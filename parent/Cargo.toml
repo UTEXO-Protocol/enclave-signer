@@ -1,0 +1,31 @@
+[package]
+name = "utexo-bridge-parent"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "utexo-bridge-parent"
+path = "src/main.rs"
+
+[dependencies]
+prost = "0.13"
+
+clap = { version = "4", features = ["derive"] }
+
+thiserror = "2"
+anyhow = "1"
+
+hex = "0.4"
+
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+vsock = "0.5"
+
+[build-dependencies]
+prost-build = "0.13"
+
+[features]
+default = []
+vsock = []
