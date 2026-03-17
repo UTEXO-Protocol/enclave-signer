@@ -143,9 +143,13 @@ nitro-cli run-enclave \
 # Read enclave console (debug mode only)
 nitro-cli console --enclave-id $(nitro-cli describe-enclaves | jq -r '.[0].EnclaveID')
 
-# Use the parent CLI (auto-connects to vsock CID 16, port 5000)
+# Use the parent CLI in another terminal / instance (auto-connects to vsock CID 16, port 5000)
 cargo run --release -p utexo-bridge-parent --features vsock -- init
-```
+
+cargo run -p utexo-bridge-parent -- interactive
+
+REPL commands: `init`, `init-seed <hex>`, `get-keys`, `help`, `quit`.
+
 
 ## Testing
 
