@@ -258,3 +258,128 @@ fn test_sign_raw_message_empty() {
         "empty message should return error"
     );
 }
+
+#[test]
+fn test_sign_raw_message_deterministic() {
+    let port = common::start_test_server();
+
+    let init_req = EnclaveRequest {
+        request: Some(Request::InitializeKey(InitializeKeyRequest {
+            seed: vec![],
+        })),
+    };
+    common::send_request(port, &init_req);
+
+    let msg = b"deterministic test payload".to_vec();
+
+    let sign_req = EnclaveRequest {
+        request: Some(Request::SignRawMessage(SignRawMessageRequest {
+            message: msg.clone(),
+        })),
+    };
+    let resp1 = common::send_request(port, &sign_req);
+
+    let sign_req2 = EnclaveRequest {
+        request: Some(Request::SignRawMessage(SignRawMessageRequest {
+            message: msg,
+        })),
+    };
+    let resp2 = common::send_request(port, &sign_req2);
+
+    let sig1 = match &resp1.response {
+        Some(Response::RawSignature(r)) => &r.signature,
+        other => panic!("expected RawSignatureResponse, got {:?}", other),
+    };
+    let sig2 = match &resp2.response {
+        Some(Response::RawSignature(r)) => &r.signature,
+        other => panic!("expected RawSignatureResponse, got {:?}", other),
+    };
+
+    assert_eq!(sig1, sig2, "same message must produce same signature (RFC 6979)");
+}
+
+#[test]
+fn test_sign_raw_message_different_messages_differ() {
+    let port = common::start_test_server();
+
+    let init_req = EnclaveRequest {
+        request: Some(Request::InitializeKey(InitializeKeyRequest {
+            seed: vec![],
+        })),
+    };
+    common::send_request(port, &init_req);
+
+    let req1 = EnclaveRequest {
+        request: Some(Request::SignRawMessage(SignRawMessageRequest {
+            message: b"message A".to_vec(),
+        })),
+    };
+    let req2 = EnclaveRequest {
+        request: Some(Request::SignRawMessage(SignRawMessageRequest {
+            message: b"message B".to_vec(),
+        })),
+    };
+
+    let sig1 = match common::send_request(port, &req1).response {
+        Some(Response::RawSignature(r)) => r.signature,
+        other => panic!("expected RawSignatureResponse, got {:?}", other),
+    };
+    let sig2 = match common::send_request(port, &req2).response {
+        Some(Response::RawSignature(r)) => r.signature,
+        other => panic!("expected RawSignatureResponse, got {:?}", other),
+    };
+
+    assert_ne!(sig1, sig2, "different messages must produce different signatures");
+}
+
+#[test]
+#[cfg(feature = "allow-seed-import")]
+fn test_sign_raw_message_recoverable() {
+    use k256::ecdsa::{RecoveryId, Signature as K256Signature, VerifyingKey};
+    use sha3::{Digest, Keccak256};
+
+    let port = common::start_test_server();
+
+    let seed = [0x42u8; 64];
+    let init_req = EnclaveRequest {
+        request: Some(Request::InitializeKey(InitializeKeyRequest {
+            seed: seed.to_vec(),
+        })),
+    };
+    let init_resp = common::send_request(port, &init_req);
+
+    let evm_address = match &init_resp.response {
+        Some(Response::InitializeKey(r)) => r.evm_address.clone(),
+        other => panic!("expected InitializeKeyResponse, got {:?}", other),
+    };
+
+    let message = b"fundsIn authorization test".to_vec();
+    let sign_req = EnclaveRequest {
+        request: Some(Request::SignRawMessage(SignRawMessageRequest {
+            message: message.clone(),
+        })),
+    };
+    let sign_resp = common::send_request(port, &sign_req);
+
+    let sig_bytes = match &sign_resp.response {
+        Some(Response::RawSignature(r)) => &r.signature,
+        other => panic!("expected RawSignatureResponse, got {:?}", other),
+    };
+
+    // Recover the signer's public key from the signature
+    let msg_hash: [u8; 32] = Keccak256::digest(&message).into();
+    let signature = K256Signature::from_slice(&sig_bytes[..64]).unwrap();
+    let recovery_id = RecoveryId::from_byte(sig_bytes[64]).unwrap();
+    let recovered_key =
+        VerifyingKey::recover_from_prehash(&msg_hash, &signature, recovery_id).unwrap();
+
+    // Derive address from recovered key
+    let pubkey_bytes = recovered_key.to_encoded_point(false);
+    let pubkey_hash = Keccak256::digest(&pubkey_bytes.as_bytes()[1..]);
+    let recovered_address: Vec<u8> = pubkey_hash[12..].to_vec();
+
+    assert_eq!(
+        recovered_address, evm_address,
+        "recovered address must match the enclave's EVM address"
+    );
+}
