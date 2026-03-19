@@ -1,0 +1,61 @@
+[package]
+name = "utexo-bridge-enclave"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "utexo_bridge_enclave"
+path = "src/lib.rs"
+
+[[bin]]
+name = "utexo-bridge-enclave"
+path = "src/main.rs"
+
+[dependencies]
+# Protobuf
+prost = "0.14.3"
+
+# Crypto — ECDSA on secp256k1 (EVM address derivation + signing later)
+k256 = { version = "0.13", features = ["ecdsa"] }
+
+# Crypto — BTC (BIP-32 HD derivation, xpub serialization, SegWit later)
+bitcoin = { version = "0.32", features = ["std"] }
+
+# Crypto — BIP-39 mnemonic
+bip39 = { version = "2.1", features = ["zeroize"] }
+
+# Secret handling (zeroize-on-drop, redacted Debug)
+secrecy = "0.10"
+zeroize = { version = "1.8", features = ["derive"] }
+
+# Hashing
+sha3 = "0.10"
+
+# Entropy
+getrandom = "0.4.2"
+
+# Error handling
+thiserror = "2"
+
+# Encoding
+hex = "0.4"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+vsock = "0.5"
+nix = { version = "0.31.2", features = ["socket"] }
+
+[build-dependencies]
+prost-build = "0.14.3"
+
+[features]
+default = []
+vsock = []
+# DANGER: allows importing a raw seed over the wire. Testing only.
+allow-seed-import = []
+
+[dev-dependencies]
+rand = "0.10.0"

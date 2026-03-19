@@ -1,0 +1,62 @@
+syntax = "proto3";
+package utexo_bridge.enclave;
+
+// Top-level envelopes. One connection = one request/response pair.
+// Adding a new operation = add variant here + match arm in server.rs.
+
+message EnclaveRequest {
+  oneof request {
+    InitializeKeyRequest   initialize_key   = 1;
+    GetPublicKeyRequest    get_public_key   = 2;
+    // Reserved for future:
+    // SignEvmRequest       sign_evm         = 3;
+    // SignPsbtRequest      sign_psbt        = 4;
+    // GetAttestationRequest get_attestation = 5;
+    // CloneRequest         clone_request    = 6;
+    // HealthCheckRequest   health_check     = 9;
+  }
+}
+
+message EnclaveResponse {
+  oneof response {
+    InitializeKeyResponse  initialize_key   = 1;
+    PublicKeysResponse     public_keys      = 2;
+    // Reserved for future:
+    // EvmSignatureResponse evm_signature    = 3;
+    // SignedPsbtResponse   signed_psbt      = 4;
+    // HealthCheckResponse  health_check     = 7;
+    ErrorResponse          error            = 15;
+  }
+}
+
+// === Key Management ===
+
+message InitializeKeyRequest {
+  // Empty = generate new mnemonic from OS entropy (production path).
+  // Non-empty = import raw 64-byte seed (requires `allow-seed-import` feature, testing only).
+  bytes seed = 1;
+}
+
+message InitializeKeyResponse {
+  bytes evm_address         = 1;  // 20 bytes — keccak256(uncompressed_pubkey[1..])[12..]
+  bytes btc_compressed_pub  = 2;  // 33 bytes — compressed secp256k1 public key
+  string btc_xpub           = 3;  // Base58 xpub string (BIP-32 serialization)
+}
+
+message GetPublicKeyRequest {
+  // Empty — returns all public keys. In the future the team's proto has
+  // a network_id field for per-network queries, but for now we return all.
+}
+
+message PublicKeysResponse {
+  bytes evm_address         = 1;
+  bytes btc_compressed_pub  = 2;
+  string btc_xpub           = 3;
+}
+
+// === Error ===
+
+message ErrorResponse {
+  uint32 code    = 1;
+  string message = 2;
+}

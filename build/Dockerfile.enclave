@@ -1,0 +1,25 @@
+FROM rust:1.94-slim AS builder
+
+RUN apt-get update && apt-get install -y \
+    pkg-config libssl-dev protobuf-compiler \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /build
+COPY . /build/
+
+WORKDIR /build/enclave
+RUN cargo build --release --features vsock
+
+# --- Runtime ---
+FROM public.ecr.aws/amazonlinux/amazonlinux:2023-minimal AS runtime
+
+RUN dnf install -y socat iproute && dnf clean all
+
+WORKDIR /app
+COPY --from=builder /build/target/release/utexo-bridge-enclave /app/utexo-bridge-enclave
+COPY build/entrypoint.sh /app/entrypoint.sh
+
+RUN chmod +x /app/utexo-bridge-enclave /app/entrypoint.sh
+
+ENV RUST_LOG=info
+ENTRYPOINT ["/app/entrypoint.sh"]
