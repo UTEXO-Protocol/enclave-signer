@@ -1,0 +1,40 @@
+syntax = "proto3";
+package tricorn.enriched;
+
+// Enriched payloads for SignRequest.data field.
+// Listener repacks SignRequest.data before forwarding to Enclave.
+// Dispatch: network_id + data_type determines which message to decode.
+// Both Listener (Go) and Enclave (Rust) generate from this file.
+
+// EVM → RGB direction (FundsIn on EVM, PSBT signing)
+message EnrichedPsbtPayload {
+  bytes evm_tx_hash           = 1;
+  uint64 operation_idx        = 2;
+
+  bool evm_event_valid        = 3;
+  bool evm_event_finalized    = 4;
+  bytes evm_token             = 5;
+  uint64 evm_amount           = 6;
+  bytes evm_recipient         = 7;
+  uint64 evm_commission       = 8;
+
+  bytes psbt_bytes            = 9;
+  uint64 psbt_output_amount   = 10;
+  string rgb_asset_id         = 11;
+}
+
+// RGB → EVM direction (FundsIn on RGB, EVM signing)
+message EnrichedEvmPayload {
+  bytes call_data             = 1;
+  uint64 nonce                = 2;
+  uint64 deadline             = 3;
+
+  bool consignment_valid      = 4;
+  uint64 rgb_amount           = 5;
+  string rgb_asset_id         = 6;
+
+  uint64 chain_id             = 7;
+  bytes proxy_contract        = 8;
+  uint64 calldata_amount      = 9;
+  uint64 calldata_commission  = 10;
+}

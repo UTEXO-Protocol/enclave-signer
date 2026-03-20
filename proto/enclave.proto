@@ -11,9 +11,10 @@ message EnclaveRequest {
     SignEvmRequest         sign_evm         = 3;
     SignPsbtRequest        sign_psbt        = 4;
     SignRawMessageRequest  sign_raw_message = 5;
+    ProxyFederationRequest proxy_federation = 6;
     // Reserved for future:
-    // GetAttestationRequest get_attestation = 6;
-    // CloneRequest         clone_request    = 6;
+    // GetAttestationRequest get_attestation = 7;
+    // CloneRequest         clone_request    = 8;
     // HealthCheckRequest   health_check     = 9;
   }
 }
@@ -25,6 +26,7 @@ message EnclaveResponse {
     EvmSignatureResponse   evm_signature    = 3;
     SignedPsbtResponse     signed_psbt      = 4;
     RawSignatureResponse   raw_signature    = 5;
+    FederationSignatureResponse federation_sig = 6;
     // Reserved for future:
     // HealthCheckResponse  health_check     = 7;
     ErrorResponse          error            = 15;
@@ -59,10 +61,23 @@ message PublicKeysResponse {
 // === EVM Signing (RGB→EVM direction) ===
 
 message SignEvmRequest {
-  bytes call_data     = 1;  // Raw ABI-encoded function call (e.g., fundsOut selector + params)
-  uint64 nonce        = 2;  // Per-selector sequential nonce (matches on-chain MultisigProxy nonce)
-  uint64 deadline     = 3;  // Unix timestamp — signature invalid after this time
-  // Future: bytes consignment = 4; (RGB consignment for Listener validation)
+  // Original fields (sent by Orchestrator → Listener → Parent → Enclave)
+  bytes call_data       = 1;  // Raw ABI-encoded function call (e.g., fundsOut selector + params)
+  uint64 nonce          = 2;  // Per-selector sequential nonce (matches on-chain MultisigProxy nonce)
+  uint64 deadline       = 3;  // Unix timestamp — signature invalid after this time
+
+  // Enriched by Listener (validation results)
+  bool consignment_valid    = 4;   // Listener validated the RGB consignment
+  uint64 rgb_amount         = 5;   // Amount from validated consignment (smallest unit)
+  string rgb_asset_id       = 6;   // RGB asset identifier from consignment
+
+  // For EIP-712 domain (Listener reads from config/chain)
+  uint64 chain_id           = 7;
+  bytes proxy_contract      = 8;   // 20 bytes — verifying contract address
+
+  // Pre-extracted from call_data by Listener (avoids ABI parsing in enclave)
+  uint64 calldata_amount    = 9;
+  uint64 calldata_commission = 10;
 }
 
 message EvmSignatureResponse {
@@ -72,9 +87,22 @@ message EvmSignatureResponse {
 // === PSBT Signing (EVM→RGB direction) ===
 
 message SignPsbtRequest {
-  bytes evm_tx_hash    = 1;  // 32 bytes — for Listener validation (not used yet)
-  uint64 operation_idx = 2;  // For Listener query (not used yet)
-  bytes psbt_bytes     = 3;  // Temporary: direct PSBT bytes until Listener is wired up
+  // Original fields
+  bytes evm_tx_hash       = 1;   // 32 bytes — for Listener validation
+  uint64 operation_idx    = 2;   // For Listener query
+
+  // Enriched by Listener (EVM event validation)
+  bool evm_event_valid       = 3;
+  bool evm_event_finalized   = 4;
+  bytes evm_token            = 5;   // 20 bytes — ERC-20 address (empty for native)
+  uint64 evm_amount          = 6;   // Deposit amount from FundsIn event
+  bytes evm_recipient        = 7;   // 20 bytes
+  uint64 evm_commission      = 8;
+
+  // Enriched by Listener (PSBT data from rgb-multisig-bridge)
+  bytes psbt_bytes           = 9;   // Raw PSBT fetched by Listener
+  uint64 psbt_output_amount  = 10;  // Total non-change output amount from PSBT
+  string rgb_asset_id        = 11;
 }
 
 message SignedPsbtResponse {
@@ -92,6 +120,16 @@ message SignRawMessageRequest {
 
 message RawSignatureResponse {
   bytes signature = 1;  // 65 bytes: r(32) + s(32) + v(1), Ethereum ECDSA convention
+}
+
+// === Federation Proxy ===
+
+message ProxyFederationRequest {
+  bytes message_hash = 1;     // 32 bytes — keccak256 of published message
+}
+
+message FederationSignatureResponse {
+  bytes signature = 1;        // 65-byte ECDSA from Listener's federation key
 }
 
 // === Error ===
