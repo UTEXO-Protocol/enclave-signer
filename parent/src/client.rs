@@ -80,18 +80,9 @@ impl EnclaveClient {
         }
     }
 
-    pub fn sign_evm(
-        &self,
-        call_data: Vec<u8>,
-        nonce: u64,
-        deadline: u64,
-    ) -> Result<EvmSignatureResponse> {
+    pub fn sign_evm(&self, req: SignEvmRequest) -> Result<EvmSignatureResponse> {
         let req = EnclaveRequest {
-            request: Some(enclave_request::Request::SignEvm(SignEvmRequest {
-                call_data,
-                nonce,
-                deadline,
-            })),
+            request: Some(enclave_request::Request::SignEvm(req)),
         };
         let resp = self.send_request(&req)?;
         match resp.response {
@@ -107,13 +98,9 @@ impl EnclaveClient {
         }
     }
 
-    pub fn sign_psbt(&self, psbt_bytes: Vec<u8>) -> Result<SignedPsbtResponse> {
+    pub fn sign_psbt(&self, req: SignPsbtRequest) -> Result<SignedPsbtResponse> {
         let req = EnclaveRequest {
-            request: Some(enclave_request::Request::SignPsbt(SignPsbtRequest {
-                evm_tx_hash: vec![],
-                operation_idx: 0,
-                psbt_bytes,
-            })),
+            request: Some(enclave_request::Request::SignPsbt(req)),
         };
         let resp = self.send_request(&req)?;
         match resp.response {

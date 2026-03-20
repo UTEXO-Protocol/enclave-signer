@@ -5,7 +5,9 @@ use clap::{Parser, Subcommand};
 use tracing_subscriber::EnvFilter;
 
 use utexo_bridge_parent::client::EnclaveClient;
-use utexo_bridge_parent::proto::{InitializeKeyResponse, PublicKeysResponse};
+use utexo_bridge_parent::proto::{
+    InitializeKeyResponse, PublicKeysResponse, SignEvmRequest, SignPsbtRequest,
+};
 
 #[derive(Parser)]
 #[command(
@@ -43,12 +45,51 @@ enum Command {
         /// Unix timestamp deadline
         #[arg(long)]
         deadline: u64,
+        /// Chain ID for EIP-712 domain
+        #[arg(long, default_value = "1")]
+        chain_id: u64,
+        /// Hex-encoded proxy contract address (20 bytes)
+        #[arg(long, default_value = "0000000000000000000000000000000000000000")]
+        proxy_contract: String,
+        /// RGB consignment amount (smallest unit)
+        #[arg(long, default_value = "0")]
+        rgb_amount: u64,
+        /// RGB asset identifier
+        #[arg(long, default_value = "")]
+        rgb_asset_id: String,
+        /// Pre-extracted calldata amount
+        #[arg(long, default_value = "0")]
+        calldata_amount: u64,
+        /// Pre-extracted calldata commission
+        #[arg(long, default_value = "0")]
+        calldata_commission: u64,
+        /// Mark consignment as valid (required unless enclave is in dev-mode)
+        #[arg(long)]
+        consignment_valid: bool,
     },
     /// Sign a PSBT (SegWit v0 P2WSH multisig)
     SignPsbt {
         /// Hex-encoded PSBT bytes
         #[arg(long)]
         psbt: String,
+        /// Hex-encoded EVM tx hash (32 bytes)
+        #[arg(long, default_value = "")]
+        evm_tx_hash: String,
+        /// EVM deposit amount
+        #[arg(long, default_value = "0")]
+        evm_amount: u64,
+        /// EVM commission
+        #[arg(long, default_value = "0")]
+        evm_commission: u64,
+        /// PSBT total non-change output amount
+        #[arg(long, default_value = "0")]
+        psbt_output_amount: u64,
+        /// Mark EVM event as valid
+        #[arg(long)]
+        evm_event_valid: bool,
+        /// Mark EVM event as finalized
+        #[arg(long)]
+        evm_event_finalized: bool,
     },
     /// Sign a raw message (fundsIn authorization, 1-of-n)
     SignRawMessage {
@@ -159,6 +200,13 @@ fn main() {
             call_data,
             nonce,
             deadline,
+            chain_id,
+            proxy_contract,
+            rgb_amount,
+            rgb_asset_id,
+            calldata_amount,
+            calldata_commission,
+            consignment_valid,
         } => {
             let data = match hex::decode(&call_data) {
                 Ok(d) => d,
@@ -167,7 +215,26 @@ fn main() {
                     process::exit(1);
                 }
             };
-            match client.sign_evm(data, nonce, deadline) {
+            let proxy = match hex::decode(&proxy_contract) {
+                Ok(d) => d,
+                Err(e) => {
+                    eprintln!("Invalid hex proxy_contract: {}", e);
+                    process::exit(1);
+                }
+            };
+            let req = SignEvmRequest {
+                call_data: data,
+                nonce,
+                deadline,
+                consignment_valid,
+                rgb_amount,
+                rgb_asset_id,
+                chain_id,
+                proxy_contract: proxy,
+                calldata_amount,
+                calldata_commission,
+            };
+            match client.sign_evm(req) {
                 Ok(r) => {
                     println!("EVM signature (65 bytes): {}", hex::encode(&r.signature));
                 }
@@ -177,7 +244,15 @@ fn main() {
                 }
             }
         }
-        Command::SignPsbt { psbt } => {
+        Command::SignPsbt {
+            psbt,
+            evm_tx_hash,
+            evm_amount,
+            evm_commission,
+            psbt_output_amount,
+            evm_event_valid,
+            evm_event_finalized,
+        } => {
             let psbt_bytes = match hex::decode(&psbt) {
                 Ok(d) => d,
                 Err(e) => {
@@ -185,7 +260,31 @@ fn main() {
                     process::exit(1);
                 }
             };
-            match client.sign_psbt(psbt_bytes) {
+            let tx_hash = if evm_tx_hash.is_empty() {
+                vec![]
+            } else {
+                match hex::decode(&evm_tx_hash) {
+                    Ok(d) => d,
+                    Err(e) => {
+                        eprintln!("Invalid hex evm_tx_hash: {}", e);
+                        process::exit(1);
+                    }
+                }
+            };
+            let req = SignPsbtRequest {
+                evm_tx_hash: tx_hash,
+                operation_idx: 0,
+                evm_event_valid,
+                evm_event_finalized,
+                evm_token: vec![],
+                evm_amount,
+                evm_recipient: vec![],
+                evm_commission,
+                psbt_bytes,
+                psbt_output_amount,
+                rgb_asset_id: String::new(),
+            };
+            match client.sign_psbt(req) {
                 Ok(r) => {
                     println!("Signed PSBT: {}", hex::encode(&r.signed_psbt));
                     println!("Inputs signed: {}", r.inputs_signed);
