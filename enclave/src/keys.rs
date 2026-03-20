@@ -198,6 +198,12 @@ pub struct EnclaveState {
     inner: Mutex<Option<KeyManager>>,
 }
 
+impl Default for EnclaveState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl EnclaveState {
     pub fn new() -> Self {
         Self {
@@ -401,7 +407,7 @@ mod tests {
         let sk3 = SecretKey::from_slice(&[0x03; 32]).unwrap();
         let pk3 = bitcoin::PublicKey::new(sk3.public_key(&secp));
 
-        let mut pubkeys = vec![*our_pubkey, pk2, pk3];
+        let mut pubkeys = [*our_pubkey, pk2, pk3];
         pubkeys.sort_by_key(|k| k.to_bytes());
 
         let witness_script = ScriptBuilder::new()
