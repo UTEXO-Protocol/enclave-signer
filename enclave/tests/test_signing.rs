@@ -4,6 +4,54 @@ use utexo_bridge_enclave::proto::enclave_request::Request;
 use utexo_bridge_enclave::proto::enclave_response::Response;
 use utexo_bridge_enclave::proto::*;
 
+/// Build a mock fundsOut calldata with the given amount and commission.
+/// fundsOut(address token, address recipient, uint256 amount, uint256 commission, ...)
+fn mock_funds_out_calldata(
+    token: [u8; 20],
+    recipient: [u8; 20],
+    amount: u64,
+    commission: u64,
+) -> Vec<u8> {
+    let mut data = Vec::with_capacity(4 + 7 * 32);
+    // 4-byte selector (placeholder)
+    data.extend_from_slice(&[0xab, 0xcd, 0xef, 0x12]);
+    // address token (padded to 32 bytes)
+    let mut padded = [0u8; 32];
+    padded[12..].copy_from_slice(&token);
+    data.extend_from_slice(&padded);
+    // address recipient (padded to 32 bytes)
+    let mut padded = [0u8; 32];
+    padded[12..].copy_from_slice(&recipient);
+    data.extend_from_slice(&padded);
+    // uint256 amount
+    let mut padded = [0u8; 32];
+    padded[24..].copy_from_slice(&amount.to_be_bytes());
+    data.extend_from_slice(&padded);
+    // uint256 commission
+    let mut padded = [0u8; 32];
+    padded[24..].copy_from_slice(&commission.to_be_bytes());
+    data.extend_from_slice(&padded);
+    // remaining params (transactionId, sourceChain, sourceAddress) — zero-fill
+    data.extend_from_slice(&[0u8; 32 * 3]);
+    data
+}
+
+/// Build a valid enriched SignEvmRequest for testing.
+fn valid_sign_evm_request(amount: u64, commission: u64) -> SignEvmRequest {
+    SignEvmRequest {
+        call_data: mock_funds_out_calldata([0x11; 20], [0x22; 20], amount, commission),
+        nonce: 1,
+        deadline: u64::MAX,
+        consignment_valid: true,
+        rgb_amount: amount + commission + 100, // plenty of headroom
+        rgb_asset_id: "rgb:test".into(),
+        chain_id: 1,
+        proxy_contract: vec![0xAA; 20],
+        calldata_amount: amount,
+        calldata_commission: commission,
+    }
+}
+
 /// Build a minimal 2-of-3 multisig PSBT for testing with a known pubkey.
 #[cfg(feature = "allow-seed-import")]
 fn build_test_multisig_psbt(our_pubkey: &bitcoin::PublicKey) -> Vec<u8> {
@@ -64,11 +112,32 @@ fn build_test_multisig_psbt(our_pubkey: &bitcoin::PublicKey) -> Vec<u8> {
     psbt.serialize()
 }
 
+/// Build a valid enriched SignPsbtRequest for testing.
+#[cfg(feature = "allow-seed-import")]
+fn valid_sign_psbt_request(psbt_bytes: Vec<u8>) -> SignPsbtRequest {
+    SignPsbtRequest {
+        evm_tx_hash: vec![0xCC; 32],
+        operation_idx: 0,
+        evm_event_valid: true,
+        evm_event_finalized: true,
+        evm_token: vec![0x11; 20],
+        evm_amount: 100_000,
+        evm_recipient: vec![0x22; 20],
+        evm_commission: 1_000,
+        psbt_bytes,
+        psbt_output_amount: 50_000,
+        rgb_asset_id: "rgb:test".into(),
+    }
+}
+
+// =============================================================================
+// EVM signing tests
+// =============================================================================
+
 #[test]
 fn test_sign_evm_roundtrip() {
     let port = common::start_test_server();
 
-    // Initialize keys first
     let init_req = EnclaveRequest {
         request: Some(Request::InitializeKey(InitializeKeyRequest {
             seed: vec![],
@@ -80,24 +149,14 @@ fn test_sign_evm_roundtrip() {
         "init should succeed"
     );
 
-    // Sign EVM
-    let call_data =
-        hex::decode("a9059cbb00000000000000000000000012345678901234567890123456789012345678900000000000000000000000000000000000000000000000000000000000000064")
-            .unwrap();
     let sign_req = EnclaveRequest {
-        request: Some(Request::SignEvm(SignEvmRequest {
-            call_data,
-            nonce: 0,
-            deadline: 1_700_000_000,
-        })),
+        request: Some(Request::SignEvm(valid_sign_evm_request(1000, 50))),
     };
     let sign_resp = common::send_request(port, &sign_req);
 
     match &sign_resp.response {
         Some(Response::EvmSignature(r)) => {
             assert_eq!(r.signature.len(), 65, "EVM signature must be 65 bytes");
-            eprintln!("--- test_sign_evm_roundtrip ---");
-            eprintln!("  signature: {}", hex::encode(&r.signature));
         }
         other => panic!("expected EvmSignatureResponse, got {:?}", other),
     }
@@ -108,11 +167,7 @@ fn test_sign_evm_before_init() {
     let port = common::start_test_server();
 
     let sign_req = EnclaveRequest {
-        request: Some(Request::SignEvm(SignEvmRequest {
-            call_data: vec![0xAB; 4],
-            nonce: 0,
-            deadline: 1_700_000_000,
-        })),
+        request: Some(Request::SignEvm(valid_sign_evm_request(1000, 50))),
     };
     let resp = common::send_request(port, &sign_req);
 
@@ -122,12 +177,105 @@ fn test_sign_evm_before_init() {
     );
 }
 
+// =============================================================================
+// EVM enriched cross-check tests
+// =============================================================================
+
+#[test]
+fn test_sign_evm_rejects_invalid_consignment() {
+    let port = common::start_test_server();
+
+    let init_req = EnclaveRequest {
+        request: Some(Request::InitializeKey(InitializeKeyRequest {
+            seed: vec![],
+        })),
+    };
+    common::send_request(port, &init_req);
+
+    let mut req = valid_sign_evm_request(1000, 50);
+    req.consignment_valid = false;
+
+    let sign_req = EnclaveRequest {
+        request: Some(Request::SignEvm(req)),
+    };
+    let resp = common::send_request(port, &sign_req);
+
+    match &resp.response {
+        Some(Response::Error(e)) => {
+            assert_eq!(e.code, 3, "cross-check failures should use code 3");
+            assert!(e.message.contains("consignment"));
+        }
+        other => panic!("expected ErrorResponse, got {:?}", other),
+    }
+}
+
+#[test]
+fn test_sign_evm_rejects_amount_mismatch() {
+    let port = common::start_test_server();
+
+    let init_req = EnclaveRequest {
+        request: Some(Request::InitializeKey(InitializeKeyRequest {
+            seed: vec![],
+        })),
+    };
+    common::send_request(port, &init_req);
+
+    let mut req = valid_sign_evm_request(90, 20);
+    req.rgb_amount = 100; // 90 + 20 = 110 > 100 => should fail
+
+    let sign_req = EnclaveRequest {
+        request: Some(Request::SignEvm(req)),
+    };
+    let resp = common::send_request(port, &sign_req);
+
+    match &resp.response {
+        Some(Response::Error(e)) => {
+            assert_eq!(e.code, 3);
+            assert!(e.message.contains("amount mismatch"));
+        }
+        other => panic!("expected ErrorResponse, got {:?}", other),
+    }
+}
+
+#[test]
+fn test_sign_evm_rejects_calldata_extraction_mismatch() {
+    let port = common::start_test_server();
+
+    let init_req = EnclaveRequest {
+        request: Some(Request::InitializeKey(InitializeKeyRequest {
+            seed: vec![],
+        })),
+    };
+    common::send_request(port, &init_req);
+
+    let mut req = valid_sign_evm_request(1000, 50);
+    // Lie about the calldata amount — doesn't match what's in the raw bytes
+    req.calldata_amount = 9999;
+    req.rgb_amount = 99999; // make sure the amount check passes first
+
+    let sign_req = EnclaveRequest {
+        request: Some(Request::SignEvm(req)),
+    };
+    let resp = common::send_request(port, &sign_req);
+
+    match &resp.response {
+        Some(Response::Error(e)) => {
+            assert_eq!(e.code, 3);
+            assert!(e.message.contains("calldata amount mismatch"));
+        }
+        other => panic!("expected ErrorResponse, got {:?}", other),
+    }
+}
+
+// =============================================================================
+// PSBT signing tests
+// =============================================================================
+
 #[test]
 #[cfg(feature = "allow-seed-import")]
 fn test_sign_psbt_roundtrip() {
     let port = common::start_test_server();
 
-    // Initialize with known seed so we know the BTC pubkey
     let seed = [0x42u8; 64];
     let init_req = EnclaveRequest {
         request: Some(Request::InitializeKey(InitializeKeyRequest {
@@ -145,11 +293,7 @@ fn test_sign_psbt_roundtrip() {
     let psbt_bytes = build_test_multisig_psbt(&our_pubkey);
 
     let sign_req = EnclaveRequest {
-        request: Some(Request::SignPsbt(SignPsbtRequest {
-            evm_tx_hash: vec![],
-            operation_idx: 0,
-            psbt_bytes,
-        })),
+        request: Some(Request::SignPsbt(valid_sign_psbt_request(psbt_bytes))),
     };
     let sign_resp = common::send_request(port, &sign_req);
 
@@ -160,8 +304,6 @@ fn test_sign_psbt_roundtrip() {
                 !r.signed_psbt.is_empty(),
                 "signed PSBT bytes should not be empty"
             );
-            eprintln!("--- test_sign_psbt_roundtrip ---");
-            eprintln!("  inputs_signed: {}", r.inputs_signed);
         }
         other => panic!("expected SignedPsbtResponse, got {:?}", other),
     }
@@ -173,9 +315,17 @@ fn test_sign_psbt_before_init() {
 
     let sign_req = EnclaveRequest {
         request: Some(Request::SignPsbt(SignPsbtRequest {
-            evm_tx_hash: vec![],
+            evm_tx_hash: vec![0xAA; 32],
             operation_idx: 0,
+            evm_event_valid: true,
+            evm_event_finalized: true,
+            evm_token: vec![],
+            evm_amount: 1000,
+            evm_recipient: vec![],
+            evm_commission: 0,
             psbt_bytes: vec![0xFF; 10],
+            psbt_output_amount: 500,
+            rgb_asset_id: String::new(),
         })),
     };
     let resp = common::send_request(port, &sign_req);
@@ -185,6 +335,88 @@ fn test_sign_psbt_before_init() {
         "sign before init should return error"
     );
 }
+
+// =============================================================================
+// PSBT enriched cross-check tests
+// =============================================================================
+
+#[test]
+fn test_sign_psbt_rejects_unfinalized() {
+    let port = common::start_test_server();
+
+    let init_req = EnclaveRequest {
+        request: Some(Request::InitializeKey(InitializeKeyRequest {
+            seed: vec![],
+        })),
+    };
+    common::send_request(port, &init_req);
+
+    let sign_req = EnclaveRequest {
+        request: Some(Request::SignPsbt(SignPsbtRequest {
+            evm_tx_hash: vec![0xAA; 32],
+            operation_idx: 0,
+            evm_event_valid: true,
+            evm_event_finalized: false,
+            evm_token: vec![],
+            evm_amount: 1000,
+            evm_recipient: vec![],
+            evm_commission: 0,
+            psbt_bytes: vec![0xFF; 10],
+            psbt_output_amount: 500,
+            rgb_asset_id: String::new(),
+        })),
+    };
+    let resp = common::send_request(port, &sign_req);
+
+    match &resp.response {
+        Some(Response::Error(e)) => {
+            assert_eq!(e.code, 3);
+            assert!(e.message.contains("not yet finalized"));
+        }
+        other => panic!("expected ErrorResponse, got {:?}", other),
+    }
+}
+
+#[test]
+fn test_sign_psbt_rejects_amount_mismatch() {
+    let port = common::start_test_server();
+
+    let init_req = EnclaveRequest {
+        request: Some(Request::InitializeKey(InitializeKeyRequest {
+            seed: vec![],
+        })),
+    };
+    common::send_request(port, &init_req);
+
+    let sign_req = EnclaveRequest {
+        request: Some(Request::SignPsbt(SignPsbtRequest {
+            evm_tx_hash: vec![0xAA; 32],
+            operation_idx: 0,
+            evm_event_valid: true,
+            evm_event_finalized: true,
+            evm_token: vec![],
+            evm_amount: 100,
+            evm_recipient: vec![],
+            evm_commission: 20,
+            psbt_bytes: vec![0xFF; 10],
+            psbt_output_amount: 90, // 90 + 20 = 110 > 100
+            rgb_asset_id: String::new(),
+        })),
+    };
+    let resp = common::send_request(port, &sign_req);
+
+    match &resp.response {
+        Some(Response::Error(e)) => {
+            assert_eq!(e.code, 3);
+            assert!(e.message.contains("amount mismatch"));
+        }
+        other => panic!("expected ErrorResponse, got {:?}", other),
+    }
+}
+
+// =============================================================================
+// Raw message signing tests
+// =============================================================================
 
 #[test]
 fn test_sign_raw_message_roundtrip() {
@@ -211,8 +443,6 @@ fn test_sign_raw_message_roundtrip() {
     match &sign_resp.response {
         Some(Response::RawSignature(r)) => {
             assert_eq!(r.signature.len(), 65, "raw signature must be 65 bytes");
-            eprintln!("--- test_sign_raw_message_roundtrip ---");
-            eprintln!("  signature: {}", hex::encode(&r.signature));
         }
         other => panic!("expected RawSignatureResponse, got {:?}", other),
     }
@@ -366,14 +596,12 @@ fn test_sign_raw_message_recoverable() {
         other => panic!("expected RawSignatureResponse, got {:?}", other),
     };
 
-    // Recover the signer's public key from the signature
     let msg_hash: [u8; 32] = Keccak256::digest(&message).into();
     let signature = K256Signature::from_slice(&sig_bytes[..64]).unwrap();
     let recovery_id = RecoveryId::from_byte(sig_bytes[64]).unwrap();
     let recovered_key =
         VerifyingKey::recover_from_prehash(&msg_hash, &signature, recovery_id).unwrap();
 
-    // Derive address from recovered key
     let pubkey_bytes = recovered_key.to_encoded_point(false);
     let pubkey_hash = Keccak256::digest(&pubkey_bytes.as_bytes()[1..]);
     let recovered_address: Vec<u8> = pubkey_hash[12..].to_vec();
@@ -382,4 +610,28 @@ fn test_sign_raw_message_recoverable() {
         recovered_address, evm_address,
         "recovered address must match the enclave's EVM address"
     );
+}
+
+// =============================================================================
+// Federation proxy test
+// =============================================================================
+
+#[test]
+fn test_proxy_federation_returns_not_ready() {
+    let port = common::start_test_server();
+
+    let req = EnclaveRequest {
+        request: Some(Request::ProxyFederation(ProxyFederationRequest {
+            message_hash: vec![0xAA; 32],
+        })),
+    };
+    let resp = common::send_request(port, &req);
+
+    match &resp.response {
+        Some(Response::Error(e)) => {
+            assert_eq!(e.code, 2, "federation proxy should return NOT_READY (code 2)");
+            assert!(e.message.contains("federation proxy"));
+        }
+        other => panic!("expected ErrorResponse, got {:?}", other),
+    }
 }
