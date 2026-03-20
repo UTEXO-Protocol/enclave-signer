@@ -56,6 +56,8 @@ default = []
 vsock = []
 # DANGER: allows importing a raw seed over the wire. Testing only.
 allow-seed-import = []
+# Skips cross-check validation on signing requests. Development/testing only.
+dev-mode = []
 
 [dev-dependencies]
 rand = "0.10.0"
