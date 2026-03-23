@@ -6,7 +6,7 @@
 # and optionally runs it.
 #
 # EC2 instance: ubuntu@18.219.168.199
-# Remote path:  ~/tricorn-signer
+# Remote path:  ~/utexo-bridge-signer
 #
 # If you cannot SSH in, your public key needs to be added to the instance.
 # Contact @Renat Skitsan to get access.
@@ -17,7 +17,7 @@
 #   ./deploy-to-ec2.sh --key ~/.ssh/my-key.pem  # specify SSH key
 #
 # What it does:
-#   1. rsync the project to ~/tricorn-signer on the remote
+#   1. rsync the project to ~/utexo-bridge-signer on the remote
 #   2. Print follow-up commands for building/running the enclave + smoke tests
 # =============================================================================
 set -euo pipefail
@@ -35,7 +35,7 @@ done
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-REMOTE_DIR="~/tricorn-signer"
+REMOTE_DIR="~/utexo-bridge-signer"
 
 echo "=== Deploying tricorn-signer to $TARGET ==="
 echo "  Local:  $PROJECT_ROOT"

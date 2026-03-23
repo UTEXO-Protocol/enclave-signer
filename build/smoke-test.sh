@@ -24,7 +24,6 @@ PASS=0
 FAIL=0
 SKIP=0
 
-PARENT_BIN="${PARENT_BIN:-./utexo-bridge-parent}"
 ADDR="127.0.0.1:5000"
 
 # Parse args
@@ -34,6 +33,17 @@ for arg in "$@"; do
         --addr=*) ADDR="${arg#*=}" ;;
     esac
 done
+
+# Find parent binary: explicit env var > release build > debug build
+if [ -n "${PARENT_BIN:-}" ]; then
+    :
+elif [ -f "./target/release/utexo-bridge-parent" ]; then
+    PARENT_BIN="./target/release/utexo-bridge-parent"
+elif [ -f "./target/debug/utexo-bridge-parent" ]; then
+    PARENT_BIN="./target/debug/utexo-bridge-parent"
+else
+    PARENT_BIN="utexo-bridge-parent"
+fi
 
 log()  { echo -e "${YELLOW}[TEST]${NC} $1"; }
 pass() { echo -e "${GREEN}[PASS]${NC} $1"; PASS=$((PASS + 1)); }
