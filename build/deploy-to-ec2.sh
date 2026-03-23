@@ -1,6 +1,6 @@
 #!/bin/bash
 # =============================================================================
-# Deploy tricorn-signer to EC2 Nitro instance
+# Deploy utexo-bridge-signer to EC2 Nitro instance
 # =============================================================================
 # Copies the full repo to the EC2 instance, builds the enclave EIF,
 # and optionally runs it.
@@ -37,7 +37,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 REMOTE_DIR="~/utexo-bridge-signer"
 
-echo "=== Deploying tricorn-signer to $TARGET ==="
+echo "=== Deploying utexo-bridge-signer to $TARGET ==="
 echo "  Local:  $PROJECT_ROOT"
 echo "  Remote: $REMOTE_DIR"
 echo ""

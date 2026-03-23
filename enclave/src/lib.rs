@@ -12,5 +12,5 @@ pub mod proto {
 }
 
 pub mod enriched {
-    include!(concat!(env!("OUT_DIR"), "/tricorn.enriched.rs"));
+    include!(concat!(env!("OUT_DIR"), "/utexo_bridge.enriched.rs"));
 }
