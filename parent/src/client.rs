@@ -2,7 +2,7 @@ use std::net::TcpStream;
 
 use crate::error::{ParentError, Result};
 use crate::framing;
-use crate::proto::{
+use crate::enclave_proto::{
     enclave_request, enclave_response, EnclaveRequest, EnclaveResponse, EvmSignatureResponse,
     GetPublicKeyRequest, InitializeKeyRequest, InitializeKeyResponse, PublicKeysResponse,
     RawSignatureResponse, SignEvmRequest, SignPsbtRequest, SignRawMessageRequest,
