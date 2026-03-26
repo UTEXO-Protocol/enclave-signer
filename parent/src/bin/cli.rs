@@ -233,6 +233,8 @@ fn main() {
                 proxy_contract: proxy,
                 calldata_amount,
                 calldata_commission,
+                consignment: vec![],
+                consignment_hash: vec![],
             };
             match client.sign_evm(req) {
                 Ok(r) => {

@@ -1,5 +1,7 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use sha3::{Digest, Keccak256};
+
 use crate::error::{EnclaveError, Result};
 use crate::proto::SignEvmRequest;
 
@@ -11,6 +13,23 @@ pub fn validate_evm_request(req: &SignEvmRequest) -> Result<()> {
         return Err(EnclaveError::CrossCheck(
             "consignment not validated by Listener".into(),
         ));
+    }
+
+    // 1b. If raw consignment bytes are present, verify hash integrity.
+    //     This catches tampering between Listener and Enclave.
+    //     Full RGB validation (rgb-lib) will be added in a follow-up PR.
+    if !req.consignment.is_empty() {
+        if req.consignment_hash.is_empty() {
+            return Err(EnclaveError::CrossCheck(
+                "consignment present but consignment_hash is missing".into(),
+            ));
+        }
+        let computed = Keccak256::digest(&req.consignment);
+        if &computed[..] != req.consignment_hash.as_slice() {
+            return Err(EnclaveError::CrossCheck(
+                "consignment hash mismatch: keccak256(consignment) != consignment_hash".into(),
+            ));
+        }
     }
 
     // 2. Amount consistency: RGB amount must cover calldata amount + commission
@@ -134,6 +153,9 @@ mod tests {
             proxy_contract: vec![0xAA; 20],
             calldata_amount: amount,
             calldata_commission: commission,
+            // Empty = skip hash check (backwards compatible)
+            consignment: vec![],
+            consignment_hash: vec![],
         }
     }
 
@@ -220,5 +242,39 @@ mod tests {
         let mut data = vec![0u8; 32];
         data[0] = 1; // high byte set — exceeds u64
         assert!(extract_uint256_as_u64(&data, 0).is_err());
+    }
+
+    #[test]
+    fn accepts_valid_consignment_hash() {
+        let mut req = valid_evm_request();
+        let consignment = b"test-consignment-bytes";
+        let hash = Keccak256::digest(consignment);
+        req.consignment = consignment.to_vec();
+        req.consignment_hash = hash.to_vec();
+        assert!(validate_evm_request(&req).is_ok());
+    }
+
+    #[test]
+    fn rejects_consignment_hash_mismatch() {
+        let mut req = valid_evm_request();
+        req.consignment = b"test-consignment-bytes".to_vec();
+        req.consignment_hash = vec![0xDE; 32]; // wrong hash
+        let err = validate_evm_request(&req).unwrap_err();
+        assert!(err.to_string().contains("consignment hash mismatch"));
+    }
+
+    #[test]
+    fn rejects_consignment_without_hash() {
+        let mut req = valid_evm_request();
+        req.consignment = b"test-consignment-bytes".to_vec();
+        req.consignment_hash = vec![]; // missing hash
+        let err = validate_evm_request(&req).unwrap_err();
+        assert!(err.to_string().contains("consignment_hash is missing"));
+    }
+
+    #[test]
+    fn skips_hash_check_when_consignment_empty() {
+        // Default valid_evm_request has empty consignment — should still pass
+        assert!(validate_evm_request(&valid_evm_request()).is_ok());
     }
 }

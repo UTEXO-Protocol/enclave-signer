@@ -159,6 +159,9 @@ impl EnclaveService for ParentAdapterService {
                             nonce: evm_flow.nonce,
                             deadline: evm_flow.deadline,
                             consignment_valid: evm_flow.consignment_valid,
+                            // Raw consignment bytes — passed through for enclave-side validation.
+                            consignment: evm_flow.consignment,
+                            consignment_hash: evm_flow.consignment_hash,
                             // Fields the Go Listener doesn't send yet — defaults.
                             rgb_amount: 0,
                             rgb_asset_id: String::new(),
