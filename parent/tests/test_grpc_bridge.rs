@@ -232,9 +232,19 @@ async fn grpc_evm_passes_consignment_bytes_through() {
 
     // Inspect what the mock enclave received
     let received = rx.recv_timeout(std::time::Duration::from_secs(2)).unwrap();
-    assert_eq!(received.consignment, consignment, "consignment bytes must pass through");
-    assert_eq!(received.consignment_hash, hash, "consignment hash must pass through");
-    assert_eq!(received.call_data, vec![0xAB; 10], "call_data mapped from sign_payload");
+    assert_eq!(
+        received.consignment, consignment,
+        "consignment bytes must pass through"
+    );
+    assert_eq!(
+        received.consignment_hash, hash,
+        "consignment hash must pass through"
+    );
+    assert_eq!(
+        received.call_data,
+        vec![0xAB; 10],
+        "call_data mapped from sign_payload"
+    );
     assert_eq!(received.nonce, 42);
     assert_eq!(received.deadline, 9999);
     assert!(received.consignment_valid);
@@ -253,7 +263,10 @@ async fn grpc_missing_flow_returns_invalid_argument() {
         .await
         .unwrap();
 
-    let err = client.sign(GrpcSignRequest { flow: None }).await.unwrap_err();
+    let err = client
+        .sign(GrpcSignRequest { flow: None })
+        .await
+        .unwrap_err();
     assert_eq!(err.code(), tonic::Code::InvalidArgument);
 }
 
