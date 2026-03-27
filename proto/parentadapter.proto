@@ -1,0 +1,46 @@
+syntax = "proto3";
+package boostylabs.parentadapter;
+
+service EnclaveService {
+  // Sign federated payloads after Listener validation and enrichment.
+  rpc Sign(EnclaveSignRequest) returns (EnclaveSignResponse);
+  // Public keys for federation / Bridge (proxied from Enclave).
+  rpc GetPublicKeys(GetPublicKeysRequest) returns (GetPublicKeysResponse);
+}
+
+message EnclaveSignRequest {
+  oneof flow {
+    PSBTSigningFlow psbt = 1;
+    EVMSigningFlow evm = 2;
+  }
+}
+
+// EVM→RGB: PSBT plus validation context from Listener.
+message PSBTSigningFlow {
+  bytes psbt = 1;
+  string validated_tx_hash = 2;
+  uint64 operation_idx = 3;
+  bool evm_event_finalized = 4;
+}
+
+// RGB→EVM: digest / payload plus consignment validation from Listener.
+message EVMSigningFlow {
+  bytes sign_payload = 1;
+  bytes consignment_hash = 2;
+  bytes consignment = 3;
+  bool consignment_valid = 4;
+  uint64 nonce = 5;
+  uint64 deadline = 6;
+}
+
+message EnclaveSignResponse {
+  oneof result {
+    bytes signed_psbt = 1;
+    bytes evm_signature = 2;
+  }
+}
+
+message GetPublicKeysRequest {}
+message GetPublicKeysResponse {
+  repeated bytes public_keys = 1;
+}

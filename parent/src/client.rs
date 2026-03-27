@@ -1,11 +1,13 @@
 use std::net::TcpStream;
 
+use crate::enclave_proto::{
+    enclave_request, enclave_response, EnclaveRequest, EnclaveResponse, EvmSignatureResponse,
+    GetPublicKeyRequest, InitializeKeyRequest, InitializeKeyResponse, PublicKeysResponse,
+    RawSignatureResponse, SignEvmRequest, SignPsbtRequest, SignRawMessageRequest,
+    SignedPsbtResponse,
+};
 use crate::error::{ParentError, Result};
 use crate::framing;
-use crate::proto::{
-    enclave_request, enclave_response, EnclaveRequest, EnclaveResponse, GetPublicKeyRequest,
-    InitializeKeyRequest, InitializeKeyResponse, PublicKeysResponse,
-};
 
 pub struct EnclaveClient {
     addr: String,
@@ -67,6 +69,62 @@ impl EnclaveClient {
         let resp = self.send_request(&req)?;
         match resp.response {
             Some(enclave_response::Response::PublicKeys(r)) => Ok(r),
+            Some(enclave_response::Response::Error(e)) => Err(ParentError::EnclaveError {
+                code: e.code,
+                message: e.message,
+            }),
+            other => Err(ParentError::Connection(format!(
+                "unexpected response variant: {:?}",
+                other
+            ))),
+        }
+    }
+
+    pub fn sign_evm(&self, req: SignEvmRequest) -> Result<EvmSignatureResponse> {
+        let req = EnclaveRequest {
+            request: Some(enclave_request::Request::SignEvm(req)),
+        };
+        let resp = self.send_request(&req)?;
+        match resp.response {
+            Some(enclave_response::Response::EvmSignature(r)) => Ok(r),
+            Some(enclave_response::Response::Error(e)) => Err(ParentError::EnclaveError {
+                code: e.code,
+                message: e.message,
+            }),
+            other => Err(ParentError::Connection(format!(
+                "unexpected response variant: {:?}",
+                other
+            ))),
+        }
+    }
+
+    pub fn sign_psbt(&self, req: SignPsbtRequest) -> Result<SignedPsbtResponse> {
+        let req = EnclaveRequest {
+            request: Some(enclave_request::Request::SignPsbt(req)),
+        };
+        let resp = self.send_request(&req)?;
+        match resp.response {
+            Some(enclave_response::Response::SignedPsbt(r)) => Ok(r),
+            Some(enclave_response::Response::Error(e)) => Err(ParentError::EnclaveError {
+                code: e.code,
+                message: e.message,
+            }),
+            other => Err(ParentError::Connection(format!(
+                "unexpected response variant: {:?}",
+                other
+            ))),
+        }
+    }
+
+    pub fn sign_raw_message(&self, message: Vec<u8>) -> Result<RawSignatureResponse> {
+        let req = EnclaveRequest {
+            request: Some(enclave_request::Request::SignRawMessage(
+                SignRawMessageRequest { message },
+            )),
+        };
+        let resp = self.send_request(&req)?;
+        match resp.response {
+            Some(enclave_response::Response::RawSignature(r)) => Ok(r),
             Some(enclave_response::Response::Error(e)) => Err(ParentError::EnclaveError {
                 code: e.code,
                 message: e.message,
