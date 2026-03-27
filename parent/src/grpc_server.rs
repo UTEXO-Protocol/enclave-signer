@@ -104,10 +104,20 @@ impl EnclaveService for ParentAdapterService {
 
         let flow = inner
             .flow
-            .ok_or_else(|| Status::invalid_argument("missing flow in EnclaveSignRequest"))?;
+            .ok_or_else(|| {
+                tracing::warn!("gRPC Sign called with no flow set");
+                Status::invalid_argument("missing flow in EnclaveSignRequest")
+            })?;
 
         let enclave_req = match flow {
             enclave_sign_request::Flow::Psbt(psbt_flow) => {
+                tracing::info!(
+                    psbt_len = psbt_flow.psbt.len(),
+                    has_tx_hash = !psbt_flow.validated_tx_hash.is_empty(),
+                    operation_idx = psbt_flow.operation_idx,
+                    evm_event_finalized = psbt_flow.evm_event_finalized,
+                    "gRPC Sign: PSBT flow"
+                );
                 // Translate PSBTSigningFlow → SignPsbtRequest.
                 // The Go Listener sends a subset of fields; we map what's available
                 // and set defaults for enriched fields the Go side doesn't send yet.
@@ -148,6 +158,15 @@ impl EnclaveService for ParentAdapterService {
                 }
             }
             enclave_sign_request::Flow::Evm(evm_flow) => {
+                tracing::info!(
+                    payload_len = evm_flow.sign_payload.len(),
+                    consignment_len = evm_flow.consignment.len(),
+                    has_consignment = !evm_flow.consignment.is_empty(),
+                    consignment_valid = evm_flow.consignment_valid,
+                    nonce = evm_flow.nonce,
+                    deadline = evm_flow.deadline,
+                    "gRPC Sign: EVM flow"
+                );
                 // Translate EVMSigningFlow → SignEvmRequest.
                 // Same story: map available fields, default the rest.
                 EnclaveRequest {
@@ -173,7 +192,9 @@ impl EnclaveService for ParentAdapterService {
             }
         };
 
+        let start = std::time::Instant::now();
         let resp = self.send_to_enclave(enclave_req).await?;
+        tracing::debug!(elapsed_ms = start.elapsed().as_millis() as u64, "enclave round-trip");
 
         match resp.response {
             Some(enclave_response::Response::SignedPsbt(r)) => {
@@ -202,6 +223,7 @@ impl EnclaveService for ParentAdapterService {
         &self,
         _request: Request<GetPublicKeysRequest>,
     ) -> Result<Response<GetPublicKeysResponse>, Status> {
+        tracing::info!("gRPC GetPublicKeys called");
         let enclave_req = EnclaveRequest {
             request: Some(enclave_request::Request::GetPublicKey(
                 enclave_proto::GetPublicKeyRequest {},

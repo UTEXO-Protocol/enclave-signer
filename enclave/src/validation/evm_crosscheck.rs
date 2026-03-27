@@ -8,11 +8,28 @@ use crate::proto::SignEvmRequest;
 /// Validate enriched SignEvmRequest before signing.
 /// Returns Ok(()) if all cross-checks pass, Err(EnclaveError::CrossCheck) if any fail.
 pub fn validate_evm_request(req: &SignEvmRequest) -> Result<()> {
-    // 1. Consignment must be validated by Listener
+    // 1. Consignment validation check.
+    //    When rgb-validation feature is enabled AND raw consignment bytes are present,
+    //    in-enclave validation already ran in handle_sign_evm — the Listener's boolean
+    //    is not authoritative. When consignment is empty (legacy callers), we still
+    //    require the Listener's attestation.
     if !req.consignment_valid {
-        return Err(EnclaveError::CrossCheck(
-            "consignment not validated by Listener".into(),
-        ));
+        #[cfg(feature = "rgb-validation")]
+        {
+            if req.consignment.is_empty() {
+                return Err(EnclaveError::CrossCheck(
+                    "consignment not validated: no consignment bytes and Listener says invalid"
+                        .into(),
+                ));
+            }
+            // else: in-enclave validation already passed in handle_sign_evm, proceed
+        }
+        #[cfg(not(feature = "rgb-validation"))]
+        {
+            return Err(EnclaveError::CrossCheck(
+                "consignment not validated by Listener".into(),
+            ));
+        }
     }
 
     // 1b. If raw consignment bytes are present, verify hash integrity.

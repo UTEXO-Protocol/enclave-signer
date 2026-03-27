@@ -10,25 +10,32 @@ use crate::signing::evm::{sign_request_digest, Eip712Domain};
 #[cfg(not(feature = "dev-mode"))]
 use crate::validation;
 
+/// Shared context passed to every request handler.
+pub struct ServerContext {
+    pub state: EnclaveState,
+    #[cfg(feature = "rgb-validation")]
+    pub rgb_validator: Option<crate::validation::rgb::RgbValidator>,
+}
+
 /// Handle a single connection: read one request, dispatch, write one response, close.
-pub fn handle_connection(stream: impl Read + Write, state: &EnclaveState) {
-    if let Err(e) = process_connection(stream, state) {
+pub fn handle_connection(stream: impl Read + Write, ctx: &ServerContext) {
+    if let Err(e) = process_connection(stream, ctx) {
         tracing::error!("connection error: {}", e);
     }
 }
 
-fn process_connection(mut stream: impl Read + Write, state: &EnclaveState) -> Result<()> {
+fn process_connection(mut stream: impl Read + Write, ctx: &ServerContext) -> Result<()> {
     tracing::debug!("reading request");
     let request: EnclaveRequest = framing::read_message(&mut stream)?;
 
-    let response = dispatch(request, state);
+    let response = dispatch(request, ctx);
 
     framing::write_message(&mut stream, &response)?;
     tracing::debug!("response written");
     Ok(())
 }
 
-fn dispatch(request: EnclaveRequest, state: &EnclaveState) -> EnclaveResponse {
+fn dispatch(request: EnclaveRequest, ctx: &ServerContext) -> EnclaveResponse {
     let result = match request.request {
         Some(Request::InitializeKey(req)) => {
             let path = if req.seed.is_empty() {
@@ -37,27 +44,27 @@ fn dispatch(request: EnclaveRequest, state: &EnclaveState) -> EnclaveResponse {
                 "seed-import"
             };
             tracing::info!("request: InitializeKey ({})", path);
-            handle_initialize(state, req)
+            handle_initialize(&ctx.state, req)
         }
         Some(Request::GetPublicKey(req)) => {
             tracing::info!("request: GetPublicKey");
-            handle_get_public_key(state, req)
+            handle_get_public_key(&ctx.state, req)
         }
         Some(Request::SignEvm(req)) => {
             tracing::info!("request: SignEvm");
-            handle_sign_evm(state, req)
+            handle_sign_evm(ctx, req)
         }
         Some(Request::SignPsbt(req)) => {
             tracing::info!("request: SignPsbt");
-            handle_sign_psbt(state, req)
+            handle_sign_psbt(&ctx.state, req)
         }
         Some(Request::SignRawMessage(req)) => {
             tracing::info!("request: SignRawMessage");
-            handle_sign_raw_message(state, req)
+            handle_sign_raw_message(&ctx.state, req)
         }
         Some(Request::ProxyFederation(req)) => {
             tracing::info!("request: ProxyFederation");
-            handle_proxy_federation(state, req)
+            handle_proxy_federation(req)
         }
         None => {
             tracing::warn!("received empty request (no oneof variant set)");
@@ -146,7 +153,29 @@ fn handle_get_public_key(
     })
 }
 
-fn handle_sign_evm(state: &EnclaveState, req: SignEvmRequest) -> Result<EnclaveResponse> {
+fn handle_sign_evm(ctx: &ServerContext, req: SignEvmRequest) -> Result<EnclaveResponse> {
+    // In-enclave RGB consignment validation (when feature enabled and bytes present).
+    // This replaces trusting the Listener's consignment_valid boolean.
+    #[cfg(feature = "rgb-validation")]
+    if !req.consignment.is_empty() {
+        if let Some(ref validator) = ctx.rgb_validator {
+            let validated = validator.validate_consignment(&req.consignment)?;
+            tracing::info!(
+                contract_id = %validated.contract_id,
+                "RGB consignment validated in-enclave"
+            );
+            // Cross-check contract_id against declared rgb_asset_id if present
+            if !req.rgb_asset_id.is_empty() && validated.contract_id != req.rgb_asset_id {
+                return Err(EnclaveError::CrossCheck(format!(
+                    "contract_id mismatch: consignment has {} but request declares {}",
+                    validated.contract_id, req.rgb_asset_id
+                )));
+            }
+        } else {
+            tracing::warn!("RGB validator not configured, skipping in-enclave validation");
+        }
+    }
+
     // Cross-check enriched fields before signing (skipped in dev-mode)
     #[cfg(not(feature = "dev-mode"))]
     validation::evm_crosscheck::validate_evm_request(&req)?;
@@ -155,7 +184,7 @@ fn handle_sign_evm(state: &EnclaveState, req: SignEvmRequest) -> Result<EnclaveR
     let domain = build_evm_domain(&req)?;
 
     let digest = sign_request_digest(&domain, &req.call_data, req.nonce, req.deadline);
-    let signature = state.sign_evm(&digest)?;
+    let signature = ctx.state.sign_evm(&digest)?;
 
     tracing::info!(
         sig_hex = %hex::encode(signature),
@@ -255,10 +284,7 @@ fn build_evm_domain(req: &SignEvmRequest) -> Result<Eip712Domain> {
     })
 }
 
-fn handle_proxy_federation(
-    _state: &EnclaveState,
-    _req: ProxyFederationRequest,
-) -> Result<EnclaveResponse> {
+fn handle_proxy_federation(_req: ProxyFederationRequest) -> Result<EnclaveResponse> {
     // Stub: federation proxy requires Listener integration (not yet wired)
     Ok(EnclaveResponse {
         response: Some(Response::Error(ErrorResponse {

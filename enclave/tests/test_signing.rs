@@ -417,6 +417,106 @@ fn test_sign_psbt_rejects_amount_mismatch() {
 }
 
 // =============================================================================
+// Consignment hash integrity tests (wire protocol integration)
+// =============================================================================
+
+#[test]
+fn test_sign_evm_rejects_consignment_hash_mismatch() {
+    let port = common::start_test_server();
+
+    let init_req = EnclaveRequest {
+        request: Some(Request::InitializeKey(InitializeKeyRequest {
+            seed: vec![],
+        })),
+    };
+    common::send_request(port, &init_req);
+
+    let mut req = valid_sign_evm_request(1000, 50);
+    req.consignment = b"some-consignment-bytes".to_vec();
+    req.consignment_hash = vec![0xDE; 32]; // wrong hash
+
+    let sign_req = EnclaveRequest {
+        request: Some(Request::SignEvm(req)),
+    };
+    let resp = common::send_request(port, &sign_req);
+
+    match &resp.response {
+        Some(Response::Error(e)) => {
+            assert_eq!(e.code, 3, "hash mismatch should be cross-check error (code 3)");
+            assert!(
+                e.message.contains("consignment hash mismatch"),
+                "error should mention hash mismatch: {}",
+                e.message
+            );
+        }
+        other => panic!("expected ErrorResponse for hash mismatch, got {:?}", other),
+    }
+}
+
+#[test]
+fn test_sign_evm_rejects_consignment_without_hash() {
+    let port = common::start_test_server();
+
+    let init_req = EnclaveRequest {
+        request: Some(Request::InitializeKey(InitializeKeyRequest {
+            seed: vec![],
+        })),
+    };
+    common::send_request(port, &init_req);
+
+    let mut req = valid_sign_evm_request(1000, 50);
+    req.consignment = b"some-consignment-bytes".to_vec();
+    req.consignment_hash = vec![]; // missing hash
+
+    let sign_req = EnclaveRequest {
+        request: Some(Request::SignEvm(req)),
+    };
+    let resp = common::send_request(port, &sign_req);
+
+    match &resp.response {
+        Some(Response::Error(e)) => {
+            assert_eq!(e.code, 3);
+            assert!(e.message.contains("consignment_hash is missing"));
+        }
+        other => panic!("expected ErrorResponse for missing hash, got {:?}", other),
+    }
+}
+
+#[test]
+fn test_sign_evm_accepts_valid_consignment_hash() {
+    use sha3::{Digest, Keccak256};
+
+    let port = common::start_test_server();
+
+    let init_req = EnclaveRequest {
+        request: Some(Request::InitializeKey(InitializeKeyRequest {
+            seed: vec![],
+        })),
+    };
+    common::send_request(port, &init_req);
+
+    let consignment = b"test-consignment-bytes";
+    let hash = Keccak256::digest(consignment);
+
+    let mut req = valid_sign_evm_request(1000, 50);
+    req.consignment = consignment.to_vec();
+    req.consignment_hash = hash.to_vec();
+
+    let sign_req = EnclaveRequest {
+        request: Some(Request::SignEvm(req)),
+    };
+    let resp = common::send_request(port, &sign_req);
+
+    // Should succeed (hash is valid, cross-checks pass in dev-mode)
+    match &resp.response {
+        Some(Response::EvmSignature(r)) => {
+            assert_eq!(r.signature.len(), 65);
+        }
+        other => panic!("expected EvmSignature, got {:?}", other),
+    }
+}
+
+// =============================================================================
 // Raw message signing tests
 // =============================================================================
 
