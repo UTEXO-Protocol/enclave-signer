@@ -6,6 +6,7 @@ use crate::keys::EnclaveState;
 use crate::proto::enclave_request::Request;
 use crate::proto::enclave_response::Response;
 use crate::proto::*;
+use crate::signing::evm::{sign_request_digest, Eip712Domain};
 
 /// Handle a single connection: read one request, dispatch, write one response, close.
 pub fn handle_connection(stream: impl Read + Write, state: &EnclaveState) {
@@ -39,6 +40,18 @@ fn dispatch(request: EnclaveRequest, state: &EnclaveState) -> EnclaveResponse {
         Some(Request::GetPublicKey(req)) => {
             tracing::info!("request: GetPublicKey");
             handle_get_public_key(state, req)
+        }
+        Some(Request::SignEvm(req)) => {
+            tracing::info!("request: SignEvm");
+            handle_sign_evm(state, req)
+        }
+        Some(Request::SignPsbt(req)) => {
+            tracing::info!("request: SignPsbt");
+            handle_sign_psbt(state, req)
+        }
+        Some(Request::SignRawMessage(req)) => {
+            tracing::info!("request: SignRawMessage");
+            handle_sign_raw_message(state, req)
         }
         None => {
             tracing::warn!("received empty request (no oneof variant set)");
@@ -123,6 +136,69 @@ fn handle_get_public_key(
             evm_address: keys.evm_address.to_vec(),
             btc_compressed_pub: keys.btc_compressed_pubkey.to_vec(),
             btc_xpub: keys.btc_xpub,
+        })),
+    })
+}
+
+fn handle_sign_evm(state: &EnclaveState, req: SignEvmRequest) -> Result<EnclaveResponse> {
+    // TODO: load from config
+    let domain = Eip712Domain {
+        name: "Tricorn".to_string(),
+        version: "1".to_string(),
+        chain_id: 1,
+        verifying_contract: [0u8; 20],
+    };
+
+    let digest = sign_request_digest(&domain, &req.call_data, req.nonce, req.deadline);
+    let signature = state.sign_evm(&digest)?;
+
+    tracing::info!(
+        sig_hex = %hex::encode(signature),
+        "EVM signature produced"
+    );
+
+    Ok(EnclaveResponse {
+        response: Some(Response::EvmSignature(EvmSignatureResponse {
+            signature: signature.to_vec(),
+        })),
+    })
+}
+
+fn handle_sign_psbt(state: &EnclaveState, req: SignPsbtRequest) -> Result<EnclaveResponse> {
+    let (signed_psbt, inputs_signed) = state.sign_psbt(&req.psbt_bytes)?;
+
+    tracing::info!(inputs_signed, "PSBT signed");
+
+    Ok(EnclaveResponse {
+        response: Some(Response::SignedPsbt(SignedPsbtResponse {
+            signed_psbt,
+            inputs_signed: inputs_signed as u32,
+        })),
+    })
+}
+
+fn handle_sign_raw_message(
+    state: &EnclaveState,
+    req: SignRawMessageRequest,
+) -> Result<EnclaveResponse> {
+    if req.message.is_empty() {
+        return Err(EnclaveError::InvalidRequest("message is empty".into()));
+    }
+
+    // Hash the raw message with keccak256 to produce a 32-byte digest
+    use sha3::{Digest, Keccak256};
+    let hash: [u8; 32] = Keccak256::digest(&req.message).into();
+    let signature = state.sign_evm(&hash)?;
+
+    tracing::info!(
+        sig_hex = %hex::encode(signature),
+        msg_len = req.message.len(),
+        "raw message signature produced"
+    );
+
+    Ok(EnclaveResponse {
+        response: Some(Response::RawSignature(RawSignatureResponse {
+            signature: signature.to_vec(),
         })),
     })
 }

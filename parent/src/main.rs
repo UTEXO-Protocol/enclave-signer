@@ -32,6 +32,30 @@ enum Command {
     },
     /// Get public keys from the enclave
     GetKeys,
+    /// Sign an EVM transaction (EIP-712 typed data)
+    SignEvm {
+        /// Hex-encoded ABI call data
+        #[arg(long)]
+        call_data: String,
+        /// Per-selector sequential nonce
+        #[arg(long)]
+        nonce: u64,
+        /// Unix timestamp deadline
+        #[arg(long)]
+        deadline: u64,
+    },
+    /// Sign a PSBT (SegWit v0 P2WSH multisig)
+    SignPsbt {
+        /// Hex-encoded PSBT bytes
+        #[arg(long)]
+        psbt: String,
+    },
+    /// Sign a raw message (fundsIn authorization, 1-of-n)
+    SignRawMessage {
+        /// Hex-encoded message bytes
+        #[arg(long)]
+        message: String,
+    },
     /// Enter interactive REPL mode
     Interactive,
 }
@@ -131,6 +155,65 @@ fn main() {
                 process::exit(1);
             }
         },
+        Command::SignEvm {
+            call_data,
+            nonce,
+            deadline,
+        } => {
+            let data = match hex::decode(&call_data) {
+                Ok(d) => d,
+                Err(e) => {
+                    eprintln!("Invalid hex call_data: {}", e);
+                    process::exit(1);
+                }
+            };
+            match client.sign_evm(data, nonce, deadline) {
+                Ok(r) => {
+                    println!("EVM signature (65 bytes): {}", hex::encode(&r.signature));
+                }
+                Err(e) => {
+                    eprintln!("Error: {}", e);
+                    process::exit(1);
+                }
+            }
+        }
+        Command::SignPsbt { psbt } => {
+            let psbt_bytes = match hex::decode(&psbt) {
+                Ok(d) => d,
+                Err(e) => {
+                    eprintln!("Invalid hex PSBT: {}", e);
+                    process::exit(1);
+                }
+            };
+            match client.sign_psbt(psbt_bytes) {
+                Ok(r) => {
+                    println!("Signed PSBT: {}", hex::encode(&r.signed_psbt));
+                    println!("Inputs signed: {}", r.inputs_signed);
+                }
+                Err(e) => {
+                    eprintln!("Error: {}", e);
+                    process::exit(1);
+                }
+            }
+        }
+        Command::SignRawMessage { message } => {
+            let msg_bytes = match hex::decode(&message) {
+                Ok(d) => d,
+                Err(e) => {
+                    eprintln!("Invalid hex message: {}", e);
+                    process::exit(1);
+                }
+            };
+            match client.sign_raw_message(msg_bytes) {
+                Ok(r) => {
+                    println!("Signature (65 bytes): {}", hex::encode(&r.signature));
+                }
+                Err(e) => {
+                    eprintln!("Error: {}", e);
+                    process::exit(1);
+                }
+            }
+        }
         Command::Interactive => run_interactive(&client),
     }
 }
