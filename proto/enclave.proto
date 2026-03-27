@@ -78,11 +78,6 @@ message SignEvmRequest {
   // Pre-extracted from call_data by Listener (avoids ABI parsing in enclave)
   uint64 calldata_amount    = 9;
   uint64 calldata_commission = 10;
-
-  // Raw RGB consignment for in-enclave validation (PR2 will add full rgb-lib validation).
-  // For now the enclave verifies keccak256(consignment) == consignment_hash as integrity check.
-  bytes consignment         = 11;  // Raw RGB consignment bytes (from Go Listener via Parent Adapter)
-  bytes consignment_hash    = 12;  // keccak256(consignment) — integrity check
 }
 
 message EvmSignatureResponse {

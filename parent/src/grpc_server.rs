@@ -18,10 +18,7 @@ use crate::grpc_proto::{
 pub enum EnclaveTarget {
     Tcp(String),
     #[cfg(target_os = "linux")]
-    Vsock {
-        cid: u32,
-        port: u32,
-    },
+    Vsock { cid: u32, port: u32 },
 }
 
 /// gRPC server that translates parentadapter.proto RPCs into enclave.proto
@@ -48,10 +45,13 @@ impl ParentAdapterService {
 
                 match target {
                     EnclaveTarget::Tcp(addr) => {
-                        let mut stream = std::net::TcpStream::connect(&addr).map_err(|e| {
-                            Status::unavailable(format!("enclave connection failed: {e}"))
-                        })?;
-                        stream.set_read_timeout(Some(ENCLAVE_TIMEOUT)).ok();
+                        let mut stream =
+                            std::net::TcpStream::connect(&addr).map_err(|e| {
+                                Status::unavailable(format!("enclave connection failed: {e}"))
+                            })?;
+                        stream
+                            .set_read_timeout(Some(ENCLAVE_TIMEOUT))
+                            .ok();
                         framing::write_message(&mut stream, &req)
                             .map_err(|e| Status::internal(format!("enclave write failed: {e}")))?;
                         let resp: EnclaveResponse = framing::read_message(&mut stream)
@@ -60,9 +60,11 @@ impl ParentAdapterService {
                     }
                     #[cfg(target_os = "linux")]
                     EnclaveTarget::Vsock { cid, port } => {
-                        let mut stream = vsock::VsockStream::connect_with_cid_port(cid, port)
-                            .map_err(|e| {
-                                Status::unavailable(format!("enclave vsock connection failed: {e}"))
+                        let mut stream =
+                            vsock::VsockStream::connect_with_cid_port(cid, port).map_err(|e| {
+                                Status::unavailable(format!(
+                                    "enclave vsock connection failed: {e}"
+                                ))
                             })?;
                         framing::write_message(&mut stream, &req)
                             .map_err(|e| Status::internal(format!("enclave write failed: {e}")))?;
@@ -86,10 +88,7 @@ impl ParentAdapterService {
     fn enclave_error_to_status(err: &enclave_proto::ErrorResponse) -> Status {
         match err.code {
             3 => Status::failed_precondition(err.message.clone()),
-            _ => Status::internal(format!(
-                "enclave error (code {}): {}",
-                err.code, err.message
-            )),
+            _ => Status::internal(format!("enclave error (code {}): {}", err.code, err.message)),
         }
     }
 }
@@ -114,9 +113,12 @@ impl EnclaveService for ParentAdapterService {
                 let evm_tx_hash = if psbt_flow.validated_tx_hash.is_empty() {
                     vec![]
                 } else {
-                    let decoded = hex::decode(&psbt_flow.validated_tx_hash).map_err(|e| {
-                        Status::invalid_argument(format!("validated_tx_hash is not valid hex: {e}"))
-                    })?;
+                    let decoded =
+                        hex::decode(&psbt_flow.validated_tx_hash).map_err(|e| {
+                            Status::invalid_argument(format!(
+                                "validated_tx_hash is not valid hex: {e}"
+                            ))
+                        })?;
                     if decoded.len() != 32 {
                         return Err(Status::invalid_argument(format!(
                             "validated_tx_hash must be 32 bytes, got {}",
@@ -157,9 +159,6 @@ impl EnclaveService for ParentAdapterService {
                             nonce: evm_flow.nonce,
                             deadline: evm_flow.deadline,
                             consignment_valid: evm_flow.consignment_valid,
-                            // Raw consignment bytes — passed through for enclave-side validation.
-                            consignment: evm_flow.consignment,
-                            consignment_hash: evm_flow.consignment_hash,
                             // Fields the Go Listener doesn't send yet — defaults.
                             rgb_amount: 0,
                             rgb_asset_id: String::new(),
@@ -179,18 +178,24 @@ impl EnclaveService for ParentAdapterService {
             Some(enclave_response::Response::SignedPsbt(r)) => {
                 Ok(Response::new(EnclaveSignResponse {
                     result: Some(
-                        crate::grpc_proto::enclave_sign_response::Result::SignedPsbt(r.signed_psbt),
+                        crate::grpc_proto::enclave_sign_response::Result::SignedPsbt(
+                            r.signed_psbt,
+                        ),
                     ),
                 }))
             }
             Some(enclave_response::Response::EvmSignature(r)) => {
                 Ok(Response::new(EnclaveSignResponse {
                     result: Some(
-                        crate::grpc_proto::enclave_sign_response::Result::EvmSignature(r.signature),
+                        crate::grpc_proto::enclave_sign_response::Result::EvmSignature(
+                            r.signature,
+                        ),
                     ),
                 }))
             }
-            Some(enclave_response::Response::Error(e)) => Err(Self::enclave_error_to_status(&e)),
+            Some(enclave_response::Response::Error(e)) => {
+                Err(Self::enclave_error_to_status(&e))
+            }
             other => Err(Status::internal(format!(
                 "unexpected enclave response for Sign: {:?}",
                 other
@@ -222,7 +227,9 @@ impl EnclaveService for ParentAdapterService {
                 }
                 Ok(Response::new(GetPublicKeysResponse { public_keys: keys }))
             }
-            Some(enclave_response::Response::Error(e)) => Err(Self::enclave_error_to_status(&e)),
+            Some(enclave_response::Response::Error(e)) => {
+                Err(Self::enclave_error_to_status(&e))
+            }
             other => Err(Status::internal(format!(
                 "unexpected enclave response for GetPublicKeys: {:?}",
                 other

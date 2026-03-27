@@ -49,8 +49,6 @@ fn valid_sign_evm_request(amount: u64, commission: u64) -> SignEvmRequest {
         proxy_contract: vec![0xAA; 20],
         calldata_amount: amount,
         calldata_commission: commission,
-        consignment: vec![],
-        consignment_hash: vec![],
     }
 }
 

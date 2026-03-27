@@ -433,9 +433,9 @@ mod tests {
             }],
             output: vec![TxOut {
                 value: Amount::from_sat(50_000),
-                script_pubkey: ScriptBuf::new_p2wpkh(&bitcoin::WPubkeyHash::from_byte_array(
-                    [0xBB; 20],
-                )),
+                script_pubkey: ScriptBuf::new_p2wpkh(
+                    &bitcoin::WPubkeyHash::from_byte_array([0xBB; 20]),
+                ),
             }],
         };
 
