@@ -20,6 +20,10 @@ fn main() {
             .ok()
             .and_then(|s| s.parse().ok())
             .unwrap_or(8001);
+        tracing::info!(
+            vsock_port,
+            "starting Esplora vsock forwarder (host must run: vsock-proxy {vsock_port} <esplora-host> <esplora-port>)"
+        );
         if let Err(e) = utexo_bridge_enclave::vsock_forwarder::start_forwarder(3443, vsock_port) {
             tracing::error!("failed to start vsock forwarder: {e}");
         }

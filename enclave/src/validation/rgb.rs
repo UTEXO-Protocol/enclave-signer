@@ -62,17 +62,33 @@ impl RgbValidator {
         &self,
         consignment_bytes: &[u8],
     ) -> Result<ValidatedConsignment> {
+        let start = std::time::Instant::now();
+        let bytes_len = consignment_bytes.len();
+        tracing::info!(
+            bytes_len,
+            esplora_url = %self.esplora_url,
+            "starting RGB consignment validation"
+        );
+
         // 1. Deserialize the consignment from its file format (magic + strict-encoded).
         let transfer = Transfer::load(Cursor::new(consignment_bytes)).map_err(|e| {
+            tracing::warn!(bytes_len, "consignment deserialization failed: {e}");
             EnclaveError::CrossCheck(format!("consignment deserialization failed: {e}"))
         })?;
 
         let contract_id = transfer.contract_id().to_string();
-        tracing::debug!(%contract_id, "deserialized RGB transfer");
+        let bundles_count = transfer.bundles.len();
+        tracing::info!(
+            %contract_id,
+            bundles_count,
+            elapsed_ms = start.elapsed().as_millis() as u64,
+            "deserialized RGB transfer"
+        );
 
         // 2. Create an Esplora-backed resolver.
         let builder = esplora_client::Builder::new(&self.esplora_url);
         let mut resolver = AnyResolver::esplora_blocking(builder).map_err(|e| {
+            tracing::error!(esplora_url = %self.esplora_url, "esplora resolver creation failed: {e}");
             EnclaveError::CrossCheck(format!("esplora resolver creation failed: {e}"))
         })?;
 
@@ -89,11 +105,21 @@ impl RgbValidator {
         };
 
         // 4. Run full RGB validation (makes blocking HTTP calls to Esplora).
+        tracing::debug!(%contract_id, "calling rgbstd validate (this may block on Esplora)");
         let _valid = transfer.validate(&resolver, &config).map_err(|e| {
+            tracing::warn!(
+                %contract_id,
+                elapsed_ms = start.elapsed().as_millis() as u64,
+                "RGB validation failed: {e}"
+            );
             EnclaveError::CrossCheck(format!("RGB consignment validation failed: {e}"))
         })?;
 
-        tracing::info!(%contract_id, "RGB consignment validated successfully");
+        tracing::info!(
+            %contract_id,
+            elapsed_ms = start.elapsed().as_millis() as u64,
+            "RGB consignment validated successfully"
+        );
 
         Ok(ValidatedConsignment { contract_id })
     }
