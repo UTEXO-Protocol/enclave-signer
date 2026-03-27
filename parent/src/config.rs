@@ -20,8 +20,7 @@ impl Config {
     pub fn from_env() -> Self {
         Self {
             grpc_port: env_or("GRPC_PORT", 5000),
-            enclave_addr: std::env::var("ENCLAVE_ADDR")
-                .unwrap_or_else(|_| "127.0.0.1:5000".into()),
+            enclave_addr: std::env::var("ENCLAVE_ADDR").unwrap_or_else(|_| "127.0.0.1:5000".into()),
             enclave_vsock_cid: env_or("ENCLAVE_VSOCK_CID", 16),
             enclave_vsock_port: env_or("ENCLAVE_VSOCK_PORT", 5000),
             use_vsock: std::env::var("USE_VSOCK")
