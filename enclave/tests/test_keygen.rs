@@ -1,6 +1,5 @@
 mod common;
 
-use hex;
 use utexo_bridge_enclave::proto::enclave_request::Request;
 use utexo_bridge_enclave::proto::enclave_response::Response;
 use utexo_bridge_enclave::proto::*;

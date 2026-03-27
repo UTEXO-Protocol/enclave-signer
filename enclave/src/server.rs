@@ -7,6 +7,8 @@ use crate::proto::enclave_request::Request;
 use crate::proto::enclave_response::Response;
 use crate::proto::*;
 use crate::signing::evm::{sign_request_digest, Eip712Domain};
+#[cfg(not(feature = "dev-mode"))]
+use crate::validation;
 
 /// Handle a single connection: read one request, dispatch, write one response, close.
 pub fn handle_connection(stream: impl Read + Write, state: &EnclaveState) {
@@ -53,6 +55,10 @@ fn dispatch(request: EnclaveRequest, state: &EnclaveState) -> EnclaveResponse {
             tracing::info!("request: SignRawMessage");
             handle_sign_raw_message(state, req)
         }
+        Some(Request::ProxyFederation(req)) => {
+            tracing::info!("request: ProxyFederation");
+            handle_proxy_federation(state, req)
+        }
         None => {
             tracing::warn!("received empty request (no oneof variant set)");
             return EnclaveResponse {
@@ -70,7 +76,7 @@ fn dispatch(request: EnclaveRequest, state: &EnclaveState) -> EnclaveResponse {
             tracing::warn!("handler error: {}", e);
             EnclaveResponse {
                 response: Some(Response::Error(ErrorResponse {
-                    code: 1,
+                    code: e.error_code(),
                     message: e.to_string(),
                 })),
             }
@@ -141,13 +147,12 @@ fn handle_get_public_key(
 }
 
 fn handle_sign_evm(state: &EnclaveState, req: SignEvmRequest) -> Result<EnclaveResponse> {
-    // TODO: load from config
-    let domain = Eip712Domain {
-        name: "Tricorn".to_string(),
-        version: "1".to_string(),
-        chain_id: 1,
-        verifying_contract: [0u8; 20],
-    };
+    // Cross-check enriched fields before signing (skipped in dev-mode)
+    #[cfg(not(feature = "dev-mode"))]
+    validation::evm_crosscheck::validate_evm_request(&req)?;
+
+    // TODO: confirm domain name/version with contract team
+    let domain = build_evm_domain(&req)?;
 
     let digest = sign_request_digest(&domain, &req.call_data, req.nonce, req.deadline);
     let signature = state.sign_evm(&digest)?;
@@ -165,6 +170,10 @@ fn handle_sign_evm(state: &EnclaveState, req: SignEvmRequest) -> Result<EnclaveR
 }
 
 fn handle_sign_psbt(state: &EnclaveState, req: SignPsbtRequest) -> Result<EnclaveResponse> {
+    // Cross-check enriched fields before signing (skipped in dev-mode)
+    #[cfg(not(feature = "dev-mode"))]
+    validation::psbt_crosscheck::validate_psbt_request(&req)?;
+
     let (signed_psbt, inputs_signed) = state.sign_psbt(&req.psbt_bytes)?;
 
     tracing::info!(inputs_signed, "PSBT signed");
@@ -199,6 +208,62 @@ fn handle_sign_raw_message(
     Ok(EnclaveResponse {
         response: Some(Response::RawSignature(RawSignatureResponse {
             signature: signature.to_vec(),
+        })),
+    })
+}
+
+/// Build EIP-712 domain from enriched request fields.
+/// In dev-mode, falls back to defaults if fields are missing.
+fn build_evm_domain(req: &SignEvmRequest) -> Result<Eip712Domain> {
+    let chain_id = if req.chain_id > 0 {
+        req.chain_id
+    } else {
+        #[cfg(feature = "dev-mode")]
+        {
+            1
+        }
+        #[cfg(not(feature = "dev-mode"))]
+        {
+            return Err(EnclaveError::CrossCheck("chain_id must be > 0".into()));
+        }
+    };
+
+    let verifying_contract: [u8; 20] = if req.proxy_contract.len() == 20 {
+        req.proxy_contract
+            .as_slice()
+            .try_into()
+            .map_err(|_| EnclaveError::CrossCheck("proxy_contract must be 20 bytes".into()))?
+    } else {
+        #[cfg(feature = "dev-mode")]
+        {
+            [0u8; 20]
+        }
+        #[cfg(not(feature = "dev-mode"))]
+        {
+            return Err(EnclaveError::CrossCheck(format!(
+                "proxy_contract must be 20 bytes, got {}",
+                req.proxy_contract.len()
+            )));
+        }
+    };
+
+    Ok(Eip712Domain {
+        name: "Tricorn".to_string(),
+        version: "1".to_string(),
+        chain_id,
+        verifying_contract,
+    })
+}
+
+fn handle_proxy_federation(
+    _state: &EnclaveState,
+    _req: ProxyFederationRequest,
+) -> Result<EnclaveResponse> {
+    // Stub: federation proxy requires Listener integration (not yet wired)
+    Ok(EnclaveResponse {
+        response: Some(Response::Error(ErrorResponse {
+            code: 2, // NOT_READY
+            message: "federation proxy not yet connected to Listener".into(),
         })),
     })
 }

@@ -26,8 +26,21 @@ pub enum EnclaveError {
     #[error("signing error: {0}")]
     Signing(String),
 
+    #[error("cross-check failed: {0}")]
+    CrossCheck(String),
+
     #[error("internal error: {0}")]
     Internal(String),
+}
+
+impl EnclaveError {
+    /// Map error to a proto error code.
+    pub fn error_code(&self) -> u32 {
+        match self {
+            EnclaveError::CrossCheck(_) => 3, // ERROR_CODE_VALIDATION_FAILED
+            _ => 1,
+        }
+    }
 }
 
 pub type Result<T> = std::result::Result<T, EnclaveError>;
