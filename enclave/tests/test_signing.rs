@@ -417,6 +417,60 @@ fn test_sign_psbt_rejects_amount_mismatch() {
 }
 
 // =============================================================================
+// Vanilla PSBT signing tests (create_utxo — no EVM cross-checks)
+// =============================================================================
+
+#[test]
+fn test_sign_vanilla_psbt_skips_evm_checks() {
+    let port = common::start_test_server();
+
+    let init_req = EnclaveRequest {
+        request: Some(Request::InitializeKey(InitializeKeyRequest {
+            seed: vec![],
+        })),
+    };
+    common::send_request(port, &init_req);
+
+    // Vanilla PSBT: empty evm_tx_hash, no EVM enrichment.
+    // This would fail bridge-mode cross-checks (evm_event_valid=false, etc.)
+    // but should pass in vanilla mode.
+    let sign_req = EnclaveRequest {
+        request: Some(Request::SignPsbt(SignPsbtRequest {
+            evm_tx_hash: vec![],     // empty = vanilla mode
+            operation_idx: 0,
+            evm_event_valid: false,  // would fail in bridge mode
+            evm_event_finalized: false,
+            evm_token: vec![],
+            evm_amount: 0,
+            evm_recipient: vec![],
+            evm_commission: 0,
+            psbt_bytes: vec![0xFF; 10], // not a real PSBT — will fail at signing, not validation
+            psbt_output_amount: 0,
+            rgb_asset_id: String::new(),
+        })),
+    };
+    let resp = common::send_request(port, &sign_req);
+
+    // The request passes cross-checks (vanilla mode) but fails at actual PSBT
+    // parsing since 0xFF bytes aren't a valid PSBT. That's fine — we're testing
+    // that validation didn't reject it.
+    match &resp.response {
+        Some(Response::Error(e)) => {
+            // Should NOT be a cross-check error (code 3) — should be a signing error
+            assert_ne!(
+                e.code, 3,
+                "vanilla PSBT should not fail cross-checks, but got: {}",
+                e.message
+            );
+        }
+        Some(Response::SignedPsbt(_)) => {
+            // Would only happen with a real valid PSBT — fine too
+        }
+        other => panic!("unexpected response: {:?}", other),
+    }
+}
+
+// =============================================================================
 // Consignment hash integrity tests (wire protocol integration)
 // =============================================================================
 
