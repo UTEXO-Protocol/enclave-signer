@@ -96,9 +96,9 @@ fn build_test_multisig_psbt(our_pubkey: &bitcoin::PublicKey) -> Vec<u8> {
         }],
         output: vec![TxOut {
             value: Amount::from_sat(50_000),
-            script_pubkey: ScriptBuf::new_p2wpkh(
-                &bitcoin::WPubkeyHash::from_byte_array([0xBB; 20]),
-            ),
+            script_pubkey: ScriptBuf::new_p2wpkh(&bitcoin::WPubkeyHash::from_byte_array(
+                [0xBB; 20],
+            )),
         }],
     };
 
@@ -442,7 +442,10 @@ fn test_sign_evm_rejects_consignment_hash_mismatch() {
 
     match &resp.response {
         Some(Response::Error(e)) => {
-            assert_eq!(e.code, 3, "hash mismatch should be cross-check error (code 3)");
+            assert_eq!(
+                e.code, 3,
+                "hash mismatch should be cross-check error (code 3)"
+            );
             assert!(
                 e.message.contains("consignment hash mismatch"),
                 "error should mention hash mismatch: {}",
@@ -627,7 +630,10 @@ fn test_sign_raw_message_deterministic() {
         other => panic!("expected RawSignatureResponse, got {:?}", other),
     };
 
-    assert_eq!(sig1, sig2, "same message must produce same signature (RFC 6979)");
+    assert_eq!(
+        sig1, sig2,
+        "same message must produce same signature (RFC 6979)"
+    );
 }
 
 #[test]
@@ -661,7 +667,10 @@ fn test_sign_raw_message_different_messages_differ() {
         other => panic!("expected RawSignatureResponse, got {:?}", other),
     };
 
-    assert_ne!(sig1, sig2, "different messages must produce different signatures");
+    assert_ne!(
+        sig1, sig2,
+        "different messages must produce different signatures"
+    );
 }
 
 #[test]
@@ -731,7 +740,10 @@ fn test_proxy_federation_returns_not_ready() {
 
     match &resp.response {
         Some(Response::Error(e)) => {
-            assert_eq!(e.code, 2, "federation proxy should return NOT_READY (code 2)");
+            assert_eq!(
+                e.code, 2,
+                "federation proxy should return NOT_READY (code 2)"
+            );
             assert!(e.message.contains("federation proxy"));
         }
         other => panic!("expected ErrorResponse, got {:?}", other),

@@ -32,10 +32,9 @@ fn main() {
     // Build RGB consignment validator (when feature enabled).
     #[cfg(feature = "rgb-validation")]
     let rgb_validator = {
-        let esplora_url = std::env::var("ESPLORA_URL")
-            .unwrap_or_else(|_| "http://127.0.0.1:3443".into());
-        let network = std::env::var("BITCOIN_NETWORK")
-            .unwrap_or_else(|_| "bitcoin".into());
+        let esplora_url =
+            std::env::var("ESPLORA_URL").unwrap_or_else(|_| "http://127.0.0.1:3443".into());
+        let network = std::env::var("BITCOIN_NETWORK").unwrap_or_else(|_| "bitcoin".into());
         match utexo_bridge_enclave::validation::rgb::RgbValidator::new(esplora_url, &network) {
             Ok(v) => {
                 tracing::info!("RGB validator initialized");

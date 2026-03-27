@@ -102,12 +102,10 @@ impl EnclaveService for ParentAdapterService {
     ) -> Result<Response<EnclaveSignResponse>, Status> {
         let inner = request.into_inner();
 
-        let flow = inner
-            .flow
-            .ok_or_else(|| {
-                tracing::warn!("gRPC Sign called with no flow set");
-                Status::invalid_argument("missing flow in EnclaveSignRequest")
-            })?;
+        let flow = inner.flow.ok_or_else(|| {
+            tracing::warn!("gRPC Sign called with no flow set");
+            Status::invalid_argument("missing flow in EnclaveSignRequest")
+        })?;
 
         let enclave_req = match flow {
             enclave_sign_request::Flow::Psbt(psbt_flow) => {
@@ -194,7 +192,10 @@ impl EnclaveService for ParentAdapterService {
 
         let start = std::time::Instant::now();
         let resp = self.send_to_enclave(enclave_req).await?;
-        tracing::debug!(elapsed_ms = start.elapsed().as_millis() as u64, "enclave round-trip");
+        tracing::debug!(
+            elapsed_ms = start.elapsed().as_millis() as u64,
+            "enclave round-trip"
+        );
 
         match resp.response {
             Some(enclave_response::Response::SignedPsbt(r)) => {
