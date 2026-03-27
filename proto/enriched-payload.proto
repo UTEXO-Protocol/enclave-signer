@@ -1,5 +1,5 @@
 syntax = "proto3";
-package tricorn.enriched;
+package utexo_bridge.enriched;
 
 // Enriched payloads for SignRequest.data field.
 // Listener repacks SignRequest.data before forwarding to Enclave.
