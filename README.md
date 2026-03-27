@@ -179,6 +179,39 @@ vsock-proxy 8001 <esplora-host> <esplora-port>
 GRPC_PORT=5000 USE_VSOCK=true cargo run --release -p utexo-bridge-parent
 ```
 
+### Debug mode (Nitro Enclave)
+
+By default, a running enclave has no console output — `RUST_LOG` output is siloed inside the TEE. To see logs, run the enclave with `--debug-mode`:
+
+```bash
+nitro-cli run-enclave \
+  --cpu-count 2 --memory 512 --enclave-cid 16 \
+  --eif-path build/utexo-bridge-enclave.eif \
+  --debug-mode
+```
+
+> **Note:** In debug mode, PCR0/PCR1/PCR2 are all zeroed. KMS attestation policies that check PCR values will reject the enclave. Use debug mode only for development/testing — never in production.
+
+Once the enclave is running, attach to its console:
+
+```bash
+nitro-cli console --enclave-id $(nitro-cli describe-enclaves | jq -r '.[0].EnclaveID')
+```
+
+This streams the enclave's stdout/stderr (i.e. `RUST_LOG` output) to your terminal. `Ctrl+C` detaches without stopping the enclave.
+
+To list running enclaves and their IDs:
+
+```bash
+nitro-cli describe-enclaves
+```
+
+To terminate an enclave:
+
+```bash
+nitro-cli terminate-enclave --enclave-id <enclave-id>
+```
+
 ### Environment variables
 
 #### Enclave
