@@ -37,7 +37,4 @@ message EnrichedEvmPayload {
   bytes proxy_contract        = 8;
   uint64 calldata_amount      = 9;
   uint64 calldata_commission  = 10;
-
-  bytes consignment           = 11;
-  bytes consignment_hash      = 12;
 }
