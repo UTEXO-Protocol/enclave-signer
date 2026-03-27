@@ -1,7 +1,7 @@
 use std::net::TcpListener;
 
 use utexo_bridge_enclave::keys::EnclaveState;
-use utexo_bridge_enclave::server;
+use utexo_bridge_enclave::server::{self, ServerContext};
 
 fn main() {
     tracing_subscriber::fmt()
@@ -11,6 +11,47 @@ fn main() {
     tracing::info!("starting utexo-bridge-enclave");
 
     let state = EnclaveState::new();
+
+    // Start vsock-to-TCP forwarder for Esplora access (production only).
+    // The host must run: vsock-proxy <ESPLORA_VSOCK_PORT> <esplora-host> <esplora-port>
+    #[cfg(all(feature = "vsock", target_os = "linux"))]
+    {
+        let vsock_port: u32 = std::env::var("ESPLORA_VSOCK_PORT")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(8001);
+        tracing::info!(
+            vsock_port,
+            "starting Esplora vsock forwarder (host must run: vsock-proxy {vsock_port} <esplora-host> <esplora-port>)"
+        );
+        if let Err(e) = utexo_bridge_enclave::vsock_forwarder::start_forwarder(3443, vsock_port) {
+            tracing::error!("failed to start vsock forwarder: {e}");
+        }
+    }
+
+    // Build RGB consignment validator (when feature enabled).
+    #[cfg(feature = "rgb-validation")]
+    let rgb_validator = {
+        let esplora_url =
+            std::env::var("ESPLORA_URL").unwrap_or_else(|_| "http://127.0.0.1:3443".into());
+        let network = std::env::var("BITCOIN_NETWORK").unwrap_or_else(|_| "bitcoin".into());
+        match utexo_bridge_enclave::validation::rgb::RgbValidator::new(esplora_url, &network) {
+            Ok(v) => {
+                tracing::info!("RGB validator initialized");
+                Some(v)
+            }
+            Err(e) => {
+                tracing::error!("failed to create RGB validator: {e}");
+                None
+            }
+        }
+    };
+
+    let ctx = ServerContext {
+        state,
+        #[cfg(feature = "rgb-validation")]
+        rgb_validator,
+    };
 
     #[cfg(all(feature = "vsock", target_os = "linux"))]
     {
@@ -24,7 +65,7 @@ fn main() {
             match stream {
                 Ok(stream) => {
                     tracing::debug!("accepted vsock connection");
-                    server::handle_connection(stream, &state);
+                    server::handle_connection(stream, &ctx);
                 }
                 Err(e) => tracing::error!("accept error: {}", e),
             }
@@ -45,7 +86,7 @@ fn main() {
                         .map(|a| a.to_string())
                         .unwrap_or_else(|_| "unknown".into());
                     tracing::debug!(%peer, "accepted TCP connection");
-                    server::handle_connection(stream, &state);
+                    server::handle_connection(stream, &ctx);
                 }
                 Err(e) => tracing::error!("accept error: {}", e),
             }

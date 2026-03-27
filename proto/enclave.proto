@@ -8,11 +8,13 @@ message EnclaveRequest {
   oneof request {
     InitializeKeyRequest   initialize_key   = 1;
     GetPublicKeyRequest    get_public_key   = 2;
+    SignEvmRequest         sign_evm         = 3;
+    SignPsbtRequest        sign_psbt        = 4;
+    SignRawMessageRequest  sign_raw_message = 5;
+    ProxyFederationRequest proxy_federation = 6;
     // Reserved for future:
-    // SignEvmRequest       sign_evm         = 3;
-    // SignPsbtRequest      sign_psbt        = 4;
-    // GetAttestationRequest get_attestation = 5;
-    // CloneRequest         clone_request    = 6;
+    // GetAttestationRequest get_attestation = 7;
+    // CloneRequest         clone_request    = 8;
     // HealthCheckRequest   health_check     = 9;
   }
 }
@@ -21,9 +23,11 @@ message EnclaveResponse {
   oneof response {
     InitializeKeyResponse  initialize_key   = 1;
     PublicKeysResponse     public_keys      = 2;
+    EvmSignatureResponse   evm_signature    = 3;
+    SignedPsbtResponse     signed_psbt      = 4;
+    RawSignatureResponse   raw_signature    = 5;
+    FederationSignatureResponse federation_sig = 6;
     // Reserved for future:
-    // EvmSignatureResponse evm_signature    = 3;
-    // SignedPsbtResponse   signed_psbt      = 4;
     // HealthCheckResponse  health_check     = 7;
     ErrorResponse          error            = 15;
   }
@@ -52,6 +56,85 @@ message PublicKeysResponse {
   bytes evm_address         = 1;
   bytes btc_compressed_pub  = 2;
   string btc_xpub           = 3;
+}
+
+// === EVM Signing (RGB→EVM direction) ===
+
+message SignEvmRequest {
+  // Original fields (sent by Orchestrator → Listener → Parent → Enclave)
+  bytes call_data       = 1;  // Raw ABI-encoded function call (e.g., fundsOut selector + params)
+  uint64 nonce          = 2;  // Per-selector sequential nonce (matches on-chain MultisigProxy nonce)
+  uint64 deadline       = 3;  // Unix timestamp — signature invalid after this time
+
+  // Enriched by Listener (validation results)
+  bool consignment_valid    = 4;   // Listener validated the RGB consignment
+  uint64 rgb_amount         = 5;   // Amount from validated consignment (smallest unit)
+  string rgb_asset_id       = 6;   // RGB asset identifier from consignment
+
+  // For EIP-712 domain (Listener reads from config/chain)
+  uint64 chain_id           = 7;
+  bytes proxy_contract      = 8;   // 20 bytes — verifying contract address
+
+  // Pre-extracted from call_data by Listener (avoids ABI parsing in enclave)
+  uint64 calldata_amount    = 9;
+  uint64 calldata_commission = 10;
+
+  // Raw RGB consignment for in-enclave validation (PR2 will add full rgb-lib validation).
+  // For now the enclave verifies keccak256(consignment) == consignment_hash as integrity check.
+  bytes consignment         = 11;  // Raw RGB consignment bytes (from Go Listener via Parent Adapter)
+  bytes consignment_hash    = 12;  // keccak256(consignment) — integrity check
+}
+
+message EvmSignatureResponse {
+  bytes signature = 1;      // 65 bytes: r(32) + s(32) + v(1), Ethereum ECDSA convention
+}
+
+// === PSBT Signing (EVM→RGB direction) ===
+
+message SignPsbtRequest {
+  // Original fields
+  bytes evm_tx_hash       = 1;   // 32 bytes — for Listener validation
+  uint64 operation_idx    = 2;   // For Listener query
+
+  // Enriched by Listener (EVM event validation)
+  bool evm_event_valid       = 3;
+  bool evm_event_finalized   = 4;
+  bytes evm_token            = 5;   // 20 bytes — ERC-20 address (empty for native)
+  uint64 evm_amount          = 6;   // Deposit amount from FundsIn event
+  bytes evm_recipient        = 7;   // 20 bytes
+  uint64 evm_commission      = 8;
+
+  // Enriched by Listener (PSBT data from rgb-multisig-bridge)
+  bytes psbt_bytes           = 9;   // Raw PSBT fetched by Listener
+  uint64 psbt_output_amount  = 10;  // Total non-change output amount from PSBT
+  string rgb_asset_id        = 11;
+}
+
+message SignedPsbtResponse {
+  bytes signed_psbt    = 1; // Serialized PSBT with our partial signature(s) added
+  uint32 inputs_signed = 2; // Number of inputs we signed
+}
+
+// === Raw Message Signing (fundsIn authorization) ===
+// Single TEE signature (1-of-n) to prove the smart contract was called
+// through the Tricorn backend. Used for fundsIn parameter authorization.
+
+message SignRawMessageRequest {
+  bytes message = 1;  // Arbitrary message bytes to sign (will be keccak256-hashed then signed)
+}
+
+message RawSignatureResponse {
+  bytes signature = 1;  // 65 bytes: r(32) + s(32) + v(1), Ethereum ECDSA convention
+}
+
+// === Federation Proxy ===
+
+message ProxyFederationRequest {
+  bytes message_hash = 1;     // 32 bytes — keccak256 of published message
+}
+
+message FederationSignatureResponse {
+  bytes signature = 1;        // 65-byte ECDSA from Listener's federation key
 }
 
 // === Error ===

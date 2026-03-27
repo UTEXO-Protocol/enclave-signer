@@ -1,56 +1,91 @@
 # utexo-bridge-signer
 
-Cryptographic key management service running inside an [AWS Nitro Enclave](https://aws.amazon.com/ec2/nitro/nitro-enclaves/) for the UTEXO bridge. The enclave generates and holds BIP-39 HD wallet keys, derives EVM and BTC public keys, and exposes them over a protobuf-based RPC protocol. A host-side CLI client communicates with the enclave over vsock (production) or TCP (development).
+Cryptographic signing service for the UTEXO RGB-EVM bridge, running inside an [AWS Nitro Enclave](https://aws.amazon.com/ec2/nitro/nitro-enclaves/). The enclave generates HD wallet keys, signs EVM (EIP-712) and BTC (PSBT) transactions, and validates RGB consignments against an Esplora indexer — all within the TEE so private keys never leave the enclave.
 
 ## Architecture
 
 ```
-┌──────────────────────────────────────────────┐
-│  EC2 Host (Parent)                           │
-│                                              │
-│  utexo-bridge-parent ──vsock:5000──┐         │
-│  (CLI client)                      │         │
-│                                    ▼         │
-│  ┌──────────────────────────────────────┐    │
-│  │  Nitro Enclave                       │    │
-│  │                                      │    │
-│  │  utexo-bridge-enclave                │    │
-│  │  ├── BIP-39 mnemonic generation      │    │
-│  │  ├── EVM key derivation (m/44'/60')  │    │
-│  │  ├── BTC key derivation (m/84'/0')   │    │
-│  │  └── Protobuf RPC server             │    │
-│  └──────────────────────────────────────┘    │
-└──────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────┐
+│  Go Listener (federated-signer-node)                             │
+│  Receives signing requests from Orchestrator, enriches with      │
+│  EVM event data + RGB consignment, forwards via gRPC             │
+└───────────────────────┬──────────────────────────────────────────┘
+                        │ gRPC (parentadapter.proto)
+                        ▼
+┌──────────────────────────────────────────────────────────────────┐
+│  EC2 Host                                                        │
+│                                                                  │
+│  utexo-bridge-parent (gRPC server + CLI)                         │
+│  ├── Translates gRPC → enclave wire protocol                     │
+│  ├── PSBTSigningFlow / EVMSigningFlow → SignPsbtRequest /        │
+│  │   SignEvmRequest (including consignment bytes)                 │
+│  └── TCP / vsock to enclave                                      │
+│                                                                  │
+│  vsock-proxy 8001 → Esplora API  (for RGB validation)            │
+│                                                                  │
+│  ┌────────────────────────────────────────────────────────────┐  │
+│  │  Nitro Enclave                                              │  │
+│  │                                                             │  │
+│  │  utexo-bridge-enclave                                       │  │
+│  │  ├── BIP-39 key generation (m/44'/60' EVM, m/84'/0' BTC)   │  │
+│  │  ├── EIP-712 signing (EVM → RGB direction)                  │  │
+│  │  ├── PSBT signing (RGB → EVM direction)                     │  │
+│  │  ├── RGB consignment validation (rgbstd + Esplora)          │  │
+│  │  ├── Cross-check validation (amounts, deadlines, calldata)  │  │
+│  │  ├── vsock forwarder (localhost → vsock → Esplora)          │  │
+│  │  └── Protobuf RPC server (vsock:5000 / TCP:5000)            │  │
+│  └────────────────────────────────────────────────────────────┘  │
+└──────────────────────────────────────────────────────────────────┘
 ```
 
-The project is a Cargo workspace with two crates:
+## Workspace crates
 
-| Crate | Description |
-|-------|-------------|
-| **`enclave/`** | Runs inside the Nitro Enclave. Generates keys, derives addresses, serves RPC requests. |
-| **`parent/`** | Runs on the EC2 host. CLI client that talks to the enclave over vsock or TCP. |
+| Crate | Binary | Description |
+|-------|--------|-------------|
+| **`enclave/`** | `utexo-bridge-enclave` | Runs inside the Nitro Enclave. Key management, signing, RGB validation. |
+| **`parent/`** | `utexo-bridge-parent` | gRPC server (Parent Adapter) — translates Go Listener RPCs to enclave wire protocol. |
+| **`parent/`** | `utexo-bridge-parent-cli` | CLI tool for direct enclave interaction (testing, key init, manual signing). |
 
 ## What it does
 
-- **Key generation** — Generates a BIP-39 mnemonic from OS entropy (`getrandom`), derives a 64-byte seed, and stores it in memory wrapped in `SecretBox` (zeroize-on-drop).
-- **EVM address derivation** — Derives `m/44'/60'/0'/0/0` (standard Ethereum path), computes the 20-byte address via `keccak256(uncompressed_pubkey[1..])[12..]`.
-- **BTC public key derivation** — Derives `m/84'/0'/0'/0/0` (SegWit v0 path), produces a 33-byte compressed secp256k1 public key and a BIP-32 xpub.
-- **Protobuf RPC** — Length-prefixed protobuf messages over vsock (production) or TCP (development). One request/response per connection, 4 MB message size limit.
+### Key management
 
-### Current operations
+- Generates a BIP-39 mnemonic from OS entropy, derives a 64-byte seed, stores it in `SecretBox` (zeroize-on-drop)
+- EVM: derives `m/44'/60'/0'/0/0`, computes 20-byte address via `keccak256(uncompressed_pubkey[1..])[12..]`
+- BTC: derives `m/84'/0'/0'/0/0`, produces 33-byte compressed pubkey and BIP-32 xpub
+
+### Signing
+
+- **EVM (EIP-712)** — Signs typed data for the MultisigProxy contract (fundsOut). Builds EIP-712 domain from chain_id + proxy_contract, computes struct hash from calldata/nonce/deadline, signs with recoverable ECDSA (65 bytes: r+s+v).
+- **PSBT (SegWit v0 P2WSH)** — Signs matching inputs in a partially signed Bitcoin transaction. Matches inputs by BIP-32 derivation path or witness script pubkey match.
+- **Raw message** — Signs arbitrary bytes (keccak256-hashed) for fundsIn authorization (1-of-n).
+
+### Validation (before signing)
+
+- **RGB consignment validation** (feature `rgb-validation`) — Deserializes the RGB `Transfer` consignment, creates an Esplora-backed resolver, runs rgbstd's full validation pipeline inside the TEE. Replaces trusting the Go Listener's boolean.
+- **Consignment hash integrity** — Verifies `keccak256(consignment) == consignment_hash` to catch tampering.
+- **Amount cross-checks** — Verifies `rgb_amount >= calldata_amount + commission`, extracts and compares amounts from raw calldata bytes.
+- **Calldata extraction** — Reads uint256 values at ABI offsets to verify declared amounts match actual calldata.
+- **Deadline check** — Rejects expired signing requests.
+- **Chain/domain validation** — Requires valid `chain_id` and 20-byte `proxy_contract` for EIP-712 domain.
+
+### gRPC bridge (Parent Adapter)
+
+- Implements `EnclaveService` from `parentadapter.proto` (the Go Listener's gRPC interface)
+- Translates `PSBTSigningFlow` / `EVMSigningFlow` into enclave-native `SignPsbtRequest` / `SignEvmRequest`
+- Passes consignment bytes through for in-enclave validation
+- 30-second timeout on enclave requests, binds to localhost only
+
+## Enclave operations
 
 | Operation | Description |
 |-----------|-------------|
-| `InitializeKey` | Generate new keys from OS entropy (or import a raw seed in test mode) |
-| `GetPublicKey` | Retrieve the EVM address, BTC compressed pubkey, and xpub |
-
-### Planned operations (reserved in proto)
-
-- `SignEvm` — EIP-712 typed data signing with ECDSA
-- `SignPsbt` — SegWit v0 PSBT signing
-- `GetAttestation` — Nitro attestation document
-- `Clone` — Key cloning between enclaves
-- `HealthCheck` — Liveness probe
+| `InitializeKey` | Generate keys from OS entropy (or import raw seed in test mode) |
+| `GetPublicKey` | Retrieve EVM address, BTC compressed pubkey, and xpub |
+| `SignEvm` | EIP-712 typed data signing with cross-check validation |
+| `SignPsbt` | SegWit v0 P2WSH PSBT signing with cross-check validation |
+| `SignRawMessage` | Keccak256-hash-then-sign for fundsIn authorization |
+| `ProxyFederation` | Federation signature proxy (stub, not yet wired) |
 
 ## Prerequisites
 
@@ -66,41 +101,34 @@ sudo apt-get install -y protobuf-compiler   # Debian/Ubuntu
 sudo dnf install -y protobuf-compiler       # Amazon Linux 2023
 ```
 
-For building the Nitro Enclave image (on EC2 only):
-
-- Docker
-- `nitro-cli` (AWS Nitro Enclaves CLI)
+For building the Nitro Enclave image (on EC2 only): Docker + `nitro-cli`.
 
 ## Building
 
 ### Local development (TCP mode)
 
 ```bash
-# Build both crates
+# Build everything
 cargo build
 
-# Build only the enclave
-cargo build -p utexo-bridge-enclave
+# Build with RGB validation support
+cargo build -p utexo-bridge-enclave --features rgb-validation
 
-# Build only the parent CLI
+# Build only the gRPC server (Parent Adapter)
 cargo build -p utexo-bridge-parent
 ```
 
-### Production (vsock mode for Nitro Enclave)
+### Production (Nitro Enclave)
 
 ```bash
-# Build the enclave binary with vsock support
-cargo build --release -p utexo-bridge-enclave --features vsock
+# Build the enclave binary with vsock + RGB validation
+cargo build --release -p utexo-bridge-enclave --features vsock,rgb-validation
 
-# Or build the full Enclave Image Format (EIF) on a Nitro-enabled EC2 instance
+# Or build the full Enclave Image Format (EIF)
 ./build/build-enclave.sh
 ```
 
-The build script will:
-1. Build a Docker image with the enclave binary
-2. Convert it to an EIF via `nitro-cli build-enclave`
-3. Output PCR measurements (PCR0/1/2) for KMS attestation policies
-4. Save the EIF to `build/utexo-bridge-enclave.eif`
+The build script builds a Docker image, converts it to an EIF via `nitro-cli build-enclave`, and outputs PCR measurements (PCR0/1/2) for KMS attestation policies.
 
 ## Running
 
@@ -112,44 +140,65 @@ Start the enclave server (TCP on `127.0.0.1:5000`):
 RUST_LOG=debug cargo run -p utexo-bridge-enclave
 ```
 
-In another terminal, use the parent CLI:
+Start the gRPC server (Parent Adapter on `127.0.0.1:5000`):
 
 ```bash
-# Initialize keys (generates new mnemonic)
-cargo run -p utexo-bridge-parent -- init
-
-# Retrieve public keys
-cargo run -p utexo-bridge-parent -- get-keys
-
-# Interactive REPL mode
-cargo run -p utexo-bridge-parent -- interactive
+RUST_LOG=debug cargo run -p utexo-bridge-parent
 ```
 
-REPL commands: `init`, `init-seed <hex>`, `get-keys`, `help`, `quit`.
+Use the CLI tool directly:
+
+```bash
+# Initialize keys
+cargo run --bin utexo-bridge-parent-cli -- init
+
+# Get public keys
+cargo run --bin utexo-bridge-parent-cli -- get-keys
+
+# Sign an EVM transaction
+cargo run --bin utexo-bridge-parent-cli -- sign-evm \
+  --call-data <hex> --nonce 1 --deadline 9999999999 \
+  --chain-id 1 --proxy-contract <hex>
+
+# Interactive REPL
+cargo run --bin utexo-bridge-parent-cli -- interactive
+```
 
 ### Production (Nitro Enclave)
 
 ```bash
-# Start the enclave (production — KMS attestation works)
+# Start the enclave
 nitro-cli run-enclave \
   --cpu-count 2 --memory 512 --enclave-cid 16 \
   --eif-path build/utexo-bridge-enclave.eif
 
-# Start the enclave (debug — console output, PCRs zeroed)
-nitro-cli run-enclave \
-  --cpu-count 2 --memory 512 --enclave-cid 16 \
-  --eif-path build/utexo-bridge-enclave.eif --debug-mode
+# Start vsock-proxy for Esplora access (on the host)
+vsock-proxy 8001 <esplora-host> <esplora-port>
 
-# Read enclave console (debug mode only)
-nitro-cli console --enclave-id $(nitro-cli describe-enclaves | jq -r '.[0].EnclaveID')
+# Start the gRPC server (Parent Adapter)
+GRPC_PORT=5000 USE_VSOCK=true cargo run --release -p utexo-bridge-parent
+```
 
-# Use the parent CLI in another terminal / instance (auto-connects to vsock CID 16, port 5000)
-cargo run --release -p utexo-bridge-parent --features vsock -- init
+### Environment variables
 
-cargo run -p utexo-bridge-parent -- interactive
+#### Enclave
 
-REPL commands: `init`, `init-seed <hex>`, `get-keys`, `help`, `quit`.
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `RUST_LOG` | (none) | Log level (e.g., `info`, `debug`) |
+| `ESPLORA_URL` | `http://127.0.0.1:3443` | Esplora API endpoint for RGB validation |
+| `BITCOIN_NETWORK` | `bitcoin` | One of: `bitcoin`, `testnet`, `signet`, `regtest` |
+| `ESPLORA_VSOCK_PORT` | `8001` | vsock port for the host's vsock-proxy |
 
+#### Parent Adapter
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `GRPC_PORT` | `5000` | Port for the gRPC server |
+| `ENCLAVE_ADDR` | `127.0.0.1:5000` | Enclave TCP address (dev mode) |
+| `USE_VSOCK` | `false` | Use vsock instead of TCP |
+| `ENCLAVE_VSOCK_CID` | `16` | Enclave vsock CID (production) |
+| `ENCLAVE_VSOCK_PORT` | `5000` | Enclave vsock port |
 
 ## Testing
 
@@ -157,81 +206,110 @@ REPL commands: `init`, `init-seed <hex>`, `get-keys`, `help`, `quit`.
 # Run all tests
 cargo test
 
-# Run with output (see key values printed during tests)
-cargo test -- --nocapture
+# Run with RGB validation tests
+cargo test -p utexo-bridge-enclave --features rgb-validation
 
-# Run deterministic seed import test (requires feature flag)
+# Run with seed import tests
 cargo test -p utexo-bridge-enclave --features allow-seed-import
 
-# Run a specific test
-cargo test -p utexo-bridge-enclave initialize_and_get_keys
+# Run gRPC bridge integration tests
+cargo test -p utexo-bridge-parent
 ```
 
-### Test coverage
+### Test coverage (75 tests)
 
-| Test | What it verifies |
-|------|-----------------|
-| `roundtrip_encode_decode` | Protobuf framing round-trip (encode → decode) |
-| `reject_oversized_message` | Messages > 4 MB are rejected |
-| `reject_zero_length_message` | Zero-length messages are rejected |
-| `initialize_and_get_keys` | Full lifecycle: init → get keys → values match |
-| `double_initialize_returns_error` | Re-initialization is blocked |
-| `get_keys_before_init_returns_error` | Accessing keys before init returns error |
-| `deterministic_seed_import` | Same seed produces identical keys across instances |
+| Category | Count | What it covers |
+|----------|-------|----------------|
+| Enclave unit tests | 45 | Key derivation, framing, EIP-712 digest, cross-checks, consignment hash integrity, RGB deserialization |
+| Enclave integration tests | 20 | Full wire-protocol: keygen, signing roundtrips, cross-check rejections, consignment hash via real TCP |
+| gRPC bridge tests | 7 | Full gRPC → Parent Adapter → mock enclave roundtrips, error paths, consignment passthrough verification |
+| RGB validator unit tests | 2 | Bad bytes rejection, unknown network rejection |
 
-Plus unit tests in `keys.rs` for derivation consistency, key format validation, and secret handling.
+## Feature flags
+
+| Feature | Description |
+|---------|-------------|
+| `vsock` | Enable vsock transport (production, Linux only) |
+| `rgb-validation` | In-enclave RGB consignment validation via rgbstd + Esplora |
+| `allow-seed-import` | Allow raw 64-byte seed import (testing only, never enable in production) |
+| `dev-mode` | Skip cross-check validation on signing requests (development only) |
 
 ## Protocol
+
+### Enclave wire protocol
 
 Wire format: `[4-byte LE length][protobuf payload]`
 
 All messages are defined in [`proto/enclave.proto`](proto/enclave.proto). The enclave accepts one `EnclaveRequest` per connection and returns one `EnclaveResponse`.
 
+### gRPC interface (Parent Adapter)
+
+Defined in [`proto/parentadapter.proto`](proto/parentadapter.proto) (copied from the Go `federated-signer-node` repo). The Go Listener connects to `EnclaveService.Sign()` and `EnclaveService.GetPublicKeys()`.
+
+### Enriched payloads
+
+[`proto/enriched-payload.proto`](proto/enriched-payload.proto) defines `EnrichedPsbtPayload` and `EnrichedEvmPayload` for the enriched data format.
+
 ## Security model
 
 - **No unsafe code** — `#![deny(unsafe_code)]` enforced in the enclave crate.
-- **Zeroize-on-drop** — All seeds and private keys are wrapped in `SecretBox` from the `secrecy` crate. Memory is zeroed when values go out of scope.
-- **Seed import gated** — Raw seed import requires the `allow-seed-import` Cargo feature, which must never be enabled in production builds.
-- **Nitro Enclave isolation** — In production, the enclave runs in a Nitro Enclave VM with no persistent storage, no network access, and no shell. Communication is restricted to vsock.
-- **Release binary hardening** — Release builds use `opt-level = "z"`, LTO, symbol stripping, `panic = "abort"`, and single codegen unit.
+- **Zeroize-on-drop** — All seeds and private keys wrapped in `SecretBox`. Memory zeroed on drop.
+- **In-enclave RGB validation** — Consignments validated inside the TEE via rgbstd, not trusted from external sources.
+- **Cross-check validation** — Amount consistency, calldata extraction, deadline, and chain/domain checks before any signature is produced.
+- **Seed import gated** — Raw seed import requires `allow-seed-import` feature, never enabled in production.
+- **Nitro Enclave isolation** — No persistent storage, no network access (only vsock), no shell.
+- **vsock-proxy allowlist** — Enclave can only reach Esplora through the host's vsock-proxy with explicit allowlist.
+- **Release hardening** — `opt-level = "z"`, LTO, symbol stripping, `panic = "abort"`, single codegen unit.
+- **gRPC localhost-only** — Parent Adapter binds to `127.0.0.1`, not `0.0.0.0`.
 
 ## Project structure
 
 ```
 .
-├── Cargo.toml                  # Workspace root
-├── Cargo.lock
+├── Cargo.toml                        # Workspace root + [patch.crates-io] for RGB deps
 ├── proto/
-│   └── enclave.proto           # Protobuf service definitions
+│   ├── enclave.proto                 # Enclave wire protocol (all request/response types)
+│   ├── parentadapter.proto           # gRPC service (Go Listener interface)
+│   └── enriched-payload.proto        # Enriched payload definitions
 ├── enclave/
 │   ├── Cargo.toml
-│   ├── build.rs                # Protobuf codegen
-│   ├── src/
-│   │   ├── lib.rs              # Library root + proto module
-│   │   ├── main.rs             # Enclave binary entry point
-│   │   ├── keys.rs             # Key generation, derivation, state management
-│   │   ├── server.rs           # Request dispatcher and handlers
-│   │   ├── framing.rs          # Length-prefixed protobuf wire format
-│   │   ├── error.rs            # Error types
-│   │   └── signing/
-│   │       └── mod.rs          # (placeholder for EVM + PSBT signing)
-│   └── tests/
-│       ├── common/mod.rs       # Test server harness
-│       ├── test_framing.rs     # Framing protocol tests
-│       └── test_keygen.rs      # Key lifecycle integration tests
+│   ├── build.rs                      # Protobuf codegen (prost)
+│   └── src/
+│       ├── lib.rs                    # Library root + proto modules
+│       ├── main.rs                   # Entry point (vsock forwarder, RGB validator, listener)
+│       ├── server.rs                 # ServerContext, request dispatch, all handlers
+│       ├── keys.rs                   # BIP-39/BIP-32 key management (EnclaveState)
+│       ├── framing.rs                # Length-prefixed protobuf wire format
+│       ├── error.rs                  # Error types with gRPC code mapping
+│       ├── vsock_forwarder.rs        # TCP→vsock forwarder for Esplora access
+│       ├── signing/
+│       │   ├── evm.rs                # EIP-712 domain/digest construction
+│       │   └── psbt.rs               # SegWit v0 P2WSH PSBT signing
+│       └── validation/
+│           ├── evm_crosscheck.rs     # EVM request cross-checks (amounts, calldata, hash)
+│           ├── psbt_crosscheck.rs    # PSBT request cross-checks
+│           └── rgb.rs                # RGB consignment validation (rgbstd + Esplora)
 ├── parent/
 │   ├── Cargo.toml
-│   ├── build.rs                # Protobuf codegen
+│   ├── build.rs                      # tonic-build (gRPC) + prost-build (enclave proto)
 │   └── src/
-│       ├── lib.rs              # Library root + proto module
-│       ├── main.rs             # Host-side CLI (clap)
-│       ├── client.rs           # Enclave RPC client
-│       ├── framing.rs          # Wire format (shared logic)
-│       └── error.rs            # Error types
-└── build/
-    ├── Dockerfile.enclave      # Multi-stage Docker build
-    ├── build-enclave.sh        # EIF build + PCR extraction script
-    └── entrypoint.sh           # Enclave runtime init (loopback + exec)
+│       ├── lib.rs                    # Library root + grpc_proto + enclave_proto modules
+│       ├── main.rs                   # gRPC server startup (tonic)
+│       ├── grpc_server.rs            # EnclaveService implementation (translation layer)
+│       ├── config.rs                 # Environment-based configuration
+│       ├── client.rs                 # Enclave TCP/vsock RPC client
+│       ├── framing.rs                # Wire format (shared with enclave)
+│       ├── error.rs                  # Error types
+│       └── bin/
+│           └── cli.rs                # CLI tool (init, get-keys, sign-evm, sign-psbt, REPL)
+├── build/
+│   ├── Dockerfile.enclave            # Multi-stage Docker build
+│   ├── build-enclave.sh              # EIF build + PCR extraction
+│   ├── deploy-to-ec2.sh             # rsync to Nitro EC2 instance
+│   ├── entrypoint.sh                 # Enclave runtime init (loopback + exec)
+│   └── smoke-test.sh                 # Comprehensive RPC smoke tests
+└── .vscode/
+    └── settings.json                 # Rust Analyzer: enables rgb-validation + allow-seed-import
 ```
 
 ## License
