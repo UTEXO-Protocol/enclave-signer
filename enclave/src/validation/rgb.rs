@@ -58,10 +58,7 @@ impl RgbValidator {
 
     /// Validate raw consignment bytes. Returns extracted data on success,
     /// or a `CrossCheck` error if validation fails.
-    pub fn validate_consignment(
-        &self,
-        consignment_bytes: &[u8],
-    ) -> Result<ValidatedConsignment> {
+    pub fn validate_consignment(&self, consignment_bytes: &[u8]) -> Result<ValidatedConsignment> {
         let start = std::time::Instant::now();
         let bytes_len = consignment_bytes.len();
         tracing::info!(
@@ -131,9 +128,10 @@ mod tests {
 
     #[test]
     fn rejects_invalid_bytes() {
-        let validator =
-            RgbValidator::new("http://localhost:1".to_string(), "regtest").unwrap();
-        let err = validator.validate_consignment(b"not-a-consignment").unwrap_err();
+        let validator = RgbValidator::new("http://localhost:1".to_string(), "regtest").unwrap();
+        let err = validator
+            .validate_consignment(b"not-a-consignment")
+            .unwrap_err();
         assert!(
             err.to_string().contains("deserialization failed"),
             "expected deserialization error, got: {err}"
