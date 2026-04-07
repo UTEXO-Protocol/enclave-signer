@@ -270,27 +270,38 @@ impl KeyManager {
         Ok(result)
     }
 
-    /// Sign PSBT inputs matching our BTC key (SegWit v0 P2WSH multisig).
+    /// Sign PSBT inputs matching our keys.
+    /// Auto-detects taproot (Schnorr, BIP-340) vs SegWit v0 P2WSH (ECDSA) per input.
     /// Returns the modified PSBT bytes and count of inputs signed.
     pub fn sign_psbt(&self, psbt_bytes: &[u8]) -> Result<(Vec<u8>, usize)> {
         let secp = Secp256k1::new();
-        let secret_key = SecretKey::from_slice(self.btc_secret.expose_secret())
-            .map_err(|e| EnclaveError::Signing(format!("btc key: {e}")))?;
-        let our_pubkey = secret_key.public_key(&secp);
 
         let mut psbt = Psbt::deserialize(psbt_bytes)
             .map_err(|e| EnclaveError::Signing(format!("psbt deserialize: {e}")))?;
 
+        let mut signed_count = 0usize;
+
+        // === Taproot signing (BIP-86 / BIP-340 Schnorr) ===
+        let taproot_jobs =
+            crate::signing::taproot::find_taproot_sign_jobs(&psbt, &self.master_fingerprint, self);
+        if !taproot_jobs.is_empty() {
+            signed_count +=
+                crate::signing::taproot::sign_taproot_inputs(&mut psbt, self, &taproot_jobs)?;
+        }
+
+        // === Legacy SegWit v0 P2WSH signing (ECDSA) ===
+        let secret_key = SecretKey::from_slice(self.btc_secret.expose_secret())
+            .map_err(|e| EnclaveError::Signing(format!("btc key: {e}")))?;
+        let our_pubkey = secret_key.public_key(&secp);
+
         let unsigned_tx = psbt.unsigned_tx.clone();
         let mut sighash_cache = SighashCache::new(&unsigned_tx);
-        let mut signed_count = 0usize;
 
         for i in 0..psbt.inputs.len() {
             if !crate::signing::psbt::should_sign_segwit_input(&psbt, i, &our_pubkey) {
                 continue;
             }
 
-            // SegWit v0 P2WSH: need witness_utxo (for value) and witness_script
             let witness_utxo = psbt.inputs[i].witness_utxo.as_ref().ok_or_else(|| {
                 EnclaveError::Signing(format!("missing witness_utxo for input {i}"))
             })?;
@@ -298,7 +309,6 @@ impl KeyManager {
                 EnclaveError::Signing(format!("missing witness_script for input {i}"))
             })?;
 
-            // BIP-143 sighash for SegWit v0
             let sighash = sighash_cache
                 .p2wsh_signature_hash(i, witness_script, witness_utxo.value, EcdsaSighashType::All)
                 .map_err(|e| EnclaveError::Signing(format!("sighash: {e}")))?;
@@ -306,7 +316,6 @@ impl KeyManager {
             let msg = Message::from_digest(sighash.to_byte_array());
             let sig = secp.sign_ecdsa(&msg, &secret_key);
 
-            // Insert partial signature into PSBT
             let bitcoin_sig = bitcoin::ecdsa::Signature {
                 signature: sig,
                 sighash_type: EcdsaSighashType::All,
@@ -817,5 +826,202 @@ mod tests {
 
         let (_, count) = km.sign_psbt(&psbt_bytes).unwrap();
         assert_eq!(count, 0);
+    }
+
+    /// Build a taproot multi_a(2, pk1, pk2, pk3) PSBT for testing.
+    /// The signer's key is derived at m/86'/1'/0'/0/0 (vanilla testnet).
+    fn build_test_taproot_psbt(km: &KeyManager) -> Vec<u8> {
+        use bitcoin::bip32::ChildNumber;
+        use bitcoin::blockdata::opcodes::all::*;
+        use bitcoin::blockdata::script::Builder as ScriptBuilder;
+        use bitcoin::taproot::{LeafVersion, TapLeafHash, TaprootBuilder};
+        use bitcoin::{
+            Amount, OutPoint, ScriptBuf, Sequence, Transaction, TxIn, TxOut, Txid, XOnlyPublicKey,
+        };
+        use std::collections::BTreeMap;
+
+        let secp = Secp256k1::new();
+
+        // Our key: derive child at m/86'/1'/0'/0/0
+        let our_secret = km
+            .derive_btc_child(
+                AccountType::Vanilla,
+                &[
+                    ChildNumber::Normal { index: 0 },
+                    ChildNumber::Normal { index: 0 },
+                ],
+            )
+            .unwrap();
+        let our_keypair = bitcoin::secp256k1::Keypair::from_secret_key(&secp, &our_secret);
+        let (our_xonly, _parity) = XOnlyPublicKey::from_keypair(&our_keypair);
+
+        // Two other cosigner keys
+        let sk2 = SecretKey::from_slice(&[0x02; 32]).unwrap();
+        let kp2 = bitcoin::secp256k1::Keypair::from_secret_key(&secp, &sk2);
+        let (xonly2, _) = XOnlyPublicKey::from_keypair(&kp2);
+
+        let sk3 = SecretKey::from_slice(&[0x03; 32]).unwrap();
+        let kp3 = bitcoin::secp256k1::Keypair::from_secret_key(&secp, &sk3);
+        let (xonly3, _) = XOnlyPublicKey::from_keypair(&kp3);
+
+        // Build multi_a(2, pk1, pk2, pk3) tapscript:
+        // pk1 OP_CHECKSIG pk2 OP_CHECKSIGADD pk3 OP_CHECKSIGADD 2 OP_NUMEQUAL
+        let mut keys = [our_xonly, xonly2, xonly3];
+        keys.sort();
+
+        let tap_script = ScriptBuilder::new()
+            .push_x_only_key(&keys[0])
+            .push_opcode(OP_CHECKSIG)
+            .push_x_only_key(&keys[1])
+            .push_opcode(OP_CHECKSIGADD)
+            .push_x_only_key(&keys[2])
+            .push_opcode(OP_CHECKSIGADD)
+            .push_int(2)
+            .push_opcode(OP_NUMEQUAL)
+            .into_script();
+
+        let leaf_hash = TapLeafHash::from_script(&tap_script, LeafVersion::TapScript);
+
+        // Use an unspendable internal key (NUMS point)
+        let internal_key = XOnlyPublicKey::from_slice(&[
+            0x50, 0x92, 0x9b, 0x74, 0xc1, 0xa0, 0x49, 0x54, 0xb7, 0x8b, 0x4b, 0x60, 0x35, 0xe9,
+            0x7a, 0x5e, 0x07, 0x8a, 0x5a, 0x0f, 0x28, 0xec, 0x96, 0xd5, 0x47, 0xbf, 0xee, 0x9a,
+            0xce, 0x80, 0x3a, 0xc0,
+        ])
+        .unwrap();
+
+        let taproot_builder = TaprootBuilder::new()
+            .add_leaf(0, tap_script.clone())
+            .unwrap();
+        let taproot_spend_info = taproot_builder.finalize(&secp, internal_key).unwrap();
+
+        let script_pubkey =
+            ScriptBuf::new_p2tr(&secp, internal_key, taproot_spend_info.merkle_root());
+
+        let unsigned_tx = Transaction {
+            version: bitcoin::transaction::Version(2),
+            lock_time: bitcoin::blockdata::locktime::absolute::LockTime::ZERO,
+            input: vec![TxIn {
+                previous_output: OutPoint {
+                    txid: Txid::from_byte_array([0xAA; 32]),
+                    vout: 0,
+                },
+                script_sig: ScriptBuf::new(),
+                sequence: Sequence::MAX,
+                witness: bitcoin::Witness::default(),
+            }],
+            output: vec![TxOut {
+                value: Amount::from_sat(50_000),
+                script_pubkey: ScriptBuf::new_p2tr_tweaked(taproot_spend_info.output_key()),
+            }],
+        };
+
+        let mut psbt = Psbt::from_unsigned_tx(unsigned_tx).unwrap();
+
+        // Set witness_utxo
+        psbt.inputs[0].witness_utxo = Some(TxOut {
+            value: Amount::from_sat(100_000),
+            script_pubkey,
+        });
+
+        // Set tap_internal_key
+        psbt.inputs[0].tap_internal_key = Some(internal_key);
+
+        // Set tap_scripts (control block → script)
+        let control_block = taproot_spend_info
+            .control_block(&(tap_script.clone(), LeafVersion::TapScript))
+            .unwrap();
+        psbt.inputs[0]
+            .tap_scripts
+            .insert(control_block, (tap_script, LeafVersion::TapScript));
+
+        // Set tap_key_origins for our key
+        let our_fingerprint = km.master_fingerprint().clone();
+        let our_derivation = DerivationPath::from(vec![
+            ChildNumber::from_hardened_idx(86).unwrap(),
+            ChildNumber::from_hardened_idx(1).unwrap(), // testnet
+            ChildNumber::from_hardened_idx(0).unwrap(),
+            ChildNumber::Normal { index: 0 },
+            ChildNumber::Normal { index: 0 },
+        ]);
+        psbt.inputs[0].tap_key_origins.insert(
+            our_xonly,
+            (vec![leaf_hash], (our_fingerprint, our_derivation)),
+        );
+
+        psbt.serialize()
+    }
+
+    #[test]
+    fn test_sign_taproot_psbt_one_input() {
+        let km = KeyManager::from_seed([0x42u8; 64], Network::Testnet).unwrap();
+        let psbt_bytes = build_test_taproot_psbt(&km);
+
+        let (signed_bytes, count) = km.sign_psbt(&psbt_bytes).unwrap();
+        assert_eq!(count, 1);
+
+        let signed_psbt = Psbt::deserialize(&signed_bytes).unwrap();
+        assert_eq!(signed_psbt.inputs[0].tap_script_sigs.len(), 1);
+    }
+
+    #[test]
+    fn test_sign_taproot_psbt_skip_already_signed() {
+        let km = KeyManager::from_seed([0x42u8; 64], Network::Testnet).unwrap();
+        let psbt_bytes = build_test_taproot_psbt(&km);
+
+        let (signed_bytes, count1) = km.sign_psbt(&psbt_bytes).unwrap();
+        assert_eq!(count1, 1);
+
+        // Sign the already-signed PSBT again — should skip
+        let (_, count2) = km.sign_psbt(&signed_bytes).unwrap();
+        assert_eq!(count2, 0);
+    }
+
+    #[test]
+    fn test_sign_taproot_psbt_no_matching_fingerprint() {
+        // Key with a different seed → different fingerprint → should not sign
+        let km_signer = KeyManager::from_seed([0x42u8; 64], Network::Testnet).unwrap();
+        let km_other = KeyManager::from_seed([0x99u8; 64], Network::Testnet).unwrap();
+
+        let psbt_bytes = build_test_taproot_psbt(&km_signer);
+
+        // km_other's fingerprint won't match the tap_key_origins
+        let (_, count) = km_other.sign_psbt(&psbt_bytes).unwrap();
+        assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn test_sign_taproot_psbt_schnorr_signature_valid() {
+        use bitcoin::secp256k1::schnorr;
+
+        let km = KeyManager::from_seed([0x42u8; 64], Network::Testnet).unwrap();
+        let psbt_bytes = build_test_taproot_psbt(&km);
+
+        let (signed_bytes, _) = km.sign_psbt(&psbt_bytes).unwrap();
+        let signed_psbt = Psbt::deserialize(&signed_bytes).unwrap();
+
+        // Extract the signature
+        let ((xonly_pk, _leaf_hash), tap_sig) =
+            signed_psbt.inputs[0].tap_script_sigs.iter().next().unwrap();
+
+        // Verify the Schnorr signature
+        let secp = Secp256k1::verification_only();
+        let schnorr_sig = &tap_sig.signature;
+
+        // Recompute the sighash
+        let prevouts = vec![signed_psbt.inputs[0].witness_utxo.clone().unwrap()];
+        let unsigned_tx = signed_psbt.unsigned_tx.clone();
+        let mut cache = bitcoin::sighash::SighashCache::new(&unsigned_tx);
+        let sighash = cache
+            .taproot_script_spend_signature_hash(
+                0,
+                &bitcoin::sighash::Prevouts::All(&prevouts),
+                *_leaf_hash,
+                bitcoin::sighash::TapSighashType::Default,
+            )
+            .unwrap();
+
+        let msg = bitcoin::secp256k1::Message::from_digest(*sighash.as_byte_array());
+        assert!(secp.verify_schnorr(schnorr_sig, &msg, xonly_pk).is_ok());
     }
 }
