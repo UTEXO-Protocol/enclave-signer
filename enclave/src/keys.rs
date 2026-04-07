@@ -282,11 +282,8 @@ impl KeyManager {
         let mut signed_count = 0usize;
 
         // === Taproot signing (BIP-86 / BIP-340 Schnorr) ===
-        let taproot_jobs = crate::signing::taproot::find_taproot_sign_jobs(
-            &psbt,
-            &self.master_fingerprint,
-            self,
-        );
+        let taproot_jobs =
+            crate::signing::taproot::find_taproot_sign_jobs(&psbt, &self.master_fingerprint, self);
         if !taproot_jobs.is_empty() {
             signed_count +=
                 crate::signing::taproot::sign_taproot_inputs(&mut psbt, self, &taproot_jobs)?;
@@ -839,8 +836,7 @@ mod tests {
         use bitcoin::blockdata::script::Builder as ScriptBuilder;
         use bitcoin::taproot::{LeafVersion, TapLeafHash, TaprootBuilder};
         use bitcoin::{
-            Amount, OutPoint, ScriptBuf, Sequence, Transaction, TxIn, TxOut, Txid,
-            XOnlyPublicKey,
+            Amount, OutPoint, ScriptBuf, Sequence, Transaction, TxIn, TxOut, Txid, XOnlyPublicKey,
         };
         use std::collections::BTreeMap;
 
@@ -850,7 +846,10 @@ mod tests {
         let our_secret = km
             .derive_btc_child(
                 AccountType::Vanilla,
-                &[ChildNumber::Normal { index: 0 }, ChildNumber::Normal { index: 0 }],
+                &[
+                    ChildNumber::Normal { index: 0 },
+                    ChildNumber::Normal { index: 0 },
+                ],
             )
             .unwrap();
         let our_keypair = bitcoin::secp256k1::Keypair::from_secret_key(&secp, &our_secret);
@@ -885,9 +884,9 @@ mod tests {
 
         // Use an unspendable internal key (NUMS point)
         let internal_key = XOnlyPublicKey::from_slice(&[
-            0x50, 0x92, 0x9b, 0x74, 0xc1, 0xa0, 0x49, 0x54, 0xb7, 0x8b, 0x4b, 0x60, 0x35,
-            0xe9, 0x7a, 0x5e, 0x07, 0x8a, 0x5a, 0x0f, 0x28, 0xec, 0x96, 0xd5, 0x47, 0xbf,
-            0xee, 0x9a, 0xce, 0x80, 0x3a, 0xc0,
+            0x50, 0x92, 0x9b, 0x74, 0xc1, 0xa0, 0x49, 0x54, 0xb7, 0x8b, 0x4b, 0x60, 0x35, 0xe9,
+            0x7a, 0x5e, 0x07, 0x8a, 0x5a, 0x0f, 0x28, 0xec, 0x96, 0xd5, 0x47, 0xbf, 0xee, 0x9a,
+            0xce, 0x80, 0x3a, 0xc0,
         ])
         .unwrap();
 
@@ -913,9 +912,7 @@ mod tests {
             }],
             output: vec![TxOut {
                 value: Amount::from_sat(50_000),
-                script_pubkey: ScriptBuf::new_p2tr_tweaked(
-                    taproot_spend_info.output_key(),
-                ),
+                script_pubkey: ScriptBuf::new_p2tr_tweaked(taproot_spend_info.output_key()),
             }],
         };
 
@@ -1024,8 +1021,7 @@ mod tests {
             )
             .unwrap();
 
-        let msg =
-            bitcoin::secp256k1::Message::from_digest(*sighash.as_byte_array());
+        let msg = bitcoin::secp256k1::Message::from_digest(*sighash.as_byte_array());
         assert!(secp.verify_schnorr(schnorr_sig, &msg, xonly_pk).is_ok());
     }
 }

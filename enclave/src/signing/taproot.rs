@@ -2,10 +2,10 @@ use bitcoin::bip32::Fingerprint;
 use bitcoin::hashes::Hash;
 use bitcoin::psbt::Psbt;
 use bitcoin::secp256k1::{Keypair, Message, Secp256k1};
-use bitcoin::XOnlyPublicKey;
 use bitcoin::sighash::{Prevouts, SighashCache, TapSighashType};
 use bitcoin::taproot::{self, TapLeafHash};
 use bitcoin::TxOut;
+use bitcoin::XOnlyPublicKey;
 
 use crate::error::{EnclaveError, Result};
 use crate::keys::{AccountType, KeyManager};
@@ -30,8 +30,7 @@ pub fn find_taproot_sign_jobs(
 
     for (i, input) in psbt.inputs.iter().enumerate() {
         // Iterate tap_key_origins looking for our fingerprint
-        for (xonly_pubkey, (leaf_hashes, (fingerprint, derivation_path))) in
-            &input.tap_key_origins
+        for (xonly_pubkey, (leaf_hashes, (fingerprint, derivation_path))) in &input.tap_key_origins
         {
             if fingerprint != master_fingerprint {
                 continue;
