@@ -38,7 +38,9 @@ fn process_connection(mut stream: impl Read + Write, ctx: &ServerContext) -> Res
 fn dispatch(request: EnclaveRequest, ctx: &ServerContext) -> EnclaveResponse {
     let result = match request.request {
         Some(Request::InitializeKey(req)) => {
-            let path = if req.seed.is_empty() {
+            let path = if !req.mnemonic.is_empty() {
+                "mnemonic-import"
+            } else if req.seed.is_empty() {
                 "entropy"
             } else {
                 "seed-import"
@@ -92,7 +94,20 @@ fn dispatch(request: EnclaveRequest, ctx: &ServerContext) -> EnclaveResponse {
 }
 
 fn handle_initialize(state: &EnclaveState, req: InitializeKeyRequest) -> Result<EnclaveResponse> {
-    if req.seed.is_empty() {
+    if !req.mnemonic.is_empty() {
+        // Testing path: import from BIP-39 mnemonic phrase
+        #[cfg(feature = "allow-seed-import")]
+        {
+            state.initialize_from_mnemonic(&req.mnemonic)?;
+            tracing::info!("key initialized from imported mnemonic");
+        }
+        #[cfg(not(feature = "allow-seed-import"))]
+        {
+            return Err(EnclaveError::InvalidRequest(
+                "mnemonic import not allowed without allow-seed-import feature".into(),
+            ));
+        }
+    } else if req.seed.is_empty() {
         // Production path: generate from OS entropy
         let mut entropy = [0u8; 32];
         getrandom::fill(&mut entropy)

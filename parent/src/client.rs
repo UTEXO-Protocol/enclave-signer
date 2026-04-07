@@ -39,10 +39,23 @@ impl EnclaveClient {
     }
 
     pub fn initialize_keys(&self, seed: Option<Vec<u8>>) -> Result<InitializeKeyResponse> {
+        self.initialize_keys_inner(seed, None)
+    }
+
+    pub fn initialize_keys_mnemonic(&self, mnemonic: &str) -> Result<InitializeKeyResponse> {
+        self.initialize_keys_inner(None, Some(mnemonic.to_string()))
+    }
+
+    fn initialize_keys_inner(
+        &self,
+        seed: Option<Vec<u8>>,
+        mnemonic: Option<String>,
+    ) -> Result<InitializeKeyResponse> {
         let req = EnclaveRequest {
             request: Some(enclave_request::Request::InitializeKey(
                 InitializeKeyRequest {
                     seed: seed.unwrap_or_default(),
+                    mnemonic: mnemonic.unwrap_or_default(),
                 },
             )),
         };
