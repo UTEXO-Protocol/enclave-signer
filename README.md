@@ -27,7 +27,7 @@ Cryptographic signing service for the UTEXO RGB-EVM bridge, running inside an [A
 │  │  Nitro Enclave                                              │  │
 │  │                                                             │  │
 │  │  utexo-bridge-enclave                                       │  │
-│  │  ├── BIP-39 key generation (m/44'/60' EVM, m/84'/0' BTC)   │  │
+│  │  ├── BIP-39 key gen (EVM m/44'/60', BTC m/84' + m/86')     │  │
 │  │  ├── EIP-712 signing (EVM → RGB direction)                  │  │
 │  │  ├── PSBT signing (RGB → EVM direction)                     │  │
 │  │  ├── RGB consignment validation (rgbstd + Esplora)          │  │
@@ -52,7 +52,11 @@ Cryptographic signing service for the UTEXO RGB-EVM bridge, running inside an [A
 
 - Generates a BIP-39 mnemonic from OS entropy (or imports a mnemonic phrase in test mode), derives a 64-byte seed, stores it in `SecretBox` (zeroize-on-drop)
 - EVM: derives `m/44'/60'/0'/0/0`, computes 20-byte address via `keccak256(uncompressed_pubkey[1..])[12..]`
-- BTC: derives `m/84'/0'/0'/0/0`, produces 33-byte compressed pubkey and BIP-32 xpub
+- BTC (legacy): derives `m/84'/0'/0'/0/0`, produces 33-byte compressed pubkey and BIP-32 xpub
+- BTC (BIP-86 taproot): derives two account-level xprivs for multisig descriptors:
+  - Vanilla: `m/86'/<coin>'/0'` (coin type 0 mainnet, 1 testnet)
+  - Colored (RGB): `m/86'/827167'/0'`
+- Returns master fingerprint (4 bytes) for cosigner identification in multisig descriptors
 
 ### Signing
 
@@ -81,7 +85,7 @@ Cryptographic signing service for the UTEXO RGB-EVM bridge, running inside an [A
 | Operation | Description |
 |-----------|-------------|
 | `InitializeKey` | Generate keys from OS entropy (or import raw seed / BIP-39 mnemonic in test mode) |
-| `GetPublicKey` | Retrieve EVM address, BTC compressed pubkey, and xpub |
+| `GetPublicKey` | Retrieve EVM address, BTC pubkeys, master fingerprint, and BIP-86 account xpubs (vanilla + colored) |
 | `SignEvm` | EIP-712 typed data signing with cross-check validation |
 | `SignPsbt` | SegWit v0 P2WSH PSBT signing with cross-check validation |
 | `SignRawMessage` | Keccak256-hash-then-sign for fundsIn authorization |
@@ -224,7 +228,7 @@ nitro-cli terminate-enclave --enclave-id <enclave-id>
 |----------|---------|-------------|
 | `RUST_LOG` | (none) | Log level (e.g., `info`, `debug`) |
 | `ESPLORA_URL` | `http://127.0.0.1:3443` | Esplora API endpoint for RGB validation |
-| `BITCOIN_NETWORK` | `bitcoin` | One of: `bitcoin`, `testnet`, `signet`, `regtest` |
+| `BITCOIN_NETWORK` | `bitcoin` | One of: `bitcoin`, `testnet`, `signet`, `regtest`. Affects BIP-86 coin type (0 vs 1) and xpub prefix (xpub vs tpub). |
 | `ESPLORA_VSOCK_PORT` | `8001` | vsock port for the host's vsock-proxy |
 
 #### Parent Adapter
@@ -253,11 +257,11 @@ cargo test -p utexo-bridge-enclave --features allow-seed-import
 cargo test -p utexo-bridge-parent
 ```
 
-### Test coverage (75 tests)
+### Test coverage (92 tests)
 
 | Category | Count | What it covers |
 |----------|-------|----------------|
-| Enclave unit tests | 45 | Key derivation, framing, EIP-712 digest, cross-checks, consignment hash integrity, RGB deserialization |
+| Enclave unit tests | 58 | Key derivation (BIP-84 + BIP-86), mnemonic import, master fingerprint, framing, EIP-712 digest, cross-checks, consignment hash integrity, RGB deserialization |
 | Enclave integration tests | 20 | Full wire-protocol: keygen, signing roundtrips, cross-check rejections, consignment hash via real TCP |
 | gRPC bridge tests | 7 | Full gRPC → Parent Adapter → mock enclave roundtrips, error paths, consignment passthrough verification |
 | RGB validator unit tests | 2 | Bad bytes rejection, unknown network rejection |
