@@ -61,7 +61,9 @@ Cryptographic signing service for the UTEXO RGB-EVM bridge, running inside an [A
 ### Signing
 
 - **EVM (EIP-712)** — Signs typed data for the MultisigProxy contract (fundsOut). Builds EIP-712 domain from chain_id + proxy_contract, computes struct hash from calldata/nonce/deadline, signs with recoverable ECDSA (65 bytes: r+s+v).
-- **PSBT (SegWit v0 P2WSH)** — Signs matching inputs in a partially signed Bitcoin transaction. Matches inputs by BIP-32 derivation path or witness script pubkey match.
+- **PSBT (SegWit v0 P2WSH + Taproot)** — Signs matching inputs in a partially signed Bitcoin transaction. Auto-detects input type:
+  - **Taproot script-path** (BIP-341/BIP-340): Matches via `tap_key_origins` fingerprint, derives child keys per-input, signs with Schnorr into `tap_script_sigs`. Supports `multi_a()` tapscripts.
+  - **SegWit v0 P2WSH** (legacy): Matches by BIP-32 derivation path or witness script pubkey, signs with ECDSA into `partial_sigs`.
 - **Raw message** — Signs arbitrary bytes (keccak256-hashed) for fundsIn authorization (1-of-n).
 
 ### Validation (before signing)
@@ -87,7 +89,7 @@ Cryptographic signing service for the UTEXO RGB-EVM bridge, running inside an [A
 | `InitializeKey` | Generate keys from OS entropy (or import raw seed / BIP-39 mnemonic in test mode) |
 | `GetPublicKey` | Retrieve EVM address, BTC pubkeys, master fingerprint, and BIP-86 account xpubs (vanilla + colored) |
 | `SignEvm` | EIP-712 typed data signing with cross-check validation |
-| `SignPsbt` | SegWit v0 P2WSH PSBT signing with cross-check validation |
+| `SignPsbt` | Taproot (Schnorr) + SegWit v0 P2WSH (ECDSA) PSBT signing with cross-check validation |
 | `SignRawMessage` | Keccak256-hash-then-sign for fundsIn authorization |
 | `ProxyFederation` | Federation signature proxy (stub, not yet wired) |
 
@@ -257,11 +259,11 @@ cargo test -p utexo-bridge-enclave --features allow-seed-import
 cargo test -p utexo-bridge-parent
 ```
 
-### Test coverage (92 tests)
+### Test coverage (96 tests)
 
 | Category | Count | What it covers |
 |----------|-------|----------------|
-| Enclave unit tests | 58 | Key derivation (BIP-84 + BIP-86), mnemonic import, master fingerprint, framing, EIP-712 digest, cross-checks, consignment hash integrity, RGB deserialization |
+| Enclave unit tests | 62 | Key derivation (BIP-84 + BIP-86), mnemonic import, master fingerprint, taproot Schnorr signing, framing, EIP-712 digest, cross-checks, consignment hash integrity, RGB deserialization |
 | Enclave integration tests | 20 | Full wire-protocol: keygen, signing roundtrips, cross-check rejections, consignment hash via real TCP |
 | gRPC bridge tests | 7 | Full gRPC → Parent Adapter → mock enclave roundtrips, error paths, consignment passthrough verification |
 | RGB validator unit tests | 2 | Bad bytes rejection, unknown network rejection |
