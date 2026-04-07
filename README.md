@@ -50,7 +50,7 @@ Cryptographic signing service for the UTEXO RGB-EVM bridge, running inside an [A
 
 ### Key management
 
-- Generates a BIP-39 mnemonic from OS entropy, derives a 64-byte seed, stores it in `SecretBox` (zeroize-on-drop)
+- Generates a BIP-39 mnemonic from OS entropy (or imports a mnemonic phrase in test mode), derives a 64-byte seed, stores it in `SecretBox` (zeroize-on-drop)
 - EVM: derives `m/44'/60'/0'/0/0`, computes 20-byte address via `keccak256(uncompressed_pubkey[1..])[12..]`
 - BTC: derives `m/84'/0'/0'/0/0`, produces 33-byte compressed pubkey and BIP-32 xpub
 
@@ -80,7 +80,7 @@ Cryptographic signing service for the UTEXO RGB-EVM bridge, running inside an [A
 
 | Operation | Description |
 |-----------|-------------|
-| `InitializeKey` | Generate keys from OS entropy (or import raw seed in test mode) |
+| `InitializeKey` | Generate keys from OS entropy (or import raw seed / BIP-39 mnemonic in test mode) |
 | `GetPublicKey` | Retrieve EVM address, BTC compressed pubkey, and xpub |
 | `SignEvm` | EIP-712 typed data signing with cross-check validation |
 | `SignPsbt` | SegWit v0 P2WSH PSBT signing with cross-check validation |
@@ -149,8 +149,12 @@ RUST_LOG=debug cargo run -p utexo-bridge-parent
 Use the CLI tool directly:
 
 ```bash
-# Initialize keys
+# Initialize keys (generate new mnemonic)
 cargo run --bin utexo-bridge-parent-cli -- init
+
+# Initialize keys from a known mnemonic (requires allow-seed-import feature)
+cargo run --features allow-seed-import --bin utexo-bridge-parent-cli -- \
+  init-mnemonic "word1 word2 word3 ... word12"
 
 # Get public keys
 cargo run --bin utexo-bridge-parent-cli -- get-keys
@@ -264,7 +268,7 @@ cargo test -p utexo-bridge-parent
 |---------|-------------|
 | `vsock` | Enable vsock transport (production, Linux only) |
 | `rgb-validation` | In-enclave RGB consignment validation via rgbstd + Esplora |
-| `allow-seed-import` | Allow raw 64-byte seed import (testing only, never enable in production) |
+| `allow-seed-import` | Allow raw 64-byte seed or BIP-39 mnemonic import (testing only, never enable in production) |
 | `dev-mode` | Skip cross-check validation on signing requests (development only) |
 
 ## Protocol
