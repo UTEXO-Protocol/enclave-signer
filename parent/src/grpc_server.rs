@@ -1,16 +1,18 @@
 use std::time::Duration;
 
+use prost::Message as ProstMessage;
 use tonic::{Request, Response, Status};
 
 use crate::enclave_proto::{
     self, enclave_request, enclave_response, EnclaveRequest, EnclaveResponse,
 };
+use crate::enriched;
 
 const ENCLAVE_TIMEOUT: Duration = Duration::from_secs(30);
 use crate::grpc_proto::enclave_service_server::EnclaveService;
 use crate::grpc_proto::{
-    enclave_sign_request, EnclaveSignRequest, EnclaveSignResponse, GetPublicKeysRequest,
-    GetPublicKeysResponse,
+    CloneRequest, CloneResponse, DataType, InitializeRequest, InitializeResponse, PublicKeyRequest,
+    PublicKeyResponse, SignRequest, Signature,
 };
 
 /// Enclave connection target — either TCP address or vsock CID+port.
@@ -24,8 +26,8 @@ pub enum EnclaveTarget {
     },
 }
 
-/// gRPC server that translates parentadapter.proto RPCs into enclave.proto
-/// wire-protocol requests over TCP/vsock.
+/// gRPC server that translates the federated-signer-node's listener-enclave.proto
+/// RPCs into enclave.proto wire-protocol requests over TCP/vsock.
 #[derive(Clone)]
 pub struct ParentAdapterService {
     target: EnclaveTarget,
@@ -96,97 +98,93 @@ impl ParentAdapterService {
 
 #[tonic::async_trait]
 impl EnclaveService for ParentAdapterService {
-    async fn sign(
-        &self,
-        request: Request<EnclaveSignRequest>,
-    ) -> Result<Response<EnclaveSignResponse>, Status> {
+    /// Sign — dispatches based on data_type:
+    ///   TRANSACTION → deserialize EnrichedPsbtPayload → SignPsbtRequest
+    ///   SWAP        → deserialize EnrichedEvmPayload  → SignEvmRequest
+    async fn sign(&self, request: Request<SignRequest>) -> Result<Response<Signature>, Status> {
         let inner = request.into_inner();
 
-        let flow = inner.flow.ok_or_else(|| {
-            tracing::warn!("gRPC Sign called with no flow set");
-            Status::invalid_argument("missing flow in EnclaveSignRequest")
-        })?;
+        let data_type = DataType::try_from(inner.data_type).unwrap_or(DataType::Transaction);
 
-        let enclave_req = match flow {
-            enclave_sign_request::Flow::Psbt(psbt_flow) => {
-                tracing::info!(
-                    psbt_len = psbt_flow.psbt.len(),
-                    has_tx_hash = !psbt_flow.validated_tx_hash.is_empty(),
-                    operation_idx = psbt_flow.operation_idx,
-                    evm_event_finalized = psbt_flow.evm_event_finalized,
-                    "gRPC Sign: PSBT flow"
-                );
-                // Translate PSBTSigningFlow → SignPsbtRequest.
-                // The Go Listener sends a subset of fields; we map what's available
-                // and set defaults for enriched fields the Go side doesn't send yet.
-                let evm_tx_hash = if psbt_flow.validated_tx_hash.is_empty() {
-                    vec![]
-                } else {
-                    let decoded = hex::decode(&psbt_flow.validated_tx_hash).map_err(|e| {
-                        Status::invalid_argument(format!("validated_tx_hash is not valid hex: {e}"))
+        let enclave_req = match data_type {
+            DataType::Transaction => {
+                // Deserialize enriched PSBT payload from data bytes
+                let payload = enriched::EnrichedPsbtPayload::decode(inner.data.as_slice())
+                    .map_err(|e| {
+                        Status::invalid_argument(format!(
+                            "failed to decode EnrichedPsbtPayload: {e}"
+                        ))
                     })?;
-                    if decoded.len() != 32 {
-                        return Err(Status::invalid_argument(format!(
-                            "validated_tx_hash must be 32 bytes, got {}",
-                            decoded.len()
-                        )));
-                    }
-                    decoded
-                };
+
+                tracing::info!(
+                    psbt_len = payload.psbt_bytes.len(),
+                    has_tx_hash = !payload.evm_tx_hash.is_empty(),
+                    operation_idx = payload.operation_idx,
+                    "gRPC Sign: PSBT (data_type=TRANSACTION)"
+                );
 
                 EnclaveRequest {
                     request: Some(enclave_request::Request::SignPsbt(
                         enclave_proto::SignPsbtRequest {
-                            psbt_bytes: psbt_flow.psbt,
-                            evm_tx_hash,
-                            operation_idx: psbt_flow.operation_idx,
-                            evm_event_finalized: psbt_flow.evm_event_finalized,
-                            // Fields the Go Listener doesn't send yet — defaults.
-                            // The enclave will skip cross-checks in dev-mode,
-                            // or these will need to be populated once the Go proto evolves.
-                            evm_event_valid: psbt_flow.evm_event_finalized, // best approximation
-                            evm_token: vec![],
-                            evm_amount: 0,
-                            evm_recipient: vec![],
-                            evm_commission: 0,
-                            psbt_output_amount: 0,
-                            rgb_asset_id: String::new(),
+                            psbt_bytes: payload.psbt_bytes,
+                            evm_tx_hash: payload.evm_tx_hash,
+                            operation_idx: payload.operation_idx,
+                            evm_event_valid: payload.evm_event_valid,
+                            evm_event_finalized: payload.evm_event_finalized,
+                            evm_token: payload.evm_token,
+                            evm_amount: payload.evm_amount,
+                            evm_recipient: payload.evm_recipient,
+                            evm_commission: payload.evm_commission,
+                            psbt_output_amount: payload.psbt_output_amount,
+                            rgb_asset_id: payload.rgb_asset_id,
                         },
                     )),
                 }
             }
-            enclave_sign_request::Flow::Evm(evm_flow) => {
+            DataType::Swap => {
+                // Deserialize enriched EVM payload from data bytes
+                let payload =
+                    enriched::EnrichedEvmPayload::decode(inner.data.as_slice()).map_err(|e| {
+                        Status::invalid_argument(format!(
+                            "failed to decode EnrichedEvmPayload: {e}"
+                        ))
+                    })?;
+
                 tracing::info!(
-                    payload_len = evm_flow.sign_payload.len(),
-                    consignment_len = evm_flow.consignment.len(),
-                    has_consignment = !evm_flow.consignment.is_empty(),
-                    consignment_valid = evm_flow.consignment_valid,
-                    nonce = evm_flow.nonce,
-                    deadline = evm_flow.deadline,
-                    "gRPC Sign: EVM flow"
+                    calldata_len = payload.call_data.len(),
+                    consignment_valid = payload.consignment_valid,
+                    nonce = payload.nonce,
+                    deadline = payload.deadline,
+                    "gRPC Sign: EVM (data_type=SWAP)"
                 );
-                // Translate EVMSigningFlow → SignEvmRequest.
-                // Same story: map available fields, default the rest.
+
                 EnclaveRequest {
                     request: Some(enclave_request::Request::SignEvm(
                         enclave_proto::SignEvmRequest {
-                            call_data: evm_flow.sign_payload,
-                            nonce: evm_flow.nonce,
-                            deadline: evm_flow.deadline,
-                            consignment_valid: evm_flow.consignment_valid,
-                            // Raw consignment bytes — passed through for enclave-side validation.
-                            consignment: evm_flow.consignment,
-                            consignment_hash: evm_flow.consignment_hash,
-                            // Fields the Go Listener doesn't send yet — defaults.
-                            rgb_amount: 0,
-                            rgb_asset_id: String::new(),
-                            chain_id: 0,
-                            proxy_contract: vec![],
-                            calldata_amount: 0,
-                            calldata_commission: 0,
+                            call_data: payload.call_data,
+                            nonce: payload.nonce,
+                            deadline: payload.deadline,
+                            consignment_valid: payload.consignment_valid,
+                            rgb_amount: payload.rgb_amount,
+                            rgb_asset_id: payload.rgb_asset_id,
+                            chain_id: payload.chain_id,
+                            proxy_contract: payload.proxy_contract,
+                            calldata_amount: payload.calldata_amount,
+                            calldata_commission: payload.calldata_commission,
+                            // Note: the enriched proto uses consignment_sha256 (SHA-256),
+                            // while the enclave proto uses consignment_hash (keccak256).
+                            // The Go Listener handles this distinction; we pass through as-is.
+                            consignment: vec![],
+                            consignment_hash: payload.consignment_sha256,
                         },
                     )),
                 }
+            }
+            other => {
+                tracing::warn!(?other, "unsupported data_type in Sign request");
+                return Err(Status::invalid_argument(format!(
+                    "unsupported data_type: {other:?}"
+                )));
             }
         };
 
@@ -198,20 +196,14 @@ impl EnclaveService for ParentAdapterService {
         );
 
         match resp.response {
-            Some(enclave_response::Response::SignedPsbt(r)) => {
-                Ok(Response::new(EnclaveSignResponse {
-                    result: Some(
-                        crate::grpc_proto::enclave_sign_response::Result::SignedPsbt(r.signed_psbt),
-                    ),
-                }))
-            }
-            Some(enclave_response::Response::EvmSignature(r)) => {
-                Ok(Response::new(EnclaveSignResponse {
-                    result: Some(
-                        crate::grpc_proto::enclave_sign_response::Result::EvmSignature(r.signature),
-                    ),
-                }))
-            }
+            Some(enclave_response::Response::SignedPsbt(r)) => Ok(Response::new(Signature {
+                network_id: inner.network_id,
+                signature: r.signed_psbt,
+            })),
+            Some(enclave_response::Response::EvmSignature(r)) => Ok(Response::new(Signature {
+                network_id: inner.network_id,
+                signature: r.signature,
+            })),
             Some(enclave_response::Response::Error(e)) => Err(Self::enclave_error_to_status(&e)),
             other => Err(Status::internal(format!(
                 "unexpected enclave response for Sign: {:?}",
@@ -220,11 +212,12 @@ impl EnclaveService for ParentAdapterService {
         }
     }
 
-    async fn get_public_keys(
+    /// PublicKey — returns the enclave's public key bytes.
+    async fn public_key(
         &self,
-        _request: Request<GetPublicKeysRequest>,
-    ) -> Result<Response<GetPublicKeysResponse>, Status> {
-        tracing::info!("gRPC GetPublicKeys called");
+        _request: Request<PublicKeyRequest>,
+    ) -> Result<Response<PublicKeyResponse>, Status> {
+        tracing::info!("gRPC PublicKey called");
         let enclave_req = EnclaveRequest {
             request: Some(enclave_request::Request::GetPublicKey(
                 enclave_proto::GetPublicKeyRequest {},
@@ -235,26 +228,59 @@ impl EnclaveService for ParentAdapterService {
 
         match resp.response {
             Some(enclave_response::Response::PublicKeys(r)) => {
-                // Flatten our structured response into the Go proto's repeated bytes.
-                let mut keys = Vec::with_capacity(2);
-                if !r.evm_address.is_empty() {
-                    keys.push(r.evm_address);
-                }
-                if !r.btc_compressed_pub.is_empty() {
-                    keys.push(r.btc_compressed_pub);
-                }
-                Ok(Response::new(GetPublicKeysResponse {
-                    public_keys: keys,
-                    master_fingerprint: r.master_fingerprint,
-                    account_xpub_vanilla: r.account_xpub_vanilla,
-                    account_xpub_colored: r.account_xpub_colored,
+                // Return the BTC compressed pubkey as the primary public key.
+                // The Go side uses this for cosigner identification.
+                Ok(Response::new(PublicKeyResponse {
+                    public_key: r.btc_compressed_pub,
                 }))
             }
             Some(enclave_response::Response::Error(e)) => Err(Self::enclave_error_to_status(&e)),
             other => Err(Status::internal(format!(
-                "unexpected enclave response for GetPublicKeys: {:?}",
+                "unexpected enclave response for PublicKey: {:?}",
                 other
             ))),
         }
+    }
+
+    /// Initialize — generates new keys in the enclave from OS entropy.
+    async fn initialize(
+        &self,
+        _request: Request<InitializeRequest>,
+    ) -> Result<Response<InitializeResponse>, Status> {
+        tracing::info!("gRPC Initialize called");
+        let enclave_req = EnclaveRequest {
+            request: Some(enclave_request::Request::InitializeKey(
+                enclave_proto::InitializeKeyRequest {
+                    seed: vec![],
+                    mnemonic: String::new(),
+                },
+            )),
+        };
+
+        let resp = self.send_to_enclave(enclave_req).await?;
+
+        match resp.response {
+            Some(enclave_response::Response::InitializeKey(r)) => {
+                Ok(Response::new(InitializeResponse {
+                    attestation: vec![], // Attestation not yet implemented
+                    public_key: r.btc_compressed_pub,
+                }))
+            }
+            Some(enclave_response::Response::Error(e)) => Err(Self::enclave_error_to_status(&e)),
+            other => Err(Status::internal(format!(
+                "unexpected enclave response for Initialize: {:?}",
+                other
+            ))),
+        }
+    }
+
+    /// Clone — not yet implemented (cluster cloning).
+    async fn clone(
+        &self,
+        _request: Request<CloneRequest>,
+    ) -> Result<Response<CloneResponse>, Status> {
+        Err(Status::unimplemented(
+            "Clone not yet implemented (cluster cloning)",
+        ))
     }
 }

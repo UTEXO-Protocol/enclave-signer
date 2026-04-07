@@ -1,0 +1,38 @@
+// signer/signer.proto — shared messages for all Tricorn signing services (unchanged contract).
+// Used by bridge-orchestrator, orchestrator-listener, listener-enclave, and upstream BridgeSigner /
+// SignerNode / ConnectorBridge patterns.
+syntax = "proto3";
+
+package tricorn;
+
+enum DataType {
+  TRANSACTION = 0;
+  SIGNATURE = 1;
+  COMMISSION = 2;
+  SWAP = 3;
+  UNSPENDABLE = 4;
+  OWNER_MULTIPLE_SIGNATURE = 5;
+}
+
+message SignRequest {
+  uint32 network_id = 1;
+  DataType data_type = 2;
+  bytes data = 3;
+  repeated int64 inputs = 4;
+  optional string algorithm = 5;
+}
+
+message Signature {
+  uint32 network_id = 1;
+  bytes signature = 2;
+}
+
+message PublicKeyRequest {
+  uint32 network_id = 1;
+  DataType data_type = 2;
+  optional string algorithm = 3;
+}
+
+message PublicKeyResponse {
+  bytes public_key = 1;
+}

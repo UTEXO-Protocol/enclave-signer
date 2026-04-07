@@ -1,49 +1,43 @@
+// Listener -> Parent Adapter -> Enclave (vsock:5000). Proto: listener-enclave.proto (Go -> Rust).
+// Parent Adapter proxies TCP gRPC <-> vsock wire protocol. Enclave is passive (inbound only).
+// Sign/PublicKey reuse signer/signer.proto; Initialize/Clone are enclave lifecycle only.
 syntax = "proto3";
-package boostylabs.parentadapter;
 
+package tricorn;
+
+import "signer/signer.proto";
+
+// EnclaveService — Parent Adapter gRPC interface.
+// Go Listener connects here; Parent Adapter translates to enclave wire protocol.
 service EnclaveService {
-  // Sign federated payloads after Listener validation and enrichment.
-  rpc Sign(EnclaveSignRequest) returns (EnclaveSignResponse);
-  // Public keys for federation / Bridge (proxied from Enclave).
-  rpc GetPublicKeys(GetPublicKeysRequest) returns (GetPublicKeysResponse);
+  // Signs data inside TEE after cross-checking amounts.
+  // data field contains enriched payload from Listener (validation results).
+  rpc Sign(SignRequest) returns (Signature);
+
+  // Returns HD-derived public key for specific network.
+  rpc PublicKey(PublicKeyRequest) returns (PublicKeyResponse);
+
+  // Generates new HD seed (BIP-39) and derives all keys. First start only.
+  rpc Initialize(InitializeRequest) returns (InitializeResponse);
+
+  // Requests HD seed from peer enclave (cluster cloning with attestation).
+  rpc Clone(CloneRequest) returns (CloneResponse);
 }
 
-message EnclaveSignRequest {
-  oneof flow {
-    PSBTSigningFlow psbt = 1;
-    EVMSigningFlow evm = 2;
-  }
+message InitializeRequest {
+  string cloning_secret = 1;
 }
 
-// EVM→RGB: PSBT plus validation context from Listener.
-message PSBTSigningFlow {
-  bytes psbt = 1;
-  string validated_tx_hash = 2;
-  uint64 operation_idx = 3;
-  bool evm_event_finalized = 4;
+message InitializeResponse {
+  bytes attestation = 1;
+  bytes public_key = 2;
 }
 
-// RGB→EVM: digest / payload plus consignment validation from Listener.
-message EVMSigningFlow {
-  bytes sign_payload = 1;
-  bytes consignment_hash = 2;
-  bytes consignment = 3;
-  bool consignment_valid = 4;
-  uint64 nonce = 5;
-  uint64 deadline = 6;
+message CloneRequest {
+  bytes attestation = 1;
+  bytes encryption_pubkey = 2;
 }
 
-message EnclaveSignResponse {
-  oneof result {
-    bytes signed_psbt = 1;
-    bytes evm_signature = 2;
-  }
-}
-
-message GetPublicKeysRequest {}
-message GetPublicKeysResponse {
-  repeated bytes public_keys = 1;          // Legacy: [evm_address, btc_compressed_pub]
-  bytes master_fingerprint = 2;            // 4 bytes — BIP-32 master key fingerprint
-  string account_xpub_vanilla = 3;         // BIP-86 account xpub for vanilla (BTC) operations
-  string account_xpub_colored = 4;         // BIP-86 account xpub for colored (RGB) operations
+message CloneResponse {
+  bytes encrypted_seed = 1;
 }
