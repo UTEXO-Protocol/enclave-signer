@@ -32,6 +32,11 @@ enum Command {
         /// 128 hex characters = 64 bytes
         hex: String,
     },
+    /// Initialize from a BIP-39 mnemonic phrase (testing only)
+    InitMnemonic {
+        /// BIP-39 mnemonic words (e.g. "word1 word2 ... word12")
+        words: String,
+    },
     /// Get public keys from the enclave
     GetKeys,
     /// Sign an EVM transaction (EIP-712 typed data)
@@ -146,12 +151,22 @@ fn run_interactive(client: &EnclaveClient) {
                     Err(e) => eprintln!("Invalid hex: {}", e),
                 }
             }
+            "init-mnemonic" => {
+                if parts.len() < 2 {
+                    eprintln!("Usage: init-mnemonic <word1 word2 ... word12>");
+                    continue;
+                }
+                match client.initialize_keys_mnemonic(parts[1]) {
+                    Ok(r) => print_init_response(&r),
+                    Err(e) => eprintln!("Error: {}", e),
+                }
+            }
             "get-keys" => match client.get_public_keys() {
                 Ok(r) => print_keys_response(&r),
                 Err(e) => eprintln!("Error: {}", e),
             },
             "help" => {
-                println!("Commands: init, init-seed <hex>, get-keys, help, quit, exit");
+                println!("Commands: init, init-seed <hex>, init-mnemonic <words>, get-keys, help, quit, exit");
             }
             "quit" | "exit" => break,
             "" => {}
@@ -186,6 +201,13 @@ fn main() {
             },
             Err(e) => {
                 eprintln!("Invalid hex: {}", e);
+                process::exit(1);
+            }
+        },
+        Command::InitMnemonic { words } => match client.initialize_keys_mnemonic(&words) {
+            Ok(r) => print_init_response(&r),
+            Err(e) => {
+                eprintln!("Error: {}", e);
                 process::exit(1);
             }
         },

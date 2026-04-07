@@ -46,6 +46,14 @@ impl KeyManager {
         Ok((manager, mnemonic))
     }
 
+    /// Create a KeyManager from a BIP-39 mnemonic phrase string.
+    pub fn from_mnemonic(mnemonic_str: &str) -> Result<Self> {
+        let mnemonic = Mnemonic::from_str(mnemonic_str)
+            .map_err(|e| EnclaveError::InvalidKey(format!("invalid mnemonic: {}", e)))?;
+        let seed = mnemonic.to_seed("");
+        Self::from_seed(seed)
+    }
+
     /// Create a KeyManager from a raw 64-byte BIP-39 seed.
     ///
     /// CRITICAL: The seed is moved into SecretBox FIRST, before any derivation.
@@ -225,6 +233,20 @@ impl EnclaveState {
         Ok(mnemonic)
     }
 
+    /// Initialize from a BIP-39 mnemonic phrase (testing only, requires allow-seed-import feature).
+    pub fn initialize_from_mnemonic(&self, mnemonic_str: &str) -> Result<()> {
+        let mut guard = self
+            .inner
+            .lock()
+            .map_err(|e| EnclaveError::Internal(format!("lock poisoned: {}", e)))?;
+        if guard.is_some() {
+            return Err(EnclaveError::AlreadyInitialized);
+        }
+        let manager = KeyManager::from_mnemonic(mnemonic_str)?;
+        *guard = Some(manager);
+        Ok(())
+    }
+
     /// Initialize from a raw 64-byte seed (testing only, requires allow-seed-import feature).
     pub fn initialize_from_seed(&self, seed: [u8; 64]) -> Result<()> {
         let mut guard = self
@@ -297,6 +319,53 @@ mod tests {
         assert_eq!(km1.evm_address(), km2.evm_address());
         assert_eq!(km1.btc_compressed_pubkey(), km2.btc_compressed_pubkey());
         assert_eq!(km1.btc_xpub().to_string(), km2.btc_xpub().to_string());
+    }
+
+    #[test]
+    fn from_mnemonic_deterministic() {
+        let mnemonic = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
+        let km1 = KeyManager::from_mnemonic(mnemonic).unwrap();
+        let km2 = KeyManager::from_mnemonic(mnemonic).unwrap();
+
+        assert_eq!(km1.evm_address(), km2.evm_address());
+        assert_eq!(km1.btc_compressed_pubkey(), km2.btc_compressed_pubkey());
+        assert_eq!(km1.btc_xpub().to_string(), km2.btc_xpub().to_string());
+    }
+
+    #[test]
+    fn from_mnemonic_matches_seed_derivation() {
+        let mnemonic_str = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
+        let mnemonic = Mnemonic::from_str(mnemonic_str).unwrap();
+        let seed = mnemonic.to_seed("");
+
+        let km_mnemonic = KeyManager::from_mnemonic(mnemonic_str).unwrap();
+        let km_seed = KeyManager::from_seed(seed).unwrap();
+
+        assert_eq!(km_mnemonic.evm_address(), km_seed.evm_address());
+        assert_eq!(
+            km_mnemonic.btc_compressed_pubkey(),
+            km_seed.btc_compressed_pubkey()
+        );
+    }
+
+    #[test]
+    fn from_mnemonic_invalid() {
+        let result = KeyManager::from_mnemonic("not a valid mnemonic");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn initialize_from_mnemonic_then_double_init_fails() {
+        let state = EnclaveState::new();
+        state
+            .initialize_from_mnemonic(
+                "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about",
+            )
+            .unwrap();
+        let result = state.initialize_from_mnemonic(
+            "zoo zoo zoo zoo zoo zoo zoo zoo zoo zoo zoo wrong",
+        );
+        assert!(result.is_err());
     }
 
     #[test]

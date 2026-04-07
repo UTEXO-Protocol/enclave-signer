@@ -143,6 +143,7 @@ fn test_sign_evm_roundtrip() {
     let init_req = EnclaveRequest {
         request: Some(Request::InitializeKey(InitializeKeyRequest {
             seed: vec![],
+            mnemonic: String::new(),
         })),
     };
     let init_resp = common::send_request(port, &init_req);
@@ -190,6 +191,7 @@ fn test_sign_evm_rejects_invalid_consignment() {
     let init_req = EnclaveRequest {
         request: Some(Request::InitializeKey(InitializeKeyRequest {
             seed: vec![],
+            mnemonic: String::new(),
         })),
     };
     common::send_request(port, &init_req);
@@ -218,6 +220,7 @@ fn test_sign_evm_rejects_amount_mismatch() {
     let init_req = EnclaveRequest {
         request: Some(Request::InitializeKey(InitializeKeyRequest {
             seed: vec![],
+            mnemonic: String::new(),
         })),
     };
     common::send_request(port, &init_req);
@@ -246,6 +249,7 @@ fn test_sign_evm_rejects_calldata_extraction_mismatch() {
     let init_req = EnclaveRequest {
         request: Some(Request::InitializeKey(InitializeKeyRequest {
             seed: vec![],
+            mnemonic: String::new(),
         })),
     };
     common::send_request(port, &init_req);
@@ -282,6 +286,7 @@ fn test_sign_psbt_roundtrip() {
     let init_req = EnclaveRequest {
         request: Some(Request::InitializeKey(InitializeKeyRequest {
             seed: seed.to_vec(),
+            mnemonic: String::new(),
         })),
     };
     let init_resp = common::send_request(port, &init_req);
@@ -349,6 +354,7 @@ fn test_sign_psbt_rejects_unfinalized() {
     let init_req = EnclaveRequest {
         request: Some(Request::InitializeKey(InitializeKeyRequest {
             seed: vec![],
+            mnemonic: String::new(),
         })),
     };
     common::send_request(port, &init_req);
@@ -386,6 +392,7 @@ fn test_sign_psbt_rejects_amount_mismatch() {
     let init_req = EnclaveRequest {
         request: Some(Request::InitializeKey(InitializeKeyRequest {
             seed: vec![],
+            mnemonic: String::new(),
         })),
     };
     common::send_request(port, &init_req);
@@ -427,6 +434,7 @@ fn test_sign_vanilla_psbt_skips_evm_checks() {
     let init_req = EnclaveRequest {
         request: Some(Request::InitializeKey(InitializeKeyRequest {
             seed: vec![],
+            mnemonic: String::new(),
         })),
     };
     common::send_request(port, &init_req);
@@ -481,6 +489,7 @@ fn test_sign_evm_rejects_consignment_hash_mismatch() {
     let init_req = EnclaveRequest {
         request: Some(Request::InitializeKey(InitializeKeyRequest {
             seed: vec![],
+            mnemonic: String::new(),
         })),
     };
     common::send_request(port, &init_req);
@@ -517,6 +526,7 @@ fn test_sign_evm_rejects_consignment_without_hash() {
     let init_req = EnclaveRequest {
         request: Some(Request::InitializeKey(InitializeKeyRequest {
             seed: vec![],
+            mnemonic: String::new(),
         })),
     };
     common::send_request(port, &init_req);
@@ -548,6 +558,7 @@ fn test_sign_evm_accepts_valid_consignment_hash() {
     let init_req = EnclaveRequest {
         request: Some(Request::InitializeKey(InitializeKeyRequest {
             seed: vec![],
+            mnemonic: String::new(),
         })),
     };
     common::send_request(port, &init_req);
@@ -584,6 +595,7 @@ fn test_sign_raw_message_roundtrip() {
     let init_req = EnclaveRequest {
         request: Some(Request::InitializeKey(InitializeKeyRequest {
             seed: vec![],
+            mnemonic: String::new(),
         })),
     };
     let init_resp = common::send_request(port, &init_req);
@@ -631,6 +643,7 @@ fn test_sign_raw_message_empty() {
     let init_req = EnclaveRequest {
         request: Some(Request::InitializeKey(InitializeKeyRequest {
             seed: vec![],
+            mnemonic: String::new(),
         })),
     };
     common::send_request(port, &init_req);
@@ -655,6 +668,7 @@ fn test_sign_raw_message_deterministic() {
     let init_req = EnclaveRequest {
         request: Some(Request::InitializeKey(InitializeKeyRequest {
             seed: vec![],
+            mnemonic: String::new(),
         })),
     };
     common::send_request(port, &init_req);
@@ -697,6 +711,7 @@ fn test_sign_raw_message_different_messages_differ() {
     let init_req = EnclaveRequest {
         request: Some(Request::InitializeKey(InitializeKeyRequest {
             seed: vec![],
+            mnemonic: String::new(),
         })),
     };
     common::send_request(port, &init_req);
@@ -739,6 +754,7 @@ fn test_sign_raw_message_recoverable() {
     let init_req = EnclaveRequest {
         request: Some(Request::InitializeKey(InitializeKeyRequest {
             seed: seed.to_vec(),
+            mnemonic: String::new(),
         })),
     };
     let init_resp = common::send_request(port, &init_req);

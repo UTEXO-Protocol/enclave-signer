@@ -12,6 +12,7 @@ fn initialize_and_get_keys() {
     let req = EnclaveRequest {
         request: Some(Request::InitializeKey(InitializeKeyRequest {
             seed: vec![],
+            mnemonic: String::new(),
         })),
     };
     let resp = common::send_request(port, &req);
@@ -61,6 +62,7 @@ fn double_initialize_returns_error() {
     let req = EnclaveRequest {
         request: Some(Request::InitializeKey(InitializeKeyRequest {
             seed: vec![],
+            mnemonic: String::new(),
         })),
     };
 
@@ -112,6 +114,7 @@ fn deterministic_seed_import() {
     let req = EnclaveRequest {
         request: Some(Request::InitializeKey(InitializeKeyRequest {
             seed: seed.to_vec(),
+            mnemonic: String::new(),
         })),
     };
     let resp1 = common::send_request(port1, &req);
