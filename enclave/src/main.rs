@@ -10,8 +10,7 @@ fn main() {
 
     tracing::info!("starting utexo-bridge-enclave");
 
-    let bitcoin_network_str =
-        std::env::var("BITCOIN_NETWORK").unwrap_or_else(|_| "bitcoin".into());
+    let bitcoin_network_str = std::env::var("BITCOIN_NETWORK").unwrap_or_else(|_| "bitcoin".into());
     let bitcoin_network = match bitcoin_network_str.as_str() {
         "bitcoin" | "mainnet" => bitcoin::Network::Bitcoin,
         "testnet" | "testnet3" => bitcoin::Network::Testnet,

@@ -90,10 +90,9 @@ impl KeyManager {
         // Derive master key from seed.
         // Use the actual network so xpub serialization produces the correct prefix
         // (xpub for mainnet, tpub for testnet/signet/regtest).
-        let master =
-            Xpriv::new_master(network, seed_box.expose_secret()).map_err(|e| {
-                EnclaveError::InvalidKey(format!("master key derivation failed: {}", e))
-            })?;
+        let master = Xpriv::new_master(network, seed_box.expose_secret()).map_err(|e| {
+            EnclaveError::InvalidKey(format!("master key derivation failed: {}", e))
+        })?;
 
         let master_fingerprint = master.fingerprint(&secp);
 
@@ -507,10 +506,7 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(
-            hex::encode(km.master_fingerprint().to_bytes()),
-            "82fb42e4"
-        );
+        assert_eq!(hex::encode(km.master_fingerprint().to_bytes()), "82fb42e4");
         assert_eq!(
             km.account_xpub_vanilla().to_string(),
             "tpubDDCUjHgx7hFxgc9Zn4tGWyiBsxeGNXfA1oGBMykU7W5LNESKAxtVafP55gqfapRPM5f1wgUG7c9hqvzh548C8g5JTZSxCTCS2nxoBHPWGaH"
@@ -530,10 +526,7 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(
-            hex::encode(km.master_fingerprint().to_bytes()),
-            "9f249100"
-        );
+        assert_eq!(hex::encode(km.master_fingerprint().to_bytes()), "9f249100");
         assert_eq!(
             km.account_xpub_colored().to_string(),
             "tpubDCSLyZybm4TSDo3aeCK5Ke2iPQQFJ6vrKAuyEa4v5F1Xnoi5UtbEeMBCQ1RtwvEH43NKnzSp63aNQUrkB6sQL6FSW2wqZVWupAy1hV3fcFw"
@@ -563,8 +556,14 @@ mod tests {
             km_test.account_xpub_vanilla().to_string()
         );
         // Mainnet xpubs start with "xpub", testnet with "tpub"
-        assert!(km_main.account_xpub_vanilla().to_string().starts_with("xpub"));
-        assert!(km_test.account_xpub_vanilla().to_string().starts_with("tpub"));
+        assert!(km_main
+            .account_xpub_vanilla()
+            .to_string()
+            .starts_with("xpub"));
+        assert!(km_test
+            .account_xpub_vanilla()
+            .to_string()
+            .starts_with("tpub"));
     }
 
     #[test]
@@ -594,13 +593,19 @@ mod tests {
         let child1 = km
             .derive_btc_child(
                 AccountType::Vanilla,
-                &[ChildNumber::Normal { index: 0 }, ChildNumber::Normal { index: 0 }],
+                &[
+                    ChildNumber::Normal { index: 0 },
+                    ChildNumber::Normal { index: 0 },
+                ],
             )
             .unwrap();
         let child2 = km
             .derive_btc_child(
                 AccountType::Vanilla,
-                &[ChildNumber::Normal { index: 0 }, ChildNumber::Normal { index: 0 }],
+                &[
+                    ChildNumber::Normal { index: 0 },
+                    ChildNumber::Normal { index: 0 },
+                ],
             )
             .unwrap();
         assert_eq!(child1.secret_bytes(), child2.secret_bytes());
