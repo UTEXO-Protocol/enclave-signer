@@ -243,7 +243,12 @@ impl EnclaveService for ParentAdapterService {
                 if !r.btc_compressed_pub.is_empty() {
                     keys.push(r.btc_compressed_pub);
                 }
-                Ok(Response::new(GetPublicKeysResponse { public_keys: keys }))
+                Ok(Response::new(GetPublicKeysResponse {
+                    public_keys: keys,
+                    master_fingerprint: r.master_fingerprint,
+                    account_xpub_vanilla: r.account_xpub_vanilla,
+                    account_xpub_colored: r.account_xpub_colored,
+                }))
             }
             Some(enclave_response::Response::Error(e)) => Err(Self::enclave_error_to_status(&e)),
             other => Err(Status::internal(format!(

@@ -45,9 +45,12 @@ message InitializeKeyRequest {
 }
 
 message InitializeKeyResponse {
-  bytes evm_address         = 1;  // 20 bytes — keccak256(uncompressed_pubkey[1..])[12..]
-  bytes btc_compressed_pub  = 2;  // 33 bytes — compressed secp256k1 public key
-  string btc_xpub           = 3;  // Base58 xpub string (BIP-32 serialization)
+  bytes evm_address             = 1;  // 20 bytes — keccak256(uncompressed_pubkey[1..])[12..]
+  bytes btc_compressed_pub      = 2;  // 33 bytes — compressed secp256k1 public key (BIP-84 legacy, kept for compat)
+  string btc_xpub               = 3;  // Base58 xpub string (BIP-84 legacy, kept for compat)
+  bytes master_fingerprint      = 4;  // 4 bytes — BIP-32 master key fingerprint for cosigner identification
+  string account_xpub_vanilla   = 5;  // BIP-86 account xpub for vanilla (BTC) operations: m/86'/<coin>'/0'
+  string account_xpub_colored   = 6;  // BIP-86 account xpub for colored (RGB) operations: m/86'/827167'/0'
 }
 
 message GetPublicKeyRequest {
@@ -56,9 +59,12 @@ message GetPublicKeyRequest {
 }
 
 message PublicKeysResponse {
-  bytes evm_address         = 1;
-  bytes btc_compressed_pub  = 2;
-  string btc_xpub           = 3;
+  bytes evm_address             = 1;
+  bytes btc_compressed_pub      = 2;
+  string btc_xpub               = 3;
+  bytes master_fingerprint      = 4;
+  string account_xpub_vanilla   = 5;
+  string account_xpub_colored   = 6;
 }
 
 // === EVM Signing (RGB→EVM direction) ===

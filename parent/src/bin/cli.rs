@@ -108,15 +108,21 @@ enum Command {
 
 fn print_init_response(r: &InitializeKeyResponse) {
     println!("Keys initialized:");
-    println!("  EVM address: 0x{}", hex::encode(&r.evm_address));
-    println!("  BTC pubkey:  {}", hex::encode(&r.btc_compressed_pub));
-    println!("  BTC xpub:    {}", r.btc_xpub);
+    println!("  EVM address:         0x{}", hex::encode(&r.evm_address));
+    println!("  BTC pubkey:          {}", hex::encode(&r.btc_compressed_pub));
+    println!("  BTC xpub:            {}", r.btc_xpub);
+    println!("  Master fingerprint:  {}", hex::encode(&r.master_fingerprint));
+    println!("  Account xpub vanilla: {}", r.account_xpub_vanilla);
+    println!("  Account xpub colored: {}", r.account_xpub_colored);
 }
 
 fn print_keys_response(r: &PublicKeysResponse) {
-    println!("  EVM address: 0x{}", hex::encode(&r.evm_address));
-    println!("  BTC pubkey:  {}", hex::encode(&r.btc_compressed_pub));
-    println!("  BTC xpub:    {}", r.btc_xpub);
+    println!("  EVM address:         0x{}", hex::encode(&r.evm_address));
+    println!("  BTC pubkey:          {}", hex::encode(&r.btc_compressed_pub));
+    println!("  BTC xpub:            {}", r.btc_xpub);
+    println!("  Master fingerprint:  {}", hex::encode(&r.master_fingerprint));
+    println!("  Account xpub vanilla: {}", r.account_xpub_vanilla);
+    println!("  Account xpub colored: {}", r.account_xpub_colored);
 }
 
 fn run_interactive(client: &EnclaveClient) {
