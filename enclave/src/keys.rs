@@ -362,9 +362,8 @@ mod tests {
                 "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about",
             )
             .unwrap();
-        let result = state.initialize_from_mnemonic(
-            "zoo zoo zoo zoo zoo zoo zoo zoo zoo zoo zoo wrong",
-        );
+        let result =
+            state.initialize_from_mnemonic("zoo zoo zoo zoo zoo zoo zoo zoo zoo zoo zoo wrong");
         assert!(result.is_err());
     }
 

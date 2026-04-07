@@ -444,9 +444,9 @@ fn test_sign_vanilla_psbt_skips_evm_checks() {
     // but should pass in vanilla mode.
     let sign_req = EnclaveRequest {
         request: Some(Request::SignPsbt(SignPsbtRequest {
-            evm_tx_hash: vec![],     // empty = vanilla mode
+            evm_tx_hash: vec![], // empty = vanilla mode
             operation_idx: 0,
-            evm_event_valid: false,  // would fail in bridge mode
+            evm_event_valid: false, // would fail in bridge mode
             evm_event_finalized: false,
             evm_token: vec![],
             evm_amount: 0,
