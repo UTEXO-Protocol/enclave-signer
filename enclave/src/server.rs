@@ -138,7 +138,9 @@ fn handle_initialize(state: &EnclaveState, req: InitializeKeyRequest) -> Result<
     let keys = state.get_keys()?;
     tracing::info!(
         evm_address = %hex::encode(keys.evm_address),
-        btc_xpub = %keys.btc_xpub,
+        master_fingerprint = %hex::encode(keys.master_fingerprint),
+        account_xpub_vanilla = %keys.account_xpub_vanilla,
+        account_xpub_colored = %keys.account_xpub_colored,
         "keys initialized"
     );
     Ok(EnclaveResponse {
@@ -146,6 +148,9 @@ fn handle_initialize(state: &EnclaveState, req: InitializeKeyRequest) -> Result<
             evm_address: keys.evm_address.to_vec(),
             btc_compressed_pub: keys.btc_compressed_pubkey.to_vec(),
             btc_xpub: keys.btc_xpub,
+            master_fingerprint: keys.master_fingerprint.to_vec(),
+            account_xpub_vanilla: keys.account_xpub_vanilla,
+            account_xpub_colored: keys.account_xpub_colored,
         })),
     })
 }
@@ -164,6 +169,9 @@ fn handle_get_public_key(
             evm_address: keys.evm_address.to_vec(),
             btc_compressed_pub: keys.btc_compressed_pubkey.to_vec(),
             btc_xpub: keys.btc_xpub,
+            master_fingerprint: keys.master_fingerprint.to_vec(),
+            account_xpub_vanilla: keys.account_xpub_vanilla,
+            account_xpub_colored: keys.account_xpub_colored,
         })),
     })
 }

@@ -42,5 +42,8 @@ message EnclaveSignResponse {
 
 message GetPublicKeysRequest {}
 message GetPublicKeysResponse {
-  repeated bytes public_keys = 1;
+  repeated bytes public_keys = 1;          // Legacy: [evm_address, btc_compressed_pub]
+  bytes master_fingerprint = 2;            // 4 bytes — BIP-32 master key fingerprint
+  string account_xpub_vanilla = 3;         // BIP-86 account xpub for vanilla (BTC) operations
+  string account_xpub_colored = 4;         // BIP-86 account xpub for colored (RGB) operations
 }

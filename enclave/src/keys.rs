@@ -2,7 +2,7 @@ use std::str::FromStr;
 use std::sync::Mutex;
 
 use bip39::Mnemonic;
-use bitcoin::bip32::{DerivationPath, Xpriv, Xpub};
+use bitcoin::bip32::{ChildNumber, DerivationPath, Fingerprint, Xpriv, Xpub};
 use bitcoin::hashes::Hash;
 use bitcoin::psbt::Psbt;
 use bitcoin::secp256k1::{Message, PublicKey, Secp256k1, SecretKey};
@@ -15,11 +15,24 @@ use zeroize::Zeroize;
 
 use crate::error::{EnclaveError, Result};
 
+/// RGB coin type for colored (RGB asset) operations.
+const RGB_COIN_TYPE: u32 = 827167;
+
 /// Public key info extracted from KeyManager for responses.
 pub struct KeyInfo {
     pub evm_address: [u8; 20],
     pub btc_compressed_pubkey: [u8; 33],
     pub btc_xpub: String,
+    pub master_fingerprint: [u8; 4],
+    pub account_xpub_vanilla: String,
+    pub account_xpub_colored: String,
+}
+
+/// Which BIP-86 account to derive from.
+#[derive(Debug, Clone, Copy)]
+pub enum AccountType {
+    Vanilla,
+    Colored,
 }
 
 /// Holds HD wallet keys in memory. Secrets are wrapped in SecretBox for
@@ -31,27 +44,35 @@ pub struct KeyManager {
     evm_address: [u8; 20],
     btc_compressed_pubkey: [u8; 33],
     btc_xpub: Xpub,
+    // BIP-86 taproot account keys
+    master_fingerprint: Fingerprint,
+    account_xpriv_vanilla: Xpriv,
+    account_xpub_vanilla: Xpub,
+    account_xpriv_colored: Xpriv,
+    account_xpub_colored: Xpub,
+    // Coin type used for vanilla derivation (0 = mainnet, 1 = testnet)
+    vanilla_coin_type: u32,
 }
 
 impl KeyManager {
     /// Generate a new KeyManager from 256-bit entropy.
     /// Returns both the manager and the BIP-39 mnemonic (caller logs once, then discards).
-    pub fn generate(entropy: &mut [u8; 32]) -> Result<(Self, Mnemonic)> {
+    pub fn generate(entropy: &mut [u8; 32], network: Network) -> Result<(Self, Mnemonic)> {
         let mnemonic = Mnemonic::from_entropy(entropy)
             .map_err(|e| EnclaveError::InvalidKey(format!("mnemonic generation failed: {}", e)))?;
         entropy.zeroize();
 
         let seed = mnemonic.to_seed("");
-        let manager = Self::from_seed(seed)?;
+        let manager = Self::from_seed(seed, network)?;
         Ok((manager, mnemonic))
     }
 
     /// Create a KeyManager from a BIP-39 mnemonic phrase string.
-    pub fn from_mnemonic(mnemonic_str: &str) -> Result<Self> {
+    pub fn from_mnemonic(mnemonic_str: &str, network: Network) -> Result<Self> {
         let mnemonic = Mnemonic::from_str(mnemonic_str)
             .map_err(|e| EnclaveError::InvalidKey(format!("invalid mnemonic: {}", e)))?;
         let seed = mnemonic.to_seed("");
-        Self::from_seed(seed)
+        Self::from_seed(seed, network)
     }
 
     /// Create a KeyManager from a raw 64-byte BIP-39 seed.
@@ -59,18 +80,21 @@ impl KeyManager {
     /// CRITICAL: The seed is moved into SecretBox FIRST, before any derivation.
     /// Do NOT zeroize the local seed before boxing — the stored seed would be
     /// all zeros and cloning would break later.
-    pub fn from_seed(mut seed: [u8; 64]) -> Result<Self> {
+    pub fn from_seed(mut seed: [u8; 64], network: Network) -> Result<Self> {
         // Box the seed FIRST
         let seed_box = SecretBox::new(Box::new(seed));
         seed.zeroize();
 
         let secp = Secp256k1::new();
 
-        // Derive master key from seed
-        let master =
-            Xpriv::new_master(Network::Bitcoin, seed_box.expose_secret()).map_err(|e| {
-                EnclaveError::InvalidKey(format!("master key derivation failed: {}", e))
-            })?;
+        // Derive master key from seed.
+        // Use the actual network so xpub serialization produces the correct prefix
+        // (xpub for mainnet, tpub for testnet/signet/regtest).
+        let master = Xpriv::new_master(network, seed_box.expose_secret()).map_err(|e| {
+            EnclaveError::InvalidKey(format!("master key derivation failed: {}", e))
+        })?;
+
+        let master_fingerprint = master.fingerprint(&secp);
 
         // === EVM: m/44'/60'/0'/0/0 ===
         let evm_path = DerivationPath::from_str("m/44'/60'/0'/0/0")
@@ -90,7 +114,7 @@ impl KeyManager {
         let mut evm_address = [0u8; 20];
         evm_address.copy_from_slice(&hash[12..32]);
 
-        // === BTC: m/84'/0'/0'/0/0 ===
+        // === BTC Legacy: m/84'/0'/0'/0/0 (kept for backward compatibility) ===
         let btc_path = DerivationPath::from_str("m/84'/0'/0'/0/0")
             .map_err(|e| EnclaveError::InvalidKey(format!("invalid BTC path: {}", e)))?;
         let btc_xpriv = master
@@ -107,6 +131,35 @@ impl KeyManager {
 
         let btc_xpub = Xpub::from_priv(&secp, &btc_xpriv);
 
+        // === BIP-86 Taproot accounts ===
+        // Vanilla coin type: 0 for mainnet, 1 for testnet/signet/regtest
+        let vanilla_coin_type = match network {
+            Network::Bitcoin => 0,
+            _ => 1,
+        };
+
+        // Vanilla: m/86'/<coin_type>'/0'
+        let vanilla_path = DerivationPath::from(vec![
+            ChildNumber::from_hardened_idx(86).unwrap(),
+            ChildNumber::from_hardened_idx(vanilla_coin_type).unwrap(),
+            ChildNumber::from_hardened_idx(0).unwrap(),
+        ]);
+        let account_xpriv_vanilla = master.derive_priv(&secp, &vanilla_path).map_err(|e| {
+            EnclaveError::InvalidKey(format!("BIP-86 vanilla derivation failed: {}", e))
+        })?;
+        let account_xpub_vanilla = Xpub::from_priv(&secp, &account_xpriv_vanilla);
+
+        // Colored: m/86'/827167'/0'
+        let colored_path = DerivationPath::from(vec![
+            ChildNumber::from_hardened_idx(86).unwrap(),
+            ChildNumber::from_hardened_idx(RGB_COIN_TYPE).unwrap(),
+            ChildNumber::from_hardened_idx(0).unwrap(),
+        ]);
+        let account_xpriv_colored = master.derive_priv(&secp, &colored_path).map_err(|e| {
+            EnclaveError::InvalidKey(format!("BIP-86 colored derivation failed: {}", e))
+        })?;
+        let account_xpub_colored = Xpub::from_priv(&secp, &account_xpriv_colored);
+
         Ok(Self {
             seed: seed_box,
             evm_secret,
@@ -114,6 +167,12 @@ impl KeyManager {
             evm_address,
             btc_compressed_pubkey,
             btc_xpub,
+            master_fingerprint,
+            account_xpriv_vanilla,
+            account_xpub_vanilla,
+            account_xpriv_colored,
+            account_xpub_colored,
+            vanilla_coin_type,
         })
     }
 
@@ -129,8 +188,70 @@ impl KeyManager {
         &self.btc_xpub
     }
 
+    pub fn master_fingerprint(&self) -> &Fingerprint {
+        &self.master_fingerprint
+    }
+
+    pub fn account_xpub_vanilla(&self) -> &Xpub {
+        &self.account_xpub_vanilla
+    }
+
+    pub fn account_xpub_colored(&self) -> &Xpub {
+        &self.account_xpub_colored
+    }
+
     pub fn expose_seed(&self) -> &[u8; 64] {
         self.seed.expose_secret()
+    }
+
+    /// Derive a child secret key from one of the BIP-86 account xprivs.
+    /// `child_path` is the relative path beyond the account level (e.g., [0, 7] for /0/7).
+    pub fn derive_btc_child(
+        &self,
+        account: AccountType,
+        child_path: &[ChildNumber],
+    ) -> Result<SecretKey> {
+        let secp = Secp256k1::new();
+        let account_xpriv = match account {
+            AccountType::Vanilla => &self.account_xpriv_vanilla,
+            AccountType::Colored => &self.account_xpriv_colored,
+        };
+        let path = DerivationPath::from(child_path.to_vec());
+        let child_xpriv = account_xpriv
+            .derive_priv(&secp, &path)
+            .map_err(|e| EnclaveError::InvalidKey(format!("child derivation failed: {}", e)))?;
+        Ok(child_xpriv.private_key)
+    }
+
+    /// Determine which account type a full derivation path belongs to,
+    /// and return the relative child path beyond the account level.
+    /// E.g., m/86'/1'/0'/0/7 → (Vanilla, [0, 7]) on testnet.
+    pub fn resolve_account_and_child_path(
+        &self,
+        full_path: &DerivationPath,
+    ) -> Option<(AccountType, Vec<ChildNumber>)> {
+        let steps: Vec<ChildNumber> = full_path.into_iter().cloned().collect();
+        // Expect at least: 86' / coin_type' / 0' / ...
+        if steps.len() < 3 {
+            return None;
+        }
+        if steps[0] != ChildNumber::from_hardened_idx(86).unwrap() {
+            return None;
+        }
+        if steps[2] != ChildNumber::from_hardened_idx(0).unwrap() {
+            return None;
+        }
+        let coin_type = steps[1];
+        let account_type =
+            if coin_type == ChildNumber::from_hardened_idx(self.vanilla_coin_type).unwrap() {
+                AccountType::Vanilla
+            } else if coin_type == ChildNumber::from_hardened_idx(RGB_COIN_TYPE).unwrap() {
+                AccountType::Colored
+            } else {
+                return None;
+            };
+        let child_path = steps[3..].to_vec();
+        Some((account_type, child_path))
     }
 
     /// Sign a 32-byte message hash with the EVM secp256k1 key.
@@ -204,19 +325,25 @@ impl KeyManager {
 /// Thread-safe enclave state holding an optional KeyManager behind a Mutex.
 pub struct EnclaveState {
     inner: Mutex<Option<KeyManager>>,
+    network: Network,
 }
 
 impl Default for EnclaveState {
     fn default() -> Self {
-        Self::new()
+        Self::new(Network::Bitcoin)
     }
 }
 
 impl EnclaveState {
-    pub fn new() -> Self {
+    pub fn new(network: Network) -> Self {
         Self {
             inner: Mutex::new(None),
+            network,
         }
+    }
+
+    pub fn network(&self) -> Network {
+        self.network
     }
 
     /// Initialize from OS entropy. Returns the mnemonic for one-time logging.
@@ -228,7 +355,7 @@ impl EnclaveState {
         if guard.is_some() {
             return Err(EnclaveError::AlreadyInitialized);
         }
-        let (manager, mnemonic) = KeyManager::generate(entropy)?;
+        let (manager, mnemonic) = KeyManager::generate(entropy, self.network)?;
         *guard = Some(manager);
         Ok(mnemonic)
     }
@@ -242,7 +369,7 @@ impl EnclaveState {
         if guard.is_some() {
             return Err(EnclaveError::AlreadyInitialized);
         }
-        let manager = KeyManager::from_mnemonic(mnemonic_str)?;
+        let manager = KeyManager::from_mnemonic(mnemonic_str, self.network)?;
         *guard = Some(manager);
         Ok(())
     }
@@ -256,7 +383,7 @@ impl EnclaveState {
         if guard.is_some() {
             return Err(EnclaveError::AlreadyInitialized);
         }
-        let manager = KeyManager::from_seed(seed)?;
+        let manager = KeyManager::from_seed(seed, self.network)?;
         *guard = Some(manager);
         Ok(())
     }
@@ -272,6 +399,9 @@ impl EnclaveState {
                 evm_address: *km.evm_address(),
                 btc_compressed_pubkey: *km.btc_compressed_pubkey(),
                 btc_xpub: km.btc_xpub().to_string(),
+                master_fingerprint: km.master_fingerprint().to_bytes(),
+                account_xpub_vanilla: km.account_xpub_vanilla().to_string(),
+                account_xpub_colored: km.account_xpub_colored().to_string(),
             }),
             None => Err(EnclaveError::KeyNotInitialized),
         }
@@ -313,8 +443,8 @@ mod tests {
     #[test]
     fn deterministic_derivation() {
         let seed = [42u8; 64];
-        let km1 = KeyManager::from_seed(seed).unwrap();
-        let km2 = KeyManager::from_seed(seed).unwrap();
+        let km1 = KeyManager::from_seed(seed, Network::Bitcoin).unwrap();
+        let km2 = KeyManager::from_seed(seed, Network::Bitcoin).unwrap();
 
         assert_eq!(km1.evm_address(), km2.evm_address());
         assert_eq!(km1.btc_compressed_pubkey(), km2.btc_compressed_pubkey());
@@ -324,8 +454,8 @@ mod tests {
     #[test]
     fn from_mnemonic_deterministic() {
         let mnemonic = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
-        let km1 = KeyManager::from_mnemonic(mnemonic).unwrap();
-        let km2 = KeyManager::from_mnemonic(mnemonic).unwrap();
+        let km1 = KeyManager::from_mnemonic(mnemonic, Network::Bitcoin).unwrap();
+        let km2 = KeyManager::from_mnemonic(mnemonic, Network::Bitcoin).unwrap();
 
         assert_eq!(km1.evm_address(), km2.evm_address());
         assert_eq!(km1.btc_compressed_pubkey(), km2.btc_compressed_pubkey());
@@ -338,8 +468,8 @@ mod tests {
         let mnemonic = Mnemonic::from_str(mnemonic_str).unwrap();
         let seed = mnemonic.to_seed("");
 
-        let km_mnemonic = KeyManager::from_mnemonic(mnemonic_str).unwrap();
-        let km_seed = KeyManager::from_seed(seed).unwrap();
+        let km_mnemonic = KeyManager::from_mnemonic(mnemonic_str, Network::Bitcoin).unwrap();
+        let km_seed = KeyManager::from_seed(seed, Network::Bitcoin).unwrap();
 
         assert_eq!(km_mnemonic.evm_address(), km_seed.evm_address());
         assert_eq!(
@@ -350,13 +480,13 @@ mod tests {
 
     #[test]
     fn from_mnemonic_invalid() {
-        let result = KeyManager::from_mnemonic("not a valid mnemonic");
+        let result = KeyManager::from_mnemonic("not a valid mnemonic", Network::Bitcoin);
         assert!(result.is_err());
     }
 
     #[test]
     fn initialize_from_mnemonic_then_double_init_fails() {
-        let state = EnclaveState::new();
+        let state = EnclaveState::new(Network::Bitcoin);
         state
             .initialize_from_mnemonic(
                 "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about",
@@ -368,11 +498,125 @@ mod tests {
     }
 
     #[test]
+    fn bip86_testnet_derivation_matches_known_mnemonic() {
+        // Known test vector from colleague's multisig setup
+        let km = KeyManager::from_mnemonic(
+            "rail item marble one share venture artist brisk useful upset bus amused",
+            Network::Testnet,
+        )
+        .unwrap();
+
+        assert_eq!(hex::encode(km.master_fingerprint().to_bytes()), "82fb42e4");
+        assert_eq!(
+            km.account_xpub_vanilla().to_string(),
+            "tpubDDCUjHgx7hFxgc9Zn4tGWyiBsxeGNXfA1oGBMykU7W5LNESKAxtVafP55gqfapRPM5f1wgUG7c9hqvzh548C8g5JTZSxCTCS2nxoBHPWGaH"
+        );
+        assert_eq!(
+            km.account_xpub_colored().to_string(),
+            "tpubDDgKC4Kea1GDCQBdR7i2SBycbDhydEHqqDguZZze7A6rLGqRD5YAYD29JAHydzGAmkcoHHdkjazd54zBEr4KPWQftyN3LiyGxGKw7CM38HR"
+        );
+    }
+
+    #[test]
+    fn bip86_second_known_mnemonic() {
+        // Second cosigner from the same multisig setup
+        let km = KeyManager::from_mnemonic(
+            "season pave name banana aspect inject book roast clown young hill unhappy",
+            Network::Testnet,
+        )
+        .unwrap();
+
+        assert_eq!(hex::encode(km.master_fingerprint().to_bytes()), "9f249100");
+        assert_eq!(
+            km.account_xpub_colored().to_string(),
+            "tpubDCSLyZybm4TSDo3aeCK5Ke2iPQQFJ6vrKAuyEa4v5F1Xnoi5UtbEeMBCQ1RtwvEH43NKnzSp63aNQUrkB6sQL6FSW2wqZVWupAy1hV3fcFw"
+        );
+    }
+
+    #[test]
+    fn bip86_vanilla_and_colored_xpubs_differ() {
+        let km = KeyManager::from_seed([42u8; 64], Network::Testnet).unwrap();
+        assert_ne!(
+            km.account_xpub_vanilla().to_string(),
+            km.account_xpub_colored().to_string()
+        );
+    }
+
+    #[test]
+    fn bip86_mainnet_vs_testnet_vanilla_differ() {
+        let seed = [42u8; 64];
+        let km_main = KeyManager::from_seed(seed, Network::Bitcoin).unwrap();
+        let km_test = KeyManager::from_seed(seed, Network::Testnet).unwrap();
+
+        // Same master fingerprint (derived from same seed)
+        assert_eq!(km_main.master_fingerprint(), km_test.master_fingerprint());
+        // Different vanilla xpubs (different coin type + different network prefix)
+        assert_ne!(
+            km_main.account_xpub_vanilla().to_string(),
+            km_test.account_xpub_vanilla().to_string()
+        );
+        // Mainnet xpubs start with "xpub", testnet with "tpub"
+        assert!(km_main
+            .account_xpub_vanilla()
+            .to_string()
+            .starts_with("xpub"));
+        assert!(km_test
+            .account_xpub_vanilla()
+            .to_string()
+            .starts_with("tpub"));
+    }
+
+    #[test]
+    fn resolve_account_and_child_path_works() {
+        let km = KeyManager::from_seed([42u8; 64], Network::Testnet).unwrap();
+
+        // m/86'/1'/0'/0/7 → Vanilla, [0, 7]
+        let path = DerivationPath::from_str("m/86'/1'/0'/0/7").unwrap();
+        let (account, child) = km.resolve_account_and_child_path(&path).unwrap();
+        assert!(matches!(account, AccountType::Vanilla));
+        assert_eq!(child.len(), 2);
+
+        // m/86'/827167'/0'/0/3 → Colored, [0, 3]
+        let path = DerivationPath::from_str("m/86'/827167'/0'/0/3").unwrap();
+        let (account, child) = km.resolve_account_and_child_path(&path).unwrap();
+        assert!(matches!(account, AccountType::Colored));
+        assert_eq!(child.len(), 2);
+
+        // m/84'/0'/0'/0/0 → None (wrong purpose)
+        let path = DerivationPath::from_str("m/84'/0'/0'/0/0").unwrap();
+        assert!(km.resolve_account_and_child_path(&path).is_none());
+    }
+
+    #[test]
+    fn derive_btc_child_deterministic() {
+        let km = KeyManager::from_seed([42u8; 64], Network::Testnet).unwrap();
+        let child1 = km
+            .derive_btc_child(
+                AccountType::Vanilla,
+                &[
+                    ChildNumber::Normal { index: 0 },
+                    ChildNumber::Normal { index: 0 },
+                ],
+            )
+            .unwrap();
+        let child2 = km
+            .derive_btc_child(
+                AccountType::Vanilla,
+                &[
+                    ChildNumber::Normal { index: 0 },
+                    ChildNumber::Normal { index: 0 },
+                ],
+            )
+            .unwrap();
+        assert_eq!(child1.secret_bytes(), child2.secret_bytes());
+    }
+
+    #[test]
     fn generate_different_keys() {
         let mut entropy1 = [1u8; 32];
         let mut entropy2 = [2u8; 32];
-        let (km1, _) = KeyManager::generate(&mut entropy1).unwrap();
-        let (km2, _) = KeyManager::generate(&mut entropy2).unwrap();
+        let (km1, _) = KeyManager::generate(&mut entropy1, Network::Bitcoin).unwrap();
+        let (km2, _) = KeyManager::generate(&mut entropy2, Network::Bitcoin).unwrap();
 
         assert_ne!(km1.evm_address(), km2.evm_address());
     }
@@ -380,7 +624,7 @@ mod tests {
     #[test]
     fn key_formats() {
         let seed = [42u8; 64];
-        let km = KeyManager::from_seed(seed).unwrap();
+        let km = KeyManager::from_seed(seed, Network::Bitcoin).unwrap();
 
         assert_eq!(km.evm_address().len(), 20);
         assert_eq!(km.btc_compressed_pubkey().len(), 33);
@@ -397,13 +641,13 @@ mod tests {
     #[test]
     fn seed_preserved_for_cloning() {
         let original_seed = [99u8; 64];
-        let km = KeyManager::from_seed(original_seed).unwrap();
+        let km = KeyManager::from_seed(original_seed, Network::Bitcoin).unwrap();
         assert_eq!(km.expose_seed(), &original_seed);
     }
 
     #[test]
     fn double_initialization_error() {
-        let state = EnclaveState::new();
+        let state = EnclaveState::new(Network::Bitcoin);
         let mut entropy1 = [1u8; 32];
         let mut entropy2 = [2u8; 32];
 
@@ -414,7 +658,7 @@ mod tests {
 
     #[test]
     fn get_keys_before_init_error() {
-        let state = EnclaveState::new();
+        let state = EnclaveState::new(Network::Bitcoin);
         let result = state.get_keys();
         assert!(result.is_err());
     }
@@ -422,7 +666,7 @@ mod tests {
     #[test]
     fn test_sign_evm_produces_65_bytes() {
         let seed = [0x42u8; 64];
-        let km = KeyManager::from_seed(seed).unwrap();
+        let km = KeyManager::from_seed(seed, Network::Bitcoin).unwrap();
         let hash = [0xABu8; 32];
         let sig = km.sign_evm(&hash).unwrap();
         assert_eq!(sig.len(), 65);
@@ -433,7 +677,7 @@ mod tests {
     #[test]
     fn test_sign_evm_deterministic() {
         let seed = [0x42u8; 64];
-        let km = KeyManager::from_seed(seed).unwrap();
+        let km = KeyManager::from_seed(seed, Network::Bitcoin).unwrap();
         let hash = [0xABu8; 32];
         let sig1 = km.sign_evm(&hash).unwrap();
         let sig2 = km.sign_evm(&hash).unwrap();
@@ -445,7 +689,7 @@ mod tests {
         use k256::ecdsa::{RecoveryId, Signature as K256Signature, VerifyingKey};
 
         let seed = [0x42u8; 64];
-        let km = KeyManager::from_seed(seed).unwrap();
+        let km = KeyManager::from_seed(seed, Network::Bitcoin).unwrap();
         let hash = [0xABu8; 32];
         let sig_bytes = km.sign_evm(&hash).unwrap();
 
@@ -522,7 +766,7 @@ mod tests {
     #[test]
     fn test_sign_psbt_one_input() {
         let seed = [0x42u8; 64];
-        let km = KeyManager::from_seed(seed).unwrap();
+        let km = KeyManager::from_seed(seed, Network::Bitcoin).unwrap();
 
         let our_pubkey = bitcoin::PublicKey::from_slice(km.btc_compressed_pubkey()).unwrap();
         let psbt_bytes = build_test_multisig_psbt(&our_pubkey);
@@ -537,7 +781,7 @@ mod tests {
     #[test]
     fn test_sign_psbt_skip_already_signed() {
         let seed = [0x42u8; 64];
-        let km = KeyManager::from_seed(seed).unwrap();
+        let km = KeyManager::from_seed(seed, Network::Bitcoin).unwrap();
 
         let our_pubkey = bitcoin::PublicKey::from_slice(km.btc_compressed_pubkey()).unwrap();
         let psbt_bytes = build_test_multisig_psbt(&our_pubkey);
@@ -554,7 +798,7 @@ mod tests {
     fn test_sign_psbt_invalid_bytes() {
         let mut entropy = [0u8; 32];
         getrandom::fill(&mut entropy).unwrap();
-        let (km, _mnemonic) = KeyManager::generate(&mut entropy).unwrap();
+        let (km, _mnemonic) = KeyManager::generate(&mut entropy, Network::Bitcoin).unwrap();
 
         let result = km.sign_psbt(&[0xFF, 0xFF, 0xFF]);
         assert!(result.is_err());
@@ -564,7 +808,7 @@ mod tests {
     fn test_sign_psbt_no_matching_inputs() {
         let mut entropy = [0u8; 32];
         getrandom::fill(&mut entropy).unwrap();
-        let (km, _mnemonic) = KeyManager::generate(&mut entropy).unwrap();
+        let (km, _mnemonic) = KeyManager::generate(&mut entropy, Network::Bitcoin).unwrap();
 
         let secp = Secp256k1::new();
         let other_sk = SecretKey::from_slice(&[0x99; 32]).unwrap();

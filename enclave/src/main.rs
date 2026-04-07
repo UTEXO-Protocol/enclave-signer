@@ -10,7 +10,20 @@ fn main() {
 
     tracing::info!("starting utexo-bridge-enclave");
 
-    let state = EnclaveState::new();
+    let bitcoin_network_str = std::env::var("BITCOIN_NETWORK").unwrap_or_else(|_| "bitcoin".into());
+    let bitcoin_network = match bitcoin_network_str.as_str() {
+        "bitcoin" | "mainnet" => bitcoin::Network::Bitcoin,
+        "testnet" | "testnet3" => bitcoin::Network::Testnet,
+        "signet" => bitcoin::Network::Signet,
+        "regtest" => bitcoin::Network::Regtest,
+        other => {
+            tracing::warn!("unknown BITCOIN_NETWORK '{other}', defaulting to mainnet");
+            bitcoin::Network::Bitcoin
+        }
+    };
+    tracing::info!(%bitcoin_network_str, "bitcoin network configured");
+
+    let state = EnclaveState::new(bitcoin_network);
 
     // Start vsock-to-TCP forwarder for Esplora access (production only).
     // The host must run: vsock-proxy <ESPLORA_VSOCK_PORT> <esplora-host> <esplora-port>
