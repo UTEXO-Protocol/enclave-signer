@@ -533,7 +533,7 @@ IwLz3/Y=
             return Err(EnclaveError::Attestation("failed to initialize NSM".into()));
         }
 
-        let mut read = |index: u16| -> Result<[u8; 48]> {
+        let read = |index: u16| -> Result<[u8; 48]> {
             let response = nsm_process_request(fd, Request::DescribePCR { index });
             match response {
                 Response::DescribePCR { lock: _, data } => data
