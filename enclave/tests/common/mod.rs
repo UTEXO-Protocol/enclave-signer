@@ -10,11 +10,22 @@ use utexo_bridge_enclave::state::EnclaveState;
 /// Start a test server on a random TCP port. Returns the port number.
 /// The server runs in a background thread and handles connections until
 /// the test process exits.
+#[allow(dead_code)]
 pub fn start_test_server() -> u16 {
+    start_test_server_with(|_| {})
+}
+
+/// Start a test server, running the provided configuration closure against
+/// the fresh `EnclaveState` before the listener accepts connections. Used
+/// by the cloning integration test to seed the donor with a known seed
+/// and a cloning secret before the first client request arrives.
+pub fn start_test_server_with(configure: impl FnOnce(&EnclaveState)) -> u16 {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
+    let state = EnclaveState::new(bitcoin::Network::Bitcoin);
+    configure(&state);
     let ctx = Arc::new(ServerContext {
-        state: EnclaveState::new(bitcoin::Network::Bitcoin),
+        state,
         #[cfg(feature = "rgb-validation")]
         rgb_validator: None,
     });

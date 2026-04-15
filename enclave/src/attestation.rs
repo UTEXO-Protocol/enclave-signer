@@ -159,14 +159,16 @@ pub fn get_own_pcrs() -> Result<ExpectedPcrs> {
 ///   3. Verify the certificate chain terminates at the AWS Nitro root CA.
 ///   4. Check certificate validity windows (not_before / not_after).
 ///   5. Compare PCR0/1/2 against `expected_pcrs`.
-///   6. Compare the document nonce against `expected_nonce`.
+///   6. Require a nonce field to be present. If `expected_nonce` is `Some`,
+///      require byte-equality with it. If `None`, caller is expected to
+///      enforce freshness via its own replay guard (see `state::ReplayGuard`).
 ///
 /// In `mock-attestation` mode, steps 1–4 are replaced with a raw CBOR parse
 /// and the cert chain is not validated. PCR/nonce/pubkey binding still hold.
 pub fn verify_peer_attestation(
     doc: &[u8],
     expected_pcrs: &ExpectedPcrs,
-    expected_nonce: &[u8; 32],
+    expected_nonce: Option<&[u8; 32]>,
 ) -> Result<VerifiedAttestation> {
     #[cfg(feature = "mock-attestation")]
     {
@@ -204,14 +206,16 @@ fn verify_pcrs(pcrs: &HashMap<u32, Vec<u8>>, expected: &ExpectedPcrs) -> Result<
     Ok(())
 }
 
-fn check_nonce(doc_nonce: &Option<Vec<u8>>, expected: &[u8; 32]) -> Result<Vec<u8>> {
-    match doc_nonce {
-        Some(n) if n.as_slice() == expected => Ok(n.clone()),
-        Some(_) => Err(EnclaveError::Attestation("nonce mismatch".into())),
-        None => Err(EnclaveError::Attestation(
-            "missing nonce in attestation".into(),
-        )),
+fn check_nonce(doc_nonce: &Option<Vec<u8>>, expected: Option<&[u8; 32]>) -> Result<Vec<u8>> {
+    let nonce = doc_nonce
+        .as_ref()
+        .ok_or_else(|| EnclaveError::Attestation("missing nonce in attestation".into()))?;
+    if let Some(exp) = expected {
+        if nonce.as_slice() != exp {
+            return Err(EnclaveError::Attestation("nonce mismatch".into()));
+        }
     }
+    Ok(nonce.clone())
 }
 
 // ----------------------------------------------------------------------------
@@ -265,7 +269,7 @@ IwLz3/Y=
     pub(super) fn verify_real_document(
         doc: &[u8],
         expected_pcrs: &ExpectedPcrs,
-        expected_nonce: &[u8; 32],
+        expected_nonce: Option<&[u8; 32]>,
     ) -> Result<VerifiedAttestation> {
         let cose = CoseSign1::from_bytes(doc)?;
         let payload = cose
@@ -620,7 +624,7 @@ mod mock {
     pub(super) fn verify_mock_document(
         doc: &[u8],
         expected_pcrs: &ExpectedPcrs,
-        expected_nonce: &[u8; 32],
+        expected_nonce: Option<&[u8; 32]>,
     ) -> Result<VerifiedAttestation> {
         let attestation: AttestationDocument = ciborium::from_reader(doc)
             .map_err(|e| EnclaveError::Attestation(format!("failed to parse mock doc: {e}")))?;
@@ -682,7 +686,8 @@ mod tests {
             let pubkey = [1u8; 32];
             let doc = get_attestation(&nonce, Some(&pubkey), Some(b"user")).unwrap();
 
-            let verified = verify_peer_attestation(&doc, &ExpectedPcrs::zero(), &nonce).unwrap();
+            let verified =
+                verify_peer_attestation(&doc, &ExpectedPcrs::zero(), Some(&nonce)).unwrap();
 
             assert_eq!(verified.enclave_pubkey, pubkey.to_vec());
             assert_eq!(verified.user_data.as_deref(), Some(b"user".as_ref()));
@@ -691,11 +696,20 @@ mod tests {
         }
 
         #[test]
+        fn mock_extracts_nonce_when_expected_is_none() {
+            let nonce = [0x5au8; 32];
+            let doc = get_attestation(&nonce, Some(&[0u8; 32]), None).unwrap();
+            let verified = verify_peer_attestation(&doc, &ExpectedPcrs::zero(), None).unwrap();
+            assert_eq!(verified.nonce, nonce.to_vec());
+        }
+
+        #[test]
         fn mock_reject_nonce_mismatch() {
             let nonce = [1u8; 32];
             let other = [2u8; 32];
             let doc = get_attestation(&nonce, Some(&[0u8; 32]), None).unwrap();
-            let err = verify_peer_attestation(&doc, &ExpectedPcrs::zero(), &other).unwrap_err();
+            let err =
+                verify_peer_attestation(&doc, &ExpectedPcrs::zero(), Some(&other)).unwrap_err();
             assert!(matches!(err, EnclaveError::Attestation(_)));
         }
 
@@ -704,7 +718,7 @@ mod tests {
             let nonce = [3u8; 32];
             let doc = get_attestation(&nonce, Some(&[0u8; 32]), None).unwrap();
             let expected = ExpectedPcrs::new([1u8; 48], [0u8; 48], [0u8; 48]);
-            let err = verify_peer_attestation(&doc, &expected, &nonce).unwrap_err();
+            let err = verify_peer_attestation(&doc, &expected, Some(&nonce)).unwrap_err();
             assert!(matches!(err, EnclaveError::PcrMismatch { pcr: 0, .. }));
         }
 
@@ -712,14 +726,16 @@ mod tests {
         fn mock_reject_missing_pubkey() {
             let nonce = [4u8; 32];
             let doc = get_attestation(&nonce, None, None).unwrap();
-            let err = verify_peer_attestation(&doc, &ExpectedPcrs::zero(), &nonce).unwrap_err();
+            let err =
+                verify_peer_attestation(&doc, &ExpectedPcrs::zero(), Some(&nonce)).unwrap_err();
             assert!(matches!(err, EnclaveError::Attestation(_)));
         }
 
         #[test]
         fn mock_reject_corrupted_doc() {
-            let err = verify_peer_attestation(&[0xffu8; 16], &ExpectedPcrs::zero(), &[0u8; 32])
-                .unwrap_err();
+            let err =
+                verify_peer_attestation(&[0xffu8; 16], &ExpectedPcrs::zero(), Some(&[0u8; 32]))
+                    .unwrap_err();
             assert!(matches!(err, EnclaveError::Attestation(_)));
         }
 
