@@ -22,13 +22,18 @@ pub struct CloningSession {}
 ///   Cloning  -> Active   (SetClone,      wired in PR 4)
 ///   Active   -> Active   (GetClone handled by donor without state change)
 /// Any other transition is rejected.
+///
+/// `KeyManager` is boxed so the enum stays small (~24 bytes) rather than
+/// bloating every `Phase` value to the size of the biggest variant
+/// (~584 bytes). The heap indirection is irrelevant in the hot path —
+/// the mutex lock dominates.
 pub enum Phase {
     /// No keys, waiting for an initialize request.
     Initial,
     /// Cloning handshake in progress, waiting for SetClone.
     Cloning(CloningSession),
     /// Keys loaded, ready to sign.
-    Active(KeyManager),
+    Active(Box<KeyManager>),
 }
 
 impl Phase {
@@ -81,7 +86,7 @@ impl EnclaveState {
         let mut guard = self.lock_phase()?;
         ensure_initial(&guard)?;
         let (manager, mnemonic) = KeyManager::generate(entropy, self.network)?;
-        *guard = Phase::Active(manager);
+        *guard = Phase::Active(Box::new(manager));
         Ok(mnemonic)
     }
 
@@ -90,7 +95,7 @@ impl EnclaveState {
         let mut guard = self.lock_phase()?;
         ensure_initial(&guard)?;
         let manager = KeyManager::from_mnemonic(mnemonic_str, self.network)?;
-        *guard = Phase::Active(manager);
+        *guard = Phase::Active(Box::new(manager));
         Ok(())
     }
 
@@ -99,7 +104,7 @@ impl EnclaveState {
         let mut guard = self.lock_phase()?;
         ensure_initial(&guard)?;
         let manager = KeyManager::from_seed(seed, self.network)?;
-        *guard = Phase::Active(manager);
+        *guard = Phase::Active(Box::new(manager));
         Ok(())
     }
 
