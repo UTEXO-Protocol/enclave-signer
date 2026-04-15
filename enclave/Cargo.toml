@@ -55,6 +55,15 @@ der = { version = "0.7", features = ["alloc"] }
 base64 = "0.22"
 serde = { version = "1", features = ["derive"] }
 
+# Cloning handshake crypto (X25519 DH + HKDF + ChaCha20Poly1305 + HMAC-SHA256)
+x25519-dalek = { version = "2", features = ["static_secrets", "zeroize"] }
+chacha20poly1305 = "0.10"
+hkdf = "0.12"
+hmac = "0.12"
+sha2 = "0.10"
+subtle = "2"
+rand_core = { version = "0.6", features = ["getrandom"] }
+
 [target.'cfg(target_os = "linux")'.dependencies]
 vsock = "0.5"
 nix = { version = "0.31.2", features = ["socket"] }

@@ -108,6 +108,28 @@ impl EnclaveState {
         Ok(())
     }
 
+    /// Initialize from a seed obtained via the cloning handshake.
+    ///
+    /// This is the production path for cloned enclaves and is NOT gated on
+    /// `allow-seed-import`. The `Phase::Cloning` guard replaces the feature
+    /// flag: PR 4's `SetClone` handler is the only caller, and it only
+    /// runs after verifying the donor's attestation and unsealing the
+    /// seed.
+    pub fn initialize_from_cloned_seed(&self, seed: [u8; 64]) -> Result<()> {
+        let mut guard = self.lock_phase()?;
+        match &*guard {
+            Phase::Cloning(_) => {}
+            other => {
+                return Err(EnclaveError::NotReady {
+                    state: other.name().into(),
+                });
+            }
+        }
+        let manager = KeyManager::from_seed(seed, self.network)?;
+        *guard = Phase::Active(Box::new(manager));
+        Ok(())
+    }
+
     /// Get public key info. Returns `KeyNotInitialized` if not in the `Active` phase.
     pub fn get_keys(&self) -> Result<KeyInfo> {
         self.with_active(|km| {
