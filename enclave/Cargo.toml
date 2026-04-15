@@ -47,9 +47,18 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # RGB consignment validation (optional, behind rgb-validation feature)
 rgb-ops = { version = "0.11.1-rc.7", features = ["esplora_blocking"], optional = true }
 
+# Attestation verification (NSM COSE_Sign1 + AWS Nitro cert chain)
+ciborium = "0.2"
+p384 = { version = "0.13", features = ["ecdsa", "pem"] }
+x509-cert = { version = "0.2", features = ["pem", "builder"] }
+der = { version = "0.7", features = ["alloc"] }
+base64 = "0.22"
+serde = { version = "1", features = ["derive"] }
+
 [target.'cfg(target_os = "linux")'.dependencies]
 vsock = "0.5"
 nix = { version = "0.31.2", features = ["socket"] }
+aws-nitro-enclaves-nsm-api = "0.4"
 
 [build-dependencies]
 prost-build = "0.14.3"
@@ -63,6 +72,9 @@ allow-seed-import = []
 dev-mode = []
 # In-enclave RGB consignment validation via rgbstd + Esplora.
 rgb-validation = ["rgb-ops"]
+# Mock attestation path: skip NSM / COSE / cert-chain checks and use raw CBOR docs.
+# Testing only — never enable in production builds.
+mock-attestation = []
 
 [dev-dependencies]
 rand = "0.10.0"
