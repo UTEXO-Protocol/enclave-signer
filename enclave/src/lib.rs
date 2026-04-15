@@ -5,6 +5,7 @@ pub mod framing;
 pub mod keys;
 pub mod server;
 pub mod signing;
+pub mod state;
 pub mod validation;
 #[cfg(all(feature = "vsock", target_os = "linux"))]
 pub mod vsock_forwarder;

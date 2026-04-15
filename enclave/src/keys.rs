@@ -1,5 +1,4 @@
 use std::str::FromStr;
-use std::sync::Mutex;
 
 use bip39::Mnemonic;
 use bitcoin::bip32::{ChildNumber, DerivationPath, Fingerprint, Xpriv, Xpub};
@@ -331,123 +330,10 @@ impl KeyManager {
     }
 }
 
-/// Thread-safe enclave state holding an optional KeyManager behind a Mutex.
-pub struct EnclaveState {
-    inner: Mutex<Option<KeyManager>>,
-    network: Network,
-}
-
-impl Default for EnclaveState {
-    fn default() -> Self {
-        Self::new(Network::Bitcoin)
-    }
-}
-
-impl EnclaveState {
-    pub fn new(network: Network) -> Self {
-        Self {
-            inner: Mutex::new(None),
-            network,
-        }
-    }
-
-    pub fn network(&self) -> Network {
-        self.network
-    }
-
-    /// Initialize from OS entropy. Returns the mnemonic for one-time logging.
-    pub fn initialize_from_entropy(&self, entropy: &mut [u8; 32]) -> Result<Mnemonic> {
-        let mut guard = self
-            .inner
-            .lock()
-            .map_err(|e| EnclaveError::Internal(format!("lock poisoned: {}", e)))?;
-        if guard.is_some() {
-            return Err(EnclaveError::AlreadyInitialized);
-        }
-        let (manager, mnemonic) = KeyManager::generate(entropy, self.network)?;
-        *guard = Some(manager);
-        Ok(mnemonic)
-    }
-
-    /// Initialize from a BIP-39 mnemonic phrase (testing only, requires allow-seed-import feature).
-    pub fn initialize_from_mnemonic(&self, mnemonic_str: &str) -> Result<()> {
-        let mut guard = self
-            .inner
-            .lock()
-            .map_err(|e| EnclaveError::Internal(format!("lock poisoned: {}", e)))?;
-        if guard.is_some() {
-            return Err(EnclaveError::AlreadyInitialized);
-        }
-        let manager = KeyManager::from_mnemonic(mnemonic_str, self.network)?;
-        *guard = Some(manager);
-        Ok(())
-    }
-
-    /// Initialize from a raw 64-byte seed (testing only, requires allow-seed-import feature).
-    pub fn initialize_from_seed(&self, seed: [u8; 64]) -> Result<()> {
-        let mut guard = self
-            .inner
-            .lock()
-            .map_err(|e| EnclaveError::Internal(format!("lock poisoned: {}", e)))?;
-        if guard.is_some() {
-            return Err(EnclaveError::AlreadyInitialized);
-        }
-        let manager = KeyManager::from_seed(seed, self.network)?;
-        *guard = Some(manager);
-        Ok(())
-    }
-
-    /// Get public key info. Returns error if not initialized.
-    pub fn get_keys(&self) -> Result<KeyInfo> {
-        let guard = self
-            .inner
-            .lock()
-            .map_err(|e| EnclaveError::Internal(format!("lock poisoned: {}", e)))?;
-        match guard.as_ref() {
-            Some(km) => Ok(KeyInfo {
-                evm_address: *km.evm_address(),
-                btc_compressed_pubkey: *km.btc_compressed_pubkey(),
-                btc_xpub: km.btc_xpub().to_string(),
-                master_fingerprint: km.master_fingerprint().to_bytes(),
-                account_xpub_vanilla: km.account_xpub_vanilla().to_string(),
-                account_xpub_colored: km.account_xpub_colored().to_string(),
-            }),
-            None => Err(EnclaveError::KeyNotInitialized),
-        }
-    }
-
-    pub fn is_initialized(&self) -> bool {
-        self.inner.lock().map(|g| g.is_some()).unwrap_or(false)
-    }
-
-    /// Sign a 32-byte EVM message hash. Returns 65-byte signature.
-    pub fn sign_evm(&self, message_hash: &[u8; 32]) -> Result<[u8; 65]> {
-        let guard = self
-            .inner
-            .lock()
-            .map_err(|e| EnclaveError::Internal(format!("lock poisoned: {}", e)))?;
-        match guard.as_ref() {
-            Some(km) => km.sign_evm(message_hash),
-            None => Err(EnclaveError::KeyNotInitialized),
-        }
-    }
-
-    /// Sign PSBT inputs matching our BTC key. Returns (signed_psbt_bytes, inputs_signed).
-    pub fn sign_psbt(&self, psbt_bytes: &[u8]) -> Result<(Vec<u8>, usize)> {
-        let guard = self
-            .inner
-            .lock()
-            .map_err(|e| EnclaveError::Internal(format!("lock poisoned: {}", e)))?;
-        match guard.as_ref() {
-            Some(km) => km.sign_psbt(psbt_bytes),
-            None => Err(EnclaveError::KeyNotInitialized),
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::state::EnclaveState;
 
     #[test]
     fn deterministic_derivation() {

@@ -3,9 +3,9 @@ use std::sync::Arc;
 use std::thread;
 
 use utexo_bridge_enclave::framing;
-use utexo_bridge_enclave::keys::EnclaveState;
 use utexo_bridge_enclave::proto::*;
 use utexo_bridge_enclave::server::{self, ServerContext};
+use utexo_bridge_enclave::state::EnclaveState;
 
 /// Start a test server on a random TCP port. Returns the port number.
 /// The server runs in a background thread and handles connections until
