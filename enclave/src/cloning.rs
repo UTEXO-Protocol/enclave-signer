@@ -3,18 +3,18 @@
 //! The handshake has three messages on the wire (see `proto/enclave.proto`
 //! in PR 4):
 //!
-//!   1. Parent  -> requester: `InitiateCloning { secret, target_pubkey }`
-//!        Requester generates an X25519 ephemeral keypair, embeds the
-//!        pubkey in an NSM attestation doc, computes a HMAC digest over
-//!        (secret, pubkey), and replies with (attestation, pubkey, digest).
-//!   2. Parent  -> donor (relayed): `GetClone { target_pubkey, pubkey, digest, attestation }`
-//!        Donor verifies the attestation, matches PCRs, verifies the
-//!        digest, X25519-DH + HKDF-derives a symmetric key, ChaCha20Poly1305
-//!        seals its seed, returns (ciphertext, our pubkey, our attestation).
-//!   3. Parent  -> requester (relayed): `SetClone { ciphertext, donor_pubkey, donor_attestation }`
-//!        Requester verifies donor attestation, DH + HKDF + unseal,
-//!        derives KeyManager from the seed, verifies the derived EVM
-//!        address matches the claimed target_pubkey, transitions to Active.
+//! 1. Parent -> requester: `InitiateCloning { secret, target_pubkey }`.
+//!    Requester generates an X25519 ephemeral keypair, embeds the pubkey in
+//!    an NSM attestation doc, computes a HMAC digest over (secret, pubkey),
+//!    and replies with (attestation, pubkey, digest).
+//! 2. Parent -> donor (relayed): `GetClone { target_pubkey, pubkey, digest, attestation }`.
+//!    Donor verifies the attestation, matches PCRs, verifies the digest,
+//!    X25519-DH + HKDF-derives a symmetric key, ChaCha20Poly1305 seals its
+//!    seed, returns (ciphertext, our pubkey, our attestation).
+//! 3. Parent -> requester (relayed): `SetClone { ciphertext, donor_pubkey, donor_attestation }`.
+//!    Requester verifies donor attestation, DH + HKDF + unseal, derives
+//!    KeyManager from the seed, verifies the derived EVM address matches
+//!    the claimed target_pubkey, transitions to Active.
 //!
 //! This module provides the crypto layer only. PR 4 wires it into the
 //! request handlers and state machine.
@@ -30,8 +30,8 @@ use hmac::{Hmac, Mac};
 use rand_core::OsRng;
 use sha2::Sha256;
 use subtle::ConstantTimeEq;
-use x25519_dalek::{EphemeralSecret, PublicKey, StaticSecret};
-use zeroize::Zeroizing;
+use x25519_dalek::{EphemeralSecret, PublicKey, SharedSecret, StaticSecret};
+use zeroize::{Zeroize, Zeroizing};
 
 use crate::error::{EnclaveError, Result};
 
@@ -78,7 +78,9 @@ impl CloneSession {
     ) -> Result<Zeroizing<[u8; 64]>> {
         let peer = PublicKey::from(*peer_pubkey);
         let shared = self.secret.diffie_hellman(&peer);
-        decrypt_with_shared(shared.as_bytes(), ciphertext)
+        reject_non_contributory(&shared)?;
+        let key = derive_symmetric_key(shared.as_bytes(), peer_pubkey, &self.public.to_bytes());
+        decrypt_with_key(&key, ciphertext)
     }
 }
 
@@ -123,58 +125,81 @@ pub fn verify_cloning_digest(
 /// Donor side: seal `seed` to the requester's X25519 pubkey using a fresh
 /// ephemeral keypair. Returns `(ciphertext, our_pubkey)`.
 ///
-/// The ephemeral secret is consumed (zeroized) before this function returns,
-/// so the ciphertext cannot be re-derived even if this enclave is compromised
-/// after the fact (forward secrecy for the cloning channel, not for the
-/// cloned seed itself — the seed IS the long-term secret).
+/// Rejects small-order / non-contributory peer public keys — otherwise an
+/// attacker sending a small-order point could force a zero shared secret,
+/// making the derived key recoverable from public information and breaking
+/// seed confidentiality.
 pub fn encrypt_seed_for_peer(
     peer_pubkey: &[u8; 32],
     seed: &[u8; 64],
 ) -> Result<(Vec<u8>, [u8; 32])> {
     let our_secret = EphemeralSecret::random_from_rng(OsRng);
-    let our_pub = PublicKey::from(&our_secret);
+    let our_pub = PublicKey::from(&our_secret).to_bytes();
     let peer = PublicKey::from(*peer_pubkey);
     let shared = our_secret.diffie_hellman(&peer);
+    reject_non_contributory(&shared)?;
 
-    let ciphertext = encrypt_with_shared(shared.as_bytes(), seed)?;
-    Ok((ciphertext, our_pub.to_bytes()))
+    let key = derive_symmetric_key(shared.as_bytes(), &our_pub, peer_pubkey);
+    let ciphertext = encrypt_with_key(&key, seed)?;
+    Ok((ciphertext, our_pub))
 }
 
 // ---- internal HKDF + AEAD helpers ----
 
-fn derive_symmetric_key(shared_secret: &[u8]) -> Zeroizing<[u8; 32]> {
+/// Reject small-order / non-contributory DH outputs. See
+/// <https://tools.ietf.org/html/rfc7748#section-6.1>.
+fn reject_non_contributory(shared: &SharedSecret) -> Result<()> {
+    if !shared.was_contributory() {
+        return Err(EnclaveError::Clone(
+            "peer X25519 public key was small-order (non-contributory DH)".into(),
+        ));
+    }
+    Ok(())
+}
+
+/// HKDF-SHA256 derivation. The `info` field binds the derived key to both
+/// participants' public keys so even a degenerate shared secret cannot be
+/// reused across handshakes. Pubkey order is donor-pubkey || requester-pubkey
+/// so both sides agree on it regardless of who's calling.
+fn derive_symmetric_key(
+    shared_secret: &[u8],
+    donor_pubkey: &[u8; 32],
+    requester_pubkey: &[u8; 32],
+) -> Zeroizing<[u8; 32]> {
+    let mut info = Vec::with_capacity(HKDF_INFO.len() + 64);
+    info.extend_from_slice(HKDF_INFO);
+    info.extend_from_slice(donor_pubkey);
+    info.extend_from_slice(requester_pubkey);
+
     let hk = Hkdf::<Sha256>::new(Some(HKDF_SALT), shared_secret);
     let mut okm = Zeroizing::new([0u8; 32]);
-    hk.expand(HKDF_INFO, okm.as_mut())
+    hk.expand(&info, okm.as_mut())
         .expect("32 bytes is within HKDF output limit");
     okm
 }
 
-// Fixed all-zero nonce: safe because (a) each cloning handshake uses a
-// fresh ephemeral keypair so the derived key is single-use, and (b) the
-// HKDF salt is versioned so nonces don't cross versions.
+// Fixed all-zero nonce: safe because each cloning handshake uses a fresh
+// ephemeral keypair, so the derived key is single-use and no nonce/key
+// pair is ever reused.
 const ZERO_NONCE: [u8; 12] = [0u8; 12];
 
-fn cipher_from_shared(shared_secret: &[u8]) -> (ChaCha20Poly1305, Zeroizing<[u8; 32]>) {
-    let key_bytes = derive_symmetric_key(shared_secret);
-    let key_array: &[u8; 32] = &key_bytes;
-    let cipher = ChaCha20Poly1305::new(key_array.into());
-    (cipher, key_bytes)
+fn cipher(key: &Zeroizing<[u8; 32]>) -> ChaCha20Poly1305 {
+    let key_array: &[u8; 32] = key;
+    ChaCha20Poly1305::new(key_array.into())
 }
 
-fn encrypt_with_shared(shared_secret: &[u8], plaintext: &[u8]) -> Result<Vec<u8>> {
-    let (cipher, _key) = cipher_from_shared(shared_secret);
-    cipher
+fn encrypt_with_key(key: &Zeroizing<[u8; 32]>, plaintext: &[u8]) -> Result<Vec<u8>> {
+    cipher(key)
         .encrypt((&ZERO_NONCE).into(), plaintext)
         .map_err(|e| EnclaveError::Clone(format!("seed seal failed: {e}")))
 }
 
-fn decrypt_with_shared(shared_secret: &[u8], ciphertext: &[u8]) -> Result<Zeroizing<[u8; 64]>> {
-    let (cipher, _key) = cipher_from_shared(shared_secret);
-    let plaintext = cipher
+fn decrypt_with_key(key: &Zeroizing<[u8; 32]>, ciphertext: &[u8]) -> Result<Zeroizing<[u8; 64]>> {
+    let mut plaintext = cipher(key)
         .decrypt((&ZERO_NONCE).into(), ciphertext)
         .map_err(|e| EnclaveError::Clone(format!("seed unseal failed: {e}")))?;
     if plaintext.len() != 64 {
+        plaintext.zeroize();
         return Err(EnclaveError::Clone(format!(
             "decrypted seed has wrong length: {}",
             plaintext.len()
@@ -182,8 +207,7 @@ fn decrypt_with_shared(shared_secret: &[u8], ciphertext: &[u8]) -> Result<Zeroiz
     }
     let mut seed = Zeroizing::new([0u8; 64]);
     seed.copy_from_slice(&plaintext);
-    // Best-effort scrub of the intermediate Vec returned by ChaCha20Poly1305.
-    drop(Zeroizing::new(plaintext));
+    plaintext.zeroize();
     Ok(seed)
 }
 
@@ -243,8 +267,31 @@ mod tests {
         let (ciphertext, _donor_pub) =
             encrypt_seed_for_peer(&requester.public_key(), &seed).unwrap();
 
-        let wrong_donor = [0u8; 32];
+        // Use a legit random donor pubkey (not zero — that's small-order
+        // and would trip the contributory check, masking the real assertion).
+        let wrong_donor = PublicKey::from(&StaticSecret::random_from_rng(OsRng)).to_bytes();
         let result = requester.decrypt_seed_from_peer(&wrong_donor, &ciphertext);
+        assert!(matches!(result, Err(EnclaveError::Clone(_))));
+    }
+
+    #[test]
+    fn encrypt_rejects_small_order_peer_pubkey() {
+        // The all-zero point is one of the known small-order points on
+        // Curve25519. Sending it as the peer pubkey should be rejected at
+        // the encryptor so the attacker cannot force a zero shared secret.
+        let result = encrypt_seed_for_peer(&[0u8; 32], &[42u8; 64]);
+        assert!(matches!(result, Err(EnclaveError::Clone(_))));
+    }
+
+    #[test]
+    fn decrypt_rejects_small_order_peer_pubkey() {
+        let requester = CloneSession::new();
+        // Build a ciphertext via a legit encrypt call, then attempt to
+        // decrypt with the all-zero peer key — must fail the contributory
+        // check, not silently produce a computable shared secret.
+        let (ciphertext, _legit_donor) =
+            encrypt_seed_for_peer(&requester.public_key(), &[42u8; 64]).unwrap();
+        let result = requester.decrypt_seed_from_peer(&[0u8; 32], &ciphertext);
         assert!(matches!(result, Err(EnclaveError::Clone(_))));
     }
 
