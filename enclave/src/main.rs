@@ -25,6 +25,17 @@ fn main() {
 
     let state = EnclaveState::new(bitcoin_network);
 
+    // Donor-side cloning secret. Optional: only required for enclaves that
+    // will serve `GetClone` requests. Pre-shared across the operator's
+    // cluster. Never logged, wrapped in `SecretBox` for zeroize-on-drop.
+    if let Ok(secret) = std::env::var("UTEXO_CLONING_SECRET") {
+        if let Err(e) = state.set_donor_cloning_secret(secret) {
+            tracing::error!("failed to set donor cloning secret: {e}");
+        } else {
+            tracing::info!("donor cloning secret configured from UTEXO_CLONING_SECRET");
+        }
+    }
+
     // Start vsock-to-TCP forwarder for Esplora access (production only).
     // The host must run: vsock-proxy <ESPLORA_VSOCK_PORT> <esplora-host> <esplora-port>
     #[cfg(all(feature = "vsock", target_os = "linux"))]
