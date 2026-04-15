@@ -68,7 +68,7 @@ impl EnclaveError {
     /// Map error to a proto error code.
     pub fn error_code(&self) -> u32 {
         match self {
-            EnclaveError::CrossCheck(_) => 3, // ERROR_CODE_VALIDATION_FAILED
+            EnclaveError::CrossCheck(_) => 3,   // ERROR_CODE_VALIDATION_FAILED
             EnclaveError::NotReady { .. } => 2, // ERROR_CODE_NOT_READY
             _ => 1,
         }

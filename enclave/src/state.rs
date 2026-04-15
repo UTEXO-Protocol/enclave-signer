@@ -67,18 +67,12 @@ impl EnclaveState {
 
     /// Returns the name of the current phase ("initial", "cloning", "active").
     pub fn phase_name(&self) -> &'static str {
-        self.inner
-            .lock()
-            .map(|g| g.name())
-            .unwrap_or("poisoned")
+        self.inner.lock().map(|g| g.name()).unwrap_or("poisoned")
     }
 
     /// True only when the state holds an active `KeyManager`.
     pub fn is_initialized(&self) -> bool {
-        matches!(
-            self.inner.lock().as_deref(),
-            Ok(Phase::Active(_))
-        )
+        matches!(self.inner.lock().as_deref(), Ok(Phase::Active(_)))
     }
 
     /// Initialize from OS entropy. Returns the mnemonic for one-time logging.
