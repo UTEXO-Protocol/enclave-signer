@@ -1,7 +1,7 @@
 use std::net::TcpListener;
 
-use utexo_bridge_enclave::keys::EnclaveState;
 use utexo_bridge_enclave::server::{self, ServerContext};
+use utexo_bridge_enclave::state::EnclaveState;
 
 fn main() {
     tracing_subscriber::fmt()

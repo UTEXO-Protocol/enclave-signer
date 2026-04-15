@@ -31,13 +31,45 @@ pub enum EnclaveError {
 
     #[error("internal error: {0}")]
     Internal(String),
+
+    #[error("not ready: enclave is in {state} state")]
+    NotReady { state: String },
+
+    #[error("attestation error: {0}")]
+    Attestation(String),
+
+    #[error("certificate error: {0}")]
+    Certificate(String),
+
+    #[error("clone failed: {0}")]
+    Clone(String),
+
+    #[error("PCR mismatch: PCR{pcr} expected={expected}, actual={actual}")]
+    PcrMismatch {
+        pcr: u32,
+        expected: String,
+        actual: String,
+    },
+
+    #[error("nonce replay detected")]
+    NonceReplay,
+
+    #[error("cloning digest mismatch")]
+    DigestMismatch,
+
+    #[error("pubkey mismatch: attestation pubkey does not match claimed pubkey")]
+    PubkeyMismatch,
+
+    #[error("identity mismatch: cloned seed does not derive to expected address")]
+    IdentityMismatch,
 }
 
 impl EnclaveError {
     /// Map error to a proto error code.
     pub fn error_code(&self) -> u32 {
         match self {
-            EnclaveError::CrossCheck(_) => 3, // ERROR_CODE_VALIDATION_FAILED
+            EnclaveError::CrossCheck(_) => 3,   // ERROR_CODE_VALIDATION_FAILED
+            EnclaveError::NotReady { .. } => 2, // ERROR_CODE_NOT_READY
             _ => 1,
         }
     }

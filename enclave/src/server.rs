@@ -2,11 +2,11 @@ use std::io::{Read, Write};
 
 use crate::error::{EnclaveError, Result};
 use crate::framing;
-use crate::keys::EnclaveState;
 use crate::proto::enclave_request::Request;
 use crate::proto::enclave_response::Response;
 use crate::proto::*;
 use crate::signing::evm::{sign_request_digest, Eip712Domain};
+use crate::state::EnclaveState;
 #[cfg(not(feature = "dev-mode"))]
 use crate::validation;
 
