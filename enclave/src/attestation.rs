@@ -125,8 +125,7 @@ pub fn get_attestation(
     {
         let _ = (nonce, public_key, user_data);
         Err(EnclaveError::Attestation(
-            "attestation not available: build for Linux with NSM or enable mock-attestation"
-                .into(),
+            "attestation not available: build for Linux with NSM or enable mock-attestation".into(),
         ))
     }
 }
@@ -184,10 +183,7 @@ pub fn verify_peer_attestation(
 // Shared helpers
 // ----------------------------------------------------------------------------
 
-fn verify_pcrs(
-    pcrs: &HashMap<u32, Vec<u8>>,
-    expected: &ExpectedPcrs,
-) -> Result<()> {
+fn verify_pcrs(pcrs: &HashMap<u32, Vec<u8>>, expected: &ExpectedPcrs) -> Result<()> {
     let check = |idx: u32, expected_bytes: &[u8; 48]| -> Result<()> {
         let actual = pcrs
             .get(&idx)
@@ -228,10 +224,14 @@ mod real {
     use base64::engine::general_purpose::STANDARD as BASE64;
     use base64::Engine;
     use p384::ecdsa::{signature::Verifier, Signature, VerifyingKey};
+    use std::sync::OnceLock;
     use std::time::{SystemTime, UNIX_EPOCH};
     use x509_cert::der::{Decode, Encode};
     use x509_cert::Certificate;
 
+    // AWS Nitro Enclave root CA. Source:
+    // https://docs.aws.amazon.com/enclaves/latest/user/verify-root.html
+    // Self-signed, P-384, ECDSA-SHA384, valid 2019-10-28 .. 2049-10-28.
     const AWS_NITRO_ROOT_CERT_PEM: &str = r#"-----BEGIN CERTIFICATE-----
 MIICETCCAZagAwIBAgIRAPkxdWgbkK/hHUbMtOTn+FYwCgYIKoZIzj0EAwMwSTEL
 MAkGA1UEBhMCVVMxDzANBgNVBAoMBkFtYXpvbjEMMAoGA1UECwwDQVdTMRswGQYD
@@ -247,13 +247,19 @@ rfMCMQCi85sWBbJwKKXdS6BptQFuZbT73o/gBh1qUxl/nNr12UO8Yfwr6wPLb+6N
 IwLz3/Y=
 -----END CERTIFICATE-----"#;
 
-    fn parse_pem_cert(pem: &str) -> Certificate {
-        let lines: Vec<&str> = pem.lines().filter(|l| !l.starts_with("-----")).collect();
-        let b64 = lines.join("");
-        let der = BASE64
-            .decode(&b64)
-            .expect("invalid base64 in embedded root cert");
-        Certificate::from_der(&der).expect("invalid DER in embedded root cert")
+    /// DER bytes of the embedded root cert. Parsed once and compared to
+    /// `cabundle[0]` bytewise on every verify.
+    fn root_cert_der() -> &'static [u8] {
+        static ROOT: OnceLock<Vec<u8>> = OnceLock::new();
+        ROOT.get_or_init(|| {
+            let lines: Vec<&str> = AWS_NITRO_ROOT_CERT_PEM
+                .lines()
+                .filter(|l| !l.starts_with("-----"))
+                .collect();
+            BASE64
+                .decode(lines.join(""))
+                .expect("invalid base64 in embedded root cert")
+        })
     }
 
     pub(super) fn verify_real_document(
@@ -261,8 +267,6 @@ IwLz3/Y=
         expected_pcrs: &ExpectedPcrs,
         expected_nonce: &[u8; 32],
     ) -> Result<VerifiedAttestation> {
-        let root_cert = parse_pem_cert(AWS_NITRO_ROOT_CERT_PEM);
-
         let cose = CoseSign1::from_bytes(doc)?;
         let payload = cose
             .payload
@@ -272,12 +276,7 @@ IwLz3/Y=
         let attestation: AttestationDocument = ciborium::from_reader(payload.as_slice())
             .map_err(|e| EnclaveError::Attestation(format!("failed to parse attestation: {e}")))?;
 
-        verify_certificate_chain(
-            &attestation.certificate,
-            &attestation.cabundle,
-            &cose,
-            &root_cert,
-        )?;
+        verify_certificate_chain(&attestation.certificate, &attestation.cabundle, &cose)?;
 
         let nonce = check_nonce(&attestation.nonce, expected_nonce)?;
         verify_pcrs(&attestation.pcrs, expected_pcrs)?;
@@ -295,100 +294,102 @@ IwLz3/Y=
         })
     }
 
+    /// Parse and verify the attestation certificate chain.
+    ///
+    /// AWS Nitro cabundle ordering (per the Nitro Enclaves User Guide):
+    ///   cabundle[0]      = AWS Nitro root CA (must match our hardcoded root)
+    ///   cabundle[1..N-1] = intermediate CAs
+    ///   cabundle[N-1]    = direct issuer of `signing_cert`
+    ///   signing_cert     = end-entity cert that signed the COSE envelope
+    ///
+    /// We verify, in order:
+    ///   1. cabundle is non-empty and cabundle[0] bytes == embedded AWS root.
+    ///   2. Each cabundle[i] signs cabundle[i+1].
+    ///   3. cabundle[last] signs signing_cert.
+    ///   4. Every cert is inside its validity window.
+    ///   5. signing_cert's P-384 pubkey verifies the COSE signature over
+    ///      Sig_structure1. Per RFC 8152 §8.1, the COSE signature is a
+    ///      fixed-width raw `r || s` (96 bytes for P-384), *not* DER.
     fn verify_certificate_chain(
         signing_cert_der: &[u8],
         cabundle: &[Vec<u8>],
         cose: &CoseSign1,
-        root_cert: &Certificate,
     ) -> Result<()> {
-        let signing_cert = Certificate::from_der(signing_cert_der).map_err(|e| {
-            EnclaveError::Certificate(format!("failed to parse signing cert: {e}"))
-        })?;
-        verify_cert_validity(&signing_cert)?;
-
-        let signing_pubkey = extract_p384_pubkey(&signing_cert)?;
-        let sig_bytes = cose.signature.as_slice();
-        let signature = Signature::from_der(sig_bytes)
-            .map_err(|e| EnclaveError::Attestation(format!("invalid COSE signature: {e}")))?;
-
-        let to_verify = cose.sig_structure()?;
-        signing_pubkey
-            .verify(&to_verify, &signature)
-            .map_err(|_| EnclaveError::Attestation("COSE signature verification failed".into()))?;
-
         if cabundle.is_empty() {
-            return Err(EnclaveError::Attestation("empty certificate bundle".into()));
+            return Err(EnclaveError::Certificate("empty certificate bundle".into()));
         }
 
-        let issuer_cert = Certificate::from_der(&cabundle[0])
-            .map_err(|e| EnclaveError::Certificate(format!("failed to parse issuer cert: {e}")))?;
-        verify_cert_validity(&issuer_cert)?;
-
-        let issuer_pubkey = extract_p384_pubkey(&issuer_cert)?;
-        let tbs_bytes = signing_cert
-            .tbs_certificate
-            .to_der()
-            .map_err(|e| EnclaveError::Certificate(format!("DER encode failed: {e}")))?;
-
-        let cert_sig_bytes = signing_cert.signature.as_bytes().ok_or_else(|| {
-            EnclaveError::Certificate("missing signature bytes on signing cert".into())
-        })?;
-        let cert_signature = Signature::from_der(cert_sig_bytes)
-            .map_err(|e| EnclaveError::Certificate(format!("invalid signature: {e}")))?;
-
-        issuer_pubkey
-            .verify(&tbs_bytes, &cert_signature)
-            .map_err(|_| EnclaveError::Certificate("signing certificate not issued by CA".into()))?;
-
-        let mut certs = Vec::with_capacity(cabundle.len());
-        for cert_der in cabundle {
-            let cert = Certificate::from_der(cert_der)
-                .map_err(|e| EnclaveError::Certificate(format!("failed to parse cert: {e}")))?;
-            verify_cert_validity(&cert)?;
-            certs.push(cert);
-        }
-
-        for i in 0..certs.len().saturating_sub(1) {
-            let subject = &certs[i];
-            let issuer = &certs[i + 1];
-
-            let issuer_pubkey = extract_p384_pubkey(issuer)?;
-            let tbs_bytes = subject
-                .tbs_certificate
-                .to_der()
-                .map_err(|e| EnclaveError::Certificate(format!("DER encode failed: {e}")))?;
-
-            let sig_bytes = subject
-                .signature
-                .as_bytes()
-                .ok_or_else(|| EnclaveError::Certificate("missing signature bytes".into()))?;
-
-            let signature = Signature::from_der(sig_bytes)
-                .map_err(|e| EnclaveError::Certificate(format!("invalid signature: {e}")))?;
-
-            issuer_pubkey
-                .verify(&tbs_bytes, &signature)
-                .map_err(|_| EnclaveError::Certificate("certificate signature invalid".into()))?;
-        }
-
-        let chain_root = certs
-            .last()
-            .ok_or_else(|| EnclaveError::Certificate("empty certificate chain".into()))?;
-
-        let chain_root_der = chain_root
-            .to_der()
-            .map_err(|e| EnclaveError::Certificate(format!("DER encode failed: {e}")))?;
-        let expected_root_der = root_cert
-            .to_der()
-            .map_err(|e| EnclaveError::Certificate(format!("DER encode failed: {e}")))?;
-
-        if chain_root_der != expected_root_der {
+        // 1. Root anchor: bytewise compare to our hardcoded AWS Nitro root.
+        if cabundle[0].as_slice() != root_cert_der() {
             return Err(EnclaveError::Certificate(
-                "certificate chain does not terminate at AWS Nitro root CA".into(),
+                "cabundle[0] is not the AWS Nitro root CA".into(),
             ));
         }
 
+        // Parse every cabundle cert + signing cert, checking validity windows.
+        let mut chain = Vec::with_capacity(cabundle.len() + 1);
+        for (i, cert_der) in cabundle.iter().enumerate() {
+            let cert = Certificate::from_der(cert_der).map_err(|e| {
+                EnclaveError::Certificate(format!("failed to parse cabundle[{i}]: {e}"))
+            })?;
+            verify_cert_validity(&cert)?;
+            chain.push(cert);
+        }
+        let signing_cert = Certificate::from_der(signing_cert_der)
+            .map_err(|e| EnclaveError::Certificate(format!("failed to parse signing cert: {e}")))?;
+        verify_cert_validity(&signing_cert)?;
+        chain.push(signing_cert);
+
+        // 2-3. Walk: chain[i] issues chain[i+1]. The root is self-signed
+        // and has already been anchored by byte-equality with our hardcoded
+        // copy, so we don't re-verify chain[0].
+        for i in 0..chain.len() - 1 {
+            verify_issuer_signed_subject(&chain[i], &chain[i + 1])?;
+        }
+
+        // 5. COSE signature verification using signing cert's pubkey.
+        let signing_pubkey = extract_p384_pubkey(chain.last().expect("non-empty"))?;
+        let cose_sig = parse_cose_ecdsa_signature(&cose.signature)?;
+        let to_verify = cose.sig_structure()?;
+        signing_pubkey
+            .verify(&to_verify, &cose_sig)
+            .map_err(|_| EnclaveError::Attestation("COSE signature verification failed".into()))?;
+
         Ok(())
+    }
+
+    fn verify_issuer_signed_subject(issuer: &Certificate, subject: &Certificate) -> Result<()> {
+        let issuer_pubkey = extract_p384_pubkey(issuer)?;
+        let tbs_bytes = subject
+            .tbs_certificate
+            .to_der()
+            .map_err(|e| EnclaveError::Certificate(format!("TBS DER encode failed: {e}")))?;
+        let sig_bytes = subject
+            .signature
+            .as_bytes()
+            .ok_or_else(|| EnclaveError::Certificate("missing signature bytes".into()))?;
+        // X.509 cert signatures are DER-encoded ECDSA (unlike COSE).
+        let signature = Signature::from_der(sig_bytes)
+            .map_err(|e| EnclaveError::Certificate(format!("invalid cert signature: {e}")))?;
+        issuer_pubkey
+            .verify(&tbs_bytes, &signature)
+            .map_err(|_| EnclaveError::Certificate("certificate signature invalid".into()))
+    }
+
+    /// RFC 8152 §8.1 mandates raw `r || s` (96 bytes for P-384). We accept
+    /// a DER fallback defensively in case a document source deviates.
+    fn parse_cose_ecdsa_signature(sig_bytes: &[u8]) -> Result<Signature> {
+        if sig_bytes.len() == 96 {
+            Signature::try_from(sig_bytes)
+                .map_err(|e| EnclaveError::Attestation(format!("invalid COSE raw signature: {e}")))
+        } else {
+            Signature::from_der(sig_bytes).map_err(|e| {
+                EnclaveError::Attestation(format!(
+                    "invalid COSE signature ({} bytes, not raw P-384 r||s or DER): {e}",
+                    sig_bytes.len()
+                ))
+            })
+        }
     }
 
     fn extract_p384_pubkey(cert: &Certificate) -> Result<VerifyingKey> {
@@ -413,7 +414,9 @@ IwLz3/Y=
         let not_after = validity.not_after.to_unix_duration().as_secs();
 
         if now < not_before {
-            return Err(EnclaveError::Certificate("certificate not yet valid".into()));
+            return Err(EnclaveError::Certificate(
+                "certificate not yet valid".into(),
+            ));
         }
         if now > not_after {
             return Err(EnclaveError::Certificate("certificate has expired".into()));
@@ -498,9 +501,7 @@ IwLz3/Y=
 
         let fd = nsm_init();
         if fd < 0 {
-            return Err(EnclaveError::Attestation(
-                "failed to initialize NSM".into(),
-            ));
+            return Err(EnclaveError::Attestation("failed to initialize NSM".into()));
         }
 
         let request = Request::Attestation {
@@ -518,9 +519,7 @@ IwLz3/Y=
                 "NSM attestation failed: {:?}",
                 e
             ))),
-            _ => Err(EnclaveError::Attestation(
-                "unexpected NSM response".into(),
-            )),
+            _ => Err(EnclaveError::Attestation("unexpected NSM response".into())),
         }
     }
 
@@ -531,9 +530,7 @@ IwLz3/Y=
 
         let fd = nsm_init();
         if fd < 0 {
-            return Err(EnclaveError::Attestation(
-                "failed to initialize NSM".into(),
-            ));
+            return Err(EnclaveError::Attestation("failed to initialize NSM".into()));
         }
 
         let mut read = |index: u16| -> Result<[u8; 48]> {
@@ -615,9 +612,8 @@ mod mock {
         };
 
         let mut buf = Vec::new();
-        ciborium::into_writer(&doc, &mut buf).map_err(|e| {
-            EnclaveError::Attestation(format!("failed to encode mock doc: {e}"))
-        })?;
+        ciborium::into_writer(&doc, &mut buf)
+            .map_err(|e| EnclaveError::Attestation(format!("failed to encode mock doc: {e}")))?;
         Ok(buf)
     }
 
@@ -709,10 +705,7 @@ mod tests {
             let doc = get_attestation(&nonce, Some(&[0u8; 32]), None).unwrap();
             let expected = ExpectedPcrs::new([1u8; 48], [0u8; 48], [0u8; 48]);
             let err = verify_peer_attestation(&doc, &expected, &nonce).unwrap_err();
-            assert!(matches!(
-                err,
-                EnclaveError::PcrMismatch { pcr: 0, .. }
-            ));
+            assert!(matches!(err, EnclaveError::PcrMismatch { pcr: 0, .. }));
         }
 
         #[test]
@@ -725,9 +718,8 @@ mod tests {
 
         #[test]
         fn mock_reject_corrupted_doc() {
-            let err =
-                verify_peer_attestation(&[0xffu8; 16], &ExpectedPcrs::zero(), &[0u8; 32])
-                    .unwrap_err();
+            let err = verify_peer_attestation(&[0xffu8; 16], &ExpectedPcrs::zero(), &[0u8; 32])
+                .unwrap_err();
             assert!(matches!(err, EnclaveError::Attestation(_)));
         }
 
