@@ -1,0 +1,51 @@
+# Parent Adapter (gRPC proxy to Enclave)
+# Usage:
+#   docker build -f build/Dockerfile.parent -t utexo-bridge-parent .
+#
+# Dev (TCP to enclave container):
+#   docker run -e ENCLAVE_ADDR=enclave:5000 utexo-bridge-parent
+#
+# Production (vsock to Nitro enclave):
+#   docker run --device /dev/vsock:/dev/vsock \
+#     -e USE_VSOCK=true -e ENCLAVE_VSOCK_CID=16 \
+#     utexo-bridge-parent
+
+# ===== Builder Stage =====
+FROM rust:1.85-slim AS builder
+
+RUN apt-get update && apt-get install -y \
+    pkg-config libssl-dev protobuf-compiler \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /build
+COPY . /build/
+
+RUN cargo build --release -p utexo-bridge-parent
+
+# ===== Runtime Stage =====
+FROM debian:bookworm-slim
+
+RUN apt-get update && apt-get install -y \
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/* \
+    && useradd -u 1000 -m parent
+
+WORKDIR /home/parent
+
+COPY --from=builder /build/target/release/utexo-bridge-parent ./utexo-bridge-parent
+
+RUN chown -R parent:parent .
+
+USER parent
+
+ENV GRPC_HOST=0.0.0.0
+ENV GRPC_PORT=5000
+ENV ENCLAVE_ADDR=127.0.0.1:5000
+ENV USE_VSOCK=false
+ENV ENCLAVE_VSOCK_CID=16
+ENV ENCLAVE_VSOCK_PORT=5000
+ENV RUST_LOG=info
+
+EXPOSE 5000
+
+ENTRYPOINT ["./utexo-bridge-parent"]

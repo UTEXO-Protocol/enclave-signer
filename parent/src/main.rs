@@ -36,11 +36,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     let service = ParentAdapterService::new(target);
-    let listen_addr = format!("127.0.0.1:{}", cfg.grpc_port).parse()?;
+    let listen_addr = format!("{}:{}", cfg.grpc_host, cfg.grpc_port).parse()?;
 
     tracing::info!(%listen_addr, "starting gRPC server");
 
+    let reflection = tonic_reflection::server::Builder::configure()
+        .register_encoded_file_descriptor_set(utexo_bridge_parent::grpc_proto::FILE_DESCRIPTOR_SET)
+        .build_v1()?;
+
     Server::builder()
+        .add_service(reflection)
         .add_service(EnclaveServiceServer::new(service))
         .serve(listen_addr)
         .await?;

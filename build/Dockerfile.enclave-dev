@@ -1,0 +1,40 @@
+# Enclave (dev mode, TCP, no vsock)
+# Usage:
+#   docker build -f build/Dockerfile.enclave-dev -t utexo-bridge-enclave-dev .
+
+# ===== Builder Stage =====
+FROM rust:1.85-slim AS builder
+
+RUN apt-get update && apt-get install -y \
+    pkg-config libssl-dev protobuf-compiler \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /build
+COPY . /build/
+
+WORKDIR /build/enclave
+RUN cargo build --release
+
+# ===== Runtime Stage =====
+FROM debian:bookworm-slim
+
+RUN apt-get update && apt-get install -y \
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/* \
+    && useradd -u 1000 -m enclave
+
+WORKDIR /home/enclave
+
+COPY --from=builder /build/target/release/utexo-bridge-enclave ./utexo-bridge-enclave
+
+RUN chown -R enclave:enclave .
+
+USER enclave
+
+ENV ENCLAVE_LISTEN_ADDR=0.0.0.0:5000
+ENV BITCOIN_NETWORK=signet
+ENV RUST_LOG=info
+
+EXPOSE 5000
+
+ENTRYPOINT ["./utexo-bridge-enclave"]
