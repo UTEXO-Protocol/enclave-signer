@@ -213,11 +213,19 @@ impl EnclaveService for ParentAdapterService {
     }
 
     /// PublicKey — returns the enclave's public key bytes.
+    /// Dispatches on `data_type`: SWAP → EVM address, otherwise → BTC compressed pubkey.
     async fn public_key(
         &self,
-        _request: Request<PublicKeyRequest>,
+        request: Request<PublicKeyRequest>,
     ) -> Result<Response<PublicKeyResponse>, Status> {
-        tracing::info!("gRPC PublicKey called");
+        let inner = request.into_inner();
+        let data_type = DataType::try_from(inner.data_type).unwrap_or(DataType::Transaction);
+        tracing::info!(
+            ?data_type,
+            network_id = inner.network_id,
+            "gRPC PublicKey called"
+        );
+
         let enclave_req = EnclaveRequest {
             request: Some(enclave_request::Request::GetPublicKey(
                 enclave_proto::GetPublicKeyRequest {},
@@ -228,11 +236,11 @@ impl EnclaveService for ParentAdapterService {
 
         match resp.response {
             Some(enclave_response::Response::PublicKeys(r)) => {
-                // Return the BTC compressed pubkey as the primary public key.
-                // The Go side uses this for cosigner identification.
-                Ok(Response::new(PublicKeyResponse {
-                    public_key: r.btc_compressed_pub,
-                }))
+                let public_key = match data_type {
+                    DataType::Swap => r.evm_address,
+                    _ => r.btc_compressed_pub,
+                };
+                Ok(Response::new(PublicKeyResponse { public_key }))
             }
             Some(enclave_response::Response::Error(e)) => Err(Self::enclave_error_to_status(&e)),
             other => Err(Status::internal(format!(

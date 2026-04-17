@@ -138,6 +138,30 @@ async fn grpc_public_key_roundtrip() {
         .into_inner();
 
     assert_eq!(resp.public_key.len(), 33, "BTC compressed pubkey");
+    assert_eq!(resp.public_key, vec![0xBB; 33]);
+}
+
+#[tokio::test]
+async fn grpc_public_key_returns_evm_address_for_swap() {
+    let enclave_port = start_mock_enclave();
+    let grpc_port = start_grpc_server(enclave_port).await;
+
+    let mut client = EnclaveServiceClient::connect(format!("http://127.0.0.1:{grpc_port}"))
+        .await
+        .unwrap();
+
+    let resp = client
+        .public_key(PublicKeyRequest {
+            network_id: 0,
+            data_type: DataType::Swap as i32,
+            algorithm: None,
+        })
+        .await
+        .unwrap()
+        .into_inner();
+
+    assert_eq!(resp.public_key.len(), 20, "EVM address is 20 bytes");
+    assert_eq!(resp.public_key, vec![0xAA; 20]);
 }
 
 #[tokio::test]

@@ -87,9 +87,10 @@ fn main() {
 
     #[cfg(not(all(feature = "vsock", target_os = "linux")))]
     {
-        let listen_addr = std::env::var("ENCLAVE_LISTEN_ADDR").unwrap_or_else(|_| "127.0.0.1:5000".into());
-        let listener =
-            TcpListener::bind(&listen_addr).unwrap_or_else(|_| panic!("failed to bind TCP {listen_addr}"));
+        let listen_addr =
+            std::env::var("ENCLAVE_LISTEN_ADDR").unwrap_or_else(|_| "127.0.0.1:5000".into());
+        let listener = TcpListener::bind(&listen_addr)
+            .unwrap_or_else(|_| panic!("failed to bind TCP {listen_addr}"));
         tracing::info!(%listen_addr, "listening on TCP");
 
         for stream in listener.incoming() {
