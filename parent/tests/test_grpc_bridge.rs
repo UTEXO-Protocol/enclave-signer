@@ -46,6 +46,7 @@ fn start_mock_enclave() -> u16 {
                             master_fingerprint: vec![0xDD; 4],
                             account_xpub_vanilla: "tpub-vanilla-test".into(),
                             account_xpub_colored: "tpub-colored-test".into(),
+                            evm_uncompressed_pub: vec![0xEE; 64],
                         },
                     )),
                 },
@@ -73,6 +74,7 @@ fn start_mock_enclave() -> u16 {
                             master_fingerprint: vec![0xDD; 4],
                             account_xpub_vanilla: "tpub-vanilla-test".into(),
                             account_xpub_colored: "tpub-colored-test".into(),
+                            evm_uncompressed_pub: vec![0xEE; 64],
                         },
                     )),
                 },
@@ -137,8 +139,8 @@ async fn grpc_public_key_roundtrip() {
         .unwrap()
         .into_inner();
 
-    assert_eq!(resp.public_key.len(), 33, "BTC compressed pubkey");
-    assert_eq!(resp.public_key, vec![0xBB; 33]);
+    assert_eq!(resp.public_key.len(), 64, "EVM uncompressed pubkey X||Y");
+    assert_eq!(resp.public_key, vec![0xEE; 64]);
 }
 
 #[tokio::test]
@@ -160,8 +162,8 @@ async fn grpc_public_key_returns_evm_address_for_swap() {
         .unwrap()
         .into_inner();
 
-    assert_eq!(resp.public_key.len(), 20, "EVM address is 20 bytes");
-    assert_eq!(resp.public_key, vec![0xAA; 20]);
+    assert_eq!(resp.public_key.len(), 64, "EVM uncompressed pubkey X||Y for SWAP");
+    assert_eq!(resp.public_key, vec![0xEE; 64]);
 }
 
 #[tokio::test]

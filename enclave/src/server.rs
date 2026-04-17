@@ -151,6 +151,7 @@ fn handle_initialize(state: &EnclaveState, req: InitializeKeyRequest) -> Result<
             master_fingerprint: keys.master_fingerprint.to_vec(),
             account_xpub_vanilla: keys.account_xpub_vanilla,
             account_xpub_colored: keys.account_xpub_colored,
+            evm_uncompressed_pub: keys.evm_uncompressed_pub.to_vec(),
         })),
     })
 }
@@ -172,6 +173,7 @@ fn handle_get_public_key(
             master_fingerprint: keys.master_fingerprint.to_vec(),
             account_xpub_vanilla: keys.account_xpub_vanilla,
             account_xpub_colored: keys.account_xpub_colored,
+            evm_uncompressed_pub: keys.evm_uncompressed_pub.to_vec(),
         })),
     })
 }

@@ -213,7 +213,9 @@ impl EnclaveService for ParentAdapterService {
     }
 
     /// PublicKey — returns the enclave's public key bytes.
-    /// Dispatches on `data_type`: SWAP → EVM address, otherwise → BTC compressed pubkey.
+    /// Dispatches on `data_type`:
+    ///   TRANSACTION/SWAP/SIGNATURE/COMMISSION/OWNER_MULTIPLE_SIGNATURE → 64-byte uncompressed X||Y
+    ///   UNSPENDABLE and other BTC-specific → 33-byte compressed pubkey
     async fn public_key(
         &self,
         request: Request<PublicKeyRequest>,
@@ -237,8 +239,8 @@ impl EnclaveService for ParentAdapterService {
         match resp.response {
             Some(enclave_response::Response::PublicKeys(r)) => {
                 let public_key = match data_type {
-                    DataType::Swap => r.evm_address,
-                    _ => r.btc_compressed_pub,
+                    DataType::Unspendable => r.btc_compressed_pub,
+                    _ => r.evm_uncompressed_pub,
                 };
                 Ok(Response::new(PublicKeyResponse { public_key }))
             }
