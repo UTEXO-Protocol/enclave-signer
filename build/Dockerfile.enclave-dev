@@ -13,7 +13,7 @@ WORKDIR /build
 COPY . /build/
 
 WORKDIR /build/enclave
-RUN cargo build --release
+RUN cargo build --release --features allow-seed-import
 
 # ===== Runtime Stage =====
 FROM debian:bookworm-slim
@@ -32,7 +32,7 @@ RUN chown -R enclave:enclave .
 USER enclave
 
 ENV ENCLAVE_LISTEN_ADDR=0.0.0.0:5000
-ENV BITCOIN_NETWORK=signet
+ENV BITCOIN_NETWORK=testnet
 ENV RUST_LOG=info
 
 EXPOSE 5000

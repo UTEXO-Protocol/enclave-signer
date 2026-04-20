@@ -252,17 +252,23 @@ impl EnclaveService for ParentAdapterService {
         }
     }
 
-    /// Initialize — generates new keys in the enclave from OS entropy.
+    /// Initialize — generates new keys in the enclave.
+    /// If cloning_secret is provided, it is forwarded as a BIP-39 mnemonic;
+    /// otherwise the enclave generates keys from OS entropy.
     async fn initialize(
         &self,
-        _request: Request<InitializeRequest>,
+        request: Request<InitializeRequest>,
     ) -> Result<Response<InitializeResponse>, Status> {
-        tracing::info!("gRPC Initialize called");
+        let inner = request.into_inner();
+        tracing::info!(
+            has_mnemonic = !inner.cloning_secret.is_empty(),
+            "gRPC Initialize called"
+        );
         let enclave_req = EnclaveRequest {
             request: Some(enclave_request::Request::InitializeKey(
                 enclave_proto::InitializeKeyRequest {
                     seed: vec![],
-                    mnemonic: String::new(),
+                    mnemonic: inner.cloning_secret,
                 },
             )),
         };
