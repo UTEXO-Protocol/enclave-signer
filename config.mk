@@ -8,7 +8,7 @@ LATEST_COMMIT           := $(shell git rev-parse --short HEAD)
 # Image names.
 PARENT_IMAGE      := utexo-bridge-parent
 ENCLAVE_IMAGE     := utexo-bridge-enclave
-ENCLAVE_DEV_IMAGE := utexo-bridge-enclave
+ENCLAVE_DEV_IMAGE := utexo-bridge-enclave-light
 
 # Variables for build.
 IMAGE_PARENT_BACKUP      = $(REGISTRY_HOST)/$(PARENT_IMAGE)$(ENVIRONMENT):$(CURRENT_DATE_TIME)-$(LATEST_COMMIT)
