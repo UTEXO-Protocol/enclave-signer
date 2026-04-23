@@ -1,0 +1,82 @@
+name: "CD Develop Environment"
+
+on:
+  push:
+    branches: [dev]
+  workflow_dispatch:
+
+env:
+  REGISTRY: ghcr.io/utexo-protocol
+  ENVIRONMENT: "-dev"
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - name: parent
+            image: utexo-bridge-parent
+            dockerfile: ./build/Dockerfile.parent
+          - name: enclave-light
+            image: utexo-bridge-enclave-light
+            dockerfile: ./build/Dockerfile.enclave-dev
+      fail-fast: false
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push ${{ matrix.name }}
+        uses: docker/build-push-action@v6
+        id: build_attempt
+        continue-on-error: true
+        with:
+          context: .
+          file: ${{ matrix.dockerfile }}
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/${{ matrix.image }}${{ env.ENVIRONMENT }}:${{ github.sha }}
+            ${{ env.REGISTRY }}/${{ matrix.image }}${{ env.ENVIRONMENT }}:latest
+          cache-from: type=gha,scope=build-${{ matrix.name }}
+          cache-to: type=gha,scope=build-${{ matrix.name }},mode=max
+
+      - name: Rebuild without cache on failure
+        if: steps.build_attempt.outcome == 'failure'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ${{ matrix.dockerfile }}
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/${{ matrix.image }}${{ env.ENVIRONMENT }}:${{ github.sha }}
+            ${{ env.REGISTRY }}/${{ matrix.image }}${{ env.ENVIRONMENT }}:latest
+
+  deploy:
+    needs: [build]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Deploy to dev server
+        uses: appleboy/ssh-action@master
+        with:
+          host: ${{ secrets.SSH_HOST_DEV }}
+          port: ${{ secrets.SSH_PORT }}
+          username: ${{ secrets.SSH_USERNAME }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          script: |
+            cd ${{ secrets.PROJECT_PATH_DEV }}
+            ./deploy.sh > /dev/null 2>&1
+            echo "Deploy completed successfully"
