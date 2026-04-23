@@ -135,6 +135,7 @@ impl EnclaveState {
         self.with_active(|km| {
             Ok(KeyInfo {
                 evm_address: *km.evm_address(),
+                evm_uncompressed_pub: *km.evm_uncompressed_pub(),
                 btc_compressed_pubkey: *km.btc_compressed_pubkey(),
                 btc_xpub: km.btc_xpub().to_string(),
                 master_fingerprint: km.master_fingerprint().to_bytes(),

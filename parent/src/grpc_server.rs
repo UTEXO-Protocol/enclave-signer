@@ -213,11 +213,21 @@ impl EnclaveService for ParentAdapterService {
     }
 
     /// PublicKey — returns the enclave's public key bytes.
+    /// Dispatches on `data_type`:
+    ///   TRANSACTION/SWAP/SIGNATURE/COMMISSION/OWNER_MULTIPLE_SIGNATURE → 64-byte uncompressed X||Y
+    ///   UNSPENDABLE and other BTC-specific → 33-byte compressed pubkey
     async fn public_key(
         &self,
-        _request: Request<PublicKeyRequest>,
+        request: Request<PublicKeyRequest>,
     ) -> Result<Response<PublicKeyResponse>, Status> {
-        tracing::info!("gRPC PublicKey called");
+        let inner = request.into_inner();
+        let data_type = DataType::try_from(inner.data_type).unwrap_or(DataType::Transaction);
+        tracing::info!(
+            ?data_type,
+            network_id = inner.network_id,
+            "gRPC PublicKey called"
+        );
+
         let enclave_req = EnclaveRequest {
             request: Some(enclave_request::Request::GetPublicKey(
                 enclave_proto::GetPublicKeyRequest {},
@@ -228,11 +238,11 @@ impl EnclaveService for ParentAdapterService {
 
         match resp.response {
             Some(enclave_response::Response::PublicKeys(r)) => {
-                // Return the BTC compressed pubkey as the primary public key.
-                // The Go side uses this for cosigner identification.
-                Ok(Response::new(PublicKeyResponse {
-                    public_key: r.btc_compressed_pub,
-                }))
+                let public_key = match data_type {
+                    DataType::Unspendable => r.btc_compressed_pub,
+                    _ => r.evm_uncompressed_pub,
+                };
+                Ok(Response::new(PublicKeyResponse { public_key }))
             }
             Some(enclave_response::Response::Error(e)) => Err(Self::enclave_error_to_status(&e)),
             other => Err(Status::internal(format!(
@@ -242,17 +252,23 @@ impl EnclaveService for ParentAdapterService {
         }
     }
 
-    /// Initialize — generates new keys in the enclave from OS entropy.
+    /// Initialize — generates new keys in the enclave.
+    /// If cloning_secret is provided, it is forwarded as a BIP-39 mnemonic;
+    /// otherwise the enclave generates keys from OS entropy.
     async fn initialize(
         &self,
-        _request: Request<InitializeRequest>,
+        request: Request<InitializeRequest>,
     ) -> Result<Response<InitializeResponse>, Status> {
-        tracing::info!("gRPC Initialize called");
+        let inner = request.into_inner();
+        tracing::info!(
+            has_mnemonic = !inner.cloning_secret.is_empty(),
+            "gRPC Initialize called"
+        );
         let enclave_req = EnclaveRequest {
             request: Some(enclave_request::Request::InitializeKey(
                 enclave_proto::InitializeKeyRequest {
                     seed: vec![],
-                    mnemonic: String::new(),
+                    mnemonic: inner.cloning_secret,
                 },
             )),
         };

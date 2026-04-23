@@ -46,6 +46,7 @@ fn start_mock_enclave() -> u16 {
                             master_fingerprint: vec![0xDD; 4],
                             account_xpub_vanilla: "tpub-vanilla-test".into(),
                             account_xpub_colored: "tpub-colored-test".into(),
+                            evm_uncompressed_pub: vec![0xEE; 64],
                         },
                     )),
                 },
@@ -73,6 +74,7 @@ fn start_mock_enclave() -> u16 {
                             master_fingerprint: vec![0xDD; 4],
                             account_xpub_vanilla: "tpub-vanilla-test".into(),
                             account_xpub_colored: "tpub-colored-test".into(),
+                            evm_uncompressed_pub: vec![0xEE; 64],
                         },
                     )),
                 },
@@ -137,7 +139,31 @@ async fn grpc_public_key_roundtrip() {
         .unwrap()
         .into_inner();
 
-    assert_eq!(resp.public_key.len(), 33, "BTC compressed pubkey");
+    assert_eq!(resp.public_key.len(), 64, "EVM uncompressed pubkey X||Y");
+    assert_eq!(resp.public_key, vec![0xEE; 64]);
+}
+
+#[tokio::test]
+async fn grpc_public_key_returns_evm_address_for_swap() {
+    let enclave_port = start_mock_enclave();
+    let grpc_port = start_grpc_server(enclave_port).await;
+
+    let mut client = EnclaveServiceClient::connect(format!("http://127.0.0.1:{grpc_port}"))
+        .await
+        .unwrap();
+
+    let resp = client
+        .public_key(PublicKeyRequest {
+            network_id: 0,
+            data_type: DataType::Swap as i32,
+            algorithm: None,
+        })
+        .await
+        .unwrap()
+        .into_inner();
+
+    assert_eq!(resp.public_key.len(), 64, "EVM uncompressed pubkey X||Y for SWAP");
+    assert_eq!(resp.public_key, vec![0xEE; 64]);
 }
 
 #[tokio::test]

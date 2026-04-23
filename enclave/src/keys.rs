@@ -20,6 +20,7 @@ const RGB_COIN_TYPE: u32 = 827167;
 /// Public key info extracted from KeyManager for responses.
 pub struct KeyInfo {
     pub evm_address: [u8; 20],
+    pub evm_uncompressed_pub: [u8; 64],
     pub btc_compressed_pubkey: [u8; 33],
     pub btc_xpub: String,
     pub master_fingerprint: [u8; 4],
@@ -41,6 +42,7 @@ pub struct KeyManager {
     evm_secret: SecretBox<[u8; 32]>,
     btc_secret: SecretBox<[u8; 32]>,
     evm_address: [u8; 20],
+    evm_uncompressed_pub: [u8; 64],
     btc_compressed_pubkey: [u8; 33],
     btc_xpub: Xpub,
     // BIP-86 taproot account keys
@@ -109,7 +111,9 @@ impl KeyManager {
         // EVM address: keccak256(uncompressed_pubkey[1..])[12..]
         let evm_pubkey = PublicKey::from_secret_key(&secp, &evm_secret_key);
         let evm_uncompressed = evm_pubkey.serialize_uncompressed();
-        let hash = Keccak256::digest(&evm_uncompressed[1..]);
+        let mut evm_uncompressed_pub = [0u8; 64];
+        evm_uncompressed_pub.copy_from_slice(&evm_uncompressed[1..]);
+        let hash = Keccak256::digest(&evm_uncompressed_pub);
         let mut evm_address = [0u8; 20];
         evm_address.copy_from_slice(&hash[12..32]);
 
@@ -164,6 +168,7 @@ impl KeyManager {
             evm_secret,
             btc_secret,
             evm_address,
+            evm_uncompressed_pub,
             btc_compressed_pubkey,
             btc_xpub,
             master_fingerprint,
@@ -177,6 +182,10 @@ impl KeyManager {
 
     pub fn evm_address(&self) -> &[u8; 20] {
         &self.evm_address
+    }
+
+    pub fn evm_uncompressed_pub(&self) -> &[u8; 64] {
+        &self.evm_uncompressed_pub
     }
 
     pub fn btc_compressed_pubkey(&self) -> &[u8; 33] {

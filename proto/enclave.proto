@@ -51,6 +51,7 @@ message InitializeKeyResponse {
   bytes master_fingerprint      = 4;  // 4 bytes — BIP-32 master key fingerprint for cosigner identification
   string account_xpub_vanilla   = 5;  // BIP-86 account xpub for vanilla (BTC) operations: m/86'/<coin>'/0'
   string account_xpub_colored   = 6;  // BIP-86 account xpub for colored (RGB) operations: m/86'/827167'/0'
+  bytes evm_uncompressed_pub    = 7;  // 64 bytes — secp256k1 X||Y (no 04 prefix), needed by EVM connectors
 }
 
 message GetPublicKeyRequest {
@@ -65,6 +66,7 @@ message PublicKeysResponse {
   bytes master_fingerprint      = 4;
   string account_xpub_vanilla   = 5;
   string account_xpub_colored   = 6;
+  bytes evm_uncompressed_pub    = 7;  // 64 bytes — secp256k1 X||Y (no 04 prefix)
 }
 
 // === EVM Signing (RGB→EVM direction) ===

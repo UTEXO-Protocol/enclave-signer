@@ -1,5 +1,8 @@
 /// Parent Adapter configuration, populated from environment variables.
 pub struct Config {
+    /// Host for the gRPC server to bind (default 127.0.0.1; use 0.0.0.0 in Docker).
+    pub grpc_host: String,
+
     /// Port for the gRPC server (Listener connects here).
     pub grpc_port: u16,
 
@@ -19,6 +22,7 @@ pub struct Config {
 impl Config {
     pub fn from_env() -> Self {
         Self {
+            grpc_host: std::env::var("GRPC_HOST").unwrap_or_else(|_| "127.0.0.1".into()),
             grpc_port: env_or("GRPC_PORT", 5000),
             enclave_addr: std::env::var("ENCLAVE_ADDR").unwrap_or_else(|_| "127.0.0.1:5000".into()),
             enclave_vsock_cid: env_or("ENCLAVE_VSOCK_CID", 16),

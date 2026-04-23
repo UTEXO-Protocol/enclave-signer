@@ -20,4 +20,7 @@ pub mod enriched {
 /// This matches the federated-signer-node's listener-enclave.proto interface.
 pub mod grpc_proto {
     tonic::include_proto!("tricorn");
+
+    pub const FILE_DESCRIPTOR_SET: &[u8] =
+        tonic::include_file_descriptor_set!("tricorn_descriptor");
 }
