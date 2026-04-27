@@ -1,5 +1,3 @@
-use std::net::TcpStream;
-
 use crate::enclave_proto::{
     enclave_request, enclave_response, EnclaveRequest, EnclaveResponse, EvmSignatureResponse,
     GetPublicKeyRequest, InitializeKeyRequest, InitializeKeyResponse, PublicKeysResponse,
@@ -31,6 +29,7 @@ impl EnclaveClient {
         }
         #[cfg(not(feature = "vsock"))]
         {
+            use std::net::TcpStream;
             let mut stream = TcpStream::connect(&self.addr)
                 .map_err(|e| ParentError::Connection(e.to_string()))?;
             framing::write_message(&mut stream, req)?;
