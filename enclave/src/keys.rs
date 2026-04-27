@@ -733,7 +733,6 @@ mod tests {
         use bitcoin::{
             Amount, OutPoint, ScriptBuf, Sequence, Transaction, TxIn, TxOut, Txid, XOnlyPublicKey,
         };
-        use std::collections::BTreeMap;
 
         let secp = Secp256k1::new();
 
@@ -831,7 +830,7 @@ mod tests {
             .insert(control_block, (tap_script, LeafVersion::TapScript));
 
         // Set tap_key_origins for our key
-        let our_fingerprint = km.master_fingerprint().clone();
+        let our_fingerprint = *km.master_fingerprint();
         let our_derivation = DerivationPath::from(vec![
             ChildNumber::from_hardened_idx(86).unwrap(),
             ChildNumber::from_hardened_idx(1).unwrap(), // testnet
@@ -887,8 +886,6 @@ mod tests {
 
     #[test]
     fn test_sign_taproot_psbt_schnorr_signature_valid() {
-        use bitcoin::secp256k1::schnorr;
-
         let km = KeyManager::from_seed([0x42u8; 64], Network::Testnet).unwrap();
         let psbt_bytes = build_test_taproot_psbt(&km);
 
