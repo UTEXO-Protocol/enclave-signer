@@ -162,7 +162,11 @@ async fn grpc_public_key_returns_evm_address_for_swap() {
         .unwrap()
         .into_inner();
 
-    assert_eq!(resp.public_key.len(), 64, "EVM uncompressed pubkey X||Y for SWAP");
+    assert_eq!(
+        resp.public_key.len(),
+        64,
+        "EVM uncompressed pubkey X||Y for SWAP"
+    );
     assert_eq!(resp.public_key, vec![0xEE; 64]);
 }
 
