@@ -171,11 +171,8 @@ impl EnclaveService for ParentAdapterService {
                             proxy_contract: payload.proxy_contract,
                             calldata_amount: payload.calldata_amount,
                             calldata_commission: payload.calldata_commission,
-                            // Note: the enriched proto uses consignment_sha256 (SHA-256),
-                            // while the enclave proto uses consignment_hash (keccak256).
-                            // The Go Listener handles this distinction; we pass through as-is.
-                            consignment: vec![],
-                            consignment_hash: payload.consignment_sha256,
+                            consignment: payload.consignment,
+                            consignment_hash: payload.consignment_hash,
                         },
                     )),
                 }

@@ -56,6 +56,7 @@ message EnrichedEvmPayload {
   uint64 calldata_amount = 9;
   uint64 calldata_commission = 10;
 
-  // SHA-256(consignment file) — 32 bytes.
-  bytes consignment_sha256 = 11;
+  bytes consignment = 11;
+  // keccak256(consignment) — 32 bytes; Enclave integrity check (see SignEvmRequest).
+  bytes consignment_hash = 12;
 }
