@@ -113,7 +113,7 @@ impl KeyManager {
         let evm_uncompressed = evm_pubkey.serialize_uncompressed();
         let mut evm_uncompressed_pub = [0u8; 64];
         evm_uncompressed_pub.copy_from_slice(&evm_uncompressed[1..]);
-        let hash = Keccak256::digest(&evm_uncompressed_pub);
+        let hash = Keccak256::digest(evm_uncompressed_pub);
         let mut evm_address = [0u8; 20];
         evm_address.copy_from_slice(&hash[12..32]);
 
