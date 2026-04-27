@@ -190,7 +190,8 @@ async fn grpc_sign_evm_roundtrip() {
         proxy_contract: vec![],
         calldata_amount: 0,
         calldata_commission: 0,
-        consignment_sha256: vec![],
+        consignment: vec![],
+        consignment_hash: vec![],
     };
 
     let req = SignRequest {
@@ -276,6 +277,7 @@ async fn grpc_evm_passes_enriched_fields_through() {
         .await
         .unwrap();
 
+    let consignment_bytes = vec![0xAB; 100];
     let consignment_hash = b"test-consignment-hash-32bytes!!!".to_vec();
 
     let payload = enriched::EnrichedEvmPayload {
@@ -289,7 +291,8 @@ async fn grpc_evm_passes_enriched_fields_through() {
         proxy_contract: vec![0x01; 20],
         calldata_amount: 50,
         calldata_commission: 5,
-        consignment_sha256: consignment_hash.clone(),
+        consignment: consignment_bytes.clone(),
+        consignment_hash: consignment_hash.clone(),
     };
 
     let req = SignRequest {
@@ -309,7 +312,76 @@ async fn grpc_evm_passes_enriched_fields_through() {
     assert!(received.consignment_valid);
     assert_eq!(received.rgb_amount, 100);
     assert_eq!(received.chain_id, 1);
-    // consignment_sha256 maps to consignment_hash on the enclave side
+    assert_eq!(received.consignment, consignment_bytes);
+    assert_eq!(received.consignment_hash, consignment_hash);
+}
+
+#[tokio::test]
+async fn grpc_evm_forwards_raw_consignment_bytes() {
+    // Regression: parent adapter previously hardcoded consignment: vec![] and
+    // forwarded only the hash. After the listener wire-format change (field 11
+    // is now raw bytes; new field 12 carries keccak256), both must round-trip.
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let enclave_port = listener.local_addr().unwrap().port();
+
+    let (tx, rx) = std::sync::mpsc::channel::<enclave_proto::SignEvmRequest>();
+
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let mut stream = stream.unwrap();
+            let req: EnclaveRequest = framing::read_message(&mut stream).unwrap();
+
+            if let Some(enclave_request::Request::SignEvm(evm_req)) = req.request {
+                tx.send(evm_req).unwrap();
+                let resp = EnclaveResponse {
+                    response: Some(enclave_response::Response::EvmSignature(
+                        enclave_proto::EvmSignatureResponse {
+                            signature: vec![0xCC; 65],
+                        },
+                    )),
+                };
+                let _ = framing::write_message(&mut stream, &resp);
+            }
+        }
+    });
+
+    let grpc_port = start_grpc_server(enclave_port).await;
+    let mut client = EnclaveServiceClient::connect(format!("http://127.0.0.1:{grpc_port}"))
+        .await
+        .unwrap();
+
+    let consignment_bytes: Vec<u8> = (0..256u32).map(|i| (i & 0xFF) as u8).collect();
+    let consignment_hash = vec![0x5A; 32];
+
+    let payload = enriched::EnrichedEvmPayload {
+        call_data: vec![0xAB; 132],
+        nonce: 7,
+        deadline: 1234,
+        consignment_valid: true,
+        rgb_amount: 0,
+        rgb_asset_id: String::new(),
+        chain_id: 1,
+        proxy_contract: vec![0x02; 20],
+        calldata_amount: 0,
+        calldata_commission: 0,
+        consignment: consignment_bytes.clone(),
+        consignment_hash: consignment_hash.clone(),
+    };
+
+    let req = SignRequest {
+        network_id: 0,
+        data_type: DataType::Swap as i32,
+        data: payload.encode_to_vec(),
+        inputs: vec![],
+        algorithm: None,
+    };
+
+    client.sign(req).await.unwrap();
+
+    let received = rx.recv_timeout(std::time::Duration::from_secs(2)).unwrap();
+    assert_eq!(received.consignment.len(), 256);
+    assert_eq!(received.consignment, consignment_bytes);
+    assert_eq!(received.consignment_hash.len(), 32);
     assert_eq!(received.consignment_hash, consignment_hash);
 }
 
