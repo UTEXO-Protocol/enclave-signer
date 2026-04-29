@@ -22,6 +22,14 @@ service EnclaveService {
 
   // Requests HD seed from peer enclave (cluster cloning with attestation).
   rpc Clone(CloneRequest) returns (CloneResponse);
+
+  // Returns the last block header stored in enclave's in-memory cache.
+  // Listener calls this to know from where to resume header sync.
+  rpc GetLastSavedBlock(GetLastSavedBlockRequest) returns (GetLastSavedBlockResponse);
+
+  // Pushes a batch of Bitcoin block headers into the enclave's cache.
+  // Listener fetches from Esplora and feeds them in ascending-height batches.
+  rpc SubmitHeaders(SubmitHeadersRequest) returns (SubmitHeadersResponse);
 }
 
 message InitializeRequest {
@@ -40,4 +48,26 @@ message CloneRequest {
 
 message CloneResponse {
   bytes encrypted_seed = 1;
+}
+
+// --- SPV: Bitcoin header sync ---
+// Mirrors enclave.proto SubmitHeaders / GetLastSavedBlock. The Parent Adapter
+// forwards these unchanged to the enclave wire protocol.
+
+message GetLastSavedBlockRequest {}
+
+message GetLastSavedBlockResponse {
+  uint32 block_height = 1;
+  bytes  block_hash   = 2;   // 32 bytes
+}
+
+message SubmitHeadersRequest {
+  repeated bytes headers      = 1;   // raw 80-byte Bitcoin headers (batch of up to ~500)
+  uint32         start_height = 2;   // block number of the first header in this batch
+}
+
+message SubmitHeadersResponse {
+  uint32 last_block_height = 1;      // enclave's latest block after processing
+  bytes  last_block_hash   = 2;      // 32 bytes
+  uint32 headers_accepted  = 3;      // how many from the batch were valid
 }

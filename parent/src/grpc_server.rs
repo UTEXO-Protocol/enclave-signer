@@ -11,8 +11,9 @@ use crate::enriched;
 const ENCLAVE_TIMEOUT: Duration = Duration::from_secs(30);
 use crate::grpc_proto::enclave_service_server::EnclaveService;
 use crate::grpc_proto::{
-    CloneRequest, CloneResponse, DataType, InitializeRequest, InitializeResponse, PublicKeyRequest,
-    PublicKeyResponse, SignRequest, Signature,
+    CloneRequest, CloneResponse, DataType, GetLastSavedBlockRequest, GetLastSavedBlockResponse,
+    InitializeRequest, InitializeResponse, PublicKeyRequest, PublicKeyResponse, SignRequest,
+    Signature, SubmitHeadersRequest, SubmitHeadersResponse,
 };
 
 /// Enclave connection target — either TCP address or vsock CID+port.
@@ -295,5 +296,78 @@ impl EnclaveService for ParentAdapterService {
         Err(Status::unimplemented(
             "Clone not yet implemented (cluster cloning)",
         ))
+    }
+
+    /// GetLastSavedBlock — forwards to enclave. PR 1 wires the surface only;
+    /// the enclave currently returns NOT_READY until the SPV header chain
+    /// lands in PR 2 (see docs/spv-review.md).
+    async fn get_last_saved_block(
+        &self,
+        _request: Request<GetLastSavedBlockRequest>,
+    ) -> Result<Response<GetLastSavedBlockResponse>, Status> {
+        tracing::info!("gRPC GetLastSavedBlock called");
+
+        let enclave_req = EnclaveRequest {
+            request: Some(enclave_request::Request::GetLastSavedBlock(
+                enclave_proto::GetLastSavedBlockRequest {},
+            )),
+        };
+
+        let resp = self.send_to_enclave(enclave_req).await?;
+
+        match resp.response {
+            Some(enclave_response::Response::GetLastSavedBlock(r)) => {
+                Ok(Response::new(GetLastSavedBlockResponse {
+                    block_height: r.block_height,
+                    block_hash: r.block_hash,
+                }))
+            }
+            Some(enclave_response::Response::Error(e)) => Err(Self::enclave_error_to_status(&e)),
+            other => Err(Status::internal(format!(
+                "unexpected enclave response for GetLastSavedBlock: {:?}",
+                other
+            ))),
+        }
+    }
+
+    /// SubmitHeaders — forwards a batch of raw 80-byte Bitcoin headers to the
+    /// enclave. PR 1 wires the surface only; the enclave currently returns
+    /// NOT_READY until the SPV header chain lands in PR 2.
+    async fn submit_headers(
+        &self,
+        request: Request<SubmitHeadersRequest>,
+    ) -> Result<Response<SubmitHeadersResponse>, Status> {
+        let inner = request.into_inner();
+        tracing::info!(
+            headers_len = inner.headers.len(),
+            start_height = inner.start_height,
+            "gRPC SubmitHeaders called"
+        );
+
+        let enclave_req = EnclaveRequest {
+            request: Some(enclave_request::Request::SubmitHeaders(
+                enclave_proto::SubmitHeadersRequest {
+                    headers: inner.headers,
+                    start_height: inner.start_height,
+                },
+            )),
+        };
+
+        let resp = self.send_to_enclave(enclave_req).await?;
+
+        match resp.response {
+            Some(enclave_response::Response::SubmitHeaders(r)) => {
+                Ok(Response::new(SubmitHeadersResponse {
+                    last_block_height: r.last_block_height,
+                    last_block_hash: r.last_block_hash,
+                    headers_accepted: r.headers_accepted,
+                }))
+            }
+            Some(enclave_response::Response::Error(e)) => Err(Self::enclave_error_to_status(&e)),
+            other => Err(Status::internal(format!(
+                "unexpected enclave response for SubmitHeaders: {:?}",
+                other
+            ))),
+        }
     }
 }

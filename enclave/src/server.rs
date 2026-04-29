@@ -80,6 +80,18 @@ fn dispatch(request: EnclaveRequest, ctx: &ServerContext) -> EnclaveResponse {
             tracing::info!("request: SetClone");
             handle_set_clone(&ctx.state, req)
         }
+        Some(Request::SubmitHeaders(req)) => {
+            tracing::info!(
+                headers_len = req.headers.len(),
+                start_height = req.start_height,
+                "request: SubmitHeaders"
+            );
+            handle_submit_headers(req)
+        }
+        Some(Request::GetLastSavedBlock(req)) => {
+            tracing::info!("request: GetLastSavedBlock");
+            handle_get_last_saved_block(req)
+        }
         None => {
             tracing::warn!("received empty request (no oneof variant set)");
             return EnclaveResponse {
@@ -327,6 +339,27 @@ fn handle_proxy_federation(_req: ProxyFederationRequest) -> Result<EnclaveRespon
         response: Some(Response::Error(ErrorResponse {
             code: 2, // NOT_READY
             message: "federation proxy not yet connected to Listener".into(),
+        })),
+    })
+}
+
+// SPV header sync stubs. The proto + grpc surface is wired so the Listener's
+// header-sync daemon can compile and connect, but header validation +
+// in-memory chain land in PR 2; Merkle proof verification lands in PR 3.
+fn handle_submit_headers(_req: SubmitHeadersRequest) -> Result<EnclaveResponse> {
+    Ok(EnclaveResponse {
+        response: Some(Response::Error(ErrorResponse {
+            code: 2, // NOT_READY
+            message: "SPV header chain not yet implemented (see docs/spv-review.md)".into(),
+        })),
+    })
+}
+
+fn handle_get_last_saved_block(_req: GetLastSavedBlockRequest) -> Result<EnclaveResponse> {
+    Ok(EnclaveResponse {
+        response: Some(Response::Error(ErrorResponse {
+            code: 2, // NOT_READY
+            message: "SPV header chain not yet implemented (see docs/spv-review.md)".into(),
         })),
     })
 }
