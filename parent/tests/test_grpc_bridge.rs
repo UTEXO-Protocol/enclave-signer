@@ -78,6 +78,23 @@ fn start_mock_enclave() -> u16 {
                         },
                     )),
                 },
+                Some(enclave_request::Request::GetLastSavedBlock(_)) => EnclaveResponse {
+                    response: Some(enclave_response::Response::GetLastSavedBlock(
+                        enclave_proto::GetLastSavedBlockResponse {
+                            block_height: 215_000,
+                            block_hash: vec![0x11; 32],
+                        },
+                    )),
+                },
+                Some(enclave_request::Request::SubmitHeaders(req)) => EnclaveResponse {
+                    response: Some(enclave_response::Response::SubmitHeaders(
+                        enclave_proto::SubmitHeadersResponse {
+                            last_block_height: req.start_height + req.headers.len() as u32 - 1,
+                            last_block_hash: vec![0x22; 32],
+                            headers_accepted: req.headers.len() as u32,
+                        },
+                    )),
+                },
                 _ => EnclaveResponse {
                     response: Some(enclave_response::Response::Error(
                         enclave_proto::ErrorResponse {
@@ -192,6 +209,7 @@ async fn grpc_sign_evm_roundtrip() {
         calldata_commission: 0,
         consignment: vec![],
         consignment_hash: vec![],
+        merkle_proofs: vec![],
     };
 
     let req = SignRequest {
@@ -293,6 +311,7 @@ async fn grpc_evm_passes_enriched_fields_through() {
         calldata_commission: 5,
         consignment: consignment_bytes.clone(),
         consignment_hash: consignment_hash.clone(),
+        merkle_proofs: vec![],
     };
 
     let req = SignRequest {
@@ -366,6 +385,7 @@ async fn grpc_evm_forwards_raw_consignment_bytes() {
         calldata_commission: 0,
         consignment: consignment_bytes.clone(),
         consignment_hash: consignment_hash.clone(),
+        merkle_proofs: vec![],
     };
 
     let req = SignRequest {
@@ -456,4 +476,47 @@ async fn grpc_initialize_roundtrip() {
         33,
         "public_key should be BTC compressed pubkey"
     );
+}
+
+#[tokio::test]
+async fn grpc_get_last_saved_block_roundtrip() {
+    let enclave_port = start_mock_enclave();
+    let grpc_port = start_grpc_server(enclave_port).await;
+
+    let mut client = EnclaveServiceClient::connect(format!("http://127.0.0.1:{grpc_port}"))
+        .await
+        .unwrap();
+
+    let resp = client
+        .get_last_saved_block(utexo_bridge_parent::grpc_proto::GetLastSavedBlockRequest {})
+        .await
+        .unwrap()
+        .into_inner();
+
+    assert_eq!(resp.block_height, 215_000);
+    assert_eq!(resp.block_hash, vec![0x11; 32]);
+}
+
+#[tokio::test]
+async fn grpc_submit_headers_roundtrip() {
+    let enclave_port = start_mock_enclave();
+    let grpc_port = start_grpc_server(enclave_port).await;
+
+    let mut client = EnclaveServiceClient::connect(format!("http://127.0.0.1:{grpc_port}"))
+        .await
+        .unwrap();
+
+    let headers = vec![vec![0xAB; 80], vec![0xCD; 80], vec![0xEF; 80]];
+    let resp = client
+        .submit_headers(utexo_bridge_parent::grpc_proto::SubmitHeadersRequest {
+            headers: headers.clone(),
+            start_height: 215_001,
+        })
+        .await
+        .unwrap()
+        .into_inner();
+
+    assert_eq!(resp.last_block_height, 215_003);
+    assert_eq!(resp.last_block_hash, vec![0x22; 32]);
+    assert_eq!(resp.headers_accepted, 3);
 }
