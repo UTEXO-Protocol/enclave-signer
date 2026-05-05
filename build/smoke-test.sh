@@ -34,15 +34,18 @@ for arg in "$@"; do
     esac
 done
 
-# Find parent binary: explicit env var > release build > debug build
+# Find parent CLI binary: explicit env var > release build > debug build.
+# NOTE: the binary is utexo-bridge-parent-CLI, not utexo-bridge-parent (the
+# latter is the gRPC server and ignores subcommands). Earlier revisions of
+# this script pointed at the wrong binary.
 if [ -n "${PARENT_BIN:-}" ]; then
     :
-elif [ -f "./target/release/utexo-bridge-parent" ]; then
-    PARENT_BIN="./target/release/utexo-bridge-parent"
-elif [ -f "./target/debug/utexo-bridge-parent" ]; then
-    PARENT_BIN="./target/debug/utexo-bridge-parent"
+elif [ -f "./target/release/utexo-bridge-parent-cli" ]; then
+    PARENT_BIN="./target/release/utexo-bridge-parent-cli"
+elif [ -f "./target/debug/utexo-bridge-parent-cli" ]; then
+    PARENT_BIN="./target/debug/utexo-bridge-parent-cli"
 else
-    PARENT_BIN="utexo-bridge-parent"
+    PARENT_BIN="utexo-bridge-parent-cli"
 fi
 
 log()  { echo -e "${YELLOW}[TEST]${NC} $1"; }
@@ -256,6 +259,140 @@ fi
 log "10. ProxyFederation (stub — should return NOT_READY)"
 # No CLI subcommand for federation yet, so we skip if not available
 skip "ProxyFederation" "no CLI subcommand yet — test via integration tests"
+
+# =============================================================================
+# SPV header sync RPCs (PR 3 wired GetLastSavedBlock + SubmitHeaders).
+# =============================================================================
+# These tests exercise the wire path (CLI -> parent -> enclave -> back) without
+# requiring valid Bitcoin headers. Building a synthetic chain that links to the
+# compiled-in checkpoint is unit-test territory; here we want to prove the RPC
+# surface is reachable, the chain is initialised, the lock isn't deadlocked,
+# and the various failure modes (gap, below-checkpoint, malformed bytes) are
+# rejected on the wire.
+#
+# A future PR can add a `build/spv-fixtures/regtest-headers.txt` file and a
+# happy-path "real header inserted" case; for now we deliberately avoid that
+# fixture so the smoke test stays lightweight and shell-only.
+
+# ─────────────────────────────────────────────
+# 11. GetLastSavedBlock baseline
+# ─────────────────────────────────────────────
+log "11. GetLastSavedBlock — chain initialised at boot"
+LAST_BLOCK_OUTPUT=$(run_parent get-last-saved-block) && RC=$? || RC=$?
+
+if [ $RC -eq 0 ] && echo "$LAST_BLOCK_OUTPUT" | grep -q "Block hash"; then
+    BLOCK_HEIGHT=$(echo "$LAST_BLOCK_OUTPUT" | grep "Block height" | awk '{print $NF}')
+    BLOCK_HASH=$(echo "$LAST_BLOCK_OUTPUT" | grep "Block hash" | awk '{print $NF}')
+    BLOCK_HASH_LEN=$((${#BLOCK_HASH} / 2))
+    if [ "$BLOCK_HASH_LEN" -eq 32 ]; then
+        pass "GetLastSavedBlock — height=$BLOCK_HEIGHT, 32-byte hash"
+    else
+        fail "GetLastSavedBlock" "expected 32-byte hash, got $BLOCK_HASH_LEN bytes"
+    fi
+else
+    fail "GetLastSavedBlock" "$LAST_BLOCK_OUTPUT"
+fi
+
+# Stash the initial tip so test 16 can prove the failed submits left the
+# chain unchanged.
+INITIAL_HEIGHT="$BLOCK_HEIGHT"
+INITIAL_HASH="$BLOCK_HASH"
+
+# Helpers for tests 12–15 — write a temp headers file, clean up at exit.
+TMP_HDR_DIR="$(mktemp -d)"
+trap 'rm -rf "$TMP_HDR_DIR"' EXIT
+
+empty_headers_file()    { local f="$TMP_HDR_DIR/empty.txt";   : > "$f"; echo "$f"; }
+malformed_headers_file() {
+    # 79 bytes (158 hex chars) — one short of a valid Bitcoin header. The
+    # enclave's deserializer will reject this with HeaderParse.
+    local f="$TMP_HDR_DIR/short.txt"
+    printf '%0.s00' $(seq 1 158) > "$f"
+    echo >> "$f"
+    echo "$f"
+}
+filler_headers_file() {
+    # 80 bytes of zeros — parses, but won't link to the placeholder checkpoint
+    # whose hash is also zeros (because prev_blockhash on the all-zero header
+    # is itself zero, which would link it to the checkpoint — but our chain
+    # rejects start_height <= checkpoint, so we use this for the gap test).
+    local f="$TMP_HDR_DIR/zero.txt"
+    printf '%0.s00' $(seq 1 160) > "$f"
+    echo >> "$f"
+    echo "$f"
+}
+
+# ─────────────────────────────────────────────
+# 12. SubmitHeaders empty batch at tip+1 — no-op success
+# ─────────────────────────────────────────────
+log "12. SubmitHeaders — empty batch at tip+1 returns headers_accepted=0"
+NEXT_HEIGHT=$((INITIAL_HEIGHT + 1))
+EMPTY_FILE="$(empty_headers_file)"
+EMPTY_OUTPUT=$(run_parent submit-headers --start-height "$NEXT_HEIGHT" --headers-file "$EMPTY_FILE") && RC=$? || RC=$?
+
+if [ $RC -eq 0 ] && echo "$EMPTY_OUTPUT" | grep -q "Headers accepted: *0"; then
+    pass "SubmitHeaders empty batch — accepted=0"
+else
+    fail "SubmitHeaders empty batch" "$EMPTY_OUTPUT"
+fi
+
+# ─────────────────────────────────────────────
+# 13. SubmitHeaders with a gap above the tip
+# ─────────────────────────────────────────────
+log "13. SubmitHeaders — gap above tip (start_height=tip+5) is rejected"
+GAP_HEIGHT=$((INITIAL_HEIGHT + 5))
+FILLER_FILE="$(filler_headers_file)"
+GAP_OUTPUT=$(run_parent submit-headers --start-height "$GAP_HEIGHT" --headers-file "$FILLER_FILE") && RC=$? || RC=$?
+
+if [ $RC -ne 0 ] && echo "$GAP_OUTPUT" | grep -qi "gap\|spv\|enclave error"; then
+    pass "SubmitHeaders gap correctly rejected"
+else
+    fail "SubmitHeaders gap" "expected error, got: $GAP_OUTPUT"
+fi
+
+# ─────────────────────────────────────────────
+# 14. SubmitHeaders at-or-below checkpoint
+# ─────────────────────────────────────────────
+log "14. SubmitHeaders — start_height at checkpoint is rejected"
+# Submitting AT the checkpoint height would rewrite the trust anchor.
+BELOW_OUTPUT=$(run_parent submit-headers --start-height "$INITIAL_HEIGHT" --headers-file "$FILLER_FILE") && RC=$? || RC=$?
+
+if [ $RC -ne 0 ] && echo "$BELOW_OUTPUT" | grep -qi "checkpoint\|trust anchor\|spv\|enclave error"; then
+    pass "SubmitHeaders below-checkpoint correctly rejected"
+else
+    fail "SubmitHeaders below-checkpoint" "expected error, got: $BELOW_OUTPUT"
+fi
+
+# ─────────────────────────────────────────────
+# 15. SubmitHeaders with malformed bytes
+# ─────────────────────────────────────────────
+log "15. SubmitHeaders — malformed (79-byte) header is rejected"
+SHORT_FILE="$(malformed_headers_file)"
+MALFORMED_OUTPUT=$(run_parent submit-headers --start-height "$NEXT_HEIGHT" --headers-file "$SHORT_FILE") && RC=$? || RC=$?
+
+if [ $RC -ne 0 ] && echo "$MALFORMED_OUTPUT" | grep -qi "header\|parse\|spv\|enclave error"; then
+    pass "SubmitHeaders malformed header correctly rejected"
+else
+    fail "SubmitHeaders malformed" "expected error, got: $MALFORMED_OUTPUT"
+fi
+
+# ─────────────────────────────────────────────
+# 16. GetLastSavedBlock unchanged after failed submits
+# ─────────────────────────────────────────────
+log "16. GetLastSavedBlock — tip unchanged after failed submits (atomic-on-error)"
+AFTER_OUTPUT=$(run_parent get-last-saved-block) && RC=$? || RC=$?
+
+if [ $RC -eq 0 ]; then
+    AFTER_HEIGHT=$(echo "$AFTER_OUTPUT" | grep "Block height" | awk '{print $NF}')
+    AFTER_HASH=$(echo "$AFTER_OUTPUT" | grep "Block hash" | awk '{print $NF}')
+    if [ "$AFTER_HEIGHT" = "$INITIAL_HEIGHT" ] && [ "$AFTER_HASH" = "$INITIAL_HASH" ]; then
+        pass "Chain tip unchanged ($AFTER_HEIGHT / ${AFTER_HASH:0:16}…)"
+    else
+        fail "Chain tip mutated" "before=($INITIAL_HEIGHT,$INITIAL_HASH) after=($AFTER_HEIGHT,$AFTER_HASH)"
+    fi
+else
+    fail "GetLastSavedBlock (after)" "$AFTER_OUTPUT"
+fi
 
 # ─────────────────────────────────────────────
 # Summary

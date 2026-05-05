@@ -1,8 +1,9 @@
 use crate::enclave_proto::{
     enclave_request, enclave_response, EnclaveRequest, EnclaveResponse, EvmSignatureResponse,
-    GetPublicKeyRequest, InitializeKeyRequest, InitializeKeyResponse, PublicKeysResponse,
-    RawSignatureResponse, SignEvmRequest, SignPsbtRequest, SignRawMessageRequest,
-    SignedPsbtResponse,
+    GetLastSavedBlockRequest, GetLastSavedBlockResponse, GetPublicKeyRequest, InitializeKeyRequest,
+    InitializeKeyResponse, PublicKeysResponse, RawSignatureResponse, SignEvmRequest,
+    SignPsbtRequest, SignRawMessageRequest, SignedPsbtResponse, SubmitHeadersRequest,
+    SubmitHeadersResponse,
 };
 use crate::error::{ParentError, Result};
 use crate::framing;
@@ -137,6 +138,53 @@ impl EnclaveClient {
         let resp = self.send_request(&req)?;
         match resp.response {
             Some(enclave_response::Response::RawSignature(r)) => Ok(r),
+            Some(enclave_response::Response::Error(e)) => Err(ParentError::EnclaveError {
+                code: e.code,
+                message: e.message,
+            }),
+            other => Err(ParentError::Connection(format!(
+                "unexpected response variant: {:?}",
+                other
+            ))),
+        }
+    }
+
+    pub fn get_last_saved_block(&self) -> Result<GetLastSavedBlockResponse> {
+        let req = EnclaveRequest {
+            request: Some(enclave_request::Request::GetLastSavedBlock(
+                GetLastSavedBlockRequest {},
+            )),
+        };
+        let resp = self.send_request(&req)?;
+        match resp.response {
+            Some(enclave_response::Response::GetLastSavedBlock(r)) => Ok(r),
+            Some(enclave_response::Response::Error(e)) => Err(ParentError::EnclaveError {
+                code: e.code,
+                message: e.message,
+            }),
+            other => Err(ParentError::Connection(format!(
+                "unexpected response variant: {:?}",
+                other
+            ))),
+        }
+    }
+
+    pub fn submit_headers(
+        &self,
+        start_height: u32,
+        headers: Vec<Vec<u8>>,
+    ) -> Result<SubmitHeadersResponse> {
+        let req = EnclaveRequest {
+            request: Some(enclave_request::Request::SubmitHeaders(
+                SubmitHeadersRequest {
+                    headers,
+                    start_height,
+                },
+            )),
+        };
+        let resp = self.send_request(&req)?;
+        match resp.response {
+            Some(enclave_response::Response::SubmitHeaders(r)) => Ok(r),
             Some(enclave_response::Response::Error(e)) => Err(ParentError::EnclaveError {
                 code: e.code,
                 message: e.message,

@@ -1,4 +1,5 @@
 use std::io::{self, BufRead, Write};
+use std::path::PathBuf;
 use std::process;
 
 use clap::{Parser, Subcommand};
@@ -101,6 +102,23 @@ enum Command {
         /// Hex-encoded message bytes
         #[arg(long)]
         message: String,
+    },
+    /// Get the enclave's current SPV chain tip (height + hash).
+    /// Listener calls this on startup to know where to resume header sync.
+    GetLastSavedBlock,
+    /// Push a batch of Bitcoin block headers into the enclave's SPV chain.
+    ///
+    /// Headers are read from a file: one hex-encoded 80-byte header per line,
+    /// in ascending height order. Empty lines and lines starting with `#` are
+    /// ignored. Pass an empty file to send a no-op batch (useful for smoke
+    /// testing — proves the dispatch path without a fixture chain).
+    SubmitHeaders {
+        /// Block height of the first header in the batch.
+        #[arg(long)]
+        start_height: u32,
+        /// Path to a file with one hex-encoded header per line (80 bytes = 160 hex chars).
+        #[arg(long)]
+        headers_file: PathBuf,
     },
     /// Enter interactive REPL mode
     Interactive,
@@ -355,6 +373,64 @@ fn main() {
                 }
             }
         }
+        Command::GetLastSavedBlock => match client.get_last_saved_block() {
+            Ok(r) => {
+                println!("Block height: {}", r.block_height);
+                println!("Block hash:   {}", hex::encode(&r.block_hash));
+            }
+            Err(e) => {
+                eprintln!("Error: {}", e);
+                process::exit(1);
+            }
+        },
+        Command::SubmitHeaders {
+            start_height,
+            headers_file,
+        } => {
+            let headers = match read_headers_file(&headers_file) {
+                Ok(h) => h,
+                Err(e) => {
+                    eprintln!("Error reading {}: {}", headers_file.display(), e);
+                    process::exit(1);
+                }
+            };
+            match client.submit_headers(start_height, headers) {
+                Ok(r) => {
+                    println!("Last block height: {}", r.last_block_height);
+                    println!("Last block hash:   {}", hex::encode(&r.last_block_hash));
+                    println!("Headers accepted:  {}", r.headers_accepted);
+                }
+                Err(e) => {
+                    eprintln!("Error: {}", e);
+                    process::exit(1);
+                }
+            }
+        }
         Command::Interactive => run_interactive(&client),
     }
+}
+
+/// Parse a headers file: one hex-encoded 80-byte header per line, blank lines
+/// and `#` comments ignored. Wrong-length lines are surfaced as errors so
+/// silent corruption can't sneak in.
+fn read_headers_file(path: &std::path::Path) -> std::io::Result<Vec<Vec<u8>>> {
+    let contents = std::fs::read_to_string(path)?;
+    let mut headers = Vec::new();
+    for (lineno, raw) in contents.lines().enumerate() {
+        let line = raw.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let bytes = hex::decode(line).map_err(|e| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("line {}: invalid hex: {}", lineno + 1, e),
+            )
+        })?;
+        // Don't enforce 80 bytes here — the enclave will reject on parse.
+        // Keeping the CLI permissive lets us deliberately send malformed
+        // headers in smoke tests.
+        headers.push(bytes);
+    }
+    Ok(headers)
 }
