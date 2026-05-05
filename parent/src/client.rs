@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use crate::enclave_proto::{
     enclave_request, enclave_response, EnclaveRequest, EnclaveResponse, EvmSignatureResponse,
     GetLastSavedBlockRequest, GetLastSavedBlockResponse, GetPublicKeyRequest, InitializeKeyRequest,
@@ -7,6 +9,19 @@ use crate::enclave_proto::{
 };
 use crate::error::{ParentError, Result};
 use crate::framing;
+
+/// Connect timeout. Localhost connect resolves in microseconds; this is
+/// only relevant when reaching across a network (or through a mis-routed
+/// vsock proxy).
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Read timeout for the response. Without this, an unrelated peer that
+/// accepts the TCP connection but never speaks our wire protocol (the
+/// classic case being macOS AirPlay Receiver hijacking port 5000) makes
+/// the CLI hang forever instead of failing fast. Enclave operations that
+/// could legitimately take a while (key generation, RGB consignment
+/// validation against Esplora) still need to fit inside this budget.
+const READ_TIMEOUT: Duration = Duration::from_secs(30);
 
 pub struct EnclaveClient {
     addr: String,
@@ -30,9 +45,20 @@ impl EnclaveClient {
         }
         #[cfg(not(feature = "vsock"))]
         {
-            use std::net::TcpStream;
-            let mut stream = TcpStream::connect(&self.addr)
+            use std::net::{TcpStream, ToSocketAddrs};
+            let socket_addr = self
+                .addr
+                .to_socket_addrs()
+                .map_err(|e| ParentError::Connection(format!("resolve {}: {}", self.addr, e)))?
+                .next()
+                .ok_or_else(|| {
+                    ParentError::Connection(format!("no addresses for {}", self.addr))
+                })?;
+            let mut stream = TcpStream::connect_timeout(&socket_addr, CONNECT_TIMEOUT)
                 .map_err(|e| ParentError::Connection(e.to_string()))?;
+            stream
+                .set_read_timeout(Some(READ_TIMEOUT))
+                .map_err(|e| ParentError::Connection(format!("set_read_timeout: {e}")))?;
             framing::write_message(&mut stream, req)?;
             framing::read_message(&mut stream)
         }

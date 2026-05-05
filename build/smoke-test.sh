@@ -67,10 +67,83 @@ echo ""
 
 # Check binary exists
 if ! command -v "$PARENT_BIN" &>/dev/null && [ ! -f "$PARENT_BIN" ]; then
-    echo -e "${RED}Error: parent binary not found at '$PARENT_BIN'${NC}"
-    echo "Set PARENT_BIN env var or place utexo-bridge-parent in current directory."
+    echo -e "${RED}Error: CLI binary not found at '$PARENT_BIN'${NC}"
+    echo "Run 'cargo build --bin utexo-bridge-parent-cli' or set PARENT_BIN env var."
     exit 1
 fi
+
+# Preflight: prove the peer at $ADDR speaks our wire protocol, not just
+# "something accepts TCP here". A naive `nc -z` is insufficient on macOS
+# because port 5000 is hijacked by AirPlay Receiver — nc happily connects,
+# we then write our length-prefixed protobuf into AirPlay's mouth, and the
+# CLI hangs forever waiting for a response that will never come.
+#
+# Strategy: run `get-keys` once. The enclave responds with one of two
+# stable patterns:
+#   - "EVM address ..."  (initialised — typical re-run state)
+#   - "key not initialized" (fresh enclave — typical first-run state)
+# Any other output (or a timeout from EnclaveClient's READ_TIMEOUT) means
+# we're talking to something that isn't our enclave. Bail with hints.
+preflight_handshake() {
+    local addr="$1"
+    local out
+    out=$("$PARENT_BIN" --addr "$addr" get-keys 2>&1) || true
+    if echo "$out" | grep -qiE "EVM address|key not initialized|not initialized"; then
+        return 0
+    fi
+    echo "$out" >&2
+    return 1
+}
+
+# Friendly diagnostic for the macOS-on-port-5000 case. Detects the
+# AirPlay Receiver process holding port 5000 and tells the user where to
+# turn it off.
+print_airplay_hint_if_relevant() {
+    local addr="$1"
+    case "$(uname -s)" in
+        Darwin) ;;  # continue
+        *) return 0 ;;
+    esac
+    case "$addr" in
+        *:5000) ;;
+        *) return 0 ;;
+    esac
+    if command -v lsof &>/dev/null && lsof -nP -iTCP:5000 -sTCP:LISTEN 2>/dev/null | grep -q "ControlCe"; then
+        echo ""
+        echo -e "${YELLOW}macOS AirPlay Receiver is holding port 5000.${NC}"
+        echo "Either:"
+        echo "  1. Disable AirPlay Receiver:"
+        echo "     System Settings → General → AirDrop & Handoff → AirPlay Receiver → Off"
+        echo "  2. Use a different port (recommended for dev):"
+        echo "     ENCLAVE_LISTEN_ADDR=127.0.0.1:5050 cargo run --bin utexo-bridge-enclave"
+        echo "     ./build/smoke-test.sh --addr=127.0.0.1:5050"
+    fi
+}
+
+case "$ADDR" in
+    vsock://*)
+        # vsock preflight needs nitro-cli describe-enclaves; left to the host.
+        if ! command -v nitro-cli &>/dev/null; then
+            echo -e "${YELLOW}Warning: nitro-cli not in PATH; cannot verify enclave is running${NC}"
+        fi
+        ;;
+    *)
+        echo "Preflight: handshake against $ADDR..."
+        if ! preflight_handshake "$ADDR"; then
+            echo -e "${RED}Error: $ADDR is not responding with our enclave wire protocol.${NC}"
+            echo ""
+            echo "Start the enclave first, then re-run this script:"
+            echo ""
+            echo "  RUST_LOG=info cargo run --bin utexo-bridge-enclave"
+            echo ""
+            echo "(in a separate terminal). For Nitro Enclave / vsock mode use --vsock."
+            print_airplay_hint_if_relevant "$ADDR"
+            exit 1
+        fi
+        echo -e "${GREEN}Preflight OK — peer speaks the enclave wire protocol${NC}"
+        echo ""
+        ;;
+esac
 
 # ─────────────────────────────────────────────
 # 1. Initialize keys
