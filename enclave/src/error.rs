@@ -62,6 +62,15 @@ pub enum EnclaveError {
 
     #[error("identity mismatch: cloned seed does not derive to expected address")]
     IdentityMismatch,
+
+    #[error("spv: {0}")]
+    Spv(String),
+}
+
+impl From<crate::spv::SpvError> for EnclaveError {
+    fn from(e: crate::spv::SpvError) -> Self {
+        EnclaveError::Spv(e.to_string())
+    }
 }
 
 impl EnclaveError {
@@ -69,6 +78,7 @@ impl EnclaveError {
     pub fn error_code(&self) -> u32 {
         match self {
             EnclaveError::CrossCheck(_) => 3,   // ERROR_CODE_VALIDATION_FAILED
+            EnclaveError::Spv(_) => 3,          // ERROR_CODE_VALIDATION_FAILED
             EnclaveError::NotReady { .. } => 2, // ERROR_CODE_NOT_READY
             _ => 1,
         }

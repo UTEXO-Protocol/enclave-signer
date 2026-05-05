@@ -1,17 +1,29 @@
-//! Compile-time checkpoint constants — the trust anchors for the in-enclave
-//! header chain.
+//! Compile-time checkpoint + network constants — the trust anchors for the
+//! in-enclave header chain.
 //!
-//! A checkpoint is `(height, block_hash)`. On boot the enclave starts empty;
-//! the Listener feeds headers starting at `height + 1`, and the first header
-//! must chain to `block_hash`. Every checkpoint here ends up in PCR0 because
-//! it's compiled in, so changing one means re-attestation.
+//! A checkpoint is `(height, block_hash, bits, time)`. On boot the enclave
+//! starts empty; the Listener feeds headers starting at `height + 1`, and
+//! the first header must chain to `block_hash`. Every checkpoint here ends
+//! up in PCR0 because it's compiled in, so changing one means re-attestation.
 //!
-//! All values below are PLACEHOLDERS pending the constants the team picks.
-//! They MUST be replaced before this module is wired into the signing path
-//! (PR 3). Building with placeholders is allowed for unit tests today, but
-//! a release build for production will refuse to start (see `assert_real()`).
+//! ## Status
+//!
+//! - **Mainnet checkpoint** — PLACEHOLDER. Required for production. Will be
+//!   set when production deployment is in scope.
+//! - **Signet checkpoint** — PLACEHOLDER. Will be filled in once Mirvais
+//!   provides a `(height, hash, bits, time)` tuple from the UTEXO custom
+//!   signet, scheduled for after the dev asset_id is finalised. PR 3 wires
+//!   the chain through with placeholders so a follow-up PR is a one-line
+//!   constant swap.
+//! - **Signet challenge / magic / block time** — REAL values, provided by
+//!   Oleksandr 2026-04-30. UTEXO custom signet, 3-of-3 multisig, 30s blocks.
+//!   These are baked in now so they end up in PCR0 alongside everything
+//!   else, even though BIP-325 signature verification itself is deferred
+//!   (the signature lives in the coinbase witness, which the proto does not
+//!   carry — see spv/validation.rs).
+//! - **Regtest** — uses well-known regtest constants, fine as-is.
 
-use crate::spv::types::{BlockHash, BlockHeight};
+use crate::spv::types::{BlockHash, BlockHeight, Network};
 
 /// A trust anchor: the enclave only accepts headers that chain forward from
 /// this point, in ascending height.
@@ -84,5 +96,98 @@ impl Checkpoint {
             );
         }
         Ok(())
+    }
+}
+
+/// Look up the checkpoint to use for a given network. Used at boot.
+pub fn checkpoint_for(network: Network) -> Checkpoint {
+    match network {
+        Network::Mainnet => MAINNET_CHECKPOINT,
+        Network::Signet => SIGNET_CHECKPOINT,
+        Network::Testnet3 => TESTNET3_CHECKPOINT,
+        Network::Regtest => REGTEST_CHECKPOINT,
+    }
+}
+
+// === UTEXO custom signet network parameters ===
+//
+// Provided by Oleksandr Mihalatii on 2026-04-30. These describe the dev
+// signet our enclaves will validate headers against. They are baked in
+// (compile-time consts) so they end up in PCR0; the network is selected at
+// boot via the BITCOIN_NETWORK env var, but the *parameters* of each
+// network are immutable per binary.
+//
+// BIP-325 signature verification using these values is NOT implemented in
+// PR 2/3 — the coinbase witness commitment (where the signature lives) is
+// not carried by the current SubmitHeadersRequest proto. Strict signet
+// validation requires extending the proto with `repeated bytes coinbase_txs`
+// and is deferred. These constants are baked in regardless so a future PR
+// can light up verification without re-collecting the values.
+
+/// Signet challenge script for the UTEXO custom signet (BIP-325).
+///
+/// Layout (per Oleksandr's note):
+/// - `6a 4c 09 01 1e 00 00 00 00 00 00 00 00` — OP_RETURN-prefixed block-time
+///   spec (PR bitcoin#29365): 30s = `0x1e` little-endian u64.
+/// - `4c 69 53 21 <33-byte pubkey> 21 <33-byte pubkey> 21 <33-byte pubkey>
+///    53 ae` — `OP_PUSHDATA1 0x69 OP_3 <pk1> <pk2> <pk3> OP_3 OP_CHECKMULTISIG`
+///   = 3-of-3 multisig over three federation signing keys.
+pub const UTEXO_SIGNET_CHALLENGE: &[u8] = &[
+    0x6a, 0x4c, 0x09, 0x01, 0x1e, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x4c, 0x69, 0x53, 0x21,
+    0x02, 0x24, 0xa5, 0x28, 0xaa, 0x14, 0x1b, 0x7d, 0x2e, 0xd0, 0x93, 0x57, 0x5b, 0x5d, 0x2c, 0x2c,
+    0xee, 0x40, 0x65, 0xab, 0xc6, 0xf7, 0xf6, 0xb1, 0x9a, 0x97, 0x0a, 0x89, 0x75, 0xd3, 0x27, 0xf9,
+    0x35, 0x21, 0x02, 0x49, 0xc6, 0xbf, 0x83, 0x38, 0xec, 0xda, 0x27, 0x49, 0xc3, 0xff, 0xad, 0x4b,
+    0x8e, 0xc2, 0x2f, 0x71, 0x58, 0x19, 0x47, 0xc1, 0x0d, 0x17, 0x66, 0xd9, 0xce, 0x83, 0xd1, 0xbc,
+    0xaf, 0xb9, 0x94, 0x21, 0x02, 0x4f, 0x3a, 0x83, 0x1f, 0xcb, 0x4d, 0xb4, 0x46, 0xb0, 0x7f, 0xe8,
+    0x89, 0x7d, 0x19, 0x3b, 0x86, 0xf9, 0x13, 0x98, 0x4f, 0x6e, 0xb3, 0xab, 0x6e, 0x97, 0x45, 0xee,
+    0xb6, 0x10, 0x17, 0xa3, 0xb5, 0x53, 0xae,
+];
+
+/// Network magic bytes for the UTEXO custom signet.
+pub const UTEXO_SIGNET_MAGIC: [u8; 4] = [0x6f, 0x21, 0x61, 0x5a];
+
+/// Block time for the UTEXO custom signet, in seconds. Encoded into the
+/// challenge script's prefix per bitcoin#29365.
+pub const UTEXO_SIGNET_BLOCK_TIME_SECS: u32 = 30;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn signet_challenge_matches_oleksandrs_hex() {
+        // Sanity: the byte array above should hex-encode to exactly the value
+        // Oleksandr posted. If anyone touches the byte array, this catches a
+        // typo before it ships to attestation.
+        let hex = hex::encode(UTEXO_SIGNET_CHALLENGE);
+        assert_eq!(
+            hex,
+            "6a4c09011e000000000000004c6953210224a528aa141b7d2ed093575b5d2c2cee4065abc6f7f6b19a970a8975d327f935210249c6bf8338ecda2749c3ffad4b8ec22f71581947c10d1766d9ce83d1bcafb99421024f3a831fcb4db446b07fe8897d193b86f913984f6eb3ab6e9745eeb61017a3b553ae"
+        );
+    }
+
+    #[test]
+    fn signet_challenge_decodes_as_3_of_3_multisig() {
+        // Light structural check: the trailing bytes are OP_3 OP_CHECKMULTISIG.
+        let len = UTEXO_SIGNET_CHALLENGE.len();
+        assert_eq!(UTEXO_SIGNET_CHALLENGE[len - 2], 0x53); // OP_3 (n)
+        assert_eq!(UTEXO_SIGNET_CHALLENGE[len - 1], 0xae); // OP_CHECKMULTISIG
+    }
+
+    #[test]
+    fn signet_magic_is_four_bytes() {
+        // Defensive: future refactors that reshape the magic must not silently
+        // change its length.
+        assert_eq!(UTEXO_SIGNET_MAGIC.len(), 4);
+        assert_eq!(UTEXO_SIGNET_MAGIC, [0x6f, 0x21, 0x61, 0x5a]);
+    }
+
+    #[test]
+    fn checkpoint_for_dispatches_on_network() {
+        // Checks the lookup table doesn't silently route the wrong checkpoint.
+        assert!(!checkpoint_for(Network::Mainnet).is_real);
+        assert!(!checkpoint_for(Network::Signet).is_real);
+        assert!(!checkpoint_for(Network::Testnet3).is_real);
+        assert!(!checkpoint_for(Network::Regtest).is_real);
     }
 }

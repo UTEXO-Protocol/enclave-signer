@@ -1,6 +1,7 @@
 use std::net::TcpListener;
 
 use utexo_bridge_enclave::server::{self, ServerContext};
+use utexo_bridge_enclave::spv::{checkpoint_for, HeaderChain, Network};
 use utexo_bridge_enclave::state::EnclaveState;
 
 fn main() {
@@ -71,10 +72,42 @@ fn main() {
         }
     };
 
+    // Initialise the in-enclave Bitcoin header chain at boot, anchored to
+    // the compile-time checkpoint for the active network. The chain starts
+    // empty; the Listener will populate it via SubmitHeaders.
+    let spv_network = Network::from_env_str(&bitcoin_network_str).unwrap_or_else(|e| {
+        tracing::warn!(
+            "spv: unknown BITCOIN_NETWORK '{bitcoin_network_str}' ({e}); defaulting to mainnet"
+        );
+        Network::Mainnet
+    });
+    let checkpoint = checkpoint_for(spv_network);
+    if let Err(msg) = checkpoint.assert_real_in_release() {
+        // In a release production build this is fatal — placeholder
+        // checkpoints would mean the listener can never push headers that
+        // chain to anything real. Crash early and loud.
+        panic!("{msg}");
+    }
+    if !checkpoint.is_real {
+        tracing::warn!(
+            ?spv_network,
+            "spv: using PLACEHOLDER checkpoint (zeros) — header validation will reject any real chain. \
+             Replace the constant in enclave/src/spv/checkpoint.rs before deploying."
+        );
+    } else {
+        tracing::info!(
+            ?spv_network,
+            checkpoint_height = checkpoint.height,
+            "spv: header chain initialised at checkpoint"
+        );
+    }
+    let header_chain = std::sync::Mutex::new(HeaderChain::new(spv_network, checkpoint));
+
     let ctx = ServerContext {
         state,
         #[cfg(feature = "rgb-validation")]
         rgb_validator,
+        header_chain,
     };
 
     #[cfg(all(feature = "vsock", target_os = "linux"))]
