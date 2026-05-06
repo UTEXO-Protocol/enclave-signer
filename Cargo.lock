@@ -202,6 +202,20 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1505bd5d3d116872e7271a6d4e16d81d0c8570876c8de68093a09ac269d8aac0"
 
 [[package]]
+name = "attestation-verify"
+version = "0.1.0"
+dependencies = [
+ "base64",
+ "ciborium",
+ "der",
+ "hex",
+ "p384",
+ "serde",
+ "thiserror 2.0.18",
+ "x509-cert",
+]
+
+[[package]]
 name = "autocfg"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2260,17 +2274,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "sha1"
-version = "0.10.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e3bf829a2d51ab4a5ddf1352d8470c140cadc8301b2ae1789db023f01cedd6ba"
-dependencies = [
- "cfg-if",
- "cpufeatures 0.2.17",
- "digest",
-]
-
-[[package]]
 name = "sha2"
 version = "0.10.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2775,20 +2778,17 @@ checksum = "8ecb6da28b8a351d773b68d5825ac39017e680750f980f3a1a85cd8dd28a47c1"
 name = "utexo-bridge-enclave"
 version = "0.1.0"
 dependencies = [
+ "attestation-verify",
  "aws-nitro-enclaves-nsm-api",
- "base64",
  "bip39",
  "bitcoin",
  "chacha20poly1305",
- "ciborium",
- "der",
  "getrandom 0.4.2",
  "hex",
  "hkdf",
  "hmac",
  "k256",
  "nix 0.31.2",
- "p384",
  "prost 0.14.3",
  "prost-build 0.14.3",
  "rand 0.10.0",
@@ -2804,7 +2804,6 @@ dependencies = [
  "tracing-subscriber",
  "vsock",
  "x25519-dalek",
- "x509-cert",
  "zeroize",
 ]
 
@@ -2813,10 +2812,14 @@ name = "utexo-bridge-parent"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "attestation-verify",
+ "bitcoin",
  "clap",
  "hex",
  "prost 0.13.5",
  "prost-build 0.13.5",
+ "rand 0.8.5",
+ "sha2",
  "thiserror 2.0.18",
  "tokio",
  "tonic",
@@ -2824,6 +2827,7 @@ dependencies = [
  "tonic-reflection",
  "tracing",
  "tracing-subscriber",
+ "utexo-bridge-enclave",
  "vsock",
 ]
 
@@ -3222,8 +3226,6 @@ checksum = "1301e935010a701ae5f8655edc0ad17c44bad3ac5ce8c39185f75453b720ae94"
 dependencies = [
  "const-oid",
  "der",
- "sha1",
- "signature",
  "spki",
  "tls_codec",
 ]

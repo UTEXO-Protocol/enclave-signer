@@ -30,6 +30,13 @@ service EnclaveService {
   // Pushes a batch of Bitcoin block headers into the enclave's cache.
   // Listener fetches from Esplora and feeds them in ascending-height batches.
   rpc SubmitHeaders(SubmitHeadersRequest) returns (SubmitHeadersResponse);
+
+  // Returns the bridge's public-key bundle along with an NSM attestation
+  // document binding the EVM signing pubkey (in `public_key` field) and a
+  // sha256 commitment over the full bundle (in `user_data` field) to the
+  // running enclave's PCRs. The caller-supplied 32-byte `nonce` is echoed
+  // in the doc and MUST be checked for equality on verify (replay defence).
+  rpc AttestedPublicKey(AttestedPublicKeyRequest) returns (AttestedPublicKeyResponse);
 }
 
 message InitializeRequest {
@@ -70,4 +77,21 @@ message SubmitHeadersResponse {
   uint32 last_block_height = 1;      // enclave's latest block after processing
   bytes  last_block_hash   = 2;      // 32 bytes
   uint32 headers_accepted  = 3;      // how many from the batch were valid
+}
+
+// --- Attested public key ---
+
+message AttestedPublicKeyRequest {
+  bytes nonce = 1;                   // MUST be 32 bytes; embedded in NSM doc
+}
+
+message AttestedPublicKeyResponse {
+  bytes  evm_address           = 1;  // 20 bytes
+  bytes  evm_uncompressed_pub  = 2;  // 64 bytes (X||Y) — ALSO present in attestation_doc.public_key
+  bytes  btc_compressed_pub    = 3;  // 33 bytes
+  string btc_xpub              = 4;
+  bytes  master_fingerprint    = 5;  // 4 bytes
+  string account_xpub_vanilla  = 6;
+  string account_xpub_colored  = 7;
+  bytes  attestation_doc       = 8;  // COSE_Sign1 NSM doc (real) or raw CBOR (mock)
 }

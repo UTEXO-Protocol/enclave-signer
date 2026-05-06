@@ -17,6 +17,7 @@ message EnclaveRequest {
     SetCloneRequest        set_clone         = 9;
     SubmitHeadersRequest      submit_headers        = 11;
     GetLastSavedBlockRequest  get_last_saved_block  = 12;
+    GetAttestedPublicKeyRequest get_attested_public_key = 13;
     // Reserved for future:
     // HealthCheckRequest  health_check     = 10;
   }
@@ -35,6 +36,7 @@ message EnclaveResponse {
     SetCloneResponse        set_clone        = 9;
     SubmitHeadersResponse      submit_headers       = 11;
     GetLastSavedBlockResponse  get_last_saved_block = 12;
+    GetAttestedPublicKeyResponse get_attested_public_key = 13;
     // Reserved for future:
     // HealthCheckResponse  health_check     = 10;
     ErrorResponse           error            = 15;
@@ -75,6 +77,29 @@ message PublicKeysResponse {
   string account_xpub_vanilla   = 5;
   string account_xpub_colored   = 6;
   bytes evm_uncompressed_pub    = 7;  // 64 bytes — secp256k1 X||Y (no 04 prefix)
+}
+
+// Returns the public-key bundle along with an NSM attestation document
+// that cryptographically binds the keys to this enclave's PCRs at the time
+// of the call. Lets external verifiers (bridge contract operator, auditors)
+// confirm "the EVM address signing my bridge txs was produced by code with
+// PCR0=X" without any trust in the parent process.
+//
+// `nonce` MUST be a fresh 32 bytes from the verifier — the enclave embeds
+// it in the NSM doc, and the verifier checks equality on response to defeat
+// replay. The NSM doc binds:
+//     public_key field -> evm_uncompressed_pub (64 bytes, primary signing key)
+//     user_data  field -> sha256(canonical_bundle)
+// where canonical_bundle is the length-prefixed concatenation of every key
+// in PublicKeysResponse. A lightweight verifier may stop at the public_key
+// field; a thorough one rebuilds the bundle and checks user_data.
+message GetAttestedPublicKeyRequest {
+  bytes nonce = 1;  // MUST be 32 bytes
+}
+
+message GetAttestedPublicKeyResponse {
+  PublicKeysResponse public_keys     = 1;
+  bytes              attestation_doc = 2;  // COSE_Sign1 NSM attestation (real) or raw CBOR (mock)
 }
 
 // === EVM Signing (RGB→EVM direction) ===

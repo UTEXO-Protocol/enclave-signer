@@ -47,12 +47,10 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # RGB consignment validation (optional, behind rgb-validation feature)
 rgb-ops = { version = "0.11.1-rc.7", features = ["esplora_blocking"], optional = true }
 
-# Attestation verification (NSM COSE_Sign1 + AWS Nitro cert chain)
-ciborium = "0.2"
-p384 = { version = "0.13", features = ["ecdsa", "pem"] }
-x509-cert = { version = "0.2", features = ["pem", "builder"] }
-der = { version = "0.7", features = ["alloc"] }
-base64 = "0.22"
+# Attestation verification (COSE_Sign1 + AWS Nitro cert chain) lives in
+# the workspace `attestation-verify` crate so the parent CLI binary and
+# the enclave share a single verifier.
+attestation-verify = { path = "../attestation-verify" }
 serde = { version = "1", features = ["derive"] }
 
 # Cloning handshake crypto (X25519 DH + HKDF + ChaCha20Poly1305 + HMAC-SHA256)
@@ -89,7 +87,7 @@ rgb-validation = ["rgb-ops"]
 spv = ["rgb-validation"]
 # Mock attestation path: skip NSM / COSE / cert-chain checks and use raw CBOR docs.
 # Testing only — never enable in production builds.
-mock-attestation = []
+mock-attestation = ["attestation-verify/mock"]
 
 [dev-dependencies]
 rand = "0.10.0"

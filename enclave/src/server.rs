@@ -24,6 +24,23 @@ pub struct ServerContext {
     pub header_chain: std::sync::Mutex<crate::spv::HeaderChain>,
 }
 
+impl ServerContext {
+    /// Construct a `ServerContext` from the always-present fields, hiding
+    /// feature-gated fields like `rgb_validator` so external callers
+    /// (e.g. the parent's E2E tests) don't need to mirror our cfg flags.
+    pub fn new(
+        state: EnclaveState,
+        header_chain: std::sync::Mutex<crate::spv::HeaderChain>,
+    ) -> Self {
+        Self {
+            state,
+            #[cfg(feature = "rgb-validation")]
+            rgb_validator: None,
+            header_chain,
+        }
+    }
+}
+
 /// Handle a single connection: read one request, dispatch, write one response, close.
 pub fn handle_connection(stream: impl Read + Write, ctx: &ServerContext) {
     if let Err(e) = process_connection(stream, ctx) {
@@ -98,6 +115,10 @@ fn dispatch(request: EnclaveRequest, ctx: &ServerContext) -> EnclaveResponse {
         Some(Request::GetLastSavedBlock(req)) => {
             tracing::info!("request: GetLastSavedBlock");
             handle_get_last_saved_block(ctx, req)
+        }
+        Some(Request::GetAttestedPublicKey(req)) => {
+            tracing::info!("request: GetAttestedPublicKey");
+            handle_get_attested_public_key(&ctx.state, req)
         }
         None => {
             tracing::warn!("received empty request (no oneof variant set)");
@@ -206,6 +227,78 @@ fn handle_get_public_key(
             account_xpub_colored: keys.account_xpub_colored,
             evm_uncompressed_pub: keys.evm_uncompressed_pub.to_vec(),
         })),
+    })
+}
+
+/// Build the canonical bundle that the verifier hashes to check `user_data`.
+///
+/// Length-prefixed (u32 BE) concatenation of every byte field in
+/// PublicKeysResponse, in the same field order as the proto. Strings are
+/// encoded as their UTF-8 bytes. Order and field set MUST match the
+/// verifier — see `docs/pubkey-attestation.md`.
+fn canonical_pubkey_bundle(keys: &PublicKeysResponse) -> Vec<u8> {
+    let parts: [&[u8]; 7] = [
+        &keys.evm_address,
+        &keys.btc_compressed_pub,
+        keys.btc_xpub.as_bytes(),
+        &keys.master_fingerprint,
+        keys.account_xpub_vanilla.as_bytes(),
+        keys.account_xpub_colored.as_bytes(),
+        &keys.evm_uncompressed_pub,
+    ];
+    let total: usize = parts.iter().map(|p| 4 + p.len()).sum();
+    let mut out = Vec::with_capacity(total);
+    for p in parts {
+        out.extend_from_slice(&(p.len() as u32).to_be_bytes());
+        out.extend_from_slice(p);
+    }
+    out
+}
+
+fn handle_get_attested_public_key(
+    state: &EnclaveState,
+    req: GetAttestedPublicKeyRequest,
+) -> Result<EnclaveResponse> {
+    use sha2::{Digest, Sha256};
+
+    let nonce: [u8; 32] = req.nonce.as_slice().try_into().map_err(|_| {
+        EnclaveError::InvalidRequest(format!("nonce must be 32 bytes, got {}", req.nonce.len()))
+    })?;
+
+    let keys = state.get_keys()?;
+    let public_keys = PublicKeysResponse {
+        evm_address: keys.evm_address.to_vec(),
+        btc_compressed_pub: keys.btc_compressed_pubkey.to_vec(),
+        btc_xpub: keys.btc_xpub,
+        master_fingerprint: keys.master_fingerprint.to_vec(),
+        account_xpub_vanilla: keys.account_xpub_vanilla,
+        account_xpub_colored: keys.account_xpub_colored,
+        evm_uncompressed_pub: keys.evm_uncompressed_pub.to_vec(),
+    };
+
+    let bundle = canonical_pubkey_bundle(&public_keys);
+    let commitment: [u8; 32] = Sha256::digest(&bundle).into();
+
+    let attestation_doc = crate::attestation::get_attestation(
+        &nonce,
+        Some(&public_keys.evm_uncompressed_pub),
+        Some(&commitment),
+    )?;
+
+    tracing::info!(
+        evm_address = %hex::encode(&public_keys.evm_address),
+        commitment = %hex::encode(commitment),
+        attestation_bytes = attestation_doc.len(),
+        "returning attested public keys"
+    );
+
+    Ok(EnclaveResponse {
+        response: Some(Response::GetAttestedPublicKey(
+            GetAttestedPublicKeyResponse {
+                public_keys: Some(public_keys),
+                attestation_doc,
+            },
+        )),
     })
 }
 

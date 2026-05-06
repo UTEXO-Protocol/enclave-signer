@@ -1,0 +1,26 @@
+[package]
+name = "attestation-verify"
+version = "0.1.0"
+edition = "2021"
+description = "AWS Nitro Enclave attestation document verification (COSE_Sign1 + AWS Nitro cert chain)"
+
+[lib]
+name = "attestation_verify"
+path = "src/lib.rs"
+
+[dependencies]
+ciborium = "0.2"
+p384 = { version = "0.13", features = ["ecdsa", "pem"] }
+x509-cert = { version = "0.2", features = ["pem"] }
+der = { version = "0.7", features = ["alloc"] }
+base64 = "0.22"
+serde = { version = "1", features = ["derive"] }
+hex = "0.4"
+thiserror = "2"
+
+[features]
+default = []
+# Enables the mock document path: build raw-CBOR docs without COSE wrapping
+# and verify them without cert-chain checks. PCR/nonce/pubkey binding still
+# enforced. Tests-only.
+mock = []

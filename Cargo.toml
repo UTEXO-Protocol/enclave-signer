@@ -1,5 +1,5 @@
 [workspace]
-members = ["enclave", "parent"]
+members = ["attestation-verify", "enclave", "parent"]
 resolver = "2"
 
 [profile.release]
