@@ -1,3 +1,8 @@
+// `TcpListener` is only used in dev mode (TCP fallback). Gating the import
+// matches the `cfg(not(all(feature = "vsock", target_os = "linux")))` block
+// at the bottom of `main` so the production-combo build (with vsock on
+// Linux) doesn't emit an unused-import warning.
+#[cfg(not(all(feature = "vsock", target_os = "linux")))]
 use std::net::TcpListener;
 
 use utexo_bridge_enclave::server::{self, ServerContext};
