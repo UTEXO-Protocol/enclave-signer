@@ -291,6 +291,7 @@ fn main() {
                 proxy_contract: proxy,
                 calldata_amount,
                 calldata_commission,
+                merkle_proofs: vec![],
                 consignment: vec![],
                 consignment_hash: vec![],
             };

@@ -173,6 +173,7 @@ mod tests {
             // Empty = skip hash check (backwards compatible)
             consignment: vec![],
             consignment_hash: vec![],
+            merkle_proofs: vec![],
         }
     }
 

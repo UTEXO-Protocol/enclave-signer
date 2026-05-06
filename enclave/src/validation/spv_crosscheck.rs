@@ -1,0 +1,613 @@
+//! SPV cross-check: verify the consignment's witness Bitcoin transactions
+//! are included in the in-enclave header chain with sufficient confirmations.
+//!
+//! This is the gate that turns the chain we built in PRs 2/2.5 into an
+//! actual signing precondition. Before signing an EVM unlock, we demand:
+//!
+//! 1. **Coverage**: every witness txid extracted from the consignment is
+//!    backed by a `MerkleProofEntry` from the listener — and there are no
+//!    extra unrelated proofs. Set equality, both directions.
+//! 2. **Cross-network**: the consignment's `chain_net` matches the network
+//!    the enclave is compiled for. Catches "regtest consignment replayed
+//!    against mainnet enclave".
+//! 3. **Inclusion**: every Merkle proof reconstructs to the `merkle_root`
+//!    committed in the header at `block_height` we have stored.
+//! 4. **Confirmation depth**: every witness tx (not just the burn) must be
+//!    at least `SPV_MIN_CONFIRMATIONS` deep — bridge spec §11 explicitly
+//!    forbids relying only on the most recent anchoring transaction.
+//!
+//! Byte order: `MerkleProofEntry.txid` and `MerkleProofEntry.merkle_path`
+//! arrive in **display (big-endian) order** — that's what Esplora returns
+//! and what `rgb-consignment-parser` emits via `.to_string()`. The Merkle
+//! verifier in `spv::merkle` operates in **internal (little-endian) order**
+//! because that's what `sha256d::Hash::hash` produces. Conversion happens
+//! exactly once per hash, at the boundary of `verify_one_proof`. Coverage
+//! checking stays in display order — both sides use the same encoding so
+//! no conversion needed for that step.
+
+use std::collections::BTreeSet;
+
+use bitcoin::hashes::Hash;
+
+use crate::error::{EnclaveError, Result};
+use crate::proto::MerkleProofEntry;
+use crate::spv::{verify_merkle_proof, HeaderChain, MerkleError, Network};
+
+/// Confirmation depth required before the enclave will sign. Compile-time
+/// constant rather than runtime configurable — making it env-driven would
+/// let an operator with control of the host set it to 0 and bypass SPV
+/// entirely while the attestation still passed.
+pub const SPV_MIN_CONFIRMATIONS: u32 = 6;
+
+/// Verify a complete set of SPV proofs against the chain.
+///
+/// `expected_txids` is the witness-txid set extracted from the validated
+/// RGB consignment, in **display byte order** (matches the wire format of
+/// `MerkleProofEntry.txid`). `proofs` are exactly the entries the listener
+/// supplied on the wire.
+pub fn validate_spv_proofs(
+    chain: &HeaderChain,
+    expected_txids: &[[u8; 32]],
+    proofs: &[MerkleProofEntry],
+    min_confirmations: u32,
+) -> Result<()> {
+    // 1. Coverage: build sets in display order, compare both ways.
+    let expected_set: BTreeSet<[u8; 32]> = expected_txids.iter().copied().collect();
+    let mut proof_set: BTreeSet<[u8; 32]> = BTreeSet::new();
+
+    for (i, proof) in proofs.iter().enumerate() {
+        let txid: [u8; 32] = proof.txid.as_slice().try_into().map_err(|_| {
+            EnclaveError::Spv(format!(
+                "merkle_proofs[{i}].txid must be 32 bytes, got {}",
+                proof.txid.len()
+            ))
+        })?;
+        if !proof_set.insert(txid) {
+            return Err(EnclaveError::Spv(format!(
+                "duplicate merkle proof for txid {}",
+                hex::encode(txid)
+            )));
+        }
+        if !expected_set.contains(&txid) {
+            return Err(EnclaveError::Spv(format!(
+                "merkle proof for txid {} does not match any consignment witness txid",
+                hex::encode(txid)
+            )));
+        }
+    }
+
+    if proof_set.len() != expected_set.len() {
+        // expected_set ⊋ proof_set (we already rejected anything in
+        // proof_set ∖ expected_set above). Find what's missing for a
+        // useful error.
+        let missing: Vec<String> = expected_set
+            .difference(&proof_set)
+            .map(hex::encode)
+            .collect();
+        return Err(EnclaveError::Spv(format!(
+            "missing merkle proofs for {} witness txid(s): {}",
+            missing.len(),
+            missing.join(", ")
+        )));
+    }
+
+    // 2. Per-proof: header lookup, confirmation depth, Merkle inclusion.
+    let tip = chain.tip_height();
+    for (i, proof) in proofs.iter().enumerate() {
+        verify_one_proof(chain, tip, min_confirmations, i, proof)?;
+    }
+
+    Ok(())
+}
+
+/// Cross-network replay defense: assert the consignment's `chain_net`
+/// (e.g. `"bc:signet"`) is the one this enclave is compiled for.
+///
+/// rgbstd's full validation also enforces this when `rgb-validation` is on,
+/// but we re-assert at the SPV layer so a future configuration change that
+/// loosens rgbstd validation (e.g. accepting an unresolved consignment for
+/// some niche flow) can never accidentally let a wrong-network consignment
+/// reach the signing path.
+pub fn assert_chain_net(consignment_chain_net: &str, enclave_network: Network) -> Result<()> {
+    let expected = match enclave_network {
+        Network::Mainnet => "bc",
+        Network::Signet => "bc:signet",
+        Network::Testnet3 => "bc:testnet3",
+        Network::Regtest => "bc:regtest",
+    };
+    if consignment_chain_net != expected {
+        return Err(EnclaveError::Spv(format!(
+            "consignment chain_net {consignment_chain_net:?} does not match \
+             enclave network {enclave_network:?} (expected {expected:?})"
+        )));
+    }
+    Ok(())
+}
+
+fn verify_one_proof(
+    chain: &HeaderChain,
+    tip: u32,
+    min_confirmations: u32,
+    index: usize,
+    proof: &MerkleProofEntry,
+) -> Result<()> {
+    // Header lookup. `header_at` returns None for heights at-or-below
+    // checkpoint (we don't store the checkpoint header itself) and for
+    // heights beyond the tip — both are rejection cases here.
+    let header = chain.header_at(proof.block_height).ok_or_else(|| {
+        EnclaveError::Spv(format!(
+            "merkle_proofs[{index}]: no header at height {} (chain tip = {})",
+            proof.block_height, tip
+        ))
+    })?;
+
+    // Confirmation depth, with checked arithmetic. A hostile listener can
+    // send `block_height = u32::MAX`, which without the check would
+    // underflow on `tip - block_height`.
+    let confs = tip
+        .checked_sub(proof.block_height)
+        .and_then(|d| d.checked_add(1))
+        .ok_or_else(|| {
+            EnclaveError::Spv(format!(
+                "merkle_proofs[{index}]: block_height {} is beyond chain tip {}",
+                proof.block_height, tip
+            ))
+        })?;
+    if confs < min_confirmations {
+        return Err(EnclaveError::Spv(format!(
+            "merkle_proofs[{index}]: insufficient confirmations for block_height {} \
+             ({confs} < {min_confirmations})",
+            proof.block_height
+        )));
+    }
+
+    // Reverse display-order bytes to internal-order for the Merkle verifier.
+    let mut txid_internal: [u8; 32] = proof.txid.as_slice().try_into().map_err(|_| {
+        EnclaveError::Spv(format!(
+            "merkle_proofs[{index}].txid must be 32 bytes (already validated above; defensive)"
+        ))
+    })?;
+    txid_internal.reverse();
+
+    let mut path_internal: Vec<[u8; 32]> = Vec::with_capacity(proof.merkle_path.len());
+    for (j, sib) in proof.merkle_path.iter().enumerate() {
+        let mut s: [u8; 32] = sib.as_slice().try_into().map_err(|_| {
+            EnclaveError::Spv(format!(
+                "merkle_proofs[{index}].merkle_path[{j}] must be 32 bytes, got {}",
+                sib.len()
+            ))
+        })?;
+        s.reverse();
+        path_internal.push(s);
+    }
+
+    // header.merkle_root is a TxMerkleNode wrapping sha256d::Hash —
+    // its as_byte_array() is internal order, matching what verify_merkle_proof
+    // wants.
+    let merkle_root_internal: [u8; 32] = header.merkle_root.to_byte_array();
+
+    verify_merkle_proof(
+        &txid_internal,
+        proof.tx_position,
+        &path_internal,
+        &merkle_root_internal,
+    )
+    .map_err(|e| match e {
+        MerkleError::RootMismatch { computed, expected } => {
+            // Display-order hex for human readability — these are end-user
+            // diagnostic hashes, not bytes used in further computation.
+            let mut c = computed;
+            c.reverse();
+            let mut x = expected;
+            x.reverse();
+            EnclaveError::Spv(format!(
+                "merkle_proofs[{index}]: proof for txid {} failed: \
+                 computed root {} != header root {} at block_height {}",
+                hex::encode(proof.txid.as_slice()),
+                hex::encode(c),
+                hex::encode(x),
+                proof.block_height,
+            ))
+        }
+        MerkleError::BadSiblingLength { index: j, len } => EnclaveError::Spv(format!(
+            "merkle_proofs[{index}].merkle_path[{j}] has wrong length {len}"
+        )),
+    })?;
+
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::proto::MerkleProofEntry;
+    use crate::spv::checkpoint::Checkpoint;
+    use crate::spv::HeaderChain;
+    use bitcoin::block::{Header, Version};
+    use bitcoin::consensus::serialize;
+    use bitcoin::hashes::{sha256d, Hash};
+
+    /// Builds a regtest synthetic chain rooted at a zero checkpoint. We use
+    /// regtest so PoW is skipped — these tests focus on the SPV crosscheck
+    /// logic, not header validation (PR 2 covers that).
+    fn regtest_chain_with(headers: Vec<Header>) -> HeaderChain {
+        let mut chain = HeaderChain::new(
+            Network::Regtest,
+            Checkpoint {
+                height: 0,
+                hash: [0u8; 32],
+                bits: 0x207fffff,
+                time: 1_700_000_000,
+                is_real: false,
+            },
+        );
+        let raw_headers: Vec<Vec<u8>> = headers.iter().map(serialize).collect();
+        chain.submit_headers(1, &raw_headers).unwrap();
+        chain
+    }
+
+    /// Build N synthetic regtest headers chaining from a zero prev_blockhash.
+    /// Each header has a deterministic, distinct merkle_root so we can test
+    /// proofs against a known root.
+    fn synth_headers(count: u32) -> Vec<Header> {
+        let mut prev = bitcoin::BlockHash::from_byte_array([0u8; 32]);
+        let mut out = Vec::new();
+        for i in 0..count {
+            let mut root_bytes = [0u8; 32];
+            root_bytes[0] = i as u8;
+            root_bytes[1] = 0xAB;
+            let header = Header {
+                version: Version::ONE,
+                prev_blockhash: prev,
+                merkle_root: bitcoin::TxMerkleNode::from_byte_array(root_bytes),
+                time: 1_700_000_001 + i,
+                bits: bitcoin::CompactTarget::from_consensus(0x207fffff),
+                nonce: i,
+            };
+            prev = header.block_hash();
+            out.push(header);
+        }
+        out
+    }
+
+    /// For a single-tx block, the Merkle root IS the txid (in internal
+    /// order). To make a working "happy path" proof we use this fact.
+    /// Returns (display-order txid, MerkleProofEntry).
+    fn single_tx_proof(header: &Header, block_height: u32) -> ([u8; 32], MerkleProofEntry) {
+        // header.merkle_root is internal-order. The txid that produces it
+        // (single-tx block, empty path) is the same bytes. Display-order
+        // is the reverse.
+        let internal: [u8; 32] = header.merkle_root.to_byte_array();
+        let mut display = internal;
+        display.reverse();
+        let entry = MerkleProofEntry {
+            txid: display.to_vec(),
+            block_height,
+            tx_position: 0,
+            merkle_path: vec![],
+        };
+        (display, entry)
+    }
+
+    fn dsha256_pair(left: &[u8; 32], right: &[u8; 32]) -> [u8; 32] {
+        let mut buf = [0u8; 64];
+        buf[..32].copy_from_slice(left);
+        buf[32..].copy_from_slice(right);
+        sha256d::Hash::hash(&buf).to_byte_array()
+    }
+
+    /// Bundle of test fixtures for a 2-tx block — used by both happy and
+    /// rejection paths. Factored into a struct to keep clippy happy with
+    /// the `type_complexity` lint (which would otherwise fire on a 5-tuple
+    /// return).
+    struct TwoTxBlock {
+        header: Header,
+        txid0_display: [u8; 32],
+        txid1_display: [u8; 32],
+        path_for_tx0: Vec<Vec<u8>>,
+        path_for_tx1: Vec<Vec<u8>>,
+    }
+
+    /// Set up a 2-tx block: leaf0 + leaf1 → root. Header points at root.
+    fn build_two_tx_block(
+        leaf0_internal: [u8; 32],
+        leaf1_internal: [u8; 32],
+        prev_blockhash: bitcoin::BlockHash,
+        time: u32,
+    ) -> TwoTxBlock {
+        let root_internal = dsha256_pair(&leaf0_internal, &leaf1_internal);
+        let header = Header {
+            version: Version::ONE,
+            prev_blockhash,
+            merkle_root: bitcoin::TxMerkleNode::from_byte_array(root_internal),
+            time,
+            bits: bitcoin::CompactTarget::from_consensus(0x207fffff),
+            nonce: 0,
+        };
+        let mut txid0_display = leaf0_internal;
+        txid0_display.reverse();
+        let mut txid1_display = leaf1_internal;
+        txid1_display.reverse();
+        let mut sib1_display = leaf1_internal;
+        sib1_display.reverse();
+        let mut sib0_display = leaf0_internal;
+        sib0_display.reverse();
+        TwoTxBlock {
+            header,
+            txid0_display,
+            txid1_display,
+            path_for_tx0: vec![sib1_display.to_vec()],
+            path_for_tx1: vec![sib0_display.to_vec()],
+        }
+    }
+
+    /// Helper: build a chain of `confirmations` headers where the header at
+    /// height 1 has the merkle commitment we care about; subsequent headers
+    /// are throwaway (they just bury the target block deep enough).
+    fn chain_burying(target_header: Header, depth_above: u32) -> HeaderChain {
+        let mut headers = vec![target_header];
+        let mut prev = headers[0].block_hash();
+        let mut next_time = headers[0].time + 1;
+        for _ in 0..depth_above {
+            let h = Header {
+                version: Version::ONE,
+                prev_blockhash: prev,
+                merkle_root: bitcoin::TxMerkleNode::all_zeros(),
+                time: next_time,
+                bits: bitcoin::CompactTarget::from_consensus(0x207fffff),
+                nonce: 0,
+            };
+            prev = h.block_hash();
+            next_time += 1;
+            headers.push(h);
+        }
+        regtest_chain_with(headers)
+    }
+
+    #[test]
+    fn happy_path_single_tx_block_with_six_confirmations() {
+        // 1 target block + 5 burying = 6 confirmations.
+        let target = synth_headers(1).into_iter().next().unwrap();
+        let chain = chain_burying(target, 5);
+        let (txid_display, proof) = single_tx_proof(chain.header_at(1).unwrap(), 1);
+
+        validate_spv_proofs(&chain, &[txid_display], &[proof], SPV_MIN_CONFIRMATIONS).unwrap();
+    }
+
+    #[test]
+    fn rejects_insufficient_confirmations() {
+        // Only 3 confirmations < 6.
+        let target = synth_headers(1).into_iter().next().unwrap();
+        let chain = chain_burying(target, 2);
+        let (txid_display, proof) = single_tx_proof(chain.header_at(1).unwrap(), 1);
+
+        let err = validate_spv_proofs(&chain, &[txid_display], &[proof], SPV_MIN_CONFIRMATIONS)
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("insufficient confirmations"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn rejects_block_height_beyond_tip() {
+        let target = synth_headers(1).into_iter().next().unwrap();
+        let chain = chain_burying(target, 5);
+        let (txid_display, mut proof) = single_tx_proof(chain.header_at(1).unwrap(), 1);
+        proof.block_height = chain.tip_height() + 100;
+
+        let err = validate_spv_proofs(&chain, &[txid_display], &[proof], SPV_MIN_CONFIRMATIONS)
+            .unwrap_err();
+        // Either "no header at height" (because we don't store > tip) or
+        // "beyond chain tip" (the explicit underflow catch). Both are
+        // acceptable rejections.
+        let msg = err.to_string();
+        assert!(
+            msg.contains("no header") || msg.contains("beyond"),
+            "got: {msg}"
+        );
+    }
+
+    #[test]
+    fn rejects_block_height_at_checkpoint_or_below() {
+        let target = synth_headers(1).into_iter().next().unwrap();
+        let chain = chain_burying(target, 5);
+        let (txid_display, mut proof) = single_tx_proof(chain.header_at(1).unwrap(), 1);
+        proof.block_height = 0; // checkpoint height — we don't store its header
+
+        let err = validate_spv_proofs(&chain, &[txid_display], &[proof], SPV_MIN_CONFIRMATIONS)
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("no header at height"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn rejects_extra_proof_for_unknown_txid() {
+        // We expect ONE txid, listener supplies that one PLUS a second
+        // unrelated proof. That extra proof must cause rejection — the
+        // contract is set equality.
+        let target = synth_headers(1).into_iter().next().unwrap();
+        let chain = chain_burying(target, 5);
+        let (txid_display, proof) = single_tx_proof(chain.header_at(1).unwrap(), 1);
+
+        let bogus_txid = [0xCC; 32];
+        let bogus_proof = MerkleProofEntry {
+            txid: bogus_txid.to_vec(),
+            block_height: 1,
+            tx_position: 0,
+            merkle_path: vec![],
+        };
+
+        let err = validate_spv_proofs(
+            &chain,
+            &[txid_display],
+            &[proof, bogus_proof],
+            SPV_MIN_CONFIRMATIONS,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("does not match any"), "got: {err}");
+    }
+
+    #[test]
+    fn rejects_missing_proof_for_expected_txid() {
+        let target = synth_headers(1).into_iter().next().unwrap();
+        let chain = chain_burying(target, 5);
+        let (txid_display, _proof) = single_tx_proof(chain.header_at(1).unwrap(), 1);
+
+        // Expected has TWO txids; listener provides ZERO proofs.
+        let extra_txid = [0xEE; 32];
+        let err = validate_spv_proofs(
+            &chain,
+            &[txid_display, extra_txid],
+            &[],
+            SPV_MIN_CONFIRMATIONS,
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("missing merkle proofs"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn rejects_duplicate_proof() {
+        let target = synth_headers(1).into_iter().next().unwrap();
+        let chain = chain_burying(target, 5);
+        let (txid_display, proof) = single_tx_proof(chain.header_at(1).unwrap(), 1);
+
+        let err = validate_spv_proofs(
+            &chain,
+            &[txid_display],
+            &[proof.clone(), proof],
+            SPV_MIN_CONFIRMATIONS,
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("duplicate merkle proof"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn rejects_bad_merkle_path() {
+        // Build a 2-tx block, supply the right proof shape but with a
+        // wrong sibling — root reconstruction should mismatch.
+        let leaf0 = [0x10u8; 32];
+        let leaf1 = [0x20u8; 32];
+        let prev = bitcoin::BlockHash::from_byte_array([0u8; 32]);
+        let block = build_two_tx_block(leaf0, leaf1, prev, 1_700_000_001);
+
+        let chain = chain_burying(block.header, 5);
+
+        // Supply a path with the WRONG sibling (all zeros instead of leaf1).
+        let proof = MerkleProofEntry {
+            txid: block.txid0_display.to_vec(),
+            block_height: 1,
+            tx_position: 0,
+            merkle_path: vec![vec![0u8; 32]],
+        };
+
+        let err = validate_spv_proofs(
+            &chain,
+            &[block.txid0_display],
+            &[proof],
+            SPV_MIN_CONFIRMATIONS,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("computed root"), "got: {err}");
+    }
+
+    #[test]
+    fn happy_path_two_tx_block() {
+        let leaf0 = [0x10u8; 32];
+        let leaf1 = [0x20u8; 32];
+        let prev = bitcoin::BlockHash::from_byte_array([0u8; 32]);
+        let block = build_two_tx_block(leaf0, leaf1, prev, 1_700_000_001);
+
+        let chain = chain_burying(block.header, 5);
+
+        let proof0 = MerkleProofEntry {
+            txid: block.txid0_display.to_vec(),
+            block_height: 1,
+            tx_position: 0,
+            merkle_path: block.path_for_tx0,
+        };
+        let proof1 = MerkleProofEntry {
+            txid: block.txid1_display.to_vec(),
+            block_height: 1,
+            tx_position: 1,
+            merkle_path: block.path_for_tx1,
+        };
+
+        validate_spv_proofs(
+            &chain,
+            &[block.txid0_display, block.txid1_display],
+            &[proof0, proof1],
+            SPV_MIN_CONFIRMATIONS,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn rejects_short_txid_in_proof() {
+        let target = synth_headers(1).into_iter().next().unwrap();
+        let chain = chain_burying(target, 5);
+        let bad_proof = MerkleProofEntry {
+            txid: vec![0u8; 16], // not 32 bytes
+            block_height: 1,
+            tx_position: 0,
+            merkle_path: vec![],
+        };
+
+        let err = validate_spv_proofs(&chain, &[[0u8; 32]], &[bad_proof], SPV_MIN_CONFIRMATIONS)
+            .unwrap_err();
+        assert!(err.to_string().contains("must be 32 bytes"), "got: {err}");
+    }
+
+    #[test]
+    fn rejects_short_merkle_path_entry() {
+        let target = synth_headers(1).into_iter().next().unwrap();
+        let chain = chain_burying(target, 5);
+        let (txid_display, _proof) = single_tx_proof(chain.header_at(1).unwrap(), 1);
+
+        let bad_proof = MerkleProofEntry {
+            txid: txid_display.to_vec(),
+            block_height: 1,
+            tx_position: 0,
+            merkle_path: vec![vec![0u8; 16]], // not 32 bytes
+        };
+
+        let err = validate_spv_proofs(&chain, &[txid_display], &[bad_proof], SPV_MIN_CONFIRMATIONS)
+            .unwrap_err();
+        assert!(err.to_string().contains("must be 32 bytes"), "got: {err}");
+    }
+
+    #[test]
+    fn assert_chain_net_accepts_matching_pair() {
+        assert_chain_net("bc", Network::Mainnet).unwrap();
+        assert_chain_net("bc:signet", Network::Signet).unwrap();
+        assert_chain_net("bc:testnet3", Network::Testnet3).unwrap();
+        assert_chain_net("bc:regtest", Network::Regtest).unwrap();
+    }
+
+    #[test]
+    fn assert_chain_net_rejects_mismatch() {
+        let err = assert_chain_net("bc:regtest", Network::Mainnet).unwrap_err();
+        assert!(err.to_string().contains("does not match"), "got: {err}");
+
+        let err = assert_chain_net("bc", Network::Signet).unwrap_err();
+        assert!(err.to_string().contains("does not match"), "got: {err}");
+    }
+
+    #[test]
+    fn empty_expected_and_empty_proofs_is_ok() {
+        // A consignment with no witness bundles (degenerate) and no proofs
+        // is trivially OK — there's nothing to verify. Useful sanity check
+        // that we don't iterate an empty set into a panic.
+        let target = synth_headers(1).into_iter().next().unwrap();
+        let chain = chain_burying(target, 5);
+        validate_spv_proofs(&chain, &[], &[], SPV_MIN_CONFIRMATIONS).unwrap();
+    }
+}

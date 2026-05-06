@@ -5,6 +5,7 @@
 //! the full rgbstd validation pipeline. This replaces trusting the Listener's
 //! `consignment_valid` boolean.
 
+use std::collections::BTreeSet;
 use std::io::Cursor;
 
 use rgbstd::containers::{ConsignmentExt, FileContent, Transfer};
@@ -16,12 +17,23 @@ use rgbstd::ChainNet;
 use crate::error::{EnclaveError, Result};
 
 /// Data extracted from a successfully validated RGB consignment.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct ValidatedConsignment {
     /// RGB contract identifier (e.g., "rgb:2TGhRyP3-...")
     pub contract_id: String,
-    // TODO: extract rgb_amount from state transitions in a future PR.
-    // For now, rely on Listener's rgb_amount + existing calldata cross-checks.
+    /// Bitcoin network the consignment is anchored to, in rgbstd's prefix
+    /// form: `"bc"`, `"bc:testnet3"`, `"bc:signet"`, or `"bc:regtest"`.
+    /// Used to reject cross-network replay (e.g. a regtest consignment
+    /// presented to a mainnet enclave).
+    pub chain_net: String,
+    /// Bitcoin txids that anchor each transition bundle in the consignment,
+    /// in **display (big-endian) byte order** — same encoding as
+    /// `MerkleProofEntry.txid` on the wire. Deduplicated and sorted so
+    /// equality checks against the listener's set are stable.
+    pub witness_txids: Vec<[u8; 32]>,
+    // TODO: extract rgb_amount from state transitions in a future PR
+    // (dual-mode work). For now, rely on Listener's rgb_amount + existing
+    // calldata cross-checks.
 }
 
 /// Validates RGB consignments using rgbstd and an Esplora-backed resolver.
@@ -82,6 +94,34 @@ impl RgbValidator {
             "deserialized RGB transfer"
         );
 
+        // Pre-validation extraction: cheap, no networking, no consumption
+        // of `transfer` (rgbstd::Transfer::validate consumes self further
+        // down). chain_net + witness_txids are needed by the SPV crosscheck;
+        // we read them out before validate() runs because validate() takes
+        // ownership.
+        let chain_net = transfer.genesis.chain_net.prefix().to_string();
+        let mut txid_set: BTreeSet<[u8; 32]> = BTreeSet::new();
+        for wb in transfer.bundles.iter() {
+            // rgbstd's Txid stringifies in display order; decoding the hex
+            // gives us display-order bytes (no reversal needed at this
+            // boundary — reversal happens later, only inside the Merkle
+            // verifier where internal-order is required).
+            let display_hex = wb.witness_id().to_string();
+            let bytes = hex::decode(&display_hex).map_err(|e| {
+                EnclaveError::CrossCheck(format!(
+                    "witness_id hex decode failed for bundle: {e} (got {display_hex:?})"
+                ))
+            })?;
+            let arr: [u8; 32] = bytes.as_slice().try_into().map_err(|_| {
+                EnclaveError::CrossCheck(format!(
+                    "witness_id is not 32 bytes (got {} bytes from {display_hex:?})",
+                    bytes.len()
+                ))
+            })?;
+            txid_set.insert(arr);
+        }
+        let witness_txids: Vec<[u8; 32]> = txid_set.into_iter().collect();
+
         // 2. Create an Esplora-backed resolver.
         let builder = esplora_client::Builder::new(&self.esplora_url);
         let mut resolver = AnyResolver::esplora_blocking(builder).map_err(|e| {
@@ -114,11 +154,17 @@ impl RgbValidator {
 
         tracing::info!(
             %contract_id,
+            %chain_net,
+            witness_txids_count = witness_txids.len(),
             elapsed_ms = start.elapsed().as_millis() as u64,
             "RGB consignment validated successfully"
         );
 
-        Ok(ValidatedConsignment { contract_id })
+        Ok(ValidatedConsignment {
+            contract_id,
+            chain_net,
+            witness_txids,
+        })
     }
 }
 

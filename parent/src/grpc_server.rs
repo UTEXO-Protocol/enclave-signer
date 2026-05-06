@@ -174,6 +174,16 @@ impl EnclaveService for ParentAdapterService {
                             calldata_commission: payload.calldata_commission,
                             consignment: payload.consignment,
                             consignment_hash: payload.consignment_hash,
+                            merkle_proofs: payload
+                                .merkle_proofs
+                                .into_iter()
+                                .map(|p| enclave_proto::MerkleProofEntry {
+                                    txid: p.txid,
+                                    block_height: p.block_height,
+                                    tx_position: p.tx_position,
+                                    merkle_path: p.merkle_path,
+                                })
+                                .collect(),
                         },
                     )),
                 }

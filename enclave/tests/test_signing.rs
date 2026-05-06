@@ -51,6 +51,7 @@ fn valid_sign_evm_request(amount: u64, commission: u64) -> SignEvmRequest {
         calldata_commission: commission,
         consignment: vec![],
         consignment_hash: vec![],
+        merkle_proofs: vec![],
     }
 }
 
@@ -136,6 +137,12 @@ fn valid_sign_psbt_request(psbt_bytes: Vec<u8>) -> SignPsbtRequest {
 // EVM signing tests
 // =============================================================================
 
+// Skipped under `spv` feature: this test sends a request with no
+// consignment bytes, which the SPV path rejects (no consignment → no
+// witness txids → cannot verify). The non-spv path still gives us the
+// happy-path coverage; SPV-on coverage lives in spv_crosscheck unit
+// tests + test_sign_evm_spv_rejects_without_proofs below.
+#[cfg(not(feature = "spv"))]
 #[test]
 fn test_sign_evm_roundtrip() {
     let port = common::start_test_server();
@@ -162,6 +169,40 @@ fn test_sign_evm_roundtrip() {
             assert_eq!(r.signature.len(), 65, "EVM signature must be 65 bytes");
         }
         other => panic!("expected EvmSignatureResponse, got {:?}", other),
+    }
+}
+
+// SPV-feature integration smoke: with the feature on, a sign_evm with no
+// consignment must be rejected on the wire. Proves the gate fires through
+// the dispatch path, not just the unit tests.
+#[cfg(feature = "spv")]
+#[test]
+fn test_sign_evm_spv_rejects_without_consignment() {
+    let port = common::start_test_server();
+
+    let init_req = EnclaveRequest {
+        request: Some(Request::InitializeKey(InitializeKeyRequest {
+            seed: vec![],
+            mnemonic: String::new(),
+        })),
+    };
+    common::send_request(port, &init_req);
+
+    let sign_req = EnclaveRequest {
+        request: Some(Request::SignEvm(valid_sign_evm_request(1000, 50))),
+    };
+    let sign_resp = common::send_request(port, &sign_req);
+
+    match &sign_resp.response {
+        Some(Response::Error(e)) => {
+            assert_eq!(e.code, 3, "spv rejection should map to VALIDATION_FAILED");
+            assert!(
+                e.message.contains("spv:") && e.message.contains("validated consignment"),
+                "expected spv validation error, got: {}",
+                e.message
+            );
+        }
+        other => panic!("expected Error response, got {:?}", other),
     }
 }
 
@@ -549,6 +590,11 @@ fn test_sign_evm_rejects_consignment_without_hash() {
     }
 }
 
+// Skipped under `spv` feature: bytes here aren't a real consignment, so
+// rgb-validation fails to parse before the keccak hash check would even run.
+// The hash-integrity logic this test covers is exercised by the non-spv
+// build (today's production path is `--features rgb-validation` alone).
+#[cfg(not(feature = "spv"))]
 #[test]
 fn test_sign_evm_accepts_valid_consignment_hash() {
     use sha3::{Digest, Keccak256};

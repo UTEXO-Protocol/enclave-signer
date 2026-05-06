@@ -272,10 +272,16 @@ if [ $RC -eq 0 ] && echo "$EVM_SIG_OUTPUT" | grep -q "signature"; then
     SIG=$(echo "$EVM_SIG_OUTPUT" | grep "signature" | awk '{print $NF}')
     SIG_LEN=$((${#SIG} / 2))
     if [ "$SIG_LEN" -eq 65 ]; then
-        pass "SignEvm — 65-byte EIP-712 signature returned"
+        pass "SignEvm — 65-byte EIP-712 signature returned (non-SPV build)"
     else
         fail "SignEvm" "expected 65 bytes, got $SIG_LEN"
     fi
+elif echo "$EVM_SIG_OUTPUT" | grep -qi "spv:.*signEVM requires"; then
+    # SPV-enabled build: this request has no consignment bytes, so the SPV
+    # path correctly rejects. That's the right behaviour, not a failure —
+    # full SPV happy-path coverage requires fixture data and lives in the
+    # spv_crosscheck unit tests + test_spv_handlers integration tests.
+    pass "SignEvm — correctly rejected by SPV (build has --features spv)"
 else
     fail "SignEvm" "$EVM_SIG_OUTPUT"
 fi

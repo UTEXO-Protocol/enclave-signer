@@ -102,6 +102,24 @@ message SignEvmRequest {
   // For now the enclave verifies keccak256(consignment) == consignment_hash as integrity check.
   bytes consignment         = 11;  // Raw RGB consignment bytes (from Go Listener via Parent Adapter)
   bytes consignment_hash    = 12;  // keccak256(consignment) — integrity check
+
+  // SPV proofs that each consignment-anchor Bitcoin tx is included in the
+  // accepted Bitcoin chain. Forwarded by the Parent Adapter from the
+  // listener-side EnrichedEvmPayload.merkle_proofs (same shape, same field
+  // numbers — see proto/enriched-payload.proto).
+  repeated MerkleProofEntry merkle_proofs = 13;
+}
+
+// Mirrors enriched-payload.proto's MerkleProofEntry. Defined here too so
+// the enclave wire protocol is self-contained — no cross-package import.
+// txid + each entry of merkle_path are 32-byte hashes in DISPLAY (big-endian)
+// order (as Esplora returns them); the SPV verifier reverses to internal
+// order at the boundary.
+message MerkleProofEntry {
+  bytes  txid         = 1;
+  uint32 block_height = 2;
+  uint32 tx_position  = 3;
+  repeated bytes merkle_path = 4;
 }
 
 message EvmSignatureResponse {

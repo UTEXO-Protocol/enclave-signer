@@ -13,7 +13,11 @@ WORKDIR /build
 COPY . /build/
 
 WORKDIR /build/enclave
-RUN cargo build --release --features allow-seed-import
+# Dev image still gets `spv` so the new code path is exercised even
+# without the production-only `vsock,rgb-validation` combo. Without spv,
+# the enclave fails-closed on any request that carries merkle_proofs,
+# which is what we want — build mismatch should always fail loudly.
+RUN cargo build --release --features allow-seed-import,spv
 
 # ===== Runtime Stage =====
 FROM debian:bookworm-slim
