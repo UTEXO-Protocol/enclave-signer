@@ -26,6 +26,7 @@
 //! no conversion needed for that step.
 
 use std::collections::BTreeSet;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use bitcoin::hashes::Hash;
 
@@ -38,6 +39,25 @@ use crate::spv::{verify_merkle_proof, HeaderChain, MerkleError, Network};
 /// let an operator with control of the host set it to 0 and bypass SPV
 /// entirely while the attestation still passed.
 pub const SPV_MIN_CONFIRMATIONS: u32 = 6;
+
+/// Maximum age of the chain tip's `time` (seconds). If the most recent
+/// header in the in-enclave chain is older than this relative to wall
+/// clock, the enclave refuses to sign — defense against the "frozen
+/// time" attack where a hostile listener feeds real-but-old headers
+/// from the checkpoint forward, never reaching the actual chain head.
+///
+/// 2 hours is generous: the listener is supposed to push every ~30s,
+/// and even on mainnet (10-minute target) legitimate gaps don't reach
+/// 2 hours under normal operation. With the gate at 2 h we false-reject
+/// only during clearly broken / hostile listener behaviour, while still
+/// closing the freeze-time window meaningfully.
+pub const SPV_MAX_TIP_AGE_SECS: u64 = 2 * 60 * 60;
+
+/// Bitcoin consensus allows a block's `time` to be up to ~2 hours in the
+/// future of network-adjusted time. We accept that grace, but reject
+/// anything beyond — otherwise an attacker could submit a header with
+/// `time = far_future` to defeat the staleness check.
+pub const SPV_MAX_TIP_FUTURE_SECS: u64 = 2 * 60 * 60;
 
 /// Verify a complete set of SPV proofs against the chain.
 ///
@@ -95,6 +115,60 @@ pub fn validate_spv_proofs(
     let tip = chain.tip_height();
     for (i, proof) in proofs.iter().enumerate() {
         verify_one_proof(chain, tip, min_confirmations, i, proof)?;
+    }
+
+    Ok(())
+}
+
+/// Refuse to sign if the chain tip is too old (or anomalously in the
+/// future) compared to wall clock. `now` is injected so this is unit
+/// testable without monkeying with the system clock; in production
+/// `handle_sign_evm` passes `SystemTime::now()`.
+///
+/// Threat model: a hostile listener can serve real-but-old headers
+/// starting at the checkpoint. The chain validates fine — every header
+/// is real, PoW is real, linkage holds. But the enclave's tip is stuck
+/// at some past height while the actual Bitcoin chain has moved on.
+/// Without this check the enclave can't tell, and an SPV proof against
+/// an old block would still be considered "well confirmed" from the
+/// enclave's frame. With this check, the staleness of the listener's
+/// feed becomes a hard rejection.
+pub fn assert_chain_not_stale(
+    chain: &HeaderChain,
+    now: SystemTime,
+    max_age: Duration,
+    max_future: Duration,
+) -> Result<()> {
+    let now_unix = now
+        .duration_since(UNIX_EPOCH)
+        .map_err(|e| EnclaveError::Internal(format!("system clock is before UNIX_EPOCH: {e}")))?
+        .as_secs();
+    let tip_time = u64::from(chain.tip_time());
+
+    // Future-bound: a tip claiming to be far ahead of now is anomalous.
+    // Bitcoin's consensus rule allows ~2h of future skew per block; we
+    // reject anything beyond.
+    if let Some(future_skew) = tip_time.checked_sub(now_unix) {
+        if future_skew > max_future.as_secs() {
+            return Err(EnclaveError::Spv(format!(
+                "spv: chain tip is {future_skew}s in the future (now = {now_unix}, \
+                 tip_time = {tip_time}, max future skew = {}s)",
+                max_future.as_secs()
+            )));
+        }
+        // Else: in-bounds future skew, OK.
+        return Ok(());
+    }
+
+    // Past-bound: tip is in the past (the normal case). Check it isn't
+    // too far back.
+    let age = now_unix.saturating_sub(tip_time);
+    if age > max_age.as_secs() {
+        return Err(EnclaveError::Spv(format!(
+            "spv: chain tip is too stale (now = {now_unix}, tip_time = {tip_time}, \
+             age = {age}s, max age = {}s) — listener may be frozen or hostile",
+            max_age.as_secs()
+        )));
     }
 
     Ok(())
@@ -609,5 +683,140 @@ mod tests {
         let target = synth_headers(1).into_iter().next().unwrap();
         let chain = chain_burying(target, 5);
         validate_spv_proofs(&chain, &[], &[], SPV_MIN_CONFIRMATIONS).unwrap();
+    }
+
+    // ===== Staleness tests =====
+    //
+    // These hand `assert_chain_not_stale` an explicit `now` so the test
+    // doesn't depend on wall clock. Synthetic headers in this file have
+    // `time = 1_700_000_001 + i`, so we anchor `now` relative to that.
+
+    /// Build a chain whose tip header has the given `time` (Unix seconds).
+    fn chain_with_tip_time(tip_time: u32) -> HeaderChain {
+        let header = Header {
+            version: Version::ONE,
+            prev_blockhash: bitcoin::BlockHash::from_byte_array([0u8; 32]),
+            merkle_root: bitcoin::TxMerkleNode::all_zeros(),
+            time: tip_time,
+            bits: bitcoin::CompactTarget::from_consensus(0x207fffff),
+            nonce: 0,
+        };
+        regtest_chain_with(vec![header])
+    }
+
+    fn unix(secs: u64) -> SystemTime {
+        UNIX_EPOCH + Duration::from_secs(secs)
+    }
+
+    #[test]
+    fn staleness_fresh_tip_passes() {
+        let chain = chain_with_tip_time(1_700_000_000);
+        // Now = tip + 30 minutes. Well within 2h.
+        assert_chain_not_stale(
+            &chain,
+            unix(1_700_000_000 + 30 * 60),
+            Duration::from_secs(SPV_MAX_TIP_AGE_SECS),
+            Duration::from_secs(SPV_MAX_TIP_FUTURE_SECS),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn staleness_tip_at_exact_max_age_passes() {
+        let chain = chain_with_tip_time(1_700_000_000);
+        // Now = tip + exactly max_age. Boundary is inclusive (age == max_age
+        // is allowed; only age > max_age rejects).
+        assert_chain_not_stale(
+            &chain,
+            unix(1_700_000_000 + SPV_MAX_TIP_AGE_SECS),
+            Duration::from_secs(SPV_MAX_TIP_AGE_SECS),
+            Duration::from_secs(SPV_MAX_TIP_FUTURE_SECS),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn staleness_old_tip_rejects() {
+        let chain = chain_with_tip_time(1_700_000_000);
+        // Now = tip + 3 hours. Past the 2-hour bound.
+        let err = assert_chain_not_stale(
+            &chain,
+            unix(1_700_000_000 + 3 * 60 * 60),
+            Duration::from_secs(SPV_MAX_TIP_AGE_SECS),
+            Duration::from_secs(SPV_MAX_TIP_FUTURE_SECS),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("too stale"), "got: {err}");
+    }
+
+    #[test]
+    fn staleness_far_future_tip_rejects() {
+        let chain = chain_with_tip_time(1_700_000_000 + 4 * 60 * 60);
+        // Tip is 4h ahead of now; we allow up to 2h future skew.
+        let err = assert_chain_not_stale(
+            &chain,
+            unix(1_700_000_000),
+            Duration::from_secs(SPV_MAX_TIP_AGE_SECS),
+            Duration::from_secs(SPV_MAX_TIP_FUTURE_SECS),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("in the future"), "got: {err}");
+    }
+
+    #[test]
+    fn staleness_near_future_tip_passes() {
+        let chain = chain_with_tip_time(1_700_000_000 + 30 * 60);
+        // Tip 30 min in the future of now — within the consensus 2h grace.
+        assert_chain_not_stale(
+            &chain,
+            unix(1_700_000_000),
+            Duration::from_secs(SPV_MAX_TIP_AGE_SECS),
+            Duration::from_secs(SPV_MAX_TIP_FUTURE_SECS),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn staleness_uses_checkpoint_time_when_no_headers() {
+        // No headers pushed. Chain falls back to checkpoint.time, which in
+        // this test setup is 1_700_000_000. Now = +1h → fresh; now = +3h
+        // → stale. Same logic as a populated chain — checkpoint is just a
+        // header we don't store the body of.
+        let chain = HeaderChain::new(
+            Network::Regtest,
+            crate::spv::checkpoint::Checkpoint {
+                height: 0,
+                hash: [0u8; 32],
+                bits: 0x207fffff,
+                time: 1_700_000_000,
+                is_real: false,
+            },
+        );
+        assert_chain_not_stale(
+            &chain,
+            unix(1_700_000_000 + 60 * 60),
+            Duration::from_secs(SPV_MAX_TIP_AGE_SECS),
+            Duration::from_secs(SPV_MAX_TIP_FUTURE_SECS),
+        )
+        .unwrap();
+
+        let err = assert_chain_not_stale(
+            &chain,
+            unix(1_700_000_000 + 3 * 60 * 60),
+            Duration::from_secs(SPV_MAX_TIP_AGE_SECS),
+            Duration::from_secs(SPV_MAX_TIP_FUTURE_SECS),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("too stale"), "got: {err}");
+    }
+
+    #[test]
+    fn staleness_thresholds_are_what_we_documented() {
+        // Defensive: if anyone tightens these constants without
+        // understanding why, the test catches it. 2h on each side is
+        // deliberately generous; lowering is a security tradeoff that
+        // should be a conscious decision, not an incidental edit.
+        assert_eq!(SPV_MAX_TIP_AGE_SECS, 2 * 60 * 60);
+        assert_eq!(SPV_MAX_TIP_FUTURE_SECS, 2 * 60 * 60);
     }
 }

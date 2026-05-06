@@ -276,6 +276,15 @@ fn handle_sign_evm(ctx: &ServerContext, req: SignEvmRequest) -> Result<EnclaveRe
             .header_chain
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
+        // Staleness: tip header time must be within bounds of wall clock.
+        // Catches the "frozen time" attack where the listener feeds
+        // real-but-old headers, never reaching the actual chain head.
+        validation::spv_crosscheck::assert_chain_not_stale(
+            &chain,
+            std::time::SystemTime::now(),
+            std::time::Duration::from_secs(validation::spv_crosscheck::SPV_MAX_TIP_AGE_SECS),
+            std::time::Duration::from_secs(validation::spv_crosscheck::SPV_MAX_TIP_FUTURE_SECS),
+        )?;
         // Cross-network replay: regtest consignment to mainnet enclave etc.
         validation::spv_crosscheck::assert_chain_net(&validated.chain_net, chain.network())?;
         // Inclusion + confirmation depth for every witness tx.
