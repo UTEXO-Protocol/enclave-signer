@@ -114,6 +114,18 @@ impl HeaderChain {
         }
     }
 
+    /// Block timestamp (`time` field, Unix seconds) of the most recent
+    /// validated header — or the checkpoint's `time` if no headers stored.
+    /// Used by the SPV staleness check to detect "frozen-time" attacks
+    /// where a hostile listener feeds real-but-old headers.
+    pub fn tip_time(&self) -> u32 {
+        if let Some(last) = self.headers.last() {
+            last.time
+        } else {
+            self.checkpoint.time
+        }
+    }
+
     /// Number of validated headers stored (excludes the checkpoint itself).
     pub fn len(&self) -> usize {
         self.headers.len()
