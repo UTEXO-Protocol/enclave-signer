@@ -40,8 +40,10 @@ jobs:
       - name: Build (default features)
         run: cargo build --workspace
 
+      # `--all-targets` so clippy lints test code too — otherwise lints on
+      # files under `tests/` slip through, as happened on the attestation PR.
       - name: Clippy (default features)
-        run: cargo clippy --workspace -- -D warnings
+        run: cargo clippy --workspace --all-targets -- -D warnings
 
       - name: Test (default features)
         run: cargo test --workspace
@@ -52,7 +54,7 @@ jobs:
         run: cargo build -p utexo-bridge-enclave --features vsock,rgb-validation,spv
 
       - name: Clippy (production combo)
-        run: cargo clippy -p utexo-bridge-enclave --features vsock,rgb-validation,spv -- -D warnings
+        run: cargo clippy -p utexo-bridge-enclave --features vsock,rgb-validation,spv --all-targets -- -D warnings
 
       # SPV path coverage. Cannot use vsock here (Linux runner without
       # vsock support); spv pulls in rgb-validation transitively, which is

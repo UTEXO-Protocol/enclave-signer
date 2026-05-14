@@ -71,7 +71,7 @@ fn build_test_multisig_psbt(our_pubkey: &bitcoin::PublicKey) -> Vec<u8> {
     let sk3 = SecretKey::from_slice(&[0x03; 32]).unwrap();
     let pk3 = bitcoin::PublicKey::new(sk3.public_key(&secp));
 
-    let mut pubkeys = vec![*our_pubkey, pk2, pk3];
+    let mut pubkeys = [*our_pubkey, pk2, pk3];
     pubkeys.sort_by_key(|k| k.to_bytes());
 
     let witness_script = ScriptBuilder::new()
