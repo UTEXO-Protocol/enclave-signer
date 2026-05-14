@@ -8,7 +8,9 @@ WORKDIR /build
 COPY . /build/
 
 WORKDIR /build/enclave
-RUN cargo build --release --features vsock,rgb-validation
+# `spv` implies `rgb-validation`; listing both explicitly so the feature
+# set is visible at a glance.
+RUN cargo build --release --features vsock,rgb-validation,spv
 
 # --- Runtime ---
 FROM public.ecr.aws/amazonlinux/amazonlinux:2023-minimal AS runtime

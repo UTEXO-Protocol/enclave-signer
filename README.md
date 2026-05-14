@@ -120,6 +120,13 @@ cargo build
 # Build with RGB validation support
 cargo build -p utexo-bridge-enclave --features rgb-validation
 
+# Build with SPV verification (implies rgb-validation). With --features spv,
+# the enclave refuses to sign EVM transactions unless the request carries
+# valid Bitcoin SPV proofs for every consignment-anchor witness tx.
+# Without the feature, the enclave fails-closed if the request supplies
+# merkle_proofs at all (catches build mismatches against the listener).
+cargo build -p utexo-bridge-enclave --features spv
+
 # Build only the gRPC server (Parent Adapter)
 cargo build -p utexo-bridge-parent
 ```
@@ -127,8 +134,8 @@ cargo build -p utexo-bridge-parent
 ### Production (Nitro Enclave)
 
 ```bash
-# Build the enclave binary with vsock + RGB validation
-cargo build --release -p utexo-bridge-enclave --features vsock,rgb-validation
+# Build the enclave binary with vsock + RGB validation + SPV
+cargo build --release -p utexo-bridge-enclave --features vsock,rgb-validation,spv
 
 # Or build the full Enclave Image Format (EIF)
 ./build/build-enclave.sh
@@ -252,6 +259,9 @@ cargo test
 # Run with RGB validation tests
 cargo test -p utexo-bridge-enclave --features rgb-validation
 
+# Run with SPV tests (implies rgb-validation; covers the full sign-path gate)
+cargo test -p utexo-bridge-enclave --features spv
+
 # Run with seed import tests
 cargo test -p utexo-bridge-enclave --features allow-seed-import
 
@@ -274,6 +284,7 @@ cargo test -p utexo-bridge-parent
 |---------|-------------|
 | `vsock` | Enable vsock transport (production, Linux only) |
 | `rgb-validation` | In-enclave RGB consignment validation via rgbstd + Esplora |
+| `spv` | Bitcoin SPV verification of consignment witness txids before signing EVM transactions. Implies `rgb-validation` (needed to extract witness txids). When OFF, `handle_sign_evm` additionally **rejects** any request that carries a non-empty `merkle_proofs` field — fail-closed against build mismatches between listener and enclave. |
 | `allow-seed-import` | Allow raw 64-byte seed or BIP-39 mnemonic import (testing only, never enable in production) |
 | `dev-mode` | Skip cross-check validation on signing requests (development only) |
 

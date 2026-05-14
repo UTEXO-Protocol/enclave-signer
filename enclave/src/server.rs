@@ -210,31 +210,86 @@ fn handle_get_public_key(
 }
 
 fn handle_sign_evm(ctx: &ServerContext, req: SignEvmRequest) -> Result<EnclaveResponse> {
+    // Fail-closed against build mismatch: if the listener built with SPV on
+    // and we built without it, the request will carry `merkle_proofs[]`
+    // that we cannot verify. Refuse loudly rather than sign as if SPV
+    // hadn't been requested.
+    #[cfg(not(feature = "spv"))]
+    if !req.merkle_proofs.is_empty() {
+        return Err(EnclaveError::Spv(
+            "enclave was not built with --features spv but request carries \
+             merkle_proofs; refusing to sign without verification (rebuild \
+             with `--features spv,rgb-validation` to enable SPV)"
+                .into(),
+        ));
+    }
+
     // In-enclave RGB consignment validation (when feature enabled and bytes present).
     // This replaces trusting the Listener's consignment_valid boolean.
+    // The result is held across the rest of the function so the SPV block
+    // (below, gated by feature `spv`) can use witness_txids + chain_net.
     #[cfg(feature = "rgb-validation")]
-    if !req.consignment.is_empty() {
+    let validated_consignment = if !req.consignment.is_empty() {
         if let Some(ref validator) = ctx.rgb_validator {
-            let validated = validator.validate_consignment(&req.consignment)?;
+            let v = validator.validate_consignment(&req.consignment)?;
             tracing::info!(
-                contract_id = %validated.contract_id,
+                contract_id = %v.contract_id,
+                chain_net = %v.chain_net,
+                witness_txids_count = v.witness_txids.len(),
                 "RGB consignment validated in-enclave"
             );
             // Cross-check contract_id against declared rgb_asset_id if present
-            if !req.rgb_asset_id.is_empty() && validated.contract_id != req.rgb_asset_id {
+            if !req.rgb_asset_id.is_empty() && v.contract_id != req.rgb_asset_id {
                 return Err(EnclaveError::CrossCheck(format!(
                     "contract_id mismatch: consignment has {} but request declares {}",
-                    validated.contract_id, req.rgb_asset_id
+                    v.contract_id, req.rgb_asset_id
                 )));
             }
+            Some(v)
         } else {
             tracing::warn!("RGB validator not configured, skipping in-enclave validation");
+            None
         }
-    }
+    } else {
+        None
+    };
 
     // Cross-check enriched fields before signing (skipped in dev-mode)
     #[cfg(not(feature = "dev-mode"))]
     validation::evm_crosscheck::validate_evm_request(&req)?;
+
+    // SPV verification: every consignment-anchor Bitcoin tx must be in our
+    // validated header chain at sufficient depth. With `spv = ["rgb-validation"]`
+    // in Cargo.toml, having the spv feature implies the rgb-validation
+    // block above ran, so `validated_consignment` is in scope and meaningful.
+    #[cfg(feature = "spv")]
+    {
+        let validated = validated_consignment.as_ref().ok_or_else(|| {
+            EnclaveError::Spv(
+                "spv: signEVM requires a non-empty validated consignment, \
+                 but the request had no consignment bytes (or the validator \
+                 is not configured)"
+                    .into(),
+            )
+        })?;
+        let chain = ctx
+            .header_chain
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        // Cross-network replay: regtest consignment to mainnet enclave etc.
+        validation::spv_crosscheck::assert_chain_net(&validated.chain_net, chain.network())?;
+        // Inclusion + confirmation depth for every witness tx.
+        validation::spv_crosscheck::validate_spv_proofs(
+            &chain,
+            &validated.witness_txids,
+            &req.merkle_proofs,
+            validation::spv_crosscheck::SPV_MIN_CONFIRMATIONS,
+        )?;
+        tracing::info!(
+            proofs_count = req.merkle_proofs.len(),
+            "SPV verification passed"
+        );
+    }
 
     // TODO: confirm domain name/version with contract team
     let domain = build_evm_domain(&req)?;

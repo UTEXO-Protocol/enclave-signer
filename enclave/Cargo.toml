@@ -81,6 +81,12 @@ allow-seed-import = []
 dev-mode = []
 # In-enclave RGB consignment validation via rgbstd + Esplora.
 rgb-validation = ["rgb-ops"]
+# Bitcoin SPV verification of consignment witness txids before signing EVM
+# transactions. Implies `rgb-validation` because SPV needs the consignment
+# parsed to extract witness txids. When the feature is OFF, handle_sign_evm
+# additionally REJECTS any request that carries non-empty merkle_proofs —
+# fail-closed against build mismatches between listener and enclave.
+spv = ["rgb-validation"]
 # Mock attestation path: skip NSM / COSE / cert-chain checks and use raw CBOR docs.
 # Testing only — never enable in production builds.
 mock-attestation = []

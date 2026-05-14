@@ -37,11 +37,25 @@ jobs:
       - name: Check formatting
         run: cargo fmt --all -- --check
 
-      - name: Build
+      - name: Build (default features)
         run: cargo build --workspace
 
-      - name: Clippy
+      - name: Clippy (default features)
         run: cargo clippy --workspace -- -D warnings
 
-      - name: Test
+      - name: Test (default features)
         run: cargo test --workspace
+
+      # Production build profile: vsock + rgb-validation + spv. Catches any
+      # regression on the actual feature combination shipped in the EIF.
+      - name: Build (production combo)
+        run: cargo build -p utexo-bridge-enclave --features vsock,rgb-validation,spv
+
+      - name: Clippy (production combo)
+        run: cargo clippy -p utexo-bridge-enclave --features vsock,rgb-validation,spv -- -D warnings
+
+      # SPV path coverage. Cannot use vsock here (Linux runner without
+      # vsock support); spv pulls in rgb-validation transitively, which is
+      # what the SPV unit + integration tests exercise.
+      - name: Test (--features spv)
+        run: cargo test -p utexo-bridge-enclave --features spv
