@@ -16,7 +16,9 @@ use utexo_bridge_parent::enriched;
 use utexo_bridge_parent::framing;
 use utexo_bridge_parent::grpc_proto::enclave_service_client::EnclaveServiceClient;
 use utexo_bridge_parent::grpc_proto::enclave_service_server::EnclaveServiceServer;
-use utexo_bridge_parent::grpc_proto::{DataType, PublicKeyRequest, SignRequest};
+use utexo_bridge_parent::grpc_proto::{
+    AttestedPublicKeyRequest, DataType, PublicKeyRequest, SignRequest,
+};
 use utexo_bridge_parent::grpc_server::{EnclaveTarget, ParentAdapterService};
 
 /// Start a mock enclave TCP server that responds to specific request types.
@@ -95,6 +97,53 @@ fn start_mock_enclave() -> u16 {
                         },
                     )),
                 },
+                Some(enclave_request::Request::GetAttestedPublicKey(req)) => {
+                    // Build a fresh mock attestation doc binding the mock pubkey.
+                    use sha2::Digest;
+                    let public_keys = enclave_proto::PublicKeysResponse {
+                        evm_address: vec![0xAA; 20],
+                        btc_compressed_pub: vec![0xBB; 33],
+                        btc_xpub: "xpub-test".into(),
+                        master_fingerprint: vec![0xDD; 4],
+                        account_xpub_vanilla: "tpub-vanilla-test".into(),
+                        account_xpub_colored: "tpub-colored-test".into(),
+                        evm_uncompressed_pub: vec![0xEE; 64],
+                    };
+                    let mut bundle: Vec<u8> = Vec::new();
+                    let parts: [&[u8]; 7] = [
+                        &public_keys.evm_address,
+                        &public_keys.btc_compressed_pub,
+                        public_keys.btc_xpub.as_bytes(),
+                        &public_keys.master_fingerprint,
+                        public_keys.account_xpub_vanilla.as_bytes(),
+                        public_keys.account_xpub_colored.as_bytes(),
+                        &public_keys.evm_uncompressed_pub,
+                    ];
+                    for p in parts {
+                        bundle.extend_from_slice(&(p.len() as u32).to_be_bytes());
+                        bundle.extend_from_slice(p);
+                    }
+                    let commitment: [u8; 32] = sha2::Sha256::digest(&bundle).into();
+                    let nonce: [u8; 32] = req
+                        .nonce
+                        .as_slice()
+                        .try_into()
+                        .expect("test must send 32-byte nonce");
+                    let doc = attestation_verify::build_mock_document(
+                        &nonce,
+                        Some(&public_keys.evm_uncompressed_pub),
+                        Some(&commitment),
+                    )
+                    .expect("build mock doc");
+                    EnclaveResponse {
+                        response: Some(enclave_response::Response::GetAttestedPublicKey(
+                            enclave_proto::GetAttestedPublicKeyResponse {
+                                public_keys: Some(public_keys),
+                                attestation_doc: doc,
+                            },
+                        )),
+                    }
+                }
                 _ => EnclaveResponse {
                     response: Some(enclave_response::Response::Error(
                         enclave_proto::ErrorResponse {
@@ -519,4 +568,76 @@ async fn grpc_submit_headers_roundtrip() {
     assert_eq!(resp.last_block_height, 215_003);
     assert_eq!(resp.last_block_hash, vec![0x22; 32]);
     assert_eq!(resp.headers_accepted, 3);
+}
+
+#[tokio::test]
+async fn grpc_attested_public_key_roundtrip_and_verify() {
+    let enclave_port = start_mock_enclave();
+    let grpc_port = start_grpc_server(enclave_port).await;
+
+    let mut client = EnclaveServiceClient::connect(format!("http://127.0.0.1:{grpc_port}"))
+        .await
+        .unwrap();
+
+    let nonce = [0x37u8; 32];
+    let resp = client
+        .attested_public_key(AttestedPublicKeyRequest {
+            nonce: nonce.to_vec(),
+        })
+        .await
+        .unwrap()
+        .into_inner();
+
+    // Wire-level public-key bundle is intact.
+    assert_eq!(resp.evm_address, vec![0xAA; 20]);
+    assert_eq!(resp.evm_uncompressed_pub, vec![0xEE; 64]);
+    assert!(!resp.attestation_doc.is_empty());
+
+    // The attestation document verifies, binds the EVM pubkey, and the
+    // commitment over the canonical bundle matches.
+    let verified = attestation_verify::verify_mock_attestation(
+        &resp.attestation_doc,
+        &attestation_verify::ExpectedPcrs::zero(),
+        Some(&nonce),
+    )
+    .expect("verify mock doc");
+    assert_eq!(verified.enclave_pubkey, resp.evm_uncompressed_pub);
+
+    use sha2::Digest;
+    let mut bundle: Vec<u8> = Vec::new();
+    let parts: [&[u8]; 7] = [
+        &resp.evm_address,
+        &resp.btc_compressed_pub,
+        resp.btc_xpub.as_bytes(),
+        &resp.master_fingerprint,
+        resp.account_xpub_vanilla.as_bytes(),
+        resp.account_xpub_colored.as_bytes(),
+        &resp.evm_uncompressed_pub,
+    ];
+    for p in parts {
+        bundle.extend_from_slice(&(p.len() as u32).to_be_bytes());
+        bundle.extend_from_slice(p);
+    }
+    let expected: [u8; 32] = sha2::Sha256::digest(&bundle).into();
+    assert_eq!(verified.user_data.as_deref(), Some(expected.as_slice()));
+    assert_eq!(verified.nonce, nonce.to_vec());
+}
+
+#[tokio::test]
+async fn grpc_attested_public_key_rejects_wrong_nonce_size() {
+    let enclave_port = start_mock_enclave();
+    let grpc_port = start_grpc_server(enclave_port).await;
+
+    let mut client = EnclaveServiceClient::connect(format!("http://127.0.0.1:{grpc_port}"))
+        .await
+        .unwrap();
+
+    let err = client
+        .attested_public_key(AttestedPublicKeyRequest {
+            nonce: vec![0u8; 16],
+        })
+        .await
+        .unwrap_err();
+
+    assert_eq!(err.code(), tonic::Code::InvalidArgument);
 }

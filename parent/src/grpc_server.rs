@@ -11,9 +11,10 @@ use crate::enriched;
 const ENCLAVE_TIMEOUT: Duration = Duration::from_secs(30);
 use crate::grpc_proto::enclave_service_server::EnclaveService;
 use crate::grpc_proto::{
-    CloneRequest, CloneResponse, DataType, GetLastSavedBlockRequest, GetLastSavedBlockResponse,
-    InitializeRequest, InitializeResponse, PublicKeyRequest, PublicKeyResponse, SignRequest,
-    Signature, SubmitHeadersRequest, SubmitHeadersResponse,
+    AttestedPublicKeyRequest, AttestedPublicKeyResponse, CloneRequest, CloneResponse, DataType,
+    GetLastSavedBlockRequest, GetLastSavedBlockResponse, InitializeRequest, InitializeResponse,
+    PublicKeyRequest, PublicKeyResponse, SignRequest, Signature, SubmitHeadersRequest,
+    SubmitHeadersResponse,
 };
 
 /// Enclave connection target — either TCP address or vsock CID+port.
@@ -376,6 +377,57 @@ impl EnclaveService for ParentAdapterService {
             Some(enclave_response::Response::Error(e)) => Err(Self::enclave_error_to_status(&e)),
             other => Err(Status::internal(format!(
                 "unexpected enclave response for SubmitHeaders: {:?}",
+                other
+            ))),
+        }
+    }
+
+    /// AttestedPublicKey — proves the bridge's signing pubkey was produced
+    /// inside this TEE. Forwards a 32-byte caller nonce to the enclave,
+    /// returns the public-key bundle plus an NSM attestation document that
+    /// binds the EVM pubkey + a sha256 commitment over the full bundle to
+    /// the enclave's PCRs. See docs/pubkey-attestation.md for the
+    /// verification recipe.
+    async fn attested_public_key(
+        &self,
+        request: Request<AttestedPublicKeyRequest>,
+    ) -> Result<Response<AttestedPublicKeyResponse>, Status> {
+        let inner = request.into_inner();
+        if inner.nonce.len() != 32 {
+            return Err(Status::invalid_argument(format!(
+                "nonce must be 32 bytes, got {}",
+                inner.nonce.len()
+            )));
+        }
+        tracing::info!("gRPC AttestedPublicKey called");
+
+        let enclave_req = EnclaveRequest {
+            request: Some(enclave_request::Request::GetAttestedPublicKey(
+                enclave_proto::GetAttestedPublicKeyRequest { nonce: inner.nonce },
+            )),
+        };
+
+        let resp = self.send_to_enclave(enclave_req).await?;
+
+        match resp.response {
+            Some(enclave_response::Response::GetAttestedPublicKey(r)) => {
+                let pk = r.public_keys.ok_or_else(|| {
+                    Status::internal("enclave returned attestation without public_keys")
+                })?;
+                Ok(Response::new(AttestedPublicKeyResponse {
+                    evm_address: pk.evm_address,
+                    evm_uncompressed_pub: pk.evm_uncompressed_pub,
+                    btc_compressed_pub: pk.btc_compressed_pub,
+                    btc_xpub: pk.btc_xpub,
+                    master_fingerprint: pk.master_fingerprint,
+                    account_xpub_vanilla: pk.account_xpub_vanilla,
+                    account_xpub_colored: pk.account_xpub_colored,
+                    attestation_doc: r.attestation_doc,
+                }))
+            }
+            Some(enclave_response::Response::Error(e)) => Err(Self::enclave_error_to_status(&e)),
+            other => Err(Status::internal(format!(
+                "unexpected enclave response for AttestedPublicKey: {:?}",
                 other
             ))),
         }

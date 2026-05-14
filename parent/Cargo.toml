@@ -11,6 +11,10 @@ path = "src/main.rs"
 name = "utexo-bridge-parent-cli"
 path = "src/bin/cli.rs"
 
+[[bin]]
+name = "attest-verify"
+path = "src/bin/attest_verify.rs"
+
 [dependencies]
 prost = "0.13"
 tonic = "0.12"
@@ -27,6 +31,13 @@ hex = "0.4"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
+# attest-verify CLI dependencies. `mock` feature is enabled so the CLI can
+# verify documents from an enclave built with `mock-attestation` for dev/CI;
+# production verification (no --mock flag) goes through the real path.
+attestation-verify = { path = "../attestation-verify", features = ["mock"] }
+sha2 = "0.10"
+rand = "0.8"
+
 [target.'cfg(target_os = "linux")'.dependencies]
 vsock = "0.5"
 
@@ -37,3 +48,9 @@ tonic-build = "0.12"
 [features]
 default = []
 vsock = []
+
+[dev-dependencies]
+# Real enclave (with mock-attestation + seed-import) for end-to-end tests
+# that drive the full CLI verifier against a live enclave + gRPC stack.
+utexo-bridge-enclave = { path = "../enclave", features = ["mock-attestation", "allow-seed-import"] }
+bitcoin = "0.32"
