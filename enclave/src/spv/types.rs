@@ -73,11 +73,26 @@ pub enum SpvError {
         expected: u32,
     },
 
-    #[error("batch start_height {got} does not extend tip {expected}")]
-    NonContiguous {
+    #[error("batch start_height {got} leaves a gap above tip {tip}")]
+    NonContiguous { got: BlockHeight, tip: BlockHeight },
+
+    #[error("batch start_height {got} is at or below checkpoint {checkpoint}; refusing to rewrite history below the trust anchor")]
+    BelowCheckpoint {
         got: BlockHeight,
-        expected: BlockHeight,
+        checkpoint: BlockHeight,
     },
+
+    #[error("reorg depth {depth} exceeds maximum {max}; refusing to rewrite that far back")]
+    ReorgTooDeep {
+        depth: BlockHeight,
+        max: BlockHeight,
+    },
+
+    #[error(
+        "alternative chain has weaker or equal cumulative work; rejecting reorg \
+         (this is normal — best chain wins)"
+    )]
+    WeakerChain,
 
     #[error("no header at height {0}")]
     HeaderNotFound(BlockHeight),
