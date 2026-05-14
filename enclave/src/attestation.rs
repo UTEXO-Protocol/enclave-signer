@@ -181,11 +181,13 @@ mod nsm {
 // Tests — facade-level only. The verifier itself is tested in attestation-verify.
 // ----------------------------------------------------------------------------
 
-#[cfg(test)]
+// Both tests below need the mock-attestation path; gate the whole module
+// so the `use super::*` doesn't fire `unused_imports` when building without
+// `--features mock-attestation` (CI runs both feature combinations).
+#[cfg(all(test, feature = "mock-attestation"))]
 mod tests {
     use super::*;
 
-    #[cfg(feature = "mock-attestation")]
     #[test]
     fn facade_mock_roundtrip() {
         let nonce = [7u8; 32];
@@ -199,7 +201,6 @@ mod tests {
         assert_eq!(verified.nonce, nonce.to_vec());
     }
 
-    #[cfg(feature = "mock-attestation")]
     #[test]
     fn facade_get_own_pcrs_returns_zero_in_mock() {
         let pcrs = get_own_pcrs().unwrap();
