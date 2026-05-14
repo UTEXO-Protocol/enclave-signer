@@ -28,6 +28,9 @@ pub mod types;
 pub mod validation;
 
 pub use chain::{HeaderChain, SubmitOutcome};
-pub use checkpoint::Checkpoint;
+pub use checkpoint::{
+    checkpoint_for, Checkpoint, UTEXO_SIGNET_BLOCK_TIME_SECS, UTEXO_SIGNET_CHALLENGE,
+    UTEXO_SIGNET_MAGIC,
+};
 pub use merkle::{verify_merkle_proof, MerkleError, Sha256d};
 pub use types::{BlockHash, BlockHeight, Network, SpvError};

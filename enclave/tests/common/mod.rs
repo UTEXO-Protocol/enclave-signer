@@ -5,6 +5,7 @@ use std::thread;
 use utexo_bridge_enclave::framing;
 use utexo_bridge_enclave::proto::*;
 use utexo_bridge_enclave::server::{self, ServerContext};
+use utexo_bridge_enclave::spv::{checkpoint_for, HeaderChain, Network};
 use utexo_bridge_enclave::state::EnclaveState;
 
 /// Start a test server on a random TCP port. Returns the port number.
@@ -24,10 +25,18 @@ pub fn start_test_server_with(configure: impl FnOnce(&EnclaveState)) -> u16 {
     let port = listener.local_addr().unwrap().port();
     let state = EnclaveState::new(bitcoin::Network::Bitcoin);
     configure(&state);
+    // Tests run with the placeholder Regtest checkpoint. The header chain
+    // is initialised but empty; tests that don't push headers leave it
+    // alone, tests that do start from `checkpoint.height` (= 0).
+    let header_chain = std::sync::Mutex::new(HeaderChain::new(
+        Network::Regtest,
+        checkpoint_for(Network::Regtest),
+    ));
     let ctx = Arc::new(ServerContext {
         state,
         #[cfg(feature = "rgb-validation")]
         rgb_validator: None,
+        header_chain,
     });
 
     thread::spawn(move || {

@@ -15,6 +15,13 @@ pub struct ServerContext {
     pub state: EnclaveState,
     #[cfg(feature = "rgb-validation")]
     pub rgb_validator: Option<crate::validation::rgb::RgbValidator>,
+    /// In-enclave Bitcoin header chain for SPV verification. Populated at
+    /// boot from the compile-time checkpoint; mutated by SubmitHeaders.
+    /// `Mutex` because the enclave handles connections from a single
+    /// thread today, but we want the type to stay correct if that ever
+    /// changes — and `Mutex` over `RefCell` so a future move to
+    /// multi-threaded handling needs no plumbing changes.
+    pub header_chain: std::sync::Mutex<crate::spv::HeaderChain>,
 }
 
 /// Handle a single connection: read one request, dispatch, write one response, close.
@@ -86,11 +93,11 @@ fn dispatch(request: EnclaveRequest, ctx: &ServerContext) -> EnclaveResponse {
                 start_height = req.start_height,
                 "request: SubmitHeaders"
             );
-            handle_submit_headers(req)
+            handle_submit_headers(ctx, req)
         }
         Some(Request::GetLastSavedBlock(req)) => {
             tracing::info!("request: GetLastSavedBlock");
-            handle_get_last_saved_block(req)
+            handle_get_last_saved_block(ctx, req)
         }
         None => {
             tracing::warn!("received empty request (no oneof variant set)");
@@ -343,23 +350,65 @@ fn handle_proxy_federation(_req: ProxyFederationRequest) -> Result<EnclaveRespon
     })
 }
 
-// SPV header sync stubs. The proto + grpc surface is wired so the Listener's
-// header-sync daemon can compile and connect, but header validation +
-// in-memory chain land in PR 2; Merkle proof verification lands in PR 3.
-fn handle_submit_headers(_req: SubmitHeadersRequest) -> Result<EnclaveResponse> {
+// SPV header sync handlers. The chain itself lives in `ctx.header_chain`,
+// initialised at boot from the compile-time checkpoint for the active
+// network (see main.rs).
+//
+// Note: a poisoned mutex (lock returns Err) means a previous handler
+// panicked while holding the lock. That should never happen because the
+// only mutation is `submit_headers` which never panics, but if it does
+// the safe thing is to clear the poison and continue rather than wedge
+// the entire enclave — the chain is in a consistent state because all
+// mutations are atomic.
+fn handle_submit_headers(
+    ctx: &ServerContext,
+    req: SubmitHeadersRequest,
+) -> Result<EnclaveResponse> {
+    let mut chain = ctx
+        .header_chain
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+    let outcome = chain.submit_headers(req.start_height, &req.headers)?;
+
+    tracing::info!(
+        last_block_height = outcome.last_block_height,
+        headers_accepted = outcome.headers_accepted,
+        reorg_depth = outcome.reorg_depth,
+        "SubmitHeaders outcome"
+    );
+
     Ok(EnclaveResponse {
-        response: Some(Response::Error(ErrorResponse {
-            code: 2, // NOT_READY
-            message: "SPV header chain not yet implemented (see docs/spv-review.md)".into(),
+        response: Some(Response::SubmitHeaders(SubmitHeadersResponse {
+            last_block_height: outcome.last_block_height,
+            last_block_hash: outcome.last_block_hash.to_vec(),
+            headers_accepted: outcome.headers_accepted,
         })),
     })
 }
 
-fn handle_get_last_saved_block(_req: GetLastSavedBlockRequest) -> Result<EnclaveResponse> {
+fn handle_get_last_saved_block(
+    ctx: &ServerContext,
+    _req: GetLastSavedBlockRequest,
+) -> Result<EnclaveResponse> {
+    let chain = ctx
+        .header_chain
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+    let height = chain.tip_height();
+    let hash = chain.tip_hash();
+
+    tracing::debug!(
+        block_height = height,
+        block_hash = %hex::encode(hash),
+        "GetLastSavedBlock"
+    );
+
     Ok(EnclaveResponse {
-        response: Some(Response::Error(ErrorResponse {
-            code: 2, // NOT_READY
-            message: "SPV header chain not yet implemented (see docs/spv-review.md)".into(),
+        response: Some(Response::GetLastSavedBlock(GetLastSavedBlockResponse {
+            block_height: height,
+            block_hash: hash.to_vec(),
         })),
     })
 }
