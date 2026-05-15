@@ -25,20 +25,16 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y pkg-config libssl-dev protobuf-compiler
 
       # The `rgb-consignment` dep (used by the rgb-validation / spv
-      # feature combos) is hosted in a private repo. Wire a PAT into
-      # git's credential layer so cargo can fetch it. The token only
-      # needs `repo:read` on UTEXO-Protocol; default features build
-      # without this, but every job below that enables `rgb-validation`
-      # or `spv` will fail without it.
-      - name: Configure git for private RGB deps
-        env:
-          GH_PAT: ${{ secrets.UTEXO_GH_PAT }}
-        run: |
-          if [ -z "$GH_PAT" ]; then
-            echo "::warning::secret UTEXO_GH_PAT not set; jobs that build --features rgb-validation/spv will fail to fetch rgb-consignment"
-          else
-            git config --global url."https://x-access-token:${GH_PAT}@github.com/".insteadOf "https://github.com/"
-          fi
+      # feature combos) is hosted in a private repo and fetched over
+      # SSH. Load a read-only deploy key registered on
+      # UTEXO-Protocol/rgb-consignment-parser into the agent so cargo's
+      # `git fetch` can authenticate. Default-feature jobs don't pull
+      # the dep and run without this; every job below that enables
+      # `rgb-validation` or `spv` requires it.
+      - name: Set up SSH for private RGB deps
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.RGB_CONSIGNMENT_PARSER_DEPLOY_KEY }}
 
       - name: Cache cargo registry
         uses: actions/cache@v4

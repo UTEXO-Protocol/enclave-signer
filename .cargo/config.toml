@@ -1,0 +1,7 @@
+# Use the system `git` binary (with its credential helper / SSH agent) to
+# fetch git dependencies. Required for the private `rgb-consignment` dep
+# under `rgb-validation`/`spv`: cargo's bundled libgit2 doesn't pick up
+# the user's SSH agent reliably across platforms, while system git does.
+# Local builds use whatever SSH key is loaded; CI loads a deploy key.
+[net]
+git-fetch-with-cli = true

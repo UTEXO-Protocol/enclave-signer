@@ -52,14 +52,11 @@ rgb-ops = { version = "0.11.1-rc.7", features = ["esplora_blocking"], optional =
 # CLI deps (clap / env_logger / log / serde_json) we don't need inside
 # the enclave.
 #
-# Pinned to commit 755d93b on the `feat/gate-cli-deps` branch of
-# rgb-consignment-parser PR #5: gates the CLI-only deps (clap /
-# env_logger / log / serde_json) behind a `cli` feature, relaxes
-# the exact-version pins so our workspace `[patch.crates-io]` can
-# redirect rgb-ops to git master, and bumps the rgb-ops floor to
-# rc.10 so the parser uses the renamed `rgb-strict-types` crate.
-# Once PR #5 merges, flip `rev = "..."` to `branch = "main"`.
-rgb-consignment = { git = "https://github.com/UTEXO-Protocol/rgb-consignment-parser", rev = "755d93b", default-features = false, optional = true }
+# SSH-style URL so cargo authenticates via the build environment's SSH
+# agent / deploy key (no PAT/insteadOf juggling in CI). Tracks the
+# parser's `main` branch directly; Cargo.lock pins the exact rev for
+# reproducible builds.
+rgb-consignment = { git = "ssh://git@github.com/UTEXO-Protocol/rgb-consignment-parser.git", branch = "main", default-features = false, optional = true }
 
 # Attestation verification (COSE_Sign1 + AWS Nitro cert chain) lives in
 # the workspace `attestation-verify` crate so the parent CLI binary and
