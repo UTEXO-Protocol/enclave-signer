@@ -5,9 +5,50 @@ use sha3::{Digest, Keccak256};
 use crate::error::{EnclaveError, Result};
 use crate::proto::SignEvmRequest;
 
+/// 4-byte function selectors the enclave is willing to sign `fundsOut`
+/// calldata for. Anything else is rejected up-front before any byte-level
+/// extraction runs.
+///
+/// Each entry is `keccak256(<Solidity signature>)[0..4]`.
+///
+/// - `0x1ad880b2` — `fundsOut(address,address,uint256,uint256,string,string)` —
+///   the 6-arg shape produced by the current `bridge-utexo` listener and
+///   accepted by the currently-deployed `Bridge` contract. Layout:
+///   `[4 selector][32 token][32 recipient][32 amount][32 transactionId][32 srcChainOffset][32 srcAddrOffset]...`.
+///
+/// When the contract migration on `bridge-smart-contracts/main` ships
+/// (split pools `fundsOut(address,uint256,uint256,string)` →
+/// `0xe005bc3f`, and mint/burn
+/// `fundsOut(address,uint256,uint256,uint256,uint256,uint256,string,uint256,bytes32,uint256[])`
+/// → `0x179bef59`), append those selectors here so the enclave begins
+/// accepting them. Per-selector offset tables will land alongside.
+const FUNDS_OUT_SELECTORS: &[[u8; 4]] = &[[0x1a, 0xd8, 0x80, 0xb2]];
+
 /// Validate enriched SignEvmRequest before signing.
 /// Returns Ok(()) if all cross-checks pass, Err(EnclaveError::CrossCheck) if any fail.
 pub fn validate_evm_request(req: &SignEvmRequest) -> Result<()> {
+    // 0. Selector whitelist. Fail-closed before any offset extraction:
+    //    every other byte-level check in this function assumes calldata is
+    //    a known `fundsOut` shape. A listener that swapped the selector
+    //    (e.g. to `transfer(address,uint256)`) would otherwise pass the
+    //    later amount-at-offset-68 check on bytes that mean something else
+    //    entirely.
+    if req.call_data.len() < 4 {
+        return Err(EnclaveError::CrossCheck(format!(
+            "call_data too short: need at least 4 bytes for selector, got {}",
+            req.call_data.len()
+        )));
+    }
+    let selector: [u8; 4] = req.call_data[..4]
+        .try_into()
+        .expect("4-byte slice always converts");
+    if !FUNDS_OUT_SELECTORS.contains(&selector) {
+        return Err(EnclaveError::CrossCheck(format!(
+            "unexpected calldata selector 0x{}: not in fundsOut whitelist",
+            hex::encode(selector)
+        )));
+    }
+
     // 1. Consignment validation check.
     //    When rgb-validation feature is enabled AND raw consignment bytes are present,
     //    in-enclave validation already ran in handle_sign_evm — the Listener's boolean
@@ -131,10 +172,11 @@ mod tests {
     use super::*;
 
     /// Build a mock fundsOut calldata with the given amount and commission.
+    /// Selector is the 6-arg `fundsOut(address,address,uint256,uint256,string,string)`
+    /// = `0x1ad880b2` — the one entry in `FUNDS_OUT_SELECTORS`.
     fn mock_funds_out_calldata(amount: u64, commission: u64) -> Vec<u8> {
         let mut data = Vec::with_capacity(4 + 7 * 32);
-        // 4-byte selector (placeholder)
-        data.extend_from_slice(&[0xab, 0xcd, 0xef, 0x12]);
+        data.extend_from_slice(&FUNDS_OUT_SELECTORS[0]);
         // address token (32 bytes, left-padded)
         let mut padded = [0u8; 32];
         padded[12..].copy_from_slice(&[0x11; 20]);
@@ -294,5 +336,32 @@ mod tests {
     fn skips_hash_check_when_consignment_empty() {
         // Default valid_evm_request has empty consignment — should still pass
         assert!(validate_evm_request(&valid_evm_request()).is_ok());
+    }
+
+    #[test]
+    fn rejects_unknown_selector() {
+        let mut req = valid_evm_request();
+        // Swap the first 4 bytes for an unrelated selector. Leave the rest
+        // of the calldata intact so the only failing predicate is the
+        // whitelist check at the top of validate_evm_request.
+        req.call_data[..4].copy_from_slice(&[0xde, 0xad, 0xbe, 0xef]);
+        let err = validate_evm_request(&req).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("unexpected calldata selector") && msg.contains("deadbeef"),
+            "expected selector rejection, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn rejects_calldata_shorter_than_selector() {
+        let mut req = valid_evm_request();
+        // 3 bytes can't carry a 4-byte selector.
+        req.call_data = vec![0x1a, 0xd8, 0x80];
+        let err = validate_evm_request(&req).unwrap_err();
+        assert!(
+            err.to_string().contains("call_data too short"),
+            "expected too-short rejection, got: {err}"
+        );
     }
 }

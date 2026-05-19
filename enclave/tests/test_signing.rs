@@ -6,6 +6,10 @@ use utexo_bridge_enclave::proto::*;
 
 /// Build a mock fundsOut calldata with the given amount and commission.
 /// fundsOut(address token, address recipient, uint256 amount, uint256 commission, ...)
+///
+/// Selector `0x1ad880b2` is the 6-arg
+/// `fundsOut(address,address,uint256,uint256,string,string)` accepted by
+/// `validation::evm_crosscheck`'s whitelist.
 fn mock_funds_out_calldata(
     token: [u8; 20],
     recipient: [u8; 20],
@@ -13,8 +17,7 @@ fn mock_funds_out_calldata(
     commission: u64,
 ) -> Vec<u8> {
     let mut data = Vec::with_capacity(4 + 7 * 32);
-    // 4-byte selector (placeholder)
-    data.extend_from_slice(&[0xab, 0xcd, 0xef, 0x12]);
+    data.extend_from_slice(&[0x1a, 0xd8, 0x80, 0xb2]);
     // address token (padded to 32 bytes)
     let mut padded = [0u8; 32];
     padded[12..].copy_from_slice(&token);
