@@ -33,6 +33,8 @@ dependencies = [
  "amplify_syn",
  "ascii",
  "rand 0.8.5",
+ "serde",
+ "stringly_conversions",
  "wasm-bindgen",
 ]
 
@@ -65,6 +67,7 @@ version = "0.5.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "99bcb75a2982047f733547042fc3968c0f460dfcf7d90b90dea3b2744580e9ad"
 dependencies = [
+ "serde",
  "wasm-bindgen",
 ]
 
@@ -161,6 +164,9 @@ name = "ascii"
 version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d92bec98840b8f03a5ff5413de5293bfcd8bf96467cf5452609f939ec6f5de16"
+dependencies = [
+ "serde",
+]
 
 [[package]]
 name = "async-stream"
@@ -522,6 +528,7 @@ dependencies = [
  "iana-time-zone",
  "js-sys",
  "num-traits",
+ "serde",
  "wasm-bindgen",
  "windows-link",
 ]
@@ -1937,9 +1944,9 @@ dependencies = [
 
 [[package]]
 name = "rgb-aluvm"
-version = "0.11.1-rc.2"
+version = "0.11.1-rc.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f6b9e41006564b48551e52e001181898982b11732348100216097033b3e536a2"
+checksum = "b60686e4f1701ca4f73b77660777a49e651f3c611461ab62ef718db47a5a6caa"
 dependencies = [
  "amplify",
  "baid64",
@@ -1951,6 +1958,7 @@ dependencies = [
  "rgb-strict-encoding",
  "rgb-strict-types",
  "ripemd",
+ "serde",
  "sha2",
  "wasm-bindgen",
 ]
@@ -1970,8 +1978,9 @@ dependencies = [
 
 [[package]]
 name = "rgb-consensus"
-version = "0.11.1-rc.8"
-source = "git+https://github.com/rgb-protocol/rgb-consensus?branch=master#da8a7d68746f87679dc7ad3826fd90b1454a6be3"
+version = "0.11.1-rc.10"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "535483ee9143782e33ddebd3eda465de0184061fc3c480e24990e42fefc58bb0"
 dependencies = [
  "amplify",
  "baid64",
@@ -1989,14 +1998,27 @@ dependencies = [
  "rgb-strict-types",
  "ripemd",
  "secp256k1",
+ "serde",
  "sha2",
  "wasm-bindgen",
 ]
 
 [[package]]
+name = "rgb-consignment"
+version = "0.1.0"
+source = "git+ssh://git@github.com/UTEXO-Protocol/rgb-consignment-parser.git?branch=main#edde99d4566d703bfea6d799ac0a0808c2e2c7c5"
+dependencies = [
+ "amplify",
+ "rgb-ops",
+ "rgb-strict-types",
+ "serde",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "rgb-invoicing"
-version = "0.11.1-rc.8"
-source = "git+https://github.com/rgb-protocol/rgb-ops?branch=master#e8613ce04c10980b4b1f43cb634725e82c426837"
+version = "0.11.1-rc.10"
+source = "git+https://github.com/rgb-protocol/rgb-ops?branch=master#08911c5b66b8a7e628f6636a99a17b8082dbc232"
 dependencies = [
  "amplify",
  "baid64",
@@ -2008,12 +2030,13 @@ dependencies = [
  "rgb-consensus",
  "rgb-strict-encoding",
  "rgb-strict-types",
+ "serde",
 ]
 
 [[package]]
 name = "rgb-ops"
-version = "0.11.1-rc.8"
-source = "git+https://github.com/rgb-protocol/rgb-ops?branch=master#e8613ce04c10980b4b1f43cb634725e82c426837"
+version = "0.11.1-rc.10"
+source = "git+https://github.com/rgb-protocol/rgb-ops?branch=master#08911c5b66b8a7e628f6636a99a17b8082dbc232"
 dependencies = [
  "amplify",
  "baid64",
@@ -2030,6 +2053,8 @@ dependencies = [
  "rgb-invoicing",
  "rgb-strict-encoding",
  "rgb-strict-types",
+ "serde",
+ "serde_json",
  "wasm-bindgen",
 ]
 
@@ -2041,6 +2066,7 @@ dependencies = [
  "amplify",
  "bitcoin",
  "rgb-strict-encoding-derive",
+ "serde",
  "wasm-bindgen",
 ]
 
@@ -2067,7 +2093,11 @@ dependencies = [
  "indexmap 2.13.0",
  "rgb-ascii-armor",
  "rgb-strict-encoding",
+ "serde",
+ "serde_json",
+ "serde_yaml",
  "sha2",
+ "toml",
  "wasm-bindgen",
 ]
 
@@ -2143,6 +2173,12 @@ name = "rustversion"
 version = "1.0.22"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b39cdef0fa800fc44525c84ccb54a029961a8215f9619753635a9c0d2538d46d"
+
+[[package]]
+name = "ryu"
+version = "1.0.23"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9774ba4a74de5f7b1c1451ed6cd5285a32eddb5cccb8cc655a4e50009e06477f"
 
 [[package]]
 name = "scopeguard"
@@ -2274,6 +2310,38 @@ dependencies = [
 ]
 
 [[package]]
+name = "serde_spanned"
+version = "0.6.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bf41e0cfaf7226dca15e8197172c295a782857fcb97fad1808a166870dee75a3"
+dependencies = [
+ "serde",
+]
+
+[[package]]
+name = "serde_str_helpers"
+version = "0.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b744a7c94f2f3785496af33a0d93857dfc0c521e25c38e993e9c5bb45f09c841"
+dependencies = [
+ "serde",
+ "serde_derive",
+]
+
+[[package]]
+name = "serde_yaml"
+version = "0.9.34+deprecated"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6a8b1a1a2ebf674015cc02edccce75287f1a0130d394307b36743c2f5d504b47"
+dependencies = [
+ "indexmap 2.13.0",
+ "itoa",
+ "ryu",
+ "serde",
+ "unsafe-libyaml",
+]
+
+[[package]]
 name = "sha2"
 version = "0.10.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2369,6 +2437,16 @@ checksum = "d91ed6c858b01f942cd56b37a94b3e0a1798290327d1236e4d9cf4eaca44d29d"
 dependencies = [
  "base64ct",
  "der",
+]
+
+[[package]]
+name = "stringly_conversions"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ff63080f492dd4d289ffcaed8d7ece38adfb423db910eb342c0e04d409536a7a"
+dependencies = [
+ "paste",
+ "serde_str_helpers",
 ]
 
 [[package]]
@@ -2560,6 +2638,47 @@ dependencies = [
  "pin-project-lite",
  "tokio",
 ]
+
+[[package]]
+name = "toml"
+version = "0.8.23"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dc1beb996b9d83529a9e75c17a1686767d148d70663143c7854d8b4a09ced362"
+dependencies = [
+ "serde",
+ "serde_spanned",
+ "toml_datetime",
+ "toml_edit",
+]
+
+[[package]]
+name = "toml_datetime"
+version = "0.6.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "22cddaf88f4fbc13c51aebbf5f8eceb5c7c5a9da2ac40a13519eb5b0a0e8f11c"
+dependencies = [
+ "serde",
+]
+
+[[package]]
+name = "toml_edit"
+version = "0.22.27"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "41fe8c660ae4257887cf66394862d21dbca4a6ddd26f04a3560410406a2f819a"
+dependencies = [
+ "indexmap 2.13.0",
+ "serde",
+ "serde_spanned",
+ "toml_datetime",
+ "toml_write",
+ "winnow",
+]
+
+[[package]]
+name = "toml_write"
+version = "0.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5d99f8c9a7727884afe522e9bd5edbfc91a3312b36a77b5fb8926e4c31a41801"
 
 [[package]]
 name = "tonic"
@@ -2769,6 +2888,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "unsafe-libyaml"
+version = "0.2.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "673aac59facbab8a9007c7f6108d11f63b603f7cabff99fabf650fea5c32b861"
+
+[[package]]
 name = "untrusted"
 version = "0.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2793,6 +2918,7 @@ dependencies = [
  "prost-build 0.14.3",
  "rand 0.10.0",
  "rand_core 0.6.4",
+ "rgb-consignment",
  "rgb-ops",
  "secrecy",
  "serde",
@@ -3119,6 +3245,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "589f6da84c646204747d1270a2a5661ea66ed1cced2631d546fdfb155959f9ec"
 
 [[package]]
+name = "winnow"
+version = "0.7.15"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "df79d97927682d2fd8adb29682d1140b343be4ac0f08fd68b7765d9c059d3945"
+dependencies = [
+ "memchr",
+]
+
+[[package]]
 name = "wit-bindgen"
 version = "0.51.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3275,3 +3410,8 @@ name = "zmij"
 version = "1.0.21"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b8848ee67ecc8aedbaf3e4122217aff892639231befc6a1b58d29fff4c2cabaa"
+
+[[patch.unused]]
+name = "rgb-consensus"
+version = "0.11.1-rc.8"
+source = "git+https://github.com/rgb-protocol/rgb-consensus?branch=master#da8a7d68746f87679dc7ad3826fd90b1454a6be3"
