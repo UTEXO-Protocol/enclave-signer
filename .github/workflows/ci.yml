@@ -15,10 +15,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Rust 1.85
+      - name: Install Rust 1.89
         uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: "1.85"
+          toolchain: "1.89"
           components: rustfmt, clippy
 
       - name: Install system dependencies
