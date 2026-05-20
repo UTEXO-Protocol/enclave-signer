@@ -1,13 +1,32 @@
+# syntax=docker/dockerfile:1.4
 # Enclave (dev mode, TCP, no vsock)
 # Usage:
-#   docker build -f build/Dockerfile.enclave-dev -t utexo-bridge-enclave-dev .
+#   DOCKER_BUILDKIT=1 docker build --ssh default \
+#     -f build/Dockerfile.enclave-dev -t utexo-bridge-enclave-dev .
+#
+# `--ssh default` forwards the host's SSH agent into the build so cargo
+# can fetch the private `rgb-consignment` git dep (under
+# `rgb-validation`/`spv`). In CI this is wired via `docker/build-push-action`
+# with `ssh: default` after `webfactory/ssh-agent` loads
+# `secrets.RGB_CONSIGNMENT_PARSER_DEPLOY_KEY`.
 
 # ===== Builder Stage =====
-FROM rust:1.85-slim AS builder
+FROM rust:1.89-slim AS builder
 
+# `git` + `openssh-client`: the workspace `[patch.crates-io]` uses public
+# git URLs for rgb-consensus / rgb-ops / rgb-invoicing / rgb-strict-encoding,
+# and `enclave/Cargo.toml` pulls `rgb-consignment` over SSH. `.cargo/config.toml`
+# sets `net.git-fetch-with-cli = true` so cargo shells out to system `git`
+# rather than bundled libgit2. `openssh-client` provides the ssh binary +
+# known_hosts machinery `git` needs for the SSH transport.
 RUN apt-get update && apt-get install -y \
-    pkg-config libssl-dev protobuf-compiler \
+    pkg-config libssl-dev protobuf-compiler git ca-certificates openssh-client \
     && rm -rf /var/lib/apt/lists/*
+
+# Trust github.com's SSH host key so the build doesn't prompt or fail
+# on host-key verification when fetching the private parser dep.
+RUN mkdir -p /root/.ssh && \
+    ssh-keyscan -t ed25519,ecdsa github.com >> /root/.ssh/known_hosts
 
 WORKDIR /build
 COPY . /build/
@@ -17,7 +36,11 @@ WORKDIR /build/enclave
 # without the production-only `vsock,rgb-validation` combo. Without spv,
 # the enclave fails-closed on any request that carries merkle_proofs,
 # which is what we want — build mismatch should always fail loudly.
-RUN cargo build --release --features allow-seed-import,spv
+#
+# `--mount=type=ssh` exposes the SSH_AUTH_SOCK forwarded by `--ssh default`
+# only for the duration of this RUN, so no credentials end up in the
+# image layers.
+RUN --mount=type=ssh cargo build --release --features allow-seed-import,spv
 
 # ===== Runtime Stage =====
 FROM debian:bookworm-slim

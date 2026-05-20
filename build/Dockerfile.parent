@@ -11,10 +11,16 @@
 #     utexo-bridge-parent
 
 # ===== Builder Stage =====
-FROM rust:1.85-slim AS builder
+FROM rust:1.89-slim AS builder
 
+# `git` + `ca-certificates`: the workspace `[patch.crates-io]` rewrites
+# rgb-consensus / rgb-ops / rgb-invoicing / rgb-strict-encoding to public
+# git URLs, and `.cargo/config.toml` sets `net.git-fetch-with-cli = true`
+# so cargo shells out to system `git` instead of bundled libgit2. Without
+# `git` installed, cargo fails with "No such file or directory" before
+# the build even starts.
 RUN apt-get update && apt-get install -y \
-    pkg-config libssl-dev protobuf-compiler \
+    pkg-config libssl-dev protobuf-compiler git ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /build
