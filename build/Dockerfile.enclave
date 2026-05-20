@@ -1,8 +1,29 @@
-FROM rust:1.85-slim AS builder
+# syntax=docker/dockerfile:1.4
+# Production enclave image (vsock + rgb-validation + spv).
+# Usage:
+#   DOCKER_BUILDKIT=1 docker build --ssh default \
+#     -f build/Dockerfile.enclave -t utexo-bridge-enclave .
+#
+# `--ssh default` forwards the host's SSH agent into the build so cargo
+# can fetch the private `rgb-consignment` git dep that the
+# `rgb-validation`/`spv` features pull in.
 
+FROM rust:1.89-slim AS builder
+
+# `git` + `openssh-client`: the workspace `[patch.crates-io]` uses public
+# git URLs for rgb-consensus / rgb-ops / rgb-invoicing / rgb-strict-encoding,
+# and `enclave/Cargo.toml` pulls `rgb-consignment` over SSH. `.cargo/config.toml`
+# sets `net.git-fetch-with-cli = true` so cargo shells out to system `git`
+# rather than bundled libgit2. `openssh-client` provides the ssh binary +
+# known_hosts machinery `git` needs for the SSH transport.
 RUN apt-get update && apt-get install -y \
-    pkg-config libssl-dev protobuf-compiler \
+    pkg-config libssl-dev protobuf-compiler git ca-certificates openssh-client \
     && rm -rf /var/lib/apt/lists/*
+
+# Trust github.com's SSH host key so the build doesn't prompt or fail
+# on host-key verification when fetching the private parser dep.
+RUN mkdir -p /root/.ssh && \
+    ssh-keyscan -t ed25519,ecdsa github.com >> /root/.ssh/known_hosts
 
 WORKDIR /build
 COPY . /build/
@@ -10,7 +31,11 @@ COPY . /build/
 WORKDIR /build/enclave
 # `spv` implies `rgb-validation`; listing both explicitly so the feature
 # set is visible at a glance.
-RUN cargo build --release --features vsock,rgb-validation,spv
+#
+# `--mount=type=ssh` exposes the SSH_AUTH_SOCK forwarded by `--ssh default`
+# only for the duration of this RUN, so no credentials end up in the
+# image layers.
+RUN --mount=type=ssh cargo build --release --features vsock,rgb-validation,spv
 
 # --- Runtime ---
 FROM public.ecr.aws/amazonlinux/amazonlinux:2023-minimal AS runtime
