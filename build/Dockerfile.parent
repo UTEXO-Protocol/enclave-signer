@@ -1,6 +1,15 @@
+# syntax=docker/dockerfile:1.4
 # Parent Adapter (gRPC proxy to Enclave)
 # Usage:
-#   docker build -f build/Dockerfile.parent -t utexo-bridge-parent .
+#   DOCKER_BUILDKIT=1 docker build --ssh default \
+#     -f build/Dockerfile.parent -t utexo-bridge-parent .
+#
+# `--ssh default` is required even though parent doesn't link against
+# `rgb-consignment`: cargo's resolver fetches every git source declared
+# anywhere in the workspace before it knows which crates a `-p` build
+# actually compiles. The optional `rgb-consignment` dep lives in
+# `enclave/Cargo.toml` and is hosted on a private repo over SSH, so the
+# agent socket has to be exposed.
 #
 # Dev (TCP to enclave container):
 #   docker run -e ENCLAVE_ADDR=enclave:5000 utexo-bridge-parent
@@ -16,17 +25,27 @@ FROM rust:1.89-slim AS builder
 # `git` + `ca-certificates`: the workspace `[patch.crates-io]` rewrites
 # rgb-consensus / rgb-ops / rgb-invoicing / rgb-strict-encoding to public
 # git URLs, and `.cargo/config.toml` sets `net.git-fetch-with-cli = true`
-# so cargo shells out to system `git` instead of bundled libgit2. Without
-# `git` installed, cargo fails with "No such file or directory" before
-# the build even starts.
+# so cargo shells out to system `git` instead of bundled libgit2.
+# `openssh-client` is required because cargo's workspace resolver also
+# fetches the private `rgb-consignment` git source (declared optional in
+# `enclave/Cargo.toml`) even when building `-p utexo-bridge-parent` —
+# the resolution is workspace-wide, not target-scoped.
 RUN apt-get update && apt-get install -y \
-    pkg-config libssl-dev protobuf-compiler git ca-certificates \
+    pkg-config libssl-dev protobuf-compiler git ca-certificates openssh-client \
     && rm -rf /var/lib/apt/lists/*
+
+# Trust github.com's SSH host key so the build doesn't prompt or fail
+# on host-key verification when fetching the private parser dep.
+RUN mkdir -p /root/.ssh && \
+    ssh-keyscan -t ed25519,ecdsa github.com >> /root/.ssh/known_hosts
 
 WORKDIR /build
 COPY . /build/
 
-RUN cargo build --release -p utexo-bridge-parent
+# `--mount=type=ssh` exposes the SSH_AUTH_SOCK forwarded by `--ssh default`
+# only for the duration of this RUN, so no credentials end up in the
+# image layers.
+RUN --mount=type=ssh cargo build --release -p utexo-bridge-parent
 
 # ===== Runtime Stage =====
 FROM debian:bookworm-slim
