@@ -1,8 +1,8 @@
-name: "CD Dev"
+name: "CD Stage"
 
 on:
   push:
-    branches: [dev]
+    branches: [stage]
   workflow_dispatch:
 
 permissions:
@@ -13,7 +13,7 @@ jobs:
   cd:
     uses: ./.github/workflows/cd-reusable.yml
     with:
-      stage: dev
-      env_suffix: -dev
+      stage: stage
+      env_suffix: -stage
       force_build: ${{ github.event_name == 'workflow_dispatch' }}
     secrets: inherit

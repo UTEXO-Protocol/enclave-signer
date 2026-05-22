@@ -1,0 +1,142 @@
+name: "CD Reusable"
+
+on:
+  workflow_call:
+    inputs:
+      stage:
+        description: "Target environment: dev | stage | prod"
+        type: string
+        required: true
+      env_suffix:
+        description: "Image tag suffix: -dev | -stage | empty for prod"
+        type: string
+        required: true
+      force_build:
+        description: "Force build even if no changes"
+        type: boolean
+        required: false
+        default: false
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  REGISTRY: ghcr.io/utexo-protocol
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      tag_parent: ${{ steps.v.outputs.tag_parent }}
+      tag_enclave: ${{ steps.v.outputs.tag_enclave }}
+      float_parent: ${{ steps.v.outputs.float_parent }}
+      float_enclave: ${{ steps.v.outputs.float_enclave }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Compute tags
+        id: v
+        run: |
+          read_ver() {
+            python3 -c "import yaml; m=yaml.safe_load(open('METADATA.yaml')); print(m['services']['$1']['version'])"
+          }
+          make_tags() {
+            local ver="$1" key="$2"
+            case "${{ inputs.stage }}" in
+              dev)   TAG="${ver}-${{ github.run_number }}"; FLOAT="${ver}-dev";;
+              stage) TAG="${ver}-rc.${{ github.run_number }}"; FLOAT="${ver}-stage";;
+              prod)  TAG="${ver}"; FLOAT="latest";;
+            esac
+            echo "tag_${key}=${TAG}"     >> "$GITHUB_OUTPUT"
+            echo "float_${key}=${FLOAT}" >> "$GITHUB_OUTPUT"
+          }
+          make_tags "$(read_ver parent)"  parent
+          make_tags "$(read_ver enclave)" enclave
+
+  build:
+    needs: prepare
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - name: parent
+            image: utexo-bridge-parent
+            dockerfile: ./build/Dockerfile.parent
+            tag: ${{ needs.prepare.outputs.tag_parent }}
+            float: ${{ needs.prepare.outputs.float_parent }}
+          - name: enclave
+            image: utexo-bridge-enclave-light
+            dockerfile: ./build/Dockerfile.enclave-dev
+            tag: ${{ needs.prepare.outputs.tag_enclave }}
+            float: ${{ needs.prepare.outputs.float_enclave }}
+      fail-fast: false
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up SSH agent for private Rust deps
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.RGB_CONSIGNMENT_PARSER_DEPLOY_KEY }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push ${{ matrix.name }}
+        uses: docker/build-push-action@v6
+        id: build_attempt
+        continue-on-error: true
+        with:
+          context: .
+          file: ${{ matrix.dockerfile }}
+          push: true
+          ssh: default
+          build-args: BUILDKIT_INLINE_CACHE=1
+          tags: |
+            ${{ env.REGISTRY }}/${{ matrix.image }}${{ inputs.env_suffix }}:${{ matrix.tag }}
+            ${{ env.REGISTRY }}/${{ matrix.image }}${{ inputs.env_suffix }}:${{ matrix.float }}
+          cache-from: type=gha,scope=build-${{ matrix.name }}-${{ inputs.stage }}
+          cache-to: type=gha,scope=build-${{ matrix.name }}-${{ inputs.stage }},mode=max
+
+      - name: Rebuild without cache on failure
+        if: steps.build_attempt.outcome == 'failure'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ${{ matrix.dockerfile }}
+          push: true
+          ssh: default
+          build-args: BUILDKIT_INLINE_CACHE=1
+          tags: |
+            ${{ env.REGISTRY }}/${{ matrix.image }}${{ inputs.env_suffix }}:${{ matrix.tag }}
+            ${{ env.REGISTRY }}/${{ matrix.image }}${{ inputs.env_suffix }}:${{ matrix.float }}
+
+  dispatch:
+    needs: [build, prepare]
+    if: ${{ needs.build.result == 'success' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Dispatch parent-adapter
+        uses: peter-evans/repository-dispatch@v3
+        with:
+          token: ${{ secrets.DEVOPS_PAT }}
+          repository: UTEXO-Protocol/devops
+          event-type: deploy
+          client-payload: |
+            {"group":"utexo-protocol","name":"parent-adapter","stage":"${{ inputs.stage }}","tag":"${{ needs.prepare.outputs.tag_parent }}"}
+
+      - name: Dispatch enclave
+        uses: peter-evans/repository-dispatch@v3
+        with:
+          token: ${{ secrets.DEVOPS_PAT }}
+          repository: UTEXO-Protocol/devops
+          event-type: deploy
+          client-payload: |
+            {"group":"utexo-protocol","name":"enclave","stage":"${{ inputs.stage }}","tag":"${{ needs.prepare.outputs.tag_enclave }}"}

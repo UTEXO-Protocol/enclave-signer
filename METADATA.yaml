@@ -1,0 +1,5 @@
+services:
+  parent:
+    version: "0.1.0"
+  enclave:
+    version: "0.1.0"
