@@ -66,7 +66,7 @@ jobs:
             tag: ${{ needs.prepare.outputs.tag_parent }}
             float: ${{ needs.prepare.outputs.float_parent }}
           - name: enclave
-            image: utexo-bridge-enclave-light
+            image: utexo-bridge-enclave
             dockerfile: ./build/Dockerfile.enclave-dev
             tag: ${{ needs.prepare.outputs.tag_enclave }}
             float: ${{ needs.prepare.outputs.float_enclave }}
