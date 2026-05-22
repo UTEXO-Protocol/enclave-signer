@@ -14,6 +14,5 @@ jobs:
     uses: ./.github/workflows/cd-reusable.yml
     with:
       stage: stage
-      env_suffix: -stage
       force_build: ${{ github.event_name == 'workflow_dispatch' }}
     secrets: inherit

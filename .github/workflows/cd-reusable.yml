@@ -7,10 +7,6 @@ on:
         description: "Target environment: dev | stage | prod"
         type: string
         required: true
-      env_suffix:
-        description: "Image tag suffix: -dev | -stage | empty for prod"
-        type: string
-        required: true
       force_build:
         description: "Force build even if no changes"
         type: boolean
@@ -100,8 +96,8 @@ jobs:
           ssh: default
           build-args: BUILDKIT_INLINE_CACHE=1
           tags: |
-            ${{ env.REGISTRY }}/${{ matrix.image }}${{ inputs.env_suffix }}:${{ matrix.tag }}
-            ${{ env.REGISTRY }}/${{ matrix.image }}${{ inputs.env_suffix }}:${{ matrix.float }}
+            ${{ env.REGISTRY }}/${{ matrix.image }}:${{ matrix.tag }}
+            ${{ env.REGISTRY }}/${{ matrix.image }}:${{ matrix.float }}
           cache-from: type=gha,scope=build-${{ matrix.name }}-${{ inputs.stage }}
           cache-to: type=gha,scope=build-${{ matrix.name }}-${{ inputs.stage }},mode=max
 
@@ -115,8 +111,8 @@ jobs:
           ssh: default
           build-args: BUILDKIT_INLINE_CACHE=1
           tags: |
-            ${{ env.REGISTRY }}/${{ matrix.image }}${{ inputs.env_suffix }}:${{ matrix.tag }}
-            ${{ env.REGISTRY }}/${{ matrix.image }}${{ inputs.env_suffix }}:${{ matrix.float }}
+            ${{ env.REGISTRY }}/${{ matrix.image }}:${{ matrix.tag }}
+            ${{ env.REGISTRY }}/${{ matrix.image }}:${{ matrix.float }}
 
   dispatch:
     needs: [build, prepare]

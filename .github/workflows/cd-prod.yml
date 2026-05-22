@@ -13,6 +13,5 @@ jobs:
     uses: ./.github/workflows/cd-reusable.yml
     with:
       stage: prod
-      env_suffix: ""
       force_build: false
     secrets: inherit
