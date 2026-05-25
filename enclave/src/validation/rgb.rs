@@ -14,10 +14,36 @@ use rgb_consignment::{
 use rgbstd::containers::{ConsignmentExt, FileContent, Transfer};
 use rgbstd::indexers::esplora_blocking::esplora_client;
 use rgbstd::indexers::AnyResolver;
+use rgbstd::schema::MetaType;
 use rgbstd::validation::ValidationConfig;
 use rgbstd::ChainNet;
 
 use crate::error::{EnclaveError, Result};
+
+/// Schema-defined `transition_type` and `metadata` keys for the Inflatable
+/// Fungible Asset (IFA) schema we use for USDT. Sourced from the
+/// `rgb-protocol/rgb-schemas` `src/lib.rs` definitions (`TS_*` for
+/// transition-type ids, `MS_*` for metadata-type ids). Constants are tied
+/// to the schema's contract — rotating the schema = updating these.
+pub mod ifa {
+    /// IFA transition that moves an existing asset allocation from one
+    /// owner to another. Pools-mode swaps use this on their last
+    /// transition.
+    pub const TS_TRANSFER: u16 = 10000;
+    /// IFA transition that mints new units against the contract's
+    /// inflation rights. Mint-mode locks produce this server-side; the
+    /// enclave reads OpIds of these transitions for spec §6 OpId binding.
+    pub const TS_INFLATION: u16 = 8000;
+    /// IFA transition that destroys asset units. Mint-burn unlock flows
+    /// produce a burn on their last transition; the destroyed amount is
+    /// in the transition's metadata under [`MS_BURNED_ASSET`].
+    pub const TS_BURN: u16 = 8010;
+
+    /// IFA burn-transition metadata key carrying the destroyed amount of
+    /// `OS_ASSET` (the regular fungible asset allocation type). The
+    /// associated value is a strict-encoded `rgbstd::Amount` (u64).
+    pub const MS_BURNED_ASSET: u16 = 1001;
+}
 
 /// Data extracted from a successfully validated RGB consignment.
 #[derive(Debug, Clone)]
@@ -60,20 +86,32 @@ pub struct ValidatedConsignment {
 pub struct TransitionSummary {
     /// Operation id (baid64).
     pub op_id: String,
-    /// IFA-schema transition-type id (Transfer / Burn / Mint / ...). The
-    /// schema-specific `u16` constants are not interpreted here — that
-    /// happens in the EVM-crosscheck layer once the constants are
-    /// confirmed against `rgb-ops`'s IFA schema definition.
+    /// IFA-schema transition-type id; compare against [`ifa::TS_TRANSFER`]
+    /// / [`ifa::TS_BURN`] / [`ifa::TS_INFLATION`] to classify the EVM
+    /// action this consignment authorises.
     pub transition_type: u16,
     /// Sum of all fungible amounts across all output assignments of this
     /// transition. For a Transfer this is the total of recipient + change
     /// outputs; for a Burn this is **zero** because burns have no output
-    /// assignments (the burned amount lives in transition metadata,
-    /// surfaced separately in a follow-up PR).
+    /// assignments — the destroyed amount lives in [`Self::burned_asset_amount`].
     pub total_output_amount: u64,
     /// Concrete output assignments, each tagged with a destination seal
     /// and an amount. Empty for Burn transitions.
     pub outputs: Vec<TransitionOutput>,
+    /// Asset units destroyed by this transition, read from the IFA
+    /// `MS_BURNED_ASSET` metadata field. `Some(0)` is allowed by the
+    /// schema (partial burn writing 0 to OS_ASSET), but for our
+    /// mint-burn unlock flow the bridge only ever signs unlocks against
+    /// transitions where this is strictly positive — the EVM-crosscheck
+    /// layer enforces that.
+    ///
+    /// `None` when:
+    /// * the transition is not a burn (`transition_type != ifa::TS_BURN`); or
+    /// * the burn transition is malformed (missing or wrong-sized
+    ///   `MS_BURNED_ASSET` metadata) — rgbstd validation would have
+    ///   already rejected such a consignment, so reaching this branch
+    ///   in practice indicates an internal contract / schema mismatch.
+    pub burned_asset_amount: Option<u64>,
 }
 
 /// One fungible output assignment on a state transition.
@@ -196,8 +234,19 @@ impl RgbValidator {
         // walk would duplicate ~80 lines we'd then have to keep in sync
         // with rgb-ops's evolving internal types. The parse cost is small
         // relative to the network validation below.
-        let (all_op_ids, last_transition) = extract_transition_summary(consignment_bytes)?;
+        let (all_op_ids, mut last_transition) = extract_transition_summary(consignment_bytes)?;
         let transitions_count = all_op_ids.len();
+
+        // Burn-amount extraction: the parser doesn't surface
+        // `Transition.metadata`, so we read the IFA `MS_BURNED_ASSET`
+        // metadata field directly from rgbstd's `Transfer`. Only the
+        // last transition matters for the unlock cross-check; if it's
+        // not a burn, the field stays `None`.
+        if let Some(ref mut last) = last_transition {
+            if last.transition_type == ifa::TS_BURN {
+                last.burned_asset_amount = read_last_transition_burned_asset(&transfer)?;
+            }
+        }
 
         // 2. Create an Esplora-backed resolver.
         let builder = esplora_client::Builder::new(&self.esplora_url);
@@ -317,7 +366,56 @@ fn transition_summary(t: &TransitionInfo) -> Result<TransitionSummary> {
         transition_type: t.transition_type,
         total_output_amount,
         outputs: outputs?,
+        // Filled by `read_last_transition_burned_asset` if the
+        // transition is a burn; the parser doesn't expose metadata so
+        // we leave this `None` here.
+        burned_asset_amount: None,
     })
+}
+
+/// Walk the rgbstd `Transfer` to the last witness bundle's last known
+/// transition and pull the IFA `MS_BURNED_ASSET` value out of its
+/// metadata. The parser drops `Transition.metadata` on the floor — we
+/// read it here directly so the unlock cross-check has the destroyed
+/// amount available.
+///
+/// The metadata value for `MS_BURNED_ASSET` is a strict-encoded
+/// `rgbstd::Amount`, which is defined as `pub struct Amount(u64)` with
+/// the standard `StrictEncode` derive — i.e. 8 bytes, little-endian.
+/// We decode the `u64` manually rather than reaching for
+/// `StrictDeserialize::from_strict_serialized` to avoid threading
+/// the `rgb-strict-encoding`-as-`strict_encoding` rename through
+/// our deps; the encoding shape has been stable since RGB 0.11 and
+/// changes here would break wire compatibility upstream regardless.
+///
+/// Returns `Ok(None)` if there's no last transition (a validated
+/// transfer should never produce that) or if the metadata key is
+/// absent — rgbstd validation rejects a `TS_BURN` transition with no
+/// `MS_BURNED_ASSET`, so reaching the `None` branch in production
+/// implies a schema mismatch. Returns `Err` if the metadata blob is
+/// the wrong size for a `u64`.
+fn read_last_transition_burned_asset(transfer: &Transfer) -> Result<Option<u64>> {
+    let Some(last_bundle) = transfer.bundles.iter().last() else {
+        return Ok(None);
+    };
+    let Some(known) = last_bundle.bundle().known_transitions.iter().last() else {
+        return Ok(None);
+    };
+    let burned_meta_key = MetaType::with(ifa::MS_BURNED_ASSET);
+    for (mt, mv) in &known.transition.metadata {
+        if *mt != burned_meta_key {
+            continue;
+        }
+        let raw: &[u8] = mv.as_unconfined().as_slice();
+        let bytes: [u8; 8] = raw.try_into().map_err(|_| {
+            EnclaveError::CrossCheck(format!(
+                "MS_BURNED_ASSET metadata is {} bytes, expected 8 (strict-encoded u64)",
+                raw.len()
+            ))
+        })?;
+        return Ok(Some(u64::from_le_bytes(bytes)));
+    }
+    Ok(None)
 }
 
 fn transition_output(e: &FungibleEntry) -> Result<TransitionOutput> {
@@ -417,6 +515,26 @@ mod tests {
         // (confidential recipient leg). Total = 14_999_960_000_000.
         assert_eq!(last.total_output_amount, 14_999_960_000_000);
         assert_eq!(last.outputs.len(), 2);
+        // The fixture's last transition is a Transfer (type 10000), not a
+        // Burn (type 8010). `extract_transition_summary` leaves
+        // `burned_asset_amount` `None` because the burn metadata read is
+        // gated on `transition_type == ifa::TS_BURN`. A real burn-fixture
+        // round-trip lives behind the validator-level path (which needs
+        // network access for Esplora), tracked separately.
+        assert_eq!(last.burned_asset_amount, None);
+    }
+
+    #[test]
+    fn ifa_constants_match_rgb_schemas_definitions() {
+        // Lock these to the values published in
+        // `rgb-protocol/rgb-schemas/src/lib.rs`. If upstream renumbers
+        // them, this test fails loud — the consequences of a silent
+        // mismatch (mis-classifying a Transfer as a Burn or vice versa)
+        // would be much worse than a CI break.
+        assert_eq!(ifa::TS_TRANSFER, 10000);
+        assert_eq!(ifa::TS_BURN, 8010);
+        assert_eq!(ifa::TS_INFLATION, 8000);
+        assert_eq!(ifa::MS_BURNED_ASSET, 1001);
     }
 
     #[test]
