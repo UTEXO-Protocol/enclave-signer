@@ -74,8 +74,11 @@ pub fn validate_evm_request(req: &SignEvmRequest) -> Result<()> {
     }
 
     // 1b. If raw consignment bytes are present, verify hash integrity.
-    //     This catches tampering between Listener and Enclave.
-    //     Full RGB validation (rgb-lib) will be added in a follow-up PR.
+    //     This catches tampering between Listener and Enclave. Full RGB
+    //     validation (deserialize + `rgbstd::Transfer::validate` against
+    //     an Esplora resolver) runs earlier in `handle_sign_evm` when
+    //     built with `--features rgb-validation`; this hash check is the
+    //     defence-in-depth that always runs.
     if !req.consignment.is_empty() {
         if req.consignment_hash.is_empty() {
             return Err(EnclaveError::CrossCheck(
