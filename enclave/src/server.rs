@@ -1,5 +1,6 @@
 use std::io::{Read, Write};
 
+use crate::config::BridgeConfig;
 use crate::error::{EnclaveError, Result};
 use crate::framing;
 use crate::proto::enclave_request::Request;
@@ -13,6 +14,10 @@ use crate::validation;
 /// Shared context passed to every request handler.
 pub struct ServerContext {
     pub state: EnclaveState,
+    /// Bridge config pinned at boot from env. Folded into the attestation
+    /// `user_data` commitment and used to cross-check `SignEvm` requests
+    /// against operator-pinned values.
+    pub bridge_config: BridgeConfig,
     #[cfg(feature = "rgb-validation")]
     pub rgb_validator: Option<crate::validation::rgb::RgbValidator>,
     /// In-enclave Bitcoin header chain for SPV verification. Populated at
@@ -30,10 +35,12 @@ impl ServerContext {
     /// (e.g. the parent's E2E tests) don't need to mirror our cfg flags.
     pub fn new(
         state: EnclaveState,
+        bridge_config: BridgeConfig,
         header_chain: std::sync::Mutex<crate::spv::HeaderChain>,
     ) -> Self {
         Self {
             state,
+            bridge_config,
             #[cfg(feature = "rgb-validation")]
             rgb_validator: None,
             header_chain,
@@ -70,11 +77,11 @@ fn dispatch(request: EnclaveRequest, ctx: &ServerContext) -> EnclaveResponse {
                 "seed-import"
             };
             tracing::info!("request: InitializeKey ({})", path);
-            handle_initialize(&ctx.state, req)
+            handle_initialize(ctx, req)
         }
         Some(Request::GetPublicKey(req)) => {
             tracing::info!("request: GetPublicKey");
-            handle_get_public_key(&ctx.state, req)
+            handle_get_public_key(ctx, req)
         }
         Some(Request::SignEvm(req)) => {
             tracing::info!("request: SignEvm");
@@ -118,7 +125,7 @@ fn dispatch(request: EnclaveRequest, ctx: &ServerContext) -> EnclaveResponse {
         }
         Some(Request::GetAttestedPublicKey(req)) => {
             tracing::info!("request: GetAttestedPublicKey");
-            handle_get_attested_public_key(&ctx.state, req)
+            handle_get_attested_public_key(ctx, req)
         }
         None => {
             tracing::warn!("received empty request (no oneof variant set)");
@@ -145,7 +152,8 @@ fn dispatch(request: EnclaveRequest, ctx: &ServerContext) -> EnclaveResponse {
     }
 }
 
-fn handle_initialize(state: &EnclaveState, req: InitializeKeyRequest) -> Result<EnclaveResponse> {
+fn handle_initialize(ctx: &ServerContext, req: InitializeKeyRequest) -> Result<EnclaveResponse> {
+    let state = &ctx.state;
     if !req.mnemonic.is_empty() {
         // Testing path: import from BIP-39 mnemonic phrase
         #[cfg(feature = "allow-seed-import")]
@@ -204,40 +212,62 @@ fn handle_initialize(state: &EnclaveState, req: InitializeKeyRequest) -> Result<
             account_xpub_vanilla: keys.account_xpub_vanilla,
             account_xpub_colored: keys.account_xpub_colored,
             evm_uncompressed_pub: keys.evm_uncompressed_pub.to_vec(),
+            chain_id: ctx.bridge_config.chain_id,
+            bridge_contract: ctx.bridge_config.bridge_contract.to_vec(),
+            rgb_asset_id: ctx.bridge_config.rgb_asset_id.clone(),
         })),
     })
 }
 
 fn handle_get_public_key(
-    state: &EnclaveState,
+    ctx: &ServerContext,
     _req: GetPublicKeyRequest,
 ) -> Result<EnclaveResponse> {
-    let keys = state.get_keys()?;
+    let keys = ctx.state.get_keys()?;
     tracing::debug!(
         evm_address = %hex::encode(keys.evm_address),
         "returning public keys"
     );
     Ok(EnclaveResponse {
-        response: Some(Response::PublicKeys(PublicKeysResponse {
-            evm_address: keys.evm_address.to_vec(),
-            btc_compressed_pub: keys.btc_compressed_pubkey.to_vec(),
-            btc_xpub: keys.btc_xpub,
-            master_fingerprint: keys.master_fingerprint.to_vec(),
-            account_xpub_vanilla: keys.account_xpub_vanilla,
-            account_xpub_colored: keys.account_xpub_colored,
-            evm_uncompressed_pub: keys.evm_uncompressed_pub.to_vec(),
-        })),
+        response: Some(Response::PublicKeys(build_public_keys_response(
+            keys,
+            &ctx.bridge_config,
+        ))),
     })
+}
+
+/// Single place that assembles a `PublicKeysResponse` — keeps the field
+/// order matching `canonical_pubkey_bundle` exactly. If you add a field
+/// here, add it to the bundle too (and to the verifier mirror in
+/// `parent/src/attest_verify.rs::canonical_bundle`).
+fn build_public_keys_response(
+    keys: crate::keys::KeyInfo,
+    cfg: &BridgeConfig,
+) -> PublicKeysResponse {
+    PublicKeysResponse {
+        evm_address: keys.evm_address.to_vec(),
+        btc_compressed_pub: keys.btc_compressed_pubkey.to_vec(),
+        btc_xpub: keys.btc_xpub,
+        master_fingerprint: keys.master_fingerprint.to_vec(),
+        account_xpub_vanilla: keys.account_xpub_vanilla,
+        account_xpub_colored: keys.account_xpub_colored,
+        evm_uncompressed_pub: keys.evm_uncompressed_pub.to_vec(),
+        chain_id: cfg.chain_id,
+        bridge_contract: cfg.bridge_contract.to_vec(),
+        rgb_asset_id: cfg.rgb_asset_id.clone(),
+    }
 }
 
 /// Build the canonical bundle that the verifier hashes to check `user_data`.
 ///
-/// Length-prefixed (u32 BE) concatenation of every byte field in
-/// PublicKeysResponse, in the same field order as the proto. Strings are
-/// encoded as their UTF-8 bytes. Order and field set MUST match the
-/// verifier — see `docs/pubkey-attestation.md`.
+/// Length-prefixed (u32 BE) concatenation of every field in
+/// PublicKeysResponse, in proto field order. Strings are encoded as their
+/// UTF-8 bytes; `chain_id` as 8-byte big-endian (its length prefix is the
+/// constant 8). Order and field set MUST match the verifier — see
+/// `docs/pubkey-attestation.md` and `parent/src/attest_verify.rs::canonical_bundle`.
 fn canonical_pubkey_bundle(keys: &PublicKeysResponse) -> Vec<u8> {
-    let parts: [&[u8]; 7] = [
+    let chain_id_bytes = keys.chain_id.to_be_bytes();
+    let parts: [&[u8]; 10] = [
         &keys.evm_address,
         &keys.btc_compressed_pub,
         keys.btc_xpub.as_bytes(),
@@ -245,6 +275,9 @@ fn canonical_pubkey_bundle(keys: &PublicKeysResponse) -> Vec<u8> {
         keys.account_xpub_vanilla.as_bytes(),
         keys.account_xpub_colored.as_bytes(),
         &keys.evm_uncompressed_pub,
+        &chain_id_bytes,
+        &keys.bridge_contract,
+        keys.rgb_asset_id.as_bytes(),
     ];
     let total: usize = parts.iter().map(|p| 4 + p.len()).sum();
     let mut out = Vec::with_capacity(total);
@@ -256,7 +289,7 @@ fn canonical_pubkey_bundle(keys: &PublicKeysResponse) -> Vec<u8> {
 }
 
 fn handle_get_attested_public_key(
-    state: &EnclaveState,
+    ctx: &ServerContext,
     req: GetAttestedPublicKeyRequest,
 ) -> Result<EnclaveResponse> {
     use sha2::{Digest, Sha256};
@@ -265,16 +298,8 @@ fn handle_get_attested_public_key(
         EnclaveError::InvalidRequest(format!("nonce must be 32 bytes, got {}", req.nonce.len()))
     })?;
 
-    let keys = state.get_keys()?;
-    let public_keys = PublicKeysResponse {
-        evm_address: keys.evm_address.to_vec(),
-        btc_compressed_pub: keys.btc_compressed_pubkey.to_vec(),
-        btc_xpub: keys.btc_xpub,
-        master_fingerprint: keys.master_fingerprint.to_vec(),
-        account_xpub_vanilla: keys.account_xpub_vanilla,
-        account_xpub_colored: keys.account_xpub_colored,
-        evm_uncompressed_pub: keys.evm_uncompressed_pub.to_vec(),
-    };
+    let keys = ctx.state.get_keys()?;
+    let public_keys = build_public_keys_response(keys, &ctx.bridge_config);
 
     let bundle = canonical_pubkey_bundle(&public_keys);
     let commitment: [u8; 32] = Sha256::digest(&bundle).into();
@@ -349,7 +374,7 @@ fn handle_sign_evm(ctx: &ServerContext, req: SignEvmRequest) -> Result<EnclaveRe
 
     // Cross-check enriched fields before signing (skipped in dev-mode)
     #[cfg(not(feature = "dev-mode"))]
-    validation::evm_crosscheck::validate_evm_request(&req)?;
+    validation::evm_crosscheck::validate_evm_request(&req, &ctx.bridge_config)?;
 
     // Consignment-bound amount cross-check for both fundsOut selectors.
     // Every fundsOut signature must be backed by a validated consignment

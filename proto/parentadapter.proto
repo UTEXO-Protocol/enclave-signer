@@ -94,4 +94,12 @@ message AttestedPublicKeyResponse {
   string account_xpub_vanilla  = 6;
   string account_xpub_colored  = 7;
   bytes  attestation_doc       = 8;  // COSE_Sign1 NSM doc (real) or raw CBOR (mock)
+
+  // Bridge config pinned at enclave boot (EVM_CHAIN_ID / BRIDGE_CONTRACT /
+  // RGB_ASSET_ID). Zero/empty means "not configured". These are included in
+  // the canonical bundle hashed into attestation.user_data so a verifier
+  // can prove the enclave is provisioned for a specific chain/contract/asset.
+  uint64 chain_id              = 9;
+  bytes  bridge_contract       = 10;  // 20 bytes (zeros = unset)
+  string rgb_asset_id          = 11;
 }

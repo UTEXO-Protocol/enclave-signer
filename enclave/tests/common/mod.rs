@@ -2,6 +2,7 @@ use std::net::{TcpListener, TcpStream};
 use std::sync::Arc;
 use std::thread;
 
+use utexo_bridge_enclave::config::BridgeConfig;
 use utexo_bridge_enclave::framing;
 use utexo_bridge_enclave::proto::*;
 use utexo_bridge_enclave::server::{self, ServerContext};
@@ -21,6 +22,20 @@ pub fn start_test_server() -> u16 {
 /// by the cloning integration test to seed the donor with a known seed
 /// and a cloning secret before the first client request arrives.
 pub fn start_test_server_with(configure: impl FnOnce(&EnclaveState)) -> u16 {
+    start_test_server_with_config(configure, BridgeConfig::from_env())
+}
+
+/// Start a test server with an explicit `BridgeConfig`. Use this from
+/// tests that need to exercise the pinned cross-check path (mismatch
+/// rejection, bundle commitment). `start_test_server` / `_with` read from
+/// env, which is the empty default in CI — pass a constructed config here
+/// to inject one without env mutation (env mutation across parallel tests
+/// is a footgun).
+#[allow(dead_code)]
+pub fn start_test_server_with_config(
+    configure: impl FnOnce(&EnclaveState),
+    bridge_config: BridgeConfig,
+) -> u16 {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
     let state = EnclaveState::new(bitcoin::Network::Bitcoin);
@@ -34,6 +49,7 @@ pub fn start_test_server_with(configure: impl FnOnce(&EnclaveState)) -> u16 {
     ));
     let ctx = Arc::new(ServerContext {
         state,
+        bridge_config,
         #[cfg(feature = "rgb-validation")]
         rgb_validator: None,
         header_chain,

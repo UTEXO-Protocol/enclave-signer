@@ -138,6 +138,7 @@ fn print_init_response(r: &InitializeKeyResponse) {
     );
     println!("  Account xpub vanilla: {}", r.account_xpub_vanilla);
     println!("  Account xpub colored: {}", r.account_xpub_colored);
+    print_bridge_config(r.chain_id, &r.bridge_contract, &r.rgb_asset_id);
 }
 
 fn print_keys_response(r: &PublicKeysResponse) {
@@ -153,6 +154,19 @@ fn print_keys_response(r: &PublicKeysResponse) {
     );
     println!("  Account xpub vanilla: {}", r.account_xpub_vanilla);
     println!("  Account xpub colored: {}", r.account_xpub_colored);
+    print_bridge_config(r.chain_id, &r.bridge_contract, &r.rgb_asset_id);
+}
+
+fn print_bridge_config(chain_id: u64, bridge_contract: &[u8], rgb_asset_id: &str) {
+    let configured =
+        chain_id != 0 || bridge_contract.iter().any(|b| *b != 0) || !rgb_asset_id.is_empty();
+    if configured {
+        println!("  Bridge chain_id:     {chain_id}");
+        println!("  Bridge contract:     0x{}", hex::encode(bridge_contract));
+        println!("  RGB asset id:        {rgb_asset_id}");
+    } else {
+        println!("  Bridge config:       <unconfigured>");
+    }
 }
 
 fn run_interactive(client: &EnclaveClient) {

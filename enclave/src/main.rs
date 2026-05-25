@@ -5,6 +5,7 @@
 #[cfg(not(all(feature = "vsock", target_os = "linux")))]
 use std::net::TcpListener;
 
+use utexo_bridge_enclave::config::BridgeConfig;
 use utexo_bridge_enclave::server::{self, ServerContext};
 use utexo_bridge_enclave::spv::{checkpoint_for, HeaderChain, Network};
 use utexo_bridge_enclave::state::EnclaveState;
@@ -30,6 +31,26 @@ fn main() {
     tracing::info!(%bitcoin_network_str, "bitcoin network configured");
 
     let state = EnclaveState::new(bitcoin_network);
+
+    // Pinned bridge config from env. Folded into the attestation `user_data`
+    // commitment and cross-checked on every SignEvm. Production deployments
+    // must set EVM_CHAIN_ID, BRIDGE_CONTRACT, RGB_ASSET_ID — a misconfigured
+    // production enclave is detectable externally via the attestation bundle.
+    let bridge_config = BridgeConfig::from_env();
+    if bridge_config.is_configured() {
+        tracing::info!(
+            chain_id = bridge_config.chain_id,
+            bridge_contract = %hex::encode(bridge_config.bridge_contract),
+            rgb_asset_id = %bridge_config.rgb_asset_id,
+            "bridge config pinned from env"
+        );
+    } else {
+        tracing::warn!(
+            "bridge config unconfigured (EVM_CHAIN_ID / BRIDGE_CONTRACT / RGB_ASSET_ID unset) — \
+             SignEvm cross-check will fall back to legacy behaviour and the attestation bundle \
+             will commit to empty values"
+        );
+    }
 
     // Donor-side cloning secret. Optional: only required for enclaves that
     // will serve `GetClone` requests. Pre-shared across the operator's
@@ -110,6 +131,7 @@ fn main() {
 
     let ctx = ServerContext {
         state,
+        bridge_config,
         #[cfg(feature = "rgb-validation")]
         rgb_validator,
         header_chain,
