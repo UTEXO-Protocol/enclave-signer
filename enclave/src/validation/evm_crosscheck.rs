@@ -1,5 +1,7 @@
+#[cfg(feature = "rgb-validation")]
 use std::time::{SystemTime, UNIX_EPOCH};
 
+#[cfg(feature = "rgb-validation")]
 use sha3::{Digest, Keccak256};
 
 use crate::error::{EnclaveError, Result};
@@ -68,34 +70,43 @@ pub fn validate_evm_request(req: &SignEvmRequest) -> Result<()> {
         )));
     }
 
-    // 1. Consignment validation check.
-    //    When rgb-validation feature is enabled AND raw consignment bytes are present,
-    //    in-enclave validation already ran in handle_sign_evm — the Listener's boolean
-    //    is not authoritative. When consignment is empty (legacy callers), we still
-    //    require the Listener's attestation.
-    if !req.consignment_valid {
-        #[cfg(feature = "rgb-validation")]
-        {
-            if req.consignment.is_empty() {
-                return Err(EnclaveError::CrossCheck(
-                    "consignment not validated: no consignment bytes and Listener says invalid"
-                        .into(),
-                ));
-            }
-            // else: in-enclave validation already passed in handle_sign_evm, proceed
-        }
-        #[cfg(not(feature = "rgb-validation"))]
-        {
-            return Err(EnclaveError::CrossCheck(
-                "consignment not validated by Listener".into(),
-            ));
-        }
+    // 1. Consignment requirement for fundsOut.
+    //    fundsOut signatures release funds; they must be backed by an
+    //    RGB consignment that this enclave has validated itself. The
+    //    listener-supplied `consignment_valid` boolean is not authoritative —
+    //    anyone who can reach the enclave can set it — so we ignore it
+    //    here and enforce the only thing we can verify in this scope:
+    //    raw bytes are present. The handler enforces the matching
+    //    "validator ran successfully" half.
+    //
+    //    Default builds (no `rgb-validation`) cannot validate at all, so
+    //    they refuse to sign fundsOut outright. Production / CI builds
+    //    use `--features rgb-validation,spv` and run the full block below.
+    #[cfg(not(feature = "rgb-validation"))]
+    {
+        let _ = selector;
+        Err(EnclaveError::CrossCheck(
+            "fundsOut signing requires the enclave to be built with --features rgb-validation"
+                .into(),
+        ))
     }
 
-    // 1b. If raw consignment bytes are present, verify hash integrity.
-    //     This catches tampering between Listener and Enclave.
-    //     Full RGB validation (rgb-lib) will be added in a follow-up PR.
-    if !req.consignment.is_empty() {
+    #[cfg(feature = "rgb-validation")]
+    {
+        if req.consignment.is_empty() {
+            return Err(EnclaveError::CrossCheck(
+                "fundsOut signing requires raw consignment bytes — refusing to trust \
+                 host-supplied consignment_valid flag"
+                    .into(),
+            ));
+        }
+
+        // 1b. Hash integrity check between listener-supplied bytes and the
+        //     pre-computed keccak. Full RGB validation
+        //     (`rgbstd::Transfer::validate` against an Esplora resolver)
+        //     happens in `handle_sign_evm` before this function runs; the
+        //     hash check is the defence-in-depth tamper detection on the
+        //     wire copy.
         if req.consignment_hash.is_empty() {
             return Err(EnclaveError::CrossCheck(
                 "consignment present but consignment_hash is missing".into(),
@@ -107,71 +118,70 @@ pub fn validate_evm_request(req: &SignEvmRequest) -> Result<()> {
                 "consignment hash mismatch: keccak256(consignment) != consignment_hash".into(),
             ));
         }
-    }
 
-    // 2 + 3. Per-selector amount cross-checks. The legacy pools shape
-    //    has `calldata_commission`/`calldata_amount` listener-supplied
-    //    plus byte-level offset checks; the new mint/burn shape has no
-    //    commission slot at all (commission moved to the on-chain
-    //    `CommissionManager`) and stores `amount` at a different offset
-    //    — its burn-side amount validation lives in
-    //    `validate_funds_out_burn`, called from the handler after the
-    //    consignment has been validated.
-    if selector == FUNDS_OUT_SELECTOR_POOLS_LEGACY {
-        // Amount consistency: RGB amount must cover calldata amount + commission.
-        let required = req
-            .calldata_amount
-            .checked_add(req.calldata_commission)
-            .ok_or_else(|| {
-                EnclaveError::CrossCheck("calldata amount + commission overflow".into())
-            })?;
-        if req.rgb_amount < required {
+        // 2 + 3. Per-selector amount cross-checks. The legacy pools shape
+        //    has `calldata_commission`/`calldata_amount` listener-supplied
+        //    plus byte-level offset checks (the binding to the consignment's
+        //    actual asset amount lives in `validate_funds_out_transfer`,
+        //    called from the handler). The new mint/burn shape has no
+        //    commission slot at all and stores `amount` at a different
+        //    offset — its burn-side amount validation lives in
+        //    `validate_funds_out_burn`, also called from the handler.
+        if selector == FUNDS_OUT_SELECTOR_POOLS_LEGACY {
+            let required = req
+                .calldata_amount
+                .checked_add(req.calldata_commission)
+                .ok_or_else(|| {
+                    EnclaveError::CrossCheck("calldata amount + commission overflow".into())
+                })?;
+            if req.rgb_amount < required {
+                return Err(EnclaveError::CrossCheck(format!(
+                    "amount mismatch: rgb_amount ({}) < calldata_amount ({}) + calldata_commission ({})",
+                    req.rgb_amount, req.calldata_amount, req.calldata_commission
+                )));
+            }
+
+            // Calldata verification for the legacy 6-arg shape:
+            //   fundsOut(address token, address recipient, uint256 amount, uint256 transactionId, ...)
+            //   amount at offset 68, transactionId (historically named "commission") at offset 100.
+            let cd_amount = extract_uint256_as_u64(&req.call_data, 68)?;
+            if cd_amount != req.calldata_amount {
+                return Err(EnclaveError::CrossCheck(format!(
+                    "calldata amount mismatch: extracted {} != declared {}",
+                    cd_amount, req.calldata_amount
+                )));
+            }
+            let cd_commission = extract_uint256_as_u64(&req.call_data, 100)?;
+            if cd_commission != req.calldata_commission {
+                return Err(EnclaveError::CrossCheck(format!(
+                    "calldata commission mismatch: extracted {} != declared {}",
+                    cd_commission, req.calldata_commission
+                )));
+            }
+        }
+
+        // 4. Chain/domain present
+        if req.chain_id == 0 {
+            return Err(EnclaveError::CrossCheck("chain_id must be > 0".into()));
+        }
+        if req.proxy_contract.len() != 20 {
             return Err(EnclaveError::CrossCheck(format!(
-                "amount mismatch: rgb_amount ({}) < calldata_amount ({}) + calldata_commission ({})",
-                req.rgb_amount, req.calldata_amount, req.calldata_commission
+                "proxy_contract must be 20 bytes, got {}",
+                req.proxy_contract.len()
             )));
         }
 
-        // Calldata verification for the legacy 6-arg shape:
-        //   fundsOut(address token, address recipient, uint256 amount, uint256 transactionId, ...)
-        //   amount at offset 68, transactionId (historically named "commission") at offset 100.
-        let cd_amount = extract_uint256_as_u64(&req.call_data, 68)?;
-        if cd_amount != req.calldata_amount {
-            return Err(EnclaveError::CrossCheck(format!(
-                "calldata amount mismatch: extracted {} != declared {}",
-                cd_amount, req.calldata_amount
-            )));
+        // 5. Deadline not expired
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|e| EnclaveError::Internal(format!("system time error: {}", e)))?
+            .as_secs();
+        if req.deadline <= now {
+            return Err(EnclaveError::CrossCheck("request deadline expired".into()));
         }
-        let cd_commission = extract_uint256_as_u64(&req.call_data, 100)?;
-        if cd_commission != req.calldata_commission {
-            return Err(EnclaveError::CrossCheck(format!(
-                "calldata commission mismatch: extracted {} != declared {}",
-                cd_commission, req.calldata_commission
-            )));
-        }
-    }
 
-    // 4. Chain/domain present
-    if req.chain_id == 0 {
-        return Err(EnclaveError::CrossCheck("chain_id must be > 0".into()));
+        Ok(())
     }
-    if req.proxy_contract.len() != 20 {
-        return Err(EnclaveError::CrossCheck(format!(
-            "proxy_contract must be 20 bytes, got {}",
-            req.proxy_contract.len()
-        )));
-    }
-
-    // 5. Deadline not expired
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_err(|e| EnclaveError::Internal(format!("system time error: {}", e)))?
-        .as_secs();
-    if req.deadline <= now {
-        return Err(EnclaveError::CrossCheck("request deadline expired".into()));
-    }
-
-    Ok(())
 }
 
 /// Mint/burn-side amount cross-check for the new 8-arg `fundsOut`
@@ -233,8 +243,80 @@ pub fn validate_funds_out_burn(
     Ok(())
 }
 
+/// Pools-side amount cross-check for the legacy 6-arg `fundsOut`
+/// (selector [`FUNDS_OUT_SELECTOR_POOLS_LEGACY`]).
+///
+/// Binds `calldata_amount + calldata_commission` to the consignment's
+/// actual asset value, closing the host-supplied `rgb_amount` trust
+/// gap that the byte-level checks in [`validate_evm_request`] cannot
+/// catch on their own. Concretely:
+///
+///   1. The consignment's most recent transition must be an IFA
+///      `Transfer` (`transition_type == ifa::TS_TRANSFER`). Pools-mode
+///      `fundsOut` releases funds against a federation-bound transfer;
+///      any other shape on this selector means the listener has cooked
+///      up a consignment that doesn't authorise a release.
+///   2. The transition's `total_output_amount` (sum across recipient
+///      and change legs) must cover the EVM-side release
+///      (`amount + commission`). This is a coarse binding — it doesn't
+///      verify which output landed on the federation seal — but with
+///      the existing SPV + contract_id cross-checks it raises the bar
+///      to "attacker must have a real, confirmed RGB transfer to the
+///      bridge for ≥ the withdrawal amount" rather than "attacker
+///      sets a field on the wire."
+///
+/// A no-op for any other selector — same dispatch convention as
+/// [`validate_funds_out_burn`].
+#[cfg(feature = "rgb-validation")]
+pub fn validate_funds_out_transfer(
+    req: &SignEvmRequest,
+    validated: &ValidatedConsignment,
+) -> Result<()> {
+    if req.call_data.len() < 4 || req.call_data[..4] != FUNDS_OUT_SELECTOR_POOLS_LEGACY {
+        return Ok(());
+    }
+
+    let last = validated.last_transition.as_ref().ok_or_else(|| {
+        EnclaveError::CrossCheck(
+            "pools-legacy fundsOut requires a consignment with at least one transition".into(),
+        )
+    })?;
+    if last.transition_type != ifa::TS_TRANSFER {
+        return Err(EnclaveError::CrossCheck(format!(
+            "pools-legacy fundsOut requires a Transfer transition (last transition_type = {}, want {})",
+            last.transition_type,
+            ifa::TS_TRANSFER
+        )));
+    }
+
+    // Re-extract from raw calldata bytes rather than trusting
+    // `req.calldata_*` — same defence-in-depth pattern as
+    // `validate_funds_out_burn`. `validate_evm_request` has already
+    // checked that the byte-level extracts match the declared fields,
+    // so the two paths agree, but this keeps the consignment binding
+    // independent of any future refactor of the declared fields.
+    let calldata_amount = extract_uint256_as_u64(&req.call_data, 68)?;
+    let calldata_commission = extract_uint256_as_u64(&req.call_data, 100)?;
+    let required = calldata_amount
+        .checked_add(calldata_commission)
+        .ok_or_else(|| EnclaveError::CrossCheck("calldata amount + commission overflow".into()))?;
+
+    if last.total_output_amount < required {
+        return Err(EnclaveError::CrossCheck(format!(
+            "transfer amount mismatch: consignment total_output_amount ({}) < calldata_amount ({}) + calldata_commission ({})",
+            last.total_output_amount, calldata_amount, calldata_commission
+        )));
+    }
+    Ok(())
+}
+
 /// Lightweight ABI extraction: read a uint256 from call_data at a given byte offset.
 /// Returns the value as u64. Fails if call_data is too short or the value exceeds u64.
+///
+/// Only called from cross-check paths that are themselves gated on
+/// `rgb-validation`; the `test` cfg keeps it available for the
+/// helper's own unit tests in default builds.
+#[cfg(any(feature = "rgb-validation", test))]
 fn extract_uint256_as_u64(call_data: &[u8], offset: usize) -> Result<u64> {
     let end = offset + 32;
     if call_data.len() < end {
@@ -259,6 +341,9 @@ fn extract_uint256_as_u64(call_data: &[u8], offset: usize) -> Result<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // The top-level `Keccak256` / `Digest` imports are gated on
+    // `rgb-validation`, so the test module needs its own.
+    use sha3::{Digest, Keccak256};
 
     /// Build a mock fundsOut calldata with the given amount and commission.
     /// Selector is the 6-arg `fundsOut(address,address,uint256,uint256,string,string)`
@@ -287,6 +372,25 @@ mod tests {
         data
     }
 
+    /// Placeholder consignment bytes for unit tests. `validate_evm_request`
+    /// only verifies the keccak hash matches the bytes — it does not deserialize
+    /// or RGB-validate them. The handler-level `validate_funds_out_*` checks
+    /// run against `ValidatedConsignment` and are exercised in their own test
+    /// modules below.
+    ///
+    /// `allow(dead_code)`: only consumed by the rgb-validation-gated tests
+    /// below; in default builds those tests don't compile and the helpers
+    /// go unused.
+    #[allow(dead_code)]
+    const PLACEHOLDER_CONSIGNMENT: &[u8] =
+        b"placeholder-consignment-bytes-for-evm-crosscheck-unit-tests";
+
+    #[allow(dead_code)]
+    fn placeholder_consignment_hash() -> Vec<u8> {
+        Keccak256::digest(PLACEHOLDER_CONSIGNMENT).to_vec()
+    }
+
+    #[allow(dead_code)]
     fn valid_evm_request() -> SignEvmRequest {
         let amount = 1000u64;
         let commission = 50u64;
@@ -301,26 +405,51 @@ mod tests {
             proxy_contract: vec![0xAA; 20],
             calldata_amount: amount,
             calldata_commission: commission,
-            // Empty = skip hash check (backwards compatible)
-            consignment: vec![],
-            consignment_hash: vec![],
+            consignment: PLACEHOLDER_CONSIGNMENT.to_vec(),
+            consignment_hash: placeholder_consignment_hash(),
             merkle_proofs: vec![],
         }
     }
 
+    #[cfg(feature = "rgb-validation")]
     #[test]
     fn valid_request_passes() {
         assert!(validate_evm_request(&valid_evm_request()).is_ok());
     }
 
+    /// P0 regression: the host-supplied `consignment_valid` flag must not
+    /// short-circuit validation. A request claiming `valid:true` with no
+    /// consignment bytes must be rejected — see Yulia's PoC #3 and the
+    /// boss's bypass report. The handler-level check (in `handle_sign_evm`)
+    /// catches "bytes present but validator didn't run"; this test pins
+    /// the cross-check's half of the contract.
+    #[cfg(feature = "rgb-validation")]
     #[test]
-    fn rejects_invalid_consignment() {
+    fn rejects_empty_consignment_even_with_valid_flag() {
         let mut req = valid_evm_request();
-        req.consignment_valid = false;
+        req.consignment_valid = true;
+        req.consignment = vec![];
+        req.consignment_hash = vec![];
         let err = validate_evm_request(&req).unwrap_err();
-        assert!(err.to_string().contains("consignment not validated"));
+        assert!(
+            err.to_string().contains("requires raw consignment bytes"),
+            "expected raw-bytes-required rejection, got: {err}"
+        );
     }
 
+    /// Symmetric pin: the flag should not be load-bearing in the other
+    /// direction either. Once bytes are present and the hash matches,
+    /// `consignment_valid:false` from a host that wants to break things
+    /// shouldn't matter — validation comes from the bytes, not the flag.
+    #[cfg(feature = "rgb-validation")]
+    #[test]
+    fn ignores_consignment_valid_flag_when_bytes_present() {
+        let mut req = valid_evm_request();
+        req.consignment_valid = false;
+        assert!(validate_evm_request(&req).is_ok());
+    }
+
+    #[cfg(feature = "rgb-validation")]
     #[test]
     fn rejects_amount_mismatch_rgb_less_than_calldata() {
         let mut req = valid_evm_request();
@@ -329,6 +458,7 @@ mod tests {
         assert!(err.to_string().contains("amount mismatch"));
     }
 
+    #[cfg(feature = "rgb-validation")]
     #[test]
     fn rejects_calldata_extraction_mismatch() {
         let mut req = valid_evm_request();
@@ -340,6 +470,7 @@ mod tests {
         assert!(err.to_string().contains("calldata amount mismatch"));
     }
 
+    #[cfg(feature = "rgb-validation")]
     #[test]
     fn rejects_expired_deadline() {
         let mut req = valid_evm_request();
@@ -348,6 +479,7 @@ mod tests {
         assert!(err.to_string().contains("deadline expired"));
     }
 
+    #[cfg(feature = "rgb-validation")]
     #[test]
     fn rejects_missing_proxy_contract() {
         let mut req = valid_evm_request();
@@ -356,6 +488,7 @@ mod tests {
         assert!(err.to_string().contains("proxy_contract must be 20 bytes"));
     }
 
+    #[cfg(feature = "rgb-validation")]
     #[test]
     fn rejects_zero_chain_id() {
         let mut req = valid_evm_request();
@@ -364,6 +497,22 @@ mod tests {
         assert!(err.to_string().contains("chain_id must be > 0"));
     }
 
+    /// Default-build coverage: every selector that would otherwise pass
+    /// the whitelist must be refused at the rgb-validation gate.
+    /// Complements the SPV / handler-level checks that fire in
+    /// rgb-validation builds.
+    #[cfg(not(feature = "rgb-validation"))]
+    #[test]
+    fn rejects_funds_out_in_default_build() {
+        let req = valid_evm_request();
+        let err = validate_evm_request(&req).unwrap_err();
+        assert!(
+            err.to_string().contains("rgb-validation"),
+            "expected feature-gate rejection, got: {err}"
+        );
+    }
+
+    #[cfg(feature = "rgb-validation")]
     #[test]
     fn accepts_exact_amount_match() {
         let mut req = valid_evm_request();
@@ -393,6 +542,7 @@ mod tests {
         assert!(extract_uint256_as_u64(&data, 0).is_err());
     }
 
+    #[cfg(feature = "rgb-validation")]
     #[test]
     fn accepts_valid_consignment_hash() {
         let mut req = valid_evm_request();
@@ -403,6 +553,7 @@ mod tests {
         assert!(validate_evm_request(&req).is_ok());
     }
 
+    #[cfg(feature = "rgb-validation")]
     #[test]
     fn rejects_consignment_hash_mismatch() {
         let mut req = valid_evm_request();
@@ -412,6 +563,7 @@ mod tests {
         assert!(err.to_string().contains("consignment hash mismatch"));
     }
 
+    #[cfg(feature = "rgb-validation")]
     #[test]
     fn rejects_consignment_without_hash() {
         let mut req = valid_evm_request();
@@ -419,12 +571,6 @@ mod tests {
         req.consignment_hash = vec![]; // missing hash
         let err = validate_evm_request(&req).unwrap_err();
         assert!(err.to_string().contains("consignment_hash is missing"));
-    }
-
-    #[test]
-    fn skips_hash_check_when_consignment_empty() {
-        // Default valid_evm_request has empty consignment — should still pass
-        assert!(validate_evm_request(&valid_evm_request()).is_ok());
     }
 
     #[test]
@@ -599,6 +745,146 @@ mod tests {
             req.call_data[..4].copy_from_slice(&FUNDS_OUT_SELECTOR_POOLS_LEGACY);
             let validated = validated_with_last(burn_transition(None));
             assert!(validate_funds_out_burn(&req, &validated).is_ok());
+        }
+    }
+
+    // =========================================================================
+    // Pools-legacy fundsOut tests — `validate_funds_out_transfer`
+    // =========================================================================
+
+    #[cfg(feature = "rgb-validation")]
+    mod transfer {
+        use super::*;
+        use crate::validation::rgb::{TransitionOutput, TransitionSummary, ValidatedConsignment};
+
+        fn validated_with_last(transition: TransitionSummary) -> ValidatedConsignment {
+            ValidatedConsignment {
+                contract_id: "rgb:test".into(),
+                chain_net: "bc".into(),
+                witness_txids: vec![],
+                all_op_ids: vec![transition.op_id.clone()],
+                last_transition: Some(transition),
+            }
+        }
+
+        fn transfer_transition(total_output_amount: u64) -> TransitionSummary {
+            TransitionSummary {
+                op_id: "transfer-op".into(),
+                transition_type: crate::validation::rgb::ifa::TS_TRANSFER,
+                total_output_amount,
+                outputs: Vec::<TransitionOutput>::new(),
+                burned_asset_amount: None,
+            }
+        }
+
+        /// Pools-legacy calldata with the given `amount` at byte 68 and
+        /// `commission` at byte 100, mirroring the test helper for the
+        /// main `validate_evm_request` tests.
+        fn mock_pools_legacy_calldata(amount: u64, commission: u64) -> Vec<u8> {
+            let mut data = Vec::with_capacity(4 + 7 * 32);
+            data.extend_from_slice(&FUNDS_OUT_SELECTOR_POOLS_LEGACY);
+            // token (32, address)
+            data.extend_from_slice(&[0u8; 32]);
+            // recipient (32, address)
+            data.extend_from_slice(&[0u8; 32]);
+            // amount @ offset 68
+            let mut amt = [0u8; 32];
+            amt[24..].copy_from_slice(&amount.to_be_bytes());
+            data.extend_from_slice(&amt);
+            // commission @ offset 100
+            let mut com = [0u8; 32];
+            com[24..].copy_from_slice(&commission.to_be_bytes());
+            data.extend_from_slice(&com);
+            // 3 more head-slots zero-filled (transactionId, srcChainOffset, srcAddrOffset).
+            data.extend_from_slice(&[0u8; 32 * 3]);
+            data
+        }
+
+        fn req_with_calldata(call_data: Vec<u8>) -> SignEvmRequest {
+            SignEvmRequest {
+                call_data,
+                nonce: 1,
+                deadline: u64::MAX,
+                consignment_valid: true,
+                rgb_amount: 0,
+                rgb_asset_id: "rgb:test".into(),
+                chain_id: 1,
+                proxy_contract: vec![0xAA; 20],
+                calldata_amount: 0,
+                calldata_commission: 0,
+                consignment: vec![],
+                consignment_hash: vec![],
+                merkle_proofs: vec![],
+            }
+        }
+
+        #[test]
+        fn passes_when_total_output_covers_calldata_total() {
+            let req = req_with_calldata(mock_pools_legacy_calldata(1000, 50));
+            let validated = validated_with_last(transfer_transition(1050));
+            assert!(validate_funds_out_transfer(&req, &validated).is_ok());
+        }
+
+        #[test]
+        fn passes_when_total_output_exceeds_calldata_total() {
+            let req = req_with_calldata(mock_pools_legacy_calldata(1000, 50));
+            let validated = validated_with_last(transfer_transition(2000));
+            assert!(validate_funds_out_transfer(&req, &validated).is_ok());
+        }
+
+        /// P0 regression for Yulia's #3: even with a valid consignment
+        /// that deserializes and validates, the EVM-side release cannot
+        /// exceed the RGB-side transfer total. A consignment for 1 unit
+        /// must not authorise a withdrawal for 10^9.
+        #[test]
+        fn rejects_when_total_output_less_than_calldata_total() {
+            let req = req_with_calldata(mock_pools_legacy_calldata(1_000_000_000, 0));
+            let validated = validated_with_last(transfer_transition(1));
+            let err = validate_funds_out_transfer(&req, &validated).unwrap_err();
+            assert!(
+                err.to_string().contains("transfer amount mismatch"),
+                "expected transfer amount mismatch, got: {err}"
+            );
+        }
+
+        #[test]
+        fn rejects_when_last_transition_is_not_transfer() {
+            let req = req_with_calldata(mock_pools_legacy_calldata(500, 0));
+            let mut t = transfer_transition(500);
+            t.transition_type = crate::validation::rgb::ifa::TS_BURN;
+            let validated = validated_with_last(t);
+            let err = validate_funds_out_transfer(&req, &validated).unwrap_err();
+            assert!(
+                err.to_string().contains("requires a Transfer transition"),
+                "expected Transfer-required rejection, got: {err}"
+            );
+        }
+
+        #[test]
+        fn rejects_when_consignment_has_no_transition() {
+            let req = req_with_calldata(mock_pools_legacy_calldata(500, 0));
+            let validated = ValidatedConsignment {
+                contract_id: "rgb:test".into(),
+                chain_net: "bc".into(),
+                witness_txids: vec![],
+                all_op_ids: vec![],
+                last_transition: None,
+            };
+            let err = validate_funds_out_transfer(&req, &validated).unwrap_err();
+            assert!(
+                err.to_string().contains("at least one transition"),
+                "expected no-transition rejection, got: {err}"
+            );
+        }
+
+        #[test]
+        fn no_op_for_non_pools_legacy_selector() {
+            // Mint/burn-selector calldata — `validate_funds_out_transfer`
+            // must not run any transfer-side checks against it.
+            let mut req = req_with_calldata(vec![0u8; 4 + 8 * 32]);
+            req.call_data[..4].copy_from_slice(&FUNDS_OUT_SELECTOR_MINTBURN);
+            let validated = validated_with_last(transfer_transition(0));
+            assert!(validate_funds_out_transfer(&req, &validated).is_ok());
         }
     }
 }

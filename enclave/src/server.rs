@@ -351,21 +351,31 @@ fn handle_sign_evm(ctx: &ServerContext, req: SignEvmRequest) -> Result<EnclaveRe
     #[cfg(not(feature = "dev-mode"))]
     validation::evm_crosscheck::validate_evm_request(&req)?;
 
-    // Mint/burn-mode burn-amount cross-check: only runs when the
-    // calldata uses the new 8-arg `fundsOut` selector. Requires the
-    // consignment to have been validated in-enclave so we can read the
-    // burn transition's `MS_BURNED_ASSET` metadata.
+    // Consignment-bound amount cross-check for both fundsOut selectors.
+    // Every fundsOut signature must be backed by a validated consignment
+    // and an amount that the consignment's last transition actually
+    // accounts for. This is the second half of the bypass closure
+    // started in `validate_evm_request`: that function rejects empty
+    // bytes; this block rejects "bytes present but validator didn't run"
+    // and binds the EVM-side amount to the RGB-side amount.
+    //
+    // `validate_funds_out_burn` / `validate_funds_out_transfer` each
+    // no-op when the selector isn't theirs, so calling both here is
+    // safe — exactly one fires per request.
     #[cfg(all(feature = "rgb-validation", not(feature = "dev-mode")))]
     if req.call_data.len() >= 4
-        && req.call_data[..4] == validation::evm_crosscheck::FUNDS_OUT_SELECTOR_MINTBURN
+        && (req.call_data[..4] == validation::evm_crosscheck::FUNDS_OUT_SELECTOR_MINTBURN
+            || req.call_data[..4] == validation::evm_crosscheck::FUNDS_OUT_SELECTOR_POOLS_LEGACY)
     {
         let validated = validated_consignment.as_ref().ok_or_else(|| {
             EnclaveError::CrossCheck(
-                "mint/burn fundsOut selector requires a validated consignment, none provided"
+                "fundsOut signing requires a validated consignment (rgb_validator must be \
+                 configured and consignment bytes must be present)"
                     .into(),
             )
         })?;
         validation::evm_crosscheck::validate_funds_out_burn(&req, validated)?;
+        validation::evm_crosscheck::validate_funds_out_transfer(&req, validated)?;
     }
 
     // SPV verification: every consignment-anchor Bitcoin tx must be in our

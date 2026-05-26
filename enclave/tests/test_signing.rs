@@ -39,6 +39,20 @@ fn mock_funds_out_calldata(
     data
 }
 
+/// Placeholder consignment bytes for integration tests. `validate_evm_request`
+/// only verifies the keccak hash; the in-enclave RGB validator
+/// (configured in production via `ctx.rgb_validator`, left `None` in the
+/// test harness) is what would deserialize and validate. Tests therefore
+/// reach the cross-check layer with these bytes but never get past the
+/// handler-level "requires validated consignment" check — which is what
+/// the integration tests below assert.
+const PLACEHOLDER_CONSIGNMENT: &[u8] = b"placeholder-consignment-bytes-for-integration-tests";
+
+fn placeholder_consignment_hash() -> Vec<u8> {
+    use sha3::{Digest, Keccak256};
+    Keccak256::digest(PLACEHOLDER_CONSIGNMENT).to_vec()
+}
+
 /// Build a valid enriched SignEvmRequest for testing.
 fn valid_sign_evm_request(amount: u64, commission: u64) -> SignEvmRequest {
     SignEvmRequest {
@@ -52,8 +66,8 @@ fn valid_sign_evm_request(amount: u64, commission: u64) -> SignEvmRequest {
         proxy_contract: vec![0xAA; 20],
         calldata_amount: amount,
         calldata_commission: commission,
-        consignment: vec![],
-        consignment_hash: vec![],
+        consignment: PLACEHOLDER_CONSIGNMENT.to_vec(),
+        consignment_hash: placeholder_consignment_hash(),
         merkle_proofs: vec![],
     }
 }
@@ -173,74 +187,13 @@ fn valid_sign_psbt_request(psbt_bytes: Vec<u8>) -> SignPsbtRequest {
 // EVM signing tests
 // =============================================================================
 
-// Skipped under `spv` feature: this test sends a request with no
-// consignment bytes, which the SPV path rejects (no consignment → no
-// witness txids → cannot verify). The non-spv path still gives us the
-// happy-path coverage; SPV-on coverage lives in spv_crosscheck unit
-// tests + test_sign_evm_spv_rejects_without_proofs below.
-#[cfg(not(feature = "spv"))]
-#[test]
-fn test_sign_evm_roundtrip() {
-    let port = common::start_test_server();
-
-    let init_req = EnclaveRequest {
-        request: Some(Request::InitializeKey(InitializeKeyRequest {
-            seed: vec![],
-            mnemonic: String::new(),
-        })),
-    };
-    let init_resp = common::send_request(port, &init_req);
-    assert!(
-        matches!(&init_resp.response, Some(Response::InitializeKey(_))),
-        "init should succeed"
-    );
-
-    let sign_req = EnclaveRequest {
-        request: Some(Request::SignEvm(valid_sign_evm_request(1000, 50))),
-    };
-    let sign_resp = common::send_request(port, &sign_req);
-
-    match &sign_resp.response {
-        Some(Response::EvmSignature(r)) => {
-            assert_eq!(r.signature.len(), 65, "EVM signature must be 65 bytes");
-        }
-        other => panic!("expected EvmSignatureResponse, got {:?}", other),
-    }
-}
-
-// SPV-feature integration smoke: with the feature on, a sign_evm with no
-// consignment must be rejected on the wire. Proves the gate fires through
-// the dispatch path, not just the unit tests.
-#[cfg(feature = "spv")]
-#[test]
-fn test_sign_evm_spv_rejects_without_consignment() {
-    let port = common::start_test_server();
-
-    let init_req = EnclaveRequest {
-        request: Some(Request::InitializeKey(InitializeKeyRequest {
-            seed: vec![],
-            mnemonic: String::new(),
-        })),
-    };
-    common::send_request(port, &init_req);
-
-    let sign_req = EnclaveRequest {
-        request: Some(Request::SignEvm(valid_sign_evm_request(1000, 50))),
-    };
-    let sign_resp = common::send_request(port, &sign_req);
-
-    match &sign_resp.response {
-        Some(Response::Error(e)) => {
-            assert_eq!(e.code, 3, "spv rejection should map to VALIDATION_FAILED");
-            assert!(
-                e.message.contains("spv:") && e.message.contains("validated consignment"),
-                "expected spv validation error, got: {}",
-                e.message
-            );
-        }
-        other => panic!("expected Error response, got {:?}", other),
-    }
-}
+// Note: there is no `test_sign_evm_roundtrip` (happy-path success) here.
+// The test harness leaves `ctx.rgb_validator` as `None`, so even with
+// valid placeholder bytes the handler refuses to sign fundsOut without
+// an in-enclave validator having actually run. Constructing a real
+// validator in tests would mean wiring an Esplora mock — out of scope
+// for this P0 fix. Happy-path coverage of `validate_funds_out_*` lives
+// in the unit tests in `validation::evm_crosscheck::tests`.
 
 #[test]
 fn test_sign_evm_before_init() {
@@ -261,8 +214,14 @@ fn test_sign_evm_before_init() {
 // EVM enriched cross-check tests
 // =============================================================================
 
+/// P0 regression: the host-supplied `consignment_valid` flag must not
+/// bypass validation over the wire. Yulia's PoC #3 / boss's report:
+/// previously, `consignment_valid:true` + `consignment:[]` produced a
+/// signature with no real RGB backing. Now the cross-check rejects
+/// empty bytes regardless of any listener claim.
+#[cfg(feature = "rgb-validation")]
 #[test]
-fn test_sign_evm_rejects_invalid_consignment() {
+fn test_sign_evm_rejects_consignment_valid_with_empty_bytes() {
     let port = common::start_test_server();
 
     let init_req = EnclaveRequest {
@@ -273,8 +232,11 @@ fn test_sign_evm_rejects_invalid_consignment() {
     };
     common::send_request(port, &init_req);
 
-    let mut req = valid_sign_evm_request(1000, 50);
-    req.consignment_valid = false;
+    let mut req = valid_sign_evm_request(1_000_000_000, 0);
+    req.consignment_valid = true;
+    req.consignment = vec![];
+    req.consignment_hash = vec![];
+    req.rgb_asset_id = "rgb:fake-asset-no-real-backing".into();
 
     let sign_req = EnclaveRequest {
         request: Some(Request::SignEvm(req)),
@@ -284,12 +246,62 @@ fn test_sign_evm_rejects_invalid_consignment() {
     match &resp.response {
         Some(Response::Error(e)) => {
             assert_eq!(e.code, 3, "cross-check failures should use code 3");
-            assert!(e.message.contains("consignment"));
+            assert!(
+                e.message.contains("requires raw consignment bytes"),
+                "expected raw-bytes-required rejection, got: {}",
+                e.message
+            );
         }
         other => panic!("expected ErrorResponse, got {:?}", other),
     }
 }
 
+/// The handler-level check fires when bytes are present (so
+/// `validate_evm_request` passes) but the in-enclave validator wasn't
+/// configured / didn't run — production must never sign fundsOut
+/// against unvalidated bytes. The test harness leaves `rgb_validator`
+/// as `None`, which simulates the "validator missing" half.
+#[cfg(feature = "rgb-validation")]
+#[test]
+fn test_sign_evm_rejects_funds_out_without_validator() {
+    let port = common::start_test_server();
+
+    let init_req = EnclaveRequest {
+        request: Some(Request::InitializeKey(InitializeKeyRequest {
+            seed: vec![],
+            mnemonic: String::new(),
+        })),
+    };
+    common::send_request(port, &init_req);
+
+    let sign_req = EnclaveRequest {
+        request: Some(Request::SignEvm(valid_sign_evm_request(1000, 50))),
+    };
+    let resp = common::send_request(port, &sign_req);
+
+    match &resp.response {
+        Some(Response::Error(e)) => {
+            assert_eq!(e.code, 3, "cross-check failures should use code 3");
+            // Either the handler-level check (no validator) or the SPV
+            // gate (also requires a validated consignment) fires —
+            // both rejection messages mention "validated consignment".
+            assert!(
+                e.message.contains("validated consignment"),
+                "expected validated-consignment rejection, got: {}",
+                e.message
+            );
+        }
+        other => panic!("expected ErrorResponse, got {:?}", other),
+    }
+}
+
+// The two amount-mismatch tests below exercise byte-level cross-checks
+// inside `validate_evm_request` that only run under `--features
+// rgb-validation` (the rest of the function is gated behind that cfg
+// now that fundsOut signing requires real consignment bytes). Default
+// builds refuse fundsOut outright, covered by the
+// `rejects_funds_out_in_default_build` test further down.
+#[cfg(feature = "rgb-validation")]
 #[test]
 fn test_sign_evm_rejects_amount_mismatch() {
     let port = common::start_test_server();
@@ -319,6 +331,7 @@ fn test_sign_evm_rejects_amount_mismatch() {
     }
 }
 
+#[cfg(feature = "rgb-validation")]
 #[test]
 fn test_sign_evm_rejects_calldata_extraction_mismatch() {
     let port = common::start_test_server();
@@ -345,6 +358,41 @@ fn test_sign_evm_rejects_calldata_extraction_mismatch() {
         Some(Response::Error(e)) => {
             assert_eq!(e.code, 3);
             assert!(e.message.contains("calldata amount mismatch"));
+        }
+        other => panic!("expected ErrorResponse, got {:?}", other),
+    }
+}
+
+/// Default-build coverage: `--features rgb-validation` is required to
+/// sign fundsOut at all. The cross-check fails fast with a message
+/// that names the missing feature, so a misconfigured deployment fails
+/// loud instead of silently signing against unvalidated bytes.
+#[cfg(not(feature = "rgb-validation"))]
+#[test]
+fn test_sign_evm_rejects_funds_out_in_default_build() {
+    let port = common::start_test_server();
+
+    let init_req = EnclaveRequest {
+        request: Some(Request::InitializeKey(InitializeKeyRequest {
+            seed: vec![],
+            mnemonic: String::new(),
+        })),
+    };
+    common::send_request(port, &init_req);
+
+    let sign_req = EnclaveRequest {
+        request: Some(Request::SignEvm(valid_sign_evm_request(1000, 50))),
+    };
+    let resp = common::send_request(port, &sign_req);
+
+    match &resp.response {
+        Some(Response::Error(e)) => {
+            assert_eq!(e.code, 3);
+            assert!(
+                e.message.contains("rgb-validation"),
+                "expected feature-gate rejection, got: {}",
+                e.message
+            );
         }
         other => panic!("expected ErrorResponse, got {:?}", other),
     }
@@ -561,6 +609,7 @@ fn test_sign_vanilla_psbt_skips_evm_checks() {
 // Consignment hash integrity tests (wire protocol integration)
 // =============================================================================
 
+#[cfg(feature = "rgb-validation")]
 #[test]
 fn test_sign_evm_rejects_consignment_hash_mismatch() {
     let port = common::start_test_server();
@@ -598,6 +647,7 @@ fn test_sign_evm_rejects_consignment_hash_mismatch() {
     }
 }
 
+#[cfg(feature = "rgb-validation")]
 #[test]
 fn test_sign_evm_rejects_consignment_without_hash() {
     let port = common::start_test_server();
@@ -625,46 +675,6 @@ fn test_sign_evm_rejects_consignment_without_hash() {
             assert!(e.message.contains("consignment_hash is missing"));
         }
         other => panic!("expected ErrorResponse for missing hash, got {:?}", other),
-    }
-}
-
-// Skipped under `spv` feature: bytes here aren't a real consignment, so
-// rgb-validation fails to parse before the keccak hash check would even run.
-// The hash-integrity logic this test covers is exercised by the non-spv
-// build (today's production path is `--features rgb-validation` alone).
-#[cfg(not(feature = "spv"))]
-#[test]
-fn test_sign_evm_accepts_valid_consignment_hash() {
-    use sha3::{Digest, Keccak256};
-
-    let port = common::start_test_server();
-
-    let init_req = EnclaveRequest {
-        request: Some(Request::InitializeKey(InitializeKeyRequest {
-            seed: vec![],
-            mnemonic: String::new(),
-        })),
-    };
-    common::send_request(port, &init_req);
-
-    let consignment = b"test-consignment-bytes";
-    let hash = Keccak256::digest(consignment);
-
-    let mut req = valid_sign_evm_request(1000, 50);
-    req.consignment = consignment.to_vec();
-    req.consignment_hash = hash.to_vec();
-
-    let sign_req = EnclaveRequest {
-        request: Some(Request::SignEvm(req)),
-    };
-    let resp = common::send_request(port, &sign_req);
-
-    // Should succeed (hash is valid, cross-checks pass in dev-mode)
-    match &resp.response {
-        Some(Response::EvmSignature(r)) => {
-            assert_eq!(r.signature.len(), 65);
-        }
-        other => panic!("expected EvmSignature, got {:?}", other),
     }
 }
 
