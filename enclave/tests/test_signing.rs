@@ -861,7 +861,16 @@ fn test_sign_raw_message_recoverable() {
         other => panic!("expected RawSignatureResponse, got {:?}", other),
     };
 
-    let msg_hash: [u8; 32] = Keccak256::digest(&message).into();
+    // EIP-191 personal_sign envelope: the enclave hashes
+    // `"\x19Ethereum Signed Message:\n" || len(msg) || msg`, NOT raw keccak(msg).
+    // The verifier MUST rebuild the same preimage, otherwise pubkey recovery
+    // returns a different address.
+    let mut hasher = Keccak256::new();
+    hasher.update(b"\x19Ethereum Signed Message:\n");
+    hasher.update(message.len().to_string().as_bytes());
+    hasher.update(&message);
+    let msg_hash: [u8; 32] = hasher.finalize().into();
+
     let signature = K256Signature::from_slice(&sig_bytes[..64]).unwrap();
     let recovery_id = RecoveryId::from_byte(sig_bytes[64]).unwrap();
     let recovered_key =
@@ -873,7 +882,22 @@ fn test_sign_raw_message_recoverable() {
 
     assert_eq!(
         recovered_address, evm_address,
-        "recovered address must match the enclave's EVM address"
+        "recovered address must match the enclave's EVM address — verifier must use the EIP-191 preimage"
+    );
+
+    // Sanity: raw-keccak preimage must NOT recover to the same address. If this
+    // ever passes, the enclave dropped the EIP-191 prefix and is back to
+    // signing arbitrary digests — i.e. the eth_sign tx-forgery hole is open.
+    let raw_hash: [u8; 32] = Keccak256::digest(&message).into();
+    let raw_recovered = VerifyingKey::recover_from_prehash(&raw_hash, &signature, recovery_id).ok();
+    let raw_address = raw_recovered.map(|k| {
+        let pk_bytes = k.to_encoded_point(false);
+        Keccak256::digest(&pk_bytes.as_bytes()[1..])[12..].to_vec()
+    });
+    assert_ne!(
+        raw_address.as_deref(),
+        Some(evm_address.as_slice()),
+        "raw-keccak recovery must NOT match enclave address — EIP-191 prefix is missing"
     );
 }
 
