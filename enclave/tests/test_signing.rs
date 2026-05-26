@@ -58,6 +58,39 @@ fn valid_sign_evm_request(amount: u64, commission: u64) -> SignEvmRequest {
     }
 }
 
+/// Build a minimal BIP-174-valid PSBT for tests that only care about
+/// `validate_psbt_request` shape-checking accepting the bytes — the actual
+/// signing path won't sign this (no witness data, no matchable keys), so
+/// only use it for tests that expect rejection BEFORE the signer runs.
+fn minimal_valid_psbt_bytes() -> Vec<u8> {
+    use bitcoin::hashes::Hash;
+    use bitcoin::psbt::Psbt;
+    use bitcoin::{Amount, OutPoint, ScriptBuf, Sequence, Transaction, TxIn, TxOut, Txid, Witness};
+
+    let unsigned_tx = Transaction {
+        version: bitcoin::transaction::Version(2),
+        lock_time: bitcoin::absolute::LockTime::ZERO,
+        input: vec![TxIn {
+            previous_output: OutPoint {
+                txid: Txid::from_raw_hash(bitcoin::hashes::sha256d::Hash::from_byte_array(
+                    [0u8; 32],
+                )),
+                vout: 0,
+            },
+            script_sig: ScriptBuf::new(),
+            sequence: Sequence::MAX,
+            witness: Witness::new(),
+        }],
+        output: vec![TxOut {
+            value: Amount::from_sat(1_000),
+            script_pubkey: ScriptBuf::new(),
+        }],
+    };
+    Psbt::from_unsigned_tx(unsigned_tx)
+        .expect("from_unsigned_tx")
+        .serialize()
+}
+
 /// Build a minimal 2-of-3 multisig PSBT for testing with a known pubkey.
 #[cfg(feature = "allow-seed-import")]
 fn build_test_multisig_psbt(our_pubkey: &bitcoin::PublicKey) -> Vec<u8> {
@@ -374,7 +407,7 @@ fn test_sign_psbt_before_init() {
             evm_amount: 1000,
             evm_recipient: vec![],
             evm_commission: 0,
-            psbt_bytes: vec![0xFF; 10],
+            psbt_bytes: minimal_valid_psbt_bytes(),
             psbt_output_amount: 500,
             rgb_asset_id: String::new(),
         })),
@@ -413,7 +446,7 @@ fn test_sign_psbt_rejects_unfinalized() {
             evm_amount: 1000,
             evm_recipient: vec![],
             evm_commission: 0,
-            psbt_bytes: vec![0xFF; 10],
+            psbt_bytes: minimal_valid_psbt_bytes(),
             psbt_output_amount: 500,
             rgb_asset_id: String::new(),
         })),
@@ -451,7 +484,7 @@ fn test_sign_psbt_rejects_amount_mismatch() {
             evm_amount: 100,
             evm_recipient: vec![],
             evm_commission: 20,
-            psbt_bytes: vec![0xFF; 10],
+            psbt_bytes: minimal_valid_psbt_bytes(),
             psbt_output_amount: 90, // 90 + 20 = 110 > 100
             rgb_asset_id: String::new(),
         })),
@@ -496,19 +529,21 @@ fn test_sign_vanilla_psbt_skips_evm_checks() {
             evm_amount: 0,
             evm_recipient: vec![],
             evm_commission: 0,
-            psbt_bytes: vec![0xFF; 10], // not a real PSBT — will fail at signing, not validation
+            psbt_bytes: minimal_valid_psbt_bytes(),
             psbt_output_amount: 0,
             rgb_asset_id: String::new(),
         })),
     };
     let resp = common::send_request(port, &sign_req);
 
-    // The request passes cross-checks (vanilla mode) but fails at actual PSBT
-    // parsing since 0xFF bytes aren't a valid PSBT. That's fine — we're testing
-    // that validation didn't reject it.
+    // Vanilla mode skips the EVM cross-checks even though `evm_event_valid`
+    // is false. The PSBT shape check now passes (real BIP-174 bytes), and
+    // the signer returns 0 matchable inputs successfully — no key material
+    // in this PSBT lines up with the test seed.
     match &resp.response {
         Some(Response::Error(e)) => {
-            // Should NOT be a cross-check error (code 3) — should be a signing error
+            // Should NOT be a cross-check error (code 3) — vanilla mode
+            // is the whole point of this test.
             assert_ne!(
                 e.code, 3,
                 "vanilla PSBT should not fail cross-checks, but got: {}",
@@ -516,7 +551,7 @@ fn test_sign_vanilla_psbt_skips_evm_checks() {
             );
         }
         Some(Response::SignedPsbt(_)) => {
-            // Would only happen with a real valid PSBT — fine too
+            // Expected with the new minimal-valid PSBT shape.
         }
         other => panic!("unexpected response: {:?}", other),
     }
