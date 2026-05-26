@@ -351,6 +351,23 @@ fn handle_sign_evm(ctx: &ServerContext, req: SignEvmRequest) -> Result<EnclaveRe
     #[cfg(not(feature = "dev-mode"))]
     validation::evm_crosscheck::validate_evm_request(&req)?;
 
+    // Mint/burn-mode burn-amount cross-check: only runs when the
+    // calldata uses the new 8-arg `fundsOut` selector. Requires the
+    // consignment to have been validated in-enclave so we can read the
+    // burn transition's `MS_BURNED_ASSET` metadata.
+    #[cfg(all(feature = "rgb-validation", not(feature = "dev-mode")))]
+    if req.call_data.len() >= 4
+        && req.call_data[..4] == validation::evm_crosscheck::FUNDS_OUT_SELECTOR_MINTBURN
+    {
+        let validated = validated_consignment.as_ref().ok_or_else(|| {
+            EnclaveError::CrossCheck(
+                "mint/burn fundsOut selector requires a validated consignment, none provided"
+                    .into(),
+            )
+        })?;
+        validation::evm_crosscheck::validate_funds_out_burn(&req, validated)?;
+    }
+
     // SPV verification: every consignment-anchor Bitcoin tx must be in our
     // validated header chain at sufficient depth. With `spv = ["rgb-validation"]`
     // in Cargo.toml, having the spv feature implies the rgb-validation
