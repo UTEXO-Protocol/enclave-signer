@@ -38,7 +38,8 @@ pub struct AttestedPubkeyResult {
 /// `user_data`. Field order and encoding MUST match the enclave's
 /// `canonical_pubkey_bundle` in `enclave/src/server.rs`.
 pub fn canonical_bundle(resp: &AttestedPublicKeyResponse) -> Vec<u8> {
-    let parts: [&[u8]; 7] = [
+    let chain_id_bytes = resp.chain_id.to_be_bytes();
+    let parts: [&[u8]; 10] = [
         &resp.evm_address,
         &resp.btc_compressed_pub,
         resp.btc_xpub.as_bytes(),
@@ -46,6 +47,9 @@ pub fn canonical_bundle(resp: &AttestedPublicKeyResponse) -> Vec<u8> {
         resp.account_xpub_vanilla.as_bytes(),
         resp.account_xpub_colored.as_bytes(),
         &resp.evm_uncompressed_pub,
+        &chain_id_bytes,
+        &resp.bridge_contract,
+        resp.rgb_asset_id.as_bytes(),
     ];
     let mut out = Vec::new();
     for p in parts {

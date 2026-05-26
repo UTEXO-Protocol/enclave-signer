@@ -423,6 +423,9 @@ impl EnclaveService for ParentAdapterService {
                     account_xpub_vanilla: pk.account_xpub_vanilla,
                     account_xpub_colored: pk.account_xpub_colored,
                     attestation_doc: r.attestation_doc,
+                    chain_id: pk.chain_id,
+                    bridge_contract: pk.bridge_contract,
+                    rgb_asset_id: pk.rgb_asset_id,
                 }))
             }
             Some(enclave_response::Response::Error(e)) => Err(Self::enclave_error_to_status(&e)),

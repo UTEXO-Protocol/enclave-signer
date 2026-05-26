@@ -62,6 +62,15 @@ message InitializeKeyResponse {
   string account_xpub_vanilla   = 5;  // BIP-86 account xpub for vanilla (BTC) operations: m/86'/<coin>'/0'
   string account_xpub_colored   = 6;  // BIP-86 account xpub for colored (RGB) operations: m/86'/827167'/0'
   bytes evm_uncompressed_pub    = 7;  // 64 bytes — secp256k1 X||Y (no 04 prefix), needed by EVM connectors
+
+  // Bridge config pinned at enclave boot from env (EVM_CHAIN_ID,
+  // BRIDGE_CONTRACT, RGB_ASSET_ID). Zero/empty means "not configured".
+  // Included in the canonical bundle hashed into the attestation `user_data`
+  // commitment so external verifiers can confirm which (chain, contract, asset)
+  // tuple this enclave is provisioned for. See docs/pubkey-attestation.md.
+  uint64 chain_id               = 8;
+  bytes  bridge_contract        = 9;   // 20 bytes (zeros = unset)
+  string rgb_asset_id           = 10;
 }
 
 message GetPublicKeyRequest {
@@ -77,6 +86,13 @@ message PublicKeysResponse {
   string account_xpub_vanilla   = 5;
   string account_xpub_colored   = 6;
   bytes evm_uncompressed_pub    = 7;  // 64 bytes — secp256k1 X||Y (no 04 prefix)
+
+  // Bridge config pinned at enclave boot (see InitializeKeyResponse).
+  // Mirrored here so GetPublicKey / GetAttestedPublicKey expose the same
+  // bundle a verifier needs to rebuild the canonical commitment.
+  uint64 chain_id               = 8;
+  bytes  bridge_contract        = 9;   // 20 bytes (zeros = unset)
+  string rgb_asset_id           = 10;
 }
 
 // Returns the public-key bundle along with an NSM attestation document

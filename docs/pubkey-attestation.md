@@ -66,6 +66,7 @@ fingerprint were not swapped by the parent host process.
 
 Length-prefixed (u32 big-endian) concatenation of every field of
 `PublicKeysResponse`, in proto field order. Strings encoded as UTF-8 bytes.
+`chain_id` is encoded as 8-byte big-endian (length prefix is the constant 8).
 
 ```
 canonical_bundle =
@@ -76,7 +77,18 @@ canonical_bundle =
     u32_be(len(account_xpub_vanilla))  || account_xpub_vanilla_utf8
     u32_be(len(account_xpub_colored))  || account_xpub_colored_utf8
     u32_be(len(evm_uncompressed_pub))  || evm_uncompressed_pub
+    u32_be(8)                          || chain_id_be8
+    u32_be(len(bridge_contract))       || bridge_contract       // 20 bytes (zeros = unset)
+    u32_be(len(rgb_asset_id))          || rgb_asset_id_utf8
 ```
+
+The last three fields are bridge config pinned at enclave boot from env
+(`EVM_CHAIN_ID`, `BRIDGE_CONTRACT`, `RGB_ASSET_ID`). They commit the
+enclave to a specific chain / contract / asset triple — a misconfigured or
+maliciously-redirected enclave is observable through this commitment.
+Production deployments MUST set all three; the commitment for a dev /
+mock build with no env is `chain_id=0`, `bridge_contract=20 zero bytes`,
+`rgb_asset_id=""`.
 
 The verifier MUST use the same field set, the same order, and the same
 length-prefix encoding. The reference encoder is `canonical_pubkey_bundle`

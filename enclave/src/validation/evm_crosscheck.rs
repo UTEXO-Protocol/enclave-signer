@@ -4,6 +4,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 #[cfg(feature = "rgb-validation")]
 use sha3::{Digest, Keccak256};
 
+use crate::config::BridgeConfig;
 use crate::error::{EnclaveError, Result};
 use crate::proto::SignEvmRequest;
 #[cfg(feature = "rgb-validation")]
@@ -47,7 +48,16 @@ const MINTBURN_AMOUNT_OFFSET: usize = 36;
 
 /// Validate enriched SignEvmRequest before signing.
 /// Returns Ok(()) if all cross-checks pass, Err(EnclaveError::CrossCheck) if any fail.
-pub fn validate_evm_request(req: &SignEvmRequest) -> Result<()> {
+///
+/// When `bridge_config.is_configured()` is true, the request's `chain_id`,
+/// `proxy_contract`, and `rgb_asset_id` are pinned: any mismatch fails
+/// closed. This is the production posture and the reason these fields are
+/// bound into the attestation `user_data` commitment — a compromised
+/// listener cannot redirect signatures to a different chain or contract.
+/// When unconfigured (dev / mock builds with no env), the legacy "trust
+/// the request" behaviour kicks in so existing tests and ad-hoc setups
+/// keep working.
+pub fn validate_evm_request(req: &SignEvmRequest, bridge_config: &BridgeConfig) -> Result<()> {
     // 0. Selector whitelist. Fail-closed before any offset extraction:
     //    every other byte-level check in this function assumes calldata is
     //    a known `fundsOut` shape. A listener that swapped the selector
@@ -85,6 +95,7 @@ pub fn validate_evm_request(req: &SignEvmRequest) -> Result<()> {
     #[cfg(not(feature = "rgb-validation"))]
     {
         let _ = selector;
+        let _ = bridge_config;
         Err(EnclaveError::CrossCheck(
             "fundsOut signing requires the enclave to be built with --features rgb-validation"
                 .into(),
@@ -169,6 +180,48 @@ pub fn validate_evm_request(req: &SignEvmRequest) -> Result<()> {
                 "proxy_contract must be 20 bytes, got {}",
                 req.proxy_contract.len()
             )));
+        }
+
+        // 4b. Pinned-config cross-check. When the operator configured
+        //     EVM_CHAIN_ID / BRIDGE_CONTRACT / RGB_ASSET_ID at boot, the
+        //     listener-supplied values MUST match — otherwise a compromised
+        //     listener could redirect signatures to a different chain or
+        //     contract. The same values are committed into the attestation
+        //     `user_data` so an external verifier can confirm what this
+        //     enclave is provisioned for.
+        if bridge_config.is_configured() {
+            if req.chain_id != bridge_config.chain_id {
+                return Err(EnclaveError::CrossCheck(format!(
+                    "chain_id mismatch: request {} != pinned {}",
+                    req.chain_id, bridge_config.chain_id
+                )));
+            }
+            if req.proxy_contract.as_slice() != bridge_config.bridge_contract {
+                return Err(EnclaveError::CrossCheck(format!(
+                    "proxy_contract mismatch: request {} != pinned {}",
+                    hex::encode(&req.proxy_contract),
+                    hex::encode(bridge_config.bridge_contract)
+                )));
+            }
+            // rgb_asset_id is optional on the request only when the listener
+            // sends nothing (legacy path). Once a request declares an asset,
+            // it must match the pin. The pin itself is always required when
+            // configured — if the operator pinned chain/contract but left
+            // RGB_ASSET_ID unset, the bridge cannot identify the asset and
+            // we'd be back to trusting the listener.
+            if bridge_config.rgb_asset_id.is_empty() {
+                return Err(EnclaveError::CrossCheck(
+                    "bridge config pinned chain/contract but RGB_ASSET_ID is empty — \
+                     set all three env vars or none"
+                        .into(),
+                ));
+            }
+            if !req.rgb_asset_id.is_empty() && req.rgb_asset_id != bridge_config.rgb_asset_id {
+                return Err(EnclaveError::CrossCheck(format!(
+                    "rgb_asset_id mismatch: request {} != pinned {}",
+                    req.rgb_asset_id, bridge_config.rgb_asset_id
+                )));
+            }
         }
 
         // 5. Deadline not expired
@@ -345,6 +398,17 @@ mod tests {
     // `rgb-validation`, so the test module needs its own.
     use sha3::{Digest, Keccak256};
 
+    /// Default unconfigured BridgeConfig — exercises the legacy "trust the
+    /// request" path. Tests that specifically want to verify the pinned
+    /// cross-check construct their own configured BridgeConfig.
+    fn unconfigured() -> BridgeConfig {
+        BridgeConfig {
+            chain_id: 0,
+            bridge_contract: [0u8; 20],
+            rgb_asset_id: String::new(),
+        }
+    }
+
     /// Build a mock fundsOut calldata with the given amount and commission.
     /// Selector is the 6-arg `fundsOut(address,address,uint256,uint256,string,string)`
     /// = `0x1ad880b2` — the one entry in `FUNDS_OUT_SELECTORS`.
@@ -414,7 +478,7 @@ mod tests {
     #[cfg(feature = "rgb-validation")]
     #[test]
     fn valid_request_passes() {
-        assert!(validate_evm_request(&valid_evm_request()).is_ok());
+        assert!(validate_evm_request(&valid_evm_request(), &unconfigured()).is_ok());
     }
 
     /// P0 regression: the host-supplied `consignment_valid` flag must not
@@ -430,7 +494,7 @@ mod tests {
         req.consignment_valid = true;
         req.consignment = vec![];
         req.consignment_hash = vec![];
-        let err = validate_evm_request(&req).unwrap_err();
+        let err = validate_evm_request(&req, &unconfigured()).unwrap_err();
         assert!(
             err.to_string().contains("requires raw consignment bytes"),
             "expected raw-bytes-required rejection, got: {err}"
@@ -446,7 +510,7 @@ mod tests {
     fn ignores_consignment_valid_flag_when_bytes_present() {
         let mut req = valid_evm_request();
         req.consignment_valid = false;
-        assert!(validate_evm_request(&req).is_ok());
+        assert!(validate_evm_request(&req, &unconfigured()).is_ok());
     }
 
     #[cfg(feature = "rgb-validation")]
@@ -454,7 +518,7 @@ mod tests {
     fn rejects_amount_mismatch_rgb_less_than_calldata() {
         let mut req = valid_evm_request();
         req.rgb_amount = 1049; // 1000 + 50 = 1050, so 1049 is insufficient
-        let err = validate_evm_request(&req).unwrap_err();
+        let err = validate_evm_request(&req, &unconfigured()).unwrap_err();
         assert!(err.to_string().contains("amount mismatch"));
     }
 
@@ -466,7 +530,7 @@ mod tests {
         req.calldata_amount = 9999;
         // Bump rgb_amount so we pass the consignment amount check first
         req.rgb_amount = 99999;
-        let err = validate_evm_request(&req).unwrap_err();
+        let err = validate_evm_request(&req, &unconfigured()).unwrap_err();
         assert!(err.to_string().contains("calldata amount mismatch"));
     }
 
@@ -475,7 +539,7 @@ mod tests {
     fn rejects_expired_deadline() {
         let mut req = valid_evm_request();
         req.deadline = 1; // Unix timestamp 1 is long expired
-        let err = validate_evm_request(&req).unwrap_err();
+        let err = validate_evm_request(&req, &unconfigured()).unwrap_err();
         assert!(err.to_string().contains("deadline expired"));
     }
 
@@ -484,7 +548,7 @@ mod tests {
     fn rejects_missing_proxy_contract() {
         let mut req = valid_evm_request();
         req.proxy_contract = vec![];
-        let err = validate_evm_request(&req).unwrap_err();
+        let err = validate_evm_request(&req, &unconfigured()).unwrap_err();
         assert!(err.to_string().contains("proxy_contract must be 20 bytes"));
     }
 
@@ -493,7 +557,7 @@ mod tests {
     fn rejects_zero_chain_id() {
         let mut req = valid_evm_request();
         req.chain_id = 0;
-        let err = validate_evm_request(&req).unwrap_err();
+        let err = validate_evm_request(&req, &unconfigured()).unwrap_err();
         assert!(err.to_string().contains("chain_id must be > 0"));
     }
 
@@ -505,7 +569,7 @@ mod tests {
     #[test]
     fn rejects_funds_out_in_default_build() {
         let req = valid_evm_request();
-        let err = validate_evm_request(&req).unwrap_err();
+        let err = validate_evm_request(&req, &unconfigured()).unwrap_err();
         assert!(
             err.to_string().contains("rgb-validation"),
             "expected feature-gate rejection, got: {err}"
@@ -518,7 +582,7 @@ mod tests {
         let mut req = valid_evm_request();
         // rgb_amount == calldata_amount + calldata_commission exactly
         req.rgb_amount = req.calldata_amount + req.calldata_commission;
-        assert!(validate_evm_request(&req).is_ok());
+        assert!(validate_evm_request(&req, &unconfigured()).is_ok());
     }
 
     #[test]
@@ -550,7 +614,7 @@ mod tests {
         let hash = Keccak256::digest(consignment);
         req.consignment = consignment.to_vec();
         req.consignment_hash = hash.to_vec();
-        assert!(validate_evm_request(&req).is_ok());
+        assert!(validate_evm_request(&req, &unconfigured()).is_ok());
     }
 
     #[cfg(feature = "rgb-validation")]
@@ -559,7 +623,7 @@ mod tests {
         let mut req = valid_evm_request();
         req.consignment = b"test-consignment-bytes".to_vec();
         req.consignment_hash = vec![0xDE; 32]; // wrong hash
-        let err = validate_evm_request(&req).unwrap_err();
+        let err = validate_evm_request(&req, &unconfigured()).unwrap_err();
         assert!(err.to_string().contains("consignment hash mismatch"));
     }
 
@@ -569,7 +633,7 @@ mod tests {
         let mut req = valid_evm_request();
         req.consignment = b"test-consignment-bytes".to_vec();
         req.consignment_hash = vec![]; // missing hash
-        let err = validate_evm_request(&req).unwrap_err();
+        let err = validate_evm_request(&req, &unconfigured()).unwrap_err();
         assert!(err.to_string().contains("consignment_hash is missing"));
     }
 
@@ -580,7 +644,7 @@ mod tests {
         // of the calldata intact so the only failing predicate is the
         // whitelist check at the top of validate_evm_request.
         req.call_data[..4].copy_from_slice(&[0xde, 0xad, 0xbe, 0xef]);
-        let err = validate_evm_request(&req).unwrap_err();
+        let err = validate_evm_request(&req, &unconfigured()).unwrap_err();
         let msg = err.to_string();
         assert!(
             msg.contains("unexpected calldata selector") && msg.contains("deadbeef"),
@@ -593,7 +657,7 @@ mod tests {
         let mut req = valid_evm_request();
         // 3 bytes can't carry a 4-byte selector.
         req.call_data = vec![0x1a, 0xd8, 0x80];
-        let err = validate_evm_request(&req).unwrap_err();
+        let err = validate_evm_request(&req, &unconfigured()).unwrap_err();
         assert!(
             err.to_string().contains("call_data too short"),
             "expected too-short rejection, got: {err}"
@@ -886,5 +950,79 @@ mod tests {
             let validated = validated_with_last(transfer_transition(0));
             assert!(validate_funds_out_transfer(&req, &validated).is_ok());
         }
+    }
+
+    // =========================================================================
+    // Pinned-config cross-check (4b) — `validate_evm_request` with pinned
+    // operator config from env vars. Gated on `rgb-validation` because the
+    // post-selector validation body lives behind that cfg.
+    // =========================================================================
+
+    #[cfg(feature = "rgb-validation")]
+    fn pinned() -> BridgeConfig {
+        BridgeConfig {
+            chain_id: 1,
+            bridge_contract: [0xAA; 20],
+            rgb_asset_id: "rgb:test-asset".into(),
+        }
+    }
+
+    #[cfg(feature = "rgb-validation")]
+    #[test]
+    fn pinned_config_accepts_matching_request() {
+        // valid_evm_request() defaults exactly match `pinned()` — sanity
+        // check that the pinned path doesn't reject a legitimate request.
+        assert!(validate_evm_request(&valid_evm_request(), &pinned()).is_ok());
+    }
+
+    #[cfg(feature = "rgb-validation")]
+    #[test]
+    fn pinned_config_rejects_chain_id_mismatch() {
+        let mut req = valid_evm_request();
+        req.chain_id = 42; // pinned config expects 1
+        let err = validate_evm_request(&req, &pinned()).unwrap_err();
+        assert!(err.to_string().contains("chain_id mismatch"), "got: {err}");
+    }
+
+    #[cfg(feature = "rgb-validation")]
+    #[test]
+    fn pinned_config_rejects_proxy_contract_mismatch() {
+        let mut req = valid_evm_request();
+        req.proxy_contract = vec![0xBB; 20]; // pinned is 0xAA
+        let err = validate_evm_request(&req, &pinned()).unwrap_err();
+        assert!(
+            err.to_string().contains("proxy_contract mismatch"),
+            "got: {err}"
+        );
+    }
+
+    #[cfg(feature = "rgb-validation")]
+    #[test]
+    fn pinned_config_rejects_rgb_asset_mismatch() {
+        let mut req = valid_evm_request();
+        req.rgb_asset_id = "rgb:wrong-asset".into();
+        let err = validate_evm_request(&req, &pinned()).unwrap_err();
+        assert!(
+            err.to_string().contains("rgb_asset_id mismatch"),
+            "got: {err}"
+        );
+    }
+
+    #[cfg(feature = "rgb-validation")]
+    #[test]
+    fn pinned_config_rejects_partial_pin_missing_asset() {
+        // Operator misconfiguration: pinned chain/contract but no asset.
+        // The function must fail-closed instead of silently allowing any
+        // asset, since the half-pin gives a misleading attestation.
+        let half_pinned = BridgeConfig {
+            chain_id: 1,
+            bridge_contract: [0xAA; 20],
+            rgb_asset_id: String::new(),
+        };
+        let err = validate_evm_request(&valid_evm_request(), &half_pinned).unwrap_err();
+        assert!(
+            err.to_string().contains("RGB_ASSET_ID is empty"),
+            "got: {err}"
+        );
     }
 }

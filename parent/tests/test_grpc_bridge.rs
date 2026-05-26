@@ -49,6 +49,9 @@ fn start_mock_enclave() -> u16 {
                             account_xpub_vanilla: "tpub-vanilla-test".into(),
                             account_xpub_colored: "tpub-colored-test".into(),
                             evm_uncompressed_pub: vec![0xEE; 64],
+                            chain_id: 0,
+                            bridge_contract: vec![0u8; 20],
+                            rgb_asset_id: String::new(),
                         },
                     )),
                 },
@@ -77,6 +80,9 @@ fn start_mock_enclave() -> u16 {
                             account_xpub_vanilla: "tpub-vanilla-test".into(),
                             account_xpub_colored: "tpub-colored-test".into(),
                             evm_uncompressed_pub: vec![0xEE; 64],
+                            chain_id: 0,
+                            bridge_contract: vec![0u8; 20],
+                            rgb_asset_id: String::new(),
                         },
                     )),
                 },
@@ -108,9 +114,13 @@ fn start_mock_enclave() -> u16 {
                         account_xpub_vanilla: "tpub-vanilla-test".into(),
                         account_xpub_colored: "tpub-colored-test".into(),
                         evm_uncompressed_pub: vec![0xEE; 64],
+                        chain_id: 0,
+                        bridge_contract: vec![0u8; 20],
+                        rgb_asset_id: String::new(),
                     };
                     let mut bundle: Vec<u8> = Vec::new();
-                    let parts: [&[u8]; 7] = [
+                    let chain_id_bytes = public_keys.chain_id.to_be_bytes();
+                    let parts: [&[u8]; 10] = [
                         &public_keys.evm_address,
                         &public_keys.btc_compressed_pub,
                         public_keys.btc_xpub.as_bytes(),
@@ -118,6 +128,9 @@ fn start_mock_enclave() -> u16 {
                         public_keys.account_xpub_vanilla.as_bytes(),
                         public_keys.account_xpub_colored.as_bytes(),
                         &public_keys.evm_uncompressed_pub,
+                        &chain_id_bytes,
+                        &public_keys.bridge_contract,
+                        public_keys.rgb_asset_id.as_bytes(),
                     ];
                     for p in parts {
                         bundle.extend_from_slice(&(p.len() as u32).to_be_bytes());
@@ -605,7 +618,8 @@ async fn grpc_attested_public_key_roundtrip_and_verify() {
 
     use sha2::Digest;
     let mut bundle: Vec<u8> = Vec::new();
-    let parts: [&[u8]; 7] = [
+    let chain_id_bytes = resp.chain_id.to_be_bytes();
+    let parts: [&[u8]; 10] = [
         &resp.evm_address,
         &resp.btc_compressed_pub,
         resp.btc_xpub.as_bytes(),
@@ -613,6 +627,9 @@ async fn grpc_attested_public_key_roundtrip_and_verify() {
         resp.account_xpub_vanilla.as_bytes(),
         resp.account_xpub_colored.as_bytes(),
         &resp.evm_uncompressed_pub,
+        &chain_id_bytes,
+        &resp.bridge_contract,
+        resp.rgb_asset_id.as_bytes(),
     ];
     for p in parts {
         bundle.extend_from_slice(&(p.len() as u32).to_be_bytes());

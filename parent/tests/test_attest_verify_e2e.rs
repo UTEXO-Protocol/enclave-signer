@@ -13,6 +13,7 @@ use std::sync::Arc;
 
 use tonic::transport::Server;
 
+use utexo_bridge_enclave::config::BridgeConfig;
 use utexo_bridge_enclave::server::{self as enclave_server, ServerContext};
 use utexo_bridge_enclave::spv::{checkpoint_for, HeaderChain, Network};
 use utexo_bridge_enclave::state::EnclaveState;
@@ -39,7 +40,11 @@ fn start_real_enclave() -> u16 {
         Network::Regtest,
         checkpoint_for(Network::Regtest),
     ));
-    let ctx = Arc::new(ServerContext::new(state, header_chain));
+    let ctx = Arc::new(ServerContext::new(
+        state,
+        BridgeConfig::from_env(),
+        header_chain,
+    ));
 
     std::thread::spawn(move || {
         for stream in listener.incoming() {
