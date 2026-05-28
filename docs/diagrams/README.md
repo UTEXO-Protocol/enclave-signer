@@ -1,7 +1,7 @@
 # Diagrams
 
 PlantUML sources for the architecture / sequence diagrams referenced in
-[`docs/project-review.md`](../project-review.md).
+[`docs/audit/ENCLAVE_SIGNER_CONTEXT.md`](../audit/ENCLAVE_SIGNER_CONTEXT.md).
 
 | Source                                                             | Rendered (SVG / PNG)                                            | What it shows                                                                                                                                                          |
 |--------------------------------------------------------------------|-----------------------------------------------------------------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------|

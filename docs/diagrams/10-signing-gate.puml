@@ -102,7 +102,7 @@ partition "Sign" {
 stop
 
 note right
-  CLOSED since original review (see spec-conformance.md):
+  CLOSED since original review (see docs/audit/cross-flow-findings.md):
    - Sec 9 / 10.2  burn amount now bound to the consignment
        (TS_BURN + amount <= burned_asset_amount, #44),
        transfer amount <= total_output_amount (#47)
