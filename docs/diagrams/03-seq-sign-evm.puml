@@ -1,0 +1,93 @@
+@startuml seq-sign-evm
+title Sign EVM (RGB -> EVM unlock) -- full path with cross-checks
+
+skinparam shadowing false
+skinparam linetype ortho
+skinparam defaultFontName "JetBrains Mono"
+skinparam defaultFontSize 12
+skinparam sequence {
+  ArrowColor #355680
+  LifeLineBorderColor #555555
+  ParticipantBorderColor #355680
+  ParticipantBackgroundColor #FAFAFA
+  ParticipantFontStyle bold
+}
+
+actor "Orchestrator" as Orc
+participant "Go Listener" as Listener
+participant "utexo-bridge-parent\n(grpc_server.rs)" as Parent
+participant "enclave/server.rs\nhandle_sign_evm" as Srv
+participant "validation::rgb\nRgbValidator"     as Rgb
+participant "validation::evm_crosscheck"        as Evm
+participant "validation::spv_crosscheck"        as Spv
+participant "spv::HeaderChain"                  as Chain
+participant "vsock_forwarder ->\nEsplora"        as Esplora
+participant "signing::evm\n+ KeyManager"        as Sign
+
+== Intent ==
+Orc -> Listener     : signing intent (op, calldata)
+Listener -> Listener: enrich (chain_id, proxy_contract,\nrgb_amount, consignment, merkle_proofs)
+Listener -> Parent  : gRPC EnclaveService.Sign(\nSWAP, EnrichedEvmPayload)
+
+== Translate gRPC -> enclave wire ==
+Parent -> Parent    : decode EnrichedEvmPayload
+Parent -> Srv       : SignEvmRequest\n(TCP/vsock, length-prefixed proto)
+
+== Build-skew guard ==
+Srv -> Srv          : #cfg(not feature="spv")\nif !merkle_proofs.is_empty() => REJECT
+
+== In-enclave RGB validation ==
+Srv -> Rgb          : validate_consignment(bytes)
+Rgb -> Rgb          : Transfer::load(...)\nextract chain_net + witness_txids
+Rgb -> Esplora      : esplora_blocking GET /tx/.../merkle-proof
+Esplora --> Rgb     : witness tx data
+Rgb -> Rgb          : rgbstd::validate(...)
+Rgb --> Srv         : ValidatedConsignment\n(contract_id, witness_txids, chain_net)
+
+alt rgb_asset_id present
+  Srv -> Srv        : assert v.contract_id == req.rgb_asset_id
+end
+
+== Cross-checks (skipped under dev-mode) ==
+Srv -> Evm          : validate_evm_request(req, bridge_config)
+Evm -> Evm          : selector in FUNDS_OUT_SELECTORS\n(legacy 0x1ad880b2 | mint/burn 0x179bef59)
+Evm -> Evm          : consignment bytes present\n(consignment_valid flag NOT trusted -- #47)
+Evm -> Evm          : keccak256(consignment) == consignment_hash
+Evm -> Evm          : legacy: rgb_amount >= calldata_amount + commission\n+ offsets 68/100 == declared amount/commission
+Evm -> Evm          : chain_id > 0 && len(proxy_contract)==20 && deadline > now
+Evm -> Evm          : if bridge_config pinned (#43):\nchain_id/proxy_contract/rgb_asset_id == env pins
+Evm --> Srv         : Ok or CrossCheck err
+
+== Amount bound to consignment (#44/#47) ==
+Srv -> Srv          : require validated_consignment for any fundsOut selector
+Srv -> Evm          : validate_funds_out_burn(req, validated)
+Evm -> Evm          : mint/burn: last == TS_BURN &&\ncalldata amount@36 <= burned_asset_amount
+Srv -> Evm          : validate_funds_out_transfer(req, validated)
+Evm -> Evm          : legacy: last == TS_TRANSFER &&\namount+commission <= total_output_amount
+Evm --> Srv         : Ok or CrossCheck err
+
+== SPV gate (feature = "spv") ==
+Srv -> Chain        : lock + tip_height/time
+Srv -> Spv          : assert_chain_not_stale(now, 2h)
+Srv -> Spv          : assert_chain_net(consignment, chain.network())
+Srv -> Spv          : validate_spv_proofs(\nexpected_txids, proofs, MIN_CONF=6)
+Spv -> Spv          : set-equality(expected, proofs)
+loop for each MerkleProofEntry
+  Spv -> Chain      : header_at(block_height)
+  Spv -> Spv        : depth >= 6
+  Spv -> Spv        : verify_merkle_proof(\ntxid_internal, position, path, root)
+end
+Spv --> Srv         : Ok or Spv err
+
+== Sign ==
+Srv -> Sign         : build_evm_domain(req)
+Srv -> Sign         : sign_request_digest(domain, calldata, nonce, deadline)
+Sign -> Sign        : keccak256(0x1901 || domSep || structHash)
+Sign -> Sign        : k256 ECDSA sign_prehash_recoverable\n(returns r||s||v)
+Sign --> Srv        : signature (65 bytes)
+
+Srv --> Parent      : EvmSignatureResponse
+Parent --> Listener : gRPC Signature
+Listener --> Orc    : signed (relays to MultisigProxy)
+
+@enduml

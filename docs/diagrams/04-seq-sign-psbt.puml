@@ -1,0 +1,109 @@
+@startuml seq-sign-psbt
+title Sign PSBT (EVM -> RGB lock) -- taproot + segwit-v0, anchored authorisation
+
+skinparam shadowing false
+skinparam linetype ortho
+skinparam defaultFontName "JetBrains Mono"
+skinparam defaultFontSize 12
+skinparam sequence {
+  ArrowColor #355680
+  LifeLineBorderColor #555555
+  ParticipantBorderColor #355680
+  ParticipantBackgroundColor #FAFAFA
+  ParticipantFontStyle bold
+}
+
+actor "Orchestrator" as Orc
+participant "Go Listener"                       as Listener
+participant "utexo-bridge-parent\n(grpc_server.rs)" as Parent
+participant "enclave/server.rs\nhandle_sign_psbt" as Srv
+participant "validation::psbt_crosscheck"        as PsbtCx
+participant "KeyManager::sign_psbt"             as Km
+participant "signing::taproot\nfind_taproot_sign_jobs" as Tap
+participant "signing::psbt\nshould_sign_segwit_input" as Sw
+participant "secp256k1 / k256"                  as Crypto
+
+== Intent ==
+Orc -> Listener      : bridge intent (FundsIn event observed on EVM)
+Listener -> Listener : fetch PSBT from rgb-multisig-bridge,\nenrich with EVM event fields
+Listener -> Parent   : gRPC Sign(TRANSACTION, EnrichedPsbtPayload)
+
+== Translate ==
+Parent -> Srv        : SignPsbtRequest\n(psbt_bytes, evm_tx_hash, amounts, ...)
+
+== Cross-checks ==
+Srv -> PsbtCx        : validate_psbt_request(req)
+PsbtCx -> PsbtCx     : PSBT shape whitelist (#40):\npsbt_bytes non-empty,\nPsbt::deserialize ok,\nunsigned tx has >= 1 input
+alt evm_tx_hash empty (vanilla)
+  PsbtCx --> Srv     : Ok -- only psbt_bytes required
+else bridge mode
+  PsbtCx -> PsbtCx   : len(evm_tx_hash) == 32
+  PsbtCx -> PsbtCx   : evm_event_valid && evm_event_finalized
+  PsbtCx -> PsbtCx   : evm_amount >= psbt_output_amount + commission
+end
+PsbtCx --> Srv       : Ok or CrossCheck err
+
+== Sign PSBT inputs ==
+Srv -> Km            : sign_psbt(psbt_bytes)
+Km -> Km             : Psbt::deserialize(...)
+
+note over Km
+  Two passes per input:
+  1. Taproot script-path (Schnorr)
+  2. SegWit v0 P2WSH (ECDSA)
+  Skip if already signed.
+end note
+
+== Taproot pass ==
+Km -> Tap            : find_taproot_sign_jobs(psbt, fp, key_manager)
+loop for each input
+  Tap -> Tap        : witness_utxo.script_pubkey.is_p2tr() ?
+  Tap -> Tap        : output_key := spk[2..34]
+  loop for (control_block, (script, leaf_version)) in tap_scripts
+    Tap -> Crypto    : control_block.verify_taproot_commitment(output_key, script)
+    note right of Tap
+      Anchor: rejects any leaf whose
+      control block does not commit
+      under the on-chain output_key.
+    end note
+    loop for 32-byte PushBytes in script
+      Tap -> Tap     : tap_key_origins[xonly] ?\nfp matches master_fingerprint ?\nleaf_hashes contains this leaf ?
+      Tap -> Tap     : resolve_account_and_child_path(\ndepth-86 path)
+      Tap -> Crypto  : derive child secret;\nxonly(derived) == xonly_from_psbt
+      alt all match
+        Tap -> Tap   : emit TaprootSignJob
+      end
+    end
+  end
+end
+Tap --> Km           : jobs
+
+alt jobs non-empty
+  Km -> Km          : sighash_cache (Prevouts::All)
+  loop for each TaprootSignJob
+    Km -> Crypto    : taproot_script_spend_signature_hash(\ninput, prevouts, leaf, Default)
+    Km -> Crypto    : sign_schnorr_no_aux_rand(sighash, keypair)
+    Km -> Km        : insert tap_script_sigs[(xonly, leaf_hash)]
+  end
+end
+
+== SegWit v0 P2WSH pass ==
+loop for each input
+  Km -> Sw          : should_sign_segwit_input(psbt, i, our_pubkey)
+  Sw -> Sw          : witness_utxo P2WSH present\n+ partial_sigs missing\n+ witness_script present
+  Sw -> Sw          : sha256(witness_script) ==\nwitness_program in script_pubkey
+  Sw -> Sw          : our_pubkey appears as exact 33-byte\nPushBytes in witness_script
+  Sw --> Km         : SignP2wsh or Skip
+  alt SignP2wsh
+    Km -> Crypto    : p2wsh_signature_hash(i, ws, value, ALL)
+    Km -> Crypto    : secp.sign_ecdsa(sighash, sk)
+    Km -> Km        : insert partial_sigs[pubkey] = sig
+  end
+end
+
+Km --> Srv          : (signed_psbt_bytes, inputs_signed)
+Srv --> Parent      : SignedPsbtResponse
+Parent --> Listener : gRPC Signature
+Listener --> Orc    : signed PSBT (assembles + broadcasts)
+
+@enduml

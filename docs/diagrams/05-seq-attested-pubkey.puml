@@ -1,0 +1,88 @@
+@startuml seq-attested-pubkey
+title Attested public key -- external verifier <-> enclave (TEE binding proof)
+
+skinparam shadowing false
+skinparam linetype ortho
+skinparam defaultFontName "JetBrains Mono"
+skinparam defaultFontSize 12
+skinparam sequence {
+  ArrowColor #355680
+  LifeLineBorderColor #555555
+  ParticipantBorderColor #355680
+  ParticipantBackgroundColor #FAFAFA
+  ParticipantFontStyle bold
+}
+
+actor "External verifier\n(auditor / bridge op)" as V
+participant "attest-verify CLI\n(bin/attest_verify.rs)" as Cli
+participant "parent/attest_verify.rs\nverify_attested_pubkey" as Lib
+participant "utexo-bridge-parent\n(grpc_server.rs)"  as Parent
+participant "enclave/server.rs\nhandle_get_attested_public_key" as Srv
+participant "EnclaveState\n+ KeyManager" as State
+participant "attestation.rs\n(NSM facade)"   as Att
+participant "/dev/nsm\n(NSM device)"          as NSM
+participant "attestation-verify\nverify_attestation()" as Verify
+database "Embedded AWS Nitro\nroot CA (PEM)" as RootCa
+
+== Verifier issues nonce ==
+V -> Cli              : attest-verify --endpoint ... --pcr0 ... --pcr1 ... --pcr2 ...
+Cli -> Lib            : verify_attested_pubkey(endpoint, expected_pcrs, Real)
+Lib -> Lib            : nonce := rand_32_bytes()
+
+== gRPC round-trip ==
+Lib -> Parent         : gRPC AttestedPublicKey(nonce)
+Parent -> Parent      : require len(nonce) == 32
+Parent -> Srv         : GetAttestedPublicKeyRequest{nonce}
+
+Srv -> State          : get_keys() (requires Phase::Active)
+State --> Srv         : KeyInfo{evm_address, evm_uncompressed_pub,\nbtc xpub, master_fingerprint,\naccount xpubs vanilla+colored}
+
+Srv -> Srv            : bundle := canonical_pubkey_bundle(keys)\n(length-prefixed concat)
+Srv -> Srv            : commitment := sha256(bundle)
+
+Srv -> Att            : get_attestation(\nnonce, pubkey=evm_uncompressed_pub,\nuser_data=commitment)
+
+alt mock-attestation feature
+  Att -> Att          : build_mock_document(...)
+  Att --> Srv         : raw CBOR (zero PCRs, no COSE)
+else real (Linux + NSM)
+  Att -> NSM          : Request::Attestation{user_data, nonce, public_key}
+  NSM -> NSM          : sign over (PCRs, ts, nonce, pubkey, user_data)\nwith per-instance ECDSA P-384 key
+  NSM --> Att         : COSE_Sign1 document
+  Att --> Srv         : doc bytes
+end
+
+Srv --> Parent        : GetAttestedPublicKeyResponse{public_keys, attestation_doc}
+Parent --> Lib        : AttestedPublicKeyResponse
+
+== Verify locally ==
+Lib -> Verify         : verify_attestation(doc, expected_pcrs, Some(nonce))
+Verify -> Verify      : parse COSE_Sign1 (array of 4)
+Verify -> Verify      : parse inner CBOR AttestationDocument
+Verify -> RootCa      : compare cabundle[0] byte-for-byte
+loop i in 0..cabundle.len()-1
+  Verify -> Verify    : verify_cert_validity(cabundle[i])
+  Verify -> Verify    : cabundle[i] signed cabundle[i+1] (ECDSA P-384)
+end
+Verify -> Verify      : cabundle[last] signed signing_cert
+Verify -> Verify      : extract P-384 pubkey, verify COSE_Sign1 signature\nover Sig_structure1(\n"Signature1", protected, b"", payload)
+Verify -> Verify      : assert pcrs[0/1/2] == expected_pcrs bytewise
+Verify -> Verify      : assert doc.nonce == nonce_sent
+Verify -> Verify      : require doc.public_key present
+Verify --> Lib        : VerifiedAttestation{pubkey, pcrs, user_data, ...}
+
+Lib -> Lib            : assert verified.enclave_pubkey ==\nresponse.evm_uncompressed_pub
+Lib -> Lib            : rebuild canonical_bundle locally\nassert verified.user_data == sha256(bundle)
+
+Lib --> Cli           : AttestedPubkeyResult
+Cli --> V             : OK + printed bundle + PCRs
+
+note right of V
+  After OK the verifier knows:
+  "AWS Nitro hardware certifies that an
+   enclave with PCR0=X/PCR1=Y/PCR2=Z
+   produced this signing pubkey, and the
+   full key bundle commits to user_data."
+end note
+
+@enduml
