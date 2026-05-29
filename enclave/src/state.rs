@@ -313,6 +313,8 @@ impl EnclaveState {
             Ok(KeyInfo {
                 evm_address: *km.evm_address(),
                 evm_uncompressed_pub: *km.evm_uncompressed_pub(),
+                evm_gas_tx_address: *km.evm_gas_tx_address(),
+                evm_gas_tx_uncompressed_pub: *km.evm_gas_tx_uncompressed_pub(),
                 btc_compressed_pubkey: *km.btc_compressed_pubkey(),
                 btc_xpub: km.btc_xpub().to_string(),
                 master_fingerprint: km.master_fingerprint().to_bytes(),
@@ -325,6 +327,11 @@ impl EnclaveState {
     /// Sign a 32-byte EVM message hash. Returns 65-byte signature.
     pub fn sign_evm(&self, message_hash: &[u8; 32]) -> Result<[u8; 65]> {
         self.with_active(|km| km.sign_evm(message_hash))
+    }
+
+    /// Sign a 32-byte digest with the EVM gas TX key. Returns 65-byte signature.
+    pub fn sign_evm_gas_tx(&self, message_hash: &[u8; 32]) -> Result<[u8; 65]> {
+        self.with_active(|km| km.sign_evm_gas_tx(message_hash))
     }
 
     /// Sign PSBT inputs matching our BTC key. Returns (signed_psbt_bytes, inputs_signed).

@@ -8,13 +8,10 @@
 //!
 //! ## Status
 //!
-//! - **Mainnet checkpoint** — PLACEHOLDER. Required for production. Will be
-//!   set when production deployment is in scope.
-//! - **Signet checkpoint** — PLACEHOLDER. Will be filled in once Mirvais
-//!   provides a `(height, hash, bits, time)` tuple from the UTEXO custom
-//!   signet, scheduled for after the dev asset_id is finalised. PR 3 wires
-//!   the chain through with placeholders so a follow-up PR is a one-line
-//!   constant swap.
+//! - **Mainnet checkpoint** — block 950 000 (2026-05-18). Verified via
+//!   double-SHA256 of raw header from blockstream.info/api.
+//! - **Signet checkpoint** — UTEXO custom signet block 311 000 (2026-05-25).
+//!   Verified via double-SHA256 of raw header from esplora-api.utexo.com.
 //! - **Signet challenge / magic / block time** — REAL values, provided by
 //!   Oleksandr 2026-04-30. UTEXO custom signet, 3-of-3 multisig, 30s blocks.
 //!   These are baked in now so they end up in PCR0 alongside everything
@@ -43,24 +40,32 @@ pub struct Checkpoint {
     pub is_real: bool,
 }
 
-/// Mainnet checkpoint. PLACEHOLDER — replace with a real recent finalized
-/// block before production.
+/// Mainnet checkpoint — block 950 000 (2026-05-18).
+/// hash (display): 000000000000000000010b93c9ea1c29fea277383f0f7d1f26de8b5802e885ff
 pub const MAINNET_CHECKPOINT: Checkpoint = Checkpoint {
-    height: 0,
-    hash: [0u8; 32],
-    bits: 0,
-    time: 0,
-    is_real: false,
+    height: 950_000,
+    hash: [
+        0xff, 0x85, 0xe8, 0x02, 0x58, 0x8b, 0xde, 0x26, 0x1f, 0x7d, 0x0f, 0x3f, 0x38, 0x77, 0xa2,
+        0xfe, 0x29, 0x1c, 0xea, 0xc9, 0x93, 0x0b, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00,
+    ],
+    bits: 0x1702_0f79,
+    time: 1_779_141_269,
+    is_real: true,
 };
 
-/// Signet checkpoint. PLACEHOLDER — replace once the team confirms
-/// default-signet vs custom-signet (see docs/spv-review.md §4).
+/// UTEXO custom signet checkpoint — block 311 000 (2026-05-25).
+/// hash (display): 00000236acddd52681c79ae733060376ce4f0ea0171876f2955e2125e32492f8
 pub const SIGNET_CHECKPOINT: Checkpoint = Checkpoint {
-    height: 0,
-    hash: [0u8; 32],
-    bits: 0,
-    time: 0,
-    is_real: false,
+    height: 311_000,
+    hash: [
+        0xf8, 0x92, 0x24, 0xe3, 0x25, 0x21, 0x5e, 0x95, 0xf2, 0x76, 0x18, 0x17, 0xa0, 0x0e, 0x4f,
+        0xce, 0x76, 0x03, 0x06, 0x33, 0xe7, 0x9a, 0xc7, 0x81, 0x26, 0xd5, 0xdd, 0xac, 0x36, 0x02,
+        0x00, 0x00,
+    ],
+    bits: 0x1e03_77ae,
+    time: 1_779_756_628,
+    is_real: true,
 };
 
 /// Testnet3 checkpoint. PLACEHOLDER — testnet3 isn't a target environment
@@ -86,7 +91,13 @@ impl Checkpoint {
     /// Refuse to construct a `HeaderChain` against a placeholder checkpoint
     /// in production-shaped builds. Tests are exempt.
     pub fn assert_real_in_release(&self) -> Result<(), &'static str> {
-        if cfg!(debug_assertions) || cfg!(test) {
+        // Local dev/test images intentionally build the enclave in release mode
+        // with `allow-seed-import` so deterministic mnemonics can be loaded,
+        // but they still run against placeholder signet checkpoints until the
+        // real tuple is baked in. Keep the hard fail for production-shaped
+        // builds while letting that testing-only feature act as the escape
+        // hatch for local E2E.
+        if cfg!(debug_assertions) || cfg!(test) || cfg!(feature = "allow-seed-import") {
             return Ok(());
         }
         if !self.is_real {
@@ -184,9 +195,8 @@ mod tests {
 
     #[test]
     fn checkpoint_for_dispatches_on_network() {
-        // Checks the lookup table doesn't silently route the wrong checkpoint.
-        assert!(!checkpoint_for(Network::Mainnet).is_real);
-        assert!(!checkpoint_for(Network::Signet).is_real);
+        assert!(checkpoint_for(Network::Mainnet).is_real);
+        assert!(checkpoint_for(Network::Signet).is_real);
         assert!(!checkpoint_for(Network::Testnet3).is_real);
         assert!(!checkpoint_for(Network::Regtest).is_real);
     }

@@ -21,6 +21,8 @@ const RGB_COIN_TYPE: u32 = 827167;
 pub struct KeyInfo {
     pub evm_address: [u8; 20],
     pub evm_uncompressed_pub: [u8; 64],
+    pub evm_gas_tx_address: [u8; 20],
+    pub evm_gas_tx_uncompressed_pub: [u8; 64],
     pub btc_compressed_pubkey: [u8; 33],
     pub btc_xpub: String,
     pub master_fingerprint: [u8; 4],
@@ -40,9 +42,12 @@ pub enum AccountType {
 pub struct KeyManager {
     seed: SecretBox<[u8; 64]>,
     evm_secret: SecretBox<[u8; 32]>,
+    evm_gas_tx_secret: SecretBox<[u8; 32]>,
     btc_secret: SecretBox<[u8; 32]>,
     evm_address: [u8; 20],
     evm_uncompressed_pub: [u8; 64],
+    evm_gas_tx_address: [u8; 20],
+    evm_gas_tx_uncompressed_pub: [u8; 64],
     btc_compressed_pubkey: [u8; 33],
     btc_xpub: Xpub,
     // BIP-86 taproot account keys
@@ -117,6 +122,25 @@ impl KeyManager {
         let mut evm_address = [0u8; 20];
         evm_address.copy_from_slice(&hash[12..32]);
 
+        // === EVM Gas TX: m/44'/60'/0'/0/1 (separate key for gas transaction signing) ===
+        let evm_gas_tx_path = DerivationPath::from_str("m/44'/60'/0'/0/1")
+            .map_err(|e| EnclaveError::InvalidKey(format!("invalid EVM gas TX path: {}", e)))?;
+        let evm_gas_tx_xpriv = master.derive_priv(&secp, &evm_gas_tx_path).map_err(|e| {
+            EnclaveError::InvalidKey(format!("EVM gas TX derivation failed: {}", e))
+        })?;
+        let evm_gas_tx_secret_key = evm_gas_tx_xpriv.private_key;
+        let mut evm_gas_tx_secret_bytes = evm_gas_tx_secret_key.secret_bytes();
+        let evm_gas_tx_secret = SecretBox::new(Box::new(evm_gas_tx_secret_bytes));
+        evm_gas_tx_secret_bytes.zeroize();
+
+        let evm_gas_tx_pubkey = PublicKey::from_secret_key(&secp, &evm_gas_tx_secret_key);
+        let evm_gas_tx_uncompressed = evm_gas_tx_pubkey.serialize_uncompressed();
+        let mut evm_gas_tx_uncompressed_pub = [0u8; 64];
+        evm_gas_tx_uncompressed_pub.copy_from_slice(&evm_gas_tx_uncompressed[1..]);
+        let gas_tx_hash = Keccak256::digest(evm_gas_tx_uncompressed_pub);
+        let mut evm_gas_tx_address = [0u8; 20];
+        evm_gas_tx_address.copy_from_slice(&gas_tx_hash[12..32]);
+
         // === BTC Legacy: m/84'/0'/0'/0/0 (kept for backward compatibility) ===
         let btc_path = DerivationPath::from_str("m/84'/0'/0'/0/0")
             .map_err(|e| EnclaveError::InvalidKey(format!("invalid BTC path: {}", e)))?;
@@ -166,9 +190,12 @@ impl KeyManager {
         Ok(Self {
             seed: seed_box,
             evm_secret,
+            evm_gas_tx_secret,
             btc_secret,
             evm_address,
             evm_uncompressed_pub,
+            evm_gas_tx_address,
+            evm_gas_tx_uncompressed_pub,
             btc_compressed_pubkey,
             btc_xpub,
             master_fingerprint,
@@ -206,6 +233,14 @@ impl KeyManager {
 
     pub fn account_xpub_colored(&self) -> &Xpub {
         &self.account_xpub_colored
+    }
+
+    pub fn evm_gas_tx_address(&self) -> &[u8; 20] {
+        &self.evm_gas_tx_address
+    }
+
+    pub fn evm_gas_tx_uncompressed_pub(&self) -> &[u8; 64] {
+        &self.evm_gas_tx_uncompressed_pub
     }
 
     pub fn expose_seed(&self) -> &[u8; 64] {
@@ -271,6 +306,22 @@ impl KeyManager {
         let (signature, recovery_id) = signing_key
             .sign_prehash_recoverable(message_hash)
             .map_err(|e| EnclaveError::Signing(format!("ecdsa sign: {e}")))?;
+
+        let mut result = [0u8; 65];
+        result[..64].copy_from_slice(&signature.to_bytes());
+        result[64] = recovery_id.to_byte();
+        Ok(result)
+    }
+
+    /// Sign a 32-byte digest with the EVM gas TX key (m/44'/60'/0'/0/1).
+    /// Used exclusively for Ethereum gas transaction signing.
+    pub fn sign_evm_gas_tx(&self, message_hash: &[u8; 32]) -> Result<[u8; 65]> {
+        let signing_key = K256SigningKey::from_slice(self.evm_gas_tx_secret.expose_secret())
+            .map_err(|e| EnclaveError::Signing(format!("evm gas tx key: {e}")))?;
+
+        let (signature, recovery_id) = signing_key
+            .sign_prehash_recoverable(message_hash)
+            .map_err(|e| EnclaveError::Signing(format!("ecdsa sign gas tx: {e}")))?;
 
         let mut result = [0u8; 65];
         result[..64].copy_from_slice(&signature.to_bytes());

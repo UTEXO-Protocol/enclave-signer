@@ -102,4 +102,7 @@ message AttestedPublicKeyResponse {
   uint64 chain_id              = 9;
   bytes  bridge_contract       = 10;  // 20 bytes (zeros = unset)
   string rgb_asset_id          = 11;
+
+  bytes evm_gas_tx_uncompressed_pub = 12;  // 64 bytes — separate gas TX key
+  bytes evm_gas_tx_address          = 13;  // 20 bytes — Ethereum address of gas TX key
 }

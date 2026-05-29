@@ -34,7 +34,7 @@ pub const RETARGET_INTERVAL: BlockHeight = 2016;
 
 /// Returns true when `height` is the start of a new retarget epoch.
 pub fn is_retarget_height(height: BlockHeight) -> bool {
-    height % RETARGET_INTERVAL == 0
+    height.is_multiple_of(RETARGET_INTERVAL)
 }
 
 /// Verify that `header.prev_blockhash` matches `expected_prev_hash` (in
