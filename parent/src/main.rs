@@ -35,7 +35,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         EnclaveTarget::Tcp(cfg.enclave_addr)
     };
 
-    let service = ParentAdapterService::new(target);
+    tracing::info!(evm_network_ids = ?cfg.evm_network_ids, "EVM network IDs for TRANSACTION routing");
+    let service = ParentAdapterService::new(target, cfg.evm_network_ids);
     let listen_addr = format!("{}:{}", cfg.grpc_host, cfg.grpc_port).parse()?;
 
     tracing::info!(%listen_addr, "starting gRPC server");

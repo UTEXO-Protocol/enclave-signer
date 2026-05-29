@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::time::Duration;
 
 use prost::Message as ProstMessage;
@@ -33,11 +34,15 @@ pub enum EnclaveTarget {
 #[derive(Clone)]
 pub struct ParentAdapterService {
     target: EnclaveTarget,
+    evm_network_ids: HashSet<u32>,
 }
 
 impl ParentAdapterService {
-    pub fn new(target: EnclaveTarget) -> Self {
-        Self { target }
+    pub fn new(target: EnclaveTarget, evm_network_ids: HashSet<u32>) -> Self {
+        Self {
+            target,
+            evm_network_ids,
+        }
     }
 
     /// Send an EnclaveRequest to the enclave and read the EnclaveResponse.
@@ -100,51 +105,17 @@ impl ParentAdapterService {
 
 #[tonic::async_trait]
 impl EnclaveService for ParentAdapterService {
-    /// Sign — dispatches based on data_type:
-    ///   TRANSACTION → deserialize EnrichedPsbtPayload → SignPsbtRequest
-    ///   SWAP        → deserialize EnrichedEvmPayload  → SignEvmRequest
+    /// Sign — dispatches based on data_type + network_id:
+    ///   TRANSACTION + EVM network_id → deserialize EnrichedEvmPayload → SignEvmRequest
+    ///   TRANSACTION + other          → deserialize EnrichedPsbtPayload → SignPsbtRequest
+    ///   EVM_GAS_TX                   → raw 32-byte digest → SignRawDigestRequest
     async fn sign(&self, request: Request<SignRequest>) -> Result<Response<Signature>, Status> {
         let inner = request.into_inner();
 
         let data_type = DataType::try_from(inner.data_type).unwrap_or(DataType::Transaction);
 
         let enclave_req = match data_type {
-            DataType::Transaction => {
-                // Deserialize enriched PSBT payload from data bytes
-                let payload = enriched::EnrichedPsbtPayload::decode(inner.data.as_slice())
-                    .map_err(|e| {
-                        Status::invalid_argument(format!(
-                            "failed to decode EnrichedPsbtPayload: {e}"
-                        ))
-                    })?;
-
-                tracing::info!(
-                    psbt_len = payload.psbt_bytes.len(),
-                    has_tx_hash = !payload.evm_tx_hash.is_empty(),
-                    operation_idx = payload.operation_idx,
-                    "gRPC Sign: PSBT (data_type=TRANSACTION)"
-                );
-
-                EnclaveRequest {
-                    request: Some(enclave_request::Request::SignPsbt(
-                        enclave_proto::SignPsbtRequest {
-                            psbt_bytes: payload.psbt_bytes,
-                            evm_tx_hash: payload.evm_tx_hash,
-                            operation_idx: payload.operation_idx,
-                            evm_event_valid: payload.evm_event_valid,
-                            evm_event_finalized: payload.evm_event_finalized,
-                            evm_token: payload.evm_token,
-                            evm_amount: payload.evm_amount,
-                            evm_recipient: payload.evm_recipient,
-                            evm_commission: payload.evm_commission,
-                            psbt_output_amount: payload.psbt_output_amount,
-                            rgb_asset_id: payload.rgb_asset_id,
-                        },
-                    )),
-                }
-            }
-            DataType::Swap => {
-                // Deserialize enriched EVM payload from data bytes
+            DataType::Transaction if self.evm_network_ids.contains(&inner.network_id) => {
                 let payload =
                     enriched::EnrichedEvmPayload::decode(inner.data.as_slice()).map_err(|e| {
                         Status::invalid_argument(format!(
@@ -153,11 +124,12 @@ impl EnclaveService for ParentAdapterService {
                     })?;
 
                 tracing::info!(
+                    network_id = inner.network_id,
                     calldata_len = payload.call_data.len(),
                     consignment_valid = payload.consignment_valid,
                     nonce = payload.nonce,
                     deadline = payload.deadline,
-                    "gRPC Sign: EVM (data_type=SWAP)"
+                    "gRPC Sign: EVM (data_type=TRANSACTION, evm network)"
                 );
 
                 EnclaveRequest {
@@ -189,6 +161,52 @@ impl EnclaveService for ParentAdapterService {
                     )),
                 }
             }
+            DataType::Transaction => {
+                let payload = enriched::EnrichedPsbtPayload::decode(inner.data.as_slice())
+                    .map_err(|e| {
+                        Status::invalid_argument(format!(
+                            "failed to decode EnrichedPsbtPayload: {e}"
+                        ))
+                    })?;
+
+                tracing::info!(
+                    network_id = inner.network_id,
+                    psbt_len = payload.psbt_bytes.len(),
+                    has_tx_hash = !payload.evm_tx_hash.is_empty(),
+                    operation_idx = payload.operation_idx,
+                    "gRPC Sign: PSBT (data_type=TRANSACTION, non-evm network)"
+                );
+
+                EnclaveRequest {
+                    request: Some(enclave_request::Request::SignPsbt(
+                        enclave_proto::SignPsbtRequest {
+                            psbt_bytes: payload.psbt_bytes,
+                            evm_tx_hash: payload.evm_tx_hash,
+                            operation_idx: payload.operation_idx,
+                            evm_event_valid: payload.evm_event_valid,
+                            evm_event_finalized: payload.evm_event_finalized,
+                            evm_token: payload.evm_token,
+                            evm_amount: payload.evm_amount,
+                            evm_recipient: payload.evm_recipient,
+                            evm_commission: payload.evm_commission,
+                            psbt_output_amount: payload.psbt_output_amount,
+                            rgb_asset_id: payload.rgb_asset_id,
+                        },
+                    )),
+                }
+            }
+            DataType::EvmGasTx => {
+                tracing::info!(
+                    data_len = inner.data.len(),
+                    "gRPC Sign: raw digest (data_type=EVM_GAS_TX)"
+                );
+
+                EnclaveRequest {
+                    request: Some(enclave_request::Request::SignRawDigest(
+                        enclave_proto::SignRawDigestRequest { digest: inner.data },
+                    )),
+                }
+            }
             other => {
                 tracing::warn!(?other, "unsupported data_type in Sign request");
                 return Err(Status::invalid_argument(format!(
@@ -213,6 +231,10 @@ impl EnclaveService for ParentAdapterService {
                 network_id: inner.network_id,
                 signature: r.signature,
             })),
+            Some(enclave_response::Response::RawDigestSig(r)) => Ok(Response::new(Signature {
+                network_id: inner.network_id,
+                signature: r.signature,
+            })),
             Some(enclave_response::Response::Error(e)) => Err(Self::enclave_error_to_status(&e)),
             other => Err(Status::internal(format!(
                 "unexpected enclave response for Sign: {:?}",
@@ -223,8 +245,8 @@ impl EnclaveService for ParentAdapterService {
 
     /// PublicKey — returns the enclave's public key bytes.
     /// Dispatches on `data_type`:
-    ///   TRANSACTION/SWAP/SIGNATURE/COMMISSION/OWNER_MULTIPLE_SIGNATURE → 64-byte uncompressed X||Y
-    ///   UNSPENDABLE and other BTC-specific → 33-byte compressed pubkey
+    ///   EVM_GAS_TX  → 64-byte uncompressed X||Y (gas key m/44'/60'/0'/0/1)
+    ///   UNSPENDABLE → 33-byte compressed BTC pubkey
     async fn public_key(
         &self,
         request: Request<PublicKeyRequest>,
@@ -248,8 +270,14 @@ impl EnclaveService for ParentAdapterService {
         match resp.response {
             Some(enclave_response::Response::PublicKeys(r)) => {
                 let public_key = match data_type {
+                    DataType::EvmGasTx => r.evm_gas_tx_uncompressed_pub,
                     DataType::Unspendable => r.btc_compressed_pub,
-                    _ => r.evm_uncompressed_pub,
+                    other => {
+                        return Err(Status::invalid_argument(format!(
+                            "PublicKey not supported for data_type {:?}",
+                            other
+                        )));
+                    }
                 };
                 Ok(Response::new(PublicKeyResponse { public_key }))
             }
@@ -426,6 +454,8 @@ impl EnclaveService for ParentAdapterService {
                     chain_id: pk.chain_id,
                     bridge_contract: pk.bridge_contract,
                     rgb_asset_id: pk.rgb_asset_id,
+                    evm_gas_tx_uncompressed_pub: pk.evm_gas_tx_uncompressed_pub,
+                    evm_gas_tx_address: pk.evm_gas_tx_address,
                 }))
             }
             Some(enclave_response::Response::Error(e)) => Err(Self::enclave_error_to_status(&e)),

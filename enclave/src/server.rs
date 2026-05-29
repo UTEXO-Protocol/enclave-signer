@@ -95,6 +95,10 @@ fn dispatch(request: EnclaveRequest, ctx: &ServerContext) -> EnclaveResponse {
             tracing::info!("request: SignRawMessage");
             handle_sign_raw_message(&ctx.state, req)
         }
+        Some(Request::SignRawDigest(req)) => {
+            tracing::info!("request: SignRawDigest");
+            handle_sign_raw_digest(&ctx.state, req)
+        }
         Some(Request::ProxyFederation(req)) => {
             tracing::info!("request: ProxyFederation");
             handle_proxy_federation(req)
@@ -198,6 +202,7 @@ fn handle_initialize(ctx: &ServerContext, req: InitializeKeyRequest) -> Result<E
     let keys = state.get_keys()?;
     tracing::info!(
         evm_address = %hex::encode(keys.evm_address),
+        evm_gas_tx_address = %hex::encode(keys.evm_gas_tx_address),
         master_fingerprint = %hex::encode(keys.master_fingerprint),
         account_xpub_vanilla = %keys.account_xpub_vanilla,
         account_xpub_colored = %keys.account_xpub_colored,
@@ -215,6 +220,8 @@ fn handle_initialize(ctx: &ServerContext, req: InitializeKeyRequest) -> Result<E
             chain_id: ctx.bridge_config.chain_id,
             bridge_contract: ctx.bridge_config.bridge_contract.to_vec(),
             rgb_asset_id: ctx.bridge_config.rgb_asset_id.clone(),
+            evm_gas_tx_uncompressed_pub: keys.evm_gas_tx_uncompressed_pub.to_vec(),
+            evm_gas_tx_address: keys.evm_gas_tx_address.to_vec(),
         })),
     })
 }
@@ -226,6 +233,7 @@ fn handle_get_public_key(
     let keys = ctx.state.get_keys()?;
     tracing::debug!(
         evm_address = %hex::encode(keys.evm_address),
+        evm_gas_tx_address = %hex::encode(keys.evm_gas_tx_address),
         "returning public keys"
     );
     Ok(EnclaveResponse {
@@ -255,6 +263,8 @@ fn build_public_keys_response(
         chain_id: cfg.chain_id,
         bridge_contract: cfg.bridge_contract.to_vec(),
         rgb_asset_id: cfg.rgb_asset_id.clone(),
+        evm_gas_tx_uncompressed_pub: keys.evm_gas_tx_uncompressed_pub.to_vec(),
+        evm_gas_tx_address: keys.evm_gas_tx_address.to_vec(),
     }
 }
 
@@ -267,7 +277,7 @@ fn build_public_keys_response(
 /// `docs/pubkey-attestation.md` and `parent/src/attest_verify.rs::canonical_bundle`.
 fn canonical_pubkey_bundle(keys: &PublicKeysResponse) -> Vec<u8> {
     let chain_id_bytes = keys.chain_id.to_be_bytes();
-    let parts: [&[u8]; 10] = [
+    let parts: [&[u8]; 12] = [
         &keys.evm_address,
         &keys.btc_compressed_pub,
         keys.btc_xpub.as_bytes(),
@@ -278,6 +288,8 @@ fn canonical_pubkey_bundle(keys: &PublicKeysResponse) -> Vec<u8> {
         &chain_id_bytes,
         &keys.bridge_contract,
         keys.rgb_asset_id.as_bytes(),
+        &keys.evm_gas_tx_uncompressed_pub,
+        &keys.evm_gas_tx_address,
     ];
     let total: usize = parts.iter().map(|p| 4 + p.len()).sum();
     let mut out = Vec::with_capacity(total);
@@ -448,7 +460,22 @@ fn handle_sign_evm(ctx: &ServerContext, req: SignEvmRequest) -> Result<EnclaveRe
     // TODO: confirm domain name/version with contract team
     let domain = build_evm_domain(&req)?;
 
+    let domain_sep = domain.separator_hash();
     let digest = sign_request_digest(&domain, &req.call_data, req.nonce, req.deadline);
+
+    tracing::info!(
+        domain_name = %domain.name,
+        chain_id = domain.chain_id,
+        proxy = %hex::encode(domain.verifying_contract),
+        domain_sep = %hex::encode(domain_sep),
+        call_data_len = req.call_data.len(),
+        selector = %hex::encode(&req.call_data[..4.min(req.call_data.len())]),
+        nonce = req.nonce,
+        deadline = req.deadline,
+        digest = %hex::encode(digest),
+        "EVM digest computed"
+    );
+
     let signature = ctx.state.sign_evm(&digest)?;
 
     tracing::info!(
@@ -514,6 +541,33 @@ fn handle_sign_raw_message(
     })
 }
 
+fn handle_sign_raw_digest(
+    state: &EnclaveState,
+    req: SignRawDigestRequest,
+) -> Result<EnclaveResponse> {
+    if req.digest.len() != 32 {
+        return Err(EnclaveError::InvalidRequest(format!(
+            "digest must be exactly 32 bytes, got {}",
+            req.digest.len()
+        )));
+    }
+
+    let digest: [u8; 32] = req.digest.as_slice().try_into().unwrap();
+    let signature = state.sign_evm_gas_tx(&digest)?;
+
+    tracing::info!(
+        sig_hex = %hex::encode(signature),
+        digest_hex = %hex::encode(digest),
+        "raw digest signature produced (evm_gas_tx key)"
+    );
+
+    Ok(EnclaveResponse {
+        response: Some(Response::RawDigestSig(RawDigestSignatureResponse {
+            signature: signature.to_vec(),
+        })),
+    })
+}
+
 /// Build EIP-712 domain from enriched request fields.
 /// In dev-mode, falls back to defaults if fields are missing.
 fn build_evm_domain(req: &SignEvmRequest) -> Result<Eip712Domain> {
@@ -550,7 +604,7 @@ fn build_evm_domain(req: &SignEvmRequest) -> Result<Eip712Domain> {
     };
 
     Ok(Eip712Domain {
-        name: "Tricorn".to_string(),
+        name: "MultisigProxy".to_string(),
         version: "1".to_string(),
         chain_id,
         verifying_contract,

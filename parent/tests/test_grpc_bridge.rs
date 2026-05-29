@@ -4,6 +4,7 @@
 //! then a real tonic gRPC server (Parent Adapter) pointing at it, and finally
 //! exercise the full path via a gRPC client.
 
+use std::collections::HashSet;
 use std::net::TcpListener;
 
 use prost::Message as ProstMessage;
@@ -52,6 +53,8 @@ fn start_mock_enclave() -> u16 {
                             chain_id: 0,
                             bridge_contract: vec![0u8; 20],
                             rgb_asset_id: String::new(),
+                            evm_gas_tx_uncompressed_pub: vec![0xFF; 64],
+                            evm_gas_tx_address: vec![0xFA; 20],
                         },
                     )),
                 },
@@ -83,6 +86,8 @@ fn start_mock_enclave() -> u16 {
                             chain_id: 0,
                             bridge_contract: vec![0u8; 20],
                             rgb_asset_id: String::new(),
+                            evm_gas_tx_uncompressed_pub: vec![0xFF; 64],
+                            evm_gas_tx_address: vec![0xFA; 20],
                         },
                     )),
                 },
@@ -117,10 +122,12 @@ fn start_mock_enclave() -> u16 {
                         chain_id: 0,
                         bridge_contract: vec![0u8; 20],
                         rgb_asset_id: String::new(),
+                        evm_gas_tx_uncompressed_pub: vec![0xFF; 64],
+                        evm_gas_tx_address: vec![0xCC; 20],
                     };
                     let mut bundle: Vec<u8> = Vec::new();
                     let chain_id_bytes = public_keys.chain_id.to_be_bytes();
-                    let parts: [&[u8]; 10] = [
+                    let parts: [&[u8]; 12] = [
                         &public_keys.evm_address,
                         &public_keys.btc_compressed_pub,
                         public_keys.btc_xpub.as_bytes(),
@@ -131,6 +138,8 @@ fn start_mock_enclave() -> u16 {
                         &chain_id_bytes,
                         &public_keys.bridge_contract,
                         public_keys.rgb_asset_id.as_bytes(),
+                        &public_keys.evm_gas_tx_uncompressed_pub,
+                        &public_keys.evm_gas_tx_address,
                     ];
                     for p in parts {
                         bundle.extend_from_slice(&(p.len() as u32).to_be_bytes());
@@ -180,8 +189,10 @@ async fn start_grpc_server(enclave_port: u16) -> u16 {
     let grpc_port = grpc_addr.port();
     drop(grpc_listener);
 
-    let service =
-        ParentAdapterService::new(EnclaveTarget::Tcp(format!("127.0.0.1:{enclave_port}")));
+    let service = ParentAdapterService::new(
+        EnclaveTarget::Tcp(format!("127.0.0.1:{enclave_port}")),
+        HashSet::from([84]),
+    );
 
     tokio::spawn(async move {
         Server::builder()
@@ -200,7 +211,7 @@ async fn start_grpc_server(enclave_port: u16) -> u16 {
 // =========================================================================
 
 #[tokio::test]
-async fn grpc_public_key_roundtrip() {
+async fn grpc_public_key_evm_gas_tx() {
     let enclave_port = start_mock_enclave();
     let grpc_port = start_grpc_server(enclave_port).await;
 
@@ -211,30 +222,7 @@ async fn grpc_public_key_roundtrip() {
     let resp = client
         .public_key(PublicKeyRequest {
             network_id: 0,
-            data_type: 0,
-            algorithm: None,
-        })
-        .await
-        .unwrap()
-        .into_inner();
-
-    assert_eq!(resp.public_key.len(), 64, "EVM uncompressed pubkey X||Y");
-    assert_eq!(resp.public_key, vec![0xEE; 64]);
-}
-
-#[tokio::test]
-async fn grpc_public_key_returns_evm_address_for_swap() {
-    let enclave_port = start_mock_enclave();
-    let grpc_port = start_grpc_server(enclave_port).await;
-
-    let mut client = EnclaveServiceClient::connect(format!("http://127.0.0.1:{grpc_port}"))
-        .await
-        .unwrap();
-
-    let resp = client
-        .public_key(PublicKeyRequest {
-            network_id: 0,
-            data_type: DataType::Swap as i32,
+            data_type: DataType::EvmGasTx as i32,
             algorithm: None,
         })
         .await
@@ -244,9 +232,30 @@ async fn grpc_public_key_returns_evm_address_for_swap() {
     assert_eq!(
         resp.public_key.len(),
         64,
-        "EVM uncompressed pubkey X||Y for SWAP"
+        "EVM gas TX uncompressed pubkey X||Y"
     );
-    assert_eq!(resp.public_key, vec![0xEE; 64]);
+    assert_eq!(resp.public_key, vec![0xFF; 64]);
+}
+
+#[tokio::test]
+async fn grpc_public_key_rejects_transaction_type() {
+    let enclave_port = start_mock_enclave();
+    let grpc_port = start_grpc_server(enclave_port).await;
+
+    let mut client = EnclaveServiceClient::connect(format!("http://127.0.0.1:{grpc_port}"))
+        .await
+        .unwrap();
+
+    let err = client
+        .public_key(PublicKeyRequest {
+            network_id: 0,
+            data_type: DataType::Transaction as i32,
+            algorithm: None,
+        })
+        .await
+        .unwrap_err();
+
+    assert_eq!(err.code(), tonic::Code::InvalidArgument);
 }
 
 #[tokio::test]
@@ -275,8 +284,8 @@ async fn grpc_sign_evm_roundtrip() {
     };
 
     let req = SignRequest {
-        network_id: 0,
-        data_type: DataType::Swap as i32,
+        network_id: 84,
+        data_type: DataType::Transaction as i32,
         data: payload.encode_to_vec(),
         inputs: vec![],
         algorithm: None,
@@ -377,8 +386,8 @@ async fn grpc_evm_passes_enriched_fields_through() {
     };
 
     let req = SignRequest {
-        network_id: 0,
-        data_type: DataType::Swap as i32,
+        network_id: 84,
+        data_type: DataType::Transaction as i32,
         data: payload.encode_to_vec(),
         inputs: vec![],
         algorithm: None,
@@ -451,8 +460,8 @@ async fn grpc_evm_forwards_raw_consignment_bytes() {
     };
 
     let req = SignRequest {
-        network_id: 0,
-        data_type: DataType::Swap as i32,
+        network_id: 84,
+        data_type: DataType::Transaction as i32,
         data: payload.encode_to_vec(),
         inputs: vec![],
         algorithm: None,
@@ -619,7 +628,7 @@ async fn grpc_attested_public_key_roundtrip_and_verify() {
     use sha2::Digest;
     let mut bundle: Vec<u8> = Vec::new();
     let chain_id_bytes = resp.chain_id.to_be_bytes();
-    let parts: [&[u8]; 10] = [
+    let parts: [&[u8]; 12] = [
         &resp.evm_address,
         &resp.btc_compressed_pub,
         resp.btc_xpub.as_bytes(),
@@ -630,6 +639,8 @@ async fn grpc_attested_public_key_roundtrip_and_verify() {
         &chain_id_bytes,
         &resp.bridge_contract,
         resp.rgb_asset_id.as_bytes(),
+        &resp.evm_gas_tx_uncompressed_pub,
+        &resp.evm_gas_tx_address,
     ];
     for p in parts {
         bundle.extend_from_slice(&(p.len() as u32).to_be_bytes());

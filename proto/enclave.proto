@@ -15,11 +15,10 @@ message EnclaveRequest {
     InitiateCloningRequest initiate_cloning  = 7;
     GetCloneRequest        get_clone         = 8;
     SetCloneRequest        set_clone         = 9;
+    SignRawDigestRequest   sign_raw_digest   = 10;
     SubmitHeadersRequest      submit_headers        = 11;
     GetLastSavedBlockRequest  get_last_saved_block  = 12;
     GetAttestedPublicKeyRequest get_attested_public_key = 13;
-    // Reserved for future:
-    // HealthCheckRequest  health_check     = 10;
   }
 }
 
@@ -34,11 +33,10 @@ message EnclaveResponse {
     InitiateCloningResponse initiate_cloning = 7;
     GetCloneResponse        get_clone        = 8;
     SetCloneResponse        set_clone        = 9;
+    RawDigestSignatureResponse raw_digest_sig = 10;
     SubmitHeadersResponse      submit_headers       = 11;
     GetLastSavedBlockResponse  get_last_saved_block = 12;
     GetAttestedPublicKeyResponse get_attested_public_key = 13;
-    // Reserved for future:
-    // HealthCheckResponse  health_check     = 10;
     ErrorResponse           error            = 15;
   }
 }
@@ -65,12 +63,12 @@ message InitializeKeyResponse {
 
   // Bridge config pinned at enclave boot from env (EVM_CHAIN_ID,
   // BRIDGE_CONTRACT, RGB_ASSET_ID). Zero/empty means "not configured".
-  // Included in the canonical bundle hashed into the attestation `user_data`
-  // commitment so external verifiers can confirm which (chain, contract, asset)
-  // tuple this enclave is provisioned for. See docs/pubkey-attestation.md.
   uint64 chain_id               = 8;
   bytes  bridge_contract        = 9;   // 20 bytes (zeros = unset)
   string rgb_asset_id           = 10;
+
+  bytes evm_gas_tx_uncompressed_pub = 11;  // 64 bytes — separate gas TX key at m/44'/60'/0'/0/1
+  bytes evm_gas_tx_address      = 12;  // 20 bytes — Ethereum address of the gas TX key
 }
 
 message GetPublicKeyRequest {
@@ -88,11 +86,12 @@ message PublicKeysResponse {
   bytes evm_uncompressed_pub    = 7;  // 64 bytes — secp256k1 X||Y (no 04 prefix)
 
   // Bridge config pinned at enclave boot (see InitializeKeyResponse).
-  // Mirrored here so GetPublicKey / GetAttestedPublicKey expose the same
-  // bundle a verifier needs to rebuild the canonical commitment.
   uint64 chain_id               = 8;
   bytes  bridge_contract        = 9;   // 20 bytes (zeros = unset)
   string rgb_asset_id           = 10;
+
+  bytes evm_gas_tx_uncompressed_pub = 11;  // 64 bytes — separate gas TX key at m/44'/60'/0'/0/1
+  bytes evm_gas_tx_address      = 12;  // 20 bytes — Ethereum address of the gas TX key
 }
 
 // Returns the public-key bundle along with an NSM attestation document
@@ -283,6 +282,18 @@ message SetCloneRequest {
 // the wire (matching every other request). The body is intentionally empty
 // — a successful SetClone is silent and the caller probes GetPublicKey.
 message SetCloneResponse {
+}
+
+// === Raw Digest Signing (EVM gas tx) ===
+// Signs a pre-hashed 32-byte digest directly with the dedicated EVM gas key,
+// without additional hashing. Used for outer Ethereum transaction signing.
+
+message SignRawDigestRequest {
+  bytes digest = 1;  // Exactly 32 bytes — already-hashed data to sign
+}
+
+message RawDigestSignatureResponse {
+  bytes signature = 1;  // 65 bytes: r(32) + s(32) + v(1)
 }
 
 // === SPV — Bitcoin header sync ===
