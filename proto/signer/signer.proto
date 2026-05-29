@@ -12,6 +12,7 @@ enum DataType {
   SWAP = 3;
   UNSPENDABLE = 4;
   OWNER_MULTIPLE_SIGNATURE = 5;
+  EVM_GAS_TX = 6;
 }
 
 message SignRequest {

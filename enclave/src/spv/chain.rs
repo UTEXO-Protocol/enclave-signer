@@ -233,7 +233,11 @@ impl HeaderChain {
                 (pred_hash, pred_bits, pred_time)
             };
 
-            let epoch_start_time = self.epoch_start_time(height, start_height, &staged)?;
+            let epoch_start_time = if self.network.enforces_pow() {
+                self.epoch_start_time(height, start_height, &staged)?
+            } else {
+                0
+            };
 
             let expected_bits_value =
                 expected_bits(height, prev_bits, prev_time, epoch_start_time, self.network)?;
@@ -664,6 +668,38 @@ mod tests {
         assert_eq!(chain.tip_hash(), original_tip);
         assert_eq!(chain.tip_height(), original_height);
         assert_eq!(chain.len(), 5);
+    }
+
+    #[test]
+    fn non_pow_network_skips_epoch_lookup_across_retarget_boundary() {
+        // Regression: a non-PoW network (signet/regtest) whose checkpoint is
+        // ABOVE the retarget epoch start must NOT fail with HeaderNotFound.
+        // Checkpoint at height 2020 means epoch_start for height 2016*2=4032
+        // would be 4032-2016=2016, which IS stored. But the PREVIOUS epoch
+        // start (height 0) is NOT stored. We test that crossing the 4032
+        // boundary works without needing headers below checkpoint.
+        //
+        // Specifically: checkpoint at 4000, first retarget at 4032 needs
+        // epoch start at 4032-2016=2016 which is below checkpoint (4000).
+        let cp_hash = {
+            let mut h = [0u8; 32];
+            h[0] = 0xBB;
+            h
+        };
+        let checkpoint = Checkpoint {
+            height: 4000,
+            hash: cp_hash,
+            bits: 0x207fffff,
+            time: 1_700_000_000,
+            is_real: false,
+        };
+        let mut chain = HeaderChain::new(Network::Regtest, checkpoint);
+
+        // Build 100 headers from 4001 to 4100, crossing retarget at 4032.
+        let (raws, _) = synth_chain_from(cp_hash, 1_700_000_000, 1, 100);
+        let outcome = chain.submit_headers(4001, &raws).unwrap();
+        assert_eq!(outcome.headers_accepted, 100);
+        assert_eq!(outcome.last_block_height, 4100);
     }
 
     #[test]

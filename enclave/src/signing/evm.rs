@@ -1,10 +1,9 @@
 use sha3::{Digest, Keccak256};
 
-// TODO: align with final MultisigProxy.sol — may need selector field
 const DOMAIN_TYPE_HASH_STR: &str =
     "EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)";
-const SIGN_REQUEST_TYPE_HASH_STR: &str =
-    "SignRequest(bytes callData,uint256 nonce,uint256 deadline)";
+const BRIDGE_OP_TYPE_HASH_STR: &str =
+    "BridgeOperation(bytes4 selector,bytes callData,uint256 nonce,uint256 deadline)";
 
 /// EIP-712 domain separator components.
 /// Must match the deployed MultisigProxy contract exactly.
@@ -33,20 +32,31 @@ impl Eip712Domain {
     }
 }
 
-/// Build the EIP-712 digest for: SignRequest(bytes callData, uint256 nonce, uint256 deadline)
-/// Returns the 32-byte hash ready to be signed with ECDSA.
+/// Build the EIP-712 digest matching MultisigProxy._buildDigest():
+///   keccak256(abi.encode(_BRIDGE_OP_TYPEHASH, selector, keccak256(callData), nonce, deadline))
 pub fn sign_request_digest(
     domain: &Eip712Domain,
     call_data: &[u8],
     nonce: u64,
     deadline: u64,
 ) -> [u8; 32] {
+    assert!(
+        call_data.len() >= 4,
+        "call_data must contain at least a 4-byte selector"
+    );
+
     let struct_hash = {
-        let type_hash = Keccak256::digest(SIGN_REQUEST_TYPE_HASH_STR.as_bytes());
+        let type_hash = Keccak256::digest(BRIDGE_OP_TYPE_HASH_STR.as_bytes());
+
+        // bytes4 selector: abi.encode pads to 32 bytes, left-aligned (same as Solidity).
+        let mut selector_padded = [0u8; 32];
+        selector_padded[..4].copy_from_slice(&call_data[..4]);
+
         let call_data_hash = Keccak256::digest(call_data);
 
-        let mut buf = Vec::with_capacity(32 * 4);
+        let mut buf = Vec::with_capacity(32 * 5);
         buf.extend_from_slice(&type_hash);
+        buf.extend_from_slice(&selector_padded);
         buf.extend_from_slice(&call_data_hash);
         buf.extend_from_slice(&abi_encode_u256(nonce));
         buf.extend_from_slice(&abi_encode_u256(deadline));
@@ -108,7 +118,7 @@ mod tests {
     #[test]
     fn test_domain_separator_deterministic() {
         let domain = Eip712Domain {
-            name: "Tricorn".to_string(),
+            name: "MultisigProxy".to_string(),
             version: "1".to_string(),
             chain_id: 1,
             verifying_contract: [0u8; 20],
@@ -122,7 +132,7 @@ mod tests {
     #[test]
     fn test_sign_request_digest_deterministic() {
         let domain = Eip712Domain {
-            name: "Tricorn".to_string(),
+            name: "MultisigProxy".to_string(),
             version: "1".to_string(),
             chain_id: 1,
             verifying_contract: [0u8; 20],
@@ -141,31 +151,126 @@ mod tests {
     #[test]
     fn test_different_nonce_different_digest() {
         let domain = Eip712Domain {
-            name: "Tricorn".to_string(),
+            name: "MultisigProxy".to_string(),
             version: "1".to_string(),
             chain_id: 1,
             verifying_contract: [0u8; 20],
         };
-        let call_data = b"test";
-        let d1 = sign_request_digest(&domain, call_data, 0, 1_700_000_000);
-        let d2 = sign_request_digest(&domain, call_data, 1, 1_700_000_000);
+        let call_data = hex::decode("aabbccdd").unwrap();
+        let d1 = sign_request_digest(&domain, &call_data, 0, 1_700_000_000);
+        let d2 = sign_request_digest(&domain, &call_data, 1, 1_700_000_000);
         assert_ne!(d1, d2);
+    }
+
+    #[test]
+    #[should_panic(expected = "call_data must contain at least a 4-byte selector")]
+    fn test_short_call_data_panics() {
+        let domain = Eip712Domain {
+            name: "MultisigProxy".to_string(),
+            version: "1".to_string(),
+            chain_id: 1,
+            verifying_contract: [0u8; 20],
+        };
+        sign_request_digest(&domain, &[0xAA, 0xBB], 0, 1_000);
+    }
+
+    #[test]
+    fn test_digest_matches_go_bridge_computation() {
+        // Cross-check: reproduce the exact digest that bridge-utexo/blsProxy/transactor.go
+        // computes for a known input, ensuring enclave and contract agree.
+        //
+        // Go side (buildExecuteDigest):
+        //   bridgeOpTypehash = keccak256("BridgeOperation(bytes4 selector,bytes callData,uint256 nonce,uint256 deadline)")
+        //   selectorBytes = callData[:4] left-aligned in 32 bytes
+        //   structHash = keccak256(typehash || selectorBytes || keccak256(callData) || nonce || deadline)
+        //   digest = keccak256(0x19 0x01 || domainSeparator || structHash)
+
+        let domain = Eip712Domain {
+            name: "MultisigProxy".to_string(),
+            version: "1".to_string(),
+            chain_id: 42161, // Arbitrum One
+            verifying_contract: {
+                let mut addr = [0u8; 20];
+                addr.copy_from_slice(
+                    &hex::decode("eAB44D217C5Af0Cc2A46ba296b5e0eBa5B4362d0").unwrap(),
+                );
+                addr
+            },
+        };
+
+        let call_data = hex::decode(
+            "a9059cbb000000000000000000000000abcdefabcdefabcdefabcdefabcdefabcdefabcd\
+             0000000000000000000000000000000000000000000000000000000000000064",
+        )
+        .unwrap();
+
+        let nonce: u64 = 0;
+        let deadline: u64 = 1_700_000_000;
+
+        // Manually compute the expected digest step by step.
+        let type_hash = Keccak256::digest(
+            b"BridgeOperation(bytes4 selector,bytes callData,uint256 nonce,uint256 deadline)",
+        );
+
+        let mut selector_padded = [0u8; 32];
+        selector_padded[..4].copy_from_slice(&call_data[..4]);
+
+        let call_data_hash = Keccak256::digest(&call_data);
+
+        let mut struct_buf = Vec::new();
+        struct_buf.extend_from_slice(&type_hash);
+        struct_buf.extend_from_slice(&selector_padded);
+        struct_buf.extend_from_slice(&call_data_hash);
+        struct_buf.extend_from_slice(&abi_encode_u256(nonce));
+        struct_buf.extend_from_slice(&abi_encode_u256(deadline));
+        let expected_struct_hash = Keccak256::digest(&struct_buf);
+
+        let domain_sep = domain.separator_hash();
+
+        let mut digest_buf = Vec::new();
+        digest_buf.extend_from_slice(&[0x19, 0x01]);
+        digest_buf.extend_from_slice(&domain_sep);
+        digest_buf.extend_from_slice(&expected_struct_hash);
+        let expected_digest: [u8; 32] = Keccak256::digest(&digest_buf).into();
+
+        let actual_digest = sign_request_digest(&domain, &call_data, nonce, deadline);
+        assert_eq!(actual_digest, expected_digest);
     }
 
     #[test]
     fn test_different_chain_id_different_domain() {
         let d1 = Eip712Domain {
-            name: "Tricorn".to_string(),
+            name: "MultisigProxy".to_string(),
             version: "1".to_string(),
             chain_id: 1,
             verifying_contract: [0u8; 20],
         };
         let d2 = Eip712Domain {
-            name: "Tricorn".to_string(),
+            name: "MultisigProxy".to_string(),
             version: "1".to_string(),
             chain_id: 137,
             verifying_contract: [0u8; 20],
         };
         assert_ne!(d1.separator_hash(), d2.separator_hash());
+    }
+
+    #[test]
+    fn test_domain_separator_matches_deployed_contract() {
+        let domain = Eip712Domain {
+            name: "MultisigProxy".to_string(),
+            version: "1".to_string(),
+            chain_id: 42161,
+            verifying_contract: {
+                let mut addr = [0u8; 20];
+                addr.copy_from_slice(
+                    &hex::decode("eAB44D217C5Af0Cc2A46ba296b5e0eBa5B4362d0").unwrap(),
+                );
+                addr
+            },
+        };
+        let on_chain =
+            hex::decode("8da42c1b5850d914ac94e640f4edd2030e2330b104f8448fdf3c6639cb0542ff")
+                .unwrap();
+        assert_eq!(domain.separator_hash(), on_chain.as_slice());
     }
 }

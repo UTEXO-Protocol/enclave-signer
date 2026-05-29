@@ -16,13 +16,13 @@ use crate::validation::rgb::{ifa, ValidatedConsignment};
 /// `[4 selector][32 token][32 recipient][32 amount][32 transactionId][32 srcChainOffset][32 srcAddrOffset]...`.
 pub const FUNDS_OUT_SELECTOR_POOLS_LEGACY: [u8; 4] = [0x1a, 0xd8, 0x80, 0xb2];
 
-/// `keccak256("fundsOut(address,uint256,uint256,uint256,uint256,uint256,string,bytes,bytes)")[0..4]`.
-/// 8-arg mint/burn shape on `bridge-smart-contracts/dev` (PR #22
+/// `keccak256("fundsOut(address,uint256,uint256,uint256,uint256,string,bytes,bytes)")[0..4]`.
+/// 8-arg mint/burn shape on `utexo-smart-contracts/dev` (PR #22
 /// route-plugin refactor). Layout:
 /// `[4 selector][32 recipient][32 amount][32 burnId][32 sourceChainId][32 destinationChainId][32 srcAddrOffset][32 proofOffset][32 settlementDataOffset]...`.
 /// `proof = abi.encode(uint256 blockHeight, bytes32 commitmentHash)` and
 /// `settlementData = abi.encode(uint256[] fundsInIds)`.
-pub const FUNDS_OUT_SELECTOR_MINTBURN: [u8; 4] = [0x17, 0x9b, 0xef, 0x59];
+pub const FUNDS_OUT_SELECTOR_MINTBURN: [u8; 4] = [0xcc, 0xdd, 0xb7, 0x68];
 
 /// 4-byte function selectors the enclave is willing to sign `fundsOut`
 /// calldata for. Anything else is rejected up-front before any byte-level

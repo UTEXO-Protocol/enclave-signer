@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 /// Parent Adapter configuration, populated from environment variables.
 pub struct Config {
     /// Host for the gRPC server to bind (default 127.0.0.1; use 0.0.0.0 in Docker).
@@ -17,6 +19,9 @@ pub struct Config {
 
     /// Use vsock instead of TCP.
     pub use_vsock: bool,
+
+    /// EVM network IDs — TRANSACTION with these network_ids routes to signEVM.
+    pub evm_network_ids: HashSet<u32>,
 }
 
 impl Config {
@@ -30,6 +35,11 @@ impl Config {
             use_vsock: std::env::var("USE_VSOCK")
                 .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
                 .unwrap_or(false),
+            evm_network_ids: std::env::var("EVM_NETWORK_IDS")
+                .unwrap_or_default()
+                .split(',')
+                .filter_map(|s| s.trim().parse::<u32>().ok())
+                .collect(),
         }
     }
 }
