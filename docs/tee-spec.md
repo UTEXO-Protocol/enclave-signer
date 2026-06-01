@@ -4,11 +4,11 @@
 **Status:** Draft for internal review
 **Date:** 2026-05-25 (refreshed 2026-06-01, code @ HEAD `bb2b396`, originally #41)
 **Parent spec:** *RGB <-> EVM Bridge Technical Specification* (Draft 06/05/2026) -- Sec 5.6, Sec 10, Sec 12, Sec 13, Sec 16
-**Companion docs:** [`audit/ENCLAVE_SIGNER_CONTEXT.md`](audit/ENCLAVE_SIGNER_CONTEXT.md) | [`audit/cross-flow-findings.md`](audit/cross-flow-findings.md) | [`diagrams/`](diagrams/)
+**Companion docs:** `ENCLAVE_SIGNER_CONTEXT.md` (in `internal_audit` repo at `release 1.0/enclave-signer/`) | `cross-flow-findings.md` (in `internal_audit` repo at `release 1.0/enclave-signer/`) | [`diagrams/`](diagrams/)
 
 Normative keywords (MUST / MUST NOT / SHOULD / MAY) follow RFC 2119. Where the
 current implementation diverges from a normative requirement, it is flagged
-inline as **`[GAP]`** with a pointer to `audit/cross-flow-findings.md`.
+inline as **`[GAP]`** with a pointer to `cross-flow-findings.md` (in `internal_audit` repo).
 
 ---
 
@@ -84,7 +84,7 @@ host-side proxies over vsock so the enclave has no direct network stack.
   - EVM signing key (bridge authorisation): `m/44'/60'/0'/0/0`; `evm_address = keccak256(uncompressed_pub[1..])[12..]`.
   - **EVM gas-tx key** (outer Ethereum tx signing): `m/44'/60'/0'/0/1`. Used by
     `SignRawDigest` (raw 32-byte digest, no envelope) — see TEE-XC-09 in
-    `audit/cross-flow-findings.md`.
+    `cross-flow-findings.md` (in `internal_audit` repo).
   - BTC SegWit: `m/84'/0'/0'/0/0`.
   - BIP-86 taproot: vanilla `m/86'/<coin>'/0'`, colored `m/86'/827167'/0'`.
 - The **EVM address is the cluster identity**: a cloned enclave installs the
@@ -213,7 +213,7 @@ byte-offsets (legacy 68/100, mint-burn 36) likewise unverified against the deplo
 > The four `[GAP]`s above are one root cause: **the enclave currently trusts
 > host-supplied semantic fields (`rgb_amount`, recipient, implied `OpId`)
 > instead of deriving them from the consignment it validates.** Closing them is
-> the pre-mainnet blocker -- see `audit/cross-flow-findings.md` Sec "Priority gaps".
+> the pre-mainnet blocker -- see `cross-flow-findings.md` (in `internal_audit` repo) Sec "Priority gaps".
 
 ## 9. Attestation & federation (parent spec Sec 16)
 
@@ -269,7 +269,7 @@ replayed cloning nonce.
 Conformant and solid: Sec 7 SPV stack (incl. SI-8), Sec 9 attestation + cloning
 (Sec 16.4), fail-closed posture (SI-10/11), cross-network defense (SI-12).
 
-**Pre-mainnet blockers** (detail in [`audit/cross-flow-findings.md`](audit/cross-flow-findings.md)):
+**Pre-mainnet blockers** (detail in `cross-flow-findings.md` (in `internal_audit` repo at `release 1.0/enclave-signer/`)):
 
 1. Bind the RGB `OpId` end-to-end (P6 / SI-4) -- add to wire format, derive from
    consignment, require equality, include in the signed EIP-712 struct.
