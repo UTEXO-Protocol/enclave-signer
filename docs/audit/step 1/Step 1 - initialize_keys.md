@@ -1,6 +1,6 @@
 # Step 1 Flow Review — Initialize Keys (first-enclave key generation)
 
-**Component:** `utexo-bridge-enclave`, `dev` @ `c51d6fb`.
+**Component:** `utexo-bridge-enclave`, `dev` @ `bb2b396`.
 **Flow:** the first enclave in a cluster generates the HD seed from OS entropy
 (`InitializeKey` with empty seed/mnemonic), deriving the EVM + BTC + BIP-86 keys. The
 **seed is born here** — this is the genesis of the cluster's signing identity.

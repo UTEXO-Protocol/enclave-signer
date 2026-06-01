@@ -1,14 +1,25 @@
 # Step 1 Flow Review — SubmitHeaders (SPV header-chain sync)
 
-**Component:** `utexo-bridge-enclave`, `dev` @ `c51d6fb`.
+**Component:** `utexo-bridge-enclave`, `dev` @ `bb2b396`.
 **Flow:** the (untrusted) Listener pushes batches of contiguous 80-byte Bitcoin
 headers via `SubmitHeaders`; the enclave validates and appends them to its in-memory
 `HeaderChain`, anchored at a compile-time checkpoint. This chain is the backing store
 for the **Sign EVM SPV gate** (inclusion + confirmation-depth proofs).
-**Reviewed:** 2026-05-29. Methodology: `internal_audit/release 1.0/prompts/`.
+**Reviewed:** 2026-05-29; **refreshed 2026-06-01** against PR #48 (`bd4158a`).
+Methodology: `internal_audit/release 1.0/prompts/`.
 
 > This closes the Layer-2 item deferred in `Step 1 - sign_evm.md` (L-5): *"is the header
 > chain the SPV gate trusts actually authenticated?"* Answer below — **on signet, no.**
+
+> **Refresh (2026-06-01, PR #48):** real checkpoints landed for **mainnet**
+> (`h=950_000`, `is_real=true`) and **signet** (`h=311_000`, `is_real=true`) → TEE-SH-03
+> **partial-close** (testnet3/regtest still placeholder). `chain.rs:236-240` now
+> short-circuits `epoch_start_time` on non-PoW networks → TEE-SH-02 closed for
+> signet/regtest. **BUT** the new mainnet checkpoint at `h=950_000` is **not**
+> retarget-boundary-aligned (`950_000 mod 2016 = 464`), so TEE-SH-02 will trigger
+> at `h=951_552` once the listener syncs that far — pick a boundary-aligned
+> checkpoint before then. TEE-SH-01 (signet linkage-only, BIP-325 pending) is
+> unchanged. See `cross-flow-findings.md` Parts 1/4 for current item status.
 
 ---
 

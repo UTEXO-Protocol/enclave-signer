@@ -9,8 +9,14 @@ produces signatures in two directions:
 - **EVM → RGB (lock)** — PSBT signatures (taproot script-path + SegWit-v0 P2WSH) that
   finalise the federated Bitcoin transaction returning RGB-coloured UTXOs.
 
-Plus a raw-keccak-then-sign helper (`fundsIn` authorisation) and a not-yet-wired
-federation-signature proxy.
+Plus:
+- a raw-keccak-then-sign helper with the EIP-191 envelope (`SignRawMessage`, `fundsIn`
+  authorisation),
+- a **`SignRawDigest`** RPC (added in PR #48, `bd4158a`) that signs an arbitrary 32-byte
+  digest with a **dedicated EVM gas-tx key** derived at `m/44'/60'/0'/0/1` — used to
+  sign the outer Ethereum transaction that carries the bridge call; security note
+  TEE-XC-09 in `cross-flow-findings.md`,
+- a not-yet-wired federation-signature proxy.
 
 The hard goal is non-functional: **the parent EC2 host is untrusted.** Operators with
 shell on the EC2, network attackers, and a malicious "Go Listener" must not be able to
@@ -33,7 +39,7 @@ replayed payload.
 
 - `server.rs` — handler dispatch + `ServerContext{state, bridge_config, rgb_validator, header_chain}`.
 - `state.rs` — `Phase{Initial, Cloning, Active(KeyManager)}` + `NonceReplayGuard`.
-- `keys.rs` — BIP-39/32/84/86 derivation; `sign_evm`, `sign_psbt`.
+- `keys.rs` — BIP-39/32/44'/84'/86' derivation (EVM auth `m/44'/60'/0'/0/0`, **EVM gas-tx `m/44'/60'/0'/0/1`**, BTC legacy `m/84'/0'/0'/0/0`, BIP-86 vanilla/colored); `sign_evm`, `sign_evm_gas_tx`, `sign_psbt`.
 - `signing/` — `evm.rs` (EIP-712), `psbt.rs` (P2WSH), `taproot.rs` (BIP-341 script-path), all anchored to `witness_utxo.script_pubkey`.
 - `validation/` — `evm_crosscheck.rs`, `psbt_crosscheck.rs`, `rgb.rs` (rgbstd + Esplora), `spv_crosscheck.rs`.
 - `spv/` — `chain.rs` (HeaderChain, bounded reorg), `checkpoint.rs` (compile-time anchors → PCR0), `merkle.rs`, `validation.rs` (linkage/PoW/nBits), `types.rs`.
@@ -55,7 +61,8 @@ replayed payload.
 
 Cross-cutting items (transport/framing/build) and the spec-conformance summary live in
 `cross-flow-findings.md`. Minor surfaces not given their own flow: `SignRawMessage`
-(captured as TEE-XC-01), `GetPublicKey` (read-only), `ProxyFederation` (stub, NOT_READY).
+(TEE-XC-01), **`SignRawDigest`** (new in PR #48 — TEE-XC-09), `GetPublicKey`
+(read-only), `ProxyFederation` (stub, NOT_READY).
 
 ## Scope & asset assumption
 

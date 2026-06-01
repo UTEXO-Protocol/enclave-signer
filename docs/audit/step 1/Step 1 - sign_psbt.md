@@ -1,6 +1,6 @@
 # Step 1 Flow Review — Sign PSBT (EVM → RGB lock)
 
-**Component:** `utexo-bridge-enclave`, `dev` @ `c51d6fb`.
+**Component:** `utexo-bridge-enclave`, `dev` @ `bb2b396`.
 **Flow:** an enriched `SignPsbtRequest` (a federation PSBT + EVM-event enrichment)
 arrives; the TEE validates shape/policy and adds its partial signature(s) to every
 input it co-owns — taproot script-path (Schnorr) and SegWit-v0 P2WSH (ECDSA).

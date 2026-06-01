@@ -1,8 +1,22 @@
 # UTEXO Enclave-Signer — Cross-Flow Findings Tracker, Coverage Map & Audit Package
 
-**Component:** `utexo-bridge-enclave` (the TEE), `dev` @ `c51d6fb`.
-**Compiled:** 2026-05-29 from the six Step 1/2 flow reviews in `docs/audit/`.
+**Component:** `utexo-bridge-enclave` (the TEE), `dev` @ `bb2b396` (was `c51d6fb`).
+**Compiled:** 2026-05-29 from the six Step 1/2 flow reviews in `docs/audit/`;
+**refreshed 2026-06-01** against PR #48 (`bd4158a` — "EVM gas TX key support and
+fix canonical bundle alignment").
 **Methodology:** `internal_audit/release 1.0/prompts/` (Cross-Flow Documents).
+
+> **Refresh note (2026-06-01).** PR #48 landed: new gas-tx key at `m/44'/60'/0'/0/1`,
+> a new `SignRawDigest` RPC (raw 32-byte digest, no allowlist) → **new TEE-XC-09**;
+> EIP-712 typehash now `BridgeOperation(bytes4 selector, ...)` matching
+> `MultisigProxy._buildDigest()` (TEE-SE-05 partial closure on the selector facet);
+> canonical bundle extended from 10 → 12 fields (enclave + parent + test mirrors
+> aligned); **real checkpoints** for mainnet (h=950_000) and signet (h=311_000) →
+> **TEE-SH-03 closes for prod nets**; non-PoW networks no longer wedge across retarget
+> boundaries (TEE-SH-02 partial). **BUT** the new mainnet checkpoint is at h=950_000
+> (mod 2016 = 464, **not boundary-aligned**), so TEE-SH-02 is now a **concrete latent
+> wedge** on the mainnet checkpoint at height 951_552 — needs a boundary-aligned
+> checkpoint before mainnet sync passes 951_552. Status changes are inlined in Part 1.
 
 > **Severities are DRAFT** (suggested by the review). Per the methodology, final
 > severity + owner are set by a human/auditor. "High-if-shipped" = catastrophic impact
@@ -22,19 +36,19 @@ Flows covered (all six): `sign_evm`, `cloning`, `sign_psbt`, `submit_headers`,
 | TEE-SH-01 | submit_headers | Signet/regtest header validation is **linkage-only** (no PoW, no BIP-325) → listener can forge the chain and defeat the Sign EVM SPV gate on the production signet. Needs proto `coinbase_txs` + BIP-325 verify. | High (signet) | Eng + Proto | open (known/deferred) |
 | TEE-SE-01 | sign_evm | Asset-identity bypass: empty `req.rgb_asset_id` skips both the pin match and the consignment `contract_id` check → a valid foreign-asset burn can authorise a USDT0 unlock. Bind `validated.contract_id == pinned RGB_ASSET_ID`. | High | Eng | open |
 | TEE-SE-02 | sign_evm | RGB `OpId` not bound (no `op_id` in `SignEvmRequest`, never checked or signed). Spec core cross-domain primitive. | High | Eng + Auditor | open |
-| TEE-SH-03 | submit_headers | All SPV checkpoints are placeholders (`is_real=false`); release-blocker (release panics via `assert_real_in_release`). | High | Ops/Deploy | open |
+| TEE-SH-03 | submit_headers | ~~All SPV checkpoints are placeholders (`is_real=false`); release-blocker.~~ **PARTIALLY CLOSED in PR #48 (bd4158a):** mainnet `h=950_000` and signet `h=311_000` are now `is_real=true`. Testnet3/regtest still placeholder (not target environments). | resolved (prod nets) | Ops/Deploy | partial-close |
 | TEE-IK-01 + TEE-CL-02 | initialize_keys / cloning | **No `compile_error!` release guard** for `allow-seed-import` (→ parent installs chosen seed on fresh enclave) / `mock-attestation` (→ zero-PCR docs accepted) / `dev-mode` (→ all cross-checks skipped). One guard pattern fixes all three. | High-if-shipped | Eng | open |
 
 ### Tier M
 
 | ID | Flow | Item (one line) | Draft sev | Owner | Status |
 |---|---|---|---|---|---|
-| TEE-SE-05 | sign_evm | EIP-712 domain `name`/`version` hardcoded `"Tricorn"/"1"` **and** calldata offsets (68/100, mint-burn 36) unverified vs deployed ABI. Needs a contract-derived fixture. | Med | Eng + Contract | open |
+| TEE-SE-05 | sign_evm | EIP-712 domain `name`/`version` hardcoded `"Tricorn"/"1"` **and** calldata offsets (68/100, mint-burn 36) unverified vs deployed ABI. Needs a contract-derived fixture. **Partial closure in PR #48 (bd4158a):** the struct typehash is now `BridgeOperation(bytes4 selector, bytes callData, uint256 nonce, uint256 deadline)` (`signing/evm.rs:5-6`), bound to selector at the typed-data level and commented to match `MultisigProxy._buildDigest()`. Domain `name`/`version` still hardcoded; calldata offsets still unverified; contract-derived fixture test still missing. | Med | Eng + Contract | open (partial) |
 | TEE-SE-03 | sign_evm | EVM recipient not derived from / bound to the RGB payload (Sec 13). | Med–High | Eng + Auditor | open |
 | TEE-PS-01 | sign_psbt | Bridge-mode trusts listener `evm_event_valid/finalized` with no in-enclave EVM-event proof (asymmetric vs unlock RGB+SPV). Design decision: policy signer vs anchored-only. | Med (design) | Auditor + Contract | open |
 | TEE-PS-02 | sign_psbt | No PSBT **output** validation; `psbt_output_amount` declared-vs-declared, never tied to actual outputs → co-signs spends to any destination. | Med–High | Eng + Auditor | open |
 | TEE-PS-03 | sign_psbt | Bridge cross-checks bypassable: listener selects **vanilla mode** via empty `evm_tx_hash`. | Med | Eng | open |
-| TEE-SH-02 | submit_headers | Non-boundary checkpoint wedges the chain at the first retarget boundary (`epoch_start_time`→`HeaderNotFound`). ~17h on signet, ~2wk on mainnet. | Med–High | Eng + Ops | open |
+| TEE-SH-02 | submit_headers | Non-boundary checkpoint wedges the chain at the first retarget boundary. PR #48 short-circuited the lookup on non-PoW nets (`chain.rs:236-240`) — signet/regtest no longer affected. **Mainnet still affected**: the new `is_real=true` checkpoint at h=950_000 has `950_000 mod 2016 = 464` (not aligned) → wedge will trigger at h=951_552 once the listener syncs that high. **Pick a boundary-aligned checkpoint** (next multiple of 2016) before that point. | Med–High (mainnet, concrete) | Eng + Ops | open |
 | TEE-CL-03 = TEE-AP-01 | cloning / attested_pubkey | `verify_certificate_chain` omits `BasicConstraints`/`KeyUsage`/`pathLen` (shared code — one fix, two flows). | Med | Eng | open |
 | TEE-CL-04 | cloning | `replay_guard` count-capped (10k) + reject-when-full → cloning-availability DoS by the parent. | Med | Eng | open |
 | TEE-CL-06 | cloning | Bind `cloning_secret` into PCR2 (leaked-secret + substituted-image defence in depth). | Med | Eng | open |
@@ -157,14 +171,19 @@ In order, the smallest set that closes the most risk:
    add U-1. Closes a listener-triggerable funds-theft path.
 3. **TEE-SH-01 signet authentication** — decide the BIP-325 timeline; until then, any
    signet-backed value flow is SPV-unprotected. Needs a proto extension.
-4. **TEE-SH-03 + TEE-SH-02 checkpoints** — pin **real, retarget-boundary-aligned**
-   mainnet/signet checkpoints (one decision closes both).
-5. **TEE-SE-02 OpId + TEE-SE-03 recipient** — the remaining unlock-side semantic
+4. **TEE-SH-02 — re-align the mainnet checkpoint to a retarget boundary** (PR #48
+   pinned `h=950_000` which is **not** a multiple of 2016 → wedge will trigger at
+   h=951_552). Pick the next boundary (h=951_552 or a higher one already finalised).
+   TEE-SH-03 is otherwise resolved for prod nets (mainnet + signet real).
+5. **TEE-XC-09 — gate the new `SignRawDigest` RPC** with a tx-shape allowlist (RLP
+   envelope or EIP-712 envelope). Currently unconstrained → gas-address ETH drain
+   path for a compromised listener.
+6. **TEE-SE-02 OpId + TEE-SE-03 recipient** — the remaining unlock-side semantic
    bindings (spec Sec 13 / Sec 6/7).
-6. **TEE-PS-01 decision** — is the enclave a policy-enforcing signer or anchored-only
+7. **TEE-PS-01 decision** — is the enclave a policy-enforcing signer or anchored-only
    cosigner? Determines whether TEE-PS-02/03 are bugs or accepted risks.
-7. **TEE-SE-05** — pin the EIP-712 domain + calldata offsets with a contract-derived
-   fixture.
+8. **TEE-SE-05** — pin EIP-712 domain `name`/`version` + calldata offsets with a
+   contract-derived fixture (selector binding closed in PR #48).
 
 Items 2/5/6/7 are facets of theme #2 (host-trusted bridge policy); 1 is theme #1; 3 is
 theme #3.
@@ -207,6 +226,7 @@ These are not scoped to one of the six flows (transport, build, key-handling,
 | TEE-XC-06 | vsock_forwarder | TCP listener on `127.0.0.1:3443` forwards any in-enclave traffic to the host vsock-proxy → covert-channel risk if another component is buggy. Prefer a Unix socket / document trusted-only. | Low | Eng | open |
 | TEE-XC-07 | build / PCR reproducibility | RGB deps `[patch.crates-io]` pinned to branch `master` not a commit; `rgb-consignment` fetched over SSH from a private repo (PCR0 not independently re-derivable → team-attested); `Dockerfile.enclave` floating `rust:1.89-slim`. Pin commits/digests + document PCR0 provenance. | Med (release) | Eng + Ops | open |
 | TEE-XC-08 | error taxonomy | Esplora/network errors during RGB validation surface as `CrossCheck` (`rgb.rs`) — conflates bad-consignment (terminal) with infra-down (transient). Split `Spv`/transient vs `CrossCheck`/terminal. | Low | Eng | open |
+| TEE-XC-09 | SignRawDigest (new in PR #48) | New RPC `handle_sign_raw_digest` (`server.rs:544-569`) signs **any** 32-byte digest with the dedicated gas-tx key (`m/44'/60'/0'/0/1`) — **no allowlist, no domain separation, no envelope**. Listener-triggerable; a compromised listener can ask the gas key to sign an arbitrary Ethereum tx digest → **drains the gas-address ETH balance** to attacker outputs. Impact bounded by the gas float; signs anything secp256k1 will sign over 32 bytes. Fix: gate behind a tx-shape allowlist (RLP envelope, `to`/`value`/`data` bounds) or require an EIP-712 envelope, like the unlock side. | Med (funds, bounded) | Eng | open |
 
 **Minor / maintainability (folded, no separate ID):** `assert_chain_not_stale`
 future-skew branch is structurally asymmetric; `verify_one_proof` has a redundant
@@ -226,7 +246,7 @@ authoritative per-predicate analysis is now in the per-flow docs cross-reference
 |---|---|---|
 | Sec 10 — TEE validation predicates (1–11) | **Partial** | 1/7/8/11 ✅; 9 n/a (on-chain); **6 ❌** OpId (TEE-SE-02); 2/3 substantially closed post #44/#47 (burn amount consignment-bound); 5 chain/contract pinned (#43) but **recipient unbound** (TEE-SE-03). → `Step 1/2 - sign_evm`. |
 | Sec 9 — RGB burn semantics | **Validated** | #41 extract + #44 enforce (TS_BURN ∧ amount ≤ burned); `<=` not strict `==` (TEE-SE-04); mint/burn path inert until the listener migrates. → `sign_evm`. |
-| Sec 12 — RGB/Bitcoin/SPV | **Strong on PoW; gap on signet** | coverage + depth + chain-net + staleness all enforced; **TEE-SH-01** signet is linkage-only; checkpoints placeholder **TEE-SH-03**. → `submit_headers` / `sign_evm`. |
+| Sec 12 — RGB/Bitcoin/SPV | **Strong on PoW; gap on signet** | coverage + depth + chain-net + staleness all enforced; **TEE-SH-01** signet is linkage-only (BIP-325 pending); checkpoints now real on mainnet (h=950_000) and signet (h=311_000) post #48 — **TEE-SH-03 partial-close** (testnet3/regtest still placeholder; mainnet checkpoint not retarget-boundary-aligned → TEE-SH-02 latent wedge at h=951_552). → `submit_headers` / `sign_evm`. |
 | Sec 13 — Destination binding | **NOT conformant** | recipient/OpId not derived from the RGB payload (TEE-SE-02/03); lock-side outputs unbound (TEE-PS-02). → `sign_evm` / `sign_psbt`. |
 | Sec 16 — TEE federation / cloning / signer attestation | **Mostly conformant** | PCR-equal cloning, mutual attestation, challenge-response attested-pubkey; carried hardening TEE-CL-03/04/06. Quorum is on-chain (out of repo). → `cloning` / `attested_pubkey`. |
 | Sec 14/15 — Security invariants & failure conditions | **Partial** | compromised-backend: amount + chain/contract now bound; recipient/OpId still host-supplied; fail-closed posture correct. → `sign_evm`. |

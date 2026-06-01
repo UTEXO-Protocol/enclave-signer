@@ -1,5 +1,3 @@
 /target/
 .claude/
-/docs/diagrams/*.svg
-/docs/diagrams/*.png
 .idea/

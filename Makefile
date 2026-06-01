@@ -4,7 +4,7 @@ include config.mk
 # Docker's BuildKit feature.
 export DOCKER_BUILDKIT=1
 
-.PHONY: build_parent push_parent build_enclave push_enclave build_enclave_dev push_enclave_dev docker docker_dev diagrams diagrams_clean help
+.PHONY: build_parent push_parent build_enclave push_enclave build_enclave_dev push_enclave_dev docker docker_dev help
 
 build_parent: ## Build parent adapter docker image.
 	docker build -f ./build/Dockerfile.parent -t $(IMAGE_PARENT_BACKUP) . && \
@@ -35,13 +35,6 @@ docker: ## Build and push all production docker images.
 
 docker_dev: ## Build and push all dev docker images (parent + enclave-dev).
 	$(MAKE) build_parent push_parent build_enclave_dev push_enclave_dev
-
-diagrams: ## Render PlantUML diagrams (docs/diagrams/*.puml) to SVG + PNG. Needs plantuml.
-	plantuml -tsvg docs/diagrams/*.puml
-	plantuml -tpng docs/diagrams/*.puml
-
-diagrams_clean: ## Remove generated diagram SVG/PNG (sources are the *.puml files).
-	rm -f docs/diagrams/*.svg docs/diagrams/*.png
 
 help: ## Show this help.
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-20s\033[0m %s\n", $$1, $$2}'

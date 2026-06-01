@@ -1,7 +1,7 @@
 # Step 1 Flow Review — Attested Public Key (external verifier ↔ enclave)
 
 **Component:** `utexo-bridge-enclave` + `attestation-verify` crate + `parent`
-(`attest-verify` CLI), `dev` @ `c51d6fb`.
+(`attest-verify` CLI), `dev` @ `bb2b396`.
 **Flow:** an external verifier sends a fresh 32-byte nonce; the enclave returns its
 public-key bundle plus an NSM attestation document binding `{evm_uncompressed_pub,
 sha256(canonical_bundle)}` to its PCRs; the verifier checks the AWS Nitro cert chain,

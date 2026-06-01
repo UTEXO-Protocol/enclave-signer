@@ -2,7 +2,7 @@
 
 **Component:** `enclave-signer` (TEE validator / signer + parent adapter)
 **Status:** Draft for internal review
-**Date:** 2026-05-25 (code @ HEAD `5148f0c`, #41)
+**Date:** 2026-05-25 (refreshed 2026-06-01, code @ HEAD `bb2b396`, originally #41)
 **Parent spec:** *RGB <-> EVM Bridge Technical Specification* (Draft 06/05/2026) -- Sec 5.6, Sec 10, Sec 12, Sec 13, Sec 16
 **Companion docs:** [`audit/ENCLAVE_SIGNER_CONTEXT.md`](audit/ENCLAVE_SIGNER_CONTEXT.md) | [`audit/cross-flow-findings.md`](audit/cross-flow-findings.md) | [`diagrams/`](diagrams/)
 
@@ -51,8 +51,8 @@ root CA, the correctness of *this* enclave code, and the correctness of the RGB
 
 The signer is three crates plus the external infrastructure it touches.
 
-![Component structure](diagrams/components.svg)
-*Source: [`diagrams/01-components.puml`](diagrams/01-components.puml)*
+[Component structure](diagrams/01-components.md)
+*Source: [`diagrams/01-components.md`](diagrams/01-components.md)*
 
 - **`enclave`** -- runs inside the TEE. Listener loop (vsock in prod, TCP in dev)
   -> `server.rs` handler dispatch -> `KeyManager`, `validation/*`, `spv/*`,
@@ -67,8 +67,8 @@ The signer is three crates plus the external infrastructure it touches.
 
 ### Deployment
 
-![Deployment](diagrams/deployment.svg)
-*Source: [`diagrams/02-deployment.puml`](diagrams/02-deployment.puml)*
+[Deployment](diagrams/02-deployment.md)
+*Source: [`diagrams/02-deployment.md`](diagrams/02-deployment.md)*
 
 Wire protocol enclave<->parent is a **4-byte little-endian length prefix + prost
 protobuf** (`framing.rs`, 4 MB cap). Esplora and NSM are reached through
@@ -81,23 +81,26 @@ host-side proxies over vsock so the enclave has no direct network stack.
   `SecretBox` / `Zeroizing` buffer and MUST NOT be exported in plaintext to the
   parent, backend, or operator (parent spec Sec 16.4).
 - Derivation paths:
-  - EVM signing key: `m/44'/60'/0'/0/0`; `evm_address = keccak256(uncompressed_pub[1..])[12..]`.
+  - EVM signing key (bridge authorisation): `m/44'/60'/0'/0/0`; `evm_address = keccak256(uncompressed_pub[1..])[12..]`.
+  - **EVM gas-tx key** (outer Ethereum tx signing): `m/44'/60'/0'/0/1`. Used by
+    `SignRawDigest` (raw 32-byte digest, no envelope) — see TEE-XC-09 in
+    `audit/cross-flow-findings.md`.
   - BTC SegWit: `m/84'/0'/0'/0/0`.
   - BIP-86 taproot: vanilla `m/86'/<coin>'/0'`, colored `m/86'/827167'/0'`.
 - The **EVM address is the cluster identity**: a cloned enclave installs the
   same seed and therefore signs as the same address; `complete_cloning` asserts
   `km.evm_address() == session.cluster_public_key` before going `Active`.
 
-![Initialize keys](diagrams/seq-initialize-keys.svg)
-*Source: [`diagrams/07-seq-initialize-keys.puml`](diagrams/07-seq-initialize-keys.puml)*
+[Initialize keys](diagrams/07-seq-initialize-keys.md)
+*Source: [`diagrams/07-seq-initialize-keys.md`](diagrams/07-seq-initialize-keys.md)*
 
 ## 5. State machine
 
 The enclave is a three-phase machine. **Signing is enabled only in `Active`**,
 and `Active` is terminal -- there is no in-place rotation or re-init.
 
-![Phase state machine](diagrams/state-phase.svg)
-*Source: [`diagrams/09-state-phase.puml`](diagrams/09-state-phase.puml)*
+[Phase state machine](diagrams/09-state-phase.md)
+*Source: [`diagrams/09-state-phase.md`](diagrams/09-state-phase.md)*
 
 | Phase     | Holds                                                       | Signing | Entry                                            |
 |-----------|-------------------------------------------------------------|---------|--------------------------------------------------|
@@ -115,8 +118,8 @@ not by mutating an `Active` enclave (parent spec Sec 16.5).
 
 The enclave signs `fundsOut` only after all validation predicates (Sec 8) hold.
 
-![Sign EVM](diagrams/seq-sign-evm.svg)
-*Source: [`diagrams/03-seq-sign-evm.puml`](diagrams/03-seq-sign-evm.puml)*
+[Sign EVM](diagrams/03-seq-sign-evm.md)
+*Source: [`diagrams/03-seq-sign-evm.md`](diagrams/03-seq-sign-evm.md)*
 
 ### 6.2 EVM lock -> RGB (PSBT signing)
 
@@ -124,32 +127,32 @@ Taproot script-path (BIP-340 Schnorr) + SegWit v0 P2WSH (ECDSA), each anchored
 to the input's `witness_utxo.script_pubkey` so the enclave signs only the
 intended UTXO.
 
-![Sign PSBT](diagrams/seq-sign-psbt.svg)
-*Source: [`diagrams/04-seq-sign-psbt.puml`](diagrams/04-seq-sign-psbt.puml)*
+[Sign PSBT](diagrams/04-seq-sign-psbt.md)
+*Source: [`diagrams/04-seq-sign-psbt.md`](diagrams/04-seq-sign-psbt.md)*
 
 ### 6.3 SPV header sync
 
 The host feeds Bitcoin headers; the enclave builds its own PoW-validated chain
 with bounded reorgs. The full chain MUST be present before any tx validation.
 
-![SPV submit headers](diagrams/seq-submit-headers.svg)
-*Source: [`diagrams/08-seq-spv-submit-headers.puml`](diagrams/08-seq-spv-submit-headers.puml)*
+[SPV submit headers](diagrams/08-seq-spv-submit-headers.md)
+*Source: [`diagrams/08-seq-spv-submit-headers.md`](diagrams/08-seq-spv-submit-headers.md)*
 
 ### 6.4 Attested public key (public verifiability)
 
 Any external verifier can confirm a signer pubkey belongs to attested enclave
 code (parent spec Sec 16.3, Sec 16.6).
 
-![Attested pubkey](diagrams/seq-attested-pubkey.svg)
-*Source: [`diagrams/05-seq-attested-pubkey.puml`](diagrams/05-seq-attested-pubkey.puml)*
+[Attested pubkey](diagrams/05-seq-attested-pubkey.md)
+*Source: [`diagrams/05-seq-attested-pubkey.md`](diagrams/05-seq-attested-pubkey.md)*
 
 ### 6.5 Cloning (recovery / federation membership)
 
 Three-message handshake; valid only between enclaves with identical PCRs, the
 same cluster pubkey, and the shared cloning secret (parent spec Sec 16.4).
 
-![Cloning](diagrams/seq-cloning.svg)
-*Source: [`diagrams/06-seq-cloning.puml`](diagrams/06-seq-cloning.puml)*
+[Cloning](diagrams/06-seq-cloning.md)
+*Source: [`diagrams/06-seq-cloning.md`](diagrams/06-seq-cloning.md)*
 
 ## 7. RGB / Bitcoin / SPV verification (parent spec Sec 12)
 
@@ -181,8 +184,8 @@ mainnet.
 Before signing `fundsOut`, the enclave MUST verify **all** of the following and
 MUST refuse to sign (fail closed) if any fails. This is the heart of the spec.
 
-![Signing gate](diagrams/signing-gate.svg)
-*Source: [`diagrams/10-signing-gate.puml`](diagrams/10-signing-gate.puml)*
+[Signing gate](diagrams/10-signing-gate.md)
+*Source: [`diagrams/10-signing-gate.md`](diagrams/10-signing-gate.md)*
 
 | #   | Predicate                                                                               | Implemented                                                        |
 |-----|-----------------------------------------------------------------------------------------|--------------------------------------------------------------------|
@@ -198,11 +201,14 @@ MUST refuse to sign (fail closed) if any fails. This is the heart of the spec.
 | P10 | EVM execution payload **exactly matches** the validated unlock intent                   | **`[GAP]`** intent not independently derived                       |
 | P11 | on any failure, refuse to sign                                                          | [OK] fail-closed                                                   |
 
-The signed digest is `EIP-712( SignRequest(bytes callData, uint256 nonce,
-uint256 deadline) )` over domain `(name, version, chainId, verifyingContract)`.
-The domain `name`/`version` MUST match the deployed `MultisigProxy` and SHOULD
-be pinned by a contract-derived fixture test. **`[GAP]`** currently `"Tricorn"`/`"1"`
-with a `TODO`.
+The signed digest is `EIP-712( BridgeOperation(bytes4 selector, bytes callData,
+uint256 nonce, uint256 deadline) )` over domain `(name, version, chainId,
+verifyingContract)`. The struct typehash is commented to match
+`MultisigProxy._buildDigest()` (PR #48, `bd4158a`) — `selector` is now bound at
+the typed-data level, not only inside `callData` bytes. The domain `name`/`version`
+MUST match the deployed `MultisigProxy` and SHOULD be pinned by a contract-derived
+fixture test. **`[GAP]`** currently `"Tricorn"`/`"1"` with a `TODO`; calldata
+byte-offsets (legacy 68/100, mint-burn 36) likewise unverified against the deployed ABI.
 
 > The four `[GAP]`s above are one root cause: **the enclave currently trusts
 > host-supplied semantic fields (`rgb_amount`, recipient, implied `OpId`)
@@ -279,15 +285,17 @@ Conformant and solid: Sec 7 SPV stack (incl. SI-8), Sec 9 attestation + cloning
 
 ## Appendix A -- Diagram index
 
-| Diagram                       | Source                                    | Rendered                      |
-|-------------------------------|-------------------------------------------|-------------------------------|
-| Component structure           | `diagrams/01-components.puml`             | `components.svg/png`          |
-| Deployment / trust zones      | `diagrams/02-deployment.puml`             | `deployment.svg/png`          |
-| Sign EVM (unlock)             | `diagrams/03-seq-sign-evm.puml`           | `seq-sign-evm.svg/png`        |
-| Sign PSBT                     | `diagrams/04-seq-sign-psbt.puml`          | `seq-sign-psbt.svg/png`       |
-| Attested pubkey               | `diagrams/05-seq-attested-pubkey.puml`    | `seq-attested-pubkey.svg/png` |
-| Cloning handshake             | `diagrams/06-seq-cloning.puml`            | `seq-cloning.svg/png`         |
-| Initialize keys               | `diagrams/07-seq-initialize-keys.puml`    | `seq-initialize-keys.svg/png` |
-| SPV submit headers            | `diagrams/08-seq-spv-submit-headers.puml` | `seq-submit-headers.svg/png`  |
-| **Phase state machine**       | `diagrams/09-state-phase.puml`            | `state-phase.svg/png`         |
-| **Signing gate / predicates** | `diagrams/10-signing-gate.puml`           | `signing-gate.svg/png`        |
+Mermaid in Markdown — view inline in any Mermaid-capable renderer (GitHub, VS Code, ...).
+
+| Diagram                       | File                                    |
+|-------------------------------|-----------------------------------------|
+| Component structure           | `diagrams/01-components.md`             |
+| Deployment / trust zones      | `diagrams/02-deployment.md`             |
+| Sign EVM (unlock)             | `diagrams/03-seq-sign-evm.md`           |
+| Sign PSBT                     | `diagrams/04-seq-sign-psbt.md`          |
+| Attested pubkey               | `diagrams/05-seq-attested-pubkey.md`    |
+| Cloning handshake             | `diagrams/06-seq-cloning.md`            |
+| Initialize keys               | `diagrams/07-seq-initialize-keys.md`    |
+| SPV submit headers            | `diagrams/08-seq-spv-submit-headers.md` |
+| **Phase state machine**       | `diagrams/09-state-phase.md`            |
+| **Signing gate / predicates** | `diagrams/10-signing-gate.md`           |

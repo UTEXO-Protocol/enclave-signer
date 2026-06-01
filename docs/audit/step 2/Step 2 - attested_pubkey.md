@@ -1,6 +1,6 @@
 # Step 2 — Attack Analysis & Implementation Spec — Attested Public Key
 
-**Input:** verified `Step 1 - attested_pubkey.md`. **Code:** `dev` @ `c51d6fb`.
+**Input:** verified `Step 1 - attested_pubkey.md`. **Code:** `dev` @ `bb2b396`.
 **Reviewed:** 2026-05-29. Output is TEXT/specs (Step 3 = code).
 
 ---

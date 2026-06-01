@@ -1,6 +1,6 @@
 # Step 1 Flow Review — Sign EVM (RGB → EVM unlock / `fundsOut`)
 
-**Component:** `utexo-bridge-enclave` (the TEE), `dev` @ HEAD `c51d6fb`.
+**Component:** `utexo-bridge-enclave` (the TEE), `dev` @ HEAD `bb2b396`.
 **Flow:** an enriched `SignEvmRequest` arrives over the enclave wire protocol; the
 TEE validates it and, if every predicate passes, returns an EIP-712 ECDSA signature
 authorising a `fundsOut(...)` call on the EVM `MultisigProxy`.

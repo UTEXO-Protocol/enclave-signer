@@ -1,6 +1,6 @@
 # Step 1 Flow Review — Enclave-to-Enclave Seed Cloning
 
-**Component:** `utexo-bridge-enclave`, `dev` @ `c51d6fb`.
+**Component:** `utexo-bridge-enclave`, `dev` @ `bb2b396`.
 **Flow:** a new enclave (`Phase::Initial`) obtains the cluster's HD seed from an
 existing enclave (`Phase::Active`) via a three-message handshake relayed by the
 untrusted parent: `InitiateCloning` (requester) → `GetClone` (donor) → `SetClone`
