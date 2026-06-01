@@ -48,7 +48,7 @@ sequenceDiagram
             loop 32-byte PushBytes in script
                 Tap->>Tap: tap_key_origins[xonly]?<br/>fp == master_fingerprint?<br/>leaf_hashes contains this leaf?
                 Tap->>Tap: resolve_account_and_child_path(<br/>BIP-86 path)
-                Tap->>Crypto: derive child secret;<br/>xonly(derived) == xonly_from_psbt
+                Tap->>Crypto: derive child secret,<br/>xonly(derived) == xonly_from_psbt
                 alt all match
                     Tap->>Tap: emit TaprootSignJob
                 end

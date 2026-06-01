@@ -47,7 +47,7 @@ sequenceDiagram
     P->>S: SignPsbtRequest{psbt_bytes, evm_* enrichment}
 
     S->>X: validate_psbt_request(req)   %% cfg(not dev-mode)
-    X->>X: psbt_bytes empty → CrossCheck; Psbt::deserialize fail → CrossCheck; 0 inputs → CrossCheck (#40)
+    X->>X: psbt_bytes empty → CrossCheck, Psbt::deserialize fail → CrossCheck, 0 inputs → CrossCheck (#40)
     alt evm_tx_hash empty (VANILLA mode — listener-selected)
         X-->>S: Ok (NO bridge checks)
     else evm_tx_hash present (BRIDGE mode)
@@ -60,17 +60,17 @@ sequenceDiagram
 
     S->>K: state.sign_psbt(req.psbt_bytes)  (with_active: Phase!=Active → KeyNotInitialized)
     K->>T: find_taproot_sign_jobs(psbt, master_fingerprint, km)
-    T->>T: per input: witness_utxo p2tr; output_key=spk[2..34]
+    T->>T: per input: witness_utxo p2tr, output_key=spk[2..34]
     T->>T: per tap_script: control_block.verify_taproot_commitment(output_key, script) else skip
-    T->>T: xonly is 32B push IN verified leaf; tap_key_origins[xonly].fp==ours; leaf_hashes∋leaf
-    T->>T: resolve BIP-86 path; derive child; derived_xonly==xonly else skip; skip if already signed
+    T->>T: xonly is 32B push IN verified leaf, tap_key_origins[xonly].fp==ours, leaf_hashes∋leaf
+    T->>T: resolve BIP-86 path, derive child, derived_xonly==xonly else skip, skip if already signed
     T-->>K: jobs
-    K->>T: sign_taproot_inputs → BIP-341 sighash(Prevouts::All); sign_schnorr_no_aux_rand (deterministic)
+    K->>T: sign_taproot_inputs → BIP-341 sighash(Prevouts::All), sign_schnorr_no_aux_rand (deterministic)
     loop each input
         K->>W: should_sign_segwit_input(psbt, i, our_pubkey)
-        W->>W: witness_utxo p2wsh; not already partial-signed; sha256(witness_script)==program; our 33B push in script
+        W->>W: witness_utxo p2wsh, not already partial-signed, sha256(witness_script)==program, our 33B push in script
         W-->>K: SignP2wsh{witness_script} | Skip
-        K->>K: p2wsh_signature_hash(i, ws, value, ALL); sign_ecdsa (low-S); insert partial_sig
+        K->>K: p2wsh_signature_hash(i, ws, value, ALL), sign_ecdsa (low-S), insert partial_sig
     end
     K-->>S: (signed_psbt, inputs_signed)
     S-->>P: SignedPsbtResponse

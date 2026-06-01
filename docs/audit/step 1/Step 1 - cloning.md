@@ -47,8 +47,8 @@ sequenceDiagram
 
     Op->>P: Initialize(cloning_secret)
     P->>Req: InitiateCloningRequest{cloning_secret, cluster_public_key(20B)}
-    Req->>Req: cloning_secret empty → Err(InvalidRequest); cluster_pk != 20B → Err
-    Req->>Req: CloneSession::new() (ephemeral X25519); nonce = getrandom(32)
+    Req->>Req: cloning_secret empty → Err(InvalidRequest), cluster_pk != 20B → Err
+    Req->>Req: CloneSession::new() (ephemeral X25519), nonce = getrandom(32)
     Req->>Req: cloning_digest = HMAC-SHA256(secret, encryption_pubkey)
     Req->>RN: get_attestation(nonce, pubkey=encryption_pubkey, user_data=cloning_digest)
     RN-->>Req: requester_attestation (COSE_Sign1)

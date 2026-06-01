@@ -49,14 +49,14 @@ sequenceDiagram
     S->>S: nonce.len()==32 else InvalidRequest
     S->>St: get_keys() (else KeyNotInitialized — Active only)
     S->>S: public_keys = build_public_keys_response(keys, bridge_config)  %% incl. chain_id/contract/rgb_asset_id (#43)
-    S->>S: bundle = canonical_pubkey_bundle(public_keys); commitment = sha256(bundle)
+    S->>S: bundle = canonical_pubkey_bundle(public_keys), commitment = sha256(bundle)
     S->>Att: get_attestation(nonce, public_key=evm_uncompressed_pub, user_data=commitment)
     Att-->>S: COSE_Sign1 doc (NSM-signed over PCRs, ts, nonce, pubkey, user_data)
     S-->>P: {public_keys, attestation_doc}
     P-->>Cli: AttestedPublicKeyResponse
 
     Cli->>Ver: verify_attestation(doc, expected_pcrs, Some(nonce))
-    Ver->>Ver: CoseSign1 (4-elem); parse inner AttestationDocument
+    Ver->>Ver: CoseSign1 (4-elem), parse inner AttestationDocument
     Ver->>Ver: cabundle[0] == embedded AWS Nitro root (byte-equal) else Certificate err
     loop each cert (root..leaf)
         Ver->>Ver: verify_cert_validity (notBefore<=now<=notAfter)
@@ -68,7 +68,7 @@ sequenceDiagram
     Ver->>Ver: require public_key present
     Ver-->>Cli: VerifiedAttestation{enclave_pubkey, pcrs, user_data, nonce, timestamp}
     Cli->>Cli: assert verified.enclave_pubkey == response.evm_uncompressed_pub
-    Cli->>Cli: rebuild canonical_bundle(response); assert verified.user_data == sha256(bundle)
+    Cli->>Cli: rebuild canonical_bundle(response), assert verified.user_data == sha256(bundle)
     Cli-->>V: OK + printed bundle + PCRs
 ```
 

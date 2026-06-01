@@ -41,23 +41,23 @@ sequenceDiagram
     Op->>P: InitializeKey (seed="", mnemonic="")
     P->>S: InitializeKeyRequest
     alt mnemonic non-empty
-        S->>S: cfg(allow-seed-import) → initialize_from_mnemonic; else InvalidRequest "not allowed"
+        S->>S: cfg(allow-seed-import) → initialize_from_mnemonic, else InvalidRequest "not allowed"
     else seed empty (PRODUCTION)
         S->>R: getrandom::fill(entropy[32]) else Internal err
         S->>St: initialize_from_entropy(&mut entropy)
-        St->>St: lock; ensure_initial else AlreadyInitialized
+        St->>St: lock, ensure_initial else AlreadyInitialized
         St->>K: KeyManager::generate(entropy)
-        K->>K: Mnemonic::from_entropy(entropy); entropy.zeroize()
-        K->>K: seed = mnemonic.to_seed(""); from_seed(seed)
-        K->>K: seed_box = SecretBox(seed); seed.zeroize()
-        K->>K: master = Xpriv::new_master(network, seed); master_fingerprint
-        K->>K: EVM m/44'/60'/0'/0/0 → evm_secret(box); evm_address = keccak256(uncompressed_pub)[12..]
+        K->>K: Mnemonic::from_entropy(entropy), entropy.zeroize()
+        K->>K: seed = mnemonic.to_seed(""), from_seed(seed)
+        K->>K: seed_box = SecretBox(seed), seed.zeroize()
+        K->>K: master = Xpriv::new_master(network, seed), master_fingerprint
+        K->>K: EVM m/44'/60'/0'/0/0 → evm_secret(box), evm_address = keccak256(uncompressed_pub)[12..]
         K->>K: BTC m/84'/0'/0'/0/0 → btc_secret(box), btc_xpub
-        K->>K: BIP-86 vanilla m/86'/<coin>'/0'; colored m/86'/827167'/0'
+        K->>K: BIP-86 vanilla m/86'/COIN'/0', colored m/86'/827167'/0'
         K-->>St: (KeyManager, Mnemonic)
         St->>St: *phase = Active(km)
     else seed non-empty
-        S->>S: cfg(allow-seed-import) → 64B seed → initialize_from_seed; else InvalidRequest "not allowed"
+        S->>S: cfg(allow-seed-import) → 64B seed → initialize_from_seed, else InvalidRequest "not allowed"
     end
     S->>St: get_keys()
     S-->>P: InitializeKeyResponse{evm_address, btc_pub, xpubs, master_fingerprint, evm_uncompressed_pub, chain_id, bridge_contract, rgb_asset_id}

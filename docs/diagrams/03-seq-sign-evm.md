@@ -27,7 +27,7 @@ sequenceDiagram
 
     Note over Srv,Esplora: In-enclave RGB validation
     Srv->>Rgb: validate_consignment(bytes)
-    Rgb->>Rgb: Transfer::load(...); extract chain_net + witness_txids
+    Rgb->>Rgb: Transfer::load(...), extract chain_net + witness_txids
     Rgb->>Esplora: esplora_blocking GET /tx/.../merkle-proof
     Esplora-->>Rgb: witness tx data
     Rgb->>Rgb: rgbstd::validate(...)
@@ -41,7 +41,7 @@ sequenceDiagram
     Evm->>Evm: selector ∈ FUNDS_OUT_SELECTORS (legacy 0x1ad880b2 / mint-burn 0x179bef59)
     Evm->>Evm: consignment bytes present (consignment_valid flag NOT trusted — #47)
     Evm->>Evm: keccak256(consignment) == consignment_hash
-    Evm->>Evm: legacy: rgb_amount ≥ calldata_amount + commission; offsets 68/100 == declared
+    Evm->>Evm: legacy: rgb_amount ≥ calldata_amount + commission, offsets 68/100 == declared
     Evm->>Evm: chain_id > 0 ∧ len(proxy_contract)==20 ∧ deadline > now
     Evm->>Evm: if bridge_config pinned (#43): chain_id/proxy_contract/rgb_asset_id == env pins
     Evm-->>Srv: Ok / CrossCheck err

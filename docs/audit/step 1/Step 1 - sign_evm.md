@@ -70,21 +70,21 @@ sequenceDiagram
     end
 
     S->>X: validate_evm_request(req, bridge_config)   %% cfg(not dev-mode)
-    X->>X: call_data.len() < 4 → Err; selector ∉ FUNDS_OUT_SELECTORS → Err
+    X->>X: call_data.len() < 4 → Err, selector ∉ FUNDS_OUT_SELECTORS → Err
     X->>X: req.consignment.is_empty() → Err  (consignment_valid flag NOT read)
     X->>X: consignment_hash empty / keccak256(consignment) != consignment_hash → Err
-    X->>X: legacy 0x1ad880b2: req.rgb_amount < calldata_amount+commission → Err; offsets 68/100 != declared → Err
-    X->>X: chain_id == 0 → Err; proxy_contract.len() != 20 → Err
-    X->>X: if bridge_config.is_configured(): chain_id/proxy_contract != pin → Err; pin asset empty → Err; req.rgb_asset_id nonempty && != pin → Err
+    X->>X: legacy 0x1ad880b2: req.rgb_amount < calldata_amount+commission → Err, offsets 68/100 != declared → Err
+    X->>X: chain_id == 0 → Err, proxy_contract.len() != 20 → Err
+    X->>X: if bridge_config.is_configured(): chain_id/proxy_contract != pin → Err, pin asset empty → Err, req.rgb_asset_id nonempty && != pin → Err
     X->>X: deadline <= now → Err
     X-->>S: Ok | Err(CrossCheck)
 
     Note over S: cfg(rgb-validation, not dev-mode), selector ∈ {legacy, mint/burn}
     S->>S: validated_consignment.as_ref() else Err(CrossCheck "requires a validated consignment")
     S->>X: validate_funds_out_burn(req, validated)
-    X->>X: mint/burn 0x179bef59: last != TS_BURN → Err; burned_asset_amount None → Err; burned < amount@36 → Err
+    X->>X: mint/burn 0x179bef59: last != TS_BURN → Err, burned_asset_amount None → Err, burned < amount@36 → Err
     S->>X: validate_funds_out_transfer(req, validated)
-    X->>X: legacy 0x1ad880b2: last != TS_TRANSFER → Err; total_output_amount < amount@68+commission@100 → Err
+    X->>X: legacy 0x1ad880b2: last != TS_TRANSFER → Err, total_output_amount < amount@68+commission@100 → Err
 
     Note over S: cfg("spv")
     S->>S: validated_consignment.as_ref() else Err(Spv)
@@ -92,7 +92,7 @@ sequenceDiagram
     S->>V: assert_chain_not_stale(now, 2h age, 2h future) → Err(Spv) if stale/future
     S->>V: assert_chain_net(validated.chain_net, chain.network()) → Err(Spv) on mismatch
     S->>V: validate_spv_proofs(witness_txids, merkle_proofs, MIN_CONF=6)
-    V->>V: set-equality(expected, proofs); per proof: header_at, depth>=6, merkle root
+    V->>V: set-equality(expected, proofs), per proof: header_at, depth>=6, merkle root
     V-->>S: Ok | Err(Spv)
 
     S->>S: build_evm_domain(req)  (name="Tricorn", version="1", chain_id, proxy_contract)

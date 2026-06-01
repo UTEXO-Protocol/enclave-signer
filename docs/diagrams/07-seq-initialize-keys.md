@@ -23,11 +23,11 @@ sequenceDiagram
     State->>State: ensure_initial(guard) — else AlreadyInitialized
     State->>Km: KeyManager::generate(entropy, network)
 
-    Km->>Km: Mnemonic::from_entropy(entropy); entropy.zeroize()
+    Km->>Km: Mnemonic::from_entropy(entropy), entropy.zeroize()
     Km->>Km: seed := mnemonic.to_seed("")
-    Km->>Km: seed_box := SecretBox::new(seed); seed.zeroize()
+    Km->>Km: seed_box := SecretBox::new(seed), seed.zeroize()
     Km->>Km: master := Xpriv::new_master(network, seed)
-    Km->>Km: EVM   = m/44'/60'/0'/0/0<br/>BTC   = m/84'/0'/0'/0/0<br/>BIP-86 vanilla = m/86'/&lt;coin&gt;'/0'<br/>BIP-86 colored = m/86'/827167'/0'
+    Km->>Km: EVM   = m/44'/60'/0'/0/0<br/>BTC   = m/84'/0'/0'/0/0<br/>BIP-86 vanilla = m/86'/COIN'/0'<br/>BIP-86 colored = m/86'/827167'/0'
     Km->>Km: evm_address = keccak256(uncomp_pub[1..])[12..]
     Km-->>State: (KeyManager, Mnemonic)
 
@@ -37,7 +37,7 @@ sequenceDiagram
     Srv->>State: get_keys()
     State-->>Srv: KeyInfo
 
-    Note over Srv: tracing::info! evm_address, master_fingerprint,<br/>account_xpubs (public values only).<br/>The mnemonic is dropped here — its content lives<br/>only in the SecretBox&lt;seed&gt; from now on.
+    Note over Srv: tracing::info! evm_address, master_fingerprint,<br/>account_xpubs (public values only).<br/>The mnemonic is dropped here — its content lives<br/>only in the SecretBox(seed) from now on.
 
     Srv-->>PClient: InitializeKeyResponse{evm_address, btc_compressed_pub,<br/>btc_xpub, master_fingerprint, account xpubs,<br/>evm_uncompressed_pub}
     PClient-->>Cli: print pubkeys

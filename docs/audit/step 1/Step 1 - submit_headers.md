@@ -54,10 +54,10 @@ sequenceDiagram
     L->>P: GetLastSavedBlock → tip N
     L->>P: SubmitHeaders{start_height, headers[80B...]}
     P->>S: SubmitHeadersRequest
-    S->>C: lock(header_chain); submit_headers(start_height, headers)
+    S->>C: lock(header_chain), submit_headers(start_height, headers)
     C->>C: start_height <= checkpoint.height → BelowCheckpoint
     C->>C: start_height > tip+1 → NonContiguous
-    C->>C: reorg_depth = (tip+1)-start_height; > MAX_REORG_DEPTH(100) → ReorgTooDeep
+    C->>C: reorg_depth = (tip+1)-start_height, > MAX_REORG_DEPTH(100) → ReorgTooDeep
     C->>C: predecessor at start_height-1 (checkpoint or stored)
     loop each raw header (staged, not committed)
         C->>C: deserialize 80B → HeaderParse on fail
@@ -70,7 +70,7 @@ sequenceDiagram
         V->>V: check_pow IF network.enforces_pow() (Mainnet|Testnet3 ONLY) else skip  %% see TEE-SH-01
     end
     alt reorg_depth > 0
-        C->>C: existing_work vs new_work (sum of header.work()); new <= existing → WeakerChain
+        C->>C: existing_work vs new_work (sum of header.work()), new <= existing → WeakerChain
         C->>C: truncate displaced tail
     end
     C->>C: append all staged (all-or-nothing)

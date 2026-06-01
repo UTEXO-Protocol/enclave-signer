@@ -9,7 +9,7 @@ sequenceDiagram
     participant RN as Req NSM
     participant DN as Don NSM
 
-    Note over Req,Don: Both enclaves must have IDENTICAL PCRs<br/>(same compiled binary) for cloning to succeed.<br/>The cloning_secret is a pre-shared operator value;<br/>the donor reads it from UTEXO_CLONING_SECRET.
+    Note over Req,Don: Both enclaves must have IDENTICAL PCRs<br/>(same compiled binary) for cloning to succeed.<br/>The cloning_secret is a pre-shared operator value,<br/>the donor reads it from UTEXO_CLONING_SECRET.
 
     Note over Op,Req: Message 1 — parent → requester
     Op->>Parent: gRPC Initialize(cloning_secret)
@@ -36,7 +36,7 @@ sequenceDiagram
     Don->>Don: verified.user_data == cloning_digest (digest binding)
     Don->>Don: with_donor_cloning_secret:<br/>HMAC(secret, encryption_pubkey) == cloning_digest
     Don->>Don: with_seed: (ct, donor_pubkey) :=<br/>encrypt_seed_for_peer(encryption_pubkey, seed)
-    Note right of Don: encrypt_seed_for_peer:<br/>our_eph := EphemeralSecret::random<br/>shared := our_eph * encryption_pubkey<br/>reject_non_contributory(shared) — small-order guard<br/>key := HKDF-SHA256(shared, salt="utexo-cloning-v1",<br/>  info="seed-encryption" ‖ donor_pub ‖ requester_pub)<br/>ct := ChaCha20Poly1305(key, nonce=[0;12]).encrypt(seed)
+    Note right of Don: encrypt_seed_for_peer:<br/>our_eph := EphemeralSecret::random<br/>shared := our_eph * encryption_pubkey<br/>reject_non_contributory(shared) — small-order guard<br/>key := HKDF-SHA256(shared, salt="utexo-cloning-v1",<br/>  info="seed-encryption" ‖ donor_pub ‖ requester_pub)<br/>ct := ChaCha20Poly1305(key, nonce=[0,12]).encrypt(seed)
     Don->>Don: donor_nonce := getrandom_32()
     Don->>DN: NSM Attestation(donor_nonce, public_key=donor_pubkey, user_data=None)
     DN-->>Don: donor_attestation
@@ -54,5 +54,5 @@ sequenceDiagram
     Req-->>Parent: SetCloneResponse{} (empty)
     Parent-->>Op: Initialize OK (probes GetPublicKey for confirmation)
 
-    Note over Req,Don: After SetClone the requester has the IDENTICAL HD seed<br/>as the donor and signs as the same address. Plaintext seed<br/>exists only inside the requester's TEE briefly<br/>(Zeroizing&lt;[u8;64]&gt;); ciphertext on the wire is bound to<br/>the per-handshake DH key by HKDF info = donor‖requester.
+    Note over Req,Don: After SetClone the requester has the IDENTICAL HD seed<br/>as the donor and signs as the same address. Plaintext seed<br/>exists only inside the requester's TEE briefly<br/>(Zeroizing 64-byte buffer), ciphertext on the wire is bound to<br/>the per-handshake DH key by HKDF info = donor‖requester.
 ```

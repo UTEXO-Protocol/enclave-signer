@@ -60,7 +60,7 @@ sequenceDiagram
     Verify-->>Lib: VerifiedAttestation{pubkey, pcrs, user_data, ...}
 
     Lib->>Lib: assert verified.enclave_pubkey ==<br/>response.evm_uncompressed_pub
-    Lib->>Lib: rebuild canonical_bundle locally;<br/>assert verified.user_data == sha256(bundle)
+    Lib->>Lib: rebuild canonical_bundle locally,<br/>assert verified.user_data == sha256(bundle)
 
     Lib-->>Cli: AttestedPubkeyResult
     Cli-->>V: OK + printed bundle + PCRs
