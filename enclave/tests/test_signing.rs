@@ -1,8 +1,23 @@
 mod common;
 
+use utexo_bridge_enclave::config::BridgeConfig;
 use utexo_bridge_enclave::proto::enclave_request::Request;
 use utexo_bridge_enclave::proto::enclave_response::Response;
 use utexo_bridge_enclave::proto::*;
+
+/// Pinned `BridgeConfig` matching the defaults of `valid_sign_evm_request`
+/// (chain_id 1, proxy/bridge contract `0xAA…`, asset `rgb:test`). Tests
+/// that need to pass the production fail-closed gate (audit TEE-SE-12) and
+/// the pinned cross-check inject this rather than relying on env, which is
+/// the empty/unconfigured default in CI.
+#[allow(dead_code)]
+fn pinned_bridge_config() -> BridgeConfig {
+    BridgeConfig {
+        chain_id: 1,
+        bridge_contract: [0xAA; 20],
+        rgb_asset_id: "rgb:test".into(),
+    }
+}
 
 /// Build a mock fundsOut calldata with the given amount and commission.
 /// fundsOut(address token, address recipient, uint256 amount, uint256 commission, ...)
@@ -264,7 +279,10 @@ fn test_sign_evm_rejects_consignment_valid_with_empty_bytes() {
 #[cfg(feature = "rgb-validation")]
 #[test]
 fn test_sign_evm_rejects_funds_out_without_validator() {
-    let port = common::start_test_server();
+    // Pinned config so the request clears the production fail-closed gate
+    // (TEE-SE-12) and the pinned cross-check, leaving the handler-level
+    // "validator didn't run" check as the failing predicate under test.
+    let port = common::start_test_server_with_config(|_| {}, pinned_bridge_config());
 
     let init_req = EnclaveRequest {
         request: Some(Request::InitializeKey(InitializeKeyRequest {
@@ -288,6 +306,52 @@ fn test_sign_evm_rejects_funds_out_without_validator() {
             assert!(
                 e.message.contains("validated consignment"),
                 "expected validated-consignment rejection, got: {}",
+                e.message
+            );
+        }
+        other => panic!("expected ErrorResponse, got {:?}", other),
+    }
+}
+
+/// Fail-closed regression (audit TEE-SE-12): a build that can validate
+/// consignments must refuse to sign when no operator config is pinned,
+/// rather than silently degrading to the listener-trusting model. The
+/// integration harness builds the library without `cfg(test)`, so the
+/// production guard in `validate_evm_request` is active here — exactly the
+/// path a misprovisioned-but-running enclave would hit. Uses an
+/// unconfigured `BridgeConfig` (constructed explicitly so a developer's
+/// env can't accidentally configure it away).
+#[cfg(feature = "rgb-validation")]
+#[test]
+fn test_sign_evm_rejects_unconfigured_bridge_config() {
+    let unconfigured = BridgeConfig {
+        chain_id: 0,
+        bridge_contract: [0u8; 20],
+        rgb_asset_id: String::new(),
+    };
+    let port = common::start_test_server_with_config(|_| {}, unconfigured);
+
+    let init_req = EnclaveRequest {
+        request: Some(Request::InitializeKey(InitializeKeyRequest {
+            seed: vec![],
+            mnemonic: String::new(),
+        })),
+    };
+    common::send_request(port, &init_req);
+
+    // A fully-formed, otherwise-valid fundsOut request — the only thing
+    // wrong is that the enclave was never provisioned with a pin.
+    let sign_req = EnclaveRequest {
+        request: Some(Request::SignEvm(valid_sign_evm_request(1000, 50))),
+    };
+    let resp = common::send_request(port, &sign_req);
+
+    match &resp.response {
+        Some(Response::Error(e)) => {
+            assert_eq!(e.code, 3, "cross-check failures should use code 3");
+            assert!(
+                e.message.contains("unconfigured"),
+                "expected unconfigured fail-closed rejection, got: {}",
                 e.message
             );
         }

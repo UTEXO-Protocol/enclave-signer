@@ -73,3 +73,50 @@ jobs:
       # what the SPV unit + integration tests exercise.
       - name: Test (--features spv)
         run: cargo test -p utexo-bridge-enclave --features spv
+
+  # Assert the dev-only features `compile_error!` in a release build, so a
+  # misconfigured Dockerfile / CI matrix can never ship one. Each feature is
+  # built individually with `--release`; the build MUST fail, and fail via
+  # our guard rather than some unrelated error. Runs separately from `ci`
+  # because these builds are expected to fail. None of the three features
+  # pulls the private SSH-hosted rgb dep, so no deploy key is needed here.
+  release-guards:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        feature: [allow-seed-import, mock-attestation, dev-mode]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust 1.89
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.89"
+
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y pkg-config libssl-dev protobuf-compiler
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-release-guards-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-release-guards-
+
+      - name: Assert release build is rejected with ${{ matrix.feature }}
+        run: |
+          if cargo build -p utexo-bridge-enclave --release --features ${{ matrix.feature }} 2>build.log; then
+            echo "::error::release build unexpectedly SUCCEEDED with '${{ matrix.feature }}' — the compile_error release guard is missing or not firing"
+            exit 1
+          fi
+          if ! grep -q "must not be enabled in a release build" build.log; then
+            echo "::error::release build failed, but not via the expected compile_error guard for '${{ matrix.feature }}'"
+            cat build.log
+            exit 1
+          fi
+          echo "OK: release build correctly rejected '${{ matrix.feature }}' via the compile_error guard"
