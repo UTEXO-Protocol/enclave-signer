@@ -78,8 +78,7 @@ jobs:
   # misconfigured Dockerfile / CI matrix can never ship one. Each feature is
   # built individually with `--release`; the build MUST fail, and fail via
   # our guard rather than some unrelated error. Runs separately from `ci`
-  # because these builds are expected to fail. None of the three features
-  # pulls the private SSH-hosted rgb dep, so no deploy key is needed here.
+  # because these builds are expected to fail.
   release-guards:
     runs-on: ubuntu-latest
     strategy:
@@ -97,6 +96,15 @@ jobs:
 
       - name: Install system dependencies
         run: sudo apt-get update && sudo apt-get install -y pkg-config libssl-dev protobuf-compiler
+
+      # `rgb-consignment` is an optional git dep, but cargo still resolves
+      # (and fetches) it from its pinned lockfile revision even when the
+      # feature is off — so the build needs the deploy key to reach the
+      # `compile_error!`, just like the `ci` job above.
+      - name: Set up SSH for private RGB deps
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.RGB_CONSIGNMENT_PARSER_DEPLOY_KEY }}
 
       - name: Cache cargo registry
         uses: actions/cache@v4
