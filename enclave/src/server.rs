@@ -395,21 +395,24 @@ fn handle_sign_evm(ctx: &ServerContext, req: SignEvmRequest) -> Result<EnclaveRe
     #[cfg(not(feature = "dev-mode"))]
     validation::evm_crosscheck::validate_evm_request(&req, &ctx.bridge_config)?;
 
-    // Consignment-bound amount cross-check for both fundsOut selectors.
-    // Every fundsOut signature must be backed by a validated consignment
-    // and an amount that the consignment's last transition actually
-    // accounts for. This is the second half of the bypass closure
-    // started in `validate_evm_request`: that function rejects empty
-    // bytes; this block rejects "bytes present but validator didn't run"
-    // and binds the EVM-side amount to the RGB-side amount.
+    // Consignment-bound amount cross-check for the `fundsOut` transfer
+    // flow. Every fundsOut signature must be backed by a validated
+    // consignment and an amount the consignment's last transition
+    // actually accounts for. This is the second half of the bypass
+    // closure started in `validate_evm_request`: that function rejects
+    // empty bytes; this block rejects "bytes present but validator
+    // didn't run" and binds the EVM-side amount to the RGB-side amount.
     //
-    // `validate_funds_out_burn` / `validate_funds_out_transfer` each
-    // no-op when the selector isn't theirs, so calling both here is
-    // safe — exactly one fires per request.
+    // The contract exposes a single `fundsOut` selector shared by the
+    // pools/transfer flow (live) and the future mint/burn unlock flow,
+    // disambiguated by contract address. Only the transfer check is
+    // wired today — a burn consignment on this selector is rejected by
+    // `validate_funds_out_transfer` ("requires a Transfer transition").
+    // `validate_funds_out_burn` is wired in the mint/burn epic (by the
+    // dedicated mint/burn contract address).
     #[cfg(all(feature = "rgb-validation", not(feature = "dev-mode")))]
     if req.call_data.len() >= 4
-        && (req.call_data[..4] == validation::evm_crosscheck::FUNDS_OUT_SELECTOR_MINTBURN
-            || req.call_data[..4] == validation::evm_crosscheck::FUNDS_OUT_SELECTOR_POOLS_LEGACY)
+        && req.call_data[..4] == validation::evm_crosscheck::FUNDS_OUT_SELECTOR_POOLS
     {
         let validated = validated_consignment.as_ref().ok_or_else(|| {
             EnclaveError::CrossCheck(
@@ -418,7 +421,6 @@ fn handle_sign_evm(ctx: &ServerContext, req: SignEvmRequest) -> Result<EnclaveRe
                     .into(),
             )
         })?;
-        validation::evm_crosscheck::validate_funds_out_burn(&req, validated)?;
         validation::evm_crosscheck::validate_funds_out_transfer(&req, validated)?;
     }
 

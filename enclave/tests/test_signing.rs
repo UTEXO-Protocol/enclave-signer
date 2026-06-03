@@ -19,38 +19,25 @@ fn pinned_bridge_config() -> BridgeConfig {
     }
 }
 
-/// Build a mock fundsOut calldata with the given amount and commission.
-/// fundsOut(address token, address recipient, uint256 amount, uint256 commission, ...)
-///
-/// Selector `0x1ad880b2` is the 6-arg
-/// `fundsOut(address,address,uint256,uint256,string,string)` accepted by
-/// `validation::evm_crosscheck`'s whitelist.
-fn mock_funds_out_calldata(
-    token: [u8; 20],
-    recipient: [u8; 20],
-    amount: u64,
-    commission: u64,
-) -> Vec<u8> {
-    let mut data = Vec::with_capacity(4 + 7 * 32);
-    data.extend_from_slice(&[0x1a, 0xd8, 0x80, 0xb2]);
-    // address token (padded to 32 bytes)
-    let mut padded = [0u8; 32];
-    padded[12..].copy_from_slice(&token);
-    data.extend_from_slice(&padded);
-    // address recipient (padded to 32 bytes)
+/// Build a mock `fundsOut` calldata in the 8-arg shape
+/// `fundsOut(address,uint256,uint256,uint256,uint256,string,bytes,bytes)`
+/// (selector `0xccddb768`) — the single `fundsOut` on the deployed
+/// contract, accepted by `validation::evm_crosscheck`'s whitelist.
+/// `amount` sits at offset 36 (after selector + recipient).
+fn mock_funds_out_calldata(recipient: [u8; 20], amount: u64) -> Vec<u8> {
+    let mut data = Vec::with_capacity(4 + 8 * 32);
+    data.extend_from_slice(&[0xcc, 0xdd, 0xb7, 0x68]);
+    // recipient (address, padded to 32 bytes) @ offset 4
     let mut padded = [0u8; 32];
     padded[12..].copy_from_slice(&recipient);
     data.extend_from_slice(&padded);
-    // uint256 amount
+    // amount (uint256) @ offset 36
     let mut padded = [0u8; 32];
     padded[24..].copy_from_slice(&amount.to_be_bytes());
     data.extend_from_slice(&padded);
-    // uint256 commission
-    let mut padded = [0u8; 32];
-    padded[24..].copy_from_slice(&commission.to_be_bytes());
-    data.extend_from_slice(&padded);
-    // remaining params (transactionId, sourceChain, sourceAddress) — zero-fill
-    data.extend_from_slice(&[0u8; 32 * 3]);
+    // 6 more head slots zero-filled (burnId, sourceChainId,
+    // destinationChainId, srcAddrOffset, proofOffset, settlementDataOffset).
+    data.extend_from_slice(&[0u8; 32 * 6]);
     data
 }
 
@@ -68,10 +55,12 @@ fn placeholder_consignment_hash() -> Vec<u8> {
     Keccak256::digest(PLACEHOLDER_CONSIGNMENT).to_vec()
 }
 
-/// Build a valid enriched SignEvmRequest for testing.
+/// Build a valid enriched SignEvmRequest for testing. `commission` is
+/// retained on the proto fields for wire-compat but is no longer part of
+/// the calldata (the contract takes commission on-chain).
 fn valid_sign_evm_request(amount: u64, commission: u64) -> SignEvmRequest {
     SignEvmRequest {
-        call_data: mock_funds_out_calldata([0x11; 20], [0x22; 20], amount, commission),
+        call_data: mock_funds_out_calldata([0x22; 20], amount),
         nonce: 1,
         deadline: u64::MAX,
         consignment_valid: true,
@@ -359,73 +348,17 @@ fn test_sign_evm_rejects_unconfigured_bridge_config() {
     }
 }
 
-// The two amount-mismatch tests below exercise byte-level cross-checks
-// inside `validate_evm_request` that only run under `--features
-// rgb-validation` (the rest of the function is gated behind that cfg
-// now that fundsOut signing requires real consignment bytes). Default
-// builds refuse fundsOut outright, covered by the
-// `rejects_funds_out_in_default_build` test further down.
-#[cfg(feature = "rgb-validation")]
-#[test]
-fn test_sign_evm_rejects_amount_mismatch() {
-    let port = common::start_test_server();
-
-    let init_req = EnclaveRequest {
-        request: Some(Request::InitializeKey(InitializeKeyRequest {
-            seed: vec![],
-            mnemonic: String::new(),
-        })),
-    };
-    common::send_request(port, &init_req);
-
-    let mut req = valid_sign_evm_request(90, 20);
-    req.rgb_amount = 100; // 90 + 20 = 110 > 100 => should fail
-
-    let sign_req = EnclaveRequest {
-        request: Some(Request::SignEvm(req)),
-    };
-    let resp = common::send_request(port, &sign_req);
-
-    match &resp.response {
-        Some(Response::Error(e)) => {
-            assert_eq!(e.code, 3);
-            assert!(e.message.contains("amount mismatch"));
-        }
-        other => panic!("expected ErrorResponse, got {:?}", other),
-    }
-}
-
-#[cfg(feature = "rgb-validation")]
-#[test]
-fn test_sign_evm_rejects_calldata_extraction_mismatch() {
-    let port = common::start_test_server();
-
-    let init_req = EnclaveRequest {
-        request: Some(Request::InitializeKey(InitializeKeyRequest {
-            seed: vec![],
-            mnemonic: String::new(),
-        })),
-    };
-    common::send_request(port, &init_req);
-
-    let mut req = valid_sign_evm_request(1000, 50);
-    // Lie about the calldata amount — doesn't match what's in the raw bytes
-    req.calldata_amount = 9999;
-    req.rgb_amount = 99999; // make sure the amount check passes first
-
-    let sign_req = EnclaveRequest {
-        request: Some(Request::SignEvm(req)),
-    };
-    let resp = common::send_request(port, &sign_req);
-
-    match &resp.response {
-        Some(Response::Error(e)) => {
-            assert_eq!(e.code, 3);
-            assert!(e.message.contains("calldata amount mismatch"));
-        }
-        other => panic!("expected ErrorResponse, got {:?}", other),
-    }
-}
+// Amount binding now lives in `validate_funds_out_transfer`, which runs
+// against a `ValidatedConsignment` (the consignment is authoritative on
+// the amount, not the listener-supplied `rgb_amount`/`calldata_*`
+// fields). It's exhaustively unit-tested in
+// `validation::evm_crosscheck::tests::transfer`. The old integration
+// tests here asserted the removed `rgb_amount < calldata_amount +
+// commission` / byte-offset-68 checks in `validate_evm_request`; those
+// checks are gone with the single-`fundsOut` ABI (no commission slot,
+// amount bound to the consignment instead), so the integration cases
+// were removed rather than ported — they can't run without a configured
+// in-enclave validator, which the harness doesn't wire.
 
 /// Default-build coverage: `--features rgb-validation` is required to
 /// sign fundsOut at all. The cross-check fails fast with a message
