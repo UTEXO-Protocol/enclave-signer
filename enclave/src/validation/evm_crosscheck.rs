@@ -182,6 +182,24 @@ pub fn validate_evm_request(req: &SignEvmRequest, bridge_config: &BridgeConfig) 
             )));
         }
 
+        // 4a. Fail-closed when unconfigured (audit TEE-SE-12). A build that
+        //     can validate consignments (rgb-validation enabled — this whole
+        //     block) must refuse to sign when the operator pinned nothing:
+        //     otherwise a misprovisioned-but-running enclave silently degrades
+        //     to the pre-pin, listener-trusting model. The escape hatch is
+        //     intentionally narrow: dev-mode skips this function entirely (see
+        //     `handle_sign_evm`), and the library unit tests (`cfg(test)`) keep
+        //     exercising the legacy unconfigured path. Integration tests pin a
+        //     config explicitly via `start_test_server_with_config`.
+        #[cfg(not(test))]
+        if !bridge_config.is_configured() {
+            return Err(EnclaveError::CrossCheck(
+                "bridge config unconfigured: set EVM_CHAIN_ID / BRIDGE_CONTRACT / RGB_ASSET_ID \
+                 — refusing to sign in listener-trusting mode"
+                    .into(),
+            ));
+        }
+
         // 4b. Pinned-config cross-check. When the operator configured
         //     EVM_CHAIN_ID / BRIDGE_CONTRACT / RGB_ASSET_ID at boot, the
         //     listener-supplied values MUST match — otherwise a compromised
@@ -235,6 +253,57 @@ pub fn validate_evm_request(req: &SignEvmRequest, bridge_config: &BridgeConfig) 
 
         Ok(())
     }
+}
+
+/// Asset-identity binding (audit TEE-SE-01).
+///
+/// The in-enclave RGB validator derives `contract_id` from the
+/// consignment's genesis — it is the authoritative asset identity, not
+/// anything the listener declares. This binds that identity to the
+/// operator-pinned `RGB_ASSET_ID` and **fails closed when either side is
+/// absent**: without both, the enclave cannot prove the consignment is
+/// against the bridge's own asset, so a foreign-asset burn could otherwise
+/// authorise a USDT0 unlock (the listener-triggerable funds-theft path the
+/// finding describes).
+///
+/// `declared_rgb_asset_id` is the listener-supplied `req.rgb_asset_id`:
+/// advisory only. When present it must agree with the validated identity,
+/// but — unlike the previous check — an *empty* declared value no longer
+/// short-circuits the binding. The pin and the validated `contract_id` are
+/// what authorise the unlock.
+#[cfg(feature = "rgb-validation")]
+pub fn bind_asset_identity(
+    validated_contract_id: &str,
+    declared_rgb_asset_id: &str,
+    pinned_rgb_asset_id: &str,
+) -> Result<()> {
+    if pinned_rgb_asset_id.is_empty() {
+        return Err(EnclaveError::CrossCheck(
+            "asset-identity pin missing: RGB_ASSET_ID is not configured — refusing to bind \
+             consignment to an unknown asset"
+                .into(),
+        ));
+    }
+    if validated_contract_id.is_empty() {
+        return Err(EnclaveError::CrossCheck(
+            "validated consignment has empty contract_id — cannot bind asset identity".into(),
+        ));
+    }
+    if validated_contract_id != pinned_rgb_asset_id {
+        return Err(EnclaveError::CrossCheck(format!(
+            "contract_id mismatch: consignment asset {} != pinned RGB_ASSET_ID {}",
+            validated_contract_id, pinned_rgb_asset_id
+        )));
+    }
+    // Defence-in-depth: when the listener declares an asset it must agree
+    // with the validated identity. Never load-bearing on its own.
+    if !declared_rgb_asset_id.is_empty() && validated_contract_id != declared_rgb_asset_id {
+        return Err(EnclaveError::CrossCheck(format!(
+            "contract_id mismatch: consignment has {} but request declares {}",
+            validated_contract_id, declared_rgb_asset_id
+        )));
+    }
+    Ok(())
 }
 
 /// Mint/burn-side amount cross-check for the new 8-arg `fundsOut`
@@ -951,6 +1020,84 @@ mod tests {
             assert!(validate_funds_out_transfer(&req, &validated).is_ok());
         }
     }
+
+    // =========================================================================
+    // Asset-identity binding — `bind_asset_identity` (audit TEE-SE-01,
+    // coverage map U-1 / T-01). The validated consignment's `contract_id`
+    // must match the pinned RGB_ASSET_ID; neither side may be absent.
+    // =========================================================================
+
+    #[cfg(feature = "rgb-validation")]
+    mod asset_bind {
+        use super::*;
+
+        const PIN: &str = "rgb:test-asset";
+
+        /// Happy path: validated contract_id == pin, listener agrees.
+        #[test]
+        fn binds_when_contract_id_matches_pin() {
+            assert!(bind_asset_identity(PIN, PIN, PIN).is_ok());
+        }
+
+        /// Listener may stay silent; the pin + validated identity carry it.
+        #[test]
+        fn binds_when_declared_is_empty() {
+            assert!(bind_asset_identity(PIN, "", PIN).is_ok());
+        }
+
+        /// The core bypass: an empty `req.rgb_asset_id` must NOT skip the
+        /// binding. A foreign-asset consignment with no declared id must be
+        /// rejected against the pin rather than waved through.
+        #[test]
+        fn rejects_foreign_asset_even_when_declared_is_empty() {
+            let err = bind_asset_identity("rgb:foreign-asset", "", PIN).unwrap_err();
+            assert!(
+                err.to_string().contains("contract_id mismatch")
+                    && err.to_string().contains("pinned RGB_ASSET_ID"),
+                "expected pin mismatch, got: {err}"
+            );
+        }
+
+        /// Fail-closed when the operator pinned no asset.
+        #[test]
+        fn rejects_when_pin_absent() {
+            let err = bind_asset_identity(PIN, PIN, "").unwrap_err();
+            assert!(
+                err.to_string().contains("asset-identity pin missing"),
+                "expected pin-missing rejection, got: {err}"
+            );
+        }
+
+        /// Fail-closed when the consignment yields no contract identity.
+        #[test]
+        fn rejects_when_contract_id_absent() {
+            let err = bind_asset_identity("", PIN, PIN).unwrap_err();
+            assert!(
+                err.to_string().contains("empty contract_id"),
+                "expected empty-contract_id rejection, got: {err}"
+            );
+        }
+
+        /// Listener declares a different asset than the validated identity:
+        /// the defence-in-depth leg fires even though the pin matches.
+        #[test]
+        fn rejects_when_declared_disagrees_with_validated() {
+            let err = bind_asset_identity(PIN, "rgb:listener-lied", PIN).unwrap_err();
+            assert!(
+                err.to_string().contains("request declares"),
+                "expected declared-mismatch rejection, got: {err}"
+            );
+        }
+    }
+
+    // =========================================================================
+    // Fail-closed when unconfigured (4a) — `validate_evm_request` rejects in
+    // production builds (audit TEE-SE-12). The unconfigured guard is compiled
+    // out under `cfg(test)`, so this is asserted at the integration layer
+    // (`enclave/tests/test_signing.rs`) where the library is built without
+    // `cfg(test)`. The unit tests here continue to exercise the legacy
+    // unconfigured path via `unconfigured()`.
+    // =========================================================================
 
     // =========================================================================
     // Pinned-config cross-check (4b) — `validate_evm_request` with pinned

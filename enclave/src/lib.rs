@@ -1,5 +1,46 @@
 #![deny(unsafe_code)]
 
+// Release guards (audit TEE-IK-01 / TEE-CL-02 + dev-mode). Three dev-only
+// features are catastrophic if accidentally enabled in a shipped build:
+//
+//   * `allow-seed-import` — the parent can install a chosen seed on a fresh
+//     enclave, defeating the in-enclave key custody.
+//   * `mock-attestation`  — zero-PCR attestation documents are accepted, so
+//     a forged "enclave" passes verification.
+//   * `dev-mode`          — every signing cross-check is skipped.
+//
+// A release build (`debug_assertions` off) must never carry any of them, so
+// each trips a `compile_error!` instead of producing a binary. A misconfigured
+// Dockerfile or CI matrix fails loudly at build time rather than shipping a
+// trust-defeating enclave. `not(test)` exempts `cargo test --release`, which
+// legitimately exercises the dev paths; local dev images build in debug
+// (`build/Dockerfile.enclave-dev`), which keeps `debug_assertions` on.
+//
+// `dev_feature_release_guard!` keeps the three checks in one place so the
+// pattern can't drift between features.
+macro_rules! dev_feature_release_guard {
+    ($feature:literal, $msg:literal) => {
+        #[cfg(all(feature = $feature, not(debug_assertions), not(test)))]
+        compile_error!($msg);
+    };
+}
+
+dev_feature_release_guard!(
+    "allow-seed-import",
+    "`allow-seed-import` must not be enabled in a release build (debug_assertions off): \
+     it lets the parent install a chosen seed. Build dev images in debug mode."
+);
+dev_feature_release_guard!(
+    "mock-attestation",
+    "`mock-attestation` must not be enabled in a release build (debug_assertions off): \
+     it accepts zero-PCR attestation documents."
+);
+dev_feature_release_guard!(
+    "dev-mode",
+    "`dev-mode` must not be enabled in a release build (debug_assertions off): \
+     it skips all signing cross-checks."
+);
+
 pub mod attestation;
 pub mod cloning;
 pub mod config;

@@ -368,13 +368,20 @@ fn handle_sign_evm(ctx: &ServerContext, req: SignEvmRequest) -> Result<EnclaveRe
                 witness_txids_count = v.witness_txids.len(),
                 "RGB consignment validated in-enclave"
             );
-            // Cross-check contract_id against declared rgb_asset_id if present
-            if !req.rgb_asset_id.is_empty() && v.contract_id != req.rgb_asset_id {
-                return Err(EnclaveError::CrossCheck(format!(
-                    "contract_id mismatch: consignment has {} but request declares {}",
-                    v.contract_id, req.rgb_asset_id
-                )));
-            }
+            // Asset-identity binding (audit TEE-SE-01). Bind the validated
+            // consignment's authoritative `contract_id` to the pinned
+            // RGB_ASSET_ID and fail closed when either is absent — closes
+            // the bypass where an empty `req.rgb_asset_id` skipped the
+            // identity check entirely. Skipped under dev-mode like the
+            // other cross-checks (#64 compile-guards dev-mode out of
+            // release); the qualified path avoids depending on the
+            // dev-mode-gated `validation` import alias.
+            #[cfg(not(feature = "dev-mode"))]
+            crate::validation::evm_crosscheck::bind_asset_identity(
+                &v.contract_id,
+                &req.rgb_asset_id,
+                &ctx.bridge_config.rgb_asset_id,
+            )?;
             Some(v)
         } else {
             tracing::warn!("RGB validator not configured, skipping in-enclave validation");

@@ -37,10 +37,16 @@ WORKDIR /build/enclave
 # the enclave fails-closed on any request that carries merkle_proofs,
 # which is what we want — build mismatch should always fail loudly.
 #
+# DEBUG build (no `--release`): `allow-seed-import` is one of the dev-only
+# features that `compile_error!`s in a release build (`debug_assertions`
+# off) — see the release guards in `enclave/src/lib.rs`. Building the dev
+# image in debug keeps `debug_assertions` on so the guard stays quiet while
+# still refusing the feature in any production (release) build.
+#
 # `--mount=type=ssh` exposes the SSH_AUTH_SOCK forwarded by `--ssh default`
 # only for the duration of this RUN, so no credentials end up in the
 # image layers.
-RUN --mount=type=ssh cargo build --release --features allow-seed-import,spv
+RUN --mount=type=ssh cargo build --features allow-seed-import,spv
 
 # ===== Runtime Stage =====
 FROM debian:bookworm-slim
@@ -52,7 +58,7 @@ RUN apt-get update && apt-get install -y \
 
 WORKDIR /home/enclave
 
-COPY --from=builder /build/target/release/utexo-bridge-enclave ./utexo-bridge-enclave
+COPY --from=builder /build/target/debug/utexo-bridge-enclave ./utexo-bridge-enclave
 
 RUN chown -R enclave:enclave .
 
