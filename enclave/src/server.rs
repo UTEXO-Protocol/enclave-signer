@@ -368,13 +368,20 @@ fn handle_sign_evm(ctx: &ServerContext, req: SignEvmRequest) -> Result<EnclaveRe
                 witness_txids_count = v.witness_txids.len(),
                 "RGB consignment validated in-enclave"
             );
-            // Cross-check contract_id against declared rgb_asset_id if present
-            if !req.rgb_asset_id.is_empty() && v.contract_id != req.rgb_asset_id {
-                return Err(EnclaveError::CrossCheck(format!(
-                    "contract_id mismatch: consignment has {} but request declares {}",
-                    v.contract_id, req.rgb_asset_id
-                )));
-            }
+            // Asset-identity binding (audit TEE-SE-01). Bind the validated
+            // consignment's authoritative `contract_id` to the pinned
+            // RGB_ASSET_ID and fail closed when either is absent — closes
+            // the bypass where an empty `req.rgb_asset_id` skipped the
+            // identity check entirely. Skipped under dev-mode like the
+            // other cross-checks (#64 compile-guards dev-mode out of
+            // release); the qualified path avoids depending on the
+            // dev-mode-gated `validation` import alias.
+            #[cfg(not(feature = "dev-mode"))]
+            crate::validation::evm_crosscheck::bind_asset_identity(
+                &v.contract_id,
+                &req.rgb_asset_id,
+                &ctx.bridge_config.rgb_asset_id,
+            )?;
             Some(v)
         } else {
             tracing::warn!("RGB validator not configured, skipping in-enclave validation");
@@ -388,21 +395,24 @@ fn handle_sign_evm(ctx: &ServerContext, req: SignEvmRequest) -> Result<EnclaveRe
     #[cfg(not(feature = "dev-mode"))]
     validation::evm_crosscheck::validate_evm_request(&req, &ctx.bridge_config)?;
 
-    // Consignment-bound amount cross-check for both fundsOut selectors.
-    // Every fundsOut signature must be backed by a validated consignment
-    // and an amount that the consignment's last transition actually
-    // accounts for. This is the second half of the bypass closure
-    // started in `validate_evm_request`: that function rejects empty
-    // bytes; this block rejects "bytes present but validator didn't run"
-    // and binds the EVM-side amount to the RGB-side amount.
+    // Consignment-bound amount cross-check for the `fundsOut` transfer
+    // flow. Every fundsOut signature must be backed by a validated
+    // consignment and an amount the consignment's last transition
+    // actually accounts for. This is the second half of the bypass
+    // closure started in `validate_evm_request`: that function rejects
+    // empty bytes; this block rejects "bytes present but validator
+    // didn't run" and binds the EVM-side amount to the RGB-side amount.
     //
-    // `validate_funds_out_burn` / `validate_funds_out_transfer` each
-    // no-op when the selector isn't theirs, so calling both here is
-    // safe — exactly one fires per request.
+    // The contract exposes a single `fundsOut` selector shared by the
+    // pools/transfer flow (live) and the future mint/burn unlock flow,
+    // disambiguated by contract address. Only the transfer check is
+    // wired today — a burn consignment on this selector is rejected by
+    // `validate_funds_out_transfer` ("requires a Transfer transition").
+    // `validate_funds_out_burn` is wired in the mint/burn epic (by the
+    // dedicated mint/burn contract address).
     #[cfg(all(feature = "rgb-validation", not(feature = "dev-mode")))]
     if req.call_data.len() >= 4
-        && (req.call_data[..4] == validation::evm_crosscheck::FUNDS_OUT_SELECTOR_MINTBURN
-            || req.call_data[..4] == validation::evm_crosscheck::FUNDS_OUT_SELECTOR_POOLS_LEGACY)
+        && req.call_data[..4] == validation::evm_crosscheck::FUNDS_OUT_SELECTOR_POOLS
     {
         let validated = validated_consignment.as_ref().ok_or_else(|| {
             EnclaveError::CrossCheck(
@@ -411,7 +421,6 @@ fn handle_sign_evm(ctx: &ServerContext, req: SignEvmRequest) -> Result<EnclaveRe
                     .into(),
             )
         })?;
-        validation::evm_crosscheck::validate_funds_out_burn(&req, validated)?;
         validation::evm_crosscheck::validate_funds_out_transfer(&req, validated)?;
     }
 

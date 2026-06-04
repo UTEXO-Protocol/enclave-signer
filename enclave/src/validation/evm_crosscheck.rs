@@ -10,41 +10,41 @@ use crate::proto::SignEvmRequest;
 #[cfg(feature = "rgb-validation")]
 use crate::validation::rgb::{ifa, ValidatedConsignment};
 
-/// `keccak256("fundsOut(address,address,uint256,uint256,string,string)")[0..4]`.
-/// 6-arg shape produced by the current `bridge-utexo` listener and
-/// accepted by the currently-deployed `Bridge` contract. Layout:
-/// `[4 selector][32 token][32 recipient][32 amount][32 transactionId][32 srcChainOffset][32 srcAddrOffset]...`.
-pub const FUNDS_OUT_SELECTOR_POOLS_LEGACY: [u8; 4] = [0x1a, 0xd8, 0x80, 0xb2];
-
 /// `keccak256("fundsOut(address,uint256,uint256,uint256,uint256,string,bytes,bytes)")[0..4]`.
-/// 8-arg mint/burn shape on `utexo-smart-contracts/dev` (PR #22
-/// route-plugin refactor). Layout:
+///
+/// The deployed `Bridge` contract (`utexo-smart-contracts/dev`, route-plugin
+/// refactor) exposes a **single** `fundsOut`. The pre-refactor 6-arg
+/// `fundsOut(address,address,uint256,uint256,string,string)` (`0x1ad880b2`)
+/// no longer exists. Both the pools/transfer flow (live now) and the
+/// future mint/burn unlock flow go through this one selector — they are
+/// deployed as separate `Bridge` instances and disambiguated by
+/// **contract address**, not by selector.
+///
+/// Layout:
 /// `[4 selector][32 recipient][32 amount][32 burnId][32 sourceChainId][32 destinationChainId][32 srcAddrOffset][32 proofOffset][32 settlementDataOffset]...`.
 /// `proof = abi.encode(uint256 blockHeight, bytes32 commitmentHash)` and
-/// `settlementData = abi.encode(uint256[] fundsInIds)`.
-pub const FUNDS_OUT_SELECTOR_MINTBURN: [u8; 4] = [0xcc, 0xdd, 0xb7, 0x68];
+/// `settlementData = abi.encode(uint256[] fundsInIds)` (mint/burn only).
+pub const FUNDS_OUT_SELECTOR_POOLS: [u8; 4] = [0xcc, 0xdd, 0xb7, 0x68];
 
 /// 4-byte function selectors the enclave is willing to sign `fundsOut`
 /// calldata for. Anything else is rejected up-front before any byte-level
 /// extraction runs.
 ///
-/// Per-selector dispatch happens further down inside
-/// [`validate_evm_request`] — the legacy pools selector keeps its old
-/// amount@68 / commission@100 byte-level checks; the new mint/burn
-/// selector defers amount validation to [`validate_funds_out_burn`]
-/// which compares against the consignment's burn-asset metadata.
-const FUNDS_OUT_SELECTORS: &[[u8; 4]] =
-    &[FUNDS_OUT_SELECTOR_POOLS_LEGACY, FUNDS_OUT_SELECTOR_MINTBURN];
+/// One entry today — the contract has a single `fundsOut`. The handler
+/// routes it to [`validate_funds_out_transfer`] (the live pools flow).
+/// Mint/burn unlock validation ([`validate_funds_out_burn`]) is not wired
+/// yet; it lands in the mint/burn epic, dispatched by contract address.
+const FUNDS_OUT_SELECTORS: &[[u8; 4]] = &[FUNDS_OUT_SELECTOR_POOLS];
 
-/// Byte offset of `amount` in the new 8-arg mint/burn `fundsOut`
-/// calldata. After the 4-byte selector and the 32-byte `recipient`
-/// head slot, `amount` (uint256) sits at byte 36..68.
+/// Byte offset of `amount` in the `fundsOut` calldata. After the 4-byte
+/// selector and the 32-byte `recipient` head slot, `amount` (uint256)
+/// sits at byte 36..68. Shared by the transfer and (future) burn paths
+/// since both use the same ABI.
 ///
-/// Only consumed by [`validate_funds_out_burn`], which lives behind
-/// `rgb-validation`; gate the const the same way so default builds
-/// don't warn about an unused symbol.
+/// Only consumed by the cross-check helpers behind `rgb-validation`;
+/// gate the const the same way so default builds don't warn.
 #[cfg(feature = "rgb-validation")]
-const MINTBURN_AMOUNT_OFFSET: usize = 36;
+const FUNDS_OUT_AMOUNT_OFFSET: usize = 36;
 
 /// Validate enriched SignEvmRequest before signing.
 /// Returns Ok(()) if all cross-checks pass, Err(EnclaveError::CrossCheck) if any fail.
@@ -130,46 +130,15 @@ pub fn validate_evm_request(req: &SignEvmRequest, bridge_config: &BridgeConfig) 
             ));
         }
 
-        // 2 + 3. Per-selector amount cross-checks. The legacy pools shape
-        //    has `calldata_commission`/`calldata_amount` listener-supplied
-        //    plus byte-level offset checks (the binding to the consignment's
-        //    actual asset amount lives in `validate_funds_out_transfer`,
-        //    called from the handler). The new mint/burn shape has no
-        //    commission slot at all and stores `amount` at a different
-        //    offset — its burn-side amount validation lives in
-        //    `validate_funds_out_burn`, also called from the handler.
-        if selector == FUNDS_OUT_SELECTOR_POOLS_LEGACY {
-            let required = req
-                .calldata_amount
-                .checked_add(req.calldata_commission)
-                .ok_or_else(|| {
-                    EnclaveError::CrossCheck("calldata amount + commission overflow".into())
-                })?;
-            if req.rgb_amount < required {
-                return Err(EnclaveError::CrossCheck(format!(
-                    "amount mismatch: rgb_amount ({}) < calldata_amount ({}) + calldata_commission ({})",
-                    req.rgb_amount, req.calldata_amount, req.calldata_commission
-                )));
-            }
-
-            // Calldata verification for the legacy 6-arg shape:
-            //   fundsOut(address token, address recipient, uint256 amount, uint256 transactionId, ...)
-            //   amount at offset 68, transactionId (historically named "commission") at offset 100.
-            let cd_amount = extract_uint256_as_u64(&req.call_data, 68)?;
-            if cd_amount != req.calldata_amount {
-                return Err(EnclaveError::CrossCheck(format!(
-                    "calldata amount mismatch: extracted {} != declared {}",
-                    cd_amount, req.calldata_amount
-                )));
-            }
-            let cd_commission = extract_uint256_as_u64(&req.call_data, 100)?;
-            if cd_commission != req.calldata_commission {
-                return Err(EnclaveError::CrossCheck(format!(
-                    "calldata commission mismatch: extracted {} != declared {}",
-                    cd_commission, req.calldata_commission
-                )));
-            }
-        }
+        // 2 + 3. Amount binding to the consignment is done in
+        //    `validate_funds_out_transfer` (called from the handler):
+        //    it reads `amount` from calldata at FUNDS_OUT_AMOUNT_OFFSET
+        //    and binds it to the validated transfer's output value. The
+        //    contract's `fundsOut` carries no commission slot (commission
+        //    is taken on-chain by `CommissionManager`), so there is no
+        //    commission to cross-check here, and we don't trust the
+        //    listener-supplied `rgb_amount`/`calldata_*` fields for the
+        //    amount decision — the consignment is authoritative.
 
         // 4. Chain/domain present
         if req.chain_id == 0 {
@@ -180,6 +149,24 @@ pub fn validate_evm_request(req: &SignEvmRequest, bridge_config: &BridgeConfig) 
                 "proxy_contract must be 20 bytes, got {}",
                 req.proxy_contract.len()
             )));
+        }
+
+        // 4a. Fail-closed when unconfigured (audit TEE-SE-12). A build that
+        //     can validate consignments (rgb-validation enabled — this whole
+        //     block) must refuse to sign when the operator pinned nothing:
+        //     otherwise a misprovisioned-but-running enclave silently degrades
+        //     to the pre-pin, listener-trusting model. The escape hatch is
+        //     intentionally narrow: dev-mode skips this function entirely (see
+        //     `handle_sign_evm`), and the library unit tests (`cfg(test)`) keep
+        //     exercising the legacy unconfigured path. Integration tests pin a
+        //     config explicitly via `start_test_server_with_config`.
+        #[cfg(not(test))]
+        if !bridge_config.is_configured() {
+            return Err(EnclaveError::CrossCheck(
+                "bridge config unconfigured: set EVM_CHAIN_ID / BRIDGE_CONTRACT / RGB_ASSET_ID \
+                 — refusing to sign in listener-trusting mode"
+                    .into(),
+            ));
         }
 
         // 4b. Pinned-config cross-check. When the operator configured
@@ -237,34 +224,88 @@ pub fn validate_evm_request(req: &SignEvmRequest, bridge_config: &BridgeConfig) 
     }
 }
 
-/// Mint/burn-side amount cross-check for the new 8-arg `fundsOut`
-/// (selector [`FUNDS_OUT_SELECTOR_MINTBURN`]).
+/// Asset-identity binding (audit TEE-SE-01).
+///
+/// The in-enclave RGB validator derives `contract_id` from the
+/// consignment's genesis — it is the authoritative asset identity, not
+/// anything the listener declares. This binds that identity to the
+/// operator-pinned `RGB_ASSET_ID` and **fails closed when either side is
+/// absent**: without both, the enclave cannot prove the consignment is
+/// against the bridge's own asset, so a foreign-asset burn could otherwise
+/// authorise a USDT0 unlock (the listener-triggerable funds-theft path the
+/// finding describes).
+///
+/// `declared_rgb_asset_id` is the listener-supplied `req.rgb_asset_id`:
+/// advisory only. When present it must agree with the validated identity,
+/// but — unlike the previous check — an *empty* declared value no longer
+/// short-circuits the binding. The pin and the validated `contract_id` are
+/// what authorise the unlock.
+#[cfg(feature = "rgb-validation")]
+pub fn bind_asset_identity(
+    validated_contract_id: &str,
+    declared_rgb_asset_id: &str,
+    pinned_rgb_asset_id: &str,
+) -> Result<()> {
+    if pinned_rgb_asset_id.is_empty() {
+        return Err(EnclaveError::CrossCheck(
+            "asset-identity pin missing: RGB_ASSET_ID is not configured — refusing to bind \
+             consignment to an unknown asset"
+                .into(),
+        ));
+    }
+    if validated_contract_id.is_empty() {
+        return Err(EnclaveError::CrossCheck(
+            "validated consignment has empty contract_id — cannot bind asset identity".into(),
+        ));
+    }
+    if validated_contract_id != pinned_rgb_asset_id {
+        return Err(EnclaveError::CrossCheck(format!(
+            "contract_id mismatch: consignment asset {} != pinned RGB_ASSET_ID {}",
+            validated_contract_id, pinned_rgb_asset_id
+        )));
+    }
+    // Defence-in-depth: when the listener declares an asset it must agree
+    // with the validated identity. Never load-bearing on its own.
+    if !declared_rgb_asset_id.is_empty() && validated_contract_id != declared_rgb_asset_id {
+        return Err(EnclaveError::CrossCheck(format!(
+            "contract_id mismatch: consignment has {} but request declares {}",
+            validated_contract_id, declared_rgb_asset_id
+        )));
+    }
+    Ok(())
+}
+
+/// Mint/burn-side amount cross-check for the unlock flow.
+///
+/// **Not wired into the handler yet.** The contract exposes a single
+/// `fundsOut` selector ([`FUNDS_OUT_SELECTOR_POOLS`]) shared by the
+/// pools/transfer flow (live) and the mint/burn unlock flow (future),
+/// disambiguated by **contract address**. Until the mint/burn `Bridge`
+/// deployment exists and the handler routes to it by address, the
+/// handler sends this selector to [`validate_funds_out_transfer`] only,
+/// so a burn consignment is rejected there ("requires a Transfer
+/// transition"). This function is kept (and tested) so the unlock-side
+/// logic is ready to wire in the mint/burn epic (issues #57 / #59 / #66).
 ///
 /// Enforces the bridge-spec §8 invariant: an unlock can only release at
 /// most as many EVM units as the RGB side actually destroyed. Concretely:
 ///
 ///   1. The consignment's most recent transition must be an IFA `Burn`
-///      (`transition_type == ifa::TS_BURN`). Any other shape on the
-///      mint/burn selector path means the listener has cooked up a
-///      consignment that doesn't authorise an unlock.
+///      (`transition_type == ifa::TS_BURN`).
 ///   2. The burn transition must carry an `MS_BURNED_ASSET` metadata
 ///      value (the destroyed amount). rgbstd validation rejects burns
 ///      with no such metadata, so reaching this branch with `None`
 ///      indicates a schema mismatch.
-///   3. The calldata's `amount` (at byte offset 36 in the 8-arg shape)
-///      must be ≤ the burned amount. Equal is fine; over is the
-///      attack we're blocking.
+///   3. The calldata's `amount` (at [`FUNDS_OUT_AMOUNT_OFFSET`]) must be
+///      ≤ the burned amount. Equal is fine; over is the attack we block.
 ///
-/// A no-op for any other selector — the caller is expected to invoke
-/// this only after the main [`validate_evm_request`] has whitelisted
-/// the selector, but the no-op guard keeps the function safe to call
-/// unconditionally.
+/// A no-op for any other selector.
 #[cfg(feature = "rgb-validation")]
 pub fn validate_funds_out_burn(
     req: &SignEvmRequest,
     validated: &ValidatedConsignment,
 ) -> Result<()> {
-    if req.call_data.len() < 4 || req.call_data[..4] != FUNDS_OUT_SELECTOR_MINTBURN {
+    if req.call_data.len() < 4 || req.call_data[..4] != FUNDS_OUT_SELECTOR_POOLS {
         return Ok(());
     }
 
@@ -286,7 +327,7 @@ pub fn validate_funds_out_burn(
         )
     })?;
 
-    let calldata_amount = extract_uint256_as_u64(&req.call_data, MINTBURN_AMOUNT_OFFSET)?;
+    let calldata_amount = extract_uint256_as_u64(&req.call_data, FUNDS_OUT_AMOUNT_OFFSET)?;
     if burned < calldata_amount {
         return Err(EnclaveError::CrossCheck(format!(
             "burn amount mismatch: burned ({}) < calldata amount ({})",
@@ -296,27 +337,30 @@ pub fn validate_funds_out_burn(
     Ok(())
 }
 
-/// Pools-side amount cross-check for the legacy 6-arg `fundsOut`
-/// (selector [`FUNDS_OUT_SELECTOR_POOLS_LEGACY`]).
+/// Pools-side amount cross-check for the `fundsOut` transfer flow
+/// (selector [`FUNDS_OUT_SELECTOR_POOLS`]).
 ///
-/// Binds `calldata_amount + calldata_commission` to the consignment's
-/// actual asset value, closing the host-supplied `rgb_amount` trust
-/// gap that the byte-level checks in [`validate_evm_request`] cannot
-/// catch on their own. Concretely:
+/// Binds the calldata `amount` to the consignment's actual asset value,
+/// closing the host-supplied trust gap that a byte-level check in
+/// [`validate_evm_request`] cannot catch on its own. Concretely:
 ///
 ///   1. The consignment's most recent transition must be an IFA
 ///      `Transfer` (`transition_type == ifa::TS_TRANSFER`). Pools-mode
 ///      `fundsOut` releases funds against a federation-bound transfer;
-///      any other shape on this selector means the listener has cooked
-///      up a consignment that doesn't authorise a release.
+///      any other shape (e.g. a burn) on this selector means a
+///      consignment that doesn't authorise a pools release — and, until
+///      the mint/burn flow is wired by contract address, that includes
+///      rejecting burn consignments outright.
 ///   2. The transition's `total_output_amount` (sum across recipient
-///      and change legs) must cover the EVM-side release
-///      (`amount + commission`). This is a coarse binding — it doesn't
-///      verify which output landed on the federation seal — but with
-///      the existing SPV + contract_id cross-checks it raises the bar
-///      to "attacker must have a real, confirmed RGB transfer to the
-///      bridge for ≥ the withdrawal amount" rather than "attacker
-///      sets a field on the wire."
+///      and change legs) must cover the EVM-side release `amount`. This
+///      is a coarse binding — it doesn't yet verify which output landed
+///      on the federation seal (issue #58) — but with the SPV +
+///      contract_id pins it raises the bar to "attacker must have a
+///      real, confirmed RGB transfer to the bridge for ≥ the withdrawal
+///      amount" rather than "attacker sets a field on the wire."
+///
+/// The contract's `fundsOut` carries no commission slot (commission is
+/// taken on-chain by `CommissionManager`), so only `amount` is checked.
 ///
 /// A no-op for any other selector — same dispatch convention as
 /// [`validate_funds_out_burn`].
@@ -325,39 +369,33 @@ pub fn validate_funds_out_transfer(
     req: &SignEvmRequest,
     validated: &ValidatedConsignment,
 ) -> Result<()> {
-    if req.call_data.len() < 4 || req.call_data[..4] != FUNDS_OUT_SELECTOR_POOLS_LEGACY {
+    if req.call_data.len() < 4 || req.call_data[..4] != FUNDS_OUT_SELECTOR_POOLS {
         return Ok(());
     }
 
     let last = validated.last_transition.as_ref().ok_or_else(|| {
         EnclaveError::CrossCheck(
-            "pools-legacy fundsOut requires a consignment with at least one transition".into(),
+            "pools fundsOut requires a consignment with at least one transition".into(),
         )
     })?;
     if last.transition_type != ifa::TS_TRANSFER {
         return Err(EnclaveError::CrossCheck(format!(
-            "pools-legacy fundsOut requires a Transfer transition (last transition_type = {}, want {})",
+            "pools fundsOut requires a Transfer transition (last transition_type = {}, want {})",
             last.transition_type,
             ifa::TS_TRANSFER
         )));
     }
 
-    // Re-extract from raw calldata bytes rather than trusting
-    // `req.calldata_*` — same defence-in-depth pattern as
-    // `validate_funds_out_burn`. `validate_evm_request` has already
-    // checked that the byte-level extracts match the declared fields,
-    // so the two paths agree, but this keeps the consignment binding
-    // independent of any future refactor of the declared fields.
-    let calldata_amount = extract_uint256_as_u64(&req.call_data, 68)?;
-    let calldata_commission = extract_uint256_as_u64(&req.call_data, 100)?;
-    let required = calldata_amount
-        .checked_add(calldata_commission)
-        .ok_or_else(|| EnclaveError::CrossCheck("calldata amount + commission overflow".into()))?;
+    // Read `amount` straight from the calldata bytes rather than
+    // trusting `req.calldata_amount`, then bind it to the consignment's
+    // output value — the consignment is the authority on how much RGB
+    // actually moved to the bridge.
+    let calldata_amount = extract_uint256_as_u64(&req.call_data, FUNDS_OUT_AMOUNT_OFFSET)?;
 
-    if last.total_output_amount < required {
+    if last.total_output_amount < calldata_amount {
         return Err(EnclaveError::CrossCheck(format!(
-            "transfer amount mismatch: consignment total_output_amount ({}) < calldata_amount ({}) + calldata_commission ({})",
-            last.total_output_amount, calldata_amount, calldata_commission
+            "transfer amount mismatch: consignment total_output_amount ({}) < calldata amount ({})",
+            last.total_output_amount, calldata_amount
         )));
     }
     Ok(())
@@ -409,30 +447,23 @@ mod tests {
         }
     }
 
-    /// Build a mock fundsOut calldata with the given amount and commission.
-    /// Selector is the 6-arg `fundsOut(address,address,uint256,uint256,string,string)`
-    /// = `0x1ad880b2` — the one entry in `FUNDS_OUT_SELECTORS`.
-    fn mock_funds_out_calldata(amount: u64, commission: u64) -> Vec<u8> {
-        let mut data = Vec::with_capacity(4 + 7 * 32);
-        data.extend_from_slice(&FUNDS_OUT_SELECTORS[0]);
-        // address token (32 bytes, left-padded)
-        let mut padded = [0u8; 32];
-        padded[12..].copy_from_slice(&[0x11; 20]);
-        data.extend_from_slice(&padded);
-        // address recipient (32 bytes, left-padded)
-        let mut padded = [0u8; 32];
-        padded[12..].copy_from_slice(&[0x22; 20]);
-        data.extend_from_slice(&padded);
-        // uint256 amount
-        let mut padded = [0u8; 32];
-        padded[24..].copy_from_slice(&amount.to_be_bytes());
-        data.extend_from_slice(&padded);
-        // uint256 commission
-        let mut padded = [0u8; 32];
-        padded[24..].copy_from_slice(&commission.to_be_bytes());
-        data.extend_from_slice(&padded);
-        // remaining params — zero-fill
-        data.extend_from_slice(&[0u8; 32 * 3]);
+    /// Build a mock `fundsOut` calldata in the 8-arg shape
+    /// (`fundsOut(address,uint256,uint256,uint256,uint256,string,bytes,bytes)`
+    /// = [`FUNDS_OUT_SELECTOR_POOLS`]) with `amount` at
+    /// [`FUNDS_OUT_AMOUNT_OFFSET`] (byte 36). Remaining head slots are
+    /// zero-filled — `validate_evm_request` doesn't read them.
+    fn mock_funds_out_calldata(amount: u64) -> Vec<u8> {
+        let mut data = Vec::with_capacity(4 + 8 * 32);
+        data.extend_from_slice(&FUNDS_OUT_SELECTOR_POOLS);
+        // recipient (32, address)
+        data.extend_from_slice(&[0u8; 32]);
+        // amount (uint256) @ offset 36
+        let mut amt = [0u8; 32];
+        amt[24..].copy_from_slice(&amount.to_be_bytes());
+        data.extend_from_slice(&amt);
+        // 6 more head slots zero-filled (burnId, sourceChainId,
+        // destinationChainId, srcAddrOffset, proofOffset, settlementDataOffset).
+        data.extend_from_slice(&[0u8; 32 * 6]);
         data
     }
 
@@ -459,7 +490,7 @@ mod tests {
         let amount = 1000u64;
         let commission = 50u64;
         SignEvmRequest {
-            call_data: mock_funds_out_calldata(amount, commission),
+            call_data: mock_funds_out_calldata(amount),
             nonce: 1,
             deadline: u64::MAX, // far future
             consignment_valid: true,
@@ -513,26 +544,11 @@ mod tests {
         assert!(validate_evm_request(&req, &unconfigured()).is_ok());
     }
 
-    #[cfg(feature = "rgb-validation")]
-    #[test]
-    fn rejects_amount_mismatch_rgb_less_than_calldata() {
-        let mut req = valid_evm_request();
-        req.rgb_amount = 1049; // 1000 + 50 = 1050, so 1049 is insufficient
-        let err = validate_evm_request(&req, &unconfigured()).unwrap_err();
-        assert!(err.to_string().contains("amount mismatch"));
-    }
-
-    #[cfg(feature = "rgb-validation")]
-    #[test]
-    fn rejects_calldata_extraction_mismatch() {
-        let mut req = valid_evm_request();
-        // Declare a different amount than what's in the actual call_data bytes
-        req.calldata_amount = 9999;
-        // Bump rgb_amount so we pass the consignment amount check first
-        req.rgb_amount = 99999;
-        let err = validate_evm_request(&req, &unconfigured()).unwrap_err();
-        assert!(err.to_string().contains("calldata amount mismatch"));
-    }
+    // Amount binding moved out of `validate_evm_request` (no more
+    // `rgb_amount < calldata_amount + commission` or byte-offset-68
+    // checks) and into `validate_funds_out_transfer`, which binds the
+    // calldata amount to the consignment. See the `transfer` submodule
+    // for that coverage.
 
     #[cfg(feature = "rgb-validation")]
     #[test]
@@ -574,15 +590,6 @@ mod tests {
             err.to_string().contains("rgb-validation"),
             "expected feature-gate rejection, got: {err}"
         );
-    }
-
-    #[cfg(feature = "rgb-validation")]
-    #[test]
-    fn accepts_exact_amount_match() {
-        let mut req = valid_evm_request();
-        // rgb_amount == calldata_amount + calldata_commission exactly
-        req.rgb_amount = req.calldata_amount + req.calldata_commission;
-        assert!(validate_evm_request(&req, &unconfigured()).is_ok());
     }
 
     #[test]
@@ -674,12 +681,14 @@ mod tests {
         use crate::validation::rgb::{TransitionOutput, TransitionSummary, ValidatedConsignment};
 
         /// Build mint/burn-shape calldata with the given `amount` at
-        /// `MINTBURN_AMOUNT_OFFSET`. Everything else (recipient, burnId,
+        /// `FUNDS_OUT_AMOUNT_OFFSET`. Everything else (recipient, burnId,
         /// chain ids, dynamic offsets) is zero-filled — none of those
-        /// fields are inspected by `validate_funds_out_burn` today.
+        /// fields are inspected by `validate_funds_out_burn` today. Uses
+        /// the single `fundsOut` selector; burn-vs-transfer is decided by
+        /// the consignment's transition type, not the selector.
         fn mock_mintburn_calldata(amount: u64) -> Vec<u8> {
             let mut data = Vec::with_capacity(4 + 8 * 32);
-            data.extend_from_slice(&FUNDS_OUT_SELECTOR_MINTBURN);
+            data.extend_from_slice(&FUNDS_OUT_SELECTOR_POOLS);
             // recipient (32, address)
             data.extend_from_slice(&[0u8; 32]);
             // amount (uint256) — offset 36
@@ -799,21 +808,21 @@ mod tests {
         }
 
         #[test]
-        fn no_op_for_non_mintburn_selector() {
-            // Legacy pools-selector calldata — `validate_funds_out_burn`
-            // must not run any burn-side checks against it. Pair it
-            // with a deliberately-bad consignment (Transfer with no
-            // burn metadata) to make sure the function bails before
-            // reading anything.
+        fn no_op_for_non_funds_out_selector() {
+            // Calldata with a selector that isn't `fundsOut` —
+            // `validate_funds_out_burn` must not run any burn-side checks
+            // against it. Pair it with a deliberately-bad consignment
+            // (Transfer with no burn metadata) to make sure the function
+            // bails before reading anything.
             let mut req = req_with_calldata(vec![0u8; 100]);
-            req.call_data[..4].copy_from_slice(&FUNDS_OUT_SELECTOR_POOLS_LEGACY);
+            req.call_data[..4].copy_from_slice(&[0xde, 0xad, 0xbe, 0xef]);
             let validated = validated_with_last(burn_transition(None));
             assert!(validate_funds_out_burn(&req, &validated).is_ok());
         }
     }
 
     // =========================================================================
-    // Pools-legacy fundsOut tests — `validate_funds_out_transfer`
+    // Pools fundsOut tests — `validate_funds_out_transfer`
     // =========================================================================
 
     #[cfg(feature = "rgb-validation")]
@@ -841,26 +850,21 @@ mod tests {
             }
         }
 
-        /// Pools-legacy calldata with the given `amount` at byte 68 and
-        /// `commission` at byte 100, mirroring the test helper for the
-        /// main `validate_evm_request` tests.
-        fn mock_pools_legacy_calldata(amount: u64, commission: u64) -> Vec<u8> {
-            let mut data = Vec::with_capacity(4 + 7 * 32);
-            data.extend_from_slice(&FUNDS_OUT_SELECTOR_POOLS_LEGACY);
-            // token (32, address)
-            data.extend_from_slice(&[0u8; 32]);
+        /// 8-arg `fundsOut` calldata with `amount` at
+        /// [`FUNDS_OUT_AMOUNT_OFFSET`] (byte 36). The contract carries no
+        /// commission slot, so there's nothing else for the transfer
+        /// check to read.
+        fn mock_pools_calldata(amount: u64) -> Vec<u8> {
+            let mut data = Vec::with_capacity(4 + 8 * 32);
+            data.extend_from_slice(&FUNDS_OUT_SELECTOR_POOLS);
             // recipient (32, address)
             data.extend_from_slice(&[0u8; 32]);
-            // amount @ offset 68
+            // amount (uint256) @ offset 36
             let mut amt = [0u8; 32];
             amt[24..].copy_from_slice(&amount.to_be_bytes());
             data.extend_from_slice(&amt);
-            // commission @ offset 100
-            let mut com = [0u8; 32];
-            com[24..].copy_from_slice(&commission.to_be_bytes());
-            data.extend_from_slice(&com);
-            // 3 more head-slots zero-filled (transactionId, srcChainOffset, srcAddrOffset).
-            data.extend_from_slice(&[0u8; 32 * 3]);
+            // 6 more head slots zero-filled.
+            data.extend_from_slice(&[0u8; 32 * 6]);
             data
         }
 
@@ -883,26 +887,26 @@ mod tests {
         }
 
         #[test]
-        fn passes_when_total_output_covers_calldata_total() {
-            let req = req_with_calldata(mock_pools_legacy_calldata(1000, 50));
-            let validated = validated_with_last(transfer_transition(1050));
+        fn passes_when_total_output_covers_calldata_amount() {
+            let req = req_with_calldata(mock_pools_calldata(1000));
+            let validated = validated_with_last(transfer_transition(1000));
             assert!(validate_funds_out_transfer(&req, &validated).is_ok());
         }
 
         #[test]
-        fn passes_when_total_output_exceeds_calldata_total() {
-            let req = req_with_calldata(mock_pools_legacy_calldata(1000, 50));
+        fn passes_when_total_output_exceeds_calldata_amount() {
+            let req = req_with_calldata(mock_pools_calldata(1000));
             let validated = validated_with_last(transfer_transition(2000));
             assert!(validate_funds_out_transfer(&req, &validated).is_ok());
         }
 
-        /// P0 regression for Yulia's #3: even with a valid consignment
-        /// that deserializes and validates, the EVM-side release cannot
-        /// exceed the RGB-side transfer total. A consignment for 1 unit
-        /// must not authorise a withdrawal for 10^9.
+        /// P0 regression: even with a valid consignment that deserializes
+        /// and validates, the EVM-side release cannot exceed the RGB-side
+        /// transfer total. A consignment for 1 unit must not authorise a
+        /// withdrawal for 10^9.
         #[test]
-        fn rejects_when_total_output_less_than_calldata_total() {
-            let req = req_with_calldata(mock_pools_legacy_calldata(1_000_000_000, 0));
+        fn rejects_when_total_output_less_than_calldata_amount() {
+            let req = req_with_calldata(mock_pools_calldata(1_000_000_000));
             let validated = validated_with_last(transfer_transition(1));
             let err = validate_funds_out_transfer(&req, &validated).unwrap_err();
             assert!(
@@ -911,9 +915,12 @@ mod tests {
             );
         }
 
+        /// A burn consignment arriving on the (single) `fundsOut`
+        /// selector must be rejected by the transfer check — this is how
+        /// mint/burn stays off until it's wired by contract address.
         #[test]
         fn rejects_when_last_transition_is_not_transfer() {
-            let req = req_with_calldata(mock_pools_legacy_calldata(500, 0));
+            let req = req_with_calldata(mock_pools_calldata(500));
             let mut t = transfer_transition(500);
             t.transition_type = crate::validation::rgb::ifa::TS_BURN;
             let validated = validated_with_last(t);
@@ -926,7 +933,7 @@ mod tests {
 
         #[test]
         fn rejects_when_consignment_has_no_transition() {
-            let req = req_with_calldata(mock_pools_legacy_calldata(500, 0));
+            let req = req_with_calldata(mock_pools_calldata(500));
             let validated = ValidatedConsignment {
                 contract_id: "rgb:test".into(),
                 chain_net: "bc".into(),
@@ -942,15 +949,94 @@ mod tests {
         }
 
         #[test]
-        fn no_op_for_non_pools_legacy_selector() {
-            // Mint/burn-selector calldata — `validate_funds_out_transfer`
-            // must not run any transfer-side checks against it.
+        fn no_op_for_non_funds_out_selector() {
+            // Calldata with a selector that isn't `fundsOut` —
+            // `validate_funds_out_transfer` must not run any transfer-side
+            // checks against it.
             let mut req = req_with_calldata(vec![0u8; 4 + 8 * 32]);
-            req.call_data[..4].copy_from_slice(&FUNDS_OUT_SELECTOR_MINTBURN);
+            req.call_data[..4].copy_from_slice(&[0xde, 0xad, 0xbe, 0xef]);
             let validated = validated_with_last(transfer_transition(0));
             assert!(validate_funds_out_transfer(&req, &validated).is_ok());
         }
     }
+
+    // =========================================================================
+    // Asset-identity binding — `bind_asset_identity` (audit TEE-SE-01,
+    // coverage map U-1 / T-01). The validated consignment's `contract_id`
+    // must match the pinned RGB_ASSET_ID; neither side may be absent.
+    // =========================================================================
+
+    #[cfg(feature = "rgb-validation")]
+    mod asset_bind {
+        use super::*;
+
+        const PIN: &str = "rgb:test-asset";
+
+        /// Happy path: validated contract_id == pin, listener agrees.
+        #[test]
+        fn binds_when_contract_id_matches_pin() {
+            assert!(bind_asset_identity(PIN, PIN, PIN).is_ok());
+        }
+
+        /// Listener may stay silent; the pin + validated identity carry it.
+        #[test]
+        fn binds_when_declared_is_empty() {
+            assert!(bind_asset_identity(PIN, "", PIN).is_ok());
+        }
+
+        /// The core bypass: an empty `req.rgb_asset_id` must NOT skip the
+        /// binding. A foreign-asset consignment with no declared id must be
+        /// rejected against the pin rather than waved through.
+        #[test]
+        fn rejects_foreign_asset_even_when_declared_is_empty() {
+            let err = bind_asset_identity("rgb:foreign-asset", "", PIN).unwrap_err();
+            assert!(
+                err.to_string().contains("contract_id mismatch")
+                    && err.to_string().contains("pinned RGB_ASSET_ID"),
+                "expected pin mismatch, got: {err}"
+            );
+        }
+
+        /// Fail-closed when the operator pinned no asset.
+        #[test]
+        fn rejects_when_pin_absent() {
+            let err = bind_asset_identity(PIN, PIN, "").unwrap_err();
+            assert!(
+                err.to_string().contains("asset-identity pin missing"),
+                "expected pin-missing rejection, got: {err}"
+            );
+        }
+
+        /// Fail-closed when the consignment yields no contract identity.
+        #[test]
+        fn rejects_when_contract_id_absent() {
+            let err = bind_asset_identity("", PIN, PIN).unwrap_err();
+            assert!(
+                err.to_string().contains("empty contract_id"),
+                "expected empty-contract_id rejection, got: {err}"
+            );
+        }
+
+        /// Listener declares a different asset than the validated identity:
+        /// the defence-in-depth leg fires even though the pin matches.
+        #[test]
+        fn rejects_when_declared_disagrees_with_validated() {
+            let err = bind_asset_identity(PIN, "rgb:listener-lied", PIN).unwrap_err();
+            assert!(
+                err.to_string().contains("request declares"),
+                "expected declared-mismatch rejection, got: {err}"
+            );
+        }
+    }
+
+    // =========================================================================
+    // Fail-closed when unconfigured (4a) — `validate_evm_request` rejects in
+    // production builds (audit TEE-SE-12). The unconfigured guard is compiled
+    // out under `cfg(test)`, so this is asserted at the integration layer
+    // (`enclave/tests/test_signing.rs`) where the library is built without
+    // `cfg(test)`. The unit tests here continue to exercise the legacy
+    // unconfigured path via `unconfigured()`.
+    // =========================================================================
 
     // =========================================================================
     // Pinned-config cross-check (4b) — `validate_evm_request` with pinned

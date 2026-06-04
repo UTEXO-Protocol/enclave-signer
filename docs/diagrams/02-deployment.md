@@ -1,0 +1,54 @@
+# UTEXO Bridge Enclave-Signer — Deployment
+
+```mermaid
+flowchart TB
+    subgraph NET [Internet — untrusted]
+        V[External verifier]
+    end
+
+    subgraph ORC [Orchestrator host — operator-controlled]
+        L[Go Listener<br/>federated-signer-node]
+    end
+
+    subgraph EC2 [EC2 instance — Nitro-enabled, UNTRUSTED parent host]
+        Parent[utexo-bridge-parent<br/>tonic gRPC, 127.0.0.1:5000<br/>―<br/>Bound to 127.0.0.1 only.<br/>30 s timeout per enclave RPC.<br/>USE_VSOCK=true in production.]
+        Cli[utexo-bridge-parent-cli<br/>attest-verify CLI]
+        VP[vsock-proxy port 8001<br/>―<br/>Allowlist points to the<br/>Esplora endpoint only.]
+
+        subgraph ENCL [AWS Nitro Enclave — TRUSTED, PCR-pinned]
+            Bin[utexo-bridge-enclave<br/>static-linked Rust<br/>―<br/>Listens on vsock CID 16, port 5000.<br/>One connection = one request.<br/>No filesystem persistence.<br/>No shell. No /dev access except /dev/nsm.<br/>Bridge config pinned from env at boot<br/>EVM_CHAIN_ID / BRIDGE_CONTRACT / RGB_ASSET_ID<br/>→ bound into attestation.]
+            Headers[(Header chain<br/>in-memory)]
+            State[(EnclaveState<br/>Phase + KeyManager in SecretBox)]
+            Replay[(NonceReplayGuard<br/>≤10 000 entries)]
+            Fwd[vsock_forwarder<br/>TCP 127.0.0.1:3443 → vsock]
+            RgbVal[RgbValidator<br/>rgbstd + Esplora HTTP]
+            NSM[/dev/nsm — Nitro Security Module/]
+        end
+    end
+
+    Esp{{Esplora API}}
+
+    V -->|"gRPC /50051<br/>AttestedPublicKey(nonce)"| Parent
+    L -->|"gRPC /5000<br/>Sign / PublicKey / SubmitHeaders ..."| Parent
+    Cli -->|"direct enclave RPC (dev/ops only)<br/>TCP 127.0.0.1:5000 or vsock CID 16:5000"| ENCL
+
+    Parent -->|"vsock CID 16:5000<br/>u32 LE len + EnclaveRequest /<br/>u32 LE len + EnclaveResponse"| ENCL
+
+    Bin --> State
+    Bin --> Replay
+    Bin --> Headers
+    Bin --> RgbVal
+    Bin -->|"DescribePCR / Attestation"| NSM
+    Bin -->|"intra-enclave loopback"| Fwd
+    RgbVal --> Fwd
+    Fwd -->|"vsock CID 3:8001"| VP
+    VP -->|"real HTTP"| Esp
+```
+
+### Build / cluster notes
+
+- Built as an **EIF** via `nitro-cli build-enclave` from `build/Dockerfile.enclave`.
+  PCR0/1/2 are pinned at build time; any change in source → different PCRs → external
+  verifiers reject.
+- A cluster of N ≥ 2 EC2 instances share **one HD seed** via the cloning handshake.
+  Each node holds an identical `KeyManager` after `Cloning → Active`.
