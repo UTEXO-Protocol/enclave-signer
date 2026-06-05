@@ -183,16 +183,16 @@ pub fn assert_chain_not_stale(
 /// some niche flow) can never accidentally let a wrong-network consignment
 /// reach the signing path.
 pub fn assert_chain_net(consignment_chain_net: &str, enclave_network: Network) -> Result<()> {
-    let expected = match enclave_network {
-        Network::Mainnet => "bc",
-        Network::Signet => "bc:signet",
-        Network::Testnet3 => "bc:testnet3",
-        Network::Regtest => "bc:regtest",
+    let accepted: &[&str] = match enclave_network {
+        Network::Mainnet => &["bc"],
+        Network::Signet => &["bc:signet", "sb"],
+        Network::Testnet3 => &["bc:testnet3", "tb"],
+        Network::Regtest => &["bc:regtest"],
     };
-    if consignment_chain_net != expected {
+    if !accepted.contains(&consignment_chain_net) {
         return Err(EnclaveError::Spv(format!(
             "consignment chain_net {consignment_chain_net:?} does not match \
-             enclave network {enclave_network:?} (expected {expected:?})"
+             enclave network {enclave_network:?} (expected one of {accepted:?})"
         )));
     }
     Ok(())
@@ -662,7 +662,9 @@ mod tests {
     fn assert_chain_net_accepts_matching_pair() {
         assert_chain_net("bc", Network::Mainnet).unwrap();
         assert_chain_net("bc:signet", Network::Signet).unwrap();
+        assert_chain_net("sb", Network::Signet).unwrap();
         assert_chain_net("bc:testnet3", Network::Testnet3).unwrap();
+        assert_chain_net("tb", Network::Testnet3).unwrap();
         assert_chain_net("bc:regtest", Network::Regtest).unwrap();
     }
 
