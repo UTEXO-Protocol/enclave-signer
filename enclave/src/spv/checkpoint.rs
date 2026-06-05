@@ -10,7 +10,7 @@
 //!
 //! - **Mainnet checkpoint** — block 950 000 (2026-05-18). Verified via
 //!   double-SHA256 of raw header from blockstream.info/api.
-//! - **Signet checkpoint** — UTEXO custom signet block 311 000 (2026-05-25).
+//! - **Signet checkpoint** — UTEXO custom signet block 334 000 (2026-06-02).
 //!   Verified via double-SHA256 of raw header from esplora-api.utexo.com.
 //! - **Signet challenge / magic / block time** — REAL values, provided by
 //!   Oleksandr 2026-04-30. UTEXO custom signet, 3-of-3 multisig, 30s blocks.
@@ -54,17 +54,17 @@ pub const MAINNET_CHECKPOINT: Checkpoint = Checkpoint {
     is_real: true,
 };
 
-/// UTEXO custom signet checkpoint — block 311 000 (2026-05-25).
-/// hash (display): 00000236acddd52681c79ae733060376ce4f0ea0171876f2955e2125e32492f8
+/// UTEXO custom signet checkpoint — block 334 000 (2026-06-02).
+/// hash (display): 000000ac5fccb8a26d3bf859952e164b4fb65190c8f29c8339c6a2c39f3aeb66
 pub const SIGNET_CHECKPOINT: Checkpoint = Checkpoint {
-    height: 311_000,
+    height: 334_000,
     hash: [
-        0xf8, 0x92, 0x24, 0xe3, 0x25, 0x21, 0x5e, 0x95, 0xf2, 0x76, 0x18, 0x17, 0xa0, 0x0e, 0x4f,
-        0xce, 0x76, 0x03, 0x06, 0x33, 0xe7, 0x9a, 0xc7, 0x81, 0x26, 0xd5, 0xdd, 0xac, 0x36, 0x02,
+        0x66, 0xeb, 0x3a, 0x9f, 0xc3, 0xa2, 0xc6, 0x39, 0x83, 0x9c, 0xf2, 0xc8, 0x90, 0x51, 0xb6,
+        0x4f, 0x4b, 0x16, 0x2e, 0x95, 0x59, 0xf8, 0x3b, 0x6d, 0xa2, 0xb8, 0xcc, 0x5f, 0xac, 0x00,
         0x00, 0x00,
     ],
     bits: 0x1e03_77ae,
-    time: 1_779_756_628,
+    time: 1_780_464_472,
     is_real: true,
 };
 
