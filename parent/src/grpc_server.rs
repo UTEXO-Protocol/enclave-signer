@@ -191,6 +191,8 @@ impl EnclaveService for ParentAdapterService {
                             evm_commission: payload.evm_commission,
                             psbt_output_amount: payload.psbt_output_amount,
                             rgb_asset_id: payload.rgb_asset_id,
+                            consignment: payload.consignment,
+                            consignment_hash: payload.consignment_hash,
                         },
                     )),
                 }

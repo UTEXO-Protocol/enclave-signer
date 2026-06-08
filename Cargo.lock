@@ -2946,6 +2946,7 @@ dependencies = [
  "prost-build 0.13.5",
  "rand 0.8.5",
  "sha2",
+ "sha3",
  "thiserror 2.0.18",
  "tokio",
  "tonic",

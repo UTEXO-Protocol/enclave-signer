@@ -89,7 +89,7 @@ fn dispatch(request: EnclaveRequest, ctx: &ServerContext) -> EnclaveResponse {
         }
         Some(Request::SignPsbt(req)) => {
             tracing::info!("request: SignPsbt");
-            handle_sign_psbt(&ctx.state, req)
+            handle_sign_psbt(ctx, req)
         }
         Some(Request::SignRawMessage(req)) => {
             tracing::info!("request: SignRawMessage");
@@ -499,12 +499,22 @@ fn handle_sign_evm(ctx: &ServerContext, req: SignEvmRequest) -> Result<EnclaveRe
     })
 }
 
-fn handle_sign_psbt(state: &EnclaveState, req: SignPsbtRequest) -> Result<EnclaveResponse> {
+fn handle_sign_psbt(ctx: &ServerContext, req: SignPsbtRequest) -> Result<EnclaveResponse> {
     // Cross-check enriched fields before signing (skipped in dev-mode)
     #[cfg(not(feature = "dev-mode"))]
     validation::psbt_crosscheck::validate_psbt_request(&req)?;
 
-    let (signed_psbt, inputs_signed) = state.sign_psbt(&req.psbt_bytes)?;
+    // Send-RGB (EVM-lock → RGB-send) consignment binding. In bridge mode the
+    // PSBT being signed IS the RGB transfer's witness transaction; bind it to
+    // the validated consignment so a signed PSBT can't move bridge BTC without
+    // finalizing the claimed RGB transition. Vanilla mode (empty evm_tx_hash,
+    // e.g. create_utxo) carries no consignment and skips this entirely.
+    #[cfg(all(feature = "rgb-validation", not(feature = "dev-mode")))]
+    if !req.evm_tx_hash.is_empty() {
+        psbt_consignment_crosscheck(ctx, &req)?;
+    }
+
+    let (signed_psbt, inputs_signed) = ctx.state.sign_psbt(&req.psbt_bytes)?;
 
     tracing::info!(inputs_signed, "PSBT signed");
 
@@ -514,6 +524,103 @@ fn handle_sign_psbt(state: &EnclaveState, req: SignPsbtRequest) -> Result<Enclav
             inputs_signed: inputs_signed as u32,
         })),
     })
+}
+
+/// Bind a send-RGB (EVM-lock → RGB-send) PSBT to the RGB consignment it
+/// claims to finalize. Mirrors the consignment-validation block of
+/// [`handle_sign_evm`]: full rgbstd validation → keccak integrity →
+/// asset-identity pin → then the PSBT-specific anchor check
+/// ([`validation::psbt_crosscheck::validate_psbt_anchors_transition`]).
+///
+/// Fail-closed posture for an **absent** consignment is compile-time gated by
+/// the `require-psbt-consignment` feature (so the posture is PCR-attested and
+/// cannot be weakened at runtime): on → hard reject; off → warn and fall back
+/// to the legacy shape-only checks while the listener is updated to send it.
+#[cfg(all(feature = "rgb-validation", not(feature = "dev-mode")))]
+fn psbt_consignment_crosscheck(ctx: &ServerContext, req: &SignPsbtRequest) -> Result<()> {
+    use sha3::{Digest, Keccak256};
+
+    if req.consignment.is_empty() {
+        #[cfg(feature = "require-psbt-consignment")]
+        {
+            return Err(EnclaveError::CrossCheck(
+                "send-RGB PSBT signing requires a consignment to bind the PSBT to the RGB \
+                 transition (require-psbt-consignment is enabled)"
+                    .into(),
+            ));
+        }
+        #[cfg(not(feature = "require-psbt-consignment"))]
+        {
+            tracing::warn!(
+                "send-RGB PSBT has no consignment — signing without anchoring the PSBT to an RGB \
+                 transition (build with --features require-psbt-consignment to fail closed)"
+            );
+            return Ok(());
+        }
+    }
+
+    let Some(ref validator) = ctx.rgb_validator else {
+        return Err(EnclaveError::CrossCheck(
+            "send-RGB PSBT carries a consignment but the RGB validator is not configured — \
+             refusing to sign on unvalidated bytes"
+                .into(),
+        ));
+    };
+
+    // Wire-tamper detection, mirroring the EVM path's defence-in-depth check.
+    if req.consignment_hash.is_empty() {
+        return Err(EnclaveError::CrossCheck(
+            "consignment present but consignment_hash is missing".into(),
+        ));
+    }
+    let computed = Keccak256::digest(&req.consignment);
+    if computed[..] != req.consignment_hash[..] {
+        return Err(EnclaveError::CrossCheck(
+            "consignment hash mismatch: keccak256(consignment) != consignment_hash".into(),
+        ));
+    }
+
+    // Full rgbstd validation (Esplora resolver + DBC commitment check). The
+    // txid-identity bind below is only meaningful because this ran.
+    let validated = validator.validate_consignment(&req.consignment)?;
+    tracing::info!(
+        contract_id = %validated.contract_id,
+        chain_net = %validated.chain_net,
+        "send-RGB PSBT consignment validated in-enclave"
+    );
+
+    // Asset-identity binding to the pinned RGB_ASSET_ID (audit TEE-SE-01),
+    // same as the EVM path.
+    crate::validation::evm_crosscheck::bind_asset_identity(
+        &validated.contract_id,
+        &req.rgb_asset_id,
+        &ctx.bridge_config.rgb_asset_id,
+    )?;
+
+    let psbt = bitcoin::psbt::Psbt::deserialize(&req.psbt_bytes)
+        .map_err(|e| EnclaveError::CrossCheck(format!("psbt_bytes is not a valid PSBT: {e}")))?;
+    match validated.last_transition {
+        Some(ref last) if last.transition_type == crate::validation::rgb::ifa::TS_TRANSFER => {
+            crate::validation::psbt_crosscheck::validate_psbt_anchors_transition(
+                &psbt,
+                &validated,
+                req.evm_amount,
+                req.evm_commission,
+            )?;
+        }
+        // A consignment whose last transition isn't a Transfer cannot
+        // authorise a pools-mode send. Reject rather than sign an unanchored
+        // PSBT.
+        _ => {
+            return Err(EnclaveError::CrossCheck(
+                "send-RGB PSBT consignment's last transition is not a Transfer — refusing to \
+                 sign a PSBT that doesn't finalize a pools-mode send"
+                    .into(),
+            ));
+        }
+    }
+
+    Ok(())
 }
 
 fn handle_sign_raw_message(
