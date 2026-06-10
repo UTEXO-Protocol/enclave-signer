@@ -420,9 +420,7 @@ mod tests {
     #[cfg(feature = "rgb-validation")]
     mod anchor {
         use super::*;
-        use crate::validation::rgb::{
-            ifa, TransitionSummary, ValidatedConsignment,
-        };
+        use crate::validation::rgb::{ifa, TransitionSummary, ValidatedConsignment};
         use bitcoin::psbt::PsbtSighashType;
         use bitcoin::{OutPoint, Txid};
 
@@ -496,9 +494,7 @@ mod tests {
         fn passes_when_txid_inputs_and_amount_match() {
             let psbt = psbt_with_two_inputs();
             let validated = validated_for(&psbt, 1_000);
-            assert!(
-                validate_psbt_anchors_transition(&psbt, &validated, 1_000, 0).is_ok()
-            );
+            assert!(validate_psbt_anchors_transition(&psbt, &validated, 1_000, 0).is_ok());
         }
 
         #[test]
@@ -506,9 +502,7 @@ mod tests {
             let psbt = psbt_with_two_inputs();
             let validated = validated_for(&psbt, 5_000);
             // net credited = 1_000 - 100 = 900 <= 5_000
-            assert!(
-                validate_psbt_anchors_transition(&psbt, &validated, 1_000, 100).is_ok()
-            );
+            assert!(validate_psbt_anchors_transition(&psbt, &validated, 1_000, 100).is_ok());
         }
 
         #[test]
@@ -520,7 +514,8 @@ mod tests {
             ));
             let err = validate_psbt_anchors_transition(&psbt, &validated, 1_000, 0).unwrap_err();
             assert!(
-                err.to_string().contains("does not finalize the consignment's transition"),
+                err.to_string()
+                    .contains("does not finalize the consignment's transition"),
                 "expected txid-mismatch rejection, got: {err}"
             );
         }
@@ -562,9 +557,7 @@ mod tests {
             let psbt = psbt_with_two_inputs();
             let mut validated = validated_for(&psbt, 1_000);
             validated.last_transfer_witness_prevouts = None;
-            assert!(
-                validate_psbt_anchors_transition(&psbt, &validated, 1_000, 0).is_ok()
-            );
+            assert!(validate_psbt_anchors_transition(&psbt, &validated, 1_000, 0).is_ok());
         }
 
         #[test]

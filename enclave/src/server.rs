@@ -533,7 +533,7 @@ fn handle_sign_psbt(ctx: &ServerContext, req: SignPsbtRequest) -> Result<Enclave
 /// ([`validation::psbt_crosscheck::validate_psbt_anchors_transition`]).
 ///
 /// Fail-closed posture for an **absent** consignment is compile-time gated by
-/// the `require-psbt-consignment` feature (so the posture is PCR-attested and
+/// the `rgb-validation` feature (so the posture is PCR-attested and
 /// cannot be weakened at runtime): on → hard reject; off → warn and fall back
 /// to the legacy shape-only checks while the listener is updated to send it.
 #[cfg(all(feature = "rgb-validation", not(feature = "dev-mode")))]
@@ -541,22 +541,11 @@ fn psbt_consignment_crosscheck(ctx: &ServerContext, req: &SignPsbtRequest) -> Re
     use sha3::{Digest, Keccak256};
 
     if req.consignment.is_empty() {
-        #[cfg(feature = "require-psbt-consignment")]
-        {
-            return Err(EnclaveError::CrossCheck(
-                "send-RGB PSBT signing requires a consignment to bind the PSBT to the RGB \
-                 transition (require-psbt-consignment is enabled)"
-                    .into(),
-            ));
-        }
-        #[cfg(not(feature = "require-psbt-consignment"))]
-        {
-            tracing::warn!(
-                "send-RGB PSBT has no consignment — signing without anchoring the PSBT to an RGB \
-                 transition (build with --features require-psbt-consignment to fail closed)"
-            );
-            return Ok(());
-        }
+        return Err(EnclaveError::CrossCheck(
+            "send-RGB PSBT signing requires a consignment to bind the PSBT to the RGB \
+                 transition (rgb-validation is enabled)"
+                .into(),
+        ));
     }
 
     let Some(ref validator) = ctx.rgb_validator else {

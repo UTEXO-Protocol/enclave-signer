@@ -658,7 +658,8 @@ mod tests {
         // `read_last_transfer_witness` works off the rgbstd `Transfer`
         // directly, so it needs no Esplora/network — load the fixture and
         // assert the witness-tx binding data the PSBT cross-check relies on.
-        let transfer = Transfer::load(Cursor::new(TRANSFER_FIXTURE)).expect("load transfer fixture");
+        let transfer =
+            Transfer::load(Cursor::new(TRANSFER_FIXTURE)).expect("load transfer fixture");
 
         // The fixture's last transition is a Transfer (type 10000, asserted in
         // `extracts_op_ids_and_last_transition_from_transfer_fixture`).
@@ -693,10 +694,12 @@ mod tests {
         // one transition while gating on another. The fixture's last
         // transition is TS_TRANSFER (10000); claiming it's a burn (8010)
         // forces the consistency check to fire.
-        let transfer = Transfer::load(Cursor::new(TRANSFER_FIXTURE)).expect("load transfer fixture");
+        let transfer =
+            Transfer::load(Cursor::new(TRANSFER_FIXTURE)).expect("load transfer fixture");
         let err = read_last_transfer_witness(&transfer, ifa::TS_BURN).unwrap_err();
         assert!(
-            err.to_string().contains("disagrees with parsed last transition type"),
+            err.to_string()
+                .contains("disagrees with parsed last transition type"),
             "expected type-mismatch rejection, got: {err}"
         );
     }

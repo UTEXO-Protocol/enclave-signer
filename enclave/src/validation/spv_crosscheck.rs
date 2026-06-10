@@ -419,20 +419,19 @@ mod tests {
     /// height 1 has the merkle commitment we care about; subsequent headers
     /// are throwaway (they just bury the target block deep enough).
     fn chain_burying(target_header: Header, depth_above: u32) -> HeaderChain {
+        let base_time = target_header.time;
         let mut headers = vec![target_header];
         let mut prev = headers[0].block_hash();
-        let mut next_time = headers[0].time + 1;
-        for _ in 0..depth_above {
+        for i in 0..depth_above {
             let h = Header {
                 version: Version::ONE,
                 prev_blockhash: prev,
                 merkle_root: bitcoin::TxMerkleNode::all_zeros(),
-                time: next_time,
+                time: base_time + 1 + i,
                 bits: bitcoin::CompactTarget::from_consensus(0x207fffff),
                 nonce: 0,
             };
             prev = h.block_hash();
-            next_time += 1;
             headers.push(h);
         }
         regtest_chain_with(headers)

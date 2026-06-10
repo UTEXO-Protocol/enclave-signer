@@ -90,14 +90,6 @@ allow-seed-import = []
 dev-mode = []
 # In-enclave RGB consignment validation via rgbstd + Esplora.
 rgb-validation = ["rgb-ops", "rgb-consignment"]
-# Fail-closed switch for the send-RGB (EVM-lock → RGB-send) PSBT path: when
-# enabled, bridge-mode PSBT signing REJECTS a request that carries no RGB
-# consignment instead of warning and signing on shape-only checks. Compile-time
-# (not env) so the posture is committed into the attestation PCRs — an operator
-# cannot weaken it at runtime, same rationale as SPV_MIN_CONFIRMATIONS. Only
-# meaningful alongside `rgb-validation` (which performs the binding); enable
-# both in production once the listener populates SignPsbtRequest.consignment.
-require-psbt-consignment = []
 # Bitcoin SPV verification of consignment witness txids before signing EVM
 # transactions. Implies `rgb-validation` because SPV needs the consignment
 # parsed to extract witness txids. When the feature is OFF, handle_sign_evm

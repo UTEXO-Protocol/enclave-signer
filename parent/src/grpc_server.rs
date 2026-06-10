@@ -47,6 +47,10 @@ impl ParentAdapterService {
 
     /// Send an EnclaveRequest to the enclave and read the EnclaveResponse.
     /// Runs blocking I/O on a spawn_blocking thread.
+    // `tonic::Status` is a large (~176 byte) error type, but it is the fixed
+    // gRPC error contract here — it cannot be boxed away. Allow the
+    // large-Err-variant lint rather than wrap every call site.
+    #[allow(clippy::result_large_err)]
     async fn send_to_enclave(&self, req: EnclaveRequest) -> Result<EnclaveResponse, Status> {
         let target = self.target.clone();
 
