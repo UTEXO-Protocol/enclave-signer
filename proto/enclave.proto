@@ -285,11 +285,21 @@ message SetCloneResponse {
 }
 
 // === Raw Digest Signing (EVM gas tx) ===
-// Signs a pre-hashed 32-byte digest directly with the dedicated EVM gas key,
-// without additional hashing. Used for outer Ethereum transaction signing.
-
+// Signs an outer Ethereum (gas-key) transaction with the dedicated EVM gas
+// key at m/44'/60'/0'/0/1.
+//
+// `unsigned_tx` carries the full unsigned transaction preimage (EIP-1559
+// `0x02 || rlp([...])` or legacy EIP-155 `rlp([...])`). The enclave decodes
+// it, enforces the gas-tx shape allowlist (pinned chain id + destination,
+// zero value — audit TEE-XC-09), computes the signing hash itself
+// (`keccak256(unsigned_tx)`) and signs that. Supplying only an opaque
+// `digest` is refused in release builds — the enclave will not blind-sign a
+// hash it cannot inspect. `digest`, if present, must equal
+// `keccak256(unsigned_tx)`; it is otherwise retained only for the dev-mode
+// legacy path.
 message SignRawDigestRequest {
-  bytes digest = 1;  // Exactly 32 bytes — already-hashed data to sign
+  bytes digest = 1;       // Optional; if set must equal keccak256(unsigned_tx). Dev-mode legacy path signs it directly.
+  bytes unsigned_tx = 2;  // Unsigned tx preimage (EIP-1559 / legacy EIP-155). Required in release builds.
 }
 
 message RawDigestSignatureResponse {
