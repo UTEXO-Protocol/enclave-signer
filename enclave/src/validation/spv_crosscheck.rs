@@ -29,6 +29,7 @@ use std::collections::BTreeSet;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use bitcoin::hashes::Hash;
+use rgbstd::ChainNet;
 
 use crate::error::{EnclaveError, Result};
 use crate::proto::MerkleProofEntry;
@@ -175,7 +176,12 @@ pub fn assert_chain_not_stale(
 }
 
 /// Cross-network replay defense: assert the consignment's `chain_net`
-/// (e.g. `"bc:signet"`) is the one this enclave is compiled for.
+/// prefix (e.g. `"sb"` for signet) is the one this enclave is compiled for.
+///
+/// The expected value is derived from [`ChainNet::prefix()`] — the same
+/// rgb-core code that produces the consignment-side string in
+/// `validation::rgb` (`transfer.genesis.chain_net.prefix()`) — so the two
+/// sides cannot drift apart on notation.
 ///
 /// rgbstd's full validation also enforces this when `rgb-validation` is on,
 /// but we re-assert at the SPV layer so a future configuration change that
@@ -183,12 +189,8 @@ pub fn assert_chain_not_stale(
 /// some niche flow) can never accidentally let a wrong-network consignment
 /// reach the signing path.
 pub fn assert_chain_net(consignment_chain_net: &str, enclave_network: Network) -> Result<()> {
-    let expected = match enclave_network {
-        Network::Mainnet => "bc",
-        Network::Signet => "bc:signet",
-        Network::Testnet3 => "bc:testnet3",
-        Network::Regtest => "bc:regtest",
-    };
+    let chain_net = expected_chain_net(enclave_network);
+    let expected = chain_net.prefix();
     if consignment_chain_net != expected {
         return Err(EnclaveError::Spv(format!(
             "consignment chain_net {consignment_chain_net:?} does not match \
@@ -196,6 +198,21 @@ pub fn assert_chain_net(consignment_chain_net: &str, enclave_network: Network) -
         )));
     }
     Ok(())
+}
+
+/// The rgb-core [`ChainNet`] this enclave accepts consignments for.
+///
+/// Mirrors the `bitcoin_network` → `ChainNet` mapping in
+/// `validation::rgb::RgbValidator::new`. Plain `BitcoinSignet` also covers
+/// our custom signet: the challenge script differs, but the rgb-core chain
+/// identity (and thus the consignment prefix) is the same `"sb"`.
+fn expected_chain_net(network: Network) -> ChainNet {
+    match network {
+        Network::Mainnet => ChainNet::BitcoinMainnet,
+        Network::Signet => ChainNet::BitcoinSignet,
+        Network::Testnet3 => ChainNet::BitcoinTestnet3,
+        Network::Regtest => ChainNet::BitcoinRegtest,
+    }
 }
 
 fn verify_one_proof(
@@ -659,18 +676,27 @@ mod tests {
 
     #[test]
     fn assert_chain_net_accepts_matching_pair() {
+        // Literal prefixes on purpose (not derived from `ChainNet::prefix()`):
+        // if an rgb-core upgrade ever changes the notation, this test must
+        // fail loudly instead of the contract silently shifting.
         assert_chain_net("bc", Network::Mainnet).unwrap();
-        assert_chain_net("bc:signet", Network::Signet).unwrap();
-        assert_chain_net("bc:testnet3", Network::Testnet3).unwrap();
-        assert_chain_net("bc:regtest", Network::Regtest).unwrap();
+        assert_chain_net("sb", Network::Signet).unwrap();
+        assert_chain_net("tb3", Network::Testnet3).unwrap();
+        assert_chain_net("bcrt", Network::Regtest).unwrap();
     }
 
     #[test]
     fn assert_chain_net_rejects_mismatch() {
-        let err = assert_chain_net("bc:regtest", Network::Mainnet).unwrap_err();
+        let err = assert_chain_net("bcrt", Network::Mainnet).unwrap_err();
         assert!(err.to_string().contains("does not match"), "got: {err}");
 
         let err = assert_chain_net("bc", Network::Signet).unwrap_err();
+        assert!(err.to_string().contains("does not match"), "got: {err}");
+
+        // Regression: "bc:signet"-style notation is not what consignments
+        // carry (`genesis.chain_net.prefix()` yields `"sb"`); it used to be
+        // hardcoded as the expected value and blocked every signet sign.
+        let err = assert_chain_net("bc:signet", Network::Signet).unwrap_err();
         assert!(err.to_string().contains("does not match"), "got: {err}");
     }
 
