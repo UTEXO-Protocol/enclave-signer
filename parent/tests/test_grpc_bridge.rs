@@ -238,7 +238,7 @@ async fn grpc_public_key_evm_gas_tx() {
 }
 
 #[tokio::test]
-async fn grpc_public_key_rejects_transaction_type() {
+async fn grpc_public_key_transaction_type() {
     let enclave_port = start_mock_enclave();
     let grpc_port = start_grpc_server(enclave_port).await;
 
@@ -246,16 +246,22 @@ async fn grpc_public_key_rejects_transaction_type() {
         .await
         .unwrap();
 
-    let err = client
+    let resp = client
         .public_key(PublicKeyRequest {
             network_id: 0,
             data_type: DataType::Transaction as i32,
             algorithm: None,
         })
         .await
-        .unwrap_err();
+        .unwrap()
+        .into_inner();
 
-    assert_eq!(err.code(), tonic::Code::InvalidArgument);
+    assert_eq!(
+        resp.public_key.len(),
+        33,
+        "Transaction type returns BTC compressed pubkey"
+    );
+    assert_eq!(resp.public_key, vec![0xBB; 33]);
 }
 
 #[tokio::test]

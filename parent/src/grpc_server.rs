@@ -277,7 +277,7 @@ impl EnclaveService for ParentAdapterService {
             Some(enclave_response::Response::PublicKeys(r)) => {
                 let public_key = match data_type {
                     DataType::EvmGasTx => r.evm_gas_tx_uncompressed_pub,
-                    DataType::Unspendable => r.btc_compressed_pub,
+                    DataType::Transaction | DataType::Unspendable => r.btc_compressed_pub,
                     other => {
                         return Err(Status::invalid_argument(format!(
                             "PublicKey not supported for data_type {:?}",
