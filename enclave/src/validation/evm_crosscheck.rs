@@ -709,6 +709,8 @@ mod tests {
                 witness_txids: vec![],
                 all_op_ids: vec![transition.op_id.clone()],
                 last_transition: Some(transition),
+                last_transfer_witness_txid: None,
+                last_transfer_witness_prevouts: None,
             }
         }
 
@@ -799,6 +801,8 @@ mod tests {
                 witness_txids: vec![],
                 all_op_ids: vec![],
                 last_transition: None,
+                last_transfer_witness_txid: None,
+                last_transfer_witness_prevouts: None,
             };
             let err = validate_funds_out_burn(&req, &validated).unwrap_err();
             assert!(
@@ -837,6 +841,8 @@ mod tests {
                 witness_txids: vec![],
                 all_op_ids: vec![transition.op_id.clone()],
                 last_transition: Some(transition),
+                last_transfer_witness_txid: None,
+                last_transfer_witness_prevouts: None,
             }
         }
 
@@ -940,6 +946,8 @@ mod tests {
                 witness_txids: vec![],
                 all_op_ids: vec![],
                 last_transition: None,
+                last_transfer_witness_txid: None,
+                last_transfer_witness_prevouts: None,
             };
             let err = validate_funds_out_transfer(&req, &validated).unwrap_err();
             assert!(

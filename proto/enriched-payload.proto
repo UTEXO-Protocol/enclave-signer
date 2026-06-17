@@ -10,6 +10,8 @@ package tricorn.enriched;
 message SignPsbtBootstrap {
   string tx_hash = 1;
   uint64 operation_idx = 2;
+  bytes consignment_hash = 3;
+  bytes consignment = 4;
 }
 
 message SignEvmBootstrap {
@@ -37,6 +39,11 @@ message EnrichedPsbtPayload {
   bytes psbt_bytes = 9;
   uint64 psbt_output_amount = 10;
   string rgb_asset_id = 11;
+
+  // Raw RGB consignment + keccak256 integrity hash for in-enclave validation
+  // of the send-RGB direction (see SignPsbtRequest fields 12/13).
+  bytes consignment = 12;
+  bytes consignment_hash = 13;
 }
 
 // --- Listener -> Enclave (RGB -> EVM: EVM signing) ---

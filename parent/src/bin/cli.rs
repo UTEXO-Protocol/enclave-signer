@@ -96,6 +96,9 @@ enum Command {
         /// Mark EVM event as finalized
         #[arg(long)]
         evm_event_finalized: bool,
+        /// Hex-encoded RGB consignment bytes (send-RGB direction; empty = legacy path)
+        #[arg(long, default_value = "")]
+        consignment: String,
     },
     /// Sign a raw message (fundsIn authorization, 1-of-n)
     SignRawMessage {
@@ -327,6 +330,7 @@ fn main() {
             psbt_output_amount,
             evm_event_valid,
             evm_event_finalized,
+            consignment,
         } => {
             let psbt_bytes = match hex::decode(&psbt) {
                 Ok(d) => d,
@@ -334,6 +338,25 @@ fn main() {
                     eprintln!("Invalid hex PSBT: {}", e);
                     process::exit(1);
                 }
+            };
+            let consignment_bytes = if consignment.is_empty() {
+                vec![]
+            } else {
+                match hex::decode(&consignment) {
+                    Ok(d) => d,
+                    Err(e) => {
+                        eprintln!("Invalid hex consignment: {}", e);
+                        process::exit(1);
+                    }
+                }
+            };
+            // keccak256 integrity hash, mirroring the EVM path; the enclave
+            // re-checks it against the bytes before validating.
+            let consignment_hash = if consignment_bytes.is_empty() {
+                vec![]
+            } else {
+                use sha3::{Digest, Keccak256};
+                Keccak256::digest(&consignment_bytes).to_vec()
             };
             let tx_hash = if evm_tx_hash.is_empty() {
                 vec![]
@@ -358,6 +381,8 @@ fn main() {
                 psbt_bytes,
                 psbt_output_amount,
                 rgb_asset_id: String::new(),
+                consignment: consignment_bytes,
+                consignment_hash,
             };
             match client.sign_psbt(req) {
                 Ok(r) => {
