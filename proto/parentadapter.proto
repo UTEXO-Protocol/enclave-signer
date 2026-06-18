@@ -48,13 +48,22 @@ message InitializeResponse {
   bytes public_key = 2;
 }
 
+// CloneRequest is relayed by the requester's orchestrator to the *donor*
+// parent adapter, which translates it into an enclave GetCloneRequest. The
+// requester first runs InitiateCloning locally (via Initialize), then forwards
+// the resulting attestation/pubkey/digest here so the donor can verify the
+// requester was issued by the same operator and seal the seed for it.
 message CloneRequest {
-  bytes attestation = 1;
-  bytes encryption_pubkey = 2;
+  bytes attestation        = 1;  // requester_attestation (NSM doc, binds pubkey + digest)
+  bytes encryption_pubkey  = 2;  // 32-byte requester X25519 pubkey
+  bytes cluster_public_key = 3;  // 20-byte EVM address of the donor we intend to clone
+  bytes cloning_digest     = 4;  // 32-byte HMAC-SHA256(secret, encryption_pubkey)
 }
 
 message CloneResponse {
-  bytes encrypted_seed = 1;
+  bytes encrypted_seed    = 1;  // sealed seed, decryptable only by the requester enclave
+  bytes donor_pubkey      = 2;  // 32-byte donor ephemeral X25519 pubkey
+  bytes donor_attestation = 3;  // NSM doc binding donor_pubkey (consumed by SetClone)
 }
 
 // --- SPV: Bitcoin header sync ---

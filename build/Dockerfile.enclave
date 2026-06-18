@@ -48,5 +48,15 @@ COPY build/entrypoint.sh /app/entrypoint.sh
 
 RUN chmod +x /app/utexo-bridge-enclave /app/entrypoint.sh
 
+# Donor-side cloning secret, baked at build time (stage). The donor enclave
+# reads UTEXO_CLONING_SECRET at boot to serve GetClone; the requester is given
+# the same value via the CLI `--cloning-secret` flag at clone time. Pass with:
+#   docker build --build-arg UTEXO_CLONING_SECRET=<secret> ...
+# Left empty by default so no secret is committed to the repo. NOTE: a baked
+# value lands in the EIF/image layers — acceptable for stage, not for prod
+# (prod should source it from SSM/KMS at provisioning time).
+ARG UTEXO_CLONING_SECRET=""
+ENV UTEXO_CLONING_SECRET=${UTEXO_CLONING_SECRET}
+
 ENV RUST_LOG=info
 ENTRYPOINT ["/app/entrypoint.sh"]

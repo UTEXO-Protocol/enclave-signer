@@ -2,10 +2,10 @@ use std::time::Duration;
 
 use crate::enclave_proto::{
     enclave_request, enclave_response, EnclaveRequest, EnclaveResponse, EvmSignatureResponse,
-    GetLastSavedBlockRequest, GetLastSavedBlockResponse, GetPublicKeyRequest, InitializeKeyRequest,
-    InitializeKeyResponse, PublicKeysResponse, RawSignatureResponse, SignEvmRequest,
-    SignPsbtRequest, SignRawMessageRequest, SignedPsbtResponse, SubmitHeadersRequest,
-    SubmitHeadersResponse,
+    GetLastSavedBlockRequest, GetLastSavedBlockResponse, GetPublicKeyRequest,
+    InitiateCloningRequest, InitiateCloningResponse, InitializeKeyRequest, InitializeKeyResponse,
+    PublicKeysResponse, RawSignatureResponse, SetCloneRequest, SignEvmRequest, SignPsbtRequest,
+    SignRawMessageRequest, SignedPsbtResponse, SubmitHeadersRequest, SubmitHeadersResponse,
 };
 use crate::error::{ParentError, Result};
 use crate::framing;
@@ -38,7 +38,16 @@ impl EnclaveClient {
         #[cfg(feature = "vsock")]
         {
             use vsock::VsockStream;
-            let mut stream = VsockStream::connect_with_cid_port(16, 5000)
+            let cid = std::env::var("ENCLAVE_VSOCK_CID")
+                .ok()
+                .and_then(|v| v.parse::<u32>().ok())
+                .unwrap_or(16);
+            let port = std::env::var("ENCLAVE_VSOCK_PORT")
+                .ok()
+                .and_then(|v| v.parse::<u32>().ok())
+                .unwrap_or(5000);
+
+            let mut stream = VsockStream::connect_with_cid_port(cid, port)
                 .map_err(|e| ParentError::Connection(e.to_string()))?;
             framing::write_message(&mut stream, req)?;
             framing::read_message(&mut stream)
@@ -88,6 +97,70 @@ impl EnclaveClient {
         let resp = self.send_request(&req)?;
         match resp.response {
             Some(enclave_response::Response::InitializeKey(r)) => Ok(r),
+            Some(enclave_response::Response::Error(e)) => Err(ParentError::EnclaveError {
+                code: e.code,
+                message: e.message,
+            }),
+            other => Err(ParentError::Connection(format!(
+                "unexpected response variant: {:?}",
+                other
+            ))),
+        }
+    }
+
+    /// Requester side, step 1 of cloning. Asks the local enclave to enter the
+    /// Cloning phase: it mints an ephemeral X25519 keypair, computes the
+    /// cloning digest from the operator secret, and returns an NSM attestation
+    /// binding both. The digest is returned so the orchestrator can forward it
+    /// to the donor (the secret itself never leaves this enclave).
+    pub fn initiate_cloning(
+        &self,
+        cloning_secret: &str,
+        cluster_public_key: Vec<u8>,
+    ) -> Result<InitiateCloningResponse> {
+        let req = EnclaveRequest {
+            request: Some(enclave_request::Request::InitiateCloning(
+                InitiateCloningRequest {
+                    cloning_secret: cloning_secret.to_string(),
+                    cluster_public_key,
+                },
+            )),
+        };
+        let resp = self.send_request(&req)?;
+        match resp.response {
+            Some(enclave_response::Response::InitiateCloning(r)) => Ok(r),
+            Some(enclave_response::Response::Error(e)) => Err(ParentError::EnclaveError {
+                code: e.code,
+                message: e.message,
+            }),
+            other => Err(ParentError::Connection(format!(
+                "unexpected response variant: {:?}",
+                other
+            ))),
+        }
+    }
+
+    /// Requester side, step 3 of cloning. Hands the donor's sealed seed +
+    /// ephemeral pubkey + attestation to the local enclave. The enclave
+    /// verifies the donor attestation, unseals the seed, and only commits the
+    /// derived keys if the resulting EVM address matches the cluster identity it
+    /// was told to clone. On success it transitions Cloning -> Active.
+    pub fn set_clone(
+        &self,
+        encrypted_seed: Vec<u8>,
+        donor_pubkey: Vec<u8>,
+        donor_attestation: Vec<u8>,
+    ) -> Result<()> {
+        let req = EnclaveRequest {
+            request: Some(enclave_request::Request::SetClone(SetCloneRequest {
+                encrypted_seed,
+                donor_pubkey,
+                donor_attestation,
+            })),
+        };
+        let resp = self.send_request(&req)?;
+        match resp.response {
+            Some(enclave_response::Response::SetClone(_)) => Ok(()),
             Some(enclave_response::Response::Error(e)) => Err(ParentError::EnclaveError {
                 code: e.code,
                 message: e.message,
