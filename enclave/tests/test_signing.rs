@@ -73,6 +73,7 @@ fn valid_sign_evm_request(amount: u64, commission: u64) -> SignEvmRequest {
         consignment: PLACEHOLDER_CONSIGNMENT.to_vec(),
         consignment_hash: placeholder_consignment_hash(),
         merkle_proofs: vec![],
+        op_id: String::new(),
     }
 }
 

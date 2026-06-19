@@ -11,13 +11,13 @@ flowchart TD
         p1b --> p1q{valid?}
         p1q -->|no| p1r[REFUSE — invalid consignment]:::refuse
         p1q -->|yes| p1e[extract chain_net, witness_txids,<br/>all_op_ids, last_transition]
-        p1e --> p1c{contract_id == declared rgb_asset_id?}
+        p1e --> p1c{contract_id == pinned RGB_ASSET_ID?<br/>bound to env pin, declared id advisory — #75}
         p1c -->|no| p1cr[REFUSE — contract_id mismatch]:::refuse
     end
     bs -->|no| p1a
 
     subgraph P2 [P2 — EVM cross-checks, validate_evm_request, Sec 10.3/4/5]
-        p2sel{selector in FUNDS_OUT allowlist?<br/>legacy 0x1ad880b2 / mint-burn 0x179bef59}
+        p2sel{selector in FUNDS_OUT allowlist?<br/>single fundsOut 0xccddb768 — #78}
         p2sel -->|no| p2selr[REFUSE — unknown selector]:::refuse
         p2sel -->|yes| p2cp{consignment bytes present?<br/>consignment_valid flag NOT trusted — #47}
         p2cp -->|no| p2cpr[REFUSE — fundsOut needs validated consignment]:::refuse
@@ -42,6 +42,12 @@ flowchart TD
     end
     p2p -->|yes| p2bv
 
+    subgraph P2c [P2c — OpId binding, bind_op_id, TEE-SE-02 / Sec 6]
+        p2oid{op_id present?<br/>advisory on pools — empty allowed}
+        p2oid -->|present| p2oidc{op_id == last_transition.op_id<br/>AND op_id ∈ all_op_ids?}
+        p2oidc -->|no| p2oidr[REFUSE — op_id not authorised by consignment]:::refuse
+    end
+
     subgraph P3 [P3 — SPV / Bitcoin anchoring, Sec 10.7/8, Sec 12]
         p3stale{chain tip fresh?<br/>not stale / not future}
         p3stale -->|no| p3sr[REFUSE — chain stale, frozen feed]:::refuse
@@ -51,7 +57,9 @@ flowchart TD
         p3v --> p3q{all proofs pass?}
         p3q -->|no| p3qr[REFUSE — SPV failure]:::refuse
     end
-    p2bt -->|yes| p3stale
+    p2bt -->|yes| p2oid
+    p2oid -->|empty| p3stale
+    p2oidc -->|yes| p3stale
 
     subgraph S [Sign]
         s1[build EIP-712 domain<br/>name, version, chain_id, proxy_contract] --> s2[digest = EIP-712 BridgeOperation<br/>selector, callData, nonce, deadline]
@@ -70,11 +78,11 @@ flowchart TD
 - Sec 9 / 10.2 — burn amount now bound to the consignment (`TS_BURN` + amount ≤ `burned_asset_amount`, #44; transfer amount ≤ `total_output_amount`, #47).
 - Sec 10.1 — `consignment_valid` bypass removed (#47).
 - Sec 10.4/5 — `chain_id` / contract / asset pinned from env (#43).
-- EIP-712 typehash now `BridgeOperation(bytes4 selector, ...)` matching `MultisigProxy._buildDigest()` (PR #48).
+- EIP-712 typehash now `BridgeOperation(bytes4 selector, ...)` matching `MultisigProxy._buildDigest()` (PR #48); domain `name`/`version` are `"MultisigProxy"`/`"1"`, verified against the deployed contract's domain separator.
+- Sec 6 / 10.6 — `OpId` now on the wire (`SignEvmRequest.op_id`) and cross-checked against the validated consignment (`bind_op_id`, `TEE-SE-02` / #63). Advisory on the pools/transfer flow (no on-chain OpId there); the staged `bind_burn_id` adds the `burnId`-slot value-binding for the mint/burn unlock flow (#59) once that path is wired and the OpId→burnId transform is confirmed.
 
 **Remaining gaps:**
-- Sec 10.6 — `OpId` binding NOT checked / NOT in payload (`TEE-SE-02`).
-- Sec 13 — EVM recipient NOT derived from / bound to the RGB payload (`TEE-SE-03`).
+- Sec 13 — EVM recipient NOT derived from / bound to the RGB payload (`TEE-SE-03`, #66).
 - Amount bind is `≤`, not the spec's strict `==` (`TEE-SE-04`).
-- EIP-712 domain `name` / `version` hardcoded `"Tricorn"` / `"1"`; calldata offsets unverified vs deployed ABI (`TEE-SE-05`).
-- Mint-burn path inert until the listener emits `0x179bef59`.
+- Calldata offsets pinned to the deployed `0xccddb768` `fundsOut` ABI but not yet asserted against a contract-derived fixture (`TEE-SE-05`).
+- Mint-burn unlock path inert: `validate_funds_out_burn` / `bind_burn_id` implemented + tested but not wired into a handler dispatch.

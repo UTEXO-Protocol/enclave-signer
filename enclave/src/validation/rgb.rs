@@ -102,7 +102,12 @@ pub struct ValidatedConsignment {
 /// doesn't leak into our public surface.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TransitionSummary {
-    /// Operation id (baid64).
+    /// Operation id — the 64-char lowercase hex of the 32-byte RGB OpId, as
+    /// the consignment parser yields it (verified by the fixture test). The
+    /// EVM OpId cross-check compares this as a string; the staged `burnId`
+    /// value-binding hex-decodes it to 32 bytes
+    /// (`evm_crosscheck::decode_op_id_to_bytes32`), so the hex form is
+    /// load-bearing — not baid64.
     pub op_id: String,
     /// IFA-schema transition-type id; compare against [`ifa::TS_TRANSFER`]
     /// / [`ifa::TS_BURN`] / [`ifa::TS_INFLATION`] to classify the EVM

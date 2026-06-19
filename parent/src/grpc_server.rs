@@ -161,6 +161,7 @@ impl EnclaveService for ParentAdapterService {
                                     merkle_path: p.merkle_path,
                                 })
                                 .collect(),
+                            op_id: payload.op_id,
                         },
                     )),
                 }

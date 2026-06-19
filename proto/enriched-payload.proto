@@ -71,6 +71,12 @@ message EnrichedEvmPayload {
   // Listener fetches each from Esplora; Enclave verifies each against its cached header chain
   // before signing. See proto/enclave.proto MerkleProofEntry for the wire format.
   repeated MerkleProofEntry merkle_proofs = 13;
+
+  // RGB OpId of the transition this EVM action is bound to (audit TEE-SE-02 /
+  // spec §6). Mirrors SignEvmRequest.op_id — the Parent Adapter passes it
+  // straight through; the Enclave cross-checks it against the validated
+  // consignment's OpIds. Same string form the consignment parser yields.
+  string op_id = 14;
 }
 
 // Proof that a Bitcoin transaction is included in a specific block.

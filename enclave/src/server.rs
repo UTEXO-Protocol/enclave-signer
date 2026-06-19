@@ -424,6 +424,20 @@ fn handle_sign_evm(ctx: &ServerContext, req: SignEvmRequest) -> Result<EnclaveRe
         validation::evm_crosscheck::validate_funds_out_transfer(&req, validated)?;
     }
 
+    // OpId binding (audit TEE-SE-02, spec §6). Cross-check the
+    // listener-supplied `op_id` against the OpIds the enclave extracted from
+    // the consignment it validated itself, so a compromised backend cannot
+    // pair a validly-anchored consignment with an EVM release that
+    // consignment does not authorise. Advisory on the live pools/transfer
+    // flow (an empty `op_id` is allowed there — that flow carries no OpId in
+    // its on-chain `fundsOut` calldata); when present it must agree with the
+    // consignment. The mint/burn unlock flow makes it required and adds the
+    // `burnId` calldata value-binding at its own dispatch (`bind_burn_id`).
+    #[cfg(all(feature = "rgb-validation", not(feature = "dev-mode")))]
+    if let Some(ref validated) = validated_consignment {
+        validation::evm_crosscheck::bind_op_id(&req, validated)?;
+    }
+
     // SPV verification: every consignment-anchor Bitcoin tx must be in our
     // validated header chain at sufficient depth. With `spv = ["rgb-validation"]`
     // in Cargo.toml, having the spv feature implies the rgb-validation

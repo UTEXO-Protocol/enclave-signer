@@ -287,6 +287,7 @@ async fn grpc_sign_evm_roundtrip() {
         consignment: vec![],
         consignment_hash: vec![],
         merkle_proofs: vec![],
+        op_id: String::new(),
     };
 
     let req = SignRequest {
@@ -391,6 +392,7 @@ async fn grpc_evm_passes_enriched_fields_through() {
         consignment: consignment_bytes.clone(),
         consignment_hash: consignment_hash.clone(),
         merkle_proofs: vec![],
+        op_id: "74c1d59264894a1bd44887fe84b36739c024bd50188e69baeeda845569313543".into(),
     };
 
     let req = SignRequest {
@@ -412,6 +414,12 @@ async fn grpc_evm_passes_enriched_fields_through() {
     assert_eq!(received.chain_id, 1);
     assert_eq!(received.consignment, consignment_bytes);
     assert_eq!(received.consignment_hash, consignment_hash);
+    // The parent adapter must forward the listener-supplied op_id verbatim so
+    // the enclave can cross-check it against the validated consignment (#63).
+    assert_eq!(
+        received.op_id,
+        "74c1d59264894a1bd44887fe84b36739c024bd50188e69baeeda845569313543"
+    );
 }
 
 #[tokio::test]
@@ -465,6 +473,7 @@ async fn grpc_evm_forwards_raw_consignment_bytes() {
         consignment: consignment_bytes.clone(),
         consignment_hash: consignment_hash.clone(),
         merkle_proofs: vec![],
+        op_id: String::new(),
     };
 
     let req = SignRequest {

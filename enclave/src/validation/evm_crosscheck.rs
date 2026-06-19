@@ -12,18 +12,26 @@ use crate::validation::rgb::{ifa, ValidatedConsignment};
 
 /// `keccak256("fundsOut(address,uint256,uint256,uint256,uint256,string,bytes,bytes)")[0..4]`.
 ///
-/// The deployed `Bridge` contract (`utexo-smart-contracts/dev`, route-plugin
+/// The deployed `Bridge` contract (`bridge-smart-contracts/dev`, route-plugin
 /// refactor) exposes a **single** `fundsOut`. The pre-refactor 6-arg
 /// `fundsOut(address,address,uint256,uint256,string,string)` (`0x1ad880b2`)
 /// no longer exists. Both the pools/transfer flow (live now) and the
-/// future mint/burn unlock flow go through this one selector — they are
-/// deployed as separate `Bridge` instances and disambiguated by
-/// **contract address**, not by selector.
+/// mint/burn unlock flow go through this one selector; despite the
+/// `_POOLS` suffix this constant is the single shared `fundsOut` selector.
+/// The enclave disambiguates the two flows by the **consignment's last
+/// transition type** (`TS_TRANSFER` → pools, `TS_BURN` → unlock), not by
+/// the selector — see [`validate_funds_out_transfer`] /
+/// [`validate_funds_out_burn`].
 ///
-/// Layout:
+/// Layout (verified against `Bridge.sol` on `dev`; the MultisigProxy
+/// default-allowlists exactly this selector):
 /// `[4 selector][32 recipient][32 amount][32 burnId][32 sourceChainId][32 destinationChainId][32 srcAddrOffset][32 proofOffset][32 settlementDataOffset]...`.
+/// The first five 32-byte slots are static and readable at fixed offsets;
+/// `sourceAddress`/`proof`/`settlementData` store ABI tail offsets (relative
+/// to the start of the argument block, i.e. byte 4) in their head slots.
 /// `proof = abi.encode(uint256 blockHeight, bytes32 commitmentHash)` and
-/// `settlementData = abi.encode(uint256[] fundsInIds)` (mint/burn only).
+/// `settlementData = abi.encode(uint256[] fundsInIds)` (RGB-route settlement;
+/// `fundsInIds` is `uint256[]`, carried on both flows).
 pub const FUNDS_OUT_SELECTOR_POOLS: [u8; 4] = [0xcc, 0xdd, 0xb7, 0x68];
 
 /// 4-byte function selectors the enclave is willing to sign `fundsOut`
@@ -45,6 +53,18 @@ const FUNDS_OUT_SELECTORS: &[[u8; 4]] = &[FUNDS_OUT_SELECTOR_POOLS];
 /// gate the const the same way so default builds don't warn.
 #[cfg(feature = "rgb-validation")]
 const FUNDS_OUT_AMOUNT_OFFSET: usize = 36;
+
+/// Byte offset of `burnId` (uint256) in the `fundsOut` calldata. After the
+/// 4-byte selector, the `recipient` head slot (4..36) and the `amount` head
+/// slot (36..68), `burnId` sits at bytes 68..100. Confirmed against
+/// `Bridge.sol` on `dev` (`burnId` is `fundsOut` param #3, an opaque
+/// single-use `uint256` tracked by `consumedBurnIds[burnId]`).
+///
+/// Consumed only by the staged mint/burn binding [`bind_burn_id`]; gate it
+/// the same way as the other rgb-validation-only consts so default builds
+/// don't warn.
+#[cfg(feature = "rgb-validation")]
+const FUNDS_OUT_BURN_ID_OFFSET: usize = 68;
 
 /// Validate enriched SignEvmRequest before signing.
 /// Returns Ok(()) if all cross-checks pass, Err(EnclaveError::CrossCheck) if any fail.
@@ -401,6 +421,136 @@ pub fn validate_funds_out_transfer(
     Ok(())
 }
 
+/// OpId binding (audit TEE-SE-02, spec §6 — coverage map `sign_evm L-9`).
+///
+/// The listener supplies `req.op_id`: its assertion of *which* RGB state
+/// transition authorises this EVM release. The enclave does not trust that
+/// assertion — it cross-checks the supplied OpId against the OpIds it
+/// extracted from the consignment it validated itself:
+///
+///   1. `op_id` must equal the consignment's **last** transition's OpId —
+///      the operation whose state change the EVM action commits to (the
+///      federation-bound Transfer for pools, the Burn for unlock).
+///   2. `op_id` must be a member of [`ValidatedConsignment::all_op_ids`].
+///      The last transition's OpId is always in that set, so this is
+///      defence-in-depth: it stays correct if the "authorising transition"
+///      rule is later refined for a new consignment shape, and it pins the
+///      issue's literal requirement ("cross-check against `all_op_ids`").
+///
+/// A mismatch means a compromised backend paired a validly-anchored
+/// consignment with an EVM release that consignment does not authorise — so
+/// we fail closed.
+///
+/// **Posture (per design decision):** `op_id` is *advisory on the live
+/// pools/transfer flow*. That flow's on-chain `fundsOut` carries no OpId the
+/// enclave can bind to (recipient, amount, blockHeight, commitmentHash), so
+/// the listener may leave it empty and this check is skipped; when present it
+/// must still agree with the consignment. When the mint/burn **unlock** flow
+/// is wired (it isn't today), its dispatch will require a non-empty `op_id`
+/// and additionally bind it into the signed calldata via the `burnId` slot —
+/// see [`bind_burn_id`]. No code enforces a non-empty `op_id` yet.
+///
+/// **Why this is the binding, not just a check:** the MultisigProxy
+/// signature commits to `keccak256(callData)`, so an OpId-derived value the
+/// calldata carries (the `burnId`) is cryptographically bound by the
+/// signature itself. This function establishes the *semantic* agreement
+/// between the listener-named OpId and the validated consignment that the
+/// value binding ([`bind_burn_id`]) then enforces byte-for-byte.
+#[cfg(feature = "rgb-validation")]
+pub fn bind_op_id(req: &SignEvmRequest, validated: &ValidatedConsignment) -> Result<()> {
+    if req.op_id.is_empty() {
+        // Advisory on the pools/transfer flow — no on-chain OpId to bind.
+        // When the mint/burn unlock path is wired it will require a non-empty
+        // op_id at its own call site (alongside `bind_burn_id`).
+        return Ok(());
+    }
+
+    let last = validated.last_transition.as_ref().ok_or_else(|| {
+        EnclaveError::CrossCheck(
+            "op_id supplied but the validated consignment has no transitions to bind it to".into(),
+        )
+    })?;
+
+    if req.op_id != last.op_id {
+        return Err(EnclaveError::CrossCheck(format!(
+            "op_id mismatch: request {} != consignment last-transition op_id {}",
+            req.op_id, last.op_id
+        )));
+    }
+
+    if !validated.all_op_ids.iter().any(|o| o == &req.op_id) {
+        return Err(EnclaveError::CrossCheck(format!(
+            "op_id {} not found among the consignment's transition op_ids",
+            req.op_id
+        )));
+    }
+
+    Ok(())
+}
+
+/// `burnId` ↔ OpId calldata binding for the mint/burn unlock flow
+/// (audit TEE-SE-02 / issue #59).
+///
+/// **Staged, not wired into any live handler — same posture as
+/// [`validate_funds_out_burn`].** Two reasons it stays inert today:
+///
+///   1. The live pools/transfer `fundsOut` may carry a `burnId` that is not
+///      the consignment OpId; wiring this for pools could false-reject a
+///      legitimate release.
+///   2. **The RGB-OpId → on-chain-`burnId` transform is a backend
+///      convention the contract does not define.** Reading
+///      `bridge-smart-contracts/dev` confirms `burnId` is an opaque
+///      `uint256` (`mapping(uint256 burnId => bool) consumedBurnIds`) — the
+///      bytes the backend writes there are its choice. This function assumes
+///      the leading candidate: **the 32-byte RGB OpId interpreted as a
+///      big-endian `uint256`** (raw-byte equality between the OpId and the
+///      `burnId` slot, both already big-endian). If the backend instead uses
+///      `keccak256(op_id)` or another transform, only the
+///      [`decode_op_id_to_bytes32`] line below changes. **Confirm the
+///      transform with the contracts/backend team before wiring this live.**
+///
+/// Once wired (mint/burn unlock dispatch), the MultisigProxy signature
+/// commits to `keccak256(callData)`, so binding the `burnId` slot to the
+/// validated burn OpId cryptographically ties the signed release to the exact
+/// RGB operation — a compromised backend cannot route the unlock to a
+/// different `consumedBurnIds[burnId]` replay slot than the consignment
+/// authorises. Meant to run alongside [`validate_funds_out_burn`]; it is
+/// **self-contained and fail-closed** — it gates on the last transition being
+/// an IFA `Burn` itself, so it cannot bind a non-burn OpId into the `burnId`
+/// slot even if a future call site forgets to run the burn-shape check first.
+#[cfg(feature = "rgb-validation")]
+pub fn bind_burn_id(req: &SignEvmRequest, validated: &ValidatedConsignment) -> Result<()> {
+    let last = validated.last_transition.as_ref().ok_or_else(|| {
+        EnclaveError::CrossCheck(
+            "burnId binding requires a consignment with at least one transition".into(),
+        )
+    })?;
+
+    // Self-contained Burn-shape gate: the `burnId` slot must only ever carry a
+    // burn transition's OpId. Refusing here keeps the binding correct
+    // regardless of call-site ordering relative to `validate_funds_out_burn`.
+    if last.transition_type != ifa::TS_BURN {
+        return Err(EnclaveError::CrossCheck(format!(
+            "burnId binding requires a Burn transition (last transition_type = {}, want {})",
+            last.transition_type,
+            ifa::TS_BURN
+        )));
+    }
+
+    let calldata_burn_id = extract_bytes32(&req.call_data, FUNDS_OUT_BURN_ID_OFFSET)?;
+    let op_id_bytes = decode_op_id_to_bytes32(&last.op_id)?;
+
+    if calldata_burn_id != op_id_bytes {
+        return Err(EnclaveError::CrossCheck(format!(
+            "burnId mismatch: calldata burnId 0x{} != consignment burn OpId 0x{} \
+             (assuming raw-byte OpId→burnId transform — confirm with contracts team)",
+            hex::encode(calldata_burn_id),
+            hex::encode(op_id_bytes)
+        )));
+    }
+    Ok(())
+}
+
 /// Lightweight ABI extraction: read a uint256 from call_data at a given byte offset.
 /// Returns the value as u64. Fails if call_data is too short or the value exceeds u64.
 ///
@@ -427,6 +577,53 @@ fn extract_uint256_as_u64(call_data: &[u8], offset: usize) -> Result<u64> {
     let mut buf = [0u8; 8];
     buf.copy_from_slice(&slot[24..32]);
     Ok(u64::from_be_bytes(buf))
+}
+
+/// Read a 32-byte word (a `bytes32`/`uint256` head slot) from `call_data` at
+/// a fixed byte offset. Unlike [`extract_uint256_as_u64`] this preserves the
+/// full 32 bytes — used for the `burnId` binding, where the value is an
+/// opaque 256-bit identifier that must be compared byte-for-byte, not
+/// clamped to `u64`.
+///
+/// Safe only for the static `fundsOut` head slots (recipient, amount,
+/// burnId, sourceChainId, destinationChainId). The dynamic
+/// `sourceAddress`/`proof`/`settlementData` args store ABI tail offsets in
+/// their head slots and must be traversed, not read at a fixed absolute
+/// offset.
+#[cfg(any(feature = "rgb-validation", test))]
+fn extract_bytes32(call_data: &[u8], offset: usize) -> Result<[u8; 32]> {
+    let end = offset + 32;
+    if call_data.len() < end {
+        return Err(EnclaveError::CrossCheck(format!(
+            "call_data too short: need {} bytes, got {}",
+            end,
+            call_data.len()
+        )));
+    }
+    call_data[offset..end]
+        .try_into()
+        .map_err(|_| EnclaveError::CrossCheck("bytes32 slice conversion failed".into()))
+}
+
+/// Decode an RGB OpId string (the 64-char hex of the 32-byte OpId, as the
+/// consignment parser yields it) into raw bytes. Fails closed if the string
+/// is not exactly 32 bytes of hex — the `burnId` binding needs the canonical
+/// 32-byte form, so a non-hex / wrong-length OpId is a hard error rather than
+/// a silent skip.
+#[cfg(feature = "rgb-validation")]
+fn decode_op_id_to_bytes32(op_id: &str) -> Result<[u8; 32]> {
+    let bytes = hex::decode(op_id).map_err(|e| {
+        EnclaveError::CrossCheck(format!(
+            "op_id is not hex-decodable (got {op_id:?}): {e} — burnId binding needs the \
+             32-byte OpId form"
+        ))
+    })?;
+    bytes.as_slice().try_into().map_err(|_| {
+        EnclaveError::CrossCheck(format!(
+            "op_id decodes to {} bytes, expected 32 (op_id {op_id:?})",
+            bytes.len()
+        ))
+    })
 }
 
 #[cfg(test)]
@@ -503,6 +700,7 @@ mod tests {
             consignment: PLACEHOLDER_CONSIGNMENT.to_vec(),
             consignment_hash: placeholder_consignment_hash(),
             merkle_proofs: vec![],
+            op_id: String::new(),
         }
     }
 
@@ -611,6 +809,22 @@ mod tests {
         let mut data = vec![0u8; 32];
         data[0] = 1; // high byte set — exceeds u64
         assert!(extract_uint256_as_u64(&data, 0).is_err());
+    }
+
+    #[test]
+    fn extract_bytes32_works() {
+        let mut data = vec![0u8; 4 + 32 + 32 + 32];
+        let mut word = [0u8; 32];
+        word[0] = 0xab;
+        word[31] = 0xcd;
+        data[68..100].copy_from_slice(&word); // burnId head slot
+        assert_eq!(extract_bytes32(&data, 68).unwrap(), word);
+    }
+
+    #[test]
+    fn extract_bytes32_rejects_short_data() {
+        let data = vec![0u8; 90]; // burnId slot ends at 100
+        assert!(extract_bytes32(&data, 68).is_err());
     }
 
     #[cfg(feature = "rgb-validation")]
@@ -739,6 +953,7 @@ mod tests {
                 consignment: vec![],
                 consignment_hash: vec![],
                 merkle_proofs: vec![],
+                op_id: String::new(),
             }
         }
 
@@ -889,6 +1104,7 @@ mod tests {
                 consignment: vec![],
                 consignment_hash: vec![],
                 merkle_proofs: vec![],
+                op_id: String::new(),
             }
         }
 
@@ -965,6 +1181,292 @@ mod tests {
             req.call_data[..4].copy_from_slice(&[0xde, 0xad, 0xbe, 0xef]);
             let validated = validated_with_last(transfer_transition(0));
             assert!(validate_funds_out_transfer(&req, &validated).is_ok());
+        }
+    }
+
+    // =========================================================================
+    // OpId binding — `bind_op_id` (audit TEE-SE-02, spec §6, coverage map
+    // sign_evm L-9). The listener-supplied op_id is cross-checked against the
+    // OpIds the enclave extracted from the validated consignment.
+    // =========================================================================
+
+    #[cfg(feature = "rgb-validation")]
+    mod op_id_bind {
+        use super::*;
+        use crate::validation::rgb::{TransitionSummary, ValidatedConsignment};
+
+        // A real 32-byte OpId in the 64-char-hex form the consignment parser
+        // yields (borrowed from the transfer fixture's last transition).
+        const OP_ID: &str = "74c1d59264894a1bd44887fe84b36739c024bd50188e69baeeda845569313543";
+        const OTHER_OP_ID: &str =
+            "f5106c6ddb8b8fd3d1de3bda0106ae13ef0705dc36bfc543566362e5e8dd4bd5";
+
+        fn transition(op_id: &str) -> TransitionSummary {
+            TransitionSummary {
+                op_id: op_id.into(),
+                transition_type: crate::validation::rgb::ifa::TS_TRANSFER,
+                total_output_amount: 0,
+                outputs: Vec::new(),
+                burned_asset_amount: None,
+            }
+        }
+
+        fn validated(
+            all_op_ids: Vec<String>,
+            last: Option<TransitionSummary>,
+        ) -> ValidatedConsignment {
+            ValidatedConsignment {
+                contract_id: "rgb:test".into(),
+                chain_net: "bc".into(),
+                witness_txids: vec![],
+                all_op_ids,
+                last_transition: last,
+                last_transfer_witness_txid: None,
+                last_transfer_witness_prevouts: None,
+            }
+        }
+
+        fn req_with_op_id(op_id: &str) -> SignEvmRequest {
+            SignEvmRequest {
+                // op_id binding never reads call_data — keep it minimal.
+                call_data: vec![0u8; 4],
+                nonce: 1,
+                deadline: u64::MAX,
+                consignment_valid: true,
+                rgb_amount: 0,
+                rgb_asset_id: "rgb:test".into(),
+                chain_id: 1,
+                proxy_contract: vec![0xAA; 20],
+                calldata_amount: 0,
+                calldata_commission: 0,
+                consignment: vec![],
+                consignment_hash: vec![],
+                merkle_proofs: vec![],
+                op_id: op_id.into(),
+            }
+        }
+
+        /// Happy path: listener op_id equals the consignment's authorising
+        /// (last) transition and is present in `all_op_ids`.
+        #[test]
+        fn binds_when_op_id_matches_last_transition() {
+            let req = req_with_op_id(OP_ID);
+            let v = validated(
+                vec![OTHER_OP_ID.into(), OP_ID.into()],
+                Some(transition(OP_ID)),
+            );
+            assert!(bind_op_id(&req, &v).is_ok());
+        }
+
+        /// Advisory on pools: an empty op_id is allowed (that flow carries no
+        /// on-chain OpId). The check is skipped, not failed.
+        #[test]
+        fn skips_when_op_id_empty() {
+            let req = req_with_op_id("");
+            let v = validated(vec![OP_ID.into()], Some(transition(OP_ID)));
+            assert!(bind_op_id(&req, &v).is_ok());
+        }
+
+        /// The core TEE-SE-02 protection: a listener that names a different
+        /// operation than the consignment's authorising transition is
+        /// rejected, even if that operation is a valid OpId elsewhere.
+        #[test]
+        fn rejects_op_id_mismatch_with_last_transition() {
+            let req = req_with_op_id(OTHER_OP_ID);
+            let v = validated(
+                vec![OTHER_OP_ID.into(), OP_ID.into()],
+                Some(transition(OP_ID)),
+            );
+            let err = bind_op_id(&req, &v).unwrap_err();
+            assert!(
+                err.to_string().contains("op_id mismatch"),
+                "expected op_id mismatch, got: {err}"
+            );
+        }
+
+        /// Defence-in-depth membership branch: op_id agrees with the last
+        /// transition but is absent from `all_op_ids` (an internally
+        /// inconsistent consignment) — fail closed rather than trust it.
+        #[test]
+        fn rejects_op_id_not_in_all_op_ids() {
+            let req = req_with_op_id(OP_ID);
+            // last transition carries OP_ID, but all_op_ids omits it.
+            let v = validated(vec![OTHER_OP_ID.into()], Some(transition(OP_ID)));
+            let err = bind_op_id(&req, &v).unwrap_err();
+            assert!(
+                err.to_string().contains("not found among"),
+                "expected membership rejection, got: {err}"
+            );
+        }
+
+        /// A non-empty op_id with a consignment that has no transitions to
+        /// bind against is a hard error, not a silent pass.
+        #[test]
+        fn rejects_op_id_when_no_transition() {
+            let req = req_with_op_id(OP_ID);
+            let v = validated(vec![], None);
+            let err = bind_op_id(&req, &v).unwrap_err();
+            assert!(
+                err.to_string().contains("no transitions to bind"),
+                "expected no-transition rejection, got: {err}"
+            );
+        }
+    }
+
+    // =========================================================================
+    // burnId calldata value-binding — `bind_burn_id` (issue #59, staged).
+    // Binds the calldata burnId slot (offset 68) to the validated burn OpId
+    // under the assumed raw-byte OpId→burnId transform. Inert until the
+    // mint/burn unlock flow is wired and the transform is confirmed.
+    // =========================================================================
+
+    #[cfg(feature = "rgb-validation")]
+    mod burn_id_bind {
+        use super::*;
+        use crate::validation::rgb::{TransitionSummary, ValidatedConsignment};
+
+        const OP_ID: &str = "74c1d59264894a1bd44887fe84b36739c024bd50188e69baeeda845569313543";
+
+        fn op_id_bytes() -> [u8; 32] {
+            hex::decode(OP_ID).unwrap().as_slice().try_into().unwrap()
+        }
+
+        /// 8-arg `fundsOut` calldata carrying `burn_id` at the burnId head
+        /// slot (offset 68). All other slots zero-filled — `bind_burn_id`
+        /// only reads the burnId slot.
+        fn mock_calldata_with_burn_id(burn_id: [u8; 32]) -> Vec<u8> {
+            let mut data = Vec::with_capacity(4 + 8 * 32);
+            data.extend_from_slice(&FUNDS_OUT_SELECTOR_POOLS);
+            data.extend_from_slice(&[0u8; 32]); // recipient @4
+            data.extend_from_slice(&[0u8; 32]); // amount @36
+            data.extend_from_slice(&burn_id); // burnId @68
+            data.extend_from_slice(&[0u8; 32 * 5]); // sourceChainId, destChainId, 3 offsets
+            data
+        }
+
+        fn burn_transition(op_id: &str) -> TransitionSummary {
+            TransitionSummary {
+                op_id: op_id.into(),
+                transition_type: crate::validation::rgb::ifa::TS_BURN,
+                total_output_amount: 0,
+                outputs: Vec::new(),
+                burned_asset_amount: Some(1_000),
+            }
+        }
+
+        fn validated(last: Option<TransitionSummary>) -> ValidatedConsignment {
+            ValidatedConsignment {
+                contract_id: "rgb:test".into(),
+                chain_net: "bc".into(),
+                witness_txids: vec![],
+                all_op_ids: last
+                    .as_ref()
+                    .map(|t| vec![t.op_id.clone()])
+                    .unwrap_or_default(),
+                last_transition: last,
+                last_transfer_witness_txid: None,
+                last_transfer_witness_prevouts: None,
+            }
+        }
+
+        fn req(call_data: Vec<u8>) -> SignEvmRequest {
+            SignEvmRequest {
+                call_data,
+                nonce: 1,
+                deadline: u64::MAX,
+                consignment_valid: true,
+                rgb_amount: 0,
+                rgb_asset_id: "rgb:test".into(),
+                chain_id: 1,
+                proxy_contract: vec![0xAA; 20],
+                calldata_amount: 0,
+                calldata_commission: 0,
+                consignment: vec![],
+                consignment_hash: vec![],
+                merkle_proofs: vec![],
+                op_id: OP_ID.into(),
+            }
+        }
+
+        /// Happy path: the calldata burnId equals the burn OpId's raw bytes.
+        #[test]
+        fn binds_when_burn_id_matches_op_id() {
+            let r = req(mock_calldata_with_burn_id(op_id_bytes()));
+            let v = validated(Some(burn_transition(OP_ID)));
+            assert!(bind_burn_id(&r, &v).is_ok());
+        }
+
+        /// The #59 protection: a burnId that doesn't match the consignment's
+        /// burn OpId is rejected — a compromised backend can't route the
+        /// unlock to a different replay slot than the consignment authorises.
+        #[test]
+        fn rejects_burn_id_mismatch() {
+            let mut wrong = op_id_bytes();
+            wrong[0] ^= 0xff;
+            let r = req(mock_calldata_with_burn_id(wrong));
+            let v = validated(Some(burn_transition(OP_ID)));
+            let err = bind_burn_id(&r, &v).unwrap_err();
+            assert!(
+                err.to_string().contains("burnId mismatch"),
+                "expected burnId mismatch, got: {err}"
+            );
+        }
+
+        /// An OpId that isn't a 32-byte hex string can't be bound to a
+        /// bytes32 burnId — fail closed rather than skip.
+        #[test]
+        fn rejects_when_op_id_not_32_byte_hex() {
+            let r = req(mock_calldata_with_burn_id(op_id_bytes()));
+            let mut t = burn_transition(OP_ID);
+            t.op_id = "not-hex".into();
+            let v = validated(Some(t));
+            let err = bind_burn_id(&r, &v).unwrap_err();
+            assert!(
+                err.to_string().contains("op_id is not hex-decodable")
+                    || err.to_string().contains("expected 32"),
+                "expected op_id decode rejection, got: {err}"
+            );
+        }
+
+        /// Calldata too short to hold a burnId slot is rejected.
+        #[test]
+        fn rejects_when_calldata_too_short() {
+            let r = req(vec![0u8; 50]); // < 100 bytes (burnId ends at 100)
+            let v = validated(Some(burn_transition(OP_ID)));
+            let err = bind_burn_id(&r, &v).unwrap_err();
+            assert!(
+                err.to_string().contains("call_data too short"),
+                "expected too-short rejection, got: {err}"
+            );
+        }
+
+        /// No transition to bind against → hard error.
+        #[test]
+        fn rejects_when_no_transition() {
+            let r = req(mock_calldata_with_burn_id(op_id_bytes()));
+            let v = validated(None);
+            let err = bind_burn_id(&r, &v).unwrap_err();
+            assert!(
+                err.to_string().contains("at least one transition"),
+                "expected no-transition rejection, got: {err}"
+            );
+        }
+
+        /// Self-contained Burn-shape gate: even with a calldata burnId that
+        /// equals the OpId, a non-Burn last transition must be refused — the
+        /// burnId slot may only ever carry a burn OpId, regardless of whether
+        /// `validate_funds_out_burn` ran first.
+        #[test]
+        fn rejects_when_last_transition_not_burn() {
+            let r = req(mock_calldata_with_burn_id(op_id_bytes()));
+            let mut t = burn_transition(OP_ID);
+            t.transition_type = crate::validation::rgb::ifa::TS_TRANSFER;
+            let v = validated(Some(t));
+            let err = bind_burn_id(&r, &v).unwrap_err();
+            assert!(
+                err.to_string().contains("requires a Burn transition"),
+                "expected Burn-required rejection, got: {err}"
+            );
         }
     }
 

@@ -148,6 +148,18 @@ message SignEvmRequest {
   // listener-side EnrichedEvmPayload.merkle_proofs (same shape, same field
   // numbers — see proto/enriched-payload.proto).
   repeated MerkleProofEntry merkle_proofs = 13;
+
+  // RGB OpId of the state transition this EVM action is bound to (audit
+  // TEE-SE-02 / spec §6). Listener-supplied; the enclave cross-checks it
+  // against the OpIds it extracts from the validated consignment
+  // (ValidatedConsignment.all_op_ids / last_transition.op_id) so a
+  // compromised backend cannot pair a valid consignment with an EVM
+  // release it does not authorise. Same string form the consignment
+  // parser yields (64-char hex of the 32-byte OpId). Empty is allowed on
+  // the pools/transfer flow, which carries no on-chain OpId binding; when the
+  // mint/burn unlock flow is wired it will require this (see
+  // evm_crosscheck::bind_op_id).
+  string op_id = 14;
 }
 
 // Mirrors enriched-payload.proto's MerkleProofEntry. Defined here too so
