@@ -91,6 +91,11 @@ jobs:
         run: |
           set -euxo pipefail
           sudo install -m 0755 ~/nitro-cli-dist/bin/nitro-cli /usr/local/bin/nitro-cli
+          # nitro-cli writes to these dirs; the package/systemd normally creates
+          # them, but on a source install we make them ourselves (else E19 on
+          # opening /var/log/nitro_enclaves/nitro_enclaves.log).
+          sudo mkdir -p /var/log/nitro_enclaves /run/nitro_enclaves
+          sudo chmod 0777 /var/log/nitro_enclaves /run/nitro_enclaves
           nitro-cli --version
 
       - name: Build EIF + measurements
