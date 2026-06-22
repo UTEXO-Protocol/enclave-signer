@@ -45,6 +45,55 @@ pub mod ifa {
     pub const MS_BURNED_ASSET: u16 = 1001;
 }
 
+/// Resolve the **trusted** strict type-system the validator must pin a
+/// consignment against, sourced from the canonical `rgb-schemas` crate by the
+/// consignment's `schema_id` — exactly as rgb-lib does
+/// (`AssetSchema::types()` → `InflatableFungibleAsset::types()` etc.).
+///
+/// **Audit 4th W-01 / #92.** RGB's `ValidationConfig.trusted_typesystem` must
+/// come from an enclave-pinned source, never from the consignment under
+/// validation: feeding `transfer.types` back in makes rgbstd compare the
+/// consignment's types against themselves (`validator.rs::validate_schema`),
+/// so the control always passes and a malicious consignment can ship its own
+/// type definitions for the schema's `SemId`s. Instead we look the schema_id
+/// up against the schema definitions compiled into `rgb-schemas` and hand the
+/// validator *that* type system; rgbstd then rejects any consignment whose
+/// types differ from the canonical set.
+///
+/// All four standard fungible/collectible schemas are accepted here; the
+/// bridge additionally pins the exact asset via `contract_id` →
+/// `RGB_ASSET_ID` (`bind_asset_identity`), so schema breadth at this layer is
+/// not asset-scoping. An **unknown** schema_id is rejected fail-closed.
+///
+/// Schema ids are compared by their canonical string form so the comparison
+/// is robust to `rgb-schemas` resolving a different `rgb-consensus` build than
+/// the enclave's validator (the `SchemaId` *value* is a content commitment and
+/// stringifies identically across versions).
+#[cfg(feature = "rgb-validation")]
+fn trusted_typesystem_for_schema(schema_id: &str) -> Result<rgbstd::TypeSystem> {
+    use rgbstd::contract::IssuerWrapper;
+    use schemata::{
+        CollectibleFungibleAsset, InflatableFungibleAsset, NonInflatableAsset, UniqueDigitalAsset,
+        CFA_SCHEMA_ID, IFA_SCHEMA_ID, NIA_SCHEMA_ID, UDA_SCHEMA_ID,
+    };
+
+    let types = if schema_id == IFA_SCHEMA_ID.to_string() {
+        InflatableFungibleAsset::types()
+    } else if schema_id == NIA_SCHEMA_ID.to_string() {
+        NonInflatableAsset::types()
+    } else if schema_id == CFA_SCHEMA_ID.to_string() {
+        CollectibleFungibleAsset::types()
+    } else if schema_id == UDA_SCHEMA_ID.to_string() {
+        UniqueDigitalAsset::types()
+    } else {
+        return Err(EnclaveError::CrossCheck(format!(
+            "consignment uses unknown/unsupported RGB schema {schema_id} — refusing to validate \
+             (cannot source a trusted type system)"
+        )));
+    };
+    Ok(types)
+}
+
 /// Data extracted from a successfully validated RGB consignment.
 #[derive(Debug, Clone)]
 pub struct ValidatedConsignment {
@@ -292,10 +341,22 @@ impl RgbValidator {
         // treats them as tentative witnesses (not yet mined).
         resolver.add_consignment_txes(&transfer);
 
+        // Pin the trusted type system (audit 4th W-01 / #92). Source it from
+        // the canonical `rgb-schemas` definitions keyed on the consignment's
+        // schema_id, NOT from `transfer.types`. Passing the consignment's own
+        // types makes rgbstd compare them against themselves (always passes);
+        // the canonical set makes `validate()` reject any consignment that
+        // ships substituted type definitions for the schema's SemIds. An
+        // unknown schema_id is rejected fail-closed inside the helper.
+        let schema_id = transfer.genesis.schema_id.to_string();
+        let trusted_typesystem = trusted_typesystem_for_schema(&schema_id).inspect_err(|_| {
+            tracing::warn!(%contract_id, %schema_id, "no trusted type system for consignment schema");
+        })?;
+
         // 3. Build validation config.
         let config = ValidationConfig {
             chain_net: self.chain_net,
-            trusted_typesystem: transfer.types.clone(),
+            trusted_typesystem,
             build_opouts_dag: true,
             ..Default::default()
         };
@@ -605,6 +666,34 @@ mod tests {
         // round-trip lives behind the validator-level path (which needs
         // network access for Esplora), tracked separately.
         assert_eq!(last.burned_asset_amount, None);
+    }
+
+    #[test]
+    fn trusted_typesystem_sourced_from_schema_not_consignment() {
+        // The W-01 fix (#92): the trusted type system must come from the
+        // canonical rgb-schemas definitions, not from `transfer.types`.
+        // The in-tree fixture is an NIA consignment, so its schema_id resolves
+        // to a canonical type system whose id matches NIA's.
+        let t = Transfer::load(Cursor::new(TRANSFER_FIXTURE)).expect("load transfer fixture");
+        let schema_id = t.genesis.schema_id.to_string();
+
+        let trusted =
+            trusted_typesystem_for_schema(&schema_id).expect("fixture schema must be known");
+
+        // The canonical type system is what rgb-schemas ships for this schema,
+        // and the fixture's own types match it (a legit consignment).
+        assert_eq!(
+            trusted.id().to_string(),
+            t.types.id().to_string(),
+            "canonical type system for the fixture's schema should match the fixture's types"
+        );
+
+        // An unknown schema id is rejected fail-closed.
+        let err = trusted_typesystem_for_schema("rgb:sch:unknown-schema-id").unwrap_err();
+        assert!(
+            err.to_string().contains("unknown/unsupported RGB schema"),
+            "expected unknown-schema rejection, got: {err}"
+        );
     }
 
     #[test]

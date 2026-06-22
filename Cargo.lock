@@ -2059,6 +2059,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "rgb-schemas"
+version = "0.11.1-rc.10"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1903961c836cc3f6963b06c69cb47491a815309f265439f20c932e0a3aa16a78"
+dependencies = [
+ "amplify",
+ "rgb-aluvm",
+ "rgb-ops",
+ "rgb-strict-types",
+]
+
+[[package]]
 name = "rgb-strict-encoding"
 version = "1.0.1"
 source = "git+https://github.com/rgb-protocol/rgb-strict-encoding?branch=master#ddeae3b546b9668cda8fb11efa9eafd0c61ef467"
@@ -2920,6 +2932,7 @@ dependencies = [
  "rand_core 0.6.4",
  "rgb-consignment",
  "rgb-ops",
+ "rgb-schemas",
  "secrecy",
  "serde",
  "sha2",

@@ -151,15 +151,32 @@ pub fn validate_evm_request(req: &SignEvmRequest, bridge_config: &BridgeConfig) 
             )));
         }
 
-        // 4a. Fail-closed when unconfigured (audit TEE-SE-12). A build that
-        //     can validate consignments (rgb-validation enabled — this whole
-        //     block) must refuse to sign when the operator pinned nothing:
-        //     otherwise a misprovisioned-but-running enclave silently degrades
-        //     to the pre-pin, listener-trusting model. The escape hatch is
-        //     intentionally narrow: dev-mode skips this function entirely (see
-        //     `handle_sign_evm`), and the library unit tests (`cfg(test)`) keep
-        //     exercising the legacy unconfigured path. Integration tests pin a
-        //     config explicitly via `start_test_server_with_config`.
+        // 4a. Partial config is always a hard error (audit 4th M-03 / #94).
+        //     The operator set some of EVM_CHAIN_ID / BRIDGE_CONTRACT /
+        //     RGB_ASSET_ID but not all, so the pin is ambiguous: a zero
+        //     chain_id can never match a real request, and a zero
+        //     bridge_contract would otherwise accept an EVM request for the
+        //     zero address. This is never a legitimate dev shape, so — unlike
+        //     the fully-unconfigured fallback below — it is not gated on
+        //     cfg(test).
+        if bridge_config.is_partially_configured() {
+            return Err(EnclaveError::CrossCheck(
+                "bridge config partially set: EVM_CHAIN_ID / BRIDGE_CONTRACT / RGB_ASSET_ID \
+                 must all be set (non-zero) or all unset — refusing to sign with an ambiguous pin"
+                    .into(),
+            ));
+        }
+
+        // 4b. Fail-closed when fully unconfigured (audit TEE-SE-12). A build
+        //     that can validate consignments (rgb-validation enabled — this
+        //     whole block) must refuse to sign when the operator pinned
+        //     nothing: otherwise a misprovisioned-but-running enclave silently
+        //     degrades to the pre-pin, listener-trusting model. The escape
+        //     hatch is intentionally narrow: dev-mode skips this function
+        //     entirely (see `handle_sign_evm`), and the library unit tests
+        //     (`cfg(test)`) keep exercising the legacy unconfigured path.
+        //     Integration tests pin a config explicitly via
+        //     `start_test_server_with_config`.
         #[cfg(not(test))]
         if !bridge_config.is_configured() {
             return Err(EnclaveError::CrossCheck(
@@ -169,13 +186,15 @@ pub fn validate_evm_request(req: &SignEvmRequest, bridge_config: &BridgeConfig) 
             ));
         }
 
-        // 4b. Pinned-config cross-check. When the operator configured
+        // 4c. Pinned-config cross-check. When the operator configured
         //     EVM_CHAIN_ID / BRIDGE_CONTRACT / RGB_ASSET_ID at boot, the
         //     listener-supplied values MUST match — otherwise a compromised
         //     listener could redirect signatures to a different chain or
         //     contract. The same values are committed into the attestation
         //     `user_data` so an external verifier can confirm what this
-        //     enclave is provisioned for.
+        //     enclave is provisioned for. `is_configured()` now guarantees all
+        //     three fields are non-zero / non-empty (audit 4th M-03 / #94), so
+        //     none of the comparisons below can be satisfied by a zero pin.
         if bridge_config.is_configured() {
             if req.chain_id != bridge_config.chain_id {
                 return Err(EnclaveError::CrossCheck(format!(
@@ -192,17 +211,10 @@ pub fn validate_evm_request(req: &SignEvmRequest, bridge_config: &BridgeConfig) 
             }
             // rgb_asset_id is optional on the request only when the listener
             // sends nothing (legacy path). Once a request declares an asset,
-            // it must match the pin. The pin itself is always required when
-            // configured — if the operator pinned chain/contract but left
-            // RGB_ASSET_ID unset, the bridge cannot identify the asset and
-            // we'd be back to trusting the listener.
-            if bridge_config.rgb_asset_id.is_empty() {
-                return Err(EnclaveError::CrossCheck(
-                    "bridge config pinned chain/contract but RGB_ASSET_ID is empty — \
-                     set all three env vars or none"
-                        .into(),
-                ));
-            }
+            // it must match the pin. The pin's own non-emptiness is now
+            // guaranteed by `is_configured()` (audit 4th M-03 / #94), so the
+            // previous "pinned chain/contract but RGB_ASSET_ID empty" branch is
+            // unreachable and has been removed.
             if !req.rgb_asset_id.is_empty() && req.rgb_asset_id != bridge_config.rgb_asset_id {
                 return Err(EnclaveError::CrossCheck(format!(
                     "rgb_asset_id mismatch: request {} != pinned {}",
@@ -1107,7 +1119,8 @@ mod tests {
     fn pinned_config_rejects_partial_pin_missing_asset() {
         // Operator misconfiguration: pinned chain/contract but no asset.
         // The function must fail-closed instead of silently allowing any
-        // asset, since the half-pin gives a misleading attestation.
+        // asset, since the half-pin gives a misleading attestation. After
+        // #94 this is caught by the unified partial-config gate.
         let half_pinned = BridgeConfig {
             chain_id: 1,
             bridge_contract: [0xAA; 20],
@@ -1115,8 +1128,23 @@ mod tests {
         };
         let err = validate_evm_request(&valid_evm_request(), &half_pinned).unwrap_err();
         assert!(
-            err.to_string().contains("RGB_ASSET_ID is empty"),
+            err.to_string().contains("partially set"),
             "got: {err}"
         );
+    }
+
+    #[cfg(feature = "rgb-validation")]
+    #[test]
+    fn pinned_config_rejects_zero_bridge_contract() {
+        // A zero bridge_contract is a partial pin (audit 4th M-03 / #94): it
+        // must never be treated as a valid pin that would accept an EVM
+        // request for the zero address.
+        let zero_contract = BridgeConfig {
+            chain_id: 1,
+            bridge_contract: [0u8; 20],
+            rgb_asset_id: "rgb:asset".into(),
+        };
+        let err = validate_evm_request(&valid_evm_request(), &zero_contract).unwrap_err();
+        assert!(err.to_string().contains("partially set"), "got: {err}");
     }
 }

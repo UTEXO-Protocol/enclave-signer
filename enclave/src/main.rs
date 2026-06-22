@@ -44,6 +44,17 @@ fn main() {
             rgb_asset_id = %bridge_config.rgb_asset_id,
             "bridge config pinned from env"
         );
+    } else if bridge_config.is_partially_configured() {
+        // Some-but-not-all pin fields set: a botched production config. SignEvm
+        // fails closed on this (audit 4th M-03 / #94); warn loudly at boot so
+        // the operator sees it before the first rejected request.
+        tracing::error!(
+            chain_id = bridge_config.chain_id,
+            bridge_contract = %hex::encode(bridge_config.bridge_contract),
+            rgb_asset_id = %bridge_config.rgb_asset_id,
+            "bridge config PARTIALLY set — EVM_CHAIN_ID / BRIDGE_CONTRACT / RGB_ASSET_ID must all \
+             be set (non-zero) or all unset; SignEvm will refuse to sign with this ambiguous pin"
+        );
     } else {
         tracing::warn!(
             "bridge config unconfigured (EVM_CHAIN_ID / BRIDGE_CONTRACT / RGB_ASSET_ID unset) — \
