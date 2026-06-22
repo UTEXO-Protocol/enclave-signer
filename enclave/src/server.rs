@@ -424,18 +424,28 @@ fn handle_sign_evm(ctx: &ServerContext, req: SignEvmRequest) -> Result<EnclaveRe
         validation::evm_crosscheck::validate_funds_out_transfer(&req, validated)?;
     }
 
-    // OpId binding (audit TEE-SE-02, spec §6). Cross-check the
-    // listener-supplied `op_id` against the OpIds the enclave extracted from
-    // the consignment it validated itself, so a compromised backend cannot
-    // pair a validly-anchored consignment with an EVM release that
-    // consignment does not authorise. Advisory on the live pools/transfer
-    // flow (an empty `op_id` is allowed there — that flow carries no OpId in
-    // its on-chain `fundsOut` calldata); when present it must agree with the
-    // consignment. The mint/burn unlock flow makes it required and adds the
-    // `burnId` calldata value-binding at its own dispatch (`bind_burn_id`).
+    // OpId binding (audit TEE-SE-02, spec §6/§7). The enclave derives the
+    // cross-domain identifiers from the consignment it validated itself — it
+    // does NOT trust any listener-supplied OpId — and binds the calldata it is
+    // about to sign to them:
+    //   - `burnId` (offset 68) == keccak256(last transition's OpId); and
+    //   - every `fundsInIds[]` entry (in `settlementData`) corresponds to a
+    //     TS_INFLATION (mint) OpId in the consignment's history.
+    // Because the MultisigProxy signature commits to keccak256(callData),
+    // these embedded values are cryptographically bound by the signature, so a
+    // compromised backend cannot route the release to a different replay slot
+    // or consume locks this consignment did not authorise.
+    //
+    // NOTE: this requires the backend (`bridge-utexo`) to derive on-chain
+    // `burnId`/`fundsInIds` as keccak256(RGB OpId) too — see PR description.
     #[cfg(all(feature = "rgb-validation", not(feature = "dev-mode")))]
-    if let Some(ref validated) = validated_consignment {
-        validation::evm_crosscheck::bind_op_id(&req, validated)?;
+    if req.call_data.len() >= 4
+        && req.call_data[..4] == validation::evm_crosscheck::FUNDS_OUT_SELECTOR_POOLS
+    {
+        if let Some(ref validated) = validated_consignment {
+            validation::evm_crosscheck::bind_burn_id(&req, validated)?;
+            validation::evm_crosscheck::bind_funds_in_ids(&req, validated)?;
+        }
     }
 
     // SPV verification: every consignment-anchor Bitcoin tx must be in our

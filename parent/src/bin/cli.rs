@@ -311,7 +311,6 @@ fn main() {
                 merkle_proofs: vec![],
                 consignment: vec![],
                 consignment_hash: vec![],
-                op_id: String::new(),
             };
             match client.sign_evm(req) {
                 Ok(r) => {

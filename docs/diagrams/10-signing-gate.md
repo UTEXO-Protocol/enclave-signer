@@ -42,10 +42,11 @@ flowchart TD
     end
     p2p -->|yes| p2bv
 
-    subgraph P2c [P2c — OpId binding, bind_op_id, TEE-SE-02 / Sec 6]
-        p2oid{op_id present?<br/>advisory on pools — empty allowed}
-        p2oid -->|present| p2oidc{op_id == last_transition.op_id<br/>AND op_id ∈ all_op_ids?}
-        p2oidc -->|no| p2oidr[REFUSE — op_id not authorised by consignment]:::refuse
+    subgraph P2c [P2c — OpId binding, bind_burn_id + bind_funds_in_ids, TEE-SE-02 / Sec 6]
+        p2burn{calldata burnId@68<br/>== keccak256 of consignment last OpId?}
+        p2burn -->|no| p2burnr[REFUSE — burnId not the authorising RGB op]:::refuse
+        p2burn -->|yes| p2fii{every settlementData fundsInId<br/>== keccak256 of a TS_INFLATION OpId in consignment?}
+        p2fii -->|no| p2fiir[REFUSE — fundsInId not backed by a consignment mint]:::refuse
     end
 
     subgraph P3 [P3 — SPV / Bitcoin anchoring, Sec 10.7/8, Sec 12]
@@ -57,9 +58,8 @@ flowchart TD
         p3v --> p3q{all proofs pass?}
         p3q -->|no| p3qr[REFUSE — SPV failure]:::refuse
     end
-    p2bt -->|yes| p2oid
-    p2oid -->|empty| p3stale
-    p2oidc -->|yes| p3stale
+    p2bt -->|yes| p2burn
+    p2fii -->|yes| p3stale
 
     subgraph S [Sign]
         s1[build EIP-712 domain<br/>name, version, chain_id, proxy_contract] --> s2[digest = EIP-712 BridgeOperation<br/>selector, callData, nonce, deadline]
@@ -79,10 +79,10 @@ flowchart TD
 - Sec 10.1 — `consignment_valid` bypass removed (#47).
 - Sec 10.4/5 — `chain_id` / contract / asset pinned from env (#43).
 - EIP-712 typehash now `BridgeOperation(bytes4 selector, ...)` matching `MultisigProxy._buildDigest()` (PR #48); domain `name`/`version` are `"MultisigProxy"`/`"1"`, verified against the deployed contract's domain separator.
-- Sec 6 / 10.6 — `OpId` now on the wire (`SignEvmRequest.op_id`) and cross-checked against the validated consignment (`bind_op_id`, `TEE-SE-02` / #63). Advisory on the pools/transfer flow (no on-chain OpId there); the staged `bind_burn_id` adds the `burnId`-slot value-binding for the mint/burn unlock flow (#59) once that path is wired and the OpId→burnId transform is confirmed.
+- Sec 6 / 10.6 — `OpId` bound into the signed calldata for **all** flows (`TEE-SE-02` / #63). The enclave derives the identifiers from the consignment it validated itself (no listener-supplied OpId): `bind_burn_id` requires `calldata.burnId@68 == keccak256(last transition OpId)`, and `bind_funds_in_ids` requires every `settlementData` `fundsInId` to be `keccak256` of a `TS_INFLATION` (mint) OpId in the consignment. Because the signature commits to `keccak256(callData)`, both are cryptographically bound.
 
 **Remaining gaps:**
 - Sec 13 — EVM recipient NOT derived from / bound to the RGB payload (`TEE-SE-03`, #66).
 - Amount bind is `≤`, not the spec's strict `==` (`TEE-SE-04`).
 - Calldata offsets pinned to the deployed `0xccddb768` `fundsOut` ABI but not yet asserted against a contract-derived fixture (`TEE-SE-05`).
-- Mint-burn unlock path inert: `validate_funds_out_burn` / `bind_burn_id` implemented + tested but not wired into a handler dispatch.
+- **Cross-repo dependency:** the OpId binding requires the backend (`bridge-utexo`) to derive on-chain `burnId` / `fundsInIds` as `keccak256(RGB OpId)`; it currently uses numeric DB transfer ids, so #63 must land coordinated with that backend change (else `fundsOut` is rejected).

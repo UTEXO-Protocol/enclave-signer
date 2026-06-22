@@ -64,10 +64,17 @@ pub struct ValidatedConsignment {
     /// Every state-transition `op_id` in the consignment, in witness order
     /// (bundle k's transitions before bundle k+1's). Spec §6 requires
     /// every mint OpId committed to EVM state to be cross-checked across
-    /// RGB validations. The downstream filter for "which of these is a
-    /// mint" lives in a follow-up PR once the IFA-schema `MINT`
-    /// `transition_type` constant is confirmed.
+    /// RGB validations.
     pub all_op_ids: Vec<String>,
+    /// The `op_id`s of every IFA `TS_INFLATION` (mint) transition in the
+    /// consignment, in witness order — the subset of [`Self::all_op_ids`]
+    /// that corresponds to EVM lock records (`fundsIn`). The `fundsOut`
+    /// calldata's `fundsInIds[]` (inside `settlementData`) must each
+    /// correspond to one of these (under the agreed OpId→id transform), so
+    /// a release can only consume locks this consignment's RGB history
+    /// actually inflated (spec §6 / §7). See
+    /// `evm_crosscheck::bind_funds_in_ids`.
+    pub mint_op_ids: Vec<String>,
     /// The most recent state transition — the change of state the EVM
     /// action this consignment authorises commits to. Follow-up PRs
     /// classify this as Transfer-to-federation (pools / spec §9.2,
@@ -257,7 +264,8 @@ impl RgbValidator {
         // walk would duplicate ~80 lines we'd then have to keep in sync
         // with rgb-ops's evolving internal types. The parse cost is small
         // relative to the network validation below.
-        let (all_op_ids, mut last_transition) = extract_transition_summary(consignment_bytes)?;
+        let (all_op_ids, mint_op_ids, mut last_transition) =
+            extract_transition_summary(consignment_bytes)?;
         let transitions_count = all_op_ids.len();
 
         // Burn-amount extraction: the parser doesn't surface
@@ -330,6 +338,7 @@ impl RgbValidator {
             chain_net,
             witness_txids,
             all_op_ids,
+            mint_op_ids,
             last_transition,
             last_transfer_witness_txid,
             last_transfer_witness_prevouts,
@@ -389,9 +398,10 @@ fn read_last_transfer_witness(
 /// flat transition summary (every op_id + the most recent transition's
 /// shape). Errors if the consignment isn't a Transfer or if any field
 /// fails to decode.
+#[allow(clippy::type_complexity)]
 fn extract_transition_summary(
     consignment_bytes: &[u8],
-) -> Result<(Vec<String>, Option<TransitionSummary>)> {
+) -> Result<(Vec<String>, Vec<String>, Option<TransitionSummary>)> {
     let info = rgb_consignment::parse(consignment_bytes)
         .map_err(|e| EnclaveError::CrossCheck(format!("rgb-consignment parse failed: {e}")))?;
 
@@ -420,6 +430,17 @@ fn extract_transition_summary(
         .map(|t: &TransitionInfo| t.op_id.clone())
         .collect();
 
+    // The mint (IFA `TS_INFLATION`) subset — these map 1:1 to EVM lock
+    // records (`fundsIn`). The `fundsOut` `fundsInIds[]` must each correspond
+    // to one of these (spec §6).
+    let mint_op_ids: Vec<String> = transfer
+        .witnesses
+        .iter()
+        .flat_map(|w: &WitnessInfo| w.transitions.iter())
+        .filter(|t: &&TransitionInfo| t.transition_type == ifa::TS_INFLATION)
+        .map(|t: &TransitionInfo| t.op_id.clone())
+        .collect();
+
     let last_transition = transfer
         .witnesses
         .last()
@@ -427,7 +448,7 @@ fn extract_transition_summary(
         .map(transition_summary)
         .transpose()?;
 
-    Ok((all_op_ids, last_transition))
+    Ok((all_op_ids, mint_op_ids, last_transition))
 }
 
 fn transition_summary(t: &TransitionInfo) -> Result<TransitionSummary> {
@@ -576,8 +597,13 @@ mod tests {
 
     #[test]
     fn extracts_op_ids_and_last_transition_from_transfer_fixture() {
-        let (all_op_ids, last_transition) =
+        let (all_op_ids, mint_op_ids, last_transition) =
             extract_transition_summary(TRANSFER_FIXTURE).expect("transfer parse");
+
+        // This transfer fixture carries no IFA TS_INFLATION (mint)
+        // transitions — both transitions are plain transfers — so the mint
+        // subset is empty.
+        assert!(mint_op_ids.is_empty(), "transfer fixture has no mints");
 
         // Fixture is a Transfer with two witness bundles, one transition
         // each. Order of `all_op_ids` matches witness order.
@@ -627,7 +653,7 @@ mod tests {
 
     #[test]
     fn last_transition_carries_revealed_and_confidential_seals() {
-        let (_, last_transition) =
+        let (_, _, last_transition) =
             extract_transition_summary(TRANSFER_FIXTURE).expect("transfer parse");
         let last = last_transition.expect("transfer has a last transition");
 
