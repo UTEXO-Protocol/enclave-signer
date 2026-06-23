@@ -12,15 +12,15 @@
 # on restart — see TODO #5 for KMS-sealed DR.)
 #
 # Usage (run as root, e.g. via SSM):
-#   GIT_SHA=<40-hex> BUCKET=<s3-bucket> AWS_REGION=<region> bash deploy-host.sh
-# No infra identifiers are baked in (public repo) — pass them via env.
+#   GIT_SHA=<40-hex> BUCKET=<s3-bucket> AWS_REGION=<region> CLUSTER_DIR=<path> bash deploy-host.sh
+# No infra identifiers or paths are baked in (public repo) — pass them via env.
 set -euo pipefail
 
 GIT_SHA="${GIT_SHA:?GIT_SHA required (40-hex commit)}"
 BUCKET="${BUCKET:?BUCKET required (S3 artifact bucket)}"
 REGION="${AWS_REGION:?AWS_REGION required (e.g. eu-central-1)}"
-DIR="${CLUSTER_DIR:-/home/ubuntu/clone-stage}"
-EIF="$DIR/utexo-bridge-enclave-clone-stage.eif"
+DIR="${CLUSTER_DIR:?CLUSTER_DIR required (cluster working dir, e.g. /home/<user>/<dir>)}"
+EIF="$DIR/utexo-bridge-enclave.eif"
 SRC="s3://$BUCKET/eif/$GIT_SHA"
 CIDS=(16 18 20)
 declare -A PORT=([16]=50051 [18]=50052 [20]=50053)
@@ -70,7 +70,7 @@ sleep 3
 
 # --- 5. run enclaves -------------------------------------------------------
 for CID in "${CIDS[@]}"; do
-  asubuntu "nitro-cli run-enclave --eif-path $EIF --cpu-count 2 --memory 3072 --enclave-cid $CID --enclave-name clone-stage-$CID" >/dev/null
+  asubuntu "nitro-cli run-enclave --eif-path $EIF --cpu-count 2 --memory 3072 --enclave-cid $CID --enclave-name enclave-$CID" >/dev/null
   sleep 2
 done
 
