@@ -95,6 +95,17 @@ pub struct ValidatedConsignment {
     /// consignment carries only the witness txid (`PubWitness::Txid`), in
     /// which case the txid identity bind alone anchors every input.
     pub last_transfer_witness_prevouts: Option<Vec<bitcoin::OutPoint>>,
+    /// Authoritative OpId (32-byte commitment hash) of the consignment's
+    /// **last** transition, read from the rgbstd-**validated** `Transfer`
+    /// (`KnownTransition.opid` of the same last bundle as
+    /// `last_transfer_witness_txid`), NOT from the flat `rgb_consignment`
+    /// parser. This is the value `validate()` authenticated and anchored on
+    /// chain, so binding the EVM `fundsOut` `burnId` to it
+    /// (`bind-burn-id` / audit M-02 / #93) is a comparison against validated
+    /// consignment data, not a parallel parse. `None` only for a consignment
+    /// with no bundles (rgbstd rejects those) or a non-Transfer last
+    /// transition (the burnId binding only applies to the transfer flow).
+    pub last_transfer_op_id: Option<[u8; 32]>,
 }
 
 /// Flat summary of one RGB state transition. Mirrors
@@ -274,12 +285,13 @@ impl RgbValidator {
         // bind is only meaningful for the pools-mode send shape, and the
         // consistency check inside reads the parsed transition type to ensure
         // the txid and the transition come from the same witness.
-        let (last_transfer_witness_txid, last_transfer_witness_prevouts) = match last_transition {
-            Some(ref last) if last.transition_type == ifa::TS_TRANSFER => {
-                read_last_transfer_witness(&transfer, last.transition_type)?
-            }
-            _ => (None, None),
-        };
+        let (last_transfer_witness_txid, last_transfer_witness_prevouts, last_transfer_op_id) =
+            match last_transition {
+                Some(ref last) if last.transition_type == ifa::TS_TRANSFER => {
+                    read_last_transfer_witness(&transfer, last.transition_type)?
+                }
+                _ => (None, None, None),
+            };
 
         // 2. Create an Esplora-backed resolver.
         let builder = esplora_client::Builder::new(&self.esplora_url);
@@ -328,16 +340,27 @@ impl RgbValidator {
             last_transition,
             last_transfer_witness_txid,
             last_transfer_witness_prevouts,
+            last_transfer_op_id,
         })
     }
 }
 
+/// Binding data for the consignment's last transfer bundle:
+/// `(witness txid, witness input prevouts, validated last-transition OpId)`.
+/// All `Option` because a bundle-less transfer (rejected upstream by rgbstd)
+/// yields `(None, None, None)`. See [`read_last_transfer_witness`].
+type LastTransferBinding = (
+    Option<bitcoin::Txid>,
+    Option<Vec<bitcoin::OutPoint>>,
+    Option<[u8; 32]>,
+);
+
 /// Extract the witness-tx identity binding for the consignment's **last**
 /// transition out of the rgbstd `Transfer`: the witness txid of the bundle
-/// carrying the most recent transition, and — when that bundle embeds the
-/// full witness tx (`PubWitness::Tx`) — its Bitcoin input prevouts. Consumed
-/// by the send-RGB PSBT cross-check to bind the PSBT being signed to the
-/// consignment's `TS_TRANSFER` witness transaction.
+/// carrying the most recent transition, and - when that bundle embeds the
+/// full witness tx (`PubWitness::Tx`) - its Bitcoin input prevouts; plus the
+/// validated OpId of that transition (canonical burnId source, #93). Consumed
+/// by the send-RGB PSBT cross-check and the EVM burnId binding.
 ///
 /// Reads the **same** `transfer.bundles.iter().last()` bundle that
 /// [`read_last_transition_burned_asset`] uses, and asserts that bundle's last
@@ -353,20 +376,35 @@ impl RgbValidator {
 fn read_last_transfer_witness(
     transfer: &Transfer,
     expected_type: u16,
-) -> Result<(Option<bitcoin::Txid>, Option<Vec<bitcoin::OutPoint>>)> {
+) -> Result<LastTransferBinding> {
     let Some(last_bundle) = transfer.bundles.iter().last() else {
-        return Ok((None, None));
+        return Ok((None, None, None));
     };
 
+    // Read the authoritative OpId of the validated last transition from the
+    // same bundle. rgbstd's `OpId` is the transition's commitment hash; its
+    // `Display` is lowercase hex of the 32 bytes, so we hex-decode it back to
+    // the raw array. Sourcing it here (the validated object) rather than from
+    // the flat `rgb_consignment` parser is what makes the EVM burnId binding a
+    // check against validated data (audit M-02 / #93).
+    let mut op_id: Option<[u8; 32]> = None;
     if let Some(known) = last_bundle.bundle().known_transitions.iter().last() {
         let actual = known.transition.transition_type;
         let expected = TransitionType::with(expected_type);
         if actual != expected {
             return Err(EnclaveError::CrossCheck(format!(
                 "consignment last-bundle transition type {actual} disagrees with parsed last \
-                 transition type {expected} — refusing to bind PSBT to an ambiguous witness"
+                 transition type {expected} - refusing to bind to an ambiguous witness"
             )));
         }
+        let opid_hex = known.opid.to_string();
+        let bytes = hex::decode(&opid_hex).map_err(|e| {
+            EnclaveError::CrossCheck(format!("validated opid hex decode failed: {e} ({opid_hex:?})"))
+        })?;
+        let arr: [u8; 32] = bytes.try_into().map_err(|v: Vec<u8>| {
+            EnclaveError::CrossCheck(format!("validated opid is not 32 bytes (got {})", v.len()))
+        })?;
+        op_id = Some(arr);
     }
 
     // `witness_id()` is `bitcoin::Txid` (rgb re-exports the same bitcoin 0.32
@@ -377,7 +415,7 @@ fn read_last_transfer_witness(
         .tx()
         .map(|tx| tx.input.iter().map(|txin| txin.previous_output).collect());
 
-    Ok((Some(txid), prevouts))
+    Ok((Some(txid), prevouts, op_id))
 }
 
 /// Parse the consignment with `rgb_consignment::parse` and pull out the
@@ -663,28 +701,38 @@ mod tests {
 
         // The fixture's last transition is a Transfer (type 10000, asserted in
         // `extracts_op_ids_and_last_transition_from_transfer_fixture`).
-        let (txid, prevouts) =
+        let (txid, prevouts, op_id) =
             read_last_transfer_witness(&transfer, ifa::TS_TRANSFER).expect("extract witness");
 
         // Every validated transfer has at least one bundle, so the txid is set.
         let txid = txid.expect("transfer fixture has a witness txid");
         // It must equal the last bundle's witness id (the bundle we bind to).
-        let expected = transfer
-            .bundles
-            .iter()
-            .last()
-            .expect("fixture has bundles")
-            .witness_id();
+        let last_bundle = transfer.bundles.iter().last().expect("fixture has bundles");
+        let expected = last_bundle.witness_id();
         assert_eq!(txid, expected);
 
         // The rgb-lib sender embeds the full witness tx for a freshly-composed
         // transfer, so the prevouts (the witness tx's Bitcoin inputs) are
-        // present and non-empty — the per-input canary is available.
+        // present and non-empty - the per-input canary is available.
         let prevouts = prevouts.expect("fixture embeds the full witness tx (PubWitness::Tx)");
         assert!(
             !prevouts.is_empty(),
             "witness tx must spend at least one input"
         );
+
+        // The validated OpId (canonical burnId source, #93) must be present and
+        // equal the last bundle's last known-transition opid, read straight
+        // from the validated object - not the flat parser.
+        let op_id = op_id.expect("transfer fixture yields a validated opid");
+        let expected_opid = last_bundle
+            .bundle()
+            .known_transitions
+            .iter()
+            .last()
+            .expect("bundle has a known transition")
+            .opid
+            .to_string();
+        assert_eq!(hex::encode(op_id), expected_opid);
     }
 
     #[test]

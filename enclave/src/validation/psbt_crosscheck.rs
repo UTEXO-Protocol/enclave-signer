@@ -487,6 +487,7 @@ mod tests {
                 last_transition: Some(transfer_summary(total_output_amount)),
                 last_transfer_witness_txid: Some(psbt.unsigned_tx.compute_txid()),
                 last_transfer_witness_prevouts: Some(prevouts),
+                last_transfer_op_id: None,
             }
         }
 
