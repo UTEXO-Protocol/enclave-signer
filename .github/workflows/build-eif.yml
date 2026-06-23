@@ -15,7 +15,10 @@ name: "Build EIF"
 #   secrets.AWS_OIDC_ROLE_ARN                  IAM role to assume via OIDC for S3 upload
 #                                              (if unset, the S3 step is skipped and
 #                                               artifacts are only attached to the run)
-#   vars.EIF_S3_BUCKET                         target bucket (defaults to the stage bucket)
+#   vars.AWS_REGION                            AWS region for OIDC + S3 (e.g. eu-central-1)
+#   vars.EIF_S3_BUCKET                         target S3 bucket for the artifacts
+# No infra identifiers (account id, bucket, region) are hardcoded here — this is
+# a public repo; everything environment-specific comes from repo vars/secrets.
 
 on:
   workflow_dispatch:
@@ -28,7 +31,7 @@ permissions:
 
 env:
   NITRO_CLI_VERSION: "1.4.5"
-  AWS_REGION: "eu-central-1"
+  AWS_REGION: ${{ vars.AWS_REGION }}
   # Hoisted to env because secrets can't be referenced directly in `if:`.
   AWS_ROLE: ${{ secrets.AWS_OIDC_ROLE_ARN }}
 
@@ -154,9 +157,10 @@ jobs:
       - name: Publish to S3 (immutable git_sha path)
         if: ${{ steps.aws.outcome == 'success' }}
         env:
-          BUCKET: ${{ vars.EIF_S3_BUCKET || 'utexo-stage-eif-artifacts-867958227014-20260618' }}
+          BUCKET: ${{ vars.EIF_S3_BUCKET }}
         run: |
           set -euxo pipefail
+          [ -n "$BUCKET" ] || { echo "vars.EIF_S3_BUCKET is not set"; exit 1; }
           DEST="s3://${BUCKET}/eif/${{ github.sha }}/"
           aws s3 cp artifacts/ "$DEST" --recursive
           echo "Published to $DEST"

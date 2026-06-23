@@ -12,12 +12,13 @@
 # on restart — see TODO #5 for KMS-sealed DR.)
 #
 # Usage (run as root, e.g. via SSM):
-#   GIT_SHA=<40-hex> [BUCKET=...] [AWS_REGION=...] bash deploy-host.sh
+#   GIT_SHA=<40-hex> BUCKET=<s3-bucket> AWS_REGION=<region> bash deploy-host.sh
+# No infra identifiers are baked in (public repo) — pass them via env.
 set -euo pipefail
 
 GIT_SHA="${GIT_SHA:?GIT_SHA required (40-hex commit)}"
-BUCKET="${BUCKET:-utexo-stage-eif-artifacts-867958227014-20260618}"
-REGION="${AWS_REGION:-eu-central-1}"
+BUCKET="${BUCKET:?BUCKET required (S3 artifact bucket)}"
+REGION="${AWS_REGION:?AWS_REGION required (e.g. eu-central-1)}"
 DIR="${CLUSTER_DIR:-/home/ubuntu/clone-stage}"
 EIF="$DIR/utexo-bridge-enclave-clone-stage.eif"
 SRC="s3://$BUCKET/eif/$GIT_SHA"
