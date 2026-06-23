@@ -514,6 +514,47 @@ fn handle_sign_psbt(ctx: &ServerContext, req: SignPsbtRequest) -> Result<Enclave
         psbt_consignment_crosscheck(ctx, &req)?;
     }
 
+    // Soft operation-uniqueness guard (audit W-02 / #84). In bridge mode,
+    // record the operation tuple and reject a same-op resubmission inside the
+    // TTL window. Check-and-record sits in the critical section — after every
+    // validation above has passed and immediately before signing — so we only
+    // ever record an operation we are actually about to sign, and a duplicate
+    // is rejected before a second signature is produced. Recording before the
+    // sign means a transient `sign_psbt` failure also blocks retries of that
+    // exact tuple until the TTL lapses; that is acceptable for a soft guard
+    // (the concern is double-*success*, and the set self-heals).
+    //
+    // This is defense-in-depth only: the guard is in-memory, per-instance, and
+    // volatile across restart, so it does not replace the durable on-chain
+    // double-spend control (#84/#93). See `EnclaveState::op_replay_guard`.
+    #[cfg(not(feature = "dev-mode"))]
+    if !req.evm_tx_hash.is_empty() {
+        let op_key = validation::psbt_crosscheck::psbt_operation_key(
+            ctx.bridge_config.chain_id,
+            &ctx.bridge_config.bridge_contract,
+            &req.evm_tx_hash,
+            req.operation_idx,
+            &req.rgb_asset_id,
+        );
+        match ctx.state.op_replay_guard.check_and_record(op_key) {
+            Ok(()) => {}
+            Err(EnclaveError::NonceReplay) => {
+                tracing::warn!(
+                    operation_idx = req.operation_idx,
+                    evm_tx_hash = %hex::encode(&req.evm_tx_hash),
+                    "rejecting duplicate bridge PSBT operation (soft replay guard, #84)"
+                );
+                return Err(EnclaveError::CrossCheck(
+                    "duplicate bridge operation: this (chain, contract, evm_tx_hash, \
+                     operation_idx, rgb_asset_id) was already signed recently — refusing to \
+                     sign a replay (soft in-memory guard; durable guard is on-chain)"
+                        .into(),
+                ));
+            }
+            Err(e) => return Err(e),
+        }
+    }
+
     let (signed_psbt, inputs_signed) = ctx.state.sign_psbt(&req.psbt_bytes)?;
 
     tracing::info!(inputs_signed, "PSBT signed");
