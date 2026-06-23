@@ -2,10 +2,10 @@ use std::time::Duration;
 
 use crate::enclave_proto::{
     enclave_request, enclave_response, EnclaveRequest, EnclaveResponse, EvmSignatureResponse,
-    GetLastSavedBlockRequest, GetLastSavedBlockResponse, GetPublicKeyRequest,
-    InitiateCloningRequest, InitiateCloningResponse, InitializeKeyRequest, InitializeKeyResponse,
-    PublicKeysResponse, RawSignatureResponse, SetCloneRequest, SignEvmRequest, SignPsbtRequest,
-    SignRawMessageRequest, SignedPsbtResponse, SubmitHeadersRequest, SubmitHeadersResponse,
+    GetLastSavedBlockRequest, GetLastSavedBlockResponse, GetPublicKeyRequest, InitializeKeyRequest,
+    InitializeKeyResponse, InitiateCloningRequest, InitiateCloningResponse, PublicKeysResponse,
+    RawSignatureResponse, SetCloneRequest, SignEvmRequest, SignPsbtRequest, SignRawMessageRequest,
+    SignedPsbtResponse, SubmitHeadersRequest, SubmitHeadersResponse,
 };
 use crate::error::{ParentError, Result};
 use crate::framing;

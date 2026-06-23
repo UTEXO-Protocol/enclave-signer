@@ -551,10 +551,7 @@ fn run_clone(
         println!("\nOK: cloned EVM address matches donor (0x{local_evm})");
         Ok(())
     } else {
-        Err(format!(
-            "clone mismatch: local EVM 0x{local_evm} != donor 0x{want_evm}"
-        )
-        .into())
+        Err(format!("clone mismatch: local EVM 0x{local_evm} != donor 0x{want_evm}").into())
     }
 }
 
