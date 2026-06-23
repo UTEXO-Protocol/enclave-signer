@@ -101,6 +101,20 @@ jobs:
           mkdir -p "$OUT_DIR"
           ./build/build-enclave.sh
 
+      # Host-side binaries that run ON the EC2 host (not inside the enclave):
+      # the parent gRPC server and the operator CLI. Built static (musl) so they
+      # do not depend on the host glibc version. Published next to the EIF under
+      # the same git_sha so a host pulls a matching {EIF, parent, cli} set.
+      - name: Build host binaries (parent + cli, static musl)
+        run: |
+          set -euxo pipefail
+          cargo build --release -p utexo-bridge-parent --features vsock \
+            --target x86_64-unknown-linux-musl
+          BIN=target/x86_64-unknown-linux-musl/release
+          cp "$BIN/utexo-bridge-parent" "$BIN/utexo-bridge-parent-cli" artifacts/
+          ( cd artifacts && sha256sum utexo-bridge-parent utexo-bridge-parent-cli > HOST-SHA256SUMS )
+          cat artifacts/HOST-SHA256SUMS
+
       - name: Write build metadata
         run: |
           set -euxo pipefail
@@ -124,6 +138,9 @@ jobs:
             artifacts/PCR.json
             artifacts/SHA256SUMS
             artifacts/metadata.json
+            artifacts/utexo-bridge-parent
+            artifacts/utexo-bridge-parent-cli
+            artifacts/HOST-SHA256SUMS
 
       # --- S3 publish (only when an OIDC role is configured) -----------------
       - name: Configure AWS credentials
