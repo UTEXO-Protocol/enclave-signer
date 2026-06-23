@@ -50,6 +50,11 @@ message InitializeKeyRequest {
   // BIP-39 mnemonic phrase (requires `allow-seed-import` feature, testing only).
   // If non-empty, takes precedence over seed.
   string mnemonic = 2;
+  // Donor-side cloning secret, delivered at runtime (NOT baked into the EIF).
+  // Optional: only set for enclaves that will serve `GetClone`. Pre-shared
+  // across the operator's cluster; the requester passes the same value via
+  // `InitiateCloningRequest.cloning_secret`. Empty = donor cloning disabled.
+  string cloning_secret = 3;
 }
 
 message InitializeKeyResponse {

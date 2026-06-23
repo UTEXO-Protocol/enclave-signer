@@ -19,12 +19,6 @@ name: "Build EIF"
 
 on:
   workflow_dispatch:
-    inputs:
-      cloning_secret:
-        description: "Stage-only: bake donor UTEXO_CLONING_SECRET into the EIF (leave empty for prod-style build)"
-        type: string
-        required: false
-        default: ""
   push:
     tags: ["v*"]
 
@@ -102,7 +96,6 @@ jobs:
         env:
           OUT_DIR: ${{ github.workspace }}/artifacts
           NITRO_CLI_BLOBS: /home/runner/nitro-cli-dist/blobs
-          UTEXO_CLONING_SECRET: ${{ inputs.cloning_secret }}
         run: |
           set -euxo pipefail
           mkdir -p "$OUT_DIR"

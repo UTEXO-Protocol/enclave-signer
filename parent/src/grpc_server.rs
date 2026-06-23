@@ -312,6 +312,7 @@ impl EnclaveService for ParentAdapterService {
                 enclave_proto::InitializeKeyRequest {
                     seed: vec![],
                     mnemonic: inner.cloning_secret,
+                    cloning_secret: String::new(),
                 },
             )),
         };

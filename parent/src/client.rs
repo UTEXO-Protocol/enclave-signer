@@ -74,23 +74,35 @@ impl EnclaveClient {
     }
 
     pub fn initialize_keys(&self, seed: Option<Vec<u8>>) -> Result<InitializeKeyResponse> {
-        self.initialize_keys_inner(seed, None)
+        self.initialize_keys_inner(seed, None, None)
+    }
+
+    /// Initialize a donor enclave and configure its cloning secret in one
+    /// message, so the secret is delivered at runtime (never baked into the EIF).
+    pub fn initialize_keys_with_secret(
+        &self,
+        seed: Option<Vec<u8>>,
+        cloning_secret: Option<String>,
+    ) -> Result<InitializeKeyResponse> {
+        self.initialize_keys_inner(seed, None, cloning_secret)
     }
 
     pub fn initialize_keys_mnemonic(&self, mnemonic: &str) -> Result<InitializeKeyResponse> {
-        self.initialize_keys_inner(None, Some(mnemonic.to_string()))
+        self.initialize_keys_inner(None, Some(mnemonic.to_string()), None)
     }
 
     fn initialize_keys_inner(
         &self,
         seed: Option<Vec<u8>>,
         mnemonic: Option<String>,
+        cloning_secret: Option<String>,
     ) -> Result<InitializeKeyResponse> {
         let req = EnclaveRequest {
             request: Some(enclave_request::Request::InitializeKey(
                 InitializeKeyRequest {
                     seed: seed.unwrap_or_default(),
                     mnemonic: mnemonic.unwrap_or_default(),
+                    cloning_secret: cloning_secret.unwrap_or_default(),
                 },
             )),
         };

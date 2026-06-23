@@ -52,14 +52,21 @@ fn main() {
         );
     }
 
-    // Donor-side cloning secret. Optional: only required for enclaves that
-    // will serve `GetClone` requests. Pre-shared across the operator's
-    // cluster. Never logged, wrapped in `SecretBox` for zeroize-on-drop.
+    // Donor-side cloning secret. Preferred delivery is at runtime via the
+    // `InitializeKey` message (`cloning_secret`), so the secret never lands in
+    // the EIF or the PCRs. The `UTEXO_CLONING_SECRET` env var is kept only as
+    // a legacy/dev fallback and is NOT set by the production Dockerfile; do not
+    // bake it into a release EIF. Never logged; wrapped in `SecretBox`.
     if let Ok(secret) = std::env::var("UTEXO_CLONING_SECRET") {
-        if let Err(e) = state.set_donor_cloning_secret(secret) {
-            tracing::error!("failed to set donor cloning secret: {e}");
-        } else {
-            tracing::info!("donor cloning secret configured from UTEXO_CLONING_SECRET");
+        if !secret.is_empty() {
+            if let Err(e) = state.set_donor_cloning_secret(secret) {
+                tracing::error!("failed to set donor cloning secret: {e}");
+            } else {
+                tracing::warn!(
+                    "donor cloning secret configured from UTEXO_CLONING_SECRET env \
+                     (legacy fallback; prefer the InitializeKey cloning_secret field)"
+                );
+            }
         }
     }
 

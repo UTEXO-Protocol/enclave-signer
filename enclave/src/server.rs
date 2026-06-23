@@ -199,6 +199,14 @@ fn handle_initialize(ctx: &ServerContext, req: InitializeKeyRequest) -> Result<E
         }
     }
 
+    // Donor-side cloning secret, delivered at runtime via the init message
+    // (never baked into the EIF, so it stays out of the PCRs). Only required
+    // for enclaves that will serve `GetClone`. Idempotent; empty = disabled.
+    if !req.cloning_secret.is_empty() {
+        state.set_donor_cloning_secret(req.cloning_secret)?;
+        tracing::info!("donor cloning secret configured from init request");
+    }
+
     let keys = state.get_keys()?;
     tracing::info!(
         evm_address = %hex::encode(keys.evm_address),

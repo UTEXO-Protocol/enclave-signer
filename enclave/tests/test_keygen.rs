@@ -13,6 +13,7 @@ fn initialize_and_get_keys() {
         request: Some(Request::InitializeKey(InitializeKeyRequest {
             seed: vec![],
             mnemonic: String::new(),
+            cloning_secret: String::new(),
         })),
     };
     let resp = common::send_request(port, &req);
@@ -63,6 +64,7 @@ fn double_initialize_returns_error() {
         request: Some(Request::InitializeKey(InitializeKeyRequest {
             seed: vec![],
             mnemonic: String::new(),
+            cloning_secret: String::new(),
         })),
     };
 
@@ -115,6 +117,7 @@ fn deterministic_seed_import() {
         request: Some(Request::InitializeKey(InitializeKeyRequest {
             seed: seed.to_vec(),
             mnemonic: String::new(),
+            cloning_secret: String::new(),
         })),
     };
     let resp1 = common::send_request(port1, &req);

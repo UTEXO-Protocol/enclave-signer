@@ -25,8 +25,10 @@
 # Tunables (env):
 #   OUT_DIR                output directory for artifacts (default: build/)
 #   IMAGE_TAG              docker tag for the builder image (default: utexo-bridge-enclave:latest)
-#   UTEXO_CLONING_SECRET   stage-only: bake donor cloning secret (leave empty for prod)
 #   NITRO_CLI_BLOBS        override blobs dir for `nitro-cli build-enclave`
+# NOTE: the donor cloning secret is NOT baked into the EIF. It is delivered at
+# runtime via the InitializeKey message (CLI: `init --cloning-secret <secret>`),
+# keeping the build secret-free and the PCRs reproducible.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -52,7 +54,6 @@ mkdir -p "$OUT_DIR"
 echo "Building Docker image (BuildKit, --ssh default)..."
 DOCKER_BUILDKIT=1 docker build \
     --ssh default \
-    --build-arg "UTEXO_CLONING_SECRET=${UTEXO_CLONING_SECRET:-}" \
     -f "$SCRIPT_DIR/Dockerfile.enclave" \
     -t "$IMAGE_TAG" \
     "$PROJECT_ROOT"

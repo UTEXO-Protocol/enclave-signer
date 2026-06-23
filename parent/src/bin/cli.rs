@@ -27,7 +27,12 @@ struct Cli {
 #[derive(Subcommand)]
 enum Command {
     /// Initialize keys (generate new mnemonic in the enclave)
-    Init,
+    Init {
+        /// Donor cloning secret, delivered at runtime (not baked into the EIF).
+        /// Set only on enclaves that should serve clone requests.
+        #[arg(long)]
+        cloning_secret: Option<String>,
+    },
     /// Initialize from a hex-encoded 64-byte seed (testing only)
     InitSeed {
         /// 128 hex characters = 64 bytes
@@ -255,13 +260,15 @@ fn main() {
     let client = EnclaveClient::new(&cli.addr);
 
     match cli.command {
-        Command::Init => match client.initialize_keys(None) {
-            Ok(r) => print_init_response(&r),
-            Err(e) => {
-                eprintln!("Error: {}", e);
-                process::exit(1);
+        Command::Init { cloning_secret } => {
+            match client.initialize_keys_with_secret(None, cloning_secret) {
+                Ok(r) => print_init_response(&r),
+                Err(e) => {
+                    eprintln!("Error: {}", e);
+                    process::exit(1);
+                }
             }
-        },
+        }
         Command::InitSeed { hex: hex_str } => match hex::decode(&hex_str) {
             Ok(seed) => match client.initialize_keys(Some(seed)) {
                 Ok(r) => print_init_response(&r),
