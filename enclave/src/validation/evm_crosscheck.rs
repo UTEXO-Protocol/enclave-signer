@@ -46,6 +46,13 @@ const FUNDS_OUT_SELECTORS: &[[u8; 4]] = &[FUNDS_OUT_SELECTOR_POOLS];
 #[cfg(feature = "rgb-validation")]
 const FUNDS_OUT_AMOUNT_OFFSET: usize = 36;
 
+/// Byte offset of `burnId` in the `fundsOut` calldata: after the selector,
+/// `recipient`, and `amount` head slots it sits at byte 68..100. Consumed by
+/// the burnId-to-OpId binding ([`verify_burn_id_binding`]); `test` keeps it
+/// available for that helper's unit tests in default builds.
+#[cfg(any(feature = "bind-burn-id", test))]
+const FUNDS_OUT_BURN_ID_OFFSET: usize = 68;
+
 /// Validate enriched SignEvmRequest before signing.
 /// Returns Ok(()) if all cross-checks pass, Err(EnclaveError::CrossCheck) if any fail.
 ///
@@ -386,6 +393,17 @@ pub fn validate_funds_out_transfer(
         )));
     }
 
+    // Operation-uniqueness binding (audit M-02 / #93, #63). The contract's
+    // single-use `consumedBurnIds[burnId]` guard is only sound if `burnId`
+    // canonically identifies the RGB operation being released against;
+    // otherwise the same burn replayed under a fresh `burnId` double-releases.
+    // Require the calldata `burnId` to equal uint256(OpId) of the release
+    // transition. Compile-time gated (PCR-attested) and OFF by default until
+    // bridge-utexo derives `burnId` the same way - see the `bind-burn-id`
+    // feature in Cargo.toml.
+    #[cfg(feature = "bind-burn-id")]
+    verify_burn_id_binding(&req.call_data, &last.op_id)?;
+
     // Read `amount` straight from the calldata bytes rather than
     // trusting `req.calldata_amount`, then bind it to the consignment's
     // output value — the consignment is the authority on how much RGB
@@ -396,6 +414,55 @@ pub fn validate_funds_out_transfer(
         return Err(EnclaveError::CrossCheck(format!(
             "transfer amount mismatch: consignment total_output_amount ({}) < calldata amount ({})",
             last.total_output_amount, calldata_amount
+        )));
+    }
+    Ok(())
+}
+
+/// Bind the `fundsOut` calldata `burnId` to the RGB operation it releases
+/// against (audit M-02 / #93, #63).
+///
+/// The canonical `burnId` is `uint256(OpId)`: the 32-byte commitment hash of
+/// the release transition, taken big-endian. rgbstd's [`OpId`] is
+/// `#[display(Self::to_hex)]` over a `Bytes32`, so `op_id_hex` is the 64-char
+/// lowercase hex of those bytes; a uint256 word is the same 32 bytes
+/// big-endian, so we compare the calldata `burnId` slot to the decoded OpId
+/// byte-for-byte (no endianness conversion).
+///
+/// Assumes one RGB release transition maps to one `fundsOut` (the live pools model);
+/// it does not support partial releases of a single operation under multiple
+/// burnIds (none exist today). Fail-closed: any decode failure or mismatch
+/// rejects.
+///
+/// [`OpId`]: https://docs.rs/rgb-consensus
+#[cfg(any(feature = "bind-burn-id", test))]
+fn verify_burn_id_binding(call_data: &[u8], op_id_hex: &str) -> Result<()> {
+    let end = FUNDS_OUT_BURN_ID_OFFSET + 32;
+    if call_data.len() < end {
+        return Err(EnclaveError::CrossCheck(format!(
+            "call_data too short for burnId: need {end} bytes, got {}",
+            call_data.len()
+        )));
+    }
+    let burn_id = &call_data[FUNDS_OUT_BURN_ID_OFFSET..end];
+
+    let expected = hex::decode(op_id_hex).map_err(|e| {
+        EnclaveError::CrossCheck(format!("consignment op_id is not valid hex: {e}"))
+    })?;
+    if expected.len() != 32 {
+        return Err(EnclaveError::CrossCheck(format!(
+            "consignment op_id decoded to {} bytes, want 32",
+            expected.len()
+        )));
+    }
+
+    if burn_id != expected.as_slice() {
+        return Err(EnclaveError::CrossCheck(format!(
+            "burnId not bound to the RGB operation: calldata burnId 0x{} != uint256(OpId) 0x{} \
+             of the release transition - refusing to sign a fundsOut that the same burn could \
+             replay under a different burnId",
+            hex::encode(burn_id),
+            op_id_hex
         )));
     }
     Ok(())
@@ -846,9 +913,16 @@ mod tests {
             }
         }
 
+        /// Canonical test OpId. rgbstd's `OpId` Displays as lowercase hex of
+        /// its 32-byte commitment, so the string form is 64 hex chars and the
+        /// byte form is what a matching `burnId` calldata slot must contain.
+        const TEST_OP_ID_BYTES: [u8; 32] = [0x11; 32];
+        const TEST_OP_ID_HEX: &str =
+            "1111111111111111111111111111111111111111111111111111111111111111";
+
         fn transfer_transition(total_output_amount: u64) -> TransitionSummary {
             TransitionSummary {
-                op_id: "transfer-op".into(),
+                op_id: TEST_OP_ID_HEX.into(),
                 transition_type: crate::validation::rgb::ifa::TS_TRANSFER,
                 total_output_amount,
                 outputs: Vec::<TransitionOutput>::new(),
@@ -869,8 +943,11 @@ mod tests {
             let mut amt = [0u8; 32];
             amt[24..].copy_from_slice(&amount.to_be_bytes());
             data.extend_from_slice(&amt);
-            // 6 more head slots zero-filled.
-            data.extend_from_slice(&[0u8; 32 * 6]);
+            // burnId @ offset 68 - set to the canonical test OpId so the
+            // (default-off) bind-burn-id check passes transparently when the
+            // feature is compiled in. The other 5 head slots stay zero-filled.
+            data.extend_from_slice(&TEST_OP_ID_BYTES);
+            data.extend_from_slice(&[0u8; 32 * 5]);
             data
         }
 
@@ -965,6 +1042,78 @@ mod tests {
             req.call_data[..4].copy_from_slice(&[0xde, 0xad, 0xbe, 0xef]);
             let validated = validated_with_last(transfer_transition(0));
             assert!(validate_funds_out_transfer(&req, &validated).is_ok());
+        }
+
+        /// End-to-end: with `bind-burn-id` on, a calldata `burnId` that does
+        /// not equal uint256(OpId) of the release transition is rejected
+        /// before the amount check (audit M-02 / #93).
+        #[cfg(feature = "bind-burn-id")]
+        #[test]
+        fn rejects_burn_id_not_bound_to_op_id() {
+            let mut cd = mock_pools_calldata(1000);
+            // Flip a byte of the burnId so it no longer matches TEST_OP_ID.
+            cd[FUNDS_OUT_BURN_ID_OFFSET] ^= 0xFF;
+            let req = req_with_calldata(cd);
+            let validated = validated_with_last(transfer_transition(1000));
+            let err = validate_funds_out_transfer(&req, &validated).unwrap_err();
+            assert!(
+                err.to_string().contains("burnId not bound"),
+                "expected burnId-binding rejection, got: {err}"
+            );
+        }
+    }
+
+    // =========================================================================
+    // burnId-to-OpId binding - `verify_burn_id_binding` (audit M-02 / #93, #63).
+    // Runs in default `cargo test` (helper is `cfg(any(bind-burn-id, test))`).
+    // =========================================================================
+    mod burn_id_binding {
+        use super::*;
+
+        fn calldata_with_burn_id(burn_id: &[u8; 32]) -> Vec<u8> {
+            let mut d = mock_funds_out_calldata(1000);
+            d[FUNDS_OUT_BURN_ID_OFFSET..FUNDS_OUT_BURN_ID_OFFSET + 32].copy_from_slice(burn_id);
+            d
+        }
+
+        #[test]
+        fn accepts_matching_burn_id() {
+            let op = [0xABu8; 32];
+            let cd = calldata_with_burn_id(&op);
+            assert!(verify_burn_id_binding(&cd, &hex::encode(op)).is_ok());
+        }
+
+        #[test]
+        fn rejects_mismatched_burn_id() {
+            let op = [0xABu8; 32];
+            let cd = calldata_with_burn_id(&[0xCDu8; 32]); // calldata burnId differs
+            let err = verify_burn_id_binding(&cd, &hex::encode(op)).unwrap_err();
+            assert!(err.to_string().contains("burnId not bound"), "got: {err}");
+        }
+
+        #[test]
+        fn rejects_calldata_too_short_for_burn_id() {
+            let op = [0xABu8; 32];
+            let err = verify_burn_id_binding(&[0u8; 50], &hex::encode(op)).unwrap_err();
+            assert!(
+                err.to_string().contains("too short for burnId"),
+                "got: {err}"
+            );
+        }
+
+        #[test]
+        fn rejects_non_hex_op_id() {
+            let cd = calldata_with_burn_id(&[0u8; 32]);
+            let err = verify_burn_id_binding(&cd, "not-hex-zz").unwrap_err();
+            assert!(err.to_string().contains("not valid hex"), "got: {err}");
+        }
+
+        #[test]
+        fn rejects_wrong_length_op_id() {
+            let cd = calldata_with_burn_id(&[0u8; 32]);
+            let short = "11".repeat(30); // 30 bytes, not 32
+            let err = verify_burn_id_binding(&cd, &short).unwrap_err();
+            assert!(err.to_string().contains("want 32"), "got: {err}");
         }
     }
 
