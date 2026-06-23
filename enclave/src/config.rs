@@ -81,8 +81,9 @@ impl BridgeConfig {
     /// rather than silently falling back to listener-trusting mode
     /// (audit 4th M-03 / #94).
     pub fn is_partially_configured(&self) -> bool {
-        let any =
-            self.chain_id != 0 || self.bridge_contract != [0u8; 20] || !self.rgb_asset_id.is_empty();
+        let any = self.chain_id != 0
+            || self.bridge_contract != [0u8; 20]
+            || !self.rgb_asset_id.is_empty();
         any && !self.is_configured()
     }
 }

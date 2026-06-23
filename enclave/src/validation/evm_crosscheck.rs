@@ -1127,10 +1127,7 @@ mod tests {
             rgb_asset_id: String::new(),
         };
         let err = validate_evm_request(&valid_evm_request(), &half_pinned).unwrap_err();
-        assert!(
-            err.to_string().contains("partially set"),
-            "got: {err}"
-        );
+        assert!(err.to_string().contains("partially set"), "got: {err}");
     }
 
     #[cfg(feature = "rgb-validation")]
