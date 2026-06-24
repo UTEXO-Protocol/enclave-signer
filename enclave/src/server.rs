@@ -557,6 +557,23 @@ fn handle_sign_psbt(ctx: &ServerContext, req: SignPsbtRequest) -> Result<Enclave
 
     let (signed_psbt, inputs_signed) = ctx.state.sign_psbt(&req.psbt_bytes)?;
 
+    // Reject a "successful" no-op (audit 3rd W-03 / #85). KeyManager::sign_psbt
+    // returns Ok((bytes, 0)) when no PSBT input belongs to this enclave; a
+    // caller that checks only RPC success would treat that as a valid signer
+    // contribution and mis-account quorum. Fail closed in production signing
+    // mode so a 0-signature response can never be mistaken for a contribution.
+    // Partial signing (0 < count < num_inputs) is still allowed. The
+    // KeyManager 0-return stays as a primitive; the policy lives here at the
+    // handler boundary. dev-mode keeps the 0-count path for inspect/dry-run.
+    #[cfg(not(feature = "dev-mode"))]
+    if inputs_signed == 0 {
+        return Err(EnclaveError::Signing(
+            "sign_psbt signed 0 inputs: no PSBT input belongs to this enclave — refusing to \
+             return a no-op as a successful signing response"
+                .into(),
+        ));
+    }
+
     tracing::info!(inputs_signed, "PSBT signed");
 
     Ok(EnclaveResponse {

@@ -53,12 +53,38 @@ impl BridgeConfig {
         }
     }
 
-    /// True if any of the three fields was set via env. Used to gate the
-    /// strict cross-check: when no operator config is present we fall back
-    /// to the legacy "trust the request" behaviour so dev / mock builds
-    /// keep working without ceremony.
+    /// True only when **all three** fields are set to non-zero / non-empty
+    /// values (audit 4th M-03 / #94). Used to gate the strict cross-check:
+    /// only a fully-pinned config authorises bridge signing.
+    ///
+    /// This is deliberately an AND, not an OR. The previous OR let a
+    /// partially-pinned enclave report "configured" while a field was still
+    /// zero, which had two bad consequences in `validate_evm_request`:
+    /// a zero `chain_id` can never match a real request (rejected as
+    /// `chain_id must be > 0`), so the enclave was permanently un-signable yet
+    /// claimed configured; and a zero `bridge_contract` meant an EVM request
+    /// for the **zero address** matched the pin and was accepted.
+    ///
+    /// Requiring all three closes both: a zero `chain_id` or zero
+    /// `bridge_contract` is never treated as a valid pin. A fully-empty
+    /// config (dev / mock builds) still degrades to the legacy
+    /// "trust the request" path; a *partial* config is a misconfiguration —
+    /// see [`is_partially_configured`](Self::is_partially_configured).
     pub fn is_configured(&self) -> bool {
-        self.chain_id != 0 || self.bridge_contract != [0u8; 20] || !self.rgb_asset_id.is_empty()
+        self.chain_id != 0 && self.bridge_contract != [0u8; 20] && !self.rgb_asset_id.is_empty()
+    }
+
+    /// True when the operator set **some but not all** pin fields. This is a
+    /// botched production config (e.g. `EVM_CHAIN_ID` set but `BRIDGE_CONTRACT`
+    /// left at the zero address), distinct from a fully-empty config that
+    /// intentionally selects the legacy dev path. Callers fail closed on this
+    /// rather than silently falling back to listener-trusting mode
+    /// (audit 4th M-03 / #94).
+    pub fn is_partially_configured(&self) -> bool {
+        let any = self.chain_id != 0
+            || self.bridge_contract != [0u8; 20]
+            || !self.rgb_asset_id.is_empty();
+        any && !self.is_configured()
     }
 }
 
@@ -113,15 +139,42 @@ mod tests {
             rgb_asset_id: String::new(),
         };
         assert!(!c.is_configured());
+        assert!(!c.is_partially_configured());
     }
 
     #[test]
-    fn configured_when_any_set() {
+    fn configured_only_when_all_three_set() {
+        let c = BridgeConfig {
+            chain_id: 1,
+            bridge_contract: [1u8; 20],
+            rgb_asset_id: "rgb:asset".into(),
+        };
+        assert!(c.is_configured());
+        assert!(!c.is_partially_configured());
+    }
+
+    #[test]
+    fn partial_config_is_not_configured() {
+        // chain_id set, contract still zero, asset set: a botched pin. The
+        // OR-logic bug (#94) used to report this "configured" and then accept
+        // an EVM request for the zero address.
         let c = BridgeConfig {
             chain_id: 1,
             bridge_contract: [0u8; 20],
-            rgb_asset_id: String::new(),
+            rgb_asset_id: "rgb:asset".into(),
         };
-        assert!(c.is_configured());
+        assert!(!c.is_configured());
+        assert!(c.is_partially_configured());
+    }
+
+    #[test]
+    fn zero_chain_id_is_not_configured() {
+        let c = BridgeConfig {
+            chain_id: 0,
+            bridge_contract: [1u8; 20],
+            rgb_asset_id: "rgb:asset".into(),
+        };
+        assert!(!c.is_configured());
+        assert!(c.is_partially_configured());
     }
 }
