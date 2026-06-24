@@ -16,7 +16,9 @@ use utexo_bridge_parent::enclave_proto::{
     about = "UTEXO Bridge enclave host-side client (CLI tool)"
 )]
 struct Cli {
-    /// Enclave address (TCP)
+    /// Enclave address: `host:port` (TCP, dev builds) or `vsock://<cid>:<port>`
+    /// (Nitro, vsock builds — e.g. `vsock://18:5000`). On a vsock build you MUST
+    /// pass a `vsock://` addr or set ENCLAVE_VSOCK_CID; it will not default to CID 16.
     #[arg(long, default_value = "127.0.0.1:5000")]
     addr: String,
 

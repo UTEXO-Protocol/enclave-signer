@@ -23,6 +23,24 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 /// validation against Esplora) still need to fit inside this budget.
 const READ_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// Parse a `vsock://` address body (`<cid>` or `<cid>:<port>`) into `(cid, port)`,
+/// defaulting the port to 5000. Keeps enclave selection explicit on multi-enclave
+/// hosts instead of silently using a default CID.
+#[cfg(feature = "vsock")]
+fn parse_vsock_spec(spec: &str) -> Result<(u32, u32)> {
+    let (cid_str, port_str) = match spec.split_once(':') {
+        Some((c, p)) => (c, p),
+        None => (spec, "5000"),
+    };
+    let cid = cid_str
+        .parse::<u32>()
+        .map_err(|_| ParentError::Connection(format!("invalid vsock cid in addr: {cid_str:?}")))?;
+    let port = port_str
+        .parse::<u32>()
+        .map_err(|_| ParentError::Connection(format!("invalid vsock port in addr: {port_str:?}")))?;
+    Ok((cid, port))
+}
+
 pub struct EnclaveClient {
     addr: String,
 }
@@ -35,22 +53,44 @@ impl EnclaveClient {
     }
 
     pub fn send_request(&self, req: &EnclaveRequest) -> Result<EnclaveResponse> {
+        // A `vsock://<cid>[:<port>]` address explicitly targets one enclave and
+        // works regardless of build features (errors if vsock isn't compiled in).
+        if let Some(spec) = self.addr.strip_prefix("vsock://") {
+            #[cfg(feature = "vsock")]
+            {
+                let (cid, port) = parse_vsock_spec(spec)?;
+                return self.send_vsock(req, cid, port);
+            }
+            #[cfg(not(feature = "vsock"))]
+            {
+                return Err(ParentError::Connection(format!(
+                    "addr `vsock://{spec}` requests vsock, but this binary was built \
+                     without the `vsock` feature"
+                )));
+            }
+        }
+
         #[cfg(feature = "vsock")]
         {
-            use vsock::VsockStream;
+            // No `vsock://` address: fall back to env for back-compat, but DO NOT
+            // silently default to CID 16 — on a multi-enclave host that routes
+            // every call to the wrong enclave (init/sign on the wrong identity).
             let cid = std::env::var("ENCLAVE_VSOCK_CID")
                 .ok()
-                .and_then(|v| v.parse::<u32>().ok())
-                .unwrap_or(16);
+                .and_then(|v| v.parse::<u32>().ok());
             let port = std::env::var("ENCLAVE_VSOCK_PORT")
                 .ok()
                 .and_then(|v| v.parse::<u32>().ok())
                 .unwrap_or(5000);
-
-            let mut stream = VsockStream::connect_with_cid_port(cid, port)
-                .map_err(|e| ParentError::Connection(e.to_string()))?;
-            framing::write_message(&mut stream, req)?;
-            framing::read_message(&mut stream)
+            match cid {
+                Some(cid) => self.send_vsock(req, cid, port),
+                None => Err(ParentError::Connection(
+                    "vsock build: select the enclave explicitly — pass \
+                     `--addr vsock://<cid>:<port>` (e.g. vsock://16:5000) or set \
+                     ENCLAVE_VSOCK_CID. Refusing to default to CID 16."
+                        .to_string(),
+                )),
+            }
         }
         #[cfg(not(feature = "vsock"))]
         {
@@ -71,6 +111,16 @@ impl EnclaveClient {
             framing::write_message(&mut stream, req)?;
             framing::read_message(&mut stream)
         }
+    }
+
+    #[cfg(feature = "vsock")]
+    fn send_vsock(&self, req: &EnclaveRequest, cid: u32, port: u32) -> Result<EnclaveResponse> {
+        use vsock::VsockStream;
+        let mut stream = VsockStream::connect_with_cid_port(cid, port).map_err(|e| {
+            ParentError::Connection(format!("vsock connect cid={cid} port={port}: {e}"))
+        })?;
+        framing::write_message(&mut stream, req)?;
+        framing::read_message(&mut stream)
     }
 
     pub fn initialize_keys(&self, seed: Option<Vec<u8>>) -> Result<InitializeKeyResponse> {
