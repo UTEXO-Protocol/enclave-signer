@@ -35,9 +35,9 @@ fn parse_vsock_spec(spec: &str) -> Result<(u32, u32)> {
     let cid = cid_str
         .parse::<u32>()
         .map_err(|_| ParentError::Connection(format!("invalid vsock cid in addr: {cid_str:?}")))?;
-    let port = port_str
-        .parse::<u32>()
-        .map_err(|_| ParentError::Connection(format!("invalid vsock port in addr: {port_str:?}")))?;
+    let port = port_str.parse::<u32>().map_err(|_| {
+        ParentError::Connection(format!("invalid vsock port in addr: {port_str:?}"))
+    })?;
     Ok((cid, port))
 }
 
