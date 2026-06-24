@@ -114,6 +114,12 @@ fn main() {
         // chain to anything real. Crash early and loud.
         panic!("{msg}");
     }
+    if let Err(msg) = checkpoint.assert_retarget_aligned(spv_network) {
+        // A misaligned PoW-network checkpoint wedges the chain at the first
+        // retarget boundary above it (the epoch-start lookup falls below the
+        // checkpoint). This is a build-time misconfiguration — fail fast.
+        panic!("{msg}");
+    }
     if !checkpoint.is_real {
         tracing::warn!(
             ?spv_network,
@@ -135,6 +141,7 @@ fn main() {
         #[cfg(feature = "rgb-validation")]
         rgb_validator,
         header_chain,
+        submit_rate_limiter: std::sync::Mutex::new(server::SubmitRateLimiter::default()),
     };
 
     #[cfg(all(feature = "vsock", target_os = "linux"))]
