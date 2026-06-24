@@ -399,7 +399,9 @@ fn read_last_transfer_witness(
         }
         let opid_hex = known.opid.to_string();
         let bytes = hex::decode(&opid_hex).map_err(|e| {
-            EnclaveError::CrossCheck(format!("validated opid hex decode failed: {e} ({opid_hex:?})"))
+            EnclaveError::CrossCheck(format!(
+                "validated opid hex decode failed: {e} ({opid_hex:?})"
+            ))
         })?;
         let arr: [u8; 32] = bytes.try_into().map_err(|v: Vec<u8>| {
             EnclaveError::CrossCheck(format!("validated opid is not 32 bytes (got {})", v.len()))
