@@ -395,21 +395,32 @@ fn handle_sign_evm(ctx: &ServerContext, req: SignEvmRequest) -> Result<EnclaveRe
     #[cfg(not(feature = "dev-mode"))]
     validation::evm_crosscheck::validate_evm_request(&req, &ctx.bridge_config)?;
 
-    // Consignment-bound amount cross-check for the `fundsOut` transfer
-    // flow. Every fundsOut signature must be backed by a validated
-    // consignment and an amount the consignment's last transition
-    // actually accounts for. This is the second half of the bypass
-    // closure started in `validate_evm_request`: that function rejects
-    // empty bytes; this block rejects "bytes present but validator
-    // didn't run" and binds the EVM-side amount to the RGB-side amount.
+    // Consignment-bound amount check + OpId binding for the `fundsOut` flow.
     //
-    // The contract exposes a single `fundsOut` selector shared by the
-    // pools/transfer flow (live) and the future mint/burn unlock flow,
-    // disambiguated by contract address. Only the transfer check is
-    // wired today — a burn consignment on this selector is rejected by
-    // `validate_funds_out_transfer` ("requires a Transfer transition").
-    // `validate_funds_out_burn` is wired in the mint/burn epic (by the
-    // dedicated mint/burn contract address).
+    //   (a) Bind the EVM-side release amount to the amount the consignment's
+    //       last transition accounts for (`validate_funds_out_transfer`). This
+    //       is the second half of the bypass closure started in
+    //       `validate_evm_request`: that rejects empty bytes; this rejects
+    //       "bytes present but validator didn't run".
+    //   (b) DERIVE the cross-domain ids from the consignment the enclave
+    //       validated and OVERWRITE them in the calldata: `burnId` (offset 68)
+    //       = the last transition's id, `settlementData` = the ids of every
+    //       TS_INFLATION (mint) transition (`apply_op_id_binding`). The enclave
+    //       does not trust or even read the listener's burnId/fundsInIds — it
+    //       rewrites them. The signed, returned `call_data` is authoritative;
+    //       a compromised backend cannot route the release to a different
+    //       replay slot (`consumedBurnIds`) or consume lock records
+    //       (`fundsInRecords`) the consignment did not authorise. The output is
+    //       a pure function of the consignment, so every federation signer
+    //       rewrites it identically. The caller MUST submit exactly the
+    //       returned bytes (the signature commits to keccak256(callData)).
+    //
+    // Default builds (no rgb-validation, or dev-mode) sign the calldata as
+    // received; they cannot validate a consignment and reject fundsOut upstream
+    // in `validate_evm_request`.
+    #[allow(unused_mut)]
+    let mut signed_call_data = req.call_data.clone();
+
     #[cfg(all(feature = "rgb-validation", not(feature = "dev-mode")))]
     if req.call_data.len() >= 4
         && req.call_data[..4] == validation::evm_crosscheck::FUNDS_OUT_SELECTOR_POOLS
@@ -422,30 +433,8 @@ fn handle_sign_evm(ctx: &ServerContext, req: SignEvmRequest) -> Result<EnclaveRe
             )
         })?;
         validation::evm_crosscheck::validate_funds_out_transfer(&req, validated)?;
-    }
-
-    // OpId binding (audit TEE-SE-02, spec §6/§7). The enclave derives the
-    // cross-domain identifiers from the consignment it validated itself — it
-    // does NOT trust any listener-supplied OpId — and binds the calldata it is
-    // about to sign to them:
-    //   - `burnId` (offset 68) == keccak256(last transition's OpId); and
-    //   - every `fundsInIds[]` entry (in `settlementData`) corresponds to a
-    //     TS_INFLATION (mint) OpId in the consignment's history.
-    // Because the MultisigProxy signature commits to keccak256(callData),
-    // these embedded values are cryptographically bound by the signature, so a
-    // compromised backend cannot route the release to a different replay slot
-    // or consume locks this consignment did not authorise.
-    //
-    // NOTE: this requires the backend (`bridge-utexo`) to derive on-chain
-    // `burnId`/`fundsInIds` as keccak256(RGB OpId) too — see PR description.
-    #[cfg(all(feature = "rgb-validation", not(feature = "dev-mode")))]
-    if req.call_data.len() >= 4
-        && req.call_data[..4] == validation::evm_crosscheck::FUNDS_OUT_SELECTOR_POOLS
-    {
-        if let Some(ref validated) = validated_consignment {
-            validation::evm_crosscheck::bind_burn_id(&req, validated)?;
-            validation::evm_crosscheck::bind_funds_in_ids(&req, validated)?;
-        }
+        signed_call_data =
+            validation::evm_crosscheck::apply_op_id_binding(&req.call_data, validated)?;
     }
 
     // SPV verification: every consignment-anchor Bitcoin tx must be in our
@@ -494,15 +483,17 @@ fn handle_sign_evm(ctx: &ServerContext, req: SignEvmRequest) -> Result<EnclaveRe
     let domain = build_evm_domain(&req)?;
 
     let domain_sep = domain.separator_hash();
-    let digest = sign_request_digest(&domain, &req.call_data, req.nonce, req.deadline);
+    // Sign over the (possibly rewritten) calldata — see `apply_op_id_binding`.
+    let digest = sign_request_digest(&domain, &signed_call_data, req.nonce, req.deadline);
 
     tracing::info!(
         domain_name = %domain.name,
         chain_id = domain.chain_id,
         proxy = %hex::encode(domain.verifying_contract),
         domain_sep = %hex::encode(domain_sep),
-        call_data_len = req.call_data.len(),
-        selector = %hex::encode(&req.call_data[..4.min(req.call_data.len())]),
+        call_data_len = signed_call_data.len(),
+        selector = %hex::encode(&signed_call_data[..4.min(signed_call_data.len())]),
+        rewritten = signed_call_data != req.call_data,
         nonce = req.nonce,
         deadline = req.deadline,
         digest = %hex::encode(digest),
@@ -519,6 +510,9 @@ fn handle_sign_evm(ctx: &ServerContext, req: SignEvmRequest) -> Result<EnclaveRe
     Ok(EnclaveResponse {
         response: Some(Response::EvmSignature(EvmSignatureResponse {
             signature: signature.to_vec(),
+            // The bytes the caller must submit on-chain (== input unless the
+            // enclave rewrote the OpId-derived fields).
+            call_data: signed_call_data,
         })),
     })
 }

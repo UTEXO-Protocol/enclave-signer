@@ -446,82 +446,97 @@ fn op_id_to_calldata_id(op_id: &str) -> Result<[u8; 32]> {
     Ok(Keccak256::digest(bytes).into())
 }
 
-/// `burnId` binding (audit TEE-SE-02, issue #59, spec §6/§7).
+/// OpId binding applied to a `fundsOut` calldata before signing (audit
+/// TEE-SE-02, spec §6/§7).
 ///
-/// The enclave derives the binding value from the consignment it validated
-/// itself — it does NOT accept any listener-supplied OpId. The calldata's
-/// `burnId` slot (offset 68) MUST equal `op_id_to_calldata_id(last OpId)`,
-/// where the last transition's OpId is the operation this EVM release commits
-/// to (the federation-bound Transfer for pools, the Burn for mint/burn
-/// unlock). Active for **every** flow: every `fundsOut` carries a `burnId`
-/// (the contract's `consumedBurnIds` single-use replay guard), and it must be
-/// keyed to the RGB operation the consignment authorises.
+/// The enclave does NOT trust — or even read — the listener's
+/// `burnId`/`fundsInIds`. It derives them from the consignment it validated
+/// and **overwrites** the calldata it is about to sign:
+///   - `burnId` (offset 68) := `op_id_to_calldata_id(last transition OpId)`
+///     (the burn for unlock, the federation transfer for pools); and
+///   - `settlementData` := `abi.encode(uint256[] fundsInIds)` over
+///     `op_id_to_calldata_id(opid)` for **every** IFA `TS_INFLATION` (mint)
+///     transition in the consignment's history.
 ///
-/// The MultisigProxy signature commits to `keccak256(callData)`, so binding
-/// the `burnId` slot here cryptographically ties the signed release to that
-/// exact RGB operation: a compromised backend cannot route the release to a
-/// different replay slot than the consignment authorises.
+/// Returns the rewritten calldata. Because the MultisigProxy signature commits
+/// to `keccak256(callData)`, these bytes are authoritative — a compromised
+/// backend cannot influence which replay slot (`consumedBurnIds`) or lock
+/// records (`fundsInRecords`) the release touches. The output is a pure
+/// function of the consignment, so every federation signer rewrites it
+/// identically. **The caller MUST submit exactly the returned bytes** (the
+/// signature is over them, not over the original).
+///
+/// Layout (verified against `Bridge.sol` on `dev`): the static head words
+/// (recipient/amount/burnId/sourceChainId/destChainId) are at fixed offsets
+/// and `settlementData` is the **last** dynamic argument, so its tail is
+/// rebuilt in place; `sourceAddress` and the SPV `proof` are preserved exactly.
 #[cfg(feature = "rgb-validation")]
-pub fn bind_burn_id(req: &SignEvmRequest, validated: &ValidatedConsignment) -> Result<()> {
+pub fn apply_op_id_binding(call_data: &[u8], validated: &ValidatedConsignment) -> Result<Vec<u8>> {
     let last = validated.last_transition.as_ref().ok_or_else(|| {
         EnclaveError::CrossCheck(
-            "burnId binding requires a consignment with at least one transition".into(),
+            "OpId binding requires a consignment with at least one transition".into(),
         )
     })?;
-
-    let calldata_burn_id = extract_bytes32(&req.call_data, FUNDS_OUT_BURN_ID_OFFSET)?;
-    let expected = op_id_to_calldata_id(&last.op_id)?;
-
-    if calldata_burn_id != expected {
-        return Err(EnclaveError::CrossCheck(format!(
-            "burnId mismatch: calldata burnId 0x{} != keccak256(consignment OpId {}) = 0x{}",
-            hex::encode(calldata_burn_id),
-            last.op_id,
-            hex::encode(expected)
-        )));
-    }
-    Ok(())
-}
-
-/// `fundsInIds[]` binding (audit TEE-SE-02, spec §6).
-///
-/// Every entry in the `fundsOut` `settlementData` (`abi.encode(uint256[]
-/// fundsInIds)`) must equal `op_id_to_calldata_id(opid)` for some IFA
-/// `TS_INFLATION` (mint) transition in the validated consignment. Each
-/// `fundsInId` references an EVM lock record (`fundsInRecords`) the release
-/// draws down; binding them to the consignment's own mint OpIds means a
-/// release can only consume locks this consignment's RGB history actually
-/// inflated — a compromised backend cannot reference an unrelated lock.
-///
-/// **Subset, not equality:** the backend selects only the covering subset of
-/// lock records needed to fund the requested amount, so fewer `fundsInIds`
-/// than mint OpIds is normal; each one present must still be backed by a
-/// consignment mint. Empty `settlementData` (no `fundsInIds`) passes —
-/// referencing no lock cannot reference a bad one.
-#[cfg(feature = "rgb-validation")]
-pub fn bind_funds_in_ids(req: &SignEvmRequest, validated: &ValidatedConsignment) -> Result<()> {
-    let calldata_ids = extract_funds_in_ids(&req.call_data)?;
-    if calldata_ids.is_empty() {
-        return Ok(());
-    }
-
-    let allowed: std::collections::BTreeSet<[u8; 32]> = validated
+    let burn_id = op_id_to_calldata_id(&last.op_id)?;
+    let funds_in_ids: Vec<[u8; 32]> = validated
         .mint_op_ids
         .iter()
         .map(|o| op_id_to_calldata_id(o))
         .collect::<Result<_>>()?;
 
-    for id in &calldata_ids {
-        if !allowed.contains(id) {
-            return Err(EnclaveError::CrossCheck(format!(
-                "fundsInIds entry 0x{} does not correspond to any TS_INFLATION OpId in the \
-                 validated consignment ({} mint op_ids available)",
-                hex::encode(id),
-                validated.mint_op_ids.len()
-            )));
-        }
+    // The 8-word head (after the 4-byte selector) must be present to locate
+    // the burnId slot and the settlementData offset.
+    let head_end = FUNDS_OUT_SETTLEMENT_DATA_HEAD_OFFSET + 32; // 260
+    if call_data.len() < head_end {
+        return Err(EnclaveError::CrossCheck(format!(
+            "fundsOut calldata too short: need {head_end} head bytes, got {}",
+            call_data.len()
+        )));
     }
-    Ok(())
+
+    let mut out = call_data.to_vec();
+
+    // (1) Overwrite burnId in place (a static head slot).
+    out[FUNDS_OUT_BURN_ID_OFFSET..FUNDS_OUT_BURN_ID_OFFSET + 32].copy_from_slice(&burn_id);
+
+    // (2) Replace settlementData (the last dynamic arg). Read its tail offset
+    //     (relative to the args start, byte 4), drop the old tail, and append a
+    //     fresh `abi.encode(uint256[] fundsInIds)`. The head offset word still
+    //     points at the same start, so it needs no update.
+    let sd_rel = bytes32_to_usize(&extract_bytes32(
+        &out,
+        FUNDS_OUT_SETTLEMENT_DATA_HEAD_OFFSET,
+    )?)?;
+    let sd_start = 4usize
+        .checked_add(sd_rel)
+        .ok_or_else(|| EnclaveError::CrossCheck("settlementData offset overflow".into()))?;
+    if sd_start < head_end || sd_start > out.len() {
+        return Err(EnclaveError::CrossCheck(format!(
+            "settlementData offset out of range: {sd_start} (head_end {head_end}, len {})",
+            out.len()
+        )));
+    }
+    out.truncate(sd_start);
+
+    // settlementData is a dynamic `bytes`: [length][payload], where payload is
+    // `abi.encode(uint256[])` = [0x20 offset][N][ids...].
+    let payload_len = 64 + funds_in_ids.len() * 32;
+    out.extend_from_slice(&u256_word(payload_len)); // bytes length
+    out.extend_from_slice(&u256_word(32)); // inner array offset (0x20)
+    out.extend_from_slice(&u256_word(funds_in_ids.len())); // N
+    for id in &funds_in_ids {
+        out.extend_from_slice(id);
+    }
+
+    Ok(out)
+}
+
+/// Encode a `usize` as a big-endian 32-byte ABI word.
+#[cfg(feature = "rgb-validation")]
+fn u256_word(n: usize) -> [u8; 32] {
+    let mut w = [0u8; 32];
+    w[24..].copy_from_slice(&(n as u64).to_be_bytes());
+    w
 }
 
 /// Lightweight ABI extraction: read a uint256 from call_data at a given byte offset.
@@ -625,7 +640,11 @@ fn bytes32_to_usize(word: &[u8; 32]) -> Result<usize> {
 /// bounds-checked (via [`extract_bytes32`]) and every offset/length is range
 /// checked (via [`bytes32_to_usize`]); a malformed or truncated blob is a hard
 /// error. Returns an empty vec when `settlementData` is empty.
-#[cfg(feature = "rgb-validation")]
+///
+/// The enclave OVERWRITES `settlementData` ([`apply_op_id_binding`]) rather
+/// than reading it, so this reader exists only to verify, in tests, that the
+/// writer's encoding round-trips — hence the `test` gate.
+#[cfg(all(feature = "rgb-validation", test))]
 fn extract_funds_in_ids(call_data: &[u8]) -> Result<Vec<[u8; 32]>> {
     // (1) settlementData tail offset (relative to the args start = byte 4).
     let rel = bytes32_to_usize(&extract_bytes32(
@@ -1253,10 +1272,11 @@ mod tests {
     }
 
     // =========================================================================
-    // OpId binding — `bind_burn_id` + `bind_funds_in_ids` (audit TEE-SE-02,
-    // spec §6/§7). The enclave derives burnId / fundsInIds from the
-    // consignment it validated itself (keccak256(OpId)) and binds the calldata
-    // it is about to sign to them. No listener-supplied OpId is trusted.
+    // OpId binding — `apply_op_id_binding` (audit TEE-SE-02, spec §6/§7). The
+    // enclave derives burnId / fundsInIds from the consignment it validated and
+    // OVERWRITES them in the calldata it signs. No listener-supplied OpId is
+    // trusted or even read. `extract_funds_in_ids` confirms the writer's
+    // settlementData round-trips through the reader.
     // =========================================================================
 
     #[cfg(feature = "rgb-validation")]
@@ -1336,63 +1356,89 @@ mod tests {
             }
         }
 
-        fn req(call_data: Vec<u8>) -> SignEvmRequest {
-            SignEvmRequest {
-                call_data,
-                nonce: 1,
-                deadline: u64::MAX,
-                consignment_valid: true,
-                rgb_amount: 0,
-                rgb_asset_id: "rgb:test".into(),
-                chain_id: 1,
-                proxy_contract: vec![0xAA; 20],
-                calldata_amount: 0,
-                calldata_commission: 0,
-                consignment: vec![],
-                consignment_hash: vec![],
-                merkle_proofs: vec![],
-            }
-        }
+        // ---- apply_op_id_binding (override, not verify) ----
 
-        // ---- bind_burn_id ----
-
-        /// Happy path: calldata burnId == keccak256(last transition OpId).
+        /// Writes burnId@68 = id(last transition OpId), overriding whatever the
+        /// bridge put there.
         #[test]
-        fn burn_id_binds_when_keccak_matches() {
-            let r = req(mock_funds_out(id(OP_ID), &[]));
+        fn writes_burn_id_from_last_transition() {
+            let cd = mock_funds_out([0xEE; 32], &[]); // bogus burnId in input
             let v = validated(Some(transition(OP_ID, ifa::TS_BURN)), vec![]);
-            assert!(bind_burn_id(&r, &v).is_ok());
-        }
-
-        /// Active on every flow: a Transfer (pools) last transition binds too.
-        #[test]
-        fn burn_id_binds_for_transfer_transition() {
-            let r = req(mock_funds_out(id(OP_ID), &[]));
-            let v = validated(Some(transition(OP_ID, ifa::TS_TRANSFER)), vec![]);
-            assert!(bind_burn_id(&r, &v).is_ok());
-        }
-
-        /// The core TEE-SE-02 protection: a burnId that isn't
-        /// keccak256(consignment OpId) is rejected.
-        #[test]
-        fn burn_id_rejects_mismatch() {
-            let mut wrong = id(OP_ID);
-            wrong[0] ^= 0xff;
-            let r = req(mock_funds_out(wrong, &[]));
-            let v = validated(Some(transition(OP_ID, ifa::TS_BURN)), vec![]);
-            let err = bind_burn_id(&r, &v).unwrap_err();
-            assert!(
-                err.to_string().contains("burnId mismatch"),
-                "expected burnId mismatch, got: {err}"
+            let out = apply_op_id_binding(&cd, &v).unwrap();
+            assert_eq!(
+                extract_bytes32(&out, FUNDS_OUT_BURN_ID_OFFSET).unwrap(),
+                id(OP_ID)
             );
+        }
+
+        /// Active on every flow: a Transfer (pools) last transition is written too.
+        #[test]
+        fn writes_burn_id_for_transfer_transition() {
+            let cd = mock_funds_out([0xEE; 32], &[]);
+            let v = validated(Some(transition(OP_ID, ifa::TS_TRANSFER)), vec![]);
+            let out = apply_op_id_binding(&cd, &v).unwrap();
+            assert_eq!(
+                extract_bytes32(&out, FUNDS_OUT_BURN_ID_OFFSET).unwrap(),
+                id(OP_ID)
+            );
+        }
+
+        /// Writes ALL mint OpIds into settlementData, overriding the bridge's set.
+        #[test]
+        fn writes_all_mint_funds_in_ids() {
+            let cd = mock_funds_out([0xEE; 32], &[[0x11; 32], [0x22; 32]]);
+            let v = validated(
+                Some(transition(OP_ID, ifa::TS_BURN)),
+                vec![MINT_A.into(), MINT_B.into()],
+            );
+            let out = apply_op_id_binding(&cd, &v).unwrap();
+            assert_eq!(
+                extract_funds_in_ids(&out).unwrap(),
+                vec![id(MINT_A), id(MINT_B)]
+            );
+        }
+
+        /// No mints in the consignment → empty fundsInIds (not an error).
+        #[test]
+        fn writes_empty_funds_in_ids_when_no_mints() {
+            let cd = mock_funds_out([0xEE; 32], &[[0x11; 32]]);
+            let v = validated(Some(transition(OP_ID, ifa::TS_BURN)), vec![]);
+            let out = apply_op_id_binding(&cd, &v).unwrap();
+            assert!(extract_funds_in_ids(&out).unwrap().is_empty());
+        }
+
+        /// Override, not verify: a fully bogus input (wrong burnId AND wrong
+        /// fundsInIds) is rewritten to the consignment's values.
+        #[test]
+        fn overrides_whatever_the_bridge_sent() {
+            let cd = mock_funds_out([0xEE; 32], &[[0xAB; 32]]);
+            let v = validated(Some(transition(OP_ID, ifa::TS_BURN)), vec![MINT_A.into()]);
+            let out = apply_op_id_binding(&cd, &v).unwrap();
+            assert_eq!(
+                extract_bytes32(&out, FUNDS_OUT_BURN_ID_OFFSET).unwrap(),
+                id(OP_ID)
+            );
+            assert_eq!(extract_funds_in_ids(&out).unwrap(), vec![id(MINT_A)]);
+        }
+
+        /// The non-OpId fields (recipient, amount) are left exactly as sent.
+        #[test]
+        fn preserves_non_op_id_fields() {
+            let mut cd = mock_funds_out([0xEE; 32], &[[0x11; 32]]);
+            cd[4..36].copy_from_slice(&u256(0xBEEF)); // recipient marker
+            cd[36..68].copy_from_slice(&u256(123_456)); // amount marker
+            let v = validated(Some(transition(OP_ID, ifa::TS_BURN)), vec![MINT_A.into()]);
+            let out = apply_op_id_binding(&cd, &v).unwrap();
+            assert_eq!(&out[4..36], &u256(0xBEEF));
+            assert_eq!(&out[36..68], &u256(123_456));
         }
 
         /// An OpId that isn't 32-byte hex can't be transformed — fail closed.
         #[test]
-        fn burn_id_rejects_non_hex_op_id() {
-            let r = req(mock_funds_out(id(OP_ID), &[]));
+        fn rejects_non_hex_op_id() {
+            let cd = mock_funds_out([0xEE; 32], &[]);
             let v = validated(Some(transition("not-hex", ifa::TS_BURN)), vec![]);
-            let err = bind_burn_id(&r, &v).unwrap_err();
+            let err = apply_op_id_binding(&cd, &v).unwrap_err();
             assert!(
                 err.to_string().contains("hex-decodable")
                     || err.to_string().contains("expected 32"),
@@ -1400,90 +1446,28 @@ mod tests {
             );
         }
 
-        /// Calldata too short to hold the burnId slot is rejected.
+        /// Calldata too short to hold the fundsOut head is rejected.
         #[test]
-        fn burn_id_rejects_calldata_too_short() {
-            let r = req(vec![0u8; 50]); // burnId slot ends at byte 100
+        fn rejects_calldata_too_short() {
             let v = validated(Some(transition(OP_ID, ifa::TS_BURN)), vec![]);
-            let err = bind_burn_id(&r, &v).unwrap_err();
-            assert!(
-                err.to_string().contains("too short"),
-                "expected too-short rejection, got: {err}"
-            );
+            let err = apply_op_id_binding(&[0u8; 100], &v).unwrap_err();
+            assert!(err.to_string().contains("too short"), "got: {err}");
         }
 
         /// No transition to bind against → hard error.
         #[test]
-        fn burn_id_rejects_no_transition() {
-            let r = req(mock_funds_out(id(OP_ID), &[]));
+        fn rejects_no_transition() {
+            let cd = mock_funds_out([0xEE; 32], &[]);
             let v = validated(None, vec![]);
-            let err = bind_burn_id(&r, &v).unwrap_err();
+            let err = apply_op_id_binding(&cd, &v).unwrap_err();
             assert!(
                 err.to_string().contains("at least one transition"),
-                "expected no-transition rejection, got: {err}"
+                "got: {err}"
             );
         }
 
-        // ---- bind_funds_in_ids ----
+        // ---- settlementData ABI round-trip (writer vs reader agree) ----
 
-        /// Happy path: every fundsInId is keccak256 of a consignment mint OpId.
-        #[test]
-        fn funds_in_ids_pass_when_all_backed_by_mints() {
-            let r = req(mock_funds_out(id(OP_ID), &[id(MINT_A), id(MINT_B)]));
-            let v = validated(
-                Some(transition(OP_ID, ifa::TS_BURN)),
-                vec![MINT_A.into(), MINT_B.into()],
-            );
-            assert!(bind_funds_in_ids(&r, &v).is_ok());
-        }
-
-        /// Subset is fine: the backend selects only the covering subset of
-        /// lock records, so fewer fundsInIds than mints is expected.
-        #[test]
-        fn funds_in_ids_pass_when_subset() {
-            let r = req(mock_funds_out(id(OP_ID), &[id(MINT_A)]));
-            let v = validated(
-                Some(transition(OP_ID, ifa::TS_BURN)),
-                vec![MINT_A.into(), MINT_B.into()],
-            );
-            assert!(bind_funds_in_ids(&r, &v).is_ok());
-        }
-
-        /// Empty settlementData (no fundsInIds) trivially passes.
-        #[test]
-        fn funds_in_ids_pass_when_empty() {
-            let r = req(mock_funds_out(id(OP_ID), &[]));
-            let v = validated(Some(transition(OP_ID, ifa::TS_BURN)), vec![MINT_A.into()]);
-            assert!(bind_funds_in_ids(&r, &v).is_ok());
-        }
-
-        /// The core protection: a fundsInId not backed by any consignment mint
-        /// OpId is rejected — a release can't consume an unrelated lock.
-        #[test]
-        fn funds_in_ids_reject_unbacked_entry() {
-            let r = req(mock_funds_out(id(OP_ID), &[id(MINT_A), id(MINT_B)]));
-            let v = validated(Some(transition(OP_ID, ifa::TS_BURN)), vec![MINT_A.into()]);
-            let err = bind_funds_in_ids(&r, &v).unwrap_err();
-            assert!(
-                err.to_string().contains("does not correspond"),
-                "expected unbacked-fundsInId rejection, got: {err}"
-            );
-        }
-
-        /// fundsInIds present but the consignment has no mints at all → reject.
-        #[test]
-        fn funds_in_ids_reject_when_no_mints() {
-            let r = req(mock_funds_out(id(OP_ID), &[id(MINT_A)]));
-            let v = validated(Some(transition(OP_ID, ifa::TS_BURN)), vec![]);
-            let err = bind_funds_in_ids(&r, &v).unwrap_err();
-            assert!(
-                err.to_string().contains("does not correspond"),
-                "expected no-mints rejection, got: {err}"
-            );
-        }
-
-        /// The settlementData ABI parser round-trips a known fundsInIds list
-        /// through the two-level dynamic encoding.
         #[test]
         fn settlement_parser_round_trips() {
             let ids = [id(MINT_A), id(MINT_B)];
@@ -1491,7 +1475,6 @@ mod tests {
             assert_eq!(extract_funds_in_ids(&cd).unwrap(), ids.to_vec());
         }
 
-        /// An empty fundsInIds array parses to no ids.
         #[test]
         fn settlement_parser_empty() {
             let cd = mock_funds_out(id(OP_ID), &[]);
