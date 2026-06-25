@@ -27,6 +27,56 @@ pub struct ServerContext {
     /// changes — and `Mutex` over `RefCell` so a future move to
     /// multi-threaded handling needs no plumbing changes.
     pub header_chain: std::sync::Mutex<crate::spv::HeaderChain>,
+    /// Cumulative rate limit for `SubmitHeaders` (#86). The per-call cap lives
+    /// in `HeaderChain::submit_headers`; this bounds the *aggregate* rate
+    /// across calls so a flood of small batches can't keep the enclave busy.
+    pub submit_rate_limiter: std::sync::Mutex<SubmitRateLimiter>,
+}
+
+/// Sliding-window rate limit for `SubmitHeaders` (#86 cumulative cap). At most
+/// [`MAX_HEADERS_PER_RATE_WINDOW`] headers may be *submitted* (validated or
+/// not) within [`RATE_LIMIT_WINDOW`]. Generous enough for a cold-start sync
+/// from the checkpoint, tight enough that a sustained flood of replayed or
+/// garbage headers can't occupy the enclave indefinitely.
+#[derive(Default)]
+pub struct SubmitRateLimiter {
+    window_start: Option<std::time::SystemTime>,
+    headers_in_window: u64,
+}
+
+/// Max headers admitted per [`RATE_LIMIT_WINDOW`]. A cold-start sync from the
+/// mainnet checkpoint to the tip is a few thousand blocks, well inside this.
+const MAX_HEADERS_PER_RATE_WINDOW: u64 = 100_000;
+/// Length of the rate-limit window.
+const RATE_LIMIT_WINDOW: std::time::Duration = std::time::Duration::from_secs(60);
+
+impl SubmitRateLimiter {
+    /// Account for `count` submitted headers at time `now`. Returns `Err` if
+    /// the rolling-window budget would be exceeded. The window resets once
+    /// `RATE_LIMIT_WINDOW` has elapsed (or if the clock moves backwards).
+    pub fn check(&mut self, count: u64, now: std::time::SystemTime) -> Result<()> {
+        let reset = match self.window_start {
+            None => true,
+            Some(start) => now
+                .duration_since(start)
+                .map(|elapsed| elapsed >= RATE_LIMIT_WINDOW)
+                .unwrap_or(true),
+        };
+        if reset {
+            self.window_start = Some(now);
+            self.headers_in_window = 0;
+        }
+        self.headers_in_window = self.headers_in_window.saturating_add(count);
+        if self.headers_in_window > MAX_HEADERS_PER_RATE_WINDOW {
+            return Err(EnclaveError::Spv(format!(
+                "SubmitHeaders rate limit exceeded: {} headers within {}s (max {})",
+                self.headers_in_window,
+                RATE_LIMIT_WINDOW.as_secs(),
+                MAX_HEADERS_PER_RATE_WINDOW,
+            )));
+        }
+        Ok(())
+    }
 }
 
 impl ServerContext {
@@ -44,6 +94,7 @@ impl ServerContext {
             #[cfg(feature = "rgb-validation")]
             rgb_validator: None,
             header_chain,
+            submit_rate_limiter: std::sync::Mutex::new(SubmitRateLimiter::default()),
         }
     }
 }
@@ -514,7 +565,65 @@ fn handle_sign_psbt(ctx: &ServerContext, req: SignPsbtRequest) -> Result<Enclave
         psbt_consignment_crosscheck(ctx, &req)?;
     }
 
+    // Soft operation-uniqueness guard (audit W-02 / #84). In bridge mode,
+    // record the operation tuple and reject a same-op resubmission inside the
+    // TTL window. Check-and-record sits in the critical section — after every
+    // validation above has passed and immediately before signing — so we only
+    // ever record an operation we are actually about to sign, and a duplicate
+    // is rejected before a second signature is produced. Recording before the
+    // sign means a transient `sign_psbt` failure also blocks retries of that
+    // exact tuple until the TTL lapses; that is acceptable for a soft guard
+    // (the concern is double-*success*, and the set self-heals).
+    //
+    // This is defense-in-depth only: the guard is in-memory, per-instance, and
+    // volatile across restart, so it does not replace the durable on-chain
+    // double-spend control (#84/#93). See `EnclaveState::op_replay_guard`.
+    #[cfg(not(feature = "dev-mode"))]
+    if !req.evm_tx_hash.is_empty() {
+        let op_key = validation::psbt_crosscheck::psbt_operation_key(
+            ctx.bridge_config.chain_id,
+            &ctx.bridge_config.bridge_contract,
+            &req.evm_tx_hash,
+            req.operation_idx,
+            &req.rgb_asset_id,
+        );
+        match ctx.state.op_replay_guard.check_and_record(op_key) {
+            Ok(()) => {}
+            Err(EnclaveError::NonceReplay) => {
+                tracing::warn!(
+                    operation_idx = req.operation_idx,
+                    evm_tx_hash = %hex::encode(&req.evm_tx_hash),
+                    "rejecting duplicate bridge PSBT operation (soft replay guard, #84)"
+                );
+                return Err(EnclaveError::CrossCheck(
+                    "duplicate bridge operation: this (chain, contract, evm_tx_hash, \
+                     operation_idx, rgb_asset_id) was already signed recently — refusing to \
+                     sign a replay (soft in-memory guard; durable guard is on-chain)"
+                        .into(),
+                ));
+            }
+            Err(e) => return Err(e),
+        }
+    }
+
     let (signed_psbt, inputs_signed) = ctx.state.sign_psbt(&req.psbt_bytes)?;
+
+    // Reject a "successful" no-op (audit 3rd W-03 / #85). KeyManager::sign_psbt
+    // returns Ok((bytes, 0)) when no PSBT input belongs to this enclave; a
+    // caller that checks only RPC success would treat that as a valid signer
+    // contribution and mis-account quorum. Fail closed in production signing
+    // mode so a 0-signature response can never be mistaken for a contribution.
+    // Partial signing (0 < count < num_inputs) is still allowed. The
+    // KeyManager 0-return stays as a primitive; the policy lives here at the
+    // handler boundary. dev-mode keeps the 0-count path for inspect/dry-run.
+    #[cfg(not(feature = "dev-mode"))]
+    if inputs_signed == 0 {
+        return Err(EnclaveError::Signing(
+            "sign_psbt signed 0 inputs: no PSBT input belongs to this enclave — refusing to \
+             return a no-op as a successful signing response"
+                .into(),
+        ));
+    }
 
     tracing::info!(inputs_signed, "PSBT signed");
 
@@ -740,6 +849,13 @@ fn handle_submit_headers(
     ctx: &ServerContext,
     req: SubmitHeadersRequest,
 ) -> Result<EnclaveResponse> {
+    // Cumulative rate limit (#86): bound the aggregate submission rate across
+    // calls. The per-call cap is enforced inside `submit_headers`.
+    ctx.submit_rate_limiter
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .check(req.headers.len() as u64, std::time::SystemTime::now())?;
+
     let mut chain = ctx
         .header_chain
         .lock()
@@ -1011,4 +1127,60 @@ fn handle_set_clone(state: &EnclaveState, req: SetCloneRequest) -> Result<Enclav
     Ok(EnclaveResponse {
         response: Some(Response::SetClone(SetCloneResponse {})),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{Duration, SystemTime};
+
+    #[test]
+    fn rate_limiter_allows_up_to_budget_then_rejects() {
+        let mut limiter = SubmitRateLimiter::default();
+        let t0 = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000);
+
+        // Spending exactly the budget across several calls within the window
+        // is fine.
+        limiter
+            .check(MAX_HEADERS_PER_RATE_WINDOW - 1, t0)
+            .expect("under budget");
+        limiter
+            .check(1, t0 + Duration::from_secs(1))
+            .expect("exactly at budget");
+
+        // One more header in the same window trips the limit.
+        let err = limiter.check(1, t0 + Duration::from_secs(2)).unwrap_err();
+        assert!(matches!(err, EnclaveError::Spv(_)));
+    }
+
+    #[test]
+    fn rate_limiter_resets_after_window() {
+        let mut limiter = SubmitRateLimiter::default();
+        let t0 = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000);
+
+        limiter
+            .check(MAX_HEADERS_PER_RATE_WINDOW, t0)
+            .expect("fills the budget");
+        // Still in-window: rejected.
+        assert!(limiter
+            .check(1, t0 + RATE_LIMIT_WINDOW - Duration::from_secs(1))
+            .is_err());
+        // After the window elapses, the budget resets.
+        limiter
+            .check(MAX_HEADERS_PER_RATE_WINDOW, t0 + RATE_LIMIT_WINDOW)
+            .expect("window reset");
+    }
+
+    #[test]
+    fn rate_limiter_handles_clock_going_backwards() {
+        let mut limiter = SubmitRateLimiter::default();
+        let t1 = SystemTime::UNIX_EPOCH + Duration::from_secs(2_000_000);
+        limiter.check(10, t1).expect("first call");
+        // An earlier timestamp (clock skew) resets the window rather than
+        // panicking or underflowing.
+        let t0 = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000);
+        limiter
+            .check(10, t0)
+            .expect("backwards clock resets window");
+    }
 }

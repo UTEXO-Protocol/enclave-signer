@@ -94,6 +94,9 @@ pub enum SpvError {
     )]
     WeakerChain,
 
+    #[error("submitted batch has {len} headers, exceeding the per-call cap of {max}")]
+    BatchTooLarge { len: usize, max: usize },
+
     #[error("no header at height {0}")]
     HeaderNotFound(BlockHeight),
 

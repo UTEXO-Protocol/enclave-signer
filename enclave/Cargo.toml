@@ -57,6 +57,12 @@ rgb-ops = { version = "0.11.1-rc.7", features = ["esplora_blocking"], optional =
 # parser's `main` branch directly; Cargo.lock pins the exact rev for
 # reproducible builds.
 rgb-consignment = { git = "ssh://git@github.com/UTEXO-Protocol/rgb-consignment-parser.git", branch = "main", default-features = false, optional = true }
+# Canonical RGB schema definitions (NIA/UDA/CFA/IFA). Source of the trusted
+# strict type-system the validator pins consignments against — the same crate
+# rgb-lib uses (`AssetSchema::types()` -> `InflatableFungibleAsset::types()`).
+# Pins per schema_id so a consignment cannot self-validate its own types
+# (audit 4th W-01 / #92). `default-features = false` skips the CLI bin deps.
+rgb-schemas = { version = "=0.11.1-rc.10", default-features = false, optional = true }
 
 # Attestation verification (COSE_Sign1 + AWS Nitro cert chain) lives in
 # the workspace `attestation-verify` crate so the parent CLI binary and
@@ -89,7 +95,7 @@ allow-seed-import = []
 # Skips cross-check validation on signing requests. Development/testing only.
 dev-mode = []
 # In-enclave RGB consignment validation via rgbstd + Esplora.
-rgb-validation = ["rgb-ops", "rgb-consignment"]
+rgb-validation = ["rgb-ops", "rgb-consignment", "rgb-schemas"]
 # Bitcoin SPV verification of consignment witness txids before signing EVM
 # transactions. Implies `rgb-validation` because SPV needs the consignment
 # parsed to extract witness txids. When the feature is OFF, handle_sign_evm
