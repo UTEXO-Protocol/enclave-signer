@@ -171,19 +171,26 @@ fn build_test_multisig_psbt(our_pubkey: &bitcoin::PublicKey) -> Vec<u8> {
 
 /// Build a valid enriched SignPsbtRequest for testing.
 #[cfg(feature = "allow-seed-import")]
+// Vanilla-mode (non-bridge) PSBT request: empty `evm_tx_hash` so the handler
+// signs the PSBT on its mechanics alone. The roundtrip test exercises signing,
+// not the bridge cross-checks. A bridge-mode request (non-empty evm_tx_hash)
+// under `rgb-validation` fail-closes on a missing consignment (the send-RGB
+// binding from #79), and this synthetic multisig PSBT could never match a real
+// consignment's witness txid - so bridge mode is the wrong shape here. The
+// consignment binding has its own coverage in `psbt_crosscheck` unit tests.
 fn valid_sign_psbt_request(psbt_bytes: Vec<u8>) -> SignPsbtRequest {
     SignPsbtRequest {
-        evm_tx_hash: vec![0xCC; 32],
+        evm_tx_hash: vec![],
         operation_idx: 0,
-        evm_event_valid: true,
-        evm_event_finalized: true,
-        evm_token: vec![0x11; 20],
-        evm_amount: 100_000,
-        evm_recipient: vec![0x22; 20],
-        evm_commission: 1_000,
+        evm_event_valid: false,
+        evm_event_finalized: false,
+        evm_token: vec![],
+        evm_amount: 0,
+        evm_recipient: vec![],
+        evm_commission: 0,
         psbt_bytes,
-        psbt_output_amount: 50_000,
-        rgb_asset_id: "rgb:test".into(),
+        psbt_output_amount: 0,
+        rgb_asset_id: String::new(),
         consignment: vec![],
         consignment_hash: vec![],
     }

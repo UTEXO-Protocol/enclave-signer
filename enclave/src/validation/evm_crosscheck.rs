@@ -409,7 +409,7 @@ pub fn validate_funds_out_transfer(
     // single-use `consumedBurnIds[burnId]` guard is only sound if `burnId`
     // canonically identifies the RGB operation being released against;
     // otherwise the same burn replayed under a fresh `burnId` double-releases.
-    // Require the calldata `burnId` to equal uint256(OpId) of the release
+    // Require the calldata `burnId` to equal keccak256(OpId) of the release
     // transition, where the OpId is read from the rgbstd-VALIDATED transfer
     // (`last_transfer_op_id`), not the flat parser. Compile-time gated
     // (PCR-attested) and OFF by default until bridge-utexo derives `burnId`
@@ -441,16 +441,29 @@ pub fn validate_funds_out_transfer(
     Ok(())
 }
 
+/// Canonical transform from an RGB `OpId` to the opaque `uint256` the EVM
+/// contract stores (`burnId`, `fundsInIds`, lock-side `operationId`):
+/// `keccak256(raw 32-byte OpId)`. This MUST match bridge-utexo and #97 (#63)
+/// byte-for-byte - the enclave, the orchestrator, and the contract caller all
+/// derive the on-chain id this way. Preimage is the raw 32 OpId bytes, not its
+/// ASCII-hex form.
+#[cfg(any(feature = "bind-burn-id", test))]
+fn op_id_to_calldata_id(op_id: &[u8; 32]) -> [u8; 32] {
+    use sha3::{Digest, Keccak256};
+    Keccak256::digest(op_id).into()
+}
+
 /// Bind the `fundsOut` calldata `burnId` to the RGB operation it releases
 /// against (audit M-02 / #93, #63).
 ///
-/// The canonical `burnId` is `uint256(OpId)`: the 32-byte commitment hash of
-/// the release transition, taken big-endian. `expected_op_id` is that hash,
-/// sourced by the caller from the rgbstd-VALIDATED transfer
+/// The canonical `burnId` is `keccak256(OpId)` (see [`op_id_to_calldata_id`]),
+/// where `expected_op_id` is the raw 32-byte commitment hash of the release
+/// transition, sourced by the caller from the rgbstd-VALIDATED transfer
 /// (`ValidatedConsignment::last_transfer_op_id`) - NOT from a parallel parse,
-/// so the comparison is against data `validate()` authenticated. A uint256 ABI
-/// word is the same 32 bytes big-endian, so we compare the calldata `burnId`
-/// slot to the OpId byte-for-byte (no endianness conversion).
+/// so the comparison is against data `validate()` authenticated. The contract's
+/// `burnId`/`fundsInIds` are opaque `uint256`s the backend assigns; this scheme
+/// is shared with bridge-utexo and #97 so the same burn always yields the same
+/// on-chain id.
 ///
 /// Assumes one RGB release transition maps to one `fundsOut` (the live pools
 /// model); it does not support partial releases of a single operation under
@@ -467,13 +480,14 @@ fn verify_burn_id_binding(call_data: &[u8], expected_op_id: &[u8; 32]) -> Result
     }
     let burn_id = &call_data[FUNDS_OUT_BURN_ID_OFFSET..end];
 
-    if burn_id != expected_op_id.as_slice() {
+    let expected = op_id_to_calldata_id(expected_op_id);
+    if burn_id != expected.as_slice() {
         return Err(EnclaveError::CrossCheck(format!(
-            "burnId not bound to the RGB operation: calldata burnId 0x{} != uint256(OpId) 0x{} \
+            "burnId not bound to the RGB operation: calldata burnId 0x{} != keccak256(OpId) 0x{} \
              of the release transition - refusing to sign a fundsOut that the same burn could \
              replay under a different burnId",
             hex::encode(burn_id),
-            hex::encode(expected_op_id)
+            hex::encode(expected)
         )));
     }
     Ok(())
@@ -960,10 +974,11 @@ mod tests {
             let mut amt = [0u8; 32];
             amt[24..].copy_from_slice(&amount.to_be_bytes());
             data.extend_from_slice(&amt);
-            // burnId @ offset 68 - set to the canonical test OpId so the
-            // (default-off) bind-burn-id check passes transparently when the
-            // feature is compiled in. The other 5 head slots stay zero-filled.
-            data.extend_from_slice(&TEST_OP_ID_BYTES);
+            // burnId @ offset 68 - set to keccak256(OpId), the canonical
+            // on-chain id, so the (default-off) bind-burn-id check passes
+            // transparently when the feature is compiled in. The other 5 head
+            // slots stay zero-filled.
+            data.extend_from_slice(&op_id_to_calldata_id(&TEST_OP_ID_BYTES));
             data.extend_from_slice(&[0u8; 32 * 5]);
             data
         }
@@ -1097,8 +1112,19 @@ mod tests {
         #[test]
         fn accepts_matching_burn_id() {
             let op = [0xABu8; 32];
-            let cd = calldata_with_burn_id(&op);
+            // The calldata carries keccak256(OpId), the canonical on-chain id.
+            let cd = calldata_with_burn_id(&op_id_to_calldata_id(&op));
             assert!(verify_burn_id_binding(&cd, &op).is_ok());
+        }
+
+        #[test]
+        fn rejects_raw_op_id_in_calldata() {
+            // A caller that put the raw OpId (not keccak256(OpId)) in the
+            // calldata must be rejected - this is the #93 -> #97 formula change.
+            let op = [0xABu8; 32];
+            let cd = calldata_with_burn_id(&op);
+            let err = verify_burn_id_binding(&cd, &op).unwrap_err();
+            assert!(err.to_string().contains("burnId not bound"), "got: {err}");
         }
 
         #[test]
@@ -1122,7 +1148,7 @@ mod tests {
         #[test]
         fn single_bit_flip_in_burn_id_is_rejected() {
             let op = [0x11u8; 32];
-            let mut bad = op;
+            let mut bad = op_id_to_calldata_id(&op);
             bad[31] ^= 0x01; // calldata burnId off by one bit
             let cd = calldata_with_burn_id(&bad);
             let err = verify_burn_id_binding(&cd, &op).unwrap_err();
