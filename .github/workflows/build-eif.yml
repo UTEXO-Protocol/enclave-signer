@@ -9,6 +9,10 @@ name: "Build EIF"
 # nitro-cli kernel/init blobs — NOT just our code. We therefore pin nitro-cli to
 # the SAME version the runtime hosts run (stage hosts: 1.4.5). Bump NITRO_CLI_VERSION
 # here in lockstep with the hosts, or attestation (KMS PCR policy + clone) breaks.
+# The image side is pinned too: base images are pinned by digest in
+# Dockerfile.enclave and layer timestamps are normalised via SOURCE_DATE_EPOCH +
+# BuildKit rewrite-timestamp (build/build-enclave.sh). OS package versions
+# (apt/dnf) still float — pinning them is the next determinism step.
 #
 # Required repo config (Settings -> Secrets and variables -> Actions):
 #   secrets.RGB_CONSIGNMENT_PARSER_DEPLOY_KEY  read-only deploy key (already used by ci.yml)
@@ -111,7 +115,7 @@ jobs:
       - name: Build host binaries (parent + cli, static musl)
         run: |
           set -euxo pipefail
-          cargo build --release -p utexo-bridge-parent --features vsock \
+          cargo build --release --locked -p utexo-bridge-parent --features vsock \
             --target x86_64-unknown-linux-musl
           BIN=target/x86_64-unknown-linux-musl/release
           cp "$BIN/utexo-bridge-parent" "$BIN/utexo-bridge-parent-cli" artifacts/

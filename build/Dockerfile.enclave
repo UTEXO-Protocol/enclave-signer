@@ -1,4 +1,4 @@
-# syntax=docker/dockerfile:1.4
+# syntax=docker/dockerfile:1.7
 # Production enclave image (vsock + rgb-validation + spv).
 # Usage:
 #   DOCKER_BUILDKIT=1 docker build --ssh default \
@@ -7,8 +7,16 @@
 # `--ssh default` forwards the host's SSH agent into the build so cargo
 # can fetch the private `rgb-consignment` git dep that the
 # `rgb-validation`/`spv` features pull in.
+#
+# Reproducible PCR0: the EIF packs the runtime-stage rootfs, so any drift in a
+# base image or its packages changes PCR0. Both FROMs are pinned by DIGEST (not
+# just tag) so a moving tag can't silently change the measurement. When bumping,
+# update BOTH the tag and the @sha256 digest together (resolve via
+# `docker buildx imagetools inspect <image>:<tag>`). `dockerfile:1.7` lets
+# BuildKit honour SOURCE_DATE_EPOCH for reproducible layer timestamps.
+# (OS package versions from apt/dnf still float — pinning them is the next step.)
 
-FROM rust:1.89-slim AS builder
+FROM rust:1.89-slim@sha256:8cffb8fe4e8a95cf0d6a2060375e5a28aff4c752155aa9f1f9193530769bdf66 AS builder
 
 # `git` + `openssh-client`: the workspace `[patch.crates-io]` uses public
 # git URLs for rgb-consensus / rgb-ops / rgb-invoicing / rgb-strict-encoding,
@@ -29,16 +37,31 @@ WORKDIR /build
 COPY . /build/
 
 WORKDIR /build/enclave
+# Deterministic compilation (PCR0 reproducibility, Step 4):
+#   CARGO_INCREMENTAL=0   no incremental artifacts (release already off; explicit)
+#   --remap-path-prefix   strip the absolute build path from embedded paths
+#   -C debuginfo=0 / strip=symbols  drop debug info + symbol tables (a common
+#                         source of binary variation; also shrinks the binary)
+# The container paths (/build, $CARGO_HOME) are already constant, so combined with
+# `--locked` below the compiled binary is stable across rebuilds of the same commit.
+ENV CARGO_INCREMENTAL=0 \
+    RUSTFLAGS="--remap-path-prefix=/build=/src -C debuginfo=0 -C strip=symbols"
 # `spv` implies `rgb-validation`; listing both explicitly so the feature
 # set is visible at a glance.
+#
+# `--locked` pins to Cargo.lock exactly — without it the `?branch=…` git deps
+# (rgb-*) could re-resolve to a newer commit on a later rebuild and change the
+# binary (and thus PCR0).
 #
 # `--mount=type=ssh` exposes the SSH_AUTH_SOCK forwarded by `--ssh default`
 # only for the duration of this RUN, so no credentials end up in the
 # image layers.
-RUN --mount=type=ssh cargo build --release --features vsock,rgb-validation,spv
+RUN --mount=type=ssh cargo build --release --locked --features vsock,rgb-validation,spv
 
 # --- Runtime ---
-FROM public.ecr.aws/amazonlinux/amazonlinux:2023-minimal AS runtime
+# Pinned by digest (see header) — this rootfs is what ends up in the EIF, so its
+# digest directly drives PCR0. Bump tag + digest together when updating.
+FROM public.ecr.aws/amazonlinux/amazonlinux:2023-minimal@sha256:8073d921f4ac1bf17fca94e16b0bc575e3fc17e4ccbe53b563160f02f0c7ccfc AS runtime
 
 RUN dnf install -y socat iproute && dnf clean all
 

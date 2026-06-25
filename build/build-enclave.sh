@@ -20,6 +20,15 @@
 # (kernel/init), NOT just our code. Pin nitro-cli to the SAME version that runs
 # on the target hosts (stage hosts are on 1.4.5) or PCRs will not match.
 #
+# Reproducible PCR0 (build side): the EIF packs the runtime-stage rootfs, so the
+# image build must be deterministic. We (1) pin both base images by digest in
+# Dockerfile.enclave, and (2) normalise layer timestamps via SOURCE_DATE_EPOCH +
+# BuildKit's `rewrite-timestamp` exporter (requires `docker buildx` with a
+# container/containerd builder — CI sets this up via docker/setup-buildx-action).
+# SOURCE_DATE_EPOCH defaults to the commit time (stable per git_sha); override by
+# exporting it. NOTE: OS package versions (apt/dnf) still float — pinning them is
+# the next determinism step.
+#
 # Usage:
 #   ./build/build-enclave.sh
 # Tunables (env):
@@ -51,11 +60,19 @@ mkdir -p "$OUT_DIR"
 
 # --- 1. Build the docker image (BuildKit + ssh-agent forwarding) ------------
 # The Dockerfile's `RUN --mount=type=ssh` consumes `--ssh default`.
-echo "Building Docker image (BuildKit, --ssh default)..."
-DOCKER_BUILDKIT=1 docker build \
+#
+# Deterministic timestamps: SOURCE_DATE_EPOCH (commit time, stable per git_sha)
+# + `rewrite-timestamp=true` make BuildKit normalise file mtimes in the exported
+# layers, so two builds of the same commit yield the same rootfs -> same PCR0.
+SOURCE_DATE_EPOCH="${SOURCE_DATE_EPOCH:-$(git -C "$PROJECT_ROOT" log -1 --format=%ct 2>/dev/null || echo 1700000000)}"
+export SOURCE_DATE_EPOCH
+echo "Building Docker image (buildx, --ssh default, SOURCE_DATE_EPOCH=$SOURCE_DATE_EPOCH)..."
+DOCKER_BUILDKIT=1 docker buildx build \
     --ssh default \
+    --build-arg SOURCE_DATE_EPOCH="$SOURCE_DATE_EPOCH" \
     -f "$SCRIPT_DIR/Dockerfile.enclave" \
     -t "$IMAGE_TAG" \
+    --output "type=docker,rewrite-timestamp=true" \
     "$PROJECT_ROOT"
 
 # --- 2. Convert to EIF ------------------------------------------------------
