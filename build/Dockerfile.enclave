@@ -14,7 +14,10 @@
 # update BOTH the tag and the @sha256 digest together (resolve via
 # `docker buildx imagetools inspect <image>:<tag>`). `dockerfile:1.7` lets
 # BuildKit honour SOURCE_DATE_EPOCH for reproducible layer timestamps.
-# (OS package versions from apt/dnf still float — pinning them is the next step.)
+# OS package versions are frozen by the digest pin ($releasever is fixed), and the
+# runtime RUN scrubs dnf/rpm state (see below). The builder-stage apt packages are
+# not shipped (multi-stage) and only affect the binary, which --locked + RUSTFLAGS
+# keep deterministic.
 
 FROM rust:1.89-slim@sha256:8cffb8fe4e8a95cf0d6a2060375e5a28aff4c752155aa9f1f9193530769bdf66 AS builder
 
@@ -63,7 +66,20 @@ RUN --mount=type=ssh cargo build --release --locked --features vsock,rgb-validat
 # digest directly drives PCR0. Bump tag + digest together when updating.
 FROM public.ecr.aws/amazonlinux/amazonlinux:2023-minimal@sha256:8073d921f4ac1bf17fca94e16b0bc575e3fc17e4ccbe53b563160f02f0c7ccfc AS runtime
 
-RUN dnf install -y socat iproute && dnf clean all
+# Deterministic runtime rootfs (PCR0/PCR2 reproducibility, Step 2):
+# Package VERSIONS are already frozen — the base image is digest-pinned, so dnf's
+# $releasever is fixed (2023.x snapshot) and resolves the same socat/iproute every
+# build. The remaining non-determinism is CONTENT dnf/rpm writes with embedded
+# timestamps/randomness (rpmdb, dnf history, caches, logs) — rewrite-timestamp
+# only normalises file mtimes, not file contents. We scrub that state in the SAME
+# layer so the measured rootfs is stable. (rpmdb isn't needed at runtime.)
+RUN dnf install -y socat iproute \
+    && dnf clean all \
+    && rm -rf \
+        /var/cache/dnf /var/cache/libdnf5 /var/cache/ldconfig \
+        /var/lib/dnf /var/lib/rpm /var/lib/rpm-state \
+        /var/log/* /tmp/* \
+    && :
 
 WORKDIR /app
 COPY --from=builder /build/target/release/utexo-bridge-enclave /app/utexo-bridge-enclave
