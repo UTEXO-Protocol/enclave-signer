@@ -36,6 +36,15 @@ pub const FUNDS_OUT_SELECTOR_POOLS: [u8; 4] = [0xcc, 0xdd, 0xb7, 0x68];
 /// yet; it lands in the mint/burn epic, dispatched by contract address.
 const FUNDS_OUT_SELECTORS: &[[u8; 4]] = &[FUNDS_OUT_SELECTOR_POOLS];
 
+/// Upper bound on `fundsOut` calldata length. The fixed ABI head is
+/// 4 + 9*32 = 292 bytes; the dynamic tails (srcAddr, proof, settlementData)
+/// add at most a few hundred bytes for the live transfer flow. 64 KiB is far
+/// above any legitimate fundsOut encoding yet rejects a multi-megabyte
+/// calldata (bounded only by the 4 MB framing limit today) before any
+/// byte-level extraction or signing work runs (audit I-06 / #90). Compile-time
+/// so the posture is PCR-attested, not host-tunable.
+pub const MAX_FUNDS_OUT_CALL_DATA_LEN: usize = 64 * 1024;
+
 /// Byte offset of `amount` in the `fundsOut` calldata. After the 4-byte
 /// selector and the 32-byte `recipient` head slot, `amount` (uint256)
 /// sits at byte 36..68. Shared by the transfer and (future) burn paths
@@ -68,6 +77,16 @@ pub fn validate_evm_request(req: &SignEvmRequest, bridge_config: &BridgeConfig) 
         return Err(EnclaveError::CrossCheck(format!(
             "call_data too short: need at least 4 bytes for selector, got {}",
             req.call_data.len()
+        )));
+    }
+    // Semantic upper bound on calldata, well below the generic 4 MB frame, so
+    // a maximally packed request is rejected before any offset extraction or
+    // signing (audit I-06 / #90).
+    if req.call_data.len() > MAX_FUNDS_OUT_CALL_DATA_LEN {
+        return Err(EnclaveError::CrossCheck(format!(
+            "call_data too large: {} bytes (max {})",
+            req.call_data.len(),
+            MAX_FUNDS_OUT_CALL_DATA_LEN
         )));
     }
     let selector: [u8; 4] = req.call_data[..4]
@@ -282,6 +301,37 @@ pub fn bind_asset_identity(
         return Err(EnclaveError::CrossCheck(format!(
             "contract_id mismatch: consignment has {} but request declares {}",
             validated_contract_id, declared_rgb_asset_id
+        )));
+    }
+    Ok(())
+}
+
+/// Defense-in-depth recency check for the RGB->EVM `fundsOut` direction
+/// (audit 4th I-03 / #95).
+///
+/// In this direction the consignment describes a transfer that is already
+/// settled on Bitcoin, so every witness transaction anchoring it must be
+/// mined. rgbstd's `validate()` already hard-rejects `Archived`/unresolvable
+/// witnesses, but accepts `Tentative`/`Ignored` ones (legitimate for the
+/// unbroadcast send-RGB PSBT flow, never for a confirmed unlock). The SPV
+/// stage independently checks inclusion + depth; this check refuses to sign
+/// if rgbstd itself classified any witness as not-mined, so confirmation is
+/// not load-bearing on the in-enclave header chain alone.
+///
+/// `validated.non_mined_witness_txids` is in display byte order.
+#[cfg(feature = "rgb-validation")]
+pub fn assert_witnesses_confirmed(validated: &ValidatedConsignment) -> Result<()> {
+    if !validated.non_mined_witness_txids.is_empty() {
+        let list: Vec<String> = validated
+            .non_mined_witness_txids
+            .iter()
+            .map(hex::encode)
+            .collect();
+        return Err(EnclaveError::CrossCheck(format!(
+            "fundsOut requires every consignment witness tx to be mined, but rgbstd classified \
+             {} witness(es) as not-yet-confirmed (tentative/ignored): {} - refusing to sign",
+            list.len(),
+            list.join(", ")
         )));
     }
     Ok(())
@@ -683,6 +733,39 @@ mod tests {
         );
     }
 
+    #[test]
+    fn rejects_calldata_over_size_cap() {
+        // A maximally packed calldata must be rejected up-front (audit I-06 /
+        // #90), before selector dispatch or any offset extraction. Start from
+        // a valid fundsOut request and pad the tail past the cap.
+        let mut req = valid_evm_request();
+        req.call_data
+            .resize(super::MAX_FUNDS_OUT_CALL_DATA_LEN + 1, 0u8);
+        let err = validate_evm_request(&req, &unconfigured()).unwrap_err();
+        assert!(
+            err.to_string().contains("call_data too large"),
+            "expected too-large rejection, got: {err}"
+        );
+    }
+
+    #[test]
+    fn accepts_calldata_at_size_cap() {
+        // Exactly at the cap is allowed; the selector head is preserved so
+        // dispatch still recognizes the fundsOut shape.
+        let mut req = valid_evm_request();
+        req.call_data
+            .resize(super::MAX_FUNDS_OUT_CALL_DATA_LEN, 0u8);
+        req.call_data[..4].copy_from_slice(&FUNDS_OUT_SELECTOR_POOLS);
+        // Under default (no rgb-validation) the call still fails later for
+        // requiring rgb-validation; assert only that it is NOT the size error.
+        if let Err(e) = validate_evm_request(&req, &unconfigured()) {
+            assert!(
+                !e.to_string().contains("call_data too large"),
+                "calldata exactly at the cap must not trip the size check, got: {e}"
+            );
+        }
+    }
+
     // =========================================================================
     // Mint/burn fundsOut tests — `validate_funds_out_burn`
     // =========================================================================
@@ -723,6 +806,7 @@ mod tests {
                 last_transition: Some(transition),
                 last_transfer_witness_txid: None,
                 last_transfer_witness_prevouts: None,
+                non_mined_witness_txids: vec![],
             }
         }
 
@@ -815,6 +899,7 @@ mod tests {
                 last_transition: None,
                 last_transfer_witness_txid: None,
                 last_transfer_witness_prevouts: None,
+                non_mined_witness_txids: vec![],
             };
             let err = validate_funds_out_burn(&req, &validated).unwrap_err();
             assert!(
@@ -855,6 +940,7 @@ mod tests {
                 last_transition: Some(transition),
                 last_transfer_witness_txid: None,
                 last_transfer_witness_prevouts: None,
+                non_mined_witness_txids: vec![],
             }
         }
 
@@ -912,6 +998,27 @@ mod tests {
         }
 
         #[test]
+        fn witnesses_confirmed_passes_when_all_mined() {
+            // No non-mined witnesses surfaced -> the recency guard is a no-op
+            // (audit 4th I-03 / #95).
+            let validated = validated_with_last(transfer_transition(1000));
+            assert!(super::super::assert_witnesses_confirmed(&validated).is_ok());
+        }
+
+        #[test]
+        fn witnesses_confirmed_rejects_non_mined() {
+            // A tentative/ignored witness in the RGB->EVM direction is an
+            // anomaly: the unlock settles an already-confirmed transfer.
+            let mut validated = validated_with_last(transfer_transition(1000));
+            validated.non_mined_witness_txids = vec![[0xABu8; 32]];
+            let err = super::super::assert_witnesses_confirmed(&validated).unwrap_err();
+            assert!(
+                err.to_string().contains("mined"),
+                "expected not-mined rejection, got: {err}"
+            );
+        }
+
+        #[test]
         fn passes_when_total_output_exceeds_calldata_amount() {
             let req = req_with_calldata(mock_pools_calldata(1000));
             let validated = validated_with_last(transfer_transition(2000));
@@ -960,6 +1067,7 @@ mod tests {
                 last_transition: None,
                 last_transfer_witness_txid: None,
                 last_transfer_witness_prevouts: None,
+                non_mined_witness_txids: vec![],
             };
             let err = validate_funds_out_transfer(&req, &validated).unwrap_err();
             assert!(
