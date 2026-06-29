@@ -533,6 +533,12 @@ fn handle_sign_evm(ctx: &ServerContext, req: SignEvmRequest) -> Result<EnclaveRe
             &req.merkle_proofs,
             validation::spv_crosscheck::SPV_MIN_CONFIRMATIONS,
         )?;
+        // BtcRelay-agreement (spec §13, #57): bind the calldata's claimed
+        // (blockHeight, commitmentHash) `proof` to the header we hold at that
+        // height, so a listener can't split the contract's on-chain BtcRelay
+        // check away from the enclave's own SPV evidence by carrying an
+        // unrelated real block in calldata. Inert until `proof` is populated.
+        validation::evm_crosscheck::verify_btc_relay_agreement(&req.call_data, &chain)?;
         tracing::info!(
             proofs_count = req.merkle_proofs.len(),
             "SPV verification passed"

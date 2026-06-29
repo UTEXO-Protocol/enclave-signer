@@ -80,6 +80,18 @@ const FUNDS_OUT_BURN_ID_OFFSET: usize = 68;
 #[cfg(feature = "rgb-validation")]
 const FUNDS_OUT_SETTLEMENT_DATA_HEAD_OFFSET: usize = 4 + 7 * 32;
 
+/// Byte offset of the `proof` head slot in the `fundsOut` calldata. `proof`
+/// is the 7th argument (a dynamic `bytes`), so after the 4-byte selector and
+/// six 32-byte head slots (recipient, amount, burnId, sourceChainId,
+/// destinationChainId, sourceAddress-offset) its head slot — an ABI tail
+/// offset measured from the args start (byte 4) — sits at 4 + 6*32 = 196.
+/// The tail decodes to `abi.encode(uint256 blockHeight, bytes32 commitmentHash)`.
+///
+/// Consumed only by the SPV BtcRelay cross-check ([`verify_btc_relay_agreement`]);
+/// kept available under `test` so its unit tests run on default builds.
+#[cfg(any(feature = "spv", test))]
+const FUNDS_OUT_PROOF_HEAD_OFFSET: usize = 4 + 6 * 32;
+
 /// Validate enriched SignEvmRequest before signing.
 /// Returns Ok(()) if all cross-checks pass, Err(EnclaveError::CrossCheck) if any fail.
 ///
@@ -609,6 +621,165 @@ fn u256_word(n: usize) -> [u8; 32] {
     let mut w = [0u8; 32];
     w[24..].copy_from_slice(&(n as u64).to_be_bytes());
     w
+}
+
+/// BtcRelay-agreement cross-check (bridge spec §13, issue #57).
+///
+/// The `fundsOut` calldata carries `proof = abi.encode(uint256 blockHeight,
+/// bytes32 commitmentHash)` — the (height, block-hash) tuple the `Bridge`
+/// contract independently re-verifies against BtcRelay on-chain. The enclave
+/// already proves every consignment-anchor txid is included in its own header
+/// chain at depth ([`super::spv_crosscheck::validate_spv_proofs`]); this adds
+/// the complementary binding that the **calldata's** claimed commitment
+/// matches the header we have stored at that height. Without it a listener
+/// could carry an unrelated (but real) block hash in calldata while the SPV
+/// inclusion proof is for a different block — splitting the contract's
+/// BtcRelay check away from the enclave's own SPV evidence.
+///
+/// Closes the spec §13 invariant: *a Bitcoin inclusion proof inconsistent with
+/// BtcRelay chain state MUST NOT be sufficient to trigger `fundsOut()`.*
+///
+/// Gating: a no-op for any non-`fundsOut` selector, and **inert when the
+/// `proof` slot is empty** — same convention as the amount checks, so the
+/// listener migration that starts populating `proof` can land independently
+/// (until then there is no calldata commitment to bind). Once `proof` is
+/// present the check is load-bearing and fails closed.
+///
+/// Byte order: the calldata `commitmentHash` is the block hash in DISPLAY
+/// (big-endian) order — the same wire convention as `merkle_proofs[].txid`
+/// (see `MerkleProofEntry` in `proto/enclave.proto`). The in-enclave
+/// `header.block_hash()` is internal (little-endian) order, so we reverse it
+/// before comparing. If the contract team settles on internal order instead,
+/// this is the single `.reverse()` to drop.
+#[cfg(any(feature = "spv", test))]
+pub fn verify_btc_relay_agreement(call_data: &[u8], chain: &crate::spv::HeaderChain) -> Result<()> {
+    use bitcoin::hashes::Hash as _;
+
+    if call_data.len() < 4 || call_data[..4] != FUNDS_OUT_SELECTOR_POOLS {
+        return Ok(());
+    }
+    let Some((block_height, commitment_hash)) = decode_funds_out_proof(call_data)? else {
+        // proof slot empty → no calldata commitment to bind (pre-migration).
+        return Ok(());
+    };
+
+    let header = chain.header_at(block_height).ok_or_else(|| {
+        EnclaveError::Spv(format!(
+            "fundsOut BtcRelay check: no header at block height {block_height} \
+             (chain tip = {}) — cannot confirm the calldata commitment against \
+             the enclave header chain",
+            chain.tip_height()
+        ))
+    })?;
+
+    let mut stored_display: [u8; 32] = header.block_hash().to_byte_array();
+    stored_display.reverse();
+    if stored_display != commitment_hash {
+        return Err(EnclaveError::Spv(format!(
+            "fundsOut BtcRelay check: calldata commitmentHash {} != enclave header \
+             hash {} at block height {block_height}",
+            hex::encode(commitment_hash),
+            hex::encode(stored_display)
+        )));
+    }
+    Ok(())
+}
+
+/// Decode the `fundsOut` `proof` slot (`abi.encode(uint256 blockHeight,
+/// bytes32 commitmentHash)`) into `(block_height, commitment_hash)`.
+///
+/// Two levels of ABI indirection: the head slot at
+/// [`FUNDS_OUT_PROOF_HEAD_OFFSET`] holds a tail offset (relative to the args
+/// start = byte 4); the tail is a dynamic `bytes` — `[length word][payload]`.
+/// A well-formed `proof` payload is exactly 64 bytes: `blockHeight` (uint256,
+/// must fit `u32`) followed by the 32-byte `commitmentHash`.
+///
+/// Returns `Ok(None)` when the `proof` bytes are empty (the pre-migration
+/// shape — caller treats this as inert). Every other malformed shape is a
+/// hard error: a calldata claiming to carry a proof must carry a valid one.
+#[cfg(any(feature = "spv", test))]
+fn decode_funds_out_proof(call_data: &[u8]) -> Result<Option<(u32, [u8; 32])>> {
+    // (1) proof tail offset, measured from the args start (byte 4).
+    let proof_offset = read_u256_as_usize(call_data, FUNDS_OUT_PROOF_HEAD_OFFSET)?;
+    let tail_start = 4usize
+        .checked_add(proof_offset)
+        .ok_or_else(|| EnclaveError::CrossCheck("fundsOut proof offset overflow".into()))?;
+
+    // (2) length word of the `bytes`.
+    let payload_start = tail_start
+        .checked_add(32)
+        .ok_or_else(|| EnclaveError::CrossCheck("fundsOut proof length overflow".into()))?;
+    if call_data.len() < payload_start {
+        return Err(EnclaveError::CrossCheck(format!(
+            "call_data too short for fundsOut proof length: need {payload_start}, got {}",
+            call_data.len()
+        )));
+    }
+    let proof_len = read_u256_as_usize(call_data, tail_start)?;
+    if proof_len == 0 {
+        return Ok(None);
+    }
+    if proof_len != 64 {
+        return Err(EnclaveError::CrossCheck(format!(
+            "fundsOut proof must be abi.encode(uint256 blockHeight, bytes32 commitmentHash) \
+             = 64 bytes, got {proof_len}"
+        )));
+    }
+
+    // (3) payload: [blockHeight: uint256][commitmentHash: bytes32].
+    let payload_end = payload_start
+        .checked_add(64)
+        .ok_or_else(|| EnclaveError::CrossCheck("fundsOut proof payload overflow".into()))?;
+    if call_data.len() < payload_end {
+        return Err(EnclaveError::CrossCheck(format!(
+            "call_data too short for fundsOut proof payload: need {payload_end}, got {}",
+            call_data.len()
+        )));
+    }
+    let payload = &call_data[payload_start..payload_end];
+
+    // blockHeight is a uint256 that must fit in u32 (Bitcoin heights do).
+    if payload[..28].iter().any(|&b| b != 0) {
+        return Err(EnclaveError::CrossCheck(
+            "fundsOut proof blockHeight exceeds u32 range".into(),
+        ));
+    }
+    let mut bh = [0u8; 4];
+    bh.copy_from_slice(&payload[28..32]);
+    let block_height = u32::from_be_bytes(bh);
+
+    let mut commitment_hash = [0u8; 32];
+    commitment_hash.copy_from_slice(&payload[32..64]);
+
+    Ok(Some((block_height, commitment_hash)))
+}
+
+/// Read a 32-byte ABI word at `offset` and interpret it as a `usize`. Used
+/// for the `fundsOut` `proof` tail offset and `bytes` length — both of which
+/// a hostile listener controls, so the high bytes are range-checked rather
+/// than silently truncated.
+#[cfg(any(feature = "spv", test))]
+fn read_u256_as_usize(call_data: &[u8], offset: usize) -> Result<usize> {
+    let end = offset
+        .checked_add(32)
+        .ok_or_else(|| EnclaveError::CrossCheck("fundsOut word offset overflow".into()))?;
+    if call_data.len() < end {
+        return Err(EnclaveError::CrossCheck(format!(
+            "call_data too short: need {end} bytes, got {}",
+            call_data.len()
+        )));
+    }
+    let word = &call_data[offset..end];
+    // Anything above usize::MAX (8 bytes on our targets) is a malformed /
+    // hostile offset; reject rather than wrap.
+    if word[..24].iter().any(|&b| b != 0) {
+        return Err(EnclaveError::CrossCheck(
+            "fundsOut ABI word exceeds usize range".into(),
+        ));
+    }
+    let mut buf = [0u8; 8];
+    buf.copy_from_slice(&word[24..32]);
+    Ok(u64::from_be_bytes(buf) as usize)
 }
 
 /// Lightweight ABI extraction: read a uint256 from call_data at a given byte offset.
@@ -1808,5 +1979,147 @@ mod tests {
         };
         let err = validate_evm_request(&valid_evm_request(), &zero_contract).unwrap_err();
         assert!(err.to_string().contains("partially set"), "got: {err}");
+    }
+
+    /// BtcRelay-agreement cross-check (#57). These exercise `proof` decoding
+    /// and header comparison directly; they don't need `rgb-validation`
+    /// because `HeaderChain` is always compiled and the check works off raw
+    /// calldata.
+    mod btc_relay {
+        use super::*;
+        use crate::spv::checkpoint::Checkpoint;
+        use crate::spv::{HeaderChain, Network};
+        use bitcoin::block::{Header, Version};
+        use bitcoin::consensus::serialize;
+        use bitcoin::hashes::Hash as _;
+
+        /// Encode `n` as a big-endian 32-byte ABI word.
+        fn u256_be(n: u64) -> [u8; 32] {
+            let mut w = [0u8; 32];
+            w[24..].copy_from_slice(&n.to_be_bytes());
+            w
+        }
+
+        /// A regtest chain with a single synthetic header at height 1 (PoW is
+        /// skipped on regtest — same pattern as `spv_crosscheck` tests).
+        /// Returns the chain and the header's DISPLAY-order block hash — the
+        /// byte order the calldata `commitmentHash` carries.
+        fn chain_with_one_header() -> (HeaderChain, [u8; 32]) {
+            let mut chain = HeaderChain::new(
+                Network::Regtest,
+                Checkpoint {
+                    height: 0,
+                    hash: [0u8; 32],
+                    bits: 0x207fffff,
+                    time: 1_700_000_000,
+                    is_real: false,
+                },
+            );
+            let header = Header {
+                version: Version::ONE,
+                prev_blockhash: bitcoin::BlockHash::from_byte_array([0u8; 32]),
+                merkle_root: bitcoin::TxMerkleNode::from_byte_array([0xAB; 32]),
+                time: 1_700_000_001,
+                bits: bitcoin::CompactTarget::from_consensus(0x207fffff),
+                nonce: 0,
+            };
+            chain.submit_headers(1, &[serialize(&header)]).unwrap();
+            let mut display: [u8; 32] = header.block_hash().to_byte_array();
+            display.reverse();
+            (chain, display)
+        }
+
+        /// `fundsOut` calldata carrying a well-formed `proof` tail. The 8 head
+        /// slots are zero except `proofOffset` (slot 6), which points at the
+        /// tail laid out right after the head (= 256 bytes from the args
+        /// start). Tail: `[length=64][blockHeight uint256][commitmentHash]`.
+        fn calldata_with_proof(block_height: u32, commitment_display: [u8; 32]) -> Vec<u8> {
+            let mut data = Vec::new();
+            data.extend_from_slice(&FUNDS_OUT_SELECTOR_POOLS);
+            let mut head = [0u8; 8 * 32];
+            head[6 * 32..7 * 32].copy_from_slice(&u256_be(256)); // proofOffset
+            data.extend_from_slice(&head);
+            data.extend_from_slice(&u256_be(64)); // proof bytes length
+            data.extend_from_slice(&u256_be(block_height as u64)); // blockHeight
+            data.extend_from_slice(&commitment_display); // commitmentHash
+            data
+        }
+
+        #[test]
+        fn passes_on_matching_commitment() {
+            let (chain, display_hash) = chain_with_one_header();
+            let cd = calldata_with_proof(1, display_hash);
+            assert!(verify_btc_relay_agreement(&cd, &chain).is_ok());
+        }
+
+        #[test]
+        fn rejects_mismatched_commitment() {
+            let (chain, _display_hash) = chain_with_one_header();
+            let cd = calldata_with_proof(1, [0x11; 32]);
+            let err = verify_btc_relay_agreement(&cd, &chain).unwrap_err();
+            assert!(err.to_string().contains("commitmentHash"), "got: {err}");
+        }
+
+        #[test]
+        fn rejects_internal_order_commitment() {
+            // Defends the byte-order contract: feeding the INTERNAL-order hash
+            // (the un-reversed `block_hash()` bytes) must be rejected — the
+            // calldata convention is display order.
+            let (chain, mut display_hash) = chain_with_one_header();
+            display_hash.reverse(); // back to internal order
+            let cd = calldata_with_proof(1, display_hash);
+            assert!(verify_btc_relay_agreement(&cd, &chain).is_err());
+        }
+
+        #[test]
+        fn rejects_height_beyond_tip() {
+            let (chain, display_hash) = chain_with_one_header();
+            let cd = calldata_with_proof(99, display_hash);
+            let err = verify_btc_relay_agreement(&cd, &chain).unwrap_err();
+            assert!(
+                err.to_string().contains("no header at block height 99"),
+                "got: {err}"
+            );
+        }
+
+        #[test]
+        fn inert_when_proof_empty() {
+            // The current live calldata shape zero-fills the proof offset, so
+            // the decoder reads an empty `proof` and the check is a no-op.
+            let (chain, _) = chain_with_one_header();
+            let cd = mock_funds_out_calldata(1_000);
+            assert!(verify_btc_relay_agreement(&cd, &chain).is_ok());
+        }
+
+        #[test]
+        fn noop_on_non_fundsout_selector() {
+            let (chain, _) = chain_with_one_header();
+            let cd = vec![0xde, 0xad, 0xbe, 0xef]; // not the fundsOut selector
+            assert!(verify_btc_relay_agreement(&cd, &chain).is_ok());
+        }
+
+        #[test]
+        fn rejects_malformed_proof_length() {
+            let (chain, display_hash) = chain_with_one_header();
+            let mut cd = calldata_with_proof(1, display_hash);
+            // Corrupt the proof `bytes` length word (at byte 260) to a
+            // non-zero, non-64 value: a calldata that claims a proof must
+            // carry a 64-byte one.
+            cd[260..292].copy_from_slice(&u256_be(33));
+            let err = verify_btc_relay_agreement(&cd, &chain).unwrap_err();
+            assert!(err.to_string().contains("64 bytes"), "got: {err}");
+        }
+
+        #[test]
+        fn rejects_blockheight_over_u32() {
+            let (chain, display_hash) = chain_with_one_header();
+            let mut cd = calldata_with_proof(1, display_hash);
+            // Set a blockHeight word (at byte 292) that overflows u32.
+            let mut huge = [0u8; 32];
+            huge[20] = 0x01; // a bit set above the low 4 bytes
+            cd[292..324].copy_from_slice(&huge);
+            let err = verify_btc_relay_agreement(&cd, &chain).unwrap_err();
+            assert!(err.to_string().contains("u32 range"), "got: {err}");
+        }
     }
 }
