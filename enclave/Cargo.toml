@@ -45,7 +45,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 # RGB consignment validation (optional, behind rgb-validation feature)
-rgb-ops = { version = "0.11.1-rc.7", features = ["esplora_blocking"], optional = true }
+rgb-ops = { version = "0.11.1-rc.7", features = ["esplora_blocking", "electrum_blocking"], optional = true }
 # Flat-shape parser for RGB consignments. Used by rgb-validation to walk
 # transitions (op_id / transition_type / fungible_allocations) without
 # hand-rolling another rgbstd walk. `default-features = false` skips the

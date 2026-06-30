@@ -157,20 +157,29 @@ pub enum OutputSeal {
     Confidential { secret_seal: String },
 }
 
-/// Validates RGB consignments using rgbstd and an Esplora-backed resolver.
+/// Validates RGB consignments using rgbstd and a witness resolver.
+///
+/// The resolver backend is chosen from the URL scheme at validation time:
+/// `ssl://` / `tcp://` -> Electrum (`electrum-client`), anything else
+/// (`http://` / `https://`) -> Esplora REST. Production uses an Electrum
+/// endpoint (`ssl://…:50002`) reached through the vsock forwarder; with an
+/// `ssl://` URL the TLS handshake terminates inside the enclave against the
+/// real server cert, so the host relays only ciphertext.
 #[derive(Debug)]
 pub struct RgbValidator {
-    esplora_url: String,
+    indexer_url: String,
     chain_net: ChainNet,
 }
 
 impl RgbValidator {
     /// Create a new validator.
     ///
-    /// - `esplora_url`: HTTP URL for the Esplora API (e.g., `http://127.0.0.1:3443`
-    ///   when using the vsock forwarder, or a direct URL in dev mode).
+    /// - `indexer_url`: witness-resolver endpoint. `ssl://host:port` /
+    ///   `tcp://host:port` selects Electrum; `http(s)://…` selects Esplora.
+    ///   Through the vsock forwarder this is typically `ssl://<host>:50002`
+    ///   (Electrum) or the legacy `http://127.0.0.1:3443` (Esplora).
     /// - `bitcoin_network`: One of "bitcoin", "testnet", "signet", "regtest".
-    pub fn new(esplora_url: String, bitcoin_network: &str) -> Result<Self> {
+    pub fn new(indexer_url: String, bitcoin_network: &str) -> Result<Self> {
         let chain_net = match bitcoin_network {
             "bitcoin" | "mainnet" => ChainNet::BitcoinMainnet,
             "testnet" | "testnet3" => ChainNet::BitcoinTestnet3,
@@ -182,9 +191,9 @@ impl RgbValidator {
                 )))
             }
         };
-        tracing::info!(%esplora_url, %bitcoin_network, "RGB validator configured");
+        tracing::info!(%indexer_url, %bitcoin_network, "RGB validator configured");
         Ok(Self {
-            esplora_url,
+            indexer_url,
             chain_net,
         })
     }
@@ -196,7 +205,7 @@ impl RgbValidator {
         let bytes_len = consignment_bytes.len();
         tracing::info!(
             bytes_len,
-            esplora_url = %self.esplora_url,
+            indexer_url = %self.indexer_url,
             "starting RGB consignment validation"
         );
 
@@ -281,12 +290,26 @@ impl RgbValidator {
             _ => (None, None),
         };
 
-        // 2. Create an Esplora-backed resolver.
-        let builder = esplora_client::Builder::new(&self.esplora_url);
-        let mut resolver = AnyResolver::esplora_blocking(builder).map_err(|e| {
-            tracing::error!(esplora_url = %self.esplora_url, "esplora resolver creation failed: {e}");
-            EnclaveError::CrossCheck(format!("esplora resolver creation failed: {e}"))
-        })?;
+        // 2. Create the witness resolver. Backend is picked from the URL
+        //    scheme: ssl://|tcp:// -> Electrum, otherwise Esplora REST.
+        //    Electrum (ssl://) is the production path: TLS terminates inside
+        //    the enclave against the real server cert (the host forwards only
+        //    ciphertext over vsock), so a compromised host cannot feed forged
+        //    witness data.
+        let is_electrum =
+            self.indexer_url.starts_with("ssl://") || self.indexer_url.starts_with("tcp://");
+        let mut resolver = if is_electrum {
+            AnyResolver::electrum_blocking(&self.indexer_url, None).map_err(|e| {
+                tracing::error!(indexer_url = %self.indexer_url, "electrum resolver creation failed: {e}");
+                EnclaveError::CrossCheck(format!("electrum resolver creation failed: {e}"))
+            })?
+        } else {
+            let builder = esplora_client::Builder::new(&self.indexer_url);
+            AnyResolver::esplora_blocking(builder).map_err(|e| {
+                tracing::error!(indexer_url = %self.indexer_url, "esplora resolver creation failed: {e}");
+                EnclaveError::CrossCheck(format!("esplora resolver creation failed: {e}"))
+            })?
+        };
 
         // Register transactions bundled in the consignment so the resolver
         // treats them as tentative witnesses (not yet mined).

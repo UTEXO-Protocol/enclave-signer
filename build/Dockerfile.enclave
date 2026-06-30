@@ -27,8 +27,13 @@ FROM rust:1.89-slim@sha256:8cffb8fe4e8a95cf0d6a2060375e5a28aff4c752155aa9f1f9193
 # sets `net.git-fetch-with-cli = true` so cargo shells out to system `git`
 # rather than bundled libgit2. `openssh-client` provides the ssh binary +
 # known_hosts machinery `git` needs for the SSH transport.
+# `cmake` + `make`: the Electrum witness resolver (rgb-ops `electrum_blocking`)
+# pulls `electrum-client` -> rustls -> aws-lc-rs, whose `aws-lc-sys` C sources
+# build via CMake. gcc/cc is already present (used by `ring`); cmake/make are not.
+# These are builder-only (multi-stage) and don't ship in the runtime rootfs/PCR.
 RUN apt-get update && apt-get install -y \
     pkg-config libssl-dev protobuf-compiler git ca-certificates openssh-client \
+    cmake make \
     && rm -rf /var/lib/apt/lists/*
 
 # Trust github.com's SSH host key so the build doesn't prompt or fail
