@@ -391,18 +391,41 @@ fn handle_get_attested_public_key(
 }
 
 fn handle_sign_evm(ctx: &ServerContext, req: SignEvmRequest) -> Result<EnclaveResponse> {
-    // Fail-closed against build mismatch: if the listener built with SPV on
-    // and we built without it, the request will carry `merkle_proofs[]`
-    // that we cannot verify. Refuse loudly rather than sign as if SPV
-    // hadn't been requested.
+    // Fail-closed without SPV (audit M-01 / #61). A build without `spv` can
+    // only anchor a consignment's witness txs through the host-controlled
+    // Esplora resolver, so a malicious host could claim a fabricated witness
+    // tx is mined at sufficient depth and the enclave would sign a `fundsOut`
+    // release against a non-existent Bitcoin anchor. Refuse every `fundsOut`
+    // here regardless of whether the request carries merkle_proofs — an empty
+    // `merkle_proofs[]` must not slip through. The `compile_error!` in lib.rs
+    // guarantees this branch only exists when `rgb-validation` is also off, so
+    // there is no in-enclave validation to fall back on.
     #[cfg(not(feature = "spv"))]
-    if !req.merkle_proofs.is_empty() {
-        return Err(EnclaveError::Spv(
-            "enclave was not built with --features spv but request carries \
-             merkle_proofs; refusing to sign without verification (rebuild \
-             with `--features spv,rgb-validation` to enable SPV)"
-                .into(),
-        ));
+    {
+        let is_funds_out = req.call_data.len() >= 4
+            && req.call_data[..4] == crate::validation::evm_crosscheck::FUNDS_OUT_SELECTOR_POOLS;
+        if is_funds_out {
+            return Err(EnclaveError::Spv(
+                "enclave was not built with --features spv: refusing to sign a \
+                 fundsOut release whose RGB anchoring cannot be SPV-verified \
+                 against the enclave's own header chain (rebuild with \
+                 `--features spv`)"
+                    .into(),
+            ));
+        }
+        // Defence-in-depth against a listener/enclave build mismatch: the
+        // listener built with SPV on and sent `merkle_proofs[]` we cannot
+        // verify. Refuse loudly rather than sign as if SPV hadn't been asked
+        // for. (Reached only for non-`fundsOut` calldata; `fundsOut` already
+        // returned above.)
+        if !req.merkle_proofs.is_empty() {
+            return Err(EnclaveError::Spv(
+                "enclave was not built with --features spv but request carries \
+                 merkle_proofs; refusing to sign without verification (rebuild \
+                 with `--features spv`)"
+                    .into(),
+            ));
+        }
     }
 
     // In-enclave RGB consignment validation (when feature enabled and bytes present).

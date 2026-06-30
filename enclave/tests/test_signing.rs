@@ -362,13 +362,17 @@ fn test_sign_evm_rejects_unconfigured_bridge_config() {
 // were removed rather than ported — they can't run without a configured
 // in-enclave validator, which the harness doesn't wire.
 
-/// Default-build coverage: `--features rgb-validation` is required to
-/// sign fundsOut at all. The cross-check fails fast with a message
-/// that names the missing feature, so a misconfigured deployment fails
-/// loud instead of silently signing against unvalidated bytes.
-#[cfg(not(feature = "rgb-validation"))]
+/// M-01 / #61: a build without `spv` must refuse to sign any `fundsOut`,
+/// even when the request carries no merkle_proofs. Without SPV the enclave can
+/// only anchor a consignment's witness txs through the host-controlled Esplora
+/// resolver, so a fabricated anchor would otherwise be signed against. The
+/// earlier guard only fired when `merkle_proofs[]` was non-empty, letting an
+/// empty-proofs `fundsOut` slip through — this asserts that gap is closed.
+/// (`not(spv)` ⇔ `not(rgb-validation)` for any build that compiles, since
+/// lib.rs's `compile_error!` forbids rgb-validation without spv.)
+#[cfg(not(feature = "spv"))]
 #[test]
-fn test_sign_evm_rejects_funds_out_in_default_build() {
+fn test_no_spv_build_refuses_funds_out_even_without_merkle_proofs() {
     let port = common::start_test_server();
 
     let init_req = EnclaveRequest {
@@ -379,8 +383,15 @@ fn test_sign_evm_rejects_funds_out_in_default_build() {
     };
     common::send_request(port, &init_req);
 
+    // A fundsOut request carrying no merkle_proofs — exactly the shape that
+    // previously bypassed the no-spv guard.
+    let req = valid_sign_evm_request(1000, 50);
+    assert!(
+        req.merkle_proofs.is_empty(),
+        "test precondition: the request must carry no merkle_proofs"
+    );
     let sign_req = EnclaveRequest {
-        request: Some(Request::SignEvm(valid_sign_evm_request(1000, 50))),
+        request: Some(Request::SignEvm(req)),
     };
     let resp = common::send_request(port, &sign_req);
 
@@ -388,8 +399,8 @@ fn test_sign_evm_rejects_funds_out_in_default_build() {
         Some(Response::Error(e)) => {
             assert_eq!(e.code, 3);
             assert!(
-                e.message.contains("rgb-validation"),
-                "expected feature-gate rejection, got: {}",
+                e.message.contains("--features spv"),
+                "expected an SPV-feature refusal, got: {}",
                 e.message
             );
         }
