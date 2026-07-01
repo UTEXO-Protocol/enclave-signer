@@ -1,5 +1,6 @@
-use std::collections::HashSet;
+use std::collections::{HashSet, VecDeque};
 use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 use bip39::Mnemonic;
 use bitcoin::Network;
@@ -38,52 +39,132 @@ impl std::fmt::Debug for CloningSession {
     }
 }
 
-/// Bounded replay guard for attestation nonces.
+/// Default time-to-live for a recorded nonce. A nonce only needs to be
+/// remembered long enough that replaying its attestation within a
+/// plausible window is still caught; the cloning handshake itself
+/// completes in seconds, so an hour is generous. After the TTL the entry
+/// self-evicts, keeping the set small in steady state.
+const DEFAULT_NONCE_TTL: Duration = Duration::from_secs(60 * 60);
+
+/// Default hard memory ceiling on recorded nonces.
+const DEFAULT_NONCE_MAX: usize = 10_000;
+
+/// Default TTL for the PSBT bridge-operation dedup guard. Far longer than
+/// the cloning nonce TTL: an EVM→RGB deposit can legitimately be retried
+/// for as long as it remains unsettled, and the window must comfortably
+/// outlast normal listener retry/confirmation latency so a same-op
+/// resubmission is still caught. 24h is generous while keeping the set
+/// self-cleaning in steady state. See [`EnclaveState::op_replay_guard`].
+const DEFAULT_OP_DEDUP_TTL: Duration = Duration::from_secs(24 * 60 * 60);
+
+/// Hard memory ceiling on recorded bridge operations. At ~80 bytes/entry
+/// this caps the guard near ~8 MB. On overflow inside one TTL window the
+/// oldest entry is evicted (never wedge signing) — see the soft-guard
+/// caveats on [`EnclaveState::op_replay_guard`].
+const DEFAULT_OP_DEDUP_MAX: usize = 100_000;
+
+/// Replay guard for attestation nonces, bounded by **time** (not just
+/// count) so a flooding parent cannot permanently wedge cloning.
 ///
-/// Every incoming peer attestation contributes its nonce to this set;
-/// duplicate nonces are rejected. Enclaves are short-lived so unbounded
-/// growth is rare, but we cap the set at 10k to prevent a pathological
-/// attacker from exhausting memory. On overflow we reject new entries
-/// rather than silently rolling the window — a safer default.
+/// Every incoming peer attestation contributes its nonce; duplicates are
+/// rejected. Each entry carries the instant it was seen, and every
+/// `check_and_record` first evicts entries older than `ttl`, so the set
+/// self-cleans in steady state. `max` remains a hard memory ceiling: if
+/// the set is still full after TTL eviction (a burst of distinct
+/// handshakes inside one TTL window), the **oldest** entry is evicted to
+/// admit the new one rather than rejecting it.
+///
+/// This replaces the previous reject-when-full behaviour, which let a
+/// parent flood `max` distinct nonces and then block every legitimate
+/// handshake — a cloning-availability DoS (audit TEE-CL-04). Cloning is
+/// parent-initiated, so the parent is the threat actor. The trade-off is a
+/// bounded, time-limited replay window: replaying an evicted nonce only
+/// ever re-seals the seed to the encryption pubkey already bound inside
+/// that attestation, so no funds or secret leak to a new party — only
+/// availability was ever at stake.
 pub struct NonceReplayGuard {
-    inner: Mutex<HashSet<[u8; 32]>>,
+    inner: Mutex<GuardState>,
     max: usize,
+    ttl: Duration,
+}
+
+/// Membership set plus an insertion-ordered (oldest at front) queue that
+/// mirrors it. The queue drives both TTL eviction and oldest-first
+/// overflow eviction; the set gives O(1) duplicate detection.
+struct GuardState {
+    seen: HashSet<[u8; 32]>,
+    order: VecDeque<(Instant, [u8; 32])>,
 }
 
 impl Default for NonceReplayGuard {
     fn default() -> Self {
-        Self::with_capacity(10_000)
+        Self::with_capacity(DEFAULT_NONCE_MAX, DEFAULT_NONCE_TTL)
     }
 }
 
 impl NonceReplayGuard {
-    pub fn with_capacity(max: usize) -> Self {
+    pub fn with_capacity(max: usize, ttl: Duration) -> Self {
         Self {
-            inner: Mutex::new(HashSet::new()),
+            inner: Mutex::new(GuardState {
+                seen: HashSet::new(),
+                order: VecDeque::new(),
+            }),
             max,
+            ttl,
         }
     }
 
     pub fn check_and_record(&self, nonce: [u8; 32]) -> Result<()> {
-        let mut guard = self
+        self.check_and_record_at(nonce, Instant::now())
+    }
+
+    /// Time-injected core of [`check_and_record`]. `now` is the wall point
+    /// against which TTL eviction is measured; the public method passes
+    /// `Instant::now()`. Split out so the eviction logic is testable
+    /// without sleeping.
+    fn check_and_record_at(&self, nonce: [u8; 32], now: Instant) -> Result<()> {
+        let mut g = self
             .inner
             .lock()
             .map_err(|e| EnclaveError::Internal(format!("replay guard poisoned: {}", e)))?;
-        if guard.contains(&nonce) {
+
+        // 1. Evict everything older than the TTL. `order` is oldest-first,
+        //    so stop at the first entry still within the window.
+        while let Some(&(seen_at, old)) = g.order.front() {
+            if now.saturating_duration_since(seen_at) >= self.ttl {
+                g.order.pop_front();
+                g.seen.remove(&old);
+            } else {
+                break;
+            }
+        }
+
+        // 2. Replay check against what survives.
+        if g.seen.contains(&nonce) {
             return Err(EnclaveError::NonceReplay);
         }
-        if guard.len() >= self.max {
-            return Err(EnclaveError::Clone(
-                "replay guard full; refusing new attestations".into(),
-            ));
+
+        // 3. Hard memory ceiling. If a burst filled the set inside one TTL
+        //    window, drop the oldest entries to admit the new nonce rather
+        //    than wedging cloning (TEE-CL-04).
+        while g.seen.len() >= self.max {
+            match g.order.pop_front() {
+                Some((_, old)) => {
+                    g.seen.remove(&old);
+                }
+                None => break,
+            }
         }
-        guard.insert(nonce);
+
+        // 4. Record.
+        g.seen.insert(nonce);
+        g.order.push_back((now, nonce));
         Ok(())
     }
 
     #[cfg(test)]
     pub fn seen_count(&self) -> usize {
-        self.inner.lock().map(|g| g.len()).unwrap_or(0)
+        self.inner.lock().map(|g| g.seen.len()).unwrap_or(0)
     }
 }
 
@@ -129,6 +210,23 @@ pub struct EnclaveState {
     donor_cloning_secret: Mutex<Option<SecretBox<String>>>,
     /// Replay guard for nonces in peer attestations.
     pub replay_guard: NonceReplayGuard,
+    /// **Soft** dedup guard for EVM→RGB bridge PSBT operations, keyed on a
+    /// hash of `(chain_id, bridge_contract, evm_tx_hash, operation_idx,
+    /// rgb_asset_id)` (see `validation::psbt_crosscheck::psbt_operation_key`).
+    /// Rejects a same-operation resubmission inside the TTL window before
+    /// signing (audit W-02 / #84).
+    ///
+    /// This is **defense-in-depth, not a sufficient double-spend control**.
+    /// Nitro has no persistent storage, so the set is:
+    ///   - **volatile** — wiped on restart;
+    ///   - **per-instance** — a sibling enclave in the cluster never saw it,
+    ///     so the host can route a duplicate to a fresh peer;
+    ///   - **TTL-bounded** — a replay after eviction is admitted again.
+    ///
+    /// A compromised host that varies any keyed field also bypasses it. It
+    /// stops honest listener retries and naive same-tuple replay; the durable
+    /// cross-instance/cross-restart guard remains an on-chain ticket (#84/#93).
+    pub op_replay_guard: NonceReplayGuard,
 }
 
 impl Default for EnclaveState {
@@ -144,6 +242,10 @@ impl EnclaveState {
             network,
             donor_cloning_secret: Mutex::new(None),
             replay_guard: NonceReplayGuard::default(),
+            op_replay_guard: NonceReplayGuard::with_capacity(
+                DEFAULT_OP_DEDUP_MAX,
+                DEFAULT_OP_DEDUP_TTL,
+            ),
         }
     }
 
@@ -453,5 +555,99 @@ mod tests {
             Phase::Cloning(CloningSession::new(CloneSession::new(), [0u8; 20]));
         let err = state.initialize_from_seed([42u8; 64]).unwrap_err();
         assert!(matches!(err, EnclaveError::AlreadyInitialized));
+    }
+
+    // =========================================================================
+    // NonceReplayGuard — time-bounded replay guard (audit TEE-CL-04, coverage
+    // map TC-3). Helpers use `check_and_record_at` so eviction is exercised
+    // without sleeping.
+    // =========================================================================
+
+    /// Distinct 32-byte nonce keyed by a small integer, for readable tests.
+    fn nonce(i: u32) -> [u8; 32] {
+        let mut n = [0u8; 32];
+        n[..4].copy_from_slice(&i.to_be_bytes());
+        n
+    }
+
+    #[test]
+    fn replay_guard_rejects_duplicate_within_ttl() {
+        let g = NonceReplayGuard::with_capacity(100, Duration::from_secs(3600));
+        let t0 = Instant::now();
+        assert!(g.check_and_record_at(nonce(1), t0).is_ok());
+        // Same nonce, still inside the TTL window → replay.
+        let err = g
+            .check_and_record_at(nonce(1), t0 + Duration::from_secs(30))
+            .unwrap_err();
+        assert!(matches!(err, EnclaveError::NonceReplay));
+    }
+
+    /// TC-3 (audit coverage map): a flood of distinct nonces beyond `max`
+    /// must NOT wedge the guard. Every record succeeds, the set stays
+    /// bounded at `max`, and a fresh legitimate handshake is still admitted
+    /// — the regression for the reject-when-full DoS.
+    #[test]
+    fn replay_guard_never_wedges_under_flood() {
+        let max = 8;
+        let g = NonceReplayGuard::with_capacity(max, Duration::from_secs(3600));
+        let t0 = Instant::now();
+
+        // Flood with 10x the cap in distinct nonces.
+        for i in 0..(max as u32 * 10) {
+            assert!(
+                g.check_and_record_at(nonce(i), t0).is_ok(),
+                "record {i} should succeed (no reject-when-full)"
+            );
+        }
+        // Memory stayed bounded.
+        assert_eq!(g.seen_count(), max);
+
+        // A brand-new legitimate handshake is still admitted, not blocked.
+        assert!(g.check_and_record_at(nonce(9_999), t0).is_ok());
+    }
+
+    #[test]
+    fn replay_guard_evicts_oldest_first_on_overflow() {
+        let g = NonceReplayGuard::with_capacity(3, Duration::from_secs(3600));
+        let t0 = Instant::now();
+        for i in 1..=3 {
+            assert!(g.check_and_record_at(nonce(i), t0).is_ok());
+        }
+        // 4th distinct nonce overflows the cap → oldest (nonce 1) evicted.
+        assert!(g.check_and_record_at(nonce(4), t0).is_ok());
+        assert_eq!(g.seen_count(), 3);
+
+        // nonce(2..=4) survive → still replay-rejected. A replay returns
+        // before any insert, so these checks don't mutate the set (the cap
+        // is full, so an admit would otherwise evict the next-oldest).
+        for i in 2..=4 {
+            assert!(
+                matches!(
+                    g.check_and_record_at(nonce(i), t0).unwrap_err(),
+                    EnclaveError::NonceReplay
+                ),
+                "nonce({i}) should still be recorded"
+            );
+        }
+        // nonce(1) was the oldest and got evicted, so it is admitted again.
+        // (Done last: this insert evicts the new oldest.)
+        assert!(g.check_and_record_at(nonce(1), t0).is_ok());
+    }
+
+    #[test]
+    fn replay_guard_evicts_stale_entries_by_ttl() {
+        let ttl = Duration::from_secs(60);
+        let g = NonceReplayGuard::with_capacity(100, ttl);
+        let t0 = Instant::now();
+        assert!(g.check_and_record_at(nonce(1), t0).is_ok());
+
+        // A later record past the TTL evicts the stale nonce(1) first.
+        assert!(g.check_and_record_at(nonce(2), t0 + ttl).is_ok());
+        assert_eq!(g.seen_count(), 1, "stale nonce(1) should have been evicted");
+
+        // Because nonce(1) aged out, the same nonce is accepted again.
+        assert!(g
+            .check_and_record_at(nonce(1), t0 + ttl + Duration::from_secs(1))
+            .is_ok());
     }
 }

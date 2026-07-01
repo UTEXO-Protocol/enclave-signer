@@ -36,6 +36,8 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # production verification (no --mock flag) goes through the real path.
 attestation-verify = { path = "../attestation-verify", features = ["mock"] }
 sha2 = "0.10"
+# keccak256 for the CLI's consignment_hash integrity field (send-RGB PSBT path)
+sha3 = "0.10"
 rand = "0.8"
 
 [target.'cfg(target_os = "linux")'.dependencies]

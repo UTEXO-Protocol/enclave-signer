@@ -14,7 +14,7 @@ use rgb_consignment::{
 use rgbstd::containers::{ConsignmentExt, FileContent, Transfer};
 use rgbstd::indexers::esplora_blocking::esplora_client;
 use rgbstd::indexers::AnyResolver;
-use rgbstd::schema::MetaType;
+use rgbstd::schema::{MetaType, TransitionType};
 use rgbstd::validation::ValidationConfig;
 use rgbstd::ChainNet;
 
@@ -43,6 +43,55 @@ pub mod ifa {
     /// `OS_ASSET` (the regular fungible asset allocation type). The
     /// associated value is a strict-encoded `rgbstd::Amount` (u64).
     pub const MS_BURNED_ASSET: u16 = 1001;
+}
+
+/// Resolve the **trusted** strict type-system the validator must pin a
+/// consignment against, sourced from the canonical `rgb-schemas` crate by the
+/// consignment's `schema_id` — exactly as rgb-lib does
+/// (`AssetSchema::types()` → `InflatableFungibleAsset::types()` etc.).
+///
+/// **Audit 4th W-01 / #92.** RGB's `ValidationConfig.trusted_typesystem` must
+/// come from an enclave-pinned source, never from the consignment under
+/// validation: feeding `transfer.types` back in makes rgbstd compare the
+/// consignment's types against themselves (`validator.rs::validate_schema`),
+/// so the control always passes and a malicious consignment can ship its own
+/// type definitions for the schema's `SemId`s. Instead we look the schema_id
+/// up against the schema definitions compiled into `rgb-schemas` and hand the
+/// validator *that* type system; rgbstd then rejects any consignment whose
+/// types differ from the canonical set.
+///
+/// All four standard fungible/collectible schemas are accepted here; the
+/// bridge additionally pins the exact asset via `contract_id` →
+/// `RGB_ASSET_ID` (`bind_asset_identity`), so schema breadth at this layer is
+/// not asset-scoping. An **unknown** schema_id is rejected fail-closed.
+///
+/// Schema ids are compared by their canonical string form so the comparison
+/// is robust to `rgb-schemas` resolving a different `rgb-consensus` build than
+/// the enclave's validator (the `SchemaId` *value* is a content commitment and
+/// stringifies identically across versions).
+#[cfg(feature = "rgb-validation")]
+fn trusted_typesystem_for_schema(schema_id: &str) -> Result<rgbstd::TypeSystem> {
+    use rgbstd::contract::IssuerWrapper;
+    use schemata::{
+        CollectibleFungibleAsset, InflatableFungibleAsset, NonInflatableAsset, UniqueDigitalAsset,
+        CFA_SCHEMA_ID, IFA_SCHEMA_ID, NIA_SCHEMA_ID, UDA_SCHEMA_ID,
+    };
+
+    let types = if schema_id == IFA_SCHEMA_ID.to_string() {
+        InflatableFungibleAsset::types()
+    } else if schema_id == NIA_SCHEMA_ID.to_string() {
+        NonInflatableAsset::types()
+    } else if schema_id == CFA_SCHEMA_ID.to_string() {
+        CollectibleFungibleAsset::types()
+    } else if schema_id == UDA_SCHEMA_ID.to_string() {
+        UniqueDigitalAsset::types()
+    } else {
+        return Err(EnclaveError::CrossCheck(format!(
+            "consignment uses unknown/unsupported RGB schema {schema_id} — refusing to validate \
+             (cannot source a trusted type system)"
+        )));
+    };
+    Ok(types)
 }
 
 /// Data extracted from a successfully validated RGB consignment.
@@ -77,6 +126,24 @@ pub struct ValidatedConsignment {
     /// validation rejects upstream — kept as `Option` for type
     /// completeness.
     pub last_transition: Option<TransitionSummary>,
+    /// Bitcoin txid of the witness transaction anchoring the consignment's
+    /// **last** transition — the freshly-composed transfer in the send-RGB
+    /// (EVM-lock → RGB-send) direction. The PSBT being signed in that flow
+    /// IS this witness transaction; the PSBT cross-check binds
+    /// `psbt.unsigned_tx.compute_txid()` to this value so a signed PSBT
+    /// can't move bridge BTC without finalizing exactly the validated RGB
+    /// transition. A `bitcoin::Txid` (not display-order bytes) so the
+    /// comparison is type-safe and avoids the txid byte-order footgun.
+    /// `None` only for a consignment with no bundles (rgbstd rejects those).
+    pub last_transfer_witness_txid: Option<bitcoin::Txid>,
+    /// Bitcoin input prevouts of that same witness transaction, when the
+    /// consignment embeds the full witness tx (`PubWitness::Tx`, which the
+    /// rgb-lib sender does for a freshly-composed transfer). Used by the
+    /// PSBT cross-check as a redundant per-input canary over the txid bind:
+    /// the set of PSBT input outpoints must equal this set. `None` when the
+    /// consignment carries only the witness txid (`PubWitness::Txid`), in
+    /// which case the txid identity bind alone anchors every input.
+    pub last_transfer_witness_prevouts: Option<Vec<bitcoin::OutPoint>>,
 }
 
 /// Flat summary of one RGB state transition. Mirrors
@@ -248,6 +315,21 @@ impl RgbValidator {
             }
         }
 
+        // Witness-tx identity binding for the send-RGB (EVM-lock → RGB-send)
+        // PSBT path. We extract the last bundle's witness txid (and, when the
+        // bundle embeds the full tx, its input prevouts) so the PSBT
+        // cross-check can prove the PSBT being signed IS this witness
+        // transaction. Gated on the last transition being a Transfer: the
+        // bind is only meaningful for the pools-mode send shape, and the
+        // consistency check inside reads the parsed transition type to ensure
+        // the txid and the transition come from the same witness.
+        let (last_transfer_witness_txid, last_transfer_witness_prevouts) = match last_transition {
+            Some(ref last) if last.transition_type == ifa::TS_TRANSFER => {
+                read_last_transfer_witness(&transfer, last.transition_type)?
+            }
+            _ => (None, None),
+        };
+
         // 2. Create an Esplora-backed resolver.
         let builder = esplora_client::Builder::new(&self.esplora_url);
         let mut resolver = AnyResolver::esplora_blocking(builder).map_err(|e| {
@@ -259,10 +341,22 @@ impl RgbValidator {
         // treats them as tentative witnesses (not yet mined).
         resolver.add_consignment_txes(&transfer);
 
+        // Pin the trusted type system (audit 4th W-01 / #92). Source it from
+        // the canonical `rgb-schemas` definitions keyed on the consignment's
+        // schema_id, NOT from `transfer.types`. Passing the consignment's own
+        // types makes rgbstd compare them against themselves (always passes);
+        // the canonical set makes `validate()` reject any consignment that
+        // ships substituted type definitions for the schema's SemIds. An
+        // unknown schema_id is rejected fail-closed inside the helper.
+        let schema_id = transfer.genesis.schema_id.to_string();
+        let trusted_typesystem = trusted_typesystem_for_schema(&schema_id).inspect_err(|_| {
+            tracing::warn!(%contract_id, %schema_id, "no trusted type system for consignment schema");
+        })?;
+
         // 3. Build validation config.
         let config = ValidationConfig {
             chain_net: self.chain_net,
-            trusted_typesystem: transfer.types.clone(),
+            trusted_typesystem,
             build_opouts_dag: true,
             ..Default::default()
         };
@@ -293,8 +387,58 @@ impl RgbValidator {
             witness_txids,
             all_op_ids,
             last_transition,
+            last_transfer_witness_txid,
+            last_transfer_witness_prevouts,
         })
     }
+}
+
+/// Extract the witness-tx identity binding for the consignment's **last**
+/// transition out of the rgbstd `Transfer`: the witness txid of the bundle
+/// carrying the most recent transition, and — when that bundle embeds the
+/// full witness tx (`PubWitness::Tx`) — its Bitcoin input prevouts. Consumed
+/// by the send-RGB PSBT cross-check to bind the PSBT being signed to the
+/// consignment's `TS_TRANSFER` witness transaction.
+///
+/// Reads the **same** `transfer.bundles.iter().last()` bundle that
+/// [`read_last_transition_burned_asset`] uses, and asserts that bundle's last
+/// known transition type equals `expected_type` (the type the flat
+/// `rgb_consignment` parser reported for the last transition). The parser
+/// walk (`transfer.witnesses.last()`) and the rgbstd walk
+/// (`transfer.bundles.iter().last()`) are two independent traversals of the
+/// same data; binding a txid from one transition while gating on another
+/// would be a latent mismatch, so a disagreement is rejected fail-closed.
+///
+/// Returns `(None, None)` only when the transfer has no bundles — a state
+/// rgbstd validation rejects upstream.
+fn read_last_transfer_witness(
+    transfer: &Transfer,
+    expected_type: u16,
+) -> Result<(Option<bitcoin::Txid>, Option<Vec<bitcoin::OutPoint>>)> {
+    let Some(last_bundle) = transfer.bundles.iter().last() else {
+        return Ok((None, None));
+    };
+
+    if let Some(known) = last_bundle.bundle().known_transitions.iter().last() {
+        let actual = known.transition.transition_type;
+        let expected = TransitionType::with(expected_type);
+        if actual != expected {
+            return Err(EnclaveError::CrossCheck(format!(
+                "consignment last-bundle transition type {actual} disagrees with parsed last \
+                 transition type {expected} — refusing to bind PSBT to an ambiguous witness"
+            )));
+        }
+    }
+
+    // `witness_id()` is `bitcoin::Txid` (rgb re-exports the same bitcoin 0.32
+    // crate the enclave depends on), so no byte-order conversion is needed.
+    let txid = last_bundle.witness_id();
+    let prevouts = last_bundle
+        .pub_witness
+        .tx()
+        .map(|tx| tx.input.iter().map(|txin| txin.previous_output).collect());
+
+    Ok((Some(txid), prevouts))
 }
 
 /// Parse the consignment with `rgb_consignment::parse` and pull out the
@@ -525,6 +669,34 @@ mod tests {
     }
 
     #[test]
+    fn trusted_typesystem_sourced_from_schema_not_consignment() {
+        // The W-01 fix (#92): the trusted type system must come from the
+        // canonical rgb-schemas definitions, not from `transfer.types`.
+        // The in-tree fixture is an NIA consignment, so its schema_id resolves
+        // to a canonical type system whose id matches NIA's.
+        let t = Transfer::load(Cursor::new(TRANSFER_FIXTURE)).expect("load transfer fixture");
+        let schema_id = t.genesis.schema_id.to_string();
+
+        let trusted =
+            trusted_typesystem_for_schema(&schema_id).expect("fixture schema must be known");
+
+        // The canonical type system is what rgb-schemas ships for this schema,
+        // and the fixture's own types match it (a legit consignment).
+        assert_eq!(
+            trusted.id().to_string(),
+            t.types.id().to_string(),
+            "canonical type system for the fixture's schema should match the fixture's types"
+        );
+
+        // An unknown schema id is rejected fail-closed.
+        let err = trusted_typesystem_for_schema("rgb:sch:unknown-schema-id").unwrap_err();
+        assert!(
+            err.to_string().contains("unknown/unsupported RGB schema"),
+            "expected unknown-schema rejection, got: {err}"
+        );
+    }
+
+    #[test]
     fn ifa_constants_match_rgb_schemas_definitions() {
         // Lock these to the values published in
         // `rgb-protocol/rgb-schemas/src/lib.rs`. If upstream renumbers
@@ -568,6 +740,57 @@ mod tests {
             }
             OutputSeal::Revealed { .. } => panic!("recipient leg should be Confidential"),
         }
+    }
+
+    #[test]
+    fn extracts_last_transfer_witness_from_transfer_fixture() {
+        // `read_last_transfer_witness` works off the rgbstd `Transfer`
+        // directly, so it needs no Esplora/network — load the fixture and
+        // assert the witness-tx binding data the PSBT cross-check relies on.
+        let transfer =
+            Transfer::load(Cursor::new(TRANSFER_FIXTURE)).expect("load transfer fixture");
+
+        // The fixture's last transition is a Transfer (type 10000, asserted in
+        // `extracts_op_ids_and_last_transition_from_transfer_fixture`).
+        let (txid, prevouts) =
+            read_last_transfer_witness(&transfer, ifa::TS_TRANSFER).expect("extract witness");
+
+        // Every validated transfer has at least one bundle, so the txid is set.
+        let txid = txid.expect("transfer fixture has a witness txid");
+        // It must equal the last bundle's witness id (the bundle we bind to).
+        let expected = transfer
+            .bundles
+            .iter()
+            .last()
+            .expect("fixture has bundles")
+            .witness_id();
+        assert_eq!(txid, expected);
+
+        // The rgb-lib sender embeds the full witness tx for a freshly-composed
+        // transfer, so the prevouts (the witness tx's Bitcoin inputs) are
+        // present and non-empty — the per-input canary is available.
+        let prevouts = prevouts.expect("fixture embeds the full witness tx (PubWitness::Tx)");
+        assert!(
+            !prevouts.is_empty(),
+            "witness tx must spend at least one input"
+        );
+    }
+
+    #[test]
+    fn rejects_last_transfer_witness_on_type_mismatch() {
+        // If the rgbstd bundle walk and the parser walk disagree on the last
+        // transition type, we must fail closed rather than bind a txid from
+        // one transition while gating on another. The fixture's last
+        // transition is TS_TRANSFER (10000); claiming it's a burn (8010)
+        // forces the consistency check to fire.
+        let transfer =
+            Transfer::load(Cursor::new(TRANSFER_FIXTURE)).expect("load transfer fixture");
+        let err = read_last_transfer_witness(&transfer, ifa::TS_BURN).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("disagrees with parsed last transition type"),
+            "expected type-mismatch rejection, got: {err}"
+        );
     }
 
     #[test]

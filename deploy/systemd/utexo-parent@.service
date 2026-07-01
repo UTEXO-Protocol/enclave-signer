@@ -1,0 +1,18 @@
+[Unit]
+Description=UTEXO parent gRPC adapter (CID %i)
+# Parent talks to its enclave over vsock, so the enclave must be up first.
+After=utexo-enclave@%i.service
+Requires=utexo-enclave@%i.service
+
+[Service]
+Type=simple
+User=ubuntu
+# Per-CID env (CLUSTER_DIR, GRPC_HOST/PORT, USE_VSOCK, ENCLAVE_VSOCK_CID/PORT)
+# is written by deploy-host.sh.
+EnvironmentFile=/etc/utexo/parent-%i.env
+ExecStart=/usr/local/bin/utexo-parent-ctl.sh
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

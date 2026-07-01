@@ -185,6 +185,15 @@ message SignPsbtRequest {
   bytes psbt_bytes           = 9;   // Raw PSBT fetched by Listener
   uint64 psbt_output_amount  = 10;  // Total non-change output amount from PSBT
   string rgb_asset_id        = 11;
+
+  // Raw RGB consignment for in-enclave validation of the send-RGB direction.
+  // The PSBT being signed IS the RGB transfer's witness transaction; the
+  // enclave parses this consignment and binds the PSBT's unsigned txid (and
+  // inputs) to the consignment's last TS_TRANSFER witness tx so a signed PSBT
+  // can't move bridge BTC without committing to the claimed RGB state. Mirrors
+  // SignEvmRequest.consignment / consignment_hash (fields 11/12 there).
+  bytes consignment          = 12;  // Raw RGB consignment bytes (empty = legacy path)
+  bytes consignment_hash     = 13;  // keccak256(consignment) — integrity check
 }
 
 message SignedPsbtResponse {

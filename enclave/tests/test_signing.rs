@@ -185,6 +185,8 @@ fn valid_sign_psbt_request(psbt_bytes: Vec<u8>) -> SignPsbtRequest {
         psbt_bytes,
         psbt_output_amount: 50_000,
         rgb_asset_id: "rgb:test".into(),
+        consignment: vec![],
+        consignment_hash: vec![],
     }
 }
 
@@ -457,6 +459,8 @@ fn test_sign_psbt_before_init() {
             psbt_bytes: minimal_valid_psbt_bytes(),
             psbt_output_amount: 500,
             rgb_asset_id: String::new(),
+            consignment: vec![],
+            consignment_hash: vec![],
         })),
     };
     let resp = common::send_request(port, &sign_req);
@@ -496,6 +500,8 @@ fn test_sign_psbt_rejects_unfinalized() {
             psbt_bytes: minimal_valid_psbt_bytes(),
             psbt_output_amount: 500,
             rgb_asset_id: String::new(),
+            consignment: vec![],
+            consignment_hash: vec![],
         })),
     };
     let resp = common::send_request(port, &sign_req);
@@ -534,6 +540,8 @@ fn test_sign_psbt_rejects_amount_mismatch() {
             psbt_bytes: minimal_valid_psbt_bytes(),
             psbt_output_amount: 90, // 90 + 20 = 110 > 100
             rgb_asset_id: String::new(),
+            consignment: vec![],
+            consignment_hash: vec![],
         })),
     };
     let resp = common::send_request(port, &sign_req);
@@ -579,6 +587,8 @@ fn test_sign_vanilla_psbt_skips_evm_checks() {
             psbt_bytes: minimal_valid_psbt_bytes(),
             psbt_output_amount: 0,
             rgb_asset_id: String::new(),
+            consignment: vec![],
+            consignment_hash: vec![],
         })),
     };
     let resp = common::send_request(port, &sign_req);

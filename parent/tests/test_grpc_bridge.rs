@@ -322,6 +322,8 @@ async fn grpc_sign_psbt_roundtrip() {
         psbt_bytes: vec![0xFF; 32],
         psbt_output_amount: 0,
         rgb_asset_id: String::new(),
+        consignment: vec![],
+        consignment_hash: vec![],
     };
 
     let req = SignRequest {
