@@ -514,8 +514,11 @@ fn op_id_to_calldata_id(op_id: &str) -> Result<[u8; 32]> {
 /// The enclave does NOT trust — or even read — the listener's
 /// `burnId`/`fundsInIds`. It derives them from the consignment it validated
 /// and **overwrites** the calldata it is about to sign:
-///   - `burnId` (offset 68) := `op_id_to_calldata_id(last transition OpId)`
-///     (the burn for unlock, the federation transfer for pools); and
+///   - `burnId` (offset 68) := `keccak256(validated release-transition OpId)`,
+///     where the OpId is `ValidatedConsignment::last_transfer_op_id` - read
+///     from the rgbstd-**validated** `Transfer`, NOT the flat parser (audit
+///     M-02 / #93). This binds the contract's single-use `consumedBurnIds`
+///     guard to the operation `validate()` actually authenticated; and
 ///   - `settlementData` := `abi.encode(uint256[] fundsInIds)` over
 ///     `op_id_to_calldata_id(opid)` for **every** IFA `TS_INFLATION` (mint)
 ///     transition in the consignment's history.
@@ -534,12 +537,19 @@ fn op_id_to_calldata_id(op_id: &str) -> Result<[u8; 32]> {
 /// rebuilt in place; `sourceAddress` and the SPV `proof` are preserved exactly.
 #[cfg(feature = "rgb-validation")]
 pub fn apply_op_id_binding(call_data: &[u8], validated: &ValidatedConsignment) -> Result<Vec<u8>> {
-    let last = validated.last_transition.as_ref().ok_or_else(|| {
+    // burnId is derived from the rgbstd-VALIDATED OpId of the release
+    // (TS_TRANSFER) transition (`last_transfer_op_id`), not the flat parser -
+    // so the contract's single-use `consumedBurnIds` key is bound to the
+    // operation `validate()` authenticated (audit M-02 / #93). Fail closed if
+    // it wasn't extracted (no bundles, or a non-Transfer last transition).
+    let op_id = validated.last_transfer_op_id.ok_or_else(|| {
         EnclaveError::CrossCheck(
-            "OpId binding requires a consignment with at least one transition".into(),
+            "OpId binding requires the validated OpId of the release transition, but none was \
+             extracted (the last transition is not a validated Transfer) - refusing to sign"
+                .into(),
         )
     })?;
-    let burn_id = op_id_to_calldata_id(&last.op_id)?;
+    let burn_id: [u8; 32] = Keccak256::digest(op_id).into();
     let funds_in_ids: Vec<[u8; 32]> = validated
         .mint_op_ids
         .iter()
@@ -1107,6 +1117,7 @@ mod tests {
                 last_transition: Some(transition),
                 last_transfer_witness_txid: None,
                 last_transfer_witness_prevouts: None,
+                last_transfer_op_id: None,
                 non_mined_witness_txids: vec![],
             }
         }
@@ -1201,6 +1212,7 @@ mod tests {
                 last_transition: None,
                 last_transfer_witness_txid: None,
                 last_transfer_witness_prevouts: None,
+                last_transfer_op_id: None,
                 non_mined_witness_txids: vec![],
             };
             let err = validate_funds_out_burn(&req, &validated).unwrap_err();
@@ -1243,6 +1255,7 @@ mod tests {
                 last_transition: Some(transition),
                 last_transfer_witness_txid: None,
                 last_transfer_witness_prevouts: None,
+                last_transfer_op_id: None,
                 non_mined_witness_txids: vec![],
             }
         }
@@ -1371,6 +1384,7 @@ mod tests {
                 last_transition: None,
                 last_transfer_witness_txid: None,
                 last_transfer_witness_prevouts: None,
+                last_transfer_op_id: None,
                 non_mined_witness_txids: vec![],
             };
             let err = validate_funds_out_transfer(&req, &validated).unwrap_err();
@@ -1458,10 +1472,21 @@ mod tests {
             }
         }
 
+        /// The validated last-transfer OpId bytes for a given hex OpId - the
+        /// authoritative burnId source (`ValidatedConsignment::last_transfer_op_id`).
+        fn op_id_bytes(op_id: &str) -> [u8; 32] {
+            hex::decode(op_id).unwrap().try_into().unwrap()
+        }
+
         fn validated(
             last: Option<TransitionSummary>,
             mint_op_ids: Vec<String>,
         ) -> ValidatedConsignment {
+            // The burnId is derived from the rgbstd-VALIDATED OpId, so mirror
+            // production: `last_transfer_op_id` carries the same OpId as the
+            // last transition (set by `read_last_transfer_witness` for a
+            // TS_TRANSFER last transition).
+            let last_transfer_op_id = last.as_ref().map(|t| op_id_bytes(&t.op_id));
             ValidatedConsignment {
                 contract_id: "rgb:test".into(),
                 chain_net: "bc".into(),
@@ -1474,18 +1499,20 @@ mod tests {
                 last_transition: last,
                 last_transfer_witness_txid: None,
                 last_transfer_witness_prevouts: None,
+                last_transfer_op_id,
                 non_mined_witness_txids: vec![],
             }
         }
 
         // ---- apply_op_id_binding (override, not verify) ----
 
-        /// Writes burnId@68 = id(last transition OpId), overriding whatever the
-        /// bridge put there.
+        /// Writes burnId@68 = keccak256(validated OpId), overriding whatever the
+        /// bridge put there. The OpId is sourced from the rgbstd-validated
+        /// transfer (`last_transfer_op_id`), not the flat parser (audit M-02 / #93).
         #[test]
-        fn writes_burn_id_from_last_transition() {
+        fn writes_burn_id_from_validated_op_id() {
             let cd = mock_funds_out([0xEE; 32], &[]); // bogus burnId in input
-            let v = validated(Some(transition(OP_ID, ifa::TS_BURN)), vec![]);
+            let v = validated(Some(transition(OP_ID, ifa::TS_TRANSFER)), vec![]);
             let out = apply_op_id_binding(&cd, &v).unwrap();
             assert_eq!(
                 extract_bytes32(&out, FUNDS_OUT_BURN_ID_OFFSET).unwrap(),
@@ -1493,15 +1520,18 @@ mod tests {
             );
         }
 
-        /// Active on every flow: a Transfer (pools) last transition is written too.
+        /// Fail closed when no validated OpId was extracted (e.g. a non-Transfer
+        /// last transition): the enclave must refuse rather than fall back to a
+        /// listener- or flat-parser-supplied burnId.
         #[test]
-        fn writes_burn_id_for_transfer_transition() {
+        fn rejects_when_validated_op_id_missing() {
             let cd = mock_funds_out([0xEE; 32], &[]);
-            let v = validated(Some(transition(OP_ID, ifa::TS_TRANSFER)), vec![]);
-            let out = apply_op_id_binding(&cd, &v).unwrap();
-            assert_eq!(
-                extract_bytes32(&out, FUNDS_OUT_BURN_ID_OFFSET).unwrap(),
-                id(OP_ID)
+            let mut v = validated(Some(transition(OP_ID, ifa::TS_TRANSFER)), vec![]);
+            v.last_transfer_op_id = None;
+            let err = apply_op_id_binding(&cd, &v).unwrap_err();
+            assert!(
+                err.to_string().contains("validated OpId of the release transition"),
+                "got: {err}"
             );
         }
 
@@ -1555,11 +1585,14 @@ mod tests {
             assert_eq!(&out[36..68], &u256(123_456));
         }
 
-        /// An OpId that isn't 32-byte hex can't be transformed — fail closed.
+        /// A mint OpId that isn't 32-byte hex can not be transformed - fail
+        /// closed. (The burnId now comes from the pre-validated
+        /// `last_transfer_op_id` bytes, so the only string-decoded OpIds left
+        /// are the `fundsInIds` mint set.)
         #[test]
         fn rejects_non_hex_op_id() {
             let cd = mock_funds_out([0xEE; 32], &[]);
-            let v = validated(Some(transition("not-hex", ifa::TS_BURN)), vec![]);
+            let v = validated(Some(transition(OP_ID, ifa::TS_TRANSFER)), vec!["not-hex".into()]);
             let err = apply_op_id_binding(&cd, &v).unwrap_err();
             assert!(
                 err.to_string().contains("hex-decodable")
@@ -1576,14 +1609,14 @@ mod tests {
             assert!(err.to_string().contains("too short"), "got: {err}");
         }
 
-        /// No transition to bind against → hard error.
+        /// No validated release OpId to bind against -> hard error.
         #[test]
         fn rejects_no_transition() {
             let cd = mock_funds_out([0xEE; 32], &[]);
             let v = validated(None, vec![]);
             let err = apply_op_id_binding(&cd, &v).unwrap_err();
             assert!(
-                err.to_string().contains("at least one transition"),
+                err.to_string().contains("validated OpId of the release transition"),
                 "got: {err}"
             );
         }
