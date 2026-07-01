@@ -26,13 +26,31 @@ pub struct BridgeConfig {
     pub chain_id: u64,
     pub bridge_contract: [u8; 20],
     pub rgb_asset_id: String,
+    /// Operator-pinned allowed destination for **gas-key** transactions
+    /// (`GAS_TX_ALLOWED_TO`). When set, `SignRawDigest` only signs a gas tx
+    /// whose `to` equals this address (and whose `value` is 0) — audit
+    /// TEE-XC-09. `None` = unset, which fails gas-tx signing closed in
+    /// release builds.
+    ///
+    /// The pinned address should be an EOA, or a contract with no function
+    /// the gas key could be coerced into calling to the operator's
+    /// detriment: the transaction calldata is not inspected (see
+    /// `validation::evm_gas_tx`).
+    ///
+    /// Unlike the three fields above, this is **not** folded into the
+    /// attestation `user_data` bundle (`canonical_pubkey_bundle` in
+    /// `server.rs`): it is an operational signing-policy pin, not part of
+    /// the enclave's committed identity. It can be added to the bundle in a
+    /// follow-up if external verifiability of the gas-tx policy is wanted.
+    pub gas_tx_allowed_to: Option<[u8; 20]>,
 }
 
 impl BridgeConfig {
     /// Load from `EVM_CHAIN_ID` (decimal), `BRIDGE_CONTRACT` (0x-prefixed or
-    /// bare 40-hex), `RGB_ASSET_ID` (string). Any missing/invalid field
-    /// degrades to its zero/empty value; `is_configured()` reports whether
-    /// the operator supplied anything at all.
+    /// bare 40-hex), `RGB_ASSET_ID` (string), and `GAS_TX_ALLOWED_TO`
+    /// (0x-prefixed or bare 40-hex). Any missing/invalid field degrades to
+    /// its zero/empty/`None` value; `is_configured()` reports whether the
+    /// operator supplied any of the three identity pins at all.
     pub fn from_env() -> Self {
         let chain_id = std::env::var("EVM_CHAIN_ID")
             .ok()
@@ -46,10 +64,15 @@ impl BridgeConfig {
 
         let rgb_asset_id = std::env::var("RGB_ASSET_ID").unwrap_or_default();
 
+        let gas_tx_allowed_to = std::env::var("GAS_TX_ALLOWED_TO")
+            .ok()
+            .and_then(|s| parse_eth_address(&s).ok());
+
         Self {
             chain_id,
             bridge_contract,
             rgb_asset_id,
+            gas_tx_allowed_to,
         }
     }
 
@@ -137,6 +160,7 @@ mod tests {
             chain_id: 0,
             bridge_contract: [0u8; 20],
             rgb_asset_id: String::new(),
+            gas_tx_allowed_to: None,
         };
         assert!(!c.is_configured());
         assert!(!c.is_partially_configured());
@@ -148,6 +172,7 @@ mod tests {
             chain_id: 1,
             bridge_contract: [1u8; 20],
             rgb_asset_id: "rgb:asset".into(),
+            gas_tx_allowed_to: None,
         };
         assert!(c.is_configured());
         assert!(!c.is_partially_configured());
@@ -162,6 +187,7 @@ mod tests {
             chain_id: 1,
             bridge_contract: [0u8; 20],
             rgb_asset_id: "rgb:asset".into(),
+            gas_tx_allowed_to: None,
         };
         assert!(!c.is_configured());
         assert!(c.is_partially_configured());
@@ -173,6 +199,7 @@ mod tests {
             chain_id: 0,
             bridge_contract: [1u8; 20],
             rgb_asset_id: "rgb:asset".into(),
+            gas_tx_allowed_to: None,
         };
         assert!(!c.is_configured());
         assert!(c.is_partially_configured());

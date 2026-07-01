@@ -148,7 +148,7 @@ fn dispatch(request: EnclaveRequest, ctx: &ServerContext) -> EnclaveResponse {
         }
         Some(Request::SignRawDigest(req)) => {
             tracing::info!("request: SignRawDigest");
-            handle_sign_raw_digest(&ctx.state, req)
+            handle_sign_raw_digest(ctx, req)
         }
         Some(Request::ProxyFederation(req)) => {
             tracing::info!("request: ProxyFederation");
@@ -756,18 +756,31 @@ fn handle_sign_raw_message(
 }
 
 fn handle_sign_raw_digest(
-    state: &EnclaveState,
+    ctx: &ServerContext,
     req: SignRawDigestRequest,
 ) -> Result<EnclaveResponse> {
-    if req.digest.len() != 32 {
-        return Err(EnclaveError::InvalidRequest(format!(
-            "digest must be exactly 32 bytes, got {}",
-            req.digest.len()
-        )));
-    }
+    // Gas-tx shape allowlist (audit TEE-XC-09). Production builds refuse to
+    // blind-sign an opaque digest: the request must carry the unsigned tx
+    // preimage, which the enclave decodes, checks against the operator pins
+    // (chain id + destination, zero value), and hashes itself — see
+    // `validation::evm_gas_tx`. Skipped under dev-mode like the other
+    // cross-checks (#64 compile-guards dev-mode out of release), where the
+    // legacy opaque-digest path is retained for local testing.
+    #[cfg(not(feature = "dev-mode"))]
+    let digest = validation::evm_gas_tx::validate_gas_tx_request(&req, &ctx.bridge_config)?;
 
-    let digest: [u8; 32] = req.digest.as_slice().try_into().unwrap();
-    let signature = state.sign_evm_gas_tx(&digest)?;
+    #[cfg(feature = "dev-mode")]
+    let digest: [u8; 32] = {
+        if req.digest.len() != 32 {
+            return Err(EnclaveError::InvalidRequest(format!(
+                "digest must be exactly 32 bytes, got {}",
+                req.digest.len()
+            )));
+        }
+        req.digest.as_slice().try_into().unwrap()
+    };
+
+    let signature = ctx.state.sign_evm_gas_tx(&digest)?;
 
     tracing::info!(
         sig_hex = %hex::encode(signature),

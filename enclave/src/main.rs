@@ -62,6 +62,19 @@ fn main() {
              will commit to empty values"
         );
     }
+    // Gas-tx destination pin (audit TEE-XC-09). Independent of the identity
+    // pins above; gates SignRawDigest. Unset in a release build fails gas-tx
+    // signing closed.
+    match bridge_config.gas_tx_allowed_to {
+        Some(addr) => tracing::info!(
+            gas_tx_allowed_to = %hex::encode(addr),
+            "gas-tx destination pinned from env (GAS_TX_ALLOWED_TO)"
+        ),
+        None => tracing::warn!(
+            "GAS_TX_ALLOWED_TO unset — gas-tx (SignRawDigest) signing will fail closed in \
+             release builds until the allowed destination is pinned"
+        ),
+    }
 
     // Donor-side cloning secret. Optional: only required for enclaves that
     // will serve `GetClone` requests. Pre-shared across the operator's

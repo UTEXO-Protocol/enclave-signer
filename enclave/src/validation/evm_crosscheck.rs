@@ -456,6 +456,7 @@ mod tests {
             chain_id: 0,
             bridge_contract: [0u8; 20],
             rgb_asset_id: String::new(),
+            gas_tx_allowed_to: None,
         }
     }
 
@@ -1070,6 +1071,7 @@ mod tests {
             chain_id: 1,
             bridge_contract: [0xAA; 20],
             rgb_asset_id: "rgb:test-asset".into(),
+            gas_tx_allowed_to: None,
         }
     }
 
@@ -1125,6 +1127,7 @@ mod tests {
             chain_id: 1,
             bridge_contract: [0xAA; 20],
             rgb_asset_id: String::new(),
+            gas_tx_allowed_to: None,
         };
         let err = validate_evm_request(&valid_evm_request(), &half_pinned).unwrap_err();
         assert!(err.to_string().contains("partially set"), "got: {err}");
@@ -1140,6 +1143,7 @@ mod tests {
             chain_id: 1,
             bridge_contract: [0u8; 20],
             rgb_asset_id: "rgb:asset".into(),
+            gas_tx_allowed_to: None,
         };
         let err = validate_evm_request(&valid_evm_request(), &zero_contract).unwrap_err();
         assert!(err.to_string().contains("partially set"), "got: {err}");
