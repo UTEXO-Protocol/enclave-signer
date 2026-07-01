@@ -433,6 +433,15 @@ fn handle_sign_evm(ctx: &ServerContext, req: SignEvmRequest) -> Result<EnclaveRe
                 &req.rgb_asset_id,
                 &ctx.bridge_config.rgb_asset_id,
             )?;
+            // Defense-in-depth recency check (audit 4th I-03 / #95). The
+            // RGB->EVM fundsOut direction settles an already-confirmed
+            // transfer, so every witness tx must be mined. rgbstd's
+            // validation status (otherwise discarded) is surfaced as
+            // `non_mined_witness_txids`; reject here so confirmation does
+            // not rest on the SPV header chain alone. Skipped under dev-mode
+            // alongside the other cross-checks.
+            #[cfg(not(feature = "dev-mode"))]
+            crate::validation::evm_crosscheck::assert_witnesses_confirmed(&v)?;
             Some(v)
         } else {
             tracing::warn!("RGB validator not configured, skipping in-enclave validation");

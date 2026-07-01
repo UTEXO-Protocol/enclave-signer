@@ -16,6 +16,7 @@ use rgbstd::indexers::esplora_blocking::esplora_client;
 use rgbstd::indexers::AnyResolver;
 use rgbstd::schema::{MetaType, TransitionType};
 use rgbstd::validation::ValidationConfig;
+use rgbstd::vm::WitnessOrd;
 use rgbstd::ChainNet;
 
 use crate::error::{EnclaveError, Result};
@@ -151,6 +152,22 @@ pub struct ValidatedConsignment {
     /// consignment carries only the witness txid (`PubWitness::Txid`), in
     /// which case the txid identity bind alone anchors every input.
     pub last_transfer_witness_prevouts: Option<Vec<bitcoin::OutPoint>>,
+    /// Witness txids that rgbstd `validate()` classified as **not mined**
+    /// (`WitnessOrd::Tentative` / `Ignored`), in **display (big-endian) byte
+    /// order** - same encoding as [`Self::witness_txids`]. `validate()` already
+    /// hard-rejects `Archived`/unresolvable witnesses, so only these softer
+    /// not-yet-confirmed states reach here, and only because this set is built
+    /// from the rgbstd status that was previously discarded (audit 4th
+    /// I-03 / #95).
+    ///
+    /// A non-empty set is **expected** for the send-RGB (EVM-lock -> RGB-send)
+    /// PSBT path: that witness tx is freshly composed and unbroadcast, so it is
+    /// legitimately `Tentative`. It is an **anomaly** for the RGB->EVM
+    /// `fundsOut` direction, where the witness is already confirmed on-chain
+    /// and SPV-verified - the SignEvm path rejects any non-mined witness as
+    /// defense-in-depth atop the SPV depth check (see
+    /// [`crate::validation::evm_crosscheck::assert_witnesses_confirmed`]).
+    pub non_mined_witness_txids: Vec<[u8; 32]>,
 }
 
 /// Flat summary of one RGB state transition. Mirrors
@@ -376,7 +393,7 @@ impl RgbValidator {
 
         // 4. Run full RGB validation (makes blocking HTTP calls to Esplora).
         tracing::debug!(%contract_id, "calling rgbstd validate (this may block on Esplora)");
-        let _valid = transfer.validate(&resolver, &config).map_err(|e| {
+        let valid = transfer.validate(&resolver, &config).map_err(|e| {
             tracing::warn!(
                 %contract_id,
                 elapsed_ms = start.elapsed().as_millis() as u64,
@@ -385,10 +402,54 @@ impl RgbValidator {
             EnclaveError::CrossCheck(format!("RGB consignment validation failed: {e}"))
         })?;
 
+        // 4b. Inspect the validation status instead of discarding it (audit 4th
+        // I-03 / #95). A hard failure already came back as Err above; what
+        // reaches here is `Ok` with a status that may still carry warnings and
+        // a per-witness ordinal map. Without `safe_height` set, rgbstd's
+        // `validity()` is `Valid` even when witnesses are not mined, so the
+        // only signal of a not-yet-confirmed witness is `tx_ord_map` - we read
+        // it out rather than trust `validity()` alone.
+        //
+        // We deliberately do NOT set `ValidationConfig.safe_height`: doing so
+        // would flag recency against the *Esplora resolver's* tip, which is
+        // host-controlled and untrusted. Recency for the RGB->EVM direction is
+        // enforced authoritatively by the in-enclave SPV header chain
+        // (`SPV_MIN_CONFIRMATIONS`); surfacing the witness ordinals here lets
+        // that direction reject non-mined witnesses as defense-in-depth.
+        let status = valid.validation_status();
+        let mut non_mined: BTreeSet<[u8; 32]> = BTreeSet::new();
+        for (txid, ord) in status.tx_ord_map.iter() {
+            if !matches!(ord, WitnessOrd::Mined(_)) {
+                // `txid` is `bitcoin::Txid`; its Display is display-order hex,
+                // matching the `witness_txids` encoding decoded above.
+                let display_hex = txid.to_string();
+                let bytes = hex::decode(&display_hex).map_err(|e| {
+                    EnclaveError::CrossCheck(format!(
+                        "witness ordinal txid hex decode failed: {e} (got {display_hex:?})"
+                    ))
+                })?;
+                let arr: [u8; 32] = bytes.as_slice().try_into().map_err(|_| {
+                    EnclaveError::CrossCheck(format!(
+                        "witness ordinal txid is not 32 bytes (got {} bytes from {display_hex:?})",
+                        bytes.len()
+                    ))
+                })?;
+                tracing::warn!(%contract_id, txid = %display_hex, witness_ord = %ord, "consignment witness tx is not mined");
+                non_mined.insert(arr);
+            }
+        }
+        for warning in &status.warnings {
+            tracing::warn!(%contract_id, "RGB validation warning: {warning}");
+        }
+        let non_mined_witness_txids: Vec<[u8; 32]> = non_mined.into_iter().collect();
+
         tracing::info!(
             %contract_id,
             %chain_net,
+            validity = %status.validity(),
             witness_txids_count = witness_txids.len(),
+            non_mined_count = non_mined_witness_txids.len(),
+            warnings = status.warnings.len(),
             transitions_count,
             elapsed_ms = start.elapsed().as_millis() as u64,
             "RGB consignment validated successfully"
@@ -403,6 +464,7 @@ impl RgbValidator {
             last_transition,
             last_transfer_witness_txid,
             last_transfer_witness_prevouts,
+            non_mined_witness_txids,
         })
     }
 }
