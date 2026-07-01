@@ -187,6 +187,7 @@ mod tests {
             chain_id: 1,
             bridge_contract: [0u8; 20],
             rgb_asset_id: "rgb:asset".into(),
+            gas_tx_allowed_to: None,
         };
         assert!(!c.is_configured());
         assert!(c.is_partially_configured());
@@ -198,6 +199,7 @@ mod tests {
             chain_id: 0,
             bridge_contract: [1u8; 20],
             rgb_asset_id: "rgb:asset".into(),
+            gas_tx_allowed_to: None,
         };
         assert!(!c.is_configured());
         assert!(c.is_partially_configured());
