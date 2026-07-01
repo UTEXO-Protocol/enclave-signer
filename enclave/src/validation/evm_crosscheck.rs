@@ -1530,7 +1530,8 @@ mod tests {
             v.last_transfer_op_id = None;
             let err = apply_op_id_binding(&cd, &v).unwrap_err();
             assert!(
-                err.to_string().contains("validated OpId of the release transition"),
+                err.to_string()
+                    .contains("validated OpId of the release transition"),
                 "got: {err}"
             );
         }
@@ -1592,7 +1593,10 @@ mod tests {
         #[test]
         fn rejects_non_hex_op_id() {
             let cd = mock_funds_out([0xEE; 32], &[]);
-            let v = validated(Some(transition(OP_ID, ifa::TS_TRANSFER)), vec!["not-hex".into()]);
+            let v = validated(
+                Some(transition(OP_ID, ifa::TS_TRANSFER)),
+                vec!["not-hex".into()],
+            );
             let err = apply_op_id_binding(&cd, &v).unwrap_err();
             assert!(
                 err.to_string().contains("hex-decodable")
@@ -1616,7 +1620,8 @@ mod tests {
             let v = validated(None, vec![]);
             let err = apply_op_id_binding(&cd, &v).unwrap_err();
             assert!(
-                err.to_string().contains("validated OpId of the release transition"),
+                err.to_string()
+                    .contains("validated OpId of the release transition"),
                 "got: {err}"
             );
         }
