@@ -241,14 +241,21 @@ impl EnclaveService for ParentAdapterService {
             Some(enclave_response::Response::SignedPsbt(r)) => Ok(Response::new(Signature {
                 network_id: inner.network_id,
                 signature: r.signed_psbt,
+                call_data: vec![],
             })),
+            // The enclave may rewrite the OpId-bound calldata fields (burnId,
+            // fundsInIds) from the validated consignment, so forward the exact
+            // calldata the signature commits to — the listener must submit
+            // these bytes, not the ones it sent.
             Some(enclave_response::Response::EvmSignature(r)) => Ok(Response::new(Signature {
                 network_id: inner.network_id,
                 signature: r.signature,
+                call_data: r.call_data,
             })),
             Some(enclave_response::Response::RawDigestSig(r)) => Ok(Response::new(Signature {
                 network_id: inner.network_id,
                 signature: r.signature,
+                call_data: vec![],
             })),
             Some(enclave_response::Response::Error(e)) => Err(Self::enclave_error_to_status(&e)),
             other => Err(Status::internal(format!(

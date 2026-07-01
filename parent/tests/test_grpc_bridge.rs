@@ -62,6 +62,7 @@ fn start_mock_enclave() -> u16 {
                     response: Some(enclave_response::Response::EvmSignature(
                         enclave_proto::EvmSignatureResponse {
                             signature: vec![0xCC; 65],
+                            call_data: vec![],
                         },
                     )),
                 },
@@ -361,6 +362,7 @@ async fn grpc_evm_passes_enriched_fields_through() {
                     response: Some(enclave_response::Response::EvmSignature(
                         enclave_proto::EvmSignatureResponse {
                             signature: vec![0xCC; 65],
+                            call_data: vec![],
                         },
                     )),
                 };
@@ -435,6 +437,7 @@ async fn grpc_evm_forwards_raw_consignment_bytes() {
                     response: Some(enclave_response::Response::EvmSignature(
                         enclave_proto::EvmSignatureResponse {
                             signature: vec![0xCC; 65],
+                            call_data: vec![],
                         },
                     )),
                 };

@@ -164,6 +164,13 @@ message MerkleProofEntry {
 
 message EvmSignatureResponse {
   bytes signature = 1;      // 65 bytes: r(32) + s(32) + v(1), Ethereum ECDSA convention
+  // The exact fundsOut calldata the signature commits to. The enclave derives
+  // the OpId-bound fields (burnId, settlementData/fundsInIds) from the
+  // validated consignment and rewrites them, so this MAY differ from the
+  // call_data sent in SignEvmRequest. The caller MUST submit these bytes
+  // on-chain (the EIP-712 digest is keccak256 over this calldata). Equal to
+  // the request's call_data on non-fundsOut / non-rgb-validation paths.
+  bytes call_data = 2;
 }
 
 // === PSBT Signing (EVM→RGB direction) ===

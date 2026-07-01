@@ -569,6 +569,7 @@ mod tests {
                 chain_net: "bc".into(),
                 witness_txids: vec![],
                 all_op_ids: vec!["transfer-op".into()],
+                mint_op_ids: vec![],
                 last_transition: Some(transfer_summary(total_output_amount)),
                 last_transfer_witness_txid: Some(psbt.unsigned_tx.compute_txid()),
                 last_transfer_witness_prevouts: Some(prevouts),
