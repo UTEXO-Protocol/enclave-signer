@@ -16,6 +16,7 @@ fn pinned_bridge_config() -> BridgeConfig {
         chain_id: 1,
         bridge_contract: [0xAA; 20],
         rgb_asset_id: "rgb:test".into(),
+        gas_tx_allowed_to: None,
     }
 }
 
@@ -326,6 +327,7 @@ fn test_sign_evm_rejects_unconfigured_bridge_config() {
         chain_id: 0,
         bridge_contract: [0u8; 20],
         rgb_asset_id: String::new(),
+        gas_tx_allowed_to: None,
     };
     let port = common::start_test_server_with_config(|_| {}, unconfigured);
 
@@ -947,6 +949,187 @@ fn test_proxy_federation_returns_not_ready() {
                 "federation proxy should return NOT_READY (code 2)"
             );
             assert!(e.message.contains("federation proxy"));
+        }
+        other => panic!("expected ErrorResponse, got {:?}", other),
+    }
+}
+
+// =============================================================================
+// EVM gas-tx (SignRawDigest) shape-allowlist tests (audit TEE-XC-09)
+// =============================================================================
+//
+// These run through the real handler, so the production fail-closed gate in
+// `validation::evm_gas_tx` is active (the integration crate builds the lib
+// without cfg(test)). They cover the accept path and the two drain vectors.
+
+/// Minimal RLP encoder for building gas-tx fixtures.
+fn rlp_str(bytes: &[u8]) -> Vec<u8> {
+    if bytes.len() == 1 && bytes[0] < 0x80 {
+        return vec![bytes[0]];
+    }
+    let mut out = Vec::new();
+    if bytes.len() <= 55 {
+        out.push(0x80 + bytes.len() as u8);
+    } else {
+        let lb: Vec<u8> = bytes
+            .len()
+            .to_be_bytes()
+            .iter()
+            .copied()
+            .skip_while(|&b| b == 0)
+            .collect();
+        out.push(0xb7 + lb.len() as u8);
+        out.extend_from_slice(&lb);
+    }
+    out.extend_from_slice(bytes);
+    out
+}
+
+fn rlp_scalar(v: u64) -> Vec<u8> {
+    let trimmed: Vec<u8> = v
+        .to_be_bytes()
+        .iter()
+        .copied()
+        .skip_while(|&b| b == 0)
+        .collect();
+    rlp_str(&trimmed)
+}
+
+fn rlp_list(items: &[Vec<u8>]) -> Vec<u8> {
+    let mut payload = Vec::new();
+    for it in items {
+        payload.extend_from_slice(it);
+    }
+    let mut out = Vec::new();
+    if payload.len() <= 55 {
+        out.push(0xc0 + payload.len() as u8);
+    } else {
+        let lb: Vec<u8> = payload
+            .len()
+            .to_be_bytes()
+            .iter()
+            .copied()
+            .skip_while(|&b| b == 0)
+            .collect();
+        out.push(0xf7 + lb.len() as u8);
+        out.extend_from_slice(&lb);
+    }
+    out.extend_from_slice(&payload);
+    out
+}
+
+/// Unsigned EIP-1559 preimage: `0x02 || rlp([chainId, nonce, maxPrio, maxFee, gas, to, value, data, accessList])`.
+fn eip1559_unsigned(chain_id: u64, to: &[u8; 20], value: u64) -> Vec<u8> {
+    let body = rlp_list(&[
+        rlp_scalar(chain_id),
+        rlp_scalar(7),
+        rlp_scalar(1),
+        rlp_scalar(100),
+        rlp_scalar(21_000),
+        rlp_str(to),
+        rlp_scalar(value),
+        rlp_str(&[]),
+        rlp_list(&[]),
+    ]);
+    let mut out = vec![0x02];
+    out.extend_from_slice(&body);
+    out
+}
+
+/// `BridgeConfig` with the gas-tx destination pinned (chain_id 1, to 0xAA…).
+fn gas_pinned_config() -> BridgeConfig {
+    BridgeConfig {
+        chain_id: 1,
+        bridge_contract: [0xBB; 20],
+        rgb_asset_id: "rgb:test".into(),
+        gas_tx_allowed_to: Some([0xAA; 20]),
+    }
+}
+
+fn init(port: u16) {
+    common::send_request(
+        port,
+        &EnclaveRequest {
+            request: Some(Request::InitializeKey(InitializeKeyRequest {
+                seed: vec![],
+                mnemonic: String::new(),
+            })),
+        },
+    );
+}
+
+#[test]
+fn test_gas_tx_signs_pinned_destination() {
+    let port = common::start_test_server_with_config(|_| {}, gas_pinned_config());
+    init(port);
+
+    let tx = eip1559_unsigned(1, &[0xAA; 20], 0);
+    let resp = common::send_request(
+        port,
+        &EnclaveRequest {
+            request: Some(Request::SignRawDigest(SignRawDigestRequest {
+                digest: vec![],
+                unsigned_tx: tx,
+            })),
+        },
+    );
+
+    match &resp.response {
+        Some(Response::RawDigestSig(r)) => assert_eq!(r.signature.len(), 65),
+        other => panic!("expected RawDigestSignatureResponse, got {:?}", other),
+    }
+}
+
+#[test]
+fn test_gas_tx_rejects_opaque_digest() {
+    let port = common::start_test_server_with_config(|_| {}, gas_pinned_config());
+    init(port);
+
+    // Legacy opaque-digest request (no preimage) must be refused.
+    let resp = common::send_request(
+        port,
+        &EnclaveRequest {
+            request: Some(Request::SignRawDigest(SignRawDigestRequest {
+                digest: vec![0x11; 32],
+                unsigned_tx: vec![],
+            })),
+        },
+    );
+
+    match &resp.response {
+        Some(Response::Error(e)) => {
+            assert_eq!(e.code, 3);
+            assert!(
+                e.message.contains("unsigned transaction preimage"),
+                "got: {}",
+                e.message
+            );
+        }
+        other => panic!("expected ErrorResponse, got {:?}", other),
+    }
+}
+
+#[test]
+fn test_gas_tx_rejects_drain_to_attacker() {
+    let port = common::start_test_server_with_config(|_| {}, gas_pinned_config());
+    init(port);
+
+    // Well-formed tx, but to an attacker address — the drain #68 closes.
+    let tx = eip1559_unsigned(1, &[0xEE; 20], 0);
+    let resp = common::send_request(
+        port,
+        &EnclaveRequest {
+            request: Some(Request::SignRawDigest(SignRawDigestRequest {
+                digest: vec![],
+                unsigned_tx: tx,
+            })),
+        },
+    );
+
+    match &resp.response {
+        Some(Response::Error(e)) => {
+            assert_eq!(e.code, 3);
+            assert!(e.message.contains("destination"), "got: {}", e.message);
         }
         other => panic!("expected ErrorResponse, got {:?}", other),
     }

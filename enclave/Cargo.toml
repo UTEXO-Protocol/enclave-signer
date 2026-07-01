@@ -102,17 +102,6 @@ rgb-validation = ["rgb-ops", "rgb-consignment", "rgb-schemas"]
 # additionally REJECTS any request that carries non-empty merkle_proofs —
 # fail-closed against build mismatches between listener and enclave.
 spv = ["rgb-validation"]
-# RGB->EVM operation-uniqueness binding (audit M-02 / #93, #63). When ON,
-# `fundsOut` signing REQUIRES the calldata `burnId` to equal keccak256(OpId) of
-# the consignment's release transition: binding the contract's single-use
-# `consumedBurnIds` guard to the actual RGB operation so the same burn can't be
-# replayed under a fresh burnId. keccak256(raw 32-byte OpId) is the shared
-# transform with bridge-utexo and #97 (#63). Default OFF: the orchestrator
-# currently sends an unrelated `TransferID` as `burnId`, so enabling this before
-# it derives burnId = keccak256(OpId) would reject every live fundsOut. Compile-
-# time (not env) so the posture is PCR-attested and can't be weakened at
-# runtime. Implies `rgb-validation` (the binding needs the parsed consignment).
-bind-burn-id = ["rgb-validation"]
 # Mock attestation path: skip NSM / COSE / cert-chain checks and use raw CBOR docs.
 # Testing only — never enable in production builds.
 mock-attestation = ["attestation-verify/mock"]

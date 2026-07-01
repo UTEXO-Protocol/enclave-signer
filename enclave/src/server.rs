@@ -148,7 +148,7 @@ fn dispatch(request: EnclaveRequest, ctx: &ServerContext) -> EnclaveResponse {
         }
         Some(Request::SignRawDigest(req)) => {
             tracing::info!("request: SignRawDigest");
-            handle_sign_raw_digest(&ctx.state, req)
+            handle_sign_raw_digest(ctx, req)
         }
         Some(Request::ProxyFederation(req)) => {
             tracing::info!("request: ProxyFederation");
@@ -433,6 +433,15 @@ fn handle_sign_evm(ctx: &ServerContext, req: SignEvmRequest) -> Result<EnclaveRe
                 &req.rgb_asset_id,
                 &ctx.bridge_config.rgb_asset_id,
             )?;
+            // Defense-in-depth recency check (audit 4th I-03 / #95). The
+            // RGB->EVM fundsOut direction settles an already-confirmed
+            // transfer, so every witness tx must be mined. rgbstd's
+            // validation status (otherwise discarded) is surfaced as
+            // `non_mined_witness_txids`; reject here so confirmation does
+            // not rest on the SPV header chain alone. Skipped under dev-mode
+            // alongside the other cross-checks.
+            #[cfg(not(feature = "dev-mode"))]
+            crate::validation::evm_crosscheck::assert_witnesses_confirmed(&v)?;
             Some(v)
         } else {
             tracing::warn!("RGB validator not configured, skipping in-enclave validation");
@@ -446,21 +455,32 @@ fn handle_sign_evm(ctx: &ServerContext, req: SignEvmRequest) -> Result<EnclaveRe
     #[cfg(not(feature = "dev-mode"))]
     validation::evm_crosscheck::validate_evm_request(&req, &ctx.bridge_config)?;
 
-    // Consignment-bound amount cross-check for the `fundsOut` transfer
-    // flow. Every fundsOut signature must be backed by a validated
-    // consignment and an amount the consignment's last transition
-    // actually accounts for. This is the second half of the bypass
-    // closure started in `validate_evm_request`: that function rejects
-    // empty bytes; this block rejects "bytes present but validator
-    // didn't run" and binds the EVM-side amount to the RGB-side amount.
+    // Consignment-bound amount check + OpId binding for the `fundsOut` flow.
     //
-    // The contract exposes a single `fundsOut` selector shared by the
-    // pools/transfer flow (live) and the future mint/burn unlock flow,
-    // disambiguated by contract address. Only the transfer check is
-    // wired today — a burn consignment on this selector is rejected by
-    // `validate_funds_out_transfer` ("requires a Transfer transition").
-    // `validate_funds_out_burn` is wired in the mint/burn epic (by the
-    // dedicated mint/burn contract address).
+    //   (a) Bind the EVM-side release amount to the amount the consignment's
+    //       last transition accounts for (`validate_funds_out_transfer`). This
+    //       is the second half of the bypass closure started in
+    //       `validate_evm_request`: that rejects empty bytes; this rejects
+    //       "bytes present but validator didn't run".
+    //   (b) DERIVE the cross-domain ids from the consignment the enclave
+    //       validated and OVERWRITE them in the calldata: `burnId` (offset 68)
+    //       = the last transition's id, `settlementData` = the ids of every
+    //       TS_INFLATION (mint) transition (`apply_op_id_binding`). The enclave
+    //       does not trust or even read the listener's burnId/fundsInIds — it
+    //       rewrites them. The signed, returned `call_data` is authoritative;
+    //       a compromised backend cannot route the release to a different
+    //       replay slot (`consumedBurnIds`) or consume lock records
+    //       (`fundsInRecords`) the consignment did not authorise. The output is
+    //       a pure function of the consignment, so every federation signer
+    //       rewrites it identically. The caller MUST submit exactly the
+    //       returned bytes (the signature commits to keccak256(callData)).
+    //
+    // Default builds (no rgb-validation, or dev-mode) sign the calldata as
+    // received; they cannot validate a consignment and reject fundsOut upstream
+    // in `validate_evm_request`.
+    #[allow(unused_mut)]
+    let mut signed_call_data = req.call_data.clone();
+
     #[cfg(all(feature = "rgb-validation", not(feature = "dev-mode")))]
     if req.call_data.len() >= 4
         && req.call_data[..4] == validation::evm_crosscheck::FUNDS_OUT_SELECTOR_POOLS
@@ -473,6 +493,8 @@ fn handle_sign_evm(ctx: &ServerContext, req: SignEvmRequest) -> Result<EnclaveRe
             )
         })?;
         validation::evm_crosscheck::validate_funds_out_transfer(&req, validated)?;
+        signed_call_data =
+            validation::evm_crosscheck::apply_op_id_binding(&req.call_data, validated)?;
     }
 
     // SPV verification: every consignment-anchor Bitcoin tx must be in our
@@ -521,15 +543,17 @@ fn handle_sign_evm(ctx: &ServerContext, req: SignEvmRequest) -> Result<EnclaveRe
     let domain = build_evm_domain(&req)?;
 
     let domain_sep = domain.separator_hash();
-    let digest = sign_request_digest(&domain, &req.call_data, req.nonce, req.deadline);
+    // Sign over the (possibly rewritten) calldata — see `apply_op_id_binding`.
+    let digest = sign_request_digest(&domain, &signed_call_data, req.nonce, req.deadline);
 
     tracing::info!(
         domain_name = %domain.name,
         chain_id = domain.chain_id,
         proxy = %hex::encode(domain.verifying_contract),
         domain_sep = %hex::encode(domain_sep),
-        call_data_len = req.call_data.len(),
-        selector = %hex::encode(&req.call_data[..4.min(req.call_data.len())]),
+        call_data_len = signed_call_data.len(),
+        selector = %hex::encode(&signed_call_data[..4.min(signed_call_data.len())]),
+        rewritten = signed_call_data != req.call_data,
         nonce = req.nonce,
         deadline = req.deadline,
         digest = %hex::encode(digest),
@@ -546,6 +570,9 @@ fn handle_sign_evm(ctx: &ServerContext, req: SignEvmRequest) -> Result<EnclaveRe
     Ok(EnclaveResponse {
         response: Some(Response::EvmSignature(EvmSignatureResponse {
             signature: signature.to_vec(),
+            // The bytes the caller must submit on-chain (== input unless the
+            // enclave rewrote the OpId-derived fields).
+            call_data: signed_call_data,
         })),
     })
 }
@@ -756,18 +783,31 @@ fn handle_sign_raw_message(
 }
 
 fn handle_sign_raw_digest(
-    state: &EnclaveState,
+    ctx: &ServerContext,
     req: SignRawDigestRequest,
 ) -> Result<EnclaveResponse> {
-    if req.digest.len() != 32 {
-        return Err(EnclaveError::InvalidRequest(format!(
-            "digest must be exactly 32 bytes, got {}",
-            req.digest.len()
-        )));
-    }
+    // Gas-tx shape allowlist (audit TEE-XC-09). Production builds refuse to
+    // blind-sign an opaque digest: the request must carry the unsigned tx
+    // preimage, which the enclave decodes, checks against the operator pins
+    // (chain id + destination, zero value), and hashes itself — see
+    // `validation::evm_gas_tx`. Skipped under dev-mode like the other
+    // cross-checks (#64 compile-guards dev-mode out of release), where the
+    // legacy opaque-digest path is retained for local testing.
+    #[cfg(not(feature = "dev-mode"))]
+    let digest = validation::evm_gas_tx::validate_gas_tx_request(&req, &ctx.bridge_config)?;
 
-    let digest: [u8; 32] = req.digest.as_slice().try_into().unwrap();
-    let signature = state.sign_evm_gas_tx(&digest)?;
+    #[cfg(feature = "dev-mode")]
+    let digest: [u8; 32] = {
+        if req.digest.len() != 32 {
+            return Err(EnclaveError::InvalidRequest(format!(
+                "digest must be exactly 32 bytes, got {}",
+                req.digest.len()
+            )));
+        }
+        req.digest.as_slice().try_into().unwrap()
+    };
+
+    let signature = ctx.state.sign_evm_gas_tx(&digest)?;
 
     tracing::info!(
         sig_hex = %hex::encode(signature),

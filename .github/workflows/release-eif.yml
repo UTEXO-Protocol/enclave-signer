@@ -1,0 +1,121 @@
+# Release (deploy) a published EIF to the stage hosts — self-contained, no external repo.
+#
+# Pairs with build-eif.yml:
+#   build-eif   -> builds the release EIF + parent/cli, publishes to s3://<bucket>/eif/<git_sha>/
+#   release-eif -> runs deploy/deploy-host.sh on the target hosts via SSM for that <git_sha>
+#
+# Artifact-only: hosts pull the matching set from S3, verify sha256 + PCR0, and bring the
+# cluster up under systemd (reboot-safe). The deploy script is the executable core; this
+# workflow only selects the git_sha + hosts and ships the script over SSM.
+#
+# !!! IMPORTANT — this RESTARTS the enclaves, which WIPES in-memory identity. A redeployed
+# enclave comes up EMPTY ("key not initialized"); re-run init/clone afterwards. Until KMS
+# identity recovery (#5) exists, do NOT point this at a cluster holding live keys without
+# planning the re-bootstrap. That's why it is manual (workflow_dispatch) + environment-gated,
+# never auto-triggered on every build.
+#
+# Required repo config:
+#   vars:    AWS_REGION, EIF_S3_BUCKET, CLUSTER_DIR
+#   secrets: AWS_DEPLOY_OIDC_ROLE_ARN  (role with ssm:SendCommand + ssm:GetCommandInvocation
+#                                       on the target instances; SEPARATE from the build role)
+#            STAGE_INSTANCE_IDS        (space-separated EC2 instance ids; kept out of the public repo)
+
+name: "Release EIF (deploy)"
+
+on:
+  workflow_dispatch:
+    inputs:
+      git_sha:
+        description: "40-hex commit to deploy (must already be published to S3 by build-eif)"
+        type: string
+        required: true
+      instances:
+        description: "Space-separated EC2 instance ids (blank = secrets.STAGE_INSTANCE_IDS)"
+        type: string
+        required: false
+        default: ""
+
+permissions:
+  id-token: write   # OIDC -> AWS
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: stage   # add required reviewers here to gate deploys
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate git_sha
+        run: |
+          echo "${{ inputs.git_sha }}" | grep -Eq '^[0-9a-f]{40}$' \
+            || { echo "::error::git_sha must be a 40-hex commit"; exit 1; }
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_OIDC_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Deploy to hosts via SSM
+        env:
+          GIT_SHA: ${{ inputs.git_sha }}
+          BUCKET: ${{ vars.EIF_S3_BUCKET }}
+          REGION: ${{ vars.AWS_REGION }}
+          CLUSTER_DIR: ${{ vars.CLUSTER_DIR }}
+          INSTANCES_INPUT: ${{ inputs.instances }}
+          INSTANCES_SECRET: ${{ secrets.STAGE_INSTANCE_IDS }}
+        run: |
+          set -euo pipefail
+          : "${BUCKET:?set repo var EIF_S3_BUCKET}"
+          : "${REGION:?set repo var AWS_REGION}"
+          : "${CLUSTER_DIR:?set repo var CLUSTER_DIR}"
+          INSTANCES="${INSTANCES_INPUT:-}"; [ -n "$INSTANCES" ] || INSTANCES="$INSTANCES_SECRET"
+          [ -n "$INSTANCES" ] || { echo "::error::no instances (input or STAGE_INSTANCE_IDS)"; exit 1; }
+
+          # Self-contained deploy script: env exports + the executable core (units embedded).
+          {
+            echo '#!/usr/bin/env bash'
+            echo "export GIT_SHA=$GIT_SHA"
+            echo "export BUCKET=$BUCKET"
+            echo "export AWS_REGION=$REGION"
+            echo "export CLUSTER_DIR=$CLUSTER_DIR"
+            cat deploy/deploy-host.sh
+          } > /tmp/deploy-run.sh
+          B64="$(base64 -w0 /tmp/deploy-run.sh)"
+
+          rc=0
+          for INSTANCE in $INSTANCES; do
+            echo "::group::deploy $INSTANCE (git_sha $GIT_SHA)"
+            CMD_ID="$(aws ssm send-command \
+              --instance-ids "$INSTANCE" \
+              --document-name AWS-RunShellScript \
+              --timeout-seconds 900 \
+              --parameters "commands=[\"echo $B64 | base64 -d > /tmp/_dh.sh\",\"bash /tmp/_dh.sh\"]" \
+              --query Command.CommandId --output text)"
+            echo "CommandId=$CMD_ID"
+            STATUS=Pending
+            while true; do
+              STATUS="$(aws ssm get-command-invocation --command-id "$CMD_ID" --instance-id "$INSTANCE" \
+                --query Status --output text 2>/dev/null || echo Pending)"
+              case "$STATUS" in Success|Failed|Cancelled|TimedOut) break ;; esac
+              sleep 5
+            done
+            echo "Status=$STATUS"
+            aws ssm get-command-invocation --command-id "$CMD_ID" --instance-id "$INSTANCE" \
+              --query StandardOutputContent --output text || true
+            ERR="$(aws ssm get-command-invocation --command-id "$CMD_ID" --instance-id "$INSTANCE" \
+              --query StandardErrorContent --output text || true)"
+            [ -n "$ERR" ] && echo "STDERR: $ERR"
+            echo "::endgroup::"
+            [ "$STATUS" = "Success" ] || rc=1
+          done
+          [ "$rc" -eq 0 ] || { echo "::error::one or more hosts failed"; exit 1; }
+
+      - name: Summary
+        if: always()
+        run: |
+          echo "### Release EIF" >> "$GITHUB_STEP_SUMMARY"
+          echo "- git_sha: \`${{ inputs.git_sha }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- bucket: \`${{ vars.EIF_S3_BUCKET }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- NOTE: enclaves restarted -> identity wiped; run init/clone to bootstrap." >> "$GITHUB_STEP_SUMMARY"

@@ -26,6 +26,12 @@ message SignRequest {
 message Signature {
   uint32 network_id = 1;
   bytes signature = 2;
+  // For EVM fundsOut signing: the exact calldata the signature commits to.
+  // The TEE derives the OpId-bound fields (burnId, fundsInIds) from the
+  // validated consignment and rewrites them, so the caller MUST submit THIS
+  // calldata on-chain rather than the one it sent. Empty for PSBT / raw-digest
+  // responses and for non-fundsOut EVM paths (caller falls back to its own).
+  bytes call_data = 3;
 }
 
 message PublicKeyRequest {

@@ -1,0 +1,3 @@
+# Give the `ne` group access to the Nitro device on every boot, so enclaves can
+# be run by the (non-root) ubuntu user without re-chmod'ing after a reboot.
+KERNEL=="nitro_enclaves", GROUP="ne", MODE="0660"

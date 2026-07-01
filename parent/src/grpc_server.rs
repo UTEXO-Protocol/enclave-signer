@@ -112,7 +112,7 @@ impl EnclaveService for ParentAdapterService {
     /// Sign — dispatches based on data_type + network_id:
     ///   TRANSACTION + EVM network_id → deserialize EnrichedEvmPayload → SignEvmRequest
     ///   TRANSACTION + other          → deserialize EnrichedPsbtPayload → SignPsbtRequest
-    ///   EVM_GAS_TX                   → raw 32-byte digest → SignRawDigestRequest
+    ///   EVM_GAS_TX                   → unsigned gas-tx preimage → SignRawDigestRequest
     async fn sign(&self, request: Request<SignRequest>) -> Result<Response<Signature>, Status> {
         let inner = request.into_inner();
 
@@ -204,12 +204,21 @@ impl EnclaveService for ParentAdapterService {
             DataType::EvmGasTx => {
                 tracing::info!(
                     data_len = inner.data.len(),
-                    "gRPC Sign: raw digest (data_type=EVM_GAS_TX)"
+                    "gRPC Sign: gas tx preimage (data_type=EVM_GAS_TX)"
                 );
 
+                // Post-#68 (TEE-XC-09): the enclave no longer blind-signs an
+                // opaque digest. `data` now carries the full unsigned gas-tx
+                // preimage (EIP-1559 `0x02||rlp([...])` or legacy EIP-155
+                // `rlp([...])`); the enclave decodes it, enforces the gas-tx
+                // shape allowlist, and computes the digest itself. The
+                // listener must send the preimage here rather than a digest.
                 EnclaveRequest {
                     request: Some(enclave_request::Request::SignRawDigest(
-                        enclave_proto::SignRawDigestRequest { digest: inner.data },
+                        enclave_proto::SignRawDigestRequest {
+                            digest: Vec::new(),
+                            unsigned_tx: inner.data,
+                        },
                     )),
                 }
             }
@@ -232,14 +241,21 @@ impl EnclaveService for ParentAdapterService {
             Some(enclave_response::Response::SignedPsbt(r)) => Ok(Response::new(Signature {
                 network_id: inner.network_id,
                 signature: r.signed_psbt,
+                call_data: vec![],
             })),
+            // The enclave may rewrite the OpId-bound calldata fields (burnId,
+            // fundsInIds) from the validated consignment, so forward the exact
+            // calldata the signature commits to — the listener must submit
+            // these bytes, not the ones it sent.
             Some(enclave_response::Response::EvmSignature(r)) => Ok(Response::new(Signature {
                 network_id: inner.network_id,
                 signature: r.signature,
+                call_data: r.call_data,
             })),
             Some(enclave_response::Response::RawDigestSig(r)) => Ok(Response::new(Signature {
                 network_id: inner.network_id,
                 signature: r.signature,
+                call_data: vec![],
             })),
             Some(enclave_response::Response::Error(e)) => Err(Self::enclave_error_to_status(&e)),
             other => Err(Status::internal(format!(

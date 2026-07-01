@@ -44,6 +44,7 @@ dev_feature_release_guard!(
 pub mod attestation;
 pub mod cloning;
 pub mod config;
+pub mod conn;
 pub mod error;
 pub mod framing;
 pub mod keys;
