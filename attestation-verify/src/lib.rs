@@ -220,7 +220,13 @@ mod real {
     use std::sync::OnceLock;
     use std::time::{SystemTime, UNIX_EPOCH};
     use x509_cert::der::{Decode, Encode};
+    use x509_cert::ext::pkix::{BasicConstraints, KeyUsage};
     use x509_cert::Certificate;
+
+    /// COSE algorithm identifier for ECDSA with SHA-384 (ES384), from the COSE
+    /// Algorithms registry (RFC 8152 / RFC 9053). AWS Nitro attestation
+    /// documents are signed with ES384 over the P-384 leaf key.
+    const COSE_ALG_ES384: i128 = -35;
 
     // AWS Nitro Enclave root CA. Source:
     // https://docs.aws.amazon.com/enclaves/latest/user/verify-root.html
@@ -261,6 +267,7 @@ IwLz3/Y=
         expected_nonce: Option<&[u8; 32]>,
     ) -> Result<VerifiedAttestation> {
         let cose = CoseSign1::from_bytes(doc)?;
+        verify_cose_alg_es384(&cose.protected)?;
         let payload = cose
             .payload
             .as_ref()
@@ -322,12 +329,32 @@ IwLz3/Y=
         verify_cert_validity(&signing_cert)?;
         chain.push(signing_cert);
 
-        // chain[0] is the root, anchored above by byte-equality. Walk forward.
+        // chain[0] is the root, anchored above by byte-equality. Walk forward,
+        // verifying each issuer both *signed* the next subject and is a CA
+        // permitted to issue subordinate certificates (RFC 5280 §6.1.4). Every
+        // cert except the end-entity acts as an issuer here.
+        let mut max_path_len = chain.len();
         for i in 0..chain.len() - 1 {
             verify_issuer_signed_subject(&chain[i], &chain[i + 1])?;
+            max_path_len = check_ca_constraints(&chain[i], i == 0, max_path_len)?;
         }
 
-        let signing_pubkey = extract_p384_pubkey(chain.last().expect("non-empty"))?;
+        let leaf = chain.last().expect("non-empty");
+        // Defensive: if the end-entity asserts a KeyUsage it must permit the
+        // digitalSignature it uses to sign the COSE envelope.
+        if let Some((_critical, key_usage)) = leaf
+            .tbs_certificate
+            .get::<KeyUsage>()
+            .map_err(|e| VerifyError::Certificate(format!("invalid signing-cert KeyUsage: {e}")))?
+        {
+            if !key_usage.digital_signature() {
+                return Err(VerifyError::Certificate(
+                    "signing certificate KeyUsage forbids digitalSignature".into(),
+                ));
+            }
+        }
+
+        let signing_pubkey = extract_p384_pubkey(leaf)?;
         let cose_sig = parse_cose_ecdsa_signature(&cose.signature)?;
         let to_verify = cose.sig_structure()?;
         signing_pubkey
@@ -355,20 +382,117 @@ IwLz3/Y=
             .map_err(|_| VerifyError::Certificate("certificate signature invalid".into()))
     }
 
-    /// RFC 8152 §8.1 mandates raw `r || s` (96 bytes for P-384). Accept DER
-    /// defensively in case a doc source deviates.
-    fn parse_cose_ecdsa_signature(sig_bytes: &[u8]) -> Result<Signature> {
-        if sig_bytes.len() == 96 {
-            Signature::try_from(sig_bytes)
-                .map_err(|e| VerifyError::Attestation(format!("invalid COSE raw signature: {e}")))
-        } else {
-            Signature::from_der(sig_bytes).map_err(|e| {
-                VerifyError::Attestation(format!(
-                    "invalid COSE signature ({} bytes, not raw P-384 r||s or DER): {e}",
-                    sig_bytes.len()
-                ))
-            })
+    /// Enforce RFC 5280 §6.1.4-style CA constraints on `issuer` — a certificate
+    /// that signs a subordinate certificate in the chain (the root and every
+    /// intermediate; never the end-entity). Verifying signatures alone is not
+    /// enough: without this, a non-CA leaf could sign further certificates.
+    ///
+    /// Checks:
+    ///   * `BasicConstraints` is present and asserts `cA = TRUE`.
+    ///   * if `KeyUsage` is present it permits `keyCertSign`.
+    ///   * the `pathLenConstraint` budget is not exhausted.
+    ///
+    /// `max_path_len` is the number of additional non-self-issued CA
+    /// certificates still permitted below `issuer`, per constraints set by
+    /// certificates already processed higher in the chain. The (possibly
+    /// tightened) budget for the next issuer down the chain is returned.
+    /// `is_trust_anchor` is true only for the root (`cabundle[0]`); per RFC 5280
+    /// the trust anchor is not counted against the path-length budget.
+    pub(super) fn check_ca_constraints(
+        issuer: &Certificate,
+        is_trust_anchor: bool,
+        max_path_len: usize,
+    ) -> Result<usize> {
+        let basic_constraints = issuer
+            .tbs_certificate
+            .get::<BasicConstraints>()
+            .map_err(|e| VerifyError::Certificate(format!("invalid BasicConstraints: {e}")))?
+            .map(|(_critical, bc)| bc)
+            .ok_or_else(|| {
+                VerifyError::Certificate("issuer certificate missing BasicConstraints".into())
+            })?;
+        if !basic_constraints.ca {
+            return Err(VerifyError::Certificate(
+                "issuer certificate is not a CA (BasicConstraints cA=FALSE)".into(),
+            ));
         }
+
+        // If KeyUsage is asserted it must permit signing subordinate certs.
+        if let Some((_critical, key_usage)) = issuer
+            .tbs_certificate
+            .get::<KeyUsage>()
+            .map_err(|e| VerifyError::Certificate(format!("invalid KeyUsage: {e}")))?
+        {
+            if !key_usage.key_cert_sign() {
+                return Err(VerifyError::Certificate(
+                    "issuer certificate KeyUsage forbids keyCertSign".into(),
+                ));
+            }
+        }
+
+        // Path length (RFC 5280 §6.1.4 steps (l)/(m)). The trust anchor is not
+        // counted; every other (non-self-issued) CA consumes one unit of budget
+        // and may only tighten it via its own pathLenConstraint.
+        let mut budget = max_path_len;
+        if !is_trust_anchor {
+            if budget == 0 {
+                return Err(VerifyError::Certificate(
+                    "certificate path length constraint exceeded".into(),
+                ));
+            }
+            budget -= 1;
+        }
+        if let Some(path_len_constraint) = basic_constraints.path_len_constraint {
+            budget = budget.min(path_len_constraint as usize);
+        }
+        Ok(budget)
+    }
+
+    /// RFC 8152 §8.1 mandates the COSE ECDSA signature be the fixed-width raw
+    /// `r || s` concatenation — 96 bytes for P-384 / ES384. Only that form is
+    /// accepted; DER is rejected here (unlike X.509 *certificate* signatures,
+    /// which are legitimately DER — see `verify_issuer_signed_subject`).
+    pub(super) fn parse_cose_ecdsa_signature(sig_bytes: &[u8]) -> Result<Signature> {
+        if sig_bytes.len() != 96 {
+            return Err(VerifyError::Attestation(format!(
+                "COSE signature must be 96-byte raw P-384 r||s, got {} bytes",
+                sig_bytes.len()
+            )));
+        }
+        Signature::try_from(sig_bytes)
+            .map_err(|e| VerifyError::Attestation(format!("invalid COSE raw signature: {e}")))
+    }
+
+    /// Assert the COSE_Sign1 protected header pins the signature algorithm to
+    /// ES384 (COSE alg `-35`), the algorithm AWS Nitro uses. Rejecting any
+    /// other value prevents a document from downgrading to a weaker or foreign
+    /// algorithm that the leaf key was not meant to be used with.
+    ///
+    /// `protected` is the raw CBOR-encoded protected header map (bstr content).
+    pub(super) fn verify_cose_alg_es384(protected: &[u8]) -> Result<()> {
+        let header: ciborium::Value = ciborium::from_reader(protected)
+            .map_err(|e| VerifyError::Attestation(format!("invalid COSE protected header: {e}")))?;
+        let map = header.as_map().ok_or_else(|| {
+            VerifyError::Attestation("COSE protected header must be a map".into())
+        })?;
+        // COSE header label 1 = alg (RFC 8152 §3.1).
+        let alg = map
+            .iter()
+            .find(|(k, _)| k.as_integer().map(i128::from) == Some(1))
+            .map(|(_, v)| v)
+            .ok_or_else(|| {
+                VerifyError::Attestation("COSE protected header missing alg (label 1)".into())
+            })?;
+        let alg = alg
+            .as_integer()
+            .map(i128::from)
+            .ok_or_else(|| VerifyError::Attestation("COSE alg must be an integer".into()))?;
+        if alg != COSE_ALG_ES384 {
+            return Err(VerifyError::Attestation(format!(
+                "unexpected COSE alg {alg}, expected ES384 ({COSE_ALG_ES384})"
+            )));
+        }
+        Ok(())
     }
 
     fn extract_p384_pubkey(cert: &Certificate) -> Result<VerifyingKey> {
@@ -463,6 +587,206 @@ IwLz3/Y=
                 VerifyError::Attestation(format!("failed to encode sig structure: {e}"))
             })?;
             Ok(buf)
+        }
+    }
+
+    #[cfg(test)]
+    mod hardening_tests {
+        use super::*;
+        use x509_cert::der::asn1::OctetString;
+        use x509_cert::der::oid::AssociatedOid;
+        use x509_cert::ext::pkix::KeyUsages;
+        use x509_cert::ext::Extension;
+
+        // --- helpers -------------------------------------------------------
+
+        /// A base certificate to mutate. Neither `check_ca_constraints` nor the
+        /// end-entity KeyUsage gate inspects the signature, so cloning the
+        /// embedded root and swapping its extensions exercises the constraint
+        /// logic without minting and signing a full chain.
+        fn base_cert() -> Certificate {
+            Certificate::from_der(root_cert_der()).expect("embedded root parses")
+        }
+
+        fn ext<T: Encode + AssociatedOid>(value: &T, critical: bool) -> Extension {
+            Extension {
+                extn_id: T::OID,
+                critical,
+                extn_value: OctetString::new(value.to_der().expect("encode extension"))
+                    .expect("octet string"),
+            }
+        }
+
+        fn cert_with_exts(exts: Vec<Extension>) -> Certificate {
+            let mut cert = base_cert();
+            cert.tbs_certificate.extensions = Some(exts);
+            cert
+        }
+
+        fn basic(ca: bool, path_len: Option<u8>) -> BasicConstraints {
+            BasicConstraints {
+                ca,
+                path_len_constraint: path_len,
+            }
+        }
+
+        /// CBOR encoding of a COSE protected-header map `{1: alg}`.
+        fn protected_with_alg(alg: i128) -> Vec<u8> {
+            use ciborium::value::Integer;
+            let map = ciborium::Value::Map(vec![(
+                ciborium::Value::Integer(Integer::try_from(1_i128).unwrap()),
+                ciborium::Value::Integer(Integer::try_from(alg).unwrap()),
+            )]);
+            let mut buf = Vec::new();
+            ciborium::into_writer(&map, &mut buf).unwrap();
+            buf
+        }
+
+        // --- COSE signature form (I-05) ------------------------------------
+
+        #[test]
+        fn cose_sig_accepts_96_byte_raw() {
+            // r = s = 0x0101..01 (48 bytes each) is a valid, in-range P-384 sig.
+            assert!(parse_cose_ecdsa_signature(&[0x01u8; 96]).is_ok());
+        }
+
+        #[test]
+        fn cose_sig_rejects_non_96_lengths() {
+            for len in [0usize, 48, 64, 95, 97, 128] {
+                let err = parse_cose_ecdsa_signature(&vec![0x01u8; len]).unwrap_err();
+                assert!(
+                    matches!(err, VerifyError::Attestation(_)),
+                    "length {len} should be rejected"
+                );
+            }
+        }
+
+        #[test]
+        fn cose_sig_rejects_der_encoding() {
+            // A full-size DER ECDSA-Sig-Value for P-384: SEQUENCE { INTEGER(48),
+            // INTEGER(48) } == 102 bytes. This is the form the old code also
+            // accepted; RFC 8152 requires raw r||s, so it must now be rejected.
+            let integer = |bytes: &[u8]| {
+                let mut v = vec![0x02u8, bytes.len() as u8];
+                v.extend_from_slice(bytes);
+                v
+            };
+            let mut body = integer(&[0x01u8; 48]);
+            body.extend_from_slice(&integer(&[0x01u8; 48]));
+            let mut der = vec![0x30u8, body.len() as u8];
+            der.extend_from_slice(&body);
+            assert_eq!(der.len(), 102, "sanity: full-size P-384 DER signature");
+            assert!(matches!(
+                parse_cose_ecdsa_signature(&der).unwrap_err(),
+                VerifyError::Attestation(_)
+            ));
+        }
+
+        // --- COSE protected-header algorithm (I-05) ------------------------
+
+        #[test]
+        fn cose_alg_es384_accepted() {
+            assert!(verify_cose_alg_es384(&protected_with_alg(COSE_ALG_ES384)).is_ok());
+        }
+
+        #[test]
+        fn cose_alg_es256_rejected() {
+            // -7 == ES256; only ES384 (-35) is permitted.
+            let err = verify_cose_alg_es384(&protected_with_alg(-7)).unwrap_err();
+            assert!(matches!(err, VerifyError::Attestation(_)));
+        }
+
+        #[test]
+        fn cose_alg_missing_rejected() {
+            let mut buf = Vec::new();
+            ciborium::into_writer(&ciborium::Value::Map(vec![]), &mut buf).unwrap();
+            assert!(matches!(
+                verify_cose_alg_es384(&buf).unwrap_err(),
+                VerifyError::Attestation(_)
+            ));
+        }
+
+        // --- X.509 CA constraints (W-10 / #70) -----------------------------
+
+        #[test]
+        fn ca_valid_issuer_passes_and_decrements_budget() {
+            let ca = cert_with_exts(vec![
+                ext(&basic(true, None), true),
+                ext(
+                    &KeyUsage(KeyUsages::KeyCertSign | KeyUsages::DigitalSignature),
+                    true,
+                ),
+            ]);
+            // A non-anchor CA consumes one unit of the path-length budget.
+            assert_eq!(check_ca_constraints(&ca, false, 3).unwrap(), 2);
+            // The trust anchor is not counted against the budget.
+            assert_eq!(check_ca_constraints(&ca, true, 3).unwrap(), 3);
+        }
+
+        #[test]
+        fn ca_missing_basic_constraints_rejected() {
+            let cert = cert_with_exts(vec![ext(&KeyUsage(KeyUsages::KeyCertSign.into()), true)]);
+            assert!(matches!(
+                check_ca_constraints(&cert, false, 3).unwrap_err(),
+                VerifyError::Certificate(_)
+            ));
+        }
+
+        #[test]
+        fn ca_non_ca_issuer_rejected() {
+            // BasicConstraints present but cA = FALSE — the W-10 case: a non-CA
+            // cert must not be accepted as an issuer of subordinate certs.
+            let cert = cert_with_exts(vec![ext(&basic(false, None), false)]);
+            assert!(matches!(
+                check_ca_constraints(&cert, false, 3).unwrap_err(),
+                VerifyError::Certificate(_)
+            ));
+            assert!(check_ca_constraints(&cert, true, 3).is_err());
+        }
+
+        #[test]
+        fn ca_keyusage_without_keycertsign_rejected() {
+            let cert = cert_with_exts(vec![
+                ext(&basic(true, None), true),
+                ext(&KeyUsage(KeyUsages::DigitalSignature.into()), true),
+            ]);
+            assert!(matches!(
+                check_ca_constraints(&cert, false, 3).unwrap_err(),
+                VerifyError::Certificate(_)
+            ));
+        }
+
+        #[test]
+        fn ca_without_keyusage_is_allowed() {
+            // KeyUsage is optional; its absence must not fail the usage gate.
+            let cert = cert_with_exts(vec![ext(&basic(true, None), true)]);
+            assert!(check_ca_constraints(&cert, false, 3).is_ok());
+        }
+
+        #[test]
+        fn ca_path_len_budget_exhausted_rejected() {
+            let ca = cert_with_exts(vec![ext(&basic(true, None), true)]);
+            // Budget 0 for a non-anchor issuer means too many CAs precede it.
+            assert!(matches!(
+                check_ca_constraints(&ca, false, 0).unwrap_err(),
+                VerifyError::Certificate(_)
+            ));
+            // The anchor is exempt from the budget check.
+            assert!(check_ca_constraints(&ca, true, 0).is_ok());
+        }
+
+        #[test]
+        fn ca_path_len_constraint_tightens_budget() {
+            // pathLenConstraint clamps the budget carried to downstream issuers.
+            let ca0 = cert_with_exts(vec![ext(&basic(true, Some(0)), true)]);
+            assert_eq!(check_ca_constraints(&ca0, false, 5).unwrap(), 0);
+            let ca2 = cert_with_exts(vec![ext(&basic(true, Some(2)), true)]);
+            assert_eq!(check_ca_constraints(&ca2, false, 5).unwrap(), 2);
+
+            // Chained effect: a pathLen=0 CA followed by another CA is rejected.
+            let budget_after = check_ca_constraints(&ca0, false, 5).unwrap();
+            let next = cert_with_exts(vec![ext(&basic(true, None), true)]);
+            assert!(check_ca_constraints(&next, false, budget_after).is_err());
         }
     }
 }
