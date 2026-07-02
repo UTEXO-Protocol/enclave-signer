@@ -14,6 +14,7 @@ path = "src/main.rs"
 [dependencies]
 # Protobuf
 prost = "0.14.3"
+federated-signer-proto = { git = "ssh://git@github.com/UTEXO-Protocol/federated-signer-proto.git", rev = "41f23e995169d6f50faee5943051afff25271224", package = "federated-signer-proto" }
 
 # Crypto — ECDSA on secp256k1 (EVM address derivation + signing later)
 k256 = { version = "0.13", features = ["ecdsa"] }
@@ -77,9 +78,6 @@ rand_core = { version = "0.6", features = ["getrandom"] }
 vsock = "0.5"
 nix = { version = "0.31.2", features = ["socket"] }
 aws-nitro-enclaves-nsm-api = "0.4"
-
-[build-dependencies]
-prost-build = "0.14.3"
 
 [features]
 default = []

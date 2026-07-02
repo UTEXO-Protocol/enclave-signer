@@ -5,10 +5,8 @@ use std::process;
 use clap::{Parser, Subcommand};
 use tracing_subscriber::EnvFilter;
 
-use utexo_bridge_parent::client::EnclaveClient;
-use utexo_bridge_parent::enclave_proto::{
-    InitializeKeyResponse, PublicKeysResponse, SignEvmRequest, SignPsbtRequest,
-};
+use utexo_bridge_parent::client::{EnclaveClient, SignEvmRequest, SignPsbtRequest};
+use utexo_bridge_parent::enclave_proto::{InitializeKeyResponse, PublicKeysResponse};
 
 #[derive(Parser)]
 #[command(
@@ -96,7 +94,10 @@ enum Command {
         /// Mark EVM event as finalized
         #[arg(long)]
         evm_event_finalized: bool,
-        /// Hex-encoded RGB consignment bytes (send-RGB direction; empty = legacy path)
+        /// RGB asset identifier associated with the transfer
+        #[arg(long, default_value = "")]
+        rgb_asset_id: String,
+        /// Hex-encoded RGB consignment bytes
         #[arg(long, default_value = "")]
         consignment: String,
     },
@@ -330,6 +331,7 @@ fn main() {
             psbt_output_amount,
             evm_event_valid,
             evm_event_finalized,
+            rgb_asset_id,
             consignment,
         } => {
             let psbt_bytes = match hex::decode(&psbt) {
@@ -350,8 +352,6 @@ fn main() {
                     }
                 }
             };
-            // keccak256 integrity hash, mirroring the EVM path; the enclave
-            // re-checks it against the bytes before validating.
             let consignment_hash = if consignment_bytes.is_empty() {
                 vec![]
             } else {
@@ -380,7 +380,7 @@ fn main() {
                 evm_commission,
                 psbt_bytes,
                 psbt_output_amount,
-                rgb_asset_id: String::new(),
+                rgb_asset_id,
                 consignment: consignment_bytes,
                 consignment_hash,
             };

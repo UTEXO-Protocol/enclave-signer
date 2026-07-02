@@ -10,7 +10,7 @@ Cryptographic signing service for the UTEXO RGB-EVM bridge, running inside an [A
 │  Receives signing requests from Orchestrator, enriches with      │
 │  EVM event data + RGB consignment, forwards via gRPC             │
 └───────────────────────┬──────────────────────────────────────────┘
-                        │ gRPC (parentadapter.proto)
+                        │ gRPC (federated-signer-proto/proto/listener/listener.proto)
                         ▼
 ┌──────────────────────────────────────────────────────────────────┐
 │  EC2 Host                                                        │
@@ -77,7 +77,7 @@ Cryptographic signing service for the UTEXO RGB-EVM bridge, running inside an [A
 
 ### gRPC bridge (Parent Adapter)
 
-- Implements `EnclaveService` from `parentadapter.proto` (the Go Listener's gRPC interface)
+- Implements `FederatedSignerNode` from `federated-signer-proto/proto/listener/listener.proto` (the Go Listener's gRPC interface)
 - Translates `PSBTSigningFlow` / `EVMSigningFlow` into enclave-native `SignPsbtRequest` / `SignEvmRequest`
 - Passes consignment bytes through for in-enclave validation
 - 30-second timeout on enclave requests, binds to localhost only
@@ -96,18 +96,30 @@ Cryptographic signing service for the UTEXO RGB-EVM bridge, running inside an [A
 ## Prerequisites
 
 - **Rust 1.85+** (stable)
-- **protobuf compiler** (`protoc`)
+- **Git + SSH access to GitHub** — Cargo fetches the generated
+  `federated-signer-proto` Rust crate from
+  `UTEXO-Protocol/federated-signer-proto` at the pinned commit in
+  `Cargo.toml`.
+- **Initialized git submodules** — this repo still carries
+  `federated-signer-proto/` as the reference checkout for proto comparison and
+  migration work.
 
 ```bash
-# macOS
-brew install protobuf
+# Fresh clone
+git clone --recursive <repo-url>
 
-# Ubuntu / Amazon Linux
-sudo apt-get install -y protobuf-compiler   # Debian/Ubuntu
-sudo dnf install -y protobuf-compiler       # Amazon Linux 2023
+# Existing clone
+git submodule update --init --recursive
+
 ```
 
 For building the Nitro Enclave image (on EC2 only): Docker + `nitro-cli`.
+
+> Note: Rust protobuf types are imported from the generated
+> `federated-signer-proto` crate. The
+> [`federated-signer-proto/`](federated-signer-proto/) submodule stays in the
+> repository as the local reference checkout while the schema migration is in
+> progress.
 
 ## Building
 
@@ -137,7 +149,9 @@ cargo build -p utexo-bridge-parent
 # Build the enclave binary with vsock + RGB validation + SPV
 cargo build --release -p utexo-bridge-enclave --features vsock,rgb-validation,spv
 
-# Or build the full Enclave Image Format (EIF)
+# Or build the full Enclave Image Format (EIF). The build needs SSH access to
+# git@github.com:UTEXO-Protocol/federated-signer-proto.git for the generated
+# Rust protobuf crate.
 ./build/build-enclave.sh
 ```
 
@@ -294,15 +308,71 @@ cargo test -p utexo-bridge-parent
 
 Wire format: `[4-byte LE length][protobuf payload]`
 
-All messages are defined in [`proto/enclave.proto`](proto/enclave.proto). The enclave accepts one `EnclaveRequest` per connection and returns one `EnclaveResponse`.
+All messages are defined in
+[`federated-signer-proto/proto/enclave/enclave.proto`](federated-signer-proto/proto/enclave/enclave.proto).
+The enclave accepts one `EnclaveRequest` per connection and returns one
+`EnclaveResponse`.
 
 ### gRPC interface (Parent Adapter)
 
-Defined in [`proto/parentadapter.proto`](proto/parentadapter.proto) (copied from the Go `federated-signer-node` repo). The Go Listener connects to `EnclaveService.Sign()` and `EnclaveService.GetPublicKeys()`.
+Defined in
+[`federated-signer-proto/proto/enclave/parent.proto`](federated-signer-proto/proto/enclave/parent.proto).
+The Go Listener connects to the parent gRPC service, which transforms requests
+before forwarding them to the enclave.
 
 ### Enriched payloads
 
-[`proto/enriched-payload.proto`](proto/enriched-payload.proto) defines `EnrichedPsbtPayload` and `EnrichedEvmPayload` for the enriched data format.
+[`federated-signer-proto/proto/enriched/payload.proto`](federated-signer-proto/proto/enriched/payload.proto)
+defines `EnrichedPsbtPayload` and `EnrichedEvmPayload` for the enriched data
+format.
+
+### Upstream proto source
+
+Rust builds import generated protobuf/gRPC Rust types from the
+`federated-signer-proto` crate declared in Cargo:
+
+```bash
+cargo build -p utexo-bridge-parent
+cargo build -p utexo-bridge-enclave
+```
+
+The dependency is pinned by commit and fetched over SSH:
+
+```toml
+federated-signer-proto = { git = "ssh://git@github.com/UTEXO-Protocol/federated-signer-proto.git", rev = "..." }
+```
+
+The upstream proto repository is still checked out at
+[`federated-signer-proto/`](federated-signer-proto/) as a reference copy. Use:
+
+```bash
+# Fresh clone of this repository
+git clone --recursive <repo-url>
+
+# Existing clone of this repository
+git submodule update --init --recursive
+find federated-signer-proto/proto -type f -name '*.proto'
+```
+
+If the proto repo was cloned manually into `federated-signer-proto/` before it
+was registered as a submodule, register it from the `enclave-signer/` directory:
+
+```bash
+git submodule add --force git@github.com:UTEXO-Protocol/federated-signer-proto.git federated-signer-proto
+git submodule update --init --recursive
+git submodule status
+```
+
+Docker builds do not copy the submodule. They require BuildKit SSH forwarding
+so Cargo can fetch the pinned generated Rust crate:
+
+```bash
+DOCKER_BUILDKIT=1 docker build --ssh default \
+  -f build/Dockerfile.parent -t utexo-bridge-parent .
+```
+
+[`federated-signer-proto/`](federated-signer-proto/) is ignored by
+[`.dockerignore`](.dockerignore) because it is only the reference checkout.
 
 ## Security model
 
@@ -325,9 +395,10 @@ Defined in [`proto/parentadapter.proto`](proto/parentadapter.proto) (copied from
 │   ├── enclave.proto                 # Enclave wire protocol (all request/response types)
 │   ├── parentadapter.proto           # gRPC service (Go Listener interface)
 │   └── enriched-payload.proto        # Enriched payload definitions
+├── federated-signer-proto/           # Upstream proto submodule/reference checkout
 ├── enclave/
 │   ├── Cargo.toml
-│   ├── build.rs                      # Protobuf codegen (prost)
+│   ├── build.rs                      # Empty: protobuf types come from federated-signer-proto
 │   └── src/
 │       ├── lib.rs                    # Library root + proto modules
 │       ├── main.rs                   # Entry point (vsock forwarder, RGB validator, listener)
@@ -345,7 +416,7 @@ Defined in [`proto/parentadapter.proto`](proto/parentadapter.proto) (copied from
 │           └── rgb.rs                # RGB consignment validation (rgbstd + Esplora)
 ├── parent/
 │   ├── Cargo.toml
-│   ├── build.rs                      # tonic-build (gRPC) + prost-build (enclave proto)
+│   ├── build.rs                      # Empty: protobuf types come from federated-signer-proto
 │   └── src/
 │       ├── lib.rs                    # Library root + grpc_proto + enclave_proto modules
 │       ├── main.rs                   # gRPC server startup (tonic)

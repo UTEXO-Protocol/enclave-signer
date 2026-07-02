@@ -7,7 +7,6 @@
 use std::collections::HashSet;
 use std::net::TcpListener;
 
-use prost::Message as ProstMessage;
 use tonic::transport::Server;
 
 use utexo_bridge_parent::enclave_proto::{
@@ -15,12 +14,14 @@ use utexo_bridge_parent::enclave_proto::{
 };
 use utexo_bridge_parent::enriched;
 use utexo_bridge_parent::framing;
-use utexo_bridge_parent::grpc_proto::enclave_service_client::EnclaveServiceClient;
-use utexo_bridge_parent::grpc_proto::enclave_service_server::EnclaveServiceServer;
+use utexo_bridge_parent::grpc_proto::parent_service_client::ParentServiceClient;
+use utexo_bridge_parent::grpc_proto::parent_service_server::ParentServiceServer;
 use utexo_bridge_parent::grpc_proto::{
-    AttestedPublicKeyRequest, DataType, PublicKeyRequest, SignRequest,
+    sign_request, source_proof, AttestedPublicKeyRequest, EvmSource, RgbSource, SignRequest,
+    SourceProof,
 };
 use utexo_bridge_parent::grpc_server::{EnclaveTarget, ParentAdapterService};
+use utexo_bridge_parent::signer::{DataType, PublicKeyRequest, SignRequest as CommonSignRequest};
 
 /// Start a mock enclave TCP server that responds to specific request types.
 fn start_mock_enclave() -> u16 {
@@ -58,21 +59,37 @@ fn start_mock_enclave() -> u16 {
                         },
                     )),
                 },
-                Some(enclave_request::Request::SignEvm(_)) => EnclaveResponse {
-                    response: Some(enclave_response::Response::EvmSignature(
-                        enclave_proto::EvmSignatureResponse {
-                            signature: vec![0xCC; 65],
+                Some(enclave_request::Request::Sign(sign_req)) => {
+                    match sign_req.destination_network {
+                        Some(enclave_proto::sign_request::DestinationNetwork::EvmDestination(
+                            _,
+                        )) => EnclaveResponse {
+                            response: Some(enclave_response::Response::EvmSignature(
+                                enclave_proto::EvmSignatureResponse {
+                                    signature: vec![0xCC; 65],
+                                },
+                            )),
                         },
-                    )),
-                },
-                Some(enclave_request::Request::SignPsbt(_)) => EnclaveResponse {
-                    response: Some(enclave_response::Response::SignedPsbt(
-                        enclave_proto::SignedPsbtResponse {
-                            signed_psbt: vec![0xDD; 100],
-                            inputs_signed: 2,
+                        Some(enclave_proto::sign_request::DestinationNetwork::RgbDestination(
+                            _,
+                        )) => EnclaveResponse {
+                            response: Some(enclave_response::Response::SignedPsbt(
+                                enclave_proto::SignedPsbtResponse {
+                                    signed_psbt: vec![0xDD; 100],
+                                    inputs_signed: 2,
+                                },
+                            )),
                         },
-                    )),
-                },
+                        _ => EnclaveResponse {
+                            response: Some(enclave_response::Response::Error(
+                                enclave_proto::ErrorResponse {
+                                    code: 1,
+                                    message: "missing destination in mock".into(),
+                                },
+                            )),
+                        },
+                    }
+                }
                 Some(enclave_request::Request::InitializeKey(_)) => EnclaveResponse {
                     response: Some(enclave_response::Response::InitializeKey(
                         enclave_proto::InitializeKeyResponse {
@@ -196,7 +213,7 @@ async fn start_grpc_server(enclave_port: u16) -> u16 {
 
     tokio::spawn(async move {
         Server::builder()
-            .add_service(EnclaveServiceServer::new(service))
+            .add_service(ParentServiceServer::new(service))
             .serve(grpc_addr)
             .await
             .unwrap();
@@ -204,6 +221,68 @@ async fn start_grpc_server(enclave_port: u16) -> u16 {
 
     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     grpc_port
+}
+
+fn common(src_network_id: u32, dst_network_id: u32, data_type: DataType) -> CommonSignRequest {
+    CommonSignRequest {
+        src_network_id,
+        dst_network_id,
+        data_type: data_type as i32,
+    }
+}
+
+fn rgb_source(
+    amount: u64,
+    commission: u64,
+    consignment: Vec<u8>,
+    consignment_hash: Vec<u8>,
+    rgb_asset_id: impl Into<String>,
+) -> SourceProof {
+    SourceProof {
+        source_network_id: 0,
+        token: String::new(),
+        amount,
+        commission,
+        recipient: String::new(),
+        finalized: true,
+        chain: Some(source_proof::Chain::Rgb(RgbSource {
+            consignment,
+            consignment_hash,
+            rgb_amount: amount,
+            rgb_asset_id: rgb_asset_id.into(),
+            merkle_proofs: vec![],
+        })),
+    }
+}
+
+fn evm_source(amount: u64, commission: u64) -> SourceProof {
+    SourceProof {
+        source_network_id: 84,
+        token: String::new(),
+        amount,
+        commission,
+        recipient: String::new(),
+        finalized: true,
+        chain: Some(source_proof::Chain::Evm(EvmSource {
+            tx_hash: vec![0xAA; 32],
+        })),
+    }
+}
+
+fn sign_evm_request(source: SourceProof, payload: enriched::EnrichedEvmPayload) -> SignRequest {
+    SignRequest {
+        common: Some(common(0, 84, DataType::Transaction)),
+        source: Some(source),
+        data: Some(sign_request::Data::EvmData(payload)),
+    }
+}
+
+fn sign_rgb_request(source: SourceProof, payload: enriched::EnrichedRgbPayload) -> SignRequest {
+    SignRequest {
+        common: Some(common(84, 0, DataType::Transaction)),
+        source: Some(source),
+        data: Some(sign_request::Data::RgbData(payload)),
+    }
 }
 
 // =========================================================================
@@ -215,7 +294,7 @@ async fn grpc_public_key_evm_gas_tx() {
     let enclave_port = start_mock_enclave();
     let grpc_port = start_grpc_server(enclave_port).await;
 
-    let mut client = EnclaveServiceClient::connect(format!("http://127.0.0.1:{grpc_port}"))
+    let mut client = ParentServiceClient::connect(format!("http://127.0.0.1:{grpc_port}"))
         .await
         .unwrap();
 
@@ -223,7 +302,6 @@ async fn grpc_public_key_evm_gas_tx() {
         .public_key(PublicKeyRequest {
             network_id: 0,
             data_type: DataType::EvmGasTx as i32,
-            algorithm: None,
         })
         .await
         .unwrap()
@@ -242,7 +320,7 @@ async fn grpc_public_key_transaction_type() {
     let enclave_port = start_mock_enclave();
     let grpc_port = start_grpc_server(enclave_port).await;
 
-    let mut client = EnclaveServiceClient::connect(format!("http://127.0.0.1:{grpc_port}"))
+    let mut client = ParentServiceClient::connect(format!("http://127.0.0.1:{grpc_port}"))
         .await
         .unwrap();
 
@@ -250,7 +328,6 @@ async fn grpc_public_key_transaction_type() {
         .public_key(PublicKeyRequest {
             network_id: 0,
             data_type: DataType::Transaction as i32,
-            algorithm: None,
         })
         .await
         .unwrap()
@@ -269,7 +346,7 @@ async fn grpc_sign_evm_roundtrip() {
     let enclave_port = start_mock_enclave();
     let grpc_port = start_grpc_server(enclave_port).await;
 
-    let mut client = EnclaveServiceClient::connect(format!("http://127.0.0.1:{grpc_port}"))
+    let mut client = ParentServiceClient::connect(format!("http://127.0.0.1:{grpc_port}"))
         .await
         .unwrap();
 
@@ -277,25 +354,13 @@ async fn grpc_sign_evm_roundtrip() {
         call_data: vec![0xAB; 132],
         nonce: 1,
         deadline: u64::MAX,
-        consignment_valid: true,
-        rgb_amount: 0,
-        rgb_asset_id: String::new(),
         chain_id: 1,
         proxy_contract: vec![],
         calldata_amount: 0,
         calldata_commission: 0,
-        consignment: vec![],
-        consignment_hash: vec![],
-        merkle_proofs: vec![],
     };
 
-    let req = SignRequest {
-        network_id: 84,
-        data_type: DataType::Transaction as i32,
-        data: payload.encode_to_vec(),
-        inputs: vec![],
-        algorithm: None,
-    };
+    let req = sign_evm_request(rgb_source(0, 0, vec![], vec![], String::new()), payload);
 
     let resp = client.sign(req).await.unwrap().into_inner();
     assert_eq!(resp.signature.len(), 65, "EVM signature must be 65 bytes");
@@ -306,19 +371,12 @@ async fn grpc_sign_psbt_roundtrip() {
     let enclave_port = start_mock_enclave();
     let grpc_port = start_grpc_server(enclave_port).await;
 
-    let mut client = EnclaveServiceClient::connect(format!("http://127.0.0.1:{grpc_port}"))
+    let mut client = ParentServiceClient::connect(format!("http://127.0.0.1:{grpc_port}"))
         .await
         .unwrap();
 
-    let payload = enriched::EnrichedPsbtPayload {
-        evm_tx_hash: vec![0xAA; 32],
+    let payload = enriched::EnrichedRgbPayload {
         operation_idx: 5,
-        evm_event_valid: true,
-        evm_event_finalized: true,
-        evm_token: vec![],
-        evm_amount: 0,
-        evm_recipient: vec![],
-        evm_commission: 0,
         psbt_bytes: vec![0xFF; 32],
         psbt_output_amount: 0,
         rgb_asset_id: String::new(),
@@ -326,13 +384,7 @@ async fn grpc_sign_psbt_roundtrip() {
         consignment_hash: vec![],
     };
 
-    let req = SignRequest {
-        network_id: 0,
-        data_type: DataType::Transaction as i32,
-        data: payload.encode_to_vec(),
-        inputs: vec![],
-        algorithm: None,
-    };
+    let req = sign_rgb_request(evm_source(0, 0), payload);
 
     let resp = client.sign(req).await.unwrap().into_inner();
     assert!(
@@ -348,15 +400,15 @@ async fn grpc_evm_passes_enriched_fields_through() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let enclave_port = listener.local_addr().unwrap().port();
 
-    let (tx, rx) = std::sync::mpsc::channel::<enclave_proto::SignEvmRequest>();
+    let (tx, rx) = std::sync::mpsc::channel::<enclave_proto::SignRequest>();
 
     std::thread::spawn(move || {
         for stream in listener.incoming() {
             let mut stream = stream.unwrap();
             let req: EnclaveRequest = framing::read_message(&mut stream).unwrap();
 
-            if let Some(enclave_request::Request::SignEvm(evm_req)) = req.request {
-                tx.send(evm_req).unwrap();
+            if let Some(enclave_request::Request::Sign(sign_req)) = req.request {
+                tx.send(sign_req).unwrap();
                 let resp = EnclaveResponse {
                     response: Some(enclave_response::Response::EvmSignature(
                         enclave_proto::EvmSignatureResponse {
@@ -370,7 +422,7 @@ async fn grpc_evm_passes_enriched_fields_through() {
     });
 
     let grpc_port = start_grpc_server(enclave_port).await;
-    let mut client = EnclaveServiceClient::connect(format!("http://127.0.0.1:{grpc_port}"))
+    let mut client = ParentServiceClient::connect(format!("http://127.0.0.1:{grpc_port}"))
         .await
         .unwrap();
 
@@ -381,37 +433,49 @@ async fn grpc_evm_passes_enriched_fields_through() {
         call_data: vec![0xAB; 10],
         nonce: 42,
         deadline: 9999,
-        consignment_valid: true,
-        rgb_amount: 100,
-        rgb_asset_id: "asset-id".into(),
         chain_id: 1,
         proxy_contract: vec![0x01; 20],
         calldata_amount: 50,
         calldata_commission: 5,
-        consignment: consignment_bytes.clone(),
-        consignment_hash: consignment_hash.clone(),
-        merkle_proofs: vec![],
     };
 
-    let req = SignRequest {
-        network_id: 84,
-        data_type: DataType::Transaction as i32,
-        data: payload.encode_to_vec(),
-        inputs: vec![],
-        algorithm: None,
-    };
+    let req = sign_evm_request(
+        rgb_source(
+            100,
+            5,
+            consignment_bytes.clone(),
+            consignment_hash.clone(),
+            "asset-id",
+        ),
+        payload,
+    );
 
     client.sign(req).await.unwrap();
 
     let received = rx.recv_timeout(std::time::Duration::from_secs(2)).unwrap();
-    assert_eq!(received.call_data, vec![0xAB; 10]);
-    assert_eq!(received.nonce, 42);
-    assert_eq!(received.deadline, 9999);
-    assert!(received.consignment_valid);
-    assert_eq!(received.rgb_amount, 100);
-    assert_eq!(received.chain_id, 1);
-    assert_eq!(received.consignment, consignment_bytes);
-    assert_eq!(received.consignment_hash, consignment_hash);
+    assert_eq!(received.amount, 100);
+    match received.source_network {
+        Some(enclave_proto::sign_request::SourceNetwork::RgbSource(source)) => {
+            assert!(source.consignment_valid);
+            assert_eq!(source.asset_id, "asset-id");
+            assert_eq!(source.commission, 5);
+            assert_eq!(source.consignment, consignment_bytes);
+            assert_eq!(source.consignment_hash, consignment_hash);
+        }
+        other => panic!("expected RGB source, got {other:?}"),
+    }
+    match received.destination_network {
+        Some(enclave_proto::sign_request::DestinationNetwork::EvmDestination(destination)) => {
+            assert_eq!(destination.call_data, vec![0xAB; 10]);
+            assert_eq!(destination.nonce, 42);
+            assert_eq!(destination.deadline, 9999);
+            assert_eq!(destination.chain_id, 1);
+            assert_eq!(destination.proxy_contract, vec![0x01; 20]);
+            assert_eq!(destination.calldata_amount, 50);
+            assert_eq!(destination.calldata_commission, 5);
+        }
+        other => panic!("expected EVM destination, got {other:?}"),
+    }
 }
 
 #[tokio::test]
@@ -422,15 +486,15 @@ async fn grpc_evm_forwards_raw_consignment_bytes() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let enclave_port = listener.local_addr().unwrap().port();
 
-    let (tx, rx) = std::sync::mpsc::channel::<enclave_proto::SignEvmRequest>();
+    let (tx, rx) = std::sync::mpsc::channel::<enclave_proto::SignRequest>();
 
     std::thread::spawn(move || {
         for stream in listener.incoming() {
             let mut stream = stream.unwrap();
             let req: EnclaveRequest = framing::read_message(&mut stream).unwrap();
 
-            if let Some(enclave_request::Request::SignEvm(evm_req)) = req.request {
-                tx.send(evm_req).unwrap();
+            if let Some(enclave_request::Request::Sign(sign_req)) = req.request {
+                tx.send(sign_req).unwrap();
                 let resp = EnclaveResponse {
                     response: Some(enclave_response::Response::EvmSignature(
                         enclave_proto::EvmSignatureResponse {
@@ -444,7 +508,7 @@ async fn grpc_evm_forwards_raw_consignment_bytes() {
     });
 
     let grpc_port = start_grpc_server(enclave_port).await;
-    let mut client = EnclaveServiceClient::connect(format!("http://127.0.0.1:{grpc_port}"))
+    let mut client = ParentServiceClient::connect(format!("http://127.0.0.1:{grpc_port}"))
         .await
         .unwrap();
 
@@ -455,33 +519,35 @@ async fn grpc_evm_forwards_raw_consignment_bytes() {
         call_data: vec![0xAB; 132],
         nonce: 7,
         deadline: 1234,
-        consignment_valid: true,
-        rgb_amount: 0,
-        rgb_asset_id: String::new(),
         chain_id: 1,
         proxy_contract: vec![0x02; 20],
         calldata_amount: 0,
         calldata_commission: 0,
-        consignment: consignment_bytes.clone(),
-        consignment_hash: consignment_hash.clone(),
-        merkle_proofs: vec![],
     };
 
-    let req = SignRequest {
-        network_id: 84,
-        data_type: DataType::Transaction as i32,
-        data: payload.encode_to_vec(),
-        inputs: vec![],
-        algorithm: None,
-    };
+    let req = sign_evm_request(
+        rgb_source(
+            0,
+            0,
+            consignment_bytes.clone(),
+            consignment_hash.clone(),
+            String::new(),
+        ),
+        payload,
+    );
 
     client.sign(req).await.unwrap();
 
     let received = rx.recv_timeout(std::time::Duration::from_secs(2)).unwrap();
-    assert_eq!(received.consignment.len(), 256);
-    assert_eq!(received.consignment, consignment_bytes);
-    assert_eq!(received.consignment_hash.len(), 32);
-    assert_eq!(received.consignment_hash, consignment_hash);
+    match received.source_network {
+        Some(enclave_proto::sign_request::SourceNetwork::RgbSource(source)) => {
+            assert_eq!(source.consignment.len(), 256);
+            assert_eq!(source.consignment, consignment_bytes);
+            assert_eq!(source.consignment_hash.len(), 32);
+            assert_eq!(source.consignment_hash, consignment_hash);
+        }
+        other => panic!("expected RGB source, got {other:?}"),
+    }
 }
 
 // =========================================================================
@@ -493,17 +559,15 @@ async fn grpc_invalid_data_type_returns_error() {
     let enclave_port = start_mock_enclave();
     let grpc_port = start_grpc_server(enclave_port).await;
 
-    let mut client = EnclaveServiceClient::connect(format!("http://127.0.0.1:{grpc_port}"))
+    let mut client = ParentServiceClient::connect(format!("http://127.0.0.1:{grpc_port}"))
         .await
         .unwrap();
 
     // Use SIGNATURE data_type which we don't support
     let req = SignRequest {
-        network_id: 0,
-        data_type: DataType::Signature as i32,
-        data: vec![],
-        inputs: vec![],
-        algorithm: None,
+        common: Some(common(0, 84, DataType::Signature)),
+        source: Some(rgb_source(0, 0, vec![], vec![], String::new())),
+        data: None,
     };
 
     let err = client.sign(req).await.unwrap_err();
@@ -511,26 +575,23 @@ async fn grpc_invalid_data_type_returns_error() {
 }
 
 #[tokio::test]
-async fn grpc_invalid_enriched_payload_returns_error() {
+async fn grpc_missing_transaction_payload_returns_error() {
     let enclave_port = start_mock_enclave();
     let grpc_port = start_grpc_server(enclave_port).await;
 
-    let mut client = EnclaveServiceClient::connect(format!("http://127.0.0.1:{grpc_port}"))
+    let mut client = ParentServiceClient::connect(format!("http://127.0.0.1:{grpc_port}"))
         .await
         .unwrap();
 
-    // Send garbage bytes as TRANSACTION data
+    // Structured API requires one destination payload for transaction signing.
     let req = SignRequest {
-        network_id: 0,
-        data_type: DataType::Transaction as i32,
-        data: vec![0xFF, 0xFF, 0xFF, 0xFF, 0xFF],
-        inputs: vec![],
-        algorithm: None,
+        common: Some(common(0, 84, DataType::Transaction)),
+        source: Some(rgb_source(0, 0, vec![], vec![], String::new())),
+        data: None,
     };
 
-    // This should still succeed at the gRPC level (prost is lenient with unknown fields)
-    // but the point is it doesn't crash
-    let _result = client.sign(req).await;
+    let err = client.sign(req).await.unwrap_err();
+    assert_eq!(err.code(), tonic::Code::InvalidArgument);
 }
 
 #[tokio::test]
@@ -538,7 +599,7 @@ async fn grpc_initialize_roundtrip() {
     let enclave_port = start_mock_enclave();
     let grpc_port = start_grpc_server(enclave_port).await;
 
-    let mut client = EnclaveServiceClient::connect(format!("http://127.0.0.1:{grpc_port}"))
+    let mut client = ParentServiceClient::connect(format!("http://127.0.0.1:{grpc_port}"))
         .await
         .unwrap();
 
@@ -562,7 +623,7 @@ async fn grpc_get_last_saved_block_roundtrip() {
     let enclave_port = start_mock_enclave();
     let grpc_port = start_grpc_server(enclave_port).await;
 
-    let mut client = EnclaveServiceClient::connect(format!("http://127.0.0.1:{grpc_port}"))
+    let mut client = ParentServiceClient::connect(format!("http://127.0.0.1:{grpc_port}"))
         .await
         .unwrap();
 
@@ -581,7 +642,7 @@ async fn grpc_submit_headers_roundtrip() {
     let enclave_port = start_mock_enclave();
     let grpc_port = start_grpc_server(enclave_port).await;
 
-    let mut client = EnclaveServiceClient::connect(format!("http://127.0.0.1:{grpc_port}"))
+    let mut client = ParentServiceClient::connect(format!("http://127.0.0.1:{grpc_port}"))
         .await
         .unwrap();
 
@@ -605,7 +666,7 @@ async fn grpc_attested_public_key_roundtrip_and_verify() {
     let enclave_port = start_mock_enclave();
     let grpc_port = start_grpc_server(enclave_port).await;
 
-    let mut client = EnclaveServiceClient::connect(format!("http://127.0.0.1:{grpc_port}"))
+    let mut client = ParentServiceClient::connect(format!("http://127.0.0.1:{grpc_port}"))
         .await
         .unwrap();
 
@@ -664,7 +725,7 @@ async fn grpc_attested_public_key_rejects_wrong_nonce_size() {
     let enclave_port = start_mock_enclave();
     let grpc_port = start_grpc_server(enclave_port).await;
 
-    let mut client = EnclaveServiceClient::connect(format!("http://127.0.0.1:{grpc_port}"))
+    let mut client = ParentServiceClient::connect(format!("http://127.0.0.1:{grpc_port}"))
         .await
         .unwrap();
 

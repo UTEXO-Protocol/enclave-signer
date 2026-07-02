@@ -67,8 +67,8 @@ pub enum EnclaveError {
     Spv(String),
 }
 
-impl From<crate::spv::SpvError> for EnclaveError {
-    fn from(e: crate::spv::SpvError) -> Self {
+impl From<crate::networks::rgb::spv::SpvError> for EnclaveError {
+    fn from(e: crate::networks::rgb::spv::SpvError) -> Self {
         EnclaveError::Spv(e.to_string())
     }
 }

@@ -4,12 +4,10 @@
 #   DOCKER_BUILDKIT=1 docker build --ssh default \
 #     -f build/Dockerfile.parent -t utexo-bridge-parent .
 #
-# `--ssh default` is required even though parent doesn't link against
-# `rgb-consignment`: cargo's resolver fetches every git source declared
-# anywhere in the workspace before it knows which crates a `-p` build
-# actually compiles. The optional `rgb-consignment` dep lives in
-# `enclave/Cargo.toml` and is hosted on a private repo over SSH, so the
-# agent socket has to be exposed.
+# `--ssh default` is required because Cargo fetches the pinned generated
+# `federated-signer-proto` Rust crate from GitHub over SSH. Parent also needs it
+# because cargo's workspace resolver may fetch every git source declared
+# anywhere in the workspace before it knows which crates a `-p` build compiles.
 #
 # Dev (TCP to enclave container):
 #   docker run -e ENCLAVE_ADDR=enclave:5000 utexo-bridge-parent

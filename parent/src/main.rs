@@ -2,7 +2,7 @@ use tonic::transport::Server;
 use tracing_subscriber::EnvFilter;
 
 use utexo_bridge_parent::config::Config;
-use utexo_bridge_parent::grpc_proto::enclave_service_server::EnclaveServiceServer;
+use utexo_bridge_parent::grpc_proto::parent_service_server::ParentServiceServer;
 use utexo_bridge_parent::grpc_server::{EnclaveTarget, ParentAdapterService};
 
 #[tokio::main]
@@ -41,13 +41,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     tracing::info!(%listen_addr, "starting gRPC server");
 
-    let reflection = tonic_reflection::server::Builder::configure()
-        .register_encoded_file_descriptor_set(utexo_bridge_parent::grpc_proto::FILE_DESCRIPTOR_SET)
-        .build_v1()?;
-
     Server::builder()
-        .add_service(reflection)
-        .add_service(EnclaveServiceServer::new(service))
+        .add_service(ParentServiceServer::new(service))
         .serve(listen_addr)
         .await?;
 

@@ -17,10 +17,10 @@
 //!   These are baked in now so they end up in PCR0 alongside everything
 //!   else, even though BIP-325 signature verification itself is deferred
 //!   (the signature lives in the coinbase witness, which the proto does not
-//!   carry — see spv/validation.rs).
+//!   carry — see networks/rgb/spv/validation.rs).
 //! - **Regtest** — uses well-known regtest constants, fine as-is.
 
-use crate::spv::types::{BlockHash, BlockHeight, Network};
+use crate::networks::rgb::spv::types::{BlockHash, BlockHeight, Network};
 
 /// A trust anchor: the enclave only accepts headers that chain forward from
 /// this point, in ascending height.
@@ -103,7 +103,7 @@ impl Checkpoint {
         if !self.is_real {
             return Err(
                 "SPV checkpoint is a placeholder — refuse to start a release build. \
-                 Update enclave/src/spv/checkpoint.rs before deploying.",
+                 Update enclave/src/networks/rgb/spv/checkpoint.rs before deploying.",
             );
         }
         Ok(())
