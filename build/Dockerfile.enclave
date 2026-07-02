@@ -97,5 +97,17 @@ RUN chmod +x /app/utexo-bridge-enclave /app/entrypoint.sh
 # --cloning-secret <secret>`), so it never lands in the EIF / image layers and
 # the PCRs stay reproducible. See enclave/src/server.rs (handle_initialize).
 
+# Pinned bridge/indexer config — public identifiers, baked so PCR0 commits to
+# them (attestation proves which chain/contract/asset this enclave serves) and
+# so anyone can reproduce PCR0 from this public repo. Stage runs on Bitcoin
+# MAINNET + Arbitrum One (chain_id 42161). Electrum: the enclave pins this host
+# to 127.0.0.1 and reaches it over the vsock forwarder (host runs
+# `vsock-proxy 8001 electrs-mainnet.utexo.com 50002`); TLS terminates in-enclave.
+ENV EVM_CHAIN_ID=42161 \
+    BRIDGE_CONTRACT=0x6711f1a319B37847fa0234181C34D883774c4951 \
+    RGB_ASSET_ID=rgb:mdsLkp_1-pw_dZme-xXMDo3x-Z4PWGNM-TH9Ig0H-_Qh2Ce0 \
+    BITCOIN_NETWORK=bitcoin \
+    ELECTRUM_URL=ssl://electrs-mainnet.utexo.com:50002
+
 ENV RUST_LOG=info
 ENTRYPOINT ["/app/entrypoint.sh"]
