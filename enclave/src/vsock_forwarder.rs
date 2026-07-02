@@ -1,6 +1,20 @@
 //! TCP-to-vsock forwarder for reaching external services (e.g., Esplora) from
 //! inside a Nitro enclave. Listens on localhost TCP and forwards each connection
 //! to the parent instance via vsock, where `vsock-proxy` relays to the real endpoint.
+//!
+//! TRUST BOUNDARY (audit I-01 / Oxorio I-03, I-08): everything reachable
+//! through this forwarder is HOST-CONTROLLED and UNTRUSTED. The host runs the
+//! `vsock-proxy` on the far end and can drop, delay, reorder, or forge any
+//! bytes it returns. Data fetched over it (Esplora tx / merkle proof / chain
+//! tip) is EVIDENCE TO BE VERIFIED - by in-enclave SPV proof checking and
+//! rgbstd consignment validation - never trusted input. The listener binds
+//! only to loopback (`127.0.0.1`, not externally reachable), but it is a
+//! GENERIC egress primitive: any code inside the enclave process that can open
+//! a loopback socket can tunnel host-bound traffic through it. A future
+//! hardening (issue #87) would replace it with a typed Esplora client private
+//! to the RGB resolver path that only issues the specific calls the resolver
+//! makes (fetch tx / merkle proof / tip), so arbitrary traffic cannot be
+//! tunneled.
 
 use std::io;
 use std::net::TcpListener;
@@ -12,6 +26,10 @@ const PARENT_CID: u32 = 3;
 
 /// Start a background forwarder thread that bridges `127.0.0.1:{local_port}`
 /// to vsock CID 3 (parent instance), port `vsock_port`.
+///
+/// See the module-level TRUST BOUNDARY note: this is an untrusted,
+/// host-controlled egress path. Anything fetched through it must be verified
+/// (SPV + rgbstd validation), never trusted as input (audit I-01).
 ///
 /// The forwarder is fire-and-forget — it logs errors but never crashes the enclave.
 pub fn start_forwarder(local_port: u16, vsock_port: u32) -> io::Result<()> {

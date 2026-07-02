@@ -119,6 +119,16 @@ fn validate_source_payload(source: &RgbSource) -> Result<()> {
                 .into(),
         ));
     }
+    // Hash integrity check between listener-supplied bytes and the pre-computed
+    // keccak. This is INTEGRITY, NOT AUTHORIZATION (audit I-02 / Oxorio I-09):
+    // the listener controls BOTH `consignment` and `consignment_hash`, so a
+    // match only proves the wire copy was not corrupted in transit - it says
+    // nothing about whether the consignment authorizes this release.
+    // Authorization comes solely from the independent in-enclave RGB validation
+    // (`validate_consignment` below, `rgbstd::Transfer::validate` against an
+    // Esplora resolver), SPV anchoring, and the binding of validated facts
+    // (contract_id / op_id / amount). Keep this as defence-in-depth tamper
+    // detection; never read a hash match as proof of intent.
     if source.consignment_hash.is_empty() {
         return Err(EnclaveError::CrossCheck(
             "consignment present but consignment_hash is missing".into(),

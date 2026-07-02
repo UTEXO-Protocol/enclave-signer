@@ -58,6 +58,28 @@ pub fn assert_witnesses_confirmed(validated: &ValidatedConsignment) -> Result<()
     Ok(())
 }
 
+/// Fail-closed selector guard for the selector-specific `fundsOut` validator
+/// [`validate_funds_out_transfer`].
+///
+/// It is only meaningful for the `fundsOut` selector
+/// ([`FUNDS_OUT_SELECTOR_POOLS`]), which the caller
+/// (`server::apply_funds_out_binding`) has already whitelisted before invoking
+/// it. It previously returned `Ok(())` for any other selector, so a future
+/// refactor that called it directly - skipping that whitelist - would get a
+/// *silent success* for an unsupported selector (audit I-03 / Oxorio I-10:
+/// caller-ordering instead of failing closed). Reject instead: a
+/// selector-specific validator handed the wrong selector is a programming
+/// error, so fail closed rather than pass.
+fn ensure_funds_out_selector(call_data: &[u8], validator: &str) -> Result<()> {
+    if call_data.len() < 4 || call_data[..4] != FUNDS_OUT_SELECTOR_POOLS {
+        return Err(EnclaveError::CrossCheck(format!(
+            "{validator} called with a non-fundsOut selector - selector-specific validators must \
+             only run after the fundsOut whitelist in apply_funds_out_binding"
+        )));
+    }
+    Ok(())
+}
+
 /// Pools-side amount cross-check for the `fundsOut` transfer flow. Binds the
 /// calldata `amount` to the consignment's actual asset value:
 ///
@@ -66,16 +88,15 @@ pub fn assert_witnesses_confirmed(validated: &ValidatedConsignment) -> Result<()
 ///   2. The transition's `total_output_amount` must cover the EVM-side release
 ///      `amount`.
 ///
-/// A no-op for any non-`fundsOut` selector.
+/// Fails closed (does not no-op) if handed anything but the `fundsOut`
+/// selector - see [`ensure_funds_out_selector`] (audit I-03).
 pub fn validate_funds_out_transfer(
     call_data: &[u8],
     validated: &ValidatedConsignment,
 ) -> Result<()> {
     use crate::networks::rgb::validation::ifa;
 
-    if call_data.len() < 4 || call_data[..4] != FUNDS_OUT_SELECTOR_POOLS {
-        return Ok(());
-    }
+    ensure_funds_out_selector(call_data, "validate_funds_out_transfer")?;
 
     let last = validated.last_transition.as_ref().ok_or_else(|| {
         EnclaveError::CrossCheck(
