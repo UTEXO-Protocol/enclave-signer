@@ -148,7 +148,8 @@ fn main() {
             vsock_port,
             "starting indexer vsock forwarder (host must run: vsock-proxy {vsock_port} <indexer-host> <indexer-port>)"
         );
-        if let Err(e) = utexo_bridge_enclave::vsock_forwarder::start_forwarder(local_port, vsock_port)
+        if let Err(e) =
+            utexo_bridge_enclave::vsock_forwarder::start_forwarder(local_port, vsock_port)
         {
             tracing::error!("failed to start vsock forwarder: {e}");
         }
