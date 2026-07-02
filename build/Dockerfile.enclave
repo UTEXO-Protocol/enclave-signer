@@ -19,7 +19,15 @@
 # not shipped (multi-stage) and only affect the binary, which --locked + RUSTFLAGS
 # keep deterministic.
 
-FROM rust:1.89-slim@sha256:8cffb8fe4e8a95cf0d6a2060375e5a28aff4c752155aa9f1f9193530769bdf66 AS builder
+# GLIBC PIN (runtime-compat, NOT just build): the enclave binary links against
+# the builder's glibc but RUNS on the amazonlinux:2023-minimal runtime rootfs
+# below, which ships glibc 2.34. The default `rust:1.89-slim` moved to Debian
+# trixie (glibc >=2.38), and `aws-lc-sys` (Electrum -> rustls -> aws-lc-rs) pulls
+# in a GLIBC_2.38 symbol, so a trixie-built binary aborts at enclave boot with
+# `version GLIBC_2.38 not found`. Bullseye (Debian 11) ships glibc 2.31 <= 2.34,
+# so the binary only needs symbols the runtime provides. Pin by DIGEST; bump tag
+# + digest together and keep it on a glibc <= the runtime's.
+FROM rust:1.89-slim-bullseye@sha256:a7a758a6c8493b507a3d75fa4dc3f41e2902f8f2eeb124ae5527df3d625539e6 AS builder
 
 # `git` + `openssh-client`: the workspace `[patch.crates-io]` uses public
 # git URLs for rgb-consensus / rgb-ops / rgb-invoicing / rgb-strict-encoding,
@@ -27,13 +35,15 @@ FROM rust:1.89-slim@sha256:8cffb8fe4e8a95cf0d6a2060375e5a28aff4c752155aa9f1f9193
 # sets `net.git-fetch-with-cli = true` so cargo shells out to system `git`
 # rather than bundled libgit2. `openssh-client` provides the ssh binary +
 # known_hosts machinery `git` needs for the SSH transport.
-# `cmake` + `make`: the Electrum witness resolver (rgb-ops `electrum_blocking`)
-# pulls `electrum-client` -> rustls -> aws-lc-rs, whose `aws-lc-sys` C sources
-# build via CMake. gcc/cc is already present (used by `ring`); cmake/make are not.
-# These are builder-only (multi-stage) and don't ship in the runtime rootfs/PCR.
+# `cmake` (via pip) + `make`: the Electrum witness resolver (rgb-ops
+# `electrum_blocking`) pulls `electrum-client` -> rustls -> aws-lc-rs, whose
+# `aws-lc-sys` C sources build via CMake. gcc/cc is already present (used by
+# `ring`). Bullseye's apt cmake is 3.18; aws-lc-sys wants a newer one, so we pin
+# a modern cmake from PyPI. All builder-only (multi-stage) — not in runtime/PCR.
 RUN apt-get update && apt-get install -y \
     pkg-config libssl-dev protobuf-compiler git ca-certificates openssh-client \
-    cmake make \
+    make python3 python3-pip \
+    && pip3 install --no-cache-dir "cmake==3.31.6" \
     && rm -rf /var/lib/apt/lists/*
 
 # Trust github.com's SSH host key so the build doesn't prompt or fail
