@@ -53,6 +53,7 @@ pub fn start_test_server_with_config(
         #[cfg(feature = "rgb-validation")]
         rgb_validator: None,
         header_chain,
+        submit_rate_limiter: std::sync::Mutex::new(server::SubmitRateLimiter::default()),
     });
 
     thread::spawn(move || {

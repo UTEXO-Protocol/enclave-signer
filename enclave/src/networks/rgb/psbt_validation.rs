@@ -4,6 +4,39 @@ use bitcoin::psbt::Psbt;
 use super::validation::{ifa, ValidatedConsignment};
 use crate::error::{EnclaveError, Result};
 
+/// Derive the soft-dedup key for an EVM→RGB bridge PSBT operation.
+///
+/// 32-byte keccak over `(chain_id, bridge_contract, evm_tx_hash,
+/// operation_idx, rgb_asset_id)`. `chain_id` and `bridge_contract` come from
+/// the enclave's **pinned** [`crate::config::BridgeConfig`] (not the request),
+/// so they can't be varied per-call. The variable-length fields are
+/// length-prefixed and a domain tag is mixed in so two distinct tuples can't
+/// hash to the same key by concatenation ambiguity.
+///
+/// Consumed by the **soft** in-memory replay guard
+/// ([`crate::state::EnclaveState::op_replay_guard`]) — see its doc for why
+/// this is defense-in-depth and not a sufficient double-spend control (#84).
+pub fn psbt_operation_key(
+    chain_id: u64,
+    bridge_contract: &[u8; 20],
+    evm_tx_hash: &[u8],
+    operation_idx: u64,
+    rgb_asset_id: &str,
+) -> [u8; 32] {
+    use sha3::{Digest, Keccak256};
+
+    let mut h = Keccak256::new();
+    h.update(b"utexo:psbt-op:v1");
+    h.update(chain_id.to_be_bytes());
+    h.update(bridge_contract);
+    h.update((evm_tx_hash.len() as u64).to_be_bytes());
+    h.update(evm_tx_hash);
+    h.update(operation_idx.to_be_bytes());
+    h.update((rgb_asset_id.len() as u64).to_be_bytes());
+    h.update(rgb_asset_id.as_bytes());
+    h.finalize().into()
+}
+
 /// Validate the serialized PSBT shape owned by an RGB destination.
 pub fn validate_psbt_bytes(psbt_bytes: &[u8]) -> Result<()> {
     // Shape whitelist: refuse payloads that aren't even a legitimate PSBT before any other
@@ -244,6 +277,58 @@ mod tests {
             err.to_string().contains("no inputs"),
             "expected no-inputs rejection, got: {err}"
         );
+    }
+
+    // =========================================================================
+    // Operation-dedup key — `psbt_operation_key` (audit W-02 / #84)
+    // =========================================================================
+
+    #[test]
+    fn op_key_is_deterministic() {
+        let a = psbt_operation_key(1, &[0x11; 20], &[0xAA; 32], 7, "rgb:asset");
+        let b = psbt_operation_key(1, &[0x11; 20], &[0xAA; 32], 7, "rgb:asset");
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn op_key_varies_with_every_field() {
+        let base = psbt_operation_key(1, &[0x11; 20], &[0xAA; 32], 7, "rgb:asset");
+        assert_ne!(
+            base,
+            psbt_operation_key(2, &[0x11; 20], &[0xAA; 32], 7, "rgb:asset"),
+            "chain_id must change the key"
+        );
+        assert_ne!(
+            base,
+            psbt_operation_key(1, &[0x22; 20], &[0xAA; 32], 7, "rgb:asset"),
+            "bridge_contract must change the key"
+        );
+        assert_ne!(
+            base,
+            psbt_operation_key(1, &[0x11; 20], &[0xBB; 32], 7, "rgb:asset"),
+            "evm_tx_hash must change the key"
+        );
+        assert_ne!(
+            base,
+            psbt_operation_key(1, &[0x11; 20], &[0xAA; 32], 8, "rgb:asset"),
+            "operation_idx must change the key"
+        );
+        assert_ne!(
+            base,
+            psbt_operation_key(1, &[0x11; 20], &[0xAA; 32], 7, "rgb:other"),
+            "rgb_asset_id must change the key"
+        );
+    }
+
+    #[test]
+    fn op_key_length_prefix_blocks_concatenation_collision() {
+        // Without length-prefixing the variable fields, moving a byte from the
+        // end of evm_tx_hash to the front of rgb_asset_id would collide. The
+        // prefix must keep these distinct. evm_tx_hash is fixed at 32 bytes in
+        // practice, but the key fn must not rely on that for separation.
+        let k1 = psbt_operation_key(1, &[0x11; 20], b"AB", 0, "C");
+        let k2 = psbt_operation_key(1, &[0x11; 20], b"A", 0, "BC");
+        assert_ne!(k1, k2);
     }
 
     // =========================================================================

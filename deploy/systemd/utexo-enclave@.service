@@ -1,0 +1,19 @@
+[Unit]
+Description=UTEXO Nitro enclave (CID %i)
+# Enclaves need the allocator (CPU/memory pool) up first.
+After=nitro-enclaves-allocator.service
+Requires=nitro-enclaves-allocator.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+User=ubuntu
+# Allow for the serialized start lock (flock -w 180) plus run-enclave retries.
+TimeoutStartSec=300
+# EIF path + cpu/memory come from the deploy-written env file.
+EnvironmentFile=/etc/utexo/enclave.env
+ExecStart=/usr/local/bin/utexo-enclave-ctl.sh start %i
+ExecStop=/usr/local/bin/utexo-enclave-ctl.sh stop %i
+
+[Install]
+WantedBy=multi-user.target

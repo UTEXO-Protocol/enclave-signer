@@ -1,0 +1,140 @@
+name: "Build EIF"
+
+# Produces the PRODUCTION enclave image (release: vsock,rgb-validation,spv) as a
+# Nitro EIF, captures its PCR measurements, and publishes everything to S3 under
+# an immutable git-SHA path. Runtime hosts then pull the EIF by SHA instead of
+# anyone building on a side machine.
+#
+# Reproducible PCRs: PCR0/PCR1 are a measurement of the EIF, which bakes in the
+# nitro-cli kernel/init blobs — NOT just our code. We therefore pin nitro-cli to
+# the SAME version the runtime hosts run (stage hosts: 1.4.5). Bump NITRO_CLI_VERSION
+# here in lockstep with the hosts, or attestation (KMS PCR policy + clone) breaks.
+#
+# Required repo config (Settings -> Secrets and variables -> Actions):
+#   secrets.RGB_CONSIGNMENT_PARSER_DEPLOY_KEY  read-only deploy key (already used by ci.yml)
+#   secrets.AWS_OIDC_ROLE_ARN                  IAM role to assume via OIDC for S3 upload
+#                                              (if unset, the S3 step is skipped and
+#                                               artifacts are only attached to the run)
+#   vars.EIF_S3_BUCKET                         target bucket (defaults to the stage bucket)
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+  id-token: write   # for AWS OIDC
+
+env:
+  NITRO_CLI_VERSION: "1.4.5"
+  AWS_REGION: "eu-central-1"
+  # Hoisted to env because secrets can't be referenced directly in `if:`.
+  AWS_ROLE: ${{ secrets.AWS_OIDC_ROLE_ARN }}
+
+jobs:
+  build-eif:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Deploy key for the private `rgb-consignment` dep (rgb-validation/spv).
+      # Same secret the CI/CD workflows already use; `--ssh default` forwards it
+      # into the BuildKit build for the cargo fetch only.
+      - name: Set up SSH for private RGB deps
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.RGB_CONSIGNMENT_PARSER_DEPLOY_KEY }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Install Rust (for nitro-cli build)
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.89"
+          targets: x86_64-unknown-linux-musl
+
+      - name: System deps
+        run: sudo apt-get update && sudo apt-get install -y musl-tools jq llvm-dev libclang-dev clang
+
+      # Build + cache nitro-cli pinned to the host version. The repo's
+      # blobs/x86_64 (kernel/init) determine PCR0/PCR1, so pinning the tag pins
+      # the PCRs. Cache keyed on the version so we only build once per bump.
+      - name: Cache nitro-cli
+        id: nitro-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/nitro-cli-dist
+          key: nitro-cli-${{ env.NITRO_CLI_VERSION }}
+
+      - name: Build nitro-cli ${{ env.NITRO_CLI_VERSION }}
+        if: steps.nitro-cache.outputs.cache-hit != 'true'
+        run: |
+          set -euxo pipefail
+          git clone --depth 1 --branch "v${NITRO_CLI_VERSION}" \
+            https://github.com/aws/aws-nitro-enclaves-cli.git /tmp/nitro-src
+          cd /tmp/nitro-src
+          make nitro-cli
+          mkdir -p ~/nitro-cli-dist/bin ~/nitro-cli-dist/blobs
+          # The CLI binary lands under build/nitro_cli/.../release/nitro-cli
+          cp "$(find . -type f -name nitro-cli -path '*release*' | head -n1)" ~/nitro-cli-dist/bin/nitro-cli
+          cp -r blobs/x86_64/. ~/nitro-cli-dist/blobs/
+
+      - name: Install nitro-cli on PATH
+        run: |
+          set -euxo pipefail
+          sudo install -m 0755 ~/nitro-cli-dist/bin/nitro-cli /usr/local/bin/nitro-cli
+          nitro-cli --version
+
+      - name: Build EIF + measurements
+        env:
+          OUT_DIR: ${{ github.workspace }}/artifacts
+          NITRO_CLI_BLOBS: /home/runner/nitro-cli-dist/blobs
+        run: |
+          set -euxo pipefail
+          mkdir -p "$OUT_DIR"
+          ./build/build-enclave.sh
+
+      - name: Write build metadata
+        run: |
+          set -euxo pipefail
+          cat > artifacts/metadata.json <<EOF
+          {
+            "git_sha": "${{ github.sha }}",
+            "ref": "${{ github.ref }}",
+            "nitro_cli_version": "${NITRO_CLI_VERSION}",
+            "run_id": "${{ github.run_id }}",
+            "built_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          }
+          EOF
+          cat artifacts/metadata.json
+
+      - name: Upload run artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: eif-${{ github.sha }}
+          path: |
+            artifacts/utexo-bridge-enclave.eif
+            artifacts/PCR.json
+            artifacts/SHA256SUMS
+            artifacts/metadata.json
+
+      # --- S3 publish (only when an OIDC role is configured) -----------------
+      - name: Configure AWS credentials
+        id: aws
+        if: ${{ env.AWS_ROLE != '' }}
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.AWS_ROLE }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Publish to S3 (immutable git_sha path)
+        if: ${{ steps.aws.outcome == 'success' }}
+        env:
+          BUCKET: ${{ vars.EIF_S3_BUCKET || 'utexo-stage-eif-artifacts-867958227014-20260618' }}
+        run: |
+          set -euxo pipefail
+          DEST="s3://${BUCKET}/eif/${{ github.sha }}/"
+          aws s3 cp artifacts/ "$DEST" --recursive
+          echo "Published to $DEST"

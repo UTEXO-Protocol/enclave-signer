@@ -49,6 +49,20 @@ const DEFAULT_NONCE_TTL: Duration = Duration::from_secs(60 * 60);
 /// Default hard memory ceiling on recorded nonces.
 const DEFAULT_NONCE_MAX: usize = 10_000;
 
+/// Default TTL for the PSBT bridge-operation dedup guard. Far longer than
+/// the cloning nonce TTL: an EVM→RGB deposit can legitimately be retried
+/// for as long as it remains unsettled, and the window must comfortably
+/// outlast normal listener retry/confirmation latency so a same-op
+/// resubmission is still caught. 24h is generous while keeping the set
+/// self-cleaning in steady state. See [`EnclaveState::op_replay_guard`].
+const DEFAULT_OP_DEDUP_TTL: Duration = Duration::from_secs(24 * 60 * 60);
+
+/// Hard memory ceiling on recorded bridge operations. At ~80 bytes/entry
+/// this caps the guard near ~8 MB. On overflow inside one TTL window the
+/// oldest entry is evicted (never wedge signing) — see the soft-guard
+/// caveats on [`EnclaveState::op_replay_guard`].
+const DEFAULT_OP_DEDUP_MAX: usize = 100_000;
+
 /// Replay guard for attestation nonces, bounded by **time** (not just
 /// count) so a flooding parent cannot permanently wedge cloning.
 ///
@@ -196,6 +210,23 @@ pub struct EnclaveState {
     donor_cloning_secret: Mutex<Option<SecretBox<String>>>,
     /// Replay guard for nonces in peer attestations.
     pub replay_guard: NonceReplayGuard,
+    /// **Soft** dedup guard for EVM→RGB bridge PSBT operations, keyed on a
+    /// hash of `(chain_id, bridge_contract, evm_tx_hash, operation_idx,
+    /// rgb_asset_id)` (see `validation::psbt_crosscheck::psbt_operation_key`).
+    /// Rejects a same-operation resubmission inside the TTL window before
+    /// signing (audit W-02 / #84).
+    ///
+    /// This is **defense-in-depth, not a sufficient double-spend control**.
+    /// Nitro has no persistent storage, so the set is:
+    ///   - **volatile** — wiped on restart;
+    ///   - **per-instance** — a sibling enclave in the cluster never saw it,
+    ///     so the host can route a duplicate to a fresh peer;
+    ///   - **TTL-bounded** — a replay after eviction is admitted again.
+    ///
+    /// A compromised host that varies any keyed field also bypasses it. It
+    /// stops honest listener retries and naive same-tuple replay; the durable
+    /// cross-instance/cross-restart guard remains an on-chain ticket (#84/#93).
+    pub op_replay_guard: NonceReplayGuard,
 }
 
 impl Default for EnclaveState {
@@ -211,6 +242,10 @@ impl EnclaveState {
             network,
             donor_cloning_secret: Mutex::new(None),
             replay_guard: NonceReplayGuard::default(),
+            op_replay_guard: NonceReplayGuard::with_capacity(
+                DEFAULT_OP_DEDUP_MAX,
+                DEFAULT_OP_DEDUP_TTL,
+            ),
         }
     }
 
