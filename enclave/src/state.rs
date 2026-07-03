@@ -212,7 +212,7 @@ pub struct EnclaveState {
     pub replay_guard: NonceReplayGuard,
     /// **Soft** dedup guard for EVM→RGB bridge PSBT operations, keyed on a
     /// hash of `(chain_id, bridge_contract, evm_tx_hash, operation_idx,
-    /// rgb_asset_id)` (see `validation::psbt_crosscheck::psbt_operation_key`).
+    /// rgb_asset_id)` (see `networks::rgb::psbt_validation::psbt_operation_key`).
     /// Rejects a same-operation resubmission inside the TTL window before
     /// signing (audit W-02 / #84).
     ///

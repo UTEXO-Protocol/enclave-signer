@@ -22,6 +22,7 @@ Cryptographic signing service for the UTEXO RGB-EVM bridge, running inside an [A
 │  └── TCP / vsock to enclave                                      │
 │                                                                  │
 │  vsock-proxy 8001 → Esplora API  (for RGB validation)            │
+│  vsock-proxy 8002 → EVM RPC      (for FundsIn verify, evm-rpc)   │
 │                                                                  │
 │  ┌────────────────────────────────────────────────────────────┐  │
 │  │  Nitro Enclave                                              │  │
@@ -206,6 +207,10 @@ nitro-cli run-enclave \
 # Start vsock-proxy for Esplora access (on the host)
 vsock-proxy 8001 <esplora-host> <esplora-port>
 
+# Start vsock-proxy for the EVM RPC (on the host) — only for `evm-rpc` builds,
+# used by in-enclave FundsIn verification (#60). Allowlist to the RPC endpoint.
+vsock-proxy 8002 <evm-rpc-host> <evm-rpc-port>
+
 # Start the gRPC server (Parent Adapter)
 GRPC_PORT=5000 USE_VSOCK=true cargo run --release -p utexo-bridge-parent
 ```
@@ -253,6 +258,9 @@ nitro-cli terminate-enclave --enclave-id <enclave-id>
 | `ESPLORA_URL` | `http://127.0.0.1:3443` | Esplora API endpoint for RGB validation |
 | `BITCOIN_NETWORK` | `bitcoin` | One of: `bitcoin`, `testnet`, `signet`, `regtest`. Affects BIP-86 coin type (0 vs 1) and xpub prefix (xpub vs tpub). |
 | `ESPLORA_VSOCK_PORT` | `8001` | vsock port for the host's vsock-proxy |
+| `EVM_RPC_URL` | `http://127.0.0.1:3444` | Loopback EVM JSON-RPC endpoint for in-enclave FundsIn verification (#60, `evm-rpc` builds). MUST be loopback — reached via the vsock forwarder. Responses are relayed by the untrusted host (evidence verified fail-closed; trustless only once Helios #77 lands). |
+| `EVM_RPC_VSOCK_PORT` | `8002` | vsock port for the host's EVM-RPC vsock-proxy (`evm-rpc` builds) |
+| `EVM_MIN_CONFIRMATIONS` | `12` | Minimum confirmation depth a FundsIn receipt must have (`evm-rpc` builds) |
 
 #### Parent Adapter
 
@@ -379,10 +387,11 @@ DOCKER_BUILDKIT=1 docker build --ssh default \
 - **No unsafe code** — `#![deny(unsafe_code)]` enforced in the enclave crate.
 - **Zeroize-on-drop** — All seeds and private keys wrapped in `SecretBox`. Memory zeroed on drop.
 - **In-enclave RGB validation** — Consignments validated inside the TEE via rgbstd, not trusted from external sources.
+- **In-enclave EVM FundsIn verification** (`evm-rpc`, #60) — bridge-mode `signPsbt` confirms the EVM deposit itself via `eth_getTransactionReceipt`, instead of trusting the listener's `evm_event_valid`/`evm_event_finalized` flags (audit M-06 / #51). The RPC is reached through the untrusted host, so responses are treated as evidence (verified fail-closed) and this becomes trustless only once Helios (#77) verifies them.
 - **Cross-check validation** — Amount consistency, calldata extraction, deadline, and chain/domain checks before any signature is produced.
 - **Seed import gated** — Raw seed import requires `allow-seed-import` feature, never enabled in production.
 - **Nitro Enclave isolation** — No persistent storage, no network access (only vsock), no shell.
-- **vsock-proxy allowlist** — Enclave can only reach Esplora through the host's vsock-proxy with explicit allowlist.
+- **vsock-proxy allowlist** — Enclave can only reach Esplora (and, for `evm-rpc` builds, the EVM RPC) through the host's vsock-proxy with explicit allowlist.
 - **Release hardening** — `opt-level = "z"`, LTO, symbol stripping, `panic = "abort"`, single codegen unit.
 - **gRPC localhost-only** — Parent Adapter binds to `127.0.0.1`, not `0.0.0.0`.
 

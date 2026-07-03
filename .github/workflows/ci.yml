@@ -65,19 +65,24 @@ jobs:
       - name: Test (default features)
         run: cargo test --workspace
 
-      # Production build profile: vsock + rgb-validation + spv. Catches any
-      # regression on the actual feature combination shipped in the EIF.
+      # Production build profile: vsock + rgb-validation + spv + evm-rpc.
+      # Catches any regression on the actual feature combination shipped in the EIF.
       - name: Build (production combo)
-        run: cargo build -p utexo-bridge-enclave --features vsock,rgb-validation,spv
+        run: cargo build -p utexo-bridge-enclave --features vsock,rgb-validation,spv,evm-rpc
 
       - name: Clippy (production combo)
-        run: cargo clippy -p utexo-bridge-enclave --features vsock,rgb-validation,spv --all-targets -- -D warnings
+        run: cargo clippy -p utexo-bridge-enclave --features vsock,rgb-validation,spv,evm-rpc --all-targets -- -D warnings
 
       # SPV path coverage. Cannot use vsock here (Linux runner without
       # vsock support); spv pulls in rgb-validation transitively, which is
       # what the SPV unit + integration tests exercise.
       - name: Test (--features spv)
         run: cargo test -p utexo-bridge-enclave --features spv
+
+      # In-enclave EVM FundsIn verification (#60). The predicate + decoding
+      # tests use a FakeProvider, so no real RPC is needed in CI.
+      - name: Test (--features evm-rpc)
+        run: cargo test -p utexo-bridge-enclave --features evm-rpc
 
   # Assert the dev-only features `compile_error!` in a release build, so a
   # misconfigured Dockerfile / CI matrix can never ship one. Each feature is

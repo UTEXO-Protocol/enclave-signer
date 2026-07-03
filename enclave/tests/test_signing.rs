@@ -505,9 +505,16 @@ fn test_sign_psbt_before_init() {
 // PSBT enriched cross-check tests
 // =============================================================================
 
+/// Audit M-06 / #51: the listener-supplied `evm_event_valid` /
+/// `evm_event_finalized` booleans no longer authorize *or* block signing. With
+/// both `false`, the request is never rejected with the old boolean-driven
+/// messages: EVM-event validity/finality is now established independently by
+/// `networks::evm::evm_event` (unit-tested). Whatever else happens to the request
+/// (rejected for a missing consignment under rgb-validation, or for no
+/// enclave-owned PSBT input), it is never the booleans that decide it.
 #[test]
 #[cfg(not(feature = "dev-mode"))]
-fn test_sign_psbt_rejects_unfinalized() {
+fn test_sign_psbt_ignores_listener_evm_booleans() {
     let port = common::start_test_server();
 
     let init_req = EnclaveRequest {
@@ -521,7 +528,7 @@ fn test_sign_psbt_rejects_unfinalized() {
     let sign_req = EnclaveRequest {
         request: Some(Request::Sign(sign_psbt_request(
             vec![0xAA; 32],
-            true,
+            false,
             false,
             1000,
             0,
@@ -531,12 +538,15 @@ fn test_sign_psbt_rejects_unfinalized() {
     };
     let resp = common::send_request(port, &sign_req);
 
-    match &resp.response {
-        Some(Response::Error(e)) => {
-            assert_eq!(e.code, 3);
-            assert!(e.message.contains("not yet finalized"));
-        }
-        other => panic!("expected ErrorResponse, got {:?}", other),
+    // Any error is fine (other real checks may reject this synthetic request),
+    // but it must NOT be the removed listener-boolean checks.
+    if let Some(Response::Error(e)) = &resp.response {
+        assert!(
+            !e.message.contains("not yet finalized")
+                && !e.message.contains("not validated by Listener"),
+            "listener booleans must no longer drive rejection, got: {}",
+            e.message
+        );
     }
 }
 

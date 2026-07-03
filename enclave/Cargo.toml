@@ -81,6 +81,11 @@ hmac = "0.12"
 sha2 = "0.10"
 subtle = "2"
 rand_core = { version = "0.6", features = ["getrandom"] }
+# rustls (not native-tls) to match the enclave's existing TLS stack (minreq
+# rustls) and keep OpenSSL out of the TEE. The enclave->forwarder hop is plain
+# loopback HTTP; TLS to the real RPC (if any) terminates at the host proxy.
+alloy = { version = "2.1.0", default-features = false, features = ["provider-http", "rpc-types-eth", "reqwest-rustls-tls"], optional = true }
+tokio = { version = "1.52.3", default-features = false, features = ["rt", "rt-multi-thread"], optional = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 vsock = "0.5"
@@ -116,6 +121,16 @@ spv = ["rgb-validation"]
 # Mock attestation path: skip NSM / COSE / cert-chain checks and use raw CBOR docs.
 # Testing only — never enable in production builds.
 mock-attestation = ["attestation-verify/mock"]
+# Independent in-enclave EVM `FundsIn` event verification for signPsbt (#60).
+# Default-OFF. When ON, bridge-mode signPsbt fetches the deposit receipt via an
+# in-enclave alloy JSON-RPC client (loopback -> vsock forwarder -> host EVM RPC)
+# and fails closed on a missing/invalid receipt or unmet confirmation depth.
+# Implies `rgb-validation`: the bridge path this augments (`psbt_consignment_crosscheck`)
+# is already gated there, and the amount/asset context the predicate reconciles
+# lives behind it. NOTE: RPC responses are relayed by the UNTRUSTED host, so this
+# is the predicate + plumbing layer and only becomes trustless once Helios (#77)
+# verifies the RPC.
+evm-rpc = ["rgb-validation", "dep:alloy", "dep:tokio"]
 
 [dev-dependencies]
 rand = "0.10.0"

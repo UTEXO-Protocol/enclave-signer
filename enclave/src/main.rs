@@ -91,6 +91,27 @@ fn main() {
         if let Err(e) = utexo_bridge_enclave::vsock_forwarder::start_forwarder(3443, vsock_port) {
             tracing::error!("failed to start vsock forwarder: {e}");
         }
+
+        // Second forwarder for the EVM JSON-RPC used by in-enclave FundsIn
+        // verification (#60). Distinct loopback/vsock ports from Esplora
+        // (3443/8001). Untrusted, host-controlled egress boundary (audit I-01);
+        // the host must run: vsock-proxy <EVM_RPC_VSOCK_PORT> <evm-rpc-host> <port>.
+        #[cfg(feature = "evm-rpc")]
+        {
+            let evm_vsock_port: u32 = std::env::var("EVM_RPC_VSOCK_PORT")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(8002);
+            tracing::info!(
+                evm_vsock_port,
+                "starting EVM RPC vsock forwarder (host must run: vsock-proxy {evm_vsock_port} <evm-rpc-host> <evm-rpc-port>)"
+            );
+            if let Err(e) =
+                utexo_bridge_enclave::vsock_forwarder::start_forwarder(3444, evm_vsock_port)
+            {
+                tracing::error!("failed to start EVM RPC vsock forwarder: {e}");
+            }
+        }
     }
 
     // Build RGB consignment validator (when feature enabled).
@@ -148,11 +169,39 @@ fn main() {
     }
     let header_chain = std::sync::Mutex::new(HeaderChain::new(spv_network, checkpoint));
 
+    // Build the in-enclave EVM RPC client for independent FundsIn verification
+    // (#60). The URL must be the loopback forwarder; responses are host-relayed
+    // and treated as evidence (verified fail-closed), not trusted input.
+    #[cfg(feature = "evm-rpc")]
+    let (evm_rpc_client, evm_rpc_config) = {
+        let cfg = utexo_bridge_enclave::config::EvmRpcConfig::from_env();
+        let client =
+            match utexo_bridge_enclave::networks::evm::evm_event::AlloyEvmClient::new(&cfg.rpc_url) {
+                Ok(c) => {
+                    tracing::info!(
+                        rpc_url = %cfg.rpc_url,
+                        min_confirmations = cfg.min_confirmations,
+                        "EVM RPC client initialized (FundsIn verification, #60)"
+                    );
+                    Some(c)
+                }
+                Err(e) => {
+                    tracing::error!("failed to init EVM RPC client: {e}");
+                    None
+                }
+            };
+        (client, cfg)
+    };
+
     let ctx = ServerContext {
         state,
         bridge_config,
         #[cfg(feature = "rgb-validation")]
         rgb_validator,
+        #[cfg(feature = "evm-rpc")]
+        evm_rpc_client,
+        #[cfg(feature = "evm-rpc")]
+        evm_rpc_config,
         header_chain,
         submit_rate_limiter: std::sync::Mutex::new(server::SubmitRateLimiter::default()),
     };

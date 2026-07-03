@@ -320,7 +320,7 @@ fn read_u256_as_usize(call_data: &[u8], offset: usize) -> Result<usize> {
 
 /// Read a uint256 from call_data at a byte offset, as u64. Fails if too short or
 /// the value exceeds u64.
-fn extract_uint256_as_u64(call_data: &[u8], offset: usize) -> Result<u64> {
+pub(crate) fn extract_uint256_as_u64(call_data: &[u8], offset: usize) -> Result<u64> {
     let end = offset + 32;
     if call_data.len() < end {
         return Err(EnclaveError::CrossCheck(format!(
