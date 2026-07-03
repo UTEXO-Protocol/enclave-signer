@@ -124,6 +124,87 @@ fn parse_eth_address(s: &str) -> Result<[u8; 20]> {
     })
 }
 
+/// EVM JSON-RPC config for in-enclave `FundsIn` event verification (#60),
+/// loaded at boot when the `evm-rpc` feature is built.
+///
+/// This is operational signing-plumbing, NOT part of the enclave's committed
+/// identity: like [`BridgeConfig::gas_tx_allowed_to`], it is deliberately
+/// **not** folded into the attestation `user_data` bundle.
+///
+/// TRUST BOUNDARY: `rpc_url` MUST be loopback. The enclave has no direct
+/// network; it reaches the EVM RPC only through the loopback -> vsock
+/// forwarder ([`crate::vsock_forwarder`]), so the responses are relayed by the
+/// UNTRUSTED host. `verify_funds_in_event` treats them as evidence and fails
+/// closed; full trustlessness needs Helios (#77).
+#[cfg(feature = "evm-rpc")]
+#[derive(Debug, Clone)]
+pub struct EvmRpcConfig {
+    /// Loopback URL of the in-enclave EVM RPC forwarder
+    /// (`EVM_RPC_URL`, default `http://127.0.0.1:3444`).
+    pub rpc_url: String,
+    /// Minimum confirmation depth a `FundsIn` receipt must have, measured
+    /// against the RPC head block (`EVM_MIN_CONFIRMATIONS`, default 12).
+    pub min_confirmations: u64,
+}
+
+#[cfg(feature = "evm-rpc")]
+impl EvmRpcConfig {
+    /// Default loopback RPC URL - the enclave side of the EVM vsock forwarder.
+    const DEFAULT_RPC_URL: &'static str = "http://127.0.0.1:3444";
+    /// Default confirmation depth (~a safe head distance for most EVM chains).
+    const DEFAULT_MIN_CONFIRMATIONS: u64 = 12;
+
+    /// Load from `EVM_RPC_URL` and `EVM_MIN_CONFIRMATIONS`. Both fall back to
+    /// safe defaults. A non-loopback `EVM_RPC_URL` is rejected back to the
+    /// default and logged: routing EVM RPC anywhere but the vsock forwarder
+    /// would bypass the only sanctioned egress path.
+    pub fn from_env() -> Self {
+        let rpc_url = match std::env::var("EVM_RPC_URL") {
+            Ok(url) if is_loopback_url(&url) => url,
+            Ok(url) => {
+                tracing::error!(
+                    %url,
+                    "EVM_RPC_URL is not loopback - ignoring and using the default vsock-forwarder \
+                     URL; the enclave must reach the EVM RPC only via the loopback forwarder"
+                );
+                Self::DEFAULT_RPC_URL.to_string()
+            }
+            Err(_) => Self::DEFAULT_RPC_URL.to_string(),
+        };
+        let min_confirmations = std::env::var("EVM_MIN_CONFIRMATIONS")
+            .ok()
+            .and_then(|s| s.parse::<u64>().ok())
+            .unwrap_or(Self::DEFAULT_MIN_CONFIRMATIONS);
+        Self {
+            rpc_url,
+            min_confirmations,
+        }
+    }
+}
+
+#[cfg(feature = "evm-rpc")]
+impl Default for EvmRpcConfig {
+    fn default() -> Self {
+        Self {
+            rpc_url: Self::DEFAULT_RPC_URL.to_string(),
+            min_confirmations: Self::DEFAULT_MIN_CONFIRMATIONS,
+        }
+    }
+}
+
+/// True if `url`'s host is a loopback literal (`127.0.0.1` or `[::1]`). A
+/// deliberately narrow, dependency-free check - the enclave only ever points
+/// this at its own loopback forwarder.
+#[cfg(feature = "evm-rpc")]
+fn is_loopback_url(url: &str) -> bool {
+    let after_scheme = url.split_once("://").map(|(_, rest)| rest).unwrap_or(url);
+    let host = after_scheme
+        .split(['/', '?', '#'])
+        .next()
+        .unwrap_or(after_scheme);
+    host.starts_with("127.0.0.1") || host.starts_with("[::1]") || host.starts_with("localhost")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

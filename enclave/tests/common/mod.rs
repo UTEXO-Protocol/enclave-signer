@@ -52,6 +52,10 @@ pub fn start_test_server_with_config(
         bridge_config,
         #[cfg(feature = "rgb-validation")]
         rgb_validator: None,
+        #[cfg(feature = "evm-rpc")]
+        evm_rpc_client: None,
+        #[cfg(feature = "evm-rpc")]
+        evm_rpc_config: utexo_bridge_enclave::config::EvmRpcConfig::default(),
         header_chain,
         submit_rate_limiter: std::sync::Mutex::new(server::SubmitRateLimiter::default()),
     });

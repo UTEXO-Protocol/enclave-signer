@@ -1,4 +1,6 @@
 pub mod evm_crosscheck;
+#[cfg(feature = "evm-rpc")]
+pub mod evm_event;
 pub mod evm_gas_tx;
 pub mod psbt_crosscheck;
 #[cfg(feature = "rgb-validation")]

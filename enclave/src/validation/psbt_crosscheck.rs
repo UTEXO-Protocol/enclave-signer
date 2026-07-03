@@ -41,9 +41,11 @@ pub fn psbt_operation_key(
 /// Validate enriched SignPsbtRequest before signing.
 ///
 /// Two modes:
-/// - **Bridge mode** (evm_tx_hash is non-empty): Full cross-checks — EVM event
-///   must be valid + finalized, amounts must match, tx hash must be 32 bytes.
-///   Used for EVM→RGB bridge operations.
+/// - **Bridge mode** (evm_tx_hash is non-empty): shape + amount cross-checks
+///   (tx hash 32 bytes, `evm_amount >= psbt_output_amount + evm_commission`).
+///   EVM-event validity/finality is NOT decided here from listener booleans
+///   (audit M-06 / #51) - the enclave establishes it independently in
+///   `handle_sign_psbt` (`validation::evm_event`, the `evm-rpc` feature).
 /// - **Vanilla mode** (evm_tx_hash is empty): Minimal checks — PSBT must be
 ///   present. Used for `create_utxo` and other plain BTC operations that don't
 ///   involve RGB state or EVM events.
@@ -90,21 +92,17 @@ pub fn validate_psbt_request(req: &SignPsbtRequest) -> Result<()> {
         )));
     }
 
-    // 2. EVM event must be valid
-    if !req.evm_event_valid {
-        return Err(EnclaveError::CrossCheck(
-            "EVM event not validated by Listener".into(),
-        ));
-    }
+    // NOTE (audit M-06 / #51): the listener-supplied `evm_event_valid` /
+    // `evm_event_finalized` booleans are NO LONGER trusted here - anyone
+    // reaching the enclave could set both `true`. EVM-event validity and
+    // finality are now established independently by the enclave itself in
+    // `handle_sign_psbt` via `validation::evm_event::verify_funds_in_event`
+    // (the `evm-rpc` feature: fetches the FundsIn receipt and checks the
+    // operationId/amount/depth against the pinned bridge contract). The proto
+    // fields remain (ignored) until the listener stops sending them.
 
-    // 3. EVM event must be finalized
-    if !req.evm_event_finalized {
-        return Err(EnclaveError::CrossCheck(
-            "EVM event not yet finalized".into(),
-        ));
-    }
-
-    // 4. Amount consistency: EVM deposit must cover PSBT output + commission
+    // 2. Amount consistency: EVM deposit must cover PSBT output + commission.
+    //    Defense-in-depth on top of the in-enclave FundsIn amount binding.
     let required = req
         .psbt_output_amount
         .checked_add(req.evm_commission)
@@ -346,20 +344,21 @@ mod tests {
         assert!(validate_psbt_request(&valid_bridge_psbt_request()).is_ok());
     }
 
+    /// Regression for audit M-06 / #51: the listener-supplied
+    /// `evm_event_valid` / `evm_event_finalized` booleans are no longer read by
+    /// `validate_psbt_request`, so flipping them to `false` does NOT change the
+    /// outcome. EVM-event validity/finality is now established independently by
+    /// `validation::evm_event::verify_funds_in_event` in the handler (see that
+    /// module's `issue_51_no_receipt_means_no_authorization` test, which proves
+    /// a request the listener marks valid+finalized is still rejected without a
+    /// real on-chain receipt).
     #[test]
-    fn bridge_psbt_rejects_invalid_evm_event() {
+    fn bridge_psbt_ignores_listener_evm_booleans() {
         let mut req = valid_bridge_psbt_request();
         req.evm_event_valid = false;
-        let err = validate_psbt_request(&req).unwrap_err();
-        assert!(err.to_string().contains("EVM event not validated"));
-    }
-
-    #[test]
-    fn bridge_psbt_rejects_unfinalized_event() {
-        let mut req = valid_bridge_psbt_request();
         req.evm_event_finalized = false;
-        let err = validate_psbt_request(&req).unwrap_err();
-        assert!(err.to_string().contains("not yet finalized"));
+        // Shape + amount are still valid, and the booleans are ignored now.
+        assert!(validate_psbt_request(&req).is_ok());
     }
 
     #[test]

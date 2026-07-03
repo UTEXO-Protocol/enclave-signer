@@ -617,8 +617,8 @@ fn u256_word(n: usize) -> [u8; 32] {
 /// Only called from cross-check paths that are themselves gated on
 /// `rgb-validation`; the `test` cfg keeps it available for the
 /// helper's own unit tests in default builds.
-#[cfg(any(feature = "rgb-validation", test))]
-fn extract_uint256_as_u64(call_data: &[u8], offset: usize) -> Result<u64> {
+#[cfg(any(feature = "rgb-validation", feature = "evm-rpc", test))]
+pub(crate) fn extract_uint256_as_u64(call_data: &[u8], offset: usize) -> Result<u64> {
     let end = offset + 32;
     if call_data.len() < end {
         return Err(EnclaveError::CrossCheck(format!(
@@ -650,8 +650,8 @@ fn extract_uint256_as_u64(call_data: &[u8], offset: usize) -> Result<u64> {
 /// `sourceAddress`/`proof`/`settlementData` args store ABI tail offsets in
 /// their head slots and must be traversed, not read at a fixed absolute
 /// offset.
-#[cfg(any(feature = "rgb-validation", test))]
-fn extract_bytes32(call_data: &[u8], offset: usize) -> Result<[u8; 32]> {
+#[cfg(any(feature = "rgb-validation", feature = "evm-rpc", test))]
+pub(crate) fn extract_bytes32(call_data: &[u8], offset: usize) -> Result<[u8; 32]> {
     let end = offset + 32;
     if call_data.len() < end {
         return Err(EnclaveError::CrossCheck(format!(
@@ -689,8 +689,8 @@ fn decode_op_id_to_bytes32(op_id: &str) -> Result<[u8; 32]> {
 /// Interpret a 32-byte ABI word as a `usize` (used for ABI offsets/lengths).
 /// Fails closed if the high 24 bytes are non-zero (a value that wouldn't fit
 /// a `usize` is a malformed/hostile offset, not something to truncate).
-#[cfg(any(feature = "rgb-validation", test))]
-fn bytes32_to_usize(word: &[u8; 32]) -> Result<usize> {
+#[cfg(any(feature = "rgb-validation", feature = "evm-rpc", test))]
+pub(crate) fn bytes32_to_usize(word: &[u8; 32]) -> Result<usize> {
     if word[..24].iter().any(|&b| b != 0) {
         return Err(EnclaveError::CrossCheck(
             "ABI offset/length word exceeds usize range".into(),
