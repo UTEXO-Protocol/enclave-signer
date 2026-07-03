@@ -97,6 +97,12 @@ pub enum SpvError {
     #[error("submitted batch has {len} headers, exceeding the per-call cap of {max}")]
     BatchTooLarge { len: usize, max: usize },
 
+    #[error(
+        "accepting this batch would retain {len} headers, exceeding the total-retention cap of \
+         {max}; the compile-time checkpoint is too far below the tip and must be advanced"
+    )]
+    ChainTooLong { len: usize, max: usize },
+
     #[error("no header at height {0}")]
     HeaderNotFound(BlockHeight),
 
