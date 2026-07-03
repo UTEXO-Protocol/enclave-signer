@@ -37,7 +37,9 @@ jobs:
       - name: Set up SSH for private RGB deps
         uses: webfactory/ssh-agent@v0.9.0
         with:
-          ssh-private-key: ${{ secrets.RGB_CONSIGNMENT_PARSER_DEPLOY_KEY }}
+          ssh-private-key: |
+            ${{ secrets.RGB_CONSIGNMENT_PARSER_DEPLOY_KEY }}
+            ${{ secrets.FEDERATED_SIGNER_PROTO_DEPLOY_KEY }}
 
       - name: Cache cargo registry
         uses: actions/cache@v4
@@ -107,7 +109,9 @@ jobs:
       - name: Set up SSH for private RGB deps
         uses: webfactory/ssh-agent@v0.9.0
         with:
-          ssh-private-key: ${{ secrets.RGB_CONSIGNMENT_PARSER_DEPLOY_KEY }}
+          ssh-private-key: |
+            ${{ secrets.RGB_CONSIGNMENT_PARSER_DEPLOY_KEY }}
+            ${{ secrets.FEDERATED_SIGNER_PROTO_DEPLOY_KEY }}
 
       - name: Cache cargo registry
         uses: actions/cache@v4
