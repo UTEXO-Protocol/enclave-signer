@@ -361,6 +361,12 @@ fn handle_get_attested_public_key(
         EnclaveError::InvalidRequest(format!("nonce must be 32 bytes, got {}", req.nonce.len()))
     })?;
 
+    // NOTE (audit W-13): this endpoint attests over a *caller-supplied* nonce,
+    // so it can act as an oracle that mints valid attestations for arbitrary
+    // nonces. That is safe for replay accounting: the cloning handlers record a
+    // nonce only after a fully-authenticated handshake (see `handle_get_clone` /
+    // `handle_set_clone`), so an oracle-minted nonce carries no replay-guard
+    // weight on its own and cannot be used to exhaust the guard.
     let keys = ctx.state.get_keys()?;
     let public_keys = build_public_keys_response(keys, &ctx.bridge_config);
 
@@ -1049,27 +1055,20 @@ fn handle_get_clone(state: &EnclaveState, req: GetCloneRequest) -> Result<Enclav
 
     // 2. Verify the requester attestation chain + PCRs. `None` for the
     //    expected nonce: we have not seen the requester's nonce before,
-    //    so freshness is enforced by the replay guard immediately after.
+    //    so freshness is enforced by the replay guard once the binding and
+    //    authenticity checks below have passed.
     let expected_pcrs = attestation::get_own_pcrs()?;
     let verified =
         attestation::verify_peer_attestation(&req.requester_attestation, &expected_pcrs, None)?;
 
-    // 3. Replay-check the nonce pulled from the verified document.
-    let nonce_array: [u8; 32] = verified
-        .nonce
-        .as_slice()
-        .try_into()
-        .map_err(|_| EnclaveError::Attestation("attestation nonce has wrong length".into()))?;
-    state.replay_guard.check_and_record(nonce_array)?;
-
-    // 4. Pubkey binding: the attestation's `public_key` field must equal
+    // 3. Pubkey binding: the attestation's `public_key` field must equal
     //    the one the parent put on the wire. Otherwise the parent could
     //    have swapped it for a key it controls.
     if verified.enclave_pubkey.as_slice() != req_encryption_pk {
         return Err(EnclaveError::PubkeyMismatch);
     }
 
-    // 5. Digest binding: the attestation's `user_data` must equal the
+    // 4. Digest binding: the attestation's `user_data` must equal the
     //    digest on the wire — NSM-signed, so parent-proof.
     let user_data = verified.user_data.as_deref().ok_or_else(|| {
         EnclaveError::Attestation("requester attestation missing user_data (cloning digest)".into())
@@ -1078,7 +1077,7 @@ fn handle_get_clone(state: &EnclaveState, req: GetCloneRequest) -> Result<Enclav
         return Err(EnclaveError::DigestMismatch);
     }
 
-    // 6. Digest authenticity: HMAC(donor_secret, encryption_pubkey) must
+    // 5. Digest authenticity: HMAC(donor_secret, encryption_pubkey) must
     //    match. Proves the requester was issued by the same operator.
     state.with_donor_cloning_secret(|secret| {
         if !cloning::verify_cloning_digest(secret, &req_encryption_pk, &req_digest) {
@@ -1086,6 +1085,21 @@ fn handle_get_clone(state: &EnclaveState, req: GetCloneRequest) -> Result<Enclav
         }
         Ok(())
     })?;
+
+    // 6. Replay-check + record the nonce from the verified document. This
+    //    runs only *after* the pubkey, digest and donor-secret checks above
+    //    have passed, so a rejected (unauthenticated) handshake never
+    //    consumes replay-guard capacity. Combined with the count-cap removal
+    //    (#80), this closes the secret-less cloning-availability DoS in which
+    //    an attacker mints attestations over arbitrary nonces via
+    //    `get_attested_public_key` and burns them on doomed handshakes
+    //    (audit W-13).
+    let nonce_array: [u8; 32] = verified
+        .nonce
+        .as_slice()
+        .try_into()
+        .map_err(|_| EnclaveError::Attestation("attestation nonce has wrong length".into()))?;
+    state.replay_guard.check_and_record(nonce_array)?;
 
     // 7. Seal the seed under a fresh donor ephemeral keypair.
     let (encrypted_seed, donor_pubkey) =
@@ -1122,18 +1136,12 @@ fn handle_set_clone(state: &EnclaveState, req: SetCloneRequest) -> Result<Enclav
         ))
     })?;
 
-    // 1. Verify donor attestation chain + PCRs (no nonce match — we
-    //    enforce freshness via the replay guard).
+    // 1. Verify donor attestation chain + PCRs (no nonce match — freshness
+    //    is enforced by the replay guard once the binding and seed/identity
+    //    checks below have passed).
     let expected_pcrs = attestation::get_own_pcrs()?;
     let verified =
         attestation::verify_peer_attestation(&req.donor_attestation, &expected_pcrs, None)?;
-
-    let nonce_array: [u8; 32] = verified
-        .nonce
-        .as_slice()
-        .try_into()
-        .map_err(|_| EnclaveError::Attestation("attestation nonce has wrong length".into()))?;
-    state.replay_guard.check_and_record(nonce_array)?;
 
     // 2. Pubkey binding: the donor's pubkey on the wire must equal the
     //    one inside their signed attestation.
@@ -1158,6 +1166,16 @@ fn handle_set_clone(state: &EnclaveState, req: SetCloneRequest) -> Result<Enclav
         cluster_public_key = session.cluster_public_key;
         Ok(km)
     })?;
+
+    // 4. Replay-check + record the donor nonce only *after* the pubkey
+    //    binding and the seed/identity checks above have passed, so a
+    //    rejected handshake never consumes replay-guard capacity (audit W-13).
+    let nonce_array: [u8; 32] = verified
+        .nonce
+        .as_slice()
+        .try_into()
+        .map_err(|_| EnclaveError::Attestation("attestation nonce has wrong length".into()))?;
+    state.replay_guard.check_and_record(nonce_array)?;
 
     tracing::info!(
         cluster_pk = %hex::encode(cluster_public_key),
