@@ -34,6 +34,14 @@ pub enum MerkleError {
         computed: Sha256d,
         expected: Sha256d,
     },
+    /// `position` carries more significant bits than the supplied `path`
+    /// has levels, i.e. the index does not fit a tree of this depth. Left
+    /// unchecked, the surplus high bits are silently ignored, so distinct
+    /// positions (`p`, `p + 2^path.len()`, ...) reconstruct the *same* root
+    /// and validate interchangeably -- the position is not authenticated by
+    /// the proof. Bitcoin Core's `CPartialMerkleTree` enforces the same
+    /// "all index bits consumed" invariant.
+    PositionOutOfRange { position: u32, path_len: usize },
 }
 
 /// Verify that `txid` (in internal byte order) is included in a block whose
@@ -77,6 +85,19 @@ pub fn verify_merkle_proof(
 
         current = sha256d::Hash::hash(&buf).to_byte_array();
         idx >>= 1;
+    }
+
+    // Every bit of `position` must have been consumed by a path level. A
+    // non-zero residue means the caller supplied an index that cannot exist
+    // in a tree of `path.len()` levels; without this guard the surplus bits
+    // are ignored and the same root reconstructs for several positions,
+    // leaving `tx_position` unauthenticated (Bitcoin Core applies the
+    // identical check in `CPartialMerkleTree::ExtractMatches`).
+    if idx != 0 {
+        return Err(MerkleError::PositionOutOfRange {
+            position,
+            path_len: path.len(),
+        });
     }
 
     if &current == merkle_root {
@@ -182,6 +203,66 @@ mod tests {
         assert!(matches!(
             verify_merkle_proof(&t0, 1, &[t1, n23], &root),
             Err(MerkleError::RootMismatch { .. })
+        ));
+    }
+
+    #[test]
+    fn rejects_position_high_bits_above_depth_two_tx_block() {
+        // 2-tx block: root = sha256d(tx0 || tx1). The honest proof for tx0 is
+        // (position 0, path [tx1]). Positions that differ only in bits above
+        // the single path level (2, 4, 6, ...) reconstruct the identical root
+        // because the surplus bits are never consulted during the walk. The
+        // verifier must reject them so `tx_position` is authenticated.
+        let tx0: Sha256d = [0x11; 32];
+        let tx1: Sha256d = [0x22; 32];
+        let root = dsha256_pair(&tx0, &tx1);
+
+        // Honest proof still passes.
+        assert!(verify_merkle_proof(&tx0, 0, &[tx1], &root).is_ok());
+
+        // Forged positions sharing the low bits but with a high bit set.
+        for forged in [2u32, 4, 6, 0x8000_0000] {
+            assert!(
+                matches!(
+                    verify_merkle_proof(&tx0, forged, &[tx1], &root),
+                    Err(MerkleError::PositionOutOfRange { position, path_len: 1 })
+                        if position == forged
+                ),
+                "position {forged} should be rejected as out of range",
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_position_high_bits_above_depth_four_tx_block() {
+        // 4-tx block, depth 2. tx2 sits at position 2 with path [t3, n01].
+        // Position 6 (= 2 | 0b100) shares the two low bits but sets a third,
+        // non-existent level bit; it used to validate identically to 2.
+        let t0: Sha256d = [0x10; 32];
+        let t1: Sha256d = [0x20; 32];
+        let t2: Sha256d = [0x30; 32];
+        let t3: Sha256d = [0x40; 32];
+        let n01 = dsha256_pair(&t0, &t1);
+        let n23 = dsha256_pair(&t2, &t3);
+        let root = dsha256_pair(&n01, &n23);
+
+        assert!(verify_merkle_proof(&t2, 2, &[t3, n01], &root).is_ok());
+        assert!(matches!(
+            verify_merkle_proof(&t2, 6, &[t3, n01], &root),
+            Err(MerkleError::PositionOutOfRange { position: 6, path_len: 2 })
+        ));
+    }
+
+    #[test]
+    fn empty_path_rejects_nonzero_position() {
+        // Single-tx block: the only valid position is 0. A non-zero index with
+        // no path levels can never be legitimate.
+        let txid: Sha256d = [0x42; 32];
+        let root = txid;
+        assert!(verify_merkle_proof(&txid, 0, &[], &root).is_ok());
+        assert!(matches!(
+            verify_merkle_proof(&txid, 1, &[], &root),
+            Err(MerkleError::PositionOutOfRange { position: 1, path_len: 0 })
         ));
     }
 
