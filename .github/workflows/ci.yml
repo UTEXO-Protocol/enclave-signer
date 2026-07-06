@@ -84,6 +84,16 @@ jobs:
       - name: Test (--features evm-rpc)
         run: cargo test -p utexo-bridge-enclave --features evm-rpc
 
+      # Trustless Helios path (#77) - EXPERIMENTAL, default-OFF, NOT in the
+      # shipped EIF. Compile + clippy only: a live light-client sync needs real
+      # execution + consensus RPCs, unavailable in CI (the predicate itself is
+      # already covered by the evm-rpc FakeProvider tests). Heavy build: a second
+      # alloy major, revm, BLS, and vendored OpenSSL.
+      - name: Build (--features helios)
+        run: cargo build -p utexo-bridge-enclave --features vsock,helios
+      - name: Clippy (--features helios)
+        run: cargo clippy -p utexo-bridge-enclave --features vsock,helios --all-targets -- -D warnings
+
   # Assert the dev-only features `compile_error!` in a release build, so a
   # misconfigured Dockerfile / CI matrix can never ship one. Each feature is
   # built individually with `--release`; the build MUST fail, and fail via

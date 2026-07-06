@@ -211,6 +211,11 @@ vsock-proxy 8001 <esplora-host> <esplora-port>
 # used by in-enclave FundsIn verification (#60). Allowlist to the RPC endpoint.
 vsock-proxy 8002 <evm-rpc-host> <evm-rpc-port>
 
+# Trustless (Helios) variant — only for `helios` builds (#77, experimental).
+# Two upstreams Helios verifies against a pinned checkpoint:
+vsock-proxy 8003 <evm-execution-rpc-host> <port>   # HELIOS_EXECUTION_RPC
+vsock-proxy 8004 <beacon-consensus-rpc-host> <port> # HELIOS_CONSENSUS_RPC
+
 # Start the gRPC server (Parent Adapter)
 GRPC_PORT=5000 USE_VSOCK=true cargo run --release -p utexo-bridge-parent
 ```
@@ -260,7 +265,13 @@ nitro-cli terminate-enclave --enclave-id <enclave-id>
 | `ESPLORA_VSOCK_PORT` | `8001` | vsock port for the host's vsock-proxy |
 | `EVM_RPC_URL` | `http://127.0.0.1:3444` | Loopback EVM JSON-RPC endpoint for in-enclave FundsIn verification (#60, `evm-rpc` builds). MUST be loopback — reached via the vsock forwarder. Responses are relayed by the untrusted host (evidence verified fail-closed; trustless only once Helios #77 lands). |
 | `EVM_RPC_VSOCK_PORT` | `8002` | vsock port for the host's EVM-RPC vsock-proxy (`evm-rpc` builds) |
-| `EVM_MIN_CONFIRMATIONS` | `12` | Minimum confirmation depth a FundsIn receipt must have (`evm-rpc` builds) |
+| `EVM_MIN_CONFIRMATIONS` | `12` | Minimum confirmation depth a FundsIn receipt must have (`evm-rpc` / `helios` builds) |
+| `HELIOS_EXECUTION_RPC` | (unset) | **`helios` builds (#77, experimental).** Loopback execution RPC Helios verifies. **Setting this selects the trustless Helios path** over the raw #60 path. |
+| `HELIOS_CONSENSUS_RPC` | `http://127.0.0.1:18550` | Loopback beacon (consensus) RPC for Helios light-client sync (`helios` builds) |
+| `HELIOS_CHECKPOINT` | (unset, **required**) | 0x 32-byte weak-subjectivity beacon block root, refreshed < ~2 weeks old. Without it Helios init fails closed (no untrusted community fallback). |
+| `HELIOS_NETWORK` | `mainnet` | `mainnet` \| `sepolia` \| `holesky` (`helios` builds) |
+| `HELIOS_EXECUTION_VSOCK_PORT` / `HELIOS_CONSENSUS_VSOCK_PORT` | `8003` / `8004` | vsock ports for the host's Helios exec/consensus proxies |
+| `HELIOS_EXECUTION_LOCAL_PORT` / `HELIOS_CONSENSUS_LOCAL_PORT` | `18545` / `18550` | Loopback ports the enclave exposes those upstreams on |
 
 #### Parent Adapter
 
@@ -388,6 +399,7 @@ DOCKER_BUILDKIT=1 docker build --ssh default \
 - **Zeroize-on-drop** — All seeds and private keys wrapped in `SecretBox`. Memory zeroed on drop.
 - **In-enclave RGB validation** — Consignments validated inside the TEE via rgbstd, not trusted from external sources.
 - **In-enclave EVM FundsIn verification** (`evm-rpc`, #60) — bridge-mode `signPsbt` confirms the EVM deposit itself via `eth_getTransactionReceipt`, instead of trusting the listener's `evm_event_valid`/`evm_event_finalized` flags (audit M-06 / #51). The RPC is reached through the untrusted host, so responses are treated as evidence (verified fail-closed) and this becomes trustless only once Helios (#77) verifies them.
+- **Trustless EVM verification via Helios** (`helios`, #77 — EXPERIMENTAL, default-OFF, not in the shipped EIF) — embeds the a16z Helios light client so the enclave cryptographically verifies the execution/consensus RPCs against a pinned weak-subjectivity checkpoint before accepting a FundsIn receipt. Runtime-selectable (`HELIOS_EXECUTION_RPC` set → verified path, else the #60 raw path) and fail-closed (an unsynced/errored Helios refuses signing, never downgrades). Heavy build (a second alloy major, revm, BLS, vendored OpenSSL); no production experience yet.
 - **Cross-check validation** — Amount consistency, calldata extraction, deadline, and chain/domain checks before any signature is produced.
 - **Seed import gated** — Raw seed import requires `allow-seed-import` feature, never enabled in production.
 - **Nitro Enclave isolation** — No persistent storage, no network access (only vsock), no shell.

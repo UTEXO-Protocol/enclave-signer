@@ -204,6 +204,81 @@ fn is_loopback_url(url: &str) -> bool {
     host.starts_with("127.0.0.1") || host.starts_with("[::1]") || host.starts_with("localhost")
 }
 
+/// Helios light-client config for TRUSTLESS in-enclave EVM event verification
+/// (#77), loaded at boot when the `helios` feature is built.
+///
+/// Selection is runtime: [`HeliosConfig::from_env`] returns `Some` only when
+/// `HELIOS_EXECUTION_RPC` is set - that is the signal to use the Helios-verified
+/// provider instead of the raw alloy path (#60). Like [`EvmRpcConfig`], the RPC
+/// URLs MUST be loopback (reached through vsock forwarders); Helios treats those
+/// upstreams as untrusted and verifies them against the pinned checkpoint.
+#[cfg(feature = "helios")]
+#[derive(Debug, Clone)]
+pub struct HeliosConfig {
+    /// Untrusted execution RPC Helios verifies against (`HELIOS_EXECUTION_RPC`,
+    /// required - typically the local exec forwarder `http://127.0.0.1:18545`).
+    /// Its presence is the signal to select the Helios-verified path.
+    pub execution_rpc: String,
+    /// Consensus (beacon) RPC for light-client sync (`HELIOS_CONSENSUS_RPC`,
+    /// loopback forwarder, default `http://127.0.0.1:18550`).
+    pub consensus_rpc: String,
+    /// Helios network name: `mainnet` | `sepolia` | `holesky`
+    /// (`HELIOS_NETWORK`, default `mainnet`).
+    pub network: String,
+    /// Weak-subjectivity checkpoint: 0x-prefixed 32-byte beacon block root
+    /// (`HELIOS_CHECKPOINT`). Required for a trustless build - without it Helios
+    /// would fall back to an untrusted community checkpoint list, which the
+    /// enclave never enables. `None` here fails client init closed.
+    pub checkpoint: Option<String>,
+    /// Reject a checkpoint older than the safe weak-subjectivity window
+    /// (`HELIOS_STRICT_CHECKPOINT_AGE`, default `true`).
+    pub strict_checkpoint_age: bool,
+}
+
+#[cfg(feature = "helios")]
+impl HeliosConfig {
+    const DEFAULT_CONSENSUS_RPC: &'static str = "http://127.0.0.1:18550";
+
+    /// Load from `HELIOS_*` env. Returns `None` when `HELIOS_EXECUTION_RPC` is
+    /// unset (the raw alloy path is used instead). A non-loopback RPC URL is
+    /// logged as an error but kept - the enclave has no direct egress, so a
+    /// non-loopback URL simply won't connect.
+    pub fn from_env() -> Option<Self> {
+        let execution_rpc = std::env::var("HELIOS_EXECUTION_RPC").ok()?;
+        warn_if_not_loopback("HELIOS_EXECUTION_RPC", &execution_rpc);
+
+        let consensus_rpc = std::env::var("HELIOS_CONSENSUS_RPC")
+            .unwrap_or_else(|_| Self::DEFAULT_CONSENSUS_RPC.to_string());
+        warn_if_not_loopback("HELIOS_CONSENSUS_RPC", &consensus_rpc);
+
+        let network = std::env::var("HELIOS_NETWORK").unwrap_or_else(|_| "mainnet".to_string());
+        let checkpoint = std::env::var("HELIOS_CHECKPOINT").ok();
+        let strict_checkpoint_age = std::env::var("HELIOS_STRICT_CHECKPOINT_AGE")
+            .ok()
+            .map(|s| s != "false" && s != "0")
+            .unwrap_or(true);
+
+        Some(Self {
+            execution_rpc,
+            consensus_rpc,
+            network,
+            checkpoint,
+            strict_checkpoint_age,
+        })
+    }
+}
+
+#[cfg(feature = "helios")]
+fn warn_if_not_loopback(var: &str, url: &str) {
+    if !is_loopback_url(url) {
+        tracing::error!(
+            %var, %url,
+            "Helios RPC URL is not loopback - the enclave reaches upstreams only via the vsock \
+             forwarder; a non-loopback URL will not connect"
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

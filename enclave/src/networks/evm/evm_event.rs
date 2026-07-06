@@ -331,6 +331,170 @@ fn map_alloy_receipt(r: alloy::rpc::types::TransactionReceipt) -> ReceiptData {
     }
 }
 
+/// Boot-time bound on the Helios light-client initial sync. If the client is
+/// not synced within this window, [`HeliosEvmClient::new`] fails and the
+/// provider stays unset - bridge signing then fails closed rather than run
+/// against an unverified/unsynced client.
+#[cfg(feature = "helios")]
+const HELIOS_BOOT_SYNC_TIMEOUT_SECS: u64 = 300;
+
+/// TRUSTLESS [`EvmReceiptProvider`] (#77): the a16z Helios light client embedded
+/// in-process. Helios treats the execution/consensus RPCs (reached via loopback
+/// vsock forwarders) as UNTRUSTED and verifies them against a pinned
+/// weak-subjectivity checkpoint before returning a receipt - so unlike
+/// [`AlloyEvmClient`], a malicious host cannot forge the result.
+///
+/// Helios is async and runs a background sync task, so a long-lived tokio
+/// runtime is built at boot and kept alive for the client's lifetime; each
+/// query is driven via `block_on`. The returned receipt (alloy 1.x types) is
+/// mapped to the enclave-local [`ReceiptData`] so no alloy-version types cross
+/// the [`EvmReceiptProvider`] boundary.
+#[cfg(feature = "helios")]
+pub struct HeliosEvmClient {
+    // Field order matters for drop: the client is dropped before the runtime.
+    client: helios_ethereum::EthereumClient,
+    runtime: tokio::runtime::Runtime,
+}
+
+#[cfg(feature = "helios")]
+impl HeliosEvmClient {
+    /// Build and SYNC the Helios client at boot. Blocks (bounded by
+    /// [`HELIOS_BOOT_SYNC_TIMEOUT_SECS`]) until the light client is synced so
+    /// the first query is already verified. Any error (bad config, no
+    /// checkpoint, sync timeout) is returned so boot leaves the provider unset
+    /// and bridge signing fails closed.
+    pub fn new(cfg: &crate::config::HeliosConfig) -> Result<Self> {
+        use helios_ethereum::{config::networks::Network, EthereumClientBuilder};
+
+        let network = match cfg.network.to_ascii_lowercase().as_str() {
+            "mainnet" => Network::Mainnet,
+            "sepolia" => Network::Sepolia,
+            "holesky" => Network::Holesky,
+            other => {
+                return Err(EnclaveError::CrossCheck(format!(
+                    "helios: unsupported HELIOS_NETWORK {other:?} (want mainnet|sepolia|holesky)"
+                )))
+            }
+        };
+        let checkpoint = parse_checkpoint(cfg.checkpoint.as_deref())?;
+
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .map_err(|e| EnclaveError::CrossCheck(format!("helios: tokio runtime: {e}")))?;
+
+        let exec = cfg.execution_rpc.clone();
+        let cons = cfg.consensus_rpc.clone();
+        let strict = cfg.strict_checkpoint_age;
+
+        let client = runtime.block_on(async move {
+            let builder = EthereumClientBuilder::new()
+                .network(network)
+                .execution_rpc(&exec)
+                .map_err(|e| EnclaveError::CrossCheck(format!("helios: bad execution_rpc: {e}")))?
+                .consensus_rpc(&cons)
+                .map_err(|e| EnclaveError::CrossCheck(format!("helios: bad consensus_rpc: {e}")))?
+                .checkpoint(checkpoint);
+            // No `load_external_fallback`/`fallback`: the ONLY egress is the two
+            // forwarded RPCs, and the checkpoint is operator-pinned.
+            let builder = if strict {
+                builder.strict_checkpoint_age()
+            } else {
+                builder
+            };
+            let client = builder
+                .with_config_db() // in-memory, no disk in the enclave
+                .build()
+                .map_err(|e| EnclaveError::CrossCheck(format!("helios: build: {e}")))?;
+
+            let timeout = std::time::Duration::from_secs(HELIOS_BOOT_SYNC_TIMEOUT_SECS);
+            tokio::time::timeout(timeout, client.wait_synced())
+                .await
+                .map_err(|_| {
+                    EnclaveError::CrossCheck(format!(
+                        "helios: light client did not sync within {HELIOS_BOOT_SYNC_TIMEOUT_SECS}s \
+                         - refusing to start (bridge signing fails closed until synced)"
+                    ))
+                })?
+                .map_err(|e| EnclaveError::CrossCheck(format!("helios: sync failed: {e}")))?;
+            Ok::<_, EnclaveError>(client)
+        })?;
+
+        tracing::info!(
+            network = %cfg.network,
+            execution_rpc = %cfg.execution_rpc,
+            consensus_rpc = %cfg.consensus_rpc,
+            "Helios light client synced (trustless FundsIn verification, #77)"
+        );
+        Ok(Self { client, runtime })
+    }
+}
+
+#[cfg(feature = "helios")]
+impl EvmReceiptProvider for HeliosEvmClient {
+    fn get_transaction_receipt(&self, tx_hash: &[u8; 32]) -> Result<Option<ReceiptData>> {
+        let hash = alloy_primitives::B256::from_slice(tx_hash);
+        let receipt = self
+            .runtime
+            .block_on(self.client.get_transaction_receipt(hash))
+            .map_err(|e| {
+                EnclaveError::CrossCheck(format!("helios: eth_getTransactionReceipt failed: {e}"))
+            })?;
+        // Map inline so the alloy-1.x receipt type is inferred, never named -
+        // it must not cross the EvmReceiptProvider boundary (our alloy is 2.x).
+        Ok(receipt.map(|r| ReceiptData {
+            status_success: r.status(),
+            block_number: r.block_number.unwrap_or(0),
+            logs: r
+                .inner
+                .logs()
+                .iter()
+                .map(|log| LogEntry {
+                    address: log.address().into_array(),
+                    topics: log.topics().iter().map(|t| t.0).collect(),
+                    data: log.data().data.to_vec(),
+                })
+                .collect(),
+        }))
+    }
+
+    fn get_block_number(&self) -> Result<u64> {
+        let n = self
+            .runtime
+            .block_on(self.client.get_block_number())
+            .map_err(|e| {
+                EnclaveError::CrossCheck(format!("helios: eth_blockNumber failed: {e}"))
+            })?;
+        u64::try_from(n)
+            .map_err(|_| EnclaveError::CrossCheck("helios: head block number exceeds u64".into()))
+    }
+}
+
+/// Parse the operator-pinned `HELIOS_CHECKPOINT` (0x-prefixed 32-byte beacon
+/// block root) into an alloy-1.x `B256`. A checkpoint is mandatory for a
+/// trustless build; `None`/malformed fails closed.
+#[cfg(feature = "helios")]
+fn parse_checkpoint(checkpoint: Option<&str>) -> Result<alloy_primitives::B256> {
+    let hex_str = checkpoint.ok_or_else(|| {
+        EnclaveError::CrossCheck(
+            "helios: HELIOS_CHECKPOINT is required (a recent weak-subjectivity beacon block root) \
+             - refusing to sync against an untrusted community checkpoint"
+                .into(),
+        )
+    })?;
+    let stripped = hex_str.strip_prefix("0x").unwrap_or(hex_str);
+    let bytes = hex::decode(stripped)
+        .map_err(|e| EnclaveError::CrossCheck(format!("helios: HELIOS_CHECKPOINT not hex: {e}")))?;
+    let arr: [u8; 32] = bytes.try_into().map_err(|v: Vec<u8>| {
+        EnclaveError::CrossCheck(format!(
+            "helios: HELIOS_CHECKPOINT must be 32 bytes, got {}",
+            v.len()
+        ))
+    })?;
+    Ok(alloy_primitives::B256::from(arr))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

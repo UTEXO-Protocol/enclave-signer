@@ -112,6 +112,47 @@ fn main() {
                 tracing::error!("failed to start EVM RPC vsock forwarder: {e}");
             }
         }
+
+        // Helios execution + consensus RPC forwarders (#77, trustless EVM
+        // verification). Helios verifies these UNTRUSTED upstreams against a
+        // pinned checkpoint. Local ports mirror HeliosConfig defaults
+        // (18545/18550); the host must run one vsock-proxy per upstream.
+        #[cfg(feature = "helios")]
+        {
+            let exec_local: u16 = std::env::var("HELIOS_EXECUTION_LOCAL_PORT")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(18545);
+            let exec_vsock: u32 = std::env::var("HELIOS_EXECUTION_VSOCK_PORT")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(8003);
+            let cons_local: u16 = std::env::var("HELIOS_CONSENSUS_LOCAL_PORT")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(18550);
+            let cons_vsock: u32 = std::env::var("HELIOS_CONSENSUS_VSOCK_PORT")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(8004);
+            tracing::info!(
+                exec_local,
+                exec_vsock,
+                cons_local,
+                cons_vsock,
+                "starting Helios execution + consensus vsock forwarders (#77)"
+            );
+            if let Err(e) =
+                utexo_bridge_enclave::vsock_forwarder::start_forwarder(exec_local, exec_vsock)
+            {
+                tracing::error!("failed to start Helios execution RPC forwarder: {e}");
+            }
+            if let Err(e) =
+                utexo_bridge_enclave::vsock_forwarder::start_forwarder(cons_local, cons_vsock)
+            {
+                tracing::error!("failed to start Helios consensus RPC forwarder: {e}");
+            }
+        }
     }
 
     // Build RGB consignment validator (when feature enabled).
@@ -174,22 +215,57 @@ fn main() {
     // and treated as evidence (verified fail-closed), not trusted input.
     #[cfg(feature = "evm-rpc")]
     let (evm_rpc_client, evm_rpc_config) = {
+        use utexo_bridge_enclave::networks::evm::evm_event::{AlloyEvmClient, EvmReceiptProvider};
         let cfg = utexo_bridge_enclave::config::EvmRpcConfig::from_env();
-        let client =
-            match utexo_bridge_enclave::networks::evm::evm_event::AlloyEvmClient::new(&cfg.rpc_url) {
+        type Boxed = Box<dyn EvmReceiptProvider + Send + Sync>;
+
+        // Raw alloy provider (#60): host-relayed, unverified.
+        let build_alloy = || -> Option<Boxed> {
+            match AlloyEvmClient::new(&cfg.rpc_url) {
                 Ok(c) => {
                     tracing::info!(
                         rpc_url = %cfg.rpc_url,
                         min_confirmations = cfg.min_confirmations,
-                        "EVM RPC client initialized (FundsIn verification, #60)"
+                        "EVM FundsIn verification: raw alloy path (#60, host-relayed/unverified)"
                     );
-                    Some(c)
+                    Some(Box::new(c) as Boxed)
                 }
                 Err(e) => {
                     tracing::error!("failed to init EVM RPC client: {e}");
                     None
                 }
-            };
+            }
+        };
+
+        // #77 runtime-selectable: HELIOS_EXECUTION_RPC set -> Helios-verified
+        // path; else the raw alloy path. Fail closed on the SELECTED provider:
+        // a Helios build/sync failure leaves the client unset so bridge signing
+        // refuses, never silently downgrading to the unverified path.
+        #[cfg(feature = "helios")]
+        let client: Option<Boxed> = match utexo_bridge_enclave::config::HeliosConfig::from_env() {
+            Some(hcfg) => {
+                match utexo_bridge_enclave::networks::evm::evm_event::HeliosEvmClient::new(&hcfg) {
+                    Ok(c) => {
+                        tracing::info!(
+                            network = %hcfg.network,
+                            min_confirmations = cfg.min_confirmations,
+                            "EVM FundsIn verification: Helios-verified path (#77, trustless)"
+                        );
+                        Some(Box::new(c) as Boxed)
+                    }
+                    Err(e) => {
+                        tracing::error!(
+                            "Helios client init/sync failed: {e} - bridge signing will fail closed"
+                        );
+                        None
+                    }
+                }
+            }
+            None => build_alloy(),
+        };
+        #[cfg(not(feature = "helios"))]
+        let client: Option<Boxed> = build_alloy();
+
         (client, cfg)
     };
 

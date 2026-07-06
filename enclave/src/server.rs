@@ -28,7 +28,8 @@ pub struct ServerContext {
     /// forwarder, so responses are host-relayed and untrusted - see
     /// [`crate::networks::evm::evm_event`].
     #[cfg(feature = "evm-rpc")]
-    pub evm_rpc_client: Option<crate::networks::evm::evm_event::AlloyEvmClient>,
+    pub evm_rpc_client:
+        Option<Box<dyn crate::networks::evm::evm_event::EvmReceiptProvider + Send + Sync>>,
     /// Pinned EVM-RPC config (loopback URL + min confirmations) for #60.
     #[cfg(feature = "evm-rpc")]
     pub evm_rpc_config: crate::config::EvmRpcConfig,
@@ -280,7 +281,7 @@ fn handle_sign(ctx: &ServerContext, req: SignRequest) -> Result<EnclaveResponse>
             )
         })?;
         crate::networks::evm::evm_event::verify_funds_in_event(
-            client,
+            &**client,
             &ctx.bridge_config.bridge_contract,
             ctx.evm_rpc_config.min_confirmations,
             &tx_hash,
