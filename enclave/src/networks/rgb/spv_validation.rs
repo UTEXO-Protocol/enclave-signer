@@ -509,6 +509,36 @@ mod tests {
         validate_spv_proofs(&chain, &[txid_display], &[proof], SPV_MIN_CONFIRMATIONS).unwrap();
     }
 
+    /// Regression for #130: an anchor far below `tip − HEADER_WINDOW` (~2122)
+    /// still verifies. The old sliding window pruned the anchor's header, so
+    /// SPV rejected every RGB consignment whose oldest witness was older than
+    /// ~a day on 30s-block signet ("no header at height H (chain tip = T)").
+    /// With full retention from the checkpoint the header resolves and the
+    /// proof passes.
+    #[test]
+    fn deep_anchor_below_old_window_still_verifies() {
+        let target = synth_headers(1).into_iter().next().unwrap();
+        // Derive the proof from the target before it is moved into the chain.
+        let (txid_display, proof) = single_tx_proof(&target, 1);
+        // Bury the target deep enough that the OLD sliding window would have
+        // pruned its header: prune_front advanced the base to
+        // floor_2016(tip − 2122), dropping the anchor at height 1 once that
+        // base ≥ 1 (tip ≥ 4138). 4200 buries it comfortably past that point,
+        // so this test genuinely fails on the pruning code and guards against
+        // its reintroduction.
+        let chain = chain_burying(target, 4200);
+        let tip = chain.tip_height();
+        let old_window = 100 + 2016 + 6; // former HEADER_WINDOW
+        let old_pruned_base = (tip.saturating_sub(old_window) / 2016) * 2016;
+        assert!(
+            old_pruned_base >= 1,
+            "precondition: the old window would have pruned the anchor at height 1 \
+             (tip={tip}, old_pruned_base={old_pruned_base})"
+        );
+
+        validate_spv_proofs(&chain, &[txid_display], &[proof], SPV_MIN_CONFIRMATIONS).unwrap();
+    }
+
     #[test]
     fn rejects_insufficient_confirmations() {
         // Only 3 confirmations < 6.

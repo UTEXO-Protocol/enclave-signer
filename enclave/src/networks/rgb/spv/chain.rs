@@ -52,33 +52,50 @@ use crate::networks::rgb::spv::validation::{
 /// attention, not something the enclave silently absorbs.
 pub const MAX_REORG_DEPTH: BlockHeight = 100;
 
-/// Confirmation depth the SPV cross-check requires before signing. Mirrors
-/// `validation::spv_crosscheck::SPV_MIN_CONFIRMATIONS` (6); kept as a local
-/// constant so `chain.rs` (always compiled) doesn't depend on the
-/// `spv`-feature-gated cross-check module. Used only to size the retention
-/// window so a proof at `tip − 5` still has its header.
-const SPV_MIN_CONFIRMATIONS: BlockHeight = 6;
+// Retention policy (#130): the in-memory chain keeps **every** validated
+// header from the checkpoint forward — there is no sliding window.
+//
+// A sliding window (#86) previously pruned everything older than `tip − ~2122`.
+// That broke the SPV cross-check's core invariant: an RGB consignment must
+// prove inclusion of *all* its witness anchors, and those anchors can sit tens
+// of thousands of blocks below the tip (any asset with history older than ~a
+// day on 30s-block signet). Once the anchor's header was pruned, `header_at`
+// returned `None` and the enclave refused to sign — blocking funds-out for
+// practically every real asset. Per the design note "Bitcoin SPV Verification
+// for TEE Enclave": keep all headers from the checkpoint and verify every
+// anchor against them.
+//
+// Steady-state memory is `tip − checkpoint` headers × ~112 B each (80 B header
+// + 32 B cached hash). Signet's checkpoint (334 000) to a live tip is ~85 k
+// headers ≈ 9.5 MB; mainnet's (951 552) grows ~52.6 k headers/year ≈ 5.9
+// MB/year. The retention floor is pinned at the checkpoint, so the checkpoint
+// must sit below the oldest anchor of any bridgeable asset.
+//
+// Growth is bounded two ways. On PoW networks (mainnet/testnet3) forward
+// growth is throttled by real chain work. But the *production* network here is
+// UTEXO custom signet, which does NOT enforce PoW (`Network::enforces_pow()`
+// is false) — headers are chain-linkage-validated only, so a hostile or buggy
+// listener can mint valid-linkage headers for free and, with no window, grow
+// the chain until the enclave OOMs (fixed RAM reservation → whole-bridge DoS).
+// `MAX_STORED_HEADERS` therefore caps absolute retention on *every* network as
+// a work-independent backstop.
 
-/// Sliding-window retention bound (#86). The in-memory chain keeps only the
-/// most recent headers; everything older than the last retarget boundary
-/// at/below `tip − HEADER_WINDOW` is pruned from the front.
+/// Absolute cap on retained headers (#130 / audit W-08). Full retention removed
+/// the sliding window that used to bound memory, so this ceiling replaces it as
+/// the work-independent memory backstop — essential on non-PoW networks
+/// (signet/regtest) where header growth is otherwise free. When accepting a
+/// batch would push the stored count past this, `submit_headers` REJECTS the
+/// batch (fail-closed) rather than pruning, so no anchor below the ceiling is
+/// ever silently dropped — the operator resolves it by advancing the
+/// compile-time checkpoint (which re-attests anyway).
 ///
-/// The window must be large enough that:
-///   - any reorg the enclave will accept (≤ `MAX_REORG_DEPTH` deep) stays
-///     entirely inside the window, and the displaced range can be re-validated;
-///   - any SPV proof the enclave will accept (≥ `SPV_MIN_CONFIRMATIONS` deep)
-///     still has its committed header; and
-///   - **critically**, the difficulty-retarget lookup still resolves: a
-///     boundary block at height `B` (which can be as low as
-///     `tip − MAX_REORG_DEPTH` on a reorg) needs the block at `B − 2016`. We
-///     therefore retain at least one full retarget interval *below* the
-///     reorg-reachable region, so `B − 2016` is never pruned.
-///
-/// `MAX_REORG_DEPTH + RETARGET_INTERVAL + SPV_MIN_CONFIRMATIONS` satisfies all
-/// three with margin. With front-pruning aligned to retarget boundaries, the
-/// retained span is between `HEADER_WINDOW` and `HEADER_WINDOW + 2015` headers
-/// — a fixed, small bound (~450 KB) regardless of how long the enclave runs.
-pub const HEADER_WINDOW: BlockHeight = MAX_REORG_DEPTH + RETARGET_INTERVAL + SPV_MIN_CONFIRMATIONS;
+/// Sizing: worst-case forced allocation is `MAX_STORED_HEADERS` × ~112 B ≈
+/// 112 MB — a firm bound versus the previous unbounded growth. Legitimate
+/// runway before the *real* chain reaches it: ~11 months on 30s-block signet
+/// (~1.05 M headers/year) and ~19 years on mainnet from their checkpoints, both
+/// far beyond the redeploy/checkpoint-refresh cadence. Tune this against the
+/// enclave's actual memory reservation and expected checkpoint cadence.
+pub const MAX_STORED_HEADERS: usize = 1_000_000;
 
 /// Maximum number of headers accepted in a single `submit_headers` call.
 /// Bounds per-call validation work. Far above any legitimate batch (the
@@ -101,30 +118,30 @@ pub struct SubmitOutcome {
     pub reorg_depth: BlockHeight,
 }
 
-/// In-memory store of validated block headers, anchored to a checkpoint and
-/// bounded by a sliding window (#86).
+/// In-memory store of validated block headers, anchored to a checkpoint.
 ///
-/// Headers are stored relative to a *window base* rather than the checkpoint.
-/// The base starts at the checkpoint and advances as the front is pruned;
-/// `headers[i]` is always the header at height `base_height + 1 + i`. The base
-/// is kept on a retarget boundary so the epoch-start lookup stays resolvable
-/// (see `HEADER_WINDOW`).
+/// Every header from the checkpoint forward is retained (#130 — no sliding
+/// window). Headers are stored relative to a *base* that equals the checkpoint
+/// and never moves: `headers[i]` is always the header at height
+/// `base_height + 1 + i`, i.e. `checkpoint.height + 1 + i`. The base fields
+/// (hash/bits/time of the checkpoint block) are the predecessor metadata the
+/// first stored header chains to.
 pub struct HeaderChain {
     network: Network,
     checkpoint: Checkpoint,
     /// Height of the block immediately preceding `headers[0]` — the anchor the
-    /// first stored header chains to. Equals `checkpoint.height` until the
-    /// front is first pruned, then advances (always to a retarget boundary).
+    /// first stored header chains to. With full retention (#130) this stays
+    /// equal to `checkpoint.height` for the life of the chain.
     base_height: BlockHeight,
-    /// Hash (internal byte order) of the block at `base_height`. Starts as the
-    /// checkpoint hash; updated to the pruned-to header's hash on prune.
+    /// Hash (internal byte order) of the block at `base_height` — the
+    /// checkpoint hash.
     base_hash: BlockHash,
     /// `nBits` of the block at `base_height` — the predecessor difficulty for
-    /// `headers[0]`. Starts as `checkpoint.bits`.
+    /// `headers[0]` (the checkpoint's `bits`).
     base_bits: u32,
-    /// Timestamp of the block at `base_height`. Doubles as the epoch-start
-    /// time when `base_height` is the boundary an incoming retarget block
-    /// references. Starts as `checkpoint.time`.
+    /// Timestamp of the block at `base_height` (the checkpoint's `time`).
+    /// Doubles as the epoch-start time when `base_height` is the boundary an
+    /// incoming retarget block references.
     base_time: u32,
     /// Validated headers, in ascending height. Index `i` is the header at
     /// height `base_height + 1 + i`.
@@ -132,6 +149,10 @@ pub struct HeaderChain {
     /// Cached hashes (internal byte order) parallel to `headers`. Avoids
     /// recomputing on every linkage check.
     hashes: Vec<BlockHash>,
+    /// Absolute cap on retained headers (see `MAX_STORED_HEADERS`). A field
+    /// rather than a bare const so tests can exercise the fail-closed rejection
+    /// without building a million headers; production always uses the const.
+    max_stored_headers: usize,
 }
 
 impl HeaderChain {
@@ -147,7 +168,15 @@ impl HeaderChain {
             base_time: checkpoint.time,
             headers: Vec::new(),
             hashes: Vec::new(),
+            max_stored_headers: MAX_STORED_HEADERS,
         }
+    }
+
+    /// Test hook: shrink the retention cap so the fail-closed ceiling can be
+    /// exercised without building `MAX_STORED_HEADERS` headers.
+    #[cfg(test)]
+    fn set_max_stored_headers_for_test(&mut self, cap: usize) {
+        self.max_stored_headers = cap;
     }
 
     pub fn network(&self) -> Network {
@@ -194,9 +223,10 @@ impl HeaderChain {
         self.headers.is_empty()
     }
 
-    /// Look up a stored header by height. Heights at or below the window base
-    /// return `None` — we don't keep the base block's header itself, only its
-    /// metadata (hash/bits/time), and anything older has been pruned (#86).
+    /// Look up a stored header by height. Heights at or below the checkpoint
+    /// return `None` — we don't keep the checkpoint block's header itself, only
+    /// its metadata (hash/bits/time). Every height from `checkpoint + 1` to the
+    /// tip is retained (#130), so old RGB anchors always resolve.
     pub fn header_at(&self, height: BlockHeight) -> Option<&Header> {
         if height <= self.base_height {
             return None;
@@ -205,9 +235,9 @@ impl HeaderChain {
         self.headers.get(idx)
     }
 
-    /// Look up a stored hash by height. Returns the window-base hash for its
-    /// own height — useful for chain-linkage checks across the base boundary.
-    /// Heights below the base have been pruned and return `None`.
+    /// Look up a stored hash by height. Returns the checkpoint (base) hash for
+    /// its own height — useful for chain-linkage checks across the base
+    /// boundary. Heights below the checkpoint return `None`.
     pub fn hash_at(&self, height: BlockHeight) -> Option<BlockHash> {
         if height == self.base_height {
             return Some(self.base_hash);
@@ -276,11 +306,27 @@ impl HeaderChain {
             });
         }
 
-        // Predecessor info at `start_height - 1`. Either the window base
-        // (checkpoint or pruned-to boundary) or a stored header. A start that
-        // lands in the pruned region below the base is caught by the
-        // `ReorgTooDeep` check above (the window always retains more than
-        // `MAX_REORG_DEPTH` headers, so any acceptable reorg stays in range).
+        // Total-retention ceiling (#130 / audit W-08): full retention dropped
+        // the sliding window, so bound absolute stored size here — otherwise a
+        // hostile/buggy listener on a non-PoW network (signet/regtest, where
+        // headers are minted for free) could grow the chain until the enclave
+        // OOMs. Fail-closed: reject the batch rather than prune, so no anchor
+        // below the ceiling is dropped. Headers retained below the batch are
+        // `start_height - 1 - base_height` (0 for a reorg back to the base),
+        // and the batch replaces everything from `start_height` up.
+        let retained_below_batch = (start_height - 1 - self.base_height) as usize;
+        let projected_len = retained_below_batch + raw_headers.len();
+        if projected_len > self.max_stored_headers {
+            return Err(SpvError::ChainTooLong {
+                len: projected_len,
+                max: self.max_stored_headers,
+            });
+        }
+
+        // Predecessor info at `start_height - 1`. Either the base (checkpoint)
+        // or a stored header. A start at or below the checkpoint was already
+        // rejected (`BelowCheckpoint`); everything above it is retained (#130),
+        // so any acceptable reorg (≤ `MAX_REORG_DEPTH`) stays in range.
         let pred_height = start_height - 1;
         let (pred_hash, pred_bits, pred_time) = if pred_height == self.base_height {
             (self.base_hash, self.base_bits, self.base_time)
@@ -358,9 +404,6 @@ impl HeaderChain {
             self.hashes.push(hash);
         }
 
-        // Bound forward growth (#86): prune the front to the window.
-        self.prune_front();
-
         Ok(SubmitOutcome {
             last_block_height: self.tip_height(),
             last_block_hash: self.tip_hash(),
@@ -369,43 +412,10 @@ impl HeaderChain {
         })
     }
 
-    /// Drop headers older than the retention window, advancing the window
-    /// base (#86). The new base is the **last retarget boundary at/below
-    /// `tip − HEADER_WINDOW`**, so:
-    ///   - the base always lands on a multiple of `RETARGET_INTERVAL`, and
-    ///   - the epoch-start block for any boundary the enclave might still
-    ///     validate (down to `tip − MAX_REORG_DEPTH` on a reorg, whose epoch
-    ///     start is `≥ tip − MAX_REORG_DEPTH − 2016 ≥ base`) is never pruned.
-    ///
-    /// No-op until the chain is long enough to prune past a boundary, so on
-    /// regtest/signet (and early mainnet sync) nothing is dropped.
-    fn prune_front(&mut self) {
-        let tip = self.tip_height();
-        let cutoff = tip.saturating_sub(HEADER_WINDOW);
-        // Round down to the last retarget boundary at/below the cutoff.
-        let new_base = (cutoff / RETARGET_INTERVAL) * RETARGET_INTERVAL;
-        if new_base <= self.base_height {
-            return;
-        }
-
-        // headers[i] is at height base_height + 1 + i, so the header at
-        // new_base sits at index (new_base - base_height - 1). Everything up to
-        // and including that index is pruned; that header becomes the new base.
-        let drop = (new_base - self.base_height) as usize;
-        let anchor_idx = drop - 1;
-        let anchor = self.headers[anchor_idx];
-        self.base_hash = self.hashes[anchor_idx];
-        self.base_bits = anchor.bits.to_consensus();
-        self.base_time = anchor.time;
-        self.base_height = new_base;
-        self.headers.drain(..drop);
-        self.hashes.drain(..drop);
-    }
-
     /// Find the timestamp of the block at the start of the retarget epoch
     /// containing `height`. Looks first in the staged batch (whose first
     /// entry is at `batch_start_height`), then in the committed chain, then
-    /// at the window base (the pruned-to boundary, or the checkpoint).
+    /// at the base (the checkpoint).
     ///
     /// Only meaningful at retarget boundaries; on non-boundary heights the
     /// caller ignores the value.
@@ -436,15 +446,15 @@ impl HeaderChain {
             }
         }
 
-        // Committed chain (strictly above the window base)?
+        // Committed chain (strictly above the base / checkpoint)?
         if let Some(h) = self.header_at(target_height) {
             return Ok(h.time);
         }
 
-        // The window base itself: a retarget boundary (or the checkpoint)
-        // whose timestamp we retain even after the header is pruned. The
-        // window guarantees the epoch start for any boundary we still validate
-        // is at or above this base (see `HEADER_WINDOW` / `prune_front`).
+        // The base (checkpoint) itself: a retarget boundary whose timestamp we
+        // retain as base metadata even though its header is not stored. Full
+        // retention (#130) guarantees the epoch start for any higher boundary
+        // is a stored header, resolved above.
         if target_height == self.base_height {
             return Ok(self.base_time);
         }
@@ -877,13 +887,15 @@ mod tests {
         assert!(matches!(err, SpvError::HeaderNotFound(949_536)));
     }
 
-    // ===== #86: bounded header chain (sliding window) =====
+    // ===== #130: full retention from the checkpoint (no sliding window) =====
 
-    /// Front-pruning advances the window base to the last retarget boundary
-    /// at/below `tip - HEADER_WINDOW`, bounds memory, and keeps the index math
-    /// (`header_at`/`hash_at`) correct off the new base.
+    /// Every header from the checkpoint forward is retained: the base stays
+    /// pinned at the checkpoint and `header_at` resolves anchors far below the
+    /// old `HEADER_WINDOW` (~2122). This is the core regression for #130 —
+    /// before the fix those headers were pruned and SPV rejected old RGB
+    /// anchors.
     #[test]
-    fn prune_bounds_memory_and_rebases_index_math() {
+    fn retains_full_history_from_checkpoint() {
         // Checkpoint at height 0 so boundaries fall on clean multiples of 2016.
         let cp = Checkpoint {
             height: 0,
@@ -894,34 +906,41 @@ mod tests {
         };
         let mut chain = HeaderChain::new(Network::Regtest, cp);
 
-        // Build enough headers to prune past a boundary: need tip ≥ 2016 +
-        // HEADER_WINDOW. HEADER_WINDOW = 100 + 2016 + 6 = 2122, so tip = 4200
-        // gives new_base = floor_2016(4200 - 2122) = floor_2016(2078) = 2016.
+        // Build well past the former window (100 + 2016 + 6 = 2122) plus a
+        // full epoch, so any leftover pruning logic would have fired.
         let count = 4200u32;
         let (raws, _) = synth_chain_from(cp.hash, cp.time, 1, count);
         let outcome = chain.submit_headers(1, &raws).unwrap();
         assert_eq!(outcome.last_block_height, count);
         assert_eq!(chain.tip_height(), count);
 
-        // Base advanced to the retarget boundary at 2016; everything below was
-        // pruned, so memory is bounded to the retained span.
-        assert_eq!(chain.base_height, 2016);
-        assert_eq!(chain.headers.len(), (count - 2016) as usize);
+        // Base stays pinned at the checkpoint — nothing is pruned, so the whole
+        // history is kept.
+        assert_eq!(chain.base_height, 0, "base pinned at the checkpoint");
+        assert_eq!(chain.headers.len(), count as usize);
+
+        // The checkpoint header itself is not stored, but its hash is available
+        // at its own height; every height above it resolves.
+        assert!(chain.header_at(0).is_none(), "checkpoint header not stored");
+        assert_eq!(chain.hash_at(0), Some(chain.base_hash));
+        assert!(chain.header_at(1).is_some(), "oldest header retained");
+
+        // A height far below `tip − 2122` is still present — exactly the case
+        // that failed before #130 (anchor at ~tip − 3200 here).
+        let deep = 1000u32;
         assert!(
-            (chain.headers.len() as BlockHeight) <= HEADER_WINDOW + RETARGET_INTERVAL,
-            "retained span must stay within one window + one epoch"
+            (count - deep) > 2122,
+            "precondition: deep anchor is below the old window"
+        );
+        assert!(
+            chain.header_at(deep).is_some(),
+            "deep-history header must be retained"
         );
 
-        // Index math is now relative to the new base.
-        assert!(chain.header_at(2016).is_none(), "base header not stored");
-        assert!(chain.hash_at(2015).is_none(), "below base is pruned");
-        assert_eq!(chain.hash_at(2016), Some(chain.base_hash));
-        assert!(chain.header_at(2017).is_some(), "first retained header");
         assert!(chain.header_at(count).is_some(), "tip is retained");
         assert_eq!(chain.header_at(count), chain.headers.last());
 
-        // The chain still extends correctly after pruning (linkage to the tip
-        // is unaffected by front-pruning).
+        // The chain still extends correctly on top of the full history.
         let tip_hash = chain.tip_hash();
         let (more, _) = synth_chain_from(tip_hash, chain.tip_time(), 9, 10);
         let outcome = chain.submit_headers(count + 1, &more).unwrap();
@@ -929,12 +948,11 @@ mod tests {
         assert_eq!(chain.tip_height(), count + 10);
     }
 
-    /// #86 critical gotcha: after pruning, the retarget epoch-start lookup must
-    /// still resolve. A boundary one interval above the new base references
-    /// exactly the base, whose timestamp we retain even though its header was
-    /// pruned.
+    /// The retarget epoch-start lookup resolves off retained history. A high
+    /// boundary references a stored header; the first boundary above the
+    /// checkpoint references the base (checkpoint) metadata.
     #[test]
-    fn epoch_start_resolves_at_new_base_after_prune() {
+    fn epoch_start_resolves_from_retained_history() {
         let cp = Checkpoint {
             height: 0,
             hash: [0xCC; 32],
@@ -945,27 +963,32 @@ mod tests {
         let mut chain = HeaderChain::new(Network::Regtest, cp);
         let (raws, _) = synth_chain_from(cp.hash, cp.time, 1, 4200);
         chain.submit_headers(1, &raws).unwrap();
-        assert_eq!(chain.base_height, 2016);
+        assert_eq!(chain.base_height, 0);
 
-        // The header that became the base was height 2016 in the submitted
-        // batch: synth_chain_from sets time = prev_time + 1 + i, so height
-        // 2016 (batch index 2015) has time cp.time + 1 + 2015 = cp.time + 2016.
-        let expected_base_time = cp.time + 2016;
-        assert_eq!(chain.base_time, expected_base_time);
-
-        // A boundary one interval above the base references the base itself —
-        // resolves to base_time rather than HeaderNotFound.
-        let boundary = chain.base_height + RETARGET_INTERVAL; // 4032
+        // synth_chain_from sets the header at height h to time cp.time + h.
+        // Boundary at 4032 references epoch start 2016 — a retained header.
+        let boundary = 2 * RETARGET_INTERVAL; // 4032
+        let epoch_start_height = boundary - RETARGET_INTERVAL; // 2016
+        let expected = chain.header_at(epoch_start_height).unwrap().time;
+        assert_eq!(expected, cp.time + epoch_start_height);
         let got = chain
             .epoch_start_time(boundary, boundary, &[])
-            .expect("epoch start at the new base must resolve post-prune");
-        assert_eq!(got, expected_base_time);
+            .expect("epoch start from retained history must resolve");
+        assert_eq!(got, expected);
+
+        // The first boundary above the checkpoint references the base itself,
+        // whose timestamp is the checkpoint time.
+        let first_boundary = RETARGET_INTERVAL; // 2016
+        let got_base = chain
+            .epoch_start_time(first_boundary, first_boundary, &[])
+            .expect("epoch start at the checkpoint base must resolve");
+        assert_eq!(got_base, cp.time);
     }
 
-    /// A reorg near the tip still validates after pruning — the truncate index
-    /// is computed off the window base, not the checkpoint.
+    /// A reorg near the tip validates with full retention — the truncate index
+    /// is computed off the base, which is pinned at the checkpoint.
     #[test]
-    fn reorg_near_tip_after_prune() {
+    fn reorg_near_tip_with_full_retention() {
         let cp = Checkpoint {
             height: 0,
             hash: [0xCC; 32],
@@ -976,7 +999,7 @@ mod tests {
         let mut chain = HeaderChain::new(Network::Regtest, cp);
         let (raws, _) = synth_chain_from(cp.hash, cp.time, 1, 4200);
         chain.submit_headers(1, &raws).unwrap();
-        assert_eq!(chain.base_height, 2016);
+        assert_eq!(chain.base_height, 0);
 
         // Reorg the last 5 blocks (depth 5) with a longer alt chain.
         let start = 4196;
@@ -987,8 +1010,48 @@ mod tests {
         assert_eq!(outcome.reorg_depth, 5);
         assert_eq!(chain.tip_height(), start - 1 + 10);
         assert_eq!(
-            chain.base_height, 2016,
-            "base unchanged by a tip-local reorg"
+            chain.base_height, 0,
+            "base pinned to the checkpoint; retention is full"
+        );
+    }
+
+    /// The absolute retention ceiling (`MAX_STORED_HEADERS`) is fail-closed: a
+    /// batch that would push the stored count past the cap is rejected and the
+    /// chain is left unchanged — never pruned. This is the memory backstop for
+    /// non-PoW networks, where headers can be minted for free.
+    #[test]
+    fn rejects_extension_past_retention_cap() {
+        let cp = Checkpoint {
+            height: 0,
+            hash: [0xCC; 32],
+            bits: 0x207fffff,
+            time: 1_700_000_000,
+            is_real: false,
+        };
+        let mut chain = HeaderChain::new(Network::Regtest, cp);
+        // Shrink the cap so we can hit it without building a million headers.
+        let cap = 50usize;
+        chain.set_max_stored_headers_for_test(cap);
+
+        // Filling exactly to the cap is accepted (boundary: 50 == cap).
+        let (raws, tip_hash) = synth_chain_from(cp.hash, cp.time, 1, cap as u32);
+        chain.submit_headers(1, &raws).unwrap();
+        assert_eq!(chain.len(), cap);
+
+        // One more header would make 51 > 50 → fail-closed rejection.
+        let (more, _) = synth_chain_from(tip_hash, chain.tip_time(), 9, 1);
+        let err = chain.submit_headers(cap as u32 + 1, &more).unwrap_err();
+        assert!(matches!(
+            err,
+            SpvError::ChainTooLong { len, max } if len == cap + 1 && max == cap
+        ));
+
+        // Chain is unchanged — nothing was pruned to make room.
+        assert_eq!(chain.len(), cap);
+        assert_eq!(chain.tip_height(), cap as u32);
+        assert!(
+            chain.header_at(1).is_some(),
+            "oldest header must not be dropped"
         );
     }
 
