@@ -41,6 +41,22 @@ dev_feature_release_guard!(
      it skips all signing cross-checks."
 );
 
+// `rgb-validation` validates a consignment by asking a resolver whether its
+// witness txs are mined. Without `spv` that resolver is the host-controlled
+// Esplora endpoint, so a malicious host can answer "mined at sufficient depth"
+// for a fabricated witness tx and the enclave would sign a `fundsOut` release
+// against a non-existent Bitcoin anchor (audit M-01 / #61). `spv` re-anchors
+// every witness tx against the enclave's own PoW-verified header chain, so a
+// build that can validate consignments MUST also carry SPV. Unlike the
+// dev-feature guards above, this combination is unsafe in every profile — so it
+// is not release-gated and must never compile.
+#[cfg(all(feature = "rgb-validation", not(feature = "spv")))]
+compile_error!(
+    "rgb-validation requires spv: without spv, consignment anchoring trusts only \
+     the host-controlled Esplora resolver — build with `--features spv` (which \
+     pulls in rgb-validation)"
+);
+
 pub mod attestation;
 pub mod cloning;
 pub mod config;
