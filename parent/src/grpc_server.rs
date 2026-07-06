@@ -109,8 +109,8 @@ impl ParentAdapterService {
     }
 
     fn common_sign_request(req: &grpc_proto::SignRequest) -> Result<CommonSignRequest, Status> {
-        req.common
-            .clone()
+        req.clone()
+            .common
             .ok_or_else(|| Status::invalid_argument("SignRequest.common is missing"))
     }
 
