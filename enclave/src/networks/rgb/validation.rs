@@ -43,7 +43,10 @@ use super::spv_validation;
 /// 4. when built without `spv`, reject any supplied Merkle proofs so build
 ///    mismatches fail closed instead of silently ignoring host-provided SPV
 ///    evidence.
-pub fn validate_source(source: &RgbSource, ctx: &ValidationContext<'_>) -> Result<()> {
+pub fn validate_source(
+    source: &RgbSource,
+    ctx: &ValidationContext<'_>,
+) -> Result<ValidatedConsignment> {
     validate_source_payload(source)?;
 
     let validator = ctx.rgb_validator.ok_or_else(|| {
@@ -105,7 +108,7 @@ pub fn validate_source(source: &RgbSource, ctx: &ValidationContext<'_>) -> Resul
         }
     }
 
-    Ok(())
+    Ok(validated)
 }
 
 fn validate_source_payload(source: &RgbSource) -> Result<()> {

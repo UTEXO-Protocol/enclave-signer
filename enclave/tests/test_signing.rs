@@ -1,10 +1,25 @@
 mod common;
 
+use alloy_primitives::{Address, Bytes, U256};
+use alloy_sol_types::{sol, SolCall};
 use utexo_bridge_enclave::config::BridgeConfig;
 use utexo_bridge_enclave::proto::enclave_request::Request;
 use utexo_bridge_enclave::proto::enclave_response::Response;
 use utexo_bridge_enclave::proto::sign_request::{DestinationNetwork, SourceNetwork};
 use utexo_bridge_enclave::proto::*;
+
+sol! {
+    function fundsOut(
+        address recipient,
+        uint256 amount,
+        uint256 burnId,
+        uint256 sourceChainId,
+        uint256 destinationChainId,
+        string sourceAddress,
+        bytes proof,
+        bytes settlementData
+    );
+}
 
 /// Pinned `BridgeConfig` matching the defaults of `valid_sign_evm_request`
 /// (chain_id 1, proxy/bridge contract `0xAA…`, asset `rgb:test`). Tests
@@ -20,26 +35,19 @@ fn pinned_bridge_config() -> BridgeConfig {
     }
 }
 
-/// Build a mock `fundsOut` calldata in the 8-arg shape
-/// `fundsOut(address,uint256,uint256,uint256,uint256,string,bytes,bytes)`
-/// (selector `0xccddb768`) — the single `fundsOut` on the deployed
-/// contract, accepted by `validation::evm_crosscheck`'s whitelist.
-/// `amount` sits at offset 36 (after selector + recipient).
+/// Build ABI-valid `fundsOut` calldata in the deployed 8-arg shape.
 fn mock_funds_out_calldata(recipient: [u8; 20], amount: u64) -> Vec<u8> {
-    let mut data = Vec::with_capacity(4 + 8 * 32);
-    data.extend_from_slice(&[0xcc, 0xdd, 0xb7, 0x68]);
-    // recipient (address, padded to 32 bytes) @ offset 4
-    let mut padded = [0u8; 32];
-    padded[12..].copy_from_slice(&recipient);
-    data.extend_from_slice(&padded);
-    // amount (uint256) @ offset 36
-    let mut padded = [0u8; 32];
-    padded[24..].copy_from_slice(&amount.to_be_bytes());
-    data.extend_from_slice(&padded);
-    // 6 more head slots zero-filled (burnId, sourceChainId,
-    // destinationChainId, srcAddrOffset, proofOffset, settlementDataOffset).
-    data.extend_from_slice(&[0u8; 32 * 6]);
-    data
+    fundsOutCall {
+        recipient: Address::from(recipient),
+        amount: U256::from(amount),
+        burnId: U256::ZERO,
+        sourceChainId: U256::ZERO,
+        destinationChainId: U256::from(1u64),
+        sourceAddress: String::new(),
+        proof: Bytes::new(),
+        settlementData: Bytes::new(),
+    }
+    .abi_encode()
 }
 
 /// Placeholder consignment bytes for integration tests. `validate_evm_request`
@@ -56,9 +64,8 @@ fn placeholder_consignment_hash() -> Vec<u8> {
     Keccak256::digest(PLACEHOLDER_CONSIGNMENT).to_vec()
 }
 
-/// Build a valid enriched EVM-destination SignRequest for testing. `commission` is
-/// retained on the proto fields for wire-compat but is no longer part of
-/// the calldata (the contract takes commission on-chain).
+/// Build a valid enriched EVM-destination SignRequest for testing. `commission`
+/// stays outside the calldata but remains part of route-proof amount coverage.
 fn valid_sign_evm_request(amount: u64, commission: u64) -> SignRequest {
     SignRequest {
         amount: amount + commission + 100, // plenty of headroom
@@ -387,17 +394,9 @@ fn test_sign_evm_rejects_unconfigured_bridge_config() {
     }
 }
 
-// Amount binding now lives in `validate_funds_out_transfer`, which runs
-// against a `ValidatedConsignment` (the consignment is authoritative on
-// the amount, not the listener-supplied `rgb_amount`/`calldata_*`
-// fields). It's exhaustively unit-tested in
-// `validation::evm_crosscheck::tests::transfer`. The old integration
-// tests here asserted the removed `rgb_amount < calldata_amount +
-// commission` / byte-offset-68 checks in `validate_evm_request`; those
-// checks are gone with the single-`fundsOut` ABI (no commission slot,
-// amount bound to the consignment instead), so the integration cases
-// were removed rather than ported — they can't run without a configured
-// in-enclave validator, which the harness doesn't wire.
+// Amount binding now runs through route proofs: RGB source validation emits the
+// consignment amount, EVM destination validation decodes `fundsOut.amount` and
+// adds `calldata_commission`, then `validate_route_proofs` compares the two.
 
 /// Default-build coverage: `--features rgb-validation` is required to
 /// sign fundsOut at all. The cross-check fails fast with a message

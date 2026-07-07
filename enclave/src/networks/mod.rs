@@ -9,6 +9,16 @@ use crate::proto::sign_request::{DestinationNetwork, SourceNetwork};
 pub mod evm;
 pub mod rgb;
 
+/// Normalized bridge-side proof emitted by source and destination validators.
+///
+/// Each network module validates only its own payload and maps the trusted
+/// amount/operation identity into this route-neutral shape
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RouteProof {
+    pub amount: u64,
+    pub operation_id: Option<String>,
+}
+
 pub struct ValidationContext<'a> {
     pub bridge_config: &'a BridgeConfig,
     #[cfg(feature = "rgb-validation")]
@@ -17,10 +27,14 @@ pub struct ValidationContext<'a> {
 }
 
 /// Dispatch source-network validation to the owning network module.
-pub fn validate_source(source: &SourceNetwork, ctx: &ValidationContext<'_>) -> Result<()> {
+pub fn validate_source(
+    amount: u64,
+    source: &SourceNetwork,
+    ctx: &ValidationContext<'_>,
+) -> Result<RouteProof> {
     match source {
-        SourceNetwork::EvmSource(source) => evm::validation::validate_source(source),
-        SourceNetwork::RgbSource(source) => rgb::validate_source(source, ctx),
+        SourceNetwork::EvmSource(source) => evm::validation::validate_source(amount, source),
+        SourceNetwork::RgbSource(source) => rgb::validate_source(amount, source, ctx),
     }
 }
 
@@ -30,7 +44,7 @@ pub fn validate_destination(
     source_commission: u64,
     destination: &DestinationNetwork,
     ctx: &ValidationContext<'_>,
-) -> Result<()> {
+) -> Result<RouteProof> {
     #[cfg(not(all(feature = "rgb-validation", not(feature = "dev-mode"))))]
     {
         let _ = amount;
@@ -47,31 +61,44 @@ pub fn validate_destination(
             #[cfg(all(feature = "rgb-validation", not(feature = "dev-mode")))]
             rgb::validate_destination_anchor(destination, amount, source_commission, ctx)?;
 
-            Ok(())
+            Ok(RouteProof {
+                amount: destination
+                    .psbt_output_amount
+                    .checked_add(source_commission)
+                    .ok_or_else(|| {
+                        EnclaveError::CrossCheck(
+                            "psbt_output_amount + source_commission overflow".into(),
+                        )
+                    })?,
+                operation_id: None,
+            })
         }
     }
 }
 
-/// Validate invariants that require both source and destination fields.
-pub fn validate_route(
-    amount: u64,
+/// Validate that source and destination proofs describe the same route action.
+pub fn validate_route_proofs(
     source: &SourceNetwork,
     destination: &DestinationNetwork,
+    source_proof: &RouteProof,
+    destination_proof: &RouteProof,
 ) -> Result<()> {
+    if cfg!(all(feature = "dev-mode", not(test))) {
+        let _ = source;
+        let _ = destination;
+        let _ = source_proof;
+        let _ = destination_proof;
+        return Ok(());
+    }
+
     match (source, destination) {
-        (SourceNetwork::EvmSource(source), DestinationNetwork::RgbDestination(destination)) => {
-            validate_amount_covers_destination(
-                amount,
-                destination.psbt_output_amount,
-                source.commission,
-            )
+        (SourceNetwork::EvmSource(_), DestinationNetwork::RgbDestination(_)) => {
+            validate_amount_covers_destination(source_proof.amount, destination_proof.amount)
+            // todo: validate operation_id
         }
-        (SourceNetwork::RgbSource(_), DestinationNetwork::EvmDestination(destination)) => {
-            validate_amount_covers_destination(
-                amount,
-                destination.calldata_amount,
-                destination.calldata_commission,
-            )
+        (SourceNetwork::RgbSource(_), DestinationNetwork::EvmDestination(_)) => {
+            validate_amount_covers_destination(source_proof.amount, destination_proof.amount)?;
+            validate_operation_ids_match(source_proof, destination_proof)
         }
         _ => Err(EnclaveError::InvalidRequest(
             "unsupported source/destination network pair".into(),
@@ -79,18 +106,27 @@ pub fn validate_route(
     }
 }
 
-fn validate_amount_covers_destination(
-    source_amount: u64,
-    destination_amount: u64,
-    commission: u64,
-) -> Result<()> {
-    let required = destination_amount.checked_add(commission).ok_or_else(|| {
-        EnclaveError::CrossCheck("destination_amount + commission overflow".into())
+fn validate_amount_covers_destination(source_amount: u64, destination_amount: u64) -> Result<()> {
+    if source_amount < destination_amount {
+        return Err(EnclaveError::CrossCheck(format!(
+            "amount mismatch: source amount ({source_amount}) < destination amount ({destination_amount})"
+        )));
+    }
+
+    Ok(())
+}
+
+fn validate_operation_ids_match(source: &RouteProof, destination: &RouteProof) -> Result<()> {
+    let source_id = source.operation_id.as_ref().ok_or_else(|| {
+        EnclaveError::CrossCheck("source route proof is missing operation_id".into())
+    })?;
+    let destination_id = destination.operation_id.as_ref().ok_or_else(|| {
+        EnclaveError::CrossCheck("destination route proof is missing operation_id".into())
     })?;
 
-    if source_amount < required {
+    if source_id != destination_id {
         return Err(EnclaveError::CrossCheck(format!(
-            "amount mismatch: source_amount ({source_amount}) < destination_amount ({destination_amount}) + commission ({commission})"
+            "operation mismatch: source operation_id {source_id} != destination operation_id {destination_id}"
         )));
     }
 
@@ -100,11 +136,8 @@ fn validate_amount_covers_destination(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::proto::{EvmDestination, RgbSource};
-    #[cfg(not(feature = "rgb-validation"))]
-    use crate::proto::{EvmSource, RgbDestination};
+    use crate::proto::{EvmDestination, EvmSource, RgbDestination, RgbSource};
 
-    #[cfg(not(feature = "rgb-validation"))]
     fn evm_source(commission: u64) -> SourceNetwork {
         SourceNetwork::EvmSource(EvmSource {
             tx_hash: vec![0xAA; 32],
@@ -113,6 +146,17 @@ mod tests {
             token: vec![0x11; 20],
             recipient: vec![0x22; 20],
             commission,
+        })
+    }
+
+    fn rgb_destination(destination_amount: u64) -> DestinationNetwork {
+        DestinationNetwork::RgbDestination(RgbDestination {
+            operation_idx: 1,
+            psbt_bytes: vec![0x70, 0x73, 0x62, 0x74, 0xff],
+            psbt_output_amount: destination_amount,
+            asset_id: "rgb:test-asset".into(),
+            consignment: vec![],
+            consignment_hash: vec![],
         })
     }
 
@@ -139,39 +183,92 @@ mod tests {
         })
     }
 
-    #[cfg(not(feature = "rgb-validation"))]
-    fn rgb_destination(destination_amount: u64) -> DestinationNetwork {
-        DestinationNetwork::RgbDestination(RgbDestination {
-            operation_idx: 1,
-            psbt_bytes: vec![0x70, 0x73, 0x62, 0x74, 0xff],
-            psbt_output_amount: destination_amount,
-            asset_id: "rgb:test-asset".into(),
-            consignment: vec![],
-            consignment_hash: vec![],
-        })
+    fn proof(amount: u64, operation_id: Option<&str>) -> RouteProof {
+        RouteProof {
+            amount,
+            operation_id: operation_id.map(str::to_string),
+        }
     }
 
     #[test]
-    #[cfg(not(feature = "rgb-validation"))]
-    fn route_amount_accepts_exact_match_to_rgb_destination() {
-        assert!(validate_route(110, &evm_source(20), &rgb_destination(90)).is_ok());
+    fn route_proofs_accept_exact_match_to_rgb_destination() {
+        assert!(validate_route_proofs(
+            &evm_source(20),
+            &rgb_destination(90),
+            &proof(90, None),
+            &proof(90, None),
+        )
+        .is_ok());
     }
 
     #[test]
-    #[cfg(not(feature = "rgb-validation"))]
-    fn route_amount_rejects_underfunded_rgb_destination() {
-        let err = validate_route(100, &evm_source(20), &rgb_destination(90)).unwrap_err();
+    fn route_proofs_reject_underfunded_rgb_destination() {
+        let err = validate_route_proofs(
+            &evm_source(20),
+            &rgb_destination(90),
+            &proof(89, None),
+            &proof(90, None),
+        )
+        .unwrap_err();
         assert!(err.to_string().contains("amount mismatch"));
     }
 
     #[test]
-    fn route_amount_accepts_exact_match_to_evm_destination() {
-        assert!(validate_route(110, &rgb_source(), &evm_destination(90, 20)).is_ok());
+    fn route_proofs_accept_rgb_to_evm_match() {
+        assert!(validate_route_proofs(
+            &rgb_source(),
+            &evm_destination(90, 20),
+            &proof(90, Some("op")),
+            &proof(90, Some("op")),
+        )
+        .is_ok());
     }
 
     #[test]
-    fn route_amount_rejects_underfunded_evm_destination() {
-        let err = validate_route(100, &rgb_source(), &evm_destination(90, 20)).unwrap_err();
+    fn route_proofs_reject_underfunded_evm_destination() {
+        let err = validate_route_proofs(
+            &rgb_source(),
+            &evm_destination(90, 20),
+            &proof(89, Some("op")),
+            &proof(90, Some("op")),
+        )
+        .unwrap_err();
         assert!(err.to_string().contains("amount mismatch"));
+    }
+
+    #[test]
+    fn route_proofs_reject_rgb_to_evm_operation_mismatch() {
+        let err = validate_route_proofs(
+            &rgb_source(),
+            &evm_destination(90, 20),
+            &proof(90, Some("source-op")),
+            &proof(90, Some("destination-op")),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("operation mismatch"));
+    }
+
+    #[test]
+    fn route_proofs_reject_rgb_to_evm_missing_operation_id() {
+        let err = validate_route_proofs(
+            &rgb_source(),
+            &evm_destination(90, 20),
+            &proof(90, None),
+            &proof(90, Some("destination-op")),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("missing operation_id"));
+    }
+
+    #[test]
+    fn route_proofs_reject_unsupported_pair() {
+        let err = validate_route_proofs(
+            &rgb_source(),
+            &rgb_destination(90),
+            &proof(90, None),
+            &proof(90, None),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("unsupported"));
     }
 }

@@ -4,7 +4,9 @@ use crate::config::BridgeConfig;
 use crate::error::{EnclaveError, Result};
 use crate::framing;
 use crate::networks::evm::signing::{build_evm_domain, sign_request_digest};
-use crate::networks::{validate_destination, validate_route, validate_source, ValidationContext};
+use crate::networks::{
+    validate_destination, validate_route_proofs, validate_source, ValidationContext,
+};
 use crate::proto::enclave_request::Request;
 use crate::proto::enclave_response::Response;
 use crate::proto::*;
@@ -215,20 +217,25 @@ fn handle_sign(ctx: &ServerContext, req: SignRequest) -> Result<EnclaveResponse>
         rgb_validator: ctx.rgb_validator.as_ref(),
         header_chain: &ctx.header_chain,
     };
-    validate_source(source_ref, &validation_ctx)?;
+    let source_proof = validate_source(req.amount, source_ref, &validation_ctx)?;
 
     let source_commission = match source_ref {
         SourceNetwork::EvmSource(source) => source.commission,
         SourceNetwork::RgbSource(source) => source.commission,
     };
-    validate_destination(
+    let destination_proof = validate_destination(
         req.amount,
         source_commission,
         destination_ref,
         &validation_ctx,
     )?;
 
-    validate_route(req.amount, source_ref, destination_ref)?;
+    validate_route_proofs(
+        source_ref,
+        destination_ref,
+        &source_proof,
+        &destination_proof,
+    )?;
 
     // Soft operation-uniqueness guard (audit W-02 / #84). In EVM -> RGB
     // bridge mode, record the source/destination operation tuple and reject a

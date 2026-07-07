@@ -40,6 +40,8 @@ thiserror = "2"
 
 # Encoding
 hex = "0.4"
+alloy-primitives = "1"
+alloy-sol-types = "1"
 
 # Logging
 tracing = "0.1"
