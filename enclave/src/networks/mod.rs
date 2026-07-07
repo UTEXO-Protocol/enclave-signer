@@ -94,11 +94,13 @@ pub fn validate_route_proofs(
     match (source, destination) {
         (SourceNetwork::EvmSource(_), DestinationNetwork::RgbDestination(_)) => {
             validate_amount_covers_destination(source_proof.amount, destination_proof.amount)
-            // todo: validate operation_id
         }
         (SourceNetwork::RgbSource(_), DestinationNetwork::EvmDestination(_)) => {
-            validate_amount_covers_destination(source_proof.amount, destination_proof.amount)?;
-            validate_operation_ids_match(source_proof, destination_proof)
+            validate_amount_covers_destination(source_proof.amount, destination_proof.amount)
+            // TODO: re-enable operation_id binding once EVM destination proofs
+            // derive the operation id from fundsOut.settlementData. The current
+            // contract burnId is unrelated to the RGB consignment opId.
+            // validate_operation_ids_match(source_proof, destination_proof)
         }
         _ => Err(EnclaveError::InvalidRequest(
             "unsupported source/destination network pair".into(),
@@ -116,6 +118,7 @@ fn validate_amount_covers_destination(source_amount: u64, destination_amount: u6
     Ok(())
 }
 
+#[allow(dead_code)]
 fn validate_operation_ids_match(source: &RouteProof, destination: &RouteProof) -> Result<()> {
     let source_id = source.operation_id.as_ref().ok_or_else(|| {
         EnclaveError::CrossCheck("source route proof is missing operation_id".into())
@@ -237,27 +240,25 @@ mod tests {
     }
 
     #[test]
-    fn route_proofs_reject_rgb_to_evm_operation_mismatch() {
-        let err = validate_route_proofs(
+    fn route_proofs_do_not_compare_rgb_to_evm_operation_id_yet() {
+        assert!(validate_route_proofs(
             &rgb_source(),
             &evm_destination(90, 20),
             &proof(90, Some("source-op")),
             &proof(90, Some("destination-op")),
         )
-        .unwrap_err();
-        assert!(err.to_string().contains("operation mismatch"));
+        .is_ok());
     }
 
     #[test]
-    fn route_proofs_reject_rgb_to_evm_missing_operation_id() {
-        let err = validate_route_proofs(
+    fn route_proofs_accept_rgb_to_evm_missing_operation_id_for_now() {
+        assert!(validate_route_proofs(
             &rgb_source(),
             &evm_destination(90, 20),
             &proof(90, None),
             &proof(90, Some("destination-op")),
         )
-        .unwrap_err();
-        assert!(err.to_string().contains("missing operation_id"));
+        .is_ok());
     }
 
     #[test]

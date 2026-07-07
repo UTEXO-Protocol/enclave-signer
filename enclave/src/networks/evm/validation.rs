@@ -1,5 +1,6 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
+#[cfg(test)]
 use alloy_primitives::U256;
 use alloy_sol_types::{sol, SolCall};
 
@@ -164,12 +165,11 @@ fn parse_proof_from_calldata(call_data: &[u8]) -> Result<RouteProof> {
 
     Ok(RouteProof {
         amount,
-        operation_id: Some(u256_to_32_byte_hex(decoded.burnId)),
+        // TODO: derive this from fundsOut.settlementData once the new smart
+        // contract calldata shape is finalized. `burnId` is not the RGB opId
+        // and must not be used for cross-network operation binding.
+        operation_id: None,
     })
-}
-
-fn u256_to_32_byte_hex(value: U256) -> String {
-    hex::encode(value.to_be_bytes::<32>())
 }
 
 #[cfg(test)]
@@ -243,10 +243,7 @@ mod tests {
         with_ctx(&config(), |ctx| {
             let proof = validate_destination(&destination(), ctx).expect("valid destination");
             assert_eq!(proof.amount, 1000);
-            assert_eq!(
-                proof.operation_id.as_deref(),
-                Some("0000000000000000000000000000000000000000000000000000000000000007")
-            );
+            assert_eq!(proof.operation_id, None);
         });
     }
 
