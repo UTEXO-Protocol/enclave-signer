@@ -12,7 +12,7 @@
 # loads the required deploy key.
 
 # ===== Builder Stage =====
-FROM rust:1.89-slim AS builder
+FROM rust:1.96-slim AS builder
 
 # `git` + `openssh-client`: the workspace `[patch.crates-io]` uses public
 # git URLs for rgb-consensus / rgb-ops / rgb-invoicing / rgb-strict-encoding,

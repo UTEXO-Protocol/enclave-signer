@@ -18,10 +18,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Rust 1.89
+      - name: Install Rust 1.96
         uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: "1.89"
+          toolchain: "1.96"
           components: rustfmt, clippy
 
       - name: Install system dependencies
@@ -109,10 +109,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Rust 1.89
+      - name: Install Rust 1.96
         uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: "1.89"
+          toolchain: "1.96"
 
       - name: Install system dependencies
         run: sudo apt-get update && sudo apt-get install -y pkg-config libssl-dev protobuf-compiler
@@ -150,3 +150,54 @@ jobs:
             exit 1
           fi
           echo "OK: release build correctly rejected '${{ matrix.feature }}' via the compile_error guard"
+
+  # Assert that enabling `rgb-validation` without `spv` fails to compile via the
+  # `compile_error!` in lib.rs (audit M-01 / #61). Without SPV, a consignment's
+  # witness txs are anchored only through the host-controlled Esplora resolver,
+  # so the enclave must never be built that way. Runs separately from `ci`
+  # because the build is expected to fail. Unlike `release-guards` this is not
+  # release-specific — the combination is unsafe in every profile.
+  feature-guards:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust 1.96
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.96"
+
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y pkg-config libssl-dev protobuf-compiler
+
+      # `--features rgb-validation` pulls the private `rgb-consignment` dep, which
+      # cargo fetches/builds before it reaches our crate's `compile_error!`, so
+      # the deploy key is required here just like the `ci` job above.
+      - name: Set up SSH for private RGB deps
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.RGB_CONSIGNMENT_PARSER_DEPLOY_KEY }}
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-feature-guards-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-feature-guards-
+
+      - name: Assert rgb-validation without spv is rejected
+        run: |
+          if cargo build -p utexo-bridge-enclave --no-default-features --features rgb-validation 2>build.log; then
+            echo "::error::build unexpectedly SUCCEEDED with rgb-validation but no spv — the compile_error guard is missing or not firing"
+            exit 1
+          fi
+          if ! grep -q "rgb-validation requires spv" build.log; then
+            echo "::error::build failed, but not via the expected compile_error guard (rgb-validation requires spv)"
+            cat build.log
+            exit 1
+          fi
+          echo "OK: rgb-validation-without-spv correctly rejected via the compile_error guard"

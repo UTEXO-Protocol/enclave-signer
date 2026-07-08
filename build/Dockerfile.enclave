@@ -9,7 +9,7 @@
 # over SSH. The same SSH mount is also used for the private `rgb-consignment`
 # git dependency pulled by the `rgb-validation`/`spv` features.
 
-FROM rust:1.89-slim AS builder
+FROM rust:1.96-slim AS builder
 
 # `git` + `openssh-client`: the workspace `[patch.crates-io]` uses public
 # git URLs for rgb-consensus / rgb-ops / rgb-invoicing / rgb-strict-encoding,
