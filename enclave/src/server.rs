@@ -291,6 +291,34 @@ fn handle_sign(ctx: &ServerContext, req: SignRequest) -> Result<EnclaveResponse>
         )?;
     }
 
+    // Fail-closed when the FundsIn verifier is not compiled in (audit M-06 /
+    // #60, #51). An EVM -> RGB bridge request is authorised by an EVM deposit,
+    // but #51 removed the listener-supplied `event_valid`/`event_finalized`
+    // booleans that used to gate it and the independent replacement lives behind
+    // the `evm-rpc` feature. A build without that feature therefore has NO
+    // evidence the deposit occurred - the consignment/PSBT checks prove the
+    // transfer shape but not that any EVM deposit backs it. Refuse rather than
+    // sign on the missing authorisation. Mirrors the M-01/#61 no-`spv` fundsOut
+    // refusal. dev-mode retains the legacy path for local testing. Compiled only
+    // when `evm-rpc` is absent, so it and the verification block above are
+    // mutually exclusive.
+    #[cfg(all(not(feature = "evm-rpc"), not(feature = "dev-mode")))]
+    if matches!(
+        (source_ref, destination_ref),
+        (
+            SourceNetwork::EvmSource(_),
+            DestinationNetwork::RgbDestination(_)
+        )
+    ) {
+        return Err(EnclaveError::CrossCheck(
+            "enclave was not built with --features evm-rpc: refusing to sign a bridge-mode PSBT \
+             without independently verifying the FundsIn deposit (the listener-supplied \
+             event_valid/event_finalized booleans are no longer trusted — audit M-06 / #60/#51). \
+             Rebuild with `--features evm-rpc` (or `helios` for the trustless path)."
+                .into(),
+        ));
+    }
+
     // Soft operation-uniqueness guard (audit W-02 / #84). In EVM -> RGB
     // bridge mode, record the source/destination operation tuple and reject a
     // same-op resubmission inside the TTL window. This is defense-in-depth

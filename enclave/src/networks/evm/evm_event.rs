@@ -16,6 +16,15 @@
 //! one; this predicate becomes trustless only once Helios (#77) verifies the
 //! RPC inside the TEE. This is the predicate + plumbing layer.
 //!
+//! #77 PREDICATE SHAPE (deliberate divergence): issue #77 sketches matching the
+//! exact listener-forwarded log (`evm_contract`, `evm_log_index`,
+//! `evm_event_topics`, `evm_event_data`). This module instead PINS the contract
+//! from config and independently DECODES + binds the semantic fields
+//! (`operationId`, gross/net/commission) from the log data. That is strictly
+//! stronger — the enclave never trusts a listener-forwarded raw log — so
+//! `evm_log_index` / `evm_event_topics` / `evm_event_data` are intentionally
+//! unused rather than an oversight.
+//!
 //! WHAT THIS DOES NOT BIND: `operationId` is a backend-assigned `uint256` with
 //! no on-chain cryptographic link to the RGB mint being signed, so confirming
 //! the deposit does not by itself prove it corresponds to *this* RGB transfer;
@@ -300,7 +309,7 @@ impl EvmReceiptProvider for AlloyEvmClient {
             .map_err(|e| {
                 EnclaveError::CrossCheck(format!("evm-rpc: eth_getTransactionReceipt failed: {e}"))
             })?;
-        Ok(receipt.map(map_alloy_receipt))
+        receipt.map(map_alloy_receipt).transpose()
     }
 
     fn get_block_number(&self) -> Result<u64> {
@@ -313,7 +322,13 @@ impl EvmReceiptProvider for AlloyEvmClient {
 
 /// Translate an alloy receipt into the enclave-local [`ReceiptData`] so no
 /// alloy types leak into the predicate.
-fn map_alloy_receipt(r: alloy::rpc::types::TransactionReceipt) -> ReceiptData {
+///
+/// Fails closed on a missing `block_number`: the confirmation-depth check is
+/// `head - block_number`, so a `None` defaulted to `0` would report the receipt
+/// as infinitely deep and pass finality. A mined tx always carries a block
+/// number (a pending tx yields no receipt at all), so this only guards against
+/// a malformed response, but a finality check must never default to "deep".
+fn map_alloy_receipt(r: alloy::rpc::types::TransactionReceipt) -> Result<ReceiptData> {
     let logs = r
         .inner
         .logs()
@@ -324,11 +339,18 @@ fn map_alloy_receipt(r: alloy::rpc::types::TransactionReceipt) -> ReceiptData {
             data: log.data().data.to_vec(),
         })
         .collect();
-    ReceiptData {
+    let block_number = r.block_number.ok_or_else(|| {
+        EnclaveError::CrossCheck(
+            "evm-rpc: FundsIn receipt has no block_number (pending/malformed) - refusing to \
+             treat an unmined receipt as confirmed"
+                .into(),
+        )
+    })?;
+    Ok(ReceiptData {
         status_success: r.status(),
-        block_number: r.block_number.unwrap_or(0),
+        block_number,
         logs,
-    }
+    })
 }
 
 /// Boot-time bound on the Helios light-client initial sync. If the client is
@@ -363,19 +385,36 @@ impl HeliosEvmClient {
     /// the first query is already verified. Any error (bad config, no
     /// checkpoint, sync timeout) is returned so boot leaves the provider unset
     /// and bridge signing fails closed.
-    pub fn new(cfg: &crate::config::HeliosConfig) -> Result<Self> {
+    pub fn new(cfg: &crate::config::HeliosConfig, expected_chain_id: u64) -> Result<Self> {
         use helios_ethereum::{config::networks::Network, EthereumClientBuilder};
 
-        let network = match cfg.network.to_ascii_lowercase().as_str() {
-            "mainnet" => Network::Mainnet,
-            "sepolia" => Network::Sepolia,
-            "holesky" => Network::Holesky,
+        // Canonical chain id for each supported network. Kept here rather than
+        // read from the network object so the consistency check below does not
+        // depend on Helios internals.
+        let (network, network_chain_id) = match cfg.network.to_ascii_lowercase().as_str() {
+            "mainnet" => (Network::Mainnet, 1u64),
+            "sepolia" => (Network::Sepolia, 11155111u64),
+            "holesky" => (Network::Holesky, 17000u64),
             other => {
                 return Err(EnclaveError::CrossCheck(format!(
                     "helios: unsupported HELIOS_NETWORK {other:?} (want mainnet|sepolia|holesky)"
                 )))
             }
         };
+        // #77 predicate 1: HELIOS_NETWORK must be consistent with the pinned
+        // EVM_CHAIN_ID. Both are operator-set at boot, so a mismatch is a
+        // misconfiguration (e.g. Helios on sepolia while the bridge is pinned to
+        // mainnet) that would otherwise verify FundsIn on the wrong chain.
+        // Skipped only when EVM_CHAIN_ID is unset (0), i.e. an unconfigured
+        // dev/mock deploy that pins no identity.
+        if expected_chain_id != 0 && expected_chain_id != network_chain_id {
+            return Err(EnclaveError::CrossCheck(format!(
+                "helios: HELIOS_NETWORK {:?} (chain id {network_chain_id}) is inconsistent with \
+                 the pinned EVM_CHAIN_ID {expected_chain_id} - refusing to verify FundsIn on a \
+                 different chain than the bridge is configured for",
+                cfg.network
+            )));
+        }
         let checkpoint = parse_checkpoint(cfg.checkpoint.as_deref())?;
 
         let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -443,20 +482,32 @@ impl EvmReceiptProvider for HeliosEvmClient {
             })?;
         // Map inline so the alloy-1.x receipt type is inferred, never named -
         // it must not cross the EvmReceiptProvider boundary (our alloy is 2.x).
-        Ok(receipt.map(|r| ReceiptData {
-            status_success: r.status(),
-            block_number: r.block_number.unwrap_or(0),
-            logs: r
-                .inner
-                .logs()
-                .iter()
-                .map(|log| LogEntry {
-                    address: log.address().into_array(),
-                    topics: log.topics().iter().map(|t| t.0).collect(),
-                    data: log.data().data.to_vec(),
+        // Fails closed on a missing block_number, same as `map_alloy_receipt`.
+        receipt
+            .map(|r| {
+                let block_number = r.block_number.ok_or_else(|| {
+                    EnclaveError::CrossCheck(
+                        "helios: FundsIn receipt has no block_number (pending/malformed) - \
+                         refusing to treat an unmined receipt as confirmed"
+                            .into(),
+                    )
+                })?;
+                Ok(ReceiptData {
+                    status_success: r.status(),
+                    block_number,
+                    logs: r
+                        .inner
+                        .logs()
+                        .iter()
+                        .map(|log| LogEntry {
+                            address: log.address().into_array(),
+                            topics: log.topics().iter().map(|t| t.0).collect(),
+                            data: log.data().data.to_vec(),
+                        })
+                        .collect(),
                 })
-                .collect(),
-        }))
+            })
+            .transpose()
     }
 
     fn get_block_number(&self) -> Result<u64> {

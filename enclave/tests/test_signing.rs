@@ -550,6 +550,59 @@ fn test_sign_psbt_ignores_listener_evm_booleans() {
     }
 }
 
+/// Audit M-06 / #60 & #51: a build without the `evm-rpc` FundsIn verifier must
+/// refuse a bridge-mode PSBT rather than sign it on the (now-removed) listener
+/// booleans. This exercises the minimal build, where the `evm-rpc` fail-closed
+/// guard is the first bridge-mode gate (no `rgb-validation` consignment
+/// crosscheck precedes it). In `rgb-validation` builds the consignment binding
+/// is an additional earlier gate; the guard still fires for a request that
+/// carries a valid consignment but no in-enclave deposit verification.
+#[cfg(all(
+    not(feature = "rgb-validation"),
+    not(feature = "evm-rpc"),
+    not(feature = "dev-mode")
+))]
+#[test]
+fn test_no_evm_rpc_build_refuses_bridge_psbt() {
+    let port = common::start_test_server();
+
+    let init_req = EnclaveRequest {
+        request: Some(Request::InitializeKey(InitializeKeyRequest {
+            seed: vec![],
+            mnemonic: String::new(),
+        })),
+    };
+    common::send_request(port, &init_req);
+
+    // Bridge mode (EVM source + RGB destination) with a shape-valid PSBT and
+    // consistent amounts, so it clears the route cross-checks and reaches the
+    // evm-rpc fail-closed guard. The listener booleans are set true but ignored.
+    let sign_req = EnclaveRequest {
+        request: Some(Request::Sign(sign_psbt_request(
+            vec![0xAA; 32],
+            true,
+            true,
+            1000,
+            0,
+            minimal_valid_psbt_bytes(),
+            500,
+        ))),
+    };
+    let resp = common::send_request(port, &sign_req);
+
+    match resp.response {
+        Some(Response::Error(e)) => {
+            assert_eq!(e.code, 3);
+            assert!(
+                e.message.contains("--features evm-rpc"),
+                "expected an evm-rpc feature refusal, got: {}",
+                e.message
+            );
+        }
+        other => panic!("expected a fail-closed error, got: {other:?}"),
+    }
+}
+
 #[test]
 #[cfg(not(feature = "dev-mode"))]
 fn test_sign_psbt_rejects_amount_mismatch() {

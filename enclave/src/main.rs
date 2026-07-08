@@ -244,7 +244,12 @@ fn main() {
         #[cfg(feature = "helios")]
         let client: Option<Boxed> = match utexo_bridge_enclave::config::HeliosConfig::from_env() {
             Some(hcfg) => {
-                match utexo_bridge_enclave::networks::evm::evm_event::HeliosEvmClient::new(&hcfg) {
+                // Pass the pinned EVM_CHAIN_ID so Helios rejects a
+                // HELIOS_NETWORK inconsistent with it (#77 predicate 1).
+                match utexo_bridge_enclave::networks::evm::evm_event::HeliosEvmClient::new(
+                    &hcfg,
+                    bridge_config.chain_id,
+                ) {
                     Ok(c) => {
                         tracing::info!(
                             network = %hcfg.network,

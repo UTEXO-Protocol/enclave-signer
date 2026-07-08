@@ -191,17 +191,34 @@ impl Default for EvmRpcConfig {
     }
 }
 
-/// True if `url`'s host is a loopback literal (`127.0.0.1` or `[::1]`). A
-/// deliberately narrow, dependency-free check - the enclave only ever points
-/// this at its own loopback forwarder.
+/// True if `url`'s host is exactly a loopback literal (`127.0.0.1`, `[::1]`, or
+/// `localhost`). A deliberately narrow, dependency-free check - the enclave only
+/// ever points this at its own loopback forwarder. Matches the host *exactly*
+/// (after stripping scheme, userinfo, path, and port) so a look-alike authority
+/// like `127.0.0.1.evil.com` or `localhost.evil.com` is NOT treated as loopback.
 #[cfg(feature = "evm-rpc")]
 fn is_loopback_url(url: &str) -> bool {
     let after_scheme = url.split_once("://").map(|(_, rest)| rest).unwrap_or(url);
-    let host = after_scheme
+    // Drop path/query/fragment, then any `userinfo@` prefix.
+    let authority = after_scheme
         .split(['/', '?', '#'])
         .next()
         .unwrap_or(after_scheme);
-    host.starts_with("127.0.0.1") || host.starts_with("[::1]") || host.starts_with("localhost")
+    let hostport = authority.rsplit_once('@').map_or(authority, |(_, h)| h);
+    // Strip the port. IPv6 literals are bracketed (`[::1]:8545`), so split off
+    // the `]` first; otherwise the host is everything before the first `:`.
+    let host = if let Some(rest) = hostport.strip_prefix('[') {
+        match rest.split_once(']') {
+            // Valid IPv6 authority: `]` is followed by nothing or `:port`.
+            Some((inner, after)) => {
+                return inner == "::1" && (after.is_empty() || after.starts_with(':'))
+            }
+            None => hostport,
+        }
+    } else {
+        hostport.split(':').next().unwrap_or(hostport)
+    };
+    host == "127.0.0.1" || host == "localhost"
 }
 
 /// Helios light-client config for TRUSTLESS in-enclave EVM event verification
@@ -358,5 +375,28 @@ mod tests {
         };
         assert!(!c.is_configured());
         assert!(c.is_partially_configured());
+    }
+
+    #[cfg(feature = "evm-rpc")]
+    #[test]
+    fn loopback_url_accepts_real_loopback() {
+        assert!(is_loopback_url("http://127.0.0.1:3444"));
+        assert!(is_loopback_url("http://127.0.0.1"));
+        assert!(is_loopback_url("http://localhost:8545"));
+        assert!(is_loopback_url("http://[::1]:18545/path"));
+        assert!(is_loopback_url("http://[::1]"));
+        assert!(is_loopback_url("http://user:pass@127.0.0.1:3444"));
+    }
+
+    #[cfg(feature = "evm-rpc")]
+    #[test]
+    fn loopback_url_rejects_lookalike_authorities() {
+        // The old `starts_with` check accepted all of these.
+        assert!(!is_loopback_url("http://127.0.0.1.evil.com"));
+        assert!(!is_loopback_url("http://localhost.evil.com/rpc"));
+        assert!(!is_loopback_url("http://127.0.0.1@evil.com"));
+        assert!(!is_loopback_url("http://[::1].evil.com"));
+        assert!(!is_loopback_url("http://10.0.0.1:8545"));
+        assert!(!is_loopback_url("http://evil.com/127.0.0.1"));
     }
 }
