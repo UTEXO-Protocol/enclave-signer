@@ -14,7 +14,7 @@ flowchart TB
         Parent[utexo-bridge-parent<br/>tonic gRPC, 127.0.0.1:5000<br/>―<br/>Bound to 127.0.0.1 only.<br/>30 s timeout per enclave RPC.<br/>USE_VSOCK=true in production.]
         Cli[utexo-bridge-parent-cli<br/>attest-verify CLI]
         VP[vsock-proxy port 8001<br/>―<br/>Allowlist → Esplora endpoint.]
-        VPe[vsock-proxy 8002 / 8003 / 8004<br/>―<br/>evm-rpc / helios builds only.<br/>8002 → EVM JSON-RPC (#60);<br/>8003 / 8004 → Helios exec / consensus (#77).<br/>Allowlisted per upstream.]
+        VPe["vsock-proxy 8002 / 8003 / 8004<br/>―<br/>evm-rpc / helios builds only.<br/>8002 → EVM JSON-RPC #60.<br/>8003 / 8004 → Helios exec / consensus #77.<br/>Allowlisted per upstream."]
 
         subgraph ENCL [AWS Nitro Enclave — TRUSTED, PCR-pinned]
             Bin[utexo-bridge-enclave<br/>static-linked Rust<br/>―<br/>Listens on vsock CID 16, port 5000.<br/>One connection = one request.<br/>No filesystem persistence.<br/>No shell. No /dev access except /dev/nsm.<br/>Bridge config pinned from env at boot<br/>EVM_CHAIN_ID / BRIDGE_CONTRACT / RGB_ASSET_ID<br/>→ bound into attestation.]

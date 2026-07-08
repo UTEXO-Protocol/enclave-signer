@@ -40,17 +40,17 @@ sequenceDiagram
     opt rgb-validation build — send-RGB consignment binding (#79)
         Srv->>Rgb: psbt_consignment_crosscheck: validate_consignment<br/>(rgbstd + Esplora resolver + SPV anchoring)
         Rgb-->>Srv: ValidatedConsignment / REFUSE
-        Srv->>Srv: keccak256(consignment)==consignment_hash;<br/>contract_id==pinned RGB_ASSET_ID;<br/>unsigned txid==last TS_TRANSFER witness txid;<br/>input prevouts match; sighash ALL/DEFAULT;<br/>total_output ≥ evm_amount − evm_commission
+        Srv->>Srv: keccak256(consignment)==consignment_hash<br/>contract_id==pinned RGB_ASSET_ID<br/>unsigned txid==last TS_TRANSFER witness txid<br/>input prevouts match, sighash ALL/DEFAULT<br/>total_output ≥ evm_amount − evm_commission
     end
     alt evm-rpc build — independent FundsIn verification (M-06 / #60, #77)
         Srv->>Evt: verify_funds_in_event(PINNED contract, EVM_MIN_CONFIRMATIONS,<br/>tx_hash, operation_id, evm_amount, evm_commission)
         Evt->>Rpc: eth_getTransactionReceipt / eth_blockNumber
-        Note right of Rpc: raw alloy path = host-relayed evidence (#60);<br/>Helios path = cryptographically verified in-TEE (#77)
+        Note right of Rpc: raw alloy path = host-relayed evidence (#60)<br/>Helios path = cryptographically verified in-TEE (#77)
         Rpc-->>Evt: receipt / head (or none)
-        Evt->>Evt: receipt exists + status success;<br/>UNIQUE FundsIn/BridgeFundsIn log from PINNED contract;<br/>operationId/amount/commission bind (net==gross−commission);<br/>depth ≥ EVM_MIN_CONFIRMATIONS
+        Evt->>Evt: receipt exists + status success<br/>UNIQUE FundsIn/BridgeFundsIn log from PINNED contract<br/>operationId/amount/commission bind (net==gross−commission)<br/>depth ≥ EVM_MIN_CONFIRMATIONS
         Evt-->>Srv: Ok / CrossCheck err (fail closed)
     else no evm-rpc feature (bridge mode)
-        Srv->>Srv: REFUSE — deposit cannot be independently verified;<br/>rebuild with --features evm-rpc (or helios)
+        Srv->>Srv: REFUSE — deposit cannot be independently verified<br/>rebuild with --features evm-rpc (or helios)
     end
     opt bridge mode — soft replay guard (#84)
         Srv->>State: op_replay_guard.check_and_record(op_key)
