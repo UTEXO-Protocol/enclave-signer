@@ -129,6 +129,18 @@ impl ParentAdapterService {
             .map_err(|e| Status::invalid_argument(format!("{field} must be hex bytes: {e}")))
     }
 
+    /// Decode a field that is hex for EVM addresses but an opaque string for
+    /// other networks — EVM→RGB FundsIn events carry the RGB invoice
+    /// (`utxob:…`) in SourceProof.recipient. Non-hex values pass through as
+    /// their raw UTF-8 bytes so the enclave sees what the listener saw.
+    fn decode_hex_or_raw_field(value: String) -> Vec<u8> {
+        let hex = value.strip_prefix("0x").unwrap_or(&value);
+        match hex::decode(hex) {
+            Ok(bytes) => bytes,
+            Err(_) => value.into_bytes(),
+        }
+    }
+
     fn enclave_merkle_proof(
         proof: grpc_proto::MerkleProofEntry,
     ) -> enclave_proto::MerkleProofEntry {
@@ -150,7 +162,7 @@ impl ParentAdapterService {
                     event_valid: true,
                     event_finalized: source.finalized,
                     token: Self::decode_hex_field("SourceProof.token", source.token)?,
-                    recipient: Self::decode_hex_field("SourceProof.recipient", source.recipient)?,
+                    recipient: Self::decode_hex_or_raw_field(source.recipient),
                     commission: source.commission,
                 }),
             ),
@@ -244,106 +256,140 @@ impl ParentService for ParentAdapterService {
         let common = Self::common_sign_request(&inner)?;
         let data_type = DataType::try_from(common.data_type).unwrap_or(DataType::Transaction);
         let signer_network_id = common.dst_network_id;
-        let source = Self::source_proof(&inner)?;
-        let amount = source.amount;
-        let data = inner.data;
 
-        let destination_network = match data_type {
-            DataType::Transaction => match data {
-                Some(sign_request::Data::EvmData(payload)) => {
-                    if !self.evm_network_ids.contains(&common.dst_network_id) {
-                        return Err(Status::invalid_argument(format!(
-                            "EVM payload destination network {} is not configured as EVM",
-                            common.dst_network_id
-                        )));
+        match data_type {
+            DataType::Transaction => {
+                let source = Self::source_proof(&inner)?;
+                let amount = source.amount;
+
+                let destination_network = match inner.data {
+                    Some(sign_request::Data::EvmData(payload)) => {
+                        if !self.evm_network_ids.contains(&common.dst_network_id) {
+                            return Err(Status::invalid_argument(format!(
+                                "EVM payload destination network {} is not configured as EVM",
+                                common.dst_network_id
+                            )));
+                        }
+                        tracing::info!(
+                            src_network_id = common.src_network_id,
+                            dst_network_id = common.dst_network_id,
+                            calldata_len = payload.call_data.len(),
+                            nonce = payload.nonce,
+                            deadline = payload.deadline,
+                            "gRPC Sign: EVM transaction"
+                        );
+
+                        Self::enclave_destination_network(sign_request::Data::EvmData(payload))
                     }
-                    tracing::info!(
-                        src_network_id = common.src_network_id,
-                        dst_network_id = common.dst_network_id,
-                        calldata_len = payload.call_data.len(),
-                        nonce = payload.nonce,
-                        deadline = payload.deadline,
-                        "gRPC Sign: EVM transaction"
-                    );
+                    Some(sign_request::Data::RgbData(payload)) => {
+                        if self.evm_network_ids.contains(&common.dst_network_id) {
+                            return Err(Status::invalid_argument(format!(
+                                "RGB payload destination network {} is configured as EVM",
+                                common.dst_network_id
+                            )));
+                        }
+                        tracing::info!(
+                            src_network_id = common.src_network_id,
+                            dst_network_id = common.dst_network_id,
+                            psbt_len = payload.psbt_bytes.len(),
+                            operation_idx = payload.operation_idx,
+                            "gRPC Sign: RGB transaction"
+                        );
 
-                    Self::enclave_destination_network(sign_request::Data::EvmData(payload))
-                }
-                Some(sign_request::Data::RgbData(payload)) => {
-                    if self.evm_network_ids.contains(&common.dst_network_id) {
-                        return Err(Status::invalid_argument(format!(
-                            "RGB payload destination network {} is configured as EVM",
-                            common.dst_network_id
-                        )));
+                        Self::enclave_destination_network(sign_request::Data::RgbData(payload))
                     }
-                    tracing::info!(
-                        src_network_id = common.src_network_id,
-                        dst_network_id = common.dst_network_id,
-                        psbt_len = payload.psbt_bytes.len(),
-                        operation_idx = payload.operation_idx,
-                        "gRPC Sign: RGB transaction"
-                    );
+                    None => return Err(Status::invalid_argument("SignRequest.data is missing")),
+                };
 
-                    Self::enclave_destination_network(sign_request::Data::RgbData(payload))
+                let source_network = Self::enclave_source_network(source)?;
+                Self::validate_cross_network_route(&source_network, &destination_network)?;
+
+                let enclave_req = EnclaveRequest {
+                    request: Some(enclave_request::Request::Sign(enclave_proto::SignRequest {
+                        amount,
+                        source_network: Some(source_network),
+                        destination_network: Some(destination_network),
+                    })),
+                };
+
+                let start = std::time::Instant::now();
+                let resp = self.send_to_enclave(enclave_req).await?;
+                tracing::debug!(
+                    elapsed_ms = start.elapsed().as_millis() as u64,
+                    "enclave round-trip"
+                );
+
+                match resp.response {
+                    Some(enclave_response::Response::SignedPsbt(r)) => {
+                        Ok(Response::new(SignatureResponse {
+                            signer_network_id,
+                            signature: r.signed_psbt,
+                            identifier: None,
+                        }))
+                    }
+                    Some(enclave_response::Response::EvmSignature(r)) => {
+                        Ok(Response::new(SignatureResponse {
+                            signer_network_id,
+                            signature: r.signature,
+                            identifier: None,
+                        }))
+                    }
+                    Some(enclave_response::Response::Error(e)) => {
+                        Err(Self::enclave_error_to_status(&e))
+                    }
+                    other => Err(Status::internal(format!(
+                        "unexpected enclave response for Sign: {:?}",
+                        other
+                    ))),
                 }
-                None => return Err(Status::invalid_argument("SignRequest.data is missing")),
-            },
+            }
             DataType::EvmGasTx => {
-                return Err(Status::invalid_argument(
-                    "EVM_GAS_TX signing is not supported by parent.SignRequest: no raw digest field",
-                ));
+                // EVM_GAS_TX carries a pre-hashed 32-byte digest in EvmData.call_data
+                // and is signed with the enclave's dedicated gas-tx key. It has no
+                // source proof, so it is routed to SignRawDigest rather than the
+                // source/destination Sign path.
+                let digest = match inner.data {
+                    Some(sign_request::Data::EvmData(payload)) => payload.call_data,
+                    _ => {
+                        return Err(Status::invalid_argument(
+                            "EVM_GAS_TX sign requires EvmData with the digest in call_data",
+                        ))
+                    }
+                };
+                tracing::info!(
+                    dst_network_id = signer_network_id,
+                    digest_len = digest.len(),
+                    "gRPC Sign: EVM gas tx raw digest"
+                );
+                let enclave_req = EnclaveRequest {
+                    request: Some(enclave_request::Request::SignRawDigest(
+                        enclave_proto::SignRawDigestRequest { digest },
+                    )),
+                };
+                let resp = self.send_to_enclave(enclave_req).await?;
+                match resp.response {
+                    Some(enclave_response::Response::RawDigestSig(r)) => {
+                        Ok(Response::new(SignatureResponse {
+                            signer_network_id,
+                            signature: r.signature,
+                            identifier: None,
+                        }))
+                    }
+                    Some(enclave_response::Response::Error(e)) => {
+                        Err(Self::enclave_error_to_status(&e))
+                    }
+                    other => Err(Status::internal(format!(
+                        "unexpected enclave response for SignRawDigest: {:?}",
+                        other
+                    ))),
+                }
             }
             other => {
                 tracing::warn!(?other, "unsupported data_type in Sign request");
-                return Err(Status::invalid_argument(format!(
+                Err(Status::invalid_argument(format!(
                     "unsupported data_type: {other:?}"
-                )));
+                )))
             }
-        };
-        let source_network = Self::enclave_source_network(source)?;
-        Self::validate_cross_network_route(&source_network, &destination_network)?;
-
-        let enclave_req = EnclaveRequest {
-            request: Some(enclave_request::Request::Sign(enclave_proto::SignRequest {
-                amount,
-                source_network: Some(source_network),
-                destination_network: Some(destination_network),
-            })),
-        };
-
-        let start = std::time::Instant::now();
-        let resp = self.send_to_enclave(enclave_req).await?;
-        tracing::debug!(
-            elapsed_ms = start.elapsed().as_millis() as u64,
-            "enclave round-trip"
-        );
-
-        match resp.response {
-            Some(enclave_response::Response::SignedPsbt(r)) => {
-                Ok(Response::new(SignatureResponse {
-                    signer_network_id,
-                    signature: r.signed_psbt,
-                    identifier: None,
-                }))
-            }
-            Some(enclave_response::Response::EvmSignature(r)) => {
-                Ok(Response::new(SignatureResponse {
-                    signer_network_id,
-                    signature: r.signature,
-                    identifier: None,
-                }))
-            }
-            Some(enclave_response::Response::RawDigestSig(r)) => {
-                Ok(Response::new(SignatureResponse {
-                    signer_network_id,
-                    signature: r.signature,
-                    identifier: None,
-                }))
-            }
-            Some(enclave_response::Response::Error(e)) => Err(Self::enclave_error_to_status(&e)),
-            other => Err(Status::internal(format!(
-                "unexpected enclave response for Sign: {:?}",
-                other
-            ))),
         }
     }
 
