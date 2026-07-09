@@ -164,6 +164,10 @@ fn dispatch(request: EnclaveRequest, ctx: &ServerContext) -> EnclaveResponse {
             tracing::info!("request: SignRawDigest");
             handle_sign_raw_digest(ctx, req)
         }
+        Some(Request::SignCcd(req)) => {
+            tracing::info!("request: SignCcd");
+            handle_sign_ccd(&ctx.state, req)
+        }
         Some(Request::ProxyFederation(req)) => {
             tracing::info!("request: ProxyFederation");
             handle_proxy_federation(req)
@@ -241,6 +245,7 @@ fn handle_sign(ctx: &ServerContext, req: SignRequest) -> Result<EnclaveResponse>
     let source_commission = match source_ref {
         SourceNetwork::EvmSource(source) => source.commission,
         SourceNetwork::RgbSource(source) => source.commission,
+        SourceNetwork::CcdSource(source) => source.commission,
     };
     let destination_proof = validate_destination(
         req.amount,
@@ -527,6 +532,7 @@ fn handle_initialize(ctx: &ServerContext, req: InitializeKeyRequest) -> Result<E
             rgb_asset_id: ctx.bridge_config.rgb_asset_id.clone(),
             evm_gas_tx_uncompressed_pub: keys.evm_gas_tx_uncompressed_pub.to_vec(),
             evm_gas_tx_address: keys.evm_gas_tx_address.to_vec(),
+            ccd_ed25519_pub: keys.ccd_ed25519_pub.to_vec(),
         })),
     })
 }
@@ -570,6 +576,7 @@ fn build_public_keys_response(
         rgb_asset_id: cfg.rgb_asset_id.clone(),
         evm_gas_tx_uncompressed_pub: keys.evm_gas_tx_uncompressed_pub.to_vec(),
         evm_gas_tx_address: keys.evm_gas_tx_address.to_vec(),
+        ccd_ed25519_pub: keys.ccd_ed25519_pub.to_vec(),
     }
 }
 
@@ -582,7 +589,7 @@ fn build_public_keys_response(
 /// `docs/pubkey-attestation.md` and `parent/src/attest_verify.rs::canonical_bundle`.
 fn canonical_pubkey_bundle(keys: &PublicKeysResponse) -> Vec<u8> {
     let chain_id_bytes = keys.chain_id.to_be_bytes();
-    let parts: [&[u8]; 12] = [
+    let parts: [&[u8]; 13] = [
         &keys.evm_address,
         &keys.btc_compressed_pub,
         keys.btc_xpub.as_bytes(),
@@ -595,6 +602,7 @@ fn canonical_pubkey_bundle(keys: &PublicKeysResponse) -> Vec<u8> {
         keys.rgb_asset_id.as_bytes(),
         &keys.evm_gas_tx_uncompressed_pub,
         &keys.evm_gas_tx_address,
+        &keys.ccd_ed25519_pub,
     ];
     let total: usize = parts.iter().map(|p| 4 + p.len()).sum();
     let mut out = Vec::with_capacity(total);
@@ -833,6 +841,33 @@ fn handle_sign_raw_digest(
 
     Ok(EnclaveResponse {
         response: Some(Response::RawDigestSig(RawDigestSignatureResponse {
+            signature: signature.to_vec(),
+        })),
+    })
+}
+
+/// Sign a 32-byte Concordium account-transaction hash with the governance
+/// Ed25519 key. The listener has already re-derived the hash and verified the
+/// transaction structure/amounts; the enclave signs the hash directly. Returns
+/// a 64-byte Ed25519 signature.
+fn handle_sign_ccd(state: &EnclaveState, req: SignCcdRequest) -> Result<EnclaveResponse> {
+    if req.hash.len() != 32 {
+        return Err(EnclaveError::InvalidRequest(format!(
+            "hash must be exactly 32 bytes, got {}",
+            req.hash.len()
+        )));
+    }
+
+    let hash: [u8; 32] = req.hash.as_slice().try_into().unwrap();
+    let signature = state.sign_ccd(&hash)?;
+
+    tracing::info!(
+        hash_hex = %hex::encode(hash),
+        "concordium signature produced (ed25519 governance key)"
+    );
+
+    Ok(EnclaveResponse {
+        response: Some(Response::CcdSignature(CcdSignatureResponse {
             signature: signature.to_vec(),
         })),
     })
