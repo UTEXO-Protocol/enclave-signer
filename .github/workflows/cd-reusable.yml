@@ -97,6 +97,9 @@ jobs:
           push: true
           ssh: default
           build-args: BUILDKIT_INLINE_CACHE=1
+          secrets: |
+            federated_key=${{ secrets.FEDERATED_SIGNER_PROTO_DEPLOY_KEY }}
+            consignment_key=${{ secrets.RGB_CONSIGNMENT_PARSER_DEPLOY_KEY }}
           tags: |
             ${{ env.REGISTRY }}/${{ matrix.image }}:${{ matrix.tag }}
             ${{ env.REGISTRY }}/${{ matrix.image }}:${{ matrix.float }}
@@ -112,6 +115,9 @@ jobs:
           push: true
           ssh: default
           build-args: BUILDKIT_INLINE_CACHE=1
+          secrets: |
+            federated_key=${{ secrets.FEDERATED_SIGNER_PROTO_DEPLOY_KEY }}
+            consignment_key=${{ secrets.RGB_CONSIGNMENT_PARSER_DEPLOY_KEY }}
           tags: |
             ${{ env.REGISTRY }}/${{ matrix.image }}:${{ matrix.tag }}
             ${{ env.REGISTRY }}/${{ matrix.image }}:${{ matrix.float }}
