@@ -14,7 +14,7 @@ path = "src/main.rs"
 [dependencies]
 # Protobuf
 prost = "0.14.3"
-federated-signer-proto = { git = "ssh://git@github.com/UTEXO-Protocol/federated-signer-proto.git", rev = "41f23e995169d6f50faee5943051afff25271224", package = "federated-signer-proto" }
+federated-signer-proto = { git = "ssh://git@github.com/UTEXO-Protocol/federated-signer-proto.git", rev = "f61dcb76595c69af914107a74852ad013afed9df", package = "federated-signer-proto" }
 
 # Crypto — ECDSA on secp256k1 (EVM address derivation + signing later)
 k256 = { version = "0.13", features = ["ecdsa"] }
@@ -88,19 +88,30 @@ nix = { version = "0.31.2", features = ["socket"] }
 aws-nitro-enclaves-nsm-api = "0.4"
 
 [features]
-default = []
+# Production posture: a plain `cargo build` produces the SPV path (which pulls
+# in `rgb-validation`), so the default binary is the one shipped in the EIF. A
+# minimal build is still available via `--no-default-features` and is covered
+# explicitly in CI.
+default = ["spv"]
 vsock = []
 # DANGER: allows importing a raw seed over the wire. Testing only.
 allow-seed-import = []
 # Skips cross-check validation on signing requests. Development/testing only.
 dev-mode = []
-# In-enclave RGB consignment validation via rgbstd + Esplora.
+# In-enclave RGB consignment validation via rgbstd + Esplora. REQUIRES `spv`
+# (enforced by a `compile_error!` in lib.rs — audit M-01 / #61): without SPV the
+# only anchor for a consignment's witness txs is the host-controlled Esplora
+# resolver, so a malicious host could have the enclave sign a release against a
+# fabricated Bitcoin anchor. Kept as a separate feature (rather than adding
+# `spv` to this list) to avoid a feature cycle with `spv` below.
 rgb-validation = ["rgb-ops", "rgb-consignment", "rgb-schemas"]
 # Bitcoin SPV verification of consignment witness txids before signing EVM
 # transactions. Implies `rgb-validation` because SPV needs the consignment
 # parsed to extract witness txids. When the feature is OFF, handle_sign_evm
-# additionally REJECTS any request that carries non-empty merkle_proofs —
-# fail-closed against build mismatches between listener and enclave.
+# refuses to sign ANY `fundsOut` release — regardless of whether the request
+# carries merkle_proofs — and additionally rejects any request that does carry
+# merkle_proofs it cannot verify (fail-closed against listener/enclave build
+# mismatches).
 spv = ["rgb-validation"]
 # Mock attestation path: skip NSM / COSE / cert-chain checks and use raw CBOR docs.
 # Testing only — never enable in production builds.

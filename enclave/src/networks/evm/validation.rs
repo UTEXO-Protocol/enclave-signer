@@ -12,6 +12,13 @@ use crate::proto::{EvmDestination, EvmSource};
 /// `keccak256("fundsOut(address,uint256,uint256,uint256,uint256,string,bytes,bytes)")[0..4]`.
 pub const FUNDS_OUT_SELECTOR_POOLS: [u8; 4] = [0xcc, 0xdd, 0xb7, 0x68];
 
+/// Upper bound on `call_data` length. A legitimate `fundsOut` call is a few
+/// hundred bytes; anything past 64 KiB is either malformed or an attempt to
+/// blow up per-request work before any byte-level extraction or signing runs
+/// (audit I-06 / #90). Compile-time so the posture is PCR-attested, not
+/// host-tunable.
+pub const MAX_FUNDS_OUT_CALL_DATA_LEN: usize = 64 * 1024;
+
 const ALLOWED_SELECTORS: &[[u8; 4]] = &[FUNDS_OUT_SELECTOR_POOLS];
 
 sol! {
@@ -89,6 +96,15 @@ pub fn validate_destination(
         return Err(EnclaveError::CrossCheck(format!(
             "call_data too short: need at least 4 bytes for selector, got {}",
             destination.call_data.len()
+        )));
+    }
+    // Reject an oversize calldata before any offset extraction or signing
+    // (audit I-06 / #90).
+    if destination.call_data.len() > MAX_FUNDS_OUT_CALL_DATA_LEN {
+        return Err(EnclaveError::CrossCheck(format!(
+            "call_data too large: {} bytes (max {})",
+            destination.call_data.len(),
+            MAX_FUNDS_OUT_CALL_DATA_LEN
         )));
     }
 
@@ -221,6 +237,7 @@ mod tests {
             chain_id: 1,
             bridge_contract: [0xAA; ADDRESS_LEN],
             rgb_asset_id: "ignored-by-evm-validation".into(),
+            gas_tx_allowed_to: None,
         }
     }
 

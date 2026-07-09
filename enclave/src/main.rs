@@ -165,15 +165,7 @@ fn main() {
             .expect("failed to bind vsock port 5000");
         tracing::info!("listening on vsock port 5000");
 
-        for stream in listener.incoming() {
-            match stream {
-                Ok(stream) => {
-                    tracing::debug!("accepted vsock connection");
-                    server::handle_connection(stream, &ctx);
-                }
-                Err(e) => tracing::error!("accept error: {}", e),
-            }
-        }
+        serve(listener.incoming(), ctx);
     }
 
     #[cfg(not(all(feature = "vsock", target_os = "linux")))]
@@ -184,18 +176,76 @@ fn main() {
             .unwrap_or_else(|_| panic!("failed to bind TCP {listen_addr}"));
         tracing::info!(%listen_addr, "listening on TCP");
 
-        for stream in listener.incoming() {
-            match stream {
+        serve(listener.incoming(), ctx);
+    }
+}
+
+/// Accept loop with bounded concurrency and per-request deadlines (audit M-03 /
+/// #83). Each accepted socket is wrapped in a [`DeadlineStream`] (idle + total
+/// request timeouts) and handed to a fixed worker pool via a bounded queue;
+/// over-cap connections are dropped (closed) so one slow request can't starve
+/// the others. Generic over the socket type so the vsock and TCP branches share
+/// one implementation.
+fn serve<I, S>(incoming: I, ctx: ServerContext)
+where
+    I: IntoIterator<Item = std::io::Result<S>>,
+    S: std::io::Read + std::io::Write + utexo_bridge_enclave::conn::SocketTimeout + Send + 'static,
+{
+    use std::sync::mpsc::{sync_channel, TrySendError};
+    use std::sync::{Arc, Mutex};
+    use utexo_bridge_enclave::conn::{
+        DeadlineStream, IO_IDLE_TIMEOUT, MAX_QUEUED_CONNECTIONS, TOTAL_REQUEST_TIMEOUT,
+        WORKER_THREADS,
+    };
+
+    let ctx = Arc::new(ctx);
+    // Bounded queue doubles as the connection cap: a full queue means all
+    // workers are busy and the backlog is at its limit.
+    let (tx, rx) = sync_channel::<S>(MAX_QUEUED_CONNECTIONS);
+    let rx = Arc::new(Mutex::new(rx));
+
+    for worker_id in 0..WORKER_THREADS {
+        let rx = Arc::clone(&rx);
+        let ctx = Arc::clone(&ctx);
+        std::thread::spawn(move || loop {
+            // Hold the queue lock only to dequeue; handling happens unlocked so
+            // workers run concurrently.
+            let next = {
+                let guard = match rx.lock() {
+                    Ok(g) => g,
+                    Err(_) => {
+                        tracing::error!(worker_id, "worker queue mutex poisoned; worker exiting");
+                        break;
+                    }
+                };
+                guard.recv()
+            };
+            match next {
                 Ok(stream) => {
-                    let peer = stream
-                        .peer_addr()
-                        .map(|a| a.to_string())
-                        .unwrap_or_else(|_| "unknown".into());
-                    tracing::debug!(%peer, "accepted TCP connection");
+                    let stream =
+                        DeadlineStream::new(stream, TOTAL_REQUEST_TIMEOUT, IO_IDLE_TIMEOUT);
                     server::handle_connection(stream, &ctx);
                 }
-                Err(e) => tracing::error!("accept error: {}", e),
+                // All senders dropped: the listener is gone, so is the process.
+                Err(_) => break,
             }
+        });
+    }
+
+    for stream in incoming {
+        match stream {
+            Ok(stream) => match tx.try_send(stream) {
+                Ok(()) => tracing::debug!("connection queued"),
+                Err(TrySendError::Full(_)) => tracing::warn!(
+                    cap = MAX_QUEUED_CONNECTIONS,
+                    "connection queue full; dropping connection (slow-request backpressure)"
+                ),
+                Err(TrySendError::Disconnected(_)) => {
+                    tracing::error!("no workers available; stopping accept loop");
+                    break;
+                }
+            },
+            Err(e) => tracing::error!("accept error: {e}"),
         }
     }
 }

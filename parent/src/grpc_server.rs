@@ -325,6 +325,7 @@ impl ParentService for ParentAdapterService {
                             signer_network_id,
                             signature: r.signed_psbt,
                             identifier: None,
+                            call_data: Vec::new(),
                         }))
                     }
                     Some(enclave_response::Response::EvmSignature(r)) => {
@@ -332,6 +333,12 @@ impl ParentService for ParentAdapterService {
                             signer_network_id,
                             signature: r.signature,
                             identifier: None,
+                            // The enclave may rewrite the OpId-bound calldata
+                            // fields (burnId, fundsInIds) from the validated
+                            // consignment, so forward the exact calldata the
+                            // signature commits to — the caller must submit these
+                            // bytes, not the ones it sent (audit M-02 / #93, #63).
+                            call_data: r.call_data,
                         }))
                     }
                     Some(enclave_response::Response::Error(e)) => {
@@ -344,26 +351,35 @@ impl ParentService for ParentAdapterService {
                 }
             }
             DataType::EvmGasTx => {
-                // EVM_GAS_TX carries a pre-hashed 32-byte digest in EvmData.call_data
-                // and is signed with the enclave's dedicated gas-tx key. It has no
-                // source proof, so it is routed to SignRawDigest rather than the
-                // source/destination Sign path.
-                let digest = match inner.data {
-                    Some(sign_request::Data::EvmData(payload)) => payload.call_data,
-                    _ => {
-                        return Err(Status::invalid_argument(
-                            "EVM_GAS_TX sign requires EvmData with the digest in call_data",
-                        ))
-                    }
-                };
+                // EVM_GAS_TX is signed with the enclave's dedicated gas-tx key.
+                // It has no source proof, so it is routed to SignRawDigest
+                // rather than the source/destination Sign path. The Listener
+                // sends the unsigned tx preimage in `EnrichedEvmPayload.unsigned_tx`
+                // (and MAY still carry a pre-hashed digest in `call_data` for
+                // defense-in-depth); the enclave decodes the preimage, enforces
+                // the gas-tx shape allowlist, and computes the digest itself
+                // (audit TEE-XC-09 / #68 — see `networks::evm::gas_tx`).
+                let (digest, unsigned_tx) =
+                    match inner.data {
+                        Some(sign_request::Data::EvmData(payload)) => {
+                            (payload.call_data, payload.unsigned_tx)
+                        }
+                        _ => return Err(Status::invalid_argument(
+                            "EVM_GAS_TX sign requires EvmData with the unsigned tx in unsigned_tx",
+                        )),
+                    };
                 tracing::info!(
                     dst_network_id = signer_network_id,
                     digest_len = digest.len(),
+                    unsigned_tx_len = unsigned_tx.len(),
                     "gRPC Sign: EVM gas tx raw digest"
                 );
                 let enclave_req = EnclaveRequest {
                     request: Some(enclave_request::Request::SignRawDigest(
-                        enclave_proto::SignRawDigestRequest { digest },
+                        enclave_proto::SignRawDigestRequest {
+                            digest,
+                            unsigned_tx,
+                        },
                     )),
                 };
                 let resp = self.send_to_enclave(enclave_req).await?;
@@ -373,6 +389,7 @@ impl ParentService for ParentAdapterService {
                             signer_network_id,
                             signature: r.signature,
                             identifier: None,
+                            call_data: Vec::new(),
                         }))
                     }
                     Some(enclave_response::Response::Error(e)) => {

@@ -32,6 +32,7 @@ fn pinned_bridge_config() -> BridgeConfig {
         chain_id: 1,
         bridge_contract: [0xAA; 20],
         rgb_asset_id: "rgb:test".into(),
+        gas_tx_allowed_to: None,
     }
 }
 
@@ -367,6 +368,7 @@ fn test_sign_evm_rejects_unconfigured_bridge_config() {
         chain_id: 0,
         bridge_contract: [0u8; 20],
         rgb_asset_id: String::new(),
+        gas_tx_allowed_to: None,
     };
     let port = common::start_test_server_with_config(|_| {}, unconfigured);
 

@@ -1,3 +1,6 @@
+#[cfg(feature = "rgb-validation")]
+pub mod crosscheck;
+pub mod gas_tx;
 pub mod signing;
 pub mod validation;
 

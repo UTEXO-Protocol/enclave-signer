@@ -143,7 +143,7 @@ fn dispatch(request: EnclaveRequest, ctx: &ServerContext) -> EnclaveResponse {
         }
         Some(Request::SignRawDigest(req)) => {
             tracing::info!("request: SignRawDigest");
-            handle_sign_raw_digest(&ctx.state, req)
+            handle_sign_raw_digest(ctx, req)
         }
         Some(Request::ProxyFederation(req)) => {
             tracing::info!("request: ProxyFederation");
@@ -217,7 +217,7 @@ fn handle_sign(ctx: &ServerContext, req: SignRequest) -> Result<EnclaveResponse>
         rgb_validator: ctx.rgb_validator.as_ref(),
         header_chain: &ctx.header_chain,
     };
-    let source_proof = validate_source(req.amount, source_ref, &validation_ctx)?;
+    let source_validated = validate_source(req.amount, source_ref, &validation_ctx)?;
 
     let source_commission = match source_ref {
         SourceNetwork::EvmSource(source) => source.commission,
@@ -233,7 +233,7 @@ fn handle_sign(ctx: &ServerContext, req: SignRequest) -> Result<EnclaveResponse>
     validate_route_proofs(
         source_ref,
         destination_ref,
-        &source_proof,
+        &source_validated.proof,
         &destination_proof,
     )?;
 
@@ -276,9 +276,93 @@ fn handle_sign(ctx: &ServerContext, req: SignRequest) -> Result<EnclaveResponse>
     })?;
 
     match destination {
-        DestinationNetwork::EvmDestination(destination) => handle_sign_evm(ctx, destination),
+        DestinationNetwork::EvmDestination(destination) => {
+            // RGB->EVM `fundsOut` binding: with the consignment the source
+            // validation captured, bind the calldata the enclave is about to
+            // sign to the operation `validate()` authenticated — witness
+            // confirmation (4th I-03 / #95), BtcRelay agreement (#57 / #122),
+            // the consignment-bound release amount, and the authoritative
+            // OpId->burnId / fundsInIds rewrite (M-02 / #93, #63 / #97). The
+            // rewrite mutates `call_data` in place so `handle_sign_evm` signs —
+            // and returns — exactly the bound bytes. On non-rgb-validation
+            // builds there is no consignment to bind and the calldata is signed
+            // as received (fundsOut is refused upstream at source validation).
+            #[cfg(feature = "rgb-validation")]
+            let destination = {
+                let mut destination = destination;
+                apply_funds_out_binding(
+                    ctx,
+                    &mut destination,
+                    source_validated.rgb_consignment.as_ref(),
+                )?;
+                destination
+            };
+            handle_sign_evm(ctx, destination)
+        }
         DestinationNetwork::RgbDestination(destination) => handle_sign_psbt(ctx, destination),
     }
+}
+
+/// Bind an RGB->EVM `fundsOut` calldata to the validated consignment before the
+/// enclave signs it. Skipped in dev-mode (like the other cross-checks) and a
+/// no-op for non-`fundsOut` calldata. Rewrites `destination.call_data` so the
+/// signature commits to the OpId-bound bytes the caller must submit on-chain.
+#[cfg(feature = "rgb-validation")]
+fn apply_funds_out_binding(
+    ctx: &ServerContext,
+    destination: &mut EvmDestination,
+    validated: Option<&crate::networks::rgb::validation::ValidatedConsignment>,
+) -> Result<()> {
+    use crate::networks::evm::crosscheck;
+    use crate::networks::evm::validation::FUNDS_OUT_SELECTOR_POOLS;
+
+    if cfg!(all(feature = "dev-mode", not(test))) {
+        return Ok(());
+    }
+
+    // Only the `fundsOut` release flow is bound to a consignment; leave any
+    // other calldata untouched.
+    if destination.call_data.len() < 4 || destination.call_data[..4] != FUNDS_OUT_SELECTOR_POOLS {
+        return Ok(());
+    }
+
+    // A `fundsOut` release requires the RGB source's validated consignment
+    // (source == RgbSource, rgb_validator configured, consignment present).
+    let validated = validated.ok_or_else(|| {
+        EnclaveError::CrossCheck(
+            "fundsOut signing requires a validated RGB source consignment (the source must be an \
+             RGB source with consignment bytes and a configured rgb_validator) — refusing to sign"
+                .into(),
+        )
+    })?;
+
+    // Defense-in-depth: every consignment witness tx must be mined (4th I-03 / #95).
+    crosscheck::assert_witnesses_confirmed(validated)?;
+
+    // BtcRelay agreement: bind the calldata's (blockHeight, commitmentHash)
+    // `proof` to the header the enclave holds at that height (#57 / #122). Inert
+    // until the listener populates `proof`. Requires the SPV header chain, which
+    // is always present under rgb-validation (spv is implied — see lib.rs M-01
+    // compile_error).
+    #[cfg(feature = "spv")]
+    {
+        let chain = ctx
+            .header_chain
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        crosscheck::verify_btc_relay_agreement(&destination.call_data, &chain)?;
+    }
+    #[cfg(not(feature = "spv"))]
+    let _ = ctx;
+
+    // Consignment-bound release amount (transfer flow).
+    crosscheck::validate_funds_out_transfer(&destination.call_data, validated)?;
+
+    // Authoritative OpId binding: rewrite burnId + settlementData from the
+    // validated consignment. The returned bytes are what gets signed.
+    destination.call_data = crosscheck::apply_op_id_binding(&destination.call_data, validated)?;
+
+    Ok(())
 }
 
 fn handle_initialize(ctx: &ServerContext, req: InitializeKeyRequest) -> Result<EnclaveResponse> {
@@ -494,6 +578,11 @@ fn handle_sign_evm(ctx: &ServerContext, req: EvmDestination) -> Result<EnclaveRe
     Ok(EnclaveResponse {
         response: Some(Response::EvmSignature(EvmSignatureResponse {
             signature: signature.to_vec(),
+            // Non-fundsOut / non-rgb-validation paths sign the calldata as
+            // received. The RGB->EVM fundsOut path rewrites the OpId-bound
+            // fields before this point and returns the rewritten bytes here
+            // (audit M-02 / #93, #63) — see `handle_sign`.
+            call_data: req.call_data.clone(),
         })),
     })
 }
@@ -563,18 +652,31 @@ fn handle_sign_raw_message(
 }
 
 fn handle_sign_raw_digest(
-    state: &EnclaveState,
+    ctx: &ServerContext,
     req: SignRawDigestRequest,
 ) -> Result<EnclaveResponse> {
-    if req.digest.len() != 32 {
-        return Err(EnclaveError::InvalidRequest(format!(
-            "digest must be exactly 32 bytes, got {}",
-            req.digest.len()
-        )));
-    }
+    // Gas-tx shape allowlist (audit TEE-XC-09 / #68). Production builds refuse
+    // to blind-sign an opaque digest: the request must carry the unsigned tx
+    // preimage, which the enclave decodes, checks against the operator pins
+    // (chain id + destination, zero value), and hashes itself — see
+    // `networks::evm::gas_tx`. Skipped under dev-mode like the other
+    // cross-checks (dev-mode is compile-guarded out of release), where the
+    // legacy opaque-digest path is retained for local testing.
+    #[cfg(not(feature = "dev-mode"))]
+    let digest = crate::networks::evm::gas_tx::validate_gas_tx_request(&req, &ctx.bridge_config)?;
 
-    let digest: [u8; 32] = req.digest.as_slice().try_into().unwrap();
-    let signature = state.sign_evm_gas_tx(&digest)?;
+    #[cfg(feature = "dev-mode")]
+    let digest: [u8; 32] = {
+        if req.digest.len() != 32 {
+            return Err(EnclaveError::InvalidRequest(format!(
+                "digest must be exactly 32 bytes, got {}",
+                req.digest.len()
+            )));
+        }
+        req.digest.as_slice().try_into().unwrap()
+    };
+
+    let signature = ctx.state.sign_evm_gas_tx(&digest)?;
 
     tracing::info!(
         sig_hex = %hex::encode(signature),
@@ -773,27 +875,20 @@ fn handle_get_clone(state: &EnclaveState, req: GetCloneRequest) -> Result<Enclav
 
     // 2. Verify the requester attestation chain + PCRs. `None` for the
     //    expected nonce: we have not seen the requester's nonce before,
-    //    so freshness is enforced by the replay guard immediately after.
+    //    so freshness is enforced by the replay guard once the binding and
+    //    authenticity checks below have passed.
     let expected_pcrs = attestation::get_own_pcrs()?;
     let verified =
         attestation::verify_peer_attestation(&req.requester_attestation, &expected_pcrs, None)?;
 
-    // 3. Replay-check the nonce pulled from the verified document.
-    let nonce_array: [u8; 32] = verified
-        .nonce
-        .as_slice()
-        .try_into()
-        .map_err(|_| EnclaveError::Attestation("attestation nonce has wrong length".into()))?;
-    state.replay_guard.check_and_record(nonce_array)?;
-
-    // 4. Pubkey binding: the attestation's `public_key` field must equal
+    // 3. Pubkey binding: the attestation's `public_key` field must equal
     //    the one the parent put on the wire. Otherwise the parent could
     //    have swapped it for a key it controls.
     if verified.enclave_pubkey.as_slice() != req_encryption_pk {
         return Err(EnclaveError::PubkeyMismatch);
     }
 
-    // 5. Digest binding: the attestation's `user_data` must equal the
+    // 4. Digest binding: the attestation's `user_data` must equal the
     //    digest on the wire — NSM-signed, so parent-proof.
     let user_data = verified.user_data.as_deref().ok_or_else(|| {
         EnclaveError::Attestation("requester attestation missing user_data (cloning digest)".into())
@@ -802,7 +897,7 @@ fn handle_get_clone(state: &EnclaveState, req: GetCloneRequest) -> Result<Enclav
         return Err(EnclaveError::DigestMismatch);
     }
 
-    // 6. Digest authenticity: HMAC(donor_secret, encryption_pubkey) must
+    // 5. Digest authenticity: HMAC(donor_secret, encryption_pubkey) must
     //    match. Proves the requester was issued by the same operator.
     state.with_donor_cloning_secret(|secret| {
         if !cloning::verify_cloning_digest(secret, &req_encryption_pk, &req_digest) {
@@ -810,6 +905,21 @@ fn handle_get_clone(state: &EnclaveState, req: GetCloneRequest) -> Result<Enclav
         }
         Ok(())
     })?;
+
+    // 6. Replay-check + record the nonce from the verified document. This
+    //    runs only *after* the pubkey, digest and donor-secret checks above
+    //    have passed, so a rejected (unauthenticated) handshake never
+    //    consumes replay-guard capacity. Combined with the count-cap removal
+    //    (#80), this closes the secret-less cloning-availability DoS in which
+    //    an attacker mints attestations over arbitrary nonces via
+    //    `get_attested_public_key` and burns them on doomed handshakes
+    //    (audit W-13).
+    let nonce_array: [u8; 32] = verified
+        .nonce
+        .as_slice()
+        .try_into()
+        .map_err(|_| EnclaveError::Attestation("attestation nonce has wrong length".into()))?;
+    state.replay_guard.check_and_record(nonce_array)?;
 
     // 7. Seal the seed under a fresh donor ephemeral keypair.
     let (encrypted_seed, donor_pubkey) =
@@ -846,18 +956,12 @@ fn handle_set_clone(state: &EnclaveState, req: SetCloneRequest) -> Result<Enclav
         ))
     })?;
 
-    // 1. Verify donor attestation chain + PCRs (no nonce match — we
-    //    enforce freshness via the replay guard).
+    // 1. Verify donor attestation chain + PCRs (no nonce match — freshness
+    //    is enforced by the replay guard once the binding and seed/identity
+    //    checks below have passed).
     let expected_pcrs = attestation::get_own_pcrs()?;
     let verified =
         attestation::verify_peer_attestation(&req.donor_attestation, &expected_pcrs, None)?;
-
-    let nonce_array: [u8; 32] = verified
-        .nonce
-        .as_slice()
-        .try_into()
-        .map_err(|_| EnclaveError::Attestation("attestation nonce has wrong length".into()))?;
-    state.replay_guard.check_and_record(nonce_array)?;
 
     // 2. Pubkey binding: the donor's pubkey on the wire must equal the
     //    one inside their signed attestation.
@@ -882,6 +986,16 @@ fn handle_set_clone(state: &EnclaveState, req: SetCloneRequest) -> Result<Enclav
         cluster_public_key = session.cluster_public_key;
         Ok(km)
     })?;
+
+    // 4. Replay-check + record the donor nonce only *after* the pubkey
+    //    binding and the seed/identity checks above have passed, so a
+    //    rejected handshake never consumes replay-guard capacity (audit W-13).
+    let nonce_array: [u8; 32] = verified
+        .nonce
+        .as_slice()
+        .try_into()
+        .map_err(|_| EnclaveError::Attestation("attestation nonce has wrong length".into()))?;
+    state.replay_guard.check_and_record(nonce_array)?;
 
     tracing::info!(
         cluster_pk = %hex::encode(cluster_public_key),

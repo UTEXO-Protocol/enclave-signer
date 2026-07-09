@@ -62,6 +62,16 @@ pub const SPV_MAX_TIP_AGE_SECS: u64 = 2 * 60 * 60;
 /// `time = far_future` to defeat the staleness check.
 pub const SPV_MAX_TIP_FUTURE_SECS: u64 = 2 * 60 * 60;
 
+/// Maximum number of sibling hashes allowed in a single Merkle path. A path
+/// of depth d authenticates a block of up to 2^d transactions; even a 4 MB
+/// block packed with minimum-size transactions holds well under 2^17, so 32
+/// (over four billion leaves) never false-rejects a real proof while bounding
+/// the per-proof hashing a hostile listener can demand. Rejected up-front in
+/// `validate_spv_proofs`, before any Merkle hashing runs, so a maximally
+/// packed request is cheap to reject (audit I-06 / #90). Compile-time, like
+/// the other SPV limits: PCR-attested posture, not host-tunable.
+pub const MAX_MERKLE_PATH_DEPTH: usize = 32;
+
 /// Validate the RGB source's Bitcoin anchoring before signing.
 ///
 /// This owns the SPV signing gate for an RGB source: the caller passes the
@@ -128,6 +138,16 @@ pub fn validate_spv_proofs(
                 proof.txid.len()
             ))
         })?;
+        // Bound per-proof hashing before it starts: a path deeper than any
+        // real block could contain is either a bug or an attempt to maximize
+        // the per-proof verification loop (audit I-06 / #90).
+        if proof.merkle_path.len() > MAX_MERKLE_PATH_DEPTH {
+            return Err(EnclaveError::Spv(format!(
+                "merkle_proofs[{i}].merkle_path too deep: {} siblings (max {})",
+                proof.merkle_path.len(),
+                MAX_MERKLE_PATH_DEPTH
+            )));
+        }
         if !proof_set.insert(txid) {
             return Err(EnclaveError::Spv(format!(
                 "duplicate merkle proof for txid {}",

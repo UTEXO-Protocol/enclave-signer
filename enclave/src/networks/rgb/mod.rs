@@ -27,20 +27,30 @@ pub fn validate_source(
     amount: u64,
     source: &RgbSource,
     ctx: &ValidationContext<'_>,
-) -> Result<RouteProof> {
+) -> Result<crate::networks::SourceProof> {
+    use crate::networks::SourceProof;
+
     if dev_mode_bypass() {
         let _ = source;
         let _ = ctx;
-        return Ok(RouteProof {
-            amount,
-            operation_id: None,
+        return Ok(SourceProof {
+            proof: RouteProof {
+                amount,
+                operation_id: None,
+            },
+            #[cfg(feature = "rgb-validation")]
+            rgb_consignment: None,
         });
     }
 
     #[cfg(feature = "rgb-validation")]
     {
         let validated = validation::validate_source(source, ctx)?;
-        route_proof_from_validated_consignment(&validated)
+        let proof = route_proof_from_validated_consignment(&validated)?;
+        Ok(SourceProof {
+            proof,
+            rgb_consignment: Some(validated),
+        })
     }
 
     #[cfg(not(feature = "rgb-validation"))]
@@ -169,20 +179,24 @@ pub fn validate_destination_anchor(
             validated.contract_id, destination.asset_id
         )));
     }
-    if ctx.bridge_config.is_configured() {
-        if ctx.bridge_config.rgb_asset_id.is_empty() {
-            return Err(EnclaveError::CrossCheck(
-                "bridge config pinned chain/contract but RGB_ASSET_ID is empty — \
-                 set all three env vars or none"
-                    .into(),
-            ));
-        }
-        if validated.contract_id != ctx.bridge_config.rgb_asset_id {
-            return Err(EnclaveError::CrossCheck(format!(
-                "contract_id mismatch: consignment asset {} != pinned RGB_ASSET_ID {}",
-                validated.contract_id, ctx.bridge_config.rgb_asset_id
-            )));
-        }
+    // Asset-identity pin (audit TEE-SE-01). Fail closed when RGB_ASSET_ID is not
+    // pinned: dev-ng refused to bind a send-RGB PSBT to an unpinned asset in
+    // every non-dev-mode build (this function is already dev-mode-gated at the
+    // dispatch), mirroring the EVM funds-out path's `!is_configured()` gate. An
+    // unconfigured yet rgb-validation-enabled enclave must not sign in
+    // listener-trusting mode.
+    if ctx.bridge_config.rgb_asset_id.is_empty() {
+        return Err(EnclaveError::CrossCheck(
+            "asset-identity pin missing: RGB_ASSET_ID is not configured — refusing to bind a \
+             send-RGB PSBT to an unpinned asset"
+                .into(),
+        ));
+    }
+    if validated.contract_id != ctx.bridge_config.rgb_asset_id {
+        return Err(EnclaveError::CrossCheck(format!(
+            "contract_id mismatch: consignment asset {} != pinned RGB_ASSET_ID {}",
+            validated.contract_id, ctx.bridge_config.rgb_asset_id
+        )));
     }
 
     let psbt = bitcoin::psbt::Psbt::deserialize(&destination.psbt_bytes)
@@ -211,6 +225,7 @@ mod tests {
             chain_net: "bc:regtest".into(),
             witness_txids: vec![],
             all_op_ids: vec![op_id.into()],
+            mint_op_ids: vec![],
             last_transition: Some(TransitionSummary {
                 op_id: op_id.into(),
                 transition_type,
@@ -220,6 +235,8 @@ mod tests {
             }),
             last_transfer_witness_txid: None,
             last_transfer_witness_prevouts: None,
+            last_transfer_op_id: None,
+            non_mined_witness_txids: vec![],
         }
     }
 
