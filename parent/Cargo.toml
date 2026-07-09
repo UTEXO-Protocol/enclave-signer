@@ -16,10 +16,10 @@ name = "attest-verify"
 path = "src/bin/attest_verify.rs"
 
 [dependencies]
-prost = "0.13"
-tonic = "0.12"
-tonic-reflection = "0.12"
+prost = "0.14"
+tonic = "0.14"
 tokio = { version = "1", features = ["full"] }
+federated-signer-proto = { git = "ssh://git@github.com/UTEXO-Protocol/federated-signer-proto.git", rev = "41f23e995169d6f50faee5943051afff25271224", package = "federated-signer-proto" }
 
 clap = { version = "4", features = ["derive"] }
 
@@ -42,10 +42,6 @@ rand = "0.8"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 vsock = "0.5"
-
-[build-dependencies]
-prost-build = "0.13"
-tonic-build = "0.12"
 
 [features]
 default = []

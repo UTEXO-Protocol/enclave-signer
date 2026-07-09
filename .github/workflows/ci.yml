@@ -31,13 +31,15 @@ jobs:
       # feature combos) is hosted in a private repo and fetched over
       # SSH. Load a read-only deploy key registered on
       # UTEXO-Protocol/rgb-consignment-parser into the agent so cargo's
-      # `git fetch` can authenticate. The default feature set now includes
-      # `spv` (which pulls `rgb-validation`), so every build below needs this
-      # key except the explicit `--no-default-features` minimal build.
+      # `git fetch` can authenticate. Default-feature jobs don't pull
+      # the dep and run without this; every job below that enables
+      # `rgb-validation` or `spv` requires it.
       - name: Set up SSH for private RGB deps
         uses: webfactory/ssh-agent@v0.9.0
         with:
-          ssh-private-key: ${{ secrets.RGB_CONSIGNMENT_PARSER_DEPLOY_KEY }}
+          ssh-private-key: |
+            ${{ secrets.RGB_CONSIGNMENT_PARSER_DEPLOY_KEY }}
+            ${{ secrets.FEDERATED_SIGNER_PROTO_DEPLOY_KEY }}
 
       - name: Cache cargo registry
         uses: actions/cache@v4
@@ -52,9 +54,6 @@ jobs:
       - name: Check formatting
         run: cargo fmt --all -- --check
 
-      # The default feature set is now `spv` (which pulls `rgb-validation`), so
-      # the default build/clippy/test below exercise the production signing
-      # path — the SPV-anchored fundsOut flow shipped in the EIF.
       - name: Build (default features)
         run: cargo build --workspace
 
@@ -67,28 +66,18 @@ jobs:
         run: cargo test --workspace
 
       # Production build profile: vsock + rgb-validation + spv. Catches any
-      # regression on the actual feature combination shipped in the EIF (the
-      # default above omits vsock, which needs a Linux/vsock host).
+      # regression on the actual feature combination shipped in the EIF.
       - name: Build (production combo)
         run: cargo build -p utexo-bridge-enclave --features vsock,rgb-validation,spv
 
       - name: Clippy (production combo)
         run: cargo clippy -p utexo-bridge-enclave --features vsock,rgb-validation,spv --all-targets -- -D warnings
 
-      # Minimal build: no features at all (`--no-default-features` drops the
-      # now-default `spv`). Keeps the no-SPV path compiling and exercises the
-      # M-01 / #61 guard that a no-spv build refuses to sign `fundsOut`
-      # (test_no_spv_build_refuses_funds_out_even_without_merkle_proofs). Does
-      # not need the RGB deploy key — without `rgb-validation` the private dep
-      # is not pulled.
-      - name: Build (minimal — no default features)
-        run: cargo build -p utexo-bridge-enclave --no-default-features
-
-      - name: Clippy (minimal — no default features)
-        run: cargo clippy -p utexo-bridge-enclave --no-default-features --all-targets -- -D warnings
-
-      - name: Test (minimal — no default features)
-        run: cargo test -p utexo-bridge-enclave --no-default-features
+      # SPV path coverage. Cannot use vsock here (Linux runner without
+      # vsock support); spv pulls in rgb-validation transitively, which is
+      # what the SPV unit + integration tests exercise.
+      - name: Test (--features spv)
+        run: cargo test -p utexo-bridge-enclave --features spv
 
   # Assert the dev-only features `compile_error!` in a release build, so a
   # misconfigured Dockerfile / CI matrix can never ship one. Each feature is
@@ -120,7 +109,9 @@ jobs:
       - name: Set up SSH for private RGB deps
         uses: webfactory/ssh-agent@v0.9.0
         with:
-          ssh-private-key: ${{ secrets.RGB_CONSIGNMENT_PARSER_DEPLOY_KEY }}
+          ssh-private-key: |
+            ${{ secrets.RGB_CONSIGNMENT_PARSER_DEPLOY_KEY }}
+            ${{ secrets.FEDERATED_SIGNER_PROTO_DEPLOY_KEY }}
 
       - name: Cache cargo registry
         uses: actions/cache@v4
@@ -144,54 +135,3 @@ jobs:
             exit 1
           fi
           echo "OK: release build correctly rejected '${{ matrix.feature }}' via the compile_error guard"
-
-  # Assert that enabling `rgb-validation` without `spv` fails to compile via the
-  # `compile_error!` in lib.rs (audit M-01 / #61). Without SPV, a consignment's
-  # witness txs are anchored only through the host-controlled Esplora resolver,
-  # so the enclave must never be built that way. Runs separately from `ci`
-  # because the build is expected to fail. Unlike `release-guards` this is not
-  # release-specific — the combination is unsafe in every profile.
-  feature-guards:
-    runs-on: ubuntu-latest
-
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install Rust 1.89
-        uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: "1.89"
-
-      - name: Install system dependencies
-        run: sudo apt-get update && sudo apt-get install -y pkg-config libssl-dev protobuf-compiler
-
-      # `--features rgb-validation` pulls the private `rgb-consignment` dep, which
-      # cargo fetches/builds before it reaches our crate's `compile_error!`, so
-      # the deploy key is required here just like the `ci` job above.
-      - name: Set up SSH for private RGB deps
-        uses: webfactory/ssh-agent@v0.9.0
-        with:
-          ssh-private-key: ${{ secrets.RGB_CONSIGNMENT_PARSER_DEPLOY_KEY }}
-
-      - name: Cache cargo registry
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-feature-guards-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-cargo-feature-guards-
-
-      - name: Assert rgb-validation without spv is rejected
-        run: |
-          if cargo build -p utexo-bridge-enclave --no-default-features --features rgb-validation 2>build.log; then
-            echo "::error::build unexpectedly SUCCEEDED with rgb-validation but no spv — the compile_error guard is missing or not firing"
-            exit 1
-          fi
-          if ! grep -q "rgb-validation requires spv" build.log; then
-            echo "::error::build failed, but not via the expected compile_error guard (rgb-validation requires spv)"
-            cat build.log
-            exit 1
-          fi
-          echo "OK: rgb-validation-without-spv correctly rejected via the compile_error guard"

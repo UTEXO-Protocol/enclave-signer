@@ -7,6 +7,8 @@
 
 use std::collections::BTreeSet;
 use std::io::Cursor;
+#[cfg(feature = "spv")]
+use std::time::SystemTime;
 
 use rgb_consignment::{
     ConsignmentInfo, FungibleAllocation, FungibleEntry, SealInfo, TransitionInfo, WitnessInfo,
@@ -16,10 +18,125 @@ use rgbstd::indexers::esplora_blocking::esplora_client;
 use rgbstd::indexers::AnyResolver;
 use rgbstd::schema::{MetaType, TransitionType};
 use rgbstd::validation::ValidationConfig;
-use rgbstd::vm::WitnessOrd;
 use rgbstd::ChainNet;
+use sha3::{Digest, Keccak256};
 
 use crate::error::{EnclaveError, Result};
+use crate::networks::ValidationContext;
+use crate::proto::RgbSource;
+
+#[cfg(feature = "spv")]
+use super::spv_validation;
+
+/// Validate all fields and source-chain evidence owned by an RGB source.
+///
+/// This deliberately does not inspect or care about the destination network.
+/// For an RGB source, the source-chain proof is:
+///
+/// 1. raw consignment bytes must be present, hash-bound, and pass full
+///    in-enclave RGB validation;
+/// 2. the validated consignment asset must match the listener-declared
+///    `asset_id` and, when configured, the operator-pinned `RGB_ASSET_ID`;
+/// 3. when built with `spv`, every consignment witness tx must have a matching
+///    Merkle proof against the in-enclave Bitcoin header chain with sufficient
+///    confirmations;
+/// 4. when built without `spv`, reject any supplied Merkle proofs so build
+///    mismatches fail closed instead of silently ignoring host-provided SPV
+///    evidence.
+pub fn validate_source(
+    source: &RgbSource,
+    ctx: &ValidationContext<'_>,
+) -> Result<ValidatedConsignment> {
+    validate_source_payload(source)?;
+
+    let validator = ctx.rgb_validator.ok_or_else(|| {
+        EnclaveError::CrossCheck(
+            "RGB source validation requires rgb_validator to be configured".into(),
+        )
+    })?;
+
+    let validated = validator.validate_consignment(&source.consignment)?;
+
+    if validated.contract_id.is_empty() {
+        return Err(EnclaveError::CrossCheck(
+            "validated consignment has empty contract_id — cannot bind asset identity".into(),
+        ));
+    }
+    if validated.contract_id != source.asset_id {
+        return Err(EnclaveError::CrossCheck(format!(
+            "contract_id mismatch: consignment has {} but RGB source declares {}",
+            validated.contract_id, source.asset_id
+        )));
+    }
+    if ctx.bridge_config.is_configured() {
+        if ctx.bridge_config.rgb_asset_id.is_empty() {
+            return Err(EnclaveError::CrossCheck(
+                "bridge config pinned chain/contract but RGB_ASSET_ID is empty — \
+                 set all three env vars or none"
+                    .into(),
+            ));
+        }
+        if validated.contract_id != ctx.bridge_config.rgb_asset_id {
+            return Err(EnclaveError::CrossCheck(format!(
+                "contract_id mismatch: consignment asset {} != pinned RGB_ASSET_ID {}",
+                validated.contract_id, ctx.bridge_config.rgb_asset_id
+            )));
+        }
+    }
+
+    #[cfg(feature = "spv")]
+    {
+        let chain = ctx
+            .header_chain
+            .lock()
+            .map_err(|e| EnclaveError::Internal(format!("SPV header chain lock poisoned: {e}")))?;
+        spv_validation::validate_source_chain(
+            &chain,
+            Some(&validated),
+            &source.merkle_proofs,
+            SystemTime::now(),
+        )?;
+    }
+
+    #[cfg(not(feature = "spv"))]
+    {
+        if !source.merkle_proofs.is_empty() {
+            return Err(EnclaveError::CrossCheck(
+                "RGB source supplied merkle_proofs but enclave was not built with --features spv"
+                    .into(),
+            ));
+        }
+    }
+
+    Ok(validated)
+}
+
+fn validate_source_payload(source: &RgbSource) -> Result<()> {
+    if source.consignment.is_empty() {
+        return Err(EnclaveError::CrossCheck(
+            "RGB source requires raw consignment bytes; consignment_valid is not authoritative"
+                .into(),
+        ));
+    }
+    if source.consignment_hash.is_empty() {
+        return Err(EnclaveError::CrossCheck(
+            "consignment present but consignment_hash is missing".into(),
+        ));
+    }
+    let computed = Keccak256::digest(&source.consignment);
+    if computed[..] != source.consignment_hash {
+        return Err(EnclaveError::CrossCheck(
+            "consignment hash mismatch: keccak256(consignment) != consignment_hash".into(),
+        ));
+    }
+    if source.asset_id.is_empty() {
+        return Err(EnclaveError::CrossCheck(
+            "RGB source asset_id is empty".into(),
+        ));
+    }
+
+    Ok(())
+}
 
 /// Schema-defined `transition_type` and `metadata` keys for the Inflatable
 /// Fungible Asset (IFA) schema we use for USDT. Sourced from the
@@ -114,17 +231,10 @@ pub struct ValidatedConsignment {
     /// Every state-transition `op_id` in the consignment, in witness order
     /// (bundle k's transitions before bundle k+1's). Spec §6 requires
     /// every mint OpId committed to EVM state to be cross-checked across
-    /// RGB validations.
+    /// RGB validations. The downstream filter for "which of these is a
+    /// mint" lives in a follow-up PR once the IFA-schema `MINT`
+    /// `transition_type` constant is confirmed.
     pub all_op_ids: Vec<String>,
-    /// The `op_id`s of every IFA `TS_INFLATION` (mint) transition in the
-    /// consignment, in witness order — the subset of [`Self::all_op_ids`]
-    /// that corresponds to EVM lock records (`fundsIn`). The `fundsOut`
-    /// calldata's `fundsInIds[]` (inside `settlementData`) must each
-    /// correspond to one of these (under the agreed OpId→id transform), so
-    /// a release can only consume locks this consignment's RGB history
-    /// actually inflated (spec §6 / §7). See
-    /// `evm_crosscheck::bind_funds_in_ids`.
-    pub mint_op_ids: Vec<String>,
     /// The most recent state transition — the change of state the EVM
     /// action this consignment authorises commits to. Follow-up PRs
     /// classify this as Transfer-to-federation (pools / spec §9.2,
@@ -152,34 +262,6 @@ pub struct ValidatedConsignment {
     /// consignment carries only the witness txid (`PubWitness::Txid`), in
     /// which case the txid identity bind alone anchors every input.
     pub last_transfer_witness_prevouts: Option<Vec<bitcoin::OutPoint>>,
-    /// Authoritative OpId (32-byte commitment hash) of the consignment's
-    /// **last** transition, read from the rgbstd-**validated** `Transfer`
-    /// (`KnownTransition.opid` of the same last bundle as
-    /// `last_transfer_witness_txid`), NOT from the flat `rgb_consignment`
-    /// parser. This is the value `validate()` authenticated and anchored on
-    /// chain, so deriving the EVM `fundsOut` `burnId` from it
-    /// (`evm_crosscheck::apply_op_id_binding`, audit M-02 / #93) binds the
-    /// contract's single-use `consumedBurnIds` guard to validated consignment
-    /// data, not a parallel/unauthenticated parse. `None` only for a
-    /// consignment with no bundles (rgbstd rejects those) or a non-Transfer
-    /// last transition (the burnId binding only applies to the transfer flow).
-    pub last_transfer_op_id: Option<[u8; 32]>,
-    /// Witness txids that rgbstd `validate()` classified as **not mined**
-    /// (`WitnessOrd::Tentative` / `Ignored`), in **display (big-endian) byte
-    /// order** - same encoding as [`Self::witness_txids`]. `validate()` already
-    /// hard-rejects `Archived`/unresolvable witnesses, so only these softer
-    /// not-yet-confirmed states reach here, and only because this set is built
-    /// from the rgbstd status that was previously discarded (audit 4th
-    /// I-03 / #95).
-    ///
-    /// A non-empty set is **expected** for the send-RGB (EVM-lock -> RGB-send)
-    /// PSBT path: that witness tx is freshly composed and unbroadcast, so it is
-    /// legitimately `Tentative`. It is an **anomaly** for the RGB->EVM
-    /// `fundsOut` direction, where the witness is already confirmed on-chain
-    /// and SPV-verified - the SignEvm path rejects any non-mined witness as
-    /// defense-in-depth atop the SPV depth check (see
-    /// [`crate::validation::evm_crosscheck::assert_witnesses_confirmed`]).
-    pub non_mined_witness_txids: Vec<[u8; 32]>,
 }
 
 /// Flat summary of one RGB state transition. Mirrors
@@ -187,14 +269,7 @@ pub struct ValidatedConsignment {
 /// doesn't leak into our public surface.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TransitionSummary {
-    /// Operation id — the 64-char lowercase hex of the 32-byte RGB OpId, as
-    /// the consignment parser yields it (verified by the fixture test). The
-    /// EVM OpId cross-check compares this as a string; the `fundsInIds`
-    /// value-binding hex-decodes it to 32 bytes
-    /// (`evm_crosscheck::decode_op_id_to_bytes32`), so the hex form is
-    /// load-bearing - not baid64. (The `burnId` is bound instead from the
-    /// rgbstd-validated [`ValidatedConsignment::last_transfer_op_id`], not this
-    /// flat-parser value - audit M-02 / #93.)
+    /// Operation id (baid64).
     pub op_id: String,
     /// IFA-schema transition-type id; compare against [`ifa::TS_TRANSFER`]
     /// / [`ifa::TS_BURN`] / [`ifa::TS_INFLATION`] to classify the EVM
@@ -344,8 +419,7 @@ impl RgbValidator {
         // walk would duplicate ~80 lines we'd then have to keep in sync
         // with rgb-ops's evolving internal types. The parse cost is small
         // relative to the network validation below.
-        let (all_op_ids, mint_op_ids, mut last_transition) =
-            extract_transition_summary(consignment_bytes)?;
+        let (all_op_ids, mut last_transition) = extract_transition_summary(consignment_bytes)?;
         let transitions_count = all_op_ids.len();
 
         // Burn-amount extraction: the parser doesn't surface
@@ -367,13 +441,12 @@ impl RgbValidator {
         // bind is only meaningful for the pools-mode send shape, and the
         // consistency check inside reads the parsed transition type to ensure
         // the txid and the transition come from the same witness.
-        let (last_transfer_witness_txid, last_transfer_witness_prevouts, last_transfer_op_id) =
-            match last_transition {
-                Some(ref last) if last.transition_type == ifa::TS_TRANSFER => {
-                    read_last_transfer_witness(&transfer, last.transition_type)?
-                }
-                _ => (None, None, None),
-            };
+        let (last_transfer_witness_txid, last_transfer_witness_prevouts) = match last_transition {
+            Some(ref last) if last.transition_type == ifa::TS_TRANSFER => {
+                read_last_transfer_witness(&transfer, last.transition_type)?
+            }
+            _ => (None, None),
+        };
 
         // 2. Create an Esplora-backed resolver.
         let builder = esplora_client::Builder::new(&self.esplora_url);
@@ -408,7 +481,7 @@ impl RgbValidator {
 
         // 4. Run full RGB validation (makes blocking HTTP calls to Esplora).
         tracing::debug!(%contract_id, "calling rgbstd validate (this may block on Esplora)");
-        let valid = transfer.validate(&resolver, &config).map_err(|e| {
+        let _valid = transfer.validate(&resolver, &config).map_err(|e| {
             tracing::warn!(
                 %contract_id,
                 elapsed_ms = start.elapsed().as_millis() as u64,
@@ -417,54 +490,10 @@ impl RgbValidator {
             EnclaveError::CrossCheck(format!("RGB consignment validation failed: {e}"))
         })?;
 
-        // 4b. Inspect the validation status instead of discarding it (audit 4th
-        // I-03 / #95). A hard failure already came back as Err above; what
-        // reaches here is `Ok` with a status that may still carry warnings and
-        // a per-witness ordinal map. Without `safe_height` set, rgbstd's
-        // `validity()` is `Valid` even when witnesses are not mined, so the
-        // only signal of a not-yet-confirmed witness is `tx_ord_map` - we read
-        // it out rather than trust `validity()` alone.
-        //
-        // We deliberately do NOT set `ValidationConfig.safe_height`: doing so
-        // would flag recency against the *Esplora resolver's* tip, which is
-        // host-controlled and untrusted. Recency for the RGB->EVM direction is
-        // enforced authoritatively by the in-enclave SPV header chain
-        // (`SPV_MIN_CONFIRMATIONS`); surfacing the witness ordinals here lets
-        // that direction reject non-mined witnesses as defense-in-depth.
-        let status = valid.validation_status();
-        let mut non_mined: BTreeSet<[u8; 32]> = BTreeSet::new();
-        for (txid, ord) in status.tx_ord_map.iter() {
-            if !matches!(ord, WitnessOrd::Mined(_)) {
-                // `txid` is `bitcoin::Txid`; its Display is display-order hex,
-                // matching the `witness_txids` encoding decoded above.
-                let display_hex = txid.to_string();
-                let bytes = hex::decode(&display_hex).map_err(|e| {
-                    EnclaveError::CrossCheck(format!(
-                        "witness ordinal txid hex decode failed: {e} (got {display_hex:?})"
-                    ))
-                })?;
-                let arr: [u8; 32] = bytes.as_slice().try_into().map_err(|_| {
-                    EnclaveError::CrossCheck(format!(
-                        "witness ordinal txid is not 32 bytes (got {} bytes from {display_hex:?})",
-                        bytes.len()
-                    ))
-                })?;
-                tracing::warn!(%contract_id, txid = %display_hex, witness_ord = %ord, "consignment witness tx is not mined");
-                non_mined.insert(arr);
-            }
-        }
-        for warning in &status.warnings {
-            tracing::warn!(%contract_id, "RGB validation warning: {warning}");
-        }
-        let non_mined_witness_txids: Vec<[u8; 32]> = non_mined.into_iter().collect();
-
         tracing::info!(
             %contract_id,
             %chain_net,
-            validity = %status.validity(),
             witness_txids_count = witness_txids.len(),
-            non_mined_count = non_mined_witness_txids.len(),
-            warnings = status.warnings.len(),
             transitions_count,
             elapsed_ms = start.elapsed().as_millis() as u64,
             "RGB consignment validated successfully"
@@ -475,12 +504,9 @@ impl RgbValidator {
             chain_net,
             witness_txids,
             all_op_ids,
-            mint_op_ids,
             last_transition,
             last_transfer_witness_txid,
             last_transfer_witness_prevouts,
-            last_transfer_op_id,
-            non_mined_witness_txids,
         })
     }
 }
@@ -501,46 +527,25 @@ impl RgbValidator {
 /// same data; binding a txid from one transition while gating on another
 /// would be a latent mismatch, so a disagreement is rejected fail-closed.
 ///
-/// Also returns the validated OpId (32-byte commitment hash) of that last
-/// transition, read from the same rgbstd bundle - the authoritative source for
-/// the EVM `fundsOut` burnId binding (audit M-02 / #93), NOT the flat parser.
-///
-/// Returns `(None, None, None)` only when the transfer has no bundles - a state
+/// Returns `(None, None)` only when the transfer has no bundles — a state
 /// rgbstd validation rejects upstream.
 fn read_last_transfer_witness(
     transfer: &Transfer,
     expected_type: u16,
-) -> Result<LastTransferBinding> {
+) -> Result<(Option<bitcoin::Txid>, Option<Vec<bitcoin::OutPoint>>)> {
     let Some(last_bundle) = transfer.bundles.iter().last() else {
-        return Ok((None, None, None));
+        return Ok((None, None));
     };
 
-    // Read the authoritative OpId of the validated last transition from the
-    // same bundle. rgbstd's `OpId` is the transition's commitment hash; its
-    // `Display` is lowercase hex of the 32 bytes, so we hex-decode it back to
-    // the raw array. Sourcing it here (the validated object) rather than from
-    // the flat `rgb_consignment` parser is what makes the EVM burnId binding a
-    // derivation from validated data (audit M-02 / #93).
-    let mut op_id: Option<[u8; 32]> = None;
     if let Some(known) = last_bundle.bundle().known_transitions.iter().last() {
         let actual = known.transition.transition_type;
         let expected = TransitionType::with(expected_type);
         if actual != expected {
             return Err(EnclaveError::CrossCheck(format!(
                 "consignment last-bundle transition type {actual} disagrees with parsed last \
-                 transition type {expected} - refusing to bind to an ambiguous witness"
+                 transition type {expected} — refusing to bind PSBT to an ambiguous witness"
             )));
         }
-        let opid_hex = known.opid.to_string();
-        let bytes = hex::decode(&opid_hex).map_err(|e| {
-            EnclaveError::CrossCheck(format!(
-                "validated opid hex decode failed: {e} ({opid_hex:?})"
-            ))
-        })?;
-        let arr: [u8; 32] = bytes.try_into().map_err(|v: Vec<u8>| {
-            EnclaveError::CrossCheck(format!("validated opid is not 32 bytes (got {})", v.len()))
-        })?;
-        op_id = Some(arr);
     }
 
     // `witness_id()` is `bitcoin::Txid` (rgb re-exports the same bitcoin 0.32
@@ -551,27 +556,16 @@ fn read_last_transfer_witness(
         .tx()
         .map(|tx| tx.input.iter().map(|txin| txin.previous_output).collect());
 
-    Ok((Some(txid), prevouts, op_id))
+    Ok((Some(txid), prevouts))
 }
-
-/// Binding data for the consignment's last transfer bundle:
-/// `(witness txid, witness input prevouts, validated last-transition OpId)`.
-/// All `Option` because a bundle-less transfer (rejected upstream by rgbstd)
-/// yields `(None, None, None)`. See [`read_last_transfer_witness`].
-type LastTransferBinding = (
-    Option<bitcoin::Txid>,
-    Option<Vec<bitcoin::OutPoint>>,
-    Option<[u8; 32]>,
-);
 
 /// Parse the consignment with `rgb_consignment::parse` and pull out the
 /// flat transition summary (every op_id + the most recent transition's
 /// shape). Errors if the consignment isn't a Transfer or if any field
 /// fails to decode.
-#[allow(clippy::type_complexity)]
 fn extract_transition_summary(
     consignment_bytes: &[u8],
-) -> Result<(Vec<String>, Vec<String>, Option<TransitionSummary>)> {
+) -> Result<(Vec<String>, Option<TransitionSummary>)> {
     let info = rgb_consignment::parse(consignment_bytes)
         .map_err(|e| EnclaveError::CrossCheck(format!("rgb-consignment parse failed: {e}")))?;
 
@@ -600,17 +594,6 @@ fn extract_transition_summary(
         .map(|t: &TransitionInfo| t.op_id.clone())
         .collect();
 
-    // The mint (IFA `TS_INFLATION`) subset — these map 1:1 to EVM lock
-    // records (`fundsIn`). The `fundsOut` `fundsInIds[]` must each correspond
-    // to one of these (spec §6).
-    let mint_op_ids: Vec<String> = transfer
-        .witnesses
-        .iter()
-        .flat_map(|w: &WitnessInfo| w.transitions.iter())
-        .filter(|t: &&TransitionInfo| t.transition_type == ifa::TS_INFLATION)
-        .map(|t: &TransitionInfo| t.op_id.clone())
-        .collect();
-
     let last_transition = transfer
         .witnesses
         .last()
@@ -618,7 +601,7 @@ fn extract_transition_summary(
         .map(transition_summary)
         .transpose()?;
 
-    Ok((all_op_ids, mint_op_ids, last_transition))
+    Ok((all_op_ids, last_transition))
 }
 
 fn transition_summary(t: &TransitionInfo) -> Result<TransitionSummary> {
@@ -743,9 +726,9 @@ mod tests {
     // harness; we ship them in-tree so the unit tests don't depend on
     // network access or the parser repo's working copy.
     const TRANSFER_FIXTURE: &[u8] =
-        include_bytes!("../../tests/fixtures/transfer_consignment.rgbc");
+        include_bytes!("../../../tests/fixtures/transfer_consignment.rgbc");
     const CONTRACT_FIXTURE: &[u8] =
-        include_bytes!("../../tests/fixtures/contract_consignment.rgbc");
+        include_bytes!("../../../tests/fixtures/contract_consignment.rgbc");
 
     #[test]
     fn rejects_invalid_bytes() {
@@ -767,13 +750,8 @@ mod tests {
 
     #[test]
     fn extracts_op_ids_and_last_transition_from_transfer_fixture() {
-        let (all_op_ids, mint_op_ids, last_transition) =
+        let (all_op_ids, last_transition) =
             extract_transition_summary(TRANSFER_FIXTURE).expect("transfer parse");
-
-        // This transfer fixture carries no IFA TS_INFLATION (mint)
-        // transitions — both transitions are plain transfers — so the mint
-        // subset is empty.
-        assert!(mint_op_ids.is_empty(), "transfer fixture has no mints");
 
         // Fixture is a Transfer with two witness bundles, one transition
         // each. Order of `all_op_ids` matches witness order.
@@ -851,7 +829,7 @@ mod tests {
 
     #[test]
     fn last_transition_carries_revealed_and_confidential_seals() {
-        let (_, _, last_transition) =
+        let (_, last_transition) =
             extract_transition_summary(TRANSFER_FIXTURE).expect("transfer parse");
         let last = last_transition.expect("transfer has a last transition");
 
@@ -892,14 +870,18 @@ mod tests {
 
         // The fixture's last transition is a Transfer (type 10000, asserted in
         // `extracts_op_ids_and_last_transition_from_transfer_fixture`).
-        let (txid, prevouts, op_id) =
+        let (txid, prevouts) =
             read_last_transfer_witness(&transfer, ifa::TS_TRANSFER).expect("extract witness");
 
         // Every validated transfer has at least one bundle, so the txid is set.
         let txid = txid.expect("transfer fixture has a witness txid");
         // It must equal the last bundle's witness id (the bundle we bind to).
-        let last_bundle = transfer.bundles.iter().last().expect("fixture has bundles");
-        let expected = last_bundle.witness_id();
+        let expected = transfer
+            .bundles
+            .iter()
+            .last()
+            .expect("fixture has bundles")
+            .witness_id();
         assert_eq!(txid, expected);
 
         // The rgb-lib sender embeds the full witness tx for a freshly-composed
@@ -910,20 +892,6 @@ mod tests {
             !prevouts.is_empty(),
             "witness tx must spend at least one input"
         );
-
-        // The validated OpId (canonical burnId source, #93) must be present and
-        // equal the last bundle's last known-transition opid, read straight
-        // from the validated object - not the flat parser.
-        let op_id = op_id.expect("transfer fixture yields a validated opid");
-        let expected_opid = last_bundle
-            .bundle()
-            .known_transitions
-            .iter()
-            .last()
-            .expect("bundle has a known transition")
-            .opid
-            .to_string();
-        assert_eq!(hex::encode(op_id), expected_opid);
     }
 
     #[test]

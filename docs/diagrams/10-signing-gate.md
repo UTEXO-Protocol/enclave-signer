@@ -11,13 +11,13 @@ flowchart TD
         p1b --> p1q{valid?}
         p1q -->|no| p1r[REFUSE — invalid consignment]:::refuse
         p1q -->|yes| p1e[extract chain_net, witness_txids,<br/>all_op_ids, last_transition]
-        p1e --> p1c{contract_id == pinned RGB_ASSET_ID?<br/>bound to env pin, declared id advisory — #75}
+        p1e --> p1c{contract_id == declared rgb_asset_id?}
         p1c -->|no| p1cr[REFUSE — contract_id mismatch]:::refuse
     end
     bs -->|no| p1a
 
     subgraph P2 [P2 — EVM cross-checks, validate_evm_request, Sec 10.3/4/5]
-        p2sel{selector in FUNDS_OUT allowlist?<br/>single fundsOut 0xccddb768 — #78}
+        p2sel{selector in FUNDS_OUT allowlist?<br/>legacy 0x1ad880b2 / mint-burn 0x179bef59}
         p2sel -->|no| p2selr[REFUSE — unknown selector]:::refuse
         p2sel -->|yes| p2cp{consignment bytes present?<br/>consignment_valid flag NOT trusted — #47}
         p2cp -->|no| p2cpr[REFUSE — fundsOut needs validated consignment]:::refuse
@@ -42,11 +42,6 @@ flowchart TD
     end
     p2p -->|yes| p2bv
 
-    subgraph P2c [P2c — OpId override, apply_op_id_binding, TEE-SE-02 / Sec 6]
-        p2ov[OVERWRITE calldata from the validated consignment:<br/>burnId@68 := id of last transition OpId,<br/>settlementData := abi.encode all TS_INFLATION OpId ids<br/>listener's values ignored — id = keccak256 OpId]
-        p2ov --> p2ret[sign + return THIS rewritten calldata<br/>caller must submit these bytes]
-    end
-
     subgraph P3 [P3 — SPV / Bitcoin anchoring, Sec 10.7/8, Sec 12]
         p3stale{chain tip fresh?<br/>not stale / not future}
         p3stale -->|no| p3sr[REFUSE — chain stale, frozen feed]:::refuse
@@ -56,13 +51,12 @@ flowchart TD
         p3v --> p3q{all proofs pass?}
         p3q -->|no| p3qr[REFUSE — SPV failure]:::refuse
     end
-    p2bt -->|yes| p2ov
-    p2ret --> p3stale
+    p2bt -->|yes| p3stale
 
     subgraph S [Sign]
         s1[build EIP-712 domain<br/>name, version, chain_id, proxy_contract] --> s2[digest = EIP-712 BridgeOperation<br/>selector, callData, nonce, deadline]
         s2 --> s3[signature = ECDSA over digest<br/>Active KeyManager]
-        s3 --> sR([RETURN EvmSignatureResponse<br/>signature + rewritten call_data]):::accept
+        s3 --> sR([RETURN EvmSignatureResponse signature]):::accept
     end
     p3q -->|yes| s1
 
@@ -76,11 +70,11 @@ flowchart TD
 - Sec 9 / 10.2 — burn amount now bound to the consignment (`TS_BURN` + amount ≤ `burned_asset_amount`, #44; transfer amount ≤ `total_output_amount`, #47).
 - Sec 10.1 — `consignment_valid` bypass removed (#47).
 - Sec 10.4/5 — `chain_id` / contract / asset pinned from env (#43).
-- EIP-712 typehash now `BridgeOperation(bytes4 selector, ...)` matching `MultisigProxy._buildDigest()` (PR #48); domain `name`/`version` are `"MultisigProxy"`/`"1"`, verified against the deployed contract's domain separator.
-- Sec 6 / 10.6 — `OpId` bound into the signed calldata for **all** flows (`TEE-SE-02` / #63). The enclave derives the identifiers from the consignment it validated and **overwrites** the calldata (`apply_op_id_binding`): `burnId@68 := id(last transition OpId)`, `settlementData := abi.encode(uint256[])` over `id(opid)` for every `TS_INFLATION` (mint) transition (`id = keccak256(opid)`). It does not trust or read the listener's values. The rewritten calldata is signed and **returned** (`EvmSignatureResponse.call_data` → `Signature.call_data`); the caller must submit those bytes. Because the signature commits to `keccak256(callData)`, the values are authoritative — a compromised backend cannot influence the replay slot or consumed lock records.
+- EIP-712 typehash now `BridgeOperation(bytes4 selector, ...)` matching `MultisigProxy._buildDigest()` (PR #48).
 
 **Remaining gaps:**
-- Sec 13 — EVM recipient NOT derived from / bound to the RGB payload (`TEE-SE-03`, #66).
+- Sec 10.6 — `OpId` binding NOT checked / NOT in payload (`TEE-SE-02`).
+- Sec 13 — EVM recipient NOT derived from / bound to the RGB payload (`TEE-SE-03`).
 - Amount bind is `≤`, not the spec's strict `==` (`TEE-SE-04`).
-- Calldata offsets pinned to the deployed `0xccddb768` `fundsOut` ABI but not yet asserted against a contract-derived fixture (`TEE-SE-05`).
-- **OpId→id transform** (`keccak256(opid)` vs raw 32-byte opid) is isolated in `op_id_to_calldata_id`; must match the lock-side `fundsIn` `operationId` so the on-chain existence check resolves. **Listener change required:** federated-signer-node must submit `Signature.call_data` instead of its own.
+- EIP-712 domain `name` / `version` hardcoded `"Tricorn"` / `"1"`; calldata offsets unverified vs deployed ABI (`TEE-SE-05`).
+- Mint-burn path inert until the listener emits `0x179bef59`.

@@ -12,7 +12,7 @@ use anyhow::{bail, Context, Result};
 use rand::RngCore;
 use sha2::{Digest, Sha256};
 
-use crate::grpc_proto::enclave_service_client::EnclaveServiceClient;
+use crate::grpc_proto::parent_service_client::ParentServiceClient;
 use crate::grpc_proto::{AttestedPublicKeyRequest, AttestedPublicKeyResponse};
 
 /// Whether to verify the document via the COSE/cert-chain real path or
@@ -77,7 +77,7 @@ pub async fn verify_attested_pubkey(
     let mut nonce = [0u8; 32];
     rand::thread_rng().fill_bytes(&mut nonce);
 
-    let mut client = EnclaveServiceClient::connect(endpoint.to_string())
+    let mut client = ParentServiceClient::connect(endpoint.to_string())
         .await
         .with_context(|| format!("connecting to {endpoint}"))?;
 

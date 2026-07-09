@@ -14,11 +14,11 @@ use std::sync::Arc;
 use tonic::transport::Server;
 
 use utexo_bridge_enclave::config::BridgeConfig;
+use utexo_bridge_enclave::networks::rgb::spv::{checkpoint_for, HeaderChain, Network};
 use utexo_bridge_enclave::server::{self as enclave_server, ServerContext};
-use utexo_bridge_enclave::spv::{checkpoint_for, HeaderChain, Network};
 use utexo_bridge_enclave::state::EnclaveState;
 use utexo_bridge_parent::attest_verify::{verify_attested_pubkey, VerifyMode};
-use utexo_bridge_parent::grpc_proto::enclave_service_server::EnclaveServiceServer;
+use utexo_bridge_parent::grpc_proto::parent_service_server::ParentServiceServer;
 use utexo_bridge_parent::grpc_server::{EnclaveTarget, ParentAdapterService};
 
 const TEST_MNEMONIC: &str =
@@ -71,7 +71,7 @@ async fn start_real_parent_grpc(enclave_port: u16) -> u16 {
 
     tokio::spawn(async move {
         Server::builder()
-            .add_service(EnclaveServiceServer::new(service))
+            .add_service(ParentServiceServer::new(service))
             .serve(grpc_addr)
             .await
             .unwrap();

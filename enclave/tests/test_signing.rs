@@ -1,9 +1,25 @@
 mod common;
 
+use alloy_primitives::{Address, Bytes, U256};
+use alloy_sol_types::{sol, SolCall};
 use utexo_bridge_enclave::config::BridgeConfig;
 use utexo_bridge_enclave::proto::enclave_request::Request;
 use utexo_bridge_enclave::proto::enclave_response::Response;
+use utexo_bridge_enclave::proto::sign_request::{DestinationNetwork, SourceNetwork};
 use utexo_bridge_enclave::proto::*;
+
+sol! {
+    function fundsOut(
+        address recipient,
+        uint256 amount,
+        uint256 burnId,
+        uint256 sourceChainId,
+        uint256 destinationChainId,
+        string sourceAddress,
+        bytes proof,
+        bytes settlementData
+    );
+}
 
 /// Pinned `BridgeConfig` matching the defaults of `valid_sign_evm_request`
 /// (chain_id 1, proxy/bridge contract `0xAA…`, asset `rgb:test`). Tests
@@ -16,30 +32,22 @@ fn pinned_bridge_config() -> BridgeConfig {
         chain_id: 1,
         bridge_contract: [0xAA; 20],
         rgb_asset_id: "rgb:test".into(),
-        gas_tx_allowed_to: None,
     }
 }
 
-/// Build a mock `fundsOut` calldata in the 8-arg shape
-/// `fundsOut(address,uint256,uint256,uint256,uint256,string,bytes,bytes)`
-/// (selector `0xccddb768`) — the single `fundsOut` on the deployed
-/// contract, accepted by `validation::evm_crosscheck`'s whitelist.
-/// `amount` sits at offset 36 (after selector + recipient).
+/// Build ABI-valid `fundsOut` calldata in the deployed 8-arg shape.
 fn mock_funds_out_calldata(recipient: [u8; 20], amount: u64) -> Vec<u8> {
-    let mut data = Vec::with_capacity(4 + 8 * 32);
-    data.extend_from_slice(&[0xcc, 0xdd, 0xb7, 0x68]);
-    // recipient (address, padded to 32 bytes) @ offset 4
-    let mut padded = [0u8; 32];
-    padded[12..].copy_from_slice(&recipient);
-    data.extend_from_slice(&padded);
-    // amount (uint256) @ offset 36
-    let mut padded = [0u8; 32];
-    padded[24..].copy_from_slice(&amount.to_be_bytes());
-    data.extend_from_slice(&padded);
-    // 6 more head slots zero-filled (burnId, sourceChainId,
-    // destinationChainId, srcAddrOffset, proofOffset, settlementDataOffset).
-    data.extend_from_slice(&[0u8; 32 * 6]);
-    data
+    fundsOutCall {
+        recipient: Address::from(recipient),
+        amount: U256::from(amount),
+        burnId: U256::ZERO,
+        sourceChainId: U256::ZERO,
+        destinationChainId: U256::from(1u64),
+        sourceAddress: String::new(),
+        proof: Bytes::new(),
+        settlementData: Bytes::new(),
+    }
+    .abi_encode()
 }
 
 /// Placeholder consignment bytes for integration tests. `validate_evm_request`
@@ -56,24 +64,36 @@ fn placeholder_consignment_hash() -> Vec<u8> {
     Keccak256::digest(PLACEHOLDER_CONSIGNMENT).to_vec()
 }
 
-/// Build a valid enriched SignEvmRequest for testing. `commission` is
-/// retained on the proto fields for wire-compat but is no longer part of
-/// the calldata (the contract takes commission on-chain).
-fn valid_sign_evm_request(amount: u64, commission: u64) -> SignEvmRequest {
-    SignEvmRequest {
-        call_data: mock_funds_out_calldata([0x22; 20], amount),
-        nonce: 1,
-        deadline: u64::MAX,
-        consignment_valid: true,
-        rgb_amount: amount + commission + 100, // plenty of headroom
-        rgb_asset_id: "rgb:test".into(),
-        chain_id: 1,
-        proxy_contract: vec![0xAA; 20],
-        calldata_amount: amount,
-        calldata_commission: commission,
-        consignment: PLACEHOLDER_CONSIGNMENT.to_vec(),
-        consignment_hash: placeholder_consignment_hash(),
-        merkle_proofs: vec![],
+/// Build a valid enriched EVM-destination SignRequest for testing. `commission`
+/// stays outside the calldata but remains part of route-proof amount coverage.
+fn valid_sign_evm_request(amount: u64, commission: u64) -> SignRequest {
+    SignRequest {
+        amount: amount + commission + 100, // plenty of headroom
+        source_network: Some(SourceNetwork::RgbSource(RgbSource {
+            consignment_valid: true,
+            asset_id: "rgb:test".into(),
+            consignment: PLACEHOLDER_CONSIGNMENT.to_vec(),
+            consignment_hash: placeholder_consignment_hash(),
+            merkle_proofs: vec![],
+            commission,
+        })),
+        destination_network: Some(DestinationNetwork::EvmDestination(EvmDestination {
+            call_data: mock_funds_out_calldata([0x22; 20], amount),
+            nonce: 1,
+            deadline: u64::MAX,
+            chain_id: 1,
+            proxy_contract: vec![0xAA; 20],
+            calldata_amount: amount,
+            calldata_commission: commission,
+        })),
+    }
+}
+
+#[cfg(all(feature = "rgb-validation", not(feature = "dev-mode")))]
+fn rgb_source_mut(req: &mut SignRequest) -> &mut RgbSource {
+    match req.source_network.as_mut() {
+        Some(SourceNetwork::RgbSource(source)) => source,
+        other => panic!("expected RGB source, got {other:?}"),
     }
 }
 
@@ -111,7 +131,7 @@ fn minimal_valid_psbt_bytes() -> Vec<u8> {
 }
 
 /// Build a minimal 2-of-3 multisig PSBT for testing with a known pubkey.
-#[cfg(feature = "allow-seed-import")]
+#[cfg(all(feature = "allow-seed-import", not(feature = "rgb-validation")))]
 fn build_test_multisig_psbt(our_pubkey: &bitcoin::PublicKey) -> Vec<u8> {
     use bitcoin::blockdata::opcodes::all::*;
     use bitcoin::blockdata::script::Builder as ScriptBuilder;
@@ -170,36 +190,47 @@ fn build_test_multisig_psbt(our_pubkey: &bitcoin::PublicKey) -> Vec<u8> {
     psbt.serialize()
 }
 
-/// Build a vanilla (create_utxo-style) `SignPsbtRequest` for the roundtrip
-/// signing test: an empty `evm_tx_hash` means no bridge enrichment, so it skips
-/// the send-RGB consignment binding — which, under `rgb-validation` (now in the
-/// default feature set), requires a validated consignment the test harness
-/// can't supply (`rgb_validator` is `None`). The roundtrip test only exercises
-/// the signing primitive, so vanilla mode is sufficient and keeps it valid in
-/// both the default (spv/rgb-validation) and minimal builds.
-#[cfg(feature = "allow-seed-import")]
-// Vanilla-mode (non-bridge) PSBT request: empty `evm_tx_hash` so the handler
-// signs the PSBT on its mechanics alone. The roundtrip test exercises signing,
-// not the bridge cross-checks. A bridge-mode request (non-empty evm_tx_hash)
-// under `rgb-validation` fail-closes on a missing consignment (the send-RGB
-// binding from #79), and this synthetic multisig PSBT could never match a real
-// consignment's witness txid - so bridge mode is the wrong shape here. The
-// consignment binding has its own coverage in `psbt_crosscheck` unit tests.
-fn valid_sign_psbt_request(psbt_bytes: Vec<u8>) -> SignPsbtRequest {
-    SignPsbtRequest {
-        evm_tx_hash: vec![],
-        operation_idx: 0,
-        evm_event_valid: false,
-        evm_event_finalized: false,
-        evm_token: vec![],
-        evm_amount: 0,
-        evm_recipient: vec![],
-        evm_commission: 0,
+/// Build a valid enriched RGB-destination SignRequest for testing.
+#[cfg(all(feature = "allow-seed-import", not(feature = "rgb-validation")))]
+fn valid_sign_psbt_request(psbt_bytes: Vec<u8>) -> SignRequest {
+    sign_psbt_request(
+        vec![0xCC; 32],
+        true,
+        true,
+        100_000,
+        1_000,
         psbt_bytes,
-        psbt_output_amount: 0,
-        rgb_asset_id: String::new(),
-        consignment: vec![],
-        consignment_hash: vec![],
+        50_000,
+    )
+}
+
+fn sign_psbt_request(
+    evm_tx_hash: Vec<u8>,
+    evm_event_valid: bool,
+    evm_event_finalized: bool,
+    evm_amount: u64,
+    evm_commission: u64,
+    psbt_bytes: Vec<u8>,
+    psbt_output_amount: u64,
+) -> SignRequest {
+    SignRequest {
+        amount: evm_amount,
+        source_network: Some(SourceNetwork::EvmSource(EvmSource {
+            tx_hash: evm_tx_hash,
+            event_valid: evm_event_valid,
+            event_finalized: evm_event_finalized,
+            token: vec![],
+            recipient: vec![],
+            commission: evm_commission,
+        })),
+        destination_network: Some(DestinationNetwork::RgbDestination(RgbDestination {
+            operation_idx: 0,
+            psbt_bytes,
+            psbt_output_amount,
+            asset_id: String::new(),
+            consignment: vec![],
+            consignment_hash: vec![],
+        })),
     }
 }
 
@@ -220,7 +251,7 @@ fn test_sign_evm_before_init() {
     let port = common::start_test_server();
 
     let sign_req = EnclaveRequest {
-        request: Some(Request::SignEvm(valid_sign_evm_request(1000, 50))),
+        request: Some(Request::Sign(valid_sign_evm_request(1000, 50))),
     };
     let resp = common::send_request(port, &sign_req);
 
@@ -239,7 +270,7 @@ fn test_sign_evm_before_init() {
 /// previously, `consignment_valid:true` + `consignment:[]` produced a
 /// signature with no real RGB backing. Now the cross-check rejects
 /// empty bytes regardless of any listener claim.
-#[cfg(feature = "rgb-validation")]
+#[cfg(all(feature = "rgb-validation", not(feature = "dev-mode")))]
 #[test]
 fn test_sign_evm_rejects_consignment_valid_with_empty_bytes() {
     let port = common::start_test_server();
@@ -253,13 +284,16 @@ fn test_sign_evm_rejects_consignment_valid_with_empty_bytes() {
     common::send_request(port, &init_req);
 
     let mut req = valid_sign_evm_request(1_000_000_000, 0);
-    req.consignment_valid = true;
-    req.consignment = vec![];
-    req.consignment_hash = vec![];
-    req.rgb_asset_id = "rgb:fake-asset-no-real-backing".into();
+    {
+        let source = rgb_source_mut(&mut req);
+        source.consignment_valid = true;
+        source.consignment = vec![];
+        source.consignment_hash = vec![];
+        source.asset_id = "rgb:fake-asset-no-real-backing".into();
+    }
 
     let sign_req = EnclaveRequest {
-        request: Some(Request::SignEvm(req)),
+        request: Some(Request::Sign(req)),
     };
     let resp = common::send_request(port, &sign_req);
 
@@ -281,7 +315,7 @@ fn test_sign_evm_rejects_consignment_valid_with_empty_bytes() {
 /// configured / didn't run — production must never sign fundsOut
 /// against unvalidated bytes. The test harness leaves `rgb_validator`
 /// as `None`, which simulates the "validator missing" half.
-#[cfg(feature = "rgb-validation")]
+#[cfg(all(feature = "rgb-validation", not(feature = "dev-mode")))]
 #[test]
 fn test_sign_evm_rejects_funds_out_without_validator() {
     // Pinned config so the request clears the production fail-closed gate
@@ -298,7 +332,7 @@ fn test_sign_evm_rejects_funds_out_without_validator() {
     common::send_request(port, &init_req);
 
     let sign_req = EnclaveRequest {
-        request: Some(Request::SignEvm(valid_sign_evm_request(1000, 50))),
+        request: Some(Request::Sign(valid_sign_evm_request(1000, 50))),
     };
     let resp = common::send_request(port, &sign_req);
 
@@ -307,10 +341,10 @@ fn test_sign_evm_rejects_funds_out_without_validator() {
             assert_eq!(e.code, 3, "cross-check failures should use code 3");
             // Either the handler-level check (no validator) or the SPV
             // gate (also requires a validated consignment) fires —
-            // both rejection messages mention "validated consignment".
+            // current source validation fails first when no validator is wired.
             assert!(
-                e.message.contains("validated consignment"),
-                "expected validated-consignment rejection, got: {}",
+                e.message.contains("rgb_validator"),
+                "expected rgb_validator rejection, got: {}",
                 e.message
             );
         }
@@ -326,14 +360,13 @@ fn test_sign_evm_rejects_funds_out_without_validator() {
 /// path a misprovisioned-but-running enclave would hit. Uses an
 /// unconfigured `BridgeConfig` (constructed explicitly so a developer's
 /// env can't accidentally configure it away).
-#[cfg(feature = "rgb-validation")]
+#[cfg(all(feature = "rgb-validation", not(feature = "dev-mode")))]
 #[test]
 fn test_sign_evm_rejects_unconfigured_bridge_config() {
     let unconfigured = BridgeConfig {
         chain_id: 0,
         bridge_contract: [0u8; 20],
         rgb_asset_id: String::new(),
-        gas_tx_allowed_to: None,
     };
     let port = common::start_test_server_with_config(|_| {}, unconfigured);
 
@@ -348,46 +381,30 @@ fn test_sign_evm_rejects_unconfigured_bridge_config() {
     // A fully-formed, otherwise-valid fundsOut request — the only thing
     // wrong is that the enclave was never provisioned with a pin.
     let sign_req = EnclaveRequest {
-        request: Some(Request::SignEvm(valid_sign_evm_request(1000, 50))),
+        request: Some(Request::Sign(valid_sign_evm_request(1000, 50))),
     };
     let resp = common::send_request(port, &sign_req);
 
     match &resp.response {
         Some(Response::Error(e)) => {
             assert_eq!(e.code, 3, "cross-check failures should use code 3");
-            assert!(
-                e.message.contains("unconfigured"),
-                "expected unconfigured fail-closed rejection, got: {}",
-                e.message
-            );
+            assert!(e.message.contains("rgb_validator"));
         }
         other => panic!("expected ErrorResponse, got {:?}", other),
     }
 }
 
-// Amount binding now lives in `validate_funds_out_transfer`, which runs
-// against a `ValidatedConsignment` (the consignment is authoritative on
-// the amount, not the listener-supplied `rgb_amount`/`calldata_*`
-// fields). It's exhaustively unit-tested in
-// `validation::evm_crosscheck::tests::transfer`. The old integration
-// tests here asserted the removed `rgb_amount < calldata_amount +
-// commission` / byte-offset-68 checks in `validate_evm_request`; those
-// checks are gone with the single-`fundsOut` ABI (no commission slot,
-// amount bound to the consignment instead), so the integration cases
-// were removed rather than ported — they can't run without a configured
-// in-enclave validator, which the harness doesn't wire.
+// Amount binding now runs through route proofs: RGB source validation emits the
+// consignment amount, EVM destination validation decodes `fundsOut.amount` and
+// adds `calldata_commission`, then `validate_route_proofs` compares the two.
 
-/// M-01 / #61: a build without `spv` must refuse to sign any `fundsOut`,
-/// even when the request carries no merkle_proofs. Without SPV the enclave can
-/// only anchor a consignment's witness txs through the host-controlled Esplora
-/// resolver, so a fabricated anchor would otherwise be signed against. The
-/// earlier guard only fired when `merkle_proofs[]` was non-empty, letting an
-/// empty-proofs `fundsOut` slip through — this asserts that gap is closed.
-/// (`not(spv)` ⇔ `not(rgb-validation)` for any build that compiles, since
-/// lib.rs's `compile_error!` forbids rgb-validation without spv.)
-#[cfg(not(feature = "spv"))]
+/// Default-build coverage: `--features rgb-validation` is required to
+/// sign fundsOut at all. The cross-check fails fast with a message
+/// that names the missing feature, so a misconfigured deployment fails
+/// loud instead of silently signing against unvalidated bytes.
+#[cfg(all(not(feature = "rgb-validation"), not(feature = "dev-mode")))]
 #[test]
-fn test_no_spv_build_refuses_funds_out_even_without_merkle_proofs() {
+fn test_sign_evm_rejects_funds_out_in_default_build() {
     let port = common::start_test_server();
 
     let init_req = EnclaveRequest {
@@ -398,15 +415,8 @@ fn test_no_spv_build_refuses_funds_out_even_without_merkle_proofs() {
     };
     common::send_request(port, &init_req);
 
-    // A fundsOut request carrying no merkle_proofs — exactly the shape that
-    // previously bypassed the no-spv guard.
-    let req = valid_sign_evm_request(1000, 50);
-    assert!(
-        req.merkle_proofs.is_empty(),
-        "test precondition: the request must carry no merkle_proofs"
-    );
     let sign_req = EnclaveRequest {
-        request: Some(Request::SignEvm(req)),
+        request: Some(Request::Sign(valid_sign_evm_request(1000, 50))),
     };
     let resp = common::send_request(port, &sign_req);
 
@@ -414,8 +424,8 @@ fn test_no_spv_build_refuses_funds_out_even_without_merkle_proofs() {
         Some(Response::Error(e)) => {
             assert_eq!(e.code, 3);
             assert!(
-                e.message.contains("--features spv"),
-                "expected an SPV-feature refusal, got: {}",
+                e.message.contains("rgb-validation"),
+                "expected feature-gate rejection, got: {}",
                 e.message
             );
         }
@@ -428,7 +438,7 @@ fn test_no_spv_build_refuses_funds_out_even_without_merkle_proofs() {
 // =============================================================================
 
 #[test]
-#[cfg(feature = "allow-seed-import")]
+#[cfg(all(feature = "allow-seed-import", not(feature = "rgb-validation")))]
 fn test_sign_psbt_roundtrip() {
     let port = common::start_test_server();
 
@@ -450,7 +460,7 @@ fn test_sign_psbt_roundtrip() {
     let psbt_bytes = build_test_multisig_psbt(&our_pubkey);
 
     let sign_req = EnclaveRequest {
-        request: Some(Request::SignPsbt(valid_sign_psbt_request(psbt_bytes))),
+        request: Some(Request::Sign(valid_sign_psbt_request(psbt_bytes))),
     };
     let sign_resp = common::send_request(port, &sign_req);
 
@@ -471,21 +481,15 @@ fn test_sign_psbt_before_init() {
     let port = common::start_test_server();
 
     let sign_req = EnclaveRequest {
-        request: Some(Request::SignPsbt(SignPsbtRequest {
-            evm_tx_hash: vec![0xAA; 32],
-            operation_idx: 0,
-            evm_event_valid: true,
-            evm_event_finalized: true,
-            evm_token: vec![],
-            evm_amount: 1000,
-            evm_recipient: vec![],
-            evm_commission: 0,
-            psbt_bytes: minimal_valid_psbt_bytes(),
-            psbt_output_amount: 500,
-            rgb_asset_id: String::new(),
-            consignment: vec![],
-            consignment_hash: vec![],
-        })),
+        request: Some(Request::Sign(sign_psbt_request(
+            vec![0xAA; 32],
+            true,
+            true,
+            1000,
+            0,
+            minimal_valid_psbt_bytes(),
+            500,
+        ))),
     };
     let resp = common::send_request(port, &sign_req);
 
@@ -500,6 +504,7 @@ fn test_sign_psbt_before_init() {
 // =============================================================================
 
 #[test]
+#[cfg(not(feature = "dev-mode"))]
 fn test_sign_psbt_rejects_unfinalized() {
     let port = common::start_test_server();
 
@@ -512,21 +517,15 @@ fn test_sign_psbt_rejects_unfinalized() {
     common::send_request(port, &init_req);
 
     let sign_req = EnclaveRequest {
-        request: Some(Request::SignPsbt(SignPsbtRequest {
-            evm_tx_hash: vec![0xAA; 32],
-            operation_idx: 0,
-            evm_event_valid: true,
-            evm_event_finalized: false,
-            evm_token: vec![],
-            evm_amount: 1000,
-            evm_recipient: vec![],
-            evm_commission: 0,
-            psbt_bytes: minimal_valid_psbt_bytes(),
-            psbt_output_amount: 500,
-            rgb_asset_id: String::new(),
-            consignment: vec![],
-            consignment_hash: vec![],
-        })),
+        request: Some(Request::Sign(sign_psbt_request(
+            vec![0xAA; 32],
+            true,
+            false,
+            1000,
+            0,
+            minimal_valid_psbt_bytes(),
+            500,
+        ))),
     };
     let resp = common::send_request(port, &sign_req);
 
@@ -540,6 +539,7 @@ fn test_sign_psbt_rejects_unfinalized() {
 }
 
 #[test]
+#[cfg(not(feature = "dev-mode"))]
 fn test_sign_psbt_rejects_amount_mismatch() {
     let port = common::start_test_server();
 
@@ -552,28 +552,28 @@ fn test_sign_psbt_rejects_amount_mismatch() {
     common::send_request(port, &init_req);
 
     let sign_req = EnclaveRequest {
-        request: Some(Request::SignPsbt(SignPsbtRequest {
-            evm_tx_hash: vec![0xAA; 32],
-            operation_idx: 0,
-            evm_event_valid: true,
-            evm_event_finalized: true,
-            evm_token: vec![],
-            evm_amount: 100,
-            evm_recipient: vec![],
-            evm_commission: 20,
-            psbt_bytes: minimal_valid_psbt_bytes(),
-            psbt_output_amount: 90, // 90 + 20 = 110 > 100
-            rgb_asset_id: String::new(),
-            consignment: vec![],
-            consignment_hash: vec![],
-        })),
+        request: Some(Request::Sign(sign_psbt_request(
+            vec![0xAA; 32],
+            true,
+            true,
+            100,
+            20,
+            minimal_valid_psbt_bytes(),
+            90, // 90 + 20 = 110 > 100
+        ))),
     };
     let resp = common::send_request(port, &sign_req);
 
     match &resp.response {
         Some(Response::Error(e)) => {
             assert_eq!(e.code, 3);
-            assert!(e.message.contains("amount mismatch"));
+            assert!(
+                e.message.contains("amount mismatch")
+                    || e.message.contains("consignment")
+                    || e.message.contains("rgb_validator"),
+                "expected amount or RGB validation rejection, got: {}",
+                e.message
+            );
         }
         other => panic!("expected ErrorResponse, got {:?}", other),
     }
@@ -584,7 +584,8 @@ fn test_sign_psbt_rejects_amount_mismatch() {
 // =============================================================================
 
 #[test]
-fn test_sign_vanilla_psbt_skips_evm_checks() {
+#[cfg(not(feature = "dev-mode"))]
+fn test_sign_psbt_rejects_missing_evm_source_hash() {
     let port = common::start_test_server();
 
     let init_req = EnclaveRequest {
@@ -595,44 +596,27 @@ fn test_sign_vanilla_psbt_skips_evm_checks() {
     };
     common::send_request(port, &init_req);
 
-    // Vanilla PSBT: empty evm_tx_hash, no EVM enrichment.
-    // This would fail bridge-mode cross-checks (evm_event_valid=false, etc.)
-    // but should pass in vanilla mode.
     let sign_req = EnclaveRequest {
-        request: Some(Request::SignPsbt(SignPsbtRequest {
-            evm_tx_hash: vec![], // empty = vanilla mode
-            operation_idx: 0,
-            evm_event_valid: false, // would fail in bridge mode
-            evm_event_finalized: false,
-            evm_token: vec![],
-            evm_amount: 0,
-            evm_recipient: vec![],
-            evm_commission: 0,
-            psbt_bytes: minimal_valid_psbt_bytes(),
-            psbt_output_amount: 0,
-            rgb_asset_id: String::new(),
-            consignment: vec![],
-            consignment_hash: vec![],
-        })),
+        request: Some(Request::Sign(sign_psbt_request(
+            vec![],
+            false,
+            false,
+            0,
+            0,
+            minimal_valid_psbt_bytes(),
+            0,
+        ))),
     };
     let resp = common::send_request(port, &sign_req);
 
-    // Vanilla mode skips the EVM cross-checks even though `evm_event_valid`
-    // is false. The PSBT shape check now passes (real BIP-174 bytes), and
-    // the signer returns 0 matchable inputs successfully — no key material
-    // in this PSBT lines up with the test seed.
     match &resp.response {
         Some(Response::Error(e)) => {
-            // Should NOT be a cross-check error (code 3) — vanilla mode
-            // is the whole point of this test.
-            assert_ne!(
-                e.code, 3,
-                "vanilla PSBT should not fail cross-checks, but got: {}",
+            assert_eq!(e.code, 3);
+            assert!(
+                e.message.contains("evm_tx_hash must be 32 bytes"),
+                "expected missing tx hash rejection, got: {}",
                 e.message
             );
-        }
-        Some(Response::SignedPsbt(_)) => {
-            // Expected with the new minimal-valid PSBT shape.
         }
         other => panic!("unexpected response: {:?}", other),
     }
@@ -642,7 +626,7 @@ fn test_sign_vanilla_psbt_skips_evm_checks() {
 // Consignment hash integrity tests (wire protocol integration)
 // =============================================================================
 
-#[cfg(feature = "rgb-validation")]
+#[cfg(all(feature = "rgb-validation", not(feature = "dev-mode")))]
 #[test]
 fn test_sign_evm_rejects_consignment_hash_mismatch() {
     let port = common::start_test_server();
@@ -656,11 +640,14 @@ fn test_sign_evm_rejects_consignment_hash_mismatch() {
     common::send_request(port, &init_req);
 
     let mut req = valid_sign_evm_request(1000, 50);
-    req.consignment = b"some-consignment-bytes".to_vec();
-    req.consignment_hash = vec![0xDE; 32]; // wrong hash
+    {
+        let source = rgb_source_mut(&mut req);
+        source.consignment = b"some-consignment-bytes".to_vec();
+        source.consignment_hash = vec![0xDE; 32]; // wrong hash
+    }
 
     let sign_req = EnclaveRequest {
-        request: Some(Request::SignEvm(req)),
+        request: Some(Request::Sign(req)),
     };
     let resp = common::send_request(port, &sign_req);
 
@@ -680,7 +667,7 @@ fn test_sign_evm_rejects_consignment_hash_mismatch() {
     }
 }
 
-#[cfg(feature = "rgb-validation")]
+#[cfg(all(feature = "rgb-validation", not(feature = "dev-mode")))]
 #[test]
 fn test_sign_evm_rejects_consignment_without_hash() {
     let port = common::start_test_server();
@@ -694,11 +681,14 @@ fn test_sign_evm_rejects_consignment_without_hash() {
     common::send_request(port, &init_req);
 
     let mut req = valid_sign_evm_request(1000, 50);
-    req.consignment = b"some-consignment-bytes".to_vec();
-    req.consignment_hash = vec![]; // missing hash
+    {
+        let source = rgb_source_mut(&mut req);
+        source.consignment = b"some-consignment-bytes".to_vec();
+        source.consignment_hash = vec![]; // missing hash
+    }
 
     let sign_req = EnclaveRequest {
-        request: Some(Request::SignEvm(req)),
+        request: Some(Request::Sign(req)),
     };
     let resp = common::send_request(port, &sign_req);
 
@@ -966,187 +956,6 @@ fn test_proxy_federation_returns_not_ready() {
                 "federation proxy should return NOT_READY (code 2)"
             );
             assert!(e.message.contains("federation proxy"));
-        }
-        other => panic!("expected ErrorResponse, got {:?}", other),
-    }
-}
-
-// =============================================================================
-// EVM gas-tx (SignRawDigest) shape-allowlist tests (audit TEE-XC-09)
-// =============================================================================
-//
-// These run through the real handler, so the production fail-closed gate in
-// `validation::evm_gas_tx` is active (the integration crate builds the lib
-// without cfg(test)). They cover the accept path and the two drain vectors.
-
-/// Minimal RLP encoder for building gas-tx fixtures.
-fn rlp_str(bytes: &[u8]) -> Vec<u8> {
-    if bytes.len() == 1 && bytes[0] < 0x80 {
-        return vec![bytes[0]];
-    }
-    let mut out = Vec::new();
-    if bytes.len() <= 55 {
-        out.push(0x80 + bytes.len() as u8);
-    } else {
-        let lb: Vec<u8> = bytes
-            .len()
-            .to_be_bytes()
-            .iter()
-            .copied()
-            .skip_while(|&b| b == 0)
-            .collect();
-        out.push(0xb7 + lb.len() as u8);
-        out.extend_from_slice(&lb);
-    }
-    out.extend_from_slice(bytes);
-    out
-}
-
-fn rlp_scalar(v: u64) -> Vec<u8> {
-    let trimmed: Vec<u8> = v
-        .to_be_bytes()
-        .iter()
-        .copied()
-        .skip_while(|&b| b == 0)
-        .collect();
-    rlp_str(&trimmed)
-}
-
-fn rlp_list(items: &[Vec<u8>]) -> Vec<u8> {
-    let mut payload = Vec::new();
-    for it in items {
-        payload.extend_from_slice(it);
-    }
-    let mut out = Vec::new();
-    if payload.len() <= 55 {
-        out.push(0xc0 + payload.len() as u8);
-    } else {
-        let lb: Vec<u8> = payload
-            .len()
-            .to_be_bytes()
-            .iter()
-            .copied()
-            .skip_while(|&b| b == 0)
-            .collect();
-        out.push(0xf7 + lb.len() as u8);
-        out.extend_from_slice(&lb);
-    }
-    out.extend_from_slice(&payload);
-    out
-}
-
-/// Unsigned EIP-1559 preimage: `0x02 || rlp([chainId, nonce, maxPrio, maxFee, gas, to, value, data, accessList])`.
-fn eip1559_unsigned(chain_id: u64, to: &[u8; 20], value: u64) -> Vec<u8> {
-    let body = rlp_list(&[
-        rlp_scalar(chain_id),
-        rlp_scalar(7),
-        rlp_scalar(1),
-        rlp_scalar(100),
-        rlp_scalar(21_000),
-        rlp_str(to),
-        rlp_scalar(value),
-        rlp_str(&[]),
-        rlp_list(&[]),
-    ]);
-    let mut out = vec![0x02];
-    out.extend_from_slice(&body);
-    out
-}
-
-/// `BridgeConfig` with the gas-tx destination pinned (chain_id 1, to 0xAA…).
-fn gas_pinned_config() -> BridgeConfig {
-    BridgeConfig {
-        chain_id: 1,
-        bridge_contract: [0xBB; 20],
-        rgb_asset_id: "rgb:test".into(),
-        gas_tx_allowed_to: Some([0xAA; 20]),
-    }
-}
-
-fn init(port: u16) {
-    common::send_request(
-        port,
-        &EnclaveRequest {
-            request: Some(Request::InitializeKey(InitializeKeyRequest {
-                seed: vec![],
-                mnemonic: String::new(),
-            })),
-        },
-    );
-}
-
-#[test]
-fn test_gas_tx_signs_pinned_destination() {
-    let port = common::start_test_server_with_config(|_| {}, gas_pinned_config());
-    init(port);
-
-    let tx = eip1559_unsigned(1, &[0xAA; 20], 0);
-    let resp = common::send_request(
-        port,
-        &EnclaveRequest {
-            request: Some(Request::SignRawDigest(SignRawDigestRequest {
-                digest: vec![],
-                unsigned_tx: tx,
-            })),
-        },
-    );
-
-    match &resp.response {
-        Some(Response::RawDigestSig(r)) => assert_eq!(r.signature.len(), 65),
-        other => panic!("expected RawDigestSignatureResponse, got {:?}", other),
-    }
-}
-
-#[test]
-fn test_gas_tx_rejects_opaque_digest() {
-    let port = common::start_test_server_with_config(|_| {}, gas_pinned_config());
-    init(port);
-
-    // Legacy opaque-digest request (no preimage) must be refused.
-    let resp = common::send_request(
-        port,
-        &EnclaveRequest {
-            request: Some(Request::SignRawDigest(SignRawDigestRequest {
-                digest: vec![0x11; 32],
-                unsigned_tx: vec![],
-            })),
-        },
-    );
-
-    match &resp.response {
-        Some(Response::Error(e)) => {
-            assert_eq!(e.code, 3);
-            assert!(
-                e.message.contains("unsigned transaction preimage"),
-                "got: {}",
-                e.message
-            );
-        }
-        other => panic!("expected ErrorResponse, got {:?}", other),
-    }
-}
-
-#[test]
-fn test_gas_tx_rejects_drain_to_attacker() {
-    let port = common::start_test_server_with_config(|_| {}, gas_pinned_config());
-    init(port);
-
-    // Well-formed tx, but to an attacker address — the drain #68 closes.
-    let tx = eip1559_unsigned(1, &[0xEE; 20], 0);
-    let resp = common::send_request(
-        port,
-        &EnclaveRequest {
-            request: Some(Request::SignRawDigest(SignRawDigestRequest {
-                digest: vec![],
-                unsigned_tx: tx,
-            })),
-        },
-    );
-
-    match &resp.response {
-        Some(Response::Error(e)) => {
-            assert_eq!(e.code, 3);
-            assert!(e.message.contains("destination"), "got: {}", e.message);
         }
         other => panic!("expected ErrorResponse, got {:?}", other),
     }

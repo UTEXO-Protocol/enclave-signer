@@ -3,13 +3,15 @@ use std::io::{Read, Write};
 use crate::config::BridgeConfig;
 use crate::error::{EnclaveError, Result};
 use crate::framing;
+use crate::networks::evm::signing::{build_evm_domain, sign_request_digest};
+use crate::networks::{
+    validate_destination, validate_route_proofs, validate_source, ValidationContext,
+};
 use crate::proto::enclave_request::Request;
 use crate::proto::enclave_response::Response;
 use crate::proto::*;
-use crate::signing::evm::{sign_request_digest, Eip712Domain};
 use crate::state::EnclaveState;
-#[cfg(not(feature = "dev-mode"))]
-use crate::validation;
+use federated_signer_proto::enclave::sign_request::{DestinationNetwork, SourceNetwork};
 
 /// Shared context passed to every request handler.
 pub struct ServerContext {
@@ -19,14 +21,14 @@ pub struct ServerContext {
     /// against operator-pinned values.
     pub bridge_config: BridgeConfig,
     #[cfg(feature = "rgb-validation")]
-    pub rgb_validator: Option<crate::validation::rgb::RgbValidator>,
+    pub rgb_validator: Option<crate::networks::rgb::validation::RgbValidator>,
     /// In-enclave Bitcoin header chain for SPV verification. Populated at
     /// boot from the compile-time checkpoint; mutated by SubmitHeaders.
     /// `Mutex` because the enclave handles connections from a single
     /// thread today, but we want the type to stay correct if that ever
     /// changes — and `Mutex` over `RefCell` so a future move to
     /// multi-threaded handling needs no plumbing changes.
-    pub header_chain: std::sync::Mutex<crate::spv::HeaderChain>,
+    pub header_chain: std::sync::Mutex<crate::networks::rgb::spv::HeaderChain>,
     /// Cumulative rate limit for `SubmitHeaders` (#86). The per-call cap lives
     /// in `HeaderChain::submit_headers`; this bounds the *aggregate* rate
     /// across calls so a flood of small batches can't keep the enclave busy.
@@ -86,7 +88,7 @@ impl ServerContext {
     pub fn new(
         state: EnclaveState,
         bridge_config: BridgeConfig,
-        header_chain: std::sync::Mutex<crate::spv::HeaderChain>,
+        header_chain: std::sync::Mutex<crate::networks::rgb::spv::HeaderChain>,
     ) -> Self {
         Self {
             state,
@@ -134,21 +136,14 @@ fn dispatch(request: EnclaveRequest, ctx: &ServerContext) -> EnclaveResponse {
             tracing::info!("request: GetPublicKey");
             handle_get_public_key(ctx, req)
         }
-        Some(Request::SignEvm(req)) => {
-            tracing::info!("request: SignEvm");
-            handle_sign_evm(ctx, req)
-        }
-        Some(Request::SignPsbt(req)) => {
-            tracing::info!("request: SignPsbt");
-            handle_sign_psbt(ctx, req)
-        }
+        Some(Request::Sign(req)) => handle_sign(ctx, req),
         Some(Request::SignRawMessage(req)) => {
             tracing::info!("request: SignRawMessage");
             handle_sign_raw_message(&ctx.state, req)
         }
         Some(Request::SignRawDigest(req)) => {
             tracing::info!("request: SignRawDigest");
-            handle_sign_raw_digest(ctx, req)
+            handle_sign_raw_digest(&ctx.state, req)
         }
         Some(Request::ProxyFederation(req)) => {
             tracing::info!("request: ProxyFederation");
@@ -204,6 +199,85 @@ fn dispatch(request: EnclaveRequest, ctx: &ServerContext) -> EnclaveResponse {
                 })),
             }
         }
+    }
+}
+
+fn handle_sign(ctx: &ServerContext, req: SignRequest) -> Result<EnclaveResponse> {
+    let source_ref = req
+        .source_network
+        .as_ref()
+        .ok_or_else(|| EnclaveError::InvalidRequest("sign request has no source_network".into()))?;
+    let destination_ref = req.destination_network.as_ref().ok_or_else(|| {
+        EnclaveError::InvalidRequest("sign request has no destination_network".into())
+    })?;
+
+    let validation_ctx = ValidationContext {
+        bridge_config: &ctx.bridge_config,
+        #[cfg(feature = "rgb-validation")]
+        rgb_validator: ctx.rgb_validator.as_ref(),
+        header_chain: &ctx.header_chain,
+    };
+    let source_proof = validate_source(req.amount, source_ref, &validation_ctx)?;
+
+    let source_commission = match source_ref {
+        SourceNetwork::EvmSource(source) => source.commission,
+        SourceNetwork::RgbSource(source) => source.commission,
+    };
+    let destination_proof = validate_destination(
+        req.amount,
+        source_commission,
+        destination_ref,
+        &validation_ctx,
+    )?;
+
+    validate_route_proofs(
+        source_ref,
+        destination_ref,
+        &source_proof,
+        &destination_proof,
+    )?;
+
+    // Soft operation-uniqueness guard (audit W-02 / #84). In EVM -> RGB
+    // bridge mode, record the source/destination operation tuple and reject a
+    // same-op resubmission inside the TTL window. This is defense-in-depth
+    // only: the guard is in-memory, per-instance, and volatile across restart.
+    #[cfg(not(feature = "dev-mode"))]
+    if let (SourceNetwork::EvmSource(source), DestinationNetwork::RgbDestination(destination)) =
+        (source_ref, destination_ref)
+    {
+        let op_key = crate::networks::rgb::psbt_validation::psbt_operation_key(
+            ctx.bridge_config.chain_id,
+            &ctx.bridge_config.bridge_contract,
+            &source.tx_hash,
+            destination.operation_idx,
+            &destination.asset_id,
+        );
+        match ctx.state.op_replay_guard.check_and_record(op_key) {
+            Ok(()) => {}
+            Err(EnclaveError::NonceReplay) => {
+                tracing::warn!(
+                    operation_idx = destination.operation_idx,
+                    evm_tx_hash = %hex::encode(&source.tx_hash),
+                    "rejecting duplicate bridge PSBT operation (soft replay guard, #84)"
+                );
+                return Err(EnclaveError::CrossCheck(
+                    "duplicate bridge operation: this (chain, contract, evm_tx_hash, \
+                     operation_idx, rgb_asset_id) was already signed recently — refusing to \
+                     sign a replay (soft in-memory guard; durable guard is on-chain)"
+                        .into(),
+                ));
+            }
+            Err(e) => return Err(e),
+        }
+    }
+
+    let destination = req.destination_network.ok_or_else(|| {
+        EnclaveError::InvalidRequest("sign request has no destination_network".into())
+    })?;
+
+    match destination {
+        DestinationNetwork::EvmDestination(destination) => handle_sign_evm(ctx, destination),
+        DestinationNetwork::RgbDestination(destination) => handle_sign_psbt(ctx, destination),
     }
 }
 
@@ -361,12 +435,6 @@ fn handle_get_attested_public_key(
         EnclaveError::InvalidRequest(format!("nonce must be 32 bytes, got {}", req.nonce.len()))
     })?;
 
-    // NOTE (audit W-13): this endpoint attests over a *caller-supplied* nonce,
-    // so it can act as an oracle that mints valid attestations for arbitrary
-    // nonces. That is safe for replay accounting: the cloning handlers record a
-    // nonce only after a fully-authenticated handshake (see `handle_get_clone` /
-    // `handle_set_clone`), so an oracle-minted nonce carries no replay-guard
-    // weight on its own and cannot be used to exhaust the guard.
     let keys = ctx.state.get_keys()?;
     let public_keys = build_public_keys_response(keys, &ctx.bridge_config);
 
@@ -396,199 +464,20 @@ fn handle_get_attested_public_key(
     })
 }
 
-fn handle_sign_evm(ctx: &ServerContext, req: SignEvmRequest) -> Result<EnclaveResponse> {
-    // Fail-closed without SPV (audit M-01 / #61). A build without `spv` can
-    // only anchor a consignment's witness txs through the host-controlled
-    // Esplora resolver, so a malicious host could claim a fabricated witness
-    // tx is mined at sufficient depth and the enclave would sign a `fundsOut`
-    // release against a non-existent Bitcoin anchor. Refuse every `fundsOut`
-    // here regardless of whether the request carries merkle_proofs — an empty
-    // `merkle_proofs[]` must not slip through. The `compile_error!` in lib.rs
-    // guarantees this branch only exists when `rgb-validation` is also off, so
-    // there is no in-enclave validation to fall back on.
-    #[cfg(not(feature = "spv"))]
-    {
-        let is_funds_out = req.call_data.len() >= 4
-            && req.call_data[..4] == crate::validation::evm_crosscheck::FUNDS_OUT_SELECTOR_POOLS;
-        if is_funds_out {
-            return Err(EnclaveError::Spv(
-                "enclave was not built with --features spv: refusing to sign a \
-                 fundsOut release whose RGB anchoring cannot be SPV-verified \
-                 against the enclave's own header chain (rebuild with \
-                 `--features spv`)"
-                    .into(),
-            ));
-        }
-        // Defence-in-depth against a listener/enclave build mismatch: the
-        // listener built with SPV on and sent `merkle_proofs[]` we cannot
-        // verify. Refuse loudly rather than sign as if SPV hadn't been asked
-        // for. (Reached only for non-`fundsOut` calldata; `fundsOut` already
-        // returned above.)
-        if !req.merkle_proofs.is_empty() {
-            return Err(EnclaveError::Spv(
-                "enclave was not built with --features spv but request carries \
-                 merkle_proofs; refusing to sign without verification (rebuild \
-                 with `--features spv`)"
-                    .into(),
-            ));
-        }
-    }
-
-    // In-enclave RGB consignment validation (when feature enabled and bytes present).
-    // This replaces trusting the Listener's consignment_valid boolean.
-    // The result is held across the rest of the function so the SPV block
-    // (below, gated by feature `spv`) can use witness_txids + chain_net.
-    #[cfg(feature = "rgb-validation")]
-    let validated_consignment = if !req.consignment.is_empty() {
-        if let Some(ref validator) = ctx.rgb_validator {
-            let v = validator.validate_consignment(&req.consignment)?;
-            tracing::info!(
-                contract_id = %v.contract_id,
-                chain_net = %v.chain_net,
-                witness_txids_count = v.witness_txids.len(),
-                "RGB consignment validated in-enclave"
-            );
-            // Asset-identity binding (audit TEE-SE-01). Bind the validated
-            // consignment's authoritative `contract_id` to the pinned
-            // RGB_ASSET_ID and fail closed when either is absent — closes
-            // the bypass where an empty `req.rgb_asset_id` skipped the
-            // identity check entirely. Skipped under dev-mode like the
-            // other cross-checks (#64 compile-guards dev-mode out of
-            // release); the qualified path avoids depending on the
-            // dev-mode-gated `validation` import alias.
-            #[cfg(not(feature = "dev-mode"))]
-            crate::validation::evm_crosscheck::bind_asset_identity(
-                &v.contract_id,
-                &req.rgb_asset_id,
-                &ctx.bridge_config.rgb_asset_id,
-            )?;
-            // Defense-in-depth recency check (audit 4th I-03 / #95). The
-            // RGB->EVM fundsOut direction settles an already-confirmed
-            // transfer, so every witness tx must be mined. rgbstd's
-            // validation status (otherwise discarded) is surfaced as
-            // `non_mined_witness_txids`; reject here so confirmation does
-            // not rest on the SPV header chain alone. Skipped under dev-mode
-            // alongside the other cross-checks.
-            #[cfg(not(feature = "dev-mode"))]
-            crate::validation::evm_crosscheck::assert_witnesses_confirmed(&v)?;
-            Some(v)
-        } else {
-            tracing::warn!("RGB validator not configured, skipping in-enclave validation");
-            None
-        }
-    } else {
-        None
-    };
-
-    // Cross-check enriched fields before signing (skipped in dev-mode)
-    #[cfg(not(feature = "dev-mode"))]
-    validation::evm_crosscheck::validate_evm_request(&req, &ctx.bridge_config)?;
-
-    // Consignment-bound amount check + OpId binding for the `fundsOut` flow.
-    //
-    //   (a) Bind the EVM-side release amount to the amount the consignment's
-    //       last transition accounts for (`validate_funds_out_transfer`). This
-    //       is the second half of the bypass closure started in
-    //       `validate_evm_request`: that rejects empty bytes; this rejects
-    //       "bytes present but validator didn't run".
-    //   (b) DERIVE the cross-domain ids from the consignment the enclave
-    //       validated and OVERWRITE them in the calldata: `burnId` (offset 68)
-    //       = the last transition's id, `settlementData` = the ids of every
-    //       TS_INFLATION (mint) transition (`apply_op_id_binding`). The enclave
-    //       does not trust or even read the listener's burnId/fundsInIds — it
-    //       rewrites them. The signed, returned `call_data` is authoritative;
-    //       a compromised backend cannot route the release to a different
-    //       replay slot (`consumedBurnIds`) or consume lock records
-    //       (`fundsInRecords`) the consignment did not authorise. The output is
-    //       a pure function of the consignment, so every federation signer
-    //       rewrites it identically. The caller MUST submit exactly the
-    //       returned bytes (the signature commits to keccak256(callData)).
-    //
-    // Default builds (no rgb-validation, or dev-mode) sign the calldata as
-    // received; they cannot validate a consignment and reject fundsOut upstream
-    // in `validate_evm_request`.
-    #[allow(unused_mut)]
-    let mut signed_call_data = req.call_data.clone();
-
-    #[cfg(all(feature = "rgb-validation", not(feature = "dev-mode")))]
-    if req.call_data.len() >= 4
-        && req.call_data[..4] == validation::evm_crosscheck::FUNDS_OUT_SELECTOR_POOLS
-    {
-        let validated = validated_consignment.as_ref().ok_or_else(|| {
-            EnclaveError::CrossCheck(
-                "fundsOut signing requires a validated consignment (rgb_validator must be \
-                 configured and consignment bytes must be present)"
-                    .into(),
-            )
-        })?;
-        validation::evm_crosscheck::validate_funds_out_transfer(&req, validated)?;
-        signed_call_data =
-            validation::evm_crosscheck::apply_op_id_binding(&req.call_data, validated)?;
-    }
-
-    // SPV verification: every consignment-anchor Bitcoin tx must be in our
-    // validated header chain at sufficient depth. With `spv = ["rgb-validation"]`
-    // in Cargo.toml, having the spv feature implies the rgb-validation
-    // block above ran, so `validated_consignment` is in scope and meaningful.
-    #[cfg(feature = "spv")]
-    {
-        let validated = validated_consignment.as_ref().ok_or_else(|| {
-            EnclaveError::Spv(
-                "spv: signEVM requires a non-empty validated consignment, \
-                 but the request had no consignment bytes (or the validator \
-                 is not configured)"
-                    .into(),
-            )
-        })?;
-        let chain = ctx
-            .header_chain
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        // Staleness: tip header time must be within bounds of wall clock.
-        // Catches the "frozen time" attack where the listener feeds
-        // real-but-old headers, never reaching the actual chain head.
-        validation::spv_crosscheck::assert_chain_not_stale(
-            &chain,
-            std::time::SystemTime::now(),
-            std::time::Duration::from_secs(validation::spv_crosscheck::SPV_MAX_TIP_AGE_SECS),
-            std::time::Duration::from_secs(validation::spv_crosscheck::SPV_MAX_TIP_FUTURE_SECS),
-        )?;
-        // Cross-network replay: regtest consignment to mainnet enclave etc.
-        validation::spv_crosscheck::assert_chain_net(&validated.chain_net, chain.network())?;
-        // Inclusion + confirmation depth for every witness tx.
-        validation::spv_crosscheck::validate_spv_proofs(
-            &chain,
-            &validated.witness_txids,
-            &req.merkle_proofs,
-            validation::spv_crosscheck::SPV_MIN_CONFIRMATIONS,
-        )?;
-        // BtcRelay-agreement (spec §13, #57): bind the calldata's claimed
-        // (blockHeight, commitmentHash) `proof` to the header we hold at that
-        // height, so a listener can't split the contract's on-chain BtcRelay
-        // check away from the enclave's own SPV evidence by carrying an
-        // unrelated real block in calldata. Inert until `proof` is populated.
-        validation::evm_crosscheck::verify_btc_relay_agreement(&req.call_data, &chain)?;
-        tracing::info!(
-            proofs_count = req.merkle_proofs.len(),
-            "SPV verification passed"
-        );
-    }
-
+fn handle_sign_evm(ctx: &ServerContext, req: EvmDestination) -> Result<EnclaveResponse> {
     // TODO: confirm domain name/version with contract team
     let domain = build_evm_domain(&req)?;
 
     let domain_sep = domain.separator_hash();
-    // Sign over the (possibly rewritten) calldata — see `apply_op_id_binding`.
-    let digest = sign_request_digest(&domain, &signed_call_data, req.nonce, req.deadline);
+    let digest = sign_request_digest(&domain, &req.call_data, req.nonce, req.deadline);
 
     tracing::info!(
         domain_name = %domain.name,
         chain_id = domain.chain_id,
         proxy = %hex::encode(domain.verifying_contract),
         domain_sep = %hex::encode(domain_sep),
-        call_data_len = signed_call_data.len(),
-        selector = %hex::encode(&signed_call_data[..4.min(signed_call_data.len())]),
-        rewritten = signed_call_data != req.call_data,
+        call_data_len = req.call_data.len(),
+        selector = %hex::encode(&req.call_data[..4.min(req.call_data.len())]),
         nonce = req.nonce,
         deadline = req.deadline,
         digest = %hex::encode(digest),
@@ -605,69 +494,11 @@ fn handle_sign_evm(ctx: &ServerContext, req: SignEvmRequest) -> Result<EnclaveRe
     Ok(EnclaveResponse {
         response: Some(Response::EvmSignature(EvmSignatureResponse {
             signature: signature.to_vec(),
-            // The bytes the caller must submit on-chain (== input unless the
-            // enclave rewrote the OpId-derived fields).
-            call_data: signed_call_data,
         })),
     })
 }
 
-fn handle_sign_psbt(ctx: &ServerContext, req: SignPsbtRequest) -> Result<EnclaveResponse> {
-    // Cross-check enriched fields before signing (skipped in dev-mode)
-    #[cfg(not(feature = "dev-mode"))]
-    validation::psbt_crosscheck::validate_psbt_request(&req)?;
-
-    // Send-RGB (EVM-lock → RGB-send) consignment binding. In bridge mode the
-    // PSBT being signed IS the RGB transfer's witness transaction; bind it to
-    // the validated consignment so a signed PSBT can't move bridge BTC without
-    // finalizing the claimed RGB transition. Vanilla mode (empty evm_tx_hash,
-    // e.g. create_utxo) carries no consignment and skips this entirely.
-    #[cfg(all(feature = "rgb-validation", not(feature = "dev-mode")))]
-    if !req.evm_tx_hash.is_empty() {
-        psbt_consignment_crosscheck(ctx, &req)?;
-    }
-
-    // Soft operation-uniqueness guard (audit W-02 / #84). In bridge mode,
-    // record the operation tuple and reject a same-op resubmission inside the
-    // TTL window. Check-and-record sits in the critical section — after every
-    // validation above has passed and immediately before signing — so we only
-    // ever record an operation we are actually about to sign, and a duplicate
-    // is rejected before a second signature is produced. Recording before the
-    // sign means a transient `sign_psbt` failure also blocks retries of that
-    // exact tuple until the TTL lapses; that is acceptable for a soft guard
-    // (the concern is double-*success*, and the set self-heals).
-    //
-    // This is defense-in-depth only: the guard is in-memory, per-instance, and
-    // volatile across restart, so it does not replace the durable on-chain
-    // double-spend control (#84/#93). See `EnclaveState::op_replay_guard`.
-    #[cfg(not(feature = "dev-mode"))]
-    if !req.evm_tx_hash.is_empty() {
-        let op_key = validation::psbt_crosscheck::psbt_operation_key(
-            ctx.bridge_config.chain_id,
-            &ctx.bridge_config.bridge_contract,
-            &req.evm_tx_hash,
-            req.operation_idx,
-            &req.rgb_asset_id,
-        );
-        match ctx.state.op_replay_guard.check_and_record(op_key) {
-            Ok(()) => {}
-            Err(EnclaveError::NonceReplay) => {
-                tracing::warn!(
-                    operation_idx = req.operation_idx,
-                    evm_tx_hash = %hex::encode(&req.evm_tx_hash),
-                    "rejecting duplicate bridge PSBT operation (soft replay guard, #84)"
-                );
-                return Err(EnclaveError::CrossCheck(
-                    "duplicate bridge operation: this (chain, contract, evm_tx_hash, \
-                     operation_idx, rgb_asset_id) was already signed recently — refusing to \
-                     sign a replay (soft in-memory guard; durable guard is on-chain)"
-                        .into(),
-                ));
-            }
-            Err(e) => return Err(e),
-        }
-    }
-
+fn handle_sign_psbt(ctx: &ServerContext, req: RgbDestination) -> Result<EnclaveResponse> {
     let (signed_psbt, inputs_signed) = ctx.state.sign_psbt(&req.psbt_bytes)?;
 
     // Reject a "successful" no-op (audit 3rd W-03 / #85). KeyManager::sign_psbt
@@ -695,92 +526,6 @@ fn handle_sign_psbt(ctx: &ServerContext, req: SignPsbtRequest) -> Result<Enclave
             inputs_signed: inputs_signed as u32,
         })),
     })
-}
-
-/// Bind a send-RGB (EVM-lock → RGB-send) PSBT to the RGB consignment it
-/// claims to finalize. Mirrors the consignment-validation block of
-/// [`handle_sign_evm`]: full rgbstd validation → keccak integrity →
-/// asset-identity pin → then the PSBT-specific anchor check
-/// ([`validation::psbt_crosscheck::validate_psbt_anchors_transition`]).
-///
-/// Fail-closed posture for an **absent** consignment is compile-time gated by
-/// the `rgb-validation` feature (so the posture is PCR-attested and
-/// cannot be weakened at runtime): on → hard reject; off → warn and fall back
-/// to the legacy shape-only checks while the listener is updated to send it.
-#[cfg(all(feature = "rgb-validation", not(feature = "dev-mode")))]
-fn psbt_consignment_crosscheck(ctx: &ServerContext, req: &SignPsbtRequest) -> Result<()> {
-    use sha3::{Digest, Keccak256};
-
-    if req.consignment.is_empty() {
-        return Err(EnclaveError::CrossCheck(
-            "send-RGB PSBT signing requires a consignment to bind the PSBT to the RGB \
-                 transition (rgb-validation is enabled)"
-                .into(),
-        ));
-    }
-
-    let Some(ref validator) = ctx.rgb_validator else {
-        return Err(EnclaveError::CrossCheck(
-            "send-RGB PSBT carries a consignment but the RGB validator is not configured — \
-             refusing to sign on unvalidated bytes"
-                .into(),
-        ));
-    };
-
-    // Wire-tamper detection, mirroring the EVM path's defence-in-depth check.
-    if req.consignment_hash.is_empty() {
-        return Err(EnclaveError::CrossCheck(
-            "consignment present but consignment_hash is missing".into(),
-        ));
-    }
-    let computed = Keccak256::digest(&req.consignment);
-    if computed[..] != req.consignment_hash[..] {
-        return Err(EnclaveError::CrossCheck(
-            "consignment hash mismatch: keccak256(consignment) != consignment_hash".into(),
-        ));
-    }
-
-    // Full rgbstd validation (Esplora resolver + DBC commitment check). The
-    // txid-identity bind below is only meaningful because this ran.
-    let validated = validator.validate_consignment(&req.consignment)?;
-    tracing::info!(
-        contract_id = %validated.contract_id,
-        chain_net = %validated.chain_net,
-        "send-RGB PSBT consignment validated in-enclave"
-    );
-
-    // Asset-identity binding to the pinned RGB_ASSET_ID (audit TEE-SE-01),
-    // same as the EVM path.
-    crate::validation::evm_crosscheck::bind_asset_identity(
-        &validated.contract_id,
-        &req.rgb_asset_id,
-        &ctx.bridge_config.rgb_asset_id,
-    )?;
-
-    let psbt = bitcoin::psbt::Psbt::deserialize(&req.psbt_bytes)
-        .map_err(|e| EnclaveError::CrossCheck(format!("psbt_bytes is not a valid PSBT: {e}")))?;
-    match validated.last_transition {
-        Some(ref last) if last.transition_type == crate::validation::rgb::ifa::TS_TRANSFER => {
-            crate::validation::psbt_crosscheck::validate_psbt_anchors_transition(
-                &psbt,
-                &validated,
-                req.evm_amount,
-                req.evm_commission,
-            )?;
-        }
-        // A consignment whose last transition isn't a Transfer cannot
-        // authorise a pools-mode send. Reject rather than sign an unanchored
-        // PSBT.
-        _ => {
-            return Err(EnclaveError::CrossCheck(
-                "send-RGB PSBT consignment's last transition is not a Transfer — refusing to \
-                 sign a PSBT that doesn't finalize a pools-mode send"
-                    .into(),
-            ));
-        }
-    }
-
-    Ok(())
 }
 
 fn handle_sign_raw_message(
@@ -818,31 +563,18 @@ fn handle_sign_raw_message(
 }
 
 fn handle_sign_raw_digest(
-    ctx: &ServerContext,
+    state: &EnclaveState,
     req: SignRawDigestRequest,
 ) -> Result<EnclaveResponse> {
-    // Gas-tx shape allowlist (audit TEE-XC-09). Production builds refuse to
-    // blind-sign an opaque digest: the request must carry the unsigned tx
-    // preimage, which the enclave decodes, checks against the operator pins
-    // (chain id + destination, zero value), and hashes itself — see
-    // `validation::evm_gas_tx`. Skipped under dev-mode like the other
-    // cross-checks (#64 compile-guards dev-mode out of release), where the
-    // legacy opaque-digest path is retained for local testing.
-    #[cfg(not(feature = "dev-mode"))]
-    let digest = validation::evm_gas_tx::validate_gas_tx_request(&req, &ctx.bridge_config)?;
+    if req.digest.len() != 32 {
+        return Err(EnclaveError::InvalidRequest(format!(
+            "digest must be exactly 32 bytes, got {}",
+            req.digest.len()
+        )));
+    }
 
-    #[cfg(feature = "dev-mode")]
-    let digest: [u8; 32] = {
-        if req.digest.len() != 32 {
-            return Err(EnclaveError::InvalidRequest(format!(
-                "digest must be exactly 32 bytes, got {}",
-                req.digest.len()
-            )));
-        }
-        req.digest.as_slice().try_into().unwrap()
-    };
-
-    let signature = ctx.state.sign_evm_gas_tx(&digest)?;
+    let digest: [u8; 32] = req.digest.as_slice().try_into().unwrap();
+    let signature = state.sign_evm_gas_tx(&digest)?;
 
     tracing::info!(
         sig_hex = %hex::encode(signature),
@@ -854,49 +586,6 @@ fn handle_sign_raw_digest(
         response: Some(Response::RawDigestSig(RawDigestSignatureResponse {
             signature: signature.to_vec(),
         })),
-    })
-}
-
-/// Build EIP-712 domain from enriched request fields.
-/// In dev-mode, falls back to defaults if fields are missing.
-fn build_evm_domain(req: &SignEvmRequest) -> Result<Eip712Domain> {
-    let chain_id = if req.chain_id > 0 {
-        req.chain_id
-    } else {
-        #[cfg(feature = "dev-mode")]
-        {
-            1
-        }
-        #[cfg(not(feature = "dev-mode"))]
-        {
-            return Err(EnclaveError::CrossCheck("chain_id must be > 0".into()));
-        }
-    };
-
-    let verifying_contract: [u8; 20] = if req.proxy_contract.len() == 20 {
-        req.proxy_contract
-            .as_slice()
-            .try_into()
-            .map_err(|_| EnclaveError::CrossCheck("proxy_contract must be 20 bytes".into()))?
-    } else {
-        #[cfg(feature = "dev-mode")]
-        {
-            [0u8; 20]
-        }
-        #[cfg(not(feature = "dev-mode"))]
-        {
-            return Err(EnclaveError::CrossCheck(format!(
-                "proxy_contract must be 20 bytes, got {}",
-                req.proxy_contract.len()
-            )));
-        }
-    };
-
-    Ok(Eip712Domain {
-        name: "MultisigProxy".to_string(),
-        version: "1".to_string(),
-        chain_id,
-        verifying_contract,
     })
 }
 
@@ -1084,20 +773,27 @@ fn handle_get_clone(state: &EnclaveState, req: GetCloneRequest) -> Result<Enclav
 
     // 2. Verify the requester attestation chain + PCRs. `None` for the
     //    expected nonce: we have not seen the requester's nonce before,
-    //    so freshness is enforced by the replay guard once the binding and
-    //    authenticity checks below have passed.
+    //    so freshness is enforced by the replay guard immediately after.
     let expected_pcrs = attestation::get_own_pcrs()?;
     let verified =
         attestation::verify_peer_attestation(&req.requester_attestation, &expected_pcrs, None)?;
 
-    // 3. Pubkey binding: the attestation's `public_key` field must equal
+    // 3. Replay-check the nonce pulled from the verified document.
+    let nonce_array: [u8; 32] = verified
+        .nonce
+        .as_slice()
+        .try_into()
+        .map_err(|_| EnclaveError::Attestation("attestation nonce has wrong length".into()))?;
+    state.replay_guard.check_and_record(nonce_array)?;
+
+    // 4. Pubkey binding: the attestation's `public_key` field must equal
     //    the one the parent put on the wire. Otherwise the parent could
     //    have swapped it for a key it controls.
     if verified.enclave_pubkey.as_slice() != req_encryption_pk {
         return Err(EnclaveError::PubkeyMismatch);
     }
 
-    // 4. Digest binding: the attestation's `user_data` must equal the
+    // 5. Digest binding: the attestation's `user_data` must equal the
     //    digest on the wire — NSM-signed, so parent-proof.
     let user_data = verified.user_data.as_deref().ok_or_else(|| {
         EnclaveError::Attestation("requester attestation missing user_data (cloning digest)".into())
@@ -1106,7 +802,7 @@ fn handle_get_clone(state: &EnclaveState, req: GetCloneRequest) -> Result<Enclav
         return Err(EnclaveError::DigestMismatch);
     }
 
-    // 5. Digest authenticity: HMAC(donor_secret, encryption_pubkey) must
+    // 6. Digest authenticity: HMAC(donor_secret, encryption_pubkey) must
     //    match. Proves the requester was issued by the same operator.
     state.with_donor_cloning_secret(|secret| {
         if !cloning::verify_cloning_digest(secret, &req_encryption_pk, &req_digest) {
@@ -1114,21 +810,6 @@ fn handle_get_clone(state: &EnclaveState, req: GetCloneRequest) -> Result<Enclav
         }
         Ok(())
     })?;
-
-    // 6. Replay-check + record the nonce from the verified document. This
-    //    runs only *after* the pubkey, digest and donor-secret checks above
-    //    have passed, so a rejected (unauthenticated) handshake never
-    //    consumes replay-guard capacity. Combined with the count-cap removal
-    //    (#80), this closes the secret-less cloning-availability DoS in which
-    //    an attacker mints attestations over arbitrary nonces via
-    //    `get_attested_public_key` and burns them on doomed handshakes
-    //    (audit W-13).
-    let nonce_array: [u8; 32] = verified
-        .nonce
-        .as_slice()
-        .try_into()
-        .map_err(|_| EnclaveError::Attestation("attestation nonce has wrong length".into()))?;
-    state.replay_guard.check_and_record(nonce_array)?;
 
     // 7. Seal the seed under a fresh donor ephemeral keypair.
     let (encrypted_seed, donor_pubkey) =
@@ -1165,12 +846,18 @@ fn handle_set_clone(state: &EnclaveState, req: SetCloneRequest) -> Result<Enclav
         ))
     })?;
 
-    // 1. Verify donor attestation chain + PCRs (no nonce match — freshness
-    //    is enforced by the replay guard once the binding and seed/identity
-    //    checks below have passed).
+    // 1. Verify donor attestation chain + PCRs (no nonce match — we
+    //    enforce freshness via the replay guard).
     let expected_pcrs = attestation::get_own_pcrs()?;
     let verified =
         attestation::verify_peer_attestation(&req.donor_attestation, &expected_pcrs, None)?;
+
+    let nonce_array: [u8; 32] = verified
+        .nonce
+        .as_slice()
+        .try_into()
+        .map_err(|_| EnclaveError::Attestation("attestation nonce has wrong length".into()))?;
+    state.replay_guard.check_and_record(nonce_array)?;
 
     // 2. Pubkey binding: the donor's pubkey on the wire must equal the
     //    one inside their signed attestation.
@@ -1195,16 +882,6 @@ fn handle_set_clone(state: &EnclaveState, req: SetCloneRequest) -> Result<Enclav
         cluster_public_key = session.cluster_public_key;
         Ok(km)
     })?;
-
-    // 4. Replay-check + record the donor nonce only *after* the pubkey
-    //    binding and the seed/identity checks above have passed, so a
-    //    rejected handshake never consumes replay-guard capacity (audit W-13).
-    let nonce_array: [u8; 32] = verified
-        .nonce
-        .as_slice()
-        .try_into()
-        .map_err(|_| EnclaveError::Attestation("attestation nonce has wrong length".into()))?;
-    state.replay_guard.check_and_record(nonce_array)?;
 
     tracing::info!(
         cluster_pk = %hex::encode(cluster_public_key),

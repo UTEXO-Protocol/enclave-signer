@@ -6,8 +6,10 @@
 use std::net::TcpListener;
 
 use utexo_bridge_enclave::config::BridgeConfig;
+use utexo_bridge_enclave::networks::rgb::spv::{checkpoint_for, HeaderChain, Network};
+#[cfg(feature = "rgb-validation")]
+use utexo_bridge_enclave::networks::rgb::validation::RgbValidator;
 use utexo_bridge_enclave::server::{self, ServerContext};
-use utexo_bridge_enclave::spv::{checkpoint_for, HeaderChain, Network};
 use utexo_bridge_enclave::state::EnclaveState;
 
 fn main() {
@@ -62,19 +64,6 @@ fn main() {
              will commit to empty values"
         );
     }
-    // Gas-tx destination pin (audit TEE-XC-09). Independent of the identity
-    // pins above; gates SignRawDigest. Unset in a release build fails gas-tx
-    // signing closed.
-    match bridge_config.gas_tx_allowed_to {
-        Some(addr) => tracing::info!(
-            gas_tx_allowed_to = %hex::encode(addr),
-            "gas-tx destination pinned from env (GAS_TX_ALLOWED_TO)"
-        ),
-        None => tracing::warn!(
-            "GAS_TX_ALLOWED_TO unset — gas-tx (SignRawDigest) signing will fail closed in \
-             release builds until the allowed destination is pinned"
-        ),
-    }
 
     // Donor-side cloning secret. Optional: only required for enclaves that
     // will serve `GetClone` requests. Pre-shared across the operator's
@@ -110,7 +99,7 @@ fn main() {
         let esplora_url =
             std::env::var("ESPLORA_URL").unwrap_or_else(|_| "http://127.0.0.1:3443".into());
         let network = std::env::var("BITCOIN_NETWORK").unwrap_or_else(|_| "bitcoin".into());
-        match utexo_bridge_enclave::validation::rgb::RgbValidator::new(esplora_url, &network) {
+        match RgbValidator::new(esplora_url, &network) {
             Ok(v) => {
                 tracing::info!("RGB validator initialized");
                 Some(v)
@@ -148,7 +137,7 @@ fn main() {
         tracing::warn!(
             ?spv_network,
             "spv: using PLACEHOLDER checkpoint (zeros) — header validation will reject any real chain. \
-             Replace the constant in enclave/src/spv/checkpoint.rs before deploying."
+             Replace the constant in enclave/src/networks/rgb/spv/checkpoint.rs before deploying."
         );
     } else {
         tracing::info!(
@@ -175,7 +164,16 @@ fn main() {
         let listener = VsockListener::bind_with_cid_port(vsock::VMADDR_CID_ANY, 5000)
             .expect("failed to bind vsock port 5000");
         tracing::info!("listening on vsock port 5000");
-        serve(listener.incoming(), ctx);
+
+        for stream in listener.incoming() {
+            match stream {
+                Ok(stream) => {
+                    tracing::debug!("accepted vsock connection");
+                    server::handle_connection(stream, &ctx);
+                }
+                Err(e) => tracing::error!("accept error: {}", e),
+            }
+        }
     }
 
     #[cfg(not(all(feature = "vsock", target_os = "linux")))]
@@ -185,76 +183,19 @@ fn main() {
         let listener = TcpListener::bind(&listen_addr)
             .unwrap_or_else(|_| panic!("failed to bind TCP {listen_addr}"));
         tracing::info!(%listen_addr, "listening on TCP");
-        serve(listener.incoming(), ctx);
-    }
-}
 
-/// Accept loop with bounded concurrency and per-request deadlines (audit M-03 /
-/// #83). Each accepted socket is wrapped in a [`DeadlineStream`] (idle + total
-/// request timeouts) and handed to a fixed worker pool via a bounded queue;
-/// over-cap connections are dropped (closed) so one slow request can't starve
-/// the others. Generic over the socket type so the vsock and TCP branches share
-/// one implementation.
-fn serve<I, S>(incoming: I, ctx: ServerContext)
-where
-    I: IntoIterator<Item = std::io::Result<S>>,
-    S: std::io::Read + std::io::Write + utexo_bridge_enclave::conn::SocketTimeout + Send + 'static,
-{
-    use std::sync::mpsc::{sync_channel, TrySendError};
-    use std::sync::{Arc, Mutex};
-    use utexo_bridge_enclave::conn::{
-        DeadlineStream, IO_IDLE_TIMEOUT, MAX_QUEUED_CONNECTIONS, TOTAL_REQUEST_TIMEOUT,
-        WORKER_THREADS,
-    };
-
-    let ctx = Arc::new(ctx);
-    // Bounded queue doubles as the connection cap: a full queue means all
-    // workers are busy and the backlog is at its limit.
-    let (tx, rx) = sync_channel::<S>(MAX_QUEUED_CONNECTIONS);
-    let rx = Arc::new(Mutex::new(rx));
-
-    for worker_id in 0..WORKER_THREADS {
-        let rx = Arc::clone(&rx);
-        let ctx = Arc::clone(&ctx);
-        std::thread::spawn(move || loop {
-            // Hold the queue lock only to dequeue; handling happens unlocked so
-            // workers run concurrently.
-            let next = {
-                let guard = match rx.lock() {
-                    Ok(g) => g,
-                    Err(_) => {
-                        tracing::error!(worker_id, "worker queue mutex poisoned; worker exiting");
-                        break;
-                    }
-                };
-                guard.recv()
-            };
-            match next {
+        for stream in listener.incoming() {
+            match stream {
                 Ok(stream) => {
-                    let stream =
-                        DeadlineStream::new(stream, TOTAL_REQUEST_TIMEOUT, IO_IDLE_TIMEOUT);
+                    let peer = stream
+                        .peer_addr()
+                        .map(|a| a.to_string())
+                        .unwrap_or_else(|_| "unknown".into());
+                    tracing::debug!(%peer, "accepted TCP connection");
                     server::handle_connection(stream, &ctx);
                 }
-                // All senders dropped: the listener is gone, so is the process.
-                Err(_) => break,
+                Err(e) => tracing::error!("accept error: {}", e),
             }
-        });
-    }
-
-    for stream in incoming {
-        match stream {
-            Ok(stream) => match tx.try_send(stream) {
-                Ok(()) => tracing::debug!("connection queued"),
-                Err(TrySendError::Full(_)) => tracing::warn!(
-                    cap = MAX_QUEUED_CONNECTIONS,
-                    "connection queue full; dropping connection (slow-request backpressure)"
-                ),
-                Err(TrySendError::Disconnected(_)) => {
-                    tracing::error!("no workers available; stopping accept loop");
-                    break;
-                }
-            },
-            Err(e) => tracing::error!("accept error: {e}"),
         }
     }
 }

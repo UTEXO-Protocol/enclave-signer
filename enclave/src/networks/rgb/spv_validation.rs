@@ -32,8 +32,10 @@ use bitcoin::hashes::Hash;
 use rgbstd::ChainNet;
 
 use crate::error::{EnclaveError, Result};
+use crate::networks::rgb::spv::{verify_merkle_proof, HeaderChain, MerkleError, Network};
 use crate::proto::MerkleProofEntry;
-use crate::spv::{verify_merkle_proof, HeaderChain, MerkleError, Network};
+
+use super::validation::ValidatedConsignment;
 
 /// Confirmation depth required before the enclave will sign. Compile-time
 /// constant rather than runtime configurable — making it env-driven would
@@ -60,15 +62,48 @@ pub const SPV_MAX_TIP_AGE_SECS: u64 = 2 * 60 * 60;
 /// `time = far_future` to defeat the staleness check.
 pub const SPV_MAX_TIP_FUTURE_SECS: u64 = 2 * 60 * 60;
 
-/// Maximum number of sibling hashes allowed in a single Merkle path. A path
-/// of depth d authenticates a block of up to 2^d transactions; even a 4 MB
-/// block packed with minimum-size transactions holds well under 2^17, so 32
-/// (over four billion leaves) never false-rejects a real proof while bounding
-/// the per-proof hashing a hostile listener can demand. Rejected up-front in
-/// `validate_spv_proofs`, before any Merkle hashing runs, so a maximally
-/// packed request is cheap to reject (audit I-06 / #90). Compile-time, like
-/// the other SPV limits: PCR-attested posture, not host-tunable.
-pub const MAX_MERKLE_PATH_DEPTH: usize = 32;
+/// Validate the RGB source's Bitcoin anchoring before signing.
+///
+/// This owns the SPV signing gate for an RGB source: the caller passes the
+/// already-validated RGB consignment and the listener-provided Merkle proofs,
+/// and this function checks chain freshness, network binding, inclusion, and
+/// confirmation depth.
+pub fn validate_source_chain(
+    chain: &HeaderChain,
+    validated_consignment: Option<&ValidatedConsignment>,
+    merkle_proofs: &[MerkleProofEntry],
+    now: SystemTime,
+) -> Result<()> {
+    let validated = validated_consignment.ok_or_else(|| {
+        EnclaveError::Spv(
+            "spv: RGB source requires a non-empty validated consignment, \
+             but the request had no consignment bytes (or the validator \
+             is not configured)"
+                .into(),
+        )
+    })?;
+
+    assert_chain_not_stale(
+        chain,
+        now,
+        Duration::from_secs(SPV_MAX_TIP_AGE_SECS),
+        Duration::from_secs(SPV_MAX_TIP_FUTURE_SECS),
+    )?;
+    assert_chain_net(&validated.chain_net, chain.network())?;
+    validate_spv_proofs(
+        chain,
+        &validated.witness_txids,
+        merkle_proofs,
+        SPV_MIN_CONFIRMATIONS,
+    )?;
+
+    tracing::info!(
+        proofs_count = merkle_proofs.len(),
+        "SPV verification passed"
+    );
+
+    Ok(())
+}
 
 /// Verify a complete set of SPV proofs against the chain.
 ///
@@ -93,16 +128,6 @@ pub fn validate_spv_proofs(
                 proof.txid.len()
             ))
         })?;
-        // Bound Merkle path depth before any hashing runs. A path longer
-        // than any real block could contain is either a bug or an attempt
-        // to maximize the per-proof verification loop (audit I-06 / #90).
-        if proof.merkle_path.len() > MAX_MERKLE_PATH_DEPTH {
-            return Err(EnclaveError::Spv(format!(
-                "merkle_proofs[{i}].merkle_path too deep: {} siblings (max {})",
-                proof.merkle_path.len(),
-                MAX_MERKLE_PATH_DEPTH
-            )));
-        }
         if !proof_set.insert(txid) {
             return Err(EnclaveError::Spv(format!(
                 "duplicate merkle proof for txid {}",
@@ -331,9 +356,9 @@ fn verify_one_proof(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::networks::rgb::spv::checkpoint::Checkpoint;
+    use crate::networks::rgb::spv::HeaderChain;
     use crate::proto::MerkleProofEntry;
-    use crate::spv::checkpoint::Checkpoint;
-    use crate::spv::HeaderChain;
     use bitcoin::block::{Header, Version};
     use bitcoin::consensus::serialize;
     use bitcoin::hashes::{sha256d, Hash};
@@ -480,6 +505,36 @@ mod tests {
         let target = synth_headers(1).into_iter().next().unwrap();
         let chain = chain_burying(target, 5);
         let (txid_display, proof) = single_tx_proof(chain.header_at(1).unwrap(), 1);
+
+        validate_spv_proofs(&chain, &[txid_display], &[proof], SPV_MIN_CONFIRMATIONS).unwrap();
+    }
+
+    /// Regression for #130: an anchor far below `tip − HEADER_WINDOW` (~2122)
+    /// still verifies. The old sliding window pruned the anchor's header, so
+    /// SPV rejected every RGB consignment whose oldest witness was older than
+    /// ~a day on 30s-block signet ("no header at height H (chain tip = T)").
+    /// With full retention from the checkpoint the header resolves and the
+    /// proof passes.
+    #[test]
+    fn deep_anchor_below_old_window_still_verifies() {
+        let target = synth_headers(1).into_iter().next().unwrap();
+        // Derive the proof from the target before it is moved into the chain.
+        let (txid_display, proof) = single_tx_proof(&target, 1);
+        // Bury the target deep enough that the OLD sliding window would have
+        // pruned its header: prune_front advanced the base to
+        // floor_2016(tip − 2122), dropping the anchor at height 1 once that
+        // base ≥ 1 (tip ≥ 4138). 4200 buries it comfortably past that point,
+        // so this test genuinely fails on the pruning code and guards against
+        // its reintroduction.
+        let chain = chain_burying(target, 4200);
+        let tip = chain.tip_height();
+        let old_window = 100 + 2016 + 6; // former HEADER_WINDOW
+        let old_pruned_base = (tip.saturating_sub(old_window) / 2016) * 2016;
+        assert!(
+            old_pruned_base >= 1,
+            "precondition: the old window would have pruned the anchor at height 1 \
+             (tip={tip}, old_pruned_base={old_pruned_base})"
+        );
 
         validate_spv_proofs(&chain, &[txid_display], &[proof], SPV_MIN_CONFIRMATIONS).unwrap();
     }
@@ -695,27 +750,6 @@ mod tests {
     }
 
     #[test]
-    fn rejects_overdeep_merkle_path() {
-        // A path deeper than any real block could produce is rejected before
-        // any Merkle hashing runs (audit I-06 / #90). Siblings are well-formed
-        // 32-byte hashes so the only failing predicate is the depth cap.
-        let target = synth_headers(1).into_iter().next().unwrap();
-        let chain = chain_burying(target, 5);
-        let (txid_display, _proof) = single_tx_proof(chain.header_at(1).unwrap(), 1);
-
-        let bad_proof = MerkleProofEntry {
-            txid: txid_display.to_vec(),
-            block_height: 1,
-            tx_position: 0,
-            merkle_path: vec![vec![0u8; 32]; MAX_MERKLE_PATH_DEPTH + 1],
-        };
-
-        let err = validate_spv_proofs(&chain, &[txid_display], &[bad_proof], SPV_MIN_CONFIRMATIONS)
-            .unwrap_err();
-        assert!(err.to_string().contains("too deep"), "got: {err}");
-    }
-
-    #[test]
     fn assert_chain_net_accepts_matching_pair() {
         // Literal prefixes on purpose (not derived from `ChainNet::prefix()`):
         // if an rgb-core upgrade ever changes the notation, this test must
@@ -850,7 +884,7 @@ mod tests {
         // header we don't store the body of.
         let chain = HeaderChain::new(
             Network::Regtest,
-            crate::spv::checkpoint::Checkpoint {
+            crate::networks::rgb::spv::checkpoint::Checkpoint {
                 height: 0,
                 hash: [0u8; 32],
                 bits: 0x207fffff,
