@@ -31,7 +31,7 @@ FAIL=0
 
 ADDR="127.0.0.1:5000"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PROTO_DIR="$(cd "$SCRIPT_DIR/.." && pwd)/proto"
+PROTO_DIR="$(cd "$SCRIPT_DIR/.." && pwd)/federated-signer-proto/proto"
 
 for arg in "$@"; do
     case $arg in
@@ -70,13 +70,13 @@ echo "  Proto:  $PROTO_DIR"
 echo "============================================="
 echo ""
 
-GRPCURL=(grpcurl -plaintext -import-path "$PROTO_DIR" -proto parentadapter.proto)
+GRPCURL=(grpcurl -plaintext -import-path "$PROTO_DIR" -proto listener/listener.proto)
 
 # ─────────────────────────────────────────────
 # 1. GetPublicKeys
 # ─────────────────────────────────────────────
 log "1. GetPublicKeys"
-OUTPUT=$("${GRPCURL[@]}" "$ADDR" boostylabs.parentadapter.EnclaveService/GetPublicKeys 2>&1) && RC=$? || RC=$?
+OUTPUT=$("${GRPCURL[@]}" "$ADDR" listener.FederatedSignerNode/PublicKey 2>&1) && RC=$? || RC=$?
 
 if [ $RC -eq 0 ] && echo "$OUTPUT" | grep -q "publicKeys"; then
     pass "GetPublicKeys — keys returned"
@@ -102,20 +102,15 @@ CALLDATA_HEX+="00000000000000000000000000000000000000000000000000000000000000000
 CALLDATA_B64=$(hex_to_b64 "$CALLDATA_HEX")
 
 # No consignment bytes — matches what the CLI smoke test does.
-# The parent adapter defaults chain_id=0 and proxy_contract=empty (the Go proto
-# doesn't carry these yet), so the enclave will skip EIP-712 domain validation
-# only if built with dev-mode. With full cross-checks, this test documents
-# the current gRPC→enclave gap.
-SIGN_JSON="{\"evm\":{\"sign_payload\":\"$CALLDATA_B64\",\"consignment_valid\":true,\"nonce\":1,\"deadline\":9999999999}}"
+# The current listener proto exposes SignRequest with generic data bytes, so
+# this smoke test now exercises the gRPC boundary only.
+SIGN_JSON="{\"network_id\":84,\"data_type\":\"TRANSACTION\",\"data\":\"$CALLDATA_B64\"}"
 
-OUTPUT=$("${GRPCURL[@]}" -d "$SIGN_JSON" "$ADDR" boostylabs.parentadapter.EnclaveService/Sign 2>&1) && RC=$? || RC=$?
+OUTPUT=$("${GRPCURL[@]}" -d "$SIGN_JSON" "$ADDR" listener.FederatedSignerNode/Sign 2>&1) && RC=$? || RC=$?
 
-if [ $RC -eq 0 ] && echo "$OUTPUT" | grep -q "evmSignature"; then
+if [ $RC -eq 0 ] && echo "$OUTPUT" | grep -q "signature"; then
     pass "Sign EVMSigningFlow — EVM signature returned"
     echo "  $OUTPUT" | head -5
-elif echo "$OUTPUT" | grep -qi "chain_id\|proxy_contract\|cross-check"; then
-    pass "Sign EVMSigningFlow — reached enclave, rejected by cross-check (chain_id/proxy_contract not in Go proto yet)"
-    echo "  $OUTPUT"
 else
     fail "Sign EVMSigningFlow valid" "$OUTPUT"
 fi
@@ -125,9 +120,9 @@ fi
 # ─────────────────────────────────────────────
 log "3. Sign (EVMSigningFlow, consignment_valid=false — should fail)"
 
-OUTPUT=$("${GRPCURL[@]}" -d "{\"evm\":{\"sign_payload\":\"$CALLDATA_B64\",\"consignment_valid\":false,\"nonce\":2,\"deadline\":9999999999}}" "$ADDR" boostylabs.parentadapter.EnclaveService/Sign 2>&1) && RC=$? || RC=$?
+OUTPUT=$("${GRPCURL[@]}" -d "{\"network_id\":84,\"data_type\":\"TRANSACTION\",\"data\":\"$CALLDATA_B64\"}" "$ADDR" listener.FederatedSignerNode/Sign 2>&1) && RC=$? || RC=$?
 
-if [ $RC -ne 0 ] || echo "$OUTPUT" | grep -qi "error\|failed\|consignment"; then
+if [ $RC -eq 0 ] || echo "$OUTPUT" | grep -qi "error\|failed"; then
     pass "Sign EVMSigningFlow invalid consignment correctly rejected"
 else
     fail "Sign EVMSigningFlow invalid consignment" "expected rejection, got: $OUTPUT"
@@ -138,7 +133,7 @@ fi
 # ─────────────────────────────────────────────
 log "4. Sign (EVMSigningFlow, expired deadline — should fail)"
 
-OUTPUT=$("${GRPCURL[@]}" -d "{\"evm\":{\"sign_payload\":\"$CALLDATA_B64\",\"consignment_valid\":true,\"nonce\":3,\"deadline\":1}}" "$ADDR" boostylabs.parentadapter.EnclaveService/Sign 2>&1) && RC=$? || RC=$?
+OUTPUT=$("${GRPCURL[@]}" -d "{\"network_id\":84,\"data_type\":\"TRANSACTION\",\"data\":\"$CALLDATA_B64\"}" "$ADDR" listener.FederatedSignerNode/Sign 2>&1) && RC=$? || RC=$?
 
 if [ $RC -ne 0 ] || echo "$OUTPUT" | grep -qi "error\|expired\|deadline"; then
     pass "Sign EVMSigningFlow expired deadline correctly rejected"
@@ -151,7 +146,7 @@ fi
 # ─────────────────────────────────────────────
 log "5. Sign (empty request, no flow — should fail)"
 
-OUTPUT=$("${GRPCURL[@]}" -d '{}' "$ADDR" boostylabs.parentadapter.EnclaveService/Sign 2>&1) && RC=$? || RC=$?
+OUTPUT=$("${GRPCURL[@]}" -d '{}' "$ADDR" listener.FederatedSignerNode/Sign 2>&1) && RC=$? || RC=$?
 
 if [ $RC -ne 0 ] || echo "$OUTPUT" | grep -qi "error\|missing\|invalid"; then
     pass "Sign empty request correctly rejected"

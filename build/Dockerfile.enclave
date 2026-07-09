@@ -4,9 +4,10 @@
 #   DOCKER_BUILDKIT=1 docker build --ssh default \
 #     -f build/Dockerfile.enclave -t utexo-bridge-enclave .
 #
-# `--ssh default` forwards the host's SSH agent into the build so cargo
-# can fetch the private `rgb-consignment` git dep that the
-# `rgb-validation`/`spv` features pull in.
+# `--ssh default` forwards the host's SSH agent into the build so Cargo can
+# fetch the pinned generated `federated-signer-proto` Rust crate from GitHub
+# over SSH. The same SSH mount is also used for the private `rgb-consignment`
+# git dependency pulled by the `rgb-validation`/`spv` features.
 
 FROM rust:1.89-slim AS builder
 

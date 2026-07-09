@@ -32,8 +32,10 @@ use bitcoin::hashes::Hash;
 use rgbstd::ChainNet;
 
 use crate::error::{EnclaveError, Result};
+use crate::networks::rgb::spv::{verify_merkle_proof, HeaderChain, MerkleError, Network};
 use crate::proto::MerkleProofEntry;
-use crate::spv::{verify_merkle_proof, HeaderChain, MerkleError, Network};
+
+use super::validation::ValidatedConsignment;
 
 /// Confirmation depth required before the enclave will sign. Compile-time
 /// constant rather than runtime configurable — making it env-driven would
@@ -59,6 +61,49 @@ pub const SPV_MAX_TIP_AGE_SECS: u64 = 2 * 60 * 60;
 /// anything beyond — otherwise an attacker could submit a header with
 /// `time = far_future` to defeat the staleness check.
 pub const SPV_MAX_TIP_FUTURE_SECS: u64 = 2 * 60 * 60;
+
+/// Validate the RGB source's Bitcoin anchoring before signing.
+///
+/// This owns the SPV signing gate for an RGB source: the caller passes the
+/// already-validated RGB consignment and the listener-provided Merkle proofs,
+/// and this function checks chain freshness, network binding, inclusion, and
+/// confirmation depth.
+pub fn validate_source_chain(
+    chain: &HeaderChain,
+    validated_consignment: Option<&ValidatedConsignment>,
+    merkle_proofs: &[MerkleProofEntry],
+    now: SystemTime,
+) -> Result<()> {
+    let validated = validated_consignment.ok_or_else(|| {
+        EnclaveError::Spv(
+            "spv: RGB source requires a non-empty validated consignment, \
+             but the request had no consignment bytes (or the validator \
+             is not configured)"
+                .into(),
+        )
+    })?;
+
+    assert_chain_not_stale(
+        chain,
+        now,
+        Duration::from_secs(SPV_MAX_TIP_AGE_SECS),
+        Duration::from_secs(SPV_MAX_TIP_FUTURE_SECS),
+    )?;
+    assert_chain_net(&validated.chain_net, chain.network())?;
+    validate_spv_proofs(
+        chain,
+        &validated.witness_txids,
+        merkle_proofs,
+        SPV_MIN_CONFIRMATIONS,
+    )?;
+
+    tracing::info!(
+        proofs_count = merkle_proofs.len(),
+        "SPV verification passed"
+    );
+
+    Ok(())
+}
 
 /// Verify a complete set of SPV proofs against the chain.
 ///
@@ -311,9 +356,9 @@ fn verify_one_proof(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::networks::rgb::spv::checkpoint::Checkpoint;
+    use crate::networks::rgb::spv::HeaderChain;
     use crate::proto::MerkleProofEntry;
-    use crate::spv::checkpoint::Checkpoint;
-    use crate::spv::HeaderChain;
     use bitcoin::block::{Header, Version};
     use bitcoin::consensus::serialize;
     use bitcoin::hashes::{sha256d, Hash};
@@ -839,7 +884,7 @@ mod tests {
         // header we don't store the body of.
         let chain = HeaderChain::new(
             Network::Regtest,
-            crate::spv::checkpoint::Checkpoint {
+            crate::networks::rgb::spv::checkpoint::Checkpoint {
                 height: 0,
                 hash: [0u8; 32],
                 bits: 0x207fffff,

@@ -7,6 +7,8 @@
 
 use std::collections::BTreeSet;
 use std::io::Cursor;
+#[cfg(feature = "spv")]
+use std::time::SystemTime;
 
 use rgb_consignment::{
     ConsignmentInfo, FungibleAllocation, FungibleEntry, SealInfo, TransitionInfo, WitnessInfo,
@@ -17,8 +19,124 @@ use rgbstd::indexers::AnyResolver;
 use rgbstd::schema::{MetaType, TransitionType};
 use rgbstd::validation::ValidationConfig;
 use rgbstd::ChainNet;
+use sha3::{Digest, Keccak256};
 
 use crate::error::{EnclaveError, Result};
+use crate::networks::ValidationContext;
+use crate::proto::RgbSource;
+
+#[cfg(feature = "spv")]
+use super::spv_validation;
+
+/// Validate all fields and source-chain evidence owned by an RGB source.
+///
+/// This deliberately does not inspect or care about the destination network.
+/// For an RGB source, the source-chain proof is:
+///
+/// 1. raw consignment bytes must be present, hash-bound, and pass full
+///    in-enclave RGB validation;
+/// 2. the validated consignment asset must match the listener-declared
+///    `asset_id` and, when configured, the operator-pinned `RGB_ASSET_ID`;
+/// 3. when built with `spv`, every consignment witness tx must have a matching
+///    Merkle proof against the in-enclave Bitcoin header chain with sufficient
+///    confirmations;
+/// 4. when built without `spv`, reject any supplied Merkle proofs so build
+///    mismatches fail closed instead of silently ignoring host-provided SPV
+///    evidence.
+pub fn validate_source(
+    source: &RgbSource,
+    ctx: &ValidationContext<'_>,
+) -> Result<ValidatedConsignment> {
+    validate_source_payload(source)?;
+
+    let validator = ctx.rgb_validator.ok_or_else(|| {
+        EnclaveError::CrossCheck(
+            "RGB source validation requires rgb_validator to be configured".into(),
+        )
+    })?;
+
+    let validated = validator.validate_consignment(&source.consignment)?;
+
+    if validated.contract_id.is_empty() {
+        return Err(EnclaveError::CrossCheck(
+            "validated consignment has empty contract_id — cannot bind asset identity".into(),
+        ));
+    }
+    if validated.contract_id != source.asset_id {
+        return Err(EnclaveError::CrossCheck(format!(
+            "contract_id mismatch: consignment has {} but RGB source declares {}",
+            validated.contract_id, source.asset_id
+        )));
+    }
+    if ctx.bridge_config.is_configured() {
+        if ctx.bridge_config.rgb_asset_id.is_empty() {
+            return Err(EnclaveError::CrossCheck(
+                "bridge config pinned chain/contract but RGB_ASSET_ID is empty — \
+                 set all three env vars or none"
+                    .into(),
+            ));
+        }
+        if validated.contract_id != ctx.bridge_config.rgb_asset_id {
+            return Err(EnclaveError::CrossCheck(format!(
+                "contract_id mismatch: consignment asset {} != pinned RGB_ASSET_ID {}",
+                validated.contract_id, ctx.bridge_config.rgb_asset_id
+            )));
+        }
+    }
+
+    #[cfg(feature = "spv")]
+    {
+        let chain = ctx
+            .header_chain
+            .lock()
+            .map_err(|e| EnclaveError::Internal(format!("SPV header chain lock poisoned: {e}")))?;
+        spv_validation::validate_source_chain(
+            &chain,
+            Some(&validated),
+            &source.merkle_proofs,
+            SystemTime::now(),
+        )?;
+    }
+
+    #[cfg(not(feature = "spv"))]
+    {
+        if !source.merkle_proofs.is_empty() {
+            return Err(EnclaveError::CrossCheck(
+                "RGB source supplied merkle_proofs but enclave was not built with --features spv"
+                    .into(),
+            ));
+        }
+    }
+
+    Ok(validated)
+}
+
+fn validate_source_payload(source: &RgbSource) -> Result<()> {
+    if source.consignment.is_empty() {
+        return Err(EnclaveError::CrossCheck(
+            "RGB source requires raw consignment bytes; consignment_valid is not authoritative"
+                .into(),
+        ));
+    }
+    if source.consignment_hash.is_empty() {
+        return Err(EnclaveError::CrossCheck(
+            "consignment present but consignment_hash is missing".into(),
+        ));
+    }
+    let computed = Keccak256::digest(&source.consignment);
+    if computed[..] != source.consignment_hash {
+        return Err(EnclaveError::CrossCheck(
+            "consignment hash mismatch: keccak256(consignment) != consignment_hash".into(),
+        ));
+    }
+    if source.asset_id.is_empty() {
+        return Err(EnclaveError::CrossCheck(
+            "RGB source asset_id is empty".into(),
+        ));
+    }
+
+    Ok(())
+}
 
 /// Schema-defined `transition_type` and `metadata` keys for the Inflatable
 /// Fungible Asset (IFA) schema we use for USDT. Sourced from the
@@ -608,9 +726,9 @@ mod tests {
     // harness; we ship them in-tree so the unit tests don't depend on
     // network access or the parser repo's working copy.
     const TRANSFER_FIXTURE: &[u8] =
-        include_bytes!("../../tests/fixtures/transfer_consignment.rgbc");
+        include_bytes!("../../../tests/fixtures/transfer_consignment.rgbc");
     const CONTRACT_FIXTURE: &[u8] =
-        include_bytes!("../../tests/fixtures/contract_consignment.rgbc");
+        include_bytes!("../../../tests/fixtures/contract_consignment.rgbc");
 
     #[test]
     fn rejects_invalid_bytes() {

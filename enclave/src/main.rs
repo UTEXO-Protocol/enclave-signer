@@ -6,8 +6,10 @@
 use std::net::TcpListener;
 
 use utexo_bridge_enclave::config::BridgeConfig;
+use utexo_bridge_enclave::networks::rgb::spv::{checkpoint_for, HeaderChain, Network};
+#[cfg(feature = "rgb-validation")]
+use utexo_bridge_enclave::networks::rgb::validation::RgbValidator;
 use utexo_bridge_enclave::server::{self, ServerContext};
-use utexo_bridge_enclave::spv::{checkpoint_for, HeaderChain, Network};
 use utexo_bridge_enclave::state::EnclaveState;
 
 fn main() {
@@ -97,7 +99,7 @@ fn main() {
         let esplora_url =
             std::env::var("ESPLORA_URL").unwrap_or_else(|_| "http://127.0.0.1:3443".into());
         let network = std::env::var("BITCOIN_NETWORK").unwrap_or_else(|_| "bitcoin".into());
-        match utexo_bridge_enclave::validation::rgb::RgbValidator::new(esplora_url, &network) {
+        match RgbValidator::new(esplora_url, &network) {
             Ok(v) => {
                 tracing::info!("RGB validator initialized");
                 Some(v)
@@ -135,7 +137,7 @@ fn main() {
         tracing::warn!(
             ?spv_network,
             "spv: using PLACEHOLDER checkpoint (zeros) — header validation will reject any real chain. \
-             Replace the constant in enclave/src/spv/checkpoint.rs before deploying."
+             Replace the constant in enclave/src/networks/rgb/spv/checkpoint.rs before deploying."
         );
     } else {
         tracing::info!(

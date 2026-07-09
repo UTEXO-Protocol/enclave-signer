@@ -27,7 +27,7 @@
 use bitcoin::block::Header;
 use bitcoin::pow::CompactTarget;
 
-use crate::spv::types::{BlockHeight, Network, Result, SpvError};
+use crate::networks::rgb::spv::types::{BlockHeight, Network, Result, SpvError};
 
 /// Bitcoin's difficulty-retarget interval: every 2016 blocks.
 pub const RETARGET_INTERVAL: BlockHeight = 2016;

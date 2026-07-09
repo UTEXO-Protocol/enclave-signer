@@ -38,9 +38,9 @@ use bitcoin::block::Header;
 use bitcoin::consensus::deserialize;
 use bitcoin::pow::Work;
 
-use crate::spv::checkpoint::Checkpoint;
-use crate::spv::types::{BlockHash, BlockHeight, Network, Result, SpvError};
-use crate::spv::validation::{
+use crate::networks::rgb::spv::checkpoint::Checkpoint;
+use crate::networks::rgb::spv::types::{BlockHash, BlockHeight, Network, Result, SpvError};
+use crate::networks::rgb::spv::validation::{
     expected_bits, is_retarget_height, validate_header_full, RETARGET_INTERVAL,
 };
 
