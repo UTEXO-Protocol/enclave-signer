@@ -54,18 +54,18 @@ RUN --mount=type=ssh \
       if [ -f /run/secrets/federated_key ] && [ -f /run/secrets/consignment_key ]; then \
         install -m 600 /run/secrets/federated_key /tmp/federated_key; \
         install -m 600 /run/secrets/consignment_key /tmp/consignment_key; \
-        cat > /tmp/ci_ssh_config <<'"'"'EOF'"'"'
-Host github.com-federated
-  HostName github.com
-  User git
-  IdentityFile /tmp/federated_key
-  IdentitiesOnly yes
-Host github.com-consignment
-  HostName github.com
-  User git
-  IdentityFile /tmp/consignment_key
-  IdentitiesOnly yes
-EOF
+        printf "%s\n" \
+          "Host github.com-federated" \
+          "  HostName github.com" \
+          "  User git" \
+          "  IdentityFile /tmp/federated_key" \
+          "  IdentitiesOnly yes" \
+          "Host github.com-consignment" \
+          "  HostName github.com" \
+          "  User git" \
+          "  IdentityFile /tmp/consignment_key" \
+          "  IdentitiesOnly yes" \
+          > /tmp/ci_ssh_config; \
         export GIT_SSH_COMMAND="ssh -F /tmp/ci_ssh_config"; \
         git config --global url."ssh://git@github.com-federated/UTEXO-Protocol/federated-signer-proto.git".insteadOf "ssh://git@github.com/UTEXO-Protocol/federated-signer-proto.git"; \
         git config --global url."ssh://git@github.com-consignment/UTEXO-Protocol/rgb-consignment-parser.git".insteadOf "ssh://git@github.com/UTEXO-Protocol/rgb-consignment-parser.git"; \
