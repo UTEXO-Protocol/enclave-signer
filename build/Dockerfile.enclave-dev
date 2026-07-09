@@ -44,10 +44,33 @@ WORKDIR /build/enclave
 # image in debug keeps `debug_assertions` on so the guard stays quiet while
 # still refusing the feature in any production (release) build.
 #
-# `--mount=type=ssh` exposes the SSH_AUTH_SOCK forwarded by `--ssh default`
-# only for the duration of this RUN, so no credentials end up in the
-# image layers.
-RUN --mount=type=ssh cargo build --features allow-seed-import,spv
+# `--mount=type=ssh` exposes the SSH_AUTH_SOCK forwarded by `--ssh default`.
+# In CD we also pass both deploy keys as BuildKit secrets to avoid SSH key
+# collisions when two private repos live on github.com.
+RUN --mount=type=ssh \
+    --mount=type=secret,id=federated_key,required=false \
+    --mount=type=secret,id=consignment_key,required=false \
+    sh -lc 'set -eu; \
+      if [ -f /run/secrets/federated_key ] && [ -f /run/secrets/consignment_key ]; then \
+        install -m 600 /run/secrets/federated_key /tmp/federated_key; \
+        install -m 600 /run/secrets/consignment_key /tmp/consignment_key; \
+        cat > /tmp/ci_ssh_config <<'"'"'EOF'"'"'
+Host github.com-federated
+  HostName github.com
+  User git
+  IdentityFile /tmp/federated_key
+  IdentitiesOnly yes
+Host github.com-consignment
+  HostName github.com
+  User git
+  IdentityFile /tmp/consignment_key
+  IdentitiesOnly yes
+EOF
+        export GIT_SSH_COMMAND="ssh -F /tmp/ci_ssh_config"; \
+        git config --global url."ssh://git@github.com-federated/UTEXO-Protocol/federated-signer-proto.git".insteadOf "ssh://git@github.com/UTEXO-Protocol/federated-signer-proto.git"; \
+        git config --global url."ssh://git@github.com-consignment/UTEXO-Protocol/rgb-consignment-parser.git".insteadOf "ssh://git@github.com/UTEXO-Protocol/rgb-consignment-parser.git"; \
+      fi; \
+      cargo build --features allow-seed-import,spv'
 
 # ===== Runtime Stage =====
 FROM debian:bookworm-slim
