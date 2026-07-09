@@ -77,6 +77,12 @@ jobs:
             ${{ secrets.RGB_CONSIGNMENT_PARSER_DEPLOY_KEY }}
             ${{ secrets.FEDERATED_SIGNER_PROTO_DEPLOY_KEY }}
 
+      - name: Prepare BuildKit key files
+        run: |
+          umask 077
+          printf '%s\n' '${{ secrets.FEDERATED_SIGNER_PROTO_DEPLOY_KEY }}' > /tmp/federated_key
+          printf '%s\n' '${{ secrets.RGB_CONSIGNMENT_PARSER_DEPLOY_KEY }}' > /tmp/consignment_key
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
@@ -97,9 +103,9 @@ jobs:
           push: true
           ssh: default
           build-args: BUILDKIT_INLINE_CACHE=1
-          secrets: |
-            federated_key=${{ secrets.FEDERATED_SIGNER_PROTO_DEPLOY_KEY }}
-            consignment_key=${{ secrets.RGB_CONSIGNMENT_PARSER_DEPLOY_KEY }}
+          secret-files: |
+            federated_key=/tmp/federated_key
+            consignment_key=/tmp/consignment_key
           tags: |
             ${{ env.REGISTRY }}/${{ matrix.image }}:${{ matrix.tag }}
             ${{ env.REGISTRY }}/${{ matrix.image }}:${{ matrix.float }}
@@ -115,9 +121,9 @@ jobs:
           push: true
           ssh: default
           build-args: BUILDKIT_INLINE_CACHE=1
-          secrets: |
-            federated_key=${{ secrets.FEDERATED_SIGNER_PROTO_DEPLOY_KEY }}
-            consignment_key=${{ secrets.RGB_CONSIGNMENT_PARSER_DEPLOY_KEY }}
+          secret-files: |
+            federated_key=/tmp/federated_key
+            consignment_key=/tmp/consignment_key
           tags: |
             ${{ env.REGISTRY }}/${{ matrix.image }}:${{ matrix.tag }}
             ${{ env.REGISTRY }}/${{ matrix.image }}:${{ matrix.float }}
