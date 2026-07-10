@@ -28,12 +28,15 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y pkg-config libssl-dev protobuf-compiler
 
       # The `rgb-consignment` dep (used by the rgb-validation / spv
-      # feature combos) is hosted in a private repo and fetched over
-      # SSH. Load a read-only deploy key registered on
-      # UTEXO-Protocol/rgb-consignment-parser into the agent so cargo's
-      # `git fetch` can authenticate. Default-feature jobs don't pull
-      # the dep and run without this; every job below that enables
-      # `rgb-validation` or `spv` requires it.
+      # feature combos) and the `federated-signer-proto` dep are hosted
+      # in private repos and fetched over SSH. Load read-only deploy
+      # keys registered on UTEXO-Protocol/rgb-consignment-parser and
+      # UTEXO-Protocol/federated-signer-proto into the agent so cargo's
+      # `git fetch` can authenticate. The default feature set now
+      # includes `spv` (which pulls `rgb-validation`), so every build
+      # below needs these keys — including the minimal
+      # `--no-default-features` build, which still fetches the private
+      # proto crate.
       - name: Set up SSH for private RGB deps
         uses: webfactory/ssh-agent@v0.9.0
         with:
@@ -54,6 +57,9 @@ jobs:
       - name: Check formatting
         run: cargo fmt --all -- --check
 
+      # The default feature set is now `spv` (which pulls `rgb-validation`), so
+      # the default build/clippy/test below exercise the production signing
+      # path — the SPV-anchored fundsOut flow shipped in the EIF.
       - name: Build (default features)
         run: cargo build --workspace
 
@@ -78,6 +84,21 @@ jobs:
       # what the SPV unit + integration tests exercise.
       - name: Test (--features spv)
         run: cargo test -p utexo-bridge-enclave --features spv
+
+      # Minimal build: no features at all (`--no-default-features` drops the
+      # now-default `spv`). Keeps the no-SPV path compiling and exercises the
+      # M-01 / #61 guard that a no-spv build refuses to sign `fundsOut`
+      # (test_no_spv_build_refuses_funds_out_even_without_merkle_proofs).
+      # Skips the private `rgb-consignment` dep, but still fetches the private
+      # `federated-signer-proto` crate — the SSH agent set up above covers it.
+      - name: Build (minimal — no default features)
+        run: cargo build -p utexo-bridge-enclave --no-default-features
+
+      - name: Clippy (minimal — no default features)
+        run: cargo clippy -p utexo-bridge-enclave --no-default-features --all-targets -- -D warnings
+
+      - name: Test (minimal — no default features)
+        run: cargo test -p utexo-bridge-enclave --no-default-features
 
       # In-enclave EVM FundsIn verification (#60). The predicate + decoding
       # tests use a FakeProvider, so no real RPC is needed in CI.

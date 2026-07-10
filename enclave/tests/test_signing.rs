@@ -465,13 +465,21 @@ fn test_sign_evm_rejects_unconfigured_bridge_config() {
 // consignment amount, EVM destination validation decodes `fundsOut.amount` and
 // adds `calldata_commission`, then `validate_route_proofs` compares the two.
 
-/// Default-build coverage: `--features rgb-validation` is required to
-/// sign fundsOut at all. The cross-check fails fast with a message
-/// that names the missing feature, so a misconfigured deployment fails
-/// loud instead of silently signing against unvalidated bytes.
+/// M-01 / #61: a build without `spv` must refuse to sign any `fundsOut`,
+/// even when the request carries no merkle_proofs. Without SPV the enclave can
+/// only anchor a consignment's witness txs through the host-controlled Esplora
+/// resolver, so a fabricated anchor would otherwise be signed against. The
+/// earlier guard only fired when `merkle_proofs[]` was non-empty, letting an
+/// empty-proofs `fundsOut` slip through — this asserts that gap is closed.
+/// (`not(rgb-validation)` ⇔ `not(spv)` for any build that compiles: `spv`
+/// pulls in `rgb-validation`, and lib.rs's `compile_error!` forbids
+/// rgb-validation without spv.) On this layout the refusal fires in RGB
+/// source validation, whose message names the missing `rgb-validation`
+/// feature, so a misconfigured deployment fails loud instead of silently
+/// signing against unvalidated bytes.
 #[cfg(all(not(feature = "rgb-validation"), not(feature = "dev-mode")))]
 #[test]
-fn test_sign_evm_rejects_funds_out_in_default_build() {
+fn test_no_spv_build_refuses_funds_out_even_without_merkle_proofs() {
     let port = common::start_test_server();
 
     let init_req = EnclaveRequest {
@@ -482,8 +490,19 @@ fn test_sign_evm_rejects_funds_out_in_default_build() {
     };
     common::send_request(port, &init_req);
 
+    // A fundsOut request carrying no merkle_proofs — exactly the shape that
+    // previously bypassed the no-validation guard (M-01 / #61): the refusal
+    // must fire even when the request supplies no SPV proofs at all.
+    let req = valid_sign_evm_request(1000, 50);
+    match &req.source_network {
+        Some(SourceNetwork::RgbSource(source)) => assert!(
+            source.merkle_proofs.is_empty(),
+            "test precondition: the request must carry no merkle_proofs"
+        ),
+        other => panic!("expected RGB source, got {other:?}"),
+    }
     let sign_req = EnclaveRequest {
-        request: Some(Request::Sign(valid_sign_evm_request(1000, 50))),
+        request: Some(Request::Sign(req)),
     };
     let resp = common::send_request(port, &sign_req);
 
@@ -491,7 +510,10 @@ fn test_sign_evm_rejects_funds_out_in_default_build() {
         Some(Response::Error(e)) => {
             assert_eq!(e.code, 3);
             assert!(
-                e.message.contains("rgb-validation"),
+                e.message.contains(
+                    "RGB source validation requires the enclave to be built with \
+                     --features rgb-validation"
+                ),
                 "expected feature-gate rejection, got: {}",
                 e.message
             );
@@ -1305,10 +1327,13 @@ fn test_proxy_federation_returns_not_ready() {
 // =============================================================================
 //
 // These run through the real handler, so the production fail-closed gate in
-// `validation::evm_gas_tx` is active (the integration crate builds the lib
+// `networks::evm::gas_tx` is active (the integration crate builds the lib
 // without cfg(test)). They cover the accept path and the two drain vectors.
+// Gated on `not(dev-mode)` like the other cross-check tests: under dev-mode
+// the handler keeps the legacy opaque-digest path instead of the allowlist.
 
 /// Minimal RLP encoder for building gas-tx fixtures.
+#[cfg(not(feature = "dev-mode"))]
 fn rlp_str(bytes: &[u8]) -> Vec<u8> {
     if bytes.len() == 1 && bytes[0] < 0x80 {
         return vec![bytes[0]];
@@ -1331,6 +1356,7 @@ fn rlp_str(bytes: &[u8]) -> Vec<u8> {
     out
 }
 
+#[cfg(not(feature = "dev-mode"))]
 fn rlp_scalar(v: u64) -> Vec<u8> {
     let trimmed: Vec<u8> = v
         .to_be_bytes()
@@ -1341,6 +1367,7 @@ fn rlp_scalar(v: u64) -> Vec<u8> {
     rlp_str(&trimmed)
 }
 
+#[cfg(not(feature = "dev-mode"))]
 fn rlp_list(items: &[Vec<u8>]) -> Vec<u8> {
     let mut payload = Vec::new();
     for it in items {
@@ -1365,6 +1392,7 @@ fn rlp_list(items: &[Vec<u8>]) -> Vec<u8> {
 }
 
 /// Unsigned EIP-1559 preimage: `0x02 || rlp([chainId, nonce, maxPrio, maxFee, gas, to, value, data, accessList])`.
+#[cfg(not(feature = "dev-mode"))]
 fn eip1559_unsigned(chain_id: u64, to: &[u8; 20], value: u64) -> Vec<u8> {
     let body = rlp_list(&[
         rlp_scalar(chain_id),
@@ -1383,6 +1411,7 @@ fn eip1559_unsigned(chain_id: u64, to: &[u8; 20], value: u64) -> Vec<u8> {
 }
 
 /// `BridgeConfig` with the gas-tx destination pinned (chain_id 1, to 0xAA…).
+#[cfg(not(feature = "dev-mode"))]
 fn gas_pinned_config() -> BridgeConfig {
     BridgeConfig {
         chain_id: 1,
@@ -1393,6 +1422,7 @@ fn gas_pinned_config() -> BridgeConfig {
     }
 }
 
+#[cfg(not(feature = "dev-mode"))]
 fn init(port: u16) {
     common::send_request(
         port,
@@ -1406,6 +1436,7 @@ fn init(port: u16) {
 }
 
 #[test]
+#[cfg(not(feature = "dev-mode"))]
 fn test_gas_tx_signs_pinned_destination() {
     let port = common::start_test_server_with_config(|_| {}, gas_pinned_config());
     init(port);
@@ -1428,6 +1459,7 @@ fn test_gas_tx_signs_pinned_destination() {
 }
 
 #[test]
+#[cfg(not(feature = "dev-mode"))]
 fn test_gas_tx_rejects_opaque_digest() {
     let port = common::start_test_server_with_config(|_| {}, gas_pinned_config());
     init(port);
@@ -1457,6 +1489,7 @@ fn test_gas_tx_rejects_opaque_digest() {
 }
 
 #[test]
+#[cfg(not(feature = "dev-mode"))]
 fn test_gas_tx_rejects_drain_to_attacker() {
     let port = common::start_test_server_with_config(|_| {}, gas_pinned_config());
     init(port);

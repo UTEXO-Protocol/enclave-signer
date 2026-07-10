@@ -269,6 +269,40 @@ fn clone_rejects_duplicate_requester_attestation_nonce_on_donor() {
 }
 
 #[test]
+fn clone_rejected_handshake_does_not_consume_replay_nonce() {
+    // audit W-13: the donor must record a handshake nonce only AFTER the
+    // pubkey/digest/donor-secret checks pass. A rejected (unauthenticated)
+    // handshake must not consume replay-guard capacity — otherwise anyone able
+    // to mint attestations over arbitrary nonces (the get_attested_public_key
+    // oracle) could exhaust the guard without ever knowing the cloning secret.
+    let (donor_port, donor_keys) = start_donor();
+    let requester_port = start_requester();
+
+    let init = initiate_cloning(requester_port, CLONING_SECRET, &donor_keys.evm_address);
+
+    // Tamper the cloning digest so the handshake is rejected at the digest
+    // binding — which runs *after* the point where the nonce used to be
+    // recorded.
+    let mut tampered = init.clone();
+    tampered.cloning_digest[0] ^= 0xff;
+    let err = request_get_clone(donor_port, &donor_keys.evm_address, &tampered)
+        .expect_err("tampered cloning_digest must be rejected");
+    assert!(
+        !err.message.contains("replay"),
+        "should fail on the digest binding, not the replay guard: {}",
+        err.message
+    );
+
+    // The rejected attempt must NOT have recorded its nonce: a subsequent
+    // valid handshake reusing the same attestation (same nonce) still
+    // succeeds. Pre-fix this failed on the replay guard because the doomed
+    // attempt consumed the nonce first.
+    request_get_clone(donor_port, &donor_keys.evm_address, &init).expect(
+        "valid handshake reusing the same nonce must still succeed after a rejected attempt",
+    );
+}
+
+#[test]
 fn cannot_initialize_after_entering_cloning() {
     let requester_port = start_requester();
     // Start a clone session using a throwaway donor address.

@@ -300,10 +300,68 @@ mod tests {
         let mut destination = destination();
         destination.call_data[..4].copy_from_slice(&[0xDE, 0xAD, 0xBE, 0xEF]);
         with_ctx(&config(), |ctx| {
-            assert!(validate_destination(&destination, ctx)
+            let msg = validate_destination(&destination, ctx)
                 .unwrap_err()
-                .to_string()
-                .contains("unexpected calldata selector"));
+                .to_string();
+            // The error must both name the failing predicate and echo the
+            // offending selector so an operator can see WHAT was rejected.
+            assert!(
+                msg.contains("unexpected calldata selector") && msg.contains("deadbeef"),
+                "expected selector rejection echoing the selector hex, got: {msg}"
+            );
+        });
+    }
+
+    #[test]
+    fn rejects_calldata_shorter_than_selector() {
+        let mut destination = destination();
+        // 3 bytes can't carry a 4-byte selector.
+        destination.call_data = vec![0x1a, 0xd8, 0x80];
+        with_ctx(&config(), |ctx| {
+            let err = validate_destination(&destination, ctx).unwrap_err();
+            assert!(
+                err.to_string().contains("call_data too short"),
+                "expected too-short rejection, got: {err}"
+            );
+        });
+    }
+
+    #[test]
+    fn rejects_calldata_over_size_cap() {
+        // A maximally packed calldata must be rejected up-front (audit I-06 /
+        // #90), before selector dispatch or any offset extraction. Start from
+        // a valid fundsOut destination and pad the tail past the cap.
+        let mut destination = destination();
+        destination
+            .call_data
+            .resize(MAX_FUNDS_OUT_CALL_DATA_LEN + 1, 0u8);
+        with_ctx(&config(), |ctx| {
+            let err = validate_destination(&destination, ctx).unwrap_err();
+            assert!(
+                err.to_string().contains("call_data too large"),
+                "expected too-large rejection, got: {err}"
+            );
+        });
+    }
+
+    #[test]
+    fn accepts_calldata_at_size_cap() {
+        // Exactly at the cap is allowed; the selector head is preserved so
+        // dispatch still recognizes the fundsOut shape.
+        let mut destination = destination();
+        destination
+            .call_data
+            .resize(MAX_FUNDS_OUT_CALL_DATA_LEN, 0u8);
+        destination.call_data[..4].copy_from_slice(&FUNDS_OUT_SELECTOR_POOLS);
+        // The zero-padded tail may still fail the later ABI decode; assert
+        // only that it is NOT the size error.
+        with_ctx(&config(), |ctx| {
+            if let Err(e) = validate_destination(&destination, ctx) {
+                assert!(
+                    !e.to_string().contains("call_data too large"),
+                    "calldata exactly at the cap must not trip the size check, got: {e}"
+                );
+            }
         });
     }
 
@@ -316,6 +374,55 @@ mod tests {
                 .unwrap_err()
                 .to_string()
                 .contains("chain_id mismatch"));
+        });
+    }
+
+    #[test]
+    fn rejects_zero_chain_id() {
+        let mut destination = destination();
+        destination.chain_id = 0;
+        with_ctx(&config(), |ctx| {
+            assert!(validate_destination(&destination, ctx)
+                .unwrap_err()
+                .to_string()
+                .contains("chain_id must be > 0"));
+        });
+    }
+
+    #[test]
+    fn rejects_proxy_contract_mismatch() {
+        let mut destination = destination();
+        destination.proxy_contract = vec![0xBB; ADDRESS_LEN]; // pinned is 0xAA
+        with_ctx(&config(), |ctx| {
+            let err = validate_destination(&destination, ctx).unwrap_err();
+            assert!(
+                err.to_string().contains("proxy_contract mismatch"),
+                "got: {err}"
+            );
+        });
+    }
+
+    #[test]
+    fn rejects_missing_proxy_contract() {
+        let mut destination = destination();
+        destination.proxy_contract = vec![];
+        with_ctx(&config(), |ctx| {
+            assert!(validate_destination(&destination, ctx)
+                .unwrap_err()
+                .to_string()
+                .contains(&format!("proxy_contract must be {ADDRESS_LEN} bytes")));
+        });
+    }
+
+    #[test]
+    fn rejects_expired_deadline() {
+        let mut destination = destination();
+        destination.deadline = 1; // Unix timestamp 1 is long expired
+        with_ctx(&config(), |ctx| {
+            assert!(validate_destination(&destination, ctx)
+                .unwrap_err()
+                .to_string()
+                .contains("deadline expired"));
         });
     }
 
