@@ -78,6 +78,9 @@ fn main() {
 
     // Start vsock-to-TCP forwarder for Esplora access (production only).
     // The host must run: vsock-proxy <ESPLORA_VSOCK_PORT> <esplora-host> <esplora-port>
+    // Untrusted, host-controlled egress boundary (audit I-01): data fetched
+    // through it is evidence verified by SPV + rgbstd validation, never
+    // trusted input. See `vsock_forwarder`'s module-level TRUST BOUNDARY note.
     #[cfg(all(feature = "vsock", target_os = "linux"))]
     {
         let vsock_port: u32 = std::env::var("ESPLORA_VSOCK_PORT")

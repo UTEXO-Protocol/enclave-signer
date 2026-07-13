@@ -441,6 +441,18 @@ impl EnclaveState {
         self.with_active(|km| km.sign_psbt(psbt_bytes))
     }
 
+    /// Sign a PSBT restricted to a single BIP-86 account (see
+    /// [`crate::keys::KeyManager::sign_psbt_scoped`]). The plain-BTC path uses
+    /// this with `Some(AccountType::Vanilla)` so it can never co-sign a Colored
+    /// (RGB-allocated) input.
+    pub fn sign_psbt_scoped(
+        &self,
+        psbt_bytes: &[u8],
+        allowed_account: Option<crate::keys::AccountType>,
+    ) -> Result<(Vec<u8>, usize)> {
+        self.with_active(|km| km.sign_psbt_scoped(psbt_bytes, allowed_account))
+    }
+
     fn lock_phase(&self) -> Result<std::sync::MutexGuard<'_, Phase>> {
         self.inner
             .lock()

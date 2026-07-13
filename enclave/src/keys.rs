@@ -31,7 +31,7 @@ pub struct KeyInfo {
 }
 
 /// Which BIP-86 account to derive from.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AccountType {
     Vanilla,
     Colored,
@@ -333,6 +333,27 @@ impl KeyManager {
     /// Auto-detects taproot (Schnorr, BIP-340) vs SegWit v0 P2WSH (ECDSA) per input.
     /// Returns the modified PSBT bytes and count of inputs signed.
     pub fn sign_psbt(&self, psbt_bytes: &[u8]) -> Result<(Vec<u8>, usize)> {
+        self.sign_psbt_scoped(psbt_bytes, None)
+    }
+
+    /// Sign PSBT inputs matching our keys, optionally restricted to a single
+    /// BIP-86 account.
+    ///
+    /// `allowed_account`:
+    ///   * `None` — sign every input we can (taproot any account + legacy
+    ///     P2WSH). Used by the consignment-bound bridge path (`SignPsbt`),
+    ///     where the consignment, not the account, is the authorization.
+    ///   * `Some(account)` — sign ONLY taproot inputs resolving to `account`,
+    ///     and skip the legacy P2WSH path entirely. The plain-BTC path
+    ///     (`SignBtc`) passes `Some(Vanilla)` so it can never co-sign a
+    ///     Colored (RGB-allocated) input — those move only via the
+    ///     consignment-bound path. This is the structural guard that keeps the
+    ///     M-01 fix from being reopened on the plain-BTC sibling path.
+    pub fn sign_psbt_scoped(
+        &self,
+        psbt_bytes: &[u8],
+        allowed_account: Option<AccountType>,
+    ) -> Result<(Vec<u8>, usize)> {
         let secp = Secp256k1::new();
 
         let mut psbt = Psbt::deserialize(psbt_bytes)
@@ -341,11 +362,17 @@ impl KeyManager {
         let mut signed_count = 0usize;
 
         // === Taproot signing (BIP-86 / BIP-340 Schnorr) ===
-        let taproot_jobs = crate::networks::rgb::signing::taproot::find_taproot_sign_jobs(
+        let mut taproot_jobs = crate::networks::rgb::signing::taproot::find_taproot_sign_jobs(
             &psbt,
             &self.master_fingerprint,
             self,
         );
+        if let Some(account) = allowed_account {
+            // Plain-BTC path: refuse any input that resolves to a different
+            // account (e.g. Colored/RGB). Dropping the job means the input is
+            // left unsigned.
+            taproot_jobs.retain(|job| job.account_type == account);
+        }
         if !taproot_jobs.is_empty() {
             signed_count += crate::networks::rgb::signing::taproot::sign_taproot_inputs(
                 &mut psbt,
@@ -355,6 +382,11 @@ impl KeyManager {
         }
 
         // === Legacy SegWit v0 P2WSH signing (ECDSA) ===
+        // Skipped entirely on an account-scoped call: the legacy single key is
+        // not BIP-86-account-derived, so it has no place on the plain-BTC path.
+        if allowed_account.is_some() {
+            return Ok((psbt.serialize(), signed_count));
+        }
         let secret_key = SecretKey::from_slice(self.btc_secret.expose_secret())
             .map_err(|e| EnclaveError::Signing(format!("btc key: {e}")))?;
         let our_pubkey = secret_key.public_key(&secp);

@@ -1,3 +1,4 @@
+pub mod btc_crosscheck;
 pub mod psbt_validation;
 pub mod signing;
 pub mod spv;
@@ -149,6 +150,11 @@ pub fn validate_destination_anchor(
                 .into(),
         ));
     }
+    // Wire-tamper detection, mirroring the EVM path's defence-in-depth check.
+    // INTEGRITY, NOT AUTHORIZATION (audit I-02 / Oxorio I-09): the listener
+    // controls both `consignment` and `consignment_hash`, so a match only
+    // proves the wire copy is intact - authorization is the full rgbstd
+    // validation + witness-txid bind below, never this hash.
     if destination.consignment_hash.is_empty() {
         return Err(EnclaveError::CrossCheck(
             "consignment present but consignment_hash is missing".into(),

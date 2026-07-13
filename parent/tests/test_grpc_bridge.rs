@@ -94,6 +94,14 @@ fn start_mock_enclave() -> u16 {
                         },
                     }
                 }
+                Some(enclave_request::Request::SignBtc(_)) => EnclaveResponse {
+                    response: Some(enclave_response::Response::SignedPsbt(
+                        enclave_proto::SignedPsbtResponse {
+                            signed_psbt: vec![0xBC; 80],
+                            inputs_signed: 1,
+                        },
+                    )),
+                },
                 Some(enclave_request::Request::InitializeKey(_)) => EnclaveResponse {
                     response: Some(enclave_response::Response::InitializeKey(
                         enclave_proto::InitializeKeyResponse {
@@ -463,6 +471,56 @@ async fn grpc_sign_psbt_roundtrip() {
         !resp.signature.is_empty(),
         "signed PSBT should not be empty"
     );
+}
+
+#[tokio::test]
+async fn grpc_sign_btc_roundtrip() {
+    // BTC_UTXO routes the EnrichedBtcPayload to a SignBtcRequest and returns a
+    // signed PSBT — the plain-BTC path is distinct from TRANSACTION/SignPsbt.
+    let enclave_port = start_mock_enclave();
+    let grpc_port = start_grpc_server(enclave_port).await;
+
+    let mut client = ParentServiceClient::connect(format!("http://127.0.0.1:{grpc_port}"))
+        .await
+        .unwrap();
+
+    let payload = enriched::EnrichedBtcPayload {
+        psbt_bytes: vec![0x70, 0x73, 0x62, 0x74, 0xFF],
+    };
+
+    let req = SignRequest {
+        common: Some(common(0, 0, DataType::BtcUtxo)),
+        source: None,
+        data: Some(sign_request::Data::BtcData(payload)),
+    };
+
+    let resp = client.sign(req).await.unwrap().into_inner();
+    assert_eq!(
+        resp.signature,
+        vec![0xBC; 80],
+        "BTC_UTXO should route to SignBtc and return its signed PSBT"
+    );
+}
+
+#[tokio::test]
+async fn grpc_btc_utxo_rejects_missing_payload() {
+    // BTC_UTXO with no BtcData in the oneof must be rejected at the boundary,
+    // not forwarded to the enclave.
+    let enclave_port = start_mock_enclave();
+    let grpc_port = start_grpc_server(enclave_port).await;
+
+    let mut client = ParentServiceClient::connect(format!("http://127.0.0.1:{grpc_port}"))
+        .await
+        .unwrap();
+
+    let req = SignRequest {
+        common: Some(common(0, 0, DataType::BtcUtxo)),
+        source: None,
+        data: None,
+    };
+
+    let status = client.sign(req).await.unwrap_err();
+    assert_eq!(status.code(), tonic::Code::InvalidArgument);
 }
 
 #[tokio::test]
