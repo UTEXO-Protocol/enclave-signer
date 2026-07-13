@@ -197,6 +197,51 @@ pub fn validate_psbt_anchors_transition(
     Ok(())
 }
 
+/// Maximum multiple of the recommended fee rate a send-RGB PSBT may pay
+/// (#55). Compile-time (PCR-attested), deliberately not host-tunable: an
+/// env knob would let the operator's host neutralize the check. 3x absorbs
+/// fee-market movement within the estimate's TTL plus the unsigned-vsize
+/// overestimate (see [`check_psbt_fee_rate`]).
+#[cfg(feature = "rgb-validation")]
+const FEE_RATE_HEADROOM: f64 = 3.0;
+
+/// Fee-rate sanity check for send-RGB PSBTs (#55): the implied fee rate must
+/// not exceed [`FEE_RATE_HEADROOM`] x the enclave-fetched recommendation.
+/// Without this, a compromised host could burn bridge BTC as miner fees on an
+/// otherwise fully-validated PSBT (the anchor bind pins inputs and the
+/// commitment output, but the fee is whatever the outputs leave behind).
+///
+/// Fail-closed on every degenerate shape: `Psbt::fee()` errors (missing
+/// `witness_utxo`/`non_witness_utxo`, value overflow) reject, a zero-vsize tx
+/// rejects, and the comparison is written so a NaN rate rejects. The rate is
+/// computed over `unsigned_tx.vsize()`, which is smaller than the final
+/// witness-carrying vsize — the implied rate is therefore an OVERestimate,
+/// i.e. conservative in the rejecting direction; the headroom absorbs it.
+#[cfg(feature = "rgb-validation")]
+pub fn check_psbt_fee_rate(psbt: &Psbt, recommended_sat_vb: f64) -> Result<()> {
+    let fee = psbt.fee().map_err(|e| {
+        EnclaveError::CrossCheck(format!(
+            "cannot compute PSBT fee (every input needs witness_utxo or non_witness_utxo): {e}"
+        ))
+    })?;
+    let vsize = psbt.unsigned_tx.vsize();
+    if vsize == 0 {
+        return Err(EnclaveError::CrossCheck(
+            "PSBT unsigned tx has zero vsize — cannot bound its fee rate".into(),
+        ));
+    }
+    let rate = fee.to_sat() as f64 / vsize as f64;
+    let limit = FEE_RATE_HEADROOM * recommended_sat_vb;
+    // `!(a <= b)` instead of `a > b`: NaN must reject, never pass.
+    if !(rate <= limit) {
+        return Err(EnclaveError::CrossCheck(format!(
+            "send-RGB PSBT fee rate too high: {rate:.2} sat/vB > {FEE_RATE_HEADROOM}x the \
+             recommended {recommended_sat_vb:.2} sat/vB — refusing to burn bridge BTC as fees"
+        )));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -348,6 +393,88 @@ mod tests {
     // =========================================================================
     // send-RGB anchoring — `validate_psbt_anchors_transition`
     // =========================================================================
+    #[cfg(feature = "rgb-validation")]
+    mod fee_rate {
+        use super::*;
+
+        /// One segwit-ish input carrying `witness_utxo` of `input_sats`, one
+        /// output of `output_sats` — so `Psbt::fee()` = input − output.
+        fn psbt_with_fee(input_sats: u64, output_sats: u64) -> Psbt {
+            let unsigned_tx = Transaction {
+                version: bitcoin::transaction::Version(2),
+                lock_time: bitcoin::absolute::LockTime::ZERO,
+                input: vec![TxIn {
+                    previous_output: OutPoint {
+                        txid: Txid::from_raw_hash(bitcoin::hashes::sha256d::Hash::from_byte_array(
+                            [0x11; 32],
+                        )),
+                        vout: 0,
+                    },
+                    script_sig: ScriptBuf::new(),
+                    sequence: Sequence::MAX,
+                    witness: Witness::new(),
+                }],
+                output: vec![TxOut {
+                    value: Amount::from_sat(output_sats),
+                    script_pubkey: ScriptBuf::new(),
+                }],
+            };
+            let mut psbt = Psbt::from_unsigned_tx(unsigned_tx).expect("from_unsigned_tx");
+            psbt.inputs[0].witness_utxo = Some(TxOut {
+                value: Amount::from_sat(input_sats),
+                script_pubkey: ScriptBuf::new(),
+            });
+            psbt
+        }
+
+        #[test]
+        fn accepts_fee_rate_at_headroom() {
+            // rate == FEE_RATE_HEADROOM × recommended must pass (boundary is
+            // inclusive: reject only strictly above the cap).
+            let recommended = 10.0;
+            let vsize = psbt_with_fee(100_000, 100_000).unsigned_tx.vsize() as u64;
+            let fee_at_cap = (FEE_RATE_HEADROOM * recommended) as u64 * vsize;
+            let psbt = psbt_with_fee(100_000, 100_000 - fee_at_cap);
+            assert!(check_psbt_fee_rate(&psbt, recommended).is_ok());
+        }
+
+        #[test]
+        fn rejects_fee_rate_above_headroom() {
+            // One extra sat/vB above the cap → reject; nothing else about the
+            // PSBT is wrong, so the error must be the fee-rate one.
+            let recommended = 10.0;
+            let vsize = psbt_with_fee(100_000, 100_000).unsigned_tx.vsize() as u64;
+            let fee_over_cap = ((FEE_RATE_HEADROOM * recommended) as u64 + 1) * vsize;
+            let psbt = psbt_with_fee(100_000, 100_000 - fee_over_cap);
+            let err = check_psbt_fee_rate(&psbt, recommended).unwrap_err();
+            assert!(
+                err.to_string().contains("fee rate too high"),
+                "expected fee-rate rejection, got: {err}"
+            );
+        }
+
+        #[test]
+        fn rejects_psbt_without_utxo_data() {
+            // No witness_utxo/non_witness_utxo → the fee is uncomputable and
+            // the check must fail closed, not skip.
+            let psbt = Psbt::deserialize(&minimal_valid_psbt_bytes()).unwrap();
+            let err = check_psbt_fee_rate(&psbt, 10.0).unwrap_err();
+            assert!(
+                err.to_string().contains("cannot compute PSBT fee"),
+                "expected uncomputable-fee rejection, got: {err}"
+            );
+        }
+
+        #[test]
+        fn rejects_nan_recommendation() {
+            // A NaN limit must reject (the comparison is written as
+            // `!(rate <= limit)` so NaN can never pass). The recommendation
+            // is validated upstream, but the check must not rely on that.
+            let psbt = psbt_with_fee(100_000, 99_000);
+            assert!(check_psbt_fee_rate(&psbt, f64::NAN).is_err());
+        }
+    }
+
     #[cfg(feature = "rgb-validation")]
     mod anchor {
         use super::*;
