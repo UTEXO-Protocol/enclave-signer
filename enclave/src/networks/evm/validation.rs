@@ -238,6 +238,7 @@ mod tests {
             bridge_contract: [0xAA; ADDRESS_LEN],
             rgb_asset_id: "ignored-by-evm-validation".into(),
             gas_tx_allowed_to: None,
+            ..Default::default()
         }
     }
 

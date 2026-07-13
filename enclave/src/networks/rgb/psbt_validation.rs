@@ -37,21 +37,22 @@ pub fn psbt_operation_key(
     h.finalize().into()
 }
 
-/// Validate the serialized PSBT shape owned by an RGB destination.
-pub fn validate_psbt_bytes(psbt_bytes: &[u8]) -> Result<()> {
-    // Shape whitelist: refuse payloads that aren't even a legitimate PSBT before any other
-    //    predicate runs. Catches three classes of garbage up-front:
-    //
-    //      (a) empty bytes (handler tried to sign nothing),
-    //      (b) bytes that don't conform to BIP-174 (random/truncated/
-    //          tampered),
-    //      (c) PSBTs with no inputs — there's literally nothing to sign,
-    //          and the unsigned-tx-must-be-non-empty rule is implicit in
-    //          BIP-174's signing semantics.
-    //
-    //    The existing PSBT signer would have failed later on these too,
-    //    but with a much noisier downstream error. Failing here gives the
-    //    caller a single clear reason.
+/// Shape whitelist for a raw PSBT: refuse payloads that aren't even a legitimate
+/// PSBT before any other predicate runs. Catches three classes of garbage
+/// up-front:
+///
+///   (a) empty bytes (handler tried to sign nothing),
+///   (b) bytes that don't conform to BIP-174 (random/truncated/tampered),
+///   (c) PSBTs with no inputs — there's literally nothing to sign, and the
+///       unsigned-tx-must-be-non-empty rule is implicit in BIP-174's signing
+///       semantics.
+///
+/// The signer would fail later on these too, but with a much noisier downstream
+/// error; failing here gives the caller a single clear reason. Returns the
+/// parsed PSBT so callers that need it (the plain-BTC `SignBtc` path) don't
+/// re-parse. Shared by the bridge/RGB `SignPsbt` path ([`validate_psbt_bytes`])
+/// and the plain-BTC `SignBtc` path ([`crate::networks::rgb::btc_crosscheck`]).
+pub(crate) fn parse_psbt_shape(psbt_bytes: &[u8]) -> Result<Psbt> {
     if psbt_bytes.is_empty() {
         return Err(EnclaveError::CrossCheck("psbt_bytes is empty".into()));
     }
@@ -63,7 +64,12 @@ pub fn validate_psbt_bytes(psbt_bytes: &[u8]) -> Result<()> {
         ));
     }
 
-    Ok(())
+    Ok(psbt)
+}
+
+/// Validate the serialized PSBT shape owned by an RGB destination.
+pub fn validate_psbt_bytes(psbt_bytes: &[u8]) -> Result<()> {
+    parse_psbt_shape(psbt_bytes).map(|_| ())
 }
 
 /// Bind a PSBT to the RGB consignment it claims to finalize.
