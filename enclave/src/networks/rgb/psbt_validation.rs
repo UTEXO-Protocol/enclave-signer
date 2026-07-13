@@ -232,8 +232,13 @@ pub fn check_psbt_fee_rate(psbt: &Psbt, recommended_sat_vb: f64) -> Result<()> {
     }
     let rate = fee.to_sat() as f64 / vsize as f64;
     let limit = FEE_RATE_HEADROOM * recommended_sat_vb;
-    // `!(a <= b)` instead of `a > b`: NaN must reject, never pass.
-    if !(rate <= limit) {
+    // `partial_cmp` (not `a > b`): an incomparable (NaN) rate or limit must
+    // reject, never pass.
+    let within_limit = matches!(
+        rate.partial_cmp(&limit),
+        Some(std::cmp::Ordering::Less | std::cmp::Ordering::Equal)
+    );
+    if !within_limit {
         return Err(EnclaveError::CrossCheck(format!(
             "send-RGB PSBT fee rate too high: {rate:.2} sat/vB > {FEE_RATE_HEADROOM}x the \
              recommended {recommended_sat_vb:.2} sat/vB — refusing to burn bridge BTC as fees"
