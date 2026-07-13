@@ -171,13 +171,16 @@ jobs:
       - name: Install system dependencies
         run: sudo apt-get update && sudo apt-get install -y pkg-config libssl-dev protobuf-compiler
 
-      # `--features rgb-validation` pulls the private `rgb-consignment` dep, which
-      # cargo fetches/builds before it reaches our crate's `compile_error!`, so
-      # the deploy key is required here just like the `ci` job above.
+      # `--features rgb-validation` pulls the private `rgb-consignment` dep, and
+      # cargo also resolves the private `federated-signer-proto` git dep from the
+      # lockfile, both fetched before it reaches our crate's `compile_error!`, so
+      # both deploy keys are required here just like the `ci` job above.
       - name: Set up SSH for private RGB deps
         uses: webfactory/ssh-agent@v0.9.0
         with:
-          ssh-private-key: ${{ secrets.RGB_CONSIGNMENT_PARSER_DEPLOY_KEY }}
+          ssh-private-key: |
+            ${{ secrets.RGB_CONSIGNMENT_PARSER_DEPLOY_KEY }}
+            ${{ secrets.FEDERATED_SIGNER_PROTO_DEPLOY_KEY }}
 
       - name: Cache cargo registry
         uses: actions/cache@v4
