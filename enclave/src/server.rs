@@ -641,11 +641,12 @@ fn handle_get_attested_public_key(
 }
 
 fn handle_sign_evm(ctx: &ServerContext, req: EvmDestination) -> Result<EnclaveResponse> {
-    // TODO: confirm domain name/version with contract team
+    // Domain name/version are pinned to the deployed MultisigProxy and
+    // regression-guarded by `test_domain_separator_matches_deployed_contract`.
     let domain = build_evm_domain(&req)?;
 
     let domain_sep = domain.separator_hash();
-    let digest = sign_request_digest(&domain, &req.call_data, req.nonce, req.deadline);
+    let digest = sign_request_digest(&domain, &req.call_data, req.nonce, req.deadline)?;
 
     tracing::info!(
         domain_name = %domain.name,

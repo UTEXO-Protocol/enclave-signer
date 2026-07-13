@@ -47,6 +47,19 @@ Internet -- orchestrator -- EC2 parent (UNTRUSTED) -- vsock -- Nitro Enclave (TR
 root CA, the correctness of *this* enclave code, and the correctness of the RGB
 / SPV validation libraries. (Parent spec Sec 6.2, Sec 6.3.)
 
+**Wall-clock and entropy assumptions (audit W-11):** three gates read
+`SystemTime::now()` — the request `deadline` check (EVM destination
+validation), the SPV chain-staleness check, and the `submit_headers` rate
+limit. Inside a Nitro enclave the wall clock is hypervisor-provided
+(kvm-clock); no NSM-attested time source is in use. The accepted assumption is
+that the AWS hypervisor is trusted for *coarse* time — consistent with the
+model above, where the same hypervisor is already trusted for isolation and
+attestation itself. The parent host cannot skew the enclave clock through any
+interface this code exposes; a hypervisor-level adversary is outside the
+threat model by construction. Entropy comes from the NSM RNG (actor table
+above). Should host-time-independence ever be required, the remediation path
+is NSM-attested time or external time anchoring (tracked under #123 / W-11).
+
 ## 3. Architecture
 
 The signer is three crates plus the external infrastructure it touches.

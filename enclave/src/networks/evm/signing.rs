@@ -80,16 +80,23 @@ pub fn build_evm_domain(req: &EvmDestination) -> Result<Eip712Domain> {
 
 /// Build the EIP-712 digest matching MultisigProxy._buildDigest():
 ///   keccak256(abi.encode(_BRIDGE_OP_TYPEHASH, selector, keccak256(callData), nonce, deadline))
+///
+/// Fallible on short calldata (audit final I-02): this used to `assert!`,
+/// which with `panic = "abort"` took down the whole enclave. The validation
+/// layer rejects `< 4` bytes in production builds, but dev-mode bypasses that
+/// check, so the guard here must be an error, not an abort.
 pub fn sign_request_digest(
     domain: &Eip712Domain,
     call_data: &[u8],
     nonce: u64,
     deadline: u64,
-) -> [u8; HASH_LEN] {
-    assert!(
-        call_data.len() >= 4,
-        "call_data must contain at least a 4-byte selector"
-    );
+) -> Result<[u8; HASH_LEN]> {
+    if call_data.len() < 4 {
+        return Err(EnclaveError::CrossCheck(format!(
+            "call_data must contain at least a 4-byte selector, got {} bytes",
+            call_data.len()
+        )));
+    }
 
     let struct_hash = {
         let type_hash = Keccak256::digest(BRIDGE_OP_TYPE_HASH_STR.as_bytes());
@@ -118,7 +125,7 @@ pub fn sign_request_digest(
     buf.extend_from_slice(&domain_separator);
     buf.extend_from_slice(&struct_hash);
 
-    Keccak256::digest(&buf).into()
+    Ok(Keccak256::digest(&buf).into())
 }
 
 /// ABI-encode a u64 as a uint256 (HASH_LEN bytes, big-endian, right-aligned).
@@ -189,8 +196,8 @@ mod tests {
              0000000000000000000000000000000000000000000000000000000000000064",
         )
         .unwrap();
-        let digest1 = sign_request_digest(&domain, &call_data, 0, 1_700_000_000);
-        let digest2 = sign_request_digest(&domain, &call_data, 0, 1_700_000_000);
+        let digest1 = sign_request_digest(&domain, &call_data, 0, 1_700_000_000).unwrap();
+        let digest2 = sign_request_digest(&domain, &call_data, 0, 1_700_000_000).unwrap();
         assert_eq!(digest1, digest2);
         assert_ne!(digest1, [0u8; HASH_LEN]);
     }
@@ -204,21 +211,26 @@ mod tests {
             verifying_contract: [0u8; 20],
         };
         let call_data = decode("aabbccdd").unwrap();
-        let d1 = sign_request_digest(&domain, &call_data, 0, 1_700_000_000);
-        let d2 = sign_request_digest(&domain, &call_data, 1, 1_700_000_000);
+        let d1 = sign_request_digest(&domain, &call_data, 0, 1_700_000_000).unwrap();
+        let d2 = sign_request_digest(&domain, &call_data, 1, 1_700_000_000).unwrap();
         assert_ne!(d1, d2);
     }
 
     #[test]
-    #[should_panic(expected = "call_data must contain at least a 4-byte selector")]
-    fn test_short_call_data_panics() {
+    fn test_short_call_data_rejected() {
+        // audit final I-02: short calldata must yield an error, never an
+        // abort — with `panic = "abort"` the old assert! killed the enclave.
         let domain = Eip712Domain {
             name: "MultisigProxy".to_string(),
             version: "1".to_string(),
             chain_id: 1,
             verifying_contract: [0u8; 20],
         };
-        sign_request_digest(&domain, &[0xAA, 0xBB], 0, 1_000);
+        let err = sign_request_digest(&domain, &[0xAA, 0xBB], 0, 1_000).unwrap_err();
+        assert!(
+            err.to_string().contains("at least a 4-byte selector"),
+            "expected short-calldata rejection, got: {err}"
+        );
     }
 
     #[test]
@@ -278,7 +290,7 @@ mod tests {
         digest_buf.extend_from_slice(&expected_struct_hash);
         let expected_digest: [u8; HASH_LEN] = Keccak256::digest(&digest_buf).into();
 
-        let actual_digest = sign_request_digest(&domain, &call_data, nonce, deadline);
+        let actual_digest = sign_request_digest(&domain, &call_data, nonce, deadline).unwrap();
         assert_eq!(actual_digest, expected_digest);
     }
 
