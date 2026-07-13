@@ -60,6 +60,14 @@ threat model by construction. Entropy comes from the NSM RNG (actor table
 above). Should host-time-independence ever be required, the remediation path
 is NSM-attested time or external time anchoring (tracked under #123 / W-11).
 
+**No batch signing path (audit W-03):** the enclave builds and signs exactly
+one digest shape — the single-call `BridgeOperation` EIP-712 struct
+(`sign_request_digest`). There is no `executeBatch` digest builder, and the
+typehash separation between the single-call struct and the on-chain batch
+struct means a signature produced here can never authorize a batch execution.
+Aligning or removing `executeBatch`/`_buildBatchDigest` on the contract side
+is tracked with the contracts team (#123 / W-03).
+
 ## 3. Architecture
 
 The signer is three crates plus the external infrastructure it touches.
