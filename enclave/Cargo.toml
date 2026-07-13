@@ -14,7 +14,7 @@ path = "src/main.rs"
 [dependencies]
 # Protobuf
 prost = "0.14.3"
-federated-signer-proto = { git = "ssh://git@github.com/UTEXO-Protocol/federated-signer-proto.git", rev = "f61dcb76595c69af914107a74852ad013afed9df", package = "federated-signer-proto" }
+federated-signer-proto = { git = "ssh://git@github.com/UTEXO-Protocol/federated-signer-proto.git", rev = "295f9596ca78bba47f76985cdc405b712de025a1", package = "federated-signer-proto" }
 
 # Crypto — ECDSA on secp256k1 (EVM address derivation + signing later)
 k256 = { version = "0.13", features = ["ecdsa"] }
