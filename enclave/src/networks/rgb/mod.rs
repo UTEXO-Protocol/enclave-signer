@@ -235,6 +235,7 @@ mod tests {
                 op_id: op_id.into(),
                 transition_type,
                 total_output_amount,
+                asset_output_amount: total_output_amount,
                 outputs: vec![],
                 burned_asset_amount,
             }),
