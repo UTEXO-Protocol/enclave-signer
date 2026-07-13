@@ -22,6 +22,17 @@ pub struct ServerContext {
     pub bridge_config: BridgeConfig,
     #[cfg(feature = "rgb-validation")]
     pub rgb_validator: Option<crate::networks::rgb::validation::RgbValidator>,
+    /// In-enclave EVM RPC client for independent `FundsIn` verification (#60).
+    /// `None` when the client could not be built; `handle_sign` fails closed on
+    /// `None` in bridge mode. Reaches the RPC only through the loopback vsock
+    /// forwarder, so responses are host-relayed and untrusted - see
+    /// [`crate::networks::evm::evm_event`].
+    #[cfg(feature = "evm-rpc")]
+    pub evm_rpc_client:
+        Option<Box<dyn crate::networks::evm::evm_event::EvmReceiptProvider + Send + Sync>>,
+    /// Pinned EVM-RPC config (loopback URL + min confirmations) for #60.
+    #[cfg(feature = "evm-rpc")]
+    pub evm_rpc_config: crate::config::EvmRpcConfig,
     /// In-enclave Bitcoin header chain for SPV verification. Populated at
     /// boot from the compile-time checkpoint; mutated by SubmitHeaders.
     /// `Mutex` because the enclave handles connections from a single
@@ -95,6 +106,10 @@ impl ServerContext {
             bridge_config,
             #[cfg(feature = "rgb-validation")]
             rgb_validator: None,
+            #[cfg(feature = "evm-rpc")]
+            evm_rpc_client: None,
+            #[cfg(feature = "evm-rpc")]
+            evm_rpc_config: crate::config::EvmRpcConfig::default(),
             header_chain,
             submit_rate_limiter: std::sync::Mutex::new(SubmitRateLimiter::default()),
         }
@@ -240,6 +255,73 @@ fn handle_sign(ctx: &ServerContext, req: SignRequest) -> Result<EnclaveResponse>
         &source_validated.proof,
         &destination_proof,
     )?;
+
+    // Independent EVM `FundsIn` verification (audit M-06 / #60, #51). In
+    // EVM -> RGB bridge mode, confirm the deposit really happened on-chain - via
+    // the enclave's own RPC call, not the listener's `event_valid` /
+    // `event_finalized` booleans (which are no longer trusted; see
+    // `evm::validation::validate_source`). Fail-closed: a missing client or any
+    // unmet predicate refuses the signature. Runs after the cheap local
+    // cross-checks and before the replay guard records the op, so the external
+    // RPC is only paid once the request is otherwise valid.
+    // NOTE: the RPC is reached through the untrusted host, so this becomes fully
+    // trustless only once Helios (#77) verifies it; see
+    // `crate::networks::evm::evm_event`.
+    #[cfg(all(feature = "evm-rpc", not(feature = "dev-mode")))]
+    if let (SourceNetwork::EvmSource(source), DestinationNetwork::RgbDestination(destination)) =
+        (source_ref, destination_ref)
+    {
+        let tx_hash: [u8; 32] = source.tx_hash.as_slice().try_into().map_err(|_| {
+            EnclaveError::CrossCheck(format!(
+                "evm_tx_hash must be 32 bytes, got {}",
+                source.tx_hash.len()
+            ))
+        })?;
+        let client = ctx.evm_rpc_client.as_ref().ok_or_else(|| {
+            EnclaveError::CrossCheck(
+                "evm-rpc build but RPC client unavailable - refusing to sign a bridge PSBT \
+                 without independently verifying the FundsIn deposit"
+                    .into(),
+            )
+        })?;
+        crate::networks::evm::evm_event::verify_funds_in_event(
+            &**client,
+            &ctx.bridge_config.bridge_contract,
+            ctx.evm_rpc_config.min_confirmations,
+            &tx_hash,
+            destination.operation_idx,
+            req.amount,
+            source.commission,
+        )?;
+    }
+
+    // Fail-closed when the FundsIn verifier is not compiled in (audit M-06 /
+    // #60, #51). An EVM -> RGB bridge request is authorised by an EVM deposit,
+    // but #51 removed the listener-supplied `event_valid`/`event_finalized`
+    // booleans that used to gate it and the independent replacement lives behind
+    // the `evm-rpc` feature. A build without that feature therefore has NO
+    // evidence the deposit occurred - the consignment/PSBT checks prove the
+    // transfer shape but not that any EVM deposit backs it. Refuse rather than
+    // sign on the missing authorisation. Mirrors the M-01/#61 no-`spv` fundsOut
+    // refusal. dev-mode retains the legacy path for local testing. Compiled only
+    // when `evm-rpc` is absent, so it and the verification block above are
+    // mutually exclusive.
+    #[cfg(all(not(feature = "evm-rpc"), not(feature = "dev-mode")))]
+    if matches!(
+        (source_ref, destination_ref),
+        (
+            SourceNetwork::EvmSource(_),
+            DestinationNetwork::RgbDestination(_)
+        )
+    ) {
+        return Err(EnclaveError::CrossCheck(
+            "enclave was not built with --features evm-rpc: refusing to sign a bridge-mode PSBT \
+             without independently verifying the FundsIn deposit (the listener-supplied \
+             event_valid/event_finalized booleans are no longer trusted — audit M-06 / #60/#51). \
+             Rebuild with `--features evm-rpc` (or `helios` for the trustless path)."
+                .into(),
+        ));
+    }
 
     // Soft operation-uniqueness guard (audit W-02 / #84). In EVM -> RGB
     // bridge mode, record the source/destination operation tuple and reject a

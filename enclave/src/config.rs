@@ -158,6 +158,179 @@ fn parse_eth_address(s: &str) -> Result<[u8; 20]> {
     })
 }
 
+/// EVM JSON-RPC config for in-enclave `FundsIn` event verification (#60),
+/// loaded at boot when the `evm-rpc` feature is built.
+///
+/// This is operational signing-plumbing, NOT part of the enclave's committed
+/// identity: like [`BridgeConfig::gas_tx_allowed_to`], it is deliberately
+/// **not** folded into the attestation `user_data` bundle.
+///
+/// TRUST BOUNDARY: `rpc_url` MUST be loopback. The enclave has no direct
+/// network; it reaches the EVM RPC only through the loopback -> vsock
+/// forwarder ([`crate::vsock_forwarder`]), so the responses are relayed by the
+/// UNTRUSTED host. `verify_funds_in_event` treats them as evidence and fails
+/// closed; full trustlessness needs Helios (#77).
+#[cfg(feature = "evm-rpc")]
+#[derive(Debug, Clone)]
+pub struct EvmRpcConfig {
+    /// Loopback URL of the in-enclave EVM RPC forwarder
+    /// (`EVM_RPC_URL`, default `http://127.0.0.1:3444`).
+    pub rpc_url: String,
+    /// Minimum confirmation depth a `FundsIn` receipt must have, measured
+    /// against the RPC head block (`EVM_MIN_CONFIRMATIONS`, default 12).
+    pub min_confirmations: u64,
+}
+
+#[cfg(feature = "evm-rpc")]
+impl EvmRpcConfig {
+    /// Default loopback RPC URL - the enclave side of the EVM vsock forwarder.
+    const DEFAULT_RPC_URL: &'static str = "http://127.0.0.1:3444";
+    /// Default confirmation depth (~a safe head distance for most EVM chains).
+    const DEFAULT_MIN_CONFIRMATIONS: u64 = 12;
+
+    /// Load from `EVM_RPC_URL` and `EVM_MIN_CONFIRMATIONS`. Both fall back to
+    /// safe defaults. A non-loopback `EVM_RPC_URL` is rejected back to the
+    /// default and logged: routing EVM RPC anywhere but the vsock forwarder
+    /// would bypass the only sanctioned egress path.
+    pub fn from_env() -> Self {
+        let rpc_url = match std::env::var("EVM_RPC_URL") {
+            Ok(url) if is_loopback_url(&url) => url,
+            Ok(url) => {
+                tracing::error!(
+                    %url,
+                    "EVM_RPC_URL is not loopback - ignoring and using the default vsock-forwarder \
+                     URL; the enclave must reach the EVM RPC only via the loopback forwarder"
+                );
+                Self::DEFAULT_RPC_URL.to_string()
+            }
+            Err(_) => Self::DEFAULT_RPC_URL.to_string(),
+        };
+        let min_confirmations = std::env::var("EVM_MIN_CONFIRMATIONS")
+            .ok()
+            .and_then(|s| s.parse::<u64>().ok())
+            .unwrap_or(Self::DEFAULT_MIN_CONFIRMATIONS);
+        Self {
+            rpc_url,
+            min_confirmations,
+        }
+    }
+}
+
+#[cfg(feature = "evm-rpc")]
+impl Default for EvmRpcConfig {
+    fn default() -> Self {
+        Self {
+            rpc_url: Self::DEFAULT_RPC_URL.to_string(),
+            min_confirmations: Self::DEFAULT_MIN_CONFIRMATIONS,
+        }
+    }
+}
+
+/// True if `url`'s host is exactly a loopback literal (`127.0.0.1`, `[::1]`, or
+/// `localhost`). A deliberately narrow, dependency-free check - the enclave only
+/// ever points this at its own loopback forwarder. Matches the host *exactly*
+/// (after stripping scheme, userinfo, path, and port) so a look-alike authority
+/// like `127.0.0.1.evil.com` or `localhost.evil.com` is NOT treated as loopback.
+#[cfg(feature = "evm-rpc")]
+fn is_loopback_url(url: &str) -> bool {
+    let after_scheme = url.split_once("://").map(|(_, rest)| rest).unwrap_or(url);
+    // Drop path/query/fragment, then any `userinfo@` prefix.
+    let authority = after_scheme
+        .split(['/', '?', '#'])
+        .next()
+        .unwrap_or(after_scheme);
+    let hostport = authority.rsplit_once('@').map_or(authority, |(_, h)| h);
+    // Strip the port. IPv6 literals are bracketed (`[::1]:8545`), so split off
+    // the `]` first; otherwise the host is everything before the first `:`.
+    let host = if let Some(rest) = hostport.strip_prefix('[') {
+        match rest.split_once(']') {
+            // Valid IPv6 authority: `]` is followed by nothing or `:port`.
+            Some((inner, after)) => {
+                return inner == "::1" && (after.is_empty() || after.starts_with(':'))
+            }
+            None => hostport,
+        }
+    } else {
+        hostport.split(':').next().unwrap_or(hostport)
+    };
+    host == "127.0.0.1" || host == "localhost"
+}
+
+/// Helios light-client config for TRUSTLESS in-enclave EVM event verification
+/// (#77), loaded at boot when the `helios` feature is built.
+///
+/// Selection is runtime: [`HeliosConfig::from_env`] returns `Some` only when
+/// `HELIOS_EXECUTION_RPC` is set - that is the signal to use the Helios-verified
+/// provider instead of the raw alloy path (#60). Like [`EvmRpcConfig`], the RPC
+/// URLs MUST be loopback (reached through vsock forwarders); Helios treats those
+/// upstreams as untrusted and verifies them against the pinned checkpoint.
+#[cfg(feature = "helios")]
+#[derive(Debug, Clone)]
+pub struct HeliosConfig {
+    /// Untrusted execution RPC Helios verifies against (`HELIOS_EXECUTION_RPC`,
+    /// required - typically the local exec forwarder `http://127.0.0.1:18545`).
+    /// Its presence is the signal to select the Helios-verified path.
+    pub execution_rpc: String,
+    /// Consensus (beacon) RPC for light-client sync (`HELIOS_CONSENSUS_RPC`,
+    /// loopback forwarder, default `http://127.0.0.1:18550`).
+    pub consensus_rpc: String,
+    /// Helios network name: `mainnet` | `sepolia` | `holesky`
+    /// (`HELIOS_NETWORK`, default `mainnet`).
+    pub network: String,
+    /// Weak-subjectivity checkpoint: 0x-prefixed 32-byte beacon block root
+    /// (`HELIOS_CHECKPOINT`). Required for a trustless build - without it Helios
+    /// would fall back to an untrusted community checkpoint list, which the
+    /// enclave never enables. `None` here fails client init closed.
+    pub checkpoint: Option<String>,
+    /// Reject a checkpoint older than the safe weak-subjectivity window
+    /// (`HELIOS_STRICT_CHECKPOINT_AGE`, default `true`).
+    pub strict_checkpoint_age: bool,
+}
+
+#[cfg(feature = "helios")]
+impl HeliosConfig {
+    const DEFAULT_CONSENSUS_RPC: &'static str = "http://127.0.0.1:18550";
+
+    /// Load from `HELIOS_*` env. Returns `None` when `HELIOS_EXECUTION_RPC` is
+    /// unset (the raw alloy path is used instead). A non-loopback RPC URL is
+    /// logged as an error but kept - the enclave has no direct egress, so a
+    /// non-loopback URL simply won't connect.
+    pub fn from_env() -> Option<Self> {
+        let execution_rpc = std::env::var("HELIOS_EXECUTION_RPC").ok()?;
+        warn_if_not_loopback("HELIOS_EXECUTION_RPC", &execution_rpc);
+
+        let consensus_rpc = std::env::var("HELIOS_CONSENSUS_RPC")
+            .unwrap_or_else(|_| Self::DEFAULT_CONSENSUS_RPC.to_string());
+        warn_if_not_loopback("HELIOS_CONSENSUS_RPC", &consensus_rpc);
+
+        let network = std::env::var("HELIOS_NETWORK").unwrap_or_else(|_| "mainnet".to_string());
+        let checkpoint = std::env::var("HELIOS_CHECKPOINT").ok();
+        let strict_checkpoint_age = std::env::var("HELIOS_STRICT_CHECKPOINT_AGE")
+            .ok()
+            .map(|s| s != "false" && s != "0")
+            .unwrap_or(true);
+
+        Some(Self {
+            execution_rpc,
+            consensus_rpc,
+            network,
+            checkpoint,
+            strict_checkpoint_age,
+        })
+    }
+}
+
+#[cfg(feature = "helios")]
+fn warn_if_not_loopback(var: &str, url: &str) {
+    if !is_loopback_url(url) {
+        tracing::error!(
+            %var, %url,
+            "Helios RPC URL is not loopback - the enclave reaches upstreams only via the vsock \
+             forwarder; a non-loopback URL will not connect"
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -239,5 +412,28 @@ mod tests {
         };
         assert!(!c.is_configured());
         assert!(c.is_partially_configured());
+    }
+
+    #[cfg(feature = "evm-rpc")]
+    #[test]
+    fn loopback_url_accepts_real_loopback() {
+        assert!(is_loopback_url("http://127.0.0.1:3444"));
+        assert!(is_loopback_url("http://127.0.0.1"));
+        assert!(is_loopback_url("http://localhost:8545"));
+        assert!(is_loopback_url("http://[::1]:18545/path"));
+        assert!(is_loopback_url("http://[::1]"));
+        assert!(is_loopback_url("http://user:pass@127.0.0.1:3444"));
+    }
+
+    #[cfg(feature = "evm-rpc")]
+    #[test]
+    fn loopback_url_rejects_lookalike_authorities() {
+        // The old `starts_with` check accepted all of these.
+        assert!(!is_loopback_url("http://127.0.0.1.evil.com"));
+        assert!(!is_loopback_url("http://localhost.evil.com/rpc"));
+        assert!(!is_loopback_url("http://127.0.0.1@evil.com"));
+        assert!(!is_loopback_url("http://[::1].evil.com"));
+        assert!(!is_loopback_url("http://10.0.0.1:8545"));
+        assert!(!is_loopback_url("http://evil.com/127.0.0.1"));
     }
 }

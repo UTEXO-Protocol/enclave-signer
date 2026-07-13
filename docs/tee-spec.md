@@ -127,6 +127,20 @@ Taproot script-path (BIP-340 Schnorr) + SegWit v0 P2WSH (ECDSA), each anchored
 to the input's `witness_utxo.script_pubkey` so the enclave signs only the
 intended UTXO.
 
+In **bridge mode** (non-empty `evm_tx_hash`) the release is authorised by an EVM
+deposit. The listener-supplied `evm_event_valid` / `evm_event_finalized` booleans
+are **NOT trusted** (audit M-06 / #51); the enclave establishes validity and
+finality itself, fail-closed, in `validation::evm_event::verify_funds_in_event`:
+a successful receipt must exist for `evm_tx_hash`, carry a **unique** `FundsIn` /
+`BridgeFundsIn` log from the **pinned** `BRIDGE_CONTRACT`, bind `operationId` /
+gross amount / commission (with `net == gross - commission`), and sit at depth
+>= `EVM_MIN_CONFIRMATIONS`. Under `rgb-validation` the PSBT is additionally bound
+to the validated consignment's `TS_TRANSFER` witness tx (txid + prevouts +
+sighash + amount). A build **without** the `evm-rpc` feature refuses bridge-mode
+`signPsbt` outright. With `helios` (#77) the RPC is verified inside the TEE
+against a pinned checkpoint (trustless); otherwise responses are host-relayed
+evidence, verified fail-closed but not trustless.
+
 [Sign PSBT](diagrams/04-seq-sign-psbt.md)
 *Source: [`diagrams/04-seq-sign-psbt.md`](diagrams/04-seq-sign-psbt.md)*
 
@@ -254,6 +268,7 @@ The enclave MUST uphold the following. Each maps to parent spec Sec 14/Sec 15.
 | **SI-10** | On any validation failure the unlock path MUST fail closed (no partial signature, no fallback). [OK]                                                    |
 | **SI-11** | A feature/build mismatch (e.g. request carries `merkle_proofs` but the binary lacks `spv`) MUST cause refusal, never a sign-without-verification. [OK]  |
 | **SI-12** | Cross-network consignments (e.g. regtest replayed at a mainnet enclave) MUST be rejected. [OK]                                                          |
+| **SI-13** | Bridge-mode `signPsbt` MUST independently verify the EVM `FundsIn` deposit (receipt success, pinned-contract log, operationId/amount/commission bind, depth ≥ `EVM_MIN_CONFIRMATIONS`); listener validity/finality flags MUST NOT authorise (#51). A build lacking `evm-rpc` MUST refuse bridge-mode signing. [OK, #60] |
 
 ## 11. Failure conditions
 
@@ -267,7 +282,9 @@ replayed cloning nonce.
 ## 12. Implementation status & blockers
 
 Conformant and solid: Sec 7 SPV stack (incl. SI-8), Sec 9 attestation + cloning
-(Sec 16.4), fail-closed posture (SI-10/11), cross-network defense (SI-12).
+(Sec 16.4), fail-closed posture (SI-10/11), cross-network defense (SI-12),
+independent EVM `FundsIn` verification for bridge-mode `signPsbt` (SI-13 / #60,
+with the trustless Helios variant #77 experimental / default-off).
 
 **Pre-mainnet blockers** (detail in `cross-flow-findings.md` (in `internal_audit` repo at `release 1.0/enclave-signer/`)):
 

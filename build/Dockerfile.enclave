@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile:1.4
-# Production enclave image (vsock + rgb-validation + spv).
+# Production enclave image (vsock + rgb-validation + spv + evm-rpc).
 # Usage:
 #   DOCKER_BUILDKIT=1 docker build --ssh default \
 #     -f build/Dockerfile.enclave -t utexo-bridge-enclave .
@@ -9,7 +9,7 @@
 # over SSH. The same SSH mount is also used for the private `rgb-consignment`
 # git dependency pulled by the `rgb-validation`/`spv` features.
 
-FROM rust:1.89-slim AS builder
+FROM rust:1.96-slim AS builder
 
 # `git` + `openssh-client`: the workspace `[patch.crates-io]` uses public
 # git URLs for rgb-consensus / rgb-ops / rgb-invoicing / rgb-strict-encoding,
@@ -36,7 +36,11 @@ WORKDIR /build/enclave
 # `--mount=type=ssh` exposes the SSH_AUTH_SOCK forwarded by `--ssh default`
 # only for the duration of this RUN, so no credentials end up in the
 # image layers.
-RUN --mount=type=ssh cargo build --release --features vsock,rgb-validation,spv
+# `evm-rpc` adds in-enclave FundsIn event verification (#60); it pulls the
+# alloy + tokio subtree, which grows the binary and therefore PCR0 - pinned via
+# Cargo.lock for reproducibility. Requires a second host vsock-proxy for the
+# EVM RPC (EVM_RPC_VSOCK_PORT, default 8002).
+RUN --mount=type=ssh cargo build --release --features vsock,rgb-validation,spv,evm-rpc
 
 # --- Runtime ---
 FROM public.ecr.aws/amazonlinux/amazonlinux:2023-minimal AS runtime

@@ -57,16 +57,15 @@ pub fn validate_source(amount: u64, source: &EvmSource) -> Result<RouteProof> {
             source.tx_hash.len()
         )));
     }
-    if !source.event_valid {
-        return Err(EnclaveError::CrossCheck(
-            "EVM event not validated by Listener".into(),
-        ));
-    }
-    if !source.event_finalized {
-        return Err(EnclaveError::CrossCheck(
-            "EVM event not yet finalized".into(),
-        ));
-    }
+
+    // NOTE (audit M-06 / #51): the listener-supplied `event_valid` /
+    // `event_finalized` booleans are NO LONGER trusted here - anyone reaching
+    // the enclave could set both `true`. EVM-event validity and finality are
+    // now established independently by the enclave itself in `handle_sign` via
+    // `networks::evm::evm_event::verify_funds_in_event` (the `evm-rpc` feature:
+    // fetches the FundsIn receipt and checks the operationId/amount/depth
+    // against the pinned bridge contract). The proto fields remain (ignored)
+    // until the listener stops sending them.
 
     Ok(RouteProof {
         amount,
@@ -282,24 +281,18 @@ mod tests {
             .contains(&format!("evm_tx_hash must be {TX_HASH_LEN} bytes")));
     }
 
+    /// Audit M-06 / #51: the listener-supplied `event_valid` / `event_finalized`
+    /// booleans are no longer read by `validate_source`, so flipping them to
+    /// `false` does NOT change the outcome. EVM-event validity/finality is now
+    /// established independently by `evm_event::verify_funds_in_event` in the
+    /// handler (see that module's `issue_51_no_receipt_means_no_authorization`).
     #[test]
-    fn source_rejects_invalid_event() {
+    fn source_ignores_listener_evm_booleans() {
         let mut source = source();
         source.event_valid = false;
-        assert!(validate_source(1_000, &source)
-            .unwrap_err()
-            .to_string()
-            .contains("EVM event not validated"));
-    }
-
-    #[test]
-    fn source_rejects_unfinalized_event() {
-        let mut source = source();
         source.event_finalized = false;
-        assert!(validate_source(1_000, &source)
-            .unwrap_err()
-            .to_string()
-            .contains("not yet finalized"));
+        // Shape is still valid and the booleans are ignored now.
+        assert!(validate_source(1_000, &source).is_ok());
     }
 
     #[test]

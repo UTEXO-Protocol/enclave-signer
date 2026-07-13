@@ -94,6 +94,68 @@ fn main() {
         if let Err(e) = utexo_bridge_enclave::vsock_forwarder::start_forwarder(3443, vsock_port) {
             tracing::error!("failed to start vsock forwarder: {e}");
         }
+
+        // Second forwarder for the EVM JSON-RPC used by in-enclave FundsIn
+        // verification (#60). Distinct loopback/vsock ports from Esplora
+        // (3443/8001). Untrusted, host-controlled egress boundary (audit I-01);
+        // the host must run: vsock-proxy <EVM_RPC_VSOCK_PORT> <evm-rpc-host> <port>.
+        #[cfg(feature = "evm-rpc")]
+        {
+            let evm_vsock_port: u32 = std::env::var("EVM_RPC_VSOCK_PORT")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(8002);
+            tracing::info!(
+                evm_vsock_port,
+                "starting EVM RPC vsock forwarder (host must run: vsock-proxy {evm_vsock_port} <evm-rpc-host> <evm-rpc-port>)"
+            );
+            if let Err(e) =
+                utexo_bridge_enclave::vsock_forwarder::start_forwarder(3444, evm_vsock_port)
+            {
+                tracing::error!("failed to start EVM RPC vsock forwarder: {e}");
+            }
+        }
+
+        // Helios execution + consensus RPC forwarders (#77, trustless EVM
+        // verification). Helios verifies these UNTRUSTED upstreams against a
+        // pinned checkpoint. Local ports mirror HeliosConfig defaults
+        // (18545/18550); the host must run one vsock-proxy per upstream.
+        #[cfg(feature = "helios")]
+        {
+            let exec_local: u16 = std::env::var("HELIOS_EXECUTION_LOCAL_PORT")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(18545);
+            let exec_vsock: u32 = std::env::var("HELIOS_EXECUTION_VSOCK_PORT")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(8003);
+            let cons_local: u16 = std::env::var("HELIOS_CONSENSUS_LOCAL_PORT")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(18550);
+            let cons_vsock: u32 = std::env::var("HELIOS_CONSENSUS_VSOCK_PORT")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(8004);
+            tracing::info!(
+                exec_local,
+                exec_vsock,
+                cons_local,
+                cons_vsock,
+                "starting Helios execution + consensus vsock forwarders (#77)"
+            );
+            if let Err(e) =
+                utexo_bridge_enclave::vsock_forwarder::start_forwarder(exec_local, exec_vsock)
+            {
+                tracing::error!("failed to start Helios execution RPC forwarder: {e}");
+            }
+            if let Err(e) =
+                utexo_bridge_enclave::vsock_forwarder::start_forwarder(cons_local, cons_vsock)
+            {
+                tracing::error!("failed to start Helios consensus RPC forwarder: {e}");
+            }
+        }
     }
 
     // Build RGB consignment validator (when feature enabled).
@@ -151,11 +213,79 @@ fn main() {
     }
     let header_chain = std::sync::Mutex::new(HeaderChain::new(spv_network, checkpoint));
 
+    // Build the in-enclave EVM RPC client for independent FundsIn verification
+    // (#60). The URL must be the loopback forwarder; responses are host-relayed
+    // and treated as evidence (verified fail-closed), not trusted input.
+    #[cfg(feature = "evm-rpc")]
+    let (evm_rpc_client, evm_rpc_config) = {
+        use utexo_bridge_enclave::networks::evm::evm_event::{AlloyEvmClient, EvmReceiptProvider};
+        let cfg = utexo_bridge_enclave::config::EvmRpcConfig::from_env();
+        type Boxed = Box<dyn EvmReceiptProvider + Send + Sync>;
+
+        // Raw alloy provider (#60): host-relayed, unverified.
+        let build_alloy = || -> Option<Boxed> {
+            match AlloyEvmClient::new(&cfg.rpc_url) {
+                Ok(c) => {
+                    tracing::info!(
+                        rpc_url = %cfg.rpc_url,
+                        min_confirmations = cfg.min_confirmations,
+                        "EVM FundsIn verification: raw alloy path (#60, host-relayed/unverified)"
+                    );
+                    Some(Box::new(c) as Boxed)
+                }
+                Err(e) => {
+                    tracing::error!("failed to init EVM RPC client: {e}");
+                    None
+                }
+            }
+        };
+
+        // #77 runtime-selectable: HELIOS_EXECUTION_RPC set -> Helios-verified
+        // path; else the raw alloy path. Fail closed on the SELECTED provider:
+        // a Helios build/sync failure leaves the client unset so bridge signing
+        // refuses, never silently downgrading to the unverified path.
+        #[cfg(feature = "helios")]
+        let client: Option<Boxed> = match utexo_bridge_enclave::config::HeliosConfig::from_env() {
+            Some(hcfg) => {
+                // Pass the pinned EVM_CHAIN_ID so Helios rejects a
+                // HELIOS_NETWORK inconsistent with it (#77 predicate 1).
+                match utexo_bridge_enclave::networks::evm::evm_event::HeliosEvmClient::new(
+                    &hcfg,
+                    bridge_config.chain_id,
+                ) {
+                    Ok(c) => {
+                        tracing::info!(
+                            network = %hcfg.network,
+                            min_confirmations = cfg.min_confirmations,
+                            "EVM FundsIn verification: Helios-verified path (#77, trustless)"
+                        );
+                        Some(Box::new(c) as Boxed)
+                    }
+                    Err(e) => {
+                        tracing::error!(
+                            "Helios client init/sync failed: {e} - bridge signing will fail closed"
+                        );
+                        None
+                    }
+                }
+            }
+            None => build_alloy(),
+        };
+        #[cfg(not(feature = "helios"))]
+        let client: Option<Boxed> = build_alloy();
+
+        (client, cfg)
+    };
+
     let ctx = ServerContext {
         state,
         bridge_config,
         #[cfg(feature = "rgb-validation")]
         rgb_validator,
+        #[cfg(feature = "evm-rpc")]
+        evm_rpc_client,
+        #[cfg(feature = "evm-rpc")]
+        evm_rpc_config,
         header_chain,
         submit_rate_limiter: std::sync::Mutex::new(server::SubmitRateLimiter::default()),
     };
