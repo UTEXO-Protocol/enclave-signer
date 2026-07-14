@@ -926,6 +926,116 @@ mod tests {
             let cd = mock_funds_out(id(OP_ID), &[]);
             assert!(extract_funds_in_ids(&cd).unwrap().is_empty());
         }
+
+        /// #65: the rewritten calldata is what gets signed and later decoded
+        /// on-chain — starting from a canonical alloy encoding, the binding
+        /// output must (a) still ABI-decode, (b) carry exactly the
+        /// enclave-authored burnId and fundsInIds, and (c) remain canonical
+        /// (re-encoding the decoded call reproduces the rewritten bytes).
+        #[test]
+        fn binding_output_stays_canonical_abi() {
+            use crate::networks::evm::validation::fundsOutCall;
+            use alloy_primitives::{Address, Bytes, U256};
+            use alloy_sol_types::SolCall;
+
+            let cd = fundsOutCall {
+                recipient: Address::from([0x11; 20]),
+                amount: U256::from(1_000u64),
+                burnId: U256::from(7u64), // listener-supplied, must be overwritten
+                sourceChainId: U256::from(5u64),
+                destinationChainId: U256::from(6u64),
+                sourceAddress: "rgb-src".to_string(),
+                proof: Bytes::from(vec![0xCC; 64]),
+                settlementData: Bytes::new(),
+            }
+            .abi_encode();
+
+            let validated = validated(
+                Some(transition(OP_ID, ifa::TS_TRANSFER)),
+                vec![MINT_A.into(), MINT_B.into()],
+            );
+            let out = apply_op_id_binding(&cd, &validated).unwrap();
+
+            let decoded = fundsOutCall::abi_decode_validate(&out)
+                .expect("binding output must remain ABI-decodable");
+            assert_eq!(decoded.burnId, U256::from_be_bytes(id(OP_ID)));
+            assert_eq!(decoded.recipient, Address::from([0x11; 20]));
+            assert_eq!(decoded.proof, Bytes::from(vec![0xCC; 64]));
+            assert_eq!(
+                extract_funds_in_ids(&out).unwrap(),
+                vec![id(MINT_A), id(MINT_B)]
+            );
+            assert_eq!(
+                decoded.abi_encode(),
+                out,
+                "binding output must be a canonical encoding"
+            );
+        }
+    }
+
+    // =========================================================================
+    // #65 — pin the hand-derived rewrite offsets to the alloy-derived ABI
+    // layout so the constants cannot silently drift from the real encoding.
+    // =========================================================================
+
+    mod abi_layout {
+        use super::*;
+        use crate::networks::evm::validation::fundsOutCall;
+        use alloy_primitives::{Address, Bytes, U256};
+        use alloy_sol_types::SolCall;
+
+        fn marker_calldata() -> Vec<u8> {
+            fundsOutCall {
+                recipient: Address::from([0x11; 20]),
+                amount: U256::from(0xA1A2_A3A4u64),
+                burnId: U256::from_be_bytes([0xBB; 32]),
+                sourceChainId: U256::from(5u64),
+                destinationChainId: U256::from(6u64),
+                sourceAddress: "rgb-src".to_string(),
+                proof: Bytes::from(vec![0xCC; 64]),
+                settlementData: Bytes::from(vec![0xDD; 32]),
+            }
+            .abi_encode()
+        }
+
+        #[test]
+        fn amount_offset_matches_abi_layout() {
+            let cd = marker_calldata();
+            assert_eq!(
+                extract_uint256_as_u64(&cd, FUNDS_OUT_AMOUNT_OFFSET).unwrap(),
+                0xA1A2_A3A4
+            );
+        }
+
+        #[test]
+        fn burn_id_offset_matches_abi_layout() {
+            let cd = marker_calldata();
+            assert_eq!(
+                extract_bytes32(&cd, FUNDS_OUT_BURN_ID_OFFSET).unwrap(),
+                [0xBB; 32]
+            );
+        }
+
+        #[test]
+        fn proof_head_offset_matches_abi_layout() {
+            let cd = marker_calldata();
+            let proof_rel = read_u256_as_usize(&cd, FUNDS_OUT_PROOF_HEAD_OFFSET).unwrap();
+            let len = read_u256_as_usize(&cd, 4 + proof_rel).unwrap();
+            assert_eq!(len, 64);
+            assert_eq!(
+                &cd[4 + proof_rel + 32..4 + proof_rel + 32 + 64],
+                &[0xCC; 64][..]
+            );
+        }
+
+        #[test]
+        fn settlement_data_head_offset_matches_abi_layout() {
+            let cd = marker_calldata();
+            let sd_rel = read_u256_as_usize(&cd, FUNDS_OUT_SETTLEMENT_DATA_HEAD_OFFSET).unwrap();
+            let len = read_u256_as_usize(&cd, 4 + sd_rel).unwrap();
+            assert_eq!(len, 32);
+            assert_eq!(&cd[4 + sd_rel + 32..4 + sd_rel + 32 + 32], &[0xDD; 32][..]);
+        }
     }
 
     // =========================================================================

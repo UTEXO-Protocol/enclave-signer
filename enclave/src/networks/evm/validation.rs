@@ -171,8 +171,24 @@ pub fn validate_destination(
 }
 
 fn parse_proof_from_calldata(call_data: &[u8]) -> Result<RouteProof> {
-    let decoded = fundsOutCall::abi_decode(call_data)
+    // Canonical-encoding enforcement (audit W-01 residual, #123): the ABI
+    // decoder is deliberately layout-permissive — overlapping or out-of-order
+    // dynamic tails and trailing junk all decode fine (`abi_decode_validate`
+    // only validates the decoded *values*). Re-encoding the decoded call and
+    // requiring byte equality pins the input to the one canonical layout.
+    // This matters because the calldata bytes are later partially rewritten
+    // by fixed offset (`apply_op_id_binding`), so every byte must sit exactly
+    // where the canonical layout puts it — and what the enclave signs must
+    // decode on-chain to exactly what it validated.
+    let decoded = fundsOutCall::abi_decode_validate(call_data)
         .map_err(|e| EnclaveError::CrossCheck(format!("invalid fundsOut calldata: {e}")))?;
+    if decoded.abi_encode() != call_data {
+        return Err(EnclaveError::CrossCheck(
+            "non-canonical fundsOut calldata encoding: re-encoding the decoded call does not \
+             reproduce the input bytes"
+                .into(),
+        ));
+    }
     let amount: u64 = decoded
         .amount
         .try_into()
@@ -469,5 +485,69 @@ mod tests {
                 .to_string()
                 .contains("exceeds u64 range"));
         });
+    }
+
+    /// The hand-pinned selector constant and the alloy-derived ABI selector
+    /// must never drift apart (#65): the whitelist gates on the constant while
+    /// decode/encode use the `sol!` type.
+    #[test]
+    fn funds_out_selector_matches_abi_derived_selector() {
+        assert_eq!(FUNDS_OUT_SELECTOR_POOLS, fundsOutCall::SELECTOR);
+    }
+
+    /// Canonical calldata with non-empty dynamic tails — the baseline the two
+    /// non-canonical rejection tests below tamper with.
+    fn funds_out_calldata_with_tails(amount: u64) -> Vec<u8> {
+        fundsOutCall {
+            recipient: Address::from([0x22; ADDRESS_LEN]),
+            amount: U256::from(amount),
+            burnId: U256::from(7u64),
+            sourceChainId: U256::from(1u64),
+            destinationChainId: U256::from(1u64),
+            sourceAddress: "rgb-src".to_string(),
+            proof: Bytes::from(vec![0xCC; 64]),
+            settlementData: Bytes::from(vec![0xDD; 32]),
+        }
+        .abi_encode()
+    }
+
+    #[test]
+    fn accepts_canonical_calldata_with_dynamic_tails() {
+        let cd = funds_out_calldata_with_tails(1_234);
+        let proof = parse_proof_from_calldata(&cd).expect("canonical encoding must parse");
+        assert_eq!(proof.amount, 1_234);
+    }
+
+    /// audit W-01 residual (#123): the ABI decoder accepts trailing junk
+    /// after the last dynamic tail; the canonical re-encode check must not.
+    /// The calldata is later partially rewritten by byte offset
+    /// (`apply_op_id_binding`), so every byte must sit exactly where the
+    /// canonical layout puts it.
+    #[test]
+    fn rejects_calldata_with_trailing_junk() {
+        let mut cd = funds_out_calldata_with_tails(1_234);
+        cd.extend_from_slice(&[0u8; 32]);
+        let err = parse_proof_from_calldata(&cd).unwrap_err();
+        assert!(
+            err.to_string().contains("non-canonical fundsOut calldata"),
+            "expected canonical-encoding rejection, got: {err}"
+        );
+    }
+
+    /// audit W-01 residual (#123): two dynamic-arg head words pointing at the
+    /// same tail decode fine but are not a canonical encoding.
+    #[test]
+    fn rejects_calldata_with_overlapping_dynamic_tails() {
+        let mut cd = funds_out_calldata_with_tails(1_234);
+        // Head words (selector included in the byte positions): arg 7
+        // (`proof`) offset word at bytes 196..228, arg 8 (`settlementData`)
+        // offset word at bytes 228..260. Point settlementData at proof's tail.
+        let proof_offset_word: [u8; 32] = cd[196..228].try_into().unwrap();
+        cd[228..260].copy_from_slice(&proof_offset_word);
+        let err = parse_proof_from_calldata(&cd).unwrap_err();
+        assert!(
+            err.to_string().contains("non-canonical fundsOut calldata"),
+            "expected canonical-encoding rejection of overlapping tails, got: {err}"
+        );
     }
 }

@@ -397,8 +397,10 @@ pub enum OutputSeal {
 
 /// Hard cap on any single blocking Esplora HTTP call (connect + read), in
 /// seconds. The Esplora egress runs through the host-controlled vsock proxy,
-/// and these calls happen *on the signing path* — without a timeout a stalled
-/// host pins the worker thread indefinitely (audit final I-03 / #87).
+/// and consignment validation happens *on the signing path* — without a
+/// timeout a stalled host pins the worker thread indefinitely (audit final
+/// I-03 / #87). Aligned with `conn.rs`'s `TOTAL_REQUEST_TIMEOUT` so a single
+/// stalled egress call cannot outlive its enclosing request budget.
 /// Compile-time (PCR-attested), deliberately not host-tunable.
 const ESPLORA_HTTP_TIMEOUT_SECS: u64 = 30;
 
@@ -418,6 +420,9 @@ pub struct RgbValidator {
     /// Cached `(fetched_at, sat/vB)` recommended fee rate (#55), guarded for
     /// the multi-threaded worker pool. `None` until the first fetch.
     fee_estimate_cache: std::sync::Mutex<Option<(std::time::Instant, f64)>>,
+    /// Per-request HTTP timeout, [`ESPLORA_HTTP_TIMEOUT_SECS`] in production.
+    /// Overridable only from tests (no env / host input reaches it).
+    http_timeout_secs: u64,
 }
 
 impl RgbValidator {
@@ -443,7 +448,16 @@ impl RgbValidator {
             esplora_url,
             chain_net,
             fee_estimate_cache: std::sync::Mutex::new(None),
+            http_timeout_secs: ESPLORA_HTTP_TIMEOUT_SECS,
         })
+    }
+
+    /// Shrink the HTTP timeout so the stalled-host test doesn't wait the
+    /// production budget. Test-only by construction.
+    #[cfg(test)]
+    fn with_http_timeout(mut self, secs: u64) -> Self {
+        self.http_timeout_secs = secs;
+        self
     }
 
     /// Recommended fee rate (sat/vB) from the enclave's own Esplora egress,
@@ -466,7 +480,7 @@ impl RgbValidator {
         }
 
         let client = esplora_client::Builder::new(&self.esplora_url)
-            .timeout(ESPLORA_HTTP_TIMEOUT_SECS)
+            .timeout(self.http_timeout_secs)
             .build_blocking();
         let estimates = client.get_fee_estimates().map_err(|e| {
             EnclaveError::CrossCheck(format!(
@@ -598,8 +612,14 @@ impl RgbValidator {
                 _ => (None, None, None),
             };
 
-        // 2. Create an Esplora-backed resolver.
-        let builder = esplora_client::Builder::new(&self.esplora_url);
+        // 2. Create an Esplora-backed resolver. The `.timeout()` is
+        // load-bearing: this is a blocking call on the signing path through
+        // the host-controlled vsock proxy (audit final I-03 / #87). Transport
+        // errors (incl. timeouts) propagate immediately — esplora-client only
+        // retries on 429/5xx status codes — so one stalled call costs at most
+        // the timeout, never an unbounded hang.
+        let builder =
+            esplora_client::Builder::new(&self.esplora_url).timeout(self.http_timeout_secs);
         let mut resolver = AnyResolver::esplora_blocking(builder).map_err(|e| {
             tracing::error!(esplora_url = %self.esplora_url, "esplora resolver creation failed: {e}");
             EnclaveError::CrossCheck(format!("esplora resolver creation failed: {e}"))
@@ -1090,6 +1110,41 @@ mod tests {
         assert!(
             err.to_string().contains("refusing to sign"),
             "expected fail-closed fetch error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn stalled_esplora_times_out_instead_of_hanging() {
+        // audit final I-03 / #87: consignment validation makes blocking HTTP
+        // calls through the host-controlled vsock proxy. A host that accepts
+        // the connection and never responds must cost at most the HTTP
+        // timeout — pre-fix this call hung the worker thread forever.
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind stalled stub");
+        let addr = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            // Accept and hold every connection open without ever writing a
+            // byte; keeping the streams alive prevents an early RST that
+            // would fail fast for the wrong reason.
+            let mut held = Vec::new();
+            for stream in listener.incoming() {
+                let Ok(stream) = stream else { break };
+                held.push(stream);
+            }
+        });
+
+        let validator = RgbValidator::new(format!("http://{addr}"), "bitcoin")
+            .unwrap()
+            .with_http_timeout(2);
+        let start = std::time::Instant::now();
+        let err = validator
+            .validate_consignment(TRANSFER_FIXTURE)
+            .unwrap_err();
+        let elapsed = start.elapsed();
+        assert!(
+            elapsed < std::time::Duration::from_secs(60),
+            "stalled Esplora must be bounded by the HTTP timeout, took {elapsed:?}: {err}"
         );
     }
 
