@@ -212,7 +212,14 @@ pub fn validate_destination_anchor(
         &validated,
         source_amount,
         source_commission,
-    )
+    )?;
+
+    // Fee-rate sanity (#55), after the pure anchor checks so the (cached)
+    // Esplora round-trip is the last thing that can reject. Fail-closed when
+    // the estimate is unavailable: the host controls the Esplora egress, so
+    // "no estimate → skip" would let the host disable the check.
+    let recommended = validator.recommended_fee_rate_sat_vb()?;
+    psbt_validation::check_psbt_fee_rate(&psbt, recommended)
 }
 
 #[cfg(all(test, feature = "rgb-validation"))]

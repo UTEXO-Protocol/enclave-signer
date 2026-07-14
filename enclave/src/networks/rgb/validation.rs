@@ -395,11 +395,29 @@ pub enum OutputSeal {
     Confidential { secret_seal: String },
 }
 
+/// Hard cap on any single blocking Esplora HTTP call (connect + read), in
+/// seconds. The Esplora egress runs through the host-controlled vsock proxy,
+/// and these calls happen *on the signing path* — without a timeout a stalled
+/// host pins the worker thread indefinitely (audit final I-03 / #87).
+/// Compile-time (PCR-attested), deliberately not host-tunable.
+const ESPLORA_HTTP_TIMEOUT_SECS: u64 = 30;
+
+/// How long a fetched fee estimate stays fresh (#55). Fee markets move on
+/// block cadence, so a minute of staleness is immaterial while keeping the
+/// sign-path from hitting Esplora on every request.
+const FEE_ESTIMATE_TTL: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// Confirmation target (blocks) used for the recommended fee rate (#55).
+const FEE_ESTIMATE_TARGET: u16 = 6;
+
 /// Validates RGB consignments using rgbstd and an Esplora-backed resolver.
 #[derive(Debug)]
 pub struct RgbValidator {
     esplora_url: String,
     chain_net: ChainNet,
+    /// Cached `(fetched_at, sat/vB)` recommended fee rate (#55), guarded for
+    /// the multi-threaded worker pool. `None` until the first fetch.
+    fee_estimate_cache: std::sync::Mutex<Option<(std::time::Instant, f64)>>,
 }
 
 impl RgbValidator {
@@ -424,7 +442,64 @@ impl RgbValidator {
         Ok(Self {
             esplora_url,
             chain_net,
+            fee_estimate_cache: std::sync::Mutex::new(None),
         })
+    }
+
+    /// Recommended fee rate (sat/vB) from the enclave's own Esplora egress,
+    /// for the send-RGB PSBT fee-rate sanity check (#55). Fetches
+    /// `/fee-estimates` (confirmation target [`FEE_ESTIMATE_TARGET`], falling
+    /// back to the nearest available target) with a [`FEE_ESTIMATE_TTL`]
+    /// cache. FAIL-CLOSED on any fetch/shape problem: the host controls the
+    /// Esplora egress, so treating "estimate unavailable" as "skip the check"
+    /// would let the host disable the check by blocking the endpoint.
+    pub fn recommended_fee_rate_sat_vb(&self) -> Result<f64> {
+        let now = std::time::Instant::now();
+        let mut cache = self
+            .fee_estimate_cache
+            .lock()
+            .map_err(|e| EnclaveError::Internal(format!("fee-estimate cache poisoned: {e}")))?;
+        if let Some((fetched_at, rate)) = *cache {
+            if now.duration_since(fetched_at) < FEE_ESTIMATE_TTL {
+                return Ok(rate);
+            }
+        }
+
+        let client = esplora_client::Builder::new(&self.esplora_url)
+            .timeout(ESPLORA_HTTP_TIMEOUT_SECS)
+            .build_blocking();
+        let estimates = client.get_fee_estimates().map_err(|e| {
+            EnclaveError::CrossCheck(format!(
+                "fee-estimate fetch failed — refusing to sign a send-RGB PSBT without a \
+                 fee-rate sanity bound (#55): {e}"
+            ))
+        })?;
+
+        // Exact target if present, else the nearest available one.
+        let rate = estimates
+            .get(&FEE_ESTIMATE_TARGET)
+            .copied()
+            .or_else(|| {
+                estimates
+                    .iter()
+                    .min_by_key(|(t, _)| t.abs_diff(FEE_ESTIMATE_TARGET))
+                    .map(|(_, r)| *r)
+            })
+            .ok_or_else(|| {
+                EnclaveError::CrossCheck(
+                    "fee-estimate response carried no targets — refusing to sign a send-RGB \
+                     PSBT without a fee-rate sanity bound (#55)"
+                        .into(),
+                )
+            })?;
+        if !rate.is_finite() || rate <= 0.0 {
+            return Err(EnclaveError::CrossCheck(format!(
+                "fee-estimate response is not a positive finite rate: {rate}"
+            )));
+        }
+
+        *cache = Some((now, rate));
+        Ok(rate)
     }
 
     /// Validate raw consignment bytes. Returns extracted data on success,
@@ -922,6 +997,99 @@ mod tests {
         assert!(
             err.to_string().contains("deserialization failed"),
             "expected deserialization error, got: {err}"
+        );
+    }
+
+    /// Stub Esplora answering only `GET /fee-estimates`, with a per-request
+    /// body sequence (later requests get the last body). Returns the URL.
+    fn spawn_fee_stub(bodies: Vec<&'static str>) -> String {
+        use std::io::{Read as _, Write as _};
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind fee stub");
+        let addr = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            let mut served = 0usize;
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { break };
+                let mut buf = [0u8; 2048];
+                let n = stream.read(&mut buf).unwrap_or(0);
+                let first = String::from_utf8_lossy(&buf[..n])
+                    .lines()
+                    .next()
+                    .unwrap_or_default()
+                    .to_string();
+                let resp = if first.starts_with("GET /fee-estimates") {
+                    let body = bodies[served.min(bodies.len() - 1)];
+                    served += 1;
+                    format!(
+                        "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    )
+                } else {
+                    "HTTP/1.1 404 Not Found\r\ncontent-length: 0\r\nconnection: close\r\n\r\n"
+                        .to_string()
+                };
+                let _ = stream.write_all(resp.as_bytes());
+            }
+        });
+        format!("http://{addr}")
+    }
+
+    #[test]
+    fn fee_estimate_uses_exact_target_and_caches() {
+        // First fetch returns target-6's rate; the second call must be served
+        // from the 60s cache (the stub would answer 99.0 if re-queried).
+        let url = spawn_fee_stub(vec![r#"{"1":50.0,"6":20.0,"25":5.0}"#, r#"{"6":99.0}"#]);
+        let v = RgbValidator::new(url, "bitcoin").unwrap();
+        assert_eq!(v.recommended_fee_rate_sat_vb().unwrap(), 20.0);
+        assert_eq!(
+            v.recommended_fee_rate_sat_vb().unwrap(),
+            20.0,
+            "second call must hit the cache, not the stub"
+        );
+    }
+
+    #[test]
+    fn fee_estimate_falls_back_to_nearest_target() {
+        // No target 6: nearest is 1 (|6-1| = 5) over 25 (|6-25| = 19).
+        let url = spawn_fee_stub(vec![r#"{"1":50.0,"25":5.0}"#]);
+        let v = RgbValidator::new(url, "bitcoin").unwrap();
+        assert_eq!(v.recommended_fee_rate_sat_vb().unwrap(), 50.0);
+    }
+
+    #[test]
+    fn fee_estimate_rejects_empty_response() {
+        let url = spawn_fee_stub(vec![r#"{}"#]);
+        let v = RgbValidator::new(url, "bitcoin").unwrap();
+        let err = v.recommended_fee_rate_sat_vb().unwrap_err();
+        assert!(
+            err.to_string().contains("no targets"),
+            "expected empty-estimates rejection, got: {err}"
+        );
+    }
+
+    #[test]
+    fn fee_estimate_rejects_non_positive_rate() {
+        let url = spawn_fee_stub(vec![r#"{"6":0.0}"#]);
+        let v = RgbValidator::new(url, "bitcoin").unwrap();
+        let err = v.recommended_fee_rate_sat_vb().unwrap_err();
+        assert!(
+            err.to_string().contains("not a positive finite rate"),
+            "expected non-positive rejection, got: {err}"
+        );
+    }
+
+    #[test]
+    fn fee_estimate_fails_closed_when_unreachable() {
+        // Nothing listening: the fetch error must propagate as a refusal, not
+        // a skip — the host controls this egress (#55).
+        let v = RgbValidator::new("http://127.0.0.1:1".into(), "bitcoin").unwrap();
+        let err = v.recommended_fee_rate_sat_vb().unwrap_err();
+        assert!(
+            err.to_string().contains("refusing to sign"),
+            "expected fail-closed fetch error, got: {err}"
         );
     }
 
