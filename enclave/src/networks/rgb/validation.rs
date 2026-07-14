@@ -172,6 +172,15 @@ pub mod ifa {
     /// `OS_ASSET` (the regular fungible asset allocation type). The
     /// associated value is a strict-encoded `rgbstd::Amount` (u64).
     pub const MS_BURNED_ASSET: u16 = 1001;
+
+    /// IFA fungible assignment type for regular asset ownership
+    /// (`assetOwner`) — the allocations that actually carry asset units.
+    pub const OS_ASSET: u16 = 4000;
+    /// IFA fungible assignment type carrying the remaining right-to-mint
+    /// (`inflationAllowance`). Its `amount` is mint *capacity*, not asset
+    /// units — summing it together with `OS_ASSET` would let an inflation
+    /// consignment claim allowance as minted value (#54).
+    pub const OS_INFLATION: u16 = 4010;
 }
 
 /// Resolve the **trusted** strict type-system the validator must pin a
@@ -328,6 +337,13 @@ pub struct TransitionSummary {
     /// outputs; for a Burn this is **zero** because burns have no output
     /// assignments — the destroyed amount lives in [`Self::burned_asset_amount`].
     pub total_output_amount: u64,
+    /// Sum of the fungible amounts on `OS_ASSET`-typed output assignments
+    /// only — the allocations that actually carry asset units. For a
+    /// Transfer this equals [`Self::total_output_amount`] (transfers move
+    /// only `OS_ASSET`); for an Inflation (mint) it is the freshly minted
+    /// value, **excluding** the `OS_INFLATION` allowance outputs, whose
+    /// amounts are remaining mint capacity, not asset units (#54).
+    pub asset_output_amount: u64,
     /// Concrete output assignments, each tagged with a destination seal
     /// and an amount. Empty for Burn transitions.
     pub outputs: Vec<TransitionOutput>,
@@ -486,13 +502,15 @@ impl RgbValidator {
         // PSBT path. We extract the last bundle's witness txid (and, when the
         // bundle embeds the full tx, its input prevouts) so the PSBT
         // cross-check can prove the PSBT being signed IS this witness
-        // transaction. Gated on the last transition being a Transfer: the
-        // bind is only meaningful for the pools-mode send shape, and the
-        // consistency check inside reads the parsed transition type to ensure
-        // the txid and the transition come from the same witness.
+        // transaction. Gated on the last transition being a Transfer (the
+        // pools-mode send shape) or an Inflation (the mint-RGB shape, #54);
+        // the consistency check inside reads the parsed transition type to
+        // ensure the txid and the transition come from the same witness.
         let (last_transfer_witness_txid, last_transfer_witness_prevouts, last_transfer_op_id) =
             match last_transition {
-                Some(ref last) if last.transition_type == ifa::TS_TRANSFER => {
+                Some(ref last)
+                    if matches!(last.transition_type, ifa::TS_TRANSFER | ifa::TS_INFLATION) =>
+                {
                     read_last_transfer_witness(&transfer, last.transition_type)?
                 }
                 _ => (None, None, None),
@@ -757,6 +775,23 @@ fn transition_summary(t: &TransitionInfo) -> Result<TransitionSummary> {
                 })
             })?;
 
+    // Asset units only: `OS_ASSET`-typed allocations. An Inflation (mint)
+    // transition also carries `OS_INFLATION` allowance outputs whose amounts
+    // are remaining mint *capacity* — counting those as minted value would
+    // let a mint consignment cover an EVM lock it never minted for (#54).
+    let asset_output_amount: u64 = t
+        .fungible_allocations
+        .iter()
+        .filter(|a: &&FungibleAllocation| a.assignment_type == ifa::OS_ASSET)
+        .try_fold(0u64, |acc, a: &FungibleAllocation| {
+            acc.checked_add(a.total).ok_or_else(|| {
+                EnclaveError::CrossCheck(format!(
+                    "consignment transition asset_output_amount overflow (op_id {})",
+                    t.op_id
+                ))
+            })
+        })?;
+
     let outputs: Result<Vec<TransitionOutput>> = t
         .fungible_allocations
         .iter()
@@ -767,6 +802,7 @@ fn transition_summary(t: &TransitionInfo) -> Result<TransitionSummary> {
         op_id: t.op_id.clone(),
         transition_type: t.transition_type,
         total_output_amount,
+        asset_output_amount,
         outputs: outputs?,
         // Filled by `read_last_transition_burned_asset` if the
         // transition is a burn; the parser doesn't expose metadata so
@@ -886,6 +922,52 @@ mod tests {
     fn rejects_unknown_network() {
         let err = RgbValidator::new("http://localhost:1".to_string(), "foonet").unwrap_err();
         assert!(err.to_string().contains("unknown bitcoin network"));
+    }
+
+    /// #54: `asset_output_amount` must count only `OS_ASSET`-typed
+    /// allocations. An inflation (mint) transition also carries
+    /// `OS_INFLATION` allowance outputs whose amounts are remaining mint
+    /// capacity — counting them as minted value would let a mint consignment
+    /// cover an EVM lock it never minted for.
+    #[test]
+    fn transition_summary_excludes_inflation_allowance_from_asset_amount() {
+        let alloc = |assignment_type: u16, amount: u64| FungibleAllocation {
+            assignment_type,
+            entries: vec![FungibleEntry {
+                amount,
+                seal: SealInfo::Revealed {
+                    txid: None,
+                    vout: 0,
+                },
+            }],
+            total: amount,
+        };
+        let info = TransitionInfo {
+            op_id: "mint-op".into(),
+            transition_type: ifa::TS_INFLATION,
+            input_count: 1,
+            fungible_allocations: vec![
+                alloc(ifa::OS_ASSET, 500),
+                // Remaining right-to-mint: must NOT count as asset units.
+                alloc(ifa::OS_INFLATION, 1_000_000),
+            ],
+        };
+
+        let summary = transition_summary(&info).expect("summary");
+        assert_eq!(summary.asset_output_amount, 500);
+        assert_eq!(summary.total_output_amount, 1_000_500);
+    }
+
+    /// For a Transfer everything is `OS_ASSET`, so the two sums agree — the
+    /// invariant the PSBT amount bind relies on when it switched from
+    /// `total_output_amount` to `asset_output_amount` (#54).
+    #[test]
+    fn transfer_fixture_asset_amount_equals_total() {
+        let (_, _, last_transition) =
+            extract_transition_summary(TRANSFER_FIXTURE).expect("transfer parse");
+        let last = last_transition.expect("transfer has a last transition");
+        assert_eq!(last.transition_type, ifa::TS_TRANSFER);
+        assert_eq!(last.asset_output_amount, last.total_output_amount);
     }
 
     #[test]

@@ -90,7 +90,8 @@ pub fn validate_psbt_bytes(psbt_bytes: &[u8]) -> Result<()> {
 ///
 /// Enforces, fail-closed:
 ///   1. The consignment's last transition is an IFA `Transfer`
-///      (`ifa::TS_TRANSFER`) — the pools-mode send shape.
+///      (`ifa::TS_TRANSFER`, the pools-mode send shape) or an IFA
+///      `Inflation` (`ifa::TS_INFLATION`, the mint-RGB shape — #54).
 ///   2. **Identity bind:** `psbt.unsigned_tx.compute_txid()` equals the
 ///      consignment's last witness txid. A segwit txid commits to every
 ///      non-witness field (all inputs, all outputs incl. the commitment
@@ -104,10 +105,11 @@ pub fn validate_psbt_bytes(psbt_bytes: &[u8]) -> Result<()> {
 ///   4. **Sighash guard:** refuse any input requesting a sighash other than
 ///      ALL / taproot-DEFAULT, so a host can't splice our signature into a
 ///      different tx (ANYONECANPAY / SINGLE / NONE).
-///   5. **Amount bind (coarse):** the transfer's `total_output_amount` must
-///      cover the net amount credited by the source side (`source_amount`
-///      minus `source_commission`). This does not yet verify which output is
-///      the recipient leg (issue #58).
+///   5. **Amount bind (coarse):** the transition's `asset_output_amount`
+///      (the `OS_ASSET`-typed allocations only — for a mint, excluding the
+///      `OS_INFLATION` allowance outputs) must cover the net amount credited
+///      by the source side (`source_amount` minus `source_commission`). This
+///      does not yet verify which output is the recipient leg (issue #58).
 #[cfg(feature = "rgb-validation")]
 pub fn validate_psbt_anchors_transition(
     psbt: &Psbt,
@@ -122,11 +124,13 @@ pub fn validate_psbt_anchors_transition(
             "send-RGB PSBT requires a consignment with at least one transition".into(),
         )
     })?;
-    if last.transition_type != ifa::TS_TRANSFER {
+    if !matches!(last.transition_type, ifa::TS_TRANSFER | ifa::TS_INFLATION) {
         return Err(EnclaveError::CrossCheck(format!(
-            "send-RGB PSBT requires a Transfer transition (last transition_type = {}, want {})",
+            "send-RGB PSBT requires a Transfer or Inflation transition (last transition_type = \
+             {}, want {} or {})",
             last.transition_type,
-            ifa::TS_TRANSFER
+            ifa::TS_TRANSFER,
+            ifa::TS_INFLATION
         )));
     }
 
@@ -134,7 +138,7 @@ pub fn validate_psbt_anchors_transition(
     // (a non-segwit input's scriptSig would change the txid post-signing).
     let expected = validated.last_transfer_witness_txid.ok_or_else(|| {
         EnclaveError::CrossCheck(
-            "consignment carries no witness txid for its Transfer transition — \
+            "consignment carries no witness txid for its last transition — \
              cannot anchor the PSBT"
                 .into(),
         )
@@ -178,11 +182,15 @@ pub fn validate_psbt_anchors_transition(
     }
 
     let net_credited = source_amount.saturating_sub(source_commission);
-    if last.total_output_amount < net_credited {
+    // `asset_output_amount`, not `total_output_amount`: only `OS_ASSET`-typed
+    // allocations carry asset units. For a Transfer the two are equal; for an
+    // Inflation the total also counts `OS_INFLATION` allowance outputs (mint
+    // *capacity*), which must not cover the credited amount (#54).
+    if last.asset_output_amount < net_credited {
         return Err(EnclaveError::CrossCheck(format!(
-            "send-RGB amount mismatch: consignment total_output_amount ({}) < net credited \
+            "send-RGB amount mismatch: consignment asset_output_amount ({}) < net credited \
              (source_amount {} - source_commission {} = {})",
-            last.total_output_amount, source_amount, source_commission, net_credited
+            last.asset_output_amount, source_amount, source_commission, net_credited
         )));
     }
 
@@ -387,6 +395,8 @@ mod tests {
                 op_id: "transfer-op".into(),
                 transition_type: ifa::TS_TRANSFER,
                 total_output_amount,
+                // Transfers move only OS_ASSET, so the two sums are equal.
+                asset_output_amount: total_output_amount,
                 outputs: vec![],
                 burned_asset_amount: None,
             }
@@ -486,6 +496,40 @@ mod tests {
             assert!(validate_psbt_anchors_transition(&psbt, &validated, 1_000, 0).is_ok());
         }
 
+        /// #54: the mint-RGB shape — an IFA Inflation last transition — binds
+        /// through the same anchor path as the pools-mode Transfer.
+        #[test]
+        fn accepts_inflation_shape() {
+            let psbt = psbt_with_two_inputs();
+            let mut validated = validated_for(&psbt, 1_000);
+            validated.last_transition.as_mut().unwrap().transition_type = ifa::TS_INFLATION;
+            assert!(validate_psbt_anchors_transition(&psbt, &validated, 1_000, 0).is_ok());
+        }
+
+        /// #54: for a mint, only `OS_ASSET`-typed outputs (the actually
+        /// minted units) may cover the credited amount — the `OS_INFLATION`
+        /// allowance (mint capacity) counted in `total_output_amount` must
+        /// not.
+        #[test]
+        fn inflation_allowance_does_not_cover_credited_amount() {
+            let psbt = psbt_with_two_inputs();
+            let mut validated = validated_for(&psbt, 1_000);
+            {
+                let last = validated.last_transition.as_mut().unwrap();
+                last.transition_type = ifa::TS_INFLATION;
+                // Minted 999 units; a large allowance rides along in the
+                // total. Net credited is 1_000 — must be rejected on the
+                // asset sum, not covered by the allowance-inflated total.
+                last.asset_output_amount = 999;
+                last.total_output_amount = 1_000_000;
+            }
+            let err = validate_psbt_anchors_transition(&psbt, &validated, 1_000, 0).unwrap_err();
+            assert!(
+                err.to_string().contains("asset_output_amount (999)"),
+                "expected asset-amount rejection, got: {err}"
+            );
+        }
+
         #[test]
         fn rejects_non_transfer_transition() {
             let psbt = psbt_with_two_inputs();
@@ -493,8 +537,9 @@ mod tests {
             validated.last_transition.as_mut().unwrap().transition_type = ifa::TS_BURN;
             let err = validate_psbt_anchors_transition(&psbt, &validated, 1_000, 0).unwrap_err();
             assert!(
-                err.to_string().contains("requires a Transfer transition"),
-                "expected Transfer-required rejection, got: {err}"
+                err.to_string()
+                    .contains("requires a Transfer or Inflation transition"),
+                "expected Transfer/Inflation-required rejection, got: {err}"
             );
         }
 
