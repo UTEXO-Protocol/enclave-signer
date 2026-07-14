@@ -605,6 +605,12 @@ fn handle_get_attested_public_key(
         EnclaveError::InvalidRequest(format!("nonce must be 32 bytes, got {}", req.nonce.len()))
     })?;
 
+    // NOTE (audit W-13): this endpoint attests over a *caller-supplied* nonce,
+    // so it can act as an oracle that mints valid attestations for arbitrary
+    // nonces. That is safe for replay accounting: the cloning handlers record a
+    // nonce only after a fully-authenticated handshake (see `handle_get_clone` /
+    // `handle_set_clone`), so an oracle-minted nonce carries no replay-guard
+    // weight on its own and cannot be used to exhaust the guard.
     let keys = ctx.state.get_keys()?;
     let public_keys = build_public_keys_response(keys, &ctx.bridge_config);
 

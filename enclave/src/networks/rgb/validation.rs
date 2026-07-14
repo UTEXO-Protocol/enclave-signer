@@ -326,7 +326,14 @@ pub struct ValidatedConsignment {
 /// doesn't leak into our public surface.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TransitionSummary {
-    /// Operation id (baid64).
+    /// Operation id — the 64-char lowercase hex of the 32-byte RGB OpId, as
+    /// the consignment parser yields it (verified by the fixture test). The
+    /// EVM OpId cross-check compares this as a string; the `fundsInIds`
+    /// value-binding hex-decodes it to 32 bytes
+    /// (`evm::crosscheck::decode_op_id_to_bytes32`), so the hex form is
+    /// load-bearing - not baid64. (The `burnId` is bound instead from the
+    /// rgbstd-validated [`ValidatedConsignment::last_transfer_op_id`], not this
+    /// flat-parser value - audit M-02 / #93.)
     pub op_id: String,
     /// IFA-schema transition-type id; compare against [`ifa::TS_TRANSFER`]
     /// / [`ifa::TS_BURN`] / [`ifa::TS_INFLATION`] to classify the EVM
@@ -1094,18 +1101,14 @@ mod tests {
 
         // The fixture's last transition is a Transfer (type 10000, asserted in
         // `extracts_op_ids_and_last_transition_from_transfer_fixture`).
-        let (txid, prevouts, _op_id) =
+        let (txid, prevouts, op_id) =
             read_last_transfer_witness(&transfer, ifa::TS_TRANSFER).expect("extract witness");
 
         // Every validated transfer has at least one bundle, so the txid is set.
         let txid = txid.expect("transfer fixture has a witness txid");
         // It must equal the last bundle's witness id (the bundle we bind to).
-        let expected = transfer
-            .bundles
-            .iter()
-            .last()
-            .expect("fixture has bundles")
-            .witness_id();
+        let last_bundle = transfer.bundles.iter().last().expect("fixture has bundles");
+        let expected = last_bundle.witness_id();
         assert_eq!(txid, expected);
 
         // The rgb-lib sender embeds the full witness tx for a freshly-composed
@@ -1116,6 +1119,20 @@ mod tests {
             !prevouts.is_empty(),
             "witness tx must spend at least one input"
         );
+
+        // The validated OpId (canonical burnId source, #93) must be present and
+        // equal the last bundle's last known-transition opid, read straight
+        // from the validated object - not the flat parser.
+        let op_id = op_id.expect("transfer fixture yields a validated opid");
+        let expected_opid = last_bundle
+            .bundle()
+            .known_transitions
+            .iter()
+            .last()
+            .expect("bundle has a known transition")
+            .opid
+            .to_string();
+        assert_eq!(hex::encode(op_id), expected_opid);
     }
 
     #[test]
@@ -1152,5 +1169,342 @@ mod tests {
             err.to_string().contains("rgb-consignment parse failed"),
             "expected parse-failure rejection, got: {err}"
         );
+    }
+
+    // =========================================================================
+    // Consignment-flag pins — successors of the dropped
+    // `validation::evm_crosscheck` tests `accepts_valid_consignment_hash` /
+    // `ignores_consignment_valid_flag_when_bytes_present` (+ the P0 companion
+    // `rejects_empty_consignment_even_with_valid_flag`). Their target,
+    // `validate_evm_request`'s payload gate, is now `validate_source_payload`
+    // in this file. The wire type (`proto::RgbSource`) STILL carries the
+    // host-supplied `consignment_valid: bool` (tag 1); the gate never reads
+    // it — validity comes from the bytes, never the flag.
+    // =========================================================================
+
+    /// keccak256(bytes) in the wire shape `validate_source_payload` expects.
+    fn keccak(bytes: &[u8]) -> Vec<u8> {
+        Keccak256::digest(bytes).to_vec()
+    }
+
+    /// A well-formed `RgbSource` around the in-tree mainnet transfer fixture.
+    ///
+    /// `consignment_valid` is deliberately `false`: the flag is not
+    /// authoritative, so anything that validates with this fixture also
+    /// proves a `false` flag cannot veto byte-derived validity.
+    fn fixture_source(asset_id: &str) -> RgbSource {
+        RgbSource {
+            consignment_valid: false,
+            asset_id: asset_id.into(),
+            consignment: TRANSFER_FIXTURE.to_vec(),
+            consignment_hash: keccak(TRANSFER_FIXTURE),
+            merkle_proofs: vec![],
+            commission: 0,
+        }
+    }
+
+    /// Old `accepts_valid_consignment_hash`: consignment bytes plus their
+    /// matching keccak256 pass the payload gate. `Ok` here is "past the hash
+    /// check" in full — everything after this gate in `validate_source` is
+    /// validator/SPV work, not payload shape.
+    #[test]
+    fn accepts_valid_consignment_hash() {
+        assert!(validate_source_payload(&fixture_source("rgb:any-declared-asset")).is_ok());
+    }
+
+    /// Old `ignores_consignment_valid_flag_when_bytes_present`: an identical
+    /// payload must validate identically whatever the host claims in
+    /// `consignment_valid` — the gate never reads the flag.
+    #[test]
+    fn ignores_consignment_valid_flag_when_bytes_present() {
+        let mut source = fixture_source("rgb:any-declared-asset");
+        source.consignment_valid = false;
+        assert!(validate_source_payload(&source).is_ok());
+        source.consignment_valid = true;
+        assert!(validate_source_payload(&source).is_ok());
+    }
+
+    /// Old `rejects_empty_consignment_even_with_valid_flag` (P0 regression):
+    /// a host-supplied `consignment_valid: true` with no consignment bytes
+    /// must be rejected — the flag can never substitute for the bytes.
+    #[test]
+    fn rejects_empty_consignment_even_with_valid_flag() {
+        let mut source = fixture_source("rgb:any-declared-asset");
+        source.consignment = vec![];
+        source.consignment_hash = vec![];
+        source.consignment_valid = true;
+        let err = validate_source_payload(&source).unwrap_err();
+        assert!(
+            err.to_string().contains("requires raw consignment bytes"),
+            "expected raw-bytes-required rejection, got: {err}"
+        );
+    }
+
+    /// Symmetric pin: the flag cannot rescue a wrong hash either.
+    #[test]
+    fn rejects_consignment_hash_mismatch_even_with_valid_flag() {
+        let mut source = fixture_source("rgb:any-declared-asset");
+        source.consignment_hash = vec![0xDE; 32];
+        source.consignment_valid = true;
+        let err = validate_source_payload(&source).unwrap_err();
+        assert!(
+            err.to_string().contains("consignment hash mismatch"),
+            "expected hash-mismatch rejection, got: {err}"
+        );
+    }
+
+    // =========================================================================
+    // Asset-identity binding, SOURCE path — successor of the dropped
+    // `evm_crosscheck::asset_bind` suite (audit TEE-SE-01). Its target,
+    // `bind_asset_identity`, was removed in the networks/ split; the legs are
+    // now INLINED in `validate_source` (this file) after
+    // `validate_consignment`, so the narrowest callable unit is
+    // `validate_source` itself, driven end-to-end with the in-tree mainnet
+    // fixture validated offline against a stub Esplora (the resolver only
+    // phones home for the genesis-hash chain-identity check; the fixture
+    // embeds its witness txs, which `add_consignment_txes` registers as
+    // tentative).
+    //
+    // Path asymmetry (deliberate, see each test): here the RGB_ASSET_ID pin
+    // is gated on `BridgeConfig::is_configured()`; the destination path
+    // (`validate_destination_anchor`, `networks/rgb/mod.rs`) enforces the pin
+    // unconditionally.
+    // =========================================================================
+
+    mod asset_bind {
+        use super::*;
+        use crate::config::BridgeConfig;
+        use crate::networks::rgb::spv::{Checkpoint, HeaderChain, Network};
+        use std::sync::Mutex;
+
+        /// Contract id of `TRANSFER_FIXTURE`. Kept as a literal (the old
+        /// suite's `PIN`), re-derived and asserted in [`fixture_asset_id`]
+        /// so a fixture swap fails loud instead of silently retargeting
+        /// every binding test.
+        const FIXTURE_ASSET_ID: &str = "rgb:fuhLYX9G-eC8gDvf-V0XpYFH-ceSafoc-lGutAYq-~SExGU4";
+
+        /// The validated asset identity: the fixture's genesis contract id.
+        fn fixture_asset_id() -> String {
+            let t = Transfer::load(Cursor::new(TRANSFER_FIXTURE)).expect("load transfer fixture");
+            let id = t.contract_id().to_string();
+            assert_eq!(
+                id, FIXTURE_ASSET_ID,
+                "transfer fixture contract id drifted — update FIXTURE_ASSET_ID"
+            );
+            id
+        }
+
+        /// Stub Esplora serving only `GET /block-height/0` with the mainnet
+        /// genesis hash — all offline rgbstd validation of the fixture needs:
+        /// the resolver phones home only for the genesis-hash chain-identity
+        /// check, and the fixture embeds its witness txs (registered as
+        /// tentative via `add_consignment_txes`).
+        fn spawn_stub_esplora() -> String {
+            use std::io::{Read as _, Write as _};
+            use std::net::TcpListener;
+
+            let listener = TcpListener::bind("127.0.0.1:0").expect("bind stub esplora");
+            let addr = listener.local_addr().unwrap();
+            std::thread::spawn(move || {
+                for stream in listener.incoming() {
+                    let Ok(mut stream) = stream else { break };
+                    let mut buf = [0u8; 4096];
+                    let n = stream.read(&mut buf).unwrap_or(0);
+                    let req = String::from_utf8_lossy(&buf[..n]).to_string();
+                    let first = req.lines().next().unwrap_or("").to_string();
+                    if !first.starts_with("GET /block-height/0") {
+                        let _ = stream.write_all(
+                            b"HTTP/1.1 404 Not Found\r\ncontent-length: 0\r\nconnection: close\r\n\r\n",
+                        );
+                        continue;
+                    }
+                    let body = bitcoin::constants::genesis_block(bitcoin::Network::Bitcoin)
+                        .block_hash()
+                        .to_string();
+                    let resp = format!(
+                        "HTTP/1.1 200 OK\r\ncontent-type: text/plain\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    );
+                    let _ = stream.write_all(resp.as_bytes());
+                }
+            });
+            format!("http://{addr}")
+        }
+
+        /// Fully-pinned operator config (`is_configured() == true`) with the
+        /// given RGB_ASSET_ID.
+        fn pinned_config(rgb_asset_id: &str) -> BridgeConfig {
+            BridgeConfig {
+                chain_id: 1,
+                bridge_contract: [0x11; 20],
+                rgb_asset_id: rgb_asset_id.into(),
+                gas_tx_allowed_to: None,
+                ..Default::default()
+            }
+        }
+
+        /// Fully-empty operator config (`is_configured() == false`) — the
+        /// legacy dev/mock posture.
+        fn unconfigured_config() -> BridgeConfig {
+            BridgeConfig {
+                chain_id: 0,
+                bridge_contract: [0u8; 20],
+                rgb_asset_id: String::new(),
+                gas_tx_allowed_to: None,
+                ..Default::default()
+            }
+        }
+
+        /// Mainnet header chain whose checkpoint is stamped "now": the SPV
+        /// staleness and chain-net checks pass, so a fully-bound source
+        /// proceeds to the merkle-proof coverage check. Its distinctive
+        /// "missing merkle proofs" error is this suite's proof that every
+        /// asset-binding leg was traversed (real proofs for the fixture's
+        /// mainnet witness txs are not constructible in a unit test).
+        fn fresh_mainnet_chain() -> Mutex<HeaderChain> {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs() as u32;
+            Mutex::new(HeaderChain::new(
+                Network::Mainnet,
+                Checkpoint {
+                    height: 0,
+                    hash: [0u8; 32],
+                    bits: 0x1d00_ffff,
+                    time: now,
+                    is_real: false,
+                },
+            ))
+        }
+
+        /// Drive `validate_source` (the unit the binding is inlined in) with
+        /// a stub-Esplora validator and a fresh mainnet header chain.
+        fn run_validate_source(
+            source: &RgbSource,
+            config: &BridgeConfig,
+        ) -> Result<ValidatedConsignment> {
+            let url = spawn_stub_esplora();
+            let validator = RgbValidator::new(url, "bitcoin").expect("validator");
+            let chain = fresh_mainnet_chain();
+            let ctx = ValidationContext {
+                bridge_config: config,
+                rgb_validator: Some(&validator),
+                header_chain: &chain,
+            };
+            validate_source(source, &ctx)
+        }
+
+        /// Happy path (old `binds_when_contract_id_matches_pin`): validated
+        /// contract_id == declared asset_id == pinned RGB_ASSET_ID. Every
+        /// binding leg passes and validation proceeds to the SPV stage —
+        /// the failure there is *past* the binding, and specifically past
+        /// the staleness + chain-net checks too.
+        #[test]
+        fn binds_when_contract_id_matches_pin() {
+            let id = fixture_asset_id();
+            let err = run_validate_source(&fixture_source(&id), &pinned_config(&id)).unwrap_err();
+            let msg = err.to_string();
+            assert!(
+                msg.contains("missing merkle proofs"),
+                "expected to reach the SPV proof-coverage stage, got: {msg}"
+            );
+            assert!(
+                !msg.contains("contract_id mismatch") && !msg.contains("RGB_ASSET_ID"),
+                "asset binding must have passed, got: {msg}"
+            );
+        }
+
+        /// Old `binds_when_declared_is_empty`, semantics INVERTED by a
+        /// deliberate post-merge strengthening: the networks/ split requires
+        /// the RGB source to declare its asset — an empty `asset_id` now
+        /// fails closed in `validate_source_payload` instead of binding via
+        /// the pin alone. This same rejection is what carries the old
+        /// `rejects_foreign_asset_even_when_declared_is_empty` guarantee:
+        /// with an empty declared id *nothing* binds, foreign or not.
+        #[test]
+        fn rejects_when_declared_is_empty() {
+            let err = run_validate_source(&fixture_source(""), &pinned_config(FIXTURE_ASSET_ID))
+                .unwrap_err();
+            assert!(
+                err.to_string().contains("RGB source asset_id is empty"),
+                "expected empty-declared rejection, got: {err}"
+            );
+        }
+
+        /// Old `rejects_foreign_asset_even_when_declared_is_empty`, adapted:
+        /// empty declarations are now rejected up-front (previous test), so
+        /// the closest reachable form of the TEE-SE-01 funds-theft path is a
+        /// listener that *colludes* — declaring the foreign asset
+        /// consistently with the consignment. The pin must still reject it:
+        /// RGB_ASSET_ID is load-bearing regardless of what the listener says.
+        #[test]
+        fn rejects_foreign_asset_even_when_declared_agrees() {
+            let id = fixture_asset_id();
+            let err = run_validate_source(
+                &fixture_source(&id),
+                &pinned_config("rgb:some-other-pinned-asset"),
+            )
+            .unwrap_err();
+            let msg = err.to_string();
+            assert!(
+                msg.contains("contract_id mismatch") && msg.contains("pinned RGB_ASSET_ID"),
+                "expected pin mismatch, got: {msg}"
+            );
+        }
+
+        /// Old `rejects_when_declared_disagrees_with_validated`: the listener
+        /// declares a different asset than the validated identity. Fires on
+        /// the declared-vs-validated leg (which runs before the pin block).
+        #[test]
+        fn rejects_when_declared_disagrees_with_validated() {
+            let err = run_validate_source(
+                &fixture_source("rgb:listener-lied"),
+                &pinned_config(FIXTURE_ASSET_ID),
+            )
+            .unwrap_err();
+            let msg = err.to_string();
+            assert!(
+                msg.contains("contract_id mismatch") && msg.contains("RGB source declares"),
+                "expected declared-mismatch rejection, got: {msg}"
+            );
+        }
+
+        /// Old `rejects_when_pin_absent` — the source-path ASYMMETRY: here
+        /// the pin block is gated on `BridgeConfig::is_configured()`, so a
+        /// fully-empty config skips the pin and the binding degrades to
+        /// declared == validated, proceeding to SPV (this test pins exactly
+        /// that). It does NOT fail closed here; the unconditional fail-closed
+        /// successor lives on the destination path
+        /// (`networks/rgb/mod.rs::tests::asset_bind::rejects_when_pin_absent`)
+        /// and, for this RGB→EVM direction, in the EVM destination's
+        /// `!is_configured()` rejection (`networks/evm/validation.rs`,
+        /// `not(test)`-gated, asserted at the integration layer). The inner
+        /// "pinned chain/contract but RGB_ASSET_ID is empty" branch in
+        /// `validate_source` is unreachable: `is_configured()` already
+        /// requires a non-empty RGB_ASSET_ID (audit 4th M-03 / #94).
+        #[test]
+        fn pin_check_skipped_when_config_unconfigured() {
+            let id = fixture_asset_id();
+            let err =
+                run_validate_source(&fixture_source(&id), &unconfigured_config()).unwrap_err();
+            let msg = err.to_string();
+            assert!(
+                msg.contains("missing merkle proofs"),
+                "expected to reach the SPV proof-coverage stage with the pin block skipped, \
+                 got: {msg}"
+            );
+        }
+
+        // Old `rejects_when_contract_id_absent`: NOT portable to this path.
+        // The guard survives (validate_source rejects an empty validated
+        // contract_id before any binding), but it is unreachable through the
+        // narrowest callable unit: `RgbValidator::validate_consignment`
+        // derives contract_id from the consignment's genesis, which is never
+        // empty for a loadable Transfer, and `ValidationContext.rgb_validator`
+        // is the concrete type — there is no seam to inject a fabricated
+        // ValidatedConsignment. Recorded as not-feasible in the restoration
+        // report rather than weakened into a vacuous test.
     }
 }

@@ -770,6 +770,27 @@ mod tests {
     }
 
     #[test]
+    fn rejects_overdeep_merkle_path() {
+        // A path deeper than any real block could produce is rejected before
+        // any Merkle hashing runs (audit I-06 / #90). Siblings are well-formed
+        // 32-byte hashes so the only failing predicate is the depth cap.
+        let target = synth_headers(1).into_iter().next().unwrap();
+        let chain = chain_burying(target, 5);
+        let (txid_display, _proof) = single_tx_proof(chain.header_at(1).unwrap(), 1);
+
+        let bad_proof = MerkleProofEntry {
+            txid: txid_display.to_vec(),
+            block_height: 1,
+            tx_position: 0,
+            merkle_path: vec![vec![0u8; 32]; MAX_MERKLE_PATH_DEPTH + 1],
+        };
+
+        let err = validate_spv_proofs(&chain, &[txid_display], &[bad_proof], SPV_MIN_CONFIRMATIONS)
+            .unwrap_err();
+        assert!(err.to_string().contains("too deep"), "got: {err}");
+    }
+
+    #[test]
     fn assert_chain_net_accepts_matching_pair() {
         // Literal prefixes on purpose (not derived from `ChainNet::prefix()`):
         // if an rgb-core upgrade ever changes the notation, this test must
