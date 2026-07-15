@@ -48,21 +48,33 @@ fn main() {
         );
     } else if bridge_config.is_partially_configured() {
         // Some-but-not-all pin fields set: a botched production config. SignEvm
-        // fails closed on this (audit 4th M-03 / #94); warn loudly at boot so
-        // the operator sees it before the first rejected request.
+        // fails closed on this (audit 4th M-03 / #94); log it before the boot
+        // gate below turns it fatal in a production build.
         tracing::error!(
             chain_id = bridge_config.chain_id,
             bridge_contract = %hex::encode(bridge_config.bridge_contract),
             rgb_asset_id = %bridge_config.rgb_asset_id,
-            "bridge config PARTIALLY set — EVM_CHAIN_ID / BRIDGE_CONTRACT / RGB_ASSET_ID must all \
+            "bridge config PARTIALLY set - EVM_CHAIN_ID / BRIDGE_CONTRACT / RGB_ASSET_ID must all \
              be set (non-zero) or all unset; SignEvm will refuse to sign with this ambiguous pin"
         );
     } else {
         tracing::warn!(
-            "bridge config unconfigured (EVM_CHAIN_ID / BRIDGE_CONTRACT / RGB_ASSET_ID unset) — \
+            "bridge config unconfigured (EVM_CHAIN_ID / BRIDGE_CONTRACT / RGB_ASSET_ID unset) - \
              SignEvm cross-check will fall back to legacy behaviour and the attestation bundle \
              will commit to empty values"
         );
+    }
+
+    // Fail-closed at BOOT for a production bridge-signing build (audit C-01
+    // systemic). A per-request refusal (evm::validation / rgb anchor) and the
+    // logs above are not enough: an operator does not tail enclave logs on a
+    // prod host, so an unconfigured or partially-pinned release enclave would
+    // start and silently reject every bridge signature. A release
+    // rgb-validation build that is not fully pinned must never become
+    // reachable. Mirrors the placeholder-checkpoint boot check below; debug /
+    // test / allow-seed-import builds are exempt.
+    if let Err(msg) = bridge_config.assert_configured_in_release() {
+        panic!("{msg}");
     }
 
     // Donor-side cloning secret. Optional: only required for enclaves that
