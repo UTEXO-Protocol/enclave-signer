@@ -3,8 +3,8 @@ use std::time::Duration;
 use crate::enclave_proto::{
     enclave_request, enclave_response, EnclaveRequest, EnclaveResponse, EvmSignatureResponse,
     GetLastSavedBlockRequest, GetLastSavedBlockResponse, GetPublicKeyRequest, InitializeKeyRequest,
-    InitializeKeyResponse, InitiateCloningRequest, InitiateCloningResponse, PublicKeysResponse,
-    RawSignatureResponse, SetCloneRequest, SignEvmRequest, SignPsbtRequest, SignRawMessageRequest,
+    InitializeKeyResponse, InitiateCloningRequest, InitiateCloningResponse, MerkleProofEntry,
+    PublicKeysResponse, RawSignatureResponse, SetCloneRequest, SignRawMessageRequest,
     SignedPsbtResponse, SubmitHeadersRequest, SubmitHeadersResponse,
 };
 use crate::error::{ParentError, Result};
@@ -23,10 +23,44 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 /// validation against Esplora) still need to fit inside this budget.
 const READ_TIMEOUT: Duration = Duration::from_secs(30);
 
+#[derive(Debug, Clone)]
+pub struct SignEvmRequest {
+    pub call_data: Vec<u8>,
+    pub nonce: u64,
+    pub deadline: u64,
+    pub consignment_valid: bool,
+    pub rgb_amount: u64,
+    pub rgb_asset_id: String,
+    pub chain_id: u64,
+    pub proxy_contract: Vec<u8>,
+    pub calldata_amount: u64,
+    pub calldata_commission: u64,
+    pub consignment: Vec<u8>,
+    pub consignment_hash: Vec<u8>,
+    pub merkle_proofs: Vec<MerkleProofEntry>,
+}
+
+#[derive(Debug, Clone)]
+pub struct SignPsbtRequest {
+    pub evm_tx_hash: Vec<u8>,
+    pub operation_idx: u64,
+    pub evm_event_valid: bool,
+    pub evm_event_finalized: bool,
+    pub evm_token: Vec<u8>,
+    pub evm_amount: u64,
+    pub evm_recipient: Vec<u8>,
+    pub evm_commission: u64,
+    pub psbt_bytes: Vec<u8>,
+    pub psbt_output_amount: u64,
+    pub rgb_asset_id: String,
+    pub consignment: Vec<u8>,
+    pub consignment_hash: Vec<u8>,
+}
+
 /// Parse a `vsock://` address body (`<cid>` or `<cid>:<port>`) into `(cid, port)`,
 /// defaulting the port to 5000. Keeps enclave selection explicit on multi-enclave
 /// hosts instead of silently using a default CID.
-#[cfg(feature = "vsock")]
+#[cfg(all(feature = "vsock", target_os = "linux"))]
 fn parse_vsock_spec(spec: &str) -> Result<(u32, u32)> {
     let (cid_str, port_str) = match spec.split_once(':') {
         Some((c, p)) => (c, p),
@@ -56,21 +90,21 @@ impl EnclaveClient {
         // A `vsock://<cid>[:<port>]` address explicitly targets one enclave and
         // works regardless of build features (errors if vsock isn't compiled in).
         if let Some(spec) = self.addr.strip_prefix("vsock://") {
-            #[cfg(feature = "vsock")]
+            #[cfg(all(feature = "vsock", target_os = "linux"))]
             {
                 let (cid, port) = parse_vsock_spec(spec)?;
                 return self.send_vsock(req, cid, port);
             }
-            #[cfg(not(feature = "vsock"))]
+            #[cfg(not(all(feature = "vsock", target_os = "linux")))]
             {
                 return Err(ParentError::Connection(format!(
                     "addr `vsock://{spec}` requests vsock, but this binary was built \
-                     without the `vsock` feature"
+                     without vsock support (needs feature `vsock` on Linux)"
                 )));
             }
         }
 
-        #[cfg(feature = "vsock")]
+        #[cfg(all(feature = "vsock", target_os = "linux"))]
         {
             // No `vsock://` address: fall back to env for back-compat, but DO NOT
             // silently default to CID 16 — on a multi-enclave host that routes
@@ -92,7 +126,7 @@ impl EnclaveClient {
                 )),
             }
         }
-        #[cfg(not(feature = "vsock"))]
+        #[cfg(not(all(feature = "vsock", target_os = "linux")))]
         {
             use std::net::{TcpStream, ToSocketAddrs};
             let socket_addr = self
@@ -256,7 +290,36 @@ impl EnclaveClient {
 
     pub fn sign_evm(&self, req: SignEvmRequest) -> Result<EvmSignatureResponse> {
         let req = EnclaveRequest {
-            request: Some(enclave_request::Request::SignEvm(req)),
+            request: Some(enclave_request::Request::Sign(
+                crate::enclave_proto::SignRequest {
+                    amount: req.rgb_amount,
+                    source_network: Some(
+                        crate::enclave_proto::sign_request::SourceNetwork::RgbSource(
+                            crate::enclave_proto::RgbSource {
+                                consignment_valid: req.consignment_valid,
+                                asset_id: req.rgb_asset_id,
+                                consignment: req.consignment,
+                                consignment_hash: req.consignment_hash,
+                                commission: req.calldata_commission,
+                                merkle_proofs: req.merkle_proofs,
+                            },
+                        ),
+                    ),
+                    destination_network: Some(
+                        crate::enclave_proto::sign_request::DestinationNetwork::EvmDestination(
+                            crate::enclave_proto::EvmDestination {
+                                call_data: req.call_data,
+                                nonce: req.nonce,
+                                deadline: req.deadline,
+                                chain_id: req.chain_id,
+                                proxy_contract: req.proxy_contract,
+                                calldata_amount: req.calldata_amount,
+                                calldata_commission: req.calldata_commission,
+                            },
+                        ),
+                    ),
+                },
+            )),
         };
         let resp = self.send_request(&req)?;
         match resp.response {
@@ -274,7 +337,35 @@ impl EnclaveClient {
 
     pub fn sign_psbt(&self, req: SignPsbtRequest) -> Result<SignedPsbtResponse> {
         let req = EnclaveRequest {
-            request: Some(enclave_request::Request::SignPsbt(req)),
+            request: Some(enclave_request::Request::Sign(
+                crate::enclave_proto::SignRequest {
+                    amount: req.evm_amount,
+                    source_network: Some(
+                        crate::enclave_proto::sign_request::SourceNetwork::EvmSource(
+                            crate::enclave_proto::EvmSource {
+                                tx_hash: req.evm_tx_hash,
+                                event_valid: req.evm_event_valid,
+                                event_finalized: req.evm_event_finalized,
+                                token: req.evm_token,
+                                recipient: req.evm_recipient,
+                                commission: req.evm_commission,
+                            },
+                        ),
+                    ),
+                    destination_network: Some(
+                        crate::enclave_proto::sign_request::DestinationNetwork::RgbDestination(
+                            crate::enclave_proto::RgbDestination {
+                                operation_idx: req.operation_idx,
+                                psbt_bytes: req.psbt_bytes,
+                                psbt_output_amount: req.psbt_output_amount,
+                                asset_id: req.rgb_asset_id,
+                                consignment: req.consignment,
+                                consignment_hash: req.consignment_hash,
+                            },
+                        ),
+                    ),
+                },
+            )),
         };
         let resp = self.send_request(&req)?;
         match resp.response {

@@ -5,10 +5,8 @@ use std::process;
 use clap::{Parser, Subcommand};
 use tracing_subscriber::EnvFilter;
 
-use utexo_bridge_parent::client::EnclaveClient;
-use utexo_bridge_parent::enclave_proto::{
-    InitializeKeyResponse, PublicKeysResponse, SignEvmRequest, SignPsbtRequest,
-};
+use utexo_bridge_parent::client::{EnclaveClient, SignEvmRequest, SignPsbtRequest};
+use utexo_bridge_parent::enclave_proto::{InitializeKeyResponse, PublicKeysResponse};
 
 #[derive(Parser)]
 #[command(
@@ -103,7 +101,10 @@ enum Command {
         /// Mark EVM event as finalized
         #[arg(long)]
         evm_event_finalized: bool,
-        /// Hex-encoded RGB consignment bytes (send-RGB direction; empty = legacy path)
+        /// RGB asset identifier associated with the transfer
+        #[arg(long, default_value = "")]
+        rgb_asset_id: String,
+        /// Hex-encoded RGB consignment bytes
         #[arg(long, default_value = "")]
         consignment: String,
     },
@@ -357,6 +358,7 @@ fn main() {
             psbt_output_amount,
             evm_event_valid,
             evm_event_finalized,
+            rgb_asset_id,
             consignment,
         } => {
             let psbt_bytes = match hex::decode(&psbt) {
@@ -377,8 +379,6 @@ fn main() {
                     }
                 }
             };
-            // keccak256 integrity hash, mirroring the EVM path; the enclave
-            // re-checks it against the bytes before validating.
             let consignment_hash = if consignment_bytes.is_empty() {
                 vec![]
             } else {
@@ -407,7 +407,7 @@ fn main() {
                 evm_commission,
                 psbt_bytes,
                 psbt_output_amount,
-                rgb_asset_id: String::new(),
+                rgb_asset_id,
                 consignment: consignment_bytes,
                 consignment_hash,
             };
@@ -496,7 +496,7 @@ fn run_clone(
     donor_grpc: &str,
     donor_evm: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    use utexo_bridge_parent::grpc_proto::enclave_service_client::EnclaveServiceClient;
+    use utexo_bridge_parent::grpc_proto::parent_service_client::ParentServiceClient;
     use utexo_bridge_parent::grpc_proto::CloneRequest;
 
     let donor_addr = hex::decode(donor_evm.trim_start_matches("0x"))?;
@@ -518,7 +518,7 @@ fn run_clone(
     println!("[2/4] Clone via donor parent gRPC at {donor_grpc} ...");
     let rt = tokio::runtime::Runtime::new()?;
     let clone_resp = rt.block_on(async {
-        let mut grpc = EnclaveServiceClient::connect(donor_grpc.to_string()).await?;
+        let mut grpc = ParentServiceClient::connect(donor_grpc.to_string()).await?;
         let req = CloneRequest {
             attestation: init.requester_attestation,
             encryption_pubkey: init.encryption_pubkey,
@@ -529,7 +529,7 @@ fn run_clone(
         // `Clone::clone(&self)`: autoref tries `&self` before `&mut self`, so
         // `grpc.clone(req)` would wrongly resolve to the derive. Call the
         // inherent method via path syntax (inherent wins over the trait).
-        let resp = EnclaveServiceClient::clone(&mut grpc, req).await?;
+        let resp = ParentServiceClient::clone(&mut grpc, req).await?;
         Ok::<_, Box<dyn std::error::Error>>(resp.into_inner())
     })?;
     println!(

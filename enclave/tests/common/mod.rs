@@ -4,9 +4,9 @@ use std::thread;
 
 use utexo_bridge_enclave::config::BridgeConfig;
 use utexo_bridge_enclave::framing;
+use utexo_bridge_enclave::networks::rgb::spv::{checkpoint_for, HeaderChain, Network};
 use utexo_bridge_enclave::proto::*;
 use utexo_bridge_enclave::server::{self, ServerContext};
-use utexo_bridge_enclave::spv::{checkpoint_for, HeaderChain, Network};
 use utexo_bridge_enclave::state::EnclaveState;
 
 /// Start a test server on a random TCP port. Returns the port number.
@@ -53,6 +53,7 @@ pub fn start_test_server_with_config(
         #[cfg(feature = "rgb-validation")]
         rgb_validator: None,
         header_chain,
+        submit_rate_limiter: std::sync::Mutex::new(server::SubmitRateLimiter::default()),
     });
 
     thread::spawn(move || {

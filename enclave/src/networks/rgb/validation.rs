@@ -7,6 +7,8 @@
 
 use std::collections::BTreeSet;
 use std::io::Cursor;
+#[cfg(feature = "spv")]
+use std::time::SystemTime;
 
 use rgb_consignment::{
     ConsignmentInfo, FungibleAllocation, FungibleEntry, SealInfo, TransitionInfo, WitnessInfo,
@@ -17,8 +19,124 @@ use rgbstd::indexers::AnyResolver;
 use rgbstd::schema::{MetaType, TransitionType};
 use rgbstd::validation::ValidationConfig;
 use rgbstd::ChainNet;
+use sha3::{Digest, Keccak256};
 
 use crate::error::{EnclaveError, Result};
+use crate::networks::ValidationContext;
+use crate::proto::RgbSource;
+
+#[cfg(feature = "spv")]
+use super::spv_validation;
+
+/// Validate all fields and source-chain evidence owned by an RGB source.
+///
+/// This deliberately does not inspect or care about the destination network.
+/// For an RGB source, the source-chain proof is:
+///
+/// 1. raw consignment bytes must be present, hash-bound, and pass full
+///    in-enclave RGB validation;
+/// 2. the validated consignment asset must match the listener-declared
+///    `asset_id` and, when configured, the operator-pinned `RGB_ASSET_ID`;
+/// 3. when built with `spv`, every consignment witness tx must have a matching
+///    Merkle proof against the in-enclave Bitcoin header chain with sufficient
+///    confirmations;
+/// 4. when built without `spv`, reject any supplied Merkle proofs so build
+///    mismatches fail closed instead of silently ignoring host-provided SPV
+///    evidence.
+pub fn validate_source(
+    source: &RgbSource,
+    ctx: &ValidationContext<'_>,
+) -> Result<ValidatedConsignment> {
+    validate_source_payload(source)?;
+
+    let validator = ctx.rgb_validator.ok_or_else(|| {
+        EnclaveError::CrossCheck(
+            "RGB source validation requires rgb_validator to be configured".into(),
+        )
+    })?;
+
+    let validated = validator.validate_consignment(&source.consignment)?;
+
+    if validated.contract_id.is_empty() {
+        return Err(EnclaveError::CrossCheck(
+            "validated consignment has empty contract_id — cannot bind asset identity".into(),
+        ));
+    }
+    if validated.contract_id != source.asset_id {
+        return Err(EnclaveError::CrossCheck(format!(
+            "contract_id mismatch: consignment has {} but RGB source declares {}",
+            validated.contract_id, source.asset_id
+        )));
+    }
+    if ctx.bridge_config.is_configured() {
+        if ctx.bridge_config.rgb_asset_id.is_empty() {
+            return Err(EnclaveError::CrossCheck(
+                "bridge config pinned chain/contract but RGB_ASSET_ID is empty — \
+                 set all three env vars or none"
+                    .into(),
+            ));
+        }
+        if validated.contract_id != ctx.bridge_config.rgb_asset_id {
+            return Err(EnclaveError::CrossCheck(format!(
+                "contract_id mismatch: consignment asset {} != pinned RGB_ASSET_ID {}",
+                validated.contract_id, ctx.bridge_config.rgb_asset_id
+            )));
+        }
+    }
+
+    #[cfg(feature = "spv")]
+    {
+        let chain = ctx
+            .header_chain
+            .lock()
+            .map_err(|e| EnclaveError::Internal(format!("SPV header chain lock poisoned: {e}")))?;
+        spv_validation::validate_source_chain(
+            &chain,
+            Some(&validated),
+            &source.merkle_proofs,
+            SystemTime::now(),
+        )?;
+    }
+
+    #[cfg(not(feature = "spv"))]
+    {
+        if !source.merkle_proofs.is_empty() {
+            return Err(EnclaveError::CrossCheck(
+                "RGB source supplied merkle_proofs but enclave was not built with --features spv"
+                    .into(),
+            ));
+        }
+    }
+
+    Ok(validated)
+}
+
+fn validate_source_payload(source: &RgbSource) -> Result<()> {
+    if source.consignment.is_empty() {
+        return Err(EnclaveError::CrossCheck(
+            "RGB source requires raw consignment bytes; consignment_valid is not authoritative"
+                .into(),
+        ));
+    }
+    if source.consignment_hash.is_empty() {
+        return Err(EnclaveError::CrossCheck(
+            "consignment present but consignment_hash is missing".into(),
+        ));
+    }
+    let computed = Keccak256::digest(&source.consignment);
+    if computed[..] != source.consignment_hash {
+        return Err(EnclaveError::CrossCheck(
+            "consignment hash mismatch: keccak256(consignment) != consignment_hash".into(),
+        ));
+    }
+    if source.asset_id.is_empty() {
+        return Err(EnclaveError::CrossCheck(
+            "RGB source asset_id is empty".into(),
+        ));
+    }
+
+    Ok(())
+}
 
 /// Schema-defined `transition_type` and `metadata` keys for the Inflatable
 /// Fungible Asset (IFA) schema we use for USDT. Sourced from the
@@ -43,6 +161,55 @@ pub mod ifa {
     /// `OS_ASSET` (the regular fungible asset allocation type). The
     /// associated value is a strict-encoded `rgbstd::Amount` (u64).
     pub const MS_BURNED_ASSET: u16 = 1001;
+}
+
+/// Resolve the **trusted** strict type-system the validator must pin a
+/// consignment against, sourced from the canonical `rgb-schemas` crate by the
+/// consignment's `schema_id` — exactly as rgb-lib does
+/// (`AssetSchema::types()` → `InflatableFungibleAsset::types()` etc.).
+///
+/// **Audit 4th W-01 / #92.** RGB's `ValidationConfig.trusted_typesystem` must
+/// come from an enclave-pinned source, never from the consignment under
+/// validation: feeding `transfer.types` back in makes rgbstd compare the
+/// consignment's types against themselves (`validator.rs::validate_schema`),
+/// so the control always passes and a malicious consignment can ship its own
+/// type definitions for the schema's `SemId`s. Instead we look the schema_id
+/// up against the schema definitions compiled into `rgb-schemas` and hand the
+/// validator *that* type system; rgbstd then rejects any consignment whose
+/// types differ from the canonical set.
+///
+/// All four standard fungible/collectible schemas are accepted here; the
+/// bridge additionally pins the exact asset via `contract_id` →
+/// `RGB_ASSET_ID` (`bind_asset_identity`), so schema breadth at this layer is
+/// not asset-scoping. An **unknown** schema_id is rejected fail-closed.
+///
+/// Schema ids are compared by their canonical string form so the comparison
+/// is robust to `rgb-schemas` resolving a different `rgb-consensus` build than
+/// the enclave's validator (the `SchemaId` *value* is a content commitment and
+/// stringifies identically across versions).
+#[cfg(feature = "rgb-validation")]
+fn trusted_typesystem_for_schema(schema_id: &str) -> Result<rgbstd::TypeSystem> {
+    use rgbstd::contract::IssuerWrapper;
+    use schemata::{
+        CollectibleFungibleAsset, InflatableFungibleAsset, NonInflatableAsset, UniqueDigitalAsset,
+        CFA_SCHEMA_ID, IFA_SCHEMA_ID, NIA_SCHEMA_ID, UDA_SCHEMA_ID,
+    };
+
+    let types = if schema_id == IFA_SCHEMA_ID.to_string() {
+        InflatableFungibleAsset::types()
+    } else if schema_id == NIA_SCHEMA_ID.to_string() {
+        NonInflatableAsset::types()
+    } else if schema_id == CFA_SCHEMA_ID.to_string() {
+        CollectibleFungibleAsset::types()
+    } else if schema_id == UDA_SCHEMA_ID.to_string() {
+        UniqueDigitalAsset::types()
+    } else {
+        return Err(EnclaveError::CrossCheck(format!(
+            "consignment uses unknown/unsupported RGB schema {schema_id} — refusing to validate \
+             (cannot source a trusted type system)"
+        )));
+    };
+    Ok(types)
 }
 
 /// Data extracted from a successfully validated RGB consignment.
@@ -315,10 +482,22 @@ impl RgbValidator {
         // treats them as tentative witnesses (not yet mined).
         resolver.add_consignment_txes(&transfer);
 
+        // Pin the trusted type system (audit 4th W-01 / #92). Source it from
+        // the canonical `rgb-schemas` definitions keyed on the consignment's
+        // schema_id, NOT from `transfer.types`. Passing the consignment's own
+        // types makes rgbstd compare them against themselves (always passes);
+        // the canonical set makes `validate()` reject any consignment that
+        // ships substituted type definitions for the schema's SemIds. An
+        // unknown schema_id is rejected fail-closed inside the helper.
+        let schema_id = transfer.genesis.schema_id.to_string();
+        let trusted_typesystem = trusted_typesystem_for_schema(&schema_id).inspect_err(|_| {
+            tracing::warn!(%contract_id, %schema_id, "no trusted type system for consignment schema");
+        })?;
+
         // 3. Build validation config.
         let config = ValidationConfig {
             chain_net: self.chain_net,
-            trusted_typesystem: transfer.types.clone(),
+            trusted_typesystem,
             build_opouts_dag: true,
             ..Default::default()
         };
@@ -570,9 +749,9 @@ mod tests {
     // harness; we ship them in-tree so the unit tests don't depend on
     // network access or the parser repo's working copy.
     const TRANSFER_FIXTURE: &[u8] =
-        include_bytes!("../../tests/fixtures/transfer_consignment.rgbc");
+        include_bytes!("../../../tests/fixtures/transfer_consignment.rgbc");
     const CONTRACT_FIXTURE: &[u8] =
-        include_bytes!("../../tests/fixtures/contract_consignment.rgbc");
+        include_bytes!("../../../tests/fixtures/contract_consignment.rgbc");
 
     #[test]
     fn rejects_invalid_bytes() {
@@ -628,6 +807,34 @@ mod tests {
         // round-trip lives behind the validator-level path (which needs
         // network access for Esplora), tracked separately.
         assert_eq!(last.burned_asset_amount, None);
+    }
+
+    #[test]
+    fn trusted_typesystem_sourced_from_schema_not_consignment() {
+        // The W-01 fix (#92): the trusted type system must come from the
+        // canonical rgb-schemas definitions, not from `transfer.types`.
+        // The in-tree fixture is an NIA consignment, so its schema_id resolves
+        // to a canonical type system whose id matches NIA's.
+        let t = Transfer::load(Cursor::new(TRANSFER_FIXTURE)).expect("load transfer fixture");
+        let schema_id = t.genesis.schema_id.to_string();
+
+        let trusted =
+            trusted_typesystem_for_schema(&schema_id).expect("fixture schema must be known");
+
+        // The canonical type system is what rgb-schemas ships for this schema,
+        // and the fixture's own types match it (a legit consignment).
+        assert_eq!(
+            trusted.id().to_string(),
+            t.types.id().to_string(),
+            "canonical type system for the fixture's schema should match the fixture's types"
+        );
+
+        // An unknown schema id is rejected fail-closed.
+        let err = trusted_typesystem_for_schema("rgb:sch:unknown-schema-id").unwrap_err();
+        assert!(
+            err.to_string().contains("unknown/unsupported RGB schema"),
+            "expected unknown-schema rejection, got: {err}"
+        );
     }
 
     #[test]

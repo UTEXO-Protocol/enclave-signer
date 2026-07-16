@@ -38,9 +38,9 @@ use bitcoin::block::Header;
 use bitcoin::consensus::deserialize;
 use bitcoin::pow::Work;
 
-use crate::spv::checkpoint::Checkpoint;
-use crate::spv::types::{BlockHash, BlockHeight, Network, Result, SpvError};
-use crate::spv::validation::{
+use crate::networks::rgb::spv::checkpoint::Checkpoint;
+use crate::networks::rgb::spv::types::{BlockHash, BlockHeight, Network, Result, SpvError};
+use crate::networks::rgb::spv::validation::{
     expected_bits, is_retarget_height, validate_header_full, RETARGET_INTERVAL,
 };
 
@@ -51,6 +51,57 @@ use crate::spv::validation::{
 /// Anything deeper than this is treated as a chain split that needs operator
 /// attention, not something the enclave silently absorbs.
 pub const MAX_REORG_DEPTH: BlockHeight = 100;
+
+// Retention policy (#130): the in-memory chain keeps **every** validated
+// header from the checkpoint forward — there is no sliding window.
+//
+// A sliding window (#86) previously pruned everything older than `tip − ~2122`.
+// That broke the SPV cross-check's core invariant: an RGB consignment must
+// prove inclusion of *all* its witness anchors, and those anchors can sit tens
+// of thousands of blocks below the tip (any asset with history older than ~a
+// day on 30s-block signet). Once the anchor's header was pruned, `header_at`
+// returned `None` and the enclave refused to sign — blocking funds-out for
+// practically every real asset. Per the design note "Bitcoin SPV Verification
+// for TEE Enclave": keep all headers from the checkpoint and verify every
+// anchor against them.
+//
+// Steady-state memory is `tip − checkpoint` headers × ~112 B each (80 B header
+// + 32 B cached hash). Signet's checkpoint (334 000) to a live tip is ~85 k
+// headers ≈ 9.5 MB; mainnet's (951 552) grows ~52.6 k headers/year ≈ 5.9
+// MB/year. The retention floor is pinned at the checkpoint, so the checkpoint
+// must sit below the oldest anchor of any bridgeable asset.
+//
+// Growth is bounded two ways. On PoW networks (mainnet/testnet3) forward
+// growth is throttled by real chain work. But the *production* network here is
+// UTEXO custom signet, which does NOT enforce PoW (`Network::enforces_pow()`
+// is false) — headers are chain-linkage-validated only, so a hostile or buggy
+// listener can mint valid-linkage headers for free and, with no window, grow
+// the chain until the enclave OOMs (fixed RAM reservation → whole-bridge DoS).
+// `MAX_STORED_HEADERS` therefore caps absolute retention on *every* network as
+// a work-independent backstop.
+
+/// Absolute cap on retained headers (#130 / audit W-08). Full retention removed
+/// the sliding window that used to bound memory, so this ceiling replaces it as
+/// the work-independent memory backstop — essential on non-PoW networks
+/// (signet/regtest) where header growth is otherwise free. When accepting a
+/// batch would push the stored count past this, `submit_headers` REJECTS the
+/// batch (fail-closed) rather than pruning, so no anchor below the ceiling is
+/// ever silently dropped — the operator resolves it by advancing the
+/// compile-time checkpoint (which re-attests anyway).
+///
+/// Sizing: worst-case forced allocation is `MAX_STORED_HEADERS` × ~112 B ≈
+/// 112 MB — a firm bound versus the previous unbounded growth. Legitimate
+/// runway before the *real* chain reaches it: ~11 months on 30s-block signet
+/// (~1.05 M headers/year) and ~19 years on mainnet from their checkpoints, both
+/// far beyond the redeploy/checkpoint-refresh cadence. Tune this against the
+/// enclave's actual memory reservation and expected checkpoint cadence.
+pub const MAX_STORED_HEADERS: usize = 1_000_000;
+
+/// Maximum number of headers accepted in a single `submit_headers` call.
+/// Bounds per-call validation work. Far above any legitimate batch (the
+/// listener pushes incrementally) yet well under the ~52 k headers the 4 MB
+/// `framing` cap would otherwise permit per message.
+pub const MAX_HEADERS_PER_SUBMIT: usize = 10_000;
 
 /// Outcome of pushing a batch of headers.
 #[derive(Debug, Clone, Copy)]
@@ -68,15 +119,40 @@ pub struct SubmitOutcome {
 }
 
 /// In-memory store of validated block headers, anchored to a checkpoint.
+///
+/// Every header from the checkpoint forward is retained (#130 — no sliding
+/// window). Headers are stored relative to a *base* that equals the checkpoint
+/// and never moves: `headers[i]` is always the header at height
+/// `base_height + 1 + i`, i.e. `checkpoint.height + 1 + i`. The base fields
+/// (hash/bits/time of the checkpoint block) are the predecessor metadata the
+/// first stored header chains to.
 pub struct HeaderChain {
     network: Network,
     checkpoint: Checkpoint,
+    /// Height of the block immediately preceding `headers[0]` — the anchor the
+    /// first stored header chains to. With full retention (#130) this stays
+    /// equal to `checkpoint.height` for the life of the chain.
+    base_height: BlockHeight,
+    /// Hash (internal byte order) of the block at `base_height` — the
+    /// checkpoint hash.
+    base_hash: BlockHash,
+    /// `nBits` of the block at `base_height` — the predecessor difficulty for
+    /// `headers[0]` (the checkpoint's `bits`).
+    base_bits: u32,
+    /// Timestamp of the block at `base_height` (the checkpoint's `time`).
+    /// Doubles as the epoch-start time when `base_height` is the boundary an
+    /// incoming retarget block references.
+    base_time: u32,
     /// Validated headers, in ascending height. Index `i` is the header at
-    /// height `checkpoint.height + 1 + i`.
+    /// height `base_height + 1 + i`.
     headers: Vec<Header>,
     /// Cached hashes (internal byte order) parallel to `headers`. Avoids
     /// recomputing on every linkage check.
     hashes: Vec<BlockHash>,
+    /// Absolute cap on retained headers (see `MAX_STORED_HEADERS`). A field
+    /// rather than a bare const so tests can exercise the fail-closed rejection
+    /// without building a million headers; production always uses the const.
+    max_stored_headers: usize,
 }
 
 impl HeaderChain {
@@ -86,9 +162,21 @@ impl HeaderChain {
         Self {
             network,
             checkpoint,
+            base_height: checkpoint.height,
+            base_hash: checkpoint.hash,
+            base_bits: checkpoint.bits,
+            base_time: checkpoint.time,
             headers: Vec::new(),
             hashes: Vec::new(),
+            max_stored_headers: MAX_STORED_HEADERS,
         }
+    }
+
+    /// Test hook: shrink the retention cap so the fail-closed ceiling can be
+    /// exercised without building `MAX_STORED_HEADERS` headers.
+    #[cfg(test)]
+    fn set_max_stored_headers_for_test(&mut self, cap: usize) {
+        self.max_stored_headers = cap;
     }
 
     pub fn network(&self) -> Network {
@@ -102,7 +190,7 @@ impl HeaderChain {
     /// Height of the most recent validated header (or the checkpoint, if no
     /// headers have been accepted yet).
     pub fn tip_height(&self) -> BlockHeight {
-        self.checkpoint.height + self.headers.len() as BlockHeight
+        self.base_height + self.headers.len() as BlockHeight
     }
 
     /// Hash of the most recent validated header (or the checkpoint hash).
@@ -135,27 +223,29 @@ impl HeaderChain {
         self.headers.is_empty()
     }
 
-    /// Look up a stored header by height. The checkpoint height returns
-    /// `None` because we don't keep the checkpoint header itself, only its
-    /// metadata (we hardcode hash/bits/time).
+    /// Look up a stored header by height. Heights at or below the checkpoint
+    /// return `None` — we don't keep the checkpoint block's header itself, only
+    /// its metadata (hash/bits/time). Every height from `checkpoint + 1` to the
+    /// tip is retained (#130), so old RGB anchors always resolve.
     pub fn header_at(&self, height: BlockHeight) -> Option<&Header> {
-        if height <= self.checkpoint.height {
+        if height <= self.base_height {
             return None;
         }
-        let idx = (height - self.checkpoint.height - 1) as usize;
+        let idx = (height - self.base_height - 1) as usize;
         self.headers.get(idx)
     }
 
-    /// Look up a stored hash by height. Returns the checkpoint hash for its
-    /// own height — useful for chain-linkage checks across the boundary.
+    /// Look up a stored hash by height. Returns the checkpoint (base) hash for
+    /// its own height — useful for chain-linkage checks across the base
+    /// boundary. Heights below the checkpoint return `None`.
     pub fn hash_at(&self, height: BlockHeight) -> Option<BlockHash> {
-        if height == self.checkpoint.height {
-            return Some(self.checkpoint.hash);
+        if height == self.base_height {
+            return Some(self.base_hash);
         }
-        if height < self.checkpoint.height {
+        if height < self.base_height {
             return None;
         }
-        let idx = (height - self.checkpoint.height - 1) as usize;
+        let idx = (height - self.base_height - 1) as usize;
         self.hashes.get(idx).copied()
     }
 
@@ -171,6 +261,27 @@ impl HeaderChain {
         raw_headers: &[Vec<u8>],
     ) -> Result<SubmitOutcome> {
         let tip = self.tip_height();
+
+        // Per-call cap (#86): bound the validation work a single submission
+        // can demand. The `framing` 4 MB cap is per-message only — without
+        // this an attacker could pack ~52 k headers into one call.
+        if raw_headers.len() > MAX_HEADERS_PER_SUBMIT {
+            return Err(SpvError::BatchTooLarge {
+                len: raw_headers.len(),
+                max: MAX_HEADERS_PER_SUBMIT,
+            });
+        }
+
+        // Empty batch: nothing to place. Return a no-op outcome rather than
+        // running the reorg path (which assumes a non-empty staged batch).
+        if raw_headers.is_empty() {
+            return Ok(SubmitOutcome {
+                last_block_height: tip,
+                last_block_hash: self.tip_hash(),
+                headers_accepted: 0,
+                reorg_depth: 0,
+            });
+        }
 
         if start_height <= self.checkpoint.height {
             return Err(SpvError::BelowCheckpoint {
@@ -195,15 +306,30 @@ impl HeaderChain {
             });
         }
 
-        // Predecessor info at `start_height - 1`. Always exists by the bounds
-        // check above (either the checkpoint itself or a stored header).
+        // Total-retention ceiling (#130 / audit W-08): full retention dropped
+        // the sliding window, so bound absolute stored size here — otherwise a
+        // hostile/buggy listener on a non-PoW network (signet/regtest, where
+        // headers are minted for free) could grow the chain until the enclave
+        // OOMs. Fail-closed: reject the batch rather than prune, so no anchor
+        // below the ceiling is dropped. Headers retained below the batch are
+        // `start_height - 1 - base_height` (0 for a reorg back to the base),
+        // and the batch replaces everything from `start_height` up.
+        let retained_below_batch = (start_height - 1 - self.base_height) as usize;
+        let projected_len = retained_below_batch + raw_headers.len();
+        if projected_len > self.max_stored_headers {
+            return Err(SpvError::ChainTooLong {
+                len: projected_len,
+                max: self.max_stored_headers,
+            });
+        }
+
+        // Predecessor info at `start_height - 1`. Either the base (checkpoint)
+        // or a stored header. A start at or below the checkpoint was already
+        // rejected (`BelowCheckpoint`); everything above it is retained (#130),
+        // so any acceptable reorg (≤ `MAX_REORG_DEPTH`) stays in range.
         let pred_height = start_height - 1;
-        let (pred_hash, pred_bits, pred_time) = if pred_height == self.checkpoint.height {
-            (
-                self.checkpoint.hash,
-                self.checkpoint.bits,
-                self.checkpoint.time,
-            )
+        let (pred_hash, pred_bits, pred_time) = if pred_height == self.base_height {
+            (self.base_hash, self.base_bits, self.base_time)
         } else {
             let h = self
                 .header_at(pred_height)
@@ -258,7 +384,7 @@ impl HeaderChain {
         // rewritten range. Equal-work-replace is rejected (Bitcoin best-chain
         // rule: ties go to the chain we already have).
         if reorg_depth > 0 {
-            let truncate_idx = (pred_height - self.checkpoint.height) as usize;
+            let truncate_idx = (pred_height - self.base_height) as usize;
             let existing_work = sum_work(self.headers[truncate_idx..].iter())
                 .expect("reorg implies non-empty existing range");
             let new_work = sum_work(staged.iter().map(|(h, _)| h))
@@ -289,7 +415,7 @@ impl HeaderChain {
     /// Find the timestamp of the block at the start of the retarget epoch
     /// containing `height`. Looks first in the staged batch (whose first
     /// entry is at `batch_start_height`), then in the committed chain, then
-    /// at the checkpoint.
+    /// at the base (the checkpoint).
     ///
     /// Only meaningful at retarget boundaries; on non-boundary heights the
     /// caller ignores the value.
@@ -320,16 +446,17 @@ impl HeaderChain {
             }
         }
 
-        // Committed chain?
-        if target_height > self.checkpoint.height {
-            if let Some(h) = self.header_at(target_height) {
-                return Ok(h.time);
-            }
+        // Committed chain (strictly above the base / checkpoint)?
+        if let Some(h) = self.header_at(target_height) {
+            return Ok(h.time);
         }
 
-        // Checkpoint?
-        if target_height == self.checkpoint.height {
-            return Ok(self.checkpoint.time);
+        // The base (checkpoint) itself: a retarget boundary whose timestamp we
+        // retain as base metadata even though its header is not stored. Full
+        // retention (#130) guarantees the epoch start for any higher boundary
+        // is a stored header, resolved above.
+        if target_height == self.base_height {
+            return Ok(self.base_time);
         }
 
         Err(SpvError::HeaderNotFound(target_height))
@@ -700,6 +827,266 @@ mod tests {
         let outcome = chain.submit_headers(4001, &raws).unwrap();
         assert_eq!(outcome.headers_accepted, 100);
         assert_eq!(outcome.last_block_height, 4100);
+    }
+
+    // ===== #67: retarget-boundary epoch-start resolution =====
+    //
+    // The wedge bug is in `epoch_start_time`: a retarget boundary at height B
+    // needs the block at `B - RETARGET_INTERVAL`. If the checkpoint isn't
+    // boundary-aligned, the first boundary above it references an epoch start
+    // *below* the checkpoint, which is never stored — `HeaderNotFound`, and the
+    // chain wedges. We test the lookup directly: synthesising a real mainnet
+    // chain across a boundary would need genuine min-difficulty PoW (not
+    // feasible in a unit test), but the difficulty math itself is covered in
+    // validation.rs — what #67 changes is purely epoch-start *availability*.
+
+    /// TH-1: with a boundary-aligned checkpoint (the #67 fix), the first
+    /// retarget boundary above it resolves its epoch start to the checkpoint
+    /// instead of wedging.
+    #[test]
+    fn th1_epoch_start_resolves_at_first_boundary_above_aligned_checkpoint() {
+        let cp = Checkpoint {
+            height: 951_552, // == 472 * RETARGET_INTERVAL (the real mainnet checkpoint)
+            hash: [0x11; 32],
+            bits: 0x1702_068f,
+            time: 1_780_050_586,
+            is_real: true,
+        };
+        assert_eq!(cp.height % RETARGET_INTERVAL, 0, "precondition: aligned");
+        let chain = HeaderChain::new(Network::Mainnet, cp);
+
+        let first_boundary = cp.height + RETARGET_INTERVAL; // 953_568
+                                                            // epoch start = first_boundary - RETARGET_INTERVAL = cp.height (the base).
+        let epoch_start = chain
+            .epoch_start_time(first_boundary, first_boundary, &[])
+            .expect("aligned checkpoint must resolve the first boundary's epoch start");
+        assert_eq!(epoch_start, cp.time);
+    }
+
+    /// TH-2: the OLD, misaligned checkpoint (950 000) wedges — the first
+    /// boundary above it (951 552) references an epoch start (949 536) below
+    /// the checkpoint, which is never stored. This is the bug #67 fixes; the
+    /// load-time assertion now rejects such a checkpoint outright.
+    #[test]
+    fn th2_misaligned_checkpoint_wedges_at_first_boundary() {
+        let cp = Checkpoint {
+            height: 950_000, // 950_000 % 2016 == 464 → NOT aligned
+            hash: [0x22; 32],
+            bits: 0x1702_0f79,
+            time: 1_779_141_269,
+            is_real: true,
+        };
+        assert_ne!(cp.height % RETARGET_INTERVAL, 0, "precondition: misaligned");
+        let chain = HeaderChain::new(Network::Mainnet, cp);
+
+        // First retarget boundary above 950_000 is 951_552 (= 472 * 2016).
+        let first_boundary = 951_552;
+        let err = chain
+            .epoch_start_time(first_boundary, first_boundary, &[])
+            .unwrap_err();
+        assert!(matches!(err, SpvError::HeaderNotFound(949_536)));
+    }
+
+    // ===== #130: full retention from the checkpoint (no sliding window) =====
+
+    /// Every header from the checkpoint forward is retained: the base stays
+    /// pinned at the checkpoint and `header_at` resolves anchors far below the
+    /// old `HEADER_WINDOW` (~2122). This is the core regression for #130 —
+    /// before the fix those headers were pruned and SPV rejected old RGB
+    /// anchors.
+    #[test]
+    fn retains_full_history_from_checkpoint() {
+        // Checkpoint at height 0 so boundaries fall on clean multiples of 2016.
+        let cp = Checkpoint {
+            height: 0,
+            hash: [0xCC; 32],
+            bits: 0x207fffff,
+            time: 1_700_000_000,
+            is_real: false,
+        };
+        let mut chain = HeaderChain::new(Network::Regtest, cp);
+
+        // Build well past the former window (100 + 2016 + 6 = 2122) plus a
+        // full epoch, so any leftover pruning logic would have fired.
+        let count = 4200u32;
+        let (raws, _) = synth_chain_from(cp.hash, cp.time, 1, count);
+        let outcome = chain.submit_headers(1, &raws).unwrap();
+        assert_eq!(outcome.last_block_height, count);
+        assert_eq!(chain.tip_height(), count);
+
+        // Base stays pinned at the checkpoint — nothing is pruned, so the whole
+        // history is kept.
+        assert_eq!(chain.base_height, 0, "base pinned at the checkpoint");
+        assert_eq!(chain.headers.len(), count as usize);
+
+        // The checkpoint header itself is not stored, but its hash is available
+        // at its own height; every height above it resolves.
+        assert!(chain.header_at(0).is_none(), "checkpoint header not stored");
+        assert_eq!(chain.hash_at(0), Some(chain.base_hash));
+        assert!(chain.header_at(1).is_some(), "oldest header retained");
+
+        // A height far below `tip − 2122` is still present — exactly the case
+        // that failed before #130 (anchor at ~tip − 3200 here).
+        let deep = 1000u32;
+        assert!(
+            (count - deep) > 2122,
+            "precondition: deep anchor is below the old window"
+        );
+        assert!(
+            chain.header_at(deep).is_some(),
+            "deep-history header must be retained"
+        );
+
+        assert!(chain.header_at(count).is_some(), "tip is retained");
+        assert_eq!(chain.header_at(count), chain.headers.last());
+
+        // The chain still extends correctly on top of the full history.
+        let tip_hash = chain.tip_hash();
+        let (more, _) = synth_chain_from(tip_hash, chain.tip_time(), 9, 10);
+        let outcome = chain.submit_headers(count + 1, &more).unwrap();
+        assert_eq!(outcome.headers_accepted, 10);
+        assert_eq!(chain.tip_height(), count + 10);
+    }
+
+    /// The retarget epoch-start lookup resolves off retained history. A high
+    /// boundary references a stored header; the first boundary above the
+    /// checkpoint references the base (checkpoint) metadata.
+    #[test]
+    fn epoch_start_resolves_from_retained_history() {
+        let cp = Checkpoint {
+            height: 0,
+            hash: [0xCC; 32],
+            bits: 0x207fffff,
+            time: 1_700_000_000,
+            is_real: false,
+        };
+        let mut chain = HeaderChain::new(Network::Regtest, cp);
+        let (raws, _) = synth_chain_from(cp.hash, cp.time, 1, 4200);
+        chain.submit_headers(1, &raws).unwrap();
+        assert_eq!(chain.base_height, 0);
+
+        // synth_chain_from sets the header at height h to time cp.time + h.
+        // Boundary at 4032 references epoch start 2016 — a retained header.
+        let boundary = 2 * RETARGET_INTERVAL; // 4032
+        let epoch_start_height = boundary - RETARGET_INTERVAL; // 2016
+        let expected = chain.header_at(epoch_start_height).unwrap().time;
+        assert_eq!(expected, cp.time + epoch_start_height);
+        let got = chain
+            .epoch_start_time(boundary, boundary, &[])
+            .expect("epoch start from retained history must resolve");
+        assert_eq!(got, expected);
+
+        // The first boundary above the checkpoint references the base itself,
+        // whose timestamp is the checkpoint time.
+        let first_boundary = RETARGET_INTERVAL; // 2016
+        let got_base = chain
+            .epoch_start_time(first_boundary, first_boundary, &[])
+            .expect("epoch start at the checkpoint base must resolve");
+        assert_eq!(got_base, cp.time);
+    }
+
+    /// A reorg near the tip validates with full retention — the truncate index
+    /// is computed off the base, which is pinned at the checkpoint.
+    #[test]
+    fn reorg_near_tip_with_full_retention() {
+        let cp = Checkpoint {
+            height: 0,
+            hash: [0xCC; 32],
+            bits: 0x207fffff,
+            time: 1_700_000_000,
+            is_real: false,
+        };
+        let mut chain = HeaderChain::new(Network::Regtest, cp);
+        let (raws, _) = synth_chain_from(cp.hash, cp.time, 1, 4200);
+        chain.submit_headers(1, &raws).unwrap();
+        assert_eq!(chain.base_height, 0);
+
+        // Reorg the last 5 blocks (depth 5) with a longer alt chain.
+        let start = 4196;
+        let pred_hash = chain.hash_at(start - 1).unwrap();
+        let pred_time = chain.header_at(start - 1).unwrap().time;
+        let (alt, _) = synth_chain_from(pred_hash, pred_time, 55, 10);
+        let outcome = chain.submit_headers(start, &alt).unwrap();
+        assert_eq!(outcome.reorg_depth, 5);
+        assert_eq!(chain.tip_height(), start - 1 + 10);
+        assert_eq!(
+            chain.base_height, 0,
+            "base pinned to the checkpoint; retention is full"
+        );
+    }
+
+    /// The absolute retention ceiling (`MAX_STORED_HEADERS`) is fail-closed: a
+    /// batch that would push the stored count past the cap is rejected and the
+    /// chain is left unchanged — never pruned. This is the memory backstop for
+    /// non-PoW networks, where headers can be minted for free.
+    #[test]
+    fn rejects_extension_past_retention_cap() {
+        let cp = Checkpoint {
+            height: 0,
+            hash: [0xCC; 32],
+            bits: 0x207fffff,
+            time: 1_700_000_000,
+            is_real: false,
+        };
+        let mut chain = HeaderChain::new(Network::Regtest, cp);
+        // Shrink the cap so we can hit it without building a million headers.
+        let cap = 50usize;
+        chain.set_max_stored_headers_for_test(cap);
+
+        // Filling exactly to the cap is accepted (boundary: 50 == cap).
+        let (raws, tip_hash) = synth_chain_from(cp.hash, cp.time, 1, cap as u32);
+        chain.submit_headers(1, &raws).unwrap();
+        assert_eq!(chain.len(), cap);
+
+        // One more header would make 51 > 50 → fail-closed rejection.
+        let (more, _) = synth_chain_from(tip_hash, chain.tip_time(), 9, 1);
+        let err = chain.submit_headers(cap as u32 + 1, &more).unwrap_err();
+        assert!(matches!(
+            err,
+            SpvError::ChainTooLong { len, max } if len == cap + 1 && max == cap
+        ));
+
+        // Chain is unchanged — nothing was pruned to make room.
+        assert_eq!(chain.len(), cap);
+        assert_eq!(chain.tip_height(), cap as u32);
+        assert!(
+            chain.header_at(1).is_some(),
+            "oldest header must not be dropped"
+        );
+    }
+
+    /// Per-call cap (#86): a batch larger than `MAX_HEADERS_PER_SUBMIT` is
+    /// rejected before any parsing work. We pass garbage vecs — the cap fires
+    /// first, so they're never deserialised.
+    #[test]
+    fn rejects_batch_over_per_call_cap() {
+        let (mut chain, _) = synthetic_regtest_setup();
+        let oversized = vec![vec![0u8; 80]; MAX_HEADERS_PER_SUBMIT + 1];
+        let err = chain.submit_headers(101, &oversized).unwrap_err();
+        assert!(matches!(
+            err,
+            SpvError::BatchTooLarge { len, max }
+                if len == MAX_HEADERS_PER_SUBMIT + 1 && max == MAX_HEADERS_PER_SUBMIT
+        ));
+        assert_eq!(chain.len(), 0, "rejected batch leaves the chain unchanged");
+    }
+
+    /// An empty batch is a no-op success: nothing to place, chain unchanged,
+    /// and it must not panic via the reorg path.
+    #[test]
+    fn empty_batch_is_noop() {
+        let (mut chain, raws) = synthetic_regtest_setup();
+        chain.submit_headers(101, &raws).unwrap();
+        let tip = chain.tip_height();
+        let len = chain.len();
+        // Empty at an extension height and at a reorg height both no-op.
+        let outcome = chain.submit_headers(tip + 1, &[]).unwrap();
+        assert_eq!(outcome.headers_accepted, 0);
+        assert_eq!(outcome.reorg_depth, 0);
+        let outcome = chain.submit_headers(tip, &[]).unwrap();
+        assert_eq!(outcome.headers_accepted, 0);
+        assert_eq!(chain.tip_height(), tip);
+        assert_eq!(chain.len(), len);
     }
 
     #[test]

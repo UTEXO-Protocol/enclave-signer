@@ -6,8 +6,10 @@
 use std::net::TcpListener;
 
 use utexo_bridge_enclave::config::BridgeConfig;
+use utexo_bridge_enclave::networks::rgb::spv::{checkpoint_for, HeaderChain, Network};
+#[cfg(feature = "rgb-validation")]
+use utexo_bridge_enclave::networks::rgb::validation::RgbValidator;
 use utexo_bridge_enclave::server::{self, ServerContext};
-use utexo_bridge_enclave::spv::{checkpoint_for, HeaderChain, Network};
 use utexo_bridge_enclave::state::EnclaveState;
 
 /// Witness-resolver endpoint. `ELECTRUM_URL` (e.g. `ssl://host:50002`) is the
@@ -94,6 +96,17 @@ fn main() {
             rgb_asset_id = %bridge_config.rgb_asset_id,
             "bridge config pinned from env"
         );
+    } else if bridge_config.is_partially_configured() {
+        // Some-but-not-all pin fields set: a botched production config. SignEvm
+        // fails closed on this (audit 4th M-03 / #94); warn loudly at boot so
+        // the operator sees it before the first rejected request.
+        tracing::error!(
+            chain_id = bridge_config.chain_id,
+            bridge_contract = %hex::encode(bridge_config.bridge_contract),
+            rgb_asset_id = %bridge_config.rgb_asset_id,
+            "bridge config PARTIALLY set — EVM_CHAIN_ID / BRIDGE_CONTRACT / RGB_ASSET_ID must all \
+             be set (non-zero) or all unset; SignEvm will refuse to sign with this ambiguous pin"
+        );
     } else {
         tracing::warn!(
             "bridge config unconfigured (EVM_CHAIN_ID / BRIDGE_CONTRACT / RGB_ASSET_ID unset) — \
@@ -160,7 +173,7 @@ fn main() {
     let rgb_validator = {
         let indexer_url = indexer_url_from_env();
         let network = std::env::var("BITCOIN_NETWORK").unwrap_or_else(|_| "bitcoin".into());
-        match utexo_bridge_enclave::validation::rgb::RgbValidator::new(indexer_url, &network) {
+        match RgbValidator::new(indexer_url, &network) {
             Ok(v) => {
                 tracing::info!("RGB validator initialized");
                 Some(v)
@@ -188,11 +201,17 @@ fn main() {
         // chain to anything real. Crash early and loud.
         panic!("{msg}");
     }
+    if let Err(msg) = checkpoint.assert_retarget_aligned(spv_network) {
+        // A misaligned PoW-network checkpoint wedges the chain at the first
+        // retarget boundary above it (the epoch-start lookup falls below the
+        // checkpoint). This is a build-time misconfiguration — fail fast.
+        panic!("{msg}");
+    }
     if !checkpoint.is_real {
         tracing::warn!(
             ?spv_network,
             "spv: using PLACEHOLDER checkpoint (zeros) — header validation will reject any real chain. \
-             Replace the constant in enclave/src/spv/checkpoint.rs before deploying."
+             Replace the constant in enclave/src/networks/rgb/spv/checkpoint.rs before deploying."
         );
     } else {
         tracing::info!(
@@ -209,6 +228,7 @@ fn main() {
         #[cfg(feature = "rgb-validation")]
         rgb_validator,
         header_chain,
+        submit_rate_limiter: std::sync::Mutex::new(server::SubmitRateLimiter::default()),
     };
 
     #[cfg(all(feature = "vsock", target_os = "linux"))]

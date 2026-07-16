@@ -1,21 +1,23 @@
 use std::collections::HashSet;
 use std::time::Duration;
 
-use prost::Message as ProstMessage;
 use tonic::{Request, Response, Status};
 
 use crate::enclave_proto::{
     self, enclave_request, enclave_response, EnclaveRequest, EnclaveResponse,
 };
-use crate::enriched;
 
 const ENCLAVE_TIMEOUT: Duration = Duration::from_secs(30);
-use crate::grpc_proto::enclave_service_server::EnclaveService;
+use crate::grpc_proto::parent_service_server::ParentService;
 use crate::grpc_proto::{
-    AttestedPublicKeyRequest, AttestedPublicKeyResponse, CloneRequest, CloneResponse, DataType,
-    GetLastSavedBlockRequest, GetLastSavedBlockResponse, InitializeRequest, InitializeResponse,
-    PublicKeyRequest, PublicKeyResponse, SignRequest, Signature, SubmitHeadersRequest,
+    self, sign_request, source_proof, AttestedPublicKeyRequest, AttestedPublicKeyResponse,
+    CloneRequest, CloneResponse, GetLastSavedBlockRequest, GetLastSavedBlockResponse,
+    InitializeRequest, InitializeResponse, SourceProof, SubmitHeadersRequest,
     SubmitHeadersResponse,
+};
+use crate::signer::{
+    DataType, PublicKeyRequest, PublicKeyResponse, SignRequest as CommonSignRequest,
+    SignatureResponse,
 };
 
 /// Enclave connection target — either TCP address or vsock CID+port.
@@ -105,147 +107,289 @@ impl ParentAdapterService {
             )),
         }
     }
+
+    fn common_sign_request(req: &grpc_proto::SignRequest) -> Result<CommonSignRequest, Status> {
+        req.clone()
+            .common
+            .ok_or_else(|| Status::invalid_argument("SignRequest.common is missing"))
+    }
+
+    fn source_proof(req: &grpc_proto::SignRequest) -> Result<SourceProof, Status> {
+        req.source
+            .clone()
+            .ok_or_else(|| Status::invalid_argument("SignRequest.source is missing"))
+    }
+
+    fn decode_hex_field(field: &str, value: String) -> Result<Vec<u8>, Status> {
+        if value.is_empty() {
+            return Ok(Vec::new());
+        }
+        let hex = value.strip_prefix("0x").unwrap_or(&value);
+        hex::decode(hex)
+            .map_err(|e| Status::invalid_argument(format!("{field} must be hex bytes: {e}")))
+    }
+
+    /// Decode a field that is hex for EVM addresses but an opaque string for
+    /// other networks — EVM→RGB FundsIn events carry the RGB invoice
+    /// (`utxob:…`) in SourceProof.recipient. Non-hex values pass through as
+    /// their raw UTF-8 bytes so the enclave sees what the listener saw.
+    fn decode_hex_or_raw_field(value: String) -> Vec<u8> {
+        let hex = value.strip_prefix("0x").unwrap_or(&value);
+        match hex::decode(hex) {
+            Ok(bytes) => bytes,
+            Err(_) => value.into_bytes(),
+        }
+    }
+
+    fn enclave_merkle_proof(
+        proof: grpc_proto::MerkleProofEntry,
+    ) -> enclave_proto::MerkleProofEntry {
+        enclave_proto::MerkleProofEntry {
+            txid: proof.txid,
+            block_height: proof.block_height,
+            tx_position: proof.tx_position,
+            merkle_path: proof.merkle_path,
+        }
+    }
+
+    fn enclave_source_network(
+        source: SourceProof,
+    ) -> Result<enclave_proto::sign_request::SourceNetwork, Status> {
+        match source.chain {
+            Some(source_proof::Chain::Evm(evm)) => Ok(
+                enclave_proto::sign_request::SourceNetwork::EvmSource(enclave_proto::EvmSource {
+                    tx_hash: evm.tx_hash,
+                    event_valid: true,
+                    event_finalized: source.finalized,
+                    token: Self::decode_hex_field("SourceProof.token", source.token)?,
+                    recipient: Self::decode_hex_or_raw_field(source.recipient),
+                    commission: source.commission,
+                }),
+            ),
+            Some(source_proof::Chain::Rgb(rgb)) => Ok(
+                enclave_proto::sign_request::SourceNetwork::RgbSource(enclave_proto::RgbSource {
+                    consignment_valid: true,
+                    asset_id: rgb.rgb_asset_id,
+                    consignment: rgb.consignment,
+                    consignment_hash: rgb.consignment_hash,
+                    commission: source.commission,
+                    merkle_proofs: rgb
+                        .merkle_proofs
+                        .into_iter()
+                        .map(Self::enclave_merkle_proof)
+                        .collect(),
+                }),
+            ),
+            None => Err(Status::invalid_argument(
+                "source proof has no chain-specific evidence",
+            )),
+        }
+    }
+
+    fn enclave_destination_network(
+        data: sign_request::Data,
+    ) -> enclave_proto::sign_request::DestinationNetwork {
+        match data {
+            sign_request::Data::EvmData(payload) => {
+                enclave_proto::sign_request::DestinationNetwork::EvmDestination(
+                    enclave_proto::EvmDestination {
+                        call_data: payload.call_data,
+                        nonce: payload.nonce,
+                        deadline: payload.deadline,
+                        chain_id: payload.chain_id,
+                        proxy_contract: payload.proxy_contract,
+                        calldata_amount: payload.calldata_amount,
+                        calldata_commission: payload.calldata_commission,
+                    },
+                )
+            }
+            sign_request::Data::RgbData(payload) => {
+                enclave_proto::sign_request::DestinationNetwork::RgbDestination(
+                    enclave_proto::RgbDestination {
+                        operation_idx: payload.operation_idx,
+                        psbt_bytes: payload.psbt_bytes,
+                        psbt_output_amount: payload.psbt_output_amount,
+                        asset_id: payload.rgb_asset_id,
+                        consignment: payload.consignment,
+                        consignment_hash: payload.consignment_hash,
+                    },
+                )
+            }
+        }
+    }
+
+    fn validate_cross_network_route(
+        source: &enclave_proto::sign_request::SourceNetwork,
+        destination: &enclave_proto::sign_request::DestinationNetwork,
+    ) -> Result<(), Status> {
+        let same_network = matches!(
+            (source, destination),
+            (
+                enclave_proto::sign_request::SourceNetwork::EvmSource(_),
+                enclave_proto::sign_request::DestinationNetwork::EvmDestination(_)
+            ) | (
+                enclave_proto::sign_request::SourceNetwork::RgbSource(_),
+                enclave_proto::sign_request::DestinationNetwork::RgbDestination(_)
+            )
+        );
+
+        if same_network {
+            return Err(Status::invalid_argument(
+                "source and destination networks must be different",
+            ));
+        }
+
+        Ok(())
+    }
 }
 
 #[tonic::async_trait]
-impl EnclaveService for ParentAdapterService {
-    /// Sign — dispatches based on data_type + network_id:
-    ///   TRANSACTION + EVM network_id → deserialize EnrichedEvmPayload → SignEvmRequest
-    ///   TRANSACTION + other          → deserialize EnrichedPsbtPayload → SignPsbtRequest
-    ///   EVM_GAS_TX                   → raw 32-byte digest → SignRawDigestRequest
-    async fn sign(&self, request: Request<SignRequest>) -> Result<Response<Signature>, Status> {
+impl ParentService for ParentAdapterService {
+    /// Sign converts the structured ParentService request into the enclave
+    /// wire `SignRequest`
+    async fn sign(
+        &self,
+        request: Request<grpc_proto::SignRequest>,
+    ) -> Result<Response<SignatureResponse>, Status> {
         let inner = request.into_inner();
 
-        let data_type = DataType::try_from(inner.data_type).unwrap_or(DataType::Transaction);
+        let common = Self::common_sign_request(&inner)?;
+        let data_type = DataType::try_from(common.data_type).unwrap_or(DataType::Transaction);
+        let signer_network_id = common.dst_network_id;
 
-        let enclave_req = match data_type {
-            DataType::Transaction if self.evm_network_ids.contains(&inner.network_id) => {
-                let payload =
-                    enriched::EnrichedEvmPayload::decode(inner.data.as_slice()).map_err(|e| {
-                        Status::invalid_argument(format!(
-                            "failed to decode EnrichedEvmPayload: {e}"
-                        ))
-                    })?;
-
-                tracing::info!(
-                    network_id = inner.network_id,
-                    calldata_len = payload.call_data.len(),
-                    consignment_valid = payload.consignment_valid,
-                    nonce = payload.nonce,
-                    deadline = payload.deadline,
-                    "gRPC Sign: EVM (data_type=TRANSACTION, evm network)"
-                );
-
-                EnclaveRequest {
-                    request: Some(enclave_request::Request::SignEvm(
-                        enclave_proto::SignEvmRequest {
-                            call_data: payload.call_data,
-                            nonce: payload.nonce,
-                            deadline: payload.deadline,
-                            consignment_valid: payload.consignment_valid,
-                            rgb_amount: payload.rgb_amount,
-                            rgb_asset_id: payload.rgb_asset_id,
-                            chain_id: payload.chain_id,
-                            proxy_contract: payload.proxy_contract,
-                            calldata_amount: payload.calldata_amount,
-                            calldata_commission: payload.calldata_commission,
-                            consignment: payload.consignment,
-                            consignment_hash: payload.consignment_hash,
-                            merkle_proofs: payload
-                                .merkle_proofs
-                                .into_iter()
-                                .map(|p| enclave_proto::MerkleProofEntry {
-                                    txid: p.txid,
-                                    block_height: p.block_height,
-                                    tx_position: p.tx_position,
-                                    merkle_path: p.merkle_path,
-                                })
-                                .collect(),
-                        },
-                    )),
-                }
-            }
+        match data_type {
             DataType::Transaction => {
-                let payload = enriched::EnrichedPsbtPayload::decode(inner.data.as_slice())
-                    .map_err(|e| {
-                        Status::invalid_argument(format!(
-                            "failed to decode EnrichedPsbtPayload: {e}"
-                        ))
-                    })?;
+                let source = Self::source_proof(&inner)?;
+                let amount = source.amount;
 
-                tracing::info!(
-                    network_id = inner.network_id,
-                    psbt_len = payload.psbt_bytes.len(),
-                    has_tx_hash = !payload.evm_tx_hash.is_empty(),
-                    operation_idx = payload.operation_idx,
-                    "gRPC Sign: PSBT (data_type=TRANSACTION, non-evm network)"
+                let destination_network = match inner.data {
+                    Some(sign_request::Data::EvmData(payload)) => {
+                        if !self.evm_network_ids.contains(&common.dst_network_id) {
+                            return Err(Status::invalid_argument(format!(
+                                "EVM payload destination network {} is not configured as EVM",
+                                common.dst_network_id
+                            )));
+                        }
+                        tracing::info!(
+                            src_network_id = common.src_network_id,
+                            dst_network_id = common.dst_network_id,
+                            calldata_len = payload.call_data.len(),
+                            nonce = payload.nonce,
+                            deadline = payload.deadline,
+                            "gRPC Sign: EVM transaction"
+                        );
+
+                        Self::enclave_destination_network(sign_request::Data::EvmData(payload))
+                    }
+                    Some(sign_request::Data::RgbData(payload)) => {
+                        if self.evm_network_ids.contains(&common.dst_network_id) {
+                            return Err(Status::invalid_argument(format!(
+                                "RGB payload destination network {} is configured as EVM",
+                                common.dst_network_id
+                            )));
+                        }
+                        tracing::info!(
+                            src_network_id = common.src_network_id,
+                            dst_network_id = common.dst_network_id,
+                            psbt_len = payload.psbt_bytes.len(),
+                            operation_idx = payload.operation_idx,
+                            "gRPC Sign: RGB transaction"
+                        );
+
+                        Self::enclave_destination_network(sign_request::Data::RgbData(payload))
+                    }
+                    None => return Err(Status::invalid_argument("SignRequest.data is missing")),
+                };
+
+                let source_network = Self::enclave_source_network(source)?;
+                Self::validate_cross_network_route(&source_network, &destination_network)?;
+
+                let enclave_req = EnclaveRequest {
+                    request: Some(enclave_request::Request::Sign(enclave_proto::SignRequest {
+                        amount,
+                        source_network: Some(source_network),
+                        destination_network: Some(destination_network),
+                    })),
+                };
+
+                let start = std::time::Instant::now();
+                let resp = self.send_to_enclave(enclave_req).await?;
+                tracing::debug!(
+                    elapsed_ms = start.elapsed().as_millis() as u64,
+                    "enclave round-trip"
                 );
 
-                EnclaveRequest {
-                    request: Some(enclave_request::Request::SignPsbt(
-                        enclave_proto::SignPsbtRequest {
-                            psbt_bytes: payload.psbt_bytes,
-                            evm_tx_hash: payload.evm_tx_hash,
-                            operation_idx: payload.operation_idx,
-                            evm_event_valid: payload.evm_event_valid,
-                            evm_event_finalized: payload.evm_event_finalized,
-                            evm_token: payload.evm_token,
-                            evm_amount: payload.evm_amount,
-                            evm_recipient: payload.evm_recipient,
-                            evm_commission: payload.evm_commission,
-                            psbt_output_amount: payload.psbt_output_amount,
-                            rgb_asset_id: payload.rgb_asset_id,
-                            consignment: payload.consignment,
-                            consignment_hash: payload.consignment_hash,
-                        },
-                    )),
+                match resp.response {
+                    Some(enclave_response::Response::SignedPsbt(r)) => {
+                        Ok(Response::new(SignatureResponse {
+                            signer_network_id,
+                            signature: r.signed_psbt,
+                            identifier: None,
+                        }))
+                    }
+                    Some(enclave_response::Response::EvmSignature(r)) => {
+                        Ok(Response::new(SignatureResponse {
+                            signer_network_id,
+                            signature: r.signature,
+                            identifier: None,
+                        }))
+                    }
+                    Some(enclave_response::Response::Error(e)) => {
+                        Err(Self::enclave_error_to_status(&e))
+                    }
+                    other => Err(Status::internal(format!(
+                        "unexpected enclave response for Sign: {:?}",
+                        other
+                    ))),
                 }
             }
             DataType::EvmGasTx => {
+                // EVM_GAS_TX carries a pre-hashed 32-byte digest in EvmData.call_data
+                // and is signed with the enclave's dedicated gas-tx key. It has no
+                // source proof, so it is routed to SignRawDigest rather than the
+                // source/destination Sign path.
+                let digest = match inner.data {
+                    Some(sign_request::Data::EvmData(payload)) => payload.call_data,
+                    _ => {
+                        return Err(Status::invalid_argument(
+                            "EVM_GAS_TX sign requires EvmData with the digest in call_data",
+                        ))
+                    }
+                };
                 tracing::info!(
-                    data_len = inner.data.len(),
-                    "gRPC Sign: raw digest (data_type=EVM_GAS_TX)"
+                    dst_network_id = signer_network_id,
+                    digest_len = digest.len(),
+                    "gRPC Sign: EVM gas tx raw digest"
                 );
-
-                EnclaveRequest {
+                let enclave_req = EnclaveRequest {
                     request: Some(enclave_request::Request::SignRawDigest(
-                        enclave_proto::SignRawDigestRequest { digest: inner.data },
+                        enclave_proto::SignRawDigestRequest { digest },
                     )),
+                };
+                let resp = self.send_to_enclave(enclave_req).await?;
+                match resp.response {
+                    Some(enclave_response::Response::RawDigestSig(r)) => {
+                        Ok(Response::new(SignatureResponse {
+                            signer_network_id,
+                            signature: r.signature,
+                            identifier: None,
+                        }))
+                    }
+                    Some(enclave_response::Response::Error(e)) => {
+                        Err(Self::enclave_error_to_status(&e))
+                    }
+                    other => Err(Status::internal(format!(
+                        "unexpected enclave response for SignRawDigest: {:?}",
+                        other
+                    ))),
                 }
             }
             other => {
                 tracing::warn!(?other, "unsupported data_type in Sign request");
-                return Err(Status::invalid_argument(format!(
+                Err(Status::invalid_argument(format!(
                     "unsupported data_type: {other:?}"
-                )));
+                )))
             }
-        };
-
-        let start = std::time::Instant::now();
-        let resp = self.send_to_enclave(enclave_req).await?;
-        tracing::debug!(
-            elapsed_ms = start.elapsed().as_millis() as u64,
-            "enclave round-trip"
-        );
-
-        match resp.response {
-            Some(enclave_response::Response::SignedPsbt(r)) => Ok(Response::new(Signature {
-                network_id: inner.network_id,
-                signature: r.signed_psbt,
-            })),
-            Some(enclave_response::Response::EvmSignature(r)) => Ok(Response::new(Signature {
-                network_id: inner.network_id,
-                signature: r.signature,
-            })),
-            Some(enclave_response::Response::RawDigestSig(r)) => Ok(Response::new(Signature {
-                network_id: inner.network_id,
-                signature: r.signature,
-            })),
-            Some(enclave_response::Response::Error(e)) => Err(Self::enclave_error_to_status(&e)),
-            other => Err(Status::internal(format!(
-                "unexpected enclave response for Sign: {:?}",
-                other
-            ))),
         }
     }
 
@@ -285,7 +429,10 @@ impl EnclaveService for ParentAdapterService {
                         )));
                     }
                 };
-                Ok(Response::new(PublicKeyResponse { public_key }))
+                Ok(Response::new(PublicKeyResponse {
+                    public_key,
+                    identifier: None,
+                }))
             }
             Some(enclave_response::Response::Error(e)) => Err(Self::enclave_error_to_status(&e)),
             other => Err(Status::internal(format!(

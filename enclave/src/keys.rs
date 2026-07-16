@@ -341,11 +341,17 @@ impl KeyManager {
         let mut signed_count = 0usize;
 
         // === Taproot signing (BIP-86 / BIP-340 Schnorr) ===
-        let taproot_jobs =
-            crate::signing::taproot::find_taproot_sign_jobs(&psbt, &self.master_fingerprint, self);
+        let taproot_jobs = crate::networks::rgb::signing::taproot::find_taproot_sign_jobs(
+            &psbt,
+            &self.master_fingerprint,
+            self,
+        );
         if !taproot_jobs.is_empty() {
-            signed_count +=
-                crate::signing::taproot::sign_taproot_inputs(&mut psbt, self, &taproot_jobs)?;
+            signed_count += crate::networks::rgb::signing::taproot::sign_taproot_inputs(
+                &mut psbt,
+                self,
+                &taproot_jobs,
+            )?;
         }
 
         // === Legacy SegWit v0 P2WSH signing (ECDSA) ===
@@ -357,8 +363,13 @@ impl KeyManager {
         let mut sighash_cache = SighashCache::new(&unsigned_tx);
 
         for i in 0..psbt.inputs.len() {
-            let crate::signing::psbt::SegwitSignDecision::SignP2wsh { witness_script } =
-                crate::signing::psbt::should_sign_segwit_input(&psbt, i, &our_pubkey)
+            let crate::networks::rgb::signing::psbt::SegwitSignDecision::SignP2wsh {
+                witness_script,
+            } = crate::networks::rgb::signing::psbt::should_sign_segwit_input(
+                &psbt,
+                i,
+                &our_pubkey,
+            )
             else {
                 continue;
             };

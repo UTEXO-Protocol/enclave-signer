@@ -1,0 +1,275 @@
+use std::sync::Mutex;
+
+use crate::config::BridgeConfig;
+use crate::error::{EnclaveError, Result};
+#[cfg(feature = "rgb-validation")]
+use crate::networks::rgb::validation::RgbValidator;
+use crate::proto::sign_request::{DestinationNetwork, SourceNetwork};
+
+pub mod evm;
+pub mod rgb;
+
+/// Normalized bridge-side proof emitted by source and destination validators.
+///
+/// Each network module validates only its own payload and maps the trusted
+/// amount/operation identity into this route-neutral shape
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RouteProof {
+    pub amount: u64,
+    pub operation_id: Option<String>,
+}
+
+pub struct ValidationContext<'a> {
+    pub bridge_config: &'a BridgeConfig,
+    #[cfg(feature = "rgb-validation")]
+    pub rgb_validator: Option<&'a RgbValidator>,
+    pub header_chain: &'a Mutex<crate::networks::rgb::spv::HeaderChain>,
+}
+
+/// Dispatch source-network validation to the owning network module.
+pub fn validate_source(
+    amount: u64,
+    source: &SourceNetwork,
+    ctx: &ValidationContext<'_>,
+) -> Result<RouteProof> {
+    match source {
+        SourceNetwork::EvmSource(source) => evm::validation::validate_source(amount, source),
+        SourceNetwork::RgbSource(source) => rgb::validate_source(amount, source, ctx),
+    }
+}
+
+/// Dispatch destination-network validation to the owning network module.
+pub fn validate_destination(
+    amount: u64,
+    source_commission: u64,
+    destination: &DestinationNetwork,
+    ctx: &ValidationContext<'_>,
+) -> Result<RouteProof> {
+    #[cfg(not(all(feature = "rgb-validation", not(feature = "dev-mode"))))]
+    {
+        let _ = amount;
+        let _ = source_commission;
+    }
+
+    match destination {
+        DestinationNetwork::EvmDestination(destination) => {
+            evm::validation::validate_destination(destination, ctx)
+        }
+        DestinationNetwork::RgbDestination(destination) => {
+            rgb::validate_destination(destination, ctx)?;
+
+            #[cfg(all(feature = "rgb-validation", not(feature = "dev-mode")))]
+            rgb::validate_destination_anchor(destination, amount, source_commission, ctx)?;
+
+            Ok(RouteProof {
+                amount: destination
+                    .psbt_output_amount
+                    .checked_add(source_commission)
+                    .ok_or_else(|| {
+                        EnclaveError::CrossCheck(
+                            "psbt_output_amount + source_commission overflow".into(),
+                        )
+                    })?,
+                operation_id: None,
+            })
+        }
+    }
+}
+
+/// Validate that source and destination proofs describe the same route action.
+pub fn validate_route_proofs(
+    source: &SourceNetwork,
+    destination: &DestinationNetwork,
+    source_proof: &RouteProof,
+    destination_proof: &RouteProof,
+) -> Result<()> {
+    if cfg!(all(feature = "dev-mode", not(test))) {
+        let _ = source;
+        let _ = destination;
+        let _ = source_proof;
+        let _ = destination_proof;
+        return Ok(());
+    }
+
+    match (source, destination) {
+        (SourceNetwork::EvmSource(_), DestinationNetwork::RgbDestination(_)) => {
+            validate_amount_covers_destination(source_proof.amount, destination_proof.amount)
+        }
+        (SourceNetwork::RgbSource(_), DestinationNetwork::EvmDestination(_)) => {
+            validate_amount_covers_destination(source_proof.amount, destination_proof.amount)
+            // TODO: re-enable operation_id binding once EVM destination proofs
+            // derive the operation id from fundsOut.settlementData. The current
+            // contract burnId is unrelated to the RGB consignment opId.
+            // validate_operation_ids_match(source_proof, destination_proof)
+        }
+        _ => Err(EnclaveError::InvalidRequest(
+            "unsupported source/destination network pair".into(),
+        )),
+    }
+}
+
+fn validate_amount_covers_destination(source_amount: u64, destination_amount: u64) -> Result<()> {
+    if source_amount < destination_amount {
+        return Err(EnclaveError::CrossCheck(format!(
+            "amount mismatch: source amount ({source_amount}) < destination amount ({destination_amount})"
+        )));
+    }
+
+    Ok(())
+}
+
+#[allow(dead_code)]
+fn validate_operation_ids_match(source: &RouteProof, destination: &RouteProof) -> Result<()> {
+    let source_id = source.operation_id.as_ref().ok_or_else(|| {
+        EnclaveError::CrossCheck("source route proof is missing operation_id".into())
+    })?;
+    let destination_id = destination.operation_id.as_ref().ok_or_else(|| {
+        EnclaveError::CrossCheck("destination route proof is missing operation_id".into())
+    })?;
+
+    if source_id != destination_id {
+        return Err(EnclaveError::CrossCheck(format!(
+            "operation mismatch: source operation_id {source_id} != destination operation_id {destination_id}"
+        )));
+    }
+
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::proto::{EvmDestination, EvmSource, RgbDestination, RgbSource};
+
+    fn evm_source(commission: u64) -> SourceNetwork {
+        SourceNetwork::EvmSource(EvmSource {
+            tx_hash: vec![0xAA; 32],
+            event_valid: true,
+            event_finalized: true,
+            token: vec![0x11; 20],
+            recipient: vec![0x22; 20],
+            commission,
+        })
+    }
+
+    fn rgb_destination(destination_amount: u64) -> DestinationNetwork {
+        DestinationNetwork::RgbDestination(RgbDestination {
+            operation_idx: 1,
+            psbt_bytes: vec![0x70, 0x73, 0x62, 0x74, 0xff],
+            psbt_output_amount: destination_amount,
+            asset_id: "rgb:test-asset".into(),
+            consignment: vec![],
+            consignment_hash: vec![],
+        })
+    }
+
+    fn rgb_source() -> SourceNetwork {
+        SourceNetwork::RgbSource(RgbSource {
+            consignment_valid: true,
+            asset_id: "rgb:test-asset".into(),
+            consignment: vec![0x01],
+            consignment_hash: vec![0x02; 32],
+            merkle_proofs: vec![],
+            commission: 20,
+        })
+    }
+
+    fn evm_destination(destination_amount: u64, commission: u64) -> DestinationNetwork {
+        DestinationNetwork::EvmDestination(EvmDestination {
+            call_data: vec![0x00; 4],
+            nonce: 1,
+            deadline: 1,
+            chain_id: 1,
+            proxy_contract: vec![0x33; 20],
+            calldata_amount: destination_amount,
+            calldata_commission: commission,
+        })
+    }
+
+    fn proof(amount: u64, operation_id: Option<&str>) -> RouteProof {
+        RouteProof {
+            amount,
+            operation_id: operation_id.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn route_proofs_accept_exact_match_to_rgb_destination() {
+        assert!(validate_route_proofs(
+            &evm_source(20),
+            &rgb_destination(90),
+            &proof(90, None),
+            &proof(90, None),
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn route_proofs_reject_underfunded_rgb_destination() {
+        let err = validate_route_proofs(
+            &evm_source(20),
+            &rgb_destination(90),
+            &proof(89, None),
+            &proof(90, None),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("amount mismatch"));
+    }
+
+    #[test]
+    fn route_proofs_accept_rgb_to_evm_match() {
+        assert!(validate_route_proofs(
+            &rgb_source(),
+            &evm_destination(90, 20),
+            &proof(90, Some("op")),
+            &proof(90, Some("op")),
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn route_proofs_reject_underfunded_evm_destination() {
+        let err = validate_route_proofs(
+            &rgb_source(),
+            &evm_destination(90, 20),
+            &proof(89, Some("op")),
+            &proof(90, Some("op")),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("amount mismatch"));
+    }
+
+    #[test]
+    fn route_proofs_do_not_compare_rgb_to_evm_operation_id_yet() {
+        assert!(validate_route_proofs(
+            &rgb_source(),
+            &evm_destination(90, 20),
+            &proof(90, Some("source-op")),
+            &proof(90, Some("destination-op")),
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn route_proofs_accept_rgb_to_evm_missing_operation_id_for_now() {
+        assert!(validate_route_proofs(
+            &rgb_source(),
+            &evm_destination(90, 20),
+            &proof(90, None),
+            &proof(90, Some("destination-op")),
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn route_proofs_reject_unsupported_pair() {
+        let err = validate_route_proofs(
+            &rgb_source(),
+            &rgb_destination(90),
+            &proof(90, None),
+            &proof(90, None),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("unsupported"));
+    }
+}

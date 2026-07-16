@@ -8,8 +8,12 @@
 //!
 //! ## Status
 //!
-//! - **Mainnet checkpoint** — block 950 000 (2026-05-18). Verified via
-//!   double-SHA256 of raw header from blockstream.info/api.
+//! - **Mainnet checkpoint** — block 951 552 (2026-05-29), a retarget-boundary
+//!   block (`951 552 = 472 × 2016`, so `height % 2016 == 0`). Boundary
+//!   alignment is required: the retarget-difficulty lookup needs the block at
+//!   `height − 2016` for the first boundary above the checkpoint, so a
+//!   non-aligned checkpoint wedges the chain at that boundary. Verified via
+//!   double-SHA256 of the raw header from blockstream.info/api.
 //! - **Signet checkpoint** — UTEXO custom signet block 334 000 (2026-06-02).
 //!   Verified via double-SHA256 of raw header from esplora-api.utexo.com.
 //! - **Signet challenge / magic / block time** — REAL values, provided by
@@ -17,10 +21,11 @@
 //!   These are baked in now so they end up in PCR0 alongside everything
 //!   else, even though BIP-325 signature verification itself is deferred
 //!   (the signature lives in the coinbase witness, which the proto does not
-//!   carry — see spv/validation.rs).
+//!   carry — see networks/rgb/spv/validation.rs).
 //! - **Regtest** — uses well-known regtest constants, fine as-is.
 
-use crate::spv::types::{BlockHash, BlockHeight, Network};
+use crate::networks::rgb::spv::types::{BlockHash, BlockHeight, Network};
+use crate::networks::rgb::spv::validation::RETARGET_INTERVAL;
 
 /// A trust anchor: the enclave only accepts headers that chain forward from
 /// this point, in ascending height.
@@ -40,17 +45,20 @@ pub struct Checkpoint {
     pub is_real: bool,
 }
 
-/// Mainnet checkpoint — block 950 000 (2026-05-18).
-/// hash (display): 000000000000000000010b93c9ea1c29fea277383f0f7d1f26de8b5802e885ff
+/// Mainnet checkpoint — block 951 552 (2026-05-29). Retarget-boundary aligned
+/// (`951 552 = 472 × 2016`), so `from_next_work_required()` at the first
+/// boundary above the checkpoint can resolve its epoch start. See the
+/// boundary-alignment invariant enforced in [`Checkpoint::assert_retarget_aligned`].
+/// hash (display): 00000000000000000001b472f1922f86148c8286609fb14be39e12b8bd14bb64
 pub const MAINNET_CHECKPOINT: Checkpoint = Checkpoint {
-    height: 950_000,
+    height: 951_552,
     hash: [
-        0xff, 0x85, 0xe8, 0x02, 0x58, 0x8b, 0xde, 0x26, 0x1f, 0x7d, 0x0f, 0x3f, 0x38, 0x77, 0xa2,
-        0xfe, 0x29, 0x1c, 0xea, 0xc9, 0x93, 0x0b, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x64, 0xbb, 0x14, 0xbd, 0xb8, 0x12, 0x9e, 0xe3, 0x4b, 0xb1, 0x9f, 0x60, 0x86, 0x82, 0x8c,
+        0x14, 0x86, 0x2f, 0x92, 0xf1, 0x72, 0xb4, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
         0x00, 0x00,
     ],
-    bits: 0x1702_0f79,
-    time: 1_779_141_269,
+    bits: 0x1702_068f,
+    time: 1_780_050_586,
     is_real: true,
 };
 
@@ -103,8 +111,33 @@ impl Checkpoint {
         if !self.is_real {
             return Err(
                 "SPV checkpoint is a placeholder — refuse to start a release build. \
-                 Update enclave/src/spv/checkpoint.rs before deploying.",
+                 Update enclave/src/networks/rgb/spv/checkpoint.rs before deploying.",
             );
+        }
+        Ok(())
+    }
+
+    /// Assert that a PoW-enforcing network's checkpoint sits on a retarget
+    /// boundary (`height % RETARGET_INTERVAL == 0`). This is a correctness
+    /// invariant, not a placeholder check: the difficulty-retarget lookup
+    /// (`HeaderChain::epoch_start_time`) needs the block at `height − 2016`
+    /// for the first boundary above the checkpoint. If the checkpoint isn't
+    /// boundary-aligned, that epoch start lands *below* the checkpoint — which
+    /// the enclave never stores — and the chain wedges the first time the
+    /// listener syncs across that boundary.
+    ///
+    /// Networks that don't enforce PoW (signet, regtest) have no retarget
+    /// enforcement and are exempt — they're chain-linkage only, so the epoch
+    /// lookup is never consulted.
+    pub fn assert_retarget_aligned(&self, network: Network) -> Result<(), String> {
+        if network.enforces_pow() && !self.height.is_multiple_of(RETARGET_INTERVAL) {
+            return Err(format!(
+                "SPV checkpoint for {network:?} is at height {} which is not on a retarget \
+                 boundary (height % {RETARGET_INTERVAL} == {}); the chain would wedge at the \
+                 first boundary above it. Pick a height that is a multiple of {RETARGET_INTERVAL}.",
+                self.height,
+                self.height % RETARGET_INTERVAL,
+            ));
         }
         Ok(())
     }
@@ -199,5 +232,36 @@ mod tests {
         assert!(checkpoint_for(Network::Signet).is_real);
         assert!(!checkpoint_for(Network::Testnet3).is_real);
         assert!(!checkpoint_for(Network::Regtest).is_real);
+    }
+
+    #[test]
+    fn mainnet_checkpoint_is_retarget_boundary_aligned() {
+        // #67: the mainnet checkpoint MUST sit on a retarget boundary, else
+        // the chain wedges at the first boundary above it.
+        assert_eq!(MAINNET_CHECKPOINT.height % RETARGET_INTERVAL, 0);
+        assert_eq!(MAINNET_CHECKPOINT.height, 472 * RETARGET_INTERVAL);
+        MAINNET_CHECKPOINT
+            .assert_retarget_aligned(Network::Mainnet)
+            .expect("mainnet checkpoint must be boundary-aligned");
+    }
+
+    #[test]
+    fn assert_retarget_aligned_rejects_misaligned_pow_checkpoint() {
+        // The previous checkpoint height (950 000) is NOT boundary-aligned
+        // (950 000 % 2016 == 464) — exactly the bug #67 fixes. A PoW network
+        // must reject it.
+        let misaligned = Checkpoint {
+            height: 950_000,
+            hash: [0u8; 32],
+            bits: 0x1702_0f79,
+            time: 1_779_141_269,
+            is_real: true,
+        };
+        assert!(misaligned
+            .assert_retarget_aligned(Network::Mainnet)
+            .is_err());
+        // Non-PoW networks are exempt — they never consult the retarget lookup.
+        assert!(misaligned.assert_retarget_aligned(Network::Signet).is_ok());
+        assert!(misaligned.assert_retarget_aligned(Network::Regtest).is_ok());
     }
 }
