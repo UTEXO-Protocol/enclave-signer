@@ -66,9 +66,28 @@ mkdir -p "$OUT_DIR"
 # layers, so two builds of the same commit yield the same rootfs -> same PCR0.
 SOURCE_DATE_EPOCH="${SOURCE_DATE_EPOCH:-$(git -C "$PROJECT_ROOT" log -1 --format=%ct 2>/dev/null || echo 1700000000)}"
 export SOURCE_DATE_EPOCH
+
+# Private deps live in two separate github.com repos (federated-signer-proto over
+# SSH + rgb-consignment-parser for rgb-validation/spv). A single ssh-agent holding
+# two repo-scoped deploy keys offers the wrong one first ("Repository not found").
+# In CI we therefore ALSO hand both keys to BuildKit as secret files, and the
+# Dockerfile sets up per-host SSH aliases (see Dockerfile.enclave). Local builds
+# (no key files) fall back to `--ssh default` agent forwarding unchanged.
+FEDERATED_KEY_FILE="${FEDERATED_KEY_FILE:-/tmp/federated_key}"
+CONSIGNMENT_KEY_FILE="${CONSIGNMENT_KEY_FILE:-/tmp/consignment_key}"
+SECRET_ARGS=()
+if [ -f "$FEDERATED_KEY_FILE" ] && [ -f "$CONSIGNMENT_KEY_FILE" ]; then
+    SECRET_ARGS+=( --secret "id=federated_key,src=$FEDERATED_KEY_FILE" )
+    SECRET_ARGS+=( --secret "id=consignment_key,src=$CONSIGNMENT_KEY_FILE" )
+    echo "Using BuildKit secret keys (federated_key + consignment_key)."
+else
+    echo "No CI key files at $FEDERATED_KEY_FILE / $CONSIGNMENT_KEY_FILE; using ssh-agent (--ssh default) only."
+fi
+
 echo "Building Docker image (buildx, --ssh default, SOURCE_DATE_EPOCH=$SOURCE_DATE_EPOCH)..."
 DOCKER_BUILDKIT=1 docker buildx build \
     --ssh default \
+    "${SECRET_ARGS[@]}" \
     --build-arg SOURCE_DATE_EPOCH="$SOURCE_DATE_EPOCH" \
     -f "$SCRIPT_DIR/Dockerfile.enclave" \
     -t "$IMAGE_TAG" \

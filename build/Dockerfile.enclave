@@ -72,9 +72,38 @@ ENV CARGO_INCREMENTAL=0 \
 # binary (and thus PCR0).
 #
 # `--mount=type=ssh` exposes the SSH_AUTH_SOCK forwarded by `--ssh default`
-# only for the duration of this RUN, so no credentials end up in the
-# image layers.
-RUN --mount=type=ssh cargo build --release --locked --features vsock,rgb-validation,spv
+# only for the duration of this RUN, so no credentials end up in the image
+# layers. In CI we ALSO pass both deploy keys as BuildKit secrets (federated_key
+# + consignment_key) and set up per-host SSH aliases + `insteadOf`: two private
+# repos (federated-signer-proto, rgb-consignment-parser) both live on github.com,
+# and a single ssh-agent holding two repo-scoped deploy keys offers the wrong one
+# first → GitHub returns "Repository not found". `required=false` keeps local
+# agent-only builds (no secret files) working unchanged. This block affects only
+# how deps are FETCHED, not the compiled binary, so PCR0 is unaffected.
+RUN --mount=type=ssh \
+    --mount=type=secret,id=federated_key,required=false \
+    --mount=type=secret,id=consignment_key,required=false \
+    set -eu; \
+    if [ -f /run/secrets/federated_key ] && [ -f /run/secrets/consignment_key ]; then \
+      install -m 600 /run/secrets/federated_key /tmp/federated_key; \
+      install -m 600 /run/secrets/consignment_key /tmp/consignment_key; \
+      printf "%s\n" \
+        "Host github.com-federated" \
+        "  HostName github.com" \
+        "  User git" \
+        "  IdentityFile /tmp/federated_key" \
+        "  IdentitiesOnly yes" \
+        "Host github.com-consignment" \
+        "  HostName github.com" \
+        "  User git" \
+        "  IdentityFile /tmp/consignment_key" \
+        "  IdentitiesOnly yes" \
+        > /tmp/ci_ssh_config; \
+      export GIT_SSH_COMMAND="ssh -F /tmp/ci_ssh_config"; \
+      git config --global url."ssh://git@github.com-federated/UTEXO-Protocol/federated-signer-proto.git".insteadOf "ssh://git@github.com/UTEXO-Protocol/federated-signer-proto.git"; \
+      git config --global url."ssh://git@github.com-consignment/UTEXO-Protocol/rgb-consignment-parser.git".insteadOf "ssh://git@github.com/UTEXO-Protocol/rgb-consignment-parser.git"; \
+    fi; \
+    cargo build --release --locked --features vsock,rgb-validation,spv
 
 # --- Runtime ---
 # Pinned by digest (see header) — this rootfs is what ends up in the EIF, so its
