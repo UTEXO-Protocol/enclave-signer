@@ -412,6 +412,14 @@ const FEE_ESTIMATE_TTL: std::time::Duration = std::time::Duration::from_secs(60)
 /// Confirmation target (blocks) used for the recommended fee rate (#55).
 const FEE_ESTIMATE_TARGET: u16 = 6;
 
+/// Fee-rate floor (sat/vB) for non-mainnet chains, which have no fee market and
+/// so answer `/fee-estimates` with `{}` (#55 refused every send-RGB PSBT there).
+/// Compile-time, never host-supplied, and reachable only via PCR0-attested
+/// `chain_net`: serving `{}` to dodge the check yields this tighter-than-real
+/// floor, so it only self-DoSes. Generous because non-mainnet coins are
+/// valueless; it just keeps the path enforced against a runaway burn.
+const NON_MAINNET_FALLBACK_FEE_RATE_SAT_VB: f64 = 10.0;
+
 /// Validates RGB consignments using rgbstd and an Esplora-backed resolver.
 #[derive(Debug)]
 pub struct RgbValidator {
@@ -464,9 +472,11 @@ impl RgbValidator {
     /// for the send-RGB PSBT fee-rate sanity check (#55). Fetches
     /// `/fee-estimates` (confirmation target [`FEE_ESTIMATE_TARGET`], falling
     /// back to the nearest available target) with a [`FEE_ESTIMATE_TTL`]
-    /// cache. FAIL-CLOSED on any fetch/shape problem: the host controls the
-    /// Esplora egress, so treating "estimate unavailable" as "skip the check"
-    /// would let the host disable the check by blocking the endpoint.
+    /// cache. FAIL-CLOSED when the fetch fails or the rate is unusable: the
+    /// host controls the Esplora egress, so "estimate unavailable" must never
+    /// mean "skip the check". The one exception is an honest empty map on a
+    /// non-mainnet chain, which yields
+    /// [`NON_MAINNET_FALLBACK_FEE_RATE_SAT_VB`] rather than a refusal.
     pub fn recommended_fee_rate_sat_vb(&self) -> Result<f64> {
         let now = std::time::Instant::now();
         let mut cache = self
@@ -490,22 +500,35 @@ impl RgbValidator {
         })?;
 
         // Exact target if present, else the nearest available one.
-        let rate = estimates
-            .get(&FEE_ESTIMATE_TARGET)
-            .copied()
-            .or_else(|| {
-                estimates
-                    .iter()
-                    .min_by_key(|(t, _)| t.abs_diff(FEE_ESTIMATE_TARGET))
-                    .map(|(_, r)| *r)
-            })
-            .ok_or_else(|| {
-                EnclaveError::CrossCheck(
-                    "fee-estimate response carried no targets — refusing to sign a send-RGB \
+        let fetched = estimates.get(&FEE_ESTIMATE_TARGET).copied().or_else(|| {
+            estimates
+                .iter()
+                .min_by_key(|(t, _)| t.abs_diff(FEE_ESTIMATE_TARGET))
+                .map(|(_, r)| *r)
+        });
+
+        // An empty map is Esplora honestly reporting no fee market: expected on
+        // signet/regtest, anomalous on mainnet. A failed fetch never reaches
+        // here - it fails closed above, on every network.
+        let rate = match fetched {
+            Some(rate) => rate,
+            None if self.chain_net == ChainNet::BitcoinMainnet => {
+                return Err(EnclaveError::CrossCheck(
+                    "fee-estimate response carried no targets - refusing to sign a send-RGB \
                      PSBT without a fee-rate sanity bound (#55)"
                         .into(),
-                )
-            })?;
+                ))
+            }
+            None => {
+                tracing::warn!(
+                    chain_net = ?self.chain_net,
+                    fallback_sat_vb = NON_MAINNET_FALLBACK_FEE_RATE_SAT_VB,
+                    "fee-estimate response carried no targets; falling back to the pinned \
+                     non-mainnet floor (#55)"
+                );
+                NON_MAINNET_FALLBACK_FEE_RATE_SAT_VB
+            }
+        };
         if !rate.is_finite() || rate <= 0.0 {
             return Err(EnclaveError::CrossCheck(format!(
                 "fee-estimate response is not a positive finite rate: {rate}"
@@ -1080,13 +1103,49 @@ mod tests {
     }
 
     #[test]
-    fn fee_estimate_rejects_empty_response() {
+    fn fee_estimate_rejects_empty_response_on_mainnet() {
+        // Anomalous on mainnet: the non-mainnet floor must not leak here (#55).
         let url = spawn_fee_stub(vec![r#"{}"#]);
         let v = RgbValidator::new(url, "bitcoin").unwrap();
         let err = v.recommended_fee_rate_sat_vb().unwrap_err();
         assert!(
             err.to_string().contains("no targets"),
             "expected empty-estimates rejection, got: {err}"
+        );
+    }
+
+    #[test]
+    fn fee_estimate_falls_back_to_pinned_floor_on_non_mainnet() {
+        // No fee market -> `{}`, which pre-fix wedged every send-RGB PSBT.
+        for network in ["signet", "regtest", "testnet"] {
+            let url = spawn_fee_stub(vec![r#"{}"#]);
+            let v = RgbValidator::new(url, network).unwrap();
+            assert_eq!(
+                v.recommended_fee_rate_sat_vb().unwrap(),
+                NON_MAINNET_FALLBACK_FEE_RATE_SAT_VB,
+                "{network} must fall back to the pinned floor on an empty map"
+            );
+        }
+    }
+
+    #[test]
+    fn fee_estimate_prefers_a_real_estimate_over_the_floor_on_non_mainnet() {
+        // The floor is empty-map-only; a real rate must win, or it would
+        // silently loosen the bound.
+        let url = spawn_fee_stub(vec![r#"{"6":2.0}"#]);
+        let v = RgbValidator::new(url, "signet").unwrap();
+        assert_eq!(v.recommended_fee_rate_sat_vb().unwrap(), 2.0);
+    }
+
+    #[test]
+    fn fee_estimate_fails_closed_when_unreachable_on_non_mainnet() {
+        // The #55 threat (host suppresses the egress): the floor must not
+        // rescue a failed fetch, only an honest empty response earns it.
+        let v = RgbValidator::new("http://127.0.0.1:1".into(), "signet").unwrap();
+        let err = v.recommended_fee_rate_sat_vb().unwrap_err();
+        assert!(
+            err.to_string().contains("refusing to sign"),
+            "expected fail-closed fetch error on signet, got: {err}"
         );
     }
 
