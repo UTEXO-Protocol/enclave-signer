@@ -1,7 +1,7 @@
 use std::str::FromStr;
 
 use bip39::Mnemonic;
-use bitcoin::bip32::{ChildNumber, DerivationPath, Fingerprint, Xpriv, Xpub};
+use bitcoin::bip32::{ChainCode, ChildNumber, DerivationPath, Fingerprint, Xpriv, Xpub};
 use bitcoin::hashes::Hash;
 use bitcoin::psbt::Psbt;
 use bitcoin::secp256k1::{Message, PublicKey, Secp256k1, SecretKey};
@@ -438,6 +438,20 @@ impl KeyManager {
 
         let signed_bytes = psbt.serialize();
         Ok((signed_bytes, signed_count))
+    }
+}
+
+impl Drop for KeyManager {
+    /// Wipe the BIP-86 account extended private keys on teardown (I-07).
+    ///
+    /// Unlike `seed`/`evm_secret`/`btc_secret`, these are stored as plain `Xpriv`
+    /// fields and are not covered by `SecretBox`'s zeroize-on-drop. Each `Xpriv`
+    /// carries a signing `private_key` and a sensitive `chain_code`; overwrite both.
+    fn drop(&mut self) {
+        self.account_xpriv_vanilla.private_key.non_secure_erase();
+        self.account_xpriv_colored.private_key.non_secure_erase();
+        self.account_xpriv_vanilla.chain_code = ChainCode::from([0u8; 32]);
+        self.account_xpriv_colored.chain_code = ChainCode::from([0u8; 32]);
     }
 }
 
