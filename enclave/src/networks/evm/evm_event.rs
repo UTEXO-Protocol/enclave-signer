@@ -138,37 +138,56 @@ pub fn verify_funds_in_event(
         )));
     }
 
-    // 3/4. Find the UNIQUE log emitted by the pinned bridge contract whose
-    //      topic0 is FundsIn / BridgeFundsIn. Pinning the address means a
-    //      compromised host cannot satisfy this with a look-alike contract.
+    // 3/4. Find the log emitted by the pinned bridge contract that authorises
+    //      this release. Pinning the address means a compromised host cannot
+    //      satisfy this with a look-alike contract.
+    //
+    //      `Bridge.sol` emits BOTH shapes for ONE deposit (`emit FundsIn` then
+    //      `emit BridgeFundsIn`), and both carry the same operationId, so the
+    //      pair is one event, not two deposits. Prefer BridgeFundsIn: it is a
+    //      strict superset that also binds tokenCommission. Uniqueness is
+    //      required within the chosen shape, so two real deposits still refuse.
     let bridge_topic0 = event_topic0(BRIDGE_FUNDS_IN_SIG);
     let funds_in_topic0 = event_topic0(FUNDS_IN_SIG);
-    let mut matches = receipt.logs.iter().filter(|log| {
-        log.address == *bridge_contract
-            && log
-                .topics
-                .first()
-                .is_some_and(|t| *t == bridge_topic0 || *t == funds_in_topic0)
-    });
-    let log = matches.next().ok_or_else(|| {
+    let logs_of_shape = |want: [u8; 32]| -> Vec<&LogEntry> {
+        receipt
+            .logs
+            .iter()
+            .filter(|log| {
+                log.address == *bridge_contract && log.topics.first().is_some_and(|t| *t == want)
+            })
+            .collect()
+    };
+    let bridge_logs = logs_of_shape(bridge_topic0);
+    let is_bridge_shape = !bridge_logs.is_empty();
+    let candidates = if is_bridge_shape {
+        bridge_logs
+    } else {
+        logs_of_shape(funds_in_topic0)
+    };
+    let shape = if is_bridge_shape {
+        "BridgeFundsIn"
+    } else {
+        "FundsIn"
+    };
+    if candidates.len() > 1 {
+        return Err(EnclaveError::CrossCheck(format!(
+            "ambiguous: multiple {shape} logs from bridge contract 0x{} in tx 0x{} - refusing to \
+             guess which authorises this release",
+            hex::encode(bridge_contract),
+            hex::encode(evm_tx_hash)
+        )));
+    }
+    let log = candidates.first().copied().ok_or_else(|| {
         EnclaveError::CrossCheck(format!(
             "no FundsIn/BridgeFundsIn log from bridge contract 0x{} in tx 0x{}",
             hex::encode(bridge_contract),
             hex::encode(evm_tx_hash)
         ))
     })?;
-    if matches.next().is_some() {
-        return Err(EnclaveError::CrossCheck(format!(
-            "ambiguous: multiple FundsIn logs from bridge contract 0x{} in tx 0x{} - refusing to \
-             guess which authorises this release",
-            hex::encode(bridge_contract),
-            hex::encode(evm_tx_hash)
-        )));
-    }
 
     // 5/6/7. Decode the log data and bind operationId + amounts. `sender` is
     //        indexed, so it is in topics, not data.
-    let is_bridge_shape = log.topics.first() == Some(&bridge_topic0);
     if is_bridge_shape {
         if log.data.len() < BFI_MIN_DATA_LEN {
             return Err(EnclaveError::CrossCheck(format!(
@@ -594,6 +613,19 @@ mod tests {
         }
     }
 
+    /// Plain `FundsIn(address indexed sender, uint256 operationId,
+    /// uint256 amount)` - `amount` is the post-commission net.
+    fn plain_log(op: u64, net: u64) -> LogEntry {
+        let mut d = Vec::new();
+        d.extend_from_slice(&word(op));
+        d.extend_from_slice(&word(net));
+        LogEntry {
+            address: BRIDGE,
+            topics: vec![event_topic0(FUNDS_IN_SIG), word(0xdead)],
+            data: d,
+        }
+    }
+
     fn receipt_with(logs: Vec<LogEntry>, block_number: u64) -> ReceiptData {
         ReceiptData {
             status_success: true,
@@ -635,6 +667,62 @@ mod tests {
     #[test]
     fn accepts_matching_bridge_funds_in() {
         assert!(verify(&happy_provider()).is_ok());
+    }
+
+    #[test]
+    fn accepts_real_contract_dual_emit() {
+        // Bridge.sol:362-363 emits FundsIn AND BridgeFundsIn for ONE deposit.
+        // Pre-fix both matched and every deposit tripped the ambiguity guard,
+        // wedging the whole EVM->RGB flow.
+        let p = FakeProvider {
+            receipt: Some(receipt_with(
+                vec![plain_log(7, 950), bridge_log(7, 1000, 950, 50)],
+                100,
+            )),
+            head: 112,
+        };
+        assert!(verify(&p).is_ok());
+    }
+
+    #[test]
+    fn dual_emit_binds_via_bridge_shape_not_the_plain_one() {
+        // The pair must resolve to BridgeFundsIn, which binds tokenCommission.
+        // A gross/commission mismatch is invisible to the plain shape, so if
+        // this passed, selection had silently fallen back to the weaker event.
+        let p = FakeProvider {
+            receipt: Some(receipt_with(
+                vec![plain_log(7, 950), bridge_log(7, 1000, 950, 999)],
+                100,
+            )),
+            head: 112,
+        };
+        let e = verify(&p).unwrap_err().to_string();
+        assert!(e.contains("tokenCommission mismatch"), "got: {e}");
+    }
+
+    #[test]
+    fn accepts_plain_funds_in_when_emitted_alone() {
+        // Fallback for a contract that emits only the plain shape.
+        let p = FakeProvider {
+            receipt: Some(receipt_with(vec![plain_log(7, 950)], 100)),
+            head: 112,
+        };
+        assert!(verify(&p).is_ok());
+    }
+
+    #[test]
+    fn rejects_two_real_deposits_in_one_tx() {
+        // Uniqueness still holds WITHIN a shape: two distinct BridgeFundsIn
+        // logs are two deposits, and picking one is a guess.
+        let p = FakeProvider {
+            receipt: Some(receipt_with(
+                vec![bridge_log(7, 1000, 950, 50), bridge_log(8, 1000, 950, 50)],
+                100,
+            )),
+            head: 112,
+        };
+        let e = verify(&p).unwrap_err().to_string();
+        assert!(e.contains("ambiguous"), "got: {e}");
     }
 
     // ---- receipt-level rejections ----
