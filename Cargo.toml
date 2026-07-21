@@ -15,9 +15,9 @@ rgb-ops = { git = "https://github.com/rgb-protocol/rgb-ops", branch = "master" }
 rgb-invoicing = { git = "https://github.com/rgb-protocol/rgb-ops", branch = "master" }
 rgb-strict-encoding = { git = "https://github.com/rgb-protocol/rgb-strict-encoding", branch = "master" }
 
-# TEMPORARY (fix/merge-dev): consume the locally-modified proto crate while the
-# federated-signer-proto `feat/enclave-fix-sync` branch is being developed.
-# Remove once that branch is pushed and the git `rev` in enclave/parent
+# TEMPORARY (feat/decouple-fundsin-operationid): consume the locally-modified
+# proto crate carrying EvmSource.funds_in_operation_id. Remove once the
+# federated-signer-proto branch is pushed and the git `rev` in enclave/parent
 # Cargo.toml is bumped to the new commit.
-# [patch."ssh://git@github.com/UTEXO-Protocol/federated-signer-proto.git"]
-# federated-signer-proto = { path = "../federated-signer-proto/rust-gen" }
+[patch."ssh://git@github.com/UTEXO-Protocol/federated-signer-proto.git"]
+federated-signer-proto = { path = "../federated-signer-proto/rust-gen" }

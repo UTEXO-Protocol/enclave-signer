@@ -218,6 +218,7 @@ mod tests {
             token: vec![0x11; ADDRESS_LEN],
             recipient: vec![0x22; ADDRESS_LEN],
             commission: 50,
+            funds_in_operation_id: 0,
         }
     }
 
