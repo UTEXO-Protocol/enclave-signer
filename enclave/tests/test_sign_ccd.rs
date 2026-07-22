@@ -1,11 +1,9 @@
+#![cfg(all(feature = "allow-seed-import", not(feature = "rgb-validation")))]
 mod common;
 
-use utexo_bridge_enclave::proto::enclave_request::Request;
-use utexo_bridge_enclave::proto::enclave_response::Response;
-use utexo_bridge_enclave::proto::*;
+use utexo_bridge_enclave::proto::{*, enclave_request::Request, enclave_response::Response};
 
 /// Init the enclave with a fixed seed and return the Concordium Ed25519 pubkey.
-#[cfg(all(feature = "allow-seed-import", not(feature = "rgb-validation")))]
 fn init_and_get_ccd_pubkey(port: u16) -> Vec<u8> {
     let init = EnclaveRequest {
         request: Some(Request::InitializeKey(InitializeKeyRequest {
@@ -19,7 +17,6 @@ fn init_and_get_ccd_pubkey(port: u16) -> Vec<u8> {
     }
 }
 
-#[cfg(all(feature = "allow-seed-import", not(feature = "rgb-validation")))]
 #[test]
 fn test_sign_ccd_roundtrip() {
     let port = common::start_test_server();
@@ -48,7 +45,6 @@ fn test_sign_ccd_roundtrip() {
     assert_eq!(sig, sig2);
 }
 
-#[cfg(all(feature = "allow-seed-import", not(feature = "rgb-validation")))]
 #[test]
 fn test_sign_ccd_rejects_wrong_hash_length() {
     let port = common::start_test_server();
