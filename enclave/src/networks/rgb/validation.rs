@@ -18,7 +18,6 @@ use rgbstd::indexers::esplora_blocking::esplora_client;
 use rgbstd::indexers::AnyResolver;
 use rgbstd::schema::{MetaType, TransitionType};
 use rgbstd::validation::ValidationConfig;
-use rgbstd::vm::WitnessOrd;
 use rgbstd::ChainNet;
 use sha3::{Digest, Keccak256};
 
@@ -683,46 +682,32 @@ impl RgbValidator {
             EnclaveError::CrossCheck(format!("RGB consignment validation failed: {e}"))
         })?;
 
-        // Inspect the validation status instead of discarding it (audit 4th
-        // I-03 / #95). A hard failure already came back as Err above; what
-        // reaches here is `Ok` with a status that may still carry warnings and
-        // a per-witness ordinal map. Without `safe_height` set, rgbstd's
-        // `validity()` is `Valid` even when witnesses are not mined, so the
-        // only signal of a not-yet-confirmed witness is `tx_ord_map` - we read
-        // it out rather than trust `validity()` alone.
+        // Inspect the validation status for warnings only. We deliberately do
+        // NOT derive witness confirmation from `tx_ord_map` here (#95 follow-up).
         //
-        // We deliberately do NOT set `ValidationConfig.safe_height`: doing so
-        // would flag recency against the *Esplora resolver's* tip, which is
-        // host-controlled and untrusted. Recency for the RGB->EVM direction is
-        // enforced authoritatively by the in-enclave SPV header chain
-        // (`SPV_MIN_CONFIRMATIONS`); surfacing the witness ordinals here lets
-        // that direction reject non-mined witnesses as defense-in-depth.
+        // The enclave feeds the consignment's witness txs to the resolver via
+        // `add_consignment_txes` (above) so rgbstd can validate the DAG from the
+        // bundled txs without trusting the host esplora for tx *contents*. But
+        // rgb-ops' `AnyResolver::resolve_witness` hard-codes every
+        // consignment-supplied tx to `WitnessOrd::Tentative` (indexers/any.rs)
+        // — it never consults the indexer for them — so `tx_ord_map` reports ALL
+        // bundled witnesses as tentative regardless of on-chain depth. Reading
+        // that as a "not-yet-mined" signal rejected EVERY fundsOut, even for
+        // deeply-confirmed witnesses (SPV verified them at the same time).
+        //
+        // Confirmation for the RGB->EVM direction is enforced authoritatively
+        // and unconditionally by the in-enclave SPV header chain:
+        // `validate_source` calls `spv_validation::validate_source_chain`, which
+        // requires a valid SPV merkle proof for EVERY witness txid at
+        // `SPV_MIN_CONFIRMATIONS` depth and errors before signing otherwise.
+        // That is the correct, trusted recency gate; the `tx_ord_map` layer is
+        // left empty. `non_mined_witness_txids` is retained (always empty) so the
+        // `assert_witnesses_confirmed` call site stays a structural guard.
         let status = valid.validation_status();
-        let mut non_mined: BTreeSet<[u8; 32]> = BTreeSet::new();
-        for (txid, ord) in status.tx_ord_map.iter() {
-            if !matches!(ord, WitnessOrd::Mined(_)) {
-                // `txid` is `bitcoin::Txid`; its Display is display-order hex,
-                // matching the `witness_txids` encoding decoded above.
-                let display_hex = txid.to_string();
-                let bytes = hex::decode(&display_hex).map_err(|e| {
-                    EnclaveError::CrossCheck(format!(
-                        "witness ordinal txid hex decode failed: {e} (got {display_hex:?})"
-                    ))
-                })?;
-                let arr: [u8; 32] = bytes.as_slice().try_into().map_err(|_| {
-                    EnclaveError::CrossCheck(format!(
-                        "witness ordinal txid is not 32 bytes (got {} bytes from {display_hex:?})",
-                        bytes.len()
-                    ))
-                })?;
-                tracing::warn!(%contract_id, txid = %display_hex, witness_ord = %ord, "consignment witness tx is not mined");
-                non_mined.insert(arr);
-            }
-        }
         for warning in &status.warnings {
             tracing::warn!(%contract_id, "RGB validation warning: {warning}");
         }
-        let non_mined_witness_txids: Vec<[u8; 32]> = non_mined.into_iter().collect();
+        let non_mined_witness_txids: Vec<[u8; 32]> = Vec::new();
 
         tracing::info!(
             %contract_id,

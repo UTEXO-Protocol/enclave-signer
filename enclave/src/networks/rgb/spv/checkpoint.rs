@@ -86,13 +86,20 @@ pub const TESTNET3_CHECKPOINT: Checkpoint = Checkpoint {
     is_real: false,
 };
 
-/// Regtest checkpoint. Genesis is fine for regtest because anyone can mine.
+/// Regtest checkpoint — the deterministic regtest genesis block (height 0).
+/// Genesis is fine for regtest because anyone can mine; the listener feeds
+/// headers from height 1, which chain to this hash.
+/// hash (display): 0f9188f13cb7b2c71f2a335e3a4fc328bf5beb436012afca590b1a11466e2206
 pub const REGTEST_CHECKPOINT: Checkpoint = Checkpoint {
     height: 0,
-    hash: [0u8; 32],
-    bits: 0x207fffff, // regtest min difficulty (1d00ffff << for testnet, 0x207fffff for regtest)
+    hash: [
+        0x06, 0x22, 0x6e, 0x46, 0x11, 0x1a, 0x0b, 0x59, 0xca, 0xaf, 0x12, 0x60, 0x43, 0xeb, 0x5b,
+        0xbf, 0x28, 0xc3, 0x4f, 0x3a, 0x5e, 0x33, 0x2a, 0x1f, 0xc7, 0xb2, 0xb7, 0x3c, 0xf1, 0x88,
+        0x91, 0x0f,
+    ],
+    bits: 0x207fffff, // regtest min difficulty
     time: 1_296_688_602,
-    is_real: false,
+    is_real: true,
 };
 
 impl Checkpoint {
@@ -231,7 +238,7 @@ mod tests {
         assert!(checkpoint_for(Network::Mainnet).is_real);
         assert!(checkpoint_for(Network::Signet).is_real);
         assert!(!checkpoint_for(Network::Testnet3).is_real);
-        assert!(!checkpoint_for(Network::Regtest).is_real);
+        assert!(checkpoint_for(Network::Regtest).is_real);
     }
 
     #[test]
