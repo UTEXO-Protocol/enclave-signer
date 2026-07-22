@@ -1,7 +1,7 @@
 #![cfg(all(feature = "allow-seed-import", not(feature = "rgb-validation")))]
 mod common;
 
-use utexo_bridge_enclave::proto::{*, enclave_request::Request, enclave_response::Response};
+use utexo_bridge_enclave::proto::{enclave_request::Request, enclave_response::Response, *};
 
 /// Init the enclave with a fixed seed and return the Concordium Ed25519 pubkey.
 fn init_and_get_ccd_pubkey(port: u16) -> Vec<u8> {
