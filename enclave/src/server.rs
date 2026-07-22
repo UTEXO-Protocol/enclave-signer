@@ -376,18 +376,17 @@ fn handle_sign(ctx: &ServerContext, req: SignRequest) -> Result<EnclaveResponse>
             // validation captured, bind the calldata the enclave is about to
             // sign to the operation `validate()` authenticated — witness
             // confirmation (4th I-03 / #95), BtcRelay agreement (#57 / #122),
-            // the consignment-bound release amount, and the authoritative
-            // OpId->burnId / fundsInIds rewrite (M-02 / #93, #63 / #97). The
-            // rewrite mutates `call_data` in place so `handle_sign_evm` signs —
-            // and returns — exactly the bound bytes. On non-rgb-validation
-            // builds there is no consignment to bind and the calldata is signed
-            // as received (fundsOut is refused upstream at source validation).
+            // the consignment-bound release amount. The current deployment
+            // supports only the swap/send-receive flow, whose general bridge
+            // `burnId` and `fundsInIds` must be preserved. Mint/burn OpId
+            // rewriting stays disabled until the two flows are routed by
+            // network id. On non-rgb-validation builds there is no consignment
+            // to bind and fundsOut is refused upstream at source validation.
             #[cfg(feature = "rgb-validation")]
             let destination = {
-                let mut destination = destination;
                 apply_funds_out_binding(
                     ctx,
-                    &mut destination,
+                    &destination,
                     source_validated.rgb_consignment.as_ref(),
                 )?;
                 destination
@@ -400,12 +399,12 @@ fn handle_sign(ctx: &ServerContext, req: SignRequest) -> Result<EnclaveResponse>
 
 /// Bind an RGB->EVM `fundsOut` calldata to the validated consignment before the
 /// enclave signs it. Skipped in dev-mode (like the other cross-checks) and a
-/// no-op for non-`fundsOut` calldata. Rewrites `destination.call_data` so the
-/// signature commits to the OpId-bound bytes the caller must submit on-chain.
+/// no-op for non-`fundsOut` calldata. For the currently enabled swap flow, the
+/// backend-provided general bridge operation ids are validated but not rewritten.
 #[cfg(feature = "rgb-validation")]
 fn apply_funds_out_binding(
     ctx: &ServerContext,
-    destination: &mut EvmDestination,
+    destination: &EvmDestination,
     validated: Option<&crate::networks::rgb::validation::ValidatedConsignment>,
 ) -> Result<()> {
     use crate::networks::evm::crosscheck;
@@ -453,9 +452,11 @@ fn apply_funds_out_binding(
     // Consignment-bound release amount (transfer flow).
     crosscheck::validate_funds_out_transfer(&destination.call_data, validated)?;
 
-    // Authoritative OpId binding: rewrite burnId + settlementData from the
-    // validated consignment. The returned bytes are what gets signed.
-    destination.call_data = crosscheck::apply_op_id_binding(&destination.call_data, validated)?;
+    // Current rollout is swap/send-receive only. Preserve the backend-provided
+    // general bridge burnId and settlement fundsInIds; the EVM connector has
+    // already selected the latter against the authoritative on-chain remaining
+    // balance. Mint/burn needs a separate network-id-routed path before its RGB
+    // OpId binding can be enabled here.
 
     Ok(())
 }
