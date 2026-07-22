@@ -105,6 +105,18 @@ jobs:
       - name: Test (--features evm-rpc)
         run: cargo test -p utexo-bridge-enclave --features evm-rpc
 
+      # Mock-attestation integration suite. The cloning handshake and attested
+      # public-key tests (enclave/tests/test_clone.rs, test_attested_pubkey.rs)
+      # are file-gated on `mock-attestation` + `allow-seed-import` — the mock
+      # path skips NSM/COSE/cert-chain but still enforces the pubkey, digest,
+      # nonce, and PCR bindings those tests assert. Without this step those
+      # suites (donor PCR-mismatch / wire-pubkey binding, attested-bundle
+      # parity) compile to nothing and never run. Debug profile only: the
+      # release compile_error guard for these dev features is asserted
+      # separately by the `release-guards` job.
+      - name: Test (mock-attestation integration — cloning + attestation)
+        run: cargo test -p utexo-bridge-enclave --features mock-attestation,allow-seed-import
+
       # Trustless Helios path (#77) - EXPERIMENTAL, default-OFF, NOT in the
       # shipped EIF. Compile + clippy only: a live light-client sync needs real
       # execution + consensus RPCs, unavailable in CI (the predicate itself is

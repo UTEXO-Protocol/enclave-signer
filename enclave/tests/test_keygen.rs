@@ -153,3 +153,123 @@ fn deterministic_seed_import() {
     assert_eq!(init1.btc_compressed_pub, init2.btc_compressed_pub);
     assert_eq!(init1.btc_xpub, init2.btc_xpub);
 }
+
+// A canonical BIP-39 test vector — a stable, non-secret mnemonic used to
+// exercise the caller-supplied-mnemonic import path.
+const TEST_MNEMONIC: &str =
+    "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
+
+/// TI-1 (#112) — Production build (default `cargo test`, `allow-seed-import`
+/// OFF): an `InitializeKey` carrying a caller-supplied seed OR mnemonic must be
+/// REJECTED. The gate is the compile-time `#[cfg(not(feature =
+/// "allow-seed-import"))]` arm in `handle_initialize` (server.rs), which returns
+/// `EnclaveError::InvalidRequest` -> `Response::Error`. Because the rejection
+/// happens before any state mutation, a subsequent OS-entropy init (empty seed
+/// + empty mnemonic) on the same server must still succeed.
+///
+/// The dev-mode acceptance counterpart is
+/// `dev_build_accepts_caller_supplied_seed_and_mnemonic` below; CI must run both
+/// feature profiles (the gate is compile-time, so the two directions cannot be
+/// exercised in one build).
+#[test]
+#[cfg(not(feature = "allow-seed-import"))]
+fn production_build_rejects_caller_supplied_seed_and_mnemonic() {
+    let port = common::start_test_server();
+
+    // Caller-supplied raw seed -> rejected.
+    let seed_req = EnclaveRequest {
+        request: Some(Request::InitializeKey(InitializeKeyRequest {
+            seed: vec![7u8; 64],
+            mnemonic: String::new(),
+        })),
+    };
+    let seed_resp = common::send_request(port, &seed_req);
+    match &seed_resp.response {
+        Some(Response::Error(e)) => {
+            eprintln!("--- production rejects seed import ---");
+            eprintln!("  error: code={} message=\"{}\"", e.code, e.message);
+            assert!(
+                e.message.contains("not allowed"),
+                "expected a 'not allowed' rejection, got: {}",
+                e.message
+            );
+        }
+        other => panic!("production build must reject seed import, got {:?}", other),
+    }
+
+    // Caller-supplied mnemonic -> rejected.
+    let mnemonic_req = EnclaveRequest {
+        request: Some(Request::InitializeKey(InitializeKeyRequest {
+            seed: vec![],
+            mnemonic: TEST_MNEMONIC.into(),
+        })),
+    };
+    let mnemonic_resp = common::send_request(port, &mnemonic_req);
+    match &mnemonic_resp.response {
+        Some(Response::Error(e)) => assert!(
+            e.message.contains("not allowed"),
+            "expected a 'not allowed' rejection, got: {}",
+            e.message
+        ),
+        other => panic!(
+            "production build must reject mnemonic import, got {:?}",
+            other
+        ),
+    }
+
+    // The rejected imports must not have consumed initialization: a plain
+    // OS-entropy init on the same server still succeeds.
+    let entropy_req = EnclaveRequest {
+        request: Some(Request::InitializeKey(InitializeKeyRequest {
+            seed: vec![],
+            mnemonic: String::new(),
+        })),
+    };
+    let entropy_resp = common::send_request(port, &entropy_req);
+    assert!(
+        matches!(&entropy_resp.response, Some(Response::InitializeKey(_))),
+        "OS-entropy init after a rejected import must still succeed, got {:?}",
+        entropy_resp.response
+    );
+}
+
+/// TI-1 (#112) — Dev build (`cargo test ... --features allow-seed-import`, debug
+/// profile): the SAME `InitializeKey` call that production rejects is ACCEPTED.
+/// The `#[cfg(feature = "allow-seed-import")]` arm of `handle_initialize`
+/// installs the caller's seed / mnemonic and returns `Response::InitializeKey`.
+/// Each import uses a fresh server (init is one-shot).
+#[test]
+#[cfg(feature = "allow-seed-import")]
+fn dev_build_accepts_caller_supplied_seed_and_mnemonic() {
+    // Caller-supplied raw seed -> accepted.
+    let port_seed = common::start_test_server();
+    let seed_req = EnclaveRequest {
+        request: Some(Request::InitializeKey(InitializeKeyRequest {
+            seed: vec![7u8; 64],
+            mnemonic: String::new(),
+        })),
+    };
+    let seed_resp = common::send_request(port_seed, &seed_req);
+    let seed_init = match &seed_resp.response {
+        Some(Response::InitializeKey(r)) => r,
+        other => panic!("dev build must accept seed import, got {:?}", other),
+    };
+    assert_eq!(seed_init.evm_address.len(), 20);
+    assert_eq!(seed_init.btc_compressed_pub.len(), 33);
+    assert!(seed_init.btc_xpub.starts_with("xpub"));
+
+    // Caller-supplied mnemonic -> accepted (fresh server; init is one-shot).
+    let port_mnemonic = common::start_test_server();
+    let mnemonic_req = EnclaveRequest {
+        request: Some(Request::InitializeKey(InitializeKeyRequest {
+            seed: vec![],
+            mnemonic: TEST_MNEMONIC.into(),
+        })),
+    };
+    let mnemonic_resp = common::send_request(port_mnemonic, &mnemonic_req);
+    assert!(
+        matches!(&mnemonic_resp.response, Some(Response::InitializeKey(_))),
+        "dev build must accept mnemonic import, got {:?}",
+        mnemonic_resp.response
+    );
+}
