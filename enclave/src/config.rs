@@ -58,6 +58,13 @@ pub struct BridgeConfig {
     /// plain-BTC signing when unset. Bounds the blast radius of the plain-BTC
     /// path independently of the destination allowlist.
     pub btc_max_total_sats: u64,
+    /// Address expected to emit `FundsIn`/`BridgeFundsIn` (env
+    /// `FUNDS_IN_CONTRACT`). Falls back to `bridge_contract` when unset, so
+    /// single-contract deployments are unaffected. Needed where the deposit
+    /// event is emitted by the bridge *entry* contract while `BRIDGE_CONTRACT`
+    /// pins the MultisigProxy for the EVM signing cross-check — one pin cannot
+    /// serve both lookups.
+    pub funds_in_contract: [u8; 20],
 }
 
 impl BridgeConfig {
@@ -100,6 +107,12 @@ impl BridgeConfig {
             .and_then(|s| s.parse::<u64>().ok())
             .unwrap_or(0);
 
+        // Separate FundsIn event-emitter pin; defaults to `bridge_contract`.
+        let funds_in_contract = std::env::var("FUNDS_IN_CONTRACT")
+            .ok()
+            .and_then(|s| parse_eth_address(&s).ok())
+            .unwrap_or(bridge_contract);
+
         Self {
             chain_id,
             bridge_contract,
@@ -107,6 +120,7 @@ impl BridgeConfig {
             gas_tx_allowed_to,
             btc_allowed_scripts,
             btc_max_total_sats,
+            funds_in_contract,
         }
     }
 
