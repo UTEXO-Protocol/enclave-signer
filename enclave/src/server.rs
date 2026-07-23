@@ -268,7 +268,7 @@ fn handle_sign(ctx: &ServerContext, req: SignRequest) -> Result<EnclaveResponse>
     // trustless only once Helios (#77) verifies it; see
     // `crate::networks::evm::evm_event`.
     #[cfg(all(feature = "evm-rpc", not(feature = "dev-mode")))]
-    if let (SourceNetwork::EvmSource(source), DestinationNetwork::RgbDestination(destination)) =
+    if let (SourceNetwork::EvmSource(source), DestinationNetwork::RgbDestination(_)) =
         (source_ref, destination_ref)
     {
         let tx_hash: [u8; 32] = source.tx_hash.as_slice().try_into().map_err(|_| {
@@ -284,6 +284,13 @@ fn handle_sign(ctx: &ServerContext, req: SignRequest) -> Result<EnclaveResponse>
                     .into(),
             )
         })?;
+        // Bind the #60 FundsIn check to the on-chain BridgeFundsIn.operationId
+        // carried in the EVM source (the bridge transfer id), NOT to
+        // destination.operation_idx. The latter is the RGB hub's own operation
+        // index — a different id-space — and only coincides with the on-chain
+        // operationId by accident; comparing against it produced spurious
+        // "operationId mismatch: on-chain N != request M" refusals. operation_idx
+        // remains the replay-guard key below.
         crate::networks::evm::evm_event::verify_funds_in_event(
             &**client,
             // FundsIn is emitted by the bridge entry contract, which may differ
@@ -291,7 +298,7 @@ fn handle_sign(ctx: &ServerContext, req: SignRequest) -> Result<EnclaveResponse>
             &ctx.bridge_config.funds_in_contract,
             ctx.evm_rpc_config.min_confirmations,
             &tx_hash,
-            destination.operation_idx,
+            source.funds_in_operation_id,
             req.amount,
             source.commission,
         )?;

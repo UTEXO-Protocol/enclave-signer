@@ -42,6 +42,10 @@ pub struct SignEvmRequest {
 #[derive(Debug, Clone)]
 pub struct SignPsbtRequest {
     pub evm_tx_hash: Vec<u8>,
+    /// On-chain BridgeFundsIn.operationId of the source deposit (bridge transfer
+    /// id). The enclave #60 FundsIn check binds to this; distinct from
+    /// `operation_idx` (the RGB hub operation index / replay-guard key).
+    pub evm_funds_in_operation_id: u64,
     pub operation_idx: u64,
     pub evm_event_valid: bool,
     pub evm_event_finalized: bool,
@@ -213,6 +217,7 @@ impl EnclaveClient {
                                 token: req.evm_token,
                                 recipient: req.evm_recipient,
                                 commission: req.evm_commission,
+                                funds_in_operation_id: req.evm_funds_in_operation_id,
                             },
                         ),
                     ),

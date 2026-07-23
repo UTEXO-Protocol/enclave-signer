@@ -288,6 +288,9 @@ fn sign_psbt_request(
             token: vec![],
             recipient: vec![],
             commission: evm_commission,
+            // On-chain FundsIn operationId the enclave #60 check binds to (these
+            // non-rgb-validation builds don't run that check; 0 is a placeholder).
+            funds_in_operation_id: 0,
         })),
         destination_network: Some(DestinationNetwork::RgbDestination(RgbDestination {
             operation_idx: 0,

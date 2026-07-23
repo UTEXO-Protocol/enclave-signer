@@ -164,6 +164,9 @@ impl ParentAdapterService {
                     token: Self::decode_hex_field("SourceProof.token", source.token)?,
                     recipient: Self::decode_hex_or_raw_field(source.recipient),
                     commission: source.commission,
+                    // On-chain FundsIn operationId (bridge transfer id); the
+                    // enclave #60 check binds to this, not to operation_idx.
+                    funds_in_operation_id: evm.funds_in_operation_id,
                 }),
             ),
             Some(source_proof::Chain::Rgb(rgb)) => Ok(
