@@ -171,6 +171,22 @@ pub fn build_mock_document(
     mock::build_mock_document(nonce, public_key, user_data)
 }
 
+/// Build a mock attestation document with caller-specified PCRs.
+///
+/// Like [`build_mock_document`] but lets a test set PCR0/1/2, so it can mint a
+/// peer document whose measurement does *not* match a verifier's expected PCRs
+/// and exercise the PCR-binding rejection path (e.g. the cloning donor refusing
+/// a PCR-mismatched peer). Test-only.
+#[cfg(feature = "mock")]
+pub fn build_mock_document_with_pcrs(
+    nonce: &[u8; 32],
+    public_key: Option<&[u8]>,
+    user_data: Option<&[u8]>,
+    pcrs: &ExpectedPcrs,
+) -> Result<Vec<u8>> {
+    mock::build_mock_document_with_pcrs(nonce, public_key, user_data, pcrs)
+}
+
 // ----------------------------------------------------------------------------
 // Shared helpers
 // ----------------------------------------------------------------------------
@@ -804,10 +820,19 @@ mod mock {
         public_key: Option<&[u8]>,
         user_data: Option<&[u8]>,
     ) -> Result<Vec<u8>> {
+        build_mock_document_with_pcrs(nonce, public_key, user_data, &ExpectedPcrs::zero())
+    }
+
+    pub(super) fn build_mock_document_with_pcrs(
+        nonce: &[u8; 32],
+        public_key: Option<&[u8]>,
+        user_data: Option<&[u8]>,
+        expected: &ExpectedPcrs,
+    ) -> Result<Vec<u8>> {
         let mut pcrs = HashMap::new();
-        pcrs.insert(0, vec![0u8; 48]);
-        pcrs.insert(1, vec![0u8; 48]);
-        pcrs.insert(2, vec![0u8; 48]);
+        pcrs.insert(0, expected.pcr0.to_vec());
+        pcrs.insert(1, expected.pcr1.to_vec());
+        pcrs.insert(2, expected.pcr2.to_vec());
 
         let timestamp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)

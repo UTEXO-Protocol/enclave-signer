@@ -781,6 +781,64 @@ fn test_sign_psbt_rejects_missing_evm_source_hash() {
     }
 }
 
+// TP-1 / M-01 (#69, PR #102): a length-VALID but all-ZERO evm_tx_hash must not
+// be read as a "vanilla mode" signal. The closed bypass inferred "plain BTC,
+// skip every bridge predicate" from a blank/empty evm_tx_hash; now a SignPsbt
+// (EvmSource + RgbDestination) runs the bridge cross-checks unconditionally and
+// fails closed when no consignment binds the PSBT. Companion to
+// `test_sign_psbt_rejects_missing_evm_source_hash` (which covers the zero-LENGTH
+// hash, rejected earlier at the 32-byte length check): a 32-byte all-zero hash
+// clears that length gate, so the request must be caught by the unconditional
+// consignment binding instead of slipping onto a vanilla signing path.
+#[cfg(feature = "rgb-validation")]
+#[test]
+#[cfg(not(feature = "dev-mode"))]
+fn test_sign_psbt_zero_evm_hash_is_bridge_mode_not_vanilla() {
+    let port = common::start_test_server();
+
+    let init_req = EnclaveRequest {
+        request: Some(Request::InitializeKey(InitializeKeyRequest {
+            seed: vec![],
+            mnemonic: String::new(),
+        })),
+    };
+    common::send_request(port, &init_req);
+
+    // All-zero 32-byte hash: passes the length check (unlike the empty-hash
+    // sibling test) but is the exact "looks like no tx" shape the removed
+    // vanilla-inference keyed on. The RgbDestination carries no consignment, so
+    // bridge mode must fail closed — never sign this as a vanilla PSBT.
+    let sign_req = EnclaveRequest {
+        request: Some(Request::Sign(sign_psbt_request(
+            vec![0u8; 32],
+            false,
+            false,
+            1000,
+            0,
+            minimal_valid_psbt_bytes(),
+            500,
+        ))),
+    };
+    let resp = common::send_request(port, &sign_req);
+
+    match &resp.response {
+        Some(Response::Error(e)) => {
+            assert_eq!(e.code, 3, "bridge cross-check failures use code 3");
+            // Bridge mode ran and rejected the missing consignment binding —
+            // the zeroed hash did NOT route the request onto the vanilla path.
+            assert!(
+                e.message.contains("consignment"),
+                "expected a consignment-binding rejection (bridge mode), got: {}",
+                e.message
+            );
+        }
+        other => panic!(
+            "zero-hash SignPsbt must fail closed in bridge mode, never sign: {:?}",
+            other
+        ),
+    }
+}
+
 // =============================================================================
 // Plain-BTC signing (SignBtc): structural input guard + pinned allowlist + cap
 // =============================================================================
