@@ -158,6 +158,17 @@ impl BridgeConfig {
         any && !self.is_configured()
     }
 
+    /// Whether the plain-BTC (vanilla / create_utxo) signing path is authorised:
+    /// both the output allowlist and the total-value cap must be operator-set.
+    /// This is the single predicate the boot-time [`crate::policy::SecurityPolicy`]
+    /// records as `allow_vanilla_psbt` and that
+    /// `networks::rgb::btc_crosscheck::validate_btc_request` enforces per request
+    /// (they MUST agree — an enclave that attests `allow_vanilla_psbt = true` must
+    /// actually accept the path, and vice versa).
+    pub fn allows_vanilla_btc(&self) -> bool {
+        !self.btc_allowed_scripts.is_empty() && self.btc_max_total_sats != 0
+    }
+
     /// The reason this config is not production-ready, or `None` when all three
     /// pins (chain, contract, asset) are set. Pure and build-profile-agnostic so
     /// it is directly unit-testable; [`assert_configured_in_release`](Self::assert_configured_in_release)

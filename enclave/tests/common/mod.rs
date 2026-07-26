@@ -47,9 +47,15 @@ pub fn start_test_server_with_config(
         Network::Regtest,
         checkpoint_for(Network::Regtest),
     ));
+    let policy = utexo_bridge_enclave::policy::SecurityPolicy::resolve(
+        &utexo_bridge_enclave::policy::BuildContext::current(),
+        &bridge_config,
+        utexo_bridge_enclave::policy::EvmDataSource::Disabled,
+    );
     let ctx = Arc::new(ServerContext {
         state,
         bridge_config,
+        policy,
         #[cfg(feature = "rgb-validation")]
         rgb_validator: None,
         #[cfg(feature = "evm-rpc")]

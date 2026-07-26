@@ -9,6 +9,7 @@ use utexo_bridge_enclave::config::BridgeConfig;
 use utexo_bridge_enclave::networks::rgb::spv::{checkpoint_for, HeaderChain, Network};
 #[cfg(feature = "rgb-validation")]
 use utexo_bridge_enclave::networks::rgb::validation::RgbValidator;
+use utexo_bridge_enclave::policy::{BuildContext, EvmDataSource, SecurityPolicy};
 use utexo_bridge_enclave::server::{self, ServerContext};
 use utexo_bridge_enclave::state::EnclaveState;
 
@@ -65,15 +66,52 @@ fn main() {
         );
     }
 
-    // Fail-closed at BOOT for a production bridge-signing build (audit C-01
-    // systemic). A per-request refusal (evm::validation / rgb anchor) and the
-    // logs above are not enough: an operator does not tail enclave logs on a
-    // prod host, so an unconfigured or partially-pinned release enclave would
-    // start and silently reject every bridge signature. A release
-    // rgb-validation build that is not fully pinned must never become
+    // Which EVM `FundsIn` deposit-verification source this build/deployment
+    // uses (audit C-01 "allowed data sources"). Determined the same way the RPC
+    // client is selected below: `evm-rpc` off => none; `helios` +
+    // HELIOS_EXECUTION_RPC set => trustless; otherwise the raw host-relayed RPC.
+    #[cfg(not(feature = "evm-rpc"))]
+    let evm_source = EvmDataSource::Disabled;
+    #[cfg(all(feature = "evm-rpc", not(feature = "helios")))]
+    let evm_source = EvmDataSource::RawRpc;
+    #[cfg(all(feature = "evm-rpc", feature = "helios"))]
+    let evm_source = if std::env::var("HELIOS_EXECUTION_RPC").is_ok() {
+        EvmDataSource::HeliosVerified
+    } else {
+        EvmDataSource::RawRpc
+    };
+
+    // Resolve the enclave's single, explicit security posture once (audit C-01),
+    // from the build context + pinned config + selected data source. This is the
+    // value committed into attestation `user_data` (see
+    // `server::handle_get_attested_public_key`) and consulted by the signing
+    // handlers instead of re-deriving posture from features and empty fields.
+    let build_ctx = BuildContext::current();
+    let policy = SecurityPolicy::resolve(&build_ctx, &bridge_config, evm_source);
+    match &policy {
+        SecurityPolicy::Production(p) => tracing::info!(
+            chain_id = p.chain_id,
+            allow_vanilla_psbt = p.allow_vanilla_psbt,
+            evm_source = ?p.evm_source,
+            btc_source = ?p.btc_source,
+            "resolved PRODUCTION security policy (committed into attestation user_data)"
+        ),
+        SecurityPolicy::Development { reason } => tracing::warn!(
+            ?reason,
+            "resolved DEVELOPMENT security policy — this is NOT a production bridge signer"
+        ),
+    }
+
+    // Fail-closed at BOOT (audit C-01 systemic). A per-request refusal
+    // (evm::validation / rgb anchor) and the logs above are not enough: an
+    // operator does not tail enclave logs on a prod host, so an unconfigured,
+    // partially-pinned, or dev-feature release enclave would start and silently
+    // reject (or worse) every bridge signature. A release rgb-validation build
+    // that does not resolve to a valid Production policy must never become
     // reachable. Mirrors the placeholder-checkpoint boot check below; debug /
-    // test / allow-seed-import builds are exempt.
-    if let Err(msg) = bridge_config.assert_configured_in_release() {
+    // test / non-bridge builds are exempt. Supersedes the old
+    // BridgeConfig::assert_configured_in_release gate.
+    if let Err(msg) = policy.assert_valid_for_build(&build_ctx) {
         panic!("{msg}");
     }
 
@@ -292,6 +330,7 @@ fn main() {
     let ctx = ServerContext {
         state,
         bridge_config,
+        policy,
         #[cfg(feature = "rgb-validation")]
         rgb_validator,
         #[cfg(feature = "evm-rpc")]
