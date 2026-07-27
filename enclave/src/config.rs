@@ -49,9 +49,9 @@ pub struct BridgeConfig {
     /// toward (e.g. the bridge's own change/UTXO-management scripts). Empty =
     /// unset; a production (`rgb-validation`) build refuses plain-BTC signing
     /// when unset. Like the gas-tx destination pin (`GAS_TX_ALLOWED_TO`), this
-    /// is an operational signing-policy pin, NOT part of `is_configured()` or
-    /// the attested identity bundle — see the C-01 systemic follow-up for
-    /// attesting it.
+    /// is an operational signing-policy pin, NOT part of `is_configured()`.
+    /// Whether the path is enabled at all ([`allows_vanilla_btc`](Self::allows_vanilla_btc))
+    /// IS attested, as `allow_vanilla_psbt` in the security policy (C-01).
     pub btc_allowed_scripts: Vec<Vec<u8>>,
     /// Operator-pinned cap (sats) on the **total** output value of a plain-BTC
     /// PSBT (`BTC_MAX_TOTAL_SATS`). `0` = unset; a production build refuses
@@ -167,57 +167,6 @@ impl BridgeConfig {
     /// actually accept the path, and vice versa).
     pub fn allows_vanilla_btc(&self) -> bool {
         !self.btc_allowed_scripts.is_empty() && self.btc_max_total_sats != 0
-    }
-
-    /// The reason this config is not production-ready, or `None` when all three
-    /// pins (chain, contract, asset) are set. Pure and build-profile-agnostic so
-    /// it is directly unit-testable; [`assert_configured_in_release`](Self::assert_configured_in_release)
-    /// layers the debug/test exemptions and the `rgb-validation`-only scope on top.
-    pub fn production_readiness_error(&self) -> Option<String> {
-        if self.is_configured() {
-            return None;
-        }
-        let detail = if self.is_partially_configured() {
-            "PARTIALLY set (some but not all of EVM_CHAIN_ID / BRIDGE_CONTRACT / RGB_ASSET_ID \
-             are set)"
-        } else {
-            "unset (none of EVM_CHAIN_ID / BRIDGE_CONTRACT / RGB_ASSET_ID are set)"
-        };
-        Some(format!(
-            "bridge config is {detail}. A release rgb-validation (bridge-signing) enclave must \
-             pin all three so every signing path is authorised against operator pins; without \
-             them it would boot and fail closed on every bridge request. Set all three env vars, \
-             or build without rgb-validation for a non-signing enclave."
-        ))
-    }
-
-    /// Refuse to START a production bridge-signing build that isn't fully pinned
-    /// (audit C-01 systemic: no single explicit fail-closed production policy).
-    ///
-    /// A release `rgb-validation` build reaches every bridge-signing path, and
-    /// each already fails closed *per request* when [`is_configured`](Self::is_configured)
-    /// is false (see `networks::evm::validation::validate_destination` and
-    /// `networks::rgb::validate_destination_anchor`). But a per-request refusal
-    /// is only visible to whoever reads the rejected response or the enclave
-    /// logs - which an operator does not watch on a production host. Fail at
-    /// BOOT instead, the same way a placeholder SPV checkpoint does
-    /// ([`crate::networks::rgb::spv::Checkpoint::assert_real_in_release`]): a
-    /// misconfigured or partially-pinned production enclave never becomes
-    /// reachable, rather than starting and silently rejecting every signature.
-    ///
-    /// Exemptions mirror `assert_real_in_release`: debug builds, tests, and the
-    /// local-E2E `allow-seed-import` feature may run unpinned. A minimal
-    /// (non-`rgb-validation`) build has no bridge-signing path to protect and
-    /// always passes.
-    pub fn assert_configured_in_release(&self) -> std::result::Result<(), String> {
-        if cfg!(debug_assertions) || cfg!(test) || cfg!(feature = "allow-seed-import") {
-            return Ok(());
-        }
-        #[cfg(feature = "rgb-validation")]
-        if let Some(msg) = self.production_readiness_error() {
-            return Err(msg);
-        }
-        Ok(())
     }
 }
 
@@ -475,47 +424,6 @@ mod tests {
         };
         assert!(!c.is_configured());
         assert!(c.is_partially_configured());
-    }
-
-    #[test]
-    fn production_readiness_error_none_when_configured() {
-        let c = BridgeConfig {
-            chain_id: 1,
-            bridge_contract: [1u8; 20],
-            rgb_asset_id: "rgb:asset".into(),
-            ..Default::default()
-        };
-        assert!(c.production_readiness_error().is_none());
-    }
-
-    #[test]
-    fn production_readiness_error_flags_unset() {
-        let msg = BridgeConfig::default()
-            .production_readiness_error()
-            .expect("a fully-empty config is not production-ready");
-        assert!(msg.contains("unset"), "got: {msg}");
-    }
-
-    #[test]
-    fn production_readiness_error_flags_partial() {
-        // chain_id set, contract + asset still empty: a botched pin.
-        let c = BridgeConfig {
-            chain_id: 1,
-            ..Default::default()
-        };
-        let msg = c
-            .production_readiness_error()
-            .expect("a partial config is not production-ready");
-        assert!(msg.contains("PARTIALLY"), "got: {msg}");
-    }
-
-    #[test]
-    fn assert_configured_in_release_exempts_test_builds() {
-        // cfg!(test) short-circuits the boot gate, so even a fully-empty config
-        // passes under test - the panic only fires in a production-shaped build.
-        assert!(BridgeConfig::default()
-            .assert_configured_in_release()
-            .is_ok());
     }
 
     #[test]

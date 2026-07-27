@@ -102,15 +102,12 @@ fn main() {
         ),
     }
 
-    // Fail-closed at BOOT (audit C-01 systemic). A per-request refusal
-    // (evm::validation / rgb anchor) and the logs above are not enough: an
-    // operator does not tail enclave logs on a prod host, so an unconfigured,
-    // partially-pinned, or dev-feature release enclave would start and silently
-    // reject (or worse) every bridge signature. A release rgb-validation build
-    // that does not resolve to a valid Production policy must never become
-    // reachable. Mirrors the placeholder-checkpoint boot check below; debug /
-    // test / non-bridge builds are exempt. Supersedes the old
-    // BridgeConfig::assert_configured_in_release gate.
+    // Fail-closed at BOOT (audit C-01 systemic). Per-request refusals and the
+    // logs above are not enough — an operator does not tail enclave logs on a
+    // prod host — so a release rgb-validation build that does not resolve to a
+    // valid Production policy must never become reachable. Mirrors the
+    // placeholder-checkpoint boot check below; debug / test / non-bridge
+    // builds are exempt.
     if let Err(msg) = policy.assert_valid_for_build(&build_ctx) {
         panic!("{msg}");
     }

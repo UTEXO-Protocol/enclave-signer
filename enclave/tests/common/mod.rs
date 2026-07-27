@@ -5,6 +5,7 @@ use std::thread;
 use utexo_bridge_enclave::config::BridgeConfig;
 use utexo_bridge_enclave::framing;
 use utexo_bridge_enclave::networks::rgb::spv::{checkpoint_for, HeaderChain, Network};
+use utexo_bridge_enclave::policy::{BuildContext, EvmDataSource, SecurityPolicy};
 use utexo_bridge_enclave::proto::*;
 use utexo_bridge_enclave::server::{self, ServerContext};
 use utexo_bridge_enclave::state::EnclaveState;
@@ -47,10 +48,10 @@ pub fn start_test_server_with_config(
         Network::Regtest,
         checkpoint_for(Network::Regtest),
     ));
-    let policy = utexo_bridge_enclave::policy::SecurityPolicy::resolve(
-        &utexo_bridge_enclave::policy::BuildContext::current(),
+    let policy = SecurityPolicy::resolve(
+        &BuildContext::current(),
         &bridge_config,
-        utexo_bridge_enclave::policy::EvmDataSource::Disabled,
+        EvmDataSource::Disabled,
     );
     let ctx = Arc::new(ServerContext {
         state,

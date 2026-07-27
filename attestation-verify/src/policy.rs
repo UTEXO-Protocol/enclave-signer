@@ -128,21 +128,32 @@ impl AttestedPolicy {
 mod tests {
     use super::*;
 
-    fn production() -> AttestedPolicy {
+    /// Parametrized production policy so each test varies exactly one field.
+    fn prod(
+        vanilla: bool,
+        evm: EvmDataSource,
+        chain_id: u64,
+        contract: u8,
+        asset: &str,
+    ) -> AttestedPolicy {
         AttestedPolicy::Production {
-            allow_vanilla_psbt: false,
+            allow_vanilla_psbt: vanilla,
             attestation: AttestationMode::Real,
-            evm_source: EvmDataSource::RawRpc,
+            evm_source: evm,
             btc_source: BtcDataSource::SpvVerified,
-            chain_id: 1,
-            bridge_contract: [0x11; 20],
-            rgb_asset_id: "rgb:asset".into(),
+            chain_id,
+            bridge_contract: [contract; 20],
+            rgb_asset_id: asset.into(),
         }
+    }
+
+    fn base() -> AttestedPolicy {
+        prod(false, EvmDataSource::RawRpc, 1, 0x11, "rgb:asset")
     }
 
     #[test]
     fn every_encoding_starts_with_the_version_tag() {
-        assert_eq!(production().to_bytes()[0], POLICY_COMMITMENT_V1);
+        assert_eq!(base().to_bytes()[0], POLICY_COMMITMENT_V1);
         assert_eq!(
             AttestedPolicy::Development.to_bytes()[0],
             POLICY_COMMITMENT_V1
@@ -151,69 +162,22 @@ mod tests {
 
     #[test]
     fn production_and_development_never_collide() {
-        assert_ne!(
-            production().to_bytes(),
-            AttestedPolicy::Development.to_bytes()
-        );
+        assert_ne!(base().to_bytes(), AttestedPolicy::Development.to_bytes());
     }
 
     #[test]
     fn every_posture_field_changes_the_bytes() {
-        let base = production().to_bytes();
-        let mut cases = Vec::new();
-
-        if let AttestedPolicy::Production { .. } = production() {
-            cases.push(AttestedPolicy::Production {
-                allow_vanilla_psbt: true,
-                attestation: AttestationMode::Real,
-                evm_source: EvmDataSource::RawRpc,
-                btc_source: BtcDataSource::SpvVerified,
-                chain_id: 1,
-                bridge_contract: [0x11; 20],
-                rgb_asset_id: "rgb:asset".into(),
-            });
-            cases.push(AttestedPolicy::Production {
-                allow_vanilla_psbt: false,
-                attestation: AttestationMode::Real,
-                evm_source: EvmDataSource::HeliosVerified,
-                btc_source: BtcDataSource::SpvVerified,
-                chain_id: 1,
-                bridge_contract: [0x11; 20],
-                rgb_asset_id: "rgb:asset".into(),
-            });
-            cases.push(AttestedPolicy::Production {
-                allow_vanilla_psbt: false,
-                attestation: AttestationMode::Real,
-                evm_source: EvmDataSource::RawRpc,
-                btc_source: BtcDataSource::SpvVerified,
-                chain_id: 2,
-                bridge_contract: [0x11; 20],
-                rgb_asset_id: "rgb:asset".into(),
-            });
-            cases.push(AttestedPolicy::Production {
-                allow_vanilla_psbt: false,
-                attestation: AttestationMode::Real,
-                evm_source: EvmDataSource::RawRpc,
-                btc_source: BtcDataSource::SpvVerified,
-                chain_id: 1,
-                bridge_contract: [0x22; 20],
-                rgb_asset_id: "rgb:asset".into(),
-            });
-            cases.push(AttestedPolicy::Production {
-                allow_vanilla_psbt: false,
-                attestation: AttestationMode::Real,
-                evm_source: EvmDataSource::RawRpc,
-                btc_source: BtcDataSource::SpvVerified,
-                chain_id: 1,
-                bridge_contract: [0x11; 20],
-                rgb_asset_id: "rgb:other".into(),
-            });
-        }
-
+        let cases = [
+            prod(true, EvmDataSource::RawRpc, 1, 0x11, "rgb:asset"),
+            prod(false, EvmDataSource::HeliosVerified, 1, 0x11, "rgb:asset"),
+            prod(false, EvmDataSource::RawRpc, 2, 0x11, "rgb:asset"),
+            prod(false, EvmDataSource::RawRpc, 1, 0x22, "rgb:asset"),
+            prod(false, EvmDataSource::RawRpc, 1, 0x11, "rgb:other"),
+        ];
         for c in cases {
             assert_ne!(
                 c.to_bytes(),
-                base,
+                base().to_bytes(),
                 "posture change must alter the commitment"
             );
         }
@@ -223,15 +187,8 @@ mod tests {
     fn asset_is_length_prefixed_not_ambiguous() {
         // The u32 length prefix means a longer asset id can never be confused
         // with a shorter one that happens to share a prefix.
-        let with_asset = |id: &str| AttestedPolicy::Production {
-            allow_vanilla_psbt: false,
-            attestation: AttestationMode::Real,
-            evm_source: EvmDataSource::RawRpc,
-            btc_source: BtcDataSource::SpvVerified,
-            chain_id: 1,
-            bridge_contract: [0x11; 20],
-            rgb_asset_id: id.into(),
-        };
-        assert_ne!(with_asset("ab").to_bytes(), with_asset("abc").to_bytes());
+        let a = prod(false, EvmDataSource::RawRpc, 1, 0x11, "ab");
+        let b = prod(false, EvmDataSource::RawRpc, 1, 0x11, "abc");
+        assert_ne!(a.to_bytes(), b.to_bytes());
     }
 }

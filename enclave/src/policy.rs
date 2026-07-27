@@ -20,10 +20,8 @@
 //!     path checks [`ProductionPolicy::allow_vanilla_psbt`]) instead of
 //!     re-deriving posture from features and empty fields.
 //!
-//! Resolution and the boot gate are split into pure functions taking an explicit
-//! [`BuildContext`] so the release behaviour is unit-testable without actually
-//! being a release build (the same split `config.rs` uses for
-//! `production_readiness_error` vs `assert_configured_in_release`).
+//! Resolution and the boot gate take an explicit [`BuildContext`] so the
+//! release behaviour is unit-testable without actually being a release build.
 
 use crate::config::BridgeConfig;
 
@@ -192,8 +190,7 @@ impl SecurityPolicy {
     /// same way a placeholder SPV checkpoint does).
     ///
     /// Debug/test builds and non-bridge builds are exempt — they have no
-    /// production bridge-signing path to protect. This mirrors the scope of the
-    /// old `BridgeConfig::assert_configured_in_release`, which it supersedes.
+    /// production bridge-signing path to protect.
     pub fn assert_valid_for_build(&self, ctx: &BuildContext) -> Result<(), String> {
         if ctx.debug_or_test || !ctx.rgb_validation {
             return Ok(());
@@ -312,22 +309,30 @@ mod tests {
     #[test]
     fn each_dev_feature_forces_development_even_when_fully_pinned() {
         let base = release_bridge_ctx();
-        for (mutate, reason) in [
+        let cases = [
             (
-                (|c: &mut BuildContext| c.dev_mode = true) as fn(&mut BuildContext),
+                BuildContext {
+                    dev_mode: true,
+                    ..base
+                },
                 DevReason::DevMode,
             ),
             (
-                |c: &mut BuildContext| c.mock_attestation = true,
+                BuildContext {
+                    mock_attestation: true,
+                    ..base
+                },
                 DevReason::MockAttestation,
             ),
             (
-                |c: &mut BuildContext| c.allow_seed_import = true,
+                BuildContext {
+                    allow_seed_import: true,
+                    ..base
+                },
                 DevReason::AllowSeedImport,
             ),
-        ] {
-            let mut ctx = base;
-            mutate(&mut ctx);
+        ];
+        for (ctx, reason) in cases {
             let p = SecurityPolicy::resolve(&ctx, &pinned_config(), EvmDataSource::HeliosVerified);
             assert_eq!(p, SecurityPolicy::Development { reason });
             // Even fully pinned, a dev feature in a release rgb build must not boot.
