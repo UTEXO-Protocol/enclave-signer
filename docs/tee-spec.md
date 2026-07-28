@@ -30,9 +30,9 @@ not trust semantic claims made by the host.
 ```
 Internet -- orchestrator -- EC2 parent (UNTRUSTED) -- vsock -- Nitro Enclave (TRUSTED)
                                   |                                    |
-                              listener,                          key material,
-                              backend, NSM proxy,                validation, signing
-                              Esplora / EVM-RPC proxies           (this spec)
+                              listener, backend,                 key material,
+                              Esplora / EVM-RPC / Helios         validation, signing
+                              vsock proxies                       (this spec)
 ```
 
 | Actor                            | Trusted for                                      | NOT trusted for                                                                        |
@@ -66,8 +66,8 @@ tracked with the contracts team (#123 / W-03).
 
 Three crates plus the infrastructure they touch:
 
-- **`enclave`** -- runs inside the TEE. Connection loop (`conn.rs`, vsock in
-  prod / TCP in dev) -> `server.rs` dispatch -> `policy.rs` (security policy),
+- **`enclave`** -- runs inside the TEE. Connection loop (`main.rs`, vsock in
+  prod / TCP in dev; hardening in `conn.rs`) -> `server.rs` dispatch -> `policy.rs` (security policy),
   `keys.rs` / `state.rs` (key custody, phases), `cloning.rs`, `attestation.rs`,
   and the network validators under `networks/`:
   - `networks/rgb/` -- consignment validation, PSBT validation and signing,
@@ -84,8 +84,9 @@ Three crates plus the infrastructure they touch:
 
 **Wire protocol** enclave<->parent: 4-byte little-endian length prefix + prost
 protobuf, 4 MiB frame cap (`framing.rs`). Esplora, EVM RPC, and Helios are
-reached through host-side vsock proxies (default loopback ports 3443, 3444,
-18545/18550); the enclave has no direct network stack.
+reached through in-enclave loopback forwarders (ports 3443, 3444, 18545/18550)
+that bridge over vsock to host-side `vsock-proxy` instances (vsock ports
+8001-8004); the enclave has no direct network stack.
 
 **Connection hardening (M-07 / #117):** fixed pool of 4 worker threads, bounded
 queue of 16 connections, 10 s per-syscall idle timeout, 30 s total per-request
@@ -117,8 +118,9 @@ SecurityPolicy = Production {
   `RGB_ASSET_ID` all set resolves to `Production`.
 - **Boot gate:** a release `rgb-validation` build that does not resolve to a
   valid `Production` policy MUST refuse to boot (panic). Independently, each
-  dev feature is a `compile_error!` in any release build, and `rgb-validation`
-  without `spv` is a `compile_error!` in every profile (M-01 / #61).
+  dev feature is a `compile_error!` in any shipped release binary (non-test
+  build with debug assertions off), and `rgb-validation` without `spv` is a
+  `compile_error!` in every profile (M-01 / #61).
 - **Attestation:** `user_data = sha256(canonical_pubkey_bundle ||
   policy_commitment)`. The commitment encoding is versioned and shared
   (`attestation-verify/src/policy.rs`), so the enclave and every verifier
@@ -131,7 +133,7 @@ SecurityPolicy = Production {
 
 Not yet inside the commitment: `GAS_TX_ALLOWED_TO`, `FUNDS_IN_CONTRACT`, and
 the concrete `BTC_ALLOWED_SCRIPTS` / `BTC_MAX_TOTAL_SATS` values (only the
-on/off boolean is attested). Tracked as follow-ups.
+on/off boolean is attested). Follow-up work; no tracking issue yet.
 
 ## 5. Key management
 
@@ -159,7 +161,7 @@ no in-place rotation or re-init.
 | Phase     | Holds                                    | Signing | Entry                                            |
 |-----------|------------------------------------------|---------|--------------------------------------------------|
 | `Initial` | nothing                                  | no      | boot                                             |
-| `Cloning` | ephemeral X25519 + target cluster pubkey | no      | `begin_cloning` (requester)                      |
+| `Cloning` | ephemeral X25519 + target cluster pubkey | no      | `enter_cloning` (requester)                      |
 | `Active`  | `KeyManager` (seed in `SecretBox`)       | yes     | `initialize_from_entropy`, or `complete_cloning` |
 
 A second initialize attempt MUST fail (`AlreadyInitialized`). Upgrades MUST be
@@ -209,8 +211,11 @@ enclave establishes validity and finality itself, fail-closed
   is preferred; a same-tx `FundsIn` + `BridgeFundsIn` pair counts as one
   deposit (#150);
 - the event MUST bind the on-chain `operationId` to the request's
-  `funds_in_operation_id` -- not the hub's `operation_idx` (#153) -- plus gross
-  amount, commission, and `net == gross - commission`.
+  `funds_in_operation_id` -- not the hub's `operation_idx` (#153). A
+  `BridgeFundsIn` event additionally binds gross amount and commission
+  (`net == gross - commission`); the plain `FundsIn` fallback binds only
+  `operationId` and the net amount, leaving the commission split
+  listener-supplied.
 
 The PSBT itself is bound to the validated consignment: unsigned txid ==
 witness txid, input prevouts == witness prevouts, `SIGHASH_ALL` / taproot
@@ -249,7 +254,8 @@ unsigned transaction preimage; the enclave strictly RLP-decodes it (EIP-1559 or
 legacy EIP-155), requires `chain_id` == pinned `EVM_CHAIN_ID`, `to` == pinned
 `GAS_TX_ALLOWED_TO` (fail-closed when unset), `value == 0`, no contract
 creation -- and computes the digest itself. Deliberate follow-ups: no fee/gas
-caps yet, and the `to` pin is not yet attested.
+caps yet, calldata to the pinned destination is not inspected (so the pin
+should be an EOA), and the `to` pin is not yet attested.
 
 ### 7.5 Raw message (`SignRawMessage`)
 
@@ -279,10 +285,11 @@ same cluster pubkey, and the shared cloning secret (Sec 10).
 
 The consignment pipeline (cheap checks first, W-04): non-empty payload,
 `keccak256(consignment) == consignment_hash` (integrity only, I-09), asset id
-declared and equal to the validated contract id and the pinned `RGB_ASSET_ID`;
-then full `rgbstd` validation with the trusted typesystem pinned per schema id
-(unknown schemas rejected, W-09 / #92) against an Esplora resolver with a 30 s
-timeout (I-03 / #87); then SPV verification of every witness tx.
+declared; then full `rgbstd` validation with the trusted typesystem pinned per
+schema id (unknown schemas rejected, W-09 / #92) against an Esplora resolver
+with a 30 s timeout (I-03 / #87); the validated contract id must then equal
+the declared asset id and the pinned `RGB_ASSET_ID`; then SPV verification of
+every witness tx.
 
 The SPV layer MUST:
 
@@ -300,8 +307,9 @@ The SPV layer MUST:
    `SPV_MIN_CONFIRMATIONS = 6`;
 5. reject a stale or future-dated tip (both bounds 2 h) to defeat frozen-feed
    attacks;
-6. reject a consignment whose `chain_net` differs from the enclave's compiled
-   network (cross-network replay defense).
+6. reject a consignment whose `chain_net` differs from the enclave's network
+   (boot-selected via `BITCOIN_NETWORK`, baked into the image and therefore
+   PCR0-attested; cross-network replay defense).
 
 All thresholds are compile-time constants -- a host-tunable threshold would let
 an operator weaken the gate while attestation still passed.
@@ -309,10 +317,11 @@ an operator weaken the gate while attestation still passed.
 **Checkpoints:** mainnet block 951,552 (retarget-aligned, W-14) and UTEXO
 signet block 334,000 are real pinned checkpoints; regtest uses genesis.
 Testnet3 remains a placeholder -- a release build refuses to boot on any
-placeholder checkpoint. **Signet caveat:** signet headers carry no PoW and the
-BIP-325 challenge signature is not verified (the wire format carries no
-coinbase witness), so signet header integrity rests on chain linkage, the
-reorg/work rules, the submission caps, and the 2 h freshness gate.
+placeholder checkpoint. **Signet caveat:** the enclave does not validate PoW or
+nBits on signet, and the BIP-325 challenge signature is not verified (the wire
+format carries no coinbase witness), so signet header integrity rests on chain
+linkage, the reorg/work rules, the submission caps, and the 2 h freshness
+gate.
 
 ## 9. Unlock authorization predicates (parent spec Sec 10) -- NORMATIVE
 
@@ -415,7 +424,7 @@ plain-BTC split (#102) · M-06 in-enclave `FundsIn` + Helios (#60/#136,
 W-08 bounded full retention (#130) · W-09 typesystem pin · W-10 cert-chain
 hardening (#126) · W-12/W-13 replay-guard fixes (#80/#129) · W-14 + real
 mainnet/signet checkpoints · I-02 fallible digest · I-03 Esplora timeout ·
-I-04/I-06 size caps (#118) · I-05 COSE pinning · I-07 xpriv zeroization (#151)
+I-04 size caps + I-15 validate()-status handling (#118) · I-05 COSE pinning · I-07 xpriv zeroization (#151)
 · EIP-712 domain pinned to the deployed contract · fee sanity (#147, #149) ·
 mint-PSBT binding (#146) · swap op-id preservation (#168) · audit regression +
 `audit:test` suites in CI (#144/#167).
