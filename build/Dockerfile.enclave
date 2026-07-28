@@ -144,7 +144,7 @@ RUN chmod +x /app/utexo-bridge-enclave /app/entrypoint.sh
 # `vsock-proxy 8001 electrs-mainnet.utexo.com 50002`); TLS terminates in-enclave.
 ENV EVM_CHAIN_ID=42161 \
     BRIDGE_CONTRACT=0x6711f1a319B37847fa0234181C34D883774c4951 \
-    RGB_ASSET_ID=rgb:TlJCVPQ7-ksdma~U-6tH_KaF-TLaIYxw-duQ9irI-uiFJa8c \
+    RGB_ASSET_ID=rgb:lJFja2kw-h_azlEd-7CNPxwf-UsvIDhH-UD0Y1f9-8f26jLk \
     BITCOIN_NETWORK=bitcoin \
     ELECTRUM_URL=ssl://electrs-mainnet.utexo.com:50002
 
