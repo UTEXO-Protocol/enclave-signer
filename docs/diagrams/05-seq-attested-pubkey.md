@@ -24,8 +24,9 @@ sequenceDiagram
     Parent->>Srv: GetAttestedPublicKeyRequest{nonce}
 
     Srv->>State: get_keys() (requires Phase::Active)
-    State-->>Srv: KeyInfo{evm_address, evm_uncompressed_pub,<br/>btc keys, master_fingerprint,<br/>account xpubs vanilla+colored,<br/>gas-tx key, chain_id, bridge_contract, rgb_asset_id}
+    State-->>Srv: KeyInfo{evm_address, evm_uncompressed_pub,<br/>gas-tx key, btc keys, master_fingerprint,<br/>account xpubs vanilla+colored}
 
+    Srv->>Srv: merge boot-pinned BridgeConfig<br/>(chain_id, bridge_contract, rgb_asset_id)<br/>into PublicKeysResponse
     Srv->>Srv: bundle := canonical_pubkey_bundle(keys)<br/>(12 length-prefixed fields, proto order)
     Srv->>Srv: commitment := sha256(bundle ‖ policy_commitment)<br/>policy = boot-resolved SecurityPolicy (C-01)
 

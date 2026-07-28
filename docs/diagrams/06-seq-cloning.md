@@ -11,16 +11,15 @@ sequenceDiagram
 
     Note over Req,Don: Both enclaves must have IDENTICAL PCRs<br/>(same compiled binary) for cloning to succeed.<br/>The cloning_secret is a pre-shared operator value,<br/>the donor reads it from UTEXO_CLONING_SECRET.
 
-    Note over Op,Req: Message 1 — parent → requester
-    Op->>Parent: gRPC Initialize(cloning_secret)
+    Note over Op,Req: Message 1 — operator tooling → requester<br/>(the parent's gRPC Clone RPC is currently a stub —<br/>the handshake runs over the enclave wire protocol,<br/>the parent acting only as an untrusted relay)
+    Op->>Parent: start cluster clone
     Parent->>Req: InitiateCloningRequest{cloning_secret, cluster_public_key=donor_evm}
-    Req->>Req: ensure Phase::Initial
     Req->>Req: ephemeral X25519 keypair (StaticSecret + PublicKey)
     Req->>Req: digest := HMAC-SHA256(secret, encryption_pubkey)
     Req->>Req: nonce := getrandom_32()
     Req->>RN: NSM Attestation(nonce, public_key=encryption_pubkey, user_data=digest)
     RN-->>Req: requester_attestation (COSE_Sign1)
-    Req->>Req: state := Phase::Cloning(session, cluster_pk)
+    Req->>Req: enter_cloning: ensure Phase::Initial (else reject),<br/>state := Phase::Cloning(session, cluster_pk)
     Req-->>Parent: InitiateCloningResponse{requester_attestation, encryption_pubkey, cloning_digest}
 
     Note over Parent,Don: Message 2 — parent → donor

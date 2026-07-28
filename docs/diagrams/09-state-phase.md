@@ -16,7 +16,7 @@ stateDiagram-v2
 
     Initial --> Active : initialize_from_entropy() — first enclave, OS entropy
     Initial --> Active : initialize_from_seed/mnemonic() — feature allow-seed-import, dev only
-    Initial --> Cloning : begin_cloning() (InitiateCloning — requester)
+    Initial --> Cloning : enter_cloning() (InitiateCloning — requester)
 
     Cloning --> Active : complete_cloning() (SetClone — decrypt + install peer seed, assert evm_address == cluster_public_key)
 
