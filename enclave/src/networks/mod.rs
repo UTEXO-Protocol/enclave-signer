@@ -26,14 +26,30 @@ pub struct ValidationContext<'a> {
     pub header_chain: &'a Mutex<crate::networks::rgb::spv::HeaderChain>,
 }
 
+/// Outcome of validating a source network: the route proof, plus — for an RGB
+/// source on an `rgb-validation` build — the validated consignment. The EVM
+/// destination signer binds the `fundsOut` calldata (OpId/burnId, BtcRelay
+/// agreement, witness confirmation) to this consignment, so it must survive
+/// past source validation rather than being discarded. `None` for EVM sources
+/// and the dev-mode bypass.
+pub struct SourceProof {
+    pub proof: RouteProof,
+    #[cfg(feature = "rgb-validation")]
+    pub rgb_consignment: Option<crate::networks::rgb::validation::ValidatedConsignment>,
+}
+
 /// Dispatch source-network validation to the owning network module.
 pub fn validate_source(
     amount: u64,
     source: &SourceNetwork,
     ctx: &ValidationContext<'_>,
-) -> Result<RouteProof> {
+) -> Result<SourceProof> {
     match source {
-        SourceNetwork::EvmSource(source) => evm::validation::validate_source(amount, source),
+        SourceNetwork::EvmSource(source) => Ok(SourceProof {
+            proof: evm::validation::validate_source(amount, source)?,
+            #[cfg(feature = "rgb-validation")]
+            rgb_consignment: None,
+        }),
         SourceNetwork::RgbSource(source) => rgb::validate_source(amount, source, ctx),
     }
 }
@@ -149,6 +165,7 @@ mod tests {
             token: vec![0x11; 20],
             recipient: vec![0x22; 20],
             commission,
+            funds_in_operation_id: 0,
         })
     }
 

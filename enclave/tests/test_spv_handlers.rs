@@ -5,6 +5,7 @@
 use bitcoin::consensus::serialize;
 use bitcoin::hashes::Hash;
 
+use utexo_bridge_enclave::networks::rgb::spv::{checkpoint_for, Network};
 use utexo_bridge_enclave::proto::enclave_request::Request as EReq;
 use utexo_bridge_enclave::proto::enclave_response::Response as ERes;
 use utexo_bridge_enclave::proto::*;
@@ -63,20 +64,22 @@ fn last_saved(port: u16) -> GetLastSavedBlockResponse {
 
 #[test]
 fn fresh_enclave_reports_checkpoint_as_tip() {
-    // Common test-server uses Regtest with the placeholder checkpoint
-    // (height=0, hash=zeros). On boot, that's the tip.
+    // Common test-server uses Regtest, whose checkpoint is the real regtest
+    // genesis block (height=0). On boot, that's the tip.
     let port = start_test_server();
+    let cp = checkpoint_for(Network::Regtest);
     let r = last_saved(port);
     assert_eq!(r.block_height, 0);
-    assert_eq!(r.block_hash, vec![0u8; 32]);
+    assert_eq!(r.block_hash, cp.hash.to_vec());
 }
 
 #[test]
 fn submit_then_query_round_trip() {
     let port = start_test_server();
 
-    // Push 5 synthetic headers chained from the (zero) checkpoint.
-    let headers = synth_chain_from([0u8; 32], 1_700_000_000, 5);
+    // Push 5 synthetic headers chained from the regtest genesis checkpoint.
+    let cp = checkpoint_for(Network::Regtest);
+    let headers = synth_chain_from(cp.hash, 1_700_000_000, 5);
     let resp = submit(port, 1, headers);
 
     match resp.response {
@@ -90,7 +93,7 @@ fn submit_then_query_round_trip() {
 
     let after = last_saved(port);
     assert_eq!(after.block_height, 5);
-    assert_ne!(after.block_hash, vec![0u8; 32]);
+    assert_ne!(after.block_hash, cp.hash.to_vec());
 }
 
 #[test]
@@ -136,8 +139,8 @@ fn submit_with_gap_returns_error() {
 fn batched_submits_advance_tip_monotonically() {
     let port = start_test_server();
 
-    // First batch of 3.
-    let mut prev = [0u8; 32];
+    // First batch of 3, chained from the regtest genesis checkpoint.
+    let mut prev = checkpoint_for(Network::Regtest).hash;
     let batch1 = synth_chain_from(prev, 1_700_000_000, 3);
     // Recompute prev = hash of last header in batch1 so batch2 chains.
     let last1: bitcoin::block::Header = bitcoin::consensus::deserialize(&batch1[2]).unwrap();

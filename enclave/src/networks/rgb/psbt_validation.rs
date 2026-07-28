@@ -37,21 +37,22 @@ pub fn psbt_operation_key(
     h.finalize().into()
 }
 
-/// Validate the serialized PSBT shape owned by an RGB destination.
-pub fn validate_psbt_bytes(psbt_bytes: &[u8]) -> Result<()> {
-    // Shape whitelist: refuse payloads that aren't even a legitimate PSBT before any other
-    //    predicate runs. Catches three classes of garbage up-front:
-    //
-    //      (a) empty bytes (handler tried to sign nothing),
-    //      (b) bytes that don't conform to BIP-174 (random/truncated/
-    //          tampered),
-    //      (c) PSBTs with no inputs — there's literally nothing to sign,
-    //          and the unsigned-tx-must-be-non-empty rule is implicit in
-    //          BIP-174's signing semantics.
-    //
-    //    The existing PSBT signer would have failed later on these too,
-    //    but with a much noisier downstream error. Failing here gives the
-    //    caller a single clear reason.
+/// Shape whitelist for a raw PSBT: refuse payloads that aren't even a legitimate
+/// PSBT before any other predicate runs. Catches three classes of garbage
+/// up-front:
+///
+///   (a) empty bytes (handler tried to sign nothing),
+///   (b) bytes that don't conform to BIP-174 (random/truncated/tampered),
+///   (c) PSBTs with no inputs — there's literally nothing to sign, and the
+///       unsigned-tx-must-be-non-empty rule is implicit in BIP-174's signing
+///       semantics.
+///
+/// The signer would fail later on these too, but with a much noisier downstream
+/// error; failing here gives the caller a single clear reason. Returns the
+/// parsed PSBT so callers that need it (the plain-BTC `SignBtc` path) don't
+/// re-parse. Shared by the bridge/RGB `SignPsbt` path ([`validate_psbt_bytes`])
+/// and the plain-BTC `SignBtc` path ([`crate::networks::rgb::btc_crosscheck`]).
+pub(crate) fn parse_psbt_shape(psbt_bytes: &[u8]) -> Result<Psbt> {
     if psbt_bytes.is_empty() {
         return Err(EnclaveError::CrossCheck("psbt_bytes is empty".into()));
     }
@@ -63,7 +64,12 @@ pub fn validate_psbt_bytes(psbt_bytes: &[u8]) -> Result<()> {
         ));
     }
 
-    Ok(())
+    Ok(psbt)
+}
+
+/// Validate the serialized PSBT shape owned by an RGB destination.
+pub fn validate_psbt_bytes(psbt_bytes: &[u8]) -> Result<()> {
+    parse_psbt_shape(psbt_bytes).map(|_| ())
 }
 
 /// Bind a PSBT to the RGB consignment it claims to finalize.
@@ -84,7 +90,8 @@ pub fn validate_psbt_bytes(psbt_bytes: &[u8]) -> Result<()> {
 ///
 /// Enforces, fail-closed:
 ///   1. The consignment's last transition is an IFA `Transfer`
-///      (`ifa::TS_TRANSFER`) — the pools-mode send shape.
+///      (`ifa::TS_TRANSFER`, the pools-mode send shape) or an IFA
+///      `Inflation` (`ifa::TS_INFLATION`, the mint-RGB shape — #54).
 ///   2. **Identity bind:** `psbt.unsigned_tx.compute_txid()` equals the
 ///      consignment's last witness txid. A segwit txid commits to every
 ///      non-witness field (all inputs, all outputs incl. the commitment
@@ -98,10 +105,11 @@ pub fn validate_psbt_bytes(psbt_bytes: &[u8]) -> Result<()> {
 ///   4. **Sighash guard:** refuse any input requesting a sighash other than
 ///      ALL / taproot-DEFAULT, so a host can't splice our signature into a
 ///      different tx (ANYONECANPAY / SINGLE / NONE).
-///   5. **Amount bind (coarse):** the transfer's `total_output_amount` must
-///      cover the net amount credited by the source side (`source_amount`
-///      minus `source_commission`). This does not yet verify which output is
-///      the recipient leg (issue #58).
+///   5. **Amount bind (coarse):** the transition's `asset_output_amount`
+///      (the `OS_ASSET`-typed allocations only — for a mint, excluding the
+///      `OS_INFLATION` allowance outputs) must cover the net amount credited
+///      by the source side (`source_amount` minus `source_commission`). This
+///      does not yet verify which output is the recipient leg (issue #58).
 #[cfg(feature = "rgb-validation")]
 pub fn validate_psbt_anchors_transition(
     psbt: &Psbt,
@@ -116,11 +124,13 @@ pub fn validate_psbt_anchors_transition(
             "send-RGB PSBT requires a consignment with at least one transition".into(),
         )
     })?;
-    if last.transition_type != ifa::TS_TRANSFER {
+    if !matches!(last.transition_type, ifa::TS_TRANSFER | ifa::TS_INFLATION) {
         return Err(EnclaveError::CrossCheck(format!(
-            "send-RGB PSBT requires a Transfer transition (last transition_type = {}, want {})",
+            "send-RGB PSBT requires a Transfer or Inflation transition (last transition_type = \
+             {}, want {} or {})",
             last.transition_type,
-            ifa::TS_TRANSFER
+            ifa::TS_TRANSFER,
+            ifa::TS_INFLATION
         )));
     }
 
@@ -128,7 +138,7 @@ pub fn validate_psbt_anchors_transition(
     // (a non-segwit input's scriptSig would change the txid post-signing).
     let expected = validated.last_transfer_witness_txid.ok_or_else(|| {
         EnclaveError::CrossCheck(
-            "consignment carries no witness txid for its Transfer transition — \
+            "consignment carries no witness txid for its last transition — \
              cannot anchor the PSBT"
                 .into(),
         )
@@ -172,14 +182,68 @@ pub fn validate_psbt_anchors_transition(
     }
 
     let net_credited = source_amount.saturating_sub(source_commission);
-    if last.total_output_amount < net_credited {
+    // `asset_output_amount`, not `total_output_amount`: only `OS_ASSET`-typed
+    // allocations carry asset units. For a Transfer the two are equal; for an
+    // Inflation the total also counts `OS_INFLATION` allowance outputs (mint
+    // *capacity*), which must not cover the credited amount (#54).
+    if last.asset_output_amount < net_credited {
         return Err(EnclaveError::CrossCheck(format!(
-            "send-RGB amount mismatch: consignment total_output_amount ({}) < net credited \
+            "send-RGB amount mismatch: consignment asset_output_amount ({}) < net credited \
              (source_amount {} - source_commission {} = {})",
-            last.total_output_amount, source_amount, source_commission, net_credited
+            last.asset_output_amount, source_amount, source_commission, net_credited
         )));
     }
 
+    Ok(())
+}
+
+/// Maximum multiple of the recommended fee rate a send-RGB PSBT may pay
+/// (#55). Compile-time (PCR-attested), deliberately not host-tunable: an
+/// env knob would let the operator's host neutralize the check. 3x absorbs
+/// fee-market movement within the estimate's TTL plus the unsigned-vsize
+/// overestimate (see [`check_psbt_fee_rate`]).
+#[cfg(feature = "rgb-validation")]
+const FEE_RATE_HEADROOM: f64 = 3.0;
+
+/// Fee-rate sanity check for send-RGB PSBTs (#55): the implied fee rate must
+/// not exceed [`FEE_RATE_HEADROOM`] x the enclave-fetched recommendation.
+/// Without this, a compromised host could burn bridge BTC as miner fees on an
+/// otherwise fully-validated PSBT (the anchor bind pins inputs and the
+/// commitment output, but the fee is whatever the outputs leave behind).
+///
+/// Fail-closed on every degenerate shape: `Psbt::fee()` errors (missing
+/// `witness_utxo`/`non_witness_utxo`, value overflow) reject, a zero-vsize tx
+/// rejects, and the comparison is written so a NaN rate rejects. The rate is
+/// computed over `unsigned_tx.vsize()`, which is smaller than the final
+/// witness-carrying vsize — the implied rate is therefore an OVERestimate,
+/// i.e. conservative in the rejecting direction; the headroom absorbs it.
+#[cfg(feature = "rgb-validation")]
+pub fn check_psbt_fee_rate(psbt: &Psbt, recommended_sat_vb: f64) -> Result<()> {
+    let fee = psbt.fee().map_err(|e| {
+        EnclaveError::CrossCheck(format!(
+            "cannot compute PSBT fee (every input needs witness_utxo or non_witness_utxo): {e}"
+        ))
+    })?;
+    let vsize = psbt.unsigned_tx.vsize();
+    if vsize == 0 {
+        return Err(EnclaveError::CrossCheck(
+            "PSBT unsigned tx has zero vsize — cannot bound its fee rate".into(),
+        ));
+    }
+    let rate = fee.to_sat() as f64 / vsize as f64;
+    let limit = FEE_RATE_HEADROOM * recommended_sat_vb;
+    // `partial_cmp` (not `a > b`): an incomparable (NaN) rate or limit must
+    // reject, never pass.
+    let within_limit = matches!(
+        rate.partial_cmp(&limit),
+        Some(std::cmp::Ordering::Less | std::cmp::Ordering::Equal)
+    );
+    if !within_limit {
+        return Err(EnclaveError::CrossCheck(format!(
+            "send-RGB PSBT fee rate too high: {rate:.2} sat/vB > {FEE_RATE_HEADROOM}x the \
+             recommended {recommended_sat_vb:.2} sat/vB — refusing to burn bridge BTC as fees"
+        )));
+    }
     Ok(())
 }
 
@@ -335,6 +399,88 @@ mod tests {
     // send-RGB anchoring — `validate_psbt_anchors_transition`
     // =========================================================================
     #[cfg(feature = "rgb-validation")]
+    mod fee_rate {
+        use super::*;
+
+        /// One segwit-ish input carrying `witness_utxo` of `input_sats`, one
+        /// output of `output_sats` — so `Psbt::fee()` = input − output.
+        fn psbt_with_fee(input_sats: u64, output_sats: u64) -> Psbt {
+            let unsigned_tx = Transaction {
+                version: bitcoin::transaction::Version(2),
+                lock_time: bitcoin::absolute::LockTime::ZERO,
+                input: vec![TxIn {
+                    previous_output: OutPoint {
+                        txid: Txid::from_raw_hash(bitcoin::hashes::sha256d::Hash::from_byte_array(
+                            [0x11; 32],
+                        )),
+                        vout: 0,
+                    },
+                    script_sig: ScriptBuf::new(),
+                    sequence: Sequence::MAX,
+                    witness: Witness::new(),
+                }],
+                output: vec![TxOut {
+                    value: Amount::from_sat(output_sats),
+                    script_pubkey: ScriptBuf::new(),
+                }],
+            };
+            let mut psbt = Psbt::from_unsigned_tx(unsigned_tx).expect("from_unsigned_tx");
+            psbt.inputs[0].witness_utxo = Some(TxOut {
+                value: Amount::from_sat(input_sats),
+                script_pubkey: ScriptBuf::new(),
+            });
+            psbt
+        }
+
+        #[test]
+        fn accepts_fee_rate_at_headroom() {
+            // rate == FEE_RATE_HEADROOM × recommended must pass (boundary is
+            // inclusive: reject only strictly above the cap).
+            let recommended = 10.0;
+            let vsize = psbt_with_fee(100_000, 100_000).unsigned_tx.vsize() as u64;
+            let fee_at_cap = (FEE_RATE_HEADROOM * recommended) as u64 * vsize;
+            let psbt = psbt_with_fee(100_000, 100_000 - fee_at_cap);
+            assert!(check_psbt_fee_rate(&psbt, recommended).is_ok());
+        }
+
+        #[test]
+        fn rejects_fee_rate_above_headroom() {
+            // One extra sat/vB above the cap → reject; nothing else about the
+            // PSBT is wrong, so the error must be the fee-rate one.
+            let recommended = 10.0;
+            let vsize = psbt_with_fee(100_000, 100_000).unsigned_tx.vsize() as u64;
+            let fee_over_cap = ((FEE_RATE_HEADROOM * recommended) as u64 + 1) * vsize;
+            let psbt = psbt_with_fee(100_000, 100_000 - fee_over_cap);
+            let err = check_psbt_fee_rate(&psbt, recommended).unwrap_err();
+            assert!(
+                err.to_string().contains("fee rate too high"),
+                "expected fee-rate rejection, got: {err}"
+            );
+        }
+
+        #[test]
+        fn rejects_psbt_without_utxo_data() {
+            // No witness_utxo/non_witness_utxo → the fee is uncomputable and
+            // the check must fail closed, not skip.
+            let psbt = Psbt::deserialize(&minimal_valid_psbt_bytes()).unwrap();
+            let err = check_psbt_fee_rate(&psbt, 10.0).unwrap_err();
+            assert!(
+                err.to_string().contains("cannot compute PSBT fee"),
+                "expected uncomputable-fee rejection, got: {err}"
+            );
+        }
+
+        #[test]
+        fn rejects_nan_recommendation() {
+            // A NaN limit must reject (the comparison is written as
+            // `!(rate <= limit)` so NaN can never pass). The recommendation
+            // is validated upstream, but the check must not rely on that.
+            let psbt = psbt_with_fee(100_000, 99_000);
+            assert!(check_psbt_fee_rate(&psbt, f64::NAN).is_err());
+        }
+    }
+
+    #[cfg(feature = "rgb-validation")]
     mod anchor {
         use super::*;
         use crate::networks::rgb::validation::{ifa, TransitionSummary, ValidatedConsignment};
@@ -381,6 +527,8 @@ mod tests {
                 op_id: "transfer-op".into(),
                 transition_type: ifa::TS_TRANSFER,
                 total_output_amount,
+                // Transfers move only OS_ASSET, so the two sums are equal.
+                asset_output_amount: total_output_amount,
                 outputs: vec![],
                 burned_asset_amount: None,
             }
@@ -401,9 +549,12 @@ mod tests {
                 chain_net: "bc".into(),
                 witness_txids: vec![],
                 all_op_ids: vec!["transfer-op".into()],
+                mint_op_ids: vec![],
                 last_transition: Some(transfer_summary(total_output_amount)),
                 last_transfer_witness_txid: Some(psbt.unsigned_tx.compute_txid()),
                 last_transfer_witness_prevouts: Some(prevouts),
+                last_transfer_op_id: None,
+                non_mined_witness_txids: vec![],
             }
         }
 
@@ -477,6 +628,40 @@ mod tests {
             assert!(validate_psbt_anchors_transition(&psbt, &validated, 1_000, 0).is_ok());
         }
 
+        /// #54: the mint-RGB shape — an IFA Inflation last transition — binds
+        /// through the same anchor path as the pools-mode Transfer.
+        #[test]
+        fn accepts_inflation_shape() {
+            let psbt = psbt_with_two_inputs();
+            let mut validated = validated_for(&psbt, 1_000);
+            validated.last_transition.as_mut().unwrap().transition_type = ifa::TS_INFLATION;
+            assert!(validate_psbt_anchors_transition(&psbt, &validated, 1_000, 0).is_ok());
+        }
+
+        /// #54: for a mint, only `OS_ASSET`-typed outputs (the actually
+        /// minted units) may cover the credited amount — the `OS_INFLATION`
+        /// allowance (mint capacity) counted in `total_output_amount` must
+        /// not.
+        #[test]
+        fn inflation_allowance_does_not_cover_credited_amount() {
+            let psbt = psbt_with_two_inputs();
+            let mut validated = validated_for(&psbt, 1_000);
+            {
+                let last = validated.last_transition.as_mut().unwrap();
+                last.transition_type = ifa::TS_INFLATION;
+                // Minted 999 units; a large allowance rides along in the
+                // total. Net credited is 1_000 — must be rejected on the
+                // asset sum, not covered by the allowance-inflated total.
+                last.asset_output_amount = 999;
+                last.total_output_amount = 1_000_000;
+            }
+            let err = validate_psbt_anchors_transition(&psbt, &validated, 1_000, 0).unwrap_err();
+            assert!(
+                err.to_string().contains("asset_output_amount (999)"),
+                "expected asset-amount rejection, got: {err}"
+            );
+        }
+
         #[test]
         fn rejects_non_transfer_transition() {
             let psbt = psbt_with_two_inputs();
@@ -484,8 +669,9 @@ mod tests {
             validated.last_transition.as_mut().unwrap().transition_type = ifa::TS_BURN;
             let err = validate_psbt_anchors_transition(&psbt, &validated, 1_000, 0).unwrap_err();
             assert!(
-                err.to_string().contains("requires a Transfer transition"),
-                "expected Transfer-required rejection, got: {err}"
+                err.to_string()
+                    .contains("requires a Transfer or Inflation transition"),
+                "expected Transfer/Inflation-required rejection, got: {err}"
             );
         }
 

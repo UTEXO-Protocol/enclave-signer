@@ -47,6 +47,27 @@ Internet -- orchestrator -- EC2 parent (UNTRUSTED) -- vsock -- Nitro Enclave (TR
 root CA, the correctness of *this* enclave code, and the correctness of the RGB
 / SPV validation libraries. (Parent spec Sec 6.2, Sec 6.3.)
 
+**Wall-clock and entropy assumptions (audit W-11):** three gates read
+`SystemTime::now()` — the request `deadline` check (EVM destination
+validation), the SPV chain-staleness check, and the `submit_headers` rate
+limit. Inside a Nitro enclave the wall clock is hypervisor-provided
+(kvm-clock); no NSM-attested time source is in use. The accepted assumption is
+that the AWS hypervisor is trusted for *coarse* time — consistent with the
+model above, where the same hypervisor is already trusted for isolation and
+attestation itself. The parent host cannot skew the enclave clock through any
+interface this code exposes; a hypervisor-level adversary is outside the
+threat model by construction. Entropy comes from the NSM RNG (actor table
+above). Should host-time-independence ever be required, the remediation path
+is NSM-attested time or external time anchoring (tracked under #123 / W-11).
+
+**No batch signing path (audit W-03):** the enclave builds and signs exactly
+one digest shape — the single-call `BridgeOperation` EIP-712 struct
+(`sign_request_digest`). There is no `executeBatch` digest builder, and the
+typehash separation between the single-call struct and the on-chain batch
+struct means a signature produced here can never authorize a batch execution.
+Aligning or removing `executeBatch`/`_buildBatchDigest` on the contract side
+is tracked with the contracts team (#123 / W-03).
+
 ## 3. Architecture
 
 The signer is three crates plus the external infrastructure it touches.
@@ -126,6 +147,20 @@ The enclave signs `fundsOut` only after all validation predicates (Sec 8) hold.
 Taproot script-path (BIP-340 Schnorr) + SegWit v0 P2WSH (ECDSA), each anchored
 to the input's `witness_utxo.script_pubkey` so the enclave signs only the
 intended UTXO.
+
+In **bridge mode** (non-empty `evm_tx_hash`) the release is authorised by an EVM
+deposit. The listener-supplied `evm_event_valid` / `evm_event_finalized` booleans
+are **NOT trusted** (audit M-06 / #51); the enclave establishes validity and
+finality itself, fail-closed, in `validation::evm_event::verify_funds_in_event`:
+a successful receipt must exist for `evm_tx_hash`, carry a **unique** `FundsIn` /
+`BridgeFundsIn` log from the **pinned** `BRIDGE_CONTRACT`, bind `operationId` /
+gross amount / commission (with `net == gross - commission`), and sit at depth
+>= `EVM_MIN_CONFIRMATIONS`. Under `rgb-validation` the PSBT is additionally bound
+to the validated consignment's `TS_TRANSFER` witness tx (txid + prevouts +
+sighash + amount). A build **without** the `evm-rpc` feature refuses bridge-mode
+`signPsbt` outright. With `helios` (#77) the RPC is verified inside the TEE
+against a pinned checkpoint (trustless); otherwise responses are host-relayed
+evidence, verified fail-closed but not trustless.
 
 [Sign PSBT](diagrams/04-seq-sign-psbt.md)
 *Source: [`diagrams/04-seq-sign-psbt.md`](diagrams/04-seq-sign-psbt.md)*
@@ -254,6 +289,7 @@ The enclave MUST uphold the following. Each maps to parent spec Sec 14/Sec 15.
 | **SI-10** | On any validation failure the unlock path MUST fail closed (no partial signature, no fallback). [OK]                                                    |
 | **SI-11** | A feature/build mismatch (e.g. request carries `merkle_proofs` but the binary lacks `spv`) MUST cause refusal, never a sign-without-verification. [OK]  |
 | **SI-12** | Cross-network consignments (e.g. regtest replayed at a mainnet enclave) MUST be rejected. [OK]                                                          |
+| **SI-13** | Bridge-mode `signPsbt` MUST independently verify the EVM `FundsIn` deposit (receipt success, pinned-contract log, operationId/amount/commission bind, depth ≥ `EVM_MIN_CONFIRMATIONS`); listener validity/finality flags MUST NOT authorise (#51). A build lacking `evm-rpc` MUST refuse bridge-mode signing. [OK, #60] |
 
 ## 11. Failure conditions
 
@@ -267,7 +303,9 @@ replayed cloning nonce.
 ## 12. Implementation status & blockers
 
 Conformant and solid: Sec 7 SPV stack (incl. SI-8), Sec 9 attestation + cloning
-(Sec 16.4), fail-closed posture (SI-10/11), cross-network defense (SI-12).
+(Sec 16.4), fail-closed posture (SI-10/11), cross-network defense (SI-12),
+independent EVM `FundsIn` verification for bridge-mode `signPsbt` (SI-13 / #60,
+with the trustless Helios variant #77 experimental / default-off).
 
 **Pre-mainnet blockers** (detail in `cross-flow-findings.md` (in `internal_audit` repo at `release 1.0/enclave-signer/`)):
 

@@ -164,6 +164,9 @@ impl ParentAdapterService {
                     token: Self::decode_hex_field("SourceProof.token", source.token)?,
                     recipient: Self::decode_hex_or_raw_field(source.recipient),
                     commission: source.commission,
+                    // On-chain FundsIn operationId (bridge transfer id); the
+                    // enclave #60 check binds to this, not to operation_idx.
+                    funds_in_operation_id: evm.funds_in_operation_id,
                 }),
             ),
             Some(source_proof::Chain::Rgb(rgb)) => Ok(
@@ -215,6 +218,11 @@ impl ParentAdapterService {
                     },
                 )
             }
+            // Plain BTC is not a cross-network destination — it is dispatched
+            // via `data_type=BTC_UTXO` to the SignBtc path, never here.
+            sign_request::Data::BtcData(_) => unreachable!(
+                "BtcData is handled by the BTC_UTXO dispatch, not enclave_destination_network"
+            ),
         }
     }
 
@@ -246,7 +254,12 @@ impl ParentAdapterService {
 #[tonic::async_trait]
 impl ParentService for ParentAdapterService {
     /// Sign converts the structured ParentService request into the enclave
-    /// wire `SignRequest`
+    /// wire `SignRequest`.
+    ///
+    /// Dispatches on `data_type`:
+    ///   TRANSACTION → source/destination cross-network Sign (bridge / RGB-send / EVM)
+    ///   EVM_GAS_TX  → unsigned gas-tx preimage → SignRawDigest
+    ///   BTC_UTXO    → plain-BTC PSBT → SignBtc (vanilla BIP-86 path, audit #69/M-01)
     async fn sign(
         &self,
         request: Request<grpc_proto::SignRequest>,
@@ -298,6 +311,12 @@ impl ParentService for ParentAdapterService {
 
                         Self::enclave_destination_network(sign_request::Data::RgbData(payload))
                     }
+                    Some(sign_request::Data::BtcData(_)) => {
+                        return Err(Status::invalid_argument(
+                            "TRANSACTION data_type must not carry BtcData; \
+                             use data_type=BTC_UTXO for plain-BTC signing",
+                        ))
+                    }
                     None => return Err(Status::invalid_argument("SignRequest.data is missing")),
                 };
 
@@ -325,6 +344,7 @@ impl ParentService for ParentAdapterService {
                             signer_network_id,
                             signature: r.signed_psbt,
                             identifier: None,
+                            call_data: Vec::new(),
                         }))
                     }
                     Some(enclave_response::Response::EvmSignature(r)) => {
@@ -332,6 +352,12 @@ impl ParentService for ParentAdapterService {
                             signer_network_id,
                             signature: r.signature,
                             identifier: None,
+                            // The enclave may rewrite the OpId-bound calldata
+                            // fields (burnId, fundsInIds) from the validated
+                            // consignment, so forward the exact calldata the
+                            // signature commits to — the caller must submit these
+                            // bytes, not the ones it sent (audit M-02 / #93, #63).
+                            call_data: r.call_data,
                         }))
                     }
                     Some(enclave_response::Response::Error(e)) => {
@@ -344,26 +370,35 @@ impl ParentService for ParentAdapterService {
                 }
             }
             DataType::EvmGasTx => {
-                // EVM_GAS_TX carries a pre-hashed 32-byte digest in EvmData.call_data
-                // and is signed with the enclave's dedicated gas-tx key. It has no
-                // source proof, so it is routed to SignRawDigest rather than the
-                // source/destination Sign path.
-                let digest = match inner.data {
-                    Some(sign_request::Data::EvmData(payload)) => payload.call_data,
-                    _ => {
-                        return Err(Status::invalid_argument(
-                            "EVM_GAS_TX sign requires EvmData with the digest in call_data",
-                        ))
-                    }
-                };
+                // EVM_GAS_TX is signed with the enclave's dedicated gas-tx key.
+                // It has no source proof, so it is routed to SignRawDigest
+                // rather than the source/destination Sign path. The Listener
+                // sends the unsigned tx preimage in `EnrichedEvmPayload.unsigned_tx`
+                // (and MAY still carry a pre-hashed digest in `call_data` for
+                // defense-in-depth); the enclave decodes the preimage, enforces
+                // the gas-tx shape allowlist, and computes the digest itself
+                // (audit TEE-XC-09 / #68 — see `networks::evm::gas_tx`).
+                let (digest, unsigned_tx) =
+                    match inner.data {
+                        Some(sign_request::Data::EvmData(payload)) => {
+                            (payload.call_data, payload.unsigned_tx)
+                        }
+                        _ => return Err(Status::invalid_argument(
+                            "EVM_GAS_TX sign requires EvmData with the unsigned tx in unsigned_tx",
+                        )),
+                    };
                 tracing::info!(
                     dst_network_id = signer_network_id,
                     digest_len = digest.len(),
+                    unsigned_tx_len = unsigned_tx.len(),
                     "gRPC Sign: EVM gas tx raw digest"
                 );
                 let enclave_req = EnclaveRequest {
                     request: Some(enclave_request::Request::SignRawDigest(
-                        enclave_proto::SignRawDigestRequest { digest },
+                        enclave_proto::SignRawDigestRequest {
+                            digest,
+                            unsigned_tx,
+                        },
                     )),
                 };
                 let resp = self.send_to_enclave(enclave_req).await?;
@@ -373,6 +408,7 @@ impl ParentService for ParentAdapterService {
                             signer_network_id,
                             signature: r.signature,
                             identifier: None,
+                            call_data: Vec::new(),
                         }))
                     }
                     Some(enclave_response::Response::Error(e)) => {
@@ -380,6 +416,54 @@ impl ParentService for ParentAdapterService {
                     }
                     other => Err(Status::internal(format!(
                         "unexpected enclave response for SignRawDigest: {:?}",
+                        other
+                    ))),
+                }
+            }
+            DataType::BtcUtxo => {
+                // Plain-BTC signing (audit #69/M-01): a distinct request that
+                // never carries a source proof or consignment. The Listener
+                // sends the PSBT in `EnrichedBtcPayload.psbt_bytes`; the enclave
+                // signs it with the vanilla BIP-86 account under a strict output
+                // allowlist + input-value cap.
+                let payload = match inner.data {
+                    Some(sign_request::Data::BtcData(payload)) => payload,
+                    _ => {
+                        return Err(Status::invalid_argument(
+                            "BTC_UTXO sign requires BtcData with the PSBT in psbt_bytes",
+                        ))
+                    }
+                };
+
+                tracing::info!(
+                    dst_network_id = signer_network_id,
+                    psbt_len = payload.psbt_bytes.len(),
+                    "gRPC Sign: plain BTC (data_type=BTC_UTXO)"
+                );
+
+                let enclave_req = EnclaveRequest {
+                    request: Some(enclave_request::Request::SignBtc(
+                        enclave_proto::SignBtcRequest {
+                            psbt_bytes: payload.psbt_bytes,
+                        },
+                    )),
+                };
+
+                let resp = self.send_to_enclave(enclave_req).await?;
+                match resp.response {
+                    Some(enclave_response::Response::SignedPsbt(r)) => {
+                        Ok(Response::new(SignatureResponse {
+                            signer_network_id,
+                            signature: r.signed_psbt,
+                            identifier: None,
+                            call_data: Vec::new(),
+                        }))
+                    }
+                    Some(enclave_response::Response::Error(e)) => {
+                        Err(Self::enclave_error_to_status(&e))
+                    }
+                    other => Err(Status::internal(format!(
+                        "unexpected enclave response for SignBtc: {:?}",
                         other
                     ))),
                 }

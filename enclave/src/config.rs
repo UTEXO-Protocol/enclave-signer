@@ -21,11 +21,50 @@
 use crate::error::{EnclaveError, Result};
 
 /// Bridge config pinned at enclave boot from env. See module docs.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct BridgeConfig {
     pub chain_id: u64,
     pub bridge_contract: [u8; 20],
     pub rgb_asset_id: String,
+    /// Operator-pinned allowed destination for **gas-key** transactions
+    /// (`GAS_TX_ALLOWED_TO`). When set, `SignRawDigest` only signs a gas tx
+    /// whose `to` equals this address (and whose `value` is 0) — audit
+    /// TEE-XC-09. `None` = unset, which fails gas-tx signing closed in
+    /// release builds.
+    ///
+    /// The pinned address should be an EOA, or a contract with no function
+    /// the gas key could be coerced into calling to the operator's
+    /// detriment: the transaction calldata is not inspected (see
+    /// `networks::evm::gas_tx`).
+    ///
+    /// Unlike the three fields above, this is **not** folded into the
+    /// attestation `user_data` bundle (`canonical_pubkey_bundle` in
+    /// `server.rs`): it is an operational signing-policy pin, not part of
+    /// the enclave's committed identity. It can be added to the bundle in a
+    /// follow-up if external verifiability of the gas-tx policy is wanted.
+    pub gas_tx_allowed_to: Option<[u8; 20]>,
+    /// Operator-pinned output allowlist for the **plain-BTC** signing path
+    /// (`SignBtc`, env `BTC_ALLOWED_SCRIPTS`): the set of output
+    /// `script_pubkey` byte-strings the enclave will co-sign a plain-BTC PSBT
+    /// toward (e.g. the bridge's own change/UTXO-management scripts). Empty =
+    /// unset; a production (`rgb-validation`) build refuses plain-BTC signing
+    /// when unset. Like the gas-tx destination pin (`GAS_TX_ALLOWED_TO`), this
+    /// is an operational signing-policy pin, NOT part of `is_configured()` or
+    /// the attested identity bundle — see the C-01 systemic follow-up for
+    /// attesting it.
+    pub btc_allowed_scripts: Vec<Vec<u8>>,
+    /// Operator-pinned cap (sats) on the **total** output value of a plain-BTC
+    /// PSBT (`BTC_MAX_TOTAL_SATS`). `0` = unset; a production build refuses
+    /// plain-BTC signing when unset. Bounds the blast radius of the plain-BTC
+    /// path independently of the destination allowlist.
+    pub btc_max_total_sats: u64,
+    /// Address expected to emit `FundsIn`/`BridgeFundsIn` (env
+    /// `FUNDS_IN_CONTRACT`). Falls back to `bridge_contract` when unset, so
+    /// single-contract deployments are unaffected. Needed where the deposit
+    /// event is emitted by the bridge *entry* contract while `BRIDGE_CONTRACT`
+    /// pins the MultisigProxy for the EVM signing cross-check — one pin cannot
+    /// serve both lookups.
+    pub funds_in_contract: [u8; 20],
 }
 
 impl BridgeConfig {
@@ -46,10 +85,42 @@ impl BridgeConfig {
 
         let rgb_asset_id = std::env::var("RGB_ASSET_ID").unwrap_or_default();
 
+        let gas_tx_allowed_to = std::env::var("GAS_TX_ALLOWED_TO")
+            .ok()
+            .and_then(|s| parse_eth_address(&s).ok());
+
+        // Plain-BTC output allowlist: comma-separated hex `script_pubkey`s.
+        // Each entry is parsed independently; malformed/empty entries are
+        // dropped rather than poisoning the whole list.
+        let btc_allowed_scripts = std::env::var("BTC_ALLOWED_SCRIPTS")
+            .ok()
+            .map(|s| {
+                s.split(',')
+                    .filter_map(|part| hex::decode(part.trim()).ok())
+                    .filter(|bytes| !bytes.is_empty())
+                    .collect::<Vec<Vec<u8>>>()
+            })
+            .unwrap_or_default();
+
+        let btc_max_total_sats = std::env::var("BTC_MAX_TOTAL_SATS")
+            .ok()
+            .and_then(|s| s.parse::<u64>().ok())
+            .unwrap_or(0);
+
+        // Separate FundsIn event-emitter pin; defaults to `bridge_contract`.
+        let funds_in_contract = std::env::var("FUNDS_IN_CONTRACT")
+            .ok()
+            .and_then(|s| parse_eth_address(&s).ok())
+            .unwrap_or(bridge_contract);
+
         Self {
             chain_id,
             bridge_contract,
             rgb_asset_id,
+            gas_tx_allowed_to,
+            btc_allowed_scripts,
+            btc_max_total_sats,
+            funds_in_contract,
         }
     }
 
@@ -86,6 +157,57 @@ impl BridgeConfig {
             || !self.rgb_asset_id.is_empty();
         any && !self.is_configured()
     }
+
+    /// The reason this config is not production-ready, or `None` when all three
+    /// pins (chain, contract, asset) are set. Pure and build-profile-agnostic so
+    /// it is directly unit-testable; [`assert_configured_in_release`](Self::assert_configured_in_release)
+    /// layers the debug/test exemptions and the `rgb-validation`-only scope on top.
+    pub fn production_readiness_error(&self) -> Option<String> {
+        if self.is_configured() {
+            return None;
+        }
+        let detail = if self.is_partially_configured() {
+            "PARTIALLY set (some but not all of EVM_CHAIN_ID / BRIDGE_CONTRACT / RGB_ASSET_ID \
+             are set)"
+        } else {
+            "unset (none of EVM_CHAIN_ID / BRIDGE_CONTRACT / RGB_ASSET_ID are set)"
+        };
+        Some(format!(
+            "bridge config is {detail}. A release rgb-validation (bridge-signing) enclave must \
+             pin all three so every signing path is authorised against operator pins; without \
+             them it would boot and fail closed on every bridge request. Set all three env vars, \
+             or build without rgb-validation for a non-signing enclave."
+        ))
+    }
+
+    /// Refuse to START a production bridge-signing build that isn't fully pinned
+    /// (audit C-01 systemic: no single explicit fail-closed production policy).
+    ///
+    /// A release `rgb-validation` build reaches every bridge-signing path, and
+    /// each already fails closed *per request* when [`is_configured`](Self::is_configured)
+    /// is false (see `networks::evm::validation::validate_destination` and
+    /// `networks::rgb::validate_destination_anchor`). But a per-request refusal
+    /// is only visible to whoever reads the rejected response or the enclave
+    /// logs - which an operator does not watch on a production host. Fail at
+    /// BOOT instead, the same way a placeholder SPV checkpoint does
+    /// ([`crate::networks::rgb::spv::Checkpoint::assert_real_in_release`]): a
+    /// misconfigured or partially-pinned production enclave never becomes
+    /// reachable, rather than starting and silently rejecting every signature.
+    ///
+    /// Exemptions mirror `assert_real_in_release`: debug builds, tests, and the
+    /// local-E2E `allow-seed-import` feature may run unpinned. A minimal
+    /// (non-`rgb-validation`) build has no bridge-signing path to protect and
+    /// always passes.
+    pub fn assert_configured_in_release(&self) -> std::result::Result<(), String> {
+        if cfg!(debug_assertions) || cfg!(test) || cfg!(feature = "allow-seed-import") {
+            return Ok(());
+        }
+        #[cfg(feature = "rgb-validation")]
+        if let Some(msg) = self.production_readiness_error() {
+            return Err(msg);
+        }
+        Ok(())
+    }
 }
 
 /// Parse `0xABCD…` (40 hex chars) or bare 40-hex into 20 bytes.
@@ -99,6 +221,179 @@ fn parse_eth_address(s: &str) -> Result<[u8; 20]> {
             v.len()
         ))
     })
+}
+
+/// EVM JSON-RPC config for in-enclave `FundsIn` event verification (#60),
+/// loaded at boot when the `evm-rpc` feature is built.
+///
+/// This is operational signing-plumbing, NOT part of the enclave's committed
+/// identity: like [`BridgeConfig::gas_tx_allowed_to`], it is deliberately
+/// **not** folded into the attestation `user_data` bundle.
+///
+/// TRUST BOUNDARY: `rpc_url` MUST be loopback. The enclave has no direct
+/// network; it reaches the EVM RPC only through the loopback -> vsock
+/// forwarder ([`crate::vsock_forwarder`]), so the responses are relayed by the
+/// UNTRUSTED host. `verify_funds_in_event` treats them as evidence and fails
+/// closed; full trustlessness needs Helios (#77).
+#[cfg(feature = "evm-rpc")]
+#[derive(Debug, Clone)]
+pub struct EvmRpcConfig {
+    /// Loopback URL of the in-enclave EVM RPC forwarder
+    /// (`EVM_RPC_URL`, default `http://127.0.0.1:3444`).
+    pub rpc_url: String,
+    /// Minimum confirmation depth a `FundsIn` receipt must have, measured
+    /// against the RPC head block (`EVM_MIN_CONFIRMATIONS`, default 12).
+    pub min_confirmations: u64,
+}
+
+#[cfg(feature = "evm-rpc")]
+impl EvmRpcConfig {
+    /// Default loopback RPC URL - the enclave side of the EVM vsock forwarder.
+    const DEFAULT_RPC_URL: &'static str = "http://127.0.0.1:3444";
+    /// Default confirmation depth (~a safe head distance for most EVM chains).
+    const DEFAULT_MIN_CONFIRMATIONS: u64 = 12;
+
+    /// Load from `EVM_RPC_URL` and `EVM_MIN_CONFIRMATIONS`. Both fall back to
+    /// safe defaults. A non-loopback `EVM_RPC_URL` is rejected back to the
+    /// default and logged: routing EVM RPC anywhere but the vsock forwarder
+    /// would bypass the only sanctioned egress path.
+    pub fn from_env() -> Self {
+        let rpc_url = match std::env::var("EVM_RPC_URL") {
+            Ok(url) if is_loopback_url(&url) => url,
+            Ok(url) => {
+                tracing::error!(
+                    %url,
+                    "EVM_RPC_URL is not loopback - ignoring and using the default vsock-forwarder \
+                     URL; the enclave must reach the EVM RPC only via the loopback forwarder"
+                );
+                Self::DEFAULT_RPC_URL.to_string()
+            }
+            Err(_) => Self::DEFAULT_RPC_URL.to_string(),
+        };
+        let min_confirmations = std::env::var("EVM_MIN_CONFIRMATIONS")
+            .ok()
+            .and_then(|s| s.parse::<u64>().ok())
+            .unwrap_or(Self::DEFAULT_MIN_CONFIRMATIONS);
+        Self {
+            rpc_url,
+            min_confirmations,
+        }
+    }
+}
+
+#[cfg(feature = "evm-rpc")]
+impl Default for EvmRpcConfig {
+    fn default() -> Self {
+        Self {
+            rpc_url: Self::DEFAULT_RPC_URL.to_string(),
+            min_confirmations: Self::DEFAULT_MIN_CONFIRMATIONS,
+        }
+    }
+}
+
+/// True if `url`'s host is exactly a loopback literal (`127.0.0.1`, `[::1]`, or
+/// `localhost`). A deliberately narrow, dependency-free check - the enclave only
+/// ever points this at its own loopback forwarder. Matches the host *exactly*
+/// (after stripping scheme, userinfo, path, and port) so a look-alike authority
+/// like `127.0.0.1.evil.com` or `localhost.evil.com` is NOT treated as loopback.
+#[cfg(feature = "evm-rpc")]
+fn is_loopback_url(url: &str) -> bool {
+    let after_scheme = url.split_once("://").map(|(_, rest)| rest).unwrap_or(url);
+    // Drop path/query/fragment, then any `userinfo@` prefix.
+    let authority = after_scheme
+        .split(['/', '?', '#'])
+        .next()
+        .unwrap_or(after_scheme);
+    let hostport = authority.rsplit_once('@').map_or(authority, |(_, h)| h);
+    // Strip the port. IPv6 literals are bracketed (`[::1]:8545`), so split off
+    // the `]` first; otherwise the host is everything before the first `:`.
+    let host = if let Some(rest) = hostport.strip_prefix('[') {
+        match rest.split_once(']') {
+            // Valid IPv6 authority: `]` is followed by nothing or `:port`.
+            Some((inner, after)) => {
+                return inner == "::1" && (after.is_empty() || after.starts_with(':'))
+            }
+            None => hostport,
+        }
+    } else {
+        hostport.split(':').next().unwrap_or(hostport)
+    };
+    host == "127.0.0.1" || host == "localhost"
+}
+
+/// Helios light-client config for TRUSTLESS in-enclave EVM event verification
+/// (#77), loaded at boot when the `helios` feature is built.
+///
+/// Selection is runtime: [`HeliosConfig::from_env`] returns `Some` only when
+/// `HELIOS_EXECUTION_RPC` is set - that is the signal to use the Helios-verified
+/// provider instead of the raw alloy path (#60). Like [`EvmRpcConfig`], the RPC
+/// URLs MUST be loopback (reached through vsock forwarders); Helios treats those
+/// upstreams as untrusted and verifies them against the pinned checkpoint.
+#[cfg(feature = "helios")]
+#[derive(Debug, Clone)]
+pub struct HeliosConfig {
+    /// Untrusted execution RPC Helios verifies against (`HELIOS_EXECUTION_RPC`,
+    /// required - typically the local exec forwarder `http://127.0.0.1:18545`).
+    /// Its presence is the signal to select the Helios-verified path.
+    pub execution_rpc: String,
+    /// Consensus (beacon) RPC for light-client sync (`HELIOS_CONSENSUS_RPC`,
+    /// loopback forwarder, default `http://127.0.0.1:18550`).
+    pub consensus_rpc: String,
+    /// Helios network name: `mainnet` | `sepolia` | `holesky`
+    /// (`HELIOS_NETWORK`, default `mainnet`).
+    pub network: String,
+    /// Weak-subjectivity checkpoint: 0x-prefixed 32-byte beacon block root
+    /// (`HELIOS_CHECKPOINT`). Required for a trustless build - without it Helios
+    /// would fall back to an untrusted community checkpoint list, which the
+    /// enclave never enables. `None` here fails client init closed.
+    pub checkpoint: Option<String>,
+    /// Reject a checkpoint older than the safe weak-subjectivity window
+    /// (`HELIOS_STRICT_CHECKPOINT_AGE`, default `true`).
+    pub strict_checkpoint_age: bool,
+}
+
+#[cfg(feature = "helios")]
+impl HeliosConfig {
+    const DEFAULT_CONSENSUS_RPC: &'static str = "http://127.0.0.1:18550";
+
+    /// Load from `HELIOS_*` env. Returns `None` when `HELIOS_EXECUTION_RPC` is
+    /// unset (the raw alloy path is used instead). A non-loopback RPC URL is
+    /// logged as an error but kept - the enclave has no direct egress, so a
+    /// non-loopback URL simply won't connect.
+    pub fn from_env() -> Option<Self> {
+        let execution_rpc = std::env::var("HELIOS_EXECUTION_RPC").ok()?;
+        warn_if_not_loopback("HELIOS_EXECUTION_RPC", &execution_rpc);
+
+        let consensus_rpc = std::env::var("HELIOS_CONSENSUS_RPC")
+            .unwrap_or_else(|_| Self::DEFAULT_CONSENSUS_RPC.to_string());
+        warn_if_not_loopback("HELIOS_CONSENSUS_RPC", &consensus_rpc);
+
+        let network = std::env::var("HELIOS_NETWORK").unwrap_or_else(|_| "mainnet".to_string());
+        let checkpoint = std::env::var("HELIOS_CHECKPOINT").ok();
+        let strict_checkpoint_age = std::env::var("HELIOS_STRICT_CHECKPOINT_AGE")
+            .ok()
+            .map(|s| s != "false" && s != "0")
+            .unwrap_or(true);
+
+        Some(Self {
+            execution_rpc,
+            consensus_rpc,
+            network,
+            checkpoint,
+            strict_checkpoint_age,
+        })
+    }
+}
+
+#[cfg(feature = "helios")]
+fn warn_if_not_loopback(var: &str, url: &str) {
+    if !is_loopback_url(url) {
+        tracing::error!(
+            %var, %url,
+            "Helios RPC URL is not loopback - the enclave reaches upstreams only via the vsock \
+             forwarder; a non-loopback URL will not connect"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -137,6 +432,7 @@ mod tests {
             chain_id: 0,
             bridge_contract: [0u8; 20],
             rgb_asset_id: String::new(),
+            ..Default::default()
         };
         assert!(!c.is_configured());
         assert!(!c.is_partially_configured());
@@ -148,6 +444,8 @@ mod tests {
             chain_id: 1,
             bridge_contract: [1u8; 20],
             rgb_asset_id: "rgb:asset".into(),
+            gas_tx_allowed_to: None,
+            ..Default::default()
         };
         assert!(c.is_configured());
         assert!(!c.is_partially_configured());
@@ -162,9 +460,51 @@ mod tests {
             chain_id: 1,
             bridge_contract: [0u8; 20],
             rgb_asset_id: "rgb:asset".into(),
+            ..Default::default()
         };
         assert!(!c.is_configured());
         assert!(c.is_partially_configured());
+    }
+
+    #[test]
+    fn production_readiness_error_none_when_configured() {
+        let c = BridgeConfig {
+            chain_id: 1,
+            bridge_contract: [1u8; 20],
+            rgb_asset_id: "rgb:asset".into(),
+            ..Default::default()
+        };
+        assert!(c.production_readiness_error().is_none());
+    }
+
+    #[test]
+    fn production_readiness_error_flags_unset() {
+        let msg = BridgeConfig::default()
+            .production_readiness_error()
+            .expect("a fully-empty config is not production-ready");
+        assert!(msg.contains("unset"), "got: {msg}");
+    }
+
+    #[test]
+    fn production_readiness_error_flags_partial() {
+        // chain_id set, contract + asset still empty: a botched pin.
+        let c = BridgeConfig {
+            chain_id: 1,
+            ..Default::default()
+        };
+        let msg = c
+            .production_readiness_error()
+            .expect("a partial config is not production-ready");
+        assert!(msg.contains("PARTIALLY"), "got: {msg}");
+    }
+
+    #[test]
+    fn assert_configured_in_release_exempts_test_builds() {
+        // cfg!(test) short-circuits the boot gate, so even a fully-empty config
+        // passes under test - the panic only fires in a production-shaped build.
+        assert!(BridgeConfig::default()
+            .assert_configured_in_release()
+            .is_ok());
     }
 
     #[test]
@@ -173,8 +513,33 @@ mod tests {
             chain_id: 0,
             bridge_contract: [1u8; 20],
             rgb_asset_id: "rgb:asset".into(),
+            gas_tx_allowed_to: None,
+            ..Default::default()
         };
         assert!(!c.is_configured());
         assert!(c.is_partially_configured());
+    }
+
+    #[cfg(feature = "evm-rpc")]
+    #[test]
+    fn loopback_url_accepts_real_loopback() {
+        assert!(is_loopback_url("http://127.0.0.1:3444"));
+        assert!(is_loopback_url("http://127.0.0.1"));
+        assert!(is_loopback_url("http://localhost:8545"));
+        assert!(is_loopback_url("http://[::1]:18545/path"));
+        assert!(is_loopback_url("http://[::1]"));
+        assert!(is_loopback_url("http://user:pass@127.0.0.1:3444"));
+    }
+
+    #[cfg(feature = "evm-rpc")]
+    #[test]
+    fn loopback_url_rejects_lookalike_authorities() {
+        // The old `starts_with` check accepted all of these.
+        assert!(!is_loopback_url("http://127.0.0.1.evil.com"));
+        assert!(!is_loopback_url("http://localhost.evil.com/rpc"));
+        assert!(!is_loopback_url("http://127.0.0.1@evil.com"));
+        assert!(!is_loopback_url("http://[::1].evil.com"));
+        assert!(!is_loopback_url("http://10.0.0.1:8545"));
+        assert!(!is_loopback_url("http://evil.com/127.0.0.1"));
     }
 }
