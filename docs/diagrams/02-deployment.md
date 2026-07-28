@@ -17,10 +17,10 @@ flowchart TB
         VPe["vsock-proxy 8002 / 8003 / 8004<br/>―<br/>evm-rpc / helios builds only.<br/>8002 → EVM JSON-RPC #60.<br/>8003 / 8004 → Helios exec / consensus #77.<br/>Allowlisted per upstream."]
 
         subgraph ENCL [AWS Nitro Enclave — TRUSTED, PCR-pinned]
-            Bin[utexo-bridge-enclave<br/>static-linked Rust<br/>―<br/>Listens on vsock CID 16, port 5000.<br/>One connection = one request.<br/>No filesystem persistence.<br/>No shell. No /dev access except /dev/nsm.<br/>Bridge config pinned from env at boot<br/>EVM_CHAIN_ID / BRIDGE_CONTRACT / RGB_ASSET_ID<br/>→ bound into attestation.]
+            Bin[utexo-bridge-enclave<br/>static-linked Rust<br/>―<br/>Listens on vsock CID 16, port 5000.<br/>One connection = one request;<br/>4 worker threads, queue of 16,<br/>10 s idle / 30 s total deadlines.<br/>No filesystem persistence.<br/>No shell. No /dev access except /dev/nsm.<br/>Env pins read at boot:<br/>EVM_CHAIN_ID / BRIDGE_CONTRACT / RGB_ASSET_ID<br/>GAS_TX_ALLOWED_TO / FUNDS_IN_CONTRACT<br/>BTC_ALLOWED_SCRIPTS / BTC_MAX_TOTAL_SATS<br/>→ SecurityPolicy resolved once, committed<br/>into attestation user_data C-01.<br/>Release bridge build refuses to boot<br/>unless the policy is valid Production.]
             Headers[(Header chain<br/>in-memory)]
             State[(EnclaveState<br/>Phase + KeyManager in SecretBox)]
-            Replay[(NonceReplayGuard<br/>≤10 000 entries)]
+            Replay[(NonceReplayGuard — cloning<br/>≤10 000 entries, 1 h TTL<br/>+ op_replay_guard — bridge ops<br/>≤100 000 entries, 24 h TTL)]
             Fwd[vsock_forwarder<br/>loopback → vsock, per-port<br/>3443/3444/18545/18550]
             RgbVal[RgbValidator<br/>rgbstd + Esplora HTTP]
             EvmVer[evm_event verifier<br/>alloy #60 / Helios #77<br/>fail-closed FundsIn check]

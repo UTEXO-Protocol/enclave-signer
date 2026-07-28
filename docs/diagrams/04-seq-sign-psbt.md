@@ -1,15 +1,23 @@
-# Sign PSBT (EVM → RGB lock) — taproot + segwit-v0, anchored authorisation
+# Sign (EVM → RGB, bridge PSBT) — taproot + segwit-v0, anchored authorisation
+
+Plain-BTC (non-bridge) PSBTs do **not** go through this path anymore: they use
+the separate `SignBtc` request (M-05 / #102), gated by the attested
+`allow_vanilla_psbt` policy, the `BTC_ALLOWED_SCRIPTS` output allowlist, and the
+`BTC_MAX_TOTAL_SATS` cap, with signing scoped to the vanilla BIP-86 account
+only. The bridge path below always requires the EVM deposit hash **and** the
+RGB consignment.
 
 ```mermaid
 sequenceDiagram
     actor Orc as Orchestrator
     participant Listener as Go Listener
     participant Parent as utexo-bridge-parent<br/>(grpc_server.rs)
-    participant Srv as enclave/server.rs<br/>handle_sign_psbt
-    participant PsbtCx as validation::psbt_crosscheck
-    participant Rgb as validation::rgb<br/>(rgbstd + Esplora + SPV)
-    participant Evt as validation::evm_event
+    participant Srv as enclave/server.rs<br/>handle_sign
+    participant Evm as networks::evm::validation
+    participant Evt as networks::evm::evm_event
     participant Rpc as EVM RPC / Helios<br/>loopback→vsock→host
+    participant Rgb as networks::rgb<br/>(rgbstd + Esplora + SPV)
+    participant Anchor as networks::rgb::psbt_validation
     participant State as EnclaveState<br/>op_replay_guard
     participant Km as KeyManager::sign_psbt
     participant Tap as signing::taproot<br/>find_taproot_sign_jobs
@@ -19,45 +27,47 @@ sequenceDiagram
     Note over Orc,Listener: Intent
     Orc->>Listener: bridge intent (FundsIn deposit observed on EVM)
     Listener->>Listener: fetch PSBT from rgb-multisig-bridge,<br/>enrich with EVM event fields + RGB consignment
-    Listener->>Parent: gRPC Sign(TRANSACTION, EnrichedPsbtPayload)
+    Listener->>Parent: gRPC Sign(TRANSACTION, enriched payload)
 
     Note over Parent,Srv: Translate
-    Parent->>Srv: SignPsbtRequest (psbt_bytes, evm_tx_hash, operation_idx,<br/>amounts, consignment, ...)
+    Parent->>Srv: Sign{source_network: EvmSource,<br/>destination_network: RgbDestination}
 
-    Note over Srv,PsbtCx: Shape + amount cross-checks (skipped in dev-mode)
-    Srv->>PsbtCx: validate_psbt_request(req)
-    PsbtCx->>PsbtCx: PSBT shape whitelist (#40):<br/>psbt_bytes non-empty,<br/>Psbt::deserialize ok,<br/>unsigned tx has ≥ 1 input
-    alt evm_tx_hash empty (vanilla, e.g. create_utxo)
-        PsbtCx-->>Srv: Ok — only psbt_bytes required, skip bridge checks
-    else bridge mode
-        PsbtCx->>PsbtCx: len(evm_tx_hash) == 32
-        Note right of PsbtCx: listener evm_event_valid /<br/>evm_event_finalized are IGNORED (#51) —<br/>validity/finality established below, not trusted
-        PsbtCx->>PsbtCx: evm_amount ≥ psbt_output_amount + evm_commission
-    end
-    PsbtCx-->>Srv: Ok / CrossCheck err
+    Note over Srv,Evm: 1 — validate_source (EVM, skipped in dev-mode)
+    Srv->>Evm: validate_source(EvmSource)
+    Evm->>Evm: len(evm_tx_hash) == 32
+    Note right of Evm: listener event_valid / event_finalized<br/>are IGNORED (#51) — validity and finality<br/>are established below, never trusted
+    Evm-->>Srv: Ok / CrossCheck err
 
-    Note over Srv,State: Bridge-mode authorisation (bridge mode only)
-    opt rgb-validation build — send-RGB consignment binding (#79)
-        Srv->>Rgb: psbt_consignment_crosscheck: validate_consignment<br/>(rgbstd + Esplora resolver + SPV anchoring)
-        Rgb-->>Srv: ValidatedConsignment / REFUSE
-        Srv->>Srv: keccak256(consignment)==consignment_hash<br/>contract_id==pinned RGB_ASSET_ID<br/>unsigned txid==last TS_TRANSFER witness txid<br/>input prevouts match, sighash ALL/DEFAULT<br/>total_output ≥ evm_amount − evm_commission
-    end
-    alt evm-rpc build — independent FundsIn verification (M-06 / #60, #77)
-        Srv->>Evt: verify_funds_in_event(PINNED contract, EVM_MIN_CONFIRMATIONS,<br/>tx_hash, operation_id, evm_amount, evm_commission)
+    Note over Srv,Rpc: 2 — independent FundsIn verification (M-06 / #60)
+    alt evm-rpc (or helios) build
+        Srv->>Evt: verify_funds_in_event(pinned FUNDS_IN_CONTRACT,<br/>tx_hash, funds_in_operation_id, amount, commission)
         Evt->>Rpc: eth_getTransactionReceipt / eth_blockNumber
-        Note right of Rpc: raw alloy path = host-relayed evidence (#60)<br/>Helios path = cryptographically verified in-TEE (#77)
+        Note right of Rpc: raw alloy path = host-relayed evidence (#60)<br/>Helios path = verified in-TEE vs pinned checkpoint —<br/>Helios sync failure fails closed, no raw fallback
         Rpc-->>Evt: receipt / head (or none)
-        Evt->>Evt: receipt exists + status success<br/>UNIQUE FundsIn/BridgeFundsIn log from PINNED contract<br/>operationId/amount/commission bind (net==gross−commission)<br/>depth ≥ EVM_MIN_CONFIRMATIONS
+        Evt->>Evt: receipt exists + status success
+        Evt->>Evt: UNIQUE deposit event from the PINNED contract<br/>(FUNDS_IN_CONTRACT, else BRIDGE_CONTRACT — #152) —<br/>BridgeFundsIn preferred, same-tx FundsIn+BridgeFundsIn<br/>pair counts as ONE deposit (#150)
+        Evt->>Evt: on-chain operationId == funds_in_operation_id (#153,<br/>NOT the hub's operation_idx) —<br/>gross == amount, commission bound,<br/>net == gross − commission — uint256 > u64 ⇒ REFUSE
+        Evt->>Evt: depth ≥ EVM_MIN_CONFIRMATIONS (default 12) —<br/>receipt above head (reorg) ⇒ REFUSE
         Evt-->>Srv: Ok / CrossCheck err (fail closed)
-    else no evm-rpc feature (bridge mode)
-        Srv->>Srv: REFUSE — deposit cannot be independently verified<br/>rebuild with --features evm-rpc (or helios)
-    end
-    opt bridge mode — soft replay guard (#84)
-        Srv->>State: op_replay_guard.check_and_record(op_key)
-        State-->>Srv: Ok / duplicate operation → REFUSE
+    else no evm-rpc feature
+        Srv->>Srv: REFUSE — deposit cannot be independently verified —<br/>rebuild with --features evm-rpc (or helios)
     end
 
-    Note over Srv,Km: Sign PSBT inputs
+    Note over Srv,State: 3 — soft replay guard (#84)
+    Srv->>State: op_replay_guard.check_and_record(<br/>hash(chain_id, bridge_contract, evm_tx_hash,<br/>operation_idx, asset_id)) — 24 h TTL
+    State-->>Srv: Ok / duplicate operation → REFUSE
+
+    Note over Srv,Anchor: 4 — validate_destination_anchor (rgb-validation, consignment MANDATORY)
+    Srv->>Rgb: validate_consignment (cheap hash gate first, then<br/>rgbstd + Esplora resolver + typesystem pin)
+    Rgb-->>Srv: ValidatedConsignment / REFUSE
+    Srv->>Anchor: keccak256(consignment) == consignment_hash (integrity)
+    Srv->>Anchor: asset pin: declared asset_id == validated contract_id<br/>== pinned RGB_ASSET_ID (unconditional on this path)
+    Srv->>Anchor: PSBT unsigned txid == last witness txid —<br/>input prevouts == witness prevouts —<br/>sighash ALL / taproot DEFAULT only
+    Srv->>Anchor: last transition TS_TRANSFER or TS_INFLATION (mint-RGB, #146) —<br/>asset_output_amount (OS_ASSET only, #54)<br/>≥ amount − commission
+    Srv->>Anchor: fee sanity (#147): implied fee rate ≤ 3x the<br/>enclave-fetched Esplora estimate, fail-closed<br/>(compile-time floor only on non-mainnet, #149)
+    Anchor-->>Srv: Ok / CrossCheck err
+
+    Note over Srv,Km: 5 — Sign PSBT inputs
     Srv->>Km: sign_psbt(psbt_bytes)
     Km->>Km: Psbt::deserialize(...)
     Note over Km: Two passes per input:<br/>1. Taproot script-path (Schnorr)<br/>2. SegWit v0 P2WSH (ECDSA)<br/>Skip if already signed.
@@ -112,29 +122,34 @@ sequenceDiagram
     Listener-->>Orc: signed PSBT (assembles + broadcasts)
 ```
 
-## FundsIn verification predicate (`validation::evm_event`, #60 / #77)
+## FundsIn verification predicate (`networks::evm::evm_event`, M-06 / #60)
 
-Bridge-mode `signPsbt` releases RGB against an EVM deposit. The listener-supplied
-`evm_event_valid` / `evm_event_finalized` booleans are **no longer trusted** (audit
-M-06 / #51); the enclave establishes validity + finality itself, fail-closed:
+Bridge PSBT signing releases RGB against an EVM deposit. The listener-supplied
+`event_valid` / `event_finalized` booleans are **not trusted** (audit M-06 /
+#51); the enclave establishes validity + finality itself, fail-closed:
 
 1. **Receipt exists** for `evm_tx_hash` — `None` (not mined / host withheld) → refuse.
-2. **Receipt status == success** — a reverted tx emits no real `FundsIn`.
-3. **Unique** `FundsIn` / `BridgeFundsIn` log from the **pinned** `BRIDGE_CONTRACT`
-   (address from config, never the request); multiple matches are ambiguous → refuse.
-4. **Field binding** — decoded `operationId` (== `operation_idx`), gross `amount`
-   (== `evm_amount`), `tokenCommission` (== `evm_commission`), and the internal
-   `net == gross − commission`. A `uint256` exceeding `u64` is rejected, not truncated.
+2. **Receipt status == success** — a reverted tx emits no real deposit event.
+3. **Unique** deposit event from the **pinned** `FUNDS_IN_CONTRACT` (falls back
+   to `BRIDGE_CONTRACT`; #152 — address from config, never the request).
+   `BridgeFundsIn` is preferred; a same-tx `FundsIn` + `BridgeFundsIn` pair is
+   one deposit (#150). Two real deposits in one tx are ambiguous → refuse.
+4. **Field binding** — on-chain `operationId` == `funds_in_operation_id`
+   (the bridge transfer id, **not** the hub's `operation_idx`; #153), gross
+   `amount`, `tokenCommission`, and `net == gross − commission`. A `uint256`
+   exceeding `u64` is rejected, not truncated.
 5. **Confirmation depth** — `head − receipt.block` ≥ `EVM_MIN_CONFIRMATIONS`
    (default 12); a receipt block above head (reorg) → refuse.
 
 **Provider selection (build/runtime):**
-- No `evm-rpc` feature → bridge-mode `signPsbt` is **refused** (deposit unverifiable).
+- No `evm-rpc` feature → bridge PSBT signing is **refused** (deposit unverifiable).
 - `evm-rpc` → raw alloy JSON-RPC over the loopback vsock forwarder; responses are
   **host-relayed evidence**, verified fail-closed but not trustless.
-- `helios` + `HELIOS_EXECUTION_RPC` set → the a16z Helios light client verifies the
-  execution/consensus RPCs against a pinned checkpoint **inside the TEE** (trustless);
-  `HELIOS_NETWORK` must be consistent with the pinned `EVM_CHAIN_ID`.
+- `helios` + `HELIOS_EXECUTION_RPC` set → the Helios light client verifies the
+  execution/consensus RPCs against an operator-pinned checkpoint **inside the
+  TEE** (trustless); `HELIOS_NETWORK` must be consistent with the pinned
+  `EVM_CHAIN_ID`. A Helios init/sync failure fails closed — it never downgrades
+  to the raw path. The selected source is part of the attested security policy
+  (C-01).
 
 See [`10-signing-gate.md`](10-signing-gate.md) for the `fundsOut` (RGB → EVM) direction.
-```

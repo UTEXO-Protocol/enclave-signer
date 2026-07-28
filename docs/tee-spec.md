@@ -460,18 +460,18 @@ mint-PSBT binding (#146) · swap op-id preservation (#168) · audit regression +
 
 Mermaid in Markdown -- rendered inline on GitHub.
 
-| Diagram                   | File                                    | Freshness                                           |
-|---------------------------|-----------------------------------------|-----------------------------------------------------|
-| Component structure       | `diagrams/01-components.md`             | stale -- predates the `networks/` layout and Sec 4  |
-| Deployment / trust zones  | `diagrams/02-deployment.md`             | mostly current                                      |
-| Sign EVM (unlock)         | `diagrams/03-seq-sign-evm.md`           | stale -- predates unified `Sign` + canonical ABI    |
-| Sign PSBT                 | `diagrams/04-seq-sign-psbt.md`          | stale -- predates `SignBtc` split + `FundsIn` pins  |
-| Attested pubkey           | `diagrams/05-seq-attested-pubkey.md`    | mostly current (commitment now includes the policy) |
-| Cloning handshake         | `diagrams/06-seq-cloning.md`            | mostly current                                      |
-| Initialize keys           | `diagrams/07-seq-initialize-keys.md`    | mostly current                                      |
-| SPV submit headers        | `diagrams/08-seq-spv-submit-headers.md` | mostly current (missing submission caps)            |
-| Phase state machine       | `diagrams/09-state-phase.md`            | current                                             |
-| Signing gate / predicates | `diagrams/10-signing-gate.md`           | stale -- see Sec 9 for the authoritative gate       |
+| Diagram                   | File                                    |
+|---------------------------|-----------------------------------------|
+| Component structure       | `diagrams/01-components.md`             |
+| Deployment / trust zones  | `diagrams/02-deployment.md`             |
+| Sign fundsOut (unlock)    | `diagrams/03-seq-sign-evm.md`           |
+| Sign bridge PSBT          | `diagrams/04-seq-sign-psbt.md`          |
+| Attested pubkey           | `diagrams/05-seq-attested-pubkey.md`    |
+| Cloning handshake         | `diagrams/06-seq-cloning.md`            |
+| Initialize keys           | `diagrams/07-seq-initialize-keys.md`    |
+| SPV submit headers        | `diagrams/08-seq-spv-submit-headers.md` |
+| Phase state machine       | `diagrams/09-state-phase.md`            |
+| Signing gate / predicates | `diagrams/10-signing-gate.md`           |
 
-A diagram refresh is tracked separately; where a diagram and this spec
-disagree, this spec is authoritative.
+All diagrams refreshed 2026-07-28 to match this spec; where a diagram and this
+spec disagree, this spec is authoritative.

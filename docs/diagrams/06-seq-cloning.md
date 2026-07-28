@@ -30,11 +30,12 @@ sequenceDiagram
     Don->>DN: read_own_pcrs()
     DN-->>Don: ExpectedPcrs{pcr0, pcr1, pcr2}
     Don->>Don: verify_peer_attestation(requester_attestation,<br/>expected=own_PCRs, nonce=None)
-    Note right of Don: Cert-chain → AWS Nitro root,<br/>COSE_Sign1 signature, PCR equality.<br/>No expected_nonce — freshness via the<br/>replay guard immediately after.
-    Don->>Don: replay_guard.check_and_record(verified.nonce)
+    Note right of Don: Cert-chain → AWS Nitro root,<br/>COSE_Sign1 signature, PCR equality.<br/>No expected_nonce — freshness via the<br/>replay guard after auth.
     Don->>Don: verified.public_key == encryption_pubkey (pubkey binding)
     Don->>Don: verified.user_data == cloning_digest (digest binding)
     Don->>Don: with_donor_cloning_secret:<br/>HMAC(secret, encryption_pubkey) == cloning_digest
+    Don->>Don: replay_guard.check_and_record(verified.nonce)
+    Note right of Don: Nonce recorded only AFTER all auth checks<br/>pass (W-13 / #129) — a rejected handshake<br/>never consumes guard capacity. Guard is<br/>TTL-bounded: 1 h, oldest-first eviction (#80).
     Don->>Don: with_seed: (ct, donor_pubkey) :=<br/>encrypt_seed_for_peer(encryption_pubkey, seed)
     Note right of Don: encrypt_seed_for_peer:<br/>our_eph := EphemeralSecret::random<br/>shared := our_eph * encryption_pubkey<br/>reject_non_contributory(shared) — small-order guard<br/>key := HKDF-SHA256(shared, salt="utexo-cloning-v1",<br/>  info="seed-encryption" ‖ donor_pub ‖ requester_pub)<br/>ct := ChaCha20Poly1305(key, nonce=[0,12]).encrypt(seed)
     Don->>Don: donor_nonce := getrandom_32()
@@ -47,10 +48,10 @@ sequenceDiagram
     Req->>RN: read_own_pcrs()
     RN-->>Req: ExpectedPcrs
     Req->>Req: verify_peer_attestation(donor_attestation,<br/>expected=own_PCRs, nonce=None)
-    Req->>Req: replay_guard.check_and_record(verified.nonce)
     Req->>Req: verified.public_key == donor_pubkey
     Req->>Req: complete_cloning {<br/>  seed := session.decrypt_seed_from_peer(donor_pubkey, ct)<br/>  km := KeyManager::from_seed(seed, network)<br/>  assert km.evm_address() == session.cluster_public_key<br/>  return km<br/>}
     Req->>Req: state := Phase::Active(km)
+    Req->>Req: replay_guard.check_and_record(verified.nonce)<br/>(after auth + commit — W-13 / #129)
     Req-->>Parent: SetCloneResponse{} (empty)
     Parent-->>Op: Initialize OK (probes GetPublicKey for confirmation)
 
