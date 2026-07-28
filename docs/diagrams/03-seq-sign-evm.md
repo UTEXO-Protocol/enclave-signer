@@ -17,7 +17,7 @@ sequenceDiagram
     Note over Orc,Listener: Intent
     Orc->>Listener: signing intent (op, calldata)
     Listener->>Listener: enrich (chain_id, proxy_contract, consignment, merkle_proofs)
-    Listener->>Parent: gRPC EnclaveService.Sign(TRANSACTION, enriched payload)
+    Listener->>Parent: gRPC ParentService.Sign(TRANSACTION, enriched payload)
 
     Note over Parent,Srv: Translate gRPC → enclave wire
     Parent->>Srv: Sign{source_network: RgbSource,<br/>destination_network: EvmDestination}<br/>(TCP/vsock, length-prefixed proto)

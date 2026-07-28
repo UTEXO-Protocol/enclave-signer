@@ -31,7 +31,7 @@ flowchart TB
     Esp{{Esplora API}}
     EvmRpc{{EVM JSON-RPC / Helios<br/>exec + consensus upstreams}}
 
-    V -->|"gRPC /50051<br/>AttestedPublicKey(nonce)"| Parent
+    V -->|"gRPC /5000 (GRPC_PORT)<br/>AttestedPublicKey(nonce)"| Parent
     L -->|"gRPC /5000<br/>Sign / PublicKey / SubmitHeaders ..."| Parent
     Cli -->|"direct enclave RPC (dev/ops only)<br/>TCP 127.0.0.1:5000 or vsock CID 16:5000"| ENCL
 

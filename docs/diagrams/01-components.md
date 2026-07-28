@@ -73,7 +73,7 @@ flowchart TB
     VPe[(host vsock-proxy<br/>8002 / 8003 / 8004)]
 
     %% Wires
-    L -->|"gRPC EnclaveService<br/>Sign / SignBtc / SignRawDigest / SignRawMessage /<br/>PublicKey / Initialize / Clone /<br/>SubmitHeaders / GetLastSavedBlock /<br/>AttestedPublicKey"| PMain
+    L -->|"gRPC ParentService<br/>Sign (data_type TRANSACTION /<br/>EVM_GAS_TX / BTC_UTXO) /<br/>PublicKey / Initialize / Clone /<br/>SubmitHeaders / GetLastSavedBlock /<br/>AttestedPublicKey"| PMain
     Op --> PCli
     V --> AVCli
     PCli --> PClient

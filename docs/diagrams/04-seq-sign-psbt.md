@@ -38,7 +38,20 @@ sequenceDiagram
     Note right of Evm: listener event_valid / event_finalized<br/>are IGNORED (#51) — validity and finality<br/>are established below, never trusted
     Evm-->>Srv: Ok / CrossCheck err
 
-    Note over Srv,Rpc: 2 — independent FundsIn verification (M-06 / #60)
+    Note over Srv,Anchor: 2 — validate_destination_anchor (rgb-validation, consignment MANDATORY)
+    Srv->>Rgb: validate_consignment (cheap hash gate first, then<br/>rgbstd + Esplora resolver + typesystem pin)
+    Rgb-->>Srv: ValidatedConsignment / REFUSE
+    Srv->>Anchor: keccak256(consignment) == consignment_hash (integrity)
+    Srv->>Anchor: asset pin: declared asset_id == validated contract_id<br/>== pinned RGB_ASSET_ID (unconditional on this path)
+    Srv->>Anchor: PSBT unsigned txid == last witness txid —<br/>input prevouts == witness prevouts —<br/>sighash ALL / taproot DEFAULT only
+    Srv->>Anchor: last transition TS_TRANSFER or TS_INFLATION (mint-RGB, #146) —<br/>asset_output_amount (OS_ASSET only, #54)<br/>≥ amount − commission
+    Srv->>Anchor: fee sanity (#147): implied fee rate ≤ 3x the<br/>enclave-fetched Esplora estimate, fail-closed<br/>(compile-time floor only on non-mainnet, #149)
+    Anchor-->>Srv: Ok / CrossCheck err
+
+    Note over Srv: 3 — validate_route_proofs
+    Srv->>Srv: source amount ≥ psbt_output_amount + commission
+
+    Note over Srv,Rpc: 4 — independent FundsIn verification (M-06 / #60)
     alt evm-rpc (or helios) build
         Srv->>Evt: verify_funds_in_event(pinned FUNDS_IN_CONTRACT,<br/>tx_hash, funds_in_operation_id, amount, commission)
         Evt->>Rpc: eth_getTransactionReceipt / eth_blockNumber
@@ -53,21 +66,11 @@ sequenceDiagram
         Srv->>Srv: REFUSE — deposit cannot be independently verified —<br/>rebuild with --features evm-rpc (or helios)
     end
 
-    Note over Srv,State: 3 — soft replay guard (#84)
+    Note over Srv,State: 5 — soft replay guard (#84)
     Srv->>State: op_replay_guard.check_and_record(<br/>hash(chain_id, bridge_contract, evm_tx_hash,<br/>operation_idx, asset_id)) — 24 h TTL
     State-->>Srv: Ok / duplicate operation → REFUSE
 
-    Note over Srv,Anchor: 4 — validate_destination_anchor (rgb-validation, consignment MANDATORY)
-    Srv->>Rgb: validate_consignment (cheap hash gate first, then<br/>rgbstd + Esplora resolver + typesystem pin)
-    Rgb-->>Srv: ValidatedConsignment / REFUSE
-    Srv->>Anchor: keccak256(consignment) == consignment_hash (integrity)
-    Srv->>Anchor: asset pin: declared asset_id == validated contract_id<br/>== pinned RGB_ASSET_ID (unconditional on this path)
-    Srv->>Anchor: PSBT unsigned txid == last witness txid —<br/>input prevouts == witness prevouts —<br/>sighash ALL / taproot DEFAULT only
-    Srv->>Anchor: last transition TS_TRANSFER or TS_INFLATION (mint-RGB, #146) —<br/>asset_output_amount (OS_ASSET only, #54)<br/>≥ amount − commission
-    Srv->>Anchor: fee sanity (#147): implied fee rate ≤ 3x the<br/>enclave-fetched Esplora estimate, fail-closed<br/>(compile-time floor only on non-mainnet, #149)
-    Anchor-->>Srv: Ok / CrossCheck err
-
-    Note over Srv,Km: 5 — Sign PSBT inputs
+    Note over Srv,Km: 6 — Sign PSBT inputs
     Srv->>Km: sign_psbt(psbt_bytes)
     Km->>Km: Psbt::deserialize(...)
     Note over Km: Two passes per input:<br/>1. Taproot script-path (Schnorr)<br/>2. SegWit v0 P2WSH (ECDSA)<br/>Skip if already signed.
@@ -135,9 +138,12 @@ Bridge PSBT signing releases RGB against an EVM deposit. The listener-supplied
    `BridgeFundsIn` is preferred; a same-tx `FundsIn` + `BridgeFundsIn` pair is
    one deposit (#150). Two real deposits in one tx are ambiguous → refuse.
 4. **Field binding** — on-chain `operationId` == `funds_in_operation_id`
-   (the bridge transfer id, **not** the hub's `operation_idx`; #153), gross
-   `amount`, `tokenCommission`, and `net == gross − commission`. A `uint256`
-   exceeding `u64` is rejected, not truncated.
+   (the bridge transfer id, **not** the hub's `operation_idx`; #153). A
+   `BridgeFundsIn` event additionally chain-binds gross `amount` and
+   `tokenCommission` (`net == gross − commission`); the plain `FundsIn`
+   fallback binds only `operationId` and the net amount, leaving the
+   commission split listener-supplied. A `uint256` exceeding `u64` is
+   rejected, not truncated.
 5. **Confirmation depth** — `head − receipt.block` ≥ `EVM_MIN_CONFIRMATIONS`
    (default 12); a receipt block above head (reorg) → refuse.
 
