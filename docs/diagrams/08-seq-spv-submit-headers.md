@@ -25,8 +25,11 @@ sequenceDiagram
         Listener->>Parent: gRPC SubmitHeaders{start_height=N+1, headers[]}
         Parent->>Srv: SubmitHeadersRequest
 
+        Srv->>Srv: rate limiter: ≤ 100 000 headers per 60 s window<br/>(cumulative, counted before validation)
         Srv->>Chain: submit_headers(start_height, &headers)
+        Chain->>Chain: batch ≤ MAX_HEADERS_PER_SUBMIT (10 000)
         Chain->>Chain: check bounds:<br/>start_height > checkpoint AND<br/>start_height ≤ tip+1
+        Chain->>Chain: projected retained count ≤<br/>MAX_STORED_HEADERS (1 000 000) — REJECT, never prune
         Chain->>Chain: reorg_depth := (tip+1) − start_height
         Chain->>Chain: require reorg_depth ≤ MAX_REORG_DEPTH (100)
 
@@ -56,5 +59,5 @@ sequenceDiagram
         Listener->>Listener: N := N'
     end
 
-    Note over Chain: Boot-time invariants:<br/>— Checkpoint::assert_real_in_release() panics<br/>  on placeholder checkpoint in release builds.<br/>— header_at(checkpoint.height) returns None<br/>  (we never store the checkpoint header itself,<br/>  only its hash/bits/time metadata).
+    Note over Chain: Boot-time invariants:<br/>— Checkpoint::assert_real_in_release() panics<br/>  on placeholder checkpoint in release builds.<br/>— assert_retarget_aligned() panics (all profiles)<br/>  on a non-retarget-aligned PoW checkpoint (W-14).<br/>— header_at(checkpoint.height) returns None<br/>  (we never store the checkpoint header itself,<br/>  only its hash/bits/time metadata).<br/>Retention: ALL headers from the checkpoint are kept<br/>(#130 — no sliding window; deep RGB anchors stay verifiable).
 ```

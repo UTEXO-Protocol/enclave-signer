@@ -20,7 +20,7 @@ stateDiagram-v2
 
     Cloning --> Active : complete_cloning() (SetClone — decrypt + install peer seed, assert evm_address == cluster_public_key)
 
-    Active --> Active : SignEvm / SignPsbt / GetAttestedPublicKey (no state change)
+    Active --> Active : Sign / SignBtc / SignRawMessage / SignRawDigest / GetAttestedPublicKey (no state change)
     Active --> Active : GetClone (donor — exports sealed seed, stays Active)
 
     note right of Active
