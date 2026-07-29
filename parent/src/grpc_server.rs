@@ -156,19 +156,28 @@ impl ParentAdapterService {
         source: SourceProof,
     ) -> Result<enclave_proto::sign_request::SourceNetwork, Status> {
         match source.chain {
-            Some(source_proof::Chain::Evm(evm)) => Ok(
-                enclave_proto::sign_request::SourceNetwork::EvmSource(enclave_proto::EvmSource {
-                    tx_hash: evm.tx_hash,
-                    event_valid: true,
-                    event_finalized: source.finalized,
-                    token: Self::decode_hex_field("SourceProof.token", source.token)?,
-                    recipient: Self::decode_hex_or_raw_field(source.recipient),
-                    commission: source.commission,
-                    // On-chain FundsIn operationId (bridge transfer id); the
-                    // enclave #60 check binds to this, not to operation_idx.
-                    funds_in_operation_id: evm.funds_in_operation_id,
-                }),
-            ),
+            Some(source_proof::Chain::Evm(evm)) => {
+                // Diagnosability only — here we still know which node sent it.
+                // The enclave's own check is the authority.
+                if evm.funds_in_operation_id.len() != 32 {
+                    return Err(Status::invalid_argument(format!(
+                        "EvmSource.funds_in_operation_id must be 32 bytes (the BridgeFundsIn \
+                         operationId from indexed topic1), got {}",
+                        evm.funds_in_operation_id.len()
+                    )));
+                }
+                Ok(enclave_proto::sign_request::SourceNetwork::EvmSource(
+                    enclave_proto::EvmSource {
+                        tx_hash: evm.tx_hash,
+                        event_valid: true,
+                        event_finalized: source.finalized,
+                        token: Self::decode_hex_field("SourceProof.token", source.token)?,
+                        recipient: Self::decode_hex_or_raw_field(source.recipient),
+                        commission: source.commission,
+                        funds_in_operation_id: evm.funds_in_operation_id,
+                    },
+                ))
+            }
             Some(source_proof::Chain::Rgb(rgb)) => Ok(
                 enclave_proto::sign_request::SourceNetwork::RgbSource(enclave_proto::RgbSource {
                     consignment_valid: true,

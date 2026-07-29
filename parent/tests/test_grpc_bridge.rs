@@ -300,7 +300,7 @@ fn evm_source(amount: u64, commission: u64) -> SourceProof {
         finalized: true,
         chain: Some(source_proof::Chain::Evm(EvmSource {
             tx_hash: vec![0xAA; 32],
-            funds_in_operation_id: 0,
+            funds_in_operation_id: vec![0x33; 32],
         })),
     }
 }

@@ -85,11 +85,9 @@ enum Command {
         /// EVM commission
         #[arg(long, default_value = "0")]
         evm_commission: u64,
-        /// On-chain BridgeFundsIn.operationId of the source deposit (bridge
-        /// transfer id). The enclave #60 check binds the on-chain operationId to
-        /// this value.
-        #[arg(long, default_value = "0")]
-        evm_funds_in_operation_id: u64,
+        /// On-chain BridgeFundsIn.operationId, 32-byte hex. Required.
+        #[arg(long, default_value = "")]
+        evm_funds_in_operation_id: String,
         /// PSBT total non-change output amount
         #[arg(long, default_value = "0")]
         psbt_output_amount: u64,
@@ -375,9 +373,27 @@ fn main() {
                     }
                 }
             };
+            let funds_in_operation_id = match hex::decode(
+                evm_funds_in_operation_id
+                    .strip_prefix("0x")
+                    .unwrap_or(&evm_funds_in_operation_id),
+            ) {
+                Ok(d) if d.len() == 32 => d,
+                Ok(d) => {
+                    eprintln!(
+                        "--evm-funds-in-operation-id must be 32 bytes (BridgeFundsIn operationId), got {}",
+                        d.len()
+                    );
+                    process::exit(1);
+                }
+                Err(e) => {
+                    eprintln!("Invalid hex evm_funds_in_operation_id: {}", e);
+                    process::exit(1);
+                }
+            };
             let req = SignPsbtRequest {
                 evm_tx_hash: tx_hash,
-                evm_funds_in_operation_id,
+                evm_funds_in_operation_id: funds_in_operation_id,
                 operation_idx: 0,
                 evm_event_valid,
                 evm_event_finalized,

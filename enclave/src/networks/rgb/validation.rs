@@ -256,12 +256,18 @@ pub struct ValidatedConsignment {
     pub all_op_ids: Vec<String>,
     /// The `op_id`s of every IFA `TS_INFLATION` (mint) transition in the
     /// consignment, in witness order — the subset of [`Self::all_op_ids`]
-    /// that corresponds to EVM lock records (`fundsIn`). The `fundsOut`
-    /// calldata's `fundsInIds[]` (inside `settlementData`) must each
-    /// correspond to one of these (under the agreed OpId→id transform), so
-    /// a release can only consume locks this consignment's RGB history
-    /// actually inflated (spec §6 / §7). See
-    /// `evm::validation::apply_op_id_binding`.
+    /// that corresponds to EVM lock records (`fundsIn`).
+    ///
+    /// NOT currently consumed by the EVM side. These used to be transformed
+    /// into the `fundsOut` calldata's `fundsInIds[]` so a release could only
+    /// consume locks this consignment's RGB history actually inflated (spec
+    /// §6 / §7). On the route-agnostic Bridge that field became
+    /// `abi.encode(bytes32[] operationIds, uint256[] netAmounts)` keyed by
+    /// BRIDGE-derived deposit ids, which no OpId transform can produce — the
+    /// citation now comes from the deposit receipts and is enforced on-chain by
+    /// `RgbSettlementModule.beforeFundsOut`. Kept because they remain the RGB
+    /// half of that correspondence, and an in-enclave check of the cited
+    /// deposits would start from them.
     pub mint_op_ids: Vec<String>,
     /// The most recent state transition — the change of state the EVM
     /// action this consignment authorises commits to. Follow-up PRs
@@ -295,12 +301,16 @@ pub struct ValidatedConsignment {
     /// (`KnownTransition.opid` of the same last bundle as
     /// `last_transfer_witness_txid`), NOT from the flat `rgb_consignment`
     /// parser. This is the value `validate()` authenticated and anchored on
-    /// chain, so deriving the EVM `fundsOut` `burnId` from it
-    /// (`evm::validation::apply_op_id_binding`, audit M-02 / #93) binds the
-    /// contract's single-use `consumedBurnIds` guard to validated consignment
-    /// data, not a parallel/unauthenticated parse. `None` only for a
-    /// consignment with no bundles (rgbstd rejects those) or a non-Transfer
-    /// last transition (the burnId binding only applies to the transfer flow).
+    /// chain.
+    ///
+    /// It used to derive the EVM `fundsOut` `burnId` (audit M-02 / #93), binding
+    /// the contract's single-use `consumedBurnIds` guard to validated
+    /// consignment data rather than a parallel/unauthenticated parse. The new
+    /// Bridge derives `burnId` itself, as a domain-separated hash over the whole
+    /// release intent, and reverts `InvalidBurnId` on anything else — so the
+    /// guard is now bound on-chain and this value no longer feeds it. `None`
+    /// only for a consignment with no bundles (rgbstd rejects those) or a
+    /// non-Transfer last transition.
     pub last_transfer_op_id: Option<[u8; 32]>,
     /// Witness txids that rgbstd `validate()` classified as **not mined**
     /// (`WitnessOrd::Tentative` / `Ignored`), in **display (big-endian) byte

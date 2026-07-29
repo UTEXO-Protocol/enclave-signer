@@ -8,17 +8,21 @@ use utexo_bridge_enclave::proto::enclave_response::Response;
 use utexo_bridge_enclave::proto::sign_request::{DestinationNetwork, SourceNetwork};
 use utexo_bridge_enclave::proto::*;
 
+// Mirrors `IBridge.fundsOut(FundsOutParams)`: one dynamic tuple, not the old
+// flat 8-argument encoding, which the decoder rejects outright.
 sol! {
-    function fundsOut(
-        address recipient,
-        uint256 amount,
-        uint256 burnId,
-        uint256 sourceChainId,
-        uint256 destinationChainId,
-        string sourceAddress,
-        bytes proof,
-        bytes settlementData
-    );
+    struct FundsOutParams {
+        address recipient;
+        uint256 amount;
+        uint256 burnId;
+        uint256 sourceChainId;
+        uint256 destinationChainId;
+        string sourceAddress;
+        bytes proof;
+        bytes settlementData;
+    }
+
+    function fundsOut(FundsOutParams params);
 }
 
 /// Pinned `BridgeConfig` matching the defaults of `valid_sign_evm_request`
@@ -49,17 +53,19 @@ fn btc_pinned_config(allowed_script: Vec<u8>, max_total_sats: u64) -> BridgeConf
     }
 }
 
-/// Build ABI-valid `fundsOut` calldata in the deployed 8-arg shape.
+/// Build ABI-valid `fundsOut(FundsOutParams)` calldata in the deployed shape.
 fn mock_funds_out_calldata(recipient: [u8; 20], amount: u64) -> Vec<u8> {
     fundsOutCall {
-        recipient: Address::from(recipient),
-        amount: U256::from(amount),
-        burnId: U256::ZERO,
-        sourceChainId: U256::ZERO,
-        destinationChainId: U256::from(1u64),
-        sourceAddress: String::new(),
-        proof: Bytes::new(),
-        settlementData: Bytes::new(),
+        params: FundsOutParams {
+            recipient: Address::from(recipient),
+            amount: U256::from(amount),
+            burnId: U256::ZERO,
+            sourceChainId: U256::ZERO,
+            destinationChainId: U256::from(1u64),
+            sourceAddress: String::new(),
+            proof: Bytes::new(),
+            settlementData: Bytes::new(),
+        },
     }
     .abi_encode()
 }
@@ -288,9 +294,8 @@ fn sign_psbt_request(
             token: vec![],
             recipient: vec![],
             commission: evm_commission,
-            // On-chain FundsIn operationId the enclave #60 check binds to (these
-            // non-rgb-validation builds don't run that check; 0 is a placeholder).
-            funds_in_operation_id: 0,
+            // Unchecked in non-`evm-rpc` builds, but must still be 32 bytes.
+            funds_in_operation_id: vec![0x33; 32],
         })),
         destination_network: Some(DestinationNetwork::RgbDestination(RgbDestination {
             operation_idx: 0,

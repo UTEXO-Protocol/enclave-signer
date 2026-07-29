@@ -3,7 +3,7 @@ use std::io::{Read, Write};
 use crate::config::BridgeConfig;
 use crate::error::{EnclaveError, Result};
 use crate::framing;
-use crate::networks::evm::signing::{build_evm_domain, sign_request_digest};
+use crate::networks::evm::signing::{build_evm_domain, funds_out_digest};
 use crate::networks::{
     validate_destination, validate_route_proofs, validate_source, ValidationContext,
 };
@@ -284,13 +284,9 @@ fn handle_sign(ctx: &ServerContext, req: SignRequest) -> Result<EnclaveResponse>
                     .into(),
             )
         })?;
-        // Bind the #60 FundsIn check to the on-chain BridgeFundsIn.operationId
-        // carried in the EVM source (the bridge transfer id), NOT to
-        // destination.operation_idx. The latter is the RGB hub's own operation
-        // index — a different id-space — and only coincides with the on-chain
-        // operationId by accident; comparing against it produced spurious
-        // "operationId mismatch: on-chain N != request M" refusals. operation_idx
-        // remains the replay-guard key below.
+        // Binds to the source's BridgeFundsIn.operationId, NOT to
+        // destination.operation_idx — the RGB hub's index is a different id-space
+        // and matching against it produced spurious mismatch refusals.
         crate::networks::evm::evm_event::verify_funds_in_event(
             &**client,
             // FundsIn is emitted by the bridge entry contract, which may differ
@@ -298,7 +294,7 @@ fn handle_sign(ctx: &ServerContext, req: SignRequest) -> Result<EnclaveResponse>
             &ctx.bridge_config.funds_in_contract,
             ctx.evm_rpc_config.min_confirmations,
             &tx_hash,
-            source.funds_in_operation_id,
+            &source.funds_in_operation_id,
             req.amount,
             source.commission,
         )?;
@@ -656,7 +652,7 @@ fn handle_sign_evm(ctx: &ServerContext, req: EvmDestination) -> Result<EnclaveRe
     let domain = build_evm_domain(&req)?;
 
     let domain_sep = domain.separator_hash();
-    let digest = sign_request_digest(&domain, &req.call_data, req.nonce, req.deadline)?;
+    let digest = funds_out_digest(&domain, &req.call_data, req.nonce, req.deadline)?;
 
     tracing::info!(
         domain_name = %domain.name,
