@@ -9,8 +9,12 @@ use crate::networks::evm::{ADDRESS_LEN, HASH_LEN as TX_HASH_LEN};
 use crate::networks::{RouteProof, ValidationContext};
 use crate::proto::{EvmDestination, EvmSource};
 
-/// `keccak256("fundsOut(address,uint256,uint256,uint256,uint256,string,bytes,bytes)")[0..4]`.
-pub const FUNDS_OUT_SELECTOR_POOLS: [u8; 4] = [0xcc, 0xdd, 0xb7, 0x68];
+/// `keccak256("fundsOut((address,uint256,uint256,uint256,uint256,string,bytes,bytes))")[0..4]`.
+///
+/// Bundling the release fields into `FundsOutParams` moved the selector
+/// `0xccddb768` -> `0xdc771390`. A flat-encoded body read as a tuple lands one
+/// word off on every field, so the mismatch fails closed at the whitelist.
+pub const FUNDS_OUT_SELECTOR_POOLS: [u8; 4] = [0xdc, 0x77, 0x13, 0x90];
 
 /// Upper bound on `call_data` length. A legitimate `fundsOut` call is a few
 /// hundred bytes; anything past 64 KiB is either malformed or an attempt to
@@ -22,16 +26,24 @@ pub const MAX_FUNDS_OUT_CALL_DATA_LEN: usize = 64 * 1024;
 const ALLOWED_SELECTORS: &[[u8; 4]] = &[FUNDS_OUT_SELECTOR_POOLS];
 
 sol! {
-    function fundsOut(
-        address recipient,
-        uint256 amount,
-        uint256 burnId,
-        uint256 sourceChainId,
-        uint256 destinationChainId,
-        string sourceAddress,
-        bytes proof,
-        bytes settlementData
-    );
+    /// Mirrors `IBridge.FundsOutParams` (IBridge.sol:193-202). Field order fixes
+    /// both the ABI decode here and the `TeeFundsOut` struct hash in
+    /// [`super::signing::funds_out_digest`].
+    struct FundsOutParams {
+        address recipient;
+        uint256 amount;
+        uint256 burnId;
+        uint256 sourceChainId;
+        uint256 destinationChainId;
+        string sourceAddress;
+        bytes proof;
+        bytes settlementData;
+    }
+
+    /// Never reaches the chain — the proxy takes the struct directly. This is
+    /// only the enclave's wire format, which is why the protos still carry an
+    /// opaque `call_data` blob.
+    function fundsOut(FundsOutParams params);
 }
 
 fn dev_mode_bypass() -> bool {
@@ -176,10 +188,34 @@ fn parse_proof_from_calldata(call_data: &[u8]) -> Result<RouteProof> {
     // dynamic tails and trailing junk all decode fine (`abi_decode_validate`
     // only validates the decoded *values*). Re-encoding the decoded call and
     // requiring byte equality pins the input to the one canonical layout.
-    // This matters because the calldata bytes are later partially rewritten
-    // by fixed offset (`apply_op_id_binding`), so every byte must sit exactly
-    // where the canonical layout puts it — and what the enclave signs must
-    // decode on-chain to exactly what it validated.
+    //
+    // The byte-level reason is gone (#168 removed the offset rewrite, and the
+    // digest now commits to decoded fields). Kept anyway: it keeps the wire
+    // format unambiguous and stops unread trailing data riding along.
+    let amount: u64 = decode_funds_out_params(call_data)?
+        .amount
+        .try_into()
+        .map_err(|_| EnclaveError::CrossCheck("fundsOut amount exceeds u64 range".into()))?;
+
+    Ok(RouteProof {
+        amount,
+        // Still `None`. `settlementData` cites bridge-derived deposit ids, not
+        // an RGB OpId, and `burnId` is not one either — so cross-network binding
+        // cannot be recovered from the calldata alone.
+        operation_id: None,
+    })
+}
+
+/// Decode a `fundsOut` calldata blob into the release fields, enforcing the
+/// canonical encoding. Shared with the signing path, which needs the fields to
+/// rebuild the `TeeFundsOut` struct hash.
+///
+/// The canonicity check lives HERE, not only in the validator: a legacy flat
+/// body with a zero `recipient` decodes cleanly as a tuple (the zero reads as a
+/// head pointer aliasing the tuple onto the same words), and only the re-encode
+/// catches it. Deferring to `validate_destination` would make this
+/// caller-ordering — audit I-03 / Oxorio I-10.
+pub fn decode_funds_out_params(call_data: &[u8]) -> Result<FundsOutParams> {
     let decoded = fundsOutCall::abi_decode_validate(call_data)
         .map_err(|e| EnclaveError::CrossCheck(format!("invalid fundsOut calldata: {e}")))?;
     if decoded.abi_encode() != call_data {
@@ -189,18 +225,7 @@ fn parse_proof_from_calldata(call_data: &[u8]) -> Result<RouteProof> {
                 .into(),
         ));
     }
-    let amount: u64 = decoded
-        .amount
-        .try_into()
-        .map_err(|_| EnclaveError::CrossCheck("fundsOut amount exceeds u64 range".into()))?;
-
-    Ok(RouteProof {
-        amount,
-        // TODO: derive this from fundsOut.settlementData once the new smart
-        // contract calldata shape is finalized. `burnId` is not the RGB opId
-        // and must not be used for cross-network operation binding.
-        operation_id: None,
-    })
+    Ok(decoded.params)
 }
 
 #[cfg(test)]
@@ -218,20 +243,22 @@ mod tests {
             token: vec![0x11; ADDRESS_LEN],
             recipient: vec![0x22; ADDRESS_LEN],
             commission: 50,
-            funds_in_operation_id: vec![0u8; 32],
+            funds_in_operation_id: vec![0x33; 32],
         }
     }
 
     fn funds_out_calldata(amount: u64, burn_id: u64) -> Vec<u8> {
         fundsOutCall {
-            recipient: Address::from([0x22; ADDRESS_LEN]),
-            amount: U256::from(amount),
-            burnId: U256::from(burn_id),
-            sourceChainId: U256::from(1u64),
-            destinationChainId: U256::from(1u64),
-            sourceAddress: String::new(),
-            proof: Bytes::new(),
-            settlementData: Bytes::new(),
+            params: FundsOutParams {
+                recipient: Address::from([0x22; ADDRESS_LEN]),
+                amount: U256::from(amount),
+                burnId: U256::from(burn_id),
+                sourceChainId: U256::from(1u64),
+                destinationChainId: U256::from(1u64),
+                sourceAddress: String::new(),
+                proof: Bytes::new(),
+                settlementData: Bytes::new(),
+            },
         }
         .abi_encode()
     }
@@ -468,14 +495,16 @@ mod tests {
     #[test]
     fn rejects_uint256_amount_overflow() {
         let mut call = fundsOutCall {
-            recipient: Address::from([0x22; ADDRESS_LEN]),
-            amount: U256::from(u64::MAX) + U256::from(1u64),
-            burnId: U256::from(7u64),
-            sourceChainId: U256::from(1u64),
-            destinationChainId: U256::from(1u64),
-            sourceAddress: String::new(),
-            proof: Bytes::new(),
-            settlementData: Bytes::new(),
+            params: FundsOutParams {
+                recipient: Address::from([0x22; ADDRESS_LEN]),
+                amount: U256::from(u64::MAX) + U256::from(1u64),
+                burnId: U256::from(7u64),
+                sourceChainId: U256::from(1u64),
+                destinationChainId: U256::from(1u64),
+                sourceAddress: String::new(),
+                proof: Bytes::new(),
+                settlementData: Bytes::new(),
+            },
         }
         .abi_encode();
         call[..4].copy_from_slice(&FUNDS_OUT_SELECTOR_POOLS);
@@ -501,14 +530,16 @@ mod tests {
     /// non-canonical rejection tests below tamper with.
     fn funds_out_calldata_with_tails(amount: u64) -> Vec<u8> {
         fundsOutCall {
-            recipient: Address::from([0x22; ADDRESS_LEN]),
-            amount: U256::from(amount),
-            burnId: U256::from(7u64),
-            sourceChainId: U256::from(1u64),
-            destinationChainId: U256::from(1u64),
-            sourceAddress: "rgb-src".to_string(),
-            proof: Bytes::from(vec![0xCC; 64]),
-            settlementData: Bytes::from(vec![0xDD; 32]),
+            params: FundsOutParams {
+                recipient: Address::from([0x22; ADDRESS_LEN]),
+                amount: U256::from(amount),
+                burnId: U256::from(7u64),
+                sourceChainId: U256::from(1u64),
+                destinationChainId: U256::from(1u64),
+                sourceAddress: "rgb-src".to_string(),
+                proof: Bytes::from(vec![0xCC; 64]),
+                settlementData: Bytes::from(vec![0xDD; 32]),
+            },
         }
         .abi_encode()
     }
@@ -521,10 +552,8 @@ mod tests {
     }
 
     /// audit W-01 residual (#123): the ABI decoder accepts trailing junk
-    /// after the last dynamic tail; the canonical re-encode check must not.
-    /// The calldata is later partially rewritten by byte offset
-    /// (`apply_op_id_binding`), so every byte must sit exactly where the
-    /// canonical layout puts it.
+    /// after the last dynamic tail; the canonical re-encode check must not, so
+    /// no unread bytes can ride along inside a signing request.
     #[test]
     fn rejects_calldata_with_trailing_junk() {
         let mut cd = funds_out_calldata_with_tails(1_234);
@@ -541,11 +570,11 @@ mod tests {
     #[test]
     fn rejects_calldata_with_overlapping_dynamic_tails() {
         let mut cd = funds_out_calldata_with_tails(1_234);
-        // Head words (selector included in the byte positions): arg 7
-        // (`proof`) offset word at bytes 196..228, arg 8 (`settlementData`)
-        // offset word at bytes 228..260. Point settlementData at proof's tail.
-        let proof_offset_word: [u8; 32] = cd[196..228].try_into().unwrap();
-        cd[228..260].copy_from_slice(&proof_offset_word);
+        // Offset words for `proof` (228..260) and `settlementData` (260..292),
+        // counting the selector and the tuple head pointer. Both are measured
+        // from the same tuple start, so copying one aliases the two tails.
+        let proof_offset_word: [u8; 32] = cd[228..260].try_into().unwrap();
+        cd[260..292].copy_from_slice(&proof_offset_word);
         let err = parse_proof_from_calldata(&cd).unwrap_err();
         assert!(
             err.to_string().contains("non-canonical fundsOut calldata"),

@@ -9,33 +9,16 @@
 //! the helpers now operate on `EvmDestination.call_data` bytes rather than the
 //! old flat `SignEvmRequest`.
 
-use sha3::{Digest, Keccak256};
-
 use crate::error::{EnclaveError, Result};
-use crate::networks::evm::validation::FUNDS_OUT_SELECTOR_POOLS;
+use crate::networks::evm::validation::{decode_funds_out_params, FUNDS_OUT_SELECTOR_POOLS};
 use crate::networks::rgb::spv::HeaderChain;
 use crate::networks::rgb::validation::ValidatedConsignment;
 
-/// Byte offset of `amount` in the `fundsOut` calldata. After the 4-byte
-/// selector and the 32-byte `recipient` head slot, `amount` (uint256) sits at
-/// byte 36..68.
-const FUNDS_OUT_AMOUNT_OFFSET: usize = 36;
-
-/// Byte offset of `burnId` (uint256) in the `fundsOut` calldata: after the
-/// selector, `recipient` (4..36) and `amount` (36..68), `burnId` sits at
-/// 68..100. Confirmed against `Bridge.sol` on `dev`.
-const FUNDS_OUT_BURN_ID_OFFSET: usize = 68;
-
-/// Byte offset of the `settlementData` head slot (its ABI tail offset word).
-/// `settlementData` is the 8th arg, so after the selector its head word sits at
-/// 4 + 7*32 = 228..260. The `abi.encode(uint256[] fundsInIds)` payload is in the
-/// tail.
-const FUNDS_OUT_SETTLEMENT_DATA_HEAD_OFFSET: usize = 4 + 7 * 32;
-
-/// Byte offset of the `proof` head slot (its ABI tail offset word). `proof` is
-/// the 7th arg, so its head word sits at 4 + 6*32 = 196. The tail decodes to
-/// `abi.encode(uint256 blockHeight, bytes32 commitmentHash)`.
-const FUNDS_OUT_PROOF_HEAD_OFFSET: usize = 4 + 6 * 32;
+// This module used to read the `fundsOut` calldata at hard-coded byte offsets,
+// which only existed because the OpId binding rewrote it in place. That rewrite
+// is gone (#168), and the `FundsOutParams` tuple shifts every field by one head
+// pointer word — so every constant would now be silently 32 bytes off. Decoding
+// via `sol!` ([`decode_funds_out_params`]) retires the whole class of bug.
 
 /// Defense-in-depth for the RGB→EVM `fundsOut` direction (audit 4th I-03 / #95):
 /// every consignment witness tx must be mined. rgbstd's per-witness ordinal map
@@ -114,7 +97,10 @@ pub fn validate_funds_out_transfer(
     // Read `amount` straight from the calldata bytes rather than trusting the
     // listener-supplied `calldata_amount`, then bind it to the consignment's
     // output value — the consignment is the authority on how much RGB moved.
-    let calldata_amount = extract_uint256_as_u64(call_data, FUNDS_OUT_AMOUNT_OFFSET)?;
+    let calldata_amount: u64 = decode_funds_out_params(call_data)?
+        .amount
+        .try_into()
+        .map_err(|_| EnclaveError::CrossCheck("fundsOut amount exceeds u64 range".into()))?;
     if last.total_output_amount < calldata_amount {
         return Err(EnclaveError::CrossCheck(format!(
             "transfer amount mismatch: consignment total_output_amount ({}) < calldata amount ({})",
@@ -124,430 +110,236 @@ pub fn validate_funds_out_transfer(
     Ok(())
 }
 
-/// The OpId → on-chain-id transform: `keccak256(op_id_bytes)`. This MUST match
-/// the derivation the backend uses when it builds the `fundsOut` calldata; the
-/// whole OpId binding hinges on this single function.
-fn op_id_to_calldata_id(op_id: &str) -> Result<[u8; 32]> {
-    let bytes = decode_op_id_to_bytes32(op_id)?;
-    Ok(Keccak256::digest(bytes).into())
-}
+// REMOVED: `apply_op_id_binding` / `op_id_to_calldata_id` (audit TEE-SE-02 /
+// M-02 / #93). It derived `burnId` and `settlementData` from the consignment and
+// overwrote them in the signed calldata. Dead since #168, and now impossible in
+// principle: both fields are keyed on bridge-derived ids that no RGB OpId yields.
+//
+// They are backend-supplied and enforced on-chain (`InvalidBurnId`,
+// `FundsInNotFound`/`AmountMismatch`). An independent enclave-side check would
+// need the deposit receipts via `evm_event::EvmReceiptProvider` — follow-up,
+// out of scope for the ABI migration.
 
-/// OpId binding applied to a `fundsOut` calldata before signing (audit
-/// TEE-SE-02 / M-02 / #93, spec §6/§7). The enclave does NOT trust the
-/// listener's `burnId`/`fundsInIds`; it derives them from the consignment it
-/// validated and **overwrites** the calldata it signs:
-///   - `burnId` (offset 68) := `keccak256(last_transfer_op_id)`; and
-///   - `settlementData` := `abi.encode(uint256[] fundsInIds)` over
-///     `op_id_to_calldata_id(opid)` for every IFA `TS_INFLATION` transition.
-///
-/// Returns the rewritten calldata. Because the signature commits to
-/// `keccak256(callData)`, these bytes are authoritative — **the caller MUST
-/// submit exactly the returned bytes**.
-pub fn apply_op_id_binding(call_data: &[u8], validated: &ValidatedConsignment) -> Result<Vec<u8>> {
-    // burnId is derived from the rgbstd-VALIDATED OpId of the release
-    // (TS_TRANSFER) transition (`last_transfer_op_id`), not the flat parser
-    // (audit M-02 / #93). Fail closed if it wasn't extracted.
-    let op_id = validated.last_transfer_op_id.ok_or_else(|| {
-        EnclaveError::CrossCheck(
-            "OpId binding requires the validated OpId of the release transition, but none was \
-             extracted (the last transition is not a validated Transfer) - refusing to sign"
-                .into(),
-        )
-    })?;
-    let burn_id: [u8; 32] = Keccak256::digest(op_id).into();
-    let funds_in_ids: Vec<[u8; 32]> = validated
-        .mint_op_ids
-        .iter()
-        .map(|o| op_id_to_calldata_id(o))
-        .collect::<Result<_>>()?;
-
-    // The 8-word head (after the 4-byte selector) must be present to locate the
-    // burnId slot and the settlementData offset.
-    let head_end = FUNDS_OUT_SETTLEMENT_DATA_HEAD_OFFSET + 32; // 260
-    if call_data.len() < head_end {
-        return Err(EnclaveError::CrossCheck(format!(
-            "fundsOut calldata too short: need {head_end} head bytes, got {}",
-            call_data.len()
-        )));
-    }
-
-    let mut out = call_data.to_vec();
-
-    // (1) Overwrite burnId in place (a static head slot).
-    out[FUNDS_OUT_BURN_ID_OFFSET..FUNDS_OUT_BURN_ID_OFFSET + 32].copy_from_slice(&burn_id);
-
-    // (2) Replace settlementData (the last dynamic arg). Read its tail offset
-    //     (relative to the args start, byte 4), drop the old tail, and append a
-    //     fresh `abi.encode(uint256[] fundsInIds)`. The head offset word still
-    //     points at the same start, so it needs no update.
-    let sd_rel = bytes32_to_usize(&extract_bytes32(
-        &out,
-        FUNDS_OUT_SETTLEMENT_DATA_HEAD_OFFSET,
-    )?)?;
-    let sd_start = 4usize
-        .checked_add(sd_rel)
-        .ok_or_else(|| EnclaveError::CrossCheck("settlementData offset overflow".into()))?;
-    if sd_start < head_end || sd_start > out.len() {
-        return Err(EnclaveError::CrossCheck(format!(
-            "settlementData offset out of range: {sd_start} (head_end {head_end}, len {})",
-            out.len()
-        )));
-    }
-    out.truncate(sd_start);
-
-    // settlementData is a dynamic `bytes`: [length][payload], where payload is
-    // `abi.encode(uint256[])` = [0x20 offset][N][ids...].
-    let payload_len = 64 + funds_in_ids.len() * 32;
-    out.extend_from_slice(&u256_word(payload_len)); // bytes length
-    out.extend_from_slice(&u256_word(32)); // inner array offset (0x20)
-    out.extend_from_slice(&u256_word(funds_in_ids.len())); // N
-    for id in &funds_in_ids {
-        out.extend_from_slice(id);
-    }
-
-    Ok(out)
-}
-
-/// Encode a `usize` as a big-endian 32-byte ABI word.
-fn u256_word(n: usize) -> [u8; 32] {
-    let mut w = [0u8; 32];
-    w[24..].copy_from_slice(&(n as u64).to_be_bytes());
-    w
+/// One `(height, commitmentHash)` pair of the finality proof.
+#[derive(Debug, Clone, Copy)]
+struct ProofBlock {
+    height: u32,
+    /// Display (big-endian) byte order, as it appears in the calldata.
+    commitment: [u8; 32],
 }
 
 /// BtcRelay-agreement cross-check (bridge spec §13, #57/#122). Binds the
-/// calldata's claimed `proof = abi.encode(uint256 blockHeight, bytes32
-/// commitmentHash)` to the header the enclave holds at that height, so a
+/// calldata's claimed finality proof to the headers the enclave holds, so a
 /// listener can't split the contract's on-chain BtcRelay check away from the
 /// enclave's own SPV evidence. A no-op for non-`fundsOut` selectors and inert
-/// when the `proof` slot is empty (pre-migration).
+/// when the `proof` slot is empty.
 ///
-/// Byte order: the calldata `commitmentHash` is display (big-endian) order; the
-/// in-enclave `header.block_hash()` is internal order, so we reverse it before
+/// The proof is now two block pairs (`RGBVerifier.sol:115-117`):
+///
+/// ```text
+/// abi.encode(uint256 sourceHeight, bytes32 sourceCommit,
+///            uint256 latestHeight, bytes32 latestCommit)
+/// ```
+///
+/// `source` packaged the RGB burn; `latest` is the relay tip proving the relay's
+/// view is current. Both are checked here, against the enclave's own headers,
+/// rather than delegating freshness to a relay the host also feeds.
+///
+/// Byte order: calldata commitments are display (big-endian) order; the
+/// in-enclave `header.block_hash()` is internal order, so it is reversed before
 /// comparing.
 pub fn verify_btc_relay_agreement(call_data: &[u8], chain: &HeaderChain) -> Result<()> {
-    use bitcoin::hashes::Hash as _;
-
     if call_data.len() < 4 || call_data[..4] != FUNDS_OUT_SELECTOR_POOLS {
         return Ok(());
     }
-    let Some((block_height, commitment_hash)) = decode_funds_out_proof(call_data)? else {
-        // proof slot empty → no calldata commitment to bind (pre-migration).
+    let Some((source, latest)) = decode_funds_out_proof(call_data)? else {
+        // proof slot empty → no calldata commitment to bind.
         return Ok(());
     };
 
-    let header = chain.header_at(block_height).ok_or_else(|| {
+    // The tip cannot precede the block it buries. Caught here so the error names
+    // the problem instead of surfacing as a header-lookup failure.
+    if latest.height < source.height {
+        return Err(EnclaveError::Spv(format!(
+            "fundsOut BtcRelay check: proof latest height {} is below source height {} — \
+             the relay tip cannot precede the block that packaged the burn",
+            latest.height, source.height
+        )));
+    }
+
+    verify_proof_block(chain, &source, "source")?;
+    verify_proof_block(chain, &latest, "latest")
+}
+
+/// Confirm one proof pair against the in-enclave header chain.
+fn verify_proof_block(chain: &HeaderChain, block: &ProofBlock, label: &str) -> Result<()> {
+    use bitcoin::hashes::Hash as _;
+
+    let header = chain.header_at(block.height).ok_or_else(|| {
         EnclaveError::Spv(format!(
-            "fundsOut BtcRelay check: no header at block height {block_height} \
+            "fundsOut BtcRelay check: no header at {label} block height {} \
              (chain tip = {}) — cannot confirm the calldata commitment against \
              the enclave header chain",
+            block.height,
             chain.tip_height()
         ))
     })?;
 
     let mut stored_display: [u8; 32] = header.block_hash().to_byte_array();
     stored_display.reverse();
-    if stored_display != commitment_hash {
+    if stored_display != block.commitment {
         return Err(EnclaveError::Spv(format!(
-            "fundsOut BtcRelay check: calldata commitmentHash {} != enclave header \
-             hash {} at block height {block_height}",
-            hex::encode(commitment_hash),
-            hex::encode(stored_display)
+            "fundsOut BtcRelay check: calldata {label} commitmentHash {} != enclave header \
+             hash {} at block height {}",
+            hex::encode(block.commitment),
+            hex::encode(stored_display),
+            block.height
         )));
     }
     Ok(())
 }
 
-/// Decode the `fundsOut` `proof` slot into `(block_height, commitment_hash)`.
-/// Returns `Ok(None)` when the `proof` bytes are empty (pre-migration shape).
-fn decode_funds_out_proof(call_data: &[u8]) -> Result<Option<(u32, [u8; 32])>> {
-    // (1) proof tail offset, measured from the args start (byte 4).
-    let proof_offset = read_u256_as_usize(call_data, FUNDS_OUT_PROOF_HEAD_OFFSET)?;
-    let tail_start = 4usize
-        .checked_add(proof_offset)
-        .ok_or_else(|| EnclaveError::CrossCheck("fundsOut proof offset overflow".into()))?;
+/// Number of bytes in the finality proof: four ABI words.
+const FUNDS_OUT_PROOF_LEN: usize = 4 * 32;
 
-    // (2) length word of the `bytes`.
-    let payload_start = tail_start
-        .checked_add(32)
-        .ok_or_else(|| EnclaveError::CrossCheck("fundsOut proof length overflow".into()))?;
-    if call_data.len() < payload_start {
-        return Err(EnclaveError::CrossCheck(format!(
-            "call_data too short for fundsOut proof length: need {payload_start}, got {}",
-            call_data.len()
-        )));
-    }
-    let proof_len = read_u256_as_usize(call_data, tail_start)?;
-    if proof_len == 0 {
+/// Decode the `fundsOut` `proof` slot into its `(source, latest)` block pair.
+/// Returns `Ok(None)` when the `proof` bytes are empty.
+///
+/// The payload is read through the ABI decoder rather than at a fixed offset:
+/// `proof` is a dynamic field of a dynamic tuple, so its position depends on the
+/// length of `sourceAddress` before it and is not a constant at all.
+fn decode_funds_out_proof(call_data: &[u8]) -> Result<Option<(ProofBlock, ProofBlock)>> {
+    let proof = decode_funds_out_params(call_data)?.proof;
+    if proof.is_empty() {
         return Ok(None);
     }
-    if proof_len != 64 {
+    if proof.len() != FUNDS_OUT_PROOF_LEN {
         return Err(EnclaveError::CrossCheck(format!(
-            "fundsOut proof must be abi.encode(uint256 blockHeight, bytes32 commitmentHash) \
-             = 64 bytes, got {proof_len}"
+            "fundsOut proof must be abi.encode(uint256 sourceHeight, bytes32 sourceCommit, \
+             uint256 latestHeight, bytes32 latestCommit) = {FUNDS_OUT_PROOF_LEN} bytes, got {}",
+            proof.len()
         )));
     }
 
-    // (3) payload: [blockHeight: uint256][commitmentHash: bytes32].
-    let payload_end = payload_start
-        .checked_add(64)
-        .ok_or_else(|| EnclaveError::CrossCheck("fundsOut proof payload overflow".into()))?;
-    if call_data.len() < payload_end {
+    let source = ProofBlock {
+        height: proof_height(&proof[0..32], "sourceHeight")?,
+        commitment: proof[32..64]
+            .try_into()
+            .expect("32-byte slice always converts"),
+    };
+    let latest = ProofBlock {
+        height: proof_height(&proof[64..96], "latestHeight")?,
+        commitment: proof[96..128]
+            .try_into()
+            .expect("32-byte slice always converts"),
+    };
+
+    Ok(Some((source, latest)))
+}
+
+/// Read one proof height word as a `u32`. Bitcoin heights fit comfortably; a
+/// larger value is rejected rather than truncated.
+fn proof_height(word: &[u8], field: &str) -> Result<u32> {
+    if word[..28].iter().any(|&b| b != 0) {
         return Err(EnclaveError::CrossCheck(format!(
-            "call_data too short for fundsOut proof payload: need {payload_end}, got {}",
-            call_data.len()
+            "fundsOut proof {field} exceeds u32 range"
         )));
     }
-    let payload = &call_data[payload_start..payload_end];
-
-    // blockHeight is a uint256 that must fit in u32 (Bitcoin heights do).
-    if payload[..28].iter().any(|&b| b != 0) {
-        return Err(EnclaveError::CrossCheck(
-            "fundsOut proof blockHeight exceeds u32 range".into(),
-        ));
-    }
-    let mut bh = [0u8; 4];
-    bh.copy_from_slice(&payload[28..32]);
-    let block_height = u32::from_be_bytes(bh);
-
-    let mut commitment_hash = [0u8; 32];
-    commitment_hash.copy_from_slice(&payload[32..64]);
-
-    Ok(Some((block_height, commitment_hash)))
+    let mut buf = [0u8; 4];
+    buf.copy_from_slice(&word[28..32]);
+    Ok(u32::from_be_bytes(buf))
 }
 
-/// Read a 32-byte ABI word at `offset` and interpret it as a `usize`, range
-/// checked (the high bytes must be zero) rather than silently truncated.
-fn read_u256_as_usize(call_data: &[u8], offset: usize) -> Result<usize> {
-    let end = offset
-        .checked_add(32)
-        .ok_or_else(|| EnclaveError::CrossCheck("fundsOut word offset overflow".into()))?;
-    if call_data.len() < end {
-        return Err(EnclaveError::CrossCheck(format!(
-            "call_data too short: need {end} bytes, got {}",
-            call_data.len()
-        )));
-    }
-    let word = &call_data[offset..end];
-    if word[..24].iter().any(|&b| b != 0) {
-        return Err(EnclaveError::CrossCheck(
-            "fundsOut ABI word exceeds usize range".into(),
-        ));
-    }
-    let mut buf = [0u8; 8];
-    buf.copy_from_slice(&word[24..32]);
-    Ok(u64::from_be_bytes(buf) as usize)
-}
-
-/// Read a uint256 from call_data at a byte offset, as u64. Fails if too short or
-/// the value exceeds u64.
-pub(crate) fn extract_uint256_as_u64(call_data: &[u8], offset: usize) -> Result<u64> {
-    let end = offset + 32;
-    if call_data.len() < end {
-        return Err(EnclaveError::CrossCheck(format!(
-            "call_data too short: need {} bytes, got {}",
-            end,
-            call_data.len()
-        )));
-    }
-    let slot = &call_data[offset..end];
-    if slot[..24].iter().any(|&b| b != 0) {
-        return Err(EnclaveError::CrossCheck(
-            "uint256 value exceeds u64 range".into(),
-        ));
-    }
-    let mut buf = [0u8; 8];
-    buf.copy_from_slice(&slot[24..32]);
-    Ok(u64::from_be_bytes(buf))
-}
-
-/// Read a full 32-byte word (a `bytes32`/`uint256` head slot) at a fixed offset.
-/// Safe only for the static `fundsOut` head slots.
-fn extract_bytes32(call_data: &[u8], offset: usize) -> Result<[u8; 32]> {
-    let end = offset + 32;
-    if call_data.len() < end {
-        return Err(EnclaveError::CrossCheck(format!(
-            "call_data too short: need {} bytes, got {}",
-            end,
-            call_data.len()
-        )));
-    }
-    call_data[offset..end]
-        .try_into()
-        .map_err(|_| EnclaveError::CrossCheck("bytes32 slice conversion failed".into()))
-}
-
-/// Decode an RGB OpId string (64-char hex of the 32-byte OpId) into raw bytes.
-/// Fails closed if not exactly 32 bytes of hex.
-fn decode_op_id_to_bytes32(op_id: &str) -> Result<[u8; 32]> {
-    let bytes = hex::decode(op_id).map_err(|e| {
-        EnclaveError::CrossCheck(format!(
-            "op_id is not hex-decodable (got {op_id:?}): {e} — burnId binding needs the \
-             32-byte OpId form"
-        ))
-    })?;
-    bytes.as_slice().try_into().map_err(|_| {
-        EnclaveError::CrossCheck(format!(
-            "op_id decodes to {} bytes, expected 32 (op_id {op_id:?})",
-            bytes.len()
-        ))
-    })
-}
-
-/// Interpret a 32-byte ABI word as a `usize`, failing closed if the high 24
-/// bytes are non-zero.
-fn bytes32_to_usize(word: &[u8; 32]) -> Result<usize> {
-    if word[..24].iter().any(|&b| b != 0) {
-        return Err(EnclaveError::CrossCheck(
-            "ABI offset/length word exceeds usize range".into(),
-        ));
-    }
-    let mut buf = [0u8; 8];
-    buf.copy_from_slice(&word[24..32]);
-    Ok(u64::from_be_bytes(buf) as usize)
-}
+// `extract_uint256_as_u64` moved to `evm_event`, its only remaining consumer:
+// nothing here reads calldata positionally now, so keeping it in this module
+// left it dead in every build without the `evm-rpc` feature.
+//
+// `extract_bytes32`, `decode_op_id_to_bytes32` and `bytes32_to_usize` were the
+// fixed-offset / OpId-hex helpers the removed calldata rewrite needed, and went
+// with it.
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// Build a mock `fundsOut` calldata in the 8-arg shape
-    /// (`fundsOut(address,uint256,uint256,uint256,uint256,string,bytes,bytes)`
-    /// = [`FUNDS_OUT_SELECTOR_POOLS`]) with `amount` at
-    /// [`FUNDS_OUT_AMOUNT_OFFSET`] (byte 36). Remaining head slots are
-    /// zero-filled — none of the cross-checks here read them.
+    use alloy_primitives::{Address, Bytes, U256};
+    use alloy_sol_types::SolCall;
+
+    use crate::networks::evm::validation::{fundsOutCall, FundsOutParams};
+
+    /// Build a `fundsOut(FundsOutParams)` calldata through the real ABI encoder.
+    ///
+    /// Hand-assembling head words (as this helper used to) only worked while the
+    /// layout was flat and constant; with the params behind a tuple pointer it
+    /// would have to reproduce the dynamic-tail arithmetic too. Encoding through
+    /// `sol!` keeps the fixtures honest by construction.
     fn mock_funds_out_calldata(amount: u64) -> Vec<u8> {
-        let mut data = Vec::with_capacity(4 + 8 * 32);
-        data.extend_from_slice(&FUNDS_OUT_SELECTOR_POOLS);
-        // recipient (32, address)
-        data.extend_from_slice(&[0u8; 32]);
-        // amount (uint256) @ offset 36
+        mock_funds_out_calldata_with_proof(amount, Bytes::new())
+    }
+
+    fn mock_funds_out_calldata_with_proof(amount: u64, proof: Bytes) -> Vec<u8> {
+        fundsOutCall {
+            params: FundsOutParams {
+                recipient: Address::ZERO,
+                amount: U256::from(amount),
+                burnId: U256::ZERO,
+                sourceChainId: U256::ZERO,
+                destinationChainId: U256::ZERO,
+                sourceAddress: String::new(),
+                proof,
+                settlementData: Bytes::new(),
+            },
+        }
+        .abi_encode()
+    }
+
+    /// The tuple encoding must round-trip through the decoder the cross-checks
+    /// now rely on. This is the replacement for the old `abi_layout` module,
+    /// which pinned hard-coded head offsets that no longer exist.
+    #[test]
+    fn mock_calldata_decodes_back_to_its_fields() {
+        let cd = mock_funds_out_calldata_with_proof(1_234, Bytes::from(vec![0xAB; 128]));
+        let params = decode_funds_out_params(&cd).expect("tuple calldata must decode");
+        assert_eq!(params.amount, U256::from(1_234u64));
+        assert_eq!(params.proof.len(), 128);
+        assert_eq!(&cd[..4], &FUNDS_OUT_SELECTOR_POOLS);
+    }
+
+    /// Guard against a half-finished migration: a flat 8-argument body must not
+    /// decode as the tuple shape.
+    ///
+    /// Sharper than it looks. With a ZERO `recipient` — as here — the ABI
+    /// decoder ACCEPTS the legacy body: the leading zero word is read as a tuple
+    /// head pointer of 0, which aliases the tuple onto those very words, and
+    /// every field then lines up one-for-one. Only the canonical re-encode check
+    /// inside [`decode_funds_out_params`] rejects it, which is why that check
+    /// lives in the decoder rather than in the validator alone. With a realistic
+    /// non-zero recipient the pointer is wildly out of range and the decode
+    /// fails by itself, so this fixture pins the harder case.
+    fn legacy_flat_calldata(recipient: [u8; 32]) -> Vec<u8> {
+        let mut legacy = Vec::with_capacity(4 + 8 * 32);
+        legacy.extend_from_slice(&FUNDS_OUT_SELECTOR_POOLS);
+        legacy.extend_from_slice(&recipient);
         let mut amt = [0u8; 32];
-        amt[24..].copy_from_slice(&amount.to_be_bytes());
-        data.extend_from_slice(&amt);
-        // 6 more head slots zero-filled (burnId, sourceChainId,
-        // destinationChainId, srcAddrOffset, proofOffset, settlementDataOffset).
-        data.extend_from_slice(&[0u8; 32 * 6]);
-        data
-    }
-
-    /// Parse the `fundsOut` `settlementData` (`abi.encode(uint256[] fundsInIds)`)
-    /// and return each `fundsInId` as a raw 32-byte word.
-    ///
-    /// Two levels of ABI indirection: (1) the `settlementData` head slot at
-    /// [`FUNDS_OUT_SETTLEMENT_DATA_HEAD_OFFSET`] holds a tail offset measured from
-    /// the start of the argument block (byte 4); (2) at that tail the `bytes` has
-    /// a length word followed by its payload, which is itself
-    /// `abi.encode(uint256[])` = `[0x20 offset][len N][N words]`. Every read is
-    /// bounds-checked (via [`extract_bytes32`]) and every offset/length is range
-    /// checked (via [`bytes32_to_usize`]); a malformed or truncated blob is a hard
-    /// error. Returns an empty vec when `settlementData` is empty.
-    ///
-    /// The enclave OVERWRITES `settlementData` ([`apply_op_id_binding`]) rather
-    /// than reading it, so this reader exists only to verify, in tests, that the
-    /// writer's encoding round-trips — hence it lives in the test module.
-    fn extract_funds_in_ids(call_data: &[u8]) -> Result<Vec<[u8; 32]>> {
-        // (1) settlementData tail offset (relative to the args start = byte 4).
-        let rel = bytes32_to_usize(&extract_bytes32(
-            call_data,
-            FUNDS_OUT_SETTLEMENT_DATA_HEAD_OFFSET,
-        )?)?;
-        let sd_start = 4usize
-            .checked_add(rel)
-            .ok_or_else(|| EnclaveError::CrossCheck("settlementData offset overflow".into()))?;
-
-        // settlementData `bytes`: [length word][payload].
-        let sd_len = bytes32_to_usize(&extract_bytes32(call_data, sd_start)?)?;
-        if sd_len == 0 {
-            return Ok(vec![]); // no fundsInIds claimed
-        }
-        let sd_body = sd_start
-            .checked_add(32)
-            .ok_or_else(|| EnclaveError::CrossCheck("settlementData body overflow".into()))?;
-        let sd_end = sd_body
-            .checked_add(sd_len)
-            .ok_or_else(|| EnclaveError::CrossCheck("settlementData length overflow".into()))?;
-        if call_data.len() < sd_end {
-            return Err(EnclaveError::CrossCheck(format!(
-                "call_data too short for settlementData: need {sd_end}, got {}",
-                call_data.len()
-            )));
-        }
-        let sd = &call_data[sd_body..sd_end];
-
-        // (2) sd = abi.encode(uint256[]) = [offset (0x20)][len N][N words].
-        let arr_off = bytes32_to_usize(&extract_bytes32(sd, 0)?)?;
-        let n = bytes32_to_usize(&extract_bytes32(sd, arr_off)?)?;
-        let elems_start = arr_off.checked_add(32).ok_or_else(|| {
-            EnclaveError::CrossCheck("fundsInIds elements offset overflow".into())
-        })?;
-        let span = n
-            .checked_mul(32)
-            .and_then(|x| elems_start.checked_add(x))
-            .ok_or_else(|| EnclaveError::CrossCheck("fundsInIds array size overflow".into()))?;
-        if sd.len() < span {
-            return Err(EnclaveError::CrossCheck(format!(
-                "settlementData too short for {n} fundsInIds: need {span}, got {}",
-                sd.len()
-            )));
-        }
-
-        let mut ids = Vec::with_capacity(n);
-        for i in 0..n {
-            ids.push(extract_bytes32(sd, elems_start + i * 32)?);
-        }
-        Ok(ids)
+        amt[24..].copy_from_slice(&1_000u64.to_be_bytes());
+        legacy.extend_from_slice(&amt); // amount, at the old flat offset 36
+        legacy.extend_from_slice(&[0u8; 32 * 6]); // remaining flat head slots
+        legacy
     }
 
     #[test]
-    fn extract_uint256_works() {
-        let mut data = vec![0u8; 40];
-        // Put value 42 at offset 8 (bytes 8..40)
-        data[39] = 42;
-        assert_eq!(extract_uint256_as_u64(&data, 8).unwrap(), 42);
+    fn rejects_legacy_flat_encoding_zero_recipient() {
+        assert!(
+            decode_funds_out_params(&legacy_flat_calldata([0u8; 32])).is_err(),
+            "a flat-encoded body must fail closed, not alias onto the tuple layout"
+        );
     }
 
     #[test]
-    fn extract_uint256_rejects_short_data() {
-        let data = vec![0u8; 10];
-        assert!(extract_uint256_as_u64(&data, 0).is_err());
-    }
-
-    #[test]
-    fn extract_uint256_rejects_overflow() {
-        let mut data = vec![0u8; 32];
-        data[0] = 1; // high byte set — exceeds u64
-        assert!(extract_uint256_as_u64(&data, 0).is_err());
-    }
-
-    #[test]
-    fn extract_bytes32_works() {
-        let mut data = vec![0u8; 4 + 32 + 32 + 32];
-        let mut word = [0u8; 32];
-        word[0] = 0xab;
-        word[31] = 0xcd;
-        data[68..100].copy_from_slice(&word); // burnId head slot
-        assert_eq!(extract_bytes32(&data, 68).unwrap(), word);
-    }
-
-    #[test]
-    fn extract_bytes32_rejects_short_data() {
-        let data = vec![0u8; 90]; // burnId slot ends at 100
-        assert!(extract_bytes32(&data, 68).is_err());
-    }
-
-    #[test]
-    fn bytes32_to_usize_works() {
-        let mut w = [0u8; 32];
-        w[24..].copy_from_slice(&320u64.to_be_bytes());
-        assert_eq!(bytes32_to_usize(&w).unwrap(), 320);
-    }
-
-    #[test]
-    fn bytes32_to_usize_rejects_out_of_range() {
-        let mut w = [0u8; 32];
-        w[0] = 1; // high byte set — exceeds usize/u64
-        assert!(bytes32_to_usize(&w).is_err());
+    fn rejects_legacy_flat_encoding_real_recipient() {
+        let mut recipient = [0u8; 32];
+        recipient[12..].copy_from_slice(&[0x22; 20]);
+        assert!(decode_funds_out_params(&legacy_flat_calldata(recipient)).is_err());
     }
 
     // =========================================================================
@@ -692,353 +484,6 @@ mod tests {
     }
 
     // =========================================================================
-    // OpId binding — `apply_op_id_binding` (audit TEE-SE-02, spec §6/§7). The
-    // enclave derives burnId / fundsInIds from the consignment it validated and
-    // OVERWRITES them in the calldata it signs. No listener-supplied OpId is
-    // trusted or even read. `extract_funds_in_ids` confirms the writer's
-    // settlementData round-trips through the reader.
-    // =========================================================================
-
-    mod op_id_binding {
-        use super::*;
-        use crate::networks::rgb::validation::{ifa, TransitionSummary, ValidatedConsignment};
-        use sha3::{Digest, Keccak256};
-
-        const OP_ID: &str = "74c1d59264894a1bd44887fe84b36739c024bd50188e69baeeda845569313543";
-        const MINT_A: &str = "f5106c6ddb8b8fd3d1de3bda0106ae13ef0705dc36bfc543566362e5e8dd4bd5";
-        const MINT_B: &str = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff";
-
-        /// The binding transform: keccak256 of the raw 32-byte OpId.
-        fn id(op_id: &str) -> [u8; 32] {
-            Keccak256::digest(hex::decode(op_id).unwrap()).into()
-        }
-
-        fn u256(n: usize) -> [u8; 32] {
-            let mut w = [0u8; 32];
-            w[24..].copy_from_slice(&(n as u64).to_be_bytes());
-            w
-        }
-
-        /// Build `fundsOut` calldata with the given `burnId` (offset 68) and
-        /// `fundsInIds` (encoded in `settlementData = abi.encode(uint256[])`).
-        /// `sourceAddress` and `proof` are present but empty. The ABI tail
-        /// layout mirrors what `extract_funds_in_ids` traverses.
-        fn mock_funds_out(burn_id: [u8; 32], funds_in_ids: &[[u8; 32]]) -> Vec<u8> {
-            let mut d = Vec::new();
-            d.extend_from_slice(&FUNDS_OUT_SELECTOR_POOLS);
-            d.extend_from_slice(&[0u8; 32]); // recipient
-            d.extend_from_slice(&[0u8; 32]); // amount
-            d.extend_from_slice(&burn_id); // burnId @68
-            d.extend_from_slice(&[0u8; 32]); // sourceChainId
-            d.extend_from_slice(&[0u8; 32]); // destinationChainId
-            d.extend_from_slice(&u256(256)); // sourceAddress tail offset (rel byte 4)
-            d.extend_from_slice(&u256(288)); // proof tail offset
-            d.extend_from_slice(&u256(320)); // settlementData tail offset
-            d.extend_from_slice(&u256(0)); // sourceAddress length = 0
-            d.extend_from_slice(&u256(0)); // proof length = 0
-                                           // settlementData bytes = abi.encode(uint256[]) = [0x20][N][ids...]
-            let payload_len = 64 + funds_in_ids.len() * 32;
-            d.extend_from_slice(&u256(payload_len)); // settlementData length
-            d.extend_from_slice(&u256(32)); // inner array offset (0x20)
-            d.extend_from_slice(&u256(funds_in_ids.len())); // N
-            for fid in funds_in_ids {
-                d.extend_from_slice(fid);
-            }
-            d
-        }
-
-        fn transition(op_id: &str, transition_type: u16) -> TransitionSummary {
-            TransitionSummary {
-                op_id: op_id.into(),
-                transition_type,
-                total_output_amount: 0,
-                asset_output_amount: 0,
-                outputs: Vec::new(),
-                burned_asset_amount: None,
-            }
-        }
-
-        /// The validated last-transfer OpId bytes for a given hex OpId - the
-        /// authoritative burnId source (`ValidatedConsignment::last_transfer_op_id`).
-        fn op_id_bytes(op_id: &str) -> [u8; 32] {
-            hex::decode(op_id).unwrap().try_into().unwrap()
-        }
-
-        fn validated(
-            last: Option<TransitionSummary>,
-            mint_op_ids: Vec<String>,
-        ) -> ValidatedConsignment {
-            // The burnId is derived from the rgbstd-VALIDATED OpId, so mirror
-            // production: `last_transfer_op_id` carries the same OpId as the
-            // last transition (set by `read_last_transfer_witness` for a
-            // TS_TRANSFER last transition).
-            let last_transfer_op_id = last.as_ref().map(|t| op_id_bytes(&t.op_id));
-            ValidatedConsignment {
-                contract_id: "rgb:test".into(),
-                chain_net: "bc".into(),
-                witness_txids: vec![],
-                all_op_ids: last
-                    .as_ref()
-                    .map(|t| vec![t.op_id.clone()])
-                    .unwrap_or_default(),
-                mint_op_ids,
-                last_transition: last,
-                last_transfer_witness_txid: None,
-                last_transfer_witness_prevouts: None,
-                last_transfer_op_id,
-                non_mined_witness_txids: vec![],
-            }
-        }
-
-        // ---- apply_op_id_binding (override, not verify) ----
-
-        /// Writes burnId@68 = keccak256(validated OpId), overriding whatever the
-        /// bridge put there. The OpId is sourced from the rgbstd-validated
-        /// transfer (`last_transfer_op_id`), not the flat parser (audit M-02 / #93).
-        #[test]
-        fn writes_burn_id_from_validated_op_id() {
-            let cd = mock_funds_out([0xEE; 32], &[]); // bogus burnId in input
-            let v = validated(Some(transition(OP_ID, ifa::TS_TRANSFER)), vec![]);
-            let out = apply_op_id_binding(&cd, &v).unwrap();
-            assert_eq!(
-                extract_bytes32(&out, FUNDS_OUT_BURN_ID_OFFSET).unwrap(),
-                id(OP_ID)
-            );
-        }
-
-        /// Fail closed when no validated OpId was extracted (e.g. a non-Transfer
-        /// last transition): the enclave must refuse rather than fall back to a
-        /// listener- or flat-parser-supplied burnId.
-        #[test]
-        fn rejects_when_validated_op_id_missing() {
-            let cd = mock_funds_out([0xEE; 32], &[]);
-            let mut v = validated(Some(transition(OP_ID, ifa::TS_TRANSFER)), vec![]);
-            v.last_transfer_op_id = None;
-            let err = apply_op_id_binding(&cd, &v).unwrap_err();
-            assert!(
-                err.to_string()
-                    .contains("validated OpId of the release transition"),
-                "got: {err}"
-            );
-        }
-
-        /// Writes ALL mint OpIds into settlementData, overriding the bridge's set.
-        #[test]
-        fn writes_all_mint_funds_in_ids() {
-            let cd = mock_funds_out([0xEE; 32], &[[0x11; 32], [0x22; 32]]);
-            let v = validated(
-                Some(transition(OP_ID, ifa::TS_BURN)),
-                vec![MINT_A.into(), MINT_B.into()],
-            );
-            let out = apply_op_id_binding(&cd, &v).unwrap();
-            assert_eq!(
-                extract_funds_in_ids(&out).unwrap(),
-                vec![id(MINT_A), id(MINT_B)]
-            );
-        }
-
-        /// No mints in the consignment → empty fundsInIds (not an error).
-        #[test]
-        fn writes_empty_funds_in_ids_when_no_mints() {
-            let cd = mock_funds_out([0xEE; 32], &[[0x11; 32]]);
-            let v = validated(Some(transition(OP_ID, ifa::TS_BURN)), vec![]);
-            let out = apply_op_id_binding(&cd, &v).unwrap();
-            assert!(extract_funds_in_ids(&out).unwrap().is_empty());
-        }
-
-        /// Override, not verify: a fully bogus input (wrong burnId AND wrong
-        /// fundsInIds) is rewritten to the consignment's values.
-        #[test]
-        fn overrides_whatever_the_bridge_sent() {
-            let cd = mock_funds_out([0xEE; 32], &[[0xAB; 32]]);
-            let v = validated(Some(transition(OP_ID, ifa::TS_BURN)), vec![MINT_A.into()]);
-            let out = apply_op_id_binding(&cd, &v).unwrap();
-            assert_eq!(
-                extract_bytes32(&out, FUNDS_OUT_BURN_ID_OFFSET).unwrap(),
-                id(OP_ID)
-            );
-            assert_eq!(extract_funds_in_ids(&out).unwrap(), vec![id(MINT_A)]);
-        }
-
-        /// The non-OpId fields (recipient, amount) are left exactly as sent.
-        #[test]
-        fn preserves_non_op_id_fields() {
-            let mut cd = mock_funds_out([0xEE; 32], &[[0x11; 32]]);
-            cd[4..36].copy_from_slice(&u256(0xBEEF)); // recipient marker
-            cd[36..68].copy_from_slice(&u256(123_456)); // amount marker
-            let v = validated(Some(transition(OP_ID, ifa::TS_BURN)), vec![MINT_A.into()]);
-            let out = apply_op_id_binding(&cd, &v).unwrap();
-            assert_eq!(&out[4..36], &u256(0xBEEF));
-            assert_eq!(&out[36..68], &u256(123_456));
-        }
-
-        /// A mint OpId that isn't 32-byte hex can not be transformed - fail
-        /// closed. (The burnId now comes from the pre-validated
-        /// `last_transfer_op_id` bytes, so the only string-decoded OpIds left
-        /// are the `fundsInIds` mint set.)
-        #[test]
-        fn rejects_non_hex_op_id() {
-            let cd = mock_funds_out([0xEE; 32], &[]);
-            let v = validated(
-                Some(transition(OP_ID, ifa::TS_TRANSFER)),
-                vec!["not-hex".into()],
-            );
-            let err = apply_op_id_binding(&cd, &v).unwrap_err();
-            assert!(
-                err.to_string().contains("hex-decodable")
-                    || err.to_string().contains("expected 32"),
-                "expected op_id decode rejection, got: {err}"
-            );
-        }
-
-        /// Calldata too short to hold the fundsOut head is rejected.
-        #[test]
-        fn rejects_calldata_too_short() {
-            let v = validated(Some(transition(OP_ID, ifa::TS_BURN)), vec![]);
-            let err = apply_op_id_binding(&[0u8; 100], &v).unwrap_err();
-            assert!(err.to_string().contains("too short"), "got: {err}");
-        }
-
-        /// No validated release OpId to bind against -> hard error.
-        #[test]
-        fn rejects_no_transition() {
-            let cd = mock_funds_out([0xEE; 32], &[]);
-            let v = validated(None, vec![]);
-            let err = apply_op_id_binding(&cd, &v).unwrap_err();
-            assert!(
-                err.to_string()
-                    .contains("validated OpId of the release transition"),
-                "got: {err}"
-            );
-        }
-
-        // ---- settlementData ABI round-trip (writer vs reader agree) ----
-
-        #[test]
-        fn settlement_parser_round_trips() {
-            let ids = [id(MINT_A), id(MINT_B)];
-            let cd = mock_funds_out(id(OP_ID), &ids);
-            assert_eq!(extract_funds_in_ids(&cd).unwrap(), ids.to_vec());
-        }
-
-        #[test]
-        fn settlement_parser_empty() {
-            let cd = mock_funds_out(id(OP_ID), &[]);
-            assert!(extract_funds_in_ids(&cd).unwrap().is_empty());
-        }
-
-        /// #65: the rewritten calldata is what gets signed and later decoded
-        /// on-chain — starting from a canonical alloy encoding, the binding
-        /// output must (a) still ABI-decode, (b) carry exactly the
-        /// enclave-authored burnId and fundsInIds, and (c) remain canonical
-        /// (re-encoding the decoded call reproduces the rewritten bytes).
-        #[test]
-        fn binding_output_stays_canonical_abi() {
-            use crate::networks::evm::validation::fundsOutCall;
-            use alloy_primitives::{Address, Bytes, U256};
-            use alloy_sol_types::SolCall;
-
-            let cd = fundsOutCall {
-                recipient: Address::from([0x11; 20]),
-                amount: U256::from(1_000u64),
-                burnId: U256::from(7u64), // listener-supplied, must be overwritten
-                sourceChainId: U256::from(5u64),
-                destinationChainId: U256::from(6u64),
-                sourceAddress: "rgb-src".to_string(),
-                proof: Bytes::from(vec![0xCC; 64]),
-                settlementData: Bytes::new(),
-            }
-            .abi_encode();
-
-            let validated = validated(
-                Some(transition(OP_ID, ifa::TS_TRANSFER)),
-                vec![MINT_A.into(), MINT_B.into()],
-            );
-            let out = apply_op_id_binding(&cd, &validated).unwrap();
-
-            let decoded = fundsOutCall::abi_decode_validate(&out)
-                .expect("binding output must remain ABI-decodable");
-            assert_eq!(decoded.burnId, U256::from_be_bytes(id(OP_ID)));
-            assert_eq!(decoded.recipient, Address::from([0x11; 20]));
-            assert_eq!(decoded.proof, Bytes::from(vec![0xCC; 64]));
-            assert_eq!(
-                extract_funds_in_ids(&out).unwrap(),
-                vec![id(MINT_A), id(MINT_B)]
-            );
-            assert_eq!(
-                decoded.abi_encode(),
-                out,
-                "binding output must be a canonical encoding"
-            );
-        }
-    }
-
-    // =========================================================================
-    // #65 — pin the hand-derived rewrite offsets to the alloy-derived ABI
-    // layout so the constants cannot silently drift from the real encoding.
-    // =========================================================================
-
-    mod abi_layout {
-        use super::*;
-        use crate::networks::evm::validation::fundsOutCall;
-        use alloy_primitives::{Address, Bytes, U256};
-        use alloy_sol_types::SolCall;
-
-        fn marker_calldata() -> Vec<u8> {
-            fundsOutCall {
-                recipient: Address::from([0x11; 20]),
-                amount: U256::from(0xA1A2_A3A4u64),
-                burnId: U256::from_be_bytes([0xBB; 32]),
-                sourceChainId: U256::from(5u64),
-                destinationChainId: U256::from(6u64),
-                sourceAddress: "rgb-src".to_string(),
-                proof: Bytes::from(vec![0xCC; 64]),
-                settlementData: Bytes::from(vec![0xDD; 32]),
-            }
-            .abi_encode()
-        }
-
-        #[test]
-        fn amount_offset_matches_abi_layout() {
-            let cd = marker_calldata();
-            assert_eq!(
-                extract_uint256_as_u64(&cd, FUNDS_OUT_AMOUNT_OFFSET).unwrap(),
-                0xA1A2_A3A4
-            );
-        }
-
-        #[test]
-        fn burn_id_offset_matches_abi_layout() {
-            let cd = marker_calldata();
-            assert_eq!(
-                extract_bytes32(&cd, FUNDS_OUT_BURN_ID_OFFSET).unwrap(),
-                [0xBB; 32]
-            );
-        }
-
-        #[test]
-        fn proof_head_offset_matches_abi_layout() {
-            let cd = marker_calldata();
-            let proof_rel = read_u256_as_usize(&cd, FUNDS_OUT_PROOF_HEAD_OFFSET).unwrap();
-            let len = read_u256_as_usize(&cd, 4 + proof_rel).unwrap();
-            assert_eq!(len, 64);
-            assert_eq!(
-                &cd[4 + proof_rel + 32..4 + proof_rel + 32 + 64],
-                &[0xCC; 64][..]
-            );
-        }
-
-        #[test]
-        fn settlement_data_head_offset_matches_abi_layout() {
-            let cd = marker_calldata();
-            let sd_rel = read_u256_as_usize(&cd, FUNDS_OUT_SETTLEMENT_DATA_HEAD_OFFSET).unwrap();
-            let len = read_u256_as_usize(&cd, 4 + sd_rel).unwrap();
-            assert_eq!(len, 32);
-            assert_eq!(&cd[4 + sd_rel + 32..4 + sd_rel + 32 + 32], &[0xDD; 32][..]);
-        }
-    }
-
-    // =========================================================================
     // BtcRelay-agreement cross-check (#57 / #122) — `verify_btc_relay_agreement`.
     // These exercise `proof` decoding and header comparison directly against a
     // synthetic regtest header chain.
@@ -1087,20 +532,35 @@ mod tests {
             (chain, display)
         }
 
-        /// `fundsOut` calldata carrying a well-formed `proof` tail. The 8 head
-        /// slots are zero except `proofOffset` (slot 6), which points at the
-        /// tail laid out right after the head (= 256 bytes from the args
-        /// start). Tail: `[length=64][blockHeight uint256][commitmentHash]`.
+        /// The 4-field finality proof payload:
+        /// `abi.encode(sourceHeight, sourceCommit, latestHeight, latestCommit)`.
+        fn proof_bytes(
+            source_height: u32,
+            source_commit: [u8; 32],
+            latest_height: u32,
+            latest_commit: [u8; 32],
+        ) -> Bytes {
+            let mut p = Vec::with_capacity(FUNDS_OUT_PROOF_LEN);
+            p.extend_from_slice(&u256_be(source_height as u64));
+            p.extend_from_slice(&source_commit);
+            p.extend_from_slice(&u256_be(latest_height as u64));
+            p.extend_from_slice(&latest_commit);
+            Bytes::from(p)
+        }
+
+        /// `fundsOut` calldata carrying a well-formed proof. The synthetic chain
+        /// has a single header, so source and latest point at the same block —
+        /// the degenerate but valid case where the burn sits at the relay tip.
         fn calldata_with_proof(block_height: u32, commitment_display: [u8; 32]) -> Vec<u8> {
-            let mut data = Vec::new();
-            data.extend_from_slice(&FUNDS_OUT_SELECTOR_POOLS);
-            let mut head = [0u8; 8 * 32];
-            head[6 * 32..7 * 32].copy_from_slice(&u256_be(256)); // proofOffset
-            data.extend_from_slice(&head);
-            data.extend_from_slice(&u256_be(64)); // proof bytes length
-            data.extend_from_slice(&u256_be(block_height as u64)); // blockHeight
-            data.extend_from_slice(&commitment_display); // commitmentHash
-            data
+            mock_funds_out_calldata_with_proof(
+                1_000,
+                proof_bytes(
+                    block_height,
+                    commitment_display,
+                    block_height,
+                    commitment_display,
+                ),
+            )
         }
 
         #[test]
@@ -1135,8 +595,55 @@ mod tests {
             let cd = calldata_with_proof(99, display_hash);
             let err = verify_btc_relay_agreement(&cd, &chain).unwrap_err();
             assert!(
-                err.to_string().contains("no header at block height 99"),
+                err.to_string()
+                    .contains("no header at source block height 99"),
                 "got: {err}"
+            );
+        }
+
+        /// The relay-tip half of the proof is checked too, not just the source
+        /// block — otherwise the enclave would be delegating the freshness claim
+        /// entirely to a relay the untrusted host also feeds.
+        #[test]
+        fn rejects_unknown_latest_block() {
+            let (chain, display_hash) = chain_with_one_header();
+            let cd = mock_funds_out_calldata_with_proof(
+                1_000,
+                proof_bytes(1, display_hash, 99, display_hash),
+            );
+            let err = verify_btc_relay_agreement(&cd, &chain).unwrap_err();
+            assert!(
+                err.to_string()
+                    .contains("no header at latest block height 99"),
+                "got: {err}"
+            );
+        }
+
+        #[test]
+        fn rejects_mismatched_latest_commitment() {
+            let (chain, display_hash) = chain_with_one_header();
+            let cd = mock_funds_out_calldata_with_proof(
+                1_000,
+                proof_bytes(1, display_hash, 1, [0x11; 32]),
+            );
+            let err = verify_btc_relay_agreement(&cd, &chain).unwrap_err();
+            assert!(
+                err.to_string().contains("latest commitmentHash"),
+                "got: {err}"
+            );
+        }
+
+        #[test]
+        fn rejects_latest_below_source() {
+            let (chain, display_hash) = chain_with_one_header();
+            let cd = mock_funds_out_calldata_with_proof(
+                1_000,
+                proof_bytes(5, display_hash, 1, display_hash),
+            );
+            let err = verify_btc_relay_agreement(&cd, &chain).unwrap_err();
+            assert!(
+                err.to_string().contains("cannot precede"),
+                "expected the tip-ordering guard, got: {err}"
             );
         }
 
@@ -1158,24 +665,38 @@ mod tests {
 
         #[test]
         fn rejects_malformed_proof_length() {
-            let (chain, display_hash) = chain_with_one_header();
-            let mut cd = calldata_with_proof(1, display_hash);
-            // Corrupt the proof `bytes` length word (at byte 260) to a
-            // non-zero, non-64 value: a calldata that claims a proof must
-            // carry a 64-byte one.
-            cd[260..292].copy_from_slice(&u256_be(33));
+            let (chain, _) = chain_with_one_header();
+            let cd = mock_funds_out_calldata_with_proof(1_000, Bytes::from(vec![0u8; 33]));
             let err = verify_btc_relay_agreement(&cd, &chain).unwrap_err();
-            assert!(err.to_string().contains("64 bytes"), "got: {err}");
+            assert!(err.to_string().contains("128 bytes"), "got: {err}");
+        }
+
+        /// The pre-migration proof was a single 64-byte
+        /// `(blockHeight, commitmentHash)` pair. It must be rejected outright:
+        /// silently accepting it would verify the source block while leaving the
+        /// relay-freshness half of the proof unchecked.
+        #[test]
+        fn rejects_legacy_two_field_proof() {
+            let (chain, display_hash) = chain_with_one_header();
+            let mut legacy = Vec::with_capacity(64);
+            legacy.extend_from_slice(&u256_be(1));
+            legacy.extend_from_slice(&display_hash);
+            let cd = mock_funds_out_calldata_with_proof(1_000, Bytes::from(legacy));
+            let err = verify_btc_relay_agreement(&cd, &chain).unwrap_err();
+            assert!(err.to_string().contains("128 bytes"), "got: {err}");
         }
 
         #[test]
         fn rejects_blockheight_over_u32() {
             let (chain, display_hash) = chain_with_one_header();
-            let mut cd = calldata_with_proof(1, display_hash);
-            // Set a blockHeight word (at byte 292) that overflows u32.
             let mut huge = [0u8; 32];
             huge[20] = 0x01; // a bit set above the low 4 bytes
-            cd[292..324].copy_from_slice(&huge);
+            let mut payload = Vec::with_capacity(FUNDS_OUT_PROOF_LEN);
+            payload.extend_from_slice(&huge); // sourceHeight
+            payload.extend_from_slice(&display_hash);
+            payload.extend_from_slice(&u256_be(1));
+            payload.extend_from_slice(&display_hash);
+            let cd = mock_funds_out_calldata_with_proof(1_000, Bytes::from(payload));
             let err = verify_btc_relay_agreement(&cd, &chain).unwrap_err();
             assert!(err.to_string().contains("u32 range"), "got: {err}");
         }

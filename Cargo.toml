@@ -9,6 +9,9 @@ strip = true
 panic = "abort"
 codegen-units = 1
 
+#[patch."ssh://git@github.com/UTEXO-Protocol/federated-signer-proto.git"]
+#federated-signer-proto = { path = "../federated-signer-proto/rust-gen" }
+
 # RGB ecosystem crates — pinned to git master for consignment validation.
 [patch.crates-io]
 rgb-ops = { git = "https://github.com/rgb-protocol/rgb-ops", branch = "master" }
