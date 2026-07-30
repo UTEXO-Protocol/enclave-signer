@@ -196,6 +196,15 @@ fn dispatch(request: EnclaveRequest, ctx: &ServerContext) -> EnclaveResponse {
             tracing::info!("request: GetAttestedPublicKey");
             handle_get_attested_public_key(ctx, req)
         }
+        // Concordium (CCD) signing is defined in the proto but not supported by
+        // this deployment's enclave (no Ed25519 governance key is derived here).
+        // Reject fail-closed rather than silently mis-routing.
+        Some(Request::SignCcd(_)) => {
+            tracing::warn!("request: SignCcd — Concordium signing not supported by this enclave");
+            Err(EnclaveError::InvalidRequest(
+                "Concordium (CCD) signing is not supported by this enclave".into(),
+            ))
+        }
         None => {
             tracing::warn!("received empty request (no oneof variant set)");
             return EnclaveResponse {
@@ -241,6 +250,13 @@ fn handle_sign(ctx: &ServerContext, req: SignRequest) -> Result<EnclaveResponse>
     let source_commission = match source_ref {
         SourceNetwork::EvmSource(source) => source.commission,
         SourceNetwork::RgbSource(source) => source.commission,
+        // CCD source is rejected earlier in validate_source; unreachable here
+        // but kept explicit + fail-closed for exhaustiveness.
+        SourceNetwork::CcdSource(_) => {
+            return Err(EnclaveError::InvalidRequest(
+                "Concordium (CCD) source is not supported by this enclave".into(),
+            ))
+        }
     };
     let destination_proof = validate_destination(
         req.amount,
@@ -535,6 +551,9 @@ fn handle_initialize(ctx: &ServerContext, req: InitializeKeyRequest) -> Result<E
             rgb_asset_id: ctx.bridge_config.rgb_asset_id.clone(),
             evm_gas_tx_uncompressed_pub: keys.evm_gas_tx_uncompressed_pub.to_vec(),
             evm_gas_tx_address: keys.evm_gas_tx_address.to_vec(),
+            // No Concordium key is derived by this enclave — empty (also kept
+            // out of the attestation bundle, so attestation stays unchanged).
+            ccd_ed25519_pub: Vec::new(),
         })),
     })
 }
@@ -578,6 +597,10 @@ fn build_public_keys_response(
         rgb_asset_id: cfg.rgb_asset_id.clone(),
         evm_gas_tx_uncompressed_pub: keys.evm_gas_tx_uncompressed_pub.to_vec(),
         evm_gas_tx_address: keys.evm_gas_tx_address.to_vec(),
+        // No Concordium key derived here — empty, and intentionally NOT folded
+        // into canonical_pubkey_bundle (attestation user_data stays a 12-field
+        // bundle, so verify/clone semantics are unchanged).
+        ccd_ed25519_pub: Vec::new(),
     }
 }
 

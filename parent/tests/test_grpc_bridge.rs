@@ -56,6 +56,7 @@ fn start_mock_enclave() -> u16 {
                             rgb_asset_id: String::new(),
                             evm_gas_tx_uncompressed_pub: vec![0xFF; 64],
                             evm_gas_tx_address: vec![0xFA; 20],
+                            ccd_ed25519_pub: vec![],
                         },
                     )),
                 },
@@ -117,6 +118,7 @@ fn start_mock_enclave() -> u16 {
                             rgb_asset_id: String::new(),
                             evm_gas_tx_uncompressed_pub: vec![0xFF; 64],
                             evm_gas_tx_address: vec![0xFA; 20],
+                            ccd_ed25519_pub: vec![],
                         },
                     )),
                 },
@@ -153,6 +155,7 @@ fn start_mock_enclave() -> u16 {
                         rgb_asset_id: String::new(),
                         evm_gas_tx_uncompressed_pub: vec![0xFF; 64],
                         evm_gas_tx_address: vec![0xCC; 20],
+                        ccd_ed25519_pub: vec![],
                     };
                     let mut bundle: Vec<u8> = Vec::new();
                     let chain_id_bytes = public_keys.chain_id.to_be_bytes();

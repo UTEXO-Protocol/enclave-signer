@@ -183,6 +183,11 @@ impl ParentAdapterService {
                         .collect(),
                 }),
             ),
+            // Concordium (CCD) is defined in the proto but not supported by this
+            // enclave — reject fail-closed rather than mis-routing.
+            Some(source_proof::Chain::Ccd(_)) => Err(Status::unimplemented(
+                "Concordium (CCD) source is not supported by this enclave",
+            )),
             None => Err(Status::invalid_argument(
                 "source proof has no chain-specific evidence",
             )),
@@ -222,6 +227,11 @@ impl ParentAdapterService {
             // via `data_type=BTC_UTXO` to the SignBtc path, never here.
             sign_request::Data::BtcData(_) => unreachable!(
                 "BtcData is handled by the BTC_UTXO dispatch, not enclave_destination_network"
+            ),
+            // CCD is not a supported cross-network destination and is rejected
+            // upstream in `sign`, so it never reaches this converter.
+            sign_request::Data::CcdData(_) => unreachable!(
+                "CcdData is not a supported destination; rejected before enclave_destination_network"
             ),
         }
     }
@@ -315,6 +325,11 @@ impl ParentService for ParentAdapterService {
                         return Err(Status::invalid_argument(
                             "TRANSACTION data_type must not carry BtcData; \
                              use data_type=BTC_UTXO for plain-BTC signing",
+                        ))
+                    }
+                    Some(sign_request::Data::CcdData(_)) => {
+                        return Err(Status::unimplemented(
+                            "Concordium (CCD) signing is not supported by this enclave",
                         ))
                     }
                     None => return Err(Status::invalid_argument("SignRequest.data is missing")),
@@ -728,6 +743,9 @@ impl ParentService for ParentAdapterService {
                     rgb_asset_id: pk.rgb_asset_id,
                     evm_gas_tx_uncompressed_pub: pk.evm_gas_tx_uncompressed_pub,
                     evm_gas_tx_address: pk.evm_gas_tx_address,
+                    // Forwarded from the enclave; empty on this deployment (no
+                    // Concordium key is derived here).
+                    ccd_ed25519_pub: pk.ccd_ed25519_pub,
                 }))
             }
             Some(enclave_response::Response::Error(e)) => Err(Self::enclave_error_to_status(&e)),

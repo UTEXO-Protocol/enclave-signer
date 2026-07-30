@@ -51,6 +51,10 @@ pub fn validate_source(
             rgb_consignment: None,
         }),
         SourceNetwork::RgbSource(source) => rgb::validate_source(amount, source, ctx),
+        // Concordium (CCD) is not a supported source network on this enclave.
+        SourceNetwork::CcdSource(_) => Err(EnclaveError::InvalidRequest(
+            "Concordium (CCD) source is not supported by this enclave".into(),
+        )),
     }
 }
 
