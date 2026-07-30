@@ -21,18 +21,20 @@
 
 # GLIBC PIN (runtime-compat, NOT just build): the enclave binary links against
 # the builder's glibc but RUNS on the amazonlinux:2023-minimal runtime rootfs
-# below, which ships glibc 2.34. The default `rust:1.89-slim` moved to Debian
+# below, which ships glibc 2.34. The default `rust:*-slim` moved to Debian
 # trixie (glibc >=2.38), and `aws-lc-sys` (Electrum -> rustls -> aws-lc-rs) pulls
 # in a GLIBC_2.38 symbol, so a trixie-built binary aborts at enclave boot with
 # `version GLIBC_2.38 not found`. Bullseye (Debian 11) ships glibc 2.31 <= 2.34,
 # so the binary only needs symbols the runtime provides. Pin by DIGEST; bump tag
 # + digest together and keep it on a glibc <= the runtime's.
 # NOTE (dev merge): dev's Dockerfile.enclave bumped this to `rust:1.96-slim`
-# (Debian trixie / glibc 2.38) alongside enabling `evm-rpc`. We deliberately KEEP
-# bullseye — trixie breaks the AL2023 runtime — and only graft the `evm-rpc`
-# feature onto the build below. If evm-rpc's deps ever need a newer rustc than
-# 1.89, bump to a newer *-bullseye rust tag (glibc <= 2.34), never trixie.
-FROM rust:1.89-slim-bullseye@sha256:a7a758a6c8493b507a3d75fa4dc3f41e2902f8f2eeb124ae5527df3d625539e6 AS builder
+# (Debian trixie / glibc 2.38) alongside enabling `evm-rpc`. We take dev's rustc
+# 1.96 but on BULLSEYE, not trixie: `evm-rpc` pulls `alloy` 2.1.x whose MSRV is
+# rustc 1.91, so the previous 1.89 pin no longer compiles ("requires rustc 1.91")
+# — yet trixie's glibc 2.38 still breaks the AL2023 runtime. `1.96-slim-bullseye`
+# satisfies BOTH (rustc >= 1.91 AND glibc 2.31 <= 2.34). If a future dep needs a
+# newer rustc, bump to a newer *-bullseye tag (glibc <= 2.34), never trixie.
+FROM rust:1.96-slim-bullseye@sha256:c593596210f729542a92aced6a8b0812bcc8d04c5f1b238e663b800d0e2e17bd AS builder
 
 # `git` + `openssh-client`: the workspace `[patch.crates-io]` uses public
 # git URLs for rgb-consensus / rgb-ops / rgb-invoicing / rgb-strict-encoding,
