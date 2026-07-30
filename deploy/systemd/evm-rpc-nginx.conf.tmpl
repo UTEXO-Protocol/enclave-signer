@@ -1,0 +1,32 @@
+# Loopback-only HTTP -> HTTPS shim for the enclave evm-rpc egress path.
+#
+# The enclave's alloy client is built with RootProvider::new_http(EVM_RPC_URL) and
+# EVM_RPC_URL is pinned to loopback `http://127.0.0.1:3444` (config.rs rejects any
+# non-loopback URL). So it emits PLAINTEXT JSON-RPC with NO API key and NO TLS. The
+# in-enclave forwarder relays 3444 -> vsock 8002 -> host vsock-proxy -> here. This
+# server terminates TLS to the upstream and injects the `/v2/<key>` path so Alchemy
+# (HTTPS-only) accepts it.
+#
+# __EVM_RPC_UPSTREAM__ is substituted by deploy/host-prep-evmrpc.sh from an SSM
+# SecureString at deploy time — the API key is NEVER stored in the repo or in the
+# SSM command text. __EVM_RPC_HOST__ is the upstream hostname (for SNI + Host).
+#
+# Rendered file is written 0600 root:root (nginx master parses it as root at start).
+server {
+    listen 127.0.0.1:8547;
+    server_name _;
+
+    # Cap body size; JSON-RPC calls here are tiny (eth_getTransactionReceipt / eth_blockNumber).
+    client_max_body_size 64k;
+
+    location / {
+        proxy_pass https://__EVM_RPC_UPSTREAM__;
+        proxy_ssl_server_name on;
+        proxy_set_header Host __EVM_RPC_HOST__;
+        proxy_http_version 1.1;
+        proxy_set_header Connection "";
+        proxy_connect_timeout 5s;
+        proxy_send_timeout 15s;
+        proxy_read_timeout 20s;
+    }
+}
