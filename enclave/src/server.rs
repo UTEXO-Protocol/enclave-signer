@@ -381,21 +381,26 @@ fn handle_sign(ctx: &ServerContext, req: SignRequest) -> Result<EnclaveResponse>
             // validation captured, bind the calldata the enclave is about to
             // sign to the operation `validate()` authenticated — witness
             // confirmation (4th I-03 / #95), BtcRelay agreement (#57 / #122),
-            // the consignment-bound release amount. The current deployment
-            // supports only the swap/send-receive flow, whose general bridge
-            // `burnId` and `fundsInIds` must be preserved. Mint/burn OpId
-            // rewriting stays disabled until the two flows are routed by
-            // network id. On non-rgb-validation builds there is no consignment
-            // to bind and fundsOut is refused upstream at source validation.
+            // the consignment-bound release amount.
+            //
+            // This binding is RGB-source-specific and MUST run only for an RGB
+            // source. A CCD source carries no consignment (`rgb_consignment` is
+            // None by design), and a CcdSource -> EvmDestination release is already
+            // authorized above by validate_source + validate_route_proofs +
+            // validate_destination (amount cross-check). Applying the binding
+            // unconditionally regressed CcdSource -> EvmDestination: the fundsOut
+            // selector reached `apply_funds_out_binding`, which requires a validated
+            // RGB consignment and rejected the sign. On non-rgb-validation builds
+            // there is no consignment to bind and fundsOut is refused upstream at
+            // source validation.
             #[cfg(feature = "rgb-validation")]
-            let destination = {
+            if matches!(source_ref, SourceNetwork::RgbSource(_)) {
                 apply_funds_out_binding(
                     ctx,
                     &destination,
                     source_validated.rgb_consignment.as_ref(),
                 )?;
-                destination
-            };
+            }
             handle_sign_evm(ctx, destination)
         }
         DestinationNetwork::RgbDestination(destination) => handle_sign_psbt(ctx, destination),
