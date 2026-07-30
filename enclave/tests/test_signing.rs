@@ -666,6 +666,7 @@ fn test_no_evm_rpc_build_refuses_bridge_psbt() {
         request: Some(Request::InitializeKey(InitializeKeyRequest {
             seed: vec![],
             mnemonic: String::new(),
+            cloning_secret: String::new(),
         })),
     };
     common::send_request(port, &init_req);
@@ -808,6 +809,7 @@ fn test_sign_psbt_zero_evm_hash_is_bridge_mode_not_vanilla() {
         request: Some(Request::InitializeKey(InitializeKeyRequest {
             seed: vec![],
             mnemonic: String::new(),
+            cloning_secret: String::new(),
         })),
     };
     common::send_request(port, &init_req);
@@ -856,6 +858,7 @@ fn init_server(port: u16) {
         request: Some(Request::InitializeKey(InitializeKeyRequest {
             seed: vec![],
             mnemonic: String::new(),
+            cloning_secret: String::new(),
         })),
     };
     common::send_request(port, &init_req);
@@ -1506,6 +1509,7 @@ fn init(port: u16) {
             request: Some(Request::InitializeKey(InitializeKeyRequest {
                 seed: vec![],
                 mnemonic: String::new(),
+                cloning_secret: String::new(),
             })),
         },
     );

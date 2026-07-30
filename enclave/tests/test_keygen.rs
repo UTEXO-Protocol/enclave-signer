@@ -184,6 +184,7 @@ fn production_build_rejects_caller_supplied_seed_and_mnemonic() {
         request: Some(Request::InitializeKey(InitializeKeyRequest {
             seed: vec![7u8; 64],
             mnemonic: String::new(),
+            cloning_secret: String::new(),
         })),
     };
     let seed_resp = common::send_request(port, &seed_req);
@@ -205,6 +206,7 @@ fn production_build_rejects_caller_supplied_seed_and_mnemonic() {
         request: Some(Request::InitializeKey(InitializeKeyRequest {
             seed: vec![],
             mnemonic: TEST_MNEMONIC.into(),
+            cloning_secret: String::new(),
         })),
     };
     let mnemonic_resp = common::send_request(port, &mnemonic_req);
@@ -226,6 +228,7 @@ fn production_build_rejects_caller_supplied_seed_and_mnemonic() {
         request: Some(Request::InitializeKey(InitializeKeyRequest {
             seed: vec![],
             mnemonic: String::new(),
+            cloning_secret: String::new(),
         })),
     };
     let entropy_resp = common::send_request(port, &entropy_req);
@@ -250,6 +253,7 @@ fn dev_build_accepts_caller_supplied_seed_and_mnemonic() {
         request: Some(Request::InitializeKey(InitializeKeyRequest {
             seed: vec![7u8; 64],
             mnemonic: String::new(),
+            cloning_secret: String::new(),
         })),
     };
     let seed_resp = common::send_request(port_seed, &seed_req);
@@ -267,6 +271,7 @@ fn dev_build_accepts_caller_supplied_seed_and_mnemonic() {
         request: Some(Request::InitializeKey(InitializeKeyRequest {
             seed: vec![],
             mnemonic: TEST_MNEMONIC.into(),
+            cloning_secret: String::new(),
         })),
     };
     let mnemonic_resp = common::send_request(port_mnemonic, &mnemonic_req);
