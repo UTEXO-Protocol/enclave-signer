@@ -12,7 +12,7 @@
 # loads the required deploy key.
 
 # ===== Builder Stage =====
-FROM rust:1.89-slim AS builder
+FROM rust:1.96-slim AS builder
 
 # `git` + `openssh-client`: the workspace `[patch.crates-io]` uses public
 # git URLs for rgb-consensus / rgb-ops / rgb-invoicing / rgb-strict-encoding,
@@ -70,10 +70,10 @@ RUN --mount=type=ssh \
       git config --global url."ssh://git@github.com-federated/UTEXO-Protocol/federated-signer-proto.git".insteadOf "ssh://git@github.com/UTEXO-Protocol/federated-signer-proto.git"; \
       git config --global url."ssh://git@github.com-consignment/UTEXO-Protocol/rgb-consignment-parser.git".insteadOf "ssh://git@github.com/UTEXO-Protocol/rgb-consignment-parser.git"; \
     fi; \
-    cargo build --features allow-seed-import,spv
+    cargo build --features allow-seed-import,spv,evm-rpc
 
 # ===== Runtime Stage =====
-FROM debian:bookworm-slim
+FROM debian:trixie-slim
 
 RUN apt-get update && apt-get install -y \
     ca-certificates \

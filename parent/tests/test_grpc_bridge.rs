@@ -67,6 +67,10 @@ fn start_mock_enclave() -> u16 {
                             response: Some(enclave_response::Response::EvmSignature(
                                 enclave_proto::EvmSignatureResponse {
                                     signature: vec![0xCC; 65],
+                                    // Marker so the roundtrip test can assert the
+                                    // parent forwards the enclave-rewritten
+                                    // calldata (OpId binding, #93/#63).
+                                    call_data: vec![0xE0; 9],
                                 },
                             )),
                         },
@@ -90,6 +94,14 @@ fn start_mock_enclave() -> u16 {
                         },
                     }
                 }
+                Some(enclave_request::Request::SignBtc(_)) => EnclaveResponse {
+                    response: Some(enclave_response::Response::SignedPsbt(
+                        enclave_proto::SignedPsbtResponse {
+                            signed_psbt: vec![0xBC; 80],
+                            inputs_signed: 1,
+                        },
+                    )),
+                },
                 Some(enclave_request::Request::InitializeKey(_)) => EnclaveResponse {
                     response: Some(enclave_response::Response::InitializeKey(
                         enclave_proto::InitializeKeyResponse {
@@ -183,6 +195,29 @@ fn start_mock_enclave() -> u16 {
                         )),
                     }
                 }
+                Some(enclave_request::Request::SignRawDigest(req)) => {
+                    // Prove the parent forwarded the unsigned gas-tx preimage:
+                    // require it, and echo its first byte into the signature so
+                    // the test can assert what the enclave received.
+                    if req.unsigned_tx.is_empty() {
+                        EnclaveResponse {
+                            response: Some(enclave_response::Response::Error(
+                                enclave_proto::ErrorResponse {
+                                    code: 3,
+                                    message: "mock: SignRawDigest missing unsigned_tx".into(),
+                                },
+                            )),
+                        }
+                    } else {
+                        EnclaveResponse {
+                            response: Some(enclave_response::Response::RawDigestSig(
+                                enclave_proto::RawDigestSignatureResponse {
+                                    signature: vec![req.unsigned_tx[0]; 65],
+                                },
+                            )),
+                        }
+                    }
+                }
                 _ => EnclaveResponse {
                     response: Some(enclave_response::Response::Error(
                         enclave_proto::ErrorResponse {
@@ -265,6 +300,7 @@ fn evm_source(amount: u64, commission: u64) -> SourceProof {
         finalized: true,
         chain: Some(source_proof::Chain::Evm(EvmSource {
             tx_hash: vec![0xAA; 32],
+            funds_in_operation_id: 0,
         })),
     }
 }
@@ -358,12 +394,57 @@ async fn grpc_sign_evm_roundtrip() {
         proxy_contract: vec![],
         calldata_amount: 0,
         calldata_commission: 0,
+        unsigned_tx: Vec::new(),
     };
 
     let req = sign_evm_request(rgb_source(0, 0, vec![], vec![], String::new()), payload);
 
     let resp = client.sign(req).await.unwrap().into_inner();
     assert_eq!(resp.signature.len(), 65, "EVM signature must be 65 bytes");
+    // The parent must forward the enclave-rewritten (OpId-bound) calldata back
+    // to the caller — the signature commits to it (#93/#63).
+    assert_eq!(
+        resp.call_data,
+        vec![0xE0; 9],
+        "parent must forward EvmSignatureResponse.call_data to the caller"
+    );
+}
+
+#[tokio::test]
+async fn grpc_sign_evm_gas_tx_forwards_unsigned_tx() {
+    let enclave_port = start_mock_enclave();
+    let grpc_port = start_grpc_server(enclave_port).await;
+
+    let mut client = ParentServiceClient::connect(format!("http://127.0.0.1:{grpc_port}"))
+        .await
+        .unwrap();
+
+    // EVM_GAS_TX: the unsigned tx preimage travels in EnrichedEvmPayload.unsigned_tx.
+    let payload = enriched::EnrichedEvmPayload {
+        call_data: Vec::new(),
+        nonce: 0,
+        deadline: 0,
+        chain_id: 1,
+        proxy_contract: vec![],
+        calldata_amount: 0,
+        calldata_commission: 0,
+        unsigned_tx: vec![0x02; 10],
+    };
+    let req = SignRequest {
+        common: Some(common(0, 84, DataType::EvmGasTx)),
+        source: None,
+        data: Some(sign_request::Data::EvmData(payload)),
+    };
+
+    // The mock enclave echoes unsigned_tx[0] into every signature byte, so a
+    // signature of all-0x02 proves the parent forwarded the preimage to
+    // SignRawDigestRequest.unsigned_tx (and would have errored on an empty one).
+    let resp = client.sign(req).await.unwrap().into_inner();
+    assert_eq!(
+        resp.signature,
+        vec![0x02; 65],
+        "parent must forward EnrichedEvmPayload.unsigned_tx to the enclave"
+    );
 }
 
 #[tokio::test]
@@ -394,6 +475,56 @@ async fn grpc_sign_psbt_roundtrip() {
 }
 
 #[tokio::test]
+async fn grpc_sign_btc_roundtrip() {
+    // BTC_UTXO routes the EnrichedBtcPayload to a SignBtcRequest and returns a
+    // signed PSBT — the plain-BTC path is distinct from TRANSACTION/SignPsbt.
+    let enclave_port = start_mock_enclave();
+    let grpc_port = start_grpc_server(enclave_port).await;
+
+    let mut client = ParentServiceClient::connect(format!("http://127.0.0.1:{grpc_port}"))
+        .await
+        .unwrap();
+
+    let payload = enriched::EnrichedBtcPayload {
+        psbt_bytes: vec![0x70, 0x73, 0x62, 0x74, 0xFF],
+    };
+
+    let req = SignRequest {
+        common: Some(common(0, 0, DataType::BtcUtxo)),
+        source: None,
+        data: Some(sign_request::Data::BtcData(payload)),
+    };
+
+    let resp = client.sign(req).await.unwrap().into_inner();
+    assert_eq!(
+        resp.signature,
+        vec![0xBC; 80],
+        "BTC_UTXO should route to SignBtc and return its signed PSBT"
+    );
+}
+
+#[tokio::test]
+async fn grpc_btc_utxo_rejects_missing_payload() {
+    // BTC_UTXO with no BtcData in the oneof must be rejected at the boundary,
+    // not forwarded to the enclave.
+    let enclave_port = start_mock_enclave();
+    let grpc_port = start_grpc_server(enclave_port).await;
+
+    let mut client = ParentServiceClient::connect(format!("http://127.0.0.1:{grpc_port}"))
+        .await
+        .unwrap();
+
+    let req = SignRequest {
+        common: Some(common(0, 0, DataType::BtcUtxo)),
+        source: None,
+        data: None,
+    };
+
+    let status = client.sign(req).await.unwrap_err();
+    assert_eq!(status.code(), tonic::Code::InvalidArgument);
+}
+
+#[tokio::test]
 async fn grpc_evm_passes_enriched_fields_through() {
     // Verify the Parent Adapter correctly deserializes EnrichedEvmPayload
     // and passes fields to the enclave.
@@ -413,6 +544,7 @@ async fn grpc_evm_passes_enriched_fields_through() {
                     response: Some(enclave_response::Response::EvmSignature(
                         enclave_proto::EvmSignatureResponse {
                             signature: vec![0xCC; 65],
+                            call_data: Vec::new(),
                         },
                     )),
                 };
@@ -437,6 +569,7 @@ async fn grpc_evm_passes_enriched_fields_through() {
         proxy_contract: vec![0x01; 20],
         calldata_amount: 50,
         calldata_commission: 5,
+        unsigned_tx: Vec::new(),
     };
 
     let req = sign_evm_request(
@@ -499,6 +632,7 @@ async fn grpc_evm_forwards_raw_consignment_bytes() {
                     response: Some(enclave_response::Response::EvmSignature(
                         enclave_proto::EvmSignatureResponse {
                             signature: vec![0xCC; 65],
+                            call_data: Vec::new(),
                         },
                     )),
                 };
@@ -523,6 +657,7 @@ async fn grpc_evm_forwards_raw_consignment_bytes() {
         proxy_contract: vec![0x02; 20],
         calldata_amount: 0,
         calldata_commission: 0,
+        unsigned_tx: Vec::new(),
     };
 
     let req = sign_evm_request(

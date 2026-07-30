@@ -270,6 +270,40 @@ fn clone_rejects_duplicate_requester_attestation_nonce_on_donor() {
 }
 
 #[test]
+fn clone_rejected_handshake_does_not_consume_replay_nonce() {
+    // audit W-13: the donor must record a handshake nonce only AFTER the
+    // pubkey/digest/donor-secret checks pass. A rejected (unauthenticated)
+    // handshake must not consume replay-guard capacity — otherwise anyone able
+    // to mint attestations over arbitrary nonces (the get_attested_public_key
+    // oracle) could exhaust the guard without ever knowing the cloning secret.
+    let (donor_port, donor_keys) = start_donor();
+    let requester_port = start_requester();
+
+    let init = initiate_cloning(requester_port, CLONING_SECRET, &donor_keys.evm_address);
+
+    // Tamper the cloning digest so the handshake is rejected at the digest
+    // binding — which runs *after* the point where the nonce used to be
+    // recorded.
+    let mut tampered = init.clone();
+    tampered.cloning_digest[0] ^= 0xff;
+    let err = request_get_clone(donor_port, &donor_keys.evm_address, &tampered)
+        .expect_err("tampered cloning_digest must be rejected");
+    assert!(
+        !err.message.contains("replay"),
+        "should fail on the digest binding, not the replay guard: {}",
+        err.message
+    );
+
+    // The rejected attempt must NOT have recorded its nonce: a subsequent
+    // valid handshake reusing the same attestation (same nonce) still
+    // succeeds. Pre-fix this failed on the replay guard because the doomed
+    // attempt consumed the nonce first.
+    request_get_clone(donor_port, &donor_keys.evm_address, &init).expect(
+        "valid handshake reusing the same nonce must still succeed after a rejected attempt",
+    );
+}
+
+#[test]
 fn cannot_initialize_after_entering_cloning() {
     let requester_port = start_requester();
     // Start a clone session using a throwaway donor address.
@@ -297,4 +331,104 @@ fn cannot_initialize_after_entering_cloning() {
         }
         other => panic!("expected Error, got {:?}", other),
     }
+}
+
+// ---- audit test coverage: attestation binding on the donor ----
+
+#[test]
+fn clone_donor_rejects_wire_pubkey_not_matching_attestation() {
+    // TC-2 (#107): the parent relays (encryption_pubkey, cloning_digest,
+    // requester_attestation) to the donor. The X25519 pubkey inside the
+    // NSM-signed requester attestation is authoritative; the plaintext
+    // `encryption_pubkey` on the wire is not. A malicious parent could swap the
+    // wire pubkey for one it controls to intercept the sealed seed. The donor
+    // must bind the two (handle_get_clone step 3) and abort on any mismatch.
+    let (donor_port, donor_keys) = start_donor();
+    let requester_port = start_requester();
+
+    let init = initiate_cloning(requester_port, CLONING_SECRET, &donor_keys.evm_address);
+
+    // Tamper only the wire pubkey; leave the attestation (which binds the real
+    // ephemeral pubkey) untouched. Any well-formed 32-byte key that is not the
+    // attested one exercises the binding check.
+    let mut tampered = init.clone();
+    tampered.encryption_pubkey = vec![0x77u8; 32];
+    assert_ne!(
+        tampered.encryption_pubkey, init.encryption_pubkey,
+        "the tampered wire pubkey must differ from the attested one"
+    );
+
+    let err = request_get_clone(donor_port, &donor_keys.evm_address, &tampered)
+        .expect_err("donor must abort when wire pubkey != attested pubkey");
+    assert!(
+        err.message.contains("pubkey mismatch") || err.message.contains("does not match"),
+        "expected a pubkey-binding rejection, got: {}",
+        err.message
+    );
+
+    // Legitimate peer (wire == attested) still succeeds. This also proves the
+    // rejected attempt aborted at the pubkey binding (which runs before the
+    // replay guard records the nonce), so reusing the same attestation is fine.
+    let clone = request_get_clone(donor_port, &donor_keys.evm_address, &init)
+        .expect("legitimate handshake (wire == attested) must succeed");
+    assert_eq!(clone.donor_pubkey.len(), 32);
+    assert_eq!(clone.encrypted_seed.len(), 64 + 16); // seed + Poly1305 tag
+    assert!(!clone.donor_attestation.is_empty());
+}
+
+#[test]
+fn clone_donor_refuses_pcr_mismatched_peer_but_accepts_matching_peer() {
+    // TC-1 (#106): the cloning donor must refuse to seal its seed to a peer
+    // whose PCR0/PCR1 do not match the donor's own measurement -- even when the
+    // handshake otherwise carries a valid attestation, the correct encryption
+    // pubkey, and a correctly-authenticated cloning digest. A PCR-equal peer is
+    // accepted in the SAME run to prove the rejection is PCR-specific, not a
+    // blanket failure.
+    let (donor_port, donor_keys) = start_donor();
+
+    // ---- 1. PCR-mismatched peer: donor must refuse to seal ----
+    let bad_requester_port = start_requester();
+    let bad_init = initiate_cloning(bad_requester_port, CLONING_SECRET, &donor_keys.evm_address);
+
+    // In mock mode the donor's own PCRs (get_own_pcrs) are all-zero, so a
+    // non-zero PCR0/PCR1 is a genuine measurement mismatch. Keep the real
+    // encryption-pubkey + cloning-digest bindings so the request can only fail
+    // on the PCR check (handle_get_clone step 2, which runs first), not on the
+    // pubkey/digest binding.
+    let mismatched_pcrs =
+        attestation_verify::ExpectedPcrs::new([0x11u8; 48], [0x22u8; 48], [0u8; 48]);
+    let mismatched_attestation = attestation_verify::build_mock_document_with_pcrs(
+        &[0x99u8; 32], // arbitrary fresh nonce; donor verifies with expected_nonce = None
+        Some(&bad_init.encryption_pubkey),
+        Some(&bad_init.cloning_digest),
+        &mismatched_pcrs,
+    )
+    .expect("build mismatched-PCR mock doc");
+
+    let mut tampered = bad_init.clone();
+    tampered.requester_attestation = mismatched_attestation;
+
+    let err = request_get_clone(donor_port, &donor_keys.evm_address, &tampered)
+        .expect_err("donor must refuse to seal to a PCR-mismatched peer");
+    assert!(
+        err.message.contains("PCR"),
+        "expected a PCR-mismatch rejection, got: {}",
+        err.message
+    );
+    // request_get_clone returned Err -> no GetCloneResponse, so no encrypted
+    // seed was ever produced or transmitted to the mismatched peer.
+
+    // ---- 2. PCR-equal peer: donor accepts and seals in the SAME run ----
+    let good_requester_port = start_requester();
+    let good_init = initiate_cloning(good_requester_port, CLONING_SECRET, &donor_keys.evm_address);
+    let clone = request_get_clone(donor_port, &donor_keys.evm_address, &good_init)
+        .expect("donor must seal to a PCR-matching peer");
+    assert_eq!(clone.encrypted_seed.len(), 64 + 16); // seed + Poly1305 tag
+    assert_eq!(clone.donor_pubkey.len(), 32);
+
+    // The matching peer can actually unseal it -> proves a real clone, not just
+    // a well-formed-looking response.
+    request_set_clone(good_requester_port, &clone).expect("SetClone should succeed");
+    let good_keys = get_public_keys(good_requester_port);
+    assert_eq!(good_keys.evm_address, donor_keys.evm_address);
 }

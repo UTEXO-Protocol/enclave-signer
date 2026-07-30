@@ -182,3 +182,117 @@ fn attested_pubkey_wrong_expected_nonce_fails_verify() {
         attestation_verify::VerifyError::Attestation(_)
     ));
 }
+
+/// Same field bytes as `canonical_bundle`, but without the u32-BE length
+/// prefixes — a deliberately non-canonical framing used to prove the enclave's
+/// specific serialization (not merely the field contents) is what the
+/// attestation commits to.
+fn naive_concat(keys: &PublicKeysResponse) -> Vec<u8> {
+    let chain_id_bytes = keys.chain_id.to_be_bytes();
+    let parts: [&[u8]; 12] = [
+        &keys.evm_address,
+        &keys.btc_compressed_pub,
+        keys.btc_xpub.as_bytes(),
+        &keys.master_fingerprint,
+        keys.account_xpub_vanilla.as_bytes(),
+        keys.account_xpub_colored.as_bytes(),
+        &keys.evm_uncompressed_pub,
+        &chain_id_bytes,
+        &keys.bridge_contract,
+        keys.rgb_asset_id.as_bytes(),
+        &keys.evm_gas_tx_uncompressed_pub,
+        &keys.evm_gas_tx_address,
+    ];
+    let mut out = Vec::new();
+    for p in parts {
+        out.extend_from_slice(p);
+    }
+    out
+}
+
+/// TA-3 (#111): the attestation bundle the enclave builds must verify with the
+/// `attestation-verify` crate *without any adaptation*, and any tampering with
+/// the committed key bundle — including a differently-serialized copy of the
+/// same fields — must be rejected. This pins the canonical-serialization parity
+/// between the enclave's bundle serializer and the verifier's commitment check.
+#[test]
+fn attested_bundle_verifies_unmodified_and_tampering_is_rejected() {
+    let port = start_test_server();
+    initialize(port);
+
+    let nonce = [0x3cu8; 32];
+    let resp = request_attested(port, &nonce);
+    let public_keys = resp.public_keys.clone().expect("public_keys present");
+
+    // (1) Accepted unmodified: the enclave-built doc verifies as-is, and its
+    // NSM-bound user_data equals sha256 of the canonical bundle — i.e. the
+    // enclave's serialization matches the verifier's byte-for-byte.
+    let verified = attestation_verify::verify_mock_attestation(
+        &resp.attestation_doc,
+        &attestation_verify::ExpectedPcrs::zero(),
+        Some(&nonce),
+    )
+    .expect("enclave-built bundle verifies without adaptation");
+
+    let good_commitment: [u8; 32] = Sha256::digest(canonical_bundle(&public_keys)).into();
+    assert_eq!(
+        verified.user_data.as_deref(),
+        Some(good_commitment.as_slice()),
+        "canonical-serialization parity: attested user_data == sha256(canonical_bundle)"
+    );
+
+    // (2) Tampered bundle rejected: flipping a single byte of any committed
+    // field yields a commitment that no longer matches the attested user_data.
+    let mut tampered = public_keys.clone();
+    tampered.evm_address[0] ^= 0x01;
+    let tampered_commitment: [u8; 32] = Sha256::digest(canonical_bundle(&tampered)).into();
+    assert_ne!(
+        verified.user_data.as_deref(),
+        Some(tampered_commitment.as_slice()),
+        "a tampered key bundle must not match the attested commitment"
+    );
+
+    // (3) Re-serialized bundle rejected: the length-prefixed framing is
+    // load-bearing. Concatenating the *same* field bytes without the u32 length
+    // prefixes is a different serialization that hashes differently, so it
+    // cannot be substituted for the canonical bundle.
+    let reserialized_commitment: [u8; 32] = Sha256::digest(naive_concat(&public_keys)).into();
+    assert_ne!(
+        verified.user_data.as_deref(),
+        Some(reserialized_commitment.as_slice()),
+        "a non-canonical re-serialization of the same fields must not verify"
+    );
+}
+
+/// TA-3 (#111): corrupting the raw attestation bytes must fail verification
+/// outright (CBOR integrity), independent of the key-bundle commitment check.
+#[test]
+fn attested_doc_corruption_fails_verification() {
+    let port = start_test_server();
+    initialize(port);
+
+    let nonce = [0x7eu8; 32];
+    let resp = request_attested(port, &nonce);
+
+    // Sanity: the untouched doc verifies.
+    attestation_verify::verify_mock_attestation(
+        &resp.attestation_doc,
+        &attestation_verify::ExpectedPcrs::zero(),
+        Some(&nonce),
+    )
+    .expect("baseline doc verifies");
+
+    // Truncating the CBOR document leaves an incomplete value that cannot be
+    // decoded — the verifier rejects it.
+    let truncated = &resp.attestation_doc[..resp.attestation_doc.len() / 2];
+    let err = attestation_verify::verify_mock_attestation(
+        truncated,
+        &attestation_verify::ExpectedPcrs::zero(),
+        Some(&nonce),
+    )
+    .expect_err("truncated attestation doc must be rejected");
+    assert!(matches!(
+        err,
+        attestation_verify::VerifyError::Attestation(_)
+    ));
+}

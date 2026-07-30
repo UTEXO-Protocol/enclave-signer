@@ -98,28 +98,41 @@ fn main() {
         );
     } else if bridge_config.is_partially_configured() {
         // Some-but-not-all pin fields set: a botched production config. SignEvm
-        // fails closed on this (audit 4th M-03 / #94); warn loudly at boot so
-        // the operator sees it before the first rejected request.
+        // fails closed on this (audit 4th M-03 / #94); log it before the boot
+        // gate below turns it fatal in a production build.
         tracing::error!(
             chain_id = bridge_config.chain_id,
             bridge_contract = %hex::encode(bridge_config.bridge_contract),
             rgb_asset_id = %bridge_config.rgb_asset_id,
-            "bridge config PARTIALLY set — EVM_CHAIN_ID / BRIDGE_CONTRACT / RGB_ASSET_ID must all \
+            "bridge config PARTIALLY set - EVM_CHAIN_ID / BRIDGE_CONTRACT / RGB_ASSET_ID must all \
              be set (non-zero) or all unset; SignEvm will refuse to sign with this ambiguous pin"
         );
     } else {
         tracing::warn!(
-            "bridge config unconfigured (EVM_CHAIN_ID / BRIDGE_CONTRACT / RGB_ASSET_ID unset) — \
+            "bridge config unconfigured (EVM_CHAIN_ID / BRIDGE_CONTRACT / RGB_ASSET_ID unset) - \
              SignEvm cross-check will fall back to legacy behaviour and the attestation bundle \
              will commit to empty values"
         );
     }
 
+    // Fail-closed at BOOT for a production bridge-signing build (audit C-01
+    // systemic). A per-request refusal (evm::validation / rgb anchor) and the
+    // logs above are not enough: an operator does not tail enclave logs on a
+    // prod host, so an unconfigured or partially-pinned release enclave would
+    // start and silently reject every bridge signature. A release
+    // rgb-validation build that is not fully pinned must never become
+    // reachable. Mirrors the placeholder-checkpoint boot check below; debug /
+    // test / allow-seed-import builds are exempt.
+    if let Err(msg) = bridge_config.assert_configured_in_release() {
+        panic!("{msg}");
+    }
+
     // Donor-side cloning secret. Preferred delivery is at runtime via the
     // `InitializeKey` message (`cloning_secret`), so the secret never lands in
-    // the EIF or the PCRs. The `UTEXO_CLONING_SECRET` env var is kept only as
-    // a legacy/dev fallback and is NOT set by the production Dockerfile; do not
-    // bake it into a release EIF. Never logged; wrapped in `SecretBox`.
+    // the EIF or the PCRs. The `UTEXO_CLONING_SECRET` env var is kept only as a
+    // legacy/dev fallback and is NOT set by the production Dockerfile; do not
+    // bake it into a release EIF. Optional: only needed for enclaves that serve
+    // `GetClone`. Never logged; wrapped in `SecretBox` for zeroize-on-drop.
     if let Ok(secret) = std::env::var("UTEXO_CLONING_SECRET") {
         if !secret.is_empty() {
             if let Err(e) = state.set_donor_cloning_secret(secret) {
@@ -140,7 +153,10 @@ fn main() {
     // ssl:// endpoint we listen on the URL's own port and pin its hostname to
     // 127.0.0.1 in /etc/hosts, so the TLS handshake terminates INSIDE the
     // enclave and validates the real server cert — the host relays ciphertext
-    // only and cannot MITM the witness data.
+    // only and cannot MITM the witness data. Untrusted, host-controlled egress
+    // boundary (audit I-01): data fetched through it is evidence verified by
+    // SPV + rgbstd validation, never trusted input. See `vsock_forwarder`'s
+    // module-level TRUST BOUNDARY note.
     #[cfg(all(feature = "vsock", target_os = "linux"))]
     {
         let vsock_port: u32 = std::env::var("ESPLORA_VSOCK_PORT")
@@ -165,6 +181,68 @@ fn main() {
             utexo_bridge_enclave::vsock_forwarder::start_forwarder(local_port, vsock_port)
         {
             tracing::error!("failed to start vsock forwarder: {e}");
+        }
+
+        // Second forwarder for the EVM JSON-RPC used by in-enclave FundsIn
+        // verification (#60). Distinct loopback/vsock ports from Esplora
+        // (3443/8001). Untrusted, host-controlled egress boundary (audit I-01);
+        // the host must run: vsock-proxy <EVM_RPC_VSOCK_PORT> <evm-rpc-host> <port>.
+        #[cfg(feature = "evm-rpc")]
+        {
+            let evm_vsock_port: u32 = std::env::var("EVM_RPC_VSOCK_PORT")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(8002);
+            tracing::info!(
+                evm_vsock_port,
+                "starting EVM RPC vsock forwarder (host must run: vsock-proxy {evm_vsock_port} <evm-rpc-host> <evm-rpc-port>)"
+            );
+            if let Err(e) =
+                utexo_bridge_enclave::vsock_forwarder::start_forwarder(3444, evm_vsock_port)
+            {
+                tracing::error!("failed to start EVM RPC vsock forwarder: {e}");
+            }
+        }
+
+        // Helios execution + consensus RPC forwarders (#77, trustless EVM
+        // verification). Helios verifies these UNTRUSTED upstreams against a
+        // pinned checkpoint. Local ports mirror HeliosConfig defaults
+        // (18545/18550); the host must run one vsock-proxy per upstream.
+        #[cfg(feature = "helios")]
+        {
+            let exec_local: u16 = std::env::var("HELIOS_EXECUTION_LOCAL_PORT")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(18545);
+            let exec_vsock: u32 = std::env::var("HELIOS_EXECUTION_VSOCK_PORT")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(8003);
+            let cons_local: u16 = std::env::var("HELIOS_CONSENSUS_LOCAL_PORT")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(18550);
+            let cons_vsock: u32 = std::env::var("HELIOS_CONSENSUS_VSOCK_PORT")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(8004);
+            tracing::info!(
+                exec_local,
+                exec_vsock,
+                cons_local,
+                cons_vsock,
+                "starting Helios execution + consensus vsock forwarders (#77)"
+            );
+            if let Err(e) =
+                utexo_bridge_enclave::vsock_forwarder::start_forwarder(exec_local, exec_vsock)
+            {
+                tracing::error!("failed to start Helios execution RPC forwarder: {e}");
+            }
+            if let Err(e) =
+                utexo_bridge_enclave::vsock_forwarder::start_forwarder(cons_local, cons_vsock)
+            {
+                tracing::error!("failed to start Helios consensus RPC forwarder: {e}");
+            }
         }
     }
 
@@ -222,11 +300,79 @@ fn main() {
     }
     let header_chain = std::sync::Mutex::new(HeaderChain::new(spv_network, checkpoint));
 
+    // Build the in-enclave EVM RPC client for independent FundsIn verification
+    // (#60). The URL must be the loopback forwarder; responses are host-relayed
+    // and treated as evidence (verified fail-closed), not trusted input.
+    #[cfg(feature = "evm-rpc")]
+    let (evm_rpc_client, evm_rpc_config) = {
+        use utexo_bridge_enclave::networks::evm::evm_event::{AlloyEvmClient, EvmReceiptProvider};
+        let cfg = utexo_bridge_enclave::config::EvmRpcConfig::from_env();
+        type Boxed = Box<dyn EvmReceiptProvider + Send + Sync>;
+
+        // Raw alloy provider (#60): host-relayed, unverified.
+        let build_alloy = || -> Option<Boxed> {
+            match AlloyEvmClient::new(&cfg.rpc_url) {
+                Ok(c) => {
+                    tracing::info!(
+                        rpc_url = %cfg.rpc_url,
+                        min_confirmations = cfg.min_confirmations,
+                        "EVM FundsIn verification: raw alloy path (#60, host-relayed/unverified)"
+                    );
+                    Some(Box::new(c) as Boxed)
+                }
+                Err(e) => {
+                    tracing::error!("failed to init EVM RPC client: {e}");
+                    None
+                }
+            }
+        };
+
+        // #77 runtime-selectable: HELIOS_EXECUTION_RPC set -> Helios-verified
+        // path; else the raw alloy path. Fail closed on the SELECTED provider:
+        // a Helios build/sync failure leaves the client unset so bridge signing
+        // refuses, never silently downgrading to the unverified path.
+        #[cfg(feature = "helios")]
+        let client: Option<Boxed> = match utexo_bridge_enclave::config::HeliosConfig::from_env() {
+            Some(hcfg) => {
+                // Pass the pinned EVM_CHAIN_ID so Helios rejects a
+                // HELIOS_NETWORK inconsistent with it (#77 predicate 1).
+                match utexo_bridge_enclave::networks::evm::evm_event::HeliosEvmClient::new(
+                    &hcfg,
+                    bridge_config.chain_id,
+                ) {
+                    Ok(c) => {
+                        tracing::info!(
+                            network = %hcfg.network,
+                            min_confirmations = cfg.min_confirmations,
+                            "EVM FundsIn verification: Helios-verified path (#77, trustless)"
+                        );
+                        Some(Box::new(c) as Boxed)
+                    }
+                    Err(e) => {
+                        tracing::error!(
+                            "Helios client init/sync failed: {e} - bridge signing will fail closed"
+                        );
+                        None
+                    }
+                }
+            }
+            None => build_alloy(),
+        };
+        #[cfg(not(feature = "helios"))]
+        let client: Option<Boxed> = build_alloy();
+
+        (client, cfg)
+    };
+
     let ctx = ServerContext {
         state,
         bridge_config,
         #[cfg(feature = "rgb-validation")]
         rgb_validator,
+        #[cfg(feature = "evm-rpc")]
+        evm_rpc_client,
+        #[cfg(feature = "evm-rpc")]
+        evm_rpc_config,
         header_chain,
         submit_rate_limiter: std::sync::Mutex::new(server::SubmitRateLimiter::default()),
     };
@@ -239,15 +385,7 @@ fn main() {
             .expect("failed to bind vsock port 5000");
         tracing::info!("listening on vsock port 5000");
 
-        for stream in listener.incoming() {
-            match stream {
-                Ok(stream) => {
-                    tracing::debug!("accepted vsock connection");
-                    server::handle_connection(stream, &ctx);
-                }
-                Err(e) => tracing::error!("accept error: {}", e),
-            }
-        }
+        serve(listener.incoming(), ctx);
     }
 
     #[cfg(not(all(feature = "vsock", target_os = "linux")))]
@@ -258,18 +396,76 @@ fn main() {
             .unwrap_or_else(|_| panic!("failed to bind TCP {listen_addr}"));
         tracing::info!(%listen_addr, "listening on TCP");
 
-        for stream in listener.incoming() {
-            match stream {
+        serve(listener.incoming(), ctx);
+    }
+}
+
+/// Accept loop with bounded concurrency and per-request deadlines (audit M-03 /
+/// #83). Each accepted socket is wrapped in a [`DeadlineStream`] (idle + total
+/// request timeouts) and handed to a fixed worker pool via a bounded queue;
+/// over-cap connections are dropped (closed) so one slow request can't starve
+/// the others. Generic over the socket type so the vsock and TCP branches share
+/// one implementation.
+fn serve<I, S>(incoming: I, ctx: ServerContext)
+where
+    I: IntoIterator<Item = std::io::Result<S>>,
+    S: std::io::Read + std::io::Write + utexo_bridge_enclave::conn::SocketTimeout + Send + 'static,
+{
+    use std::sync::mpsc::{sync_channel, TrySendError};
+    use std::sync::{Arc, Mutex};
+    use utexo_bridge_enclave::conn::{
+        DeadlineStream, IO_IDLE_TIMEOUT, MAX_QUEUED_CONNECTIONS, TOTAL_REQUEST_TIMEOUT,
+        WORKER_THREADS,
+    };
+
+    let ctx = Arc::new(ctx);
+    // Bounded queue doubles as the connection cap: a full queue means all
+    // workers are busy and the backlog is at its limit.
+    let (tx, rx) = sync_channel::<S>(MAX_QUEUED_CONNECTIONS);
+    let rx = Arc::new(Mutex::new(rx));
+
+    for worker_id in 0..WORKER_THREADS {
+        let rx = Arc::clone(&rx);
+        let ctx = Arc::clone(&ctx);
+        std::thread::spawn(move || loop {
+            // Hold the queue lock only to dequeue; handling happens unlocked so
+            // workers run concurrently.
+            let next = {
+                let guard = match rx.lock() {
+                    Ok(g) => g,
+                    Err(_) => {
+                        tracing::error!(worker_id, "worker queue mutex poisoned; worker exiting");
+                        break;
+                    }
+                };
+                guard.recv()
+            };
+            match next {
                 Ok(stream) => {
-                    let peer = stream
-                        .peer_addr()
-                        .map(|a| a.to_string())
-                        .unwrap_or_else(|_| "unknown".into());
-                    tracing::debug!(%peer, "accepted TCP connection");
+                    let stream =
+                        DeadlineStream::new(stream, TOTAL_REQUEST_TIMEOUT, IO_IDLE_TIMEOUT);
                     server::handle_connection(stream, &ctx);
                 }
-                Err(e) => tracing::error!("accept error: {}", e),
+                // All senders dropped: the listener is gone, so is the process.
+                Err(_) => break,
             }
+        });
+    }
+
+    for stream in incoming {
+        match stream {
+            Ok(stream) => match tx.try_send(stream) {
+                Ok(()) => tracing::debug!("connection queued"),
+                Err(TrySendError::Full(_)) => tracing::warn!(
+                    cap = MAX_QUEUED_CONNECTIONS,
+                    "connection queue full; dropping connection (slow-request backpressure)"
+                ),
+                Err(TrySendError::Disconnected(_)) => {
+                    tracing::error!("no workers available; stopping accept loop");
+                    break;
+                }
+            },
+            Err(e) => tracing::error!("accept error: {e}"),
         }
     }
 }

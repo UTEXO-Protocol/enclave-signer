@@ -71,7 +71,7 @@ jobs:
       - name: Install Rust (for nitro-cli build)
         uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: "1.89"
+          toolchain: "1.96"
           targets: x86_64-unknown-linux-musl
 
       - name: System deps

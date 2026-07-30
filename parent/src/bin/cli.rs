@@ -92,6 +92,11 @@ enum Command {
         /// EVM commission
         #[arg(long, default_value = "0")]
         evm_commission: u64,
+        /// On-chain BridgeFundsIn.operationId of the source deposit (bridge
+        /// transfer id). The enclave #60 check binds the on-chain operationId to
+        /// this value.
+        #[arg(long, default_value = "0")]
+        evm_funds_in_operation_id: u64,
         /// PSBT total non-change output amount
         #[arg(long, default_value = "0")]
         psbt_output_amount: u64,
@@ -355,6 +360,7 @@ fn main() {
             evm_tx_hash,
             evm_amount,
             evm_commission,
+            evm_funds_in_operation_id,
             psbt_output_amount,
             evm_event_valid,
             evm_event_finalized,
@@ -398,6 +404,7 @@ fn main() {
             };
             let req = SignPsbtRequest {
                 evm_tx_hash: tx_hash,
+                evm_funds_in_operation_id,
                 operation_idx: 0,
                 evm_event_valid,
                 evm_event_finalized,

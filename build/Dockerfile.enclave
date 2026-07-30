@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile:1.7
-# Production enclave image (vsock + rgb-validation + spv).
+# Production enclave image (vsock + rgb-validation + spv + evm-rpc).
 # Usage:
 #   DOCKER_BUILDKIT=1 docker build --ssh default \
 #     -f build/Dockerfile.enclave -t utexo-bridge-enclave .
@@ -27,6 +27,11 @@
 # `version GLIBC_2.38 not found`. Bullseye (Debian 11) ships glibc 2.31 <= 2.34,
 # so the binary only needs symbols the runtime provides. Pin by DIGEST; bump tag
 # + digest together and keep it on a glibc <= the runtime's.
+# NOTE (dev merge): dev's Dockerfile.enclave bumped this to `rust:1.96-slim`
+# (Debian trixie / glibc 2.38) alongside enabling `evm-rpc`. We deliberately KEEP
+# bullseye — trixie breaks the AL2023 runtime — and only graft the `evm-rpc`
+# feature onto the build below. If evm-rpc's deps ever need a newer rustc than
+# 1.89, bump to a newer *-bullseye rust tag (glibc <= 2.34), never trixie.
 FROM rust:1.89-slim-bullseye@sha256:a7a758a6c8493b507a3d75fa4dc3f41e2902f8f2eeb124ae5527df3d625539e6 AS builder
 
 # `git` + `openssh-client`: the workspace `[patch.crates-io]` uses public
@@ -71,7 +76,6 @@ ENV CARGO_INCREMENTAL=0 \
 # (rgb-*) could re-resolve to a newer commit on a later rebuild and change the
 # binary (and thus PCR0).
 #
-# `--mount=type=ssh` exposes the SSH_AUTH_SOCK forwarded by `--ssh default`
 # only for the duration of this RUN, so no credentials end up in the image
 # layers. In CI we ALSO pass both deploy keys as BuildKit secrets (federated_key
 # + consignment_key) and set up per-host SSH aliases + `insteadOf`: two private
@@ -80,6 +84,12 @@ ENV CARGO_INCREMENTAL=0 \
 # first → GitHub returns "Repository not found". `required=false` keeps local
 # agent-only builds (no secret files) working unchanged. This block affects only
 # how deps are FETCHED, not the compiled binary, so PCR0 is unaffected.
+#
+# `evm-rpc` (dev merge) adds in-enclave FundsIn event verification (#60); it pulls
+# the alloy + tokio subtree, which grows the binary and therefore PCR0 — pinned
+# via `--locked`/Cargo.lock for reproducibility. Requires a second host
+# vsock-proxy for the EVM RPC (EVM_RPC_VSOCK_PORT, default 8002). `helios` (#77)
+# is intentionally NOT enabled here (experimental/default-off, not in the EIF).
 RUN --mount=type=ssh \
     --mount=type=secret,id=federated_key,required=false \
     --mount=type=secret,id=consignment_key,required=false \
@@ -103,7 +113,7 @@ RUN --mount=type=ssh \
       git config --global url."ssh://git@github.com-federated/UTEXO-Protocol/federated-signer-proto.git".insteadOf "ssh://git@github.com/UTEXO-Protocol/federated-signer-proto.git"; \
       git config --global url."ssh://git@github.com-consignment/UTEXO-Protocol/rgb-consignment-parser.git".insteadOf "ssh://git@github.com/UTEXO-Protocol/rgb-consignment-parser.git"; \
     fi; \
-    cargo build --release --locked --features vsock,rgb-validation,spv
+    cargo build --release --locked --features vsock,rgb-validation,spv,evm-rpc
 
 # --- Runtime ---
 # Pinned by digest (see header) — this rootfs is what ends up in the EIF, so its
@@ -147,6 +157,27 @@ ENV EVM_CHAIN_ID=42161 \
     RGB_ASSET_ID=rgb:lJFja2kw-h_azlEd-7CNPxwf-UsvIDhH-UD0Y1f9-8f26jLk \
     BITCOIN_NETWORK=bitcoin \
     ELECTRUM_URL=ssl://electrs-mainnet.utexo.com:50002
+
+# In-enclave EVM `FundsIn` verification config (evm-rpc, #60), baked so PCR0
+# commits to the confirmation policy and the loopback egress. EVM_RPC_URL MUST
+# be loopback: the enclave reaches the EVM RPC only through the vsock forwarder
+# (host runs `vsock-proxy <EVM_RPC_VSOCK_PORT=8002> <arbitrum-rpc-host> <port>`,
+# enclave listens on 127.0.0.1:3444). A non-loopback value is rejected back to
+# the default at boot (see enclave/src/config.rs EvmRpcConfig). EVM_MIN_CONFIRMATIONS
+# is the minimum depth a FundsIn receipt must have vs the RPC head (fail-closed).
+# FUNDS_IN_CONTRACT is intentionally left UNSET: it falls back to BRIDGE_CONTRACT
+# (the FundsIn event is emitted by the same bridge contract on this deployment).
+#
+# INTENTIONALLY UNSET (not forgotten): BTC_ALLOWED_SCRIPTS, BTC_MAX_TOTAL_SATS,
+# GAS_TX_ALLOWED_TO. These pin the plain-BTC `SignBtc` (handle_sign_btc) and
+# gas-tx `SignRawDigest` (handle_sign_raw_digest) paths, which this deployment's
+# listener never calls (its ParentService surface is Sign / PublicKey /
+# Initialize / Clone / GetLastSavedBlock / SubmitHeaders / AttestedPublicKey).
+# Left unset they fail closed on those unused paths (secure default) while the
+# RGB SignPsbt + EVM signing paths are unaffected. Bake them in a future EIF rev
+# with real deployment values if/when plain-BTC UTXO-management is wired.
+ENV EVM_RPC_URL=http://127.0.0.1:3444 \
+    EVM_MIN_CONFIRMATIONS=12
 
 ENV RUST_LOG=info
 ENTRYPOINT ["/app/entrypoint.sh"]

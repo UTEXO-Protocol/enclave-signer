@@ -212,7 +212,7 @@ pub struct EnclaveState {
     pub replay_guard: NonceReplayGuard,
     /// **Soft** dedup guard for EVM→RGB bridge PSBT operations, keyed on a
     /// hash of `(chain_id, bridge_contract, evm_tx_hash, operation_idx,
-    /// rgb_asset_id)` (see `validation::psbt_crosscheck::psbt_operation_key`).
+    /// rgb_asset_id)` (see `networks::rgb::psbt_validation::psbt_operation_key`).
     /// Rejects a same-operation resubmission inside the TTL window before
     /// signing (audit W-02 / #84).
     ///
@@ -439,6 +439,18 @@ impl EnclaveState {
     /// Sign PSBT inputs matching our BTC key. Returns (signed_psbt_bytes, inputs_signed).
     pub fn sign_psbt(&self, psbt_bytes: &[u8]) -> Result<(Vec<u8>, usize)> {
         self.with_active(|km| km.sign_psbt(psbt_bytes))
+    }
+
+    /// Sign a PSBT restricted to a single BIP-86 account (see
+    /// [`crate::keys::KeyManager::sign_psbt_scoped`]). The plain-BTC path uses
+    /// this with `Some(AccountType::Vanilla)` so it can never co-sign a Colored
+    /// (RGB-allocated) input.
+    pub fn sign_psbt_scoped(
+        &self,
+        psbt_bytes: &[u8],
+        allowed_account: Option<crate::keys::AccountType>,
+    ) -> Result<(Vec<u8>, usize)> {
+        self.with_active(|km| km.sign_psbt_scoped(psbt_bytes, allowed_account))
     }
 
     fn lock_phase(&self) -> Result<std::sync::MutexGuard<'_, Phase>> {

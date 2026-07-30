@@ -35,7 +35,7 @@ flowchart TB
         EFr[framing.rs<br/>len-prefixed proto, 4 MB cap]
         EErr[error.rs<br/>EnclaveError + error_code]
         BCfg[config.rs<br/>BridgeConfig env-pinned<br/>chain_id / contract / rgb_asset_id]
-        VFwd[vsock_forwarder.rs<br/>TCP 127.0.0.1:3443<br/>→ vsock CID 3:8001]
+        VFwd[vsock_forwarder.rs<br/>loopback → vsock, per-port instances<br/>3443→8001 Esplora, 3444→8002 EVM RPC,<br/>18545→8003 / 18550→8004 Helios]
 
         subgraph KEYS [keys.rs]
             KM[KeyManager<br/>BIP-39/32/84/86<br/>SecretBox seed + keys]
@@ -47,9 +47,11 @@ flowchart TB
         end
         subgraph VAL [validation/]
             VEvm[evm_crosscheck.rs<br/>selector allowlist + pinned-config<br/>amount bound to consignment<br/>funds_out burn/transfer]
-            VPsbt[psbt_crosscheck.rs<br/>bridge vs vanilla<br/>amount consistency]
+            VPsbt[psbt_crosscheck.rs<br/>bridge vs vanilla<br/>amount + consignment bind]
             VRgb[rgb.rs<br/>rgbstd Transfer<br/>+ Esplora resolver]
             VSpv[spv_crosscheck.rs<br/>coverage + depth<br/>+ chain_net + staleness]
+            VEvt[evm_event.rs<br/>independent FundsIn verify<br/>alloy #60 / Helios #77<br/>evm-rpc / helios features]
+            VGas[evm_gas_tx.rs<br/>gas-tx shape allowlist]
         end
         subgraph SPVMOD [spv/]
             SCh[chain.rs<br/>HeaderChain<br/>bounded reorg ≤100]
@@ -68,6 +70,8 @@ flowchart TB
     NSM[(AWS NSM device<br/>/dev/nsm)]
     Esp{{Esplora indexer}}
     VP[(host vsock-proxy<br/>port 8001)]
+    EvmRpc{{EVM JSON-RPC / Helios<br/>exec + consensus upstreams}}
+    VPe[(host vsock-proxy<br/>8002 / 8003 / 8004)]
 
     %% Wires
     L -->|"gRPC EnclaveService<br/>Sign / PublicKey / Initialize / Clone /<br/>SubmitHeaders / GetLastSavedBlock /<br/>AttestedPublicKey"| PMain
@@ -102,6 +106,12 @@ flowchart TB
     VRgb -.->|"HTTP"| VFwd
     VFwd -->|"vsock CID 3:8001"| VP
     VP -->|"real HTTP"| Esp
+
+    ESrv --> VEvt
+    ESrv --> VGas
+    VEvt -.->|"eth_getTransactionReceipt /<br/>eth_blockNumber (host-relayed evidence,<br/>Helios-verified in #77)"| VFwd
+    VFwd -->|"vsock 8002 / 8003 / 8004"| VPe
+    VPe -->|"real HTTP"| EvmRpc
 
     VSpv --> SCh
     VSpv --> SMk

@@ -14,8 +14,7 @@ path = "src/main.rs"
 [dependencies]
 # Protobuf
 prost = "0.14.3"
-federated-signer-proto = { git = "ssh://git@github.com/UTEXO-Protocol/federated-signer-proto.git", rev = "e8fa6a46de11b5fa3bdf3d1ea768b8615b6429ed", package = "federated-signer-proto" }
-
+federated-signer-proto = { git = "ssh://git@github.com/UTEXO-Protocol/federated-signer-proto.git", rev = "7e15aad6536fb97d64c98911e746cc292b5737e2", package = "federated-signer-proto" }
 # Crypto — ECDSA on secp256k1 (EVM address derivation + signing later)
 k256 = { version = "0.13", features = ["ecdsa"] }
 
@@ -81,6 +80,30 @@ hmac = "0.12"
 sha2 = "0.10"
 subtle = "2"
 rand_core = { version = "0.6", features = ["getrandom"] }
+# rustls (not native-tls) to match the enclave's existing TLS stack (minreq
+# rustls) and keep OpenSSL out of the TEE. The enclave->forwarder hop is plain
+# loopback HTTP; TLS to the real RPC (if any) terminates at the host proxy.
+alloy = { version = "2.1.0", default-features = false, features = ["provider-http", "rpc-types-eth", "reqwest-rustls-tls"], optional = true }
+tokio = { version = "1.52.3", default-features = false, features = ["rt", "rt-multi-thread", "time"], optional = true }
+# Helios Ethereum light client for trustless in-enclave EVM event verification
+# (#77), behind the default-OFF `helios` feature. Depend on the `helios-ethereum`
+# member crate (NOT the `helios` umbrella) to avoid pulling helios-opstack ->
+# libp2p and its heavy/yanked transitive deps. Git dep (crates.io copies are
+# stale); Cargo.lock pins the exact rev. HEAVY: brings a second alloy major
+# (1.x, vs our 2.x), revm, BLS, reqwest, and vendored OpenSSL.
+#
+# OpenSSL note: it comes only from Helios's own manifests (an unused
+# `openssl = {vendored}` dep in helios-core/ethereum + reqwest's default
+# native-tls) - not removable from here (cargo feature unification is additive).
+# To drop it, fork Helios and (1) set reqwest `default-features = false` +
+# `rustls-tls`, (2) delete the `openssl` workspace dep + the `openssl.workspace`
+# lines, then pin this to the fork. Deferred (helios is experimental/default-off).
+helios-ethereum = { git = "https://github.com/a16z/helios", tag = "0.11.1", optional = true }
+# NOTE: the `helios` module hands `B256`/`U256` to/from the Helios API using the
+# always-on `alloy-primitives = "1"` declared above (dev-ng's new-arch EVM
+# validation already depends on it non-optionally). Helios also uses the alloy 1.x
+# major, so cargo unifies to the same crate instance; no separate optional
+# alloy-primitives dep is needed here.
 
 [target.'cfg(target_os = "linux")'.dependencies]
 vsock = "0.5"
@@ -88,23 +111,52 @@ nix = { version = "0.31.2", features = ["socket"] }
 aws-nitro-enclaves-nsm-api = "0.4"
 
 [features]
-default = []
+# Production posture: a plain `cargo build` produces the SPV path (which pulls
+# in `rgb-validation`), so the default binary is the one shipped in the EIF. A
+# minimal build is still available via `--no-default-features` and is covered
+# explicitly in CI.
+default = ["spv"]
 vsock = []
 # DANGER: allows importing a raw seed over the wire. Testing only.
 allow-seed-import = []
 # Skips cross-check validation on signing requests. Development/testing only.
 dev-mode = []
-# In-enclave RGB consignment validation via rgbstd + Esplora.
+# In-enclave RGB consignment validation via rgbstd + Esplora. REQUIRES `spv`
+# (enforced by a `compile_error!` in lib.rs — audit M-01 / #61): without SPV the
+# only anchor for a consignment's witness txs is the host-controlled Esplora
+# resolver, so a malicious host could have the enclave sign a release against a
+# fabricated Bitcoin anchor. Kept as a separate feature (rather than adding
+# `spv` to this list) to avoid a feature cycle with `spv` below.
 rgb-validation = ["rgb-ops", "rgb-consignment", "rgb-schemas"]
 # Bitcoin SPV verification of consignment witness txids before signing EVM
 # transactions. Implies `rgb-validation` because SPV needs the consignment
 # parsed to extract witness txids. When the feature is OFF, handle_sign_evm
-# additionally REJECTS any request that carries non-empty merkle_proofs —
-# fail-closed against build mismatches between listener and enclave.
+# refuses to sign ANY `fundsOut` release — regardless of whether the request
+# carries merkle_proofs — and additionally rejects any request that does carry
+# merkle_proofs it cannot verify (fail-closed against listener/enclave build
+# mismatches).
 spv = ["rgb-validation"]
 # Mock attestation path: skip NSM / COSE / cert-chain checks and use raw CBOR docs.
 # Testing only — never enable in production builds.
 mock-attestation = ["attestation-verify/mock"]
+# Independent in-enclave EVM `FundsIn` event verification for signPsbt (#60).
+# Default-OFF. When ON, bridge-mode signPsbt fetches the deposit receipt via an
+# in-enclave alloy JSON-RPC client (loopback -> vsock forwarder -> host EVM RPC)
+# and fails closed on a missing/invalid receipt or unmet confirmation depth.
+# Implies `rgb-validation`: the bridge path this augments (`psbt_consignment_crosscheck`)
+# is already gated there, and the amount/asset context the predicate reconciles
+# lives behind it. NOTE: RPC responses are relayed by the UNTRUSTED host, so this
+# is the predicate + plumbing layer and only becomes trustless once Helios (#77)
+# verifies the RPC.
+evm-rpc = ["rgb-validation", "dep:alloy", "dep:tokio"]
+# Trustless variant of `evm-rpc` (#77, EXPERIMENTAL, default-OFF): embed the
+# Helios light client so the enclave cryptographically verifies the EVM RPC
+# against a pinned weak-subjectivity checkpoint before accepting a FundsIn
+# receipt. Extends `evm-rpc` (reuses the EvmReceiptProvider seam, predicate, and
+# EVM_MIN_CONFIRMATIONS). Runtime-selectable: with HELIOS_EXECUTION_RPC set the
+# enclave uses the verified path, else the raw alloy path. HEAVY build (2 alloy
+# majors, revm, BLS, vendored OpenSSL) - not in the shipped EIF yet.
+helios = ["evm-rpc", "dep:helios-ethereum"]
 
 [dev-dependencies]
 rand = "0.10.0"

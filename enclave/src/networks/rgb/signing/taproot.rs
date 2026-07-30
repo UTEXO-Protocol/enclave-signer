@@ -545,4 +545,118 @@ mod tests {
         let jobs = find_taproot_sign_jobs(&psbt, km.master_fingerprint(), &km);
         assert!(jobs.is_empty());
     }
+
+    // === Account-scoped signing (plain-BTC path guard, M-01/#69) ===
+
+    fn our_xonly_colored(km: &KeyManager) -> XOnlyPublicKey {
+        let secp = Secp256k1::new();
+        let sk = km
+            .derive_btc_child(
+                AccountType::Colored,
+                &[
+                    ChildNumber::Normal { index: 0 },
+                    ChildNumber::Normal { index: 0 },
+                ],
+            )
+            .unwrap();
+        XOnlyPublicKey::from_keypair(&Keypair::from_secret_key(&secp, &sk)).0
+    }
+
+    fn our_colored_full_path() -> DerivationPath {
+        DerivationPath::from(vec![
+            ChildNumber::from_hardened_idx(86).unwrap(),
+            ChildNumber::from_hardened_idx(827167).unwrap(), // RGB coin type → Colored
+            ChildNumber::from_hardened_idx(0).unwrap(),
+            ChildNumber::Normal { index: 0 },
+            ChildNumber::Normal { index: 0 },
+        ])
+    }
+
+    /// Like [`build_legit_taproot_psbt`] but the leaf + tap_key_origins use the
+    /// COLORED (RGB) account key/path, so the resolved job is `AccountType::Colored`.
+    fn build_colored_taproot_psbt(km: &KeyManager) -> Psbt {
+        let secp = Secp256k1::new();
+        let our = our_xonly_colored(km);
+        let leaf_script = multi_a_2_of_3(&[our, xonly_from_byte(0xA1), xonly_from_byte(0xA2)]);
+        let leaf_hash = TapLeafHash::from_script(&leaf_script, LeafVersion::TapScript);
+
+        let internal_key = XOnlyPublicKey::from_slice(&NUMS_INTERNAL).unwrap();
+        let spend_info = TaprootBuilder::new()
+            .add_leaf(0, leaf_script.clone())
+            .unwrap()
+            .finalize(&secp, internal_key)
+            .unwrap();
+        let script_pubkey = ScriptBuf::new_p2tr(&secp, internal_key, spend_info.merkle_root());
+        let control_block = spend_info
+            .control_block(&(leaf_script.clone(), LeafVersion::TapScript))
+            .unwrap();
+
+        let unsigned_tx = Transaction {
+            version: bitcoin::transaction::Version(2),
+            lock_time: bitcoin::blockdata::locktime::absolute::LockTime::ZERO,
+            input: vec![TxIn {
+                previous_output: OutPoint {
+                    txid: Txid::from_byte_array([0xBB; 32]),
+                    vout: 0,
+                },
+                script_sig: ScriptBuf::new(),
+                sequence: Sequence::MAX,
+                witness: bitcoin::Witness::default(),
+            }],
+            output: vec![TxOut {
+                value: Amount::from_sat(50_000),
+                script_pubkey: ScriptBuf::new_p2tr_tweaked(spend_info.output_key()),
+            }],
+        };
+        let mut psbt = Psbt::from_unsigned_tx(unsigned_tx).unwrap();
+        psbt.inputs[0].witness_utxo = Some(TxOut {
+            value: Amount::from_sat(100_000),
+            script_pubkey,
+        });
+        psbt.inputs[0].tap_internal_key = Some(internal_key);
+        psbt.inputs[0]
+            .tap_scripts
+            .insert(control_block, (leaf_script, LeafVersion::TapScript));
+        psbt.inputs[0].tap_key_origins.insert(
+            our,
+            (
+                vec![leaf_hash],
+                (*km.master_fingerprint(), our_colored_full_path()),
+            ),
+        );
+        psbt
+    }
+
+    #[test]
+    fn scoped_vanilla_signs_a_vanilla_input() {
+        let km = KeyManager::from_seed([0x42u8; 64], Network::Testnet).unwrap();
+        let (psbt, _, _, _, _) = build_legit_taproot_psbt(&km);
+        let bytes = psbt.serialize();
+        let (_, signed) = km
+            .sign_psbt_scoped(&bytes, Some(AccountType::Vanilla))
+            .unwrap();
+        assert_eq!(
+            signed, 1,
+            "vanilla-scoped signing must sign a vanilla input"
+        );
+    }
+
+    #[test]
+    fn scoped_vanilla_refuses_a_colored_input() {
+        let km = KeyManager::from_seed([0x42u8; 64], Network::Testnet).unwrap();
+        let bytes = build_colored_taproot_psbt(&km).serialize();
+
+        // Unscoped: the colored input IS signable (sanity check the fixture).
+        let (_, unscoped) = km.sign_psbt_scoped(&bytes, None).unwrap();
+        assert_eq!(unscoped, 1, "fixture: colored input should sign unscoped");
+
+        // Vanilla-scoped: the colored (RGB-allocated) input must NOT be signed.
+        let (_, scoped) = km
+            .sign_psbt_scoped(&bytes, Some(AccountType::Vanilla))
+            .unwrap();
+        assert_eq!(
+            scoped, 0,
+            "plain-BTC (vanilla-scoped) signing must refuse a colored input"
+        );
+    }
 }

@@ -18,7 +18,7 @@
 #     utexo-bridge-parent
 
 # ===== Builder Stage =====
-FROM rust:1.89-slim AS builder
+FROM rust:1.96-slim AS builder
 
 # `git` + `ca-certificates`: the workspace `[patch.crates-io]` rewrites
 # rgb-consensus / rgb-ops / rgb-invoicing / rgb-strict-encoding to public

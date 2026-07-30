@@ -12,6 +12,13 @@ use crate::proto::{EvmDestination, EvmSource};
 /// `keccak256("fundsOut(address,uint256,uint256,uint256,uint256,string,bytes,bytes)")[0..4]`.
 pub const FUNDS_OUT_SELECTOR_POOLS: [u8; 4] = [0xcc, 0xdd, 0xb7, 0x68];
 
+/// Upper bound on `call_data` length. A legitimate `fundsOut` call is a few
+/// hundred bytes; anything past 64 KiB is either malformed or an attempt to
+/// blow up per-request work before any byte-level extraction or signing runs
+/// (audit I-06 / #90). Compile-time so the posture is PCR-attested, not
+/// host-tunable.
+pub const MAX_FUNDS_OUT_CALL_DATA_LEN: usize = 64 * 1024;
+
 const ALLOWED_SELECTORS: &[[u8; 4]] = &[FUNDS_OUT_SELECTOR_POOLS];
 
 sol! {
@@ -50,16 +57,15 @@ pub fn validate_source(amount: u64, source: &EvmSource) -> Result<RouteProof> {
             source.tx_hash.len()
         )));
     }
-    if !source.event_valid {
-        return Err(EnclaveError::CrossCheck(
-            "EVM event not validated by Listener".into(),
-        ));
-    }
-    if !source.event_finalized {
-        return Err(EnclaveError::CrossCheck(
-            "EVM event not yet finalized".into(),
-        ));
-    }
+
+    // NOTE (audit M-06 / #51): the listener-supplied `event_valid` /
+    // `event_finalized` booleans are NO LONGER trusted here - anyone reaching
+    // the enclave could set both `true`. EVM-event validity and finality are
+    // now established independently by the enclave itself in `handle_sign` via
+    // `networks::evm::evm_event::verify_funds_in_event` (the `evm-rpc` feature:
+    // fetches the FundsIn receipt and checks the operationId/amount/depth
+    // against the pinned bridge contract). The proto fields remain (ignored)
+    // until the listener stops sending them.
 
     Ok(RouteProof {
         amount,
@@ -89,6 +95,15 @@ pub fn validate_destination(
         return Err(EnclaveError::CrossCheck(format!(
             "call_data too short: need at least 4 bytes for selector, got {}",
             destination.call_data.len()
+        )));
+    }
+    // Reject an oversize calldata before any offset extraction or signing
+    // (audit I-06 / #90).
+    if destination.call_data.len() > MAX_FUNDS_OUT_CALL_DATA_LEN {
+        return Err(EnclaveError::CrossCheck(format!(
+            "call_data too large: {} bytes (max {})",
+            destination.call_data.len(),
+            MAX_FUNDS_OUT_CALL_DATA_LEN
         )));
     }
 
@@ -156,8 +171,24 @@ pub fn validate_destination(
 }
 
 fn parse_proof_from_calldata(call_data: &[u8]) -> Result<RouteProof> {
-    let decoded = fundsOutCall::abi_decode(call_data)
+    // Canonical-encoding enforcement (audit W-01 residual, #123): the ABI
+    // decoder is deliberately layout-permissive — overlapping or out-of-order
+    // dynamic tails and trailing junk all decode fine (`abi_decode_validate`
+    // only validates the decoded *values*). Re-encoding the decoded call and
+    // requiring byte equality pins the input to the one canonical layout.
+    // This matters because the calldata bytes are later partially rewritten
+    // by fixed offset (`apply_op_id_binding`), so every byte must sit exactly
+    // where the canonical layout puts it — and what the enclave signs must
+    // decode on-chain to exactly what it validated.
+    let decoded = fundsOutCall::abi_decode_validate(call_data)
         .map_err(|e| EnclaveError::CrossCheck(format!("invalid fundsOut calldata: {e}")))?;
+    if decoded.abi_encode() != call_data {
+        return Err(EnclaveError::CrossCheck(
+            "non-canonical fundsOut calldata encoding: re-encoding the decoded call does not \
+             reproduce the input bytes"
+                .into(),
+        ));
+    }
     let amount: u64 = decoded
         .amount
         .try_into()
@@ -187,6 +218,7 @@ mod tests {
             token: vec![0x11; ADDRESS_LEN],
             recipient: vec![0x22; ADDRESS_LEN],
             commission: 50,
+            funds_in_operation_id: 0,
         }
     }
 
@@ -221,6 +253,8 @@ mod tests {
             chain_id: 1,
             bridge_contract: [0xAA; ADDRESS_LEN],
             rgb_asset_id: "ignored-by-evm-validation".into(),
+            gas_tx_allowed_to: None,
+            ..Default::default()
         }
     }
 
@@ -264,24 +298,18 @@ mod tests {
             .contains(&format!("evm_tx_hash must be {TX_HASH_LEN} bytes")));
     }
 
+    /// Audit M-06 / #51: the listener-supplied `event_valid` / `event_finalized`
+    /// booleans are no longer read by `validate_source`, so flipping them to
+    /// `false` does NOT change the outcome. EVM-event validity/finality is now
+    /// established independently by `evm_event::verify_funds_in_event` in the
+    /// handler (see that module's `issue_51_no_receipt_means_no_authorization`).
     #[test]
-    fn source_rejects_invalid_event() {
+    fn source_ignores_listener_evm_booleans() {
         let mut source = source();
         source.event_valid = false;
-        assert!(validate_source(1_000, &source)
-            .unwrap_err()
-            .to_string()
-            .contains("EVM event not validated"));
-    }
-
-    #[test]
-    fn source_rejects_unfinalized_event() {
-        let mut source = source();
         source.event_finalized = false;
-        assert!(validate_source(1_000, &source)
-            .unwrap_err()
-            .to_string()
-            .contains("not yet finalized"));
+        // Shape is still valid and the booleans are ignored now.
+        assert!(validate_source(1_000, &source).is_ok());
     }
 
     #[test]
@@ -289,10 +317,68 @@ mod tests {
         let mut destination = destination();
         destination.call_data[..4].copy_from_slice(&[0xDE, 0xAD, 0xBE, 0xEF]);
         with_ctx(&config(), |ctx| {
-            assert!(validate_destination(&destination, ctx)
+            let msg = validate_destination(&destination, ctx)
                 .unwrap_err()
-                .to_string()
-                .contains("unexpected calldata selector"));
+                .to_string();
+            // The error must both name the failing predicate and echo the
+            // offending selector so an operator can see WHAT was rejected.
+            assert!(
+                msg.contains("unexpected calldata selector") && msg.contains("deadbeef"),
+                "expected selector rejection echoing the selector hex, got: {msg}"
+            );
+        });
+    }
+
+    #[test]
+    fn rejects_calldata_shorter_than_selector() {
+        let mut destination = destination();
+        // 3 bytes can't carry a 4-byte selector.
+        destination.call_data = vec![0x1a, 0xd8, 0x80];
+        with_ctx(&config(), |ctx| {
+            let err = validate_destination(&destination, ctx).unwrap_err();
+            assert!(
+                err.to_string().contains("call_data too short"),
+                "expected too-short rejection, got: {err}"
+            );
+        });
+    }
+
+    #[test]
+    fn rejects_calldata_over_size_cap() {
+        // A maximally packed calldata must be rejected up-front (audit I-06 /
+        // #90), before selector dispatch or any offset extraction. Start from
+        // a valid fundsOut destination and pad the tail past the cap.
+        let mut destination = destination();
+        destination
+            .call_data
+            .resize(MAX_FUNDS_OUT_CALL_DATA_LEN + 1, 0u8);
+        with_ctx(&config(), |ctx| {
+            let err = validate_destination(&destination, ctx).unwrap_err();
+            assert!(
+                err.to_string().contains("call_data too large"),
+                "expected too-large rejection, got: {err}"
+            );
+        });
+    }
+
+    #[test]
+    fn accepts_calldata_at_size_cap() {
+        // Exactly at the cap is allowed; the selector head is preserved so
+        // dispatch still recognizes the fundsOut shape.
+        let mut destination = destination();
+        destination
+            .call_data
+            .resize(MAX_FUNDS_OUT_CALL_DATA_LEN, 0u8);
+        destination.call_data[..4].copy_from_slice(&FUNDS_OUT_SELECTOR_POOLS);
+        // The zero-padded tail may still fail the later ABI decode; assert
+        // only that it is NOT the size error.
+        with_ctx(&config(), |ctx| {
+            if let Err(e) = validate_destination(&destination, ctx) {
+                assert!(
+                    !e.to_string().contains("call_data too large"),
+                    "calldata exactly at the cap must not trip the size check, got: {e}"
+                );
+            }
         });
     }
 
@@ -305,6 +391,55 @@ mod tests {
                 .unwrap_err()
                 .to_string()
                 .contains("chain_id mismatch"));
+        });
+    }
+
+    #[test]
+    fn rejects_zero_chain_id() {
+        let mut destination = destination();
+        destination.chain_id = 0;
+        with_ctx(&config(), |ctx| {
+            assert!(validate_destination(&destination, ctx)
+                .unwrap_err()
+                .to_string()
+                .contains("chain_id must be > 0"));
+        });
+    }
+
+    #[test]
+    fn rejects_proxy_contract_mismatch() {
+        let mut destination = destination();
+        destination.proxy_contract = vec![0xBB; ADDRESS_LEN]; // pinned is 0xAA
+        with_ctx(&config(), |ctx| {
+            let err = validate_destination(&destination, ctx).unwrap_err();
+            assert!(
+                err.to_string().contains("proxy_contract mismatch"),
+                "got: {err}"
+            );
+        });
+    }
+
+    #[test]
+    fn rejects_missing_proxy_contract() {
+        let mut destination = destination();
+        destination.proxy_contract = vec![];
+        with_ctx(&config(), |ctx| {
+            assert!(validate_destination(&destination, ctx)
+                .unwrap_err()
+                .to_string()
+                .contains(&format!("proxy_contract must be {ADDRESS_LEN} bytes")));
+        });
+    }
+
+    #[test]
+    fn rejects_expired_deadline() {
+        let mut destination = destination();
+        destination.deadline = 1; // Unix timestamp 1 is long expired
+        with_ctx(&config(), |ctx| {
+            assert!(validate_destination(&destination, ctx)
+                .unwrap_err()
+                .to_string()
+                .contains("deadline expired"));
         });
     }
 
@@ -351,5 +486,69 @@ mod tests {
                 .to_string()
                 .contains("exceeds u64 range"));
         });
+    }
+
+    /// The hand-pinned selector constant and the alloy-derived ABI selector
+    /// must never drift apart (#65): the whitelist gates on the constant while
+    /// decode/encode use the `sol!` type.
+    #[test]
+    fn funds_out_selector_matches_abi_derived_selector() {
+        assert_eq!(FUNDS_OUT_SELECTOR_POOLS, fundsOutCall::SELECTOR);
+    }
+
+    /// Canonical calldata with non-empty dynamic tails — the baseline the two
+    /// non-canonical rejection tests below tamper with.
+    fn funds_out_calldata_with_tails(amount: u64) -> Vec<u8> {
+        fundsOutCall {
+            recipient: Address::from([0x22; ADDRESS_LEN]),
+            amount: U256::from(amount),
+            burnId: U256::from(7u64),
+            sourceChainId: U256::from(1u64),
+            destinationChainId: U256::from(1u64),
+            sourceAddress: "rgb-src".to_string(),
+            proof: Bytes::from(vec![0xCC; 64]),
+            settlementData: Bytes::from(vec![0xDD; 32]),
+        }
+        .abi_encode()
+    }
+
+    #[test]
+    fn accepts_canonical_calldata_with_dynamic_tails() {
+        let cd = funds_out_calldata_with_tails(1_234);
+        let proof = parse_proof_from_calldata(&cd).expect("canonical encoding must parse");
+        assert_eq!(proof.amount, 1_234);
+    }
+
+    /// audit W-01 residual (#123): the ABI decoder accepts trailing junk
+    /// after the last dynamic tail; the canonical re-encode check must not.
+    /// The calldata is later partially rewritten by byte offset
+    /// (`apply_op_id_binding`), so every byte must sit exactly where the
+    /// canonical layout puts it.
+    #[test]
+    fn rejects_calldata_with_trailing_junk() {
+        let mut cd = funds_out_calldata_with_tails(1_234);
+        cd.extend_from_slice(&[0u8; 32]);
+        let err = parse_proof_from_calldata(&cd).unwrap_err();
+        assert!(
+            err.to_string().contains("non-canonical fundsOut calldata"),
+            "expected canonical-encoding rejection, got: {err}"
+        );
+    }
+
+    /// audit W-01 residual (#123): two dynamic-arg head words pointing at the
+    /// same tail decode fine but are not a canonical encoding.
+    #[test]
+    fn rejects_calldata_with_overlapping_dynamic_tails() {
+        let mut cd = funds_out_calldata_with_tails(1_234);
+        // Head words (selector included in the byte positions): arg 7
+        // (`proof`) offset word at bytes 196..228, arg 8 (`settlementData`)
+        // offset word at bytes 228..260. Point settlementData at proof's tail.
+        let proof_offset_word: [u8; 32] = cd[196..228].try_into().unwrap();
+        cd[228..260].copy_from_slice(&proof_offset_word);
+        let err = parse_proof_from_calldata(&cd).unwrap_err();
+        assert!(
+            err.to_string().contains("non-canonical fundsOut calldata"),
+            "expected canonical-encoding rejection of overlapping tails, got: {err}"
+        );
     }
 }
