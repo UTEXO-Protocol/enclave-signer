@@ -115,7 +115,7 @@ both the enclave and every verifier share so the bytes are identical.
 
 ```
 policy_commitment =
-    u8(POLICY_COMMITMENT_V1 = 1)                    // version tag
+    u8(POLICY_COMMITMENT_V2 = 2)                    // version tag
     // Production (release, fully-pinned bridge signer):
     u8(0x01)                                        // production discriminant
     u8(allow_vanilla_psbt)                          // plain-BTC path enabled?
@@ -124,16 +124,30 @@ policy_commitment =
     u8(btc_source)                                  // 1 = SPV-verified
     chain_id_be8 || bridge_contract(20)
     u32_be(len(rgb_asset_id)) || rgb_asset_id_utf8
+    // Gas-tx (SignRawDigest) rule (audit C-02):
+    gas_tx_allowed_to(20)                           // all-zero = gas path unpinned
+    gas_tx_max_gas_limit_be8                        // gasLimit ceiling (0 = unset)
+    gas_tx_max_fee_per_gas_be16                     // per-gas fee ceiling, wei (0 = unset)
+    u32_be(len(selectors)) || selector(4)...        // sorted + deduped 4-byte selectors
     // Development (debug/test/dev-feature/non-bridge/unpinned build):
     u8(0x00)                                        // development discriminant
 ```
 
 A production enclave commits the full production tuple; a dev/mock enclave
 commits just `[version, 0x00]`. Because the posture flags (`allow_vanilla_psbt`,
-`evm_source`, …) are not on the wire, a verifier reconstructs the **expected**
-policy and requires the commitment to match — so an enclave that shipped with a
-downgraded posture (vanilla signing on, raw instead of Helios-verified RPC, a
-dev build) fails verification rather than being silently trusted.
+`evm_source`, …) and the gas-tx rule are not on the wire, a verifier reconstructs
+the **expected** policy and requires the commitment to match — so an enclave that
+shipped with a downgraded posture (vanilla signing on, raw instead of
+Helios-verified RPC, an unpinned or wrong gas-tx rule, a dev build) fails
+verification rather than being silently trusted.
+
+The gas-tx rule (audit C-02) is the `SignRawDigest` allowlist: the pinned
+destination, the `gasLimit`/fee ceilings that bound fee-griefing, and the 4-byte
+calldata selectors the gas EOA may invoke. Committing it makes the enclave's
+gas-signing policy externally verifiable instead of a self-protection pin the
+operator has to trust; `attest-verify` declares the expected rule via
+`--expect-gas-tx-to` / `--expect-gas-max-gas-limit` / `--expect-gas-max-fee-per-gas`
+/ `--expect-gas-selectors`.
 
 ## Where the expected PCRs come from
 

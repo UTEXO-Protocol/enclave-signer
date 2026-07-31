@@ -32,13 +32,23 @@ pub enum VerifyMode {
 ///
 /// The chain/contract/asset pins are taken from the wire response (already bound
 /// by the public-key bundle), so a production expectation only states the
-/// posture flags.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// posture flags — plus the gas-tx rule, which is NOT on the wire and so must be
+/// declared here for the verifier to reconstruct the committed policy (audit
+/// C-02).
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ExpectedPolicy {
     /// Expect a production bridge enclave with these posture flags.
     Production {
         allow_vanilla_psbt: bool,
         evm_source: EvmDataSource,
+        /// Expected gas-tx (`SignRawDigest`) rule the enclave committed (audit
+        /// C-02). All-zero destination + zero caps + empty selectors express
+        /// "the operator did not pin the gas path" — which the enclave attests
+        /// as such and fails closed on per request.
+        gas_tx_allowed_to: [u8; 20],
+        gas_tx_max_gas_limit: u64,
+        gas_tx_max_fee_per_gas: u128,
+        gas_tx_allowed_selectors: Vec<[u8; 4]>,
     },
     /// Expect a dev/mock enclave (e.g. behind `--mock`). Never for production.
     Development,
@@ -178,6 +188,10 @@ fn expected_attested_policy(
         ExpectedPolicy::Production {
             allow_vanilla_psbt,
             evm_source,
+            gas_tx_allowed_to,
+            gas_tx_max_gas_limit,
+            gas_tx_max_fee_per_gas,
+            gas_tx_allowed_selectors,
         } => {
             let bridge_contract: [u8; 20] = resp
                 .bridge_contract
@@ -200,6 +214,13 @@ fn expected_attested_policy(
                 chain_id: resp.chain_id,
                 bridge_contract,
                 rgb_asset_id: resp.rgb_asset_id.clone(),
+                // Gas-tx rule (audit C-02): declared by the operator, not on the
+                // wire. `to_bytes` canonicalises the selector set, so the caller
+                // need not pre-sort it.
+                gas_tx_allowed_to: *gas_tx_allowed_to,
+                gas_tx_max_gas_limit: *gas_tx_max_gas_limit,
+                gas_tx_max_fee_per_gas: *gas_tx_max_fee_per_gas,
+                gas_tx_allowed_selectors: gas_tx_allowed_selectors.clone(),
             })
         }
     }

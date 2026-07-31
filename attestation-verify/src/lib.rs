@@ -24,7 +24,7 @@ use thiserror::Error;
 
 pub mod policy;
 pub use policy::{
-    AttestationMode, AttestedPolicy, BtcDataSource, EvmDataSource, POLICY_COMMITMENT_V1,
+    AttestationMode, AttestedPolicy, BtcDataSource, EvmDataSource, POLICY_COMMITMENT_V2,
 };
 
 // ----------------------------------------------------------------------------
