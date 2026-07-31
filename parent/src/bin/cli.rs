@@ -333,6 +333,7 @@ fn main() {
                 merkle_proofs: vec![],
                 consignment: vec![],
                 consignment_hash: vec![],
+                lz_release: None,
             };
             match client.sign_evm(req) {
                 Ok(r) => {

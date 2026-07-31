@@ -16,6 +16,13 @@ use crate::proto::{EvmDestination, EvmSource};
 /// word off on every field, so the mismatch fails closed at the whitelist.
 pub const FUNDS_OUT_SELECTOR_POOLS: [u8; 4] = [0xdc, 0x77, 0x13, 0x90];
 
+/// `keccak256("lzFundsOut(uint256,uint256,uint256,uint256,string,bytes,bytes,uint32,bytes32,uint256,bytes)")[0..4]`.
+///
+/// Enclave wire format for `MultisigProxy.lzFundsOutCall`: individual params,
+/// no struct wrapper — analogous to `fundsOut` above. The selector distinguishes
+/// the two release paths in the allowlist and routes to `TeeLzFundsOut` digest.
+pub const LZ_FUNDS_OUT_SELECTOR: [u8; 4] = lzFundsOutCall::SELECTOR;
+
 /// Upper bound on `call_data` length. A legitimate `fundsOut` call is a few
 /// hundred bytes; anything past 64 KiB is either malformed or an attempt to
 /// blow up per-request work before any byte-level extraction or signing runs
@@ -23,7 +30,7 @@ pub const FUNDS_OUT_SELECTOR_POOLS: [u8; 4] = [0xdc, 0x77, 0x13, 0x90];
 /// host-tunable.
 pub const MAX_FUNDS_OUT_CALL_DATA_LEN: usize = 64 * 1024;
 
-const ALLOWED_SELECTORS: &[[u8; 4]] = &[FUNDS_OUT_SELECTOR_POOLS];
+const ALLOWED_SELECTORS: &[[u8; 4]] = &[FUNDS_OUT_SELECTOR_POOLS, LZ_FUNDS_OUT_SELECTOR];
 
 sol! {
     /// Mirrors `IBridge.FundsOutParams` (IBridge.sol:193-202). Field order fixes
@@ -44,6 +51,23 @@ sol! {
     /// only the enclave's wire format, which is why the protos still carry an
     /// opaque `call_data` blob.
     function fundsOut(FundsOutParams params);
+
+    /// Mirrors `IMultisigProxy.LzFundsOutParams` enclave wire format.
+    /// Individual params (no struct wrapper) analogous to `fundsOut` above.
+    /// Selector routes to `TeeLzFundsOut` digest in [`super::signing::lz_funds_out_digest`].
+    function lzFundsOut(
+        uint256 amount,
+        uint256 burnId,
+        uint256 sourceChainId,
+        uint256 destinationChainId,
+        string sourceAddress,
+        bytes proof,
+        bytes settlementData,
+        uint32 dstEid,
+        bytes32 recipient,
+        uint256 minAmountLD,
+        bytes extraOptions
+    );
 }
 
 fn dev_mode_bypass() -> bool {
@@ -128,7 +152,11 @@ pub fn validate_destination(
             hex::encode(selector)
         )));
     }
-    let proof = parse_proof_from_calldata(&destination.call_data)?;
+    let proof = if selector == LZ_FUNDS_OUT_SELECTOR {
+        parse_lz_proof_from_calldata(&destination.call_data)?
+    } else {
+        parse_proof_from_calldata(&destination.call_data)?
+    };
     if proof.amount != destination.calldata_amount {
         return Err(EnclaveError::CrossCheck(format!(
             "calldata amount mismatch: decoded {} != declared {}",
@@ -228,6 +256,35 @@ pub fn decode_funds_out_params(call_data: &[u8]) -> Result<FundsOutParams> {
     Ok(decoded.params)
 }
 
+/// Decode an `lzFundsOut` calldata blob, enforcing canonical encoding.
+/// Shared with [`super::signing::lz_funds_out_digest`] which needs every
+/// field to build the `TeeLzFundsOut` struct hash.
+pub fn decode_lz_funds_out_params(call_data: &[u8]) -> Result<lzFundsOutCall> {
+    let decoded = lzFundsOutCall::abi_decode_validate(call_data)
+        .map_err(|e| EnclaveError::CrossCheck(format!("invalid lzFundsOut calldata: {e}")))?;
+    if decoded.abi_encode() != call_data {
+        return Err(EnclaveError::CrossCheck(
+            "non-canonical lzFundsOut calldata encoding: re-encoding does not reproduce input"
+                .into(),
+        ));
+    }
+    Ok(decoded)
+}
+
+/// Extract and crosscheck `amount` from an `lzFundsOut` calldata blob,
+/// returning a `RouteProof` consistent with the `fundsOut` path.
+pub(super) fn parse_lz_proof_from_calldata(call_data: &[u8]) -> Result<RouteProof> {
+    let decoded = decode_lz_funds_out_params(call_data)?;
+    let amount: u64 = decoded
+        .amount
+        .try_into()
+        .map_err(|_| EnclaveError::CrossCheck("lzFundsOut amount exceeds u64 range".into()))?;
+    Ok(RouteProof {
+        amount,
+        operation_id: None,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -272,6 +329,7 @@ mod tests {
             proxy_contract: vec![0xAA; ADDRESS_LEN],
             calldata_amount: 1000,
             calldata_commission: 0,
+            lz_release: None,
         }
     }
 
