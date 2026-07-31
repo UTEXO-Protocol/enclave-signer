@@ -27,7 +27,7 @@ sequenceDiagram
     Km->>Km: seed := mnemonic.to_seed("")
     Km->>Km: seed_box := SecretBox::new(seed), seed.zeroize()
     Km->>Km: master := Xpriv::new_master(network, seed)
-    Km->>Km: EVM   = m/44'/60'/0'/0/0<br/>BTC   = m/84'/0'/0'/0/0<br/>BIP-86 vanilla = m/86'/COIN'/0'<br/>BIP-86 colored = m/86'/827167'/0'
+    Km->>Km: EVM bridge = m/44'/60'/0'/0/0<br/>EVM gas-tx = m/44'/60'/0'/0/1<br/>BTC = m/84'/0'/0'/0/0<br/>BIP-86 vanilla = m/86'/COIN'/0'<br/>BIP-86 colored = m/86'/827167'/0'
     Km->>Km: evm_address = keccak256(uncomp_pub[1..])[12..]
     Km-->>State: (KeyManager, Mnemonic)
 
@@ -39,7 +39,7 @@ sequenceDiagram
 
     Note over Srv: tracing::info! evm_address, master_fingerprint,<br/>account_xpubs (public values only).<br/>The mnemonic is dropped here — its content lives<br/>only in the SecretBox(seed) from now on.
 
-    Srv-->>PClient: InitializeKeyResponse{evm_address, btc_compressed_pub,<br/>btc_xpub, master_fingerprint, account xpubs,<br/>evm_uncompressed_pub}
+    Srv-->>PClient: InitializeKeyResponse{evm_address, btc_compressed_pub,<br/>btc_xpub, master_fingerprint, account xpubs,<br/>evm_uncompressed_pub, evm_gas_tx pubkey + address,<br/>chain_id, bridge_contract, rgb_asset_id}
     PClient-->>Cli: print pubkeys
     Cli-->>Op: enclave ready
 ```
