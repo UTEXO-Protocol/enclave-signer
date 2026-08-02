@@ -105,11 +105,23 @@ pub fn validate_psbt_bytes(psbt_bytes: &[u8]) -> Result<()> {
 ///   4. **Sighash guard:** refuse any input requesting a sighash other than
 ///      ALL / taproot-DEFAULT, so a host can't splice our signature into a
 ///      different tx (ANYONECANPAY / SINGLE / NONE).
-///   5. **Amount bind (coarse):** the transition's `asset_output_amount`
-///      (the `OS_ASSET`-typed allocations only — for a mint, excluding the
-///      `OS_INFLATION` allowance outputs) must cover the net amount credited
-///      by the source side (`source_amount` minus `source_commission`). This
-///      does not yet verify which output is the recipient leg (issue #58).
+///   5. **Amount bind:** the transition's `asset_output_amount` (the
+///      `OS_ASSET`-typed allocations only — excluding the `OS_INFLATION`
+///      mint-capacity outputs) is bound to the net amount credited by the
+///      source side (`source_amount` minus `source_commission`):
+///      * **Inflation (mint):** exact equality. A fresh mint has no
+///        pre-existing allocation to return as change, so every `OS_ASSET` unit
+///        is minted for the recipient; any surplus over the credited amount is
+///        an over-mint and is rejected. (The old one-sided lower bound let a
+///        compromised host over-mint.)
+///      * **Transfer (pools send):** coverage lower bound only. The recipient
+///        is paid via a blinded (confidential) seal while bridge change returns
+///        via a revealed seal on this witness tx, so `asset_output_amount`
+///        (recipient + change) legitimately exceeds the credited amount.
+///        Binding the recipient leg exactly — and rejecting an over-send routed
+///        to an *unverified revealed* output — requires binding the
+///        recipient/change destinations (a recipient seal in the request plus
+///        bridge-owned-output verification), which is deferred follow-up work.
 #[cfg(feature = "rgb-validation")]
 pub fn validate_psbt_anchors_transition(
     psbt: &Psbt,
@@ -181,17 +193,41 @@ pub fn validate_psbt_anchors_transition(
         }
     }
 
-    let net_credited = source_amount.saturating_sub(source_commission);
     // `asset_output_amount`, not `total_output_amount`: only `OS_ASSET`-typed
-    // allocations carry asset units. For a Transfer the two are equal; for an
-    // Inflation the total also counts `OS_INFLATION` allowance outputs (mint
-    // *capacity*), which must not cover the credited amount (#54).
-    if last.asset_output_amount < net_credited {
-        return Err(EnclaveError::CrossCheck(format!(
-            "send-RGB amount mismatch: consignment asset_output_amount ({}) < net credited \
-             (source_amount {} - source_commission {} = {})",
-            last.asset_output_amount, source_amount, source_commission, net_credited
-        )));
+    // allocations carry asset units; the `OS_INFLATION` allowance outputs are
+    // mint *capacity*, not minted value, and are excluded.
+    let net_credited = source_amount.saturating_sub(source_commission);
+    match last.transition_type {
+        // Inflation (mint-RGB): a fresh mint has no pre-existing allocation to
+        // return as change, so the minted `OS_ASSET` units must EQUAL the
+        // credited amount — any surplus is an over-mint. This closes the
+        // over-mint gap the old one-sided lower bound left open.
+        ifa::TS_INFLATION => {
+            if last.asset_output_amount != net_credited {
+                return Err(EnclaveError::CrossCheck(format!(
+                    "mint-RGB amount mismatch: consignment asset_output_amount ({}) != net \
+                     credited (source_amount {} - source_commission {} = {net_credited})",
+                    last.asset_output_amount, source_amount, source_commission
+                )));
+            }
+        }
+        // Transfer (pools send) — the only other shape past the gate above. The
+        // recipient is paid via a blinded seal while bridge change returns via a
+        // revealed seal on this witness tx, so `asset_output_amount` (recipient
+        // + change) legitimately exceeds `net_credited`. Only a coverage lower
+        // bound is enforceable here: binding the recipient leg exactly, and
+        // rejecting an over-send routed to an unverified revealed output, needs
+        // recipient/change destination binding (a recipient seal in the request
+        // + bridge-owned-output verification) — deferred follow-up work.
+        _ => {
+            if last.asset_output_amount < net_credited {
+                return Err(EnclaveError::CrossCheck(format!(
+                    "send-RGB amount mismatch: consignment asset_output_amount ({}) < net credited \
+                     (source_amount {} - source_commission {} = {net_credited})",
+                    last.asset_output_amount, source_amount, source_commission
+                )));
+            }
+        }
     }
 
     Ok(())
@@ -659,6 +695,28 @@ mod tests {
             assert!(
                 err.to_string().contains("asset_output_amount (999)"),
                 "expected asset-amount rejection, got: {err}"
+            );
+        }
+
+        /// A mint whose `OS_ASSET` output EXCEEDS the credited amount is an
+        /// over-mint and must be rejected. The old one-sided lower bound
+        /// (`asset_output_amount < net_credited`) accepted this surplus; the
+        /// inflation path now requires exact equality.
+        #[test]
+        fn rejects_mint_over_mint() {
+            let psbt = psbt_with_two_inputs();
+            let mut validated = validated_for(&psbt, 1_000);
+            {
+                let last = validated.last_transition.as_mut().unwrap();
+                last.transition_type = ifa::TS_INFLATION;
+                // Minted 1_500 against a 1_000 credit → 500 over-mint.
+                last.asset_output_amount = 1_500;
+                last.total_output_amount = 1_500;
+            }
+            let err = validate_psbt_anchors_transition(&psbt, &validated, 1_000, 0).unwrap_err();
+            assert!(
+                err.to_string().contains("mint-RGB amount mismatch"),
+                "expected over-mint rejection, got: {err}"
             );
         }
 
