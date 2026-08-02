@@ -247,6 +247,61 @@ fn clone_rejects_tampered_ciphertext() {
 }
 
 #[test]
+fn clone_set_failed_completion_leaves_state_and_nonce_unconsumed() {
+    // Requester side: the requester records the donor's attestation nonce only
+    // AFTER `complete_cloning` commits. A SetClone that
+    // fails inside completion (seed decrypt / KeyManager derivation / identity)
+    // must therefore leave the enclave in `Cloning` with the nonce un-consumed,
+    // so a legitimate party whose handshake fails once can retry with the SAME
+    // donor attestation instead of being wedged out by a self-inflicted replay.
+    let (donor_port, donor_keys) = start_donor();
+    let requester_port = start_requester();
+
+    let init = initiate_cloning(requester_port, CLONING_SECRET, &donor_keys.evm_address);
+    let clone = request_get_clone(donor_port, &donor_keys.evm_address, &init)
+        .expect("GetClone should succeed");
+
+    // 1. First SetClone fails at seed-decrypt (flip a byte in the Poly1305 tag),
+    //    i.e. inside `complete_cloning`, after the point where the nonce is read
+    //    but before it is recorded.
+    let mut tampered = clone.clone();
+    let len = tampered.encrypted_seed.len();
+    tampered.encrypted_seed[len - 1] ^= 0x01;
+    let err = request_set_clone(requester_port, &tampered)
+        .expect_err("tampered ciphertext must fail at seed-decrypt");
+    assert!(
+        !err.message.contains("replay") && !err.message.contains("nonce"),
+        "must fail on the unseal, not the replay guard: {}",
+        err.message
+    );
+
+    // 2. State unchanged: the requester never reached `Active`, so it exposes no
+    //    keys yet (GetPublicKey fails while still in `Cloning`).
+    let resp = send_request(
+        requester_port,
+        &EnclaveRequest {
+            request: Some(Req::GetPublicKey(GetPublicKeyRequest {})),
+        },
+    );
+    assert!(
+        matches!(resp.response, Some(Resp::Error(_))),
+        "requester must still be in Cloning after a failed SetClone, got {:?}",
+        resp.response
+    );
+
+    // 3. Nonce un-consumed: retrying with the ORIGINAL (untampered) clone — the
+    //    same `donor_attestation`, hence the same nonce — still succeeds.
+    //    Pre-fix the doomed attempt consumed the nonce first and this retry
+    //    failed on the replay guard.
+    request_set_clone(requester_port, &clone)
+        .expect("retry with the same donor attestation must succeed after a failed completion");
+
+    let requester_keys = get_public_keys(requester_port);
+    assert_eq!(requester_keys.evm_address, donor_keys.evm_address);
+    assert_eq!(requester_keys.btc_xpub, donor_keys.btc_xpub);
+}
+
+#[test]
 fn clone_rejects_duplicate_requester_attestation_nonce_on_donor() {
     let (donor_port, donor_keys) = start_donor();
     let requester_port = start_requester();
