@@ -28,6 +28,31 @@ use crate::proto::RgbSource;
 #[cfg(feature = "spv")]
 use super::spv_validation;
 
+/// Aggregate request-size caps enforced *before* the expensive rgbstd
+/// consignment parse and the SPV Merkle-proof loop. The generic
+/// 4 MB wire-frame cap (`framing::MAX_MESSAGE_SIZE`) and the per-field caps
+/// (`spv_validation::MAX_MERKLE_PATH_DEPTH`,
+/// `evm::validation::MAX_FUNDS_OUT_CALL_DATA_LEN`) leave the *aggregate* parse
+/// and hashing budget unbounded: a request can stay under every individual
+/// limit yet still carry a multi-megabyte consignment or a large set of proofs.
+/// These caps bound that aggregate work up front, on the serial signing path.
+///
+/// Real USDT-swap consignments are a few KB (the in-tree transfer fixture is
+/// ~5.5 KB); 1 MiB is a generous ceiling well under the 4 MB frame.
+pub const MAX_CONSIGNMENT_BYTES: usize = 1024 * 1024;
+
+/// Maximum number of Merkle proofs (witness txids) a single source may carry.
+/// A consignment anchors a handful of witness transactions; 256 is far above
+/// any realistic transfer history.
+pub const MAX_MERKLE_PROOFS: usize = 256;
+
+/// Maximum total variable-length proof bytes (txids + Merkle-path siblings)
+/// summed across every proof, bounding aggregate Merkle-hashing work
+/// independently of the per-proof depth cap. 128 KiB permits a large multiple
+/// of any realistic proof set while rejecting a proof flood that stays under
+/// both the count cap and the per-path-depth cap.
+pub const MAX_TOTAL_PROOF_BYTES: usize = 128 * 1024;
+
 /// Validate all fields and source-chain evidence owned by an RGB source.
 ///
 /// This deliberately does not inspect or care about the destination network.
@@ -117,6 +142,32 @@ fn validate_source_payload(source: &RgbSource) -> Result<()> {
             "RGB source requires raw consignment bytes; consignment_valid is not authoritative"
                 .into(),
         ));
+    }
+    // Aggregate size/compute caps, enforced before the keccak hash and the full
+    // rgbstd parse below so a request cannot force disproportionate
+    // parsing/hashing while staying under every per-field cap.
+    if source.consignment.len() > MAX_CONSIGNMENT_BYTES {
+        return Err(EnclaveError::CrossCheck(format!(
+            "RGB source consignment too large: {} bytes (max {MAX_CONSIGNMENT_BYTES})",
+            source.consignment.len()
+        )));
+    }
+    if source.merkle_proofs.len() > MAX_MERKLE_PROOFS {
+        return Err(EnclaveError::CrossCheck(format!(
+            "RGB source carries too many merkle proofs: {} (max {MAX_MERKLE_PROOFS})",
+            source.merkle_proofs.len()
+        )));
+    }
+    let total_proof_bytes: usize = source
+        .merkle_proofs
+        .iter()
+        .map(|p| p.txid.len() + p.merkle_path.iter().map(|s| s.len()).sum::<usize>())
+        .sum();
+    if total_proof_bytes > MAX_TOTAL_PROOF_BYTES {
+        return Err(EnclaveError::CrossCheck(format!(
+            "RGB source merkle proofs too large in aggregate: {total_proof_bytes} bytes \
+             (max {MAX_TOTAL_PROOF_BYTES})"
+        )));
     }
     // Hash integrity check between listener-supplied bytes and the pre-computed
     // keccak. This is INTEGRITY, NOT AUTHORIZATION (audit I-02 / Oxorio I-09):
@@ -1016,6 +1067,8 @@ mod tests {
     const CONTRACT_FIXTURE: &[u8] =
         include_bytes!("../../../tests/fixtures/contract_consignment.rgbc");
 
+    use crate::proto::MerkleProofEntry;
+
     #[test]
     fn rejects_invalid_bytes() {
         let validator = RgbValidator::new("http://localhost:1".to_string(), "regtest").unwrap();
@@ -1477,6 +1530,66 @@ mod tests {
     #[test]
     fn accepts_valid_consignment_hash() {
         assert!(validate_source_payload(&fixture_source("rgb:any-declared-asset")).is_ok());
+    }
+
+    /// A consignment larger than `MAX_CONSIGNMENT_BYTES` is rejected by the
+    /// payload gate with the aggregate-size error *before* any rgbstd parse
+    /// (the error is the size cap, not a decode failure).
+    #[test]
+    fn rejects_oversized_consignment_before_parse() {
+        let mut source = fixture_source("rgb:any-declared-asset");
+        source.consignment = vec![0u8; MAX_CONSIGNMENT_BYTES + 1];
+        source.consignment_hash = keccak(&source.consignment);
+        let err = validate_source_payload(&source).unwrap_err().to_string();
+        assert!(err.contains("consignment too large"), "unexpected: {err}");
+    }
+
+    /// Boundary: a consignment exactly at `MAX_CONSIGNMENT_BYTES` passes the
+    /// aggregate gate (rejection is strictly `>` the cap).
+    #[test]
+    fn accepts_consignment_at_size_cap() {
+        let mut source = fixture_source("rgb:any-declared-asset");
+        source.consignment = vec![0u8; MAX_CONSIGNMENT_BYTES];
+        source.consignment_hash = keccak(&source.consignment);
+        assert!(validate_source_payload(&source).is_ok());
+    }
+
+    /// Too many Merkle proofs is rejected on count alone, even when each proof
+    /// is individually tiny.
+    #[test]
+    fn rejects_too_many_merkle_proofs() {
+        let mut source = fixture_source("rgb:any-declared-asset");
+        source.merkle_proofs = (0..MAX_MERKLE_PROOFS + 1)
+            .map(|_| MerkleProofEntry::default())
+            .collect();
+        let err = validate_source_payload(&source).unwrap_err().to_string();
+        assert!(err.contains("too many merkle proofs"), "unexpected: {err}");
+    }
+
+    /// Proofs that each stay under the per-path-depth cap but exceed the
+    /// aggregate byte budget are rejected by the aggregate gate — the case the
+    /// per-field caps miss.
+    #[test]
+    fn rejects_aggregate_proof_bytes_over_budget() {
+        // Each proof counts 32-byte txid + 32 siblings * 32 bytes = 1056 bytes,
+        // all within MAX_MERKLE_PATH_DEPTH. Take just enough to cross the
+        // aggregate cap while staying under the proof-count cap.
+        let per_proof = 32 + 32 * 32;
+        let n = MAX_TOTAL_PROOF_BYTES / per_proof + 1;
+        assert!(
+            n <= MAX_MERKLE_PROOFS,
+            "test would trip the count cap first"
+        );
+        let proof = MerkleProofEntry {
+            txid: vec![0u8; 32],
+            block_height: 0,
+            tx_position: 0,
+            merkle_path: vec![vec![0u8; 32]; 32],
+        };
+        let mut source = fixture_source("rgb:any-declared-asset");
+        source.merkle_proofs = vec![proof; n];
+        let err = validate_source_payload(&source).unwrap_err().to_string();
+        assert!(err.contains("too large in aggregate"), "unexpected: {err}");
     }
 
     /// Old `ignores_consignment_valid_flag_when_bytes_present`: an identical
