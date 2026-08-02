@@ -88,29 +88,18 @@ fn main() {
         }
     }
 
-    // Start vsock-to-TCP forwarder for Esplora access (production only).
-    // The host must run: vsock-proxy <ESPLORA_VSOCK_PORT> <esplora-host> <esplora-port>
-    // Untrusted, host-controlled egress boundary (audit I-01): data fetched
-    // through it is evidence verified by SPV + rgbstd validation, never
-    // trusted input. See `vsock_forwarder`'s module-level TRUST BOUNDARY note.
+    // Host-egress vsock forwarders (production only). Untrusted,
+    // host-controlled egress boundary: bytes fetched through them are evidence
+    // verified in-enclave (SPV + rgbstd validation, or Helios), never trusted
+    // input. Esplora no longer uses a generic forwarder — the RGB validator
+    // owns a typed, destination-pinned Esplora client that dials the parent
+    // vsock directly (see `RgbValidator::new_vsock`), so no loopback Esplora
+    // port is bound. These forwarders serve only the EVM-RPC and Helios paths.
     #[cfg(all(feature = "vsock", target_os = "linux"))]
     {
-        let vsock_port: u32 = std::env::var("ESPLORA_VSOCK_PORT")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(8001);
-        tracing::info!(
-            vsock_port,
-            "starting Esplora vsock forwarder (host must run: vsock-proxy {vsock_port} <esplora-host> <esplora-port>)"
-        );
-        if let Err(e) = utexo_bridge_enclave::vsock_forwarder::start_forwarder(3443, vsock_port) {
-            tracing::error!("failed to start vsock forwarder: {e}");
-        }
-
-        // Second forwarder for the EVM JSON-RPC used by in-enclave FundsIn
-        // verification (#60). Distinct loopback/vsock ports from Esplora
-        // (3443/8001). Untrusted, host-controlled egress boundary (audit I-01);
-        // the host must run: vsock-proxy <EVM_RPC_VSOCK_PORT> <evm-rpc-host> <port>.
+        // Forwarder for the EVM JSON-RPC used by in-enclave FundsIn
+        // verification. Untrusted, host-controlled egress boundary; the host
+        // must run: vsock-proxy <EVM_RPC_VSOCK_PORT> <evm-rpc-host> <port>.
         #[cfg(feature = "evm-rpc")]
         {
             let evm_vsock_port: u32 = std::env::var("EVM_RPC_VSOCK_PORT")
@@ -173,10 +162,24 @@ fn main() {
     // Build RGB consignment validator (when feature enabled).
     #[cfg(feature = "rgb-validation")]
     let rgb_validator = {
-        let esplora_url =
-            std::env::var("ESPLORA_URL").unwrap_or_else(|_| "http://127.0.0.1:3443".into());
         let network = std::env::var("BITCOIN_NETWORK").unwrap_or_else(|_| "bitcoin".into());
-        match RgbValidator::new(esplora_url, &network) {
+        // Production dials the parent vsock directly through the pinned, typed
+        // Esplora client (no loopback forwarder); dev/tests use a direct TCP URL.
+        #[cfg(all(feature = "vsock", target_os = "linux"))]
+        let validator = {
+            let vsock_port: u32 = std::env::var("ESPLORA_VSOCK_PORT")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(8001);
+            RgbValidator::new_vsock(vsock_port, &network)
+        };
+        #[cfg(not(all(feature = "vsock", target_os = "linux")))]
+        let validator = {
+            let esplora_url =
+                std::env::var("ESPLORA_URL").unwrap_or_else(|_| "http://127.0.0.1:3443".into());
+            RgbValidator::new(esplora_url, &network)
+        };
+        match validator {
             Ok(v) => {
                 tracing::info!("RGB validator initialized");
                 Some(v)

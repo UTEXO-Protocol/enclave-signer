@@ -65,6 +65,11 @@ rgb-consignment = { git = "ssh://git@github.com/UTEXO-Protocol/rgb-consignment-p
 # Pins per schema_id so a consignment cannot self-validate its own types
 # (audit 4th W-01 / #92). `default-features = false` skips the CLI bin deps.
 rgb-schemas = { version = "=0.11.1-rc.10", default-features = false, optional = true }
+# JSON decode for the typed, pinned Esplora client: reuses
+# `esplora_client::TxStatus` + the fee-estimate map decoders. Already present in
+# the tree via `rgb-ops`'s esplora-client, so this direct dep adds nothing to
+# the binary. Gated to `rgb-validation` (the only code path that fetches).
+serde_json = { version = "1", optional = true }
 
 # Attestation verification (COSE_Sign1 + AWS Nitro cert chain) lives in
 # the workspace `attestation-verify` crate so the parent CLI binary and
@@ -127,7 +132,7 @@ dev-mode = []
 # resolver, so a malicious host could have the enclave sign a release against a
 # fabricated Bitcoin anchor. Kept as a separate feature (rather than adding
 # `spv` to this list) to avoid a feature cycle with `spv` below.
-rgb-validation = ["rgb-ops", "rgb-consignment", "rgb-schemas"]
+rgb-validation = ["rgb-ops", "rgb-consignment", "rgb-schemas", "dep:serde_json"]
 # Bitcoin SPV verification of consignment witness txids before signing EVM
 # transactions. Implies `rgb-validation` because SPV needs the consignment
 # parsed to extract witness txids. When the feature is OFF, handle_sign_evm

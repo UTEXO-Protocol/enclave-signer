@@ -1,4 +1,6 @@
 pub mod btc_crosscheck;
+#[cfg(feature = "rgb-validation")]
+pub mod esplora_egress;
 pub mod psbt_validation;
 pub mod signing;
 pub mod spv;
