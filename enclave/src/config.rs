@@ -20,8 +20,26 @@
 
 use crate::error::{EnclaveError, Result};
 
+/// Default aggregate request-size caps for the RGB signing path, used when the
+/// matching env var is unset. Operators may override each via env
+/// (`MAX_CONSIGNMENT_BYTES`, `MAX_MERKLE_PROOFS`, `MAX_TOTAL_PROOF_BYTES`), a
+/// per-deployment tune that needs no rebuild or re-attestation. These are
+/// defense-in-depth DoS bounds on the serial signing path; consignment size is
+/// additionally hard-capped by the 4 MB wire frame regardless of this value.
+///
+/// Real USDT-swap consignments are a few KB (the in-tree fixture is ~5.5 KB);
+/// 1 MiB is a generous ceiling well under the 4 MB frame.
+pub const DEFAULT_MAX_CONSIGNMENT_BYTES: usize = 1024 * 1024;
+/// Default cap on the number of Merkle proofs a source may carry (env
+/// `MAX_MERKLE_PROOFS`). A consignment anchors a handful of witness txs.
+pub const DEFAULT_MAX_MERKLE_PROOFS: usize = 256;
+/// Default cap on total variable-length proof bytes (txids + Merkle-path
+/// siblings) across all proofs (env `MAX_TOTAL_PROOF_BYTES`), bounding aggregate
+/// Merkle-hashing work independently of the per-proof depth cap.
+pub const DEFAULT_MAX_TOTAL_PROOF_BYTES: usize = 128 * 1024;
+
 /// Bridge config pinned at enclave boot from env. See module docs.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct BridgeConfig {
     pub chain_id: u64,
     pub bridge_contract: [u8; 20],
@@ -65,6 +83,31 @@ pub struct BridgeConfig {
     /// pins the MultisigProxy for the EVM signing cross-check — one pin cannot
     /// serve both lookups.
     pub funds_in_contract: [u8; 20],
+    /// Aggregate request-size caps for the RGB signing path, operator-tunable
+    /// via env (`MAX_CONSIGNMENT_BYTES` / `MAX_MERKLE_PROOFS` /
+    /// `MAX_TOTAL_PROOF_BYTES`); each defaults to its `DEFAULT_*` constant when
+    /// unset (or set to 0). Defense-in-depth DoS bounds, not attested — like the
+    /// operational pins above. See [`DEFAULT_MAX_CONSIGNMENT_BYTES`].
+    pub max_consignment_bytes: usize,
+    pub max_merkle_proofs: usize,
+    pub max_total_proof_bytes: usize,
+}
+
+impl Default for BridgeConfig {
+    fn default() -> Self {
+        Self {
+            chain_id: 0,
+            bridge_contract: [0u8; 20],
+            rgb_asset_id: String::new(),
+            gas_tx_allowed_to: None,
+            btc_allowed_scripts: Vec::new(),
+            btc_max_total_sats: 0,
+            funds_in_contract: [0u8; 20],
+            max_consignment_bytes: DEFAULT_MAX_CONSIGNMENT_BYTES,
+            max_merkle_proofs: DEFAULT_MAX_MERKLE_PROOFS,
+            max_total_proof_bytes: DEFAULT_MAX_TOTAL_PROOF_BYTES,
+        }
+    }
 }
 
 impl BridgeConfig {
@@ -113,6 +156,21 @@ impl BridgeConfig {
             .and_then(|s| parse_eth_address(&s).ok())
             .unwrap_or(bridge_contract);
 
+        // Aggregate request-size caps (operator-tunable, defense-in-depth). An
+        // unset, unparseable, or zero value falls back to the default.
+        let parse_cap = |name: &str, default: usize| -> usize {
+            std::env::var(name)
+                .ok()
+                .and_then(|s| s.parse::<usize>().ok())
+                .filter(|&n| n > 0)
+                .unwrap_or(default)
+        };
+        let max_consignment_bytes =
+            parse_cap("MAX_CONSIGNMENT_BYTES", DEFAULT_MAX_CONSIGNMENT_BYTES);
+        let max_merkle_proofs = parse_cap("MAX_MERKLE_PROOFS", DEFAULT_MAX_MERKLE_PROOFS);
+        let max_total_proof_bytes =
+            parse_cap("MAX_TOTAL_PROOF_BYTES", DEFAULT_MAX_TOTAL_PROOF_BYTES);
+
         Self {
             chain_id,
             bridge_contract,
@@ -121,6 +179,9 @@ impl BridgeConfig {
             btc_allowed_scripts,
             btc_max_total_sats,
             funds_in_contract,
+            max_consignment_bytes,
+            max_merkle_proofs,
+            max_total_proof_bytes,
         }
     }
 

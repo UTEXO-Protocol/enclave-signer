@@ -150,14 +150,14 @@ pub fn validate_destination_anchor(
                 .into(),
         ));
     }
-    // Aggregate size cap, before the keccak hash and the rgbstd parse below —
-    // the destination consignment is otherwise bounded only by the generic 4 MB
-    // wire frame.
-    if destination.consignment.len() > validation::MAX_CONSIGNMENT_BYTES {
+    // Aggregate size cap (operator-configurable via `MAX_CONSIGNMENT_BYTES`),
+    // before the keccak hash and the rgbstd parse below — the destination
+    // consignment is otherwise bounded only by the generic 4 MB wire frame.
+    if destination.consignment.len() > ctx.bridge_config.max_consignment_bytes {
         return Err(EnclaveError::CrossCheck(format!(
             "send-RGB consignment too large: {} bytes (max {})",
             destination.consignment.len(),
-            validation::MAX_CONSIGNMENT_BYTES
+            ctx.bridge_config.max_consignment_bytes
         )));
     }
     // Wire-tamper detection, mirroring the EVM path's defence-in-depth check.
