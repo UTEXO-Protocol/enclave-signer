@@ -521,7 +521,7 @@ mod tests {
     fn test_lz_different_dst_eid_different_digest() {
         let domain = lz_test_domain();
         let call_data = lz_test_calldata();
-        let mut lz1 = lz_test_release();
+        let lz1 = lz_test_release();
         let mut lz2 = lz_test_release();
         lz2.dst_eid = 40161; // Sepolia
 

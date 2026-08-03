@@ -219,9 +219,6 @@ fn dispatch(request: EnclaveRequest, ctx: &ServerContext) -> EnclaveResponse {
             tracing::info!("request: GetAttestedPublicKey");
             handle_get_attested_public_key(ctx, req)
         }
-        Some(Request::SignCcd(_)) => {
-            Err(EnclaveError::Internal("SignCcd not yet implemented".into()))
-        }
         None => {
             tracing::warn!("received empty request (no oneof variant set)");
             return EnclaveResponse {
