@@ -2,7 +2,8 @@
 
 Plain-BTC (non-bridge) PSBTs do **not** go through this path anymore: they use
 the separate `SignBtc` request (M-05 / #102), gated by the attested
-`allow_vanilla_psbt` policy, the `BTC_ALLOWED_SCRIPTS` output allowlist, and the
+`allow_vanilla_psbt` policy, the output self-ownership rule (every output must
+pay back to a script the enclave proves it controls), and the
 `BTC_MAX_TOTAL_SATS` cap, with signing scoped to the vanilla BIP-86 account
 only. The bridge path below always requires the EVM deposit hash **and** the
 RGB consignment.

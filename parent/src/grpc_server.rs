@@ -424,8 +424,9 @@ impl ParentService for ParentAdapterService {
                 // Plain-BTC signing (audit #69/M-01): a distinct request that
                 // never carries a source proof or consignment. The Listener
                 // sends the PSBT in `EnrichedBtcPayload.psbt_bytes`; the enclave
-                // signs it with the vanilla BIP-86 account under a strict output
-                // allowlist + input-value cap.
+                // signs it with the vanilla BIP-86 account, and only after
+                // proving every output pays back to a script it controls
+                // (self-pay), under an input-value cap.
                 let payload = match inner.data {
                     Some(sign_request::Data::BtcData(payload)) => payload,
                     _ => {

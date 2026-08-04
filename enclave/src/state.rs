@@ -453,6 +453,16 @@ impl EnclaveState {
         self.with_active(|km| km.sign_psbt_scoped(psbt_bytes, allowed_account))
     }
 
+    /// Run `f` against the active `KeyManager`, or fail with
+    /// `KeyNotInitialized`. Exposed for validators that must reason about the
+    /// enclave's own keys before signing — the plain-BTC cross-check proves
+    /// every output pays back to a script this enclave controls
+    /// ([`crate::networks::rgb::btc_ownership`]), which needs the derivation,
+    /// not just the signature.
+    pub fn with_keys<T>(&self, f: impl FnOnce(&KeyManager) -> Result<T>) -> Result<T> {
+        self.with_active(f)
+    }
+
     fn lock_phase(&self) -> Result<std::sync::MutexGuard<'_, Phase>> {
         self.inner
             .lock()

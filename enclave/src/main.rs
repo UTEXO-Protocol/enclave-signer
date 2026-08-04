@@ -6,7 +6,9 @@
 use std::net::TcpListener;
 
 use utexo_bridge_enclave::config::BridgeConfig;
-use utexo_bridge_enclave::networks::rgb::spv::{checkpoint_for, HeaderChain, Network};
+use utexo_bridge_enclave::networks::rgb::spv::{
+    resolve_checkpoint, CheckpointSource, HeaderChain, Network, CHECKPOINT_ENV,
+};
 #[cfg(feature = "rgb-validation")]
 use utexo_bridge_enclave::networks::rgb::validation::RgbValidator;
 use utexo_bridge_enclave::server::{self, ServerContext};
@@ -197,7 +199,22 @@ fn main() {
         );
         Network::Mainnet
     });
-    let checkpoint = checkpoint_for(spv_network);
+    // Compiled-in anchor, or the dev-only `SPV_CHECKPOINT` override. A
+    // production-shaped build with that var set refuses to boot rather than
+    // letting the host pick the SPV trust anchor; a malformed spec is fatal too,
+    // so a dev never silently syncs from the compiled height instead.
+    let (checkpoint, checkpoint_source) = resolve_checkpoint(spv_network).unwrap_or_else(|msg| {
+        panic!("{msg}");
+    });
+    if checkpoint_source == CheckpointSource::Env {
+        tracing::warn!(
+            ?spv_network,
+            checkpoint_height = checkpoint.height,
+            "spv: checkpoint OVERRIDDEN from {} — dev builds only; headers below this height are \
+             not verifiable by this enclave",
+            CHECKPOINT_ENV
+        );
+    }
     if let Err(msg) = checkpoint.assert_real_in_release() {
         // In a release production build this is fatal — placeholder
         // checkpoints would mean the listener can never push headers that
