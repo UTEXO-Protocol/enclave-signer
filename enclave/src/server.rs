@@ -3,7 +3,7 @@ use std::io::{Read, Write};
 use crate::config::BridgeConfig;
 use crate::error::{EnclaveError, Result};
 use crate::framing;
-use crate::networks::evm::signing::{build_evm_domain, funds_out_digest};
+use crate::networks::evm::signing::{build_evm_domain, evm_digest};
 use crate::networks::{
     validate_destination, validate_route_proofs, validate_source, ValidationContext,
 };
@@ -291,7 +291,7 @@ fn handle_sign(ctx: &ServerContext, req: SignRequest) -> Result<EnclaveResponse>
             &**client,
             // FundsIn is emitted by the bridge entry contract, which may differ
             // from the MultisigProxy pinned in BRIDGE_CONTRACT (see config.rs).
-            &ctx.bridge_config.funds_in_contract,
+            &ctx.bridge_config.funds_in_contracts,
             ctx.evm_rpc_config.min_confirmations,
             &tx_hash,
             &source.funds_in_operation_id,
@@ -338,7 +338,7 @@ fn handle_sign(ctx: &ServerContext, req: SignRequest) -> Result<EnclaveResponse>
     {
         let op_key = crate::networks::rgb::psbt_validation::psbt_operation_key(
             ctx.bridge_config.chain_id,
-            &ctx.bridge_config.bridge_contract,
+            &ctx.bridge_config.bridge_contracts_bytes(),
             &source.tx_hash,
             destination.operation_idx,
             &destination.asset_id,
@@ -519,7 +519,7 @@ fn handle_initialize(ctx: &ServerContext, req: InitializeKeyRequest) -> Result<E
             account_xpub_colored: keys.account_xpub_colored,
             evm_uncompressed_pub: keys.evm_uncompressed_pub.to_vec(),
             chain_id: ctx.bridge_config.chain_id,
-            bridge_contract: ctx.bridge_config.bridge_contract.to_vec(),
+            bridge_contract: ctx.bridge_config.bridge_contracts_bytes(),
             rgb_asset_id: ctx.bridge_config.rgb_asset_id.clone(),
             evm_gas_tx_uncompressed_pub: keys.evm_gas_tx_uncompressed_pub.to_vec(),
             evm_gas_tx_address: keys.evm_gas_tx_address.to_vec(),
@@ -562,7 +562,7 @@ fn build_public_keys_response(
         account_xpub_colored: keys.account_xpub_colored,
         evm_uncompressed_pub: keys.evm_uncompressed_pub.to_vec(),
         chain_id: cfg.chain_id,
-        bridge_contract: cfg.bridge_contract.to_vec(),
+        bridge_contract: cfg.bridge_contracts_bytes(),
         rgb_asset_id: cfg.rgb_asset_id.clone(),
         evm_gas_tx_uncompressed_pub: keys.evm_gas_tx_uncompressed_pub.to_vec(),
         evm_gas_tx_address: keys.evm_gas_tx_address.to_vec(),
@@ -652,7 +652,7 @@ fn handle_sign_evm(ctx: &ServerContext, req: EvmDestination) -> Result<EnclaveRe
     let domain = build_evm_domain(&req)?;
 
     let domain_sep = domain.separator_hash();
-    let digest = funds_out_digest(&domain, &req.call_data, req.nonce, req.deadline)?;
+    let digest = evm_digest(&domain, &req.call_data, req.nonce, req.deadline)?;
 
     tracing::info!(
         domain_name = %domain.name,

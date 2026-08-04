@@ -6,19 +6,23 @@ use crate::error::{EnclaveError, Result};
 
 /// Derive the soft-dedup key for an EVM→RGB bridge PSBT operation.
 ///
-/// 32-byte keccak over `(chain_id, bridge_contract, evm_tx_hash,
-/// operation_idx, rgb_asset_id)`. `chain_id` and `bridge_contract` come from
+/// 32-byte keccak over `(chain_id, bridge_contracts, evm_tx_hash,
+/// operation_idx, rgb_asset_id)`. `chain_id` and `bridge_contracts` come from
 /// the enclave's **pinned** [`crate::config::BridgeConfig`] (not the request),
-/// so they can't be varied per-call. The variable-length fields are
-/// length-prefixed and a domain tag is mixed in so two distinct tuples can't
-/// hash to the same key by concatenation ambiguity.
+/// so they can't be varied per-call — that is why the whole pinned set is
+/// hashed rather than whichever deployment this request resolved to. The
+/// variable-length fields are length-prefixed and a domain tag is mixed in so
+/// two distinct tuples can't hash to the same key by concatenation ambiguity.
 ///
 /// Consumed by the **soft** in-memory replay guard
 /// ([`crate::state::EnclaveState::op_replay_guard`]) — see its doc for why
 /// this is defense-in-depth and not a sufficient double-spend control (#84).
+/// The guard is in-memory and volatile, so the key changing when the operator
+/// adds a deployment costs at most one TTL window of dedup, with nothing to
+/// migrate.
 pub fn psbt_operation_key(
     chain_id: u64,
-    bridge_contract: &[u8; 20],
+    bridge_contracts: &[u8],
     evm_tx_hash: &[u8],
     operation_idx: u64,
     rgb_asset_id: &str,
@@ -28,7 +32,11 @@ pub fn psbt_operation_key(
     let mut h = Keccak256::new();
     h.update(b"utexo:psbt-op:v1");
     h.update(chain_id.to_be_bytes());
-    h.update(bridge_contract);
+    // Length-prefixed: this field was a fixed 20 bytes and is now the pinned
+    // set, so without the prefix two different sets could concatenate into the
+    // same bytes and collide with a neighbouring field.
+    h.update((bridge_contracts.len() as u64).to_be_bytes());
+    h.update(bridge_contracts);
     h.update((evm_tx_hash.len() as u64).to_be_bytes());
     h.update(evm_tx_hash);
     h.update(operation_idx.to_be_bytes());

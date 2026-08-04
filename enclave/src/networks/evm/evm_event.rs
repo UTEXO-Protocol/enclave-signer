@@ -124,7 +124,7 @@ fn event_topic0(sig: &str) -> [u8; 32] {
 /// any field mismatch, an on-chain value exceeding `u64`, or insufficient
 /// confirmation depth all return `Err` and the caller refuses to sign.
 ///
-/// `bridge_contract` and `min_confirmations` come from PINNED config, never the
+/// `bridge_contracts` and `min_confirmations` come from PINNED config, never the
 /// request. `expected_*` come from the request fields the listener supplied and
 /// that this function is confirming against the chain.
 ///
@@ -133,7 +133,7 @@ fn event_topic0(sig: &str) -> [u8; 32] {
 #[allow(clippy::too_many_arguments)]
 pub fn verify_funds_in_event(
     provider: &dyn EvmReceiptProvider,
-    bridge_contract: &[u8; 20],
+    bridge_contracts: &[[u8; 20]],
     min_confirmations: u64,
     evm_tx_hash: &[u8; 32],
     expected_operation_id: &[u8],
@@ -174,27 +174,40 @@ pub fn verify_funds_in_event(
     //      RGB-only and carries the RGB OpId, so falling back would compare
     //      across id-spaces. Two deposits in one tx still refuse rather than
     //      guess.
+    //      Several pinned deployments are searched together on purpose. The
+    //      "more than one candidate refuses" rule is what keeps that safe: two
+    //      deployments both emitting in one tx is still ambiguous and still
+    //      refused, so widening the pin can never make an ambiguous receipt
+    //      resolvable - it can only add candidates that would themselves have
+    //      to be unique.
     let bridge_topic0 = event_topic0(BRIDGE_FUNDS_IN_SIG);
+    let pinned = |addr: &[u8; 20]| bridge_contracts.iter().any(|c| c == addr);
     let candidates: Vec<&LogEntry> = receipt
         .logs
         .iter()
         .filter(|log| {
-            log.address == *bridge_contract
-                && log.topics.first().is_some_and(|t| *t == bridge_topic0)
+            pinned(&log.address) && log.topics.first().is_some_and(|t| *t == bridge_topic0)
         })
         .collect();
+    let pinned_list = || {
+        bridge_contracts
+            .iter()
+            .map(hex::encode)
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
     if candidates.len() > 1 {
         return Err(EnclaveError::CrossCheck(format!(
-            "ambiguous: multiple BridgeFundsIn logs from bridge contract 0x{} in tx 0x{} - \
+            "ambiguous: multiple BridgeFundsIn logs from pinned bridge contracts [{}] in tx 0x{} - \
              refusing to guess which authorises this release",
-            hex::encode(bridge_contract),
+            pinned_list(),
             hex::encode(evm_tx_hash)
         )));
     }
     let log = candidates.first().copied().ok_or_else(|| {
         EnclaveError::CrossCheck(format!(
-            "no BridgeFundsIn log from bridge contract 0x{} in tx 0x{}",
-            hex::encode(bridge_contract),
+            "no BridgeFundsIn log from pinned bridge contracts [{}] in tx 0x{}",
+            pinned_list(),
             hex::encode(evm_tx_hash)
         ))
     })?;
@@ -677,7 +690,7 @@ mod tests {
 
     /// Verify with the operationId bound — the only supported call shape.
     fn verify(p: &FakeProvider) -> Result<()> {
-        verify_funds_in_event(p, &BRIDGE, 12, &TX, &op_id(7), 1000, 50)
+        verify_funds_in_event(p, &[BRIDGE], 12, &TX, &op_id(7), 1000, 50)
     }
 
     #[test]
@@ -939,7 +952,7 @@ mod tests {
             receipt: Some(receipt_with(vec![bridge_log(op_id(7), 100, 0, 150)], 100)),
             head: 112,
         };
-        let e = verify_funds_in_event(&p, &BRIDGE, 12, &TX, &op_id(7), 100, 150)
+        let e = verify_funds_in_event(&p, &[BRIDGE], 12, &TX, &op_id(7), 100, 150)
             .unwrap_err()
             .to_string();
         assert!(e.contains("exceeds gross amount"), "got: {e}");
@@ -966,7 +979,7 @@ mod tests {
         let p = happy_provider();
         assert!(verify(&p).is_ok(), "a 32-byte operationId must bind");
         // ...and a different one must not.
-        let e = verify_funds_in_event(&p, &BRIDGE, 12, &TX, &op_id(9), 1000, 50)
+        let e = verify_funds_in_event(&p, &[BRIDGE], 12, &TX, &op_id(9), 1000, 50)
             .unwrap_err()
             .to_string();
         assert!(e.contains("operationId mismatch"), "got: {e}");
@@ -976,7 +989,7 @@ mod tests {
     /// check as it once did.
     #[test]
     fn rejects_when_operation_id_not_supplied() {
-        let e = verify_funds_in_event(&happy_provider(), &BRIDGE, 12, &TX, &[], 1000, 50)
+        let e = verify_funds_in_event(&happy_provider(), &[BRIDGE], 12, &TX, &[], 1000, 50)
             .unwrap_err()
             .to_string();
         assert!(e.contains("must be exactly 32 bytes"), "got: {e}");
@@ -995,7 +1008,7 @@ mod tests {
     /// A wrong-length id is a mis-encoding, not an absent one: refuse.
     #[test]
     fn rejects_malformed_expected_operation_id() {
-        let e = verify_funds_in_event(&happy_provider(), &BRIDGE, 12, &TX, &[0xAA; 8], 1000, 50)
+        let e = verify_funds_in_event(&happy_provider(), &[BRIDGE], 12, &TX, &[0xAA; 8], 1000, 50)
             .unwrap_err()
             .to_string();
         assert!(e.contains("must be exactly 32 bytes"), "got: {e}");
@@ -1043,5 +1056,63 @@ mod tests {
             head: 112,
         };
         assert!(verify(&p).is_err());
+    }
+
+    /// A second pinned deployment (mint/burn alongside pools) must resolve, or
+    /// no mint on network 103 can ever be authorised.
+    #[test]
+    fn finds_the_log_from_a_second_pinned_contract() {
+        let mut log = bridge_log(op_id(7), 1000, 950, 50);
+        log.address = OTHER;
+        let p = FakeProvider {
+            receipt: Some(ReceiptData {
+                status_success: true,
+                block_number: 100,
+                logs: vec![log],
+            }),
+            head: 112,
+        };
+        verify_funds_in_event(&p, &[BRIDGE, OTHER], 12, &TX, &op_id(7), 1000, 50)
+            .expect("log from the second pinned contract resolves");
+    }
+
+    /// Widening the pin must not make an ambiguous receipt resolvable: one log
+    /// from each pinned deployment is still two candidates, and still refused.
+    #[test]
+    fn two_pinned_contracts_each_emitting_is_still_ambiguous() {
+        let a = bridge_log(op_id(7), 1000, 950, 50);
+        let mut b = bridge_log(op_id(7), 1000, 950, 50);
+        b.address = OTHER;
+        let p = FakeProvider {
+            receipt: Some(ReceiptData {
+                status_success: true,
+                block_number: 100,
+                logs: vec![a, b],
+            }),
+            head: 112,
+        };
+        let e = verify_funds_in_event(&p, &[BRIDGE, OTHER], 12, &TX, &op_id(7), 1000, 50)
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("ambiguous"), "unexpected: {e}");
+    }
+
+    /// An unpinned emitter is still ignored when several contracts are pinned.
+    #[test]
+    fn unpinned_emitter_is_ignored_with_several_pins() {
+        let mut log = bridge_log(op_id(7), 1000, 950, 50);
+        log.address = [0xEE; 20];
+        let p = FakeProvider {
+            receipt: Some(ReceiptData {
+                status_success: true,
+                block_number: 100,
+                logs: vec![log],
+            }),
+            head: 112,
+        };
+        let e = verify_funds_in_event(&p, &[BRIDGE, OTHER], 12, &TX, &op_id(7), 1000, 50)
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("no BridgeFundsIn log"), "unexpected: {e}");
     }
 }

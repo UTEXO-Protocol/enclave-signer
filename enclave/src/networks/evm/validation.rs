@@ -23,7 +23,19 @@ pub const FUNDS_OUT_SELECTOR_POOLS: [u8; 4] = [0xdc, 0x77, 0x13, 0x90];
 /// host-tunable.
 pub const MAX_FUNDS_OUT_CALL_DATA_LEN: usize = 64 * 1024;
 
-const ALLOWED_SELECTORS: &[[u8; 4]] = &[FUNDS_OUT_SELECTOR_POOLS];
+/// `keccak256("rebalanceLiquidity((uint256,uint256,uint256,uint256,string,string,bytes,bytes,bytes))")[0..4]`.
+///
+/// The credit leg of a scenario-A pool refill, submitted through
+/// `MultisigProxy.rebalanceCall`. Distinct from `fundsOut` in both shape and
+/// authorisation: a rebalance is **self-originated**, so there is no source
+/// consignment to bind it to (see `server.rs::run_evm_destination_crosschecks`).
+///
+/// Derived from the `sol!` definition so it cannot drift from the decoder;
+/// `rebalance_selector_matches_contract` pins it to the independently computed
+/// value so the definition itself cannot drift unnoticed.
+pub const REBALANCE_SELECTOR: [u8; 4] = rebalanceLiquidityCall::SELECTOR;
+
+const ALLOWED_SELECTORS: &[[u8; 4]] = &[FUNDS_OUT_SELECTOR_POOLS, REBALANCE_SELECTOR];
 
 sol! {
     /// Mirrors `IBridge.FundsOutParams` (IBridge.sol:193-202). Field order fixes
@@ -40,10 +52,31 @@ sol! {
         bytes settlementData;
     }
 
+    /// Mirrors `IBridge.RebalanceParams`. Field order fixes both the ABI decode
+    /// here and the `TeeRebalance` struct hash in
+    /// [`super::signing::rebalance_digest`].
+    ///
+    /// Two settlement blobs, not one: a rebalance debits one chain's bucket and
+    /// credits another's, so it cites deposits on both sides.
+    struct RebalanceParams {
+        uint256 amount;
+        uint256 burnId;
+        uint256 sourceChainId;
+        uint256 destinationChainId;
+        string sourceAddress;
+        string destinationAddress;
+        bytes proof;
+        bytes settlementDataOut;
+        bytes settlementDataIn;
+    }
+
     /// Never reaches the chain — the proxy takes the struct directly. This is
     /// only the enclave's wire format, which is why the protos still carry an
     /// opaque `call_data` blob.
     function fundsOut(FundsOutParams params);
+
+    /// Same: the enclave's wire format for the rebalance calldata blob.
+    function rebalanceLiquidity(RebalanceParams params);
 }
 
 fn dev_mode_bypass() -> bool {
@@ -161,13 +194,23 @@ pub fn validate_destination(
             destination.chain_id, bridge_config.chain_id
         )));
     }
-    if bridge_config.bridge_contract != [0u8; ADDRESS_LEN]
-        && destination.proxy_contract.as_slice() != bridge_config.bridge_contract
+    // Membership, not equality: one federation serves several Bridge
+    // deployments on a chain (pools and mint/burn are separate pairs). Widening
+    // the pin does not widen what a compromised host can reach - the request
+    // still has to name an address the operator pinned, and the matched address
+    // is what the rest of the request is bound to.
+    if !bridge_config.bridge_contracts.is_empty()
+        && !bridge_config.allows_proxy_contract(&destination.proxy_contract)
     {
         return Err(EnclaveError::CrossCheck(format!(
-            "proxy_contract mismatch: request {} != pinned {}",
+            "proxy_contract mismatch: request {} is not one of the pinned [{}]",
             hex::encode(&destination.proxy_contract),
-            hex::encode(bridge_config.bridge_contract)
+            bridge_config
+                .bridge_contracts
+                .iter()
+                .map(hex::encode)
+                .collect::<Vec<_>>()
+                .join(", ")
         )));
     }
 
@@ -192,10 +235,23 @@ fn parse_proof_from_calldata(call_data: &[u8]) -> Result<RouteProof> {
     // The byte-level reason is gone (#168 removed the offset rewrite, and the
     // digest now commits to decoded fields). Kept anyway: it keeps the wire
     // format unambiguous and stops unread trailing data riding along.
-    let amount: u64 = decode_funds_out_params(call_data)?
-        .amount
+    //
+    // Selector-dispatched: the caller already rejected anything outside
+    // ALLOWED_SELECTORS, so this matches the same set. A new selector added to
+    // the whitelist without a decode arm here fails closed rather than being
+    // read with the wrong struct.
+    let amount = match call_data.get(..4) {
+        Some(s) if s == FUNDS_OUT_SELECTOR_POOLS => decode_funds_out_params(call_data)?.amount,
+        Some(s) if s == REBALANCE_SELECTOR => decode_rebalance_params(call_data)?.amount,
+        _ => {
+            return Err(EnclaveError::CrossCheck(
+                "no decoder for this calldata selector".into(),
+            ))
+        }
+    };
+    let amount: u64 = amount
         .try_into()
-        .map_err(|_| EnclaveError::CrossCheck("fundsOut amount exceeds u64 range".into()))?;
+        .map_err(|_| EnclaveError::CrossCheck("calldata amount exceeds u64 range".into()))?;
 
     Ok(RouteProof {
         amount,
@@ -204,6 +260,22 @@ fn parse_proof_from_calldata(call_data: &[u8]) -> Result<RouteProof> {
         // cannot be recovered from the calldata alone.
         operation_id: None,
     })
+}
+
+/// Decode a `rebalanceLiquidity` calldata blob, enforcing the canonical
+/// encoding for the same reason [`decode_funds_out_params`] does.
+pub fn decode_rebalance_params(call_data: &[u8]) -> Result<RebalanceParams> {
+    let decoded = rebalanceLiquidityCall::abi_decode_validate(call_data).map_err(|e| {
+        EnclaveError::CrossCheck(format!("invalid rebalanceLiquidity calldata: {e}"))
+    })?;
+    if decoded.abi_encode() != call_data {
+        return Err(EnclaveError::CrossCheck(
+            "non-canonical rebalanceLiquidity calldata encoding: re-encoding the decoded call \
+             does not reproduce the input bytes"
+                .into(),
+        ));
+    }
+    Ok(decoded.params)
 }
 
 /// Decode a `fundsOut` calldata blob into the release fields, enforcing the
@@ -278,7 +350,7 @@ mod tests {
     fn config() -> BridgeConfig {
         BridgeConfig {
             chain_id: 1,
-            bridge_contract: [0xAA; ADDRESS_LEN],
+            bridge_contracts: vec![[0xAA; ADDRESS_LEN]],
             rgb_asset_id: "ignored-by-evm-validation".into(),
             gas_tx_allowed_to: None,
             ..Default::default()
@@ -579,5 +651,95 @@ mod tests {
             err.to_string().contains("non-canonical fundsOut calldata"),
             "expected canonical-encoding rejection of overlapping tails, got: {err}"
         );
+    }
+
+    fn rebalance_calldata(amount: u64) -> Vec<u8> {
+        rebalanceLiquidityCall {
+            params: RebalanceParams {
+                amount: U256::from(amount),
+                burnId: U256::from(7u64),
+                sourceChainId: U256::from(1u64),
+                destinationChainId: U256::from(96u64),
+                sourceAddress: "src".into(),
+                destinationAddress: "dst".into(),
+                proof: Bytes::new(),
+                settlementDataOut: Bytes::new(),
+                settlementDataIn: Bytes::new(),
+            },
+        }
+        .abi_encode()
+    }
+
+    /// The mint/burn deployment is a second `Bridge` + `MultisigProxy` pair on
+    /// the same chain, so a request naming it must be accepted by the same
+    /// federation that serves pools.
+    #[test]
+    fn second_pinned_proxy_is_accepted() {
+        let cfg = BridgeConfig {
+            bridge_contracts: vec![[0xAA; ADDRESS_LEN], [0xBB; ADDRESS_LEN]],
+            ..config()
+        };
+        let mut dst = destination();
+        dst.proxy_contract = vec![0xBB; ADDRESS_LEN];
+        with_ctx(&cfg, |ctx| {
+            validate_destination(&dst, ctx).expect("second pinned proxy accepted");
+        });
+    }
+
+    #[test]
+    fn unpinned_proxy_is_rejected_even_with_several_pins() {
+        let cfg = BridgeConfig {
+            bridge_contracts: vec![[0xAA; ADDRESS_LEN], [0xBB; ADDRESS_LEN]],
+            ..config()
+        };
+        let mut dst = destination();
+        dst.proxy_contract = vec![0xCC; ADDRESS_LEN];
+        with_ctx(&cfg, |ctx| {
+            let err = validate_destination(&dst, ctx).unwrap_err().to_string();
+            assert!(err.contains("not one of the pinned"), "unexpected: {err}");
+        });
+    }
+
+    /// Widening the pin must not become "allow anything": the zero address is
+    /// not a member, so a request for it is still refused.
+    #[test]
+    fn zero_address_is_not_a_member() {
+        let cfg = config();
+        assert!(!cfg.allows_proxy_contract(&[0u8; ADDRESS_LEN]));
+    }
+
+    #[test]
+    fn rebalance_selector_is_accepted_and_amount_decoded() {
+        let cfg = config();
+        let mut dst = destination();
+        dst.call_data = rebalance_calldata(4242);
+        dst.calldata_amount = 4242;
+        with_ctx(&cfg, |ctx| {
+            let proof = validate_destination(&dst, ctx).expect("rebalance accepted");
+            assert_eq!(proof.amount, 4242);
+        });
+    }
+
+    /// The declared amount is cross-checked against the decoded one for
+    /// rebalance exactly as it is for fundsOut.
+    #[test]
+    fn rebalance_amount_mismatch_is_rejected() {
+        let cfg = config();
+        let mut dst = destination();
+        dst.call_data = rebalance_calldata(4242);
+        dst.calldata_amount = 1;
+        with_ctx(&cfg, |ctx| {
+            let err = validate_destination(&dst, ctx).unwrap_err().to_string();
+            assert!(err.contains("amount mismatch"), "unexpected: {err}");
+        });
+    }
+
+    /// `REBALANCE_SELECTOR` is derived from the `sol!` definition, so it tracks
+    /// the decoder automatically - but that means a wrong definition would go
+    /// unnoticed. Pin it to the value computed independently (go-ethereum) from
+    /// the contract's own signature.
+    #[test]
+    fn rebalance_selector_matches_contract() {
+        assert_eq!(hex::encode(REBALANCE_SELECTOR), "a021ba4e");
     }
 }

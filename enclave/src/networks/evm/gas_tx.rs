@@ -406,7 +406,7 @@ mod tests {
     fn cfg() -> BridgeConfig {
         BridgeConfig {
             chain_id: CHAIN_ID,
-            bridge_contract: [0xBB; 20],
+            bridge_contracts: vec![[0xBB; 20]],
             rgb_asset_id: "rgb:test".into(),
             gas_tx_allowed_to: Some(ALLOWED_TO),
             ..Default::default()

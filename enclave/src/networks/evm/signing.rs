@@ -1,7 +1,9 @@
 use sha3::{Digest, Keccak256};
 
 use crate::error::{EnclaveError, Result};
-use crate::networks::evm::validation::decode_funds_out_params;
+use crate::networks::evm::validation::{
+    decode_funds_out_params, decode_rebalance_params, FUNDS_OUT_SELECTOR_POOLS, REBALANCE_SELECTOR,
+};
 use crate::networks::evm::{ADDRESS_LEN, HASH_LEN};
 use crate::proto::EvmDestination;
 
@@ -17,6 +19,18 @@ const DOMAIN_TYPE_HASH_STR: &str =
 const TEE_FUNDS_OUT_TYPE_HASH_STR: &str = "TeeFundsOut(address recipient,uint256 amount,\
      uint256 burnId,uint256 sourceChainId,uint256 destinationChainId,string sourceAddress,\
      bytes proof,bytes settlementData,uint256 nonce,uint256 deadline)";
+
+/// EIP-712 type string for `MultisigProxy.rebalanceCall`
+/// (`MultisigProxy.sol:149-151`, `_TEE_REBALANCE_TYPEHASH`).
+///
+/// Eleven members, two of them settlement blobs: a rebalance debits one chain's
+/// bucket and credits another's. `teeNonce[sourceChainId]` is SHARED with
+/// `fundsOutCall`/`lzFundsOutCall`, so a nonce consumed here is not available to
+/// a release on the same source chain.
+const TEE_REBALANCE_TYPE_HASH_STR: &str = "TeeRebalance(uint256 amount,uint256 burnId,\
+     uint256 sourceChainId,uint256 destinationChainId,string sourceAddress,\
+     string destinationAddress,bytes proof,bytes settlementDataOut,bytes settlementDataIn,\
+     uint256 nonce,uint256 deadline)";
 
 /// EIP-712 domain separator components.
 /// Must match the deployed MultisigProxy contract exactly.
@@ -135,6 +149,77 @@ pub fn funds_out_digest(
     };
 
     Ok(eip712_digest(domain, &struct_hash))
+}
+
+/// Build the EIP-712 digest that `MultisigProxy.rebalanceCall` verifies, from a
+/// `rebalanceLiquidity(RebalanceParams)` calldata blob.
+///
+/// Mirrors `MultisigProxy._rebalanceStructHash`: eleven words, `string`/`bytes`
+/// pre-hashed. Same domain separator as `fundsOutCall` — the proxy is the
+/// verifying contract for both.
+pub fn rebalance_digest(
+    domain: &Eip712Domain,
+    call_data: &[u8],
+    nonce: u64,
+    deadline: u64,
+) -> Result<[u8; HASH_LEN]> {
+    if call_data.len() < 4 {
+        return Err(EnclaveError::CrossCheck(format!(
+            "call_data must contain at least a 4-byte selector, got {} bytes",
+            call_data.len()
+        )));
+    }
+    let params = decode_rebalance_params(call_data)?;
+
+    let struct_hash = {
+        let type_hash = Keccak256::digest(TEE_REBALANCE_TYPE_HASH_STR.as_bytes());
+
+        let mut buf = Vec::with_capacity(HASH_LEN * 12);
+        buf.extend_from_slice(&type_hash);
+        // Full-width uint256s — never narrowed to the cross-checks' u64.
+        buf.extend_from_slice(&params.amount.to_be_bytes::<HASH_LEN>());
+        buf.extend_from_slice(&params.burnId.to_be_bytes::<HASH_LEN>());
+        buf.extend_from_slice(&params.sourceChainId.to_be_bytes::<HASH_LEN>());
+        buf.extend_from_slice(&params.destinationChainId.to_be_bytes::<HASH_LEN>());
+        // Dynamic fields enter the struct hash pre-hashed, per EIP-712.
+        buf.extend_from_slice(&Keccak256::digest(params.sourceAddress.as_bytes()));
+        buf.extend_from_slice(&Keccak256::digest(params.destinationAddress.as_bytes()));
+        buf.extend_from_slice(&Keccak256::digest(&params.proof));
+        buf.extend_from_slice(&Keccak256::digest(&params.settlementDataOut));
+        buf.extend_from_slice(&Keccak256::digest(&params.settlementDataIn));
+        buf.extend_from_slice(&abi_encode_u256(nonce));
+        buf.extend_from_slice(&abi_encode_u256(deadline));
+
+        let hash: [u8; HASH_LEN] = Keccak256::digest(&buf).into();
+        hash
+    };
+
+    Ok(eip712_digest(domain, &struct_hash))
+}
+
+/// Route a calldata blob to the digest its selector calls for.
+///
+/// Signing a rebalance with the `TeeFundsOut` struct hash recovers a different
+/// address, which surfaces on-chain only as an unregistered-signer rejection —
+/// so the dispatch is here rather than at the call site, where a caller could
+/// forget it. An unknown selector fails closed; the validator whitelist should
+/// already have rejected it.
+pub fn evm_digest(
+    domain: &Eip712Domain,
+    call_data: &[u8],
+    nonce: u64,
+    deadline: u64,
+) -> Result<[u8; HASH_LEN]> {
+    match call_data.get(..4) {
+        Some(s) if s == FUNDS_OUT_SELECTOR_POOLS => {
+            funds_out_digest(domain, call_data, nonce, deadline)
+        }
+        Some(s) if s == REBALANCE_SELECTOR => rebalance_digest(domain, call_data, nonce, deadline),
+        _ => Err(EnclaveError::CrossCheck(format!(
+            "no EIP-712 digest for calldata selector 0x{} - refusing to sign",
+            hex::encode(call_data.get(..4).unwrap_or(call_data))
+        ))),
+    }
 }
 
 /// Wrap a struct hash into the final EIP-712 digest: `keccak256(0x1901 ‖
@@ -356,5 +441,110 @@ mod tests {
         let on_chain =
             decode("8da42c1b5850d914ac94e640f4edd2030e2330b104f8448fdf3c6639cb0542ff").unwrap();
         assert_eq!(domain.separator_hash(), on_chain.as_slice());
+    }
+
+    /// Reference `rebalanceLiquidity` calldata, ABI-encoded independently (Go
+    /// `abi.Pack` over the contract's own signature) rather than by the `sol!`
+    /// types under test, so a mistake in the Rust mirror cannot make this pass.
+    ///
+    /// Fields: amount 1_000_000, burnId 123_456_789, sourceChainId 1,
+    /// destinationChainId 96, "src"/"dst", proof 0x01, settlementDataOut 0x02,
+    /// settlementDataIn 0x03.
+    fn reference_rebalance_call_data() -> Vec<u8> {
+        decode(concat!(
+            "a021ba4e",
+            "0000000000000000000000000000000000000000000000000000000000000020",
+            "00000000000000000000000000000000000000000000000000000000000f4240",
+            "00000000000000000000000000000000000000000000000000000000075bcd15",
+            "0000000000000000000000000000000000000000000000000000000000000001",
+            "0000000000000000000000000000000000000000000000000000000000000060",
+            "0000000000000000000000000000000000000000000000000000000000000120",
+            "0000000000000000000000000000000000000000000000000000000000000160",
+            "00000000000000000000000000000000000000000000000000000000000001a0",
+            "00000000000000000000000000000000000000000000000000000000000001e0",
+            "0000000000000000000000000000000000000000000000000000000000000220",
+            "0000000000000000000000000000000000000000000000000000000000000003",
+            "7372630000000000000000000000000000000000000000000000000000000000",
+            "0000000000000000000000000000000000000000000000000000000000000003",
+            "6473740000000000000000000000000000000000000000000000000000000000",
+            "0000000000000000000000000000000000000000000000000000000000000001",
+            "0100000000000000000000000000000000000000000000000000000000000000",
+            "0000000000000000000000000000000000000000000000000000000000000001",
+            "0200000000000000000000000000000000000000000000000000000000000000",
+            "0000000000000000000000000000000000000000000000000000000000000001",
+            "0300000000000000000000000000000000000000000000000000000000000000",
+        ))
+        .unwrap()
+    }
+
+    fn test_domain() -> Eip712Domain {
+        Eip712Domain {
+            name: "MultisigProxy".to_string(),
+            version: "1".to_string(),
+            chain_id: 42161,
+            verifying_contract: [0xAB; 20],
+        }
+    }
+
+    /// Pins the wire contract. The value is keccak256 of the type string as
+    /// computed by go-ethereum from `blsProxy/transactor.go`'s copy - an
+    /// implementation the enclave shares no code with.
+    #[test]
+    fn test_tee_rebalance_typehash_matches_contract() {
+        let type_hash: [u8; HASH_LEN] =
+            Keccak256::digest(TEE_REBALANCE_TYPE_HASH_STR.as_bytes()).into();
+        assert_eq!(
+            hex::encode(type_hash),
+            "4ad4831c34ba9e337ee3485b15fdb15a024e6eddf9aa26d501a661797690254c"
+        );
+    }
+
+    #[test]
+    fn test_rebalance_digest_deterministic() {
+        let d = test_domain();
+        let cd = reference_rebalance_call_data();
+        let a = rebalance_digest(&d, &cd, 7, 99).unwrap();
+        let b = rebalance_digest(&d, &cd, 7, 99).unwrap();
+        assert_eq!(a, b);
+        assert_ne!(a, [0u8; HASH_LEN]);
+        // The nonce is part of the struct hash, so it must move the digest.
+        assert_ne!(a, rebalance_digest(&d, &cd, 8, 99).unwrap());
+    }
+
+    /// The dispatcher must pick the struct hash the selector calls for. Signing
+    /// a rebalance under `TeeFundsOut` would recover a different address and
+    /// surface only as an on-chain unregistered-signer rejection.
+    #[test]
+    fn test_evm_digest_routes_by_selector() {
+        let d = test_domain();
+        let rebalance = reference_rebalance_call_data();
+        assert_eq!(
+            evm_digest(&d, &rebalance, 7, 99).unwrap(),
+            rebalance_digest(&d, &rebalance, 7, 99).unwrap()
+        );
+
+        let funds_out = reference_call_data();
+        assert_eq!(
+            evm_digest(&d, &funds_out, 7, 99).unwrap(),
+            funds_out_digest(&d, &funds_out, 7, 99).unwrap()
+        );
+
+        // Cross-decoding must not merely differ - it must refuse.
+        assert!(funds_out_digest(&d, &rebalance, 7, 99).is_err());
+        assert!(rebalance_digest(&d, &funds_out, 7, 99).is_err());
+    }
+
+    #[test]
+    fn test_evm_digest_rejects_unknown_selector() {
+        let d = test_domain();
+        let mut cd = reference_rebalance_call_data();
+        cd[0] ^= 0xFF;
+        let err = evm_digest(&d, &cd, 7, 99).unwrap_err().to_string();
+        assert!(err.contains("no EIP-712 digest"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn test_evm_digest_rejects_short_calldata() {
+        assert!(evm_digest(&test_domain(), &[0xa0, 0x21], 1, 2).is_err());
     }
 }

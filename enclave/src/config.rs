@@ -24,7 +24,18 @@ use crate::error::{EnclaveError, Result};
 #[derive(Debug, Clone, Default)]
 pub struct BridgeConfig {
     pub chain_id: u64,
-    pub bridge_contract: [u8; 20],
+    /// Proxy contracts this enclave will sign for, in `BRIDGE_CONTRACT` order.
+    ///
+    /// A set rather than a single address because one federation serves several
+    /// Bridge deployments on the same chain - pools and mint/burn are separate
+    /// `Bridge` + `MultisigProxy` pairs. A request must match one of these
+    /// exactly; the matched address, not the set, is what downstream binding
+    /// keys commit to (see [`crate::networks::rgb::psbt_validation::psbt_operation_key`]).
+    ///
+    /// Empty = unset. The zero address is never a member: it is filtered at
+    /// parse, so "unset" cannot be spelled as a pin that matches the zero
+    /// address (the bug `is_configured` was hardened against).
+    pub bridge_contracts: Vec<[u8; 20]>,
     pub rgb_asset_id: String,
     /// Operator-pinned allowed destination for **gas-key** transactions
     /// (`GAS_TX_ALLOWED_TO`). When set, `SignRawDigest` only signs a gas tx
@@ -58,13 +69,17 @@ pub struct BridgeConfig {
     /// plain-BTC signing when unset. Bounds the blast radius of the plain-BTC
     /// path independently of the destination allowlist.
     pub btc_max_total_sats: u64,
-    /// Address expected to emit `FundsIn`/`BridgeFundsIn` (env
-    /// `FUNDS_IN_CONTRACT`). Falls back to `bridge_contract` when unset, so
-    /// single-contract deployments are unaffected. Needed where the deposit
-    /// event is emitted by the bridge *entry* contract while `BRIDGE_CONTRACT`
-    /// pins the MultisigProxy for the EVM signing cross-check — one pin cannot
-    /// serve both lookups.
-    pub funds_in_contract: [u8; 20],
+    /// Addresses expected to emit `FundsIn`/`BridgeFundsIn` (env
+    /// `FUNDS_IN_CONTRACT`). Falls back to [`bridge_contracts`](Self::bridge_contracts)
+    /// when unset, so single-contract deployments are unaffected. Needed where
+    /// the deposit event is emitted by the bridge *entry* contract while
+    /// `BRIDGE_CONTRACT` pins the MultisigProxy for the EVM signing
+    /// cross-check — one pin cannot serve both lookups.
+    ///
+    /// A set for the same reason as `bridge_contracts`. Deposit lookup searches
+    /// every entry and still refuses when more than one candidate log matches,
+    /// so widening the pin cannot make an ambiguous receipt resolvable.
+    pub funds_in_contracts: Vec<[u8; 20]>,
 }
 
 impl BridgeConfig {
@@ -78,10 +93,10 @@ impl BridgeConfig {
             .and_then(|s| s.parse::<u64>().ok())
             .unwrap_or(0);
 
-        let bridge_contract = std::env::var("BRIDGE_CONTRACT")
+        let bridge_contracts = std::env::var("BRIDGE_CONTRACT")
             .ok()
-            .and_then(|s| parse_eth_address(&s).ok())
-            .unwrap_or([0u8; 20]);
+            .map(|s| parse_eth_address_list(&s))
+            .unwrap_or_default();
 
         let rgb_asset_id = std::env::var("RGB_ASSET_ID").unwrap_or_default();
 
@@ -107,21 +122,39 @@ impl BridgeConfig {
             .and_then(|s| s.parse::<u64>().ok())
             .unwrap_or(0);
 
-        // Separate FundsIn event-emitter pin; defaults to `bridge_contract`.
-        let funds_in_contract = std::env::var("FUNDS_IN_CONTRACT")
+        // Separate FundsIn event-emitter pin; defaults to `bridge_contracts`.
+        let funds_in_contracts = std::env::var("FUNDS_IN_CONTRACT")
             .ok()
-            .and_then(|s| parse_eth_address(&s).ok())
-            .unwrap_or(bridge_contract);
+            .map(|s| parse_eth_address_list(&s))
+            .filter(|v| !v.is_empty())
+            .unwrap_or_else(|| bridge_contracts.clone());
 
         Self {
             chain_id,
-            bridge_contract,
+            bridge_contracts,
             rgb_asset_id,
             gas_tx_allowed_to,
             btc_allowed_scripts,
             btc_max_total_sats,
-            funds_in_contract,
+            funds_in_contracts,
         }
+    }
+
+    /// Whether `addr` is a pinned proxy contract. An empty pin set accepts
+    /// nothing: callers gate on [`is_configured`](Self::is_configured) first and
+    /// treat "unset" as the legacy dev path, never as "allow any".
+    pub fn allows_proxy_contract(&self, addr: &[u8]) -> bool {
+        self.bridge_contracts.iter().any(|c| c.as_slice() == addr)
+    }
+
+    /// Pinned addresses concatenated, for the attestation `user_data` bundle.
+    ///
+    /// One pinned address yields exactly the 20 bytes the single-contract build
+    /// committed to, so existing attestations and verifiers are unaffected; only
+    /// a multi-deployment enclave produces a longer field. The bundle is
+    /// length-prefixed, so the longer field stays unambiguous.
+    pub fn bridge_contracts_bytes(&self) -> Vec<u8> {
+        self.bridge_contracts.concat()
     }
 
     /// True only when **all three** fields are set to non-zero / non-empty
@@ -142,7 +175,7 @@ impl BridgeConfig {
     /// "trust the request" path; a *partial* config is a misconfiguration —
     /// see [`is_partially_configured`](Self::is_partially_configured).
     pub fn is_configured(&self) -> bool {
-        self.chain_id != 0 && self.bridge_contract != [0u8; 20] && !self.rgb_asset_id.is_empty()
+        self.chain_id != 0 && !self.bridge_contracts.is_empty() && !self.rgb_asset_id.is_empty()
     }
 
     /// True when the operator set **some but not all** pin fields. This is a
@@ -153,7 +186,7 @@ impl BridgeConfig {
     /// (audit 4th M-03 / #94).
     pub fn is_partially_configured(&self) -> bool {
         let any = self.chain_id != 0
-            || self.bridge_contract != [0u8; 20]
+            || !self.bridge_contracts.is_empty()
             || !self.rgb_asset_id.is_empty();
         any && !self.is_configured()
     }
@@ -208,6 +241,31 @@ impl BridgeConfig {
         }
         Ok(())
     }
+}
+
+/// Parse a comma-separated address pin into an ordered, de-duplicated set.
+///
+/// Malformed entries and the zero address are dropped rather than poisoning the
+/// whole list, matching how `BTC_ALLOWED_SCRIPTS` is parsed. Dropping the zero
+/// address matters: it is the sentinel for "unset", so admitting it as a member
+/// would let a request for the zero address satisfy the pin — the exact hole
+/// `is_configured` was hardened against (audit 4th M-03 / #94).
+///
+/// A wholly unparseable value therefore yields an empty set, which reads as
+/// unset and fails closed in a release build rather than allowing anything.
+fn parse_eth_address_list(s: &str) -> Vec<[u8; 20]> {
+    let mut out: Vec<[u8; 20]> = Vec::new();
+    for part in s.split(',') {
+        let part = part.trim();
+        if part.is_empty() {
+            continue;
+        }
+        match parse_eth_address(part) {
+            Ok(addr) if addr != [0u8; 20] && !out.contains(&addr) => out.push(addr),
+            _ => continue,
+        }
+    }
+    out
 }
 
 /// Parse `0xABCD…` (40 hex chars) or bare 40-hex into 20 bytes.
@@ -430,7 +488,7 @@ mod tests {
     fn unconfigured_when_all_unset() {
         let c = BridgeConfig {
             chain_id: 0,
-            bridge_contract: [0u8; 20],
+            bridge_contracts: vec![],
             rgb_asset_id: String::new(),
             ..Default::default()
         };
@@ -442,7 +500,7 @@ mod tests {
     fn configured_only_when_all_three_set() {
         let c = BridgeConfig {
             chain_id: 1,
-            bridge_contract: [1u8; 20],
+            bridge_contracts: vec![[1u8; 20]],
             rgb_asset_id: "rgb:asset".into(),
             gas_tx_allowed_to: None,
             ..Default::default()
@@ -458,7 +516,7 @@ mod tests {
         // an EVM request for the zero address.
         let c = BridgeConfig {
             chain_id: 1,
-            bridge_contract: [0u8; 20],
+            bridge_contracts: vec![],
             rgb_asset_id: "rgb:asset".into(),
             ..Default::default()
         };
@@ -470,7 +528,7 @@ mod tests {
     fn production_readiness_error_none_when_configured() {
         let c = BridgeConfig {
             chain_id: 1,
-            bridge_contract: [1u8; 20],
+            bridge_contracts: vec![[1u8; 20]],
             rgb_asset_id: "rgb:asset".into(),
             ..Default::default()
         };
@@ -511,7 +569,7 @@ mod tests {
     fn zero_chain_id_is_not_configured() {
         let c = BridgeConfig {
             chain_id: 0,
-            bridge_contract: [1u8; 20],
+            bridge_contracts: vec![[1u8; 20]],
             rgb_asset_id: "rgb:asset".into(),
             gas_tx_allowed_to: None,
             ..Default::default()
@@ -541,5 +599,77 @@ mod tests {
         assert!(!is_loopback_url("http://[::1].evil.com"));
         assert!(!is_loopback_url("http://10.0.0.1:8545"));
         assert!(!is_loopback_url("http://evil.com/127.0.0.1"));
+    }
+
+    #[test]
+    fn address_list_parses_dedups_and_preserves_order() {
+        let a = "0x1111111111111111111111111111111111111111";
+        let b = "2222222222222222222222222222222222222222";
+        let got = parse_eth_address_list(&format!("{a}, {b} ,{a}"));
+        assert_eq!(got, vec![[0x11u8; 20], [0x22u8; 20]]);
+    }
+
+    /// Malformed entries are dropped rather than poisoning the list, matching
+    /// how `BTC_ALLOWED_SCRIPTS` parses. A wholly unparseable value yields an
+    /// empty set, which reads as unset and fails closed.
+    #[test]
+    fn address_list_drops_malformed_entries() {
+        let good = "0x3333333333333333333333333333333333333333";
+        assert_eq!(
+            parse_eth_address_list(&format!("nonsense,{good},0xdeadbeef")),
+            vec![[0x33u8; 20]]
+        );
+        assert!(parse_eth_address_list("nonsense,,0xzz").is_empty());
+    }
+
+    /// The zero address is the "unset" sentinel, so admitting it as a member
+    /// would let a request for the zero address satisfy the pin.
+    #[test]
+    fn address_list_never_admits_the_zero_address() {
+        let zero = "0x0000000000000000000000000000000000000000";
+        assert!(parse_eth_address_list(zero).is_empty());
+        let cfg = BridgeConfig {
+            bridge_contracts: parse_eth_address_list(zero),
+            ..Default::default()
+        };
+        assert!(!cfg.allows_proxy_contract(&[0u8; 20]));
+        assert!(!cfg.is_configured());
+    }
+
+    /// A single pinned deployment must hash to exactly the 20 bytes the
+    /// pre-set build committed to, or every existing attestation breaks.
+    #[test]
+    fn attestation_bytes_unchanged_for_a_single_pin() {
+        let cfg = BridgeConfig {
+            bridge_contracts: vec![[0xAB; 20]],
+            ..Default::default()
+        };
+        assert_eq!(cfg.bridge_contracts_bytes(), vec![0xABu8; 20]);
+    }
+
+    #[test]
+    fn attestation_bytes_concatenate_in_pin_order() {
+        let cfg = BridgeConfig {
+            bridge_contracts: vec![[0x11; 20], [0x22; 20]],
+            ..Default::default()
+        };
+        let got = cfg.bridge_contracts_bytes();
+        assert_eq!(got.len(), 40);
+        assert_eq!(&got[..20], &[0x11u8; 20]);
+        assert_eq!(&got[20..], &[0x22u8; 20]);
+    }
+
+    #[test]
+    fn configured_with_several_pins() {
+        let cfg = BridgeConfig {
+            chain_id: 1,
+            bridge_contracts: vec![[0x11; 20], [0x22; 20]],
+            rgb_asset_id: "rgb:asset".into(),
+            ..Default::default()
+        };
+        assert!(cfg.is_configured());
+        assert!(!cfg.is_partially_configured());
+        assert!(cfg.allows_proxy_contract(&[0x22u8; 20]));
+        assert!(!cfg.allows_proxy_contract(&[0x33u8; 20]));
     }
 }

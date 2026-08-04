@@ -1614,7 +1614,7 @@ mod tests {
         fn pinned_config(rgb_asset_id: &str) -> BridgeConfig {
             BridgeConfig {
                 chain_id: 1,
-                bridge_contract: [0x11; 20],
+                bridge_contracts: vec![[0x11; 20]],
                 rgb_asset_id: rgb_asset_id.into(),
                 gas_tx_allowed_to: None,
                 ..Default::default()
@@ -1626,7 +1626,7 @@ mod tests {
         fn unconfigured_config() -> BridgeConfig {
             BridgeConfig {
                 chain_id: 0,
-                bridge_contract: [0u8; 20],
+                bridge_contracts: vec![],
                 rgb_asset_id: String::new(),
                 gas_tx_allowed_to: None,
                 ..Default::default()

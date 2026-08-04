@@ -167,13 +167,19 @@ fn print_keys_response(r: &PublicKeysResponse) {
 fn print_bridge_config(chain_id: u64, bridge_contract: &[u8], rgb_asset_id: &str) {
     let configured =
         chain_id != 0 || bridge_contract.iter().any(|b| *b != 0) || !rgb_asset_id.is_empty();
-    if configured {
-        println!("  Bridge chain_id:     {chain_id}");
-        println!("  Bridge contract:     0x{}", hex::encode(bridge_contract));
-        println!("  RGB asset id:        {rgb_asset_id}");
-    } else {
+    if !configured {
         println!("  Bridge config:       <unconfigured>");
+        return;
     }
+    println!("  Bridge chain_id:     {chain_id}");
+    // One 20-byte address per pinned deployment, concatenated. A trailing
+    // partial chunk is printed as-is rather than dropped, so a malformed field
+    // is visible instead of silently truncated.
+    for (i, addr) in bridge_contract.chunks(20).enumerate() {
+        let label = if i == 0 { "Bridge contract:" } else { "" };
+        println!("  {label:<20} 0x{}", hex::encode(addr));
+    }
+    println!("  RGB asset id:        {rgb_asset_id}");
 }
 
 fn run_interactive(client: &EnclaveClient) {

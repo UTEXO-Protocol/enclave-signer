@@ -42,7 +42,7 @@ fn main() {
     if bridge_config.is_configured() {
         tracing::info!(
             chain_id = bridge_config.chain_id,
-            bridge_contract = %hex::encode(bridge_config.bridge_contract),
+            bridge_contracts = %hex::encode(bridge_config.bridge_contracts_bytes()),
             rgb_asset_id = %bridge_config.rgb_asset_id,
             "bridge config pinned from env"
         );
@@ -52,7 +52,7 @@ fn main() {
         // gate below turns it fatal in a production build.
         tracing::error!(
             chain_id = bridge_config.chain_id,
-            bridge_contract = %hex::encode(bridge_config.bridge_contract),
+            bridge_contracts = %hex::encode(bridge_config.bridge_contracts_bytes()),
             rgb_asset_id = %bridge_config.rgb_asset_id,
             "bridge config PARTIALLY set - EVM_CHAIN_ID / BRIDGE_CONTRACT / RGB_ASSET_ID must all \
              be set (non-zero) or all unset; SignEvm will refuse to sign with this ambiguous pin"
