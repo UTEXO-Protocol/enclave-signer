@@ -540,8 +540,17 @@ impl ParentService for ParentAdapterService {
 
     /// PublicKey — returns the enclave's public key bytes.
     /// Dispatches on `data_type`:
-    ///   EVM_GAS_TX  → 64-byte uncompressed X||Y (gas key m/44'/60'/0'/0/1)
-    ///   UNSPENDABLE → 33-byte compressed BTC pubkey
+    ///   EVM_GAS_TX               → 64-byte uncompressed X||Y (gas key m/44'/60'/0'/0/1)
+    ///   TRANSACTION, UNSPENDABLE → 33-byte compressed BTC pubkey
+    ///   CCD_GOVERNANCE           → 32-byte Concordium Ed25519 governance pubkey
+    ///                              (m/44'/919'/0'/0'/0')
+    ///
+    /// `CCD_GOVERNANCE` is the attestation-free way to read the governance
+    /// pubkey. `AttestedPublicKey` carries the same value, but it also produces
+    /// an NSM document and therefore fails outright wherever the enclave runs
+    /// without a Nitro Security Module (dev is a plain container). Callers that
+    /// need proof the key came from a real enclave must still use
+    /// `AttestedPublicKey` — see docs/pubkey-attestation.md.
     async fn public_key(
         &self,
         request: Request<PublicKeyRequest>,
@@ -566,6 +575,7 @@ impl ParentService for ParentAdapterService {
             Some(enclave_response::Response::PublicKeys(r)) => {
                 let public_key = match data_type {
                     DataType::EvmGasTx => r.evm_gas_tx_uncompressed_pub,
+                    DataType::CcdGovernance => r.ccd_ed25519_pub,
                     DataType::Transaction | DataType::Unspendable => r.btc_compressed_pub,
                     other => {
                         return Err(Status::invalid_argument(format!(
