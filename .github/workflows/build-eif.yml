@@ -77,6 +77,35 @@ jobs:
       - name: System deps
         run: sudo apt-get update && sudo apt-get install -y musl-tools jq llvm-dev libclang-dev clang protobuf-compiler
 
+      # Re-resolve Cargo.lock against the floating git deps (rgb-ops branch=master
+      # et al.) so the `--locked` builds below (parent on the runner + enclave in
+      # BuildKit) validate against a lock cargo actually agrees with. We use the
+      # same per-repo SSH aliases as Dockerfile.enclave because a single ssh-agent
+      # holding both private-repo deploy keys offers the wrong one first. The
+      # regenerated lock is uploaded as an artifact so it can be committed back to
+      # pin PCR0 reproducibly (then this step can be dropped).
+      - name: Sync Cargo.lock with git deps
+        run: |
+          set -euxo pipefail
+          mkdir -p ~/.ssh && chmod 700 ~/.ssh
+          cat >> ~/.ssh/config <<'EOF'
+          Host github.com-federated
+            HostName github.com
+            User git
+            IdentityFile /tmp/federated_key
+            IdentitiesOnly yes
+          Host github.com-consignment
+            HostName github.com
+            User git
+            IdentityFile /tmp/consignment_key
+            IdentitiesOnly yes
+          EOF
+          ssh-keyscan -t ed25519,ecdsa github.com >> ~/.ssh/known_hosts 2>/dev/null
+          git config --global url."ssh://git@github.com-federated/UTEXO-Protocol/federated-signer-proto.git".insteadOf "ssh://git@github.com/UTEXO-Protocol/federated-signer-proto.git"
+          git config --global url."ssh://git@github.com-consignment/UTEXO-Protocol/rgb-consignment-parser.git".insteadOf "ssh://git@github.com/UTEXO-Protocol/rgb-consignment-parser.git"
+          cargo generate-lockfile
+          git --no-pager diff --stat -- Cargo.lock || true
+
       # Build + cache nitro-cli pinned to the host version. The repo's
       # blobs/x86_64 (kernel/init) determine PCR0/PCR1, so pinning the tag pins
       # the PCRs. Cache keyed on the version so we only build once per bump.
@@ -160,6 +189,7 @@ jobs:
             artifacts/utexo-bridge-parent
             artifacts/utexo-bridge-parent-cli
             artifacts/HOST-SHA256SUMS
+            Cargo.lock
 
       # --- S3 publish (only when an OIDC role is configured) -----------------
       - name: Configure AWS credentials
