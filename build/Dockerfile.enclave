@@ -179,19 +179,21 @@ ENV EVM_CHAIN_ID=42161 \
 # bridge's create_utxos / send_btc / gas-funding ops flow through here. In a
 # release (`rgb-validation`) build these paths FAIL CLOSED unless pinned, so we
 # bake real values (public -> commit into PCR0):
-#   - BTC_ALLOWED_SCRIPTS: output script_pubkey allowlist (hex, comma-separated) —
-#     3× P2TR (5120…) bridge change/utxo-mgmt outputs + 1× OP_RETURN (6a20…) opret
-#     commitment. A production build needs BOTH this AND the cap (half-pin = unset).
-#   - BTC_MAX_TOTAL_SATS: cap on total input value spent (blast-radius bound).
+#   - BTC_MAX_TOTAL_SATS: cap on total input value spent (blast-radius bound). This
+#     is the plain-BTC production gate that must be set.
 #   - GAS_TX_ALLOWED_TO: the only `to` the enclave will sign a gas tx toward (with
 #     value==0) — here the bridge contract itself (== BRIDGE_CONTRACT).
+# NOTE: the former BTC_ALLOWED_SCRIPTS output allowlist was REMOVED upstream
+# (enclave 91fd82c): the scripts derive from a post-boot seed, but enclave env is
+# measured into PCR0, so baking them changed the identity the seed was bound to.
+# The enclave now PROVES each plain-BTC output is its own (control-block anchored
+# or BIP-371 metadata), so no destination allowlist config is needed.
 # FUNDS_IN_CONTRACT stays UNSET (falls back to BRIDGE_CONTRACT, see above). The RGB
 # SignPsbt (DataType_TRANSACTION) + EVM swap-signing paths are independent of these.
 ENV EVM_RPC_URL=http://127.0.0.1:3444 \
     EVM_MIN_CONFIRMATIONS=12 \
     GAS_TX_ALLOWED_TO=0x6711f1a319B37847fa0234181C34D883774c4951 \
-    BTC_MAX_TOTAL_SATS=1000000 \
-    BTC_ALLOWED_SCRIPTS=51209c87cae69fb69604fa7bfada4372cb70dd33e1664b743e84bfa6ebf2aac4b0a2,5120a00a752c3fbf862f898565fb7f1a7e3361a5a7c19d9442bfdc79e7e0fe32cf17,6a20c5ca749bbf933ce9c9868b443fe0d37460137a2e9781e782bf1504be4c58cd79,5120af9961d336f66cbe73ff09c4df98cd57e9bc17155aa3e841e34cd210c48e9218
+    BTC_MAX_TOTAL_SATS=1000000
 
 ENV RUST_LOG=info
 ENTRYPOINT ["/app/entrypoint.sh"]

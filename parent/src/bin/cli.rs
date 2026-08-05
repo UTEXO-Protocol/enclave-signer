@@ -172,6 +172,15 @@ fn print_init_response(r: &InitializeKeyResponse) {
     );
     println!("  Account xpub vanilla: {}", r.account_xpub_vanilla);
     println!("  Account xpub colored: {}", r.account_xpub_colored);
+    println!(
+        "  EVM gas TX address:  0x{}",
+        hex::encode(&r.evm_gas_tx_address)
+    );
+    println!(
+        "  EVM gas TX pubkey:   {}",
+        hex::encode(&r.evm_gas_tx_uncompressed_pub)
+    );
+    println!("  CCD Ed25519 pubkey:  {}", hex::encode(&r.ccd_ed25519_pub));
     print_bridge_config(r.chain_id, &r.bridge_contract, &r.rgb_asset_id);
 }
 
@@ -188,6 +197,15 @@ fn print_keys_response(r: &PublicKeysResponse) {
     );
     println!("  Account xpub vanilla: {}", r.account_xpub_vanilla);
     println!("  Account xpub colored: {}", r.account_xpub_colored);
+    println!(
+        "  EVM gas TX address:  0x{}",
+        hex::encode(&r.evm_gas_tx_address)
+    );
+    println!(
+        "  EVM gas TX pubkey:   {}",
+        hex::encode(&r.evm_gas_tx_uncompressed_pub)
+    );
+    println!("  CCD Ed25519 pubkey:  {}", hex::encode(&r.ccd_ed25519_pub));
     print_bridge_config(r.chain_id, &r.bridge_contract, &r.rgb_asset_id);
 }
 
