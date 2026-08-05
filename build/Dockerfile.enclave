@@ -9,7 +9,11 @@
 # over SSH. The same SSH mount is also used for the private `rgb-consignment`
 # git dependency pulled by the `rgb-validation`/`spv` features.
 
-FROM rust:1.96-slim AS builder
+# Base images are digest-pinned so a rebuild from this source reproduces the
+# same PCR0/PCR1. Refresh a digest with:
+#   docker buildx imagetools inspect <image:tag>   # take the top-level Digest
+# The tag is kept alongside the digest for human readability; the digest wins.
+FROM rust:1.96-slim@sha256:31ee7fc65186be7e0e0ccb3f2ca305f14e4739e7642a1ae65753aa5d7b874523 AS builder
 
 # `git` + `openssh-client`: the workspace `[patch.crates-io]` uses public
 # git URLs for rgb-consensus / rgb-ops / rgb-invoicing / rgb-strict-encoding,
@@ -40,10 +44,10 @@ WORKDIR /build/enclave
 # alloy + tokio subtree, which grows the binary and therefore PCR0 - pinned via
 # Cargo.lock for reproducibility. Requires a second host vsock-proxy for the
 # EVM RPC (EVM_RPC_VSOCK_PORT, default 8002).
-RUN --mount=type=ssh cargo build --release --features vsock,rgb-validation,spv,evm-rpc
+RUN --mount=type=ssh cargo build --release --locked --features vsock,rgb-validation,spv,evm-rpc
 
 # --- Runtime ---
-FROM public.ecr.aws/amazonlinux/amazonlinux:2023-minimal AS runtime
+FROM public.ecr.aws/amazonlinux/amazonlinux:2023-minimal@sha256:97daa826f6597bd39ab9dee373290b6ce8220f1686fce5e83b51294a45f7484d AS runtime
 
 RUN dnf install -y socat iproute && dnf clean all
 

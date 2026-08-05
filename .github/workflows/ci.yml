@@ -237,3 +237,29 @@ jobs:
             exit 1
           fi
           echo "OK: rgb-validation-without-spv correctly rejected via the compile_error guard"
+
+  build-input-pins:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Assert base images are digest-pinned and cargo builds are --locked
+        run: |
+          fail=0
+          for f in build/Dockerfile.enclave build/Dockerfile.parent build/Dockerfile.enclave-dev; do
+            while IFS= read -r line; do
+              case "$line" in
+                *"@sha256:"*) ;;
+                *) echo "::error file=$f::base image not digest-pinned (needs @sha256): $line"; fail=1 ;;
+              esac
+            done < <(grep -E '^FROM ' "$f")
+            while IFS= read -r line; do
+              case "$line" in
+                *"--locked"*) ;;
+                *) echo "::error file=$f::cargo build without --locked: $line"; fail=1 ;;
+              esac
+            done < <(grep -E '^[^#]*cargo build' "$f")
+          done
+          if [ "$fail" -ne 0 ]; then exit 1; fi
+          echo "OK: every Dockerfile FROM is digest-pinned and every cargo build is --locked"

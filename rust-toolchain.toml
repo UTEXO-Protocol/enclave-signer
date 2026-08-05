@@ -1,0 +1,8 @@
+# Single source of truth for the Rust toolchain across local dev, CI, and the
+# reproducible enclave image. Pinning here keeps `cargo`/`clippy`/`fmt`
+# identical everywhere: without it, a newer local toolchain surfaces lints the
+# (pinned) CI does not, or vice versa. Matches the digest-pinned `rust` base
+# image in build/Dockerfile.* and the version the CI workflows install.
+[toolchain]
+channel = "1.96.0"
+components = ["rustfmt", "clippy"]
