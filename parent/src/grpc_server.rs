@@ -183,6 +183,15 @@ impl ParentAdapterService {
                         .collect(),
                 }),
             ),
+            // A CCD source (fundsIn burn) feeding an EVM release. The listener
+            // validated finality/structure on-chain; the enclave trusts it and
+            // cross-checks the release amount against the destination.
+            Some(source_proof::Chain::Ccd(ccd)) => Ok(
+                enclave_proto::sign_request::SourceNetwork::CcdSource(enclave_proto::CcdSource {
+                    tx_hash: ccd.tx_hash,
+                    commission: source.commission,
+                }),
+            ),
             None => Err(Status::invalid_argument(
                 "source proof has no chain-specific evidence",
             )),
@@ -223,6 +232,10 @@ impl ParentAdapterService {
             sign_request::Data::BtcData(_) => unreachable!(
                 "BtcData is handled by the BTC_UTXO dispatch, not enclave_destination_network"
             ),
+            // CCD is handled in `sign` before destination dispatch; never routed here.
+            sign_request::Data::CcdData(_) => {
+                unreachable!("CCD sign requests are handled before destination dispatch")
+            }
         }
     }
 
@@ -270,6 +283,49 @@ impl ParentService for ParentAdapterService {
         let data_type = DataType::try_from(common.data_type).unwrap_or(DataType::Transaction);
         let signer_network_id = common.dst_network_id;
 
+        // Concordium: the listener has already validated the operation and
+        // re-derived the transaction hash; the enclave signs the hash directly.
+        // No source/destination validation or amount cross-check happens here.
+        if let Some(sign_request::Data::CcdData(payload)) = inner.data.as_ref() {
+            if data_type != DataType::Transaction {
+                return Err(Status::invalid_argument(
+                    "CCD signing requires TRANSACTION data_type",
+                ));
+            }
+            tracing::info!(
+                src_network_id = common.src_network_id,
+                dst_network_id = common.dst_network_id,
+                hash_len = payload.hash.len(),
+                "gRPC Sign: Concordium transaction"
+            );
+
+            let enclave_req = EnclaveRequest {
+                request: Some(enclave_request::Request::SignCcd(
+                    enclave_proto::SignCcdRequest {
+                        hash: payload.hash.clone(),
+                    },
+                )),
+            };
+            let resp = self.send_to_enclave(enclave_req).await?;
+            return match resp.response {
+                Some(enclave_response::Response::CcdSignature(r)) => {
+                    Ok(Response::new(SignatureResponse {
+                        signer_network_id,
+                        signature: r.signature,
+                        identifier: None,
+                        call_data: Vec::new(),
+                    }))
+                }
+                Some(enclave_response::Response::Error(e)) => {
+                    Err(Self::enclave_error_to_status(&e))
+                }
+                other => Err(Status::internal(format!(
+                    "unexpected enclave response for CCD Sign: {:?}",
+                    other
+                ))),
+            };
+        }
+
         match data_type {
             DataType::Transaction => {
                 let source = Self::source_proof(&inner)?;
@@ -316,6 +372,11 @@ impl ParentService for ParentAdapterService {
                             "TRANSACTION data_type must not carry BtcData; \
                              use data_type=BTC_UTXO for plain-BTC signing",
                         ))
+                    }
+                    Some(sign_request::Data::CcdData(_)) => {
+                        return Err(Status::internal(
+                            "CCD sign request should have been handled before destination dispatch",
+                        ));
                     }
                     None => return Err(Status::invalid_argument("SignRequest.data is missing")),
                 };
@@ -694,6 +755,7 @@ impl ParentService for ParentAdapterService {
                     rgb_asset_id: pk.rgb_asset_id,
                     evm_gas_tx_uncompressed_pub: pk.evm_gas_tx_uncompressed_pub,
                     evm_gas_tx_address: pk.evm_gas_tx_address,
+                    ccd_ed25519_pub: pk.ccd_ed25519_pub,
                 }))
             }
             Some(enclave_response::Response::Error(e)) => Err(Self::enclave_error_to_status(&e)),

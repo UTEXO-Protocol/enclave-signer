@@ -39,7 +39,7 @@ pub struct AttestedPubkeyResult {
 /// `canonical_pubkey_bundle` in `enclave/src/server.rs`.
 pub fn canonical_bundle(resp: &AttestedPublicKeyResponse) -> Vec<u8> {
     let chain_id_bytes = resp.chain_id.to_be_bytes();
-    let parts: [&[u8]; 12] = [
+    let parts: [&[u8]; 13] = [
         &resp.evm_address,
         &resp.btc_compressed_pub,
         resp.btc_xpub.as_bytes(),
@@ -52,6 +52,7 @@ pub fn canonical_bundle(resp: &AttestedPublicKeyResponse) -> Vec<u8> {
         resp.rgb_asset_id.as_bytes(),
         &resp.evm_gas_tx_uncompressed_pub,
         &resp.evm_gas_tx_address,
+        &resp.ccd_ed25519_pub,
     ];
     let mut out = Vec::new();
     for p in parts {

@@ -617,6 +617,65 @@ fn test_sign_evm_rejects_funds_out_without_validator() {
     }
 }
 
+/// Regression (CcdSource -> EvmDestination fundsOut): a Concordium-sourced
+/// release must sign. A CCD source carries no RGB consignment, so the RGB->EVM
+/// fundsOut binding must be skipped for it; the binding was applied
+/// unconditionally under `rgb-validation`, which rejected every CCD fundsOut
+/// with "fundsOut signing requires a validated RGB source consignment". This
+/// exercises the full `handle_sign` path (source validation + route/amount
+/// cross-check + EVM signing) with the real fundsOut selector — the layer the
+/// existing `route_proofs_accept_ccd_source_to_evm_destination` unit test does
+/// not reach. Mirrors `valid_sign_evm_request` but with a `CcdSource`.
+#[cfg(all(feature = "rgb-validation", not(feature = "dev-mode")))]
+#[test]
+fn test_sign_evm_accepts_ccd_source_funds_out() {
+    let port = common::start_test_server_with_config(|_| {}, pinned_bridge_config());
+
+    let init_req = EnclaveRequest {
+        request: Some(Request::InitializeKey(InitializeKeyRequest {
+            seed: vec![],
+            mnemonic: String::new(),
+        })),
+    };
+    common::send_request(port, &init_req);
+
+    let amount = 1000u64;
+    let commission = 50u64;
+    let sign_req = EnclaveRequest {
+        request: Some(Request::Sign(SignRequest {
+            amount: amount + commission + 100, // headroom, mirrors valid_sign_evm_request
+            source_network: Some(SourceNetwork::CcdSource(CcdSource {
+                tx_hash: vec![0xCC; 32],
+                commission,
+            })),
+            destination_network: Some(DestinationNetwork::EvmDestination(EvmDestination {
+                call_data: mock_funds_out_calldata([0x22; 20], amount),
+                nonce: 1,
+                deadline: u64::MAX,
+                chain_id: 1,
+                proxy_contract: vec![0xAA; 20],
+                calldata_amount: amount,
+                calldata_commission: commission,
+            })),
+        })),
+    };
+    let resp = common::send_request(port, &sign_req);
+
+    match &resp.response {
+        Some(Response::EvmSignature(sig)) => {
+            assert!(
+                !sig.signature.is_empty(),
+                "expected a non-empty EVM signature for CcdSource -> EvmDestination fundsOut"
+            );
+        }
+        // A regression re-introduces the unconditional RGB binding, which fails here.
+        other => panic!(
+            "expected EvmSignature for CcdSource -> EvmDestination fundsOut, got {:?}",
+            other
+        ),
+    }
+}
+
 /// Fail-closed regression (audit TEE-SE-12): a build that can validate
 /// consignments must refuse to sign when no operator config is pinned,
 /// rather than silently degrading to the listener-trusting model. The
