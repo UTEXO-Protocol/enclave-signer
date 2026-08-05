@@ -583,7 +583,9 @@ impl RgbValidator {
             ))
         })?;
         let btc_per_kvb = client
-            .estimate_fee(FEE_ESTIMATE_TARGET as usize)
+            // electrum-client 0.25 added a second `mode: Option<EstimationMode>`
+            // arg; `None` keeps the server-default estimation we relied on before.
+            .estimate_fee(FEE_ESTIMATE_TARGET as usize, None)
             .map_err(|e| {
                 EnclaveError::CrossCheck(format!(
                     "electrum fee-estimate fetch failed — refusing to sign a send-RGB PSBT \

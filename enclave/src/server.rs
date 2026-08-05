@@ -200,15 +200,6 @@ fn dispatch(request: EnclaveRequest, ctx: &ServerContext) -> EnclaveResponse {
             tracing::info!("request: GetAttestedPublicKey");
             handle_get_attested_public_key(ctx, req)
         }
-        // Concordium (CCD) signing is defined in the proto but not supported by
-        // this deployment's enclave (no Ed25519 governance key is derived here).
-        // Reject fail-closed rather than silently mis-routing.
-        Some(Request::SignCcd(_)) => {
-            tracing::warn!("request: SignCcd — Concordium signing not supported by this enclave");
-            Err(EnclaveError::InvalidRequest(
-                "Concordium (CCD) signing is not supported by this enclave".into(),
-            ))
-        }
         None => {
             tracing::warn!("received empty request (no oneof variant set)");
             return EnclaveResponse {
