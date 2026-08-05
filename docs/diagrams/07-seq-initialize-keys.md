@@ -27,7 +27,7 @@ sequenceDiagram
     Km->>Km: seed := mnemonic.to_seed("")
     Km->>Km: seed_box := SecretBox::new(seed), seed.zeroize()
     Km->>Km: master := Xpriv::new_master(network, seed)
-    Km->>Km: EVM bridge = m/44'/60'/0'/0/0<br/>EVM gas-tx = m/44'/60'/0'/0/1<br/>BTC = m/84'/0'/0'/0/0<br/>BIP-86 vanilla = m/86'/COIN'/0'<br/>BIP-86 colored = m/86'/827167'/0'
+    Km->>Km: EVM bridge = m/44'/60'/0'/0/0<br/>EVM gas-tx = m/44'/60'/0'/0/1<br/>BTC = m/84'/0'/0'/0/0<br/>BIP-86 vanilla = m/86'/COIN'/0'<br/>BIP-86 colored = m/86'/RGB_COIN'/0'
     Km->>Km: evm_address = keccak256(uncomp_pub[1..])[12..]
     Km-->>State: (KeyManager, Mnemonic)
 

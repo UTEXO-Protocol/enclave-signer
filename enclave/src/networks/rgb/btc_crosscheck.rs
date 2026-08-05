@@ -22,7 +22,10 @@
 //!     every output must pay back to a script this enclave co-controls, proven
 //!     from the PSBT and the enclave's own derivation rather than asserted by
 //!     configuration. A listener cannot redirect funds to an address the
-//!     enclave does not control. This replaces the `BTC_ALLOWED_SCRIPTS`
+//!     enclave does not control. Destinations on *either* BIP-86 account count
+//!     as ours (`create_utxo` funds Colored UTXOs from vanilla inputs); the
+//!     asymmetry with the input scope above is deliberate — M-01 is about which
+//!     inputs we spend. This replaces the `BTC_ALLOWED_SCRIPTS`
 //!     allowlist, which was unbootstrappable in production — the scripts to pin
 //!     derive from a seed that only exists after the enclave boots, and baking
 //!     them into the image changes the PCR0 identity that seed is bound to.
@@ -108,8 +111,9 @@ pub fn validate_btc_request(
                 "plain-BTC output {i} pays {} — refusing: the enclave cannot prove it controls \
                  that script. An output must either repay an input this enclave co-signs, or \
                  carry BIP-371 taproot metadata (PSBT_OUT_TAP_INTERNAL_KEY / _TREE / _BIP32_\
-                 DERIVATION) that reconstructs it from a key on this enclave's BIP-86 vanilla \
-                 account. Plain-BTC signing is self-pay only.",
+                 DERIVATION) that reconstructs it from a key on one of this enclave's BIP-86 \
+                 accounts (vanilla, or colored for create_utxo allocation outputs). Plain-BTC \
+                 signing is self-pay only.",
                 hex::encode(psbt.unsigned_tx.output[i].script_pubkey.as_bytes())
             )));
         }

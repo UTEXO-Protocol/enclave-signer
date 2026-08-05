@@ -56,7 +56,7 @@ Cryptographic signing service for the UTEXO RGB-EVM bridge, running inside an [A
 - BTC (legacy): derives `m/84'/0'/0'/0/0`, produces 33-byte compressed pubkey and BIP-32 xpub
 - BTC (BIP-86 taproot): derives two account-level xprivs for multisig descriptors:
   - Vanilla: `m/86'/<coin>'/0'` (coin type 0 mainnet, 1 testnet)
-  - Colored (RGB): `m/86'/827167'/0'`
+  - Colored (RGB): `m/86'/<rgb_coin>'/0'` (coin type 827166 mainnet, 827167 testnet)
 - Returns master fingerprint (4 bytes) for cosigner identification in multisig descriptors
 
 ### Signing

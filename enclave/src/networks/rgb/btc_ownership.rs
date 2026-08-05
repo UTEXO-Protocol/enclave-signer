@@ -28,10 +28,16 @@
 //!   * **(B) its taproot metadata reconstructs to a script we participate in** —
 //!     `tap_internal_key` (+ `tap_tree`, when present) must rebuild the exact
 //!     on-chain `script_pubkey`, and some key in that committed script must be
-//!     one we derive at a BIP-86 **Vanilla** path under our own master
-//!     fingerprint. This covers fresh change addresses at indices the tx does
-//!     not spend from, and requires the PSBT author to populate output taproot
-//!     fields (`PSBT_OUT_TAP_*`) — standard BIP-371 metadata.
+//!     one we derive at a BIP-86 path under our own master fingerprint, on
+//!     either of our accounts. This covers fresh change addresses at indices the
+//!     tx does not spend from, and requires the PSBT author to populate output
+//!     taproot fields (`PSBT_OUT_TAP_*`) — standard BIP-371 metadata.
+//!
+//! Rule (B) accepts **Colored** destinations as well as **Vanilla** ones:
+//! `create_utxo` funds fresh colored UTXOs out of vanilla inputs, so both its
+//! outputs are ours. M-01 scopes which inputs we *spend* — enforced in the
+//! signer via `sign_psbt_scoped(.., Some(Vanilla))` — not which of our own
+//! accounts we pay into.
 //!
 //! Both rules are anchored in the reconstructed `script_pubkey`, which is what
 //! the segwit sighash commits to — the same bytes the signature covers. A
@@ -117,7 +123,7 @@ fn reconstructs_to_our_taproot(psbt: &Psbt, index: usize, keys: &KeyManager) -> 
     }
 
     // Key-path ownership: the internal key itself is one of ours.
-    if is_our_vanilla_key(&internal_key, out, keys, None) {
+    if is_our_key(&internal_key, out, keys, None) {
         return true;
     }
 
@@ -139,7 +145,7 @@ fn reconstructs_to_our_taproot(psbt: &Psbt, index: usize, keys: &KeyManager) -> 
             let Ok(xonly) = XOnlyPublicKey::from_slice(bytes.as_bytes()) else {
                 continue;
             };
-            if is_our_vanilla_key(&xonly, out, keys, Some(leaf_hash)) {
+            if is_our_key(&xonly, out, keys, Some(leaf_hash)) {
                 return true;
             }
         }
@@ -148,18 +154,22 @@ fn reconstructs_to_our_taproot(psbt: &Psbt, index: usize, keys: &KeyManager) -> 
     false
 }
 
-/// Whether `xonly` is a key this enclave derives on the **Vanilla** BIP-86
-/// account, per the output's `tap_key_origins`.
+/// Whether `xonly` is a key this enclave derives, per the output's
+/// `tap_key_origins`.
 ///
 /// The origin entry supplies only the *claim* (fingerprint + path); the claim is
 /// then checked by deriving that path and requiring it to produce `xonly`. A
 /// coordinator can write any fingerprint and path it likes into a PSBT, so
 /// without that step it could point our fingerprint at a key we do not hold.
 ///
+/// Either BIP-86 account counts (see the module docs).
+/// `resolve_account_and_child_path` still pins the path shape, so a wrong
+/// purpose or an unknown coin type resolves to nothing and is refused.
+///
 /// `leaf_hash` is `Some` when the key was found inside a script leaf, in which
 /// case the origin entry must also list that leaf — mirroring the input-side
 /// rule, so an entry describing a different leaf cannot vouch for this one.
-fn is_our_vanilla_key(
+fn is_our_key(
     xonly: &XOnlyPublicKey,
     out: &bitcoin::psbt::Output,
     keys: &KeyManager,
@@ -180,9 +190,6 @@ fn is_our_vanilla_key(
     else {
         return false;
     };
-    if account_type != AccountType::Vanilla {
-        return false;
-    }
     let Ok(child_secret) = keys.derive_btc_child(account_type, &child_path) else {
         return false;
     };
@@ -243,8 +250,8 @@ mod tests {
         (xonly, path)
     }
 
-    /// Colored-account key at m/86'/827167'/0'/0/0 — a real key of ours, but on
-    /// the RGB account, which the plain-BTC path must not treat as its own.
+    /// Colored-account key at m/86'/827167'/0'/0/0 — ours, on the RGB account
+    /// that `create_utxo` funds fresh allocation UTXOs on.
     fn our_colored_key(keys: &KeyManager) -> (XOnlyPublicKey, DerivationPath) {
         let child = [
             ChildNumber::Normal { index: 0 },
@@ -383,11 +390,11 @@ mod tests {
         assert!(!owned(&psbt, &keys));
     }
 
-    /// A Colored (RGB) input is ours but off the plain-BTC account; repaying it
-    /// must not authorise the output. Vanilla-scoping is what keeps the M-01
-    /// fix from being reopened on this path.
+    /// Rule (A) anchors on inputs we co-sign, and this path signs Vanilla only,
+    /// so repaying a Colored input with no output metadata proves nothing. A
+    /// Colored destination is fine, but must come via rule (B).
     #[test]
-    fn rejects_output_repaying_a_colored_input() {
+    fn rejects_bare_output_repaying_a_colored_input() {
         let keys = km();
         let secp = Secp256k1::new();
         let (colored, colored_path) = our_colored_key(&keys);
@@ -577,10 +584,10 @@ mod tests {
         assert!(!owned(&psbt, &keys));
     }
 
-    /// An output on the Colored account is ours, but not on this path — plain
-    /// BTC must not silently move value into RGB-allocated space.
+    /// The `create_utxo` shape: a vanilla input funding a fresh Colored
+    /// (RGB-allocation) UTXO. Still a script the enclave derives, so self-pay.
     #[test]
-    fn rejects_colored_account_change_output() {
+    fn accepts_colored_account_output_for_create_utxo() {
         let keys = km();
         let (colored, colored_path) = our_colored_key(&keys);
         let (spk, leaf, leaf_hash, internal) = multisig_address(colored);
@@ -598,6 +605,42 @@ mod tests {
         psbt.outputs[0].tap_key_origins.insert(
             colored,
             (vec![leaf_hash], (*keys.master_fingerprint(), colored_path)),
+        );
+
+        assert!(owned(&psbt, &keys));
+    }
+
+    /// Dropping the Vanilla-only rule did not drop the path check: a coin type
+    /// that is neither the network's nor RGB's resolves to no account of ours.
+    #[test]
+    fn rejects_origin_on_a_path_off_both_accounts() {
+        let keys = km();
+        let (our, _) = our_key(&keys, 1, 7);
+        let (spk, leaf, leaf_hash, internal) = multisig_address(our);
+        let foreign_account_path = DerivationPath::from(vec![
+            ChildNumber::from_hardened_idx(86).unwrap(),
+            ChildNumber::from_hardened_idx(9999).unwrap(),
+            ChildNumber::from_hardened_idx(0).unwrap(),
+            ChildNumber::Normal { index: 1 },
+            ChildNumber::Normal { index: 7 },
+        ]);
+
+        let mut psbt = psbt_with(ScriptBuf::new(), spk);
+        make_input_ours(&mut psbt, &keys);
+        psbt.outputs[0].tap_internal_key = Some(internal);
+        psbt.outputs[0].tap_tree = Some(
+            TaprootBuilder::new()
+                .add_leaf(0, leaf)
+                .unwrap()
+                .try_into()
+                .unwrap(),
+        );
+        psbt.outputs[0].tap_key_origins.insert(
+            our,
+            (
+                vec![leaf_hash],
+                (*keys.master_fingerprint(), foreign_account_path),
+            ),
         );
 
         assert!(!owned(&psbt, &keys));

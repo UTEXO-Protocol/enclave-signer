@@ -153,6 +153,7 @@ fn minimal_valid_psbt_bytes() -> Vec<u8> {
 struct EnclaveWallet {
     fingerprint: bitcoin::bip32::Fingerprint,
     account_xpub: bitcoin::bip32::Xpub,
+    account_xpub_colored: bitcoin::bip32::Xpub,
 }
 
 /// NUMS internal key (BIP-341 unspendable key-path), as the bridge's taproot
@@ -182,6 +183,8 @@ fn init_wallet(port: u16) -> EnclaveWallet {
             ),
             account_xpub: bitcoin::bip32::Xpub::from_str(&r.account_xpub_vanilla)
                 .expect("vanilla account xpub"),
+            account_xpub_colored: bitcoin::bip32::Xpub::from_str(&r.account_xpub_colored)
+                .expect("colored account xpub"),
         },
         other => panic!("InitializeKey failed: {:?}", other),
     }
@@ -205,6 +208,24 @@ struct OurAddress {
 
 #[allow(dead_code)]
 fn our_address(wallet: &EnclaveWallet, chain: u32, index: u32) -> OurAddress {
+    address_on_account(wallet, &wallet.account_xpub, 0, chain, index)
+}
+
+/// The colored (RGB) counterpart of [`our_address`], at
+/// `m/86'/827166'/0'/chain/index` — the account `create_utxo` funds.
+#[allow(dead_code)]
+fn our_colored_address(wallet: &EnclaveWallet, chain: u32, index: u32) -> OurAddress {
+    address_on_account(wallet, &wallet.account_xpub_colored, 827166, chain, index)
+}
+
+#[allow(dead_code)]
+fn address_on_account(
+    wallet: &EnclaveWallet,
+    account_xpub: &bitcoin::bip32::Xpub,
+    coin_type: u32,
+    chain: u32,
+    index: u32,
+) -> OurAddress {
     use bitcoin::bip32::ChildNumber;
     use bitcoin::blockdata::opcodes::all::{OP_CHECKSIG, OP_CHECKSIGADD, OP_NUMEQUAL};
     use bitcoin::blockdata::script::Builder;
@@ -215,8 +236,7 @@ fn our_address(wallet: &EnclaveWallet, chain: u32, index: u32) -> OurAddress {
         ChildNumber::Normal { index: chain },
         ChildNumber::Normal { index },
     ];
-    let derived = wallet
-        .account_xpub
+    let derived = account_xpub
         .derive_pub(&secp, &child.to_vec())
         .expect("derive child xpub");
     let ours = derived.to_x_only_pub();
@@ -254,7 +274,7 @@ fn our_address(wallet: &EnclaveWallet, chain: u32, index: u32) -> OurAddress {
         fingerprint: wallet.fingerprint,
         path: bitcoin::bip32::DerivationPath::from(vec![
             ChildNumber::from_hardened_idx(86).unwrap(),
-            ChildNumber::from_hardened_idx(0).unwrap(),
+            ChildNumber::from_hardened_idx(coin_type).unwrap(),
             ChildNumber::from_hardened_idx(0).unwrap(),
             child[0],
             child[1],
@@ -338,6 +358,37 @@ fn btc_psbt(from: &OurAddress, input_sats: u64, outputs: &[(bitcoin::ScriptBuf, 
         from.xonly,
         (vec![from.leaf_hash], (from.fingerprint, from.path.clone())),
     );
+    psbt.serialize()
+}
+
+/// Like [`btc_psbt`], but each output is one of the enclave's own addresses and
+/// carries the BIP-371 metadata (`PSBT_OUT_TAP_INTERNAL_KEY` / `_TREE` /
+/// `_BIP32_DERIVATION`) that proves it — the shape `create_utxo` produces.
+#[allow(dead_code)]
+fn btc_psbt_to_ours(from: &OurAddress, input_sats: u64, outputs: &[(&OurAddress, u64)]) -> Vec<u8> {
+    use bitcoin::psbt::Psbt;
+    use bitcoin::taproot::TaprootBuilder;
+
+    let spks: Vec<(bitcoin::ScriptBuf, u64)> = outputs
+        .iter()
+        .map(|(o, sat)| (o.spk.clone(), *sat))
+        .collect();
+    let mut psbt = Psbt::deserialize(&btc_psbt(from, input_sats, &spks)).expect("psbt");
+
+    for (i, (out, _)) in outputs.iter().enumerate() {
+        psbt.outputs[i].tap_internal_key = Some(out.internal);
+        psbt.outputs[i].tap_tree = Some(
+            TaprootBuilder::new()
+                .add_leaf(0, out.leaf.clone())
+                .unwrap()
+                .try_into()
+                .unwrap(),
+        );
+        psbt.outputs[i].tap_key_origins.insert(
+            out.xonly,
+            (vec![out.leaf_hash], (out.fingerprint, out.path.clone())),
+        );
+    }
     psbt.serialize()
 }
 
@@ -1016,9 +1067,32 @@ fn test_sign_btc_before_init() {
 // The structural M-01 guard for the plain-BTC path — the enclave refuses to
 // co-sign a Colored (RGB-allocated) input under SignBtc's vanilla-only signing
 // scope — is exercised at the unit level in
-// `signing::taproot::tests::scoped_vanilla_refuses_a_colored_input`. The
-// output-side counterpart (a Colored change address is not a valid plain-BTC
-// destination) is covered in `btc_ownership::tests`.
+// `signing::taproot::tests::scoped_vanilla_refuses_a_colored_input`. Paying
+// *into* the colored account is a different question, and legitimate: see
+// `test_sign_btc_accepts_create_utxo_colored_output` below.
+
+/// `create_utxo`: vanilla input, one fresh Colored (RGB-allocation) output plus
+/// vanilla change. Both destinations are the enclave's, so both must pass the
+/// self-ownership check and the PSBT must get signed.
+#[test]
+fn test_sign_btc_accepts_create_utxo_colored_output() {
+    let port = common::start_test_server_with_config(|_| {}, btc_capped_config(100_000));
+    let wallet = init_wallet(port);
+    let ours = our_address(&wallet, 0, 0);
+    let colored = our_colored_address(&wallet, 0, 0);
+    let change = our_address(&wallet, 1, 4);
+
+    let sign_req = EnclaveRequest {
+        request: Some(Request::SignBtc(SignBtcRequest {
+            psbt_bytes: btc_psbt_to_ours(&ours, 60_000, &[(&colored, 20_000), (&change, 35_000)]),
+        })),
+    };
+
+    match &common::send_request(port, &sign_req).response {
+        Some(Response::SignedPsbt(r)) => assert_eq!(r.inputs_signed, 1),
+        other => panic!("create_utxo PSBT should sign, got {:?}", other),
+    }
+}
 
 #[test]
 fn test_sign_btc_rejects_output_the_enclave_does_not_control() {
