@@ -19,7 +19,7 @@ path = "src/bin/attest_verify.rs"
 prost = "0.14"
 tonic = "0.14"
 tokio = { version = "1", features = ["full"] }
-federated-signer-proto = { git = "ssh://git@github.com/UTEXO-Protocol/federated-signer-proto.git", rev = "7ae4ea48d6d90e0a8e481de8a81bdbeff2a26ab8", package = "federated-signer-proto" }
+federated-signer-proto = { git = "ssh://git@github.com/UTEXO-Protocol/federated-signer-proto.git", rev = "141d84a8f0afcdc0e7572701346fd492a1df5072", package = "federated-signer-proto" }
 clap = { version = "4", features = ["derive"] }
 
 thiserror = "2"

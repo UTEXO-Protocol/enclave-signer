@@ -382,6 +382,57 @@ async fn grpc_public_key_transaction_type() {
 }
 
 #[tokio::test]
+async fn grpc_public_key_ccd_governance() {
+    // The governance pubkey must be reachable over plain PublicKey, with no
+    // attestation involved — AttestedPublicKey needs an NSM device, which the
+    // dev deployment (plain container, no /dev/nsm) does not have.
+    let enclave_port = start_mock_enclave();
+    let grpc_port = start_grpc_server(enclave_port).await;
+
+    let mut client = ParentServiceClient::connect(format!("http://127.0.0.1:{grpc_port}"))
+        .await
+        .unwrap();
+
+    let resp = client
+        .public_key(PublicKeyRequest {
+            network_id: 0,
+            data_type: DataType::CcdGovernance as i32,
+        })
+        .await
+        .unwrap()
+        .into_inner();
+
+    assert_eq!(
+        resp.public_key.len(),
+        32,
+        "CCD_GOVERNANCE returns a 32-byte Ed25519 pubkey"
+    );
+    assert_eq!(resp.public_key, vec![0x99; 32]);
+}
+
+#[tokio::test]
+async fn grpc_public_key_rejects_unsupported_data_type() {
+    // Guard against the CCD_GOVERNANCE arm turning the match into a catch-all:
+    // data types with no pubkey of their own must still be rejected.
+    let enclave_port = start_mock_enclave();
+    let grpc_port = start_grpc_server(enclave_port).await;
+
+    let mut client = ParentServiceClient::connect(format!("http://127.0.0.1:{grpc_port}"))
+        .await
+        .unwrap();
+
+    let err = client
+        .public_key(PublicKeyRequest {
+            network_id: 0,
+            data_type: DataType::Swap as i32,
+        })
+        .await
+        .unwrap_err();
+
+    assert_eq!(err.code(), tonic::Code::InvalidArgument);
+}
+
+#[tokio::test]
 async fn grpc_sign_evm_roundtrip() {
     let enclave_port = start_mock_enclave();
     let grpc_port = start_grpc_server(enclave_port).await;
