@@ -429,10 +429,7 @@ impl ResolveWitness for ConsignmentResolver<'_> {
             .client
             .get_tx_status(&witness_id)
             .map_err(|e| WitnessResolverError::ResolverIssue(Some(witness_id), e.to_string()))?;
-        let ord = match status
-            .block_height
-            .and_then(|h| status.block_time.map(|t| (h, t)))
-        {
+        let ord = match status.block_height.zip(status.block_time) {
             Some((h, t)) => {
                 let height = NonZeroU32::new(h).ok_or(WitnessResolverError::InvalidResolverData)?;
                 WitnessOrd::Mined(
