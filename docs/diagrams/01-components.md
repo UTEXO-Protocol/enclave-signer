@@ -35,7 +35,7 @@ flowchart TB
         EPol[policy.rs<br/>SecurityPolicy C-01<br/>Production / Development,<br/>resolved once at boot]
         EState[state.rs<br/>Phase Initial / Cloning / Active<br/>NonceReplayGuard 1 h TTL<br/>op_replay_guard 24 h TTL]
         EFr[framing.rs<br/>len-prefixed proto, 4 MiB cap]
-        BCfg[config.rs — BridgeConfig env pins<br/>EVM_CHAIN_ID / BRIDGE_CONTRACT / RGB_ASSET_ID<br/>GAS_TX_ALLOWED_TO / FUNDS_IN_CONTRACT<br/>BTC_ALLOWED_SCRIPTS / BTC_MAX_TOTAL_SATS]
+        BCfg[config.rs — BridgeConfig env pins<br/>EVM_CHAIN_ID / BRIDGE_CONTRACT / RGB_ASSET_ID<br/>GAS_TX_ALLOWED_TO / FUNDS_IN_CONTRACT<br/>BTC_MAX_TOTAL_SATS]
         VFwd[vsock_forwarder.rs<br/>loopback → vsock, per-port instances<br/>3443→8001 Esplora, 3444→8002 EVM RPC,<br/>18545→8003 / 18550→8004 Helios]
         KM[keys.rs — KeyManager<br/>BIP-39/32/44/84/86<br/>SecretBox seed + keys]
 
@@ -49,7 +49,7 @@ flowchart TB
         subgraph NRGB [networks/rgb/]
             NRV[validation.rs<br/>rgbstd Transfer + Esplora resolver,<br/>typesystem pinned per schema]
             NRP[psbt_validation.rs<br/>PSBT ↔ consignment anchor,<br/>fee-rate 3x cap]
-            NRB[btc_crosscheck.rs<br/>plain-BTC output allowlist<br/>+ total-sats cap]
+            NRB[btc_crosscheck.rs<br/>plain-BTC output self-ownership<br/>btc_ownership.rs + total-sats cap]
             NRS[spv_validation.rs<br/>coverage + depth ≥ 6<br/>+ chain_net + staleness]
             NRSIG[signing/<br/>psbt.rs P2WSH ECDSA<br/>taproot.rs BIP-341 Schnorr]
             subgraph SPVMOD [spv/]
@@ -128,7 +128,7 @@ flowchart TB
 
     BCfg -->|"pinned chain / contract / asset cross-check"| NEV
     BCfg -->|"gas-tx to-pin"| NEG
-    BCfg -->|"BTC allowlist + cap"| NRB
+    BCfg -->|"BTC total-sats cap"| NRB
     BCfg --> EPol
     EPol -.->|"user_data = sha256(pubkey_bundle ‖<br/>policy commitment) — C-01"| AF
 ```

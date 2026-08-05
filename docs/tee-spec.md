@@ -132,8 +132,10 @@ SecurityPolicy = Production {
   silently trusted.
 
 Not yet inside the commitment: `GAS_TX_ALLOWED_TO`, `FUNDS_IN_CONTRACT`, and
-the concrete `BTC_ALLOWED_SCRIPTS` / `BTC_MAX_TOTAL_SATS` values (only the
-on/off boolean is attested). Follow-up work; no tracking issue yet.
+the concrete `BTC_MAX_TOTAL_SATS` value (only the on/off boolean is attested).
+Follow-up work; no tracking issue yet. The plain-BTC *destination* rule needs no
+commitment: it is not configuration but a property the enclave derives from its
+own keys.
 
 ## 5. Key management
 
@@ -146,7 +148,9 @@ on/off boolean is attested). Follow-up work; no tracking issue yet.
     `evm_address = keccak256(uncompressed_pub[1..])[12..]`.
   - EVM gas-tx key (outer tx signing, `SignRawDigest`): `m/44'/60'/0'/0/1`.
   - BTC SegWit v0 (legacy P2WSH): `m/84'/0'/0'/0/0`.
-  - BIP-86 taproot: vanilla `m/86'/<coin>'/0'`, colored (RGB) `m/86'/827167'/0'`.
+  - BIP-86 taproot: vanilla `m/86'/<coin>'/0'` (0 mainnet, 1 otherwise), colored
+    (RGB) `m/86'/<rgb_coin>'/0'` (827166 mainnet, 827167 otherwise -- the split
+    `rgb-lib` uses, so the host's colored addresses resolve).
 - The **EVM address is the cluster identity**: a cloned enclave installs the
   same seed and signs as the same address; `complete_cloning` asserts the
   derived address equals the target cluster key before going `Active`.
@@ -243,9 +247,23 @@ durable double-spend guard is on-chain.
 Vanilla (non-bridge) BTC signing is its own request and can no longer be
 reached by omitting bridge fields. It is gated by the attested policy
 (`allow_vanilla_psbt`, default **off**), and each request must satisfy the
-operator pins: every output script in `BTC_ALLOWED_SCRIPTS`, total input value
-<= `BTC_MAX_TOTAL_SATS`. Signing is scoped to the **vanilla** BIP-86 account
-only -- it can structurally never co-sign a colored (RGB-allocated) input.
+authorization rules: every output must pay back to a script the enclave proves
+it controls, and total input value <= `BTC_MAX_TOTAL_SATS`. Signing is scoped to
+the **vanilla** BIP-86 account only -- it can structurally never co-sign a
+colored (RGB-allocated) input.
+
+The destination rule is self-proving, not pinned. An output is accepted when it
+either repays an input the enclave co-signs (control-block anchored), or carries
+BIP-371 output metadata that reconstructs the exact on-chain `script_pubkey` from
+a key the enclave derives on either of its own BIP-86 accounts. Colored
+destinations count too: `create_utxo` funds RGB-allocation UTXOs out of vanilla
+inputs. The M-01 account scope is the **input** one above -- which UTXOs the
+enclave will spend -- and is unchanged. The previous
+`BTC_ALLOWED_SCRIPTS` allowlist was removed: the scripts to pin derive from a
+seed that only exists once the enclave has booted, and enclave env is measured
+into PCR0, so pinning them changed the very identity the seed was bound to. The
+path is therefore structurally self-pay; withdrawals to arbitrary user addresses
+were never expressible here and still are not.
 
 ### 7.4 Gas transaction (`SignRawDigest`, C-02 / #68)
 
@@ -315,7 +333,11 @@ All thresholds are compile-time constants -- a host-tunable threshold would let
 an operator weaken the gate while attestation still passed.
 
 **Checkpoints:** mainnet block 951,552 (retarget-aligned, W-14) and UTEXO
-signet block 334,000 are real pinned checkpoints; regtest uses genesis.
+signet block 334,000 are real pinned checkpoints; regtest uses genesis. Local/dev
+builds (debug, `cfg(test)`, or `allow-seed-import`) may move the anchor forward
+at boot with `SPV_CHECKPOINT=height:block_hash[:bits:time]` to skip a long
+initial sync; a production-shaped build refuses to start if that variable is
+set, so the host can never choose the trust anchor.
 Testnet3 remains a placeholder -- a release build refuses to boot on any
 placeholder checkpoint. **Signet caveat:** the enclave does not validate PoW or
 nBits on signet, and the BIP-325 challenge signature is not verified (the wire
@@ -399,7 +421,7 @@ MUST refuse to sign (fail closed) if any fails.
 | **SI-13** | Bridge PSBT signing MUST independently verify the EVM deposit (receipt success, pinned contract, unique event, on-chain `operationId` + amount + commission binding, depth >= `EVM_MIN_CONFIRMATIONS`); listener flags MUST NOT authorize. OK (#51/#60, #150/#152/#153) |
 | **SI-14** | A release bridge build MUST refuse to boot unless it resolves to a valid `Production` security policy. OK (C-01)                                         |
 | **SI-15** | The full security posture MUST be verifiable as one attested value; a downgraded posture MUST fail pubkey verification. OK (C-01)                        |
-| **SI-16** | Plain-BTC signing MUST be off unless enabled in the attested policy, MUST respect the output allowlist and value cap, and MUST NOT touch colored keys. OK (#102) |
+| **SI-16** | Plain-BTC signing MUST be off unless enabled in the attested policy, MUST pay only to scripts the enclave proves it controls, MUST respect the value cap, and MUST NOT co-sign a colored (RGB-allocated) input. OK (#102) |
 | **SI-17** | A signing that produced zero input signatures MUST NOT be reported as success. OK (W-07 / #85)                                                            |
 
 ## 12. Failure conditions

@@ -17,8 +17,11 @@ use zeroize::Zeroize;
 
 use crate::error::{EnclaveError, Result};
 
-/// RGB coin type for colored (RGB asset) operations.
-const RGB_COIN_TYPE: u32 = 827167;
+/// RGB coin types for colored (RGB asset) operations. Mainnet/other split,
+/// matching `rgb-lib::utils::get_coin_type` — the host wallet derives the
+/// colored addresses this enclave must resolve.
+const RGB_COIN_TYPE_MAINNET: u32 = 827166;
+const RGB_COIN_TYPE_TESTNET: u32 = 827167;
 
 /// SLIP-44 coin type for Concordium.
 const CONCORDIUM_COIN_TYPE: u32 = 919;
@@ -98,6 +101,8 @@ pub struct KeyManager {
     account_xpub_colored: Xpub,
     // Coin type used for vanilla derivation (0 = mainnet, 1 = testnet)
     vanilla_coin_type: u32,
+    // Coin type used for colored/RGB derivation (827166 mainnet, 827167 testnet)
+    colored_coin_type: u32,
     // Concordium Ed25519 governance key (SLIP-0010, m/44'/919'/0'/0'/0').
     concordium_secret: SecretBox<[u8; 32]>,
     concordium_pub: [u8; 32],
@@ -207,6 +212,11 @@ impl KeyManager {
             Network::Bitcoin => 0,
             _ => 1,
         };
+        // Colored (RGB) coin type: same mainnet / not-mainnet split.
+        let colored_coin_type = match network {
+            Network::Bitcoin => RGB_COIN_TYPE_MAINNET,
+            _ => RGB_COIN_TYPE_TESTNET,
+        };
 
         // Vanilla: m/86'/<coin_type>'/0'
         let vanilla_path = DerivationPath::from(vec![
@@ -219,10 +229,10 @@ impl KeyManager {
         })?;
         let account_xpub_vanilla = Xpub::from_priv(&secp, &account_xpriv_vanilla);
 
-        // Colored: m/86'/827167'/0'
+        // Colored: m/86'/<rgb_coin_type>'/0'
         let colored_path = DerivationPath::from(vec![
             ChildNumber::from_hardened_idx(86).unwrap(),
-            ChildNumber::from_hardened_idx(RGB_COIN_TYPE).unwrap(),
+            ChildNumber::from_hardened_idx(colored_coin_type).unwrap(),
             ChildNumber::from_hardened_idx(0).unwrap(),
         ]);
         let account_xpriv_colored = master.derive_priv(&secp, &colored_path).map_err(|e| {
@@ -258,6 +268,7 @@ impl KeyManager {
             account_xpriv_colored,
             account_xpub_colored,
             vanilla_coin_type,
+            colored_coin_type,
             concordium_secret,
             concordium_pub,
         })
@@ -348,7 +359,7 @@ impl KeyManager {
         let account_type =
             if coin_type == ChildNumber::from_hardened_idx(self.vanilla_coin_type).unwrap() {
                 AccountType::Vanilla
-            } else if coin_type == ChildNumber::from_hardened_idx(RGB_COIN_TYPE).unwrap() {
+            } else if coin_type == ChildNumber::from_hardened_idx(self.colored_coin_type).unwrap() {
                 AccountType::Colored
             } else {
                 return None;
@@ -673,6 +684,33 @@ mod tests {
         // m/84'/0'/0'/0/0 → None (wrong purpose)
         let path = DerivationPath::from_str("m/84'/0'/0'/0/0").unwrap();
         assert!(km.resolve_account_and_child_path(&path).is_none());
+    }
+
+    /// RGB coin type is network-scoped: 827166 on mainnet, 827167 elsewhere.
+    #[test]
+    fn colored_coin_type_follows_the_network() {
+        let km_main = KeyManager::from_seed([42u8; 64], Network::Bitcoin).unwrap();
+        let km_test = KeyManager::from_seed([42u8; 64], Network::Testnet).unwrap();
+
+        let mainnet_rgb = DerivationPath::from_str("m/86'/827166'/0'/0/3").unwrap();
+        let testnet_rgb = DerivationPath::from_str("m/86'/827167'/0'/0/3").unwrap();
+
+        let (account, child) = km_main
+            .resolve_account_and_child_path(&mainnet_rgb)
+            .unwrap();
+        assert!(matches!(account, AccountType::Colored));
+        assert_eq!(child.len(), 2);
+        assert!(km_main
+            .resolve_account_and_child_path(&testnet_rgb)
+            .is_none());
+
+        let (account, _) = km_test
+            .resolve_account_and_child_path(&testnet_rgb)
+            .unwrap();
+        assert!(matches!(account, AccountType::Colored));
+        assert!(km_test
+            .resolve_account_and_child_path(&mainnet_rgb)
+            .is_none());
     }
 
     #[test]

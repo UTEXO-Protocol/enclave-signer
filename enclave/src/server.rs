@@ -733,18 +733,23 @@ fn handle_sign_psbt(ctx: &ServerContext, req: RgbDestination) -> Result<EnclaveR
     })
 }
 
-/// Sign a plain-BTC PSBT (create_utxo / plain withdrawals). Distinct from
+/// Sign a plain-BTC PSBT (create_utxo / UTXO management). Distinct from
 /// [`handle_sign_psbt`]: this path carries no RGB consignment and no EVM event.
-/// The enclave authorizes it solely against the operator-pinned output
-/// allowlist + amount cap ([`crate::networks::rgb::btc_crosscheck`]); a
-/// production (rgb-validation) build refuses to sign when that policy is
-/// unconfigured. Routing plain-BTC ops through their own request type is the
-/// structural half of the M-01/#69 fix — the bridge `SignPsbt` (RgbDestination)
-/// path can no longer be reached by omitting its fields.
+/// The enclave authorizes it by proving every output pays back to a script it
+/// controls, plus the operator-pinned amount cap
+/// ([`crate::networks::rgb::btc_crosscheck`]); a production (rgb-validation)
+/// build refuses to sign while the cap is unset. Routing plain-BTC ops through
+/// their own request type is the structural half of the M-01/#69 fix — the
+/// bridge `SignPsbt` (RgbDestination) path can no longer be reached by omitting
+/// its fields.
 fn handle_sign_btc(ctx: &ServerContext, req: SignBtcRequest) -> Result<EnclaveResponse> {
-    // Pinned output allowlist + amount cap (skipped only in dev-mode).
+    // Output self-ownership + amount cap (skipped only in dev-mode). Runs
+    // against the enclave's own keys, so an uninitialized enclave fails here
+    // with KeyNotInitialized rather than reaching the signer.
     #[cfg(not(feature = "dev-mode"))]
-    crate::networks::rgb::btc_crosscheck::validate_btc_request(&req, &ctx.bridge_config)?;
+    ctx.state.with_keys(|keys| {
+        crate::networks::rgb::btc_crosscheck::validate_btc_request(&req, &ctx.bridge_config, keys)
+    })?;
 
     // Sign restricted to the VANILLA (plain-BTC) account: the enclave will not
     // co-sign a Colored (RGB-allocated) input on this path, so it is
