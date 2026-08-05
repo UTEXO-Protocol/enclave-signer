@@ -518,6 +518,8 @@ fn handle_initialize(ctx: &ServerContext, req: InitializeKeyRequest) -> Result<E
     tracing::info!(
         evm_address = %hex::encode(keys.evm_address),
         evm_gas_tx_address = %hex::encode(keys.evm_gas_tx_address),
+        btc_compressed_pub = %hex::encode(keys.btc_compressed_pubkey),
+        ccd_ed25519_pub = %hex::encode(keys.ccd_ed25519_pub),
         master_fingerprint = %hex::encode(keys.master_fingerprint),
         account_xpub_vanilla = %keys.account_xpub_vanilla,
         account_xpub_colored = %keys.account_xpub_colored,
