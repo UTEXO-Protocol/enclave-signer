@@ -43,20 +43,23 @@ pub struct BridgeConfig {
     /// the enclave's committed identity. It can be added to the bundle in a
     /// follow-up if external verifiability of the gas-tx policy is wanted.
     pub gas_tx_allowed_to: Option<[u8; 20]>,
-    /// Operator-pinned output allowlist for the **plain-BTC** signing path
-    /// (`SignBtc`, env `BTC_ALLOWED_SCRIPTS`): the set of output
-    /// `script_pubkey` byte-strings the enclave will co-sign a plain-BTC PSBT
-    /// toward (e.g. the bridge's own change/UTXO-management scripts). Empty =
-    /// unset; a production (`rgb-validation`) build refuses plain-BTC signing
-    /// when unset. Like the gas-tx destination pin (`GAS_TX_ALLOWED_TO`), this
-    /// is an operational signing-policy pin, NOT part of `is_configured()`.
-    /// Whether the path is enabled at all ([`allows_vanilla_btc`](Self::allows_vanilla_btc))
-    /// IS attested, as `allow_vanilla_psbt` in the security policy (C-01).
-    pub btc_allowed_scripts: Vec<Vec<u8>>,
-    /// Operator-pinned cap (sats) on the **total** output value of a plain-BTC
-    /// PSBT (`BTC_MAX_TOTAL_SATS`). `0` = unset; a production build refuses
-    /// plain-BTC signing when unset. Bounds the blast radius of the plain-BTC
-    /// path independently of the destination allowlist.
+    /// Operator-pinned cap (sats) on the **total input value spent** by a
+    /// plain-BTC PSBT (`BTC_MAX_TOTAL_SATS`). `0` = unset; a production build
+    /// refuses plain-BTC signing when unset. Bounds the blast radius of the
+    /// plain-BTC path — including value routed to miner fees — on top of the
+    /// destination rule, which needs no configuration: outputs must pay back to
+    /// scripts the enclave proves it controls (see
+    /// [`crate::networks::rgb::btc_ownership`]).
+    ///
+    /// Whether the plain-BTC path is enabled at all
+    /// ([`allows_vanilla_btc`](Self::allows_vanilla_btc)) IS attested, as
+    /// `allow_vanilla_psbt` in the security policy (C-01).
+    ///
+    /// There used to be a `BTC_ALLOWED_SCRIPTS` output allowlist alongside this.
+    /// It was removed because an operator could not set it: the scripts to pin
+    /// derive from a seed that only exists once the enclave has booted, and
+    /// enclave env is measured into PCR0, so baking them in changes the very
+    /// identity the seed is bound to.
     pub btc_max_total_sats: u64,
     /// Address expected to emit `FundsIn`/`BridgeFundsIn` (env
     /// `FUNDS_IN_CONTRACT`). Falls back to `bridge_contract` when unset, so
@@ -89,19 +92,6 @@ impl BridgeConfig {
             .ok()
             .and_then(|s| parse_eth_address(&s).ok());
 
-        // Plain-BTC output allowlist: comma-separated hex `script_pubkey`s.
-        // Each entry is parsed independently; malformed/empty entries are
-        // dropped rather than poisoning the whole list.
-        let btc_allowed_scripts = std::env::var("BTC_ALLOWED_SCRIPTS")
-            .ok()
-            .map(|s| {
-                s.split(',')
-                    .filter_map(|part| hex::decode(part.trim()).ok())
-                    .filter(|bytes| !bytes.is_empty())
-                    .collect::<Vec<Vec<u8>>>()
-            })
-            .unwrap_or_default();
-
         let btc_max_total_sats = std::env::var("BTC_MAX_TOTAL_SATS")
             .ok()
             .and_then(|s| s.parse::<u64>().ok())
@@ -118,7 +108,6 @@ impl BridgeConfig {
             bridge_contract,
             rgb_asset_id,
             gas_tx_allowed_to,
-            btc_allowed_scripts,
             btc_max_total_sats,
             funds_in_contract,
         }
@@ -159,14 +148,17 @@ impl BridgeConfig {
     }
 
     /// Whether the plain-BTC (vanilla / create_utxo) signing path is authorised:
-    /// both the output allowlist and the total-value cap must be operator-set.
+    /// the operator-set total-value cap (`BTC_MAX_TOTAL_SATS`) is what gates it.
+    /// The output destination rule needs no configuration — outputs must pay
+    /// back to scripts the enclave proves it controls
+    /// ([`crate::networks::rgb::btc_ownership`]) — so the cap is the only pin.
     /// This is the single predicate the boot-time [`crate::policy::SecurityPolicy`]
     /// records as `allow_vanilla_psbt` and that
     /// `networks::rgb::btc_crosscheck::validate_btc_request` enforces per request
     /// (they MUST agree — an enclave that attests `allow_vanilla_psbt = true` must
     /// actually accept the path, and vice versa).
     pub fn allows_vanilla_btc(&self) -> bool {
-        !self.btc_allowed_scripts.is_empty() && self.btc_max_total_sats != 0
+        self.btc_max_total_sats != 0
     }
 }
 

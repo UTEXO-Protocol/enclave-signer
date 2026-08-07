@@ -10,59 +10,58 @@ flowchart TB
     %% parent crate
     subgraph PARENT [parent crate — utexo-bridge-parent]
         PMain[main.rs<br/>gRPC server tonic, 127.0.0.1]
-        Grpc[grpc_server.rs<br/>ParentAdapterService<br/>gRPC ↔ enclave wire]
+        Grpc[grpc_server.rs<br/>ParentAdapterService — gRPC ↔ enclave wire<br/>TRANSACTION → Sign, EVM_GAS_TX → SignRawDigest,<br/>BTC_UTXO → SignBtc]
         PClient[client.rs<br/>EnclaveClient<br/>TCP / vsock]
         PFr[framing.rs<br/>u32 LE len + protobuf]
-        PALib[attest_verify.rs<br/>library half of CLI]
+        PALib[attest_verify.rs<br/>library half of CLI —<br/>rebuilds expected policy + bundle]
         PCli[bin/cli.rs<br/>utexo-bridge-parent-cli]
-        AVCli[bin/attest_verify.rs<br/>attest-verify CLI]
+        AVCli[attest-verify CLI<br/>--pcr0/1/2, --expect-vanilla-psbt,<br/>--expect-evm-source raw or helios or disabled]
         PMisc[config.rs / error.rs]
     end
 
     %% attestation-verify shared crate
     subgraph ATTV [attestation-verify crate — shared]
-        AV[verify_attestation<br/>COSE_Sign1 + AWS Nitro<br/>cert chain + PCRs]
+        AV[verify_attestation<br/>COSE_Sign1, alg pinned ES384, raw 96-byte sig,<br/>cert chain + CA constraints + PCR0/1/2]
+        AVPol[policy.rs<br/>AttestedPolicy — canonical policy<br/>commitment encoding v1, audit C-01]
         AVMock[verify_mock_attestation<br/>feature 'mock']
-        AVBuild[build_mock_document<br/>feature 'mock']
         Root[Embedded AWS Nitro<br/>root CA PEM]
     end
 
     %% enclave crate
     subgraph ENC [enclave crate — utexo-bridge-enclave]
-        EMain[main.rs<br/>listener loop<br/>vsock / TCP]
-        ESrv[server.rs<br/>ServerContext + handler dispatch]
-        EState[state.rs<br/>EnclaveState<br/>Phase Initial/Cloning/Active<br/>+ NonceReplayGuard]
-        EFr[framing.rs<br/>len-prefixed proto, 4 MB cap]
-        EErr[error.rs<br/>EnclaveError + error_code]
-        BCfg[config.rs<br/>BridgeConfig env-pinned<br/>chain_id / contract / rgb_asset_id]
+        EMain[main.rs<br/>boot: resolve SecurityPolicy — a release<br/>bridge build panics unless valid Production —<br/>then listener loop vsock / TCP]
+        EConn[conn.rs<br/>DeadlineStream 10 s idle / 30 s total<br/>4 worker threads, queue of 16]
+        ESrv[server.rs<br/>ServerContext + handler dispatch<br/>+ SubmitHeaders rate limiter]
+        EPol[policy.rs<br/>SecurityPolicy C-01<br/>Production / Development,<br/>resolved once at boot]
+        EState[state.rs<br/>Phase Initial / Cloning / Active<br/>NonceReplayGuard 1 h TTL<br/>op_replay_guard 24 h TTL]
+        EFr[framing.rs<br/>len-prefixed proto, 4 MiB cap]
+        BCfg[config.rs — BridgeConfig env pins<br/>EVM_CHAIN_ID / BRIDGE_CONTRACT / RGB_ASSET_ID<br/>GAS_TX_ALLOWED_TO / FUNDS_IN_CONTRACT<br/>BTC_MAX_TOTAL_SATS]
         VFwd[vsock_forwarder.rs<br/>loopback → vsock, per-port instances<br/>3443→8001 Esplora, 3444→8002 EVM RPC,<br/>18545→8003 / 18550→8004 Helios]
+        KM[keys.rs — KeyManager<br/>BIP-39/32/44/84/86<br/>SecretBox seed + keys]
 
-        subgraph KEYS [keys.rs]
-            KM[KeyManager<br/>BIP-39/32/84/86<br/>SecretBox seed + keys]
+        subgraph NEVM [networks/evm/]
+            NEV[validation.rs<br/>selector allowlist 0xccddb768,<br/>canonical ABI decode + re-encode,<br/>64 KiB cap, pins, deadline]
+            NEC[crosscheck.rs<br/>witnesses-confirmed, BtcRelay proof,<br/>consignment amount bind]
+            NEE[evm_event.rs<br/>independent FundsIn verify —<br/>alloy raw RPC or Helios in-TEE]
+            NEG[gas_tx.rs<br/>gas-tx preimage allowlist:<br/>strict RLP + chain / to pins]
+            NES[signing.rs<br/>EIP-712 MultisigProxy v1<br/>BridgeOperation digest]
         end
-        subgraph SIGN [signing/]
-            SE[evm.rs<br/>EIP-712 domain + digest]
-            SP[psbt.rs<br/>P2WSH segwit-v0<br/>anchor: script_pubkey]
-            ST[taproot.rs<br/>BIP-341 script-path<br/>verify_taproot_commitment]
-        end
-        subgraph VAL [validation/]
-            VEvm[evm_crosscheck.rs<br/>selector allowlist + pinned-config<br/>amount bound to consignment<br/>funds_out burn/transfer]
-            VPsbt[psbt_crosscheck.rs<br/>bridge vs vanilla<br/>amount + consignment bind]
-            VRgb[rgb.rs<br/>rgbstd Transfer<br/>+ Esplora resolver]
-            VSpv[spv_crosscheck.rs<br/>coverage + depth<br/>+ chain_net + staleness]
-            VEvt[evm_event.rs<br/>independent FundsIn verify<br/>alloy #60 / Helios #77<br/>evm-rpc / helios features]
-            VGas[evm_gas_tx.rs<br/>gas-tx shape allowlist]
-        end
-        subgraph SPVMOD [spv/]
-            SCh[chain.rs<br/>HeaderChain<br/>bounded reorg ≤100]
-            SCp[checkpoint.rs<br/>compile-time anchors → PCR0]
-            SMk[merkle.rs<br/>Bitcoin merkle proof]
-            SVal[validation.rs<br/>linkage + PoW + nBits]
-            STy[types.rs<br/>Network, SpvError]
+        subgraph NRGB [networks/rgb/]
+            NRV[validation.rs<br/>rgbstd Transfer + Esplora resolver,<br/>typesystem pinned per schema]
+            NRP[psbt_validation.rs<br/>PSBT ↔ consignment anchor,<br/>fee-rate 3x cap]
+            NRB[btc_crosscheck.rs<br/>plain-BTC output self-ownership<br/>btc_ownership.rs + total-sats cap]
+            NRS[spv_validation.rs<br/>coverage + depth ≥ 6<br/>+ chain_net + staleness]
+            NRSIG[signing/<br/>psbt.rs P2WSH ECDSA<br/>taproot.rs BIP-341 Schnorr]
+            subgraph SPVMOD [spv/]
+                SCh[chain.rs — HeaderChain<br/>full retention, 1M cap,<br/>bounded reorg ≤ 100]
+                SCp[checkpoint.rs<br/>compile-time anchors → PCR0]
+                SMk[merkle.rs]
+                SVal[validation.rs<br/>linkage + PoW + nBits]
+            end
         end
         subgraph ATTGRP [attestation + cloning]
             AF[attestation.rs<br/>NSM facade<br/>+ verify_peer_attestation]
-            CL[cloning.rs<br/>CloneSession<br/>X25519 + HKDF-SHA256<br/>+ ChaCha20Poly1305]
+            CL[cloning.rs<br/>X25519 + HKDF-SHA256<br/>+ ChaCha20Poly1305]
         end
     end
 
@@ -74,60 +73,62 @@ flowchart TB
     VPe[(host vsock-proxy<br/>8002 / 8003 / 8004)]
 
     %% Wires
-    L -->|"gRPC EnclaveService<br/>Sign / PublicKey / Initialize / Clone /<br/>SubmitHeaders / GetLastSavedBlock /<br/>AttestedPublicKey"| PMain
+    L -->|"gRPC ParentService<br/>Sign (data_type TRANSACTION /<br/>EVM_GAS_TX / BTC_UTXO) /<br/>PublicKey / Initialize / Clone /<br/>SubmitHeaders / GetLastSavedBlock /<br/>AttestedPublicKey"| PMain
     Op --> PCli
-    V -->|"--pcr0/1/2 + endpoint"| AVCli
+    V --> AVCli
     PCli --> PClient
     AVCli --> PALib
     PALib -->|"verify_attestation()"| AV
+    PALib -->|"expected policy commitment"| AVPol
     PALib -->|"feature mock"| AVMock
 
     PMain --> Grpc
     Grpc --> PFr
     Grpc -.->|"u32 LE len + EnclaveRequest<br/>TCP 127.0.0.1:5000 or vsock CID 16:5000"| EFr
 
-    EMain -->|"ServerContext: state, header_chain, rgb_validator"| ESrv
+    EMain --> EPol
+    EMain --> EConn
+    EConn --> ESrv
     ESrv --> EFr
     ESrv --> EState
-    ESrv --> VEvm
-    ESrv --> VPsbt
-    ESrv --> VRgb
-    ESrv --> VSpv
+    ESrv --> NEV
+    ESrv --> NEC
+    ESrv --> NEE
+    ESrv --> NEG
+    ESrv --> NRV
+    ESrv --> NRP
+    ESrv --> NRB
+    ESrv --> NRS
     ESrv -->|"InitiateCloning / GetClone / SetClone /<br/>GetAttestedPublicKey"| AF
     ESrv --> CL
     ESrv -->|"SubmitHeaders / lookup"| SCh
 
     EState -->|"Phase::Active(km)"| KM
-    KM --> SE
-    KM --> SP
-    KM --> ST
+    KM --> NES
+    KM --> NRSIG
 
-    VRgb -->|"esplora_blocking via localhost:3443"| Esp
-    VRgb -.->|"HTTP"| VFwd
+    NRV -->|"esplora_blocking via localhost:3443,<br/>30 s timeout"| VFwd
     VFwd -->|"vsock CID 3:8001"| VP
     VP -->|"real HTTP"| Esp
 
-    ESrv --> VEvt
-    ESrv --> VGas
-    VEvt -.->|"eth_getTransactionReceipt /<br/>eth_blockNumber (host-relayed evidence,<br/>Helios-verified in #77)"| VFwd
+    NEE -.->|"eth_getTransactionReceipt /<br/>eth_blockNumber — host-relayed evidence,<br/>or Helios-verified in-TEE"| VFwd
     VFwd -->|"vsock 8002 / 8003 / 8004"| VPe
     VPe -->|"real HTTP"| EvmRpc
 
-    VSpv --> SCh
-    VSpv --> SMk
+    NRS --> SCh
+    NRS --> SMk
     SCh --> SVal
     SCh --> SCp
-    SCh --> STy
 
     AF -->|"Linux only — Request::Attestation /<br/>DescribePCR"| NSM
     AF -->|"peer verification (real)"| AV
     AF -->|"peer verification (mock)"| AVMock
-    AF --> AVBuild
     CL -.->|"ephemeral pubkey ↔ attestation user_data"| AF
     AV --> Root
 
-    EErr -->|"From<SpvError>"| STy
-
-    BCfg -->|"pinned chain/contract/asset cross-check"| VEvm
-    BCfg -.->|"folded into canonical bundle<br/>(attestation user_data)"| AF
+    BCfg -->|"pinned chain / contract / asset cross-check"| NEV
+    BCfg -->|"gas-tx to-pin"| NEG
+    BCfg -->|"BTC total-sats cap"| NRB
+    BCfg --> EPol
+    EPol -.->|"user_data = sha256(pubkey_bundle ‖<br/>policy commitment) — C-01"| AF
 ```

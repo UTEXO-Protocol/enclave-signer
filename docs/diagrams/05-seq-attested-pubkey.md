@@ -14,8 +14,8 @@ sequenceDiagram
     participant RootCa as Embedded AWS Nitro<br/>root CA (PEM)
 
     Note over V,Lib: Verifier issues nonce
-    V->>Cli: attest-verify --endpoint ... --pcr0 ... --pcr1 ... --pcr2 ...
-    Cli->>Lib: verify_attested_pubkey(endpoint, expected_pcrs, Real)
+    V->>Cli: attest-verify --endpoint ... --pcr0/1/2 ...<br/>--expect-vanilla-psbt --expect-evm-source raw|helios|disabled
+    Cli->>Lib: verify_attested_pubkey(endpoint, expected_pcrs, expected_policy)
     Lib->>Lib: nonce := rand_32_bytes()
 
     Note over Lib,Srv: gRPC round-trip
@@ -24,10 +24,11 @@ sequenceDiagram
     Parent->>Srv: GetAttestedPublicKeyRequest{nonce}
 
     Srv->>State: get_keys() (requires Phase::Active)
-    State-->>Srv: KeyInfo{evm_address, evm_uncompressed_pub,<br/>btc xpub, master_fingerprint,<br/>account xpubs vanilla+colored}
+    State-->>Srv: KeyInfo{evm_address, evm_uncompressed_pub,<br/>gas-tx key, btc keys, master_fingerprint,<br/>account xpubs vanilla+colored}
 
-    Srv->>Srv: bundle := canonical_pubkey_bundle(keys)<br/>(length-prefixed concat)
-    Srv->>Srv: commitment := sha256(bundle)
+    Srv->>Srv: merge boot-pinned BridgeConfig<br/>(chain_id, bridge_contract, rgb_asset_id)<br/>into PublicKeysResponse
+    Srv->>Srv: bundle := canonical_pubkey_bundle(keys)<br/>(12 length-prefixed fields, proto order)
+    Srv->>Srv: commitment := sha256(bundle ‖ policy_commitment)<br/>policy = boot-resolved SecurityPolicy (C-01)
 
     Srv->>Att: get_attestation(nonce, pubkey=evm_uncompressed_pub, user_data=commitment)
     alt mock-attestation feature
@@ -60,10 +61,10 @@ sequenceDiagram
     Verify-->>Lib: VerifiedAttestation{pubkey, pcrs, user_data, ...}
 
     Lib->>Lib: assert verified.enclave_pubkey ==<br/>response.evm_uncompressed_pub
-    Lib->>Lib: rebuild canonical_bundle locally,<br/>assert verified.user_data == sha256(bundle)
+    Lib->>Lib: rebuild canonical_bundle + EXPECTED policy<br/>(from CLI flags + wire pins),<br/>assert verified.user_data ==<br/>sha256(bundle ‖ expected_policy_bytes)
 
     Lib-->>Cli: AttestedPubkeyResult
     Cli-->>V: OK + printed bundle + PCRs
 
-    Note right of V: After OK the verifier knows:<br/>"AWS Nitro hardware certifies that an<br/>enclave with PCR0=X / PCR1=Y / PCR2=Z<br/>produced this signing pubkey, and the<br/>full key bundle commits to user_data."
+    Note right of V: After OK the verifier knows:<br/>"AWS Nitro hardware certifies that an<br/>enclave with PCR0=X / PCR1=Y / PCR2=Z<br/>produced this signing pubkey, and the full<br/>key bundle PLUS the enclave's resolved<br/>security policy commit to user_data."<br/>A downgraded posture (vanilla on, raw<br/>instead of Helios, dev build) FAILS here.
 ```
