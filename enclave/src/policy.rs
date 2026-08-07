@@ -209,13 +209,8 @@ impl SecurityPolicy {
 
 impl ProductionPolicy {
     /// Invariants that must hold before a production enclave signs anything.
-    ///
-    /// The EVM data source is deliberately NOT gated here: a `Disabled` source
-    /// fails closed *per request* (see `server::handle_sign`) rather than being
-    /// unsafe, and its value is attested for the external verifier to check
-    /// against the operator's expected posture. What must hold at boot is that
-    /// the identity pins are complete, the attestation is real, and Bitcoin
-    /// anchors are SPV-verified.
+    /// Both evidence sources must be trustless: Bitcoin anchors via SPV, EVM
+    /// FundsIn deposits via Helios. `RawRpc`/`Disabled` are rejected (audit #77).
     pub fn check_invariants(&self) -> Result<(), String> {
         if self.chain_id == 0 || self.bridge_contract == [0u8; 20] || self.rgb_asset_id.is_empty() {
             return Err(
@@ -231,6 +226,13 @@ impl ProductionPolicy {
             return Err(
                 "production policy must anchor Bitcoin witness txs via the SPV header chain".into(),
             );
+        }
+        if self.evm_source != EvmDataSource::HeliosVerified {
+            return Err(format!(
+                "production policy must verify EVM FundsIn via the trustless Helios path, not \
+                 {:?}. Build with `--features helios` and set HELIOS_EXECUTION_RPC. See #77.",
+                self.evm_source
+            ));
         }
         Ok(())
     }
@@ -265,18 +267,37 @@ mod tests {
         let p = SecurityPolicy::resolve(
             &release_bridge_ctx(),
             &pinned_config(),
-            EvmDataSource::RawRpc,
+            EvmDataSource::HeliosVerified,
         );
         match &p {
             SecurityPolicy::Production(pp) => {
                 assert_eq!(pp.chain_id, 1);
-                assert_eq!(pp.evm_source, EvmDataSource::RawRpc);
+                assert_eq!(pp.evm_source, EvmDataSource::HeliosVerified);
                 assert_eq!(pp.attestation, AttestationMode::Real);
                 assert_eq!(pp.btc_source, BtcDataSource::SpvVerified);
             }
             other => panic!("expected Production, got {other:?}"),
         }
         assert!(p.assert_valid_for_build(&release_bridge_ctx()).is_ok());
+    }
+
+    #[test]
+    fn production_requires_the_trustless_helios_evm_source() {
+        let ctx = release_bridge_ctx();
+        // Non-Helios sources still resolve to Production (recorded + attested)
+        // but must not pass the boot gate.
+        for source in [EvmDataSource::Disabled, EvmDataSource::RawRpc] {
+            let p = SecurityPolicy::resolve(&ctx, &pinned_config(), source);
+            assert!(
+                matches!(p, SecurityPolicy::Production(_)),
+                "expected Production for {source:?}"
+            );
+            let err = p.assert_valid_for_build(&ctx).unwrap_err();
+            assert!(err.contains("Helios"), "got: {err}");
+        }
+        // Only Helios-verified passes the boot gate.
+        let p = SecurityPolicy::resolve(&ctx, &pinned_config(), EvmDataSource::HeliosVerified);
+        assert!(p.assert_valid_for_build(&ctx).is_ok());
     }
 
     #[test]
