@@ -422,6 +422,7 @@ impl EnclaveState {
                 master_fingerprint: km.master_fingerprint().to_bytes(),
                 account_xpub_vanilla: km.account_xpub_vanilla().to_string(),
                 account_xpub_colored: km.account_xpub_colored().to_string(),
+                ccd_ed25519_pub: *km.ccd_ed25519_pub(),
             })
         })
     }
@@ -429,6 +430,12 @@ impl EnclaveState {
     /// Sign a 32-byte EVM message hash. Returns 65-byte signature.
     pub fn sign_evm(&self, message_hash: &[u8; 32]) -> Result<[u8; 65]> {
         self.with_active(|km| km.sign_evm(message_hash))
+    }
+
+    /// Sign a 32-byte Concordium account-transaction hash with the governance
+    /// Ed25519 key. Returns the 64-byte signature.
+    pub fn sign_ccd(&self, hash: &[u8; 32]) -> Result<[u8; 64]> {
+        self.with_active(|km| km.sign_ccd(hash))
     }
 
     /// Sign a 32-byte digest with the EVM gas TX key. Returns 65-byte signature.
@@ -451,6 +458,16 @@ impl EnclaveState {
         allowed_account: Option<crate::keys::AccountType>,
     ) -> Result<(Vec<u8>, usize)> {
         self.with_active(|km| km.sign_psbt_scoped(psbt_bytes, allowed_account))
+    }
+
+    /// Run `f` against the active `KeyManager`, or fail with
+    /// `KeyNotInitialized`. Exposed for validators that must reason about the
+    /// enclave's own keys before signing — the plain-BTC cross-check proves
+    /// every output pays back to a script this enclave controls
+    /// ([`crate::networks::rgb::btc_ownership`]), which needs the derivation,
+    /// not just the signature.
+    pub fn with_keys<T>(&self, f: impl FnOnce(&KeyManager) -> Result<T>) -> Result<T> {
+        self.with_active(f)
     }
 
     fn lock_phase(&self) -> Result<std::sync::MutexGuard<'_, Phase>> {

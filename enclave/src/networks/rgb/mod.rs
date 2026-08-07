@@ -1,4 +1,5 @@
 pub mod btc_crosscheck;
+pub mod btc_ownership;
 pub mod psbt_validation;
 pub mod signing;
 pub mod spv;

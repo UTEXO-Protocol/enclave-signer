@@ -18,38 +18,55 @@
 //!     only via the consignment-bound `SignPsbt` path. That scoping is what
 //!     keeps the M-01 fix from being reopened on this sibling path; this
 //!     validator adds the operator-pinned destination + amount policy on top:
-//!   * **Output allowlist** (`BTC_ALLOWED_SCRIPTS`): every output's
-//!     `script_pubkey` must be one the operator pinned (e.g. the bridge's own
-//!     change / UTXO-management scripts). A listener cannot redirect funds to
-//!     an address the operator did not pre-authorize.
+//!   * **Output self-ownership** ([`crate::networks::rgb::btc_ownership`]):
+//!     every output must pay back to a script this enclave co-controls, proven
+//!     from the PSBT and the enclave's own derivation rather than asserted by
+//!     configuration. A listener cannot redirect funds to an address the
+//!     enclave does not control. Destinations on *either* BIP-86 account count
+//!     as ours (`create_utxo` funds Colored UTXOs from vanilla inputs); the
+//!     asymmetry with the input scope above is deliberate — M-01 is about which
+//!     inputs we spend. This replaces the `BTC_ALLOWED_SCRIPTS`
+//!     allowlist, which was unbootstrappable in production — the scripts to pin
+//!     derive from a seed that only exists after the enclave boots, and baking
+//!     them into the image changes the PCR0 identity that seed is bound to.
 //!   * **Amount cap** (`BTC_MAX_TOTAL_SATS`): the **total input value spent**
 //!     must not exceed the pinned cap. Capping *value spent* (not output value)
 //!     bounds the real blast radius — including value routed to miner fees — so
 //!     a host can't burn bridge funds by under-paying the outputs.
 //!
-//! Scope note: a *static* pinned allowlist cannot express a withdrawal to an
-//! arbitrary user address (`sendBtc`); this path serves self-pay / UTXO-
-//! management (`create_utxo`) where destinations are bridge-controlled and
-//! pinnable. Dynamic-destination withdrawals are out of scope for #69.
+//! Scope note: self-ownership makes this path structurally self-pay — UTXO
+//! management (`create_utxo`) and consolidation, where destinations are
+//! bridge-controlled. A withdrawal to an arbitrary user address was never
+//! expressible here (the pinned allowlist could not describe one either) and
+//! still isn't: that needs a destination bound to verified evidence, not a
+//! signing-policy pin. Dynamic-destination withdrawals remain out of scope.
 //!
-//! Fail-closed posture (mirrors `evm_crosscheck`): a production build
-//! (`rgb-validation`) refuses to sign on this path when the allowlist/cap are
-//! unconfigured. Default / `cfg(test)` builds, which are never production
-//! (production is `--features vsock,rgb-validation,spv`), fall back to a
-//! permissive dev path when nothing is pinned so local tooling keeps working.
-//! `dev-mode` skips this function entirely (the handler is
-//! `cfg(not(dev-mode))`). The witness_utxo requirement below runs in ALL builds
-//! (it is needed to bound value, not a tunable policy).
+//! Fail-closed posture (mirrors `evm_crosscheck`): the output check needs no
+//! configuration, so it runs in every build that reaches this function. The
+//! amount cap is operator-supplied, and there a production build
+//! (`rgb-validation`) refuses to sign while it is unset; default / `cfg(test)`
+//! builds, which are never production (production is
+//! `--features vsock,rgb-validation,spv`), fall back to a permissive dev path
+//! so local tooling keeps working. `dev-mode` skips this function entirely (the
+//! handler is `cfg(not(dev-mode))`). The witness_utxo requirement below runs in
+//! ALL builds (it is needed to bound value, not a tunable policy).
 
 use crate::config::BridgeConfig;
 use crate::error::{EnclaveError, Result};
+use crate::keys::KeyManager;
+use crate::networks::rgb::btc_ownership::{output_is_self_owned, self_controlled_input_scripts};
 use crate::proto::SignBtcRequest;
 
-/// Validate a plain-BTC `SignBtcRequest` before signing: the operator-pinned
-/// output allowlist + value-spent cap. (Account scoping — never sign a Colored
-/// input — is enforced separately in the signer; see the module docs.) Returns
-/// `Ok(())` when authorized, a `CrossCheck` error otherwise.
-pub fn validate_btc_request(req: &SignBtcRequest, cfg: &BridgeConfig) -> Result<()> {
+/// Validate a plain-BTC `SignBtcRequest` before signing: output self-ownership
+/// plus the operator-pinned value-spent cap. Account scoping — never sign a
+/// Colored input — is enforced separately in the signer; see the module docs.
+///
+/// Returns `Ok(())` when authorized, a `CrossCheck` error otherwise.
+pub fn validate_btc_request(
+    req: &SignBtcRequest,
+    cfg: &BridgeConfig,
+    keys: &KeyManager,
+) -> Result<()> {
     // 0. Shape whitelist (shared with the bridge path).
     let psbt = crate::networks::rgb::psbt_validation::parse_psbt_shape(&req.psbt_bytes)?;
 
@@ -71,65 +88,64 @@ pub fn validate_btc_request(req: &SignBtcRequest, cfg: &BridgeConfig) -> Result<
             })?;
     }
 
-    // 2. A usable pin requires BOTH an allowlist and a cap. A half-pin is
-    //    treated as unconfigured (fail-closed in production) rather than
-    //    enforcing one dimension while silently ignoring the other.
-    let pinned = !cfg.btc_allowed_scripts.is_empty() && cfg.btc_max_total_sats != 0;
-
-    if !pinned {
-        // Production (rgb-validation, not test) must not sign plain BTC without
-        // an enclave-verifiable policy — otherwise a misprovisioned-but-running
-        // enclave silently degrades to "sign any output the host asks for".
-        #[cfg(all(feature = "rgb-validation", not(test)))]
-        {
-            return Err(EnclaveError::CrossCheck(
-                "plain-BTC signing requires BTC_ALLOWED_SCRIPTS and BTC_MAX_TOTAL_SATS to be \
-                 pinned — refusing to sign without an enclave-verifiable output allowlist + \
-                 amount cap"
-                    .into(),
-            ));
-        }
-        // Default / test builds: nothing pinned, no operator policy to enforce
-        // (the input guard above still ran). Dev path only.
-        #[cfg(not(all(feature = "rgb-validation", not(test))))]
-        {
-            tracing::warn!(
-                "plain-BTC signing: no BTC_ALLOWED_SCRIPTS / BTC_MAX_TOTAL_SATS pinned \
-                 (non-production build) — skipping output/amount policy"
-            );
-            return Ok(());
-        }
-    }
-
-    // 3. Reject an empty output set — every input value would go to fees, which
-    //    the output allowlist would not catch. The cap below bounds value spent,
-    //    but a no-output PSBT is never a legitimate plain-BTC op.
+    // 2. Reject an empty output set — every input value would go to fees, which
+    //    the per-output check below would not catch (there is nothing to check).
+    //    The cap bounds value spent, but a no-output PSBT is never a legitimate
+    //    plain-BTC op.
     if psbt.unsigned_tx.output.is_empty() {
         return Err(EnclaveError::CrossCheck(
             "plain-BTC PSBT has no outputs — refusing (would route all input value to fees)".into(),
         ));
     }
 
-    // 4. Output allowlist. Authorization is anchored to the unsigned tx's
-    //    outputs, which the segwit sighash commits to — the same bytes the
-    //    signature will cover.
-    for (i, out) in psbt.unsigned_tx.output.iter().enumerate() {
-        let spk = out.script_pubkey.as_bytes();
-        let allowed = cfg
-            .btc_allowed_scripts
-            .iter()
-            .any(|allowed_spk| allowed_spk.as_slice() == spk);
-        if !allowed {
+    // 3. Output self-ownership. Every output must pay back to a script this
+    //    enclave co-controls. Unlike the old allowlist this needs no operator
+    //    configuration — the enclave proves it from the PSBT and its own
+    //    derivation — so it runs unconditionally rather than behind a "pinned"
+    //    gate. Authorization is anchored to the unsigned tx's outputs, which the
+    //    segwit sighash commits to: the same bytes the signature will cover.
+    let input_scripts = self_controlled_input_scripts(&psbt, keys);
+    for i in 0..psbt.unsigned_tx.output.len() {
+        if !output_is_self_owned(&psbt, i, keys, &input_scripts) {
             return Err(EnclaveError::CrossCheck(format!(
-                "plain-BTC output {i} pays a non-allowlisted script_pubkey ({}) — refusing to \
-                 sign toward a destination the operator did not pin",
-                hex::encode(spk)
+                "plain-BTC output {i} pays {} — refusing: the enclave cannot prove it controls \
+                 that script. An output must either repay an input this enclave co-signs, or \
+                 carry BIP-371 taproot metadata (PSBT_OUT_TAP_INTERNAL_KEY / _TREE / _BIP32_\
+                 DERIVATION) that reconstructs it from a key on one of this enclave's BIP-86 \
+                 accounts (vanilla, or colored for create_utxo allocation outputs). Plain-BTC \
+                 signing is self-pay only.",
+                hex::encode(psbt.unsigned_tx.output[i].script_pubkey.as_bytes())
             )));
         }
     }
 
-    // 5. Amount cap on VALUE SPENT (sum of input values), bounding the blast
-    //    radius including any value routed to fees.
+    // 4. Amount cap on VALUE SPENT (sum of input values), bounding the blast
+    //    radius including any value routed to fees. Operator-supplied, so this
+    //    dimension keeps the production fail-closed / dev-fallback split.
+    if cfg.btc_max_total_sats == 0 {
+        // Production (rgb-validation, not test) must not sign plain BTC without
+        // the cap — the self-pay rule above keeps funds under enclave control,
+        // but nothing else bounds what a host can route to miner fees.
+        #[cfg(all(feature = "rgb-validation", not(test)))]
+        {
+            return Err(EnclaveError::CrossCheck(
+                "plain-BTC signing requires BTC_MAX_TOTAL_SATS to be pinned — refusing to sign \
+                 without a bound on the value a single plain-BTC transaction can spend"
+                    .into(),
+            ));
+        }
+        // Default / test builds: no cap to enforce (the structural guards above
+        // still ran). Dev path only.
+        #[cfg(not(all(feature = "rgb-validation", not(test))))]
+        {
+            tracing::warn!(
+                "plain-BTC signing: no BTC_MAX_TOTAL_SATS pinned (non-production build) — \
+                 skipping the value-spent cap"
+            );
+            return Ok(());
+        }
+    }
+
     if total_in_sat > cfg.btc_max_total_sats {
         return Err(EnclaveError::CrossCheck(format!(
             "plain-BTC total input value {total_in_sat} sats exceeds pinned cap {} sats",
@@ -143,39 +159,147 @@ pub fn validate_btc_request(req: &SignBtcRequest, cfg: &BridgeConfig) -> Result<
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bitcoin::bip32::{ChildNumber, DerivationPath};
+    use bitcoin::blockdata::opcodes::all::{OP_CHECKSIG, OP_CHECKSIGADD, OP_NUMEQUAL};
+    use bitcoin::blockdata::script::Builder as ScriptBuilder;
     use bitcoin::hashes::Hash;
     use bitcoin::psbt::Psbt;
+    use bitcoin::secp256k1::{Keypair, Secp256k1, SecretKey};
+    use bitcoin::taproot::{LeafVersion, TapLeafHash, TaprootBuilder};
     use bitcoin::{
-        Amount, OutPoint, ScriptBuf, Sequence, Transaction, TxIn, TxOut, Txid, WPubkeyHash, Witness,
+        Amount, Network, OutPoint, ScriptBuf, Sequence, Transaction, TxIn, TxOut, Txid,
+        WPubkeyHash, Witness, XOnlyPublicKey,
     };
 
-    /// A P2WPKH script_pubkey seeded deterministically — a NON-P2WSH script,
-    /// stands in for a bridge-controlled plain output/input script.
-    fn script_for(seed: u8) -> ScriptBuf {
-        ScriptBuf::new_p2wpkh(&WPubkeyHash::from_byte_array([seed; 20]))
+    use crate::keys::AccountType;
+
+    /// NUMS internal key — unspendable key-path, as the bridge's taproot
+    /// multisig addresses use.
+    const NUMS_INTERNAL: [u8; 32] = [
+        0x50, 0x92, 0x9b, 0x74, 0xc1, 0xa0, 0x49, 0x54, 0xb7, 0x8b, 0x4b, 0x60, 0x35, 0xe9, 0x7a,
+        0x5e, 0x07, 0x8a, 0x5a, 0x0f, 0x28, 0xec, 0x96, 0xd5, 0x47, 0xbf, 0xee, 0x9a, 0xce, 0x80,
+        0x3a, 0xc0,
+    ];
+
+    fn km() -> KeyManager {
+        KeyManager::from_seed([0x42u8; 64], Network::Testnet).unwrap()
     }
 
-    /// Build a PSBT from `inputs` (witness_utxo script + value sats, per input)
-    /// and `outputs` (script + value sats). Every input gets its witness_utxo
-    /// populated so the validator can classify and value it.
-    fn psbt(inputs: &[(ScriptBuf, u64)], outputs: &[(ScriptBuf, u64)]) -> Vec<u8> {
-        psbt_inner(inputs, outputs, true)
+    fn foreign_xonly(b: u8) -> XOnlyPublicKey {
+        let secp = Secp256k1::new();
+        let sk = SecretKey::from_slice(&[b; 32]).unwrap();
+        XOnlyPublicKey::from_keypair(&Keypair::from_secret_key(&secp, &sk)).0
     }
 
-    /// Like [`psbt`] but leaves witness_utxo unset on every input (for the
-    /// missing-witness_utxo guard test).
-    fn psbt_without_witness_utxo(
-        inputs: &[(ScriptBuf, u64)],
+    fn multi_a_2_of_3(keys: &[XOnlyPublicKey; 3]) -> ScriptBuf {
+        let mut sorted = *keys;
+        sorted.sort();
+        ScriptBuilder::new()
+            .push_x_only_key(&sorted[0])
+            .push_opcode(OP_CHECKSIG)
+            .push_x_only_key(&sorted[1])
+            .push_opcode(OP_CHECKSIGADD)
+            .push_x_only_key(&sorted[2])
+            .push_opcode(OP_CHECKSIGADD)
+            .push_int(2)
+            .push_opcode(OP_NUMEQUAL)
+            .into_script()
+    }
+
+    /// The enclave's own 2-of-3 taproot address at m/86'/1'/0'/0/0: the
+    /// `script_pubkey` plus everything an input needs to be recognised as
+    /// co-controlled (leaf, control block, key origin).
+    struct OurAddress {
+        spk: ScriptBuf,
+        leaf: ScriptBuf,
+        leaf_hash: TapLeafHash,
+        internal: XOnlyPublicKey,
+        control: bitcoin::taproot::ControlBlock,
+        xonly: XOnlyPublicKey,
+        path: DerivationPath,
+    }
+
+    fn our_address(keys: &KeyManager) -> OurAddress {
+        let secp = Secp256k1::new();
+        let child = [
+            ChildNumber::Normal { index: 0 },
+            ChildNumber::Normal { index: 0 },
+        ];
+        let sk = keys.derive_btc_child(AccountType::Vanilla, &child).unwrap();
+        let xonly = XOnlyPublicKey::from_keypair(&Keypair::from_secret_key(&secp, &sk)).0;
+        let leaf = multi_a_2_of_3(&[xonly, foreign_xonly(0xA1), foreign_xonly(0xA2)]);
+        let leaf_hash = TapLeafHash::from_script(&leaf, LeafVersion::TapScript);
+        let internal = XOnlyPublicKey::from_slice(&NUMS_INTERNAL).unwrap();
+        let info = TaprootBuilder::new()
+            .add_leaf(0, leaf.clone())
+            .unwrap()
+            .finalize(&secp, internal)
+            .unwrap();
+        OurAddress {
+            spk: ScriptBuf::new_p2tr(&secp, internal, info.merkle_root()),
+            control: info
+                .control_block(&(leaf.clone(), LeafVersion::TapScript))
+                .unwrap(),
+            leaf,
+            leaf_hash,
+            internal,
+            xonly,
+            path: DerivationPath::from(vec![
+                ChildNumber::from_hardened_idx(86).unwrap(),
+                ChildNumber::from_hardened_idx(1).unwrap(),
+                ChildNumber::from_hardened_idx(0).unwrap(),
+                child[0],
+                child[1],
+            ]),
+        }
+    }
+
+    /// A taproot address the enclave has nothing to do with.
+    fn foreign_address() -> ScriptBuf {
+        let secp = Secp256k1::new();
+        let leaf = multi_a_2_of_3(&[
+            foreign_xonly(0xB1),
+            foreign_xonly(0xB2),
+            foreign_xonly(0xB3),
+        ]);
+        let internal = XOnlyPublicKey::from_slice(&NUMS_INTERNAL).unwrap();
+        let info = TaprootBuilder::new()
+            .add_leaf(0, leaf)
+            .unwrap()
+            .finalize(&secp, internal)
+            .unwrap();
+        ScriptBuf::new_p2tr(&secp, internal, info.merkle_root())
+    }
+
+    /// Build a plain-BTC PSBT spending `input_sats` from the enclave's own
+    /// address on each input, paying `outputs`. Every input carries the full
+    /// taproot metadata that makes it co-controlled, so rule (A) recognises any
+    /// output paying back to that same address.
+    fn psbt_from_our_address(
+        keys: &KeyManager,
+        inputs: &[u64],
         outputs: &[(ScriptBuf, u64)],
     ) -> Vec<u8> {
-        psbt_inner(inputs, outputs, false)
+        psbt_inner(keys, inputs, outputs, true)
+    }
+
+    /// Like [`psbt_from_our_address`] but leaves witness_utxo unset (for the
+    /// missing-witness_utxo guard test).
+    fn psbt_without_witness_utxo(
+        keys: &KeyManager,
+        inputs: &[u64],
+        outputs: &[(ScriptBuf, u64)],
+    ) -> Vec<u8> {
+        psbt_inner(keys, inputs, outputs, false)
     }
 
     fn psbt_inner(
-        inputs: &[(ScriptBuf, u64)],
+        keys: &KeyManager,
+        inputs: &[u64],
         outputs: &[(ScriptBuf, u64)],
         set_witness_utxo: bool,
     ) -> Vec<u8> {
+        let ours = our_address(keys);
         let unsigned_tx = Transaction {
             version: bitcoin::transaction::Version(2),
             lock_time: bitcoin::absolute::LockTime::ZERO,
@@ -201,20 +325,31 @@ mod tests {
                 .collect(),
         };
         let mut p = Psbt::from_unsigned_tx(unsigned_tx).expect("from_unsigned_tx");
-        if set_witness_utxo {
-            for (i, (spk, sat)) in inputs.iter().enumerate() {
+        for (i, sat) in inputs.iter().enumerate() {
+            if set_witness_utxo {
                 p.inputs[i].witness_utxo = Some(TxOut {
                     value: Amount::from_sat(*sat),
-                    script_pubkey: spk.clone(),
+                    script_pubkey: ours.spk.clone(),
                 });
             }
+            p.inputs[i].tap_internal_key = Some(ours.internal);
+            p.inputs[i].tap_scripts.insert(
+                ours.control.clone(),
+                (ours.leaf.clone(), LeafVersion::TapScript),
+            );
+            p.inputs[i].tap_key_origins.insert(
+                ours.xonly,
+                (
+                    vec![ours.leaf_hash],
+                    (*keys.master_fingerprint(), ours.path.clone()),
+                ),
+            );
         }
         p.serialize()
     }
 
-    fn cfg_pinned(allowed: &[ScriptBuf], cap: u64) -> BridgeConfig {
+    fn cfg_with_cap(cap: u64) -> BridgeConfig {
         BridgeConfig {
-            btc_allowed_scripts: allowed.iter().map(|s| s.as_bytes().to_vec()).collect(),
             btc_max_total_sats: cap,
             ..Default::default()
         }
@@ -222,9 +357,9 @@ mod tests {
 
     #[test]
     fn rejects_empty_psbt() {
-        let cfg = cfg_pinned(&[script_for(0x11)], 100_000);
+        let keys = km();
         let req = SignBtcRequest { psbt_bytes: vec![] };
-        let err = validate_btc_request(&req, &cfg).unwrap_err();
+        let err = validate_btc_request(&req, &cfg_with_cap(100_000), &keys).unwrap_err();
         assert!(err.to_string().contains("psbt_bytes is empty"));
     }
 
@@ -232,139 +367,150 @@ mod tests {
 
     #[test]
     fn rejects_missing_witness_utxo() {
-        let allowed = script_for(0x11);
-        let cfg = cfg_pinned(std::slice::from_ref(&allowed), 100_000);
+        let keys = km();
+        let ours = our_address(&keys);
         let req = SignBtcRequest {
-            psbt_bytes: psbt_without_witness_utxo(
-                &[(script_for(0x11), 50_000)],
-                &[(allowed, 40_000)],
-            ),
+            psbt_bytes: psbt_without_witness_utxo(&keys, &[50_000], &[(ours.spk, 40_000)]),
         };
-        let err = validate_btc_request(&req, &cfg).unwrap_err();
+        let err = validate_btc_request(&req, &cfg_with_cap(100_000), &keys).unwrap_err();
         assert!(
             err.to_string().contains("missing witness_utxo"),
             "got: {err}"
         );
     }
 
-    // --- Output allowlist + value-spent cap (pinned policy) ---
+    // --- Output self-ownership + value-spent cap ---
 
     #[test]
-    fn accepts_allowlisted_output_under_cap() {
-        let allowed = script_for(0x11);
-        let cfg = cfg_pinned(std::slice::from_ref(&allowed), 100_000);
+    fn accepts_self_paying_output_under_cap() {
+        let keys = km();
+        let ours = our_address(&keys);
         let req = SignBtcRequest {
-            psbt_bytes: psbt(&[(script_for(0x11), 60_000)], &[(allowed, 50_000)]),
+            psbt_bytes: psbt_from_our_address(&keys, &[60_000], &[(ours.spk, 50_000)]),
         };
-        assert!(validate_btc_request(&req, &cfg).is_ok());
+        assert!(validate_btc_request(&req, &cfg_with_cap(100_000), &keys).is_ok());
     }
 
     #[test]
     fn accepts_input_value_at_exact_cap() {
-        let allowed = script_for(0x11);
-        let cfg = cfg_pinned(std::slice::from_ref(&allowed), 100_000);
+        let keys = km();
+        let ours = our_address(&keys);
         let req = SignBtcRequest {
-            // input value 100_000 == cap; outputs allowlisted
-            psbt_bytes: psbt(&[(script_for(0x11), 100_000)], &[(allowed, 99_000)]),
+            // input value 100_000 == cap; output pays back to us
+            psbt_bytes: psbt_from_our_address(&keys, &[100_000], &[(ours.spk, 99_000)]),
         };
-        assert!(validate_btc_request(&req, &cfg).is_ok());
+        assert!(validate_btc_request(&req, &cfg_with_cap(100_000), &keys).is_ok());
     }
 
     #[test]
-    fn rejects_output_not_in_allowlist() {
-        let allowed = script_for(0x11);
-        let cfg = cfg_pinned(&[allowed], 100_000);
+    fn rejects_output_the_enclave_does_not_control() {
+        let keys = km();
         let req = SignBtcRequest {
-            // input fine, but pays 0x99 which is not pinned
-            psbt_bytes: psbt(&[(script_for(0x11), 50_000)], &[(script_for(0x99), 10_000)]),
+            psbt_bytes: psbt_from_our_address(&keys, &[50_000], &[(foreign_address(), 10_000)]),
         };
-        let err = validate_btc_request(&req, &cfg).unwrap_err();
+        let err = validate_btc_request(&req, &cfg_with_cap(100_000), &keys).unwrap_err();
         assert!(
-            err.to_string().contains("non-allowlisted script_pubkey"),
+            err.to_string().contains("cannot prove it controls"),
             "got: {err}"
         );
     }
 
     #[test]
-    fn rejects_one_bad_output_among_allowed() {
-        let a = script_for(0x11);
-        let cfg = cfg_pinned(std::slice::from_ref(&a), 100_000);
+    fn rejects_one_foreign_output_among_self_paying_ones() {
+        let keys = km();
+        let ours = our_address(&keys);
         let req = SignBtcRequest {
-            psbt_bytes: psbt(
-                &[(script_for(0x11), 50_000)],
-                &[(a, 10_000), (script_for(0x99), 10_000)],
+            psbt_bytes: psbt_from_our_address(
+                &keys,
+                &[50_000],
+                &[(ours.spk, 10_000), (foreign_address(), 10_000)],
             ),
         };
-        let err = validate_btc_request(&req, &cfg).unwrap_err();
-        assert!(err.to_string().contains("non-allowlisted"), "got: {err}");
+        let err = validate_btc_request(&req, &cfg_with_cap(100_000), &keys).unwrap_err();
+        assert!(
+            err.to_string().contains("output 1"),
+            "the second output is the offending one; got: {err}"
+        );
+    }
+
+    /// A non-taproot output can never be proven ours: the enclave co-controls
+    /// taproot scripts only, and BIP-371 metadata cannot describe a P2WPKH.
+    #[test]
+    fn rejects_non_taproot_output() {
+        let keys = km();
+        let p2wpkh = ScriptBuf::new_p2wpkh(&WPubkeyHash::from_byte_array([0xCC; 20]));
+        let req = SignBtcRequest {
+            psbt_bytes: psbt_from_our_address(&keys, &[50_000], &[(p2wpkh, 10_000)]),
+        };
+        assert!(validate_btc_request(&req, &cfg_with_cap(100_000), &keys).is_err());
     }
 
     #[test]
     fn rejects_empty_output_set() {
-        let allowed = script_for(0x11);
-        let cfg = cfg_pinned(std::slice::from_ref(&allowed), 100_000);
+        let keys = km();
         let req = SignBtcRequest {
-            psbt_bytes: psbt(&[(script_for(0x11), 50_000)], &[]),
+            psbt_bytes: psbt_from_our_address(&keys, &[50_000], &[]),
         };
-        let err = validate_btc_request(&req, &cfg).unwrap_err();
+        let err = validate_btc_request(&req, &cfg_with_cap(100_000), &keys).unwrap_err();
         assert!(err.to_string().contains("no outputs"), "got: {err}");
     }
 
     #[test]
     fn rejects_input_value_over_cap() {
-        let allowed = script_for(0x11);
-        let cfg = cfg_pinned(std::slice::from_ref(&allowed), 100_000);
+        let keys = km();
+        let ours = our_address(&keys);
         let req = SignBtcRequest {
-            // input value 100_001 > cap; output allowlisted (so we reach the cap)
-            psbt_bytes: psbt(&[(script_for(0x11), 100_001)], &[(allowed, 50_000)]),
+            // input value 100_001 > cap; output pays back to us (so we reach the cap)
+            psbt_bytes: psbt_from_our_address(&keys, &[100_001], &[(ours.spk, 50_000)]),
         };
-        let err = validate_btc_request(&req, &cfg).unwrap_err();
+        let err = validate_btc_request(&req, &cfg_with_cap(100_000), &keys).unwrap_err();
         assert!(err.to_string().contains("exceeds pinned cap"), "got: {err}");
     }
 
     #[test]
     fn rejects_summed_input_value_over_cap() {
-        let allowed = script_for(0x11);
-        let cfg = cfg_pinned(std::slice::from_ref(&allowed), 100_000);
+        let keys = km();
+        let ours = our_address(&keys);
         let req = SignBtcRequest {
             // two inputs, 70_000 + 50_000 = 120_000 > cap
-            psbt_bytes: psbt(
-                &[(script_for(0x11), 70_000), (script_for(0x11), 50_000)],
-                &[(allowed, 100_000)],
-            ),
+            psbt_bytes: psbt_from_our_address(&keys, &[70_000, 50_000], &[(ours.spk, 100_000)]),
         };
-        let err = validate_btc_request(&req, &cfg).unwrap_err();
+        let err = validate_btc_request(&req, &cfg_with_cap(100_000), &keys).unwrap_err();
         assert!(err.to_string().contains("exceeds pinned cap"), "got: {err}");
     }
 
-    /// In a production build, an unpinned policy fails closed (after the input
-    /// guard passes). In default / test builds it falls back to the dev path.
+    /// The self-pay rule is structural: it needs no configuration, so an unset
+    /// cap does not excuse a foreign output in ANY build profile. This is the
+    /// behaviour the old allowlist could not have — with nothing pinned it
+    /// waved every destination through on non-production builds.
     #[test]
-    fn unpinned_policy_behaviour_matches_build_profile() {
-        let cfg = BridgeConfig::default(); // nothing pinned
+    fn foreign_output_is_rejected_even_with_no_cap_pinned() {
+        let keys = km();
         let req = SignBtcRequest {
-            psbt_bytes: psbt(&[(script_for(0x11), 1_000)], &[(script_for(0x99), 900)]),
+            psbt_bytes: psbt_from_our_address(&keys, &[1_000], &[(foreign_address(), 900)]),
         };
-        let result = validate_btc_request(&req, &cfg);
+        let err = validate_btc_request(&req, &BridgeConfig::default(), &keys).unwrap_err();
+        assert!(
+            err.to_string().contains("cannot prove it controls"),
+            "got: {err}"
+        );
+    }
+
+    /// With the cap unset, a production build fails closed on the amount
+    /// dimension; default / test builds fall back to the dev path (the
+    /// structural guards above having already passed).
+    #[test]
+    fn unpinned_cap_behaviour_matches_build_profile() {
+        let keys = km();
+        let ours = our_address(&keys);
+        let req = SignBtcRequest {
+            psbt_bytes: psbt_from_our_address(&keys, &[1_000], &[(ours.spk, 900)]),
+        };
+        let result = validate_btc_request(&req, &BridgeConfig::default(), &keys);
         #[cfg(all(feature = "rgb-validation", not(test)))]
         assert!(result.is_err());
         // Unit tests are always cfg(test): the dev fallback returns Ok.
         #[cfg(not(all(feature = "rgb-validation", not(test))))]
         assert!(result.is_ok());
-    }
-
-    /// A half-pin (allowlist but no cap, or vice-versa) is treated as
-    /// unconfigured — never "enforce one dimension, ignore the other".
-    #[test]
-    fn half_pin_is_treated_as_unconfigured() {
-        let allowed = script_for(0x11);
-        // allowlist set, cap == 0 (unset)
-        let cfg = cfg_pinned(std::slice::from_ref(&allowed), 0);
-        let req = SignBtcRequest {
-            psbt_bytes: psbt(&[(script_for(0x11), 50_000)], &[(allowed, 40_000)]),
-        };
-        // In test builds the unconfigured path returns Ok (dev fallback);
-        // the point of the test is that it does NOT enforce the partial pin.
-        assert!(validate_btc_request(&req, &cfg).is_ok());
     }
 }

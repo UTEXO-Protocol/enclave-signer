@@ -14,7 +14,7 @@ path = "src/main.rs"
 [dependencies]
 # Protobuf
 prost = "0.14.3"
-federated-signer-proto = { git = "ssh://git@github.com/UTEXO-Protocol/federated-signer-proto.git", rev = "f7a5f1f1d0f632fe470f5bc175d8d00599739aab", package = "federated-signer-proto" }
+federated-signer-proto = { git = "ssh://git@github.com/UTEXO-Protocol/federated-signer-proto.git", rev = "141d84a8f0afcdc0e7572701346fd492a1df5072", package = "federated-signer-proto" }
 # Crypto — ECDSA on secp256k1 (EVM address derivation + signing later)
 k256 = { version = "0.13", features = ["ecdsa"] }
 
@@ -23,6 +23,10 @@ bitcoin = { version = "0.32", features = ["std"] }
 
 # Crypto — BIP-39 mnemonic
 bip39 = { version = "2.1", features = ["zeroize"] }
+
+# Crypto — Ed25519 (Concordium governance account signatures). Key derived from
+# the seed via SLIP-0010 (HMAC-SHA512), signed over the 32-byte tx hash.
+ed25519-dalek = { version = "2", features = ["zeroize"] }
 
 # Secret handling (zeroize-on-drop, redacted Debug)
 secrecy = "0.10"
