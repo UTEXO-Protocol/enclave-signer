@@ -211,6 +211,7 @@ async fn e2e_attest_verify_fails_on_policy_mismatch() {
         ExpectedPolicy::Production {
             allow_vanilla_psbt: false,
             evm_source: EvmDataSource::RawRpc,
+            evm_checkpoint: None,
         },
     )
     .await

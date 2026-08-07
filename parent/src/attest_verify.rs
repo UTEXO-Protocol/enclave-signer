@@ -39,6 +39,12 @@ pub enum ExpectedPolicy {
     Production {
         allow_vanilla_psbt: bool,
         evm_source: EvmDataSource,
+        /// The Helios weak-subjectivity checkpoint the operator expects the
+        /// enclave to have pinned. `Some` (required) when `evm_source` is
+        /// [`EvmDataSource::HeliosVerified`]; folded into the reconstructed
+        /// commitment so an enclave that trust-rooted on a different checkpoint
+        /// fails verification (audit M-06).
+        evm_checkpoint: Option<[u8; 32]>,
     },
     /// Expect a dev/mock enclave (e.g. behind `--mock`). Never for production.
     Development,
@@ -179,6 +185,7 @@ fn expected_attested_policy(
         ExpectedPolicy::Production {
             allow_vanilla_psbt,
             evm_source,
+            evm_checkpoint,
         } => {
             let bridge_contract: [u8; 20] = resp
                 .bridge_contract
@@ -201,6 +208,7 @@ fn expected_attested_policy(
                 chain_id: resp.chain_id,
                 bridge_contract,
                 rgb_asset_id: resp.rgb_asset_id.clone(),
+                evm_checkpoint: *evm_checkpoint,
             })
         }
     }

@@ -116,6 +116,7 @@ impl ServerContext {
             &crate::policy::BuildContext::current(),
             &bridge_config,
             crate::policy::EvmDataSource::Disabled,
+            None,
         );
         Self {
             state,

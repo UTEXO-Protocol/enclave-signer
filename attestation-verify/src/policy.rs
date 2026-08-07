@@ -78,6 +78,13 @@ pub enum AttestedPolicy {
         chain_id: u64,
         bridge_contract: [u8; 20],
         rgb_asset_id: String,
+        /// The Helios weak-subjectivity checkpoint (beacon block root) the
+        /// enclave trust-roots EVM verification on. `Some` only for
+        /// [`EvmDataSource::HeliosVerified`]; pinned here so a verifier confirms
+        /// WHICH checkpoint the enclave synced from, not merely that it runs in
+        /// Helios mode (audit M-06). Two enclaves with identical PCRs but
+        /// different checkpoints therefore commit different `user_data`.
+        evm_checkpoint: Option<[u8; 32]>,
     },
     Development,
 }
@@ -91,6 +98,7 @@ impl AttestedPolicy {
     /// Production:  [0x01][allow_vanilla u8][attestation u8][evm_source u8]
     ///              [btc_source u8][chain_id u64 BE][bridge_contract 20]
     ///              [len(asset) u32 BE][asset bytes]
+    ///              [evm_checkpoint: 0x00 | 0x01 ++ 32 bytes]
     /// Development: [0x00]
     /// ```
     pub fn to_bytes(&self) -> Vec<u8> {
@@ -105,6 +113,7 @@ impl AttestedPolicy {
                 chain_id,
                 bridge_contract,
                 rgb_asset_id,
+                evm_checkpoint,
             } => {
                 out.push(0x01);
                 out.push(*allow_vanilla_psbt as u8);
@@ -115,6 +124,17 @@ impl AttestedPolicy {
                 out.extend_from_slice(bridge_contract);
                 out.extend_from_slice(&(rgb_asset_id.len() as u32).to_be_bytes());
                 out.extend_from_slice(rgb_asset_id.as_bytes());
+                // EVM verification checkpoint (M-06): a presence byte plus, when
+                // present, the 32-byte Helios beacon block root. Pins WHICH
+                // checkpoint, so an attacker-chosen trust root is visible to a
+                // verifier instead of hiding behind an identical mode byte.
+                match evm_checkpoint {
+                    Some(cp) => {
+                        out.push(0x01);
+                        out.extend_from_slice(cp);
+                    }
+                    None => out.push(0x00),
+                }
             }
             AttestedPolicy::Development => {
                 out.push(0x00);
@@ -144,6 +164,7 @@ mod tests {
             chain_id,
             bridge_contract: [contract; 20],
             rgb_asset_id: asset.into(),
+            evm_checkpoint: None,
         }
     }
 
@@ -181,6 +202,34 @@ mod tests {
                 "posture change must alter the commitment"
             );
         }
+    }
+
+    #[test]
+    fn evm_checkpoint_presence_and_value_change_the_bytes() {
+        // No checkpoint vs a pinned checkpoint must differ (M-06): a verifier
+        // expecting a specific trust root rejects one that pins none.
+        let none = base();
+        let mut with_cp = base();
+        if let AttestedPolicy::Production {
+            ref mut evm_checkpoint,
+            ..
+        } = with_cp
+        {
+            *evm_checkpoint = Some([0xAB; 32]);
+        }
+        assert_ne!(none.to_bytes(), with_cp.to_bytes());
+
+        // Two different checkpoints must also differ — the value is bound, not
+        // just its presence.
+        let mut other_cp = base();
+        if let AttestedPolicy::Production {
+            ref mut evm_checkpoint,
+            ..
+        } = other_cp
+        {
+            *evm_checkpoint = Some([0xCD; 32]);
+        }
+        assert_ne!(with_cp.to_bytes(), other_cp.to_bytes());
     }
 
     #[test]
