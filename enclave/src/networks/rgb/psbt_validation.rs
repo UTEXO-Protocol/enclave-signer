@@ -402,6 +402,75 @@ mod tests {
     }
 
     // =========================================================================
+    // Operation dedup end-to-end — `psbt_operation_key` + the soft replay guard.
+    // Encodes the M-02 properties the EVM->RGB path relies on the guard for.
+    // =========================================================================
+    mod operation_dedup {
+        use crate::error::EnclaveError;
+        use crate::networks::rgb::psbt_validation::psbt_operation_key;
+        use crate::state::NonceReplayGuard;
+        use std::time::Duration;
+
+        // A representative EVM->RGB operation key. Mirrors the server call site:
+        // pinned chain/contract, the request tx hash, the canonical on-chain
+        // `funds_in_operation_id`, and the RGB asset id.
+        fn op_key(tx: &[u8], funds_in_operation_id: &[u8]) -> [u8; 32] {
+            psbt_operation_key(1, &[0x11; 20], tx, funds_in_operation_id, "rgb:asset")
+        }
+
+        fn guard() -> NonceReplayGuard {
+            NonceReplayGuard::with_capacity(1000, Duration::from_secs(24 * 60 * 60))
+        }
+
+        #[test]
+        fn same_operation_is_rejected_within_one_instance() {
+            // A deposit signed once is refused on a same-op resubmission while
+            // the record is live (honest-listener-retry / naive-replay case).
+            let g = guard();
+            let k = op_key(&[0xAA; 32], &[0x07; 32]);
+            g.reserve(k)
+                .expect("first signing reserves the op")
+                .commit();
+            assert!(
+                matches!(g.reserve(k), Err(EnclaveError::NonceReplay)),
+                "the same operation must be refused as a replay"
+            );
+        }
+
+        #[test]
+        fn a_different_deposit_is_not_a_false_replay() {
+            // A different canonical operationId is a different deposit and signs.
+            let g = guard();
+            g.reserve(op_key(&[0xAA; 32], &[0x07; 32]))
+                .expect("first")
+                .commit();
+            g.reserve(op_key(&[0xAA; 32], &[0x08; 32]))
+                .expect("a different funds_in_operation_id is a different op")
+                .commit();
+        }
+
+        #[test]
+        fn restart_or_sibling_instance_admits_the_same_operation_again() {
+            // The guard is in-memory and per-instance: a fresh instance (an
+            // enclave restart, or a sibling enclave the host routed the duplicate
+            // to) has never seen the record and admits the same op again. This
+            // documents WHY the durable cross-instance exactly-once anchor lives
+            // on-chain (consumedBurnIds / fundsInRecords), not in this soft guard.
+            let k = op_key(&[0xAA; 32], &[0x07; 32]);
+            let first = guard();
+            first.reserve(k).expect("instance A reserves").commit();
+            assert!(matches!(first.reserve(k), Err(EnclaveError::NonceReplay)));
+
+            let second = guard(); // restart / sibling enclave
+            assert!(
+                second.reserve(k).is_ok(),
+                "a fresh instance does not share the soft guard — on-chain state \
+                 is the durable anchor"
+            );
+        }
+    }
+
+    // =========================================================================
     // send-RGB anchoring — `validate_psbt_anchors_transition`
     // =========================================================================
     #[cfg(feature = "rgb-validation")]
