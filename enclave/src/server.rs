@@ -352,44 +352,51 @@ fn handle_sign(ctx: &ServerContext, req: SignRequest) -> Result<EnclaveResponse>
     }
 
     // Soft operation-uniqueness guard (audit W-02 / #84). In EVM -> RGB
-    // bridge mode, record the source/destination operation tuple and reject a
-    // same-op resubmission inside the TTL window. This is defense-in-depth
-    // only: the guard is in-memory, per-instance, and volatile across restart.
+    // bridge mode, reject a same-op resubmission inside the TTL window. This is
+    // defense-in-depth only: the guard is in-memory, per-instance, and volatile
+    // across restart. RESERVE the key before signing (so a concurrent duplicate
+    // is still rejected up front) and commit it only after signing succeeds; a
+    // signing failure drops the reservation and rolls the key back, so a
+    // transient error does not self-block a legitimate retry (audit M-02).
     #[cfg(not(feature = "dev-mode"))]
-    if let (SourceNetwork::EvmSource(source), DestinationNetwork::RgbDestination(destination)) =
-        (source_ref, destination_ref)
+    let _op_reservation = if let (
+        SourceNetwork::EvmSource(source),
+        DestinationNetwork::RgbDestination(destination),
+    ) = (source_ref, destination_ref)
     {
         let op_key = crate::networks::rgb::psbt_validation::psbt_operation_key(
             ctx.bridge_config.chain_id,
             &ctx.bridge_config.bridge_contract,
             &source.tx_hash,
-            destination.operation_idx,
+            &source.funds_in_operation_id,
             &destination.asset_id,
         );
-        match ctx.state.op_replay_guard.check_and_record(op_key) {
-            Ok(()) => {}
+        match ctx.state.op_replay_guard.reserve(op_key) {
+            Ok(reservation) => Some(reservation),
             Err(EnclaveError::NonceReplay) => {
                 tracing::warn!(
-                    operation_idx = destination.operation_idx,
+                    funds_in_operation_id = %hex::encode(&source.funds_in_operation_id),
                     evm_tx_hash = %hex::encode(&source.tx_hash),
                     "rejecting duplicate bridge PSBT operation (soft replay guard, #84)"
                 );
                 return Err(EnclaveError::CrossCheck(
                     "duplicate bridge operation: this (chain, contract, evm_tx_hash, \
-                     operation_idx, rgb_asset_id) was already signed recently — refusing to \
-                     sign a replay (soft in-memory guard; durable guard is on-chain)"
+                     funds_in_operation_id, rgb_asset_id) was already signed recently — refusing \
+                     to sign a replay (soft in-memory guard; durable guard is on-chain)"
                         .into(),
                 ));
             }
             Err(e) => return Err(e),
         }
-    }
+    } else {
+        None
+    };
 
     let destination = req.destination_network.ok_or_else(|| {
         EnclaveError::InvalidRequest("sign request has no destination_network".into())
     })?;
 
-    match destination {
+    let result = match destination {
         DestinationNetwork::EvmDestination(destination) => {
             // RGB->EVM `fundsOut` binding: with the consignment the source
             // validation captured, bind the calldata the enclave is about to
@@ -418,7 +425,19 @@ fn handle_sign(ctx: &ServerContext, req: SignRequest) -> Result<EnclaveResponse>
             handle_sign_evm(ctx, destination)
         }
         DestinationNetwork::RgbDestination(destination) => handle_sign_psbt(ctx, destination),
+    };
+
+    // Commit the soft-guard reservation only once signing has succeeded. On
+    // error `_op_reservation` drops here un-committed and rolls the key back, so
+    // a transient signing failure does not consume it (audit M-02).
+    #[cfg(not(feature = "dev-mode"))]
+    if result.is_ok() {
+        if let Some(reservation) = _op_reservation {
+            reservation.commit();
+        }
     }
+
+    result
 }
 
 /// Bind an RGB->EVM `fundsOut` calldata to the validated consignment before the

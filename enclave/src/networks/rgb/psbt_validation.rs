@@ -7,9 +7,14 @@ use crate::error::{EnclaveError, Result};
 /// Derive the soft-dedup key for an EVM→RGB bridge PSBT operation.
 ///
 /// 32-byte keccak over `(chain_id, bridge_contract, evm_tx_hash,
-/// operation_idx, rgb_asset_id)`. `chain_id` and `bridge_contract` come from
-/// the enclave's **pinned** [`crate::config::BridgeConfig`] (not the request),
-/// so they can't be varied per-call. The variable-length fields are
+/// funds_in_operation_id, rgb_asset_id)`. `chain_id` and `bridge_contract` come
+/// from the enclave's **pinned** [`crate::config::BridgeConfig`] (not the
+/// request), so they can't be varied per-call. `funds_in_operation_id` is the
+/// canonical on-chain `BridgeFundsIn.operationId` (bytes32), already verified
+/// against the deposit log by
+/// [`crate::networks::evm::evm_event::verify_funds_in_event`] — so the key is
+/// derived from an authentic, canonical identifier rather than the
+/// host-supplied `operation_idx` (audit M-02). The variable-length fields are
 /// length-prefixed and a domain tag is mixed in so two distinct tuples can't
 /// hash to the same key by concatenation ambiguity.
 ///
@@ -20,7 +25,7 @@ pub fn psbt_operation_key(
     chain_id: u64,
     bridge_contract: &[u8; 20],
     evm_tx_hash: &[u8],
-    operation_idx: u64,
+    funds_in_operation_id: &[u8],
     rgb_asset_id: &str,
 ) -> [u8; 32] {
     use sha3::{Digest, Keccak256};
@@ -31,7 +36,8 @@ pub fn psbt_operation_key(
     h.update(bridge_contract);
     h.update((evm_tx_hash.len() as u64).to_be_bytes());
     h.update(evm_tx_hash);
-    h.update(operation_idx.to_be_bytes());
+    h.update((funds_in_operation_id.len() as u64).to_be_bytes());
+    h.update(funds_in_operation_id);
     h.update((rgb_asset_id.len() as u64).to_be_bytes());
     h.update(rgb_asset_id.as_bytes());
     h.finalize().into()
@@ -349,49 +355,49 @@ mod tests {
 
     #[test]
     fn op_key_is_deterministic() {
-        let a = psbt_operation_key(1, &[0x11; 20], &[0xAA; 32], 7, "rgb:asset");
-        let b = psbt_operation_key(1, &[0x11; 20], &[0xAA; 32], 7, "rgb:asset");
+        let a = psbt_operation_key(1, &[0x11; 20], &[0xAA; 32], &[0x07; 32], "rgb:asset");
+        let b = psbt_operation_key(1, &[0x11; 20], &[0xAA; 32], &[0x07; 32], "rgb:asset");
         assert_eq!(a, b);
     }
 
     #[test]
     fn op_key_varies_with_every_field() {
-        let base = psbt_operation_key(1, &[0x11; 20], &[0xAA; 32], 7, "rgb:asset");
+        let base = psbt_operation_key(1, &[0x11; 20], &[0xAA; 32], &[0x07; 32], "rgb:asset");
         assert_ne!(
             base,
-            psbt_operation_key(2, &[0x11; 20], &[0xAA; 32], 7, "rgb:asset"),
+            psbt_operation_key(2, &[0x11; 20], &[0xAA; 32], &[0x07; 32], "rgb:asset"),
             "chain_id must change the key"
         );
         assert_ne!(
             base,
-            psbt_operation_key(1, &[0x22; 20], &[0xAA; 32], 7, "rgb:asset"),
+            psbt_operation_key(1, &[0x22; 20], &[0xAA; 32], &[0x07; 32], "rgb:asset"),
             "bridge_contract must change the key"
         );
         assert_ne!(
             base,
-            psbt_operation_key(1, &[0x11; 20], &[0xBB; 32], 7, "rgb:asset"),
+            psbt_operation_key(1, &[0x11; 20], &[0xBB; 32], &[0x07; 32], "rgb:asset"),
             "evm_tx_hash must change the key"
         );
         assert_ne!(
             base,
-            psbt_operation_key(1, &[0x11; 20], &[0xAA; 32], 8, "rgb:asset"),
-            "operation_idx must change the key"
+            psbt_operation_key(1, &[0x11; 20], &[0xAA; 32], &[0x08; 32], "rgb:asset"),
+            "funds_in_operation_id must change the key"
         );
         assert_ne!(
             base,
-            psbt_operation_key(1, &[0x11; 20], &[0xAA; 32], 7, "rgb:other"),
+            psbt_operation_key(1, &[0x11; 20], &[0xAA; 32], &[0x07; 32], "rgb:other"),
             "rgb_asset_id must change the key"
         );
     }
 
     #[test]
     fn op_key_length_prefix_blocks_concatenation_collision() {
-        // Without length-prefixing the variable fields, moving a byte from the
-        // end of evm_tx_hash to the front of rgb_asset_id would collide. The
-        // prefix must keep these distinct. evm_tx_hash is fixed at 32 bytes in
-        // practice, but the key fn must not rely on that for separation.
-        let k1 = psbt_operation_key(1, &[0x11; 20], b"AB", 0, "C");
-        let k2 = psbt_operation_key(1, &[0x11; 20], b"A", 0, "BC");
+        // Without length-prefixing the variable fields, moving a byte across a
+        // field boundary would collide. The prefix must keep these distinct.
+        // evm_tx_hash / operationId are fixed at 32 bytes in practice, but the
+        // key fn must not rely on that for separation.
+        let k1 = psbt_operation_key(1, &[0x11; 20], b"AB", b"X", "C");
+        let k2 = psbt_operation_key(1, &[0x11; 20], b"A", b"X", "BC");
         assert_ne!(k1, k2);
     }
 
