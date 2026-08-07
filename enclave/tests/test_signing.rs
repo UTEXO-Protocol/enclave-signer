@@ -393,7 +393,11 @@ fn btc_psbt_to_ours(from: &OurAddress, input_sats: u64, outputs: &[(&OurAddress,
 }
 
 /// Build a minimal 2-of-3 multisig PSBT for testing with a known pubkey.
-#[cfg(all(feature = "allow-seed-import", not(feature = "rgb-validation")))]
+#[cfg(all(
+    feature = "allow-seed-import",
+    feature = "dev-mode",
+    not(feature = "rgb-validation")
+))]
 fn build_test_multisig_psbt(our_pubkey: &bitcoin::PublicKey) -> Vec<u8> {
     use bitcoin::blockdata::opcodes::all::*;
     use bitcoin::blockdata::script::Builder as ScriptBuilder;
@@ -453,7 +457,11 @@ fn build_test_multisig_psbt(our_pubkey: &bitcoin::PublicKey) -> Vec<u8> {
 }
 
 /// Build a valid enriched RGB-destination SignRequest for testing.
-#[cfg(all(feature = "allow-seed-import", not(feature = "rgb-validation")))]
+#[cfg(all(
+    feature = "allow-seed-import",
+    feature = "dev-mode",
+    not(feature = "rgb-validation")
+))]
 fn valid_sign_psbt_request(psbt_bytes: Vec<u8>) -> SignRequest {
     sign_psbt_request(
         vec![0xCC; 32],
@@ -626,7 +634,11 @@ fn test_sign_evm_rejects_funds_out_without_validator() {
 /// cross-check + EVM signing) with the real fundsOut selector — the layer the
 /// existing `route_proofs_accept_ccd_source_to_evm_destination` unit test does
 /// not reach. Mirrors `valid_sign_evm_request` but with a `CcdSource`.
-#[cfg(all(feature = "rgb-validation", not(feature = "dev-mode")))]
+#[cfg(all(
+    feature = "rgb-validation",
+    feature = "ccd",
+    not(feature = "dev-mode")
+))]
 #[test]
 fn test_sign_evm_accepts_ccd_source_funds_out() {
     let port = common::start_test_server_with_config(|_| {}, pinned_bridge_config());
@@ -784,8 +796,17 @@ fn test_no_spv_build_refuses_funds_out_even_without_merkle_proofs() {
 // PSBT signing tests
 // =============================================================================
 
+// A successful bridge (EVM -> RGB) PSBT roundtrip needs the M-06 FundsIn
+// cross-check bypassed. Without `rgb-validation` the only way to sign one is
+// `dev-mode` (which skips the cross-checks); `evm-rpc` — the production route —
+// itself implies `rgb-validation`, so it cannot combine with `not(rgb-validation)`
+// here. dev-mode is compile-guarded out of release builds (see lib.rs).
 #[test]
-#[cfg(all(feature = "allow-seed-import", not(feature = "rgb-validation")))]
+#[cfg(all(
+    feature = "allow-seed-import",
+    feature = "dev-mode",
+    not(feature = "rgb-validation")
+))]
 fn test_sign_psbt_roundtrip() {
     let port = common::start_test_server();
 

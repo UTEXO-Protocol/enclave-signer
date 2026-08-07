@@ -39,10 +39,15 @@ pub struct ServerContext {
     /// thread today, but we want the type to stay correct if that ever
     /// changes — and `Mutex` over `RefCell` so a future move to
     /// multi-threaded handling needs no plumbing changes.
+    ///
+    /// SPV-only: the RGB/BTC stack (`spv`) owns the header chain. A `ccd`-only
+    /// build carries no chain and rejects `SubmitHeaders`/`GetLastSavedBlock`.
+    #[cfg(feature = "spv")]
     pub header_chain: std::sync::Mutex<crate::networks::rgb::spv::HeaderChain>,
     /// Cumulative rate limit for `SubmitHeaders` (#86). The per-call cap lives
     /// in `HeaderChain::submit_headers`; this bounds the *aggregate* rate
     /// across calls so a flood of small batches can't keep the enclave busy.
+    #[cfg(feature = "spv")]
     pub submit_rate_limiter: std::sync::Mutex<SubmitRateLimiter>,
 }
 
@@ -51,6 +56,10 @@ pub struct ServerContext {
 /// not) within [`RATE_LIMIT_WINDOW`]. Generous enough for a cold-start sync
 /// from the checkpoint, tight enough that a sustained flood of replayed or
 /// garbage headers can't occupy the enclave indefinitely.
+///
+/// SPV-only: gated with the RGB/BTC stack (`spv`). A `ccd`-only build has no
+/// header chain to rate-limit.
+#[cfg(feature = "spv")]
 #[derive(Default)]
 pub struct SubmitRateLimiter {
     window_start: Option<std::time::SystemTime>,
@@ -59,10 +68,13 @@ pub struct SubmitRateLimiter {
 
 /// Max headers admitted per [`RATE_LIMIT_WINDOW`]. A cold-start sync from the
 /// mainnet checkpoint to the tip is a few thousand blocks, well inside this.
+#[cfg(feature = "spv")]
 const MAX_HEADERS_PER_RATE_WINDOW: u64 = 100_000;
 /// Length of the rate-limit window.
+#[cfg(feature = "spv")]
 const RATE_LIMIT_WINDOW: std::time::Duration = std::time::Duration::from_secs(60);
 
+#[cfg(feature = "spv")]
 impl SubmitRateLimiter {
     /// Account for `count` submitted headers at time `now`. Returns `Err` if
     /// the rolling-window budget would be exceeded. The window resets once
@@ -96,6 +108,7 @@ impl ServerContext {
     /// Construct a `ServerContext` from the always-present fields, hiding
     /// feature-gated fields like `rgb_validator` so external callers
     /// (e.g. the parent's E2E tests) don't need to mirror our cfg flags.
+    #[cfg(feature = "spv")]
     pub fn new(
         state: EnclaveState,
         bridge_config: BridgeConfig,
@@ -112,6 +125,19 @@ impl ServerContext {
             evm_rpc_config: crate::config::EvmRpcConfig::default(),
             header_chain,
             submit_rate_limiter: std::sync::Mutex::new(SubmitRateLimiter::default()),
+        }
+    }
+
+    /// `ccd`-only variant: no SPV header chain to pass in.
+    #[cfg(not(feature = "spv"))]
+    pub fn new(state: EnclaveState, bridge_config: BridgeConfig) -> Self {
+        Self {
+            state,
+            bridge_config,
+            #[cfg(feature = "evm-rpc")]
+            evm_rpc_client: None,
+            #[cfg(feature = "evm-rpc")]
+            evm_rpc_config: crate::config::EvmRpcConfig::default(),
         }
     }
 }
@@ -132,6 +158,18 @@ fn process_connection(mut stream: impl Read + Write, ctx: &ServerContext) -> Res
     framing::write_message(&mut stream, &response)?;
     tracing::debug!("response written");
     Ok(())
+}
+
+/// Error for a request whose owning network was not compiled into this build.
+/// Single-network EIFs (RGB-only / CCD-only) return this for requests that
+/// belong to the other network, so the separation is observable to callers
+/// rather than a silent no-op.
+#[allow(dead_code)]
+fn unsupported_build(network: &str) -> EnclaveError {
+    EnclaveError::InvalidRequest(format!(
+        "enclave was not built with `{network}` support: this binary does not handle {network} \
+         requests (rebuild with `--features {network}`)"
+    ))
 }
 
 fn dispatch(request: EnclaveRequest, ctx: &ServerContext) -> EnclaveResponse {
@@ -166,7 +204,15 @@ fn dispatch(request: EnclaveRequest, ctx: &ServerContext) -> EnclaveResponse {
         }
         Some(Request::SignCcd(req)) => {
             tracing::info!("request: SignCcd");
-            handle_sign_ccd(&ctx.state, req)
+            #[cfg(feature = "ccd")]
+            {
+                handle_sign_ccd(&ctx.state, req)
+            }
+            #[cfg(not(feature = "ccd"))]
+            {
+                let _ = req;
+                Err(unsupported_build("ccd"))
+            }
         }
         Some(Request::ProxyFederation(req)) => {
             tracing::info!("request: ProxyFederation");
@@ -190,11 +236,27 @@ fn dispatch(request: EnclaveRequest, ctx: &ServerContext) -> EnclaveResponse {
                 start_height = req.start_height,
                 "request: SubmitHeaders"
             );
-            handle_submit_headers(ctx, req)
+            #[cfg(feature = "spv")]
+            {
+                handle_submit_headers(ctx, req)
+            }
+            #[cfg(not(feature = "spv"))]
+            {
+                let _ = req;
+                Err(unsupported_build("rgb"))
+            }
         }
         Some(Request::GetLastSavedBlock(req)) => {
             tracing::info!("request: GetLastSavedBlock");
-            handle_get_last_saved_block(ctx, req)
+            #[cfg(feature = "spv")]
+            {
+                handle_get_last_saved_block(ctx, req)
+            }
+            #[cfg(not(feature = "spv"))]
+            {
+                let _ = req;
+                Err(unsupported_build("rgb"))
+            }
         }
         Some(Request::GetAttestedPublicKey(req)) => {
             tracing::info!("request: GetAttestedPublicKey");
@@ -238,14 +300,21 @@ fn handle_sign(ctx: &ServerContext, req: SignRequest) -> Result<EnclaveResponse>
         bridge_config: &ctx.bridge_config,
         #[cfg(feature = "rgb-validation")]
         rgb_validator: ctx.rgb_validator.as_ref(),
+        #[cfg(feature = "spv")]
         header_chain: &ctx.header_chain,
     };
     let source_validated = validate_source(req.amount, source_ref, &validation_ctx)?;
 
+    // Commission per compiled source network. A CCD source is only present on a
+    // `ccd` build; `validate_source` already rejected it otherwise, but the arm
+    // is still required for the match to type-check.
     let source_commission = match source_ref {
         SourceNetwork::EvmSource(source) => source.commission,
         SourceNetwork::RgbSource(source) => source.commission,
+        #[cfg(feature = "ccd")]
         SourceNetwork::CcdSource(source) => source.commission,
+        #[allow(unreachable_patterns)]
+        _ => return Err(unsupported_build("ccd")),
     };
     let destination_proof = validate_destination(
         req.amount,
@@ -862,6 +931,7 @@ fn handle_sign_raw_digest(
 /// Ed25519 key. The listener has already re-derived the hash and verified the
 /// transaction structure/amounts; the enclave signs the hash directly. Returns
 /// a 64-byte Ed25519 signature.
+#[cfg(feature = "ccd")]
 fn handle_sign_ccd(state: &EnclaveState, req: SignCcdRequest) -> Result<EnclaveResponse> {
     if req.hash.len() != 32 {
         return Err(EnclaveError::InvalidRequest(format!(
@@ -905,6 +975,7 @@ fn handle_proxy_federation(_req: ProxyFederationRequest) -> Result<EnclaveRespon
 // the safe thing is to clear the poison and continue rather than wedge
 // the entire enclave — the chain is in a consistent state because all
 // mutations are atomic.
+#[cfg(feature = "spv")]
 fn handle_submit_headers(
     ctx: &ServerContext,
     req: SubmitHeadersRequest,
@@ -939,6 +1010,7 @@ fn handle_submit_headers(
     })
 }
 
+#[cfg(feature = "spv")]
 fn handle_get_last_saved_block(
     ctx: &ServerContext,
     _req: GetLastSavedBlockRequest,
@@ -1201,7 +1273,9 @@ fn handle_set_clone(state: &EnclaveState, req: SetCloneRequest) -> Result<Enclav
     })
 }
 
-#[cfg(test)]
+// These tests cover only the SPV `SubmitRateLimiter`, so they are gated with
+// the RGB/BTC stack (`spv`).
+#[cfg(all(test, feature = "spv"))]
 mod tests {
     use super::*;
     use std::time::{Duration, SystemTime};

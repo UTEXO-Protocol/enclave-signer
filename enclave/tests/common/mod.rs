@@ -4,6 +4,7 @@ use std::thread;
 
 use utexo_bridge_enclave::config::BridgeConfig;
 use utexo_bridge_enclave::framing;
+#[cfg(feature = "spv")]
 use utexo_bridge_enclave::networks::rgb::spv::{checkpoint_for, HeaderChain, Network};
 use utexo_bridge_enclave::proto::*;
 use utexo_bridge_enclave::server::{self, ServerContext};
@@ -42,7 +43,8 @@ pub fn start_test_server_with_config(
     configure(&state);
     // Tests run with the placeholder Regtest checkpoint. The header chain
     // is initialised but empty; tests that don't push headers leave it
-    // alone, tests that do start from `checkpoint.height` (= 0).
+    // alone, tests that do start from `checkpoint.height` (= 0). SPV-only.
+    #[cfg(feature = "spv")]
     let header_chain = std::sync::Mutex::new(HeaderChain::new(
         Network::Regtest,
         checkpoint_for(Network::Regtest),
@@ -56,7 +58,9 @@ pub fn start_test_server_with_config(
         evm_rpc_client: None,
         #[cfg(feature = "evm-rpc")]
         evm_rpc_config: utexo_bridge_enclave::config::EvmRpcConfig::default(),
+        #[cfg(feature = "spv")]
         header_chain,
+        #[cfg(feature = "spv")]
         submit_rate_limiter: std::sync::Mutex::new(server::SubmitRateLimiter::default()),
     });
 

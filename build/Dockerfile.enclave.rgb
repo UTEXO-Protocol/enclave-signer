@@ -1,15 +1,16 @@
 # syntax=docker/dockerfile:1.4
-# Combined enclave image (vsock + rgb + ccd + evm-rpc) — handles both the RGB/BTC
-# and Concordium bridges in one binary. For a lean single-network EIF, build
-# Dockerfile.enclave.rgb (RGB only) or Dockerfile.enclave.ccd (Concordium only).
+# RGB-only enclave image (vsock + rgb + evm-rpc) — handles the RGB/BTC bridge
+# only; Concordium (SignCcd / CcdSource) is not compiled in and its requests are
+# refused. For the Concordium bridge use Dockerfile.enclave.ccd; for both in one
+# binary use Dockerfile.enclave.
 # Usage:
 #   DOCKER_BUILDKIT=1 docker build --ssh default \
-#     -f build/Dockerfile.enclave -t utexo-bridge-enclave .
+#     -f build/Dockerfile.enclave.rgb -t utexo-bridge-enclave-rgb .
 #
 # `--ssh default` forwards the host's SSH agent into the build so Cargo can
 # fetch the pinned generated `federated-signer-proto` Rust crate from GitHub
 # over SSH. The same SSH mount is also used for the private `rgb-consignment`
-# git dependency pulled by the `rgb-validation`/`spv` features.
+# git dependency pulled by the `rgb`/`spv`/`rgb-validation` features.
 
 FROM rust:1.96-slim AS builder
 
@@ -32,19 +33,14 @@ WORKDIR /build
 COPY . /build/
 
 WORKDIR /build/enclave
-# `spv` implies `rgb-validation`; listing both explicitly so the feature
-# set is visible at a glance.
+# `rgb` implies `spv` + `rgb-validation`. `--no-default-features` drops `ccd` so
+# this binary is RGB-only. `evm-rpc` adds in-enclave FundsIn verification (#60),
+# pulling the alloy + tokio subtree; requires a second host vsock-proxy
+# (EVM_RPC_VSOCK_PORT, default 8002).
 #
-# `--mount=type=ssh` exposes the SSH_AUTH_SOCK forwarded by `--ssh default`
-# only for the duration of this RUN, so no credentials end up in the
-# image layers.
-# `evm-rpc` adds in-enclave FundsIn event verification (#60); it pulls the
-# alloy + tokio subtree, which grows the binary and therefore PCR0 - pinned via
-# Cargo.lock for reproducibility. Requires a second host vsock-proxy for the
-# EVM RPC (EVM_RPC_VSOCK_PORT, default 8002).
-# `ccd` adds Concordium governance signing (SignCcd + CcdSource routes). The
-# umbrella `rgb` feature pulls in `spv`/`rgb-validation`.
-RUN --mount=type=ssh cargo build --release --features vsock,rgb,ccd,evm-rpc
+# `--mount=type=ssh` exposes the forwarded SSH_AUTH_SOCK only for this RUN, so
+# no credentials end up in the image layers.
+RUN --mount=type=ssh cargo build --release --no-default-features --features vsock,rgb,evm-rpc
 
 # --- Runtime ---
 FROM public.ecr.aws/amazonlinux/amazonlinux:2023-minimal AS runtime

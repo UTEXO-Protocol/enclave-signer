@@ -115,11 +115,28 @@ nix = { version = "0.31.2", features = ["socket"] }
 aws-nitro-enclaves-nsm-api = "0.4"
 
 [features]
-# Production posture: a plain `cargo build` produces the SPV path (which pulls
-# in `rgb-validation`), so the default binary is the one shipped in the EIF. A
-# minimal build is still available via `--no-default-features` and is covered
-# explicitly in CI.
-default = ["spv"]
+# Production posture: a plain `cargo build` produces the combined bridge
+# (rgb + ccd), which is the all-in-one binary. Single-network EIFs are built
+# with `--no-default-features --features vsock,rgb,evm-rpc` (RGB) or
+# `--no-default-features --features vsock,ccd` (Concordium); both, and the
+# minimal `--no-default-features` build, are covered in CI.
+default = ["rgb", "ccd"]
+
+# Network-selection umbrellas. Additive: enable one for a lean single-network
+# EIF, or both for the combined build. They gate only the request-handling
+# surface (dispatch arms, validators, SPV plumbing) - key derivation and the
+# attestation pubkey bundle stay uniform across every build so the parent
+# verifier is unaffected.
+#
+# `rgb` = the RGB/BTC bridge stack. `spv` already implies `rgb-validation`, so
+# this pulls the heavy rgb-ops / rgb-consignment / rgb-schemas deps + the SPV
+# header chain. `evm-rpc` (EVM-source FundsIn verification) is a separate opt-in
+# layered on top.
+rgb = ["spv"]
+# `ccd` = the Concordium bridge stack. Light: no extra deps (ed25519 is always
+# on to keep key derivation / the attestation bundle uniform across builds).
+ccd = []
+
 vsock = []
 # DANGER: allows importing a raw seed over the wire. Testing only.
 allow-seed-import = []

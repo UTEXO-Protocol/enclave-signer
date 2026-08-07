@@ -85,6 +85,27 @@ jobs:
       - name: Test (--features spv)
         run: cargo test -p utexo-bridge-enclave --features spv
 
+      # RGB-only single-network EIF profile: rgb (=spv+rgb-validation) + evm-rpc,
+      # `ccd` dropped via --no-default-features. Mirrors Dockerfile.enclave.rgb;
+      # CCD requests (SignCcd / CcdSource) must be refused here.
+      - name: Build (rgb-only)
+        run: cargo build -p utexo-bridge-enclave --no-default-features --features vsock,rgb,evm-rpc
+      - name: Clippy (rgb-only)
+        run: cargo clippy -p utexo-bridge-enclave --no-default-features --features vsock,rgb,evm-rpc --all-targets -- -D warnings
+      - name: Test (rgb-only)
+        run: cargo test -p utexo-bridge-enclave --no-default-features --features rgb,evm-rpc,mock-attestation,allow-seed-import
+
+      # CCD-only single-network EIF profile: ccd + shared EVM signing, no RGB
+      # stack (no rgb-ops/rgb-consignment/rgb-schemas/spv). Mirrors
+      # Dockerfile.enclave.ccd; RGB requests must be refused. The SignCcd
+      # integration suite (test_sign_ccd.rs) is gated on ccd+allow-seed-import.
+      - name: Build (ccd-only)
+        run: cargo build -p utexo-bridge-enclave --no-default-features --features vsock,ccd
+      - name: Clippy (ccd-only)
+        run: cargo clippy -p utexo-bridge-enclave --no-default-features --features vsock,ccd,mock-attestation,allow-seed-import --all-targets -- -D warnings
+      - name: Test (ccd-only)
+        run: cargo test -p utexo-bridge-enclave --no-default-features --features ccd,mock-attestation,allow-seed-import
+
       # Minimal build: no features at all (`--no-default-features` drops the
       # now-default `spv`). Keeps the no-SPV path compiling and exercises the
       # M-01 / #61 guard that a no-spv build refuses to sign `fundsOut`

@@ -6,6 +6,7 @@
 use std::net::TcpListener;
 
 use utexo_bridge_enclave::config::BridgeConfig;
+#[cfg(feature = "spv")]
 use utexo_bridge_enclave::networks::rgb::spv::{
     resolve_checkpoint, CheckpointSource, HeaderChain, Network, CHECKPOINT_ENV,
 };
@@ -97,16 +98,22 @@ fn main() {
     // trusted input. See `vsock_forwarder`'s module-level TRUST BOUNDARY note.
     #[cfg(all(feature = "vsock", target_os = "linux"))]
     {
-        let vsock_port: u32 = std::env::var("ESPLORA_VSOCK_PORT")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(8001);
-        tracing::info!(
-            vsock_port,
-            "starting Esplora vsock forwarder (host must run: vsock-proxy {vsock_port} <esplora-host> <esplora-port>)"
-        );
-        if let Err(e) = utexo_bridge_enclave::vsock_forwarder::start_forwarder(3443, vsock_port) {
-            tracing::error!("failed to start vsock forwarder: {e}");
+        // Esplora egress is only needed by the RGB/BTC stack (consignment
+        // resolver + SPV). A `ccd`-only build starts no Esplora forwarder.
+        #[cfg(feature = "spv")]
+        {
+            let vsock_port: u32 = std::env::var("ESPLORA_VSOCK_PORT")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(8001);
+            tracing::info!(
+                vsock_port,
+                "starting Esplora vsock forwarder (host must run: vsock-proxy {vsock_port} <esplora-host> <esplora-port>)"
+            );
+            if let Err(e) = utexo_bridge_enclave::vsock_forwarder::start_forwarder(3443, vsock_port)
+            {
+                tracing::error!("failed to start vsock forwarder: {e}");
+            }
         }
 
         // Second forwarder for the EVM JSON-RPC used by in-enclave FundsIn
@@ -192,55 +199,59 @@ fn main() {
 
     // Initialise the in-enclave Bitcoin header chain at boot, anchored to
     // the compile-time checkpoint for the active network. The chain starts
-    // empty; the Listener will populate it via SubmitHeaders.
-    let spv_network = Network::from_env_str(&bitcoin_network_str).unwrap_or_else(|e| {
-        tracing::warn!(
-            "spv: unknown BITCOIN_NETWORK '{bitcoin_network_str}' ({e}); defaulting to mainnet"
-        );
-        Network::Mainnet
-    });
-    // Compiled-in anchor, or the dev-only `SPV_CHECKPOINT` override. A
-    // production-shaped build with that var set refuses to boot rather than
-    // letting the host pick the SPV trust anchor; a malformed spec is fatal too,
-    // so a dev never silently syncs from the compiled height instead.
-    let (checkpoint, checkpoint_source) = resolve_checkpoint(spv_network).unwrap_or_else(|msg| {
-        panic!("{msg}");
-    });
-    if checkpoint_source == CheckpointSource::Env {
-        tracing::warn!(
-            ?spv_network,
-            checkpoint_height = checkpoint.height,
-            "spv: checkpoint OVERRIDDEN from {} — dev builds only; headers below this height are \
-             not verifiable by this enclave",
-            CHECKPOINT_ENV
-        );
-    }
-    if let Err(msg) = checkpoint.assert_real_in_release() {
-        // In a release production build this is fatal — placeholder
-        // checkpoints would mean the listener can never push headers that
-        // chain to anything real. Crash early and loud.
-        panic!("{msg}");
-    }
-    if let Err(msg) = checkpoint.assert_retarget_aligned(spv_network) {
-        // A misaligned PoW-network checkpoint wedges the chain at the first
-        // retarget boundary above it (the epoch-start lookup falls below the
-        // checkpoint). This is a build-time misconfiguration — fail fast.
-        panic!("{msg}");
-    }
-    if !checkpoint.is_real {
-        tracing::warn!(
-            ?spv_network,
-            "spv: using PLACEHOLDER checkpoint (zeros) — header validation will reject any real chain. \
-             Replace the constant in enclave/src/networks/rgb/spv/checkpoint.rs before deploying."
-        );
-    } else {
-        tracing::info!(
-            ?spv_network,
-            checkpoint_height = checkpoint.height,
-            "spv: header chain initialised at checkpoint"
-        );
-    }
-    let header_chain = std::sync::Mutex::new(HeaderChain::new(spv_network, checkpoint));
+    // empty; the Listener will populate it via SubmitHeaders. SPV/RGB-only:
+    // a `ccd`-only build has no header chain (and no SubmitHeaders handler).
+    #[cfg(feature = "spv")]
+    let header_chain = {
+        let spv_network = Network::from_env_str(&bitcoin_network_str).unwrap_or_else(|e| {
+            tracing::warn!(
+                "spv: unknown BITCOIN_NETWORK '{bitcoin_network_str}' ({e}); defaulting to mainnet"
+            );
+            Network::Mainnet
+        });
+        // Compiled-in anchor, or the dev-only `SPV_CHECKPOINT` override. A
+        // production-shaped build with that var set refuses to boot rather than
+        // letting the host pick the SPV trust anchor; a malformed spec is fatal too,
+        // so a dev never silently syncs from the compiled height instead.
+        let (checkpoint, checkpoint_source) = resolve_checkpoint(spv_network).unwrap_or_else(|msg| {
+            panic!("{msg}");
+        });
+        if checkpoint_source == CheckpointSource::Env {
+            tracing::warn!(
+                ?spv_network,
+                checkpoint_height = checkpoint.height,
+                "spv: checkpoint OVERRIDDEN from {} — dev builds only; headers below this height are \
+                 not verifiable by this enclave",
+                CHECKPOINT_ENV
+            );
+        }
+        if let Err(msg) = checkpoint.assert_real_in_release() {
+            // In a release production build this is fatal — placeholder
+            // checkpoints would mean the listener can never push headers that
+            // chain to anything real. Crash early and loud.
+            panic!("{msg}");
+        }
+        if let Err(msg) = checkpoint.assert_retarget_aligned(spv_network) {
+            // A misaligned PoW-network checkpoint wedges the chain at the first
+            // retarget boundary above it (the epoch-start lookup falls below the
+            // checkpoint). This is a build-time misconfiguration — fail fast.
+            panic!("{msg}");
+        }
+        if !checkpoint.is_real {
+            tracing::warn!(
+                ?spv_network,
+                "spv: using PLACEHOLDER checkpoint (zeros) — header validation will reject any real chain. \
+                 Replace the constant in enclave/src/networks/rgb/spv/checkpoint.rs before deploying."
+            );
+        } else {
+            tracing::info!(
+                ?spv_network,
+                checkpoint_height = checkpoint.height,
+                "spv: header chain initialised at checkpoint"
+            );
+        }
+        std::sync::Mutex::new(HeaderChain::new(spv_network, checkpoint))
+    };
 
     // Build the in-enclave EVM RPC client for independent FundsIn verification
     // (#60). The URL must be the loopback forwarder; responses are host-relayed
@@ -315,7 +326,9 @@ fn main() {
         evm_rpc_client,
         #[cfg(feature = "evm-rpc")]
         evm_rpc_config,
+        #[cfg(feature = "spv")]
         header_chain,
+        #[cfg(feature = "spv")]
         submit_rate_limiter: std::sync::Mutex::new(server::SubmitRateLimiter::default()),
     };
 
