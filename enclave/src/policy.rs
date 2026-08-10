@@ -61,6 +61,12 @@ pub struct ProductionPolicy {
     /// disabled). Recorded and attested so a verifier can tell a trustless
     /// deployment apart from a host-relayed one.
     pub evm_source: EvmDataSource,
+    /// The Helios weak-subjectivity checkpoint (beacon block root) EVM
+    /// verification trust-roots on. `Some` only when `evm_source` is
+    /// [`EvmDataSource::HeliosVerified`]; required in that case and attested, so
+    /// a verifier confirms WHICH checkpoint the enclave synced from — not just
+    /// that it is in Helios mode (audit M-06).
+    pub evm_checkpoint: Option<[u8; 32]>,
     /// Bitcoin anchor-verification source. Always SPV in a production build.
     pub btc_source: BtcDataSource,
 }
@@ -120,7 +126,12 @@ impl SecurityPolicy {
     /// non-bridge build, or an unpinned config yields
     /// [`SecurityPolicy::Development`]. Only a release bridge build with all
     /// three pins set becomes [`SecurityPolicy::Production`].
-    pub fn resolve(ctx: &BuildContext, bridge: &BridgeConfig, evm_source: EvmDataSource) -> Self {
+    pub fn resolve(
+        ctx: &BuildContext,
+        bridge: &BridgeConfig,
+        evm_source: EvmDataSource,
+        evm_checkpoint: Option<[u8; 32]>,
+    ) -> Self {
         // Any dev feature collapses the posture regardless of everything else.
         // (These are `compile_error!` in a release build — lib.rs — so in a real
         // production binary they are all false; the checks make dev/test builds
@@ -152,6 +163,7 @@ impl SecurityPolicy {
             allow_vanilla_psbt: bridge.allows_vanilla_btc(),
             attestation: AttestationMode::Real,
             evm_source,
+            evm_checkpoint,
             // `rgb-validation` implies `spv` (lib.rs `compile_error!`), so a
             // bridge build always anchors witness txs via the SPV header chain.
             btc_source: BtcDataSource::SpvVerified,
@@ -173,6 +185,7 @@ impl SecurityPolicy {
                 chain_id: p.chain_id,
                 bridge_contract: p.bridge_contract,
                 rgb_asset_id: p.rgb_asset_id.clone(),
+                evm_checkpoint: p.evm_checkpoint,
             },
             Self::Development { .. } => AttestedPolicy::Development,
         }
@@ -234,6 +247,18 @@ impl ProductionPolicy {
                 self.evm_source
             ));
         }
+        // Helios's trust root MUST be pinned and attested (audit M-06): without a
+        // checkpoint the light client would bootstrap from an untrusted source,
+        // and a verifier could not tell which chain the enclave synced. Fail
+        // closed at boot rather than attesting Helios mode with no trust root.
+        if self.evm_checkpoint.is_none() {
+            return Err(
+                "production policy uses the Helios EVM source but pins no weak-subjectivity \
+                 checkpoint. Set HELIOS_CHECKPOINT to a recent beacon block root so the trust \
+                 root is fixed and attested (audit M-06)."
+                    .into(),
+            );
+        }
         Ok(())
     }
 }
@@ -262,17 +287,25 @@ mod tests {
         }
     }
 
+    /// A pinned Helios checkpoint for tests that resolve a valid production
+    /// Helios policy (a real beacon block root is 32 bytes).
+    fn a_checkpoint() -> Option<[u8; 32]> {
+        Some([0x0c; 32])
+    }
+
     #[test]
     fn release_bridge_with_full_pins_is_production() {
         let p = SecurityPolicy::resolve(
             &release_bridge_ctx(),
             &pinned_config(),
             EvmDataSource::HeliosVerified,
+            a_checkpoint(),
         );
         match &p {
             SecurityPolicy::Production(pp) => {
                 assert_eq!(pp.chain_id, 1);
                 assert_eq!(pp.evm_source, EvmDataSource::HeliosVerified);
+                assert_eq!(pp.evm_checkpoint, a_checkpoint());
                 assert_eq!(pp.attestation, AttestationMode::Real);
                 assert_eq!(pp.btc_source, BtcDataSource::SpvVerified);
             }
@@ -287,7 +320,7 @@ mod tests {
         // Non-Helios sources still resolve to Production (recorded + attested)
         // but must not pass the boot gate.
         for source in [EvmDataSource::Disabled, EvmDataSource::RawRpc] {
-            let p = SecurityPolicy::resolve(&ctx, &pinned_config(), source);
+            let p = SecurityPolicy::resolve(&ctx, &pinned_config(), source, None);
             assert!(
                 matches!(p, SecurityPolicy::Production(_)),
                 "expected Production for {source:?}"
@@ -295,15 +328,35 @@ mod tests {
             let err = p.assert_valid_for_build(&ctx).unwrap_err();
             assert!(err.contains("Helios"), "got: {err}");
         }
-        // Only Helios-verified passes the boot gate.
-        let p = SecurityPolicy::resolve(&ctx, &pinned_config(), EvmDataSource::HeliosVerified);
+        // Only Helios-verified WITH a pinned checkpoint passes the boot gate.
+        let p = SecurityPolicy::resolve(
+            &ctx,
+            &pinned_config(),
+            EvmDataSource::HeliosVerified,
+            a_checkpoint(),
+        );
         assert!(p.assert_valid_for_build(&ctx).is_ok());
+    }
+
+    #[test]
+    fn production_helios_without_a_pinned_checkpoint_is_rejected_at_boot() {
+        // M-06: Helios is the trustless source, but with no weak-subjectivity
+        // checkpoint its trust root is unpinned and unattested. Such a build
+        // resolves to Production (so the missing pin is visible) but must NOT
+        // pass the boot gate.
+        let ctx = release_bridge_ctx();
+        let p =
+            SecurityPolicy::resolve(&ctx, &pinned_config(), EvmDataSource::HeliosVerified, None);
+        assert!(matches!(p, SecurityPolicy::Production(_)));
+        let err = p.assert_valid_for_build(&ctx).unwrap_err();
+        assert!(err.contains("checkpoint"), "got: {err}");
     }
 
     #[test]
     fn release_bridge_unconfigured_is_rejected_at_boot() {
         let ctx = release_bridge_ctx();
-        let p = SecurityPolicy::resolve(&ctx, &BridgeConfig::default(), EvmDataSource::RawRpc);
+        let p =
+            SecurityPolicy::resolve(&ctx, &BridgeConfig::default(), EvmDataSource::RawRpc, None);
         assert_eq!(
             p,
             SecurityPolicy::Development {
@@ -322,7 +375,7 @@ mod tests {
             chain_id: 1,
             ..Default::default()
         };
-        let p = SecurityPolicy::resolve(&ctx, &partial, EvmDataSource::RawRpc);
+        let p = SecurityPolicy::resolve(&ctx, &partial, EvmDataSource::RawRpc, None);
         assert!(matches!(p, SecurityPolicy::Development { .. }));
         assert!(p.assert_valid_for_build(&ctx).is_err());
     }
@@ -354,7 +407,12 @@ mod tests {
             ),
         ];
         for (ctx, reason) in cases {
-            let p = SecurityPolicy::resolve(&ctx, &pinned_config(), EvmDataSource::HeliosVerified);
+            let p = SecurityPolicy::resolve(
+                &ctx,
+                &pinned_config(),
+                EvmDataSource::HeliosVerified,
+                a_checkpoint(),
+            );
             assert_eq!(p, SecurityPolicy::Development { reason });
             // Even fully pinned, a dev feature in a release rgb build must not boot.
             assert!(p.assert_valid_for_build(&ctx).is_err());
@@ -367,7 +425,7 @@ mod tests {
             debug_or_test: true,
             ..release_bridge_ctx()
         };
-        let p = SecurityPolicy::resolve(&ctx, &pinned_config(), EvmDataSource::RawRpc);
+        let p = SecurityPolicy::resolve(&ctx, &pinned_config(), EvmDataSource::RawRpc, None);
         assert_eq!(
             p,
             SecurityPolicy::Development {
@@ -383,7 +441,12 @@ mod tests {
             rgb_validation: false,
             ..release_bridge_ctx()
         };
-        let p = SecurityPolicy::resolve(&ctx, &BridgeConfig::default(), EvmDataSource::Disabled);
+        let p = SecurityPolicy::resolve(
+            &ctx,
+            &BridgeConfig::default(),
+            EvmDataSource::Disabled,
+            None,
+        );
         assert_eq!(
             p,
             SecurityPolicy::Development {
@@ -399,7 +462,7 @@ mod tests {
         let ctx = release_bridge_ctx();
         let mut cfg = pinned_config();
         // Unset BTC pins -> vanilla disabled (fail-closed).
-        let p = SecurityPolicy::resolve(&ctx, &cfg, EvmDataSource::RawRpc);
+        let p = SecurityPolicy::resolve(&ctx, &cfg, EvmDataSource::RawRpc, None);
         assert!(matches!(
             p,
             SecurityPolicy::Production(ProductionPolicy {
@@ -409,7 +472,7 @@ mod tests {
         ));
         // Operator sets the cap -> vanilla enabled and attested.
         cfg.btc_max_total_sats = 100_000;
-        let p = SecurityPolicy::resolve(&ctx, &cfg, EvmDataSource::RawRpc);
+        let p = SecurityPolicy::resolve(&ctx, &cfg, EvmDataSource::RawRpc, None);
         assert!(matches!(
             p,
             SecurityPolicy::Production(ProductionPolicy {
@@ -422,11 +485,37 @@ mod tests {
     #[test]
     fn evm_source_is_carried_into_the_commitment() {
         let ctx = release_bridge_ctx();
-        let raw = SecurityPolicy::resolve(&ctx, &pinned_config(), EvmDataSource::RawRpc);
-        let helios = SecurityPolicy::resolve(&ctx, &pinned_config(), EvmDataSource::HeliosVerified);
+        let raw = SecurityPolicy::resolve(&ctx, &pinned_config(), EvmDataSource::RawRpc, None);
+        let helios = SecurityPolicy::resolve(
+            &ctx,
+            &pinned_config(),
+            EvmDataSource::HeliosVerified,
+            a_checkpoint(),
+        );
         // A raw-RPC deployment and a Helios deployment commit to different bytes,
         // so a verifier expecting one rejects the other (audit C-01 data source).
         assert_ne!(raw.commitment_bytes(), helios.commitment_bytes());
+    }
+
+    #[test]
+    fn evm_checkpoint_is_carried_into_the_commitment() {
+        // M-06: two Helios deployments identical except for the pinned checkpoint
+        // commit different bytes, so a verifier bound to one trust root rejects
+        // an enclave that synced from another.
+        let ctx = release_bridge_ctx();
+        let a = SecurityPolicy::resolve(
+            &ctx,
+            &pinned_config(),
+            EvmDataSource::HeliosVerified,
+            Some([0xAA; 32]),
+        );
+        let b = SecurityPolicy::resolve(
+            &ctx,
+            &pinned_config(),
+            EvmDataSource::HeliosVerified,
+            Some([0xBB; 32]),
+        );
+        assert_ne!(a.commitment_bytes(), b.commitment_bytes());
     }
 
     #[test]
@@ -445,7 +534,8 @@ mod tests {
             SecurityPolicy::resolve(
                 &release_bridge_ctx(),
                 &pinned_config(),
-                EvmDataSource::RawRpc
+                EvmDataSource::RawRpc,
+                None,
             )
             .commitment_bytes()
         );

@@ -73,14 +73,24 @@ fn main() {
     // client is selected below: `evm-rpc` off => none; `helios` +
     // HELIOS_EXECUTION_RPC set => trustless; otherwise the raw host-relayed RPC.
     #[cfg(not(feature = "evm-rpc"))]
-    let evm_source = EvmDataSource::Disabled;
+    let (evm_source, evm_checkpoint) = (EvmDataSource::Disabled, None);
     #[cfg(all(feature = "evm-rpc", not(feature = "helios")))]
-    let evm_source = EvmDataSource::RawRpc;
+    let (evm_source, evm_checkpoint) = (EvmDataSource::RawRpc, None);
     #[cfg(all(feature = "evm-rpc", feature = "helios"))]
-    let evm_source = if std::env::var("HELIOS_EXECUTION_RPC").is_ok() {
-        EvmDataSource::HeliosVerified
+    let (evm_source, evm_checkpoint) = if std::env::var("HELIOS_EXECUTION_RPC").is_ok() {
+        // The pinned weak-subjectivity checkpoint is Helios's trust root, so
+        // commit it into the attested policy — a verifier then confirms WHICH
+        // checkpoint the enclave synced from, not merely that it is in Helios
+        // mode (audit M-06). Reads the SAME `HELIOS_CHECKPOINT` that
+        // `HeliosConfig` / `HeliosEvmClient` sync against. A missing/malformed
+        // value yields `None`, and the boot gate below then refuses to boot.
+        let checkpoint = std::env::var("HELIOS_CHECKPOINT")
+            .ok()
+            .and_then(|s| hex::decode(s.strip_prefix("0x").unwrap_or(&s)).ok())
+            .and_then(|b| <[u8; 32]>::try_from(b).ok());
+        (EvmDataSource::HeliosVerified, checkpoint)
     } else {
-        EvmDataSource::RawRpc
+        (EvmDataSource::RawRpc, None)
     };
 
     // Resolve the enclave's single, explicit security posture once (audit C-01),
@@ -89,7 +99,7 @@ fn main() {
     // `server::handle_get_attested_public_key`) and consulted by the signing
     // handlers instead of re-deriving posture from features and empty fields.
     let build_ctx = BuildContext::current();
-    let policy = SecurityPolicy::resolve(&build_ctx, &bridge_config, evm_source);
+    let policy = SecurityPolicy::resolve(&build_ctx, &bridge_config, evm_source, evm_checkpoint);
     match &policy {
         SecurityPolicy::Production(p) => tracing::info!(
             chain_id = p.chain_id,
