@@ -414,9 +414,10 @@ const ESPLORA_HTTP_TIMEOUT_SECS: u64 = 30;
 /// requests incl. the health probe — surfacing on the parent as
 /// `enclave read failed: failed to fill whole buffer`. `electrum-client` retries
 /// `retry` times on error, so worst-case blocking is ~`(retry+1) *` this; kept
-/// within the `conn.rs` `TOTAL_REQUEST_TIMEOUT` budget. `u8` per the crate's
-/// `Config.timeout` type. Compile-time (PCR-attested), not host-tunable.
-const ELECTRUM_WITNESS_TIMEOUT_SECS: u8 = 15;
+/// within the `conn.rs` `TOTAL_REQUEST_TIMEOUT` budget. Fed to
+/// `Config::builder().timeout(Some(Duration))`. Compile-time (PCR-attested),
+/// not host-tunable.
+const ELECTRUM_WITNESS_TIMEOUT_SECS: u64 = 15;
 
 /// How long a fetched fee estimate stays fresh (#55). Fee markets move on
 /// block cadence, so a minute of staleness is immaterial while keeping the
@@ -748,7 +749,9 @@ impl RgbValidator {
             // client so the `Config` type matches `AnyResolver::electrum_blocking`.
             use rgbstd::indexers::electrum_blocking::electrum_client;
             let electrum_cfg = electrum_client::Config::builder()
-                .timeout(Some(ELECTRUM_WITNESS_TIMEOUT_SECS))
+                .timeout(Some(std::time::Duration::from_secs(
+                    ELECTRUM_WITNESS_TIMEOUT_SECS,
+                )))
                 .build();
             AnyResolver::electrum_blocking(&self.indexer_url, Some(electrum_cfg)).map_err(|e| {
                 tracing::error!(indexer_url = %self.indexer_url, "electrum resolver creation failed: {e}");
