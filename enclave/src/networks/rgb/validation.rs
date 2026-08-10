@@ -21,6 +21,7 @@ use rgbstd::validation::ValidationConfig;
 use rgbstd::ChainNet;
 use sha3::{Digest, Keccak256};
 
+use crate::config::BridgeConfig;
 use crate::error::{EnclaveError, Result};
 use crate::networks::ValidationContext;
 use crate::proto::RgbSource;
@@ -47,7 +48,7 @@ pub fn validate_source(
     source: &RgbSource,
     ctx: &ValidationContext<'_>,
 ) -> Result<ValidatedConsignment> {
-    validate_source_payload(source)?;
+    validate_source_payload(source, ctx.bridge_config)?;
 
     let validator = ctx.rgb_validator.ok_or_else(|| {
         EnclaveError::CrossCheck(
@@ -111,12 +112,41 @@ pub fn validate_source(
     Ok(validated)
 }
 
-fn validate_source_payload(source: &RgbSource) -> Result<()> {
+fn validate_source_payload(source: &RgbSource, cfg: &BridgeConfig) -> Result<()> {
     if source.consignment.is_empty() {
         return Err(EnclaveError::CrossCheck(
             "RGB source requires raw consignment bytes; consignment_valid is not authoritative"
                 .into(),
         ));
+    }
+    // Aggregate size/compute caps (operator-configurable, defaulting to the
+    // `DEFAULT_*` constants), enforced before the keccak hash and the full
+    // rgbstd parse below so a request cannot force disproportionate
+    // parsing/hashing while staying under every per-field cap.
+    if source.consignment.len() > cfg.max_consignment_bytes {
+        return Err(EnclaveError::CrossCheck(format!(
+            "RGB source consignment too large: {} bytes (max {})",
+            source.consignment.len(),
+            cfg.max_consignment_bytes
+        )));
+    }
+    if source.merkle_proofs.len() > cfg.max_merkle_proofs {
+        return Err(EnclaveError::CrossCheck(format!(
+            "RGB source carries too many merkle proofs: {} (max {})",
+            source.merkle_proofs.len(),
+            cfg.max_merkle_proofs
+        )));
+    }
+    let total_proof_bytes: usize = source
+        .merkle_proofs
+        .iter()
+        .map(|p| p.txid.len() + p.merkle_path.iter().map(|s| s.len()).sum::<usize>())
+        .sum();
+    if total_proof_bytes > cfg.max_total_proof_bytes {
+        return Err(EnclaveError::CrossCheck(format!(
+            "RGB source merkle proofs too large in aggregate: {total_proof_bytes} bytes (max {})",
+            cfg.max_total_proof_bytes
+        )));
     }
     // Hash integrity check between listener-supplied bytes and the pre-computed
     // keccak. This is INTEGRITY, NOT AUTHORIZATION (audit I-02 / Oxorio I-09):
@@ -1026,6 +1056,12 @@ mod tests {
     const CONTRACT_FIXTURE: &[u8] =
         include_bytes!("../../../tests/fixtures/contract_consignment.rgbc");
 
+    use crate::config::{
+        BridgeConfig, DEFAULT_MAX_CONSIGNMENT_BYTES, DEFAULT_MAX_MERKLE_PROOFS,
+        DEFAULT_MAX_TOTAL_PROOF_BYTES,
+    };
+    use crate::proto::MerkleProofEntry;
+
     #[test]
     fn rejects_invalid_bytes() {
         let validator = RgbValidator::new("http://localhost:1".to_string(), "regtest").unwrap();
@@ -1486,7 +1522,97 @@ mod tests {
     /// validator/SPV work, not payload shape.
     #[test]
     fn accepts_valid_consignment_hash() {
-        assert!(validate_source_payload(&fixture_source("rgb:any-declared-asset")).is_ok());
+        assert!(validate_source_payload(
+            &fixture_source("rgb:any-declared-asset"),
+            &BridgeConfig::default()
+        )
+        .is_ok());
+    }
+
+    /// A consignment larger than the configured cap is rejected by the payload
+    /// gate with the aggregate-size error *before* any rgbstd parse (the error
+    /// is the size cap, not a decode failure).
+    #[test]
+    fn rejects_oversized_consignment_before_parse() {
+        let mut source = fixture_source("rgb:any-declared-asset");
+        source.consignment = vec![0u8; DEFAULT_MAX_CONSIGNMENT_BYTES + 1];
+        source.consignment_hash = keccak(&source.consignment);
+        let err = validate_source_payload(&source, &BridgeConfig::default())
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("consignment too large"), "unexpected: {err}");
+    }
+
+    /// Boundary: a consignment exactly at the cap passes the aggregate gate
+    /// (rejection is strictly `>` the cap).
+    #[test]
+    fn accepts_consignment_at_size_cap() {
+        let mut source = fixture_source("rgb:any-declared-asset");
+        source.consignment = vec![0u8; DEFAULT_MAX_CONSIGNMENT_BYTES];
+        source.consignment_hash = keccak(&source.consignment);
+        assert!(validate_source_payload(&source, &BridgeConfig::default()).is_ok());
+    }
+
+    /// The caps are operator-configurable: a smaller `max_consignment_bytes`
+    /// rejects a consignment the default would accept.
+    #[test]
+    fn honors_configured_consignment_cap() {
+        let mut source = fixture_source("rgb:any-declared-asset");
+        source.consignment = vec![0u8; 200];
+        source.consignment_hash = keccak(&source.consignment);
+        // The default cap accepts 200 bytes.
+        assert!(validate_source_payload(&source, &BridgeConfig::default()).is_ok());
+        // A 100-byte configured cap rejects the same source.
+        let cfg = BridgeConfig {
+            max_consignment_bytes: 100,
+            ..BridgeConfig::default()
+        };
+        let err = validate_source_payload(&source, &cfg)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("consignment too large"), "unexpected: {err}");
+    }
+
+    /// Too many Merkle proofs is rejected on count alone, even when each proof
+    /// is individually tiny.
+    #[test]
+    fn rejects_too_many_merkle_proofs() {
+        let mut source = fixture_source("rgb:any-declared-asset");
+        source.merkle_proofs = (0..DEFAULT_MAX_MERKLE_PROOFS + 1)
+            .map(|_| MerkleProofEntry::default())
+            .collect();
+        let err = validate_source_payload(&source, &BridgeConfig::default())
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("too many merkle proofs"), "unexpected: {err}");
+    }
+
+    /// Proofs that each stay under the per-path-depth cap but exceed the
+    /// aggregate byte budget are rejected by the aggregate gate — the case the
+    /// per-field caps miss.
+    #[test]
+    fn rejects_aggregate_proof_bytes_over_budget() {
+        // Each proof counts 32-byte txid + 32 siblings * 32 bytes = 1056 bytes,
+        // all within MAX_MERKLE_PATH_DEPTH. Take just enough to cross the
+        // aggregate cap while staying under the proof-count cap.
+        let per_proof = 32 + 32 * 32;
+        let n = DEFAULT_MAX_TOTAL_PROOF_BYTES / per_proof + 1;
+        assert!(
+            n <= DEFAULT_MAX_MERKLE_PROOFS,
+            "test would trip the count cap first"
+        );
+        let proof = MerkleProofEntry {
+            txid: vec![0u8; 32],
+            block_height: 0,
+            tx_position: 0,
+            merkle_path: vec![vec![0u8; 32]; 32],
+        };
+        let mut source = fixture_source("rgb:any-declared-asset");
+        source.merkle_proofs = vec![proof; n];
+        let err = validate_source_payload(&source, &BridgeConfig::default())
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("too large in aggregate"), "unexpected: {err}");
     }
 
     /// Old `ignores_consignment_valid_flag_when_bytes_present`: an identical
@@ -1496,9 +1622,9 @@ mod tests {
     fn ignores_consignment_valid_flag_when_bytes_present() {
         let mut source = fixture_source("rgb:any-declared-asset");
         source.consignment_valid = false;
-        assert!(validate_source_payload(&source).is_ok());
+        assert!(validate_source_payload(&source, &BridgeConfig::default()).is_ok());
         source.consignment_valid = true;
-        assert!(validate_source_payload(&source).is_ok());
+        assert!(validate_source_payload(&source, &BridgeConfig::default()).is_ok());
     }
 
     /// Old `rejects_empty_consignment_even_with_valid_flag` (P0 regression):
@@ -1510,7 +1636,7 @@ mod tests {
         source.consignment = vec![];
         source.consignment_hash = vec![];
         source.consignment_valid = true;
-        let err = validate_source_payload(&source).unwrap_err();
+        let err = validate_source_payload(&source, &BridgeConfig::default()).unwrap_err();
         assert!(
             err.to_string().contains("requires raw consignment bytes"),
             "expected raw-bytes-required rejection, got: {err}"
@@ -1523,7 +1649,7 @@ mod tests {
         let mut source = fixture_source("rgb:any-declared-asset");
         source.consignment_hash = vec![0xDE; 32];
         source.consignment_valid = true;
-        let err = validate_source_payload(&source).unwrap_err();
+        let err = validate_source_payload(&source, &BridgeConfig::default()).unwrap_err();
         assert!(
             err.to_string().contains("consignment hash mismatch"),
             "expected hash-mismatch rejection, got: {err}"
