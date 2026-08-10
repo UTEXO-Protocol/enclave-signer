@@ -103,7 +103,6 @@ impl Default for BridgeConfig {
             bridge_contract: [0u8; 20],
             rgb_asset_id: String::new(),
             gas_tx_allowed_to: None,
-            btc_allowed_scripts: Vec::new(),
             btc_max_total_sats: 0,
             funds_in_contract: [0u8; 20],
             max_consignment_bytes: DEFAULT_MAX_CONSIGNMENT_BYTES,
