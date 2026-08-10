@@ -195,5 +195,12 @@ ENV EVM_RPC_URL=http://127.0.0.1:3444 \
     GAS_TX_ALLOWED_TO=0x6711f1a319B37847fa0234181C34D883774c4951 \
     BTC_MAX_TOTAL_SATS=1000000
 
-ENV RUST_LOG=info
+# DEBUG-HUNT EIF (op13 RGB-PSBT enclave crash): verbose logs + full panic
+# backtrace so `nitro-cli console` (enclave run with --debug-mode) captures the
+# exact panic site when signing op13. RUST_LOG reaches the tracing EnvFilter
+# (main.rs from_default_env). This is a throwaway measurement build — PCRs are
+# zeroed under --debug-mode anyway; revert to `RUST_LOG=info` before any
+# production (non-debug) EIF.
+ENV RUST_LOG=debug \
+    RUST_BACKTRACE=full
 ENTRYPOINT ["/app/entrypoint.sh"]
