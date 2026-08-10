@@ -16,15 +16,18 @@
 //!      than trusting any supplied digest;
 //!   3. enforces an operator allowlist: the chain id must equal the pinned
 //!      `EVM_CHAIN_ID`, the destination must equal the pinned
-//!      `GAS_TX_ALLOWED_TO`, the value must be zero, and contract-creation
-//!      (empty `to`) is refused.
+//!      `GAS_TX_ALLOWED_TO`, the value must be zero unless the transaction is
+//!      the payable `lzFundsOutCall`, and contract-creation (empty `to`) is
+//!      refused.
 //!
 //! Anything that doesn't decode to an allowed shape, or that targets an
 //! address / carries value the operator didn't pin, is rejected before a
 //! signature is produced. With the destination pinned, the two *theft*
 //! vectors are closed: an attacker can neither redirect funds (`to` is
-//! pinned) nor move ETH by `value` (`value == 0`). When the pin is unset
-//! the enclave fails closed in production rather than signing blindly.
+//! pinned) nor move ETH through arbitrary calldata. A non-zero value is only
+//! accepted for the pinned proxy's payable LayerZero release entrypoint. When
+//! the pin is unset the enclave fails closed in production rather than signing
+//! blindly.
 //!
 //! Residual risks deliberately NOT covered here (tracked as #68 follow-ups):
 //!   * **Fee griefing.** `gasLimit` and the fee-per-gas fields are not
@@ -58,6 +61,12 @@ use crate::proto::SignRawDigestRequest;
 /// EIP-2718 type byte for an EIP-1559 (dynamic-fee) transaction.
 const TX_TYPE_EIP1559: u8 = 0x02;
 
+/// `keccak256("lzFundsOutCall((uint256,uint256,uint256,uint256,string,bytes,bytes,uint32,bytes32,uint256,bytes),uint256,uint256,uint256,bytes[])")[0..4]`.
+///
+/// This is the only proxy method that legitimately carries native value: the
+/// value is forwarded as the LayerZero messaging fee.
+const LZ_FUNDS_OUT_CALL_SELECTOR: [u8; 4] = [0x7a, 0xe8, 0xf7, 0x36];
+
 /// Maximum RLP nesting depth we will decode. A real transaction reaches
 /// depth ~4 (tx list → accessList → entry → storage-key list); the cap is
 /// a defensive backstop against a deeply-nested input exhausting the stack.
@@ -78,10 +87,11 @@ enum Rlp<'a> {
 }
 
 /// The fields of an unsigned gas transaction that the allowlist inspects.
-struct GasTx {
+struct GasTx<'a> {
     chain_id: u64,
     to: [u8; 20],
     value_is_zero: bool,
+    data: &'a [u8],
 }
 
 /// Validate a gas-key `SignRawDigest` request against the operator pins and
@@ -134,10 +144,14 @@ pub fn validate_gas_tx_request(req: &SignRawDigestRequest, cfg: &BridgeConfig) -
         )));
     }
 
-    // No value transfer. A gas tx pays for execution via the fee fields,
-    // never by moving ETH — so a non-zero value is the other drain vector.
-    if !tx.value_is_zero {
-        return Err(reject("gas tx: value must be 0"));
+    // Native value is required only by the payable LayerZero release method,
+    // where the pinned MultisigProxy forwards it as the messaging fee. Keep
+    // the original fail-closed rule for every other selector so the gas key
+    // cannot be used for an arbitrary value transfer to the proxy.
+    if !tx.value_is_zero && !tx.data.starts_with(&LZ_FUNDS_OUT_CALL_SELECTOR) {
+        return Err(reject(
+            "gas tx: value must be 0 unless calldata is lzFundsOutCall",
+        ));
     }
 
     // Compute the digest ourselves from the validated preimage. If the
@@ -155,7 +169,7 @@ pub fn validate_gas_tx_request(req: &SignRawDigestRequest, cfg: &BridgeConfig) -
 /// Decode an unsigned gas transaction preimage and extract the fields the
 /// allowlist needs. Accepts EIP-1559 (`0x02 ‖ rlp([...9])`) and legacy
 /// EIP-155 (`rlp([...9])`) unsigned bodies; rejects everything else.
-fn parse_gas_tx(raw: &[u8]) -> Result<GasTx> {
+fn parse_gas_tx(raw: &[u8]) -> Result<GasTx<'_>> {
     let first = *raw
         .first()
         .ok_or_else(|| reject("gas tx: empty unsigned_tx"))?;
@@ -175,6 +189,7 @@ fn parse_gas_tx(raw: &[u8]) -> Result<GasTx> {
             chain_id: scalar_u64(&items[0])?,
             to: as_address(&items[5])?,
             value_is_zero: scalar_is_zero(&items[6])?,
+            data: as_bytes(&items[7])?,
         })
     } else if first >= 0xc0 {
         // Legacy EIP-155 unsigned signing body, a 9-field RLP list:
@@ -200,6 +215,7 @@ fn parse_gas_tx(raw: &[u8]) -> Result<GasTx> {
             chain_id: scalar_u64(&items[6])?,
             to: as_address(&items[3])?,
             value_is_zero: scalar_is_zero(&items[4])?,
+            data: as_bytes(&items[5])?,
         })
     } else {
         Err(reject(format!(
@@ -347,6 +363,14 @@ fn as_list<'a, 'b>(item: &'b Rlp<'a>) -> Result<&'b [Rlp<'a>]> {
     }
 }
 
+/// Borrow a byte-string field such as transaction calldata.
+fn as_bytes<'a>(item: &Rlp<'a>) -> Result<&'a [u8]> {
+    match item {
+        Rlp::Str(bytes) => Ok(bytes),
+        Rlp::List(_) => Err(reject("rlp: expected a byte string, found a list")),
+    }
+}
+
 /// Borrow an item's scalar bytes (a canonical big-endian integer string),
 /// rejecting a list or a non-minimal leading-zero encoding.
 fn as_scalar<'a>(item: &Rlp<'a>) -> Result<&'a [u8]> {
@@ -460,7 +484,7 @@ mod tests {
     }
 
     /// Build a well-formed unsigned EIP-1559 preimage.
-    fn eip1559(chain_id: u64, to: &[u8], value: u64) -> Vec<u8> {
+    fn eip1559_with_data(chain_id: u64, to: &[u8], value: u64, data: &[u8]) -> Vec<u8> {
         let body = rlp_list(&[
             rlp_scalar(chain_id), // chainId
             rlp_scalar(7),        // nonce
@@ -469,12 +493,16 @@ mod tests {
             rlp_scalar(21_000),   // gasLimit
             rlp_str(to),          // to
             rlp_scalar(value),    // value
-            rlp_str(&[]),         // data
+            rlp_str(data),        // data
             rlp_list(&[]),        // accessList (empty)
         ]);
         let mut out = vec![TX_TYPE_EIP1559];
         out.extend_from_slice(&body);
         out
+    }
+
+    fn eip1559(chain_id: u64, to: &[u8], value: u64) -> Vec<u8> {
+        eip1559_with_data(chain_id, to, value, &[])
     }
 
     /// Build a well-formed unsigned legacy EIP-155 preimage.
@@ -536,6 +564,21 @@ mod tests {
     #[test]
     fn rejects_nonzero_value_the_other_drain() {
         let tx = eip1559(CHAIN_ID, &ALLOWED_TO, 1_000_000);
+        let err = validate_gas_tx_request(&req(tx), &cfg()).unwrap_err();
+        assert!(err.to_string().contains("value must be 0"), "got: {err}");
+    }
+
+    #[test]
+    fn accepts_nonzero_value_for_lz_funds_out_call() {
+        let mut calldata = LZ_FUNDS_OUT_CALL_SELECTOR.to_vec();
+        calldata.extend_from_slice(&[0x11; 64]);
+        let tx = eip1559_with_data(CHAIN_ID, &ALLOWED_TO, 1_000_000, &calldata);
+        assert!(validate_gas_tx_request(&req(tx), &cfg()).is_ok());
+    }
+
+    #[test]
+    fn rejects_nonzero_value_for_other_proxy_selector() {
+        let tx = eip1559_with_data(CHAIN_ID, &ALLOWED_TO, 1_000_000, &[0xde, 0xad, 0xbe, 0xef]);
         let err = validate_gas_tx_request(&req(tx), &cfg()).unwrap_err();
         assert!(err.to_string().contains("value must be 0"), "got: {err}");
     }
