@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile:1.4
-# Production enclave image (vsock + rgb-validation + spv + evm-rpc).
+# Production enclave image (vsock + rgb-validation + spv + evm-rpc + helios).
 # Usage:
 #   DOCKER_BUILDKIT=1 docker build --ssh default \
 #     -f build/Dockerfile.enclave -t utexo-bridge-enclave .
@@ -40,7 +40,11 @@ WORKDIR /build/enclave
 # alloy + tokio subtree, which grows the binary and therefore PCR0 - pinned via
 # Cargo.lock for reproducibility. Requires a second host vsock-proxy for the
 # EVM RPC (EVM_RPC_VSOCK_PORT, default 8002).
-RUN --mount=type=ssh cargo build --release --features vsock,rgb-validation,spv,evm-rpc
+# `helios` makes FundsIn verification trustless (#77) and is now REQUIRED: the
+# production policy refuses to boot on the host-relayed RawRpc source. Operator
+# must set HELIOS_EXECUTION_RPC / HELIOS_CONSENSUS_RPC and run the exec+consensus
+# vsock-proxies (default ports 8003 / 8004).
+RUN --mount=type=ssh cargo build --release --features vsock,rgb-validation,spv,evm-rpc,helios
 
 # --- Runtime ---
 FROM public.ecr.aws/amazonlinux/amazonlinux:2023-minimal AS runtime
