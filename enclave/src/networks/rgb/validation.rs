@@ -403,6 +403,21 @@ pub enum OutputSeal {
 /// Compile-time (PCR-attested), deliberately not host-tunable.
 const ESPLORA_HTTP_TIMEOUT_SECS: u64 = 30;
 
+/// Per-socket timeout (seconds) for the **Electrum** witness resolver — the
+/// production signing path (`ssl://…:50002` over the vsock forwarder). The
+/// Electrum analog of [`ESPLORA_HTTP_TIMEOUT_SECS`] and the SAME audit issue
+/// (final I-03 / #87): `electrum_client::Config::default()` leaves
+/// `timeout: None`, so a stalled electrs read blocks the worker thread
+/// *forever*. Observed in production: an op13 RGB consignment validation stalled
+/// on an electrs witness lookup, pinned every worker on an unbounded read, the
+/// connection queue overflowed (cap 16), and the enclave then dropped ALL
+/// requests incl. the health probe — surfacing on the parent as
+/// `enclave read failed: failed to fill whole buffer`. `electrum-client` retries
+/// `retry` times on error, so worst-case blocking is ~`(retry+1) *` this; kept
+/// within the `conn.rs` `TOTAL_REQUEST_TIMEOUT` budget. `u8` per the crate's
+/// `Config.timeout` type. Compile-time (PCR-attested), not host-tunable.
+const ELECTRUM_WITNESS_TIMEOUT_SECS: u8 = 15;
+
 /// How long a fetched fee estimate stays fresh (#55). Fee markets move on
 /// block cadence, so a minute of staleness is immaterial while keeping the
 /// sign-path from hitting Esplora on every request.
@@ -725,7 +740,17 @@ impl RgbValidator {
         let is_electrum =
             self.indexer_url.starts_with("ssl://") || self.indexer_url.starts_with("tcp://");
         let mut resolver = if is_electrum {
-            AnyResolver::electrum_blocking(&self.indexer_url, None).map_err(|e| {
+            // Bound the blocking electrs reads with a real socket timeout — the
+            // Electrum analog of the Esplora `.timeout()` below. Without it
+            // `Config::default()` has `timeout: None`, so a stalled electrs read
+            // pins the worker thread forever and wedges the whole enclave (see
+            // ELECTRUM_WITNESS_TIMEOUT_SECS). Same crate re-export as the fee
+            // client so the `Config` type matches `AnyResolver::electrum_blocking`.
+            use rgbstd::indexers::electrum_blocking::electrum_client;
+            let electrum_cfg = electrum_client::Config::builder()
+                .timeout(Some(ELECTRUM_WITNESS_TIMEOUT_SECS))
+                .build();
+            AnyResolver::electrum_blocking(&self.indexer_url, Some(electrum_cfg)).map_err(|e| {
                 tracing::error!(indexer_url = %self.indexer_url, "electrum resolver creation failed: {e}");
                 EnclaveError::CrossCheck(format!("electrum resolver creation failed: {e}"))
             })?
