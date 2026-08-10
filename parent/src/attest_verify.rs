@@ -9,6 +9,7 @@
 //! by the binary against an in-process parent + enclave stack.
 
 use anyhow::{bail, Context, Result};
+use attestation_verify::{AttestationMode, AttestedPolicy, BtcDataSource, EvmDataSource};
 use rand::RngCore;
 use sha2::{Digest, Sha256};
 
@@ -21,6 +22,26 @@ use crate::grpc_proto::{AttestedPublicKeyRequest, AttestedPublicKeyResponse};
 pub enum VerifyMode {
     Real,
     Mock,
+}
+
+/// The security posture the caller expects the attested enclave to have (audit
+/// C-01). The enclave commits its resolved posture into `user_data`; the
+/// verifier reconstructs the *expected* posture here and requires the commitment
+/// to match, so a downgraded enclave (vanilla signing on, a raw instead of
+/// Helios-verified data source, a dev build) is rejected rather than trusted.
+///
+/// The chain/contract/asset pins are taken from the wire response (already bound
+/// by the public-key bundle), so a production expectation only states the
+/// posture flags.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ExpectedPolicy {
+    /// Expect a production bridge enclave with these posture flags.
+    Production {
+        allow_vanilla_psbt: bool,
+        evm_source: EvmDataSource,
+    },
+    /// Expect a dev/mock enclave (e.g. behind `--mock`). Never for production.
+    Development,
 }
 
 /// Successful verification result. The presence of this value is the
@@ -74,6 +95,7 @@ pub async fn verify_attested_pubkey(
     endpoint: &str,
     expected_pcrs: attestation_verify::ExpectedPcrs,
     mode: VerifyMode,
+    expected_policy: ExpectedPolicy,
 ) -> Result<AttestedPubkeyResult> {
     let mut nonce = [0u8; 32];
     rand::thread_rng().fill_bytes(&mut nonce);
@@ -113,15 +135,24 @@ pub async fn verify_attested_pubkey(
         );
     }
 
-    let bundle = canonical_bundle(&response);
-    let bundle_commitment: [u8; 32] = Sha256::digest(&bundle).into();
+    // The enclave commits to sha256(pubkey_bundle || policy_commitment) (audit
+    // C-01). Reconstruct the expected policy — pins from the wire response,
+    // posture flags from `expected_policy` — and require the whole commitment to
+    // match. A mismatch means the attested posture is not the one the operator
+    // expects (downgraded data source, vanilla signing on, a dev build, …).
+    let attested_policy = expected_attested_policy(&expected_policy, &response)?;
+    let mut preimage = canonical_bundle(&response);
+    preimage.extend_from_slice(&attested_policy.to_bytes());
+    let bundle_commitment: [u8; 32] = Sha256::digest(&preimage).into();
     let user_data = verified
         .user_data
         .as_deref()
         .context("attestation has no user_data field")?;
     if user_data != bundle_commitment {
         bail!(
-            "attestation `user_data` ({}) does not match sha256(canonical_bundle) ({})",
+            "attestation `user_data` ({}) does not match sha256(canonical_bundle || policy) ({}) \
+             for the expected policy {expected_policy:?} — the enclave's attested public keys or \
+             security posture differ from what was expected",
             hex::encode(user_data),
             hex::encode(bundle_commitment),
         );
@@ -133,4 +164,44 @@ pub async fn verify_attested_pubkey(
         bundle_commitment,
         nonce_sent: nonce,
     })
+}
+
+/// Build the [`AttestedPolicy`] the verifier expects the enclave to have
+/// committed, combining the operator-declared posture ([`ExpectedPolicy`]) with
+/// the pins from the wire response (which the pubkey bundle already binds). MUST
+/// produce the same bytes the enclave's `SecurityPolicy::commitment_bytes` does.
+fn expected_attested_policy(
+    expected: &ExpectedPolicy,
+    resp: &AttestedPublicKeyResponse,
+) -> Result<AttestedPolicy> {
+    match expected {
+        ExpectedPolicy::Development => Ok(AttestedPolicy::Development),
+        ExpectedPolicy::Production {
+            allow_vanilla_psbt,
+            evm_source,
+        } => {
+            let bridge_contract: [u8; 20] = resp
+                .bridge_contract
+                .as_slice()
+                .try_into()
+                .with_context(|| {
+                    format!(
+                        "wire bridge_contract is {} bytes, expected 20 (is this really a \
+                         production bridge enclave?)",
+                        resp.bridge_contract.len()
+                    )
+                })?;
+            Ok(AttestedPolicy::Production {
+                allow_vanilla_psbt: *allow_vanilla_psbt,
+                // A real-verified production enclave always uses real (NSM)
+                // attestation; SPV is the only Bitcoin anchor source.
+                attestation: AttestationMode::Real,
+                evm_source: *evm_source,
+                btc_source: BtcDataSource::SpvVerified,
+                chain_id: resp.chain_id,
+                bridge_contract,
+                rgb_asset_id: resp.rgb_asset_id.clone(),
+            })
+        }
+    }
 }
