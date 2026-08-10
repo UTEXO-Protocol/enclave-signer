@@ -60,13 +60,21 @@ pub fn validate_source(
     }
 }
 
+/// Route proof plus, for an EVM `fundsOut`, the calldata decoded once into one
+/// typed intent that the later stages consume (I-12 / #165). `None` for RGB
+/// destinations and the dev-mode bypass.
+pub struct DestinationProof {
+    pub proof: RouteProof,
+    pub evm_funds_out: Option<crate::networks::evm::validation::FundsOutParams>,
+}
+
 /// Dispatch destination-network validation to the owning network module.
 pub fn validate_destination(
     amount: u64,
     source_commission: u64,
     destination: &DestinationNetwork,
     ctx: &ValidationContext<'_>,
-) -> Result<RouteProof> {
+) -> Result<DestinationProof> {
     #[cfg(not(all(feature = "rgb-validation", not(feature = "dev-mode"))))]
     {
         let _ = amount;
@@ -75,7 +83,11 @@ pub fn validate_destination(
 
     match destination {
         DestinationNetwork::EvmDestination(destination) => {
-            evm::validation::validate_destination(destination, ctx)
+            let (proof, evm_funds_out) = evm::validation::validate_destination(destination, ctx)?;
+            Ok(DestinationProof {
+                proof,
+                evm_funds_out,
+            })
         }
         DestinationNetwork::RgbDestination(destination) => {
             rgb::validate_destination(destination, ctx)?;
@@ -83,16 +95,19 @@ pub fn validate_destination(
             #[cfg(all(feature = "rgb-validation", not(feature = "dev-mode")))]
             rgb::validate_destination_anchor(destination, amount, source_commission, ctx)?;
 
-            Ok(RouteProof {
-                amount: destination
-                    .psbt_output_amount
-                    .checked_add(source_commission)
-                    .ok_or_else(|| {
-                        EnclaveError::CrossCheck(
-                            "psbt_output_amount + source_commission overflow".into(),
-                        )
-                    })?,
-                operation_id: None,
+            Ok(DestinationProof {
+                proof: RouteProof {
+                    amount: destination
+                        .psbt_output_amount
+                        .checked_add(source_commission)
+                        .ok_or_else(|| {
+                            EnclaveError::CrossCheck(
+                                "psbt_output_amount + source_commission overflow".into(),
+                            )
+                        })?,
+                    operation_id: None,
+                },
+                evm_funds_out: None,
             })
         }
     }
