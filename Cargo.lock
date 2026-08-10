@@ -7926,6 +7926,7 @@ dependencies = [
  "rgb-schemas",
  "secrecy",
  "serde",
+ "serde_json",
  "sha2 0.10.9",
  "sha3 0.10.8",
  "subtle",

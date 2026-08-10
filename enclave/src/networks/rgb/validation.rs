@@ -14,13 +14,12 @@ use rgb_consignment::{
     ConsignmentInfo, FungibleAllocation, FungibleEntry, SealInfo, TransitionInfo, WitnessInfo,
 };
 use rgbstd::containers::{ConsignmentExt, FileContent, Transfer};
-use rgbstd::indexers::esplora_blocking::esplora_client;
-use rgbstd::indexers::AnyResolver;
 use rgbstd::schema::{MetaType, TransitionType};
 use rgbstd::validation::ValidationConfig;
 use rgbstd::ChainNet;
 use sha3::{Digest, Keccak256};
 
+use super::esplora_egress::{ConsignmentResolver, EsploraDest, TypedEsploraClient};
 use crate::config::BridgeConfig;
 use crate::error::{EnclaveError, Result};
 use crate::networks::ValidationContext;
@@ -424,13 +423,14 @@ pub enum OutputSeal {
     Confidential { secret_seal: String },
 }
 
-/// Hard cap on any single blocking Esplora HTTP call (connect + read), in
-/// seconds. The Esplora egress runs through the host-controlled vsock proxy,
-/// and consignment validation happens *on the signing path* — without a
-/// timeout a stalled host pins the worker thread indefinitely (audit final
-/// I-03 / #87). Aligned with `conn.rs`'s `TOTAL_REQUEST_TIMEOUT` so a single
-/// stalled egress call cannot outlive its enclosing request budget.
-/// Compile-time (PCR-attested), deliberately not host-tunable.
+/// Absolute per-call budget for a single Esplora fetch (connect + all reads),
+/// in seconds. The Esplora egress runs through the host-controlled vsock proxy
+/// and consignment validation happens *on the signing path*, so without a bound
+/// a stalled or slow-trickle host pins a worker thread. The typed client wraps
+/// each call in a `conn::DeadlineStream` with this budget, so the whole fetch —
+/// not just one read syscall — is bounded, matching `conn.rs`'s
+/// `TOTAL_REQUEST_TIMEOUT` for ingress. Compile-time (PCR-attested), deliberately
+/// not host-tunable.
 const ESPLORA_HTTP_TIMEOUT_SECS: u64 = 30;
 
 /// How long a fetched fee estimate stays fresh (#55). Fee markets move on
@@ -449,51 +449,73 @@ const FEE_ESTIMATE_TARGET: u16 = 6;
 /// valueless; it just keeps the path enforced against a runaway burn.
 const NON_MAINNET_FALLBACK_FEE_RATE_SAT_VB: f64 = 10.0;
 
-/// Validates RGB consignments using rgbstd and an Esplora-backed resolver.
+/// Validates RGB consignments using rgbstd and a typed, pinned Esplora client.
 #[derive(Debug)]
 pub struct RgbValidator {
-    esplora_url: String,
+    /// Typed, destination-pinned Esplora egress: exposes only the resolver's
+    /// genesis/tx/status calls plus the fee estimate, over a boot-pinned
+    /// destination with no retries — not a generic host egress.
+    client: TypedEsploraClient,
     chain_net: ChainNet,
     /// Cached `(fetched_at, sat/vB)` recommended fee rate (#55), guarded for
     /// the multi-threaded worker pool. `None` until the first fetch.
     fee_estimate_cache: std::sync::Mutex<Option<(std::time::Instant, f64)>>,
-    /// Per-request HTTP timeout, [`ESPLORA_HTTP_TIMEOUT_SECS`] in production.
-    /// Overridable only from tests (no env / host input reaches it).
-    http_timeout_secs: u64,
 }
 
 impl RgbValidator {
-    /// Create a new validator.
-    ///
-    /// - `esplora_url`: HTTP URL for the Esplora API (e.g., `http://127.0.0.1:3443`
-    ///   when using the vsock forwarder, or a direct URL in dev mode).
-    /// - `bitcoin_network`: One of "bitcoin", "testnet", "signet", "regtest".
-    pub fn new(esplora_url: String, bitcoin_network: &str) -> Result<Self> {
-        let chain_net = match bitcoin_network {
-            "bitcoin" | "mainnet" => ChainNet::BitcoinMainnet,
-            "testnet" | "testnet3" => ChainNet::BitcoinTestnet3,
-            "signet" => ChainNet::BitcoinSignet,
-            "regtest" => ChainNet::BitcoinRegtest,
-            other => {
-                return Err(EnclaveError::Internal(format!(
-                    "unknown bitcoin network: {other}"
-                )))
-            }
-        };
-        tracing::info!(%esplora_url, %bitcoin_network, "RGB validator configured");
-        Ok(Self {
-            esplora_url,
+    fn chain_net_for(bitcoin_network: &str) -> Result<ChainNet> {
+        match bitcoin_network {
+            "bitcoin" | "mainnet" => Ok(ChainNet::BitcoinMainnet),
+            "testnet" | "testnet3" => Ok(ChainNet::BitcoinTestnet3),
+            "signet" => Ok(ChainNet::BitcoinSignet),
+            "regtest" => Ok(ChainNet::BitcoinRegtest),
+            other => Err(EnclaveError::Internal(format!(
+                "unknown bitcoin network: {other}"
+            ))),
+        }
+    }
+
+    fn from_dest(dest: EsploraDest, chain_net: ChainNet) -> Self {
+        Self {
+            client: TypedEsploraClient::new(
+                dest,
+                std::time::Duration::from_secs(ESPLORA_HTTP_TIMEOUT_SECS),
+            ),
             chain_net,
             fee_estimate_cache: std::sync::Mutex::new(None),
-            http_timeout_secs: ESPLORA_HTTP_TIMEOUT_SECS,
-        })
+        }
+    }
+
+    /// Create a validator that reaches Esplora over a direct TCP `esplora_url`
+    /// (`http://host:port`). Used in dev / tests; production uses
+    /// [`Self::new_vsock`].
+    ///
+    /// - `bitcoin_network`: one of "bitcoin", "testnet", "signet", "regtest".
+    pub fn new(esplora_url: String, bitcoin_network: &str) -> Result<Self> {
+        let chain_net = Self::chain_net_for(bitcoin_network)?;
+        let dest = EsploraDest::tcp_from_url(&esplora_url)?;
+        tracing::info!(%esplora_url, %bitcoin_network, "RGB validator configured (pinned TCP Esplora)");
+        Ok(Self::from_dest(dest, chain_net))
+    }
+
+    /// Create a validator that reaches Esplora by dialing the parent vsock
+    /// directly (CID 3, `vsock_port`) — no loopback forwarder.
+    #[cfg(all(feature = "vsock", target_os = "linux"))]
+    pub fn new_vsock(vsock_port: u32, bitcoin_network: &str) -> Result<Self> {
+        let chain_net = Self::chain_net_for(bitcoin_network)?;
+        tracing::info!(vsock_port, %bitcoin_network, "RGB validator configured (pinned vsock Esplora)");
+        Ok(Self::from_dest(
+            EsploraDest::Vsock { port: vsock_port },
+            chain_net,
+        ))
     }
 
     /// Shrink the HTTP timeout so the stalled-host test doesn't wait the
     /// production budget. Test-only by construction.
     #[cfg(test)]
     fn with_http_timeout(mut self, secs: u64) -> Self {
-        self.http_timeout_secs = secs;
+        self.client
+            .set_timeout(std::time::Duration::from_secs(secs));
         self
     }
 
@@ -518,13 +540,10 @@ impl RgbValidator {
             }
         }
 
-        let client = esplora_client::Builder::new(&self.esplora_url)
-            .timeout(self.http_timeout_secs)
-            .build_blocking();
-        let estimates = client.get_fee_estimates().map_err(|e| {
+        let estimates = self.client.get_fee_estimates().map_err(|e| {
             EnclaveError::CrossCheck(format!(
                 "fee-estimate fetch failed — refusing to sign a send-RGB PSBT without a \
-                 fee-rate sanity bound (#55): {e}"
+                 fee-rate sanity bound: {e}"
             ))
         })?;
 
@@ -573,11 +592,7 @@ impl RgbValidator {
     pub fn validate_consignment(&self, consignment_bytes: &[u8]) -> Result<ValidatedConsignment> {
         let start = std::time::Instant::now();
         let bytes_len = consignment_bytes.len();
-        tracing::info!(
-            bytes_len,
-            esplora_url = %self.esplora_url,
-            "starting RGB consignment validation"
-        );
+        tracing::info!(bytes_len, "starting RGB consignment validation");
 
         // 1. Deserialize the consignment from its file format (magic + strict-encoded).
         let transfer = Transfer::load(Cursor::new(consignment_bytes)).map_err(|e| {
@@ -664,22 +679,19 @@ impl RgbValidator {
                 _ => (None, None, None),
             };
 
-        // 2. Create an Esplora-backed resolver. The `.timeout()` is
-        // load-bearing: this is a blocking call on the signing path through
-        // the host-controlled vsock proxy (audit final I-03 / #87). Transport
-        // errors (incl. timeouts) propagate immediately — esplora-client only
-        // retries on 429/5xx status codes — so one stalled call costs at most
-        // the timeout, never an unbounded hang.
-        let builder =
-            esplora_client::Builder::new(&self.esplora_url).timeout(self.http_timeout_secs);
-        let mut resolver = AnyResolver::esplora_blocking(builder).map_err(|e| {
-            tracing::error!(esplora_url = %self.esplora_url, "esplora resolver creation failed: {e}");
-            EnclaveError::CrossCheck(format!("esplora resolver creation failed: {e}"))
-        })?;
-
-        // Register transactions bundled in the consignment so the resolver
-        // treats them as tentative witnesses (not yet mined).
-        resolver.add_consignment_txes(&transfer);
+        // 2. Build the typed, pinned Esplora resolver. Transactions bundled in
+        // the consignment are answered locally as tentative witnesses (no
+        // egress); any other witness is fetched through the pinned client with a
+        // bounded, non-retrying blocking call, so a stalled or error-spamming
+        // host costs at most one timeout per fetch and can never amplify a
+        // single fetch or pin a signing worker.
+        let consignment_txes: std::collections::HashMap<_, _> = transfer
+            .bundles
+            .iter()
+            .filter_map(|bw| bw.pub_witness.tx().cloned())
+            .map(|tx| (tx.compute_txid(), tx))
+            .collect();
+        let resolver = ConsignmentResolver::new(&self.client, consignment_txes);
 
         // Pin the trusted type system (audit 4th W-01 / #92). Source it from
         // the canonical `rgb-schemas` definitions keyed on the consignment's

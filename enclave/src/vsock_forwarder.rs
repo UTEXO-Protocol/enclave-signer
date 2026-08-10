@@ -1,20 +1,21 @@
-//! TCP-to-vsock forwarder for reaching external services (e.g., Esplora) from
-//! inside a Nitro enclave. Listens on localhost TCP and forwards each connection
-//! to the parent instance via vsock, where `vsock-proxy` relays to the real endpoint.
+//! TCP-to-vsock forwarder for reaching external services from inside a Nitro
+//! enclave. Listens on localhost TCP and forwards each connection to the parent
+//! instance via vsock, where `vsock-proxy` relays to the real endpoint.
 //!
-//! TRUST BOUNDARY (audit I-01 / Oxorio I-03, I-08): everything reachable
-//! through this forwarder is HOST-CONTROLLED and UNTRUSTED. The host runs the
-//! `vsock-proxy` on the far end and can drop, delay, reorder, or forge any
-//! bytes it returns. Data fetched over it (Esplora tx / merkle proof / chain
-//! tip) is EVIDENCE TO BE VERIFIED - by in-enclave SPV proof checking and
-//! rgbstd consignment validation - never trusted input. The listener binds
-//! only to loopback (`127.0.0.1`, not externally reachable), but it is a
-//! GENERIC egress primitive: any code inside the enclave process that can open
-//! a loopback socket can tunnel host-bound traffic through it. A future
-//! hardening (issue #87) would replace it with a typed Esplora client private
-//! to the RGB resolver path that only issues the specific calls the resolver
-//! makes (fetch tx / merkle proof / tip), so arbitrary traffic cannot be
-//! tunneled.
+//! TRUST BOUNDARY: everything reachable through this forwarder is
+//! HOST-CONTROLLED and UNTRUSTED. The host runs the `vsock-proxy` on the far
+//! end and can drop, delay, reorder, or forge any bytes it returns. Data
+//! fetched over it is EVIDENCE TO BE VERIFIED - by the in-enclave Helios light
+//! client for EVM data - never trusted input. The listener binds only to
+//! loopback (`127.0.0.1`, not externally reachable), but it is a GENERIC egress
+//! primitive: any code inside the enclave process that can open a loopback
+//! socket can tunnel host-bound traffic through it.
+//!
+//! The Esplora path no longer uses this forwarder: the RGB validator owns a
+//! typed, destination-pinned Esplora client that dials the parent vsock
+//! directly and exposes only the specific calls the resolver makes, so no
+//! Esplora traffic can be tunneled through a generic port. This forwarder now
+//! serves the EVM-RPC and Helios execution/consensus paths only.
 
 use std::io;
 use std::net::TcpListener;
@@ -29,7 +30,7 @@ const PARENT_CID: u32 = 3;
 ///
 /// See the module-level TRUST BOUNDARY note: this is an untrusted,
 /// host-controlled egress path. Anything fetched through it must be verified
-/// (SPV + rgbstd validation), never trusted as input (audit I-01).
+/// in-enclave (Helios light client for EVM data), never trusted as input.
 ///
 /// The forwarder is fire-and-forget — it logs errors but never crashes the enclave.
 pub fn start_forwarder(local_port: u16, vsock_port: u32) -> io::Result<()> {
