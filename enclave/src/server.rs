@@ -342,9 +342,17 @@ fn handle_sign(ctx: &ServerContext, req: SignRequest) -> Result<EnclaveResponse>
     }
 
     // Soft operation-uniqueness guard (audit W-02 / #84). In EVM -> RGB
-    // bridge mode, record the source/destination operation tuple and reject a
-    // same-op resubmission inside the TTL window. This is defense-in-depth
-    // only: the guard is in-memory, per-instance, and volatile across restart.
+    // bridge mode, reject a same-op resubmission inside the TTL window.
+    // Defense-in-depth only: in-memory, per-instance, volatile across restart.
+    //
+    // CHECK here, RECORD only after the signature is actually produced (end of
+    // this function). Recording at check time poisoned honest retries: the
+    // federation fan-out cancels in-flight cosigners the moment threshold
+    // becomes unreachable, so one transient failure on a sibling node left
+    // this enclave's guard primed with no signature delivered, and every
+    // retry was refused as a replay until a restart.
+    #[cfg(not(feature = "dev-mode"))]
+    let mut replay_key_to_record: Option<[u8; 32]> = None;
     #[cfg(not(feature = "dev-mode"))]
     if let SourceNetwork::EvmSource(source) = source_ref {
         let rgb_op = match destination_ref {
@@ -362,8 +370,8 @@ fn handle_sign(ctx: &ServerContext, req: SignRequest) -> Result<EnclaveResponse>
                 operation_idx,
                 asset_id,
             );
-            match ctx.state.op_replay_guard.check_and_record(op_key) {
-                Ok(()) => {}
+            match ctx.state.op_replay_guard.check(op_key) {
+                Ok(()) => replay_key_to_record = Some(op_key),
                 Err(EnclaveError::NonceReplay) => {
                     tracing::warn!(
                         operation_idx,
@@ -386,7 +394,7 @@ fn handle_sign(ctx: &ServerContext, req: SignRequest) -> Result<EnclaveResponse>
         EnclaveError::InvalidRequest("sign request has no destination_network".into())
     })?;
 
-    match destination {
+    let result = match destination {
         DestinationNetwork::EvmDestination(destination) => {
             // RGB->EVM `fundsOut` binding: with the consignment the source
             // validation captured, bind the calldata the enclave is about to
@@ -415,7 +423,21 @@ fn handle_sign(ctx: &ServerContext, req: SignRequest) -> Result<EnclaveResponse>
         DestinationNetwork::RgbInflationDestination(destination) => {
             handle_sign_psbt(ctx, &destination.psbt_bytes)
         }
+    };
+
+    // The signature exists - NOW arm the replay guard (see the check above).
+    // A response lost between here and the parent re-arms on the next attempt
+    // only after this TTL, which is the soft guard's documented trade-off.
+    #[cfg(not(feature = "dev-mode"))]
+    if result.is_ok() {
+        if let Some(op_key) = replay_key_to_record {
+            if let Err(e) = ctx.state.op_replay_guard.record(op_key) {
+                tracing::warn!("replay guard record failed: {e}");
+            }
+        }
     }
+
+    result
 }
 
 /// Bind an RGB->EVM `fundsOut` calldata to the validated consignment before the

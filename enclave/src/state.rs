@@ -118,6 +118,56 @@ impl NonceReplayGuard {
         self.check_and_record_at(nonce, Instant::now())
     }
 
+    /// Replay test WITHOUT recording. Pair with [`record`]: check before
+    /// signing, record only once the signature was actually produced.
+    /// Recording at check time poisons honest retries - seen live on the
+    /// stand: the federation fan-out cancels in-flight cosigners the moment
+    /// threshold becomes unreachable (one node always fails instantly), so a
+    /// single transient failure on one cosigner left the other's guard primed
+    /// with no signature delivered, and every retry after that was refused as
+    /// a replay until an enclave restart.
+    pub fn check(&self, nonce: [u8; 32]) -> Result<()> {
+        let now = Instant::now();
+        let mut g = self
+            .inner
+            .lock()
+            .map_err(|e| EnclaveError::Internal(format!("replay guard poisoned: {}", e)))?;
+        while let Some(&(seen_at, old)) = g.order.front() {
+            if now.saturating_duration_since(seen_at) >= self.ttl {
+                g.order.pop_front();
+                g.seen.remove(&old);
+            } else {
+                break;
+            }
+        }
+        if g.seen.contains(&nonce) {
+            return Err(EnclaveError::NonceReplay);
+        }
+        Ok(())
+    }
+
+    /// Record a nonce after the guarded action succeeded. Same eviction and
+    /// memory-ceiling rules as [`check_and_record`]; no replay test - the
+    /// caller already ran [`check`].
+    pub fn record(&self, nonce: [u8; 32]) -> Result<()> {
+        let now = Instant::now();
+        let mut g = self
+            .inner
+            .lock()
+            .map_err(|e| EnclaveError::Internal(format!("replay guard poisoned: {}", e)))?;
+        while g.seen.len() >= self.max {
+            match g.order.pop_front() {
+                Some((_, old)) => {
+                    g.seen.remove(&old);
+                }
+                None => break,
+            }
+        }
+        g.seen.insert(nonce);
+        g.order.push_back((now, nonce));
+        Ok(())
+    }
+
     /// Time-injected core of [`check_and_record`]. `now` is the wall point
     /// against which TTL eviction is measured; the public method passes
     /// `Instant::now()`. Split out so the eviction logic is testable
