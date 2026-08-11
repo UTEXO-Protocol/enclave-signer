@@ -1041,8 +1041,21 @@ pub struct ValidatedInflationFascia {
 /// Parse and walk an rgb-lib fascia file for the mint path.
 ///
 /// Refuses: non-JSON / non-Fascia bytes, more than one contract per fascia,
-/// and any transition that is not IFA `TS_INFLATION` - a mint witness must
-/// only inflate, or a transfer could ride the same signature.
+/// any `TS_BURN` or unknown transition type, and a fascia that mints zero
+/// `OS_ASSET` units.
+///
+/// `TS_TRANSFER` legs are ACCEPTED alongside the inflation, deliberately:
+/// when the inflation-rights allocation shares a utxo with other allocations
+/// (which happens as soon as one mint's allowance change lands on an occupied
+/// utxo - seen live on the second stand mint), spending that utxo forces
+/// rgb-lib to move the co-located allocations in the same witness. Those legs
+/// contribute NOTHING to `minted_amount`, so the deposit==minted binding is
+/// untouched. What the enclave cannot see is a transfer leg's destination (a
+/// fascia seal is txid/vout/blinding; telling "own change" from an attacker
+/// output needs the wallet descriptor) - that is checked by the cosigners'
+/// `InspectRgbTransfer` at ACK time, the same defence the pools send path
+/// relies on. A descriptor-aware enclave check is a refinement for the
+/// enclave team, same bucket as the create-utxos descriptor policy.
 pub fn validate_inflation_fascia(fascia_bytes: &[u8]) -> Result<ValidatedInflationFascia> {
     use rgbstd::containers::Fascia;
     use rgbstd::schema::AssignmentType;
@@ -1067,24 +1080,31 @@ pub fn validate_inflation_fascia(fascia_bytes: &[u8]) -> Result<ValidatedInflati
     let contract_id_str = contract_id.to_string();
 
     let inflation = TransitionType::with(ifa::TS_INFLATION);
+    let transfer = TransitionType::with(ifa::TS_TRANSFER);
     let asset_type = AssignmentType::with(ifa::OS_ASSET);
     let mut minted_amount: u64 = 0;
     let mut inflation_op_ids = Vec::new();
 
     for known in &bundle.known_transitions {
         let transition = &known.transition;
-        if transition.transition_type != inflation {
-            return Err(EnclaveError::CrossCheck(format!(
-                "mint fascia carries a non-inflation transition (type {}, expected IFA \
-                 TS_INFLATION {}) - a mint witness must only inflate",
-                transition.transition_type,
-                ifa::TS_INFLATION
-            )));
-        }
         if transition.contract_id != *contract_id {
             return Err(EnclaveError::CrossCheck(format!(
                 "fascia transition contract {} disagrees with the bundle key {contract_id_str}",
                 transition.contract_id
+            )));
+        }
+        if transition.transition_type == transfer {
+            // Co-located allocations moving off the spent utxos; see the
+            // function doc. Not counted toward minted_amount.
+            continue;
+        }
+        if transition.transition_type != inflation {
+            return Err(EnclaveError::CrossCheck(format!(
+                "mint fascia carries transition type {} - only IFA TS_INFLATION ({}) and \
+                 accompanying TS_TRANSFER ({}) legs are allowed in a mint witness",
+                transition.transition_type,
+                ifa::TS_INFLATION,
+                ifa::TS_TRANSFER
             )));
         }
         for (assignment_type, assigns) in transition.assignments.iter() {
@@ -1154,12 +1174,25 @@ mod tests {
     }
 
     #[test]
-    fn refuses_a_transfer_smuggled_into_a_mint_fascia() {
+    fn refuses_a_transfer_only_fascia() {
+        // Transfer legs are allowed ALONGSIDE an inflation, but a fascia with
+        // no inflation at all mints nothing - the zero-mint refusal holds.
         let tampered = String::from_utf8_lossy(LIVE_MINT_FASCIA)
             .replace("\"transitionType\":8000", "\"transitionType\":10000");
         let err = validate_inflation_fascia(tampered.as_bytes()).unwrap_err();
         assert!(
-            err.to_string().contains("non-inflation transition"),
+            err.to_string().contains("mints zero OS_ASSET"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn refuses_a_burn_in_a_mint_fascia() {
+        let tampered = String::from_utf8_lossy(LIVE_MINT_FASCIA)
+            .replace("\"transitionType\":8000", "\"transitionType\":8010");
+        let err = validate_inflation_fascia(tampered.as_bytes()).unwrap_err();
+        assert!(
+            err.to_string().contains("only IFA TS_INFLATION"),
             "unexpected error: {err}"
         );
     }
