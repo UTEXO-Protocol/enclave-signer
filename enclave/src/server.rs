@@ -345,14 +345,12 @@ fn handle_sign(ctx: &ServerContext, req: SignRequest) -> Result<EnclaveResponse>
     // bridge mode, reject a same-op resubmission inside the TTL window.
     // Defense-in-depth only: in-memory, per-instance, volatile across restart.
     //
-    // CHECK here, RECORD only after the signature is actually produced (end of
-    // this function). Recording at check time poisoned honest retries: the
-    // federation fan-out cancels in-flight cosigners the moment threshold
-    // becomes unreachable, so one transient failure on a sibling node left
-    // this enclave's guard primed with no signature delivered, and every
-    // retry was refused as a replay until a restart.
+    // RESERVE here (atomic test-and-reserve under one lock, so concurrent
+    // same-op requests cannot both pass), PROMOTE only after the signature is
+    // actually produced, RELEASE on failure so honest retries survive. See
+    // NonceReplayGuard::reserve for the live incident this encodes.
     #[cfg(not(feature = "dev-mode"))]
-    let mut replay_key_to_record: Option<[u8; 32]> = None;
+    let mut reserved_replay_key: Option<[u8; 32]> = None;
     #[cfg(not(feature = "dev-mode"))]
     if let SourceNetwork::EvmSource(source) = source_ref {
         let rgb_op = match destination_ref {
@@ -370,8 +368,8 @@ fn handle_sign(ctx: &ServerContext, req: SignRequest) -> Result<EnclaveResponse>
                 operation_idx,
                 asset_id,
             );
-            match ctx.state.op_replay_guard.check(op_key) {
-                Ok(()) => replay_key_to_record = Some(op_key),
+            match ctx.state.op_replay_guard.reserve(op_key) {
+                Ok(()) => reserved_replay_key = Some(op_key),
                 Err(EnclaveError::NonceReplay) => {
                     tracing::warn!(
                         operation_idx,
@@ -425,15 +423,18 @@ fn handle_sign(ctx: &ServerContext, req: SignRequest) -> Result<EnclaveResponse>
         }
     };
 
-    // The signature exists - NOW arm the replay guard (see the check above).
-    // A response lost between here and the parent re-arms on the next attempt
-    // only after this TTL, which is the soft guard's documented trade-off.
+    // Settle the reservation: a produced signature arms the guard durably; a
+    // failed attempt releases the key so an honest retry is not refused. The
+    // enclave always reaches this line, so a reservation cannot dangle.
     #[cfg(not(feature = "dev-mode"))]
-    if result.is_ok() {
-        if let Some(op_key) = replay_key_to_record {
-            if let Err(e) = ctx.state.op_replay_guard.record(op_key) {
-                tracing::warn!("replay guard record failed: {e}");
-            }
+    if let Some(op_key) = reserved_replay_key {
+        let settle = if result.is_ok() {
+            ctx.state.op_replay_guard.promote(op_key)
+        } else {
+            ctx.state.op_replay_guard.release(op_key)
+        };
+        if let Err(e) = settle {
+            tracing::warn!("replay guard settle failed: {e}");
         }
     }
 

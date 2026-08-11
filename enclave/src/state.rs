@@ -94,6 +94,11 @@ pub struct NonceReplayGuard {
 struct GuardState {
     seen: HashSet<[u8; 32]>,
     order: VecDeque<(Instant, [u8; 32])>,
+    /// Keys reserved by an in-flight signing attempt: refused as
+    /// duplicates like `seen`, but released (not promoted) when the attempt
+    /// fails, so honest retries survive - the atomic middle ground between
+    /// record-at-check (poisons retries) and check-then-record (TOCTOU).
+    tentative: HashSet<[u8; 32]>,
 }
 
 impl Default for NonceReplayGuard {
@@ -108,6 +113,7 @@ impl NonceReplayGuard {
             inner: Mutex::new(GuardState {
                 seen: HashSet::new(),
                 order: VecDeque::new(),
+                tentative: HashSet::new(),
             }),
             max,
             ttl,
@@ -118,15 +124,22 @@ impl NonceReplayGuard {
         self.check_and_record_at(nonce, Instant::now())
     }
 
-    /// Replay test WITHOUT recording. Pair with [`record`]: check before
-    /// signing, record only once the signature was actually produced.
-    /// Recording at check time poisons honest retries - seen live on the
-    /// stand: the federation fan-out cancels in-flight cosigners the moment
-    /// threshold becomes unreachable (one node always fails instantly), so a
-    /// single transient failure on one cosigner left the other's guard primed
-    /// with no signature delivered, and every retry after that was refused as
-    /// a replay until an enclave restart.
-    pub fn check(&self, nonce: [u8; 32]) -> Result<()> {
+    /// Atomically test-and-reserve a key for an in-flight signing attempt.
+    ///
+    /// Refuses when the key is already recorded (a delivered signature inside
+    /// the TTL) OR already reserved (a concurrent attempt) - both checks and
+    /// the reservation happen under one lock, so two concurrent requests can
+    /// never both observe the key as absent. The caller MUST finish with
+    /// [`promote`] (signature produced) or [`release`] (attempt failed); the
+    /// enclave handles each request to completion, so a reservation cannot
+    /// dangle.
+    ///
+    /// Why not record at check time: the federation fan-out cancels in-flight
+    /// cosigners the moment threshold becomes unreachable (one node always
+    /// fails instantly on mints), so a transient failure on a sibling left
+    /// this enclave's guard primed with no signature delivered, and every
+    /// retry was refused as a replay until a restart. Seen live, twice.
+    pub fn reserve(&self, nonce: [u8; 32]) -> Result<()> {
         let now = Instant::now();
         let mut g = self
             .inner
@@ -140,21 +153,21 @@ impl NonceReplayGuard {
                 break;
             }
         }
-        if g.seen.contains(&nonce) {
+        if g.seen.contains(&nonce) || g.tentative.contains(&nonce) {
             return Err(EnclaveError::NonceReplay);
         }
+        g.tentative.insert(nonce);
         Ok(())
     }
 
-    /// Record a nonce after the guarded action succeeded. Same eviction and
-    /// memory-ceiling rules as [`check_and_record`]; no replay test - the
-    /// caller already ran [`check`].
-    pub fn record(&self, nonce: [u8; 32]) -> Result<()> {
+    /// Promote a reservation to a durable record - the signature exists.
+    pub fn promote(&self, nonce: [u8; 32]) -> Result<()> {
         let now = Instant::now();
         let mut g = self
             .inner
             .lock()
             .map_err(|e| EnclaveError::Internal(format!("replay guard poisoned: {}", e)))?;
+        g.tentative.remove(&nonce);
         while g.seen.len() >= self.max {
             match g.order.pop_front() {
                 Some((_, old)) => {
@@ -165,6 +178,17 @@ impl NonceReplayGuard {
         }
         g.seen.insert(nonce);
         g.order.push_back((now, nonce));
+        Ok(())
+    }
+
+    /// Drop a reservation - the attempt failed before a signature existed, so
+    /// an honest retry must succeed.
+    pub fn release(&self, nonce: [u8; 32]) -> Result<()> {
+        let mut g = self
+            .inner
+            .lock()
+            .map_err(|e| EnclaveError::Internal(format!("replay guard poisoned: {}", e)))?;
+        g.tentative.remove(&nonce);
         Ok(())
     }
 
@@ -527,6 +551,33 @@ fn ensure_initial(phase: &Phase) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn reserved_key_refuses_a_concurrent_duplicate() {
+        let g = NonceReplayGuard::with_capacity(16, std::time::Duration::from_secs(60));
+        let k = [7u8; 32];
+        g.reserve(k).expect("first reserve");
+        assert!(matches!(g.reserve(k), Err(EnclaveError::NonceReplay)));
+    }
+
+    #[test]
+    fn released_key_allows_an_honest_retry() {
+        let g = NonceReplayGuard::with_capacity(16, std::time::Duration::from_secs(60));
+        let k = [8u8; 32];
+        g.reserve(k).expect("reserve");
+        g.release(k).expect("release");
+        g.reserve(k)
+            .expect("retry after a failed attempt must succeed");
+    }
+
+    #[test]
+    fn promoted_key_is_a_durable_replay() {
+        let g = NonceReplayGuard::with_capacity(16, std::time::Duration::from_secs(60));
+        let k = [9u8; 32];
+        g.reserve(k).expect("reserve");
+        g.promote(k).expect("promote");
+        assert!(matches!(g.reserve(k), Err(EnclaveError::NonceReplay)));
+    }
     use super::*;
 
     #[test]
