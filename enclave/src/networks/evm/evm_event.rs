@@ -289,6 +289,20 @@ fn check_eq(field: &str, got: u64, want: u64) -> Result<()> {
     Ok(())
 }
 
+/// Hard per-call ceiling for a single EVM JSON-RPC round-trip. WITHOUT it a
+/// hung RPC (e.g. a half-open keep-alive to the host's vsock-proxy/nginx after
+/// it restarts, or an upstream that accepts the socket then never replies)
+/// blocks the worker thread FOREVER: `block_on` has no built-in deadline and
+/// alloy/reqwest set no default request timeout. The accept-layer
+/// [`crate::conn::DeadlineStream`] bounds only the request SOCKET I/O, never
+/// this compute, and a client-side (parent/listener) timeout does NOT cancel
+/// the in-flight `block_on`. With only [`crate::conn::WORKER_THREADS`] workers,
+/// a handful of such stalls pin every worker and wedge the whole enclave until
+/// terminate+run. Bounding each call and failing closed on elapse frees the
+/// worker instead. 15s comfortably covers a healthy receipt/head fetch through
+/// the loopback -> vsock -> nginx -> upstream path.
+const EVM_RPC_CALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+
 /// Production [`EvmReceiptProvider`]: an alloy JSON-RPC client over the
 /// in-enclave loopback URL (which a vsock forwarder tunnels to the host EVM
 /// RPC). alloy is async, so a single-worker tokio runtime is built once at boot
@@ -322,9 +336,22 @@ impl EvmReceiptProvider for AlloyEvmClient {
     fn get_transaction_receipt(&self, tx_hash: &[u8; 32]) -> Result<Option<ReceiptData>> {
         use alloy::providers::Provider;
         let hash = alloy::primitives::B256::from_slice(tx_hash);
+        // `timeout` requires the runtime's time driver (built with `enable_all`).
+        // Outer `?` = the call stalled past the deadline (fail closed, free the
+        // worker); inner `?` = the RPC itself errored.
         let receipt = self
             .runtime
-            .block_on(self.provider.get_transaction_receipt(hash))
+            .block_on(tokio::time::timeout(
+                EVM_RPC_CALL_TIMEOUT,
+                self.provider.get_transaction_receipt(hash),
+            ))
+            .map_err(|_elapsed| {
+                EnclaveError::CrossCheck(format!(
+                    "evm-rpc: eth_getTransactionReceipt timed out after {}s (host RPC path stalled) \
+                     - refusing to sign",
+                    EVM_RPC_CALL_TIMEOUT.as_secs()
+                ))
+            })?
             .map_err(|e| {
                 EnclaveError::CrossCheck(format!("evm-rpc: eth_getTransactionReceipt failed: {e}"))
             })?;
@@ -334,7 +361,17 @@ impl EvmReceiptProvider for AlloyEvmClient {
     fn get_block_number(&self) -> Result<u64> {
         use alloy::providers::Provider;
         self.runtime
-            .block_on(self.provider.get_block_number())
+            .block_on(tokio::time::timeout(
+                EVM_RPC_CALL_TIMEOUT,
+                self.provider.get_block_number(),
+            ))
+            .map_err(|_elapsed| {
+                EnclaveError::CrossCheck(format!(
+                    "evm-rpc: eth_blockNumber timed out after {}s (host RPC path stalled) - \
+                     refusing to sign",
+                    EVM_RPC_CALL_TIMEOUT.as_secs()
+                ))
+            })?
             .map_err(|e| EnclaveError::CrossCheck(format!("evm-rpc: eth_blockNumber failed: {e}")))
     }
 }
