@@ -1122,6 +1122,54 @@ pub fn validate_inflation_fascia(fascia_bytes: &[u8]) -> Result<ValidatedInflati
 mod tests {
     use super::*;
 
+    /// The fascia of the FIRST live mint (stand slot 2, hub operation 5),
+    /// captured verbatim from the hub's file store. Its witness transaction is
+    /// on UTEXO Signet as
+    /// `9010bf45acc9919dfed1a1473e5bc0b9735bd30b8aaffa039f595b86d285b46f`
+    /// (height 527780), and its opid is the very settlement_data the deposit
+    /// carried - so these assertions pin the parser to data that provably
+    /// cleared the whole path.
+    const LIVE_MINT_FASCIA: &[u8] = include_bytes!("../../../tests/fixtures/mint-fascia.json");
+
+    #[test]
+    fn parses_the_live_mint_fascia() {
+        let f = validate_inflation_fascia(LIVE_MINT_FASCIA).expect("live fascia must validate");
+        assert_eq!(
+            f.contract_id,
+            "rgb:WOLU~Vc3-jCOii6g-35VF9Xz-FVTweL7-v9klRrl-4OTd2Mo"
+        );
+        // OS_ASSET only. The same transition carries 999_999_900_000 of
+        // OS_INFLATION allowance; counting it would be the #54 bug.
+        assert_eq!(f.minted_amount, 100_000);
+        // txid excludes witness data, so the unsigned witness tx in the fascia
+        // has exactly the txid the signed transaction confirmed under.
+        assert_eq!(
+            f.witness_txid.to_string(),
+            "9010bf45acc9919dfed1a1473e5bc0b9735bd30b8aaffa039f595b86d285b46f"
+        );
+        assert_eq!(
+            f.inflation_op_ids,
+            vec!["ee69b9b60d3044c94b9e5586016d6852f767125061637789a006ff0ab092c49c".to_string()]
+        );
+    }
+
+    #[test]
+    fn refuses_a_transfer_smuggled_into_a_mint_fascia() {
+        let tampered = String::from_utf8_lossy(LIVE_MINT_FASCIA)
+            .replace("\"transitionType\":8000", "\"transitionType\":10000");
+        let err = validate_inflation_fascia(tampered.as_bytes()).unwrap_err();
+        assert!(
+            err.to_string().contains("non-inflation transition"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn refuses_garbage_fascia_bytes() {
+        assert!(validate_inflation_fascia(b"not json").is_err());
+        assert!(validate_inflation_fascia(b"{}").is_err());
+    }
+
     // Fixtures borrowed from the rgb-consignment-parser repo
     // (`test-data/consignment_out` and `test-data/asset`). Both are
     // mainnet NIA artefacts produced by the upstream rgb-lib test
