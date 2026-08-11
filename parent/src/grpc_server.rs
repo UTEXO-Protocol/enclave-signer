@@ -156,6 +156,9 @@ impl ParentAdapterService {
         source: SourceProof,
     ) -> Result<enclave_proto::sign_request::SourceNetwork, Status> {
         match source.chain {
+            Some(source_proof::Chain::Ccd(_)) => Err(Status::invalid_argument(
+                "CCD sources are not supported by this build",
+            )),
             Some(source_proof::Chain::Evm(evm)) => {
                 // Diagnosability only — here we still know which node sent it.
                 // The enclave's own check is the authority.
@@ -212,6 +215,9 @@ impl ParentAdapterService {
                         proxy_contract: payload.proxy_contract,
                         calldata_amount: payload.calldata_amount,
                         calldata_commission: payload.calldata_commission,
+                        // This branch predates the LZ release path: every
+                        // release here is a direct fundsOutCall.
+                        lz_release: None,
                     },
                 )
             }
@@ -227,11 +233,27 @@ impl ParentAdapterService {
                     },
                 )
             }
+            sign_request::Data::RgbInflationData(payload) => {
+                enclave_proto::sign_request::DestinationNetwork::RgbInflationDestination(
+                    enclave_proto::RgbInflationDestination {
+                        operation_idx: payload.operation_idx,
+                        psbt_bytes: payload.psbt_bytes,
+                        asset_id: payload.rgb_asset_id,
+                        fascia: payload.fascia,
+                        fascia_hash: payload.fascia_hash,
+                    },
+                )
+            }
             // Plain BTC is not a cross-network destination — it is dispatched
             // via `data_type=BTC_UTXO` to the SignBtc path, never here.
             sign_request::Data::BtcData(_) => unreachable!(
                 "BtcData is handled by the BTC_UTXO dispatch, not enclave_destination_network"
             ),
+            // Refused earlier in the sign dispatch; kept unreachable for the
+            // same reason as BtcData.
+            sign_request::Data::CcdData(_) => {
+                unreachable!("CcdData is refused by the sign dispatch before destination mapping")
+            }
         }
     }
 
@@ -247,6 +269,7 @@ impl ParentAdapterService {
             ) | (
                 enclave_proto::sign_request::SourceNetwork::RgbSource(_),
                 enclave_proto::sign_request::DestinationNetwork::RgbDestination(_)
+                    | enclave_proto::sign_request::DestinationNetwork::RgbInflationDestination(_)
             )
         );
 
@@ -320,10 +343,35 @@ impl ParentService for ParentAdapterService {
 
                         Self::enclave_destination_network(sign_request::Data::RgbData(payload))
                     }
+                    Some(sign_request::Data::RgbInflationData(payload)) => {
+                        if self.evm_network_ids.contains(&common.dst_network_id) {
+                            return Err(Status::invalid_argument(format!(
+                                "RGB inflation payload destination network {} is configured as EVM",
+                                common.dst_network_id
+                            )));
+                        }
+                        tracing::info!(
+                            src_network_id = common.src_network_id,
+                            dst_network_id = common.dst_network_id,
+                            psbt_len = payload.psbt_bytes.len(),
+                            fascia_len = payload.fascia.len(),
+                            operation_idx = payload.operation_idx,
+                            "gRPC Sign: RGB inflation (mint)"
+                        );
+
+                        Self::enclave_destination_network(sign_request::Data::RgbInflationData(
+                            payload,
+                        ))
+                    }
                     Some(sign_request::Data::BtcData(_)) => {
                         return Err(Status::invalid_argument(
                             "TRANSACTION data_type must not carry BtcData; \
                              use data_type=BTC_UTXO for plain-BTC signing",
+                        ))
+                    }
+                    Some(sign_request::Data::CcdData(_)) => {
+                        return Err(Status::invalid_argument(
+                            "CCD payloads are not supported by this build",
                         ))
                     }
                     None => return Err(Status::invalid_argument("SignRequest.data is missing")),
@@ -689,6 +737,7 @@ impl ParentService for ParentAdapterService {
                     Status::internal("enclave returned attestation without public_keys")
                 })?;
                 Ok(Response::new(AttestedPublicKeyResponse {
+                    ccd_ed25519_pub: pk.ccd_ed25519_pub,
                     evm_address: pk.evm_address,
                     evm_uncompressed_pub: pk.evm_uncompressed_pub,
                     btc_compressed_pub: pk.btc_compressed_pub,

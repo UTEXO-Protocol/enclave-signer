@@ -1012,6 +1012,112 @@ fn decode_display_txid(hex_str: &str) -> Result<[u8; 32]> {
     })
 }
 
+/// An IFA inflation (mint) fascia the enclave has walked and accepted.
+///
+/// The fascia is the mint's binding evidence the way the consignment is the
+/// send's: an inflation hands nothing to a counterparty, so rgb-lib exports
+/// the freshly-composed transition bundle + its seal witness instead
+/// (`Fascia`, serialized as serde JSON by the multisig flow). Unlike a
+/// consignment there is no ownership history to validate against the chain -
+/// the transition is new and its witness unbroadcast - so what the enclave
+/// checks is *shape and binding*, and authorisation comes from the validated
+/// EVM deposit the caller pairs it with.
+#[derive(Debug, Clone)]
+pub struct ValidatedInflationFascia {
+    /// RGB contract id the fascia inflates, canonical string form.
+    pub contract_id: String,
+    /// Txid of the seal witness - the transaction the PSBT under signature
+    /// must BE (`psbt.unsigned_tx.compute_txid()` equality).
+    pub witness_txid: bitcoin::Txid,
+    /// Sum of `OS_ASSET` fungible outputs across the inflation transitions:
+    /// the freshly minted units. `OS_INFLATION` allowance outputs are
+    /// deliberately excluded - they are remaining mint *capacity*, and
+    /// counting them would let a fascia claim allowance as minted value (#54).
+    pub minted_amount: u64,
+    /// OpIds (64-char lowercase hex) of the inflation transitions.
+    pub inflation_op_ids: Vec<String>,
+}
+
+/// Parse and walk an rgb-lib fascia file for the mint path.
+///
+/// Refuses: non-JSON / non-Fascia bytes, more than one contract per fascia,
+/// and any transition that is not IFA `TS_INFLATION` - a mint witness must
+/// only inflate, or a transfer could ride the same signature.
+pub fn validate_inflation_fascia(fascia_bytes: &[u8]) -> Result<ValidatedInflationFascia> {
+    use rgbstd::containers::Fascia;
+    use rgbstd::schema::AssignmentType;
+
+    let fascia: Fascia = serde_json::from_slice(fascia_bytes).map_err(|e| {
+        EnclaveError::CrossCheck(format!("fascia does not parse as rgb-lib fascia JSON: {e}"))
+    })?;
+
+    let witness_txid = fascia.witness_id();
+
+    let mut bundles = fascia.bundles().iter();
+    let (contract_id, bundle) = bundles
+        .next()
+        .expect("Fascia.bundles is a NonEmptyOrdMap - at least one entry by construction");
+    if bundles.next().is_some() {
+        return Err(EnclaveError::CrossCheck(
+            "mint fascia names more than one contract - refusing to sign a multi-contract \
+             witness"
+                .into(),
+        ));
+    }
+    let contract_id_str = contract_id.to_string();
+
+    let inflation = TransitionType::with(ifa::TS_INFLATION);
+    let asset_type = AssignmentType::with(ifa::OS_ASSET);
+    let mut minted_amount: u64 = 0;
+    let mut inflation_op_ids = Vec::new();
+
+    for known in &bundle.known_transitions {
+        let transition = &known.transition;
+        if transition.transition_type != inflation {
+            return Err(EnclaveError::CrossCheck(format!(
+                "mint fascia carries a non-inflation transition (type {}, expected IFA \
+                 TS_INFLATION {}) - a mint witness must only inflate",
+                transition.transition_type,
+                ifa::TS_INFLATION
+            )));
+        }
+        if transition.contract_id != *contract_id {
+            return Err(EnclaveError::CrossCheck(format!(
+                "fascia transition contract {} disagrees with the bundle key {contract_id_str}",
+                transition.contract_id
+            )));
+        }
+        for (assignment_type, assigns) in transition.assignments.iter() {
+            if *assignment_type != asset_type {
+                continue;
+            }
+            for assign in assigns.as_fungible() {
+                minted_amount = minted_amount
+                    .checked_add(assign.as_revealed_state().as_u64())
+                    .ok_or_else(|| {
+                        EnclaveError::CrossCheck("fascia minted amount overflows u64".into())
+                    })?;
+            }
+        }
+        inflation_op_ids.push(known.opid.to_string());
+    }
+
+    if minted_amount == 0 {
+        return Err(EnclaveError::CrossCheck(
+            "mint fascia mints zero OS_ASSET units - nothing this signature would be \
+             authorising"
+                .into(),
+        ));
+    }
+
+    Ok(ValidatedInflationFascia {
+        contract_id: contract_id_str,
+        witness_txid,
+        minted_amount,
+        inflation_op_ids,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

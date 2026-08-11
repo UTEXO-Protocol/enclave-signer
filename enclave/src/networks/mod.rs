@@ -51,6 +51,10 @@ pub fn validate_source(
             rgb_consignment: None,
         }),
         SourceNetwork::RgbSource(source) => rgb::validate_source(amount, source, ctx),
+        // This branch derives no CCD keys and holds no CCD predicates.
+        SourceNetwork::CcdSource(_) => Err(EnclaveError::InvalidRequest(
+            "CCD sources are not supported by this enclave build".into(),
+        )),
     }
 }
 
@@ -89,6 +93,49 @@ pub fn validate_destination(
                 operation_id: None,
             })
         }
+        DestinationNetwork::RgbInflationDestination(destination) => {
+            // A mint carries NO listener-supplied amount on purpose: the
+            // authoritative minted value is derived from the fascia inside the
+            // anchor, so the listener has nothing amount-shaped to lie about.
+            #[cfg(not(feature = "rgb-validation"))]
+            {
+                let _ = destination;
+                Err(EnclaveError::CrossCheck(
+                    "mint (RGB inflation) signing requires an rgb-validation build - this \
+                     enclave cannot verify a fascia and refuses to sign blind"
+                        .into(),
+                ))
+            }
+            #[cfg(feature = "rgb-validation")]
+            {
+                rgb::validate_inflation_destination(destination, ctx)?;
+
+                #[cfg(not(feature = "dev-mode"))]
+                {
+                    let minted = rgb::validate_inflation_anchor(
+                        destination,
+                        amount,
+                        source_commission,
+                        ctx,
+                    )?;
+                    Ok(RouteProof {
+                        amount: minted.checked_add(source_commission).ok_or_else(|| {
+                            EnclaveError::CrossCheck(
+                                "minted amount + source_commission overflow".into(),
+                            )
+                        })?,
+                        operation_id: None,
+                    })
+                }
+                // dev-mode mirrors the send path: cross-checks are bypassed and
+                // the route proof passes the source amount through.
+                #[cfg(feature = "dev-mode")]
+                Ok(RouteProof {
+                    amount,
+                    operation_id: None,
+                })
+            }
+        }
     }
 }
 
@@ -109,6 +156,12 @@ pub fn validate_route_proofs(
 
     match (source, destination) {
         (SourceNetwork::EvmSource(_), DestinationNetwork::RgbDestination(_)) => {
+            validate_amount_covers_destination(source_proof.amount, destination_proof.amount)
+        }
+        // Mint: the destination proof's amount is fascia-derived (minted +
+        // commission), and the anchor has already required minted to equal the
+        // deposit net EXACTLY - this covers-check is the route-level backstop.
+        (SourceNetwork::EvmSource(_), DestinationNetwork::RgbInflationDestination(_)) => {
             validate_amount_covers_destination(source_proof.amount, destination_proof.amount)
         }
         (SourceNetwork::RgbSource(_), DestinationNetwork::EvmDestination(_)) => {
@@ -200,6 +253,7 @@ mod tests {
             proxy_contract: vec![0x33; 20],
             calldata_amount: destination_amount,
             calldata_commission: commission,
+            lz_release: None,
         })
     }
 

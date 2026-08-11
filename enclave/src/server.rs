@@ -196,6 +196,12 @@ fn dispatch(request: EnclaveRequest, ctx: &ServerContext) -> EnclaveResponse {
             tracing::info!("request: GetAttestedPublicKey");
             handle_get_attested_public_key(ctx, req)
         }
+        Some(Request::SignCcd(_)) => {
+            tracing::warn!("request: SignCcd - not supported by this build");
+            Err(EnclaveError::InvalidRequest(
+                "CCD signing is not supported by this enclave build".into(),
+            ))
+        }
         None => {
             tracing::warn!("received empty request (no oneof variant set)");
             return EnclaveResponse {
@@ -241,6 +247,11 @@ fn handle_sign(ctx: &ServerContext, req: SignRequest) -> Result<EnclaveResponse>
     let source_commission = match source_ref {
         SourceNetwork::EvmSource(source) => source.commission,
         SourceNetwork::RgbSource(source) => source.commission,
+        SourceNetwork::CcdSource(_) => {
+            return Err(EnclaveError::InvalidRequest(
+                "CCD sources are not supported by this enclave build".into(),
+            ))
+        }
     };
     let destination_proof = validate_destination(
         req.amount,
@@ -268,8 +279,10 @@ fn handle_sign(ctx: &ServerContext, req: SignRequest) -> Result<EnclaveResponse>
     // trustless only once Helios (#77) verifies it; see
     // `crate::networks::evm::evm_event`.
     #[cfg(all(feature = "evm-rpc", not(feature = "dev-mode")))]
-    if let (SourceNetwork::EvmSource(source), DestinationNetwork::RgbDestination(_)) =
-        (source_ref, destination_ref)
+    if let (
+        SourceNetwork::EvmSource(source),
+        DestinationNetwork::RgbDestination(_) | DestinationNetwork::RgbInflationDestination(_),
+    ) = (source_ref, destination_ref)
     {
         let tx_hash: [u8; 32] = source.tx_hash.as_slice().try_into().map_err(|_| {
             EnclaveError::CrossCheck(format!(
@@ -316,7 +329,7 @@ fn handle_sign(ctx: &ServerContext, req: SignRequest) -> Result<EnclaveResponse>
         (source_ref, destination_ref),
         (
             SourceNetwork::EvmSource(_),
-            DestinationNetwork::RgbDestination(_)
+            DestinationNetwork::RgbDestination(_) | DestinationNetwork::RgbInflationDestination(_)
         )
     ) {
         return Err(EnclaveError::CrossCheck(
@@ -333,32 +346,39 @@ fn handle_sign(ctx: &ServerContext, req: SignRequest) -> Result<EnclaveResponse>
     // same-op resubmission inside the TTL window. This is defense-in-depth
     // only: the guard is in-memory, per-instance, and volatile across restart.
     #[cfg(not(feature = "dev-mode"))]
-    if let (SourceNetwork::EvmSource(source), DestinationNetwork::RgbDestination(destination)) =
-        (source_ref, destination_ref)
-    {
-        let op_key = crate::networks::rgb::psbt_validation::psbt_operation_key(
-            ctx.bridge_config.chain_id,
-            &ctx.bridge_config.bridge_contracts_bytes(),
-            &source.tx_hash,
-            destination.operation_idx,
-            &destination.asset_id,
-        );
-        match ctx.state.op_replay_guard.check_and_record(op_key) {
-            Ok(()) => {}
-            Err(EnclaveError::NonceReplay) => {
-                tracing::warn!(
-                    operation_idx = destination.operation_idx,
-                    evm_tx_hash = %hex::encode(&source.tx_hash),
-                    "rejecting duplicate bridge PSBT operation (soft replay guard, #84)"
-                );
-                return Err(EnclaveError::CrossCheck(
-                    "duplicate bridge operation: this (chain, contract, evm_tx_hash, \
+    if let SourceNetwork::EvmSource(source) = source_ref {
+        let rgb_op = match destination_ref {
+            DestinationNetwork::RgbDestination(d) => Some((d.operation_idx, d.asset_id.as_str())),
+            DestinationNetwork::RgbInflationDestination(d) => {
+                Some((d.operation_idx, d.asset_id.as_str()))
+            }
+            DestinationNetwork::EvmDestination(_) => None,
+        };
+        if let Some((operation_idx, asset_id)) = rgb_op {
+            let op_key = crate::networks::rgb::psbt_validation::psbt_operation_key(
+                ctx.bridge_config.chain_id,
+                &ctx.bridge_config.bridge_contracts_bytes(),
+                &source.tx_hash,
+                operation_idx,
+                asset_id,
+            );
+            match ctx.state.op_replay_guard.check_and_record(op_key) {
+                Ok(()) => {}
+                Err(EnclaveError::NonceReplay) => {
+                    tracing::warn!(
+                        operation_idx,
+                        evm_tx_hash = %hex::encode(&source.tx_hash),
+                        "rejecting duplicate bridge PSBT operation (soft replay guard, #84)"
+                    );
+                    return Err(EnclaveError::CrossCheck(
+                        "duplicate bridge operation: this (chain, contract, evm_tx_hash, \
                      operation_idx, rgb_asset_id) was already signed recently — refusing to \
                      sign a replay (soft in-memory guard; durable guard is on-chain)"
-                        .into(),
-                ));
+                            .into(),
+                    ));
+                }
+                Err(e) => return Err(e),
             }
-            Err(e) => return Err(e),
         }
     }
 
@@ -389,7 +409,12 @@ fn handle_sign(ctx: &ServerContext, req: SignRequest) -> Result<EnclaveResponse>
             };
             handle_sign_evm(ctx, destination)
         }
-        DestinationNetwork::RgbDestination(destination) => handle_sign_psbt(ctx, destination),
+        DestinationNetwork::RgbDestination(destination) => {
+            handle_sign_psbt(ctx, &destination.psbt_bytes)
+        }
+        DestinationNetwork::RgbInflationDestination(destination) => {
+            handle_sign_psbt(ctx, &destination.psbt_bytes)
+        }
     }
 }
 
@@ -523,6 +548,9 @@ fn handle_initialize(ctx: &ServerContext, req: InitializeKeyRequest) -> Result<E
             rgb_asset_id: ctx.bridge_config.rgb_asset_id.clone(),
             evm_gas_tx_uncompressed_pub: keys.evm_gas_tx_uncompressed_pub.to_vec(),
             evm_gas_tx_address: keys.evm_gas_tx_address.to_vec(),
+            // CCD governance keys are not derived on this branch; empty means
+            // "not provisioned" to the reader, same as an unset bridge pin.
+            ccd_ed25519_pub: Vec::new(),
         })),
     })
 }
@@ -566,6 +594,8 @@ fn build_public_keys_response(
         rgb_asset_id: cfg.rgb_asset_id.clone(),
         evm_gas_tx_uncompressed_pub: keys.evm_gas_tx_uncompressed_pub.to_vec(),
         evm_gas_tx_address: keys.evm_gas_tx_address.to_vec(),
+        // Not derived on this branch - see the InitializeKey note.
+        ccd_ed25519_pub: Vec::new(),
     }
 }
 
@@ -686,8 +716,8 @@ fn handle_sign_evm(ctx: &ServerContext, req: EvmDestination) -> Result<EnclaveRe
     })
 }
 
-fn handle_sign_psbt(ctx: &ServerContext, req: RgbDestination) -> Result<EnclaveResponse> {
-    let (signed_psbt, inputs_signed) = ctx.state.sign_psbt(&req.psbt_bytes)?;
+fn handle_sign_psbt(ctx: &ServerContext, psbt_bytes: &[u8]) -> Result<EnclaveResponse> {
+    let (signed_psbt, inputs_signed) = ctx.state.sign_psbt(psbt_bytes)?;
 
     // Reject a "successful" no-op (audit 3rd W-03 / #85). KeyManager::sign_psbt
     // returns Ok((bytes, 0)) when no PSBT input belongs to this enclave; a

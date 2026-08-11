@@ -182,6 +182,9 @@ impl EnclaveClient {
                                 proxy_contract: req.proxy_contract,
                                 calldata_amount: req.calldata_amount,
                                 calldata_commission: req.calldata_commission,
+                                // This branch predates the LZ release path:
+                                // every release here is a direct fundsOutCall.
+                                lz_release: None,
                             },
                         ),
                     ),

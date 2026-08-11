@@ -344,6 +344,7 @@ mod tests {
             proxy_contract: vec![0xAA; ADDRESS_LEN],
             calldata_amount: 1000,
             calldata_commission: 0,
+            lz_release: None,
         }
     }
 

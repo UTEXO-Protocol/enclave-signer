@@ -14,7 +14,7 @@ path = "src/main.rs"
 [dependencies]
 # Protobuf
 prost = "0.14.3"
-federated-signer-proto = { git = "ssh://git@github.com/UTEXO-Protocol/federated-signer-proto.git", rev = "f7a5f1f1d0f632fe470f5bc175d8d00599739aab", package = "federated-signer-proto" }
+federated-signer-proto = { git = "ssh://git@github.com/UTEXO-Protocol/federated-signer-proto.git", rev = "2f34e4304260b2469dce0fd39468f8ac43c6103c", package = "federated-signer-proto" }
 # Crypto — ECDSA on secp256k1 (EVM address derivation + signing later)
 k256 = { version = "0.13", features = ["ecdsa"] }
 
@@ -47,7 +47,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 # RGB consignment validation (optional, behind rgb-validation feature)
-rgb-ops = { version = "0.11.1-rc.7", features = ["esplora_blocking"], optional = true }
+rgb-ops = { version = "0.11.1-rc.7", features = ["esplora_blocking", "serde"], optional = true }
 # Flat-shape parser for RGB consignments. Used by rgb-validation to walk
 # transitions (op_id / transition_type / fungible_allocations) without
 # hand-rolling another rgbstd walk. `default-features = false` skips the
@@ -71,6 +71,9 @@ rgb-schemas = { version = "=0.11.1-rc.10", default-features = false, optional = 
 # the enclave share a single verifier.
 attestation-verify = { path = "../attestation-verify" }
 serde = { version = "1", features = ["derive"] }
+# The mint fascia file is serde JSON of rgbstd's Fascia (what rgb-lib writes);
+# only the rgb-validation feature parses it.
+serde_json = { version = "1", optional = true }
 
 # Cloning handshake crypto (X25519 DH + HKDF + ChaCha20Poly1305 + HMAC-SHA256)
 x25519-dalek = { version = "2", features = ["static_secrets", "zeroize"] }
@@ -127,7 +130,7 @@ dev-mode = []
 # resolver, so a malicious host could have the enclave sign a release against a
 # fabricated Bitcoin anchor. Kept as a separate feature (rather than adding
 # `spv` to this list) to avoid a feature cycle with `spv` below.
-rgb-validation = ["rgb-ops", "rgb-consignment", "rgb-schemas"]
+rgb-validation = ["rgb-ops", "rgb-consignment", "rgb-schemas", "serde_json"]
 # Bitcoin SPV verification of consignment witness txids before signing EVM
 # transactions. Implies `rgb-validation` because SPV needs the consignment
 # parsed to extract witness txids. When the feature is OFF, handle_sign_evm
