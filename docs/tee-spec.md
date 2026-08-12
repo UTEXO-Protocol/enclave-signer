@@ -131,8 +131,9 @@ SecurityPolicy = Production {
   raw RPC instead of Helios, a dev build) fails verification instead of being
   silently trusted.
 
-Not yet inside the commitment: `GAS_TX_ALLOWED_TO`, `FUNDS_IN_CONTRACT`, and
-the concrete `BTC_MAX_TOTAL_SATS` value (only the on/off boolean is attested).
+Not yet inside the commitment: `GAS_TX_ALLOWED_TO`, `GAS_TX_MAX_VALUE_WEI`,
+`FUNDS_IN_CONTRACT`, and the concrete `BTC_MAX_TOTAL_SATS` value (only the
+on/off boolean is attested).
 Follow-up work; no tracking issue yet. The plain-BTC *destination* rule needs no
 commitment: it is not configuration but a property the enclave derives from its
 own keys.
@@ -271,9 +272,20 @@ The enclave no longer signs an opaque digest. The request MUST carry the
 unsigned transaction preimage; the enclave strictly RLP-decodes it (EIP-1559 or
 legacy EIP-155), requires `chain_id` == pinned `EVM_CHAIN_ID`, `to` == pinned
 `GAS_TX_ALLOWED_TO` (fail-closed when unset), `value == 0`, no contract
-creation -- and computes the digest itself. Deliberate follow-ups: no fee/gas
-caps yet, calldata to the pinned destination is not inspected (so the pin
-should be an EOA), and the `to` pin is not yet attested.
+creation -- and computes the digest itself.
+
+One carve-out to `value == 0`: the payable `lzFundsOutCall`, which forwards
+native value as the LayerZero messaging fee. Admitted only when all three hold
+-- the on-chain `lzFundsOutCall` selector, `to` == pinned `BRIDGE_CONTRACT`
+(the proxy itself, not merely `GAS_TX_ALLOWED_TO`, which may be an EOA), and
+`value` <= pinned `GAS_TX_MAX_VALUE_WEI`. That ceiling is fail-closed when
+unset, so a deployment not using the path keeps the strict posture.
+
+Deliberate follow-ups: no fee/gas caps yet; calldata is not inspected beyond
+that selector prefix (so the pin should be an EOA unless the LayerZero path is
+in use); the `to` pin is not yet attested; and the fee is not a field of the
+`TeeLzFundsOut` payload, so nothing binds a fee to its release -- the ceiling
+bounds the blast radius until a contract change adds that binding.
 
 ### 7.5 Raw message (`SignRawMessage`)
 
