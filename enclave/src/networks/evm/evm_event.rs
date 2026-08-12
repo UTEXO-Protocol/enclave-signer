@@ -1058,8 +1058,8 @@ mod tests {
         assert!(verify(&p).is_err());
     }
 
-    /// A second pinned deployment (mint/burn alongside pools) must resolve, or
-    /// no mint on network 103 can ever be authorised.
+    /// A second pinned deployment (mint/burn alongside pools on the same
+    /// chain) must resolve, or no deposit routed through it can be authorised.
     #[test]
     fn finds_the_log_from_a_second_pinned_contract() {
         let mut log = bridge_log(op_id(7), 1000, 950, 50);
