@@ -1,339 +1,499 @@
 # Nitro Enclave Signer -- Technical Specification
 
 **Component:** `enclave-signer` (TEE validator / signer + parent adapter)
-**Status:** Draft for internal review
-**Date:** 2026-05-25 (refreshed 2026-06-01, code @ HEAD `bb2b396`, originally #41)
-**Parent spec:** *RGB <-> EVM Bridge Technical Specification* (Draft 06/05/2026) -- Sec 5.6, Sec 10, Sec 12, Sec 13, Sec 16
-**Companion docs:** `ENCLAVE_SIGNER_CONTEXT.md` (in `internal_audit` repo at `release 1.0/enclave-signer/`) | `cross-flow-findings.md` (in `internal_audit` repo at `release 1.0/enclave-signer/`) | [`diagrams/`](diagrams/)
+**Status:** Current -- describes the audit-fix line (`dev-ng`, including PR #169) that is being ported to `dev`
+**Date:** 2026-07-28 (supersedes the 2026-06-01 draft)
+**Parent spec:** *RGB <-> EVM Bridge Technical Specification* -- Sec 5.6, Sec 10, Sec 12, Sec 13, Sec 16
+**Audit:** Oxorio final report, 22 Jun 2026 ([hosted](https://audits.oxor.io/reports/-OvekSN6D3fiqnoGqrq3)) | status board: issue #91
 
 Normative keywords (MUST / MUST NOT / SHOULD / MAY) follow RFC 2119. Where the
-current implementation diverges from a normative requirement, it is flagged
-inline as **`[GAP]`** with a pointer to `cross-flow-findings.md` (in `internal_audit` repo).
+implementation still diverges from a requirement, it is flagged **`[OPEN]`**
+with the audit finding ID (Oxorio final numbering) and GitHub issue.
 
 ---
 
 ## 1. Purpose
 
-The enclave signer is the trust-minimised authorization component of the bridge.
-It runs inside an **AWS Nitro Enclave (TEE)** and is the only component permitted
-to produce the signatures that release EVM-side liquidity (`fundsOut`) and that
-sign Bitcoin PSBTs for the RGB-side flows.
+The enclave signer is the authorization component of the bridge. It runs inside
+an **AWS Nitro Enclave (TEE)** and is the only component that can produce the
+signatures that release EVM-side liquidity (`fundsOut`) and that sign Bitcoin
+PSBTs for the RGB-side flows.
 
-Its job is to **move trust away from the host operator**: even a fully
-compromised parent host, listener, or backend MUST NOT be able to extract a
-signature unless every protocol predicate holds. The enclave validates RGB
-consignments, Bitcoin SPV inclusion, and cross-domain bindings *itself*, rather
-than trusting any value asserted by the host.
+Its job is to move trust away from the host operator: even a fully compromised
+parent host, listener, or backend MUST NOT be able to obtain a signature unless
+every protocol predicate holds. The enclave validates RGB consignments, Bitcoin
+SPV inclusion, EVM deposit events, and cross-domain bindings itself; it does
+not trust semantic claims made by the host.
 
 ## 2. Trust boundary and threat model
 
 ```
 Internet -- orchestrator -- EC2 parent (UNTRUSTED) -- vsock -- Nitro Enclave (TRUSTED)
                                   |                                    |
-                              listener,                          key material,
-                              backend, NSM proxy,                validation, signing
-                              Esplora proxy                       (this spec)
+                              listener, backend,                 key material,
+                              Esplora / EVM-RPC / Helios         validation, signing
+                              vsock proxies                       (this spec)
 ```
 
-| Actor                            | Trusted for                                      | NOT trusted for                                                                       |
-|----------------------------------|--------------------------------------------------|---------------------------------------------------------------------------------------|
+| Actor                            | Trusted for                                      | NOT trusted for                                                                        |
+|----------------------------------|--------------------------------------------------|----------------------------------------------------------------------------------------|
 | Nitro hardware + NSM             | measurement (PCRs), attestation signing, entropy | --                                                                                     |
 | Enclave code (this repo)         | validation, key custody, signing                 | -- (the thing being attested)                                                          |
 | Parent host / listener / backend | liveness, transport, data *delivery*             | **any semantic claim** -- every value is re-derived or re-validated inside the enclave |
-| Esplora / Bitcoin data providers | availability                                     | correctness -- outputs are checked against in-enclave PoW header chain + SPV           |
-| Operator                         | deployment, the pre-shared cloning secret        | seed access (never leaves the TEE in plaintext)                                       |
+| Esplora / Bitcoin data providers | availability                                     | correctness -- checked against the in-enclave PoW header chain + SPV                   |
+| EVM RPC provider                 | availability                                     | correctness -- Helios-verified when enabled; otherwise fail-closed evidence (Sec 7.2)  |
+| Operator                         | deployment, env pins, the cloning secret         | seed access (never leaves the TEE in plaintext)                                        |
 
-**Trust anchors (residual):** TEE manufacturer (AWS), the Nitro attestation
-root CA, the correctness of *this* enclave code, and the correctness of the RGB
-/ SPV validation libraries. (Parent spec Sec 6.2, Sec 6.3.)
+**Residual trust anchors:** AWS (Nitro isolation + attestation root CA), the
+correctness of this enclave code, and the RGB / SPV validation libraries.
 
-**Wall-clock and entropy assumptions (audit W-11):** three gates read
-`SystemTime::now()` — the request `deadline` check (EVM destination
-validation), the SPV chain-staleness check, and the `submit_headers` rate
-limit. Inside a Nitro enclave the wall clock is hypervisor-provided
-(kvm-clock); no NSM-attested time source is in use. The accepted assumption is
-that the AWS hypervisor is trusted for *coarse* time — consistent with the
-model above, where the same hypervisor is already trusted for isolation and
-attestation itself. The parent host cannot skew the enclave clock through any
-interface this code exposes; a hypervisor-level adversary is outside the
-threat model by construction. Entropy comes from the NSM RNG (actor table
-above). Should host-time-independence ever be required, the remediation path
-is NSM-attested time or external time anchoring (tracked under #123 / W-11).
+**Wall clock (W-11):** the deadline check, the SPV tip-staleness check, and the
+header-submission rate limit read `SystemTime::now()`. Inside Nitro this clock
+is hypervisor-provided (kvm-clock); there is no NSM-attested time source. The
+accepted assumption: the AWS hypervisor is trusted for *coarse* time --
+consistent with already trusting it for isolation and attestation. The parent
+cannot skew the enclave clock through any interface this code exposes. If
+host-time independence is ever required, the remediation is NSM-attested time
+(tracked under #123 / W-11).
 
-**No batch signing path (audit W-03):** the enclave builds and signs exactly
-one digest shape — the single-call `BridgeOperation` EIP-712 struct
-(`sign_request_digest`). There is no `executeBatch` digest builder, and the
-typehash separation between the single-call struct and the on-chain batch
-struct means a signature produced here can never authorize a batch execution.
-Aligning or removing `executeBatch`/`_buildBatchDigest` on the contract side
-is tracked with the contracts team (#123 / W-03).
+**No batch signing (W-03):** the enclave builds exactly one digest shape -- the
+single-call `BridgeOperation` EIP-712 struct. There is no batch digest builder,
+and the typehash separation means a signature produced here can never authorize
+a batch execution. Aligning or removing `executeBatch` on the contract side is
+tracked with the contracts team (#123 / W-03).
 
 ## 3. Architecture
 
-The signer is three crates plus the external infrastructure it touches.
+Three crates plus the infrastructure they touch:
 
-[Component structure](diagrams/01-components.md)
-*Source: [`diagrams/01-components.md`](diagrams/01-components.md)*
+- **`enclave`** -- runs inside the TEE. Connection loop (`main.rs`, vsock in
+  prod / TCP in dev; hardening in `conn.rs`) -> `server.rs` dispatch -> `policy.rs` (security policy),
+  `keys.rs` / `state.rs` (key custody, phases), `cloning.rs`, `attestation.rs`,
+  and the network validators under `networks/`:
+  - `networks/rgb/` -- consignment validation, PSBT validation and signing,
+    the SPV header chain (`spv/`), plain-BTC crosschecks;
+  - `networks/evm/` -- `fundsOut` calldata validation and crosschecks, EIP-712
+    signing, `FundsIn` event verification (`evm_event.rs`, optional Helios),
+    gas-tx validation.
+- **`attestation-verify`** -- shared library that verifies COSE_Sign1 Nitro
+  attestation documents against the embedded AWS root CA, and defines the
+  canonical **security-policy commitment encoding** (Sec 4) used identically by
+  the enclave and every verifier.
+- **`parent`** -- untrusted EC2-side adapter: tonic gRPC server bridging the
+  backend to the enclave's wire protocol, plus the `attest-verify` CLI.
 
-- **`enclave`** -- runs inside the TEE. Listener loop (vsock in prod, TCP in dev)
-  -> `server.rs` handler dispatch -> `KeyManager`, `validation/*`, `spv/*`,
-  `signing/*`, `cloning.rs`, `attestation.rs`.
-- **`attestation-verify`** -- shared, no-std-friendly library that verifies a
-  COSE_Sign1 Nitro attestation document against the embedded AWS Nitro root CA
-  (cert-chain + PCR equality + nonce). Used by both the parent CLI and, for
-  peer attestation, inside the enclave.
-- **`parent`** -- untrusted EC2-side adapter: tonic gRPC server (`grpc_server.rs`)
-  bridging the bridge backend to the enclave's length-prefixed wire protocol,
-  plus the `attest-verify` CLI.
+**Wire protocol** enclave<->parent: 4-byte little-endian length prefix + prost
+protobuf, 4 MiB frame cap (`framing.rs`). Esplora, EVM RPC, and Helios are
+reached through in-enclave loopback forwarders (ports 3443, 3444, 18545/18550)
+that bridge over vsock to host-side `vsock-proxy` instances (vsock ports
+8001-8004); the enclave has no direct network stack.
 
-### Deployment
+**Connection hardening (M-07 / #117):** fixed pool of 4 worker threads, bounded
+queue of 16 connections, 10 s per-syscall idle timeout, 30 s total per-request
+deadline. One request per connection. All limits are compile-time constants.
 
-[Deployment](diagrams/02-deployment.md)
-*Source: [`diagrams/02-deployment.md`](diagrams/02-deployment.md)*
+Diagrams: [components](diagrams/01-components.md) |
+[deployment](diagrams/02-deployment.md) (see Appendix A for freshness).
 
-Wire protocol enclave<->parent is a **4-byte little-endian length prefix + prost
-protobuf** (`framing.rs`, 4 MB cap). Esplora and NSM are reached through
-host-side proxies over vsock so the enclave has no direct network stack.
+## 4. Security policy (audit C-01, PR #169)
 
-## 4. Key management
+The enclave's whole security posture is one explicit value, resolved once at
+boot and attested as a single commitment -- a verifier no longer has to infer
+the posture from build flags and config guesses.
 
-- Keys are **generated inside the enclave** from OS entropy (BIP-39 mnemonic ->
-  BIP-32 seed) and are **enclave-confined**: the 64-byte seed lives only in a
-  `SecretBox` / `Zeroizing` buffer and MUST NOT be exported in plaintext to the
-  parent, backend, or operator (parent spec Sec 16.4).
+```
+SecurityPolicy = Production {
+    chain_id, bridge_contract, rgb_asset_id,   -- operator pins
+    allow_vanilla_psbt,                        -- plain-BTC signing on/off
+    attestation: Real,                         -- always, in production
+    evm_source:  Disabled | RawRpc | HeliosVerified,
+    btc_source:  SpvVerified,                  -- always, in production
+} | Development { reason }
+```
+
+- **Resolution** (`policy.rs`): any dev feature (`dev-mode`,
+  `mock-attestation`, `allow-seed-import`), a debug/test build, a non-bridge
+  build, or a missing pin resolves to `Development`. Only a release
+  `rgb-validation` build with `EVM_CHAIN_ID`, `BRIDGE_CONTRACT`, and
+  `RGB_ASSET_ID` all set resolves to `Production`.
+- **Boot gate:** a release `rgb-validation` build that does not resolve to a
+  valid `Production` policy MUST refuse to boot (panic). Independently, each
+  dev feature is a `compile_error!` in any shipped release binary (non-test
+  build with debug assertions off), and `rgb-validation` without `spv` is a
+  `compile_error!` in every profile (M-01 / #61).
+- **Attestation:** `user_data = sha256(canonical_pubkey_bundle ||
+  policy_commitment)`. The commitment encoding is versioned and shared
+  (`attestation-verify/src/policy.rs`), so the enclave and every verifier
+  produce identical bytes. See [`pubkey-attestation.md`](pubkey-attestation.md).
+- **Verification:** `attest-verify` reconstructs the *expected* policy
+  (`--expect-vanilla-psbt`, `--expect-evm-source raw|helios|disabled`) and
+  fails if the commitment differs -- a downgraded posture (vanilla signing on,
+  raw RPC instead of Helios, a dev build) fails verification instead of being
+  silently trusted.
+
+Not yet inside the commitment: `GAS_TX_ALLOWED_TO`, `FUNDS_IN_CONTRACT`, and
+the concrete `BTC_MAX_TOTAL_SATS` value (only the on/off boolean is attested).
+Follow-up work; no tracking issue yet. The plain-BTC *destination* rule needs no
+commitment: it is not configuration but a property the enclave derives from its
+own keys.
+
+## 5. Key management
+
+- Keys are **generated inside the enclave** from OS entropy (BIP-39 mnemonic
+  -> BIP-32 seed). The 64-byte seed lives in a `SecretBox` and MUST NOT leave
+  the TEE in plaintext (parent spec Sec 16.4). Intermediate buffers are
+  zeroized; the BIP-86 account xprivs are wiped on drop (I-07 / #151).
 - Derivation paths:
-  - EVM signing key (bridge authorisation): `m/44'/60'/0'/0/0`; `evm_address = keccak256(uncompressed_pub[1..])[12..]`.
-  - **EVM gas-tx key** (outer Ethereum tx signing): `m/44'/60'/0'/0/1`. Used by
-    `SignRawDigest` (raw 32-byte digest, no envelope) — see TEE-XC-09 in
-    `cross-flow-findings.md` (in `internal_audit` repo).
-  - BTC SegWit: `m/84'/0'/0'/0/0`.
-  - BIP-86 taproot: vanilla `m/86'/<coin>'/0'`, colored `m/86'/827167'/0'`.
+  - EVM bridge key (authorization): `m/44'/60'/0'/0/0`;
+    `evm_address = keccak256(uncompressed_pub[1..])[12..]`.
+  - EVM gas-tx key (outer tx signing, `SignRawDigest`): `m/44'/60'/0'/0/1`.
+  - BTC SegWit v0 (legacy P2WSH): `m/84'/0'/0'/0/0`.
+  - BIP-86 taproot: vanilla `m/86'/<coin>'/0'` (0 mainnet, 1 otherwise), colored
+    (RGB) `m/86'/<rgb_coin>'/0'` (827166 mainnet, 827167 otherwise -- the split
+    `rgb-lib` uses, so the host's colored addresses resolve).
 - The **EVM address is the cluster identity**: a cloned enclave installs the
-  same seed and therefore signs as the same address; `complete_cloning` asserts
-  `km.evm_address() == session.cluster_public_key` before going `Active`.
+  same seed and signs as the same address; `complete_cloning` asserts the
+  derived address equals the target cluster key before going `Active`.
 
 [Initialize keys](diagrams/07-seq-initialize-keys.md)
-*Source: [`diagrams/07-seq-initialize-keys.md`](diagrams/07-seq-initialize-keys.md)*
 
-## 5. State machine
+## 6. State machine
 
-The enclave is a three-phase machine. **Signing is enabled only in `Active`**,
-and `Active` is terminal -- there is no in-place rotation or re-init.
+Three phases; **signing works only in `Active`**, and `Active` is terminal --
+no in-place rotation or re-init.
+
+| Phase     | Holds                                    | Signing | Entry                                            |
+|-----------|------------------------------------------|---------|--------------------------------------------------|
+| `Initial` | nothing                                  | no      | boot                                             |
+| `Cloning` | ephemeral X25519 + target cluster pubkey | no      | `enter_cloning` (requester)                      |
+| `Active`  | `KeyManager` (seed in `SecretBox`)       | yes     | `initialize_from_entropy`, or `complete_cloning` |
+
+A second initialize attempt MUST fail (`AlreadyInitialized`). Upgrades MUST be
+done by standing up a new cluster with new PCRs, not by mutating an `Active`
+enclave (parent spec Sec 16.5). Mnemonic/seed import is rejected unless the
+dev-only `allow-seed-import` feature is compiled in (release: `compile_error!`).
 
 [Phase state machine](diagrams/09-state-phase.md)
-*Source: [`diagrams/09-state-phase.md`](diagrams/09-state-phase.md)*
 
-| Phase     | Holds                                                       | Signing | Entry                                            |
-|-----------|-------------------------------------------------------------|---------|--------------------------------------------------|
-| `Initial` | nothing                                                     | [NO]      | boot                                             |
-| `Cloning` | `CloningSession` (ephemeral X25519 + target cluster pubkey) | [NO]      | `begin_cloning` (requester)                      |
-| `Active`  | `Box<KeyManager>` (seed in `SecretBox`)                     | [OK]      | `initialize_from_entropy`, or `complete_cloning` |
+## 7. Protocol flows
 
-A second initialize attempt MUST fail with `AlreadyInitialized` (`ensure_initial`).
-Upgrades/rotation MUST be done by standing up a **new cluster with new PCRs**,
-not by mutating an `Active` enclave (parent spec Sec 16.5).
+All bridge signing goes through one `Sign` request carrying a source network
+and a destination network. Plain-BTC signing is a separate `SignBtc` request
+(Sec 7.3). The old standalone SignEvm/SignPsbt request shapes no longer exist.
 
-## 6. Protocol flows
+### 7.1 RGB burn -> EVM unlock (`fundsOut`)
 
-### 6.1 RGB burn -> EVM unlock (the protected path)
-
-The enclave signs `fundsOut` only after all validation predicates (Sec 8) hold.
-
-[Sign EVM](diagrams/03-seq-sign-evm.md)
-*Source: [`diagrams/03-seq-sign-evm.md`](diagrams/03-seq-sign-evm.md)*
-
-### 6.2 EVM lock -> RGB (PSBT signing)
-
-Taproot script-path (BIP-340 Schnorr) + SegWit v0 P2WSH (ECDSA), each anchored
-to the input's `witness_utxo.script_pubkey` so the enclave signs only the
-intended UTXO.
-
-In **bridge mode** (non-empty `evm_tx_hash`) the release is authorised by an EVM
-deposit. The listener-supplied `evm_event_valid` / `evm_event_finalized` booleans
-are **NOT trusted** (audit M-06 / #51); the enclave establishes validity and
-finality itself, fail-closed, in `validation::evm_event::verify_funds_in_event`:
-a successful receipt must exist for `evm_tx_hash`, carry a **unique** `FundsIn` /
-`BridgeFundsIn` log from the **pinned** `BRIDGE_CONTRACT`, bind `operationId` /
-gross amount / commission (with `net == gross - commission`), and sit at depth
->= `EVM_MIN_CONFIRMATIONS`. Under `rgb-validation` the PSBT is additionally bound
-to the validated consignment's `TS_TRANSFER` witness tx (txid + prevouts +
-sighash + amount). A build **without** the `evm-rpc` feature refuses bridge-mode
-`signPsbt` outright. With `helios` (#77) the RPC is verified inside the TEE
-against a pinned checkpoint (trustless); otherwise responses are host-relayed
-evidence, verified fail-closed but not trustless.
-
-[Sign PSBT](diagrams/04-seq-sign-psbt.md)
-*Source: [`diagrams/04-seq-sign-psbt.md`](diagrams/04-seq-sign-psbt.md)*
-
-### 6.3 SPV header sync
-
-The host feeds Bitcoin headers; the enclave builds its own PoW-validated chain
-with bounded reorgs. The full chain MUST be present before any tx validation.
-
-[SPV submit headers](diagrams/08-seq-spv-submit-headers.md)
-*Source: [`diagrams/08-seq-spv-submit-headers.md`](diagrams/08-seq-spv-submit-headers.md)*
-
-### 6.4 Attested public key (public verifiability)
-
-Any external verifier can confirm a signer pubkey belongs to attested enclave
-code (parent spec Sec 16.3, Sec 16.6).
-
-[Attested pubkey](diagrams/05-seq-attested-pubkey.md)
-*Source: [`diagrams/05-seq-attested-pubkey.md`](diagrams/05-seq-attested-pubkey.md)*
-
-### 6.5 Cloning (recovery / federation membership)
-
-Three-message handshake; valid only between enclaves with identical PCRs, the
-same cluster pubkey, and the shared cloning secret (parent spec Sec 16.4).
-
-[Cloning](diagrams/06-seq-cloning.md)
-*Source: [`diagrams/06-seq-cloning.md`](diagrams/06-seq-cloning.md)*
-
-## 7. RGB / Bitcoin / SPV verification (parent spec Sec 12)
-
-The enclave runs full `rgbstd` consignment validation against an Esplora-backed
-resolver, then independently verifies Bitcoin anchoring via its own header chain.
-
-The enclave MUST:
-1. hold the full header chain before accepting tx validation (`header_at` returns
-   `None` below checkpoint / above tip);
-2. validate header linkage, PoW, and nBits, and track the best chain by
-   cumulative work with bounded reorgs (`MAX_REORG_DEPTH = 100`);
-3. for **every** witness tx referenced by the consignment -- not only the most
-   recent burn anchor -- verify Merkle inclusion against the stored header root
-   and require `>= SPV_MIN_CONFIRMATIONS (6)` depth;
-4. reject a stale or future-dated chain tip (`SPV_MAX_TIP_AGE_SECS`,
-   `SPV_MAX_TIP_FUTURE_SECS` = 2 h) to defeat a frozen-feed attack;
-5. reject a consignment whose `chain_net` differs from the enclave's compiled
-   network (cross-network replay defense).
-
-`SPV_MIN_CONFIRMATIONS` MUST be a compile-time constant, not host-configurable --
-otherwise an operator could set it to 0 while attestation still passed.
-
-**`[GAP]`** Production checkpoints are placeholders (`is_real = false`); a
-release-build assert fails closed, but real checkpoints MUST be pinned before
-mainnet.
-
-## 8. Unlock authorization predicates (parent spec Sec 10) -- NORMATIVE
-
-Before signing `fundsOut`, the enclave MUST verify **all** of the following and
-MUST refuse to sign (fail closed) if any fails. This is the heart of the spec.
-
-[Signing gate](diagrams/10-signing-gate.md)
-*Source: [`diagrams/10-signing-gate.md`](diagrams/10-signing-gate.md)*
-
-| #   | Predicate                                                                               | Implemented                                                        |
-|-----|-----------------------------------------------------------------------------------------|--------------------------------------------------------------------|
-| P1  | submitted RGB consignment is valid (`rgbstd` full validation)                           | [OK]                                                               |
-| P2  | consignment proves the **expected burn transition**                                     | **`[GAP/partial]`** (#41) classified via `TS_BURN`, but signing not gated on it |
-| P3  | burn amount **equals** amount requested for unlock, derived from `burnedAsset` metadata | **`[GAP/partial]`** (#41) amount extracted (`burned_asset_amount`), but decision still uses host `rgb_amount`, `>=` not `=` |
-| P4  | bridge metadata is well-formed                                                          | [~] partial                                                        |
-| P5  | payload binds correct destination chain / contract / **recipient**                      | **`[GAP]`** recipient not cross-checked                            |
-| P6  | payload binds correct **RGB `OpId`** (the cross-domain identifier, Sec 7)               | **`[GAP]`** no `OpId` in wire format or signed payload             |
-| P7  | referenced Bitcoin txs are in accepted chain history                                    | [OK]                                                               |
-| P8  | Bitcoin inclusion proofs valid against supplied headers                                 | [OK]                                                               |
-| P9  | corresponding EVM lock record exists for same `OpId`                                    | on-chain (Sec 11), depends on P6                                   |
-| P10 | EVM execution payload **exactly matches** the validated unlock intent                   | **`[GAP]`** intent not independently derived                       |
-| P11 | on any failure, refuse to sign                                                          | [OK] fail-closed                                                   |
+The enclave signs `fundsOut` only after the full predicate set of Sec 9 holds:
+validated consignment, SPV-confirmed anchors, canonical calldata, pinned
+chain/contract, amount coverage, future deadline.
 
 The signed digest is `EIP-712( BridgeOperation(bytes4 selector, bytes callData,
-uint256 nonce, uint256 deadline) )` over domain `(name, version, chainId,
-verifyingContract)`. The struct typehash is commented to match
-`MultisigProxy._buildDigest()` (PR #48, `bd4158a`) — `selector` is now bound at
-the typed-data level, not only inside `callData` bytes. The domain `name`/`version`
-MUST match the deployed `MultisigProxy` and SHOULD be pinned by a contract-derived
-fixture test. **`[GAP]`** currently `"Tricorn"`/`"1"` with a `TODO`; calldata
-byte-offsets (legacy 68/100, mint-burn 36) likewise unverified against the deployed ABI.
+uint256 nonce, uint256 deadline) )` over domain `("MultisigProxy", "1",
+chainId, verifyingContract)`. The domain separator is pinned by a regression
+test against the deployed `MultisigProxy`, and a second test reproduces the
+backend's digest -- domain drift breaks the build.
 
-> The four `[GAP]`s above are one root cause: **the enclave currently trusts
-> host-supplied semantic fields (`rgb_amount`, recipient, implied `OpId`)
-> instead of deriving them from the consignment it validates.** Closing them is
-> the pre-mainnet blocker -- see `cross-flow-findings.md` (in `internal_audit` repo) Sec "Priority gaps".
+The current rollout signs the **swap flow** (`TS_TRANSFER` consignments) only.
+The mint/burn unlock flow is deliberately not wired yet: the enclave preserves
+the backend-provided `burnId` / `fundsInIds` (#168), and the in-enclave OpId
+rewrite stays dormant until flows are routed by network id (Sec 9, P6).
 
-## 9. Attestation & federation (parent spec Sec 16)
+[Sign EVM](diagrams/03-seq-sign-evm.md)
 
-- **Public verifiability:** each signer pubkey is generated in-enclave and bound
-  to a Nitro attestation; the COSE_Sign1 document chains to the embedded AWS
-  Nitro root CA and commits to the canonical pubkey bundle + verifier nonce.
-- **PCR policy:** PCR0 and PCR1 MUST be checked by frontend, backend, and fellow
-  signers; PCR2 MAY be checked for stronger app-state binding. The verifier
-  asserts all of PCR0/1/2 equal expected (stricter than the spec's minimum).
-- **Cloning** is valid only if source and destination enclaves: target the same
-  cluster pubkey, run the same accepted code snapshot (PCR equality), share the
-  same cloning secret, and complete **mutual** attestation. The DH exchange MUST
-  reject non-contributory (small-order) points; the seed ciphertext is bound to
-  the per-handshake key via HKDF `info = donor_pub || requester_pub`.
-- **Federation / quorum:** unlock SHOULD require an M-of-N enclave-signer quorum.
-  Quorum enforcement is on-chain in `MultisigProxy` (out of this repo); the
-  enclave guarantees the spec's "signed payload identical across quorum members"
-  because the EIP-712 digest is a pure function of `callData`/`nonce`/`deadline`.
-- **Replay:** the in-enclave `NonceReplayGuard` covers cloning attestation
-  nonces; the authoritative unlock replay guard is on-chain `burnId` consumption
-  (Sec 8.2, out of repo). The EIP-712 `nonce` is bound into the signed payload.
+### 7.2 EVM lock -> RGB (bridge PSBT)
 
-## 10. Security invariants -- NORMATIVE
+A bridge PSBT request MUST carry the EVM deposit tx hash **and** the RGB
+consignment; there is no consignment-less bridge mode. Listener-supplied
+`event_valid` / `event_finalized` booleans are ignored (M-06 / #51). The
+enclave establishes validity and finality itself, fail-closed
+(`evm_event::verify_funds_in_event`):
 
-The enclave MUST uphold the following. Each maps to parent spec Sec 14/Sec 15.
+- a **successful receipt** must exist for `evm_tx_hash`, at depth >=
+  `EVM_MIN_CONFIRMATIONS` (pinned config, default 12);
+- it must carry a **unique** deposit event from the pinned
+  `FUNDS_IN_CONTRACT` (falls back to `BRIDGE_CONTRACT`; #152). `BridgeFundsIn`
+  is preferred; a same-tx `FundsIn` + `BridgeFundsIn` pair counts as one
+  deposit (#150);
+- the event MUST bind the on-chain `operationId` to the request's
+  `funds_in_operation_id` -- not the hub's `operation_idx` (#153). A
+  `BridgeFundsIn` event additionally binds gross amount and commission
+  (`net == gross - commission`); the plain `FundsIn` fallback binds only
+  `operationId` and the net amount, leaving the commission split
+  listener-supplied.
 
-| ID        | Invariant                                                                                                                                               |
-|-----------|---------------------------------------------------------------------------------------------------------------------------------------------------------|
-| **SI-1**  | A compromised parent/listener/backend alone MUST NOT yield a `fundsOut` signature. (Depends on P2/P3/P5/P6 -- see `[GAP]`s.)                            |
-| **SI-2**  | A forged or malformed RGB consignment MUST NOT trigger signing. [OK]                                                                                    |
-| **SI-3**  | A Bitcoin inclusion proof inconsistent with the in-enclave PoW chain MUST NOT trigger signing. [OK]                                                     |
-| **SI-4**  | An EVM unlock payload not bound to the RGB `OpId` MUST NOT be accepted. **`[GAP]` P6.**                                                                 |
-| **SI-5**  | The signing seed MUST NOT leave the enclave in plaintext; only HKDF-sealed ciphertext crosses the wire, and only during a mutually-attested clone. [OK] |
-| **SI-6**  | Cloning MUST require identical PCRs (same code), same cluster pubkey, and the shared cloning secret -- i.e. cloning MUST NOT be an upgrade path. [OK]   |
-| **SI-7**  | Confirmation depth and chain-freshness thresholds MUST NOT be host-configurable. [OK]                                                                   |
-| **SI-8**  | The enclave MUST verify SPV depth on **every** anchoring tx in the relevant RGB history, not only the most recent burn tx. [OK]                         |
-| **SI-9**  | Signing MUST be possible only in `Active`; `Initial`/`Cloning` MUST reject all signing and key-export RPCs (except the donor's sealed export). [OK]     |
-| **SI-10** | On any validation failure the unlock path MUST fail closed (no partial signature, no fallback). [OK]                                                    |
-| **SI-11** | A feature/build mismatch (e.g. request carries `merkle_proofs` but the binary lacks `spv`) MUST cause refusal, never a sign-without-verification. [OK]  |
-| **SI-12** | Cross-network consignments (e.g. regtest replayed at a mainnet enclave) MUST be rejected. [OK]                                                          |
-| **SI-13** | Bridge-mode `signPsbt` MUST independently verify the EVM `FundsIn` deposit (receipt success, pinned-contract log, operationId/amount/commission bind, depth ≥ `EVM_MIN_CONFIRMATIONS`); listener validity/finality flags MUST NOT authorise (#51). A build lacking `evm-rpc` MUST refuse bridge-mode signing. [OK, #60] |
+The PSBT itself is bound to the validated consignment: unsigned txid ==
+witness txid, input prevouts == witness prevouts, `SIGHASH_ALL` / taproot
+`DEFAULT` only, and the consignment's asset outputs must cover the credited
+amount. `TS_TRANSFER` and `TS_INFLATION` (mint-RGB) transitions are accepted
+(#146 / #54). A fee sanity check rejects a PSBT whose fee rate exceeds 3x the
+enclave's own Esplora estimate, fail-closed on a missing estimate (#147; a
+compile-time floor applies only on non-mainnet chains, #149).
 
-## 11. Failure conditions
+**EVM data source:** a build without `evm-rpc` refuses bridge PSBTs outright.
+With `evm-rpc`, receipts are host-relayed evidence -- verified fail-closed, but
+not trustless. With `helios` and `HELIOS_EXECUTION_RPC` set, receipts are
+verified by an in-enclave light client against an operator-pinned checkpoint
+(trustless; #60/#136); a Helios sync failure fails closed rather than
+downgrading to raw RPC. The chosen source is part of the attested policy
+(Sec 4).
+
+A soft in-memory replay guard (24 h TTL) dedups deposit-keyed requests; the
+durable double-spend guard is on-chain.
+
+[Sign PSBT](diagrams/04-seq-sign-psbt.md)
+
+### 7.3 Plain-BTC PSBT (`SignBtc`, M-05 / #102)
+
+Vanilla (non-bridge) BTC signing is its own request and can no longer be
+reached by omitting bridge fields. It is gated by the attested policy
+(`allow_vanilla_psbt`, default **off**), and each request must satisfy the
+authorization rules: every output must pay back to a script the enclave proves
+it controls, and total input value <= `BTC_MAX_TOTAL_SATS`. Signing is scoped to
+the **vanilla** BIP-86 account only -- it can structurally never co-sign a
+colored (RGB-allocated) input.
+
+The destination rule is self-proving, not pinned. An output is accepted when it
+either repays an input the enclave co-signs (control-block anchored), or carries
+BIP-371 output metadata that reconstructs the exact on-chain `script_pubkey` from
+a key the enclave derives on either of its own BIP-86 accounts. Colored
+destinations count too: `create_utxo` funds RGB-allocation UTXOs out of vanilla
+inputs. The M-01 account scope is the **input** one above -- which UTXOs the
+enclave will spend -- and is unchanged. The previous
+`BTC_ALLOWED_SCRIPTS` allowlist was removed: the scripts to pin derive from a
+seed that only exists once the enclave has booted, and enclave env is measured
+into PCR0, so pinning them changed the very identity the seed was bound to. The
+path is therefore structurally self-pay; withdrawals to arbitrary user addresses
+were never expressible here and still are not.
+
+### 7.4 Gas transaction (`SignRawDigest`, C-02 / #68)
+
+The enclave no longer signs an opaque digest. The request MUST carry the
+unsigned transaction preimage; the enclave strictly RLP-decodes it (EIP-1559 or
+legacy EIP-155), requires `chain_id` == pinned `EVM_CHAIN_ID`, `to` == pinned
+`GAS_TX_ALLOWED_TO` (fail-closed when unset), `value == 0`, no contract
+creation -- and computes the digest itself. Deliberate follow-ups: no fee/gas
+caps yet, calldata to the pinned destination is not inspected (so the pin
+should be an EOA), and the `to` pin is not yet attested.
+
+### 7.5 Raw message (`SignRawMessage`)
+
+Wraps the message in the EIP-191 `personal_sign` envelope and signs with the
+main bridge key. **`[OPEN]`** I-01 (#124): the handler is not gated by any
+feature or policy; decision pending (remove vs. add domain/nonce).
+
+### 7.6 SPV header sync
+
+The host feeds Bitcoin headers; the enclave builds its own PoW-validated chain
+(Sec 8). The chain MUST cover every consignment anchor before any tx
+validation. [SPV submit headers](diagrams/08-seq-spv-submit-headers.md)
+
+### 7.7 Attested public key
+
+Any external verifier can confirm the signer pubkey belongs to attested
+enclave code *and* that the enclave runs the expected security posture (Sec 4).
+[Attested pubkey](diagrams/05-seq-attested-pubkey.md)
+
+### 7.8 Cloning (recovery / federation membership)
+
+Three-message handshake, valid only between enclaves with identical PCRs, the
+same cluster pubkey, and the shared cloning secret (Sec 10).
+[Cloning](diagrams/06-seq-cloning.md)
+
+## 8. RGB / Bitcoin / SPV verification (parent spec Sec 12)
+
+The consignment pipeline (cheap checks first, W-04): non-empty payload,
+`keccak256(consignment) == consignment_hash` (integrity only, I-09), asset id
+declared; then full `rgbstd` validation with the trusted typesystem pinned per
+schema id (unknown schemas rejected, W-09 / #92) against an Esplora resolver
+with a 30 s timeout (I-03 / #87); the validated contract id must then equal
+the declared asset id and the pinned `RGB_ASSET_ID`; then SPV verification of
+every witness tx.
+
+The SPV layer MUST:
+
+1. validate header linkage, PoW, and nBits, and track the best chain by
+   cumulative work with bounded reorgs (`MAX_REORG_DEPTH = 100`; an equal-work
+   alternative is rejected);
+2. retain **all** headers from the checkpoint (no pruning -- deep RGB anchors
+   stay verifiable, #130), with a fail-closed cap `MAX_STORED_HEADERS =
+   1,000,000` that rejects rather than prunes;
+3. bound submission: max 10,000 headers per call, max 100,000 headers per
+   60 s window;
+4. for **every** witness tx referenced by the consignment: require exact
+   set-equality with the supplied Merkle proofs, verify inclusion against the
+   stored header (path depth <= 32), and require depth >=
+   `SPV_MIN_CONFIRMATIONS = 6`;
+5. reject a stale or future-dated tip (both bounds 2 h) to defeat frozen-feed
+   attacks;
+6. reject a consignment whose `chain_net` differs from the enclave's network
+   (boot-selected via `BITCOIN_NETWORK`, baked into the image and therefore
+   PCR0-attested; cross-network replay defense).
+
+All thresholds are compile-time constants -- a host-tunable threshold would let
+an operator weaken the gate while attestation still passed.
+
+**Checkpoints:** mainnet block 951,552 (retarget-aligned, W-14) and UTEXO
+signet block 334,000 are real pinned checkpoints; regtest uses genesis. Local/dev
+builds (debug, `cfg(test)`, or `allow-seed-import`) may move the anchor forward
+at boot with `SPV_CHECKPOINT=height:block_hash[:bits:time]` to skip a long
+initial sync; a production-shaped build refuses to start if that variable is
+set, so the host can never choose the trust anchor.
+Testnet3 remains a placeholder -- a release build refuses to boot on any
+placeholder checkpoint. **Signet caveat:** the enclave does not validate PoW or
+nBits on signet, and the BIP-325 challenge signature is not verified (the wire
+format carries no coinbase witness), so signet header integrity rests on chain
+linkage, the reorg/work rules, the submission caps, and the 2 h freshness
+gate.
+
+## 9. Unlock authorization predicates (parent spec Sec 10) -- NORMATIVE
+
+Before signing `fundsOut`, the enclave MUST verify **all** of the following and
+MUST refuse to sign (fail closed) if any fails.
+
+| #   | Predicate                                                   | Status                                                                                                                                                            |
+|-----|-------------------------------------------------------------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| P1  | submitted RGB consignment is valid (`rgbstd` full validation) | OK                                                                                                                                                               |
+| P2  | consignment proves the expected transition                  | OK for the live swap flow: last transition MUST be `TS_TRANSFER`. `TS_BURN` is classified and amount-extracted, but mint/burn unlock is not wired yet (#168)       |
+| P3  | unlock amount is covered by the consignment-derived amount  | OK -- the amount comes from the consignment (host `rgb_amount` is ignored); comparison is coverage (`>=`), strict `==` pending per-output binding (**`[OPEN]`** I-06 / #124, #58) |
+| P4  | calldata is well-formed                                     | OK -- single pinned selector, 64 KiB cap, canonical ABI decode + re-encode byte-equality (closes W-01)                                                            |
+| P5  | payload binds destination chain / contract / **recipient**  | chain + contract pinned; **`[OPEN]`** recipient not bound (C-04 / #66) -- blocked on an EVM-destination commitment in the RGB burn schema (cross-repo)             |
+| P6  | payload binds the RGB `OpId` (cross-domain identifier)      | **`[OPEN -- dormant]`** M-02: the in-enclave `burnId` / `fundsInIds` derivation exists (#93/#97) but is disabled for the swap rollout (#168); backend ids are signed as received |
+| P7  | referenced Bitcoin txs are in accepted chain history        | OK                                                                                                                                                               |
+| P8  | Bitcoin inclusion proofs valid against the in-enclave chain | OK; plus, when populated, the calldata `(blockHeight, commitmentHash)` proof must match the enclave's own header (#57/#122 -- inert until the listener sends it)   |
+| P9  | corresponding EVM lock record exists for the same operation | on-chain for this direction; for EVM->RGB the enclave verifies `FundsIn` itself (Sec 7.2)                                                                         |
+| P10 | EVM execution payload matches the validated unlock intent   | selector, calldata layout, amount, chain, contract: OK; recipient and operation id: see P5 / P6                                                                   |
+| P11 | on any failure, refuse to sign                              | OK -- fail-closed                                                                                                                                                |
+
+> The two remaining `[OPEN]`s share one root cause: the recipient and the
+> operation id inside `fundsOut` calldata are not yet derived from the
+> validated consignment. C-04 needs a schema change (cross-repo); P6 activation
+> needs network-id-routed flows. Until then, those two fields rest on the
+> backend plus the on-chain quorum and replay controls.
+
+[Signing gate](diagrams/10-signing-gate.md)
+
+## 10. Attestation & federation (parent spec Sec 16)
+
+- **Public verifiability:** each signer pubkey is generated in-enclave and
+  bound to a Nitro attestation. The verifier enforces: cert chain to the
+  embedded AWS root with `BasicConstraints`, `keyCertSign`, path-length, and
+  leaf `digitalSignature` checks (W-10 / #126); COSE `alg == ES384` with the
+  raw 96-byte signature form only (I-05); PCR0/1/2 equality; nonce equality;
+  and the `user_data` commitment over pubkey bundle + security policy (Sec 4).
+- **PCR policy:** verifiers assert PCR0/1/2 (stricter than the parent spec's
+  minimum of PCR0/1).
+- **Cloning** is valid only between enclaves that target the same cluster
+  pubkey, run the same code (PCR equality), and share the cloning secret, with
+  mutual attestation. The DH exchange rejects small-order points; the seed
+  ciphertext is bound to both handshake keys via HKDF; replay-guard nonces are
+  recorded only **after** authentication succeeds (W-13 / #129), and the guard
+  is TTL-bounded (1 h) with oldest-first eviction so it cannot be wedged
+  (W-12 / #80). **`[OPEN]`** M-08 (#73): authorization still rests on a static
+  cluster-wide secret, not bound into PCRs or the attested commitment.
+  **`[OPEN]`** I-13 (#124): the master seed stays resident for the enclave's
+  lifetime (the donor re-seals it per clone); fix requires a cloning redesign
+  or threshold keys.
+- **Federation / quorum:** unlock SHOULD require M-of-N enclave signatures;
+  quorum is enforced on-chain in `MultisigProxy`. The EIP-712 digest is a pure
+  function of `callData` / `nonce` / `deadline`, so quorum members sign
+  identical payloads.
+- **Replay:** `fundsOut` replay protection is the on-chain proxy nonce, which
+  is committed into the signed digest; the enclave keeps no fundsOut nonce
+  state. EVM->RGB requests get the soft in-enclave dedup guard (Sec 7.2);
+  cloning nonces get their own guard.
+
+## 11. Security invariants -- NORMATIVE
+
+| ID        | Invariant                                                                                                                                                |
+|-----------|-----------------------------------------------------------------------------------------------------------------------------------------------------------|
+| **SI-1**  | A compromised parent/listener/backend alone MUST NOT yield a `fundsOut` signature. (Holds except the unbound recipient / operation id -- P5/P6 `[OPEN]`.) |
+| **SI-2**  | A forged or malformed RGB consignment MUST NOT trigger signing. OK                                                                                       |
+| **SI-3**  | A Bitcoin inclusion proof inconsistent with the in-enclave PoW chain MUST NOT trigger signing. OK                                                        |
+| **SI-4**  | An EVM unlock payload not bound to the RGB `OpId` MUST NOT be accepted. **`[OPEN]` P6 (dormant binding).**                                                |
+| **SI-5**  | The seed MUST NOT leave the enclave in plaintext; only HKDF-sealed ciphertext crosses the wire, and only during a mutually-attested clone. OK             |
+| **SI-6**  | Cloning MUST require identical PCRs, same cluster pubkey, and the cloning secret -- cloning MUST NOT be an upgrade path. OK                               |
+| **SI-7**  | Confirmation depth, freshness, and size thresholds MUST NOT be host-configurable. OK (compile-time constants)                                            |
+| **SI-8**  | SPV depth MUST be verified for **every** anchoring tx in the consignment history, with no header pruning below it. OK (#130)                             |
+| **SI-9**  | Signing MUST be possible only in `Active`; other phases MUST reject signing and key-export RPCs (except the donor's sealed export). OK                    |
+| **SI-10** | On any validation failure the path MUST fail closed -- no partial signature, no fallback, no silent downgrade (including Helios -> raw RPC). OK           |
+| **SI-11** | A feature/build mismatch MUST cause refusal, never sign-without-verification (no `evm-rpc` => no bridge PSBTs; `rgb-validation` without `spv` does not compile). OK |
+| **SI-12** | Cross-network consignments MUST be rejected. OK                                                                                                          |
+| **SI-13** | Bridge PSBT signing MUST independently verify the EVM deposit (receipt success, pinned contract, unique event, on-chain `operationId` + amount + commission binding, depth >= `EVM_MIN_CONFIRMATIONS`); listener flags MUST NOT authorize. OK (#51/#60, #150/#152/#153) |
+| **SI-14** | A release bridge build MUST refuse to boot unless it resolves to a valid `Production` security policy. OK (C-01)                                         |
+| **SI-15** | The full security posture MUST be verifiable as one attested value; a downgraded posture MUST fail pubkey verification. OK (C-01)                        |
+| **SI-16** | Plain-BTC signing MUST be off unless enabled in the attested policy, MUST pay only to scripts the enclave proves it controls, MUST respect the value cap, and MUST NOT co-sign a colored (RGB-allocated) input. OK (#102) |
+| **SI-17** | A signing that produced zero input signatures MUST NOT be reported as success. OK (W-07 / #85)                                                            |
+
+## 12. Failure conditions
 
 On any of the following the enclave MUST return an error and MUST NOT sign:
-invalid RGB consignment; invalid/missing burn transition; amount mismatch;
-malformed bridge metadata; `OpId` mismatch across domains; invalid Bitcoin
-inclusion proof; inconsistent or stale Bitcoin headers; missing/insufficient
-SPV confirmations; cross-network consignment; wrong phase; deadline expired;
-replayed cloning nonce.
+invalid consignment; unsupported or unclassified transition; amount not
+covered; malformed or non-canonical calldata; unpinned or mismatched
+chain/contract/asset; invalid or missing SPV proof; stale, future-dated, or
+incomplete header chain; cross-network consignment; missing/failed/shallow
+`FundsIn` verification; `operationId` mismatch; excessive fee rate; PSBT not
+anchored to the consignment; disallowed output script or value cap exceeded
+(plain BTC); non-allowlisted gas tx; wrong phase; expired deadline; replayed
+nonce or duplicate operation; oversized frame, field, or header batch.
 
-## 12. Implementation status & blockers
+## 13. Implementation status
 
-Conformant and solid: Sec 7 SPV stack (incl. SI-8), Sec 9 attestation + cloning
-(Sec 16.4), fail-closed posture (SI-10/11), cross-network defense (SI-12),
-independent EVM `FundsIn` verification for bridge-mode `signPsbt` (SI-13 / #60,
-with the trustless Helios variant #77 experimental / default-off).
+**Landed on the `dev-ng` line** (Oxorio final IDs): C-01 unified attested
+policy (#148/#169) · C-02 gas-tx allowlist (#81) · C-03 asset pin (#75) · M-05
+plain-BTC split (#102) · M-06 in-enclave `FundsIn` + Helios (#60/#136,
+#150/#152/#153) · M-07 connection limits (#117) · M-09 config AND-logic (#98)
+· W-01 canonical ABI · W-04 hash-first ordering · W-07 zero-signature guard ·
+W-08 bounded full retention (#130) · W-09 typesystem pin · W-10 cert-chain
+hardening (#126) · W-12/W-13 replay-guard fixes (#80/#129) · W-14 + real
+mainnet/signet checkpoints · I-02 fallible digest · I-03 Esplora timeout ·
+I-04 size caps + I-15 validate()-status handling (#118) · I-05 COSE pinning · I-07 xpriv zeroization (#151)
+· EIP-712 domain pinned to the deployed contract · fee sanity (#147, #149) ·
+mint-PSBT binding (#146) · swap op-id preservation (#168) · audit regression +
+`audit:test` suites in CI (#144/#167).
 
-**Pre-mainnet blockers** (detail in `cross-flow-findings.md` (in `internal_audit` repo at `release 1.0/enclave-signer/`)):
+**Open -- pre-mainnet:**
 
-1. Bind the RGB `OpId` end-to-end (P6 / SI-4) -- add to wire format, derive from
-   consignment, require equality, include in the signed EIP-712 struct.
-2. Validate burn semantics and derive the amount from `burnedAsset` (P2/P3).
-   _#41 did the extraction half_ (`TS_BURN` classification + `burned_asset_amount`);
-   remaining: gate signing on `TS_BURN` and use `burned_asset_amount` (== not `>=`)
-   in place of host `rgb_amount`.
-3. Derive destination (contract + recipient) from the validated RGB payload (P5).
-4. Pin real SPV checkpoints for mainnet/signet/testnet3 (Sec 7).
-5. Pin the EIP-712 domain with a contract-derived fixture test (Sec 8).
+1. **C-04 recipient binding** (P5): needs the EVM-destination commitment in
+   the RGB burn-transition schema first (cross-repo), then the enclave reads
+   and binds it.
+2. **M-02 operation-id activation** (P6): enable the in-enclave
+   `burnId` / `fundsInIds` derivation once flows are routed by network id;
+   durable cluster-wide dedup stays on-chain.
+3. **M-03 signer-set rotation** (cross-repo): no enclave membership gate for
+   co-signers; needs contracts (`btcDescriptorHash`) + listener support.
+4. **M-08 / I-13 cloning hardening**: bind the cloning secret / operator
+   identity into the attested measurement; redesign so the seed need not stay
+   resident.
+5. **W-06** (#52): derive `psbt_output_amount` from the PSBT instead of the
+   listener; identify the recipient leg (#58).
+6. **Helios by default**: raw RPC remains host-relayed evidence; decide
+   Helios-on for production images and require `--expect-evm-source helios`.
+7. **Listener migration** (deploy ordering): a production enclave rejects the
+   old gas-tx digest and consignment-less request shapes -- migrate
+   proto/listener/backend before deploying, otherwise availability (never
+   safety) suffers.
+8. Smaller: attest `GAS_TX_ALLOWED_TO` / `FUNDS_IN_CONTRACT` / BTC pin values;
+   gas-tx fee caps; I-01 `SignRawMessage` decision; I-14 u64 amount ceiling;
+   I-16 reproducible-build determinism; testnet3 checkpoint.
 
 ---
 
 ## Appendix A -- Diagram index
 
-Mermaid in Markdown — view inline in any Mermaid-capable renderer (GitHub, VS Code, ...).
+Mermaid in Markdown -- rendered inline on GitHub.
 
-| Diagram                       | File                                    |
-|-------------------------------|-----------------------------------------|
-| Component structure           | `diagrams/01-components.md`             |
-| Deployment / trust zones      | `diagrams/02-deployment.md`             |
-| Sign EVM (unlock)             | `diagrams/03-seq-sign-evm.md`           |
-| Sign PSBT                     | `diagrams/04-seq-sign-psbt.md`          |
-| Attested pubkey               | `diagrams/05-seq-attested-pubkey.md`    |
-| Cloning handshake             | `diagrams/06-seq-cloning.md`            |
-| Initialize keys               | `diagrams/07-seq-initialize-keys.md`    |
-| SPV submit headers            | `diagrams/08-seq-spv-submit-headers.md` |
-| **Phase state machine**       | `diagrams/09-state-phase.md`            |
-| **Signing gate / predicates** | `diagrams/10-signing-gate.md`           |
+| Diagram                   | File                                    |
+|---------------------------|-----------------------------------------|
+| Component structure       | `diagrams/01-components.md`             |
+| Deployment / trust zones  | `diagrams/02-deployment.md`             |
+| Sign fundsOut (unlock)    | `diagrams/03-seq-sign-evm.md`           |
+| Sign bridge PSBT          | `diagrams/04-seq-sign-psbt.md`          |
+| Attested pubkey           | `diagrams/05-seq-attested-pubkey.md`    |
+| Cloning handshake         | `diagrams/06-seq-cloning.md`            |
+| Initialize keys           | `diagrams/07-seq-initialize-keys.md`    |
+| SPV submit headers        | `diagrams/08-seq-spv-submit-headers.md` |
+| Phase state machine       | `diagrams/09-state-phase.md`            |
+| Signing gate / predicates | `diagrams/10-signing-gate.md`           |
+
+All diagrams refreshed 2026-07-28 to match this spec; where a diagram and this
+spec disagree, this spec is authoritative.

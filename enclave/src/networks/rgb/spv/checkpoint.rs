@@ -16,6 +16,11 @@
 //!   double-SHA256 of the raw header from blockstream.info/api.
 //! - **Signet checkpoint** — UTEXO custom signet block 334 000 (2026-06-02).
 //!   Verified via double-SHA256 of raw header from esplora-api.utexo.com.
+//!   Local/dev builds can move this anchor forward at boot with `SPV_CHECKPOINT`
+//!   so the initial header sync doesn't replay every block since then — see
+//!   [`resolve_checkpoint`]. Production-shaped builds refuse to start when that
+//!   variable is set: the checkpoint is the trust anchor, and the host must not
+//!   be able to choose it.
 //! - **Signet challenge / magic / block time** — REAL values, provided by
 //!   Oleksandr 2026-04-30. UTEXO custom signet, 3-of-3 multisig, 30s blocks.
 //!   These are baked in now so they end up in PCR0 alongside everything
@@ -150,7 +155,10 @@ impl Checkpoint {
     }
 }
 
-/// Look up the checkpoint to use for a given network. Used at boot.
+/// Look up the compile-time checkpoint for a given network.
+///
+/// This is the PCR0-committed anchor. Boot goes through [`resolve_checkpoint`],
+/// which layers the dev-only `SPV_CHECKPOINT` override on top.
 pub fn checkpoint_for(network: Network) -> Checkpoint {
     match network {
         Network::Mainnet => MAINNET_CHECKPOINT,
@@ -158,6 +166,153 @@ pub fn checkpoint_for(network: Network) -> Checkpoint {
         Network::Testnet3 => TESTNET3_CHECKPOINT,
         Network::Regtest => REGTEST_CHECKPOINT,
     }
+}
+
+/// Env var that moves the boot checkpoint forward in local/dev builds.
+///
+/// Format: `height:block_hash` or `height:block_hash:bits:time`
+///   * `height` — decimal block height.
+///   * `block_hash` — 64 hex chars in **display order** (what an explorer or
+///     `getblockhash` prints), optional `0x` prefix.
+///   * `bits` — the block's compact target, hex, `0x` prefix REQUIRED (so a
+///     decimal `bits` copied out of an Esplora JSON body errors instead of
+///     being misread as hex).
+///   * `time` — the block's Unix timestamp, decimal.
+///
+/// The two-field form inherits `bits`/`time` from the compiled-in checkpoint.
+/// That is only sound where `nBits` is never checked and the epoch-start lookup
+/// is never consulted, so PoW networks (mainnet, testnet3) must give all four.
+pub const CHECKPOINT_ENV: &str = "SPV_CHECKPOINT";
+
+/// Where the boot checkpoint came from. Reported so the log line can't imply a
+/// compiled-in anchor when the operator supplied one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CheckpointSource {
+    /// The compile-time constant for this network (PCR0-committed).
+    Compiled,
+    /// A dev-only `SPV_CHECKPOINT` override.
+    Env,
+}
+
+/// True when this build may honour [`CHECKPOINT_ENV`].
+///
+/// The checkpoint is the SPV trust anchor: everything the enclave believes
+/// about the Bitcoin chain hangs off it, so a production enclave takes it only
+/// from the compiled-in constant that PCR0 commits to. The exemptions mirror
+/// [`Checkpoint::assert_real_in_release`] — debug builds, tests, and the
+/// local-E2E `allow-seed-import` feature (what `build/Dockerfile.enclave-dev`
+/// produces) are the sanctioned dev shapes.
+pub fn checkpoint_override_allowed() -> bool {
+    cfg!(debug_assertions) || cfg!(test) || cfg!(feature = "allow-seed-import")
+}
+
+/// Resolve the checkpoint to boot against: the compiled-in constant, or the
+/// `SPV_CHECKPOINT` override when this build allows one.
+///
+/// Errors are boot-fatal by design (`main` panics on them), in all three cases:
+/// the var set in a production build, a malformed spec, and a spec missing
+/// `bits`/`time` on a PoW network. Silently falling back to the compiled anchor
+/// would leave a dev wondering why the sync still starts thousands of blocks
+/// back, and would let a production image quietly ignore an operator's intent.
+pub fn resolve_checkpoint(
+    network: Network,
+) -> std::result::Result<(Checkpoint, CheckpointSource), String> {
+    let compiled = checkpoint_for(network);
+    let Ok(spec) = std::env::var(CHECKPOINT_ENV) else {
+        return Ok((compiled, CheckpointSource::Compiled));
+    };
+    if !checkpoint_override_allowed() {
+        return Err(format!(
+            "{CHECKPOINT_ENV} is set ({spec:?}) but this is a production-shaped build. The SPV \
+             checkpoint is the trust anchor for every header the enclave accepts and must come \
+             from the compiled-in constant that PCR0 commits to. Unset {CHECKPOINT_ENV}, or edit \
+             enclave/src/networks/rgb/spv/checkpoint.rs and rebuild."
+        ));
+    }
+    let checkpoint = parse_checkpoint_spec(&spec, network, &compiled)?;
+    Ok((checkpoint, CheckpointSource::Env))
+}
+
+/// Parse a [`CHECKPOINT_ENV`] spec against `base` (the compiled-in checkpoint
+/// for `network`, supplying `bits`/`time` in the two-field form).
+///
+/// Pure so the format is directly unit-testable; [`resolve_checkpoint`] layers
+/// the env read and the build-profile gate on top.
+pub fn parse_checkpoint_spec(
+    spec: &str,
+    network: Network,
+    base: &Checkpoint,
+) -> std::result::Result<Checkpoint, String> {
+    let fields: Vec<&str> = spec.trim().split(':').map(str::trim).collect();
+    let (height_s, hash_s, bits_time) = match fields.as_slice() {
+        [h, hash] => (*h, *hash, None),
+        [h, hash, bits, time] => (*h, *hash, Some((*bits, *time))),
+        _ => {
+            return Err(format!(
+                "{CHECKPOINT_ENV} must be `height:block_hash` or `height:block_hash:bits:time`, \
+                 got {} field(s) in {spec:?}",
+                fields.len()
+            ))
+        }
+    };
+
+    let height: BlockHeight = height_s
+        .parse()
+        .map_err(|e| format!("{CHECKPOINT_ENV}: height {height_s:?} is not a block height: {e}"))?;
+
+    // Display order in, internal order stored — the same flip the constants
+    // above document (hash bytes are reversed relative to what explorers print).
+    let hash_hex = hash_s.strip_prefix("0x").unwrap_or(hash_s);
+    let hash_bytes = hex::decode(hash_hex)
+        .map_err(|e| format!("{CHECKPOINT_ENV}: block_hash {hash_s:?} is not hex: {e}"))?;
+    let mut hash: BlockHash = hash_bytes.try_into().map_err(|v: Vec<u8>| {
+        format!(
+            "{CHECKPOINT_ENV}: block_hash must be 32 bytes (64 hex chars), got {}",
+            v.len()
+        )
+    })?;
+    hash.reverse();
+    if hash == [0u8; 32] {
+        return Err(format!(
+            "{CHECKPOINT_ENV}: block_hash is all zeros — that is the placeholder, not a real \
+             block; no header can ever chain to it"
+        ));
+    }
+
+    let (bits, time) = match bits_time {
+        Some((bits_s, time_s)) => {
+            let bits_hex = bits_s.strip_prefix("0x").ok_or_else(|| {
+                format!(
+                    "{CHECKPOINT_ENV}: bits {bits_s:?} must be hex with an explicit `0x` prefix \
+                     (an Esplora JSON body reports bits in decimal — convert it)"
+                )
+            })?;
+            let bits = u32::from_str_radix(bits_hex, 16)
+                .map_err(|e| format!("{CHECKPOINT_ENV}: bits {bits_s:?} is not hex u32: {e}"))?;
+            let time: u32 = time_s.parse().map_err(|e| {
+                format!("{CHECKPOINT_ENV}: time {time_s:?} is not a timestamp: {e}")
+            })?;
+            (bits, time)
+        }
+        None => {
+            if network.enforces_pow() {
+                return Err(format!(
+                    "{CHECKPOINT_ENV}: {network:?} enforces PoW, so bits and time must be given \
+                     explicitly (`height:block_hash:bits:time`) — inheriting them from the \
+                     compiled checkpoint would make every nBits and retarget check wrong"
+                ));
+            }
+            (base.bits, base.time)
+        }
+    };
+
+    Ok(Checkpoint {
+        height,
+        hash,
+        bits,
+        time,
+        is_real: true,
+    })
 }
 
 // === UTEXO custom signet network parameters ===
@@ -250,6 +405,109 @@ mod tests {
         MAINNET_CHECKPOINT
             .assert_retarget_aligned(Network::Mainnet)
             .expect("mainnet checkpoint must be boundary-aligned");
+    }
+
+    // === SPV_CHECKPOINT override (dev-only boot anchor) ===
+
+    /// Round-trip: the spec for the real signet checkpoint must parse back to
+    /// exactly the compiled-in constant — display-order hash included. If the
+    /// byte flip ever regresses, every dev override would anchor to a hash no
+    /// header chains to, and this catches it.
+    #[test]
+    fn parse_spec_round_trips_the_signet_constant() {
+        let spec = "334000:000000ac5fccb8a26d3bf859952e164b4fb65190c8f29c8339c6a2c39f3aeb66:0x1e0377ae:1780464472";
+        let cp = parse_checkpoint_spec(spec, Network::Signet, &SIGNET_CHECKPOINT).unwrap();
+        assert_eq!(cp.height, SIGNET_CHECKPOINT.height);
+        assert_eq!(cp.hash, SIGNET_CHECKPOINT.hash);
+        assert_eq!(cp.bits, SIGNET_CHECKPOINT.bits);
+        assert_eq!(cp.time, SIGNET_CHECKPOINT.time);
+        assert!(cp.is_real);
+    }
+
+    #[test]
+    fn parse_spec_two_field_form_inherits_bits_and_time() {
+        let spec = "0x334000".to_string(); // not a full spec — see below
+        assert!(parse_checkpoint_spec(&spec, Network::Signet, &SIGNET_CHECKPOINT).is_err());
+
+        let spec = "400000:000000ac5fccb8a26d3bf859952e164b4fb65190c8f29c8339c6a2c39f3aeb66";
+        let cp = parse_checkpoint_spec(spec, Network::Signet, &SIGNET_CHECKPOINT).unwrap();
+        assert_eq!(cp.height, 400_000);
+        assert_eq!(cp.bits, SIGNET_CHECKPOINT.bits, "bits inherited");
+        assert_eq!(cp.time, SIGNET_CHECKPOINT.time, "time inherited");
+    }
+
+    #[test]
+    fn parse_spec_accepts_0x_prefixed_hash() {
+        let bare = "400000:000000ac5fccb8a26d3bf859952e164b4fb65190c8f29c8339c6a2c39f3aeb66";
+        let prefixed = "400000:0x000000ac5fccb8a26d3bf859952e164b4fb65190c8f29c8339c6a2c39f3aeb66";
+        let a = parse_checkpoint_spec(bare, Network::Signet, &SIGNET_CHECKPOINT).unwrap();
+        let b = parse_checkpoint_spec(prefixed, Network::Signet, &SIGNET_CHECKPOINT).unwrap();
+        assert_eq!(a.hash, b.hash);
+    }
+
+    /// A PoW network must not inherit bits/time — the nBits check and the
+    /// retarget epoch-start lookup both consume them, so a stale pair would
+    /// reject every real header.
+    #[test]
+    fn parse_spec_requires_bits_and_time_on_pow_networks() {
+        let spec = "953568:00000000000000000001b472f1922f86148c8286609fb14be39e12b8bd14bb64";
+        let err = parse_checkpoint_spec(spec, Network::Mainnet, &MAINNET_CHECKPOINT).unwrap_err();
+        assert!(err.contains("enforces PoW"), "got: {err}");
+        // Same height with the full four fields is fine.
+        let full = format!("{spec}:0x1702068f:1780050586");
+        assert!(parse_checkpoint_spec(&full, Network::Mainnet, &MAINNET_CHECKPOINT).is_ok());
+    }
+
+    /// Esplora reports `bits` in decimal; without the `0x` requirement
+    /// `503538094` would silently parse as hex (a completely different target).
+    #[test]
+    fn parse_spec_rejects_decimal_bits() {
+        let spec = "334000:000000ac5fccb8a26d3bf859952e164b4fb65190c8f29c8339c6a2c39f3aeb66:503538094:1780464472";
+        let err = parse_checkpoint_spec(spec, Network::Signet, &SIGNET_CHECKPOINT).unwrap_err();
+        assert!(err.contains("0x"), "got: {err}");
+    }
+
+    #[test]
+    fn parse_spec_rejects_malformed_specs() {
+        let cases = [
+            // wrong field count
+            "334000",
+            "334000:aa:0x1e0377ae",
+            // height not a number
+            "tip:000000ac5fccb8a26d3bf859952e164b4fb65190c8f29c8339c6a2c39f3aeb66",
+            // hash not hex / wrong length
+            "334000:zzzz00ac5fccb8a26d3bf859952e164b4fb65190c8f29c8339c6a2c39f3aeb66",
+            "334000:00ac5fcc",
+            // placeholder hash
+            "334000:0000000000000000000000000000000000000000000000000000000000000000",
+            // bad time
+            "334000:000000ac5fccb8a26d3bf859952e164b4fb65190c8f29c8339c6a2c39f3aeb66:0x1e0377ae:soon",
+        ];
+        for spec in cases {
+            assert!(
+                parse_checkpoint_spec(spec, Network::Signet, &SIGNET_CHECKPOINT).is_err(),
+                "spec {spec:?} should have been rejected"
+            );
+        }
+    }
+
+    /// Unit tests run under `cfg(test)`, one of the sanctioned dev shapes, so
+    /// the override is allowed here. The production-shaped combination
+    /// (release, no `allow-seed-import`) is what the boot gate refuses.
+    #[test]
+    fn override_is_allowed_in_test_builds() {
+        assert!(checkpoint_override_allowed());
+    }
+
+    /// With no env var set, boot resolution is the compiled-in constant.
+    #[test]
+    fn resolve_without_env_returns_the_compiled_checkpoint() {
+        if std::env::var(CHECKPOINT_ENV).is_ok() {
+            return; // someone's shell has it set; the pure parser tests cover the rest
+        }
+        let (cp, source) = resolve_checkpoint(Network::Signet).unwrap();
+        assert_eq!(cp.hash, SIGNET_CHECKPOINT.hash);
+        assert_eq!(source, CheckpointSource::Compiled);
     }
 
     #[test]

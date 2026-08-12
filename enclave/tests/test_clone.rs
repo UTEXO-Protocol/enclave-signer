@@ -48,6 +48,7 @@ fn initialize_key_from_mnemonic(port: u16, mnemonic: &str) -> PublicKeysResponse
             rgb_asset_id: r.rgb_asset_id,
             evm_gas_tx_uncompressed_pub: r.evm_gas_tx_uncompressed_pub,
             evm_gas_tx_address: r.evm_gas_tx_address,
+            ccd_ed25519_pub: r.ccd_ed25519_pub,
         },
         other => panic!("expected InitializeKey response, got {:?}", other),
     }

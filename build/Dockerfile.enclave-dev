@@ -70,10 +70,10 @@ RUN --mount=type=ssh \
       git config --global url."ssh://git@github.com-federated/UTEXO-Protocol/federated-signer-proto.git".insteadOf "ssh://git@github.com/UTEXO-Protocol/federated-signer-proto.git"; \
       git config --global url."ssh://git@github.com-consignment/UTEXO-Protocol/rgb-consignment-parser.git".insteadOf "ssh://git@github.com/UTEXO-Protocol/rgb-consignment-parser.git"; \
     fi; \
-    cargo build --features allow-seed-import,spv
+    cargo build --features allow-seed-import,spv,evm-rpc
 
 # ===== Runtime Stage =====
-FROM debian:bookworm-slim
+FROM debian:trixie-slim
 
 RUN apt-get update && apt-get install -y \
     ca-certificates \

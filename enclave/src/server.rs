@@ -181,6 +181,10 @@ fn dispatch(request: EnclaveRequest, ctx: &ServerContext) -> EnclaveResponse {
             tracing::info!("request: SignRawDigest");
             handle_sign_raw_digest(ctx, req)
         }
+        Some(Request::SignCcd(req)) => {
+            tracing::info!("request: SignCcd");
+            handle_sign_ccd(&ctx.state, req)
+        }
         Some(Request::ProxyFederation(req)) => {
             tracing::info!("request: ProxyFederation");
             handle_proxy_federation(req)
@@ -258,6 +262,7 @@ fn handle_sign(ctx: &ServerContext, req: SignRequest) -> Result<EnclaveResponse>
     let source_commission = match source_ref {
         SourceNetwork::EvmSource(source) => source.commission,
         SourceNetwork::RgbSource(source) => source.commission,
+        SourceNetwork::CcdSource(source) => source.commission,
     };
     let destination_proof = validate_destination(
         req.amount,
@@ -393,21 +398,26 @@ fn handle_sign(ctx: &ServerContext, req: SignRequest) -> Result<EnclaveResponse>
             // validation captured, bind the calldata the enclave is about to
             // sign to the operation `validate()` authenticated — witness
             // confirmation (4th I-03 / #95), BtcRelay agreement (#57 / #122),
-            // the consignment-bound release amount. The current deployment
-            // supports only the swap/send-receive flow, whose general bridge
-            // `burnId` and `fundsInIds` must be preserved. Mint/burn OpId
-            // rewriting stays disabled until the two flows are routed by
-            // network id. On non-rgb-validation builds there is no consignment
-            // to bind and fundsOut is refused upstream at source validation.
+            // the consignment-bound release amount.
+            //
+            // This binding is RGB-source-specific and MUST run only for an RGB
+            // source. A CCD source carries no consignment (`rgb_consignment` is
+            // None by design), and a CcdSource -> EvmDestination release is already
+            // authorized above by validate_source + validate_route_proofs +
+            // validate_destination (amount cross-check). Applying the binding
+            // unconditionally regressed CcdSource -> EvmDestination: the fundsOut
+            // selector reached `apply_funds_out_binding`, which requires a validated
+            // RGB consignment and rejected the sign. On non-rgb-validation builds
+            // there is no consignment to bind and fundsOut is refused upstream at
+            // source validation.
             #[cfg(feature = "rgb-validation")]
-            let destination = {
+            if matches!(source_ref, SourceNetwork::RgbSource(_)) {
                 apply_funds_out_binding(
                     ctx,
                     &destination,
                     source_validated.rgb_consignment.as_ref(),
                 )?;
-                destination
-            };
+            }
             handle_sign_evm(ctx, destination)
         }
         DestinationNetwork::RgbDestination(destination) => handle_sign_psbt(ctx, destination),
@@ -525,6 +535,8 @@ fn handle_initialize(ctx: &ServerContext, req: InitializeKeyRequest) -> Result<E
     tracing::info!(
         evm_address = %hex::encode(keys.evm_address),
         evm_gas_tx_address = %hex::encode(keys.evm_gas_tx_address),
+        btc_compressed_pub = %hex::encode(keys.btc_compressed_pubkey),
+        ccd_ed25519_pub = %hex::encode(keys.ccd_ed25519_pub),
         master_fingerprint = %hex::encode(keys.master_fingerprint),
         account_xpub_vanilla = %keys.account_xpub_vanilla,
         account_xpub_colored = %keys.account_xpub_colored,
@@ -544,6 +556,7 @@ fn handle_initialize(ctx: &ServerContext, req: InitializeKeyRequest) -> Result<E
             rgb_asset_id: ctx.bridge_config.rgb_asset_id.clone(),
             evm_gas_tx_uncompressed_pub: keys.evm_gas_tx_uncompressed_pub.to_vec(),
             evm_gas_tx_address: keys.evm_gas_tx_address.to_vec(),
+            ccd_ed25519_pub: keys.ccd_ed25519_pub.to_vec(),
         })),
     })
 }
@@ -587,6 +600,7 @@ fn build_public_keys_response(
         rgb_asset_id: cfg.rgb_asset_id.clone(),
         evm_gas_tx_uncompressed_pub: keys.evm_gas_tx_uncompressed_pub.to_vec(),
         evm_gas_tx_address: keys.evm_gas_tx_address.to_vec(),
+        ccd_ed25519_pub: keys.ccd_ed25519_pub.to_vec(),
     }
 }
 
@@ -599,7 +613,7 @@ fn build_public_keys_response(
 /// `docs/pubkey-attestation.md` and `parent/src/attest_verify.rs::canonical_bundle`.
 fn canonical_pubkey_bundle(keys: &PublicKeysResponse) -> Vec<u8> {
     let chain_id_bytes = keys.chain_id.to_be_bytes();
-    let parts: [&[u8]; 12] = [
+    let parts: [&[u8]; 13] = [
         &keys.evm_address,
         &keys.btc_compressed_pub,
         keys.btc_xpub.as_bytes(),
@@ -612,6 +626,7 @@ fn canonical_pubkey_bundle(keys: &PublicKeysResponse) -> Vec<u8> {
         keys.rgb_asset_id.as_bytes(),
         &keys.evm_gas_tx_uncompressed_pub,
         &keys.evm_gas_tx_address,
+        &keys.ccd_ed25519_pub,
     ];
     let total: usize = parts.iter().map(|p| 4 + p.len()).sum();
     let mut out = Vec::with_capacity(total);
@@ -742,33 +757,38 @@ fn handle_sign_psbt(ctx: &ServerContext, req: RgbDestination) -> Result<EnclaveR
     })
 }
 
-/// Sign a plain-BTC PSBT (create_utxo / plain withdrawals). Distinct from
+/// Sign a plain-BTC PSBT (create_utxo / UTXO management). Distinct from
 /// [`handle_sign_psbt`]: this path carries no RGB consignment and no EVM event.
-/// The enclave authorizes it solely against the operator-pinned output
-/// allowlist + amount cap ([`crate::networks::rgb::btc_crosscheck`]); a
-/// production (rgb-validation) build refuses to sign when that policy is
-/// unconfigured. Routing plain-BTC ops through their own request type is the
-/// structural half of the M-01/#69 fix — the bridge `SignPsbt` (RgbDestination)
-/// path can no longer be reached by omitting its fields.
+/// The enclave authorizes it by proving every output pays back to a script it
+/// controls, plus the operator-pinned amount cap
+/// ([`crate::networks::rgb::btc_crosscheck`]); a production (rgb-validation)
+/// build refuses to sign while the cap is unset. Routing plain-BTC ops through
+/// their own request type is the structural half of the M-01/#69 fix — the
+/// bridge `SignPsbt` (RgbDestination) path can no longer be reached by omitting
+/// its fields.
 fn handle_sign_btc(ctx: &ServerContext, req: SignBtcRequest) -> Result<EnclaveResponse> {
     // Authoritative posture check: in a production enclave the plain-BTC path is
     // only reachable when the attested policy enables it (audit C-01). This is
-    // the same predicate `validate_btc_request` enforces via the BTC pins, but
+    // the same predicate `validate_btc_request` enforces via the BTC cap pin, but
     // sourced from the single resolved policy rather than re-derived here — and
     // the enabled/disabled state is committed into attestation `user_data`.
     if let crate::policy::SecurityPolicy::Production(p) = &ctx.policy {
         if !p.allow_vanilla_psbt {
             return Err(EnclaveError::Signing(
                 "plain-BTC (vanilla) signing is disabled by the enclave's production security \
-                 policy (BTC_ALLOWED_SCRIPTS / BTC_MAX_TOTAL_SATS unset) — refusing to sign"
+                 policy (BTC_MAX_TOTAL_SATS unset) — refusing to sign"
                     .into(),
             ));
         }
     }
 
-    // Pinned output allowlist + amount cap (skipped only in dev-mode).
+    // Output self-ownership + amount cap (skipped only in dev-mode). Runs
+    // against the enclave's own keys, so an uninitialized enclave fails here
+    // with KeyNotInitialized rather than reaching the signer.
     #[cfg(not(feature = "dev-mode"))]
-    crate::networks::rgb::btc_crosscheck::validate_btc_request(&req, &ctx.bridge_config)?;
+    ctx.state.with_keys(|keys| {
+        crate::networks::rgb::btc_crosscheck::validate_btc_request(&req, &ctx.bridge_config, keys)
+    })?;
 
     // Sign restricted to the VANILLA (plain-BTC) account: the enclave will not
     // co-sign a Colored (RGB-allocated) input on this path, so it is
@@ -870,6 +890,33 @@ fn handle_sign_raw_digest(
 
     Ok(EnclaveResponse {
         response: Some(Response::RawDigestSig(RawDigestSignatureResponse {
+            signature: signature.to_vec(),
+        })),
+    })
+}
+
+/// Sign a 32-byte Concordium account-transaction hash with the governance
+/// Ed25519 key. The listener has already re-derived the hash and verified the
+/// transaction structure/amounts; the enclave signs the hash directly. Returns
+/// a 64-byte Ed25519 signature.
+fn handle_sign_ccd(state: &EnclaveState, req: SignCcdRequest) -> Result<EnclaveResponse> {
+    if req.hash.len() != 32 {
+        return Err(EnclaveError::InvalidRequest(format!(
+            "hash must be exactly 32 bytes, got {}",
+            req.hash.len()
+        )));
+    }
+
+    let hash: [u8; 32] = req.hash.as_slice().try_into().unwrap();
+    let signature = state.sign_ccd(&hash)?;
+
+    tracing::info!(
+        hash_hex = %hex::encode(hash),
+        "concordium signature produced (ed25519 governance key)"
+    );
+
+    Ok(EnclaveResponse {
+        response: Some(Response::CcdSignature(CcdSignatureResponse {
             signature: signature.to_vec(),
         })),
     })

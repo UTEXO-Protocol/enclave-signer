@@ -51,8 +51,8 @@ pub struct ProductionPolicy {
     /// Pinned RGB asset id (`RGB_ASSET_ID`).
     pub rgb_asset_id: String,
     /// Whether the plain-BTC (vanilla / create_utxo) signing path is authorised.
-    /// Derived from the operator's `BTC_ALLOWED_SCRIPTS` + `BTC_MAX_TOTAL_SATS`
-    /// pins ([`BridgeConfig::allows_vanilla_btc`]); default fail-closed (false).
+    /// Derived from the operator's `BTC_MAX_TOTAL_SATS` pin
+    /// ([`BridgeConfig::allows_vanilla_btc`]); default fail-closed (false).
     pub allow_vanilla_psbt: bool,
     /// Expected attestation root of trust. Always [`AttestationMode::Real`] in a
     /// production build (mock is a `compile_error!` in release — see `lib.rs`).
@@ -411,8 +411,7 @@ mod tests {
                 ..
             })
         ));
-        // Operator sets the allowlist + cap -> vanilla enabled and attested.
-        cfg.btc_allowed_scripts = vec![vec![0x00, 0x14]];
+        // Operator sets the cap -> vanilla enabled and attested.
         cfg.btc_max_total_sats = 100_000;
         let p = SecurityPolicy::resolve(&ctx, &cfg, EvmDataSource::RawRpc);
         assert!(matches!(

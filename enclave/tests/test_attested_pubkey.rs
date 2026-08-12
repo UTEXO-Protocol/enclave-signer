@@ -34,7 +34,7 @@ fn initialize(port: u16) {
 
 fn canonical_bundle(keys: &PublicKeysResponse) -> Vec<u8> {
     let chain_id_bytes = keys.chain_id.to_be_bytes();
-    let parts: [&[u8]; 12] = [
+    let parts: [&[u8]; 13] = [
         &keys.evm_address,
         &keys.btc_compressed_pub,
         keys.btc_xpub.as_bytes(),
@@ -47,6 +47,7 @@ fn canonical_bundle(keys: &PublicKeysResponse) -> Vec<u8> {
         keys.rgb_asset_id.as_bytes(),
         &keys.evm_gas_tx_uncompressed_pub,
         &keys.evm_gas_tx_address,
+        &keys.ccd_ed25519_pub,
     ];
     let mut out = Vec::new();
     for p in parts {
