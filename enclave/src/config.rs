@@ -80,6 +80,16 @@ pub struct BridgeConfig {
     /// every entry and still refuses when more than one candidate log matches,
     /// so widening the pin cannot make an ambiguous receipt resolvable.
     pub funds_in_contracts: Vec<[u8; 20]>,
+    /// Proxy deployments that carry the **mint/burn** flow (env
+    /// `MINT_BURN_CONTRACT`) - the subset of
+    /// [`bridge_contracts`](Self::bridge_contracts) whose `fundsOut` releases
+    /// settle RGB *burns*. Routing is by consignment semantics: a burn
+    /// consignment releases only from a deployment pinned here, a transfer
+    /// consignment only from one that is not. Empty = unset, which refuses
+    /// every burn release (mint/burn stays off exactly as before this pin
+    /// existed). An operational signing-policy pin, like the gas-tx and
+    /// plain-BTC pins above.
+    pub mint_burn_contracts: Vec<[u8; 20]>,
 }
 
 impl BridgeConfig {
@@ -129,6 +139,13 @@ impl BridgeConfig {
             .filter(|v| !v.is_empty())
             .unwrap_or_else(|| bridge_contracts.clone());
 
+        // Mint/burn deployment pin; deliberately NO fallback - unset keeps
+        // burn releases refused everywhere.
+        let mint_burn_contracts = std::env::var("MINT_BURN_CONTRACT")
+            .ok()
+            .map(|s| parse_eth_address_list(&s))
+            .unwrap_or_default();
+
         Self {
             chain_id,
             bridge_contracts,
@@ -137,7 +154,15 @@ impl BridgeConfig {
             btc_allowed_scripts,
             btc_max_total_sats,
             funds_in_contracts,
+            mint_burn_contracts,
         }
+    }
+
+    /// Whether `addr` is a pinned mint/burn deployment proxy - the routing
+    /// switch between burn releases and pool-transfer releases in
+    /// `validate_funds_out_transfer`.
+    pub fn is_mint_burn_contract(&self, addr: &[u8]) -> bool {
+        self.mint_burn_contracts.iter().any(|c| c.as_slice() == addr)
     }
 
     /// Whether `addr` is a pinned proxy contract. An empty pin set accepts

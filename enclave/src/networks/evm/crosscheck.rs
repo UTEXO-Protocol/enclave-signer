@@ -63,19 +63,28 @@ fn ensure_funds_out_selector(call_data: &[u8], validator: &str) -> Result<()> {
     Ok(())
 }
 
-/// Pools-side amount cross-check for the `fundsOut` transfer flow. Binds the
-/// calldata `amount` to the consignment's actual asset value:
+/// Amount cross-check for the `fundsOut` release flow, routed by consignment
+/// semantics and deployment pin:
 ///
-///   1. The consignment's most recent transition must be an IFA `Transfer`
-///      (`transition_type == ifa::TS_TRANSFER`).
-///   2. The transition's `total_output_amount` must cover the EVM-side release
-///      `amount`.
+///   * **Pools** (`is_mint_burn_deployment == false`): the consignment's most
+///     recent transition must be an IFA `Transfer` (`TS_TRANSFER`) whose
+///     `total_output_amount` covers the EVM-side release `amount`.
+///   * **Mint/burn** (`is_mint_burn_deployment == true`, the calldata targets
+///     a `MINT_BURN_CONTRACT` pin): the most recent transition must be a
+///     `TS_BURN` whose `MS_BURNED_ASSET` metadata covers the release `amount`
+///     - burned supply is the only thing that backs an unlock.
+///
+/// The two flows never cross: a burn cannot release pool liquidity and a pool
+/// transfer cannot release mint/burn backing. With no `MINT_BURN_CONTRACT`
+/// pinned every burn release is refused, which is exactly the pre-existing
+/// behaviour ("mint/burn stays off until wired by contract address").
 ///
 /// Fails closed (does not no-op) if handed anything but the `fundsOut`
 /// selector - see [`ensure_funds_out_selector`] (audit I-03).
 pub fn validate_funds_out_transfer(
     call_data: &[u8],
     validated: &ValidatedConsignment,
+    is_mint_burn_deployment: bool,
 ) -> Result<()> {
     use crate::networks::rgb::validation::ifa;
 
@@ -83,31 +92,56 @@ pub fn validate_funds_out_transfer(
 
     let last = validated.last_transition.as_ref().ok_or_else(|| {
         EnclaveError::CrossCheck(
-            "pools fundsOut requires a consignment with at least one transition".into(),
+            "fundsOut requires a consignment with at least one transition".into(),
         )
     })?;
-    if last.transition_type != ifa::TS_TRANSFER {
-        return Err(EnclaveError::CrossCheck(format!(
-            "pools fundsOut requires a Transfer transition (last transition_type = {}, want {})",
-            last.transition_type,
-            ifa::TS_TRANSFER
-        )));
-    }
 
     // Read `amount` straight from the calldata bytes rather than trusting the
     // listener-supplied `calldata_amount`, then bind it to the consignment's
-    // output value — the consignment is the authority on how much RGB moved.
+    // asset value — the consignment is the authority on how much RGB moved.
     let calldata_amount: u64 = decode_funds_out_params(call_data)?
         .amount
         .try_into()
         .map_err(|_| EnclaveError::CrossCheck("fundsOut amount exceeds u64 range".into()))?;
-    if last.total_output_amount < calldata_amount {
-        return Err(EnclaveError::CrossCheck(format!(
-            "transfer amount mismatch: consignment total_output_amount ({}) < calldata amount ({})",
-            last.total_output_amount, calldata_amount
-        )));
+
+    match (last.transition_type, is_mint_burn_deployment) {
+        (t, true) if t == ifa::TS_TRANSFER => Err(EnclaveError::CrossCheck(
+            "a pool transfer consignment cannot release from a mint/burn deployment".into(),
+        )),
+        (t, _) if t == ifa::TS_TRANSFER => {
+            if last.total_output_amount < calldata_amount {
+                return Err(EnclaveError::CrossCheck(format!(
+                    "transfer amount mismatch: consignment total_output_amount ({}) < calldata amount ({})",
+                    last.total_output_amount, calldata_amount
+                )));
+            }
+            Ok(())
+        }
+        (t, false) if t == ifa::TS_BURN => Err(EnclaveError::CrossCheck(
+            "a burn consignment releases only from a pinned mint/burn deployment \
+             (MINT_BURN_CONTRACT); this deployment is not pinned as one"
+                .into(),
+        )),
+        (t, true) if t == ifa::TS_BURN => {
+            let burned = last.burned_asset_amount.ok_or_else(|| {
+                EnclaveError::CrossCheck(
+                    "burn transition is missing MS_BURNED_ASSET metadata — cannot validate amount"
+                        .into(),
+                )
+            })?;
+            if burned < calldata_amount {
+                return Err(EnclaveError::CrossCheck(format!(
+                    "burn amount mismatch: consignment burned_asset_amount ({burned}) < calldata amount ({calldata_amount})"
+                )));
+            }
+            Ok(())
+        }
+        (other, _) => Err(EnclaveError::CrossCheck(format!(
+            "fundsOut requires a Transfer ({}) or Burn ({}) transition (last transition_type = {other})",
+            ifa::TS_TRANSFER,
+            ifa::TS_BURN
+        ))),
     }
-    Ok(())
 }
 
 // REMOVED: `apply_op_id_binding` / `op_id_to_calldata_id` (audit TEE-SE-02 /
@@ -381,7 +415,7 @@ mod tests {
         fn passes_when_total_output_covers_calldata_amount() {
             let cd = mock_funds_out_calldata(1000);
             let validated = validated_with_last(transfer_transition(1000));
-            assert!(validate_funds_out_transfer(&cd, &validated).is_ok());
+            assert!(validate_funds_out_transfer(&cd, &validated, false).is_ok());
         }
 
         #[test]
@@ -409,7 +443,7 @@ mod tests {
         fn passes_when_total_output_exceeds_calldata_amount() {
             let cd = mock_funds_out_calldata(1000);
             let validated = validated_with_last(transfer_transition(2000));
-            assert!(validate_funds_out_transfer(&cd, &validated).is_ok());
+            assert!(validate_funds_out_transfer(&cd, &validated, false).is_ok());
         }
 
         /// P0 regression: even with a valid consignment that deserializes
@@ -420,26 +454,79 @@ mod tests {
         fn rejects_when_total_output_less_than_calldata_amount() {
             let cd = mock_funds_out_calldata(1_000_000_000);
             let validated = validated_with_last(transfer_transition(1));
-            let err = validate_funds_out_transfer(&cd, &validated).unwrap_err();
+            let err = validate_funds_out_transfer(&cd, &validated, false).unwrap_err();
             assert!(
                 err.to_string().contains("transfer amount mismatch"),
                 "expected transfer amount mismatch, got: {err}"
             );
         }
 
-        /// A burn consignment arriving on the (single) `fundsOut`
-        /// selector must be rejected by the transfer check — this is how
-        /// mint/burn stays off until it's wired by contract address.
+        fn burn_transition(burned: Option<u64>) -> TransitionSummary {
+            TransitionSummary {
+                op_id: "burn-op".into(),
+                transition_type: ifa::TS_BURN,
+                total_output_amount: 0,
+                asset_output_amount: 0,
+                outputs: Vec::new(),
+                burned_asset_amount: burned,
+            }
+        }
+
+        /// A burn consignment on a deployment NOT pinned as mint/burn must be
+        /// rejected - burn releases exist only where `MINT_BURN_CONTRACT`
+        /// wires them, so an unpinned enclave behaves exactly as before.
         #[test]
-        fn rejects_when_last_transition_is_not_transfer() {
+        fn burn_rejected_off_the_mint_burn_deployment() {
             let cd = mock_funds_out_calldata(500);
-            let mut t = transfer_transition(500);
-            t.transition_type = ifa::TS_BURN;
-            let validated = validated_with_last(t);
-            let err = validate_funds_out_transfer(&cd, &validated).unwrap_err();
+            let validated = validated_with_last(burn_transition(Some(500)));
+            let err = validate_funds_out_transfer(&cd, &validated, false).unwrap_err();
             assert!(
-                err.to_string().contains("requires a Transfer transition"),
-                "expected Transfer-required rejection, got: {err}"
+                err.to_string().contains("pinned mint/burn deployment"),
+                "expected mint/burn-pin rejection, got: {err}"
+            );
+        }
+
+        #[test]
+        fn burn_passes_when_burned_covers_calldata_amount() {
+            let cd = mock_funds_out_calldata(500);
+            let validated = validated_with_last(burn_transition(Some(500)));
+            assert!(validate_funds_out_transfer(&cd, &validated, true).is_ok());
+        }
+
+        /// P0 symmetry with the pools check: the release cannot exceed what
+        /// the consignment provably destroyed.
+        #[test]
+        fn burn_rejects_when_burned_less_than_calldata_amount() {
+            let cd = mock_funds_out_calldata(1_000_000_000);
+            let validated = validated_with_last(burn_transition(Some(1)));
+            let err = validate_funds_out_transfer(&cd, &validated, true).unwrap_err();
+            assert!(
+                err.to_string().contains("burn amount mismatch"),
+                "expected burn amount mismatch, got: {err}"
+            );
+        }
+
+        #[test]
+        fn burn_rejects_when_metadata_amount_is_missing() {
+            let cd = mock_funds_out_calldata(500);
+            let validated = validated_with_last(burn_transition(None));
+            let err = validate_funds_out_transfer(&cd, &validated, true).unwrap_err();
+            assert!(
+                err.to_string().contains("MS_BURNED_ASSET"),
+                "expected missing-metadata rejection, got: {err}"
+            );
+        }
+
+        /// The flows never cross in the other direction either: a pool
+        /// transfer cannot release from the mint/burn deployment's backing.
+        #[test]
+        fn transfer_rejected_on_the_mint_burn_deployment() {
+            let cd = mock_funds_out_calldata(500);
+            let validated = validated_with_last(transfer_transition(500));
+            let err = validate_funds_out_transfer(&cd, &validated, true).unwrap_err();
+            assert!(
+                err.to_string().contains("cannot release from a mint/burn"),
+                "expected transfer-on-mint/burn rejection, got: {err}"
             );
         }
 
@@ -458,7 +545,7 @@ mod tests {
                 last_transfer_op_id: None,
                 non_mined_witness_txids: vec![],
             };
-            let err = validate_funds_out_transfer(&cd, &validated).unwrap_err();
+            let err = validate_funds_out_transfer(&cd, &validated, false).unwrap_err();
             assert!(
                 err.to_string().contains("at least one transition"),
                 "expected no-transition rejection, got: {err}"
@@ -475,7 +562,7 @@ mod tests {
             let mut cd = vec![0u8; 4 + 8 * 32];
             cd[..4].copy_from_slice(&[0xde, 0xad, 0xbe, 0xef]);
             let validated = validated_with_last(transfer_transition(0));
-            let err = validate_funds_out_transfer(&cd, &validated).unwrap_err();
+            let err = validate_funds_out_transfer(&cd, &validated, false).unwrap_err();
             assert!(
                 err.to_string().contains("non-fundsOut selector"),
                 "expected the fail-closed selector guard, got: {err}"

@@ -494,7 +494,12 @@ fn apply_funds_out_binding(
     let _ = ctx;
 
     // Consignment-bound release amount (transfer flow).
-    crosscheck::validate_funds_out_transfer(&destination.call_data, validated)?;
+    crosscheck::validate_funds_out_transfer(
+        &destination.call_data,
+        validated,
+        ctx.bridge_config
+            .is_mint_burn_contract(&destination.proxy_contract),
+    )?;
 
     // Current rollout is swap/send-receive only. Preserve the backend-provided
     // general bridge burnId and settlement fundsInIds; the EVM connector has
