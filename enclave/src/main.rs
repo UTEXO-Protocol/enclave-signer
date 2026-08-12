@@ -258,9 +258,10 @@ fn main() {
         // production-shaped build with that var set refuses to boot rather than
         // letting the host pick the SPV trust anchor; a malformed spec is fatal too,
         // so a dev never silently syncs from the compiled height instead.
-        let (checkpoint, checkpoint_source) = resolve_checkpoint(spv_network).unwrap_or_else(|msg| {
-            panic!("{msg}");
-        });
+        let (checkpoint, checkpoint_source) =
+            resolve_checkpoint(spv_network).unwrap_or_else(|msg| {
+                panic!("{msg}");
+            });
         if checkpoint_source == CheckpointSource::Env {
             tracing::warn!(
                 ?spv_network,

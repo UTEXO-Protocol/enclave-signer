@@ -634,11 +634,7 @@ fn test_sign_evm_rejects_funds_out_without_validator() {
 /// cross-check + EVM signing) with the real fundsOut selector — the layer the
 /// existing `route_proofs_accept_ccd_source_to_evm_destination` unit test does
 /// not reach. Mirrors `valid_sign_evm_request` but with a `CcdSource`.
-#[cfg(all(
-    feature = "rgb-validation",
-    feature = "ccd",
-    not(feature = "dev-mode")
-))]
+#[cfg(all(feature = "rgb-validation", feature = "ccd", not(feature = "dev-mode")))]
 #[test]
 fn test_sign_evm_accepts_ccd_source_funds_out() {
     let port = common::start_test_server_with_config(|_| {}, pinned_bridge_config());

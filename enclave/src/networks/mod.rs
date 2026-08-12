@@ -183,9 +183,9 @@ fn validate_operation_ids_match(source: &RouteProof, destination: &RouteProof) -
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::proto::{EvmDestination, EvmSource, RgbDestination, RgbSource};
     #[cfg(feature = "ccd")]
     use crate::proto::CcdSource;
+    use crate::proto::{EvmDestination, EvmSource, RgbDestination, RgbSource};
 
     fn evm_source(commission: u64) -> SourceNetwork {
         SourceNetwork::EvmSource(EvmSource {
