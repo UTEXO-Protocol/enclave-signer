@@ -497,8 +497,7 @@ fn apply_funds_out_binding(
     crosscheck::validate_funds_out_transfer(
         &destination.call_data,
         validated,
-        ctx.bridge_config
-            .is_mint_burn_contract(&destination.proxy_contract),
+        ctx.bridge_config.allow_burn_releases,
     )?;
 
     // Current rollout is swap/send-receive only. Preserve the backend-provided

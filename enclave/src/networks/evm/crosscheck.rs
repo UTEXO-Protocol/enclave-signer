@@ -64,27 +64,26 @@ fn ensure_funds_out_selector(call_data: &[u8], validator: &str) -> Result<()> {
 }
 
 /// Amount cross-check for the `fundsOut` release flow, routed by consignment
-/// semantics and deployment pin:
+/// semantics:
 ///
-///   * **Pools** (`is_mint_burn_deployment == false`): the consignment's most
-///     recent transition must be an IFA `Transfer` (`TS_TRANSFER`) whose
-///     `total_output_amount` covers the EVM-side release `amount`.
-///   * **Mint/burn** (`is_mint_burn_deployment == true`, the calldata targets
-///     a `MINT_BURN_CONTRACT` pin): the most recent transition must be a
-///     `TS_BURN` whose `MS_BURNED_ASSET` metadata covers the release `amount`
-///     - burned supply is the only thing that backs an unlock.
+///   * **Transfer** (`TS_TRANSFER`, the pools flow): `total_output_amount`
+///     must cover the EVM-side release `amount`. Always allowed - one
+///     deployment serves both pools and mint/burn (the contract's own route
+///     buckets separate the funds), so there is no address to split flows by.
+///   * **Burn** (`TS_BURN`, the unlock flow): allowed only when the operator
+///     enabled it (`ALLOW_BURN_RELEASES=1`), and the `MS_BURNED_ASSET`
+///     metadata must cover the release `amount`: burned supply is the only
+///     thing that backs an unlock.
 ///
-/// The two flows never cross: a burn cannot release pool liquidity and a pool
-/// transfer cannot release mint/burn backing. With no `MINT_BURN_CONTRACT`
-/// pinned every burn release is refused, which is exactly the pre-existing
-/// behaviour ("mint/burn stays off until wired by contract address").
+/// With the switch off every burn release is refused, which is exactly the
+/// pre-existing behaviour (mint/burn stayed off until explicitly enabled).
 ///
 /// Fails closed (does not no-op) if handed anything but the `fundsOut`
 /// selector - see [`ensure_funds_out_selector`] (audit I-03).
 pub fn validate_funds_out_transfer(
     call_data: &[u8],
     validated: &ValidatedConsignment,
-    is_mint_burn_deployment: bool,
+    burn_releases_allowed: bool,
 ) -> Result<()> {
     use crate::networks::rgb::validation::ifa;
 
@@ -104,10 +103,7 @@ pub fn validate_funds_out_transfer(
         .try_into()
         .map_err(|_| EnclaveError::CrossCheck("fundsOut amount exceeds u64 range".into()))?;
 
-    match (last.transition_type, is_mint_burn_deployment) {
-        (t, true) if t == ifa::TS_TRANSFER => Err(EnclaveError::CrossCheck(
-            "a pool transfer consignment cannot release from a mint/burn deployment".into(),
-        )),
+    match (last.transition_type, burn_releases_allowed) {
         (t, _) if t == ifa::TS_TRANSFER => {
             if last.total_output_amount < calldata_amount {
                 return Err(EnclaveError::CrossCheck(format!(
@@ -118,8 +114,8 @@ pub fn validate_funds_out_transfer(
             Ok(())
         }
         (t, false) if t == ifa::TS_BURN => Err(EnclaveError::CrossCheck(
-            "a burn consignment releases only from a pinned mint/burn deployment \
-             (MINT_BURN_CONTRACT); this deployment is not pinned as one"
+            "burn releases are disabled on this enclave (set ALLOW_BURN_RELEASES=1 to enable the \
+             unlock flow)"
                 .into(),
         )),
         (t, true) if t == ifa::TS_BURN => {
@@ -472,17 +468,17 @@ mod tests {
             }
         }
 
-        /// A burn consignment on a deployment NOT pinned as mint/burn must be
-        /// rejected - burn releases exist only where `MINT_BURN_CONTRACT`
-        /// wires them, so an unpinned enclave behaves exactly as before.
+        /// A burn consignment with the switch off must be rejected - burn
+        /// releases exist only where `ALLOW_BURN_RELEASES` enables them, so
+        /// an enclave without the switch behaves exactly as before.
         #[test]
-        fn burn_rejected_off_the_mint_burn_deployment() {
+        fn burn_rejected_when_releases_disabled() {
             let cd = mock_funds_out_calldata(500);
             let validated = validated_with_last(burn_transition(Some(500)));
             let err = validate_funds_out_transfer(&cd, &validated, false).unwrap_err();
             assert!(
-                err.to_string().contains("pinned mint/burn deployment"),
-                "expected mint/burn-pin rejection, got: {err}"
+                err.to_string().contains("burn releases are disabled"),
+                "expected disabled-switch rejection, got: {err}"
             );
         }
 
@@ -517,17 +513,13 @@ mod tests {
             );
         }
 
-        /// The flows never cross in the other direction either: a pool
-        /// transfer cannot release from the mint/burn deployment's backing.
+        /// One deployment serves pools and mint/burn at once, so enabling
+        /// burn releases must not restrict transfer releases.
         #[test]
-        fn transfer_rejected_on_the_mint_burn_deployment() {
+        fn transfer_still_passes_with_burn_releases_enabled() {
             let cd = mock_funds_out_calldata(500);
             let validated = validated_with_last(transfer_transition(500));
-            let err = validate_funds_out_transfer(&cd, &validated, true).unwrap_err();
-            assert!(
-                err.to_string().contains("cannot release from a mint/burn"),
-                "expected transfer-on-mint/burn rejection, got: {err}"
-            );
+            assert!(validate_funds_out_transfer(&cd, &validated, true).is_ok());
         }
 
         #[test]
