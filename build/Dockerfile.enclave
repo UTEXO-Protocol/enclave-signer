@@ -1,7 +1,8 @@
 # syntax=docker/dockerfile:1.4
-# Combined enclave image (vsock + rgb + ccd + evm-rpc) — handles both the RGB/BTC
-# and Concordium bridges in one binary. For a lean single-network EIF, build
-# Dockerfile.enclave.rgb (RGB only) or Dockerfile.enclave.ccd (Concordium only).
+# Combined production enclave image (vsock + rgb + ccd + evm-rpc + helios) —
+# handles both the RGB/BTC and Concordium bridges in one binary. For a lean
+# single-network EIF, build Dockerfile.enclave.rgb (RGB only) or
+# Dockerfile.enclave.ccd (Concordium only).
 # Usage:
 #   DOCKER_BUILDKIT=1 docker build --ssh default \
 #     -f build/Dockerfile.enclave -t utexo-bridge-enclave .
@@ -44,7 +45,12 @@ WORKDIR /build/enclave
 # EVM RPC (EVM_RPC_VSOCK_PORT, default 8002).
 # `ccd` adds Concordium governance signing (SignCcd + CcdSource routes). The
 # umbrella `rgb` feature pulls in `spv`/`rgb-validation`.
-RUN --mount=type=ssh cargo build --release --features vsock,rgb,ccd,evm-rpc
+# `helios` makes FundsIn verification trustless (#77) and is REQUIRED in any
+# build that carries the RGB bridge path: the production policy refuses to boot
+# on the host-relayed RawRpc source. Operator must set HELIOS_EXECUTION_RPC /
+# HELIOS_CONSENSUS_RPC and run the exec+consensus vsock-proxies (default ports
+# 8003 / 8004).
+RUN --mount=type=ssh cargo build --release --features vsock,rgb,ccd,evm-rpc,helios
 
 # --- Runtime ---
 FROM public.ecr.aws/amazonlinux/amazonlinux:2023-minimal AS runtime

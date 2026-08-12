@@ -22,6 +22,11 @@ use std::collections::HashMap;
 
 use thiserror::Error;
 
+pub mod policy;
+pub use policy::{
+    AttestationMode, AttestedPolicy, BtcDataSource, EvmDataSource, POLICY_COMMITMENT_V1,
+};
+
 // ----------------------------------------------------------------------------
 // Public types
 // ----------------------------------------------------------------------------

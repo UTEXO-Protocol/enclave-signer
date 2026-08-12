@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile:1.4
-# RGB-only enclave image (vsock + rgb + evm-rpc) — handles the RGB/BTC bridge
+# RGB-only enclave image (vsock + rgb + evm-rpc + helios) — handles the RGB/BTC bridge
 # only; Concordium (SignCcd / CcdSource) is not compiled in and its requests are
 # refused. For the Concordium bridge use Dockerfile.enclave.ccd; for both in one
 # binary use Dockerfile.enclave.
@@ -38,9 +38,16 @@ WORKDIR /build/enclave
 # pulling the alloy + tokio subtree; requires a second host vsock-proxy
 # (EVM_RPC_VSOCK_PORT, default 8002).
 #
+# `helios` makes that FundsIn verification trustless (#77) and is REQUIRED here:
+# `rgb` turns on the bridge-signing path, and a release rgb-validation build
+# whose policy resolves to the host-relayed RawRpc source refuses to boot
+# (see enclave/src/policy.rs). Operator must set HELIOS_EXECUTION_RPC /
+# HELIOS_CONSENSUS_RPC (+ HELIOS_CHECKPOINT) and run the exec+consensus
+# vsock-proxies (default ports 8003 / 8004).
+#
 # `--mount=type=ssh` exposes the forwarded SSH_AUTH_SOCK only for this RUN, so
 # no credentials end up in the image layers.
-RUN --mount=type=ssh cargo build --release --no-default-features --features vsock,rgb,evm-rpc
+RUN --mount=type=ssh cargo build --release --no-default-features --features vsock,rgb,evm-rpc,helios
 
 # --- Runtime ---
 FROM public.ecr.aws/amazonlinux/amazonlinux:2023-minimal AS runtime

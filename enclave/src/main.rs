@@ -12,6 +12,7 @@ use utexo_bridge_enclave::networks::rgb::spv::{
 };
 #[cfg(feature = "rgb-validation")]
 use utexo_bridge_enclave::networks::rgb::validation::RgbValidator;
+use utexo_bridge_enclave::policy::{BuildContext, EvmDataSource, SecurityPolicy};
 use utexo_bridge_enclave::server::{self, ServerContext};
 use utexo_bridge_enclave::state::EnclaveState;
 
@@ -68,15 +69,59 @@ fn main() {
         );
     }
 
-    // Fail-closed at BOOT for a production bridge-signing build (audit C-01
-    // systemic). A per-request refusal (evm::validation / rgb anchor) and the
-    // logs above are not enough: an operator does not tail enclave logs on a
-    // prod host, so an unconfigured or partially-pinned release enclave would
-    // start and silently reject every bridge signature. A release
-    // rgb-validation build that is not fully pinned must never become
-    // reachable. Mirrors the placeholder-checkpoint boot check below; debug /
-    // test / allow-seed-import builds are exempt.
-    if let Err(msg) = bridge_config.assert_configured_in_release() {
+    // Which EVM `FundsIn` deposit-verification source this build/deployment
+    // uses (audit C-01 "allowed data sources"). Determined the same way the RPC
+    // client is selected below: `evm-rpc` off => none; `helios` +
+    // HELIOS_EXECUTION_RPC set => trustless; otherwise the raw host-relayed RPC.
+    #[cfg(not(feature = "evm-rpc"))]
+    let (evm_source, evm_checkpoint) = (EvmDataSource::Disabled, None);
+    #[cfg(all(feature = "evm-rpc", not(feature = "helios")))]
+    let (evm_source, evm_checkpoint) = (EvmDataSource::RawRpc, None);
+    #[cfg(all(feature = "evm-rpc", feature = "helios"))]
+    let (evm_source, evm_checkpoint) = if std::env::var("HELIOS_EXECUTION_RPC").is_ok() {
+        // The pinned weak-subjectivity checkpoint is Helios's trust root, so
+        // commit it into the attested policy — a verifier then confirms WHICH
+        // checkpoint the enclave synced from, not merely that it is in Helios
+        // mode (audit M-06). Reads the SAME `HELIOS_CHECKPOINT` that
+        // `HeliosConfig` / `HeliosEvmClient` sync against. A missing/malformed
+        // value yields `None`, and the boot gate below then refuses to boot.
+        let checkpoint = std::env::var("HELIOS_CHECKPOINT")
+            .ok()
+            .and_then(|s| hex::decode(s.strip_prefix("0x").unwrap_or(&s)).ok())
+            .and_then(|b| <[u8; 32]>::try_from(b).ok());
+        (EvmDataSource::HeliosVerified, checkpoint)
+    } else {
+        (EvmDataSource::RawRpc, None)
+    };
+
+    // Resolve the enclave's single, explicit security posture once (audit C-01),
+    // from the build context + pinned config + selected data source. This is the
+    // value committed into attestation `user_data` (see
+    // `server::handle_get_attested_public_key`) and consulted by the signing
+    // handlers instead of re-deriving posture from features and empty fields.
+    let build_ctx = BuildContext::current();
+    let policy = SecurityPolicy::resolve(&build_ctx, &bridge_config, evm_source, evm_checkpoint);
+    match &policy {
+        SecurityPolicy::Production(p) => tracing::info!(
+            chain_id = p.chain_id,
+            allow_vanilla_psbt = p.allow_vanilla_psbt,
+            evm_source = ?p.evm_source,
+            btc_source = ?p.btc_source,
+            "resolved PRODUCTION security policy (committed into attestation user_data)"
+        ),
+        SecurityPolicy::Development { reason } => tracing::warn!(
+            ?reason,
+            "resolved DEVELOPMENT security policy — this is NOT a production bridge signer"
+        ),
+    }
+
+    // Fail-closed at BOOT (audit C-01 systemic). Per-request refusals and the
+    // logs above are not enough — an operator does not tail enclave logs on a
+    // prod host — so a release rgb-validation build that does not resolve to a
+    // valid Production policy must never become reachable. Mirrors the
+    // placeholder-checkpoint boot check below; debug / test / non-bridge
+    // builds are exempt.
+    if let Err(msg) = policy.assert_valid_for_build(&build_ctx) {
         panic!("{msg}");
     }
 
@@ -320,6 +365,7 @@ fn main() {
     let ctx = ServerContext {
         state,
         bridge_config,
+        policy,
         #[cfg(feature = "rgb-validation")]
         rgb_validator,
         #[cfg(feature = "evm-rpc")]
