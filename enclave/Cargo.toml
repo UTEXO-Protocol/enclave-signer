@@ -115,12 +115,14 @@ nix = { version = "0.31.2", features = ["socket"] }
 aws-nitro-enclaves-nsm-api = "0.4"
 
 [features]
-# Production posture: a plain `cargo build` produces the combined bridge
-# (rgb + ccd), which is the all-in-one binary. Single-network EIFs are built
-# with `--no-default-features --features vsock,rgb,evm-rpc` (RGB) or
-# `--no-default-features --features vsock,ccd` (Concordium); both, and the
-# minimal `--no-default-features` build, are covered in CI.
-default = ["rgb", "ccd"]
+# A plain `cargo build` is the combined production bridge: rgb + ccd + helios.
+# `helios` is default because production requires it — the boot gate in
+# `policy.rs` rejects any other EVM source (#77). It implies `evm-rpc`.
+#
+# Single-network EIFs: `--no-default-features --features vsock,rgb,evm-rpc,helios`
+# (RGB) or `--no-default-features --features vsock,ccd` (Concordium — no
+# bridge-signing path, so no Helios). Both are covered in CI.
+default = ["rgb", "ccd", "helios"]
 
 # Network-selection umbrellas. Additive: enable one for a lean single-network
 # EIF, or both for the combined build. They gate only the request-handling

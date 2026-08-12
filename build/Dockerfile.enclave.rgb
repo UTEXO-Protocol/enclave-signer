@@ -38,11 +38,10 @@ WORKDIR /build/enclave
 # pulling the alloy + tokio subtree; requires a second host vsock-proxy
 # (EVM_RPC_VSOCK_PORT, default 8002).
 #
-# `helios` makes that FundsIn verification trustless (#77) and is REQUIRED here:
-# `rgb` turns on the bridge-signing path, and a release rgb-validation build
-# whose policy resolves to the host-relayed RawRpc source refuses to boot
-# (see enclave/src/policy.rs). Operator must set HELIOS_EXECUTION_RPC /
-# HELIOS_CONSENSUS_RPC (+ HELIOS_CHECKPOINT) and run the exec+consensus
+# `helios` makes that verification trustless (#77) and is required: `rgb` turns
+# on the bridge-signing path, and the production policy refuses to boot on the
+# host-relayed RawRpc source. Operator must set HELIOS_EXECUTION_RPC /
+# HELIOS_CONSENSUS_RPC / HELIOS_CHECKPOINT and run the exec+consensus
 # vsock-proxies (default ports 8003 / 8004).
 #
 # `--mount=type=ssh` exposes the forwarded SSH_AUTH_SOCK only for this RUN, so

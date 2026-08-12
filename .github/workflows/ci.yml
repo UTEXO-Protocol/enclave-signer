@@ -32,8 +32,8 @@ jobs:
       # in private repos and fetched over SSH. Load read-only deploy
       # keys registered on UTEXO-Protocol/rgb-consignment-parser and
       # UTEXO-Protocol/federated-signer-proto into the agent so cargo's
-      # `git fetch` can authenticate. The default feature set now
-      # includes `spv` (which pulls `rgb-validation`), so every build
+      # `git fetch` can authenticate. The default feature set includes
+      # `rgb` (which pulls `spv`/`rgb-validation`), so every build
       # below needs these keys — including the minimal
       # `--no-default-features` build, which still fetches the private
       # proto crate.
@@ -57,9 +57,9 @@ jobs:
       - name: Check formatting
         run: cargo fmt --all -- --check
 
-      # The default feature set is now `spv` (which pulls `rgb-validation`), so
-      # the default build/clippy/test below exercise the production signing
-      # path — the SPV-anchored fundsOut flow shipped in the EIF.
+      # Defaults are the production posture (rgb + ccd + helios), so the steps
+      # below exercise the signing path shipped in the EIF. Heavy build; the
+      # cache above absorbs it.
       - name: Build (default features)
         run: cargo build --workspace
 
@@ -71,9 +71,8 @@ jobs:
       - name: Test (default features)
         run: cargo test --workspace
 
-      # Production build profile: the exact feature set shipped in the EIF
-      # (build/Dockerfile.enclave). `helios` is required in production (#77) and
-      # makes this a heavy build (2nd alloy major, revm, BLS, vendored OpenSSL).
+      # The exact feature set shipped in the EIF (build/Dockerfile.enclave):
+      # the defaults plus `vsock`. Spelled out so it stays greppable.
       - name: Build (production combo)
         run: cargo build -p utexo-bridge-enclave --features vsock,rgb,ccd,evm-rpc,helios
 
@@ -86,18 +85,15 @@ jobs:
       - name: Test (--features spv)
         run: cargo test -p utexo-bridge-enclave --features spv
 
-      # RGB-only single-network EIF profile: rgb (=spv+rgb-validation) + evm-rpc,
-      # `ccd` dropped via --no-default-features. Mirrors Dockerfile.enclave.rgb
-      # minus `helios` — the shipped RGB image adds it (the release boot gate
-      # requires the Helios source, #77), but it is already compile-covered by
-      # the production combo above and doubling that heavy build here buys
-      # nothing. CCD requests (SignCcd / CcdSource) must be refused here.
+      # RGB-only EIF profile, `ccd` dropped. Mirrors Dockerfile.enclave.rgb;
+      # keeps helios (this build still has the bridge-signing path, #77).
+      # CCD requests (SignCcd / CcdSource) must be refused here.
       - name: Build (rgb-only)
-        run: cargo build -p utexo-bridge-enclave --no-default-features --features vsock,rgb,evm-rpc
+        run: cargo build -p utexo-bridge-enclave --no-default-features --features vsock,rgb,evm-rpc,helios
       - name: Clippy (rgb-only)
-        run: cargo clippy -p utexo-bridge-enclave --no-default-features --features vsock,rgb,evm-rpc --all-targets -- -D warnings
+        run: cargo clippy -p utexo-bridge-enclave --no-default-features --features vsock,rgb,evm-rpc,helios --all-targets -- -D warnings
       - name: Test (rgb-only)
-        run: cargo test -p utexo-bridge-enclave --no-default-features --features rgb,evm-rpc,mock-attestation,allow-seed-import
+        run: cargo test -p utexo-bridge-enclave --no-default-features --features rgb,evm-rpc,helios,mock-attestation,allow-seed-import
 
       # CCD-only single-network EIF profile: ccd + shared EVM signing, no RGB
       # stack (no rgb-ops/rgb-consignment/rgb-schemas/spv). Mirrors
@@ -111,7 +107,7 @@ jobs:
         run: cargo test -p utexo-bridge-enclave --no-default-features --features ccd,mock-attestation,allow-seed-import
 
       # Minimal build: no features at all (`--no-default-features` drops the
-      # now-default `spv`). Keeps the no-SPV path compiling and exercises the
+      # default rgb/ccd/helios set). Keeps the no-SPV path compiling and exercises the
       # M-01 / #61 guard that a no-spv build refuses to sign `fundsOut`
       # (test_no_spv_build_refuses_funds_out_even_without_merkle_proofs).
       # Skips the private `rgb-consignment` dep, but still fetches the private

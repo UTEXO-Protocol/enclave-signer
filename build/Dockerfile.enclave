@@ -45,11 +45,10 @@ WORKDIR /build/enclave
 # EVM RPC (EVM_RPC_VSOCK_PORT, default 8002).
 # `ccd` adds Concordium governance signing (SignCcd + CcdSource routes). The
 # umbrella `rgb` feature pulls in `spv`/`rgb-validation`.
-# `helios` makes FundsIn verification trustless (#77) and is REQUIRED in any
-# build that carries the RGB bridge path: the production policy refuses to boot
-# on the host-relayed RawRpc source. Operator must set HELIOS_EXECUTION_RPC /
-# HELIOS_CONSENSUS_RPC and run the exec+consensus vsock-proxies (default ports
-# 8003 / 8004).
+# `helios` makes FundsIn verification trustless (#77) and is required: the
+# production policy refuses to boot on the host-relayed RawRpc source. Operator
+# must set HELIOS_EXECUTION_RPC / HELIOS_CONSENSUS_RPC and run the exec+consensus
+# vsock-proxies (default ports 8003 / 8004).
 RUN --mount=type=ssh cargo build --release --features vsock,rgb,ccd,evm-rpc,helios
 
 # --- Runtime ---

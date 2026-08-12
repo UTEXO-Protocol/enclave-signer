@@ -149,10 +149,9 @@ impl ServerContext {
     /// `ccd`-only variant: no SPV header chain to pass in.
     #[cfg(not(feature = "spv"))]
     pub fn new(state: EnclaveState, bridge_config: BridgeConfig) -> Self {
-        // Same resolution as the `spv` constructor above: no EVM source is
-        // wired here, so it resolves with `Disabled`. A non-`rgb-validation`
-        // build resolves to `Development { NonBridgeBuild }` and is exempt from
-        // the boot gate — there is no bridge-signing path to protect.
+        // As in the `spv` constructor: no EVM source is wired here, so resolve
+        // with `Disabled`. A ccd-only build has no bridge-signing path, so it
+        // resolves to `Development` and the boot gate exempts it.
         let policy = crate::policy::SecurityPolicy::resolve(
             &crate::policy::BuildContext::current(),
             &bridge_config,
