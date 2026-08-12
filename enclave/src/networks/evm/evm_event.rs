@@ -339,12 +339,21 @@ impl EvmReceiptProvider for AlloyEvmClient {
         // `timeout` requires the runtime's time driver (built with `enable_all`).
         // Outer `?` = the call stalled past the deadline (fail closed, free the
         // worker); inner `?` = the RPC itself errored.
+        // Construct the `timeout` future INSIDE the async block so it is created
+        // within the runtime's reactor context. `block_on(timeout(dur, fut))`
+        // would build the `Timeout` (which registers a timer entry) as an
+        // argument — i.e. BEFORE `block_on` enters the runtime — panicking with
+        // "there is no reactor running" and, under `panic = "abort"`, killing the
+        // whole enclave on every EVM-RPC call.
         let receipt = self
             .runtime
-            .block_on(tokio::time::timeout(
-                EVM_RPC_CALL_TIMEOUT,
-                self.provider.get_transaction_receipt(hash),
-            ))
+            .block_on(async {
+                tokio::time::timeout(
+                    EVM_RPC_CALL_TIMEOUT,
+                    self.provider.get_transaction_receipt(hash),
+                )
+                .await
+            })
             .map_err(|_elapsed| {
                 EnclaveError::CrossCheck(format!(
                     "evm-rpc: eth_getTransactionReceipt timed out after {}s (host RPC path stalled) \
@@ -360,11 +369,16 @@ impl EvmReceiptProvider for AlloyEvmClient {
 
     fn get_block_number(&self) -> Result<u64> {
         use alloy::providers::Provider;
+        // See `get_transaction_receipt`: build the `timeout` future inside the
+        // async block so it is created within the runtime reactor context.
         self.runtime
-            .block_on(tokio::time::timeout(
-                EVM_RPC_CALL_TIMEOUT,
-                self.provider.get_block_number(),
-            ))
+            .block_on(async {
+                tokio::time::timeout(
+                    EVM_RPC_CALL_TIMEOUT,
+                    self.provider.get_block_number(),
+                )
+                .await
+            })
             .map_err(|_elapsed| {
                 EnclaveError::CrossCheck(format!(
                     "evm-rpc: eth_blockNumber timed out after {}s (host RPC path stalled) - \
