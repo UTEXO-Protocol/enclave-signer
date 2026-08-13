@@ -228,6 +228,9 @@ fn dispatch(request: EnclaveRequest, ctx: &ServerContext) -> EnclaveResponse {
 }
 
 fn handle_sign(ctx: &ServerContext, req: SignRequest) -> Result<EnclaveResponse> {
+    if req.source_network.is_none() {
+        return handle_sign_sourceless(ctx, req);
+    }
     let source_ref = req
         .source_network
         .as_ref()
@@ -439,6 +442,54 @@ fn handle_sign(ctx: &ServerContext, req: SignRequest) -> Result<EnclaveResponse>
     }
 
     result
+}
+
+/// The one sourceless Sign the enclave accepts: a `rebalanceLiquidity`
+/// signature. A rebalance is self-originated - the bridge's watermark chore
+/// raised it - so no inbound event exists to validate. Authorisation here is
+/// the full destination check (pinned proxy and chain id, deadline, selector
+/// whitelist, canonical calldata decode); on-chain the RouteRegistry entry,
+/// the per-chain rate bucket and the teeNonce the digest commits to enforce
+/// the rest. Any other sourceless request keeps the old refusal, so a
+/// `fundsOut` can never sign without a validated source. The in-memory replay
+/// guard stays out on purpose: it keys on the EVM source tx, and rebalance
+/// replay protection is the on-chain teeNonce.
+fn handle_sign_sourceless(ctx: &ServerContext, req: SignRequest) -> Result<EnclaveResponse> {
+    use crate::networks::evm::validation::REBALANCE_SELECTOR;
+
+    let destination = match req.destination_network {
+        Some(DestinationNetwork::EvmDestination(destination)) => destination,
+        Some(_) => {
+            return Err(EnclaveError::InvalidRequest(
+                "sign request has no source_network".into(),
+            ))
+        }
+        None => {
+            return Err(EnclaveError::InvalidRequest(
+                "sign request has no destination_network".into(),
+            ))
+        }
+    };
+    if destination.call_data.get(..4) != Some(REBALANCE_SELECTOR.as_slice()) {
+        return Err(EnclaveError::InvalidRequest(
+            "sourceless signing is allowed for rebalanceLiquidity calldata only".into(),
+        ));
+    }
+
+    let validation_ctx = ValidationContext {
+        bridge_config: &ctx.bridge_config,
+        #[cfg(feature = "rgb-validation")]
+        rgb_validator: ctx.rgb_validator.as_ref(),
+        header_chain: &ctx.header_chain,
+    };
+    validate_destination(
+        req.amount,
+        0,
+        &DestinationNetwork::EvmDestination(destination.clone()),
+        &validation_ctx,
+    )?;
+
+    handle_sign_evm(ctx, destination)
 }
 
 /// Bind an RGB->EVM `fundsOut` calldata to the validated consignment before the

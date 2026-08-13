@@ -165,6 +165,19 @@ evidence, verified fail-closed but not trustless.
 [Sign PSBT](diagrams/04-seq-sign-psbt.md)
 *Source: [`diagrams/04-seq-sign-psbt.md`](diagrams/04-seq-sign-psbt.md)*
 
+### 6.2b Pool rebalancing (the one sourceless Sign)
+
+`rebalanceLiquidity` moves no tokens - it re-books per-chain liquidity - and is
+raised by the bridge's own watermark chore, so no inbound event exists to prove.
+It is therefore the single `Sign` the enclave accepts with **no source network**
+(`handle_sign_sourceless`), gated on the `rebalanceLiquidity` selector alone: a
+sourceless request carrying any other calldata, or naming a non-EVM destination,
+is refused exactly as before. Everything else still applies - the pinned proxy
+contract and chain id, the deadline, the selector whitelist, the canonical
+calldata decode, and the `TeeRebalance` EIP-712 digest. Replay protection is the
+contract's `teeNonce` (the digest commits to it), not the in-memory guard, which
+keys on an EVM source tx a rebalance does not have.
+
 ### 6.3 SPV header sync
 
 The host feeds Bitcoin headers; the enclave builds its own PoW-validated chain

@@ -23,6 +23,21 @@ sol! {
     }
 
     function fundsOut(FundsOutParams params);
+
+    // Mirrors `IBridge.RebalanceParams`: the sourceless rebalance calldata.
+    struct RebalanceParams {
+        uint256 amount;
+        uint256 burnId;
+        uint256 sourceChainId;
+        uint256 destinationChainId;
+        string sourceAddress;
+        string destinationAddress;
+        bytes proof;
+        bytes settlementDataOut;
+        bytes settlementDataIn;
+    }
+
+    function rebalanceLiquidity(RebalanceParams params);
 }
 
 /// Pinned `BridgeConfig` matching the defaults of `valid_sign_evm_request`
@@ -68,6 +83,207 @@ fn mock_funds_out_calldata(recipient: [u8; 20], amount: u64) -> Vec<u8> {
         },
     }
     .abi_encode()
+}
+
+/// Build ABI-valid `rebalanceLiquidity(RebalanceParams)` calldata.
+fn mock_rebalance_calldata(amount: u64) -> Vec<u8> {
+    rebalanceLiquidityCall {
+        params: RebalanceParams {
+            amount: U256::from(amount),
+            burnId: U256::from(7u64),
+            sourceChainId: U256::from(1u64),
+            destinationChainId: U256::from(96u64),
+            sourceAddress: "0xaa".into(),
+            destinationAddress: "tb1qtest".into(),
+            proof: Bytes::new(),
+            settlementDataOut: Bytes::new(),
+            settlementDataIn: Bytes::new(),
+        },
+    }
+    .abi_encode()
+}
+
+/// A rebalance sign request: no source network at all, EVM destination
+/// carrying `rebalanceLiquidity` calldata. Destination fields match
+/// `pinned_bridge_config` so the request clears the pinned cross-checks.
+fn sourceless_rebalance_request(call_data: Vec<u8>, calldata_amount: u64) -> SignRequest {
+    SignRequest {
+        amount: calldata_amount,
+        source_network: None,
+        destination_network: Some(DestinationNetwork::EvmDestination(EvmDestination {
+            call_data,
+            nonce: 1,
+            deadline: u64::MAX,
+            chain_id: 1,
+            proxy_contract: vec![0xAA; 20],
+            calldata_amount,
+            calldata_commission: 0,
+            lz_release: None,
+        })),
+    }
+}
+
+/// Bring up an initialized enclave pinned to `pinned_bridge_config`.
+fn initialized_pinned_server() -> u16 {
+    let port = common::start_test_server_with_config(|_| {}, pinned_bridge_config());
+    common::send_request(
+        port,
+        &EnclaveRequest {
+            request: Some(Request::InitializeKey(InitializeKeyRequest {
+                seed: vec![],
+                mnemonic: String::new(),
+            })),
+        },
+    );
+    port
+}
+
+/// A rebalance is self-originated - the bridge's watermark chore raised it -
+/// so it reaches the enclave with no source proof and must still sign.
+#[test]
+fn test_sourceless_rebalance_signs() {
+    let port = initialized_pinned_server();
+
+    let resp = common::send_request(
+        port,
+        &EnclaveRequest {
+            request: Some(Request::Sign(sourceless_rebalance_request(
+                mock_rebalance_calldata(1000),
+                1000,
+            ))),
+        },
+    );
+
+    match &resp.response {
+        Some(Response::EvmSignature(r)) => {
+            assert_eq!(r.signature.len(), 65, "recoverable secp256k1 signature");
+            assert_eq!(
+                r.call_data,
+                mock_rebalance_calldata(1000),
+                "rebalance calldata is signed as received"
+            );
+        }
+        other => panic!("expected EvmSignature, got {:?}", other),
+    }
+}
+
+/// The exemption is keyed on the rebalance selector alone: a `fundsOut`
+/// release arriving without a source proof is still refused, so the sourceless
+/// door cannot be used to release funds.
+#[test]
+fn test_sourceless_funds_out_is_refused() {
+    let port = initialized_pinned_server();
+
+    let resp = common::send_request(
+        port,
+        &EnclaveRequest {
+            request: Some(Request::Sign(sourceless_rebalance_request(
+                mock_funds_out_calldata([0x22; 20], 1000),
+                1000,
+            ))),
+        },
+    );
+
+    match &resp.response {
+        Some(Response::Error(e)) => {
+            assert!(
+                e.message.contains("rebalanceLiquidity"),
+                "unexpected message: {}",
+                e.message
+            );
+        }
+        other => panic!("expected ErrorResponse, got {:?}", other),
+    }
+}
+
+/// A sourceless request for a non-EVM destination keeps the original refusal:
+/// only the EVM rebalance path is sourceless.
+#[test]
+fn test_sourceless_rgb_destination_is_refused() {
+    let port = initialized_pinned_server();
+
+    let mut req = sourceless_rebalance_request(mock_rebalance_calldata(1000), 1000);
+    req.destination_network = Some(DestinationNetwork::RgbDestination(RgbDestination {
+        psbt_bytes: minimal_valid_psbt_bytes(),
+        ..Default::default()
+    }));
+
+    let resp = common::send_request(
+        port,
+        &EnclaveRequest {
+            request: Some(Request::Sign(req)),
+        },
+    );
+
+    match &resp.response {
+        Some(Response::Error(e)) => {
+            assert!(
+                e.message.contains("source_network"),
+                "unexpected message: {}",
+                e.message
+            );
+        }
+        other => panic!("expected ErrorResponse, got {:?}", other),
+    }
+}
+
+/// The destination cross-checks still run on the sourceless path: a request
+/// naming a contract other than the pinned proxy is refused.
+#[test]
+fn test_sourceless_rebalance_honours_the_contract_pin() {
+    let port = initialized_pinned_server();
+
+    let mut req = sourceless_rebalance_request(mock_rebalance_calldata(1000), 1000);
+    match req.destination_network.as_mut() {
+        Some(DestinationNetwork::EvmDestination(d)) => d.proxy_contract = vec![0xBB; 20],
+        other => panic!("expected EVM destination, got {other:?}"),
+    }
+
+    let resp = common::send_request(
+        port,
+        &EnclaveRequest {
+            request: Some(Request::Sign(req)),
+        },
+    );
+
+    match &resp.response {
+        Some(Response::Error(e)) => {
+            assert_eq!(e.code, 3, "cross-check failures should use code 3");
+            assert!(
+                e.message.contains("proxy_contract mismatch"),
+                "unexpected message: {}",
+                e.message
+            );
+        }
+        other => panic!("expected ErrorResponse, got {:?}", other),
+    }
+}
+
+/// ...and so does the calldata/declared-amount binding.
+#[test]
+fn test_sourceless_rebalance_binds_the_declared_amount() {
+    let port = initialized_pinned_server();
+
+    let resp = common::send_request(
+        port,
+        &EnclaveRequest {
+            request: Some(Request::Sign(sourceless_rebalance_request(
+                mock_rebalance_calldata(1000),
+                999,
+            ))),
+        },
+    );
+
+    match &resp.response {
+        Some(Response::Error(e)) => {
+            assert!(
+                e.message.contains("calldata amount mismatch"),
+                "unexpected message: {}",
+                e.message
+            );
+        }
+        other => panic!("expected ErrorResponse, got {:?}", other),
+    }
 }
 
 /// Placeholder consignment bytes for integration tests. `validate_evm_request`

@@ -8,6 +8,14 @@ use crate::enclave_proto::{
 };
 
 const ENCLAVE_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// `IBridge.rebalanceLiquidity(RebalanceParams)` selector. The one calldata
+/// this adapter forwards without a source proof: a rebalance is raised by the
+/// bridge's own watermark chore, so no inbound event exists to prove. Pinned
+/// here as a literal because the adapter does not link the enclave crate; the
+/// enclave holds the authoritative `REBALANCE_SELECTOR` and refuses anything
+/// else that arrives sourceless.
+const REBALANCE_SELECTOR: [u8; 4] = [0xa0, 0x21, 0xba, 0x4e];
 use crate::grpc_proto::parent_service_server::ParentService;
 use crate::grpc_proto::{
     self, sign_request, source_proof, AttestedPublicKeyRequest, AttestedPublicKeyResponse,
@@ -281,6 +289,80 @@ impl ParentAdapterService {
 
         Ok(())
     }
+
+    /// Whether this is the one TRANSACTION that legitimately carries no source
+    /// proof: a `rebalanceLiquidity` call. Keyed on the selector alone and only
+    /// when no source was sent, so a `fundsOut` (or a rebalance that DID come
+    /// with a source) keeps the normal cross-network path.
+    fn is_sourceless_rebalance(req: &grpc_proto::SignRequest) -> bool {
+        if req.source.is_some() {
+            return false;
+        }
+        match &req.data {
+            Some(sign_request::Data::EvmData(payload)) => {
+                payload.call_data.get(..4) == Some(REBALANCE_SELECTOR.as_slice())
+            }
+            _ => false,
+        }
+    }
+
+    /// Forward a sourceless `rebalanceLiquidity` request to the enclave.
+    ///
+    /// No source network and no cross-network route check - there is no source
+    /// to describe. The enclave applies the same destination checks as any
+    /// other EVM sign (pinned proxy and chain id, deadline, selector
+    /// whitelist, canonical decode) and refuses a sourceless request whose
+    /// calldata is anything else.
+    async fn sign_rebalance(
+        &self,
+        req: grpc_proto::SignRequest,
+        signer_network_id: u32,
+    ) -> Result<Response<SignatureResponse>, Status> {
+        let Some(sign_request::Data::EvmData(payload)) = req.data else {
+            return Err(Status::invalid_argument(
+                "rebalance signing requires an EVM payload",
+            ));
+        };
+        if !self.evm_network_ids.contains(&signer_network_id) {
+            return Err(Status::invalid_argument(format!(
+                "EVM payload destination network {signer_network_id} is not configured as EVM"
+            )));
+        }
+        tracing::info!(
+            dst_network_id = signer_network_id,
+            calldata_len = payload.call_data.len(),
+            nonce = payload.nonce,
+            deadline = payload.deadline,
+            "gRPC Sign: EVM rebalance (sourceless)"
+        );
+
+        let amount = payload.calldata_amount;
+        let destination_network =
+            Self::enclave_destination_network(sign_request::Data::EvmData(payload));
+
+        let enclave_req = EnclaveRequest {
+            request: Some(enclave_request::Request::Sign(enclave_proto::SignRequest {
+                amount,
+                source_network: None,
+                destination_network: Some(destination_network),
+            })),
+        };
+
+        match self.send_to_enclave(enclave_req).await?.response {
+            Some(enclave_response::Response::EvmSignature(r)) => {
+                Ok(Response::new(SignatureResponse {
+                    signer_network_id,
+                    signature: r.signature,
+                    identifier: None,
+                    call_data: r.call_data,
+                }))
+            }
+            Some(enclave_response::Response::Error(e)) => Err(Self::enclave_error_to_status(&e)),
+            other => Err(Status::internal(format!(
+                "unexpected enclave response for rebalance Sign: {other:?}"
+            ))),
+        }
+    }
 }
 
 #[tonic::async_trait]
@@ -304,6 +386,9 @@ impl ParentService for ParentAdapterService {
 
         match data_type {
             DataType::Transaction => {
+                if Self::is_sourceless_rebalance(&inner) {
+                    return self.sign_rebalance(inner, signer_network_id).await;
+                }
                 let source = Self::source_proof(&inner)?;
                 let amount = source.amount;
 
