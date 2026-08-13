@@ -37,6 +37,11 @@ pub struct SignEvmRequest {
     pub consignment: Vec<u8>,
     pub consignment_hash: Vec<u8>,
     pub merkle_proofs: Vec<MerkleProofEntry>,
+    /// LZ-specific fields for `lzFundsOutCall` releases. `None` for direct
+    /// `fundsOutCall` releases. When set, the enclave routes to the
+    /// `TeeLzFundsOut` EIP-712 digest and crosschecks these fields against
+    /// the decoded calldata.
+    pub lz_release: Option<crate::enclave_proto::LzReleaseParams>,
 }
 
 #[derive(Debug, Clone)]
@@ -182,6 +187,7 @@ impl EnclaveClient {
                                 proxy_contract: req.proxy_contract,
                                 calldata_amount: req.calldata_amount,
                                 calldata_commission: req.calldata_commission,
+                                lz_release: req.lz_release,
                             },
                         ),
                     ),

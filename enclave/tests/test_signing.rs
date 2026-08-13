@@ -104,6 +104,7 @@ fn valid_sign_evm_request(amount: u64, commission: u64) -> SignRequest {
             proxy_contract: vec![0xAA; 20],
             calldata_amount: amount,
             calldata_commission: commission,
+            lz_release: None,
         })),
     }
 }
@@ -661,6 +662,7 @@ fn test_sign_evm_accepts_ccd_source_funds_out() {
                 proxy_contract: vec![0xAA; 20],
                 calldata_amount: amount,
                 calldata_commission: commission,
+                lz_release: None,
             })),
         })),
     };
