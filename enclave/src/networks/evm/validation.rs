@@ -194,23 +194,15 @@ pub fn validate_destination(
             destination.chain_id, bridge_config.chain_id
         )));
     }
-    // Membership, not equality: one federation serves several Bridge
-    // deployments on a chain (pools and mint/burn are separate pairs). Widening
-    // the pin does not widen what a compromised host can reach - the request
-    // still has to name an address the operator pinned, and the matched address
-    // is what the rest of the request is bound to.
-    if !bridge_config.bridge_contracts.is_empty()
+    // The request must name exactly the operator-pinned proxy - a compromised
+    // host cannot redirect signatures to any other contract.
+    if bridge_config.bridge_contract != [0u8; 20]
         && !bridge_config.allows_proxy_contract(&destination.proxy_contract)
     {
         return Err(EnclaveError::CrossCheck(format!(
-            "proxy_contract mismatch: request {} is not one of the pinned [{}]",
+            "proxy_contract mismatch: request {} is not the pinned {}",
             hex::encode(&destination.proxy_contract),
-            bridge_config
-                .bridge_contracts
-                .iter()
-                .map(hex::encode)
-                .collect::<Vec<_>>()
-                .join(", ")
+            hex::encode(bridge_config.bridge_contract)
         )));
     }
 
@@ -351,7 +343,7 @@ mod tests {
     fn config() -> BridgeConfig {
         BridgeConfig {
             chain_id: 1,
-            bridge_contracts: vec![[0xAA; ADDRESS_LEN]],
+            bridge_contract: [0xAA; ADDRESS_LEN],
             rgb_asset_id: "ignored-by-evm-validation".into(),
             gas_tx_allowed_to: None,
             ..Default::default()
@@ -671,33 +663,18 @@ mod tests {
         .abi_encode()
     }
 
-    /// The mint/burn deployment is a second `Bridge` + `MultisigProxy` pair on
-    /// the same chain, so a request naming it must be accepted by the same
-    /// federation that serves pools.
+    /// A request naming any proxy other than the single pinned one is refused.
     #[test]
-    fn second_pinned_proxy_is_accepted() {
+    fn unpinned_proxy_is_rejected() {
         let cfg = BridgeConfig {
-            bridge_contracts: vec![[0xAA; ADDRESS_LEN], [0xBB; ADDRESS_LEN]],
-            ..config()
-        };
-        let mut dst = destination();
-        dst.proxy_contract = vec![0xBB; ADDRESS_LEN];
-        with_ctx(&cfg, |ctx| {
-            validate_destination(&dst, ctx).expect("second pinned proxy accepted");
-        });
-    }
-
-    #[test]
-    fn unpinned_proxy_is_rejected_even_with_several_pins() {
-        let cfg = BridgeConfig {
-            bridge_contracts: vec![[0xAA; ADDRESS_LEN], [0xBB; ADDRESS_LEN]],
+            bridge_contract: [0xAA; ADDRESS_LEN],
             ..config()
         };
         let mut dst = destination();
         dst.proxy_contract = vec![0xCC; ADDRESS_LEN];
         with_ctx(&cfg, |ctx| {
             let err = validate_destination(&dst, ctx).unwrap_err().to_string();
-            assert!(err.contains("not one of the pinned"), "unexpected: {err}");
+            assert!(err.contains("not the pinned"), "unexpected: {err}");
         });
     }
 

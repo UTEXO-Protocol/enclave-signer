@@ -34,7 +34,7 @@ sol! {
 fn pinned_bridge_config() -> BridgeConfig {
     BridgeConfig {
         chain_id: 1,
-        bridge_contracts: vec![[0xAA; 20]],
+        bridge_contract: [0xAA; 20],
         rgb_asset_id: "rgb:test".into(),
         ..Default::default()
     }
@@ -440,7 +440,7 @@ fn test_sign_evm_rejects_funds_out_without_validator() {
 fn test_sign_evm_rejects_unconfigured_bridge_config() {
     let unconfigured = BridgeConfig {
         chain_id: 0,
-        bridge_contracts: vec![],
+        bridge_contract: [0u8; 20],
         rgb_asset_id: String::new(),
         ..Default::default()
     };
@@ -1482,7 +1482,7 @@ fn eip1559_unsigned(chain_id: u64, to: &[u8; 20], value: u64) -> Vec<u8> {
 fn gas_pinned_config() -> BridgeConfig {
     BridgeConfig {
         chain_id: 1,
-        bridge_contracts: vec![[0xBB; 20]],
+        bridge_contract: [0xBB; 20],
         rgb_asset_id: "rgb:test".into(),
         gas_tx_allowed_to: Some([0xAA; 20]),
         ..Default::default()

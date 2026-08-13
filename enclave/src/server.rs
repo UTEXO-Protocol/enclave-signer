@@ -304,7 +304,7 @@ fn handle_sign(ctx: &ServerContext, req: SignRequest) -> Result<EnclaveResponse>
             &**client,
             // FundsIn is emitted by the bridge entry contract, which may differ
             // from the MultisigProxy pinned in BRIDGE_CONTRACT (see config.rs).
-            &ctx.bridge_config.funds_in_contracts,
+            &ctx.bridge_config.funds_in_contract,
             ctx.evm_rpc_config.min_confirmations,
             &tx_hash,
             &source.funds_in_operation_id,
@@ -363,7 +363,7 @@ fn handle_sign(ctx: &ServerContext, req: SignRequest) -> Result<EnclaveResponse>
         if let Some((operation_idx, asset_id)) = rgb_op {
             let op_key = crate::networks::rgb::psbt_validation::psbt_operation_key(
                 ctx.bridge_config.chain_id,
-                &ctx.bridge_config.bridge_contracts_bytes(),
+                &ctx.bridge_config.bridge_contract,
                 &source.tx_hash,
                 operation_idx,
                 asset_id,
@@ -571,7 +571,7 @@ fn handle_initialize(ctx: &ServerContext, req: InitializeKeyRequest) -> Result<E
             account_xpub_colored: keys.account_xpub_colored,
             evm_uncompressed_pub: keys.evm_uncompressed_pub.to_vec(),
             chain_id: ctx.bridge_config.chain_id,
-            bridge_contract: ctx.bridge_config.bridge_contracts_bytes(),
+            bridge_contract: ctx.bridge_config.bridge_contract_bytes(),
             rgb_asset_id: ctx.bridge_config.rgb_asset_id.clone(),
             evm_gas_tx_uncompressed_pub: keys.evm_gas_tx_uncompressed_pub.to_vec(),
             evm_gas_tx_address: keys.evm_gas_tx_address.to_vec(),
@@ -617,7 +617,7 @@ fn build_public_keys_response(
         account_xpub_colored: keys.account_xpub_colored,
         evm_uncompressed_pub: keys.evm_uncompressed_pub.to_vec(),
         chain_id: cfg.chain_id,
-        bridge_contract: cfg.bridge_contracts_bytes(),
+        bridge_contract: cfg.bridge_contract_bytes(),
         rgb_asset_id: cfg.rgb_asset_id.clone(),
         evm_gas_tx_uncompressed_pub: keys.evm_gas_tx_uncompressed_pub.to_vec(),
         evm_gas_tx_address: keys.evm_gas_tx_address.to_vec(),
