@@ -164,19 +164,6 @@ impl BridgeConfig {
             })
             .unwrap_or_default();
 
-        // Plain-BTC output allowlist: comma-separated hex `script_pubkey`s.
-        // Each entry is parsed independently; malformed/empty entries are
-        // dropped rather than poisoning the whole list.
-        let btc_allowed_scripts = std::env::var("BTC_ALLOWED_SCRIPTS")
-            .ok()
-            .map(|s| {
-                s.split(',')
-                    .filter_map(|part| hex::decode(part.trim()).ok())
-                    .filter(|bytes| !bytes.is_empty())
-                    .collect::<Vec<Vec<u8>>>()
-            })
-            .unwrap_or_default();
-
         let btc_max_total_sats = std::env::var("BTC_MAX_TOTAL_SATS")
             .ok()
             .and_then(|s| s.parse::<u64>().ok())
