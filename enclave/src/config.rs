@@ -53,14 +53,17 @@ pub struct BridgeConfig {
     pub rgb_asset_id: String,
     /// Operator-pinned allowed destination for **gas-key** transactions
     /// (`GAS_TX_ALLOWED_TO`). When set, `SignRawDigest` only signs a gas tx
-    /// whose `to` equals this address (and whose `value` is 0) — audit
-    /// TEE-XC-09. `None` = unset, which fails gas-tx signing closed in
-    /// release builds.
+    /// whose `to` equals this address — audit TEE-XC-09. `None` = unset,
+    /// which fails gas-tx signing closed in release builds.
     ///
-    /// The pinned address should be an EOA, or a contract with no function
-    /// the gas key could be coerced into calling to the operator's
-    /// detriment: the transaction calldata is not inspected (see
-    /// `networks::evm::gas_tx`).
+    /// A gas tx must carry `value == 0`, except for the payable
+    /// `lzFundsOutCall` — which also requires this pin to equal
+    /// [`Self::bridge_contract`] and the value to fit under
+    /// [`Self::gas_tx_max_value_wei`]. See `networks::evm::gas_tx`.
+    ///
+    /// Otherwise the pinned address should be an EOA, or a contract with no
+    /// function the gas key could be coerced into calling to the operator's
+    /// detriment: calldata is not inspected beyond that selector prefix.
     ///
     /// Unlike the three fields above, this is **not** folded into the
     /// attestation `user_data` bundle (`canonical_pubkey_bundle` in
@@ -68,6 +71,16 @@ pub struct BridgeConfig {
     /// the enclave's committed identity. It can be added to the bundle in a
     /// follow-up if external verifiability of the gas-tx policy is wanted.
     pub gas_tx_allowed_to: Option<[u8; 20]>,
+    /// Operator-pinned ceiling (wei) on the **native value** a single gas tx
+    /// may carry (`GAS_TX_MAX_VALUE_WEI`). `None` = unset, which refuses any
+    /// non-zero value — so a deployment not using the LayerZero release path
+    /// keeps the old `value == 0` posture with no new configuration.
+    ///
+    /// The fee is not a field of the `TeeLzFundsOut` payload the proxy
+    /// verifies, so nothing binds it to the release it pays for; this ceiling
+    /// bounds the blast radius until that exists. Same fail-closed shape as
+    /// [`Self::btc_max_total_sats`].
+    pub gas_tx_max_value_wei: Option<u128>,
     /// Operator-pinned cap (sats) on the **total input value spent** by a
     /// plain-BTC PSBT (`BTC_MAX_TOTAL_SATS`). `0` = unset; a production build
     /// refuses plain-BTC signing when unset. Bounds the blast radius of the
@@ -112,6 +125,7 @@ impl Default for BridgeConfig {
             bridge_contract: [0u8; 20],
             rgb_asset_id: String::new(),
             gas_tx_allowed_to: None,
+            gas_tx_max_value_wei: None,
             btc_max_total_sats: 0,
             funds_in_contract: [0u8; 20],
             max_consignment_bytes: DEFAULT_MAX_CONSIGNMENT_BYTES,
@@ -142,6 +156,11 @@ impl BridgeConfig {
         let gas_tx_allowed_to = std::env::var("GAS_TX_ALLOWED_TO")
             .ok()
             .and_then(|s| parse_eth_address(&s).ok());
+
+        // Unset or unparseable stays `None`: a typo must not widen the ceiling.
+        let gas_tx_max_value_wei = std::env::var("GAS_TX_MAX_VALUE_WEI")
+            .ok()
+            .and_then(|s| s.trim().parse::<u128>().ok());
 
         let btc_max_total_sats = std::env::var("BTC_MAX_TOTAL_SATS")
             .ok()
@@ -174,6 +193,7 @@ impl BridgeConfig {
             bridge_contract,
             rgb_asset_id,
             gas_tx_allowed_to,
+            gas_tx_max_value_wei,
             btc_max_total_sats,
             funds_in_contract,
             max_consignment_bytes,
@@ -487,6 +507,13 @@ mod tests {
         };
         assert!(!c.is_configured());
         assert!(c.is_partially_configured());
+    }
+
+    /// Must default to the fail-closed `None` so an existing deployment keeps
+    /// the old `value == 0` posture.
+    #[test]
+    fn gas_tx_value_ceiling_defaults_to_unset() {
+        assert_eq!(BridgeConfig::default().gas_tx_max_value_wei, None);
     }
 
     #[test]
