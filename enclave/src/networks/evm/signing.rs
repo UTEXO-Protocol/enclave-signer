@@ -1,9 +1,9 @@
 use sha3::{Digest, Keccak256};
 
 use crate::error::{EnclaveError, Result};
-use crate::networks::evm::validation::decode_funds_out_params;
+use crate::networks::evm::validation::{decode_funds_out_params, decode_lz_funds_out_params};
 use crate::networks::evm::{ADDRESS_LEN, HASH_LEN};
-use crate::proto::EvmDestination;
+use crate::proto::{EvmDestination, LzReleaseParams};
 
 const DOMAIN_TYPE_HASH_STR: &str =
     "EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)";
@@ -137,6 +137,86 @@ pub fn funds_out_digest(
     Ok(eip712_digest(domain, &struct_hash))
 }
 
+/// EIP-712 type string for `MultisigProxy.lzFundsOutCall` (MultisigProxy.sol:147).
+/// Thirteen fields: the seven shared with `TeeFundsOut` plus four LZ-specific ones.
+const TEE_LZ_FUNDS_OUT_TYPE_HASH_STR: &str = "TeeLzFundsOut(uint256 amount,uint256 burnId,\
+     uint256 sourceChainId,uint256 destinationChainId,string sourceAddress,\
+     bytes proof,bytes settlementData,uint32 dstEid,bytes32 recipient,\
+     uint256 minAmountLD,bytes extraOptions,uint256 nonce,uint256 deadline)";
+
+/// Build the EIP-712 digest that `MultisigProxy.lzFundsOutCall` verifies.
+///
+/// Mirrors `MultisigProxy._lzFundsOutStructHash` (MultisigProxy.sol:388-413):
+/// thirteen words — dynamic fields pre-hashed, `dstEid` (uint32) padded to
+/// 32 bytes. The `lz_release` proto fields are crosschecked against the decoded
+/// calldata before the digest is built.
+pub fn lz_funds_out_digest(
+    domain: &Eip712Domain,
+    call_data: &[u8],
+    lz_release: &LzReleaseParams,
+    nonce: u64,
+    deadline: u64,
+) -> Result<[u8; HASH_LEN]> {
+    if call_data.len() < 4 {
+        return Err(EnclaveError::CrossCheck(format!(
+            "lzFundsOut call_data must be at least 4 bytes, got {}",
+            call_data.len()
+        )));
+    }
+    let params = decode_lz_funds_out_params(call_data)?;
+
+    // Crosscheck LZ-specific fields from proto against decoded calldata.
+    if lz_release.dst_eid != params.dstEid {
+        return Err(EnclaveError::CrossCheck(format!(
+            "lz_release.dst_eid {} != calldata dstEid {}",
+            lz_release.dst_eid, params.dstEid
+        )));
+    }
+    let recipient_bytes: [u8; 32] = params.recipient.0;
+    if lz_release.recipient != recipient_bytes {
+        return Err(EnclaveError::CrossCheck(
+            "lz_release.recipient does not match calldata recipient".into(),
+        ));
+    }
+    let min_amount_ld: u64 = params
+        .minAmountLD
+        .try_into()
+        .map_err(|_| EnclaveError::CrossCheck("lzFundsOut minAmountLD exceeds u64 range".into()))?;
+    if lz_release.min_amount_ld != min_amount_ld {
+        return Err(EnclaveError::CrossCheck(format!(
+            "lz_release.min_amount_ld {} != calldata minAmountLD {}",
+            lz_release.min_amount_ld, min_amount_ld
+        )));
+    }
+
+    let struct_hash = {
+        let type_hash = Keccak256::digest(TEE_LZ_FUNDS_OUT_TYPE_HASH_STR.as_bytes());
+
+        let mut buf = Vec::with_capacity(HASH_LEN * 14);
+        buf.extend_from_slice(&type_hash);
+        buf.extend_from_slice(&params.amount.to_be_bytes::<HASH_LEN>());
+        buf.extend_from_slice(&params.burnId.to_be_bytes::<HASH_LEN>());
+        buf.extend_from_slice(&params.sourceChainId.to_be_bytes::<HASH_LEN>());
+        buf.extend_from_slice(&params.destinationChainId.to_be_bytes::<HASH_LEN>());
+        buf.extend_from_slice(&Keccak256::digest(params.sourceAddress.as_bytes()));
+        buf.extend_from_slice(&Keccak256::digest(&params.proof));
+        buf.extend_from_slice(&Keccak256::digest(&params.settlementData));
+        // uint32 dstEid: right-aligned in a 32-byte word (same as Solidity uint32 ABI-encoding).
+        buf.extend_from_slice(&abi_encode_u32(params.dstEid));
+        // bytes32 recipient: already 32 bytes, used as-is.
+        buf.extend_from_slice(&recipient_bytes);
+        buf.extend_from_slice(&params.minAmountLD.to_be_bytes::<HASH_LEN>());
+        buf.extend_from_slice(&Keccak256::digest(&params.extraOptions));
+        buf.extend_from_slice(&abi_encode_u256(nonce));
+        buf.extend_from_slice(&abi_encode_u256(deadline));
+
+        let hash: [u8; HASH_LEN] = Keccak256::digest(&buf).into();
+        hash
+    };
+
+    Ok(eip712_digest(domain, &struct_hash))
+}
+
 /// Wrap a struct hash into the final EIP-712 digest: `keccak256(0x1901 ‖
 /// domainSeparator ‖ structHash)`.
 fn eip712_digest(domain: &Eip712Domain, struct_hash: &[u8; HASH_LEN]) -> [u8; HASH_LEN] {
@@ -154,6 +234,14 @@ fn eip712_digest(domain: &Eip712Domain, struct_hash: &[u8; HASH_LEN]) -> [u8; HA
 fn abi_encode_u256(val: u64) -> [u8; HASH_LEN] {
     let mut buf = [0u8; HASH_LEN];
     buf[24..].copy_from_slice(&val.to_be_bytes());
+    buf
+}
+
+/// ABI-encode a u32 as a uint32 (HASH_LEN bytes, big-endian, right-aligned).
+/// Matches Solidity's abi.encode(uint32) padding.
+fn abi_encode_u32(val: u32) -> [u8; HASH_LEN] {
+    let mut buf = [0u8; HASH_LEN];
+    buf[28..].copy_from_slice(&val.to_be_bytes());
     buf
 }
 
@@ -356,5 +444,130 @@ mod tests {
         let on_chain =
             decode("8da42c1b5850d914ac94e640f4edd2030e2330b104f8448fdf3c6639cb0542ff").unwrap();
         assert_eq!(domain.separator_hash(), on_chain.as_slice());
+    }
+
+    // --- LZ digest tests ---
+
+    fn lz_test_domain() -> Eip712Domain {
+        Eip712Domain {
+            name: "MultisigProxy".to_string(),
+            version: "1".to_string(),
+            chain_id: 42161,
+            verifying_contract: [0u8; 20],
+        }
+    }
+
+    /// Pack `lzFundsOut` calldata using the same ABI as the node's
+    /// `packIMultisigProxyLzFundsOut` test helper — individual params, no
+    /// struct wrapper.
+    fn lz_test_calldata() -> Vec<u8> {
+        use crate::networks::evm::validation::lzFundsOutCall;
+        use alloy_primitives::{Bytes, FixedBytes, U256};
+        use alloy_sol_types::SolCall;
+
+        let mut recipient = [0u8; 32];
+        recipient[31] = 0x05;
+
+        lzFundsOutCall {
+            amount: U256::from(1u64),
+            burnId: U256::from(3u64),
+            sourceChainId: U256::from(84u64),
+            destinationChainId: U256::from(1u64),
+            sourceAddress: "addr".to_string(),
+            proof: Bytes::new(),
+            settlementData: Bytes::new(),
+            dstEid: 30101u32,
+            recipient: FixedBytes(recipient),
+            minAmountLD: U256::from(1u64),
+            extraOptions: Bytes::new(),
+        }
+        .abi_encode()
+    }
+
+    fn lz_test_release() -> crate::proto::LzReleaseParams {
+        let mut recipient = vec![0u8; 32];
+        recipient[31] = 0x05;
+        crate::proto::LzReleaseParams {
+            dst_eid: 30101,
+            min_amount_ld: 1,
+            recipient,
+        }
+    }
+
+    #[test]
+    fn test_lz_funds_out_digest_deterministic() {
+        let domain = lz_test_domain();
+        let call_data = lz_test_calldata();
+        let lz_release = lz_test_release();
+
+        let d1 = lz_funds_out_digest(&domain, &call_data, &lz_release, 7, 999_999).unwrap();
+        let d2 = lz_funds_out_digest(&domain, &call_data, &lz_release, 7, 999_999).unwrap();
+        assert_eq!(d1, d2);
+        assert_ne!(d1, [0u8; HASH_LEN]);
+    }
+
+    #[test]
+    fn test_lz_different_nonce_different_digest() {
+        let domain = lz_test_domain();
+        let call_data = lz_test_calldata();
+        let lz_release = lz_test_release();
+
+        let d1 = lz_funds_out_digest(&domain, &call_data, &lz_release, 0, 999_999).unwrap();
+        let d2 = lz_funds_out_digest(&domain, &call_data, &lz_release, 1, 999_999).unwrap();
+        assert_ne!(d1, d2);
+    }
+
+    #[test]
+    fn test_lz_different_dst_eid_different_digest() {
+        let domain = lz_test_domain();
+        let call_data = lz_test_calldata();
+        let lz1 = lz_test_release();
+        let mut lz2 = lz_test_release();
+        lz2.dst_eid = 40161; // Sepolia
+
+        // Rebuild calldata with different dstEid for lz2.
+        use crate::networks::evm::validation::lzFundsOutCall;
+        use alloy_primitives::{Bytes, FixedBytes, U256};
+        use alloy_sol_types::SolCall;
+        let mut recipient = [0u8; 32];
+        recipient[31] = 0x05;
+        let call_data2 = lzFundsOutCall {
+            amount: U256::from(1u64),
+            burnId: U256::from(3u64),
+            sourceChainId: U256::from(84u64),
+            destinationChainId: U256::from(1u64),
+            sourceAddress: "addr".to_string(),
+            proof: Bytes::new(),
+            settlementData: Bytes::new(),
+            dstEid: 40161u32,
+            recipient: FixedBytes(recipient),
+            minAmountLD: U256::from(1u64),
+            extraOptions: Bytes::new(),
+        }
+        .abi_encode();
+
+        let d1 = lz_funds_out_digest(&domain, &call_data, &lz1, 0, 999_999).unwrap();
+        let d2 = lz_funds_out_digest(&domain, &call_data2, &lz2, 0, 999_999).unwrap();
+        assert_ne!(d1, d2);
+    }
+
+    #[test]
+    fn test_lz_rejects_dst_eid_mismatch() {
+        let domain = lz_test_domain();
+        let call_data = lz_test_calldata();
+        let mut lz_release = lz_test_release();
+        lz_release.dst_eid = 99999; // wrong
+
+        assert!(lz_funds_out_digest(&domain, &call_data, &lz_release, 0, 999_999).is_err());
+    }
+
+    #[test]
+    fn test_lz_rejects_recipient_mismatch() {
+        let domain = lz_test_domain();
+        let call_data = lz_test_calldata();
+        let mut lz_release = lz_test_release();
+        lz_release.recipient = vec![0xAB; 32]; // wrong
+
+        assert!(lz_funds_out_digest(&domain, &call_data, &lz_release, 0, 999_999).is_err());
     }
 }
