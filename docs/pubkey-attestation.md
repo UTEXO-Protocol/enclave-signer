@@ -124,6 +124,8 @@ policy_commitment =
     u8(btc_source)                                  // 1 = SPV-verified
     chain_id_be8 || bridge_contract(20)
     u32_be(len(rgb_asset_id)) || rgb_asset_id_utf8
+    // Helios trust root (audit M-06):
+    u8(0x00) | u8(0x01) || evm_checkpoint(32)       // pinned beacon block root
     // Gas-tx (SignRawDigest) rule (audit C-02):
     gas_tx_allowed_to(20)                           // all-zero = gas path unpinned
     gas_tx_max_gas_limit_be8                        // gasLimit ceiling (0 = unset)
@@ -148,6 +150,11 @@ gas-signing policy externally verifiable instead of a self-protection pin the
 operator has to trust; `attest-verify` declares the expected rule via
 `--expect-gas-tx-to` / `--expect-gas-max-gas-limit` / `--expect-gas-max-fee-per-gas`
 / `--expect-gas-selectors`.
+
+The Helios checkpoint (audit M-06) pins WHICH weak-subjectivity beacon block root
+the enclave trust-rooted EVM verification on, so two enclaves with identical PCRs
+but different checkpoints commit different `user_data`; `attest-verify` declares
+it via `--expect-helios-checkpoint`, required with `--expect-evm-source helios`.
 
 ## Where the expected PCRs come from
 

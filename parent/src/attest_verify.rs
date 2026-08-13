@@ -41,6 +41,12 @@ pub enum ExpectedPolicy {
     Production {
         allow_vanilla_psbt: bool,
         evm_source: EvmDataSource,
+        /// The Helios weak-subjectivity checkpoint the operator expects the
+        /// enclave to have pinned. `Some` (required) when `evm_source` is
+        /// [`EvmDataSource::HeliosVerified`]; folded into the reconstructed
+        /// commitment so an enclave that trust-rooted on a different checkpoint
+        /// fails verification (audit M-06).
+        evm_checkpoint: Option<[u8; 32]>,
         /// Expected gas-tx (`SignRawDigest`) rule the enclave committed (audit
         /// C-02). All-zero destination + zero caps + empty selectors express
         /// "the operator did not pin the gas path" — which the enclave attests
@@ -189,6 +195,7 @@ fn expected_attested_policy(
         ExpectedPolicy::Production {
             allow_vanilla_psbt,
             evm_source,
+            evm_checkpoint,
             gas_tx_allowed_to,
             gas_tx_max_gas_limit,
             gas_tx_max_fee_per_gas,
@@ -215,6 +222,7 @@ fn expected_attested_policy(
                 chain_id: resp.chain_id,
                 bridge_contract,
                 rgb_asset_id: resp.rgb_asset_id.clone(),
+                evm_checkpoint: *evm_checkpoint,
                 // Gas-tx rule (audit C-02): declared by the operator, not on the
                 // wire. `to_bytes` canonicalises the selector set, so the caller
                 // need not pre-sort it.

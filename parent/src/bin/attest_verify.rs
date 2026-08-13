@@ -69,6 +69,14 @@ struct Cli {
     #[arg(long, default_value = "raw")]
     expect_evm_source: String,
 
+    /// Expected Helios weak-subjectivity checkpoint (0x-prefixed 32-byte beacon
+    /// block root) the enclave must have trust-rooted on. REQUIRED when
+    /// `--expect-evm-source helios`: the verifier reconstructs the committed
+    /// posture with this value, so an enclave that synced from a different
+    /// checkpoint fails the `user_data` hash (audit M-06). Ignored otherwise.
+    #[arg(long)]
+    expect_helios_checkpoint: Option<String>,
+
     /// Expected gas-tx (`SignRawDigest`) allowed destination the enclave pinned
     /// (`GAS_TX_ALLOWED_TO`), as 0x-hex. Omit if the operator left the gas path
     /// unpinned (the enclave then commits the all-zero destination and fails the
@@ -90,6 +98,18 @@ struct Cli {
     /// comma-separated 4-byte hex selectors. Default empty. Ignored with --mock.
     #[arg(long, default_value = "")]
     expect_gas_selectors: String,
+}
+
+/// Parse the `--expect-helios-checkpoint` flag into a 32-byte beacon block root.
+fn parse_checkpoint(s: &str) -> Result<[u8; 32]> {
+    let bytes = hex::decode(s.strip_prefix("0x").unwrap_or(s))
+        .context("--expect-helios-checkpoint is not valid hex")?;
+    bytes.try_into().map_err(|v: Vec<u8>| {
+        anyhow::anyhow!(
+            "--expect-helios-checkpoint must be 32 bytes (a beacon block root), got {}",
+            v.len()
+        )
+    })
 }
 
 /// Parse the `--expect-evm-source` flag into an [`EvmDataSource`].
@@ -166,9 +186,25 @@ async fn run(cli: Cli) -> Result<()> {
         let pcr2 = cli.pcr2.context("--pcr2 required (or pass --mock)")?;
         let pcrs = attestation_verify::ExpectedPcrs::from_hex(&pcr0, &pcr1, &pcr2)
             .context("invalid PCR hex")?;
+        let evm_source = parse_evm_source(&cli.expect_evm_source)?;
+        let evm_checkpoint = cli
+            .expect_helios_checkpoint
+            .as_deref()
+            .map(parse_checkpoint)
+            .transpose()?;
+        // A Helios expectation without a pinned checkpoint could never match a
+        // real trustless enclave (which always commits one), so refuse early
+        // with a clear message rather than a downstream hash mismatch (M-06).
+        if evm_source == EvmDataSource::HeliosVerified && evm_checkpoint.is_none() {
+            anyhow::bail!(
+                "--expect-evm-source helios requires --expect-helios-checkpoint \
+                 (the beacon block root the enclave pinned)"
+            );
+        }
         let expected_policy = ExpectedPolicy::Production {
             allow_vanilla_psbt: cli.expect_vanilla_psbt,
-            evm_source: parse_evm_source(&cli.expect_evm_source)?,
+            evm_source,
+            evm_checkpoint,
             gas_tx_allowed_to: parse_expect_gas_to(&cli.expect_gas_tx_to)?,
             gas_tx_max_gas_limit: cli.expect_gas_max_gas_limit,
             gas_tx_max_fee_per_gas: cli.expect_gas_max_fee_per_gas,
