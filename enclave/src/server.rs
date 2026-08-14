@@ -20,6 +20,12 @@ pub struct ServerContext {
     /// `user_data` commitment and used to cross-check `SignEvm` requests
     /// against operator-pinned values.
     pub bridge_config: BridgeConfig,
+    /// The enclave's single, explicit security posture, resolved once at boot
+    /// (audit C-01). Committed into the attestation `user_data` commitment via
+    /// [`crate::policy::SecurityPolicy::commitment_bytes`] and consulted by the
+    /// signing handlers instead of re-deriving posture from build features and
+    /// empty request fields.
+    pub policy: crate::policy::SecurityPolicy,
     #[cfg(feature = "rgb-validation")]
     pub rgb_validator: Option<crate::networks::rgb::validation::RgbValidator>,
     /// In-enclave EVM RPC client for independent `FundsIn` verification (#60).
@@ -101,9 +107,21 @@ impl ServerContext {
         bridge_config: BridgeConfig,
         header_chain: std::sync::Mutex<crate::networks::rgb::spv::HeaderChain>,
     ) -> Self {
+        // Resolve the posture from the current build + this config. The main
+        // binary sets `policy` explicitly (it knows the selected EVM data
+        // source); this constructor is used by tests and the parent E2E harness,
+        // where the EVM source is not wired, so it resolves with `Disabled`.
+        // Debug/test builds resolve to `Development` regardless.
+        let policy = crate::policy::SecurityPolicy::resolve(
+            &crate::policy::BuildContext::current(),
+            &bridge_config,
+            crate::policy::EvmDataSource::Disabled,
+            None,
+        );
         Self {
             state,
             bridge_config,
+            policy,
             #[cfg(feature = "rgb-validation")]
             rgb_validator: None,
             #[cfg(feature = "evm-rpc")]
@@ -647,8 +665,13 @@ fn handle_get_attested_public_key(
     let keys = ctx.state.get_keys()?;
     let public_keys = build_public_keys_response(keys, &ctx.bridge_config);
 
-    let bundle = canonical_pubkey_bundle(&public_keys);
-    let commitment: [u8; 32] = Sha256::digest(&bundle).into();
+    // The attestation `user_data` commits to BOTH the public-key bundle and the
+    // enclave's resolved security policy (audit C-01), so a verifier checks the
+    // whole posture as one value: sha256(pubkey_bundle || policy_commitment).
+    // The verifier mirror is `parent/src/attest_verify.rs::verify_attested_pubkey`.
+    let mut preimage = canonical_pubkey_bundle(&public_keys);
+    preimage.extend_from_slice(&ctx.policy.commitment_bytes());
+    let commitment: [u8; 32] = Sha256::digest(&preimage).into();
 
     let attestation_doc = crate::attestation::get_attestation(
         &nonce,
@@ -753,6 +776,21 @@ fn handle_sign_psbt(ctx: &ServerContext, req: RgbDestination) -> Result<EnclaveR
 /// bridge `SignPsbt` (RgbDestination) path can no longer be reached by omitting
 /// its fields.
 fn handle_sign_btc(ctx: &ServerContext, req: SignBtcRequest) -> Result<EnclaveResponse> {
+    // Authoritative posture check: in a production enclave the plain-BTC path is
+    // only reachable when the attested policy enables it (audit C-01). This is
+    // the same predicate `validate_btc_request` enforces via the BTC cap pin, but
+    // sourced from the single resolved policy rather than re-derived here — and
+    // the enabled/disabled state is committed into attestation `user_data`.
+    if let crate::policy::SecurityPolicy::Production(p) = &ctx.policy {
+        if !p.allow_vanilla_psbt {
+            return Err(EnclaveError::Signing(
+                "plain-BTC (vanilla) signing is disabled by the enclave's production security \
+                 policy (BTC_MAX_TOTAL_SATS unset) — refusing to sign"
+                    .into(),
+            ));
+        }
+    }
+
     // Output self-ownership + amount cap (skipped only in dev-mode). Runs
     // against the enclave's own keys, so an uninitialized enclave fails here
     // with KeyNotInitialized rather than reaching the signer.

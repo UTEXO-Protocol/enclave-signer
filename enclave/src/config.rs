@@ -21,8 +21,26 @@
 
 use crate::error::{EnclaveError, Result};
 
+/// Default aggregate request-size caps for the RGB signing path, used when the
+/// matching env var is unset. Operators may override each via env
+/// (`MAX_CONSIGNMENT_BYTES`, `MAX_MERKLE_PROOFS`, `MAX_TOTAL_PROOF_BYTES`), a
+/// per-deployment tune that needs no rebuild or re-attestation. These are
+/// defense-in-depth DoS bounds on the serial signing path; consignment size is
+/// additionally hard-capped by the 4 MB wire frame regardless of this value.
+///
+/// Real USDT-swap consignments are a few KB (the in-tree fixture is ~5.5 KB);
+/// 1 MiB is a generous ceiling well under the 4 MB frame.
+pub const DEFAULT_MAX_CONSIGNMENT_BYTES: usize = 1024 * 1024;
+/// Default cap on the number of Merkle proofs a source may carry (env
+/// `MAX_MERKLE_PROOFS`). A consignment anchors a handful of witness txs.
+pub const DEFAULT_MAX_MERKLE_PROOFS: usize = 256;
+/// Default cap on total variable-length proof bytes (txids + Merkle-path
+/// siblings) across all proofs (env `MAX_TOTAL_PROOF_BYTES`), bounding aggregate
+/// Merkle-hashing work independently of the per-proof depth cap.
+pub const DEFAULT_MAX_TOTAL_PROOF_BYTES: usize = 128 * 1024;
+
 /// Bridge config pinned at enclave boot from env. See module docs.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct BridgeConfig {
     pub chain_id: u64,
     /// MultisigProxy contract pinned for the EVM signing cross-check (env
@@ -58,6 +76,10 @@ pub struct BridgeConfig {
     /// scripts the enclave proves it controls (see
     /// [`crate::networks::rgb::btc_ownership`]).
     ///
+    /// Whether the plain-BTC path is enabled at all
+    /// ([`allows_vanilla_btc`](Self::allows_vanilla_btc)) IS attested, as
+    /// `allow_vanilla_psbt` in the security policy (C-01).
+    ///
     /// There used to be a `BTC_ALLOWED_SCRIPTS` output allowlist alongside this.
     /// It was removed because an operator could not set it: the scripts to pin
     /// derive from a seed that only exists once the enclave has booted, and
@@ -73,6 +95,30 @@ pub struct BridgeConfig {
     /// two contracts DIFFER, so `FUNDS_IN_CONTRACT` MUST be set explicitly
     /// (leaving it unset would fold the proxy address into the FundsIn lookup).
     pub funds_in_contract: [u8; 20],
+    /// Aggregate request-size caps for the RGB signing path, operator-tunable
+    /// via env (`MAX_CONSIGNMENT_BYTES` / `MAX_MERKLE_PROOFS` /
+    /// `MAX_TOTAL_PROOF_BYTES`); each defaults to its `DEFAULT_*` constant when
+    /// unset (or set to 0). Defense-in-depth DoS bounds, not attested — like the
+    /// operational pins above. See [`DEFAULT_MAX_CONSIGNMENT_BYTES`].
+    pub max_consignment_bytes: usize,
+    pub max_merkle_proofs: usize,
+    pub max_total_proof_bytes: usize,
+}
+
+impl Default for BridgeConfig {
+    fn default() -> Self {
+        Self {
+            chain_id: 0,
+            bridge_contract: [0u8; 20],
+            rgb_asset_id: String::new(),
+            gas_tx_allowed_to: None,
+            btc_max_total_sats: 0,
+            funds_in_contract: [0u8; 20],
+            max_consignment_bytes: DEFAULT_MAX_CONSIGNMENT_BYTES,
+            max_merkle_proofs: DEFAULT_MAX_MERKLE_PROOFS,
+            max_total_proof_bytes: DEFAULT_MAX_TOTAL_PROOF_BYTES,
+        }
+    }
 }
 
 impl BridgeConfig {
@@ -108,6 +154,21 @@ impl BridgeConfig {
             .and_then(|s| parse_eth_address(&s).ok())
             .unwrap_or(bridge_contract);
 
+        // Aggregate request-size caps (operator-tunable, defense-in-depth). An
+        // unset, unparseable, or zero value falls back to the default.
+        let parse_cap = |name: &str, default: usize| -> usize {
+            std::env::var(name)
+                .ok()
+                .and_then(|s| s.parse::<usize>().ok())
+                .filter(|&n| n > 0)
+                .unwrap_or(default)
+        };
+        let max_consignment_bytes =
+            parse_cap("MAX_CONSIGNMENT_BYTES", DEFAULT_MAX_CONSIGNMENT_BYTES);
+        let max_merkle_proofs = parse_cap("MAX_MERKLE_PROOFS", DEFAULT_MAX_MERKLE_PROOFS);
+        let max_total_proof_bytes =
+            parse_cap("MAX_TOTAL_PROOF_BYTES", DEFAULT_MAX_TOTAL_PROOF_BYTES);
+
         Self {
             chain_id,
             bridge_contract,
@@ -115,6 +176,9 @@ impl BridgeConfig {
             gas_tx_allowed_to,
             btc_max_total_sats,
             funds_in_contract,
+            max_consignment_bytes,
+            max_merkle_proofs,
+            max_total_proof_bytes,
         }
     }
 
@@ -152,55 +216,18 @@ impl BridgeConfig {
         any && !self.is_configured()
     }
 
-    /// The reason this config is not production-ready, or `None` when all three
-    /// pins (chain, contract, asset) are set. Pure and build-profile-agnostic so
-    /// it is directly unit-testable; [`assert_configured_in_release`](Self::assert_configured_in_release)
-    /// layers the debug/test exemptions and the `rgb-validation`-only scope on top.
-    pub fn production_readiness_error(&self) -> Option<String> {
-        if self.is_configured() {
-            return None;
-        }
-        let detail = if self.is_partially_configured() {
-            "PARTIALLY set (some but not all of EVM_CHAIN_ID / EVM_PROXY_CONTRACT_ADDRESS / RGB_ASSET_ID \
-             are set)"
-        } else {
-            "unset (none of EVM_CHAIN_ID / EVM_PROXY_CONTRACT_ADDRESS / RGB_ASSET_ID are set)"
-        };
-        Some(format!(
-            "bridge config is {detail}. A release rgb-validation (bridge-signing) enclave must \
-             pin all three so every signing path is authorised against operator pins; without \
-             them it would boot and fail closed on every bridge request. Set all three env vars, \
-             or build without rgb-validation for a non-signing enclave."
-        ))
-    }
-
-    /// Refuse to START a production bridge-signing build that isn't fully pinned
-    /// (audit C-01 systemic: no single explicit fail-closed production policy).
-    ///
-    /// A release `rgb-validation` build reaches every bridge-signing path, and
-    /// each already fails closed *per request* when [`is_configured`](Self::is_configured)
-    /// is false (see `networks::evm::validation::validate_destination` and
-    /// `networks::rgb::validate_destination_anchor`). But a per-request refusal
-    /// is only visible to whoever reads the rejected response or the enclave
-    /// logs - which an operator does not watch on a production host. Fail at
-    /// BOOT instead, the same way a placeholder SPV checkpoint does
-    /// ([`crate::networks::rgb::spv::Checkpoint::assert_real_in_release`]): a
-    /// misconfigured or partially-pinned production enclave never becomes
-    /// reachable, rather than starting and silently rejecting every signature.
-    ///
-    /// Exemptions mirror `assert_real_in_release`: debug builds, tests, and the
-    /// local-E2E `allow-seed-import` feature may run unpinned. A minimal
-    /// (non-`rgb-validation`) build has no bridge-signing path to protect and
-    /// always passes.
-    pub fn assert_configured_in_release(&self) -> std::result::Result<(), String> {
-        if cfg!(debug_assertions) || cfg!(test) || cfg!(feature = "allow-seed-import") {
-            return Ok(());
-        }
-        #[cfg(feature = "rgb-validation")]
-        if let Some(msg) = self.production_readiness_error() {
-            return Err(msg);
-        }
-        Ok(())
+    /// Whether the plain-BTC (vanilla / create_utxo) signing path is authorised:
+    /// the operator-set total-value cap (`BTC_MAX_TOTAL_SATS`) is what gates it.
+    /// The output destination rule needs no configuration — outputs must pay
+    /// back to scripts the enclave proves it controls
+    /// ([`crate::networks::rgb::btc_ownership`]) — so the cap is the only pin.
+    /// This is the single predicate the boot-time [`crate::policy::SecurityPolicy`]
+    /// records as `allow_vanilla_psbt` and that
+    /// `networks::rgb::btc_crosscheck::validate_btc_request` enforces per request
+    /// (they MUST agree — an enclave that attests `allow_vanilla_psbt = true` must
+    /// actually accept the path, and vice versa).
+    pub fn allows_vanilla_btc(&self) -> bool {
+        self.btc_max_total_sats != 0
     }
 }
 
@@ -460,47 +487,6 @@ mod tests {
         };
         assert!(!c.is_configured());
         assert!(c.is_partially_configured());
-    }
-
-    #[test]
-    fn production_readiness_error_none_when_configured() {
-        let c = BridgeConfig {
-            chain_id: 1,
-            bridge_contract: [1u8; 20],
-            rgb_asset_id: "rgb:asset".into(),
-            ..Default::default()
-        };
-        assert!(c.production_readiness_error().is_none());
-    }
-
-    #[test]
-    fn production_readiness_error_flags_unset() {
-        let msg = BridgeConfig::default()
-            .production_readiness_error()
-            .expect("a fully-empty config is not production-ready");
-        assert!(msg.contains("unset"), "got: {msg}");
-    }
-
-    #[test]
-    fn production_readiness_error_flags_partial() {
-        // chain_id set, contract + asset still empty: a botched pin.
-        let c = BridgeConfig {
-            chain_id: 1,
-            ..Default::default()
-        };
-        let msg = c
-            .production_readiness_error()
-            .expect("a partial config is not production-ready");
-        assert!(msg.contains("PARTIALLY"), "got: {msg}");
-    }
-
-    #[test]
-    fn assert_configured_in_release_exempts_test_builds() {
-        // cfg!(test) short-circuits the boot gate, so even a fully-empty config
-        // passes under test - the panic only fires in a production-shaped build.
-        assert!(BridgeConfig::default()
-            .assert_configured_in_release()
-            .is_ok());
     }
 
     #[test]

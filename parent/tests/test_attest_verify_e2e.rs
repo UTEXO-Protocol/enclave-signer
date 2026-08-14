@@ -13,11 +13,12 @@ use std::sync::Arc;
 
 use tonic::transport::Server;
 
+use attestation_verify::EvmDataSource;
 use utexo_bridge_enclave::config::BridgeConfig;
 use utexo_bridge_enclave::networks::rgb::spv::{checkpoint_for, HeaderChain, Network};
 use utexo_bridge_enclave::server::{self as enclave_server, ServerContext};
 use utexo_bridge_enclave::state::EnclaveState;
-use utexo_bridge_parent::attest_verify::{verify_attested_pubkey, VerifyMode};
+use utexo_bridge_parent::attest_verify::{verify_attested_pubkey, ExpectedPolicy, VerifyMode};
 use utexo_bridge_parent::grpc_proto::parent_service_server::ParentServiceServer;
 use utexo_bridge_parent::grpc_server::{EnclaveTarget, ParentAdapterService};
 
@@ -90,6 +91,8 @@ async fn e2e_attest_verify_succeeds_against_live_stack() {
         &format!("http://127.0.0.1:{grpc_port}"),
         attestation_verify::ExpectedPcrs::zero(),
         VerifyMode::Mock,
+        // The in-process enclave is a debug/mock build => Development posture.
+        ExpectedPolicy::Development,
     )
     .await
     .expect("end-to-end verification succeeds");
@@ -132,6 +135,7 @@ async fn e2e_attest_verify_fails_on_pcr_mismatch() {
         &format!("http://127.0.0.1:{grpc_port}"),
         wrong_pcrs,
         VerifyMode::Mock,
+        ExpectedPolicy::Development,
     )
     .await
     .expect_err("PCR0 mismatch must fail verification");
@@ -156,6 +160,7 @@ async fn e2e_attest_verify_fails_on_real_path_against_mock_enclave() {
         &format!("http://127.0.0.1:{grpc_port}"),
         attestation_verify::ExpectedPcrs::zero(),
         VerifyMode::Real, // <- real path against mock doc
+        ExpectedPolicy::Development,
     )
     .await
     .expect_err("real verifier must reject a mock document");
@@ -174,6 +179,7 @@ async fn e2e_attest_verify_fails_on_unreachable_endpoint() {
         "http://127.0.0.1:1", // nothing listening here
         attestation_verify::ExpectedPcrs::zero(),
         VerifyMode::Mock,
+        ExpectedPolicy::Development,
     )
     .await
     .expect_err("connection to dead port must fail");
@@ -185,5 +191,35 @@ async fn e2e_attest_verify_fails_on_unreachable_endpoint() {
             || msg.contains("Connection")
             || msg.contains("transport"),
         "expected connection error, got: {msg}"
+    );
+}
+
+#[tokio::test]
+async fn e2e_attest_verify_fails_on_policy_mismatch() {
+    // The in-process enclave is a debug/mock build, so it attests the
+    // `Development` posture. A verifier that expects a *production* enclave must
+    // reject it: the committed policy differs, so the user_data commitment no
+    // longer matches. This is the C-01 property — the security posture is one
+    // attested value the verifier checks, not something inferred out of band.
+    let enclave_port = start_real_enclave();
+    let grpc_port = start_real_parent_grpc(enclave_port).await;
+
+    let err = verify_attested_pubkey(
+        &format!("http://127.0.0.1:{grpc_port}"),
+        attestation_verify::ExpectedPcrs::zero(),
+        VerifyMode::Mock,
+        ExpectedPolicy::Production {
+            allow_vanilla_psbt: false,
+            evm_source: EvmDataSource::RawRpc,
+            evm_checkpoint: None,
+        },
+    )
+    .await
+    .expect_err("expecting a production policy against a dev enclave must fail");
+
+    let msg = format!("{err:#}");
+    assert!(
+        msg.contains("user_data") || msg.contains("security posture") || msg.contains("policy"),
+        "expected a policy/user_data mismatch error, got: {msg}"
     );
 }
