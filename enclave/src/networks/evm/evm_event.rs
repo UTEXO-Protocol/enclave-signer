@@ -373,11 +373,7 @@ impl EvmReceiptProvider for AlloyEvmClient {
         // async block so it is created within the runtime reactor context.
         self.runtime
             .block_on(async {
-                tokio::time::timeout(
-                    EVM_RPC_CALL_TIMEOUT,
-                    self.provider.get_block_number(),
-                )
-                .await
+                tokio::time::timeout(EVM_RPC_CALL_TIMEOUT, self.provider.get_block_number()).await
             })
             .map_err(|_elapsed| {
                 EnclaveError::CrossCheck(format!(
