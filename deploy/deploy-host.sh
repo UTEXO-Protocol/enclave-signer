@@ -31,6 +31,11 @@ EIF="$DIR/utexo-bridge-enclave.eif"
 SRC="s3://$BUCKET/eif/$GIT_SHA"
 ENCLAVE_CPU_COUNT="${ENCLAVE_CPU_COUNT:-2}"
 ENCLAVE_MEMORY="${ENCLAVE_MEMORY:-3072}"
+# DEBUG-MODE (op13 crash hunt): when set to 1, enclaves run with --debug-mode so
+# `nitro-cli console` can attach. This ZEROES runtime PCR0/1/2, so the step-6
+# runtime-PCR check is skipped (the static describe-eif measurement in step 3
+# still verifies the EIF file). Default 0 keeps the normal production path.
+ENCLAVE_DEBUG_MODE="${ENCLAVE_DEBUG_MODE:-0}"
 CIDS=(16 18 20)
 declare -A PORT=([16]=50051 [18]=50052 [20]=50053)
 
@@ -109,11 +114,15 @@ case "$ACTION" in
     # keep holding the lock and deadlock the next CID.
     exec 9>"$LOCK"
     flock -w 180 9 || { echo "could not acquire enclave start lock for CID $CID" >&2; exit 1; }
+    # DEBUG-MODE: ENCLAVE_DEBUG_MODE=1 (unit env) -> run with --debug-mode so
+    # `nitro-cli console` can attach. Zeroes PCR0/1/2; never on real production.
+    DEBUG_ARG=()
+    [ "${ENCLAVE_DEBUG_MODE:-0}" = "1" ] && DEBUG_ARG=(--debug-mode)
     old="$(enc_id)"; [ -n "$old" ] && nitro-cli terminate-enclave --enclave-id "$old" 9>&- || true
     for attempt in 1 2 3 4 5; do
       if nitro-cli run-enclave \
         --eif-path "$EIF" --cpu-count "$CPU" --memory "$MEM" \
-        --enclave-cid "$CID" --enclave-name "$NAME" 9>&-; then
+        --enclave-cid "$CID" --enclave-name "$NAME" "${DEBUG_ARG[@]}" 9>&-; then
         exit 0
       fi
       echo "run-enclave CID $CID attempt $attempt failed; cleaning up and retrying" >&2
@@ -184,6 +193,7 @@ cat > /etc/utexo/enclave.env <<EOF
 EIF=$EIF
 ENCLAVE_CPU_COUNT=$ENCLAVE_CPU_COUNT
 ENCLAVE_MEMORY=$ENCLAVE_MEMORY
+ENCLAVE_DEBUG_MODE=$ENCLAVE_DEBUG_MODE
 EOF
 for CID in "${CIDS[@]}"; do
   cat > "/etc/utexo/parent-$CID.env" <<EOF
@@ -218,6 +228,13 @@ for CID in "${CIDS[@]}"; do
 done
 
 # --- 6. verify runtime PCR matches the manifest ----------------------------
+# In debug-mode the running enclave reports zeroed PCR0, so a manifest match is
+# impossible by design — skip the runtime check (the static EIF measurement in
+# step 3 already verified the artifact). Only meaningful for a production EIF.
+if [ "$ENCLAVE_DEBUG_MODE" = "1" ]; then
+  log "ENCLAVE_DEBUG_MODE=1 — skipping runtime PCR0 check (PCRs zeroed under --debug-mode)"
+  asubuntu 'nitro-cli describe-enclaves' | python3 -c 'import json,sys; print("running CIDs:", sorted(e["EnclaveCID"] for e in json.load(sys.stdin)))'
+else
 asubuntu 'nitro-cli describe-enclaves' > /tmp/desc.json
 python3 - "$MAN_PCR" <<'PY'
 import json, sys
@@ -229,6 +246,7 @@ if bad:
     sys.exit(f"runtime PCR0 mismatch on CID {bad}")
 print("runtime PCR0 == manifest on all enclaves")
 PY
+fi
 
 # --- 7. start parents via systemd ------------------------------------------
 for CID in "${CIDS[@]}"; do

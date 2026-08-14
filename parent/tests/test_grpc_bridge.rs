@@ -304,7 +304,7 @@ fn evm_source(amount: u64, commission: u64) -> SourceProof {
         finalized: true,
         chain: Some(source_proof::Chain::Evm(EvmSource {
             tx_hash: vec![0xAA; 32],
-            funds_in_operation_id: 0,
+            funds_in_operation_id: vec![0u8; 32],
         })),
     }
 }
@@ -450,6 +450,7 @@ async fn grpc_sign_evm_roundtrip() {
         calldata_amount: 0,
         calldata_commission: 0,
         unsigned_tx: Vec::new(),
+        lz_release: None,
     };
 
     let req = sign_evm_request(rgb_source(0, 0, vec![], vec![], String::new()), payload);
@@ -484,6 +485,7 @@ async fn grpc_sign_evm_gas_tx_forwards_unsigned_tx() {
         calldata_amount: 0,
         calldata_commission: 0,
         unsigned_tx: vec![0x02; 10],
+        lz_release: None,
     };
     let req = SignRequest {
         common: Some(common(0, 84, DataType::EvmGasTx)),
@@ -625,6 +627,7 @@ async fn grpc_evm_passes_enriched_fields_through() {
         calldata_amount: 50,
         calldata_commission: 5,
         unsigned_tx: Vec::new(),
+        lz_release: None,
     };
 
     let req = sign_evm_request(
@@ -713,6 +716,7 @@ async fn grpc_evm_forwards_raw_consignment_bytes() {
         calldata_amount: 0,
         calldata_commission: 0,
         unsigned_tx: Vec::new(),
+        lz_release: None,
     };
 
     let req = sign_evm_request(

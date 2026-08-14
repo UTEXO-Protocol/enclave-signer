@@ -433,6 +433,22 @@ pub enum OutputSeal {
 /// Compile-time (PCR-attested), deliberately not host-tunable.
 const ESPLORA_HTTP_TIMEOUT_SECS: u64 = 30;
 
+/// Per-socket timeout (seconds) for the **Electrum** witness resolver — the
+/// production signing path (`ssl://…:50002` over the vsock forwarder). The
+/// Electrum analog of [`ESPLORA_HTTP_TIMEOUT_SECS`] and the SAME audit issue
+/// (final I-03 / #87): `electrum_client::Config::default()` leaves
+/// `timeout: None`, so a stalled electrs read blocks the worker thread
+/// *forever*. Observed in production: an op13 RGB consignment validation stalled
+/// on an electrs witness lookup, pinned every worker on an unbounded read, the
+/// connection queue overflowed (cap 16), and the enclave then dropped ALL
+/// requests incl. the health probe — surfacing on the parent as
+/// `enclave read failed: failed to fill whole buffer`. `electrum-client` retries
+/// `retry` times on error, so worst-case blocking is ~`(retry+1) *` this; kept
+/// within the `conn.rs` `TOTAL_REQUEST_TIMEOUT` budget. Fed to
+/// `Config::builder().timeout(Some(Duration))`. Compile-time (PCR-attested),
+/// not host-tunable.
+const ELECTRUM_WITNESS_TIMEOUT_SECS: u64 = 15;
+
 /// How long a fetched fee estimate stays fresh (#55). Fee markets move on
 /// block cadence, so a minute of staleness is immaterial while keeping the
 /// sign-path from hitting Esplora on every request.
@@ -449,10 +465,17 @@ const FEE_ESTIMATE_TARGET: u16 = 6;
 /// valueless; it just keeps the path enforced against a runaway burn.
 const NON_MAINNET_FALLBACK_FEE_RATE_SAT_VB: f64 = 10.0;
 
-/// Validates RGB consignments using rgbstd and an Esplora-backed resolver.
+/// Validates RGB consignments using rgbstd and a witness resolver.
+///
+/// The resolver backend is chosen from the URL scheme at validation time:
+/// `ssl://` / `tcp://` -> Electrum (`electrum-client`), anything else
+/// (`http://` / `https://`) -> Esplora REST. Production uses an Electrum
+/// endpoint (`ssl://…:50002`) reached through the vsock forwarder; with an
+/// `ssl://` URL the TLS handshake terminates inside the enclave against the
+/// real server cert, so the host relays only ciphertext.
 #[derive(Debug)]
 pub struct RgbValidator {
-    esplora_url: String,
+    indexer_url: String,
     chain_net: ChainNet,
     /// Cached `(fetched_at, sat/vB)` recommended fee rate (#55), guarded for
     /// the multi-threaded worker pool. `None` until the first fetch.
@@ -465,10 +488,12 @@ pub struct RgbValidator {
 impl RgbValidator {
     /// Create a new validator.
     ///
-    /// - `esplora_url`: HTTP URL for the Esplora API (e.g., `http://127.0.0.1:3443`
-    ///   when using the vsock forwarder, or a direct URL in dev mode).
+    /// - `indexer_url`: witness-resolver endpoint. `ssl://host:port` /
+    ///   `tcp://host:port` selects Electrum; `http(s)://…` selects Esplora.
+    ///   Through the vsock forwarder this is typically `ssl://<host>:50002`
+    ///   (Electrum) or the legacy `http://127.0.0.1:3443` (Esplora).
     /// - `bitcoin_network`: One of "bitcoin", "testnet", "signet", "regtest".
-    pub fn new(esplora_url: String, bitcoin_network: &str) -> Result<Self> {
+    pub fn new(indexer_url: String, bitcoin_network: &str) -> Result<Self> {
         let chain_net = match bitcoin_network {
             "bitcoin" | "mainnet" => ChainNet::BitcoinMainnet,
             "testnet" | "testnet3" => ChainNet::BitcoinTestnet3,
@@ -480,9 +505,9 @@ impl RgbValidator {
                 )))
             }
         };
-        tracing::info!(%esplora_url, %bitcoin_network, "RGB validator configured");
+        tracing::info!(%indexer_url, %bitcoin_network, "RGB validator configured");
         Ok(Self {
-            esplora_url,
+            indexer_url,
             chain_net,
             fee_estimate_cache: std::sync::Mutex::new(None),
             http_timeout_secs: ESPLORA_HTTP_TIMEOUT_SECS,
@@ -497,14 +522,15 @@ impl RgbValidator {
         self
     }
 
-    /// Recommended fee rate (sat/vB) from the enclave's own Esplora egress,
-    /// for the send-RGB PSBT fee-rate sanity check (#55). Fetches
-    /// `/fee-estimates` (confirmation target [`FEE_ESTIMATE_TARGET`], falling
-    /// back to the nearest available target) with a [`FEE_ESTIMATE_TTL`]
-    /// cache. FAIL-CLOSED when the fetch fails or the rate is unusable: the
-    /// host controls the Esplora egress, so "estimate unavailable" must never
-    /// mean "skip the check". The one exception is an honest empty map on a
-    /// non-mainnet chain, which yields
+    /// Recommended fee rate (sat/vB) from the enclave's own witness-indexer
+    /// egress, for the send-RGB PSBT fee-rate sanity check (#55). The backend
+    /// mirrors the resolver — Electrum (`estimate_fee`) for an ssl://|tcp://
+    /// endpoint, else Esplora `/fee-estimates` (confirmation target
+    /// [`FEE_ESTIMATE_TARGET`], nearest available) — cached for
+    /// [`FEE_ESTIMATE_TTL`]. FAIL-CLOSED when the fetch fails or the rate is
+    /// unusable: the host controls the egress, so "estimate unavailable" must
+    /// never mean "skip the check". The one exception is an honest "no fee
+    /// market" answer on a non-mainnet chain, which yields
     /// [`NON_MAINNET_FALLBACK_FEE_RATE_SAT_VB`] rather than a refusal.
     pub fn recommended_fee_rate_sat_vb(&self) -> Result<f64> {
         let now = std::time::Instant::now();
@@ -518,7 +544,35 @@ impl RgbValidator {
             }
         }
 
-        let client = esplora_client::Builder::new(&self.esplora_url)
+        // Backend mirrors the witness resolver (see validate_consignment): an
+        // ssl://|tcp:// endpoint is Electrum, anything else Esplora REST.
+        // Production reaches an Electrum server (ssl://…:50002) over the vsock
+        // forwarder — Esplora has no equivalent endpoint here — so the fee
+        // estimate must ride the SAME backend. Both paths are FAIL-CLOSED: a
+        // failed fetch is a refusal, never a skipped check (the host controls
+        // the egress, #55).
+        let is_electrum =
+            self.indexer_url.starts_with("ssl://") || self.indexer_url.starts_with("tcp://");
+        let rate = if is_electrum {
+            self.electrum_fee_rate_sat_vb()?
+        } else {
+            self.esplora_fee_rate_sat_vb()?
+        };
+
+        if !rate.is_finite() || rate <= 0.0 {
+            return Err(EnclaveError::CrossCheck(format!(
+                "fee-estimate response is not a positive finite rate: {rate}"
+            )));
+        }
+
+        *cache = Some((now, rate));
+        Ok(rate)
+    }
+
+    /// Esplora `/fee-estimates` backend for [`Self::recommended_fee_rate_sat_vb`].
+    /// Fetches the confirmation-target rate (nearest available) in sat/vB.
+    fn esplora_fee_rate_sat_vb(&self) -> Result<f64> {
+        let client = esplora_client::Builder::new(&self.indexer_url)
             .timeout(self.http_timeout_secs)
             .build_blocking();
         let estimates = client.get_fee_estimates().map_err(|e| {
@@ -539,15 +593,13 @@ impl RgbValidator {
         // An empty map is Esplora honestly reporting no fee market: expected on
         // signet/regtest, anomalous on mainnet. A failed fetch never reaches
         // here - it fails closed above, on every network.
-        let rate = match fetched {
-            Some(rate) => rate,
-            None if self.chain_net == ChainNet::BitcoinMainnet => {
-                return Err(EnclaveError::CrossCheck(
-                    "fee-estimate response carried no targets - refusing to sign a send-RGB \
-                     PSBT without a fee-rate sanity bound (#55)"
-                        .into(),
-                ))
-            }
+        match fetched {
+            Some(rate) => Ok(rate),
+            None if self.chain_net == ChainNet::BitcoinMainnet => Err(EnclaveError::CrossCheck(
+                "fee-estimate response carried no targets - refusing to sign a send-RGB \
+                 PSBT without a fee-rate sanity bound (#55)"
+                    .into(),
+            )),
             None => {
                 tracing::warn!(
                     chain_net = ?self.chain_net,
@@ -555,17 +607,59 @@ impl RgbValidator {
                     "fee-estimate response carried no targets; falling back to the pinned \
                      non-mainnet floor (#55)"
                 );
-                NON_MAINNET_FALLBACK_FEE_RATE_SAT_VB
+                Ok(NON_MAINNET_FALLBACK_FEE_RATE_SAT_VB)
             }
-        };
-        if !rate.is_finite() || rate <= 0.0 {
-            return Err(EnclaveError::CrossCheck(format!(
-                "fee-estimate response is not a positive finite rate: {rate}"
-            )));
+        }
+    }
+
+    /// Electrum `estimate_fee` backend for [`Self::recommended_fee_rate_sat_vb`].
+    /// Production path: our witness indexer is an Electrum server (ssl://…:50002)
+    /// reached over the same vsock forwarder as consignment validation, so the
+    /// fee estimate does not need a separate Esplora egress. Electrum reports
+    /// the rate in BTC per 1000 vbytes; we convert to sat/vB (×100_000). It
+    /// answers a non-positive value when it cannot estimate (no fee market /
+    /// insufficient data): mainnet treats that as fail-closed, non-mainnet falls
+    /// back to the pinned floor — mirroring the Esplora empty-map semantics (#55).
+    fn electrum_fee_rate_sat_vb(&self) -> Result<f64> {
+        use rgbstd::indexers::electrum_blocking::electrum_client::{Client, ElectrumApi};
+        let client = Client::new(&self.indexer_url).map_err(|e| {
+            EnclaveError::CrossCheck(format!(
+                "electrum fee-estimate client creation failed — refusing to sign a send-RGB \
+                 PSBT without a fee-rate sanity bound (#55): {e}"
+            ))
+        })?;
+        let btc_per_kvb = client
+            // electrum-client 0.25 added a second `mode: Option<EstimationMode>`
+            // arg; `None` keeps the server-default estimation we relied on before.
+            .estimate_fee(FEE_ESTIMATE_TARGET as usize, None)
+            .map_err(|e| {
+                EnclaveError::CrossCheck(format!(
+                    "electrum fee-estimate fetch failed — refusing to sign a send-RGB PSBT \
+                     without a fee-rate sanity bound (#55): {e}"
+                ))
+            })?;
+
+        // Electrum returns BTC/kvB; a non-positive value (typically -1) means
+        // "cannot estimate". Mirror the Esplora empty-map handling (#55).
+        if btc_per_kvb <= 0.0 {
+            if self.chain_net == ChainNet::BitcoinMainnet {
+                return Err(EnclaveError::CrossCheck(
+                    "electrum returned no fee estimate - refusing to sign a send-RGB PSBT \
+                     without a fee-rate sanity bound (#55)"
+                        .into(),
+                ));
+            }
+            tracing::warn!(
+                chain_net = ?self.chain_net,
+                fallback_sat_vb = NON_MAINNET_FALLBACK_FEE_RATE_SAT_VB,
+                "electrum returned no fee estimate; falling back to the pinned non-mainnet \
+                 floor (#55)"
+            );
+            return Ok(NON_MAINNET_FALLBACK_FEE_RATE_SAT_VB);
         }
 
-        *cache = Some((now, rate));
-        Ok(rate)
+        // BTC/kvB -> sat/vB: ×1e8 sat/BTC ÷ 1000 vB/kvB = ×100_000.
+        Ok(btc_per_kvb * 100_000.0)
     }
 
     /// Validate raw consignment bytes. Returns extracted data on success,
@@ -575,7 +669,7 @@ impl RgbValidator {
         let bytes_len = consignment_bytes.len();
         tracing::info!(
             bytes_len,
-            esplora_url = %self.esplora_url,
+            indexer_url = %self.indexer_url,
             "starting RGB consignment validation"
         );
 
@@ -664,18 +758,43 @@ impl RgbValidator {
                 _ => (None, None, None),
             };
 
-        // 2. Create an Esplora-backed resolver. The `.timeout()` is
-        // load-bearing: this is a blocking call on the signing path through
-        // the host-controlled vsock proxy (audit final I-03 / #87). Transport
-        // errors (incl. timeouts) propagate immediately — esplora-client only
-        // retries on 429/5xx status codes — so one stalled call costs at most
-        // the timeout, never an unbounded hang.
-        let builder =
-            esplora_client::Builder::new(&self.esplora_url).timeout(self.http_timeout_secs);
-        let mut resolver = AnyResolver::esplora_blocking(builder).map_err(|e| {
-            tracing::error!(esplora_url = %self.esplora_url, "esplora resolver creation failed: {e}");
-            EnclaveError::CrossCheck(format!("esplora resolver creation failed: {e}"))
-        })?;
+        // 2. Create the witness resolver. Backend is picked from the URL
+        //    scheme: ssl://|tcp:// -> Electrum, otherwise Esplora REST.
+        //    Electrum (ssl://) is the production path: TLS terminates inside
+        //    the enclave against the real server cert (the host forwards only
+        //    ciphertext over vsock), so a compromised host cannot feed forged
+        //    witness data. On the Esplora path the `.timeout()` is load-bearing
+        //    (audit final I-03 / #87): a blocking call on the signing path
+        //    through the host-controlled vsock proxy — transport errors (incl.
+        //    timeouts) propagate immediately, so one stalled call costs at most
+        //    the timeout, never an unbounded hang.
+        let is_electrum =
+            self.indexer_url.starts_with("ssl://") || self.indexer_url.starts_with("tcp://");
+        let mut resolver = if is_electrum {
+            // Bound the blocking electrs reads with a real socket timeout — the
+            // Electrum analog of the Esplora `.timeout()` below. Without it
+            // `Config::default()` has `timeout: None`, so a stalled electrs read
+            // pins the worker thread forever and wedges the whole enclave (see
+            // ELECTRUM_WITNESS_TIMEOUT_SECS). Same crate re-export as the fee
+            // client so the `Config` type matches `AnyResolver::electrum_blocking`.
+            use rgbstd::indexers::electrum_blocking::electrum_client;
+            let electrum_cfg = electrum_client::Config::builder()
+                .timeout(Some(std::time::Duration::from_secs(
+                    ELECTRUM_WITNESS_TIMEOUT_SECS,
+                )))
+                .build();
+            AnyResolver::electrum_blocking(&self.indexer_url, Some(electrum_cfg)).map_err(|e| {
+                tracing::error!(indexer_url = %self.indexer_url, "electrum resolver creation failed: {e}");
+                EnclaveError::CrossCheck(format!("electrum resolver creation failed: {e}"))
+            })?
+        } else {
+            let builder =
+                esplora_client::Builder::new(&self.indexer_url).timeout(self.http_timeout_secs);
+            AnyResolver::esplora_blocking(builder).map_err(|e| {
+                tracing::error!(indexer_url = %self.indexer_url, "esplora resolver creation failed: {e}");
+                EnclaveError::CrossCheck(format!("esplora resolver creation failed: {e}"))
+            })?
+        };
 
         // Register transactions bundled in the consignment so the resolver
         // treats them as tentative witnesses (not yet mined).

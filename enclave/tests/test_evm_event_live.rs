@@ -19,7 +19,7 @@ struct Live {
     client: AlloyEvmClient,
     bridge: [u8; 20],
     tx: [u8; 32],
-    op_id: u64,
+    op_id: [u8; 32],
     amount: u64,
     commission: u64,
     min_conf: u64,
@@ -37,15 +37,25 @@ fn num(var: &str, default: u64) -> u64 {
         .unwrap_or(default)
 }
 
-/// `operationId` is a `uint256` on chain that the enclave binds as a `u64`.
-/// Accept either a decimal or a `0x` literal so the value can be pasted
-/// straight from a tx receipt.
-fn op_id(var: &str) -> u64 {
+/// `operationId` is a `uint256` on chain that the enclave binds as the full
+/// 32-byte word (proto #24). Accept either a decimal or a `0x` literal so the
+/// value can be pasted straight from a tx receipt; both are left-padded
+/// big-endian into the 32-byte word, matching the on-chain ABI encoding.
+fn op_id(var: &str) -> [u8; 32] {
     let v = std::env::var(var).unwrap_or_else(|_| panic!("{var} is required"));
+    let mut word = [0u8; 32];
     match v.strip_prefix("0x") {
-        Some(hex) => u64::from_str_radix(hex, 16).expect("operationId hex must fit u64"),
-        None => v.parse().expect("operationId must be a u64"),
+        Some(hex) => {
+            let raw = hex::decode(hex).expect("operationId hex");
+            assert!(raw.len() <= 32, "operationId must fit in 32 bytes");
+            word[32 - raw.len()..].copy_from_slice(&raw);
+        }
+        None => {
+            let n: u128 = v.parse().expect("operationId must be a decimal or 0x hex");
+            word[16..].copy_from_slice(&n.to_be_bytes());
+        }
     }
+    word
 }
 
 /// `None` when the live chain is not configured, so the suite is a no-op in CI.
@@ -73,7 +83,7 @@ fn live_deposit_binds_operation_id() {
         &l.bridge,
         l.min_conf,
         &l.tx,
-        l.op_id,
+        &l.op_id,
         l.amount,
         l.commission,
     )
@@ -85,12 +95,15 @@ fn live_deposit_binds_operation_id() {
 #[test]
 fn live_deposit_rejects_wrong_operation_id() {
     let Some(l) = live() else { return };
+    // A different 32-byte operationId (bump the low byte, wrapping) must refuse.
+    let mut wrong = l.op_id;
+    wrong[31] = wrong[31].wrapping_add(1);
     let e = verify_funds_in_event(
         &l.client,
         &l.bridge,
         l.min_conf,
         &l.tx,
-        l.op_id.wrapping_add(1),
+        &wrong,
         l.amount,
         l.commission,
     )
@@ -109,7 +122,7 @@ fn live_deposit_rejects_wrong_amount() {
         &l.bridge,
         l.min_conf,
         &l.tx,
-        l.op_id,
+        &l.op_id,
         l.amount.wrapping_add(1),
         l.commission,
     )

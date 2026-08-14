@@ -212,6 +212,10 @@ impl ParentAdapterService {
                         proxy_contract: payload.proxy_contract,
                         calldata_amount: payload.calldata_amount,
                         calldata_commission: payload.calldata_commission,
+                        // LayerZero release passthrough is not wired on this
+                        // build (direct fundsOutCall only); the enclave binds
+                        // the release via its independent call_data crosscheck.
+                        lz_release: None,
                     },
                 )
             }
@@ -615,6 +619,7 @@ impl ParentService for ParentAdapterService {
                 enclave_proto::InitializeKeyRequest {
                     seed: vec![],
                     mnemonic: inner.cloning_secret,
+                    cloning_secret: String::new(),
                 },
             )),
         };
@@ -636,14 +641,48 @@ impl ParentService for ParentAdapterService {
         }
     }
 
-    /// Clone — not yet implemented (cluster cloning).
+    /// Clone — donor side of cluster cloning. The requester's orchestrator
+    /// relays its InitiateCloning output here; we translate it into an enclave
+    /// GetCloneRequest against the *local* (donor) enclave. The enclave verifies
+    /// the requester attestation, PCRs, nonce freshness, pubkey/digest binding
+    /// and the digest against its own UTEXO_CLONING_SECRET before sealing the
+    /// seed. We return the sealed seed plus the donor's ephemeral pubkey and
+    /// attestation so the requester can drive SetClone locally.
     async fn clone(
         &self,
-        _request: Request<CloneRequest>,
+        request: Request<CloneRequest>,
     ) -> Result<Response<CloneResponse>, Status> {
-        Err(Status::unimplemented(
-            "Clone not yet implemented (cluster cloning)",
-        ))
+        let inner = request.into_inner();
+        tracing::info!(
+            cluster_pk = %hex::encode(&inner.cluster_public_key),
+            "gRPC Clone called (donor GetClone)"
+        );
+
+        let enclave_req = EnclaveRequest {
+            request: Some(enclave_request::Request::GetClone(
+                enclave_proto::GetCloneRequest {
+                    cluster_public_key: inner.cluster_public_key,
+                    cloning_digest: inner.cloning_digest,
+                    encryption_pubkey: inner.encryption_pubkey,
+                    requester_attestation: inner.attestation,
+                },
+            )),
+        };
+
+        let resp = self.send_to_enclave(enclave_req).await?;
+
+        match resp.response {
+            Some(enclave_response::Response::GetClone(r)) => Ok(Response::new(CloneResponse {
+                encrypted_seed: r.encrypted_seed,
+                donor_pubkey: r.donor_pubkey,
+                donor_attestation: r.donor_attestation,
+            })),
+            Some(enclave_response::Response::Error(e)) => Err(Self::enclave_error_to_status(&e)),
+            other => Err(Status::internal(format!(
+                "unexpected enclave response for Clone: {:?}",
+                other
+            ))),
+        }
     }
 
     /// GetLastSavedBlock — forwards to enclave. PR 1 wires the surface only;

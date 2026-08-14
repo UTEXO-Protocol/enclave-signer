@@ -98,6 +98,7 @@ fn valid_sign_evm_request(amount: u64, commission: u64) -> SignRequest {
             proxy_contract: vec![0xAA; 20],
             calldata_amount: amount,
             calldata_commission: commission,
+            lz_release: None,
         })),
     }
 }
@@ -174,6 +175,7 @@ fn init_wallet(port: u16) -> EnclaveWallet {
         request: Some(Request::InitializeKey(InitializeKeyRequest {
             seed: vec![],
             mnemonic: String::new(),
+            cloning_secret: String::new(),
         })),
     };
     match common::send_request(port, &init_req).response {
@@ -485,8 +487,9 @@ fn sign_psbt_request(
             recipient: vec![],
             commission: evm_commission,
             // On-chain FundsIn operationId the enclave #60 check binds to (these
-            // non-rgb-validation builds don't run that check; 0 is a placeholder).
-            funds_in_operation_id: 0,
+            // non-rgb-validation builds don't run that check; a zero 32-byte
+            // word is a placeholder). Proto #24: this field is now 32 bytes.
+            funds_in_operation_id: vec![0u8; 32],
         })),
         destination_network: Some(DestinationNetwork::RgbDestination(RgbDestination {
             operation_idx: 0,
@@ -544,6 +547,7 @@ fn test_sign_evm_rejects_consignment_valid_with_empty_bytes() {
         request: Some(Request::InitializeKey(InitializeKeyRequest {
             seed: vec![],
             mnemonic: String::new(),
+            cloning_secret: String::new(),
         })),
     };
     common::send_request(port, &init_req);
@@ -592,6 +596,7 @@ fn test_sign_evm_rejects_funds_out_without_validator() {
         request: Some(Request::InitializeKey(InitializeKeyRequest {
             seed: vec![],
             mnemonic: String::new(),
+            cloning_secret: String::new(),
         })),
     };
     common::send_request(port, &init_req);
@@ -635,6 +640,7 @@ fn test_sign_evm_accepts_ccd_source_funds_out() {
         request: Some(Request::InitializeKey(InitializeKeyRequest {
             seed: vec![],
             mnemonic: String::new(),
+            cloning_secret: String::new(),
         })),
     };
     common::send_request(port, &init_req);
@@ -656,6 +662,7 @@ fn test_sign_evm_accepts_ccd_source_funds_out() {
                 proxy_contract: vec![0xAA; 20],
                 calldata_amount: amount,
                 calldata_commission: commission,
+                lz_release: None,
             })),
         })),
     };
@@ -699,6 +706,7 @@ fn test_sign_evm_rejects_unconfigured_bridge_config() {
         request: Some(Request::InitializeKey(InitializeKeyRequest {
             seed: vec![],
             mnemonic: String::new(),
+            cloning_secret: String::new(),
         })),
     };
     common::send_request(port, &init_req);
@@ -744,6 +752,7 @@ fn test_no_spv_build_refuses_funds_out_even_without_merkle_proofs() {
         request: Some(Request::InitializeKey(InitializeKeyRequest {
             seed: vec![],
             mnemonic: String::new(),
+            cloning_secret: String::new(),
         })),
     };
     common::send_request(port, &init_req);
@@ -794,6 +803,7 @@ fn test_sign_psbt_roundtrip() {
         request: Some(Request::InitializeKey(InitializeKeyRequest {
             seed: seed.to_vec(),
             mnemonic: String::new(),
+            cloning_secret: String::new(),
         })),
     };
     let init_resp = common::send_request(port, &init_req);
@@ -866,6 +876,7 @@ fn test_sign_psbt_ignores_listener_evm_booleans() {
         request: Some(Request::InitializeKey(InitializeKeyRequest {
             seed: vec![],
             mnemonic: String::new(),
+            cloning_secret: String::new(),
         })),
     };
     common::send_request(port, &init_req);
@@ -915,6 +926,7 @@ fn test_no_evm_rpc_build_refuses_bridge_psbt() {
         request: Some(Request::InitializeKey(InitializeKeyRequest {
             seed: vec![],
             mnemonic: String::new(),
+            cloning_secret: String::new(),
         })),
     };
     common::send_request(port, &init_req);
@@ -957,6 +969,7 @@ fn test_sign_psbt_rejects_amount_mismatch() {
         request: Some(Request::InitializeKey(InitializeKeyRequest {
             seed: vec![],
             mnemonic: String::new(),
+            cloning_secret: String::new(),
         })),
     };
     common::send_request(port, &init_req);
@@ -1006,6 +1019,7 @@ fn test_sign_psbt_rejects_missing_evm_source_hash() {
         request: Some(Request::InitializeKey(InitializeKeyRequest {
             seed: vec![],
             mnemonic: String::new(),
+            cloning_secret: String::new(),
         })),
     };
     common::send_request(port, &init_req);
@@ -1055,6 +1069,7 @@ fn test_sign_psbt_zero_evm_hash_is_bridge_mode_not_vanilla() {
         request: Some(Request::InitializeKey(InitializeKeyRequest {
             seed: vec![],
             mnemonic: String::new(),
+            cloning_secret: String::new(),
         })),
     };
     common::send_request(port, &init_req);
@@ -1333,6 +1348,7 @@ fn test_sign_evm_rejects_consignment_hash_mismatch() {
         request: Some(Request::InitializeKey(InitializeKeyRequest {
             seed: vec![],
             mnemonic: String::new(),
+            cloning_secret: String::new(),
         })),
     };
     common::send_request(port, &init_req);
@@ -1374,6 +1390,7 @@ fn test_sign_evm_rejects_consignment_without_hash() {
         request: Some(Request::InitializeKey(InitializeKeyRequest {
             seed: vec![],
             mnemonic: String::new(),
+            cloning_secret: String::new(),
         })),
     };
     common::send_request(port, &init_req);
@@ -1411,6 +1428,7 @@ fn test_sign_raw_message_roundtrip() {
         request: Some(Request::InitializeKey(InitializeKeyRequest {
             seed: vec![],
             mnemonic: String::new(),
+            cloning_secret: String::new(),
         })),
     };
     let init_resp = common::send_request(port, &init_req);
@@ -1459,6 +1477,7 @@ fn test_sign_raw_message_empty() {
         request: Some(Request::InitializeKey(InitializeKeyRequest {
             seed: vec![],
             mnemonic: String::new(),
+            cloning_secret: String::new(),
         })),
     };
     common::send_request(port, &init_req);
@@ -1484,6 +1503,7 @@ fn test_sign_raw_message_deterministic() {
         request: Some(Request::InitializeKey(InitializeKeyRequest {
             seed: vec![],
             mnemonic: String::new(),
+            cloning_secret: String::new(),
         })),
     };
     common::send_request(port, &init_req);
@@ -1527,6 +1547,7 @@ fn test_sign_raw_message_different_messages_differ() {
         request: Some(Request::InitializeKey(InitializeKeyRequest {
             seed: vec![],
             mnemonic: String::new(),
+            cloning_secret: String::new(),
         })),
     };
     common::send_request(port, &init_req);
@@ -1570,6 +1591,7 @@ fn test_sign_raw_message_recoverable() {
         request: Some(Request::InitializeKey(InitializeKeyRequest {
             seed: seed.to_vec(),
             mnemonic: String::new(),
+            cloning_secret: String::new(),
         })),
     };
     let init_resp = common::send_request(port, &init_req);
@@ -1767,6 +1789,7 @@ fn init(port: u16) {
             request: Some(Request::InitializeKey(InitializeKeyRequest {
                 seed: vec![],
                 mnemonic: String::new(),
+                cloning_secret: String::new(),
             })),
         },
     );

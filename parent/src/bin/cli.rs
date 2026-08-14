@@ -14,7 +14,9 @@ use utexo_bridge_parent::enclave_proto::{InitializeKeyResponse, PublicKeysRespon
     about = "UTEXO Bridge enclave host-side client (CLI tool)"
 )]
 struct Cli {
-    /// Enclave address (TCP)
+    /// Enclave address: `host:port` (TCP, dev builds) or `vsock://<cid>:<port>`
+    /// (Nitro, vsock builds — e.g. `vsock://18:5000`). On a vsock build you MUST
+    /// pass a `vsock://` addr or set ENCLAVE_VSOCK_CID; it will not default to CID 16.
     #[arg(long, default_value = "127.0.0.1:5000")]
     addr: String,
 
@@ -25,7 +27,12 @@ struct Cli {
 #[derive(Subcommand)]
 enum Command {
     /// Initialize keys (generate new mnemonic in the enclave)
-    Init,
+    Init {
+        /// Donor cloning secret, delivered at runtime (not baked into the EIF).
+        /// Set only on enclaves that should serve clone requests.
+        #[arg(long)]
+        cloning_secret: Option<String>,
+    },
     /// Initialize from a hex-encoded 64-byte seed (testing only)
     InitSeed {
         /// 128 hex characters = 64 bytes
@@ -128,6 +135,24 @@ enum Command {
         /// Path to a file with one hex-encoded header per line (80 bytes = 160 hex chars).
         #[arg(long)]
         headers_file: PathBuf,
+    },
+    /// Clone the signing identity from a donor enclave into the local
+    /// (requester) enclave. Runs the full three-step handshake:
+    ///   1. InitiateCloning on the local enclave (vsock).
+    ///   2. gRPC Clone to the donor's parent adapter (relayed to its GetClone).
+    ///   3. SetClone on the local enclave (vsock), then verify the EVM address
+    ///      now matches the donor's cluster identity.
+    Clone {
+        /// Pre-shared operator cloning secret (must match the donor enclave's
+        /// baked UTEXO_CLONING_SECRET).
+        #[arg(long)]
+        cloning_secret: String,
+        /// Donor parent-adapter gRPC endpoint, e.g. http://10.0.1.23:50051
+        #[arg(long)]
+        donor_grpc: String,
+        /// Donor cluster identity: 20-byte EVM address, hex (with or without 0x).
+        #[arg(long)]
+        donor_evm: String,
     },
     /// Enter interactive REPL mode
     Interactive,
@@ -261,13 +286,15 @@ fn main() {
     let client = EnclaveClient::new(&cli.addr);
 
     match cli.command {
-        Command::Init => match client.initialize_keys(None) {
-            Ok(r) => print_init_response(&r),
-            Err(e) => {
-                eprintln!("Error: {}", e);
-                process::exit(1);
+        Command::Init { cloning_secret } => {
+            match client.initialize_keys_with_secret(None, cloning_secret) {
+                Ok(r) => print_init_response(&r),
+                Err(e) => {
+                    eprintln!("Error: {}", e);
+                    process::exit(1);
+                }
             }
-        },
+        }
         Command::InitSeed { hex: hex_str } => match hex::decode(&hex_str) {
             Ok(seed) => match client.initialize_keys(Some(seed)) {
                 Ok(r) => print_init_response(&r),
@@ -471,7 +498,87 @@ fn main() {
                 }
             }
         }
+        Command::Clone {
+            cloning_secret,
+            donor_grpc,
+            donor_evm,
+        } => {
+            if let Err(e) = run_clone(&client, &cloning_secret, &donor_grpc, &donor_evm) {
+                eprintln!("Error: {}", e);
+                process::exit(1);
+            }
+        }
         Command::Interactive => run_interactive(&client),
+    }
+}
+
+/// Drive the donor->requester cloning handshake. `client` targets the local
+/// (requester) enclave over vsock; the donor enclave is reached through its
+/// parent-adapter gRPC endpoint over TCP (cross-host within the VPC).
+fn run_clone(
+    client: &EnclaveClient,
+    cloning_secret: &str,
+    donor_grpc: &str,
+    donor_evm: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use utexo_bridge_parent::grpc_proto::parent_service_client::ParentServiceClient;
+    use utexo_bridge_parent::grpc_proto::CloneRequest;
+
+    let donor_addr = hex::decode(donor_evm.trim_start_matches("0x"))?;
+    if donor_addr.len() != 20 {
+        return Err(format!(
+            "donor_evm must be a 20-byte address, got {} bytes",
+            donor_addr.len()
+        )
+        .into());
+    }
+
+    println!("[1/4] InitiateCloning on local enclave...");
+    let init = client.initiate_cloning(cloning_secret, donor_addr.clone())?;
+    println!(
+        "      encryption_pubkey: {}",
+        hex::encode(&init.encryption_pubkey)
+    );
+
+    println!("[2/4] Clone via donor parent gRPC at {donor_grpc} ...");
+    let rt = tokio::runtime::Runtime::new()?;
+    let clone_resp = rt.block_on(async {
+        let mut grpc = ParentServiceClient::connect(donor_grpc.to_string()).await?;
+        let req = CloneRequest {
+            attestation: init.requester_attestation,
+            encryption_pubkey: init.encryption_pubkey,
+            cluster_public_key: donor_addr.clone(),
+            cloning_digest: init.cloning_digest,
+        };
+        // Disambiguate the generated RPC `clone(&mut self, req)` from
+        // `Clone::clone(&self)`: autoref tries `&self` before `&mut self`, so
+        // `grpc.clone(req)` would wrongly resolve to the derive. Call the
+        // inherent method via path syntax (inherent wins over the trait).
+        let resp = ParentServiceClient::clone(&mut grpc, req).await?;
+        Ok::<_, Box<dyn std::error::Error>>(resp.into_inner())
+    })?;
+    println!(
+        "      donor_pubkey: {}",
+        hex::encode(&clone_resp.donor_pubkey)
+    );
+
+    println!("[3/4] SetClone on local enclave...");
+    client.set_clone(
+        clone_resp.encrypted_seed,
+        clone_resp.donor_pubkey,
+        clone_resp.donor_attestation,
+    )?;
+
+    println!("[4/4] Verifying cloned identity...");
+    let keys = client.get_public_keys()?;
+    let local_evm = hex::encode(&keys.evm_address);
+    let want_evm = hex::encode(&donor_addr);
+    print_keys_response(&keys);
+    if local_evm == want_evm {
+        println!("\nOK: cloned EVM address matches donor (0x{local_evm})");
+        Ok(())
+    } else {
+        Err(format!("clone mismatch: local EVM 0x{local_evm} != donor 0x{want_evm}").into())
     }
 }
 

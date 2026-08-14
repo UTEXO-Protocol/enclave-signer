@@ -300,6 +300,19 @@ fn handle_sign(ctx: &ServerContext, req: SignRequest) -> Result<EnclaveResponse>
                 source.tx_hash.len()
             ))
         })?;
+        // Proto #24: funds_in_operation_id is the on-chain BridgeFundsIn
+        // operationId as the full 32-byte word (uint256), not a u64. It is
+        // required; an empty/short value fails closed here.
+        let funds_in_operation_id: [u8; 32] = source
+            .funds_in_operation_id
+            .as_slice()
+            .try_into()
+            .map_err(|_| {
+                EnclaveError::CrossCheck(format!(
+                    "funds_in_operation_id must be 32 bytes, got {}",
+                    source.funds_in_operation_id.len()
+                ))
+            })?;
         let client = ctx.evm_rpc_client.as_ref().ok_or_else(|| {
             EnclaveError::CrossCheck(
                 "evm-rpc build but RPC client unavailable - refusing to sign a bridge PSBT \
@@ -317,11 +330,11 @@ fn handle_sign(ctx: &ServerContext, req: SignRequest) -> Result<EnclaveResponse>
         crate::networks::evm::evm_event::verify_funds_in_event(
             &**client,
             // FundsIn is emitted by the bridge entry contract, which may differ
-            // from the MultisigProxy pinned in BRIDGE_CONTRACT (see config.rs).
+            // from the MultisigProxy pinned in EVM_PROXY_CONTRACT_ADDRESS (see config.rs).
             &ctx.bridge_config.funds_in_contract,
             ctx.evm_rpc_config.min_confirmations,
             &tx_hash,
-            source.funds_in_operation_id,
+            &funds_in_operation_id,
             req.amount,
             source.commission,
         )?;
@@ -530,6 +543,14 @@ fn handle_initialize(ctx: &ServerContext, req: InitializeKeyRequest) -> Result<E
                 "seed import not allowed without allow-seed-import feature".into(),
             ));
         }
+    }
+
+    // Donor-side cloning secret, delivered at runtime via the init message
+    // (never baked into the EIF, so it stays out of the PCRs). Only required
+    // for enclaves that will serve `GetClone`. Idempotent; empty = disabled.
+    if !req.cloning_secret.is_empty() {
+        state.set_donor_cloning_secret(req.cloning_secret)?;
+        tracing::info!("donor cloning secret configured from init request");
     }
 
     let keys = state.get_keys()?;

@@ -1,0 +1,25 @@
+[Unit]
+# EVM-RPC egress for the in-enclave FundsIn verification (evm-rpc feature, #60).
+# The enclave speaks PLAINTEXT JSON-RPC to its loopback 127.0.0.1:3444, which the
+# in-enclave forwarder relays over vsock port 8002. This proxy is the host side of
+# that vsock hop: vsock 8002 -> 127.0.0.1:8547 (the local nginx TLS/key shim) ->
+# https://arb-mainnet.g.alchemy.com/v2/<key> (Arbitrum One, chain 42161).
+#
+# Why the extra nginx hop (unlike vsock-proxy-electrs, which is a single raw hop):
+# electrs is reached as `ssl://…:50002`, so the enclave does TLS end-to-end and a
+# raw Vsock<->TCP proxy suffices. evm-rpc uses `http://` (alloy RootProvider::new_http,
+# no TLS) and carries no API key, so TLS termination + the `/v2/<key>` path must be
+# added host-side by nginx. vsock-proxy stays a raw TCP relay to that local shim.
+Description=vsock-proxy for enclave EVM RPC (evm-rpc FundsIn verify: vsock 8002 -> 127.0.0.1:8547 nginx -> Alchemy Arbitrum One)
+After=network-online.target nitro-enclaves-allocator.service nginx.service
+Wants=network-online.target
+Requires=nginx.service
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/vsock-proxy 8002 127.0.0.1 8547 --config /etc/nitro_enclaves/vsock-proxy-evmrpc.yaml
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target
