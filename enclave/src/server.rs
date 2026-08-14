@@ -299,7 +299,7 @@ fn handle_sign(ctx: &ServerContext, req: SignRequest) -> Result<EnclaveResponse>
         crate::networks::evm::evm_event::verify_funds_in_event(
             &**client,
             // FundsIn is emitted by the bridge entry contract, which may differ
-            // from the MultisigProxy pinned in BRIDGE_CONTRACT (see config.rs).
+            // from the MultisigProxy pinned in EVM_PROXY_CONTRACT_ADDRESS (see config.rs).
             &ctx.bridge_config.funds_in_contract,
             ctx.evm_rpc_config.min_confirmations,
             &tx_hash,

@@ -35,7 +35,7 @@ flowchart TB
         EPol[policy.rs<br/>SecurityPolicy C-01<br/>Production / Development,<br/>resolved once at boot]
         EState[state.rs<br/>Phase Initial / Cloning / Active<br/>NonceReplayGuard 1 h TTL<br/>op_replay_guard 24 h TTL]
         EFr[framing.rs<br/>len-prefixed proto, 4 MiB cap]
-        BCfg[config.rs — BridgeConfig env pins<br/>EVM_CHAIN_ID / BRIDGE_CONTRACT / RGB_ASSET_ID<br/>GAS_TX_ALLOWED_TO / FUNDS_IN_CONTRACT<br/>BTC_MAX_TOTAL_SATS]
+        BCfg[config.rs — BridgeConfig env pins<br/>EVM_CHAIN_ID / EVM_PROXY_CONTRACT_ADDRESS / RGB_ASSET_ID<br/>GAS_TX_ALLOWED_TO / FUNDS_IN_CONTRACT<br/>BTC_MAX_TOTAL_SATS]
         VFwd[vsock_forwarder.rs<br/>loopback → vsock, per-port instances<br/>3443→8001 Esplora, 3444→8002 EVM RPC,<br/>18545→8003 / 18550→8004 Helios]
         KM[keys.rs — KeyManager<br/>BIP-39/32/44/84/86<br/>SecretBox seed + keys]
 

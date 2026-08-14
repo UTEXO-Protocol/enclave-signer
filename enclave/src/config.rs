@@ -1,7 +1,8 @@
 //! Enclave-side bridge configuration pinned at boot.
 //!
-//! The chain, bridge contract, and RGB asset the enclave is willing to sign
-//! for are loaded once from the environment at startup and then folded into
+//! The chain, MultisigProxy contract (`EVM_PROXY_CONTRACT_ADDRESS`), and RGB
+//! asset the enclave is willing to sign for are loaded once from the
+//! environment at startup and then folded into
 //! the attestation `user_data` commitment (see `canonical_pubkey_bundle` in
 //! `server.rs`). Two consequences:
 //!
@@ -24,6 +25,12 @@ use crate::error::{EnclaveError, Result};
 #[derive(Debug, Clone, Default)]
 pub struct BridgeConfig {
     pub chain_id: u64,
+    /// MultisigProxy contract pinned for the EVM signing cross-check (env
+    /// `EVM_PROXY_CONTRACT_ADDRESS`) — the EIP-712 `verifyingContract` the
+    /// listener stamps into every funds-out request. NOTE: this is the
+    /// MultisigProxy, NOT the bridge *entry* contract that emits `FundsIn`
+    /// (that one is `funds_in_contract`). The struct/proto field keeps the
+    /// legacy name `bridge_contract` for wire/attestation-bundle stability.
     pub bridge_contract: [u8; 20],
     pub rgb_asset_id: String,
     /// Operator-pinned allowed destination for **gas-key** transactions
@@ -60,16 +67,18 @@ pub struct BridgeConfig {
     /// Address expected to emit `FundsIn`/`BridgeFundsIn` (env
     /// `FUNDS_IN_CONTRACT`). Falls back to `bridge_contract` when unset, so
     /// single-contract deployments are unaffected. Needed where the deposit
-    /// event is emitted by the bridge *entry* contract while `BRIDGE_CONTRACT`
-    /// pins the MultisigProxy for the EVM signing cross-check — one pin cannot
-    /// serve both lookups.
+    /// event is emitted by the bridge *entry* contract while
+    /// `EVM_PROXY_CONTRACT_ADDRESS` pins the MultisigProxy for the EVM signing
+    /// cross-check — one pin cannot serve both lookups. On this deployment the
+    /// two contracts DIFFER, so `FUNDS_IN_CONTRACT` MUST be set explicitly
+    /// (leaving it unset would fold the proxy address into the FundsIn lookup).
     pub funds_in_contract: [u8; 20],
 }
 
 impl BridgeConfig {
-    /// Load from `EVM_CHAIN_ID` (decimal), `BRIDGE_CONTRACT` (0x-prefixed or
-    /// bare 40-hex), `RGB_ASSET_ID` (string). Any missing/invalid field
-    /// degrades to its zero/empty value; `is_configured()` reports whether
+    /// Load from `EVM_CHAIN_ID` (decimal), `EVM_PROXY_CONTRACT_ADDRESS`
+    /// (0x-prefixed or bare 40-hex), `RGB_ASSET_ID` (string). Any missing/invalid
+    /// field degrades to its zero/empty value; `is_configured()` reports whether
     /// the operator supplied anything at all.
     pub fn from_env() -> Self {
         let chain_id = std::env::var("EVM_CHAIN_ID")
@@ -77,7 +86,7 @@ impl BridgeConfig {
             .and_then(|s| s.parse::<u64>().ok())
             .unwrap_or(0);
 
-        let bridge_contract = std::env::var("BRIDGE_CONTRACT")
+        let bridge_contract = std::env::var("EVM_PROXY_CONTRACT_ADDRESS")
             .ok()
             .and_then(|s| parse_eth_address(&s).ok())
             .unwrap_or([0u8; 20]);
@@ -131,8 +140,8 @@ impl BridgeConfig {
     }
 
     /// True when the operator set **some but not all** pin fields. This is a
-    /// botched production config (e.g. `EVM_CHAIN_ID` set but `BRIDGE_CONTRACT`
-    /// left at the zero address), distinct from a fully-empty config that
+    /// botched production config (e.g. `EVM_CHAIN_ID` set but
+    /// `EVM_PROXY_CONTRACT_ADDRESS` left at the zero address), distinct from a fully-empty config that
     /// intentionally selects the legacy dev path. Callers fail closed on this
     /// rather than silently falling back to listener-trusting mode
     /// (audit 4th M-03 / #94).
@@ -152,10 +161,10 @@ impl BridgeConfig {
             return None;
         }
         let detail = if self.is_partially_configured() {
-            "PARTIALLY set (some but not all of EVM_CHAIN_ID / BRIDGE_CONTRACT / RGB_ASSET_ID \
+            "PARTIALLY set (some but not all of EVM_CHAIN_ID / EVM_PROXY_CONTRACT_ADDRESS / RGB_ASSET_ID \
              are set)"
         } else {
-            "unset (none of EVM_CHAIN_ID / BRIDGE_CONTRACT / RGB_ASSET_ID are set)"
+            "unset (none of EVM_CHAIN_ID / EVM_PROXY_CONTRACT_ADDRESS / RGB_ASSET_ID are set)"
         };
         Some(format!(
             "bridge config is {detail}. A release rgb-validation (bridge-signing) enclave must \
@@ -195,14 +204,16 @@ impl BridgeConfig {
     }
 }
 
-/// Parse `0xABCD…` (40 hex chars) or bare 40-hex into 20 bytes.
+/// Parse `0xABCD…` (40 hex chars) or bare 40-hex into 20 bytes. Shared by the
+/// `EVM_PROXY_CONTRACT_ADDRESS`, `GAS_TX_ALLOWED_TO`, and `FUNDS_IN_CONTRACT`
+/// address pins, so the error text is address-agnostic.
 fn parse_eth_address(s: &str) -> Result<[u8; 20]> {
     let stripped = s.strip_prefix("0x").unwrap_or(s);
     let bytes = hex::decode(stripped)
-        .map_err(|e| EnclaveError::InvalidRequest(format!("BRIDGE_CONTRACT not hex: {e}")))?;
+        .map_err(|e| EnclaveError::InvalidRequest(format!("eth address not hex: {e}")))?;
     bytes.try_into().map_err(|v: Vec<u8>| {
         EnclaveError::InvalidRequest(format!(
-            "BRIDGE_CONTRACT must decode to 20 bytes, got {}",
+            "eth address must decode to 20 bytes, got {}",
             v.len()
         ))
     })

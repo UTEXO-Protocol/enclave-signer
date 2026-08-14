@@ -59,7 +59,7 @@ sequenceDiagram
         Note right of Rpc: raw alloy path = host-relayed evidence (#60)<br/>Helios path = verified in-TEE vs pinned checkpoint —<br/>Helios sync failure fails closed, no raw fallback
         Rpc-->>Evt: receipt / head (or none)
         Evt->>Evt: receipt exists + status success
-        Evt->>Evt: UNIQUE deposit event from the PINNED contract<br/>(FUNDS_IN_CONTRACT, else BRIDGE_CONTRACT — #152) —<br/>BridgeFundsIn preferred, same-tx FundsIn+BridgeFundsIn<br/>pair counts as ONE deposit (#150)
+        Evt->>Evt: UNIQUE deposit event from the PINNED contract<br/>(FUNDS_IN_CONTRACT, else EVM_PROXY_CONTRACT_ADDRESS — #152) —<br/>BridgeFundsIn preferred, same-tx FundsIn+BridgeFundsIn<br/>pair counts as ONE deposit (#150)
         Evt->>Evt: on-chain operationId == funds_in_operation_id (#153,<br/>NOT the hub's operation_idx) —<br/>gross == amount, commission bound,<br/>net == gross − commission — uint256 > u64 ⇒ REFUSE
         Evt->>Evt: depth ≥ EVM_MIN_CONFIRMATIONS (default 12) —<br/>receipt above head (reorg) ⇒ REFUSE
         Evt-->>Srv: Ok / CrossCheck err (fail closed)
@@ -135,7 +135,7 @@ Bridge PSBT signing releases RGB against an EVM deposit. The listener-supplied
 1. **Receipt exists** for `evm_tx_hash` — `None` (not mined / host withheld) → refuse.
 2. **Receipt status == success** — a reverted tx emits no real deposit event.
 3. **Unique** deposit event from the **pinned** `FUNDS_IN_CONTRACT` (falls back
-   to `BRIDGE_CONTRACT`; #152 — address from config, never the request).
+   to `EVM_PROXY_CONTRACT_ADDRESS`; #152 — address from config, never the request).
    `BridgeFundsIn` is preferred; a same-tx `FundsIn` + `BridgeFundsIn` pair is
    one deposit (#150). Two real deposits in one tx are ambiguous → refuse.
 4. **Field binding** — on-chain `operationId` == `funds_in_operation_id`

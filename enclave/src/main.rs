@@ -88,7 +88,7 @@ fn main() {
 
     // Pinned bridge config from env. Folded into the attestation `user_data`
     // commitment and cross-checked on every SignEvm. Production deployments
-    // must set EVM_CHAIN_ID, BRIDGE_CONTRACT, RGB_ASSET_ID — a misconfigured
+    // must set EVM_CHAIN_ID, EVM_PROXY_CONTRACT_ADDRESS, RGB_ASSET_ID — a misconfigured
     // production enclave is detectable externally via the attestation bundle.
     let bridge_config = BridgeConfig::from_env();
     if bridge_config.is_configured() {
@@ -106,12 +106,12 @@ fn main() {
             chain_id = bridge_config.chain_id,
             bridge_contract = %hex::encode(bridge_config.bridge_contract),
             rgb_asset_id = %bridge_config.rgb_asset_id,
-            "bridge config PARTIALLY set - EVM_CHAIN_ID / BRIDGE_CONTRACT / RGB_ASSET_ID must all \
+            "bridge config PARTIALLY set - EVM_CHAIN_ID / EVM_PROXY_CONTRACT_ADDRESS / RGB_ASSET_ID must all \
              be set (non-zero) or all unset; SignEvm will refuse to sign with this ambiguous pin"
         );
     } else {
         tracing::warn!(
-            "bridge config unconfigured (EVM_CHAIN_ID / BRIDGE_CONTRACT / RGB_ASSET_ID unset) - \
+            "bridge config unconfigured (EVM_CHAIN_ID / EVM_PROXY_CONTRACT_ADDRESS / RGB_ASSET_ID unset) - \
              SignEvm cross-check will fall back to legacy behaviour and the attestation bundle \
              will commit to empty values"
         );
