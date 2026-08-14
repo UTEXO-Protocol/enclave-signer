@@ -46,6 +46,8 @@ pub struct SignPsbtRequest {
     /// On-chain BridgeFundsIn.operationId of the source deposit (bridge transfer
     /// id). The enclave #60 FundsIn check binds to this; distinct from
     /// `operation_idx` (the RGB hub operation index / replay-guard key).
+    /// Kept numeric for the CLI/client path; encoded into the proto's 32-byte
+    /// `funds_in_operation_id` word (big-endian) when the request is built.
     pub evm_funds_in_operation_id: u64,
     pub operation_idx: u64,
     pub evm_event_valid: bool,
@@ -319,6 +321,9 @@ impl EnclaveClient {
                                 proxy_contract: req.proxy_contract,
                                 calldata_amount: req.calldata_amount,
                                 calldata_commission: req.calldata_commission,
+                                // LayerZero release not supported on this build
+                                // (direct fundsOutCall only); see grpc_server.
+                                lz_release: None,
                             },
                         ),
                     ),
@@ -353,7 +358,18 @@ impl EnclaveClient {
                                 token: req.evm_token,
                                 recipient: req.evm_recipient,
                                 commission: req.evm_commission,
-                                funds_in_operation_id: req.evm_funds_in_operation_id,
+                                // Proto #24: the enclave EvmSource carries the
+                                // operationId as a 32-byte word. This CLI/client
+                                // path takes a numeric id, so left-pad it big-endian
+                                // into the 32-byte word (matches how a small
+                                // uint256 operationId is ABI-encoded on-chain).
+                                funds_in_operation_id: {
+                                    let mut w = [0u8; 32];
+                                    w[24..].copy_from_slice(
+                                        &req.evm_funds_in_operation_id.to_be_bytes(),
+                                    );
+                                    w.to_vec()
+                                },
                             },
                         ),
                     ),

@@ -212,6 +212,10 @@ impl ParentAdapterService {
                         proxy_contract: payload.proxy_contract,
                         calldata_amount: payload.calldata_amount,
                         calldata_commission: payload.calldata_commission,
+                        // LayerZero release passthrough is not wired on this
+                        // build (direct fundsOutCall only); the enclave binds
+                        // the release via its independent call_data crosscheck.
+                        lz_release: None,
                     },
                 )
             }

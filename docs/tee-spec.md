@@ -214,8 +214,9 @@ enclave establishes validity and finality itself, fail-closed
   `FUNDS_IN_CONTRACT` (falls back to `EVM_PROXY_CONTRACT_ADDRESS`; #152). `BridgeFundsIn`
   is preferred; a same-tx `FundsIn` + `BridgeFundsIn` pair counts as one
   deposit (#150);
-- the event MUST bind the on-chain `operationId` to the request's
-  `funds_in_operation_id` -- not the hub's `operation_idx` (#153). A
+- the event MUST bind the on-chain `operationId` (the full 32-byte word) to the
+  request's 32-byte `funds_in_operation_id` -- not the hub's `operation_idx`
+  (#153, #24). A
   `BridgeFundsIn` event additionally binds gross amount and commission
   (`net == gross - commission`); the plain `FundsIn` fallback binds only
   `operationId` and the net amount, leaving the commission split

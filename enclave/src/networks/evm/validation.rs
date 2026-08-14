@@ -218,7 +218,7 @@ mod tests {
             token: vec![0x11; ADDRESS_LEN],
             recipient: vec![0x22; ADDRESS_LEN],
             commission: 50,
-            funds_in_operation_id: 0,
+            funds_in_operation_id: vec![0u8; 32],
         }
     }
 
@@ -245,6 +245,7 @@ mod tests {
             proxy_contract: vec![0xAA; ADDRESS_LEN],
             calldata_amount: 1000,
             calldata_commission: 0,
+            lz_release: None,
         }
     }
 

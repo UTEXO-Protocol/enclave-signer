@@ -98,6 +98,7 @@ fn valid_sign_evm_request(amount: u64, commission: u64) -> SignRequest {
             proxy_contract: vec![0xAA; 20],
             calldata_amount: amount,
             calldata_commission: commission,
+            lz_release: None,
         })),
     }
 }
@@ -486,8 +487,9 @@ fn sign_psbt_request(
             recipient: vec![],
             commission: evm_commission,
             // On-chain FundsIn operationId the enclave #60 check binds to (these
-            // non-rgb-validation builds don't run that check; 0 is a placeholder).
-            funds_in_operation_id: 0,
+            // non-rgb-validation builds don't run that check; a zero 32-byte
+            // word is a placeholder). Proto #24: this field is now 32 bytes.
+            funds_in_operation_id: vec![0u8; 32],
         })),
         destination_network: Some(DestinationNetwork::RgbDestination(RgbDestination {
             operation_idx: 0,
@@ -660,6 +662,7 @@ fn test_sign_evm_accepts_ccd_source_funds_out() {
                 proxy_contract: vec![0xAA; 20],
                 calldata_amount: amount,
                 calldata_commission: commission,
+                lz_release: None,
             })),
         })),
     };
