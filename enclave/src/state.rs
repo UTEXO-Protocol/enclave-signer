@@ -490,7 +490,7 @@ impl EnclaveState {
 
     /// Sign a 32-byte Concordium account-transaction hash with the governance
     /// Ed25519 key. Returns the 64-byte signature.
-    pub fn sign_ccd(&self, hash: &[u8; 32]) -> Result<[u8; 64]> {
+    pub fn sign_ccd(&self, hash: &[u8; 32]) -> Result<([u8; 64], [u8; 32])> {
         self.with_active(|km| km.sign_ccd(hash))
     }
 

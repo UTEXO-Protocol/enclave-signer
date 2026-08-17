@@ -221,10 +221,11 @@ impl ParentAdapterService {
                         proxy_contract: payload.proxy_contract,
                         calldata_amount: payload.calldata_amount,
                         calldata_commission: payload.calldata_commission,
-                        // LayerZero release passthrough is not wired on this
-                        // build (direct fundsOutCall only); the enclave binds
-                        // the release via its independent call_data crosscheck.
-                        lz_release: None,
+                        lz_release: payload.lz_release.map(|lr| enclave_proto::LzReleaseParams {
+                            dst_eid: lr.dst_eid,
+                            min_amount_ld: lr.min_amount_ld,
+                            recipient: lr.recipient,
+                        }),
                     },
                 )
             }
@@ -327,6 +328,9 @@ impl ParentService for ParentAdapterService {
                         signature: r.signature,
                         identifier: None,
                         call_data: Vec::new(),
+                        // Ed25519: the signer cannot be recovered from the signature,
+                        // so the key travels with it.
+                        public_key: r.public_key,
                     }))
                 }
                 Some(enclave_response::Response::Error(e)) => {
@@ -419,6 +423,8 @@ impl ParentService for ParentAdapterService {
                             signature: r.signed_psbt,
                             identifier: None,
                             call_data: Vec::new(),
+                            // A PSBT carries per-input key material of its own.
+                            public_key: Vec::new(),
                         }))
                     }
                     Some(enclave_response::Response::EvmSignature(r)) => {
@@ -432,6 +438,8 @@ impl ParentService for ParentAdapterService {
                             // signature commits to — the caller must submit these
                             // bytes, not the ones it sent (audit M-02 / #93, #63).
                             call_data: r.call_data,
+                            // secp256k1: the signer is recoverable from the signature.
+                            public_key: Vec::new(),
                         }))
                     }
                     Some(enclave_response::Response::Error(e)) => {
@@ -483,6 +491,8 @@ impl ParentService for ParentAdapterService {
                             signature: r.signature,
                             identifier: None,
                             call_data: Vec::new(),
+                            // secp256k1: the signer is recoverable from the signature.
+                            public_key: Vec::new(),
                         }))
                     }
                     Some(enclave_response::Response::Error(e)) => {
@@ -532,6 +542,8 @@ impl ParentService for ParentAdapterService {
                             signature: r.signed_psbt,
                             identifier: None,
                             call_data: Vec::new(),
+                            // A PSBT carries per-input key material of its own.
+                            public_key: Vec::new(),
                         }))
                     }
                     Some(enclave_response::Response::Error(e)) => {

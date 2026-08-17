@@ -3,7 +3,8 @@ use std::io::{Read, Write};
 use crate::config::BridgeConfig;
 use crate::error::{EnclaveError, Result};
 use crate::framing;
-use crate::networks::evm::signing::{build_evm_domain, funds_out_digest};
+use crate::networks::evm::signing::{build_evm_domain, funds_out_digest, lz_funds_out_digest};
+use crate::networks::evm::validation::LZ_FUNDS_OUT_SELECTOR;
 use crate::networks::{
     validate_destination, validate_route_proofs, validate_source, ValidationContext,
 };
@@ -714,8 +715,9 @@ fn handle_get_attested_public_key(
 }
 
 /// `params` comes from destination validation, so the digest commits to exactly
-/// the fields cross-checked there (I-12 / #165). `None` only in dev-mode, which
-/// skips validation and therefore decodes here.
+/// the fields cross-checked there (I-12 / #165). `None` in dev-mode, which skips
+/// validation and therefore decodes here, and on the LayerZero route, whose
+/// param shape is not `FundsOutParams` — `lz_funds_out_digest` decodes its own.
 fn handle_sign_evm(
     ctx: &ServerContext,
     req: EvmDestination,
@@ -726,16 +728,38 @@ fn handle_sign_evm(
     let domain = build_evm_domain(&req)?;
 
     let domain_sep = domain.separator_hash();
-    let decoded_here;
-    let params = match params {
-        Some(params) => params,
-        None => {
-            decoded_here =
-                crate::networks::evm::validation::decode_funds_out_params(&req.call_data)?;
-            &decoded_here
-        }
+
+    // Route to the appropriate EIP-712 digest based on selector and lz_release.
+    // lzFundsOutCall carries LZ-specific fields the digest commits to; the
+    // proto field is the authority — the selector in calldata is a consistency
+    // check only (crosschecked inside lz_funds_out_digest).
+    let is_lz = req.call_data.len() >= 4
+        && req.call_data[..4] == LZ_FUNDS_OUT_SELECTOR
+        && req.lz_release.is_some();
+
+    let digest = if is_lz {
+        lz_funds_out_digest(
+            &domain,
+            &req.call_data,
+            req.lz_release.as_ref().expect("checked above"),
+            req.nonce,
+            req.deadline,
+        )?
+    } else {
+        // `params` is `Some` on the pools route whenever validation ran, so the
+        // digest commits to exactly the fields cross-checked there. Dev-mode
+        // skips validation and therefore decodes here.
+        let decoded_here;
+        let params = match params {
+            Some(params) => params,
+            None => {
+                decoded_here =
+                    crate::networks::evm::validation::decode_funds_out_params(&req.call_data)?;
+                &decoded_here
+            }
+        };
+        funds_out_digest(&domain, params, req.nonce, req.deadline)?
     };
-    let digest = funds_out_digest(&domain, params, req.nonce, req.deadline)?;
 
     tracing::info!(
         domain_name = %domain.name,
@@ -947,7 +971,7 @@ fn handle_sign_ccd(state: &EnclaveState, req: SignCcdRequest) -> Result<EnclaveR
     }
 
     let hash: [u8; 32] = req.hash.as_slice().try_into().unwrap();
-    let signature = state.sign_ccd(&hash)?;
+    let (signature, public_key) = state.sign_ccd(&hash)?;
 
     tracing::info!(
         hash_hex = %hex::encode(hash),
@@ -957,6 +981,10 @@ fn handle_sign_ccd(state: &EnclaveState, req: SignCcdRequest) -> Result<EnclaveR
     Ok(EnclaveResponse {
         response: Some(Response::CcdSignature(CcdSignatureResponse {
             signature: signature.to_vec(),
+            // Ed25519 signatures are not recoverable, so the consumer needs the key
+            // to find this signature's index on the governance account. Taken from
+            // the same call that signed, so the two cannot disagree.
+            public_key: public_key.to_vec(),
         })),
     })
 }
