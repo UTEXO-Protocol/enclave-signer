@@ -279,6 +279,8 @@ mod tests {
             last_transfer_witness_prevouts: None,
             last_transfer_op_id: None,
             non_mined_witness_txids: vec![],
+            // These cases never reach the PSBT bind (garbage `psbt_bytes`).
+            transitions_by_witness: vec![],
         }
     }
 

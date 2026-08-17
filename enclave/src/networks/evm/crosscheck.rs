@@ -339,6 +339,9 @@ mod tests {
                 last_transfer_witness_prevouts: None,
                 last_transfer_op_id: None,
                 non_mined_witness_txids: vec![],
+                // The fundsOut cross-check reads `last_transition` only; the
+                // per-witness grouping is the send-RGB PSBT bind's input.
+                transitions_by_witness: vec![],
             }
         }
 
@@ -433,6 +436,7 @@ mod tests {
                 last_transfer_witness_prevouts: None,
                 last_transfer_op_id: None,
                 non_mined_witness_txids: vec![],
+                transitions_by_witness: vec![],
             };
             let err = validate_funds_out_transfer(&params_of(&cd), &validated).unwrap_err();
             assert!(
