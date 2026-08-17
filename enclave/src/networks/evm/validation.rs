@@ -395,6 +395,9 @@ mod tests {
             #[cfg(feature = "rgb-validation")]
             rgb_validator: None,
             header_chain: &header_chain,
+            // EVM destinations never reach the send-RGB PSBT bind.
+            #[cfg(feature = "rgb-validation")]
+            self_owned_psbt_outputs: None,
         };
         f(&ctx)
     }

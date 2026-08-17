@@ -412,6 +412,13 @@ pub struct TransitionSummary {
 /// One fungible output assignment on a state transition.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TransitionOutput {
+    /// IFA fungible assignment type of the allocation this entry belongs to
+    /// ([`ifa::OS_ASSET`] or [`ifa::OS_INFLATION`]). Load-bearing: only
+    /// `OS_ASSET` entries carry asset units, so the per-output recipient bind
+    /// must filter on this exactly as `asset_output_amount` does — counting an
+    /// `OS_INFLATION` allowance entry as a paid-out leg would let a mint
+    /// consignment claim mint *capacity* as value delivered (#54).
+    pub assignment_type: u16,
     /// Amount in the asset's smallest unit.
     pub amount: u64,
     /// Destination seal — either a revealed `txid:vout` or a hidden
@@ -1064,7 +1071,12 @@ fn transition_summary(t: &TransitionInfo) -> Result<TransitionSummary> {
     let outputs: Result<Vec<TransitionOutput>> = t
         .fungible_allocations
         .iter()
-        .flat_map(|a: &FungibleAllocation| a.entries.iter().map(transition_output))
+        .flat_map(|a: &FungibleAllocation| {
+            let assignment_type = a.assignment_type;
+            a.entries
+                .iter()
+                .map(move |e| transition_output(assignment_type, e))
+        })
         .collect();
 
     Ok(TransitionSummary {
@@ -1125,7 +1137,7 @@ fn read_last_transition_burned_asset(transfer: &Transfer) -> Result<Option<u64>>
     Ok(None)
 }
 
-fn transition_output(e: &FungibleEntry) -> Result<TransitionOutput> {
+fn transition_output(assignment_type: u16, e: &FungibleEntry) -> Result<TransitionOutput> {
     let seal = match &e.seal {
         SealInfo::Revealed { txid, vout } => {
             let txid_bytes = txid
@@ -1142,6 +1154,7 @@ fn transition_output(e: &FungibleEntry) -> Result<TransitionOutput> {
         },
     };
     Ok(TransitionOutput {
+        assignment_type,
         amount: e.amount,
         seal,
     })
@@ -1495,6 +1508,16 @@ mod tests {
         let (_, _, last_transition) =
             extract_transition_summary(TRANSFER_FIXTURE).expect("transfer parse");
         let last = last_transition.expect("transfer has a last transition");
+
+        // Both legs are `OS_ASSET` — the assignment tag the per-output
+        // recipient bind (W-06 / #52) filters on. Asserted against real
+        // consignment bytes so the tag can't silently drift from the parser.
+        assert!(
+            last.outputs
+                .iter()
+                .all(|o| o.assignment_type == ifa::OS_ASSET),
+            "transfer fixture legs should all be OS_ASSET"
+        );
 
         // First entry is the change leg: revealed with no explicit txid
         // (points at the witness tx itself), vout=1, amount as above.
@@ -1914,6 +1937,8 @@ mod tests {
                 bridge_config: config,
                 rgb_validator: Some(&validator),
                 header_chain: &chain,
+                // Source validation never reaches the destination PSBT bind.
+                self_owned_psbt_outputs: None,
             };
             validate_source(source, &ctx)
         }
