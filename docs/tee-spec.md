@@ -114,7 +114,7 @@ SecurityPolicy = Production {
 - **Resolution** (`policy.rs`): any dev feature (`dev-mode`,
   `mock-attestation`, `allow-seed-import`), a debug/test build, a non-bridge
   build, or a missing pin resolves to `Development`. Only a release
-  `rgb-validation` build with `EVM_CHAIN_ID`, `BRIDGE_CONTRACT`, and
+  `rgb-validation` build with `EVM_CHAIN_ID`, `EVM_PROXY_CONTRACT_ADDRESS`, and
   `RGB_ASSET_ID` all set resolves to `Production`.
 - **Boot gate:** a release `rgb-validation` build that does not resolve to a
   valid `Production` policy MUST refuse to boot (panic). Independently, each
@@ -131,8 +131,9 @@ SecurityPolicy = Production {
   raw RPC instead of Helios, a dev build) fails verification instead of being
   silently trusted.
 
-Not yet inside the commitment: `GAS_TX_ALLOWED_TO`, `FUNDS_IN_CONTRACT`, and
-the concrete `BTC_MAX_TOTAL_SATS` value (only the on/off boolean is attested).
+Not yet inside the commitment: `GAS_TX_ALLOWED_TO`, `GAS_TX_MAX_VALUE_WEI`,
+`FUNDS_IN_CONTRACT`, and the concrete `BTC_MAX_TOTAL_SATS` value (only the
+on/off boolean is attested).
 Follow-up work; no tracking issue yet. The plain-BTC *destination* rule needs no
 commitment: it is not configuration but a property the enclave derives from its
 own keys.
@@ -211,11 +212,12 @@ enclave establishes validity and finality itself, fail-closed
 - a **successful receipt** must exist for `evm_tx_hash`, at depth >=
   `EVM_MIN_CONFIRMATIONS` (pinned config, default 12);
 - it must carry a **unique** deposit event from the pinned
-  `FUNDS_IN_CONTRACT` (falls back to `BRIDGE_CONTRACT`; #152). `BridgeFundsIn`
+  `FUNDS_IN_CONTRACT` (falls back to `EVM_PROXY_CONTRACT_ADDRESS`; #152). `BridgeFundsIn`
   is preferred; a same-tx `FundsIn` + `BridgeFundsIn` pair counts as one
   deposit (#150);
-- the event MUST bind the on-chain `operationId` to the request's
-  `funds_in_operation_id` -- not the hub's `operation_idx` (#153). A
+- the event MUST bind the on-chain `operationId` (the full 32-byte word) to the
+  request's 32-byte `funds_in_operation_id` -- not the hub's `operation_idx`
+  (#153, #24). A
   `BridgeFundsIn` event additionally binds gross amount and commission
   (`net == gross - commission`); the plain `FundsIn` fallback binds only
   `operationId` and the net amount, leaving the commission split
@@ -271,9 +273,20 @@ The enclave no longer signs an opaque digest. The request MUST carry the
 unsigned transaction preimage; the enclave strictly RLP-decodes it (EIP-1559 or
 legacy EIP-155), requires `chain_id` == pinned `EVM_CHAIN_ID`, `to` == pinned
 `GAS_TX_ALLOWED_TO` (fail-closed when unset), `value == 0`, no contract
-creation -- and computes the digest itself. Deliberate follow-ups: no fee/gas
-caps yet, calldata to the pinned destination is not inspected (so the pin
-should be an EOA), and the `to` pin is not yet attested.
+creation -- and computes the digest itself.
+
+One carve-out to `value == 0`: the payable `lzFundsOutCall`, which forwards
+native value as the LayerZero messaging fee. Admitted only when all three hold
+-- the on-chain `lzFundsOutCall` selector, `to` == pinned `BRIDGE_CONTRACT`
+(the proxy itself, not merely `GAS_TX_ALLOWED_TO`, which may be an EOA), and
+`value` <= pinned `GAS_TX_MAX_VALUE_WEI`. That ceiling is fail-closed when
+unset, so a deployment not using the path keeps the strict posture.
+
+Deliberate follow-ups: no fee/gas caps yet; calldata is not inspected beyond
+that selector prefix (so the pin should be an EOA unless the LayerZero path is
+in use); the `to` pin is not yet attested; and the fee is not a field of the
+`TeeLzFundsOut` payload, so nothing binds a fee to its release -- the ceiling
+bounds the blast radius until a contract change adds that binding.
 
 ### 7.5 Raw message (`SignRawMessage`)
 

@@ -1,7 +1,8 @@
 //! Enclave-side bridge configuration pinned at boot.
 //!
-//! The chain, bridge contract, and RGB asset the enclave is willing to sign
-//! for are loaded once from the environment at startup and then folded into
+//! The chain, MultisigProxy contract (`EVM_PROXY_CONTRACT_ADDRESS`), and RGB
+//! asset the enclave is willing to sign for are loaded once from the
+//! environment at startup and then folded into
 //! the attestation `user_data` commitment (see `canonical_pubkey_bundle` in
 //! `server.rs`). Two consequences:
 //!
@@ -42,13 +43,23 @@ pub const DEFAULT_MAX_TOTAL_PROOF_BYTES: usize = 128 * 1024;
 #[derive(Debug, Clone)]
 pub struct BridgeConfig {
     pub chain_id: u64,
+    /// MultisigProxy contract pinned for the EVM signing cross-check (env
+    /// `EVM_PROXY_CONTRACT_ADDRESS`) — the EIP-712 `verifyingContract` the
+    /// listener stamps into every funds-out request. NOTE: this is the
+    /// MultisigProxy, NOT the bridge *entry* contract that emits `FundsIn`
+    /// (that one is `funds_in_contract`). The struct/proto field keeps the
+    /// legacy name `bridge_contract` for wire/attestation-bundle stability.
     pub bridge_contract: [u8; 20],
     pub rgb_asset_id: String,
     /// Operator-pinned allowed destination for **gas-key** transactions
     /// (`GAS_TX_ALLOWED_TO`). When set, `SignRawDigest` only signs a gas tx
-    /// whose `to` equals this address (and whose `value` is 0) — audit
-    /// TEE-XC-09 / C-02. `None` = unset, which fails gas-tx signing closed in
-    /// release builds.
+    /// whose `to` equals this address — audit TEE-XC-09 / C-02. `None` =
+    /// unset, which fails gas-tx signing closed in release builds.
+    ///
+    /// A gas tx must carry `value == 0`, except for the payable
+    /// `lzFundsOutCall` — which also requires this pin to equal
+    /// [`Self::bridge_contract`] and the value to fit under
+    /// [`Self::gas_tx_max_value_wei`]. See `networks::evm::gas_tx`.
     ///
     /// The destination is expected to be the bridge / an operational contract
     /// the gas EOA calls. Safety no longer rests on that destination being a
@@ -84,10 +95,16 @@ pub struct BridgeConfig {
     /// calldata is inert" assumption with an in-enclave, attested control
     /// (audit C-02).
     pub gas_tx_allowed_selectors: Vec<[u8; 4]>,
-    /// Operator-pinned cap (sats) on the **total** output value of a plain-BTC
-    /// PSBT (`BTC_MAX_TOTAL_SATS`). `0` = unset; a production build refuses
-    /// plain-BTC signing when unset. Bounds the blast radius of the plain-BTC
-    /// path independently of the destination allowlist.
+    /// Operator-pinned ceiling (wei) on the **native value** a single gas tx
+    /// may carry (`GAS_TX_MAX_VALUE_WEI`). `None` = unset, which refuses any
+    /// non-zero value — so a deployment not using the LayerZero release path
+    /// keeps the old `value == 0` posture with no new configuration.
+    ///
+    /// The fee is not a field of the `TeeLzFundsOut` payload the proxy
+    /// verifies, so nothing binds it to the release it pays for; this ceiling
+    /// bounds the blast radius until that exists. Same fail-closed shape as
+    /// [`Self::btc_max_total_sats`].
+    pub gas_tx_max_value_wei: Option<u128>,
     /// Operator-pinned cap (sats) on the **total input value spent** by a
     /// plain-BTC PSBT (`BTC_MAX_TOTAL_SATS`). `0` = unset; a production build
     /// refuses plain-BTC signing when unset. Bounds the blast radius of the
@@ -109,9 +126,11 @@ pub struct BridgeConfig {
     /// Address expected to emit `FundsIn`/`BridgeFundsIn` (env
     /// `FUNDS_IN_CONTRACT`). Falls back to `bridge_contract` when unset, so
     /// single-contract deployments are unaffected. Needed where the deposit
-    /// event is emitted by the bridge *entry* contract while `BRIDGE_CONTRACT`
-    /// pins the MultisigProxy for the EVM signing cross-check — one pin cannot
-    /// serve both lookups.
+    /// event is emitted by the bridge *entry* contract while
+    /// `EVM_PROXY_CONTRACT_ADDRESS` pins the MultisigProxy for the EVM signing
+    /// cross-check — one pin cannot serve both lookups. On this deployment the
+    /// two contracts DIFFER, so `FUNDS_IN_CONTRACT` MUST be set explicitly
+    /// (leaving it unset would fold the proxy address into the FundsIn lookup).
     pub funds_in_contract: [u8; 20],
     /// Aggregate request-size caps for the RGB signing path, operator-tunable
     /// via env (`MAX_CONSIGNMENT_BYTES` / `MAX_MERKLE_PROOFS` /
@@ -133,6 +152,7 @@ impl Default for BridgeConfig {
             gas_tx_max_gas_limit: 0,
             gas_tx_max_fee_per_gas: 0,
             gas_tx_allowed_selectors: Vec::new(),
+            gas_tx_max_value_wei: None,
             btc_max_total_sats: 0,
             funds_in_contract: [0u8; 20],
             max_consignment_bytes: DEFAULT_MAX_CONSIGNMENT_BYTES,
@@ -143,9 +163,9 @@ impl Default for BridgeConfig {
 }
 
 impl BridgeConfig {
-    /// Load from `EVM_CHAIN_ID` (decimal), `BRIDGE_CONTRACT` (0x-prefixed or
-    /// bare 40-hex), `RGB_ASSET_ID` (string). Any missing/invalid field
-    /// degrades to its zero/empty value; `is_configured()` reports whether
+    /// Load from `EVM_CHAIN_ID` (decimal), `EVM_PROXY_CONTRACT_ADDRESS`
+    /// (0x-prefixed or bare 40-hex), `RGB_ASSET_ID` (string). Any missing/invalid
+    /// field degrades to its zero/empty value; `is_configured()` reports whether
     /// the operator supplied anything at all.
     pub fn from_env() -> Self {
         let chain_id = std::env::var("EVM_CHAIN_ID")
@@ -153,7 +173,7 @@ impl BridgeConfig {
             .and_then(|s| s.parse::<u64>().ok())
             .unwrap_or(0);
 
-        let bridge_contract = std::env::var("BRIDGE_CONTRACT")
+        let bridge_contract = std::env::var("EVM_PROXY_CONTRACT_ADDRESS")
             .ok()
             .and_then(|s| parse_eth_address(&s).ok())
             .unwrap_or([0u8; 20]);
@@ -209,6 +229,11 @@ impl BridgeConfig {
             })
             .unwrap_or_default();
 
+        // Unset or unparseable stays `None`: a typo must not widen the ceiling.
+        let gas_tx_max_value_wei = std::env::var("GAS_TX_MAX_VALUE_WEI")
+            .ok()
+            .and_then(|s| s.trim().parse::<u128>().ok());
+
         let btc_max_total_sats = std::env::var("BTC_MAX_TOTAL_SATS")
             .ok()
             .and_then(|s| s.parse::<u64>().ok())
@@ -257,6 +282,7 @@ impl BridgeConfig {
             gas_tx_max_gas_limit,
             gas_tx_max_fee_per_gas,
             gas_tx_allowed_selectors,
+            gas_tx_max_value_wei,
             btc_max_total_sats,
             funds_in_contract,
             max_consignment_bytes,
@@ -287,8 +313,8 @@ impl BridgeConfig {
     }
 
     /// True when the operator set **some but not all** pin fields. This is a
-    /// botched production config (e.g. `EVM_CHAIN_ID` set but `BRIDGE_CONTRACT`
-    /// left at the zero address), distinct from a fully-empty config that
+    /// botched production config (e.g. `EVM_CHAIN_ID` set but
+    /// `EVM_PROXY_CONTRACT_ADDRESS` left at the zero address), distinct from a fully-empty config that
     /// intentionally selects the legacy dev path. Callers fail closed on this
     /// rather than silently falling back to listener-trusting mode
     /// (audit 4th M-03 / #94).
@@ -314,14 +340,16 @@ impl BridgeConfig {
     }
 }
 
-/// Parse `0xABCD…` (40 hex chars) or bare 40-hex into 20 bytes.
+/// Parse `0xABCD…` (40 hex chars) or bare 40-hex into 20 bytes. Shared by the
+/// `EVM_PROXY_CONTRACT_ADDRESS`, `GAS_TX_ALLOWED_TO`, and `FUNDS_IN_CONTRACT`
+/// address pins, so the error text is address-agnostic.
 fn parse_eth_address(s: &str) -> Result<[u8; 20]> {
     let stripped = s.strip_prefix("0x").unwrap_or(s);
     let bytes = hex::decode(stripped)
-        .map_err(|e| EnclaveError::InvalidRequest(format!("BRIDGE_CONTRACT not hex: {e}")))?;
+        .map_err(|e| EnclaveError::InvalidRequest(format!("eth address not hex: {e}")))?;
     bytes.try_into().map_err(|v: Vec<u8>| {
         EnclaveError::InvalidRequest(format!(
-            "BRIDGE_CONTRACT must decode to 20 bytes, got {}",
+            "eth address must decode to 20 bytes, got {}",
             v.len()
         ))
     })
@@ -570,6 +598,13 @@ mod tests {
         };
         assert!(!c.is_configured());
         assert!(c.is_partially_configured());
+    }
+
+    /// Must default to the fail-closed `None` so an existing deployment keeps
+    /// the old `value == 0` posture.
+    #[test]
+    fn gas_tx_value_ceiling_defaults_to_unset() {
+        assert_eq!(BridgeConfig::default().gas_tx_max_value_wei, None);
     }
 
     #[test]

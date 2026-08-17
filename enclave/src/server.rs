@@ -3,7 +3,8 @@ use std::io::{Read, Write};
 use crate::config::BridgeConfig;
 use crate::error::{EnclaveError, Result};
 use crate::framing;
-use crate::networks::evm::signing::{build_evm_domain, sign_request_digest};
+use crate::networks::evm::signing::{build_evm_domain, funds_out_digest, lz_funds_out_digest};
+use crate::networks::evm::validation::LZ_FUNDS_OUT_SELECTOR;
 use crate::networks::{
     validate_destination, validate_route_proofs, validate_source, ValidationContext,
 };
@@ -276,7 +277,7 @@ fn handle_sign(ctx: &ServerContext, req: SignRequest) -> Result<EnclaveResponse>
         source_ref,
         destination_ref,
         &source_validated.proof,
-        &destination_proof,
+        &destination_proof.proof,
     )?;
 
     // Independent EVM `FundsIn` verification (audit M-06 / #60, #51). In
@@ -300,6 +301,9 @@ fn handle_sign(ctx: &ServerContext, req: SignRequest) -> Result<EnclaveResponse>
                 source.tx_hash.len()
             ))
         })?;
+        // `funds_in_operation_id` is the on-chain BridgeFundsIn operationId as
+        // the full 32-byte word. It is required; `verify_funds_in_event` fails
+        // closed on an empty/short value.
         let client = ctx.evm_rpc_client.as_ref().ok_or_else(|| {
             EnclaveError::CrossCheck(
                 "evm-rpc build but RPC client unavailable - refusing to sign a bridge PSBT \
@@ -307,21 +311,17 @@ fn handle_sign(ctx: &ServerContext, req: SignRequest) -> Result<EnclaveResponse>
                     .into(),
             )
         })?;
-        // Bind the #60 FundsIn check to the on-chain BridgeFundsIn.operationId
-        // carried in the EVM source (the bridge transfer id), NOT to
-        // destination.operation_idx. The latter is the RGB hub's own operation
-        // index — a different id-space — and only coincides with the on-chain
-        // operationId by accident; comparing against it produced spurious
-        // "operationId mismatch: on-chain N != request M" refusals. operation_idx
-        // remains the replay-guard key below.
+        // Binds to the source's BridgeFundsIn.operationId, NOT to
+        // destination.operation_idx — the RGB hub's index is a different id-space
+        // and matching against it produced spurious mismatch refusals.
         crate::networks::evm::evm_event::verify_funds_in_event(
             &**client,
             // FundsIn is emitted by the bridge entry contract, which may differ
-            // from the MultisigProxy pinned in BRIDGE_CONTRACT (see config.rs).
+            // from the MultisigProxy pinned in EVM_PROXY_CONTRACT_ADDRESS (see config.rs).
             &ctx.bridge_config.funds_in_contract,
             ctx.evm_rpc_config.min_confirmations,
             &tx_hash,
-            source.funds_in_operation_id,
+            &source.funds_in_operation_id,
             req.amount,
             source.commission,
         )?;
@@ -356,44 +356,51 @@ fn handle_sign(ctx: &ServerContext, req: SignRequest) -> Result<EnclaveResponse>
     }
 
     // Soft operation-uniqueness guard (audit W-02 / #84). In EVM -> RGB
-    // bridge mode, record the source/destination operation tuple and reject a
-    // same-op resubmission inside the TTL window. This is defense-in-depth
-    // only: the guard is in-memory, per-instance, and volatile across restart.
+    // bridge mode, reject a same-op resubmission inside the TTL window. This is
+    // defense-in-depth only: the guard is in-memory, per-instance, and volatile
+    // across restart. RESERVE the key before signing (so a concurrent duplicate
+    // is still rejected up front) and commit it only after signing succeeds; a
+    // signing failure drops the reservation and rolls the key back, so a
+    // transient error does not self-block a legitimate retry (audit M-02).
     #[cfg(not(feature = "dev-mode"))]
-    if let (SourceNetwork::EvmSource(source), DestinationNetwork::RgbDestination(destination)) =
-        (source_ref, destination_ref)
+    let _op_reservation = if let (
+        SourceNetwork::EvmSource(source),
+        DestinationNetwork::RgbDestination(destination),
+    ) = (source_ref, destination_ref)
     {
         let op_key = crate::networks::rgb::psbt_validation::psbt_operation_key(
             ctx.bridge_config.chain_id,
             &ctx.bridge_config.bridge_contract,
             &source.tx_hash,
-            destination.operation_idx,
+            &source.funds_in_operation_id,
             &destination.asset_id,
         );
-        match ctx.state.op_replay_guard.check_and_record(op_key) {
-            Ok(()) => {}
+        match ctx.state.op_replay_guard.reserve(op_key) {
+            Ok(reservation) => Some(reservation),
             Err(EnclaveError::NonceReplay) => {
                 tracing::warn!(
-                    operation_idx = destination.operation_idx,
+                    funds_in_operation_id = %hex::encode(&source.funds_in_operation_id),
                     evm_tx_hash = %hex::encode(&source.tx_hash),
                     "rejecting duplicate bridge PSBT operation (soft replay guard, #84)"
                 );
                 return Err(EnclaveError::CrossCheck(
                     "duplicate bridge operation: this (chain, contract, evm_tx_hash, \
-                     operation_idx, rgb_asset_id) was already signed recently — refusing to \
-                     sign a replay (soft in-memory guard; durable guard is on-chain)"
+                     funds_in_operation_id, rgb_asset_id) was already signed recently — refusing \
+                     to sign a replay (soft in-memory guard; durable guard is on-chain)"
                         .into(),
                 ));
             }
             Err(e) => return Err(e),
         }
-    }
+    } else {
+        None
+    };
 
     let destination = req.destination_network.ok_or_else(|| {
         EnclaveError::InvalidRequest("sign request has no destination_network".into())
     })?;
 
-    match destination {
+    let result = match destination {
         DestinationNetwork::EvmDestination(destination) => {
             // RGB->EVM `fundsOut` binding: with the consignment the source
             // validation captured, bind the calldata the enclave is about to
@@ -415,14 +422,26 @@ fn handle_sign(ctx: &ServerContext, req: SignRequest) -> Result<EnclaveResponse>
             if matches!(source_ref, SourceNetwork::RgbSource(_)) {
                 apply_funds_out_binding(
                     ctx,
-                    &destination,
+                    destination_proof.evm_funds_out.as_ref(),
                     source_validated.rgb_consignment.as_ref(),
                 )?;
             }
-            handle_sign_evm(ctx, destination)
+            handle_sign_evm(ctx, destination, destination_proof.evm_funds_out.as_ref())
         }
         DestinationNetwork::RgbDestination(destination) => handle_sign_psbt(ctx, destination),
+    };
+
+    // Commit the soft-guard reservation only once signing has succeeded. On
+    // error `_op_reservation` drops here un-committed and rolls the key back, so
+    // a transient signing failure does not consume it (audit M-02).
+    #[cfg(not(feature = "dev-mode"))]
+    if result.is_ok() {
+        if let Some(reservation) = _op_reservation {
+            reservation.commit();
+        }
     }
+
+    result
 }
 
 /// Bind an RGB->EVM `fundsOut` calldata to the validated consignment before the
@@ -432,21 +451,20 @@ fn handle_sign(ctx: &ServerContext, req: SignRequest) -> Result<EnclaveResponse>
 #[cfg(feature = "rgb-validation")]
 fn apply_funds_out_binding(
     ctx: &ServerContext,
-    destination: &EvmDestination,
+    params: Option<&crate::networks::evm::validation::FundsOutParams>,
     validated: Option<&crate::networks::rgb::validation::ValidatedConsignment>,
 ) -> Result<()> {
     use crate::networks::evm::crosscheck;
-    use crate::networks::evm::validation::FUNDS_OUT_SELECTOR_POOLS;
 
     if cfg!(all(feature = "dev-mode", not(test))) {
         return Ok(());
     }
 
-    // Only the `fundsOut` release flow is bound to a consignment; leave any
-    // other calldata untouched.
-    if destination.call_data.len() < 4 || destination.call_data[..4] != FUNDS_OUT_SELECTOR_POOLS {
+    // `Some` exactly when destination validation decoded a `fundsOut` calldata,
+    // so the type replaces the old selector check (I-12 / #165).
+    let Some(params) = params else {
         return Ok(());
-    }
+    };
 
     // A `fundsOut` release requires the RGB source's validated consignment
     // (source == RgbSource, rgb_validator configured, consignment present).
@@ -472,13 +490,13 @@ fn apply_funds_out_binding(
             .header_chain
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        crosscheck::verify_btc_relay_agreement(&destination.call_data, &chain)?;
+        crosscheck::verify_btc_relay_agreement(params, &chain)?;
     }
     #[cfg(not(feature = "spv"))]
     let _ = ctx;
 
     // Consignment-bound release amount (transfer flow).
-    crosscheck::validate_funds_out_transfer(&destination.call_data, validated)?;
+    crosscheck::validate_funds_out_transfer(params, validated)?;
 
     // Current rollout is swap/send-receive only. Preserve the backend-provided
     // general bridge burnId and settlement fundsInIds; the EVM connector has
@@ -530,6 +548,14 @@ fn handle_initialize(ctx: &ServerContext, req: InitializeKeyRequest) -> Result<E
                 "seed import not allowed without allow-seed-import feature".into(),
             ));
         }
+    }
+
+    // Donor-side cloning secret, delivered at runtime via the init message
+    // (never baked into the EIF, so it stays out of the PCRs). Only required
+    // for enclaves that will serve `GetClone`. Idempotent; empty = disabled.
+    if !req.cloning_secret.is_empty() {
+        state.set_donor_cloning_secret(req.cloning_secret)?;
+        tracing::info!("donor cloning secret configured from init request");
     }
 
     let keys = state.get_keys()?;
@@ -688,13 +714,52 @@ fn handle_get_attested_public_key(
     })
 }
 
-fn handle_sign_evm(ctx: &ServerContext, req: EvmDestination) -> Result<EnclaveResponse> {
+/// `params` comes from destination validation, so the digest commits to exactly
+/// the fields cross-checked there (I-12 / #165). `None` in dev-mode, which skips
+/// validation and therefore decodes here, and on the LayerZero route, whose
+/// param shape is not `FundsOutParams` — `lz_funds_out_digest` decodes its own.
+fn handle_sign_evm(
+    ctx: &ServerContext,
+    req: EvmDestination,
+    params: Option<&crate::networks::evm::validation::FundsOutParams>,
+) -> Result<EnclaveResponse> {
     // Domain name/version are pinned to the deployed MultisigProxy and
     // regression-guarded by `test_domain_separator_matches_deployed_contract`.
     let domain = build_evm_domain(&req)?;
 
     let domain_sep = domain.separator_hash();
-    let digest = sign_request_digest(&domain, &req.call_data, req.nonce, req.deadline)?;
+
+    // Route to the appropriate EIP-712 digest based on selector and lz_release.
+    // lzFundsOutCall carries LZ-specific fields the digest commits to; the
+    // proto field is the authority — the selector in calldata is a consistency
+    // check only (crosschecked inside lz_funds_out_digest).
+    let is_lz = req.call_data.len() >= 4
+        && req.call_data[..4] == LZ_FUNDS_OUT_SELECTOR
+        && req.lz_release.is_some();
+
+    let digest = if is_lz {
+        lz_funds_out_digest(
+            &domain,
+            &req.call_data,
+            req.lz_release.as_ref().expect("checked above"),
+            req.nonce,
+            req.deadline,
+        )?
+    } else {
+        // `params` is `Some` on the pools route whenever validation ran, so the
+        // digest commits to exactly the fields cross-checked there. Dev-mode
+        // skips validation and therefore decodes here.
+        let decoded_here;
+        let params = match params {
+            Some(params) => params,
+            None => {
+                decoded_here =
+                    crate::networks::evm::validation::decode_funds_out_params(&req.call_data)?;
+                &decoded_here
+            }
+        };
+        funds_out_digest(&domain, params, req.nonce, req.deadline)?
+    };
 
     tracing::info!(
         domain_name = %domain.name,
@@ -719,10 +784,7 @@ fn handle_sign_evm(ctx: &ServerContext, req: EvmDestination) -> Result<EnclaveRe
     Ok(EnclaveResponse {
         response: Some(Response::EvmSignature(EvmSignatureResponse {
             signature: signature.to_vec(),
-            // Non-fundsOut / non-rgb-validation paths sign the calldata as
-            // received. The RGB->EVM fundsOut path rewrites the OpId-bound
-            // fields before this point and returns the rewritten bytes here
-            // (audit M-02 / #93, #63) — see `handle_sign`.
+            // Echoed unchanged; nothing rewrites the calldata since #168.
             call_data: req.call_data.clone(),
         })),
     })
@@ -909,7 +971,7 @@ fn handle_sign_ccd(state: &EnclaveState, req: SignCcdRequest) -> Result<EnclaveR
     }
 
     let hash: [u8; 32] = req.hash.as_slice().try_into().unwrap();
-    let signature = state.sign_ccd(&hash)?;
+    let (signature, public_key) = state.sign_ccd(&hash)?;
 
     tracing::info!(
         hash_hex = %hex::encode(hash),
@@ -919,6 +981,10 @@ fn handle_sign_ccd(state: &EnclaveState, req: SignCcdRequest) -> Result<EnclaveR
     Ok(EnclaveResponse {
         response: Some(Response::CcdSignature(CcdSignatureResponse {
             signature: signature.to_vec(),
+            // Ed25519 signatures are not recoverable, so the consumer needs the key
+            // to find this signature's index on the governance account. Taken from
+            // the same call that signed, so the two cannot disagree.
+            public_key: public_key.to_vec(),
         })),
     })
 }
