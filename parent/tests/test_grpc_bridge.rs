@@ -56,6 +56,7 @@ fn start_mock_enclave() -> u16 {
                             rgb_asset_id: String::new(),
                             evm_gas_tx_uncompressed_pub: vec![0xFF; 64],
                             evm_gas_tx_address: vec![0xFA; 20],
+                            ccd_ed25519_pub: vec![0x99; 32],
                         },
                     )),
                 },
@@ -117,6 +118,7 @@ fn start_mock_enclave() -> u16 {
                             rgb_asset_id: String::new(),
                             evm_gas_tx_uncompressed_pub: vec![0xFF; 64],
                             evm_gas_tx_address: vec![0xFA; 20],
+                            ccd_ed25519_pub: vec![0x99; 32],
                         },
                     )),
                 },
@@ -153,10 +155,11 @@ fn start_mock_enclave() -> u16 {
                         rgb_asset_id: String::new(),
                         evm_gas_tx_uncompressed_pub: vec![0xFF; 64],
                         evm_gas_tx_address: vec![0xCC; 20],
+                        ccd_ed25519_pub: vec![0x99; 32],
                     };
                     let mut bundle: Vec<u8> = Vec::new();
                     let chain_id_bytes = public_keys.chain_id.to_be_bytes();
-                    let parts: [&[u8]; 12] = [
+                    let parts: [&[u8]; 13] = [
                         &public_keys.evm_address,
                         &public_keys.btc_compressed_pub,
                         public_keys.btc_xpub.as_bytes(),
@@ -169,6 +172,7 @@ fn start_mock_enclave() -> u16 {
                         public_keys.rgb_asset_id.as_bytes(),
                         &public_keys.evm_gas_tx_uncompressed_pub,
                         &public_keys.evm_gas_tx_address,
+                        &public_keys.ccd_ed25519_pub,
                     ];
                     for p in parts {
                         bundle.extend_from_slice(&(p.len() as u32).to_be_bytes());
@@ -300,7 +304,7 @@ fn evm_source(amount: u64, commission: u64) -> SourceProof {
         finalized: true,
         chain: Some(source_proof::Chain::Evm(EvmSource {
             tx_hash: vec![0xAA; 32],
-            funds_in_operation_id: 0,
+            funds_in_operation_id: vec![0x33; 32],
         })),
     }
 }
@@ -378,6 +382,57 @@ async fn grpc_public_key_transaction_type() {
 }
 
 #[tokio::test]
+async fn grpc_public_key_ccd_governance() {
+    // The governance pubkey must be reachable over plain PublicKey, with no
+    // attestation involved — AttestedPublicKey needs an NSM device, which the
+    // dev deployment (plain container, no /dev/nsm) does not have.
+    let enclave_port = start_mock_enclave();
+    let grpc_port = start_grpc_server(enclave_port).await;
+
+    let mut client = ParentServiceClient::connect(format!("http://127.0.0.1:{grpc_port}"))
+        .await
+        .unwrap();
+
+    let resp = client
+        .public_key(PublicKeyRequest {
+            network_id: 0,
+            data_type: DataType::CcdGovernance as i32,
+        })
+        .await
+        .unwrap()
+        .into_inner();
+
+    assert_eq!(
+        resp.public_key.len(),
+        32,
+        "CCD_GOVERNANCE returns a 32-byte Ed25519 pubkey"
+    );
+    assert_eq!(resp.public_key, vec![0x99; 32]);
+}
+
+#[tokio::test]
+async fn grpc_public_key_rejects_unsupported_data_type() {
+    // Guard against the CCD_GOVERNANCE arm turning the match into a catch-all:
+    // data types with no pubkey of their own must still be rejected.
+    let enclave_port = start_mock_enclave();
+    let grpc_port = start_grpc_server(enclave_port).await;
+
+    let mut client = ParentServiceClient::connect(format!("http://127.0.0.1:{grpc_port}"))
+        .await
+        .unwrap();
+
+    let err = client
+        .public_key(PublicKeyRequest {
+            network_id: 0,
+            data_type: DataType::Swap as i32,
+        })
+        .await
+        .unwrap_err();
+
+    assert_eq!(err.code(), tonic::Code::InvalidArgument);
+}
+
+#[tokio::test]
 async fn grpc_sign_evm_roundtrip() {
     let enclave_port = start_mock_enclave();
     let grpc_port = start_grpc_server(enclave_port).await;
@@ -395,6 +450,7 @@ async fn grpc_sign_evm_roundtrip() {
         calldata_amount: 0,
         calldata_commission: 0,
         unsigned_tx: Vec::new(),
+        lz_release: None,
     };
 
     let req = sign_evm_request(rgb_source(0, 0, vec![], vec![], String::new()), payload);
@@ -429,6 +485,7 @@ async fn grpc_sign_evm_gas_tx_forwards_unsigned_tx() {
         calldata_amount: 0,
         calldata_commission: 0,
         unsigned_tx: vec![0x02; 10],
+        lz_release: None,
     };
     let req = SignRequest {
         common: Some(common(0, 84, DataType::EvmGasTx)),
@@ -570,6 +627,7 @@ async fn grpc_evm_passes_enriched_fields_through() {
         calldata_amount: 50,
         calldata_commission: 5,
         unsigned_tx: Vec::new(),
+        lz_release: None,
     };
 
     let req = sign_evm_request(
@@ -658,6 +716,7 @@ async fn grpc_evm_forwards_raw_consignment_bytes() {
         calldata_amount: 0,
         calldata_commission: 0,
         unsigned_tx: Vec::new(),
+        lz_release: None,
     };
 
     let req = sign_evm_request(
@@ -832,7 +891,7 @@ async fn grpc_attested_public_key_roundtrip_and_verify() {
     use sha2::Digest;
     let mut bundle: Vec<u8> = Vec::new();
     let chain_id_bytes = resp.chain_id.to_be_bytes();
-    let parts: [&[u8]; 12] = [
+    let parts: [&[u8]; 13] = [
         &resp.evm_address,
         &resp.btc_compressed_pub,
         resp.btc_xpub.as_bytes(),
@@ -845,6 +904,7 @@ async fn grpc_attested_public_key_roundtrip_and_verify() {
         resp.rgb_asset_id.as_bytes(),
         &resp.evm_gas_tx_uncompressed_pub,
         &resp.evm_gas_tx_address,
+        &resp.ccd_ed25519_pub,
     ];
     for p in parts {
         bundle.extend_from_slice(&(p.len() as u32).to_be_bytes());

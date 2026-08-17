@@ -1,4 +1,5 @@
 pub mod btc_crosscheck;
+pub mod btc_ownership;
 pub mod psbt_validation;
 pub mod signing;
 pub mod spv;
@@ -149,6 +150,16 @@ pub fn validate_destination_anchor(
             "send-RGB PSBT signing requires a consignment to bind the PSBT to the RGB transition"
                 .into(),
         ));
+    }
+    // Aggregate size cap (operator-configurable via `MAX_CONSIGNMENT_BYTES`),
+    // before the keccak hash and the rgbstd parse below — the destination
+    // consignment is otherwise bounded only by the generic 4 MB wire frame.
+    if destination.consignment.len() > ctx.bridge_config.max_consignment_bytes {
+        return Err(EnclaveError::CrossCheck(format!(
+            "send-RGB consignment too large: {} bytes (max {})",
+            destination.consignment.len(),
+            ctx.bridge_config.max_consignment_bytes
+        )));
     }
     // Wire-tamper detection, mirroring the EVM path's defence-in-depth check.
     // INTEGRITY, NOT AUTHORIZATION (audit I-02 / Oxorio I-09): the listener

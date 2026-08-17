@@ -26,6 +26,7 @@ fn initialize(port: u16) {
             request: Some(Req::InitializeKey(InitializeKeyRequest {
                 seed: vec![],
                 mnemonic: TEST_MNEMONIC.into(),
+                cloning_secret: String::new(),
             })),
         },
     );
@@ -34,7 +35,7 @@ fn initialize(port: u16) {
 
 fn canonical_bundle(keys: &PublicKeysResponse) -> Vec<u8> {
     let chain_id_bytes = keys.chain_id.to_be_bytes();
-    let parts: [&[u8]; 12] = [
+    let parts: [&[u8]; 13] = [
         &keys.evm_address,
         &keys.btc_compressed_pub,
         keys.btc_xpub.as_bytes(),
@@ -47,6 +48,7 @@ fn canonical_bundle(keys: &PublicKeysResponse) -> Vec<u8> {
         keys.rgb_asset_id.as_bytes(),
         &keys.evm_gas_tx_uncompressed_pub,
         &keys.evm_gas_tx_address,
+        &keys.ccd_ed25519_pub,
     ];
     let mut out = Vec::new();
     for p in parts {
@@ -54,6 +56,16 @@ fn canonical_bundle(keys: &PublicKeysResponse) -> Vec<u8> {
         out.extend_from_slice(p);
     }
     out
+}
+
+/// The commitment the enclave actually produces: sha256(pubkey_bundle ||
+/// policy_commitment) (audit C-01). These tests run in a debug build with
+/// `mock-attestation`, so the enclave resolves to the `Development` policy;
+/// mirror that here so the parity check matches byte-for-byte.
+fn expected_user_data(keys: &PublicKeysResponse) -> [u8; 32] {
+    let mut preimage = canonical_bundle(keys);
+    preimage.extend_from_slice(&attestation_verify::AttestedPolicy::Development.to_bytes());
+    Sha256::digest(preimage).into()
 }
 
 fn request_attested(port: u16, nonce: &[u8]) -> GetAttestedPublicKeyResponse {
@@ -92,12 +104,12 @@ fn attested_pubkey_happy_path_binds_evm_pubkey_and_commitment() {
     // The NSM `public_key` field MUST be the bridge's EVM uncompressed pubkey.
     assert_eq!(verified.enclave_pubkey, public_keys.evm_uncompressed_pub);
 
-    // The NSM `user_data` field MUST be sha256 of the canonical bundle.
-    let expected_commitment: [u8; 32] = Sha256::digest(canonical_bundle(&public_keys)).into();
+    // The NSM `user_data` field MUST be sha256(canonical_bundle || policy).
+    let expected_commitment = expected_user_data(&public_keys);
     assert_eq!(
         verified.user_data.as_deref(),
         Some(expected_commitment.as_slice()),
-        "user_data must be sha256(canonical_bundle)"
+        "user_data must be sha256(canonical_bundle || policy_commitment)"
     );
 
     // Nonce echoed.
@@ -233,11 +245,11 @@ fn attested_bundle_verifies_unmodified_and_tampering_is_rejected() {
     )
     .expect("enclave-built bundle verifies without adaptation");
 
-    let good_commitment: [u8; 32] = Sha256::digest(canonical_bundle(&public_keys)).into();
+    let good_commitment = expected_user_data(&public_keys);
     assert_eq!(
         verified.user_data.as_deref(),
         Some(good_commitment.as_slice()),
-        "canonical-serialization parity: attested user_data == sha256(canonical_bundle)"
+        "canonical-serialization parity: attested user_data == sha256(canonical_bundle || policy)"
     );
 
     // (2) Tampered bundle rejected: flipping a single byte of any committed

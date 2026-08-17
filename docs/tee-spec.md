@@ -114,7 +114,7 @@ SecurityPolicy = Production {
 - **Resolution** (`policy.rs`): any dev feature (`dev-mode`,
   `mock-attestation`, `allow-seed-import`), a debug/test build, a non-bridge
   build, or a missing pin resolves to `Development`. Only a release
-  `rgb-validation` build with `EVM_CHAIN_ID`, `BRIDGE_CONTRACT`, and
+  `rgb-validation` build with `EVM_CHAIN_ID`, `EVM_PROXY_CONTRACT_ADDRESS`, and
   `RGB_ASSET_ID` all set resolves to `Production`.
 - **Boot gate:** a release `rgb-validation` build that does not resolve to a
   valid `Production` policy MUST refuse to boot (panic). Independently, each
@@ -131,9 +131,17 @@ SecurityPolicy = Production {
   raw RPC instead of Helios, a dev build) fails verification instead of being
   silently trusted.
 
-Not yet inside the commitment: `GAS_TX_ALLOWED_TO`, `FUNDS_IN_CONTRACT`, and
-the concrete `BTC_ALLOWED_SCRIPTS` / `BTC_MAX_TOTAL_SATS` values (only the
-on/off boolean is attested). Follow-up work; no tracking issue yet.
+Inside the commitment as of C-02: the whole gas-tx rule -- `GAS_TX_ALLOWED_TO`,
+`GAS_TX_MAX_GAS_LIMIT`, `GAS_TX_MAX_FEE_PER_GAS`, `GAS_TX_MAX_VALUE_WEI`, and
+`GAS_TX_ALLOWED_SELECTORS` -- so a verifier confirms the `SignRawDigest` policy
+instead of trusting the operator's configuration. An unset pin commits as its
+zero value, which is the posture it enforces, so "unpinned" is attested too.
+
+Not yet inside the commitment: `FUNDS_IN_CONTRACT`, and the concrete
+`BTC_MAX_TOTAL_SATS` value (only the on/off boolean is attested).
+Follow-up work; no tracking issue yet. The plain-BTC *destination* rule needs no
+commitment: it is not configuration but a property the enclave derives from its
+own keys.
 
 ## 5. Key management
 
@@ -146,7 +154,9 @@ on/off boolean is attested). Follow-up work; no tracking issue yet.
     `evm_address = keccak256(uncompressed_pub[1..])[12..]`.
   - EVM gas-tx key (outer tx signing, `SignRawDigest`): `m/44'/60'/0'/0/1`.
   - BTC SegWit v0 (legacy P2WSH): `m/84'/0'/0'/0/0`.
-  - BIP-86 taproot: vanilla `m/86'/<coin>'/0'`, colored (RGB) `m/86'/827167'/0'`.
+  - BIP-86 taproot: vanilla `m/86'/<coin>'/0'` (0 mainnet, 1 otherwise), colored
+    (RGB) `m/86'/<rgb_coin>'/0'` (827166 mainnet, 827167 otherwise -- the split
+    `rgb-lib` uses, so the host's colored addresses resolve).
 - The **EVM address is the cluster identity**: a cloned enclave installs the
   same seed and signs as the same address; `complete_cloning` asserts the
   derived address equals the target cluster key before going `Active`.
@@ -207,11 +217,12 @@ enclave establishes validity and finality itself, fail-closed
 - a **successful receipt** must exist for `evm_tx_hash`, at depth >=
   `EVM_MIN_CONFIRMATIONS` (pinned config, default 12);
 - it must carry a **unique** deposit event from the pinned
-  `FUNDS_IN_CONTRACT` (falls back to `BRIDGE_CONTRACT`; #152). `BridgeFundsIn`
+  `FUNDS_IN_CONTRACT` (falls back to `EVM_PROXY_CONTRACT_ADDRESS`; #152). `BridgeFundsIn`
   is preferred; a same-tx `FundsIn` + `BridgeFundsIn` pair counts as one
   deposit (#150);
-- the event MUST bind the on-chain `operationId` to the request's
-  `funds_in_operation_id` -- not the hub's `operation_idx` (#153). A
+- the event MUST bind the on-chain `operationId` (the full 32-byte word) to the
+  request's 32-byte `funds_in_operation_id` -- not the hub's `operation_idx`
+  (#153, #24). A
   `BridgeFundsIn` event additionally binds gross amount and commission
   (`net == gross - commission`); the plain `FundsIn` fallback binds only
   `operationId` and the net amount, leaving the commission split
@@ -243,9 +254,23 @@ durable double-spend guard is on-chain.
 Vanilla (non-bridge) BTC signing is its own request and can no longer be
 reached by omitting bridge fields. It is gated by the attested policy
 (`allow_vanilla_psbt`, default **off**), and each request must satisfy the
-operator pins: every output script in `BTC_ALLOWED_SCRIPTS`, total input value
-<= `BTC_MAX_TOTAL_SATS`. Signing is scoped to the **vanilla** BIP-86 account
-only -- it can structurally never co-sign a colored (RGB-allocated) input.
+authorization rules: every output must pay back to a script the enclave proves
+it controls, and total input value <= `BTC_MAX_TOTAL_SATS`. Signing is scoped to
+the **vanilla** BIP-86 account only -- it can structurally never co-sign a
+colored (RGB-allocated) input.
+
+The destination rule is self-proving, not pinned. An output is accepted when it
+either repays an input the enclave co-signs (control-block anchored), or carries
+BIP-371 output metadata that reconstructs the exact on-chain `script_pubkey` from
+a key the enclave derives on either of its own BIP-86 accounts. Colored
+destinations count too: `create_utxo` funds RGB-allocation UTXOs out of vanilla
+inputs. The M-01 account scope is the **input** one above -- which UTXOs the
+enclave will spend -- and is unchanged. The previous
+`BTC_ALLOWED_SCRIPTS` allowlist was removed: the scripts to pin derive from a
+seed that only exists once the enclave has booted, and enclave env is measured
+into PCR0, so pinning them changed the very identity the seed was bound to. The
+path is therefore structurally self-pay; withdrawals to arbitrary user addresses
+were never expressible here and still are not.
 
 ### 7.4 Gas transaction (`SignRawDigest`, C-02 / #68)
 
@@ -253,9 +278,39 @@ The enclave no longer signs an opaque digest. The request MUST carry the
 unsigned transaction preimage; the enclave strictly RLP-decodes it (EIP-1559 or
 legacy EIP-155), requires `chain_id` == pinned `EVM_CHAIN_ID`, `to` == pinned
 `GAS_TX_ALLOWED_TO` (fail-closed when unset), `value == 0`, no contract
-creation -- and computes the digest itself. Deliberate follow-ups: no fee/gas
-caps yet, calldata to the pinned destination is not inspected (so the pin
-should be an EOA), and the `to` pin is not yet attested.
+creation -- and computes the digest itself.
+
+Two further bounds, each fail-closed when unset:
+
+- **Fee/gas ceilings.** `gasLimit` <= `GAS_TX_MAX_GAS_LIMIT`, and the per-gas
+  fee fields (`maxFeePerGas` / `maxPriorityFeePerGas`, or legacy `gasPrice`) <=
+  `GAS_TX_MAX_FEE_PER_GAS`. Together they bound the most ETH a *single* signed
+  gas tx can burn as fees.
+- **Calldata selector allowlist.** The calldata MUST lead with a 4-byte selector
+  in `GAS_TX_ALLOWED_SELECTORS`; empty calldata is refused, because a bare call
+  still invokes the destination's `fallback`/`receive`. This replaces the old
+  unverifiable "the pin is an EOA, so calldata is inert" assumption with an
+  in-enclave, attested control.
+
+One carve-out to `value == 0`: the payable `lzFundsOutCall`, which forwards
+native value as the LayerZero messaging fee. Admitted only when all three hold
+-- the on-chain `lzFundsOutCall` selector, `to` == pinned `BRIDGE_CONTRACT`
+(the proxy itself, not merely `GAS_TX_ALLOWED_TO`, which may be an EOA), and
+`value` <= pinned `GAS_TX_MAX_VALUE_WEI`. That ceiling is fail-closed when
+unset, so a deployment not using the path keeps the strict posture. The
+carve-out widens the *value* rule only: `lzFundsOutCall` must still appear in
+`GAS_TX_ALLOWED_SELECTORS` like any other call.
+
+The whole rule -- destination, both fee/gas ceilings, the value ceiling, and the
+selector allowlist -- is folded into the attested `SecurityPolicy` (Sec 4), so a
+verifier confirms the gas policy rather than trusting configuration.
+
+Deliberate follow-ups: the ceilings are per-transaction, not aggregate, so a
+compromised listener can still burn the gas EOA's balance over a long sequence
+of within-cap txs (bounded griefing -- fees go to the base fee / block builder,
+never to an attacker; rate limiting belongs out-of-enclave). And the fee is not
+a field of the `TeeLzFundsOut` payload, so nothing binds a fee to its release --
+the ceiling bounds the blast radius until a contract change adds that binding.
 
 ### 7.5 Raw message (`SignRawMessage`)
 
@@ -315,7 +370,11 @@ All thresholds are compile-time constants -- a host-tunable threshold would let
 an operator weaken the gate while attestation still passed.
 
 **Checkpoints:** mainnet block 951,552 (retarget-aligned, W-14) and UTEXO
-signet block 334,000 are real pinned checkpoints; regtest uses genesis.
+signet block 334,000 are real pinned checkpoints; regtest uses genesis. Local/dev
+builds (debug, `cfg(test)`, or `allow-seed-import`) may move the anchor forward
+at boot with `SPV_CHECKPOINT=height:block_hash[:bits:time]` to skip a long
+initial sync; a production-shaped build refuses to start if that variable is
+set, so the host can never choose the trust anchor.
 Testnet3 remains a placeholder -- a release build refuses to boot on any
 placeholder checkpoint. **Signet caveat:** the enclave does not validate PoW or
 nBits on signet, and the BIP-325 challenge signature is not verified (the wire
@@ -399,7 +458,7 @@ MUST refuse to sign (fail closed) if any fails.
 | **SI-13** | Bridge PSBT signing MUST independently verify the EVM deposit (receipt success, pinned contract, unique event, on-chain `operationId` + amount + commission binding, depth >= `EVM_MIN_CONFIRMATIONS`); listener flags MUST NOT authorize. OK (#51/#60, #150/#152/#153) |
 | **SI-14** | A release bridge build MUST refuse to boot unless it resolves to a valid `Production` security policy. OK (C-01)                                         |
 | **SI-15** | The full security posture MUST be verifiable as one attested value; a downgraded posture MUST fail pubkey verification. OK (C-01)                        |
-| **SI-16** | Plain-BTC signing MUST be off unless enabled in the attested policy, MUST respect the output allowlist and value cap, and MUST NOT touch colored keys. OK (#102) |
+| **SI-16** | Plain-BTC signing MUST be off unless enabled in the attested policy, MUST pay only to scripts the enclave proves it controls, MUST respect the value cap, and MUST NOT co-sign a colored (RGB-allocated) input. OK (#102) |
 | **SI-17** | A signing that produced zero input signatures MUST NOT be reported as success. OK (W-07 / #85)                                                            |
 
 ## 12. Failure conditions
@@ -450,9 +509,9 @@ mint-PSBT binding (#146) · swap op-id preservation (#168) · audit regression +
    old gas-tx digest and consignment-less request shapes -- migrate
    proto/listener/backend before deploying, otherwise availability (never
    safety) suffers.
-8. Smaller: attest `GAS_TX_ALLOWED_TO` / `FUNDS_IN_CONTRACT` / BTC pin values;
-   gas-tx fee caps; I-01 `SignRawMessage` decision; I-14 u64 amount ceiling;
-   I-16 reproducible-build determinism; testnet3 checkpoint.
+8. Smaller: attest `FUNDS_IN_CONTRACT` / BTC pin values; aggregate (not just
+   per-tx) gas-tx fee limiting; I-01 `SignRawMessage` decision; I-14 u64 amount
+   ceiling; I-16 reproducible-build determinism; testnet3 checkpoint.
 
 ---
 
