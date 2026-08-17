@@ -20,13 +20,24 @@
 # (kernel/init), NOT just our code. Pin nitro-cli to the SAME version that runs
 # on the target hosts (stage hosts are on 1.4.5) or PCRs will not match.
 #
+# Reproducible PCR0 (build side): the EIF packs the runtime-stage rootfs, so the
+# image build must be deterministic. We (1) pin both base images by digest in
+# Dockerfile.enclave, and (2) normalise layer timestamps via SOURCE_DATE_EPOCH +
+# BuildKit's `rewrite-timestamp` exporter (requires `docker buildx` with a
+# container/containerd builder — CI sets this up via docker/setup-buildx-action).
+# SOURCE_DATE_EPOCH defaults to the commit time (stable per git_sha); override by
+# exporting it. NOTE: OS package versions (apt/dnf) still float — pinning them is
+# the next determinism step.
+#
 # Usage:
 #   ./build/build-enclave.sh
 # Tunables (env):
 #   OUT_DIR                output directory for artifacts (default: build/)
 #   IMAGE_TAG              docker tag for the builder image (default: utexo-bridge-enclave:latest)
-#   UTEXO_CLONING_SECRET   stage-only: bake donor cloning secret (leave empty for prod)
 #   NITRO_CLI_BLOBS        override blobs dir for `nitro-cli build-enclave`
+# NOTE: the donor cloning secret is NOT baked into the EIF. It is delivered at
+# runtime via the InitializeKey message (CLI: `init --cloning-secret <secret>`),
+# keeping the build secret-free and the PCRs reproducible.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -49,12 +60,38 @@ mkdir -p "$OUT_DIR"
 
 # --- 1. Build the docker image (BuildKit + ssh-agent forwarding) ------------
 # The Dockerfile's `RUN --mount=type=ssh` consumes `--ssh default`.
-echo "Building Docker image (BuildKit, --ssh default)..."
-DOCKER_BUILDKIT=1 docker build \
+#
+# Deterministic timestamps: SOURCE_DATE_EPOCH (commit time, stable per git_sha)
+# + `rewrite-timestamp=true` make BuildKit normalise file mtimes in the exported
+# layers, so two builds of the same commit yield the same rootfs -> same PCR0.
+SOURCE_DATE_EPOCH="${SOURCE_DATE_EPOCH:-$(git -C "$PROJECT_ROOT" log -1 --format=%ct 2>/dev/null || echo 1700000000)}"
+export SOURCE_DATE_EPOCH
+
+# Private deps live in two separate github.com repos (federated-signer-proto over
+# SSH + rgb-consignment-parser for rgb-validation/spv). A single ssh-agent holding
+# two repo-scoped deploy keys offers the wrong one first ("Repository not found").
+# In CI we therefore ALSO hand both keys to BuildKit as secret files, and the
+# Dockerfile sets up per-host SSH aliases (see Dockerfile.enclave). Local builds
+# (no key files) fall back to `--ssh default` agent forwarding unchanged.
+FEDERATED_KEY_FILE="${FEDERATED_KEY_FILE:-/tmp/federated_key}"
+CONSIGNMENT_KEY_FILE="${CONSIGNMENT_KEY_FILE:-/tmp/consignment_key}"
+SECRET_ARGS=()
+if [ -f "$FEDERATED_KEY_FILE" ] && [ -f "$CONSIGNMENT_KEY_FILE" ]; then
+    SECRET_ARGS+=( --secret "id=federated_key,src=$FEDERATED_KEY_FILE" )
+    SECRET_ARGS+=( --secret "id=consignment_key,src=$CONSIGNMENT_KEY_FILE" )
+    echo "Using BuildKit secret keys (federated_key + consignment_key)."
+else
+    echo "No CI key files at $FEDERATED_KEY_FILE / $CONSIGNMENT_KEY_FILE; using ssh-agent (--ssh default) only."
+fi
+
+echo "Building Docker image (buildx, --ssh default, SOURCE_DATE_EPOCH=$SOURCE_DATE_EPOCH)..."
+DOCKER_BUILDKIT=1 docker buildx build \
     --ssh default \
-    --build-arg "UTEXO_CLONING_SECRET=${UTEXO_CLONING_SECRET:-}" \
+    "${SECRET_ARGS[@]}" \
+    --build-arg SOURCE_DATE_EPOCH="$SOURCE_DATE_EPOCH" \
     -f "$SCRIPT_DIR/Dockerfile.enclave" \
     -t "$IMAGE_TAG" \
+    --output "type=docker,rewrite-timestamp=true" \
     "$PROJECT_ROOT"
 
 # --- 2. Convert to EIF ------------------------------------------------------

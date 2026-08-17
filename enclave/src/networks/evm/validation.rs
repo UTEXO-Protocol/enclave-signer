@@ -153,7 +153,7 @@ pub fn validate_destination(
     #[cfg(all(feature = "rgb-validation", not(test)))]
     if !bridge_config.is_configured() {
         return Err(EnclaveError::CrossCheck(
-            "bridge config unconfigured: set EVM_CHAIN_ID / BRIDGE_CONTRACT / RGB_ASSET_ID \
+            "bridge config unconfigured: set EVM_CHAIN_ID / EVM_PROXY_CONTRACT_ADDRESS / RGB_ASSET_ID \
              — refusing to sign in listener-trusting mode"
                 .into(),
         ));
@@ -308,6 +308,7 @@ mod tests {
             proxy_contract: vec![0xAA; ADDRESS_LEN],
             calldata_amount: 1000,
             calldata_commission: 0,
+            lz_release: None,
         }
     }
 

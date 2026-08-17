@@ -114,7 +114,7 @@ SecurityPolicy = Production {
 - **Resolution** (`policy.rs`): any dev feature (`dev-mode`,
   `mock-attestation`, `allow-seed-import`), a debug/test build, a non-bridge
   build, or a missing pin resolves to `Development`. Only a release
-  `rgb-validation` build with `EVM_CHAIN_ID`, `BRIDGE_CONTRACT`, and
+  `rgb-validation` build with `EVM_CHAIN_ID`, `EVM_PROXY_CONTRACT_ADDRESS`, and
   `RGB_ASSET_ID` all set resolves to `Production`.
 - **Boot gate:** a release `rgb-validation` build that does not resolve to a
   valid `Production` policy MUST refuse to boot (panic). Independently, each
@@ -211,11 +211,12 @@ enclave establishes validity and finality itself, fail-closed
 - a **successful receipt** must exist for `evm_tx_hash`, at depth >=
   `EVM_MIN_CONFIRMATIONS` (pinned config, default 12);
 - it must carry a **unique** deposit event from the pinned
-  `FUNDS_IN_CONTRACT` (falls back to `BRIDGE_CONTRACT`; #152). `BridgeFundsIn`
+  `FUNDS_IN_CONTRACT` (falls back to `EVM_PROXY_CONTRACT_ADDRESS`; #152). `BridgeFundsIn`
   is preferred; a same-tx `FundsIn` + `BridgeFundsIn` pair counts as one
   deposit (#150);
-- the event MUST bind the on-chain `operationId` to the request's
-  `funds_in_operation_id` -- not the hub's `operation_idx` (#153). A
+- the event MUST bind the on-chain `operationId` (the full 32-byte word) to the
+  request's 32-byte `funds_in_operation_id` -- not the hub's `operation_idx`
+  (#153, #24). A
   `BridgeFundsIn` event additionally binds gross amount and commission
   (`net == gross - commission`); the plain `FundsIn` fallback binds only
   `operationId` and the net amount, leaving the commission split

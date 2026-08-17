@@ -233,6 +233,7 @@ mod tests {
             proxy_contract: vec![0x33; 20],
             calldata_amount: destination_amount,
             calldata_commission: commission,
+            lz_release: None,
         })
     }
 
