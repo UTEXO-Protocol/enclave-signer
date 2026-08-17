@@ -15,6 +15,56 @@ use utexo_bridge_enclave::policy::{BuildContext, EvmDataSource, SecurityPolicy};
 use utexo_bridge_enclave::server::{self, ServerContext};
 use utexo_bridge_enclave::state::EnclaveState;
 
+/// Witness-resolver endpoint. `ELECTRUM_URL` (e.g. `ssl://host:50002`) is the
+/// production path; `ESPLORA_URL` is the legacy REST fallback. Default targets
+/// the legacy esplora forwarder port for backwards compatibility.
+#[allow(dead_code)]
+fn indexer_url_from_env() -> String {
+    std::env::var("ELECTRUM_URL")
+        .or_else(|_| std::env::var("ESPLORA_URL"))
+        .unwrap_or_else(|_| "http://127.0.0.1:3443".into())
+}
+
+/// Map an indexer URL to (local forwarder listen port, optional hostname to pin
+/// to loopback). For `ssl://host:port` / `tcp://host:port` we listen on the
+/// URL's own port and return the host so it can be pinned to 127.0.0.1 (keeps
+/// in-enclave TLS validating the real cert). For http(s)/legacy esplora we keep
+/// the historical port 3443 and pin nothing.
+#[cfg(all(feature = "vsock", target_os = "linux"))]
+fn forwarder_target(url: &str) -> (u16, Option<String>) {
+    for scheme in ["ssl://", "tcp://"] {
+        if let Some(rest) = url.strip_prefix(scheme) {
+            let hostport = rest.split('/').next().unwrap_or(rest);
+            if let Some((host, port)) = hostport.rsplit_once(':') {
+                if let Ok(p) = port.parse::<u16>() {
+                    return (p, Some(host.to_string()));
+                }
+            }
+        }
+    }
+    (3443, None)
+}
+
+/// Append `127.0.0.1 <host>` to /etc/hosts (idempotent) so the enclave's
+/// outbound connection to `host` lands on the local vsock forwarder while the
+/// TLS layer still validates against `host`'s real certificate.
+#[cfg(all(feature = "vsock", target_os = "linux"))]
+fn pin_host_to_loopback(host: &str) -> std::io::Result<()> {
+    use std::io::Write;
+    let existing = std::fs::read_to_string("/etc/hosts").unwrap_or_default();
+    if existing
+        .lines()
+        .any(|l| l.split_whitespace().any(|tok| tok == host))
+    {
+        return Ok(());
+    }
+    let mut f = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open("/etc/hosts")?;
+    writeln!(f, "127.0.0.1 {host}")
+}
+
 fn main() {
     tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
@@ -39,7 +89,7 @@ fn main() {
 
     // Pinned bridge config from env. Folded into the attestation `user_data`
     // commitment and cross-checked on every SignEvm. Production deployments
-    // must set EVM_CHAIN_ID, BRIDGE_CONTRACT, RGB_ASSET_ID — a misconfigured
+    // must set EVM_CHAIN_ID, EVM_PROXY_CONTRACT_ADDRESS, RGB_ASSET_ID — a misconfigured
     // production enclave is detectable externally via the attestation bundle.
     let bridge_config = BridgeConfig::from_env();
     if bridge_config.is_configured() {
@@ -57,12 +107,12 @@ fn main() {
             chain_id = bridge_config.chain_id,
             bridge_contract = %hex::encode(bridge_config.bridge_contract),
             rgb_asset_id = %bridge_config.rgb_asset_id,
-            "bridge config PARTIALLY set - EVM_CHAIN_ID / BRIDGE_CONTRACT / RGB_ASSET_ID must all \
+            "bridge config PARTIALLY set - EVM_CHAIN_ID / EVM_PROXY_CONTRACT_ADDRESS / RGB_ASSET_ID must all \
              be set (non-zero) or all unset; SignEvm will refuse to sign with this ambiguous pin"
         );
     } else {
         tracing::warn!(
-            "bridge config unconfigured (EVM_CHAIN_ID / BRIDGE_CONTRACT / RGB_ASSET_ID unset) - \
+            "bridge config unconfigured (EVM_CHAIN_ID / EVM_PROXY_CONTRACT_ADDRESS / RGB_ASSET_ID unset) - \
              SignEvm cross-check will fall back to legacy behaviour and the attestation bundle \
              will commit to empty values"
         );
@@ -124,33 +174,59 @@ fn main() {
         panic!("{msg}");
     }
 
-    // Donor-side cloning secret. Optional: only required for enclaves that
-    // will serve `GetClone` requests. Pre-shared across the operator's
-    // cluster. Never logged, wrapped in `SecretBox` for zeroize-on-drop.
+    // Donor-side cloning secret. Preferred delivery is at runtime via the
+    // `InitializeKey` message (`cloning_secret`), so the secret never lands in
+    // the EIF or the PCRs. The `UTEXO_CLONING_SECRET` env var is kept only as a
+    // legacy/dev fallback and is NOT set by the production Dockerfile; do not
+    // bake it into a release EIF. Optional: only needed for enclaves that serve
+    // `GetClone`. Never logged; wrapped in `SecretBox` for zeroize-on-drop.
     if let Ok(secret) = std::env::var("UTEXO_CLONING_SECRET") {
-        if let Err(e) = state.set_donor_cloning_secret(secret) {
-            tracing::error!("failed to set donor cloning secret: {e}");
-        } else {
-            tracing::info!("donor cloning secret configured from UTEXO_CLONING_SECRET");
+        if !secret.is_empty() {
+            if let Err(e) = state.set_donor_cloning_secret(secret) {
+                tracing::error!("failed to set donor cloning secret: {e}");
+            } else {
+                tracing::warn!(
+                    "donor cloning secret configured from UTEXO_CLONING_SECRET env \
+                     (legacy fallback; prefer the InitializeKey cloning_secret field)"
+                );
+            }
         }
     }
 
-    // Start vsock-to-TCP forwarder for Esplora access (production only).
-    // The host must run: vsock-proxy <ESPLORA_VSOCK_PORT> <esplora-host> <esplora-port>
-    // Untrusted, host-controlled egress boundary (audit I-01): data fetched
-    // through it is evidence verified by SPV + rgbstd validation, never
-    // trusted input. See `vsock_forwarder`'s module-level TRUST BOUNDARY note.
+    // Start the vsock-to-TCP forwarder so the in-enclave witness resolver can
+    // reach the host-side indexer. The host must run:
+    //   vsock-proxy <ESPLORA_VSOCK_PORT> <indexer-host> <indexer-port>
+    // We forward 127.0.0.1:<local_port> -> vsock:<vsock_port>. For an Electrum
+    // ssl:// endpoint we listen on the URL's own port and pin its hostname to
+    // 127.0.0.1 in /etc/hosts, so the TLS handshake terminates INSIDE the
+    // enclave and validates the real server cert — the host relays ciphertext
+    // only and cannot MITM the witness data. Untrusted, host-controlled egress
+    // boundary (audit I-01): data fetched through it is evidence verified by
+    // SPV + rgbstd validation, never trusted input. See `vsock_forwarder`'s
+    // module-level TRUST BOUNDARY note.
     #[cfg(all(feature = "vsock", target_os = "linux"))]
     {
         let vsock_port: u32 = std::env::var("ESPLORA_VSOCK_PORT")
             .ok()
             .and_then(|s| s.parse().ok())
             .unwrap_or(8001);
+        let (local_port, host_pin) = forwarder_target(&indexer_url_from_env());
+        if let Some(host) = host_pin {
+            match pin_host_to_loopback(&host) {
+                Ok(()) => tracing::info!(
+                    "pinned {host} -> 127.0.0.1 for in-enclave TLS over the vsock forwarder"
+                ),
+                Err(e) => tracing::error!("failed to pin {host} in /etc/hosts: {e}"),
+            }
+        }
         tracing::info!(
+            local_port,
             vsock_port,
-            "starting Esplora vsock forwarder (host must run: vsock-proxy {vsock_port} <esplora-host> <esplora-port>)"
+            "starting indexer vsock forwarder (host must run: vsock-proxy {vsock_port} <indexer-host> <indexer-port>)"
         );
-        if let Err(e) = utexo_bridge_enclave::vsock_forwarder::start_forwarder(3443, vsock_port) {
+        if let Err(e) =
+            utexo_bridge_enclave::vsock_forwarder::start_forwarder(local_port, vsock_port)
+        {
             tracing::error!("failed to start vsock forwarder: {e}");
         }
 
@@ -220,10 +296,9 @@ fn main() {
     // Build RGB consignment validator (when feature enabled).
     #[cfg(feature = "rgb-validation")]
     let rgb_validator = {
-        let esplora_url =
-            std::env::var("ESPLORA_URL").unwrap_or_else(|_| "http://127.0.0.1:3443".into());
+        let indexer_url = indexer_url_from_env();
         let network = std::env::var("BITCOIN_NETWORK").unwrap_or_else(|_| "bitcoin".into());
-        match RgbValidator::new(esplora_url, &network) {
+        match RgbValidator::new(indexer_url, &network) {
             Ok(v) => {
                 tracing::info!("RGB validator initialized");
                 Some(v)

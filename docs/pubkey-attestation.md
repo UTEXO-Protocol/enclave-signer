@@ -91,9 +91,11 @@ canonical_bundle =
 ```
 
 The last three fields are bridge config pinned at enclave boot from env
-(`EVM_CHAIN_ID`, `BRIDGE_CONTRACT`, `RGB_ASSET_ID`). They commit the
+(`EVM_CHAIN_ID`, `EVM_PROXY_CONTRACT_ADDRESS`, `RGB_ASSET_ID`). They commit the
 enclave to a specific chain / contract / asset triple — a misconfigured or
-maliciously-redirected enclave is observable through this commitment.
+maliciously-redirected enclave is observable through this commitment. (The
+attestation-bundle/proto field keeps the legacy name `bridge_contract`; its
+value is the MultisigProxy from `EVM_PROXY_CONTRACT_ADDRESS`.)
 Production deployments MUST set all three; the commitment for a dev /
 mock build with no env is `chain_id=0`, `bridge_contract=20 zero bytes`,
 `rgb_asset_id=""`.

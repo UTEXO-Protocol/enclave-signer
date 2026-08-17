@@ -287,7 +287,10 @@ pub fn verify_funds_in_event(
 /// Read a 32-byte ABI word at `offset` in `data` as a `u64`, mapping the
 /// generic overflow/short errors to a field-named, fail-closed message. The
 /// `u64`-fit check (high 24 bytes zero) is the documented width guard: an
-/// on-chain value exceeding `u64` is rejected, not truncated.
+/// on-chain amount exceeding `u64` is rejected, not truncated. Used for the
+/// value fields (amount/net/commission); `operationId` is compared as the full
+/// 32-byte word read from the indexed topic, since it is a contract-derived
+/// `bytes32` rather than a `u64`.
 fn decode_u64_word(data: &[u8], offset: usize, field: &str) -> Result<u64> {
     extract_uint256_as_u64(data, offset).map_err(|e| {
         EnclaveError::CrossCheck(format!(
@@ -306,6 +309,20 @@ fn check_eq(field: &str, got: u64, want: u64) -> Result<()> {
     }
     Ok(())
 }
+
+/// Hard per-call ceiling for a single EVM JSON-RPC round-trip. WITHOUT it a
+/// hung RPC (e.g. a half-open keep-alive to the host's vsock-proxy/nginx after
+/// it restarts, or an upstream that accepts the socket then never replies)
+/// blocks the worker thread FOREVER: `block_on` has no built-in deadline and
+/// alloy/reqwest set no default request timeout. The accept-layer
+/// [`crate::conn::DeadlineStream`] bounds only the request SOCKET I/O, never
+/// this compute, and a client-side (parent/listener) timeout does NOT cancel
+/// the in-flight `block_on`. With only [`crate::conn::WORKER_THREADS`] workers,
+/// a handful of such stalls pin every worker and wedge the whole enclave until
+/// terminate+run. Bounding each call and failing closed on elapse frees the
+/// worker instead. 15s comfortably covers a healthy receipt/head fetch through
+/// the loopback -> vsock -> nginx -> upstream path.
+const EVM_RPC_CALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
 
 /// Production [`EvmReceiptProvider`]: an alloy JSON-RPC client over the
 /// in-enclave loopback URL (which a vsock forwarder tunnels to the host EVM
@@ -340,9 +357,31 @@ impl EvmReceiptProvider for AlloyEvmClient {
     fn get_transaction_receipt(&self, tx_hash: &[u8; 32]) -> Result<Option<ReceiptData>> {
         use alloy::providers::Provider;
         let hash = alloy::primitives::B256::from_slice(tx_hash);
+        // `timeout` requires the runtime's time driver (built with `enable_all`).
+        // Outer `?` = the call stalled past the deadline (fail closed, free the
+        // worker); inner `?` = the RPC itself errored.
+        // Construct the `timeout` future INSIDE the async block so it is created
+        // within the runtime's reactor context. `block_on(timeout(dur, fut))`
+        // would build the `Timeout` (which registers a timer entry) as an
+        // argument — i.e. BEFORE `block_on` enters the runtime — panicking with
+        // "there is no reactor running" and, under `panic = "abort"`, killing the
+        // whole enclave on every EVM-RPC call.
         let receipt = self
             .runtime
-            .block_on(self.provider.get_transaction_receipt(hash))
+            .block_on(async {
+                tokio::time::timeout(
+                    EVM_RPC_CALL_TIMEOUT,
+                    self.provider.get_transaction_receipt(hash),
+                )
+                .await
+            })
+            .map_err(|_elapsed| {
+                EnclaveError::CrossCheck(format!(
+                    "evm-rpc: eth_getTransactionReceipt timed out after {}s (host RPC path stalled) \
+                     - refusing to sign",
+                    EVM_RPC_CALL_TIMEOUT.as_secs()
+                ))
+            })?
             .map_err(|e| {
                 EnclaveError::CrossCheck(format!("evm-rpc: eth_getTransactionReceipt failed: {e}"))
             })?;
@@ -351,8 +390,19 @@ impl EvmReceiptProvider for AlloyEvmClient {
 
     fn get_block_number(&self) -> Result<u64> {
         use alloy::providers::Provider;
+        // See `get_transaction_receipt`: build the `timeout` future inside the
+        // async block so it is created within the runtime reactor context.
         self.runtime
-            .block_on(self.provider.get_block_number())
+            .block_on(async {
+                tokio::time::timeout(EVM_RPC_CALL_TIMEOUT, self.provider.get_block_number()).await
+            })
+            .map_err(|_elapsed| {
+                EnclaveError::CrossCheck(format!(
+                    "evm-rpc: eth_blockNumber timed out after {}s (host RPC path stalled) - \
+                     refusing to sign",
+                    EVM_RPC_CALL_TIMEOUT.as_secs()
+                ))
+            })?
             .map_err(|e| EnclaveError::CrossCheck(format!("evm-rpc: eth_blockNumber failed: {e}")))
     }
 }

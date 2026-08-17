@@ -1,3 +1,7 @@
 /target/
 .claude/
 .idea/
+
+# Local build artifacts (EIF, checksums, PCR measurements) — never committed,
+# published to S3 instead.
+/.artifacts/

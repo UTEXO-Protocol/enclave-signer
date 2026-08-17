@@ -31,6 +31,7 @@ fn initialize_key_from_mnemonic(port: u16, mnemonic: &str) -> PublicKeysResponse
             request: Some(Req::InitializeKey(InitializeKeyRequest {
                 seed: vec![],
                 mnemonic: mnemonic.into(),
+                cloning_secret: String::new(),
             })),
         },
     );
@@ -372,6 +373,7 @@ fn cannot_initialize_after_entering_cloning() {
             request: Some(Req::InitializeKey(InitializeKeyRequest {
                 seed: vec![],
                 mnemonic: DONOR_MNEMONIC.into(),
+                cloning_secret: String::new(),
             })),
         },
     );
