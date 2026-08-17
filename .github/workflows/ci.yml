@@ -25,24 +25,16 @@ jobs:
           components: rustfmt, clippy
 
       - name: Install system dependencies
-        run: sudo apt-get update && sudo apt-get install -y pkg-config libssl-dev protobuf-compiler
+        run: sudo apt-get update && sudo apt-get install -y pkg-config libssl-dev
 
-      # The `rgb-consignment` dep (used by the rgb-validation / spv
-      # feature combos) and the `federated-signer-proto` dep are hosted
-      # in private repos and fetched over SSH. Load read-only deploy
-      # keys registered on UTEXO-Protocol/rgb-consignment-parser and
-      # UTEXO-Protocol/federated-signer-proto into the agent so cargo's
-      # `git fetch` can authenticate. The default feature set now
-      # includes `spv` (which pulls `rgb-validation`), so every build
-      # below needs these keys — including the minimal
-      # `--no-default-features` build, which still fetches the private
-      # proto crate.
-      - name: Set up SSH for private RGB deps
+      # Only ONE private dep is left anywhere in the repo: federated-signer-proto,
+      # needed by `parent` — which this job also builds. The enclave workspace
+      # itself resolves entirely over public HTTPS and needs no credentials (see
+      # the enclave-only jobs below, which load no key at all).
+      - name: Set up SSH for the parent's private proto dep
         uses: webfactory/ssh-agent@v0.9.0
         with:
-          ssh-private-key: |
-            ${{ secrets.RGB_CONSIGNMENT_PARSER_DEPLOY_KEY }}
-            ${{ secrets.FEDERATED_SIGNER_PROTO_DEPLOY_KEY }}
+          ssh-private-key: ${{ secrets.FEDERATED_SIGNER_PROTO_DEPLOY_KEY }}
 
       - name: Cache cargo registry
         uses: actions/cache@v4
@@ -51,9 +43,14 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
+            parent/target
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-
 
+      # NOTE: `parent/` is a SEPARATE cargo workspace (see the root Cargo.toml
+      # comment), so `--workspace` here covers only enclave / enclave-proto /
+      # attestation-verify. Parent gets its own steps below; keep them in sync
+      # when adding checks.
       - name: Check formatting
         run: cargo fmt --all -- --check
 
@@ -70,6 +67,19 @@ jobs:
 
       - name: Test (default features)
         run: cargo test --workspace
+
+      # --- parent workspace (separate lockfile, separate target dir) ---------
+      - name: Check formatting (parent)
+        run: cargo fmt --all --manifest-path parent/Cargo.toml -- --check
+
+      - name: Build (parent)
+        run: cargo build --manifest-path parent/Cargo.toml
+
+      - name: Clippy (parent)
+        run: cargo clippy --manifest-path parent/Cargo.toml --all-targets -- -D warnings
+
+      - name: Test (parent)
+        run: cargo test --manifest-path parent/Cargo.toml
 
       # Production build profile: the exact feature set shipped in the EIF
       # (build/Dockerfile.enclave). `helios` is required in production (#77) and
@@ -90,8 +100,9 @@ jobs:
       # now-default `spv`). Keeps the no-SPV path compiling and exercises the
       # M-01 / #61 guard that a no-spv build refuses to sign `fundsOut`
       # (test_no_spv_build_refuses_funds_out_even_without_merkle_proofs).
-      # Skips the private `rgb-consignment` dep, but still fetches the private
-      # `federated-signer-proto` crate — the SSH agent set up above covers it.
+      # Skips the rgb-consignment dep entirely. Like every enclave build here it
+      # needs no credentials -- the property that makes the EIF publicly
+      # reproducible.
       - name: Build (minimal — no default features)
         run: cargo build -p utexo-bridge-enclave --no-default-features
 
@@ -139,19 +150,10 @@ jobs:
           toolchain: "1.96"
 
       - name: Install system dependencies
-        run: sudo apt-get update && sudo apt-get install -y pkg-config libssl-dev protobuf-compiler
+        run: sudo apt-get update && sudo apt-get install -y pkg-config libssl-dev
 
-      # `rgb-consignment` is an optional git dep, but cargo still resolves
-      # (and fetches) it from its pinned lockfile revision even when the
-      # feature is off — so the build needs the deploy key to reach the
-      # `compile_error!`, just like the `ci` job above.
-      - name: Set up SSH for private RGB deps
-        uses: webfactory/ssh-agent@v0.9.0
-        with:
-          ssh-private-key: |
-            ${{ secrets.RGB_CONSIGNMENT_PARSER_DEPLOY_KEY }}
-            ${{ secrets.FEDERATED_SIGNER_PROTO_DEPLOY_KEY }}
-
+      # No credentials: `rgb-consignment` is a public HTTPS git dep, and the
+      # enclave workspace has no private sources at all.
       - name: Cache cargo registry
         uses: actions/cache@v4
         with:
@@ -159,6 +161,7 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
+            parent/target
           key: ${{ runner.os }}-cargo-release-guards-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-release-guards-
 
@@ -193,19 +196,9 @@ jobs:
           toolchain: "1.96"
 
       - name: Install system dependencies
-        run: sudo apt-get update && sudo apt-get install -y pkg-config libssl-dev protobuf-compiler
+        run: sudo apt-get update && sudo apt-get install -y pkg-config libssl-dev
 
-      # `--features rgb-validation` pulls the private `rgb-consignment` dep, and
-      # cargo also resolves the private `federated-signer-proto` git dep from the
-      # lockfile, both fetched before it reaches our crate's `compile_error!`, so
-      # both deploy keys are required here just like the `ci` job above.
-      - name: Set up SSH for private RGB deps
-        uses: webfactory/ssh-agent@v0.9.0
-        with:
-          ssh-private-key: |
-            ${{ secrets.RGB_CONSIGNMENT_PARSER_DEPLOY_KEY }}
-            ${{ secrets.FEDERATED_SIGNER_PROTO_DEPLOY_KEY }}
-
+      # No credentials: `rgb-consignment` is a public HTTPS git dep.
       - name: Cache cargo registry
         uses: actions/cache@v4
         with:
@@ -213,6 +206,7 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
+            parent/target
           key: ${{ runner.os }}-cargo-feature-guards-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-feature-guards-
 

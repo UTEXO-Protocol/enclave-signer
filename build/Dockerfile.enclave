@@ -1,12 +1,19 @@
 # syntax=docker/dockerfile:1.7
 # Production enclave image (vsock + rgb-validation + spv + evm-rpc).
 # Usage:
-#   DOCKER_BUILDKIT=1 docker build --ssh default \
-#     -f build/Dockerfile.enclave -t utexo-bridge-enclave .
+#   DOCKER_BUILDKIT=1 docker build -f build/Dockerfile.enclave -t utexo-bridge-enclave .
 #
-# `--ssh default` forwards the host's SSH agent into the build so cargo
-# can fetch the private `rgb-consignment` git dep that the
-# `rgb-validation`/`spv` features pull in.
+# NO CREDENTIALS REQUIRED. Every dependency of the enclave resolves over public
+# HTTPS, so anyone can run this build and reproduce PCR0. Keep it that way: a
+# private dep added to the root workspace would silently break public
+# reproducibility, because cargo materialises every git source in a workspace
+# during resolution.
+#
+# Two changes got us here, both worth preserving:
+#   - `enclave-proto/` is an in-tree vendored slice of federated-signer-proto
+#     holding only the `enclave` package (see its README for provenance).
+#   - `parent/` is a SEPARATE cargo workspace, so its private
+#     federated-signer-proto dep never enters this build.
 #
 # Reproducible PCR0: the EIF packs the runtime-stage rootfs, so any drift in a
 # base image or its packages changes PCR0. Both FROMs are pinned by DIGEST (not
@@ -36,27 +43,23 @@
 # newer rustc, bump to a newer *-bullseye tag (glibc <= 2.34), never trixie.
 FROM rust:1.96-slim-bullseye@sha256:c593596210f729542a92aced6a8b0812bcc8d04c5f1b238e663b800d0e2e17bd AS builder
 
-# `git` + `openssh-client`: the workspace `[patch.crates-io]` uses public
-# git URLs for rgb-consensus / rgb-ops / rgb-invoicing / rgb-strict-encoding,
-# and `enclave/Cargo.toml` pulls `rgb-consignment` over SSH. `.cargo/config.toml`
-# sets `net.git-fetch-with-cli = true` so cargo shells out to system `git`
-# rather than bundled libgit2. `openssh-client` provides the ssh binary +
-# known_hosts machinery `git` needs for the SSH transport.
+# `git` + `ca-certificates`: the `[patch.crates-io]` block and the
+# rgb-consignment dep are public HTTPS git URLs, and `.cargo/config.toml` sets
+# `net.git-fetch-with-cli = true` so cargo shells out to system `git` rather
+# than bundled libgit2. No `openssh-client` and no ssh-keyscan: nothing in this
+# image is fetched over SSH.
+# `protobuf-compiler` is NOT needed: the proto crate is vendored pre-generated
+# and no crate in the workspace has a build.rs, so protoc never runs.
 # `cmake` (via pip) + `make`: the Electrum witness resolver (rgb-ops
 # `electrum_blocking`) pulls `electrum-client` -> rustls -> aws-lc-rs, whose
 # `aws-lc-sys` C sources build via CMake. gcc/cc is already present (used by
 # `ring`). Bullseye's apt cmake is 3.18; aws-lc-sys wants a newer one, so we pin
 # a modern cmake from PyPI. All builder-only (multi-stage) — not in runtime/PCR.
 RUN apt-get update && apt-get install -y \
-    pkg-config libssl-dev protobuf-compiler git ca-certificates openssh-client \
+    pkg-config libssl-dev git ca-certificates \
     make python3 python3-pip \
     && pip3 install --no-cache-dir "cmake==3.31.6" \
     && rm -rf /var/lib/apt/lists/*
-
-# Trust github.com's SSH host key so the build doesn't prompt or fail
-# on host-key verification when fetching the private parser dep.
-RUN mkdir -p /root/.ssh && \
-    ssh-keyscan -t ed25519,ecdsa github.com >> /root/.ssh/known_hosts
 
 WORKDIR /build
 COPY . /build/
@@ -78,44 +81,12 @@ ENV CARGO_INCREMENTAL=0 \
 # (rgb-*) could re-resolve to a newer commit on a later rebuild and change the
 # binary (and thus PCR0).
 #
-# only for the duration of this RUN, so no credentials end up in the image
-# layers. In CI we ALSO pass both deploy keys as BuildKit secrets (federated_key
-# + consignment_key) and set up per-host SSH aliases + `insteadOf`: two private
-# repos (federated-signer-proto, rgb-consignment-parser) both live on github.com,
-# and a single ssh-agent holding two repo-scoped deploy keys offers the wrong one
-# first → GitHub returns "Repository not found". `required=false` keeps local
-# agent-only builds (no secret files) working unchanged. This block affects only
-# how deps are FETCHED, not the compiled binary, so PCR0 is unaffected.
-#
 # `evm-rpc` (dev merge) adds in-enclave FundsIn event verification (#60); it pulls
 # the alloy + tokio subtree, which grows the binary and therefore PCR0 — pinned
 # via `--locked`/Cargo.lock for reproducibility. Requires a second host
 # vsock-proxy for the EVM RPC (EVM_RPC_VSOCK_PORT, default 8002). `helios` (#77)
 # is intentionally NOT enabled here (experimental/default-off, not in the EIF).
-RUN --mount=type=ssh \
-    --mount=type=secret,id=federated_key,required=false \
-    --mount=type=secret,id=consignment_key,required=false \
-    set -eu; \
-    if [ -f /run/secrets/federated_key ] && [ -f /run/secrets/consignment_key ]; then \
-      install -m 600 /run/secrets/federated_key /tmp/federated_key; \
-      install -m 600 /run/secrets/consignment_key /tmp/consignment_key; \
-      printf "%s\n" \
-        "Host github.com-federated" \
-        "  HostName github.com" \
-        "  User git" \
-        "  IdentityFile /tmp/federated_key" \
-        "  IdentitiesOnly yes" \
-        "Host github.com-consignment" \
-        "  HostName github.com" \
-        "  User git" \
-        "  IdentityFile /tmp/consignment_key" \
-        "  IdentitiesOnly yes" \
-        > /tmp/ci_ssh_config; \
-      export GIT_SSH_COMMAND="ssh -F /tmp/ci_ssh_config"; \
-      git config --global url."ssh://git@github.com-federated/UTEXO-Protocol/federated-signer-proto.git".insteadOf "ssh://git@github.com/UTEXO-Protocol/federated-signer-proto.git"; \
-      git config --global url."ssh://git@github.com-consignment/UTEXO-Protocol/rgb-consignment-parser.git".insteadOf "ssh://git@github.com/UTEXO-Protocol/rgb-consignment-parser.git"; \
-    fi; \
-    cargo build --release --locked --features vsock,rgb-validation,spv,evm-rpc
+RUN cargo build --release --locked --features vsock,rgb-validation,spv,evm-rpc
 
 # --- Runtime ---
 # Pinned by digest (see header) — this rootfs is what ends up in the EIF, so its
@@ -204,12 +175,12 @@ ENV EVM_RPC_URL=http://127.0.0.1:3444 \
     GAS_TX_ALLOWED_TO=0x6711f1a319B37847fa0234181C34D883774c4951 \
     BTC_MAX_TOTAL_SATS=1000000
 
-# DEBUG-HUNT EIF (op13 RGB-PSBT enclave crash): verbose logs + full panic
-# backtrace so `nitro-cli console` (enclave run with --debug-mode) captures the
-# exact panic site when signing op13. RUST_LOG reaches the tracing EnvFilter
-# (main.rs from_default_env). This is a throwaway measurement build — PCRs are
-# zeroed under --debug-mode anyway; revert to `RUST_LOG=info` before any
-# production (non-debug) EIF.
-ENV RUST_LOG=debug \
-    RUST_BACKTRACE=full
+# Production logging. RUST_LOG reaches the tracing EnvFilter (main.rs
+# from_default_env).
+#
+# This env is MEASURED INTO PCR0, so it is part of the published measurement —
+# do not flip it to `debug` for a production EIF. If you need the op13-style
+# verbose/backtrace build again, do it on a throwaway branch and run the enclave
+# with `--debug-mode` (which zeroes the PCRs anyway), never here.
+ENV RUST_LOG=info
 ENTRYPOINT ["/app/entrypoint.sh"]

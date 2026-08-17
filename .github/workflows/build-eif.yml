@@ -15,7 +15,8 @@ name: "Build EIF"
 # (apt/dnf) still float — pinning them is the next determinism step.
 #
 # Required repo config (Settings -> Secrets and variables -> Actions):
-#   secrets.RGB_CONSIGNMENT_PARSER_DEPLOY_KEY  read-only deploy key (already used by ci.yml)
+#   secrets.FEDERATED_SIGNER_PROTO_DEPLOY_KEY  read-only deploy key; needed ONLY for the
+#                                              host-binaries (parent) step, not for the EIF
 #   secrets.AWS_OIDC_ROLE_ARN                  IAM role to assume via OIDC for S3 upload
 #                                              (if unset, the S3 step is skipped and
 #                                               artifacts are only attached to the run)
@@ -45,25 +46,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # Deploy key for the private `rgb-consignment` dep (rgb-validation/spv).
-      # Same secret the CI/CD workflows already use; `--ssh default` forwards it
-      # into the BuildKit build for the cargo fetch only.
-      - name: Set up SSH for private RGB deps
+      # One deploy key, for ONE step. The EIF build itself needs no credentials
+      # at all — every enclave dep is public HTTPS, which is what makes PCR0
+      # reproducible by third parties. This key exists only for the
+      # "Build host binaries" step below, which builds the parent adapter and
+      # its private federated-signer-proto dep.
+      - name: Set up SSH for the parent's private proto dep
         uses: webfactory/ssh-agent@v0.9.0
         with:
-          ssh-private-key: |
-            ${{ secrets.RGB_CONSIGNMENT_PARSER_DEPLOY_KEY }}
-            ${{ secrets.FEDERATED_SIGNER_PROTO_DEPLOY_KEY }}
-
-      # Two private repos (federated-signer-proto + rgb-consignment-parser) live on
-      # github.com; a single ssh-agent with two repo-scoped deploy keys offers the
-      # wrong one first ("Repository not found"). Hand both keys to BuildKit as
-      # secret files so Dockerfile.enclave can pin a per-repo key via SSH aliases.
-      - name: Prepare BuildKit key files
-        run: |
-          umask 077
-          printf '%s\n' '${{ secrets.FEDERATED_SIGNER_PROTO_DEPLOY_KEY }}' > /tmp/federated_key
-          printf '%s\n' '${{ secrets.RGB_CONSIGNMENT_PARSER_DEPLOY_KEY }}' > /tmp/consignment_key
+          ssh-private-key: ${{ secrets.FEDERATED_SIGNER_PROTO_DEPLOY_KEY }}
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -127,9 +118,11 @@ jobs:
       - name: Build host binaries (parent + cli, static musl)
         run: |
           set -euxo pipefail
-          cargo build --release --locked -p utexo-bridge-parent --features vsock \
-            --target x86_64-unknown-linux-musl
-          BIN=target/x86_64-unknown-linux-musl/release
+          # `parent/` is its own workspace (see the root Cargo.toml comment),
+          # so build from inside it rather than with `-p` from the repo root.
+          cargo build --release --locked --manifest-path parent/Cargo.toml \
+            --features vsock --target x86_64-unknown-linux-musl
+          BIN=parent/target/x86_64-unknown-linux-musl/release
           cp "$BIN/utexo-bridge-parent" "$BIN/utexo-bridge-parent-cli" artifacts/
           ( cd artifacts && sha256sum utexo-bridge-parent utexo-bridge-parent-cli > HOST-SHA256SUMS )
           cat artifacts/HOST-SHA256SUMS

@@ -4,10 +4,13 @@
 #   DOCKER_BUILDKIT=1 docker build --ssh default \
 #     -f build/Dockerfile.parent -t utexo-bridge-parent .
 #
-# `--ssh default` is required because Cargo fetches the pinned generated
-# `federated-signer-proto` Rust crate from GitHub over SSH. Parent also needs it
-# because cargo's workspace resolver may fetch every git source declared
-# anywhere in the workspace before it knows which crates a `-p` build compiles.
+# `--ssh default` is required for ONE private git dep: `federated-signer-proto`,
+# the full schema (bridge / node / orchestrator / parent / signer packages) that
+# only the parent needs. The enclave uses the vendored `enclave-proto/` slice
+# and needs no credential at all.
+#
+# Unlike the enclave image, this one is NOT part of the public reproducibility
+# story: the parent runs on the untrusted host and is not measured into any PCR.
 #
 # Dev (TCP to enclave container):
 #   docker run -e ENCLAVE_ADDR=enclave:5000 utexo-bridge-parent
@@ -20,16 +23,15 @@
 # ===== Builder Stage =====
 FROM rust:1.96-slim AS builder
 
-# `git` + `ca-certificates`: the workspace `[patch.crates-io]` rewrites
-# rgb-consensus / rgb-ops / rgb-invoicing / rgb-strict-encoding to public
-# git URLs, and `.cargo/config.toml` sets `net.git-fetch-with-cli = true`
-# so cargo shells out to system `git` instead of bundled libgit2.
-# `openssh-client` is required because cargo's workspace resolver also
-# fetches the private `rgb-consignment` git source (declared optional in
-# `enclave/Cargo.toml`) even when building `-p utexo-bridge-parent` —
-# the resolution is workspace-wide, not target-scoped.
+# `git` + `ca-certificates`: `parent/Cargo.toml`'s `[patch.crates-io]` rewrites
+# rgb-ops / rgb-invoicing / rgb-strict-encoding to public git URLs, and
+# `.cargo/config.toml` sets `net.git-fetch-with-cli = true` so cargo shells out
+# to system `git` instead of bundled libgit2.
+# `openssh-client` is needed for the one private SSH dep, federated-signer-proto.
+# `protobuf-compiler` is NOT needed: the proto crate ships pre-generated and no
+# crate here has a build.rs, so protoc never runs.
 RUN apt-get update && apt-get install -y \
-    pkg-config libssl-dev protobuf-compiler git ca-certificates openssh-client \
+    pkg-config libssl-dev git ca-certificates openssh-client \
     && rm -rf /var/lib/apt/lists/*
 
 # Trust github.com's SSH host key so the build doesn't prompt or fail
@@ -41,32 +43,18 @@ WORKDIR /build
 COPY . /build/
 
 # `--mount=type=ssh` exposes the SSH_AUTH_SOCK forwarded by `--ssh default`.
-# In CD we also pass both deploy keys as BuildKit secrets to avoid SSH key
-# collisions when two private repos live on github.com.
+# In CD we also pass the deploy key as a BuildKit secret so git uses exactly
+# that identity (a shared agent may offer the wrong key first, and GitHub then
+# answers "Repository not found"). `required=false` keeps local agent-only
+# builds working.
 RUN --mount=type=ssh \
     --mount=type=secret,id=federated_key,required=false \
-    --mount=type=secret,id=consignment_key,required=false \
     set -eu; \
-    if [ -f /run/secrets/federated_key ] && [ -f /run/secrets/consignment_key ]; then \
+    if [ -f /run/secrets/federated_key ]; then \
       install -m 600 /run/secrets/federated_key /tmp/federated_key; \
-      install -m 600 /run/secrets/consignment_key /tmp/consignment_key; \
-      printf "%s\n" \
-        "Host github.com-federated" \
-        "  HostName github.com" \
-        "  User git" \
-        "  IdentityFile /tmp/federated_key" \
-        "  IdentitiesOnly yes" \
-        "Host github.com-consignment" \
-        "  HostName github.com" \
-        "  User git" \
-        "  IdentityFile /tmp/consignment_key" \
-        "  IdentitiesOnly yes" \
-        > /tmp/ci_ssh_config; \
-      export GIT_SSH_COMMAND="ssh -F /tmp/ci_ssh_config"; \
-      git config --global url."ssh://git@github.com-federated/UTEXO-Protocol/federated-signer-proto.git".insteadOf "ssh://git@github.com/UTEXO-Protocol/federated-signer-proto.git"; \
-      git config --global url."ssh://git@github.com-consignment/UTEXO-Protocol/rgb-consignment-parser.git".insteadOf "ssh://git@github.com/UTEXO-Protocol/rgb-consignment-parser.git"; \
+      export GIT_SSH_COMMAND="ssh -i /tmp/federated_key -o IdentitiesOnly=yes"; \
     fi; \
-    cargo build --release -p utexo-bridge-parent
+    cd /build/parent && cargo build --release
 
 # ===== Runtime Stage =====
 FROM debian:bookworm-slim
@@ -78,7 +66,8 @@ RUN apt-get update && apt-get install -y \
 
 WORKDIR /home/parent
 
-COPY --from=builder /build/target/release/utexo-bridge-parent ./utexo-bridge-parent
+# `parent/` is its own workspace, so its target dir is nested, not at /build.
+COPY --from=builder /build/parent/target/release/utexo-bridge-parent ./utexo-bridge-parent
 
 RUN chown -R parent:parent .
 
