@@ -17,9 +17,10 @@
 //! [`POLICY_COMMITMENT_V2`] and add a new arm to evolve the format.
 //!
 //! V2 (audit C-02) extends the `Production` arm with the gas-tx signing rule —
-//! the pinned destination, the gas/fee ceilings, and the calldata selector
-//! allowlist — so the whole `SignRawDigest` policy is externally verifiable
-//! rather than a self-protection pin the operator has to trust.
+//! the pinned destination, the gas/fee ceilings, the native-value ceiling, and
+//! the calldata selector allowlist — so the whole `SignRawDigest` policy is
+//! externally verifiable rather than a self-protection pin the operator has to
+//! trust.
 
 /// Version tag prepended to every policy commitment. Lets a verifier reject a
 /// document produced by an enclave speaking a different policy-encoding version
@@ -102,6 +103,12 @@ pub enum AttestedPolicy {
         gas_tx_allowed_to: [u8; 20],
         gas_tx_max_gas_limit: u64,
         gas_tx_max_fee_per_gas: u128,
+        /// Ceiling (wei) on the native value a gas tx may carry, for the payable
+        /// `lzFundsOutCall` carve-out. `0` commits "no non-zero value is
+        /// signable" — the same posture an unset `GAS_TX_MAX_VALUE_WEI`
+        /// enforces, so "unpinned" is itself attested (as with
+        /// `gas_tx_allowed_to`).
+        gas_tx_max_value_wei: u128,
         /// Permitted 4-byte calldata selectors. Canonicalised (sorted + deduped)
         /// by [`to_bytes`](AttestedPolicy::to_bytes) so the operator's env order
         /// never changes the commitment.
@@ -122,6 +129,7 @@ impl AttestedPolicy {
     ///              [evm_checkpoint: 0x00 | 0x01 ++ 32 bytes]
     ///              [gas_tx_allowed_to 20][gas_tx_max_gas_limit u64 BE]
     ///              [gas_tx_max_fee_per_gas u128 BE]
+    ///              [gas_tx_max_value_wei u128 BE]
     ///              [len(selectors) u32 BE][selector 4]...   (sorted, deduped)
     /// Development: [0x00]
     /// ```
@@ -141,6 +149,7 @@ impl AttestedPolicy {
                 gas_tx_allowed_to,
                 gas_tx_max_gas_limit,
                 gas_tx_max_fee_per_gas,
+                gas_tx_max_value_wei,
                 gas_tx_allowed_selectors,
             } => {
                 out.push(0x01);
@@ -167,6 +176,7 @@ impl AttestedPolicy {
                 out.extend_from_slice(gas_tx_allowed_to);
                 out.extend_from_slice(&gas_tx_max_gas_limit.to_be_bytes());
                 out.extend_from_slice(&gas_tx_max_fee_per_gas.to_be_bytes());
+                out.extend_from_slice(&gas_tx_max_value_wei.to_be_bytes());
                 // Canonicalise the selector set: sort + dedup so the operator's
                 // env ordering (or duplicates) never changes the commitment.
                 let mut selectors = gas_tx_allowed_selectors.clone();
@@ -210,6 +220,7 @@ mod tests {
             gas_tx_allowed_to: [0xAA; 20],
             gas_tx_max_gas_limit: 21_000,
             gas_tx_max_fee_per_gas: 1_000,
+            gas_tx_max_value_wei: 0,
             gas_tx_allowed_selectors: vec![[0xde, 0xad, 0xbe, 0xef]],
         }
     }
@@ -223,6 +234,7 @@ mod tests {
         to: [u8; 20],
         max_gas: u64,
         max_fee: u128,
+        max_value: u128,
         selectors: Vec<[u8; 4]>,
     ) -> AttestedPolicy {
         match base() {
@@ -248,6 +260,7 @@ mod tests {
                 gas_tx_allowed_to: to,
                 gas_tx_max_gas_limit: max_gas,
                 gas_tx_max_fee_per_gas: max_fee,
+                gas_tx_max_value_wei: max_value,
                 gas_tx_allowed_selectors: selectors,
             },
             AttestedPolicy::Development => unreachable!(),
@@ -327,13 +340,14 @@ mod tests {
 
     #[test]
     fn every_gas_tx_field_changes_the_bytes() {
-        let base_gas = base_with_gas([0xAA; 20], 21_000, 1_000, vec![[1, 2, 3, 4]]);
+        let base_gas = base_with_gas([0xAA; 20], 21_000, 1_000, 0, vec![[1, 2, 3, 4]]);
         let cases = [
-            base_with_gas([0xBB; 20], 21_000, 1_000, vec![[1, 2, 3, 4]]), // destination
-            base_with_gas([0xAA; 20], 30_000, 1_000, vec![[1, 2, 3, 4]]), // gas cap
-            base_with_gas([0xAA; 20], 21_000, 2_000, vec![[1, 2, 3, 4]]), // fee cap
-            base_with_gas([0xAA; 20], 21_000, 1_000, vec![[9, 9, 9, 9]]), // selector
-            base_with_gas([0xAA; 20], 21_000, 1_000, vec![]),             // no selectors
+            base_with_gas([0xBB; 20], 21_000, 1_000, 0, vec![[1, 2, 3, 4]]), // destination
+            base_with_gas([0xAA; 20], 30_000, 1_000, 0, vec![[1, 2, 3, 4]]), // gas cap
+            base_with_gas([0xAA; 20], 21_000, 2_000, 0, vec![[1, 2, 3, 4]]), // fee cap
+            base_with_gas([0xAA; 20], 21_000, 1_000, 5, vec![[1, 2, 3, 4]]), // value ceiling
+            base_with_gas([0xAA; 20], 21_000, 1_000, 0, vec![[9, 9, 9, 9]]), // selector
+            base_with_gas([0xAA; 20], 21_000, 1_000, 0, vec![]),             // no selectors
         ];
         for c in cases {
             assert_ne!(
@@ -348,11 +362,18 @@ mod tests {
     fn selector_allowlist_is_order_and_dup_independent() {
         // The commitment canonicalises selectors, so operator env ordering and
         // duplicate entries never change the attested bytes.
-        let a = base_with_gas([0xAA; 20], 21_000, 1_000, vec![[1, 1, 1, 1], [2, 2, 2, 2]]);
+        let a = base_with_gas(
+            [0xAA; 20],
+            21_000,
+            1_000,
+            0,
+            vec![[1, 1, 1, 1], [2, 2, 2, 2]],
+        );
         let b = base_with_gas(
             [0xAA; 20],
             21_000,
             1_000,
+            0,
             vec![[2, 2, 2, 2], [1, 1, 1, 1], [1, 1, 1, 1]],
         );
         assert_eq!(a.to_bytes(), b.to_bytes());
@@ -362,8 +383,14 @@ mod tests {
     fn selector_count_is_length_prefixed() {
         // A different number of selectors changes the length prefix, so a set
         // can never be confused with a longer one sharing a prefix.
-        let one = base_with_gas([0xAA; 20], 21_000, 1_000, vec![[1, 1, 1, 1]]);
-        let two = base_with_gas([0xAA; 20], 21_000, 1_000, vec![[1, 1, 1, 1], [2, 2, 2, 2]]);
+        let one = base_with_gas([0xAA; 20], 21_000, 1_000, 0, vec![[1, 1, 1, 1]]);
+        let two = base_with_gas(
+            [0xAA; 20],
+            21_000,
+            1_000,
+            0,
+            vec![[1, 1, 1, 1], [2, 2, 2, 2]],
+        );
         assert_ne!(one.to_bytes(), two.to_bytes());
     }
 }

@@ -79,6 +79,11 @@ pub struct ProductionPolicy {
     /// Gas-tx per-gas fee ceiling in wei (`GAS_TX_MAX_FEE_PER_GAS`; 0 = unset →
     /// fail closed).
     pub gas_tx_max_fee_per_gas: u128,
+    /// Gas-tx native-value ceiling in wei (`GAS_TX_MAX_VALUE_WEI`) for the
+    /// payable `lzFundsOutCall` carve-out, or `None` when unset — in which case
+    /// no non-zero value is signable. Attested (as 0 when `None`, which enforces
+    /// the same posture) so the carve-out's bound is externally verifiable.
+    pub gas_tx_max_value_wei: Option<u128>,
     /// Gas-tx calldata selector allowlist (`GAS_TX_ALLOWED_SELECTORS`).
     pub gas_tx_allowed_selectors: Vec<[u8; 4]>,
 }
@@ -185,6 +190,7 @@ impl SecurityPolicy {
             gas_tx_allowed_to: bridge.gas_tx_allowed_to,
             gas_tx_max_gas_limit: bridge.gas_tx_max_gas_limit,
             gas_tx_max_fee_per_gas: bridge.gas_tx_max_fee_per_gas,
+            gas_tx_max_value_wei: bridge.gas_tx_max_value_wei,
             gas_tx_allowed_selectors: bridge.gas_tx_allowed_selectors.clone(),
         })
     }
@@ -210,6 +216,10 @@ impl SecurityPolicy {
                 gas_tx_allowed_to: p.gas_tx_allowed_to.unwrap_or([0u8; 20]),
                 gas_tx_max_gas_limit: p.gas_tx_max_gas_limit,
                 gas_tx_max_fee_per_gas: p.gas_tx_max_fee_per_gas,
+                // Same rule as the destination: an unset ceiling commits as 0,
+                // which is exactly the posture it enforces (no non-zero value
+                // is signable), so "unpinned" is itself attested.
+                gas_tx_max_value_wei: p.gas_tx_max_value_wei.unwrap_or(0),
                 gas_tx_allowed_selectors: p.gas_tx_allowed_selectors.clone(),
             },
             Self::Development { .. } => AttestedPolicy::Development,
@@ -518,6 +528,7 @@ mod tests {
         cfg.gas_tx_allowed_to = Some([0x77; 20]);
         cfg.gas_tx_max_gas_limit = 30_000;
         cfg.gas_tx_max_fee_per_gas = 5_000;
+        cfg.gas_tx_max_value_wei = Some(9_000);
         cfg.gas_tx_allowed_selectors = vec![[0xaa, 0xbb, 0xcc, 0xdd]];
         let pinned = SecurityPolicy::resolve(&ctx, &cfg, EvmDataSource::RawRpc, None);
 
@@ -531,10 +542,49 @@ mod tests {
                 assert_eq!(p.gas_tx_allowed_to, Some([0x77; 20]));
                 assert_eq!(p.gas_tx_max_gas_limit, 30_000);
                 assert_eq!(p.gas_tx_max_fee_per_gas, 5_000);
+                assert_eq!(p.gas_tx_max_value_wei, Some(9_000));
                 assert_eq!(p.gas_tx_allowed_selectors, vec![[0xaa, 0xbb, 0xcc, 0xdd]]);
             }
             other => panic!("expected Production, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn gas_tx_value_ceiling_alone_changes_the_commitment() {
+        // The LayerZero carve-out's bound is part of the attested gas-tx rule:
+        // raising it must be visible to a verifier, not a silent config change.
+        let ctx = release_bridge_ctx();
+        let mut base = pinned_config();
+        base.gas_tx_allowed_to = Some([0x77; 20]);
+        base.gas_tx_max_gas_limit = 30_000;
+        base.gas_tx_max_fee_per_gas = 5_000;
+        base.gas_tx_allowed_selectors = vec![[0xaa, 0xbb, 0xcc, 0xdd]];
+
+        let mut raised = base.clone();
+        raised.gas_tx_max_value_wei = Some(1);
+
+        assert_ne!(
+            SecurityPolicy::resolve(&ctx, &base, EvmDataSource::RawRpc, None).commitment_bytes(),
+            SecurityPolicy::resolve(&ctx, &raised, EvmDataSource::RawRpc, None).commitment_bytes(),
+            "raising GAS_TX_MAX_VALUE_WEI must change the attested commitment"
+        );
+    }
+
+    #[test]
+    fn unset_gas_tx_value_ceiling_commits_as_zero() {
+        // `None` and `Some(0)` enforce the same posture — no non-zero value is
+        // signable — so they must commit identically rather than let an operator
+        // produce two different attestations for one enforced rule.
+        let ctx = release_bridge_ctx();
+        let mut unset = pinned_config();
+        unset.gas_tx_max_value_wei = None;
+        let mut zero = pinned_config();
+        zero.gas_tx_max_value_wei = Some(0);
+
+        assert_eq!(
+            SecurityPolicy::resolve(&ctx, &unset, EvmDataSource::RawRpc, None).commitment_bytes(),
+            SecurityPolicy::resolve(&ctx, &zero, EvmDataSource::RawRpc, None).commitment_bytes(),
+        );
     }
 
     #[test]

@@ -94,6 +94,12 @@ struct Cli {
     #[arg(long, default_value_t = 0)]
     expect_gas_max_fee_per_gas: u128,
 
+    /// Expected gas-tx native-value ceiling in wei (`GAS_TX_MAX_VALUE_WEI`), the
+    /// bound on the payable `lzFundsOutCall` carve-out. Default 0 (unpinned —
+    /// the enclave then signs no non-zero value at all). Ignored with --mock.
+    #[arg(long, default_value_t = 0)]
+    expect_gas_max_value_wei: u128,
+
     /// Expected gas-tx calldata selector allowlist (`GAS_TX_ALLOWED_SELECTORS`):
     /// comma-separated 4-byte hex selectors. Default empty. Ignored with --mock.
     #[arg(long, default_value = "")]
@@ -208,6 +214,7 @@ async fn run(cli: Cli) -> Result<()> {
             gas_tx_allowed_to: parse_expect_gas_to(&cli.expect_gas_tx_to)?,
             gas_tx_max_gas_limit: cli.expect_gas_max_gas_limit,
             gas_tx_max_fee_per_gas: cli.expect_gas_max_fee_per_gas,
+            gas_tx_max_value_wei: cli.expect_gas_max_value_wei,
             gas_tx_allowed_selectors: parse_expect_gas_selectors(&cli.expect_gas_selectors)?,
         };
         (pcrs, VerifyMode::Real, expected_policy)

@@ -132,6 +132,7 @@ policy_commitment =
     gas_tx_allowed_to(20)                           // all-zero = gas path unpinned
     gas_tx_max_gas_limit_be8                        // gasLimit ceiling (0 = unset)
     gas_tx_max_fee_per_gas_be16                     // per-gas fee ceiling, wei (0 = unset)
+    gas_tx_max_value_wei_be16                       // native-value ceiling, wei (0 = unset)
     u32_be(len(selectors)) || selector(4)...        // sorted + deduped 4-byte selectors
     // Development (debug/test/dev-feature/non-bridge/unpinned build):
     u8(0x00)                                        // development discriminant
@@ -146,12 +147,18 @@ Helios-verified RPC, an unpinned or wrong gas-tx rule, a dev build) fails
 verification rather than being silently trusted.
 
 The gas-tx rule (audit C-02) is the `SignRawDigest` allowlist: the pinned
-destination, the `gasLimit`/fee ceilings that bound fee-griefing, and the 4-byte
-calldata selectors the gas EOA may invoke. Committing it makes the enclave's
-gas-signing policy externally verifiable instead of a self-protection pin the
-operator has to trust; `attest-verify` declares the expected rule via
+destination, the `gasLimit`/fee ceilings that bound fee-griefing, the
+native-value ceiling that bounds the payable `lzFundsOutCall` carve-out, and the
+4-byte calldata selectors the gas EOA may invoke. Committing it makes the
+enclave's gas-signing policy externally verifiable instead of a self-protection
+pin the operator has to trust; `attest-verify` declares the expected rule via
 `--expect-gas-tx-to` / `--expect-gas-max-gas-limit` / `--expect-gas-max-fee-per-gas`
-/ `--expect-gas-selectors`.
+/ `--expect-gas-max-value-wei` / `--expect-gas-selectors`.
+
+An unset `GAS_TX_MAX_VALUE_WEI` commits as `0`, which is exactly the posture it
+enforces (no non-zero value is signable) — so "unpinned" is itself attested, the
+same way an unset destination commits as all-zero. `None` and `Some(0)` therefore
+produce identical bytes; one enforced rule cannot yield two attestations.
 
 The Helios checkpoint (audit M-06) pins WHICH weak-subjectivity beacon block root
 the enclave trust-rooted EVM verification on, so two enclaves with identical PCRs

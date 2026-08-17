@@ -54,6 +54,7 @@ pub enum ExpectedPolicy {
         gas_tx_allowed_to: [u8; 20],
         gas_tx_max_gas_limit: u64,
         gas_tx_max_fee_per_gas: u128,
+        gas_tx_max_value_wei: u128,
         gas_tx_allowed_selectors: Vec<[u8; 4]>,
     },
     /// Expect a dev/mock enclave (e.g. behind `--mock`). Never for production.
@@ -199,6 +200,7 @@ fn expected_attested_policy(
             gas_tx_allowed_to,
             gas_tx_max_gas_limit,
             gas_tx_max_fee_per_gas,
+            gas_tx_max_value_wei,
             gas_tx_allowed_selectors,
         } => {
             let bridge_contract: [u8; 20] = resp
@@ -229,6 +231,7 @@ fn expected_attested_policy(
                 gas_tx_allowed_to: *gas_tx_allowed_to,
                 gas_tx_max_gas_limit: *gas_tx_max_gas_limit,
                 gas_tx_max_fee_per_gas: *gas_tx_max_fee_per_gas,
+                gas_tx_max_value_wei: *gas_tx_max_value_wei,
                 gas_tx_allowed_selectors: gas_tx_allowed_selectors.clone(),
             })
         }
