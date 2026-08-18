@@ -7,7 +7,7 @@
 //!
 //! ```sh
 //! UTEXO_LIVE_EVM_RPC=http://localhost:8545 \
-//! UTEXO_LIVE_BRIDGE=0x… UTEXO_LIVE_TX=0x… UTEXO_LIVE_OP_ID=42 \
+//! UTEXO_LIVE_BRIDGE=0x… UTEXO_LIVE_TX=0x… UTEXO_LIVE_OP_ID=0x<64 hex> \
 //! UTEXO_LIVE_AMOUNT=1000000 UTEXO_LIVE_COMMISSION=0 UTEXO_LIVE_MIN_CONF=1 \
 //!     cargo test -p utexo-bridge-enclave --features evm-rpc --test test_evm_event_live
 //! ```
@@ -19,7 +19,7 @@ struct Live {
     client: AlloyEvmClient,
     bridge: [u8; 20],
     tx: [u8; 32],
-    op_id: u64,
+    op_id: Vec<u8>,
     amount: u64,
     commission: u64,
     min_conf: u64,
@@ -37,15 +37,16 @@ fn num(var: &str, default: u64) -> u64 {
         .unwrap_or(default)
 }
 
-/// `operationId` is a `uint256` on chain that the enclave binds as a `u64`.
-/// Accept either a decimal or a `0x` literal so the value can be pasted
-/// straight from a tx receipt.
-fn op_id(var: &str) -> u64 {
+/// `operationId` is a `bytes32` on chain (a keccak hash). Accept a `0x` literal
+/// (or bare hex) and left-pad to 32 bytes so a short value pasted from a receipt
+/// still binds.
+fn op_id(var: &str) -> Vec<u8> {
     let v = std::env::var(var).unwrap_or_else(|_| panic!("{var} is required"));
-    match v.strip_prefix("0x") {
-        Some(hex) => u64::from_str_radix(hex, 16).expect("operationId hex must fit u64"),
-        None => v.parse().expect("operationId must be a u64"),
-    }
+    let raw = hex::decode(v.strip_prefix("0x").unwrap_or(&v)).expect("operationId hex");
+    assert!(raw.len() <= 32, "operationId must be at most 32 bytes");
+    let mut id = vec![0u8; 32 - raw.len()];
+    id.extend_from_slice(&raw);
+    id
 }
 
 /// `None` when the live chain is not configured, so the suite is a no-op in CI.
@@ -73,7 +74,7 @@ fn live_deposit_binds_operation_id() {
         &l.bridge,
         l.min_conf,
         &l.tx,
-        l.op_id,
+        &l.op_id,
         l.amount,
         l.commission,
     )
@@ -85,12 +86,15 @@ fn live_deposit_binds_operation_id() {
 #[test]
 fn live_deposit_rejects_wrong_operation_id() {
     let Some(l) = live() else { return };
+    // Flip the last byte so the id is a valid 32-byte value that differs.
+    let mut wrong = l.op_id.clone();
+    wrong[31] ^= 1;
     let e = verify_funds_in_event(
         &l.client,
         &l.bridge,
         l.min_conf,
         &l.tx,
-        l.op_id.wrapping_add(1),
+        &wrong,
         l.amount,
         l.commission,
     )
@@ -109,7 +113,7 @@ fn live_deposit_rejects_wrong_amount() {
         &l.bridge,
         l.min_conf,
         &l.tx,
-        l.op_id,
+        &l.op_id,
         l.amount.wrapping_add(1),
         l.commission,
     )

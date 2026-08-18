@@ -156,19 +156,28 @@ impl ParentAdapterService {
         source: SourceProof,
     ) -> Result<enclave_proto::sign_request::SourceNetwork, Status> {
         match source.chain {
-            Some(source_proof::Chain::Evm(evm)) => Ok(
-                enclave_proto::sign_request::SourceNetwork::EvmSource(enclave_proto::EvmSource {
-                    tx_hash: evm.tx_hash,
-                    event_valid: true,
-                    event_finalized: source.finalized,
-                    token: Self::decode_hex_field("SourceProof.token", source.token)?,
-                    recipient: Self::decode_hex_or_raw_field(source.recipient),
-                    commission: source.commission,
-                    // On-chain FundsIn operationId (bridge transfer id); the
-                    // enclave #60 check binds to this, not to operation_idx.
-                    funds_in_operation_id: evm.funds_in_operation_id,
-                }),
-            ),
+            Some(source_proof::Chain::Evm(evm)) => {
+                // Diagnosability only — here we still know which node sent it.
+                // The enclave's own check is the authority.
+                if evm.funds_in_operation_id.len() != 32 {
+                    return Err(Status::invalid_argument(format!(
+                        "EvmSource.funds_in_operation_id must be 32 bytes (the BridgeFundsIn \
+                         operationId from indexed topic1), got {}",
+                        evm.funds_in_operation_id.len()
+                    )));
+                }
+                Ok(enclave_proto::sign_request::SourceNetwork::EvmSource(
+                    enclave_proto::EvmSource {
+                        tx_hash: evm.tx_hash,
+                        event_valid: true,
+                        event_finalized: source.finalized,
+                        token: Self::decode_hex_field("SourceProof.token", source.token)?,
+                        recipient: Self::decode_hex_or_raw_field(source.recipient),
+                        commission: source.commission,
+                        funds_in_operation_id: evm.funds_in_operation_id,
+                    },
+                ))
+            }
             Some(source_proof::Chain::Rgb(rgb)) => Ok(
                 enclave_proto::sign_request::SourceNetwork::RgbSource(enclave_proto::RgbSource {
                     consignment_valid: true,
@@ -212,6 +221,11 @@ impl ParentAdapterService {
                         proxy_contract: payload.proxy_contract,
                         calldata_amount: payload.calldata_amount,
                         calldata_commission: payload.calldata_commission,
+                        lz_release: payload.lz_release.map(|lr| enclave_proto::LzReleaseParams {
+                            dst_eid: lr.dst_eid,
+                            min_amount_ld: lr.min_amount_ld,
+                            recipient: lr.recipient,
+                        }),
                     },
                 )
             }
@@ -314,6 +328,9 @@ impl ParentService for ParentAdapterService {
                         signature: r.signature,
                         identifier: None,
                         call_data: Vec::new(),
+                        // Ed25519: the signer cannot be recovered from the signature,
+                        // so the key travels with it.
+                        public_key: r.public_key,
                     }))
                 }
                 Some(enclave_response::Response::Error(e)) => {
@@ -406,6 +423,8 @@ impl ParentService for ParentAdapterService {
                             signature: r.signed_psbt,
                             identifier: None,
                             call_data: Vec::new(),
+                            // A PSBT carries per-input key material of its own.
+                            public_key: Vec::new(),
                         }))
                     }
                     Some(enclave_response::Response::EvmSignature(r)) => {
@@ -419,6 +438,8 @@ impl ParentService for ParentAdapterService {
                             // signature commits to — the caller must submit these
                             // bytes, not the ones it sent (audit M-02 / #93, #63).
                             call_data: r.call_data,
+                            // secp256k1: the signer is recoverable from the signature.
+                            public_key: Vec::new(),
                         }))
                     }
                     Some(enclave_response::Response::Error(e)) => {
@@ -470,6 +491,8 @@ impl ParentService for ParentAdapterService {
                             signature: r.signature,
                             identifier: None,
                             call_data: Vec::new(),
+                            // secp256k1: the signer is recoverable from the signature.
+                            public_key: Vec::new(),
                         }))
                     }
                     Some(enclave_response::Response::Error(e)) => {
@@ -519,6 +542,8 @@ impl ParentService for ParentAdapterService {
                             signature: r.signed_psbt,
                             identifier: None,
                             call_data: Vec::new(),
+                            // A PSBT carries per-input key material of its own.
+                            public_key: Vec::new(),
                         }))
                     }
                     Some(enclave_response::Response::Error(e)) => {
@@ -615,6 +640,7 @@ impl ParentService for ParentAdapterService {
                 enclave_proto::InitializeKeyRequest {
                     seed: vec![],
                     mnemonic: inner.cloning_secret,
+                    cloning_secret: String::new(),
                 },
             )),
         };
@@ -636,14 +662,48 @@ impl ParentService for ParentAdapterService {
         }
     }
 
-    /// Clone — not yet implemented (cluster cloning).
+    /// Clone — donor side of cluster cloning. The requester's orchestrator
+    /// relays its InitiateCloning output here; we translate it into an enclave
+    /// GetCloneRequest against the *local* (donor) enclave. The enclave verifies
+    /// the requester attestation, PCRs, nonce freshness, pubkey/digest binding
+    /// and the digest against its own UTEXO_CLONING_SECRET before sealing the
+    /// seed. We return the sealed seed plus the donor's ephemeral pubkey and
+    /// attestation so the requester can drive SetClone locally.
     async fn clone(
         &self,
-        _request: Request<CloneRequest>,
+        request: Request<CloneRequest>,
     ) -> Result<Response<CloneResponse>, Status> {
-        Err(Status::unimplemented(
-            "Clone not yet implemented (cluster cloning)",
-        ))
+        let inner = request.into_inner();
+        tracing::info!(
+            cluster_pk = %hex::encode(&inner.cluster_public_key),
+            "gRPC Clone called (donor GetClone)"
+        );
+
+        let enclave_req = EnclaveRequest {
+            request: Some(enclave_request::Request::GetClone(
+                enclave_proto::GetCloneRequest {
+                    cluster_public_key: inner.cluster_public_key,
+                    cloning_digest: inner.cloning_digest,
+                    encryption_pubkey: inner.encryption_pubkey,
+                    requester_attestation: inner.attestation,
+                },
+            )),
+        };
+
+        let resp = self.send_to_enclave(enclave_req).await?;
+
+        match resp.response {
+            Some(enclave_response::Response::GetClone(r)) => Ok(Response::new(CloneResponse {
+                encrypted_seed: r.encrypted_seed,
+                donor_pubkey: r.donor_pubkey,
+                donor_attestation: r.donor_attestation,
+            })),
+            Some(enclave_response::Response::Error(e)) => Err(Self::enclave_error_to_status(&e)),
+            other => Err(Status::internal(format!(
+                "unexpected enclave response for Clone: {:?}",
+                other
+            ))),
+        }
     }
 
     /// GetLastSavedBlock — forwards to enclave. PR 1 wires the surface only;

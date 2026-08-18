@@ -1,5 +1,5 @@
-# syntax=docker/dockerfile:1.4
-# Combined production enclave image (vsock + rgb + ccd + evm-rpc + helios) —
+# syntax=docker/dockerfile:1.7
+# Combined production enclave image (vsock + rgb + ccd + evm-rpc + helios) -
 # handles both the RGB/BTC and Concordium bridges in one binary. For a lean
 # single-network EIF, build Dockerfile.enclave.rgb (RGB only) or
 # Dockerfile.enclave.ccd (Concordium only).
@@ -7,12 +7,37 @@
 #   DOCKER_BUILDKIT=1 docker build --ssh default \
 #     -f build/Dockerfile.enclave -t utexo-bridge-enclave .
 #
-# `--ssh default` forwards the host's SSH agent into the build so Cargo can
-# fetch the pinned generated `federated-signer-proto` Rust crate from GitHub
-# over SSH. The same SSH mount is also used for the private `rgb-consignment`
-# git dependency pulled by the `rgb-validation`/`spv` features.
+# `--ssh default` forwards the host's SSH agent into the build so cargo
+# can fetch the private `rgb-consignment` git dep that the
+# `rgb-validation`/`spv` features pull in.
+#
+# Reproducible PCR0: the EIF packs the runtime-stage rootfs, so any drift in a
+# base image or its packages changes PCR0. Both FROMs are pinned by DIGEST (not
+# just tag) so a moving tag can't silently change the measurement. When bumping,
+# update BOTH the tag and the @sha256 digest together (resolve via
+# `docker buildx imagetools inspect <image>:<tag>`). `dockerfile:1.7` lets
+# BuildKit honour SOURCE_DATE_EPOCH for reproducible layer timestamps.
+# OS package versions are frozen by the digest pin ($releasever is fixed), and the
+# runtime RUN scrubs dnf/rpm state (see below). The builder-stage apt packages are
+# not shipped (multi-stage) and only affect the binary, which --locked + RUSTFLAGS
+# keep deterministic.
 
-FROM rust:1.96-slim AS builder
+# GLIBC PIN (runtime-compat, NOT just build): the enclave binary links against
+# the builder's glibc but RUNS on the amazonlinux:2023-minimal runtime rootfs
+# below, which ships glibc 2.34. The default `rust:*-slim` moved to Debian
+# trixie (glibc >=2.38), and `aws-lc-sys` (Electrum -> rustls -> aws-lc-rs) pulls
+# in a GLIBC_2.38 symbol, so a trixie-built binary aborts at enclave boot with
+# `version GLIBC_2.38 not found`. Bullseye (Debian 11) ships glibc 2.31 <= 2.34,
+# so the binary only needs symbols the runtime provides. Pin by DIGEST; bump tag
+# + digest together and keep it on a glibc <= the runtime's.
+# NOTE (dev merge): dev's Dockerfile.enclave bumped this to `rust:1.96-slim`
+# (Debian trixie / glibc 2.38) alongside enabling `evm-rpc`. We take dev's rustc
+# 1.96 but on BULLSEYE, not trixie: `evm-rpc` pulls `alloy` 2.1.x whose MSRV is
+# rustc 1.91, so the previous 1.89 pin no longer compiles ("requires rustc 1.91")
+# — yet trixie's glibc 2.38 still breaks the AL2023 runtime. `1.96-slim-bullseye`
+# satisfies BOTH (rustc >= 1.91 AND glibc 2.31 <= 2.34). If a future dep needs a
+# newer rustc, bump to a newer *-bullseye tag (glibc <= 2.34), never trixie.
+FROM rust:1.96-slim-bullseye@sha256:c593596210f729542a92aced6a8b0812bcc8d04c5f1b238e663b800d0e2e17bd AS builder
 
 # `git` + `openssh-client`: the workspace `[patch.crates-io]` uses public
 # git URLs for rgb-consensus / rgb-ops / rgb-invoicing / rgb-strict-encoding,
@@ -20,8 +45,15 @@ FROM rust:1.96-slim AS builder
 # sets `net.git-fetch-with-cli = true` so cargo shells out to system `git`
 # rather than bundled libgit2. `openssh-client` provides the ssh binary +
 # known_hosts machinery `git` needs for the SSH transport.
+# `cmake` (via pip) + `make`: the Electrum witness resolver (rgb-ops
+# `electrum_blocking`) pulls `electrum-client` -> rustls -> aws-lc-rs, whose
+# `aws-lc-sys` C sources build via CMake. gcc/cc is already present (used by
+# `ring`). Bullseye's apt cmake is 3.18; aws-lc-sys wants a newer one, so we pin
+# a modern cmake from PyPI. All builder-only (multi-stage) — not in runtime/PCR.
 RUN apt-get update && apt-get install -y \
     pkg-config libssl-dev protobuf-compiler git ca-certificates openssh-client \
+    make python3 python3-pip \
+    && pip3 install --no-cache-dir "cmake==3.31.6" \
     && rm -rf /var/lib/apt/lists/*
 
 # Trust github.com's SSH host key so the build doesn't prompt or fail
@@ -33,28 +65,86 @@ WORKDIR /build
 COPY . /build/
 
 WORKDIR /build/enclave
+# Deterministic compilation (PCR0 reproducibility, Step 4):
+#   CARGO_INCREMENTAL=0   no incremental artifacts (release already off; explicit)
+#   --remap-path-prefix   strip the absolute build path from embedded paths
+#   -C debuginfo=0 / strip=symbols  drop debug info + symbol tables (a common
+#                         source of binary variation; also shrinks the binary)
+# The container paths (/build, $CARGO_HOME) are already constant, so combined with
+# `--locked` below the compiled binary is stable across rebuilds of the same commit.
+ENV CARGO_INCREMENTAL=0 \
+    RUSTFLAGS="--remap-path-prefix=/build=/src -C debuginfo=0 -C strip=symbols"
 # `spv` implies `rgb-validation`; listing both explicitly so the feature
 # set is visible at a glance.
 #
 # `--mount=type=ssh` exposes the SSH_AUTH_SOCK forwarded by `--ssh default`
-# only for the duration of this RUN, so no credentials end up in the
-# image layers.
+# only for the duration of this RUN, so no credentials end up in the image
+# layers. In CI we ALSO pass both deploy keys as BuildKit secrets (federated_key
+# + consignment_key) and set up per-host SSH aliases + `insteadOf`: two private
+# repos (federated-signer-proto, rgb-consignment-parser) both live on github.com,
+# and a single ssh-agent holding two repo-scoped deploy keys offers the wrong one
+# first -> GitHub returns "Repository not found". `required=false` keeps local
+# agent-only builds (no secret files) working unchanged. This block affects only
+# how deps are FETCHED, not the compiled binary, so PCR0 is unaffected.
+#
+# `--locked` pins to Cargo.lock exactly - without it the `?branch=...` git deps
+# (rgb-*) could re-resolve to a newer commit on a later rebuild and change the
+# binary (and thus PCR0).
+#
 # `evm-rpc` adds in-enclave FundsIn event verification (#60); it pulls the
 # alloy + tokio subtree, which grows the binary and therefore PCR0 - pinned via
-# Cargo.lock for reproducibility. Requires a second host vsock-proxy for the
-# EVM RPC (EVM_RPC_VSOCK_PORT, default 8002).
+# `--locked`/Cargo.lock for reproducibility. Requires a second host vsock-proxy
+# for the EVM RPC (EVM_RPC_VSOCK_PORT, default 8002).
 # `ccd` adds Concordium governance signing (SignCcd + CcdSource routes). The
 # umbrella `rgb` feature pulls in `spv`/`rgb-validation`.
 # `helios` makes FundsIn verification trustless (#77) and is required: the
 # production policy refuses to boot on the host-relayed RawRpc source. Operator
 # must set HELIOS_EXECUTION_RPC / HELIOS_CONSENSUS_RPC and run the exec+consensus
 # vsock-proxies (default ports 8003 / 8004).
-RUN --mount=type=ssh cargo build --release --features vsock,rgb,ccd,evm-rpc,helios
+RUN --mount=type=ssh \
+    --mount=type=secret,id=federated_key,required=false \
+    --mount=type=secret,id=consignment_key,required=false \
+    set -eu; \
+    if [ -f /run/secrets/federated_key ] && [ -f /run/secrets/consignment_key ]; then \
+      install -m 600 /run/secrets/federated_key /tmp/federated_key; \
+      install -m 600 /run/secrets/consignment_key /tmp/consignment_key; \
+      printf "%s\n" \
+        "Host github.com-federated" \
+        "  HostName github.com" \
+        "  User git" \
+        "  IdentityFile /tmp/federated_key" \
+        "  IdentitiesOnly yes" \
+        "Host github.com-consignment" \
+        "  HostName github.com" \
+        "  User git" \
+        "  IdentityFile /tmp/consignment_key" \
+        "  IdentitiesOnly yes" \
+        > /tmp/ci_ssh_config; \
+      export GIT_SSH_COMMAND="ssh -F /tmp/ci_ssh_config"; \
+      git config --global url."ssh://git@github.com-federated/UTEXO-Protocol/federated-signer-proto.git".insteadOf "ssh://git@github.com/UTEXO-Protocol/federated-signer-proto.git"; \
+      git config --global url."ssh://git@github.com-consignment/UTEXO-Protocol/rgb-consignment-parser.git".insteadOf "ssh://git@github.com/UTEXO-Protocol/rgb-consignment-parser.git"; \
+    fi; \
+    cargo build --release --locked --features vsock,rgb,ccd,evm-rpc,helios
 
 # --- Runtime ---
-FROM public.ecr.aws/amazonlinux/amazonlinux:2023-minimal AS runtime
+# Pinned by digest (see header) — this rootfs is what ends up in the EIF, so its
+# digest directly drives PCR0. Bump tag + digest together when updating.
+FROM public.ecr.aws/amazonlinux/amazonlinux:2023-minimal@sha256:8073d921f4ac1bf17fca94e16b0bc575e3fc17e4ccbe53b563160f02f0c7ccfc AS runtime
 
-RUN dnf install -y socat iproute && dnf clean all
+# Deterministic runtime rootfs (PCR0/PCR2 reproducibility, Step 2):
+# Package VERSIONS are already frozen — the base image is digest-pinned, so dnf's
+# $releasever is fixed (2023.x snapshot) and resolves the same socat/iproute every
+# build. The remaining non-determinism is CONTENT dnf/rpm writes with embedded
+# timestamps/randomness (rpmdb, dnf history, caches, logs) — rewrite-timestamp
+# only normalises file mtimes, not file contents. We scrub that state in the SAME
+# layer so the measured rootfs is stable. (rpmdb isn't needed at runtime.)
+RUN dnf install -y socat iproute \
+    && dnf clean all \
+    && rm -rf \
+        /var/cache/dnf /var/cache/libdnf5 /var/cache/ldconfig \
+        /var/lib/dnf /var/lib/rpm /var/lib/rpm-state \
+        /var/log/* /tmp/* \
+    && :
 
 WORKDIR /app
 COPY --from=builder /build/target/release/utexo-bridge-enclave /app/utexo-bridge-enclave
@@ -62,5 +152,73 @@ COPY build/entrypoint.sh /app/entrypoint.sh
 
 RUN chmod +x /app/utexo-bridge-enclave /app/entrypoint.sh
 
-ENV RUST_LOG=info
+# NOTE: the donor cloning secret is intentionally NOT baked here. It is
+# delivered at runtime via the `InitializeKey` message (CLI: `init
+# --cloning-secret <secret>`), so it never lands in the EIF / image layers and
+# the PCRs stay reproducible. See enclave/src/server.rs (handle_initialize).
+
+# Pinned bridge/indexer config — public identifiers, baked so PCR0 commits to
+# them (attestation proves which chain/contract/asset this enclave serves) and
+# so anyone can reproduce PCR0 from this public repo. Stage runs on Bitcoin
+# MAINNET + Arbitrum One (chain_id 42161). Electrum: the enclave pins this host
+# to 127.0.0.1 and reaches it over the vsock forwarder (host runs
+# `vsock-proxy 8001 electrs-mainnet.utexo.com 50002`); TLS terminates in-enclave.
+# TWO-CONTRACT deployment: the EVM funds-out EIP-712 verifyingContract is the
+# MultisigProxy (EVM_PROXY_CONTRACT_ADDRESS), which DIFFERS from the bridge
+# *entry* contract that emits FundsIn (FUNDS_IN_CONTRACT, set below). The listener
+# stamps EVM_PROXY_CONTRACT_ADDRESS into every funds-out request; the enclave
+# cross-checks it (see enclave/src/config.rs + networks/evm/validation.rs).
+ENV EVM_CHAIN_ID=42161 \
+    EVM_PROXY_CONTRACT_ADDRESS=0xC985c12bbCECe96A13A72A62FD75d8aB9381ef5A \
+    RGB_ASSET_ID=rgb:lJFja2kw-h_azlEd-7CNPxwf-UsvIDhH-UD0Y1f9-8f26jLk \
+    BITCOIN_NETWORK=bitcoin \
+    ELECTRUM_URL=ssl://electrs-mainnet.utexo.com:50002
+
+# In-enclave EVM `FundsIn` verification config (evm-rpc, #60), baked so PCR0
+# commits to the confirmation policy and the loopback egress. EVM_RPC_URL MUST
+# be loopback: the enclave reaches the EVM RPC only through the vsock forwarder
+# (host runs `vsock-proxy <EVM_RPC_VSOCK_PORT=8002> <arbitrum-rpc-host> <port>`,
+# enclave listens on 127.0.0.1:3444). A non-loopback value is rejected back to
+# the default at boot (see enclave/src/config.rs EvmRpcConfig). EVM_MIN_CONFIRMATIONS
+# is the minimum depth a FundsIn receipt must have vs the RPC head (fail-closed).
+# FUNDS_IN_CONTRACT is set EXPLICITLY to the bridge *entry* contract (the FundsIn
+# event emitter). It MUST be explicit here because it differs from
+# EVM_PROXY_CONTRACT_ADDRESS (the MultisigProxy) — leaving it unset would fall
+# back to the proxy address and make FundsIn verification look at the wrong contract.
+#
+# Operational signing-policy pins for the plain-BTC (`SignBtc`/handle_sign_btc)
+# and gas-tx (`SignRawDigest`/handle_sign_raw_digest) paths. These ARE reachable
+# from our listener: it dials a single `Sign` gRPC method but routes by DataType —
+# `BTC_UTXO` -> signBtcPsbt -> EnrichedBtcPayload -> SignBtcRequest, and
+# `EVM_GAS_TX` -> signGasTx -> EnrichedEvmPayload.unsigned_tx -> SignRawDigest
+# (federated-signer-node networks/rgb/signer.go + networks/evm/signer.go). So the
+# bridge's create_utxos / send_btc / gas-funding ops flow through here. In a
+# release (`rgb-validation`) build these paths FAIL CLOSED unless pinned, so we
+# bake real values (public -> commit into PCR0):
+#   - BTC_MAX_TOTAL_SATS: cap on total input value spent (blast-radius bound). This
+#     is the plain-BTC production gate that must be set.
+#   - GAS_TX_ALLOWED_TO: the only `to` the enclave will sign a gas tx toward (with
+#     value==0) — here the bridge *entry* contract itself (== FUNDS_IN_CONTRACT,
+#     NOT the MultisigProxy in EVM_PROXY_CONTRACT_ADDRESS).
+# NOTE: the former BTC_ALLOWED_SCRIPTS output allowlist was REMOVED upstream
+# (enclave 91fd82c): the scripts derive from a post-boot seed, but enclave env is
+# measured into PCR0, so baking them changed the identity the seed was bound to.
+# The enclave now PROVES each plain-BTC output is its own (control-block anchored
+# or BIP-371 metadata), so no destination allowlist config is needed.
+# The RGB SignPsbt (DataType_TRANSACTION) + EVM swap-signing paths are independent
+# of the plain-BTC / gas-tx pins.
+ENV EVM_RPC_URL=http://127.0.0.1:3444 \
+    EVM_MIN_CONFIRMATIONS=12 \
+    FUNDS_IN_CONTRACT=0x6711f1a319B37847fa0234181C34D883774c4951 \
+    GAS_TX_ALLOWED_TO=0x6711f1a319B37847fa0234181C34D883774c4951 \
+    BTC_MAX_TOTAL_SATS=1000000
+
+# DEBUG-HUNT EIF (op13 RGB-PSBT enclave crash): verbose logs + full panic
+# backtrace so `nitro-cli console` (enclave run with --debug-mode) captures the
+# exact panic site when signing op13. RUST_LOG reaches the tracing EnvFilter
+# (main.rs from_default_env). This is a throwaway measurement build — PCRs are
+# zeroed under --debug-mode anyway; revert to `RUST_LOG=info` before any
+# production (non-debug) EIF.
+ENV RUST_LOG=debug \
+    RUST_BACKTRACE=full
 ENTRYPOINT ["/app/entrypoint.sh"]

@@ -32,6 +32,17 @@ pub struct ValidationContext<'a> {
     pub rgb_validator: Option<&'a RgbValidator>,
     #[cfg(feature = "spv")]
     pub header_chain: &'a Mutex<crate::networks::rgb::spv::HeaderChain>,
+    /// Resolves which of a PSBT's Bitcoin outputs pay back to this enclave.
+    /// Required by the send-RGB per-output recipient bind (W-06 / #52) to tell
+    /// bridge change from a payout to a third party.
+    ///
+    /// A callback so the key lock is taken only for that resolution, never
+    /// across consignment validation's Esplora/Electrum round-trips. `None`
+    /// fails the bind closed — an enclave that cannot identify its own outputs
+    /// must not sign a send-RGB PSBT.
+    #[cfg(feature = "rgb-validation")]
+    pub self_owned_psbt_outputs:
+        Option<crate::networks::rgb::psbt_validation::SelfOwnedOutputs<'a>>,
 }
 
 /// Outcome of validating a source network: the route proof, plus — for an RGB
@@ -76,13 +87,21 @@ pub fn validate_source(
     }
 }
 
+/// Route proof plus, for an EVM `fundsOut`, the calldata decoded once into one
+/// typed intent that the later stages consume (I-12 / #165). `None` for RGB
+/// destinations and the dev-mode bypass.
+pub struct DestinationProof {
+    pub proof: RouteProof,
+    pub evm_funds_out: Option<crate::networks::evm::validation::FundsOutParams>,
+}
+
 /// Dispatch destination-network validation to the owning network module.
 pub fn validate_destination(
     amount: u64,
     source_commission: u64,
     destination: &DestinationNetwork,
     ctx: &ValidationContext<'_>,
-) -> Result<RouteProof> {
+) -> Result<DestinationProof> {
     #[cfg(not(all(feature = "rgb-validation", not(feature = "dev-mode"))))]
     {
         let _ = amount;
@@ -91,24 +110,38 @@ pub fn validate_destination(
 
     match destination {
         DestinationNetwork::EvmDestination(destination) => {
-            evm::validation::validate_destination(destination, ctx)
+            let (proof, evm_funds_out) = evm::validation::validate_destination(destination, ctx)?;
+            Ok(DestinationProof {
+                proof,
+                evm_funds_out,
+            })
         }
         DestinationNetwork::RgbDestination(destination) => {
             rgb::validate_destination(destination, ctx)?;
 
+            // The destination amount is the consignment's **recipient leg**,
+            // derived and proven inside the enclave (W-06 / #52) — not the
+            // host-supplied `psbt_output_amount`, which nothing checks. Only
+            // builds without that binding fall back to the wire field, and
+            // those builds run no destination cross-checks at all.
             #[cfg(all(feature = "rgb-validation", not(feature = "dev-mode")))]
-            rgb::validate_destination_anchor(destination, amount, source_commission, ctx)?;
+            let destination_amount =
+                rgb::validate_destination_anchor(destination, amount, source_commission, ctx)?;
+            #[cfg(not(all(feature = "rgb-validation", not(feature = "dev-mode"))))]
+            let destination_amount = destination.psbt_output_amount;
 
-            Ok(RouteProof {
-                amount: destination
-                    .psbt_output_amount
-                    .checked_add(source_commission)
-                    .ok_or_else(|| {
-                        EnclaveError::CrossCheck(
-                            "psbt_output_amount + source_commission overflow".into(),
-                        )
-                    })?,
-                operation_id: None,
+            Ok(DestinationProof {
+                proof: RouteProof {
+                    amount: destination_amount
+                        .checked_add(source_commission)
+                        .ok_or_else(|| {
+                            EnclaveError::CrossCheck(
+                                "destination amount + source_commission overflow".into(),
+                            )
+                        })?,
+                    operation_id: None,
+                },
+                evm_funds_out: None,
             })
         }
     }
@@ -152,6 +185,15 @@ pub fn validate_route_proofs(
     }
 }
 
+/// Both sides are **bridge asset units**, not sats.
+///
+/// `source_amount` is the EVM `FundsIn` token amount (verified against the
+/// on-chain log by `evm::evm_event::verify_funds_in_event`); an RGB
+/// `destination_amount` is the consignment's recipient leg in RGB asset units
+/// (`TransitionOutput::amount`), which the bridge issues 1:1 against the EVM
+/// token. Neither is a Bitcoin value — nothing here reads
+/// `psbt.unsigned_tx.output`, and the sats-denominated checks on a PSBT live in
+/// [`crate::networks::rgb::btc_crosscheck`] instead.
 fn validate_amount_covers_destination(source_amount: u64, destination_amount: u64) -> Result<()> {
     if source_amount < destination_amount {
         return Err(EnclaveError::CrossCheck(format!(
@@ -195,7 +237,7 @@ mod tests {
             token: vec![0x11; 20],
             recipient: vec![0x22; 20],
             commission,
-            funds_in_operation_id: 0,
+            funds_in_operation_id: vec![0x33; 32],
         })
     }
 
@@ -238,6 +280,7 @@ mod tests {
             proxy_contract: vec![0x33; 20],
             calldata_amount: destination_amount,
             calldata_commission: commission,
+            lz_release: None,
         })
     }
 

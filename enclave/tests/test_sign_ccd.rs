@@ -13,6 +13,7 @@ fn init_and_get_ccd_pubkey(port: u16) -> Vec<u8> {
         request: Some(Request::InitializeKey(InitializeKeyRequest {
             seed: [0x42u8; 64].to_vec(),
             mnemonic: String::new(),
+            cloning_secret: String::new(),
         })),
     };
     match common::send_request(port, &init).response {

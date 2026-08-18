@@ -76,6 +76,34 @@ struct Cli {
     /// checkpoint fails the `user_data` hash (audit M-06). Ignored otherwise.
     #[arg(long)]
     expect_helios_checkpoint: Option<String>,
+
+    /// Expected gas-tx (`SignRawDigest`) allowed destination the enclave pinned
+    /// (`GAS_TX_ALLOWED_TO`), as 0x-hex. Omit if the operator left the gas path
+    /// unpinned (the enclave then commits the all-zero destination and fails the
+    /// path closed). Audit C-02; ignored with --mock.
+    #[arg(long)]
+    expect_gas_tx_to: Option<String>,
+
+    /// Expected gas-tx `gasLimit` ceiling (`GAS_TX_MAX_GAS_LIMIT`). Default 0
+    /// (unpinned). Ignored with --mock.
+    #[arg(long, default_value_t = 0)]
+    expect_gas_max_gas_limit: u64,
+
+    /// Expected gas-tx per-gas fee ceiling in wei (`GAS_TX_MAX_FEE_PER_GAS`).
+    /// Default 0 (unpinned). Ignored with --mock.
+    #[arg(long, default_value_t = 0)]
+    expect_gas_max_fee_per_gas: u128,
+
+    /// Expected gas-tx native-value ceiling in wei (`GAS_TX_MAX_VALUE_WEI`), the
+    /// bound on the payable `lzFundsOutCall` carve-out. Default 0 (unpinned —
+    /// the enclave then signs no non-zero value at all). Ignored with --mock.
+    #[arg(long, default_value_t = 0)]
+    expect_gas_max_value_wei: u128,
+
+    /// Expected gas-tx calldata selector allowlist (`GAS_TX_ALLOWED_SELECTORS`):
+    /// comma-separated 4-byte hex selectors. Default empty. Ignored with --mock.
+    #[arg(long, default_value = "")]
+    expect_gas_selectors: String,
 }
 
 /// Parse the `--expect-helios-checkpoint` flag into a 32-byte beacon block root.
@@ -100,6 +128,38 @@ fn parse_evm_source(s: &str) -> Result<EvmDataSource> {
             "invalid --expect-evm-source '{other}' (expected: raw | helios | disabled)"
         ),
     }
+}
+
+/// Parse an optional `0x`-hex Ethereum address into 20 bytes; `None` → all-zero
+/// (the "gas path unpinned" commitment).
+fn parse_expect_gas_to(s: &Option<String>) -> Result<[u8; 20]> {
+    match s {
+        None => Ok([0u8; 20]),
+        Some(s) => {
+            let stripped = s.strip_prefix("0x").unwrap_or(s);
+            let bytes = hex::decode(stripped)
+                .with_context(|| format!("--expect-gas-tx-to '{s}' is not hex"))?;
+            bytes.try_into().map_err(|v: Vec<u8>| {
+                anyhow::anyhow!("--expect-gas-tx-to must be 20 bytes, got {}", v.len())
+            })
+        }
+    }
+}
+
+/// Parse `--expect-gas-selectors` (comma-separated 4-byte hex) into selectors.
+/// An empty string yields an empty allowlist.
+fn parse_expect_gas_selectors(s: &str) -> Result<Vec<[u8; 4]>> {
+    s.split(',')
+        .map(str::trim)
+        .filter(|p| !p.is_empty())
+        .map(|p| {
+            let stripped = p.strip_prefix("0x").unwrap_or(p);
+            let bytes =
+                hex::decode(stripped).with_context(|| format!("selector '{p}' is not hex"))?;
+            <[u8; 4]>::try_from(bytes.as_slice())
+                .map_err(|_| anyhow::anyhow!("selector '{p}' must be exactly 4 bytes"))
+        })
+        .collect()
 }
 
 #[tokio::main]
@@ -151,6 +211,11 @@ async fn run(cli: Cli) -> Result<()> {
             allow_vanilla_psbt: cli.expect_vanilla_psbt,
             evm_source,
             evm_checkpoint,
+            gas_tx_allowed_to: parse_expect_gas_to(&cli.expect_gas_tx_to)?,
+            gas_tx_max_gas_limit: cli.expect_gas_max_gas_limit,
+            gas_tx_max_fee_per_gas: cli.expect_gas_max_fee_per_gas,
+            gas_tx_max_value_wei: cli.expect_gas_max_value_wei,
+            gas_tx_allowed_selectors: parse_expect_gas_selectors(&cli.expect_gas_selectors)?,
         };
         (pcrs, VerifyMode::Real, expected_policy)
     };

@@ -26,6 +26,7 @@ fn initialize(port: u16) {
             request: Some(Req::InitializeKey(InitializeKeyRequest {
                 seed: vec![],
                 mnemonic: TEST_MNEMONIC.into(),
+                cloning_secret: String::new(),
             })),
         },
     );

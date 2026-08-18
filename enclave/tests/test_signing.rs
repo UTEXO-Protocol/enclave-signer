@@ -8,17 +8,21 @@ use utexo_bridge_enclave::proto::enclave_response::Response;
 use utexo_bridge_enclave::proto::sign_request::{DestinationNetwork, SourceNetwork};
 use utexo_bridge_enclave::proto::*;
 
+// Mirrors `IBridge.fundsOut(FundsOutParams)`: one dynamic tuple, not the old
+// flat 8-argument encoding, which the decoder rejects outright.
 sol! {
-    function fundsOut(
-        address recipient,
-        uint256 amount,
-        uint256 burnId,
-        uint256 sourceChainId,
-        uint256 destinationChainId,
-        string sourceAddress,
-        bytes proof,
-        bytes settlementData
-    );
+    struct FundsOutParams {
+        address recipient;
+        uint256 amount;
+        uint256 burnId;
+        uint256 sourceChainId;
+        uint256 destinationChainId;
+        string sourceAddress;
+        bytes proof;
+        bytes settlementData;
+    }
+
+    function fundsOut(FundsOutParams params);
 }
 
 /// Pinned `BridgeConfig` matching the defaults of `valid_sign_evm_request`
@@ -48,17 +52,19 @@ fn btc_capped_config(max_total_sats: u64) -> BridgeConfig {
     }
 }
 
-/// Build ABI-valid `fundsOut` calldata in the deployed 8-arg shape.
+/// Build ABI-valid `fundsOut(FundsOutParams)` calldata in the deployed shape.
 fn mock_funds_out_calldata(recipient: [u8; 20], amount: u64) -> Vec<u8> {
     fundsOutCall {
-        recipient: Address::from(recipient),
-        amount: U256::from(amount),
-        burnId: U256::ZERO,
-        sourceChainId: U256::ZERO,
-        destinationChainId: U256::from(1u64),
-        sourceAddress: String::new(),
-        proof: Bytes::new(),
-        settlementData: Bytes::new(),
+        params: FundsOutParams {
+            recipient: Address::from(recipient),
+            amount: U256::from(amount),
+            burnId: U256::ZERO,
+            sourceChainId: U256::ZERO,
+            destinationChainId: U256::from(1u64),
+            sourceAddress: String::new(),
+            proof: Bytes::new(),
+            settlementData: Bytes::new(),
+        },
     }
     .abi_encode()
 }
@@ -98,6 +104,7 @@ fn valid_sign_evm_request(amount: u64, commission: u64) -> SignRequest {
             proxy_contract: vec![0xAA; 20],
             calldata_amount: amount,
             calldata_commission: commission,
+            lz_release: None,
         })),
     }
 }
@@ -174,6 +181,7 @@ fn init_wallet(port: u16) -> EnclaveWallet {
         request: Some(Request::InitializeKey(InitializeKeyRequest {
             seed: vec![],
             mnemonic: String::new(),
+            cloning_secret: String::new(),
         })),
     };
     match common::send_request(port, &init_req).response {
@@ -492,9 +500,8 @@ fn sign_psbt_request(
             token: vec![],
             recipient: vec![],
             commission: evm_commission,
-            // On-chain FundsIn operationId the enclave #60 check binds to (these
-            // non-rgb-validation builds don't run that check; 0 is a placeholder).
-            funds_in_operation_id: 0,
+            // Unchecked in non-`evm-rpc` builds, but must still be 32 bytes.
+            funds_in_operation_id: vec![0x33; 32],
         })),
         destination_network: Some(DestinationNetwork::RgbDestination(RgbDestination {
             operation_idx: 0,
@@ -552,6 +559,7 @@ fn test_sign_evm_rejects_consignment_valid_with_empty_bytes() {
         request: Some(Request::InitializeKey(InitializeKeyRequest {
             seed: vec![],
             mnemonic: String::new(),
+            cloning_secret: String::new(),
         })),
     };
     common::send_request(port, &init_req);
@@ -600,6 +608,7 @@ fn test_sign_evm_rejects_funds_out_without_validator() {
         request: Some(Request::InitializeKey(InitializeKeyRequest {
             seed: vec![],
             mnemonic: String::new(),
+            cloning_secret: String::new(),
         })),
     };
     common::send_request(port, &init_req);
@@ -643,6 +652,7 @@ fn test_sign_evm_accepts_ccd_source_funds_out() {
         request: Some(Request::InitializeKey(InitializeKeyRequest {
             seed: vec![],
             mnemonic: String::new(),
+            cloning_secret: String::new(),
         })),
     };
     common::send_request(port, &init_req);
@@ -664,6 +674,7 @@ fn test_sign_evm_accepts_ccd_source_funds_out() {
                 proxy_contract: vec![0xAA; 20],
                 calldata_amount: amount,
                 calldata_commission: commission,
+                lz_release: None,
             })),
         })),
     };
@@ -707,6 +718,7 @@ fn test_sign_evm_rejects_unconfigured_bridge_config() {
         request: Some(Request::InitializeKey(InitializeKeyRequest {
             seed: vec![],
             mnemonic: String::new(),
+            cloning_secret: String::new(),
         })),
     };
     common::send_request(port, &init_req);
@@ -752,6 +764,7 @@ fn test_no_spv_build_refuses_funds_out_even_without_merkle_proofs() {
         request: Some(Request::InitializeKey(InitializeKeyRequest {
             seed: vec![],
             mnemonic: String::new(),
+            cloning_secret: String::new(),
         })),
     };
     common::send_request(port, &init_req);
@@ -811,6 +824,7 @@ fn test_sign_psbt_roundtrip() {
         request: Some(Request::InitializeKey(InitializeKeyRequest {
             seed: seed.to_vec(),
             mnemonic: String::new(),
+            cloning_secret: String::new(),
         })),
     };
     let init_resp = common::send_request(port, &init_req);
@@ -883,6 +897,7 @@ fn test_sign_psbt_ignores_listener_evm_booleans() {
         request: Some(Request::InitializeKey(InitializeKeyRequest {
             seed: vec![],
             mnemonic: String::new(),
+            cloning_secret: String::new(),
         })),
     };
     common::send_request(port, &init_req);
@@ -932,6 +947,7 @@ fn test_no_evm_rpc_build_refuses_bridge_psbt() {
         request: Some(Request::InitializeKey(InitializeKeyRequest {
             seed: vec![],
             mnemonic: String::new(),
+            cloning_secret: String::new(),
         })),
     };
     common::send_request(port, &init_req);
@@ -974,6 +990,7 @@ fn test_sign_psbt_rejects_amount_mismatch() {
         request: Some(Request::InitializeKey(InitializeKeyRequest {
             seed: vec![],
             mnemonic: String::new(),
+            cloning_secret: String::new(),
         })),
     };
     common::send_request(port, &init_req);
@@ -1023,6 +1040,7 @@ fn test_sign_psbt_rejects_missing_evm_source_hash() {
         request: Some(Request::InitializeKey(InitializeKeyRequest {
             seed: vec![],
             mnemonic: String::new(),
+            cloning_secret: String::new(),
         })),
     };
     common::send_request(port, &init_req);
@@ -1072,6 +1090,7 @@ fn test_sign_psbt_zero_evm_hash_is_bridge_mode_not_vanilla() {
         request: Some(Request::InitializeKey(InitializeKeyRequest {
             seed: vec![],
             mnemonic: String::new(),
+            cloning_secret: String::new(),
         })),
     };
     common::send_request(port, &init_req);
@@ -1350,6 +1369,7 @@ fn test_sign_evm_rejects_consignment_hash_mismatch() {
         request: Some(Request::InitializeKey(InitializeKeyRequest {
             seed: vec![],
             mnemonic: String::new(),
+            cloning_secret: String::new(),
         })),
     };
     common::send_request(port, &init_req);
@@ -1391,6 +1411,7 @@ fn test_sign_evm_rejects_consignment_without_hash() {
         request: Some(Request::InitializeKey(InitializeKeyRequest {
             seed: vec![],
             mnemonic: String::new(),
+            cloning_secret: String::new(),
         })),
     };
     common::send_request(port, &init_req);
@@ -1428,6 +1449,7 @@ fn test_sign_raw_message_roundtrip() {
         request: Some(Request::InitializeKey(InitializeKeyRequest {
             seed: vec![],
             mnemonic: String::new(),
+            cloning_secret: String::new(),
         })),
     };
     let init_resp = common::send_request(port, &init_req);
@@ -1476,6 +1498,7 @@ fn test_sign_raw_message_empty() {
         request: Some(Request::InitializeKey(InitializeKeyRequest {
             seed: vec![],
             mnemonic: String::new(),
+            cloning_secret: String::new(),
         })),
     };
     common::send_request(port, &init_req);
@@ -1501,6 +1524,7 @@ fn test_sign_raw_message_deterministic() {
         request: Some(Request::InitializeKey(InitializeKeyRequest {
             seed: vec![],
             mnemonic: String::new(),
+            cloning_secret: String::new(),
         })),
     };
     common::send_request(port, &init_req);
@@ -1544,6 +1568,7 @@ fn test_sign_raw_message_different_messages_differ() {
         request: Some(Request::InitializeKey(InitializeKeyRequest {
             seed: vec![],
             mnemonic: String::new(),
+            cloning_secret: String::new(),
         })),
     };
     common::send_request(port, &init_req);
@@ -1587,6 +1612,7 @@ fn test_sign_raw_message_recoverable() {
         request: Some(Request::InitializeKey(InitializeKeyRequest {
             seed: seed.to_vec(),
             mnemonic: String::new(),
+            cloning_secret: String::new(),
         })),
     };
     let init_resp = common::send_request(port, &init_req);
@@ -1764,7 +1790,8 @@ fn eip1559_unsigned(chain_id: u64, to: &[u8; 20], value: u64) -> Vec<u8> {
     out
 }
 
-/// `BridgeConfig` with the gas-tx destination pinned (chain_id 1, to 0xAA…).
+/// `BridgeConfig` with the full gas-tx rule pinned (audit C-02): chain_id 1,
+/// destination 0xAA…, gas ≤ 30_000, fee ≤ 1_000 wei, selector 0xdeadbeef.
 #[cfg(not(feature = "dev-mode"))]
 fn gas_pinned_config() -> BridgeConfig {
     BridgeConfig {
@@ -1772,8 +1799,31 @@ fn gas_pinned_config() -> BridgeConfig {
         bridge_contract: [0xBB; 20],
         rgb_asset_id: "rgb:test".into(),
         gas_tx_allowed_to: Some([0xAA; 20]),
+        gas_tx_max_gas_limit: 30_000,
+        gas_tx_max_fee_per_gas: 1_000,
+        gas_tx_allowed_selectors: vec![[0xde, 0xad, 0xbe, 0xef]],
         ..Default::default()
     }
+}
+
+/// Unsigned EIP-1559 preimage with explicit gas/fee/data, for the C-02 cap and
+/// calldata-allowlist integration tests.
+#[cfg(not(feature = "dev-mode"))]
+fn eip1559_full(to: &[u8; 20], max_fee: u64, gas: u64, data: &[u8]) -> Vec<u8> {
+    let body = rlp_list(&[
+        rlp_scalar(1),       // chainId
+        rlp_scalar(7),       // nonce
+        rlp_scalar(1),       // maxPriorityFeePerGas
+        rlp_scalar(max_fee), // maxFeePerGas
+        rlp_scalar(gas),     // gasLimit
+        rlp_str(to),         // to
+        rlp_scalar(0),       // value
+        rlp_str(data),       // data
+        rlp_list(&[]),       // accessList
+    ]);
+    let mut out = vec![0x02];
+    out.extend_from_slice(&body);
+    out
 }
 
 #[cfg(not(feature = "dev-mode"))]
@@ -1784,6 +1834,7 @@ fn init(port: u16) {
             request: Some(Request::InitializeKey(InitializeKeyRequest {
                 seed: vec![],
                 mnemonic: String::new(),
+                cloning_secret: String::new(),
             })),
         },
     );
@@ -1795,7 +1846,8 @@ fn test_gas_tx_signs_pinned_destination() {
     let port = common::start_test_server_with_config(|_| {}, gas_pinned_config());
     init(port);
 
-    let tx = eip1559_unsigned(1, &[0xAA; 20], 0);
+    // Calldata leads with the pinned 0xdeadbeef selector (empty calldata is refused).
+    let tx = eip1559_full(&[0xAA; 20], 100, 21_000, &[0xde, 0xad, 0xbe, 0xef]);
     let resp = common::send_request(
         port,
         &EnclaveRequest {
@@ -1864,6 +1916,108 @@ fn test_gas_tx_rejects_drain_to_attacker() {
         Some(Response::Error(e)) => {
             assert_eq!(e.code, 3);
             assert!(e.message.contains("destination"), "got: {}", e.message);
+        }
+        other => panic!("expected ErrorResponse, got {:?}", other),
+    }
+}
+
+/// Send a gas-tx preimage through the real handler and return the response.
+#[cfg(not(feature = "dev-mode"))]
+fn sign_gas_tx(port: u16, unsigned_tx: Vec<u8>) -> EnclaveResponse {
+    common::send_request(
+        port,
+        &EnclaveRequest {
+            request: Some(Request::SignRawDigest(SignRawDigestRequest {
+                digest: vec![],
+                unsigned_tx,
+            })),
+        },
+    )
+}
+
+#[test]
+#[cfg(not(feature = "dev-mode"))]
+fn test_gas_tx_rejects_gas_limit_over_cap() {
+    let port = common::start_test_server_with_config(|_| {}, gas_pinned_config());
+    init(port);
+
+    // gasLimit 40_000 exceeds the pinned 30_000 cap — the fee-griefing bound.
+    let tx = eip1559_full(&[0xAA; 20], 100, 40_000, &[]);
+    match &sign_gas_tx(port, tx).response {
+        Some(Response::Error(e)) => {
+            assert_eq!(e.code, 3);
+            assert!(e.message.contains("gasLimit"), "got: {}", e.message);
+        }
+        other => panic!("expected ErrorResponse, got {:?}", other),
+    }
+}
+
+#[test]
+#[cfg(not(feature = "dev-mode"))]
+fn test_gas_tx_rejects_fee_over_cap() {
+    let port = common::start_test_server_with_config(|_| {}, gas_pinned_config());
+    init(port);
+
+    // maxFeePerGas 5_000 exceeds the pinned 1_000 cap.
+    let tx = eip1559_full(&[0xAA; 20], 5_000, 21_000, &[]);
+    match &sign_gas_tx(port, tx).response {
+        Some(Response::Error(e)) => {
+            assert_eq!(e.code, 3);
+            assert!(e.message.contains("maxFeePerGas"), "got: {}", e.message);
+        }
+        other => panic!("expected ErrorResponse, got {:?}", other),
+    }
+}
+
+#[test]
+#[cfg(not(feature = "dev-mode"))]
+fn test_gas_tx_signs_allowlisted_selector() {
+    let port = common::start_test_server_with_config(|_| {}, gas_pinned_config());
+    init(port);
+
+    // Calldata leading with the pinned 0xdeadbeef selector is accepted.
+    let mut data = vec![0xde, 0xad, 0xbe, 0xef];
+    data.extend_from_slice(&[0u8; 32]);
+    let tx = eip1559_full(&[0xAA; 20], 100, 21_000, &data);
+    match &sign_gas_tx(port, tx).response {
+        Some(Response::RawDigestSig(r)) => assert_eq!(r.signature.len(), 65),
+        other => panic!("expected RawDigestSignatureResponse, got {:?}", other),
+    }
+}
+
+#[test]
+#[cfg(not(feature = "dev-mode"))]
+fn test_gas_tx_rejects_disallowed_selector() {
+    let port = common::start_test_server_with_config(|_| {}, gas_pinned_config());
+    init(port);
+
+    // Calldata with a selector outside the allowlist is refused.
+    let tx = eip1559_full(&[0xAA; 20], 100, 21_000, &[0x11, 0x22, 0x33, 0x44]);
+    match &sign_gas_tx(port, tx).response {
+        Some(Response::Error(e)) => {
+            assert_eq!(e.code, 3);
+            assert!(e.message.contains("selector"), "got: {}", e.message);
+        }
+        other => panic!("expected ErrorResponse, got {:?}", other),
+    }
+}
+
+#[test]
+#[cfg(not(feature = "dev-mode"))]
+fn test_gas_tx_fails_closed_when_caps_unpinned() {
+    // A config that pins the destination but NOT the caps must refuse to sign:
+    // an uncapped gas tx is never produced (audit C-02 fail-closed).
+    let mut cfg = gas_pinned_config();
+    cfg.gas_tx_max_gas_limit = 0;
+    cfg.gas_tx_max_fee_per_gas = 0;
+    let port = common::start_test_server_with_config(|_| {}, cfg);
+    init(port);
+
+    let tx = eip1559_full(&[0xAA; 20], 100, 21_000, &[]);
+    match &sign_gas_tx(port, tx).response {
+        Some(Response::Error(e)) => {
+            assert_eq!(e.code, 3);
+            assert!(e.message.contains("cap not pinned"), "got: {}", e.message);
         }
         other => panic!("expected ErrorResponse, got {:?}", other),
     }
