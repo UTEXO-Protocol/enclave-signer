@@ -282,6 +282,12 @@ pub struct ValidatedConsignment {
     /// A `bitcoin::Txid` rather than display-order bytes, to avoid the txid
     /// byte-order footgun. `None` only for a consignment with no bundles.
     pub last_transfer_witness_txid: Option<bitcoin::Txid>,
+    /// Witness txid of the **last** bundle, whatever its transition type.
+    /// [`Self::last_transfer_witness_txid`] covers Transfer/Inflation only;
+    /// this one is also set for `TS_BURN`, so the RGB->EVM `fundsOut`
+    /// source-block bind works for transfer and burn alike. `None` only for a
+    /// consignment with no bundles.
+    pub last_witness_txid: Option<bitcoin::Txid>,
     /// Bitcoin input prevouts of that witness transaction, when the
     /// consignment embeds the full tx (`PubWitness::Tx`). Used by the PSBT
     /// cross-check as a redundant per-input canary over the txid bind. `None`
@@ -748,6 +754,10 @@ impl RgbValidator {
             }
         }
 
+        // Last bundle's witness tx, ungated by transition type, so the fundsOut
+        // source-block bind also works on a burn.
+        let last_witness_txid = transfer.bundles.iter().last().map(|wb| wb.witness_id());
+
         // Witness-tx identity binding for the send-RGB PSBT path: the last
         // bundle's witness txid, plus its input prevouts when the bundle
         // embeds the full tx. Gated on the last transition being a Transfer
@@ -865,6 +875,7 @@ impl RgbValidator {
             mint_op_ids,
             last_transition,
             last_transfer_witness_txid,
+            last_witness_txid,
             last_transfer_witness_prevouts,
             last_transfer_op_id,
             non_mined_witness_txids,

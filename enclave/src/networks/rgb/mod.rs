@@ -271,6 +271,7 @@ mod tests {
                 burned_asset_amount,
             }),
             last_transfer_witness_txid: None,
+            last_witness_txid: None,
             last_transfer_witness_prevouts: None,
             last_transfer_op_id: None,
             non_mined_witness_txids: vec![],

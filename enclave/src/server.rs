@@ -522,11 +522,12 @@ fn handle_sign(ctx: &ServerContext, req: SignRequest) -> Result<EnclaveResponse>
             // CcdSource -> EvmDestination release is already authorized above;
             // applying the binding unconditionally rejected those signs.
             #[cfg(feature = "rgb-validation")]
-            if matches!(source_ref, SourceNetwork::RgbSource(_)) {
+            if let SourceNetwork::RgbSource(rgb_source) = source_ref {
                 apply_funds_out_binding(
                     ctx,
                     destination_proof.evm_funds_out.as_ref(),
                     source_validated.rgb_consignment.as_ref(),
+                    &rgb_source.merkle_proofs,
                 )?;
             }
             handle_sign_evm(ctx, destination, destination_proof.evm_funds_out.as_ref())
@@ -556,6 +557,7 @@ fn apply_funds_out_binding(
     ctx: &ServerContext,
     params: Option<&crate::networks::evm::validation::FundsOutParams>,
     validated: Option<&crate::networks::rgb::validation::ValidatedConsignment>,
+    merkle_proofs: &[crate::proto::MerkleProofEntry],
 ) -> Result<()> {
     use crate::networks::evm::crosscheck;
 
@@ -582,21 +584,21 @@ fn apply_funds_out_binding(
     // Defense-in-depth: every consignment witness tx must be mined.
     crosscheck::assert_witnesses_confirmed(validated)?;
 
-    // BtcRelay agreement: bind the calldata's (blockHeight, commitmentHash)
-    // `proof` to the header the enclave holds at that height. Inert
-    // until the listener populates `proof`. Requires the SPV header chain, which
-    // is always present under rgb-validation (spv is implied - see the
-    // lib.rs compile_error).
+    // BtcRelay agreement + source-block bind (#57 / #122): the calldata `proof`
+    // must name headers the enclave holds, and its `source` pair must be the
+    // block anchoring the consignment's last witness tx. Fail-closed on an
+    // empty `proof`. The SPV header chain is always present under
+    // rgb-validation (spv is implied - see lib.rs M-01 compile_error).
     #[cfg(feature = "spv")]
     {
         let chain = ctx
             .header_chain
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        crosscheck::verify_btc_relay_agreement(params, &chain)?;
+        crosscheck::verify_btc_relay_agreement(params, validated, merkle_proofs, &chain)?;
     }
     #[cfg(not(feature = "spv"))]
-    let _ = ctx;
+    let _ = (ctx, merkle_proofs);
 
     // Consignment-bound release amount (transfer flow).
     crosscheck::validate_funds_out_transfer(params, validated)?;

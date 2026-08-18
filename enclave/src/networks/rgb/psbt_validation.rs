@@ -951,6 +951,7 @@ mod tests {
                 mint_op_ids: vec![],
                 last_transition: transitions.last().cloned(),
                 last_transfer_witness_txid: Some(txid),
+                last_witness_txid: Some(txid),
                 last_transfer_witness_prevouts: Some(prevouts),
                 last_transfer_op_id: None,
                 non_mined_witness_txids: vec![],
