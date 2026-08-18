@@ -212,6 +212,11 @@ async fn e2e_attest_verify_fails_on_policy_mismatch() {
             allow_vanilla_psbt: false,
             evm_source: EvmDataSource::RawRpc,
             evm_checkpoint: None,
+            gas_tx_allowed_to: [0u8; 20],
+            gas_tx_max_gas_limit: 0,
+            gas_tx_max_fee_per_gas: 0,
+            gas_tx_max_value_wei: 0,
+            gas_tx_allowed_selectors: Vec::new(),
         },
     )
     .await
