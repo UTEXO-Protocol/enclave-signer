@@ -136,6 +136,39 @@ pub fn validate_destination(
                 })
             }
         }
+        DestinationNetwork::RgbBurnDestination(destination) => {
+            // Sourceless: a rebalance burn destroys the bridge's own units, so
+            // the fascia is the whole authorisation. The authoritative burned
+            // value is derived from it inside the anchor and must equal the
+            // declared burn_amount exactly.
+            #[cfg(not(feature = "rgb-validation"))]
+            {
+                let _ = destination;
+                Err(EnclaveError::CrossCheck(
+                    "burn (RGB rebalance) signing requires an rgb-validation build - this \
+                     enclave cannot verify a fascia and refuses to sign blind"
+                        .into(),
+                ))
+            }
+            #[cfg(feature = "rgb-validation")]
+            {
+                rgb::validate_burn_destination(destination, ctx)?;
+
+                #[cfg(not(feature = "dev-mode"))]
+                {
+                    let burned = rgb::validate_burn_anchor(destination, ctx)?;
+                    Ok(RouteProof {
+                        amount: burned,
+                        operation_id: None,
+                    })
+                }
+                #[cfg(feature = "dev-mode")]
+                Ok(RouteProof {
+                    amount,
+                    operation_id: None,
+                })
+            }
+        }
     }
 }
 

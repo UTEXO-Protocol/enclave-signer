@@ -1138,6 +1138,134 @@ pub fn validate_inflation_fascia(fascia_bytes: &[u8]) -> Result<ValidatedInflati
     })
 }
 
+/// A rebalance-origin burn fascia the enclave has walked and accepted.
+///
+/// Same evidence model as [`ValidatedInflationFascia`]: a bridge burn hands
+/// nothing to a counterparty, so its binding evidence is the fascia. Unlike a
+/// mint there is no EVM deposit pairing it - authorisation is structural: the
+/// fascia may only destroy units of the pinned asset, in the exact declared
+/// amount, and the signature can finalise nothing but that witness.
+#[derive(Debug, Clone)]
+pub struct ValidatedBurnFascia {
+    /// RGB contract id the fascia burns, canonical string form.
+    pub contract_id: String,
+    /// Txid of the seal witness - the transaction the PSBT under signature
+    /// must BE (`psbt.unsigned_tx.compute_txid()` equality).
+    pub witness_txid: bitcoin::Txid,
+    /// Sum of `MS_BURNED_ASSET` metadata across the burn transitions: the
+    /// units this witness destroys. `OS_ASSET` change assignments riding the
+    /// same transitions are deliberately NOT counted - they return to the
+    /// wallet and destroy nothing.
+    pub burned_amount: u64,
+    /// OpIds (64-char lowercase hex) of the burn transitions.
+    pub burn_op_ids: Vec<String>,
+}
+
+/// Parse and walk an rgb-lib fascia file for the rebalance-burn path.
+///
+/// Refuses: non-JSON / non-Fascia bytes, more than one contract per fascia,
+/// any `TS_INFLATION` or unknown transition type, and a fascia that burns
+/// zero units.
+///
+/// `TS_TRANSFER` legs are ACCEPTED alongside the burn for the same reason the
+/// mint path accepts them (co-located allocations forced to move when their
+/// utxo is spent); they contribute nothing to `burned_amount`, and their
+/// destinations are covered by the cosigners' `InspectRgbTransfer` at ACK
+/// time, exactly as on the mint and send paths.
+pub fn validate_burn_fascia(fascia_bytes: &[u8]) -> Result<ValidatedBurnFascia> {
+    use rgbstd::containers::Fascia;
+
+    let fascia: Fascia = serde_json::from_slice(fascia_bytes).map_err(|e| {
+        EnclaveError::CrossCheck(format!("fascia does not parse as rgb-lib fascia JSON: {e}"))
+    })?;
+
+    let witness_txid = fascia.witness_id();
+
+    let mut bundles = fascia.bundles().iter();
+    let (contract_id, bundle) = bundles
+        .next()
+        .expect("Fascia.bundles is a NonEmptyOrdMap - at least one entry by construction");
+    if bundles.next().is_some() {
+        return Err(EnclaveError::CrossCheck(
+            "burn fascia names more than one contract - refusing to sign a multi-contract \
+             witness"
+                .into(),
+        ));
+    }
+    let contract_id_str = contract_id.to_string();
+
+    let burn = TransitionType::with(ifa::TS_BURN);
+    let transfer = TransitionType::with(ifa::TS_TRANSFER);
+    let burned_meta_key = MetaType::with(ifa::MS_BURNED_ASSET);
+    let mut burned_amount: u64 = 0;
+    let mut burn_op_ids = Vec::new();
+
+    for known in &bundle.known_transitions {
+        let transition = &known.transition;
+        if transition.contract_id != *contract_id {
+            return Err(EnclaveError::CrossCheck(format!(
+                "fascia transition contract {} disagrees with the bundle key {contract_id_str}",
+                transition.contract_id
+            )));
+        }
+        if transition.transition_type == transfer {
+            // Co-located allocations moving off the spent utxos; see the
+            // function doc. Not counted toward burned_amount.
+            continue;
+        }
+        if transition.transition_type != burn {
+            return Err(EnclaveError::CrossCheck(format!(
+                "burn fascia carries transition type {} - only IFA TS_BURN ({}) and \
+                 accompanying TS_TRANSFER ({}) legs are allowed in a burn witness",
+                transition.transition_type,
+                ifa::TS_BURN,
+                ifa::TS_TRANSFER
+            )));
+        }
+
+        let mut transition_burned: Option<u64> = None;
+        for (mt, mv) in &transition.metadata {
+            if *mt != burned_meta_key {
+                continue;
+            }
+            let raw: &[u8] = mv.as_unconfined().as_slice();
+            let bytes: [u8; 8] = raw.try_into().map_err(|_| {
+                EnclaveError::CrossCheck(format!(
+                    "MS_BURNED_ASSET metadata is {} bytes, expected 8 (strict-encoded u64)",
+                    raw.len()
+                ))
+            })?;
+            transition_burned = Some(u64::from_le_bytes(bytes));
+        }
+        let Some(transition_burned) = transition_burned else {
+            // rgbstd validation rejects a TS_BURN with no MS_BURNED_ASSET, so
+            // this is a schema mismatch, not a legitimate zero.
+            return Err(EnclaveError::CrossCheck(
+                "burn transition carries no MS_BURNED_ASSET metadata - schema mismatch, \
+                 refusing to sign"
+                    .into(),
+            ));
+        };
+        burned_amount = burned_amount
+            .checked_add(transition_burned)
+            .ok_or_else(|| EnclaveError::CrossCheck("fascia burned amount overflows u64".into()))?;
+        burn_op_ids.push(known.opid.to_string());
+    }
+
+    if burned_amount == 0 {
+        return Err(EnclaveError::CrossCheck(
+            "burn fascia destroys zero units - nothing this signature would be authorising".into(),
+        ));
+    }
+
+    Ok(ValidatedBurnFascia {
+        contract_id: contract_id_str,
+        witness_txid,
+        burned_amount,
+        burn_op_ids,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1201,6 +1329,87 @@ mod tests {
     fn refuses_garbage_fascia_bytes() {
         assert!(validate_inflation_fascia(b"not json").is_err());
         assert!(validate_inflation_fascia(b"{}").is_err());
+    }
+
+    /// The live mint fascia rewritten into a structurally valid burn: the
+    /// transition becomes IFA TS_BURN and its metadata key becomes
+    /// MS_BURNED_ASSET carrying 100_000 as a strict-encoded u64 LE. Witness
+    /// tx, contract and opid stay untouched, so the positive assertions keep
+    /// pinning real chain-cleared data.
+    fn burn_fascia() -> String {
+        String::from_utf8_lossy(LIVE_MINT_FASCIA)
+            .replace("\"transitionType\":8000", "\"transitionType\":8010")
+            .replace(
+                "\"1000\":\"6089a3d4e8000000\"",
+                "\"1001\":\"a086010000000000\"",
+            )
+    }
+
+    #[test]
+    fn parses_a_burn_fascia() {
+        let f = validate_burn_fascia(burn_fascia().as_bytes()).expect("burn fascia must validate");
+        assert_eq!(
+            f.contract_id,
+            "rgb:WOLU~Vc3-jCOii6g-35VF9Xz-FVTweL7-v9klRrl-4OTd2Mo"
+        );
+        assert_eq!(f.burned_amount, 100_000);
+        assert_eq!(
+            f.witness_txid.to_string(),
+            "9010bf45acc9919dfed1a1473e5bc0b9735bd30b8aaffa039f595b86d285b46f"
+        );
+        assert_eq!(
+            f.burn_op_ids,
+            vec!["ee69b9b60d3044c94b9e5586016d6852f767125061637789a006ff0ab092c49c".to_string()]
+        );
+    }
+
+    #[test]
+    fn refuses_a_mint_in_a_burn_fascia() {
+        // The untampered live fascia IS a mint - the burn walk must refuse
+        // TS_INFLATION outright, the mirror of refuses_a_burn_in_a_mint_fascia.
+        let err = validate_burn_fascia(LIVE_MINT_FASCIA).unwrap_err();
+        assert!(
+            err.to_string().contains("only IFA TS_BURN"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn refuses_a_transfer_only_burn_fascia() {
+        // Transfer legs may ride a burn witness, but a fascia with no burn at
+        // all destroys nothing - the zero-burn refusal holds.
+        let tampered = burn_fascia().replace("\"transitionType\":8010", "\"transitionType\":10000");
+        let err = validate_burn_fascia(tampered.as_bytes()).unwrap_err();
+        assert!(
+            err.to_string().contains("destroys zero units"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn refuses_a_burn_without_burned_metadata() {
+        let tampered = burn_fascia().replace("\"1001\":", "\"1000\":");
+        let err = validate_burn_fascia(tampered.as_bytes()).unwrap_err();
+        assert!(
+            err.to_string().contains("no MS_BURNED_ASSET"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn refuses_short_burned_metadata() {
+        let tampered = burn_fascia().replace("\"a086010000000000\"", "\"a08601\"");
+        let err = validate_burn_fascia(tampered.as_bytes()).unwrap_err();
+        assert!(
+            err.to_string().contains("expected 8"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn refuses_garbage_burn_fascia_bytes() {
+        assert!(validate_burn_fascia(b"not json").is_err());
+        assert!(validate_burn_fascia(b"{}").is_err());
     }
 
     // Fixtures borrowed from the rgb-consignment-parser repo

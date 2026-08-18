@@ -11,7 +11,7 @@ pub mod validation;
 use crate::error::EnclaveError;
 use crate::error::Result;
 use crate::networks::{RouteProof, ValidationContext};
-use crate::proto::{RgbDestination, RgbInflationDestination, RgbSource};
+use crate::proto::{RgbBurnDestination, RgbDestination, RgbInflationDestination, RgbSource};
 #[cfg(feature = "rgb-validation")]
 use sha3::{Digest, Keccak256};
 
@@ -350,6 +350,122 @@ pub fn validate_inflation_anchor(
     psbt_validation::check_psbt_fee_rate(&psbt, recommended)?;
 
     Ok(fascia.minted_amount)
+}
+
+/// Validate fields owned by an RGB burn destination before route-level
+/// validation. Mirrors [`validate_inflation_destination`].
+pub fn validate_burn_destination(
+    destination: &RgbBurnDestination,
+    _ctx: &ValidationContext<'_>,
+) -> Result<()> {
+    #[cfg(not(feature = "dev-mode"))]
+    {
+        psbt_validation::validate_psbt_bytes(&destination.psbt_bytes)?;
+    }
+    #[cfg(feature = "dev-mode")]
+    let _ = destination;
+
+    Ok(())
+}
+
+/// The burn counterpart of [`validate_inflation_anchor`]: bind the PSBT the
+/// enclave is about to sign to the bridge's own rebalance burn.
+///
+/// A burn is SOURCELESS - the bridge destroys its own units, so no deposit
+/// and no consignment exist when the signature is requested. Authorisation is
+/// therefore structural, carried entirely by the fascia:
+///
+/// 1. wire integrity: `keccak256(fascia) == fascia_hash`;
+/// 2. the fascia parses, names ONE contract, and carries ONLY IFA `TS_BURN`
+///    transitions (plus co-located `TS_TRANSFER` change legs, uncounted);
+/// 3. that contract is the declared asset AND the operator-pinned
+///    `RGB_ASSET_ID` - the signature cannot destroy any other asset;
+/// 4. the PSBT's unsigned txid IS the fascia's seal witness txid - the
+///    signature cannot finalise any other transition;
+/// 5. burned `MS_BURNED_ASSET` units == the declared `burn_amount`, exactly,
+///    and zero-burn fascias were already refused in the walk;
+/// 6. fee-rate sanity, same as the send and mint paths.
+///
+/// Returns the burned amount for the route proof.
+#[cfg(feature = "rgb-validation")]
+pub fn validate_burn_anchor(
+    destination: &RgbBurnDestination,
+    ctx: &ValidationContext<'_>,
+) -> Result<u64> {
+    use crate::error::EnclaveError;
+
+    if destination.fascia.is_empty() {
+        return Err(EnclaveError::CrossCheck(
+            "burn PSBT signing requires the burn fascia to bind the PSBT to the RGB transition"
+                .into(),
+        ));
+    }
+    if destination.fascia_hash.is_empty() {
+        return Err(EnclaveError::CrossCheck(
+            "fascia present but fascia_hash is missing".into(),
+        ));
+    }
+    let computed = Keccak256::digest(&destination.fascia);
+    if computed[..] != destination.fascia_hash {
+        return Err(EnclaveError::CrossCheck(
+            "fascia hash mismatch: keccak256(fascia) != fascia_hash".into(),
+        ));
+    }
+    if destination.asset_id.is_empty() {
+        return Err(EnclaveError::CrossCheck(
+            "RGB burn destination asset_id is empty".into(),
+        ));
+    }
+
+    let fascia = validation::validate_burn_fascia(&destination.fascia)?;
+
+    if fascia.contract_id != destination.asset_id {
+        return Err(EnclaveError::CrossCheck(format!(
+            "contract_id mismatch: fascia burns {} but the destination declares {}",
+            fascia.contract_id, destination.asset_id
+        )));
+    }
+    if ctx.bridge_config.rgb_asset_id.is_empty() {
+        return Err(EnclaveError::CrossCheck(
+            "asset-identity pin missing: RGB_ASSET_ID is not configured - refusing to burn an \
+             unpinned asset"
+                .into(),
+        ));
+    }
+    if fascia.contract_id != ctx.bridge_config.rgb_asset_id {
+        return Err(EnclaveError::CrossCheck(format!(
+            "contract_id mismatch: fascia burns {} != pinned RGB_ASSET_ID {}",
+            fascia.contract_id, ctx.bridge_config.rgb_asset_id
+        )));
+    }
+
+    let psbt = bitcoin::psbt::Psbt::deserialize(&destination.psbt_bytes)
+        .map_err(|e| EnclaveError::CrossCheck(format!("psbt_bytes is not a valid PSBT: {e}")))?;
+    let psbt_txid = psbt.unsigned_tx.compute_txid();
+    if psbt_txid != fascia.witness_txid {
+        return Err(EnclaveError::CrossCheck(format!(
+            "PSBT/fascia witness mismatch: signing txid {psbt_txid} but the fascia anchors \
+             {} - this signature would not finalise the prepared burn",
+            fascia.witness_txid
+        )));
+    }
+
+    if fascia.burned_amount != destination.burn_amount {
+        return Err(EnclaveError::CrossCheck(format!(
+            "BURN AMOUNT MISMATCH: fascia burns {} but the request declares {}",
+            fascia.burned_amount, destination.burn_amount
+        )));
+    }
+
+    let validator = ctx.rgb_validator.ok_or_else(|| {
+        EnclaveError::CrossCheck(
+            "burn PSBT signing requires a configured RGB validator for the fee-rate check".into(),
+        )
+    })?;
+    let recommended = validator.recommended_fee_rate_sat_vb()?;
+    psbt_validation::check_psbt_fee_rate(&psbt, recommended)?;
+
+    Ok(fascia.burned_amount)
 }
 
 #[cfg(all(test, feature = "rgb-validation"))]

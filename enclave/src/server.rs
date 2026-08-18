@@ -361,6 +361,9 @@ fn handle_sign(ctx: &ServerContext, req: SignRequest) -> Result<EnclaveResponse>
             DestinationNetwork::RgbInflationDestination(d) => {
                 Some((d.operation_idx, d.asset_id.as_str()))
             }
+            // A burn is sourceless; pairing it with an EvmSource is refused by
+            // validate_route_proofs before signing, so there is no op to guard.
+            DestinationNetwork::RgbBurnDestination(_) => None,
             DestinationNetwork::EvmDestination(_) => None,
         };
         if let Some((operation_idx, asset_id)) = rgb_op {
@@ -424,6 +427,9 @@ fn handle_sign(ctx: &ServerContext, req: SignRequest) -> Result<EnclaveResponse>
         DestinationNetwork::RgbInflationDestination(destination) => {
             handle_sign_psbt(ctx, &destination.psbt_bytes)
         }
+        DestinationNetwork::RgbBurnDestination(_) => Err(EnclaveError::InvalidRequest(
+            "burn signing is sourceless - a burn request must not carry a source_network".into(),
+        )),
     };
 
     // Settle the reservation: a produced signature arms the guard durably; a
@@ -459,6 +465,9 @@ fn handle_sign_sourceless(ctx: &ServerContext, req: SignRequest) -> Result<Encla
 
     let destination = match req.destination_network {
         Some(DestinationNetwork::EvmDestination(destination)) => destination,
+        Some(DestinationNetwork::RgbBurnDestination(destination)) => {
+            return handle_sign_burn(ctx, req.amount, destination)
+        }
         Some(_) => {
             return Err(EnclaveError::InvalidRequest(
                 "sign request has no source_network".into(),
@@ -490,6 +499,36 @@ fn handle_sign_sourceless(ctx: &ServerContext, req: SignRequest) -> Result<Encla
     )?;
 
     handle_sign_evm(ctx, destination)
+}
+
+/// The RGB half of sourceless signing: a rebalance-origin bridge burn.
+/// Authorisation is structural - validate_destination anchors the PSBT to a
+/// fascia that may only destroy the pinned asset in the declared amount.
+fn handle_sign_burn(
+    ctx: &ServerContext,
+    amount: u64,
+    destination: crate::proto::RgbBurnDestination,
+) -> Result<EnclaveResponse> {
+    tracing::info!(
+        operation_idx = destination.operation_idx,
+        burn_amount = destination.burn_amount,
+        "sourceless sign: RGB rebalance burn"
+    );
+
+    let validation_ctx = ValidationContext {
+        bridge_config: &ctx.bridge_config,
+        #[cfg(feature = "rgb-validation")]
+        rgb_validator: ctx.rgb_validator.as_ref(),
+        header_chain: &ctx.header_chain,
+    };
+    validate_destination(
+        amount,
+        0,
+        &DestinationNetwork::RgbBurnDestination(destination.clone()),
+        &validation_ctx,
+    )?;
+
+    handle_sign_psbt(ctx, &destination.psbt_bytes)
 }
 
 /// Bind an RGB->EVM `fundsOut` calldata to the validated consignment before the

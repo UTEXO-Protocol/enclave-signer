@@ -252,6 +252,18 @@ impl ParentAdapterService {
                     },
                 )
             }
+            sign_request::Data::RgbBurnData(payload) => {
+                enclave_proto::sign_request::DestinationNetwork::RgbBurnDestination(
+                    enclave_proto::RgbBurnDestination {
+                        operation_idx: payload.operation_idx,
+                        psbt_bytes: payload.psbt_bytes,
+                        asset_id: payload.rgb_asset_id,
+                        fascia: payload.fascia,
+                        fascia_hash: payload.fascia_hash,
+                        burn_amount: payload.burn_amount,
+                    },
+                )
+            }
             // Plain BTC is not a cross-network destination — it is dispatched
             // via `data_type=BTC_UTXO` to the SignBtc path, never here.
             sign_request::Data::BtcData(_) => unreachable!(
@@ -454,6 +466,12 @@ impl ParentService for ParentAdapterService {
                              use data_type=BTC_UTXO for plain-BTC signing",
                         ))
                     }
+                    Some(sign_request::Data::RgbBurnData(_)) => {
+                        return Err(Status::invalid_argument(
+                            "TRANSACTION data_type must not carry RgbBurnData; \
+                             use data_type=RGB_BURN for rebalance-burn signing",
+                        ))
+                    }
                     Some(sign_request::Data::CcdData(_)) => {
                         return Err(Status::invalid_argument(
                             "CCD payloads are not supported by this build",
@@ -607,6 +625,64 @@ impl ParentService for ParentAdapterService {
                     other => Err(Status::internal(format!(
                         "unexpected enclave response for SignBtc: {:?}",
                         other
+                    ))),
+                }
+            }
+            DataType::RgbBurn => {
+                // Rebalance-origin bridge burn: sourceless like BTC_UTXO - the
+                // burn is self-originated, no deposit or consignment exists.
+                // Authorisation is structural inside the enclave: the fascia
+                // must anchor exactly this PSBT, name only the pinned asset,
+                // carry only burn transitions and destroy exactly burn_amount.
+                let payload = match inner.data {
+                    Some(sign_request::Data::RgbBurnData(payload)) => payload,
+                    _ => {
+                        return Err(Status::invalid_argument(
+                            "RGB_BURN sign requires RgbBurnData with the PSBT and fascia",
+                        ))
+                    }
+                };
+                if self.evm_network_ids.contains(&signer_network_id) {
+                    return Err(Status::invalid_argument(format!(
+                        "RGB burn payload destination network {signer_network_id} is configured as EVM"
+                    )));
+                }
+
+                tracing::info!(
+                    dst_network_id = signer_network_id,
+                    psbt_len = payload.psbt_bytes.len(),
+                    fascia_len = payload.fascia.len(),
+                    operation_idx = payload.operation_idx,
+                    burn_amount = payload.burn_amount,
+                    "gRPC Sign: RGB rebalance burn (sourceless)"
+                );
+
+                let amount = payload.burn_amount;
+                let destination_network =
+                    Self::enclave_destination_network(sign_request::Data::RgbBurnData(payload));
+
+                let enclave_req = EnclaveRequest {
+                    request: Some(enclave_request::Request::Sign(enclave_proto::SignRequest {
+                        amount,
+                        source_network: None,
+                        destination_network: Some(destination_network),
+                    })),
+                };
+
+                match self.send_to_enclave(enclave_req).await?.response {
+                    Some(enclave_response::Response::SignedPsbt(r)) => {
+                        Ok(Response::new(SignatureResponse {
+                            signer_network_id,
+                            signature: r.signed_psbt,
+                            identifier: None,
+                            call_data: Vec::new(),
+                        }))
+                    }
+                    Some(enclave_response::Response::Error(e)) => {
+                        Err(Self::enclave_error_to_status(&e))
+                    }
+                    other => Err(Status::internal(format!(
+                        "unexpected enclave response for burn Sign: {other:?}"
                     ))),
                 }
             }
