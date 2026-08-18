@@ -1,6 +1,5 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
-#[cfg(test)]
 use alloy_primitives::U256;
 use alloy_sol_types::{sol, SolCall};
 
@@ -116,13 +115,16 @@ pub fn validate_source(amount: u64, source: &EvmSource) -> Result<RouteProof> {
 pub fn validate_destination(
     destination: &EvmDestination,
     ctx: &ValidationContext<'_>,
-) -> Result<RouteProof> {
+) -> Result<(RouteProof, Option<FundsOutParams>)> {
     if dev_mode_bypass() {
         let _ = ctx;
-        return Ok(RouteProof {
-            amount: destination.calldata_amount,
-            operation_id: None,
-        });
+        return Ok((
+            RouteProof {
+                amount: destination.calldata_amount,
+                operation_id: None,
+            },
+            None,
+        ));
     }
 
     let bridge_config = ctx.bridge_config;
@@ -152,10 +154,19 @@ pub fn validate_destination(
             hex::encode(selector)
         )));
     }
-    let proof = if selector == LZ_FUNDS_OUT_SELECTOR {
-        parse_lz_proof_from_calldata(&destination.call_data)?
+    // Decoded once here; every later stage takes the typed result (I-12 / #165).
+    // The LayerZero route has its own param shape, so it yields no
+    // `FundsOutParams` — `signing::lz_funds_out_digest` re-decodes the calldata
+    // itself. Both routes still surface `destinationChainId` for the pin check
+    // below, so neither escapes it.
+    let (proof, params, calldata_destination_chain_id) = if selector == LZ_FUNDS_OUT_SELECTOR {
+        let decoded = decode_lz_funds_out_params(&destination.call_data)?;
+        let chain_id = decoded.destinationChainId;
+        (lz_route_proof_from_params(&decoded)?, None, chain_id)
     } else {
-        parse_proof_from_calldata(&destination.call_data)?
+        let params = decode_funds_out_params(&destination.call_data)?;
+        let chain_id = params.destinationChainId;
+        (route_proof_from_params(&params)?, Some(params), chain_id)
     };
     if proof.amount != destination.calldata_amount {
         return Err(EnclaveError::CrossCheck(format!(
@@ -189,6 +200,16 @@ pub fn validate_destination(
             destination.chain_id, bridge_config.chain_id
         )));
     }
+    // Distinct from the request-level `chain_id` above, which only drives the
+    // EIP-712 domain. Bound to the same attested pin (I-12 / #165).
+    if bridge_config.chain_id != 0
+        && calldata_destination_chain_id != U256::from(bridge_config.chain_id)
+    {
+        return Err(EnclaveError::CrossCheck(format!(
+            "calldata destinationChainId mismatch: {} != pinned {}",
+            calldata_destination_chain_id, bridge_config.chain_id
+        )));
+    }
     if bridge_config.bridge_contract != [0u8; ADDRESS_LEN]
         && destination.proxy_contract.as_slice() != bridge_config.bridge_contract
     {
@@ -207,20 +228,12 @@ pub fn validate_destination(
         return Err(EnclaveError::CrossCheck("request deadline expired".into()));
     }
 
-    Ok(proof)
+    Ok((proof, params))
 }
 
-fn parse_proof_from_calldata(call_data: &[u8]) -> Result<RouteProof> {
-    // Canonical-encoding enforcement (audit W-01 residual, #123): the ABI
-    // decoder is deliberately layout-permissive — overlapping or out-of-order
-    // dynamic tails and trailing junk all decode fine (`abi_decode_validate`
-    // only validates the decoded *values*). Re-encoding the decoded call and
-    // requiring byte equality pins the input to the one canonical layout.
-    //
-    // The byte-level reason is gone (#168 removed the offset rewrite, and the
-    // digest now commits to decoded fields). Kept anyway: it keeps the wire
-    // format unambiguous and stops unread trailing data riding along.
-    let amount: u64 = decode_funds_out_params(call_data)?
+/// Narrow a decoded release into the route-neutral proof.
+fn route_proof_from_params(params: &FundsOutParams) -> Result<RouteProof> {
+    let amount: u64 = params
         .amount
         .try_into()
         .map_err(|_| EnclaveError::CrossCheck("fundsOut amount exceeds u64 range".into()))?;
@@ -271,10 +284,9 @@ pub fn decode_lz_funds_out_params(call_data: &[u8]) -> Result<lzFundsOutCall> {
     Ok(decoded)
 }
 
-/// Extract and crosscheck `amount` from an `lzFundsOut` calldata blob,
-/// returning a `RouteProof` consistent with the `fundsOut` path.
-pub(super) fn parse_lz_proof_from_calldata(call_data: &[u8]) -> Result<RouteProof> {
-    let decoded = decode_lz_funds_out_params(call_data)?;
+/// Narrow a decoded LayerZero release into the route-neutral proof, mirroring
+/// [`route_proof_from_params`] on the pools route.
+fn lz_route_proof_from_params(decoded: &lzFundsOutCall) -> Result<RouteProof> {
     let amount: u64 = decoded
         .amount
         .try_into()
@@ -287,6 +299,19 @@ pub(super) fn parse_lz_proof_from_calldata(call_data: &[u8]) -> Result<RouteProo
 
 #[cfg(test)]
 mod tests {
+    /// Drop the typed intent; these assertions cover the route proof.
+    fn validate_dest(
+        destination: &EvmDestination,
+        ctx: &ValidationContext<'_>,
+    ) -> Result<RouteProof> {
+        super::validate_destination(destination, ctx).map(|(proof, _)| proof)
+    }
+
+    /// Keeps the canonical-encoding regressions expressed against raw bytes.
+    fn parse_proof_from_calldata(call_data: &[u8]) -> Result<RouteProof> {
+        route_proof_from_params(&decode_funds_out_params(call_data)?)
+    }
+
     use super::*;
     use crate::config::BridgeConfig;
     use alloy_primitives::{Address, Bytes};
@@ -312,6 +337,23 @@ mod tests {
                 burnId: U256::from(burn_id),
                 sourceChainId: U256::from(1u64),
                 destinationChainId: U256::from(1u64),
+                sourceAddress: String::new(),
+                proof: Bytes::new(),
+                settlementData: Bytes::new(),
+            },
+        }
+        .abi_encode()
+    }
+
+    /// `funds_out_calldata` with `destinationChainId` overridden.
+    fn funds_out_calldata_for_chain(amount: u64, destination_chain_id: u64) -> Vec<u8> {
+        fundsOutCall {
+            params: FundsOutParams {
+                recipient: Address::from([0x22; ADDRESS_LEN]),
+                amount: U256::from(amount),
+                burnId: U256::from(7u64),
+                sourceChainId: U256::from(1u64),
+                destinationChainId: U256::from(destination_chain_id),
                 sourceAddress: String::new(),
                 proof: Bytes::new(),
                 settlementData: Bytes::new(),
@@ -360,7 +402,7 @@ mod tests {
     #[test]
     fn valid_destination_passes() {
         with_ctx(&config(), |ctx| {
-            let proof = validate_destination(&destination(), ctx).expect("valid destination");
+            let proof = validate_dest(&destination(), ctx).expect("valid destination");
             assert_eq!(proof.amount, 1000);
             assert_eq!(proof.operation_id, None);
         });
@@ -402,9 +444,7 @@ mod tests {
         let mut destination = destination();
         destination.call_data[..4].copy_from_slice(&[0xDE, 0xAD, 0xBE, 0xEF]);
         with_ctx(&config(), |ctx| {
-            let msg = validate_destination(&destination, ctx)
-                .unwrap_err()
-                .to_string();
+            let msg = validate_dest(&destination, ctx).unwrap_err().to_string();
             // The error must both name the failing predicate and echo the
             // offending selector so an operator can see WHAT was rejected.
             assert!(
@@ -420,7 +460,7 @@ mod tests {
         // 3 bytes can't carry a 4-byte selector.
         destination.call_data = vec![0x1a, 0xd8, 0x80];
         with_ctx(&config(), |ctx| {
-            let err = validate_destination(&destination, ctx).unwrap_err();
+            let err = validate_dest(&destination, ctx).unwrap_err();
             assert!(
                 err.to_string().contains("call_data too short"),
                 "expected too-short rejection, got: {err}"
@@ -438,7 +478,7 @@ mod tests {
             .call_data
             .resize(MAX_FUNDS_OUT_CALL_DATA_LEN + 1, 0u8);
         with_ctx(&config(), |ctx| {
-            let err = validate_destination(&destination, ctx).unwrap_err();
+            let err = validate_dest(&destination, ctx).unwrap_err();
             assert!(
                 err.to_string().contains("call_data too large"),
                 "expected too-large rejection, got: {err}"
@@ -458,7 +498,7 @@ mod tests {
         // The zero-padded tail may still fail the later ABI decode; assert
         // only that it is NOT the size error.
         with_ctx(&config(), |ctx| {
-            if let Err(e) = validate_destination(&destination, ctx) {
+            if let Err(e) = validate_dest(&destination, ctx) {
                 assert!(
                     !e.to_string().contains("call_data too large"),
                     "calldata exactly at the cap must not trip the size check, got: {e}"
@@ -472,11 +512,32 @@ mod tests {
         let mut destination = destination();
         destination.chain_id = 42;
         with_ctx(&config(), |ctx| {
-            assert!(validate_destination(&destination, ctx)
+            assert!(validate_dest(&destination, ctx)
                 .unwrap_err()
                 .to_string()
                 .contains("chain_id mismatch"));
         });
+    }
+
+    /// I-12 / #165: a release naming an unpinned chain is refused even when the
+    /// request-level `chain_id` matches.
+    #[test]
+    fn rejects_calldata_destination_chain_id_mismatch() {
+        let mut destination = destination();
+        destination.call_data = funds_out_calldata_for_chain(1000, 999);
+        with_ctx(&config(), |ctx| {
+            let err = destination_or_err(&destination, ctx);
+            assert!(
+                err.contains("destinationChainId mismatch"),
+                "expected destinationChainId rejection, got: {err}"
+            );
+        });
+    }
+
+    fn destination_or_err(destination: &EvmDestination, ctx: &ValidationContext<'_>) -> String {
+        validate_dest(destination, ctx)
+            .expect_err("must reject")
+            .to_string()
     }
 
     #[test]
@@ -484,7 +545,7 @@ mod tests {
         let mut destination = destination();
         destination.chain_id = 0;
         with_ctx(&config(), |ctx| {
-            assert!(validate_destination(&destination, ctx)
+            assert!(validate_dest(&destination, ctx)
                 .unwrap_err()
                 .to_string()
                 .contains("chain_id must be > 0"));
@@ -496,7 +557,7 @@ mod tests {
         let mut destination = destination();
         destination.proxy_contract = vec![0xBB; ADDRESS_LEN]; // pinned is 0xAA
         with_ctx(&config(), |ctx| {
-            let err = validate_destination(&destination, ctx).unwrap_err();
+            let err = validate_dest(&destination, ctx).unwrap_err();
             assert!(
                 err.to_string().contains("proxy_contract mismatch"),
                 "got: {err}"
@@ -509,7 +570,7 @@ mod tests {
         let mut destination = destination();
         destination.proxy_contract = vec![];
         with_ctx(&config(), |ctx| {
-            assert!(validate_destination(&destination, ctx)
+            assert!(validate_dest(&destination, ctx)
                 .unwrap_err()
                 .to_string()
                 .contains(&format!("proxy_contract must be {ADDRESS_LEN} bytes")));
@@ -521,7 +582,7 @@ mod tests {
         let mut destination = destination();
         destination.deadline = 1; // Unix timestamp 1 is long expired
         with_ctx(&config(), |ctx| {
-            assert!(validate_destination(&destination, ctx)
+            assert!(validate_dest(&destination, ctx)
                 .unwrap_err()
                 .to_string()
                 .contains("deadline expired"));
@@ -533,7 +594,7 @@ mod tests {
         let mut config = config();
         config.rgb_asset_id.clear();
         with_ctx(&config, |ctx| {
-            assert!(validate_destination(&destination(), ctx).is_ok());
+            assert!(validate_dest(&destination(), ctx).is_ok());
         });
     }
 
@@ -542,7 +603,7 @@ mod tests {
         let mut destination = destination();
         destination.calldata_amount = 999;
         with_ctx(&config(), |ctx| {
-            assert!(validate_destination(&destination, ctx)
+            assert!(validate_dest(&destination, ctx)
                 .unwrap_err()
                 .to_string()
                 .contains("calldata amount mismatch"));
@@ -568,7 +629,7 @@ mod tests {
         let mut destination = destination();
         destination.call_data = call;
         with_ctx(&config(), |ctx| {
-            assert!(validate_destination(&destination, ctx)
+            assert!(validate_dest(&destination, ctx)
                 .unwrap_err()
                 .to_string()
                 .contains("exceeds u64 range"));

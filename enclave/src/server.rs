@@ -277,7 +277,7 @@ fn handle_sign(ctx: &ServerContext, req: SignRequest) -> Result<EnclaveResponse>
         source_ref,
         destination_ref,
         &source_validated.proof,
-        &destination_proof,
+        &destination_proof.proof,
     )?;
 
     // Independent EVM `FundsIn` verification (audit M-06 / #60, #51). In
@@ -422,11 +422,11 @@ fn handle_sign(ctx: &ServerContext, req: SignRequest) -> Result<EnclaveResponse>
             if matches!(source_ref, SourceNetwork::RgbSource(_)) {
                 apply_funds_out_binding(
                     ctx,
-                    &destination,
+                    destination_proof.evm_funds_out.as_ref(),
                     source_validated.rgb_consignment.as_ref(),
                 )?;
             }
-            handle_sign_evm(ctx, destination)
+            handle_sign_evm(ctx, destination, destination_proof.evm_funds_out.as_ref())
         }
         DestinationNetwork::RgbDestination(destination) => handle_sign_psbt(ctx, destination),
     };
@@ -451,21 +451,20 @@ fn handle_sign(ctx: &ServerContext, req: SignRequest) -> Result<EnclaveResponse>
 #[cfg(feature = "rgb-validation")]
 fn apply_funds_out_binding(
     ctx: &ServerContext,
-    destination: &EvmDestination,
+    params: Option<&crate::networks::evm::validation::FundsOutParams>,
     validated: Option<&crate::networks::rgb::validation::ValidatedConsignment>,
 ) -> Result<()> {
     use crate::networks::evm::crosscheck;
-    use crate::networks::evm::validation::FUNDS_OUT_SELECTOR_POOLS;
 
     if cfg!(all(feature = "dev-mode", not(test))) {
         return Ok(());
     }
 
-    // Only the `fundsOut` release flow is bound to a consignment; leave any
-    // other calldata untouched.
-    if destination.call_data.len() < 4 || destination.call_data[..4] != FUNDS_OUT_SELECTOR_POOLS {
+    // `Some` exactly when destination validation decoded a `fundsOut` calldata,
+    // so the type replaces the old selector check (I-12 / #165).
+    let Some(params) = params else {
         return Ok(());
-    }
+    };
 
     // A `fundsOut` release requires the RGB source's validated consignment
     // (source == RgbSource, rgb_validator configured, consignment present).
@@ -491,13 +490,13 @@ fn apply_funds_out_binding(
             .header_chain
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        crosscheck::verify_btc_relay_agreement(&destination.call_data, &chain)?;
+        crosscheck::verify_btc_relay_agreement(params, &chain)?;
     }
     #[cfg(not(feature = "spv"))]
     let _ = ctx;
 
     // Consignment-bound release amount (transfer flow).
-    crosscheck::validate_funds_out_transfer(&destination.call_data, validated)?;
+    crosscheck::validate_funds_out_transfer(params, validated)?;
 
     // Current rollout is swap/send-receive only. Preserve the backend-provided
     // general bridge burnId and settlement fundsInIds; the EVM connector has
@@ -715,7 +714,15 @@ fn handle_get_attested_public_key(
     })
 }
 
-fn handle_sign_evm(ctx: &ServerContext, req: EvmDestination) -> Result<EnclaveResponse> {
+/// `params` comes from destination validation, so the digest commits to exactly
+/// the fields cross-checked there (I-12 / #165). `None` in dev-mode, which skips
+/// validation and therefore decodes here, and on the LayerZero route, whose
+/// param shape is not `FundsOutParams` — `lz_funds_out_digest` decodes its own.
+fn handle_sign_evm(
+    ctx: &ServerContext,
+    req: EvmDestination,
+    params: Option<&crate::networks::evm::validation::FundsOutParams>,
+) -> Result<EnclaveResponse> {
     // Domain name/version are pinned to the deployed MultisigProxy and
     // regression-guarded by `test_domain_separator_matches_deployed_contract`.
     let domain = build_evm_domain(&req)?;
@@ -739,7 +746,19 @@ fn handle_sign_evm(ctx: &ServerContext, req: EvmDestination) -> Result<EnclaveRe
             req.deadline,
         )?
     } else {
-        funds_out_digest(&domain, &req.call_data, req.nonce, req.deadline)?
+        // `params` is `Some` on the pools route whenever validation ran, so the
+        // digest commits to exactly the fields cross-checked there. Dev-mode
+        // skips validation and therefore decodes here.
+        let decoded_here;
+        let params = match params {
+            Some(params) => params,
+            None => {
+                decoded_here =
+                    crate::networks::evm::validation::decode_funds_out_params(&req.call_data)?;
+                &decoded_here
+            }
+        };
+        funds_out_digest(&domain, params, req.nonce, req.deadline)?
     };
 
     tracing::info!(
@@ -765,10 +784,7 @@ fn handle_sign_evm(ctx: &ServerContext, req: EvmDestination) -> Result<EnclaveRe
     Ok(EnclaveResponse {
         response: Some(Response::EvmSignature(EvmSignatureResponse {
             signature: signature.to_vec(),
-            // Non-fundsOut / non-rgb-validation paths sign the calldata as
-            // received. The RGB->EVM fundsOut path rewrites the OpId-bound
-            // fields before this point and returns the rewritten bytes here
-            // (audit M-02 / #93, #63) — see `handle_sign`.
+            // Echoed unchanged; nothing rewrites the calldata since #168.
             call_data: req.call_data.clone(),
         })),
     })

@@ -1,7 +1,7 @@
 use sha3::{Digest, Keccak256};
 
 use crate::error::{EnclaveError, Result};
-use crate::networks::evm::validation::{decode_funds_out_params, decode_lz_funds_out_params};
+use crate::networks::evm::validation::{decode_lz_funds_out_params, FundsOutParams};
 use crate::networks::evm::{ADDRESS_LEN, HASH_LEN};
 use crate::proto::{EvmDestination, LzReleaseParams};
 
@@ -100,18 +100,10 @@ pub fn build_evm_domain(req: &EvmDestination) -> Result<Eip712Domain> {
 /// calldata would take the enclave down, and dev-mode skips the validation layer.
 pub fn funds_out_digest(
     domain: &Eip712Domain,
-    call_data: &[u8],
+    params: &FundsOutParams,
     nonce: u64,
     deadline: u64,
 ) -> Result<[u8; HASH_LEN]> {
-    if call_data.len() < 4 {
-        return Err(EnclaveError::CrossCheck(format!(
-            "call_data must contain at least a 4-byte selector, got {} bytes",
-            call_data.len()
-        )));
-    }
-    let params = decode_funds_out_params(call_data)?;
-
     let struct_hash = {
         let type_hash = Keccak256::digest(TEE_FUNDS_OUT_TYPE_HASH_STR.as_bytes());
 
@@ -255,7 +247,12 @@ fn abi_encode_address(addr: &[u8; ADDRESS_LEN]) -> [u8; HASH_LEN] {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::networks::evm::validation::decode_funds_out_params;
     use hex::decode;
+
+    fn reference_params() -> FundsOutParams {
+        decode_funds_out_params(&reference_call_data()).expect("reference calldata must decode")
+    }
 
     #[test]
     fn test_abi_encode_u256() {
@@ -353,9 +350,9 @@ mod tests {
     #[test]
     fn test_funds_out_digest_deterministic() {
         let domain = arbitrum_domain();
-        let call_data = reference_call_data();
-        let digest1 = funds_out_digest(&domain, &call_data, 0, 1_700_000_000).unwrap();
-        let digest2 = funds_out_digest(&domain, &call_data, 0, 1_700_000_000).unwrap();
+        let params = reference_params();
+        let digest1 = funds_out_digest(&domain, &params, 0, 1_700_000_000).unwrap();
+        let digest2 = funds_out_digest(&domain, &params, 0, 1_700_000_000).unwrap();
         assert_eq!(digest1, digest2);
         assert_ne!(digest1, [0u8; HASH_LEN]);
     }
@@ -363,33 +360,23 @@ mod tests {
     #[test]
     fn test_different_nonce_different_digest() {
         let domain = arbitrum_domain();
-        let call_data = reference_call_data();
-        let d1 = funds_out_digest(&domain, &call_data, 0, 1_700_000_000).unwrap();
-        let d2 = funds_out_digest(&domain, &call_data, 1, 1_700_000_000).unwrap();
+        let params = reference_params();
+        let d1 = funds_out_digest(&domain, &params, 0, 1_700_000_000).unwrap();
+        let d2 = funds_out_digest(&domain, &params, 1, 1_700_000_000).unwrap();
         assert_ne!(d1, d2);
     }
 
+    /// Short and non-`fundsOut` calldata are rejected at the decode, which now
+    /// happens before signing rather than inside it (audit final I-02).
     #[test]
-    fn test_short_call_data_rejected() {
-        // audit final I-02: short calldata must yield an error, never an
-        // abort — with `panic = "abort"` the old assert! killed the enclave.
-        let err = funds_out_digest(&arbitrum_domain(), &[0xAA, 0xBB], 0, 1_000).unwrap_err();
-        assert!(
-            err.to_string().contains("at least a 4-byte selector"),
-            "expected short-calldata rejection, got: {err}"
-        );
-    }
-
-    /// Anything that is not a decodable `fundsOut` call must fail — the old
-    /// scheme would happily hash an ERC-20 `transfer` blob.
-    #[test]
-    fn test_non_funds_out_calldata_rejected() {
+    fn test_undecodable_call_data_rejected() {
+        assert!(decode_funds_out_params(&[0xAA, 0xBB]).is_err());
         let erc20_transfer = decode(
             "a9059cbb000000000000000000000000abcdefabcdefabcdefabcdefabcdefabcdefabcd\
              0000000000000000000000000000000000000000000000000000000000000064",
         )
         .unwrap();
-        assert!(funds_out_digest(&arbitrum_domain(), &erc20_transfer, 0, 1_000).is_err());
+        assert!(decode_funds_out_params(&erc20_transfer).is_err());
     }
 
     /// Cross-implementation vector: Solidity, Go and this module must agree
@@ -405,7 +392,7 @@ mod tests {
     #[test]
     fn test_digest_matches_foundry_vector() {
         let digest =
-            funds_out_digest(&arbitrum_domain(), &reference_call_data(), 3, 1_700_000_000).unwrap();
+            funds_out_digest(&arbitrum_domain(), &reference_params(), 3, 1_700_000_000).unwrap();
         assert_eq!(
             hex::encode(digest),
             "fed59f73692c4af5ef0bcec16b76fdc50c0a5fc15a32b38264043b8a1c283de5"

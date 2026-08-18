@@ -10,7 +10,7 @@
 //! old flat `SignEvmRequest`.
 
 use crate::error::{EnclaveError, Result};
-use crate::networks::evm::validation::{decode_funds_out_params, FUNDS_OUT_SELECTOR_POOLS};
+use crate::networks::evm::validation::FundsOutParams;
 use crate::networks::rgb::spv::HeaderChain;
 use crate::networks::rgb::validation::ValidatedConsignment;
 
@@ -41,45 +41,21 @@ pub fn assert_witnesses_confirmed(validated: &ValidatedConsignment) -> Result<()
     Ok(())
 }
 
-/// Fail-closed selector guard for the selector-specific `fundsOut` validator
-/// [`validate_funds_out_transfer`].
-///
-/// It is only meaningful for the `fundsOut` selector
-/// ([`FUNDS_OUT_SELECTOR_POOLS`]), which the caller
-/// (`server::apply_funds_out_binding`) has already whitelisted before invoking
-/// it. It previously returned `Ok(())` for any other selector, so a future
-/// refactor that called it directly - skipping that whitelist - would get a
-/// *silent success* for an unsupported selector (audit I-03 / Oxorio I-10:
-/// caller-ordering instead of failing closed). Reject instead: a
-/// selector-specific validator handed the wrong selector is a programming
-/// error, so fail closed rather than pass.
-fn ensure_funds_out_selector(call_data: &[u8], validator: &str) -> Result<()> {
-    if call_data.len() < 4 || call_data[..4] != FUNDS_OUT_SELECTOR_POOLS {
-        return Err(EnclaveError::CrossCheck(format!(
-            "{validator} called with a non-fundsOut selector - selector-specific validators must \
-             only run after the fundsOut whitelist in apply_funds_out_binding"
-        )));
-    }
-    Ok(())
-}
-
 /// Pools-side amount cross-check for the `fundsOut` transfer flow. Binds the
-/// calldata `amount` to the consignment's actual asset value:
+/// release `amount` to the consignment's actual asset value:
 ///
 ///   1. The consignment's most recent transition must be an IFA `Transfer`
 ///      (`transition_type == ifa::TS_TRANSFER`).
 ///   2. The transition's `total_output_amount` must cover the EVM-side release
 ///      `amount`.
 ///
-/// Fails closed (does not no-op) if handed anything but the `fundsOut`
-/// selector - see [`ensure_funds_out_selector`] (audit I-03).
+/// Takes the decoded intent (I-12 / #165), which also replaces the old selector
+/// guard: `FundsOutParams` only exists after a successful `fundsOut` decode.
 pub fn validate_funds_out_transfer(
-    call_data: &[u8],
+    params: &FundsOutParams,
     validated: &ValidatedConsignment,
 ) -> Result<()> {
     use crate::networks::rgb::validation::ifa;
-
-    ensure_funds_out_selector(call_data, "validate_funds_out_transfer")?;
 
     let last = validated.last_transition.as_ref().ok_or_else(|| {
         EnclaveError::CrossCheck(
@@ -94,10 +70,9 @@ pub fn validate_funds_out_transfer(
         )));
     }
 
-    // Read `amount` straight from the calldata bytes rather than trusting the
-    // listener-supplied `calldata_amount`, then bind it to the consignment's
-    // output value — the consignment is the authority on how much RGB moved.
-    let calldata_amount: u64 = decode_funds_out_params(call_data)?
+    // The consignment, not the listener-supplied `calldata_amount`, is the
+    // authority on how much RGB moved.
+    let calldata_amount: u64 = params
         .amount
         .try_into()
         .map_err(|_| EnclaveError::CrossCheck("fundsOut amount exceeds u64 range".into()))?;
@@ -148,11 +123,8 @@ struct ProofBlock {
 /// Byte order: calldata commitments are display (big-endian) order; the
 /// in-enclave `header.block_hash()` is internal order, so it is reversed before
 /// comparing.
-pub fn verify_btc_relay_agreement(call_data: &[u8], chain: &HeaderChain) -> Result<()> {
-    if call_data.len() < 4 || call_data[..4] != FUNDS_OUT_SELECTOR_POOLS {
-        return Ok(());
-    }
-    let Some((source, latest)) = decode_funds_out_proof(call_data)? else {
+pub fn verify_btc_relay_agreement(params: &FundsOutParams, chain: &HeaderChain) -> Result<()> {
+    let Some((source, latest)) = decode_funds_out_proof(params)? else {
         // proof slot empty → no calldata commitment to bind.
         return Ok(());
     };
@@ -205,11 +177,8 @@ const FUNDS_OUT_PROOF_LEN: usize = 4 * 32;
 /// Decode the `fundsOut` `proof` slot into its `(source, latest)` block pair.
 /// Returns `Ok(None)` when the `proof` bytes are empty.
 ///
-/// The payload is read through the ABI decoder rather than at a fixed offset:
-/// `proof` is a dynamic field of a dynamic tuple, so its position depends on the
-/// length of `sourceAddress` before it and is not a constant at all.
-fn decode_funds_out_proof(call_data: &[u8]) -> Result<Option<(ProofBlock, ProofBlock)>> {
-    let proof = decode_funds_out_params(call_data)?.proof;
+fn decode_funds_out_proof(params: &FundsOutParams) -> Result<Option<(ProofBlock, ProofBlock)>> {
+    let proof = &params.proof;
     if proof.is_empty() {
         return Ok(None);
     }
@@ -265,7 +234,14 @@ mod tests {
     use alloy_primitives::{Address, Bytes, U256};
     use alloy_sol_types::SolCall;
 
-    use crate::networks::evm::validation::{fundsOutCall, FundsOutParams};
+    use crate::networks::evm::validation::{
+        decode_funds_out_params, fundsOutCall, FundsOutParams, FUNDS_OUT_SELECTOR_POOLS,
+    };
+
+    /// Decode a fixture blob into the intent the cross-checks now take.
+    fn params_of(call_data: &[u8]) -> FundsOutParams {
+        decode_funds_out_params(call_data).expect("fixture calldata must decode")
+    }
 
     /// Build a `fundsOut(FundsOutParams)` calldata through the real ABI encoder.
     ///
@@ -381,7 +357,7 @@ mod tests {
         fn passes_when_total_output_covers_calldata_amount() {
             let cd = mock_funds_out_calldata(1000);
             let validated = validated_with_last(transfer_transition(1000));
-            assert!(validate_funds_out_transfer(&cd, &validated).is_ok());
+            assert!(validate_funds_out_transfer(&params_of(&cd), &validated).is_ok());
         }
 
         #[test]
@@ -409,7 +385,7 @@ mod tests {
         fn passes_when_total_output_exceeds_calldata_amount() {
             let cd = mock_funds_out_calldata(1000);
             let validated = validated_with_last(transfer_transition(2000));
-            assert!(validate_funds_out_transfer(&cd, &validated).is_ok());
+            assert!(validate_funds_out_transfer(&params_of(&cd), &validated).is_ok());
         }
 
         /// P0 regression: even with a valid consignment that deserializes
@@ -420,7 +396,7 @@ mod tests {
         fn rejects_when_total_output_less_than_calldata_amount() {
             let cd = mock_funds_out_calldata(1_000_000_000);
             let validated = validated_with_last(transfer_transition(1));
-            let err = validate_funds_out_transfer(&cd, &validated).unwrap_err();
+            let err = validate_funds_out_transfer(&params_of(&cd), &validated).unwrap_err();
             assert!(
                 err.to_string().contains("transfer amount mismatch"),
                 "expected transfer amount mismatch, got: {err}"
@@ -436,7 +412,7 @@ mod tests {
             let mut t = transfer_transition(500);
             t.transition_type = ifa::TS_BURN;
             let validated = validated_with_last(t);
-            let err = validate_funds_out_transfer(&cd, &validated).unwrap_err();
+            let err = validate_funds_out_transfer(&params_of(&cd), &validated).unwrap_err();
             assert!(
                 err.to_string().contains("requires a Transfer transition"),
                 "expected Transfer-required rejection, got: {err}"
@@ -458,27 +434,10 @@ mod tests {
                 last_transfer_op_id: None,
                 non_mined_witness_txids: vec![],
             };
-            let err = validate_funds_out_transfer(&cd, &validated).unwrap_err();
+            let err = validate_funds_out_transfer(&params_of(&cd), &validated).unwrap_err();
             assert!(
                 err.to_string().contains("at least one transition"),
                 "expected no-transition rejection, got: {err}"
-            );
-        }
-
-        #[test]
-        fn rejects_non_funds_out_selector() {
-            // Calldata with a selector that isn't `fundsOut` — the
-            // selector-specific validator fails closed instead of silently
-            // passing (audit I-03: the pre-#127 contract was a no-op; a caller
-            // skipping the `apply_funds_out_binding` whitelist must not get an
-            // `Ok`).
-            let mut cd = vec![0u8; 4 + 8 * 32];
-            cd[..4].copy_from_slice(&[0xde, 0xad, 0xbe, 0xef]);
-            let validated = validated_with_last(transfer_transition(0));
-            let err = validate_funds_out_transfer(&cd, &validated).unwrap_err();
-            assert!(
-                err.to_string().contains("non-fundsOut selector"),
-                "expected the fail-closed selector guard, got: {err}"
             );
         }
     }
@@ -567,14 +526,14 @@ mod tests {
         fn passes_on_matching_commitment() {
             let (chain, display_hash) = chain_with_one_header();
             let cd = calldata_with_proof(1, display_hash);
-            assert!(verify_btc_relay_agreement(&cd, &chain).is_ok());
+            assert!(verify_btc_relay_agreement(&params_of(&cd), &chain).is_ok());
         }
 
         #[test]
         fn rejects_mismatched_commitment() {
             let (chain, _display_hash) = chain_with_one_header();
             let cd = calldata_with_proof(1, [0x11; 32]);
-            let err = verify_btc_relay_agreement(&cd, &chain).unwrap_err();
+            let err = verify_btc_relay_agreement(&params_of(&cd), &chain).unwrap_err();
             assert!(err.to_string().contains("commitmentHash"), "got: {err}");
         }
 
@@ -586,14 +545,14 @@ mod tests {
             let (chain, mut display_hash) = chain_with_one_header();
             display_hash.reverse(); // back to internal order
             let cd = calldata_with_proof(1, display_hash);
-            assert!(verify_btc_relay_agreement(&cd, &chain).is_err());
+            assert!(verify_btc_relay_agreement(&params_of(&cd), &chain).is_err());
         }
 
         #[test]
         fn rejects_height_beyond_tip() {
             let (chain, display_hash) = chain_with_one_header();
             let cd = calldata_with_proof(99, display_hash);
-            let err = verify_btc_relay_agreement(&cd, &chain).unwrap_err();
+            let err = verify_btc_relay_agreement(&params_of(&cd), &chain).unwrap_err();
             assert!(
                 err.to_string()
                     .contains("no header at source block height 99"),
@@ -611,7 +570,7 @@ mod tests {
                 1_000,
                 proof_bytes(1, display_hash, 99, display_hash),
             );
-            let err = verify_btc_relay_agreement(&cd, &chain).unwrap_err();
+            let err = verify_btc_relay_agreement(&params_of(&cd), &chain).unwrap_err();
             assert!(
                 err.to_string()
                     .contains("no header at latest block height 99"),
@@ -626,7 +585,7 @@ mod tests {
                 1_000,
                 proof_bytes(1, display_hash, 1, [0x11; 32]),
             );
-            let err = verify_btc_relay_agreement(&cd, &chain).unwrap_err();
+            let err = verify_btc_relay_agreement(&params_of(&cd), &chain).unwrap_err();
             assert!(
                 err.to_string().contains("latest commitmentHash"),
                 "got: {err}"
@@ -640,7 +599,7 @@ mod tests {
                 1_000,
                 proof_bytes(5, display_hash, 1, display_hash),
             );
-            let err = verify_btc_relay_agreement(&cd, &chain).unwrap_err();
+            let err = verify_btc_relay_agreement(&params_of(&cd), &chain).unwrap_err();
             assert!(
                 err.to_string().contains("cannot precede"),
                 "expected the tip-ordering guard, got: {err}"
@@ -653,21 +612,14 @@ mod tests {
             // the decoder reads an empty `proof` and the check is a no-op.
             let (chain, _) = chain_with_one_header();
             let cd = mock_funds_out_calldata(1_000);
-            assert!(verify_btc_relay_agreement(&cd, &chain).is_ok());
-        }
-
-        #[test]
-        fn noop_on_non_fundsout_selector() {
-            let (chain, _) = chain_with_one_header();
-            let cd = vec![0xde, 0xad, 0xbe, 0xef]; // not the fundsOut selector
-            assert!(verify_btc_relay_agreement(&cd, &chain).is_ok());
+            assert!(verify_btc_relay_agreement(&params_of(&cd), &chain).is_ok());
         }
 
         #[test]
         fn rejects_malformed_proof_length() {
             let (chain, _) = chain_with_one_header();
             let cd = mock_funds_out_calldata_with_proof(1_000, Bytes::from(vec![0u8; 33]));
-            let err = verify_btc_relay_agreement(&cd, &chain).unwrap_err();
+            let err = verify_btc_relay_agreement(&params_of(&cd), &chain).unwrap_err();
             assert!(err.to_string().contains("128 bytes"), "got: {err}");
         }
 
@@ -682,7 +634,7 @@ mod tests {
             legacy.extend_from_slice(&u256_be(1));
             legacy.extend_from_slice(&display_hash);
             let cd = mock_funds_out_calldata_with_proof(1_000, Bytes::from(legacy));
-            let err = verify_btc_relay_agreement(&cd, &chain).unwrap_err();
+            let err = verify_btc_relay_agreement(&params_of(&cd), &chain).unwrap_err();
             assert!(err.to_string().contains("128 bytes"), "got: {err}");
         }
 
@@ -697,7 +649,7 @@ mod tests {
             payload.extend_from_slice(&u256_be(1));
             payload.extend_from_slice(&display_hash);
             let cd = mock_funds_out_calldata_with_proof(1_000, Bytes::from(payload));
-            let err = verify_btc_relay_agreement(&cd, &chain).unwrap_err();
+            let err = verify_btc_relay_agreement(&params_of(&cd), &chain).unwrap_err();
             assert!(err.to_string().contains("u32 range"), "got: {err}");
         }
     }
