@@ -13,20 +13,35 @@
 # private dep at all, so there is no SSH mount and no BuildKit secret. Keep it
 # that way - a private dep here would break public PCR reproducibility.
 
-FROM rust:1.96-slim AS builder
+# Builder base pinned by DIGEST, matching Dockerfile.enclave. Must stay on a
+# glibc <= the AL2023 runtime's (2.34): plain `rust:1.96-slim` is Debian trixie
+# (glibc 2.38) and produces a binary the runtime cannot load. `1.96-slim-bullseye`
+# gives glibc 2.31 and rustc >= 1.91 (alloy's MSRV). If a future dep needs a newer
+# rustc, bump to a newer *-bullseye tag, never trixie.
+FROM rust:1.96-slim-bullseye@sha256:c593596210f729542a92aced6a8b0812bcc8d04c5f1b238e663b800d0e2e17bd AS builder
 
 # `git` + `ca-certificates` for the public git `[patch.crates-io]` mirrors, which
 # resolve even though the rgb-validation crates that use them are not built here.
 # `.cargo/config.toml` sets `net.git-fetch-with-cli = true` so cargo shells out
 # to system `git`. No `openssh-client`: nothing here is fetched over SSH.
+# No `cmake`/`make`: this build has no rgb-ops, so nothing pulls aws-lc-sys.
+# `protobuf-compiler` is NOT needed either: the proto crate is vendored
+# pre-generated and no crate in the workspace has a build.rs.
 RUN apt-get update && apt-get install -y \
-    pkg-config libssl-dev protobuf-compiler git ca-certificates \
+    pkg-config libssl-dev git ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /build
 COPY . /build/
 
 WORKDIR /build/enclave
+
+# Deterministic compilation (PCR0 reproducibility), same as Dockerfile.enclave:
+#   CARGO_INCREMENTAL=0   no incremental artifacts
+#   --remap-path-prefix   strip the absolute build path from embedded paths
+#   -C debuginfo=0 / strip=symbols  drop debug info + symbol tables
+ENV CARGO_INCREMENTAL=0 \
+    RUSTFLAGS="--remap-path-prefix=/build=/src -C debuginfo=0 -C strip=symbols"
 # `--no-default-features --features vsock,ccd`: Concordium + shared EVM signing
 # only. No `rgb`/`spv`/`rgb-validation`/`evm-rpc`, so the heavy RGB deps are not
 # compiled. `--locked` pins to Cargo.lock exactly, so a rebuild of the same
@@ -34,9 +49,21 @@ WORKDIR /build/enclave
 RUN cargo build --release --locked --no-default-features --features vsock,ccd
 
 # --- Runtime ---
-FROM public.ecr.aws/amazonlinux/amazonlinux:2023-minimal AS runtime
+# Pinned by DIGEST: this rootfs is what ends up in the EIF, so its digest drives
+# PCR0 directly. Bump tag + digest together, in step with Dockerfile.enclave.
+FROM public.ecr.aws/amazonlinux/amazonlinux:2023-minimal@sha256:8073d921f4ac1bf17fca94e16b0bc575e3fc17e4ccbe53b563160f02f0c7ccfc AS runtime
 
-RUN dnf install -y socat iproute && dnf clean all
+# Deterministic runtime rootfs (PCR0/PCR2 reproducibility). dnf/rpm write state
+# with embedded timestamps and randomness (rpmdb, history, caches, logs);
+# rewrite-timestamp normalises mtimes but not file contents. Scrub it in the SAME
+# layer so the measured rootfs is stable. (rpmdb is not needed at runtime.)
+RUN dnf install -y socat iproute \
+    && dnf clean all \
+    && rm -rf \
+        /var/cache/dnf /var/cache/libdnf5 /var/cache/ldconfig \
+        /var/lib/dnf /var/lib/rpm /var/lib/rpm-state \
+        /var/log/* /tmp/* \
+    && :
 
 WORKDIR /app
 COPY --from=builder /build/target/release/utexo-bridge-enclave /app/utexo-bridge-enclave

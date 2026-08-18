@@ -11,20 +11,41 @@
 # resolves over public HTTPS, so there is no SSH mount and no BuildKit secret.
 # Keep it that way - a private dep here would break public PCR reproducibility.
 
-FROM rust:1.96-slim AS builder
+# Builder base pinned by DIGEST, matching Dockerfile.enclave. Must stay on a
+# glibc <= the AL2023 runtime's (2.34): plain `rust:1.96-slim` is Debian trixie
+# (glibc 2.38) and produces a binary the runtime cannot load. `1.96-slim-bullseye`
+# gives glibc 2.31 and rustc >= 1.91 (alloy's MSRV). If a future dep needs a newer
+# rustc, bump to a newer *-bullseye tag, never trixie.
+FROM rust:1.96-slim-bullseye@sha256:c593596210f729542a92aced6a8b0812bcc8d04c5f1b238e663b800d0e2e17bd AS builder
 
 # `git` + `ca-certificates`: the workspace `[patch.crates-io]` and the
 # `rgb-consignment` dep are public HTTPS git URLs, and `.cargo/config.toml` sets
 # `net.git-fetch-with-cli = true` so cargo shells out to system `git` rather than
 # bundled libgit2. No `openssh-client`: nothing here is fetched over SSH.
+# `cmake` (via pip) + `make`: the Electrum witness resolver (rgb-ops
+# `electrum_blocking`) pulls electrum-client -> rustls -> aws-lc-rs, whose
+# `aws-lc-sys` C sources build via CMake. Bullseye's apt cmake is 3.18 and
+# aws-lc-sys wants newer, so pin a modern one from PyPI. Builder-only, so none of
+# it lands in the runtime rootfs or PCR0.
+# `protobuf-compiler` is NOT needed: the proto crate is vendored pre-generated
+# and no crate in the workspace has a build.rs, so protoc never runs.
 RUN apt-get update && apt-get install -y \
-    pkg-config libssl-dev protobuf-compiler git ca-certificates \
+    pkg-config libssl-dev git ca-certificates \
+    make python3 python3-pip \
+    && pip3 install --no-cache-dir "cmake==3.31.6" \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /build
 COPY . /build/
 
 WORKDIR /build/enclave
+
+# Deterministic compilation (PCR0 reproducibility), same as Dockerfile.enclave:
+#   CARGO_INCREMENTAL=0   no incremental artifacts
+#   --remap-path-prefix   strip the absolute build path from embedded paths
+#   -C debuginfo=0 / strip=symbols  drop debug info + symbol tables
+ENV CARGO_INCREMENTAL=0 \
+    RUSTFLAGS="--remap-path-prefix=/build=/src -C debuginfo=0 -C strip=symbols"
 # `rgb` implies `spv` + `rgb-validation`. `--no-default-features` drops `ccd` so
 # this binary is RGB-only. `evm-rpc` adds in-enclave FundsIn verification (#60),
 # pulling the alloy + tokio subtree; requires a second host vsock-proxy
@@ -36,7 +57,6 @@ WORKDIR /build/enclave
 # HELIOS_CONSENSUS_RPC / HELIOS_CHECKPOINT and run the exec+consensus
 # vsock-proxies (default ports 8003 / 8004).
 #
-#
 # NO CREDENTIALS REQUIRED, same as Dockerfile.enclave: `enclave-proto/` is a
 # vendored in-tree slice and every other dep resolves over public HTTPS, so this
 # build carries no SSH mount and no BuildKit secrets. Keep it that way - a
@@ -44,9 +64,21 @@ WORKDIR /build/enclave
 RUN cargo build --release --locked --no-default-features --features vsock,rgb,evm-rpc,helios
 
 # --- Runtime ---
-FROM public.ecr.aws/amazonlinux/amazonlinux:2023-minimal AS runtime
+# Pinned by DIGEST: this rootfs is what ends up in the EIF, so its digest drives
+# PCR0 directly. Bump tag + digest together, in step with Dockerfile.enclave.
+FROM public.ecr.aws/amazonlinux/amazonlinux:2023-minimal@sha256:8073d921f4ac1bf17fca94e16b0bc575e3fc17e4ccbe53b563160f02f0c7ccfc AS runtime
 
-RUN dnf install -y socat iproute && dnf clean all
+# Deterministic runtime rootfs (PCR0/PCR2 reproducibility). dnf/rpm write state
+# with embedded timestamps and randomness (rpmdb, history, caches, logs);
+# rewrite-timestamp normalises mtimes but not file contents. Scrub it in the SAME
+# layer so the measured rootfs is stable. (rpmdb is not needed at runtime.)
+RUN dnf install -y socat iproute \
+    && dnf clean all \
+    && rm -rf \
+        /var/cache/dnf /var/cache/libdnf5 /var/cache/ldconfig \
+        /var/lib/dnf /var/lib/rpm /var/lib/rpm-state \
+        /var/log/* /tmp/* \
+    && :
 
 WORKDIR /app
 COPY --from=builder /build/target/release/utexo-bridge-enclave /app/utexo-bridge-enclave
