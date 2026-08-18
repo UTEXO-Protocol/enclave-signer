@@ -3,7 +3,8 @@ use std::io::{Read, Write};
 use crate::config::BridgeConfig;
 use crate::error::{EnclaveError, Result};
 use crate::framing;
-use crate::networks::evm::signing::{build_evm_domain, sign_request_digest};
+use crate::networks::evm::signing::{build_evm_domain, funds_out_digest, lz_funds_out_digest};
+use crate::networks::evm::validation::LZ_FUNDS_OUT_SELECTOR;
 use crate::networks::{
     validate_destination, validate_route_proofs, validate_source, ValidationContext,
 };
@@ -300,19 +301,9 @@ fn handle_sign(ctx: &ServerContext, req: SignRequest) -> Result<EnclaveResponse>
                 source.tx_hash.len()
             ))
         })?;
-        // Proto #24: funds_in_operation_id is the on-chain BridgeFundsIn
-        // operationId as the full 32-byte word (uint256), not a u64. It is
-        // required; an empty/short value fails closed here.
-        let funds_in_operation_id: [u8; 32] = source
-            .funds_in_operation_id
-            .as_slice()
-            .try_into()
-            .map_err(|_| {
-                EnclaveError::CrossCheck(format!(
-                    "funds_in_operation_id must be 32 bytes, got {}",
-                    source.funds_in_operation_id.len()
-                ))
-            })?;
+        // `funds_in_operation_id` is the on-chain BridgeFundsIn operationId as
+        // the full 32-byte word. It is required; `verify_funds_in_event` fails
+        // closed on an empty/short value.
         let client = ctx.evm_rpc_client.as_ref().ok_or_else(|| {
             EnclaveError::CrossCheck(
                 "evm-rpc build but RPC client unavailable - refusing to sign a bridge PSBT \
@@ -320,13 +311,9 @@ fn handle_sign(ctx: &ServerContext, req: SignRequest) -> Result<EnclaveResponse>
                     .into(),
             )
         })?;
-        // Bind the #60 FundsIn check to the on-chain BridgeFundsIn.operationId
-        // carried in the EVM source (the bridge transfer id), NOT to
-        // destination.operation_idx. The latter is the RGB hub's own operation
-        // index — a different id-space — and only coincides with the on-chain
-        // operationId by accident; comparing against it produced spurious
-        // "operationId mismatch: on-chain N != request M" refusals. operation_idx
-        // remains the replay-guard key below.
+        // Binds to the source's BridgeFundsIn.operationId, NOT to
+        // destination.operation_idx — the RGB hub's index is a different id-space
+        // and matching against it produced spurious mismatch refusals.
         crate::networks::evm::evm_event::verify_funds_in_event(
             &**client,
             // FundsIn is emitted by the bridge entry contract, which may differ
@@ -334,7 +321,7 @@ fn handle_sign(ctx: &ServerContext, req: SignRequest) -> Result<EnclaveResponse>
             &ctx.bridge_config.funds_in_contract,
             ctx.evm_rpc_config.min_confirmations,
             &tx_hash,
-            &funds_in_operation_id,
+            &source.funds_in_operation_id,
             req.amount,
             source.commission,
         )?;
@@ -715,7 +702,26 @@ fn handle_sign_evm(ctx: &ServerContext, req: EvmDestination) -> Result<EnclaveRe
     let domain = build_evm_domain(&req)?;
 
     let domain_sep = domain.separator_hash();
-    let digest = sign_request_digest(&domain, &req.call_data, req.nonce, req.deadline)?;
+
+    // Route to the appropriate EIP-712 digest based on selector and lz_release.
+    // lzFundsOutCall carries LZ-specific fields the digest commits to; the
+    // proto field is the authority — the selector in calldata is a consistency
+    // check only (crosschecked inside lz_funds_out_digest).
+    let is_lz = req.call_data.len() >= 4
+        && req.call_data[..4] == LZ_FUNDS_OUT_SELECTOR
+        && req.lz_release.is_some();
+
+    let digest = if is_lz {
+        lz_funds_out_digest(
+            &domain,
+            &req.call_data,
+            req.lz_release.as_ref().expect("checked above"),
+            req.nonce,
+            req.deadline,
+        )?
+    } else {
+        funds_out_digest(&domain, &req.call_data, req.nonce, req.deadline)?
+    };
 
     tracing::info!(
         domain_name = %domain.name,
@@ -930,7 +936,7 @@ fn handle_sign_ccd(state: &EnclaveState, req: SignCcdRequest) -> Result<EnclaveR
     }
 
     let hash: [u8; 32] = req.hash.as_slice().try_into().unwrap();
-    let signature = state.sign_ccd(&hash)?;
+    let (signature, public_key) = state.sign_ccd(&hash)?;
 
     tracing::info!(
         hash_hex = %hex::encode(hash),
@@ -940,6 +946,10 @@ fn handle_sign_ccd(state: &EnclaveState, req: SignCcdRequest) -> Result<EnclaveR
     Ok(EnclaveResponse {
         response: Some(Response::CcdSignature(CcdSignatureResponse {
             signature: signature.to_vec(),
+            // Ed25519 signatures are not recoverable, so the consumer needs the key
+            // to find this signature's index on the governance account. Taken from
+            // the same call that signed, so the two cannot disagree.
+            public_key: public_key.to_vec(),
         })),
     })
 }
