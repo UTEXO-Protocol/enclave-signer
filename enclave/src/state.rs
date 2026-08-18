@@ -162,9 +162,65 @@ impl NonceReplayGuard {
         Ok(())
     }
 
+    /// Reserve `nonce`: [`check_and_record`](Self::check_and_record) it and
+    /// return an RAII [`ReplayReservation`] that ROLLS BACK the record on drop
+    /// unless [`ReplayReservation::commit`] is called first.
+    ///
+    /// Use when the record must only stick if the guarded operation commits:
+    /// reserve before the fallible work, commit after it succeeds. Any failure
+    /// in between (an early return / `?`) drops the reservation and releases the
+    /// key, so a transient error does not consume it and self-block a legitimate
+    /// retry (audit M-02 — the local reservation must roll back on failure).
+    /// Reserving still rejects a concurrent duplicate up front.
+    pub fn reserve(&self, nonce: [u8; 32]) -> Result<ReplayReservation<'_>> {
+        self.check_and_record(nonce)?;
+        Ok(ReplayReservation {
+            guard: self,
+            nonce,
+            committed: false,
+        })
+    }
+
+    /// Drop a previously recorded nonce. No-op if it is absent (already
+    /// TTL-evicted). Only used by [`ReplayReservation`] rollback, so it must not
+    /// fail: a poisoned lock is recovered rather than propagated.
+    fn remove(&self, nonce: &[u8; 32]) {
+        let mut g = self.inner.lock().unwrap_or_else(|p| p.into_inner());
+        if g.seen.remove(nonce) {
+            if let Some(pos) = g.order.iter().position(|(_, n)| n == nonce) {
+                g.order.remove(pos);
+            }
+        }
+    }
+
     #[cfg(test)]
     pub fn seen_count(&self) -> usize {
         self.inner.lock().map(|g| g.seen.len()).unwrap_or(0)
+    }
+}
+
+/// RAII reservation returned by [`NonceReplayGuard::reserve`]. On drop it
+/// removes the reserved nonce UNLESS [`Self::commit`] was called, so a guarded
+/// operation that fails before committing leaves the key un-consumed.
+#[must_use = "an un-committed reservation rolls back on drop"]
+pub struct ReplayReservation<'a> {
+    guard: &'a NonceReplayGuard,
+    nonce: [u8; 32],
+    committed: bool,
+}
+
+impl ReplayReservation<'_> {
+    /// Keep the record: the guarded operation committed.
+    pub fn commit(mut self) {
+        self.committed = true;
+    }
+}
+
+impl Drop for ReplayReservation<'_> {
+    fn drop(&mut self) {
+        if !self.committed {
+            self.guard.remove(&self.nonce);
+        }
     }
 }
 
@@ -609,6 +665,50 @@ mod tests {
             .check_and_record_at(nonce(1), t0 + Duration::from_secs(30))
             .unwrap_err();
         assert!(matches!(err, EnclaveError::NonceReplay));
+    }
+
+    // ReplayReservation — reserve/commit/rollback (audit M-02).
+
+    #[test]
+    fn reservation_rolls_back_when_dropped_uncommitted() {
+        let g = NonceReplayGuard::with_capacity(100, Duration::from_secs(3600));
+        let key = nonce(1);
+        {
+            let _r = g.reserve(key).expect("first reserve succeeds");
+            assert_eq!(g.seen_count(), 1, "reserved key is recorded while held");
+            // `_r` drops here without commit -> rollback.
+        }
+        assert_eq!(
+            g.seen_count(),
+            0,
+            "un-committed reservation rolls back on drop"
+        );
+        // The same key can now be reserved again (a legitimate retry).
+        g.reserve(key)
+            .expect("retry after rollback succeeds")
+            .commit();
+        assert_eq!(g.seen_count(), 1);
+    }
+
+    #[test]
+    fn reservation_sticks_after_commit() {
+        let g = NonceReplayGuard::with_capacity(100, Duration::from_secs(3600));
+        let key = nonce(2);
+        g.reserve(key).expect("reserve succeeds").commit();
+        // Committed -> a second reserve of the same key is a replay.
+        assert!(matches!(g.reserve(key), Err(EnclaveError::NonceReplay)));
+    }
+
+    #[test]
+    fn reservation_rejects_concurrent_duplicate_before_commit() {
+        // While a reservation is held (not yet committed), a second reserve of
+        // the same key is still rejected up front — reserve-before-sign blocks a
+        // concurrent duplicate, not only a committed one.
+        let g = NonceReplayGuard::with_capacity(100, Duration::from_secs(3600));
+        let key = nonce(3);
+        let held = g.reserve(key).expect("first reserve succeeds");
+        assert!(matches!(g.reserve(key), Err(EnclaveError::NonceReplay)));
+        held.commit();
     }
 
     /// TC-3 (audit coverage map): a flood of distinct nonces beyond `max`
