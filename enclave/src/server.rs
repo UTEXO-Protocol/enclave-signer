@@ -253,11 +253,24 @@ fn handle_sign(ctx: &ServerContext, req: SignRequest) -> Result<EnclaveResponse>
         EnclaveError::InvalidRequest("sign request has no destination_network".into())
     })?;
 
+    // Self-owned-output oracle for the send-RGB per-output recipient bind
+    // (W-06 / #52). Passed as a closure so the key lock is held only while the
+    // outputs are being resolved — validation itself makes Esplora/Electrum
+    // calls, and holding the lock across those would pin every other worker.
+    #[cfg(feature = "rgb-validation")]
+    let self_owned_psbt_outputs = |psbt: &bitcoin::psbt::Psbt| {
+        ctx.state.with_keys(|keys| {
+            Ok(crate::networks::rgb::btc_ownership::self_owned_output_indices(psbt, keys))
+        })
+    };
+
     let validation_ctx = ValidationContext {
         bridge_config: &ctx.bridge_config,
         #[cfg(feature = "rgb-validation")]
         rgb_validator: ctx.rgb_validator.as_ref(),
         header_chain: &ctx.header_chain,
+        #[cfg(feature = "rgb-validation")]
+        self_owned_psbt_outputs: Some(&self_owned_psbt_outputs),
     };
     let source_validated = validate_source(req.amount, source_ref, &validation_ctx)?;
 

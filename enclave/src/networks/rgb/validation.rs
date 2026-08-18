@@ -358,6 +358,31 @@ pub struct ValidatedConsignment {
     /// defense-in-depth atop the SPV depth check (see
     /// `evm::validation::assert_witnesses_confirmed`).
     pub non_mined_witness_txids: Vec<[u8; 32]>,
+    /// Every transition in the consignment, grouped by the witness tx that
+    /// commits it.
+    ///
+    /// [`Self::last_transition`] is one transition; a single Bitcoin
+    /// transaction commits a *bundle*, which may hold several. Binding only
+    /// the last one leaves every other transition in the tx being signed
+    /// unchecked — an attacker can park a large transfer earlier in the bundle
+    /// and a correctly-sized one last. The send-RGB PSBT cross-check therefore
+    /// binds the whole group belonging to the signed txid, via
+    /// [`Self::transitions_committed_by`].
+    pub transitions_by_witness: Vec<(bitcoin::Txid, Vec<TransitionSummary>)>,
+}
+
+impl ValidatedConsignment {
+    /// Every transition committed by witness transaction `txid`.
+    ///
+    /// Empty when the consignment commits nothing to that transaction — which
+    /// callers must treat as a rejection, not as "nothing to check".
+    pub fn transitions_committed_by(&self, txid: bitcoin::Txid) -> Vec<&TransitionSummary> {
+        self.transitions_by_witness
+            .iter()
+            .filter(|(witness_txid, _)| *witness_txid == txid)
+            .flat_map(|(_, transitions)| transitions.iter())
+            .collect()
+    }
 }
 
 /// Flat summary of one RGB state transition. Mirrors
@@ -412,6 +437,13 @@ pub struct TransitionSummary {
 /// One fungible output assignment on a state transition.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TransitionOutput {
+    /// IFA fungible assignment type of the allocation this entry belongs to
+    /// ([`ifa::OS_ASSET`] or [`ifa::OS_INFLATION`]). Load-bearing: only
+    /// `OS_ASSET` entries carry asset units, so the per-output recipient bind
+    /// must filter on this exactly as `asset_output_amount` does — counting an
+    /// `OS_INFLATION` allowance entry as a paid-out leg would let a mint
+    /// consignment claim mint *capacity* as value delivered (#54).
+    pub assignment_type: u16,
     /// Amount in the asset's smallest unit.
     pub amount: u64,
     /// Destination seal — either a revealed `txid:vout` or a hidden
@@ -735,7 +767,7 @@ impl RgbValidator {
         // walk would duplicate ~80 lines we'd then have to keep in sync
         // with rgb-ops's evolving internal types. The parse cost is small
         // relative to the network validation below.
-        let (all_op_ids, mint_op_ids, mut last_transition) =
+        let (all_op_ids, mint_op_ids, mut last_transition, transitions_by_witness) =
             extract_transition_summary(consignment_bytes)?;
         let transitions_count = all_op_ids.len();
 
@@ -891,6 +923,7 @@ impl RgbValidator {
             last_transfer_witness_prevouts,
             last_transfer_op_id,
             non_mined_witness_txids,
+            transitions_by_witness,
         })
     }
 }
@@ -975,13 +1008,18 @@ type LastTransferBinding = (
 );
 
 /// Parse the consignment with `rgb_consignment::parse` and pull out the
-/// flat transition summary (every op_id + the most recent transition's
-/// shape). Errors if the consignment isn't a Transfer or if any field
-/// fails to decode.
+/// flat transition summary (every op_id, the most recent transition's shape,
+/// and every transition grouped by the witness tx that commits it). Errors if
+/// the consignment isn't a Transfer or if any field fails to decode.
 #[allow(clippy::type_complexity)]
 fn extract_transition_summary(
     consignment_bytes: &[u8],
-) -> Result<(Vec<String>, Vec<String>, Option<TransitionSummary>)> {
+) -> Result<(
+    Vec<String>,
+    Vec<String>,
+    Option<TransitionSummary>,
+    Vec<(bitcoin::Txid, Vec<TransitionSummary>)>,
+)> {
     let info = rgb_consignment::parse(consignment_bytes)
         .map_err(|e| EnclaveError::CrossCheck(format!("rgb-consignment parse failed: {e}")))?;
 
@@ -1028,7 +1066,41 @@ fn extract_transition_summary(
         .map(transition_summary)
         .transpose()?;
 
-    Ok((all_op_ids, mint_op_ids, last_transition))
+    // Every transition, grouped by the witness tx that commits it. One
+    // Bitcoin transaction can carry a bundle of SEVERAL transitions, so a
+    // check that reads only `last_transition` leaves the rest of the value
+    // moved by the very tx being signed unbound. The PSBT cross-check binds
+    // this whole group, selected by the signed tx's own txid.
+    let mut transitions_by_witness: Vec<(bitcoin::Txid, Vec<TransitionSummary>)> =
+        Vec::with_capacity(transfer.witnesses.len());
+    for w in transfer.witnesses.iter() {
+        let txid = txid_from_display_hex(&w.txid)?;
+        let summaries: Result<Vec<TransitionSummary>> =
+            w.transitions.iter().map(transition_summary).collect();
+        transitions_by_witness.push((txid, summaries?));
+    }
+
+    Ok((
+        all_op_ids,
+        mint_op_ids,
+        last_transition,
+        transitions_by_witness,
+    ))
+}
+
+/// Parse a display-order (big-endian) txid hex string into a `bitcoin::Txid`.
+///
+/// The parser stringifies txids in display order, while `bitcoin::Txid` stores
+/// them internally reversed — so the flip lives here, once, rather than at each
+/// comparison site.
+fn txid_from_display_hex(display_hex: &str) -> Result<bitcoin::Txid> {
+    use bitcoin::hashes::Hash;
+
+    let mut raw = decode_display_txid(display_hex)?;
+    raw.reverse();
+    Ok(bitcoin::Txid::from_raw_hash(
+        bitcoin::hashes::sha256d::Hash::from_byte_array(raw),
+    ))
 }
 
 fn transition_summary(t: &TransitionInfo) -> Result<TransitionSummary> {
@@ -1064,7 +1136,12 @@ fn transition_summary(t: &TransitionInfo) -> Result<TransitionSummary> {
     let outputs: Result<Vec<TransitionOutput>> = t
         .fungible_allocations
         .iter()
-        .flat_map(|a: &FungibleAllocation| a.entries.iter().map(transition_output))
+        .flat_map(|a: &FungibleAllocation| {
+            let assignment_type = a.assignment_type;
+            a.entries
+                .iter()
+                .map(move |e| transition_output(assignment_type, e))
+        })
         .collect();
 
     Ok(TransitionSummary {
@@ -1125,7 +1202,7 @@ fn read_last_transition_burned_asset(transfer: &Transfer) -> Result<Option<u64>>
     Ok(None)
 }
 
-fn transition_output(e: &FungibleEntry) -> Result<TransitionOutput> {
+fn transition_output(assignment_type: u16, e: &FungibleEntry) -> Result<TransitionOutput> {
     let seal = match &e.seal {
         SealInfo::Revealed { txid, vout } => {
             let txid_bytes = txid
@@ -1142,6 +1219,7 @@ fn transition_output(e: &FungibleEntry) -> Result<TransitionOutput> {
         },
     };
     Ok(TransitionOutput {
+        assignment_type,
         amount: e.amount,
         seal,
     })
@@ -1402,7 +1480,7 @@ mod tests {
     /// `total_output_amount` to `asset_output_amount` (#54).
     #[test]
     fn transfer_fixture_asset_amount_equals_total() {
-        let (_, _, last_transition) =
+        let (_, _, last_transition, _) =
             extract_transition_summary(TRANSFER_FIXTURE).expect("transfer parse");
         let last = last_transition.expect("transfer has a last transition");
         assert_eq!(last.transition_type, ifa::TS_TRANSFER);
@@ -1411,7 +1489,7 @@ mod tests {
 
     #[test]
     fn extracts_op_ids_and_last_transition_from_transfer_fixture() {
-        let (all_op_ids, mint_op_ids, last_transition) =
+        let (all_op_ids, mint_op_ids, last_transition, _) =
             extract_transition_summary(TRANSFER_FIXTURE).expect("transfer parse");
 
         // Fixture is a Transfer with two witness bundles, one transition
@@ -1492,9 +1570,19 @@ mod tests {
 
     #[test]
     fn last_transition_carries_revealed_and_confidential_seals() {
-        let (_, _, last_transition) =
+        let (_, _, last_transition, _) =
             extract_transition_summary(TRANSFER_FIXTURE).expect("transfer parse");
         let last = last_transition.expect("transfer has a last transition");
+
+        // Both legs are `OS_ASSET` — the assignment tag the per-output
+        // recipient bind (W-06 / #52) filters on. Asserted against real
+        // consignment bytes so the tag can't silently drift from the parser.
+        assert!(
+            last.outputs
+                .iter()
+                .all(|o| o.assignment_type == ifa::OS_ASSET),
+            "transfer fixture legs should all be OS_ASSET"
+        );
 
         // First entry is the change leg: revealed with no explicit txid
         // (points at the witness tx itself), vout=1, amount as above.
@@ -1914,6 +2002,8 @@ mod tests {
                 bridge_config: config,
                 rgb_validator: Some(&validator),
                 header_chain: &chain,
+                // Source validation never reaches the destination PSBT bind.
+                self_owned_psbt_outputs: None,
             };
             validate_source(source, &ctx)
         }

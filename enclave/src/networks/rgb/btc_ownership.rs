@@ -69,12 +69,45 @@ use crate::networks::rgb::signing::taproot::find_taproot_sign_jobs;
 /// output key, claimed key present in that verified leaf, and the claimed
 /// BIP-86 derivation actually producing it.
 pub fn self_controlled_input_scripts(psbt: &Psbt, keys: &KeyManager) -> HashSet<Vec<u8>> {
+    self_controlled_input_scripts_scoped(psbt, keys, Some(AccountType::Vanilla))
+}
+
+/// [`self_controlled_input_scripts`] with the account filter made explicit.
+///
+/// `allowed_account` is `Some(_)` to keep to one BIP-86 account and `None` to
+/// accept either. The plain-BTC path pins `Vanilla` because M-01 scopes which
+/// inputs it may spend; the send-RGB change-leg proof passes `None`, because a
+/// bridge change output on that path sits on the **Colored** account and rule
+/// (A) would otherwise never fire for it. Widening the filter cannot widen what
+/// gets *signed* — that is enforced separately by `sign_psbt_scoped` — it only
+/// widens which scripts count as provably ours.
+pub fn self_controlled_input_scripts_scoped(
+    psbt: &Psbt,
+    keys: &KeyManager,
+    allowed_account: Option<AccountType>,
+) -> HashSet<Vec<u8>> {
     find_taproot_sign_jobs(psbt, keys.master_fingerprint(), keys)
         .into_iter()
-        .filter(|job| job.account_type == AccountType::Vanilla)
+        .filter(|job| allowed_account.is_none_or(|want| job.account_type == want))
         .filter_map(|job| psbt.inputs.get(job.input_index))
         .filter_map(|input| input.witness_utxo.as_ref())
         .map(|utxo| utxo.script_pubkey.as_bytes().to_vec())
+        .collect()
+}
+
+/// Indices of every PSBT output that provably pays back to this enclave, on
+/// **either** BIP-86 account. Hoists the input resolution once and applies
+/// [`output_is_self_owned`] to each output.
+///
+/// This is the change-leg oracle for the send-RGB per-output amount bind
+/// (W-06 / #52): a revealed RGB seal is only credible as *bridge change* when
+/// the Bitcoin output it names is one we control. Anything else is a payout to
+/// a third party and must be counted as such.
+pub fn self_owned_output_indices(psbt: &Psbt, keys: &KeyManager) -> HashSet<u32> {
+    let input_scripts = self_controlled_input_scripts_scoped(psbt, keys, None);
+    (0..psbt.unsigned_tx.output.len())
+        .filter(|&i| output_is_self_owned(psbt, i, keys, &input_scripts))
+        .map(|i| i as u32)
         .collect()
 }
 
