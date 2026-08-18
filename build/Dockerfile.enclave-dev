@@ -25,11 +25,11 @@ WORKDIR /build/enclave
 # Dev image still gets `spv` so the new code path is exercised even
 # without the production-only `vsock,rgb-validation` combo. Without spv,
 # the enclave fails-closed on any request that carries merkle_proofs,
-# which is what we want — build mismatch should always fail loudly.
+# which is what we want - build mismatch should always fail loudly.
 #
 # DEBUG build (no `--release`): `allow-seed-import` is one of the dev-only
 # features that `compile_error!`s in a release build (`debug_assertions`
-# off) — see the release guards in `enclave/src/lib.rs`. Building the dev
+# off) - see the release guards in `enclave/src/lib.rs`. Building the dev
 # image in debug keeps `debug_assertions` on so the guard stays quiet while
 # still refusing the feature in any production (release) build.
 #

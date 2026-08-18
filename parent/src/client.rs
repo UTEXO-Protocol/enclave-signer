@@ -15,12 +15,10 @@ use crate::framing;
 /// vsock proxy).
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// Read timeout for the response. Without this, an unrelated peer that
-/// accepts the TCP connection but never speaks our wire protocol (the
-/// classic case being macOS AirPlay Receiver hijacking port 5000) makes
-/// the CLI hang forever instead of failing fast. Enclave operations that
-/// could legitimately take a while (key generation, RGB consignment
-/// validation against Esplora) still need to fit inside this budget.
+/// Read timeout for the response. Without it, a peer that accepts the TCP
+/// connection but never speaks our wire protocol hangs the CLI forever. Slow
+/// but legitimate operations (key generation, RGB consignment validation) must
+/// still fit inside this budget.
 const READ_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Debug, Clone)]
@@ -114,9 +112,9 @@ impl EnclaveClient {
 
         #[cfg(all(feature = "vsock", target_os = "linux"))]
         {
-            // No `vsock://` address: fall back to env for back-compat, but DO NOT
-            // silently default to CID 16 — on a multi-enclave host that routes
-            // every call to the wrong enclave (init/sign on the wrong identity).
+            // No `vsock://` address: fall back to env for back-compat, but do
+            // not default to CID 16 - on a multi-enclave host that would route
+            // every call to the wrong enclave identity.
             let cid = std::env::var("ENCLAVE_VSOCK_CID")
                 .ok()
                 .and_then(|v| v.parse::<u32>().ok());

@@ -25,14 +25,14 @@ pub struct TaprootSignJob {
 /// Scan all PSBT inputs for taproot script-path leaves whose script contains
 /// one of our keys, and emit a sign job per (input, leaf, xonly) triple.
 ///
-/// Authorization is anchored to `witness_utxo.script_pubkey` — for each
+/// Authorization is anchored to `witness_utxo.script_pubkey` - for each
 /// `(control_block, script)` entry in `tap_scripts`, the control block must
 /// prove the script's inclusion under the on-chain output key (BIP-341). The
 /// candidate xonly key must (1) appear as a 32-byte push inside the verified
 /// leaf script, (2) be claimed by a `tap_key_origins` entry whose fingerprint
 /// matches ours, (3) appear in that entry's `leaf_hashes` for *this* leaf,
 /// and (4) match the xonly pubkey our claimed BIP-86 derivation actually
-/// derives — closing the gap where a coordinator could forge `tap_key_origins`
+/// derives - closing the gap where a coordinator could forge `tap_key_origins`
 /// to point our fingerprint at someone else's key.
 pub fn find_taproot_sign_jobs(
     psbt: &Psbt,

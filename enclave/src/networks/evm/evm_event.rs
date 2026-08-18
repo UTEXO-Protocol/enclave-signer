@@ -1,40 +1,31 @@
 //! Independent in-enclave verification of the EVM `FundsIn` deposit event for
 //! bridge-mode `signPsbt` (audit M-06 / issues #60, #51).
 //!
-//! Bridge-mode `signPsbt` releases RGB against an EVM deposit. Previously the
-//! enclave trusted two listener-supplied booleans (`evm_event_valid` /
-//! `evm_event_finalized`) that anyone reaching the enclave could set to `true`.
-//! This module replaces that trust: the enclave fetches the deposit's
-//! transaction receipt over an in-enclave EVM RPC and checks, itself, that a
-//! `BridgeFundsIn` log was emitted by the pinned bridge contract with the
-//! claimed amount, and at sufficient confirmation depth. Every predicate is
-//! **fail-closed**.
+//! Bridge-mode `signPsbt` releases RGB against an EVM deposit. Instead of
+//! trusting the listener's `evm_event_valid` / `evm_event_finalized` booleans,
+//! the enclave fetches the deposit's transaction receipt over an in-enclave EVM
+//! RPC and checks itself that a `BridgeFundsIn` log was emitted by the pinned
+//! bridge contract, with the claimed amount, at sufficient confirmation depth.
+//! Every predicate is fail-closed.
 //!
-//! TRUST BOUNDARY: the RPC is reached through the loopback -> vsock forwarder,
-//! i.e. responses are relayed by the UNTRUSTED host. A malicious host can
-//! withhold a receipt (-> we fail closed, safe) but could in principle forge
-//! one; this predicate becomes trustless only once Helios (#77) verifies the
-//! RPC inside the TEE. This is the predicate + plumbing layer.
+//! Trust boundary: the RPC is reached through the loopback -> vsock forwarder,
+//! so responses are relayed by the untrusted host. A withheld receipt fails
+//! closed; a forged one is only ruled out once Helios (#77) verifies the RPC
+//! inside the TEE.
 //!
-//! #77 PREDICATE SHAPE (deliberate divergence): issue #77 sketches matching the
-//! exact listener-forwarded log (`evm_contract`, `evm_log_index`,
-//! `evm_event_topics`, `evm_event_data`). This module instead PINS the contract
-//! from config and independently DECODES + binds the semantic fields
-//! (`operationId`, gross/net/commission) from the log data. That is strictly
-//! stronger — the enclave never trusts a listener-forwarded raw log — so
-//! `evm_log_index` / `evm_event_topics` / `evm_event_data` are intentionally
-//! unused rather than an oversight.
+//! Divergence from #77: rather than matching the listener-forwarded raw log,
+//! this module pins the contract from config and independently decodes and
+//! binds the semantic fields (`operationId`, gross/net/commission). So
+//! `evm_log_index` / `evm_event_topics` / `evm_event_data` are unused by
+//! design.
 //!
-//! WHAT THIS DOES NOT BIND: `operationId` has no on-chain cryptographic link to
-//! the RGB mint being signed, so confirming the deposit does not by itself prove
-//! it corresponds to *this* RGB transfer; that association stays
-//! listener-supplied (related to #66). Amounts are still compared as `u64`
-//! because the proto carries them that way, so an on-chain value exceeding `u64`
-//! is rejected fail-closed (see [`extract_uint256_as_u64`]).
+//! Not bound here: `operationId` has no on-chain link to the RGB mint being
+//! signed, so that association stays listener-supplied (#66). Amounts are
+//! compared as `u64` because the proto carries them that way; an on-chain value
+//! exceeding `u64` is rejected fail-closed (see [`extract_uint256_as_u64`]).
 //!
-//! `operationId` is a contract-derived `bytes32` on the route-agnostic Bridge,
-//! and the binding is required: exactly 32 bytes, matching the on-chain topic,
-//! or refuse. There is deliberately no "unavailable" sentinel to forget to fill.
+//! `operationId` is a contract-derived `bytes32`, and the binding is required:
+//! exactly 32 bytes matching the on-chain topic, or refuse.
 
 use sha3::{Digest, Keccak256};
 
@@ -63,7 +54,7 @@ fn extract_uint256_as_u64(data: &[u8], offset: usize) -> Result<u64> {
 }
 
 /// Canonical `BridgeFundsIn` signature, verbatim from `bridge-smart-contracts`
-/// `IBridge.sol`. A stale signature here fails SILENTLY — the filter matches zero
+/// `IBridge.sol`. A stale signature fails silently: the filter matches zero
 /// logs and every deposit reports "no FundsIn log in tx".
 const BRIDGE_FUNDS_IN_SIG: &str = "BridgeFundsIn(bytes32,bytes32,address,uint256,uint256,\
      uint256,uint256,uint256,uint256,uint256,string)";
@@ -75,9 +66,9 @@ const BFI_OPERATION_ID_TOPIC: usize = 1;
 /// Order: senderNonce, amount(gross), netAmount, tokenCommission,
 /// nativeCommission, sourceChainId, destinationChainId, <string offset>.
 ///
-/// The amount offsets are unchanged from the old event only by coincidence —
-/// `senderNonce` took the slot `operationId` vacated — so a half-done migration
-/// still decodes plausible amounts. Hence the pinned topic0 test.
+/// The amount offsets survived the event change only by coincidence
+/// (`senderNonce` took the slot `operationId` vacated), so a half-done
+/// migration still decodes plausible amounts. Hence the pinned topic0 test.
 const BFI_AMOUNT_OFF: usize = 32;
 const BFI_NET_AMOUNT_OFF: usize = 64;
 const BFI_TOKEN_COMMISSION_OFF: usize = 96;
@@ -167,13 +158,9 @@ pub fn verify_funds_in_event(
     }
 
     // 3/4. Find the log emitted by the pinned bridge contract that authorises
-    //      this release. Pinning the address means a compromised host cannot
-    //      satisfy this with a look-alike contract.
-    //
-    //      The plain-`FundsIn` fallback is gone: on the new Bridge that event is
-    //      RGB-only and carries the RGB OpId, so falling back would compare
-    //      across id-spaces. Two deposits in one tx still refuse rather than
-    //      guess.
+    //      this release; a look-alike contract cannot satisfy it. No fallback
+    //      to plain `FundsIn`: that event carries an RGB OpId, so it would
+    //      compare across id-spaces. Two deposits in one tx refuse.
     let bridge_topic0 = event_topic0(BRIDGE_FUNDS_IN_SIG);
     let candidates: Vec<&LogEntry> = receipt
         .logs
@@ -232,10 +219,9 @@ pub fn verify_funds_in_event(
     check_eq("amount", gross, expected_gross_amount)?;
     check_eq("tokenCommission", commission, expected_commission)?;
 
-    // Bounded, not equal: the Bridge credits the MEASURED balance delta while
+    // Bounded, not equal: the Bridge credits the measured balance delta while
     // `amount` stays nominal, so a fee-on-transfer token legitimately nets less
-    // (Bridge.sol:501-508). Only `net` too HIGH is unsafe — it would mint more
-    // RGB than the deposit backs.
+    // (Bridge.sol:501-508). Only a too-high `net` is unsafe.
     let max_net = gross.checked_sub(commission).ok_or_else(|| {
         EnclaveError::CrossCheck(format!(
             "BridgeFundsIn commission ({commission}) exceeds gross amount ({gross})"
@@ -256,10 +242,9 @@ pub fn verify_funds_in_event(
         );
     }
 
-    // 8. Confirmation depth against the current head. `eth_blockNumber` and the
-    //    receipt are two separate calls, so a reorg between them is possible;
-    //    min_confirmations bounds it. head < block_number == the receipt's
-    //    block was reorged out from under us -> reject.
+    // 8. Confirmation depth against the current head. The head and the receipt
+    //    are two separate calls, so min_confirmations bounds a reorg between
+    //    them. head < block_number means the receipt's block was reorged out.
     let head = provider.get_block_number()?;
     let depth = head.checked_sub(receipt.block_number).ok_or_else(|| {
         EnclaveError::CrossCheck(format!(
@@ -284,13 +269,10 @@ pub fn verify_funds_in_event(
     Ok(())
 }
 
-/// Read a 32-byte ABI word at `offset` in `data` as a `u64`, mapping the
-/// generic overflow/short errors to a field-named, fail-closed message. The
-/// `u64`-fit check (high 24 bytes zero) is the documented width guard: an
-/// on-chain amount exceeding `u64` is rejected, not truncated. Used for the
-/// value fields (amount/net/commission); `operationId` is compared as the full
-/// 32-byte word read from the indexed topic, since it is a contract-derived
-/// `bytes32` rather than a `u64`.
+/// Read a 32-byte ABI word at `offset` in `data` as a `u64`, with a
+/// field-named fail-closed error. The width guard (high 24 bytes zero) rejects
+/// an on-chain amount exceeding `u64` rather than truncating it. Used for the
+/// value fields; `operationId` is compared as the full 32-byte topic word.
 fn decode_u64_word(data: &[u8], offset: usize, field: &str) -> Result<u64> {
     extract_uint256_as_u64(data, offset).map_err(|e| {
         EnclaveError::CrossCheck(format!(
@@ -310,26 +292,19 @@ fn check_eq(field: &str, got: u64, want: u64) -> Result<()> {
     Ok(())
 }
 
-/// Hard per-call ceiling for a single EVM JSON-RPC round-trip. WITHOUT it a
-/// hung RPC (e.g. a half-open keep-alive to the host's vsock-proxy/nginx after
-/// it restarts, or an upstream that accepts the socket then never replies)
-/// blocks the worker thread FOREVER: `block_on` has no built-in deadline and
-/// alloy/reqwest set no default request timeout. The accept-layer
-/// [`crate::conn::DeadlineStream`] bounds only the request SOCKET I/O, never
-/// this compute, and a client-side (parent/listener) timeout does NOT cancel
-/// the in-flight `block_on`. With only [`crate::conn::WORKER_THREADS`] workers,
-/// a handful of such stalls pin every worker and wedge the whole enclave until
-/// terminate+run. Bounding each call and failing closed on elapse frees the
-/// worker instead. 15s comfortably covers a healthy receipt/head fetch through
-/// the loopback -> vsock -> nginx -> upstream path.
+/// Hard per-call ceiling for one EVM JSON-RPC round-trip. Without it a hung RPC
+/// blocks the worker thread forever: `block_on` has no deadline and
+/// alloy/reqwest set no default request timeout. [`crate::conn::DeadlineStream`]
+/// bounds only the request socket I/O, and a client-side timeout does not cancel
+/// an in-flight `block_on`, so a few such stalls pin every worker and wedge the
+/// enclave. 15s covers a healthy fetch through loopback -> vsock -> nginx.
 const EVM_RPC_CALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
 
 /// Production [`EvmReceiptProvider`]: an alloy JSON-RPC client over the
-/// in-enclave loopback URL (which a vsock forwarder tunnels to the host EVM
-/// RPC). alloy is async, so a single-worker tokio runtime is built once at boot
-/// and each blocking call is driven via `block_on`. One worker is enough (the
-/// receipt fetch is the only async work) and keeps `Send + Sync` so the shared
-/// `ServerContext` can call it from any handler thread.
+/// in-enclave loopback URL that a vsock forwarder tunnels to the host EVM RPC.
+/// alloy is async, so a single-worker tokio runtime is built at boot and each
+/// call is driven via `block_on`. One worker suffices and keeps the type
+/// `Send + Sync` for the shared `ServerContext`.
 pub struct AlloyEvmClient {
     runtime: tokio::runtime::Runtime,
     provider: alloy::providers::RootProvider,
@@ -357,15 +332,12 @@ impl EvmReceiptProvider for AlloyEvmClient {
     fn get_transaction_receipt(&self, tx_hash: &[u8; 32]) -> Result<Option<ReceiptData>> {
         use alloy::providers::Provider;
         let hash = alloy::primitives::B256::from_slice(tx_hash);
-        // `timeout` requires the runtime's time driver (built with `enable_all`).
-        // Outer `?` = the call stalled past the deadline (fail closed, free the
-        // worker); inner `?` = the RPC itself errored.
-        // Construct the `timeout` future INSIDE the async block so it is created
-        // within the runtime's reactor context. `block_on(timeout(dur, fut))`
-        // would build the `Timeout` (which registers a timer entry) as an
-        // argument — i.e. BEFORE `block_on` enters the runtime — panicking with
-        // "there is no reactor running" and, under `panic = "abort"`, killing the
-        // whole enclave on every EVM-RPC call.
+        // Outer `?` = stalled past the deadline (fail closed, free the
+        // worker); inner `?` = the RPC itself errored. The `timeout` future
+        // must be built INSIDE the async block: as an argument to `block_on`
+        // it registers a timer before the runtime is entered and panics with
+        // "there is no reactor running", which under `panic = "abort"` kills
+        // the enclave on every EVM-RPC call.
         let receipt = self
             .runtime
             .block_on(async {
@@ -410,11 +382,10 @@ impl EvmReceiptProvider for AlloyEvmClient {
 /// Translate an alloy receipt into the enclave-local [`ReceiptData`] so no
 /// alloy types leak into the predicate.
 ///
-/// Fails closed on a missing `block_number`: the confirmation-depth check is
-/// `head - block_number`, so a `None` defaulted to `0` would report the receipt
-/// as infinitely deep and pass finality. A mined tx always carries a block
-/// number (a pending tx yields no receipt at all), so this only guards against
-/// a malformed response, but a finality check must never default to "deep".
+/// Fails closed on a missing `block_number`: defaulting it to `0` would make
+/// `head - block_number` report the receipt as infinitely deep and pass
+/// finality. Only reachable on a malformed response, but a finality check must
+/// never default to "deep".
 fn map_alloy_receipt(r: alloy::rpc::types::TransactionReceipt) -> Result<ReceiptData> {
     let logs = r
         .inner
@@ -447,17 +418,15 @@ fn map_alloy_receipt(r: alloy::rpc::types::TransactionReceipt) -> Result<Receipt
 #[cfg(feature = "helios")]
 const HELIOS_BOOT_SYNC_TIMEOUT_SECS: u64 = 300;
 
-/// TRUSTLESS [`EvmReceiptProvider`] (#77): the a16z Helios light client embedded
-/// in-process. Helios treats the execution/consensus RPCs (reached via loopback
-/// vsock forwarders) as UNTRUSTED and verifies them against a pinned
-/// weak-subjectivity checkpoint before returning a receipt - so unlike
-/// [`AlloyEvmClient`], a malicious host cannot forge the result.
+/// Trustless [`EvmReceiptProvider`] (#77): the a16z Helios light client, run
+/// in-process. Helios treats the execution/consensus RPCs as untrusted and
+/// verifies them against a pinned weak-subjectivity checkpoint, so unlike
+/// [`AlloyEvmClient`] a malicious host cannot forge the result.
 ///
-/// Helios is async and runs a background sync task, so a long-lived tokio
-/// runtime is built at boot and kept alive for the client's lifetime; each
-/// query is driven via `block_on`. The returned receipt (alloy 1.x types) is
-/// mapped to the enclave-local [`ReceiptData`] so no alloy-version types cross
-/// the [`EvmReceiptProvider`] boundary.
+/// Helios runs a background sync task, so a long-lived tokio runtime is built
+/// at boot and each query is driven via `block_on`. The alloy-1.x receipt is
+/// mapped to [`ReceiptData`] so no alloy-version types cross the
+/// [`EvmReceiptProvider`] boundary.
 #[cfg(feature = "helios")]
 pub struct HeliosEvmClient {
     // Field order matters for drop: the client is dropped before the runtime.
@@ -488,12 +457,10 @@ impl HeliosEvmClient {
                 )))
             }
         };
-        // #77 predicate 1: HELIOS_NETWORK must be consistent with the pinned
-        // EVM_CHAIN_ID. Both are operator-set at boot, so a mismatch is a
-        // misconfiguration (e.g. Helios on sepolia while the bridge is pinned to
-        // mainnet) that would otherwise verify FundsIn on the wrong chain.
-        // Skipped only when EVM_CHAIN_ID is unset (0), i.e. an unconfigured
-        // dev/mock deploy that pins no identity.
+        // #77 predicate 1: HELIOS_NETWORK must agree with the pinned
+        // EVM_CHAIN_ID, or FundsIn would be verified on the wrong chain.
+        // Skipped when EVM_CHAIN_ID is unset (0), i.e. a dev deploy that pins
+        // no identity.
         if expected_chain_id != 0 && expected_chain_id != network_chain_id {
             return Err(EnclaveError::CrossCheck(format!(
                 "helios: HELIOS_NETWORK {:?} (chain id {network_chain_id}) is inconsistent with \
@@ -567,9 +534,8 @@ impl EvmReceiptProvider for HeliosEvmClient {
             .map_err(|e| {
                 EnclaveError::CrossCheck(format!("helios: eth_getTransactionReceipt failed: {e}"))
             })?;
-        // Map inline so the alloy-1.x receipt type is inferred, never named -
-        // it must not cross the EvmReceiptProvider boundary (our alloy is 2.x).
-        // Fails closed on a missing block_number, same as `map_alloy_receipt`.
+        // Mapped inline so the alloy-1.x receipt type is inferred, never named
+        // (our alloy is 2.x). Fails closed on a missing block_number.
         receipt
             .map(|r| {
                 let block_number = r.block_number.ok_or_else(|| {
@@ -661,7 +627,7 @@ mod tests {
         w
     }
 
-    /// A hash-shaped operationId — deliberately not a small left-padded integer.
+    /// A hash-shaped operationId - deliberately not a small left-padded integer.
     fn op_id(tag: u8) -> [u8; 32] {
         let mut id = [tag; 32];
         id[0] = 0xF0 | (tag & 0x0F); // high bytes set: cannot fit a u64
@@ -670,7 +636,7 @@ mod tests {
 
     /// BridgeFundsIn `data`: senderNonce, gross, net, commission, then
     /// nativeCommission/srcChain/destChain/string-offset zero-filled.
-    /// `operationId` is NOT here any more — it is an indexed topic.
+    /// `operationId` is NOT here any more - it is an indexed topic.
     fn bridge_data(gross: u64, net: u64, commission: u64) -> Vec<u8> {
         let mut d = Vec::new();
         d.extend_from_slice(&word(0)); // senderNonce
@@ -725,7 +691,7 @@ mod tests {
         }
     }
 
-    /// Verify with the operationId bound — the only supported call shape.
+    /// Verify with the operationId bound - the only supported call shape.
     fn verify(p: &FakeProvider) -> Result<()> {
         verify_funds_in_event(p, &BRIDGE, 12, &TX, &op_id(7), 1000, 50)
     }
@@ -1009,7 +975,7 @@ mod tests {
         assert!(e.contains("operationId is expected in topic1"), "got: {e}");
     }
 
-    /// A full-width id must round-trip — the old u64 decode rejected every
+    /// A full-width id must round-trip - the old u64 decode rejected every
     /// realistic one as "exceeds u64 range".
     #[test]
     fn binds_full_width_operation_id() {

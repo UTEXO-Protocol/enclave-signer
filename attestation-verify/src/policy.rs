@@ -1,26 +1,21 @@
 //! Canonical encoding of the enclave's attested security policy (audit C-01).
 //!
-//! The enclave has ONE explicit security posture, resolved once at boot, that a
-//! verifier can check as a single value. That posture is serialized here and
-//! folded into the attestation `user_data` commitment alongside the public-key
-//! bundle (see `enclave/src/server.rs::handle_get_attested_public_key`).
+//! The enclave's posture is resolved once at boot, serialized here, and folded
+//! into the attestation `user_data` commitment alongside the public-key bundle
+//! (see `enclave/src/server.rs::handle_get_attested_public_key`).
 //!
-//! This module is the SINGLE source of truth for that serialization so the
-//! enclave (which commits it) and every verifier (the parent `attest-verify`
-//! CLI, the cloning peer check) produce byte-identical bytes. Both sides build
-//! an [`AttestedPolicy`] and call [`AttestedPolicy::to_bytes`]; if the enclave's
-//! committed posture differs from the one the verifier expects, the `user_data`
-//! hash will not match and verification fails.
+//! This module is the single source of truth for that serialization, so the
+//! enclave and every verifier (the `attest-verify` CLI, the cloning peer check)
+//! produce identical bytes. Both build an [`AttestedPolicy`] and call
+//! [`AttestedPolicy::to_bytes`]; a posture mismatch shows up as a `user_data`
+//! hash mismatch.
 //!
-//! WIRE CONTRACT: the discriminants and field order below are load-bearing.
-//! Never renumber an existing variant or reorder fields — bump
-//! [`POLICY_COMMITMENT_V2`] and add a new arm to evolve the format.
+//! Wire contract: the discriminants and field order are load-bearing. Never
+//! renumber a variant or reorder fields - bump [`POLICY_COMMITMENT_V2`] and add
+//! a new arm instead.
 //!
-//! V2 (audit C-02) extends the `Production` arm with the gas-tx signing rule —
-//! the pinned destination, the gas/fee ceilings, the native-value ceiling, and
-//! the calldata selector allowlist — so the whole `SignRawDigest` policy is
-//! externally verifiable rather than a self-protection pin the operator has to
-//! trust.
+//! V2 (audit C-02) extends the `Production` arm with the gas-tx signing rule,
+//! so the whole `SignRawDigest` policy is externally verifiable.
 
 /// Version tag prepended to every policy commitment. Lets a verifier reject a
 /// document produced by an enclave speaking a different policy-encoding version
@@ -33,7 +28,7 @@ pub const POLICY_COMMITMENT_V2: u8 = 2;
 
 /// Where the enclave gets the EVM `FundsIn` deposit evidence it verifies before
 /// signing an EVM->RGB bridge PSBT. Attested so a verifier can tell a trustless
-/// deployment (Helios) apart from a host-relayed one (raw RPC) — the shipped
+/// deployment (Helios) apart from a host-relayed one (raw RPC) - the shipped
 /// image currently uses [`RawRpc`](EvmDataSource::RawRpc).
 #[repr(u8)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -42,7 +37,7 @@ pub enum EvmDataSource {
     /// EVM->RGB signing fails closed per request.
     Disabled = 0,
     /// Host-relayed JSON-RPC (`evm-rpc`): treated as evidence, verified
-    /// fail-closed, but NOT trustless — the host relays the responses.
+    /// fail-closed, but NOT trustless - the host relays the responses.
     RawRpc = 1,
     /// Helios light client (`helios`): the RPC is cryptographically verified
     /// against a pinned weak-subjectivity checkpoint before use (trustless).
@@ -62,8 +57,8 @@ pub enum BtcDataSource {
 
 /// Whether the attestation root of trust is a real NSM device or the zero-PCR
 /// mock. Mock is a `compile_error!` in release builds, so a production policy is
-/// always [`Real`](AttestationMode::Real); the value is committed anyway so the
-/// posture stands alone as one attested value.
+/// always [`Real`](AttestationMode::Real); committed anyway so the posture is
+/// one self-contained value.
 #[repr(u8)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AttestationMode {
@@ -75,9 +70,9 @@ pub enum AttestationMode {
 ///
 /// [`Production`](AttestedPolicy::Production) is the fail-closed bridge-signing
 /// posture: fully pinned, real attestation, SPV-anchored, with an explicit EVM
-/// data source. Anything else — a debug build, a dev feature, an unpinned or
-/// non-bridge build — is [`Development`](AttestedPolicy::Development), which a
-/// verifier of a production enclave must reject.
+/// data source. A debug build, a dev feature, or an unpinned or non-bridge build
+/// is [`Development`](AttestedPolicy::Development), which a verifier of a
+/// production enclave must reject.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum AttestedPolicy {
     Production {
@@ -88,12 +83,10 @@ pub enum AttestedPolicy {
         chain_id: u64,
         bridge_contract: [u8; 20],
         rgb_asset_id: String,
-        /// The Helios weak-subjectivity checkpoint (beacon block root) the
-        /// enclave trust-roots EVM verification on. `Some` only for
-        /// [`EvmDataSource::HeliosVerified`]; pinned here so a verifier confirms
-        /// WHICH checkpoint the enclave synced from, not merely that it runs in
-        /// Helios mode (audit M-06). Two enclaves with identical PCRs but
-        /// different checkpoints therefore commit different `user_data`.
+        /// The Helios weak-subjectivity checkpoint (beacon block root) EVM
+        /// verification trust-roots on. `Some` only for
+        /// [`EvmDataSource::HeliosVerified`], and pinned here so a verifier
+        /// confirms which checkpoint the enclave synced from (audit M-06).
         evm_checkpoint: Option<[u8; 32]>,
         /// Gas-tx (`SignRawDigest`) rule (audit C-02). Pinned destination
         /// (all-zero when the operator left `GAS_TX_ALLOWED_TO` unset, which
@@ -103,11 +96,10 @@ pub enum AttestedPolicy {
         gas_tx_allowed_to: [u8; 20],
         gas_tx_max_gas_limit: u64,
         gas_tx_max_fee_per_gas: u128,
-        /// Ceiling (wei) on the native value a gas tx may carry, for the payable
-        /// `lzFundsOutCall` carve-out. `0` commits "no non-zero value is
-        /// signable" — the same posture an unset `GAS_TX_MAX_VALUE_WEI`
-        /// enforces, so "unpinned" is itself attested (as with
-        /// `gas_tx_allowed_to`).
+        /// Ceiling (wei) on the native value a gas tx may carry, for the
+        /// payable `lzFundsOutCall` carve-out. `0` commits "no non-zero value is
+        /// signable", the same posture an unset `GAS_TX_MAX_VALUE_WEI` enforces,
+        /// so being unpinned is itself attested.
         gas_tx_max_value_wei: u128,
         /// Permitted 4-byte calldata selectors. Canonicalised (sorted + deduped)
         /// by [`to_bytes`](AttestedPolicy::to_bytes) so the operator's env order
@@ -162,9 +154,9 @@ impl AttestedPolicy {
                 out.extend_from_slice(&(rgb_asset_id.len() as u32).to_be_bytes());
                 out.extend_from_slice(rgb_asset_id.as_bytes());
                 // EVM verification checkpoint (M-06): a presence byte plus, when
-                // present, the 32-byte Helios beacon block root. Pins WHICH
-                // checkpoint, so an attacker-chosen trust root is visible to a
-                // verifier instead of hiding behind an identical mode byte.
+                // present, the 32-byte Helios beacon block root. Pins which
+                // checkpoint, so an attacker-chosen trust root cannot hide
+                // behind an identical mode byte.
                 match evm_checkpoint {
                     Some(cp) => {
                         out.push(0x01);
@@ -314,7 +306,7 @@ mod tests {
         }
         assert_ne!(none.to_bytes(), with_cp.to_bytes());
 
-        // Two different checkpoints must also differ — the value is bound, not
+        // Two different checkpoints must also differ - the value is bound, not
         // just its presence.
         let mut other_cp = base();
         if let AttestedPolicy::Production {

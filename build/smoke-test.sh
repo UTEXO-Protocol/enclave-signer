@@ -74,14 +74,14 @@ fi
 
 # Preflight: prove the peer at $ADDR speaks our wire protocol, not just
 # "something accepts TCP here". A naive `nc -z` is insufficient on macOS
-# because port 5000 is hijacked by AirPlay Receiver — nc happily connects,
+# because port 5000 is hijacked by AirPlay Receiver - nc happily connects,
 # we then write our length-prefixed protobuf into AirPlay's mouth, and the
 # CLI hangs forever waiting for a response that will never come.
 #
 # Strategy: run `get-keys` once. The enclave responds with one of two
 # stable patterns:
-#   - "EVM address ..."  (initialised — typical re-run state)
-#   - "key not initialized" (fresh enclave — typical first-run state)
+#   - "EVM address ..."  (initialised - typical re-run state)
+#   - "key not initialized" (fresh enclave - typical first-run state)
 # Any other output (or a timeout from EnclaveClient's READ_TIMEOUT) means
 # we're talking to something that isn't our enclave. Bail with hints.
 preflight_handshake() {
@@ -145,9 +145,9 @@ case "$ADDR" in
         ;;
 esac
 
-# ─────────────────────────────────────────────
+# ---------------------------------------------
 # 1. Initialize keys
-# ─────────────────────────────────────────────
+# ---------------------------------------------
 log "1. InitializeKey (generate new mnemonic)"
 INIT_OUTPUT=$(run_parent init) && RC=$? || RC=$?
 
@@ -157,7 +157,7 @@ if [ $RC -eq 0 ] && echo "$INIT_OUTPUT" | grep -q "EVM address"; then
     BTC_XPUB=$(echo "$INIT_OUTPUT" | grep "BTC xpub" | awk '{print $NF}')
     pass "InitializeKey — EVM: $EVM_ADDR"
 else
-    # May fail if already initialized — that's OK, try get-keys instead
+    # May fail if already initialized - that's OK, try get-keys instead
     if echo "$INIT_OUTPUT" | grep -qi "already initialized"; then
         skip "InitializeKey" "already initialized (expected on re-run)"
     else
@@ -165,9 +165,9 @@ else
     fi
 fi
 
-# ─────────────────────────────────────────────
+# ---------------------------------------------
 # 2. Get public keys
-# ─────────────────────────────────────────────
+# ---------------------------------------------
 log "2. GetPublicKey"
 KEYS_OUTPUT=$(run_parent get-keys) && RC=$? || RC=$?
 
@@ -180,9 +180,9 @@ else
     fail "GetPublicKey" "$KEYS_OUTPUT"
 fi
 
-# ─────────────────────────────────────────────
+# ---------------------------------------------
 # 3. Double-init should fail
-# ─────────────────────────────────────────────
+# ---------------------------------------------
 log "3. Double InitializeKey (should fail)"
 DOUBLE_INIT=$(run_parent init) && RC=$? || RC=$?
 
@@ -192,9 +192,9 @@ else
     fail "Double init" "expected error, got: $DOUBLE_INIT"
 fi
 
-# ─────────────────────────────────────────────
+# ---------------------------------------------
 # 4. SignRawMessage
-# ─────────────────────────────────────────────
+# ---------------------------------------------
 log "4. SignRawMessage (fundsIn authorization)"
 # "hello from smoke test" in hex
 RAW_MSG_HEX="68656c6c6f2066726f6d20736d6f6b652074657374"
@@ -212,9 +212,9 @@ else
     fail "SignRawMessage" "$RAW_SIG_OUTPUT"
 fi
 
-# ─────────────────────────────────────────────
-# 5. SignRawMessage determinism (same message → same sig)
-# ─────────────────────────────────────────────
+# ---------------------------------------------
+# 5. SignRawMessage determinism (same message -> same sig)
+# ---------------------------------------------
 log "5. SignRawMessage determinism"
 RAW_SIG_OUTPUT2=$(run_parent sign-raw-message --message "$RAW_MSG_HEX") && RC=$? || RC=$?
 
@@ -229,9 +229,9 @@ else
     fail "SignRawMessage determinism" "$RAW_SIG_OUTPUT2"
 fi
 
-# ─────────────────────────────────────────────
+# ---------------------------------------------
 # 6. SignRawMessage empty (should fail)
-# ─────────────────────────────────────────────
+# ---------------------------------------------
 log "6. SignRawMessage empty message (should fail)"
 EMPTY_SIG=$(run_parent sign-raw-message --message "") && RC=$? || RC=$?
 
@@ -241,9 +241,9 @@ else
     fail "Empty SignRawMessage" "expected error, got: $EMPTY_SIG"
 fi
 
-# ─────────────────────────────────────────────
+# ---------------------------------------------
 # 7. SignEvm (with valid enriched payload)
-# ─────────────────────────────────────────────
+# ---------------------------------------------
 log "7. SignEvm (enriched payload, valid)"
 
 # Build a mock fundsOut calldata:
@@ -278,7 +278,7 @@ if [ $RC -eq 0 ] && echo "$EVM_SIG_OUTPUT" | grep -q "signature"; then
     fi
 elif echo "$EVM_SIG_OUTPUT" | grep -qi "spv:.*signEVM requires"; then
     # SPV-enabled build: this request has no consignment bytes, so the SPV
-    # path correctly rejects. That's the right behaviour, not a failure —
+    # path correctly rejects. That's the right behaviour, not a failure -
     # full SPV happy-path coverage requires fixture data and lives in the
     # spv_crosscheck unit tests + test_spv_handlers integration tests.
     pass "SignEvm — correctly rejected by SPV (build has --features spv)"
@@ -286,9 +286,9 @@ else
     fail "SignEvm" "$EVM_SIG_OUTPUT"
 fi
 
-# ─────────────────────────────────────────────
+# ---------------------------------------------
 # 8. SignEvm rejects invalid consignment
-# ─────────────────────────────────────────────
+# ---------------------------------------------
 log "8. SignEvm rejects invalid consignment"
 
 BAD_CONSIGN_OUTPUT=$(run_parent sign-evm \
@@ -301,7 +301,7 @@ BAD_CONSIGN_OUTPUT=$(run_parent sign-evm \
     --rgb-asset-id "rgb:test" \
     --calldata-amount 1000 \
     --calldata-commission 50) && RC=$? || RC=$?
-    # Note: --consignment-valid flag NOT passed → consignment_valid = false
+    # Note: --consignment-valid flag NOT passed -> consignment_valid = false
 
 if [ $RC -ne 0 ] || echo "$BAD_CONSIGN_OUTPUT" | grep -qi "consignment\|error"; then
     pass "SignEvm correctly rejected invalid consignment"
@@ -309,9 +309,9 @@ else
     fail "SignEvm invalid consignment" "expected rejection, got: $BAD_CONSIGN_OUTPUT"
 fi
 
-# ─────────────────────────────────────────────
+# ---------------------------------------------
 # 9. SignEvm rejects amount mismatch
-# ─────────────────────────────────────────────
+# ---------------------------------------------
 log "9. SignEvm rejects amount mismatch"
 
 BAD_AMOUNT_OUTPUT=$(run_parent sign-evm \
@@ -332,9 +332,9 @@ else
     fail "SignEvm amount mismatch" "expected rejection, got: $BAD_AMOUNT_OUTPUT"
 fi
 
-# ─────────────────────────────────────────────
+# ---------------------------------------------
 # 10. ProxyFederation (should return NOT_READY)
-# ─────────────────────────────────────────────
+# ---------------------------------------------
 log "10. ProxyFederation (stub — should return NOT_READY)"
 # No CLI subcommand for federation yet, so we skip if not available
 skip "ProxyFederation" "no CLI subcommand yet — test via integration tests"
@@ -353,9 +353,9 @@ skip "ProxyFederation" "no CLI subcommand yet — test via integration tests"
 # happy-path "real header inserted" case; for now we deliberately avoid that
 # fixture so the smoke test stays lightweight and shell-only.
 
-# ─────────────────────────────────────────────
+# ---------------------------------------------
 # 11. GetLastSavedBlock baseline
-# ─────────────────────────────────────────────
+# ---------------------------------------------
 log "11. GetLastSavedBlock — chain initialised at boot"
 LAST_BLOCK_OUTPUT=$(run_parent get-last-saved-block) && RC=$? || RC=$?
 
@@ -377,13 +377,13 @@ fi
 INITIAL_HEIGHT="$BLOCK_HEIGHT"
 INITIAL_HASH="$BLOCK_HASH"
 
-# Helpers for tests 12–15 — write a temp headers file, clean up at exit.
+# Helpers for tests 12-15 - write a temp headers file, clean up at exit.
 TMP_HDR_DIR="$(mktemp -d)"
 trap 'rm -rf "$TMP_HDR_DIR"' EXIT
 
 empty_headers_file()    { local f="$TMP_HDR_DIR/empty.txt";   : > "$f"; echo "$f"; }
 malformed_headers_file() {
-    # 79 bytes (158 hex chars) — one short of a valid Bitcoin header. The
+    # 79 bytes (158 hex chars) - one short of a valid Bitcoin header. The
     # enclave's deserializer will reject this with HeaderParse.
     local f="$TMP_HDR_DIR/short.txt"
     printf '%0.s00' $(seq 1 158) > "$f"
@@ -391,9 +391,9 @@ malformed_headers_file() {
     echo "$f"
 }
 filler_headers_file() {
-    # 80 bytes of zeros — parses, but won't link to the placeholder checkpoint
+    # 80 bytes of zeros - parses, but won't link to the placeholder checkpoint
     # whose hash is also zeros (because prev_blockhash on the all-zero header
-    # is itself zero, which would link it to the checkpoint — but our chain
+    # is itself zero, which would link it to the checkpoint - but our chain
     # rejects start_height <= checkpoint, so we use this for the gap test).
     local f="$TMP_HDR_DIR/zero.txt"
     printf '%0.s00' $(seq 1 160) > "$f"
@@ -401,9 +401,9 @@ filler_headers_file() {
     echo "$f"
 }
 
-# ─────────────────────────────────────────────
-# 12. SubmitHeaders empty batch at tip+1 — no-op success
-# ─────────────────────────────────────────────
+# ---------------------------------------------
+# 12. SubmitHeaders empty batch at tip+1 - no-op success
+# ---------------------------------------------
 log "12. SubmitHeaders — empty batch at tip+1 returns headers_accepted=0"
 NEXT_HEIGHT=$((INITIAL_HEIGHT + 1))
 EMPTY_FILE="$(empty_headers_file)"
@@ -415,9 +415,9 @@ else
     fail "SubmitHeaders empty batch" "$EMPTY_OUTPUT"
 fi
 
-# ─────────────────────────────────────────────
+# ---------------------------------------------
 # 13. SubmitHeaders with a gap above the tip
-# ─────────────────────────────────────────────
+# ---------------------------------------------
 log "13. SubmitHeaders — gap above tip (start_height=tip+5) is rejected"
 GAP_HEIGHT=$((INITIAL_HEIGHT + 5))
 FILLER_FILE="$(filler_headers_file)"
@@ -429,9 +429,9 @@ else
     fail "SubmitHeaders gap" "expected error, got: $GAP_OUTPUT"
 fi
 
-# ─────────────────────────────────────────────
+# ---------------------------------------------
 # 14. SubmitHeaders at-or-below checkpoint
-# ─────────────────────────────────────────────
+# ---------------------------------------------
 log "14. SubmitHeaders — start_height at checkpoint is rejected"
 # Submitting AT the checkpoint height would rewrite the trust anchor.
 BELOW_OUTPUT=$(run_parent submit-headers --start-height "$INITIAL_HEIGHT" --headers-file "$FILLER_FILE") && RC=$? || RC=$?
@@ -442,9 +442,9 @@ else
     fail "SubmitHeaders below-checkpoint" "expected error, got: $BELOW_OUTPUT"
 fi
 
-# ─────────────────────────────────────────────
+# ---------------------------------------------
 # 15. SubmitHeaders with malformed bytes
-# ─────────────────────────────────────────────
+# ---------------------------------------------
 log "15. SubmitHeaders — malformed (79-byte) header is rejected"
 SHORT_FILE="$(malformed_headers_file)"
 MALFORMED_OUTPUT=$(run_parent submit-headers --start-height "$NEXT_HEIGHT" --headers-file "$SHORT_FILE") && RC=$? || RC=$?
@@ -455,9 +455,9 @@ else
     fail "SubmitHeaders malformed" "expected error, got: $MALFORMED_OUTPUT"
 fi
 
-# ─────────────────────────────────────────────
+# ---------------------------------------------
 # 16. GetLastSavedBlock unchanged after failed submits
-# ─────────────────────────────────────────────
+# ---------------------------------------------
 log "16. GetLastSavedBlock — tip unchanged after failed submits (atomic-on-error)"
 AFTER_OUTPUT=$(run_parent get-last-saved-block) && RC=$? || RC=$?
 
@@ -473,9 +473,9 @@ else
     fail "GetLastSavedBlock (after)" "$AFTER_OUTPUT"
 fi
 
-# ─────────────────────────────────────────────
+# ---------------------------------------------
 # Summary
-# ─────────────────────────────────────────────
+# ---------------------------------------------
 echo ""
 echo "============================================="
 echo -e "  Results: ${GREEN}${PASS} passed${NC}, ${RED}${FAIL} failed${NC}, ${YELLOW}${SKIP} skipped${NC}"

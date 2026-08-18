@@ -1,12 +1,10 @@
 //! True end-to-end test for the `attest-verify` flow.
 //!
-//! Spins up the **real** enclave server (in-process, via the public API
-//! exposed from the enclave crate), the **real** parent gRPC server
-//! pointing at it, and drives the **real** `attest-verify` library
-//! function against the full stack. No hand-built mock attestations,
-//! no inline-duplicated check logic — this exercises everything the
-//! deployed CLI binary does, except for argument parsing and stdout
-//! formatting.
+//! Spins up the real enclave server in-process, the real parent gRPC server
+//! pointing at it, and drives the real `attest-verify` library function against
+//! the full stack. No hand-built mock attestations and no duplicated check
+//! logic, so this covers everything the CLI does except argument parsing and
+//! output formatting.
 
 use std::net::TcpListener;
 use std::sync::Arc;
@@ -98,7 +96,7 @@ async fn e2e_attest_verify_succeeds_against_live_stack() {
     .expect("end-to-end verification succeeds");
 
     // EVM address from BIP-39 test vector "abandon abandon ... about" with
-    // the project's BIP-44 derivation. We don't hardcode the bytes —
+    // the project's BIP-44 derivation. We don't hardcode the bytes -
     // we just assert the structure is correct.
     assert_eq!(result.response.evm_address.len(), 20);
     assert_eq!(result.response.evm_uncompressed_pub.len(), 64);
@@ -150,7 +148,7 @@ async fn e2e_attest_verify_fails_on_pcr_mismatch() {
 #[tokio::test]
 async fn e2e_attest_verify_fails_on_real_path_against_mock_enclave() {
     // Mock enclave produces a raw-CBOR doc, not a COSE_Sign1. The real
-    // verify path expects COSE_Sign1, so it must reject the doc — proving
+    // verify path expects COSE_Sign1, so it must reject the doc - proving
     // that --mock and the real path are not interchangeable, which is the
     // entire safety property of the mode flag.
     let enclave_port = start_real_enclave();
@@ -197,10 +195,9 @@ async fn e2e_attest_verify_fails_on_unreachable_endpoint() {
 #[tokio::test]
 async fn e2e_attest_verify_fails_on_policy_mismatch() {
     // The in-process enclave is a debug/mock build, so it attests the
-    // `Development` posture. A verifier that expects a *production* enclave must
-    // reject it: the committed policy differs, so the user_data commitment no
-    // longer matches. This is the C-01 property — the security posture is one
-    // attested value the verifier checks, not something inferred out of band.
+    // `Development` posture. A verifier expecting a production enclave must
+    // reject it, because the committed policy differs and the user_data
+    // commitment no longer matches (the C-01 property).
     let enclave_port = start_real_enclave();
     let grpc_port = start_real_parent_grpc(enclave_port).await;
 

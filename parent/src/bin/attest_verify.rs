@@ -1,4 +1,4 @@
-//! `attest-verify` — externally verify that the bridge signing pubkey
+//! `attest-verify` - externally verify that the bridge signing pubkey
 //! belongs to the running TEE.
 //!
 //! Issues a fresh nonce, calls the parent's `AttestedPublicKey` gRPC,
@@ -13,9 +13,9 @@
 //! all zeros and the COSE wrapper is skipped).
 //!
 //! Exit codes:
-//!     0 — verification succeeded
-//!     1 — verification failed (output explains why)
-//!     2 — usage / IO / connection error
+//!     0 - verification succeeded
+//!     1 - verification failed (output explains why)
+//!     2 - usage / IO / connection error
 
 use std::process::ExitCode;
 
@@ -63,7 +63,7 @@ struct Cli {
 
     /// Expected EVM `FundsIn` deposit-verification data source the enclave must
     /// have committed to: `raw` (host-relayed RPC), `helios` (trustless,
-    /// checkpoint-verified), or `disabled`. Defaults to `raw` — the source the
+    /// checkpoint-verified), or `disabled`. Defaults to `raw` - the source the
     /// shipped image uses. Pass `helios` to require the trustless path and fail
     /// verification if the enclave is only on raw RPC. Ignored with --mock.
     #[arg(long, default_value = "raw")]
@@ -95,7 +95,7 @@ struct Cli {
     expect_gas_max_fee_per_gas: u128,
 
     /// Expected gas-tx native-value ceiling in wei (`GAS_TX_MAX_VALUE_WEI`), the
-    /// bound on the payable `lzFundsOutCall` carve-out. Default 0 (unpinned —
+    /// bound on the payable `lzFundsOutCall` carve-out. Default 0 (unpinned -
     /// the enclave then signs no non-zero value at all). Ignored with --mock.
     #[arg(long, default_value_t = 0)]
     expect_gas_max_value_wei: u128,
@@ -130,7 +130,7 @@ fn parse_evm_source(s: &str) -> Result<EvmDataSource> {
     }
 }
 
-/// Parse an optional `0x`-hex Ethereum address into 20 bytes; `None` → all-zero
+/// Parse an optional `0x`-hex Ethereum address into 20 bytes; `None` -> all-zero
 /// (the "gas path unpinned" commitment).
 fn parse_expect_gas_to(s: &Option<String>) -> Result<[u8; 20]> {
     match s {

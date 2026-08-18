@@ -40,15 +40,13 @@ pub struct ServerContext {
     /// Pinned EVM-RPC config (loopback URL + min confirmations) for #60.
     #[cfg(feature = "evm-rpc")]
     pub evm_rpc_config: crate::config::EvmRpcConfig,
-    /// In-enclave Bitcoin header chain for SPV verification. Populated at
-    /// boot from the compile-time checkpoint; mutated by SubmitHeaders.
-    /// `Mutex` because the enclave handles connections from a single
-    /// thread today, but we want the type to stay correct if that ever
-    /// changes — and `Mutex` over `RefCell` so a future move to
-    /// multi-threaded handling needs no plumbing changes.
+    /// In-enclave Bitcoin header chain for SPV verification. Populated at boot
+    /// from the compile-time checkpoint and mutated by SubmitHeaders. `Mutex`
+    /// rather than `RefCell` so multi-threaded handling needs no plumbing
+    /// change.
     ///
-    /// SPV-only: the RGB/BTC stack (`spv`) owns the header chain. A `ccd`-only
-    /// build carries no chain and rejects `SubmitHeaders`/`GetLastSavedBlock`.
+    /// SPV-only: a `ccd`-only build carries no chain and rejects
+    /// `SubmitHeaders` / `GetLastSavedBlock`.
     #[cfg(feature = "spv")]
     pub header_chain: std::sync::Mutex<crate::networks::rgb::spv::HeaderChain>,
     /// Cumulative rate limit for `SubmitHeaders` (#86). The per-call cap lives
@@ -58,14 +56,12 @@ pub struct ServerContext {
     pub submit_rate_limiter: std::sync::Mutex<SubmitRateLimiter>,
 }
 
-/// Sliding-window rate limit for `SubmitHeaders` (#86 cumulative cap). At most
-/// [`MAX_HEADERS_PER_RATE_WINDOW`] headers may be *submitted* (validated or
-/// not) within [`RATE_LIMIT_WINDOW`]. Generous enough for a cold-start sync
-/// from the checkpoint, tight enough that a sustained flood of replayed or
-/// garbage headers can't occupy the enclave indefinitely.
+/// Sliding-window rate limit for `SubmitHeaders` (#86 cumulative cap): at most
+/// [`MAX_HEADERS_PER_RATE_WINDOW`] headers submitted, validated or not, within
+/// [`RATE_LIMIT_WINDOW`]. Generous enough for a cold-start sync, tight enough
+/// that a flood of garbage headers cannot occupy the enclave.
 ///
-/// SPV-only: gated with the RGB/BTC stack (`spv`). A `ccd`-only build has no
-/// header chain to rate-limit.
+/// SPV-only: a `ccd`-only build has no header chain to rate-limit.
 #[cfg(feature = "spv")]
 #[derive(Default)]
 pub struct SubmitRateLimiter {
@@ -121,11 +117,9 @@ impl ServerContext {
         bridge_config: BridgeConfig,
         header_chain: std::sync::Mutex<crate::networks::rgb::spv::HeaderChain>,
     ) -> Self {
-        // Resolve the posture from the current build + this config. The main
-        // binary sets `policy` explicitly (it knows the selected EVM data
-        // source); this constructor is used by tests and the parent E2E harness,
-        // where the EVM source is not wired, so it resolves with `Disabled`.
-        // Debug/test builds resolve to `Development` regardless.
+        // The main binary sets `policy` explicitly, since it knows the selected
+        // EVM data source. This constructor serves tests and the parent E2E
+        // harness, where no EVM source is wired, so it resolves `Disabled`.
         let policy = crate::policy::SecurityPolicy::resolve(
             &crate::policy::BuildContext::current(),
             &bridge_config,
@@ -150,9 +144,8 @@ impl ServerContext {
     /// `ccd`-only variant: no SPV header chain to pass in.
     #[cfg(not(feature = "spv"))]
     pub fn new(state: EnclaveState, bridge_config: BridgeConfig) -> Self {
-        // As in the `spv` constructor: no EVM source is wired here, so resolve
-        // with `Disabled`. A ccd-only build has no bridge-signing path, so it
-        // resolves to `Development` and the boot gate exempts it.
+        // No EVM source is wired here, so resolve `Disabled`. A ccd-only build
+        // has no bridge-signing path and the boot gate exempts it.
         let policy = crate::policy::SecurityPolicy::resolve(
             &crate::policy::BuildContext::current(),
             &bridge_config,
@@ -326,9 +319,8 @@ fn handle_sign(ctx: &ServerContext, req: SignRequest) -> Result<EnclaveResponse>
     })?;
 
     // Self-owned-output oracle for the send-RGB per-output recipient bind
-    // (W-06 / #52). Passed as a closure so the key lock is held only while the
-    // outputs are being resolved — validation itself makes Esplora/Electrum
-    // calls, and holding the lock across those would pin every other worker.
+    // (W-06 / #52). A closure, so the key lock is held only while the outputs
+    // resolve and never across validation's Esplora/Electrum calls.
     #[cfg(feature = "rgb-validation")]
     let self_owned_psbt_outputs = |psbt: &bitcoin::psbt::Psbt| {
         ctx.state.with_keys(|keys| {
@@ -372,17 +364,12 @@ fn handle_sign(ctx: &ServerContext, req: SignRequest) -> Result<EnclaveResponse>
         &destination_proof.proof,
     )?;
 
-    // Independent EVM `FundsIn` verification (audit M-06 / #60, #51). In
-    // EVM -> RGB bridge mode, confirm the deposit really happened on-chain - via
-    // the enclave's own RPC call, not the listener's `event_valid` /
-    // `event_finalized` booleans (which are no longer trusted; see
-    // `evm::validation::validate_source`). Fail-closed: a missing client or any
-    // unmet predicate refuses the signature. Runs after the cheap local
-    // cross-checks and before the replay guard records the op, so the external
-    // RPC is only paid once the request is otherwise valid.
-    // NOTE: the RPC is reached through the untrusted host, so this becomes fully
-    // trustless only once Helios (#77) verifies it; see
-    // `crate::networks::evm::evm_event`.
+    // Independent EVM `FundsIn` verification (audit M-06 / #60, #51): confirm
+    // the deposit on-chain through the enclave's own RPC call rather than the
+    // listener's booleans. Fail-closed - a missing client or unmet predicate
+    // refuses the signature. Runs after the cheap local cross-checks and before
+    // the replay guard records the op, so the RPC is only paid on an otherwise
+    // valid request. Fully trustless only once Helios (#77) verifies it.
     #[cfg(all(feature = "evm-rpc", not(feature = "dev-mode")))]
     if let (SourceNetwork::EvmSource(source), DestinationNetwork::RgbDestination(_)) =
         (source_ref, destination_ref)
@@ -403,9 +390,8 @@ fn handle_sign(ctx: &ServerContext, req: SignRequest) -> Result<EnclaveResponse>
                     .into(),
             )
         })?;
-        // Binds to the source's BridgeFundsIn.operationId, NOT to
-        // destination.operation_idx — the RGB hub's index is a different id-space
-        // and matching against it produced spurious mismatch refusals.
+        // Binds to the source's BridgeFundsIn.operationId, not
+        // destination.operation_idx, which is a different id-space.
         crate::networks::evm::evm_event::verify_funds_in_event(
             &**client,
             // FundsIn is emitted by the bridge entry contract, which may differ
@@ -420,16 +406,10 @@ fn handle_sign(ctx: &ServerContext, req: SignRequest) -> Result<EnclaveResponse>
     }
 
     // Fail-closed when the FundsIn verifier is not compiled in (audit M-06 /
-    // #60, #51). An EVM -> RGB bridge request is authorised by an EVM deposit,
-    // but #51 removed the listener-supplied `event_valid`/`event_finalized`
-    // booleans that used to gate it and the independent replacement lives behind
-    // the `evm-rpc` feature. A build without that feature therefore has NO
-    // evidence the deposit occurred - the consignment/PSBT checks prove the
-    // transfer shape but not that any EVM deposit backs it. Refuse rather than
-    // sign on the missing authorisation. Mirrors the M-01/#61 no-`spv` fundsOut
-    // refusal. dev-mode retains the legacy path for local testing. Compiled only
-    // when `evm-rpc` is absent, so it and the verification block above are
-    // mutually exclusive.
+    // #60, #51). Without the `evm-rpc` feature there is no evidence the deposit
+    // occurred: the consignment/PSBT checks prove the transfer shape, not that
+    // an EVM deposit backs it. Mirrors the M-01 / #61 no-`spv` fundsOut refusal.
+    // dev-mode keeps the legacy path for local testing.
     #[cfg(all(not(feature = "evm-rpc"), not(feature = "dev-mode")))]
     if matches!(
         (source_ref, destination_ref),
@@ -447,13 +427,11 @@ fn handle_sign(ctx: &ServerContext, req: SignRequest) -> Result<EnclaveResponse>
         ));
     }
 
-    // Soft operation-uniqueness guard (audit W-02 / #84). In EVM -> RGB
-    // bridge mode, reject a same-op resubmission inside the TTL window. This is
-    // defense-in-depth only: the guard is in-memory, per-instance, and volatile
-    // across restart. RESERVE the key before signing (so a concurrent duplicate
-    // is still rejected up front) and commit it only after signing succeeds; a
-    // signing failure drops the reservation and rolls the key back, so a
-    // transient error does not self-block a legitimate retry (audit M-02).
+    // Soft operation-uniqueness guard (audit W-02 / #84): reject a same-op
+    // resubmission inside the TTL window. Defense in depth only - the guard is
+    // in-memory, per-instance, and volatile. The key is reserved before signing
+    // (so a concurrent duplicate is rejected up front) and committed only after
+    // it succeeds, so a transient error does not self-block a retry (M-02).
     #[cfg(not(feature = "dev-mode"))]
     let _op_reservation = if let (
         SourceNetwork::EvmSource(source),
@@ -494,22 +472,14 @@ fn handle_sign(ctx: &ServerContext, req: SignRequest) -> Result<EnclaveResponse>
 
     let result = match destination {
         DestinationNetwork::EvmDestination(destination) => {
-            // RGB->EVM `fundsOut` binding: with the consignment the source
-            // validation captured, bind the calldata the enclave is about to
-            // sign to the operation `validate()` authenticated — witness
-            // confirmation (4th I-03 / #95), BtcRelay agreement (#57 / #122),
-            // the consignment-bound release amount.
+            // RGB->EVM `fundsOut` binding: tie the calldata about to be signed
+            // to the operation `validate()` authenticated - witness confirmation
+            // (4th I-03 / #95), BtcRelay agreement (#57 / #122), and the
+            // consignment-bound release amount.
             //
-            // This binding is RGB-source-specific and MUST run only for an RGB
-            // source. A CCD source carries no consignment (`rgb_consignment` is
-            // None by design), and a CcdSource -> EvmDestination release is already
-            // authorized above by validate_source + validate_route_proofs +
-            // validate_destination (amount cross-check). Applying the binding
-            // unconditionally regressed CcdSource -> EvmDestination: the fundsOut
-            // selector reached `apply_funds_out_binding`, which requires a validated
-            // RGB consignment and rejected the sign. On non-rgb-validation builds
-            // there is no consignment to bind and fundsOut is refused upstream at
-            // source validation.
+            // RGB-source-only. A CCD source carries no consignment and a
+            // CcdSource -> EvmDestination release is already authorized above;
+            // applying the binding unconditionally rejected those signs.
             #[cfg(feature = "rgb-validation")]
             if matches!(source_ref, SourceNetwork::RgbSource(_)) {
                 apply_funds_out_binding(
@@ -574,7 +544,7 @@ fn apply_funds_out_binding(
     // BtcRelay agreement: bind the calldata's (blockHeight, commitmentHash)
     // `proof` to the header the enclave holds at that height (#57 / #122). Inert
     // until the listener populates `proof`. Requires the SPV header chain, which
-    // is always present under rgb-validation (spv is implied — see lib.rs M-01
+    // is always present under rgb-validation (spv is implied - see lib.rs M-01
     // compile_error).
     #[cfg(feature = "spv")]
     {
@@ -590,11 +560,10 @@ fn apply_funds_out_binding(
     // Consignment-bound release amount (transfer flow).
     crosscheck::validate_funds_out_transfer(params, validated)?;
 
-    // Current rollout is swap/send-receive only. Preserve the backend-provided
-    // general bridge burnId and settlement fundsInIds; the EVM connector has
-    // already selected the latter against the authoritative on-chain remaining
-    // balance. Mint/burn needs a separate network-id-routed path before its RGB
-    // OpId binding can be enabled here.
+    // Swap / send-receive only for now. The backend-provided burnId and
+    // settlement fundsInIds are preserved; the EVM connector already selected
+    // the latter against the on-chain remaining balance. Mint/burn needs a
+    // network-id-routed path before its RGB OpId binding can be enabled.
 
     Ok(())
 }
@@ -698,10 +667,10 @@ fn handle_get_public_key(
     })
 }
 
-/// Single place that assembles a `PublicKeysResponse` — keeps the field
-/// order matching `canonical_pubkey_bundle` exactly. If you add a field
-/// here, add it to the bundle too (and to the verifier mirror in
-/// `parent/src/attest_verify.rs::canonical_bundle`).
+/// Single place that assembles a `PublicKeysResponse`, keeping the field order
+/// matching `canonical_pubkey_bundle`. A new field must be added to the bundle
+/// and to the verifier mirror in
+/// `parent/src/attest_verify.rs::canonical_bundle`.
 fn build_public_keys_response(
     keys: crate::keys::KeyInfo,
     cfg: &BridgeConfig,
@@ -728,7 +697,7 @@ fn build_public_keys_response(
 /// Length-prefixed (u32 BE) concatenation of every field in
 /// PublicKeysResponse, in proto field order. Strings are encoded as their
 /// UTF-8 bytes; `chain_id` as 8-byte big-endian (its length prefix is the
-/// constant 8). Order and field set MUST match the verifier — see
+/// constant 8). Order and field set MUST match the verifier - see
 /// `docs/pubkey-attestation.md` and `parent/src/attest_verify.rs::canonical_bundle`.
 fn canonical_pubkey_bundle(keys: &PublicKeysResponse) -> Vec<u8> {
     let chain_id_bytes = keys.chain_id.to_be_bytes();
@@ -766,12 +735,10 @@ fn handle_get_attested_public_key(
         EnclaveError::InvalidRequest(format!("nonce must be 32 bytes, got {}", req.nonce.len()))
     })?;
 
-    // NOTE (audit W-13): this endpoint attests over a *caller-supplied* nonce,
-    // so it can act as an oracle that mints valid attestations for arbitrary
-    // nonces. That is safe for replay accounting: the cloning handlers record a
-    // nonce only after a fully-authenticated handshake (see `handle_get_clone` /
-    // `handle_set_clone`), so an oracle-minted nonce carries no replay-guard
-    // weight on its own and cannot be used to exhaust the guard.
+    // Audit W-13: this endpoint attests over a caller-supplied nonce, so it can
+    // mint attestations for arbitrary nonces. Safe for replay accounting: the
+    // cloning handlers record a nonce only after a fully-authenticated
+    // handshake, so an oracle-minted nonce cannot exhaust the guard.
     let keys = ctx.state.get_keys()?;
     let public_keys = build_public_keys_response(keys, &ctx.bridge_config);
 
@@ -809,7 +776,7 @@ fn handle_get_attested_public_key(
 /// `params` comes from destination validation, so the digest commits to exactly
 /// the fields cross-checked there (I-12 / #165). `None` in dev-mode, which skips
 /// validation and therefore decodes here, and on the LayerZero route, whose
-/// param shape is not `FundsOutParams` — `lz_funds_out_digest` decodes its own.
+/// param shape is not `FundsOutParams` - `lz_funds_out_digest` decodes its own.
 fn handle_sign_evm(
     ctx: &ServerContext,
     req: EvmDestination,
@@ -821,10 +788,9 @@ fn handle_sign_evm(
 
     let domain_sep = domain.separator_hash();
 
-    // Route to the appropriate EIP-712 digest based on selector and lz_release.
-    // lzFundsOutCall carries LZ-specific fields the digest commits to; the
-    // proto field is the authority — the selector in calldata is a consistency
-    // check only (crosschecked inside lz_funds_out_digest).
+    // Route by selector and lz_release. `lzFundsOutCall` carries LZ-specific
+    // fields the digest commits to; the proto field is the authority and the
+    // calldata selector is only a consistency check (see lz_funds_out_digest).
     let is_lz = req.call_data.len() >= 4
         && req.call_data[..4] == LZ_FUNDS_OUT_SELECTOR
         && req.lz_release.is_some();
@@ -885,14 +851,11 @@ fn handle_sign_evm(
 fn handle_sign_psbt(ctx: &ServerContext, req: RgbDestination) -> Result<EnclaveResponse> {
     let (signed_psbt, inputs_signed) = ctx.state.sign_psbt(&req.psbt_bytes)?;
 
-    // Reject a "successful" no-op (audit 3rd W-03 / #85). KeyManager::sign_psbt
-    // returns Ok((bytes, 0)) when no PSBT input belongs to this enclave; a
-    // caller that checks only RPC success would treat that as a valid signer
-    // contribution and mis-account quorum. Fail closed in production signing
-    // mode so a 0-signature response can never be mistaken for a contribution.
-    // Partial signing (0 < count < num_inputs) is still allowed. The
-    // KeyManager 0-return stays as a primitive; the policy lives here at the
-    // handler boundary. dev-mode keeps the 0-count path for inspect/dry-run.
+    // Reject a "successful" no-op (audit 3rd W-03 / #85): `sign_psbt` returns
+    // Ok((bytes, 0)) when no input belongs to this enclave, which a caller
+    // checking only RPC success would mis-count as a signer contribution.
+    // Partial signing (0 < count < num_inputs) is still allowed. dev-mode keeps
+    // the 0-count path for inspect/dry-run.
     #[cfg(not(feature = "dev-mode"))]
     if inputs_signed == 0 {
         return Err(EnclaveError::Signing(
@@ -912,21 +875,18 @@ fn handle_sign_psbt(ctx: &ServerContext, req: RgbDestination) -> Result<EnclaveR
     })
 }
 
-/// Sign a plain-BTC PSBT (create_utxo / UTXO management). Distinct from
-/// [`handle_sign_psbt`]: this path carries no RGB consignment and no EVM event.
-/// The enclave authorizes it by proving every output pays back to a script it
+/// Sign a plain-BTC PSBT (create_utxo / UTXO management). Unlike
+/// [`handle_sign_psbt`] this path carries no RGB consignment and no EVM event.
+/// Authorized by proving every output pays back to a script the enclave
 /// controls, plus the operator-pinned amount cap
-/// ([`crate::networks::rgb::btc_crosscheck`]); a production (rgb-validation)
-/// build refuses to sign while the cap is unset. Routing plain-BTC ops through
-/// their own request type is the structural half of the M-01/#69 fix — the
-/// bridge `SignPsbt` (RgbDestination) path can no longer be reached by omitting
-/// its fields.
+/// ([`crate::networks::rgb::btc_crosscheck`]); a production build refuses to
+/// sign while that cap is unset. Its own request type is the structural half of
+/// the M-01 / #69 fix.
 fn handle_sign_btc(ctx: &ServerContext, req: SignBtcRequest) -> Result<EnclaveResponse> {
-    // Authoritative posture check: in a production enclave the plain-BTC path is
-    // only reachable when the attested policy enables it (audit C-01). This is
-    // the same predicate `validate_btc_request` enforces via the BTC cap pin, but
-    // sourced from the single resolved policy rather than re-derived here — and
-    // the enabled/disabled state is committed into attestation `user_data`.
+    // Posture check: in production the plain-BTC path is reachable only when
+    // the attested policy enables it (audit C-01). Same predicate
+    // `validate_btc_request` enforces, but read from the resolved policy, whose
+    // state is committed into attestation `user_data`.
     if let crate::policy::SecurityPolicy::Production(p) = &ctx.policy {
         if !p.allow_vanilla_psbt {
             return Err(EnclaveError::Signing(
@@ -945,12 +905,9 @@ fn handle_sign_btc(ctx: &ServerContext, req: SignBtcRequest) -> Result<EnclaveRe
         crate::networks::rgb::btc_crosscheck::validate_btc_request(&req, &ctx.bridge_config, keys)
     })?;
 
-    // Sign restricted to the VANILLA (plain-BTC) account: the enclave will not
-    // co-sign a Colored (RGB-allocated) input on this path, so it is
-    // structurally impossible for plain-BTC signing to move federation/RGB
-    // funds — those move only via the consignment-bound SignPsbt path. createUtxos
-    // and sendBtc spend only vanilla-account UTXOs, so this never blocks a
-    // legitimate plain-BTC op.
+    // Restricted to the Vanilla account: no Colored (RGB-allocated) input is
+    // co-signed here, so plain-BTC signing cannot move RGB funds. createUtxos
+    // and sendBtc spend only vanilla UTXOs, so nothing legitimate is blocked.
     let (signed_psbt, inputs_signed) = ctx
         .state
         .sign_psbt_scoped(&req.psbt_bytes, Some(crate::keys::AccountType::Vanilla))?;
@@ -985,10 +942,9 @@ fn handle_sign_raw_message(
     }
 
     // EIP-191 personal_sign envelope: keccak256("\x19Ethereum Signed Message:\n" || len || msg).
-    // The 0x19 prefix byte is not a valid first byte for any Ethereum transaction
-    // envelope (legacy RLP starts at 0xc0+, typed txs use 0x01..=0x7f), so a
-    // signature produced here can never be replayed as a transaction signature
-    // — which is the whole point of EIP-191 and why this RPC must use it.
+    // 0x19 is not a valid first byte for any Ethereum transaction envelope
+    // (legacy RLP starts at 0xc0+, typed txs use 0x01..=0x7f), so a signature
+    // produced here can never be replayed as a transaction signature.
     use sha3::{Digest, Keccak256};
     let mut hasher = Keccak256::new();
     hasher.update(b"\x19Ethereum Signed Message:\n");
@@ -1014,13 +970,11 @@ fn handle_sign_raw_digest(
     ctx: &ServerContext,
     req: SignRawDigestRequest,
 ) -> Result<EnclaveResponse> {
-    // Gas-tx shape allowlist (audit TEE-XC-09 / #68). Production builds refuse
-    // to blind-sign an opaque digest: the request must carry the unsigned tx
-    // preimage, which the enclave decodes, checks against the operator pins
-    // (chain id + destination, zero value), and hashes itself — see
-    // `networks::evm::gas_tx`. Skipped under dev-mode like the other
-    // cross-checks (dev-mode is compile-guarded out of release), where the
-    // legacy opaque-digest path is retained for local testing.
+    // Gas-tx shape allowlist (audit TEE-XC-09 / #68). Production refuses to
+    // blind-sign an opaque digest: the request must carry the unsigned tx
+    // preimage, which the enclave decodes, checks against the operator pins, and
+    // hashes itself (see `networks::evm::gas_tx`). dev-mode keeps the legacy
+    // opaque-digest path for local testing.
     #[cfg(not(feature = "dev-mode"))]
     let digest = crate::networks::evm::gas_tx::validate_gas_tx_request(&req, &ctx.bridge_config)?;
 
@@ -1074,9 +1028,9 @@ fn handle_sign_ccd(state: &EnclaveState, req: SignCcdRequest) -> Result<EnclaveR
     Ok(EnclaveResponse {
         response: Some(Response::CcdSignature(CcdSignatureResponse {
             signature: signature.to_vec(),
-            // Ed25519 signatures are not recoverable, so the consumer needs the key
-            // to find this signature's index on the governance account. Taken from
-            // the same call that signed, so the two cannot disagree.
+            // Ed25519 signatures are not recoverable, so the consumer needs the
+            // key to locate this signature's index on the governance account.
+            // Read from the same call that signed.
             public_key: public_key.to_vec(),
         })),
     })
@@ -1096,12 +1050,10 @@ fn handle_proxy_federation(_req: ProxyFederationRequest) -> Result<EnclaveRespon
 // initialised at boot from the compile-time checkpoint for the active
 // network (see main.rs).
 //
-// Note: a poisoned mutex (lock returns Err) means a previous handler
-// panicked while holding the lock. That should never happen because the
-// only mutation is `submit_headers` which never panics, but if it does
-// the safe thing is to clear the poison and continue rather than wedge
-// the entire enclave — the chain is in a consistent state because all
-// mutations are atomic.
+// A poisoned mutex means a previous handler panicked while holding the lock.
+// The only mutation is `submit_headers`, which never panics, but if it happens
+// the poison is cleared rather than wedging the enclave: all mutations are
+// atomic, so the chain is still consistent.
 #[cfg(feature = "spv")]
 fn handle_submit_headers(
     ctx: &ServerContext,
@@ -1282,7 +1234,7 @@ fn handle_get_clone(state: &EnclaveState, req: GetCloneRequest) -> Result<Enclav
     }
 
     // 4. Digest binding: the attestation's `user_data` must equal the
-    //    digest on the wire — NSM-signed, so parent-proof.
+    //    digest on the wire - NSM-signed, so parent-proof.
     let user_data = verified.user_data.as_deref().ok_or_else(|| {
         EnclaveError::Attestation("requester attestation missing user_data (cloning digest)".into())
     })?;
@@ -1299,14 +1251,10 @@ fn handle_get_clone(state: &EnclaveState, req: GetCloneRequest) -> Result<Enclav
         Ok(())
     })?;
 
-    // 6. Replay-check + record the nonce from the verified document. This
-    //    runs only *after* the pubkey, digest and donor-secret checks above
-    //    have passed, so a rejected (unauthenticated) handshake never
-    //    consumes replay-guard capacity. Combined with the count-cap removal
-    //    (#80), this closes the secret-less cloning-availability DoS in which
-    //    an attacker mints attestations over arbitrary nonces via
-    //    `get_attested_public_key` and burns them on doomed handshakes
-    //    (audit W-13).
+    // 6. Replay-check + record the nonce from the verified document, only
+    //    after the checks above have passed, so an unauthenticated handshake
+    //    never consumes replay-guard capacity. With the count-cap removal
+    //    (#80) this closes the secret-less cloning-availability DoS (W-13).
     let nonce_array: [u8; 32] = verified
         .nonce
         .as_slice()
@@ -1349,7 +1297,7 @@ fn handle_set_clone(state: &EnclaveState, req: SetCloneRequest) -> Result<Enclav
         ))
     })?;
 
-    // 1. Verify donor attestation chain + PCRs (no nonce match — freshness
+    // 1. Verify donor attestation chain + PCRs (no nonce match - freshness
     //    is enforced by the replay guard once the binding and seed/identity
     //    checks below have passed).
     let expected_pcrs = attestation::get_own_pcrs()?;
@@ -1363,7 +1311,7 @@ fn handle_set_clone(state: &EnclaveState, req: SetCloneRequest) -> Result<Enclav
     }
 
     // 3. Decrypt seed, derive KeyManager, identity check, and commit the
-    //    Cloning -> Active transition — all atomically under the state
+    //    Cloning -> Active transition - all atomically under the state
     //    lock via `complete_cloning`. On any failure the state stays in
     //    Cloning and the handshake can be retried.
     let network = state.network();

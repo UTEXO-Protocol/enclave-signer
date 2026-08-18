@@ -1,54 +1,35 @@
 //! Proof that a plain-BTC PSBT output pays back to keys this enclave controls.
 //!
-//! This replaces the operator-pinned `BTC_ALLOWED_SCRIPTS` allowlist, which
-//! could not work in production for two reasons:
+//! Replaces the operator-pinned `BTC_ALLOWED_SCRIPTS` allowlist, which could
+//! not work in production: the scripts to pin derive from a seed that only
+//! exists after the enclave boots, and baking them into the image changes the
+//! PCR0 identity that seed is bound to.
 //!
-//!   1. **Chicken-and-egg.** The scripts to pin are the bridge's own taproot
-//!      addresses, which derive from a seed that only exists *after* the
-//!      enclave boots. You cannot know them before provisioning the enclave
-//!      that produces them.
-//!   2. **PCR churn.** Enclave env comes from the image, so it is measured into
-//!      PCR0. Baking the scripts in changes the enclave identity — and the
-//!      identity is what the seed is bound to, so the addresses you just pinned
-//!      belong to an enclave that no longer exists.
+//! An output is accepted when either:
 //!
-//! The allowlist was also unnecessary. "Pays somewhere the operator approved"
-//! was only ever a proxy for "pays back to the bridge", and the enclave can
-//! decide that itself, from evidence it verifies rather than configuration it
-//! is handed. An output is accepted when either:
-//!
-//!   * **(A) it repays an input we co-control** — its `script_pubkey` equals the
-//!     `script_pubkey` of an input for which
+//!   * (A) it repays an input we co-control: its `script_pubkey` equals that of
+//!     an input for which
 //!     [`find_taproot_sign_jobs`](crate::networks::rgb::signing::taproot::find_taproot_sign_jobs)
-//!     produced a **Vanilla**-account job. That job is control-block anchored
-//!     (the leaf provably sits under the input's on-chain output key) *and*
-//!     derivation anchored (the claimed key is the one we actually derive), so
-//!     the equal script is co-controlled by construction. This covers the common
-//!     self-pay / consolidation shape and needs no new PSBT metadata.
-//!   * **(B) its taproot metadata reconstructs to a script we participate in** —
+//!     produced a Vanilla-account job. Such a job is control-block anchored and
+//!     derivation anchored, so the equal script is co-controlled by
+//!     construction. Covers the self-pay / consolidation shape.
+//!   * (B) its taproot metadata reconstructs to a script we participate in:
 //!     `tap_internal_key` (+ `tap_tree`, when present) must rebuild the exact
-//!     on-chain `script_pubkey`, and some key in that committed script must be
-//!     one we derive at a BIP-86 path under our own master fingerprint, on
-//!     either of our accounts. This covers fresh change addresses at indices the
-//!     tx does not spend from, and requires the PSBT author to populate output
-//!     taproot fields (`PSBT_OUT_TAP_*`) — standard BIP-371 metadata.
+//!     on-chain `script_pubkey`, and some key in that script must be one we
+//!     derive at a BIP-86 path under our own master fingerprint, on either
+//!     account. Covers fresh change addresses at indices the tx does not spend
+//!     from, and needs standard BIP-371 output fields (`PSBT_OUT_TAP_*`).
 //!
-//! Rule (B) accepts **Colored** destinations as well as **Vanilla** ones:
-//! `create_utxo` funds fresh colored UTXOs out of vanilla inputs, so both its
-//! outputs are ours. M-01 scopes which inputs we *spend* — enforced in the
-//! signer via `sign_psbt_scoped(.., Some(Vanilla))` — not which of our own
-//! accounts we pay into.
+//! Rule (B) accepts Colored destinations as well as Vanilla ones, since
+//! `create_utxo` funds fresh colored UTXOs out of vanilla inputs. M-01 scopes
+//! which inputs we spend, not which of our accounts we pay into.
 //!
-//! Both rules are anchored in the reconstructed `script_pubkey`, which is what
-//! the segwit sighash commits to — the same bytes the signature covers. A
-//! `tap_key_origins` entry on its own proves nothing: it is coordinator-supplied
-//! and can claim anything, exactly the forgery the input-side check already
-//! defends against.
+//! Both rules anchor on the reconstructed `script_pubkey`, which the segwit
+//! sighash commits to. A `tap_key_origins` entry alone proves nothing: it is
+//! coordinator-supplied and can claim anything.
 //!
 //! Scope: this makes the plain-BTC path structurally self-pay. Withdrawals to
-//! an arbitrary user address were already out of scope here (a static allowlist
-//! could not express them either) and remain so — they need a destination bound
-//! to verified evidence, not a signing-policy pin.
+//! an arbitrary user address remain out of scope.
 
 use std::collections::HashSet;
 
@@ -66,21 +47,19 @@ use crate::networks::rgb::signing::taproot::find_taproot_sign_jobs;
 ///
 /// Membership comes from the signing-job resolver, so each entry carries the
 /// full input-side anchor chain: control block verified against the input's own
-/// output key, claimed key present in that verified leaf, and the claimed
-/// BIP-86 derivation actually producing it.
+/// output key, claimed key present in that leaf, and the claimed BIP-86
+/// derivation actually producing it.
 pub fn self_controlled_input_scripts(psbt: &Psbt, keys: &KeyManager) -> HashSet<Vec<u8>> {
     self_controlled_input_scripts_scoped(psbt, keys, Some(AccountType::Vanilla))
 }
 
 /// [`self_controlled_input_scripts`] with the account filter made explicit.
 ///
-/// `allowed_account` is `Some(_)` to keep to one BIP-86 account and `None` to
-/// accept either. The plain-BTC path pins `Vanilla` because M-01 scopes which
-/// inputs it may spend; the send-RGB change-leg proof passes `None`, because a
-/// bridge change output on that path sits on the **Colored** account and rule
-/// (A) would otherwise never fire for it. Widening the filter cannot widen what
-/// gets *signed* — that is enforced separately by `sign_psbt_scoped` — it only
-/// widens which scripts count as provably ours.
+/// `allowed_account` is `Some(_)` for one BIP-86 account, `None` for either.
+/// The plain-BTC path pins `Vanilla` (M-01); the send-RGB change-leg proof
+/// passes `None`, since bridge change there sits on the Colored account.
+/// Widening the filter only widens which scripts count as ours, never what gets
+/// signed - that is `sign_psbt_scoped`'s job.
 pub fn self_controlled_input_scripts_scoped(
     psbt: &Psbt,
     keys: &KeyManager,
@@ -99,10 +78,9 @@ pub fn self_controlled_input_scripts_scoped(
 /// **either** BIP-86 account. Hoists the input resolution once and applies
 /// [`output_is_self_owned`] to each output.
 ///
-/// This is the change-leg oracle for the send-RGB per-output amount bind
-/// (W-06 / #52): a revealed RGB seal is only credible as *bridge change* when
-/// the Bitcoin output it names is one we control. Anything else is a payout to
-/// a third party and must be counted as such.
+/// The change-leg oracle for the send-RGB per-output amount bind (W-06 / #52):
+/// a revealed RGB seal counts as bridge change only when the Bitcoin output it
+/// names is one we control.
 pub fn self_owned_output_indices(psbt: &Psbt, keys: &KeyManager) -> HashSet<u32> {
     let input_scripts = self_controlled_input_scripts_scoped(psbt, keys, None);
     (0..psbt.unsigned_tx.output.len())
@@ -111,7 +89,7 @@ pub fn self_owned_output_indices(psbt: &Psbt, keys: &KeyManager) -> HashSet<u32>
         .collect()
 }
 
-/// Whether output `index` pays back to this enclave — rule (A) or rule (B) of
+/// Whether output `index` pays back to this enclave - rule (A) or rule (B) of
 /// the module docs. `input_scripts` comes from
 /// [`self_controlled_input_scripts`] (hoisted so a multi-output PSBT resolves
 /// its inputs once).
@@ -148,8 +126,8 @@ fn reconstructs_to_our_taproot(psbt: &Psbt, index: usize, keys: &KeyManager) -> 
         return false;
     };
 
-    // The reconstruction is the anchor: metadata that does not produce the
-    // script being paid tells us nothing about who controls that script.
+    // Metadata that does not rebuild the script being paid says nothing about
+    // who controls it.
     let merkle_root = out.tap_tree.as_ref().map(|tree| tree.root_hash());
     if ScriptBuf::new_p2tr(&secp, internal_key, merkle_root) != txout.script_pubkey {
         return false;
@@ -161,8 +139,8 @@ fn reconstructs_to_our_taproot(psbt: &Psbt, index: usize, keys: &KeyManager) -> 
     }
 
     // Script-path ownership: some leaf of the committed tree pushes one of our
-    // keys. Leaves come from `tap_tree`, which we just proved the script commits
-    // to, so a forged leaf cannot get here.
+    // keys. Leaves come from the `tap_tree` the script was just proven to
+    // commit to, so a forged leaf cannot get here.
     let Some(tree) = out.tap_tree.as_ref() else {
         return false;
     };
@@ -190,18 +168,15 @@ fn reconstructs_to_our_taproot(psbt: &Psbt, index: usize, keys: &KeyManager) -> 
 /// Whether `xonly` is a key this enclave derives, per the output's
 /// `tap_key_origins`.
 ///
-/// The origin entry supplies only the *claim* (fingerprint + path); the claim is
-/// then checked by deriving that path and requiring it to produce `xonly`. A
-/// coordinator can write any fingerprint and path it likes into a PSBT, so
-/// without that step it could point our fingerprint at a key we do not hold.
+/// The origin entry supplies only a claim (fingerprint + path), which is
+/// checked by deriving that path and requiring it to produce `xonly`. A
+/// coordinator can write any fingerprint and path into a PSBT.
 ///
-/// Either BIP-86 account counts (see the module docs).
-/// `resolve_account_and_child_path` still pins the path shape, so a wrong
-/// purpose or an unknown coin type resolves to nothing and is refused.
+/// Either BIP-86 account counts. `resolve_account_and_child_path` still pins
+/// the path shape, so a wrong purpose or unknown coin type is refused.
 ///
 /// `leaf_hash` is `Some` when the key was found inside a script leaf, in which
-/// case the origin entry must also list that leaf — mirroring the input-side
-/// rule, so an entry describing a different leaf cannot vouch for this one.
+/// case the origin entry must list that same leaf.
 fn is_our_key(
     xonly: &XOnlyPublicKey,
     out: &bitcoin::psbt::Output,
@@ -246,7 +221,7 @@ mod tests {
         XOnlyPublicKey,
     };
 
-    /// NUMS internal key — unspendable key-path, as the bridge's multisig
+    /// NUMS internal key - unspendable key-path, as the bridge's multisig
     /// addresses use.
     const NUMS_INTERNAL: [u8; 32] = [
         0x50, 0x92, 0x9b, 0x74, 0xc1, 0xa0, 0x49, 0x54, 0xb7, 0x8b, 0x4b, 0x60, 0x35, 0xe9, 0x7a,
@@ -283,7 +258,7 @@ mod tests {
         (xonly, path)
     }
 
-    /// Colored-account key at m/86'/827167'/0'/0/0 — ours, on the RGB account
+    /// Colored-account key at m/86'/827167'/0'/0/0 - ours, on the RGB account
     /// that `create_utxo` funds fresh allocation UTXOs on.
     fn our_colored_key(keys: &KeyManager) -> (XOnlyPublicKey, DerivationPath) {
         let child = [
@@ -407,7 +382,7 @@ mod tests {
         let keys = km();
         let mut psbt = psbt_with(ScriptBuf::new(), ScriptBuf::new());
         let spk = make_input_ours(&mut psbt, &keys);
-        // Pay straight back to the input's own script — no output metadata at all.
+        // Pay straight back to the input's own script - no output metadata at all.
         psbt.unsigned_tx.output[0].script_pubkey = spk;
         assert!(owned(&psbt, &keys));
     }
@@ -500,10 +475,9 @@ mod tests {
         assert!(owned(&psbt, &keys));
     }
 
-    /// The whole point of the reconstruction: metadata is coordinator-supplied,
-    /// so it only counts when it rebuilds the script actually being paid. Here
-    /// the metadata describes a genuine address of ours while the output pays
-    /// somewhere else entirely.
+    /// Metadata is coordinator-supplied, so it only counts when it rebuilds
+    /// the script actually being paid. Here it describes a genuine address of
+    /// ours while the output pays elsewhere.
     #[test]
     fn rejects_metadata_that_does_not_reconstruct_the_paid_script() {
         let keys = km();
@@ -528,9 +502,8 @@ mod tests {
         assert!(!owned(&psbt, &keys));
     }
 
-    /// A forged origin entry that points our fingerprint and a real BIP-86 path
-    /// at a key we do not hold. Without deriving the path and comparing, this
-    /// would pass — the same gap the input-side check closes.
+    /// A forged origin entry pointing our fingerprint and a real BIP-86 path
+    /// at a key we do not hold. Passes unless the path is derived and compared.
     #[test]
     fn rejects_origin_claiming_our_fingerprint_for_a_foreign_key() {
         let keys = km();
@@ -689,7 +662,7 @@ mod tests {
     }
 
     /// Non-taproot outputs can never be reconstructed from BIP-371 metadata, so
-    /// they are only accepted via rule (A) — which a P2WPKH input can't satisfy
+    /// they are only accepted via rule (A) - which a P2WPKH input can't satisfy
     /// either (the enclave co-controls taproot inputs only).
     #[test]
     fn rejects_non_taproot_output() {

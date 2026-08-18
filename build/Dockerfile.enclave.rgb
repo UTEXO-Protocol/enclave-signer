@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile:1.7
-# RGB-only enclave image (vsock + rgb + evm-rpc + helios) — handles the RGB/BTC bridge
+# RGB-only enclave image (vsock + rgb + evm-rpc + helios) - handles the RGB/BTC bridge
 # only; Concordium (SignCcd / CcdSource) is not compiled in and its requests are
 # refused. For the Concordium bridge use Dockerfile.enclave.ccd; for both in one
 # binary use Dockerfile.enclave.
@@ -22,11 +22,9 @@ FROM rust:1.96-slim-bullseye@sha256:c593596210f729542a92aced6a8b0812bcc8d04c5f1b
 # `rgb-consignment` dep are public HTTPS git URLs, and `.cargo/config.toml` sets
 # `net.git-fetch-with-cli = true` so cargo shells out to system `git` rather than
 # bundled libgit2. No `openssh-client`: nothing here is fetched over SSH.
-# `cmake` (via pip) + `make`: the Electrum witness resolver (rgb-ops
-# `electrum_blocking`) pulls electrum-client -> rustls -> aws-lc-rs, whose
-# `aws-lc-sys` C sources build via CMake. Bullseye's apt cmake is 3.18 and
-# aws-lc-sys wants newer, so pin a modern one from PyPI. Builder-only, so none of
-# it lands in the runtime rootfs or PCR0.
+# `cmake` (from PyPI, since bullseye's apt cmake 3.18 is too old) + `make`:
+# `aws-lc-sys` builds C sources via CMake. Builder-only, so none of it lands in
+# the runtime rootfs or PCR0.
 # `protobuf-compiler` is NOT needed: the proto crate is vendored pre-generated
 # and no crate in the workspace has a build.rs, so protoc never runs.
 RUN apt-get update && apt-get install -y \
@@ -56,11 +54,6 @@ ENV CARGO_INCREMENTAL=0 \
 # host-relayed RawRpc source. Operator must set HELIOS_EXECUTION_RPC /
 # HELIOS_CONSENSUS_RPC / HELIOS_CHECKPOINT and run the exec+consensus
 # vsock-proxies (default ports 8003 / 8004).
-#
-# NO CREDENTIALS REQUIRED, same as Dockerfile.enclave: `enclave-proto/` is a
-# vendored in-tree slice and every other dep resolves over public HTTPS, so this
-# build carries no SSH mount and no BuildKit secrets. Keep it that way - a
-# private dep here would break public PCR reproducibility.
 RUN cargo build --release --locked --no-default-features --features vsock,rgb,evm-rpc,helios
 
 # --- Runtime ---

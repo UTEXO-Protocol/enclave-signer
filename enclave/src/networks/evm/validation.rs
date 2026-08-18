@@ -11,22 +11,20 @@ use crate::proto::{EvmDestination, EvmSource};
 /// `keccak256("fundsOut((address,uint256,uint256,uint256,uint256,string,bytes,bytes))")[0..4]`.
 ///
 /// Bundling the release fields into `FundsOutParams` moved the selector
-/// `0xccddb768` -> `0xdc771390`. A flat-encoded body read as a tuple lands one
-/// word off on every field, so the mismatch fails closed at the whitelist.
+/// `0xccddb768` -> `0xdc771390`. A flat body read as a tuple lands one word off
+/// on every field, so the mismatch fails closed at the whitelist.
 pub const FUNDS_OUT_SELECTOR_POOLS: [u8; 4] = [0xdc, 0x77, 0x13, 0x90];
 
 /// `keccak256("lzFundsOut(uint256,uint256,uint256,uint256,string,bytes,bytes,uint32,bytes32,uint256,bytes)")[0..4]`.
 ///
 /// Enclave wire format for `MultisigProxy.lzFundsOutCall`: individual params,
-/// no struct wrapper — analogous to `fundsOut` above. The selector distinguishes
+/// no struct wrapper - analogous to `fundsOut` above. The selector distinguishes
 /// the two release paths in the allowlist and routes to `TeeLzFundsOut` digest.
 pub const LZ_FUNDS_OUT_SELECTOR: [u8; 4] = lzFundsOutCall::SELECTOR;
 
 /// Upper bound on `call_data` length. A legitimate `fundsOut` call is a few
-/// hundred bytes; anything past 64 KiB is either malformed or an attempt to
-/// blow up per-request work before any byte-level extraction or signing runs
-/// (audit I-06 / #90). Compile-time so the posture is PCR-attested, not
-/// host-tunable.
+/// hundred bytes, so anything past 64 KiB is malformed or a work-amplification
+/// attempt (audit I-06 / #90). Compile-time and PCR-attested.
 pub const MAX_FUNDS_OUT_CALL_DATA_LEN: usize = 64 * 1024;
 
 const ALLOWED_SELECTORS: &[[u8; 4]] = &[FUNDS_OUT_SELECTOR_POOLS, LZ_FUNDS_OUT_SELECTOR];
@@ -46,7 +44,7 @@ sol! {
         bytes settlementData;
     }
 
-    /// Never reaches the chain — the proxy takes the struct directly. This is
+    /// Never reaches the chain - the proxy takes the struct directly. This is
     /// only the enclave's wire format, which is why the protos still carry an
     /// opaque `call_data` blob.
     function fundsOut(FundsOutParams params);
@@ -93,14 +91,11 @@ pub fn validate_source(amount: u64, source: &EvmSource) -> Result<RouteProof> {
         )));
     }
 
-    // NOTE (audit M-06 / #51): the listener-supplied `event_valid` /
-    // `event_finalized` booleans are NO LONGER trusted here - anyone reaching
-    // the enclave could set both `true`. EVM-event validity and finality are
-    // now established independently by the enclave itself in `handle_sign` via
-    // `networks::evm::evm_event::verify_funds_in_event` (the `evm-rpc` feature:
-    // fetches the FundsIn receipt and checks the operationId/amount/depth
-    // against the pinned bridge contract). The proto fields remain (ignored)
-    // until the listener stops sending them.
+    // Audit M-06 / #51: the listener-supplied `event_valid` / `event_finalized`
+    // booleans are not trusted here - anyone reaching the enclave could set
+    // both. Validity and finality come from
+    // `networks::evm::evm_event::verify_funds_in_event` in `handle_sign`. The
+    // proto fields remain, ignored, until the listener stops sending them.
 
     Ok(RouteProof {
         amount,
@@ -154,11 +149,10 @@ pub fn validate_destination(
             hex::encode(selector)
         )));
     }
-    // Decoded once here; every later stage takes the typed result (I-12 / #165).
-    // The LayerZero route has its own param shape, so it yields no
-    // `FundsOutParams` — `signing::lz_funds_out_digest` re-decodes the calldata
-    // itself. Both routes still surface `destinationChainId` for the pin check
-    // below, so neither escapes it.
+    // Decoded once here; later stages take the typed result (I-12 / #165). The
+    // LayerZero route has its own param shape and yields no `FundsOutParams`, so
+    // `signing::lz_funds_out_digest` re-decodes it. Both routes still surface
+    // `destinationChainId` for the pin check below.
     let (proof, params, calldata_destination_chain_id) = if selector == LZ_FUNDS_OUT_SELECTOR {
         let decoded = decode_lz_funds_out_params(&destination.call_data)?;
         let chain_id = decoded.destinationChainId;
@@ -241,7 +235,7 @@ fn route_proof_from_params(params: &FundsOutParams) -> Result<RouteProof> {
     Ok(RouteProof {
         amount,
         // Still `None`. `settlementData` cites bridge-derived deposit ids, not
-        // an RGB OpId, and `burnId` is not one either — so cross-network binding
+        // an RGB OpId, and `burnId` is not one either - so cross-network binding
         // cannot be recovered from the calldata alone.
         operation_id: None,
     })
@@ -251,11 +245,10 @@ fn route_proof_from_params(params: &FundsOutParams) -> Result<RouteProof> {
 /// canonical encoding. Shared with the signing path, which needs the fields to
 /// rebuild the `TeeFundsOut` struct hash.
 ///
-/// The canonicity check lives HERE, not only in the validator: a legacy flat
-/// body with a zero `recipient` decodes cleanly as a tuple (the zero reads as a
-/// head pointer aliasing the tuple onto the same words), and only the re-encode
-/// catches it. Deferring to `validate_destination` would make this
-/// caller-ordering — audit I-03 / Oxorio I-10.
+/// The canonicity check lives here rather than only in the validator: a legacy
+/// flat body with a zero `recipient` decodes cleanly as a tuple, and only the
+/// re-encode catches it. Deferring to `validate_destination` would make the
+/// property depend on caller ordering (audit I-03 / Oxorio I-10).
 pub fn decode_funds_out_params(call_data: &[u8]) -> Result<FundsOutParams> {
     let decoded = fundsOutCall::abi_decode_validate(call_data)
         .map_err(|e| EnclaveError::CrossCheck(format!("invalid fundsOut calldata: {e}")))?;
@@ -431,11 +424,10 @@ mod tests {
             .contains(&format!("evm_tx_hash must be {TX_HASH_LEN} bytes")));
     }
 
-    /// Audit M-06 / #51: the listener-supplied `event_valid` / `event_finalized`
-    /// booleans are no longer read by `validate_source`, so flipping them to
-    /// `false` does NOT change the outcome. EVM-event validity/finality is now
-    /// established independently by `evm_event::verify_funds_in_event` in the
-    /// handler (see that module's `issue_51_no_receipt_means_no_authorization`).
+    /// Audit M-06 / #51: `validate_source` no longer reads the listener's
+    /// `event_valid` / `event_finalized` booleans, so flipping them changes
+    /// nothing. Validity and finality come from
+    /// `evm_event::verify_funds_in_event`.
     #[test]
     fn source_ignores_listener_evm_booleans() {
         let mut source = source();
@@ -650,7 +642,7 @@ mod tests {
         assert_eq!(FUNDS_OUT_SELECTOR_POOLS, fundsOutCall::SELECTOR);
     }
 
-    /// Canonical calldata with non-empty dynamic tails — the baseline the two
+    /// Canonical calldata with non-empty dynamic tails - the baseline the two
     /// non-canonical rejection tests below tamper with.
     fn funds_out_calldata_with_tails(amount: u64) -> Vec<u8> {
         fundsOutCall {

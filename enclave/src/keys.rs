@@ -18,7 +18,7 @@ use zeroize::Zeroize;
 use crate::error::{EnclaveError, Result};
 
 /// RGB coin types for colored (RGB asset) operations. Mainnet/other split,
-/// matching `rgb-lib::utils::get_coin_type` — the host wallet derives the
+/// matching `rgb-lib::utils::get_coin_type` - the host wallet derives the
 /// colored addresses this enclave must resolve.
 const RGB_COIN_TYPE_MAINNET: u32 = 827166;
 const RGB_COIN_TYPE_TESTNET: u32 = 827167;
@@ -29,7 +29,7 @@ const CONCORDIUM_COIN_TYPE: u32 = 919;
 type HmacSha512 = Hmac<Sha512>;
 
 /// SLIP-0010 Ed25519 hardened key derivation. Returns the 32-byte private key at
-/// the given path. Every index is treated as hardened — SLIP-0010 Ed25519 only
+/// the given path. Every index is treated as hardened - SLIP-0010 Ed25519 only
 /// supports hardened derivation.
 fn derive_ed25519_slip10(seed: &[u8; 64], path: &[u32]) -> [u8; 32] {
     // Master key: I = HMAC-SHA512(key="ed25519 seed", data=seed).
@@ -131,9 +131,9 @@ impl KeyManager {
 
     /// Create a KeyManager from a raw 64-byte BIP-39 seed.
     ///
-    /// CRITICAL: The seed is moved into SecretBox FIRST, before any derivation.
-    /// Do NOT zeroize the local seed before boxing — the stored seed would be
-    /// all zeros and cloning would break later.
+    /// The seed is moved into `SecretBox` before any derivation. Do not zeroize
+    /// the local seed before boxing, or the stored seed ends up all zeros and
+    /// cloning breaks.
     pub fn from_seed(mut seed: [u8; 64], network: Network) -> Result<Self> {
         // Box the seed FIRST
         let seed_box = SecretBox::new(Box::new(seed));
@@ -339,7 +339,7 @@ impl KeyManager {
 
     /// Determine which account type a full derivation path belongs to,
     /// and return the relative child path beyond the account level.
-    /// E.g., m/86'/1'/0'/0/7 → (Vanilla, [0, 7]) on testnet.
+    /// E.g., m/86'/1'/0'/0/7 -> (Vanilla, [0, 7]) on testnet.
     pub fn resolve_account_and_child_path(
         &self,
         full_path: &DerivationPath,
@@ -369,7 +369,7 @@ impl KeyManager {
     }
 
     /// Sign a 32-byte message hash with the EVM secp256k1 key.
-    /// Returns 65 bytes: r(32) + s(32) + v(1) — Ethereum `ecrecover` convention.
+    /// Returns 65 bytes: r(32) + s(32) + v(1) - Ethereum `ecrecover` convention.
     pub fn sign_evm(&self, message_hash: &[u8; 32]) -> Result<[u8; 65]> {
         let signing_key = K256SigningKey::from_slice(self.evm_secret.expose_secret())
             .map_err(|e| EnclaveError::Signing(format!("evm key: {e}")))?;
@@ -419,15 +419,13 @@ impl KeyManager {
     /// BIP-86 account.
     ///
     /// `allowed_account`:
-    ///   * `None` — sign every input we can (taproot any account + legacy
+    ///   * `None`: sign every input we can (taproot on any account, plus legacy
     ///     P2WSH). Used by the consignment-bound bridge path (`SignPsbt`),
-    ///     where the consignment, not the account, is the authorization.
-    ///   * `Some(account)` — sign ONLY taproot inputs resolving to `account`,
-    ///     and skip the legacy P2WSH path entirely. The plain-BTC path
-    ///     (`SignBtc`) passes `Some(Vanilla)` so it can never co-sign a
-    ///     Colored (RGB-allocated) input — those move only via the
-    ///     consignment-bound path. This is the structural guard that keeps the
-    ///     M-01 fix from being reopened on the plain-BTC sibling path.
+    ///     where the consignment is the authorization.
+    ///   * `Some(account)`: sign only taproot inputs resolving to `account` and
+    ///     skip the legacy P2WSH path. `SignBtc` passes `Some(Vanilla)`, so the
+    ///     plain-BTC path can never co-sign a Colored (RGB-allocated) input
+    ///     (the structural half of the M-01 fix).
     pub fn sign_psbt_scoped(
         &self,
         psbt_bytes: &[u8],
@@ -461,8 +459,8 @@ impl KeyManager {
         }
 
         // === Legacy SegWit v0 P2WSH signing (ECDSA) ===
-        // Skipped entirely on an account-scoped call: the legacy single key is
-        // not BIP-86-account-derived, so it has no place on the plain-BTC path.
+        // Skipped on an account-scoped call: the legacy key is not
+        // BIP-86-account-derived.
         if allowed_account.is_some() {
             return Ok((psbt.serialize(), signed_count));
         }
@@ -523,9 +521,9 @@ impl KeyManager {
 impl Drop for KeyManager {
     /// Wipe the BIP-86 account extended private keys on teardown (I-07).
     ///
-    /// Unlike `seed`/`evm_secret`/`btc_secret`, these are stored as plain `Xpriv`
-    /// fields and are not covered by `SecretBox`'s zeroize-on-drop. Each `Xpriv`
-    /// carries a signing `private_key` and a sensitive `chain_code`; overwrite both.
+    /// Unlike `seed` / `evm_secret` / `btc_secret`, these are plain `Xpriv`
+    /// fields with no `SecretBox` zeroize-on-drop. Each carries a signing
+    /// `private_key` and a sensitive `chain_code`; both are overwritten.
     fn drop(&mut self) {
         self.account_xpriv_vanilla.private_key.non_secure_erase();
         self.account_xpriv_colored.private_key.non_secure_erase();
@@ -669,19 +667,19 @@ mod tests {
     fn resolve_account_and_child_path_works() {
         let km = KeyManager::from_seed([42u8; 64], Network::Testnet).unwrap();
 
-        // m/86'/1'/0'/0/7 → Vanilla, [0, 7]
+        // m/86'/1'/0'/0/7 -> Vanilla, [0, 7]
         let path = DerivationPath::from_str("m/86'/1'/0'/0/7").unwrap();
         let (account, child) = km.resolve_account_and_child_path(&path).unwrap();
         assert!(matches!(account, AccountType::Vanilla));
         assert_eq!(child.len(), 2);
 
-        // m/86'/827167'/0'/0/3 → Colored, [0, 3]
+        // m/86'/827167'/0'/0/3 -> Colored, [0, 3]
         let path = DerivationPath::from_str("m/86'/827167'/0'/0/3").unwrap();
         let (account, child) = km.resolve_account_and_child_path(&path).unwrap();
         assert!(matches!(account, AccountType::Colored));
         assert_eq!(child.len(), 2);
 
-        // m/84'/0'/0'/0/0 → None (wrong purpose)
+        // m/84'/0'/0'/0/0 -> None (wrong purpose)
         let path = DerivationPath::from_str("m/84'/0'/0'/0/0").unwrap();
         assert!(km.resolve_account_and_child_path(&path).is_none());
     }
@@ -858,8 +856,7 @@ mod tests {
         assert_eq!(sig_bytes.len(), 64);
 
         // The reported key must be the one that signed: the consumer maps the
-        // signature onto an account key index by it, so a mismatch would place the
-        // signature at the wrong index.
+        // signature onto an account key index by it.
         assert_eq!(&public_key, km.ccd_ed25519_pub());
 
         let vk = VerifyingKey::from_bytes(&public_key).unwrap();
@@ -958,7 +955,7 @@ mod tests {
         let (signed_bytes, count1) = km.sign_psbt(&psbt_bytes).unwrap();
         assert_eq!(count1, 1);
 
-        // Sign the already-signed PSBT again — should skip
+        // Sign the already-signed PSBT again - should skip
         let (_, count2) = km.sign_psbt(&signed_bytes).unwrap();
         assert_eq!(count2, 0);
     }
@@ -988,9 +985,8 @@ mod tests {
         assert_eq!(count, 0);
     }
 
-    /// Adversarial: 2-of-3 P2WSH where the TEE is NOT a cosigner, but the PSBT
-    /// places our pubkey in `bip32_derivation`. The pre-fix code signed; the
-    /// post-fix code must refuse.
+    /// Adversarial: 2-of-3 P2WSH where the TEE is not a cosigner, but the PSBT
+    /// places our pubkey in `bip32_derivation`. Must refuse.
     #[test]
     fn adversarial_psbt_forged_bip32_derivation_is_not_signed() {
         use bitcoin::blockdata::opcodes::all::*;
@@ -1045,7 +1041,7 @@ mod tests {
         });
         psbt.inputs[0].witness_script = Some(witness_script);
 
-        // Plant our pubkey in bip32_derivation — the lie.
+        // Plant our pubkey in bip32_derivation - the lie.
         psbt.inputs[0].bip32_derivation.insert(
             our_pk,
             (
@@ -1063,10 +1059,9 @@ mod tests {
         assert!(!signed.inputs[0].partial_sigs.contains_key(&our_btc_pk));
     }
 
-    /// Adversarial: `script_pubkey` commits to script A (not containing us) but
-    /// the PSBT ships script B (containing our pubkey) as `witness_script`.
-    /// Pre-fix sliding-window/bip32 paths could accept; post-fix must refuse
-    /// because sha256(B) != script_pubkey's witness program.
+    /// Adversarial: `script_pubkey` commits to script A (without us) while the
+    /// PSBT ships script B (with our pubkey) as `witness_script`. Must refuse,
+    /// since sha256(B) != the script_pubkey's witness program.
     #[test]
     fn adversarial_psbt_witness_script_mismatch_is_not_signed() {
         use bitcoin::blockdata::opcodes::all::*;
@@ -1083,7 +1078,7 @@ mod tests {
             bitcoin::PublicKey::new(SecretKey::from_slice(&[b; 32]).unwrap().public_key(&secp))
         };
 
-        // Script A — what the on-chain UTXO actually commits to (no us).
+        // Script A - what the on-chain UTXO actually commits to (no us).
         let mut keys_a = [pk_other(0xA1), pk_other(0xA2), pk_other(0xA3)];
         keys_a.sort_by_key(|k| k.to_bytes());
         let script_a = ScriptBuilder::new()
@@ -1096,7 +1091,7 @@ mod tests {
             .into_script();
         let real_spk = ScriptBuf::new_p2wsh(&bitcoin::WScriptHash::hash(script_a.as_bytes()));
 
-        // Script B — what the attacker ships in PSBT (contains us).
+        // Script B - what the attacker ships in PSBT (contains us).
         let mut keys_b = [our_btc_pk, pk_other(0xA2), pk_other(0xA3)];
         keys_b.sort_by_key(|k| k.to_bytes());
         let script_b = ScriptBuilder::new()
@@ -1241,7 +1236,7 @@ mod tests {
         // Set tap_internal_key
         psbt.inputs[0].tap_internal_key = Some(internal_key);
 
-        // Set tap_scripts (control block → script)
+        // Set tap_scripts (control block -> script)
         let control_block = taproot_spend_info
             .control_block(&(tap_script.clone(), LeafVersion::TapScript))
             .unwrap();
@@ -1286,14 +1281,14 @@ mod tests {
         let (signed_bytes, count1) = km.sign_psbt(&psbt_bytes).unwrap();
         assert_eq!(count1, 1);
 
-        // Sign the already-signed PSBT again — should skip
+        // Sign the already-signed PSBT again - should skip
         let (_, count2) = km.sign_psbt(&signed_bytes).unwrap();
         assert_eq!(count2, 0);
     }
 
     #[test]
     fn test_sign_taproot_psbt_no_matching_fingerprint() {
-        // Key with a different seed → different fingerprint → should not sign
+        // Key with a different seed -> different fingerprint -> should not sign
         let km_signer = KeyManager::from_seed([0x42u8; 64], Network::Testnet).unwrap();
         let km_other = KeyManager::from_seed([0x99u8; 64], Network::Testnet).unwrap();
 
@@ -1337,9 +1332,8 @@ mod tests {
         assert!(secp.verify_schnorr(schnorr_sig, &msg, xonly_pk).is_ok());
     }
 
-    /// Adversarial taproot: the committed leaf does NOT push our xonly key,
-    /// but `tap_key_origins` lies and claims our key participates. Pre-fix
-    /// code (which iterated origins) would sign; post-fix must refuse.
+    /// Adversarial taproot: the committed leaf does not push our xonly key,
+    /// but `tap_key_origins` claims our key participates. Must refuse.
     #[test]
     fn adversarial_taproot_psbt_forged_origins_is_not_signed() {
         use bitcoin::bip32::ChildNumber;

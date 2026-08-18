@@ -110,7 +110,7 @@ pub fn funds_out_digest(
         let mut buf = Vec::with_capacity(HASH_LEN * 11);
         buf.extend_from_slice(&type_hash);
         buf.extend_from_slice(&abi_encode_address(&params.recipient.into_array()));
-        // Full-width uint256s — never narrowed to the cross-checks' u64.
+        // Full-width uint256s - never narrowed to the cross-checks' u64.
         buf.extend_from_slice(&params.amount.to_be_bytes::<HASH_LEN>());
         buf.extend_from_slice(&params.burnId.to_be_bytes::<HASH_LEN>());
         buf.extend_from_slice(&params.sourceChainId.to_be_bytes::<HASH_LEN>());
@@ -139,7 +139,7 @@ const TEE_LZ_FUNDS_OUT_TYPE_HASH_STR: &str = "TeeLzFundsOut(uint256 amount,uint2
 /// Build the EIP-712 digest that `MultisigProxy.lzFundsOutCall` verifies.
 ///
 /// Mirrors `MultisigProxy._lzFundsOutStructHash` (MultisigProxy.sol:388-413):
-/// thirteen words — dynamic fields pre-hashed, `dstEid` (uint32) padded to
+/// thirteen words - dynamic fields pre-hashed, `dstEid` (uint32) padded to
 /// 32 bytes. The `lz_release` proto fields are crosschecked against the decoded
 /// calldata before the digest is built.
 pub fn lz_funds_out_digest(
@@ -209,8 +209,8 @@ pub fn lz_funds_out_digest(
     Ok(eip712_digest(domain, &struct_hash))
 }
 
-/// Wrap a struct hash into the final EIP-712 digest: `keccak256(0x1901 ‖
-/// domainSeparator ‖ structHash)`.
+/// Wrap a struct hash into the final EIP-712 digest: `keccak256(0x1901 ||
+/// domainSeparator || structHash)`.
 fn eip712_digest(domain: &Eip712Domain, struct_hash: &[u8; HASH_LEN]) -> [u8; HASH_LEN] {
     let domain_separator = domain.separator_hash();
 
@@ -384,10 +384,10 @@ mod tests {
     /// as "not a registered enclave signer". Calldata and digest come from
     /// Foundry, not from this module's own helpers.
     ///
-    /// Fields: recipient 0xf39F…2266, amount 1_000_000, burnId 123_456_789,
+    /// Fields: recipient 0xf39F...2266, amount 1_000_000, burnId 123_456_789,
     /// sourceChainId 96, destinationChainId 31337, sourceAddress
-    /// "rgb:localnet-test", proof = abi.encode(101, 0xaa…, 107, 0xbb…),
-    /// settlementData = abi.encode([0xcc…], [999]), nonce 3,
+    /// "rgb:localnet-test", proof = abi.encode(101, 0xaa..., 107, 0xbb...),
+    /// settlementData = abi.encode([0xcc...], [999]), nonce 3,
     /// deadline 1_700_000_000, on the Arbitrum One domain.
     #[test]
     fn test_digest_matches_foundry_vector() {
@@ -445,7 +445,7 @@ mod tests {
     }
 
     /// Pack `lzFundsOut` calldata using the same ABI as the node's
-    /// `packIMultisigProxyLzFundsOut` test helper — individual params, no
+    /// `packIMultisigProxyLzFundsOut` test helper - individual params, no
     /// struct wrapper.
     fn lz_test_calldata() -> Vec<u8> {
         use crate::networks::evm::validation::lzFundsOutCall;

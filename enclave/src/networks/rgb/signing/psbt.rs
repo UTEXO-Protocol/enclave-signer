@@ -15,17 +15,17 @@ pub enum SegwitSignDecision {
 
 /// Decide whether to sign a PSBT input as P2WSH for `our_pubkey`.
 ///
-/// Authorization is anchored to `witness_utxo.script_pubkey` — the only PSBT
+/// Authorization is anchored to `witness_utxo.script_pubkey` - the only PSBT
 /// field committed to by the BIP-143 sighash and therefore the only one we
 /// can trust. We require:
 ///
 ///   1. `witness_utxo` is present and its `script_pubkey` is P2WSH.
 ///   2. `partial_sigs` does not already contain our key.
 ///   3. `witness_script` is present and `sha256(witness_script)` matches the
-///      witness program in `script_pubkey` — closing the "fabricated
+///      witness program in `script_pubkey` - closing the "fabricated
 ///      witness_script" hole.
 ///   4. `our_pubkey` appears as an exact 33-byte push (opcode-aware) inside
-///      `witness_script` — closing the "key bytes hidden inside a larger
+///      `witness_script` - closing the "key bytes hidden inside a larger
 ///      push" hole.
 ///
 /// Hint fields (`bip32_derivation`, etc.) are coordinator-supplied and are

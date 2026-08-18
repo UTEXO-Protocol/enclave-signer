@@ -1,4 +1,4 @@
-//! Compile-time checkpoint + network constants — the trust anchors for the
+//! Compile-time checkpoint + network constants - the trust anchors for the
 //! in-enclave header chain.
 //!
 //! A checkpoint is `(height, block_hash, bits, time)`. On boot the enclave
@@ -6,28 +6,20 @@
 //! the first header must chain to `block_hash`. Every checkpoint here ends
 //! up in PCR0 because it's compiled in, so changing one means re-attestation.
 //!
-//! ## Status
+//! Status:
 //!
-//! - **Mainnet checkpoint** — block 951 552 (2026-05-29), a retarget-boundary
-//!   block (`951 552 = 472 × 2016`, so `height % 2016 == 0`). Boundary
-//!   alignment is required: the retarget-difficulty lookup needs the block at
-//!   `height − 2016` for the first boundary above the checkpoint, so a
-//!   non-aligned checkpoint wedges the chain at that boundary. Verified via
-//!   double-SHA256 of the raw header from blockstream.info/api.
-//! - **Signet checkpoint** — UTEXO custom signet block 334 000 (2026-06-02).
-//!   Verified via double-SHA256 of raw header from esplora-api.utexo.com.
-//!   Local/dev builds can move this anchor forward at boot with `SPV_CHECKPOINT`
-//!   so the initial header sync doesn't replay every block since then — see
-//!   [`resolve_checkpoint`]. Production-shaped builds refuse to start when that
-//!   variable is set: the checkpoint is the trust anchor, and the host must not
-//!   be able to choose it.
-//! - **Signet challenge / magic / block time** — REAL values, provided by
-//!   Oleksandr 2026-04-30. UTEXO custom signet, 3-of-3 multisig, 30s blocks.
-//!   These are baked in now so they end up in PCR0 alongside everything
-//!   else, even though BIP-325 signature verification itself is deferred
-//!   (the signature lives in the coinbase witness, which the proto does not
-//!   carry — see networks/rgb/spv/validation.rs).
-//! - **Regtest** — uses well-known regtest constants, fine as-is.
+//! - Mainnet: block 951 552 (2026-05-29), retarget-boundary aligned
+//!   (951 552 = 472 * 2016). Alignment is required, because the
+//!   retarget-difficulty lookup needs the block at `height - 2016` for the
+//!   first boundary above the checkpoint.
+//! - Signet: UTEXO custom signet block 334 000 (2026-06-02). Local/dev builds
+//!   can move this forward at boot with `SPV_CHECKPOINT` (see
+//!   [`resolve_checkpoint`]); production-shaped builds refuse to start when it
+//!   is set.
+//! - Signet challenge / magic / block time: real values for UTEXO custom
+//!   signet, 3-of-3 multisig, 30s blocks. Baked in so they land in PCR0, even
+//!   though BIP-325 signature verification is deferred.
+//! - Regtest: well-known regtest constants.
 
 use crate::networks::rgb::spv::types::{BlockHash, BlockHeight, Network};
 use crate::networks::rgb::spv::validation::RETARGET_INTERVAL;
@@ -50,8 +42,8 @@ pub struct Checkpoint {
     pub is_real: bool,
 }
 
-/// Mainnet checkpoint — block 951 552 (2026-05-29). Retarget-boundary aligned
-/// (`951 552 = 472 × 2016`), so `from_next_work_required()` at the first
+/// Mainnet checkpoint - block 951 552 (2026-05-29). Retarget-boundary aligned
+/// (`951 552 = 472 x 2016`), so `from_next_work_required()` at the first
 /// boundary above the checkpoint can resolve its epoch start. See the
 /// boundary-alignment invariant enforced in [`Checkpoint::assert_retarget_aligned`].
 /// hash (display): 00000000000000000001b472f1922f86148c8286609fb14be39e12b8bd14bb64
@@ -67,7 +59,7 @@ pub const MAINNET_CHECKPOINT: Checkpoint = Checkpoint {
     is_real: true,
 };
 
-/// UTEXO custom signet checkpoint — block 334 000 (2026-06-02).
+/// UTEXO custom signet checkpoint - block 334 000 (2026-06-02).
 /// hash (display): 000000ac5fccb8a26d3bf859952e164b4fb65190c8f29c8339c6a2c39f3aeb66
 pub const SIGNET_CHECKPOINT: Checkpoint = Checkpoint {
     height: 334_000,
@@ -81,7 +73,7 @@ pub const SIGNET_CHECKPOINT: Checkpoint = Checkpoint {
     is_real: true,
 };
 
-/// Testnet3 checkpoint. PLACEHOLDER — testnet3 isn't a target environment
+/// Testnet3 checkpoint. PLACEHOLDER - testnet3 isn't a target environment
 /// today, but kept symmetric with the Network enum.
 pub const TESTNET3_CHECKPOINT: Checkpoint = Checkpoint {
     height: 0,
@@ -91,7 +83,7 @@ pub const TESTNET3_CHECKPOINT: Checkpoint = Checkpoint {
     is_real: false,
 };
 
-/// Regtest checkpoint — the deterministic regtest genesis block (height 0).
+/// Regtest checkpoint - the deterministic regtest genesis block (height 0).
 /// Genesis is fine for regtest because anyone can mine; the listener feeds
 /// headers from height 1, which chain to this hash.
 /// hash (display): 0f9188f13cb7b2c71f2a335e3a4fc328bf5beb436012afca590b1a11466e2206
@@ -111,12 +103,9 @@ impl Checkpoint {
     /// Refuse to construct a `HeaderChain` against a placeholder checkpoint
     /// in production-shaped builds. Tests are exempt.
     pub fn assert_real_in_release(&self) -> Result<(), &'static str> {
-        // Local dev/test images intentionally build the enclave in release mode
-        // with `allow-seed-import` so deterministic mnemonics can be loaded,
-        // but they still run against placeholder signet checkpoints until the
-        // real tuple is baked in. Keep the hard fail for production-shaped
-        // builds while letting that testing-only feature act as the escape
-        // hatch for local E2E.
+        // Local dev/test images build in release mode with `allow-seed-import`
+        // and may still run against placeholder checkpoints, so that feature is
+        // the escape hatch. Production-shaped builds keep the hard fail.
         if cfg!(debug_assertions) || cfg!(test) || cfg!(feature = "allow-seed-import") {
             return Ok(());
         }
@@ -130,17 +119,12 @@ impl Checkpoint {
     }
 
     /// Assert that a PoW-enforcing network's checkpoint sits on a retarget
-    /// boundary (`height % RETARGET_INTERVAL == 0`). This is a correctness
-    /// invariant, not a placeholder check: the difficulty-retarget lookup
-    /// (`HeaderChain::epoch_start_time`) needs the block at `height − 2016`
-    /// for the first boundary above the checkpoint. If the checkpoint isn't
-    /// boundary-aligned, that epoch start lands *below* the checkpoint — which
-    /// the enclave never stores — and the chain wedges the first time the
-    /// listener syncs across that boundary.
+    /// boundary. `HeaderChain::epoch_start_time` needs the block at
+    /// `height - 2016` for the first boundary above the checkpoint; if the
+    /// checkpoint is not aligned, that epoch start lands below it, is never
+    /// stored, and the chain wedges.
     ///
-    /// Networks that don't enforce PoW (signet, regtest) have no retarget
-    /// enforcement and are exempt — they're chain-linkage only, so the epoch
-    /// lookup is never consulted.
+    /// Signet and regtest do not enforce retargeting and are exempt.
     pub fn assert_retarget_aligned(&self, network: Network) -> Result<(), String> {
         if network.enforces_pow() && !self.height.is_multiple_of(RETARGET_INTERVAL) {
             return Err(format!(
@@ -171,13 +155,13 @@ pub fn checkpoint_for(network: Network) -> Checkpoint {
 /// Env var that moves the boot checkpoint forward in local/dev builds.
 ///
 /// Format: `height:block_hash` or `height:block_hash:bits:time`
-///   * `height` — decimal block height.
-///   * `block_hash` — 64 hex chars in **display order** (what an explorer or
+///   * `height` - decimal block height.
+///   * `block_hash` - 64 hex chars in **display order** (what an explorer or
 ///     `getblockhash` prints), optional `0x` prefix.
-///   * `bits` — the block's compact target, hex, `0x` prefix REQUIRED (so a
+///   * `bits` - the block's compact target, hex, `0x` prefix REQUIRED (so a
 ///     decimal `bits` copied out of an Esplora JSON body errors instead of
 ///     being misread as hex).
-///   * `time` — the block's Unix timestamp, decimal.
+///   * `time` - the block's Unix timestamp, decimal.
 ///
 /// The two-field form inherits `bits`/`time` from the compiled-in checkpoint.
 /// That is only sound where `nBits` is never checked and the epoch-start lookup
@@ -196,12 +180,10 @@ pub enum CheckpointSource {
 
 /// True when this build may honour [`CHECKPOINT_ENV`].
 ///
-/// The checkpoint is the SPV trust anchor: everything the enclave believes
-/// about the Bitcoin chain hangs off it, so a production enclave takes it only
-/// from the compiled-in constant that PCR0 commits to. The exemptions mirror
-/// [`Checkpoint::assert_real_in_release`] — debug builds, tests, and the
-/// local-E2E `allow-seed-import` feature (what `build/Dockerfile.enclave-dev`
-/// produces) are the sanctioned dev shapes.
+/// The checkpoint is the SPV trust anchor, so a production enclave takes it
+/// only from the compiled-in constant PCR0 commits to. Exemptions mirror
+/// [`Checkpoint::assert_real_in_release`]: debug builds, tests, and the
+/// local-E2E `allow-seed-import` feature.
 pub fn checkpoint_override_allowed() -> bool {
     cfg!(debug_assertions) || cfg!(test) || cfg!(feature = "allow-seed-import")
 }
@@ -209,11 +191,10 @@ pub fn checkpoint_override_allowed() -> bool {
 /// Resolve the checkpoint to boot against: the compiled-in constant, or the
 /// `SPV_CHECKPOINT` override when this build allows one.
 ///
-/// Errors are boot-fatal by design (`main` panics on them), in all three cases:
-/// the var set in a production build, a malformed spec, and a spec missing
-/// `bits`/`time` on a PoW network. Silently falling back to the compiled anchor
-/// would leave a dev wondering why the sync still starts thousands of blocks
-/// back, and would let a production image quietly ignore an operator's intent.
+/// Errors are boot-fatal (`main` panics) in all three cases: the var set in a
+/// production build, a malformed spec, and a spec missing `bits`/`time` on a
+/// PoW network. Falling back silently would hide both a dev mistake and a
+/// production image ignoring operator intent.
 pub fn resolve_checkpoint(
     network: Network,
 ) -> std::result::Result<(Checkpoint, CheckpointSource), String> {
@@ -260,8 +241,8 @@ pub fn parse_checkpoint_spec(
         .parse()
         .map_err(|e| format!("{CHECKPOINT_ENV}: height {height_s:?} is not a block height: {e}"))?;
 
-    // Display order in, internal order stored — the same flip the constants
-    // above document (hash bytes are reversed relative to what explorers print).
+    // Display order in, internal order stored - the same flip the constants
+    // above document.
     let hash_hex = hash_s.strip_prefix("0x").unwrap_or(hash_s);
     let hash_bytes = hex::decode(hash_hex)
         .map_err(|e| format!("{CHECKPOINT_ENV}: block_hash {hash_s:?} is not hex: {e}"))?;
@@ -317,26 +298,21 @@ pub fn parse_checkpoint_spec(
 
 // === UTEXO custom signet network parameters ===
 //
-// Provided by Oleksandr Mihalatii on 2026-04-30. These describe the dev
-// signet our enclaves will validate headers against. They are baked in
-// (compile-time consts) so they end up in PCR0; the network is selected at
-// boot via the BITCOIN_NETWORK env var, but the *parameters* of each
-// network are immutable per binary.
+// Compile-time consts, so they end up in PCR0. The network is selected at boot
+// via BITCOIN_NETWORK, but each network's parameters are immutable per binary.
 //
-// BIP-325 signature verification using these values is NOT implemented in
-// PR 2/3 — the coinbase witness commitment (where the signature lives) is
-// not carried by the current SubmitHeadersRequest proto. Strict signet
-// validation requires extending the proto with `repeated bytes coinbase_txs`
-// and is deferred. These constants are baked in regardless so a future PR
-// can light up verification without re-collecting the values.
+// BIP-325 signature verification is not implemented: the signature lives in the
+// coinbase witness commitment, which SubmitHeadersRequest does not carry. It
+// would need `repeated bytes coinbase_txs` on the proto. The constants are
+// baked in anyway so a later change can use them.
 
 /// Signet challenge script for the UTEXO custom signet (BIP-325).
 ///
 /// Layout (per Oleksandr's note):
-/// - `6a 4c 09 01 1e 00 00 00 00 00 00 00 00` — OP_RETURN-prefixed block-time
+/// - `6a 4c 09 01 1e 00 00 00 00 00 00 00 00` - OP_RETURN-prefixed block-time
 ///   spec (PR bitcoin#29365): 30s = `0x1e` little-endian u64.
 /// - `4c 69 53 21 <33-byte pubkey> 21 <33-byte pubkey> 21 <33-byte pubkey>
-///    53 ae` — `OP_PUSHDATA1 0x69 OP_3 <pk1> <pk2> <pk3> OP_3 OP_CHECKMULTISIG`
+///    53 ae` - `OP_PUSHDATA1 0x69 OP_3 <pk1> <pk2> <pk3> OP_3 OP_CHECKMULTISIG`
 ///   = 3-of-3 multisig over three federation signing keys.
 pub const UTEXO_SIGNET_CHALLENGE: &[u8] = &[
     0x6a, 0x4c, 0x09, 0x01, 0x1e, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x4c, 0x69, 0x53, 0x21,
@@ -362,9 +338,8 @@ mod tests {
 
     #[test]
     fn signet_challenge_matches_oleksandrs_hex() {
-        // Sanity: the byte array above should hex-encode to exactly the value
-        // Oleksandr posted. If anyone touches the byte array, this catches a
-        // typo before it ships to attestation.
+        // The byte array must hex-encode to exactly the published value, so a
+        // typo is caught before it ships to attestation.
         let hex = hex::encode(UTEXO_SIGNET_CHALLENGE);
         assert_eq!(
             hex,
@@ -410,9 +385,8 @@ mod tests {
     // === SPV_CHECKPOINT override (dev-only boot anchor) ===
 
     /// Round-trip: the spec for the real signet checkpoint must parse back to
-    /// exactly the compiled-in constant — display-order hash included. If the
-    /// byte flip ever regresses, every dev override would anchor to a hash no
-    /// header chains to, and this catches it.
+    /// the compiled-in constant, display-order hash included. Catches a
+    /// regression in the byte flip.
     #[test]
     fn parse_spec_round_trips_the_signet_constant() {
         let spec = "334000:000000ac5fccb8a26d3bf859952e164b4fb65190c8f29c8339c6a2c39f3aeb66:0x1e0377ae:1780464472";
@@ -445,9 +419,9 @@ mod tests {
         assert_eq!(a.hash, b.hash);
     }
 
-    /// A PoW network must not inherit bits/time — the nBits check and the
-    /// retarget epoch-start lookup both consume them, so a stale pair would
-    /// reject every real header.
+    /// A PoW network must not inherit bits/time: the nBits check and the
+    /// retarget epoch-start lookup consume them, so a stale pair would reject
+    /// every real header.
     #[test]
     fn parse_spec_requires_bits_and_time_on_pow_networks() {
         let spec = "953568:00000000000000000001b472f1922f86148c8286609fb14be39e12b8bd14bb64";
@@ -513,7 +487,7 @@ mod tests {
     #[test]
     fn assert_retarget_aligned_rejects_misaligned_pow_checkpoint() {
         // The previous checkpoint height (950 000) is NOT boundary-aligned
-        // (950 000 % 2016 == 464) — exactly the bug #67 fixes. A PoW network
+        // (950 000 % 2016 == 464) - exactly the bug #67 fixes. A PoW network
         // must reject it.
         let misaligned = Checkpoint {
             height: 950_000,
@@ -525,7 +499,7 @@ mod tests {
         assert!(misaligned
             .assert_retarget_aligned(Network::Mainnet)
             .is_err());
-        // Non-PoW networks are exempt — they never consult the retarget lookup.
+        // Non-PoW networks are exempt - they never consult the retarget lookup.
         assert!(misaligned.assert_retarget_aligned(Network::Signet).is_ok());
         assert!(misaligned.assert_retarget_aligned(Network::Regtest).is_ok());
     }

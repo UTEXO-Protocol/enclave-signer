@@ -538,7 +538,7 @@ pub struct SubmitHeadersRequest {
     #[prost(bytes="vec", repeated, tag="1")]
     pub headers: ::prost::alloc::vec::Vec<::prost::alloc::vec::Vec<u8>>,
     /// Block height of headers\[0\]. Headers must connect to the enclave's stored
-    /// chain (i.e. start_height == last_saved_height + 1) — except for the very
+    /// chain (i.e. start_height == last_saved_height + 1) - except for the very
     /// first batch which connects to the compiled-in checkpoint.
     #[prost(uint32, tag="2")]
     pub start_height: u32,

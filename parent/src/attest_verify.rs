@@ -25,16 +25,14 @@ pub enum VerifyMode {
 }
 
 /// The security posture the caller expects the attested enclave to have (audit
-/// C-01). The enclave commits its resolved posture into `user_data`; the
-/// verifier reconstructs the *expected* posture here and requires the commitment
-/// to match, so a downgraded enclave (vanilla signing on, a raw instead of
-/// Helios-verified data source, a dev build) is rejected rather than trusted.
+/// C-01). The enclave commits its resolved posture into `user_data`, and the
+/// verifier reconstructs the expected posture here and requires a match, so a
+/// downgraded enclave is rejected.
 ///
-/// The chain/contract/asset pins are taken from the wire response (already bound
-/// by the public-key bundle), so a production expectation only states the
-/// posture flags — plus the gas-tx rule, which is NOT on the wire and so must be
-/// declared here for the verifier to reconstruct the committed policy (audit
-/// C-02).
+/// Chain/contract/asset pins come from the wire response, which the public-key
+/// bundle already binds, so a production expectation states only the posture
+/// flags plus the gas-tx rule - the latter is not on the wire and must be
+/// declared here (audit C-02).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ExpectedPolicy {
     /// Expect a production bridge enclave with these posture flags.
@@ -48,9 +46,9 @@ pub enum ExpectedPolicy {
         /// fails verification (audit M-06).
         evm_checkpoint: Option<[u8; 32]>,
         /// Expected gas-tx (`SignRawDigest`) rule the enclave committed (audit
-        /// C-02). All-zero destination + zero caps + empty selectors express
-        /// "the operator did not pin the gas path" — which the enclave attests
-        /// as such and fails closed on per request.
+        /// C-02). An all-zero destination, zero caps, and empty selectors mean
+        /// the operator did not pin the gas path, which the enclave attests as
+        /// such and fails closed on per request.
         gas_tx_allowed_to: [u8; 20],
         gas_tx_max_gas_limit: u64,
         gas_tx_max_fee_per_gas: u128,
@@ -153,10 +151,9 @@ pub async fn verify_attested_pubkey(
     }
 
     // The enclave commits to sha256(pubkey_bundle || policy_commitment) (audit
-    // C-01). Reconstruct the expected policy — pins from the wire response,
-    // posture flags from `expected_policy` — and require the whole commitment to
-    // match. A mismatch means the attested posture is not the one the operator
-    // expects (downgraded data source, vanilla signing on, a dev build, …).
+    // C-01). Reconstruct the expected policy - pins from the wire response,
+    // posture flags from `expected_policy` - and require the whole commitment to
+    // match. A mismatch means the attested posture is not the expected one.
     let attested_policy = expected_attested_policy(&expected_policy, &response)?;
     let mut preimage = canonical_bundle(&response);
     preimage.extend_from_slice(&attested_policy.to_bytes());

@@ -1,13 +1,13 @@
-//! Live-chain check of the #60 FundsIn binding, against a real `BridgeFundsIn`
-//! log rather than a synthetic one. The unit tests build their own logs, so a
-//! wrong event signature or topic index would pass both sides of the mistake.
+//! Live-chain check of the #60 FundsIn binding against a real `BridgeFundsIn`
+//! log. The unit tests build their own logs, so a wrong event signature or
+//! topic index would pass on both sides.
 //!
-//! Skipped unless `UTEXO_LIVE_EVM_RPC` is set — no CI runner has a chain. Run it
-//! against the localnet after `make evm-fundsin`:
+//! Skipped unless `UTEXO_LIVE_EVM_RPC` is set. Run against the localnet after
+//! `make evm-fundsin`:
 //!
 //! ```sh
 //! UTEXO_LIVE_EVM_RPC=http://localhost:8545 \
-//! UTEXO_LIVE_BRIDGE=0x… UTEXO_LIVE_TX=0x… UTEXO_LIVE_OP_ID=0x<64 hex> \
+//! UTEXO_LIVE_BRIDGE=0x... UTEXO_LIVE_TX=0x... UTEXO_LIVE_OP_ID=0x<64 hex> \
 //! UTEXO_LIVE_AMOUNT=1000000 UTEXO_LIVE_COMMISSION=0 UTEXO_LIVE_MIN_CONF=1 \
 //!     cargo test -p utexo-bridge-enclave --features evm-rpc --test test_evm_event_live
 //! ```
@@ -81,7 +81,7 @@ fn live_deposit_binds_operation_id() {
     .expect("the real deposit must verify");
 }
 
-/// A different id must refuse — proves the comparison runs rather than the
+/// A different id must refuse - proves the comparison runs rather than the
 /// decode merely succeeding.
 #[test]
 fn live_deposit_rejects_wrong_operation_id() {
@@ -103,7 +103,7 @@ fn live_deposit_rejects_wrong_operation_id() {
     assert!(e.contains("operationId mismatch"), "got: {e}");
 }
 
-/// The amount is bound off the same log, at a different word offset — a swapped
+/// The amount is bound off the same log, at a different word offset - a swapped
 /// or mis-numbered offset would still bind the id but not this.
 #[test]
 fn live_deposit_rejects_wrong_amount() {

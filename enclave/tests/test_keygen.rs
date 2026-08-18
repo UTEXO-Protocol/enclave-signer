@@ -40,7 +40,7 @@ fn initialize_and_get_keys() {
     assert!(!init_resp.btc_xpub.is_empty());
     assert!(init_resp.btc_xpub.starts_with("xpub"));
 
-    // Get keys — should return same values
+    // Get keys - should return same values
     let req2 = EnclaveRequest {
         request: Some(Request::GetPublicKey(GetPublicKeyRequest {})),
     };
@@ -157,23 +157,19 @@ fn deterministic_seed_import() {
     assert_eq!(init1.btc_xpub, init2.btc_xpub);
 }
 
-// A canonical BIP-39 test vector — a stable, non-secret mnemonic used to
+// A canonical BIP-39 test vector - a stable, non-secret mnemonic used to
 // exercise the caller-supplied-mnemonic import path.
 const TEST_MNEMONIC: &str =
     "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
 
-/// TI-1 (#112) — Production build (default `cargo test`, `allow-seed-import`
-/// OFF): an `InitializeKey` carrying a caller-supplied seed OR mnemonic must be
-/// REJECTED. The gate is the compile-time `#[cfg(not(feature =
-/// "allow-seed-import"))]` arm in `handle_initialize` (server.rs), which returns
-/// `EnclaveError::InvalidRequest` -> `Response::Error`. Because the rejection
-/// happens before any state mutation, a subsequent OS-entropy init (empty seed
-/// + empty mnemonic) on the same server must still succeed.
+/// TI-1 (#112), production build (`allow-seed-import` off): an `InitializeKey`
+/// carrying a caller-supplied seed or mnemonic must be rejected by the
+/// `#[cfg(not(feature = "allow-seed-import"))]` arm of `handle_initialize`. The
+/// rejection precedes any state mutation, so a later OS-entropy init on the
+/// same server still succeeds.
 ///
-/// The dev-mode acceptance counterpart is
-/// `dev_build_accepts_caller_supplied_seed_and_mnemonic` below; CI must run both
-/// feature profiles (the gate is compile-time, so the two directions cannot be
-/// exercised in one build).
+/// The counterpart is `dev_build_accepts_caller_supplied_seed_and_mnemonic`
+/// below; the gate is compile-time, so CI must run both feature profiles.
 #[test]
 #[cfg(not(feature = "allow-seed-import"))]
 fn production_build_rejects_caller_supplied_seed_and_mnemonic() {
@@ -239,11 +235,9 @@ fn production_build_rejects_caller_supplied_seed_and_mnemonic() {
     );
 }
 
-/// TI-1 (#112) — Dev build (`cargo test ... --features allow-seed-import`, debug
-/// profile): the SAME `InitializeKey` call that production rejects is ACCEPTED.
-/// The `#[cfg(feature = "allow-seed-import")]` arm of `handle_initialize`
-/// installs the caller's seed / mnemonic and returns `Response::InitializeKey`.
-/// Each import uses a fresh server (init is one-shot).
+/// TI-1 (#112), dev build (`--features allow-seed-import`): the same
+/// `InitializeKey` call production rejects is accepted, installing the caller's
+/// seed / mnemonic. Each import uses a fresh server, since init is one-shot.
 #[test]
 #[cfg(feature = "allow-seed-import")]
 fn dev_build_accepts_caller_supplied_seed_and_mnemonic() {
