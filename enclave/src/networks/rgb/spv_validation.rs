@@ -257,6 +257,18 @@ fn expected_chain_net(network: Network) -> ChainNet {
     }
 }
 
+/// Re-verify a single proof (inclusion + depth) against `chain`. Exposed so the
+/// `fundsOut` anchor bind can redo the check under the same lock guard it reads
+/// the header with, instead of trusting the earlier `validate_source_chain` pass
+/// across a lock release a reorg could slip through.
+pub(crate) fn verify_proof_against_chain(
+    chain: &HeaderChain,
+    min_confirmations: u32,
+    proof: &MerkleProofEntry,
+) -> Result<()> {
+    verify_one_proof(chain, chain.tip_height(), min_confirmations, 0, proof)
+}
+
 fn verify_one_proof(
     chain: &HeaderChain,
     tip: u32,

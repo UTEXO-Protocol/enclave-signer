@@ -9,6 +9,7 @@
 use crate::error::{EnclaveError, Result};
 use crate::networks::evm::validation::FundsOutParams;
 use crate::networks::rgb::spv::HeaderChain;
+use crate::networks::rgb::spv_validation;
 use crate::networks::rgb::validation::ValidatedConsignment;
 use crate::proto::MerkleProofEntry;
 
@@ -106,10 +107,11 @@ struct ProofBlock {
 ///
 /// The `proof` slot is `abi.encode(uint256 sourceHeight, bytes32 sourceCommit,
 /// uint256 latestHeight, bytes32 latestCommit)` (`RGBVerifier.sol:115-117`):
-/// `source` packaged the burn/transfer, `latest` is the relay tip. Both are
-/// checked against the enclave's own headers, so freshness is not delegated to
-/// a relay the host also feeds; pinning `source` to the anchor stops a listener
-/// citing any other block the enclave happens to know. Empty `proof` = reject.
+/// `source` packaged the burn/transfer, `latest` is the relay tip. Both must
+/// match the enclave's own headers; `latest` must additionally sit within
+/// `MAX_RELAY_TIP_LAG_BLOCKS` of the enclave tip, so freshness is not delegated
+/// to a relay the host also feeds. Pinning `source` to the anchor stops a
+/// listener citing any other block the enclave knows. Empty `proof` = reject.
 ///
 /// Byte order: calldata is display order, `header.block_hash()` internal.
 pub fn verify_btc_relay_agreement(
@@ -134,6 +136,19 @@ pub fn verify_btc_relay_agreement(
     verify_proof_block(chain, &source, "source")?;
     verify_proof_block(chain, &latest, "latest")?;
 
+    // `latest` must actually be near the tip, else it proves only that some
+    // block existed and the relay could be arbitrarily far behind.
+    let lag = chain.tip_height().saturating_sub(latest.height);
+    if lag > MAX_RELAY_TIP_LAG_BLOCKS {
+        return Err(EnclaveError::Spv(format!(
+            "fundsOut BtcRelay check: proof latest height {} is {lag} blocks below the \
+             enclave tip {} (max {MAX_RELAY_TIP_LAG_BLOCKS}) - the relay's view is too \
+             stale to prove freshness",
+            latest.height,
+            chain.tip_height()
+        )));
+    }
+
     // The calldata's source block must be the consignment's own anchor.
     if source.height != anchor.height || source.commitment != anchor.commitment {
         return Err(EnclaveError::CrossCheck(format!(
@@ -153,7 +168,7 @@ pub fn verify_btc_relay_agreement(
 
 /// The Bitcoin block anchoring a consignment's last witness tx.
 #[derive(Debug, Clone, Copy)]
-pub struct ConsignmentAnchor {
+pub(crate) struct ConsignmentAnchor {
     pub height: u32,
     /// Block hash in display (big-endian) order, as the calldata carries it.
     pub commitment: [u8; 32],
@@ -162,11 +177,18 @@ pub struct ConsignmentAnchor {
 }
 
 /// Locate that block from evidence the enclave already trusts: the txid from
-/// the rgbstd-validated `Transfer`, the height from the SPV proof
-/// `validate_source_chain` verified, the hash from the enclave's own header
-/// chain. Nothing is read from the calldata. No header at that height means
-/// the enclave is behind the anchoring block, so it refuses.
-pub fn resolve_consignment_anchor(
+/// the rgbstd-validated `Transfer`, the height from the tx's SPV proof, the hash
+/// from the enclave's own header chain. Nothing is read from the calldata. No
+/// header at that height means the enclave is behind the anchoring block, so it
+/// refuses.
+///
+/// The proof is re-verified here rather than relying on the earlier
+/// `validate_source_chain` pass: that ran under a different acquisition of the
+/// header-chain lock, and a concurrent `SubmitHeaders` reorg (up to
+/// `MAX_REORG_DEPTH = 100`, well past `SPV_MIN_CONFIRMATIONS = 6`) could have
+/// replaced the header in between. Inclusion and header hash must come from one
+/// consistent view.
+pub(crate) fn resolve_consignment_anchor(
     validated: &ValidatedConsignment,
     merkle_proofs: &[MerkleProofEntry],
     chain: &HeaderChain,
@@ -208,6 +230,14 @@ pub fn resolve_consignment_anchor(
         ))
     })?;
 
+    // Re-verify inclusion and depth against the header just read, under this
+    // same lock guard (see the doc note on reorgs).
+    spv_validation::verify_proof_against_chain(
+        chain,
+        spv_validation::SPV_MIN_CONFIRMATIONS,
+        proof,
+    )?;
+
     let mut commitment: [u8; 32] = header.block_hash().to_byte_array();
     commitment.reverse();
 
@@ -248,6 +278,16 @@ fn verify_proof_block(chain: &HeaderChain, block: &ProofBlock, label: &str) -> R
 
 /// Number of bytes in the finality proof: four ABI words.
 const FUNDS_OUT_PROOF_LEN: usize = 4 * 32;
+
+/// How far the calldata's `latest` block may sit below the enclave's own tip.
+/// Without a bound the `latest` pair proves only that a block existed, so a
+/// listener could pass an ancient known block and the freshness half of the
+/// BtcRelay check would be vacuous.
+///
+/// 100 blocks is ~16 h on mainnet - generous next to the relay's own posting
+/// cadence, and it matches `MAX_REORG_DEPTH`, the depth beyond which the
+/// enclave already refuses to rewrite history. Compile-time, not host-tunable.
+const MAX_RELAY_TIP_LAG_BLOCKS: u32 = 100;
 
 /// Decode the `fundsOut` `proof` slot into its `(source, latest)` block pair.
 /// An empty slot is rejected: it leaves nothing to bind the anchor to.
@@ -527,6 +567,20 @@ mod tests {
         use bitcoin::consensus::serialize;
         use bitcoin::hashes::Hash as _;
 
+        /// Display-order txid of the consignment's single witness tx.
+        /// Deliberately NOT a palindrome: a byte-order slip in
+        /// `resolve_consignment_anchor` must fail the tests, not pass them.
+        const WITNESS_TXID: [u8; 32] = [
+            0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e,
+            0x0f, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b, 0x1c,
+            0x1d, 0x1e, 0x1f, 0x20,
+        ];
+
+        /// Block holding [`WITNESS_TXID`].
+        const ANCHOR_HEIGHT: u32 = 2;
+        /// Default tip: leaves the anchor 7 deep, past `SPV_MIN_CONFIRMATIONS`.
+        const TIP_HEIGHT: u32 = 8;
+
         /// Encode `n` as a big-endian 32-byte ABI word.
         fn u256_be(n: u64) -> [u8; 32] {
             let mut w = [0u8; 32];
@@ -534,11 +588,14 @@ mod tests {
             w
         }
 
-        /// A regtest chain with a single synthetic header at height 1 (PoW is
-        /// skipped on regtest - same pattern as the `spv::chain` tests).
-        /// Returns the chain and the header's DISPLAY-order block hash - the
-        /// byte order the calldata `commitmentHash` carries.
-        fn chain_with_one_header() -> (HeaderChain, [u8; 32]) {
+        /// A regtest chain of `tip` synthetic headers (PoW is skipped on
+        /// regtest - same pattern as the `spv::chain` tests). The header at
+        /// [`ANCHOR_HEIGHT`] commits exactly one transaction, [`WITNESS_TXID`],
+        /// so a proof with an empty path reconstructs its Merkle root.
+        ///
+        /// Returns the chain and every header's DISPLAY-order hash, indexed by
+        /// height (slot 0 is the checkpoint placeholder).
+        fn chain_to(tip: u32) -> (HeaderChain, Vec<[u8; 32]>) {
             let mut chain = HeaderChain::new(
                 Network::Regtest,
                 Checkpoint {
@@ -549,18 +606,35 @@ mod tests {
                     is_real: false,
                 },
             );
-            let header = Header {
-                version: Version::ONE,
-                prev_blockhash: bitcoin::BlockHash::from_byte_array([0u8; 32]),
-                merkle_root: bitcoin::TxMerkleNode::from_byte_array([0xAB; 32]),
-                time: 1_700_000_001,
-                bits: bitcoin::CompactTarget::from_consensus(0x207fffff),
-                nonce: 0,
-            };
-            chain.submit_headers(1, &[serialize(&header)]).unwrap();
-            let mut display: [u8; 32] = header.block_hash().to_byte_array();
-            display.reverse();
-            (chain, display)
+            let mut hashes = vec![[0u8; 32]];
+            let mut prev = bitcoin::BlockHash::from_byte_array([0u8; 32]);
+            for height in 1..=tip {
+                let merkle_root = if height == ANCHOR_HEIGHT {
+                    let mut internal = WITNESS_TXID;
+                    internal.reverse(); // Merkle math works in internal order
+                    bitcoin::TxMerkleNode::from_byte_array(internal)
+                } else {
+                    bitcoin::TxMerkleNode::from_byte_array([0xAB; 32])
+                };
+                let header = Header {
+                    version: Version::ONE,
+                    prev_blockhash: prev,
+                    merkle_root,
+                    time: 1_700_000_000 + height,
+                    bits: bitcoin::CompactTarget::from_consensus(0x207fffff),
+                    nonce: 0,
+                };
+                chain.submit_headers(height, &[serialize(&header)]).unwrap();
+                prev = header.block_hash();
+                let mut display: [u8; 32] = header.block_hash().to_byte_array();
+                display.reverse();
+                hashes.push(display);
+            }
+            (chain, hashes)
+        }
+
+        fn chain() -> (HeaderChain, Vec<[u8; 32]>) {
+            chain_to(TIP_HEIGHT)
         }
 
         /// The 4-field finality proof payload:
@@ -579,32 +653,23 @@ mod tests {
             Bytes::from(p)
         }
 
-        /// Two synthetic regtest headers (heights 1 and 2). Returns the chain
-        /// and both DISPLAY-order block hashes.
-        fn chain_with_two_headers() -> (HeaderChain, [u8; 32], [u8; 32]) {
-            let (mut chain, first) = chain_with_one_header();
-            let mut prev: [u8; 32] = first;
-            prev.reverse(); // back to internal order for `prev_blockhash`
-            let header = Header {
-                version: Version::ONE,
-                prev_blockhash: bitcoin::BlockHash::from_byte_array(prev),
-                merkle_root: bitcoin::TxMerkleNode::from_byte_array([0xCD; 32]),
-                time: 1_700_000_002,
-                bits: bitcoin::CompactTarget::from_consensus(0x207fffff),
-                nonce: 0,
-            };
-            chain.submit_headers(2, &[serialize(&header)]).unwrap();
-            let mut second: [u8; 32] = header.block_hash().to_byte_array();
-            second.reverse();
-            (chain, first, second)
+        /// `fundsOut` calldata whose `source` pair is the anchor block and whose
+        /// `latest` pair is the chain tip - the well-formed case.
+        fn good_calldata(hashes: &[[u8; 32]]) -> Vec<u8> {
+            mock_funds_out_calldata_with_proof(
+                1_000,
+                proof_bytes(
+                    ANCHOR_HEIGHT,
+                    hashes[ANCHOR_HEIGHT as usize],
+                    TIP_HEIGHT,
+                    hashes[TIP_HEIGHT as usize],
+                ),
+            )
         }
 
-        /// Display-order txid of the consignment's single witness tx.
-        const WITNESS_TXID: [u8; 32] = [0x77; 32];
-
         /// A consignment anchored by [`WITNESS_TXID`], plus the SPV proof
-        /// placing it at `height`. Only `txid` and `block_height` matter:
-        /// `validate_source_chain` already verified the proof body.
+        /// placing it at `height`. The block at [`ANCHOR_HEIGHT`] holds only
+        /// that tx, so the path is empty and the position is 0.
         fn anchored_at(height: u32) -> (ValidatedConsignment, Vec<MerkleProofEntry>) {
             let mut internal = WITNESS_TXID;
             internal.reverse();
@@ -631,57 +696,68 @@ mod tests {
             (validated, proofs)
         }
 
+        /// Run the check against a consignment anchored at [`ANCHOR_HEIGHT`].
+        fn check(cd: &[u8], chain: &HeaderChain) -> Result<()> {
+            check_at(cd, chain, ANCHOR_HEIGHT)
+        }
+
         /// Run the check against a consignment anchored at `anchor_height`.
         fn check_at(cd: &[u8], chain: &HeaderChain, anchor_height: u32) -> Result<()> {
             let (validated, proofs) = anchored_at(anchor_height);
             verify_btc_relay_agreement(&params_of(cd), &validated, &proofs, chain)
         }
 
-        /// `fundsOut` calldata carrying a well-formed proof. The synthetic chain
-        /// has a single header, so source and latest point at the same block -
-        /// the degenerate but valid case where the burn sits at the relay tip.
-        fn calldata_with_proof(block_height: u32, commitment_display: [u8; 32]) -> Vec<u8> {
-            mock_funds_out_calldata_with_proof(
-                1_000,
-                proof_bytes(
-                    block_height,
-                    commitment_display,
-                    block_height,
-                    commitment_display,
-                ),
-            )
-        }
+        // -- Calldata proof vs the enclave's own headers.
 
         #[test]
         fn passes_on_matching_commitment() {
-            let (chain, display_hash) = chain_with_one_header();
-            let cd = calldata_with_proof(1, display_hash);
-            assert!(check_at(&cd, &chain, 1).is_ok());
+            let (chain, hashes) = chain();
+            assert!(check(&good_calldata(&hashes), &chain).is_ok());
         }
 
         #[test]
         fn rejects_mismatched_commitment() {
-            let (chain, _display_hash) = chain_with_one_header();
-            let cd = calldata_with_proof(1, [0x11; 32]);
-            let err = check_at(&cd, &chain, 1).unwrap_err();
+            let (chain, hashes) = chain();
+            let cd = mock_funds_out_calldata_with_proof(
+                1_000,
+                proof_bytes(
+                    ANCHOR_HEIGHT,
+                    [0x11; 32],
+                    TIP_HEIGHT,
+                    hashes[TIP_HEIGHT as usize],
+                ),
+            );
+            let err = check(&cd, &chain).unwrap_err();
             assert!(err.to_string().contains("commitmentHash"), "got: {err}");
         }
 
+        /// Byte-order contract: the internal-order (un-reversed) hash must be
+        /// rejected, since calldata carries display order.
         #[test]
         fn rejects_internal_order_commitment() {
-            // Byte-order contract: the internal-order (un-reversed) hash must
-            // be rejected, since calldata carries display order.
-            let (chain, mut display_hash) = chain_with_one_header();
-            display_hash.reverse(); // back to internal order
-            let cd = calldata_with_proof(1, display_hash);
-            assert!(check_at(&cd, &chain, 1).is_err());
+            let (chain, hashes) = chain();
+            let mut internal = hashes[ANCHOR_HEIGHT as usize];
+            internal.reverse();
+            let cd = mock_funds_out_calldata_with_proof(
+                1_000,
+                proof_bytes(
+                    ANCHOR_HEIGHT,
+                    internal,
+                    TIP_HEIGHT,
+                    hashes[TIP_HEIGHT as usize],
+                ),
+            );
+            assert!(check(&cd, &chain).is_err());
         }
 
         #[test]
         fn rejects_height_beyond_tip() {
-            let (chain, display_hash) = chain_with_one_header();
-            let cd = calldata_with_proof(99, display_hash);
-            let err = check_at(&cd, &chain, 1).unwrap_err();
+            let (chain, hashes) = chain();
+            let cd = mock_funds_out_calldata_with_proof(
+                1_000,
+                proof_bytes(99, hashes[ANCHOR_HEIGHT as usize], 99, hashes[1]),
+            );
+            let err = check(&cd, &chain).unwrap_err();
             assert!(
                 err.to_string()
                     .contains("no header at source block height 99"),
@@ -693,12 +769,17 @@ mod tests {
         /// be delegated to a relay the untrusted host also feeds.
         #[test]
         fn rejects_unknown_latest_block() {
-            let (chain, display_hash) = chain_with_one_header();
+            let (chain, hashes) = chain();
             let cd = mock_funds_out_calldata_with_proof(
                 1_000,
-                proof_bytes(1, display_hash, 99, display_hash),
+                proof_bytes(
+                    ANCHOR_HEIGHT,
+                    hashes[ANCHOR_HEIGHT as usize],
+                    99,
+                    hashes[TIP_HEIGHT as usize],
+                ),
             );
-            let err = check_at(&cd, &chain, 1).unwrap_err();
+            let err = check(&cd, &chain).unwrap_err();
             assert!(
                 err.to_string()
                     .contains("no header at latest block height 99"),
@@ -708,12 +789,17 @@ mod tests {
 
         #[test]
         fn rejects_mismatched_latest_commitment() {
-            let (chain, display_hash) = chain_with_one_header();
+            let (chain, hashes) = chain();
             let cd = mock_funds_out_calldata_with_proof(
                 1_000,
-                proof_bytes(1, display_hash, 1, [0x11; 32]),
+                proof_bytes(
+                    ANCHOR_HEIGHT,
+                    hashes[ANCHOR_HEIGHT as usize],
+                    TIP_HEIGHT,
+                    [0x11; 32],
+                ),
             );
-            let err = check_at(&cd, &chain, 1).unwrap_err();
+            let err = check(&cd, &chain).unwrap_err();
             assert!(
                 err.to_string().contains("latest commitmentHash"),
                 "got: {err}"
@@ -722,33 +808,76 @@ mod tests {
 
         #[test]
         fn rejects_latest_below_source() {
-            let (chain, display_hash) = chain_with_one_header();
+            let (chain, hashes) = chain();
             let cd = mock_funds_out_calldata_with_proof(
                 1_000,
-                proof_bytes(5, display_hash, 1, display_hash),
+                proof_bytes(
+                    TIP_HEIGHT,
+                    hashes[TIP_HEIGHT as usize],
+                    ANCHOR_HEIGHT,
+                    hashes[ANCHOR_HEIGHT as usize],
+                ),
             );
-            let err = check_at(&cd, &chain, 1).unwrap_err();
+            let err = check(&cd, &chain).unwrap_err();
             assert!(
                 err.to_string().contains("cannot precede"),
                 "expected the tip-ordering guard, got: {err}"
             );
         }
 
+        /// A `latest` far below the enclave tip proves only that a block
+        /// existed, so the freshness half would be vacuous.
+        #[test]
+        fn rejects_stale_relay_tip() {
+            let (chain, hashes) = chain_to(MAX_RELAY_TIP_LAG_BLOCKS + 20);
+            let cd = mock_funds_out_calldata_with_proof(
+                1_000,
+                proof_bytes(
+                    ANCHOR_HEIGHT,
+                    hashes[ANCHOR_HEIGHT as usize],
+                    ANCHOR_HEIGHT,
+                    hashes[ANCHOR_HEIGHT as usize],
+                ),
+            );
+            let err = check(&cd, &chain).unwrap_err();
+            assert!(
+                err.to_string().contains("too stale to prove freshness"),
+                "got: {err}"
+            );
+        }
+
+        /// A relay lagging inside the bound is still accepted.
+        #[test]
+        fn accepts_relay_tip_within_lag_bound() {
+            let (chain, hashes) = chain_to(MAX_RELAY_TIP_LAG_BLOCKS);
+            let latest = MAX_RELAY_TIP_LAG_BLOCKS / 2;
+            let cd = mock_funds_out_calldata_with_proof(
+                1_000,
+                proof_bytes(
+                    ANCHOR_HEIGHT,
+                    hashes[ANCHOR_HEIGHT as usize],
+                    latest,
+                    hashes[latest as usize],
+                ),
+            );
+            assert!(check(&cd, &chain).is_ok());
+        }
+
         /// Fail-closed: a zero-filled `proof` leaves nothing to bind the
         /// anchoring block to.
         #[test]
         fn rejects_empty_proof() {
-            let (chain, _) = chain_with_one_header();
+            let (chain, _) = chain();
             let cd = mock_funds_out_calldata(1_000);
-            let err = check_at(&cd, &chain, 1).unwrap_err();
+            let err = check(&cd, &chain).unwrap_err();
             assert!(err.to_string().contains("proof is empty"), "got: {err}");
         }
 
         #[test]
         fn rejects_malformed_proof_length() {
-            let (chain, _) = chain_with_one_header();
+            let (chain, _) = chain();
             let cd = mock_funds_out_calldata_with_proof(1_000, Bytes::from(vec![0u8; 33]));
-            let err = check_at(&cd, &chain, 1).unwrap_err();
+            let err = check(&cd, &chain).unwrap_err();
             assert!(err.to_string().contains("128 bytes"), "got: {err}");
         }
 
@@ -757,13 +886,28 @@ mod tests {
         /// source block and leave the relay-freshness half unchecked.
         #[test]
         fn rejects_legacy_two_field_proof() {
-            let (chain, display_hash) = chain_with_one_header();
+            let (chain, hashes) = chain();
             let mut legacy = Vec::with_capacity(64);
-            legacy.extend_from_slice(&u256_be(1));
-            legacy.extend_from_slice(&display_hash);
+            legacy.extend_from_slice(&u256_be(ANCHOR_HEIGHT as u64));
+            legacy.extend_from_slice(&hashes[ANCHOR_HEIGHT as usize]);
             let cd = mock_funds_out_calldata_with_proof(1_000, Bytes::from(legacy));
-            let err = check_at(&cd, &chain, 1).unwrap_err();
+            let err = check(&cd, &chain).unwrap_err();
             assert!(err.to_string().contains("128 bytes"), "got: {err}");
+        }
+
+        #[test]
+        fn rejects_blockheight_over_u32() {
+            let (chain, hashes) = chain();
+            let mut huge = [0u8; 32];
+            huge[20] = 0x01; // a bit set above the low 4 bytes
+            let mut payload = Vec::with_capacity(FUNDS_OUT_PROOF_LEN);
+            payload.extend_from_slice(&huge); // sourceHeight
+            payload.extend_from_slice(&hashes[ANCHOR_HEIGHT as usize]);
+            payload.extend_from_slice(&u256_be(TIP_HEIGHT as u64));
+            payload.extend_from_slice(&hashes[TIP_HEIGHT as usize]);
+            let cd = mock_funds_out_calldata_with_proof(1_000, Bytes::from(payload));
+            let err = check(&cd, &chain).unwrap_err();
+            assert!(err.to_string().contains("u32 range"), "got: {err}");
         }
 
         // -- Source-block bind: the calldata `source` pair must be the block
@@ -773,72 +917,87 @@ mod tests {
         /// half passes - must still be refused.
         #[test]
         fn rejects_source_block_that_is_not_the_consignment_anchor() {
-            let (chain, _first, second) = chain_with_two_headers();
-            let cd = calldata_with_proof(2, second);
-            // Consignment's witness tx sits in block 1, not 2.
-            let err = check_at(&cd, &chain, 1).unwrap_err();
+            let (chain, hashes) = chain();
+            let other = ANCHOR_HEIGHT + 1;
+            let cd = mock_funds_out_calldata_with_proof(
+                1_000,
+                proof_bytes(
+                    other,
+                    hashes[other as usize],
+                    TIP_HEIGHT,
+                    hashes[TIP_HEIGHT as usize],
+                ),
+            );
+            let err = check(&cd, &chain).unwrap_err();
             assert!(
                 err.to_string().contains("source block mismatch"),
                 "got: {err}"
             );
         }
 
-        /// The matching case, anchor below the relay tip rather than at it.
-        #[test]
-        fn passes_when_source_block_is_the_consignment_anchor() {
-            let (chain, first, second) = chain_with_two_headers();
-            let cd = mock_funds_out_calldata_with_proof(1_000, proof_bytes(1, first, 2, second));
-            assert!(check_at(&cd, &chain, 1).is_ok());
-        }
-
         /// No header at the anchoring height: refuse rather than trust the
         /// calldata.
         #[test]
         fn rejects_when_tee_has_no_header_at_anchor_height() {
-            let (chain, display_hash) = chain_with_one_header();
-            let cd = calldata_with_proof(1, display_hash);
-            let err = check_at(&cd, &chain, 99).unwrap_err();
+            let (chain, hashes) = chain();
+            let err = check_at(&good_calldata(&hashes), &chain, 99).unwrap_err();
             assert!(err.to_string().contains("not in sync"), "got: {err}");
         }
 
+        /// The anchor's own SPV proof is re-verified here, under the same lock
+        /// guard the header is read with, so a reorg between the source-chain
+        /// pass and this one cannot slip a substituted header through.
         #[test]
-        fn rejects_when_no_merkle_proof_covers_the_last_witness_tx() {
-            let (chain, display_hash) = chain_with_one_header();
-            let cd = calldata_with_proof(1, display_hash);
-            let (validated, mut proofs) = anchored_at(1);
-            proofs[0].txid = vec![0x01; 32];
-            let err = verify_btc_relay_agreement(&params_of(&cd), &validated, &proofs, &chain)
-                .unwrap_err();
-            assert!(err.to_string().contains("no merkle proof"), "got: {err}");
+        fn rejects_when_anchor_proof_does_not_reconstruct_the_root() {
+            let (chain, hashes) = chain();
+            // Block ANCHOR_HEIGHT + 1 commits a different Merkle root.
+            let err = check_at(&good_calldata(&hashes), &chain, ANCHOR_HEIGHT + 1).unwrap_err();
+            assert!(err.to_string().contains("failed"), "got: {err}");
         }
 
+        /// Depth is re-checked too: an anchor at the tip is only 1 confirmation
+        /// deep, short of `SPV_MIN_CONFIRMATIONS`.
         #[test]
-        fn rejects_when_consignment_has_no_witness_bundle() {
-            let (chain, display_hash) = chain_with_one_header();
-            let cd = calldata_with_proof(1, display_hash);
-            let (mut validated, proofs) = anchored_at(1);
-            validated.last_witness_txid = None;
-            let err = verify_btc_relay_agreement(&params_of(&cd), &validated, &proofs, &chain)
-                .unwrap_err();
+        fn rejects_when_anchor_is_too_shallow() {
+            let (chain, hashes) = chain();
+            let err = check_at(&good_calldata(&hashes), &chain, TIP_HEIGHT).unwrap_err();
             assert!(
-                err.to_string().contains("no last witness txid"),
+                err.to_string().contains("insufficient confirmations"),
                 "got: {err}"
             );
         }
 
         #[test]
-        fn rejects_blockheight_over_u32() {
-            let (chain, display_hash) = chain_with_one_header();
-            let mut huge = [0u8; 32];
-            huge[20] = 0x01; // a bit set above the low 4 bytes
-            let mut payload = Vec::with_capacity(FUNDS_OUT_PROOF_LEN);
-            payload.extend_from_slice(&huge); // sourceHeight
-            payload.extend_from_slice(&display_hash);
-            payload.extend_from_slice(&u256_be(1));
-            payload.extend_from_slice(&display_hash);
-            let cd = mock_funds_out_calldata_with_proof(1_000, Bytes::from(payload));
-            let err = check_at(&cd, &chain, 1).unwrap_err();
-            assert!(err.to_string().contains("u32 range"), "got: {err}");
+        fn rejects_when_no_merkle_proof_covers_the_last_witness_tx() {
+            let (chain, hashes) = chain();
+            let (validated, mut proofs) = anchored_at(ANCHOR_HEIGHT);
+            proofs[0].txid = vec![0x01; 32];
+            let err = verify_btc_relay_agreement(
+                &params_of(&good_calldata(&hashes)),
+                &validated,
+                &proofs,
+                &chain,
+            )
+            .unwrap_err();
+            assert!(err.to_string().contains("no merkle proof"), "got: {err}");
+        }
+
+        #[test]
+        fn rejects_when_consignment_has_no_witness_bundle() {
+            let (chain, hashes) = chain();
+            let (mut validated, proofs) = anchored_at(ANCHOR_HEIGHT);
+            validated.last_witness_txid = None;
+            let err = verify_btc_relay_agreement(
+                &params_of(&good_calldata(&hashes)),
+                &validated,
+                &proofs,
+                &chain,
+            )
+            .unwrap_err();
+            assert!(
+                err.to_string().contains("no last witness txid"),
+                "got: {err}"
+            );
         }
     }
 }

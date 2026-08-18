@@ -591,10 +591,12 @@ fn apply_funds_out_binding(
     // rgb-validation (spv is implied - see lib.rs M-01 compile_error).
     #[cfg(feature = "spv")]
     {
+        // Fail on a poisoned lock rather than reading through it, matching
+        // `validate_source`: a poisoned header chain may be mid-reorg.
         let chain = ctx
             .header_chain
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .map_err(|e| EnclaveError::Internal(format!("SPV header chain lock poisoned: {e}")))?;
         crosscheck::verify_btc_relay_agreement(params, validated, merkle_proofs, &chain)?;
     }
     #[cfg(not(feature = "spv"))]
