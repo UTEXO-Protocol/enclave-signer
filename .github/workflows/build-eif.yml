@@ -1,9 +1,12 @@
 name: "Build EIF"
 
-# Produces the PRODUCTION enclave image (release: vsock,rgb-validation,spv) as a
-# Nitro EIF, captures its PCR measurements, and publishes everything to S3 under
-# an immutable git-SHA path. Runtime hosts then pull the EIF by SHA instead of
-# anyone building on a side machine.
+# Produces the PRODUCTION enclave EIFs, captures their PCR measurements, and
+# publishes everything to S3 under an immutable git-SHA path. Runtime hosts then
+# pull the EIF by SHA instead of anyone building on a side machine.
+#
+# Builds three variants (matrix): the combined rgb+ccd image (historical name +
+# S3 path, unchanged), an RGB-only image (eif/<sha>/rgb/), and a Concordium-only
+# image (eif/<sha>/ccd/). Deploy whichever the target host needs.
 #
 # Reproducible PCRs: PCR0/PCR1 are a measurement of the EIF, which bakes in the
 # nitro-cli kernel/init blobs — NOT just our code. We therefore pin nitro-cli to
@@ -43,6 +46,29 @@ env:
 jobs:
   build-eif:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Combined (rgb+ccd) — the historical artifact. Keeps the original
+          # eif name and S3 path so existing consumers are unaffected.
+          - variant: combined
+            dockerfile: Dockerfile.enclave
+            eif_name: utexo-bridge-enclave.eif
+            s3_subpath: ""
+            artifact_suffix: ""
+          # RGB-only single-network EIF.
+          - variant: rgb
+            dockerfile: Dockerfile.enclave.rgb
+            eif_name: utexo-bridge-enclave-rgb.eif
+            s3_subpath: "rgb/"
+            artifact_suffix: "-rgb"
+          # Concordium-only single-network EIF.
+          - variant: ccd
+            dockerfile: Dockerfile.enclave.ccd
+            eif_name: utexo-bridge-enclave-ccd.eif
+            s3_subpath: "ccd/"
+            artifact_suffix: "-ccd"
     steps:
       - uses: actions/checkout@v4
 
@@ -106,6 +132,9 @@ jobs:
         env:
           OUT_DIR: ${{ github.workspace }}/artifacts
           NITRO_CLI_BLOBS: /home/runner/nitro-cli-dist/blobs
+          DOCKERFILE: ${{ matrix.dockerfile }}
+          EIF_NAME: ${{ matrix.eif_name }}
+          IMAGE_TAG: utexo-bridge-enclave-${{ matrix.variant }}:latest
         run: |
           set -euxo pipefail
           mkdir -p "$OUT_DIR"
@@ -134,6 +163,8 @@ jobs:
           {
             "git_sha": "${{ github.sha }}",
             "ref": "${{ github.ref }}",
+            "variant": "${{ matrix.variant }}",
+            "eif_name": "${{ matrix.eif_name }}",
             "nitro_cli_version": "${NITRO_CLI_VERSION}",
             "run_id": "${{ github.run_id }}",
             "built_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
@@ -144,9 +175,9 @@ jobs:
       - name: Upload run artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: eif-${{ github.sha }}
+          name: eif-${{ github.sha }}${{ matrix.artifact_suffix }}
           path: |
-            artifacts/utexo-bridge-enclave.eif
+            artifacts/${{ matrix.eif_name }}
             artifacts/PCR.json
             artifacts/SHA256SUMS
             artifacts/metadata.json
@@ -170,6 +201,6 @@ jobs:
         run: |
           set -euxo pipefail
           [ -n "$BUCKET" ] || { echo "vars.EIF_S3_BUCKET is not set"; exit 1; }
-          DEST="s3://${BUCKET}/eif/${{ github.sha }}/"
+          DEST="s3://${BUCKET}/eif/${{ github.sha }}/${{ matrix.s3_subpath }}"
           aws s3 cp artifacts/ "$DEST" --recursive
           echo "Published to $DEST"

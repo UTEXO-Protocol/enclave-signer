@@ -1,4 +1,8 @@
-#![cfg(all(feature = "allow-seed-import", not(feature = "rgb-validation")))]
+#![cfg(all(
+    feature = "ccd",
+    feature = "allow-seed-import",
+    not(feature = "rgb-validation")
+))]
 mod common;
 
 use utexo_bridge_enclave::proto::{enclave_request::Request, enclave_response::Response, *};

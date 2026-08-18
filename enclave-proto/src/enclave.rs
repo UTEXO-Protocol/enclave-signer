@@ -446,6 +446,13 @@ pub struct CcdSignatureResponse {
     /// 64-byte Concordium Ed25519 signature.
     #[prost(bytes="vec", tag="1")]
     pub signature: ::prost::alloc::vec::Vec<u8>,
+    /// 32-byte Ed25519 public key that produced `signature`. Ed25519 signatures are
+    /// not recoverable, so the consumer cannot derive the signer the way it does on
+    /// EVM; it needs the key to look the signature's credential and key index up in
+    /// the governance account. Derived in the same operation as the signature, so
+    /// the two cannot disagree.
+    #[prost(bytes="vec", tag="2")]
+    pub public_key: ::prost::alloc::vec::Vec<u8>,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct ProxyFederationRequest {

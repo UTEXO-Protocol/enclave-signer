@@ -403,9 +403,9 @@ impl KeyManager {
     /// Sign a 32-byte Concordium account-transaction hash with the governance
     /// Ed25519 key. Concordium signs the transaction hash directly with plain
     /// Ed25519 (no additional hashing). Returns the 64-byte signature.
-    pub fn sign_ccd(&self, hash: &[u8; 32]) -> Result<[u8; 64]> {
+    pub fn sign_ccd(&self, hash: &[u8; 32]) -> Result<([u8; 64], [u8; 32])> {
         let signing_key = Ed25519SigningKey::from_bytes(self.concordium_secret.expose_secret());
-        Ok(signing_key.sign(hash).to_bytes())
+        Ok((signing_key.sign(hash).to_bytes(), self.concordium_pub))
     }
 
     /// Sign PSBT inputs matching our keys.
@@ -854,10 +854,15 @@ mod tests {
 
         let km = KeyManager::from_seed([0x42u8; 64], Network::Bitcoin).unwrap();
         let hash = [0xABu8; 32];
-        let sig_bytes = km.sign_ccd(&hash).unwrap();
+        let (sig_bytes, public_key) = km.sign_ccd(&hash).unwrap();
         assert_eq!(sig_bytes.len(), 64);
 
-        let vk = VerifyingKey::from_bytes(km.ccd_ed25519_pub()).unwrap();
+        // The reported key must be the one that signed: the consumer maps the
+        // signature onto an account key index by it, so a mismatch would place the
+        // signature at the wrong index.
+        assert_eq!(&public_key, km.ccd_ed25519_pub());
+
+        let vk = VerifyingKey::from_bytes(&public_key).unwrap();
         let sig = Signature::from_bytes(&sig_bytes);
         assert!(vk.verify(&hash, &sig).is_ok());
     }

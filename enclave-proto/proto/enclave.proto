@@ -250,6 +250,12 @@ message SignCcdRequest {
 
 message CcdSignatureResponse {
   bytes signature = 1; // 64-byte Concordium Ed25519 signature.
+  // 32-byte Ed25519 public key that produced `signature`. Ed25519 signatures are
+  // not recoverable, so the consumer cannot derive the signer the way it does on
+  // EVM; it needs the key to look the signature's credential and key index up in
+  // the governance account. Derived in the same operation as the signature, so
+  // the two cannot disagree.
+  bytes public_key = 2;
 }
 
 message ProxyFederationRequest {

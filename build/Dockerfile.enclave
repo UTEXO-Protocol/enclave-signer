@@ -1,5 +1,8 @@
 # syntax=docker/dockerfile:1.7
-# Production enclave image (vsock + rgb-validation + spv + evm-rpc).
+# Combined production enclave image (vsock + rgb + ccd + evm-rpc + helios) -
+# handles both the RGB/BTC and Concordium bridges in one binary. For a lean
+# single-network EIF, build Dockerfile.enclave.rgb (RGB only) or
+# Dockerfile.enclave.ccd (Concordium only).
 # Usage:
 #   DOCKER_BUILDKIT=1 docker build -f build/Dockerfile.enclave -t utexo-bridge-enclave .
 #
@@ -77,16 +80,21 @@ ENV CARGO_INCREMENTAL=0 \
 # `spv` implies `rgb-validation`; listing both explicitly so the feature
 # set is visible at a glance.
 #
-# `--locked` pins to Cargo.lock exactly — without it the `?branch=…` git deps
+# `--locked` pins to Cargo.lock exactly - without it the `?branch=...` git deps
 # (rgb-*) could re-resolve to a newer commit on a later rebuild and change the
 # binary (and thus PCR0).
 #
-# `evm-rpc` (dev merge) adds in-enclave FundsIn event verification (#60); it pulls
-# the alloy + tokio subtree, which grows the binary and therefore PCR0 — pinned
-# via `--locked`/Cargo.lock for reproducibility. Requires a second host
-# vsock-proxy for the EVM RPC (EVM_RPC_VSOCK_PORT, default 8002). `helios` (#77)
-# is intentionally NOT enabled here (experimental/default-off, not in the EIF).
-RUN cargo build --release --locked --features vsock,rgb-validation,spv,evm-rpc
+# `evm-rpc` adds in-enclave FundsIn event verification (#60); it pulls the
+# alloy + tokio subtree, which grows the binary and therefore PCR0 - pinned via
+# `--locked`/Cargo.lock for reproducibility. Requires a second host vsock-proxy
+# for the EVM RPC (EVM_RPC_VSOCK_PORT, default 8002).
+# `ccd` adds Concordium governance signing (SignCcd + CcdSource routes). The
+# umbrella `rgb` feature pulls in `spv`/`rgb-validation`.
+# `helios` makes FundsIn verification trustless (#77) and is required: the
+# production policy refuses to boot on the host-relayed RawRpc source. Operator
+# must set HELIOS_EXECUTION_RPC / HELIOS_CONSENSUS_RPC and run the exec+consensus
+# vsock-proxies (default ports 8003 / 8004).
+RUN cargo build --release --locked --features vsock,rgb,ccd,evm-rpc,helios
 
 # --- Runtime ---
 # Pinned by digest (see header) — this rootfs is what ends up in the EIF, so its

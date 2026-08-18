@@ -14,8 +14,8 @@ The bridge / node / orchestrator / parent / signer packages are not vendored —
 | | |
 |---|---|
 | Upstream | https://github.com/UTEXO-Protocol/federated-signer-proto |
-| Commit | `08ab48be2f42ec1ae11d93672f630dc2035245c5` ("fix: pin go and tooling versions") |
-| Commit date | 2026-08-14T16:07:32+03:00 |
+| Commit | `359a421245cf5b78078426c2b98a3a92bb63ab07` ("Merge branch 'main' into vs/signer-groups-support") |
+| Commit date | 2026-08-17T22:27:11+03:00 |
 
 This is the same commit `parent/Cargo.toml` still pins as a git dependency, so
 both crates compile against one schema version. Keep them in lockstep.
@@ -29,7 +29,7 @@ both crates compile against one schema version. Keep them in lockstep.
 Verify against upstream (needs read access to the private repo):
 
 ```bash
-REV=08ab48be2f42ec1ae11d93672f630dc2035245c5
+REV=359a421245cf5b78078426c2b98a3a92bb63ab07
 git clone https://github.com/UTEXO-Protocol/federated-signer-proto /tmp/fsp
 git -C /tmp/fsp checkout "$REV"
 diff /tmp/fsp/rust-gen/src/enclave/enclave.rs enclave-proto/src/enclave.rs

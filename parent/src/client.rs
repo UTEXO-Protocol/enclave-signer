@@ -38,17 +38,19 @@ pub struct SignEvmRequest {
     pub consignment: Vec<u8>,
     pub consignment_hash: Vec<u8>,
     pub merkle_proofs: Vec<MerkleProofEntry>,
+    /// LZ-specific fields for `lzFundsOutCall` releases. `None` for direct
+    /// `fundsOutCall` releases. When set, the enclave routes to the
+    /// `TeeLzFundsOut` EIP-712 digest and crosschecks these fields against
+    /// the decoded calldata.
+    pub lz_release: Option<crate::enclave_proto::LzReleaseParams>,
 }
 
 #[derive(Debug, Clone)]
 pub struct SignPsbtRequest {
     pub evm_tx_hash: Vec<u8>,
-    /// On-chain BridgeFundsIn.operationId of the source deposit (bridge transfer
-    /// id). The enclave #60 FundsIn check binds to this; distinct from
-    /// `operation_idx` (the RGB hub operation index / replay-guard key).
-    /// Kept numeric for the CLI/client path; encoded into the proto's 32-byte
-    /// `funds_in_operation_id` word (big-endian) when the request is built.
-    pub evm_funds_in_operation_id: u64,
+    /// On-chain BridgeFundsIn.operationId, 32 bytes. Required by the enclave;
+    /// distinct from `operation_idx` (the RGB hub index / replay-guard key).
+    pub evm_funds_in_operation_id: Vec<u8>,
     pub operation_idx: u64,
     pub evm_event_valid: bool,
     pub evm_event_finalized: bool,
@@ -321,9 +323,7 @@ impl EnclaveClient {
                                 proxy_contract: req.proxy_contract,
                                 calldata_amount: req.calldata_amount,
                                 calldata_commission: req.calldata_commission,
-                                // LayerZero release not supported on this build
-                                // (direct fundsOutCall only); see grpc_server.
-                                lz_release: None,
+                                lz_release: req.lz_release,
                             },
                         ),
                     ),
@@ -358,18 +358,7 @@ impl EnclaveClient {
                                 token: req.evm_token,
                                 recipient: req.evm_recipient,
                                 commission: req.evm_commission,
-                                // Proto #24: the enclave EvmSource carries the
-                                // operationId as a 32-byte word. This CLI/client
-                                // path takes a numeric id, so left-pad it big-endian
-                                // into the 32-byte word (matches how a small
-                                // uint256 operationId is ABI-encoded on-chain).
-                                funds_in_operation_id: {
-                                    let mut w = [0u8; 32];
-                                    w[24..].copy_from_slice(
-                                        &req.evm_funds_in_operation_id.to_be_bytes(),
-                                    );
-                                    w.to_vec()
-                                },
+                                funds_in_operation_id: req.evm_funds_in_operation_id,
                             },
                         ),
                     ),
