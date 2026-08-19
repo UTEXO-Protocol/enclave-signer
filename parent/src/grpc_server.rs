@@ -164,9 +164,6 @@ impl ParentAdapterService {
         source: SourceProof,
     ) -> Result<enclave_proto::sign_request::SourceNetwork, Status> {
         match source.chain {
-            Some(source_proof::Chain::Ccd(_)) => Err(Status::invalid_argument(
-                "CCD sources are not supported by this build",
-            )),
             Some(source_proof::Chain::Evm(evm)) => {
                 // Diagnosability only — here we still know which node sent it.
                 // The enclave's own check is the authority.
@@ -203,6 +200,15 @@ impl ParentAdapterService {
                         .collect(),
                 }),
             ),
+            // A CCD source (fundsIn burn) feeding an EVM release. The listener
+            // validated finality/structure on-chain; the enclave trusts it and
+            // cross-checks the release amount against the destination.
+            Some(source_proof::Chain::Ccd(ccd)) => Ok(
+                enclave_proto::sign_request::SourceNetwork::CcdSource(enclave_proto::CcdSource {
+                    tx_hash: ccd.tx_hash,
+                    commission: source.commission,
+                }),
+            ),
             None => Err(Status::invalid_argument(
                 "source proof has no chain-specific evidence",
             )),
@@ -223,9 +229,11 @@ impl ParentAdapterService {
                         proxy_contract: payload.proxy_contract,
                         calldata_amount: payload.calldata_amount,
                         calldata_commission: payload.calldata_commission,
-                        // This branch predates the LZ release path: every
-                        // release here is a direct fundsOutCall.
-                        lz_release: None,
+                        lz_release: payload.lz_release.map(|lr| enclave_proto::LzReleaseParams {
+                            dst_eid: lr.dst_eid,
+                            min_amount_ld: lr.min_amount_ld,
+                            recipient: lr.recipient,
+                        }),
                     },
                 )
             }
@@ -269,10 +277,9 @@ impl ParentAdapterService {
             sign_request::Data::BtcData(_) => unreachable!(
                 "BtcData is handled by the BTC_UTXO dispatch, not enclave_destination_network"
             ),
-            // Refused earlier in the sign dispatch; kept unreachable for the
-            // same reason as BtcData.
+            // CCD is handled in `sign` before destination dispatch; never routed here.
             sign_request::Data::CcdData(_) => {
-                unreachable!("CcdData is refused by the sign dispatch before destination mapping")
+                unreachable!("CCD sign requests are handled before destination dispatch")
             }
         }
     }
@@ -367,6 +374,7 @@ impl ParentAdapterService {
                     signature: r.signature,
                     identifier: None,
                     call_data: r.call_data,
+                    public_key: Vec::new(),
                 }))
             }
             Some(enclave_response::Response::Error(e)) => Err(Self::enclave_error_to_status(&e)),
@@ -395,6 +403,52 @@ impl ParentService for ParentAdapterService {
         let common = Self::common_sign_request(&inner)?;
         let data_type = DataType::try_from(common.data_type).unwrap_or(DataType::Transaction);
         let signer_network_id = common.dst_network_id;
+
+        // Concordium: the listener has already validated the operation and
+        // re-derived the transaction hash; the enclave signs the hash directly.
+        // No source/destination validation or amount cross-check happens here.
+        if let Some(sign_request::Data::CcdData(payload)) = inner.data.as_ref() {
+            if data_type != DataType::Transaction {
+                return Err(Status::invalid_argument(
+                    "CCD signing requires TRANSACTION data_type",
+                ));
+            }
+            tracing::info!(
+                src_network_id = common.src_network_id,
+                dst_network_id = common.dst_network_id,
+                hash_len = payload.hash.len(),
+                "gRPC Sign: Concordium transaction"
+            );
+
+            let enclave_req = EnclaveRequest {
+                request: Some(enclave_request::Request::SignCcd(
+                    enclave_proto::SignCcdRequest {
+                        hash: payload.hash.clone(),
+                    },
+                )),
+            };
+            let resp = self.send_to_enclave(enclave_req).await?;
+            return match resp.response {
+                Some(enclave_response::Response::CcdSignature(r)) => {
+                    Ok(Response::new(SignatureResponse {
+                        signer_network_id,
+                        signature: r.signature,
+                        identifier: None,
+                        call_data: Vec::new(),
+                        // Ed25519: the signer cannot be recovered from the signature,
+                        // so the key travels with it.
+                        public_key: r.public_key,
+                    }))
+                }
+                Some(enclave_response::Response::Error(e)) => {
+                    Err(Self::enclave_error_to_status(&e))
+                }
+                other => Err(Status::internal(format!(
+                    "unexpected enclave response for CCD Sign: {:?}",
+                    other
+                ))),
+            };
+        }
 
         match data_type {
             DataType::Transaction => {
@@ -473,9 +527,9 @@ impl ParentService for ParentAdapterService {
                         ))
                     }
                     Some(sign_request::Data::CcdData(_)) => {
-                        return Err(Status::invalid_argument(
-                            "CCD payloads are not supported by this build",
-                        ))
+                        return Err(Status::internal(
+                            "CCD sign request should have been handled before destination dispatch",
+                        ));
                     }
                     None => return Err(Status::invalid_argument("SignRequest.data is missing")),
                 };
@@ -505,6 +559,8 @@ impl ParentService for ParentAdapterService {
                             signature: r.signed_psbt,
                             identifier: None,
                             call_data: Vec::new(),
+                            // A PSBT carries per-input key material of its own.
+                            public_key: Vec::new(),
                         }))
                     }
                     Some(enclave_response::Response::EvmSignature(r)) => {
@@ -518,6 +574,8 @@ impl ParentService for ParentAdapterService {
                             // signature commits to — the caller must submit these
                             // bytes, not the ones it sent (audit M-02 / #93, #63).
                             call_data: r.call_data,
+                            // secp256k1: the signer is recoverable from the signature.
+                            public_key: Vec::new(),
                         }))
                     }
                     Some(enclave_response::Response::Error(e)) => {
@@ -569,6 +627,8 @@ impl ParentService for ParentAdapterService {
                             signature: r.signature,
                             identifier: None,
                             call_data: Vec::new(),
+                            // secp256k1: the signer is recoverable from the signature.
+                            public_key: Vec::new(),
                         }))
                     }
                     Some(enclave_response::Response::Error(e)) => {
@@ -584,8 +644,9 @@ impl ParentService for ParentAdapterService {
                 // Plain-BTC signing (audit #69/M-01): a distinct request that
                 // never carries a source proof or consignment. The Listener
                 // sends the PSBT in `EnrichedBtcPayload.psbt_bytes`; the enclave
-                // signs it with the vanilla BIP-86 account under a strict output
-                // allowlist + input-value cap.
+                // signs it with the vanilla BIP-86 account, and only after
+                // proving every output pays back to a script it controls
+                // (self-pay), under an input-value cap.
                 let payload = match inner.data {
                     Some(sign_request::Data::BtcData(payload)) => payload,
                     _ => {
@@ -617,6 +678,8 @@ impl ParentService for ParentAdapterService {
                             signature: r.signed_psbt,
                             identifier: None,
                             call_data: Vec::new(),
+                            // A PSBT carries per-input key material of its own.
+                            public_key: Vec::new(),
                         }))
                     }
                     Some(enclave_response::Response::Error(e)) => {
@@ -676,6 +739,7 @@ impl ParentService for ParentAdapterService {
                             signature: r.signed_psbt,
                             identifier: None,
                             call_data: Vec::new(),
+                            public_key: Vec::new(),
                         }))
                     }
                     Some(enclave_response::Response::Error(e)) => {
@@ -697,8 +761,17 @@ impl ParentService for ParentAdapterService {
 
     /// PublicKey — returns the enclave's public key bytes.
     /// Dispatches on `data_type`:
-    ///   EVM_GAS_TX  → 64-byte uncompressed X||Y (gas key m/44'/60'/0'/0/1)
-    ///   UNSPENDABLE → 33-byte compressed BTC pubkey
+    ///   EVM_GAS_TX               → 64-byte uncompressed X||Y (gas key m/44'/60'/0'/0/1)
+    ///   TRANSACTION, UNSPENDABLE → 33-byte compressed BTC pubkey
+    ///   CCD_GOVERNANCE           → 32-byte Concordium Ed25519 governance pubkey
+    ///                              (m/44'/919'/0'/0'/0')
+    ///
+    /// `CCD_GOVERNANCE` is the attestation-free way to read the governance
+    /// pubkey. `AttestedPublicKey` carries the same value, but it also produces
+    /// an NSM document and therefore fails outright wherever the enclave runs
+    /// without a Nitro Security Module (dev is a plain container). Callers that
+    /// need proof the key came from a real enclave must still use
+    /// `AttestedPublicKey` — see docs/pubkey-attestation.md.
     async fn public_key(
         &self,
         request: Request<PublicKeyRequest>,
@@ -723,6 +796,7 @@ impl ParentService for ParentAdapterService {
             Some(enclave_response::Response::PublicKeys(r)) => {
                 let public_key = match data_type {
                     DataType::EvmGasTx => r.evm_gas_tx_uncompressed_pub,
+                    DataType::CcdGovernance => r.ccd_ed25519_pub,
                     DataType::Transaction | DataType::Unspendable => r.btc_compressed_pub,
                     other => {
                         return Err(Status::invalid_argument(format!(
@@ -761,6 +835,7 @@ impl ParentService for ParentAdapterService {
                 enclave_proto::InitializeKeyRequest {
                     seed: vec![],
                     mnemonic: inner.cloning_secret,
+                    cloning_secret: String::new(),
                 },
             )),
         };
@@ -782,14 +857,48 @@ impl ParentService for ParentAdapterService {
         }
     }
 
-    /// Clone — not yet implemented (cluster cloning).
+    /// Clone — donor side of cluster cloning. The requester's orchestrator
+    /// relays its InitiateCloning output here; we translate it into an enclave
+    /// GetCloneRequest against the *local* (donor) enclave. The enclave verifies
+    /// the requester attestation, PCRs, nonce freshness, pubkey/digest binding
+    /// and the digest against its own UTEXO_CLONING_SECRET before sealing the
+    /// seed. We return the sealed seed plus the donor's ephemeral pubkey and
+    /// attestation so the requester can drive SetClone locally.
     async fn clone(
         &self,
-        _request: Request<CloneRequest>,
+        request: Request<CloneRequest>,
     ) -> Result<Response<CloneResponse>, Status> {
-        Err(Status::unimplemented(
-            "Clone not yet implemented (cluster cloning)",
-        ))
+        let inner = request.into_inner();
+        tracing::info!(
+            cluster_pk = %hex::encode(&inner.cluster_public_key),
+            "gRPC Clone called (donor GetClone)"
+        );
+
+        let enclave_req = EnclaveRequest {
+            request: Some(enclave_request::Request::GetClone(
+                enclave_proto::GetCloneRequest {
+                    cluster_public_key: inner.cluster_public_key,
+                    cloning_digest: inner.cloning_digest,
+                    encryption_pubkey: inner.encryption_pubkey,
+                    requester_attestation: inner.attestation,
+                },
+            )),
+        };
+
+        let resp = self.send_to_enclave(enclave_req).await?;
+
+        match resp.response {
+            Some(enclave_response::Response::GetClone(r)) => Ok(Response::new(CloneResponse {
+                encrypted_seed: r.encrypted_seed,
+                donor_pubkey: r.donor_pubkey,
+                donor_attestation: r.donor_attestation,
+            })),
+            Some(enclave_response::Response::Error(e)) => Err(Self::enclave_error_to_status(&e)),
+            other => Err(Status::internal(format!(
+                "unexpected enclave response for Clone: {:?}",
+                other
+            ))),
+        }
     }
 
     /// GetLastSavedBlock — forwards to enclave. PR 1 wires the surface only;

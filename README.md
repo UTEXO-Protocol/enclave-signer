@@ -56,7 +56,7 @@ Cryptographic signing service for the UTEXO RGB-EVM bridge, running inside an [A
 - BTC (legacy): derives `m/84'/0'/0'/0/0`, produces 33-byte compressed pubkey and BIP-32 xpub
 - BTC (BIP-86 taproot): derives two account-level xprivs for multisig descriptors:
   - Vanilla: `m/86'/<coin>'/0'` (coin type 0 mainnet, 1 testnet)
-  - Colored (RGB): `m/86'/827167'/0'`
+  - Colored (RGB): `m/86'/<rgb_coin>'/0'` (coin type 827166 mainnet, 827167 testnet)
 - Returns master fingerprint (4 bytes) for cosigner identification in multisig descriptors
 
 ### Signing
@@ -262,6 +262,13 @@ nitro-cli terminate-enclave --enclave-id <enclave-id>
 | `RUST_LOG` | (none) | Log level (e.g., `info`, `debug`) |
 | `ESPLORA_URL` | `http://127.0.0.1:3443` | Esplora API endpoint for RGB validation |
 | `BITCOIN_NETWORK` | `bitcoin` | One of: `bitcoin`, `testnet`, `signet`, `regtest`. Affects BIP-86 coin type (0 vs 1) and xpub prefix (xpub vs tpub). |
+| `SPV_CHECKPOINT` | (unset) | **Local/dev builds only** (debug, `cfg(test)`, or `allow-seed-import` — i.e. what `build/Dockerfile.enclave-dev` produces). Moves the SPV boot checkpoint forward so the initial header sync doesn't replay every block since the compiled-in anchor. Format `height:block_hash` or `height:block_hash:bits:time`, where `block_hash` is 64 hex chars in explorer (display) order, `bits` is hex and **must** carry a `0x` prefix, and `time` is a Unix timestamp. The two-field form inherits `bits`/`time` from the compiled checkpoint and is rejected on PoW networks (mainnet/testnet3), which consume both. A production-shaped build **refuses to boot** when this is set: the checkpoint is the SPV trust anchor and must come from the constant PCR0 commits to. Example: `SPV_CHECKPOINT=430000:000000ac5fccb8a26d3bf859952e164b4fb65190c8f29c8339c6a2c39f3aeb66`. |
+| `BTC_MAX_TOTAL_SATS` | (unset) | Cap on the total input value a single plain-BTC (`SignBtc`) transaction may spend. A release `rgb-validation` build refuses plain-BTC signing while unset. The plain-BTC *destination* rule needs no configuration — every output must pay back to a script the enclave proves it controls (see `networks/rgb/btc_ownership.rs`). |
+| `GAS_TX_ALLOWED_TO` | (unset) | 0x-hex destination a gas-key transaction (`SignRawDigest`) may target. Unset refuses all gas-tx signing in a release build. Together with the three pins below this forms the gas-tx rule, which is folded into the attested `SecurityPolicy` (audit C-02), so a verifier confirms it rather than trusting configuration (see `networks/evm/gas_tx.rs`). |
+| `GAS_TX_MAX_GAS_LIMIT` | (unset) | Ceiling on a gas tx's `gasLimit`. `0`/unset refuses all gas-tx signing. With `GAS_TX_MAX_FEE_PER_GAS` this bounds the most ETH a *single* signed gas tx can burn as fees (`gasLimit * maxFeePerGas`). Not an aggregate cap — rate limiting belongs outside the enclave. |
+| `GAS_TX_MAX_FEE_PER_GAS` | (unset) | Ceiling (wei) on a gas tx's per-gas fee: `maxFeePerGas` and `maxPriorityFeePerGas` for EIP-1559, `gasPrice` for legacy. `0`/unset refuses all gas-tx signing. |
+| `GAS_TX_ALLOWED_SELECTORS` | (unset) | Comma-separated 4-byte hex function selectors (e.g. `0xdeadbeef,0x7ae8f736`) a gas tx's calldata may invoke. Every signed gas tx must lead with a selector in this set; empty calldata is refused (a bare call still invokes the destination's `fallback`/`receive`). Empty/unset refuses all gas-tx signing. A malformed entry is dropped with a boot warning rather than poisoning the list. This replaces the old unverifiable "the destination is an EOA so calldata is inert" assumption. |
+| `GAS_TX_MAX_VALUE_WEI` | (unset) | Ceiling (wei) on the native `value` a gas-key transaction (`SignRawDigest`) may carry. Only the payable `lzFundsOutCall` may carry value, and only when `to` is also the pinned `BRIDGE_CONTRACT`; every other selector still requires `value == 0`. The carve-out widens the *value* rule only — `lzFundsOutCall` must still appear in `GAS_TX_ALLOWED_SELECTORS`. Unset or unparseable refuses any non-zero value, so deployments not using the LayerZero release path need no configuration. The fee is not bound into the `TeeLzFundsOut` payload, so this ceiling bounds the blast radius (see `networks/evm/gas_tx.rs`). |
 | `ESPLORA_VSOCK_PORT` | `8001` | vsock port for the host's vsock-proxy |
 | `EVM_RPC_URL` | `http://127.0.0.1:3444` | Loopback EVM JSON-RPC endpoint for in-enclave FundsIn verification (#60, `evm-rpc` builds). MUST be loopback — reached via the vsock forwarder. Responses are relayed by the untrusted host (evidence verified fail-closed; trustless only once Helios #77 lands). |
 | `EVM_RPC_VSOCK_PORT` | `8002` | vsock port for the host's EVM-RPC vsock-proxy (`evm-rpc` builds) |
@@ -269,6 +276,7 @@ nitro-cli terminate-enclave --enclave-id <enclave-id>
 | `HELIOS_EXECUTION_RPC` | (unset) | **`helios` builds (#77, experimental).** Loopback execution RPC Helios verifies. **Setting this selects the trustless Helios path** over the raw #60 path. |
 | `HELIOS_CONSENSUS_RPC` | `http://127.0.0.1:18550` | Loopback beacon (consensus) RPC for Helios light-client sync (`helios` builds) |
 | `HELIOS_CHECKPOINT` | (unset, **required**) | 0x 32-byte weak-subjectivity beacon block root, refreshed < ~2 weeks old. Without it Helios init fails closed (no untrusted community fallback). |
+| `HELIOS_STRICT_CHECKPOINT_AGE` | `true` | Refuse a `HELIOS_CHECKPOINT` older than the safe weak-subjectivity window (~2 weeks) — Helios init fails closed instead of syncing from a stale trust root. Only the literal `false` or `0` disable it; any other value leaves it on. Disable for local/dev replay only. |
 | `HELIOS_NETWORK` | `mainnet` | `mainnet` \| `sepolia` \| `holesky` (`helios` builds). Must be consistent with the pinned `EVM_CHAIN_ID` (mainnet=1 / sepolia=11155111 / holesky=17000) or Helios init fails closed. |
 | `HELIOS_EXECUTION_VSOCK_PORT` / `HELIOS_CONSENSUS_VSOCK_PORT` | `8003` / `8004` | vsock ports for the host's Helios exec/consensus proxies |
 | `HELIOS_EXECUTION_LOCAL_PORT` / `HELIOS_CONSENSUS_LOCAL_PORT` | `18545` / `18550` | Loopback ports the enclave exposes those upstreams on |

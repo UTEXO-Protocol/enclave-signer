@@ -3,8 +3,9 @@ use std::time::Duration;
 use crate::enclave_proto::{
     enclave_request, enclave_response, EnclaveRequest, EnclaveResponse, EvmSignatureResponse,
     GetLastSavedBlockRequest, GetLastSavedBlockResponse, GetPublicKeyRequest, InitializeKeyRequest,
-    InitializeKeyResponse, MerkleProofEntry, PublicKeysResponse, RawSignatureResponse,
-    SignRawMessageRequest, SignedPsbtResponse, SubmitHeadersRequest, SubmitHeadersResponse,
+    InitializeKeyResponse, InitiateCloningRequest, InitiateCloningResponse, MerkleProofEntry,
+    PublicKeysResponse, RawSignatureResponse, SetCloneRequest, SignRawMessageRequest,
+    SignedPsbtResponse, SubmitHeadersRequest, SubmitHeadersResponse,
 };
 use crate::error::{ParentError, Result};
 use crate::framing;
@@ -37,6 +38,11 @@ pub struct SignEvmRequest {
     pub consignment: Vec<u8>,
     pub consignment_hash: Vec<u8>,
     pub merkle_proofs: Vec<MerkleProofEntry>,
+    /// LZ-specific fields for `lzFundsOutCall` releases. `None` for direct
+    /// `fundsOutCall` releases. When set, the enclave routes to the
+    /// `TeeLzFundsOut` EIP-712 digest and crosschecks these fields against
+    /// the decoded calldata.
+    pub lz_release: Option<crate::enclave_proto::LzReleaseParams>,
 }
 
 #[derive(Debug, Clone)]
@@ -59,6 +65,24 @@ pub struct SignPsbtRequest {
     pub consignment_hash: Vec<u8>,
 }
 
+/// Parse a `vsock://` address body (`<cid>` or `<cid>:<port>`) into `(cid, port)`,
+/// defaulting the port to 5000. Keeps enclave selection explicit on multi-enclave
+/// hosts instead of silently using a default CID.
+#[cfg(all(feature = "vsock", target_os = "linux"))]
+fn parse_vsock_spec(spec: &str) -> Result<(u32, u32)> {
+    let (cid_str, port_str) = match spec.split_once(':') {
+        Some((c, p)) => (c, p),
+        None => (spec, "5000"),
+    };
+    let cid = cid_str
+        .parse::<u32>()
+        .map_err(|_| ParentError::Connection(format!("invalid vsock cid in addr: {cid_str:?}")))?;
+    let port = port_str.parse::<u32>().map_err(|_| {
+        ParentError::Connection(format!("invalid vsock port in addr: {port_str:?}"))
+    })?;
+    Ok((cid, port))
+}
+
 pub struct EnclaveClient {
     addr: String,
 }
@@ -71,13 +95,44 @@ impl EnclaveClient {
     }
 
     pub fn send_request(&self, req: &EnclaveRequest) -> Result<EnclaveResponse> {
+        // A `vsock://<cid>[:<port>]` address explicitly targets one enclave and
+        // works regardless of build features (errors if vsock isn't compiled in).
+        if let Some(spec) = self.addr.strip_prefix("vsock://") {
+            #[cfg(all(feature = "vsock", target_os = "linux"))]
+            {
+                let (cid, port) = parse_vsock_spec(spec)?;
+                return self.send_vsock(req, cid, port);
+            }
+            #[cfg(not(all(feature = "vsock", target_os = "linux")))]
+            {
+                return Err(ParentError::Connection(format!(
+                    "addr `vsock://{spec}` requests vsock, but this binary was built \
+                     without vsock support (needs feature `vsock` on Linux)"
+                )));
+            }
+        }
+
         #[cfg(all(feature = "vsock", target_os = "linux"))]
         {
-            use vsock::VsockStream;
-            let mut stream = VsockStream::connect_with_cid_port(16, 5000)
-                .map_err(|e| ParentError::Connection(e.to_string()))?;
-            framing::write_message(&mut stream, req)?;
-            framing::read_message(&mut stream)
+            // No `vsock://` address: fall back to env for back-compat, but DO NOT
+            // silently default to CID 16 — on a multi-enclave host that routes
+            // every call to the wrong enclave (init/sign on the wrong identity).
+            let cid = std::env::var("ENCLAVE_VSOCK_CID")
+                .ok()
+                .and_then(|v| v.parse::<u32>().ok());
+            let port = std::env::var("ENCLAVE_VSOCK_PORT")
+                .ok()
+                .and_then(|v| v.parse::<u32>().ok())
+                .unwrap_or(5000);
+            match cid {
+                Some(cid) => self.send_vsock(req, cid, port),
+                None => Err(ParentError::Connection(
+                    "vsock build: select the enclave explicitly — pass \
+                     `--addr vsock://<cid>:<port>` (e.g. vsock://16:5000) or set \
+                     ENCLAVE_VSOCK_CID. Refusing to default to CID 16."
+                        .to_string(),
+                )),
+            }
         }
         #[cfg(not(all(feature = "vsock", target_os = "linux")))]
         {
@@ -100,30 +155,116 @@ impl EnclaveClient {
         }
     }
 
+    #[cfg(feature = "vsock")]
+    fn send_vsock(&self, req: &EnclaveRequest, cid: u32, port: u32) -> Result<EnclaveResponse> {
+        use vsock::VsockStream;
+        let mut stream = VsockStream::connect_with_cid_port(cid, port).map_err(|e| {
+            ParentError::Connection(format!("vsock connect cid={cid} port={port}: {e}"))
+        })?;
+        framing::write_message(&mut stream, req)?;
+        framing::read_message(&mut stream)
+    }
+
     pub fn initialize_keys(&self, seed: Option<Vec<u8>>) -> Result<InitializeKeyResponse> {
-        self.initialize_keys_inner(seed, None)
+        self.initialize_keys_inner(seed, None, None)
+    }
+
+    /// Initialize a donor enclave and configure its cloning secret in one
+    /// message, so the secret is delivered at runtime (never baked into the EIF).
+    pub fn initialize_keys_with_secret(
+        &self,
+        seed: Option<Vec<u8>>,
+        cloning_secret: Option<String>,
+    ) -> Result<InitializeKeyResponse> {
+        self.initialize_keys_inner(seed, None, cloning_secret)
     }
 
     pub fn initialize_keys_mnemonic(&self, mnemonic: &str) -> Result<InitializeKeyResponse> {
-        self.initialize_keys_inner(None, Some(mnemonic.to_string()))
+        self.initialize_keys_inner(None, Some(mnemonic.to_string()), None)
     }
 
     fn initialize_keys_inner(
         &self,
         seed: Option<Vec<u8>>,
         mnemonic: Option<String>,
+        cloning_secret: Option<String>,
     ) -> Result<InitializeKeyResponse> {
         let req = EnclaveRequest {
             request: Some(enclave_request::Request::InitializeKey(
                 InitializeKeyRequest {
                     seed: seed.unwrap_or_default(),
                     mnemonic: mnemonic.unwrap_or_default(),
+                    cloning_secret: cloning_secret.unwrap_or_default(),
                 },
             )),
         };
         let resp = self.send_request(&req)?;
         match resp.response {
             Some(enclave_response::Response::InitializeKey(r)) => Ok(r),
+            Some(enclave_response::Response::Error(e)) => Err(ParentError::EnclaveError {
+                code: e.code,
+                message: e.message,
+            }),
+            other => Err(ParentError::Connection(format!(
+                "unexpected response variant: {:?}",
+                other
+            ))),
+        }
+    }
+
+    /// Requester side, step 1 of cloning. Asks the local enclave to enter the
+    /// Cloning phase: it mints an ephemeral X25519 keypair, computes the
+    /// cloning digest from the operator secret, and returns an NSM attestation
+    /// binding both. The digest is returned so the orchestrator can forward it
+    /// to the donor (the secret itself never leaves this enclave).
+    pub fn initiate_cloning(
+        &self,
+        cloning_secret: &str,
+        cluster_public_key: Vec<u8>,
+    ) -> Result<InitiateCloningResponse> {
+        let req = EnclaveRequest {
+            request: Some(enclave_request::Request::InitiateCloning(
+                InitiateCloningRequest {
+                    cloning_secret: cloning_secret.to_string(),
+                    cluster_public_key,
+                },
+            )),
+        };
+        let resp = self.send_request(&req)?;
+        match resp.response {
+            Some(enclave_response::Response::InitiateCloning(r)) => Ok(r),
+            Some(enclave_response::Response::Error(e)) => Err(ParentError::EnclaveError {
+                code: e.code,
+                message: e.message,
+            }),
+            other => Err(ParentError::Connection(format!(
+                "unexpected response variant: {:?}",
+                other
+            ))),
+        }
+    }
+
+    /// Requester side, step 3 of cloning. Hands the donor's sealed seed +
+    /// ephemeral pubkey + attestation to the local enclave. The enclave
+    /// verifies the donor attestation, unseals the seed, and only commits the
+    /// derived keys if the resulting EVM address matches the cluster identity it
+    /// was told to clone. On success it transitions Cloning -> Active.
+    pub fn set_clone(
+        &self,
+        encrypted_seed: Vec<u8>,
+        donor_pubkey: Vec<u8>,
+        donor_attestation: Vec<u8>,
+    ) -> Result<()> {
+        let req = EnclaveRequest {
+            request: Some(enclave_request::Request::SetClone(SetCloneRequest {
+                encrypted_seed,
+                donor_pubkey,
+                donor_attestation,
+            })),
+        };
+        let resp = self.send_request(&req)?;
+        match resp.response {
+            Some(enclave_response::Response::SetClone(_)) => Ok(()),
             Some(enclave_response::Response::Error(e)) => Err(ParentError::EnclaveError {
                 code: e.code,
                 message: e.message,
@@ -182,9 +323,7 @@ impl EnclaveClient {
                                 proxy_contract: req.proxy_contract,
                                 calldata_amount: req.calldata_amount,
                                 calldata_commission: req.calldata_commission,
-                                // This branch predates the LZ release path:
-                                // every release here is a direct fundsOutCall.
-                                lz_release: None,
+                                lz_release: req.lz_release,
                             },
                         ),
                     ),

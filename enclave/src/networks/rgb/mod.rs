@@ -1,4 +1,5 @@
 pub mod btc_crosscheck;
+pub mod btc_ownership;
 pub mod psbt_validation;
 pub mod signing;
 pub mod spv;
@@ -135,13 +136,17 @@ pub fn validate_destination(
     Ok(())
 }
 
+/// Returns the **recipient leg** of the bound consignment in asset units — see
+/// [`psbt_validation::validate_psbt_anchors_transition`]. This is the
+/// enclave-derived destination amount the route-level cross-check uses, in
+/// place of the host-supplied `psbt_output_amount` (W-06 / #52).
 #[cfg(feature = "rgb-validation")]
 pub fn validate_destination_anchor(
     destination: &RgbDestination,
     source_amount: u64,
     source_commission: u64,
     ctx: &ValidationContext<'_>,
-) -> Result<()> {
+) -> Result<u64> {
     use crate::error::EnclaveError;
 
     if destination.consignment.is_empty() {
@@ -149,6 +154,16 @@ pub fn validate_destination_anchor(
             "send-RGB PSBT signing requires a consignment to bind the PSBT to the RGB transition"
                 .into(),
         ));
+    }
+    // Aggregate size cap (operator-configurable via `MAX_CONSIGNMENT_BYTES`),
+    // before the keccak hash and the rgbstd parse below — the destination
+    // consignment is otherwise bounded only by the generic 4 MB wire frame.
+    if destination.consignment.len() > ctx.bridge_config.max_consignment_bytes {
+        return Err(EnclaveError::CrossCheck(format!(
+            "send-RGB consignment too large: {} bytes (max {})",
+            destination.consignment.len(),
+            ctx.bridge_config.max_consignment_bytes
+        )));
     }
     // Wire-tamper detection, mirroring the EVM path's defence-in-depth check.
     // INTEGRITY, NOT AUTHORIZATION (audit I-02 / Oxorio I-09): the listener
@@ -207,11 +222,22 @@ pub fn validate_destination_anchor(
 
     let psbt = bitcoin::psbt::Psbt::deserialize(&destination.psbt_bytes)
         .map_err(|e| EnclaveError::CrossCheck(format!("psbt_bytes is not a valid PSBT: {e}")))?;
-    psbt_validation::validate_psbt_anchors_transition(
+    // Fail closed: the per-output recipient bind (W-06 / #52) needs to tell a
+    // bridge change output from a payout, and it cannot do that without the
+    // enclave's own keys. No resolver means no bind, so refuse to sign.
+    let self_owned = ctx.self_owned_psbt_outputs.ok_or_else(|| {
+        EnclaveError::CrossCheck(
+            "send-RGB PSBT cannot be bound: no self-owned-output resolver is wired in, so the \
+             enclave cannot distinguish bridge change from a payout to a third party"
+                .into(),
+        )
+    })?;
+    let recipient_amount = psbt_validation::validate_psbt_anchors_transition(
         &psbt,
         &validated,
         source_amount,
         source_commission,
+        self_owned,
     )?;
 
     // Fee-rate sanity (#55), after the pure anchor checks so the (cached)
@@ -219,7 +245,9 @@ pub fn validate_destination_anchor(
     // the estimate is unavailable: the host controls the Esplora egress, so
     // "no estimate → skip" would let the host disable the check.
     let recommended = validator.recommended_fee_rate_sat_vb()?;
-    psbt_validation::check_psbt_fee_rate(&psbt, recommended)
+    psbt_validation::check_psbt_fee_rate(&psbt, recommended)?;
+
+    Ok(recipient_amount)
 }
 
 /// Validate fields owned by an RGB inflation (mint) destination before
@@ -497,6 +525,8 @@ mod tests {
             last_transfer_witness_prevouts: None,
             last_transfer_op_id: None,
             non_mined_witness_txids: vec![],
+            // These cases never reach the PSBT bind (garbage `psbt_bytes`).
+            transitions_by_witness: vec![],
         }
     }
 
@@ -689,7 +719,7 @@ mod tests {
         fn run_validate_destination_anchor(
             destination: &RgbDestination,
             config: &BridgeConfig,
-        ) -> Result<()> {
+        ) -> Result<u64> {
             let url = spawn_stub_esplora();
             let validator = RgbValidator::new(url, "bitcoin").expect("validator");
             let chain = Mutex::new(HeaderChain::new(
@@ -702,10 +732,16 @@ mod tests {
                     is_real: false,
                 },
             ));
+            // Every case in this suite fails before the PSBT stage (the
+            // fixture's `psbt_bytes` are deliberately garbage), so the
+            // resolver is never called — but it must be present, or the
+            // fail-closed guard would mask the error each test asserts on.
+            let self_owned = |_: &bitcoin::psbt::Psbt| Ok(std::collections::HashSet::new());
             let ctx = ValidationContext {
                 bridge_config: config,
                 rgb_validator: Some(&validator),
                 header_chain: &chain,
+                self_owned_psbt_outputs: Some(&self_owned),
             };
             validate_destination_anchor(destination, 0, 0, &ctx)
         }

@@ -94,11 +94,6 @@ pub struct NonceReplayGuard {
 struct GuardState {
     seen: HashSet<[u8; 32]>,
     order: VecDeque<(Instant, [u8; 32])>,
-    /// Keys reserved by an in-flight signing attempt: refused as
-    /// duplicates like `seen`, but released (not promoted) when the attempt
-    /// fails, so honest retries survive - the atomic middle ground between
-    /// record-at-check (poisons retries) and check-then-record (TOCTOU).
-    tentative: HashSet<[u8; 32]>,
 }
 
 impl Default for NonceReplayGuard {
@@ -113,7 +108,6 @@ impl NonceReplayGuard {
             inner: Mutex::new(GuardState {
                 seen: HashSet::new(),
                 order: VecDeque::new(),
-                tentative: HashSet::new(),
             }),
             max,
             ttl,
@@ -122,74 +116,6 @@ impl NonceReplayGuard {
 
     pub fn check_and_record(&self, nonce: [u8; 32]) -> Result<()> {
         self.check_and_record_at(nonce, Instant::now())
-    }
-
-    /// Atomically test-and-reserve a key for an in-flight signing attempt.
-    ///
-    /// Refuses when the key is already recorded (a delivered signature inside
-    /// the TTL) OR already reserved (a concurrent attempt) - both checks and
-    /// the reservation happen under one lock, so two concurrent requests can
-    /// never both observe the key as absent. The caller MUST finish with
-    /// [`promote`] (signature produced) or [`release`] (attempt failed); the
-    /// enclave handles each request to completion, so a reservation cannot
-    /// dangle.
-    ///
-    /// Why not record at check time: the federation fan-out cancels in-flight
-    /// cosigners the moment threshold becomes unreachable (one node always
-    /// fails instantly on mints), so a transient failure on a sibling left
-    /// this enclave's guard primed with no signature delivered, and every
-    /// retry was refused as a replay until a restart. Seen live, twice.
-    pub fn reserve(&self, nonce: [u8; 32]) -> Result<()> {
-        let now = Instant::now();
-        let mut g = self
-            .inner
-            .lock()
-            .map_err(|e| EnclaveError::Internal(format!("replay guard poisoned: {}", e)))?;
-        while let Some(&(seen_at, old)) = g.order.front() {
-            if now.saturating_duration_since(seen_at) >= self.ttl {
-                g.order.pop_front();
-                g.seen.remove(&old);
-            } else {
-                break;
-            }
-        }
-        if g.seen.contains(&nonce) || g.tentative.contains(&nonce) {
-            return Err(EnclaveError::NonceReplay);
-        }
-        g.tentative.insert(nonce);
-        Ok(())
-    }
-
-    /// Promote a reservation to a durable record - the signature exists.
-    pub fn promote(&self, nonce: [u8; 32]) -> Result<()> {
-        let now = Instant::now();
-        let mut g = self
-            .inner
-            .lock()
-            .map_err(|e| EnclaveError::Internal(format!("replay guard poisoned: {}", e)))?;
-        g.tentative.remove(&nonce);
-        while g.seen.len() >= self.max {
-            match g.order.pop_front() {
-                Some((_, old)) => {
-                    g.seen.remove(&old);
-                }
-                None => break,
-            }
-        }
-        g.seen.insert(nonce);
-        g.order.push_back((now, nonce));
-        Ok(())
-    }
-
-    /// Drop a reservation - the attempt failed before a signature existed, so
-    /// an honest retry must succeed.
-    pub fn release(&self, nonce: [u8; 32]) -> Result<()> {
-        let mut g = self
-            .inner
-            .lock()
-            .map_err(|e| EnclaveError::Internal(format!("replay guard poisoned: {}", e)))?;
-        g.tentative.remove(&nonce);
-        Ok(())
     }
 
     /// Time-injected core of [`check_and_record`]. `now` is the wall point
@@ -236,9 +162,65 @@ impl NonceReplayGuard {
         Ok(())
     }
 
+    /// Reserve `nonce`: [`check_and_record`](Self::check_and_record) it and
+    /// return an RAII [`ReplayReservation`] that ROLLS BACK the record on drop
+    /// unless [`ReplayReservation::commit`] is called first.
+    ///
+    /// Use when the record must only stick if the guarded operation commits:
+    /// reserve before the fallible work, commit after it succeeds. Any failure
+    /// in between (an early return / `?`) drops the reservation and releases the
+    /// key, so a transient error does not consume it and self-block a legitimate
+    /// retry (audit M-02 — the local reservation must roll back on failure).
+    /// Reserving still rejects a concurrent duplicate up front.
+    pub fn reserve(&self, nonce: [u8; 32]) -> Result<ReplayReservation<'_>> {
+        self.check_and_record(nonce)?;
+        Ok(ReplayReservation {
+            guard: self,
+            nonce,
+            committed: false,
+        })
+    }
+
+    /// Drop a previously recorded nonce. No-op if it is absent (already
+    /// TTL-evicted). Only used by [`ReplayReservation`] rollback, so it must not
+    /// fail: a poisoned lock is recovered rather than propagated.
+    fn remove(&self, nonce: &[u8; 32]) {
+        let mut g = self.inner.lock().unwrap_or_else(|p| p.into_inner());
+        if g.seen.remove(nonce) {
+            if let Some(pos) = g.order.iter().position(|(_, n)| n == nonce) {
+                g.order.remove(pos);
+            }
+        }
+    }
+
     #[cfg(test)]
     pub fn seen_count(&self) -> usize {
         self.inner.lock().map(|g| g.seen.len()).unwrap_or(0)
+    }
+}
+
+/// RAII reservation returned by [`NonceReplayGuard::reserve`]. On drop it
+/// removes the reserved nonce UNLESS [`Self::commit`] was called, so a guarded
+/// operation that fails before committing leaves the key un-consumed.
+#[must_use = "an un-committed reservation rolls back on drop"]
+pub struct ReplayReservation<'a> {
+    guard: &'a NonceReplayGuard,
+    nonce: [u8; 32],
+    committed: bool,
+}
+
+impl ReplayReservation<'_> {
+    /// Keep the record: the guarded operation committed.
+    pub fn commit(mut self) {
+        self.committed = true;
+    }
+}
+
+impl Drop for ReplayReservation<'_> {
+    fn drop(&mut self) {
+        if !self.committed {
+            self.guard.remove(&self.nonce);
+        }
     }
 }
 
@@ -496,6 +478,7 @@ impl EnclaveState {
                 master_fingerprint: km.master_fingerprint().to_bytes(),
                 account_xpub_vanilla: km.account_xpub_vanilla().to_string(),
                 account_xpub_colored: km.account_xpub_colored().to_string(),
+                ccd_ed25519_pub: *km.ccd_ed25519_pub(),
             })
         })
     }
@@ -503,6 +486,12 @@ impl EnclaveState {
     /// Sign a 32-byte EVM message hash. Returns 65-byte signature.
     pub fn sign_evm(&self, message_hash: &[u8; 32]) -> Result<[u8; 65]> {
         self.with_active(|km| km.sign_evm(message_hash))
+    }
+
+    /// Sign a 32-byte Concordium account-transaction hash with the governance
+    /// Ed25519 key. Returns the 64-byte signature.
+    pub fn sign_ccd(&self, hash: &[u8; 32]) -> Result<([u8; 64], [u8; 32])> {
+        self.with_active(|km| km.sign_ccd(hash))
     }
 
     /// Sign a 32-byte digest with the EVM gas TX key. Returns 65-byte signature.
@@ -525,6 +514,16 @@ impl EnclaveState {
         allowed_account: Option<crate::keys::AccountType>,
     ) -> Result<(Vec<u8>, usize)> {
         self.with_active(|km| km.sign_psbt_scoped(psbt_bytes, allowed_account))
+    }
+
+    /// Run `f` against the active `KeyManager`, or fail with
+    /// `KeyNotInitialized`. Exposed for validators that must reason about the
+    /// enclave's own keys before signing — the plain-BTC cross-check proves
+    /// every output pays back to a script this enclave controls
+    /// ([`crate::networks::rgb::btc_ownership`]), which needs the derivation,
+    /// not just the signature.
+    pub fn with_keys<T>(&self, f: impl FnOnce(&KeyManager) -> Result<T>) -> Result<T> {
+        self.with_active(f)
     }
 
     fn lock_phase(&self) -> Result<std::sync::MutexGuard<'_, Phase>> {
@@ -551,33 +550,6 @@ fn ensure_initial(phase: &Phase) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-
-    #[test]
-    fn reserved_key_refuses_a_concurrent_duplicate() {
-        let g = NonceReplayGuard::with_capacity(16, std::time::Duration::from_secs(60));
-        let k = [7u8; 32];
-        g.reserve(k).expect("first reserve");
-        assert!(matches!(g.reserve(k), Err(EnclaveError::NonceReplay)));
-    }
-
-    #[test]
-    fn released_key_allows_an_honest_retry() {
-        let g = NonceReplayGuard::with_capacity(16, std::time::Duration::from_secs(60));
-        let k = [8u8; 32];
-        g.reserve(k).expect("reserve");
-        g.release(k).expect("release");
-        g.reserve(k)
-            .expect("retry after a failed attempt must succeed");
-    }
-
-    #[test]
-    fn promoted_key_is_a_durable_replay() {
-        let g = NonceReplayGuard::with_capacity(16, std::time::Duration::from_secs(60));
-        let k = [9u8; 32];
-        g.reserve(k).expect("reserve");
-        g.promote(k).expect("promote");
-        assert!(matches!(g.reserve(k), Err(EnclaveError::NonceReplay)));
-    }
     use super::*;
 
     #[test]
@@ -693,6 +665,50 @@ mod tests {
             .check_and_record_at(nonce(1), t0 + Duration::from_secs(30))
             .unwrap_err();
         assert!(matches!(err, EnclaveError::NonceReplay));
+    }
+
+    // ReplayReservation — reserve/commit/rollback (audit M-02).
+
+    #[test]
+    fn reservation_rolls_back_when_dropped_uncommitted() {
+        let g = NonceReplayGuard::with_capacity(100, Duration::from_secs(3600));
+        let key = nonce(1);
+        {
+            let _r = g.reserve(key).expect("first reserve succeeds");
+            assert_eq!(g.seen_count(), 1, "reserved key is recorded while held");
+            // `_r` drops here without commit -> rollback.
+        }
+        assert_eq!(
+            g.seen_count(),
+            0,
+            "un-committed reservation rolls back on drop"
+        );
+        // The same key can now be reserved again (a legitimate retry).
+        g.reserve(key)
+            .expect("retry after rollback succeeds")
+            .commit();
+        assert_eq!(g.seen_count(), 1);
+    }
+
+    #[test]
+    fn reservation_sticks_after_commit() {
+        let g = NonceReplayGuard::with_capacity(100, Duration::from_secs(3600));
+        let key = nonce(2);
+        g.reserve(key).expect("reserve succeeds").commit();
+        // Committed -> a second reserve of the same key is a replay.
+        assert!(matches!(g.reserve(key), Err(EnclaveError::NonceReplay)));
+    }
+
+    #[test]
+    fn reservation_rejects_concurrent_duplicate_before_commit() {
+        // While a reservation is held (not yet committed), a second reserve of
+        // the same key is still rejected up front — reserve-before-sign blocks a
+        // concurrent duplicate, not only a committed one.
+        let g = NonceReplayGuard::with_capacity(100, Duration::from_secs(3600));
+        let key = nonce(3);
+        let held = g.reserve(key).expect("first reserve succeeds");
+        assert!(matches!(g.reserve(key), Err(EnclaveError::NonceReplay)));
+        held.commit();
     }
 
     /// TC-3 (audit coverage map): a flood of distinct nonces beyond `max`

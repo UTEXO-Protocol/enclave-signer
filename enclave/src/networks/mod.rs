@@ -6,6 +6,7 @@ use crate::error::{EnclaveError, Result};
 use crate::networks::rgb::validation::RgbValidator;
 use crate::proto::sign_request::{DestinationNetwork, SourceNetwork};
 
+pub mod ccd;
 pub mod evm;
 pub mod rgb;
 
@@ -24,6 +25,17 @@ pub struct ValidationContext<'a> {
     #[cfg(feature = "rgb-validation")]
     pub rgb_validator: Option<&'a RgbValidator>,
     pub header_chain: &'a Mutex<crate::networks::rgb::spv::HeaderChain>,
+    /// Resolves which of a PSBT's Bitcoin outputs pay back to this enclave.
+    /// Required by the send-RGB per-output recipient bind (W-06 / #52) to tell
+    /// bridge change from a payout to a third party.
+    ///
+    /// A callback so the key lock is taken only for that resolution, never
+    /// across consignment validation's Esplora/Electrum round-trips. `None`
+    /// fails the bind closed — an enclave that cannot identify its own outputs
+    /// must not sign a send-RGB PSBT.
+    #[cfg(feature = "rgb-validation")]
+    pub self_owned_psbt_outputs:
+        Option<crate::networks::rgb::psbt_validation::SelfOwnedOutputs<'a>>,
 }
 
 /// Outcome of validating a source network: the route proof, plus — for an RGB
@@ -51,11 +63,20 @@ pub fn validate_source(
             rgb_consignment: None,
         }),
         SourceNetwork::RgbSource(source) => rgb::validate_source(amount, source, ctx),
-        // This branch derives no CCD keys and holds no CCD predicates.
-        SourceNetwork::CcdSource(_) => Err(EnclaveError::InvalidRequest(
-            "CCD sources are not supported by this enclave build".into(),
-        )),
+        SourceNetwork::CcdSource(source) => Ok(SourceProof {
+            proof: ccd::validate_source(amount, source)?,
+            #[cfg(feature = "rgb-validation")]
+            rgb_consignment: None,
+        }),
     }
+}
+
+/// Route proof plus, for an EVM `fundsOut`, the calldata decoded once into one
+/// typed intent that the later stages consume (I-12 / #165). `None` for RGB
+/// destinations and the dev-mode bypass.
+pub struct DestinationProof {
+    pub proof: RouteProof,
+    pub evm_funds_out: Option<crate::networks::evm::validation::FundsOutParams>,
 }
 
 /// Dispatch destination-network validation to the owning network module.
@@ -64,7 +85,7 @@ pub fn validate_destination(
     source_commission: u64,
     destination: &DestinationNetwork,
     ctx: &ValidationContext<'_>,
-) -> Result<RouteProof> {
+) -> Result<DestinationProof> {
     #[cfg(not(all(feature = "rgb-validation", not(feature = "dev-mode"))))]
     {
         let _ = amount;
@@ -73,24 +94,38 @@ pub fn validate_destination(
 
     match destination {
         DestinationNetwork::EvmDestination(destination) => {
-            evm::validation::validate_destination(destination, ctx)
+            let (proof, evm_funds_out) = evm::validation::validate_destination(destination, ctx)?;
+            Ok(DestinationProof {
+                proof,
+                evm_funds_out,
+            })
         }
         DestinationNetwork::RgbDestination(destination) => {
             rgb::validate_destination(destination, ctx)?;
 
+            // The destination amount is the consignment's **recipient leg**,
+            // derived and proven inside the enclave (W-06 / #52) — not the
+            // host-supplied `psbt_output_amount`, which nothing checks. Only
+            // builds without that binding fall back to the wire field, and
+            // those builds run no destination cross-checks at all.
             #[cfg(all(feature = "rgb-validation", not(feature = "dev-mode")))]
-            rgb::validate_destination_anchor(destination, amount, source_commission, ctx)?;
+            let destination_amount =
+                rgb::validate_destination_anchor(destination, amount, source_commission, ctx)?;
+            #[cfg(not(all(feature = "rgb-validation", not(feature = "dev-mode"))))]
+            let destination_amount = destination.psbt_output_amount;
 
-            Ok(RouteProof {
-                amount: destination
-                    .psbt_output_amount
-                    .checked_add(source_commission)
-                    .ok_or_else(|| {
-                        EnclaveError::CrossCheck(
-                            "psbt_output_amount + source_commission overflow".into(),
-                        )
-                    })?,
-                operation_id: None,
+            Ok(DestinationProof {
+                proof: RouteProof {
+                    amount: destination_amount
+                        .checked_add(source_commission)
+                        .ok_or_else(|| {
+                            EnclaveError::CrossCheck(
+                                "destination amount + source_commission overflow".into(),
+                            )
+                        })?,
+                    operation_id: None,
+                },
+                evm_funds_out: None,
             })
         }
         DestinationNetwork::RgbInflationDestination(destination) => {
@@ -118,21 +153,27 @@ pub fn validate_destination(
                         source_commission,
                         ctx,
                     )?;
-                    Ok(RouteProof {
-                        amount: minted.checked_add(source_commission).ok_or_else(|| {
-                            EnclaveError::CrossCheck(
-                                "minted amount + source_commission overflow".into(),
-                            )
-                        })?,
-                        operation_id: None,
+                    Ok(DestinationProof {
+                        proof: RouteProof {
+                            amount: minted.checked_add(source_commission).ok_or_else(|| {
+                                EnclaveError::CrossCheck(
+                                    "minted amount + source_commission overflow".into(),
+                                )
+                            })?,
+                            operation_id: None,
+                        },
+                        evm_funds_out: None,
                     })
                 }
                 // dev-mode mirrors the send path: cross-checks are bypassed and
                 // the route proof passes the source amount through.
                 #[cfg(feature = "dev-mode")]
-                Ok(RouteProof {
-                    amount,
-                    operation_id: None,
+                Ok(DestinationProof {
+                    proof: RouteProof {
+                        amount,
+                        operation_id: None,
+                    },
+                    evm_funds_out: None,
                 })
             }
         }
@@ -157,15 +198,21 @@ pub fn validate_destination(
                 #[cfg(not(feature = "dev-mode"))]
                 {
                     let burned = rgb::validate_burn_anchor(destination, ctx)?;
-                    Ok(RouteProof {
-                        amount: burned,
-                        operation_id: None,
+                    Ok(DestinationProof {
+                        proof: RouteProof {
+                            amount: burned,
+                            operation_id: None,
+                        },
+                        evm_funds_out: None,
                     })
                 }
                 #[cfg(feature = "dev-mode")]
-                Ok(RouteProof {
-                    amount,
-                    operation_id: None,
+                Ok(DestinationProof {
+                    proof: RouteProof {
+                        amount,
+                        operation_id: None,
+                    },
+                    evm_funds_out: None,
                 })
             }
         }
@@ -204,12 +251,26 @@ pub fn validate_route_proofs(
             // contract burnId is unrelated to the RGB consignment opId.
             // validate_operation_ids_match(source_proof, destination_proof)
         }
+        // Concordium fundsIn -> EVM release. Source finality/structure was
+        // validated by the listener; bind the release amount to the destination.
+        (SourceNetwork::CcdSource(_), DestinationNetwork::EvmDestination(_)) => {
+            validate_amount_covers_destination(source_proof.amount, destination_proof.amount)
+        }
         _ => Err(EnclaveError::InvalidRequest(
             "unsupported source/destination network pair".into(),
         )),
     }
 }
 
+/// Both sides are **bridge asset units**, not sats.
+///
+/// `source_amount` is the EVM `FundsIn` token amount (verified against the
+/// on-chain log by `evm::evm_event::verify_funds_in_event`); an RGB
+/// `destination_amount` is the consignment's recipient leg in RGB asset units
+/// (`TransitionOutput::amount`), which the bridge issues 1:1 against the EVM
+/// token. Neither is a Bitcoin value — nothing here reads
+/// `psbt.unsigned_tx.output`, and the sats-denominated checks on a PSBT live in
+/// [`crate::networks::rgb::btc_crosscheck`] instead.
 fn validate_amount_covers_destination(source_amount: u64, destination_amount: u64) -> Result<()> {
     if source_amount < destination_amount {
         return Err(EnclaveError::CrossCheck(format!(
@@ -241,7 +302,7 @@ fn validate_operation_ids_match(source: &RouteProof, destination: &RouteProof) -
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::proto::{EvmDestination, EvmSource, RgbDestination, RgbSource};
+    use crate::proto::{CcdSource, EvmDestination, EvmSource, RgbDestination, RgbSource};
 
     fn evm_source(commission: u64) -> SourceNetwork {
         SourceNetwork::EvmSource(EvmSource {
@@ -277,6 +338,13 @@ mod tests {
         })
     }
 
+    fn ccd_source(commission: u64) -> SourceNetwork {
+        SourceNetwork::CcdSource(CcdSource {
+            tx_hash: vec![0xCC; 32],
+            commission,
+        })
+    }
+
     fn evm_destination(destination_amount: u64, commission: u64) -> DestinationNetwork {
         DestinationNetwork::EvmDestination(EvmDestination {
             call_data: vec![0x00; 4],
@@ -306,6 +374,53 @@ mod tests {
             &proof(90, None),
         )
         .is_ok());
+    }
+
+    #[test]
+    fn route_proofs_accept_ccd_source_to_evm_destination() {
+        assert!(validate_route_proofs(
+            &ccd_source(10),
+            &evm_destination(990, 10),
+            &proof(990, None),
+            &proof(990, None),
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn route_proofs_reject_underfunded_ccd_to_evm_destination() {
+        let err = validate_route_proofs(
+            &ccd_source(10),
+            &evm_destination(990, 10),
+            &proof(980, None), // source amount < destination amount
+            &proof(990, None),
+        );
+        assert!(err.is_err());
+    }
+
+    #[test]
+    fn ccd_validate_source_trusts_and_binds_amount() {
+        let proof = ccd::validate_source(
+            990,
+            &CcdSource {
+                tx_hash: vec![0xCC; 32],
+                commission: 10,
+            },
+        )
+        .expect("trusted CCD source");
+        assert_eq!(proof.amount, 990);
+    }
+
+    #[test]
+    fn ccd_validate_source_rejects_bad_tx_hash() {
+        let err = ccd::validate_source(
+            990,
+            &CcdSource {
+                tx_hash: vec![0xCC; 31],
+                commission: 10,
+            },
+        );
+        assert!(err.is_err());
     }
 
     #[test]

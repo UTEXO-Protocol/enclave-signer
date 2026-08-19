@@ -14,7 +14,7 @@ path = "src/main.rs"
 [dependencies]
 # Protobuf
 prost = "0.14.3"
-federated-signer-proto = { git = "ssh://git@github.com/UTEXO-Protocol/federated-signer-proto.git", rev = "c0daae1cce11af6b58476467c04c3e2428093a1a", package = "federated-signer-proto" }
+federated-signer-proto = { git = "ssh://git@github.com/UTEXO-Protocol/federated-signer-proto.git", rev = "a9b4ef1fd3465a573b2f90f99f824c48499b670e", package = "federated-signer-proto" }
 # Crypto — ECDSA on secp256k1 (EVM address derivation + signing later)
 k256 = { version = "0.13", features = ["ecdsa"] }
 
@@ -23,6 +23,10 @@ bitcoin = { version = "0.32", features = ["std"] }
 
 # Crypto — BIP-39 mnemonic
 bip39 = { version = "2.1", features = ["zeroize"] }
+
+# Crypto — Ed25519 (Concordium governance account signatures). Key derived from
+# the seed via SLIP-0010 (HMAC-SHA512), signed over the 32-byte tx hash.
+ed25519-dalek = { version = "2", features = ["zeroize"] }
 
 # Secret handling (zeroize-on-drop, redacted Debug)
 secrecy = "0.10"
@@ -47,7 +51,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 # RGB consignment validation (optional, behind rgb-validation feature)
-rgb-ops = { version = "0.11.1-rc.7", features = ["esplora_blocking", "serde"], optional = true }
+rgb-ops = { version = "0.11.1-rc.7", features = ["esplora_blocking", "electrum_blocking", "serde"], optional = true }
 # Flat-shape parser for RGB consignments. Used by rgb-validation to walk
 # transitions (op_id / transition_type / fungible_allocations) without
 # hand-rolling another rgbstd walk. `default-features = false` skips the
@@ -152,13 +156,12 @@ mock-attestation = ["attestation-verify/mock"]
 # is the predicate + plumbing layer and only becomes trustless once Helios (#77)
 # verifies the RPC.
 evm-rpc = ["rgb-validation", "dep:alloy", "dep:tokio"]
-# Trustless variant of `evm-rpc` (#77, EXPERIMENTAL, default-OFF): embed the
-# Helios light client so the enclave cryptographically verifies the EVM RPC
-# against a pinned weak-subjectivity checkpoint before accepting a FundsIn
-# receipt. Extends `evm-rpc` (reuses the EvmReceiptProvider seam, predicate, and
-# EVM_MIN_CONFIRMATIONS). Runtime-selectable: with HELIOS_EXECUTION_RPC set the
-# enclave uses the verified path, else the raw alloy path. HEAVY build (2 alloy
-# majors, revm, BLS, vendored OpenSSL) - not in the shipped EIF yet.
+# Trustless variant of `evm-rpc` (#77): the Helios light client verifies the EVM
+# RPC against a pinned weak-subjectivity checkpoint before accepting a FundsIn
+# receipt. Runtime-selectable: with HELIOS_EXECUTION_RPC set the enclave uses the
+# verified path, else the raw alloy path - which a release rgb-validation build
+# rejects at boot (production policy requires the trustless source). Shipped in
+# the production EIF. HEAVY build (2 alloy majors, revm, BLS, vendored OpenSSL).
 helios = ["evm-rpc", "dep:helios-ethereum"]
 
 [dev-dependencies]

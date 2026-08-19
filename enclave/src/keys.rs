@@ -7,15 +7,57 @@ use bitcoin::psbt::Psbt;
 use bitcoin::secp256k1::{Message, PublicKey, Secp256k1, SecretKey};
 use bitcoin::sighash::{EcdsaSighashType, SighashCache};
 use bitcoin::Network;
+use ed25519_dalek::{Signer, SigningKey as Ed25519SigningKey};
+use hmac::{Hmac, Mac};
 use k256::ecdsa::SigningKey as K256SigningKey;
 use secrecy::{ExposeSecret, SecretBox};
+use sha2::Sha512;
 use sha3::{Digest, Keccak256};
 use zeroize::Zeroize;
 
 use crate::error::{EnclaveError, Result};
 
-/// RGB coin type for colored (RGB asset) operations.
-const RGB_COIN_TYPE: u32 = 827167;
+/// RGB coin types for colored (RGB asset) operations. Mainnet/other split,
+/// matching `rgb-lib::utils::get_coin_type` — the host wallet derives the
+/// colored addresses this enclave must resolve.
+const RGB_COIN_TYPE_MAINNET: u32 = 827166;
+const RGB_COIN_TYPE_TESTNET: u32 = 827167;
+
+/// SLIP-44 coin type for Concordium.
+const CONCORDIUM_COIN_TYPE: u32 = 919;
+
+type HmacSha512 = Hmac<Sha512>;
+
+/// SLIP-0010 Ed25519 hardened key derivation. Returns the 32-byte private key at
+/// the given path. Every index is treated as hardened — SLIP-0010 Ed25519 only
+/// supports hardened derivation.
+fn derive_ed25519_slip10(seed: &[u8; 64], path: &[u32]) -> [u8; 32] {
+    // Master key: I = HMAC-SHA512(key="ed25519 seed", data=seed).
+    let mut mac = HmacSha512::new_from_slice(b"ed25519 seed").expect("HMAC accepts any key length");
+    mac.update(seed);
+    let mut i = mac.finalize().into_bytes();
+
+    let mut key = [0u8; 32];
+    let mut chain = [0u8; 32];
+    key.copy_from_slice(&i[0..32]);
+    chain.copy_from_slice(&i[32..64]);
+
+    // Child: I = HMAC-SHA512(key=chain, data=0x00 || key || ser32(index | hardened)).
+    for &index in path {
+        let hardened = index | 0x8000_0000;
+        let mut mac = HmacSha512::new_from_slice(&chain).expect("HMAC accepts any key length");
+        mac.update(&[0u8]);
+        mac.update(&key);
+        mac.update(&hardened.to_be_bytes());
+        i = mac.finalize().into_bytes();
+        key.copy_from_slice(&i[0..32]);
+        chain.copy_from_slice(&i[32..64]);
+    }
+
+    i.fill(0);
+    chain.zeroize();
+    key
+}
 
 /// Public key info extracted from KeyManager for responses.
 pub struct KeyInfo {
@@ -28,6 +70,7 @@ pub struct KeyInfo {
     pub master_fingerprint: [u8; 4],
     pub account_xpub_vanilla: String,
     pub account_xpub_colored: String,
+    pub ccd_ed25519_pub: [u8; 32],
 }
 
 /// Which BIP-86 account to derive from.
@@ -58,6 +101,11 @@ pub struct KeyManager {
     account_xpub_colored: Xpub,
     // Coin type used for vanilla derivation (0 = mainnet, 1 = testnet)
     vanilla_coin_type: u32,
+    // Coin type used for colored/RGB derivation (827166 mainnet, 827167 testnet)
+    colored_coin_type: u32,
+    // Concordium Ed25519 governance key (SLIP-0010, m/44'/919'/0'/0'/0').
+    concordium_secret: SecretBox<[u8; 32]>,
+    concordium_pub: [u8; 32],
 }
 
 impl KeyManager {
@@ -164,6 +212,11 @@ impl KeyManager {
             Network::Bitcoin => 0,
             _ => 1,
         };
+        // Colored (RGB) coin type: same mainnet / not-mainnet split.
+        let colored_coin_type = match network {
+            Network::Bitcoin => RGB_COIN_TYPE_MAINNET,
+            _ => RGB_COIN_TYPE_TESTNET,
+        };
 
         // Vanilla: m/86'/<coin_type>'/0'
         let vanilla_path = DerivationPath::from(vec![
@@ -176,16 +229,27 @@ impl KeyManager {
         })?;
         let account_xpub_vanilla = Xpub::from_priv(&secp, &account_xpriv_vanilla);
 
-        // Colored: m/86'/827167'/0'
+        // Colored: m/86'/<rgb_coin_type>'/0'
         let colored_path = DerivationPath::from(vec![
             ChildNumber::from_hardened_idx(86).unwrap(),
-            ChildNumber::from_hardened_idx(RGB_COIN_TYPE).unwrap(),
+            ChildNumber::from_hardened_idx(colored_coin_type).unwrap(),
             ChildNumber::from_hardened_idx(0).unwrap(),
         ]);
         let account_xpriv_colored = master.derive_priv(&secp, &colored_path).map_err(|e| {
             EnclaveError::InvalidKey(format!("BIP-86 colored derivation failed: {}", e))
         })?;
         let account_xpub_colored = Xpub::from_priv(&secp, &account_xpriv_colored);
+
+        // === Concordium: Ed25519 via SLIP-0010, m/44'/919'/0'/0'/0' (all hardened) ===
+        let mut concordium_secret_bytes = derive_ed25519_slip10(
+            seed_box.expose_secret(),
+            &[44, CONCORDIUM_COIN_TYPE, 0, 0, 0],
+        );
+        let concordium_signing = Ed25519SigningKey::from_bytes(&concordium_secret_bytes);
+        let concordium_pub = concordium_signing.verifying_key().to_bytes();
+        let concordium_secret = SecretBox::new(Box::new(concordium_secret_bytes));
+        concordium_secret_bytes.zeroize();
+        drop(concordium_signing);
 
         Ok(Self {
             seed: seed_box,
@@ -204,6 +268,9 @@ impl KeyManager {
             account_xpriv_colored,
             account_xpub_colored,
             vanilla_coin_type,
+            colored_coin_type,
+            concordium_secret,
+            concordium_pub,
         })
     }
 
@@ -241,6 +308,10 @@ impl KeyManager {
 
     pub fn evm_gas_tx_uncompressed_pub(&self) -> &[u8; 64] {
         &self.evm_gas_tx_uncompressed_pub
+    }
+
+    pub fn ccd_ed25519_pub(&self) -> &[u8; 32] {
+        &self.concordium_pub
     }
 
     pub fn expose_seed(&self) -> &[u8; 64] {
@@ -288,7 +359,7 @@ impl KeyManager {
         let account_type =
             if coin_type == ChildNumber::from_hardened_idx(self.vanilla_coin_type).unwrap() {
                 AccountType::Vanilla
-            } else if coin_type == ChildNumber::from_hardened_idx(RGB_COIN_TYPE).unwrap() {
+            } else if coin_type == ChildNumber::from_hardened_idx(self.colored_coin_type).unwrap() {
                 AccountType::Colored
             } else {
                 return None;
@@ -327,6 +398,14 @@ impl KeyManager {
         result[..64].copy_from_slice(&signature.to_bytes());
         result[64] = recovery_id.to_byte();
         Ok(result)
+    }
+
+    /// Sign a 32-byte Concordium account-transaction hash with the governance
+    /// Ed25519 key. Concordium signs the transaction hash directly with plain
+    /// Ed25519 (no additional hashing). Returns the 64-byte signature.
+    pub fn sign_ccd(&self, hash: &[u8; 32]) -> Result<([u8; 64], [u8; 32])> {
+        let signing_key = Ed25519SigningKey::from_bytes(self.concordium_secret.expose_secret());
+        Ok((signing_key.sign(hash).to_bytes(), self.concordium_pub))
     }
 
     /// Sign PSBT inputs matching our keys.
@@ -607,6 +686,33 @@ mod tests {
         assert!(km.resolve_account_and_child_path(&path).is_none());
     }
 
+    /// RGB coin type is network-scoped: 827166 on mainnet, 827167 elsewhere.
+    #[test]
+    fn colored_coin_type_follows_the_network() {
+        let km_main = KeyManager::from_seed([42u8; 64], Network::Bitcoin).unwrap();
+        let km_test = KeyManager::from_seed([42u8; 64], Network::Testnet).unwrap();
+
+        let mainnet_rgb = DerivationPath::from_str("m/86'/827166'/0'/0/3").unwrap();
+        let testnet_rgb = DerivationPath::from_str("m/86'/827167'/0'/0/3").unwrap();
+
+        let (account, child) = km_main
+            .resolve_account_and_child_path(&mainnet_rgb)
+            .unwrap();
+        assert!(matches!(account, AccountType::Colored));
+        assert_eq!(child.len(), 2);
+        assert!(km_main
+            .resolve_account_and_child_path(&testnet_rgb)
+            .is_none());
+
+        let (account, _) = km_test
+            .resolve_account_and_child_path(&testnet_rgb)
+            .unwrap();
+        assert!(matches!(account, AccountType::Colored));
+        assert!(km_test
+            .resolve_account_and_child_path(&mainnet_rgb)
+            .is_none());
+    }
+
     #[test]
     fn derive_btc_child_deterministic() {
         let km = KeyManager::from_seed([42u8; 64], Network::Testnet).unwrap();
@@ -724,6 +830,49 @@ mod tests {
         let recovered_address: [u8; 20] = pubkey_hash[12..].try_into().unwrap();
 
         assert_eq!(&recovered_address, km.evm_address());
+    }
+
+    #[test]
+    fn test_concordium_pubkey_deterministic() {
+        let seed = [0x42u8; 64];
+        let km1 = KeyManager::from_seed(seed, Network::Bitcoin).unwrap();
+        let km2 = KeyManager::from_seed(seed, Network::Bitcoin).unwrap();
+        assert_eq!(km1.ccd_ed25519_pub(), km2.ccd_ed25519_pub());
+        assert_eq!(km1.ccd_ed25519_pub().len(), 32);
+    }
+
+    #[test]
+    fn test_concordium_different_seeds_differ() {
+        let a = KeyManager::from_seed([0x42u8; 64], Network::Bitcoin).unwrap();
+        let b = KeyManager::from_seed([0x99u8; 64], Network::Bitcoin).unwrap();
+        assert_ne!(a.ccd_ed25519_pub(), b.ccd_ed25519_pub());
+    }
+
+    #[test]
+    fn test_sign_ccd_produces_valid_signature() {
+        use ed25519_dalek::{Signature, Verifier, VerifyingKey};
+
+        let km = KeyManager::from_seed([0x42u8; 64], Network::Bitcoin).unwrap();
+        let hash = [0xABu8; 32];
+        let (sig_bytes, public_key) = km.sign_ccd(&hash).unwrap();
+        assert_eq!(sig_bytes.len(), 64);
+
+        // The reported key must be the one that signed: the consumer maps the
+        // signature onto an account key index by it, so a mismatch would place the
+        // signature at the wrong index.
+        assert_eq!(&public_key, km.ccd_ed25519_pub());
+
+        let vk = VerifyingKey::from_bytes(&public_key).unwrap();
+        let sig = Signature::from_bytes(&sig_bytes);
+        assert!(vk.verify(&hash, &sig).is_ok());
+    }
+
+    #[test]
+    fn test_sign_ccd_deterministic() {
+        let km = KeyManager::from_seed([0x42u8; 64], Network::Bitcoin).unwrap();
+        let hash = [0xABu8; 32];
+        // Ed25519 (RFC 8032) is deterministic.
+        assert_eq!(km.sign_ccd(&hash).unwrap(), km.sign_ccd(&hash).unwrap());
     }
 
     /// Build a minimal 2-of-3 multisig PSBT for testing.

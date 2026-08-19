@@ -31,12 +31,19 @@ case "$ACTION" in
     # the next CID; the lock is released the moment this shell exits.
     exec 9>"$LOCK"
     flock -w 180 9 || { echo "could not acquire enclave start lock for CID $CID" >&2; exit 1; }
+    # DEBUG-MODE (op13 crash hunt): when ENCLAVE_DEBUG_MODE=1 in the unit env,
+    # run the enclave with --debug-mode so `nitro-cli console` can attach and
+    # surface the in-enclave panic/backtrace. NOTE: debug-mode ZEROES PCR0/1/2 —
+    # attestation is insecure and the clone flow only passes because both peers
+    # report zeroed PCRs. Never leave this enabled on a real production host.
+    DEBUG_ARG=()
+    [ "${ENCLAVE_DEBUG_MODE:-0}" = "1" ] && DEBUG_ARG=(--debug-mode)
     # Clear a stale instance of THIS enclave so the CPU pool is free (anti-E39).
     old="$(enc_id)"; [ -n "$old" ] && nitro-cli terminate-enclave --enclave-id "$old" 9>&- || true
     for attempt in 1 2 3 4 5; do
       if nitro-cli run-enclave \
         --eif-path "$EIF" --cpu-count "$CPU" --memory "$MEM" \
-        --enclave-cid "$CID" --enclave-name "$NAME" 9>&-; then
+        --enclave-cid "$CID" --enclave-name "$NAME" "${DEBUG_ARG[@]}" 9>&-; then
         exit 0
       fi
       echo "run-enclave CID $CID attempt $attempt failed; cleaning up and retrying" >&2
