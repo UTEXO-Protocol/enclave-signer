@@ -1239,9 +1239,405 @@ fn decode_display_txid(hex_str: &str) -> Result<[u8; 32]> {
     })
 }
 
+/// An IFA inflation (mint) fascia the enclave has walked and accepted.
+///
+/// The fascia is the mint's binding evidence the way the consignment is the
+/// send's: an inflation hands nothing to a counterparty, so rgb-lib exports
+/// the freshly-composed transition bundle + its seal witness instead
+/// (`Fascia`, serialized as serde JSON by the multisig flow). Unlike a
+/// consignment there is no ownership history to validate against the chain -
+/// the transition is new and its witness unbroadcast - so what the enclave
+/// checks is *shape and binding*, and authorisation comes from the validated
+/// EVM deposit the caller pairs it with.
+#[derive(Debug, Clone)]
+pub struct ValidatedInflationFascia {
+    /// RGB contract id the fascia inflates, canonical string form.
+    pub contract_id: String,
+    /// Txid of the seal witness - the transaction the PSBT under signature
+    /// must BE (`psbt.unsigned_tx.compute_txid()` equality).
+    pub witness_txid: bitcoin::Txid,
+    /// Sum of `OS_ASSET` fungible outputs across the inflation transitions:
+    /// the freshly minted units. `OS_INFLATION` allowance outputs are
+    /// deliberately excluded - they are remaining mint *capacity*, and
+    /// counting them would let a fascia claim allowance as minted value (#54).
+    pub minted_amount: u64,
+    /// OpIds (64-char lowercase hex) of the inflation transitions.
+    pub inflation_op_ids: Vec<String>,
+}
+
+/// Parse and walk an rgb-lib fascia file for the mint path.
+///
+/// Refuses: non-JSON / non-Fascia bytes, more than one contract per fascia,
+/// any `TS_BURN` or unknown transition type, and a fascia that mints zero
+/// `OS_ASSET` units.
+///
+/// `TS_TRANSFER` legs are ACCEPTED alongside the inflation, deliberately:
+/// when the inflation-rights allocation shares a utxo with other allocations
+/// (which happens as soon as one mint's allowance change lands on an occupied
+/// utxo - seen live on the second stand mint), spending that utxo forces
+/// rgb-lib to move the co-located allocations in the same witness. Those legs
+/// contribute NOTHING to `minted_amount`, so the deposit==minted binding is
+/// untouched. What the enclave cannot see is a transfer leg's destination (a
+/// fascia seal is txid/vout/blinding; telling "own change" from an attacker
+/// output needs the wallet descriptor) - that is checked by the cosigners'
+/// `InspectRgbTransfer` at ACK time, the same defence the pools send path
+/// relies on. A descriptor-aware enclave check is a refinement for the
+/// enclave team, same bucket as the create-utxos descriptor policy.
+pub fn validate_inflation_fascia(fascia_bytes: &[u8]) -> Result<ValidatedInflationFascia> {
+    use rgbstd::containers::Fascia;
+    use rgbstd::schema::AssignmentType;
+
+    let fascia: Fascia = serde_json::from_slice(fascia_bytes).map_err(|e| {
+        EnclaveError::CrossCheck(format!("fascia does not parse as rgb-lib fascia JSON: {e}"))
+    })?;
+
+    let witness_txid = fascia.witness_id();
+
+    let mut bundles = fascia.bundles().iter();
+    let (contract_id, bundle) = bundles
+        .next()
+        .expect("Fascia.bundles is a NonEmptyOrdMap - at least one entry by construction");
+    if bundles.next().is_some() {
+        return Err(EnclaveError::CrossCheck(
+            "mint fascia names more than one contract - refusing to sign a multi-contract \
+             witness"
+                .into(),
+        ));
+    }
+    let contract_id_str = contract_id.to_string();
+
+    let inflation = TransitionType::with(ifa::TS_INFLATION);
+    let transfer = TransitionType::with(ifa::TS_TRANSFER);
+    let asset_type = AssignmentType::with(ifa::OS_ASSET);
+    let mut minted_amount: u64 = 0;
+    let mut inflation_op_ids = Vec::new();
+
+    for known in &bundle.known_transitions {
+        let transition = &known.transition;
+        if transition.contract_id != *contract_id {
+            return Err(EnclaveError::CrossCheck(format!(
+                "fascia transition contract {} disagrees with the bundle key {contract_id_str}",
+                transition.contract_id
+            )));
+        }
+        if transition.transition_type == transfer {
+            // Co-located allocations moving off the spent utxos; see the
+            // function doc. Not counted toward minted_amount.
+            continue;
+        }
+        if transition.transition_type != inflation {
+            return Err(EnclaveError::CrossCheck(format!(
+                "mint fascia carries transition type {} - only IFA TS_INFLATION ({}) and \
+                 accompanying TS_TRANSFER ({}) legs are allowed in a mint witness",
+                transition.transition_type,
+                ifa::TS_INFLATION,
+                ifa::TS_TRANSFER
+            )));
+        }
+        for (assignment_type, assigns) in transition.assignments.iter() {
+            if *assignment_type != asset_type {
+                continue;
+            }
+            for assign in assigns.as_fungible() {
+                minted_amount = minted_amount
+                    .checked_add(assign.as_revealed_state().as_u64())
+                    .ok_or_else(|| {
+                        EnclaveError::CrossCheck("fascia minted amount overflows u64".into())
+                    })?;
+            }
+        }
+        inflation_op_ids.push(known.opid.to_string());
+    }
+
+    if minted_amount == 0 {
+        return Err(EnclaveError::CrossCheck(
+            "mint fascia mints zero OS_ASSET units - nothing this signature would be \
+             authorising"
+                .into(),
+        ));
+    }
+
+    Ok(ValidatedInflationFascia {
+        contract_id: contract_id_str,
+        witness_txid,
+        minted_amount,
+        inflation_op_ids,
+    })
+}
+
+/// A rebalance-origin burn fascia the enclave has walked and accepted.
+///
+/// Same evidence model as [`ValidatedInflationFascia`]: a bridge burn hands
+/// nothing to a counterparty, so its binding evidence is the fascia. Unlike a
+/// mint there is no EVM deposit pairing it - authorisation is structural: the
+/// fascia may only destroy units of the pinned asset, in the exact declared
+/// amount, and the signature can finalise nothing but that witness.
+#[derive(Debug, Clone)]
+pub struct ValidatedBurnFascia {
+    /// RGB contract id the fascia burns, canonical string form.
+    pub contract_id: String,
+    /// Txid of the seal witness - the transaction the PSBT under signature
+    /// must BE (`psbt.unsigned_tx.compute_txid()` equality).
+    pub witness_txid: bitcoin::Txid,
+    /// Sum of `MS_BURNED_ASSET` metadata across the burn transitions: the
+    /// units this witness destroys. `OS_ASSET` change assignments riding the
+    /// same transitions are deliberately NOT counted - they return to the
+    /// wallet and destroy nothing.
+    pub burned_amount: u64,
+    /// OpIds (64-char lowercase hex) of the burn transitions.
+    pub burn_op_ids: Vec<String>,
+}
+
+/// Parse and walk an rgb-lib fascia file for the rebalance-burn path.
+///
+/// Refuses: non-JSON / non-Fascia bytes, more than one contract per fascia,
+/// any `TS_INFLATION` or unknown transition type, and a fascia that burns
+/// zero units.
+///
+/// `TS_TRANSFER` legs are ACCEPTED alongside the burn for the same reason the
+/// mint path accepts them (co-located allocations forced to move when their
+/// utxo is spent); they contribute nothing to `burned_amount`, and their
+/// destinations are covered by the cosigners' `InspectRgbTransfer` at ACK
+/// time, exactly as on the mint and send paths.
+pub fn validate_burn_fascia(fascia_bytes: &[u8]) -> Result<ValidatedBurnFascia> {
+    use rgbstd::containers::Fascia;
+
+    let fascia: Fascia = serde_json::from_slice(fascia_bytes).map_err(|e| {
+        EnclaveError::CrossCheck(format!("fascia does not parse as rgb-lib fascia JSON: {e}"))
+    })?;
+
+    let witness_txid = fascia.witness_id();
+
+    let mut bundles = fascia.bundles().iter();
+    let (contract_id, bundle) = bundles
+        .next()
+        .expect("Fascia.bundles is a NonEmptyOrdMap - at least one entry by construction");
+    if bundles.next().is_some() {
+        return Err(EnclaveError::CrossCheck(
+            "burn fascia names more than one contract - refusing to sign a multi-contract \
+             witness"
+                .into(),
+        ));
+    }
+    let contract_id_str = contract_id.to_string();
+
+    let burn = TransitionType::with(ifa::TS_BURN);
+    let transfer = TransitionType::with(ifa::TS_TRANSFER);
+    let burned_meta_key = MetaType::with(ifa::MS_BURNED_ASSET);
+    let mut burned_amount: u64 = 0;
+    let mut burn_op_ids = Vec::new();
+
+    for known in &bundle.known_transitions {
+        let transition = &known.transition;
+        if transition.contract_id != *contract_id {
+            return Err(EnclaveError::CrossCheck(format!(
+                "fascia transition contract {} disagrees with the bundle key {contract_id_str}",
+                transition.contract_id
+            )));
+        }
+        if transition.transition_type == transfer {
+            // Co-located allocations moving off the spent utxos; see the
+            // function doc. Not counted toward burned_amount.
+            continue;
+        }
+        if transition.transition_type != burn {
+            return Err(EnclaveError::CrossCheck(format!(
+                "burn fascia carries transition type {} - only IFA TS_BURN ({}) and \
+                 accompanying TS_TRANSFER ({}) legs are allowed in a burn witness",
+                transition.transition_type,
+                ifa::TS_BURN,
+                ifa::TS_TRANSFER
+            )));
+        }
+
+        let mut transition_burned: Option<u64> = None;
+        for (mt, mv) in &transition.metadata {
+            if *mt != burned_meta_key {
+                continue;
+            }
+            let raw: &[u8] = mv.as_unconfined().as_slice();
+            let bytes: [u8; 8] = raw.try_into().map_err(|_| {
+                EnclaveError::CrossCheck(format!(
+                    "MS_BURNED_ASSET metadata is {} bytes, expected 8 (strict-encoded u64)",
+                    raw.len()
+                ))
+            })?;
+            transition_burned = Some(u64::from_le_bytes(bytes));
+        }
+        let Some(transition_burned) = transition_burned else {
+            // rgbstd validation rejects a TS_BURN with no MS_BURNED_ASSET, so
+            // this is a schema mismatch, not a legitimate zero.
+            return Err(EnclaveError::CrossCheck(
+                "burn transition carries no MS_BURNED_ASSET metadata - schema mismatch, \
+                 refusing to sign"
+                    .into(),
+            ));
+        };
+        burned_amount = burned_amount
+            .checked_add(transition_burned)
+            .ok_or_else(|| EnclaveError::CrossCheck("fascia burned amount overflows u64".into()))?;
+        burn_op_ids.push(known.opid.to_string());
+    }
+
+    if burned_amount == 0 {
+        return Err(EnclaveError::CrossCheck(
+            "burn fascia destroys zero units - nothing this signature would be authorising".into(),
+        ));
+    }
+
+    Ok(ValidatedBurnFascia {
+        contract_id: contract_id_str,
+        witness_txid,
+        burned_amount,
+        burn_op_ids,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The fascia of the FIRST live mint (stand slot 2, hub operation 5),
+    /// captured verbatim from the hub's file store. Its witness transaction is
+    /// on UTEXO Signet as
+    /// `9010bf45acc9919dfed1a1473e5bc0b9735bd30b8aaffa039f595b86d285b46f`
+    /// (height 527780), and its opid is the very settlement_data the deposit
+    /// carried - so these assertions pin the parser to data that provably
+    /// cleared the whole path.
+    const LIVE_MINT_FASCIA: &[u8] = include_bytes!("../../../tests/fixtures/mint-fascia.json");
+
+    #[test]
+    fn parses_the_live_mint_fascia() {
+        let f = validate_inflation_fascia(LIVE_MINT_FASCIA).expect("live fascia must validate");
+        assert_eq!(
+            f.contract_id,
+            "rgb:WOLU~Vc3-jCOii6g-35VF9Xz-FVTweL7-v9klRrl-4OTd2Mo"
+        );
+        // OS_ASSET only. The same transition carries 999_999_900_000 of
+        // OS_INFLATION allowance; counting it would be the #54 bug.
+        assert_eq!(f.minted_amount, 100_000);
+        // txid excludes witness data, so the unsigned witness tx in the fascia
+        // has exactly the txid the signed transaction confirmed under.
+        assert_eq!(
+            f.witness_txid.to_string(),
+            "9010bf45acc9919dfed1a1473e5bc0b9735bd30b8aaffa039f595b86d285b46f"
+        );
+        assert_eq!(
+            f.inflation_op_ids,
+            vec!["ee69b9b60d3044c94b9e5586016d6852f767125061637789a006ff0ab092c49c".to_string()]
+        );
+    }
+
+    #[test]
+    fn refuses_a_transfer_only_fascia() {
+        // Transfer legs are allowed ALONGSIDE an inflation, but a fascia with
+        // no inflation at all mints nothing - the zero-mint refusal holds.
+        let tampered = String::from_utf8_lossy(LIVE_MINT_FASCIA)
+            .replace("\"transitionType\":8000", "\"transitionType\":10000");
+        let err = validate_inflation_fascia(tampered.as_bytes()).unwrap_err();
+        assert!(
+            err.to_string().contains("mints zero OS_ASSET"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn refuses_a_burn_in_a_mint_fascia() {
+        let tampered = String::from_utf8_lossy(LIVE_MINT_FASCIA)
+            .replace("\"transitionType\":8000", "\"transitionType\":8010");
+        let err = validate_inflation_fascia(tampered.as_bytes()).unwrap_err();
+        assert!(
+            err.to_string().contains("only IFA TS_INFLATION"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn refuses_garbage_fascia_bytes() {
+        assert!(validate_inflation_fascia(b"not json").is_err());
+        assert!(validate_inflation_fascia(b"{}").is_err());
+    }
+
+    /// The live mint fascia rewritten into a structurally valid burn: the
+    /// transition becomes IFA TS_BURN and its metadata key becomes
+    /// MS_BURNED_ASSET carrying 100_000 as a strict-encoded u64 LE. Witness
+    /// tx, contract and opid stay untouched, so the positive assertions keep
+    /// pinning real chain-cleared data.
+    fn burn_fascia() -> String {
+        String::from_utf8_lossy(LIVE_MINT_FASCIA)
+            .replace("\"transitionType\":8000", "\"transitionType\":8010")
+            .replace(
+                "\"1000\":\"6089a3d4e8000000\"",
+                "\"1001\":\"a086010000000000\"",
+            )
+    }
+
+    #[test]
+    fn parses_a_burn_fascia() {
+        let f = validate_burn_fascia(burn_fascia().as_bytes()).expect("burn fascia must validate");
+        assert_eq!(
+            f.contract_id,
+            "rgb:WOLU~Vc3-jCOii6g-35VF9Xz-FVTweL7-v9klRrl-4OTd2Mo"
+        );
+        assert_eq!(f.burned_amount, 100_000);
+        assert_eq!(
+            f.witness_txid.to_string(),
+            "9010bf45acc9919dfed1a1473e5bc0b9735bd30b8aaffa039f595b86d285b46f"
+        );
+        assert_eq!(
+            f.burn_op_ids,
+            vec!["ee69b9b60d3044c94b9e5586016d6852f767125061637789a006ff0ab092c49c".to_string()]
+        );
+    }
+
+    #[test]
+    fn refuses_a_mint_in_a_burn_fascia() {
+        // The untampered live fascia IS a mint - the burn walk must refuse
+        // TS_INFLATION outright, the mirror of refuses_a_burn_in_a_mint_fascia.
+        let err = validate_burn_fascia(LIVE_MINT_FASCIA).unwrap_err();
+        assert!(
+            err.to_string().contains("only IFA TS_BURN"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn refuses_a_transfer_only_burn_fascia() {
+        // Transfer legs may ride a burn witness, but a fascia with no burn at
+        // all destroys nothing - the zero-burn refusal holds.
+        let tampered = burn_fascia().replace("\"transitionType\":8010", "\"transitionType\":10000");
+        let err = validate_burn_fascia(tampered.as_bytes()).unwrap_err();
+        assert!(
+            err.to_string().contains("destroys zero units"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn refuses_a_burn_without_burned_metadata() {
+        let tampered = burn_fascia().replace("\"1001\":", "\"1000\":");
+        let err = validate_burn_fascia(tampered.as_bytes()).unwrap_err();
+        assert!(
+            err.to_string().contains("no MS_BURNED_ASSET"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn refuses_short_burned_metadata() {
+        let tampered = burn_fascia().replace("\"a086010000000000\"", "\"a08601\"");
+        let err = validate_burn_fascia(tampered.as_bytes()).unwrap_err();
+        assert!(
+            err.to_string().contains("expected 8"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn refuses_garbage_burn_fascia_bytes() {
+        assert!(validate_burn_fascia(b"not json").is_err());
+        assert!(validate_burn_fascia(b"{}").is_err());
+    }
 
     // Fixtures borrowed from the rgb-consignment-parser repo
     // (`test-data/consignment_out` and `test-data/asset`). Both are

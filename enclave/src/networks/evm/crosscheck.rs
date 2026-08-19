@@ -54,21 +54,15 @@ pub fn assert_witnesses_confirmed(validated: &ValidatedConsignment) -> Result<()
 pub fn validate_funds_out_transfer(
     params: &FundsOutParams,
     validated: &ValidatedConsignment,
+    burn_releases_allowed: bool,
 ) -> Result<()> {
     use crate::networks::rgb::validation::ifa;
 
     let last = validated.last_transition.as_ref().ok_or_else(|| {
         EnclaveError::CrossCheck(
-            "pools fundsOut requires a consignment with at least one transition".into(),
+            "fundsOut requires a consignment with at least one transition".into(),
         )
     })?;
-    if last.transition_type != ifa::TS_TRANSFER {
-        return Err(EnclaveError::CrossCheck(format!(
-            "pools fundsOut requires a Transfer transition (last transition_type = {}, want {})",
-            last.transition_type,
-            ifa::TS_TRANSFER
-        )));
-    }
 
     // The consignment, not the listener-supplied `calldata_amount`, is the
     // authority on how much RGB moved.
@@ -76,13 +70,42 @@ pub fn validate_funds_out_transfer(
         .amount
         .try_into()
         .map_err(|_| EnclaveError::CrossCheck("fundsOut amount exceeds u64 range".into()))?;
-    if last.total_output_amount < calldata_amount {
-        return Err(EnclaveError::CrossCheck(format!(
-            "transfer amount mismatch: consignment total_output_amount ({}) < calldata amount ({})",
-            last.total_output_amount, calldata_amount
-        )));
+
+    match (last.transition_type, burn_releases_allowed) {
+        (t, _) if t == ifa::TS_TRANSFER => {
+            if last.total_output_amount < calldata_amount {
+                return Err(EnclaveError::CrossCheck(format!(
+                    "transfer amount mismatch: consignment total_output_amount ({}) < calldata amount ({})",
+                    last.total_output_amount, calldata_amount
+                )));
+            }
+            Ok(())
+        }
+        (t, false) if t == ifa::TS_BURN => Err(EnclaveError::CrossCheck(
+            "burn releases are disabled on this enclave (set ALLOW_BURN_RELEASES=1 to enable the \
+             unlock flow)"
+                .into(),
+        )),
+        (t, true) if t == ifa::TS_BURN => {
+            let burned = last.burned_asset_amount.ok_or_else(|| {
+                EnclaveError::CrossCheck(
+                    "burn transition is missing MS_BURNED_ASSET metadata — cannot validate amount"
+                        .into(),
+                )
+            })?;
+            if burned < calldata_amount {
+                return Err(EnclaveError::CrossCheck(format!(
+                    "burn amount mismatch: consignment burned_asset_amount ({burned}) < calldata amount ({calldata_amount})"
+                )));
+            }
+            Ok(())
+        }
+        (other, _) => Err(EnclaveError::CrossCheck(format!(
+            "fundsOut requires a Transfer ({}) or Burn ({}) transition (last transition_type = {other})",
+            ifa::TS_TRANSFER,
+            ifa::TS_BURN
+        ))),
     }
-    Ok(())
 }
 
 // REMOVED: `apply_op_id_binding` / `op_id_to_calldata_id` (audit TEE-SE-02 /
@@ -360,7 +383,7 @@ mod tests {
         fn passes_when_total_output_covers_calldata_amount() {
             let cd = mock_funds_out_calldata(1000);
             let validated = validated_with_last(transfer_transition(1000));
-            assert!(validate_funds_out_transfer(&params_of(&cd), &validated).is_ok());
+            assert!(validate_funds_out_transfer(&params_of(&cd), &validated, false).is_ok());
         }
 
         #[test]
@@ -388,7 +411,7 @@ mod tests {
         fn passes_when_total_output_exceeds_calldata_amount() {
             let cd = mock_funds_out_calldata(1000);
             let validated = validated_with_last(transfer_transition(2000));
-            assert!(validate_funds_out_transfer(&params_of(&cd), &validated).is_ok());
+            assert!(validate_funds_out_transfer(&params_of(&cd), &validated, false).is_ok());
         }
 
         /// P0 regression: even with a valid consignment that deserializes
@@ -399,7 +422,7 @@ mod tests {
         fn rejects_when_total_output_less_than_calldata_amount() {
             let cd = mock_funds_out_calldata(1_000_000_000);
             let validated = validated_with_last(transfer_transition(1));
-            let err = validate_funds_out_transfer(&params_of(&cd), &validated).unwrap_err();
+            let err = validate_funds_out_transfer(&params_of(&cd), &validated, false).unwrap_err();
             assert!(
                 err.to_string().contains("transfer amount mismatch"),
                 "expected transfer amount mismatch, got: {err}"
@@ -411,13 +434,15 @@ mod tests {
         /// mint/burn stays off until it's wired by contract address.
         #[test]
         fn rejects_when_last_transition_is_not_transfer() {
+            // TS_BURN is its own (switch-gated) flow now - see the burn tests
+            // below - so the foreign-type refusal is pinned with an inflation.
             let cd = mock_funds_out_calldata(500);
             let mut t = transfer_transition(500);
-            t.transition_type = ifa::TS_BURN;
+            t.transition_type = ifa::TS_INFLATION;
             let validated = validated_with_last(t);
-            let err = validate_funds_out_transfer(&params_of(&cd), &validated).unwrap_err();
+            let err = validate_funds_out_transfer(&params_of(&cd), &validated, false).unwrap_err();
             assert!(
-                err.to_string().contains("requires a Transfer transition"),
+                err.to_string().contains("requires a Transfer"),
                 "expected Transfer-required rejection, got: {err}"
             );
         }
@@ -438,11 +463,43 @@ mod tests {
                 non_mined_witness_txids: vec![],
                 transitions_by_witness: vec![],
             };
-            let err = validate_funds_out_transfer(&params_of(&cd), &validated).unwrap_err();
+            let err = validate_funds_out_transfer(&params_of(&cd), &validated, false).unwrap_err();
             assert!(
                 err.to_string().contains("at least one transition"),
                 "expected no-transition rejection, got: {err}"
             );
+        }
+
+        fn burn_transition(burned: Option<u64>) -> TransitionSummary {
+            TransitionSummary {
+                op_id: "burn-op".into(),
+                transition_type: ifa::TS_BURN,
+                total_output_amount: 0,
+                asset_output_amount: 0,
+                outputs: Vec::new(),
+                burned_asset_amount: burned,
+            }
+        }
+
+        /// A burn consignment with the switch off must be rejected - burn
+        /// releases exist only where `ALLOW_BURN_RELEASES` enables them, so
+        /// an enclave without the switch behaves exactly as before.
+        #[test]
+        fn burn_rejected_when_releases_disabled() {
+            let cd = mock_funds_out_calldata(500);
+            let validated = validated_with_last(burn_transition(Some(500)));
+            let err = validate_funds_out_transfer(&params_of(&cd), &validated, false).unwrap_err();
+            assert!(
+                err.to_string().contains("burn releases are disabled"),
+                "expected disabled-switch rejection, got: {err}"
+            );
+        }
+
+        #[test]
+        fn burn_passes_when_burned_covers_calldata_amount() {
+            let cd = mock_funds_out_calldata(500);
+            let validated = validated_with_last(burn_transition(Some(500)));
+            assert!(validate_funds_out_transfer(&params_of(&cd), &validated, true).is_ok());
         }
     }
 

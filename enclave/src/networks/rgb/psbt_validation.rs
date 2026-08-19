@@ -21,6 +21,9 @@ use crate::error::{EnclaveError, Result};
 /// Consumed by the **soft** in-memory replay guard
 /// ([`crate::state::EnclaveState::op_replay_guard`]) — see its doc for why
 /// this is defense-in-depth and not a sufficient double-spend control (#84).
+/// The guard is in-memory and volatile, so the key changing when the operator
+/// adds a deployment costs at most one TTL window of dedup, with nothing to
+/// migrate.
 pub fn psbt_operation_key(
     chain_id: u64,
     bridge_contract: &[u8; 20],

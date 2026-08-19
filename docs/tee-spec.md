@@ -249,6 +249,28 @@ durable double-spend guard is on-chain.
 
 [Sign PSBT](diagrams/04-seq-sign-psbt.md)
 
+### 7.2b Pool rebalancing and rebalance burns (the sourceless Signs)
+
+`rebalanceLiquidity` moves no tokens - it re-books per-chain liquidity - and is
+operator-raised, so no inbound event exists to prove. Exactly two `Sign` shapes
+are accepted with **no source network** (`handle_sign_sourceless`):
+
+- **EVM destination**, gated on the `rebalanceLiquidity` selector alone: a
+  sourceless request carrying any other calldata is refused. Everything else
+  still applies - the pinned proxy contract and chain id, the deadline, the
+  selector whitelist, the canonical calldata decode, and the `TeeRebalance`
+  EIP-712 digest. Replay protection is the contract's `teeNonce` (the digest
+  commits to it), not the in-memory guard, which keys on an EVM source tx a
+  rebalance does not have.
+- **RGB burn destination** (`RGB_BURN`): the debit-RGB leg of a rebalance,
+  where the bridge burns its own units - no deposit and no consignment exist
+  at sign time. Authorization is structural: the fascia must anchor the exact
+  PSBT being signed (unsigned txid == fascia witness txid), name only the
+  operator-pinned `RGB_ASSET_ID`, carry ONLY IFA `TS_BURN` transitions (plus
+  co-located `TS_TRANSFER` change legs, uncounted), and destroy exactly the
+  declared `burn_amount`. Fee-rate sanity applies as on the send and mint
+  paths.
+
 ### 7.3 Plain-BTC PSBT (`SignBtc`, M-05 / #102)
 
 Vanilla (non-bridge) BTC signing is its own request and can no longer be

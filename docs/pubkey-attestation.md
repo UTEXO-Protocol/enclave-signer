@@ -86,7 +86,7 @@ canonical_bundle =
     u32_be(len(account_xpub_colored))  || account_xpub_colored_utf8
     u32_be(len(evm_uncompressed_pub))  || evm_uncompressed_pub
     u32_be(8)                          || chain_id_be8
-    u32_be(len(bridge_contract))       || bridge_contract       // 20 bytes (zeros = unset)
+    u32_be(len(bridge_contract))       || bridge_contract       // 20*N bytes (empty = unset)
     u32_be(len(rgb_asset_id))          || rgb_asset_id_utf8
 ```
 
@@ -97,8 +97,20 @@ maliciously-redirected enclave is observable through this commitment. (The
 attestation-bundle/proto field keeps the legacy name `bridge_contract`; its
 value is the MultisigProxy from `EVM_PROXY_CONTRACT_ADDRESS`.)
 Production deployments MUST set all three; the commitment for a dev /
-mock build with no env is `chain_id=0`, `bridge_contract=20 zero bytes`,
+mock build with no env is `chain_id=0`, `bridge_contract=empty`,
 `rgb_asset_id=""`.
+
+`bridge_contract` carries **one 20-byte address per pinned deployment**,
+concatenated in `BRIDGE_CONTRACT` order, because one federation can serve
+several `Bridge` + `MultisigProxy` pairs on a chain (pools and mint/burn are
+separate deployments). A single-deployment enclave therefore commits to exactly
+the same 20 bytes as before, so existing attestations and verifiers are
+unaffected; only a multi-deployment enclave produces a longer field, which the
+length prefix keeps unambiguous.
+
+A verifier that treats this field as opaque length-prefixed bytes needs no
+change. One that asserts `len == 20` must relax to `len % 20 == 0` — and note
+that the empty case now means "unset", where it previously meant 20 zero bytes.
 
 The verifier MUST use the same field set, the same order, and the same
 length-prefix encoding. The reference encoder is `canonical_pubkey_bundle`

@@ -71,6 +71,15 @@ const BRIDGE_FUNDS_IN_SIG: &str = "BridgeFundsIn(bytes32,bytes32,address,uint256
 /// `operationId` is `topic1` (topic0 is the event signature itself).
 const BFI_OPERATION_ID_TOPIC: usize = 1;
 
+/// Canonical lean RGB-correlation event, verbatim from `bridge-smart-contracts`
+/// `BaseBridge.sol`. A deposit emits it ALONGSIDE `BridgeFundsIn`; a REBALANCE
+/// credit leg emits ONLY this one, and its `rgbOpId` (topic2) carries exactly
+/// the RGB operation id a rebalance-origin mint is verified against.
+const LEAN_FUNDS_IN_SIG: &str = "FundsIn(address,uint256,uint256)";
+
+/// `rgbOpId` is `topic2` of the lean event (topic1 is the indexed sender).
+const LFI_RGB_OP_ID_TOPIC: usize = 2;
+
 /// Byte offsets of the NON-INDEXED `BridgeFundsIn` data words (each 32 bytes).
 /// Order: senderNonce, amount(gross), netAmount, tokenCommission,
 /// nativeCommission, sourceChainId, destinationChainId, <string offset>.
@@ -179,82 +188,131 @@ pub fn verify_funds_in_event(
         .logs
         .iter()
         .filter(|log| {
-            log.address == *bridge_contract
+            &log.address == bridge_contract
                 && log.topics.first().is_some_and(|t| *t == bridge_topic0)
         })
         .collect();
     if candidates.len() > 1 {
         return Err(EnclaveError::CrossCheck(format!(
-            "ambiguous: multiple BridgeFundsIn logs from bridge contract 0x{} in tx 0x{} - \
+            "ambiguous: multiple BridgeFundsIn logs from the pinned bridge contract {} in tx 0x{} - \
              refusing to guess which authorises this release",
             hex::encode(bridge_contract),
             hex::encode(evm_tx_hash)
         )));
     }
-    let log = candidates.first().copied().ok_or_else(|| {
-        EnclaveError::CrossCheck(format!(
-            "no BridgeFundsIn log from bridge contract 0x{} in tx 0x{}",
-            hex::encode(bridge_contract),
-            hex::encode(evm_tx_hash)
-        ))
-    })?;
+    let operation_id: [u8; 32] = if let Some(log) = candidates.first().copied() {
+        // 5/6/7. Bind operationId + amounts. The three indexed fields are in
+        //        topics; everything else comes from `data`.
+        let operation_id = log
+            .topics
+            .get(BFI_OPERATION_ID_TOPIC)
+            .ok_or_else(|| {
+                EnclaveError::CrossCheck(format!(
+                    "BridgeFundsIn log has {} topic(s); operationId is expected in topic{BFI_OPERATION_ID_TOPIC}",
+                    log.topics.len()
+                ))
+            })?;
 
-    // 5/6/7. Bind operationId + amounts. The three indexed fields are in topics;
-    //        everything else comes from `data`.
-    let operation_id = log
-        .topics
-        .get(BFI_OPERATION_ID_TOPIC)
-        .ok_or_else(|| {
+        if log.data.len() < BFI_MIN_DATA_LEN {
+            return Err(EnclaveError::CrossCheck(format!(
+                "BridgeFundsIn data too short: {} bytes (need {BFI_MIN_DATA_LEN})",
+                log.data.len()
+            )));
+        }
+        let gross = decode_u64_word(&log.data, BFI_AMOUNT_OFF, "amount")?;
+        let net = decode_u64_word(&log.data, BFI_NET_AMOUNT_OFF, "netAmount")?;
+        let commission = decode_u64_word(&log.data, BFI_TOKEN_COMMISSION_OFF, "tokenCommission")?;
+
+        if expected_operation_id != operation_id.as_slice() {
+            return Err(EnclaveError::CrossCheck(format!(
+                "FundsIn operationId mismatch: on-chain 0x{} != request 0x{}",
+                hex::encode(operation_id),
+                hex::encode(expected_operation_id)
+            )));
+        }
+
+        check_eq("amount", gross, expected_gross_amount)?;
+        check_eq("tokenCommission", commission, expected_commission)?;
+
+        // Bounded, not equal: the Bridge credits the MEASURED balance delta while
+        // `amount` stays nominal, so a fee-on-transfer token legitimately nets less
+        // (Bridge.sol:501-508). Only `net` too HIGH is unsafe — it would mint more
+        // RGB than the deposit backs.
+        let max_net = gross.checked_sub(commission).ok_or_else(|| {
             EnclaveError::CrossCheck(format!(
                 "BridgeFundsIn log has {} topic(s); operationId is expected in topic{BFI_OPERATION_ID_TOPIC}",
                 log.topics.len()
             ))
         })?;
+        if net > max_net {
+            return Err(EnclaveError::CrossCheck(format!(
+                "BridgeFundsIn netAmount ({net}) exceeds gross - commission ({max_net}) - refusing \
+                 to sign a release for more than the deposit backs"
+            )));
+        }
+        if net < max_net {
+            tracing::warn!(
+                net,
+                max_net,
+                "BridgeFundsIn netAmount is below gross - commission; expected only for a \
+                 fee-on-transfer token, where the Bridge credits the measured balance delta"
+            );
+        }
+        *operation_id
+    } else {
+        // No BridgeFundsIn at all: the REBALANCE credit leg emits only the lean
+        // RGB-correlation event, whose `rgbOpId` IS the RGB operation id this
+        // mint is verified against — the id-space concern that removed the old
+        // plain-FundsIn fallback applies to deposits, and a deposit always
+        // carries BridgeFundsIn, so this branch never fires for one. Same
+        // pinned-address and fail-closed rules as above.
+        let lean_topic0 = event_topic0(LEAN_FUNDS_IN_SIG);
+        let lean: Vec<&LogEntry> = receipt
+            .logs
+            .iter()
+            .filter(|log| {
+                &log.address == bridge_contract
+                    && log.topics.first().is_some_and(|t| *t == lean_topic0)
+            })
+            .collect();
+        if lean.len() > 1 {
+            return Err(EnclaveError::CrossCheck(format!(
+                "ambiguous: multiple FundsIn logs from the pinned bridge contract {} in tx 0x{} - \
+                 refusing to guess which authorises this release",
+                hex::encode(bridge_contract),
+                hex::encode(evm_tx_hash)
+            )));
+        }
+        let log = lean.first().copied().ok_or_else(|| {
+            EnclaveError::CrossCheck(format!(
+                "no BridgeFundsIn or FundsIn log from the pinned bridge contract {} in tx 0x{}",
+                hex::encode(bridge_contract),
+                hex::encode(evm_tx_hash)
+            ))
+        })?;
 
-    if log.data.len() < BFI_MIN_DATA_LEN {
-        return Err(EnclaveError::CrossCheck(format!(
-            "BridgeFundsIn data too short: {} bytes (need {BFI_MIN_DATA_LEN})",
-            log.data.len()
-        )));
-    }
-    let gross = decode_u64_word(&log.data, BFI_AMOUNT_OFF, "amount")?;
-    let net = decode_u64_word(&log.data, BFI_NET_AMOUNT_OFF, "netAmount")?;
-    let commission = decode_u64_word(&log.data, BFI_TOKEN_COMMISSION_OFF, "tokenCommission")?;
+        let rgb_op_id = log.topics.get(LFI_RGB_OP_ID_TOPIC).ok_or_else(|| {
+            EnclaveError::CrossCheck(format!(
+                "FundsIn log has {} topic(s); rgbOpId is expected in topic{LFI_RGB_OP_ID_TOPIC}",
+                log.topics.len()
+            ))
+        })?;
+        if expected_operation_id != rgb_op_id.as_slice() {
+            return Err(EnclaveError::CrossCheck(format!(
+                "FundsIn rgbOpId mismatch: on-chain 0x{} != request 0x{}",
+                hex::encode(rgb_op_id),
+                hex::encode(expected_operation_id)
+            )));
+        }
 
-    if expected_operation_id != operation_id.as_slice() {
-        return Err(EnclaveError::CrossCheck(format!(
-            "FundsIn operationId mismatch: on-chain 0x{} != request 0x{}",
-            hex::encode(operation_id),
-            hex::encode(expected_operation_id)
-        )));
-    }
+        let amount = decode_u64_word(&log.data, 0, "amount")?;
+        check_eq("amount", amount, expected_gross_amount)?;
+        // The rebalance credit leg carries no commission; a nonzero expectation
+        // cannot be satisfied by this event — refuse rather than skip.
+        check_eq("tokenCommission", 0, expected_commission)?;
 
-    check_eq("amount", gross, expected_gross_amount)?;
-    check_eq("tokenCommission", commission, expected_commission)?;
-
-    // Bounded, not equal: the Bridge credits the MEASURED balance delta while
-    // `amount` stays nominal, so a fee-on-transfer token legitimately nets less
-    // (Bridge.sol:501-508). Only `net` too HIGH is unsafe — it would mint more
-    // RGB than the deposit backs.
-    let max_net = gross.checked_sub(commission).ok_or_else(|| {
-        EnclaveError::CrossCheck(format!(
-            "BridgeFundsIn commission ({commission}) exceeds gross amount ({gross})"
-        ))
-    })?;
-    if net > max_net {
-        return Err(EnclaveError::CrossCheck(format!(
-            "BridgeFundsIn netAmount ({net}) exceeds gross - commission ({max_net}) - refusing \
-             to sign a release for more than the deposit backs"
-        )));
-    }
-    if net < max_net {
-        tracing::warn!(
-            net,
-            max_net,
-            "BridgeFundsIn netAmount is below gross - commission; expected only for a \
-             fee-on-transfer token, where the Bridge credits the measured balance delta"
-        );
-    }
+        *rgb_op_id
+    };
 
     // 8. Confirmation depth against the current head. `eth_blockNumber` and the
     //    receipt are two separate calls, so a reorg between them is possible;
@@ -695,8 +753,10 @@ mod tests {
         }
     }
 
-    /// The RGB-only companion `FundsIn(address,uint256 rgbOpId,uint256)`. Its id
-    /// is an RGB id, so the predicate must never fall back to this shape.
+    /// The RGB-only companion `FundsIn(address,uint256 rgbOpId,uint256)`. When a
+    /// `BridgeFundsIn` is present it always wins; the companion is consulted
+    /// ONLY when no `BridgeFundsIn` exists (the rebalance credit leg), and even
+    /// then its rgbOpId must equal the expected operation id exactly.
     fn rgb_companion_log(rgb_op_id: u64, net: u64) -> LogEntry {
         LogEntry {
             address: BRIDGE,
@@ -706,6 +766,19 @@ mod tests {
                 word(rgb_op_id),
             ],
             data: word(net).to_vec(),
+        }
+    }
+
+    /// A rebalance credit-leg log: lean `FundsIn` with a full 32-byte RGB op id.
+    fn lean_log(rgb_op_id: [u8; 32], amount: u64) -> LogEntry {
+        LogEntry {
+            address: BRIDGE,
+            topics: vec![
+                event_topic0(LEAN_FUNDS_IN_SIG),
+                word(0xdead), // sender
+                rgb_op_id,
+            ],
+            data: word(amount).to_vec(),
         }
     }
 
@@ -816,16 +889,86 @@ mod tests {
         assert!(e.contains("tokenCommission mismatch"), "got: {e}");
     }
 
-    /// A tx carrying only the companion `FundsIn` is not an authorised deposit:
-    /// its id is an RGB id and it binds no commission.
+    /// A companion-only tx is consulted as a rebalance credit leg, but its
+    /// rgbOpId must match the expected operation id exactly - a foreign id is
+    /// still refused (the id-space guard, now enforced by comparison instead
+    /// of by ignoring the event).
     #[test]
-    fn rejects_rgb_companion_event_alone() {
+    fn rejects_rgb_companion_event_alone_with_foreign_id() {
         let p = FakeProvider {
             receipt: Some(receipt_with(vec![rgb_companion_log(7, 950)], 100)),
             head: 112,
         };
         let e = verify(&p).unwrap_err().to_string();
-        assert!(e.contains("no BridgeFundsIn log"), "got: {e}");
+        assert!(e.contains("rgbOpId mismatch"), "got: {e}");
+    }
+
+    /// The rebalance credit leg: only the lean `FundsIn`, carrying exactly the
+    /// expected RGB operation id and amount, no commission expectation.
+    #[test]
+    fn accepts_rebalance_lean_funds_in() {
+        let p = FakeProvider {
+            receipt: Some(receipt_with(vec![lean_log(op_id(7), 1000)], 100)),
+            head: 112,
+        };
+        assert!(verify_funds_in_event(&p, &BRIDGE, 12, &TX, &op_id(7), 1000, 0).is_ok());
+    }
+
+    #[test]
+    fn rejects_rebalance_lean_amount_mismatch() {
+        let p = FakeProvider {
+            receipt: Some(receipt_with(vec![lean_log(op_id(7), 999)], 100)),
+            head: 112,
+        };
+        let e = verify_funds_in_event(&p, &BRIDGE, 12, &TX, &op_id(7), 1000, 0)
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("amount mismatch"), "got: {e}");
+    }
+
+    /// The lean event binds no commission, so a nonzero commission expectation
+    /// cannot be satisfied by it - refuse rather than silently skip the check.
+    #[test]
+    fn rejects_rebalance_lean_with_commission_expectation() {
+        let p = FakeProvider {
+            receipt: Some(receipt_with(vec![lean_log(op_id(7), 1000)], 100)),
+            head: 112,
+        };
+        let e = verify_funds_in_event(&p, &BRIDGE, 12, &TX, &op_id(7), 1000, 50)
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("tokenCommission mismatch"), "got: {e}");
+    }
+
+    #[test]
+    fn rejects_two_lean_logs_ambiguous() {
+        let p = FakeProvider {
+            receipt: Some(receipt_with(
+                vec![lean_log(op_id(7), 1000), lean_log(op_id(8), 1000)],
+                100,
+            )),
+            head: 112,
+        };
+        let e = verify_funds_in_event(&p, &BRIDGE, 12, &TX, &op_id(7), 1000, 0)
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("ambiguous"), "got: {e}");
+    }
+
+    /// A lean log from a foreign contract is invisible - the pinned-address
+    /// rule holds on the fallback path too.
+    #[test]
+    fn rejects_lean_log_from_unpinned_contract() {
+        let mut foreign = lean_log(op_id(7), 1000);
+        foreign.address = OTHER;
+        let p = FakeProvider {
+            receipt: Some(receipt_with(vec![foreign], 100)),
+            head: 112,
+        };
+        let e = verify_funds_in_event(&p, &BRIDGE, 12, &TX, &op_id(7), 1000, 0)
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("no BridgeFundsIn or FundsIn log"), "got: {e}");
     }
 
     #[test]
@@ -881,7 +1024,7 @@ mod tests {
             head: 112,
         };
         let e = verify(&p).unwrap_err().to_string();
-        assert!(e.contains("no BridgeFundsIn log"), "got: {e}");
+        assert!(e.contains("no BridgeFundsIn or FundsIn log"), "got: {e}");
     }
 
     #[test]
@@ -893,7 +1036,7 @@ mod tests {
             head: 112,
         };
         let e = verify(&p).unwrap_err().to_string();
-        assert!(e.contains("no BridgeFundsIn log"), "got: {e}");
+        assert!(e.contains("no BridgeFundsIn or FundsIn log"), "got: {e}");
     }
 
     #[test]
@@ -1093,5 +1236,48 @@ mod tests {
             head: 112,
         };
         assert!(verify(&p).is_err());
+    }
+
+    /// Two matching logs from the pinned contract in one receipt are still
+    /// two candidates - refuse rather than guess which authorises the release.
+    #[test]
+    fn two_logs_from_the_pinned_contract_are_ambiguous() {
+        let a = bridge_log(op_id(7), 1000, 950, 50);
+        let b = bridge_log(op_id(7), 1000, 950, 50);
+        let p = FakeProvider {
+            receipt: Some(ReceiptData {
+                status_success: true,
+                block_number: 100,
+                logs: vec![a, b],
+            }),
+            head: 112,
+        };
+        let e = verify_funds_in_event(&p, &BRIDGE, 12, &TX, &op_id(7), 1000, 50)
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("ambiguous"), "unexpected: {e}");
+    }
+
+    /// A log from any contract other than the pinned one is ignored - a
+    /// look-alike emitter cannot satisfy the deposit check.
+    #[test]
+    fn unpinned_emitter_is_ignored() {
+        let mut log = bridge_log(op_id(7), 1000, 950, 50);
+        log.address = OTHER;
+        let p = FakeProvider {
+            receipt: Some(ReceiptData {
+                status_success: true,
+                block_number: 100,
+                logs: vec![log],
+            }),
+            head: 112,
+        };
+        let e = verify_funds_in_event(&p, &BRIDGE, 12, &TX, &op_id(7), 1000, 50)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            e.contains("no BridgeFundsIn or FundsIn log"),
+            "unexpected: {e}"
+        );
     }
 }

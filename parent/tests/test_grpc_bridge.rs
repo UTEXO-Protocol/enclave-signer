@@ -70,8 +70,14 @@ fn start_mock_enclave() -> u16 {
                                     signature: vec![0xCC; 65],
                                     // Marker so the roundtrip test can assert the
                                     // parent forwards the enclave-rewritten
-                                    // calldata (OpId binding, #93/#63).
-                                    call_data: vec![0xE0; 9],
+                                    // calldata (OpId binding, #93/#63). A second
+                                    // marker tells the rebalance test that the
+                                    // request really arrived without a source.
+                                    call_data: if sign_req.source_network.is_none() {
+                                        vec![0xE1; 9]
+                                    } else {
+                                        vec![0xE0; 9]
+                                    },
                                 },
                             )),
                         },
@@ -463,6 +469,106 @@ async fn grpc_sign_evm_roundtrip() {
         resp.call_data,
         vec![0xE0; 9],
         "parent must forward EvmSignatureResponse.call_data to the caller"
+    );
+}
+
+/// `IBridge.rebalanceLiquidity` selector - the sourceless calldata.
+const REBALANCE_SELECTOR: [u8; 4] = [0xa0, 0x21, 0xba, 0x4e];
+
+fn rebalance_payload() -> enriched::EnrichedEvmPayload {
+    let mut call_data = REBALANCE_SELECTOR.to_vec();
+    call_data.extend_from_slice(&[0x00; 128]);
+
+    enriched::EnrichedEvmPayload {
+        call_data,
+        nonce: 3,
+        deadline: u64::MAX,
+        chain_id: 1,
+        proxy_contract: vec![0xAA; 20],
+        calldata_amount: 1000,
+        calldata_commission: 0,
+        unsigned_tx: Vec::new(),
+        lz_release: None,
+    }
+}
+
+/// A rebalance is raised by the bridge's own watermark chore, so it carries no
+/// source proof: the adapter must forward it with `source_network: None`
+/// instead of refusing it with "SignRequest.source is missing".
+#[tokio::test]
+async fn grpc_sign_rebalance_without_source_roundtrips() {
+    let enclave_port = start_mock_enclave();
+    let grpc_port = start_grpc_server(enclave_port).await;
+
+    let mut client = ParentServiceClient::connect(format!("http://127.0.0.1:{grpc_port}"))
+        .await
+        .unwrap();
+
+    let req = SignRequest {
+        common: Some(common(84, 84, DataType::Transaction)),
+        source: None,
+        data: Some(sign_request::Data::EvmData(rebalance_payload())),
+    };
+
+    let resp = client.sign(req).await.unwrap().into_inner();
+    assert_eq!(resp.signature.len(), 65, "EVM signature must be 65 bytes");
+    assert_eq!(
+        resp.call_data,
+        vec![0xE1; 9],
+        "the enclave must have seen a request with no source network"
+    );
+}
+
+/// The exemption is keyed on the rebalance selector alone: any other calldata
+/// without a source proof stays refused.
+#[tokio::test]
+async fn grpc_sign_without_source_refuses_non_rebalance() {
+    let enclave_port = start_mock_enclave();
+    let grpc_port = start_grpc_server(enclave_port).await;
+
+    let mut client = ParentServiceClient::connect(format!("http://127.0.0.1:{grpc_port}"))
+        .await
+        .unwrap();
+
+    let mut payload = rebalance_payload();
+    payload.call_data[..4].copy_from_slice(&[0xde, 0xad, 0xbe, 0xef]);
+
+    let req = SignRequest {
+        common: Some(common(84, 84, DataType::Transaction)),
+        source: None,
+        data: Some(sign_request::Data::EvmData(payload)),
+    };
+
+    let status = client.sign(req).await.unwrap_err();
+    assert_eq!(status.code(), tonic::Code::InvalidArgument);
+    assert!(
+        status.message().contains("source is missing"),
+        "unexpected message: {}",
+        status.message()
+    );
+}
+
+/// A rebalance that DOES arrive with a source proof keeps the normal
+/// cross-network path, source checks included.
+#[tokio::test]
+async fn grpc_sign_rebalance_with_source_keeps_the_normal_path() {
+    let enclave_port = start_mock_enclave();
+    let grpc_port = start_grpc_server(enclave_port).await;
+
+    let mut client = ParentServiceClient::connect(format!("http://127.0.0.1:{grpc_port}"))
+        .await
+        .unwrap();
+
+    let req = sign_evm_request(
+        rgb_source(1000, 0, vec![], vec![], String::new()),
+        rebalance_payload(),
+    );
+
+    let resp = client.sign(req).await.unwrap().into_inner();
+    assert_eq!(
+        resp.call_data,
+        vec![0xE0; 9],
+        "a sourced rebalance must still reach the enclave with its source"
     );
 }
 

@@ -3,8 +3,10 @@ use std::io::{Read, Write};
 use crate::config::BridgeConfig;
 use crate::error::{EnclaveError, Result};
 use crate::framing;
-use crate::networks::evm::signing::{build_evm_domain, funds_out_digest, lz_funds_out_digest};
-use crate::networks::evm::validation::LZ_FUNDS_OUT_SELECTOR;
+use crate::networks::evm::signing::{
+    build_evm_domain, funds_out_digest, lz_funds_out_digest, rebalance_digest,
+};
+use crate::networks::evm::validation::{LZ_FUNDS_OUT_SELECTOR, REBALANCE_SELECTOR};
 use crate::networks::{
     validate_destination, validate_route_proofs, validate_source, ValidationContext,
 };
@@ -245,6 +247,9 @@ fn dispatch(request: EnclaveRequest, ctx: &ServerContext) -> EnclaveResponse {
 }
 
 fn handle_sign(ctx: &ServerContext, req: SignRequest) -> Result<EnclaveResponse> {
+    if req.source_network.is_none() {
+        return handle_sign_sourceless(ctx, req);
+    }
     let source_ref = req
         .source_network
         .as_ref()
@@ -305,8 +310,10 @@ fn handle_sign(ctx: &ServerContext, req: SignRequest) -> Result<EnclaveResponse>
     // trustless only once Helios (#77) verifies it; see
     // `crate::networks::evm::evm_event`.
     #[cfg(all(feature = "evm-rpc", not(feature = "dev-mode")))]
-    if let (SourceNetwork::EvmSource(source), DestinationNetwork::RgbDestination(_)) =
-        (source_ref, destination_ref)
+    if let (
+        SourceNetwork::EvmSource(source),
+        DestinationNetwork::RgbDestination(_) | DestinationNetwork::RgbInflationDestination(_),
+    ) = (source_ref, destination_ref)
     {
         let tx_hash: [u8; 32] = source.tx_hash.as_slice().try_into().map_err(|_| {
             EnclaveError::CrossCheck(format!(
@@ -356,7 +363,7 @@ fn handle_sign(ctx: &ServerContext, req: SignRequest) -> Result<EnclaveResponse>
         (source_ref, destination_ref),
         (
             SourceNetwork::EvmSource(_),
-            DestinationNetwork::RgbDestination(_)
+            DestinationNetwork::RgbDestination(_) | DestinationNetwork::RgbInflationDestination(_)
         )
     ) {
         return Err(EnclaveError::CrossCheck(
@@ -376,34 +383,44 @@ fn handle_sign(ctx: &ServerContext, req: SignRequest) -> Result<EnclaveResponse>
     // signing failure drops the reservation and rolls the key back, so a
     // transient error does not self-block a legitimate retry (audit M-02).
     #[cfg(not(feature = "dev-mode"))]
-    let _op_reservation = if let (
-        SourceNetwork::EvmSource(source),
-        DestinationNetwork::RgbDestination(destination),
-    ) = (source_ref, destination_ref)
-    {
-        let op_key = crate::networks::rgb::psbt_validation::psbt_operation_key(
-            ctx.bridge_config.chain_id,
-            &ctx.bridge_config.bridge_contract,
-            &source.tx_hash,
-            &source.funds_in_operation_id,
-            &destination.asset_id,
-        );
-        match ctx.state.op_replay_guard.reserve(op_key) {
-            Ok(reservation) => Some(reservation),
-            Err(EnclaveError::NonceReplay) => {
-                tracing::warn!(
-                    funds_in_operation_id = %hex::encode(&source.funds_in_operation_id),
-                    evm_tx_hash = %hex::encode(&source.tx_hash),
-                    "rejecting duplicate bridge PSBT operation (soft replay guard, #84)"
-                );
-                return Err(EnclaveError::CrossCheck(
-                    "duplicate bridge operation: this (chain, contract, evm_tx_hash, \
+    let _op_reservation = if let SourceNetwork::EvmSource(source) = source_ref {
+        // The soft guard covers the EVM->RGB flows - send and mint. A burn is
+        // sourceless; pairing it with an EvmSource is refused by
+        // validate_route_proofs before signing, so there is no op to guard.
+        let rgb_asset_id = match destination_ref {
+            DestinationNetwork::RgbDestination(d) => Some(d.asset_id.as_str()),
+            DestinationNetwork::RgbInflationDestination(d) => Some(d.asset_id.as_str()),
+            DestinationNetwork::RgbBurnDestination(_) | DestinationNetwork::EvmDestination(_) => {
+                None
+            }
+        };
+        if let Some(rgb_asset_id) = rgb_asset_id {
+            let op_key = crate::networks::rgb::psbt_validation::psbt_operation_key(
+                ctx.bridge_config.chain_id,
+                &ctx.bridge_config.bridge_contract,
+                &source.tx_hash,
+                &source.funds_in_operation_id,
+                rgb_asset_id,
+            );
+            match ctx.state.op_replay_guard.reserve(op_key) {
+                Ok(reservation) => Some(reservation),
+                Err(EnclaveError::NonceReplay) => {
+                    tracing::warn!(
+                        funds_in_operation_id = %hex::encode(&source.funds_in_operation_id),
+                        evm_tx_hash = %hex::encode(&source.tx_hash),
+                        "rejecting duplicate bridge PSBT operation (soft replay guard, #84)"
+                    );
+                    return Err(EnclaveError::CrossCheck(
+                        "duplicate bridge operation: this (chain, contract, evm_tx_hash, \
                      funds_in_operation_id, rgb_asset_id) was already signed recently — refusing \
                      to sign a replay (soft in-memory guard; durable guard is on-chain)"
-                        .into(),
-                ));
+                            .into(),
+                    ));
+                }
+                Err(e) => return Err(e),
             }
-            Err(e) => return Err(e),
+        } else {
+            None
         }
     } else {
         None
@@ -441,7 +458,15 @@ fn handle_sign(ctx: &ServerContext, req: SignRequest) -> Result<EnclaveResponse>
             }
             handle_sign_evm(ctx, destination, destination_proof.evm_funds_out.as_ref())
         }
-        DestinationNetwork::RgbDestination(destination) => handle_sign_psbt(ctx, destination),
+        DestinationNetwork::RgbDestination(destination) => {
+            handle_sign_psbt(ctx, &destination.psbt_bytes)
+        }
+        DestinationNetwork::RgbInflationDestination(destination) => {
+            handle_sign_psbt(ctx, &destination.psbt_bytes)
+        }
+        DestinationNetwork::RgbBurnDestination(_) => Err(EnclaveError::InvalidRequest(
+            "burn signing is sourceless - a burn request must not carry a source_network".into(),
+        )),
     };
 
     // Commit the soft-guard reservation only once signing has succeeded. On
@@ -455,6 +480,87 @@ fn handle_sign(ctx: &ServerContext, req: SignRequest) -> Result<EnclaveResponse>
     }
 
     result
+}
+
+/// The EVM half of sourceless signing: a `rebalanceLiquidity` signature. A
+/// rebalance is self-originated - the operator raised it - so no inbound
+/// event exists to validate. Authorisation here is the full destination check
+/// (pinned proxy and chain id, deadline, selector whitelist, canonical
+/// calldata decode); on-chain the RouteRegistry entry, the per-chain rate
+/// bucket and the teeNonce the digest commits to enforce the rest. Any other
+/// sourceless request keeps the old refusal (the burn aside, below), so a
+/// `fundsOut` can never sign without a validated source. The in-memory replay
+/// guard stays out on purpose: it keys on the EVM source tx, and rebalance
+/// replay protection is the on-chain teeNonce.
+fn handle_sign_sourceless(ctx: &ServerContext, req: SignRequest) -> Result<EnclaveResponse> {
+    let destination = match req.destination_network {
+        Some(DestinationNetwork::EvmDestination(destination)) => destination,
+        Some(DestinationNetwork::RgbBurnDestination(destination)) => {
+            return handle_sign_burn(ctx, req.amount, destination)
+        }
+        Some(_) => {
+            return Err(EnclaveError::InvalidRequest(
+                "sign request has no source_network".into(),
+            ))
+        }
+        None => {
+            return Err(EnclaveError::InvalidRequest(
+                "sign request has no destination_network".into(),
+            ))
+        }
+    };
+    if destination.call_data.get(..4) != Some(REBALANCE_SELECTOR.as_slice()) {
+        return Err(EnclaveError::InvalidRequest(
+            "sourceless signing is allowed for rebalanceLiquidity calldata only".into(),
+        ));
+    }
+
+    let validation_ctx = ValidationContext {
+        bridge_config: &ctx.bridge_config,
+        #[cfg(feature = "rgb-validation")]
+        rgb_validator: ctx.rgb_validator.as_ref(),
+        header_chain: &ctx.header_chain,
+        self_owned_psbt_outputs: None,
+    };
+    let destination_proof = validate_destination(
+        req.amount,
+        0,
+        &DestinationNetwork::EvmDestination(destination.clone()),
+        &validation_ctx,
+    )?;
+
+    handle_sign_evm(ctx, destination, destination_proof.evm_funds_out.as_ref())
+}
+
+/// The RGB half of sourceless signing: a rebalance-origin bridge burn.
+/// Authorisation is structural - validate_destination anchors the PSBT to a
+/// fascia that may only destroy the pinned asset in the declared amount.
+fn handle_sign_burn(
+    ctx: &ServerContext,
+    amount: u64,
+    destination: crate::proto::RgbBurnDestination,
+) -> Result<EnclaveResponse> {
+    tracing::info!(
+        operation_idx = destination.operation_idx,
+        burn_amount = destination.burn_amount,
+        "sourceless sign: RGB rebalance burn"
+    );
+
+    let validation_ctx = ValidationContext {
+        bridge_config: &ctx.bridge_config,
+        #[cfg(feature = "rgb-validation")]
+        rgb_validator: ctx.rgb_validator.as_ref(),
+        header_chain: &ctx.header_chain,
+        self_owned_psbt_outputs: None,
+    };
+    validate_destination(
+        amount,
+        0,
+        &DestinationNetwork::RgbBurnDestination(destination.clone()),
+        &validation_ctx,
+    )?;
+
+    handle_sign_psbt(ctx, &destination.psbt_bytes)
 }
 
 /// Bind an RGB->EVM `fundsOut` calldata to the validated consignment before the
@@ -509,7 +615,11 @@ fn apply_funds_out_binding(
     let _ = ctx;
 
     // Consignment-bound release amount (transfer flow).
-    crosscheck::validate_funds_out_transfer(params, validated)?;
+    crosscheck::validate_funds_out_transfer(
+        params,
+        validated,
+        ctx.bridge_config.allow_burn_releases,
+    )?;
 
     // Current rollout is swap/send-receive only. Preserve the backend-provided
     // general bridge burnId and settlement fundsInIds; the EVM connector has
@@ -592,7 +702,7 @@ fn handle_initialize(ctx: &ServerContext, req: InitializeKeyRequest) -> Result<E
             account_xpub_colored: keys.account_xpub_colored,
             evm_uncompressed_pub: keys.evm_uncompressed_pub.to_vec(),
             chain_id: ctx.bridge_config.chain_id,
-            bridge_contract: ctx.bridge_config.bridge_contract.to_vec(),
+            bridge_contract: ctx.bridge_config.bridge_contract_bytes(),
             rgb_asset_id: ctx.bridge_config.rgb_asset_id.clone(),
             evm_gas_tx_uncompressed_pub: keys.evm_gas_tx_uncompressed_pub.to_vec(),
             evm_gas_tx_address: keys.evm_gas_tx_address.to_vec(),
@@ -636,7 +746,7 @@ fn build_public_keys_response(
         account_xpub_colored: keys.account_xpub_colored,
         evm_uncompressed_pub: keys.evm_uncompressed_pub.to_vec(),
         chain_id: cfg.chain_id,
-        bridge_contract: cfg.bridge_contract.to_vec(),
+        bridge_contract: cfg.bridge_contract_bytes(),
         rgb_asset_id: cfg.rgb_asset_id.clone(),
         evm_gas_tx_uncompressed_pub: keys.evm_gas_tx_uncompressed_pub.to_vec(),
         evm_gas_tx_address: keys.evm_gas_tx_address.to_vec(),
@@ -745,7 +855,8 @@ fn handle_sign_evm(
     // Route to the appropriate EIP-712 digest based on selector and lz_release.
     // lzFundsOutCall carries LZ-specific fields the digest commits to; the
     // proto field is the authority — the selector in calldata is a consistency
-    // check only (crosschecked inside lz_funds_out_digest).
+    // check only (crosschecked inside lz_funds_out_digest). The sourceless
+    // rebalance route digests the TeeRebalance struct from its own calldata.
     let is_lz = req.call_data.len() >= 4
         && req.call_data[..4] == LZ_FUNDS_OUT_SELECTOR
         && req.lz_release.is_some();
@@ -758,6 +869,8 @@ fn handle_sign_evm(
             req.nonce,
             req.deadline,
         )?
+    } else if req.call_data.get(..4) == Some(REBALANCE_SELECTOR.as_slice()) {
+        rebalance_digest(&domain, &req.call_data, req.nonce, req.deadline)?
     } else {
         // `params` is `Some` on the pools route whenever validation ran, so the
         // digest commits to exactly the fields cross-checked there. Dev-mode
@@ -803,8 +916,8 @@ fn handle_sign_evm(
     })
 }
 
-fn handle_sign_psbt(ctx: &ServerContext, req: RgbDestination) -> Result<EnclaveResponse> {
-    let (signed_psbt, inputs_signed) = ctx.state.sign_psbt(&req.psbt_bytes)?;
+fn handle_sign_psbt(ctx: &ServerContext, psbt_bytes: &[u8]) -> Result<EnclaveResponse> {
+    let (signed_psbt, inputs_signed) = ctx.state.sign_psbt(psbt_bytes)?;
 
     // Reject a "successful" no-op (audit 3rd W-03 / #85). KeyManager::sign_psbt
     // returns Ok((bytes, 0)) when no PSBT input belongs to this enclave; a

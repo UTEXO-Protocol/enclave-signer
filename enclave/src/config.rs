@@ -45,10 +45,19 @@ pub struct BridgeConfig {
     pub chain_id: u64,
     /// MultisigProxy contract pinned for the EVM signing cross-check (env
     /// `EVM_PROXY_CONTRACT_ADDRESS`) — the EIP-712 `verifyingContract` the
-    /// listener stamps into every funds-out request. NOTE: this is the
-    /// MultisigProxy, NOT the bridge *entry* contract that emits `FundsIn`
-    /// (that one is `funds_in_contract`). The struct/proto field keeps the
-    /// legacy name `bridge_contract` for wire/attestation-bundle stability.
+    /// listener stamps into every funds-out request. One deployment serves
+    /// both pools and mint/burn - the contract's own route buckets separate
+    /// the funds - so this is a single pinned address, and downstream binding
+    /// keys commit to it (see
+    /// [`crate::networks::rgb::psbt_validation::psbt_operation_key`]).
+    /// NOTE: this is the MultisigProxy, NOT the bridge *entry* contract that
+    /// emits `FundsIn` (that one is `funds_in_contract`). The struct/proto
+    /// field keeps the legacy name `bridge_contract` for
+    /// wire/attestation-bundle stability.
+    ///
+    /// Zero = unset. A zero or unparseable value reads as unset and fails
+    /// closed in a release build (the bug `is_configured` was hardened
+    /// against).
     pub bridge_contract: [u8; 20],
     pub rgb_asset_id: String,
     /// Operator-pinned allowed destination for **gas-key** transactions
@@ -131,7 +140,19 @@ pub struct BridgeConfig {
     /// cross-check — one pin cannot serve both lookups. On this deployment the
     /// two contracts DIFFER, so `FUNDS_IN_CONTRACT` MUST be set explicitly
     /// (leaving it unset would fold the proxy address into the FundsIn lookup).
+    /// Deposit lookup still refuses when more than one candidate log matches
+    /// in a receipt.
     pub funds_in_contract: [u8; 20],
+    /// Whether this enclave may sign **burn releases** (env
+    /// `ALLOW_BURN_RELEASES=1`): a `fundsOut` backed by a `TS_BURN`
+    /// consignment instead of a pool transfer. There is no separate mint/burn
+    /// contract - the same pinned deployment serves both flows, with the
+    /// contract's own route buckets separating the funds - so this is a plain
+    /// operator switch, not an address pin. `false` (unset) refuses every
+    /// burn release, exactly the behaviour before the switch existed. An
+    /// operational signing-policy setting, like the gas-tx and plain-BTC pins
+    /// above.
+    pub allow_burn_releases: bool,
     /// Aggregate request-size caps for the RGB signing path, operator-tunable
     /// via env (`MAX_CONSIGNMENT_BYTES` / `MAX_MERKLE_PROOFS` /
     /// `MAX_TOTAL_PROOF_BYTES`); each defaults to its `DEFAULT_*` constant when
@@ -155,6 +176,7 @@ impl Default for BridgeConfig {
             gas_tx_max_value_wei: None,
             btc_max_total_sats: 0,
             funds_in_contract: [0u8; 20],
+            allow_burn_releases: false,
             max_consignment_bytes: DEFAULT_MAX_CONSIGNMENT_BYTES,
             max_merkle_proofs: DEFAULT_MAX_MERKLE_PROOFS,
             max_total_proof_bytes: DEFAULT_MAX_TOTAL_PROOF_BYTES,
@@ -243,7 +265,14 @@ impl BridgeConfig {
         let funds_in_contract = std::env::var("FUNDS_IN_CONTRACT")
             .ok()
             .and_then(|s| parse_eth_address(&s).ok())
+            .filter(|a| *a != [0u8; 20])
             .unwrap_or(bridge_contract);
+
+        // Burn-release switch; deliberately defaults to off - unset keeps
+        // burn releases refused everywhere.
+        let allow_burn_releases = std::env::var("ALLOW_BURN_RELEASES")
+            .map(|s| matches!(s.trim(), "1" | "true"))
+            .unwrap_or(false);
 
         // Migration guard (audit C-02): the gas caps are mandatory-fail-closed,
         // so a deployment that pins only GAS_TX_ALLOWED_TO (as earlier builds
@@ -285,10 +314,24 @@ impl BridgeConfig {
             gas_tx_max_value_wei,
             btc_max_total_sats,
             funds_in_contract,
+            allow_burn_releases,
             max_consignment_bytes,
             max_merkle_proofs,
             max_total_proof_bytes,
         }
+    }
+
+    /// Whether `addr` is the pinned proxy contract. An unset (zero) pin
+    /// accepts nothing: callers gate on [`is_configured`](Self::is_configured)
+    /// first and treat "unset" as the legacy dev path, never as "allow any".
+    pub fn allows_proxy_contract(&self, addr: &[u8]) -> bool {
+        self.bridge_contract != [0u8; 20] && self.bridge_contract.as_slice() == addr
+    }
+
+    /// The pinned address as bytes, for the attestation `user_data` bundle -
+    /// exactly the 20 bytes the bundle has always committed to.
+    pub fn bridge_contract_bytes(&self) -> Vec<u8> {
+        self.bridge_contract.to_vec()
     }
 
     /// True only when **all three** fields are set to non-zero / non-empty
@@ -641,5 +684,42 @@ mod tests {
         assert!(!is_loopback_url("http://[::1].evil.com"));
         assert!(!is_loopback_url("http://10.0.0.1:8545"));
         assert!(!is_loopback_url("http://evil.com/127.0.0.1"));
+    }
+
+    /// The zero address is the "unset" sentinel, so a zero pin must never
+    /// satisfy a request for the zero address.
+    #[test]
+    fn zero_pin_never_matches() {
+        let cfg = BridgeConfig {
+            bridge_contract: [0u8; 20],
+            ..Default::default()
+        };
+        assert!(!cfg.allows_proxy_contract(&[0u8; 20]));
+        assert!(!cfg.is_configured());
+    }
+
+    /// The attestation field is exactly the 20 pinned bytes - the format the
+    /// bundle has always committed to.
+    #[test]
+    fn attestation_bytes_are_the_pinned_address() {
+        let cfg = BridgeConfig {
+            bridge_contract: [0xAB; 20],
+            ..Default::default()
+        };
+        assert_eq!(cfg.bridge_contract_bytes(), vec![0xABu8; 20]);
+    }
+
+    #[test]
+    fn pinned_contract_matches_only_itself() {
+        let cfg = BridgeConfig {
+            chain_id: 1,
+            bridge_contract: [0x22; 20],
+            rgb_asset_id: "rgb:asset".into(),
+            ..Default::default()
+        };
+        assert!(cfg.is_configured());
+        assert!(!cfg.is_partially_configured());
+        assert!(cfg.allows_proxy_contract(&[0x22u8; 20]));
+        assert!(!cfg.allows_proxy_contract(&[0x33u8; 20]));
     }
 }

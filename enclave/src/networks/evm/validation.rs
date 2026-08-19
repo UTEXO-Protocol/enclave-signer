@@ -29,7 +29,23 @@ pub const LZ_FUNDS_OUT_SELECTOR: [u8; 4] = lzFundsOutCall::SELECTOR;
 /// host-tunable.
 pub const MAX_FUNDS_OUT_CALL_DATA_LEN: usize = 64 * 1024;
 
-const ALLOWED_SELECTORS: &[[u8; 4]] = &[FUNDS_OUT_SELECTOR_POOLS, LZ_FUNDS_OUT_SELECTOR];
+/// `keccak256("rebalanceLiquidity((uint256,uint256,uint256,uint256,string,string,bytes,bytes,bytes))")[0..4]`.
+///
+/// The credit leg of a scenario-A pool refill, submitted through
+/// `MultisigProxy.rebalanceCall`. Distinct from `fundsOut` in both shape and
+/// authorisation: a rebalance is **self-originated**, so there is no source
+/// consignment to bind it to (see `server.rs::run_evm_destination_crosschecks`).
+///
+/// Derived from the `sol!` definition so it cannot drift from the decoder;
+/// `rebalance_selector_matches_contract` pins it to the independently computed
+/// value so the definition itself cannot drift unnoticed.
+pub const REBALANCE_SELECTOR: [u8; 4] = rebalanceLiquidityCall::SELECTOR;
+
+const ALLOWED_SELECTORS: &[[u8; 4]] = &[
+    FUNDS_OUT_SELECTOR_POOLS,
+    LZ_FUNDS_OUT_SELECTOR,
+    REBALANCE_SELECTOR,
+];
 
 sol! {
     /// Mirrors `IBridge.FundsOutParams` (IBridge.sol:193-202). Field order fixes
@@ -67,6 +83,27 @@ sol! {
         uint256 minAmountLD,
         bytes extraOptions
     );
+
+    /// Mirrors `IBridge.RebalanceParams`. Field order fixes both the ABI decode
+    /// here and the `TeeRebalance` struct hash in
+    /// [`super::signing::rebalance_digest`].
+    ///
+    /// Two settlement blobs, not one: a rebalance debits one chain's bucket and
+    /// credits another's, so it cites deposits on both sides.
+    struct RebalanceParams {
+        uint256 amount;
+        uint256 burnId;
+        uint256 sourceChainId;
+        uint256 destinationChainId;
+        string sourceAddress;
+        string destinationAddress;
+        bytes proof;
+        bytes settlementDataOut;
+        bytes settlementDataIn;
+    }
+
+    /// Same: the enclave's wire format for the rebalance calldata blob.
+    function rebalanceLiquidity(RebalanceParams params);
 }
 
 fn dev_mode_bypass() -> bool {
@@ -162,11 +199,34 @@ pub fn validate_destination(
     let (proof, params, calldata_destination_chain_id) = if selector == LZ_FUNDS_OUT_SELECTOR {
         let decoded = decode_lz_funds_out_params(&destination.call_data)?;
         let chain_id = decoded.destinationChainId;
-        (lz_route_proof_from_params(&decoded)?, None, chain_id)
+        (lz_route_proof_from_params(&decoded)?, None, Some(chain_id))
+    } else if selector == REBALANCE_SELECTOR {
+        // A rebalance's calldata destinationChainId names the CREDITED
+        // liquidity bucket (an internal network id, e.g. 96/97), never this
+        // EVM chain - so the calldata pin check below does not apply. The
+        // RouteRegistry enforces the corridor on-chain and the TeeRebalance
+        // digest commits to every field.
+        let decoded = decode_rebalance_params(&destination.call_data)?;
+        let amount: u64 = decoded
+            .amount
+            .try_into()
+            .map_err(|_| EnclaveError::CrossCheck("rebalance amount exceeds u64 range".into()))?;
+        (
+            RouteProof {
+                amount,
+                operation_id: None,
+            },
+            None,
+            None,
+        )
     } else {
         let params = decode_funds_out_params(&destination.call_data)?;
         let chain_id = params.destinationChainId;
-        (route_proof_from_params(&params)?, Some(params), chain_id)
+        (
+            route_proof_from_params(&params)?,
+            Some(params),
+            Some(chain_id),
+        )
     };
     if proof.amount != destination.calldata_amount {
         return Err(EnclaveError::CrossCheck(format!(
@@ -201,14 +261,18 @@ pub fn validate_destination(
         )));
     }
     // Distinct from the request-level `chain_id` above, which only drives the
-    // EIP-712 domain. Bound to the same attested pin (I-12 / #165).
-    if bridge_config.chain_id != 0
-        && calldata_destination_chain_id != U256::from(bridge_config.chain_id)
-    {
-        return Err(EnclaveError::CrossCheck(format!(
-            "calldata destinationChainId mismatch: {} != pinned {}",
-            calldata_destination_chain_id, bridge_config.chain_id
-        )));
+    // EIP-712 domain. Bound to the same attested pin (I-12 / #165). `None` on
+    // the rebalance route, whose calldata destinationChainId is a liquidity
+    // bucket, not an EVM chain.
+    if let Some(calldata_destination_chain_id) = calldata_destination_chain_id {
+        if bridge_config.chain_id != 0
+            && calldata_destination_chain_id != U256::from(bridge_config.chain_id)
+        {
+            return Err(EnclaveError::CrossCheck(format!(
+                "calldata destinationChainId mismatch: {} != pinned {}",
+                calldata_destination_chain_id, bridge_config.chain_id
+            )));
+        }
     }
     if bridge_config.bridge_contract != [0u8; ADDRESS_LEN]
         && destination.proxy_contract.as_slice() != bridge_config.bridge_contract
@@ -282,6 +346,22 @@ pub fn decode_lz_funds_out_params(call_data: &[u8]) -> Result<lzFundsOutCall> {
         ));
     }
     Ok(decoded)
+}
+
+/// Decode a `rebalanceLiquidity` calldata blob, enforcing the canonical
+/// encoding for the same reason [`decode_funds_out_params`] does.
+pub fn decode_rebalance_params(call_data: &[u8]) -> Result<RebalanceParams> {
+    let decoded = rebalanceLiquidityCall::abi_decode_validate(call_data).map_err(|e| {
+        EnclaveError::CrossCheck(format!("invalid rebalanceLiquidity calldata: {e}"))
+    })?;
+    if decoded.abi_encode() != call_data {
+        return Err(EnclaveError::CrossCheck(
+            "non-canonical rebalanceLiquidity calldata encoding: re-encoding the decoded call \
+             does not reproduce the input bytes"
+                .into(),
+        ));
+    }
+    Ok(decoded.params)
 }
 
 /// Narrow a decoded LayerZero release into the route-neutral proof, mirroring
@@ -701,5 +781,57 @@ mod tests {
             err.to_string().contains("non-canonical fundsOut calldata"),
             "expected canonical-encoding rejection of overlapping tails, got: {err}"
         );
+    }
+
+    fn rebalance_calldata(amount: u64) -> Vec<u8> {
+        rebalanceLiquidityCall {
+            params: RebalanceParams {
+                amount: U256::from(amount),
+                burnId: U256::from(7u64),
+                sourceChainId: U256::from(1u64),
+                destinationChainId: U256::from(96u64),
+                sourceAddress: "src".into(),
+                destinationAddress: "dst".into(),
+                proof: Bytes::new(),
+                settlementDataOut: Bytes::new(),
+                settlementDataIn: Bytes::new(),
+            },
+        }
+        .abi_encode()
+    }
+
+    #[test]
+    fn rebalance_selector_is_accepted_and_amount_decoded() {
+        let cfg = config();
+        let mut dst = destination();
+        dst.call_data = rebalance_calldata(4242);
+        dst.calldata_amount = 4242;
+        with_ctx(&cfg, |ctx| {
+            let proof = validate_dest(&dst, ctx).expect("rebalance accepted");
+            assert_eq!(proof.amount, 4242);
+        });
+    }
+
+    /// The declared amount is cross-checked against the decoded one for
+    /// rebalance exactly as it is for fundsOut.
+    #[test]
+    fn rebalance_amount_mismatch_is_rejected() {
+        let cfg = config();
+        let mut dst = destination();
+        dst.call_data = rebalance_calldata(4242);
+        dst.calldata_amount = 1;
+        with_ctx(&cfg, |ctx| {
+            let err = validate_dest(&dst, ctx).unwrap_err().to_string();
+            assert!(err.contains("amount mismatch"), "unexpected: {err}");
+        });
+    }
+
+    /// `REBALANCE_SELECTOR` is derived from the `sol!` definition, so it tracks
+    /// the decoder automatically - but that means a wrong definition would go
+    /// unnoticed. Pin it to the value computed independently (go-ethereum) from
+    /// the contract's own signature.
+    #[test]
+    fn rebalance_selector_matches_contract() {
+        assert_eq!(hex::encode(REBALANCE_SELECTOR), "a021ba4e");
     }
 }
