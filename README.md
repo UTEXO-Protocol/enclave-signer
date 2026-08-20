@@ -91,7 +91,6 @@ Cryptographic signing service for the UTEXO RGB-EVM bridge, running inside an [A
 | `GetPublicKey` | Retrieve EVM address, BTC pubkeys, master fingerprint, and BIP-86 account xpubs (vanilla + colored) |
 | `SignEvm` | EIP-712 typed data signing with cross-check validation |
 | `SignPsbt` | Taproot (Schnorr) + SegWit v0 P2WSH (ECDSA) PSBT signing with cross-check validation |
-| `SignRawMessage` | Keccak256-hash-then-sign for fundsIn authorization |
 | `ProxyFederation` | Federation signature proxy (stub, not yet wired) |
 
 ## Prerequisites

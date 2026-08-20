@@ -312,11 +312,11 @@ never to an attacker; rate limiting belongs out-of-enclave). And the fee is not
 a field of the `TeeLzFundsOut` payload, so nothing binds a fee to its release --
 the ceiling bounds the blast radius until a contract change adds that binding.
 
-### 7.5 Raw message (`SignRawMessage`)
+### 7.5 Raw message (`SignRawMessage`) -- REMOVED
 
-Wraps the message in the EIP-191 `personal_sign` envelope and signs with the
-main bridge key. **`[OPEN]`** I-01 (#124): the handler is not gated by any
-feature or policy; decision pending (remove vs. add domain/nonce).
+Signed the message under the EIP-191 `personal_sign` envelope with the main
+bridge key, gated by no feature and no policy. Removed (I-01 / #124). The proto
+variant is kept for wire compatibility and the enclave refuses the request.
 
 ### 7.6 SPV header sync
 
@@ -510,7 +510,7 @@ mint-PSBT binding (#146) · swap op-id preservation (#168) · audit regression +
    proto/listener/backend before deploying, otherwise availability (never
    safety) suffers.
 8. Smaller: attest `FUNDS_IN_CONTRACT` / BTC pin values; aggregate (not just
-   per-tx) gas-tx fee limiting; I-01 `SignRawMessage` decision; I-14 u64 amount
+   per-tx) gas-tx fee limiting; I-14 u64 amount
    ceiling; I-16 reproducible-build determinism; testnet3 checkpoint.
 
 ---

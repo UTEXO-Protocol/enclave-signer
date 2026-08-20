@@ -175,9 +175,15 @@ fn dispatch(request: EnclaveRequest, ctx: &ServerContext) -> EnclaveResponse {
             tracing::info!("request: SignBtc");
             handle_sign_btc(ctx, req)
         }
-        Some(Request::SignRawMessage(req)) => {
-            tracing::info!("request: SignRawMessage");
-            handle_sign_raw_message(&ctx.state, req)
+        // Removed (audit I-01 / #124). The EIP-191 `personal_sign` path was
+        // gated by no feature and no policy, and signed arbitrary caller-supplied
+        // bytes with the main bridge key. The proto still carries the variant, so
+        // refuse explicitly instead of dropping the arm.
+        Some(Request::SignRawMessage(_)) => {
+            tracing::warn!("request: SignRawMessage - removed, refusing");
+            Err(EnclaveError::InvalidRequest(
+                "SignRawMessage is removed (audit I-01); no replacement".into(),
+            ))
         }
         Some(Request::SignRawDigest(req)) => {
             tracing::info!("request: SignRawDigest");
@@ -893,40 +899,6 @@ fn handle_sign_btc(ctx: &ServerContext, req: SignBtcRequest) -> Result<EnclaveRe
         response: Some(Response::SignedPsbt(SignedPsbtResponse {
             signed_psbt,
             inputs_signed: inputs_signed as u32,
-        })),
-    })
-}
-
-fn handle_sign_raw_message(
-    state: &EnclaveState,
-    req: SignRawMessageRequest,
-) -> Result<EnclaveResponse> {
-    if req.message.is_empty() {
-        return Err(EnclaveError::InvalidRequest("message is empty".into()));
-    }
-
-    // EIP-191 personal_sign envelope: keccak256("\x19Ethereum Signed Message:\n" || len || msg).
-    // The 0x19 prefix byte is not a valid first byte for any Ethereum transaction
-    // envelope (legacy RLP starts at 0xc0+, typed txs use 0x01..=0x7f), so a
-    // signature produced here can never be replayed as a transaction signature
-    // — which is the whole point of EIP-191 and why this RPC must use it.
-    use sha3::{Digest, Keccak256};
-    let mut hasher = Keccak256::new();
-    hasher.update(b"\x19Ethereum Signed Message:\n");
-    hasher.update(req.message.len().to_string().as_bytes());
-    hasher.update(&req.message);
-    let hash: [u8; 32] = hasher.finalize().into();
-    let signature = state.sign_evm(&hash)?;
-
-    tracing::info!(
-        sig_hex = %hex::encode(signature),
-        msg_len = req.message.len(),
-        "raw message signature produced (EIP-191)"
-    );
-
-    Ok(EnclaveResponse {
-        response: Some(Response::RawSignature(RawSignatureResponse {
-            signature: signature.to_vec(),
         })),
     })
 }
