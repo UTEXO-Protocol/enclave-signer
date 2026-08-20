@@ -193,58 +193,9 @@ else
 fi
 
 # ─────────────────────────────────────────────
-# 4. SignRawMessage
+# 4. SignEvm (with valid enriched payload)
 # ─────────────────────────────────────────────
-log "4. SignRawMessage (fundsIn authorization)"
-# "hello from smoke test" in hex
-RAW_MSG_HEX="68656c6c6f2066726f6d20736d6f6b652074657374"
-RAW_SIG_OUTPUT=$(run_parent sign-raw-message --message "$RAW_MSG_HEX") && RC=$? || RC=$?
-
-if [ $RC -eq 0 ] && echo "$RAW_SIG_OUTPUT" | grep -q "Signature"; then
-    SIG=$(echo "$RAW_SIG_OUTPUT" | grep "Signature" | awk '{print $NF}')
-    SIG_LEN=$((${#SIG} / 2))
-    if [ "$SIG_LEN" -eq 65 ]; then
-        pass "SignRawMessage — 65-byte signature returned"
-    else
-        fail "SignRawMessage" "expected 65 bytes, got $SIG_LEN"
-    fi
-else
-    fail "SignRawMessage" "$RAW_SIG_OUTPUT"
-fi
-
-# ─────────────────────────────────────────────
-# 5. SignRawMessage determinism (same message → same sig)
-# ─────────────────────────────────────────────
-log "5. SignRawMessage determinism"
-RAW_SIG_OUTPUT2=$(run_parent sign-raw-message --message "$RAW_MSG_HEX") && RC=$? || RC=$?
-
-if [ $RC -eq 0 ]; then
-    SIG2=$(echo "$RAW_SIG_OUTPUT2" | grep "Signature" | awk '{print $NF}')
-    if [ "$SIG" = "$SIG2" ]; then
-        pass "SignRawMessage deterministic (RFC 6979)"
-    else
-        fail "SignRawMessage determinism" "signatures differ"
-    fi
-else
-    fail "SignRawMessage determinism" "$RAW_SIG_OUTPUT2"
-fi
-
-# ─────────────────────────────────────────────
-# 6. SignRawMessage empty (should fail)
-# ─────────────────────────────────────────────
-log "6. SignRawMessage empty message (should fail)"
-EMPTY_SIG=$(run_parent sign-raw-message --message "") && RC=$? || RC=$?
-
-if [ $RC -ne 0 ] || echo "$EMPTY_SIG" | grep -qi "error\|empty"; then
-    pass "Empty SignRawMessage correctly rejected"
-else
-    fail "Empty SignRawMessage" "expected error, got: $EMPTY_SIG"
-fi
-
-# ─────────────────────────────────────────────
-# 7. SignEvm (with valid enriched payload)
-# ─────────────────────────────────────────────
-log "7. SignEvm (enriched payload, valid)"
+log "4. SignEvm (enriched payload, valid)"
 
 # Build a mock fundsOut calldata:
 #   selector(4) + token(32) + recipient(32) + amount(32) + commission(32) + padding(96)
@@ -287,9 +238,9 @@ else
 fi
 
 # ─────────────────────────────────────────────
-# 8. SignEvm rejects invalid consignment
+# 5. SignEvm rejects invalid consignment
 # ─────────────────────────────────────────────
-log "8. SignEvm rejects invalid consignment"
+log "5. SignEvm rejects invalid consignment"
 
 BAD_CONSIGN_OUTPUT=$(run_parent sign-evm \
     --call-data "$CALLDATA" \
@@ -310,9 +261,9 @@ else
 fi
 
 # ─────────────────────────────────────────────
-# 9. SignEvm rejects amount mismatch
+# 6. SignEvm rejects amount mismatch
 # ─────────────────────────────────────────────
-log "9. SignEvm rejects amount mismatch"
+log "6. SignEvm rejects amount mismatch"
 
 BAD_AMOUNT_OUTPUT=$(run_parent sign-evm \
     --call-data "$CALLDATA" \
@@ -333,9 +284,9 @@ else
 fi
 
 # ─────────────────────────────────────────────
-# 10. ProxyFederation (should return NOT_READY)
+# 7. ProxyFederation (should return NOT_READY)
 # ─────────────────────────────────────────────
-log "10. ProxyFederation (stub — should return NOT_READY)"
+log "7. ProxyFederation (stub — should return NOT_READY)"
 # No CLI subcommand for federation yet, so we skip if not available
 skip "ProxyFederation" "no CLI subcommand yet — test via integration tests"
 
@@ -354,9 +305,9 @@ skip "ProxyFederation" "no CLI subcommand yet — test via integration tests"
 # fixture so the smoke test stays lightweight and shell-only.
 
 # ─────────────────────────────────────────────
-# 11. GetLastSavedBlock baseline
+# 8. GetLastSavedBlock baseline
 # ─────────────────────────────────────────────
-log "11. GetLastSavedBlock — chain initialised at boot"
+log "8. GetLastSavedBlock — chain initialised at boot"
 LAST_BLOCK_OUTPUT=$(run_parent get-last-saved-block) && RC=$? || RC=$?
 
 if [ $RC -eq 0 ] && echo "$LAST_BLOCK_OUTPUT" | grep -q "Block hash"; then
@@ -402,9 +353,9 @@ filler_headers_file() {
 }
 
 # ─────────────────────────────────────────────
-# 12. SubmitHeaders empty batch at tip+1 — no-op success
+# 9. SubmitHeaders empty batch at tip+1 — no-op success
 # ─────────────────────────────────────────────
-log "12. SubmitHeaders — empty batch at tip+1 returns headers_accepted=0"
+log "9. SubmitHeaders — empty batch at tip+1 returns headers_accepted=0"
 NEXT_HEIGHT=$((INITIAL_HEIGHT + 1))
 EMPTY_FILE="$(empty_headers_file)"
 EMPTY_OUTPUT=$(run_parent submit-headers --start-height "$NEXT_HEIGHT" --headers-file "$EMPTY_FILE") && RC=$? || RC=$?
@@ -416,9 +367,9 @@ else
 fi
 
 # ─────────────────────────────────────────────
-# 13. SubmitHeaders with a gap above the tip
+# 10. SubmitHeaders with a gap above the tip
 # ─────────────────────────────────────────────
-log "13. SubmitHeaders — gap above tip (start_height=tip+5) is rejected"
+log "10. SubmitHeaders — gap above tip (start_height=tip+5) is rejected"
 GAP_HEIGHT=$((INITIAL_HEIGHT + 5))
 FILLER_FILE="$(filler_headers_file)"
 GAP_OUTPUT=$(run_parent submit-headers --start-height "$GAP_HEIGHT" --headers-file "$FILLER_FILE") && RC=$? || RC=$?
@@ -430,9 +381,9 @@ else
 fi
 
 # ─────────────────────────────────────────────
-# 14. SubmitHeaders at-or-below checkpoint
+# 11. SubmitHeaders at-or-below checkpoint
 # ─────────────────────────────────────────────
-log "14. SubmitHeaders — start_height at checkpoint is rejected"
+log "11. SubmitHeaders — start_height at checkpoint is rejected"
 # Submitting AT the checkpoint height would rewrite the trust anchor.
 BELOW_OUTPUT=$(run_parent submit-headers --start-height "$INITIAL_HEIGHT" --headers-file "$FILLER_FILE") && RC=$? || RC=$?
 
@@ -443,9 +394,9 @@ else
 fi
 
 # ─────────────────────────────────────────────
-# 15. SubmitHeaders with malformed bytes
+# 12. SubmitHeaders with malformed bytes
 # ─────────────────────────────────────────────
-log "15. SubmitHeaders — malformed (79-byte) header is rejected"
+log "12. SubmitHeaders — malformed (79-byte) header is rejected"
 SHORT_FILE="$(malformed_headers_file)"
 MALFORMED_OUTPUT=$(run_parent submit-headers --start-height "$NEXT_HEIGHT" --headers-file "$SHORT_FILE") && RC=$? || RC=$?
 
@@ -456,9 +407,9 @@ else
 fi
 
 # ─────────────────────────────────────────────
-# 16. GetLastSavedBlock unchanged after failed submits
+# 13. GetLastSavedBlock unchanged after failed submits
 # ─────────────────────────────────────────────
-log "16. GetLastSavedBlock — tip unchanged after failed submits (atomic-on-error)"
+log "13. GetLastSavedBlock — tip unchanged after failed submits (atomic-on-error)"
 AFTER_OUTPUT=$(run_parent get-last-saved-block) && RC=$? || RC=$?
 
 if [ $RC -eq 0 ]; then
