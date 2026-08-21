@@ -490,7 +490,7 @@ mod tests {
             // fixture's `psbt_bytes` are deliberately garbage), so the
             // resolver is never called — but it must be present, or the
             // fail-closed guard would mask the error each test asserts on.
-            let self_owned = |_: &bitcoin::psbt::Psbt| Ok(std::collections::HashSet::new());
+            let self_owned = |_: &bitcoin::psbt::Psbt, _: bitcoin::OutPoint| Ok(false);
             let ctx = ValidationContext {
                 bridge_config: config,
                 rgb_validator: Some(&validator),

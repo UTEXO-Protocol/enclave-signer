@@ -259,14 +259,48 @@ fn handle_sign(ctx: &ServerContext, req: SignRequest) -> Result<EnclaveResponse>
         EnclaveError::InvalidRequest("sign request has no destination_network".into())
     })?;
 
-    // Self-owned-output oracle for the send-RGB per-output recipient bind
-    // (W-06 / #52). Passed as a closure so the key lock is held only while the
-    // outputs are being resolved — validation itself makes Esplora/Electrum
-    // calls, and holding the lock across those would pin every other worker.
+    // Self-owned-outpoint oracle for the send-RGB per-output recipient bind
+    // (W-06 / #52). A closure so the key lock is held only for the resolution,
+    // never across the Esplora/Electrum calls validation makes.
+    //
+    // An outpoint on this PSBT is decided from its taproot metadata. One on an
+    // earlier tx (rgb-lib parks the change on an existing UTXO when the
+    // transfer has no BTC change) needs the tx fetched to read its script.
     #[cfg(feature = "rgb-validation")]
-    let self_owned_psbt_outputs = |psbt: &bitcoin::psbt::Psbt| {
+    let self_owned_psbt_outputs = |psbt: &bitcoin::psbt::Psbt, outpoint: bitcoin::OutPoint| {
+        use crate::networks::rgb::btc_ownership;
+
+        if outpoint.txid == psbt.unsigned_tx.compute_txid() {
+            return ctx.state.with_keys(|keys| {
+                Ok(btc_ownership::self_owned_output_indices(psbt, keys).contains(&outpoint.vout))
+            });
+        }
+
+        // Fail closed: no indexer, no script, no way to tell change from payout.
+        let validator = ctx.rgb_validator.as_ref().ok_or_else(|| {
+            EnclaveError::CrossCheck(
+                "send-RGB change seal names an outpoint outside the PSBT, but the RGB validator \
+                 is not configured — the enclave cannot resolve that outpoint's script"
+                    .into(),
+            )
+        })?;
+        // Outside `with_keys`: network round-trip.
+        let tx = validator.fetch_transaction(outpoint.txid)?;
+        let Some(txout) = tx.output.get(outpoint.vout as usize) else {
+            return Err(EnclaveError::CrossCheck(format!(
+                "send-RGB change seal names outpoint {outpoint}, but that transaction has only \
+                 {} outputs",
+                tx.output.len()
+            )));
+        };
+        let script = txout.script_pubkey.as_bytes().to_vec();
         ctx.state.with_keys(|keys| {
-            Ok(crate::networks::rgb::btc_ownership::self_owned_output_indices(psbt, keys))
+            // `None` scope: bridge change sits on the Colored account. This
+            // widens what counts as ours, never what gets signed.
+            Ok(
+                btc_ownership::self_controlled_input_scripts_scoped(psbt, keys, None)
+                    .contains(&script),
+            )
         })
     };
 
