@@ -1438,11 +1438,15 @@ fn test_sign_evm_rejects_consignment_without_hash() {
 }
 
 // =============================================================================
-// Raw message signing tests
+// Raw message signing (removed - audit I-01 / #124)
 // =============================================================================
 
+/// `SignRawMessage` used to sign arbitrary caller-supplied bytes with the main
+/// bridge key under an EIP-191 envelope, gated by no feature and no policy. It
+/// was removed; the proto variant still exists, so the enclave must refuse it
+/// rather than sign anything.
 #[test]
-fn test_sign_raw_message_roundtrip() {
+fn test_sign_raw_message_is_refused() {
     let port = common::start_test_server();
 
     let init_req = EnclaveRequest {
@@ -1463,216 +1467,18 @@ fn test_sign_raw_message_roundtrip() {
             message: b"fundsIn authorization payload".to_vec(),
         })),
     };
-    let sign_resp = common::send_request(port, &sign_req);
+    let resp = common::send_request(port, &sign_req);
 
-    match &sign_resp.response {
-        Some(Response::RawSignature(r)) => {
-            assert_eq!(r.signature.len(), 65, "raw signature must be 65 bytes");
+    match &resp.response {
+        Some(Response::Error(e)) => {
+            assert!(
+                e.message.contains("SignRawMessage is removed"),
+                "unexpected error message: {}",
+                e.message
+            );
         }
-        other => panic!("expected RawSignatureResponse, got {:?}", other),
+        other => panic!("expected ErrorResponse for SignRawMessage, got {:?}", other),
     }
-}
-
-#[test]
-fn test_sign_raw_message_before_init() {
-    let port = common::start_test_server();
-
-    let sign_req = EnclaveRequest {
-        request: Some(Request::SignRawMessage(SignRawMessageRequest {
-            message: b"test".to_vec(),
-        })),
-    };
-    let resp = common::send_request(port, &sign_req);
-
-    assert!(
-        matches!(&resp.response, Some(Response::Error(_))),
-        "sign before init should return error"
-    );
-}
-
-#[test]
-fn test_sign_raw_message_empty() {
-    let port = common::start_test_server();
-
-    let init_req = EnclaveRequest {
-        request: Some(Request::InitializeKey(InitializeKeyRequest {
-            seed: vec![],
-            mnemonic: String::new(),
-            cloning_secret: String::new(),
-        })),
-    };
-    common::send_request(port, &init_req);
-
-    let sign_req = EnclaveRequest {
-        request: Some(Request::SignRawMessage(SignRawMessageRequest {
-            message: vec![],
-        })),
-    };
-    let resp = common::send_request(port, &sign_req);
-
-    assert!(
-        matches!(&resp.response, Some(Response::Error(_))),
-        "empty message should return error"
-    );
-}
-
-#[test]
-fn test_sign_raw_message_deterministic() {
-    let port = common::start_test_server();
-
-    let init_req = EnclaveRequest {
-        request: Some(Request::InitializeKey(InitializeKeyRequest {
-            seed: vec![],
-            mnemonic: String::new(),
-            cloning_secret: String::new(),
-        })),
-    };
-    common::send_request(port, &init_req);
-
-    let msg = b"deterministic test payload".to_vec();
-
-    let sign_req = EnclaveRequest {
-        request: Some(Request::SignRawMessage(SignRawMessageRequest {
-            message: msg.clone(),
-        })),
-    };
-    let resp1 = common::send_request(port, &sign_req);
-
-    let sign_req2 = EnclaveRequest {
-        request: Some(Request::SignRawMessage(SignRawMessageRequest {
-            message: msg,
-        })),
-    };
-    let resp2 = common::send_request(port, &sign_req2);
-
-    let sig1 = match &resp1.response {
-        Some(Response::RawSignature(r)) => &r.signature,
-        other => panic!("expected RawSignatureResponse, got {:?}", other),
-    };
-    let sig2 = match &resp2.response {
-        Some(Response::RawSignature(r)) => &r.signature,
-        other => panic!("expected RawSignatureResponse, got {:?}", other),
-    };
-
-    assert_eq!(
-        sig1, sig2,
-        "same message must produce same signature (RFC 6979)"
-    );
-}
-
-#[test]
-fn test_sign_raw_message_different_messages_differ() {
-    let port = common::start_test_server();
-
-    let init_req = EnclaveRequest {
-        request: Some(Request::InitializeKey(InitializeKeyRequest {
-            seed: vec![],
-            mnemonic: String::new(),
-            cloning_secret: String::new(),
-        })),
-    };
-    common::send_request(port, &init_req);
-
-    let req1 = EnclaveRequest {
-        request: Some(Request::SignRawMessage(SignRawMessageRequest {
-            message: b"message A".to_vec(),
-        })),
-    };
-    let req2 = EnclaveRequest {
-        request: Some(Request::SignRawMessage(SignRawMessageRequest {
-            message: b"message B".to_vec(),
-        })),
-    };
-
-    let sig1 = match common::send_request(port, &req1).response {
-        Some(Response::RawSignature(r)) => r.signature,
-        other => panic!("expected RawSignatureResponse, got {:?}", other),
-    };
-    let sig2 = match common::send_request(port, &req2).response {
-        Some(Response::RawSignature(r)) => r.signature,
-        other => panic!("expected RawSignatureResponse, got {:?}", other),
-    };
-
-    assert_ne!(
-        sig1, sig2,
-        "different messages must produce different signatures"
-    );
-}
-
-#[test]
-#[cfg(feature = "allow-seed-import")]
-fn test_sign_raw_message_recoverable() {
-    use k256::ecdsa::{RecoveryId, Signature as K256Signature, VerifyingKey};
-    use sha3::{Digest, Keccak256};
-
-    let port = common::start_test_server();
-
-    let seed = [0x42u8; 64];
-    let init_req = EnclaveRequest {
-        request: Some(Request::InitializeKey(InitializeKeyRequest {
-            seed: seed.to_vec(),
-            mnemonic: String::new(),
-            cloning_secret: String::new(),
-        })),
-    };
-    let init_resp = common::send_request(port, &init_req);
-
-    let evm_address = match &init_resp.response {
-        Some(Response::InitializeKey(r)) => r.evm_address.clone(),
-        other => panic!("expected InitializeKeyResponse, got {:?}", other),
-    };
-
-    let message = b"fundsIn authorization test".to_vec();
-    let sign_req = EnclaveRequest {
-        request: Some(Request::SignRawMessage(SignRawMessageRequest {
-            message: message.clone(),
-        })),
-    };
-    let sign_resp = common::send_request(port, &sign_req);
-
-    let sig_bytes = match &sign_resp.response {
-        Some(Response::RawSignature(r)) => &r.signature,
-        other => panic!("expected RawSignatureResponse, got {:?}", other),
-    };
-
-    // EIP-191 personal_sign envelope: the enclave hashes
-    // `"\x19Ethereum Signed Message:\n" || len(msg) || msg`, NOT raw keccak(msg).
-    // The verifier MUST rebuild the same preimage, otherwise pubkey recovery
-    // returns a different address.
-    let mut hasher = Keccak256::new();
-    hasher.update(b"\x19Ethereum Signed Message:\n");
-    hasher.update(message.len().to_string().as_bytes());
-    hasher.update(&message);
-    let msg_hash: [u8; 32] = hasher.finalize().into();
-
-    let signature = K256Signature::from_slice(&sig_bytes[..64]).unwrap();
-    let recovery_id = RecoveryId::from_byte(sig_bytes[64]).unwrap();
-    let recovered_key =
-        VerifyingKey::recover_from_prehash(&msg_hash, &signature, recovery_id).unwrap();
-
-    let pubkey_bytes = recovered_key.to_encoded_point(false);
-    let pubkey_hash = Keccak256::digest(&pubkey_bytes.as_bytes()[1..]);
-    let recovered_address: Vec<u8> = pubkey_hash[12..].to_vec();
-
-    assert_eq!(
-        recovered_address, evm_address,
-        "recovered address must match the enclave's EVM address — verifier must use the EIP-191 preimage"
-    );
-
-    // Sanity: raw-keccak preimage must NOT recover to the same address. If this
-    // ever passes, the enclave dropped the EIP-191 prefix and is back to
-    // signing arbitrary digests — i.e. the eth_sign tx-forgery hole is open.
-    let raw_hash: [u8; 32] = Keccak256::digest(&message).into();
-    let raw_recovered = VerifyingKey::recover_from_prehash(&raw_hash, &signature, recovery_id).ok();
-    let raw_address = raw_recovered.map(|k| {
-        let pk_bytes = k.to_encoded_point(false);
-        Keccak256::digest(&pk_bytes.as_bytes()[1..])[12..].to_vec()
-    });
-    assert_ne!(
-        raw_address.as_deref(),
-        Some(evm_address.as_slice()),
-        "raw-keccak recovery must NOT match enclave address — EIP-191 prefix is missing"
-    );
 }
 
 // =============================================================================

@@ -111,12 +111,6 @@ enum Command {
         #[arg(long, default_value = "")]
         consignment: String,
     },
-    /// Sign a raw message (fundsIn authorization, 1-of-n)
-    SignRawMessage {
-        /// Hex-encoded message bytes
-        #[arg(long)]
-        message: String,
-    },
     /// Get the enclave's current SPV chain tip (height + hash).
     /// Listener calls this on startup to know where to resume header sync.
     GetLastSavedBlock,
@@ -457,24 +451,6 @@ fn main() {
                 Ok(r) => {
                     println!("Signed PSBT: {}", hex::encode(&r.signed_psbt));
                     println!("Inputs signed: {}", r.inputs_signed);
-                }
-                Err(e) => {
-                    eprintln!("Error: {}", e);
-                    process::exit(1);
-                }
-            }
-        }
-        Command::SignRawMessage { message } => {
-            let msg_bytes = match hex::decode(&message) {
-                Ok(d) => d,
-                Err(e) => {
-                    eprintln!("Invalid hex message: {}", e);
-                    process::exit(1);
-                }
-            };
-            match client.sign_raw_message(msg_bytes) {
-                Ok(r) => {
-                    println!("Signature (65 bytes): {}", hex::encode(&r.signature));
                 }
                 Err(e) => {
                     eprintln!("Error: {}", e);
