@@ -1,0 +1,94 @@
+# syntax=docker/dockerfile:1.7
+# RGB-only enclave image (vsock + rgb + evm-rpc + helios) — handles the RGB/BTC bridge
+# only; Concordium (SignCcd / CcdSource) is not compiled in and its requests are
+# refused. For the Concordium bridge use Dockerfile.enclave.ccd; for both in one
+# binary use Dockerfile.enclave.
+# Usage:
+#   DOCKER_BUILDKIT=1 docker build --ssh default \
+#     -f build/Dockerfile.enclave.rgb -t utexo-bridge-enclave-rgb .
+#
+# `--ssh default` forwards the host's SSH agent into the build so Cargo can
+# fetch the pinned generated `federated-signer-proto` Rust crate from GitHub
+# over SSH. The same SSH mount is also used for the private `rgb-consignment`
+# git dependency pulled by the `rgb`/`spv`/`rgb-validation` features.
+
+FROM rust:1.96-slim AS builder
+
+# `git` + `openssh-client`: the workspace `[patch.crates-io]` uses public
+# git URLs for rgb-consensus / rgb-ops / rgb-invoicing / rgb-strict-encoding,
+# and `enclave/Cargo.toml` pulls `rgb-consignment` over SSH. `.cargo/config.toml`
+# sets `net.git-fetch-with-cli = true` so cargo shells out to system `git`
+# rather than bundled libgit2. `openssh-client` provides the ssh binary +
+# known_hosts machinery `git` needs for the SSH transport.
+RUN apt-get update && apt-get install -y \
+    pkg-config libssl-dev protobuf-compiler git ca-certificates openssh-client \
+    && rm -rf /var/lib/apt/lists/*
+
+# Trust github.com's SSH host key so the build doesn't prompt or fail
+# on host-key verification when fetching the private parser dep.
+RUN mkdir -p /root/.ssh && \
+    ssh-keyscan -t ed25519,ecdsa github.com >> /root/.ssh/known_hosts
+
+WORKDIR /build
+COPY . /build/
+
+WORKDIR /build/enclave
+# `rgb` implies `spv` + `rgb-validation`. `--no-default-features` drops `ccd` so
+# this binary is RGB-only. `evm-rpc` adds in-enclave FundsIn verification (#60),
+# pulling the alloy + tokio subtree; requires a second host vsock-proxy
+# (EVM_RPC_VSOCK_PORT, default 8002).
+#
+# `helios` makes that verification trustless (#77) and is required: `rgb` turns
+# on the bridge-signing path, and the production policy refuses to boot on the
+# host-relayed RawRpc source. Operator must set HELIOS_EXECUTION_RPC /
+# HELIOS_CONSENSUS_RPC / HELIOS_CHECKPOINT and run the exec+consensus
+# vsock-proxies (default ports 8003 / 8004).
+#
+# `--mount=type=ssh` exposes the forwarded SSH_AUTH_SOCK only for this RUN, so
+# no credentials end up in the image layers.
+#
+# In CI both deploy keys are ALSO passed as BuildKit secrets (federated_key +
+# consignment_key), with per-host SSH aliases + `insteadOf`: two private repos
+# (federated-signer-proto, rgb-consignment-parser) both live on github.com, and a
+# single ssh-agent holding two repo-scoped deploy keys offers the wrong one first
+# -> GitHub returns "Repository not found". `required=false` keeps local
+# agent-only builds (no secret files) working unchanged. This block affects only
+# how deps are FETCHED, not the compiled binary, so PCR0 is unaffected.
+RUN --mount=type=ssh \
+    --mount=type=secret,id=federated_key,required=false \
+    --mount=type=secret,id=consignment_key,required=false \
+    set -eu; \
+    if [ -f /run/secrets/federated_key ] && [ -f /run/secrets/consignment_key ]; then \
+      install -m 600 /run/secrets/federated_key /tmp/federated_key; \
+      install -m 600 /run/secrets/consignment_key /tmp/consignment_key; \
+      printf "%s\n" \
+        "Host github.com-federated" \
+        "  HostName github.com" \
+        "  User git" \
+        "  IdentityFile /tmp/federated_key" \
+        "  IdentitiesOnly yes" \
+        "Host github.com-consignment" \
+        "  HostName github.com" \
+        "  User git" \
+        "  IdentityFile /tmp/consignment_key" \
+        "  IdentitiesOnly yes" \
+        > /tmp/ci_ssh_config; \
+      export GIT_SSH_COMMAND="ssh -F /tmp/ci_ssh_config"; \
+      git config --global url."ssh://git@github.com-federated/UTEXO-Protocol/federated-signer-proto.git".insteadOf "ssh://git@github.com/UTEXO-Protocol/federated-signer-proto.git"; \
+      git config --global url."ssh://git@github.com-consignment/UTEXO-Protocol/rgb-consignment-parser.git".insteadOf "ssh://git@github.com/UTEXO-Protocol/rgb-consignment-parser.git"; \
+    fi; \
+    cargo build --release --locked --no-default-features --features vsock,rgb,evm-rpc,helios
+
+# --- Runtime ---
+FROM public.ecr.aws/amazonlinux/amazonlinux:2023-minimal AS runtime
+
+RUN dnf install -y socat iproute && dnf clean all
+
+WORKDIR /app
+COPY --from=builder /build/target/release/utexo-bridge-enclave /app/utexo-bridge-enclave
+COPY build/entrypoint.sh /app/entrypoint.sh
+
+RUN chmod +x /app/utexo-bridge-enclave /app/entrypoint.sh
+
+ENV RUST_LOG=info
+ENTRYPOINT ["/app/entrypoint.sh"]

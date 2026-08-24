@@ -342,6 +342,7 @@ mod tests {
     use super::*;
     use crate::config::BridgeConfig;
     use alloy_primitives::{Address, Bytes};
+    #[cfg(feature = "spv")]
     use std::sync::Mutex;
 
     fn source() -> EvmSource {
@@ -413,6 +414,7 @@ mod tests {
     }
 
     fn with_ctx<T>(config: &BridgeConfig, f: impl FnOnce(&ValidationContext<'_>) -> T) -> T {
+        #[cfg(feature = "spv")]
         let header_chain = Mutex::new(crate::networks::rgb::spv::HeaderChain::new(
             crate::networks::rgb::spv::Network::Regtest,
             crate::networks::rgb::spv::checkpoint_for(crate::networks::rgb::spv::Network::Regtest),
@@ -421,6 +423,7 @@ mod tests {
             bridge_config: config,
             #[cfg(feature = "rgb-validation")]
             rgb_validator: None,
+            #[cfg(feature = "spv")]
             header_chain: &header_chain,
             // EVM destinations never reach the send-RGB PSBT bind.
             #[cfg(feature = "rgb-validation")]

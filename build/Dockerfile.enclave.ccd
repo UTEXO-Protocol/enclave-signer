@@ -1,0 +1,85 @@
+# syntax=docker/dockerfile:1.7
+# Concordium-only enclave image (vsock + ccd) — handles the Concordium bridge
+# only (SignCcd + CcdSource -> EVM release). The RGB/BTC stack is not compiled
+# in: no rgb-ops / rgb-consignment / rgb-schemas / Esplora / SPV, so the binary
+# and PCR0 are much smaller. RGB requests (SignBtc, SubmitHeaders, RGB routes)
+# are refused. For the RGB bridge use Dockerfile.enclave.rgb; for both use
+# Dockerfile.enclave.
+# Usage:
+#   DOCKER_BUILDKIT=1 docker build --ssh default \
+#     -f build/Dockerfile.enclave.ccd -t utexo-bridge-enclave-ccd .
+#
+# `--ssh default` forwards the host's SSH agent so Cargo can fetch the pinned
+# generated `federated-signer-proto` crate over SSH. Unlike the RGB image this
+# build pulls NO private `rgb-consignment` dep (rgb-validation is off), but it
+# still needs SSH for `federated-signer-proto`.
+
+FROM rust:1.96-slim AS builder
+
+# `git` + `openssh-client` for the SSH fetch of `federated-signer-proto` (and
+# the public git `[patch.crates-io]` mirrors, which resolve even though the
+# rgb-validation crates that use them are not built here). `.cargo/config.toml`
+# sets `net.git-fetch-with-cli = true`.
+RUN apt-get update && apt-get install -y \
+    pkg-config libssl-dev protobuf-compiler git ca-certificates openssh-client \
+    && rm -rf /var/lib/apt/lists/*
+
+# Trust github.com's SSH host key so the build doesn't prompt or fail on
+# host-key verification when fetching the proto crate.
+RUN mkdir -p /root/.ssh && \
+    ssh-keyscan -t ed25519,ecdsa github.com >> /root/.ssh/known_hosts
+
+WORKDIR /build
+COPY . /build/
+
+WORKDIR /build/enclave
+# `--no-default-features --features vsock,ccd`: Concordium + shared EVM signing
+# only. No `rgb`/`spv`/`rgb-validation`/`evm-rpc`, so the heavy RGB deps are not
+# compiled. `--mount=type=ssh` exposes the forwarded SSH_AUTH_SOCK only for this
+# RUN, so no credentials end up in the image layers.
+#
+# In CI both deploy keys are ALSO passed as BuildKit secrets (federated_key +
+# consignment_key), with per-host SSH aliases + `insteadOf`: two private repos
+# (federated-signer-proto, rgb-consignment-parser) both live on github.com, and a
+# single ssh-agent holding two repo-scoped deploy keys offers the wrong one first
+# -> GitHub returns "Repository not found". `required=false` keeps local
+# agent-only builds (no secret files) working unchanged. This block affects only
+# how deps are FETCHED, not the compiled binary, so PCR0 is unaffected.
+RUN --mount=type=ssh \
+    --mount=type=secret,id=federated_key,required=false \
+    --mount=type=secret,id=consignment_key,required=false \
+    set -eu; \
+    if [ -f /run/secrets/federated_key ] && [ -f /run/secrets/consignment_key ]; then \
+      install -m 600 /run/secrets/federated_key /tmp/federated_key; \
+      install -m 600 /run/secrets/consignment_key /tmp/consignment_key; \
+      printf "%s\n" \
+        "Host github.com-federated" \
+        "  HostName github.com" \
+        "  User git" \
+        "  IdentityFile /tmp/federated_key" \
+        "  IdentitiesOnly yes" \
+        "Host github.com-consignment" \
+        "  HostName github.com" \
+        "  User git" \
+        "  IdentityFile /tmp/consignment_key" \
+        "  IdentitiesOnly yes" \
+        > /tmp/ci_ssh_config; \
+      export GIT_SSH_COMMAND="ssh -F /tmp/ci_ssh_config"; \
+      git config --global url."ssh://git@github.com-federated/UTEXO-Protocol/federated-signer-proto.git".insteadOf "ssh://git@github.com/UTEXO-Protocol/federated-signer-proto.git"; \
+      git config --global url."ssh://git@github.com-consignment/UTEXO-Protocol/rgb-consignment-parser.git".insteadOf "ssh://git@github.com/UTEXO-Protocol/rgb-consignment-parser.git"; \
+    fi; \
+    cargo build --release --locked --no-default-features --features vsock,ccd
+
+# --- Runtime ---
+FROM public.ecr.aws/amazonlinux/amazonlinux:2023-minimal AS runtime
+
+RUN dnf install -y socat iproute && dnf clean all
+
+WORKDIR /app
+COPY --from=builder /build/target/release/utexo-bridge-enclave /app/utexo-bridge-enclave
+COPY build/entrypoint.sh /app/entrypoint.sh
+
+RUN chmod +x /app/utexo-bridge-enclave /app/entrypoint.sh
+
+ENV RUST_LOG=info
+ENTRYPOINT ["/app/entrypoint.sh"]
