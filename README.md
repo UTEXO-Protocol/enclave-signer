@@ -10,7 +10,7 @@ Cryptographic signing service for the UTEXO RGB-EVM bridge, running inside an [A
 │  Receives signing requests from Orchestrator, enriches with      │
 │  EVM event data + RGB consignment, forwards via gRPC             │
 └───────────────────────┬──────────────────────────────────────────┘
-                        │ gRPC (federated-signer-proto/proto/listener/listener.proto)
+                        │ gRPC (upstream federated-signer-proto: proto/listener/listener.proto)
                         ▼
 ┌──────────────────────────────────────────────────────────────────┐
 │  EC2 Host                                                        │
@@ -78,7 +78,7 @@ Cryptographic signing service for the UTEXO RGB-EVM bridge, running inside an [A
 
 ### gRPC bridge (Parent Adapter)
 
-- Implements `FederatedSignerNode` from `federated-signer-proto/proto/listener/listener.proto` (the Go Listener's gRPC interface)
+- Implements `FederatedSignerNode` from the upstream federated-signer-proto repo (`proto/listener/listener.proto`) (the Go Listener's gRPC interface)
 - Translates `PSBTSigningFlow` / `EVMSigningFlow` into enclave-native `SignPsbtRequest` / `SignEvmRequest`
 - Passes consignment bytes through for in-enclave validation
 - 30-second timeout on enclave requests, binds to localhost only
@@ -134,7 +134,7 @@ cargo build -p utexo-bridge-enclave --features rgb-validation
 cargo build -p utexo-bridge-enclave --features spv
 
 # Build only the gRPC server (Parent Adapter)
-cargo build -p utexo-bridge-parent
+cargo build --manifest-path parent/Cargo.toml
 ```
 
 ### Production (Nitro Enclave)
@@ -163,29 +163,29 @@ RUST_LOG=debug cargo run -p utexo-bridge-enclave
 Start the gRPC server (Parent Adapter on `127.0.0.1:5000`):
 
 ```bash
-RUST_LOG=debug cargo run -p utexo-bridge-parent
+RUST_LOG=debug cargo run --manifest-path parent/Cargo.toml
 ```
 
 Use the CLI tool directly:
 
 ```bash
 # Initialize keys (generate new mnemonic)
-cargo run --bin utexo-bridge-parent-cli -- init
+cargo run --manifest-path parent/Cargo.toml --bin utexo-bridge-parent-cli -- init
 
 # Initialize keys from a known mnemonic (requires allow-seed-import feature)
-cargo run --features allow-seed-import --bin utexo-bridge-parent-cli -- \
+cargo run --manifest-path parent/Cargo.toml --features allow-seed-import --bin utexo-bridge-parent-cli -- \
   init-mnemonic "word1 word2 word3 ... word12"
 
 # Get public keys
-cargo run --bin utexo-bridge-parent-cli -- get-keys
+cargo run --manifest-path parent/Cargo.toml --bin utexo-bridge-parent-cli -- get-keys
 
 # Sign an EVM transaction
-cargo run --bin utexo-bridge-parent-cli -- sign-evm \
+cargo run --manifest-path parent/Cargo.toml --bin utexo-bridge-parent-cli -- sign-evm \
   --call-data <hex> --nonce 1 --deadline 9999999999 \
   --chain-id 1 --proxy-contract <hex>
 
 # Interactive REPL
-cargo run --bin utexo-bridge-parent-cli -- interactive
+cargo run --manifest-path parent/Cargo.toml --bin utexo-bridge-parent-cli -- interactive
 ```
 
 ### Production (Nitro Enclave)
@@ -209,7 +209,7 @@ vsock-proxy 8003 <evm-execution-rpc-host> <port>   # HELIOS_EXECUTION_RPC
 vsock-proxy 8004 <beacon-consensus-rpc-host> <port> # HELIOS_CONSENSUS_RPC
 
 # Start the gRPC server (Parent Adapter)
-GRPC_PORT=5000 USE_VSOCK=true cargo run --release -p utexo-bridge-parent
+GRPC_PORT=5000 USE_VSOCK=true cargo run --release --manifest-path parent/Cargo.toml
 ```
 
 ### Debug mode (Nitro Enclave)
@@ -299,7 +299,7 @@ cargo test -p utexo-bridge-enclave --features spv
 cargo test -p utexo-bridge-enclave --features allow-seed-import
 
 # Run gRPC bridge integration tests
-cargo test -p utexo-bridge-parent
+cargo test --manifest-path parent/Cargo.toml
 ```
 
 ### Test coverage (96 tests)

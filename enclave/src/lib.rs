@@ -72,8 +72,6 @@ pub mod state;
 #[cfg(all(feature = "vsock", target_os = "linux"))]
 pub mod vsock_forwarder;
 
-// Only the `enclave` package is vendored into the TEE build; the `grpc_proto` /
-// `enriched` / `signer` re-exports that used to sit here were unused and are
-// gone with the rest of the full proto crate. The parent adapter still exposes
-// those packages (see parent/src/lib.rs).
+// Only the `enclave` package is vendored into the TEE build; the parent adapter
+// exposes the full schema (see parent/src/lib.rs).
 pub use enclave_proto as proto;

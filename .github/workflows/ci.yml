@@ -72,9 +72,6 @@ jobs:
       - name: Check formatting (parent)
         run: cargo fmt --all --manifest-path parent/Cargo.toml -- --check
 
-      - name: Build (parent)
-        run: cargo build --manifest-path parent/Cargo.toml
-
       - name: Clippy (parent)
         run: cargo clippy --manifest-path parent/Cargo.toml --all-targets -- -D warnings
 
@@ -173,8 +170,6 @@ jobs:
       - name: Install system dependencies
         run: sudo apt-get update && sudo apt-get install -y pkg-config libssl-dev
 
-      # No credentials: `rgb-consignment` is a public HTTPS git dep, and the
-      # enclave workspace has no private sources at all.
       - name: Cache cargo registry
         uses: actions/cache@v4
         with:
@@ -182,7 +177,6 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-            parent/target
           key: ${{ runner.os }}-cargo-release-guards-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-release-guards-
 
@@ -219,7 +213,6 @@ jobs:
       - name: Install system dependencies
         run: sudo apt-get update && sudo apt-get install -y pkg-config libssl-dev
 
-      # No credentials: `rgb-consignment` is a public HTTPS git dep.
       - name: Cache cargo registry
         uses: actions/cache@v4
         with:
@@ -227,7 +220,6 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-            parent/target
           key: ${{ runner.os }}-cargo-feature-guards-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-feature-guards-
 

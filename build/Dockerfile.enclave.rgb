@@ -56,11 +56,6 @@ ENV CARGO_INCREMENTAL=0 \
 # host-relayed RawRpc source. Operator must set HELIOS_EXECUTION_RPC /
 # HELIOS_CONSENSUS_RPC / HELIOS_CHECKPOINT and run the exec+consensus
 # vsock-proxies (default ports 8003 / 8004).
-#
-# NO CREDENTIALS REQUIRED, same as Dockerfile.enclave: `enclave-proto/` is a
-# vendored in-tree slice and every other dep resolves over public HTTPS, so this
-# build carries no SSH mount and no BuildKit secrets. Keep it that way - a
-# private dep here would break public PCR reproducibility.
 RUN cargo build --release --locked --no-default-features --features vsock,rgb,evm-rpc,helios
 
 # --- Runtime ---

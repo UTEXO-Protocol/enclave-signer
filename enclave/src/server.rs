@@ -12,7 +12,7 @@ use crate::proto::enclave_request::Request;
 use crate::proto::enclave_response::Response;
 use crate::proto::*;
 use crate::state::EnclaveState;
-use enclave_proto::sign_request::{DestinationNetwork, SourceNetwork};
+use crate::proto::sign_request::{DestinationNetwork, SourceNetwork};
 
 /// Shared context passed to every request handler.
 pub struct ServerContext {
