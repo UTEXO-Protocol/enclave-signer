@@ -33,7 +33,11 @@ WORKDIR /build/enclave
 # image in debug keeps `debug_assertions` on so the guard stays quiet while
 # still refusing the feature in any production (release) build.
 #
-RUN cargo build --features allow-seed-import,spv,evm-rpc
+# `ccd` is listed explicitly: Concordium signing (SignCcd / CcdSource) now
+# sits behind that feature, and without it this image would answer every CCD
+# request with "not compiled in" — a silent capability loss versus the
+# pre-split build, where CCD was always compiled.
+RUN cargo build --features allow-seed-import,spv,ccd,evm-rpc
 
 # ===== Runtime Stage =====
 FROM debian:trixie-slim
