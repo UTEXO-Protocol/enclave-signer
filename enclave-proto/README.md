@@ -44,8 +44,8 @@ git hash-object enclave-proto/src/enclave.rs enclave-proto/proto/enclave.proto
 
 | File | Upstream blob hash |
 |---|---|
-| `rust-gen/src/enclave/enclave.rs` | `f1ee7ac28583f0b1999ff7967c21d6f589faa360` |
-| `proto/enclave/enclave.proto` | `6d99f04eedb333bb36d9c0807c0a38b945060aa3` |
+| `rust-gen/src/enclave/enclave.rs` | `bfb9857f6a24cd85d2a9324ea1e19ad6a7291f5a` |
+| `proto/enclave/enclave.proto` | `9060c2dbebfad3eb0025f72e297dfd3884b2bd81` |
 
 ## Why only `prost`
 
