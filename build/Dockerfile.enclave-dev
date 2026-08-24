@@ -44,6 +44,11 @@ WORKDIR /build/enclave
 # image in debug keeps `debug_assertions` on so the guard stays quiet while
 # still refusing the feature in any production (release) build.
 #
+# `ccd` is listed explicitly: Concordium signing (SignCcd / CcdSource) now
+# sits behind that feature, and without it this image would answer every CCD
+# request with "not compiled in" — a silent capability loss versus the
+# pre-split build, where CCD was always compiled.
+#
 # `--mount=type=ssh` exposes the SSH_AUTH_SOCK forwarded by `--ssh default`.
 # In CD we also pass both deploy keys as BuildKit secrets to avoid SSH key
 # collisions when two private repos live on github.com.
@@ -70,7 +75,7 @@ RUN --mount=type=ssh \
       git config --global url."ssh://git@github.com-federated/UTEXO-Protocol/federated-signer-proto.git".insteadOf "ssh://git@github.com/UTEXO-Protocol/federated-signer-proto.git"; \
       git config --global url."ssh://git@github.com-consignment/UTEXO-Protocol/rgb-consignment-parser.git".insteadOf "ssh://git@github.com/UTEXO-Protocol/rgb-consignment-parser.git"; \
     fi; \
-    cargo build --features allow-seed-import,spv,evm-rpc
+    cargo build --features allow-seed-import,spv,ccd,evm-rpc
 
 # ===== Runtime Stage =====
 FROM debian:trixie-slim
