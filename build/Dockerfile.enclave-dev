@@ -44,6 +44,14 @@ WORKDIR /build/enclave
 # image in debug keeps `debug_assertions` on so the guard stays quiet while
 # still refusing the feature in any production (release) build.
 #
+# `--no-default-features` is REQUIRED. The RGB/CCD split set
+# `default = ["rgb", "ccd", "helios"]` in enclave/Cargo.toml, and a plain
+# `--features` still applies defaults — so this image would silently pull
+# `helios`, whose reqwest -> native-tls -> openssl-sys chain builds OpenSSL
+# from source. This builder stage installs no `make`, so that build FAILS.
+# The release Dockerfiles already pass `--no-default-features` for the same
+# reason; keep the feature list here exhaustive and explicit.
+#
 # `ccd` is listed explicitly: Concordium signing (SignCcd / CcdSource) now
 # sits behind that feature, and without it this image would answer every CCD
 # request with "not compiled in" — a silent capability loss versus the
@@ -75,7 +83,7 @@ RUN --mount=type=ssh \
       git config --global url."ssh://git@github.com-federated/UTEXO-Protocol/federated-signer-proto.git".insteadOf "ssh://git@github.com/UTEXO-Protocol/federated-signer-proto.git"; \
       git config --global url."ssh://git@github.com-consignment/UTEXO-Protocol/rgb-consignment-parser.git".insteadOf "ssh://git@github.com/UTEXO-Protocol/rgb-consignment-parser.git"; \
     fi; \
-    cargo build --features allow-seed-import,spv,ccd,evm-rpc
+    cargo build --no-default-features --features allow-seed-import,spv,ccd,evm-rpc
 
 # ===== Runtime Stage =====
 FROM debian:trixie-slim
