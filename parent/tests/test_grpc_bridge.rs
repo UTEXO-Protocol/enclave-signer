@@ -325,9 +325,7 @@ fn sign_rgb_request(source: SourceProof, payload: enriched::EnrichedRgbPayload) 
     }
 }
 
-// =========================================================================
 // Happy-path tests
-// =========================================================================
 
 #[tokio::test]
 async fn grpc_public_key_evm_gas_tx() {
@@ -744,9 +742,7 @@ async fn grpc_evm_forwards_raw_consignment_bytes() {
     }
 }
 
-// =========================================================================
 // Error-path tests
-// =========================================================================
 
 #[tokio::test]
 async fn grpc_invalid_data_type_returns_error() {

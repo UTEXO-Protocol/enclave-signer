@@ -165,7 +165,7 @@ pub async fn verify_attested_pubkey(
     if user_data != bundle_commitment {
         bail!(
             "attestation `user_data` ({}) does not match sha256(canonical_bundle || policy) ({}) \
-             for the expected policy {expected_policy:?} — the enclave's attested public keys or \
+             for the expected policy {expected_policy:?} - the enclave's attested public keys or \
              security posture differ from what was expected",
             hex::encode(user_data),
             hex::encode(bundle_commitment),

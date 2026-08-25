@@ -111,7 +111,7 @@ impl Checkpoint {
         }
         if !self.is_real {
             return Err(
-                "SPV checkpoint is a placeholder — refuse to start a release build. \
+                "SPV checkpoint is a placeholder - refuse to start a release build. \
                  Update enclave/src/networks/rgb/spv/checkpoint.rs before deploying.",
             );
         }
@@ -255,7 +255,7 @@ pub fn parse_checkpoint_spec(
     hash.reverse();
     if hash == [0u8; 32] {
         return Err(format!(
-            "{CHECKPOINT_ENV}: block_hash is all zeros — that is the placeholder, not a real \
+            "{CHECKPOINT_ENV}: block_hash is all zeros - that is the placeholder, not a real \
              block; no header can ever chain to it"
         ));
     }
@@ -265,7 +265,7 @@ pub fn parse_checkpoint_spec(
             let bits_hex = bits_s.strip_prefix("0x").ok_or_else(|| {
                 format!(
                     "{CHECKPOINT_ENV}: bits {bits_s:?} must be hex with an explicit `0x` prefix \
-                     (an Esplora JSON body reports bits in decimal — convert it)"
+                     (an Esplora JSON body reports bits in decimal - convert it)"
                 )
             })?;
             let bits = u32::from_str_radix(bits_hex, 16)
@@ -279,7 +279,7 @@ pub fn parse_checkpoint_spec(
             if network.enforces_pow() {
                 return Err(format!(
                     "{CHECKPOINT_ENV}: {network:?} enforces PoW, so bits and time must be given \
-                     explicitly (`height:block_hash:bits:time`) — inheriting them from the \
+                     explicitly (`height:block_hash:bits:time`) - inheriting them from the \
                      compiled checkpoint would make every nBits and retarget check wrong"
                 ));
             }
@@ -400,7 +400,7 @@ mod tests {
 
     #[test]
     fn parse_spec_two_field_form_inherits_bits_and_time() {
-        let spec = "0x334000".to_string(); // not a full spec — see below
+        let spec = "0x334000".to_string(); // not a full spec - see below
         assert!(parse_checkpoint_spec(&spec, Network::Signet, &SIGNET_CHECKPOINT).is_err());
 
         let spec = "400000:000000ac5fccb8a26d3bf859952e164b4fb65190c8f29c8339c6a2c39f3aeb66";

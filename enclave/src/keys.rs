@@ -135,7 +135,6 @@ impl KeyManager {
     /// the local seed before boxing, or the stored seed ends up all zeros and
     /// cloning breaks.
     pub fn from_seed(mut seed: [u8; 64], network: Network) -> Result<Self> {
-        // Box the seed FIRST
         let seed_box = SecretBox::new(Box::new(seed));
         seed.zeroize();
 
@@ -794,7 +793,6 @@ mod tests {
         let hash = [0xABu8; 32];
         let sig = km.sign_evm(&hash).unwrap();
         assert_eq!(sig.len(), 65);
-        // recovery_id should be 0 or 1
         assert!(sig[64] <= 1);
     }
 
@@ -822,7 +820,6 @@ mod tests {
         let recovered_key =
             VerifyingKey::recover_from_prehash(&hash, &signature, recovery_id).unwrap();
 
-        // Derive address from recovered key and compare
         let pubkey_bytes = recovered_key.to_encoded_point(false);
         let pubkey_hash = Keccak256::digest(&pubkey_bytes.as_bytes()[1..]);
         let recovered_address: [u8; 20] = pubkey_hash[12..].try_into().unwrap();
@@ -1227,16 +1224,13 @@ mod tests {
 
         let mut psbt = Psbt::from_unsigned_tx(unsigned_tx).unwrap();
 
-        // Set witness_utxo
         psbt.inputs[0].witness_utxo = Some(TxOut {
             value: Amount::from_sat(100_000),
             script_pubkey,
         });
 
-        // Set tap_internal_key
         psbt.inputs[0].tap_internal_key = Some(internal_key);
 
-        // Set tap_scripts (control block -> script)
         let control_block = taproot_spend_info
             .control_block(&(tap_script.clone(), LeafVersion::TapScript))
             .unwrap();
@@ -1244,7 +1238,6 @@ mod tests {
             .tap_scripts
             .insert(control_block, (tap_script, LeafVersion::TapScript));
 
-        // Set tap_key_origins for our key
         let our_fingerprint = *km.master_fingerprint();
         let our_derivation = DerivationPath::from(vec![
             ChildNumber::from_hardened_idx(86).unwrap(),
@@ -1307,15 +1300,12 @@ mod tests {
         let (signed_bytes, _) = km.sign_psbt(&psbt_bytes).unwrap();
         let signed_psbt = Psbt::deserialize(&signed_bytes).unwrap();
 
-        // Extract the signature
         let ((xonly_pk, _leaf_hash), tap_sig) =
             signed_psbt.inputs[0].tap_script_sigs.iter().next().unwrap();
 
-        // Verify the Schnorr signature
         let secp = Secp256k1::verification_only();
         let schnorr_sig = &tap_sig.signature;
 
-        // Recompute the sighash
         let prevouts = vec![signed_psbt.inputs[0].witness_utxo.clone().unwrap()];
         let unsigned_tx = signed_psbt.unsigned_tx.clone();
         let mut cache = bitcoin::sighash::SighashCache::new(&unsigned_tx);

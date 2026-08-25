@@ -104,7 +104,7 @@ pub fn validate_gas_tx_request(req: &SignRawDigestRequest, cfg: &BridgeConfig) -
     // Chain-id pin: blocks cross-chain replay of a gas tx.
     if cfg.chain_id == 0 {
         return Err(reject(
-            "gas tx: chain_id not pinned (EVM_CHAIN_ID unset) — refusing to sign",
+            "gas tx: chain_id not pinned (EVM_CHAIN_ID unset) - refusing to sign",
         ));
     }
     if tx.chain_id != cfg.chain_id {
@@ -117,7 +117,7 @@ pub fn validate_gas_tx_request(req: &SignRawDigestRequest, cfg: &BridgeConfig) -
     // Destination pin: stops a redirect-to-attacker drain.
     let allowed = cfg.gas_tx_allowed_to.ok_or_else(|| {
         reject(
-            "gas tx: destination not pinned (GAS_TX_ALLOWED_TO unset) — refusing to sign \
+            "gas tx: destination not pinned (GAS_TX_ALLOWED_TO unset) - refusing to sign \
              (this enclave will not sign gas transactions until the allowed destination is pinned)",
         )
     })?;
@@ -144,7 +144,7 @@ pub fn validate_gas_tx_request(req: &SignRawDigestRequest, cfg: &BridgeConfig) -
         if cfg.bridge_contract == [0u8; 20] {
             return Err(reject(
                 "gas tx: non-zero value requires a pinned BRIDGE_CONTRACT to check the \
-                 destination against (unset) — refusing to sign",
+                 destination against (unset) - refusing to sign",
             ));
         }
         if tx.to != cfg.bridge_contract {
@@ -159,7 +159,7 @@ pub fn validate_gas_tx_request(req: &SignRawDigestRequest, cfg: &BridgeConfig) -
         let max = cfg.gas_tx_max_value_wei.ok_or_else(|| {
             reject(
                 "gas tx: non-zero value requires a pinned ceiling (GAS_TX_MAX_VALUE_WEI unset) \
-                 — refusing to sign",
+                 - refusing to sign",
             )
         })?;
         if tx.value > max {
@@ -174,12 +174,12 @@ pub fn validate_gas_tx_request(req: &SignRawDigestRequest, cfg: &BridgeConfig) -
     // `gasLimit * maxFeePerGas`. Unset caps fail closed.
     if cfg.gas_tx_max_gas_limit == 0 {
         return Err(reject(
-            "gas tx: gas-limit cap not pinned (GAS_TX_MAX_GAS_LIMIT unset) — refusing to sign",
+            "gas tx: gas-limit cap not pinned (GAS_TX_MAX_GAS_LIMIT unset) - refusing to sign",
         ));
     }
     if cfg.gas_tx_max_fee_per_gas == 0 {
         return Err(reject(
-            "gas tx: fee cap not pinned (GAS_TX_MAX_FEE_PER_GAS unset) — refusing to sign",
+            "gas tx: fee cap not pinned (GAS_TX_MAX_FEE_PER_GAS unset) - refusing to sign",
         ));
     }
     if tx.gas_limit > cfg.gas_tx_max_gas_limit {
@@ -217,7 +217,7 @@ pub fn validate_gas_tx_request(req: &SignRawDigestRequest, cfg: &BridgeConfig) -
         }
         None => {
             return Err(reject(
-                "gas tx: empty calldata is not permitted — a gas tx must invoke an \
+                "gas tx: empty calldata is not permitted - a gas tx must invoke an \
                  allowlisted function selector on the pinned destination; a bare call \
                  would still invoke the destination contract's fallback/receive, which \
                  is outside the allowlist",
@@ -280,7 +280,7 @@ fn parse_gas_tx(raw: &[u8]) -> Result<GasTx<'_>> {
         // tx, not an unsigned signing body.
         if !scalar_is_zero(&items[7])? || !scalar_is_zero(&items[8])? {
             return Err(reject(
-                "gas tx: legacy EIP-155 trailer must be (chainId, 0, 0) — \
+                "gas tx: legacy EIP-155 trailer must be (chainId, 0, 0) - \
                  refusing a signed or pre-EIP-155 transaction",
             ));
         }
@@ -306,9 +306,7 @@ fn parse_gas_tx(raw: &[u8]) -> Result<GasTx<'_>> {
     }
 }
 
-// ============================================================================
 // Minimal, defensive RLP decoder
-// ============================================================================
 //
 // Hand-rolled and strict: it decodes attacker-controlled bytes inside the TEE,
 // so it bounds-checks every read, rejects non-canonical encodings, and requires
@@ -726,10 +724,8 @@ mod tests {
         assert!(err.to_string().contains("value must be 0"), "got: {err}");
     }
 
-    // =====================================================================
     // LayerZero native-fee carve-out: payable selector + destination ==
     // pinned proxy + value <= ceiling. Each test breaks exactly one leg.
-    // =====================================================================
 
     /// Verbatim from `MultisigProxy.sol`. Kept in the test module so the
     /// release build carries no unused constant.

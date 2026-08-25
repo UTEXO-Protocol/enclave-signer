@@ -84,7 +84,7 @@ fn route_proof_from_validated_consignment(
         ifa::TS_TRANSFER => last.total_output_amount,
         ifa::TS_BURN => last.burned_asset_amount.ok_or_else(|| {
             EnclaveError::CrossCheck(
-                "burn transition is missing MS_BURNED_ASSET metadata — cannot validate amount"
+                "burn transition is missing MS_BURNED_ASSET metadata - cannot validate amount"
                     .into(),
             )
         })?,
@@ -204,7 +204,7 @@ pub fn validate_destination_anchor(
     // listener-trusting mode. Mirrors the EVM funds-out `!is_configured()` gate.
     if ctx.bridge_config.rgb_asset_id.is_empty() {
         return Err(EnclaveError::CrossCheck(
-            "asset-identity pin missing: RGB_ASSET_ID is not configured — refusing to bind a \
+            "asset-identity pin missing: RGB_ASSET_ID is not configured - refusing to bind a \
              send-RGB PSBT to an unpinned asset"
                 .into(),
         ));
@@ -338,7 +338,6 @@ mod tests {
         assert!(err.to_string().contains("not hex-decodable"));
     }
 
-    // =========================================================================
     // Asset-identity binding, destination path (audit TEE-SE-01). The legs are
     // inlined in `validate_destination_anchor` after `validate_consignment`, so
     // that function is the narrowest callable unit. Driven end-to-end with the
@@ -347,7 +346,6 @@ mod tests {
     // Deliberate asymmetry: this path enforces the RGB_ASSET_ID pin
     // unconditionally, while the source path gates it on
     // `BridgeConfig::is_configured()`.
-    // =========================================================================
 
     mod asset_bind {
         use super::*;
@@ -373,7 +371,7 @@ mod tests {
             let id = t.contract_id().to_string();
             assert_eq!(
                 id, FIXTURE_ASSET_ID,
-                "transfer fixture contract id drifted — update FIXTURE_ASSET_ID"
+                "transfer fixture contract id drifted - update FIXTURE_ASSET_ID"
             );
             id
         }

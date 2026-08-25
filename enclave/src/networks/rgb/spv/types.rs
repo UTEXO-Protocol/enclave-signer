@@ -90,7 +90,7 @@ pub enum SpvError {
 
     #[error(
         "alternative chain has weaker or equal cumulative work; rejecting reorg \
-         (this is normal — best chain wins)"
+         (this is normal - best chain wins)"
     )]
     WeakerChain,
 

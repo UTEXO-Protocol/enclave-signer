@@ -62,7 +62,7 @@ pub(crate) fn parse_psbt_shape(psbt_bytes: &[u8]) -> Result<Psbt> {
         .map_err(|e| EnclaveError::CrossCheck(format!("psbt_bytes is not a valid PSBT: {e}")))?;
     if psbt.unsigned_tx.input.is_empty() {
         return Err(EnclaveError::CrossCheck(
-            "psbt has no inputs — nothing to sign".into(),
+            "psbt has no inputs - nothing to sign".into(),
         ));
     }
 
@@ -150,7 +150,7 @@ pub fn validate_psbt_anchors_transition(
     // (a non-segwit input's scriptSig would change the txid post-signing).
     let expected = validated.last_transfer_witness_txid.ok_or_else(|| {
         EnclaveError::CrossCheck(
-            "consignment carries no witness txid for its last transition — \
+            "consignment carries no witness txid for its last transition - \
              cannot anchor the PSBT"
                 .into(),
         )
@@ -174,7 +174,7 @@ pub fn validate_psbt_anchors_transition(
         if psbt_set != expected_set {
             return Err(EnclaveError::CrossCheck(
                 "PSBT input outpoints do not match the consignment witness tx inputs \
-                 (txid matched but input set differs — broken consignment invariant)"
+                 (txid matched but input set differs - broken consignment invariant)"
                     .into(),
             ));
         }
@@ -199,7 +199,7 @@ pub fn validate_psbt_anchors_transition(
     if committed.is_empty() {
         return Err(EnclaveError::CrossCheck(format!(
             "send-RGB consignment commits no transition to the transaction being signed \
-             ({psbt_txid}) — refusing to sign an unbound witness"
+             ({psbt_txid}) - refusing to sign an unbound witness"
         )));
     }
     // Canary: the transition the pipeline calls "last" must be one this tx
@@ -216,7 +216,7 @@ pub fn validate_psbt_anchors_transition(
     for t in &committed {
         if !matches!(t.transition_type, ifa::TS_TRANSFER | ifa::TS_INFLATION) {
             return Err(EnclaveError::CrossCheck(format!(
-                "send-RGB PSBT commits transition {} of type {} — requires Transfer ({}) or \
+                "send-RGB PSBT commits transition {} of type {} - requires Transfer ({}) or \
                  Inflation ({})",
                 t.op_id,
                 t.transition_type,
@@ -250,7 +250,7 @@ pub fn validate_psbt_anchors_transition(
         ifa::TS_TRANSFER
     } else {
         return Err(EnclaveError::CrossCheck(format!(
-            "send-RGB PSBT commits a mixed bundle ({mints} Inflation of {} transitions) — \
+            "send-RGB PSBT commits a mixed bundle ({mints} Inflation of {} transitions) - \
              refusing to sign a shape with no defined amount bind",
             committed.len()
         )));
@@ -285,7 +285,7 @@ pub fn validate_psbt_anchors_transition(
         // so a new transition type cannot silently inherit the Transfer rule.
         other => {
             return Err(EnclaveError::CrossCheck(format!(
-                "send-RGB transition type {other} has no amount bind defined — refusing to sign"
+                "send-RGB transition type {other} has no amount bind defined - refusing to sign"
             )));
         }
     }
@@ -348,7 +348,7 @@ fn split_asset_legs(
         .collect();
     if asset_outputs.is_empty() {
         return Err(EnclaveError::CrossCheck(
-            "send-RGB consignment's committed transitions carry no OS_ASSET output assignments — \
+            "send-RGB consignment's committed transitions carry no OS_ASSET output assignments - \
              nothing to bind the credited amount to"
                 .into(),
         ));
@@ -399,7 +399,7 @@ fn split_asset_legs(
                 if !owned.contains(vout) {
                     return Err(EnclaveError::CrossCheck(format!(
                         "send-RGB OS_ASSET output {i} ({} units) has a revealed seal on vout \
-                         {vout}, which this enclave does not control — a revealed leg is only \
+                         {vout}, which this enclave does not control - a revealed leg is only \
                          acceptable as bridge change, and an unowned one is an unverifiable \
                          payout destination",
                         out.amount
@@ -441,7 +441,7 @@ pub fn check_psbt_fee_rate(psbt: &Psbt, recommended_sat_vb: f64) -> Result<()> {
     let vsize = psbt.unsigned_tx.vsize();
     if vsize == 0 {
         return Err(EnclaveError::CrossCheck(
-            "PSBT unsigned tx has zero vsize — cannot bound its fee rate".into(),
+            "PSBT unsigned tx has zero vsize - cannot bound its fee rate".into(),
         ));
     }
     let rate = fee.to_sat() as f64 / vsize as f64;
@@ -455,7 +455,7 @@ pub fn check_psbt_fee_rate(psbt: &Psbt, recommended_sat_vb: f64) -> Result<()> {
     if !within_limit {
         return Err(EnclaveError::CrossCheck(format!(
             "send-RGB PSBT fee rate too high: {rate:.2} sat/vB > {FEE_RATE_HEADROOM}x the \
-             recommended {recommended_sat_vb:.2} sat/vB — refusing to burn bridge BTC as fees"
+             recommended {recommended_sat_vb:.2} sat/vB - refusing to burn bridge BTC as fees"
         )));
     }
     Ok(())
@@ -495,9 +495,7 @@ mod tests {
             .serialize()
     }
 
-    // =========================================================================
     // PSBT shape whitelist tests
-    // =========================================================================
 
     #[test]
     fn accepts_valid_psbt_bytes() {
@@ -510,9 +508,7 @@ mod tests {
         assert!(err.to_string().contains("psbt_bytes is empty"));
     }
 
-    // =========================================================================
     // PSBT shape whitelist rejection tests
-    // =========================================================================
 
     #[test]
     fn rejects_garbage_psbt_bytes() {
@@ -556,9 +552,7 @@ mod tests {
         );
     }
 
-    // =========================================================================
     // Operation-dedup key - `psbt_operation_key` (audit W-02 / #84)
-    // =========================================================================
 
     #[test]
     fn op_key_is_deterministic() {
@@ -608,10 +602,8 @@ mod tests {
         assert_ne!(k1, k2);
     }
 
-    // =========================================================================
     // Operation dedup end-to-end - `psbt_operation_key` + the soft replay guard.
     // Encodes the M-02 properties the EVM->RGB path relies on the guard for.
-    // =========================================================================
     mod operation_dedup {
         use crate::error::EnclaveError;
         use crate::networks::rgb::psbt_validation::psbt_operation_key;
@@ -671,15 +663,13 @@ mod tests {
             let second = guard(); // restart / sibling enclave
             assert!(
                 second.reserve(k).is_ok(),
-                "a fresh instance does not share the soft guard — on-chain state \
+                "a fresh instance does not share the soft guard - on-chain state \
                  is the durable anchor"
             );
         }
     }
 
-    // =========================================================================
     // send-RGB anchoring - `validate_psbt_anchors_transition`
-    // =========================================================================
     #[cfg(feature = "rgb-validation")]
     mod fee_rate {
         use super::*;

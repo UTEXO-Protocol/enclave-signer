@@ -67,7 +67,7 @@ fn mock_funds_out_calldata(recipient: [u8; 20], amount: u64) -> Vec<u8> {
     .abi_encode()
 }
 
-/// Placeholder consignment bytes. `validate_evm_request` only verifies the
+/// Placeholder consignment bytes. `validate_source_payload` only verifies the
 /// keccak hash; the RGB validator that would deserialize them is `None` in this
 /// harness. So tests reach the cross-check layer but stop at the handler's
 /// "requires validated consignment" check, which is what they assert.
@@ -113,7 +113,7 @@ fn rgb_source_mut(req: &mut SignRequest) -> &mut RgbSource {
 }
 
 /// Build a minimal BIP-174-valid PSBT for tests that only care about
-/// `validate_psbt_request` shape-checking accepting the bytes - the actual
+/// `validate_psbt_bytes` shape-checking accepting the bytes - the actual
 /// signing path won't sign this (no witness data, no matchable keys), so
 /// only use it for tests that expect rejection BEFORE the signer runs.
 fn minimal_valid_psbt_bytes() -> Vec<u8> {
@@ -507,9 +507,7 @@ fn sign_psbt_request(
     }
 }
 
-// =============================================================================
 // EVM signing tests
-// =============================================================================
 
 // No happy-path `test_sign_evm_roundtrip` here: the harness leaves
 // `ctx.rgb_validator` as `None`, so the handler refuses to sign fundsOut
@@ -531,9 +529,7 @@ fn test_sign_evm_before_init() {
     );
 }
 
-// =============================================================================
 // EVM enriched cross-check tests
-// =============================================================================
 
 /// P0 regression: the host-supplied `consignment_valid` flag must not bypass
 /// validation. `consignment_valid: true` with `consignment: []` once produced a
@@ -777,9 +773,7 @@ fn test_no_spv_build_refuses_funds_out_even_without_merkle_proofs() {
     }
 }
 
-// =============================================================================
 // PSBT signing tests
-// =============================================================================
 
 // A successful bridge (EVM -> RGB) PSBT roundtrip needs the M-06 FundsIn
 // cross-check bypassed. Without `rgb-validation` only `dev-mode` can sign one;
@@ -852,9 +846,7 @@ fn test_sign_psbt_before_init() {
     );
 }
 
-// =============================================================================
 // PSBT enriched cross-check tests
-// =============================================================================
 
 /// Audit M-06 / #51: the listener's `evm_event_valid` / `evm_event_finalized`
 /// booleans neither authorize nor block signing. With both `false` the request
@@ -992,9 +984,7 @@ fn test_sign_psbt_rejects_amount_mismatch() {
     }
 }
 
-// =============================================================================
 // M-01/#69: bridge SignPsbt no longer has a vanilla bypass
-// =============================================================================
 
 // In a production (rgb-validation) build, a SignPsbt with no consignment is
 // rejected fail-closed - the empty-`evm_tx_hash` "vanilla mode" that used to
@@ -1095,10 +1085,8 @@ fn test_sign_psbt_zero_evm_hash_is_bridge_mode_not_vanilla() {
     }
 }
 
-// =============================================================================
 // Plain-BTC signing (SignBtc): structural input guard + output self-ownership
 // + pinned value-spent cap
-// =============================================================================
 //
 // The destination policy is not configuration: every output must pay back to a
 // script the enclave proves it controls. These tests build their PSBTs the way
@@ -1320,9 +1308,7 @@ fn test_sign_btc_uncapped_fails_closed_under_rgb_validation() {
     }
 }
 
-// =============================================================================
 // Consignment hash integrity tests (wire protocol integration)
-// =============================================================================
 
 #[cfg(all(feature = "rgb-validation", not(feature = "dev-mode")))]
 #[test]
@@ -1401,9 +1387,7 @@ fn test_sign_evm_rejects_consignment_without_hash() {
     }
 }
 
-// =============================================================================
 // Raw message signing (removed - audit I-01 / #124)
-// =============================================================================
 
 /// `SignRawMessage` used to sign arbitrary caller-supplied bytes with the main
 /// bridge key under an EIP-191 envelope, gated by no feature and no policy. It
@@ -1445,9 +1429,7 @@ fn test_sign_raw_message_is_refused() {
     }
 }
 
-// =============================================================================
 // Federation proxy test
-// =============================================================================
 
 #[test]
 fn test_proxy_federation_returns_not_ready() {
@@ -1472,9 +1454,7 @@ fn test_proxy_federation_returns_not_ready() {
     }
 }
 
-// =============================================================================
 // EVM gas-tx (SignRawDigest) shape-allowlist tests (audit TEE-XC-09)
-// =============================================================================
 //
 // These run through the real handler, so the fail-closed gate in
 // `networks::evm::gas_tx` is active. They cover the accept path and the two

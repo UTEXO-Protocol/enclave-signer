@@ -126,7 +126,7 @@ pub fn verify_btc_relay_agreement(params: &FundsOutParams, chain: &HeaderChain) 
     // the problem instead of surfacing as a header-lookup failure.
     if latest.height < source.height {
         return Err(EnclaveError::Spv(format!(
-            "fundsOut BtcRelay check: proof latest height {} is below source height {} — \
+            "fundsOut BtcRelay check: proof latest height {} is below source height {} - \
              the relay tip cannot precede the block that packaged the burn",
             latest.height, source.height
         )));
@@ -143,7 +143,7 @@ fn verify_proof_block(chain: &HeaderChain, block: &ProofBlock, label: &str) -> R
     let header = chain.header_at(block.height).ok_or_else(|| {
         EnclaveError::Spv(format!(
             "fundsOut BtcRelay check: no header at {label} block height {} \
-             (chain tip = {}) — cannot confirm the calldata commitment against \
+             (chain tip = {}) - cannot confirm the calldata commitment against \
              the enclave header chain",
             block.height,
             chain.tip_height()
@@ -302,10 +302,8 @@ mod tests {
         assert!(decode_funds_out_params(&legacy_flat_calldata(recipient)).is_err());
     }
 
-    // =========================================================================
     // Pools fundsOut tests - `validate_funds_out_transfer` (+ the #95 witness
     // recency guard `assert_witnesses_confirmed`).
-    // =========================================================================
 
     mod transfer {
         use super::*;
@@ -430,11 +428,9 @@ mod tests {
         }
     }
 
-    // =========================================================================
     // BtcRelay-agreement cross-check (#57 / #122) - `verify_btc_relay_agreement`.
     // These exercise `proof` decoding and header comparison directly against a
     // synthetic regtest header chain.
-    // =========================================================================
 
     mod btc_relay {
         use super::*;

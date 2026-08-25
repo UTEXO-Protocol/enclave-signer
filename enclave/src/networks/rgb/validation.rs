@@ -59,7 +59,7 @@ pub fn validate_source(
 
     if validated.contract_id.is_empty() {
         return Err(EnclaveError::CrossCheck(
-            "validated consignment has empty contract_id — cannot bind asset identity".into(),
+            "validated consignment has empty contract_id - cannot bind asset identity".into(),
         ));
     }
     if validated.contract_id != source.asset_id {
@@ -71,7 +71,7 @@ pub fn validate_source(
     if ctx.bridge_config.is_configured() {
         if ctx.bridge_config.rgb_asset_id.is_empty() {
             return Err(EnclaveError::CrossCheck(
-                "bridge config pinned chain/contract but RGB_ASSET_ID is empty — \
+                "bridge config pinned chain/contract but RGB_ASSET_ID is empty - \
                  set all three env vars or none"
                     .into(),
             ));
@@ -235,7 +235,7 @@ fn trusted_typesystem_for_schema(schema_id: &str) -> Result<rgbstd::TypeSystem> 
         UniqueDigitalAsset::types()
     } else {
         return Err(EnclaveError::CrossCheck(format!(
-            "consignment uses unknown/unsupported RGB schema {schema_id} — refusing to validate \
+            "consignment uses unknown/unsupported RGB schema {schema_id} - refusing to validate \
              (cannot source a trusted type system)"
         )));
     };
@@ -542,7 +542,7 @@ impl RgbValidator {
             .build_blocking();
         let estimates = client.get_fee_estimates().map_err(|e| {
             EnclaveError::CrossCheck(format!(
-                "fee-estimate fetch failed — refusing to sign a send-RGB PSBT without a \
+                "fee-estimate fetch failed - refusing to sign a send-RGB PSBT without a \
                  fee-rate sanity bound (#55): {e}"
             ))
         })?;
@@ -586,7 +586,7 @@ impl RgbValidator {
         use rgbstd::indexers::electrum_blocking::electrum_client::{Client, ElectrumApi};
         let client = Client::new(&self.indexer_url).map_err(|e| {
             EnclaveError::CrossCheck(format!(
-                "electrum fee-estimate client creation failed — refusing to sign a send-RGB \
+                "electrum fee-estimate client creation failed - refusing to sign a send-RGB \
                  PSBT without a fee-rate sanity bound (#55): {e}"
             ))
         })?;
@@ -596,7 +596,7 @@ impl RgbValidator {
             .estimate_fee(FEE_ESTIMATE_TARGET as usize, None)
             .map_err(|e| {
                 EnclaveError::CrossCheck(format!(
-                    "electrum fee-estimate fetch failed — refusing to sign a send-RGB PSBT \
+                    "electrum fee-estimate fetch failed - refusing to sign a send-RGB PSBT \
                      without a fee-rate sanity bound (#55): {e}"
                 ))
             })?;
@@ -855,7 +855,7 @@ fn read_last_transfer_witness(
         if actual != expected {
             return Err(EnclaveError::CrossCheck(format!(
                 "consignment last-bundle transition type {actual} disagrees with parsed last \
-                 transition type {expected} — refusing to bind PSBT to an ambiguous witness"
+                 transition type {expected} - refusing to bind PSBT to an ambiguous witness"
             )));
         }
         let opid_hex = known.opid.to_string();
@@ -1539,7 +1539,7 @@ mod tests {
         let msg = err.to_string();
         assert!(
             msg.contains("Contract") && msg.contains("expected Transfer"),
-            "expected Contract→Transfer rejection, got: {msg}"
+            "expected Contract->Transfer rejection, got: {msg}"
         );
     }
 
@@ -1552,7 +1552,6 @@ mod tests {
         );
     }
 
-    // =========================================================================
     // Consignment-flag pins - successors of the dropped
     // `validation::evm_crosscheck` tests `accepts_valid_consignment_hash` /
     // `ignores_consignment_valid_flag_when_bytes_present` (+ the P0 companion
@@ -1561,7 +1560,6 @@ mod tests {
     // in this file. The wire type (`proto::RgbSource`) STILL carries the
     // host-supplied `consignment_valid: bool` (tag 1); the gate never reads
     // it - validity comes from the bytes, never the flag.
-    // =========================================================================
 
     /// keccak256(bytes) in the wire shape `validate_source_payload` expects.
     fn keccak(bytes: &[u8]) -> Vec<u8> {
@@ -1724,7 +1722,6 @@ mod tests {
         );
     }
 
-    // =========================================================================
     // Asset-identity binding, SOURCE path - successor of the dropped
     // `evm_crosscheck::asset_bind` suite (audit TEE-SE-01). Its target,
     // `bind_asset_identity`, was removed in the networks/ split; the legs are
@@ -1740,7 +1737,6 @@ mod tests {
     // is gated on `BridgeConfig::is_configured()`; the destination path
     // (`validate_destination_anchor`, `networks/rgb/mod.rs`) enforces the pin
     // unconditionally.
-    // =========================================================================
 
     mod asset_bind {
         use super::*;
@@ -1760,7 +1756,7 @@ mod tests {
             let id = t.contract_id().to_string();
             assert_eq!(
                 id, FIXTURE_ASSET_ID,
-                "transfer fixture contract id drifted — update FIXTURE_ASSET_ID"
+                "transfer fixture contract id drifted - update FIXTURE_ASSET_ID"
             );
             id
         }

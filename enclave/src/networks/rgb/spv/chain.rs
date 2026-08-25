@@ -741,7 +741,7 @@ mod tests {
         // then corrupt the middle header so the BATCH itself fails to parse.
         let pred_hash = chain.hash_at(101).unwrap();
         let (mut alt, _) = synth_chain_from(pred_hash, 1_700_000_002, 13, 6);
-        alt[3] = vec![0u8; 79]; // shorter than the 80-byte header — parse error
+        alt[3] = vec![0u8; 79]; // shorter than the 80-byte header - parse error
 
         let err = chain.submit_headers(102, &alt).unwrap_err();
         assert!(matches!(err, SpvError::HeaderParse { index: 3, .. }));
@@ -814,7 +814,7 @@ mod tests {
     #[test]
     fn th2_misaligned_checkpoint_wedges_at_first_boundary() {
         let cp = Checkpoint {
-            height: 950_000, // 950_000 % 2016 == 464 → NOT aligned
+            height: 950_000, // 950_000 % 2016 == 464 -> NOT aligned
             hash: [0x22; 32],
             bits: 0x1702_0f79,
             time: 1_779_141_269,

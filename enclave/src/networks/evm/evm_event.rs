@@ -713,7 +713,7 @@ mod tests {
     #[test]
     fn extract_uint256_rejects_overflow() {
         let mut data = vec![0u8; 32];
-        data[0] = 1; // high byte set — exceeds u64
+        data[0] = 1; // high byte set - exceeds u64
         assert!(extract_uint256_as_u64(&data, 0).is_err());
     }
 

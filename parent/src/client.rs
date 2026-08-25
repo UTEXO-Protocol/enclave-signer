@@ -125,7 +125,7 @@ impl EnclaveClient {
             match cid {
                 Some(cid) => self.send_vsock(req, cid, port),
                 None => Err(ParentError::Connection(
-                    "vsock build: select the enclave explicitly — pass \
+                    "vsock build: select the enclave explicitly - pass \
                      `--addr vsock://<cid>:<port>` (e.g. vsock://16:5000) or set \
                      ENCLAVE_VSOCK_CID. Refusing to default to CID 16."
                         .to_string(),

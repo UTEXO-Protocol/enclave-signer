@@ -157,10 +157,8 @@ pub fn sign_taproot_inputs(
     let mut signed_count = 0;
 
     for job in jobs {
-        // Derive the child secret key for this input
         let child_secret = key_manager.derive_btc_child(job.account_type, &job.child_path)?;
 
-        // Compute taproot script-path sighash
         let sighash = sighash_cache
             .taproot_script_spend_signature_hash(
                 job.input_index,
@@ -172,7 +170,7 @@ pub fn sign_taproot_inputs(
 
         let msg = Message::from_digest(*sighash.as_byte_array());
 
-        // Create keypair for Schnorr signing (no tweak for script-path spend)
+        // No tweak: a script-path spend signs with the untweaked child key.
         let keypair = Keypair::from_secret_key(&secp, &child_secret);
         let schnorr_sig = secp.sign_schnorr_no_aux_rand(&msg, &keypair);
 
@@ -565,7 +563,7 @@ mod tests {
     fn our_colored_full_path() -> DerivationPath {
         DerivationPath::from(vec![
             ChildNumber::from_hardened_idx(86).unwrap(),
-            ChildNumber::from_hardened_idx(827167).unwrap(), // RGB coin type → Colored
+            ChildNumber::from_hardened_idx(827167).unwrap(), // RGB coin type -> Colored
             ChildNumber::from_hardened_idx(0).unwrap(),
             ChildNumber::Normal { index: 0 },
             ChildNumber::Normal { index: 0 },

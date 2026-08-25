@@ -210,7 +210,7 @@ pub fn assert_chain_not_stale(
     if age > max_age.as_secs() {
         return Err(EnclaveError::Spv(format!(
             "spv: chain tip is too stale (now = {now_unix}, tip_time = {tip_time}, \
-             age = {age}s, max age = {}s) — listener may be frozen or hostile",
+             age = {age}s, max age = {}s) - listener may be frozen or hostile",
             max_age.as_secs()
         )));
     }
@@ -576,7 +576,7 @@ mod tests {
         let target = synth_headers(1).into_iter().next().unwrap();
         let chain = chain_burying(target, 5);
         let (txid_display, mut proof) = single_tx_proof(chain.header_at(1).unwrap(), 1);
-        proof.block_height = 0; // checkpoint height — we don't store its header
+        proof.block_height = 0; // checkpoint height - we don't store its header
 
         let err = validate_spv_proofs(&chain, &[txid_display], &[proof], SPV_MIN_CONFIRMATIONS)
             .unwrap_err();

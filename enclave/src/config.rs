@@ -228,7 +228,7 @@ impl BridgeConfig {
         {
             tracing::warn!(
                 "GAS_TX_ALLOWED_TO is set but GAS_TX_MAX_GAS_LIMIT and/or GAS_TX_MAX_FEE_PER_GAS \
-                 is unset — gas-tx (SignRawDigest) signing will FAIL CLOSED until both caps are \
+                 is unset - gas-tx (SignRawDigest) signing will FAIL CLOSED until both caps are \
                  pinned (audit C-02)"
             );
         }

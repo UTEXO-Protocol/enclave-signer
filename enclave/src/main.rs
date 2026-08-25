@@ -157,7 +157,7 @@ fn main() {
         ),
         SecurityPolicy::Development { reason } => tracing::warn!(
             ?reason,
-            "resolved DEVELOPMENT security policy — this is NOT a production bridge signer"
+            "resolved DEVELOPMENT security policy - this is NOT a production bridge signer"
         ),
     }
 
@@ -327,7 +327,7 @@ fn main() {
             tracing::warn!(
                 ?spv_network,
                 checkpoint_height = checkpoint.height,
-                "spv: checkpoint OVERRIDDEN from {} — dev builds only; headers below this height are \
+                "spv: checkpoint OVERRIDDEN from {} - dev builds only; headers below this height are \
                  not verifiable by this enclave",
                 CHECKPOINT_ENV
             );
@@ -346,7 +346,7 @@ fn main() {
         if !checkpoint.is_real {
             tracing::warn!(
                 ?spv_network,
-                "spv: using PLACEHOLDER checkpoint (zeros) — header validation will reject any real chain. \
+                "spv: using PLACEHOLDER checkpoint (zeros) - header validation will reject any real chain. \
                  Replace the constant in enclave/src/networks/rgb/spv/checkpoint.rs before deploying."
             );
         } else {

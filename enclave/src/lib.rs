@@ -46,7 +46,7 @@ dev_feature_release_guard!(
 #[cfg(all(feature = "rgb-validation", not(feature = "spv")))]
 compile_error!(
     "rgb-validation requires spv: without spv, consignment anchoring trusts only \
-     the host-controlled Esplora resolver — build with `--features spv` (which \
+     the host-controlled Esplora resolver - build with `--features spv` (which \
      pulls in rgb-validation)"
 );
 

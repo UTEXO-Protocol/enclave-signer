@@ -185,7 +185,7 @@ pub fn validate_destination(
     if !bridge_config.is_configured() {
         return Err(EnclaveError::CrossCheck(
             "bridge config unconfigured: set EVM_CHAIN_ID / EVM_PROXY_CONTRACT_ADDRESS / RGB_ASSET_ID \
-             — refusing to sign in listener-trusting mode"
+             - refusing to sign in listener-trusting mode"
                 .into(),
         ));
     }

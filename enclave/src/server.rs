@@ -427,7 +427,7 @@ fn handle_sign(ctx: &ServerContext, req: SignRequest) -> Result<EnclaveResponse>
         return Err(EnclaveError::CrossCheck(
             "enclave was not built with --features evm-rpc: refusing to sign a bridge-mode PSBT \
              without independently verifying the FundsIn deposit (the listener-supplied \
-             event_valid/event_finalized booleans are no longer trusted — audit M-06 / #60/#51). \
+             event_valid/event_finalized booleans are no longer trusted - audit M-06 / #60/#51). \
              Rebuild with `--features evm-rpc` (or `helios` for the trustless path)."
                 .into(),
         ));
@@ -461,7 +461,7 @@ fn handle_sign(ctx: &ServerContext, req: SignRequest) -> Result<EnclaveResponse>
                 );
                 return Err(EnclaveError::CrossCheck(
                     "duplicate bridge operation: this (chain, contract, evm_tx_hash, \
-                     funds_in_operation_id, rgb_asset_id) was already signed recently — refusing \
+                     funds_in_operation_id, rgb_asset_id) was already signed recently - refusing \
                      to sign a replay (soft in-memory guard; durable guard is on-chain)"
                         .into(),
                 ));
@@ -539,7 +539,7 @@ fn apply_funds_out_binding(
     let validated = validated.ok_or_else(|| {
         EnclaveError::CrossCheck(
             "fundsOut signing requires a validated RGB source consignment (the source must be an \
-             RGB source with consignment bytes and a configured rgb_validator) — refusing to sign"
+             RGB source with consignment bytes and a configured rgb_validator) - refusing to sign"
                 .into(),
         )
     })?;
@@ -865,7 +865,7 @@ fn handle_sign_psbt(ctx: &ServerContext, req: RgbDestination) -> Result<EnclaveR
     #[cfg(not(feature = "dev-mode"))]
     if inputs_signed == 0 {
         return Err(EnclaveError::Signing(
-            "sign_psbt signed 0 inputs: no PSBT input belongs to this enclave — refusing to \
+            "sign_psbt signed 0 inputs: no PSBT input belongs to this enclave - refusing to \
              return a no-op as a successful signing response"
                 .into(),
         ));
@@ -897,7 +897,7 @@ fn handle_sign_btc(ctx: &ServerContext, req: SignBtcRequest) -> Result<EnclaveRe
         if !p.allow_vanilla_psbt {
             return Err(EnclaveError::Signing(
                 "plain-BTC (vanilla) signing is disabled by the enclave's production security \
-                 policy (BTC_MAX_TOTAL_SATS unset) — refusing to sign"
+                 policy (BTC_MAX_TOTAL_SATS unset) - refusing to sign"
                     .into(),
             ));
         }
@@ -923,7 +923,7 @@ fn handle_sign_btc(ctx: &ServerContext, req: SignBtcRequest) -> Result<EnclaveRe
     #[cfg(not(feature = "dev-mode"))]
     if inputs_signed == 0 {
         return Err(EnclaveError::Signing(
-            "sign_btc signed 0 inputs: no PSBT input belongs to this enclave — refusing to \
+            "sign_btc signed 0 inputs: no PSBT input belongs to this enclave - refusing to \
              return a no-op as a successful signing response"
                 .into(),
         ));
@@ -1089,9 +1089,7 @@ fn handle_get_last_saved_block(
     })
 }
 
-// ============================================================================
 // Cloning handshake
-// ============================================================================
 //
 // See proto/enclave.proto for the full protocol description.
 

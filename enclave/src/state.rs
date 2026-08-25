@@ -619,11 +619,9 @@ mod tests {
         assert!(matches!(err, EnclaveError::AlreadyInitialized));
     }
 
-    // =========================================================================
     // NonceReplayGuard - time-bounded replay guard (audit TEE-CL-04, coverage
     // map TC-3). Helpers use `check_and_record_at` so eviction is exercised
     // without sleeping.
-    // =========================================================================
 
     /// Distinct 32-byte nonce keyed by a small integer, for readable tests.
     fn nonce(i: u32) -> [u8; 32] {

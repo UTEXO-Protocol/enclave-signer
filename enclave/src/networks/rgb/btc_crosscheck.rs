@@ -54,7 +54,7 @@ pub fn validate_btc_request(
     for (i, input) in psbt.inputs.iter().enumerate() {
         let Some(witness_utxo) = input.witness_utxo.as_ref() else {
             return Err(EnclaveError::CrossCheck(format!(
-                "plain-BTC input {i} is missing witness_utxo — cannot bound the value spent; \
+                "plain-BTC input {i} is missing witness_utxo - cannot bound the value spent; \
                  refusing (the bridge populates witness_utxo on every segwit input it spends)"
             )));
         };
@@ -69,7 +69,7 @@ pub fn validate_btc_request(
     //    per-output check below would have nothing to inspect.
     if psbt.unsigned_tx.output.is_empty() {
         return Err(EnclaveError::CrossCheck(
-            "plain-BTC PSBT has no outputs — refusing (would route all input value to fees)".into(),
+            "plain-BTC PSBT has no outputs - refusing (would route all input value to fees)".into(),
         ));
     }
 
@@ -81,7 +81,7 @@ pub fn validate_btc_request(
     for i in 0..psbt.unsigned_tx.output.len() {
         if !output_is_self_owned(&psbt, i, keys, &input_scripts) {
             return Err(EnclaveError::CrossCheck(format!(
-                "plain-BTC output {i} pays {} — refusing: the enclave cannot prove it controls \
+                "plain-BTC output {i} pays {} - refusing: the enclave cannot prove it controls \
                  that script. An output must either repay an input this enclave co-signs, or \
                  carry BIP-371 taproot metadata (PSBT_OUT_TAP_INTERNAL_KEY / _TREE / _BIP32_\
                  DERIVATION) that reconstructs it from a key on one of this enclave's BIP-86 \
@@ -101,7 +101,7 @@ pub fn validate_btc_request(
         #[cfg(all(feature = "rgb-validation", not(test)))]
         {
             return Err(EnclaveError::CrossCheck(
-                "plain-BTC signing requires BTC_MAX_TOTAL_SATS to be pinned — refusing to sign \
+                "plain-BTC signing requires BTC_MAX_TOTAL_SATS to be pinned - refusing to sign \
                  without a bound on the value a single plain-BTC transaction can spend"
                     .into(),
             ));
@@ -110,7 +110,7 @@ pub fn validate_btc_request(
         #[cfg(not(all(feature = "rgb-validation", not(test))))]
         {
             tracing::warn!(
-                "plain-BTC signing: no BTC_MAX_TOTAL_SATS pinned (non-production build) — \
+                "plain-BTC signing: no BTC_MAX_TOTAL_SATS pinned (non-production build) - \
                  skipping the value-spent cap"
             );
             return Ok(());

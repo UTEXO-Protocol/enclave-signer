@@ -23,9 +23,7 @@ pub use policy::{
     AttestationMode, AttestedPolicy, BtcDataSource, EvmDataSource, POLICY_COMMITMENT_V2,
 };
 
-// ----------------------------------------------------------------------------
 // Public types
-// ----------------------------------------------------------------------------
 
 #[derive(Debug, Error)]
 pub enum VerifyError {
@@ -117,9 +115,7 @@ pub(crate) struct AttestationDocument {
     pub nonce: Option<Vec<u8>>,
 }
 
-// ----------------------------------------------------------------------------
 // Public API - real path (always available)
-// ----------------------------------------------------------------------------
 
 /// Verify a real (production) Nitro Enclave attestation document.
 ///
@@ -141,9 +137,7 @@ pub fn verify_attestation(
     real::verify_real_document(doc, expected_pcrs, expected_nonce)
 }
 
-// ----------------------------------------------------------------------------
 // Public API - mock path (feature-gated)
-// ----------------------------------------------------------------------------
 
 /// Verify a mock attestation document (raw CBOR, no COSE wrapping, no cert chain).
 ///
@@ -183,9 +177,7 @@ pub fn build_mock_document_with_pcrs(
     mock::build_mock_document_with_pcrs(nonce, public_key, user_data, pcrs)
 }
 
-// ----------------------------------------------------------------------------
 // Shared helpers
-// ----------------------------------------------------------------------------
 
 fn verify_pcrs(pcrs: &HashMap<u32, Vec<u8>>, expected: &ExpectedPcrs) -> Result<()> {
     let check = |idx: u32, expected_bytes: &[u8; 48]| -> Result<()> {
@@ -220,9 +212,7 @@ fn check_nonce(doc_nonce: &Option<Vec<u8>>, expected: Option<&[u8; 32]>) -> Resu
     Ok(nonce.clone())
 }
 
-// ----------------------------------------------------------------------------
 // Real path (COSE + cert chain)
-// ----------------------------------------------------------------------------
 
 mod real {
     use super::*;
@@ -800,9 +790,7 @@ IwLz3/Y=
     }
 }
 
-// ----------------------------------------------------------------------------
 // Mock path (raw CBOR, no COSE / cert chain)
-// ----------------------------------------------------------------------------
 
 #[cfg(feature = "mock")]
 mod mock {
@@ -875,9 +863,7 @@ mod mock {
     }
 }
 
-// ----------------------------------------------------------------------------
 // Tests
-// ----------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {

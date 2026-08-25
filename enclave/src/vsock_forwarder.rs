@@ -96,12 +96,12 @@ pub fn start_forwarder(local_port: u16, vsock_port: u32) -> io::Result<()> {
             };
 
             std::thread::spawn(move || match io::copy(&mut tcp_r, &mut vsock_w) {
-                Ok(bytes) => tracing::debug!("forwarder: tcp→vsock closed ({bytes} bytes)"),
-                Err(e) => tracing::debug!("forwarder: tcp→vsock error: {e}"),
+                Ok(bytes) => tracing::debug!("forwarder: tcp->vsock closed ({bytes} bytes)"),
+                Err(e) => tracing::debug!("forwarder: tcp->vsock error: {e}"),
             });
             std::thread::spawn(move || match io::copy(&mut vsock_r, &mut tcp_w) {
-                Ok(bytes) => tracing::debug!("forwarder: vsock→tcp closed ({bytes} bytes)"),
-                Err(e) => tracing::debug!("forwarder: vsock→tcp error: {e}"),
+                Ok(bytes) => tracing::debug!("forwarder: vsock->tcp closed ({bytes} bytes)"),
+                Err(e) => tracing::debug!("forwarder: vsock->tcp error: {e}"),
             });
         }
     });
