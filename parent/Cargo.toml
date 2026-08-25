@@ -1,3 +1,31 @@
+# Its OWN workspace, deliberately separate from the enclave workspace at the
+# repo root — see the comment there. In short: the parent needs the private
+# `federated-signer-proto` crate, and a shared workspace would force that
+# credential onto every enclave build, breaking public PCR0 reproducibility.
+#
+# Consequence: build the parent from THIS directory (`cd parent && cargo build`),
+# not with `-p utexo-bridge-parent` from the repo root. It also carries its own
+# Cargo.lock, and the `[patch.crates-io]` / `[profile.release]` blocks below
+# duplicate the root ones — keep them in sync.
+[workspace]
+
+[profile.release]
+opt-level = "z"
+lto = true
+strip = true
+panic = "abort"
+codegen-units = 1
+
+# Must mirror the root workspace EXACTLY: the dev-dependency on
+# `utexo-bridge-enclave` pulls its default features (`spv` -> `rgb-validation`),
+# so the RGB crates land in this graph too. Pinned by rev rather than branch —
+# with `branch = "master"` this workspace resolved to a newer commit than the
+# root and the two compiled against different rgb-ops. Bump both together.
+[patch.crates-io]
+rgb-ops = { git = "https://github.com/rgb-protocol/rgb-ops", rev = "5308b9d46c91857513ff5be2459992264687632b" }
+rgb-invoicing = { git = "https://github.com/rgb-protocol/rgb-ops", rev = "5308b9d46c91857513ff5be2459992264687632b" }
+rgb-strict-encoding = { git = "https://github.com/rgb-protocol/rgb-strict-encoding", rev = "7698a5e96a2a27d5bfa4cd3560da0e8af8e4a18a" }
+
 [package]
 name = "utexo-bridge-parent"
 version = "0.1.0"
@@ -19,6 +47,10 @@ path = "src/bin/attest_verify.rs"
 prost = "0.14"
 tonic = "0.14"
 tokio = { version = "1", features = ["full"] }
+# Full schema from the shared upstream repo (bridge / node / orchestrator /
+# parent / signer packages). The parent runs on the untrusted host, so needing a
+# credential to build it costs nothing. Keep this rev in lockstep with the
+# vendored slice in `enclave-proto/` — see its README.
 federated-signer-proto = { git = "ssh://git@github.com/UTEXO-Protocol/federated-signer-proto.git", rev = "359a421245cf5b78078426c2b98a3a92bb63ab07", package = "federated-signer-proto" }
 clap = { version = "4", features = ["derive"] }
 

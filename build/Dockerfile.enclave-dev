@@ -1,33 +1,22 @@
 # syntax=docker/dockerfile:1.4
 # Enclave (dev mode, TCP, no vsock)
 # Usage:
-#   DOCKER_BUILDKIT=1 docker build --ssh default \
-#     -f build/Dockerfile.enclave-dev -t utexo-bridge-enclave-dev .
+#   DOCKER_BUILDKIT=1 docker build -f build/Dockerfile.enclave-dev -t utexo-bridge-enclave-dev .
 #
-# `--ssh default` forwards the host's SSH agent into the build so Cargo can
-# fetch the pinned generated `federated-signer-proto` Rust crate from GitHub
-# over SSH. The same SSH mount is also used for the private `я`
-# git dependency pulled by `rgb-validation`/`spv`. In CI this is wired via
-# `docker/build-push-action` with `ssh: default` after `webfactory/ssh-agent`
-# loads the required deploy key.
+# NO CREDENTIALS REQUIRED, same as Dockerfile.enclave: the enclave compiles
+# against the in-tree `enclave-proto/` slice and every git dep is public HTTPS.
 
 # ===== Builder Stage =====
 FROM rust:1.96-slim AS builder
 
-# `git` + `openssh-client`: the workspace `[patch.crates-io]` uses public
-# git URLs for rgb-consensus / rgb-ops / rgb-invoicing / rgb-strict-encoding,
-# and `enclave/Cargo.toml` pulls `rgb-consignment` over SSH. `.cargo/config.toml`
-# sets `net.git-fetch-with-cli = true` so cargo shells out to system `git`
-# rather than bundled libgit2. `openssh-client` provides the ssh binary +
-# known_hosts machinery `git` needs for the SSH transport.
+# `git` + `ca-certificates`: the `[patch.crates-io]` block and the
+# rgb-consignment dep are public HTTPS git URLs, and `.cargo/config.toml` sets
+# `net.git-fetch-with-cli = true` so cargo shells out to system `git` rather
+# than bundled libgit2. No SSH transport is used, so no `openssh-client`.
+# `protobuf-compiler` is NOT needed: no crate here has a build.rs.
 RUN apt-get update && apt-get install -y \
-    pkg-config libssl-dev protobuf-compiler git ca-certificates openssh-client \
+    pkg-config libssl-dev git ca-certificates \
     && rm -rf /var/lib/apt/lists/*
-
-# Trust github.com's SSH host key so the build doesn't prompt or fail
-# on host-key verification when fetching the private parser dep.
-RUN mkdir -p /root/.ssh && \
-    ssh-keyscan -t ed25519,ecdsa github.com >> /root/.ssh/known_hosts
 
 WORKDIR /build
 COPY . /build/
@@ -56,34 +45,7 @@ WORKDIR /build/enclave
 # sits behind that feature, and without it this image would answer every CCD
 # request with "not compiled in" — a silent capability loss versus the
 # pre-split build, where CCD was always compiled.
-#
-# `--mount=type=ssh` exposes the SSH_AUTH_SOCK forwarded by `--ssh default`.
-# In CD we also pass both deploy keys as BuildKit secrets to avoid SSH key
-# collisions when two private repos live on github.com.
-RUN --mount=type=ssh \
-    --mount=type=secret,id=federated_key,required=false \
-    --mount=type=secret,id=consignment_key,required=false \
-    set -eu; \
-    if [ -f /run/secrets/federated_key ] && [ -f /run/secrets/consignment_key ]; then \
-      install -m 600 /run/secrets/federated_key /tmp/federated_key; \
-      install -m 600 /run/secrets/consignment_key /tmp/consignment_key; \
-      printf "%s\n" \
-        "Host github.com-federated" \
-        "  HostName github.com" \
-        "  User git" \
-        "  IdentityFile /tmp/federated_key" \
-        "  IdentitiesOnly yes" \
-        "Host github.com-consignment" \
-        "  HostName github.com" \
-        "  User git" \
-        "  IdentityFile /tmp/consignment_key" \
-        "  IdentitiesOnly yes" \
-        > /tmp/ci_ssh_config; \
-      export GIT_SSH_COMMAND="ssh -F /tmp/ci_ssh_config"; \
-      git config --global url."ssh://git@github.com-federated/UTEXO-Protocol/federated-signer-proto.git".insteadOf "ssh://git@github.com/UTEXO-Protocol/federated-signer-proto.git"; \
-      git config --global url."ssh://git@github.com-consignment/UTEXO-Protocol/rgb-consignment-parser.git".insteadOf "ssh://git@github.com/UTEXO-Protocol/rgb-consignment-parser.git"; \
-    fi; \
-    cargo build --no-default-features --features allow-seed-import,spv,ccd,evm-rpc
+RUN cargo build --no-default-features --features allow-seed-import,spv,ccd,evm-rpc
 
 # ===== Runtime Stage =====
 FROM debian:trixie-slim

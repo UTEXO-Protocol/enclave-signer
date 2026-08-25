@@ -1,4 +1,7 @@
-target/
+# `**/target/` rather than `target/`: parent/ is its own cargo workspace and so
+# has its own target dir. A bare `target/` only matches the root one, which
+# would ship parent/target into the build context.
+**/target/
 .git/
 .github/
 .vscode/

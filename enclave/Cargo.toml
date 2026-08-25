@@ -12,34 +12,24 @@ name = "utexo-bridge-enclave"
 path = "src/main.rs"
 
 [dependencies]
-# Protobuf
-prost = "0.14.3"
-federated-signer-proto = { git = "ssh://git@github.com/UTEXO-Protocol/federated-signer-proto.git", rev = "359a421245cf5b78078426c2b98a3a92bb63ab07", package = "federated-signer-proto" }
-# Crypto — ECDSA on secp256k1 (EVM address derivation + signing later)
-k256 = { version = "0.13", features = ["ecdsa"] }
-
-# Crypto — BTC (BIP-32 HD derivation, xpub serialization, SegWit later)
-bitcoin = { version = "0.32", features = ["std"] }
-
-# Crypto — BIP-39 mnemonic
 bip39 = { version = "2.1", features = ["zeroize"] }
-
-# Crypto — Ed25519 (Concordium governance account signatures). Key derived from
-# the seed via SLIP-0010 (HMAC-SHA512), signed over the 32-byte tx hash.
+bitcoin = { version = "0.32", features = ["std"] }
+chacha20poly1305 = "0.10"
 ed25519-dalek = { version = "2", features = ["zeroize"] }
-
-# Secret handling (zeroize-on-drop, redacted Debug)
-secrecy = "0.10"
-zeroize = { version = "1.8", features = ["derive"] }
-
-# Hashing
-sha3 = "0.10"
-
-# Entropy
+enclave-proto = { path = "../enclave-proto" }
 getrandom = "0.4.2"
-
-# Error handling
+hkdf = "0.12"
+hmac = "0.12"
+k256 = { version = "0.13", features = ["ecdsa"] }
+prost = "0.14.3"
+rand_core = { version = "0.6", features = ["getrandom"] }
+secrecy = "0.10"
+sha2 = "0.10"
+sha3 = "0.10"
+subtle = "2"
 thiserror = "2"
+x25519-dalek = { version = "2", features = ["static_secrets", "zeroize"] }
+zeroize = { version = "1.8", features = ["derive"] }
 
 # Encoding
 hex = "0.4"
@@ -52,62 +42,14 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 # RGB consignment validation (optional, behind rgb-validation feature)
 rgb-ops = { version = "0.11.1-rc.7", features = ["esplora_blocking", "electrum_blocking"], optional = true }
-# Flat-shape parser for RGB consignments. Used by rgb-validation to walk
-# transitions (op_id / transition_type / fungible_allocations) without
-# hand-rolling another rgbstd walk. `default-features = false` skips the
-# CLI deps (clap / env_logger / log / serde_json) we don't need inside
-# the enclave.
-#
-# SSH-style URL so cargo authenticates via the build environment's SSH
-# agent / deploy key (no PAT/insteadOf juggling in CI). Tracks the
-# parser's `main` branch directly; Cargo.lock pins the exact rev for
-# reproducible builds.
-rgb-consignment = { git = "ssh://git@github.com/UTEXO-Protocol/rgb-consignment-parser.git", branch = "main", default-features = false, optional = true }
-# Canonical RGB schema definitions (NIA/UDA/CFA/IFA). Source of the trusted
-# strict type-system the validator pins consignments against — the same crate
-# rgb-lib uses (`AssetSchema::types()` -> `InflatableFungibleAsset::types()`).
-# Pins per schema_id so a consignment cannot self-validate its own types
-# (audit 4th W-01 / #92). `default-features = false` skips the CLI bin deps.
+rgb-consignment = { git = "https://github.com/UTEXO-Protocol/consignment-utils.git", rev = "6a792af035cc5b011a790831a0732d420a2413e0", default-features = false, optional = true }
 rgb-schemas = { version = "=0.11.1-rc.10", default-features = false, optional = true }
-
-# Attestation verification (COSE_Sign1 + AWS Nitro cert chain) lives in
-# the workspace `attestation-verify` crate so the parent CLI binary and
-# the enclave share a single verifier.
 attestation-verify = { path = "../attestation-verify" }
 serde = { version = "1", features = ["derive"] }
 
-# Cloning handshake crypto (X25519 DH + HKDF + ChaCha20Poly1305 + HMAC-SHA256)
-x25519-dalek = { version = "2", features = ["static_secrets", "zeroize"] }
-chacha20poly1305 = "0.10"
-hkdf = "0.12"
-hmac = "0.12"
-sha2 = "0.10"
-subtle = "2"
-rand_core = { version = "0.6", features = ["getrandom"] }
-# rustls (not native-tls) to match the enclave's existing TLS stack (minreq
-# rustls) and keep OpenSSL out of the TEE. The enclave->forwarder hop is plain
-# loopback HTTP; TLS to the real RPC (if any) terminates at the host proxy.
 alloy = { version = "2.1.0", default-features = false, features = ["provider-http", "rpc-types-eth", "reqwest-rustls-tls"], optional = true }
 tokio = { version = "1.52.3", default-features = false, features = ["rt", "rt-multi-thread", "time"], optional = true }
-# Helios Ethereum light client for trustless in-enclave EVM event verification
-# (#77), behind the default-OFF `helios` feature. Depend on the `helios-ethereum`
-# member crate (NOT the `helios` umbrella) to avoid pulling helios-opstack ->
-# libp2p and its heavy/yanked transitive deps. Git dep (crates.io copies are
-# stale); Cargo.lock pins the exact rev. HEAVY: brings a second alloy major
-# (1.x, vs our 2.x), revm, BLS, reqwest, and vendored OpenSSL.
-#
-# OpenSSL note: it comes only from Helios's own manifests (an unused
-# `openssl = {vendored}` dep in helios-core/ethereum + reqwest's default
-# native-tls) - not removable from here (cargo feature unification is additive).
-# To drop it, fork Helios and (1) set reqwest `default-features = false` +
-# `rustls-tls`, (2) delete the `openssl` workspace dep + the `openssl.workspace`
-# lines, then pin this to the fork. Deferred (helios is experimental/default-off).
 helios-ethereum = { git = "https://github.com/a16z/helios", tag = "0.11.1", optional = true }
-# NOTE: the `helios` module hands `B256`/`U256` to/from the Helios API using the
-# always-on `alloy-primitives = "1"` declared above (dev-ng's new-arch EVM
-# validation already depends on it non-optionally). Helios also uses the alloy 1.x
-# major, so cargo unifies to the same crate instance; no separate optional
-# alloy-primitives dep is needed here.
 
 [target.'cfg(target_os = "linux")'.dependencies]
 vsock = "0.5"

@@ -72,7 +72,6 @@ pub mod state;
 #[cfg(all(feature = "vsock", target_os = "linux"))]
 pub mod vsock_forwarder;
 
-pub use federated_signer_proto as grpc_proto;
-pub use federated_signer_proto::enclave as proto;
-pub use federated_signer_proto::parent as enriched;
-pub use federated_signer_proto::signer;
+// Only the `enclave` package is vendored into the TEE build; the parent adapter
+// exposes the full schema (see parent/src/lib.rs).
+pub use enclave_proto as proto;

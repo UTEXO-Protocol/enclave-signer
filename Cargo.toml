@@ -1,5 +1,21 @@
+# Enclave workspace — everything measured into the EIF, plus the attestation
+# verifier it shares with the parent.
+#
+# `parent/` is deliberately EXCLUDED and is its own workspace. Cargo materialises
+# every git source declared anywhere in a workspace during resolution, before it
+# knows which crates a `-p` build actually compiles. While `parent` was a member,
+# its private `federated-signer-proto` dep made even
+# `cargo build -p utexo-bridge-enclave --no-default-features` demand that
+# credential — which would defeat the whole point of vendoring `enclave-proto/`.
+# Splitting the workspaces is what makes the enclave (and therefore PCR0)
+# reproducible by anyone. Keep it out of `members`.
 [workspace]
-members = ["attestation-verify", "enclave", "parent"]
+members = [
+    "attestation-verify",
+    "enclave",
+    "enclave-proto",
+]
+exclude = ["parent"]
 resolver = "2"
 
 [profile.release]
@@ -9,11 +25,17 @@ strip = true
 panic = "abort"
 codegen-units = 1
 
-#[patch."ssh://git@github.com/UTEXO-Protocol/federated-signer-proto.git"]
-#federated-signer-proto = { path = "../federated-signer-proto/rust-gen" }
-
-# RGB ecosystem crates — pinned to git master for consignment validation.
+# RGB ecosystem crates for consignment validation, pinned by REV, not branch.
+#
+# `branch = "master"` was a reproducibility hazard on two counts. (1) Cargo
+# fetches the branch and then looks up the locked rev inside it; if upstream
+# rebases or force-pushes, that rev becomes unreachable and the build breaks
+# permanently for everyone, including anyone reproducing PCR0. (2) It let the
+# parent workspace resolve `master` to a NEWER commit than this one, so the two
+# halves of the repo compiled against different rgb-ops.
+#
+# These revs must match parent/Cargo.toml exactly. Bump both together.
 [patch.crates-io]
-rgb-ops = { git = "https://github.com/rgb-protocol/rgb-ops", branch = "master" }
-rgb-invoicing = { git = "https://github.com/rgb-protocol/rgb-ops", branch = "master" }
-rgb-strict-encoding = { git = "https://github.com/rgb-protocol/rgb-strict-encoding", branch = "master" }
+rgb-ops = { git = "https://github.com/rgb-protocol/rgb-ops", rev = "5308b9d46c91857513ff5be2459992264687632b" }
+rgb-invoicing = { git = "https://github.com/rgb-protocol/rgb-ops", rev = "5308b9d46c91857513ff5be2459992264687632b" }
+rgb-strict-encoding = { git = "https://github.com/rgb-protocol/rgb-strict-encoding", rev = "7698a5e96a2a27d5bfa4cd3560da0e8af8e4a18a" }

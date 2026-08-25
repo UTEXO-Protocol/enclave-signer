@@ -10,11 +10,10 @@
 # (the build-eif workflow handles AWS auth + S3). This keeps the script a pure,
 # reproducible build step.
 #
-# Private dep: the `rgb-validation`/`spv` features pull `rgb-consignment` over
-# SSH. BuildKit `--ssh default` forwards the host's ssh-agent into the build for
-# the duration of the cargo fetch only (no key in image layers). Make sure a
-# read-only deploy key is loaded into the agent before running:
-#   eval "$(ssh-agent -s)" && ssh-add <deploy-key>
+# NO CREDENTIALS REQUIRED. Every enclave dependency resolves over public HTTPS,
+# so any third party can run this script and reproduce the PCRs it prints. The
+# enclave compiles against the in-tree `enclave-proto/` slice, and `parent/`
+# (which does need a private crate) is a separate workspace this never touches.
 #
 # Reproducible PCRs: PCR0/PCR1 depend on the nitro-cli version + its blobs
 # (kernel/init), NOT just our code. Pin nitro-cli to the SAME version that runs
@@ -66,36 +65,15 @@ command -v jq       &>/dev/null || { echo "Error: jq not found"; exit 1; }
 
 mkdir -p "$OUT_DIR"
 
-# --- 1. Build the docker image (BuildKit + ssh-agent forwarding) ------------
-# The Dockerfile's `RUN --mount=type=ssh` consumes `--ssh default`.
-#
+# --- 1. Build the docker image ---------------------------------------------
 # Deterministic timestamps: SOURCE_DATE_EPOCH (commit time, stable per git_sha)
 # + `rewrite-timestamp=true` make BuildKit normalise file mtimes in the exported
 # layers, so two builds of the same commit yield the same rootfs -> same PCR0.
 SOURCE_DATE_EPOCH="${SOURCE_DATE_EPOCH:-$(git -C "$PROJECT_ROOT" log -1 --format=%ct 2>/dev/null || echo 1700000000)}"
 export SOURCE_DATE_EPOCH
 
-# Private deps live in two separate github.com repos (federated-signer-proto over
-# SSH + rgb-consignment-parser for rgb-validation/spv). A single ssh-agent holding
-# two repo-scoped deploy keys offers the wrong one first ("Repository not found").
-# In CI we therefore ALSO hand both keys to BuildKit as secret files, and the
-# Dockerfile sets up per-host SSH aliases (see Dockerfile.enclave). Local builds
-# (no key files) fall back to `--ssh default` agent forwarding unchanged.
-FEDERATED_KEY_FILE="${FEDERATED_KEY_FILE:-/tmp/federated_key}"
-CONSIGNMENT_KEY_FILE="${CONSIGNMENT_KEY_FILE:-/tmp/consignment_key}"
-SECRET_ARGS=()
-if [ -f "$FEDERATED_KEY_FILE" ] && [ -f "$CONSIGNMENT_KEY_FILE" ]; then
-    SECRET_ARGS+=( --secret "id=federated_key,src=$FEDERATED_KEY_FILE" )
-    SECRET_ARGS+=( --secret "id=consignment_key,src=$CONSIGNMENT_KEY_FILE" )
-    echo "Using BuildKit secret keys (federated_key + consignment_key)."
-else
-    echo "No CI key files at $FEDERATED_KEY_FILE / $CONSIGNMENT_KEY_FILE; using ssh-agent (--ssh default) only."
-fi
-
-echo "Building Docker image (buildx, --ssh default, SOURCE_DATE_EPOCH=$SOURCE_DATE_EPOCH)..."
+echo "Building Docker image (buildx, SOURCE_DATE_EPOCH=$SOURCE_DATE_EPOCH)..."
 DOCKER_BUILDKIT=1 docker buildx build \
-    --ssh default \
-    "${SECRET_ARGS[@]}" \
     --build-arg SOURCE_DATE_EPOCH="$SOURCE_DATE_EPOCH" \
     -f "$SCRIPT_DIR/$DOCKERFILE" \
     -t "$IMAGE_TAG" \

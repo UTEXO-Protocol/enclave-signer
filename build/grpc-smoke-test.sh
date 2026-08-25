@@ -31,7 +31,11 @@ FAIL=0
 
 ADDR="127.0.0.1:5000"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PROTO_DIR="$(cd "$SCRIPT_DIR/.." && pwd)/federated-signer-proto/proto"
+# Parent-side gRPC schema. It is NOT vendored here — only the enclave's slice is
+# (see enclave-proto/). Point this at a checkout of
+# https://github.com/UTEXO-Protocol/federated-signer-proto:
+#   PROTO_DIR=/path/to/federated-signer-proto/proto ./build/grpc-smoke-test.sh
+PROTO_DIR="${PROTO_DIR:-$(cd "$SCRIPT_DIR/../.." && pwd)/federated-signer-proto/proto}"
 
 for arg in "$@"; do
     case $arg in
@@ -46,6 +50,14 @@ fail() { echo -e "${RED}[FAIL]${NC} $1: $2"; FAIL=$((FAIL + 1)); }
 
 command -v grpcurl &>/dev/null || {
     echo -e "${RED}Error: grpcurl not found. Install with: brew install grpcurl${NC}"
+    exit 1
+}
+
+[ -d "$PROTO_DIR" ] || {
+    echo -e "${RED}Error: proto dir not found: $PROTO_DIR${NC}"
+    echo "The parent gRPC schema is not vendored in this repo. Clone"
+    echo "  https://github.com/UTEXO-Protocol/federated-signer-proto"
+    echo "and re-run with PROTO_DIR=/path/to/that/checkout/proto"
     exit 1
 }
 
