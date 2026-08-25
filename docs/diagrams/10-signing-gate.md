@@ -5,10 +5,10 @@ flowchart TD
     start([Sign request received<br/>RgbSource + EvmDestination:<br/>consignment, merkle_proofs, call_data,<br/>nonce, deadline, chain_id, proxy_contract, ...])
 
     subgraph P1 ["P1 — RGB source (validate_source)"]
-        p1w["cheap payload gate first (W-04):<br/>consignment bytes present,<br/>keccak256 == consignment_hash,<br/>asset_id declared"]
+        p1w["cheap payload gate first:<br/>consignment bytes present,<br/>keccak256 == consignment_hash,<br/>asset_id declared"]
         p1w --> p1wq{pass?}
         p1wq -->|no| p1wr[REFUSE — payload gate]:::refuse
-        p1wq -->|yes| p1a["Transfer::load + typesystem pinned<br/>per schema_id (W-09)"]
+        p1wq -->|yes| p1a["Transfer::load + typesystem pinned<br/>per schema_id"]
         p1a --> p1b[rgbstd validate against Esplora resolver<br/>30 s timeout]
         p1b --> p1q{valid?}
         p1q -->|no| p1r[REFUSE — invalid consignment]:::refuse
@@ -34,7 +34,7 @@ flowchart TD
         p2len -->|no| p2lenr[REFUSE — size]:::refuse
         p2len -->|yes| p2sel{"selector == 0xccddb768<br/>fundsOut(address,uint256,uint256,<br/>uint256,uint256,string,bytes,bytes)?"}
         p2sel -->|no| p2selr[REFUSE — unknown selector]:::refuse
-        p2sel -->|yes| p2abi{"canonical ABI (W-01):<br/>abi_decode_validate AND<br/>re-encode byte-equals input?"}
+        p2sel -->|yes| p2abi{"canonical ABI:<br/>abi_decode_validate AND<br/>re-encode byte-equals input?"}
         p2abi -->|no| p2abir[REFUSE — non-canonical calldata]:::refuse
         p2abi -->|yes| p2am{"decoded amount == declared<br/>calldata_amount, fits u64?"}
         p2am -->|no| p2amr[REFUSE — amount mismatch]:::refuse
@@ -50,7 +50,7 @@ flowchart TD
         p4r -->|no| p4rr[REFUSE — not covered]:::refuse
         p4r -->|yes| p4w{all consignment witnesses mined?}
         p4w -->|no| p4wr[REFUSE — unmined witness]:::refuse
-        p4w -->|yes| p4b{"calldata proof slot populated?<br/>(#57/#122 — empty pre-migration)"}
+        p4w -->|yes| p4b{"calldata proof slot populated?<br/>(empty pre-migration)"}
         p4b -->|yes| p4bv{"decoded (blockHeight, commitmentHash)<br/>matches enclave header at that height?"}
         p4bv -->|no| p4bvr[REFUSE — BtcRelay disagreement]:::refuse
         p4b -->|"no (inert)"| p4t
@@ -73,26 +73,26 @@ flowchart TD
 ### Notes
 
 - `burnId` / `fundsInIds` inside the calldata are **preserved as received**
-  (#168). The in-enclave OpId rewrite (`burnId` derived from the validated
-  consignment OpId, M-02 / #93) is implemented but dormant until flows are
+. The in-enclave OpId rewrite (`burnId` derived from the validated
+  consignment OpId) is implemented but dormant until flows are
   routed by network id; mint/burn unlock (`TS_BURN` consignments) cannot
   complete this gate — only the swap flow (`TS_TRANSFER`) signs.
 - `dev-mode` builds bypass the validation subgraphs entirely; every dev
   feature is a `compile_error!` in release builds, and a release bridge build
-  refuses to boot without a valid attested `Production` policy (C-01).
+  refuses to boot without a valid attested `Production` policy.
 
-### Status vs audit (Oxorio final IDs)
+### Status
 
 **Closed since the original review:** amount bound to the consignment (host
-`rgb_amount` unused); canonical ABI validation (W-01); single pools selector,
+`rgb_amount` unused); canonical ABI validation; single pools selector,
 pinned by an ABI-derived test; EIP-712 domain `MultisigProxy`/`1` pinned by a
 deployed-contract fixture test; chain / contract / asset env-pinned; BtcRelay
-proof agreement wired (#57/#122, inert until the listener populates it).
+proof agreement wired (inert until the listener populates it).
 
 **Remaining gaps:**
-- Recipient not derived from / bound to the RGB payload (C-04 / #66 —
-  blocked on an EVM-destination commitment in the RGB burn schema, cross-repo).
-- OpId binding dormant (M-02 — see note above); backend `burnId` is signed as
+- Recipient not derived from / bound to the RGB payload (blocked on an
+  EVM-destination commitment in the RGB burn schema, cross-repo).
+- OpId binding dormant (see note above); backend `burnId` is signed as
   received.
-- Amount bind is coverage (`≥`), not strict `==` (I-06; per-output recipient-leg
-  binding is #58).
+- Amount bind is coverage (`≥`), not strict `==` (per-output recipient-leg
+  binding is).

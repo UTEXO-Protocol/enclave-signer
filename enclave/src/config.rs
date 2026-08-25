@@ -1,35 +1,28 @@
 //! Enclave-side bridge configuration pinned at boot.
 //!
 //! The chain, MultisigProxy contract (`EVM_PROXY_CONTRACT_ADDRESS`), and RGB
-//! asset the enclave is willing to sign for are loaded once from the
-//! environment at startup and then folded into
-//! the attestation `user_data` commitment (see `canonical_pubkey_bundle` in
-//! `server.rs`). Two consequences:
+//! asset this enclave will sign for are read from the environment once at
+//! startup, then folded into the attestation `user_data` commitment (see
+//! `canonical_pubkey_bundle` in `server.rs`). So:
 //!
-//!   1. A verifier that fetches `GetAttestedPublicKey` can prove this
-//!      enclave was provisioned for a specific (chain_id, contract, asset)
-//!      tuple — operator-level pinning becomes cryptographically observable.
-//!   2. `SignEvm` cross-checks the listener-supplied fields against this
-//!      config and rejects on mismatch, so a compromised listener cannot
-//!      redirect signatures to a different chain or contract.
+//!   1. a verifier fetching `GetAttestedPublicKey` can prove the enclave was
+//!      provisioned for a specific (chain_id, contract, asset) tuple;
+//!   2. `SignEvm` cross-checks the listener-supplied fields against this config
+//!      and rejects on mismatch.
 //!
-//! Production deployments MUST set all three env vars. Dev / mock builds
-//! may leave them unset, in which case the config is "unconfigured" — the
-//! cross-check is skipped and the canonical bundle commits to the empty
-//! values. That makes a missing-env production deploy externally visible
-//! to anyone running the attestation verifier.
+//! Production must set all three env vars. Dev / mock builds may leave them
+//! unset, which makes the config "unconfigured": the cross-check is skipped and
+//! the bundle commits to empty values, so a missing-env production deploy is
+//! externally visible.
 
 use crate::error::{EnclaveError, Result};
 
 /// Default aggregate request-size caps for the RGB signing path, used when the
-/// matching env var is unset. Operators may override each via env
-/// (`MAX_CONSIGNMENT_BYTES`, `MAX_MERKLE_PROOFS`, `MAX_TOTAL_PROOF_BYTES`), a
-/// per-deployment tune that needs no rebuild or re-attestation. These are
-/// defense-in-depth DoS bounds on the serial signing path; consignment size is
-/// additionally hard-capped by the 4 MB wire frame regardless of this value.
+/// matching env var is unset (`MAX_CONSIGNMENT_BYTES`, `MAX_MERKLE_PROOFS`,
+/// `MAX_TOTAL_PROOF_BYTES`). Defense-in-depth DoS bounds on the serial signing
+/// path; consignment size is also hard-capped by the 4 MB wire frame.
 ///
-/// Real USDT-swap consignments are a few KB (the in-tree fixture is ~5.5 KB);
-/// 1 MiB is a generous ceiling well under the 4 MB frame.
+/// Real USDT-swap consignments are a few KB, so 1 MiB is generous.
 pub const DEFAULT_MAX_CONSIGNMENT_BYTES: usize = 1024 * 1024;
 /// Default cap on the number of Merkle proofs a source may carry (env
 /// `MAX_MERKLE_PROOFS`). A consignment anchors a handful of witness txs.
@@ -44,40 +37,36 @@ pub const DEFAULT_MAX_TOTAL_PROOF_BYTES: usize = 128 * 1024;
 pub struct BridgeConfig {
     pub chain_id: u64,
     /// MultisigProxy contract pinned for the EVM signing cross-check (env
-    /// `EVM_PROXY_CONTRACT_ADDRESS`) — the EIP-712 `verifyingContract` the
-    /// listener stamps into every funds-out request. NOTE: this is the
-    /// MultisigProxy, NOT the bridge *entry* contract that emits `FundsIn`
-    /// (that one is `funds_in_contract`). The struct/proto field keeps the
-    /// legacy name `bridge_contract` for wire/attestation-bundle stability.
+    /// `EVM_PROXY_CONTRACT_ADDRESS`), the EIP-712 `verifyingContract` stamped
+    /// into every funds-out request. Not the bridge entry contract that emits
+    /// `FundsIn` - that is `funds_in_contract`. The field keeps the legacy name
+    /// `bridge_contract` for wire/attestation-bundle stability.
     pub bridge_contract: [u8; 20],
     pub rgb_asset_id: String,
     /// Operator-pinned allowed destination for **gas-key** transactions
     /// (`GAS_TX_ALLOWED_TO`). When set, `SignRawDigest` only signs a gas tx
-    /// whose `to` equals this address — audit TEE-XC-09 / C-02. `None` =
+    /// whose `to` equals this address. `None` =
     /// unset, which fails gas-tx signing closed in release builds.
     ///
     /// A gas tx must carry `value == 0`, except for the payable
-    /// `lzFundsOutCall` — which also requires this pin to equal
+    /// `lzFundsOutCall` - which also requires this pin to equal
     /// [`Self::bridge_contract`] and the value to fit under
     /// [`Self::gas_tx_max_value_wei`]. See `networks::evm::gas_tx`.
     ///
-    /// The destination is expected to be the bridge / an operational contract
-    /// the gas EOA calls. Safety no longer rests on that destination being a
-    /// plain wallet: [`gas_tx_allowed_selectors`](Self::gas_tx_allowed_selectors)
-    /// bounds which functions may be called and [`gas_tx_max_gas_limit`](Self::gas_tx_max_gas_limit)
-    /// / [`gas_tx_max_fee_per_gas`](Self::gas_tx_max_fee_per_gas) bound the fee it can burn
-    /// (see `networks::evm::gas_tx`).
+    /// The destination is the bridge or an operational contract the gas EOA
+    /// calls. Safety does not rest on it being a plain wallet:
+    /// [`gas_tx_allowed_selectors`](Self::gas_tx_allowed_selectors) bounds
+    /// which functions may be called, and the gas/fee caps bound what it can
+    /// burn.
     ///
-    /// Together with the two caps and the selector allowlist below, this whole
-    /// gas-tx rule IS folded into the attestation `user_data` commitment via the
-    /// C-01 [`crate::policy::SecurityPolicy`] (audit C-02), so an external
-    /// verifier can confirm the pinned gas-tx policy rather than trusting it.
+    /// The whole gas-tx rule is folded into the attestation `user_data`
+    /// commitment via [`crate::policy::SecurityPolicy`].
     pub gas_tx_allowed_to: Option<[u8; 20]>,
     /// Operator-pinned upper bound on a gas tx's `gasLimit` (`GAS_TX_MAX_GAS_LIMIT`).
-    /// `0` = unset, which — like [`gas_tx_allowed_to`](Self::gas_tx_allowed_to) —
+    /// `0` = unset, which - like [`gas_tx_allowed_to`](Self::gas_tx_allowed_to) -
     /// fails gas-tx signing closed. With [`gas_tx_max_fee_per_gas`](Self::gas_tx_max_fee_per_gas)
     /// it caps the most ETH a signed gas tx can burn as fees (`gasLimit *
-    /// maxFeePerGas`), bounding the fee-griefing residual (audit C-02).
+    /// maxFeePerGas`), bounding the fee-griefing residual.
     pub gas_tx_max_gas_limit: u64,
     /// Operator-pinned upper bound (wei) on a gas tx's per-gas fee
     /// (`GAS_TX_MAX_FEE_PER_GAS`): `maxFeePerGas` and `maxPriorityFeePerGas` for
@@ -87,55 +76,45 @@ pub struct BridgeConfig {
     pub gas_tx_max_fee_per_gas: u128,
     /// Operator-pinned allowlist of 4-byte function selectors a gas tx's
     /// calldata may invoke (`GAS_TX_ALLOWED_SELECTORS`, comma-separated hex).
-    /// Every signed gas tx must lead with a selector in this set; a bare /
-    /// empty-calldata call is refused (a value-0 empty-data call still invokes
-    /// the destination contract's fallback/receive, an entrypoint outside the
-    /// allowlist). Empty = unset, which refuses ALL gas-tx signing (fail-closed).
-    /// This replaces the previous unverifiable "the destination is an EOA so any
-    /// calldata is inert" assumption with an in-enclave, attested control
-    /// (audit C-02).
+    /// Every signed gas tx must lead with one; empty calldata is refused, since
+    /// it would still invoke the destination's fallback/receive. Empty = unset,
+    /// which refuses all gas-tx signing.
     pub gas_tx_allowed_selectors: Vec<[u8; 4]>,
-    /// Operator-pinned ceiling (wei) on the **native value** a single gas tx
-    /// may carry (`GAS_TX_MAX_VALUE_WEI`). `None` = unset, which refuses any
-    /// non-zero value — so a deployment not using the LayerZero release path
-    /// keeps the old `value == 0` posture with no new configuration.
+    /// Operator-pinned ceiling (wei) on the native value a single gas tx may
+    /// carry (`GAS_TX_MAX_VALUE_WEI`). `None` = unset, which refuses any
+    /// non-zero value, so a deployment without the LayerZero release path needs
+    /// no new configuration.
     ///
     /// The fee is not a field of the `TeeLzFundsOut` payload the proxy
     /// verifies, so nothing binds it to the release it pays for; this ceiling
-    /// bounds the blast radius until that exists. Same fail-closed shape as
-    /// [`Self::btc_max_total_sats`].
+    /// bounds the blast radius until that exists.
     pub gas_tx_max_value_wei: Option<u128>,
-    /// Operator-pinned cap (sats) on the **total input value spent** by a
-    /// plain-BTC PSBT (`BTC_MAX_TOTAL_SATS`). `0` = unset; a production build
-    /// refuses plain-BTC signing when unset. Bounds the blast radius of the
-    /// plain-BTC path — including value routed to miner fees — on top of the
-    /// destination rule, which needs no configuration: outputs must pay back to
-    /// scripts the enclave proves it controls (see
-    /// [`crate::networks::rgb::btc_ownership`]).
+    /// Operator-pinned cap (sats) on the total input value spent by a plain-BTC
+    /// PSBT (`BTC_MAX_TOTAL_SATS`). `0` = unset, and a production build then
+    /// refuses plain-BTC signing. Bounds the blast radius including value routed
+    /// to miner fees, on top of the destination rule, which needs no
+    /// configuration (see [`crate::networks::rgb::btc_ownership`]).
     ///
-    /// Whether the plain-BTC path is enabled at all
-    /// ([`allows_vanilla_btc`](Self::allows_vanilla_btc)) IS attested, as
-    /// `allow_vanilla_psbt` in the security policy (C-01).
+    /// Whether the path is enabled at all
+    /// ([`allows_vanilla_btc`](Self::allows_vanilla_btc)) is attested as
+    /// `allow_vanilla_psbt` in the security policy.
     ///
-    /// There used to be a `BTC_ALLOWED_SCRIPTS` output allowlist alongside this.
-    /// It was removed because an operator could not set it: the scripts to pin
-    /// derive from a seed that only exists once the enclave has booted, and
-    /// enclave env is measured into PCR0, so baking them in changes the very
-    /// identity the seed is bound to.
+    /// The old `BTC_ALLOWED_SCRIPTS` output allowlist was removed: the scripts
+    /// to pin derive from a seed that only exists after boot, and enclave env is
+    /// measured into PCR0, so baking them in changes the identity that seed is
+    /// bound to.
     pub btc_max_total_sats: u64,
     /// Address expected to emit `FundsIn`/`BridgeFundsIn` (env
-    /// `FUNDS_IN_CONTRACT`). Falls back to `bridge_contract` when unset, so
-    /// single-contract deployments are unaffected. Needed where the deposit
-    /// event is emitted by the bridge *entry* contract while
-    /// `EVM_PROXY_CONTRACT_ADDRESS` pins the MultisigProxy for the EVM signing
-    /// cross-check — one pin cannot serve both lookups. On this deployment the
-    /// two contracts DIFFER, so `FUNDS_IN_CONTRACT` MUST be set explicitly
-    /// (leaving it unset would fold the proxy address into the FundsIn lookup).
+    /// `FUNDS_IN_CONTRACT`), falling back to `bridge_contract` when unset. The
+    /// deposit event comes from the bridge entry contract while
+    /// `EVM_PROXY_CONTRACT_ADDRESS` pins the MultisigProxy, and one pin cannot
+    /// serve both lookups. These two contracts differ on this deployment, so
+    /// `FUNDS_IN_CONTRACT` must be set explicitly.
     pub funds_in_contract: [u8; 20],
     /// Aggregate request-size caps for the RGB signing path, operator-tunable
     /// via env (`MAX_CONSIGNMENT_BYTES` / `MAX_MERKLE_PROOFS` /
     /// `MAX_TOTAL_PROOF_BYTES`); each defaults to its `DEFAULT_*` constant when
-    /// unset (or set to 0). Defense-in-depth DoS bounds, not attested — like the
+    /// unset (or set to 0). Defense-in-depth DoS bounds, not attested - like the
     /// operational pins above. See [`DEFAULT_MAX_CONSIGNMENT_BYTES`].
     pub max_consignment_bytes: usize,
     pub max_merkle_proofs: usize,
@@ -184,9 +163,8 @@ impl BridgeConfig {
             .ok()
             .and_then(|s| parse_eth_address(&s).ok());
 
-        // Gas-tx fee/gas ceilings (audit C-02). Unset (`0`) fails the gas path
-        // closed in `validate_gas_tx_request`, so a malformed value degrading to
-        // 0 is safe — the enclave refuses to sign rather than signing uncapped.
+        // Gas-tx fee/gas ceilings. Unset (`0`) fails the gas path
+        // closed, so a malformed value degrading to 0 is safe.
         let gas_tx_max_gas_limit = std::env::var("GAS_TX_MAX_GAS_LIMIT")
             .ok()
             .and_then(|s| s.parse::<u64>().ok())
@@ -197,11 +175,9 @@ impl BridgeConfig {
             .and_then(|s| s.parse::<u128>().ok())
             .unwrap_or(0);
 
-        // Calldata selector allowlist: comma-separated 4-byte hex selectors.
-        // Each entry is parsed independently; anything that is not exactly 4
-        // bytes of hex is dropped (rather than poisoning the whole list) but
-        // logged, so an operator typo is visible at boot rather than surfacing
-        // later as a rejected gas tx.
+        // Comma-separated 4-byte hex selectors, parsed independently. A malformed
+        // entry is dropped rather than poisoning the list, but logged so an
+        // operator typo shows up at boot.
         let gas_tx_allowed_selectors = std::env::var("GAS_TX_ALLOWED_SELECTORS")
             .ok()
             .map(|s| {
@@ -245,17 +221,15 @@ impl BridgeConfig {
             .and_then(|s| parse_eth_address(&s).ok())
             .unwrap_or(bridge_contract);
 
-        // Migration guard (audit C-02): the gas caps are mandatory-fail-closed,
-        // so a deployment that pins only GAS_TX_ALLOWED_TO (as earlier builds
-        // did) will refuse to sign ANY gas tx until both caps are also set —
-        // stopping L1 gas submission. Surface that at boot rather than leaving
-        // the operator to discover it as a per-request rejection.
+        // Migration guard: a deployment pinning only
+        // GAS_TX_ALLOWED_TO refuses every gas tx until both caps are set.
+        // Surfaced at boot rather than as a per-request rejection.
         if gas_tx_allowed_to.is_some() && (gas_tx_max_gas_limit == 0 || gas_tx_max_fee_per_gas == 0)
         {
             tracing::warn!(
                 "GAS_TX_ALLOWED_TO is set but GAS_TX_MAX_GAS_LIMIT and/or GAS_TX_MAX_FEE_PER_GAS \
-                 is unset — gas-tx (SignRawDigest) signing will FAIL CLOSED until both caps are \
-                 pinned (audit C-02)"
+                 is unset - gas-tx (SignRawDigest) signing will FAIL CLOSED until both caps are \
+                 pinned"
             );
         }
 
@@ -291,33 +265,23 @@ impl BridgeConfig {
         }
     }
 
-    /// True only when **all three** fields are set to non-zero / non-empty
-    /// values (audit 4th M-03 / #94). Used to gate the strict cross-check:
-    /// only a fully-pinned config authorises bridge signing.
+    /// True only when all three fields are non-zero / non-empty. Only a
+    /// fully-pinned config authorises bridge signing.
     ///
-    /// This is deliberately an AND, not an OR. The previous OR let a
-    /// partially-pinned enclave report "configured" while a field was still
-    /// zero, which had two bad consequences in `validate_evm_request`:
-    /// a zero `chain_id` can never match a real request (rejected as
-    /// `chain_id must be > 0`), so the enclave was permanently un-signable yet
-    /// claimed configured; and a zero `bridge_contract` meant an EVM request
-    /// for the **zero address** matched the pin and was accepted.
+    /// An AND, not an OR: under an OR a zero `chain_id` made the enclave
+    /// permanently un-signable while still claiming configured, and a zero
+    /// `bridge_contract` let an EVM request for the zero address match the pin.
     ///
-    /// Requiring all three closes both: a zero `chain_id` or zero
-    /// `bridge_contract` is never treated as a valid pin. A fully-empty
-    /// config (dev / mock builds) still degrades to the legacy
-    /// "trust the request" path; a *partial* config is a misconfiguration —
-    /// see [`is_partially_configured`](Self::is_partially_configured).
+    /// A fully-empty config (dev / mock builds) still degrades to the legacy
+    /// trust-the-request path; a partial config is a misconfiguration, see
+    /// [`is_partially_configured`](Self::is_partially_configured).
     pub fn is_configured(&self) -> bool {
         self.chain_id != 0 && self.bridge_contract != [0u8; 20] && !self.rgb_asset_id.is_empty()
     }
 
-    /// True when the operator set **some but not all** pin fields. This is a
-    /// botched production config (e.g. `EVM_CHAIN_ID` set but
-    /// `EVM_PROXY_CONTRACT_ADDRESS` left at the zero address), distinct from a fully-empty config that
-    /// intentionally selects the legacy dev path. Callers fail closed on this
-    /// rather than silently falling back to listener-trusting mode
-    /// (audit 4th M-03 / #94).
+    /// True when some but not all pin fields are set: a botched production
+    /// config, distinct from a fully-empty one that selects the dev path.
+    /// Callers fail closed rather than falling back to listener-trusting mode.
     pub fn is_partially_configured(&self) -> bool {
         let any = self.chain_id != 0
             || self.bridge_contract != [0u8; 20]
@@ -325,22 +289,20 @@ impl BridgeConfig {
         any && !self.is_configured()
     }
 
-    /// Whether the plain-BTC (vanilla / create_utxo) signing path is authorised:
-    /// the operator-set total-value cap (`BTC_MAX_TOTAL_SATS`) is what gates it.
-    /// The output destination rule needs no configuration — outputs must pay
-    /// back to scripts the enclave proves it controls
-    /// ([`crate::networks::rgb::btc_ownership`]) — so the cap is the only pin.
-    /// This is the single predicate the boot-time [`crate::policy::SecurityPolicy`]
-    /// records as `allow_vanilla_psbt` and that
-    /// `networks::rgb::btc_crosscheck::validate_btc_request` enforces per request
-    /// (they MUST agree — an enclave that attests `allow_vanilla_psbt = true` must
-    /// actually accept the path, and vice versa).
+    /// Whether the plain-BTC (vanilla / create_utxo) signing path is
+    /// authorised, gated solely by the `BTC_MAX_TOTAL_SATS` cap: the output
+    /// destination rule needs no configuration
+    /// ([`crate::networks::rgb::btc_ownership`]).
+    ///
+    /// [`crate::policy::SecurityPolicy`] records this as `allow_vanilla_psbt`
+    /// and `btc_crosscheck::validate_btc_request` enforces it per request. The
+    /// two must agree.
     pub fn allows_vanilla_btc(&self) -> bool {
         self.btc_max_total_sats != 0
     }
 }
 
-/// Parse `0xABCD…` (40 hex chars) or bare 40-hex into 20 bytes. Shared by the
+/// Parse `0xABCD...` (40 hex chars) or bare 40-hex into 20 bytes. Shared by the
 /// `EVM_PROXY_CONTRACT_ADDRESS`, `GAS_TX_ALLOWED_TO`, and `FUNDS_IN_CONTRACT`
 /// address pins, so the error text is address-agnostic.
 fn parse_eth_address(s: &str) -> Result<[u8; 20]> {
@@ -355,20 +317,18 @@ fn parse_eth_address(s: &str) -> Result<[u8; 20]> {
     })
 }
 
-/// EVM JSON-RPC config for in-enclave `FundsIn` event verification (#60),
+/// EVM JSON-RPC config for in-enclave `FundsIn` event verification,
 /// loaded at boot when the `evm-rpc` feature is built.
 ///
-/// This is operational signing-plumbing, NOT part of the enclave's committed
-/// identity: like [`BridgeConfig::funds_in_contract`], it is deliberately
-/// **not** folded into the attestation `user_data` bundle. (The *choice* of EVM
-/// data source — raw RPC vs Helios — IS attested, as `evm_source` in the C-01
-/// security policy; this URL/confirmations plumbing is not.)
+/// Operational plumbing, not part of the committed identity: like
+/// [`BridgeConfig::funds_in_contract`] it is not folded into the attestation
+/// bundle. The choice of EVM data source (raw RPC vs Helios) is attested, as
+/// `evm_source` in the security policy; this URL is not.
 ///
-/// TRUST BOUNDARY: `rpc_url` MUST be loopback. The enclave has no direct
-/// network; it reaches the EVM RPC only through the loopback -> vsock
-/// forwarder ([`crate::vsock_forwarder`]), so the responses are relayed by the
-/// UNTRUSTED host. `verify_funds_in_event` treats them as evidence and fails
-/// closed; full trustlessness needs Helios (#77).
+/// Trust boundary: `rpc_url` must be loopback. The enclave reaches the EVM RPC
+/// only through the vsock forwarder ([`crate::vsock_forwarder`]), so responses
+/// are relayed by the untrusted host. `verify_funds_in_event` treats them as
+/// evidence and fails closed; full trustlessness needs Helios.
 #[cfg(feature = "evm-rpc")]
 #[derive(Debug, Clone)]
 pub struct EvmRpcConfig {
@@ -426,10 +386,9 @@ impl Default for EvmRpcConfig {
 }
 
 /// True if `url`'s host is exactly a loopback literal (`127.0.0.1`, `[::1]`, or
-/// `localhost`). A deliberately narrow, dependency-free check - the enclave only
-/// ever points this at its own loopback forwarder. Matches the host *exactly*
-/// (after stripping scheme, userinfo, path, and port) so a look-alike authority
-/// like `127.0.0.1.evil.com` or `localhost.evil.com` is NOT treated as loopback.
+/// `localhost`). Narrow and dependency-free. Matches the host exactly, after
+/// stripping scheme, userinfo, path, and port, so `127.0.0.1.evil.com` is not
+/// treated as loopback.
 #[cfg(feature = "evm-rpc")]
 fn is_loopback_url(url: &str) -> bool {
     let after_scheme = url.split_once("://").map(|(_, rest)| rest).unwrap_or(url);
@@ -455,14 +414,14 @@ fn is_loopback_url(url: &str) -> bool {
     host == "127.0.0.1" || host == "localhost"
 }
 
-/// Helios light-client config for TRUSTLESS in-enclave EVM event verification
-/// (#77), loaded at boot when the `helios` feature is built.
+/// Helios light-client config for TRUSTLESS in-enclave EVM event
+/// verification, loaded at boot when the `helios` feature is built.
 ///
 /// Selection is runtime: [`HeliosConfig::from_env`] returns `Some` only when
-/// `HELIOS_EXECUTION_RPC` is set - that is the signal to use the Helios-verified
-/// provider instead of the raw alloy path (#60). Like [`EvmRpcConfig`], the RPC
-/// URLs MUST be loopback (reached through vsock forwarders); Helios treats those
-/// upstreams as untrusted and verifies them against the pinned checkpoint.
+/// `HELIOS_EXECUTION_RPC` is set, which selects the Helios-verified provider
+/// over the raw alloy path. Like [`EvmRpcConfig`] the URLs must be
+/// loopback; Helios treats those upstreams as untrusted and verifies them
+/// against the pinned checkpoint.
 #[cfg(feature = "helios")]
 #[derive(Debug, Clone)]
 pub struct HeliosConfig {
@@ -588,7 +547,7 @@ mod tests {
     #[test]
     fn partial_config_is_not_configured() {
         // chain_id set, contract still zero, asset set: a botched pin. The
-        // OR-logic bug (#94) used to report this "configured" and then accept
+        // OR-logic bug used to report this "configured" and then accept
         // an EVM request for the zero address.
         let c = BridgeConfig {
             chain_id: 1,

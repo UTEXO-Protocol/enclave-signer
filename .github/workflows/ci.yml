@@ -72,6 +72,9 @@ jobs:
       - name: Check formatting (parent)
         run: cargo fmt --all --manifest-path parent/Cargo.toml -- --check
 
+      - name: Build (parent)
+        run: cargo build --manifest-path parent/Cargo.toml
+
       - name: Clippy (parent)
         run: cargo clippy --manifest-path parent/Cargo.toml --all-targets -- -D warnings
 
@@ -79,8 +82,8 @@ jobs:
         run: cargo test --manifest-path parent/Cargo.toml
 
       # Production build profile: the exact feature set shipped in the EIF
-      # (build/Dockerfile.enclave). `helios` is required in production (#77) and
-      # makes this a heavy build (2nd alloy major, revm, BLS, vendored OpenSSL).
+      # (build/Dockerfile.enclave). `helios` is required in production and
+      # makes this a heavy build (alloy major, revm, BLS, vendored OpenSSL).
       - name: Build (production combo)
         run: cargo build -p utexo-bridge-enclave --features vsock,rgb,ccd,evm-rpc,helios
 
@@ -94,7 +97,7 @@ jobs:
         run: cargo test -p utexo-bridge-enclave --features spv
 
       # RGB-only EIF profile, `ccd` dropped. Mirrors Dockerfile.enclave.rgb;
-      # keeps helios (this build still has the bridge-signing path, #77).
+      # keeps helios (this build still has the bridge-signing path).
       # CCD requests (SignCcd / CcdSource) must be refused here.
       - name: Build (rgb-only)
         run: cargo build -p utexo-bridge-enclave --no-default-features --features vsock,rgb,evm-rpc,helios
@@ -116,7 +119,7 @@ jobs:
 
       # Minimal build: no features at all (`--no-default-features` drops the
       # default rgb/ccd/helios set). Keeps the no-SPV path compiling and exercises the
-      # M-01 / #61 guard that a no-spv build refuses to sign `fundsOut`
+      # Guard that a no-spv build refuses to sign `fundsOut`
       # (test_no_spv_build_refuses_funds_out_even_without_merkle_proofs).
       # Skips the rgb-consignment dep entirely. Like every enclave build here it
       # needs no credentials -- the property that makes the EIF publicly
@@ -130,7 +133,7 @@ jobs:
       - name: Test (minimal — no default features)
         run: cargo test -p utexo-bridge-enclave --no-default-features
 
-      # In-enclave EVM FundsIn verification (#60). The predicate + decoding
+      # In-enclave EVM FundsIn verification. The predicate + decoding
       # tests use a FakeProvider, so no real RPC is needed in CI.
       - name: Test (--features evm-rpc)
         run: cargo test -p utexo-bridge-enclave --features evm-rpc
@@ -170,6 +173,8 @@ jobs:
       - name: Install system dependencies
         run: sudo apt-get update && sudo apt-get install -y pkg-config libssl-dev
 
+      # No credentials: `rgb-consignment` is a public HTTPS git dep, and the
+      # enclave workspace has no private sources at all.
       - name: Cache cargo registry
         uses: actions/cache@v4
         with:
@@ -177,6 +182,7 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
+            parent/target
           key: ${{ runner.os }}-cargo-release-guards-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-release-guards-
 
@@ -194,7 +200,7 @@ jobs:
           echo "OK: release build correctly rejected '${{ matrix.feature }}' via the compile_error guard"
 
   # Assert that enabling `rgb-validation` without `spv` fails to compile via the
-  # `compile_error!` in lib.rs (audit M-01 / #61). Without SPV, a consignment's
+  # `compile_error!` in lib.rs. Without SPV, a consignment's
   # witness txs are anchored only through the host-controlled Esplora resolver,
   # so the enclave must never be built that way. Runs separately from `ci`
   # because the build is expected to fail. Unlike `release-guards` this is not
@@ -213,6 +219,7 @@ jobs:
       - name: Install system dependencies
         run: sudo apt-get update && sudo apt-get install -y pkg-config libssl-dev
 
+      # No credentials: `rgb-consignment` is a public HTTPS git dep.
       - name: Cache cargo registry
         uses: actions/cache@v4
         with:
@@ -220,6 +227,7 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
+            parent/target
           key: ${{ runner.os }}-cargo-feature-guards-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-feature-guards-
 

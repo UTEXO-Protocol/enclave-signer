@@ -27,12 +27,9 @@ pub fn start_test_server_with(configure: impl FnOnce(&EnclaveState)) -> u16 {
     start_test_server_with_config(configure, BridgeConfig::from_env())
 }
 
-/// Start a test server with an explicit `BridgeConfig`. Use this from
-/// tests that need to exercise the pinned cross-check path (mismatch
-/// rejection, bundle commitment). `start_test_server` / `_with` read from
-/// env, which is the empty default in CI — pass a constructed config here
-/// to inject one without env mutation (env mutation across parallel tests
-/// is a footgun).
+/// Start a test server with an explicit `BridgeConfig`, for tests exercising
+/// the pinned cross-check path. `start_test_server` / `_with` read env, which
+/// is empty in CI, and mutating env across parallel tests is unsafe.
 #[allow(dead_code)]
 pub fn start_test_server_with_config(
     configure: impl FnOnce(&EnclaveState),

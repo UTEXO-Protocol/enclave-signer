@@ -15,7 +15,7 @@ use utexo_bridge_parent::enclave_proto::{InitializeKeyResponse, PublicKeysRespon
 )]
 struct Cli {
     /// Enclave address: `host:port` (TCP, dev builds) or `vsock://<cid>:<port>`
-    /// (Nitro, vsock builds — e.g. `vsock://18:5000`). On a vsock build you MUST
+    /// (Nitro, vsock builds - e.g. `vsock://18:5000`). On a vsock build you MUST
     /// pass a `vsock://` addr or set ENCLAVE_VSOCK_CID; it will not default to CID 16.
     #[arg(long, default_value = "127.0.0.1:5000")]
     addr: String,
@@ -119,7 +119,7 @@ enum Command {
     /// Headers are read from a file: one hex-encoded 80-byte header per line,
     /// in ascending height order. Empty lines and lines starting with `#` are
     /// ignored. Pass an empty file to send a no-op batch (useful for smoke
-    /// testing — proves the dispatch path without a fixture chain).
+    /// testing - proves the dispatch path without a fixture chain).
     SubmitHeaders {
         /// Block height of the first header in the batch.
         #[arg(long)]
@@ -592,7 +592,7 @@ fn read_headers_file(path: &std::path::Path) -> std::io::Result<Vec<Vec<u8>>> {
                 format!("line {}: invalid hex: {}", lineno + 1, e),
             )
         })?;
-        // Don't enforce 80 bytes here — the enclave will reject on parse.
+        // Don't enforce 80 bytes here - the enclave will reject on parse.
         // Keeping the CLI permissive lets us deliberately send malformed
         // headers in smoke tests.
         headers.push(bytes);

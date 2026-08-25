@@ -10,17 +10,17 @@
 # It does NOT bootstrap identity. A fresh/restarted enclave has no key; after this
 # run `utexo-bridge-parent-cli init --cloning-secret ...` on a donor, or
 # `... clone ...` on a requester. (Identity lives in enclave memory and is lost
-# on restart/reboot — see TODO #5 for KMS-sealed DR. #7 only makes the PROCESSES
+# on restart/reboot - see TODO #5 for KMS-sealed DR. #7 only makes the PROCESSES
 # come back automatically; the enclaves come up empty.)
 #
 # The systemd units / ctl scripts / udev / tmpfiles installed here are embedded
 # below as heredocs so this script is self-contained over SSM. They are the same
-# files kept (canonical, reviewable) under deploy/systemd/ in the repo — keep both
+# files kept (canonical, reviewable) under deploy/systemd/ in the repo - keep both
 # in sync.
 #
 # Usage (run as root, e.g. via SSM):
 #   GIT_SHA=<40-hex> BUCKET=<s3-bucket> AWS_REGION=<region> CLUSTER_DIR=<path> bash deploy-host.sh
-# No infra identifiers or paths are baked in (public repo) — pass them via env.
+# No infra identifiers or paths are baked in (public repo) - pass them via env.
 set -euo pipefail
 
 GIT_SHA="${GIT_SHA:?GIT_SHA required (40-hex commit)}"
@@ -229,7 +229,7 @@ done
 
 # --- 6. verify runtime PCR matches the manifest ----------------------------
 # In debug-mode the running enclave reports zeroed PCR0, so a manifest match is
-# impossible by design — skip the runtime check (the static EIF measurement in
+# impossible by design - skip the runtime check (the static EIF measurement in
 # step 3 already verified the artifact). Only meaningful for a production EIF.
 if [ "$ENCLAVE_DEBUG_MODE" = "1" ]; then
   log "ENCLAVE_DEBUG_MODE=1 — skipping runtime PCR0 check (PCRs zeroed under --debug-mode)"

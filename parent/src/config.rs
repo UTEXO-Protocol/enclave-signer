@@ -20,7 +20,7 @@ pub struct Config {
     /// Use vsock instead of TCP.
     pub use_vsock: bool,
 
-    /// EVM network IDs — TRANSACTION with these network_ids routes to signEVM.
+    /// EVM network IDs - TRANSACTION with these network_ids routes to signEVM.
     pub evm_network_ids: HashSet<u32>,
 }
 

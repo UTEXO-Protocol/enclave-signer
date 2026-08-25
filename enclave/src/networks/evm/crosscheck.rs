@@ -1,26 +1,21 @@
-//! RGB→EVM `fundsOut` cross-checks: bind the calldata the enclave signs to the
+//! RGB->EVM `fundsOut` cross-checks: bind the calldata the enclave signs to the
 //! consignment it validated. All logic here is `rgb-validation`-gated (the
 //! module is only compiled then) because every check reads a
 //! [`ValidatedConsignment`]; SPV builds additionally run the BtcRelay agreement
 //! check ([`verify_btc_relay_agreement`]).
 //!
-//! Ported from the pre-refactor `validation/evm_crosscheck.rs` (audit M-02/#93,
-//! #63/#97, #57/#122, 4th I-03/#95) and re-homed onto the `networks/evm` layout;
-//! the helpers now operate on `EvmDestination.call_data` bytes rather than the
-//! old flat `SignEvmRequest`.
+//! The helpers operate on `EvmDestination.call_data` bytes.
 
 use crate::error::{EnclaveError, Result};
 use crate::networks::evm::validation::FundsOutParams;
 use crate::networks::rgb::spv::HeaderChain;
 use crate::networks::rgb::validation::ValidatedConsignment;
 
-// This module used to read the `fundsOut` calldata at hard-coded byte offsets,
-// which only existed because the OpId binding rewrote it in place. That rewrite
-// is gone (#168), and the `FundsOutParams` tuple shifts every field by one head
-// pointer word — so every constant would now be silently 32 bytes off. Decoding
-// via `sol!` ([`decode_funds_out_params`]) retires the whole class of bug.
+// Calldata is decoded via `sol!` ([`decode_funds_out_params`]), not at
+// hard-coded byte offsets: the `FundsOutParams` tuple shifts every field by one
+// head pointer word, so the old constants would be 32 bytes off.
 
-/// Defense-in-depth for the RGB→EVM `fundsOut` direction (audit 4th I-03 / #95):
+/// Defense-in-depth for the RGB->EVM `fundsOut` direction:
 /// every consignment witness tx must be mined. rgbstd's per-witness ordinal map
 /// (otherwise discarded) is surfaced as `non_mined_witness_txids`; reject here
 /// so confirmation does not rest on the SPV header chain alone.
@@ -49,7 +44,7 @@ pub fn assert_witnesses_confirmed(validated: &ValidatedConsignment) -> Result<()
 ///   2. The transition's `total_output_amount` must cover the EVM-side release
 ///      `amount`.
 ///
-/// Takes the decoded intent (I-12 / #165), which also replaces the old selector
+/// Takes the decoded intent, which also replaces the old selector
 /// guard: `FundsOutParams` only exists after a successful `fundsOut` decode.
 pub fn validate_funds_out_transfer(
     params: &FundsOutParams,
@@ -85,15 +80,12 @@ pub fn validate_funds_out_transfer(
     Ok(())
 }
 
-// REMOVED: `apply_op_id_binding` / `op_id_to_calldata_id` (audit TEE-SE-02 /
-// M-02 / #93). It derived `burnId` and `settlementData` from the consignment and
-// overwrote them in the signed calldata. Dead since #168, and now impossible in
-// principle: both fields are keyed on bridge-derived ids that no RGB OpId yields.
-//
-// They are backend-supplied and enforced on-chain (`InvalidBurnId`,
-// `FundsInNotFound`/`AmountMismatch`). An independent enclave-side check would
-// need the deposit receipts via `evm_event::EvmReceiptProvider` — follow-up,
-// out of scope for the ABI migration.
+// `apply_op_id_binding` / `op_id_to_calldata_id` were removed: they
+// rewrote `burnId` and `settlementData` in the signed
+// calldata, and both fields are now keyed on bridge-derived ids no RGB OpId
+// yields. They are backend-supplied and enforced on-chain (`InvalidBurnId`,
+// `FundsInNotFound` / `AmountMismatch`). An enclave-side check would need the
+// deposit receipts via `evm_event::EvmReceiptProvider` - follow-up.
 
 /// One `(height, commitmentHash)` pair of the finality proof.
 #[derive(Debug, Clone, Copy)]
@@ -103,7 +95,7 @@ struct ProofBlock {
     commitment: [u8; 32],
 }
 
-/// BtcRelay-agreement cross-check (bridge spec §13, #57/#122). Binds the
+/// BtcRelay-agreement cross-check (bridge spec section 13). Binds the
 /// calldata's claimed finality proof to the headers the enclave holds, so a
 /// listener can't split the contract's on-chain BtcRelay check away from the
 /// enclave's own SPV evidence. A no-op for non-`fundsOut` selectors and inert
@@ -116,16 +108,16 @@ struct ProofBlock {
 ///            uint256 latestHeight, bytes32 latestCommit)
 /// ```
 ///
-/// `source` packaged the RGB burn; `latest` is the relay tip proving the relay's
-/// view is current. Both are checked here, against the enclave's own headers,
-/// rather than delegating freshness to a relay the host also feeds.
+/// `source` packaged the RGB burn; `latest` is the relay tip proving the
+/// relay's view is current. Both are checked against the enclave's own headers,
+/// so freshness is not delegated to a relay the host also feeds.
 ///
 /// Byte order: calldata commitments are display (big-endian) order; the
 /// in-enclave `header.block_hash()` is internal order, so it is reversed before
 /// comparing.
 pub fn verify_btc_relay_agreement(params: &FundsOutParams, chain: &HeaderChain) -> Result<()> {
     let Some((source, latest)) = decode_funds_out_proof(params)? else {
-        // proof slot empty → no calldata commitment to bind.
+        // proof slot empty -> no calldata commitment to bind.
         return Ok(());
     };
 
@@ -133,7 +125,7 @@ pub fn verify_btc_relay_agreement(params: &FundsOutParams, chain: &HeaderChain) 
     // the problem instead of surfacing as a header-lookup failure.
     if latest.height < source.height {
         return Err(EnclaveError::Spv(format!(
-            "fundsOut BtcRelay check: proof latest height {} is below source height {} — \
+            "fundsOut BtcRelay check: proof latest height {} is below source height {} - \
              the relay tip cannot precede the block that packaged the burn",
             latest.height, source.height
         )));
@@ -150,7 +142,7 @@ fn verify_proof_block(chain: &HeaderChain, block: &ProofBlock, label: &str) -> R
     let header = chain.header_at(block.height).ok_or_else(|| {
         EnclaveError::Spv(format!(
             "fundsOut BtcRelay check: no header at {label} block height {} \
-             (chain tip = {}) — cannot confirm the calldata commitment against \
+             (chain tip = {}) - cannot confirm the calldata commitment against \
              the enclave header chain",
             block.height,
             chain.tip_height()
@@ -219,13 +211,9 @@ fn proof_height(word: &[u8], field: &str) -> Result<u32> {
     Ok(u32::from_be_bytes(buf))
 }
 
-// `extract_uint256_as_u64` moved to `evm_event`, its only remaining consumer:
-// nothing here reads calldata positionally now, so keeping it in this module
-// left it dead in every build without the `evm-rpc` feature.
-//
-// `extract_bytes32`, `decode_op_id_to_bytes32` and `bytes32_to_usize` were the
-// fixed-offset / OpId-hex helpers the removed calldata rewrite needed, and went
-// with it.
+// `extract_uint256_as_u64` moved to `evm_event`, its only remaining consumer.
+// `extract_bytes32`, `decode_op_id_to_bytes32` and `bytes32_to_usize` went with
+// the removed calldata rewrite.
 
 #[cfg(test)]
 mod tests {
@@ -245,10 +233,8 @@ mod tests {
 
     /// Build a `fundsOut(FundsOutParams)` calldata through the real ABI encoder.
     ///
-    /// Hand-assembling head words (as this helper used to) only worked while the
-    /// layout was flat and constant; with the params behind a tuple pointer it
-    /// would have to reproduce the dynamic-tail arithmetic too. Encoding through
-    /// `sol!` keeps the fixtures honest by construction.
+    /// Encoded through `sol!` rather than hand-assembled head words, which
+    /// would have to reproduce the dynamic-tail arithmetic.
     fn mock_funds_out_calldata(amount: u64) -> Vec<u8> {
         mock_funds_out_calldata_with_proof(amount, Bytes::new())
     }
@@ -270,8 +256,7 @@ mod tests {
     }
 
     /// The tuple encoding must round-trip through the decoder the cross-checks
-    /// now rely on. This is the replacement for the old `abi_layout` module,
-    /// which pinned hard-coded head offsets that no longer exist.
+    /// rely on. Replaces the old `abi_layout` module's hard-coded head offsets.
     #[test]
     fn mock_calldata_decodes_back_to_its_fields() {
         let cd = mock_funds_out_calldata_with_proof(1_234, Bytes::from(vec![0xAB; 128]));
@@ -284,14 +269,12 @@ mod tests {
     /// Guard against a half-finished migration: a flat 8-argument body must not
     /// decode as the tuple shape.
     ///
-    /// Sharper than it looks. With a ZERO `recipient` — as here — the ABI
-    /// decoder ACCEPTS the legacy body: the leading zero word is read as a tuple
-    /// head pointer of 0, which aliases the tuple onto those very words, and
-    /// every field then lines up one-for-one. Only the canonical re-encode check
-    /// inside [`decode_funds_out_params`] rejects it, which is why that check
-    /// lives in the decoder rather than in the validator alone. With a realistic
-    /// non-zero recipient the pointer is wildly out of range and the decode
-    /// fails by itself, so this fixture pins the harder case.
+    /// With a zero `recipient`, as here, the ABI decoder accepts the legacy
+    /// body: the leading zero word reads as a tuple head pointer of 0, aliasing
+    /// the tuple onto those words so every field lines up. Only the canonical
+    /// re-encode check inside [`decode_funds_out_params`] rejects it. A
+    /// non-zero recipient fails the decode by itself, so this pins the harder
+    /// case.
     fn legacy_flat_calldata(recipient: [u8; 32]) -> Vec<u8> {
         let mut legacy = Vec::with_capacity(4 + 8 * 32);
         legacy.extend_from_slice(&FUNDS_OUT_SELECTOR_POOLS);
@@ -318,10 +301,8 @@ mod tests {
         assert!(decode_funds_out_params(&legacy_flat_calldata(recipient)).is_err());
     }
 
-    // =========================================================================
-    // Pools fundsOut tests — `validate_funds_out_transfer` (+ the #95 witness
+    // Pools fundsOut tests - `validate_funds_out_transfer` (+ the witness
     // recency guard `assert_witnesses_confirmed`).
-    // =========================================================================
 
     mod transfer {
         use super::*;
@@ -365,8 +346,7 @@ mod tests {
 
         #[test]
         fn witnesses_confirmed_passes_when_all_mined() {
-            // No non-mined witnesses surfaced -> the recency guard is a no-op
-            // (audit 4th I-03 / #95).
+            // No non-mined witnesses surfaced -> the recency guard is a no-op.
             let validated = validated_with_last(transfer_transition(1000));
             assert!(super::super::assert_witnesses_confirmed(&validated).is_ok());
         }
@@ -407,7 +387,7 @@ mod tests {
         }
 
         /// A burn consignment arriving on the (single) `fundsOut`
-        /// selector must be rejected by the transfer check — this is how
+        /// selector must be rejected by the transfer check - this is how
         /// mint/burn stays off until it's wired by contract address.
         #[test]
         fn rejects_when_last_transition_is_not_transfer() {
@@ -446,11 +426,9 @@ mod tests {
         }
     }
 
-    // =========================================================================
-    // BtcRelay-agreement cross-check (#57 / #122) — `verify_btc_relay_agreement`.
+    // BtcRelay-agreement cross-check - `verify_btc_relay_agreement`.
     // These exercise `proof` decoding and header comparison directly against a
     // synthetic regtest header chain.
-    // =========================================================================
 
     mod btc_relay {
         use super::*;
@@ -467,8 +445,8 @@ mod tests {
         }
 
         /// A regtest chain with a single synthetic header at height 1 (PoW is
-        /// skipped on regtest — same pattern as the `spv::chain` tests).
-        /// Returns the chain and the header's DISPLAY-order block hash — the
+        /// skipped on regtest - same pattern as the `spv::chain` tests).
+        /// Returns the chain and the header's DISPLAY-order block hash - the
         /// byte order the calldata `commitmentHash` carries.
         fn chain_with_one_header() -> (HeaderChain, [u8; 32]) {
             let mut chain = HeaderChain::new(
@@ -512,7 +490,7 @@ mod tests {
         }
 
         /// `fundsOut` calldata carrying a well-formed proof. The synthetic chain
-        /// has a single header, so source and latest point at the same block —
+        /// has a single header, so source and latest point at the same block -
         /// the degenerate but valid case where the burn sits at the relay tip.
         fn calldata_with_proof(block_height: u32, commitment_display: [u8; 32]) -> Vec<u8> {
             mock_funds_out_calldata_with_proof(
@@ -543,9 +521,8 @@ mod tests {
 
         #[test]
         fn rejects_internal_order_commitment() {
-            // Defends the byte-order contract: feeding the INTERNAL-order hash
-            // (the un-reversed `block_hash()` bytes) must be rejected — the
-            // calldata convention is display order.
+            // Byte-order contract: the internal-order (un-reversed) hash must
+            // be rejected, since calldata carries display order.
             let (chain, mut display_hash) = chain_with_one_header();
             display_hash.reverse(); // back to internal order
             let cd = calldata_with_proof(1, display_hash);
@@ -564,9 +541,8 @@ mod tests {
             );
         }
 
-        /// The relay-tip half of the proof is checked too, not just the source
-        /// block — otherwise the enclave would be delegating the freshness claim
-        /// entirely to a relay the untrusted host also feeds.
+        /// The relay-tip half of the proof is checked too, else freshness would
+        /// be delegated to a relay the untrusted host also feeds.
         #[test]
         fn rejects_unknown_latest_block() {
             let (chain, display_hash) = chain_with_one_header();
@@ -628,9 +604,8 @@ mod tests {
         }
 
         /// The pre-migration proof was a single 64-byte
-        /// `(blockHeight, commitmentHash)` pair. It must be rejected outright:
-        /// silently accepting it would verify the source block while leaving the
-        /// relay-freshness half of the proof unchecked.
+        /// `(blockHeight, commitmentHash)` pair. Accepting it would verify the
+        /// source block and leave the relay-freshness half unchecked.
         #[test]
         fn rejects_legacy_two_field_proof() {
             let (chain, display_hash) = chain_with_one_header();

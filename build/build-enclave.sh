@@ -6,27 +6,23 @@
 #   - SHA256SUMS                 sha256 of the EIF (integrity check before run-enclave)
 #
 # Environment-agnostic: runs the same on a Nitro EC2 build host and on a CI
-# runner. It does NOT touch S3 — uploading/publishing is the caller's job
-# (the build-eif workflow handles AWS auth + S3). This keeps the script a pure,
-# reproducible build step.
+# runner. It does not touch S3 - uploading is the caller's job (the build-eif
+# workflow handles AWS auth + S3).
 #
 # NO CREDENTIALS REQUIRED. Every enclave dependency resolves over public HTTPS,
-# so any third party can run this script and reproduce the PCRs it prints. The
-# enclave compiles against the in-tree `enclave-proto/` slice, and `parent/`
-# (which does need a private crate) is a separate workspace this never touches.
+# so a third party can run this and reproduce the PCRs it prints. `parent/`,
+# which does need a private crate, is a separate workspace this never touches.
 #
-# Reproducible PCRs: PCR0/PCR1 depend on the nitro-cli version + its blobs
-# (kernel/init), NOT just our code. Pin nitro-cli to the SAME version that runs
-# on the target hosts (stage hosts are on 1.4.5) or PCRs will not match.
+# Reproducible PCRs: PCR0/PCR1 depend on the nitro-cli version and its blobs
+# (kernel/init), not just our code. Pin nitro-cli to the same version the target
+# hosts run (stage is on 1.4.5) or the PCRs will not match.
 #
-# Reproducible PCR0 (build side): the EIF packs the runtime-stage rootfs, so the
-# image build must be deterministic. We (1) pin both base images by digest in
-# Dockerfile.enclave, and (2) normalise layer timestamps via SOURCE_DATE_EPOCH +
-# BuildKit's `rewrite-timestamp` exporter (requires `docker buildx` with a
-# container/containerd builder — CI sets this up via docker/setup-buildx-action).
-# SOURCE_DATE_EPOCH defaults to the commit time (stable per git_sha); override by
-# exporting it. NOTE: OS package versions (apt/dnf) still float — pinning them is
-# the next determinism step.
+# On the build side the EIF packs the runtime-stage rootfs, so the image build
+# must be deterministic: both base images are digest-pinned in
+# Dockerfile.enclave, and layer timestamps are normalised via SOURCE_DATE_EPOCH
+# plus BuildKit's `rewrite-timestamp` exporter (needs `docker buildx` with a
+# container/containerd builder). SOURCE_DATE_EPOCH defaults to the commit time.
+# OS package versions (apt/dnf) still float.
 #
 # Usage:
 #   ./build/build-enclave.sh

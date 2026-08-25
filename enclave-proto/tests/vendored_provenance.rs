@@ -3,7 +3,7 @@
 //! `enclave.rs` is committed pre-generated: there is no `build.rs` and no
 //! `prost-build` anywhere in the repo, deliberately, so that PCR0 does not
 //! depend on which `protoc`/`prost-build` version a builder happens to have.
-//! The cost of that choice is that `proto/enclave.proto` is inert — editing it
+//! The cost of that choice is that `proto/enclave.proto` is inert - editing it
 //! changes nothing, and the schema silently drifts from the code.
 //!
 //! Nothing but prose stood between us and that drift, and the prose has already
@@ -17,7 +17,7 @@
 //!      one-sided re-sync, where the parent moves to a new schema and the
 //!      enclave keeps compiling against the old one.
 //!
-//! Neither can verify the vendored bytes against the private upstream — that
+//! Neither can verify the vendored bytes against the private upstream - that
 //! needs credentials this build deliberately does not have. `README.md` documents
 //! the manual procedure for anyone who does have them.
 
@@ -105,8 +105,8 @@ fn sha1(msg: &[u8]) -> [u8; 20] {
 }
 
 /// The 40-hex id quoted on a line mentioning `needle`. Several lines can mention
-/// the same path — README.md lists `rust-gen/src/enclave/enclave.rs` in both the
-/// file-mapping table and the blob-hash table — so take the first line that
+/// the same path - README.md lists `rust-gen/src/enclave/enclave.rs` in both the
+/// file-mapping table and the blob-hash table - so take the first line that
 /// carries an id, not merely the first that matches.
 fn quoted_sha_on_line(haystack: &str, needle: &str, what: &str) -> String {
     let mut seen = 0usize;
@@ -138,7 +138,7 @@ fn readme_blob_hashes_match_the_vendored_files() {
             "\n\nenclave-proto/{local_path} does not match the hash README.md documents \
              for upstream {upstream_path}.\n\
              \n  README.md says : {documented}\n  file on disk is : {actual}\n\n\
-             Either the vendored file was edited (it must stay verbatim — see \
+             Either the vendored file was edited (it must stay verbatim - see \
              enclave-proto/README.md), or it was re-synced from a new upstream commit \
              and the README table was not updated. Re-sync BOTH files and the whole \
              Provenance section together, then `git hash-object` them to refresh the table.\n"
@@ -164,7 +164,7 @@ fn readme_commit_matches_the_rev_parent_pins() {
         "\n\nThe vendored slice and the parent are pinned to DIFFERENT upstream commits.\n\
          \n  enclave-proto/README.md Commit : {documented}\n  parent/Cargo.toml rev          : {pinned}\n\n\
          The enclave compiles against the vendored slice and the parent against the git \
-         crate, so a split pin means the two halves speak different wire schemas — a field \
+         crate, so a split pin means the two halves speak different wire schemas - a field \
          renumbering would surface as a mis-parsed request at runtime, not as a build \
          failure. Re-vendor enclave-proto/ from the rev parent pins (or move both together).\n"
     );
@@ -184,7 +184,7 @@ fn readme_still_documents_the_resync_procedure() {
         assert!(
             readme.contains(marker),
             "enclave-proto/README.md no longer contains {marker:?}. The vendored slice has no \
-             build.rs, so this README is the only description of how to re-sync it — keep the \
+             build.rs, so this README is the only description of how to re-sync it - keep the \
              Provenance section and its verification commands intact."
         );
     }

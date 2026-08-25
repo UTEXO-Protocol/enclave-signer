@@ -70,7 +70,7 @@ fn start_mock_enclave() -> u16 {
                                     signature: vec![0xCC; 65],
                                     // Marker so the roundtrip test can assert the
                                     // parent forwards the enclave-rewritten
-                                    // calldata (OpId binding, #93/#63).
+                                    // calldata (OpId binding).
                                     call_data: vec![0xE0; 9],
                                 },
                             )),
@@ -325,9 +325,7 @@ fn sign_rgb_request(source: SourceProof, payload: enriched::EnrichedRgbPayload) 
     }
 }
 
-// =========================================================================
 // Happy-path tests
-// =========================================================================
 
 #[tokio::test]
 async fn grpc_public_key_evm_gas_tx() {
@@ -384,7 +382,7 @@ async fn grpc_public_key_transaction_type() {
 #[tokio::test]
 async fn grpc_public_key_ccd_governance() {
     // The governance pubkey must be reachable over plain PublicKey, with no
-    // attestation involved — AttestedPublicKey needs an NSM device, which the
+    // attestation involved - AttestedPublicKey needs an NSM device, which the
     // dev deployment (plain container, no /dev/nsm) does not have.
     let enclave_port = start_mock_enclave();
     let grpc_port = start_grpc_server(enclave_port).await;
@@ -458,7 +456,7 @@ async fn grpc_sign_evm_roundtrip() {
     let resp = client.sign(req).await.unwrap().into_inner();
     assert_eq!(resp.signature.len(), 65, "EVM signature must be 65 bytes");
     // The parent must forward the enclave-rewritten (OpId-bound) calldata back
-    // to the caller — the signature commits to it (#93/#63).
+    // to the caller - the signature commits to it.
     assert_eq!(
         resp.call_data,
         vec![0xE0; 9],
@@ -534,7 +532,7 @@ async fn grpc_sign_psbt_roundtrip() {
 #[tokio::test]
 async fn grpc_sign_btc_roundtrip() {
     // BTC_UTXO routes the EnrichedBtcPayload to a SignBtcRequest and returns a
-    // signed PSBT — the plain-BTC path is distinct from TRANSACTION/SignPsbt.
+    // signed PSBT - the plain-BTC path is distinct from TRANSACTION/SignPsbt.
     let enclave_port = start_mock_enclave();
     let grpc_port = start_grpc_server(enclave_port).await;
 
@@ -744,9 +742,7 @@ async fn grpc_evm_forwards_raw_consignment_bytes() {
     }
 }
 
-// =========================================================================
 // Error-path tests
-// =========================================================================
 
 #[tokio::test]
 async fn grpc_invalid_data_type_returns_error() {

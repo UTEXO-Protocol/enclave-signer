@@ -39,49 +39,37 @@ impl std::fmt::Debug for CloningSession {
     }
 }
 
-/// Default time-to-live for a recorded nonce. A nonce only needs to be
-/// remembered long enough that replaying its attestation within a
-/// plausible window is still caught; the cloning handshake itself
-/// completes in seconds, so an hour is generous. After the TTL the entry
-/// self-evicts, keeping the set small in steady state.
+/// Default time-to-live for a recorded nonce. The cloning handshake completes
+/// in seconds, so an hour is generous. Entries self-evict after the TTL.
 const DEFAULT_NONCE_TTL: Duration = Duration::from_secs(60 * 60);
 
 /// Default hard memory ceiling on recorded nonces.
 const DEFAULT_NONCE_MAX: usize = 10_000;
 
-/// Default TTL for the PSBT bridge-operation dedup guard. Far longer than
-/// the cloning nonce TTL: an EVM→RGB deposit can legitimately be retried
-/// for as long as it remains unsettled, and the window must comfortably
-/// outlast normal listener retry/confirmation latency so a same-op
-/// resubmission is still caught. 24h is generous while keeping the set
-/// self-cleaning in steady state. See [`EnclaveState::op_replay_guard`].
+/// Default TTL for the PSBT bridge-operation dedup guard. Much longer than the
+/// nonce TTL: an EVM->RGB deposit can be retried while unsettled, so the window
+/// must outlast normal listener retry/confirmation latency. See
+/// [`EnclaveState::op_replay_guard`].
 const DEFAULT_OP_DEDUP_TTL: Duration = Duration::from_secs(24 * 60 * 60);
 
-/// Hard memory ceiling on recorded bridge operations. At ~80 bytes/entry
-/// this caps the guard near ~8 MB. On overflow inside one TTL window the
-/// oldest entry is evicted (never wedge signing) — see the soft-guard
-/// caveats on [`EnclaveState::op_replay_guard`].
+/// Hard memory ceiling on recorded bridge operations, ~8 MB at ~80 bytes per
+/// entry. On overflow inside one TTL window the oldest entry is evicted rather
+/// than wedging signing. See [`EnclaveState::op_replay_guard`].
 const DEFAULT_OP_DEDUP_MAX: usize = 100_000;
 
 /// Replay guard for attestation nonces, bounded by **time** (not just
 /// count) so a flooding parent cannot permanently wedge cloning.
 ///
-/// Every incoming peer attestation contributes its nonce; duplicates are
-/// rejected. Each entry carries the instant it was seen, and every
-/// `check_and_record` first evicts entries older than `ttl`, so the set
-/// self-cleans in steady state. `max` remains a hard memory ceiling: if
-/// the set is still full after TTL eviction (a burst of distinct
-/// handshakes inside one TTL window), the **oldest** entry is evicted to
-/// admit the new one rather than rejecting it.
+/// Every incoming peer attestation contributes its nonce, and duplicates are
+/// rejected. Each entry carries the instant it was seen, and `check_and_record`
+/// first evicts entries older than `ttl`. `max` is a hard memory ceiling: when
+/// the set is still full after eviction, the oldest entry is dropped to admit
+/// the new one.
 ///
-/// This replaces the previous reject-when-full behaviour, which let a
-/// parent flood `max` distinct nonces and then block every legitimate
-/// handshake — a cloning-availability DoS (audit TEE-CL-04). Cloning is
-/// parent-initiated, so the parent is the threat actor. The trade-off is a
-/// bounded, time-limited replay window: replaying an evicted nonce only
-/// ever re-seals the seed to the encryption pubkey already bound inside
-/// that attestation, so no funds or secret leak to a new party — only
-/// availability was ever at stake.
+/// Rejecting when full instead would let a parent flood `max` distinct nonces
+/// and block every legitimate handshake. The trade-off is a
+/// bounded replay window: replaying an evicted nonce only re-seals the seed to
+/// the encryption pubkey already bound inside that attestation.
 pub struct NonceReplayGuard {
     inner: Mutex<GuardState>,
     max: usize,
@@ -146,7 +134,7 @@ impl NonceReplayGuard {
 
         // 3. Hard memory ceiling. If a burst filled the set inside one TTL
         //    window, drop the oldest entries to admit the new nonce rather
-        //    than wedging cloning (TEE-CL-04).
+        // than wedging cloning.
         while g.seen.len() >= self.max {
             match g.order.pop_front() {
                 Some((_, old)) => {
@@ -166,12 +154,10 @@ impl NonceReplayGuard {
     /// return an RAII [`ReplayReservation`] that ROLLS BACK the record on drop
     /// unless [`ReplayReservation::commit`] is called first.
     ///
-    /// Use when the record must only stick if the guarded operation commits:
-    /// reserve before the fallible work, commit after it succeeds. Any failure
-    /// in between (an early return / `?`) drops the reservation and releases the
-    /// key, so a transient error does not consume it and self-block a legitimate
-    /// retry (audit M-02 — the local reservation must roll back on failure).
-    /// Reserving still rejects a concurrent duplicate up front.
+    /// Reserve before the fallible work, commit after it succeeds. Any failure
+    /// in between drops the reservation and releases the key, so a transient
+    /// error does not self-block a legitimate retry. Reserving
+    /// still rejects a concurrent duplicate up front.
     pub fn reserve(&self, nonce: [u8; 32]) -> Result<ReplayReservation<'_>> {
         self.check_and_record(nonce)?;
         Ok(ReplayReservation {
@@ -233,10 +219,8 @@ impl Drop for ReplayReservation<'_> {
 ///   Active   -> Active   (GetClone handled by donor without state change)
 /// Any other transition is rejected.
 ///
-/// `KeyManager` is boxed so the enum stays small (~24 bytes) rather than
-/// bloating every `Phase` value to the size of the biggest variant
-/// (~584 bytes). The heap indirection is irrelevant in the hot path —
-/// the mutex lock dominates.
+/// `KeyManager` is boxed so the enum stays ~24 bytes rather than ~584. The
+/// heap indirection is irrelevant next to the mutex lock.
 pub enum Phase {
     /// No keys, waiting for an initialize request.
     Initial,
@@ -266,22 +250,20 @@ pub struct EnclaveState {
     donor_cloning_secret: Mutex<Option<SecretBox<String>>>,
     /// Replay guard for nonces in peer attestations.
     pub replay_guard: NonceReplayGuard,
-    /// **Soft** dedup guard for EVM→RGB bridge PSBT operations, keyed on a
+    /// **Soft** dedup guard for EVM->RGB bridge PSBT operations, keyed on a
     /// hash of `(chain_id, bridge_contract, evm_tx_hash, operation_idx,
     /// rgb_asset_id)` (see `networks::rgb::psbt_validation::psbt_operation_key`).
     /// Rejects a same-operation resubmission inside the TTL window before
-    /// signing (audit W-02 / #84).
+    /// signing.
     ///
-    /// This is **defense-in-depth, not a sufficient double-spend control**.
-    /// Nitro has no persistent storage, so the set is:
-    ///   - **volatile** — wiped on restart;
-    ///   - **per-instance** — a sibling enclave in the cluster never saw it,
-    ///     so the host can route a duplicate to a fresh peer;
-    ///   - **TTL-bounded** — a replay after eviction is admitted again.
+    /// Defense in depth, not a sufficient double-spend control. Nitro has no
+    /// persistent storage, so the set is volatile (wiped on restart),
+    /// per-instance (the host can route a duplicate to a sibling enclave), and
+    /// TTL-bounded (a replay after eviction is admitted again). A host that
+    /// varies any keyed field also bypasses it.
     ///
-    /// A compromised host that varies any keyed field also bypasses it. It
-    /// stops honest listener retries and naive same-tuple replay; the durable
-    /// cross-instance/cross-restart guard remains an on-chain ticket (#84/#93).
+    /// It stops honest listener retries and naive same-tuple replay; the
+    /// durable guard is an on-chain ticket.
     pub op_replay_guard: NonceReplayGuard,
 }
 
@@ -401,7 +383,7 @@ impl EnclaveState {
         }
     }
 
-    /// Active-phase accessor for the donor side of `GetClone` — the donor
+    /// Active-phase accessor for the donor side of `GetClone` - the donor
     /// is in `Phase::Active` and needs to read the seed to seal it.
     pub fn with_seed<T>(&self, f: impl FnOnce(&[u8; 64]) -> Result<T>) -> Result<T> {
         self.with_active(|km| f(km.expose_seed()))
@@ -415,11 +397,10 @@ impl EnclaveState {
 
     /// Initialize from a seed obtained via the cloning handshake.
     ///
-    /// This is the production path for cloned enclaves and is NOT gated on
-    /// `allow-seed-import`. The `Phase::Cloning` guard replaces the feature
-    /// flag: PR 4's `SetClone` handler is the only caller, and it only
-    /// runs after verifying the donor's attestation and unsealing the
-    /// seed.
+    /// The production path for cloned enclaves, not gated on
+    /// `allow-seed-import`: the `Phase::Cloning` guard replaces that flag. The
+    /// `SetClone` handler is the only caller, and runs only after verifying the
+    /// donor's attestation and unsealing the seed.
     pub fn initialize_from_cloned_seed(&self, seed: [u8; 64]) -> Result<()> {
         let mut guard = self.lock_phase()?;
         match &*guard {
@@ -437,16 +418,14 @@ impl EnclaveState {
 
     /// Complete the cloning handshake atomically.
     ///
-    /// The closure is given a reference to the current `CloningSession`
-    /// and must return a fully-constructed `KeyManager` built from the
-    /// unsealed seed. The closure is responsible for any identity check
-    /// (e.g. derived-address vs `cluster_public_key`). On `Ok(km)`, the
-    /// phase transitions atomically to `Active(km)`. On error, the state
-    /// stays in `Cloning` so the operator can retry if desired.
+    /// The closure gets the current `CloningSession` and must return a
+    /// `KeyManager` built from the unsealed seed, including any identity check
+    /// (derived address vs `cluster_public_key`). On `Ok`, the phase moves
+    /// atomically to `Active`; on error it stays `Cloning` so the operator can
+    /// retry.
     ///
-    /// Locking the phase for the entire decrypt-derive-check-commit
-    /// sequence keeps the seed in memory for the shortest possible window
-    /// and makes the transition observably atomic from other threads.
+    /// The phase stays locked across decrypt-derive-check-commit, so the seed
+    /// is in memory for the shortest window and the transition is atomic.
     pub fn complete_cloning(
         &self,
         f: impl FnOnce(&CloningSession) -> Result<KeyManager>,
@@ -517,11 +496,9 @@ impl EnclaveState {
     }
 
     /// Run `f` against the active `KeyManager`, or fail with
-    /// `KeyNotInitialized`. Exposed for validators that must reason about the
-    /// enclave's own keys before signing — the plain-BTC cross-check proves
-    /// every output pays back to a script this enclave controls
-    /// ([`crate::networks::rgb::btc_ownership`]), which needs the derivation,
-    /// not just the signature.
+    /// `KeyNotInitialized`. Exposed for validators that need the derivation and
+    /// not just a signature, such as the plain-BTC output ownership proof
+    /// ([`crate::networks::rgb::btc_ownership`]).
     pub fn with_keys<T>(&self, f: impl FnOnce(&KeyManager) -> Result<T>) -> Result<T> {
         self.with_active(f)
     }
@@ -642,11 +619,9 @@ mod tests {
         assert!(matches!(err, EnclaveError::AlreadyInitialized));
     }
 
-    // =========================================================================
-    // NonceReplayGuard — time-bounded replay guard (audit TEE-CL-04, coverage
-    // map TC-3). Helpers use `check_and_record_at` so eviction is exercised
+    // NonceReplayGuard - time-bounded replay guard (coverage
+    // map). Helpers use `check_and_record_at` so eviction is exercised
     // without sleeping.
-    // =========================================================================
 
     /// Distinct 32-byte nonce keyed by a small integer, for readable tests.
     fn nonce(i: u32) -> [u8; 32] {
@@ -660,14 +635,14 @@ mod tests {
         let g = NonceReplayGuard::with_capacity(100, Duration::from_secs(3600));
         let t0 = Instant::now();
         assert!(g.check_and_record_at(nonce(1), t0).is_ok());
-        // Same nonce, still inside the TTL window → replay.
+        // Same nonce, still inside the TTL window -> replay.
         let err = g
             .check_and_record_at(nonce(1), t0 + Duration::from_secs(30))
             .unwrap_err();
         assert!(matches!(err, EnclaveError::NonceReplay));
     }
 
-    // ReplayReservation — reserve/commit/rollback (audit M-02).
+    // ReplayReservation - reserve/commit/rollback.
 
     #[test]
     fn reservation_rolls_back_when_dropped_uncommitted() {
@@ -702,7 +677,7 @@ mod tests {
     #[test]
     fn reservation_rejects_concurrent_duplicate_before_commit() {
         // While a reservation is held (not yet committed), a second reserve of
-        // the same key is still rejected up front — reserve-before-sign blocks a
+        // the same key is still rejected up front - reserve-before-sign blocks a
         // concurrent duplicate, not only a committed one.
         let g = NonceReplayGuard::with_capacity(100, Duration::from_secs(3600));
         let key = nonce(3);
@@ -711,10 +686,8 @@ mod tests {
         held.commit();
     }
 
-    /// TC-3 (audit coverage map): a flood of distinct nonces beyond `max`
-    /// must NOT wedge the guard. Every record succeeds, the set stays
-    /// bounded at `max`, and a fresh legitimate handshake is still admitted
-    /// — the regression for the reject-when-full DoS.
+    /// A flood of distinct nonces beyond `max` must
+    /// not wedge the guard. Regression for the reject-when-full DoS.
     #[test]
     fn replay_guard_never_wedges_under_flood() {
         let max = 8;
@@ -742,13 +715,12 @@ mod tests {
         for i in 1..=3 {
             assert!(g.check_and_record_at(nonce(i), t0).is_ok());
         }
-        // 4th distinct nonce overflows the cap → oldest (nonce 1) evicted.
+        // 4th distinct nonce overflows the cap -> oldest (nonce 1) evicted.
         assert!(g.check_and_record_at(nonce(4), t0).is_ok());
         assert_eq!(g.seen_count(), 3);
 
-        // nonce(2..=4) survive → still replay-rejected. A replay returns
-        // before any insert, so these checks don't mutate the set (the cap
-        // is full, so an admit would otherwise evict the next-oldest).
+        // nonce(2..=4) survive and are still replay-rejected. A replay returns
+        // before any insert, so these checks do not mutate the set.
         for i in 2..=4 {
             assert!(
                 matches!(

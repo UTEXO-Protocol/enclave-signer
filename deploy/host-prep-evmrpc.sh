@@ -2,7 +2,7 @@
 # Host-prep for the enclave evm-rpc egress path (run as root, e.g. via SSM).
 #
 # Stands up, idempotently and reboot-safe, the host side of the in-enclave EVM
-# FundsIn verification (evm-rpc feature, #60):
+# FundsIn verification (evm-rpc feature):
 #
 #   enclave http://127.0.0.1:3444  (alloy RootProvider::new_http, plaintext, no key)
 #     -> in-enclave vsock forwarder -> vsock port 8002
@@ -62,7 +62,7 @@ rm -f /etc/nginx/sites-enabled/default 2>/dev/null || true
 log "writing /etc/nginx/conf.d/evm-rpc.conf"
 umask 077
 cat > /etc/nginx/conf.d/evm-rpc.conf <<EOF
-# Managed by deploy/host-prep-evmrpc.sh — enclave evm-rpc loopback TLS/key shim.
+# Managed by deploy/host-prep-evmrpc.sh - enclave evm-rpc loopback TLS/key shim.
 # Enclave -> vsock 8002 -> 127.0.0.1:${LOCAL_PORT} (here) -> https://${UP_HOST}/v2/<key>.
 server {
     listen 127.0.0.1:${LOCAL_PORT};

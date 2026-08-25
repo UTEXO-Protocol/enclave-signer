@@ -25,26 +25,19 @@ WORKDIR /build/enclave
 # Dev image still gets `spv` so the new code path is exercised even
 # without the production-only `vsock,rgb-validation` combo. Without spv,
 # the enclave fails-closed on any request that carries merkle_proofs,
-# which is what we want — build mismatch should always fail loudly.
+# which is what we want - build mismatch should always fail loudly.
 #
 # DEBUG build (no `--release`): `allow-seed-import` is one of the dev-only
 # features that `compile_error!`s in a release build (`debug_assertions`
-# off) — see the release guards in `enclave/src/lib.rs`. Building the dev
+# off) - see the release guards in `enclave/src/lib.rs`. Building the dev
 # image in debug keeps `debug_assertions` on so the guard stays quiet while
 # still refusing the feature in any production (release) build.
 #
-# `--no-default-features` is REQUIRED. The RGB/CCD split set
-# `default = ["rgb", "ccd", "helios"]` in enclave/Cargo.toml, and a plain
-# `--features` still applies defaults — so this image would silently pull
-# `helios`, whose reqwest -> native-tls -> openssl-sys chain builds OpenSSL
-# from source. This builder stage installs no `make`, so that build FAILS.
-# The release Dockerfiles already pass `--no-default-features` for the same
-# reason; keep the feature list here exhaustive and explicit.
-#
-# `ccd` is listed explicitly: Concordium signing (SignCcd / CcdSource) now
-# sits behind that feature, and without it this image would answer every CCD
-# request with "not compiled in" — a silent capability loss versus the
-# pre-split build, where CCD was always compiled.
+# `--no-default-features` is REQUIRED: defaults are `rgb,ccd,helios`, and a plain
+# `--features` still applies them - `helios` would pull openssl-sys, which needs
+# `make` (not installed in this stage) and fails. Keep the list below explicit.
+# `ccd` is listed because Concordium signing sits behind that feature; without it
+# every CCD request answers "not compiled in".
 RUN cargo build --no-default-features --features allow-seed-import,spv,ccd,evm-rpc
 
 # ===== Runtime Stage =====
