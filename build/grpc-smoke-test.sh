@@ -35,7 +35,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # (see enclave-proto/). Point this at a checkout of
 # https://github.com/UTEXO-Protocol/federated-signer-proto:
 #   PROTO_DIR=/path/to/federated-signer-proto/proto ./build/grpc-smoke-test.sh
-PROTO_DIR="${PROTO_DIR:-$(cd "$SCRIPT_DIR/.." && pwd)/../federated-signer-proto/proto}"
+PROTO_DIR="${PROTO_DIR:-$(cd "$SCRIPT_DIR/../.." && pwd)/federated-signer-proto/proto}"
 
 for arg in "$@"; do
     case $arg in

@@ -88,11 +88,11 @@ jobs:
       - name: Install Rust (for nitro-cli build)
         uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: "1.96"
+          toolchain: "1.96.1"
           targets: x86_64-unknown-linux-musl
 
       - name: System deps
-        run: sudo apt-get update && sudo apt-get install -y musl-tools jq llvm-dev libclang-dev clang protobuf-compiler
+        run: sudo apt-get update && sudo apt-get install -y musl-tools jq llvm-dev libclang-dev clang
 
       # Build + cache nitro-cli pinned to the host version. The repo's
       # blobs/x86_64 (kernel/init) determine PCR0/PCR1, so pinning the tag pins

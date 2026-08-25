@@ -305,7 +305,7 @@ message SubmitHeadersRequest {
   // Listener typically batches up to ~500 to keep gRPC messages small.
   repeated bytes headers = 1;
   // Block height of headers[0]. Headers must connect to the enclave's stored
-  // chain (i.e. start_height == last_saved_height + 1) - except for the very
+  // chain (i.e. start_height == last_saved_height + 1) — except for the very
   // first batch which connects to the compiled-in checkpoint.
   uint32 start_height = 2;
 }

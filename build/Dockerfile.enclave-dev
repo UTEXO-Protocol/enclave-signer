@@ -33,7 +33,12 @@ WORKDIR /build/enclave
 # image in debug keeps `debug_assertions` on so the guard stays quiet while
 # still refusing the feature in any production (release) build.
 #
-RUN cargo build --features allow-seed-import,spv,evm-rpc
+# `--no-default-features` is REQUIRED: defaults are `rgb,ccd,helios`, and a plain
+# `--features` still applies them - `helios` would pull openssl-sys, which needs
+# `make` (not installed in this stage) and fails. Keep the list below explicit.
+# `ccd` is listed because Concordium signing sits behind that feature; without it
+# every CCD request answers "not compiled in".
+RUN cargo build --no-default-features --features allow-seed-import,spv,ccd,evm-rpc
 
 # ===== Runtime Stage =====
 FROM debian:trixie-slim

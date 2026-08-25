@@ -151,9 +151,11 @@ pub fn validate_destination(
     }
     // Decoded once here; later stages take the typed result (I-12 / #165). The
     // LayerZero route has its own param shape and yields no `FundsOutParams`, so
-    // `signing::lz_funds_out_digest` re-decodes it. Both routes still surface
-    // `destinationChainId` for the pin check below.
-    let (proof, params, calldata_destination_chain_id) = if selector == LZ_FUNDS_OUT_SELECTOR {
+    // `signing::lz_funds_out_digest` re-decodes it. Both routes surface
+    // `destinationChainId` but mean different things by it, so
+    // `is_entrypoint_route` picks the matching check below.
+    let is_entrypoint_route = selector == LZ_FUNDS_OUT_SELECTOR;
+    let (proof, params, calldata_destination_chain_id) = if is_entrypoint_route {
         let decoded = decode_lz_funds_out_params(&destination.call_data)?;
         let chain_id = decoded.destinationChainId;
         (lz_route_proof_from_params(&decoded)?, None, chain_id)
@@ -195,8 +197,34 @@ pub fn validate_destination(
         )));
     }
     // Distinct from the request-level `chain_id` above, which only drives the
-    // EIP-712 domain. Bound to the same attested pin (I-12 / #165).
-    if bridge_config.chain_id != 0
+    // EIP-712 domain (I-12 / #165).
+    //
+    // A direct pools payout settles on the very chain the tx runs on, so its
+    // calldata destinationChainId must equal the attested pin. An entrypoint
+    // (LayerZero) payout settles on a remote chain by design - Ethereum,
+    // Polygon, Plasma, Tron - so pinning it the same way made every
+    // cross-chain payout unsignable (#200). The execution chain stays pinned
+    // for both routes by the `destination.chain_id` and `proxy_contract`
+    // checks above; the entrypoint route only has to name a real, remote
+    // destination. Beyond that the field is bound on-chain: `Bridge.fundsOut`
+    // folds it into the canonical `burnId` preimage and rejects a mismatch,
+    // so it cannot be varied on its own.
+    if is_entrypoint_route {
+        if calldata_destination_chain_id.is_zero() {
+            return Err(EnclaveError::CrossCheck(
+                "calldata destinationChainId must be > 0".into(),
+            ));
+        }
+        if bridge_config.chain_id != 0
+            && calldata_destination_chain_id == U256::from(bridge_config.chain_id)
+        {
+            return Err(EnclaveError::CrossCheck(format!(
+                "calldata destinationChainId {} equals the pinned execution chain - \
+                 a local payout must use the direct fundsOut route",
+                calldata_destination_chain_id
+            )));
+        }
+    } else if bridge_config.chain_id != 0
         && calldata_destination_chain_id != U256::from(bridge_config.chain_id)
     {
         return Err(EnclaveError::CrossCheck(format!(
@@ -528,6 +556,74 @@ mod tests {
             assert!(
                 err.contains("destinationChainId mismatch"),
                 "expected destinationChainId rejection, got: {err}"
+            );
+        });
+    }
+
+    /// `lzFundsOut` calldata for an entrypoint-routed payout to a remote chain.
+    fn lz_funds_out_calldata(amount: u64, destination_chain_id: u64) -> Vec<u8> {
+        use alloy_primitives::FixedBytes;
+
+        let mut recipient = [0u8; 32];
+        recipient[31] = 0x05;
+
+        lzFundsOutCall {
+            amount: U256::from(amount),
+            burnId: U256::from(7u64),
+            sourceChainId: U256::from(1u64),
+            destinationChainId: U256::from(destination_chain_id),
+            sourceAddress: String::new(),
+            proof: Bytes::new(),
+            settlementData: Bytes::new(),
+            dstEid: 30101u32,
+            recipient: FixedBytes(recipient),
+            minAmountLD: U256::from(amount),
+            extraOptions: Bytes::new(),
+        }
+        .abi_encode()
+    }
+
+    fn lz_destination(destination_chain_id: u64) -> EvmDestination {
+        EvmDestination {
+            call_data: lz_funds_out_calldata(1000, destination_chain_id),
+            ..destination()
+        }
+    }
+
+    /// The entrypoint route settles on a remote chain, so its calldata
+    /// destinationChainId must NOT be pinned to the execution chain: pinning it
+    /// blocked every LayerZero payout (Ethereum, Polygon, Plasma, Tron).
+    #[test]
+    fn accepts_entrypoint_route_to_remote_chain() {
+        with_ctx(&config(), |ctx| {
+            let proof = validate_dest(&lz_destination(137), ctx)
+                .expect("entrypoint payout to a remote chain must validate");
+            assert_eq!(proof.amount, 1000);
+        });
+    }
+
+    /// The entrypoint route still has to name a real destination.
+    #[test]
+    fn rejects_entrypoint_route_with_zero_destination_chain_id() {
+        with_ctx(&config(), |ctx| {
+            let err = destination_or_err(&lz_destination(0), ctx);
+            assert!(
+                err.contains("destinationChainId must be > 0"),
+                "expected zero destinationChainId rejection, got: {err}"
+            );
+        });
+    }
+
+    /// A payout that lands back on the pinned execution chain is a direct
+    /// payout; routing it through the entrypoint digest is refused.
+    #[test]
+    fn rejects_entrypoint_route_to_pinned_chain() {
+        let config = config(); // pinned chain_id = 1
+        with_ctx(&config, |ctx| {
+            let err = destination_or_err(&lz_destination(1), ctx);
+            assert!(
+                err.contains("equals the pinned execution chain"),
+                "expected local-payout rejection, got: {err}"
             );
         });
     }
