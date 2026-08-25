@@ -21,8 +21,8 @@
 //!     from, and needs standard BIP-371 output fields (`PSBT_OUT_TAP_*`).
 //!
 //! Rule (B) accepts Colored destinations as well as Vanilla ones, since
-//! `create_utxo` funds fresh colored UTXOs out of vanilla inputs. M-01 scopes
-//! which inputs we spend, not which of our accounts we pay into.
+//! `create_utxo` funds fresh colored UTXOs out of vanilla inputs. The rule
+//! scopes which inputs we spend, not which of our accounts we pay into.
 //!
 //! Both rules anchor on the reconstructed `script_pubkey`, which the segwit
 //! sighash commits to. A `tap_key_origins` entry alone proves nothing: it is
@@ -56,7 +56,7 @@ pub fn self_controlled_input_scripts(psbt: &Psbt, keys: &KeyManager) -> HashSet<
 /// [`self_controlled_input_scripts`] with the account filter made explicit.
 ///
 /// `allowed_account` is `Some(_)` for one BIP-86 account, `None` for either.
-/// The plain-BTC path pins `Vanilla` (M-01); the send-RGB change-leg proof
+/// The plain-BTC path pins `Vanilla`; the send-RGB change-leg proof
 /// passes `None`, since bridge change there sits on the Colored account.
 /// Widening the filter only widens which scripts count as ours, never what gets
 /// signed - that is `sign_psbt_scoped`'s job.
@@ -78,7 +78,7 @@ pub fn self_controlled_input_scripts_scoped(
 /// **either** BIP-86 account. Hoists the input resolution once and applies
 /// [`output_is_self_owned`] to each output.
 ///
-/// The change-leg oracle for the send-RGB per-output amount bind (W-06 / #52):
+/// The change-leg oracle for the send-RGB per-output amount bind:
 /// a revealed RGB seal counts as bridge change only when the Bitcoin output it
 /// names is one we control.
 pub fn self_owned_output_indices(psbt: &Psbt, keys: &KeyManager) -> HashSet<u32> {

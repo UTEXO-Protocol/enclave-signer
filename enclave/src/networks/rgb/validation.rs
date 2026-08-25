@@ -146,7 +146,7 @@ fn validate_source_payload(source: &RgbSource, cfg: &BridgeConfig) -> Result<()>
             cfg.max_total_proof_bytes
         )));
     }
-    // Integrity, NOT authorization (audit I-02 / Oxorio I-09): the listener
+    // Integrity, NOT authorization: the listener
     // controls both `consignment` and `consignment_hash`, so a match only
     // proves the wire copy was not corrupted. Authorization comes from the
     // in-enclave RGB validation, SPV anchoring, and the binding of validated
@@ -199,14 +199,14 @@ pub mod ifa {
     /// IFA fungible assignment type carrying the remaining right-to-mint
     /// (`inflationAllowance`). Its `amount` is mint capacity, not asset units;
     /// summing it with `OS_ASSET` would let a consignment claim allowance as
-    /// minted value (#54).
+    /// minted value.
     pub const OS_INFLATION: u16 = 4010;
 }
 
 /// Resolve the trusted strict type-system to pin a consignment against, keyed
 /// on its `schema_id` and sourced from the canonical `rgb-schemas` crate.
 ///
-/// Audit 4th W-01 / #92: `ValidationConfig.trusted_typesystem` must never come
+/// `ValidationConfig.trusted_typesystem` must never come
 /// from the consignment under validation. Feeding `transfer.types` back in
 /// makes rgbstd compare the consignment's types against themselves, so the
 /// control always passes and a malicious consignment can ship its own type
@@ -294,7 +294,7 @@ pub struct ValidatedConsignment {
     /// parser. This is the value `validate()` authenticated and anchored on
     /// chain.
     ///
-    /// No longer feeds the EVM `fundsOut` `burnId` (audit M-02 / #93): the new
+    /// No longer feeds the EVM `fundsOut` `burnId`: the new
     /// Bridge derives that itself and reverts `InvalidBurnId` otherwise. `None`
     /// for a consignment with no bundles or a non-Transfer last transition.
     pub last_transfer_op_id: Option<[u8; 32]>,
@@ -303,8 +303,8 @@ pub struct ValidatedConsignment {
     /// order** - same encoding as [`Self::witness_txids`]. `validate()` already
     /// hard-rejects `Archived`/unresolvable witnesses, so only these softer
     /// not-yet-confirmed states reach here, and only because this set is built
-    /// from the rgbstd status that was previously discarded (audit 4th
-    /// I-03 / #95).
+    /// from the rgbstd status that was previously discarded (4th
+    ///).
     ///
     /// A non-empty set is **expected** for the send-RGB (EVM-lock -> RGB-send)
     /// PSBT path: that witness tx is freshly composed and unbroadcast, so it is
@@ -362,7 +362,7 @@ pub struct TransitionSummary {
     /// Transfer this equals [`Self::total_output_amount`] (transfers move
     /// only `OS_ASSET`); for an Inflation (mint) it is the freshly minted
     /// value, **excluding** the `OS_INFLATION` allowance outputs, whose
-    /// amounts are remaining mint capacity, not asset units (#54).
+    /// amounts are remaining mint capacity, not asset units.
     pub asset_output_amount: u64,
     /// Concrete output assignments, each tagged with a destination seal
     /// and an amount. Empty for Burn transitions.
@@ -382,7 +382,7 @@ pub struct TransitionOutput {
     /// IFA fungible assignment type ([`ifa::OS_ASSET`] or
     /// [`ifa::OS_INFLATION`]). Load-bearing: only `OS_ASSET` entries carry
     /// asset units, so the per-output recipient bind must filter on this just
-    /// as `asset_output_amount` does (#54).
+    /// as `asset_output_amount` does.
     pub assignment_type: u16,
     /// Amount in the asset's smallest unit.
     pub amount: u64,
@@ -409,29 +409,29 @@ pub enum OutputSeal {
 /// Hard cap on a single blocking Esplora HTTP call (connect + read), in
 /// seconds. The egress runs through the host-controlled vsock proxy on the
 /// signing path, so without a timeout a stalled host pins the worker thread
-/// (audit final I-03 / #87). Aligned with `conn.rs`'s `TOTAL_REQUEST_TIMEOUT`.
+///. Aligned with `conn.rs`'s `TOTAL_REQUEST_TIMEOUT`.
 /// Compile-time and PCR-attested, not host-tunable.
 const ESPLORA_HTTP_TIMEOUT_SECS: u64 = 30;
 
 /// Per-socket timeout (seconds) for the Electrum witness resolver, the
 /// production signing path. Electrum analog of [`ESPLORA_HTTP_TIMEOUT_SECS`]
-/// and the same audit issue (final I-03 / #87): `Config::default()` leaves
+/// and the same problem: `Config::default()` leaves
 /// `timeout: None`, so a stalled electrs read blocks the worker thread forever
 /// and eventually wedges the whole enclave. `electrum-client` retries `retry`
 /// times, so worst-case blocking is ~`(retry+1) *` this; kept within the
 /// `conn.rs` `TOTAL_REQUEST_TIMEOUT` budget. Compile-time and PCR-attested.
 const ELECTRUM_WITNESS_TIMEOUT_SECS: u64 = 15;
 
-/// How long a fetched fee estimate stays fresh (#55). Fee markets move on
+/// How long a fetched fee estimate stays fresh. Fee markets move on
 /// block cadence, so a minute of staleness is immaterial while keeping the
 /// sign-path from hitting Esplora on every request.
 const FEE_ESTIMATE_TTL: std::time::Duration = std::time::Duration::from_secs(60);
 
-/// Confirmation target (blocks) used for the recommended fee rate (#55).
+/// Confirmation target (blocks) used for the recommended fee rate.
 const FEE_ESTIMATE_TARGET: u16 = 6;
 
 /// Fee-rate floor (sat/vB) for non-mainnet chains, which have no fee market and
-/// answer `/fee-estimates` with `{}` (#55). Compile-time and reachable only via
+/// answer `/fee-estimates` with `{}`. Compile-time and reachable only via
 /// PCR0-attested `chain_net`, so serving `{}` to dodge the check only yields a
 /// tighter floor. Generous, since non-mainnet coins are valueless.
 const NON_MAINNET_FALLBACK_FEE_RATE_SAT_VB: f64 = 10.0;
@@ -448,7 +448,7 @@ const NON_MAINNET_FALLBACK_FEE_RATE_SAT_VB: f64 = 10.0;
 pub struct RgbValidator {
     indexer_url: String,
     chain_net: ChainNet,
-    /// Cached `(fetched_at, sat/vB)` recommended fee rate (#55), guarded for
+    /// Cached `(fetched_at, sat/vB)` recommended fee rate, guarded for
     /// the multi-threaded worker pool. `None` until the first fetch.
     fee_estimate_cache: std::sync::Mutex<Option<(std::time::Instant, f64)>>,
     /// Per-request HTTP timeout, [`ESPLORA_HTTP_TIMEOUT_SECS`] in production.
@@ -494,7 +494,7 @@ impl RgbValidator {
     }
 
     /// Recommended fee rate (sat/vB) from the enclave's own witness-indexer
-    /// egress, for the send-RGB PSBT fee-rate check (#55). The backend mirrors the
+    /// egress, for the send-RGB PSBT fee-rate check. The backend mirrors the
     /// resolver: Electrum `estimate_fee` for ssl://|tcp://, else Esplora
     /// `/fee-estimates` at [`FEE_ESTIMATE_TARGET`]. Cached for
     /// [`FEE_ESTIMATE_TTL`]. Fail-closed when the fetch fails or the rate is
@@ -515,7 +515,7 @@ impl RgbValidator {
 
         // Backend mirrors the witness resolver: ssl://|tcp:// is Electrum,
         // anything else Esplora REST. Both paths are fail-closed - a failed
-        // fetch is a refusal, never a skipped check (#55).
+        // fetch is a refusal, never a skipped check.
         let is_electrum =
             self.indexer_url.starts_with("ssl://") || self.indexer_url.starts_with("tcp://");
         let rate = if is_electrum {
@@ -543,7 +543,7 @@ impl RgbValidator {
         let estimates = client.get_fee_estimates().map_err(|e| {
             EnclaveError::CrossCheck(format!(
                 "fee-estimate fetch failed - refusing to sign a send-RGB PSBT without a \
-                 fee-rate sanity bound (#55): {e}"
+                 fee-rate sanity bound: {e}"
             ))
         })?;
 
@@ -562,7 +562,7 @@ impl RgbValidator {
             Some(rate) => Ok(rate),
             None if self.chain_net == ChainNet::BitcoinMainnet => Err(EnclaveError::CrossCheck(
                 "fee-estimate response carried no targets - refusing to sign a send-RGB \
-                 PSBT without a fee-rate sanity bound (#55)"
+                 PSBT without a fee-rate sanity bound"
                     .into(),
             )),
             None => {
@@ -570,7 +570,7 @@ impl RgbValidator {
                     chain_net = ?self.chain_net,
                     fallback_sat_vb = NON_MAINNET_FALLBACK_FEE_RATE_SAT_VB,
                     "fee-estimate response carried no targets; falling back to the pinned \
-                     non-mainnet floor (#55)"
+                     non-mainnet floor"
                 );
                 Ok(NON_MAINNET_FALLBACK_FEE_RATE_SAT_VB)
             }
@@ -581,13 +581,13 @@ impl RgbValidator {
     /// [`Self::recommended_fee_rate_sat_vb`], the production path. Electrum
     /// reports BTC per 1000 vbytes; converted to sat/vB. A non-positive answer
     /// means it cannot estimate: fail-closed on mainnet, falls back to the
-    /// pinned floor elsewhere, mirroring the Esplora empty-map case (#55).
+    /// pinned floor elsewhere, mirroring the Esplora empty-map case.
     fn electrum_fee_rate_sat_vb(&self) -> Result<f64> {
         use rgbstd::indexers::electrum_blocking::electrum_client::{Client, ElectrumApi};
         let client = Client::new(&self.indexer_url).map_err(|e| {
             EnclaveError::CrossCheck(format!(
                 "electrum fee-estimate client creation failed - refusing to sign a send-RGB \
-                 PSBT without a fee-rate sanity bound (#55): {e}"
+                 PSBT without a fee-rate sanity bound: {e}"
             ))
         })?;
         let btc_per_kvb = client
@@ -597,17 +597,17 @@ impl RgbValidator {
             .map_err(|e| {
                 EnclaveError::CrossCheck(format!(
                     "electrum fee-estimate fetch failed - refusing to sign a send-RGB PSBT \
-                     without a fee-rate sanity bound (#55): {e}"
+                     without a fee-rate sanity bound: {e}"
                 ))
             })?;
 
         // Electrum returns BTC/kvB; a non-positive value (typically -1) means
-        // "cannot estimate". Mirror the Esplora empty-map handling (#55).
+        // "cannot estimate". Mirror the Esplora empty-map handling.
         if btc_per_kvb <= 0.0 {
             if self.chain_net == ChainNet::BitcoinMainnet {
                 return Err(EnclaveError::CrossCheck(
                     "electrum returned no fee estimate - refusing to sign a send-RGB PSBT \
-                     without a fee-rate sanity bound (#55)"
+                     without a fee-rate sanity bound"
                         .into(),
                 ));
             }
@@ -615,7 +615,7 @@ impl RgbValidator {
                 chain_net = ?self.chain_net,
                 fallback_sat_vb = NON_MAINNET_FALLBACK_FEE_RATE_SAT_VB,
                 "electrum returned no fee estimate; falling back to the pinned non-mainnet \
-                 floor (#55)"
+                 floor"
             );
             return Ok(NON_MAINNET_FALLBACK_FEE_RATE_SAT_VB);
         }
@@ -696,7 +696,7 @@ impl RgbValidator {
         // Witness-tx identity binding for the send-RGB PSBT path: the last
         // bundle's witness txid, plus its input prevouts when the bundle
         // embeds the full tx. Gated on the last transition being a Transfer
-        // or an Inflation (#54); the check inside asserts the txid and the
+        // or an Inflation; the check inside asserts the txid and the
         // transition come from the same witness.
         let (last_transfer_witness_txid, last_transfer_witness_prevouts, last_transfer_op_id) =
             match last_transition {
@@ -712,8 +712,8 @@ impl RgbValidator {
         //    ssl://|tcp:// -> Electrum, otherwise Esplora REST. Electrum is
         //    the production path: TLS terminates inside the enclave against
         //    the real server cert, so a compromised host cannot forge witness
-        //    data. The Esplora `.timeout()` is load-bearing (audit final
-        //    I-03 / #87) - it bounds a stalled call on the signing path.
+        // data. The Esplora `.timeout()` is load-bearing (final
+        //) - it bounds a stalled call on the signing path.
         let is_electrum =
             self.indexer_url.starts_with("ssl://") || self.indexer_url.starts_with("tcp://");
         let mut resolver = if is_electrum {
@@ -745,7 +745,7 @@ impl RgbValidator {
         // treats them as tentative witnesses (not yet mined).
         resolver.add_consignment_txes(&transfer);
 
-        // Pin the trusted type system (audit 4th W-01 / #92) from the
+        // Pin the trusted type system from the
         // canonical `rgb-schemas` definitions, NOT from `transfer.types` -
         // the consignment's own types would be compared against themselves.
         // An unknown schema_id is rejected fail-closed inside the helper.
@@ -774,7 +774,7 @@ impl RgbValidator {
         })?;
 
         // Warnings only. Witness confirmation is deliberately NOT derived
-        // from `tx_ord_map` (#95 follow-up): rgb-ops' `resolve_witness`
+        // from `tx_ord_map` (follow-up): rgb-ops' `resolve_witness`
         // hard-codes every consignment-supplied tx to `WitnessOrd::Tentative`
         // regardless of on-chain depth, so reading it as "not yet mined"
         // rejected every fundsOut.
@@ -832,7 +832,7 @@ impl RgbValidator {
 /// rejected fail-closed.
 ///
 /// Also returns the validated OpId of that transition, read from the rgbstd
-/// bundle rather than the flat parser (audit M-02 / #93).
+/// bundle rather than the flat parser.
 ///
 /// Returns `(None, None, None)` only for a bundle-less transfer, which rgbstd
 /// rejects upstream.
@@ -847,7 +847,7 @@ fn read_last_transfer_witness(
     // OpId of the validated last transition, from the same bundle. rgbstd's
     // `OpId` displays as lowercase hex of its 32-byte commitment hash, so
     // hex-decode it back. Sourced from the validated object, not the flat
-    // parser (audit M-02 / #93).
+    // parser.
     let mut op_id: Option<[u8; 32]> = None;
     if let Some(known) = last_bundle.bundle().known_transitions.iter().last() {
         let actual = known.transition.transition_type;
@@ -996,7 +996,7 @@ fn transition_summary(t: &TransitionInfo) -> Result<TransitionSummary> {
             })?;
 
     // `OS_ASSET` allocations only. An Inflation transition also carries
-    // `OS_INFLATION` outputs whose amounts are mint capacity, not value (#54).
+    // `OS_INFLATION` outputs whose amounts are mint capacity, not value.
     let asset_output_amount: u64 = t
         .fungible_allocations
         .iter()
@@ -1198,7 +1198,7 @@ mod tests {
 
     #[test]
     fn fee_estimate_rejects_empty_response_on_mainnet() {
-        // Anomalous on mainnet: the non-mainnet floor must not leak here (#55).
+        // Anomalous on mainnet: the non-mainnet floor must not leak here.
         let url = spawn_fee_stub(vec![r#"{}"#]);
         let v = RgbValidator::new(url, "bitcoin").unwrap();
         let err = v.recommended_fee_rate_sat_vb().unwrap_err();
@@ -1233,7 +1233,7 @@ mod tests {
 
     #[test]
     fn fee_estimate_fails_closed_when_unreachable_on_non_mainnet() {
-        // The #55 threat (host suppresses the egress): the floor must not
+        // The threat (host suppresses the egress): the floor must not
         // rescue a failed fetch, only an honest empty response earns it.
         let v = RgbValidator::new("http://127.0.0.1:1".into(), "signet").unwrap();
         let err = v.recommended_fee_rate_sat_vb().unwrap_err();
@@ -1257,7 +1257,7 @@ mod tests {
     #[test]
     fn fee_estimate_fails_closed_when_unreachable() {
         // Nothing listening: the fetch error must propagate as a refusal, not
-        // a skip - the host controls this egress (#55).
+        // a skip - the host controls this egress.
         let v = RgbValidator::new("http://127.0.0.1:1".into(), "bitcoin").unwrap();
         let err = v.recommended_fee_rate_sat_vb().unwrap_err();
         assert!(
@@ -1268,7 +1268,7 @@ mod tests {
 
     #[test]
     fn stalled_esplora_times_out_instead_of_hanging() {
-        // audit final I-03 / #87: a host that accepts the connection and
+        // A host that accepts the connection and
         // never responds must cost at most the HTTP timeout.
         use std::net::TcpListener;
 
@@ -1305,7 +1305,7 @@ mod tests {
         assert!(err.to_string().contains("unknown bitcoin network"));
     }
 
-    /// #54: `asset_output_amount` must count only `OS_ASSET` allocations, not
+    /// `asset_output_amount` must count only `OS_ASSET` allocations, not
     /// the `OS_INFLATION` allowance outputs that carry mint capacity.
     #[test]
     fn transition_summary_excludes_inflation_allowance_from_asset_amount() {
@@ -1338,7 +1338,7 @@ mod tests {
 
     /// For a Transfer everything is `OS_ASSET`, so the two sums agree - the
     /// invariant the PSBT amount bind relies on when it switched from
-    /// `total_output_amount` to `asset_output_amount` (#54).
+    /// `total_output_amount` to `asset_output_amount`.
     #[test]
     fn transfer_fixture_asset_amount_equals_total() {
         let (_, _, last_transition, _) =
@@ -1390,7 +1390,7 @@ mod tests {
 
     #[test]
     fn trusted_typesystem_sourced_from_schema_not_consignment() {
-        // The W-01 fix (#92): the trusted type system must come from the
+        // The trusted type system must come from the
         // canonical rgb-schemas definitions, not from `transfer.types`.
         // The in-tree fixture is an NIA consignment, so its schema_id resolves
         // to a canonical type system whose id matches NIA's.
@@ -1436,7 +1436,7 @@ mod tests {
         let last = last_transition.expect("transfer has a last transition");
 
         // Both legs are `OS_ASSET` - the assignment tag the per-output
-        // recipient bind (W-06 / #52) filters on. Asserted against real
+        // recipient bind filters on. Asserted against real
         // consignment bytes so the tag can't silently drift from the parser.
         assert!(
             last.outputs
@@ -1501,7 +1501,7 @@ mod tests {
             "witness tx must spend at least one input"
         );
 
-        // The validated OpId (canonical burnId source, #93) must be present and
+        // The validated OpId (canonical burnId source) must be present and
         // equal the last bundle's last known-transition opid, read straight
         // from the validated object - not the flat parser.
         let op_id = op_id.expect("transfer fixture yields a validated opid");
@@ -1723,7 +1723,7 @@ mod tests {
     }
 
     // Asset-identity binding, SOURCE path - successor of the dropped
-    // `evm_crosscheck::asset_bind` suite (audit TEE-SE-01). Its target,
+    // `evm_crosscheck::asset_bind` suite. Its target,
     // `bind_asset_identity`, was removed in the networks/ split; the legs are
     // now INLINED in `validate_source` (this file) after
     // `validate_consignment`, so the narrowest callable unit is
@@ -1904,7 +1904,7 @@ mod tests {
 
         /// Old `rejects_foreign_asset_even_when_declared_is_empty`, adapted:
         /// empty declarations are now rejected up-front (previous test), so
-        /// the closest reachable form of the TEE-SE-01 funds-theft path is a
+        /// the closest reachable form of the funds-theft path is a
         /// listener that *colludes* - declaring the foreign asset
         /// consistently with the consignment. The pin must still reject it:
         /// RGB_ASSET_ID is load-bearing regardless of what the listener says.
@@ -1952,7 +1952,7 @@ mod tests {
         /// `not(test)`-gated, asserted at the integration layer). The inner
         /// "pinned chain/contract but RGB_ASSET_ID is empty" branch in
         /// `validate_source` is unreachable: `is_configured()` already
-        /// requires a non-empty RGB_ASSET_ID (audit 4th M-03 / #94).
+        /// requires a non-empty RGB_ASSET_ID.
         #[test]
         fn pin_check_skipped_when_config_unconfigured() {
             let id = fixture_asset_id();

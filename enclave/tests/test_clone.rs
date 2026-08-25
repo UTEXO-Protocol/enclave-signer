@@ -322,7 +322,7 @@ fn clone_rejects_duplicate_requester_attestation_nonce_on_donor() {
 
 #[test]
 fn clone_rejected_handshake_does_not_consume_replay_nonce() {
-    // Audit W-13: the donor records a handshake nonce only after the
+    // The donor records a handshake nonce only after the
     // pubkey/digest/donor-secret checks pass, so an unauthenticated handshake
     // cannot consume replay-guard capacity.
     let (donor_port, donor_keys) = start_donor();
@@ -382,11 +382,11 @@ fn cannot_initialize_after_entering_cloning() {
     }
 }
 
-// ---- audit test coverage: attestation binding on the donor ----
+// ---- attestation binding on the donor ----
 
 #[test]
 fn clone_donor_rejects_wire_pubkey_not_matching_attestation() {
-    // TC-2 (#107): the X25519 pubkey inside the NSM-signed requester
+    // The X25519 pubkey inside the NSM-signed requester
     // attestation is authoritative, not the plaintext `encryption_pubkey` the
     // parent relays. A parent could swap the wire pubkey to intercept the sealed
     // seed, so the donor binds the two and aborts on mismatch.
@@ -425,7 +425,7 @@ fn clone_donor_rejects_wire_pubkey_not_matching_attestation() {
 
 #[test]
 fn clone_donor_refuses_pcr_mismatched_peer_but_accepts_matching_peer() {
-    // TC-1 (#106): the donor must refuse to seal its seed to a peer whose
+    // The donor must refuse to seal its seed to a peer whose
     // PCR0/PCR1 differ from its own measurement, even with an otherwise valid
     // handshake. A PCR-equal peer is accepted in the same run, to show the
     // rejection is PCR-specific.

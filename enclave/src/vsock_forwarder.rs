@@ -2,7 +2,7 @@
 //! inside a Nitro enclave. Listens on localhost TCP and forwards each connection
 //! to the parent instance via vsock, where `vsock-proxy` relays to the real endpoint.
 //!
-//! Trust boundary (audit I-01 / Oxorio I-03, I-08): everything reachable
+//! Trust boundary: everything reachable
 //! through this forwarder is host-controlled and untrusted. The host runs the
 //! `vsock-proxy` on the far end and can drop, delay, reorder, or forge any
 //! bytes. Data fetched over it is evidence to be verified by in-enclave SPV
@@ -10,7 +10,7 @@
 //!
 //! The listener binds to loopback only, but it is a generic egress primitive:
 //! any code in the enclave process can tunnel host-bound traffic through it.
-//! Hardening (#87) would replace it with a typed Esplora client private to the
+//! Hardening would replace it with a typed Esplora client private to the
 //! RGB resolver path.
 
 use std::io;
@@ -26,7 +26,7 @@ const PARENT_CID: u32 = 3;
 ///
 /// See the module-level TRUST BOUNDARY note: this is an untrusted,
 /// host-controlled egress path. Anything fetched through it must be verified
-/// (SPV + rgbstd validation), never trusted as input (audit I-01).
+/// (SPV + rgbstd validation), never trusted as input.
 ///
 /// The forwarder is fire-and-forget - it logs errors but never crashes the enclave.
 pub fn start_forwarder(local_port: u16, vsock_port: u32) -> io::Result<()> {

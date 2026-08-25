@@ -24,7 +24,7 @@ pub const LZ_FUNDS_OUT_SELECTOR: [u8; 4] = lzFundsOutCall::SELECTOR;
 
 /// Upper bound on `call_data` length. A legitimate `fundsOut` call is a few
 /// hundred bytes, so anything past 64 KiB is malformed or a work-amplification
-/// attempt (audit I-06 / #90). Compile-time and PCR-attested.
+/// attempt. Compile-time and PCR-attested.
 pub const MAX_FUNDS_OUT_CALL_DATA_LEN: usize = 64 * 1024;
 
 const ALLOWED_SELECTORS: &[[u8; 4]] = &[FUNDS_OUT_SELECTOR_POOLS, LZ_FUNDS_OUT_SELECTOR];
@@ -91,7 +91,7 @@ pub fn validate_source(amount: u64, source: &EvmSource) -> Result<RouteProof> {
         )));
     }
 
-    // Audit M-06 / #51: the listener-supplied `event_valid` / `event_finalized`
+    // The listener-supplied `event_valid` / `event_finalized`
     // booleans are not trusted here - anyone reaching the enclave could set
     // both. Validity and finality come from
     // `networks::evm::evm_event::verify_funds_in_event` in `handle_sign`. The
@@ -131,7 +131,7 @@ pub fn validate_destination(
         )));
     }
     // Reject an oversize calldata before any offset extraction or signing
-    // (audit I-06 / #90).
+    //.
     if destination.call_data.len() > MAX_FUNDS_OUT_CALL_DATA_LEN {
         return Err(EnclaveError::CrossCheck(format!(
             "call_data too large: {} bytes (max {})",
@@ -149,7 +149,7 @@ pub fn validate_destination(
             hex::encode(selector)
         )));
     }
-    // Decoded once here; later stages take the typed result (I-12 / #165). The
+    // Decoded once here; later stages take the typed result. The
     // LayerZero route has its own param shape and yields no `FundsOutParams`, so
     // `signing::lz_funds_out_digest` re-decodes it. Both routes surface
     // `destinationChainId` but mean different things by it, so
@@ -197,13 +197,13 @@ pub fn validate_destination(
         )));
     }
     // Distinct from the request-level `chain_id` above, which only drives the
-    // EIP-712 domain (I-12 / #165).
+    // EIP-712 domain.
     //
     // A direct pools payout settles on the very chain the tx runs on, so its
     // calldata destinationChainId must equal the attested pin. An entrypoint
     // (LayerZero) payout settles on a remote chain by design - Ethereum,
     // Polygon, Plasma, Tron - so pinning it the same way made every
-    // cross-chain payout unsignable (#200). The execution chain stays pinned
+    // cross-chain payout unsignable. The execution chain stays pinned
     // for both routes by the `destination.chain_id` and `proxy_contract`
     // checks above; the entrypoint route only has to name a real, remote
     // destination. Beyond that the field is bound on-chain: `Bridge.fundsOut`
@@ -276,7 +276,7 @@ fn route_proof_from_params(params: &FundsOutParams) -> Result<RouteProof> {
 /// The canonicity check lives here rather than only in the validator: a legacy
 /// flat body with a zero `recipient` decodes cleanly as a tuple, and only the
 /// re-encode catches it. Deferring to `validate_destination` would make the
-/// property depend on caller ordering (audit I-03 / Oxorio I-10).
+/// property depend on caller ordering.
 pub fn decode_funds_out_params(call_data: &[u8]) -> Result<FundsOutParams> {
     let decoded = fundsOutCall::abi_decode_validate(call_data)
         .map_err(|e| EnclaveError::CrossCheck(format!("invalid fundsOut calldata: {e}")))?;
@@ -452,7 +452,7 @@ mod tests {
             .contains(&format!("evm_tx_hash must be {TX_HASH_LEN} bytes")));
     }
 
-    /// Audit M-06 / #51: `validate_source` no longer reads the listener's
+    /// `validate_source` no longer reads the listener's
     /// `event_valid` / `event_finalized` booleans, so flipping them changes
     /// nothing. Validity and finality come from
     /// `evm_event::verify_funds_in_event`.
@@ -496,8 +496,8 @@ mod tests {
 
     #[test]
     fn rejects_calldata_over_size_cap() {
-        // A maximally packed calldata must be rejected up-front (audit I-06 /
-        // #90), before selector dispatch or any offset extraction. Start from
+        // A maximally packed calldata must be rejected up-front,
+        // before selector dispatch or any offset extraction. Start from
         // a valid fundsOut destination and pad the tail past the cap.
         let mut destination = destination();
         destination
@@ -545,7 +545,7 @@ mod tests {
         });
     }
 
-    /// I-12 / #165: a release naming an unpinned chain is refused even when the
+    /// A release naming an unpinned chain is refused even when the
     /// request-level `chain_id` matches.
     #[test]
     fn rejects_calldata_destination_chain_id_mismatch() {
@@ -731,7 +731,7 @@ mod tests {
     }
 
     /// The hand-pinned selector constant and the alloy-derived ABI selector
-    /// must never drift apart (#65): the whitelist gates on the constant while
+    /// must never drift apart: the whitelist gates on the constant while
     /// decode/encode use the `sol!` type.
     #[test]
     fn funds_out_selector_matches_abi_derived_selector() {
@@ -763,7 +763,7 @@ mod tests {
         assert_eq!(proof.amount, 1_234);
     }
 
-    /// audit W-01 residual (#123): the ABI decoder accepts trailing junk
+    /// ABI residual: the ABI decoder accepts trailing junk
     /// after the last dynamic tail; the canonical re-encode check must not, so
     /// no unread bytes can ride along inside a signing request.
     #[test]
@@ -777,7 +777,7 @@ mod tests {
         );
     }
 
-    /// audit W-01 residual (#123): two dynamic-arg head words pointing at the
+    /// ABI residual: two dynamic-arg head words pointing at the
     /// same tail decode fine but are not a canonical encoding.
     #[test]
     fn rejects_calldata_with_overlapping_dynamic_tails() {

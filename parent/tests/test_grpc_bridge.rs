@@ -70,7 +70,7 @@ fn start_mock_enclave() -> u16 {
                                     signature: vec![0xCC; 65],
                                     // Marker so the roundtrip test can assert the
                                     // parent forwards the enclave-rewritten
-                                    // calldata (OpId binding, #93/#63).
+                                    // calldata (OpId binding).
                                     call_data: vec![0xE0; 9],
                                 },
                             )),
@@ -456,7 +456,7 @@ async fn grpc_sign_evm_roundtrip() {
     let resp = client.sign(req).await.unwrap().into_inner();
     assert_eq!(resp.signature.len(), 65, "EVM signature must be 65 bytes");
     // The parent must forward the enclave-rewritten (OpId-bound) calldata back
-    // to the caller - the signature commits to it (#93/#63).
+    // to the caller - the signature commits to it.
     assert_eq!(
         resp.call_data,
         vec![0xE0; 9],

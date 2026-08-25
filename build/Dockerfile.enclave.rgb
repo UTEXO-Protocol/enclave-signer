@@ -45,11 +45,11 @@ WORKDIR /build/enclave
 ENV CARGO_INCREMENTAL=0 \
     RUSTFLAGS="--remap-path-prefix=/build=/src -C debuginfo=0 -C strip=symbols"
 # `rgb` implies `spv` + `rgb-validation`. `--no-default-features` drops `ccd` so
-# this binary is RGB-only. `evm-rpc` adds in-enclave FundsIn verification (#60),
+# this binary is RGB-only. `evm-rpc` adds in-enclave FundsIn verification,
 # pulling the alloy + tokio subtree; requires a second host vsock-proxy
 # (EVM_RPC_VSOCK_PORT, default 8002).
 #
-# `helios` makes that verification trustless (#77) and is required: `rgb` turns
+# `helios` makes that verification trustless and is required: `rgb` turns
 # on the bridge-signing path, and the production policy refuses to boot on the
 # host-relayed RawRpc source. Operator must set HELIOS_EXECUTION_RPC /
 # HELIOS_CONSENSUS_RPC / HELIOS_CHECKPOINT and run the exec+consensus
@@ -87,7 +87,7 @@ RUN chmod +x /app/utexo-bridge-enclave /app/entrypoint.sh
 # Pinned bridge/indexer config - identical to Dockerfile.enclave; keep the two in
 # lockstep. `rgb` implies `spv` + `rgb-validation`, so this is a release
 # bridge-signing build and `SecurityPolicy::assert_valid_for_build` refuses to
-# boot without these pins (audit C-01, enclave/src/policy.rs). Public
+# boot without these pins (enclave/src/policy.rs). Public
 # identifiers, baked so PCR0 commits to them. Stage runs on Bitcoin MAINNET +
 # Arbitrum One (chain_id 42161). Electrum is pinned to 127.0.0.1 and reached over
 # the vsock forwarder (host runs
@@ -101,7 +101,7 @@ ENV EVM_CHAIN_ID=42161 \
     BITCOIN_NETWORK=bitcoin \
     ELECTRUM_URL=ssl://electrs-mainnet.utexo.com:50002
 
-# In-enclave EVM `FundsIn` verification (evm-rpc, #60) plus the plain-BTC
+# In-enclave EVM `FundsIn` verification (evm-rpc) plus the plain-BTC
 # (`SignBtc`) and gas-tx (`SignRawDigest`) policy pins - identical to
 # Dockerfile.enclave. EVM_RPC_URL MUST be loopback: the enclave reaches the EVM
 # RPC only through the vsock forwarder (host runs

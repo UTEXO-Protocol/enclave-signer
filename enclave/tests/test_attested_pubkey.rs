@@ -58,7 +58,7 @@ fn canonical_bundle(keys: &PublicKeysResponse) -> Vec<u8> {
 }
 
 /// The commitment the enclave actually produces: sha256(pubkey_bundle ||
-/// policy_commitment) (audit C-01). These tests run in a debug build with
+/// policy_commitment). These tests run in a debug build with
 /// `mock-attestation`, so the enclave resolves to the `Development` policy;
 /// mirror that here so the parity check matches byte-for-byte.
 fn expected_user_data(keys: &PublicKeysResponse) -> [u8; 32] {
@@ -220,7 +220,7 @@ fn naive_concat(keys: &PublicKeysResponse) -> Vec<u8> {
     out
 }
 
-/// TA-3 (#111): the enclave's attestation bundle must verify with the
+/// The enclave's attestation bundle must verify with the
 /// `attestation-verify` crate unmodified, and any tampering with the committed
 /// key bundle - including a differently-serialized copy of the same fields -
 /// must be rejected. Pins canonical-serialization parity between the two.
@@ -273,7 +273,7 @@ fn attested_bundle_verifies_unmodified_and_tampering_is_rejected() {
     );
 }
 
-/// TA-3 (#111): corrupting the raw attestation bytes must fail verification
+/// Corrupting the raw attestation bytes must fail verification
 /// outright (CBOR integrity), independent of the key-bundle commitment check.
 #[test]
 fn attested_doc_corruption_fails_verification() {

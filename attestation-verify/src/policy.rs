@@ -1,4 +1,4 @@
-//! Canonical encoding of the enclave's attested security policy (audit C-01).
+//! Canonical encoding of the enclave's attested security policy.
 //!
 //! The enclave's posture is resolved once at boot, serialized here, and folded
 //! into the attestation `user_data` commitment alongside the public-key bundle
@@ -14,14 +14,14 @@
 //! renumber a variant or reorder fields - bump [`POLICY_COMMITMENT_V2`] and add
 //! a new arm instead.
 //!
-//! V2 (audit C-02) extends the `Production` arm with the gas-tx signing rule,
+//! V2 extends the `Production` arm with the gas-tx signing rule,
 //! so the whole `SignRawDigest` policy is externally verifiable.
 
 /// Version tag prepended to every policy commitment. Lets a verifier reject a
 /// document produced by an enclave speaking a different policy-encoding version
 /// instead of silently mis-hashing it.
 ///
-/// V2 (audit C-02) added the gas-tx rule to the `Production` arm; V1 predated
+/// V2 added the gas-tx rule to the `Production` arm; V1 predated
 /// it. Bumping the tag means a V1 verifier and a V2 enclave never silently
 /// agree on a hash.
 pub const POLICY_COMMITMENT_V2: u8 = 2;
@@ -45,7 +45,7 @@ pub enum EvmDataSource {
 }
 
 /// Where the enclave gets the Bitcoin anchor evidence for RGB consignment
-/// witness txs. Only the SPV-verified source is safe (audit M-01 / #61), so a
+/// witness txs. Only the SPV-verified source is safe, so a
 /// production build always reports [`SpvVerified`](BtcDataSource::SpvVerified).
 #[repr(u8)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -86,9 +86,9 @@ pub enum AttestedPolicy {
         /// The Helios weak-subjectivity checkpoint (beacon block root) EVM
         /// verification trust-roots on. `Some` only for
         /// [`EvmDataSource::HeliosVerified`], and pinned here so a verifier
-        /// confirms which checkpoint the enclave synced from (audit M-06).
+        /// confirms which checkpoint the enclave synced from.
         evm_checkpoint: Option<[u8; 32]>,
-        /// Gas-tx (`SignRawDigest`) rule (audit C-02). Pinned destination
+        /// Gas-tx (`SignRawDigest`) rule. Pinned destination
         /// (all-zero when the operator left `GAS_TX_ALLOWED_TO` unset, which
         /// fails the gas path closed), the gas/fee ceilings, and the allowlisted
         /// calldata selectors. Committed so a verifier confirms the gas policy
@@ -153,7 +153,7 @@ impl AttestedPolicy {
                 out.extend_from_slice(bridge_contract);
                 out.extend_from_slice(&(rgb_asset_id.len() as u32).to_be_bytes());
                 out.extend_from_slice(rgb_asset_id.as_bytes());
-                // EVM verification checkpoint (M-06): a presence byte plus, when
+                // EVM verification checkpoint: a presence byte plus, when
                 // present, the 32-byte Helios beacon block root. Pins which
                 // checkpoint, so an attacker-chosen trust root cannot hide
                 // behind an identical mode byte.
@@ -164,7 +164,7 @@ impl AttestedPolicy {
                     }
                     None => out.push(0x00),
                 }
-                // Gas-tx rule (audit C-02).
+                // Gas-tx rule.
                 out.extend_from_slice(gas_tx_allowed_to);
                 out.extend_from_slice(&gas_tx_max_gas_limit.to_be_bytes());
                 out.extend_from_slice(&gas_tx_max_fee_per_gas.to_be_bytes());
@@ -221,7 +221,7 @@ mod tests {
         prod(false, EvmDataSource::RawRpc, 1, 0x11, "rgb:asset")
     }
 
-    /// `base()` with the gas-tx fields overridden, for the C-02 gas tests.
+    /// `base()` with the gas-tx fields overridden, for the gas tests.
     fn base_with_gas(
         to: [u8; 20],
         max_gas: u64,
@@ -293,7 +293,7 @@ mod tests {
 
     #[test]
     fn evm_checkpoint_presence_and_value_change_the_bytes() {
-        // No checkpoint vs a pinned checkpoint must differ (M-06): a verifier
+        // No checkpoint vs a pinned checkpoint must differ: a verifier
         // expecting a specific trust root rejects one that pins none.
         let none = base();
         let mut with_cp = base();
@@ -328,7 +328,7 @@ mod tests {
         assert_ne!(a.to_bytes(), b.to_bytes());
     }
 
-    // ---- gas-tx rule commitment (audit C-02) ----
+    // ---- gas-tx rule commitment ----
 
     #[test]
     fn every_gas_tx_field_changes_the_bytes() {

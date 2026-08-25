@@ -59,5 +59,5 @@ sequenceDiagram
         Listener->>Listener: N := N'
     end
 
-    Note over Chain: Boot-time invariants:<br/>— Checkpoint::assert_real_in_release() panics<br/>  on placeholder checkpoint in release builds.<br/>— assert_retarget_aligned() panics (all profiles)<br/>  on a non-retarget-aligned PoW checkpoint (W-14).<br/>— header_at(checkpoint.height) returns None<br/>  (we never store the checkpoint header itself,<br/>  only its hash/bits/time metadata).<br/>Retention: ALL headers from the checkpoint are kept<br/>(#130 — no sliding window; deep RGB anchors stay verifiable).
+    Note over Chain: Boot-time invariants:<br/>— Checkpoint::assert_real_in_release() panics<br/> on placeholder checkpoint in release builds.<br/>— assert_retarget_aligned() panics (all profiles)<br/> on a non-retarget-aligned PoW checkpoint.<br/>— header_at(checkpoint.height) returns None<br/> (we never store the checkpoint header itself,<br/> only its hash/bits/time metadata).<br/>Retention: ALL headers from the checkpoint are kept<br/>(no sliding window; deep RGB anchors stay verifiable).
 ```

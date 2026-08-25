@@ -24,15 +24,15 @@ pub enum VerifyMode {
     Mock,
 }
 
-/// The security posture the caller expects the attested enclave to have (audit
-/// C-01). The enclave commits its resolved posture into `user_data`, and the
+/// The security posture the caller expects the attested enclave to have.
+/// The enclave commits its resolved posture into `user_data`, and the
 /// verifier reconstructs the expected posture here and requires a match, so a
 /// downgraded enclave is rejected.
 ///
 /// Chain/contract/asset pins come from the wire response, which the public-key
 /// bundle already binds, so a production expectation states only the posture
 /// flags plus the gas-tx rule - the latter is not on the wire and must be
-/// declared here (audit C-02).
+/// declared here.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ExpectedPolicy {
     /// Expect a production bridge enclave with these posture flags.
@@ -43,10 +43,10 @@ pub enum ExpectedPolicy {
         /// enclave to have pinned. `Some` (required) when `evm_source` is
         /// [`EvmDataSource::HeliosVerified`]; folded into the reconstructed
         /// commitment so an enclave that trust-rooted on a different checkpoint
-        /// fails verification (audit M-06).
+        /// fails verification.
         evm_checkpoint: Option<[u8; 32]>,
-        /// Expected gas-tx (`SignRawDigest`) rule the enclave committed (audit
-        /// C-02). An all-zero destination, zero caps, and empty selectors mean
+        /// Expected gas-tx (`SignRawDigest`) rule the enclave committed.
+        /// An all-zero destination, zero caps, and empty selectors mean
         /// the operator did not pin the gas path, which the enclave attests as
         /// such and fails closed on per request.
         gas_tx_allowed_to: [u8; 20],
@@ -150,8 +150,8 @@ pub async fn verify_attested_pubkey(
         );
     }
 
-    // The enclave commits to sha256(pubkey_bundle || policy_commitment) (audit
-    // C-01). Reconstruct the expected policy - pins from the wire response,
+    // The enclave commits to sha256(pubkey_bundle || policy_commitment).
+    // Reconstruct the expected policy - pins from the wire response,
     // posture flags from `expected_policy` - and require the whole commitment to
     // match. A mismatch means the attested posture is not the expected one.
     let attested_policy = expected_attested_policy(&expected_policy, &response)?;
@@ -222,7 +222,7 @@ fn expected_attested_policy(
                 bridge_contract,
                 rgb_asset_id: resp.rgb_asset_id.clone(),
                 evm_checkpoint: *evm_checkpoint,
-                // Gas-tx rule (audit C-02): declared by the operator, not on the
+                // Gas-tx rule: declared by the operator, not on the
                 // wire. `to_bytes` canonicalises the selector set, so the caller
                 // need not pre-sort it.
                 gas_tx_allowed_to: *gas_tx_allowed_to,

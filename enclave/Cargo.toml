@@ -59,7 +59,7 @@ aws-nitro-enclaves-nsm-api = "0.4"
 [features]
 # A plain `cargo build` is the combined production bridge: rgb + ccd + helios.
 # `helios` is default because production requires it — the boot gate in
-# `policy.rs` rejects any other EVM source (#77). It implies `evm-rpc`.
+# `policy.rs` rejects any other EVM source. It implies `evm-rpc`.
 #
 # Single-network EIFs: `--no-default-features --features vsock,rgb,evm-rpc,helios`
 # (RGB) or `--no-default-features --features vsock,ccd` (Concordium — no
@@ -87,7 +87,7 @@ allow-seed-import = []
 # Skips cross-check validation on signing requests. Development/testing only.
 dev-mode = []
 # In-enclave RGB consignment validation via rgbstd + Esplora. REQUIRES `spv`
-# (enforced by a `compile_error!` in lib.rs — audit M-01 / #61): without SPV the
+# (enforced by a `compile_error!` in lib.rs): without SPV the
 # only anchor for a consignment's witness txs is the host-controlled Esplora
 # resolver, so a malicious host could have the enclave sign a release against a
 # fabricated Bitcoin anchor. Kept as a separate feature (rather than adding
@@ -104,17 +104,17 @@ spv = ["rgb-validation"]
 # Mock attestation path: skip NSM / COSE / cert-chain checks and use raw CBOR docs.
 # Testing only — never enable in production builds.
 mock-attestation = ["attestation-verify/mock"]
-# Independent in-enclave EVM `FundsIn` event verification for signPsbt (#60).
+# Independent in-enclave EVM `FundsIn` event verification for signPsbt.
 # Default-OFF. When ON, bridge-mode signPsbt fetches the deposit receipt via an
 # in-enclave alloy JSON-RPC client (loopback -> vsock forwarder -> host EVM RPC)
 # and fails closed on a missing/invalid receipt or unmet confirmation depth.
 # Implies `rgb-validation`: the bridge path this augments (`psbt_consignment_crosscheck`)
 # is already gated there, and the amount/asset context the predicate reconciles
 # lives behind it. NOTE: RPC responses are relayed by the UNTRUSTED host, so this
-# is the predicate + plumbing layer and only becomes trustless once Helios (#77)
+# is the predicate + plumbing layer and only becomes trustless once Helios
 # verifies the RPC.
 evm-rpc = ["rgb-validation", "dep:alloy", "dep:tokio"]
-# Trustless variant of `evm-rpc` (#77): the Helios light client verifies the EVM
+# Trustless variant of `evm-rpc`: the Helios light client verifies the EVM
 # RPC against a pinned weak-subjectivity checkpoint before accepting a FundsIn
 # receipt. Runtime-selectable: with HELIOS_EXECUTION_RPC set the enclave uses the
 # verified path, else the raw alloy path - which a release rgb-validation build

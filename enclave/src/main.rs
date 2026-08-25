@@ -101,7 +101,7 @@ fn main() {
         );
     } else if bridge_config.is_partially_configured() {
         // Some-but-not-all pin fields set: a botched production config. SignEvm
-        // fails closed on this (audit 4th M-03 / #94); log it before the boot
+        // fails closed on this; log it before the boot
         // gate below turns it fatal in a production build.
         tracing::error!(
             chain_id = bridge_config.chain_id,
@@ -119,7 +119,7 @@ fn main() {
     }
 
     // Which EVM `FundsIn` deposit-verification source this build/deployment
-    // uses (audit C-01 "allowed data sources"). Determined the same way the RPC
+    // uses ("allowed data sources"). Determined the same way the RPC
     // client is selected below: `evm-rpc` off => none; `helios` +
     // HELIOS_EXECUTION_RPC set => trustless; otherwise the raw host-relayed RPC.
     #[cfg(not(feature = "evm-rpc"))]
@@ -131,7 +131,7 @@ fn main() {
         // The pinned weak-subjectivity checkpoint is Helios's trust root, so
         // it is committed into the attested policy: a verifier confirms which
         // checkpoint the enclave synced from, not just that it is in Helios
-        // mode (audit M-06). A missing or malformed value yields `None`, and
+        // mode. A missing or malformed value yields `None`, and
         // the boot gate below then refuses to boot.
         let checkpoint = std::env::var("HELIOS_CHECKPOINT")
             .ok()
@@ -142,7 +142,7 @@ fn main() {
         (EvmDataSource::RawRpc, None)
     };
 
-    // Resolve the security posture once (audit C-01) from the build context,
+    // Resolve the security posture once from the build context,
     // pinned config, and selected data source. This is what gets committed into
     // attestation `user_data` and what the signing handlers consult.
     let build_ctx = BuildContext::current();
@@ -161,7 +161,7 @@ fn main() {
         ),
     }
 
-    // Fail closed at boot (audit C-01): a release rgb-validation build that
+    // Fail closed at boot: a release rgb-validation build that
     // does not resolve to a valid Production policy must never become
     // reachable. Debug / test / non-bridge builds are exempt.
     if let Err(msg) = policy.assert_valid_for_build(&build_ctx) {
@@ -192,7 +192,7 @@ fn main() {
     // ssl:// endpoint we listen on the URL's own port and pin its hostname to
     // 127.0.0.1 in /etc/hosts, so TLS terminates inside the enclave against the
     // real server cert and the host relays ciphertext only. Untrusted egress
-    // (audit I-01); see `vsock_forwarder`'s trust-boundary note.
+    //; see `vsock_forwarder`'s trust-boundary note.
     #[cfg(all(feature = "vsock", target_os = "linux"))]
     {
         // Esplora egress is only needed by the RGB/BTC stack (consignment
@@ -225,8 +225,8 @@ fn main() {
         }
 
         // Second forwarder for the EVM JSON-RPC used by in-enclave FundsIn
-        // verification (#60). Distinct loopback/vsock ports from Esplora
-        // (3443/8001). Untrusted, host-controlled egress boundary (audit I-01);
+        // verification. Distinct loopback/vsock ports from Esplora
+        // (3443/8001). Untrusted, host-controlled egress boundary;
         // the host must run: vsock-proxy <EVM_RPC_VSOCK_PORT> <evm-rpc-host> <port>.
         #[cfg(feature = "evm-rpc")]
         {
@@ -245,7 +245,7 @@ fn main() {
             }
         }
 
-        // Helios execution + consensus RPC forwarders (#77, trustless EVM
+        // Helios execution + consensus RPC forwarders (trustless EVM
         // verification). Helios verifies these UNTRUSTED upstreams against a
         // pinned checkpoint. Local ports mirror HeliosConfig defaults
         // (18545/18550); the host must run one vsock-proxy per upstream.
@@ -272,7 +272,7 @@ fn main() {
                 exec_vsock,
                 cons_local,
                 cons_vsock,
-                "starting Helios execution + consensus vsock forwarders (#77)"
+                "starting Helios execution + consensus vsock forwarders"
             );
             if let Err(e) =
                 utexo_bridge_enclave::vsock_forwarder::start_forwarder(exec_local, exec_vsock)
@@ -360,7 +360,7 @@ fn main() {
     };
 
     // Build the in-enclave EVM RPC client for independent FundsIn verification
-    // (#60). The URL must be the loopback forwarder; responses are host-relayed
+    //. The URL must be the loopback forwarder; responses are host-relayed
     // and treated as evidence (verified fail-closed), not trusted input.
     #[cfg(feature = "evm-rpc")]
     let (evm_rpc_client, evm_rpc_config) = {
@@ -368,14 +368,14 @@ fn main() {
         let cfg = utexo_bridge_enclave::config::EvmRpcConfig::from_env();
         type Boxed = Box<dyn EvmReceiptProvider + Send + Sync>;
 
-        // Raw alloy provider (#60): host-relayed, unverified.
+        // Raw alloy provider: host-relayed, unverified.
         let build_alloy = || -> Option<Boxed> {
             match AlloyEvmClient::new(&cfg.rpc_url) {
                 Ok(c) => {
                     tracing::info!(
                         rpc_url = %cfg.rpc_url,
                         min_confirmations = cfg.min_confirmations,
-                        "EVM FundsIn verification: raw alloy path (#60, host-relayed/unverified)"
+                        "EVM FundsIn verification: raw alloy path (host-relayed/unverified)"
                     );
                     Some(Box::new(c) as Boxed)
                 }
@@ -386,7 +386,7 @@ fn main() {
             }
         };
 
-        // #77 runtime-selectable: HELIOS_EXECUTION_RPC set selects the
+        // Runtime-selectable: HELIOS_EXECUTION_RPC set selects the
         // Helios-verified path, else raw alloy. Fail closed on the selected
         // provider - a Helios sync failure leaves the client unset so bridge
         // signing refuses, never downgrading to the unverified path.
@@ -394,7 +394,7 @@ fn main() {
         let client: Option<Boxed> = match utexo_bridge_enclave::config::HeliosConfig::from_env() {
             Some(hcfg) => {
                 // Pass the pinned EVM_CHAIN_ID so Helios rejects a
-                // HELIOS_NETWORK inconsistent with it (#77 predicate 1).
+                // HELIOS_NETWORK inconsistent with it (predicate 1).
                 match utexo_bridge_enclave::networks::evm::evm_event::HeliosEvmClient::new(
                     &hcfg,
                     bridge_config.chain_id,
@@ -403,7 +403,7 @@ fn main() {
                         tracing::info!(
                             network = %hcfg.network,
                             min_confirmations = cfg.min_confirmations,
-                            "EVM FundsIn verification: Helios-verified path (#77, trustless)"
+                            "EVM FundsIn verification: Helios-verified path (trustless)"
                         );
                         Some(Box::new(c) as Boxed)
                     }
@@ -462,8 +462,8 @@ fn main() {
     }
 }
 
-/// Accept loop with bounded concurrency and per-request deadlines (audit M-03 /
-/// #83). Each accepted socket is wrapped in a [`DeadlineStream`] (idle + total
+/// Accept loop with bounded concurrency and per-request deadlines.
+/// Each accepted socket is wrapped in a [`DeadlineStream`] (idle + total
 /// request timeouts) and handed to a fixed worker pool via a bounded queue;
 /// over-cap connections are dropped (closed) so one slow request can't starve
 /// the others. Generic over the socket type so the vsock and TCP branches share

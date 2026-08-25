@@ -197,7 +197,7 @@ async fn e2e_attest_verify_fails_on_policy_mismatch() {
     // The in-process enclave is a debug/mock build, so it attests the
     // `Development` posture. A verifier expecting a production enclave must
     // reject it, because the committed policy differs and the user_data
-    // commitment no longer matches (the C-01 property).
+    // commitment no longer matches.
     let enclave_port = start_real_enclave();
     let grpc_port = start_real_parent_grpc(enclave_port).await;
 

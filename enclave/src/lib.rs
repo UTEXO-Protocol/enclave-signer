@@ -1,6 +1,6 @@
 #![deny(unsafe_code)]
 
-// Release guards (audit TEE-IK-01 / TEE-CL-02 + dev-mode). Three dev-only
+// Release guards (dev-mode). Three dev-only
 // features are catastrophic if accidentally enabled in a shipped build:
 //
 //   * `allow-seed-import` - the parent can install a chosen seed on a fresh
@@ -40,8 +40,7 @@ dev_feature_release_guard!(
 // `rgb-validation` asks a resolver whether a consignment's witness txs are
 // mined. Without `spv` that resolver is the host-controlled Esplora endpoint,
 // so a malicious host could claim a fabricated witness tx is confirmed and the
-// enclave would sign a `fundsOut` against a non-existent anchor (audit M-01 /
-// #61). `spv` re-anchors every witness tx against the enclave's own header
+// enclave would sign a `fundsOut` against a non-existent anchor. `spv` re-anchors every witness tx against the enclave's own header
 // chain. Unsafe in every profile, so this is not release-gated.
 #[cfg(all(feature = "rgb-validation", not(feature = "spv")))]
 compile_error!(

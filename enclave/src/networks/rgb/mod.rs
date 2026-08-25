@@ -139,7 +139,7 @@ pub fn validate_destination(
 /// Returns the **recipient leg** of the bound consignment in asset units - see
 /// [`psbt_validation::validate_psbt_anchors_transition`]. This is the
 /// enclave-derived destination amount the route-level cross-check uses, in
-/// place of the host-supplied `psbt_output_amount` (W-06 / #52).
+/// place of the host-supplied `psbt_output_amount`.
 #[cfg(feature = "rgb-validation")]
 pub fn validate_destination_anchor(
     destination: &RgbDestination,
@@ -165,7 +165,7 @@ pub fn validate_destination_anchor(
             ctx.bridge_config.max_consignment_bytes
         )));
     }
-    // Integrity, not authorization (audit I-02 / Oxorio I-09): the listener
+    // Integrity, not authorization: the listener
     // controls both `consignment` and `consignment_hash`, so a match only
     // proves the wire copy is intact. Authorization is the rgbstd validation
     // plus the witness-txid bind below.
@@ -199,7 +199,7 @@ pub fn validate_destination_anchor(
             validated.contract_id, destination.asset_id
         )));
     }
-    // Asset-identity pin (audit TEE-SE-01), fail-closed when RGB_ASSET_ID is
+    // Asset-identity pin, fail-closed when RGB_ASSET_ID is
     // unset: an unconfigured yet rgb-validation-enabled enclave must not sign in
     // listener-trusting mode. Mirrors the EVM funds-out `!is_configured()` gate.
     if ctx.bridge_config.rgb_asset_id.is_empty() {
@@ -218,7 +218,7 @@ pub fn validate_destination_anchor(
 
     let psbt = bitcoin::psbt::Psbt::deserialize(&destination.psbt_bytes)
         .map_err(|e| EnclaveError::CrossCheck(format!("psbt_bytes is not a valid PSBT: {e}")))?;
-    // Fail closed: the per-output recipient bind (W-06 / #52) needs to tell a
+    // Fail closed: the per-output recipient bind needs to tell a
     // bridge change output from a payout, and it cannot do that without the
     // enclave's own keys. No resolver means no bind, so refuse to sign.
     let self_owned = ctx.self_owned_psbt_outputs.ok_or_else(|| {
@@ -236,7 +236,7 @@ pub fn validate_destination_anchor(
         self_owned,
     )?;
 
-    // Fee-rate sanity (#55), after the pure anchor checks so the cached Esplora
+    // Fee-rate sanity, after the pure anchor checks so the cached Esplora
     // round-trip is the last thing that can reject. Fail-closed when the
     // estimate is unavailable, since the host controls that egress.
     let recommended = validator.recommended_fee_rate_sat_vb()?;
@@ -338,7 +338,7 @@ mod tests {
         assert!(err.to_string().contains("not hex-decodable"));
     }
 
-    // Asset-identity binding, destination path (audit TEE-SE-01). The legs are
+    // Asset-identity binding, destination path. The legs are
     // inlined in `validate_destination_anchor` after `validate_consignment`, so
     // that function is the narrowest callable unit. Driven end-to-end with the
     // in-tree mainnet transfer fixture against a stub Esplora.
@@ -522,7 +522,7 @@ mod tests {
         }
 
         /// Empty declarations are rejected up-front, so the reachable form of
-        /// the TEE-SE-01 funds-theft path is a listener that declares the
+        /// the funds-theft path is a listener that declares the
         /// foreign asset consistently with the consignment. The RGB_ASSET_ID
         /// pin must still reject it.
         #[test]

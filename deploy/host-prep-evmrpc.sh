@@ -2,7 +2,7 @@
 # Host-prep for the enclave evm-rpc egress path (run as root, e.g. via SSM).
 #
 # Stands up, idempotently and reboot-safe, the host side of the in-enclave EVM
-# FundsIn verification (evm-rpc feature, #60):
+# FundsIn verification (evm-rpc feature):
 #
 #   enclave http://127.0.0.1:3444  (alloy RootProvider::new_http, plaintext, no key)
 #     -> in-enclave vsock forwarder -> vsock port 8002

@@ -162,7 +162,7 @@ fn deterministic_seed_import() {
 const TEST_MNEMONIC: &str =
     "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
 
-/// TI-1 (#112), production build (`allow-seed-import` off): an `InitializeKey`
+/// Production build (`allow-seed-import` off): an `InitializeKey`
 /// carrying a caller-supplied seed or mnemonic must be rejected by the
 /// `#[cfg(not(feature = "allow-seed-import"))]` arm of `handle_initialize`. The
 /// rejection precedes any state mutation, so a later OS-entropy init on the
@@ -235,7 +235,7 @@ fn production_build_rejects_caller_supplied_seed_and_mnemonic() {
     );
 }
 
-/// TI-1 (#112), dev build (`--features allow-seed-import`): the same
+/// Dev build (`--features allow-seed-import`): the same
 /// `InitializeKey` call production rejects is accepted, installing the caller's
 /// seed / mnemonic. Each import uses a fresh server, since init is one-shot.
 #[test]

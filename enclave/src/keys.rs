@@ -424,7 +424,7 @@ impl KeyManager {
     ///   * `Some(account)`: sign only taproot inputs resolving to `account` and
     ///     skip the legacy P2WSH path. `SignBtc` passes `Some(Vanilla)`, so the
     ///     plain-BTC path can never co-sign a Colored (RGB-allocated) input
-    ///     (the structural half of the M-01 fix).
+    ///     (the structural half of the input-scoping fix).
     pub fn sign_psbt_scoped(
         &self,
         psbt_bytes: &[u8],
@@ -518,7 +518,7 @@ impl KeyManager {
 }
 
 impl Drop for KeyManager {
-    /// Wipe the BIP-86 account extended private keys on teardown (I-07).
+    /// Wipe the BIP-86 account extended private keys on teardown.
     ///
     /// Unlike `seed` / `evm_secret` / `btc_secret`, these are plain `Xpriv`
     /// fields with no `SecretBox` zeroize-on-drop. Each carries a signing

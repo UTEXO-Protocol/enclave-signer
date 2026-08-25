@@ -51,13 +51,13 @@ struct Cli {
 
     /// Verify a mock-attestation document (zero PCRs, no COSE wrapping).
     /// For dev/CI only. Real production verification MUST NOT use this flag.
-    /// Implies the expected security policy is `Development` (audit C-01).
+    /// Implies the expected security policy is `Development`.
     #[arg(long)]
     mock: bool,
 
     /// Expect the enclave to enable the plain-BTC (vanilla / create_utxo)
     /// signing path. Default: expect it DISABLED (fail-closed). Ignored with
-    /// --mock. Audit C-01: this posture is committed into attestation user_data.
+    /// --mock. This posture is committed into attestation user_data.
     #[arg(long)]
     expect_vanilla_psbt: bool,
 
@@ -73,14 +73,14 @@ struct Cli {
     /// block root) the enclave must have trust-rooted on. REQUIRED when
     /// `--expect-evm-source helios`: the verifier reconstructs the committed
     /// posture with this value, so an enclave that synced from a different
-    /// checkpoint fails the `user_data` hash (audit M-06). Ignored otherwise.
+    /// checkpoint fails the `user_data` hash. Ignored otherwise.
     #[arg(long)]
     expect_helios_checkpoint: Option<String>,
 
     /// Expected gas-tx (`SignRawDigest`) allowed destination the enclave pinned
     /// (`GAS_TX_ALLOWED_TO`), as 0x-hex. Omit if the operator left the gas path
     /// unpinned (the enclave then commits the all-zero destination and fails the
-    /// path closed). Audit C-02; ignored with --mock.
+    /// path closed). Ignored with --mock.
     #[arg(long)]
     expect_gas_tx_to: Option<String>,
 
@@ -200,7 +200,7 @@ async fn run(cli: Cli) -> Result<()> {
             .transpose()?;
         // A Helios expectation without a pinned checkpoint could never match a
         // real trustless enclave (which always commits one), so refuse early
-        // with a clear message rather than a downstream hash mismatch (M-06).
+        // with a clear message rather than a downstream hash mismatch.
         if evm_source == EvmDataSource::HeliosVerified && evm_checkpoint.is_none() {
             anyhow::bail!(
                 "--expect-evm-source helios requires --expect-helios-checkpoint \

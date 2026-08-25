@@ -310,7 +310,7 @@ pub fn parse_checkpoint_spec(
 ///
 /// Layout (per Oleksandr's note):
 /// - `6a 4c 09 01 1e 00 00 00 00 00 00 00 00` - OP_RETURN-prefixed block-time
-///   spec (PR bitcoin#29365): 30s = `0x1e` little-endian u64.
+/// spec (bitcoin#29365): 30s = `0x1e` little-endian u64.
 /// - `4c 69 53 21 <33-byte pubkey> 21 <33-byte pubkey> 21 <33-byte pubkey>
 ///    53 ae` - `OP_PUSHDATA1 0x69 OP_3 <pk1> <pk2> <pk3> OP_3 OP_CHECKMULTISIG`
 ///   = 3-of-3 multisig over three federation signing keys.
@@ -373,7 +373,7 @@ mod tests {
 
     #[test]
     fn mainnet_checkpoint_is_retarget_boundary_aligned() {
-        // #67: the mainnet checkpoint MUST sit on a retarget boundary, else
+        // The mainnet checkpoint MUST sit on a retarget boundary, else
         // the chain wedges at the first boundary above it.
         assert_eq!(MAINNET_CHECKPOINT.height % RETARGET_INTERVAL, 0);
         assert_eq!(MAINNET_CHECKPOINT.height, 472 * RETARGET_INTERVAL);
@@ -487,7 +487,7 @@ mod tests {
     #[test]
     fn assert_retarget_aligned_rejects_misaligned_pow_checkpoint() {
         // The previous checkpoint height (950 000) is NOT boundary-aligned
-        // (950 000 % 2016 == 464) - exactly the bug #67 fixes. A PoW network
+        // (950 000 % 2016 == 464) - exactly the misalignment bug. A PoW network
         // must reject it.
         let misaligned = Checkpoint {
             height: 950_000,

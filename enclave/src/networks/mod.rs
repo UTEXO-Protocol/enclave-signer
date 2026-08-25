@@ -32,7 +32,7 @@ pub struct ValidationContext<'a> {
     #[cfg(feature = "spv")]
     pub header_chain: &'a Mutex<crate::networks::rgb::spv::HeaderChain>,
     /// Resolves which of a PSBT's Bitcoin outputs pay back to this enclave.
-    /// Required by the send-RGB per-output recipient bind (W-06 / #52) to tell
+    /// Required by the send-RGB per-output recipient bind to tell
     /// bridge change from a payout to a third party.
     ///
     /// A callback, so the key lock is taken only for that resolution and never
@@ -84,7 +84,7 @@ pub fn validate_source(
 }
 
 /// Route proof plus, for an EVM `fundsOut`, the calldata decoded once into one
-/// typed intent that the later stages consume (I-12 / #165). `None` for RGB
+/// typed intent that the later stages consume. `None` for RGB
 /// destinations and the dev-mode bypass.
 pub struct DestinationProof {
     pub proof: RouteProof,
@@ -116,7 +116,7 @@ pub fn validate_destination(
             rgb::validate_destination(destination, ctx)?;
 
             // The destination amount is the consignment's recipient leg,
-            // proven inside the enclave (W-06 / #52), not the unchecked
+            // proven inside the enclave, not the unchecked
             // host-supplied `psbt_output_amount`. Only builds without that
             // binding fall back to the wire field, and they run no destination
             // cross-checks at all.

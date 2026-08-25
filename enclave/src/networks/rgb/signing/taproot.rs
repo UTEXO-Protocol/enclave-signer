@@ -544,7 +544,7 @@ mod tests {
         assert!(jobs.is_empty());
     }
 
-    // === Account-scoped signing (plain-BTC path guard, M-01/#69) ===
+    // === Account-scoped signing (plain-BTC path guard) ===
 
     fn our_xonly_colored(km: &KeyManager) -> XOnlyPublicKey {
         let secp = Secp256k1::new();

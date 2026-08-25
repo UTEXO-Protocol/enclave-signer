@@ -45,8 +45,8 @@ use crate::networks::rgb::spv::validation::{
 /// deeper is a chain split needing operator attention.
 pub const MAX_REORG_DEPTH: BlockHeight = 100;
 
-// Retention policy (#130): every validated header from the checkpoint forward
-// is kept - there is no sliding window. The old window (#86) pruned below
+// Retention policy: every validated header from the checkpoint forward
+// is kept - there is no sliding window. The old window pruned below
 // `tip - ~2122`, which broke the SPV invariant that a consignment must prove
 // inclusion of all its witness anchors: those can sit tens of thousands of
 // blocks below the tip, and once pruned the enclave refused to sign.
@@ -60,7 +60,7 @@ pub const MAX_REORG_DEPTH: BlockHeight = 100;
 // free. `MAX_STORED_HEADERS` therefore caps absolute retention on every
 // network.
 
-/// Absolute cap on retained headers (#130 / audit W-08), the work-independent
+/// Absolute cap on retained headers, the work-independent
 /// memory backstop that replaced the sliding window. A batch that would push
 /// the stored count past it is rejected fail-closed rather than pruned, so no
 /// anchor is silently dropped; the operator advances the compile-time
@@ -90,7 +90,7 @@ pub struct SubmitOutcome {
 
 /// In-memory store of validated block headers, anchored to a checkpoint.
 ///
-/// Every header from the checkpoint forward is retained (#130). Headers are
+/// Every header from the checkpoint forward is retained. Headers are
 /// stored relative to a base that equals the checkpoint and never moves:
 /// `headers[i]` is the header at height `base_height + 1 + i`. The base fields
 /// are the checkpoint block's hash/bits/time, which the first stored header
@@ -98,7 +98,7 @@ pub struct SubmitOutcome {
 pub struct HeaderChain {
     network: Network,
     checkpoint: Checkpoint,
-    /// Height of the block preceding `headers[0]`. With full retention (#130)
+    /// Height of the block preceding `headers[0]`. With full retention
     /// this stays equal to `checkpoint.height` for the life of the chain.
     base_height: BlockHeight,
     /// Hash (internal byte order) of the block at `base_height` - the
@@ -191,7 +191,7 @@ impl HeaderChain {
 
     /// Look up a stored header by height. Heights at or below the checkpoint
     /// return `None`: only the checkpoint's metadata is kept, not its header.
-    /// Every height above it is retained (#130), so old RGB anchors resolve.
+    /// Every height above it is retained, so old RGB anchors resolve.
     pub fn header_at(&self, height: BlockHeight) -> Option<&Header> {
         if height <= self.base_height {
             return None;
@@ -227,7 +227,7 @@ impl HeaderChain {
     ) -> Result<SubmitOutcome> {
         let tip = self.tip_height();
 
-        // Per-call cap (#86). The `framing` 4 MB cap is per-message only, so
+        // Per-call cap. The `framing` 4 MB cap is per-message only, so
         // without this an attacker could pack ~52k headers into one call.
         if raw_headers.len() > MAX_HEADERS_PER_SUBMIT {
             return Err(SpvError::BatchTooLarge {
@@ -270,7 +270,7 @@ impl HeaderChain {
             });
         }
 
-        // Total-retention ceiling (#130 / audit W-08): on a non-PoW network
+        // Total-retention ceiling: on a non-PoW network
         // headers are minted for free, so without this the chain could grow
         // until the enclave OOMs. Fail-closed - reject rather than prune.
         // Headers retained below the batch are `start_height - 1 - base_height`
@@ -286,7 +286,7 @@ impl HeaderChain {
 
         // Predecessor at `start_height - 1`: the base (checkpoint) or a stored
         // header. A start at or below the checkpoint was already rejected, and
-        // everything above it is retained (#130).
+        // everything above it is retained.
         let pred_height = start_height - 1;
         let (pred_hash, pred_bits, pred_time) = if pred_height == self.base_height {
             (self.base_hash, self.base_bits, self.base_time)
@@ -411,7 +411,7 @@ impl HeaderChain {
         }
 
         // The checkpoint itself: its timestamp is kept as base metadata even
-        // though its header is not stored. Full retention (#130) means any
+        // though its header is not stored. Full retention means any
         // higher boundary's epoch start is a stored header, resolved above.
         if target_height == self.base_height {
             return Ok(self.base_time);
@@ -777,7 +777,7 @@ mod tests {
         assert_eq!(outcome.last_block_height, 4100);
     }
 
-    // ===== #67: retarget-boundary epoch-start resolution =====
+    // ===== retarget-boundary epoch-start resolution =====
     //
     // A retarget boundary at height B needs the block at `B -
     // RETARGET_INTERVAL`. With a misaligned checkpoint, the first boundary
@@ -785,7 +785,7 @@ mod tests {
     // stored, and the chain wedges. Tested through the lookup directly; the
     // difficulty math itself is covered in validation.rs.
 
-    /// TH-1: with a boundary-aligned checkpoint (the #67 fix), the first
+    /// With a boundary-aligned checkpoint, the first
     /// retarget boundary above it resolves its epoch start to the checkpoint
     /// instead of wedging.
     #[test]
@@ -831,9 +831,9 @@ mod tests {
         assert!(matches!(err, SpvError::HeaderNotFound(949_536)));
     }
 
-    // ===== #130: full retention from the checkpoint (no sliding window) =====
+    // ===== full retention from the checkpoint (no sliding window) =====
 
-    /// Core #130 regression: the base stays pinned at the checkpoint and
+    /// Core retention regression: the base stays pinned at the checkpoint and
     /// `header_at` resolves anchors far below the old `HEADER_WINDOW` (~2122),
     /// which used to be pruned.
     #[test]
@@ -868,7 +868,7 @@ mod tests {
         assert!(chain.header_at(1).is_some(), "oldest header retained");
 
         // A height far below `tip - 2122` is still present - exactly the case
-        // that failed before #130 (anchor at ~tip - 3200 here).
+        // that failed under the old sliding window (anchor at ~tip - 3200 here).
         let deep = 1000u32;
         assert!(
             (count - deep) > 2122,
@@ -995,7 +995,7 @@ mod tests {
         );
     }
 
-    /// Per-call cap (#86): a batch larger than `MAX_HEADERS_PER_SUBMIT` is
+    /// Per-call cap: a batch larger than `MAX_HEADERS_PER_SUBMIT` is
     /// rejected before any parsing, so the garbage vecs are never deserialised.
     #[test]
     fn rejects_batch_over_per_call_cap() {

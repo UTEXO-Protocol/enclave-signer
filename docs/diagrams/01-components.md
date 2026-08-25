@@ -22,7 +22,7 @@ flowchart TB
     %% attestation-verify shared crate
     subgraph ATTV [attestation-verify crate — shared]
         AV[verify_attestation<br/>COSE_Sign1, alg pinned ES384, raw 96-byte sig,<br/>cert chain + CA constraints + PCR0/1/2]
-        AVPol[policy.rs<br/>AttestedPolicy — canonical policy<br/>commitment encoding v1, audit C-01]
+        AVPol[policy.rs<br/>AttestedPolicy — canonical policy<br/>commitment encoding v1]
         AVMock[verify_mock_attestation<br/>feature 'mock']
         Root[Embedded AWS Nitro<br/>root CA PEM]
     end
@@ -32,7 +32,7 @@ flowchart TB
         EMain[main.rs<br/>boot: resolve SecurityPolicy — a release<br/>bridge build panics unless valid Production —<br/>then listener loop vsock / TCP]
         EConn[conn.rs<br/>DeadlineStream 10 s idle / 30 s total<br/>4 worker threads, queue of 16]
         ESrv[server.rs<br/>ServerContext + handler dispatch<br/>+ SubmitHeaders rate limiter]
-        EPol[policy.rs<br/>SecurityPolicy C-01<br/>Production / Development,<br/>resolved once at boot]
+        EPol[policy.rs<br/>SecurityPolicy<br/>Production / Development,<br/>resolved once at boot]
         EState[state.rs<br/>Phase Initial / Cloning / Active<br/>NonceReplayGuard 1 h TTL<br/>op_replay_guard 24 h TTL]
         EFr[framing.rs<br/>len-prefixed proto, 4 MiB cap]
         BCfg[config.rs — BridgeConfig env pins<br/>EVM_CHAIN_ID / EVM_PROXY_CONTRACT_ADDRESS / RGB_ASSET_ID<br/>GAS_TX_ALLOWED_TO / GAS_TX_MAX_GAS_LIMIT<br/>GAS_TX_MAX_FEE_PER_GAS / GAS_TX_MAX_VALUE_WEI<br/>GAS_TX_ALLOWED_SELECTORS<br/>FUNDS_IN_CONTRACT / BTC_MAX_TOTAL_SATS]
@@ -130,5 +130,5 @@ flowchart TB
     BCfg -->|"gas-tx to-pin"| NEG
     BCfg -->|"BTC total-sats cap"| NRB
     BCfg --> EPol
-    EPol -.->|"user_data = sha256(pubkey_bundle ‖<br/>policy commitment) — C-01"| AF
+    EPol -.->|"user_data = sha256(pubkey_bundle ‖<br/>policy commitment)"| AF
 ```

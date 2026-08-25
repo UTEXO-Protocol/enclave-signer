@@ -1,4 +1,4 @@
-//! Live-chain check of the #60 FundsIn binding against a real `BridgeFundsIn`
+//! Live-chain check of the FundsIn binding against a real `BridgeFundsIn`
 //! log. The unit tests build their own logs, so a wrong event signature or
 //! topic index would pass on both sides.
 //!

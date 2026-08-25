@@ -1,4 +1,4 @@
-//! Gas-key transaction shape allowlist (audit TEE-XC-09).
+//! Gas-key transaction shape allowlist.
 //!
 //! The gas key (`m/44'/60'/0'/0/1`) pays L1 gas for the bridge's Ethereum
 //! transactions. The enclave is given the unsigned transaction preimage, not a
@@ -20,7 +20,7 @@
 //! attestation `user_data` commitment via [`crate::policy::SecurityPolicy`].
 //!
 //! Not bounded here: aggregate fee spend across many txs (validation is
-//! stateless), and the LayerZero fee is not bound to its release (#68).
+//! stateless), and the LayerZero fee is not bound to its release.
 //! EIP-712 typed data is not accepted: the gas key signs L1 transactions,
 //! whose envelope is RLP.
 
@@ -170,7 +170,7 @@ pub fn validate_gas_tx_request(req: &SignRawDigestRequest, cfg: &BridgeConfig) -
         }
     }
 
-    // Fee/gas ceilings (audit C-02): a signed gas tx can burn at most
+    // Fee/gas ceilings: a signed gas tx can burn at most
     // `gasLimit * maxFeePerGas`. Unset caps fail closed.
     if cfg.gas_tx_max_gas_limit == 0 {
         return Err(reject(
@@ -201,7 +201,7 @@ pub fn validate_gas_tx_request(req: &SignRawDigestRequest, cfg: &BridgeConfig) -
         )));
     }
 
-    // Calldata allowlist (audit C-02). Every signed gas tx must invoke an
+    // Calldata allowlist. Every signed gas tx must invoke an
     // allowlisted 4-byte selector on the pinned destination. Empty calldata is
     // refused (it would invoke `fallback()` / `receive()`), and an empty
     // allowlist refuses all gas-tx signing.
@@ -1099,7 +1099,7 @@ mod tests {
         assert!(err.to_string().contains("nesting too deep"), "got: {err}");
     }
 
-    // ---- fee/gas caps (audit C-02) ----
+    // ---- fee/gas caps ----
 
     #[test]
     fn rejects_gas_limit_over_cap() {
@@ -1212,7 +1212,7 @@ mod tests {
         assert!(err.to_string().contains("exceeds u128"), "got: {err}");
     }
 
-    // ---- calldata selector allowlist (audit C-02) ----
+    // ---- calldata selector allowlist ----
 
     #[test]
     fn accepts_allowlisted_selector_with_args() {

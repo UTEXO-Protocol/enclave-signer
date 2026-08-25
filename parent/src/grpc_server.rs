@@ -285,7 +285,7 @@ impl ParentService for ParentAdapterService {
     /// Dispatches on `data_type`:
     ///   TRANSACTION -> source/destination cross-network Sign (bridge / RGB-send / EVM)
     ///   EVM_GAS_TX  -> unsigned gas-tx preimage -> SignRawDigest
-    ///   BTC_UTXO    -> plain-BTC PSBT -> SignBtc (vanilla BIP-86 path, audit #69/M-01)
+    /// BTC_UTXO -> plain-BTC PSBT -> SignBtc (vanilla BIP-86 path)
     async fn sign(
         &self,
         request: Request<grpc_proto::SignRequest>,
@@ -433,7 +433,7 @@ impl ParentService for ParentAdapterService {
                             identifier: None,
                             // Forward the exact calldata the signature commits
                             // to, so the caller submits these bytes rather than
-                            // the ones it sent (audit M-02 / #93, #63).
+                            // the ones it sent.
                             call_data: r.call_data,
                             // secp256k1: the signer is recoverable from the signature.
                             public_key: Vec::new(),
@@ -455,7 +455,7 @@ impl ParentService for ParentAdapterService {
                 // `EnrichedEvmPayload.unsigned_tx`, and may still carry a
                 // pre-hashed digest in `call_data`; the enclave decodes the
                 // preimage, enforces the gas-tx shape allowlist, and computes
-                // the digest itself (audit TEE-XC-09 / #68).
+                // the digest itself.
                 let (digest, unsigned_tx) =
                     match inner.data {
                         Some(sign_request::Data::EvmData(payload)) => {
@@ -501,7 +501,7 @@ impl ParentService for ParentAdapterService {
                 }
             }
             DataType::BtcUtxo => {
-                // Plain-BTC signing (audit #69 / M-01): a distinct request with
+                // Plain-BTC signing: a distinct request with
                 // no source proof or consignment. The Listener sends the PSBT in
                 // `EnrichedBtcPayload.psbt_bytes`; the enclave signs it on the
                 // vanilla BIP-86 account, only after proving every output pays

@@ -11,12 +11,12 @@ use crate::error::{EnclaveError, Result};
 /// from the pinned [`crate::config::BridgeConfig`], not the request.
 /// `funds_in_operation_id` is the on-chain `BridgeFundsIn.operationId`, already
 /// verified by [`crate::networks::evm::evm_event::verify_funds_in_event`]
-/// (audit M-02). Variable-length fields are length-prefixed and a domain tag is
+///. Variable-length fields are length-prefixed and a domain tag is
 /// mixed in, so distinct tuples cannot collide by concatenation ambiguity.
 ///
 /// Consumed by the soft in-memory replay guard
 /// ([`crate::state::EnclaveState::op_replay_guard`]), which is defense in depth
-/// and not a sufficient double-spend control (#84).
+/// and not a sufficient double-spend control.
 pub fn psbt_operation_key(
     chain_id: u64,
     bridge_contract: &[u8; 20],
@@ -88,7 +88,7 @@ pub fn validate_psbt_bytes(psbt_bytes: &[u8]) -> Result<()> {
 ///
 /// Enforces, fail-closed:
 ///   1. The consignment's last transition is an IFA `Transfer`
-///      (`ifa::TS_TRANSFER`) or an IFA `Inflation` (`ifa::TS_INFLATION`, #54).
+/// (`ifa::TS_TRANSFER`) or an IFA `Inflation` (`ifa::TS_INFLATION`).
 ///   2. Identity bind: `psbt.unsigned_tx.compute_txid()` equals the
 ///      consignment's last witness txid. A segwit txid commits to every
 ///      non-witness field, so equality means signing this PSBT finalizes
@@ -107,7 +107,7 @@ pub fn validate_psbt_bytes(psbt_bytes: &[u8]) -> Result<()> {
 ///      against `source_amount - source_commission`. Exact equality for an
 ///      Inflation (any surplus is an over-mint), a coverage lower bound for a
 ///      Transfer (whose total includes bridge change).
-///   7. Per-output recipient bind (W-06 / #52): each `OS_ASSET` output is
+/// 7. Per-output recipient bind: each `OS_ASSET` output is
 ///      classified by its seal. A confidential (`utxob:`) seal is a recipient
 ///      leg; a revealed (`txid:vout`) seal counts as bridge change only if it
 ///      names a vout of this witness tx and that output is provably ours
@@ -290,7 +290,7 @@ pub fn validate_psbt_anchors_transition(
         }
     }
 
-    // Per-output recipient bind (W-06 / #52). Runs last: it is the only check
+    // Per-output recipient bind. Runs last: it is the only check
     // here that reaches for the enclave's keys.
     let legs = split_asset_legs(psbt, psbt_txid, &committed, self_owned)?;
     if legs.recipient != net_credited {
@@ -330,7 +330,7 @@ struct AssetLegs {
 ///
 /// Takes the whole committed group, not one transition: otherwise value routed
 /// by a sibling transition escapes the bind. `OS_INFLATION` entries are skipped
-/// because their amount is mint capacity, not delivered value (#54).
+/// because their amount is mint capacity, not delivered value.
 #[cfg(feature = "rgb-validation")]
 fn split_asset_legs(
     psbt: &Psbt,
@@ -417,13 +417,13 @@ fn split_asset_legs(
     Ok(legs)
 }
 
-/// Maximum multiple of the recommended fee rate a send-RGB PSBT may pay (#55).
+/// Maximum multiple of the recommended fee rate a send-RGB PSBT may pay.
 /// Compile-time and PCR-attested, not host-tunable. 3x absorbs fee-market
 /// movement within the estimate's TTL plus the unsigned-vsize overestimate.
 #[cfg(feature = "rgb-validation")]
 const FEE_RATE_HEADROOM: f64 = 3.0;
 
-/// Fee-rate sanity check for send-RGB PSBTs (#55): the implied fee rate must
+/// Fee-rate sanity check for send-RGB PSBTs: the implied fee rate must
 /// not exceed [`FEE_RATE_HEADROOM`] x the enclave-fetched recommendation.
 /// Without this, a compromised host could burn bridge BTC as miner fees on an
 /// otherwise fully-validated PSBT.
@@ -552,7 +552,7 @@ mod tests {
         );
     }
 
-    // Operation-dedup key - `psbt_operation_key` (audit W-02 / #84)
+    // Operation-dedup key - `psbt_operation_key`
 
     #[test]
     fn op_key_is_deterministic() {
@@ -603,7 +603,7 @@ mod tests {
     }
 
     // Operation dedup end-to-end - `psbt_operation_key` + the soft replay guard.
-    // Encodes the M-02 properties the EVM->RGB path relies on the guard for.
+    // Encodes the properties the EVM->RGB path relies on the guard for.
     mod operation_dedup {
         use crate::error::EnclaveError;
         use crate::networks::rgb::psbt_validation::psbt_operation_key;
@@ -943,7 +943,7 @@ mod tests {
             );
         }
 
-        /// **W-06 / #52.** The over-send this whole bind exists for: a genuine
+        /// The over-send this whole bind exists for: a genuine
         /// 1_000-unit deposit, and a consignment that is rgbstd-valid, anchored
         /// to this exact PSBT, and pays 10_000_000 units to a blinded seal the
         /// attacker controls. Every other leg of the cross-check passes; the
@@ -1013,7 +1013,7 @@ mod tests {
             );
         }
 
-        /// #54, at per-output granularity: an `OS_INFLATION` entry is mint
+        /// At per-output granularity: an `OS_INFLATION` entry is mint
         /// *capacity*, not value delivered, so it must not be able to stand in
         /// for the recipient leg.
         #[test]
@@ -1218,7 +1218,7 @@ mod tests {
             );
         }
 
-        /// #54: the mint-RGB shape - an IFA Inflation last transition - binds
+        /// The mint-RGB shape - an IFA Inflation last transition - binds
         /// through the same anchor path as the pools-mode Transfer.
         #[test]
         fn accepts_inflation_shape() {
@@ -1230,7 +1230,7 @@ mod tests {
             );
         }
 
-        /// #54: for a mint, only `OS_ASSET`-typed outputs (the actually
+        /// For a mint, only `OS_ASSET`-typed outputs (the actually
         /// minted units) may cover the credited amount - the `OS_INFLATION`
         /// allowance (mint capacity) counted in `total_output_amount` must
         /// not.

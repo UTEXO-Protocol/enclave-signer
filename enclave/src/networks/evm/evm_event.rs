@@ -1,5 +1,5 @@
 //! Independent in-enclave verification of the EVM `FundsIn` deposit event for
-//! bridge-mode `signPsbt` (audit M-06 / issues #60, #51).
+//! bridge-mode `signPsbt`.
 //!
 //! Bridge-mode `signPsbt` releases RGB against an EVM deposit. Instead of
 //! trusting the listener's `evm_event_valid` / `evm_event_finalized` booleans,
@@ -10,17 +10,17 @@
 //!
 //! Trust boundary: the RPC is reached through the loopback -> vsock forwarder,
 //! so responses are relayed by the untrusted host. A withheld receipt fails
-//! closed; a forged one is only ruled out once Helios (#77) verifies the RPC
+//! closed; a forged one is only ruled out once Helios verifies the RPC
 //! inside the TEE.
 //!
-//! Divergence from #77: rather than matching the listener-forwarded raw log,
+//! Divergence: rather than matching the listener-forwarded raw log,
 //! this module pins the contract from config and independently decodes and
 //! binds the semantic fields (`operationId`, gross/net/commission). So
 //! `evm_log_index` / `evm_event_topics` / `evm_event_data` are unused by
 //! design.
 //!
 //! Not bound here: `operationId` has no on-chain link to the RGB mint being
-//! signed, so that association stays listener-supplied (#66). Amounts are
+//! signed, so that association stays listener-supplied. Amounts are
 //! compared as `u64` because the proto carries them that way; an on-chain value
 //! exceeding `u64` is rejected fail-closed (see [`extract_uint256_as_u64`]).
 //!
@@ -418,7 +418,7 @@ fn map_alloy_receipt(r: alloy::rpc::types::TransactionReceipt) -> Result<Receipt
 #[cfg(feature = "helios")]
 const HELIOS_BOOT_SYNC_TIMEOUT_SECS: u64 = 300;
 
-/// Trustless [`EvmReceiptProvider`] (#77): the a16z Helios light client, run
+/// Trustless [`EvmReceiptProvider`]: the a16z Helios light client, run
 /// in-process. Helios treats the execution/consensus RPCs as untrusted and
 /// verifies them against a pinned weak-subjectivity checkpoint, so unlike
 /// [`AlloyEvmClient`] a malicious host cannot forge the result.
@@ -457,7 +457,7 @@ impl HeliosEvmClient {
                 )))
             }
         };
-        // #77 predicate 1: HELIOS_NETWORK must agree with the pinned
+        // Predicate 1: HELIOS_NETWORK must agree with the pinned
         // EVM_CHAIN_ID, or FundsIn would be verified on the wrong chain.
         // Skipped when EVM_CHAIN_ID is unset (0), i.e. a dev deploy that pins
         // no identity.
@@ -518,7 +518,7 @@ impl HeliosEvmClient {
             network = %cfg.network,
             execution_rpc = %cfg.execution_rpc,
             consensus_rpc = %cfg.consensus_rpc,
-            "Helios light client synced (trustless FundsIn verification, #77)"
+            "Helios light client synced (trustless FundsIn verification)"
         );
         Ok(Self { client, runtime })
     }
@@ -1047,7 +1047,7 @@ mod tests {
         assert!(e.contains("reorg"), "got: {e}");
     }
 
-    // ---- #51 regression: listener booleans can no longer authorize ----
+    // ---- regression: listener booleans can no longer authorize ----
 
     #[test]
     fn issue_51_no_receipt_means_no_authorization() {

@@ -4,8 +4,7 @@
 //! [`ValidatedConsignment`]; SPV builds additionally run the BtcRelay agreement
 //! check ([`verify_btc_relay_agreement`]).
 //!
-//! Audit refs: M-02/#93, #63/#97, #57/#122, 4th I-03/#95. The helpers operate
-//! on `EvmDestination.call_data` bytes.
+//! The helpers operate on `EvmDestination.call_data` bytes.
 
 use crate::error::{EnclaveError, Result};
 use crate::networks::evm::validation::FundsOutParams;
@@ -14,9 +13,9 @@ use crate::networks::rgb::validation::ValidatedConsignment;
 
 // Calldata is decoded via `sol!` ([`decode_funds_out_params`]), not at
 // hard-coded byte offsets: the `FundsOutParams` tuple shifts every field by one
-// head pointer word, so the old constants would be 32 bytes off (#168).
+// head pointer word, so the old constants would be 32 bytes off.
 
-/// Defense-in-depth for the RGB->EVM `fundsOut` direction (audit 4th I-03 / #95):
+/// Defense-in-depth for the RGB->EVM `fundsOut` direction:
 /// every consignment witness tx must be mined. rgbstd's per-witness ordinal map
 /// (otherwise discarded) is surfaced as `non_mined_witness_txids`; reject here
 /// so confirmation does not rest on the SPV header chain alone.
@@ -45,7 +44,7 @@ pub fn assert_witnesses_confirmed(validated: &ValidatedConsignment) -> Result<()
 ///   2. The transition's `total_output_amount` must cover the EVM-side release
 ///      `amount`.
 ///
-/// Takes the decoded intent (I-12 / #165), which also replaces the old selector
+/// Takes the decoded intent, which also replaces the old selector
 /// guard: `FundsOutParams` only exists after a successful `fundsOut` decode.
 pub fn validate_funds_out_transfer(
     params: &FundsOutParams,
@@ -81,8 +80,8 @@ pub fn validate_funds_out_transfer(
     Ok(())
 }
 
-// `apply_op_id_binding` / `op_id_to_calldata_id` were removed (audit TEE-SE-02
-// / M-02 / #93): they rewrote `burnId` and `settlementData` in the signed
+// `apply_op_id_binding` / `op_id_to_calldata_id` were removed: they
+// rewrote `burnId` and `settlementData` in the signed
 // calldata, and both fields are now keyed on bridge-derived ids no RGB OpId
 // yields. They are backend-supplied and enforced on-chain (`InvalidBurnId`,
 // `FundsInNotFound` / `AmountMismatch`). An enclave-side check would need the
@@ -96,7 +95,7 @@ struct ProofBlock {
     commitment: [u8; 32],
 }
 
-/// BtcRelay-agreement cross-check (bridge spec section 13, #57/#122). Binds the
+/// BtcRelay-agreement cross-check (bridge spec section 13). Binds the
 /// calldata's claimed finality proof to the headers the enclave holds, so a
 /// listener can't split the contract's on-chain BtcRelay check away from the
 /// enclave's own SPV evidence. A no-op for non-`fundsOut` selectors and inert
@@ -302,7 +301,7 @@ mod tests {
         assert!(decode_funds_out_params(&legacy_flat_calldata(recipient)).is_err());
     }
 
-    // Pools fundsOut tests - `validate_funds_out_transfer` (+ the #95 witness
+    // Pools fundsOut tests - `validate_funds_out_transfer` (+ the witness
     // recency guard `assert_witnesses_confirmed`).
 
     mod transfer {
@@ -348,7 +347,7 @@ mod tests {
         #[test]
         fn witnesses_confirmed_passes_when_all_mined() {
             // No non-mined witnesses surfaced -> the recency guard is a no-op
-            // (audit 4th I-03 / #95).
+            //.
             let validated = validated_with_last(transfer_transition(1000));
             assert!(super::super::assert_witnesses_confirmed(&validated).is_ok());
         }
@@ -428,7 +427,7 @@ mod tests {
         }
     }
 
-    // BtcRelay-agreement cross-check (#57 / #122) - `verify_btc_relay_agreement`.
+    // BtcRelay-agreement cross-check - `verify_btc_relay_agreement`.
     // These exercise `proof` decoding and header comparison directly against a
     // synthetic regtest header chain.
 

@@ -1,4 +1,4 @@
-//! Connection-level resource limits for the request socket (audit M-03 / #83).
+//! Connection-level resource limits for the request socket.
 //!
 //! The enclave reads a single length-prefixed request, replies, and closes
 //! (see `framing` + `server::handle_connection`). Without deadlines a peer that

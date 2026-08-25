@@ -96,7 +96,7 @@ pub fn build_evm_domain(req: &EvmDestination) -> Result<Eip712Domain> {
 /// Decoded rather than hashed whole, so the enclave commits to the individual
 /// values the transactor will submit.
 ///
-/// Fallible, not `assert!` (audit final I-02): with `panic = "abort"` a short
+/// Fallible, not `assert!`: with `panic = "abort"` a short
 /// calldata would take the enclave down, and dev-mode skips the validation layer.
 pub fn funds_out_digest(
     domain: &Eip712Domain,
@@ -367,7 +367,7 @@ mod tests {
     }
 
     /// Short and non-`fundsOut` calldata are rejected at the decode, which now
-    /// happens before signing rather than inside it (audit final I-02).
+    /// happens before signing rather than inside it.
     #[test]
     fn test_undecodable_call_data_rejected() {
         assert!(decode_funds_out_params(&[0xAA, 0xBB]).is_err());

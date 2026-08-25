@@ -67,7 +67,7 @@ const DEFAULT_OP_DEDUP_MAX: usize = 100_000;
 /// the new one.
 ///
 /// Rejecting when full instead would let a parent flood `max` distinct nonces
-/// and block every legitimate handshake (audit TEE-CL-04). The trade-off is a
+/// and block every legitimate handshake. The trade-off is a
 /// bounded replay window: replaying an evicted nonce only re-seals the seed to
 /// the encryption pubkey already bound inside that attestation.
 pub struct NonceReplayGuard {
@@ -134,7 +134,7 @@ impl NonceReplayGuard {
 
         // 3. Hard memory ceiling. If a burst filled the set inside one TTL
         //    window, drop the oldest entries to admit the new nonce rather
-        //    than wedging cloning (TEE-CL-04).
+        // than wedging cloning.
         while g.seen.len() >= self.max {
             match g.order.pop_front() {
                 Some((_, old)) => {
@@ -156,7 +156,7 @@ impl NonceReplayGuard {
     ///
     /// Reserve before the fallible work, commit after it succeeds. Any failure
     /// in between drops the reservation and releases the key, so a transient
-    /// error does not self-block a legitimate retry (audit M-02). Reserving
+    /// error does not self-block a legitimate retry. Reserving
     /// still rejects a concurrent duplicate up front.
     pub fn reserve(&self, nonce: [u8; 32]) -> Result<ReplayReservation<'_>> {
         self.check_and_record(nonce)?;
@@ -254,7 +254,7 @@ pub struct EnclaveState {
     /// hash of `(chain_id, bridge_contract, evm_tx_hash, operation_idx,
     /// rgb_asset_id)` (see `networks::rgb::psbt_validation::psbt_operation_key`).
     /// Rejects a same-operation resubmission inside the TTL window before
-    /// signing (audit W-02 / #84).
+    /// signing.
     ///
     /// Defense in depth, not a sufficient double-spend control. Nitro has no
     /// persistent storage, so the set is volatile (wiped on restart),
@@ -263,7 +263,7 @@ pub struct EnclaveState {
     /// varies any keyed field also bypasses it.
     ///
     /// It stops honest listener retries and naive same-tuple replay; the
-    /// durable guard is an on-chain ticket (#84 / #93).
+    /// durable guard is an on-chain ticket.
     pub op_replay_guard: NonceReplayGuard,
 }
 
@@ -619,8 +619,8 @@ mod tests {
         assert!(matches!(err, EnclaveError::AlreadyInitialized));
     }
 
-    // NonceReplayGuard - time-bounded replay guard (audit TEE-CL-04, coverage
-    // map TC-3). Helpers use `check_and_record_at` so eviction is exercised
+    // NonceReplayGuard - time-bounded replay guard (coverage
+    // map). Helpers use `check_and_record_at` so eviction is exercised
     // without sleeping.
 
     /// Distinct 32-byte nonce keyed by a small integer, for readable tests.
@@ -642,7 +642,7 @@ mod tests {
         assert!(matches!(err, EnclaveError::NonceReplay));
     }
 
-    // ReplayReservation - reserve/commit/rollback (audit M-02).
+    // ReplayReservation - reserve/commit/rollback.
 
     #[test]
     fn reservation_rolls_back_when_dropped_uncommitted() {
@@ -686,7 +686,7 @@ mod tests {
         held.commit();
     }
 
-    /// TC-3 (audit coverage map): a flood of distinct nonces beyond `max` must
+    /// A flood of distinct nonces beyond `max` must
     /// not wedge the guard. Regression for the reject-when-full DoS.
     #[test]
     fn replay_guard_never_wedges_under_flood() {

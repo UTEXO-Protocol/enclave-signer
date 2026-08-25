@@ -66,12 +66,12 @@ ENV CARGO_INCREMENTAL=0 \
 # (rgb-*) could re-resolve to a newer commit on a later rebuild and change the
 # binary (and thus PCR0).
 #
-# `evm-rpc` adds in-enclave FundsIn event verification (#60), pulling the alloy
+# `evm-rpc` adds in-enclave FundsIn event verification, pulling the alloy
 # + tokio subtree. Requires a second host vsock-proxy for the EVM RPC
 # (EVM_RPC_VSOCK_PORT, default 8002).
 # `ccd` adds Concordium governance signing (SignCcd + CcdSource routes). The
 # umbrella `rgb` feature pulls in `spv`/`rgb-validation`.
-# `helios` makes FundsIn verification trustless (#77) and is required: the
+# `helios` makes FundsIn verification trustless and is required: the
 # production policy refuses to boot on the host-relayed RawRpc source. Operator
 # must set HELIOS_EXECUTION_RPC / HELIOS_CONSENSUS_RPC and run the exec+consensus
 # vsock-proxies (default ports 8003 / 8004).
@@ -123,7 +123,7 @@ ENV EVM_CHAIN_ID=42161 \
     BITCOIN_NETWORK=bitcoin \
     ELECTRUM_URL=ssl://electrs-mainnet.utexo.com:50002
 
-# In-enclave EVM `FundsIn` verification config (evm-rpc, #60), baked so PCR0
+# In-enclave EVM `FundsIn` verification config (evm-rpc), baked so PCR0
 # commits to the confirmation policy and the loopback egress. EVM_RPC_URL MUST
 # be loopback: the enclave reaches the EVM RPC only through the vsock forwarder
 # (host runs `vsock-proxy <EVM_RPC_VSOCK_PORT=8002> <arbitrum-rpc-host> <port>`,

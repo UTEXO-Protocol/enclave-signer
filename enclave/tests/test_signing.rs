@@ -26,8 +26,8 @@ sol! {
 }
 
 /// Pinned `BridgeConfig` matching the defaults of `valid_sign_evm_request`.
-/// Injected by tests that must pass the production fail-closed gate (audit
-/// TEE-SE-12), since env is unconfigured in CI.
+/// Injected by tests that must pass the production fail-closed gate,
+/// since env is unconfigured in CI.
 #[allow(dead_code)]
 fn pinned_bridge_config() -> BridgeConfig {
     BridgeConfig {
@@ -582,7 +582,7 @@ fn test_sign_evm_rejects_consignment_valid_with_empty_bytes() {
 #[test]
 fn test_sign_evm_rejects_funds_out_without_validator() {
     // Pinned config so the request clears the production fail-closed gate
-    // (TEE-SE-12) and the pinned cross-check, leaving the handler-level
+    // and the pinned cross-check, leaving the handler-level
     // "validator didn't run" check as the failing predicate under test.
     let port = common::start_test_server_with_config(|_| {}, pinned_bridge_config());
 
@@ -674,7 +674,7 @@ fn test_sign_evm_accepts_ccd_source_funds_out() {
     }
 }
 
-/// Fail-closed regression (audit TEE-SE-12): a build that can validate
+/// Fail-closed regression: a build that can validate
 /// consignments must refuse to sign with no operator config pinned, rather than
 /// degrading to the listener-trusting model. The integration harness builds the
 /// library without `cfg(test)`, so the production guard is active. The
@@ -719,7 +719,7 @@ fn test_sign_evm_rejects_unconfigured_bridge_config() {
 // consignment amount, EVM destination validation decodes `fundsOut.amount` and
 // adds `calldata_commission`, then `validate_route_proofs` compares the two.
 
-/// M-01 / #61: a build without `spv` must refuse every `fundsOut`, even with no
+/// A build without `spv` must refuse every `fundsOut`, even with no
 /// merkle_proofs. Without SPV the enclave can only anchor witness txs through
 /// the host-controlled Esplora resolver, so a fabricated anchor would be signed
 /// against. The earlier guard fired only on non-empty `merkle_proofs[]`.
@@ -742,7 +742,7 @@ fn test_no_spv_build_refuses_funds_out_even_without_merkle_proofs() {
     common::send_request(port, &init_req);
 
     // A fundsOut request carrying no merkle_proofs - exactly the shape that
-    // previously bypassed the no-validation guard (M-01 / #61): the refusal
+    // previously bypassed the no-validation guard: the refusal
     // must fire even when the request supplies no SPV proofs at all.
     let req = valid_sign_evm_request(1000, 50);
     match &req.source_network {
@@ -775,7 +775,7 @@ fn test_no_spv_build_refuses_funds_out_even_without_merkle_proofs() {
 
 // PSBT signing tests
 
-// A successful bridge (EVM -> RGB) PSBT roundtrip needs the M-06 FundsIn
+// A successful bridge (EVM -> RGB) PSBT roundtrip needs the FundsIn
 // cross-check bypassed. Without `rgb-validation` only `dev-mode` can sign one;
 // `evm-rpc` implies `rgb-validation`, so it cannot combine with
 // `not(rgb-validation)`. dev-mode is compile-guarded out of release builds.
@@ -848,7 +848,7 @@ fn test_sign_psbt_before_init() {
 
 // PSBT enriched cross-check tests
 
-/// Audit M-06 / #51: the listener's `evm_event_valid` / `evm_event_finalized`
+/// The listener's `evm_event_valid` / `evm_event_finalized`
 /// booleans neither authorize nor block signing. With both `false` the request
 /// is never rejected with the old boolean-driven messages; whatever else
 /// happens to it, the booleans are not what decide.
@@ -891,7 +891,7 @@ fn test_sign_psbt_ignores_listener_evm_booleans() {
     }
 }
 
-/// Audit M-06 / #60 & #51: a build without the `evm-rpc` FundsIn verifier must
+/// A build without the `evm-rpc` FundsIn verifier must
 /// refuse a bridge-mode PSBT rather than sign it on the removed listener
 /// booleans. Exercises the minimal build, where the `evm-rpc` fail-closed guard
 /// is the first bridge-mode gate.
@@ -984,11 +984,11 @@ fn test_sign_psbt_rejects_amount_mismatch() {
     }
 }
 
-// M-01/#69: bridge SignPsbt no longer has a vanilla bypass
+// Bridge SignPsbt no longer has a vanilla bypass
 
 // In a production (rgb-validation) build, a SignPsbt with no consignment is
 // rejected fail-closed - the empty-`evm_tx_hash` "vanilla mode" that used to
-// skip every bridge predicate is gone. This is the core M-01 regression gate.
+// skip every bridge predicate is gone. This is the core regression gate.
 #[cfg(feature = "rgb-validation")]
 #[test]
 #[cfg(not(feature = "dev-mode"))]
@@ -1030,7 +1030,7 @@ fn test_sign_psbt_rejects_missing_evm_source_hash() {
     }
 }
 
-// TP-1 / M-01 (#69, PR #102): a length-valid but all-zero evm_tx_hash must not
+// A length-valid but all-zero evm_tx_hash must not
 // read as a "vanilla mode" signal. SignPsbt runs the bridge cross-checks
 // unconditionally and fails closed when no consignment binds the PSBT.
 // Companion to `test_sign_psbt_rejects_missing_evm_source_hash`, which covers
@@ -1112,7 +1112,7 @@ fn test_sign_btc_before_init() {
     );
 }
 
-// The structural M-01 guard for the plain-BTC path (refusing to co-sign a
+// The structural guard for the plain-BTC path (refusing to co-sign a
 // Colored input under SignBtc's vanilla-only scope) is covered by
 // `signing::taproot::tests::scoped_vanilla_refuses_a_colored_input`. Paying
 // into the colored account is legitimate: see
@@ -1387,7 +1387,7 @@ fn test_sign_evm_rejects_consignment_without_hash() {
     }
 }
 
-// Raw message signing (removed - audit I-01 / #124)
+// Raw message signing (removed)
 
 /// `SignRawMessage` used to sign arbitrary caller-supplied bytes with the main
 /// bridge key under an EIP-191 envelope, gated by no feature and no policy. It
@@ -1454,7 +1454,7 @@ fn test_proxy_federation_returns_not_ready() {
     }
 }
 
-// EVM gas-tx (SignRawDigest) shape-allowlist tests (audit TEE-XC-09)
+// EVM gas-tx (SignRawDigest) shape-allowlist tests
 //
 // These run through the real handler, so the fail-closed gate in
 // `networks::evm::gas_tx` is active. They cover the accept path and the two
@@ -1539,7 +1539,7 @@ fn eip1559_unsigned(chain_id: u64, to: &[u8; 20], value: u64) -> Vec<u8> {
     out
 }
 
-/// `BridgeConfig` with the full gas-tx rule pinned (audit C-02): chain_id 1,
+/// `BridgeConfig` with the full gas-tx rule pinned: chain_id 1,
 /// destination 0xAA..., gas <= 30_000, fee <= 1_000 wei, selector 0xdeadbeef.
 #[cfg(not(feature = "dev-mode"))]
 fn gas_pinned_config() -> BridgeConfig {
@@ -1555,7 +1555,7 @@ fn gas_pinned_config() -> BridgeConfig {
     }
 }
 
-/// Unsigned EIP-1559 preimage with explicit gas/fee/data, for the C-02 cap and
+/// Unsigned EIP-1559 preimage with explicit gas/fee/data, for the cap and
 /// calldata-allowlist integration tests.
 #[cfg(not(feature = "dev-mode"))]
 fn eip1559_full(to: &[u8; 20], max_fee: u64, gas: u64, data: &[u8]) -> Vec<u8> {
@@ -1649,7 +1649,7 @@ fn test_gas_tx_rejects_drain_to_attacker() {
     let port = common::start_test_server_with_config(|_| {}, gas_pinned_config());
     init(port);
 
-    // Well-formed tx, but to an attacker address - the drain #68 closes.
+    // Well-formed tx, but to an attacker address - the drain this rule closes.
     let tx = eip1559_unsigned(1, &[0xEE; 20], 0);
     let resp = common::send_request(
         port,
@@ -1755,7 +1755,7 @@ fn test_gas_tx_rejects_disallowed_selector() {
 #[cfg(not(feature = "dev-mode"))]
 fn test_gas_tx_fails_closed_when_caps_unpinned() {
     // A config that pins the destination but NOT the caps must refuse to sign:
-    // an uncapped gas tx is never produced (audit C-02 fail-closed).
+    // an uncapped gas tx is never produced (fail-closed).
     let mut cfg = gas_pinned_config();
     cfg.gas_tx_max_gas_limit = 0;
     cfg.gas_tx_max_fee_per_gas = 0;

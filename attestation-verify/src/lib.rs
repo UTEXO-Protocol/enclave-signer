@@ -641,7 +641,7 @@ IwLz3/Y=
             buf
         }
 
-        // --- COSE signature form (I-05) ------------------------------------
+        // --- COSE signature form ------------------------------------
 
         #[test]
         fn cose_sig_accepts_96_byte_raw() {
@@ -681,7 +681,7 @@ IwLz3/Y=
             ));
         }
 
-        // --- COSE protected-header algorithm (I-05) ------------------------
+        // --- COSE protected-header algorithm ------------------------
 
         #[test]
         fn cose_alg_es384_accepted() {
@@ -705,7 +705,7 @@ IwLz3/Y=
             ));
         }
 
-        // --- X.509 CA constraints (W-10 / #70) -----------------------------
+        // --- X.509 CA constraints -----------------------------
 
         #[test]
         fn ca_valid_issuer_passes_and_decrements_budget() {
@@ -733,7 +733,7 @@ IwLz3/Y=
 
         #[test]
         fn ca_non_ca_issuer_rejected() {
-            // BasicConstraints present but cA = FALSE (the W-10 case): a non-CA
+            // BasicConstraints present but cA = FALSE: a non-CA
             // cert must not be accepted as an issuer.
             let cert = cert_with_exts(vec![ext(&basic(false, None), false)]);
             assert!(matches!(

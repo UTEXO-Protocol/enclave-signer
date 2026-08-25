@@ -3,7 +3,7 @@
 //! Authorization gate for the plain-BTC signing path: bridge ops with no RGB
 //! consignment and no EVM correlation (`create_utxo`, plain BTC withdrawals).
 //! A request type distinct from `SignPsbt` so plain-BTC ops cannot be reached
-//! by omitting the bridge fields on a bridge request (M-01 / #69).
+//! by omitting the bridge fields on a bridge request.
 //!
 //! Funds-safety is layered:
 //!
@@ -13,8 +13,8 @@
 //!   * Output self-ownership ([`crate::networks::rgb::btc_ownership`]): every
 //!     output must pay back to a script this enclave co-controls, proven from
 //!     the PSBT and our own derivation. Either BIP-86 account counts, since
-//!     `create_utxo` funds Colored UTXOs from vanilla inputs; M-01 is about
-//!     which inputs we spend. Replaces the `BTC_ALLOWED_SCRIPTS` allowlist,
+//!     `create_utxo` funds Colored UTXOs from vanilla inputs; the rule is
+//!     about which inputs we spend. Replaces the `BTC_ALLOWED_SCRIPTS` allowlist,
 //!     which was unbootstrappable in production.
 //!   * Amount cap (`BTC_MAX_TOTAL_SATS`) on total input value spent, not
 //!     output value, so it also bounds value routed to miner fees.

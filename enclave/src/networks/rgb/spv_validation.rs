@@ -53,8 +53,8 @@ pub const SPV_MAX_TIP_FUTURE_SECS: u64 = 2 * 60 * 60;
 /// Maximum sibling hashes in a single Merkle path. Depth d authenticates up to
 /// 2^d transactions, and a 4 MB block holds well under 2^17, so 32 never
 /// false-rejects a real proof while bounding the hashing a hostile listener can
-/// demand. Checked in `validate_spv_proofs` before any hashing runs (audit
-/// I-06 / #90). Compile-time and PCR-attested, not host-tunable.
+/// demand. Checked in `validate_spv_proofs` before any hashing runs.
+/// Compile-time and PCR-attested, not host-tunable.
 pub const MAX_MERKLE_PATH_DEPTH: usize = 32;
 
 /// Validate the RGB source's Bitcoin anchoring before signing.
@@ -123,8 +123,7 @@ pub fn validate_spv_proofs(
             ))
         })?;
         // Bound per-proof hashing before it starts: a path deeper than any
-        // real block is a bug or a work-amplification attempt (audit I-06 /
-        // #90).
+        // real block is a bug or a work-amplification attempt.
         if proof.merkle_path.len() > MAX_MERKLE_PATH_DEPTH {
             return Err(EnclaveError::Spv(format!(
                 "merkle_proofs[{i}].merkle_path too deep: {} siblings (max {})",
@@ -363,7 +362,7 @@ mod tests {
 
     /// Builds a regtest synthetic chain rooted at a zero checkpoint. We use
     /// regtest so PoW is skipped - these tests focus on the SPV crosscheck
-    /// logic, not header validation (PR 2 covers that).
+    /// logic, not header validation (2 covers that).
     fn regtest_chain_with(headers: Vec<Header>) -> HeaderChain {
         let mut chain = HeaderChain::new(
             Network::Regtest,
@@ -507,7 +506,7 @@ mod tests {
         validate_spv_proofs(&chain, &[txid_display], &[proof], SPV_MIN_CONFIRMATIONS).unwrap();
     }
 
-    /// Regression for #130: an anchor far below `tip - HEADER_WINDOW` (~2122)
+    /// Regression: an anchor far below `tip - HEADER_WINDOW` (~2122)
     /// still verifies. The old sliding window pruned the anchor's header, so
     /// SPV rejected every RGB consignment whose oldest witness was older than
     /// ~a day on 30s-block signet ("no header at height H (chain tip = T)").
@@ -750,7 +749,7 @@ mod tests {
     #[test]
     fn rejects_overdeep_merkle_path() {
         // A path deeper than any real block could produce is rejected before
-        // any Merkle hashing runs (audit I-06 / #90). Siblings are well-formed
+        // any Merkle hashing runs. Siblings are well-formed
         // 32-byte hashes so the only failing predicate is the depth cap.
         let target = synth_headers(1).into_iter().next().unwrap();
         let chain = chain_burying(target, 5);

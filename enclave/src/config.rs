@@ -45,7 +45,7 @@ pub struct BridgeConfig {
     pub rgb_asset_id: String,
     /// Operator-pinned allowed destination for **gas-key** transactions
     /// (`GAS_TX_ALLOWED_TO`). When set, `SignRawDigest` only signs a gas tx
-    /// whose `to` equals this address - audit TEE-XC-09 / C-02. `None` =
+    /// whose `to` equals this address. `None` =
     /// unset, which fails gas-tx signing closed in release builds.
     ///
     /// A gas tx must carry `value == 0`, except for the payable
@@ -60,13 +60,13 @@ pub struct BridgeConfig {
     /// burn.
     ///
     /// The whole gas-tx rule is folded into the attestation `user_data`
-    /// commitment via [`crate::policy::SecurityPolicy`] (audit C-02).
+    /// commitment via [`crate::policy::SecurityPolicy`].
     pub gas_tx_allowed_to: Option<[u8; 20]>,
     /// Operator-pinned upper bound on a gas tx's `gasLimit` (`GAS_TX_MAX_GAS_LIMIT`).
     /// `0` = unset, which - like [`gas_tx_allowed_to`](Self::gas_tx_allowed_to) -
     /// fails gas-tx signing closed. With [`gas_tx_max_fee_per_gas`](Self::gas_tx_max_fee_per_gas)
     /// it caps the most ETH a signed gas tx can burn as fees (`gasLimit *
-    /// maxFeePerGas`), bounding the fee-griefing residual (audit C-02).
+    /// maxFeePerGas`), bounding the fee-griefing residual.
     pub gas_tx_max_gas_limit: u64,
     /// Operator-pinned upper bound (wei) on a gas tx's per-gas fee
     /// (`GAS_TX_MAX_FEE_PER_GAS`): `maxFeePerGas` and `maxPriorityFeePerGas` for
@@ -78,7 +78,7 @@ pub struct BridgeConfig {
     /// calldata may invoke (`GAS_TX_ALLOWED_SELECTORS`, comma-separated hex).
     /// Every signed gas tx must lead with one; empty calldata is refused, since
     /// it would still invoke the destination's fallback/receive. Empty = unset,
-    /// which refuses all gas-tx signing (audit C-02).
+    /// which refuses all gas-tx signing.
     pub gas_tx_allowed_selectors: Vec<[u8; 4]>,
     /// Operator-pinned ceiling (wei) on the native value a single gas tx may
     /// carry (`GAS_TX_MAX_VALUE_WEI`). `None` = unset, which refuses any
@@ -97,7 +97,7 @@ pub struct BridgeConfig {
     ///
     /// Whether the path is enabled at all
     /// ([`allows_vanilla_btc`](Self::allows_vanilla_btc)) is attested as
-    /// `allow_vanilla_psbt` in the security policy (C-01).
+    /// `allow_vanilla_psbt` in the security policy.
     ///
     /// The old `BTC_ALLOWED_SCRIPTS` output allowlist was removed: the scripts
     /// to pin derive from a seed that only exists after boot, and enclave env is
@@ -163,7 +163,7 @@ impl BridgeConfig {
             .ok()
             .and_then(|s| parse_eth_address(&s).ok());
 
-        // Gas-tx fee/gas ceilings (audit C-02). Unset (`0`) fails the gas path
+        // Gas-tx fee/gas ceilings. Unset (`0`) fails the gas path
         // closed, so a malformed value degrading to 0 is safe.
         let gas_tx_max_gas_limit = std::env::var("GAS_TX_MAX_GAS_LIMIT")
             .ok()
@@ -221,7 +221,7 @@ impl BridgeConfig {
             .and_then(|s| parse_eth_address(&s).ok())
             .unwrap_or(bridge_contract);
 
-        // Migration guard (audit C-02): a deployment pinning only
+        // Migration guard: a deployment pinning only
         // GAS_TX_ALLOWED_TO refuses every gas tx until both caps are set.
         // Surfaced at boot rather than as a per-request rejection.
         if gas_tx_allowed_to.is_some() && (gas_tx_max_gas_limit == 0 || gas_tx_max_fee_per_gas == 0)
@@ -229,7 +229,7 @@ impl BridgeConfig {
             tracing::warn!(
                 "GAS_TX_ALLOWED_TO is set but GAS_TX_MAX_GAS_LIMIT and/or GAS_TX_MAX_FEE_PER_GAS \
                  is unset - gas-tx (SignRawDigest) signing will FAIL CLOSED until both caps are \
-                 pinned (audit C-02)"
+                 pinned"
             );
         }
 
@@ -265,8 +265,8 @@ impl BridgeConfig {
         }
     }
 
-    /// True only when all three fields are non-zero / non-empty (audit 4th
-    /// M-03 / #94). Only a fully-pinned config authorises bridge signing.
+    /// True only when all three fields are non-zero / non-empty (4th
+    ///). Only a fully-pinned config authorises bridge signing.
     ///
     /// An AND, not an OR: under an OR a zero `chain_id` made the enclave
     /// permanently un-signable while still claiming configured, and a zero
@@ -282,7 +282,7 @@ impl BridgeConfig {
     /// True when some but not all pin fields are set: a botched production
     /// config, distinct from a fully-empty one that selects the dev path.
     /// Callers fail closed rather than falling back to listener-trusting mode
-    /// (audit 4th M-03 / #94).
+    ///.
     pub fn is_partially_configured(&self) -> bool {
         let any = self.chain_id != 0
             || self.bridge_contract != [0u8; 20]
@@ -318,7 +318,7 @@ fn parse_eth_address(s: &str) -> Result<[u8; 20]> {
     })
 }
 
-/// EVM JSON-RPC config for in-enclave `FundsIn` event verification (#60),
+/// EVM JSON-RPC config for in-enclave `FundsIn` event verification,
 /// loaded at boot when the `evm-rpc` feature is built.
 ///
 /// Operational plumbing, not part of the committed identity: like
@@ -329,7 +329,7 @@ fn parse_eth_address(s: &str) -> Result<[u8; 20]> {
 /// Trust boundary: `rpc_url` must be loopback. The enclave reaches the EVM RPC
 /// only through the vsock forwarder ([`crate::vsock_forwarder`]), so responses
 /// are relayed by the untrusted host. `verify_funds_in_event` treats them as
-/// evidence and fails closed; full trustlessness needs Helios (#77).
+/// evidence and fails closed; full trustlessness needs Helios.
 #[cfg(feature = "evm-rpc")]
 #[derive(Debug, Clone)]
 pub struct EvmRpcConfig {
@@ -416,11 +416,11 @@ fn is_loopback_url(url: &str) -> bool {
 }
 
 /// Helios light-client config for TRUSTLESS in-enclave EVM event verification
-/// (#77), loaded at boot when the `helios` feature is built.
+///, loaded at boot when the `helios` feature is built.
 ///
 /// Selection is runtime: [`HeliosConfig::from_env`] returns `Some` only when
 /// `HELIOS_EXECUTION_RPC` is set, which selects the Helios-verified provider
-/// over the raw alloy path (#60). Like [`EvmRpcConfig`] the URLs must be
+/// over the raw alloy path. Like [`EvmRpcConfig`] the URLs must be
 /// loopback; Helios treats those upstreams as untrusted and verifies them
 /// against the pinned checkpoint.
 #[cfg(feature = "helios")]
@@ -548,7 +548,7 @@ mod tests {
     #[test]
     fn partial_config_is_not_configured() {
         // chain_id set, contract still zero, asset set: a botched pin. The
-        // OR-logic bug (#94) used to report this "configured" and then accept
+        // OR-logic bug used to report this "configured" and then accept
         // an EVM request for the zero address.
         let c = BridgeConfig {
             chain_id: 1,
