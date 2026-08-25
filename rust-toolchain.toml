@@ -6,25 +6,5 @@
 # EXACT PATCH VERSION, not "1.96": the minor-only form floats onto the next
 # patch release the moment it ships, which would silently change the compiler
 # under a build that is supposed to be reproducible.
-#
-# 1.96.1 is what the digest-pinned builder in build/Dockerfile.enclave ships
-# (rust:1.96-slim-bullseye@sha256:c5935962...). Keep the two in lockstep: bump
-# this file, the three EIF Dockerfile digests, and the `toolchain:` inputs in
-# .github/workflows/{ci,build-eif}.yml together, and verify with
-#   docker run --rm --entrypoint rustc <pinned-image> --version
-#
-# NO `components` key on purpose. The rust:*-slim images carry only cargo,
-# rustc and rust-std — asking for rustfmt/clippy here makes rustup re-sync the
-# channel from static.rust-lang.org inside EVERY docker build, which needs
-# network in a build that is otherwise offline-clean and is pure waste. CI
-# installs those two itself (dtolnay/rust-toolchain `components:`), which is
-# where they are actually used.
-#
-# NO `targets` key either, for the same reason: the musl target is only needed
-# for the parent host binaries in build-eif.yml, and that workflow adds it.
-#
-# This file is found by walking up from the working directory, so it covers the
-# nested `parent/` workspace too (`cargo build --manifest-path parent/Cargo.toml`
-# from the repo root, and `cd /build/parent && cargo build` in Dockerfile.parent).
 [toolchain]
 channel = "1.96.1"
