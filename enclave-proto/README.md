@@ -9,6 +9,24 @@ This is a *slice*, not a copy: only the `enclave` protobuf package is here.
 The bridge / node / orchestrator / parent / signer packages are not vendored —
 `parent/` still consumes the full crate from upstream, over SSH.
 
+## `enclave.proto` is NOT compiled
+
+There is no `build.rs` and no `prost-build` anywhere in this repo. `src/lib.rs`
+is `include!("enclave.rs")`, and **`enclave.rs` is committed pre-generated**.
+
+That is deliberate: generating at build time would put `protoc` in the enclave
+builder image and make PCR0 depend on which `protoc` / `prost-build` version
+built it, so the same commit would no longer reproduce the same measurement.
+
+The consequence is that **`proto/enclave.proto` is inert — editing it changes
+nothing.** The build still succeeds and the Rust types are unchanged. It is kept
+here as the human-readable source of truth for the schema, not as a build input.
+
+To change the wire protocol: change it upstream, regenerate there, then re-sync
+BOTH files here and update the Provenance tables below. `tests/vendored_provenance.rs`
+fails the build if the files and the tables disagree, or if the commit recorded
+below drifts from the `rev` that `parent/Cargo.toml` pins.
+
 ## Provenance
 
 | | |

@@ -81,5 +81,48 @@ COPY build/entrypoint.sh /app/entrypoint.sh
 
 RUN chmod +x /app/utexo-bridge-enclave /app/entrypoint.sh
 
+# NOTE: the donor cloning secret is intentionally NOT baked here. It is
+# delivered at runtime via the `InitializeKey` message (CLI: `init
+# --cloning-secret <secret>`), so it never lands in the EIF / image layers and
+# the PCRs stay reproducible. See enclave/src/server.rs (handle_initialize).
+
+# Pinned bridge/indexer config — identical to Dockerfile.enclave; keep the two
+# in lockstep. This build turns on `rgb` -> `spv` -> `rgb-validation`, so it is a
+# release bridge-signing build and `SecurityPolicy::assert_valid_for_build`
+# REFUSES TO BOOT without these pins (audit C-01, enclave/src/policy.rs). Without
+# them the published RGB EIF panics at startup with "resolved to a non-production
+# security policy (Unconfigured)". Public identifiers, baked so PCR0 commits to
+# them and anyone can reproduce PCR0 from this repo. Stage runs on Bitcoin
+# MAINNET + Arbitrum One (chain_id 42161). Electrum is pinned to 127.0.0.1 and
+# reached over the vsock forwarder (host runs
+# `vsock-proxy 8001 electrs-mainnet.utexo.com 50002`); TLS terminates in-enclave.
+# TWO-CONTRACT deployment: the EVM funds-out EIP-712 verifyingContract is the
+# MultisigProxy (EVM_PROXY_CONTRACT_ADDRESS), which DIFFERS from the bridge
+# *entry* contract that emits FundsIn (FUNDS_IN_CONTRACT, set below).
+ENV EVM_CHAIN_ID=42161 \
+    EVM_PROXY_CONTRACT_ADDRESS=0xC985c12bbCECe96A13A72A62FD75d8aB9381ef5A \
+    RGB_ASSET_ID=rgb:lJFja2kw-h_azlEd-7CNPxwf-UsvIDhH-UD0Y1f9-8f26jLk \
+    BITCOIN_NETWORK=bitcoin \
+    ELECTRUM_URL=ssl://electrs-mainnet.utexo.com:50002
+
+# In-enclave EVM `FundsIn` verification config (evm-rpc, #60) and the operational
+# signing-policy pins for the plain-BTC (`SignBtc`) and gas-tx (`SignRawDigest`)
+# paths — identical to Dockerfile.enclave. EVM_RPC_URL MUST be loopback: the
+# enclave reaches the EVM RPC only through the vsock forwarder (host runs
+# `vsock-proxy <EVM_RPC_VSOCK_PORT=8002> <arbitrum-rpc-host> <port>`). A
+# non-loopback value is rejected back to the default at boot (config.rs
+# EvmRpcConfig). FUNDS_IN_CONTRACT is set EXPLICITLY because it differs from
+# EVM_PROXY_CONTRACT_ADDRESS — leaving it unset falls back to the proxy address
+# and points FundsIn verification at the wrong contract. In a release
+# `rgb-validation` build the plain-BTC and gas-tx paths FAIL CLOSED unless
+# BTC_MAX_TOTAL_SATS / GAS_TX_ALLOWED_TO are pinned.
+ENV EVM_RPC_URL=http://127.0.0.1:3444 \
+    EVM_MIN_CONFIRMATIONS=12 \
+    FUNDS_IN_CONTRACT=0x6711f1a319B37847fa0234181C34D883774c4951 \
+    GAS_TX_ALLOWED_TO=0x6711f1a319B37847fa0234181C34D883774c4951 \
+    BTC_MAX_TOTAL_SATS=1000000
+
+# Production logging. This env is MEASURED INTO PCR0 — do not flip it to `debug`
+# for a production EIF.
 ENV RUST_LOG=info
 ENTRYPOINT ["/app/entrypoint.sh"]
