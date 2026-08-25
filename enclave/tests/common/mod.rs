@@ -4,6 +4,7 @@ use std::thread;
 
 use utexo_bridge_enclave::config::BridgeConfig;
 use utexo_bridge_enclave::framing;
+#[cfg(feature = "spv")]
 use utexo_bridge_enclave::networks::rgb::spv::{checkpoint_for, HeaderChain, Network};
 use utexo_bridge_enclave::policy::{BuildContext, EvmDataSource, SecurityPolicy};
 use utexo_bridge_enclave::proto::*;
@@ -26,12 +27,9 @@ pub fn start_test_server_with(configure: impl FnOnce(&EnclaveState)) -> u16 {
     start_test_server_with_config(configure, BridgeConfig::from_env())
 }
 
-/// Start a test server with an explicit `BridgeConfig`. Use this from
-/// tests that need to exercise the pinned cross-check path (mismatch
-/// rejection, bundle commitment). `start_test_server` / `_with` read from
-/// env, which is the empty default in CI — pass a constructed config here
-/// to inject one without env mutation (env mutation across parallel tests
-/// is a footgun).
+/// Start a test server with an explicit `BridgeConfig`, for tests exercising
+/// the pinned cross-check path. `start_test_server` / `_with` read env, which
+/// is empty in CI, and mutating env across parallel tests is unsafe.
 #[allow(dead_code)]
 pub fn start_test_server_with_config(
     configure: impl FnOnce(&EnclaveState),
@@ -43,7 +41,8 @@ pub fn start_test_server_with_config(
     configure(&state);
     // Tests run with the placeholder Regtest checkpoint. The header chain
     // is initialised but empty; tests that don't push headers leave it
-    // alone, tests that do start from `checkpoint.height` (= 0).
+    // alone, tests that do start from `checkpoint.height` (= 0). SPV-only.
+    #[cfg(feature = "spv")]
     let header_chain = std::sync::Mutex::new(HeaderChain::new(
         Network::Regtest,
         checkpoint_for(Network::Regtest),
@@ -64,7 +63,9 @@ pub fn start_test_server_with_config(
         evm_rpc_client: None,
         #[cfg(feature = "evm-rpc")]
         evm_rpc_config: utexo_bridge_enclave::config::EvmRpcConfig::default(),
+        #[cfg(feature = "spv")]
         header_chain,
+        #[cfg(feature = "spv")]
         submit_rate_limiter: std::sync::Mutex::new(server::SubmitRateLimiter::default()),
     });
 

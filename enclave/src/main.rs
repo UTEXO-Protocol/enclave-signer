@@ -1,11 +1,11 @@
-// `TcpListener` is only used in dev mode (TCP fallback). Gating the import
-// matches the `cfg(not(all(feature = "vsock", target_os = "linux")))` block
-// at the bottom of `main` so the production-combo build (with vsock on
-// Linux) doesn't emit an unused-import warning.
+// `TcpListener` is only used in the dev-mode TCP fallback. The import is gated
+// to match the block at the bottom of `main`, so the production build emits no
+// unused-import warning.
 #[cfg(not(all(feature = "vsock", target_os = "linux")))]
 use std::net::TcpListener;
 
 use utexo_bridge_enclave::config::BridgeConfig;
+#[cfg(feature = "spv")]
 use utexo_bridge_enclave::networks::rgb::spv::{
     resolve_checkpoint, CheckpointSource, HeaderChain, Network, CHECKPOINT_ENV,
 };
@@ -30,7 +30,7 @@ fn indexer_url_from_env() -> String {
 /// URL's own port and return the host so it can be pinned to 127.0.0.1 (keeps
 /// in-enclave TLS validating the real cert). For http(s)/legacy esplora we keep
 /// the historical port 3443 and pin nothing.
-#[cfg(all(feature = "vsock", target_os = "linux"))]
+#[cfg(all(feature = "vsock", feature = "spv", target_os = "linux"))]
 fn forwarder_target(url: &str) -> (u16, Option<String>) {
     for scheme in ["ssl://", "tcp://"] {
         if let Some(rest) = url.strip_prefix(scheme) {
@@ -48,7 +48,7 @@ fn forwarder_target(url: &str) -> (u16, Option<String>) {
 /// Append `127.0.0.1 <host>` to /etc/hosts (idempotent) so the enclave's
 /// outbound connection to `host` lands on the local vsock forwarder while the
 /// TLS layer still validates against `host`'s real certificate.
-#[cfg(all(feature = "vsock", target_os = "linux"))]
+#[cfg(all(feature = "vsock", feature = "spv", target_os = "linux"))]
 fn pin_host_to_loopback(host: &str) -> std::io::Result<()> {
     use std::io::Write;
     let existing = std::fs::read_to_string("/etc/hosts").unwrap_or_default();
@@ -89,7 +89,7 @@ fn main() {
 
     // Pinned bridge config from env. Folded into the attestation `user_data`
     // commitment and cross-checked on every SignEvm. Production deployments
-    // must set EVM_CHAIN_ID, EVM_PROXY_CONTRACT_ADDRESS, RGB_ASSET_ID — a misconfigured
+    // must set EVM_CHAIN_ID, EVM_PROXY_CONTRACT_ADDRESS, RGB_ASSET_ID - a misconfigured
     // production enclave is detectable externally via the attestation bundle.
     let bridge_config = BridgeConfig::from_env();
     if bridge_config.is_configured() {
@@ -101,7 +101,7 @@ fn main() {
         );
     } else if bridge_config.is_partially_configured() {
         // Some-but-not-all pin fields set: a botched production config. SignEvm
-        // fails closed on this (audit 4th M-03 / #94); log it before the boot
+        // fails closed on this; log it before the boot
         // gate below turns it fatal in a production build.
         tracing::error!(
             chain_id = bridge_config.chain_id,
@@ -119,7 +119,7 @@ fn main() {
     }
 
     // Which EVM `FundsIn` deposit-verification source this build/deployment
-    // uses (audit C-01 "allowed data sources"). Determined the same way the RPC
+    // uses ("allowed data sources"). Determined the same way the RPC
     // client is selected below: `evm-rpc` off => none; `helios` +
     // HELIOS_EXECUTION_RPC set => trustless; otherwise the raw host-relayed RPC.
     #[cfg(not(feature = "evm-rpc"))]
@@ -129,11 +129,10 @@ fn main() {
     #[cfg(all(feature = "evm-rpc", feature = "helios"))]
     let (evm_source, evm_checkpoint) = if std::env::var("HELIOS_EXECUTION_RPC").is_ok() {
         // The pinned weak-subjectivity checkpoint is Helios's trust root, so
-        // commit it into the attested policy — a verifier then confirms WHICH
-        // checkpoint the enclave synced from, not merely that it is in Helios
-        // mode (audit M-06). Reads the SAME `HELIOS_CHECKPOINT` that
-        // `HeliosConfig` / `HeliosEvmClient` sync against. A missing/malformed
-        // value yields `None`, and the boot gate below then refuses to boot.
+        // it is committed into the attested policy: a verifier confirms which
+        // checkpoint the enclave synced from, not just that it is in Helios
+        // mode. A missing or malformed value yields `None`, and
+        // the boot gate below then refuses to boot.
         let checkpoint = std::env::var("HELIOS_CHECKPOINT")
             .ok()
             .and_then(|s| hex::decode(s.strip_prefix("0x").unwrap_or(&s)).ok())
@@ -143,11 +142,9 @@ fn main() {
         (EvmDataSource::RawRpc, None)
     };
 
-    // Resolve the enclave's single, explicit security posture once (audit C-01),
-    // from the build context + pinned config + selected data source. This is the
-    // value committed into attestation `user_data` (see
-    // `server::handle_get_attested_public_key`) and consulted by the signing
-    // handlers instead of re-deriving posture from features and empty fields.
+    // Resolve the security posture once from the build context,
+    // pinned config, and selected data source. This is what gets committed into
+    // attestation `user_data` and what the signing handlers consult.
     let build_ctx = BuildContext::current();
     let policy = SecurityPolicy::resolve(&build_ctx, &bridge_config, evm_source, evm_checkpoint);
     match &policy {
@@ -160,26 +157,21 @@ fn main() {
         ),
         SecurityPolicy::Development { reason } => tracing::warn!(
             ?reason,
-            "resolved DEVELOPMENT security policy — this is NOT a production bridge signer"
+            "resolved DEVELOPMENT security policy - this is NOT a production bridge signer"
         ),
     }
 
-    // Fail-closed at BOOT (audit C-01 systemic). Per-request refusals and the
-    // logs above are not enough — an operator does not tail enclave logs on a
-    // prod host — so a release rgb-validation build that does not resolve to a
-    // valid Production policy must never become reachable. Mirrors the
-    // placeholder-checkpoint boot check below; debug / test / non-bridge
-    // builds are exempt.
+    // Fail closed at boot: a release rgb-validation build that
+    // does not resolve to a valid Production policy must never become
+    // reachable. Debug / test / non-bridge builds are exempt.
     if let Err(msg) = policy.assert_valid_for_build(&build_ctx) {
         panic!("{msg}");
     }
 
-    // Donor-side cloning secret. Preferred delivery is at runtime via the
-    // `InitializeKey` message (`cloning_secret`), so the secret never lands in
-    // the EIF or the PCRs. The `UTEXO_CLONING_SECRET` env var is kept only as a
-    // legacy/dev fallback and is NOT set by the production Dockerfile; do not
-    // bake it into a release EIF. Optional: only needed for enclaves that serve
-    // `GetClone`. Never logged; wrapped in `SecretBox` for zeroize-on-drop.
+    // Donor-side cloning secret, delivered at runtime via `InitializeKey` so it
+    // never lands in the EIF or the PCRs. `UTEXO_CLONING_SECRET` is a legacy/dev
+    // fallback only and must not be baked into a release EIF. Needed only by
+    // enclaves that serve `GetClone`. Never logged; `SecretBox` zeroizes it.
     if let Ok(secret) = std::env::var("UTEXO_CLONING_SECRET") {
         if !secret.is_empty() {
             if let Err(e) = state.set_donor_cloning_secret(secret) {
@@ -196,43 +188,45 @@ fn main() {
     // Start the vsock-to-TCP forwarder so the in-enclave witness resolver can
     // reach the host-side indexer. The host must run:
     //   vsock-proxy <ESPLORA_VSOCK_PORT> <indexer-host> <indexer-port>
-    // We forward 127.0.0.1:<local_port> -> vsock:<vsock_port>. For an Electrum
+    // 127.0.0.1:<local_port> is forwarded to vsock:<vsock_port>. For an Electrum
     // ssl:// endpoint we listen on the URL's own port and pin its hostname to
-    // 127.0.0.1 in /etc/hosts, so the TLS handshake terminates INSIDE the
-    // enclave and validates the real server cert — the host relays ciphertext
-    // only and cannot MITM the witness data. Untrusted, host-controlled egress
-    // boundary (audit I-01): data fetched through it is evidence verified by
-    // SPV + rgbstd validation, never trusted input. See `vsock_forwarder`'s
-    // module-level TRUST BOUNDARY note.
+    // 127.0.0.1 in /etc/hosts, so TLS terminates inside the enclave against the
+    // real server cert and the host relays ciphertext only. Untrusted egress;
+    // see `vsock_forwarder`'s trust-boundary note.
     #[cfg(all(feature = "vsock", target_os = "linux"))]
     {
-        let vsock_port: u32 = std::env::var("ESPLORA_VSOCK_PORT")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(8001);
-        let (local_port, host_pin) = forwarder_target(&indexer_url_from_env());
-        if let Some(host) = host_pin {
-            match pin_host_to_loopback(&host) {
-                Ok(()) => tracing::info!(
-                    "pinned {host} -> 127.0.0.1 for in-enclave TLS over the vsock forwarder"
-                ),
-                Err(e) => tracing::error!("failed to pin {host} in /etc/hosts: {e}"),
-            }
-        }
-        tracing::info!(
-            local_port,
-            vsock_port,
-            "starting indexer vsock forwarder (host must run: vsock-proxy {vsock_port} <indexer-host> <indexer-port>)"
-        );
-        if let Err(e) =
-            utexo_bridge_enclave::vsock_forwarder::start_forwarder(local_port, vsock_port)
+        // Esplora egress is only needed by the RGB/BTC stack (consignment
+        // resolver + SPV). A `ccd`-only build starts no Esplora forwarder.
+        #[cfg(feature = "spv")]
         {
-            tracing::error!("failed to start vsock forwarder: {e}");
+            let vsock_port: u32 = std::env::var("ESPLORA_VSOCK_PORT")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(8001);
+            let (local_port, host_pin) = forwarder_target(&indexer_url_from_env());
+            if let Some(host) = host_pin {
+                match pin_host_to_loopback(&host) {
+                    Ok(()) => tracing::info!(
+                        "pinned {host} -> 127.0.0.1 for in-enclave TLS over the vsock forwarder"
+                    ),
+                    Err(e) => tracing::error!("failed to pin {host} in /etc/hosts: {e}"),
+                }
+            }
+            tracing::info!(
+                local_port,
+                vsock_port,
+                "starting indexer vsock forwarder (host must run: vsock-proxy {vsock_port} <indexer-host> <indexer-port>)"
+            );
+            if let Err(e) =
+                utexo_bridge_enclave::vsock_forwarder::start_forwarder(local_port, vsock_port)
+            {
+                tracing::error!("failed to start vsock forwarder: {e}");
+            }
         }
 
         // Second forwarder for the EVM JSON-RPC used by in-enclave FundsIn
-        // verification (#60). Distinct loopback/vsock ports from Esplora
-        // (3443/8001). Untrusted, host-controlled egress boundary (audit I-01);
+        // verification. Distinct loopback/vsock ports from Esplora
+        // (3443/8001). Untrusted, host-controlled egress boundary;
         // the host must run: vsock-proxy <EVM_RPC_VSOCK_PORT> <evm-rpc-host> <port>.
         #[cfg(feature = "evm-rpc")]
         {
@@ -251,7 +245,7 @@ fn main() {
             }
         }
 
-        // Helios execution + consensus RPC forwarders (#77, trustless EVM
+        // Helios execution + consensus RPC forwarders (trustless EVM
         // verification). Helios verifies these UNTRUSTED upstreams against a
         // pinned checkpoint. Local ports mirror HeliosConfig defaults
         // (18545/18550); the host must run one vsock-proxy per upstream.
@@ -278,7 +272,7 @@ fn main() {
                 exec_vsock,
                 cons_local,
                 cons_vsock,
-                "starting Helios execution + consensus vsock forwarders (#77)"
+                "starting Helios execution + consensus vsock forwarders"
             );
             if let Err(e) =
                 utexo_bridge_enclave::vsock_forwarder::start_forwarder(exec_local, exec_vsock)
@@ -312,73 +306,77 @@ fn main() {
 
     // Initialise the in-enclave Bitcoin header chain at boot, anchored to
     // the compile-time checkpoint for the active network. The chain starts
-    // empty; the Listener will populate it via SubmitHeaders.
-    let spv_network = Network::from_env_str(&bitcoin_network_str).unwrap_or_else(|e| {
-        tracing::warn!(
-            "spv: unknown BITCOIN_NETWORK '{bitcoin_network_str}' ({e}); defaulting to mainnet"
-        );
-        Network::Mainnet
-    });
-    // Compiled-in anchor, or the dev-only `SPV_CHECKPOINT` override. A
-    // production-shaped build with that var set refuses to boot rather than
-    // letting the host pick the SPV trust anchor; a malformed spec is fatal too,
-    // so a dev never silently syncs from the compiled height instead.
-    let (checkpoint, checkpoint_source) = resolve_checkpoint(spv_network).unwrap_or_else(|msg| {
-        panic!("{msg}");
-    });
-    if checkpoint_source == CheckpointSource::Env {
-        tracing::warn!(
-            ?spv_network,
-            checkpoint_height = checkpoint.height,
-            "spv: checkpoint OVERRIDDEN from {} — dev builds only; headers below this height are \
-             not verifiable by this enclave",
-            CHECKPOINT_ENV
-        );
-    }
-    if let Err(msg) = checkpoint.assert_real_in_release() {
-        // In a release production build this is fatal — placeholder
-        // checkpoints would mean the listener can never push headers that
-        // chain to anything real. Crash early and loud.
-        panic!("{msg}");
-    }
-    if let Err(msg) = checkpoint.assert_retarget_aligned(spv_network) {
-        // A misaligned PoW-network checkpoint wedges the chain at the first
-        // retarget boundary above it (the epoch-start lookup falls below the
-        // checkpoint). This is a build-time misconfiguration — fail fast.
-        panic!("{msg}");
-    }
-    if !checkpoint.is_real {
-        tracing::warn!(
-            ?spv_network,
-            "spv: using PLACEHOLDER checkpoint (zeros) — header validation will reject any real chain. \
-             Replace the constant in enclave/src/networks/rgb/spv/checkpoint.rs before deploying."
-        );
-    } else {
-        tracing::info!(
-            ?spv_network,
-            checkpoint_height = checkpoint.height,
-            "spv: header chain initialised at checkpoint"
-        );
-    }
-    let header_chain = std::sync::Mutex::new(HeaderChain::new(spv_network, checkpoint));
+    // empty; the Listener will populate it via SubmitHeaders. SPV/RGB-only:
+    // a `ccd`-only build has no header chain (and no SubmitHeaders handler).
+    #[cfg(feature = "spv")]
+    let header_chain = {
+        let spv_network = Network::from_env_str(&bitcoin_network_str).unwrap_or_else(|e| {
+            tracing::warn!(
+                "spv: unknown BITCOIN_NETWORK '{bitcoin_network_str}' ({e}); defaulting to mainnet"
+            );
+            Network::Mainnet
+        });
+        // Compiled-in anchor, or the dev-only `SPV_CHECKPOINT` override. A
+        // production-shaped build refuses to boot when that var is set, and a
+        // malformed spec is fatal rather than silently ignored.
+        let (checkpoint, checkpoint_source) =
+            resolve_checkpoint(spv_network).unwrap_or_else(|msg| {
+                panic!("{msg}");
+            });
+        if checkpoint_source == CheckpointSource::Env {
+            tracing::warn!(
+                ?spv_network,
+                checkpoint_height = checkpoint.height,
+                "spv: checkpoint OVERRIDDEN from {} - dev builds only; headers below this height are \
+                 not verifiable by this enclave",
+                CHECKPOINT_ENV
+            );
+        }
+        if let Err(msg) = checkpoint.assert_real_in_release() {
+            // Fatal in a release build: with a placeholder checkpoint the
+            // listener can never push headers that chain to anything real.
+            panic!("{msg}");
+        }
+        if let Err(msg) = checkpoint.assert_retarget_aligned(spv_network) {
+            // A misaligned PoW-network checkpoint wedges the chain at the first
+            // retarget boundary above it, since the epoch-start lookup falls
+            // below the checkpoint. A build-time misconfiguration.
+            panic!("{msg}");
+        }
+        if !checkpoint.is_real {
+            tracing::warn!(
+                ?spv_network,
+                "spv: using PLACEHOLDER checkpoint (zeros) - header validation will reject any real chain. \
+                 Replace the constant in enclave/src/networks/rgb/spv/checkpoint.rs before deploying."
+            );
+        } else {
+            tracing::info!(
+                ?spv_network,
+                checkpoint_height = checkpoint.height,
+                "spv: header chain initialised at checkpoint"
+            );
+        }
+        std::sync::Mutex::new(HeaderChain::new(spv_network, checkpoint))
+    };
 
-    // Build the in-enclave EVM RPC client for independent FundsIn verification
-    // (#60). The URL must be the loopback forwarder; responses are host-relayed
-    // and treated as evidence (verified fail-closed), not trusted input.
+    // Build the in-enclave EVM RPC client for independent FundsIn
+    // verification. The URL must be the loopback forwarder; responses are
+    // host-relayed and treated as evidence (verified fail-closed), not
+    // trusted input.
     #[cfg(feature = "evm-rpc")]
     let (evm_rpc_client, evm_rpc_config) = {
         use utexo_bridge_enclave::networks::evm::evm_event::{AlloyEvmClient, EvmReceiptProvider};
         let cfg = utexo_bridge_enclave::config::EvmRpcConfig::from_env();
         type Boxed = Box<dyn EvmReceiptProvider + Send + Sync>;
 
-        // Raw alloy provider (#60): host-relayed, unverified.
+        // Raw alloy provider: host-relayed, unverified.
         let build_alloy = || -> Option<Boxed> {
             match AlloyEvmClient::new(&cfg.rpc_url) {
                 Ok(c) => {
                     tracing::info!(
                         rpc_url = %cfg.rpc_url,
                         min_confirmations = cfg.min_confirmations,
-                        "EVM FundsIn verification: raw alloy path (#60, host-relayed/unverified)"
+                        "EVM FundsIn verification: raw alloy path (host-relayed/unverified)"
                     );
                     Some(Box::new(c) as Boxed)
                 }
@@ -389,15 +387,15 @@ fn main() {
             }
         };
 
-        // #77 runtime-selectable: HELIOS_EXECUTION_RPC set -> Helios-verified
-        // path; else the raw alloy path. Fail closed on the SELECTED provider:
-        // a Helios build/sync failure leaves the client unset so bridge signing
-        // refuses, never silently downgrading to the unverified path.
+        // Runtime-selectable: HELIOS_EXECUTION_RPC set selects the
+        // Helios-verified path, else raw alloy. Fail closed on the selected
+        // provider - a Helios sync failure leaves the client unset so bridge
+        // signing refuses, never downgrading to the unverified path.
         #[cfg(feature = "helios")]
         let client: Option<Boxed> = match utexo_bridge_enclave::config::HeliosConfig::from_env() {
             Some(hcfg) => {
                 // Pass the pinned EVM_CHAIN_ID so Helios rejects a
-                // HELIOS_NETWORK inconsistent with it (#77 predicate 1).
+                // HELIOS_NETWORK inconsistent with it (predicate 1).
                 match utexo_bridge_enclave::networks::evm::evm_event::HeliosEvmClient::new(
                     &hcfg,
                     bridge_config.chain_id,
@@ -406,7 +404,7 @@ fn main() {
                         tracing::info!(
                             network = %hcfg.network,
                             min_confirmations = cfg.min_confirmations,
-                            "EVM FundsIn verification: Helios-verified path (#77, trustless)"
+                            "EVM FundsIn verification: Helios-verified path (trustless)"
                         );
                         Some(Box::new(c) as Boxed)
                     }
@@ -436,7 +434,9 @@ fn main() {
         evm_rpc_client,
         #[cfg(feature = "evm-rpc")]
         evm_rpc_config,
+        #[cfg(feature = "spv")]
         header_chain,
+        #[cfg(feature = "spv")]
         submit_rate_limiter: std::sync::Mutex::new(server::SubmitRateLimiter::default()),
     };
 
@@ -463,8 +463,8 @@ fn main() {
     }
 }
 
-/// Accept loop with bounded concurrency and per-request deadlines (audit M-03 /
-/// #83). Each accepted socket is wrapped in a [`DeadlineStream`] (idle + total
+/// Accept loop with bounded concurrency and per-request deadlines.
+/// Each accepted socket is wrapped in a [`DeadlineStream`] (idle + total
 /// request timeouts) and handed to a fixed worker pool via a bounded queue;
 /// over-cap connections are dropped (closed) so one slow request can't starve
 /// the others. Generic over the socket type so the vsock and TCP branches share

@@ -1,23 +1,19 @@
 #![deny(unsafe_code)]
 
-// Release guards (audit TEE-IK-01 / TEE-CL-02 + dev-mode). Three dev-only
+// Release guards (dev-mode). Three dev-only
 // features are catastrophic if accidentally enabled in a shipped build:
 //
-//   * `allow-seed-import` — the parent can install a chosen seed on a fresh
+//   * `allow-seed-import` - the parent can install a chosen seed on a fresh
 //     enclave, defeating the in-enclave key custody.
-//   * `mock-attestation`  — zero-PCR attestation documents are accepted, so
+//   * `mock-attestation`  - zero-PCR attestation documents are accepted, so
 //     a forged "enclave" passes verification.
-//   * `dev-mode`          — every signing cross-check is skipped.
+//   * `dev-mode`          - every signing cross-check is skipped.
 //
 // A release build (`debug_assertions` off) must never carry any of them, so
-// each trips a `compile_error!` instead of producing a binary. A misconfigured
-// Dockerfile or CI matrix fails loudly at build time rather than shipping a
-// trust-defeating enclave. `not(test)` exempts `cargo test --release`, which
-// legitimately exercises the dev paths; local dev images build in debug
-// (`build/Dockerfile.enclave-dev`), which keeps `debug_assertions` on.
+// each trips a `compile_error!`. `not(test)` exempts `cargo test --release`,
+// which legitimately exercises the dev paths; local dev images build in debug.
 //
-// `dev_feature_release_guard!` keeps the three checks in one place so the
-// pattern can't drift between features.
+// `dev_feature_release_guard!` keeps the three checks in one place.
 macro_rules! dev_feature_release_guard {
     ($feature:literal, $msg:literal) => {
         #[cfg(all(feature = $feature, not(debug_assertions), not(test)))]
@@ -41,19 +37,15 @@ dev_feature_release_guard!(
      it skips all signing cross-checks."
 );
 
-// `rgb-validation` validates a consignment by asking a resolver whether its
-// witness txs are mined. Without `spv` that resolver is the host-controlled
-// Esplora endpoint, so a malicious host can answer "mined at sufficient depth"
-// for a fabricated witness tx and the enclave would sign a `fundsOut` release
-// against a non-existent Bitcoin anchor (audit M-01 / #61). `spv` re-anchors
-// every witness tx against the enclave's own PoW-verified header chain, so a
-// build that can validate consignments MUST also carry SPV. Unlike the
-// dev-feature guards above, this combination is unsafe in every profile — so it
-// is not release-gated and must never compile.
+// `rgb-validation` asks a resolver whether a consignment's witness txs are
+// mined. Without `spv` that resolver is the host-controlled Esplora endpoint,
+// so a malicious host could claim a fabricated witness tx is confirmed and the
+// enclave would sign a `fundsOut` against a non-existent anchor. `spv` re-anchors every witness tx against the enclave's own header
+// chain. Unsafe in every profile, so this is not release-gated.
 #[cfg(all(feature = "rgb-validation", not(feature = "spv")))]
 compile_error!(
     "rgb-validation requires spv: without spv, consignment anchoring trusts only \
-     the host-controlled Esplora resolver — build with `--features spv` (which \
+     the host-controlled Esplora resolver - build with `--features spv` (which \
      pulls in rgb-validation)"
 );
 
@@ -72,7 +64,6 @@ pub mod state;
 #[cfg(all(feature = "vsock", target_os = "linux"))]
 pub mod vsock_forwarder;
 
-pub use federated_signer_proto as grpc_proto;
-pub use federated_signer_proto::enclave as proto;
-pub use federated_signer_proto::parent as enriched;
-pub use federated_signer_proto::signer;
+// Only the `enclave` package is vendored into the TEE build. The parent
+// adapter still exposes the other proto packages (see parent/src/lib.rs).
+pub use enclave_proto as proto;

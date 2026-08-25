@@ -14,7 +14,7 @@ After successful verification, the verifier knows:
 > PCR1=Y, PCR2=Z produced public key K, and the full key bundle B **plus the
 > enclave's resolved security policy P** commit to user_data."
 
-The security policy `P` (audit C-01) is the enclave's single, explicit posture —
+The security policy `P` is the enclave's single, explicit posture —
 signing modes, the chain/contract/asset pins, the attestation mode, and the
 allowed data sources — resolved once at boot. Committing it into `user_data`
 lets a verifier check the whole posture as one attested value instead of
@@ -106,7 +106,7 @@ in [`enclave/src/server.rs`](../enclave/src/server.rs) and the reference
 decoder/checker is `canonical_bundle` in
 [`parent/src/attest_verify.rs`](../parent/src/attest_verify.rs).
 
-### Security policy commitment (audit C-01)
+### Security policy commitment
 
 The canonical bundle above is followed by the enclave's resolved security
 policy, and `user_data = sha256(canonical_bundle || policy_commitment)`. The
@@ -126,9 +126,9 @@ policy_commitment =
     u8(btc_source)                                  // 1 = SPV-verified
     chain_id_be8 || bridge_contract(20)
     u32_be(len(rgb_asset_id)) || rgb_asset_id_utf8
-    // Helios trust root (audit M-06):
+    // Helios trust root:
     u8(0x00) | u8(0x01) || evm_checkpoint(32)       // pinned beacon block root
-    // Gas-tx (SignRawDigest) rule (audit C-02):
+    // Gas-tx (SignRawDigest) rule:
     gas_tx_allowed_to(20)                           // all-zero = gas path unpinned
     gas_tx_max_gas_limit_be8                        // gasLimit ceiling (0 = unset)
     gas_tx_max_fee_per_gas_be16                     // per-gas fee ceiling, wei (0 = unset)
@@ -146,7 +146,7 @@ shipped with a downgraded posture (vanilla signing on, raw instead of
 Helios-verified RPC, an unpinned or wrong gas-tx rule, a dev build) fails
 verification rather than being silently trusted.
 
-The gas-tx rule (audit C-02) is the `SignRawDigest` allowlist: the pinned
+The gas-tx rule is the `SignRawDigest` allowlist: the pinned
 destination, the `gasLimit`/fee ceilings that bound fee-griefing, the
 native-value ceiling that bounds the payable `lzFundsOutCall` carve-out, and the
 4-byte calldata selectors the gas EOA may invoke. Committing it makes the
@@ -160,7 +160,7 @@ enforces (no non-zero value is signable) — so "unpinned" is itself attested, t
 same way an unset destination commits as all-zero. `None` and `Some(0)` therefore
 produce identical bytes; one enforced rule cannot yield two attestations.
 
-The Helios checkpoint (audit M-06) pins WHICH weak-subjectivity beacon block root
+The Helios checkpoint pins WHICH weak-subjectivity beacon block root
 the enclave trust-rooted EVM verification on, so two enclaves with identical PCRs
 but different checkpoints commit different `user_data`; `attest-verify` declares
 it via `--expect-helios-checkpoint`, required with `--expect-evm-source helios`.
@@ -258,7 +258,7 @@ Defended:
 - **BTC key / xpub swap** — `user_data` commits to the full bundle. A parent
   cannot change one field of `PublicKeysResponse` without breaking the
   commitment match.
-- **Posture downgrade (audit C-01)** — `user_data` also commits to the resolved
+- **Posture downgrade** — `user_data` also commits to the resolved
   security policy (signing modes, pins, attestation mode, data sources). An
   enclave that shipped with a weaker posture than expected — plain-BTC signing
   enabled, a raw instead of Helios-verified EVM source, or a dev build — fails
@@ -282,7 +282,7 @@ NOT defended (out of scope for attestation):
 - Verifier crate: [`attestation-verify/src/lib.rs`](../attestation-verify/src/lib.rs).
 - Verifier library (`verify_attested_pubkey`, `ExpectedPolicy`): [`parent/src/attest_verify.rs`](../parent/src/attest_verify.rs).
 - CLI binary: [`parent/src/bin/attest_verify.rs`](../parent/src/bin/attest_verify.rs).
-- Security policy (audit C-01): resolved in [`enclave/src/policy.rs`](../enclave/src/policy.rs);
+- Security policy: resolved in [`enclave/src/policy.rs`](../enclave/src/policy.rs);
   shared canonical encoding in [`attestation-verify/src/policy.rs`](../attestation-verify/src/policy.rs).
 - Wire definitions:
   - Enclave wire: [`proto/enclave.proto`](../proto/enclave.proto)

@@ -1,83 +1,28 @@
-//! Gas-key transaction shape allowlist (audit TEE-XC-09).
+//! Gas-key transaction shape allowlist.
 //!
-//! The gas key (`m/44'/60'/0'/0/1`) exists to pay L1 gas for the bridge's
-//! Ethereum transactions. Its RPC, `SignRawDigest`, originally signed an
-//! opaque 32-byte digest with no constraint — so a compromised listener
-//! could have the enclave sign *any* transaction from the gas address,
-//! including one transferring its whole ETH balance to an attacker (a
-//! gas-account drain).
+//! The gas key (`m/44'/60'/0'/0/1`) pays L1 gas for the bridge's Ethereum
+//! transactions. The enclave is given the unsigned transaction preimage, not a
+//! pre-hashed digest, and:
+//!   1. decodes it as EIP-1559 (type `0x02`) or legacy EIP-155 with a strict
+//!      canonical RLP decoder;
+//!   2. computes the signing hash itself (`keccak256(preimage)`);
+//!   3. enforces the operator's attested allowlist: chain id == `EVM_CHAIN_ID`,
+//!      `to` == `GAS_TX_ALLOWED_TO`, `value == 0`, `gasLimit` <=
+//!      `GAS_TX_MAX_GAS_LIMIT`, per-gas fees <= `GAS_TX_MAX_FEE_PER_GAS`, and a
+//!      leading 4-byte selector in `GAS_TX_ALLOWED_SELECTORS`.
 //!
-//! This module closes that path. Instead of trusting a pre-hashed digest,
-//! the enclave is given the **unsigned transaction preimage** and:
-//!   1. decodes it as a recognised envelope — EIP-1559 (type `0x02`) or
-//!      legacy EIP-155 — with a strict, canonical RLP decoder that rejects
-//!      malformed / non-canonical / trailing-byte input;
-//!   2. computes the signing hash itself (`keccak256(preimage)`) rather
-//!      than trusting any supplied digest;
-//!   3. enforces the operator's attested gas-tx allowlist:
-//!        * the chain id must equal the pinned `EVM_CHAIN_ID`;
-//!        * the destination must equal the pinned `GAS_TX_ALLOWED_TO`;
-//!        * the value must be zero, except for the LayerZero fee carve-out
-//!          below (contract-creation, i.e. empty `to`, is refused);
-//!        * `gasLimit` must not exceed `GAS_TX_MAX_GAS_LIMIT` and the
-//!          per-gas fee fields (`maxFeePerGas` / `maxPriorityFeePerGas`, or
-//!          legacy `gasPrice`) must not exceed `GAS_TX_MAX_FEE_PER_GAS`;
-//!        * the calldata must lead with a 4-byte selector in
-//!          `GAS_TX_ALLOWED_SELECTORS` — a bare / empty-calldata call is
-//!          refused (it would still invoke the destination's fallback/receive,
-//!          outside the allowlist).
+//! Carve-out to `value == 0`: the payable `lzFundsOutCall` forwards the
+//! LayerZero messaging fee. Allowed only when the selector is `lzFundsOutCall`,
+//! `to` == pinned `BRIDGE_CONTRACT`, and `value` <= `GAS_TX_MAX_VALUE_WEI`. The
+//! selector must also be in `GAS_TX_ALLOWED_SELECTORS`.
 //!
-//! One exception to `value == 0`: the payable `lzFundsOutCall`, which
-//! forwards native value as the LayerZero messaging fee. Admitted only when
-//! all three hold — `lzFundsOutCall` selector, `to` == pinned
-//! `BRIDGE_CONTRACT`, `value` <= pinned `GAS_TX_MAX_VALUE_WEI`. The selector
-//! must ALSO be in `GAS_TX_ALLOWED_SELECTORS`: the carve-out widens the value
-//! rule, never the calldata rule.
+//! Any unset pin fails the path closed. The whole rule is folded into the
+//! attestation `user_data` commitment via [`crate::policy::SecurityPolicy`].
 //!
-//! Anything that doesn't decode to an allowed shape — a different chain or
-//! destination, a value outside the carve-out, a gasLimit/fee above the pinned
-//! ceiling, or calldata invoking a selector the operator didn't allow — is
-//! rejected before a signature is produced. This closes *theft* (`to` pinned,
-//! and value only ever a bounded fee to the proxy itself), bounds
-//! *per-transaction fee-griefing* (the most ETH a *single* signed gas tx can
-//! burn is `GAS_TX_MAX_GAS_LIMIT * GAS_TX_MAX_FEE_PER_GAS`), and bounds *what
-//! the gas EOA can be made to do* (only allowlisted function selectors on the
-//! pinned contract). Every pin unset fails the path closed in production
-//! rather than signing blindly.
-//!
-//! Not bounded here: the *aggregate* fee spend across many txs. Validation is
-//! stateless (the nonce is not even extracted), so this per-tx ceiling is not
-//! an aggregate cap — a compromised listener could still burn the gas EOA's
-//! balance as fees over a long sequence of within-cap txs. That is bounded
-//! griefing (fees go to base fee / the block builder, never to an attacker),
-//! and aggregate/rate limiting for a stateless signing oracle belongs
-//! out-of-enclave (refill limits / monitoring), not in this per-request check.
-//!
-//! On the destination's code state: the previous design leaned on an
-//! unverifiable operator assumption — "`GAS_TX_ALLOWED_TO` is an EOA, so any
-//! calldata is inert" — which the enclave could not confirm (a trustless
-//! `eth_getCode` needs the Helios light client, #77). The selector allowlist
-//! removes that dependence: safety no longer rests on the destination being a
-//! plain wallet but on the in-enclave, attested set of selectors it may be
-//! called with. Verifying the destination's authenticated code state as an
-//! additional defence-in-depth is a possible Helios-gated follow-up, not a
-//! prerequisite for this control (audit C-02).
-//!
-//! The whole rule — destination, both caps, and the selector allowlist — is
-//! folded into the attestation `user_data` commitment via the C-01
-//! [`crate::policy::SecurityPolicy`], so an external verifier confirms the gas
-//! policy the enclave is pinned to instead of trusting configuration.
-//!
-//! Also not bounded here: **the LayerZero fee is not bound to its release.**
-//! The value is not a field of `TeeLzFundsOut` (see
-//! `super::signing::TEE_LZ_FUNDS_OUT_TYPE_HASH_STR`), so nothing ties a fee to
-//! an operation. `GAS_TX_MAX_VALUE_WEI` bounds the blast radius; binding the
-//! quoted fee needs a contract change (#68 follow-up).
-//!
-//! Note: EIP-712 typed-data is intentionally *not* accepted here — the gas
-//! key signs outer L1 transactions, whose canonical envelope is RLP, not
-//! EIP-712. A separate signing surface would be needed if that ever
-//! changes.
+//! Not bounded here: aggregate fee spend across many txs (validation is
+//! stateless), and the LayerZero fee is not bound to its release.
+//! EIP-712 typed data is not accepted: the gas key signs L1 transactions,
+//! whose envelope is RLP.
 
 use sha3::{Digest, Keccak256};
 
@@ -89,30 +34,25 @@ use crate::proto::SignRawDigestRequest;
 const TX_TYPE_EIP1559: u8 = 0x02;
 
 /// Selector of the **on-chain** `MultisigProxy.lzFundsOutCall` (params as one
-/// struct) — the only proxy method that legitimately carries native value.
+/// struct) - the only proxy method that legitimately carries native value.
 ///
 /// NOT [`super::validation::LZ_FUNDS_OUT_SELECTOR`], which is the enclave's
-/// wire format for the same operation (flat params, never reaches the chain).
-/// This module inspects a real L1 tx, so it needs the on-chain ABI.
-///
-/// A literal because keccak is not const-evaluable here;
-/// `onchain_lz_selector_matches_its_signature` pins it to its signature.
+/// wire format for the same operation. A literal because keccak is not
+/// const-evaluable here; `onchain_lz_selector_matches_its_signature` pins it.
 const ONCHAIN_LZ_FUNDS_OUT_CALL_SELECTOR: [u8; 4] = [0x7a, 0xe8, 0xf7, 0x36];
 
 /// Maximum RLP nesting depth we will decode. A real transaction reaches
-/// depth ~4 (tx list → accessList → entry → storage-key list); the cap is
+/// depth ~4 (tx list -> accessList -> entry -> storage-key list); the cap is
 /// a defensive backstop against a deeply-nested input exhausting the stack.
 const MAX_RLP_DEPTH: usize = 8;
 
 /// Shorthand for the cross-check rejection used throughout this module.
-/// Maps to the same `CrossCheck` error code (3) as the other signing
-/// cross-checks.
 fn reject(msg: impl Into<String>) -> EnclaveError {
     EnclaveError::CrossCheck(msg.into())
 }
 
 /// A decoded RLP item: either a byte string or a list of items. Borrows
-/// from the input buffer — no allocation of payload bytes.
+/// from the input buffer - no allocation of payload bytes.
 enum Rlp<'a> {
     Str(&'a [u8]),
     List(Vec<Rlp<'a>>),
@@ -125,26 +65,23 @@ struct GasTx<'a> {
     /// Wei. A number rather than a zero flag: the LayerZero carve-out
     /// compares it against a pinned ceiling.
     value: u128,
-    /// `gasLimit` — bounded by `GAS_TX_MAX_GAS_LIMIT`.
+    /// `gasLimit` - bounded by `GAS_TX_MAX_GAS_LIMIT`.
     gas_limit: u64,
-    /// `maxFeePerGas` (EIP-1559) or `gasPrice` (legacy) — bounded by
+    /// `maxFeePerGas` (EIP-1559) or `gasPrice` (legacy) - bounded by
     /// `GAS_TX_MAX_FEE_PER_GAS`.
     max_fee_per_gas: u128,
     /// `maxPriorityFeePerGas` (EIP-1559); equal to `gasPrice` for legacy. Also
     /// bounded by `GAS_TX_MAX_FEE_PER_GAS`.
     max_priority_fee_per_gas: u128,
-    /// The calldata's leading 4-byte function selector, or `None` when the
-    /// calldata is empty — which `validate_gas_tx_request` refuses (a bare call
-    /// still invokes the destination contract's fallback/receive).
+    /// Leading 4-byte function selector, or `None` for empty calldata (which
+    /// `validate_gas_tx_request` refuses).
     selector: Option<[u8; 4]>,
-    /// The full calldata. Two views of the same RLP item: `selector` is the
-    /// allowlist key (and rejects 1..=3-byte calldata that could never carry
-    /// one), `data` is what the LayerZero carve-out prefix-matches.
+    /// The full calldata, prefix-matched by the LayerZero carve-out.
     data: &'a [u8],
 }
 
 /// Validate a gas-key `SignRawDigest` request against the operator pins and
-/// return the 32-byte digest the enclave should sign — `keccak256` of the
+/// return the 32-byte digest the enclave should sign - `keccak256` of the
 /// supplied preimage, computed here rather than trusted from the wire.
 ///
 /// Fails closed (`CrossCheck`) on: missing preimage, unparseable / malformed
@@ -161,15 +98,13 @@ pub fn validate_gas_tx_request(req: &SignRawDigestRequest, cfg: &BridgeConfig) -
         ));
     }
 
-    // Decode + structural allowlist. Reject anything that isn't a clean,
-    // recognised, canonical transaction envelope.
+    // Decode + structural allowlist.
     let tx = parse_gas_tx(&req.unsigned_tx)?;
 
-    // Chain-id pin. EVM_CHAIN_ID must be configured, and the tx must target
-    // exactly it — blocks cross-chain replay of a gas tx.
+    // Chain-id pin: blocks cross-chain replay of a gas tx.
     if cfg.chain_id == 0 {
         return Err(reject(
-            "gas tx: chain_id not pinned (EVM_CHAIN_ID unset) — refusing to sign",
+            "gas tx: chain_id not pinned (EVM_CHAIN_ID unset) - refusing to sign",
         ));
     }
     if tx.chain_id != cfg.chain_id {
@@ -179,11 +114,10 @@ pub fn validate_gas_tx_request(req: &SignRawDigestRequest, cfg: &BridgeConfig) -
         )));
     }
 
-    // Destination pin. GAS_TX_ALLOWED_TO must be configured, and the tx must
-    // go to exactly it — this is what stops a redirect-to-attacker drain.
+    // Destination pin: stops a redirect-to-attacker drain.
     let allowed = cfg.gas_tx_allowed_to.ok_or_else(|| {
         reject(
-            "gas tx: destination not pinned (GAS_TX_ALLOWED_TO unset) — refusing to sign \
+            "gas tx: destination not pinned (GAS_TX_ALLOWED_TO unset) - refusing to sign \
              (this enclave will not sign gas transactions until the allowed destination is pinned)",
         )
     })?;
@@ -195,8 +129,7 @@ pub fn validate_gas_tx_request(req: &SignRawDigestRequest, cfg: &BridgeConfig) -
         )));
     }
 
-    // A gas tx pays for execution via the fee fields, never by moving ETH, so
-    // a non-zero value is the other drain vector. Refused by default; the LZ
+    // A non-zero value is a drain vector. Refused by default; the LayerZero
     // fee carve-out needs all three legs below.
     if tx.value != 0 {
         // (a) Payable entrypoint only.
@@ -206,13 +139,12 @@ pub fn validate_gas_tx_request(req: &SignRawDigestRequest, cfg: &BridgeConfig) -
             ));
         }
 
-        // (b) The proxy itself, not just GAS_TX_ALLOWED_TO — that pin may be
-        // an EOA, which ignores calldata, making the selector a password over
-        // a plain ETH transfer.
+        // (b) The proxy itself, not just GAS_TX_ALLOWED_TO, which may be an
+        // EOA that ignores calldata.
         if cfg.bridge_contract == [0u8; 20] {
             return Err(reject(
                 "gas tx: non-zero value requires a pinned BRIDGE_CONTRACT to check the \
-                 destination against (unset) — refusing to sign",
+                 destination against (unset) - refusing to sign",
             ));
         }
         if tx.to != cfg.bridge_contract {
@@ -223,12 +155,11 @@ pub fn validate_gas_tx_request(req: &SignRawDigestRequest, cfg: &BridgeConfig) -
             )));
         }
 
-        // (c) Bounded: the fee is not in the TeeLzFundsOut payload, so nothing
-        // on-chain constrains it either.
+        // (c) Bounded: nothing on-chain constrains the fee.
         let max = cfg.gas_tx_max_value_wei.ok_or_else(|| {
             reject(
                 "gas tx: non-zero value requires a pinned ceiling (GAS_TX_MAX_VALUE_WEI unset) \
-                 — refusing to sign",
+                 - refusing to sign",
             )
         })?;
         if tx.value > max {
@@ -239,18 +170,16 @@ pub fn validate_gas_tx_request(req: &SignRawDigestRequest, cfg: &BridgeConfig) -
         }
     }
 
-    // Fee/gas ceilings (audit C-02). These bound the fee-griefing residual:
-    // the most ETH a signed gas tx can burn is `gasLimit * maxFeePerGas`, so
-    // both are capped. Unset caps fail closed, exactly like the destination pin
-    // — an unbounded gas tx is never signed.
+    // Fee/gas ceilings: a signed gas tx can burn at most
+    // `gasLimit * maxFeePerGas`. Unset caps fail closed.
     if cfg.gas_tx_max_gas_limit == 0 {
         return Err(reject(
-            "gas tx: gas-limit cap not pinned (GAS_TX_MAX_GAS_LIMIT unset) — refusing to sign",
+            "gas tx: gas-limit cap not pinned (GAS_TX_MAX_GAS_LIMIT unset) - refusing to sign",
         ));
     }
     if cfg.gas_tx_max_fee_per_gas == 0 {
         return Err(reject(
-            "gas tx: fee cap not pinned (GAS_TX_MAX_FEE_PER_GAS unset) — refusing to sign",
+            "gas tx: fee cap not pinned (GAS_TX_MAX_FEE_PER_GAS unset) - refusing to sign",
         ));
     }
     if tx.gas_limit > cfg.gas_tx_max_gas_limit {
@@ -272,15 +201,10 @@ pub fn validate_gas_tx_request(req: &SignRawDigestRequest, cfg: &BridgeConfig) -
         )));
     }
 
-    // Calldata allowlist (audit C-02). Every signed gas tx must invoke an
-    // operator-allowlisted 4-byte function selector on the pinned destination.
-    // A bare / empty-calldata call is refused: the destination is expected to be
-    // a contract, and an empty-data call still invokes its `fallback()` /
-    // `receive()` — an entrypoint the allowlist neither covers nor can exclude,
-    // and one the enclave cannot vet. Allowing it would silently reintroduce the
-    // "trust the destination is inert" assumption this allowlist exists to
-    // remove. So empty calldata is rejected, and an empty allowlist refuses all
-    // gas-tx signing (fail-closed).
+    // Calldata allowlist. Every signed gas tx must invoke an
+    // allowlisted 4-byte selector on the pinned destination. Empty calldata is
+    // refused (it would invoke `fallback()` / `receive()`), and an empty
+    // allowlist refuses all gas-tx signing.
     match tx.selector {
         Some(selector) => {
             if !cfg.gas_tx_allowed_selectors.contains(&selector) {
@@ -293,7 +217,7 @@ pub fn validate_gas_tx_request(req: &SignRawDigestRequest, cfg: &BridgeConfig) -
         }
         None => {
             return Err(reject(
-                "gas tx: empty calldata is not permitted — a gas tx must invoke an \
+                "gas tx: empty calldata is not permitted - a gas tx must invoke an \
                  allowlisted function selector on the pinned destination; a bare call \
                  would still invoke the destination contract's fallback/receive, which \
                  is outside the allowlist",
@@ -301,9 +225,8 @@ pub fn validate_gas_tx_request(req: &SignRawDigestRequest, cfg: &BridgeConfig) -
         }
     }
 
-    // Compute the digest ourselves from the validated preimage. If the
-    // request also carried a digest (legacy/defence-in-depth), it must
-    // agree — but the signed bytes come from our own hash, never the wire.
+    // Compute the digest from the validated preimage. Any wire-supplied
+    // digest must agree, but the signed bytes come from our own hash.
     let digest: [u8; 32] = Keccak256::digest(&req.unsigned_tx).into();
     if !req.digest.is_empty() && req.digest.as_slice() != digest {
         return Err(reject(
@@ -314,7 +237,7 @@ pub fn validate_gas_tx_request(req: &SignRawDigestRequest, cfg: &BridgeConfig) -
 }
 
 /// Decode an unsigned gas transaction preimage and extract the fields the
-/// allowlist needs. Accepts EIP-1559 (`0x02 ‖ rlp([...9])`) and legacy
+/// allowlist needs. Accepts EIP-1559 (`0x02 || rlp([...9])`) and legacy
 /// EIP-155 (`rlp([...9])`) unsigned bodies; rejects everything else.
 fn parse_gas_tx(raw: &[u8]) -> Result<GasTx<'_>> {
     let first = *raw
@@ -353,12 +276,11 @@ fn parse_gas_tx(raw: &[u8]) -> Result<GasTx<'_>> {
                 items.len()
             )));
         }
-        // The EIP-155 trailer must be (chainId, 0, 0). The two zero scalars
-        // distinguish an *unsigned* signing body from a *signed* tx (whose
-        // trailer is (v, r, s) with non-zero r/s) — we only sign the former.
+        // The trailer must be (chainId, 0, 0). Non-zero r/s means a signed
+        // tx, not an unsigned signing body.
         if !scalar_is_zero(&items[7])? || !scalar_is_zero(&items[8])? {
             return Err(reject(
-                "gas tx: legacy EIP-155 trailer must be (chainId, 0, 0) — \
+                "gas tx: legacy EIP-155 trailer must be (chainId, 0, 0) - \
                  refusing a signed or pre-EIP-155 transaction",
             ));
         }
@@ -384,16 +306,11 @@ fn parse_gas_tx(raw: &[u8]) -> Result<GasTx<'_>> {
     }
 }
 
-// ============================================================================
 // Minimal, defensive RLP decoder
-// ============================================================================
 //
-// Hand-rolled (no external crate) and strict: it decodes attacker-controlled
-// bytes inside the TEE, so it bounds-checks every read, rejects non-canonical
-// encodings, and requires the whole input to be consumed by exactly one
-// top-level item. Correctness here is not load-bearing for the *signed bytes*
-// — those are `keccak256` of the raw preimage — but it must extract fields
-// truthfully and never panic.
+// Hand-rolled and strict: it decodes attacker-controlled bytes inside the TEE,
+// so it bounds-checks every read, rejects non-canonical encodings, and requires
+// the whole input to be consumed by exactly one top-level item.
 
 /// Decode exactly one top-level RLP item and require it to consume the
 /// entire buffer (no trailing bytes).
@@ -557,11 +474,9 @@ fn scalar_u64(item: &Rlp) -> Result<u64> {
 }
 
 /// Interpret a scalar item as a `u128`, used for the wei-denominated fee
-/// fields (`maxFeePerGas`, `maxPriorityFeePerGas`, legacy `gasPrice`) and for
-/// `value`, all of which are `uint256` on the wire. A value wider than 16
-/// bytes is astronomically larger than any pinnable ceiling (`u128::MAX` wei
-/// is ~3.4e20 ETH), so it is rejected here rather than truncated — refusing
-/// wider is fail-closed, and the cap check downstream would reject it anyway.
+/// fields and `value` (all `uint256` on the wire). Wider than 16 bytes is
+/// rejected rather than truncated: `u128::MAX` wei already exceeds any
+/// pinnable ceiling.
 fn scalar_u128(item: &Rlp) -> Result<u128> {
     let s = as_scalar(item)?;
     if s.len() > 16 {
@@ -599,11 +514,8 @@ fn as_address(item: &Rlp) -> Result<[u8; 20]> {
 }
 
 /// Interpret the `data` item as calldata and extract its leading 4-byte
-/// function selector. Empty calldata yields `None` (the caller refuses it — a
-/// bare call still invokes the destination's fallback/receive). Non-empty
-/// calldata must be at least 4 bytes — anything shorter cannot carry a selector
-/// and so could never match the allowlist; it is rejected rather than silently
-/// admitted. A list is refused: `data` is a byte string.
+/// function selector. Empty calldata yields `None` (the caller refuses it).
+/// Non-empty calldata shorter than 4 bytes, or a list, is rejected.
 fn as_calldata_selector(item: &Rlp) -> Result<Option<[u8; 4]>> {
     match item {
         Rlp::Str([]) => Ok(None),
@@ -812,19 +724,16 @@ mod tests {
         assert!(err.to_string().contains("value must be 0"), "got: {err}");
     }
 
-    // =====================================================================
     // LayerZero native-fee carve-out: payable selector + destination ==
     // pinned proxy + value <= ceiling. Each test breaks exactly one leg.
-    // =====================================================================
 
-    /// Verbatim from `MultisigProxy.sol`. Here, not beside the selector, so
-    /// the release build carries no unused constant.
+    /// Verbatim from `MultisigProxy.sol`. Kept in the test module so the
+    /// release build carries no unused constant.
     const ONCHAIN_LZ_FUNDS_OUT_CALL_SIG: &str =
         "lzFundsOutCall((uint256,uint256,uint256,uint256,string,bytes,bytes,uint32,bytes32,\
          uint256,bytes),uint256,uint256,uint256,bytes[])";
 
-    /// Drift fails closed, so this catches a silently disabled carve-out
-    /// rather than an opened hole — still an outage.
+    /// Drift fails closed, so this catches a silently disabled carve-out.
     #[test]
     fn onchain_lz_selector_matches_its_signature() {
         let digest = Keccak256::digest(ONCHAIN_LZ_FUNDS_OUT_CALL_SIG.as_bytes());
@@ -836,7 +745,6 @@ mod tests {
     }
 
     /// LZ posture: `GAS_TX_ALLOWED_TO` pinned at the proxy, plus a ceiling.
-    /// `cfg()` keeps them distinct so both configs stay testable.
     fn lz_cfg() -> BridgeConfig {
         BridgeConfig {
             chain_id: CHAIN_ID,
@@ -846,8 +754,8 @@ mod tests {
             gas_tx_max_value_wei: Some(1_000_000),
             gas_tx_max_gas_limit: MAX_GAS_LIMIT,
             gas_tx_max_fee_per_gas: MAX_FEE_PER_GAS,
-            // The carve-out widens the *value* rule only: `lzFundsOutCall`
-            // must still clear the C-02 selector allowlist like any other call.
+            // The carve-out widens the value rule only; the selector must
+            // still be allowlisted.
             gas_tx_allowed_selectors: vec![ONCHAIN_LZ_FUNDS_OUT_CALL_SELECTOR, ALLOWED_SELECTOR],
             ..Default::default()
         }
@@ -885,9 +793,8 @@ mod tests {
         assert!(err.to_string().contains("value must be 0"), "got: {err}");
     }
 
-    /// The core fix: `GAS_TX_ALLOWED_TO` may be an EOA, which ignores
-    /// calldata — so value also requires `to` == the pinned proxy.
-    /// `cfg()` has gas_tx_allowed_to = 0xAA…, bridge_contract = 0xBB… .
+    /// `GAS_TX_ALLOWED_TO` may be an EOA, which ignores calldata, so value
+    /// also requires `to` == the pinned proxy.
     #[test]
     fn rejects_nonzero_value_when_destination_is_not_the_pinned_proxy() {
         let tx = eip1559_with_data(CHAIN_ID, &ALLOWED_TO, 1_000, &lz_calldata());
@@ -914,8 +821,7 @@ mod tests {
         );
     }
 
-    /// Fail-closed default: a deployment that never sets the pin keeps the
-    /// old `value == 0` posture rather than gaining an unbounded one.
+    /// Fail-closed default: an unset pin keeps the `value == 0` posture.
     #[test]
     fn rejects_nonzero_value_when_ceiling_unset() {
         let uncapped = BridgeConfig {
@@ -941,8 +847,7 @@ mod tests {
         );
     }
 
-    /// `starts_with` is a prefix match, so a bare selector passes leg (a);
-    /// the ceiling is what stops it.
+    /// A bare selector passes leg (a); the ceiling is what stops it.
     #[test]
     fn rejects_bare_selector_above_the_ceiling() {
         let tx = eip1559_with_data(
@@ -1019,7 +924,7 @@ mod tests {
 
     #[test]
     fn rejects_wrong_field_count() {
-        // A 9-field list with the 0x02 prefix is valid; drop a field → 8.
+        // A 9-field list with the 0x02 prefix is valid; drop a field -> 8.
         let body = rlp_list(&[
             rlp_scalar(CHAIN_ID),
             rlp_scalar(7),
@@ -1029,7 +934,7 @@ mod tests {
             rlp_str(&ALLOWED_TO),
             rlp_scalar(0),
             rlp_str(&[]),
-            // accessList omitted → 8 fields
+            // accessList omitted -> 8 fields
         ]);
         let mut tx = vec![TX_TYPE_EIP1559];
         tx.extend_from_slice(&body);
@@ -1194,7 +1099,7 @@ mod tests {
         assert!(err.to_string().contains("nesting too deep"), "got: {err}");
     }
 
-    // ---- fee/gas caps (audit C-02) ----
+    // ---- fee/gas caps ----
 
     #[test]
     fn rejects_gas_limit_over_cap() {
@@ -1307,7 +1212,7 @@ mod tests {
         assert!(err.to_string().contains("exceeds u128"), "got: {err}");
     }
 
-    // ---- calldata selector allowlist (audit C-02) ----
+    // ---- calldata selector allowlist ----
 
     #[test]
     fn accepts_allowlisted_selector_with_args() {

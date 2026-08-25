@@ -1,7 +1,6 @@
 //! Cryptographic primitives for the enclave-to-enclave cloning handshake.
 //!
-//! The handshake has three messages on the wire (see `proto/enclave.proto`
-//! in PR 4):
+//! Three messages on the wire (see `proto/enclave.proto`):
 //!
 //! 1. Parent -> requester: `InitiateCloning { secret, target_pubkey }`.
 //!    Requester generates an X25519 ephemeral keypair, embeds the pubkey in
@@ -16,8 +15,8 @@
 //!    KeyManager from the seed, verifies the derived EVM address matches
 //!    the claimed target_pubkey, transitions to Active.
 //!
-//! This module provides the crypto layer only. PR 4 wires it into the
-//! request handlers and state machine.
+//! This module is the crypto layer only; `server.rs` wires it into the request
+//! handlers and state machine.
 
 #![allow(dead_code)]
 
@@ -46,10 +45,9 @@ const HKDF_INFO: &[u8] = b"seed-encryption";
 /// the cloning handshake. The secret is dropped (and zeroized) when the
 /// session is consumed or dropped.
 ///
-/// `StaticSecret` is used instead of `EphemeralSecret` only because we need
-/// to hold it across two message boundaries (InitiateCloning -> SetClone)
-/// and `EphemeralSecret` is consume-on-DH. `StaticSecret` implements
-/// `ZeroizeOnDrop` when the `zeroize` feature is enabled.
+/// `StaticSecret` rather than `EphemeralSecret`, which is consume-on-DH: the
+/// secret must survive from InitiateCloning to SetClone. It implements
+/// `ZeroizeOnDrop` under the `zeroize` feature.
 pub struct CloneSession {
     secret: StaticSecret,
     public: PublicKey,
@@ -101,10 +99,9 @@ impl std::fmt::Debug for CloneSession {
 
 /// Compute HMAC-SHA256(secret, encryption_pubkey).
 ///
-/// This proves the holder of the cloning secret authorized the request
-/// without transmitting the secret over the wire. The message is the
-/// raw 32 bytes of the X25519 pubkey — deterministic, no canonicalization
-/// ambiguity, unlike the Python enclave-msig implementation that uses JCS(JSON).
+/// Proves the holder of the cloning secret authorized the request without
+/// sending the secret. The message is the raw 32 bytes of the X25519 pubkey, so
+/// there is no canonicalization ambiguity.
 pub fn make_cloning_digest(secret: &str, encryption_pubkey: &[u8; 32]) -> [u8; 32] {
     let mut mac = <HmacSha256 as Mac>::new_from_slice(secret.as_bytes())
         .expect("HMAC accepts any key length");
@@ -125,7 +122,7 @@ pub fn verify_cloning_digest(
 /// Donor side: seal `seed` to the requester's X25519 pubkey using a fresh
 /// ephemeral keypair. Returns `(ciphertext, our_pubkey)`.
 ///
-/// Rejects small-order / non-contributory peer public keys — otherwise an
+/// Rejects small-order / non-contributory peer public keys - otherwise an
 /// attacker sending a small-order point could force a zero shared secret,
 /// making the derived key recoverable from public information and breaking
 /// seed confidentiality.
@@ -267,8 +264,8 @@ mod tests {
         let (ciphertext, _donor_pub) =
             encrypt_seed_for_peer(&requester.public_key(), &seed).unwrap();
 
-        // Use a legit random donor pubkey (not zero — that's small-order
-        // and would trip the contributory check, masking the real assertion).
+        // A random donor pubkey, not zero: zero is small-order and would trip
+        // the contributory check, masking the real assertion.
         let wrong_donor = PublicKey::from(&StaticSecret::random_from_rng(OsRng)).to_bytes();
         let result = requester.decrypt_seed_from_peer(&wrong_donor, &ciphertext);
         assert!(matches!(result, Err(EnclaveError::Clone(_))));
@@ -287,7 +284,7 @@ mod tests {
     fn decrypt_rejects_small_order_peer_pubkey() {
         let requester = CloneSession::new();
         // Build a ciphertext via a legit encrypt call, then attempt to
-        // decrypt with the all-zero peer key — must fail the contributory
+        // decrypt with the all-zero peer key - must fail the contributory
         // check, not silently produce a computable shared secret.
         let (ciphertext, _legit_donor) =
             encrypt_seed_for_peer(&requester.public_key(), &[42u8; 64]).unwrap();
@@ -329,7 +326,7 @@ mod tests {
         let (ciphertext, donor_pub) =
             encrypt_seed_for_peer(&requester_a.public_key(), &seed).unwrap();
 
-        // Different session — shared secret will differ -> auth tag fails.
+        // Different session - shared secret will differ -> auth tag fails.
         let requester_b = CloneSession::new();
         let result = requester_b.decrypt_seed_from_peer(&donor_pub, &ciphertext);
         assert!(matches!(result, Err(EnclaveError::Clone(_))));

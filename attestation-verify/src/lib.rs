@@ -1,11 +1,7 @@
 //! AWS Nitro Enclave attestation document verification.
 //!
-//! Pure-Rust verifier extracted from the enclave crate so that:
-//!   - the enclave's cloning peer-verify path,
-//!   - the parent's external `attest-verify` CLI binary,
-//!
-//! all run the *same* verification code. Single source of truth for
-//! "is this attestation document trustworthy?"
+//! Pure-Rust verifier shared by the enclave's cloning peer-verify path and the
+//! parent's `attest-verify` CLI, so both run the same code.
 //!
 //! Real path: parses COSE_Sign1, verifies the AWS Nitro certificate chain
 //! down from the hardcoded root CA, checks PCR0/1/2 against expected, and
@@ -27,9 +23,7 @@ pub use policy::{
     AttestationMode, AttestedPolicy, BtcDataSource, EvmDataSource, POLICY_COMMITMENT_V2,
 };
 
-// ----------------------------------------------------------------------------
 // Public types
-// ----------------------------------------------------------------------------
 
 #[derive(Debug, Error)]
 pub enum VerifyError {
@@ -49,11 +43,9 @@ pub enum VerifyError {
 
 pub type Result<T> = std::result::Result<T, VerifyError>;
 
-/// Expected PCR values for an enclave we trust.
-///
-/// Sourced out-of-band — typically pinned in a release artifact, on-chain
-/// config, or operator-supplied flag — and compared bytewise against the
-/// PCRs reported in an attestation document.
+/// Expected PCR values for an enclave we trust. Sourced out-of-band (a release
+/// artifact, on-chain config, or an operator flag) and compared bytewise
+/// against the PCRs in an attestation document.
 #[derive(Clone, Debug)]
 pub struct ExpectedPcrs {
     pub pcr0: [u8; 48],
@@ -123,9 +115,7 @@ pub(crate) struct AttestationDocument {
     pub nonce: Option<Vec<u8>>,
 }
 
-// ----------------------------------------------------------------------------
-// Public API — real path (always available)
-// ----------------------------------------------------------------------------
+// Public API - real path (always available)
 
 /// Verify a real (production) Nitro Enclave attestation document.
 ///
@@ -147,9 +137,7 @@ pub fn verify_attestation(
     real::verify_real_document(doc, expected_pcrs, expected_nonce)
 }
 
-// ----------------------------------------------------------------------------
-// Public API — mock path (feature-gated)
-// ----------------------------------------------------------------------------
+// Public API - mock path (feature-gated)
 
 /// Verify a mock attestation document (raw CBOR, no COSE wrapping, no cert chain).
 ///
@@ -176,12 +164,9 @@ pub fn build_mock_document(
     mock::build_mock_document(nonce, public_key, user_data)
 }
 
-/// Build a mock attestation document with caller-specified PCRs.
-///
-/// Like [`build_mock_document`] but lets a test set PCR0/1/2, so it can mint a
-/// peer document whose measurement does *not* match a verifier's expected PCRs
-/// and exercise the PCR-binding rejection path (e.g. the cloning donor refusing
-/// a PCR-mismatched peer). Test-only.
+/// Build a mock attestation document with caller-specified PCRs. Like
+/// [`build_mock_document`], but a test can set PCR0/1/2 to exercise the
+/// PCR-binding rejection path. Test-only.
 #[cfg(feature = "mock")]
 pub fn build_mock_document_with_pcrs(
     nonce: &[u8; 32],
@@ -192,9 +177,7 @@ pub fn build_mock_document_with_pcrs(
     mock::build_mock_document_with_pcrs(nonce, public_key, user_data, pcrs)
 }
 
-// ----------------------------------------------------------------------------
 // Shared helpers
-// ----------------------------------------------------------------------------
 
 fn verify_pcrs(pcrs: &HashMap<u32, Vec<u8>>, expected: &ExpectedPcrs) -> Result<()> {
     let check = |idx: u32, expected_bytes: &[u8; 48]| -> Result<()> {
@@ -229,9 +212,7 @@ fn check_nonce(doc_nonce: &Option<Vec<u8>>, expected: Option<&[u8; 32]>) -> Resu
     Ok(nonce.clone())
 }
 
-// ----------------------------------------------------------------------------
 // Real path (COSE + cert chain)
-// ----------------------------------------------------------------------------
 
 mod real {
     use super::*;
@@ -351,9 +332,8 @@ IwLz3/Y=
         chain.push(signing_cert);
 
         // chain[0] is the root, anchored above by byte-equality. Walk forward,
-        // verifying each issuer both *signed* the next subject and is a CA
-        // permitted to issue subordinate certificates (RFC 5280 §6.1.4). Every
-        // cert except the end-entity acts as an issuer here.
+        // checking each issuer both signed the next subject and is a CA
+        // permitted to issue subordinate certificates (RFC 5280 6.1.4).
         let mut max_path_len = chain.len();
         for i in 0..chain.len() - 1 {
             verify_issuer_signed_subject(&chain[i], &chain[i + 1])?;
@@ -403,10 +383,9 @@ IwLz3/Y=
             .map_err(|_| VerifyError::Certificate("certificate signature invalid".into()))
     }
 
-    /// Enforce RFC 5280 §6.1.4-style CA constraints on `issuer` — a certificate
-    /// that signs a subordinate certificate in the chain (the root and every
-    /// intermediate; never the end-entity). Verifying signatures alone is not
-    /// enough: without this, a non-CA leaf could sign further certificates.
+    /// Enforce RFC 5280 6.1.4-style CA constraints on `issuer`, a certificate
+    /// that signs a subordinate one (the root and every intermediate, never the
+    /// end-entity). Without this a non-CA leaf could sign further certificates.
     ///
     /// Checks:
     ///   * `BasicConstraints` is present and asserts `cA = TRUE`.
@@ -451,7 +430,7 @@ IwLz3/Y=
             }
         }
 
-        // Path length (RFC 5280 §6.1.4 steps (l)/(m)). The trust anchor is not
+        // Path length (RFC 5280 section 6.1.4 steps (l)/(m)). The trust anchor is not
         // counted; every other (non-self-issued) CA consumes one unit of budget
         // and may only tighten it via its own pathLenConstraint.
         let mut budget = max_path_len;
@@ -469,10 +448,9 @@ IwLz3/Y=
         Ok(budget)
     }
 
-    /// RFC 8152 §8.1 mandates the COSE ECDSA signature be the fixed-width raw
-    /// `r || s` concatenation — 96 bytes for P-384 / ES384. Only that form is
-    /// accepted; DER is rejected here (unlike X.509 *certificate* signatures,
-    /// which are legitimately DER — see `verify_issuer_signed_subject`).
+    /// RFC 8152 8.1 mandates the COSE ECDSA signature be the fixed-width raw
+    /// `r || s` concatenation, 96 bytes for P-384 / ES384. DER is rejected here,
+    /// unlike X.509 certificate signatures (see `verify_issuer_signed_subject`).
     pub(super) fn parse_cose_ecdsa_signature(sig_bytes: &[u8]) -> Result<Signature> {
         if sig_bytes.len() != 96 {
             return Err(VerifyError::Attestation(format!(
@@ -496,7 +474,7 @@ IwLz3/Y=
         let map = header.as_map().ok_or_else(|| {
             VerifyError::Attestation("COSE protected header must be a map".into())
         })?;
-        // COSE header label 1 = alg (RFC 8152 §3.1).
+        // COSE header label 1 = alg (RFC 8152 section 3.1).
         let alg = map
             .iter()
             .find(|(k, _)| k.as_integer().map(i128::from) == Some(1))
@@ -622,9 +600,9 @@ IwLz3/Y=
         // --- helpers -------------------------------------------------------
 
         /// A base certificate to mutate. Neither `check_ca_constraints` nor the
-        /// end-entity KeyUsage gate inspects the signature, so cloning the
-        /// embedded root and swapping its extensions exercises the constraint
-        /// logic without minting and signing a full chain.
+        /// end-entity KeyUsage gate inspects the signature, so swapping the
+        /// embedded root's extensions exercises the constraint logic without
+        /// minting a full signed chain.
         fn base_cert() -> Certificate {
             Certificate::from_der(root_cert_der()).expect("embedded root parses")
         }
@@ -663,7 +641,7 @@ IwLz3/Y=
             buf
         }
 
-        // --- COSE signature form (I-05) ------------------------------------
+        // --- COSE signature form ------------------------------------
 
         #[test]
         fn cose_sig_accepts_96_byte_raw() {
@@ -685,8 +663,8 @@ IwLz3/Y=
         #[test]
         fn cose_sig_rejects_der_encoding() {
             // A full-size DER ECDSA-Sig-Value for P-384: SEQUENCE { INTEGER(48),
-            // INTEGER(48) } == 102 bytes. This is the form the old code also
-            // accepted; RFC 8152 requires raw r||s, so it must now be rejected.
+            // INTEGER(48) } == 102 bytes. RFC 8152 requires raw r||s, so it must
+            // be rejected.
             let integer = |bytes: &[u8]| {
                 let mut v = vec![0x02u8, bytes.len() as u8];
                 v.extend_from_slice(bytes);
@@ -703,7 +681,7 @@ IwLz3/Y=
             ));
         }
 
-        // --- COSE protected-header algorithm (I-05) ------------------------
+        // --- COSE protected-header algorithm ------------------------
 
         #[test]
         fn cose_alg_es384_accepted() {
@@ -727,7 +705,7 @@ IwLz3/Y=
             ));
         }
 
-        // --- X.509 CA constraints (W-10 / #70) -----------------------------
+        // --- X.509 CA constraints -----------------------------
 
         #[test]
         fn ca_valid_issuer_passes_and_decrements_budget() {
@@ -755,8 +733,8 @@ IwLz3/Y=
 
         #[test]
         fn ca_non_ca_issuer_rejected() {
-            // BasicConstraints present but cA = FALSE — the W-10 case: a non-CA
-            // cert must not be accepted as an issuer of subordinate certs.
+            // BasicConstraints present but cA = FALSE: a non-CA
+            // cert must not be accepted as an issuer.
             let cert = cert_with_exts(vec![ext(&basic(false, None), false)]);
             assert!(matches!(
                 check_ca_constraints(&cert, false, 3).unwrap_err(),
@@ -812,9 +790,7 @@ IwLz3/Y=
     }
 }
 
-// ----------------------------------------------------------------------------
 // Mock path (raw CBOR, no COSE / cert chain)
-// ----------------------------------------------------------------------------
 
 #[cfg(feature = "mock")]
 mod mock {
@@ -887,9 +863,7 @@ mod mock {
     }
 }
 
-// ----------------------------------------------------------------------------
 // Tests
-// ----------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {

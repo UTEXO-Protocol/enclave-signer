@@ -1,4 +1,4 @@
-//! AWS Nitro Enclave attestation — enclave-side facade.
+//! AWS Nitro Enclave attestation - enclave-side facade.
 //!
 //! Production: requests attestation documents from the NSM device
 //! (`/dev/nsm`) via `aws-nitro-enclaves-nsm-api` and reads the enclave's
@@ -107,9 +107,7 @@ pub fn verify_peer_attestation(
     }
 }
 
-// ----------------------------------------------------------------------------
 // NSM device interaction (Linux only, production path)
-// ----------------------------------------------------------------------------
 
 #[cfg(all(target_os = "linux", not(feature = "mock-attestation")))]
 mod nsm {
@@ -177,9 +175,7 @@ mod nsm {
     }
 }
 
-// ----------------------------------------------------------------------------
-// Tests — facade-level only. The verifier itself is tested in attestation-verify.
-// ----------------------------------------------------------------------------
+// Tests - facade-level only. The verifier itself is tested in attestation-verify.
 
 // Both tests below need the mock-attestation path; gate the whole module
 // so the `use super::*` doesn't fire `unused_imports` when building without

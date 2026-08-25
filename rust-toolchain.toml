@@ -1,0 +1,10 @@
+# Single source of truth for the compiler, so a local `cargo build` uses the
+# same rustc that CI and the production EIF builders use. Codegen differs
+# between releases, and the enclave binary is measured into PCR0 — a developer
+# on a different toolchain cannot reproduce the published measurement.
+#
+# EXACT PATCH VERSION, not "1.96": the minor-only form floats onto the next
+# patch release the moment it ships, which would silently change the compiler
+# under a build that is supposed to be reproducible.
+[toolchain]
+channel = "1.96.1"

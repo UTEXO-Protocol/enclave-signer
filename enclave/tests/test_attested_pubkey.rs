@@ -1,9 +1,8 @@
 //! Integration tests for `GetAttestedPublicKey`.
 //!
-//! Runs with `--features mock-attestation,allow-seed-import`. Mock mode
-//! skips COSE / cert-chain validation but still enforces nonce, PCRs, and
-//! the embedded `public_key` / `user_data` bindings — which is exactly
-//! what we want to exercise here, since those are the bits the new RPC
+//! Runs with `--features mock-attestation,allow-seed-import`. Mock mode skips
+//! COSE / cert-chain validation but still enforces nonce, PCRs, and the
+//! embedded `public_key` / `user_data` bindings, which is what this RPC
 //! produces.
 
 #![cfg(all(feature = "mock-attestation", feature = "allow-seed-import"))]
@@ -59,7 +58,7 @@ fn canonical_bundle(keys: &PublicKeysResponse) -> Vec<u8> {
 }
 
 /// The commitment the enclave actually produces: sha256(pubkey_bundle ||
-/// policy_commitment) (audit C-01). These tests run in a debug build with
+/// policy_commitment). These tests run in a debug build with
 /// `mock-attestation`, so the enclave resolves to the `Development` policy;
 /// mirror that here so the parity check matches byte-for-byte.
 fn expected_user_data(keys: &PublicKeysResponse) -> [u8; 32] {
@@ -195,7 +194,7 @@ fn attested_pubkey_wrong_expected_nonce_fails_verify() {
 }
 
 /// Same field bytes as `canonical_bundle`, but without the u32-BE length
-/// prefixes — a deliberately non-canonical framing used to prove the enclave's
+/// prefixes - a deliberately non-canonical framing used to prove the enclave's
 /// specific serialization (not merely the field contents) is what the
 /// attestation commits to.
 fn naive_concat(keys: &PublicKeysResponse) -> Vec<u8> {
@@ -221,11 +220,10 @@ fn naive_concat(keys: &PublicKeysResponse) -> Vec<u8> {
     out
 }
 
-/// TA-3 (#111): the attestation bundle the enclave builds must verify with the
-/// `attestation-verify` crate *without any adaptation*, and any tampering with
-/// the committed key bundle — including a differently-serialized copy of the
-/// same fields — must be rejected. This pins the canonical-serialization parity
-/// between the enclave's bundle serializer and the verifier's commitment check.
+/// The enclave's attestation bundle must verify with the
+/// `attestation-verify` crate unmodified, and any tampering with the committed
+/// key bundle - including a differently-serialized copy of the same fields -
+/// must be rejected. Pins canonical-serialization parity between the two.
 #[test]
 fn attested_bundle_verifies_unmodified_and_tampering_is_rejected() {
     let port = start_test_server();
@@ -236,7 +234,7 @@ fn attested_bundle_verifies_unmodified_and_tampering_is_rejected() {
     let public_keys = resp.public_keys.clone().expect("public_keys present");
 
     // (1) Accepted unmodified: the enclave-built doc verifies as-is, and its
-    // NSM-bound user_data equals sha256 of the canonical bundle — i.e. the
+    // NSM-bound user_data equals sha256 of the canonical bundle - i.e. the
     // enclave's serialization matches the verifier's byte-for-byte.
     let verified = attestation_verify::verify_mock_attestation(
         &resp.attestation_doc,
@@ -275,7 +273,7 @@ fn attested_bundle_verifies_unmodified_and_tampering_is_rejected() {
     );
 }
 
-/// TA-3 (#111): corrupting the raw attestation bytes must fail verification
+/// Corrupting the raw attestation bytes must fail verification
 /// outright (CBOR integrity), independent of the key-bundle commitment check.
 #[test]
 fn attested_doc_corruption_fails_verification() {
@@ -294,7 +292,7 @@ fn attested_doc_corruption_fails_verification() {
     .expect("baseline doc verifies");
 
     // Truncating the CBOR document leaves an incomplete value that cannot be
-    // decoded — the verifier rejects it.
+    // decoded - the verifier rejects it.
     let truncated = &resp.attestation_doc[..resp.attestation_doc.len() / 2];
     let err = attestation_verify::verify_mock_attestation(
         truncated,

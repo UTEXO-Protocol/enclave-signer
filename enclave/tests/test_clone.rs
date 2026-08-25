@@ -1,13 +1,10 @@
-//! Integration tests for the cloning handshake (T5 PR 4).
+//! Integration tests for the cloning handshake.
 //!
-//! These tests run with `--features mock-attestation,allow-seed-import`.
-//! Mock attestation skips NSM / COSE / cert-chain validation but still
-//! enforces pubkey, digest, nonce, and PCR binding. `allow-seed-import`
-//! is only used to give the *donor* a known fixed seed.
-//!
-//! The cloning path itself does NOT require `allow-seed-import` — PR 3's
-//! `initialize_from_cloned_seed` is production-available and guarded by
-//! the `Phase::Cloning` state, not a feature flag.
+//! Run with `--features mock-attestation,allow-seed-import`. Mock attestation
+//! skips NSM / COSE / cert-chain validation but still enforces pubkey, digest,
+//! nonce, and PCR binding. `allow-seed-import` only gives the donor a known
+//! fixed seed; the cloning path itself does not need it, since
+//! `initialize_from_cloned_seed` is guarded by `Phase::Cloning`.
 
 #![cfg(all(feature = "mock-attestation", feature = "allow-seed-import"))]
 
@@ -79,7 +76,7 @@ fn start_donor() -> (u16, PublicKeysResponse) {
 }
 
 fn start_requester() -> u16 {
-    // Requester does not need a donor secret configured — it receives
+    // Requester does not need a donor secret configured - it receives
     // the secret via InitiateCloningRequest. But set it anyway to match
     // a realistic deployment where both roles are possible.
     start_test_server_with(|state| {
@@ -250,12 +247,10 @@ fn clone_rejects_tampered_ciphertext() {
 
 #[test]
 fn clone_set_failed_completion_leaves_state_and_nonce_unconsumed() {
-    // Requester side: the requester records the donor's attestation nonce only
-    // AFTER `complete_cloning` commits. A SetClone that
-    // fails inside completion (seed decrypt / KeyManager derivation / identity)
-    // must therefore leave the enclave in `Cloning` with the nonce un-consumed,
-    // so a legitimate party whose handshake fails once can retry with the SAME
-    // donor attestation instead of being wedged out by a self-inflicted replay.
+    // The requester records the donor's attestation nonce only after
+    // `complete_cloning` commits, so a SetClone that fails inside completion
+    // leaves the enclave in `Cloning` with the nonce un-consumed and the same
+    // donor attestation can be retried.
     let (donor_port, donor_keys) = start_donor();
     let requester_port = start_requester();
 
@@ -291,8 +286,8 @@ fn clone_set_failed_completion_leaves_state_and_nonce_unconsumed() {
         resp.response
     );
 
-    // 3. Nonce un-consumed: retrying with the ORIGINAL (untampered) clone — the
-    //    same `donor_attestation`, hence the same nonce — still succeeds.
+    // 3. Nonce un-consumed: retrying with the ORIGINAL (untampered) clone - the
+    //    same `donor_attestation`, hence the same nonce - still succeeds.
     //    Pre-fix the doomed attempt consumed the nonce first and this retry
     //    failed on the replay guard.
     request_set_clone(requester_port, &clone)
@@ -327,18 +322,16 @@ fn clone_rejects_duplicate_requester_attestation_nonce_on_donor() {
 
 #[test]
 fn clone_rejected_handshake_does_not_consume_replay_nonce() {
-    // audit W-13: the donor must record a handshake nonce only AFTER the
-    // pubkey/digest/donor-secret checks pass. A rejected (unauthenticated)
-    // handshake must not consume replay-guard capacity — otherwise anyone able
-    // to mint attestations over arbitrary nonces (the get_attested_public_key
-    // oracle) could exhaust the guard without ever knowing the cloning secret.
+    // The donor records a handshake nonce only after the
+    // pubkey/digest/donor-secret checks pass, so an unauthenticated handshake
+    // cannot consume replay-guard capacity.
     let (donor_port, donor_keys) = start_donor();
     let requester_port = start_requester();
 
     let init = initiate_cloning(requester_port, CLONING_SECRET, &donor_keys.evm_address);
 
     // Tamper the cloning digest so the handshake is rejected at the digest
-    // binding — which runs *after* the point where the nonce used to be
+    // binding - which runs *after* the point where the nonce used to be
     // recorded.
     let mut tampered = init.clone();
     tampered.cloning_digest[0] ^= 0xff;
@@ -365,7 +358,7 @@ fn cannot_initialize_after_entering_cloning() {
     // Start a clone session using a throwaway donor address.
     let _init = initiate_cloning(requester_port, CLONING_SECRET, &[0x11u8; 20]);
 
-    // Attempting a fresh InitializeKey must now fail — the enclave is in
+    // Attempting a fresh InitializeKey must now fail - the enclave is in
     // Phase::Cloning, not Phase::Initial.
     let resp = send_request(
         requester_port,
@@ -389,16 +382,14 @@ fn cannot_initialize_after_entering_cloning() {
     }
 }
 
-// ---- audit test coverage: attestation binding on the donor ----
+// ---- attestation binding on the donor ----
 
 #[test]
 fn clone_donor_rejects_wire_pubkey_not_matching_attestation() {
-    // TC-2 (#107): the parent relays (encryption_pubkey, cloning_digest,
-    // requester_attestation) to the donor. The X25519 pubkey inside the
-    // NSM-signed requester attestation is authoritative; the plaintext
-    // `encryption_pubkey` on the wire is not. A malicious parent could swap the
-    // wire pubkey for one it controls to intercept the sealed seed. The donor
-    // must bind the two (handle_get_clone step 3) and abort on any mismatch.
+    // The X25519 pubkey inside the NSM-signed requester
+    // attestation is authoritative, not the plaintext `encryption_pubkey` the
+    // parent relays. A parent could swap the wire pubkey to intercept the sealed
+    // seed, so the donor binds the two and aborts on mismatch.
     let (donor_port, donor_keys) = start_donor();
     let requester_port = start_requester();
 
@@ -434,23 +425,19 @@ fn clone_donor_rejects_wire_pubkey_not_matching_attestation() {
 
 #[test]
 fn clone_donor_refuses_pcr_mismatched_peer_but_accepts_matching_peer() {
-    // TC-1 (#106): the cloning donor must refuse to seal its seed to a peer
-    // whose PCR0/PCR1 do not match the donor's own measurement -- even when the
-    // handshake otherwise carries a valid attestation, the correct encryption
-    // pubkey, and a correctly-authenticated cloning digest. A PCR-equal peer is
-    // accepted in the SAME run to prove the rejection is PCR-specific, not a
-    // blanket failure.
+    // The donor must refuse to seal its seed to a peer whose
+    // PCR0/PCR1 differ from its own measurement, even with an otherwise valid
+    // handshake. A PCR-equal peer is accepted in the same run, to show the
+    // rejection is PCR-specific.
     let (donor_port, donor_keys) = start_donor();
 
     // ---- 1. PCR-mismatched peer: donor must refuse to seal ----
     let bad_requester_port = start_requester();
     let bad_init = initiate_cloning(bad_requester_port, CLONING_SECRET, &donor_keys.evm_address);
 
-    // In mock mode the donor's own PCRs (get_own_pcrs) are all-zero, so a
-    // non-zero PCR0/PCR1 is a genuine measurement mismatch. Keep the real
-    // encryption-pubkey + cloning-digest bindings so the request can only fail
-    // on the PCR check (handle_get_clone step 2, which runs first), not on the
-    // pubkey/digest binding.
+    // In mock mode the donor's own PCRs are all-zero, so a non-zero PCR0/PCR1
+    // is a genuine mismatch. The real pubkey and digest bindings are kept so the
+    // request can only fail on the PCR check, which runs first.
     let mismatched_pcrs =
         attestation_verify::ExpectedPcrs::new([0x11u8; 48], [0x22u8; 48], [0u8; 48]);
     let mismatched_attestation = attestation_verify::build_mock_document_with_pcrs(

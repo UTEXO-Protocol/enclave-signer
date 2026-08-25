@@ -1,3 +1,4 @@
+#[cfg(feature = "spv")]
 use std::sync::Mutex;
 
 use crate::config::BridgeConfig;
@@ -6,6 +7,10 @@ use crate::error::{EnclaveError, Result};
 use crate::networks::rgb::validation::RgbValidator;
 use crate::proto::sign_request::{DestinationNetwork, SourceNetwork};
 
+// `ccd` is self-contained, so its module is feature-gated. `rgb` and `evm` stay
+// always-compiled: they are woven into shared code (keys.rs PSBT signing,
+// error.rs SpvError), and their heavy deps sit behind `rgb-validation`.
+#[cfg(feature = "ccd")]
 pub mod ccd;
 pub mod evm;
 pub mod rgb;
@@ -24,28 +29,26 @@ pub struct ValidationContext<'a> {
     pub bridge_config: &'a BridgeConfig,
     #[cfg(feature = "rgb-validation")]
     pub rgb_validator: Option<&'a RgbValidator>,
+    #[cfg(feature = "spv")]
     pub header_chain: &'a Mutex<crate::networks::rgb::spv::HeaderChain>,
-    /// Resolves whether a Bitcoin outpoint pays back to this enclave. Required
-    /// by the send-RGB per-output recipient bind (W-06 / #52) to tell bridge
-    /// change from a payout to a third party. The outpoint may sit on the PSBT
-    /// being signed or on an earlier transaction — see
+    /// Resolves whether a Bitcoin outpoint pays back to this enclave.
+    /// Required by the send-RGB per-output recipient bind to tell
+    /// bridge change from a payout to a third party. The outpoint may sit on
+    /// the PSBT being signed or on an earlier transaction - see
     /// [`crate::networks::rgb::psbt_validation::SelfOwnedOutpoint`].
     ///
-    /// A callback so the key lock is taken only for that resolution, never
-    /// across consignment validation's Esplora/Electrum round-trips. `None`
-    /// fails the bind closed — an enclave that cannot identify its own outputs
-    /// must not sign a send-RGB PSBT.
+    /// A callback, so the key lock is taken only for that resolution and never
+    /// across consignment validation's network round-trips. `None` fails the
+    /// bind closed.
     #[cfg(feature = "rgb-validation")]
     pub self_owned_psbt_outputs:
         Option<crate::networks::rgb::psbt_validation::SelfOwnedOutpoint<'a>>,
 }
 
-/// Outcome of validating a source network: the route proof, plus — for an RGB
-/// source on an `rgb-validation` build — the validated consignment. The EVM
-/// destination signer binds the `fundsOut` calldata (OpId/burnId, BtcRelay
-/// agreement, witness confirmation) to this consignment, so it must survive
-/// past source validation rather than being discarded. `None` for EVM sources
-/// and the dev-mode bypass.
+/// Outcome of validating a source network: the route proof, plus the validated
+/// consignment for an RGB source on an `rgb-validation` build. The EVM
+/// destination signer binds the `fundsOut` calldata to that consignment, so it
+/// must outlive source validation. `None` for EVM sources and dev-mode.
 pub struct SourceProof {
     pub proof: RouteProof,
     #[cfg(feature = "rgb-validation")]
@@ -64,17 +67,26 @@ pub fn validate_source(
             #[cfg(feature = "rgb-validation")]
             rgb_consignment: None,
         }),
+        // RGB is always compiled; `rgb::validate_source` fails closed (with a
+        // "requires --features rgb-validation" message) on a build that lacks
+        // the validator, so a `ccd`-only enclave refuses RGB sources there.
         SourceNetwork::RgbSource(source) => rgb::validate_source(amount, source, ctx),
+        // Concordium source handling is gated with the `ccd` feature.
+        #[cfg(feature = "ccd")]
         SourceNetwork::CcdSource(source) => Ok(SourceProof {
             proof: ccd::validate_source(amount, source)?,
             #[cfg(feature = "rgb-validation")]
             rgb_consignment: None,
         }),
+        #[allow(unreachable_patterns)]
+        _ => Err(EnclaveError::InvalidRequest(
+            "source network not supported by this build (rebuild with `--features ccd`)".into(),
+        )),
     }
 }
 
 /// Route proof plus, for an EVM `fundsOut`, the calldata decoded once into one
-/// typed intent that the later stages consume (I-12 / #165). `None` for RGB
+/// typed intent that the later stages consume. `None` for RGB
 /// destinations and the dev-mode bypass.
 pub struct DestinationProof {
     pub proof: RouteProof,
@@ -105,11 +117,11 @@ pub fn validate_destination(
         DestinationNetwork::RgbDestination(destination) => {
             rgb::validate_destination(destination, ctx)?;
 
-            // The destination amount is the consignment's **recipient leg**,
-            // derived and proven inside the enclave (W-06 / #52) — not the
-            // host-supplied `psbt_output_amount`, which nothing checks. Only
-            // builds without that binding fall back to the wire field, and
-            // those builds run no destination cross-checks at all.
+            // The destination amount is the consignment's recipient leg,
+            // proven inside the enclave, not the unchecked
+            // host-supplied `psbt_output_amount`. Only builds without that
+            // binding fall back to the wire field, and they run no destination
+            // cross-checks at all.
             #[cfg(all(feature = "rgb-validation", not(feature = "dev-mode")))]
             let destination_amount =
                 rgb::validate_destination_anchor(destination, amount, source_commission, ctx)?;
@@ -161,6 +173,7 @@ pub fn validate_route_proofs(
         }
         // Concordium fundsIn -> EVM release. Source finality/structure was
         // validated by the listener; bind the release amount to the destination.
+        #[cfg(feature = "ccd")]
         (SourceNetwork::CcdSource(_), DestinationNetwork::EvmDestination(_)) => {
             validate_amount_covers_destination(source_proof.amount, destination_proof.amount)
         }
@@ -170,15 +183,11 @@ pub fn validate_route_proofs(
     }
 }
 
-/// Both sides are **bridge asset units**, not sats.
-///
-/// `source_amount` is the EVM `FundsIn` token amount (verified against the
-/// on-chain log by `evm::evm_event::verify_funds_in_event`); an RGB
-/// `destination_amount` is the consignment's recipient leg in RGB asset units
-/// (`TransitionOutput::amount`), which the bridge issues 1:1 against the EVM
-/// token. Neither is a Bitcoin value — nothing here reads
-/// `psbt.unsigned_tx.output`, and the sats-denominated checks on a PSBT live in
-/// [`crate::networks::rgb::btc_crosscheck`] instead.
+/// Both sides are bridge asset units, not sats. `source_amount` is the EVM
+/// `FundsIn` token amount verified by `evm::evm_event::verify_funds_in_event`;
+/// an RGB `destination_amount` is the consignment's recipient leg in RGB asset
+/// units, issued 1:1 against the EVM token. The sats-denominated PSBT checks
+/// live in [`crate::networks::rgb::btc_crosscheck`].
 fn validate_amount_covers_destination(source_amount: u64, destination_amount: u64) -> Result<()> {
     if source_amount < destination_amount {
         return Err(EnclaveError::CrossCheck(format!(
@@ -210,7 +219,9 @@ fn validate_operation_ids_match(source: &RouteProof, destination: &RouteProof) -
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::proto::{CcdSource, EvmDestination, EvmSource, RgbDestination, RgbSource};
+    #[cfg(feature = "ccd")]
+    use crate::proto::CcdSource;
+    use crate::proto::{EvmDestination, EvmSource, RgbDestination, RgbSource};
 
     fn evm_source(commission: u64) -> SourceNetwork {
         SourceNetwork::EvmSource(EvmSource {
@@ -246,6 +257,7 @@ mod tests {
         })
     }
 
+    #[cfg(feature = "ccd")]
     fn ccd_source(commission: u64) -> SourceNetwork {
         SourceNetwork::CcdSource(CcdSource {
             tx_hash: vec![0xCC; 32],
@@ -284,6 +296,7 @@ mod tests {
         .is_ok());
     }
 
+    #[cfg(feature = "ccd")]
     #[test]
     fn route_proofs_accept_ccd_source_to_evm_destination() {
         assert!(validate_route_proofs(
@@ -295,6 +308,7 @@ mod tests {
         .is_ok());
     }
 
+    #[cfg(feature = "ccd")]
     #[test]
     fn route_proofs_reject_underfunded_ccd_to_evm_destination() {
         let err = validate_route_proofs(
@@ -306,6 +320,7 @@ mod tests {
         assert!(err.is_err());
     }
 
+    #[cfg(feature = "ccd")]
     #[test]
     fn ccd_validate_source_trusts_and_binds_amount() {
         let proof = ccd::validate_source(
@@ -319,6 +334,7 @@ mod tests {
         assert_eq!(proof.amount, 990);
     }
 
+    #[cfg(feature = "ccd")]
     #[test]
     fn ccd_validate_source_rejects_bad_tx_hash() {
         let err = ccd::validate_source(

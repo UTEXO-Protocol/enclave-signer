@@ -18,31 +18,23 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Rust 1.96
+      - name: Install Rust 1.96.1
         uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: "1.96"
+          toolchain: "1.96.1"
           components: rustfmt, clippy
 
       - name: Install system dependencies
-        run: sudo apt-get update && sudo apt-get install -y pkg-config libssl-dev protobuf-compiler
+        run: sudo apt-get update && sudo apt-get install -y pkg-config libssl-dev
 
-      # The `rgb-consignment` dep (used by the rgb-validation / spv
-      # feature combos) and the `federated-signer-proto` dep are hosted
-      # in private repos and fetched over SSH. Load read-only deploy
-      # keys registered on UTEXO-Protocol/rgb-consignment-parser and
-      # UTEXO-Protocol/federated-signer-proto into the agent so cargo's
-      # `git fetch` can authenticate. The default feature set now
-      # includes `spv` (which pulls `rgb-validation`), so every build
-      # below needs these keys — including the minimal
-      # `--no-default-features` build, which still fetches the private
-      # proto crate.
-      - name: Set up SSH for private RGB deps
+      # Only ONE private dep is left anywhere in the repo: federated-signer-proto,
+      # needed by `parent` — which this job also builds. The enclave workspace
+      # itself resolves entirely over public HTTPS and needs no credentials (see
+      # the enclave-only jobs below, which load no key at all).
+      - name: Set up SSH for the parent's private proto dep
         uses: webfactory/ssh-agent@v0.9.0
         with:
-          ssh-private-key: |
-            ${{ secrets.RGB_CONSIGNMENT_PARSER_DEPLOY_KEY }}
-            ${{ secrets.FEDERATED_SIGNER_PROTO_DEPLOY_KEY }}
+          ssh-private-key: ${{ secrets.FEDERATED_SIGNER_PROTO_DEPLOY_KEY }}
 
       - name: Cache cargo registry
         uses: actions/cache@v4
@@ -51,15 +43,20 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
+            parent/target
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-
 
+      # NOTE: `parent/` is a SEPARATE cargo workspace (see the root Cargo.toml
+      # comment), so `--workspace` here covers only enclave / enclave-proto /
+      # attestation-verify. Parent gets its own steps below; keep them in sync
+      # when adding checks.
       - name: Check formatting
         run: cargo fmt --all -- --check
 
-      # The default feature set is now `spv` (which pulls `rgb-validation`), so
-      # the default build/clippy/test below exercise the production signing
-      # path — the SPV-anchored fundsOut flow shipped in the EIF.
+      # Defaults are the production posture (rgb + ccd + helios), so the steps
+      # below exercise the signing path shipped in the EIF. Heavy build; the
+      # cache above absorbs it.
       - name: Build (default features)
         run: cargo build --workspace
 
@@ -71,14 +68,27 @@ jobs:
       - name: Test (default features)
         run: cargo test --workspace
 
+      # --- parent workspace (separate lockfile, separate target dir) ---------
+      - name: Check formatting (parent)
+        run: cargo fmt --all --manifest-path parent/Cargo.toml -- --check
+
+      - name: Build (parent)
+        run: cargo build --manifest-path parent/Cargo.toml
+
+      - name: Clippy (parent)
+        run: cargo clippy --manifest-path parent/Cargo.toml --all-targets -- -D warnings
+
+      - name: Test (parent)
+        run: cargo test --manifest-path parent/Cargo.toml
+
       # Production build profile: the exact feature set shipped in the EIF
-      # (build/Dockerfile.enclave). `helios` is required in production (#77) and
-      # makes this a heavy build (2nd alloy major, revm, BLS, vendored OpenSSL).
+      # (build/Dockerfile.enclave). `helios` is required in production and
+      # makes this a heavy build (alloy major, revm, BLS, vendored OpenSSL).
       - name: Build (production combo)
-        run: cargo build -p utexo-bridge-enclave --features vsock,rgb-validation,spv,evm-rpc,helios
+        run: cargo build -p utexo-bridge-enclave --features vsock,rgb,ccd,evm-rpc,helios
 
       - name: Clippy (production combo)
-        run: cargo clippy -p utexo-bridge-enclave --features vsock,rgb-validation,spv,evm-rpc,helios --all-targets -- -D warnings
+        run: cargo clippy -p utexo-bridge-enclave --features vsock,rgb,ccd,evm-rpc,helios --all-targets -- -D warnings
 
       # SPV path coverage. Cannot use vsock here (Linux runner without
       # vsock support); spv pulls in rgb-validation transitively, which is
@@ -86,12 +96,34 @@ jobs:
       - name: Test (--features spv)
         run: cargo test -p utexo-bridge-enclave --features spv
 
+      # RGB-only EIF profile, `ccd` dropped. Mirrors Dockerfile.enclave.rgb;
+      # keeps helios (this build still has the bridge-signing path).
+      # CCD requests (SignCcd / CcdSource) must be refused here.
+      - name: Build (rgb-only)
+        run: cargo build -p utexo-bridge-enclave --no-default-features --features vsock,rgb,evm-rpc,helios
+      - name: Clippy (rgb-only)
+        run: cargo clippy -p utexo-bridge-enclave --no-default-features --features vsock,rgb,evm-rpc,helios --all-targets -- -D warnings
+      - name: Test (rgb-only)
+        run: cargo test -p utexo-bridge-enclave --no-default-features --features rgb,evm-rpc,helios,mock-attestation,allow-seed-import
+
+      # CCD-only single-network EIF profile: ccd + shared EVM signing, no RGB
+      # stack (no rgb-ops/rgb-consignment/rgb-schemas/spv). Mirrors
+      # Dockerfile.enclave.ccd; RGB requests must be refused. The SignCcd
+      # integration suite (test_sign_ccd.rs) is gated on ccd+allow-seed-import.
+      - name: Build (ccd-only)
+        run: cargo build -p utexo-bridge-enclave --no-default-features --features vsock,ccd
+      - name: Clippy (ccd-only)
+        run: cargo clippy -p utexo-bridge-enclave --no-default-features --features vsock,ccd,mock-attestation,allow-seed-import --all-targets -- -D warnings
+      - name: Test (ccd-only)
+        run: cargo test -p utexo-bridge-enclave --no-default-features --features ccd,mock-attestation,allow-seed-import
+
       # Minimal build: no features at all (`--no-default-features` drops the
-      # now-default `spv`). Keeps the no-SPV path compiling and exercises the
-      # M-01 / #61 guard that a no-spv build refuses to sign `fundsOut`
+      # default rgb/ccd/helios set). Keeps the no-SPV path compiling and exercises the
+      # Guard that a no-spv build refuses to sign `fundsOut`
       # (test_no_spv_build_refuses_funds_out_even_without_merkle_proofs).
-      # Skips the private `rgb-consignment` dep, but still fetches the private
-      # `federated-signer-proto` crate — the SSH agent set up above covers it.
+      # Skips the rgb-consignment dep entirely. Like every enclave build here it
+      # needs no credentials -- the property that makes the EIF publicly
+      # reproducible.
       - name: Build (minimal — no default features)
         run: cargo build -p utexo-bridge-enclave --no-default-features
 
@@ -101,7 +133,7 @@ jobs:
       - name: Test (minimal — no default features)
         run: cargo test -p utexo-bridge-enclave --no-default-features
 
-      # In-enclave EVM FundsIn verification (#60). The predicate + decoding
+      # In-enclave EVM FundsIn verification. The predicate + decoding
       # tests use a FakeProvider, so no real RPC is needed in CI.
       - name: Test (--features evm-rpc)
         run: cargo test -p utexo-bridge-enclave --features evm-rpc
@@ -133,25 +165,16 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Rust 1.96
+      - name: Install Rust 1.96.1
         uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: "1.96"
+          toolchain: "1.96.1"
 
       - name: Install system dependencies
-        run: sudo apt-get update && sudo apt-get install -y pkg-config libssl-dev protobuf-compiler
+        run: sudo apt-get update && sudo apt-get install -y pkg-config libssl-dev
 
-      # `rgb-consignment` is an optional git dep, but cargo still resolves
-      # (and fetches) it from its pinned lockfile revision even when the
-      # feature is off — so the build needs the deploy key to reach the
-      # `compile_error!`, just like the `ci` job above.
-      - name: Set up SSH for private RGB deps
-        uses: webfactory/ssh-agent@v0.9.0
-        with:
-          ssh-private-key: |
-            ${{ secrets.RGB_CONSIGNMENT_PARSER_DEPLOY_KEY }}
-            ${{ secrets.FEDERATED_SIGNER_PROTO_DEPLOY_KEY }}
-
+      # No credentials: `rgb-consignment` is a public HTTPS git dep, and the
+      # enclave workspace has no private sources at all.
       - name: Cache cargo registry
         uses: actions/cache@v4
         with:
@@ -159,6 +182,7 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
+            parent/target
           key: ${{ runner.os }}-cargo-release-guards-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-release-guards-
 
@@ -176,7 +200,7 @@ jobs:
           echo "OK: release build correctly rejected '${{ matrix.feature }}' via the compile_error guard"
 
   # Assert that enabling `rgb-validation` without `spv` fails to compile via the
-  # `compile_error!` in lib.rs (audit M-01 / #61). Without SPV, a consignment's
+  # `compile_error!` in lib.rs. Without SPV, a consignment's
   # witness txs are anchored only through the host-controlled Esplora resolver,
   # so the enclave must never be built that way. Runs separately from `ci`
   # because the build is expected to fail. Unlike `release-guards` this is not
@@ -187,25 +211,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Rust 1.96
+      - name: Install Rust 1.96.1
         uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: "1.96"
+          toolchain: "1.96.1"
 
       - name: Install system dependencies
-        run: sudo apt-get update && sudo apt-get install -y pkg-config libssl-dev protobuf-compiler
+        run: sudo apt-get update && sudo apt-get install -y pkg-config libssl-dev
 
-      # `--features rgb-validation` pulls the private `rgb-consignment` dep, and
-      # cargo also resolves the private `federated-signer-proto` git dep from the
-      # lockfile, both fetched before it reaches our crate's `compile_error!`, so
-      # both deploy keys are required here just like the `ci` job above.
-      - name: Set up SSH for private RGB deps
-        uses: webfactory/ssh-agent@v0.9.0
-        with:
-          ssh-private-key: |
-            ${{ secrets.RGB_CONSIGNMENT_PARSER_DEPLOY_KEY }}
-            ${{ secrets.FEDERATED_SIGNER_PROTO_DEPLOY_KEY }}
-
+      # No credentials: `rgb-consignment` is a public HTTPS git dep.
       - name: Cache cargo registry
         uses: actions/cache@v4
         with:
@@ -213,6 +227,7 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
+            parent/target
           key: ${{ runner.os }}-cargo-feature-guards-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-feature-guards-
 
