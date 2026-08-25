@@ -10,8 +10,8 @@ use crate::error::{EnclaveError, Result};
 /// funds_in_operation_id, rgb_asset_id)`. `chain_id` and `bridge_contract` come
 /// from the pinned [`crate::config::BridgeConfig`], not the request.
 /// `funds_in_operation_id` is the on-chain `BridgeFundsIn.operationId`, already
-/// verified by [`crate::networks::evm::evm_event::verify_funds_in_event`]
-///. Variable-length fields are length-prefixed and a domain tag is
+/// verified by [`crate::networks::evm::evm_event::verify_funds_in_event`].
+/// Variable-length fields are length-prefixed and a domain tag is
 /// mixed in, so distinct tuples cannot collide by concatenation ambiguity.
 ///
 /// Consumed by the soft in-memory replay guard
@@ -88,7 +88,7 @@ pub fn validate_psbt_bytes(psbt_bytes: &[u8]) -> Result<()> {
 ///
 /// Enforces, fail-closed:
 ///   1. The consignment's last transition is an IFA `Transfer`
-/// (`ifa::TS_TRANSFER`) or an IFA `Inflation` (`ifa::TS_INFLATION`).
+///      (`ifa::TS_TRANSFER`) or an IFA `Inflation` (`ifa::TS_INFLATION`).
 ///   2. Identity bind: `psbt.unsigned_tx.compute_txid()` equals the
 ///      consignment's last witness txid. A segwit txid commits to every
 ///      non-witness field, so equality means signing this PSBT finalizes
@@ -107,7 +107,7 @@ pub fn validate_psbt_bytes(psbt_bytes: &[u8]) -> Result<()> {
 ///      against `source_amount - source_commission`. Exact equality for an
 ///      Inflation (any surplus is an over-mint), a coverage lower bound for a
 ///      Transfer (whose total includes bridge change).
-/// 7. Per-output recipient bind: each `OS_ASSET` output is
+///   7. Per-output recipient bind: each `OS_ASSET` output is
 ///      classified by its seal. A confidential (`utxob:`) seal is a recipient
 ///      leg; a revealed (`txid:vout`) seal counts as bridge change only if it
 ///      names a vout of this witness tx and that output is provably ours

@@ -310,7 +310,7 @@ pub fn parse_checkpoint_spec(
 ///
 /// Layout (per Oleksandr's note):
 /// - `6a 4c 09 01 1e 00 00 00 00 00 00 00 00` - OP_RETURN-prefixed block-time
-/// spec (bitcoin#29365): 30s = `0x1e` little-endian u64.
+///   spec (bitcoin#29365): 30s = `0x1e` little-endian u64.
 /// - `4c 69 53 21 <33-byte pubkey> 21 <33-byte pubkey> 21 <33-byte pubkey>
 ///    53 ae` - `OP_PUSHDATA1 0x69 OP_3 <pk1> <pk2> <pk3> OP_3 OP_CHECKMULTISIG`
 ///   = 3-of-3 multisig over three federation signing keys.

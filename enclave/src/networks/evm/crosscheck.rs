@@ -346,8 +346,7 @@ mod tests {
 
         #[test]
         fn witnesses_confirmed_passes_when_all_mined() {
-            // No non-mined witnesses surfaced -> the recency guard is a no-op
-            //.
+            // No non-mined witnesses surfaced -> the recency guard is a no-op.
             let validated = validated_with_last(transfer_transition(1000));
             assert!(super::super::assert_witnesses_confirmed(&validated).is_ok());
         }

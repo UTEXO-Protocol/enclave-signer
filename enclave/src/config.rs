@@ -265,8 +265,8 @@ impl BridgeConfig {
         }
     }
 
-    /// True only when all three fields are non-zero / non-empty (4th
-    ///). Only a fully-pinned config authorises bridge signing.
+    /// True only when all three fields are non-zero / non-empty. Only a
+    /// fully-pinned config authorises bridge signing.
     ///
     /// An AND, not an OR: under an OR a zero `chain_id` made the enclave
     /// permanently un-signable while still claiming configured, and a zero
@@ -281,8 +281,7 @@ impl BridgeConfig {
 
     /// True when some but not all pin fields are set: a botched production
     /// config, distinct from a fully-empty one that selects the dev path.
-    /// Callers fail closed rather than falling back to listener-trusting mode
-    ///.
+    /// Callers fail closed rather than falling back to listener-trusting mode.
     pub fn is_partially_configured(&self) -> bool {
         let any = self.chain_id != 0
             || self.bridge_contract != [0u8; 20]
@@ -415,8 +414,8 @@ fn is_loopback_url(url: &str) -> bool {
     host == "127.0.0.1" || host == "localhost"
 }
 
-/// Helios light-client config for TRUSTLESS in-enclave EVM event verification
-///, loaded at boot when the `helios` feature is built.
+/// Helios light-client config for TRUSTLESS in-enclave EVM event
+/// verification, loaded at boot when the `helios` feature is built.
 ///
 /// Selection is runtime: [`HeliosConfig::from_env`] returns `Some` only when
 /// `HELIOS_EXECUTION_RPC` is set, which selects the Helios-verified provider

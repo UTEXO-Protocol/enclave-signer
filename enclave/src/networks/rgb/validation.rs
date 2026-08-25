@@ -303,8 +303,7 @@ pub struct ValidatedConsignment {
     /// order** - same encoding as [`Self::witness_txids`]. `validate()` already
     /// hard-rejects `Archived`/unresolvable witnesses, so only these softer
     /// not-yet-confirmed states reach here, and only because this set is built
-    /// from the rgbstd status that was previously discarded (4th
-    ///).
+    /// from the rgbstd status that was previously discarded.
     ///
     /// A non-empty set is **expected** for the send-RGB (EVM-lock -> RGB-send)
     /// PSBT path: that witness tx is freshly composed and unbroadcast, so it is
@@ -408,8 +407,8 @@ pub enum OutputSeal {
 
 /// Hard cap on a single blocking Esplora HTTP call (connect + read), in
 /// seconds. The egress runs through the host-controlled vsock proxy on the
-/// signing path, so without a timeout a stalled host pins the worker thread
-///. Aligned with `conn.rs`'s `TOTAL_REQUEST_TIMEOUT`.
+/// signing path, so without a timeout a stalled host pins the worker
+/// thread. Aligned with `conn.rs`'s `TOTAL_REQUEST_TIMEOUT`.
 /// Compile-time and PCR-attested, not host-tunable.
 const ESPLORA_HTTP_TIMEOUT_SECS: u64 = 30;
 
@@ -712,8 +711,8 @@ impl RgbValidator {
         //    ssl://|tcp:// -> Electrum, otherwise Esplora REST. Electrum is
         //    the production path: TLS terminates inside the enclave against
         //    the real server cert, so a compromised host cannot forge witness
-        // data. The Esplora `.timeout()` is load-bearing (final
-        //) - it bounds a stalled call on the signing path.
+        // data. The Esplora `.timeout()` is load-bearing - it bounds a
+        // stalled call on the signing path.
         let is_electrum =
             self.indexer_url.starts_with("ssl://") || self.indexer_url.starts_with("tcp://");
         let mut resolver = if is_electrum {

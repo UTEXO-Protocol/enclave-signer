@@ -21,8 +21,8 @@ pub struct ServerContext {
     /// `user_data` commitment and used to cross-check `SignEvm` requests
     /// against operator-pinned values.
     pub bridge_config: BridgeConfig,
-    /// The enclave's single, explicit security posture, resolved once at boot
-    ///. Committed into the attestation `user_data` commitment via
+    /// The enclave's single, explicit security posture, resolved once at
+    /// boot. Committed into the attestation `user_data` commitment via
     /// [`crate::policy::SecurityPolicy::commitment_bytes`] and consulted by the
     /// signing handlers instead of re-deriving posture from build features and
     /// empty request fields.
@@ -324,8 +324,8 @@ fn handle_sign(ctx: &ServerContext, req: SignRequest) -> Result<EnclaveResponse>
         EnclaveError::InvalidRequest("sign request has no destination_network".into())
     })?;
 
-    // Self-owned-output oracle for the send-RGB per-output recipient bind
-    //. A closure, so the key lock is held only while the outputs
+    // Self-owned-output oracle for the send-RGB per-output recipient bind.
+    // A closure, so the key lock is held only while the outputs
     // resolve and never across validation's Esplora/Electrum calls.
     #[cfg(feature = "rgb-validation")]
     let self_owned_psbt_outputs = |psbt: &bitcoin::psbt::Psbt| {
@@ -479,9 +479,9 @@ fn handle_sign(ctx: &ServerContext, req: SignRequest) -> Result<EnclaveResponse>
     let result = match destination {
         DestinationNetwork::EvmDestination(destination) => {
             // RGB->EVM `fundsOut` binding: tie the calldata about to be signed
-            // to the operation `validate()` authenticated - witness confirmation
-            //, BtcRelay agreement, and the
-            // consignment-bound release amount.
+            // to the operation `validate()` authenticated - witness
+            // confirmation, BtcRelay agreement, and the consignment-bound
+            // release amount.
             //
             // RGB-source-only. A CCD source carries no consignment and a
             // CcdSource -> EvmDestination release is already authorized above;

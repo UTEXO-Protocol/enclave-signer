@@ -130,8 +130,7 @@ pub fn validate_destination(
             destination.call_data.len()
         )));
     }
-    // Reject an oversize calldata before any offset extraction or signing
-    //.
+    // Reject an oversize calldata before any offset extraction or signing.
     if destination.call_data.len() > MAX_FUNDS_OUT_CALL_DATA_LEN {
         return Err(EnclaveError::CrossCheck(format!(
             "call_data too large: {} bytes (max {})",

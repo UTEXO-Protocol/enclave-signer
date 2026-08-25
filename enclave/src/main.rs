@@ -191,8 +191,8 @@ fn main() {
     // 127.0.0.1:<local_port> is forwarded to vsock:<vsock_port>. For an Electrum
     // ssl:// endpoint we listen on the URL's own port and pin its hostname to
     // 127.0.0.1 in /etc/hosts, so TLS terminates inside the enclave against the
-    // real server cert and the host relays ciphertext only. Untrusted egress
-    //; see `vsock_forwarder`'s trust-boundary note.
+    // real server cert and the host relays ciphertext only. Untrusted egress;
+    // see `vsock_forwarder`'s trust-boundary note.
     #[cfg(all(feature = "vsock", target_os = "linux"))]
     {
         // Esplora egress is only needed by the RGB/BTC stack (consignment
@@ -359,9 +359,10 @@ fn main() {
         std::sync::Mutex::new(HeaderChain::new(spv_network, checkpoint))
     };
 
-    // Build the in-enclave EVM RPC client for independent FundsIn verification
-    //. The URL must be the loopback forwarder; responses are host-relayed
-    // and treated as evidence (verified fail-closed), not trusted input.
+    // Build the in-enclave EVM RPC client for independent FundsIn
+    // verification. The URL must be the loopback forwarder; responses are
+    // host-relayed and treated as evidence (verified fail-closed), not
+    // trusted input.
     #[cfg(feature = "evm-rpc")]
     let (evm_rpc_client, evm_rpc_config) = {
         use utexo_bridge_enclave::networks::evm::evm_event::{AlloyEvmClient, EvmReceiptProvider};

@@ -32,8 +32,8 @@ pub enum SecurityPolicy {
     Development { reason: DevReason },
 }
 
-/// The pinned facts and enabled modes of a production bridge-signing enclave
-///: signing modes, chain/contract/asset pins, expected attestation
+/// The pinned facts and enabled modes of a production bridge-signing enclave:
+/// signing modes, chain/contract/asset pins, expected attestation
 /// values, and allowed data sources, all committed into attestation
 /// `user_data`.
 #[derive(Clone, Debug, PartialEq, Eq)]
