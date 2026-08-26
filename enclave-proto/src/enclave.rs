@@ -205,7 +205,7 @@ pub struct SignRequest {
     pub amount: u64,
     #[prost(oneof="sign_request::SourceNetwork", tags="2, 3, 6")]
     pub source_network: ::core::option::Option<sign_request::SourceNetwork>,
-    #[prost(oneof="sign_request::DestinationNetwork", tags="4, 5")]
+    #[prost(oneof="sign_request::DestinationNetwork", tags="4, 5, 7")]
     pub destination_network: ::core::option::Option<sign_request::DestinationNetwork>,
 }
 /// Nested message and enum types in `SignRequest`.
@@ -225,6 +225,8 @@ pub mod sign_request {
         EvmDestination(super::EvmDestination),
         #[prost(message, tag="5")]
         RgbDestination(super::RgbDestination),
+        #[prost(message, tag="7")]
+        RgbInflationDestination(super::RgbInflationDestination),
     }
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
@@ -351,6 +353,30 @@ pub struct RgbDestination {
     /// keccak256(consignment).
     #[prost(bytes="vec", tag="6")]
     pub consignment_hash: ::prost::alloc::vec::Vec<u8>,
+}
+/// EVM->RGB mint destination. Deliberately a separate message from
+/// RgbDestination: an inflation ships no consignment, and the send path must not
+/// be reachable by omitting one (M-01: explicit type, never inference from absent
+/// fields). The enclave validates the fascia instead - it must anchor the exact
+/// PSBT being signed, name only the pinned asset, and mint exactly the validated
+/// source amount.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct RgbInflationDestination {
+    /// Destination operation index.
+    #[prost(uint64, tag="1")]
+    pub operation_idx: u64,
+    /// Serialized PSBT to sign.
+    #[prost(bytes="vec", tag="2")]
+    pub psbt_bytes: ::prost::alloc::vec::Vec<u8>,
+    /// RGB asset the listener claims is being inflated.
+    #[prost(string, tag="3")]
+    pub asset_id: ::prost::alloc::string::String,
+    /// rgb-lib fascia file bytes (serde_json of rgbstd Fascia).
+    #[prost(bytes="vec", tag="4")]
+    pub fascia: ::prost::alloc::vec::Vec<u8>,
+    /// keccak256(fascia); wire integrity, not authorization.
+    #[prost(bytes="vec", tag="5")]
+    pub fascia_hash: ::prost::alloc::vec::Vec<u8>,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct MerkleProofEntry {

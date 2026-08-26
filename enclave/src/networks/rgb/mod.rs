@@ -12,7 +12,7 @@ pub mod validation;
 use crate::error::EnclaveError;
 use crate::error::Result;
 use crate::networks::{RouteProof, ValidationContext};
-use crate::proto::{RgbDestination, RgbSource};
+use crate::proto::{RgbDestination, RgbInflationDestination, RgbSource};
 #[cfg(feature = "rgb-validation")]
 use sha3::{Digest, Keccak256};
 
@@ -134,6 +134,136 @@ pub fn validate_destination(
     let _ = destination;
 
     Ok(())
+}
+
+/// Validate fields owned by an RGB inflation destination before route-level
+/// validation.
+pub fn validate_inflation_destination(
+    destination: &RgbInflationDestination,
+    _ctx: &ValidationContext<'_>,
+) -> Result<()> {
+    #[cfg(not(feature = "dev-mode"))]
+    {
+        psbt_validation::validate_psbt_bytes(&destination.psbt_bytes)?;
+    }
+    #[cfg(feature = "dev-mode")]
+    let _ = destination;
+
+    Ok(())
+}
+
+/// The mint counterpart of [`validate_destination_anchor`]: bind the PSBT the
+/// enclave is about to sign to the inflation the deposit paid for.
+///
+/// An inflation ships no consignment - nothing is handed to a counterparty - so
+/// its binding evidence is the fascia rgb-lib prepared. Authorization is the
+/// pair: the EVM deposit is verified independently on the source side, and this
+/// anchor proves the PSBT finalises an inflation of exactly that deposit's net
+/// amount on the pinned asset.
+///
+/// Returns the minted amount for the route proof.
+#[cfg(feature = "rgb-validation")]
+pub fn validate_inflation_anchor(
+    destination: &RgbInflationDestination,
+    source_amount: u64,
+    source_commission: u64,
+    ctx: &ValidationContext<'_>,
+) -> Result<u64> {
+    use crate::error::EnclaveError;
+
+    if destination.fascia.is_empty() {
+        return Err(EnclaveError::CrossCheck(
+            "mint PSBT signing requires the inflation fascia to bind the PSBT to the RGB \
+             transition"
+                .into(),
+        ));
+    }
+    if destination.fascia.len() > ctx.bridge_config.max_consignment_bytes {
+        return Err(EnclaveError::CrossCheck(format!(
+            "mint fascia too large: {} bytes (max {})",
+            destination.fascia.len(),
+            ctx.bridge_config.max_consignment_bytes
+        )));
+    }
+    // Wire-tamper detection only. The listener controls both the fascia and its
+    // hash, so a match proves the copy is intact and nothing more; authorization
+    // is the shape and binding checks below.
+    if destination.fascia_hash.is_empty() {
+        return Err(EnclaveError::CrossCheck(
+            "fascia present but fascia_hash is missing".into(),
+        ));
+    }
+    let computed = Keccak256::digest(&destination.fascia);
+    if computed[..] != destination.fascia_hash {
+        return Err(EnclaveError::CrossCheck(
+            "fascia hash mismatch: keccak256(fascia) != fascia_hash".into(),
+        ));
+    }
+    if destination.asset_id.is_empty() {
+        return Err(EnclaveError::CrossCheck(
+            "RGB inflation destination asset_id is empty".into(),
+        ));
+    }
+
+    let fascia = validation::validate_inflation_fascia(&destination.fascia)?;
+
+    if fascia.contract_id != destination.asset_id {
+        return Err(EnclaveError::CrossCheck(format!(
+            "contract_id mismatch: fascia inflates {} but the destination declares {}",
+            fascia.contract_id, destination.asset_id
+        )));
+    }
+    if ctx.bridge_config.rgb_asset_id.is_empty() {
+        return Err(EnclaveError::CrossCheck(
+            "asset-identity pin missing: RGB_ASSET_ID is not configured - refusing to mint an \
+             unpinned asset"
+                .into(),
+        ));
+    }
+    if fascia.contract_id != ctx.bridge_config.rgb_asset_id {
+        return Err(EnclaveError::CrossCheck(format!(
+            "contract_id mismatch: fascia inflates {} != pinned RGB_ASSET_ID {}",
+            fascia.contract_id, ctx.bridge_config.rgb_asset_id
+        )));
+    }
+
+    let psbt = bitcoin::psbt::Psbt::deserialize(&destination.psbt_bytes)
+        .map_err(|e| EnclaveError::CrossCheck(format!("psbt_bytes is not a valid PSBT: {e}")))?;
+    let psbt_txid = psbt.unsigned_tx.compute_txid();
+    if psbt_txid != fascia.witness_txid {
+        return Err(EnclaveError::CrossCheck(format!(
+            "PSBT/fascia witness mismatch: signing txid {psbt_txid} but the fascia anchors {} - \
+             this signature would not finalise the prepared inflation",
+            fascia.witness_txid
+        )));
+    }
+
+    // Exact, not a lower bound: a fresh mint has no pre-existing allocation to
+    // return as change, so any surplus is an over-mint.
+    let expected_minted = source_amount
+        .checked_sub(source_commission)
+        .ok_or_else(|| {
+            EnclaveError::CrossCheck(format!(
+                "source commission {source_commission} exceeds deposit amount {source_amount}"
+            ))
+        })?;
+    if fascia.minted_amount != expected_minted {
+        return Err(EnclaveError::CrossCheck(format!(
+            "MINT AMOUNT MISMATCH: fascia mints {} but the validated deposit nets {} (amount {} - \
+             commission {})",
+            fascia.minted_amount, expected_minted, source_amount, source_commission
+        )));
+    }
+
+    let validator = ctx.rgb_validator.ok_or_else(|| {
+        EnclaveError::CrossCheck(
+            "mint PSBT signing requires a configured RGB validator for the fee-rate check".into(),
+        )
+    })?;
+    let recommended = validator.recommended_fee_rate_sat_vb()?;
+    psbt_validation::check_psbt_fee_rate(&psbt, recommended)?;
+
+    Ok(fascia.minted_amount)
 }
 
 /// Returns the **recipient leg** of the bound consignment in asset units - see

@@ -111,6 +111,12 @@ pub struct BridgeConfig {
     /// serve both lookups. These two contracts differ on this deployment, so
     /// `FUNDS_IN_CONTRACT` must be set explicitly.
     pub funds_in_contract: [u8; 20],
+    /// Whether this enclave may sign **RGB mints** (env
+    /// `ALLOW_INFLATION_SIGNING=1`): an inflation PSBT backed by a fascia
+    /// instead of a consignment. `false` (unset) refuses every mint, exactly
+    /// the behaviour before the switch existed. An operational signing-policy
+    /// setting, like the gas-tx and plain-BTC pins above.
+    pub allow_inflation_signing: bool,
     /// Aggregate request-size caps for the RGB signing path, operator-tunable
     /// via env (`MAX_CONSIGNMENT_BYTES` / `MAX_MERKLE_PROOFS` /
     /// `MAX_TOTAL_PROOF_BYTES`); each defaults to its `DEFAULT_*` constant when
@@ -134,6 +140,7 @@ impl Default for BridgeConfig {
             gas_tx_max_value_wei: None,
             btc_max_total_sats: 0,
             funds_in_contract: [0u8; 20],
+            allow_inflation_signing: false,
             max_consignment_bytes: DEFAULT_MAX_CONSIGNMENT_BYTES,
             max_merkle_proofs: DEFAULT_MAX_MERKLE_PROOFS,
             max_total_proof_bytes: DEFAULT_MAX_TOTAL_PROOF_BYTES,
@@ -221,6 +228,11 @@ impl BridgeConfig {
             .and_then(|s| parse_eth_address(&s).ok())
             .unwrap_or(bridge_contract);
 
+        // Deliberately defaults to off: unset keeps mints refused everywhere.
+        let allow_inflation_signing = std::env::var("ALLOW_INFLATION_SIGNING")
+            .map(|s| matches!(s.trim(), "1" | "true"))
+            .unwrap_or(false);
+
         // Migration guard: a deployment pinning only
         // GAS_TX_ALLOWED_TO refuses every gas tx until both caps are set.
         // Surfaced at boot rather than as a per-request rejection.
@@ -259,6 +271,7 @@ impl BridgeConfig {
             gas_tx_max_value_wei,
             btc_max_total_sats,
             funds_in_contract,
+            allow_inflation_signing,
             max_consignment_bytes,
             max_merkle_proofs,
             max_total_proof_bytes,

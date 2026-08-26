@@ -33,8 +33,8 @@ disagree, or if the commit recorded below drifts from the `rev` that
 | | |
 |---|---|
 | Upstream | https://github.com/UTEXO-Protocol/federated-signer-proto |
-| Commit | `359a421245cf5b78078426c2b98a3a92bb63ab07` ("Merge branch 'main' into vs/signer-groups-support") |
-| Commit date | 2026-08-17T22:27:11+03:00 |
+| Commit | `6f94899e1f29ffbd468638ef0382256e9b741266` ("feat(enclave): add the RGB inflation destination") |
+| Commit date | 2026-08-27T00:05:50+03:00 |
 
 This is the same commit `parent/Cargo.toml` still pins as a git dependency, so
 both crates compile against one schema version. Keep them in lockstep.
@@ -48,7 +48,7 @@ both crates compile against one schema version. Keep them in lockstep.
 Verify against upstream (needs read access to the private repo):
 
 ```bash
-REV=359a421245cf5b78078426c2b98a3a92bb63ab07
+REV=6f94899e1f29ffbd468638ef0382256e9b741266
 git clone https://github.com/UTEXO-Protocol/federated-signer-proto /tmp/fsp
 git -C /tmp/fsp checkout "$REV"
 diff /tmp/fsp/rust-gen/src/enclave/enclave.rs enclave-proto/src/enclave.rs
@@ -63,8 +63,8 @@ git hash-object enclave-proto/src/enclave.rs enclave-proto/proto/enclave.proto
 
 | File | Upstream blob hash |
 |---|---|
-| `rust-gen/src/enclave/enclave.rs` | `bfb9857f6a24cd85d2a9324ea1e19ad6a7291f5a` |
-| `proto/enclave/enclave.proto` | `9060c2dbebfad3eb0025f72e297dfd3884b2bd81` |
+| `rust-gen/src/enclave/enclave.rs` | `3fe52d01406bcf7ffab47f466566f6c641d14d77` |
+| `proto/enclave/enclave.proto` | `5dc267ebda69f1bff2e3286ad40b69b43f811c55` |
 
 ## Why only `prost`
 
