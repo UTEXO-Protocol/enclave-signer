@@ -100,21 +100,24 @@ struct ProofBlock {
 /// BtcRelay agreement + consignment source-block bind (spec section 13,
 /// #57/#122). Before signing a `fundsOut`:
 ///
-/// 1. find the block anchoring the consignment's last witness tx (received
-///    transfer or burn) from its SPV Merkle proof, not from the calldata;
-/// 2. require a header there, which proves the TEE is in sync;
-/// 3. require the calldata `proof` to name that same block.
+/// 1. find the block anchoring the consignment's last witness tx from its SPV
+///    Merkle proof, not from the calldata;
+/// 2. require a header there, proving the TEE is in sync;
+/// 3. require the calldata `proof` to name that same height.
 ///
 /// The `proof` slot is `abi.encode(uint256 sourceHeight, bytes32 sourceCommit,
 /// uint256 latestHeight, bytes32 latestCommit)` (`RGBVerifier.sol:115-117`):
-/// `source` packaged the burn/transfer, `latest` is the relay tip. Both must
-/// match the enclave's own headers - `source` via the anchor equality, `latest`
-/// via [`verify_proof_block`]; `latest` must additionally sit within
-/// `MAX_RELAY_TIP_LAG_BLOCKS` of the enclave tip, so freshness is not delegated
-/// to a relay the host also feeds. Pinning `source` to the anchor stops a
-/// listener citing any other block the enclave knows. Empty `proof` = reject.
+/// `source` packaged the burn/transfer, `latest` is the relay tip. `latest` must
+/// also sit within `MAX_RELAY_TIP_LAG_BLOCKS` of the enclave tip, so freshness
+/// is not delegated to a relay the host also feeds. Empty `proof` = reject.
 ///
-/// Byte order: calldata is display order, `header.block_hash()` internal.
+/// **The commitment words are not checked, by design.** They are BtcRelay's
+/// `keccak256(StoredBlockHeader)` over relay-internal state (chainWork,
+/// lastDiffAdjustment, the last ten timestamps), which the enclave cannot
+/// compute - comparing them to `header.block_hash()` made every release
+/// unsatisfiable. `RGBVerifier` checks each against the relay itself, so a
+/// manipulated commitment reverts on-chain. The enclave enforces what only it
+/// knows: which block the consignment is anchored in, by height.
 ///
 /// Ordered cheapest-first: the pure calldata decode and the `latest` checks run
 /// before the anchor resolution, which reads the chain and redoes a Merkle
@@ -137,7 +140,7 @@ pub fn verify_btc_relay_agreement(
         )));
     }
 
-    verify_proof_block(chain, &latest, "latest")?;
+    assert_header_present(chain, &latest, "latest")?;
 
     // `latest` must actually be near the tip, else it proves only that some
     // block existed and the relay could be arbitrarily far behind.
@@ -152,18 +155,25 @@ pub fn verify_btc_relay_agreement(
         )));
     }
 
-    // The calldata's source block must be the consignment's own anchor. This
-    // subsumes a `verify_proof_block` on `source`: `anchor.commitment` IS the
-    // enclave's header hash at `anchor.height`, so equality proves the header
-    // exists and matches.
+    // Recorded, not checked: an on-chain revert is otherwise opaque about which
+    // commitments were signed.
+    tracing::debug!(
+        source_height = source.height,
+        source_commit = %hex::encode(source.commitment),
+        latest_height = latest.height,
+        latest_commit = %hex::encode(latest.commitment),
+        "fundsOut relay proof accepted (commitments verified on-chain, not here)"
+    );
+
+    // The calldata's source block must be the consignment's own anchor. Height
+    // only - see the commitment note on this function.
     let anchor = resolve_consignment_anchor(validated, merkle_proofs, chain)?;
-    if source.height != anchor.height || source.commitment != anchor.commitment {
+    if source.height != anchor.height {
         return Err(EnclaveError::CrossCheck(format!(
-            "fundsOut source block mismatch: calldata proof cites height {} / hash {}, but the \
-             consignment's last witness tx {} is anchored at height {} / hash {} - refusing \
-             to sign",
+            "fundsOut source block mismatch: calldata proof cites height {}, but the \
+             consignment's last witness tx {} is anchored at height {} (enclave header hash {}) \
+             - refusing to sign",
             source.height,
-            hex::encode(source.commitment),
             hex::encode(anchor.txid),
             anchor.height,
             hex::encode(anchor.commitment),
@@ -267,27 +277,18 @@ fn display_hash_at(chain: &HeaderChain, height: u32) -> Option<[u8; 32]> {
 }
 
 /// Confirm one proof pair against the in-enclave header chain.
-fn verify_proof_block(chain: &HeaderChain, block: &ProofBlock, label: &str) -> Result<()> {
-    let stored_display = display_hash_at(chain, block.height).ok_or_else(|| {
-        EnclaveError::Spv(format!(
-            "fundsOut BtcRelay check: no header at {label} block height {} \
-             (chain tip = {}) - cannot confirm the calldata commitment against \
-             the enclave header chain",
-            block.height,
-            chain.tip_height()
-        ))
-    })?;
-
-    if stored_display != block.commitment {
-        return Err(EnclaveError::Spv(format!(
-            "fundsOut BtcRelay check: calldata {label} commitmentHash {} != enclave header \
-             hash {} at block height {}",
-            hex::encode(block.commitment),
-            hex::encode(stored_display),
-            block.height
-        )));
-    }
-    Ok(())
+fn assert_header_present(chain: &HeaderChain, block: &ProofBlock, label: &str) -> Result<()> {
+    display_hash_at(chain, block.height)
+        .map(|_| ())
+        .ok_or_else(|| {
+            EnclaveError::Spv(format!(
+                "fundsOut BtcRelay check: no header at {label} block height {} \
+                 (chain tip = {}) - the enclave is behind the chain and cannot confirm the \
+                 block the calldata names",
+                block.height,
+                chain.tip_height()
+            ))
+        })
 }
 
 /// Number of bytes in the finality proof: four ABI words.
@@ -731,11 +732,28 @@ mod tests {
         /// Right height, wrong hash: the anchor bind owns the `source` half, so
         /// this surfaces as a mismatch against the consignment's anchor.
         #[test]
-        fn rejects_mismatched_commitment() {
+        fn accepts_any_source_commitment_at_the_anchor_height() {
             let (chain, hashes) = chain();
+            // BtcRelay's commitment is keccak256 over its own 160-byte record,
+            // which the enclave cannot compute. It is verified on-chain against
+            // the relay instead; the enclave binds the height.
             let cd = calldata(
                 ANCHOR_HEIGHT,
                 [0x11; 32],
+                TIP_HEIGHT,
+                hashes[TIP_HEIGHT as usize],
+            );
+            assert!(check(&cd, &chain).is_ok());
+        }
+
+        /// The bind that remains: a source height other than the consignment's
+        /// anchor is refused, whatever commitment accompanies it.
+        #[test]
+        fn rejects_a_source_height_that_is_not_the_anchor() {
+            let (chain, hashes) = chain();
+            let cd = calldata(
+                ANCHOR_HEIGHT + 1,
+                hashes[(ANCHOR_HEIGHT + 1) as usize],
                 TIP_HEIGHT,
                 hashes[TIP_HEIGHT as usize],
             );
@@ -744,22 +762,6 @@ mod tests {
                 err.to_string().contains("source block mismatch"),
                 "got: {err}"
             );
-        }
-
-        /// Byte-order contract: the internal-order (un-reversed) hash must be
-        /// rejected, since calldata carries display order.
-        #[test]
-        fn rejects_internal_order_commitment() {
-            let (chain, hashes) = chain();
-            let mut internal = hashes[ANCHOR_HEIGHT as usize];
-            internal.reverse();
-            let cd = calldata(
-                ANCHOR_HEIGHT,
-                internal,
-                TIP_HEIGHT,
-                hashes[TIP_HEIGHT as usize],
-            );
-            assert!(check(&cd, &chain).is_err());
         }
 
         /// A `source` height the enclave holds no header for - here at the
@@ -798,7 +800,7 @@ mod tests {
         }
 
         #[test]
-        fn rejects_mismatched_latest_commitment() {
+        fn accepts_any_latest_commitment_at_a_known_height() {
             let (chain, hashes) = chain();
             let cd = calldata(
                 ANCHOR_HEIGHT,
@@ -806,9 +808,23 @@ mod tests {
                 TIP_HEIGHT,
                 [0x11; 32],
             );
+            assert!(check(&cd, &chain).is_ok());
+        }
+
+        /// What `latest` still proves: the enclave holds a header there, so it
+        /// is in sync with the chain the relay claims to be following.
+        #[test]
+        fn rejects_a_latest_height_the_enclave_has_no_header_for() {
+            let (chain, hashes) = chain();
+            let cd = calldata(
+                ANCHOR_HEIGHT,
+                hashes[ANCHOR_HEIGHT as usize],
+                TIP_HEIGHT + 1,
+                [0x11; 32],
+            );
             let err = check(&cd, &chain).unwrap_err();
             assert!(
-                err.to_string().contains("latest commitmentHash"),
+                err.to_string().contains("no header at latest block height"),
                 "got: {err}"
             );
         }

@@ -894,7 +894,26 @@ fn handle_sign_evm(
 }
 
 fn handle_sign_psbt(ctx: &ServerContext, req: RgbDestination) -> Result<EnclaveResponse> {
-    let (signed_psbt, inputs_signed) = ctx.state.sign_psbt(&req.psbt_bytes)?;
+    // Sats gate: every other send-RGB bind is in RGB asset units, so without
+    // this a witness tx can satisfy the ledger and still sweep the Bitcoin
+    // backing. dev-mode keeps the unbounded path.
+    #[cfg(not(feature = "dev-mode"))]
+    {
+        let psbt = crate::networks::rgb::psbt_validation::parse_psbt_shape(&req.psbt_bytes)?;
+        ctx.state.with_keys(|keys| {
+            crate::networks::rgb::btc_crosscheck::validate_rgb_psbt_sats(
+                &psbt,
+                &ctx.bridge_config,
+                keys,
+            )
+        })?;
+    }
+
+    // Colored account only: an unscoped sign co-signs every input the enclave
+    // can derive a key for, including vanilla inputs no send-RGB bind examines.
+    let (signed_psbt, inputs_signed) = ctx
+        .state
+        .sign_psbt_scoped(&req.psbt_bytes, Some(crate::keys::AccountType::Colored))?;
 
     // Reject a "successful" no-op: `sign_psbt` returns
     // Ok((bytes, 0)) when no input belongs to this enclave, which a caller
