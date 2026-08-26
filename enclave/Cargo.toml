@@ -121,6 +121,15 @@ evm-rpc = ["rgb-validation", "dep:alloy", "dep:tokio"]
 # rejects at boot (production policy requires the trustless source). Shipped in
 # the production EIF. HEAVY build (2 alloy majors, revm, BLS, vendored OpenSSL).
 helios = ["evm-rpc", "dep:helios-ethereum"]
+# BFA (Bridged Fungible Asset) mint support. Purely additive on top of `rgb`: it
+# only widens consignment validation to the bridged schema, whose script ends
+# with the `cea` ether-extension opcode the default validator decodes as `Fail`.
+# `evm-rpc` because the events that opcode checks come from the enclave's own
+# verified `FundsIn` read. The swap enclave is built without the feature and so
+# keeps its behaviour, but NOT its PCR0: the workspace `[patch.crates-io]` moves
+# every build onto the BFA RGB crates (and electrum-client 0.24), so every EIF
+# here re-measures and the signer set must rotate.
+bfa-mint = ["rgb", "evm-rpc"]
 
 [dev-dependencies]
 rand = "0.10.0"

@@ -22,8 +22,13 @@ codegen-units = 1
 # with `branch = "master"` this workspace resolved to a newer commit than the
 # root and the two compiled against different rgb-ops. Bump both together.
 [patch.crates-io]
-rgb-ops = { git = "https://github.com/rgb-protocol/rgb-ops", rev = "5308b9d46c91857513ff5be2459992264687632b" }
-rgb-invoicing = { git = "https://github.com/rgb-protocol/rgb-ops", rev = "5308b9d46c91857513ff5be2459992264687632b" }
+# Mirrors the root block verbatim, including rgb-consensus: the `s/bfa` rgb-ops
+# references the ether extension, so it does not build against a crates.io
+# rgb-consensus of the same version.
+rgb-consensus = { git = "https://github.com/UTEXO-Protocol/rgb-consensus-s-bfa", rev = "66819e80df9adb3b5ad100467f3a7179e38ca5a4" }
+rgb-ops = { git = "https://github.com/UTEXO-Protocol/rgb-ops-s-bfa", rev = "3bcc7d98d759a8b71bf94ad4a36371dcb7bf392b" }
+rgb-invoicing = { git = "https://github.com/UTEXO-Protocol/rgb-ops-s-bfa", rev = "3bcc7d98d759a8b71bf94ad4a36371dcb7bf392b" }
+rgb-schemas = { git = "https://github.com/UTEXO-Protocol/rgb-schemas-s-bfa", rev = "09d5d494706e75593f71c3f5f06cd89a8dcb807e" }
 rgb-strict-encoding = { git = "https://github.com/rgb-protocol/rgb-strict-encoding", rev = "7698a5e96a2a27d5bfa4cd3560da0e8af8e4a18a" }
 
 [package]

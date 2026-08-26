@@ -191,7 +191,12 @@ pub fn validate_destination_anchor(
             "send-RGB PSBT carries a consignment but the RGB validator is not configured".into(),
         )
     })?;
-    let validated = validator.validate_consignment(&destination.consignment)?;
+    // A BFA mint cannot be validated at all without the event `cea` checks it
+    // against, so the caller verified the EVM lock before reaching here.
+    #[cfg(feature = "bfa-mint")]
+    let validated = validator.validate_consignment(&destination.consignment, ctx.bridge_events)?;
+    #[cfg(not(feature = "bfa-mint"))]
+    let validated = validator.validate_consignment(&destination.consignment, &[])?;
 
     if validated.contract_id != destination.asset_id {
         return Err(EnclaveError::CrossCheck(format!(
@@ -480,6 +485,8 @@ mod tests {
                 rgb_validator: Some(&validator),
                 header_chain: &chain,
                 self_owned_psbt_outputs: Some(&self_owned),
+                #[cfg(feature = "bfa-mint")]
+                bridge_events: &[],
             };
             validate_destination_anchor(destination, 0, 0, &ctx)
         }

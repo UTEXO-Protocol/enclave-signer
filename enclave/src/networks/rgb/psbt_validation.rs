@@ -1,8 +1,28 @@
 use bitcoin::psbt::Psbt;
 
+#[cfg(feature = "bfa-mint")]
+use super::validation::bfa;
 #[cfg(feature = "rgb-validation")]
-use super::validation::{ifa, ValidatedConsignment};
+use super::validation::{ifa, is_mint_transition, ValidatedConsignment};
 use crate::error::{EnclaveError, Result};
+
+/// Transition types this bind knows an amount rule for. A BFA mint joins the
+/// mint rule, never the transfer one - a surplus must not pass as change.
+#[cfg(feature = "rgb-validation")]
+fn binds_psbt_amounts(transition_type: u16) -> bool {
+    #[cfg(feature = "bfa-mint")]
+    {
+        if transition_type == bfa::TS_BRIDGE {
+            return true;
+        }
+    }
+    matches!(transition_type, ifa::TS_TRANSFER | ifa::TS_INFLATION)
+}
+
+#[cfg(all(feature = "rgb-validation", feature = "bfa-mint"))]
+const BOUND_TRANSITION_TYPES: &str = "Transfer, Inflation or Bridge";
+#[cfg(all(feature = "rgb-validation", not(feature = "bfa-mint")))]
+const BOUND_TRANSITION_TYPES: &str = "Transfer or Inflation";
 
 /// Derive the soft-dedup key for an EVM->RGB bridge PSBT operation.
 ///
@@ -140,13 +160,11 @@ pub fn validate_psbt_anchors_transition(
             "send-RGB PSBT requires a consignment with at least one transition".into(),
         )
     })?;
-    if !matches!(last.transition_type, ifa::TS_TRANSFER | ifa::TS_INFLATION) {
+    if !binds_psbt_amounts(last.transition_type) {
         return Err(EnclaveError::CrossCheck(format!(
-            "send-RGB PSBT requires a Transfer or Inflation transition (last transition_type = \
-             {}, want {} or {})",
-            last.transition_type,
-            ifa::TS_TRANSFER,
-            ifa::TS_INFLATION
+            "send-RGB PSBT requires a transition with a defined amount bind (last \
+             transition_type = {}, want {BOUND_TRANSITION_TYPES})",
+            last.transition_type
         )));
     }
 
@@ -216,16 +234,14 @@ pub fn validate_psbt_anchors_transition(
             last.op_id
         )));
     }
-    // The per-shape amount rules below cover only these two shapes.
+    // The per-shape amount rules below cover only the shapes `binds_psbt_amounts`
+    // admits.
     for t in &committed {
-        if !matches!(t.transition_type, ifa::TS_TRANSFER | ifa::TS_INFLATION) {
+        if !binds_psbt_amounts(t.transition_type) {
             return Err(EnclaveError::CrossCheck(format!(
-                "send-RGB PSBT commits transition {} of type {} - requires Transfer ({}) or \
-                 Inflation ({})",
-                t.op_id,
-                t.transition_type,
-                ifa::TS_TRANSFER,
-                ifa::TS_INFLATION
+                "send-RGB PSBT commits transition {} of type {} - requires \
+                 {BOUND_TRANSITION_TYPES}",
+                t.op_id, t.transition_type
             )));
         }
     }
@@ -244,17 +260,21 @@ pub fn validate_psbt_anchors_transition(
 
     // A mixed mint/transfer group has no single aggregate rule (equality vs
     // floor), and no known flow produces one. Refuse rather than guess.
+    // Must be the same predicate validation uses, or a BFA mint would count as a
+    // transfer here and inherit the lower-bound rule, which accepts an over-mint.
     let mints = committed
         .iter()
-        .filter(|t| t.transition_type == ifa::TS_INFLATION)
+        .filter(|t| is_mint_transition(t.transition_type))
         .count();
+    // The marker selects the amount RULE, not the literal transition type: every
+    // mint shape, IFA or BFA, takes the equality branch below.
     let group_type = if mints == committed.len() {
         ifa::TS_INFLATION
     } else if mints == 0 {
         ifa::TS_TRANSFER
     } else {
         return Err(EnclaveError::CrossCheck(format!(
-            "send-RGB PSBT commits a mixed bundle ({mints} Inflation of {} transitions) - \
+            "send-RGB PSBT commits a mixed bundle ({mints} mint of {} transitions) - \
              refusing to sign a shape with no defined amount bind",
             committed.len()
         )));
@@ -1389,6 +1409,22 @@ mod tests {
             );
         }
 
+        /// A BFA mint takes the mint rule, so a surplus over the credited amount is
+        /// refused. Under the transfer rule it would pass as change.
+        #[cfg(feature = "bfa-mint")]
+        #[test]
+        fn bfa_mint_surplus_is_refused_like_an_inflation_surplus() {
+            let psbt = psbt_with_two_inputs();
+            let mut validated = validated_for(&psbt, 1_000);
+            edit_signing_transition(&mut validated, |t| t.transition_type = bfa::TS_BRIDGE);
+            let err = validate_psbt_anchors_transition(&psbt, &validated, 900, 0, &owns_vout_1)
+                .unwrap_err();
+            assert!(
+                err.to_string().contains("mint-RGB amount mismatch"),
+                "a bridge mint must use the equality rule, got: {err}"
+            );
+        }
+
         #[test]
         fn rejects_non_transfer_transition() {
             let psbt = psbt_with_two_inputs();
@@ -1397,9 +1433,8 @@ mod tests {
             let err = validate_psbt_anchors_transition(&psbt, &validated, 1_000, 0, &owns_vout_1)
                 .unwrap_err();
             assert!(
-                err.to_string()
-                    .contains("requires a Transfer or Inflation transition"),
-                "expected Transfer/Inflation-required rejection, got: {err}"
+                err.to_string().contains("defined amount bind"),
+                "expected an amount-bind rejection, got: {err}"
             );
         }
 

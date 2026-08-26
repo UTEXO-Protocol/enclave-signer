@@ -315,6 +315,85 @@ fn dispatch(request: EnclaveRequest, ctx: &ServerContext) -> EnclaveResponse {
     }
 }
 
+/// Verify the EVM lock a BFA mint commits to and return it as the one-element
+/// event set RGB consensus checks the minted amount against.
+///
+/// The OpId parsed out of the consignment is untrusted: it only selects which
+/// `FundsIn` log must exist. That log is verified through the same Helios-backed
+/// path the swap flow uses, against the contract pinned in config *and* named by
+/// the asset's genesis, and consensus re-binds both OpId and amount when `cea`
+/// runs. Empty vec when the consignment is not a BFA one, so the swap path is
+/// unaffected; every failure refuses the signature.
+#[cfg(feature = "bfa-mint")]
+fn bfa_mint_events(
+    ctx: &ServerContext,
+    source: &SourceNetwork,
+    destination: &DestinationNetwork,
+) -> Result<Vec<rgbstd::vm::ether_extension::Event>> {
+    use crate::networks::evm::evm_event::{check_bridge_location, verify_rgb_funds_in};
+    use crate::networks::rgb::validation::bfa_mint_binding;
+    use rgbstd::vm::ether_extension::Event;
+    use rgbstd::{OpId, RevealedValue};
+
+    // dev-mode compiles no destination-anchor validation, so these events would
+    // have no consumer and the RPC call would be pure cost.
+    if cfg!(feature = "dev-mode") {
+        return Ok(Vec::new());
+    }
+
+    let (SourceNetwork::EvmSource(source), DestinationNetwork::RgbDestination(destination)) =
+        (source, destination)
+    else {
+        return Ok(Vec::new());
+    };
+
+    // The same cap `validate_destination_anchor` applies, repeated because that
+    // check now runs after this parse rather than before it.
+    if destination.consignment.len() > ctx.bridge_config.max_consignment_bytes {
+        return Err(EnclaveError::CrossCheck(format!(
+            "send-RGB consignment too large: {} bytes (max {})",
+            destination.consignment.len(),
+            ctx.bridge_config.max_consignment_bytes
+        )));
+    }
+    let Some(binding) = bfa_mint_binding(&destination.consignment)? else {
+        return Ok(Vec::new());
+    };
+
+    // The extension never checks which contract an event came from, so this is
+    // the only thing between a mint and a log from an attacker's contract.
+    check_bridge_location(
+        &binding.bridge_location,
+        &ctx.bridge_config.funds_in_contract,
+    )?;
+
+    let tx_hash: [u8; 32] = source.tx_hash.as_slice().try_into().map_err(|_| {
+        EnclaveError::CrossCheck(format!(
+            "evm_tx_hash must be 32 bytes, got {}",
+            source.tx_hash.len()
+        ))
+    })?;
+    let client = ctx.evm_rpc_client.as_ref().ok_or_else(|| {
+        EnclaveError::CrossCheck(
+            "bfa-mint build but the EVM RPC client is unavailable - refusing to sign a mint \
+             without independently verifying its FundsIn lock"
+                .into(),
+        )
+    })?;
+    let amount = verify_rgb_funds_in(
+        &**client,
+        &ctx.bridge_config.funds_in_contract,
+        ctx.evm_rpc_config.min_confirmations,
+        &tx_hash,
+        &binding.mint_opid,
+    )?;
+
+    Ok(vec![Event::new(
+        OpId::from(binding.mint_opid),
+        RevealedValue::from(amount),
+    )])
+}
+
 fn handle_sign(ctx: &ServerContext, req: SignRequest) -> Result<EnclaveResponse> {
     let source_ref = req
         .source_network
@@ -369,6 +448,11 @@ fn handle_sign(ctx: &ServerContext, req: SignRequest) -> Result<EnclaveResponse>
         })
     };
 
+    // Before destination validation, not after: a BFA mint's consignment cannot
+    // be validated at all until the lock it commits to has been verified.
+    #[cfg(feature = "bfa-mint")]
+    let bfa_bridge_events = bfa_mint_events(ctx, source_ref, destination_ref)?;
+
     let validation_ctx = ValidationContext {
         bridge_config: &ctx.bridge_config,
         #[cfg(feature = "rgb-validation")]
@@ -377,6 +461,8 @@ fn handle_sign(ctx: &ServerContext, req: SignRequest) -> Result<EnclaveResponse>
         header_chain: &ctx.header_chain,
         #[cfg(feature = "rgb-validation")]
         self_owned_psbt_outputs: Some(&self_owned_psbt_outputs),
+        #[cfg(feature = "bfa-mint")]
+        bridge_events: &bfa_bridge_events,
     };
     let source_validated = validate_source(req.amount, source_ref, &validation_ctx)?;
 
