@@ -135,7 +135,8 @@ instead of trusting the operator's configuration. An unset pin commits as its
 zero value, which is the posture it enforces, so "unpinned" is attested too.
 
 Not yet inside the commitment: `FUNDS_IN_CONTRACT`, and the concrete
-`BTC_MAX_TOTAL_SATS` value (only the on/off boolean is attested).
+`BTC_MAX_TOTAL_SATS`, `BTC_MAX_UNOWNED_SATS` and `RGB_MAX_UNOWNED_SATS` values
+(only the `BTC_MAX_TOTAL_SATS` on/off boolean is attested).
 Follow-up work; no tracking issue yet. The plain-BTC *destination* rule needs no
 commitment: it is not configuration but a property the enclave derives from its
 own keys.
@@ -244,6 +245,17 @@ downgrading to raw RPC. The chosen source is part of the attested policy
 A soft in-memory replay guard (24 h TTL) dedups deposit-keyed requests; the
 durable double-spend guard is on-chain.
 
+**Bitcoin value.** Every bind above is denominated in RGB asset units, so a
+witness transaction can satisfy the RGB ledger exactly and still route the
+bridge's Bitcoin backing to an attacker output that carries no RGB assignment.
+The fee-rate cap does not catch it -- a diverted sat is an output, not a fee, so
+diversion *lowers* the implied rate. Outputs that do not pay back into the
+custody their inputs were in are therefore bounded by `RGB_MAX_UNOWNED_SATS`,
+fail-closed while unset. The budget is a bound rather than an identity check
+because the recipient's seal is blinded: the enclave cannot tell which output is
+the payout, only how much may leave. Signing is scoped to the **colored** BIP-86
+account.
+
 [Sign PSBT](diagrams/04-seq-sign-psbt.md)
 
 ### 7.3 Plain-BTC PSBT (`SignBtc`)
@@ -251,23 +263,33 @@ durable double-spend guard is on-chain.
 Vanilla (non-bridge) BTC signing is its own request and can no longer be
 reached by omitting bridge fields. It is gated by the attested policy
 (`allow_vanilla_psbt`, default **off**), and each request must satisfy the
-authorization rules: every output must pay back to a script the enclave proves
-it controls, and total input value <= `BTC_MAX_TOTAL_SATS`. Signing is scoped to
+authorization rules: every output must pay back into the custody its inputs were
+already in, except a budget of `BTC_MAX_UNOWNED_SATS` for those that do not, and
+total input value <= `BTC_MAX_TOTAL_SATS`. Signing is scoped to
 the **vanilla** BIP-86 account only -- it can structurally never co-sign a
 colored (RGB-allocated) input.
 
-The destination rule is self-proving, not pinned. An output is accepted when it
-either repays an input the enclave co-signs (control-block anchored), or carries
-BIP-371 output metadata that reconstructs the exact on-chain `script_pubkey` from
-a key the enclave derives on either of its own BIP-86 accounts. Colored
-destinations count too: `create_utxo` funds RGB-allocation UTXOs out of vanilla
-inputs. The account scope is the **input** one above -- which UTXOs the
-enclave will spend -- and is unchanged. The previous
-`BTC_ALLOWED_SCRIPTS` allowlist was removed: the scripts to pin derive from a
-seed that only exists once the enclave has booted, and enclave env is measured
-into PCR0, so pinning them changed the very identity the seed was bound to. The
-path is therefore structurally self-pay; withdrawals to arbitrary user addresses
-were never expressible here and still are not.
+The destination rule is self-proving, not pinned. An output is accepted when its
+`script_pubkey` equals that of an input the enclave co-signs -- control-block and
+derivation anchored, and committed to by the segwit sighash. That proves custody
+is unchanged, not that only the enclave can spend: the bridge is a multisig and
+the other signers can move funds regardless. It holds for change because the
+wallet reuses addresses.
+
+A second rule, accepting an output whose taproot tree held any leaf pushing a key
+the enclave derives, was **removed**. It was not a proof of control: a P2TR output
+is spendable by its internal key alone, and one leaf says nothing about the rest
+of the tree or its threshold, so a host could build an output the enclave
+believed it owned and sweep it unilaterally. What it legitimately covered --
+fresh change indices, and `create_utxo`'s colored allocation dust funded out of
+vanilla inputs -- is bounded by `BTC_MAX_UNOWNED_SATS` instead.
+
+The earlier `BTC_ALLOWED_SCRIPTS` allowlist was removed for a different reason:
+the scripts to pin derive from a seed that only exists once the enclave has
+booted, and enclave env is measured into PCR0, so pinning them changed the very
+identity the seed was bound to. The path remains structurally self-pay up to the
+budget; withdrawals to arbitrary user addresses were never expressible here and
+still are not.
 
 ### 7.4 Gas transaction (`SignRawDigest`)
 

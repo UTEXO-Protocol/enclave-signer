@@ -1,12 +1,16 @@
 # Sign (EVM → RGB, bridge PSBT) — taproot + segwit-v0, anchored authorisation
 
 Plain-BTC (non-bridge) PSBTs do **not** go through this path anymore: they use
-the separate `SignBtc` request, gated by the attested
-`allow_vanilla_psbt` policy, the output self-ownership rule (every output must
-pay back to a script the enclave proves it controls), and the
-`BTC_MAX_TOTAL_SATS` cap, with signing scoped to the vanilla BIP-86 account
-only. The bridge path below always requires the EVM deposit hash **and** the
-RGB consignment.
+the separate `SignBtc` request, gated by the attested `allow_vanilla_psbt`
+policy, the output self-ownership rule (an output must repay a script the
+transaction is already spending, with `BTC_MAX_UNOWNED_SATS` budgeting those
+that do not), and the `BTC_MAX_TOTAL_SATS` cap, with signing scoped to the
+vanilla BIP-86 account only.
+
+The bridge path below always requires the EVM deposit hash **and** the RGB
+consignment, is scoped to the colored account, and bounds Bitcoin outputs it
+cannot prove by `RGB_MAX_UNOWNED_SATS` -- every other bind on this path is
+denominated in RGB asset units and says nothing about sats.
 
 ```mermaid
 sequenceDiagram
