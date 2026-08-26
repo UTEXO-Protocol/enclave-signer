@@ -109,12 +109,16 @@ pub fn validate_psbt_bytes(psbt_bytes: &[u8]) -> Result<()> {
 ///      Transfer (whose total includes bridge change).
 ///   7. Per-output recipient bind: each `OS_ASSET` output is
 ///      classified by its seal. A confidential (`utxob:`) seal is a recipient
-///      leg; a revealed (`txid:vout`) seal counts as bridge change only if it
-///      names a vout of this witness tx and that output is provably ours
-///      (`self_owned`). Anything else is rejected. The recipient total must
-///      equal `net_credited` exactly.
+///      leg; a revealed (`txid:vout`) seal counts as bridge change only if the
+///      outpoint it names is provably ours (`self_owned`). Anything else is
+///      rejected. The recipient total must equal `net_credited` exactly.
 ///
-/// `self_owned` resolves which Bitcoin outputs pay back to this enclave. It is
+///      The outpoint need not sit on the tx being signed: with no BTC change,
+///      rgb-lib parks the RGB change on an existing wallet UTXO. Same proof,
+///      plus an indexer round-trip, capped at
+///      [`MAX_OFF_TX_CHANGE_OUTPOINTS`] per PSBT.
+///
+/// `self_owned` resolves whether a Bitcoin outpoint pays back to this enclave. It is
 /// a callback rather than a `&KeyManager` so the caller holds the key lock only
 /// for that resolution, never across consignment validation's network calls.
 ///
@@ -127,7 +131,7 @@ pub fn validate_psbt_anchors_transition(
     validated: &ValidatedConsignment,
     source_amount: u64,
     source_commission: u64,
-    self_owned: SelfOwnedOutputs<'_>,
+    self_owned: SelfOwnedOutpoint<'_>,
 ) -> Result<u64> {
     use std::collections::BTreeSet;
 
@@ -306,14 +310,25 @@ pub fn validate_psbt_anchors_transition(
     Ok(legs.recipient)
 }
 
-/// Resolves which of a PSBT's Bitcoin outputs pay back to this enclave, by
-/// output index.
+/// Resolves whether a Bitcoin outpoint pays back to this enclave.
 ///
 /// A callback rather than a `&KeyManager` so the key lock is not held across
-/// consignment validation's network round-trips. In production this is
-/// [`crate::networks::rgb::btc_ownership::self_owned_output_indices`].
+/// consignment validation's network round-trips. Two cases, two kinds of
+/// evidence:
+///
+///   * on this PSBT - from PSBT metadata alone, via
+///     [`crate::networks::rgb::btc_ownership::self_owned_output_indices`];
+///   * on an earlier tx - the tx is fetched and verified by
+///     [`crate::networks::rgb::validation::RgbValidator::fetch_transaction`],
+///     then its `script_pubkey` must be an input script we co-control.
 #[cfg(feature = "rgb-validation")]
-pub type SelfOwnedOutputs<'a> = &'a dyn Fn(&Psbt) -> Result<std::collections::HashSet<u32>>;
+pub type SelfOwnedOutpoint<'a> = &'a dyn Fn(&Psbt, bitcoin::OutPoint) -> Result<bool>;
+
+/// Cap on distinct off-transaction outpoints resolved per PSBT. Each costs an
+/// indexer round-trip, so an unbounded count would let one request amplify into
+/// many egress calls. A real transfer uses one; the slack is for bundles.
+#[cfg(feature = "rgb-validation")]
+pub const MAX_OFF_TX_CHANGE_OUTPOINTS: usize = 4;
 
 /// The two legs an `OS_ASSET` output assignment can belong to, in asset units.
 #[cfg(feature = "rgb-validation")]
@@ -336,7 +351,7 @@ fn split_asset_legs(
     psbt: &Psbt,
     psbt_txid: bitcoin::Txid,
     committed: &[&super::validation::TransitionSummary],
-    self_owned: SelfOwnedOutputs<'_>,
+    self_owned: SelfOwnedOutpoint<'_>,
 ) -> Result<AssetLegs> {
     use super::validation::OutputSeal;
     use bitcoin::hashes::Hash;
@@ -354,20 +369,11 @@ fn split_asset_legs(
         ));
     }
 
-    // Seal txids are display order, `bitcoin::Txid` is internal order. Flip
-    // once here so the byte-order footgun lives in one place.
-    let mut psbt_txid_display = psbt_txid.to_byte_array();
-    psbt_txid_display.reverse();
-
-    // Only take the key lock when a revealed seal needs adjudicating.
-    let has_revealed = asset_outputs
-        .iter()
-        .any(|o| matches!(o.seal, OutputSeal::Revealed { .. }));
-    let owned = if has_revealed {
-        self_owned(psbt)?
-    } else {
-        std::collections::HashSet::new()
-    };
+    // Memoised per outpoint: several change legs can share one UTXO, and every
+    // miss costs a resolution. Only misses that leave the PSBT are capped.
+    let mut verdicts: std::collections::HashMap<bitcoin::OutPoint, bool> =
+        std::collections::HashMap::new();
+    let mut off_tx_lookups = 0usize;
 
     let mut legs = AssetLegs {
         recipient: 0,
@@ -383,25 +389,48 @@ fn split_asset_legs(
                 })?;
             }
             OutputSeal::Revealed { txid, vout } => {
-                // `None` means this bundle's witness tx, which the identity
-                // bind proved is the PSBT being signed.
-                if let Some(txid) = txid {
-                    if *txid != psbt_txid_display {
-                        return Err(EnclaveError::CrossCheck(format!(
-                            "send-RGB OS_ASSET output {i} has a revealed seal on a different \
-                             transaction ({}): a change leg must land on the witness tx being \
-                             signed ({})",
-                            hex::encode(txid),
-                            hex::encode(psbt_txid_display)
-                        )));
+                // `None` means the witness tx of this bundle, which the
+                // identity bind already proved is the PSBT being signed. Seal
+                // txids are display order, `Txid` is internal order: flip here,
+                // the one place that footgun lives.
+                let seal_txid = match txid {
+                    Some(bytes) => {
+                        let mut internal = *bytes;
+                        internal.reverse();
+                        bitcoin::Txid::from_byte_array(internal)
                     }
-                }
-                if !owned.contains(vout) {
+                    None => psbt_txid,
+                };
+                let outpoint = bitcoin::OutPoint {
+                    txid: seal_txid,
+                    vout: *vout,
+                };
+
+                let is_owned = match verdicts.get(&outpoint) {
+                    Some(known) => *known,
+                    None => {
+                        if seal_txid != psbt_txid {
+                            off_tx_lookups += 1;
+                            if off_tx_lookups > MAX_OFF_TX_CHANGE_OUTPOINTS {
+                                return Err(EnclaveError::CrossCheck(format!(
+                                    "send-RGB consignment names more than \
+                                     {MAX_OFF_TX_CHANGE_OUTPOINTS} distinct off-transaction \
+                                     change outpoints - refusing to sign"
+                                )));
+                            }
+                        }
+                        let verdict = self_owned(psbt, outpoint)?;
+                        verdicts.insert(outpoint, verdict);
+                        verdict
+                    }
+                };
+
+                if !is_owned {
                     return Err(EnclaveError::CrossCheck(format!(
-                        "send-RGB OS_ASSET output {i} ({} units) has a revealed seal on vout \
-                         {vout}, which this enclave does not control - a revealed leg is only \
-                         acceptable as bridge change, and an unowned one is an unverifiable \
-                         payout destination",
+                        "send-RGB OS_ASSET output {i} ({} units) has a revealed seal on outpoint \
+                         {outpoint}, which this enclave cannot prove it controls - a revealed leg \
+                         is only acceptable as bridge change, and an unprovable one is an \
+                         unverifiable payout destination",
                         out.amount
                     )));
                 }
@@ -760,7 +789,6 @@ mod tests {
         };
         use bitcoin::psbt::PsbtSighashType;
         use bitcoin::{OutPoint, Txid};
-        use std::collections::HashSet;
 
         /// Build a two-input, one-output unsigned tx + its Psbt. The two
         /// prevouts are deterministic so a test can reproduce the exact
@@ -805,12 +833,16 @@ mod tests {
             Psbt::from_unsigned_tx(unsigned_tx).expect("from_unsigned_tx")
         }
 
-        /// Stand-in ownership oracles. Fn items coerce to `SelfOwnedOutputs`.
-        fn owns_nothing(_: &Psbt) -> Result<HashSet<u32>> {
-            Ok(HashSet::new())
+        /// Stand-in ownership oracles. Fn items coerce to `SelfOwnedOutpoint`.
+        fn owns_nothing(_: &Psbt, _: OutPoint) -> Result<bool> {
+            Ok(false)
         }
-        fn owns_vout_1(_: &Psbt) -> Result<HashSet<u32>> {
-            Ok(HashSet::from([1]))
+        fn owns_vout_1(psbt: &Psbt, outpoint: OutPoint) -> Result<bool> {
+            Ok(outpoint.txid == psbt.unsigned_tx.compute_txid() && outpoint.vout == 1)
+        }
+        /// Owns vout 0 of [`OFF_TX_SEED`] - an existing wallet UTXO.
+        fn owns_off_tx_outpoint(_: &Psbt, outpoint: OutPoint) -> Result<bool> {
+            Ok(outpoint == off_tx_outpoint())
         }
 
         /// A recipient leg: paid to a blinded (`utxob:...`) seal.
@@ -831,6 +863,32 @@ mod tests {
                 assignment_type: ifa::OS_ASSET,
                 amount,
                 seal: OutputSeal::Revealed { txid: None, vout },
+            }
+        }
+
+        /// Display-order seal bytes for the off-transaction change UTXO.
+        const OFF_TX_SEED: [u8; 32] = [0x77; 32];
+
+        /// The same outpoint as a `bitcoin::OutPoint` (internal byte order).
+        fn off_tx_outpoint() -> OutPoint {
+            let mut internal = OFF_TX_SEED;
+            internal.reverse();
+            OutPoint {
+                txid: Txid::from_byte_array(internal),
+                vout: 0,
+            }
+        }
+
+        /// A change leg on an existing wallet UTXO: an explicit txid that is
+        /// NOT the tx being signed. Emitted when there is no BTC change.
+        fn revealed_off_tx(amount: u64) -> TransitionOutput {
+            TransitionOutput {
+                assignment_type: ifa::OS_ASSET,
+                amount,
+                seal: OutputSeal::Revealed {
+                    txid: Some(OFF_TX_SEED),
+                    vout: 0,
+                },
             }
         }
 
@@ -972,7 +1030,7 @@ mod tests {
             let err = validate_psbt_anchors_transition(&psbt, &validated, 1_000, 0, &owns_nothing)
                 .unwrap_err();
             assert!(
-                err.to_string().contains("this enclave does not control"),
+                err.to_string().contains("cannot prove it controls"),
                 "expected unowned-change rejection, got: {err}"
             );
         }
@@ -986,31 +1044,86 @@ mod tests {
             let err = validate_psbt_anchors_transition(&psbt, &validated, 1_000, 0, &owns_vout_1)
                 .unwrap_err();
             assert!(
-                err.to_string().contains("this enclave does not control"),
+                err.to_string().contains("cannot prove it controls"),
                 "expected out-of-range-vout rejection, got: {err}"
             );
         }
 
-        /// A revealed seal carrying an explicit txid must name the witness tx
-        /// being signed. Anything else parks the allocation on a transaction
-        /// this signature does not commit to.
+        /// With no BTC change, rgb-lib parks the RGB change on an existing
+        /// UTXO. Legitimate, on the same terms: the outpoint must be ours.
         #[test]
-        fn rejects_revealed_seal_on_a_different_tx() {
+        fn passes_when_change_lands_on_an_existing_bridge_utxo() {
             let psbt = psbt_with_two_inputs();
-            let mut validated = validated_with(&psbt, vec![confidential(1_000), revealed(500, 1)]);
-            edit_signing_transition(&mut validated, |t| {
-                t.outputs[1].seal = OutputSeal::Revealed {
-                    txid: Some([0x99; 32]),
-                    vout: 1,
-                };
-            });
-            let err = validate_psbt_anchors_transition(&psbt, &validated, 1_000, 0, &owns_vout_1)
+            let validated = validated_with(&psbt, vec![confidential(900), revealed_off_tx(4_100)]);
+            let recipient =
+                validate_psbt_anchors_transition(&psbt, &validated, 900, 0, &owns_off_tx_outpoint)
+                    .expect("off-tx change on a bridge-owned UTXO binds");
+            assert_eq!(recipient, 900);
+        }
+
+        /// Same shape, outpoint we cannot prove. Accepting it unconditionally
+        /// would hand the change to whoever the host names.
+        #[test]
+        fn rejects_off_tx_change_on_an_outpoint_we_cannot_prove() {
+            let psbt = psbt_with_two_inputs();
+            let validated = validated_with(&psbt, vec![confidential(900), revealed_off_tx(4_100)]);
+            let err = validate_psbt_anchors_transition(&psbt, &validated, 900, 0, &owns_vout_1)
+                .unwrap_err();
+            assert!(
+                err.to_string().contains("cannot prove it controls"),
+                "expected unprovable off-tx change rejection, got: {err}"
+            );
+        }
+
+        /// A bundle naming more than [`MAX_OFF_TX_CHANGE_OUTPOINTS`] outpoints
+        /// is refused before the egress, not after.
+        #[test]
+        fn rejects_too_many_distinct_off_tx_outpoints() {
+            let psbt = psbt_with_two_inputs();
+            let mut outputs = vec![confidential(900)];
+            for i in 0..=(MAX_OFF_TX_CHANGE_OUTPOINTS as u8) {
+                outputs.push(TransitionOutput {
+                    assignment_type: ifa::OS_ASSET,
+                    amount: 10,
+                    seal: OutputSeal::Revealed {
+                        txid: Some([0xB0 + i; 32]),
+                        vout: 0,
+                    },
+                });
+            }
+            let validated = validated_with(&psbt, outputs);
+            // Owns everything: the cap must bite on the count, not a verdict.
+            let owns_everything = |_: &Psbt, _: OutPoint| Ok(true);
+            let err = validate_psbt_anchors_transition(&psbt, &validated, 900, 0, &owns_everything)
                 .unwrap_err();
             assert!(
                 err.to_string()
-                    .contains("revealed seal on a different transaction"),
-                "expected wrong-tx-seal rejection, got: {err}"
+                    .contains("distinct off-transaction change outpoints"),
+                "expected off-tx lookup cap rejection, got: {err}"
             );
+        }
+
+        /// Several change legs on one UTXO must hit the memo, not the indexer.
+        #[test]
+        fn resolves_a_repeated_off_tx_outpoint_only_once() {
+            use std::cell::Cell;
+            let psbt = psbt_with_two_inputs();
+            let validated = validated_with(
+                &psbt,
+                vec![
+                    confidential(900),
+                    revealed_off_tx(2_000),
+                    revealed_off_tx(2_100),
+                ],
+            );
+            let calls = Cell::new(0usize);
+            let oracle = |_: &Psbt, outpoint: OutPoint| {
+                calls.set(calls.get() + 1);
+                Ok(outpoint == off_tx_outpoint())
+            };
+            validate_psbt_anchors_transition(&psbt, &validated, 900, 0, &oracle)
+                .expect("two legs on one owned UTXO bind");
+            assert_eq!(calls.get(), 1, "the outpoint verdict should be memoised");
         }
 
         /// At per-output granularity: an `OS_INFLATION` entry is mint

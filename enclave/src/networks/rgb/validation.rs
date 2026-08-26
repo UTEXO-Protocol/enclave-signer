@@ -533,6 +533,62 @@ impl RgbValidator {
         Ok(rate)
     }
 
+    /// Fetch a raw transaction by txid from the witness indexer.
+    ///
+    /// The egress is host-controlled, so the bytes are re-hashed and must match
+    /// `txid`: a lying host can only make the fetch fail. Used by the send-RGB
+    /// change-leg proof (W-06 / #52) to read the script of an outpoint that is
+    /// not in the PSBT.
+    pub fn fetch_transaction(&self, txid: bitcoin::Txid) -> Result<bitcoin::Transaction> {
+        // Backend and timeouts mirror the witness resolver (final I-03 / #87).
+        let is_electrum =
+            self.indexer_url.starts_with("ssl://") || self.indexer_url.starts_with("tcp://");
+        let tx = if is_electrum {
+            use rgbstd::indexers::electrum_blocking::electrum_client::{
+                Client, Config, ElectrumApi,
+            };
+            let cfg = Config::builder()
+                .timeout(Some(std::time::Duration::from_secs(
+                    ELECTRUM_WITNESS_TIMEOUT_SECS,
+                )))
+                .build();
+            let client = Client::from_config(&self.indexer_url, cfg).map_err(|e| {
+                EnclaveError::CrossCheck(format!(
+                    "electrum client creation failed while resolving outpoint tx {txid}: {e}"
+                ))
+            })?;
+            let raw = client.transaction_get_raw(&txid).map_err(|e| {
+                EnclaveError::CrossCheck(format!("electrum fetch of tx {txid} failed: {e}"))
+            })?;
+            bitcoin::consensus::deserialize::<bitcoin::Transaction>(&raw).map_err(|e| {
+                EnclaveError::CrossCheck(format!(
+                    "electrum returned bytes for tx {txid} that do not decode: {e}"
+                ))
+            })?
+        } else {
+            let client = esplora_client::Builder::new(&self.indexer_url)
+                .timeout(self.http_timeout_secs)
+                .build_blocking();
+            client
+                .get_tx(&txid)
+                .map_err(|e| {
+                    EnclaveError::CrossCheck(format!("esplora fetch of tx {txid} failed: {e}"))
+                })?
+                .ok_or_else(|| {
+                    EnclaveError::CrossCheck(format!("esplora does not know tx {txid}"))
+                })?
+        };
+
+        let got = tx.compute_txid();
+        if got != txid {
+            return Err(EnclaveError::CrossCheck(format!(
+                "indexer returned tx {got} for a request for tx {txid} - refusing to trust its \
+                 outputs"
+            )));
+        }
+        Ok(tx)
+    }
+
     /// Esplora `/fee-estimates` backend for [`Self::recommended_fee_rate_sat_vb`].
     /// Fetches the confirmation-target rate (nearest available) in sat/vB.
     fn esplora_fee_rate_sat_vb(&self) -> Result<f64> {

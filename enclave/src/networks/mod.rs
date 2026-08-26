@@ -31,16 +31,18 @@ pub struct ValidationContext<'a> {
     pub rgb_validator: Option<&'a RgbValidator>,
     #[cfg(feature = "spv")]
     pub header_chain: &'a Mutex<crate::networks::rgb::spv::HeaderChain>,
-    /// Resolves which of a PSBT's Bitcoin outputs pay back to this enclave.
+    /// Resolves whether a Bitcoin outpoint pays back to this enclave.
     /// Required by the send-RGB per-output recipient bind to tell
-    /// bridge change from a payout to a third party.
+    /// bridge change from a payout to a third party. The outpoint may sit on
+    /// the PSBT being signed or on an earlier transaction - see
+    /// [`crate::networks::rgb::psbt_validation::SelfOwnedOutpoint`].
     ///
     /// A callback, so the key lock is taken only for that resolution and never
     /// across consignment validation's network round-trips. `None` fails the
     /// bind closed.
     #[cfg(feature = "rgb-validation")]
     pub self_owned_psbt_outputs:
-        Option<crate::networks::rgb::psbt_validation::SelfOwnedOutputs<'a>>,
+        Option<crate::networks::rgb::psbt_validation::SelfOwnedOutpoint<'a>>,
 }
 
 /// Outcome of validating a source network: the route proof, plus the validated
