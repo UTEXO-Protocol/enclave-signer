@@ -270,7 +270,6 @@ mod tests {
                 outputs: vec![],
                 burned_asset_amount,
             }),
-            last_transfer_witness_txid: None,
             last_witness_txid: None,
             last_transfer_witness_prevouts: None,
             last_transfer_op_id: None,

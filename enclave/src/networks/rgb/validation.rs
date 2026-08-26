@@ -276,17 +276,18 @@ pub struct ValidatedConsignment {
     /// consignment authorises commits to. `None` only for malformed transfers
     /// with no transition bundles, which rgbstd rejects upstream.
     pub last_transition: Option<TransitionSummary>,
-    /// Bitcoin txid of the witness transaction anchoring the last transition.
-    /// In the send-RGB direction the PSBT being signed IS that witness tx, and
-    /// the PSBT cross-check binds `psbt.unsigned_tx.compute_txid()` to this.
+    /// Bitcoin txid of the witness transaction anchoring the last transition,
+    /// whatever its transition type (burn included).
+    ///
+    /// Two consumers. In the send-RGB direction the PSBT being signed IS that
+    /// witness tx, and the PSBT cross-check binds
+    /// `psbt.unsigned_tx.compute_txid()` to this after gating on the last
+    /// transition being a Transfer or Inflation. The RGB->EVM `fundsOut`
+    /// source-block bind uses it ungated, so it works for transfer and burn
+    /// alike.
+    ///
     /// A `bitcoin::Txid` rather than display-order bytes, to avoid the txid
     /// byte-order footgun. `None` only for a consignment with no bundles.
-    pub last_transfer_witness_txid: Option<bitcoin::Txid>,
-    /// Witness txid of the **last** bundle, whatever its transition type.
-    /// [`Self::last_transfer_witness_txid`] covers Transfer/Inflation only;
-    /// this one is also set for `TS_BURN`, so the RGB->EVM `fundsOut`
-    /// source-block bind works for transfer and burn alike. `None` only for a
-    /// consignment with no bundles.
     pub last_witness_txid: Option<bitcoin::Txid>,
     /// Bitcoin input prevouts of that witness transaction, when the
     /// consignment embeds the full tx (`PubWitness::Tx`). Used by the PSBT
@@ -296,7 +297,7 @@ pub struct ValidatedConsignment {
     /// Authoritative OpId (32-byte commitment hash) of the consignment's
     /// **last** transition, read from the rgbstd-**validated** `Transfer`
     /// (`KnownTransition.opid` of the same last bundle as
-    /// `last_transfer_witness_txid`), NOT from the flat `rgb_consignment`
+    /// `last_witness_txid`), NOT from the flat `rgb_consignment`
     /// parser. This is the value `validate()` authenticated and anchored on
     /// chain.
     ///
@@ -755,23 +756,22 @@ impl RgbValidator {
         }
 
         // Last bundle's witness tx, ungated by transition type, so the fundsOut
-        // source-block bind also works on a burn.
+        // source-block bind also works on a burn. The PSBT path applies its own
+        // Transfer/Inflation gate before reading this.
         let last_witness_txid = transfer.bundles.iter().last().map(|wb| wb.witness_id());
 
-        // Witness-tx identity binding for the send-RGB PSBT path: the last
-        // bundle's witness txid, plus its input prevouts when the bundle
-        // embeds the full tx. Gated on the last transition being a Transfer
-        // or an Inflation; the check inside asserts the txid and the
-        // transition come from the same witness.
-        let (last_transfer_witness_txid, last_transfer_witness_prevouts, last_transfer_op_id) =
-            match last_transition {
-                Some(ref last)
-                    if matches!(last.transition_type, ifa::TS_TRANSFER | ifa::TS_INFLATION) =>
-                {
-                    read_last_transfer_witness(&transfer, last.transition_type)?
-                }
-                _ => (None, None, None),
-            };
+        // Rest of the send-RGB PSBT binding for that same bundle: its input
+        // prevouts when the bundle embeds the full tx, plus the validated OpId.
+        // Gated on the last transition being a Transfer or an Inflation; the
+        // check inside asserts the transition type and the witness agree.
+        let (last_transfer_witness_prevouts, last_transfer_op_id) = match last_transition {
+            Some(ref last)
+                if matches!(last.transition_type, ifa::TS_TRANSFER | ifa::TS_INFLATION) =>
+            {
+                read_last_transfer_witness(&transfer, last.transition_type)?
+            }
+            _ => (None, None),
+        };
 
         // 2. Create the witness resolver. Backend from the URL scheme:
         //    ssl://|tcp:// -> Electrum, otherwise Esplora REST. Electrum is
@@ -874,7 +874,6 @@ impl RgbValidator {
             all_op_ids,
             mint_op_ids,
             last_transition,
-            last_transfer_witness_txid,
             last_witness_txid,
             last_transfer_witness_prevouts,
             last_transfer_op_id,
@@ -884,12 +883,11 @@ impl RgbValidator {
     }
 }
 
-/// Extract the witness-tx identity binding for the consignment's **last**
-/// transition out of the rgbstd `Transfer`: the witness txid of the bundle
-/// carrying the most recent transition, and - when that bundle embeds the
-/// full witness tx (`PubWitness::Tx`) - its Bitcoin input prevouts. Consumed
-/// by the send-RGB PSBT cross-check to bind the PSBT being signed to the
-/// consignment's `TS_TRANSFER` witness transaction.
+/// Extract the rest of the witness-tx identity binding for the consignment's
+/// **last** transition out of the rgbstd `Transfer`: when that bundle embeds
+/// the full witness tx (`PubWitness::Tx`), its Bitcoin input prevouts.
+/// Consumed by the send-RGB PSBT cross-check alongside
+/// [`ValidatedConsignment::last_witness_txid`], which names the same bundle.
 ///
 /// Reads the same `transfer.bundles.iter().last()` bundle as
 /// [`read_last_transition_burned_asset`] and asserts its last known transition
@@ -900,14 +898,14 @@ impl RgbValidator {
 /// Also returns the validated OpId of that transition, read from the rgbstd
 /// bundle rather than the flat parser.
 ///
-/// Returns `(None, None, None)` only for a bundle-less transfer, which rgbstd
+/// Returns `(None, None)` only for a bundle-less transfer, which rgbstd
 /// rejects upstream.
 fn read_last_transfer_witness(
     transfer: &Transfer,
     expected_type: u16,
 ) -> Result<LastTransferBinding> {
     let Some(last_bundle) = transfer.bundles.iter().last() else {
-        return Ok((None, None, None));
+        return Ok((None, None));
     };
 
     // OpId of the validated last transition, from the same bundle. rgbstd's
@@ -936,26 +934,19 @@ fn read_last_transfer_witness(
         op_id = Some(arr);
     }
 
-    // `witness_id()` is `bitcoin::Txid` (rgb re-exports the same bitcoin 0.32
-    // crate the enclave depends on), so no byte-order conversion is needed.
-    let txid = last_bundle.witness_id();
     let prevouts = last_bundle
         .pub_witness
         .tx()
         .map(|tx| tx.input.iter().map(|txin| txin.previous_output).collect());
 
-    Ok((Some(txid), prevouts, op_id))
+    Ok((prevouts, op_id))
 }
 
 /// Binding data for the consignment's last transfer bundle:
-/// `(witness txid, witness input prevouts, validated last-transition OpId)`.
-/// All `Option` because a bundle-less transfer (rejected upstream by rgbstd)
-/// yields `(None, None, None)`. See [`read_last_transfer_witness`].
-type LastTransferBinding = (
-    Option<bitcoin::Txid>,
-    Option<Vec<bitcoin::OutPoint>>,
-    Option<[u8; 32]>,
-);
+/// `(witness input prevouts, validated last-transition OpId)`. Both `Option`
+/// because a bundle-less transfer (rejected upstream by rgbstd) yields
+/// `(None, None)`. See [`read_last_transfer_witness`].
+type LastTransferBinding = (Option<Vec<bitcoin::OutPoint>>, Option<[u8; 32]>);
 
 /// Parse the consignment with `rgb_consignment::parse` and pull out the
 /// flat transition summary (every op_id, the most recent transition's shape,
@@ -1548,15 +1539,9 @@ mod tests {
 
         // The fixture's last transition is a Transfer (type 10000, asserted in
         // `extracts_op_ids_and_last_transition_from_transfer_fixture`).
-        let (txid, prevouts, op_id) =
+        let (prevouts, op_id) =
             read_last_transfer_witness(&transfer, ifa::TS_TRANSFER).expect("extract witness");
-
-        // Every validated transfer has at least one bundle, so the txid is set.
-        let txid = txid.expect("transfer fixture has a witness txid");
-        // It must equal the last bundle's witness id (the bundle we bind to).
         let last_bundle = transfer.bundles.iter().last().expect("fixture has bundles");
-        let expected = last_bundle.witness_id();
-        assert_eq!(txid, expected);
 
         // The rgb-lib sender embeds the full witness tx for a freshly-composed
         // transfer, so the prevouts (the witness tx's Bitcoin inputs) are

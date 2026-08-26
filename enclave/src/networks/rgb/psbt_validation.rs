@@ -152,7 +152,9 @@ pub fn validate_psbt_anchors_transition(
 
     // Derive the txid from `unsigned_tx`, never a finalized/extracted tx
     // (a non-segwit input's scriptSig would change the txid post-signing).
-    let expected = validated.last_transfer_witness_txid.ok_or_else(|| {
+    // The Transfer/Inflation gate above is what makes this last-bundle txid the
+    // transition's witness.
+    let expected = validated.last_witness_txid.ok_or_else(|| {
         EnclaveError::CrossCheck(
             "consignment carries no witness txid for its last transition - \
              cannot anchor the PSBT"
@@ -950,7 +952,6 @@ mod tests {
                 all_op_ids: transitions.iter().map(|t| t.op_id.clone()).collect(),
                 mint_op_ids: vec![],
                 last_transition: transitions.last().cloned(),
-                last_transfer_witness_txid: Some(txid),
                 last_witness_txid: Some(txid),
                 last_transfer_witness_prevouts: Some(prevouts),
                 last_transfer_op_id: None,
@@ -1276,7 +1277,7 @@ mod tests {
         fn rejects_txid_mismatch() {
             let psbt = psbt_with_two_inputs();
             let mut validated = validated_for(&psbt, 1_000);
-            validated.last_transfer_witness_txid = Some(Txid::from_raw_hash(
+            validated.last_witness_txid = Some(Txid::from_raw_hash(
                 bitcoin::hashes::sha256d::Hash::from_byte_array([0xAB; 32]),
             ));
             let err = validate_psbt_anchors_transition(&psbt, &validated, 1_000, 0, &owns_vout_1)
@@ -1292,7 +1293,7 @@ mod tests {
         fn rejects_missing_witness_txid() {
             let psbt = psbt_with_two_inputs();
             let mut validated = validated_for(&psbt, 1_000);
-            validated.last_transfer_witness_txid = None;
+            validated.last_witness_txid = None;
             let err = validate_psbt_anchors_transition(&psbt, &validated, 1_000, 0, &owns_vout_1)
                 .unwrap_err();
             assert!(
