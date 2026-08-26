@@ -527,6 +527,15 @@ IwLz3/Y=
             .map_err(|e| VerifyError::Certificate(format!("invalid P-384 key: {e}")))
     }
 
+    /// Symmetric tolerance (seconds) applied to the certificate validity window
+    /// to absorb clock skew between the verifier and the AWS-issued attestation
+    /// certificate. Nitro enclaves take their initial time from the hypervisor at
+    /// boot and then free-run without NTP, so a long-lived enclave can drift by
+    /// tens of seconds relative to a freshly-booted peer. Without this tolerance a
+    /// clone/attestation exchange between a drifted donor and a fresh requester
+    /// fails with a spurious "certificate not yet valid".
+    const CERT_CLOCK_SKEW_TOLERANCE_SECS: u64 = 900;
+
     fn verify_cert_validity(cert: &Certificate) -> Result<()> {
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -537,10 +546,16 @@ IwLz3/Y=
         let not_before = validity.not_before.to_unix_duration().as_secs();
         let not_after = validity.not_after.to_unix_duration().as_secs();
 
-        if now < not_before {
+        check_cert_validity_window(now, not_before, not_after)
+    }
+
+    /// Pure validity-window check with a symmetric clock-skew tolerance, split out
+    /// so it can be unit-tested without minting and signing a certificate.
+    fn check_cert_validity_window(now: u64, not_before: u64, not_after: u64) -> Result<()> {
+        if now.saturating_add(CERT_CLOCK_SKEW_TOLERANCE_SECS) < not_before {
             return Err(VerifyError::Certificate("certificate not yet valid".into()));
         }
-        if now > not_after {
+        if now > not_after.saturating_add(CERT_CLOCK_SKEW_TOLERANCE_SECS) {
             return Err(VerifyError::Certificate("certificate has expired".into()));
         }
         Ok(())
@@ -661,6 +676,51 @@ IwLz3/Y=
             let mut buf = Vec::new();
             ciborium::into_writer(&map, &mut buf).unwrap();
             buf
+        }
+
+        // --- certificate validity window w/ clock-skew tolerance -----------
+
+        #[test]
+        fn cert_validity_accepts_now_inside_window() {
+            assert!(check_cert_validity_window(1_000, 900, 1_100).is_ok());
+        }
+
+        #[test]
+        fn cert_validity_accepts_fresh_peer_within_skew_tolerance() {
+            // Verifier is behind the cert's not_before by less than the tolerance
+            // (the donor-drift / fresh-requester case that broke clone).
+            let not_before = 1_000;
+            let now = not_before - (CERT_CLOCK_SKEW_TOLERANCE_SECS - 1);
+            assert!(check_cert_validity_window(now, not_before, not_before + 10_000).is_ok());
+        }
+
+        #[test]
+        fn cert_validity_rejects_beyond_skew_tolerance_before() {
+            let not_before = 100_000;
+            let now = not_before - (CERT_CLOCK_SKEW_TOLERANCE_SECS + 1);
+            let err = check_cert_validity_window(now, not_before, not_before + 10_000).unwrap_err();
+            assert!(matches!(err, VerifyError::Certificate(_)));
+        }
+
+        #[test]
+        fn cert_validity_accepts_just_expired_within_skew_tolerance() {
+            let not_after = 1_000;
+            let now = not_after + (CERT_CLOCK_SKEW_TOLERANCE_SECS - 1);
+            assert!(check_cert_validity_window(now, 0, not_after).is_ok());
+        }
+
+        #[test]
+        fn cert_validity_rejects_beyond_skew_tolerance_after() {
+            let not_after = 1_000;
+            let now = not_after + (CERT_CLOCK_SKEW_TOLERANCE_SECS + 1);
+            let err = check_cert_validity_window(now, 0, not_after).unwrap_err();
+            assert!(matches!(err, VerifyError::Certificate(_)));
+        }
+
+        #[test]
+        fn cert_validity_saturates_near_epoch_zero() {
+            // now near 0 must not underflow when tolerance is added.
+            assert!(check_cert_validity_window(0, 10, 10_000).is_ok());
         }
 
         // --- COSE signature form (I-05) ------------------------------------
