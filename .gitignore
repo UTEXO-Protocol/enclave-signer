@@ -1,4 +1,7 @@
 /target/
+# The parent is a separate cargo project (excluded from the workspace) and is
+# built from its own directory, so its target/ needs its own entry.
+/parent/target/
 .claude/
 .idea/
 /docs/raw

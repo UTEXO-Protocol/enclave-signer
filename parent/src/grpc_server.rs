@@ -240,6 +240,21 @@ impl ParentAdapterService {
                     },
                 )
             }
+            // A mint posts no consignment - nothing is handed to a counterparty -
+            // so it travels as its own destination carrying the fascia instead.
+            // Keeping it a separate variant is what stops the send path from
+            // being reached by simply omitting the consignment.
+            sign_request::Data::RgbInflationData(payload) => {
+                enclave_proto::sign_request::DestinationNetwork::RgbInflationDestination(
+                    enclave_proto::RgbInflationDestination {
+                        operation_idx: payload.operation_idx,
+                        psbt_bytes: payload.psbt_bytes,
+                        asset_id: payload.rgb_asset_id,
+                        fascia: payload.fascia,
+                        fascia_hash: payload.fascia_hash,
+                    },
+                )
+            }
             // Plain BTC is not a cross-network destination - it is dispatched
             // via `data_type=BTC_UTXO` to the SignBtc path, never here.
             sign_request::Data::BtcData(_) => unreachable!(
@@ -264,6 +279,9 @@ impl ParentAdapterService {
             ) | (
                 enclave_proto::sign_request::SourceNetwork::RgbSource(_),
                 enclave_proto::sign_request::DestinationNetwork::RgbDestination(_)
+            ) | (
+                enclave_proto::sign_request::SourceNetwork::RgbSource(_),
+                enclave_proto::sign_request::DestinationNetwork::RgbInflationDestination(_)
             )
         );
 
@@ -382,6 +400,26 @@ impl ParentService for ParentAdapterService {
                         );
 
                         Self::enclave_destination_network(sign_request::Data::RgbData(payload))
+                    }
+                    Some(sign_request::Data::RgbInflationData(payload)) => {
+                        if self.evm_network_ids.contains(&common.dst_network_id) {
+                            return Err(Status::invalid_argument(format!(
+                                "RGB inflation payload destination network {} is configured as EVM",
+                                common.dst_network_id
+                            )));
+                        }
+                        tracing::info!(
+                            src_network_id = common.src_network_id,
+                            dst_network_id = common.dst_network_id,
+                            psbt_len = payload.psbt_bytes.len(),
+                            fascia_len = payload.fascia.len(),
+                            operation_idx = payload.operation_idx,
+                            "gRPC Sign: RGB inflation"
+                        );
+
+                        Self::enclave_destination_network(sign_request::Data::RgbInflationData(
+                            payload,
+                        ))
                     }
                     Some(sign_request::Data::BtcData(_)) => {
                         return Err(Status::invalid_argument(
@@ -826,5 +864,69 @@ impl ParentService for ParentAdapterService {
                 other
             ))),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn inflation_payload() -> federated_signer_proto::parent::EnrichedRgbInflationPayload {
+        federated_signer_proto::parent::EnrichedRgbInflationPayload {
+            operation_idx: 9,
+            psbt_bytes: b"psbt".to_vec(),
+            rgb_asset_id: "rgb:pinned".into(),
+            fascia: b"fascia".to_vec(),
+            fascia_hash: b"hash".to_vec(),
+        }
+    }
+
+    /// The mint payload has to reach the enclave as its own destination. Mapping
+    /// it onto `RgbDestination` instead, or dropping the fascia on the way, would
+    /// leave the enclave's inflation validation unreachable.
+    #[test]
+    fn inflation_payload_maps_to_the_inflation_destination() {
+        let mapped = ParentAdapterService::enclave_destination_network(
+            sign_request::Data::RgbInflationData(inflation_payload()),
+        );
+
+        let enclave_proto::sign_request::DestinationNetwork::RgbInflationDestination(destination) =
+            mapped
+        else {
+            panic!("expected RgbInflationDestination, got {mapped:?}");
+        };
+
+        assert_eq!(destination.operation_idx, 9);
+        assert_eq!(destination.psbt_bytes, b"psbt");
+        assert_eq!(destination.asset_id, "rgb:pinned");
+        assert_eq!(destination.fascia, b"fascia");
+        assert_eq!(destination.fascia_hash, b"hash");
+    }
+
+    /// A mint is authorized by a deposit on another chain. An RGB source paired
+    /// with an inflation destination is the same network on both ends, which is
+    /// what the route check exists to refuse.
+    #[test]
+    fn rgb_source_cannot_authorize_an_inflation() {
+        let source = enclave_proto::sign_request::SourceNetwork::RgbSource(
+            enclave_proto::RgbSource::default(),
+        );
+        let destination = ParentAdapterService::enclave_destination_network(
+            sign_request::Data::RgbInflationData(inflation_payload()),
+        );
+
+        assert!(ParentAdapterService::validate_cross_network_route(&source, &destination).is_err());
+    }
+
+    #[test]
+    fn evm_source_authorizes_an_inflation() {
+        let source = enclave_proto::sign_request::SourceNetwork::EvmSource(
+            enclave_proto::EvmSource::default(),
+        );
+        let destination = ParentAdapterService::enclave_destination_network(
+            sign_request::Data::RgbInflationData(inflation_payload()),
+        );
+
+        assert!(ParentAdapterService::validate_cross_network_route(&source, &destination).is_ok());
     }
 }

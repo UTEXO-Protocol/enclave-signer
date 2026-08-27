@@ -142,6 +142,49 @@ pub fn validate_destination(
                 evm_funds_out: None,
             })
         }
+        DestinationNetwork::RgbInflationDestination(destination) => {
+            if !ctx.bridge_config.allow_inflation_signing {
+                return Err(EnclaveError::CrossCheck(
+                    "RGB mint signing is not enabled on this enclave (ALLOW_INFLATION_SIGNING)"
+                        .into(),
+                ));
+            }
+
+            // A mint carries no listener-supplied amount on purpose: the
+            // authoritative minted value comes from the fascia inside the
+            // anchor, so the listener has nothing amount-shaped to lie about.
+            #[cfg(not(feature = "rgb-validation"))]
+            {
+                let _ = destination;
+                Err(EnclaveError::CrossCheck(
+                    "RGB mint signing requires an rgb-validation build - this enclave cannot \
+                     verify a fascia and refuses to sign blind"
+                        .into(),
+                ))
+            }
+            #[cfg(feature = "rgb-validation")]
+            {
+                rgb::validate_inflation_destination(destination, ctx)?;
+
+                #[cfg(not(feature = "dev-mode"))]
+                let minted =
+                    rgb::validate_inflation_anchor(destination, amount, source_commission, ctx)?;
+                #[cfg(feature = "dev-mode")]
+                let minted = amount;
+
+                Ok(DestinationProof {
+                    proof: RouteProof {
+                        amount: minted.checked_add(source_commission).ok_or_else(|| {
+                            EnclaveError::CrossCheck(
+                                "minted amount + source_commission overflow".into(),
+                            )
+                        })?,
+                        operation_id: None,
+                    },
+                    evm_funds_out: None,
+                })
+            }
+        }
     }
 }
 
@@ -162,6 +205,12 @@ pub fn validate_route_proofs(
 
     match (source, destination) {
         (SourceNetwork::EvmSource(_), DestinationNetwork::RgbDestination(_)) => {
+            validate_amount_covers_destination(source_proof.amount, destination_proof.amount)
+        }
+        // Mint: the destination proof's amount is fascia-derived, and the anchor
+        // has already required minted to equal the deposit net exactly - this is
+        // the route-level backstop.
+        (SourceNetwork::EvmSource(_), DestinationNetwork::RgbInflationDestination(_)) => {
             validate_amount_covers_destination(source_proof.amount, destination_proof.amount)
         }
         (SourceNetwork::RgbSource(_), DestinationNetwork::EvmDestination(_)) => {
