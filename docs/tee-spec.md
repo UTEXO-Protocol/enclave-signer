@@ -519,8 +519,9 @@ binding · swap op-id preservation · regression suites in CI.
    resident.
 5. **Output-amount derivation**: derive `psbt_output_amount` from the PSBT
    instead of the listener; identify the recipient leg.
-6. **Helios by default**: raw RPC remains host-relayed evidence; decide
-   Helios-on for production images and require `--expect-evm-source helios`.
+6. **Trustless EVM source on L2**: Helios has no Arbitrum light client, so an
+   L2 image runs on host-relayed raw RPC -- attested, and still pinnable via
+   `--expect-evm-source`. Needs an L2-native proof path.
 7. **Listener migration** (deploy ordering): a production enclave rejects the
    old gas-tx digest and consignment-less request shapes -- migrate
    proto/listener/backend before deploying, otherwise availability (never

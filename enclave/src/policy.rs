@@ -248,8 +248,8 @@ impl SecurityPolicy {
 
 impl ProductionPolicy {
     /// Invariants that must hold before a production enclave signs anything.
-    /// Both evidence sources must be trustless: Bitcoin anchors via SPV, EVM
-    /// FundsIn deposits via Helios. `RawRpc`/`Disabled` are rejected.
+    /// Bitcoin anchors must be SPV-verified; the EVM source is attested, not
+    /// gated.
     pub fn check_invariants(&self) -> Result<(), String> {
         if self.chain_id == 0 || self.bridge_contract == [0u8; 20] || self.rgb_asset_id.is_empty() {
             return Err(
@@ -266,18 +266,11 @@ impl ProductionPolicy {
                 "production policy must anchor Bitcoin witness txs via the SPV header chain".into(),
             );
         }
-        if self.evm_source != EvmDataSource::HeliosVerified {
-            return Err(format!(
-                "production policy must verify EVM FundsIn via the trustless Helios path, not \
-                 {:?}. Build with `--features helios` and set HELIOS_EXECUTION_RPC.",
-                self.evm_source
-            ));
-        }
-        // Helios's trust root MUST be pinned and attested: without a
-        // checkpoint the light client would bootstrap from an untrusted source,
-        // and a verifier could not tell which chain the enclave synced. Fail
-        // closed at boot rather than attesting Helios mode with no trust root.
-        if self.evm_checkpoint.is_none() {
+        // The EVM source is not gated: Helios has no Arbitrum light client, so
+        // an L2 image runs on host-relayed RPC. It stays attested, so verifiers
+        // judge the posture; `Disabled` fails closed per request. Helios with no
+        // pinned checkpoint would bootstrap untrusted, so that stays rejected.
+        if self.evm_source == EvmDataSource::HeliosVerified && self.evm_checkpoint.is_none() {
             return Err(
                 "production policy uses the Helios EVM source but pins no weak-subjectivity \
                  checkpoint. Set HELIOS_CHECKPOINT to a recent beacon block root so the trust \
@@ -341,20 +334,22 @@ mod tests {
     }
 
     #[test]
-    fn production_requires_the_trustless_helios_evm_source() {
+    fn production_accepts_any_evm_source_but_still_attests_it() {
         let ctx = release_bridge_ctx();
-        // Non-Helios sources still resolve to Production (recorded + attested)
-        // but must not pass the boot gate.
+        // Helios has no L2 light client, so an Arbitrum image runs on raw RPC.
+        // Every source boots, and each is recorded and attested.
         for source in [EvmDataSource::Disabled, EvmDataSource::RawRpc] {
             let p = SecurityPolicy::resolve(&ctx, &pinned_config(), source, None);
+            match &p {
+                SecurityPolicy::Production(pp) => assert_eq!(pp.evm_source, source),
+                other => panic!("expected Production for {source:?}, got {other:?}"),
+            }
             assert!(
-                matches!(p, SecurityPolicy::Production(_)),
-                "expected Production for {source:?}"
+                p.assert_valid_for_build(&ctx).is_ok(),
+                "{source:?} must not be gated at boot"
             );
-            let err = p.assert_valid_for_build(&ctx).unwrap_err();
-            assert!(err.contains("Helios"), "got: {err}");
         }
-        // Only Helios-verified WITH a pinned checkpoint passes the boot gate.
+        // Helios WITH a pinned checkpoint still passes.
         let p = SecurityPolicy::resolve(
             &ctx,
             &pinned_config(),
