@@ -90,8 +90,17 @@ ENV CARGO_INCREMENTAL=0 \
 # `evm-rpc` (dev merge) adds in-enclave FundsIn event verification (#60); it pulls
 # the alloy + tokio subtree, which grows the binary and therefore PCR0 — pinned
 # via `--locked`/Cargo.lock for reproducibility. Requires a second host
-# vsock-proxy for the EVM RPC (EVM_RPC_VSOCK_PORT, default 8002). `helios` (#77)
-# is intentionally NOT enabled here (experimental/default-off, not in the EIF).
+# vsock-proxy for the EVM RPC (EVM_RPC_VSOCK_PORT, default 8002).
+#
+# `helios` (#77) IS enabled here so the enclave passes the production boot gate
+# (enclave/src/policy.rs assert_valid_for_build requires evm_source=HeliosVerified;
+# a non-helios release build panics at main.rs:174). ⚠️ a16z Helios only supports
+# Ethereum L1 (mainnet|sepolia|holesky). This bridge is pinned to Arbitrum
+# (EVM_CHAIN_ID=42161), so HeliosEvmClient::new rejects the chain mismatch
+# (42161 != 1) BEFORE syncing (evm_event.rs:501) and leaves the FundsIn provider
+# UNSET — non-fatal (main.rs:413), so the enclave still BOOTS. This yields a
+# bootable EIF for the clock-skew attestation test; it is NOT a production-viable
+# trustless-FundsIn deploy (that needs Helios Arbitrum support = dev/design work).
 RUN --mount=type=ssh \
     --mount=type=secret,id=federated_key,required=false \
     --mount=type=secret,id=consignment_key,required=false \
@@ -115,7 +124,7 @@ RUN --mount=type=ssh \
       git config --global url."ssh://git@github.com-federated/UTEXO-Protocol/federated-signer-proto.git".insteadOf "ssh://git@github.com/UTEXO-Protocol/federated-signer-proto.git"; \
       git config --global url."ssh://git@github.com-consignment/UTEXO-Protocol/rgb-consignment-parser.git".insteadOf "ssh://git@github.com/UTEXO-Protocol/rgb-consignment-parser.git"; \
     fi; \
-    cargo build --release --locked --features vsock,rgb-validation,spv,evm-rpc
+    cargo build --release --locked --features vsock,rgb-validation,spv,evm-rpc,helios
 
 # --- Runtime ---
 # Pinned by digest (see header) — this rootfs is what ends up in the EIF, so its
@@ -203,6 +212,23 @@ ENV EVM_RPC_URL=http://127.0.0.1:3444 \
     FUNDS_IN_CONTRACT=0x6711f1a319B37847fa0234181C34D883774c4951 \
     GAS_TX_ALLOWED_TO=0x6711f1a319B37847fa0234181C34D883774c4951 \
     BTC_MAX_TOTAL_SATS=1000000
+
+# Helios trustless-FundsIn config (#77), baked so PCR0 commits to it and the
+# production security policy resolves to HeliosVerified (else the release build
+# panics at boot). HELIOS_EXECUTION_RPC's PRESENCE selects the Helios path; both
+# RPC URLs MUST be loopback (a real deploy reaches them via host vsock forwarders:
+# exec 127.0.0.1:18545 -> vsock 8003, consensus 127.0.0.1:18550 -> vsock 8004).
+# HELIOS_STRICT_CHECKPOINT_AGE left unset -> defaults true.
+# ⚠️ PLACEHOLDER CHECKPOINT (override with `--build-arg HELIOS_CHECKPOINT=0x<root>`):
+# Helios only supports Ethereum L1, but this bridge is Arbitrum (EVM_CHAIN_ID=42161),
+# so HeliosEvmClient::new rejects the chain mismatch BEFORE syncing (evm_event.rs:501)
+# and never reads this value. It exists only to satisfy the boot gate's
+# "checkpoint must be Some" (policy.rs:254). NOT a real trust root.
+ARG HELIOS_CHECKPOINT=0x0000000000000000000000000000000000000000000000000000000000000001
+ENV HELIOS_EXECUTION_RPC=http://127.0.0.1:18545 \
+    HELIOS_CONSENSUS_RPC=http://127.0.0.1:18550 \
+    HELIOS_NETWORK=mainnet \
+    HELIOS_CHECKPOINT=${HELIOS_CHECKPOINT}
 
 # DEBUG-HUNT EIF (op13 RGB-PSBT enclave crash): verbose logs + full panic
 # backtrace so `nitro-cli console` (enclave run with --debug-mode) captures the
