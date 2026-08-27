@@ -19,7 +19,7 @@ use rgbstd::indexers::AnyResolver;
 #[cfg(feature = "bfa-mint")]
 use rgbstd::persistence::{MemContract, MemContractState};
 use rgbstd::schema::{MetaType, TransitionType};
-use rgbstd::validation::ValidationConfig;
+use rgbstd::validation::{ValidationConfig, ValidationError};
 use rgbstd::vm::ether_extension::Event;
 #[cfg(feature = "bfa-mint")]
 use rgbstd::vm::ether_extension::{BridgedContract, IssuedAmountCheckExt};
@@ -1011,12 +1011,22 @@ impl RgbValidator {
         let validation_result = transfer.validate(&resolver, &config);
 
         let valid = validation_result.map_err(|e| {
+            // ValidationError carries the Failure that condemned the consignment,
+            // but its Display is a doc comment that drops it - so on its own the
+            // log says only "invalid" and an operator has nothing to act on.
+            let detail = match &e {
+                ValidationError::InvalidConsignment(failure) => failure.to_string(),
+                other => other.to_string(),
+            };
             tracing::warn!(
                 %contract_id,
                 elapsed_ms = start.elapsed().as_millis() as u64,
+                %detail,
                 "RGB validation failed: {e}"
             );
-            EnclaveError::CrossCheck(format!("RGB consignment validation failed: {e}"))
+            EnclaveError::CrossCheck(format!(
+                "RGB consignment validation failed: {e}: {detail}"
+            ))
         })?;
 
         // Warnings only. Witness confirmation is deliberately NOT derived
