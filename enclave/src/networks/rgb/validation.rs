@@ -1009,8 +1009,8 @@ impl RgbValidator {
                         opid = %kt.opid,
                         transition_type = %kt.transition.transition_type,
                         globals = ?kt.transition.globals,
-                        inputs = kt.transition.inputs.len(),
-                        assignments = ?kt.transition.assignments.keys().collect::<Vec<_>>(),
+                        inputs = ?kt.transition.inputs,
+                        assignments = ?kt.transition.assignments,
                         "consignment transition"
                     );
                 }
