@@ -59,6 +59,11 @@ compile_error!(
 
 pub mod attestation;
 pub mod cloning;
+// Disciplines CLOCK_REALTIME from the hypervisor PTP source (`/dev/ptp0`) so a
+// long-lived enclave does not drift and start rejecting valid attestation/TLS
+// certs. Linux-only (uses `nix::time`, which is a linux-gated dep here).
+#[cfg(target_os = "linux")]
+pub mod clocksync;
 pub mod config;
 pub mod conn;
 pub mod error;
