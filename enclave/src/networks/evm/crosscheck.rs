@@ -9,7 +9,9 @@
 use crate::error::{EnclaveError, Result};
 use crate::networks::evm::validation::FundsOutParams;
 use crate::networks::rgb::spv::HeaderChain;
+use crate::networks::rgb::spv_validation;
 use crate::networks::rgb::validation::ValidatedConsignment;
+use crate::proto::MerkleProofEntry;
 
 // Calldata is decoded via `sol!` ([`decode_funds_out_params`]), not at
 // hard-coded byte offsets: the `FundsOutParams` tuple shifts every field by one
@@ -95,31 +97,38 @@ struct ProofBlock {
     commitment: [u8; 32],
 }
 
-/// BtcRelay-agreement cross-check (bridge spec section 13). Binds the
-/// calldata's claimed finality proof to the headers the enclave holds, so a
-/// listener can't split the contract's on-chain BtcRelay check away from the
-/// enclave's own SPV evidence. A no-op for non-`fundsOut` selectors and inert
-/// when the `proof` slot is empty.
+/// BtcRelay agreement + consignment source-block bind (spec section 13,
+/// #57/#122). Before signing a `fundsOut`:
 ///
-/// The proof is now two block pairs (`RGBVerifier.sol:115-117`):
+/// 1. find the block anchoring the consignment's last witness tx from its SPV
+///    Merkle proof, not from the calldata;
+/// 2. require a header there, proving the TEE is in sync;
+/// 3. require the calldata `proof` to name that same height.
 ///
-/// ```text
-/// abi.encode(uint256 sourceHeight, bytes32 sourceCommit,
-///            uint256 latestHeight, bytes32 latestCommit)
-/// ```
+/// The `proof` slot is `abi.encode(uint256 sourceHeight, bytes32 sourceCommit,
+/// uint256 latestHeight, bytes32 latestCommit)` (`RGBVerifier.sol:115-117`):
+/// `source` packaged the burn/transfer, `latest` is the relay tip. `latest` must
+/// also sit within `MAX_RELAY_TIP_LAG_BLOCKS` of the enclave tip, so freshness
+/// is not delegated to a relay the host also feeds. Empty `proof` = reject.
 ///
-/// `source` packaged the RGB burn; `latest` is the relay tip proving the
-/// relay's view is current. Both are checked against the enclave's own headers,
-/// so freshness is not delegated to a relay the host also feeds.
+/// **The commitment words are not checked, by design.** They are BtcRelay's
+/// `keccak256(StoredBlockHeader)` over relay-internal state (chainWork,
+/// lastDiffAdjustment, the last ten timestamps), which the enclave cannot
+/// compute - comparing them to `header.block_hash()` made every release
+/// unsatisfiable. `RGBVerifier` checks each against the relay itself, so a
+/// manipulated commitment reverts on-chain. The enclave enforces what only it
+/// knows: which block the consignment is anchored in, by height.
 ///
-/// Byte order: calldata commitments are display (big-endian) order; the
-/// in-enclave `header.block_hash()` is internal order, so it is reversed before
-/// comparing.
-pub fn verify_btc_relay_agreement(params: &FundsOutParams, chain: &HeaderChain) -> Result<()> {
-    let Some((source, latest)) = decode_funds_out_proof(params)? else {
-        // proof slot empty -> no calldata commitment to bind.
-        return Ok(());
-    };
+/// Ordered cheapest-first: the pure calldata decode and the `latest` checks run
+/// before the anchor resolution, which reads the chain and redoes a Merkle
+/// verification.
+pub fn verify_btc_relay_agreement(
+    params: &FundsOutParams,
+    validated: &ValidatedConsignment,
+    merkle_proofs: &[MerkleProofEntry],
+    chain: &HeaderChain,
+) -> Result<()> {
+    let (source, latest) = decode_funds_out_proof(params)?;
 
     // The tip cannot precede the block it buries. Caught here so the error names
     // the problem instead of surfacing as a header-lookup failure.
@@ -131,48 +140,183 @@ pub fn verify_btc_relay_agreement(params: &FundsOutParams, chain: &HeaderChain) 
         )));
     }
 
-    verify_proof_block(chain, &source, "source")?;
-    verify_proof_block(chain, &latest, "latest")
+    assert_header_present(chain, &latest, "latest")?;
+
+    // `latest` must actually be near the tip, else it proves only that some
+    // block existed and the relay could be arbitrarily far behind.
+    let lag = chain.tip_height().saturating_sub(latest.height);
+    if lag > MAX_RELAY_TIP_LAG_BLOCKS {
+        return Err(EnclaveError::Spv(format!(
+            "fundsOut BtcRelay check: proof latest height {} is {lag} blocks below the \
+             enclave tip {} (max {MAX_RELAY_TIP_LAG_BLOCKS}) - the relay's view is too \
+             stale to prove freshness",
+            latest.height,
+            chain.tip_height()
+        )));
+    }
+
+    // Recorded, not checked: an on-chain revert is otherwise opaque about which
+    // commitments were signed.
+    tracing::debug!(
+        source_height = source.height,
+        source_commit = %hex::encode(source.commitment),
+        latest_height = latest.height,
+        latest_commit = %hex::encode(latest.commitment),
+        "fundsOut relay proof accepted (commitments verified on-chain, not here)"
+    );
+
+    // The calldata's source block must be the consignment's own anchor. Height
+    // only - see the commitment note on this function.
+    let anchor = resolve_consignment_anchor(validated, merkle_proofs, chain)?;
+    if source.height != anchor.height {
+        return Err(EnclaveError::CrossCheck(format!(
+            "fundsOut source block mismatch: calldata proof cites height {}, but the \
+             consignment's last witness tx {} is anchored at height {} (enclave header hash {}) \
+             - refusing to sign",
+            source.height,
+            hex::encode(anchor.txid),
+            anchor.height,
+            hex::encode(anchor.commitment),
+        )));
+    }
+
+    Ok(())
 }
 
-/// Confirm one proof pair against the in-enclave header chain.
-fn verify_proof_block(chain: &HeaderChain, block: &ProofBlock, label: &str) -> Result<()> {
+/// The Bitcoin block anchoring a consignment's last witness tx.
+#[derive(Debug, Clone, Copy)]
+struct ConsignmentAnchor {
+    height: u32,
+    /// Block hash in display (big-endian) order, as the calldata carries it.
+    commitment: [u8; 32],
+    /// Witness txid, display order. Error messages only.
+    txid: [u8; 32],
+}
+
+/// Locate that block from evidence the enclave already trusts: the txid from
+/// the rgbstd-validated `Transfer`, the height from the tx's SPV proof, the hash
+/// from the enclave's own header chain. Nothing is read from the calldata. No
+/// header at that height means the enclave is behind the anchoring block, so it
+/// refuses.
+///
+/// The proof is re-verified here rather than relying on the earlier
+/// `validate_source_chain` pass: that ran under a different acquisition of the
+/// header-chain lock, and a concurrent `SubmitHeaders` reorg (up to
+/// `MAX_REORG_DEPTH = 100`, well past `SPV_MIN_CONFIRMATIONS = 6`) could have
+/// replaced the header in between. Inclusion and header hash must come from one
+/// consistent view.
+fn resolve_consignment_anchor(
+    validated: &ValidatedConsignment,
+    merkle_proofs: &[MerkleProofEntry],
+    chain: &HeaderChain,
+) -> Result<ConsignmentAnchor> {
     use bitcoin::hashes::Hash as _;
 
-    let header = chain.header_at(block.height).ok_or_else(|| {
+    let witness_txid = validated.last_witness_txid.ok_or_else(|| {
+        EnclaveError::CrossCheck(
+            "fundsOut requires a consignment with at least one witness bundle, but the validated \
+             consignment has no last witness txid - refusing to sign"
+                .into(),
+        )
+    })?;
+    // `MerkleProofEntry.txid` is display order; `Txid::to_byte_array` is internal.
+    let mut txid: [u8; 32] = witness_txid.to_byte_array();
+    txid.reverse();
+
+    // `validate_spv_proofs` enforced set equality against `witness_txids`, so a
+    // miss means the two views disagree. Fail closed.
+    let proof = merkle_proofs
+        .iter()
+        .find(|p| p.txid.as_slice() == txid)
+        .ok_or_else(|| {
+            EnclaveError::Spv(format!(
+                "fundsOut source block: no merkle proof for the consignment's last witness tx {} \
+                 - cannot determine the block that anchors it",
+                hex::encode(txid)
+            ))
+        })?;
+
+    let commitment = display_hash_at(chain, proof.block_height).ok_or_else(|| {
         EnclaveError::Spv(format!(
-            "fundsOut BtcRelay check: no header at {label} block height {} \
-             (chain tip = {}) - cannot confirm the calldata commitment against \
-             the enclave header chain",
-            block.height,
-            chain.tip_height()
+            "fundsOut source block: enclave holds no header at height {} (chain tip = {}) for the \
+             consignment's last witness tx {} - the TEE header chain is not in sync with \
+             the block that anchors this consignment",
+            proof.block_height,
+            chain.tip_height(),
+            hex::encode(txid)
         ))
     })?;
 
-    let mut stored_display: [u8; 32] = header.block_hash().to_byte_array();
-    stored_display.reverse();
-    if stored_display != block.commitment {
-        return Err(EnclaveError::Spv(format!(
-            "fundsOut BtcRelay check: calldata {label} commitmentHash {} != enclave header \
-             hash {} at block height {}",
-            hex::encode(block.commitment),
-            hex::encode(stored_display),
-            block.height
-        )));
-    }
-    Ok(())
+    // Re-verify inclusion and depth against the chain just read, under this
+    // same lock guard (see the doc note on reorgs). The full set validator is
+    // reused on a one-element slice so the path-depth and txid-correspondence
+    // bounds it enforces apply here too.
+    spv_validation::validate_spv_proofs(
+        chain,
+        &[txid],
+        std::slice::from_ref(proof),
+        spv_validation::SPV_MIN_CONFIRMATIONS,
+    )?;
+
+    Ok(ConsignmentAnchor {
+        height: proof.block_height,
+        commitment,
+        txid,
+    })
+}
+
+/// Hash of the enclave's own header at `height`, in display (big-endian) order:
+/// the order calldata `commitmentHash` words carry. `None` when the enclave
+/// holds no header there (at or below the checkpoint, or beyond the tip).
+fn display_hash_at(chain: &HeaderChain, height: u32) -> Option<[u8; 32]> {
+    use bitcoin::hashes::Hash as _;
+
+    let mut display: [u8; 32] = chain.header_at(height)?.block_hash().to_byte_array();
+    display.reverse();
+    Some(display)
+}
+
+/// Confirm one proof pair against the in-enclave header chain.
+fn assert_header_present(chain: &HeaderChain, block: &ProofBlock, label: &str) -> Result<()> {
+    display_hash_at(chain, block.height)
+        .map(|_| ())
+        .ok_or_else(|| {
+            EnclaveError::Spv(format!(
+                "fundsOut BtcRelay check: no header at {label} block height {} \
+                 (chain tip = {}) - the enclave is behind the chain and cannot confirm the \
+                 block the calldata names",
+                block.height,
+                chain.tip_height()
+            ))
+        })
 }
 
 /// Number of bytes in the finality proof: four ABI words.
 const FUNDS_OUT_PROOF_LEN: usize = 4 * 32;
 
-/// Decode the `fundsOut` `proof` slot into its `(source, latest)` block pair.
-/// Returns `Ok(None)` when the `proof` bytes are empty.
+/// How far the calldata's `latest` block may sit below the enclave's own tip.
+/// Without a bound the `latest` pair proves only that a block existed, so a
+/// listener could pass an ancient known block and the freshness half of the
+/// BtcRelay check would be vacuous.
 ///
-fn decode_funds_out_proof(params: &FundsOutParams) -> Result<Option<(ProofBlock, ProofBlock)>> {
+/// Set to `MAX_REORG_DEPTH` (100 blocks, ~16 h on mainnet): generous next to
+/// the relay's own posting cadence, and the depth beyond which the enclave
+/// already refuses to rewrite history. Aliased rather than re-typed so the two
+/// cannot drift. Compile-time, not host-tunable.
+const MAX_RELAY_TIP_LAG_BLOCKS: u32 = crate::networks::rgb::spv::chain::MAX_REORG_DEPTH;
+
+/// Decode the `fundsOut` `proof` slot into its `(source, latest)` block pair.
+/// An empty slot is rejected: it leaves nothing to bind the anchor to.
+fn decode_funds_out_proof(params: &FundsOutParams) -> Result<(ProofBlock, ProofBlock)> {
     let proof = &params.proof;
     if proof.is_empty() {
-        return Ok(None);
+        return Err(EnclaveError::CrossCheck(
+            "fundsOut proof is empty: the calldata must carry the finality proof - \
+             abi.encode(uint256 sourceHeight, bytes32 sourceCommit, uint256 latestHeight, \
+             bytes32 latestCommit) - so the enclave can bind it to the consignment's \
+             anchoring block"
+                .into(),
+        ));
     }
     if proof.len() != FUNDS_OUT_PROOF_LEN {
         return Err(EnclaveError::CrossCheck(format!(
@@ -195,7 +339,7 @@ fn decode_funds_out_proof(params: &FundsOutParams) -> Result<Option<(ProofBlock,
             .expect("32-byte slice always converts"),
     };
 
-    Ok(Some((source, latest)))
+    Ok((source, latest))
 }
 
 /// Read one proof height word as a `u32`. Bitcoin heights fit comfortably; a
@@ -316,7 +460,7 @@ mod tests {
                 all_op_ids: vec![transition.op_id.clone()],
                 mint_op_ids: vec![],
                 last_transition: Some(transition),
-                last_transfer_witness_txid: None,
+                last_witness_txid: None,
                 last_transfer_witness_prevouts: None,
                 last_transfer_op_id: None,
                 non_mined_witness_txids: vec![],
@@ -412,7 +556,7 @@ mod tests {
                 all_op_ids: vec![],
                 mint_op_ids: vec![],
                 last_transition: None,
-                last_transfer_witness_txid: None,
+                last_witness_txid: None,
                 last_transfer_witness_prevouts: None,
                 last_transfer_op_id: None,
                 non_mined_witness_txids: vec![],
@@ -437,6 +581,20 @@ mod tests {
         use bitcoin::consensus::serialize;
         use bitcoin::hashes::Hash as _;
 
+        /// Display-order txid of the consignment's single witness tx.
+        /// Deliberately NOT a palindrome: a byte-order slip in
+        /// `resolve_consignment_anchor` must fail the tests, not pass them.
+        const WITNESS_TXID: [u8; 32] = [
+            0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e,
+            0x0f, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b, 0x1c,
+            0x1d, 0x1e, 0x1f, 0x20,
+        ];
+
+        /// Block holding [`WITNESS_TXID`].
+        const ANCHOR_HEIGHT: u32 = 2;
+        /// Default tip: leaves the anchor 7 deep, past `SPV_MIN_CONFIRMATIONS`.
+        const TIP_HEIGHT: u32 = 8;
+
         /// Encode `n` as a big-endian 32-byte ABI word.
         fn u256_be(n: u64) -> [u8; 32] {
             let mut w = [0u8; 32];
@@ -444,11 +602,14 @@ mod tests {
             w
         }
 
-        /// A regtest chain with a single synthetic header at height 1 (PoW is
-        /// skipped on regtest - same pattern as the `spv::chain` tests).
-        /// Returns the chain and the header's DISPLAY-order block hash - the
-        /// byte order the calldata `commitmentHash` carries.
-        fn chain_with_one_header() -> (HeaderChain, [u8; 32]) {
+        /// A regtest chain of `tip` synthetic headers (PoW is skipped on
+        /// regtest - same pattern as the `spv::chain` tests). The header at
+        /// [`ANCHOR_HEIGHT`] commits exactly one transaction, [`WITNESS_TXID`],
+        /// so a proof with an empty path reconstructs its Merkle root.
+        ///
+        /// Returns the chain and every header's DISPLAY-order hash, indexed by
+        /// height (slot 0 is the checkpoint placeholder).
+        fn chain_to(tip: u32) -> (HeaderChain, Vec<[u8; 32]>) {
             let mut chain = HeaderChain::new(
                 Network::Regtest,
                 Checkpoint {
@@ -459,18 +620,35 @@ mod tests {
                     is_real: false,
                 },
             );
-            let header = Header {
-                version: Version::ONE,
-                prev_blockhash: bitcoin::BlockHash::from_byte_array([0u8; 32]),
-                merkle_root: bitcoin::TxMerkleNode::from_byte_array([0xAB; 32]),
-                time: 1_700_000_001,
-                bits: bitcoin::CompactTarget::from_consensus(0x207fffff),
-                nonce: 0,
-            };
-            chain.submit_headers(1, &[serialize(&header)]).unwrap();
-            let mut display: [u8; 32] = header.block_hash().to_byte_array();
-            display.reverse();
-            (chain, display)
+            let mut hashes = vec![[0u8; 32]];
+            let mut prev = bitcoin::BlockHash::from_byte_array([0u8; 32]);
+            for height in 1..=tip {
+                let merkle_root = if height == ANCHOR_HEIGHT {
+                    let mut internal = WITNESS_TXID;
+                    internal.reverse(); // Merkle math works in internal order
+                    bitcoin::TxMerkleNode::from_byte_array(internal)
+                } else {
+                    bitcoin::TxMerkleNode::from_byte_array([0xAB; 32])
+                };
+                let header = Header {
+                    version: Version::ONE,
+                    prev_blockhash: prev,
+                    merkle_root,
+                    time: 1_700_000_000 + height,
+                    bits: bitcoin::CompactTarget::from_consensus(0x207fffff),
+                    nonce: 0,
+                };
+                chain.submit_headers(height, &[serialize(&header)]).unwrap();
+                prev = header.block_hash();
+                let mut display: [u8; 32] = header.block_hash().to_byte_array();
+                display.reverse();
+                hashes.push(display);
+            }
+            (chain, hashes)
+        }
+
+        fn chain() -> (HeaderChain, Vec<[u8; 32]>) {
+            chain_to(TIP_HEIGHT)
         }
 
         /// The 4-field finality proof payload:
@@ -489,54 +667,115 @@ mod tests {
             Bytes::from(p)
         }
 
-        /// `fundsOut` calldata carrying a well-formed proof. The synthetic chain
-        /// has a single header, so source and latest point at the same block -
-        /// the degenerate but valid case where the burn sits at the relay tip.
-        fn calldata_with_proof(block_height: u32, commitment_display: [u8; 32]) -> Vec<u8> {
-            mock_funds_out_calldata_with_proof(
-                1_000,
-                proof_bytes(
-                    block_height,
-                    commitment_display,
-                    block_height,
-                    commitment_display,
-                ),
+        /// `fundsOut` calldata carrying the four-field finality proof.
+        fn calldata(sh: u32, sc: [u8; 32], lh: u32, lc: [u8; 32]) -> Vec<u8> {
+            mock_funds_out_calldata_with_proof(1_000, proof_bytes(sh, sc, lh, lc))
+        }
+
+        /// The well-formed case: `source` is the anchor block, `latest` the tip.
+        fn good_calldata(hashes: &[[u8; 32]]) -> Vec<u8> {
+            calldata(
+                ANCHOR_HEIGHT,
+                hashes[ANCHOR_HEIGHT as usize],
+                TIP_HEIGHT,
+                hashes[TIP_HEIGHT as usize],
             )
         }
 
+        /// A consignment anchored by [`WITNESS_TXID`], plus the SPV proof
+        /// placing it at `height`. The block at [`ANCHOR_HEIGHT`] holds only
+        /// that tx, so the path is empty and the position is 0.
+        fn anchored_at(height: u32) -> (ValidatedConsignment, Vec<MerkleProofEntry>) {
+            let mut internal = WITNESS_TXID;
+            internal.reverse();
+            let validated = ValidatedConsignment {
+                contract_id: "rgb:test".into(),
+                chain_net: "bc".into(),
+                witness_txids: vec![WITNESS_TXID],
+                all_op_ids: vec![],
+                mint_op_ids: vec![],
+                last_transition: None,
+                last_witness_txid: Some(bitcoin::Txid::from_byte_array(internal)),
+                last_transfer_witness_prevouts: None,
+                last_transfer_op_id: None,
+                non_mined_witness_txids: vec![],
+                transitions_by_witness: vec![],
+            };
+            let proofs = vec![MerkleProofEntry {
+                txid: WITNESS_TXID.to_vec(),
+                block_height: height,
+                tx_position: 0,
+                merkle_path: vec![],
+            }];
+            (validated, proofs)
+        }
+
+        /// Run the check against a consignment anchored at [`ANCHOR_HEIGHT`].
+        fn check(cd: &[u8], chain: &HeaderChain) -> Result<()> {
+            check_at(cd, chain, ANCHOR_HEIGHT)
+        }
+
+        /// Run the check against a consignment anchored at `anchor_height`.
+        fn check_at(cd: &[u8], chain: &HeaderChain, anchor_height: u32) -> Result<()> {
+            let (validated, proofs) = anchored_at(anchor_height);
+            verify_btc_relay_agreement(&params_of(cd), &validated, &proofs, chain)
+        }
+
+        // -- Calldata proof vs the enclave's own headers.
+
         #[test]
         fn passes_on_matching_commitment() {
-            let (chain, display_hash) = chain_with_one_header();
-            let cd = calldata_with_proof(1, display_hash);
-            assert!(verify_btc_relay_agreement(&params_of(&cd), &chain).is_ok());
+            let (chain, hashes) = chain();
+            assert!(check(&good_calldata(&hashes), &chain).is_ok());
         }
 
+        /// Right height, wrong hash: the anchor bind owns the `source` half, so
+        /// this surfaces as a mismatch against the consignment's anchor.
         #[test]
-        fn rejects_mismatched_commitment() {
-            let (chain, _display_hash) = chain_with_one_header();
-            let cd = calldata_with_proof(1, [0x11; 32]);
-            let err = verify_btc_relay_agreement(&params_of(&cd), &chain).unwrap_err();
-            assert!(err.to_string().contains("commitmentHash"), "got: {err}");
+        fn accepts_any_source_commitment_at_the_anchor_height() {
+            let (chain, hashes) = chain();
+            // BtcRelay's commitment is keccak256 over its own 160-byte record,
+            // which the enclave cannot compute. It is verified on-chain against
+            // the relay instead; the enclave binds the height.
+            let cd = calldata(
+                ANCHOR_HEIGHT,
+                [0x11; 32],
+                TIP_HEIGHT,
+                hashes[TIP_HEIGHT as usize],
+            );
+            assert!(check(&cd, &chain).is_ok());
         }
 
+        /// The bind that remains: a source height other than the consignment's
+        /// anchor is refused, whatever commitment accompanies it.
         #[test]
-        fn rejects_internal_order_commitment() {
-            // Byte-order contract: the internal-order (un-reversed) hash must
-            // be rejected, since calldata carries display order.
-            let (chain, mut display_hash) = chain_with_one_header();
-            display_hash.reverse(); // back to internal order
-            let cd = calldata_with_proof(1, display_hash);
-            assert!(verify_btc_relay_agreement(&params_of(&cd), &chain).is_err());
-        }
-
-        #[test]
-        fn rejects_height_beyond_tip() {
-            let (chain, display_hash) = chain_with_one_header();
-            let cd = calldata_with_proof(99, display_hash);
-            let err = verify_btc_relay_agreement(&params_of(&cd), &chain).unwrap_err();
+        fn rejects_a_source_height_that_is_not_the_anchor() {
+            let (chain, hashes) = chain();
+            let cd = calldata(
+                ANCHOR_HEIGHT + 1,
+                hashes[(ANCHOR_HEIGHT + 1) as usize],
+                TIP_HEIGHT,
+                hashes[TIP_HEIGHT as usize],
+            );
+            let err = check(&cd, &chain).unwrap_err();
             assert!(
-                err.to_string()
-                    .contains("no header at source block height 99"),
+                err.to_string().contains("source block mismatch"),
+                "got: {err}"
+            );
+        }
+
+        /// A `source` height the enclave holds no header for - here at the
+        /// checkpoint, below every stored header - cannot equal the anchor, so
+        /// the bind rejects it without a separate header lookup. (A height
+        /// ABOVE the tip trips the ordering guard first; see
+        /// `rejects_latest_below_source`.)
+        #[test]
+        fn rejects_source_height_with_no_header() {
+            let (chain, hashes) = chain();
+            let cd = calldata(0, hashes[0], TIP_HEIGHT, hashes[TIP_HEIGHT as usize]);
+            let err = check(&cd, &chain).unwrap_err();
+            assert!(
+                err.to_string().contains("source block mismatch"),
                 "got: {err}"
             );
         }
@@ -545,12 +784,14 @@ mod tests {
         /// be delegated to a relay the untrusted host also feeds.
         #[test]
         fn rejects_unknown_latest_block() {
-            let (chain, display_hash) = chain_with_one_header();
-            let cd = mock_funds_out_calldata_with_proof(
-                1_000,
-                proof_bytes(1, display_hash, 99, display_hash),
+            let (chain, hashes) = chain();
+            let cd = calldata(
+                ANCHOR_HEIGHT,
+                hashes[ANCHOR_HEIGHT as usize],
+                99,
+                hashes[TIP_HEIGHT as usize],
             );
-            let err = verify_btc_relay_agreement(&params_of(&cd), &chain).unwrap_err();
+            let err = check(&cd, &chain).unwrap_err();
             assert!(
                 err.to_string()
                     .contains("no header at latest block height 99"),
@@ -559,47 +800,98 @@ mod tests {
         }
 
         #[test]
-        fn rejects_mismatched_latest_commitment() {
-            let (chain, display_hash) = chain_with_one_header();
-            let cd = mock_funds_out_calldata_with_proof(
-                1_000,
-                proof_bytes(1, display_hash, 1, [0x11; 32]),
+        fn accepts_any_latest_commitment_at_a_known_height() {
+            let (chain, hashes) = chain();
+            let cd = calldata(
+                ANCHOR_HEIGHT,
+                hashes[ANCHOR_HEIGHT as usize],
+                TIP_HEIGHT,
+                [0x11; 32],
             );
-            let err = verify_btc_relay_agreement(&params_of(&cd), &chain).unwrap_err();
+            assert!(check(&cd, &chain).is_ok());
+        }
+
+        /// What `latest` still proves: the enclave holds a header there, so it
+        /// is in sync with the chain the relay claims to be following.
+        #[test]
+        fn rejects_a_latest_height_the_enclave_has_no_header_for() {
+            let (chain, hashes) = chain();
+            let cd = calldata(
+                ANCHOR_HEIGHT,
+                hashes[ANCHOR_HEIGHT as usize],
+                TIP_HEIGHT + 1,
+                [0x11; 32],
+            );
+            let err = check(&cd, &chain).unwrap_err();
             assert!(
-                err.to_string().contains("latest commitmentHash"),
+                err.to_string().contains("no header at latest block height"),
                 "got: {err}"
             );
         }
 
         #[test]
         fn rejects_latest_below_source() {
-            let (chain, display_hash) = chain_with_one_header();
-            let cd = mock_funds_out_calldata_with_proof(
-                1_000,
-                proof_bytes(5, display_hash, 1, display_hash),
+            let (chain, hashes) = chain();
+            let cd = calldata(
+                TIP_HEIGHT,
+                hashes[TIP_HEIGHT as usize],
+                ANCHOR_HEIGHT,
+                hashes[ANCHOR_HEIGHT as usize],
             );
-            let err = verify_btc_relay_agreement(&params_of(&cd), &chain).unwrap_err();
+            let err = check(&cd, &chain).unwrap_err();
             assert!(
                 err.to_string().contains("cannot precede"),
                 "expected the tip-ordering guard, got: {err}"
             );
         }
 
+        /// A `latest` far below the enclave tip proves only that a block
+        /// existed, so the freshness half would be vacuous.
         #[test]
-        fn inert_when_proof_empty() {
-            // The current live calldata shape zero-fills the proof offset, so
-            // the decoder reads an empty `proof` and the check is a no-op.
-            let (chain, _) = chain_with_one_header();
+        fn rejects_stale_relay_tip() {
+            let (chain, hashes) = chain_to(MAX_RELAY_TIP_LAG_BLOCKS + 20);
+            let cd = calldata(
+                ANCHOR_HEIGHT,
+                hashes[ANCHOR_HEIGHT as usize],
+                ANCHOR_HEIGHT,
+                hashes[ANCHOR_HEIGHT as usize],
+            );
+            let err = check(&cd, &chain).unwrap_err();
+            assert!(
+                err.to_string().contains("too stale to prove freshness"),
+                "got: {err}"
+            );
+        }
+
+        /// A relay lagging inside the bound is still accepted.
+        #[test]
+        fn accepts_relay_tip_within_lag_bound() {
+            let (chain, hashes) = chain_to(MAX_RELAY_TIP_LAG_BLOCKS);
+            let latest = MAX_RELAY_TIP_LAG_BLOCKS / 2;
+            let cd = calldata(
+                ANCHOR_HEIGHT,
+                hashes[ANCHOR_HEIGHT as usize],
+                latest,
+                hashes[latest as usize],
+            );
+            assert!(check(&cd, &chain).is_ok());
+        }
+
+        /// Fail-closed: a zero-filled `proof` leaves nothing to bind the
+        /// anchoring block to.
+        #[test]
+        fn rejects_empty_proof() {
+            let (chain, _) = chain();
             let cd = mock_funds_out_calldata(1_000);
-            assert!(verify_btc_relay_agreement(&params_of(&cd), &chain).is_ok());
+            let err = check(&cd, &chain).unwrap_err();
+            assert!(err.to_string().contains("proof is empty"), "got: {err}");
         }
 
         #[test]
         fn rejects_malformed_proof_length() {
-            let (chain, _) = chain_with_one_header();
+            let (chain, _) = chain();
             let cd = mock_funds_out_calldata_with_proof(1_000, Bytes::from(vec![0u8; 33]));
-            let err = verify_btc_relay_agreement(&params_of(&cd), &chain).unwrap_err();
+            let err = check(&cd, &chain).unwrap_err();
             assert!(err.to_string().contains("128 bytes"), "got: {err}");
         }
 
@@ -608,28 +900,115 @@ mod tests {
         /// source block and leave the relay-freshness half unchecked.
         #[test]
         fn rejects_legacy_two_field_proof() {
-            let (chain, display_hash) = chain_with_one_header();
+            let (chain, hashes) = chain();
             let mut legacy = Vec::with_capacity(64);
-            legacy.extend_from_slice(&u256_be(1));
-            legacy.extend_from_slice(&display_hash);
+            legacy.extend_from_slice(&u256_be(ANCHOR_HEIGHT as u64));
+            legacy.extend_from_slice(&hashes[ANCHOR_HEIGHT as usize]);
             let cd = mock_funds_out_calldata_with_proof(1_000, Bytes::from(legacy));
-            let err = verify_btc_relay_agreement(&params_of(&cd), &chain).unwrap_err();
+            let err = check(&cd, &chain).unwrap_err();
             assert!(err.to_string().contains("128 bytes"), "got: {err}");
         }
 
         #[test]
         fn rejects_blockheight_over_u32() {
-            let (chain, display_hash) = chain_with_one_header();
+            let (chain, hashes) = chain();
             let mut huge = [0u8; 32];
             huge[20] = 0x01; // a bit set above the low 4 bytes
             let mut payload = Vec::with_capacity(FUNDS_OUT_PROOF_LEN);
             payload.extend_from_slice(&huge); // sourceHeight
-            payload.extend_from_slice(&display_hash);
-            payload.extend_from_slice(&u256_be(1));
-            payload.extend_from_slice(&display_hash);
+            payload.extend_from_slice(&hashes[ANCHOR_HEIGHT as usize]);
+            payload.extend_from_slice(&u256_be(TIP_HEIGHT as u64));
+            payload.extend_from_slice(&hashes[TIP_HEIGHT as usize]);
             let cd = mock_funds_out_calldata_with_proof(1_000, Bytes::from(payload));
-            let err = verify_btc_relay_agreement(&params_of(&cd), &chain).unwrap_err();
+            let err = check(&cd, &chain).unwrap_err();
             assert!(err.to_string().contains("u32 range"), "got: {err}");
+        }
+
+        // -- Source-block bind: the calldata `source` pair must be the block
+        // -- anchoring the consignment's last witness tx.
+
+        /// A different but real block - one the enclave knows, so the BtcRelay
+        /// half passes - must still be refused.
+        #[test]
+        fn rejects_source_block_that_is_not_the_consignment_anchor() {
+            let (chain, hashes) = chain();
+            let other = ANCHOR_HEIGHT + 1;
+            let cd = calldata(
+                other,
+                hashes[other as usize],
+                TIP_HEIGHT,
+                hashes[TIP_HEIGHT as usize],
+            );
+            let err = check(&cd, &chain).unwrap_err();
+            assert!(
+                err.to_string().contains("source block mismatch"),
+                "got: {err}"
+            );
+        }
+
+        /// No header at the anchoring height: refuse rather than trust the
+        /// calldata.
+        #[test]
+        fn rejects_when_tee_has_no_header_at_anchor_height() {
+            let (chain, hashes) = chain();
+            let err = check_at(&good_calldata(&hashes), &chain, 99).unwrap_err();
+            assert!(err.to_string().contains("not in sync"), "got: {err}");
+        }
+
+        /// The anchor's own SPV proof is re-verified here, under the same lock
+        /// guard the header is read with, so a reorg between the source-chain
+        /// pass and this one cannot slip a substituted header through.
+        #[test]
+        fn rejects_when_anchor_proof_does_not_reconstruct_the_root() {
+            let (chain, hashes) = chain();
+            // Block ANCHOR_HEIGHT + 1 commits a different Merkle root.
+            let err = check_at(&good_calldata(&hashes), &chain, ANCHOR_HEIGHT + 1).unwrap_err();
+            assert!(err.to_string().contains("failed"), "got: {err}");
+        }
+
+        /// Depth is re-checked too: an anchor at the tip is only 1 confirmation
+        /// deep, short of `SPV_MIN_CONFIRMATIONS`.
+        #[test]
+        fn rejects_when_anchor_is_too_shallow() {
+            let (chain, hashes) = chain();
+            let err = check_at(&good_calldata(&hashes), &chain, TIP_HEIGHT).unwrap_err();
+            assert!(
+                err.to_string().contains("insufficient confirmations"),
+                "got: {err}"
+            );
+        }
+
+        #[test]
+        fn rejects_when_no_merkle_proof_covers_the_last_witness_tx() {
+            let (chain, hashes) = chain();
+            let (validated, mut proofs) = anchored_at(ANCHOR_HEIGHT);
+            proofs[0].txid = vec![0x01; 32];
+            let err = verify_btc_relay_agreement(
+                &params_of(&good_calldata(&hashes)),
+                &validated,
+                &proofs,
+                &chain,
+            )
+            .unwrap_err();
+            assert!(err.to_string().contains("no merkle proof"), "got: {err}");
+        }
+
+        #[test]
+        fn rejects_when_consignment_has_no_witness_bundle() {
+            let (chain, hashes) = chain();
+            let (mut validated, proofs) = anchored_at(ANCHOR_HEIGHT);
+            validated.last_witness_txid = None;
+            let err = verify_btc_relay_agreement(
+                &params_of(&good_calldata(&hashes)),
+                &validated,
+                &proofs,
+                &chain,
+            )
+            .unwrap_err();
+            assert!(
+                err.to_string().contains("no last witness txid"),
+                "got: {err}"
+            );
         }
     }
 }

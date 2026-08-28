@@ -58,8 +58,8 @@ aws-nitro-enclaves-nsm-api = "0.4"
 
 [features]
 # A plain `cargo build` is the combined production bridge: rgb + ccd + helios.
-# `helios` is default because production requires it — the boot gate in
-# `policy.rs` rejects any other EVM source. It implies `evm-rpc`.
+# `helios` is default but not mandatory: it has no L2 light client, so an
+# Arbitrum deployment runs on plain `evm-rpc`. It implies `evm-rpc`.
 #
 # Single-network EIFs: `--no-default-features --features vsock,rgb,evm-rpc,helios`
 # (RGB) or `--no-default-features --features vsock,ccd` (Concordium — no

@@ -82,8 +82,8 @@ jobs:
         run: cargo test --manifest-path parent/Cargo.toml
 
       # Production build profile: the exact feature set shipped in the EIF
-      # (build/Dockerfile.enclave). `helios` is required in production and
-      # makes this a heavy build (alloy major, revm, BLS, vendored OpenSSL).
+      # (build/Dockerfile.enclave). `helios` is shipped but optional at boot,
+      # and makes this a heavy build (alloy major, revm, BLS, vendored OpenSSL).
       - name: Build (production combo)
         run: cargo build -p utexo-bridge-enclave --features vsock,rgb,ccd,evm-rpc,helios
 

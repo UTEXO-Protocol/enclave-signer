@@ -5,39 +5,29 @@
 //! exists after the enclave boots, and baking them into the image changes the
 //! PCR0 identity that seed is bound to.
 //!
-//! An output is accepted when either:
+//! An output is accepted on one rule: its `script_pubkey` equals that of an
+//! input for which
+//! [`find_taproot_sign_jobs`](crate::networks::rgb::signing::taproot::find_taproot_sign_jobs)
+//! produced a job. That job is control-block and derivation anchored, and the
+//! segwit sighash commits to the script.
 //!
-//!   * (A) it repays an input we co-control: its `script_pubkey` equals that of
-//!     an input for which
-//!     [`find_taproot_sign_jobs`](crate::networks::rgb::signing::taproot::find_taproot_sign_jobs)
-//!     produced a Vanilla-account job. Such a job is control-block anchored and
-//!     derivation anchored, so the equal script is co-controlled by
-//!     construction. Covers the self-pay / consolidation shape.
-//!   * (B) its taproot metadata reconstructs to a script we participate in:
-//!     `tap_internal_key` (+ `tap_tree`, when present) must rebuild the exact
-//!     on-chain `script_pubkey`, and some key in that script must be one we
-//!     derive at a BIP-86 path under our own master fingerprint, on either
-//!     account. Covers fresh change addresses at indices the tx does not spend
-//!     from, and needs standard BIP-371 output fields (`PSBT_OUT_TAP_*`).
+//! It proves custody is unchanged, not that only we can spend: the bridge is a
+//! multisig, and the other signers can move funds without us either way. It
+//! holds for bridge change because the wallet reuses addresses.
 //!
-//! Rule (B) accepts Colored destinations as well as Vanilla ones, since
-//! `create_utxo` funds fresh colored UTXOs out of vanilla inputs. The rule
-//! scopes which inputs we spend, not which of our accounts we pay into.
-//!
-//! Both rules anchor on the reconstructed `script_pubkey`, which the segwit
-//! sighash commits to. A `tap_key_origins` entry alone proves nothing: it is
-//! coordinator-supplied and can claim anything.
+//! A previous rule (B) accepted an output whose taproot tree held any leaf
+//! pushing a key we derive. That proves nothing - a P2TR output is spendable by
+//! its internal key alone, and one leaf says nothing about the rest of the tree
+//! or its threshold. Removed. What it used to cover (fresh change indices,
+//! `create_utxo` dust) is bounded by value in
+//! [`crate::networks::rgb::btc_crosscheck`] instead.
 //!
 //! Scope: this makes the plain-BTC path structurally self-pay. Withdrawals to
 //! an arbitrary user address remain out of scope.
 
 use std::collections::HashSet;
 
-use bitcoin::blockdata::script::Instruction;
 use bitcoin::psbt::Psbt;
-use bitcoin::secp256k1::{Keypair, Secp256k1};
-use bitcoin::taproot::TapLeafHash;
-use bitcoin::{ScriptBuf, XOnlyPublicKey};
 
 use crate::keys::{AccountType, KeyManager};
 use crate::networks::rgb::signing::taproot::find_taproot_sign_jobs;
@@ -84,138 +74,32 @@ pub fn self_controlled_input_scripts_scoped(
 pub fn self_owned_output_indices(psbt: &Psbt, keys: &KeyManager) -> HashSet<u32> {
     let input_scripts = self_controlled_input_scripts_scoped(psbt, keys, None);
     (0..psbt.unsigned_tx.output.len())
-        .filter(|&i| output_is_self_owned(psbt, i, keys, &input_scripts))
+        .filter(|&i| output_is_self_owned(psbt, i, &input_scripts))
         .map(|i| i as u32)
         .collect()
 }
 
-/// Whether output `index` pays back to this enclave - rule (A) or rule (B) of
-/// the module docs. `input_scripts` comes from
-/// [`self_controlled_input_scripts`] (hoisted so a multi-output PSBT resolves
-/// its inputs once).
-pub fn output_is_self_owned(
-    psbt: &Psbt,
-    index: usize,
-    keys: &KeyManager,
-    input_scripts: &HashSet<Vec<u8>>,
-) -> bool {
+/// Whether output `index` pays back into the custody its inputs were already in.
+/// `input_scripts` is hoisted so a multi-output PSBT resolves its inputs once.
+pub fn output_is_self_owned(psbt: &Psbt, index: usize, input_scripts: &HashSet<Vec<u8>>) -> bool {
     let Some(txout) = psbt.unsigned_tx.output.get(index) else {
         return false;
     };
-
-    // (A) Repays an input we co-control.
-    if input_scripts.contains(txout.script_pubkey.as_bytes()) {
-        return true;
-    }
-
-    // (B) Output metadata reconstructs to a script we participate in.
-    reconstructs_to_our_taproot(psbt, index, keys)
-}
-
-/// Rule (B): rebuild the taproot output from the PSBT's output metadata, require
-/// it to equal the on-chain `script_pubkey` byte for byte, then require one of
-/// the keys committed by that script to be ours.
-fn reconstructs_to_our_taproot(psbt: &Psbt, index: usize, keys: &KeyManager) -> bool {
-    let secp = Secp256k1::new();
-
-    let (Some(txout), Some(out)) = (psbt.unsigned_tx.output.get(index), psbt.outputs.get(index))
-    else {
-        return false;
-    };
-    let Some(internal_key) = out.tap_internal_key else {
-        return false;
-    };
-
-    // Metadata that does not rebuild the script being paid says nothing about
-    // who controls it.
-    let merkle_root = out.tap_tree.as_ref().map(|tree| tree.root_hash());
-    if ScriptBuf::new_p2tr(&secp, internal_key, merkle_root) != txout.script_pubkey {
-        return false;
-    }
-
-    // Key-path ownership: the internal key itself is one of ours.
-    if is_our_key(&internal_key, out, keys, None) {
-        return true;
-    }
-
-    // Script-path ownership: some leaf of the committed tree pushes one of our
-    // keys. Leaves come from the `tap_tree` the script was just proven to
-    // commit to, so a forged leaf cannot get here.
-    let Some(tree) = out.tap_tree.as_ref() else {
-        return false;
-    };
-    for leaf in tree.script_leaves() {
-        let leaf_hash = TapLeafHash::from_script(leaf.script(), leaf.version());
-        for insn in leaf.script().instructions().filter_map(|r| r.ok()) {
-            let Instruction::PushBytes(bytes) = insn else {
-                continue;
-            };
-            if bytes.as_bytes().len() != 32 {
-                continue;
-            }
-            let Ok(xonly) = XOnlyPublicKey::from_slice(bytes.as_bytes()) else {
-                continue;
-            };
-            if is_our_key(&xonly, out, keys, Some(leaf_hash)) {
-                return true;
-            }
-        }
-    }
-
-    false
-}
-
-/// Whether `xonly` is a key this enclave derives, per the output's
-/// `tap_key_origins`.
-///
-/// The origin entry supplies only a claim (fingerprint + path), which is
-/// checked by deriving that path and requiring it to produce `xonly`. A
-/// coordinator can write any fingerprint and path into a PSBT.
-///
-/// Either BIP-86 account counts. `resolve_account_and_child_path` still pins
-/// the path shape, so a wrong purpose or unknown coin type is refused.
-///
-/// `leaf_hash` is `Some` when the key was found inside a script leaf, in which
-/// case the origin entry must list that same leaf.
-fn is_our_key(
-    xonly: &XOnlyPublicKey,
-    out: &bitcoin::psbt::Output,
-    keys: &KeyManager,
-    leaf_hash: Option<TapLeafHash>,
-) -> bool {
-    let Some((leaf_hashes, (fingerprint, derivation_path))) = out.tap_key_origins.get(xonly) else {
-        return false;
-    };
-    if fingerprint != keys.master_fingerprint() {
-        return false;
-    }
-    if let Some(leaf_hash) = leaf_hash {
-        if !leaf_hashes.contains(&leaf_hash) {
-            return false;
-        }
-    }
-    let Some((account_type, child_path)) = keys.resolve_account_and_child_path(derivation_path)
-    else {
-        return false;
-    };
-    let Ok(child_secret) = keys.derive_btc_child(account_type, &child_path) else {
-        return false;
-    };
-    let secp = Secp256k1::new();
-    let (derived, _) =
-        XOnlyPublicKey::from_keypair(&Keypair::from_secret_key(&secp, &child_secret));
-    derived == *xonly
+    input_scripts.contains(txout.script_pubkey.as_bytes())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bitcoin::bip32::{ChildNumber, DerivationPath, Fingerprint};
+    use bitcoin::bip32::{ChildNumber, DerivationPath};
     use bitcoin::blockdata::opcodes::all::{OP_CHECKSIG, OP_CHECKSIGADD, OP_NUMEQUAL};
     use bitcoin::blockdata::script::Builder as ScriptBuilder;
     use bitcoin::hashes::Hash;
     use bitcoin::secp256k1::SecretKey;
+    use bitcoin::secp256k1::{Keypair, Secp256k1};
+    use bitcoin::taproot::TapLeafHash;
     use bitcoin::taproot::{LeafVersion, TaprootBuilder};
+    use bitcoin::ScriptBuf;
     use bitcoin::{
         Amount, Network, OutPoint, Sequence, Transaction, TxIn, TxOut, Txid, Witness,
         XOnlyPublicKey,
@@ -372,7 +256,7 @@ mod tests {
 
     fn owned(psbt: &Psbt, keys: &KeyManager) -> bool {
         let inputs = self_controlled_input_scripts(psbt, keys);
-        output_is_self_owned(psbt, 0, keys, &inputs)
+        output_is_self_owned(psbt, 0, &inputs)
     }
 
     // === Rule (A): repaying an input we co-control ===
@@ -432,12 +316,16 @@ mod tests {
         assert!(!owned(&psbt, &keys));
     }
 
-    // === Rule (B): output metadata reconstructing to a script we participate in ===
+    // === Rule (B) is gone: metadata is not a proof of control ===
+    //
+    // Shapes rule (B) accepted, now rejected. Not a loss of function: change
+    // reuses the address, and `create_utxo` dust is bounded by value in
+    // `btc_crosscheck`.
 
+    /// The finding's shape: a leaf naming our key, in a tree we do not control.
     #[test]
-    fn accepts_fresh_change_address_with_script_path_metadata() {
+    fn a_leaf_mentioning_our_key_is_not_ownership() {
         let keys = km();
-        // A change address at an index the tx does not spend from.
         let (our, path) = our_key(&keys, 1, 7);
         let (spk, leaf, leaf_hash, internal) = multisig_address(our);
 
@@ -455,11 +343,16 @@ mod tests {
             .tap_key_origins
             .insert(our, (vec![leaf_hash], (*keys.master_fingerprint(), path)));
 
-        assert!(owned(&psbt, &keys));
+        assert!(
+            !owned(&psbt, &keys),
+            "a tap_tree leaf holding our key is not proof we control the output"
+        );
     }
 
+    /// Genuinely ours, but indistinguishable from a forged claim without
+    /// trusting the metadata. Address reuse removes the need to.
     #[test]
-    fn accepts_bip86_key_path_change_output() {
+    fn a_fresh_change_index_is_not_ownership() {
         let keys = km();
         let secp = Secp256k1::new();
         let (our, path) = our_key(&keys, 1, 3);
@@ -472,193 +365,10 @@ mod tests {
             .tap_key_origins
             .insert(our, (vec![], (*keys.master_fingerprint(), path)));
 
-        assert!(owned(&psbt, &keys));
-    }
-
-    /// Metadata is coordinator-supplied, so it only counts when it rebuilds
-    /// the script actually being paid. Here it describes a genuine address of
-    /// ours while the output pays elsewhere.
-    #[test]
-    fn rejects_metadata_that_does_not_reconstruct_the_paid_script() {
-        let keys = km();
-        let (our, path) = our_key(&keys, 1, 7);
-        let (_ours_spk, leaf, leaf_hash, internal) = multisig_address(our);
-        let (attacker_spk, _, _, _) = multisig_address(foreign_xonly(0xB1));
-
-        let mut psbt = psbt_with(ScriptBuf::new(), attacker_spk);
-        make_input_ours(&mut psbt, &keys);
-        psbt.outputs[0].tap_internal_key = Some(internal);
-        psbt.outputs[0].tap_tree = Some(
-            TaprootBuilder::new()
-                .add_leaf(0, leaf)
-                .unwrap()
-                .try_into()
-                .unwrap(),
+        assert!(
+            !owned(&psbt, &keys),
+            "change must land on a script the transaction already spends"
         );
-        psbt.outputs[0]
-            .tap_key_origins
-            .insert(our, (vec![leaf_hash], (*keys.master_fingerprint(), path)));
-
-        assert!(!owned(&psbt, &keys));
-    }
-
-    /// A forged origin entry pointing our fingerprint and a real BIP-86 path
-    /// at a key we do not hold. Passes unless the path is derived and compared.
-    #[test]
-    fn rejects_origin_claiming_our_fingerprint_for_a_foreign_key() {
-        let keys = km();
-        let foreign = foreign_xonly(0xEE);
-        let (_, path) = our_key(&keys, 1, 7);
-        let (spk, leaf, leaf_hash, internal) = multisig_address(foreign);
-
-        let mut psbt = psbt_with(ScriptBuf::new(), spk);
-        make_input_ours(&mut psbt, &keys);
-        psbt.outputs[0].tap_internal_key = Some(internal);
-        psbt.outputs[0].tap_tree = Some(
-            TaprootBuilder::new()
-                .add_leaf(0, leaf)
-                .unwrap()
-                .try_into()
-                .unwrap(),
-        );
-        psbt.outputs[0].tap_key_origins.insert(
-            foreign,
-            (vec![leaf_hash], (*keys.master_fingerprint(), path)),
-        );
-
-        assert!(!owned(&psbt, &keys));
-    }
-
-    #[test]
-    fn rejects_origin_with_a_different_fingerprint() {
-        let keys = km();
-        let (our, path) = our_key(&keys, 1, 7);
-        let (spk, leaf, leaf_hash, internal) = multisig_address(our);
-
-        let mut psbt = psbt_with(ScriptBuf::new(), spk);
-        make_input_ours(&mut psbt, &keys);
-        psbt.outputs[0].tap_internal_key = Some(internal);
-        psbt.outputs[0].tap_tree = Some(
-            TaprootBuilder::new()
-                .add_leaf(0, leaf)
-                .unwrap()
-                .try_into()
-                .unwrap(),
-        );
-        psbt.outputs[0].tap_key_origins.insert(
-            our,
-            (
-                vec![leaf_hash],
-                (Fingerprint::from([0xDE, 0xAD, 0xBE, 0xEF]), path),
-            ),
-        );
-
-        assert!(!owned(&psbt, &keys));
-    }
-
-    /// The origin entry vouches for a different leaf than the one the key was
-    /// found in, so it cannot authorise this leaf.
-    #[test]
-    fn rejects_origin_listing_a_different_leaf() {
-        let keys = km();
-        let (our, path) = our_key(&keys, 1, 7);
-        let (spk, leaf, _leaf_hash, internal) = multisig_address(our);
-        let other_leaf_hash = TapLeafHash::from_script(
-            &multi_a_2_of_3(&[
-                foreign_xonly(0xC1),
-                foreign_xonly(0xC2),
-                foreign_xonly(0xC3),
-            ]),
-            LeafVersion::TapScript,
-        );
-
-        let mut psbt = psbt_with(ScriptBuf::new(), spk);
-        make_input_ours(&mut psbt, &keys);
-        psbt.outputs[0].tap_internal_key = Some(internal);
-        psbt.outputs[0].tap_tree = Some(
-            TaprootBuilder::new()
-                .add_leaf(0, leaf)
-                .unwrap()
-                .try_into()
-                .unwrap(),
-        );
-        psbt.outputs[0].tap_key_origins.insert(
-            our,
-            (vec![other_leaf_hash], (*keys.master_fingerprint(), path)),
-        );
-
-        assert!(!owned(&psbt, &keys));
-    }
-
-    /// The `create_utxo` shape: a vanilla input funding a fresh Colored
-    /// (RGB-allocation) UTXO. Still a script the enclave derives, so self-pay.
-    #[test]
-    fn accepts_colored_account_output_for_create_utxo() {
-        let keys = km();
-        let (colored, colored_path) = our_colored_key(&keys);
-        let (spk, leaf, leaf_hash, internal) = multisig_address(colored);
-
-        let mut psbt = psbt_with(ScriptBuf::new(), spk);
-        make_input_ours(&mut psbt, &keys);
-        psbt.outputs[0].tap_internal_key = Some(internal);
-        psbt.outputs[0].tap_tree = Some(
-            TaprootBuilder::new()
-                .add_leaf(0, leaf)
-                .unwrap()
-                .try_into()
-                .unwrap(),
-        );
-        psbt.outputs[0].tap_key_origins.insert(
-            colored,
-            (vec![leaf_hash], (*keys.master_fingerprint(), colored_path)),
-        );
-
-        assert!(owned(&psbt, &keys));
-    }
-
-    /// Dropping the Vanilla-only rule did not drop the path check: a coin type
-    /// that is neither the network's nor RGB's resolves to no account of ours.
-    #[test]
-    fn rejects_origin_on_a_path_off_both_accounts() {
-        let keys = km();
-        let (our, _) = our_key(&keys, 1, 7);
-        let (spk, leaf, leaf_hash, internal) = multisig_address(our);
-        let foreign_account_path = DerivationPath::from(vec![
-            ChildNumber::from_hardened_idx(86).unwrap(),
-            ChildNumber::from_hardened_idx(9999).unwrap(),
-            ChildNumber::from_hardened_idx(0).unwrap(),
-            ChildNumber::Normal { index: 1 },
-            ChildNumber::Normal { index: 7 },
-        ]);
-
-        let mut psbt = psbt_with(ScriptBuf::new(), spk);
-        make_input_ours(&mut psbt, &keys);
-        psbt.outputs[0].tap_internal_key = Some(internal);
-        psbt.outputs[0].tap_tree = Some(
-            TaprootBuilder::new()
-                .add_leaf(0, leaf)
-                .unwrap()
-                .try_into()
-                .unwrap(),
-        );
-        psbt.outputs[0].tap_key_origins.insert(
-            our,
-            (
-                vec![leaf_hash],
-                (*keys.master_fingerprint(), foreign_account_path),
-            ),
-        );
-
-        assert!(!owned(&psbt, &keys));
-    }
-
-    #[test]
-    fn rejects_output_with_no_metadata_at_all() {
-        let keys = km();
-        let (spk, _, _, _) = multisig_address(foreign_xonly(0xB1));
-        let mut psbt = psbt_with(ScriptBuf::new(), spk);
-        make_input_ours(&mut psbt, &keys);
-        assert!(!owned(&psbt, &keys));
     }
 
     /// Non-taproot outputs can never be reconstructed from BIP-371 metadata, so
