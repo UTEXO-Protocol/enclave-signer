@@ -25,10 +25,10 @@ codegen-units = 1
 # Mirrors the root block verbatim, including rgb-consensus: the `s/bfa` rgb-ops
 # references the ether extension, so it does not build against a crates.io
 # rgb-consensus of the same version.
-rgb-consensus = { git = "https://github.com/UTEXO-Protocol/rgb-consensus-s-bfa", rev = "66819e80df9adb3b5ad100467f3a7179e38ca5a4" }
+rgb-consensus = { git = "https://github.com/UTEXO-Protocol/rgb-consensus-s-bfa", rev = "68a1470e22ae4bb6a38205404e484b264b4139ee" }
 rgb-ops = { git = "https://github.com/UTEXO-Protocol/rgb-ops-s-bfa", rev = "3bcc7d98d759a8b71bf94ad4a36371dcb7bf392b" }
 rgb-invoicing = { git = "https://github.com/UTEXO-Protocol/rgb-ops-s-bfa", rev = "3bcc7d98d759a8b71bf94ad4a36371dcb7bf392b" }
-rgb-schemas = { git = "https://github.com/UTEXO-Protocol/rgb-schemas-s-bfa", rev = "09d5d494706e75593f71c3f5f06cd89a8dcb807e" }
+rgb-schemas = { git = "https://github.com/UTEXO-Protocol/rgb-schemas-s-bfa", rev = "af4f91e6807a9680ab195c28719197b7811ac5d6" }
 rgb-strict-encoding = { git = "https://github.com/rgb-protocol/rgb-strict-encoding", rev = "7698a5e96a2a27d5bfa4cd3560da0e8af8e4a18a" }
 
 [package]
