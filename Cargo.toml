@@ -44,7 +44,7 @@ codegen-units = 1
 # with `cargo update -p rgb-ops -p rgb-consensus -p rgb-invoicing -p rgb-schemas`.
 # That downgrade also pulls electrum-client 0.24 - see the REVERT note in
 # enclave/src/networks/rgb/validation.rs.
-rgb-consensus = { git = "https://github.com/UTEXO-Protocol/rgb-consensus-s-bfa", rev = "66819e80df9adb3b5ad100467f3a7179e38ca5a4" }
+rgb-consensus = { git = "https://github.com/UTEXO-Protocol/rgb-consensus-s-bfa", rev = "445d77b29c21787f46ba5d9da070517ffbd2ae59" }
 rgb-ops = { git = "https://github.com/UTEXO-Protocol/rgb-ops-s-bfa", rev = "3bcc7d98d759a8b71bf94ad4a36371dcb7bf392b" }
 rgb-invoicing = { git = "https://github.com/UTEXO-Protocol/rgb-ops-s-bfa", rev = "3bcc7d98d759a8b71bf94ad4a36371dcb7bf392b" }
 rgb-schemas = { git = "https://github.com/UTEXO-Protocol/rgb-schemas-s-bfa", rev = "09d5d494706e75593f71c3f5f06cd89a8dcb807e" }
