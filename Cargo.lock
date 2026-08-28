@@ -6043,7 +6043,7 @@ dependencies = [
 [[package]]
 name = "rgb-consensus"
 version = "0.11.1-rc.10"
-source = "git+https://github.com/UTEXO-Protocol/rgb-consensus-s-bfa?rev=445d77b29c21787f46ba5d9da070517ffbd2ae59#445d77b29c21787f46ba5d9da070517ffbd2ae59"
+source = "git+https://github.com/UTEXO-Protocol/rgb-consensus-s-bfa?rev=59349c0f9b971024166fecb3fd537f7170b7be7f#59349c0f9b971024166fecb3fd537f7170b7be7f"
 dependencies = [
  "amplify",
  "baid64",
