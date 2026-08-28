@@ -6043,7 +6043,7 @@ dependencies = [
 [[package]]
 name = "rgb-consensus"
 version = "0.11.1-rc.10"
-source = "git+https://github.com/UTEXO-Protocol/rgb-consensus-s-bfa?rev=9ce27c88e96b8cef16e3724ca88a84846462cf6d#9ce27c88e96b8cef16e3724ca88a84846462cf6d"
+source = "git+https://github.com/UTEXO-Protocol/rgb-consensus-s-bfa?rev=68a1470e22ae4bb6a38205404e484b264b4139ee#68a1470e22ae4bb6a38205404e484b264b4139ee"
 dependencies = [
  "amplify",
  "baid64",
@@ -6125,7 +6125,7 @@ dependencies = [
 [[package]]
 name = "rgb-schemas"
 version = "0.11.1-rc.10"
-source = "git+https://github.com/UTEXO-Protocol/rgb-schemas-s-bfa?rev=09d5d494706e75593f71c3f5f06cd89a8dcb807e#09d5d494706e75593f71c3f5f06cd89a8dcb807e"
+source = "git+https://github.com/UTEXO-Protocol/rgb-schemas-s-bfa?rev=af4f91e6807a9680ab195c28719197b7811ac5d6#af4f91e6807a9680ab195c28719197b7811ac5d6"
 dependencies = [
  "amplify",
  "rgb-aluvm",
