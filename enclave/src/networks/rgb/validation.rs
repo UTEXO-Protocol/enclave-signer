@@ -996,6 +996,26 @@ impl RgbValidator {
                 ));
             }
             let events: Vec<Event> = bridge_events.to_vec();
+
+            // The bridge script sets its errno once and never resets it, so `sas`
+            // and `cea` both report code 1 and the failure alone cannot say which
+            // one rejected the mint. Print what each of them reads.
+            for event in &events {
+                tracing::info!(reason = %event.reason(), "bridge event supplied to the extension");
+            }
+            for wb in transfer.bundles.iter() {
+                for kt in wb.bundle.known_transitions.iter() {
+                    tracing::info!(
+                        opid = %kt.opid,
+                        transition_type = %kt.transition.transition_type,
+                        globals = ?kt.transition.globals,
+                        inputs = kt.transition.inputs.len(),
+                        assignments = ?kt.transition.assignments.keys().collect::<Vec<_>>(),
+                        "consignment transition"
+                    );
+                }
+            }
+
             let schema = transfer.schema.clone();
             let contract = transfer.contract_id();
             transfer
