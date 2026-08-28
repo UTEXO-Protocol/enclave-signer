@@ -111,7 +111,7 @@ helios-ethereum = { git = "https://github.com/a16z/helios", tag = "0.11.1", opti
 
 [target.'cfg(target_os = "linux")'.dependencies]
 vsock = "0.5"
-nix = { version = "0.31.2", features = ["socket"] }
+nix = { version = "0.31.2", features = ["socket", "time"] }
 aws-nitro-enclaves-nsm-api = "0.4"
 
 [features]

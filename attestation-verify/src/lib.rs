@@ -528,13 +528,21 @@ IwLz3/Y=
     }
 
     /// Symmetric tolerance (seconds) applied to the certificate validity window
-    /// to absorb clock skew between the verifier and the AWS-issued attestation
-    /// certificate. Nitro enclaves take their initial time from the hypervisor at
-    /// boot and then free-run without NTP, so a long-lived enclave can drift by
-    /// tens of seconds relative to a freshly-booted peer. Without this tolerance a
-    /// clone/attestation exchange between a drifted donor and a fresh requester
-    /// fails with a spurious "certificate not yet valid".
-    const CERT_CLOCK_SKEW_TOLERANCE_SECS: u64 = 900;
+    /// to absorb residual clock skew between the verifier and the AWS-issued
+    /// attestation certificate.
+    ///
+    /// Nitro enclaves take their initial time from the hypervisor at boot and then
+    /// free-run without NTP, so a long-lived enclave can drift relative to a
+    /// freshly-booted peer; without any tolerance a clone/attestation exchange
+    /// between a drifted donor and a fresh requester fails with a spurious
+    /// "certificate not yet valid". The PRIMARY fix for that drift is now in the
+    /// enclave itself (`enclave::clocksync` disciplines CLOCK_REALTIME from the
+    /// hypervisor PTP clock every few minutes), so this tolerance is only a
+    /// secondary net for brief skew (e.g. the first seconds after boot, before the
+    /// first PTP sync, or a peer whose PTP sync is unavailable). Keep it small — a
+    /// wide window needlessly weakens the validity-freshness signal (replay is
+    /// already guarded by nonces, not by wall-clock).
+    const CERT_CLOCK_SKEW_TOLERANCE_SECS: u64 = 60;
 
     fn verify_cert_validity(cert: &Certificate) -> Result<()> {
         let now = SystemTime::now()
