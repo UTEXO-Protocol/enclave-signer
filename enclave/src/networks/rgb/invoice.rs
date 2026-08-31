@@ -128,6 +128,23 @@ mod tests {
         assert!(assert_recipient_authorized(&[INVOICE_SEAL.to_string()], &authorized).is_ok());
     }
 
+    /// The shape the frontend actually emits: no contract/schema/state, plus
+    /// `expiry` and `endpoints` query params. Signet (`sb:`) as well as mainnet.
+    #[test]
+    fn the_frontend_invoice_shape_parses() {
+        for chain in ["bc", "sb"] {
+            let inv = format!(
+                "rgb:~/~/~/{chain}:utxob:dYwB28dy-yD6EBgm-MO~UKN_-FyEEdBL-E9hw8Oj-i9KxH5b-e9vZL\
+                 ?expiry=2073313268&endpoints=rpcs://rgb-proxy-utexo.utexo.com/json-rpc"
+            );
+            assert_eq!(
+                parse_authorized_recipient(&inv).unwrap(),
+                blinded("utxob:dYwB28dy-yD6EBgm-MO~UKN_-FyEEdBL-E9hw8Oj-i9KxH5b-e9vZL"),
+                "{chain}"
+            );
+        }
+    }
+
     #[test]
     fn a_witness_vout_invoice_is_refused() {
         let err = parse_authorized_recipient(WITNESS_VOUT_INVOICE).unwrap_err();
