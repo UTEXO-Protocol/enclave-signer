@@ -77,9 +77,28 @@ const BFI_TOKEN_COMMISSION_OFF: usize = 96;
 const BFI_DEST_ADDRESS_HEAD_OFF: usize = 224;
 /// Ceiling on the decoded `destinationAddress`. `Bridge.sol` caps it at 512
 /// on-chain; this bounds what a host-relayed receipt can make the enclave parse.
-const BFI_MAX_DEST_ADDRESS_LEN: usize = 2048;
+/// The single cap on this string: the invoice parser reuses it rather than
+/// declaring a second one that could drift.
+pub(crate) const BFI_MAX_DEST_ADDRESS_LEN: usize = 2048;
 /// 7 static words + 1 dynamic-string offset word must be present.
 const BFI_MIN_DATA_LEN: usize = 8 * 32;
+
+/// An RGB invoice in the shape the pinned `rgb-invoicing` accepts:
+/// `rgb:<contract>/<schema>/<state>/bc:utxob:<seal>`.
+///
+/// Lives here, outside the test module, so [`crate::networks::rgb::invoice`]'s
+/// tests parse the very string this module's tests ABI-encode. One literal, so
+/// the ABI half and the parsing half cannot drift apart.
+#[cfg(test)]
+pub(crate) const SAMPLE_INVOICE: &str = "rgb:fuhLYX9G-eC8gDvf-V0XpYFH-ceSafoc-lGutAYq-~SExGU4/\
+                                         XvmU3d4_nQQ8S7oagbXi07x5vjMm7P~ERukQNX6SC4M/BF/bc:utxob:\
+                                         UzR~73lD-JyzirTn-engdWia-qjd5NyV-mndAmmo-EbxdVEG-L6OiP";
+
+/// The beneficiary [`SAMPLE_INVOICE`] names, in the form a confidential
+/// recipient leg carries.
+#[cfg(test)]
+pub(crate) const SAMPLE_INVOICE_SEAL: &str =
+    "utxob:UzR~73lD-JyzirTn-engdWia-qjd5NyV-mndAmmo-EbxdVEG-L6OiP";
 
 /// One decoded EVM log, enclave-local so no RPC-client types leak past this
 /// module boundary (keeps the predicate unit-testable without a live RPC).
@@ -311,21 +330,23 @@ fn decode_u64_word(data: &[u8], offset: usize, field: &str) -> Result<u64> {
 fn decode_abi_string(data: &[u8], head_off: usize, field: &str) -> Result<String> {
     let err = |m: String| EnclaveError::CrossCheck(format!("BridgeFundsIn {field}: {m}"));
 
-    let offset =
-        usize::try_from(extract_uint256_as_u64(data, head_off).map_err(|e| err(e.to_string()))?)
-            .map_err(|_| err("tail offset exceeds usize".into()))?;
+    let word_at = |off: usize, what: &str| -> Result<usize> {
+        let raw = extract_uint256_as_u64(data, off).map_err(|e| err(e.to_string()))?;
+        usize::try_from(raw).map_err(|_| err(format!("{what} exceeds usize")))
+    };
+
+    let offset = word_at(head_off, "tail offset")?;
     let len_off = offset
         .checked_add(32)
         .ok_or_else(|| err("tail offset overflow".into()))?;
+    // Ahead of the read below: it is what keeps `offset + 32` in range.
     if len_off > data.len() {
         return Err(err(format!(
             "tail offset {offset} is past the {} bytes of log data",
             data.len()
         )));
     }
-    let len =
-        usize::try_from(extract_uint256_as_u64(data, offset).map_err(|e| err(e.to_string()))?)
-            .map_err(|_| err("tail length exceeds usize".into()))?;
+    let len = word_at(offset, "tail length")?;
     if len > BFI_MAX_DEST_ADDRESS_LEN {
         return Err(err(format!(
             "tail length {len} exceeds the {BFI_MAX_DEST_ADDRESS_LEN}-byte cap"
@@ -695,14 +716,6 @@ mod tests {
         id[0] = 0xF0 | (tag & 0x0F); // high bytes set: cannot fit a u64
         id
     }
-
-    /// An RGB invoice in the shape the pinned `rgb-invoicing` accepts:
-    /// `rgb:<contract>/<schema>/<state>/bc:utxob:<seal>`. Shared with
-    /// [`crate::networks::rgb::invoice`], whose tests parse this same string,
-    /// so the ABI half and the parsing half cannot drift apart.
-    const SAMPLE_INVOICE: &str = "rgb:fuhLYX9G-eC8gDvf-V0XpYFH-ceSafoc-lGutAYq-~SExGU4/\
-                                  XvmU3d4_nQQ8S7oagbXi07x5vjMm7P~ERukQNX6SC4M/BF/bc:utxob:\
-                                  UzR~73lD-JyzirTn-engdWia-qjd5NyV-mndAmmo-EbxdVEG-L6OiP";
 
     /// BridgeFundsIn `data`: senderNonce, gross, net, commission,
     /// nativeCommission, srcChain, destChain, then the `destinationAddress`

@@ -447,18 +447,15 @@ fn handle_sign(ctx: &ServerContext, req: SignRequest) -> Result<EnclaveResponse>
 
         // Recipient bind: the checks above prove how much the recipient leg
         // pays, not who it pays. The invoice in the log just verified says
-        // which seal the deposit authorised.
-        #[cfg(feature = "rgb-validation")]
-        {
-            use crate::networks::rgb::invoice;
-            let authorized = invoice::parse_authorized_recipient(&verified.destination_address)?;
-            invoice::assert_recipient_authorized(
-                &destination_proof.rgb_recipient_seals,
-                &authorized,
-            )?;
-        }
-        #[cfg(not(feature = "rgb-validation"))]
-        let _ = verified;
+        // which seal the deposit authorised. Ungated: `evm-rpc` implies
+        // `rgb-validation`, so reaching here means the bind is compiled in.
+        let authorized = crate::networks::rgb::invoice::parse_authorized_recipient(
+            &verified.destination_address,
+        )?;
+        crate::networks::rgb::invoice::assert_recipient_authorized(
+            &destination_proof.rgb_recipient_seals,
+            &authorized,
+        )?;
     }
 
     // Fail-closed when the FundsIn verifier is not compiled in. Without

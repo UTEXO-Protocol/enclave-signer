@@ -9,16 +9,14 @@ use std::str::FromStr;
 use rgbinvoice::{Beneficiary, RgbInvoice};
 
 use crate::error::{EnclaveError, Result};
+use crate::networks::evm::evm_event::BFI_MAX_DEST_ADDRESS_LEN as MAX_INVOICE_LEN;
 
-/// Ceiling on the invoice string handed to the parser.
-const MAX_INVOICE_LEN: usize = 2048;
-
-/// The destination a verified deposit authorises paying.
+/// The `utxob:...` blinded seal a verified deposit authorises paying.
+///
+/// A newtype, not a bare `String`: [`assert_recipient_authorized`] compares it
+/// against consignment seals, and the two must not be swappable at a call site.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum AuthorizedRecipient {
-    /// `utxob:...` - the form a confidential recipient leg carries.
-    BlindedSeal(String),
-}
+pub struct AuthorizedRecipient(String);
 
 /// Parse `BridgeFundsIn.destinationAddress` into the recipient it authorises.
 ///
@@ -47,7 +45,7 @@ pub fn parse_authorized_recipient(destination_address: &str) -> Result<Authorize
     })?;
 
     match invoice.beneficiary.into_inner() {
-        Beneficiary::BlindedSeal(seal) => Ok(AuthorizedRecipient::BlindedSeal(seal.to_string())),
+        Beneficiary::BlindedSeal(seal) => Ok(AuthorizedRecipient(seal.to_string())),
         Beneficiary::WitnessVout(..) => Err(EnclaveError::CrossCheck(
             "BridgeFundsIn.destinationAddress names a witness-vout beneficiary; the send-RGB \
              recipient bind supports blinded seals only"
@@ -65,45 +63,37 @@ pub fn assert_recipient_authorized(
     seals: &[String],
     authorized: &AuthorizedRecipient,
 ) -> Result<()> {
-    let AuthorizedRecipient::BlindedSeal(expected) = authorized;
+    let AuthorizedRecipient(expected) = authorized;
 
-    match seals {
-        [] => Err(EnclaveError::CrossCheck(
-            "send-RGB consignment pays no confidential recipient leg, but the deposit authorised \
-             a blinded seal - refusing to sign"
-                .into(),
-        )),
-        [only] if only == expected => Ok(()),
-        [only] => Err(EnclaveError::CrossCheck(format!(
+    let [only] = seals else {
+        return Err(EnclaveError::CrossCheck(format!(
+            "send-RGB consignment pays {} confidential recipient legs; exactly one is \
+             authorised by the deposit ({expected})",
+            seals.len()
+        )));
+    };
+    if only != expected {
+        return Err(EnclaveError::CrossCheck(format!(
             "send-RGB recipient seal mismatch: the consignment pays {only}, but the on-chain \
              deposit authorised {expected} - refusing to sign a correct amount to the wrong \
              destination"
-        ))),
-        many => Err(EnclaveError::CrossCheck(format!(
-            "send-RGB consignment pays {} confidential recipient legs; exactly one is \
-             authorised by the deposit ({expected})",
-            many.len()
-        ))),
+        )));
     }
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    /// The one literal the ABI half encodes and this half parses.
+    use crate::networks::evm::evm_event::{
+        SAMPLE_INVOICE as BLINDED_INVOICE, SAMPLE_INVOICE_SEAL as INVOICE_SEAL,
+    };
+
     fn blinded(seal: &str) -> AuthorizedRecipient {
-        AuthorizedRecipient::BlindedSeal(seal.into())
+        AuthorizedRecipient(seal.into())
     }
-
-    /// Byte-identical to `evm_event`'s `SAMPLE_INVOICE`, so the ABI half and the
-    /// parsing half cannot drift apart.
-    const BLINDED_INVOICE: &str = "rgb:fuhLYX9G-eC8gDvf-V0XpYFH-ceSafoc-lGutAYq-~SExGU4/\
-                                   XvmU3d4_nQQ8S7oagbXi07x5vjMm7P~ERukQNX6SC4M/BF/bc:utxob:\
-                                   UzR~73lD-JyzirTn-engdWia-qjd5NyV-mndAmmo-EbxdVEG-L6OiP";
-
-    /// The beneficiary of [`BLINDED_INVOICE`]. Also the recipient leg of the
-    /// in-tree transfer fixture, so both sources of the string are one value.
-    const INVOICE_SEAL: &str = "utxob:UzR~73lD-JyzirTn-engdWia-qjd5NyV-mndAmmo-EbxdVEG-L6OiP";
 
     /// [`BLINDED_INVOICE`] with a `wvout:` beneficiary.
     const WITNESS_VOUT_INVOICE: &str = "rgb:fuhLYX9G-eC8gDvf-V0XpYFH-ceSafoc-lGutAYq-~SExGU4/\
@@ -217,6 +207,10 @@ mod tests {
     #[test]
     fn no_confidential_leg_at_all_is_refused() {
         let err = assert_recipient_authorized(&[], &blinded("utxob:real-recipient")).unwrap_err();
-        assert!(err.to_string().contains("pays no confidential"), "{err}");
+        assert!(
+            err.to_string()
+                .contains("pays 0 confidential recipient legs"),
+            "{err}"
+        );
     }
 }

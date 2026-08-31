@@ -122,9 +122,9 @@ pub fn validate_psbt_bytes(psbt_bytes: &[u8]) -> Result<()> {
 /// a callback rather than a `&KeyManager` so the caller holds the key lock only
 /// for that resolution, never across consignment validation's network calls.
 ///
-/// Returns the recipient leg in asset units. The route-level amount
-/// cross-check is built from this, not from the wire-supplied
-/// `psbt_output_amount`.
+/// Returns the [`AssetLegs`] this walk classified: the recipient leg in asset
+/// units, which the route-level amount cross-check is built from rather than
+/// the wire-supplied `psbt_output_amount`, and the seals it was paid to.
 #[cfg(feature = "rgb-validation")]
 pub fn validate_psbt_anchors_transition(
     psbt: &Psbt,
@@ -132,7 +132,7 @@ pub fn validate_psbt_anchors_transition(
     source_amount: u64,
     source_commission: u64,
     self_owned: SelfOwnedOutpoint<'_>,
-) -> Result<u64> {
+) -> Result<AssetLegs> {
     use std::collections::BTreeSet;
 
     let last = validated.last_transition.as_ref().ok_or_else(|| {
@@ -309,7 +309,7 @@ pub fn validate_psbt_anchors_transition(
         )));
     }
 
-    Ok(legs.recipient)
+    Ok(legs)
 }
 
 /// Resolves whether a Bitcoin outpoint pays back to this enclave.
@@ -332,38 +332,20 @@ pub type SelfOwnedOutpoint<'a> = &'a dyn Fn(&Psbt, bitcoin::OutPoint) -> Result<
 #[cfg(feature = "rgb-validation")]
 pub const MAX_OFF_TX_CHANGE_OUTPOINTS: usize = 4;
 
-/// The `utxob:...` seals of every confidential `OS_ASSET` leg `psbt_txid`
-/// commits, in consignment order.
-///
-/// [`validate_psbt_anchors_transition`] pins the recipient *amount*; these are
-/// what [`crate::networks::rgb::invoice`] binds to prove *who* is paid.
-#[cfg(feature = "rgb-validation")]
-pub fn confidential_recipient_seals(
-    validated: &ValidatedConsignment,
-    psbt_txid: bitcoin::Txid,
-) -> Vec<String> {
-    use super::validation::OutputSeal;
-
-    validated
-        .transitions_committed_by(psbt_txid)
-        .iter()
-        .flat_map(|t| t.outputs.iter())
-        .filter(|o| o.assignment_type == ifa::OS_ASSET)
-        .filter_map(|o| match &o.seal {
-            OutputSeal::Confidential { secret_seal } => Some(secret_seal.clone()),
-            OutputSeal::Revealed { .. } => None,
-        })
-        .collect()
-}
-
 /// The two legs an `OS_ASSET` output assignment can belong to, in asset units.
 #[cfg(feature = "rgb-validation")]
-struct AssetLegs {
+#[derive(Debug)]
+pub struct AssetLegs {
     /// Paid to confidential (blinded) seals - the recipient.
-    recipient: u64,
+    pub recipient: u64,
     /// Returned to revealed seals on Bitcoin outputs this enclave provably
     /// controls - bridge change.
-    change: u64,
+    pub change: u64,
+    /// The `utxob:...` seals behind `recipient`, in consignment order. Carried
+    /// out of this one walk so the amount bind and
+    /// [`crate::networks::rgb::invoice`]'s identity bind cannot classify a leg
+    /// differently.
+    pub recipient_seals: Vec<String>,
 }
 
 /// Split the `OS_ASSET` outputs of every transition the signed tx commits into
@@ -404,15 +386,17 @@ fn split_asset_legs(
     let mut legs = AssetLegs {
         recipient: 0,
         change: 0,
+        recipient_seals: Vec::new(),
     };
     for (i, out) in asset_outputs.iter().enumerate() {
         match &out.seal {
-            OutputSeal::Confidential { .. } => {
+            OutputSeal::Confidential { secret_seal } => {
                 legs.recipient = legs.recipient.checked_add(out.amount).ok_or_else(|| {
                     EnclaveError::CrossCheck(
                         "send-RGB recipient leg total overflows u64 asset units".into(),
                     )
                 })?;
+                legs.recipient_seals.push(secret_seal.clone());
             }
             OutputSeal::Revealed { txid, vout } => {
                 // `None` means the witness tx of this bundle, which the
@@ -1086,10 +1070,10 @@ mod tests {
         fn passes_when_change_lands_on_an_existing_bridge_utxo() {
             let psbt = psbt_with_two_inputs();
             let validated = validated_with(&psbt, vec![confidential(900), revealed_off_tx(4_100)]);
-            let recipient =
+            let legs =
                 validate_psbt_anchors_transition(&psbt, &validated, 900, 0, &owns_off_tx_outpoint)
                     .expect("off-tx change on a bridge-owned UTXO binds");
-            assert_eq!(recipient, 900);
+            assert_eq!(legs.recipient, 900);
         }
 
         /// Same shape, outpoint we cannot prove. Accepting it unconditionally
@@ -1464,19 +1448,20 @@ mod tests {
             );
         }
 
-        // --- confidential_recipient_seals ---
+        // --- AssetLegs::recipient_seals ---
         //
-        // What the invoice bind compares against, so each filter is tested:
-        // a leg wrongly included or dropped makes the bind check the wrong thing.
+        // What the invoice bind compares against. The same walk that sums the
+        // recipient amount collects these, so each classification rule is
+        // asserted here too: a leg wrongly included or dropped would make the
+        // bind check the wrong thing.
 
         #[test]
-        fn collects_the_blinded_seal_of_a_recipient_leg() {
+        fn carries_the_blinded_seal_of_a_recipient_leg() {
             let psbt = psbt_with_two_inputs();
             let validated = validated_with(&psbt, vec![confidential_to(1_000, "utxob:recipient")]);
-            assert_eq!(
-                confidential_recipient_seals(&validated, psbt.unsigned_tx.compute_txid()),
-                vec!["utxob:recipient".to_string()]
-            );
+            let legs = validate_psbt_anchors_transition(&psbt, &validated, 1_000, 0, &owns_vout_1)
+                .expect("single recipient leg binds");
+            assert_eq!(legs.recipient_seals, vec!["utxob:recipient".to_string()]);
         }
 
         /// Change is revealed. Including it would compare the invoice against
@@ -1492,10 +1477,11 @@ mod tests {
                     revealed_off_tx(200),
                 ],
             );
-            assert_eq!(
-                confidential_recipient_seals(&validated, psbt.unsigned_tx.compute_txid()),
-                vec!["utxob:recipient".to_string()]
-            );
+            let owns_both =
+                |p: &Psbt, o: OutPoint| Ok(owns_vout_1(p, o)? || owns_off_tx_outpoint(p, o)?);
+            let legs = validate_psbt_anchors_transition(&psbt, &validated, 600, 0, &owns_both)
+                .expect("both change legs are bridge-owned");
+            assert_eq!(legs.recipient_seals, vec!["utxob:recipient".to_string()]);
         }
 
         /// Only `OS_ASSET` legs are recipient legs.
@@ -1508,15 +1494,15 @@ mod tests {
                 &psbt,
                 vec![inflation, confidential_to(1_000, "utxob:recipient")],
             );
-            assert_eq!(
-                confidential_recipient_seals(&validated, psbt.unsigned_tx.compute_txid()),
-                vec!["utxob:recipient".to_string()]
-            );
+            let legs = validate_psbt_anchors_transition(&psbt, &validated, 1_000, 0, &owns_vout_1)
+                .expect("the inflation assignment is not a recipient leg");
+            assert_eq!(legs.recipient_seals, vec!["utxob:recipient".to_string()]);
         }
 
-        /// The split shape the bind refuses: both seals must be surfaced.
+        /// The split shape the invoice bind refuses: both seals must be
+        /// surfaced, in consignment order, for it to see the second one.
         #[test]
-        fn collects_every_confidential_leg_in_order() {
+        fn carries_every_confidential_leg_in_order() {
             let psbt = psbt_with_two_inputs();
             let validated = validated_with(
                 &psbt,
@@ -1525,20 +1511,12 @@ mod tests {
                     confidential_to(400, "utxob:attacker"),
                 ],
             );
+            let legs = validate_psbt_anchors_transition(&psbt, &validated, 1_000, 0, &owns_vout_1)
+                .expect("the amount bind sees only the 1_000 total");
             assert_eq!(
-                confidential_recipient_seals(&validated, psbt.unsigned_tx.compute_txid()),
+                legs.recipient_seals,
                 vec!["utxob:recipient".to_string(), "utxob:attacker".to_string()]
             );
-        }
-
-        /// Another transaction's legs are not this signature's recipients.
-        #[test]
-        fn ignores_transitions_committed_by_another_txid() {
-            let psbt = psbt_with_two_inputs();
-            let validated = validated_with(&psbt, vec![confidential_to(1_000, "utxob:recipient")]);
-            let other =
-                Txid::from_raw_hash(bitcoin::hashes::sha256d::Hash::from_byte_array([0x99; 32]));
-            assert!(confidential_recipient_seals(&validated, other).is_empty());
         }
 
         #[test]

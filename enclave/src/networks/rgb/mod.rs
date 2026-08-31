@@ -230,7 +230,9 @@ pub fn validate_destination_anchor(
                 .into(),
         )
     })?;
-    let recipient_amount = psbt_validation::validate_psbt_anchors_transition(
+    // `legs.recipient_seals` is surfaced, not compared here: the invoice is
+    // only authenticated once the FundsIn receipt is verified, in `handle_sign`.
+    let legs = psbt_validation::validate_psbt_anchors_transition(
         &psbt,
         &validated,
         source_amount,
@@ -244,12 +246,7 @@ pub fn validate_destination_anchor(
     let recommended = validator.recommended_fee_rate_sat_vb()?;
     psbt_validation::check_psbt_fee_rate(&psbt, recommended)?;
 
-    // Surfaced, not compared here: the invoice is only authenticated once the
-    // FundsIn receipt is verified, later in `handle_sign`.
-    let recipient_seals =
-        psbt_validation::confidential_recipient_seals(&validated, psbt.unsigned_tx.compute_txid());
-
-    Ok((recipient_amount, recipient_seals))
+    Ok((legs.recipient, legs.recipient_seals))
 }
 
 #[cfg(all(test, feature = "rgb-validation"))]
