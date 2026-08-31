@@ -44,6 +44,10 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 rgb-ops = { version = "0.11.1-rc.7", features = ["esplora_blocking", "electrum_blocking"], optional = true }
 rgb-consignment = { git = "https://github.com/UTEXO-Protocol/consignment-utils.git", rev = "6a792af035cc5b011a790831a0732d420a2413e0", default-features = false, optional = true }
 rgb-schemas = { version = "=0.11.1-rc.10", default-features = false, optional = true }
+# Invoice parsing for the send-RGB recipient bind. Sibling crate of `rgb-ops`
+# in the same repo and already in the lock at its rev, so this adds no new
+# third-party code.
+rgb-invoicing = { version = "0.11.1-rc.11", default-features = false, optional = true }
 attestation-verify = { path = "../attestation-verify" }
 serde = { version = "1", features = ["derive"] }
 
@@ -92,7 +96,7 @@ dev-mode = []
 # resolver, so a malicious host could have the enclave sign a release against a
 # fabricated Bitcoin anchor. Kept as a separate feature (rather than adding
 # `spv` to this list) to avoid a feature cycle with `spv` below.
-rgb-validation = ["rgb-ops", "rgb-consignment", "rgb-schemas"]
+rgb-validation = ["rgb-ops", "rgb-consignment", "rgb-schemas", "rgb-invoicing"]
 # Bitcoin SPV verification of consignment witness txids before signing EVM
 # transactions. Implies `rgb-validation` because SPV needs the consignment
 # parsed to extract witness txids. When the feature is OFF, handle_sign_evm

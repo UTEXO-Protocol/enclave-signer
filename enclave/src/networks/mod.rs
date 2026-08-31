@@ -91,6 +91,10 @@ pub fn validate_source(
 pub struct DestinationProof {
     pub proof: RouteProof,
     pub evm_funds_out: Option<crate::networks::evm::validation::FundsOutParams>,
+    /// `utxob:...` seals of the send-RGB confidential recipient legs. Bound
+    /// against the deposit's invoice once that receipt is verified. Empty for
+    /// EVM destinations and builds without the bind.
+    pub rgb_recipient_seals: Vec<String>,
 }
 
 /// Dispatch destination-network validation to the owning network module.
@@ -112,6 +116,7 @@ pub fn validate_destination(
             Ok(DestinationProof {
                 proof,
                 evm_funds_out,
+                rgb_recipient_seals: Vec::new(),
             })
         }
         DestinationNetwork::RgbDestination(destination) => {
@@ -123,10 +128,11 @@ pub fn validate_destination(
             // binding fall back to the wire field, and they run no destination
             // cross-checks at all.
             #[cfg(all(feature = "rgb-validation", not(feature = "dev-mode")))]
-            let destination_amount =
+            let (destination_amount, rgb_recipient_seals) =
                 rgb::validate_destination_anchor(destination, amount, source_commission, ctx)?;
             #[cfg(not(all(feature = "rgb-validation", not(feature = "dev-mode"))))]
-            let destination_amount = destination.psbt_output_amount;
+            let (destination_amount, rgb_recipient_seals) =
+                (destination.psbt_output_amount, Vec::new());
 
             Ok(DestinationProof {
                 proof: RouteProof {
@@ -140,6 +146,7 @@ pub fn validate_destination(
                     operation_id: None,
                 },
                 evm_funds_out: None,
+                rgb_recipient_seals,
             })
         }
     }
