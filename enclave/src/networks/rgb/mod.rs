@@ -1,5 +1,7 @@
 pub mod btc_crosscheck;
 pub mod btc_ownership;
+#[cfg(feature = "rgb-validation")]
+pub mod flow;
 pub mod psbt_validation;
 pub mod signing;
 pub mod spv;
@@ -72,7 +74,6 @@ fn route_proof_from_validated_consignment(
     validated: &validation::ValidatedConsignment,
 ) -> Result<RouteProof> {
     use crate::error::EnclaveError;
-    use validation::ifa;
 
     let last = validated.last_transition.as_ref().ok_or_else(|| {
         EnclaveError::CrossCheck(
@@ -80,20 +81,10 @@ fn route_proof_from_validated_consignment(
         )
     })?;
 
-    let amount = match last.transition_type {
-        ifa::TS_TRANSFER => last.total_output_amount,
-        ifa::TS_BURN => last.burned_asset_amount.ok_or_else(|| {
-            EnclaveError::CrossCheck(
-                "burn transition is missing MS_BURNED_ASSET metadata - cannot validate amount"
-                    .into(),
-            )
-        })?,
-        other => {
-            return Err(EnclaveError::CrossCheck(format!(
-                "unsupported RGB transition_type for route proof: {other}"
-            )));
-        }
-    };
+    // Which transition proves how much left the source, and how to read its
+    // amount, is the flow's business: a Transfer carries it in the output
+    // assignments, a Burn in `MS_BURNED_ASSET` metadata. See `flow/`.
+    let amount = flow::funds_out_source_amount(last)?;
 
     Ok(RouteProof {
         amount,
@@ -279,6 +270,19 @@ mod tests {
         }
     }
 
+    /// A withdrawal consignment shaped for this build's flow, carrying
+    /// `amount` where that flow reads it.
+    #[cfg(feature = "rgb-swap")]
+    fn funds_out_consignment(amount: u64, op_id: &str) -> ValidatedConsignment {
+        validated_consignment(ifa::TS_TRANSFER, amount, None, op_id)
+    }
+
+    #[cfg(feature = "rgb-mint-burn")]
+    fn funds_out_consignment(amount: u64, op_id: &str) -> ValidatedConsignment {
+        validated_consignment(ifa::TS_BURN, 0, Some(amount), op_id)
+    }
+
+    #[cfg(feature = "rgb-swap")]
     #[test]
     fn route_proof_uses_transfer_output_amount() {
         let op_id = "0xAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
@@ -297,6 +301,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "rgb-mint-burn")]
     #[test]
     fn route_proof_uses_burn_metadata_amount() {
         let op_id = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
@@ -312,6 +317,7 @@ mod tests {
         assert_eq!(proof.operation_id.as_deref(), Some(op_id));
     }
 
+    #[cfg(feature = "rgb-mint-burn")]
     #[test]
     fn route_proof_rejects_burn_without_burned_amount() {
         let err = route_proof_from_validated_consignment(&validated_consignment(
@@ -327,15 +333,29 @@ mod tests {
 
     #[test]
     fn route_proof_rejects_non_hex_operation_id() {
-        let err = route_proof_from_validated_consignment(&validated_consignment(
-            ifa::TS_TRANSFER,
+        let err = route_proof_from_validated_consignment(&funds_out_consignment(
             100,
-            None,
             "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz",
         ))
         .unwrap_err();
 
         assert!(err.to_string().contains("not hex-decodable"));
+    }
+
+    /// The other flow's withdrawal shape must not authorize a release here.
+    #[test]
+    fn route_proof_rejects_the_other_flows_shape() {
+        let op_id = "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd";
+        #[cfg(feature = "rgb-swap")]
+        let wrong = validated_consignment(ifa::TS_BURN, 0, Some(700), op_id);
+        #[cfg(feature = "rgb-mint-burn")]
+        let wrong = validated_consignment(ifa::TS_TRANSFER, 700, None, op_id);
+
+        let err = route_proof_from_validated_consignment(&wrong).unwrap_err();
+        assert!(
+            err.to_string().contains("this enclave is built for the"),
+            "expected flow-shape rejection, got: {err}"
+        );
     }
 
     // Asset-identity binding, destination path. The legs are

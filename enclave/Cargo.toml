@@ -64,7 +64,7 @@ aws-nitro-enclaves-nsm-api = "0.4"
 # Single-network EIFs: `--no-default-features --features vsock,rgb,evm-rpc,helios`
 # (RGB) or `--no-default-features --features vsock,ccd` (Concordium — no
 # bridge-signing path, so no Helios). Both are covered in CI.
-default = ["rgb", "ccd", "helios"]
+default = ["rgb", "rgb-swap", "ccd", "helios"]
 
 # Network-selection umbrellas. Additive: enable one for a lean single-network
 # EIF, or both for the combined build. They gate only the request-handling
@@ -80,6 +80,27 @@ rgb = ["spv"]
 # `ccd` = the Concordium bridge stack. Light: no extra deps (ed25519 is always
 # on to keep key derivation / the attestation bundle uniform across builds).
 ccd = []
+
+# RGB flow selection. EXACTLY ONE is required whenever `rgb-validation` is on;
+# a `compile_error!` pair in lib.rs enforces it. The two flows ship as two
+# separate enclave instances with two PCR0s, so the choice is made at build
+# time and measured into the image - a send/receive enclave contains no mint
+# rule to reach.
+#
+# Both are `default = false` in the additive sense cargo means it, so a
+# mint/burn image MUST be built with `--no-default-features` (the default set
+# carries `rgb-swap`), exactly like the existing single-network EIFs:
+#   `--no-default-features --features vsock,rgb-mint-burn,evm-rpc,helios`
+#
+# The per-flow rules live in `enclave/src/networks/rgb/flow/{swap,mint_burn}.rs`;
+# everything else about consignment validation is shared.
+#
+# `rgb-swap` = pools/send-receive: the bridge holds an allocation and moves it
+# with IFA `Transfer` in both directions.
+rgb-swap = ["rgb"]
+# `rgb-mint-burn` = the bridge owns the contract's inflation rights: deposits
+# mint with IFA `Inflation`, withdrawals destroy with IFA `Burn`.
+rgb-mint-burn = ["rgb"]
 
 vsock = []
 # DANGER: allows importing a raw seed over the wire. Testing only.

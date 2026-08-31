@@ -38,45 +38,44 @@ pub fn assert_witnesses_confirmed(validated: &ValidatedConsignment) -> Result<()
     Ok(())
 }
 
-/// Pools-side amount cross-check for the `fundsOut` transfer flow. Binds the
-/// release `amount` to the consignment's actual asset value:
+/// Amount cross-check for the `fundsOut` direction. Binds the release `amount`
+/// to the consignment's actual asset value:
 ///
-///   1. The consignment's most recent transition must be an IFA `Transfer`
-///      (`transition_type == ifa::TS_TRANSFER`).
-///   2. The transition's `total_output_amount` must cover the EVM-side release
-///      `amount`.
+///   1. The consignment's most recent transition must be the type this build's
+///      RGB flow accepts on a withdrawal - an IFA `Transfer` under `rgb-swap`,
+///      an IFA `Burn` under `rgb-mint-burn`.
+///   2. The amount that transition proves left the source must cover the
+///      EVM-side release `amount`.
+///
+/// Both legs come from [`crate::networks::rgb::flow::funds_out_source_amount`],
+/// the same function the route proof is built from, so the two cannot disagree
+/// about which transition authorized the release.
 ///
 /// Takes the decoded intent, which also replaces the old selector
 /// guard: `FundsOutParams` only exists after a successful `fundsOut` decode.
-pub fn validate_funds_out_transfer(
+pub fn validate_funds_out_amount(
     params: &FundsOutParams,
     validated: &ValidatedConsignment,
 ) -> Result<()> {
-    use crate::networks::rgb::validation::ifa;
+    use crate::networks::rgb::flow;
 
     let last = validated.last_transition.as_ref().ok_or_else(|| {
         EnclaveError::CrossCheck(
-            "pools fundsOut requires a consignment with at least one transition".into(),
+            "fundsOut requires a consignment with at least one transition".into(),
         )
     })?;
-    if last.transition_type != ifa::TS_TRANSFER {
-        return Err(EnclaveError::CrossCheck(format!(
-            "pools fundsOut requires a Transfer transition (last transition_type = {}, want {})",
-            last.transition_type,
-            ifa::TS_TRANSFER
-        )));
-    }
-
     // The consignment, not the listener-supplied `calldata_amount`, is the
     // authority on how much RGB moved.
+    let source_amount = flow::funds_out_source_amount(last)?;
+
     let calldata_amount: u64 = params
         .amount
         .try_into()
         .map_err(|_| EnclaveError::CrossCheck("fundsOut amount exceeds u64 range".into()))?;
-    if last.total_output_amount < calldata_amount {
+    if source_amount < calldata_amount {
         return Err(EnclaveError::CrossCheck(format!(
-            "transfer amount mismatch: consignment total_output_amount ({}) < calldata amount ({})",
-            last.total_output_amount, calldata_amount
+            "fundsOut amount mismatch: consignment proves {source_amount} asset units left the \
+             source, below the calldata amount ({calldata_amount})"
         )));
     }
     Ok(())
@@ -445,7 +444,7 @@ mod tests {
         assert!(decode_funds_out_params(&legacy_flat_calldata(recipient)).is_err());
     }
 
-    // Pools fundsOut tests - `validate_funds_out_transfer` (+ the witness
+    // fundsOut amount tests - `validate_funds_out_amount` (+ the witness
     // recency guard `assert_witnesses_confirmed`).
 
     mod transfer {
@@ -470,28 +469,47 @@ mod tests {
             }
         }
 
-        fn transfer_transition(total_output_amount: u64) -> TransitionSummary {
+        /// The last transition this build's RGB flow accepts on a `fundsOut`,
+        /// carrying `amount` where that flow reads it: a Transfer's output
+        /// assignments under `rgb-swap`, a Burn's `MS_BURNED_ASSET` metadata
+        /// under `rgb-mint-burn`. Keeps the shared cases below flow-agnostic.
+        #[cfg(feature = "rgb-swap")]
+        fn source_transition(amount: u64) -> TransitionSummary {
             TransitionSummary {
                 op_id: "transfer-op".into(),
                 transition_type: ifa::TS_TRANSFER,
-                total_output_amount,
-                asset_output_amount: total_output_amount,
+                total_output_amount: amount,
+                asset_output_amount: amount,
                 outputs: Vec::new(),
                 burned_asset_amount: None,
             }
         }
 
+        #[cfg(feature = "rgb-mint-burn")]
+        fn source_transition(amount: u64) -> TransitionSummary {
+            TransitionSummary {
+                op_id: "burn-op".into(),
+                // A burn destroys units; it has no output assignments carrying
+                // them, so the amount lives in the metadata field only.
+                transition_type: ifa::TS_BURN,
+                total_output_amount: 0,
+                asset_output_amount: 0,
+                outputs: Vec::new(),
+                burned_asset_amount: Some(amount),
+            }
+        }
+
         #[test]
-        fn passes_when_total_output_covers_calldata_amount() {
+        fn passes_when_source_amount_covers_calldata_amount() {
             let cd = mock_funds_out_calldata(1000);
-            let validated = validated_with_last(transfer_transition(1000));
-            assert!(validate_funds_out_transfer(&params_of(&cd), &validated).is_ok());
+            let validated = validated_with_last(source_transition(1000));
+            assert!(validate_funds_out_amount(&params_of(&cd), &validated).is_ok());
         }
 
         #[test]
         fn witnesses_confirmed_passes_when_all_mined() {
             // No non-mined witnesses surfaced -> the recency guard is a no-op.
-            let validated = validated_with_last(transfer_transition(1000));
+            let validated = validated_with_last(source_transition(1000));
             assert!(super::super::assert_witnesses_confirmed(&validated).is_ok());
         }
 
@@ -499,7 +517,7 @@ mod tests {
         fn witnesses_confirmed_rejects_non_mined() {
             // A tentative/ignored witness in the RGB->EVM direction is an
             // anomaly: the unlock settles an already-confirmed transfer.
-            let mut validated = validated_with_last(transfer_transition(1000));
+            let mut validated = validated_with_last(source_transition(1000));
             validated.non_mined_witness_txids = vec![[0xABu8; 32]];
             let err = super::super::assert_witnesses_confirmed(&validated).unwrap_err();
             assert!(
@@ -509,40 +527,41 @@ mod tests {
         }
 
         #[test]
-        fn passes_when_total_output_exceeds_calldata_amount() {
+        fn passes_when_source_amount_exceeds_calldata_amount() {
             let cd = mock_funds_out_calldata(1000);
-            let validated = validated_with_last(transfer_transition(2000));
-            assert!(validate_funds_out_transfer(&params_of(&cd), &validated).is_ok());
+            let validated = validated_with_last(source_transition(2000));
+            assert!(validate_funds_out_amount(&params_of(&cd), &validated).is_ok());
         }
 
         /// P0 regression: even with a valid consignment that deserializes
-        /// and validates, the EVM-side release cannot exceed the RGB-side
-        /// transfer total. A consignment for 1 unit must not authorise a
-        /// withdrawal for 10^9.
+        /// and validates, the EVM-side release cannot exceed what the RGB side
+        /// proves left the source. A consignment for 1 unit must not authorise
+        /// a withdrawal for 10^9.
         #[test]
-        fn rejects_when_total_output_less_than_calldata_amount() {
+        fn rejects_when_source_amount_less_than_calldata_amount() {
             let cd = mock_funds_out_calldata(1_000_000_000);
-            let validated = validated_with_last(transfer_transition(1));
-            let err = validate_funds_out_transfer(&params_of(&cd), &validated).unwrap_err();
+            let validated = validated_with_last(source_transition(1));
+            let err = validate_funds_out_amount(&params_of(&cd), &validated).unwrap_err();
             assert!(
-                err.to_string().contains("transfer amount mismatch"),
-                "expected transfer amount mismatch, got: {err}"
+                err.to_string().contains("fundsOut amount mismatch"),
+                "expected fundsOut amount mismatch, got: {err}"
             );
         }
 
-        /// A burn consignment arriving on the (single) `fundsOut`
-        /// selector must be rejected by the transfer check - this is how
-        /// mint/burn stays off until it's wired by contract address.
+        /// A consignment whose last transition is not the one this build's
+        /// flow withdraws with must be refused. `TS_INFLATION` is a deposit
+        /// shape in both flows, so it is wrong for either build - which is
+        /// also how a mint-shaped consignment stays out of a swap enclave.
         #[test]
-        fn rejects_when_last_transition_is_not_transfer() {
+        fn rejects_when_last_transition_is_not_the_flow_shape() {
             let cd = mock_funds_out_calldata(500);
-            let mut t = transfer_transition(500);
-            t.transition_type = ifa::TS_BURN;
+            let mut t = source_transition(500);
+            t.transition_type = ifa::TS_INFLATION;
             let validated = validated_with_last(t);
-            let err = validate_funds_out_transfer(&params_of(&cd), &validated).unwrap_err();
+            let err = validate_funds_out_amount(&params_of(&cd), &validated).unwrap_err();
             assert!(
-                err.to_string().contains("requires a Transfer transition"),
-                "expected Transfer-required rejection, got: {err}"
+                err.to_string().contains("this enclave is built for the"),
+                "expected flow-shape rejection, got: {err}"
             );
         }
 
@@ -562,7 +581,7 @@ mod tests {
                 non_mined_witness_txids: vec![],
                 transitions_by_witness: vec![],
             };
-            let err = validate_funds_out_transfer(&params_of(&cd), &validated).unwrap_err();
+            let err = validate_funds_out_amount(&params_of(&cd), &validated).unwrap_err();
             assert!(
                 err.to_string().contains("at least one transition"),
                 "expected no-transition rejection, got: {err}"

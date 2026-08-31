@@ -49,6 +49,34 @@ compile_error!(
      pulls in rgb-validation)"
 );
 
+// RGB flow selection is mutually exclusive and mandatory. The two flows are two
+// separate enclave instances with two PCR0s; the per-flow rules in
+// `networks/rgb/flow/` deliberately expose the same item names, so enabling
+// both would be a glob-import collision, and enabling neither leaves every
+// `flow::` call unresolved. Both are caught here with a message that says what
+// to do instead of a wall of name-resolution errors.
+#[cfg(all(
+    feature = "rgb-validation",
+    feature = "rgb-swap",
+    feature = "rgb-mint-burn"
+))]
+compile_error!(
+    "rgb-swap and rgb-mint-burn are mutually exclusive: the send/receive and mint/burn flows \
+     ship as separate enclave instances. Build one image per flow - the default feature set \
+     carries `rgb-swap`, so a mint/burn image needs `--no-default-features --features \
+     vsock,rgb-mint-burn,evm-rpc,helios`"
+);
+#[cfg(all(
+    feature = "rgb-validation",
+    not(feature = "rgb-swap"),
+    not(feature = "rgb-mint-burn")
+))]
+compile_error!(
+    "rgb-validation requires a flow: enable exactly one of `rgb-swap` (send/receive) or \
+     `rgb-mint-burn`. Without one the enclave has no rule for which RGB transition types it \
+     may sign, and refusing to build is safer than defaulting to either"
+);
+
 pub mod attestation;
 pub mod cloning;
 pub mod config;

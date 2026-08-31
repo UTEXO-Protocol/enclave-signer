@@ -57,12 +57,20 @@ jobs:
             eif_name: utexo-bridge-enclave.eif
             s3_subpath: ""
             artifact_suffix: ""
-          # RGB-only single-network EIF.
+          # RGB-only single-network EIF, send/receive flow (`rgb-swap`).
           - variant: rgb
             dockerfile: Dockerfile.enclave.rgb
             eif_name: utexo-bridge-enclave-rgb.eif
             s3_subpath: "rgb/"
             artifact_suffix: "-rgb"
+          # RGB-only single-network EIF, mint/burn flow (`rgb-mint-burn`). The
+          # second enclave instance: same stack, the other set of RGB rules,
+          # its own PCR0.
+          - variant: rgb-mint-burn
+            dockerfile: Dockerfile.enclave.mint-burn
+            eif_name: utexo-bridge-enclave-mint-burn.eif
+            s3_subpath: "rgb-mint-burn/"
+            artifact_suffix: "-mint-burn"
           # Concordium-only single-network EIF.
           - variant: ccd
             dockerfile: Dockerfile.enclave.ccd

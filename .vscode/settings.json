@@ -1,3 +1,3 @@
 {
-  "rust-analyzer.cargo.features": ["rgb-validation", "allow-seed-import", "spv"]
+  "rust-analyzer.cargo.features": ["rgb-validation", "allow-seed-import", "spv", "rgb-swap"]
 }

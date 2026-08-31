@@ -762,12 +762,11 @@ impl RgbValidator {
 
         // Rest of the send-RGB PSBT binding for that same bundle: its input
         // prevouts when the bundle embeds the full tx, plus the validated OpId.
-        // Gated on the last transition being a Transfer or an Inflation; the
-        // check inside asserts the transition type and the witness agree.
+        // Gated on the last transition being the type this build's flow signs
+        // (see `super::flow`); the check inside asserts the transition type and
+        // the witness agree.
         let (last_transfer_witness_prevouts, last_transfer_op_id) = match last_transition {
-            Some(ref last)
-                if matches!(last.transition_type, ifa::TS_TRANSFER | ifa::TS_INFLATION) =>
-            {
+            Some(ref last) if super::flow::is_signing_transition(last.transition_type) => {
                 read_last_transfer_witness(&transfer, last.transition_type)?
             }
             _ => (None, None),

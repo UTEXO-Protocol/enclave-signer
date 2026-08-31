@@ -602,13 +602,14 @@ fn apply_funds_out_binding(
     #[cfg(not(feature = "spv"))]
     let _ = (ctx, merkle_proofs);
 
-    // Consignment-bound release amount (transfer flow).
-    crosscheck::validate_funds_out_transfer(params, validated)?;
+    // Consignment-bound release amount, under this build's RGB flow
+    // (`rgb-swap` = Transfer, `rgb-mint-burn` = Burn).
+    crosscheck::validate_funds_out_amount(params, validated)?;
 
-    // Swap / send-receive only for now. The backend-provided burnId and
-    // settlement fundsInIds are preserved; the EVM connector already selected
-    // the latter against the on-chain remaining balance. Mint/burn needs a
-    // network-id-routed path before its RGB OpId binding can be enabled.
+    // The backend-provided burnId and settlement fundsInIds are preserved; the
+    // EVM connector already selected the latter against the on-chain remaining
+    // balance. Mint/burn still needs a network-id-routed path before its RGB
+    // OpId binding can be enabled.
 
     Ok(())
 }

@@ -116,8 +116,9 @@ SecurityPolicy = Production {
 - **Boot gate:** a release `rgb-validation` build that does not resolve to a
   valid `Production` policy MUST refuse to boot (panic). Independently, each
   dev feature is a `compile_error!` in any shipped release binary (non-test
-  build with debug assertions off), and `rgb-validation` without `spv` is a
-  `compile_error!` in every profile.
+  build with debug assertions off); `rgb-validation` without `spv` is a
+  `compile_error!` in every profile, as is `rgb-validation` with both RGB flows
+  (`rgb-swap` + `rgb-mint-burn`) or with neither.
 - **Attestation:** `user_data = sha256(canonical_pubkey_bundle ||
   policy_commitment)`. The commitment encoding is versioned and shared
   (`attestation-verify/src/policy.rs`), so the enclave and every verifier
@@ -197,9 +198,12 @@ chainId, verifyingContract)`. The domain separator is pinned by a regression
 test against the deployed `MultisigProxy`, and a second test reproduces the
 backend's digest -- domain drift breaks the build.
 
-The current rollout signs the **swap flow** (`TS_TRANSFER` consignments) only.
-The mint/burn unlock flow is deliberately not wired yet: the enclave preserves
-the backend-provided `burnId` / `fundsInIds`, and the in-enclave OpId
+Which consignment shape a build signs is chosen at compile time by its RGB
+flow feature (`rgb-swap` or `rgb-mint-burn`, exactly one). A **swap** enclave
+signs `TS_TRANSFER` unlocks; a **mint/burn** enclave signs `TS_BURN` unlocks and
+nothing else. The two are separate instances with separate PCR0s -- neither
+binary contains the other's rules. Independently of the flow, the enclave
+preserves the backend-provided `burnId` / `fundsInIds`, and the in-enclave OpId
 rewrite stays dormant until flows are routed by network id (Sec 9, P6).
 
 [Sign EVM](diagrams/03-seq-sign-evm.md)
@@ -229,8 +233,10 @@ enclave establishes validity and finality itself, fail-closed
 The PSBT itself is bound to the validated consignment: unsigned txid ==
 witness txid, input prevouts == witness prevouts, `SIGHASH_ALL` / taproot
 `DEFAULT` only, and the consignment's asset outputs must cover the credited
-amount. `TS_TRANSFER` and `TS_INFLATION` (mint-RGB) transitions are accepted
-. A fee sanity check rejects a PSBT whose fee rate exceeds 3x the
+amount. Which transition is accepted is the build's RGB flow: `TS_TRANSFER`
+under `rgb-swap` (coverage `>=`, since the surplus is bridge change),
+`TS_INFLATION` under `rgb-mint-burn` (strict `==`, since any surplus is an
+over-mint). A fee sanity check rejects a PSBT whose fee rate exceeds 3x the
 enclave's own Esplora estimate, fail-closed on a missing estimate (a
 compile-time floor applies only on non-mainnet chains).
 
@@ -409,7 +415,7 @@ MUST refuse to sign (fail closed) if any fails.
 | #   | Predicate                                                   | Status                                                                                                                                                            |
 |-----|-------------------------------------------------------------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | P1  | submitted RGB consignment is valid (`rgbstd` full validation) | OK                                                                                                                                                               |
-| P2  | consignment proves the expected transition                  | OK for the live swap flow: last transition MUST be `TS_TRANSFER`. `TS_BURN` is classified and amount-extracted, but mint/burn unlock is not wired yet       |
+| P2  | consignment proves the expected transition                  | OK -- the last transition MUST be the one this build's RGB flow unlocks with: `TS_TRANSFER` under `rgb-swap`, `TS_BURN` (amount from `MS_BURNED_ASSET`) under `rgb-mint-burn`. Any other shape is refused |
 | P3  | unlock amount is covered by the consignment-derived amount  | OK -- the amount comes from the consignment (host `rgb_amount` is ignored); comparison is coverage (`>=`), strict `==` pending per-output binding (**`[OPEN]`**) |
 | P4  | calldata is well-formed                                     | OK -- single pinned selector, 64 KiB cap, canonical ABI decode + re-encode byte-equality                                                            |
 | P5  | payload binds destination chain / contract / **recipient**  | chain + contract pinned; **`[OPEN]`** recipient not bound -- blocked on an EVM-destination commitment in the RGB burn schema (cross-repo)             |
@@ -472,7 +478,7 @@ MUST refuse to sign (fail closed) if any fails.
 | **SI-8**  | SPV depth MUST be verified for **every** anchoring tx in the consignment history, with no header pruning below it. OK                             |
 | **SI-9**  | Signing MUST be possible only in `Active`; other phases MUST reject signing and key-export RPCs (except the donor's sealed export). OK                    |
 | **SI-10** | On any validation failure the path MUST fail closed -- no partial signature, no fallback, no silent downgrade (including Helios -> raw RPC). OK           |
-| **SI-11** | A feature/build mismatch MUST cause refusal, never sign-without-verification (no `evm-rpc` => no bridge PSBTs; `rgb-validation` without `spv` does not compile). OK |
+| **SI-11** | A feature/build mismatch MUST cause refusal, never sign-without-verification (no `evm-rpc` => no bridge PSBTs; `rgb-validation` without `spv`, or without exactly one RGB flow, does not compile). OK |
 | **SI-12** | Cross-network consignments MUST be rejected. OK                                                                                                          |
 | **SI-13** | Bridge PSBT signing MUST independently verify the EVM deposit (receipt success, pinned contract, unique event, on-chain `operationId` + amount + commission binding, depth >= `EVM_MIN_CONFIRMATIONS`); listener flags MUST NOT authorize. OK |
 | **SI-14** | A release bridge build MUST refuse to boot unless it resolves to a valid `Production` security policy. OK                                         |

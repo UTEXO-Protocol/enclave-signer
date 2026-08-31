@@ -1,6 +1,8 @@
 use bitcoin::psbt::Psbt;
 
 #[cfg(feature = "rgb-validation")]
+use super::flow;
+#[cfg(feature = "rgb-validation")]
 use super::validation::{ifa, ValidatedConsignment};
 use crate::error::{EnclaveError, Result};
 
@@ -86,9 +88,13 @@ pub fn validate_psbt_bytes(psbt_bytes: &[u8]) -> Result<()> {
 /// [`crate::networks::rgb::validation::RgbValidator::validate_consignment`],
 /// which is what proves the commitment is genuinely anchored.
 ///
+/// The shape and amount rules (legs 1, 5, 6) belong to the build's RGB flow,
+/// [`crate::networks::rgb::flow`]. A `rgb-swap` enclave admits only IFA
+/// `Transfer`, a `rgb-mint-burn` enclave only IFA `Inflation`; everything else
+/// here is shared PSBT mechanics.
+///
 /// Enforces, fail-closed:
-///   1. The consignment's last transition is an IFA `Transfer`
-///      (`ifa::TS_TRANSFER`) or an IFA `Inflation` (`ifa::TS_INFLATION`).
+///   1. The consignment's last transition is the type this flow signs.
 ///   2. Identity bind: `psbt.unsigned_tx.compute_txid()` equals the
 ///      consignment's last witness txid. A segwit txid commits to every
 ///      non-witness field, so equality means signing this PSBT finalizes
@@ -100,13 +106,13 @@ pub fn validate_psbt_bytes(psbt_bytes: &[u8]) -> Result<()> {
 ///      signature into a different tx.
 ///   5. Whole-bundle scope: both amount binds run over every transition the
 ///      signed txid commits, not just the last one. The group must be
-///      non-empty, must contain that last transition, and must be all-Transfer
-///      or all-Inflation.
+///      non-empty, must contain that last transition, and every member must be
+///      the type this flow signs (which also rules out a mixed bundle).
 ///   6. Aggregate amount bind: the group's summed `asset_output_amount`
 ///      (`OS_ASSET` allocations only, excluding `OS_INFLATION` mint capacity)
-///      against `source_amount - source_commission`. Exact equality for an
-///      Inflation (any surplus is an over-mint), a coverage lower bound for a
-///      Transfer (whose total includes bridge change).
+///      against `source_amount - source_commission`, under the active flow's
+///      rule - exact equality for a mint, a coverage lower bound for a
+///      transfer (whose total includes bridge change).
 ///   7. Per-output recipient bind: each `OS_ASSET` output is
 ///      classified by its seal. A confidential (`utxob:`) seal is a recipient
 ///      leg; a revealed (`txid:vout`) seal counts as bridge change only if the
@@ -140,19 +146,11 @@ pub fn validate_psbt_anchors_transition(
             "send-RGB PSBT requires a consignment with at least one transition".into(),
         )
     })?;
-    if !matches!(last.transition_type, ifa::TS_TRANSFER | ifa::TS_INFLATION) {
-        return Err(EnclaveError::CrossCheck(format!(
-            "send-RGB PSBT requires a Transfer or Inflation transition (last transition_type = \
-             {}, want {} or {})",
-            last.transition_type,
-            ifa::TS_TRANSFER,
-            ifa::TS_INFLATION
-        )));
-    }
+    flow::assert_signing_transition(last)?;
 
     // Derive the txid from `unsigned_tx`, never a finalized/extracted tx
     // (a non-segwit input's scriptSig would change the txid post-signing).
-    // The Transfer/Inflation gate above is what makes this last-bundle txid the
+    // The flow's transition gate above is what makes this last-bundle txid the
     // transition's witness.
     let expected = validated.last_witness_txid.ok_or_else(|| {
         EnclaveError::CrossCheck(
@@ -218,19 +216,10 @@ pub fn validate_psbt_anchors_transition(
             last.op_id
         )));
     }
-    // The per-shape amount rules below cover only these two shapes.
-    for t in &committed {
-        if !matches!(t.transition_type, ifa::TS_TRANSFER | ifa::TS_INFLATION) {
-            return Err(EnclaveError::CrossCheck(format!(
-                "send-RGB PSBT commits transition {} of type {} - requires Transfer ({}) or \
-                 Inflation ({})",
-                t.op_id,
-                t.transition_type,
-                ifa::TS_TRANSFER,
-                ifa::TS_INFLATION
-            )));
-        }
-    }
+    // Every transition in the group must be the shape this flow's amount rule
+    // was written for. That also rules out a mixed bundle, which has no single
+    // aggregate rule (equality vs floor) and no known flow that produces one.
+    flow::assert_committed_group(&committed)?;
 
     // `asset_output_amount`, not `total_output_amount`: `OS_INFLATION` outputs
     // are mint capacity, not minted value. Summed across the whole group so a
@@ -244,57 +233,14 @@ pub fn validate_psbt_anchors_transition(
             )
         })?;
 
-    // A mixed mint/transfer group has no single aggregate rule (equality vs
-    // floor), and no known flow produces one. Refuse rather than guess.
-    let mints = committed
-        .iter()
-        .filter(|t| t.transition_type == ifa::TS_INFLATION)
-        .count();
-    let group_type = if mints == committed.len() {
-        ifa::TS_INFLATION
-    } else if mints == 0 {
-        ifa::TS_TRANSFER
-    } else {
-        return Err(EnclaveError::CrossCheck(format!(
-            "send-RGB PSBT commits a mixed bundle ({mints} Inflation of {} transitions) - \
-             refusing to sign a shape with no defined amount bind",
-            committed.len()
-        )));
-    };
-
+    // Equality for a mint, a coverage floor for a transfer - see `flow/`.
     let net_credited = source_amount.saturating_sub(source_commission);
-    match group_type {
-        // Inflation (mint-RGB): no pre-existing allocation to return as
-        // change, so minted units must equal the credit. Surplus = over-mint.
-        ifa::TS_INFLATION => {
-            if committed_asset_output != net_credited {
-                return Err(EnclaveError::CrossCheck(format!(
-                    "mint-RGB amount mismatch: consignment asset_output_amount \
-                     ({committed_asset_output}) != net credited (source_amount {source_amount} - \
-                     source_commission {source_commission} = {net_credited})"
-                )));
-            }
-        }
-        // Transfer (pools send): `asset_output_amount` is recipient + bridge
-        // change, so only a lower bound is meaningful here. The per-output bind
-        // below pins the recipient leg.
-        ifa::TS_TRANSFER => {
-            if committed_asset_output < net_credited {
-                return Err(EnclaveError::CrossCheck(format!(
-                    "send-RGB amount mismatch: consignment asset_output_amount \
-                     ({committed_asset_output}) < net credited (source_amount {source_amount} - \
-                     source_commission {source_commission} = {net_credited})"
-                )));
-            }
-        }
-        // Unreachable: the gate above admits only the two shapes. Spelled out
-        // so a new transition type cannot silently inherit the Transfer rule.
-        other => {
-            return Err(EnclaveError::CrossCheck(format!(
-                "send-RGB transition type {other} has no amount bind defined - refusing to sign"
-            )));
-        }
-    }
+    flow::assert_group_amount(
+        committed_asset_output,
+        net_credited,
+        source_amount,
+        source_commission,
+    )?;
 
     // Per-output recipient bind. Runs last: it is the only check
     // here that reaches for the enclave's keys.
@@ -836,12 +782,14 @@ mod tests {
         }
 
         /// Stand-in ownership oracles. Fn items coerce to `SelfOwnedOutpoint`.
+        #[cfg(feature = "rgb-swap")]
         fn owns_nothing(_: &Psbt, _: OutPoint) -> Result<bool> {
             Ok(false)
         }
         fn owns_vout_1(psbt: &Psbt, outpoint: OutPoint) -> Result<bool> {
             Ok(outpoint.txid == psbt.unsigned_tx.compute_txid() && outpoint.vout == 1)
         }
+        #[cfg(feature = "rgb-swap")]
         /// Owns vout 0 of [`OFF_TX_SEED`] - an existing wallet UTXO.
         fn owns_off_tx_outpoint(_: &Psbt, outpoint: OutPoint) -> Result<bool> {
             Ok(outpoint == off_tx_outpoint())
@@ -858,6 +806,7 @@ mod tests {
             }
         }
 
+        #[cfg(feature = "rgb-swap")]
         /// A change leg: revealed on `vout` of the witness tx being signed
         /// (`txid: None`, exactly as the in-tree transfer fixture encodes it).
         fn revealed(amount: u64, vout: u32) -> TransitionOutput {
@@ -868,9 +817,11 @@ mod tests {
             }
         }
 
+        #[cfg(feature = "rgb-swap")]
         /// Display-order seal bytes for the off-transaction change UTXO.
         const OFF_TX_SEED: [u8; 32] = [0x77; 32];
 
+        #[cfg(feature = "rgb-swap")]
         /// The same outpoint as a `bitcoin::OutPoint` (internal byte order).
         fn off_tx_outpoint() -> OutPoint {
             let mut internal = OFF_TX_SEED;
@@ -881,6 +832,7 @@ mod tests {
             }
         }
 
+        #[cfg(feature = "rgb-swap")]
         /// A change leg on an existing wallet UTXO: an explicit txid that is
         /// NOT the tx being signed. Emitted when there is no BTC change.
         fn revealed_off_tx(amount: u64) -> TransitionOutput {
@@ -894,8 +846,16 @@ mod tests {
             }
         }
 
+        /// The last-transition type this build's flow signs on a deposit.
+        /// Lets the shared PSBT-mechanics cases below (txid bind, prevout
+        /// canary, sighash, leg split) run unchanged under either flow.
+        #[cfg(feature = "rgb-swap")]
+        const SIGNING_TT: u16 = ifa::TS_TRANSFER;
+        #[cfg(feature = "rgb-mint-burn")]
+        const SIGNING_TT: u16 = ifa::TS_INFLATION;
+
         fn transfer_summary(outputs: Vec<TransitionOutput>) -> TransitionSummary {
-            summary("transfer-op", ifa::TS_TRANSFER, outputs)
+            summary("transfer-op", SIGNING_TT, outputs)
         }
 
         fn summary(
@@ -992,6 +952,12 @@ mod tests {
         /// allocation returns as change on a revealed seal pointing at an
         /// output we control. `asset_output_amount` (5_000) exceeding
         /// `net_credited` (900) is fine - the surplus is provably ours.
+        // Bridge-change shapes: only the send/receive flow has them.
+        // Every case below leans on an `asset_output_amount` surplus
+        // returning as change, which the mint rule rejects outright as
+        // an over-mint before the leg split is reached - see
+        // `rejects_mint_over_mint`.
+        #[cfg(feature = "rgb-swap")]
         #[test]
         fn passes_when_change_returns_to_a_bridge_owned_seal() {
             let psbt = psbt_with_two_inputs();
@@ -1009,6 +975,7 @@ mod tests {
         /// attacker controls. Every other leg of the cross-check passes; the
         /// aggregate bound (`asset_output_amount >= net_credited`) passes
         /// vacuously. Only the recipient bind catches it.
+        #[cfg(feature = "rgb-swap")]
         #[test]
         fn rejects_over_send_to_a_blinded_seal() {
             let psbt = psbt_with_two_inputs();
@@ -1024,6 +991,7 @@ mod tests {
         /// The same drain routed through a *revealed* seal instead of a blinded
         /// one. Counting revealed legs as change unconditionally would let this
         /// through, so a revealed output we cannot prove is ours is refused.
+        #[cfg(feature = "rgb-swap")]
         #[test]
         fn rejects_change_on_an_output_we_do_not_control() {
             let psbt = psbt_with_two_inputs();
@@ -1039,6 +1007,7 @@ mod tests {
 
         /// A revealed seal naming a vout that does not exist on this tx is
         /// equally unownable, and must be refused rather than ignored.
+        #[cfg(feature = "rgb-swap")]
         #[test]
         fn rejects_change_on_an_out_of_range_vout() {
             let psbt = psbt_with_two_inputs();
@@ -1053,6 +1022,7 @@ mod tests {
 
         /// With no BTC change, rgb-lib parks the RGB change on an existing
         /// UTXO. Legitimate, on the same terms: the outpoint must be ours.
+        #[cfg(feature = "rgb-swap")]
         #[test]
         fn passes_when_change_lands_on_an_existing_bridge_utxo() {
             let psbt = psbt_with_two_inputs();
@@ -1065,6 +1035,7 @@ mod tests {
 
         /// Same shape, outpoint we cannot prove. Accepting it unconditionally
         /// would hand the change to whoever the host names.
+        #[cfg(feature = "rgb-swap")]
         #[test]
         fn rejects_off_tx_change_on_an_outpoint_we_cannot_prove() {
             let psbt = psbt_with_two_inputs();
@@ -1079,6 +1050,7 @@ mod tests {
 
         /// A bundle naming more than [`MAX_OFF_TX_CHANGE_OUTPOINTS`] outpoints
         /// is refused before the egress, not after.
+        #[cfg(feature = "rgb-swap")]
         #[test]
         fn rejects_too_many_distinct_off_tx_outpoints() {
             let psbt = psbt_with_two_inputs();
@@ -1106,6 +1078,7 @@ mod tests {
         }
 
         /// Several change legs on one UTXO must hit the memo, not the indexer.
+        #[cfg(feature = "rgb-swap")]
         #[test]
         fn resolves_a_repeated_off_tx_outpoint_only_once() {
             use std::cell::Cell;
@@ -1131,12 +1104,12 @@ mod tests {
         /// At per-output granularity: an `OS_INFLATION` entry is mint
         /// *capacity*, not value delivered, so it must not be able to stand in
         /// for the recipient leg.
+        #[cfg(feature = "rgb-mint-burn")]
         #[test]
         fn inflation_allowance_output_is_not_a_recipient_leg() {
             let psbt = psbt_with_two_inputs();
             let mut validated = validated_with(&psbt, vec![confidential(1_000)]);
             edit_signing_transition(&mut validated, |t| {
-                t.transition_type = ifa::TS_INFLATION;
                 // Allowance rides along confidentially. It must be skipped by
                 // the recipient sum, leaving 1_000 == net credited.
                 t.outputs.push(TransitionOutput {
@@ -1176,14 +1149,15 @@ mod tests {
         /// perfectly sized (1_000 = the credit) while its sibling ships
         /// 10_000_000 to a blinded seal. Both are committed by the tx being
         /// signed, so both must be bound.
+        #[cfg(feature = "rgb-swap")]
         #[test]
         fn rejects_over_send_in_a_sibling_transition() {
             let psbt = psbt_with_two_inputs();
             let validated = validated_from(
                 &psbt,
                 vec![
-                    summary("drain-op", ifa::TS_TRANSFER, vec![confidential(10_000_000)]),
-                    summary("decoy-op", ifa::TS_TRANSFER, vec![confidential(1_000)]),
+                    summary("drain-op", SIGNING_TT, vec![confidential(10_000_000)]),
+                    summary("decoy-op", SIGNING_TT, vec![confidential(1_000)]),
                 ],
             );
             let err = validate_psbt_anchors_transition(&psbt, &validated, 1_000, 0, &owns_vout_1)
@@ -1197,6 +1171,7 @@ mod tests {
         /// The legitimate multi-transition shape: a send funded from two
         /// bridge UTXOs, so the bundle carries two transitions whose recipient
         /// legs sum to the credit and whose change returns to us.
+        #[cfg(feature = "rgb-swap")]
         #[test]
         fn passes_when_a_bundle_splits_the_payout_across_transitions() {
             let psbt = psbt_with_two_inputs();
@@ -1206,10 +1181,10 @@ mod tests {
                 vec![
                     summary(
                         "leg-a",
-                        ifa::TS_TRANSFER,
+                        SIGNING_TT,
                         vec![confidential(400), revealed(2_000, 1)],
                     ),
-                    summary("leg-b", ifa::TS_TRANSFER, vec![confidential(500)]),
+                    summary("leg-b", SIGNING_TT, vec![confidential(500)]),
                 ],
             );
             assert!(
@@ -1218,23 +1193,27 @@ mod tests {
             );
         }
 
-        /// A bundle mixing mint and transfer has no single correct aggregate
-        /// rule (equality vs floor), so it is refused rather than guessed at.
+        /// The group gate covers every member, not just the last transition:
+        /// a sibling of another shape would move value under an amount rule
+        /// that was never written for it. A mixed bundle also has no single
+        /// aggregate rule (equality vs floor), so it is refused rather than
+        /// guessed at.
         #[test]
-        fn rejects_mixed_mint_and_transfer_bundle() {
+        fn rejects_foreign_transition_type_in_the_bundle() {
             let psbt = psbt_with_two_inputs();
             let validated = validated_from(
                 &psbt,
                 vec![
-                    summary("mint-op", ifa::TS_INFLATION, vec![confidential(500)]),
-                    summary("send-op", ifa::TS_TRANSFER, vec![confidential(500)]),
+                    // Neither flow signs a Burn on a deposit.
+                    summary("foreign-op", ifa::TS_BURN, vec![confidential(500)]),
+                    summary("signing-op", SIGNING_TT, vec![confidential(500)]),
                 ],
             );
             let err = validate_psbt_anchors_transition(&psbt, &validated, 1_000, 0, &owns_vout_1)
                 .unwrap_err();
             assert!(
-                err.to_string().contains("mixed bundle"),
-                "expected mixed-bundle rejection, got: {err}"
+                err.to_string().contains("flow requires"),
+                "expected foreign-transition rejection, got: {err}"
             );
         }
 
@@ -1333,28 +1312,16 @@ mod tests {
             );
         }
 
-        /// The mint-RGB shape - an IFA Inflation last transition - binds
-        /// through the same anchor path as the pools-mode Transfer.
-        #[test]
-        fn accepts_inflation_shape() {
-            let psbt = psbt_with_two_inputs();
-            let mut validated = validated_for(&psbt, 1_000);
-            edit_signing_transition(&mut validated, |t| t.transition_type = ifa::TS_INFLATION);
-            assert!(
-                validate_psbt_anchors_transition(&psbt, &validated, 1_000, 0, &owns_vout_1).is_ok()
-            );
-        }
-
         /// For a mint, only `OS_ASSET`-typed outputs (the actually
         /// minted units) may cover the credited amount - the `OS_INFLATION`
         /// allowance (mint capacity) counted in `total_output_amount` must
         /// not.
+        #[cfg(feature = "rgb-mint-burn")]
         #[test]
         fn inflation_allowance_does_not_cover_credited_amount() {
             let psbt = psbt_with_two_inputs();
             let mut validated = validated_for(&psbt, 1_000);
             edit_signing_transition(&mut validated, |t| {
-                t.transition_type = ifa::TS_INFLATION;
                 // Minted 999 units; a large allowance rides along in the
                 // total. Net credited is 1_000 - must be rejected on the
                 // asset sum, not covered by the allowance-inflated total.
@@ -1373,12 +1340,12 @@ mod tests {
         /// over-mint and must be rejected. The old one-sided lower bound
         /// (`asset_output_amount < net_credited`) accepted this surplus; the
         /// inflation path now requires exact equality.
+        #[cfg(feature = "rgb-mint-burn")]
         #[test]
         fn rejects_mint_over_mint() {
             let psbt = psbt_with_two_inputs();
             let mut validated = validated_for(&psbt, 1_000);
             edit_signing_transition(&mut validated, |t| {
-                t.transition_type = ifa::TS_INFLATION;
                 // Minted 1_500 against a 1_000 credit -> 500 over-mint.
                 t.asset_output_amount = 1_500;
                 t.total_output_amount = 1_500;
@@ -1391,17 +1358,19 @@ mod tests {
             );
         }
 
+        /// A consignment shaped for a transition this build's flow does not
+        /// sign is refused up front. `TS_BURN` is a withdrawal shape in both
+        /// flows, so it is wrong on a deposit either way.
         #[test]
-        fn rejects_non_transfer_transition() {
+        fn rejects_transition_type_this_flow_does_not_sign() {
             let psbt = psbt_with_two_inputs();
             let mut validated = validated_for(&psbt, 1_000);
             edit_signing_transition(&mut validated, |t| t.transition_type = ifa::TS_BURN);
             let err = validate_psbt_anchors_transition(&psbt, &validated, 1_000, 0, &owns_vout_1)
                 .unwrap_err();
             assert!(
-                err.to_string()
-                    .contains("requires a Transfer or Inflation transition"),
-                "expected Transfer/Inflation-required rejection, got: {err}"
+                err.to_string().contains("this enclave is built for the"),
+                "expected flow-shape rejection, got: {err}"
             );
         }
 

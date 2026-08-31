@@ -14,7 +14,7 @@ flowchart TD
         p1q -->|no| p1r[REFUSE — invalid consignment]:::refuse
         p1q -->|yes| p1c{"contract_id == declared asset_id<br/>(== pinned RGB_ASSET_ID when configured)?"}
         p1c -->|no| p1cr[REFUSE — asset mismatch]:::refuse
-        p1c -->|yes| p1e["source amount from consignment:<br/>TS_TRANSFER total_output /<br/>TS_BURN burned amount<br/>(host rgb_amount NOT used);<br/>other transition ⇒ REFUSE"]
+        p1c -->|yes| p1e["source amount from consignment, per build flow:<br/>rgb-swap ⇒ TS_TRANSFER total_output /<br/>rgb-mint-burn ⇒ TS_BURN burned amount<br/>(host rgb_amount NOT used);<br/>any other transition ⇒ REFUSE"]
     end
     start --> p1w
 
@@ -54,8 +54,8 @@ flowchart TD
         p4b -->|yes| p4bv{"decoded (blockHeight, commitmentHash)<br/>matches enclave header at that height?"}
         p4bv -->|no| p4bvr[REFUSE — BtcRelay disagreement]:::refuse
         p4b -->|"no (inert)"| p4t
-        p4bv -->|yes| p4t{"last transition == TS_TRANSFER AND<br/>consignment total_output ≥<br/>amount read from calldata bytes?"}
-        p4t -->|no| p4tr[REFUSE — transfer bind]:::refuse
+        p4bv -->|yes| p4t{"last transition == the build flow's unlock shape<br/>(TS_TRANSFER / TS_BURN) AND<br/>consignment-derived amount ≥<br/>amount read from calldata bytes?"}
+        p4t -->|no| p4tr[REFUSE — fundsOut amount bind]:::refuse
     end
     p2d -->|yes| p4r
 
@@ -75,8 +75,11 @@ flowchart TD
 - `burnId` / `fundsInIds` inside the calldata are **preserved as received**
 . The in-enclave OpId rewrite (`burnId` derived from the validated
   consignment OpId) is implemented but dormant until flows are
-  routed by network id; mint/burn unlock (`TS_BURN` consignments) cannot
-  complete this gate — only the swap flow (`TS_TRANSFER`) signs.
+  routed by network id.
+- Which unlock shape completes this gate is chosen at build time: an
+  `rgb-swap` enclave signs `TS_TRANSFER` only, an `rgb-mint-burn` enclave
+  `TS_BURN` only. They are separate instances with separate PCR0s; neither
+  binary contains the other's rules.
 - `dev-mode` builds bypass the validation subgraphs entirely; every dev
   feature is a `compile_error!` in release builds, and a release bridge build
   refuses to boot without a valid attested `Production` policy.
