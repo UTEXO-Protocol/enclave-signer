@@ -72,6 +72,12 @@ const BFI_OPERATION_ID_TOPIC: usize = 1;
 const BFI_AMOUNT_OFF: usize = 32;
 const BFI_NET_AMOUNT_OFF: usize = 64;
 const BFI_TOKEN_COMMISSION_OFF: usize = 96;
+/// Word 7: the byte offset of the `string destinationAddress` tail, not the
+/// string itself.
+const BFI_DEST_ADDRESS_HEAD_OFF: usize = 224;
+/// Ceiling on the decoded `destinationAddress`. `Bridge.sol` caps it at 512
+/// on-chain; this bounds what a host-relayed receipt can make the enclave parse.
+const BFI_MAX_DEST_ADDRESS_LEN: usize = 2048;
 /// 7 static words + 1 dynamic-string offset word must be present.
 const BFI_MIN_DATA_LEN: usize = 8 * 32;
 
@@ -109,6 +115,15 @@ fn event_topic0(sig: &str) -> [u8; 32] {
     Keccak256::digest(sig.as_bytes()).into()
 }
 
+/// What a verified `BridgeFundsIn` deposit authorises. Only the fields later
+/// stages bind against; the rest is checked in [`verify_funds_in_event`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VerifiedFundsIn {
+    /// Verbatim from the log. For an RGB destination this is the user's
+    /// invoice, which the send-RGB recipient bind parses.
+    pub destination_address: String,
+}
+
 /// Independently verify the `FundsIn` deposit for a bridge-mode `signPsbt`.
 ///
 /// Fail-closed: a missing/failed receipt, no matching log, an ambiguous match,
@@ -130,7 +145,7 @@ pub fn verify_funds_in_event(
     expected_operation_id: &[u8],
     expected_gross_amount: u64,
     expected_commission: u64,
-) -> Result<()> {
+) -> Result<VerifiedFundsIn> {
     if expected_operation_id.len() != 32 {
         return Err(EnclaveError::CrossCheck(format!(
             "FundsIn expected operationId must be exactly 32 bytes (the contract-derived \
@@ -207,6 +222,10 @@ pub fn verify_funds_in_event(
     let gross = decode_u64_word(&log.data, BFI_AMOUNT_OFF, "amount")?;
     let net = decode_u64_word(&log.data, BFI_NET_AMOUNT_OFF, "netAmount")?;
     let commission = decode_u64_word(&log.data, BFI_TOKEN_COMMISSION_OFF, "tokenCommission")?;
+    // Decoded here, where the log is already proven to come from the pinned
+    // bridge contract, so later stages bind against authenticated evidence.
+    let destination_address =
+        decode_abi_string(&log.data, BFI_DEST_ADDRESS_HEAD_OFF, "destinationAddress")?;
 
     if expected_operation_id != operation_id.as_slice() {
         return Err(EnclaveError::CrossCheck(format!(
@@ -266,7 +285,9 @@ pub fn verify_funds_in_event(
         depth,
         "FundsIn event independently verified in-enclave"
     );
-    Ok(())
+    Ok(VerifiedFundsIn {
+        destination_address,
+    })
 }
 
 /// Read a 32-byte ABI word at `offset` in `data` as a `u64`, with a
@@ -280,6 +301,47 @@ fn decode_u64_word(data: &[u8], offset: usize, field: &str) -> Result<u64> {
              is rejected, never truncated)"
         ))
     })
+}
+
+/// Decode the ABI dynamic `string` whose head word sits at `head_off`: an
+/// offset into `data`, then a length word and the bytes, padded to 32.
+///
+/// Every bound is checked - a forged offset or length must fail, not read
+/// adjacent memory or panic.
+fn decode_abi_string(data: &[u8], head_off: usize, field: &str) -> Result<String> {
+    let err = |m: String| EnclaveError::CrossCheck(format!("BridgeFundsIn {field}: {m}"));
+
+    let offset =
+        usize::try_from(extract_uint256_as_u64(data, head_off).map_err(|e| err(e.to_string()))?)
+            .map_err(|_| err("tail offset exceeds usize".into()))?;
+    let len_off = offset
+        .checked_add(32)
+        .ok_or_else(|| err("tail offset overflow".into()))?;
+    if len_off > data.len() {
+        return Err(err(format!(
+            "tail offset {offset} is past the {} bytes of log data",
+            data.len()
+        )));
+    }
+    let len =
+        usize::try_from(extract_uint256_as_u64(data, offset).map_err(|e| err(e.to_string()))?)
+            .map_err(|_| err("tail length exceeds usize".into()))?;
+    if len > BFI_MAX_DEST_ADDRESS_LEN {
+        return Err(err(format!(
+            "tail length {len} exceeds the {BFI_MAX_DEST_ADDRESS_LEN}-byte cap"
+        )));
+    }
+    let end = len_off
+        .checked_add(len)
+        .ok_or_else(|| err("tail length overflow".into()))?;
+    if end > data.len() {
+        return Err(err(format!(
+            "tail claims {len} bytes at {len_off} but the log data is {} bytes",
+            data.len()
+        )));
+    }
+    String::from_utf8(data[len_off..end].to_vec())
+        .map_err(|_| err("tail is not valid UTF-8".into()))
 }
 
 /// Equality assertion with a field-named fail-closed error.
@@ -634,17 +696,104 @@ mod tests {
         id
     }
 
-    /// BridgeFundsIn `data`: senderNonce, gross, net, commission, then
-    /// nativeCommission/srcChain/destChain/string-offset zero-filled.
-    /// `operationId` is NOT here any more - it is an indexed topic.
+    /// An RGB invoice in the shape the pinned `rgb-invoicing` accepts:
+    /// `rgb:<contract>/<schema>/<state>/bc:utxob:<seal>`. Shared with
+    /// [`crate::networks::rgb::invoice`], whose tests parse this same string,
+    /// so the ABI half and the parsing half cannot drift apart.
+    const SAMPLE_INVOICE: &str = "rgb:fuhLYX9G-eC8gDvf-V0XpYFH-ceSafoc-lGutAYq-~SExGU4/\
+                                  XvmU3d4_nQQ8S7oagbXi07x5vjMm7P~ERukQNX6SC4M/BF/bc:utxob:\
+                                  UzR~73lD-JyzirTn-engdWia-qjd5NyV-mndAmmo-EbxdVEG-L6OiP";
+
+    /// BridgeFundsIn `data`: senderNonce, gross, net, commission,
+    /// nativeCommission, srcChain, destChain, then the `destinationAddress`
+    /// head word and its tail. `operationId` is NOT here - it is an indexed
+    /// topic.
     fn bridge_data(gross: u64, net: u64, commission: u64) -> Vec<u8> {
+        bridge_data_with_dest(gross, net, commission, SAMPLE_INVOICE)
+    }
+
+    /// The real ABI shape: 8 head words, the last one the tail offset, then a
+    /// length word and padded bytes.
+    fn bridge_data_with_dest(gross: u64, net: u64, commission: u64, dest: &str) -> Vec<u8> {
         let mut d = Vec::new();
         d.extend_from_slice(&word(0)); // senderNonce
         d.extend_from_slice(&word(gross));
         d.extend_from_slice(&word(net));
         d.extend_from_slice(&word(commission));
-        d.extend_from_slice(&[0u8; 32 * 4]); // nativeCommission, src, dest, str offset
+        d.extend_from_slice(&[0u8; 32 * 3]); // nativeCommission, sourceChainId, destinationChainId
+        d.extend_from_slice(&word(8 * 32)); // tail offset: just past the head words
+        d.extend_from_slice(&word(dest.len() as u64));
+        let mut bytes = dest.as_bytes().to_vec();
+        bytes.resize(bytes.len().div_ceil(32) * 32, 0);
+        d.extend_from_slice(&bytes);
         d
+    }
+
+    // --- destinationAddress tail decoding ---
+    //
+    // Attacker-shaped data on a host-relayed receipt, so every bound is
+    // asserted.
+
+    #[test]
+    fn decodes_the_destination_address_tail() {
+        let d = bridge_data_with_dest(1000, 950, 50, SAMPLE_INVOICE);
+        let got = decode_abi_string(&d, BFI_DEST_ADDRESS_HEAD_OFF, "destinationAddress").unwrap();
+        assert_eq!(got, SAMPLE_INVOICE);
+    }
+
+    #[test]
+    fn decodes_an_empty_destination_address() {
+        let d = bridge_data_with_dest(1000, 950, 50, "");
+        let got = decode_abi_string(&d, BFI_DEST_ADDRESS_HEAD_OFF, "destinationAddress").unwrap();
+        assert!(got.is_empty());
+    }
+
+    #[test]
+    fn rejects_a_tail_offset_past_the_data() {
+        let mut d = bridge_data_with_dest(1000, 950, 50, SAMPLE_INVOICE);
+        d[BFI_DEST_ADDRESS_HEAD_OFF..BFI_DEST_ADDRESS_HEAD_OFF + 32]
+            .copy_from_slice(&word(1_000_000));
+        let err =
+            decode_abi_string(&d, BFI_DEST_ADDRESS_HEAD_OFF, "destinationAddress").unwrap_err();
+        assert!(err.to_string().contains("past the"), "{err}");
+    }
+
+    #[test]
+    fn rejects_a_tail_length_past_the_data() {
+        let mut d = bridge_data_with_dest(1000, 950, 50, SAMPLE_INVOICE);
+        let len_at = 8 * 32;
+        // Under the size cap, so the bounds check is what must catch it.
+        d[len_at..len_at + 32].copy_from_slice(&word(1_000));
+        let err =
+            decode_abi_string(&d, BFI_DEST_ADDRESS_HEAD_OFF, "destinationAddress").unwrap_err();
+        assert!(err.to_string().contains("log data is"), "{err}");
+    }
+
+    #[test]
+    fn rejects_a_tail_over_the_size_cap() {
+        let huge = "x".repeat(BFI_MAX_DEST_ADDRESS_LEN + 1);
+        let d = bridge_data_with_dest(1000, 950, 50, &huge);
+        let err =
+            decode_abi_string(&d, BFI_DEST_ADDRESS_HEAD_OFF, "destinationAddress").unwrap_err();
+        assert!(err.to_string().contains("cap"), "{err}");
+    }
+
+    #[test]
+    fn rejects_a_non_utf8_tail() {
+        let mut d = bridge_data_with_dest(1000, 950, 50, "abcd");
+        let at = 9 * 32; // first byte of the string body
+        d[at] = 0xFF;
+        let err =
+            decode_abi_string(&d, BFI_DEST_ADDRESS_HEAD_OFF, "destinationAddress").unwrap_err();
+        assert!(err.to_string().contains("not valid UTF-8"), "{err}");
+    }
+
+    /// Without this the recipient bind has nothing to compare against.
+    #[test]
+    fn verified_funds_in_carries_the_destination_address() {
+        let p = happy_provider();
+        let v = verify_funds_in_event(&p, &BRIDGE, 12, &TX, &op_id(7), 1000, 50).unwrap();
+        assert_eq!(v.destination_address, SAMPLE_INVOICE);
     }
 
     /// topics: [topic0, operationId, sourceSender, sender].
@@ -693,7 +842,7 @@ mod tests {
 
     /// Verify with the operationId bound - the only supported call shape.
     fn verify(p: &FakeProvider) -> Result<()> {
-        verify_funds_in_event(p, &BRIDGE, 12, &TX, &op_id(7), 1000, 50)
+        verify_funds_in_event(p, &BRIDGE, 12, &TX, &op_id(7), 1000, 50).map(|_| ())
     }
 
     #[test]

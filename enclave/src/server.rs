@@ -433,7 +433,7 @@ fn handle_sign(ctx: &ServerContext, req: SignRequest) -> Result<EnclaveResponse>
         })?;
         // Binds to the source's BridgeFundsIn.operationId, not
         // destination.operation_idx, which is a different id-space.
-        crate::networks::evm::evm_event::verify_funds_in_event(
+        let verified = crate::networks::evm::evm_event::verify_funds_in_event(
             &**client,
             // FundsIn is emitted by the bridge entry contract, which may differ
             // from the MultisigProxy pinned in EVM_PROXY_CONTRACT_ADDRESS (see config.rs).
@@ -444,6 +444,21 @@ fn handle_sign(ctx: &ServerContext, req: SignRequest) -> Result<EnclaveResponse>
             req.amount,
             source.commission,
         )?;
+
+        // Recipient bind: the checks above prove how much the recipient leg
+        // pays, not who it pays. The invoice in the log just verified says
+        // which seal the deposit authorised.
+        #[cfg(feature = "rgb-validation")]
+        {
+            use crate::networks::rgb::invoice;
+            let authorized = invoice::parse_authorized_recipient(&verified.destination_address)?;
+            invoice::assert_recipient_authorized(
+                &destination_proof.rgb_recipient_seals,
+                &authorized,
+            )?;
+        }
+        #[cfg(not(feature = "rgb-validation"))]
+        let _ = verified;
     }
 
     // Fail-closed when the FundsIn verifier is not compiled in. Without
