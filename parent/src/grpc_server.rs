@@ -189,6 +189,16 @@ impl ParentAdapterService {
                         .into_iter()
                         .map(Self::enclave_merkle_proof)
                         .collect(),
+                    // Forwarded as given: the enclave verifies every pair
+                    // against the chain, so the parent adds no trust here.
+                    mint_ancestors: rgb
+                        .mint_ancestors
+                        .into_iter()
+                        .map(|a| enclave_proto::MintAncestor {
+                            op_id: a.op_id,
+                            tx_hash: a.tx_hash,
+                        })
+                        .collect(),
                 }),
             ),
             // A CCD source (fundsIn burn) feeding an EVM release. The listener

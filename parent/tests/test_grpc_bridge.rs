@@ -290,6 +290,7 @@ fn rgb_source(
             rgb_amount: amount,
             rgb_asset_id: rgb_asset_id.into(),
             merkle_proofs: vec![],
+            mint_ancestors: vec![],
         })),
     }
 }

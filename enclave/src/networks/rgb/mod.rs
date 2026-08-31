@@ -274,6 +274,7 @@ mod tests {
                 asset_output_amount: total_output_amount,
                 outputs: vec![],
                 burned_asset_amount,
+                burn_recipient: None,
             }),
             last_transfer_witness_txid: None,
             last_transfer_witness_prevouts: None,

@@ -933,6 +933,7 @@ mod tests {
                 asset_output_amount,
                 outputs,
                 burned_asset_amount: None,
+                burn_recipient: None,
             }
         }
 

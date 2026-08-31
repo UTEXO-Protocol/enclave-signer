@@ -259,6 +259,7 @@ mod tests {
             consignment_hash: vec![0x02; 32],
             merkle_proofs: vec![],
             commission: 20,
+            mint_ancestors: vec![],
         })
     }
 

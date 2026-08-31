@@ -56,7 +56,7 @@ tokio = { version = "1", features = ["full"] }
 # parent / signer packages). The parent runs on the untrusted host, so needing a
 # credential to build it costs nothing. Keep this rev in lockstep with the
 # vendored slice in `enclave-proto/` — see its README.
-federated-signer-proto = { git = "ssh://git@github.com/UTEXO-Protocol/federated-signer-proto.git", rev = "359a421245cf5b78078426c2b98a3a92bb63ab07", package = "federated-signer-proto" }
+federated-signer-proto = { git = "ssh://git@github.com/UTEXO-Protocol/federated-signer-proto.git", rev = "0614fbf6c35f8daf638e3e52fd72ea7ce728b20c", package = "federated-signer-proto" }
 clap = { version = "4", features = ["derive"] }
 
 thiserror = "2"

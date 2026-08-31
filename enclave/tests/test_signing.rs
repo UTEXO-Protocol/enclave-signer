@@ -90,6 +90,7 @@ fn valid_sign_evm_request(amount: u64, commission: u64) -> SignRequest {
             consignment_hash: placeholder_consignment_hash(),
             merkle_proofs: vec![],
             commission,
+            mint_ancestors: vec![],
         })),
         destination_network: Some(DestinationNetwork::EvmDestination(EvmDestination {
             call_data: mock_funds_out_calldata([0x22; 20], amount),

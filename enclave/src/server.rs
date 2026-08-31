@@ -325,6 +325,111 @@ fn dispatch(request: EnclaveRequest, ctx: &ServerContext) -> EnclaveResponse {
 /// runs. Empty vec when the consignment is not a BFA one, so the swap path is
 /// unaffected; every failure refuses the signature.
 #[cfg(feature = "bfa-mint")]
+/// The EVM tx hash the listener claims backs `mint_opid`.
+///
+/// Fails closed: an unlisted mint, or one listed with a malformed hash, aborts
+/// the burn rather than validating with that mint's lock unchecked.
+#[cfg(feature = "bfa-mint")]
+fn ancestor_tx_hash(
+    mint_opid: &[u8; 32],
+    ancestors: &[enclave_proto::MintAncestor],
+) -> Result<[u8; 32]> {
+    let ancestor = ancestors
+        .iter()
+        .find(|a| a.op_id.as_slice() == mint_opid.as_slice())
+        .ok_or_else(|| {
+            EnclaveError::CrossCheck(format!(
+                "no mint_ancestors entry for bridge transition 0x{} - the burn cannot be \
+                 validated without the EVM lock behind every mint it descends from",
+                hex::encode(mint_opid)
+            ))
+        })?;
+
+    ancestor.tx_hash.as_slice().try_into().map_err(|_| {
+        EnclaveError::CrossCheck(format!(
+            "mint_ancestors tx_hash for 0x{} must be 32 bytes, got {}",
+            hex::encode(mint_opid),
+            ancestor.tx_hash.len()
+        ))
+    })
+}
+
+/// Verify the `FundsIn` lock behind every mint a burn consignment descends
+/// from, and return one `cea` event per mint.
+///
+/// The listener supplies `(op_id, tx_hash)` pairs because only it can search
+/// the chain; they are hints. Every pair is fetched and checked here against
+/// the enclave's own contract pin, and a mint with no pair - or with one whose
+/// log does not bind to it - fails the whole validation. That is the point: a
+/// burn may only release funds that a real, verified lock once created.
+#[cfg(feature = "bfa-mint")]
+fn bfa_burn_ancestry_events(
+    ctx: &ServerContext,
+    source: &enclave_proto::RgbSource,
+) -> Result<Vec<rgbstd::vm::ether_extension::Event>> {
+    use crate::networks::evm::evm_event::{check_bridge_location, verify_rgb_funds_in};
+    use crate::networks::rgb::validation::bfa_ancestry_binding;
+    use rgbstd::vm::ether_extension::Event;
+    use rgbstd::{OpId, RevealedValue};
+
+    if cfg!(feature = "dev-mode") {
+        return Ok(Vec::new());
+    }
+    if source.consignment.len() > ctx.bridge_config.max_consignment_bytes {
+        return Err(EnclaveError::CrossCheck(format!(
+            "RGB source consignment too large: {} bytes (max {})",
+            source.consignment.len(),
+            ctx.bridge_config.max_consignment_bytes
+        )));
+    }
+
+    let Some(binding) = bfa_ancestry_binding(&source.consignment)? else {
+        // Not a BFA consignment: the other schemas run no extension opcode, so
+        // an empty event set is correct rather than merely tolerated.
+        return Ok(Vec::new());
+    };
+
+    // The extension never checks which contract an event came from, so this is
+    // the only thing between a redemption and logs from an attacker's contract.
+    check_bridge_location(
+        &binding.bridge_location,
+        &ctx.bridge_config.funds_in_contract,
+    )?;
+
+    if binding.mint_opids.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let client = ctx.evm_rpc_client.as_ref().ok_or_else(|| {
+        EnclaveError::CrossCheck(
+            "bfa-mint build but the EVM RPC client is unavailable - refusing to validate a burn \
+             without independently verifying the locks behind its mints"
+                .into(),
+        )
+    })?;
+
+    let mut events = Vec::with_capacity(binding.mint_opids.len());
+    for mint_opid in &binding.mint_opids {
+        let tx_hash = ancestor_tx_hash(mint_opid, &source.mint_ancestors)?;
+
+        let amount = verify_rgb_funds_in(
+            &**client,
+            &ctx.bridge_config.funds_in_contract,
+            ctx.evm_rpc_config.min_confirmations,
+            &tx_hash,
+            mint_opid,
+        )?;
+
+        events.push(Event::new(
+            OpId::from(*mint_opid),
+            RevealedValue::from(amount),
+        ));
+    }
+
+    Ok(events)
+}
+
+#[cfg(feature = "bfa-mint")]
 fn bfa_mint_events(
     ctx: &ServerContext,
     source: &SourceNetwork,
@@ -451,7 +556,12 @@ fn handle_sign(ctx: &ServerContext, req: SignRequest) -> Result<EnclaveResponse>
     // Before destination validation, not after: a BFA mint's consignment cannot
     // be validated at all until the lock it commits to has been verified.
     #[cfg(feature = "bfa-mint")]
-    let bfa_bridge_events = bfa_mint_events(ctx, source_ref, destination_ref)?;
+    let bfa_bridge_events = match source_ref {
+        // A burn: the events prove the locks behind the mints it descends from.
+        SourceNetwork::RgbSource(rgb) => bfa_burn_ancestry_events(ctx, rgb)?,
+        // A mint: the event proves the one lock it is being minted against.
+        _ => bfa_mint_events(ctx, source_ref, destination_ref)?,
+    };
 
     let validation_ctx = ValidationContext {
         bridge_config: &ctx.bridge_config,
@@ -684,8 +794,20 @@ fn apply_funds_out_binding(
     #[cfg(not(feature = "spv"))]
     let _ = ctx;
 
-    // Consignment-bound release amount (transfer flow).
-    crosscheck::validate_funds_out_transfer(params, validated)?;
+    // Consignment-bound release. A transfer settles a swap; a burn settles a
+    // redemption and additionally binds the payout target to the 32 bytes the
+    // burner committed to. Dispatching on the last transition rather than on a
+    // caller-supplied flag keeps the consignment the authority on which rule
+    // applies.
+    let is_burn = validated
+        .last_transition
+        .as_ref()
+        .is_some_and(|t| t.transition_type == crate::networks::rgb::validation::ifa::TS_BURN);
+    if is_burn {
+        crosscheck::validate_funds_out_burn(params, validated)?;
+    } else {
+        crosscheck::validate_funds_out_transfer(params, validated)?;
+    }
 
     // Swap / send-receive only for now. The backend-provided burnId and
     // settlement fundsInIds are preserved; the EVM connector already selected
@@ -1444,6 +1566,62 @@ fn handle_set_clone(state: &EnclaveState, req: SetCloneRequest) -> Result<Enclav
 // the RGB/BTC stack (`spv`).
 #[cfg(all(test, feature = "spv"))]
 mod tests {
+    #[cfg(feature = "bfa-mint")]
+    mod burn_ancestry {
+        use crate::server::ancestor_tx_hash;
+        use enclave_proto::MintAncestor;
+
+        fn ancestor(op: u8, tx: u8) -> MintAncestor {
+            MintAncestor {
+                op_id: vec![op; 32],
+                tx_hash: vec![tx; 32],
+            }
+        }
+
+        #[test]
+        fn returns_the_tx_hash_listed_for_that_mint() {
+            let ancestors = vec![ancestor(1, 0xaa), ancestor(2, 0xbb)];
+            assert_eq!(
+                ancestor_tx_hash(&[2u8; 32], &ancestors).unwrap(),
+                [0xbb; 32]
+            );
+        }
+
+        /// The whole point of the pre-pass. A mint the listener did not account
+        /// for must abort the burn - never validate with its lock unchecked,
+        /// which is what would let an unbacked mint be redeemed on EVM.
+        #[test]
+        fn rejects_a_mint_with_no_listed_ancestor() {
+            let err = ancestor_tx_hash(&[9u8; 32], &[ancestor(1, 0xaa)]).unwrap_err();
+            assert!(err.to_string().contains("no mint_ancestors entry"), "{err}");
+        }
+
+        #[test]
+        fn rejects_an_empty_ancestor_list() {
+            assert!(ancestor_tx_hash(&[1u8; 32], &[]).is_err());
+        }
+
+        /// A short hash would otherwise be silently padded by a lenient decoder
+        /// and look up a different transaction.
+        #[test]
+        fn rejects_a_tx_hash_that_is_not_32_bytes() {
+            let listed = MintAncestor {
+                op_id: vec![1u8; 32],
+                tx_hash: vec![0xaa; 31],
+            };
+            let err = ancestor_tx_hash(&[1u8; 32], &[listed]).unwrap_err();
+            assert!(err.to_string().contains("must be 32 bytes"), "{err}");
+        }
+
+        /// An op id that merely shares a prefix is a different transition.
+        #[test]
+        fn matches_the_op_id_exactly() {
+            let mut near = ancestor(1, 0xaa);
+            near.op_id[31] = 2;
+            assert!(ancestor_tx_hash(&[1u8; 32], &[near]).is_err());
+        }
+    }
+
     use super::*;
     use std::time::{Duration, SystemTime};
 

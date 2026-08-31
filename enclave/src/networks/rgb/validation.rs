@@ -60,6 +60,12 @@ pub fn validate_source(
         )
     })?;
 
+    // A burn consignment carries its whole mint ancestry, and every one of those
+    // mint transitions ends in `cea` - consensus re-runs them, so it needs the
+    // locks the enclave verified for itself.
+    #[cfg(feature = "bfa-mint")]
+    let validated = validator.validate_consignment(&source.consignment, ctx.bridge_events)?;
+    #[cfg(not(feature = "bfa-mint"))]
     let validated = validator.validate_consignment(&source.consignment, &[])?;
 
     if validated.contract_id.is_empty() {
@@ -223,6 +229,12 @@ pub mod bfa {
     /// Unlike IFA's `OS_INFLATION` it holds no amount, so it can never be summed
     /// into a minted total by mistake.
     pub const OS_BRIDGE: u16 = 4014;
+    /// BFA burn metadata carrying where the redemption is owed on the EVM side:
+    /// 32 opaque bytes the schema makes mandatory on every `TS_BURN`. Consensus
+    /// neither interprets nor validates them, but they sit inside the burn
+    /// operation, so they are covered by its OpId and signed by whoever spent
+    /// the burned units - which is what lets a release trust them.
+    pub const MS_BURN_RECIPIENT: u16 = 1003;
 }
 
 /// What the enclave must verify on-chain before RGB consensus may see a BFA
@@ -293,6 +305,58 @@ pub fn bfa_mint_binding(consignment_bytes: &[u8]) -> Result<Option<BfaMintBindin
         mint_opid,
         bridge_location: genesis_bridge_location(&transfer)?,
     }))
+}
+
+/// Every `TS_BRIDGE` transition a BFA consignment descends from, plus the
+/// asset's genesis `bridgeLocation`.
+///
+/// The mint direction verifies one lock because it *is* one mint. A burn is
+/// different: consensus re-runs the script of every transition in the
+/// consignment, so every historical mint's `cea` needs its own verified event.
+/// This is the flat parse, deliberately - the OpIds are needed *before*
+/// validation, to pick which logs to fetch.
+#[cfg(feature = "bfa-mint")]
+pub fn bfa_ancestry_binding(consignment_bytes: &[u8]) -> Result<Option<BfaAncestryBinding>> {
+    let Ok(transfer) = Transfer::load(Cursor::new(consignment_bytes)) else {
+        return Ok(None);
+    };
+    if transfer.genesis.schema_id != schemata::BFA_SCHEMA_ID {
+        return Ok(None);
+    }
+
+    let (_, mint_op_ids, _, _) = extract_transition_summary(consignment_bytes)?;
+
+    let mut opids = Vec::with_capacity(mint_op_ids.len());
+    for hex_opid in &mint_op_ids {
+        let hex_opid = hex_opid.strip_prefix("0x").unwrap_or(hex_opid);
+        let bytes = hex::decode(hex_opid).map_err(|e| {
+            EnclaveError::CrossCheck(format!(
+                "BFA mint opid hex decode failed: {e} ({hex_opid:?})"
+            ))
+        })?;
+        let opid: [u8; 32] = bytes.try_into().map_err(|v: Vec<u8>| {
+            EnclaveError::CrossCheck(format!("BFA mint opid is not 32 bytes (got {})", v.len()))
+        })?;
+        opids.push(opid);
+    }
+
+    Ok(Some(BfaAncestryBinding {
+        mint_opids: opids,
+        bridge_location: genesis_bridge_location(&transfer)?,
+    }))
+}
+
+/// What the enclave must verify on-chain before RGB consensus may see a BFA
+/// burn: every mint in the consignment's ancestry, and the contract allowed to
+/// have emitted their `FundsIn` logs.
+#[cfg(feature = "bfa-mint")]
+pub struct BfaAncestryBinding {
+    /// OpIds of every `TS_BRIDGE` transition in the consignment. Untrusted -
+    /// they only select which logs to fetch; each one is then verified.
+    pub mint_opids: Vec<[u8; 32]>,
+    /// The asset's genesis `bridgeLocation`, to compare against the enclave's
+    /// own `funds_in_contract` pin before any log is trusted.
+    pub bridge_location: String,
 }
 
 /// Read the asset's `bridgeLocation` straight out of the genesis global state.
@@ -525,6 +589,11 @@ pub struct TransitionSummary {
     /// `None` when the transition is not a burn, or when a burn transition is
     /// malformed (which rgbstd validation should already have rejected).
     pub burned_asset_amount: Option<u64>,
+    /// Where the burn's proceeds are owed on the EVM side, from the BFA
+    /// `MS_BURN_RECIPIENT` metadata field: exactly 32 bytes, as the schema
+    /// requires. `None` for a non-burn, and for an IFA burn, which declares
+    /// `burnedInflation` in that slot instead.
+    pub burn_recipient: Option<Vec<u8>>,
 }
 
 /// One fungible output assignment on a state transition.
@@ -911,6 +980,7 @@ impl RgbValidator {
         if let Some(ref mut last) = last_transition {
             if last.transition_type == ifa::TS_BURN {
                 last.burned_asset_amount = read_last_transition_burned_asset(&transfer)?;
+                last.burn_recipient = read_last_transition_burn_recipient(&transfer)?;
             }
         }
 
@@ -1025,9 +1095,7 @@ impl RgbValidator {
                 %detail,
                 "RGB validation failed: {e}"
             );
-            EnclaveError::CrossCheck(format!(
-                "RGB consignment validation failed: {e}: {detail}"
-            ))
+            EnclaveError::CrossCheck(format!("RGB consignment validation failed: {e}: {detail}"))
         })?;
 
         // Warnings only. Witness confirmation is deliberately NOT derived
@@ -1310,10 +1378,11 @@ fn transition_summary(t: &TransitionInfo) -> Result<TransitionSummary> {
         total_output_amount,
         asset_output_amount,
         outputs: outputs?,
-        // Filled by `read_last_transition_burned_asset` if the
-        // transition is a burn; the parser doesn't expose metadata so
-        // we leave this `None` here.
+        // Filled by `read_last_transition_burned_asset` /
+        // `read_last_transition_burn_recipient` if the transition is a burn;
+        // the parser doesn't expose metadata so we leave these `None` here.
         burned_asset_amount: None,
+        burn_recipient: None,
     })
 }
 
@@ -1330,6 +1399,37 @@ fn transition_summary(t: &TransitionInfo) -> Result<TransitionSummary> {
 /// Returns `Ok(None)` when there is no last transition or the metadata key is
 /// absent (which for a `TS_BURN` implies a schema mismatch), and `Err` when the
 /// blob is the wrong size for a `u64`.
+/// Walk to the last known transition and read the BFA `MS_BURN_RECIPIENT`
+/// value from its metadata - the 32 bytes naming where the redemption is owed.
+///
+/// Returns `Ok(None)` when there is no last transition or the key is absent
+/// (an IFA burn declares `burnedInflation` there instead), and `Err` when the
+/// blob is not exactly 32 bytes, because a release must never be pointed at a
+/// truncated or padded address.
+fn read_last_transition_burn_recipient(transfer: &Transfer) -> Result<Option<Vec<u8>>> {
+    let Some(last_bundle) = transfer.bundles.iter().last() else {
+        return Ok(None);
+    };
+    let Some(known) = last_bundle.bundle().known_transitions.iter().last() else {
+        return Ok(None);
+    };
+    let recipient_meta_key = MetaType::with(bfa::MS_BURN_RECIPIENT);
+    for (mt, mv) in &known.transition.metadata {
+        if *mt != recipient_meta_key {
+            continue;
+        }
+        let raw: &[u8] = mv.as_unconfined().as_slice();
+        if raw.len() != 32 {
+            return Err(EnclaveError::CrossCheck(format!(
+                "MS_BURN_RECIPIENT metadata is {} bytes, expected 32",
+                raw.len()
+            )));
+        }
+        return Ok(Some(raw.to_vec()));
+    }
+    Ok(None)
+}
+
 fn read_last_transition_burned_asset(transfer: &Transfer) -> Result<Option<u64>> {
     let Some(last_bundle) = transfer.bundles.iter().last() else {
         return Ok(None);
@@ -1768,6 +1868,23 @@ mod tests {
         assert!(bfa_mint_binding(b"not-a-consignment").unwrap().is_none());
     }
 
+    /// The burn ancestry pre-pass shares the mint pre-pass's schema gate: an
+    /// IFA or swap consignment must trigger no EVM lookup and no ancestor
+    /// requirement, or every non-BFA burn on the stand would start failing.
+    #[cfg(feature = "bfa-mint")]
+    #[test]
+    fn no_ancestry_binding_for_a_non_bfa_consignment() {
+        assert!(bfa_ancestry_binding(TRANSFER_FIXTURE).unwrap().is_none());
+    }
+
+    #[cfg(feature = "bfa-mint")]
+    #[test]
+    fn ancestry_binding_defers_undecodable_bytes() {
+        assert!(bfa_ancestry_binding(b"not-a-consignment")
+            .unwrap()
+            .is_none());
+    }
+
     #[cfg(feature = "bfa-mint")]
     #[test]
     fn bfa_schema_resolves_a_trusted_typesystem() {
@@ -1954,6 +2071,7 @@ mod tests {
             consignment_hash: keccak(TRANSFER_FIXTURE),
             merkle_proofs: vec![],
             commission: 0,
+            mint_ancestors: vec![],
         }
     }
 
