@@ -1733,10 +1733,13 @@ checksum = "31b698c5f9a010f6573133b09e0de5408834d0c82f8d7475a89fc1867a71cd90"
 dependencies = [
  "axum-core",
  "bytes",
+ "form_urlencoded",
  "futures-util",
  "http 1.5.0",
  "http-body 1.1.0",
  "http-body-util",
+ "hyper 1.11.0",
+ "hyper-util",
  "itoa",
  "matchit",
  "memchr",
@@ -1744,10 +1747,15 @@ dependencies = [
  "percent-encoding",
  "pin-project-lite",
  "serde_core",
+ "serde_json",
+ "serde_path_to_error",
+ "serde_urlencoded",
  "sync_wrapper",
+ "tokio",
  "tower 0.5.3",
  "tower-layer",
  "tower-service",
+ "tracing",
 ]
 
 [[package]]
@@ -1766,6 +1774,7 @@ dependencies = [
  "sync_wrapper",
  "tower-layer",
  "tower-service",
+ "tracing",
 ]
 
 [[package]]
@@ -3159,7 +3168,7 @@ dependencies = [
 [[package]]
 name = "federated-signer-proto"
 version = "0.1.0"
-source = "git+ssh://git@github.com/UTEXO-Protocol/federated-signer-proto.git?rev=359a421245cf5b78078426c2b98a3a92bb63ab07#359a421245cf5b78078426c2b98a3a92bb63ab07"
+source = "git+ssh://git@github.com/UTEXO-Protocol/federated-signer-proto.git?rev=8577243bc62ccd73c424d1e0ae350cf1e93e8d0a#8577243bc62ccd73c424d1e0ae350cf1e93e8d0a"
 dependencies = [
  "bytes",
  "prost",
@@ -7042,6 +7051,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "serde_path_to_error"
+version = "0.1.20"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "10a9ff822e371bb5403e391ecd83e182e0e77ba7f6fe0160b795797109d1b457"
+dependencies = [
+ "itoa",
+ "serde",
+ "serde_core",
+]
+
+[[package]]
 name = "serde_spanned"
 version = "0.6.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -8213,12 +8233,14 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "attestation-verify",
+ "axum",
  "bitcoin",
  "clap",
  "federated-signer-proto",
  "hex",
  "prost",
  "rand 0.8.7",
+ "serde_json",
  "sha2 0.10.9",
  "sha3 0.10.9",
  "thiserror 2.0.20",

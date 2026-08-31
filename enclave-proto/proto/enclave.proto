@@ -26,6 +26,7 @@ message EnclaveRequest {
     GetAttestedPublicKeyRequest get_attested_public_key = 13;
     SignBtcRequest sign_btc = 14;
     SignCcdRequest sign_ccd = 15;
+    HealthRequest health = 16;
   }
 }
 
@@ -46,6 +47,7 @@ message EnclaveResponse {
     GetAttestedPublicKeyResponse get_attested_public_key = 13;
     CcdSignatureResponse ccd_signature = 14;
     ErrorResponse error = 15;
+    HealthResponse health = 16;
   }
 }
 
@@ -321,6 +323,34 @@ message GetLastSavedBlockRequest {}
 message GetLastSavedBlockResponse {
   uint32 block_height = 1; // Height of the latest accepted header.
   bytes block_hash = 2; // 32-byte hash of the latest accepted header.
+}
+
+// Readiness probe used by deploy orchestration to replace a fixed sleep between
+// sequential enclave restarts. Internal only: never expose outside the host.
+
+message HealthRequest {}
+
+message HealthResponse {
+  // key_loaded && spv_synced. The only field a caller needs; the rest are
+  // diagnostics for logs.
+  bool ready = 1;
+  // Signing key present, i.e. the phase state machine reached "active".
+  bool key_loaded = 2;
+  // Header chain tip is recent enough that a signature would pass the same
+  // staleness gate signing applies. False while the chain is still catching up.
+  bool spv_synced = 3;
+  // Phase name: "initial", "cloning", or "active".
+  string phase = 4;
+  // Height of the latest accepted header (the compiled-in checkpoint height
+  // when no headers have been accepted yet).
+  uint32 spv_tip_height = 5;
+  // Block timestamp of that header.
+  uint32 spv_tip_time = 6;
+  // Enclave wall clock minus spv_tip_time, clamped at 0. Shows how far behind
+  // the chain still is.
+  uint32 spv_tip_age_secs = 7;
+  // Max age spv_tip_age_secs is compared against.
+  uint32 spv_max_tip_age_secs = 8;
 }
 
 message ErrorResponse {

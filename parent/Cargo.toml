@@ -51,8 +51,15 @@ tokio = { version = "1", features = ["full"] }
 # parent / signer packages). The parent runs on the untrusted host, so needing a
 # credential to build it costs nothing. Keep this rev in lockstep with the
 # vendored slice in `enclave-proto/` — see its README.
-federated-signer-proto = { git = "ssh://git@github.com/UTEXO-Protocol/federated-signer-proto.git", rev = "359a421245cf5b78078426c2b98a3a92bb63ab07", package = "federated-signer-proto" }
+federated-signer-proto = { git = "ssh://git@github.com/UTEXO-Protocol/federated-signer-proto.git", rev = "8577243bc62ccd73c424d1e0ae350cf1e93e8d0a", package = "federated-signer-proto" }
 clap = { version = "4", features = ["derive"] }
+# The `GET /health` readiness probe. Both already resolve in this graph via
+# tonic, so the only lockfile addition is `serde_path_to_error` (axum's `json`
+# feature). Keep the version aligned with tonic's axum. Parent-only: the enclave
+# workspace and its PCR-measured binary are untouched.
+axum = "0.8"
+serde_json = "1"
+
 
 thiserror = "2"
 anyhow = "1"
