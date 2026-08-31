@@ -22,6 +22,16 @@ pub struct Config {
 
     /// EVM network IDs - TRANSACTION with these network_ids routes to signEVM.
     pub evm_network_ids: HashSet<u32>,
+
+    /// Host for the `GET /health` readiness endpoint. Loopback by default:
+    /// deploy polls it from the parent host, and it must not be exposed
+    /// off-host. Unlike `grpc_host`, do NOT set this to 0.0.0.0 in Docker.
+    pub health_host: String,
+
+    /// Port for the health endpoint. Separate from `grpc_port`: the gRPC
+    /// listener speaks h2 only, and the probe is plain HTTP/1.1 so a shell
+    /// script can curl it.
+    pub health_port: u16,
 }
 
 impl Config {
@@ -40,6 +50,8 @@ impl Config {
                 .split(',')
                 .filter_map(|s| s.trim().parse::<u32>().ok())
                 .collect(),
+            health_host: std::env::var("HEALTH_HOST").unwrap_or_else(|_| "127.0.0.1".into()),
+            health_port: env_or("HEALTH_PORT", 5001),
         }
     }
 }

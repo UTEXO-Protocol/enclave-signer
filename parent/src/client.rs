@@ -2,10 +2,10 @@ use std::time::Duration;
 
 use crate::enclave_proto::{
     enclave_request, enclave_response, EnclaveRequest, EnclaveResponse, EvmSignatureResponse,
-    GetLastSavedBlockRequest, GetLastSavedBlockResponse, GetPublicKeyRequest, InitializeKeyRequest,
-    InitializeKeyResponse, InitiateCloningRequest, InitiateCloningResponse, MerkleProofEntry,
-    PublicKeysResponse, SetCloneRequest, SignedPsbtResponse, SubmitHeadersRequest,
-    SubmitHeadersResponse,
+    GetLastSavedBlockRequest, GetLastSavedBlockResponse, GetPublicKeyRequest, HealthRequest,
+    HealthResponse, InitializeKeyRequest, InitializeKeyResponse, InitiateCloningRequest,
+    InitiateCloningResponse, MerkleProofEntry, PublicKeysResponse, SetCloneRequest,
+    SignedPsbtResponse, SubmitHeadersRequest, SubmitHeadersResponse,
 };
 use crate::error::{ParentError, Result};
 use crate::framing;
@@ -398,6 +398,26 @@ impl EnclaveClient {
         let resp = self.send_request(&req)?;
         match resp.response {
             Some(enclave_response::Response::GetLastSavedBlock(r)) => Ok(r),
+            Some(enclave_response::Response::Error(e)) => Err(ParentError::EnclaveError {
+                code: e.code,
+                message: e.message,
+            }),
+            other => Err(ParentError::Connection(format!(
+                "unexpected response variant: {:?}",
+                other
+            ))),
+        }
+    }
+
+    /// Readiness probe. Mirrors what `GET /health` on the parent reports, for
+    /// operators debugging a stuck deploy from the host shell.
+    pub fn health(&self) -> Result<HealthResponse> {
+        let req = EnclaveRequest {
+            request: Some(enclave_request::Request::Health(HealthRequest {})),
+        };
+        let resp = self.send_request(&req)?;
+        match resp.response {
+            Some(enclave_response::Response::Health(r)) => Ok(r),
             Some(enclave_response::Response::Error(e)) => Err(ParentError::EnclaveError {
                 code: e.code,
                 message: e.message,

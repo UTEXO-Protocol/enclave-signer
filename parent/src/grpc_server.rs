@@ -52,7 +52,10 @@ impl ParentAdapterService {
     // `tonic::Status` is a large (~176 byte) error type, but it is the fixed
     // gRPC error contract here, so the lint is allowed rather than boxing it.
     #[allow(clippy::result_large_err)]
-    async fn send_to_enclave(&self, req: EnclaveRequest) -> Result<EnclaveResponse, Status> {
+    pub(crate) async fn send_to_enclave(
+        &self,
+        req: EnclaveRequest,
+    ) -> Result<EnclaveResponse, Status> {
         let target = self.target.clone();
 
         let result = tokio::time::timeout(
@@ -78,6 +81,11 @@ impl ParentAdapterService {
                             .map_err(|e| {
                                 Status::unavailable(format!("enclave vsock connection failed: {e}"))
                             })?;
+                        // Parity with the TCP branch. Without it a wedged socket
+                        // pins a blocking-pool thread indefinitely: the outer
+                        // `timeout` only abandons the JoinHandle, it cannot
+                        // cancel a `spawn_blocking` body already in a read.
+                        stream.set_read_timeout(Some(ENCLAVE_TIMEOUT)).ok();
                         framing::write_message(&mut stream, &req)
                             .map_err(|e| Status::internal(format!("enclave write failed: {e}")))?;
                         let resp: EnclaveResponse = framing::read_message(&mut stream)

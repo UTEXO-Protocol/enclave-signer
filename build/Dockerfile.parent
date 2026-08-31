@@ -59,8 +59,11 @@ RUN --mount=type=ssh \
 # ===== Runtime Stage =====
 FROM debian:bookworm-slim
 
+# `curl` is here only for HEALTHCHECK below. This image runs on the untrusted
+# host, not in the TEE, so it is not measured by any PCR.
 RUN apt-get update && apt-get install -y \
     ca-certificates \
+    curl \
     && rm -rf /var/lib/apt/lists/* \
     && useradd -u 1000 -m parent
 
@@ -79,8 +82,21 @@ ENV ENCLAVE_ADDR=127.0.0.1:5000
 ENV USE_VSOCK=false
 ENV ENCLAVE_VSOCK_CID=16
 ENV ENCLAVE_VSOCK_PORT=5000
+# Readiness probe. Loopback and deliberately not EXPOSEd: it is reachable from
+# inside the container (HEALTHCHECK below) and from the host via
+# `docker inspect`, never from off-host.
+ENV HEALTH_HOST=127.0.0.1
+ENV HEALTH_PORT=5001
 ENV RUST_LOG=debug
 
 EXPOSE 5000
+
+# Surfaces readiness to `docker inspect --format '{{.State.Health.Status}}'`.
+# `start-period` is sized for the SPV re-sync; `timeout` must stay above the
+# parent's own 5s PROBE_TIMEOUT and below `interval`. The interval is docker's
+# own cadence only - a deploy that wants a faster answer polls the endpoint
+# directly - so it is set for low steady-state cost, not deploy latency.
+HEALTHCHECK --interval=30s --timeout=6s --start-period=25m --retries=3 \
+    CMD curl -fsS "http://127.0.0.1:${HEALTH_PORT}/health" > /dev/null || exit 1
 
 ENTRYPOINT ["./utexo-bridge-parent"]

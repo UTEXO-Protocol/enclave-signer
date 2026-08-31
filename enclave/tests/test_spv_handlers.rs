@@ -5,52 +5,13 @@
 //! SPV/RGB-only: gated with `spv` (a `ccd`-only build has no header chain).
 #![cfg(feature = "spv")]
 
-use bitcoin::consensus::serialize;
-use bitcoin::hashes::Hash;
-
 use utexo_bridge_enclave::networks::rgb::spv::{checkpoint_for, Network};
 use utexo_bridge_enclave::proto::enclave_request::Request as EReq;
 use utexo_bridge_enclave::proto::enclave_response::Response as ERes;
 use utexo_bridge_enclave::proto::*;
 
 mod common;
-use common::{send_request, start_test_server};
-
-/// Build `count` synthetic regtest headers chained from `prev_hash`. The
-/// test server is wired to `Network::Regtest` (see `common/mod.rs`), where
-/// header validation is "chain linkage only", so we don't need to satisfy
-/// real PoW.
-fn synth_chain_from(prev_hash: [u8; 32], prev_time: u32, count: u32) -> Vec<Vec<u8>> {
-    let mut prev = bitcoin::BlockHash::from_raw_hash(
-        bitcoin::hashes::sha256d::Hash::from_byte_array(prev_hash),
-    );
-    let mut out = Vec::with_capacity(count as usize);
-    for i in 0..count {
-        let header = bitcoin::block::Header {
-            version: bitcoin::block::Version::ONE,
-            prev_blockhash: prev,
-            merkle_root: bitcoin::TxMerkleNode::all_zeros(),
-            time: prev_time + 1 + i,
-            bits: bitcoin::CompactTarget::from_consensus(0x207fffff),
-            nonce: i,
-        };
-        out.push(serialize(&header));
-        prev = header.block_hash();
-    }
-    out
-}
-
-fn submit(port: u16, start_height: u32, headers: Vec<Vec<u8>>) -> EnclaveResponse {
-    send_request(
-        port,
-        &EnclaveRequest {
-            request: Some(EReq::SubmitHeaders(SubmitHeadersRequest {
-                headers,
-                start_height,
-            })),
-        },
-    )
-}
+use common::{send_request, start_test_server, submit_headers as submit, synth_chain_from};
 
 fn last_saved(port: u16) -> GetLastSavedBlockResponse {
     let resp = send_request(
