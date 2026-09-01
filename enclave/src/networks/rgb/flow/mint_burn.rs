@@ -64,10 +64,10 @@ pub fn assert_committed_group(committed: &[&TransitionSummary]) -> Result<()> {
 /// allowance riding along is remaining mint capacity, not minted value.
 pub fn assert_group_amount(
     committed_asset_output: u64,
-    net_credited: u64,
     source_amount: u64,
     source_commission: u64,
 ) -> Result<()> {
+    let net_credited = source_amount.saturating_sub(source_commission);
     if committed_asset_output != net_credited {
         return Err(EnclaveError::CrossCheck(format!(
             "mint-RGB amount mismatch: consignment asset_output_amount \

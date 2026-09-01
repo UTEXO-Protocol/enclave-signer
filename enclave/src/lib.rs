@@ -55,11 +55,10 @@ compile_error!(
 // both would be a glob-import collision, and enabling neither leaves every
 // `flow::` call unresolved. Both are caught here with a message that says what
 // to do instead of a wall of name-resolution errors.
-#[cfg(all(
-    feature = "rgb-validation",
-    feature = "rgb-swap",
-    feature = "rgb-mint-burn"
-))]
+// No `rgb-validation` term: either flow feature already implies it
+// (`rgb-swap` -> `rgb` -> `spv` -> `rgb-validation`), and both flows on is
+// wrong in any build.
+#[cfg(all(feature = "rgb-swap", feature = "rgb-mint-burn"))]
 compile_error!(
     "rgb-swap and rgb-mint-burn are mutually exclusive: the send/receive and mint/burn flows \
      ship as separate enclave instances. Build one image per flow - the default feature set \

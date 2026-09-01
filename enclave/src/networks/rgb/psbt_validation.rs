@@ -235,12 +235,7 @@ pub fn validate_psbt_anchors_transition(
 
     // Equality for a mint, a coverage floor for a transfer - see `flow/`.
     let net_credited = source_amount.saturating_sub(source_commission);
-    flow::assert_group_amount(
-        committed_asset_output,
-        net_credited,
-        source_amount,
-        source_commission,
-    )?;
+    flow::assert_group_amount(committed_asset_output, source_amount, source_commission)?;
 
     // Per-output recipient bind. Runs last: it is the only check
     // here that reaches for the enclave's keys.
