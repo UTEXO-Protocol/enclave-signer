@@ -670,15 +670,17 @@ fn handle_sign(ctx: &ServerContext, req: SignRequest) -> Result<EnclaveResponse>
     // (so a concurrent duplicate is rejected up front) and committed only after
     // it succeeds, so a transient error does not self-block a retry.
     #[cfg(not(feature = "dev-mode"))]
-    let _op_reservation = if let (SourceNetwork::EvmSource(source), Some(asset_id)) =
-        (source_ref, destination_rgb_asset_id(destination_ref))
+    let _op_reservation = if let (
+        SourceNetwork::EvmSource(source),
+        DestinationNetwork::RgbDestination(destination),
+    ) = (source_ref, destination_ref)
     {
         let op_key = crate::networks::rgb::psbt_validation::psbt_operation_key(
             ctx.bridge_config.chain_id,
             &ctx.bridge_config.bridge_contract,
             &source.tx_hash,
             &source.funds_in_operation_id,
-            asset_id,
+            &destination.asset_id,
         );
         match ctx.state.op_replay_guard.reserve(op_key) {
             Ok(reservation) => Some(reservation),
@@ -725,12 +727,7 @@ fn handle_sign(ctx: &ServerContext, req: SignRequest) -> Result<EnclaveResponse>
             }
             handle_sign_evm(ctx, destination, destination_proof.evm_funds_out.as_ref())
         }
-        DestinationNetwork::RgbDestination(destination) => {
-            handle_sign_psbt(ctx, &destination.psbt_bytes)
-        }
-        DestinationNetwork::RgbInflationDestination(destination) => {
-            handle_sign_psbt(ctx, &destination.psbt_bytes)
-        }
+        DestinationNetwork::RgbDestination(destination) => handle_sign_psbt(ctx, destination),
     };
 
     // Commit the soft-guard reservation only once signing has succeeded. On
@@ -1100,19 +1097,8 @@ fn handle_sign_evm(
     })
 }
 
-/// The RGB asset an EVM->RGB destination credits, for the operation replay
-/// guard. `None` for an EVM destination, which the guard does not cover.
-#[cfg(not(feature = "dev-mode"))]
-fn destination_rgb_asset_id(destination: &DestinationNetwork) -> Option<&str> {
-    match destination {
-        DestinationNetwork::RgbDestination(destination) => Some(&destination.asset_id),
-        DestinationNetwork::RgbInflationDestination(destination) => Some(&destination.asset_id),
-        DestinationNetwork::EvmDestination(_) => None,
-    }
-}
-
-fn handle_sign_psbt(ctx: &ServerContext, psbt_bytes: &[u8]) -> Result<EnclaveResponse> {
-    let (signed_psbt, inputs_signed) = ctx.state.sign_psbt(psbt_bytes)?;
+fn handle_sign_psbt(ctx: &ServerContext, req: RgbDestination) -> Result<EnclaveResponse> {
+    let (signed_psbt, inputs_signed) = ctx.state.sign_psbt(&req.psbt_bytes)?;
 
     // Reject a "successful" no-op: `sign_psbt` returns
     // Ok((bytes, 0)) when no input belongs to this enclave, which a caller

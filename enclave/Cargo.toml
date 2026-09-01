@@ -46,8 +46,6 @@ rgb-consignment = { git = "https://github.com/UTEXO-Protocol/consignment-utils.g
 rgb-schemas = { version = "=0.11.1-rc.10", default-features = false, optional = true }
 attestation-verify = { path = "../attestation-verify" }
 serde = { version = "1", features = ["derive"] }
-# The mint fascia is serde JSON of rgbstd's Fascia, as rgb-lib writes it.
-serde_json = { version = "1", optional = true }
 
 alloy = { version = "2.1.0", default-features = false, features = ["provider-http", "rpc-types-eth", "reqwest-rustls-tls"], optional = true }
 tokio = { version = "1.52.3", default-features = false, features = ["rt", "rt-multi-thread", "time"], optional = true }
@@ -94,7 +92,7 @@ dev-mode = []
 # resolver, so a malicious host could have the enclave sign a release against a
 # fabricated Bitcoin anchor. Kept as a separate feature (rather than adding
 # `spv` to this list) to avoid a feature cycle with `spv` below.
-rgb-validation = ["rgb-ops", "rgb-consignment", "rgb-schemas", "serde_json"]
+rgb-validation = ["rgb-ops", "rgb-consignment", "rgb-schemas"]
 # Bitcoin SPV verification of consignment witness txids before signing EVM
 # transactions. Implies `rgb-validation` because SPV needs the consignment
 # parsed to extract witness txids. When the feature is OFF, handle_sign_evm

@@ -119,7 +119,6 @@ message SignRequest {
   oneof destination_network {
     EvmDestination evm_destination = 4;
     RgbDestination rgb_destination = 5;
-    RgbInflationDestination rgb_inflation_destination = 7;
   }
 }
 
@@ -205,20 +204,6 @@ message RgbDestination {
   string asset_id = 4; // RGB asset identifier associated with the transfer.
   bytes consignment = 5; // Raw destination RGB consignment bytes.
   bytes consignment_hash = 6; // keccak256(consignment).
-}
-
-// EVM->RGB mint destination. Deliberately a separate message from
-// RgbDestination: an inflation ships no consignment, and the send path must not
-// be reachable by omitting one (M-01: explicit type, never inference from absent
-// fields). The enclave validates the fascia instead - it must anchor the exact
-// PSBT being signed, name only the pinned asset, and mint exactly the validated
-// source amount.
-message RgbInflationDestination {
-  uint64 operation_idx = 1; // Destination operation index.
-  bytes psbt_bytes = 2; // Serialized PSBT to sign.
-  string asset_id = 3; // RGB asset the listener claims is being inflated.
-  bytes fascia = 4; // rgb-lib fascia file bytes (serde_json of rgbstd Fascia).
-  bytes fascia_hash = 5; // keccak256(fascia); wire integrity, not authorization.
 }
 
 message MerkleProofEntry {
