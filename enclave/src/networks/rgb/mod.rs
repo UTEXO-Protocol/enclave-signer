@@ -2,6 +2,8 @@ pub mod btc_crosscheck;
 pub mod btc_ownership;
 #[cfg(feature = "rgb-validation")]
 pub mod flow;
+#[cfg(feature = "rgb-validation")]
+pub mod invoice;
 pub mod psbt_validation;
 pub mod signing;
 pub mod spv;
@@ -137,7 +139,7 @@ pub fn validate_destination_anchor(
     source_amount: u64,
     source_commission: u64,
     ctx: &ValidationContext<'_>,
-) -> Result<u64> {
+) -> Result<(u64, Vec<String>)> {
     use crate::error::EnclaveError;
 
     if destination.consignment.is_empty() {
@@ -219,7 +221,9 @@ pub fn validate_destination_anchor(
                 .into(),
         )
     })?;
-    let recipient_amount = psbt_validation::validate_psbt_anchors_transition(
+    // `legs.recipient_seals` is surfaced, not compared here: the invoice is
+    // only authenticated once the FundsIn receipt is verified, in `handle_sign`.
+    let legs = psbt_validation::validate_psbt_anchors_transition(
         &psbt,
         &validated,
         source_amount,
@@ -233,7 +237,7 @@ pub fn validate_destination_anchor(
     let recommended = validator.recommended_fee_rate_sat_vb()?;
     psbt_validation::check_psbt_fee_rate(&psbt, recommended)?;
 
-    Ok(recipient_amount)
+    Ok((legs.recipient, legs.recipient_seals))
 }
 
 #[cfg(all(test, feature = "rgb-validation"))]
@@ -501,7 +505,7 @@ mod tests {
                 header_chain: &chain,
                 self_owned_psbt_outputs: Some(&self_owned),
             };
-            validate_destination_anchor(destination, 0, 0, &ctx)
+            validate_destination_anchor(destination, 0, 0, &ctx).map(|(amount, _)| amount)
         }
 
         /// Happy path (old `binds_when_contract_id_matches_pin`): validated
