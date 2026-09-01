@@ -2,8 +2,8 @@
 //! deposit mints with an IFA `Inflation`, a withdrawal destroys units with an
 //! IFA `Burn`.
 //!
-//! See [`super`] for why this lives in its own file. Item names here mirror
-//! [`super::swap`] exactly.
+//! See [`super`] for why this lives in its own file, and for the mirrored-name
+//! contract these items keep.
 
 use crate::error::{EnclaveError, Result};
 use crate::networks::rgb::validation::{ifa, TransitionSummary};

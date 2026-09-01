@@ -83,9 +83,8 @@ fn route_proof_from_validated_consignment(
         )
     })?;
 
-    // Which transition proves how much left the source, and how to read its
-    // amount, is the flow's business: a Transfer carries it in the output
-    // assignments, a Burn in `MS_BURNED_ASSET` metadata. See `flow/`.
+    // Which transition proves the withdrawal, and where its amount lives, is
+    // the flow's business - see `flow/`.
     let amount = flow::funds_out_source_amount(last)?;
 
     Ok(RouteProof {

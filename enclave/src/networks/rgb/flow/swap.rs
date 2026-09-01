@@ -1,8 +1,8 @@
 //! Send/receive (pools) flow rules. The bridge holds an allocation of the
 //! asset and moves it with IFA `Transfer` transitions in both directions.
 //!
-//! See [`super`] for why this lives in its own file. Item names here mirror
-//! [`super::mint_burn`] exactly.
+//! See [`super`] for why this lives in its own file, and for the mirrored-name
+//! contract these items keep.
 
 use crate::error::{EnclaveError, Result};
 use crate::networks::rgb::validation::{ifa, TransitionSummary};

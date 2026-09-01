@@ -216,9 +216,6 @@ pub fn validate_psbt_anchors_transition(
             last.op_id
         )));
     }
-    // Every transition in the group must be the shape this flow's amount rule
-    // was written for. That also rules out a mixed bundle, which has no single
-    // aggregate rule (equality vs floor) and no known flow that produces one.
     flow::assert_committed_group(&committed)?;
 
     // `asset_output_amount`, not `total_output_amount`: `OS_INFLATION` outputs
@@ -233,7 +230,6 @@ pub fn validate_psbt_anchors_transition(
             )
         })?;
 
-    // Equality for a mint, a coverage floor for a transfer - see `flow/`.
     let net_credited = source_amount.saturating_sub(source_commission);
     flow::assert_group_amount(committed_asset_output, source_amount, source_commission)?;
 
