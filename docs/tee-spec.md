@@ -196,8 +196,10 @@ chainId, verifyingContract)`. The domain separator is pinned by a regression
 test against the deployed `MultisigProxy`, and a second test reproduces the
 backend's digest -- domain drift breaks the build.
 
-The current rollout signs the **swap flow** (`TS_TRANSFER` consignments) only.
-The mint/burn unlock flow is deliberately not wired yet: the enclave preserves
+The rollout signs the **swap flow** (`TS_TRANSFER` consignments) and, on the BFA
+line, the **mint/burn flow**: a bridge mint against a verified `FundsIn` lock, and
+a burn whose release is bound to the payout target the burn transition commits to
+(`MS_BURN_RECIPIENT`). Proven end to end on the stand. The enclave preserves
 the backend-provided `burnId` / `fundsInIds`, and the in-enclave OpId
 rewrite stays dormant until flows are routed by network id (Sec 9, P6).
 
@@ -228,7 +230,8 @@ enclave establishes validity and finality itself, fail-closed
 The PSBT itself is bound to the validated consignment: unsigned txid ==
 witness txid, input prevouts == witness prevouts, `SIGHASH_ALL` / taproot
 `DEFAULT` only, and the consignment's asset outputs must cover the credited
-amount. `TS_TRANSFER` and `TS_INFLATION` (mint-RGB) transitions are accepted
+amount. `TS_TRANSFER`, `TS_INFLATION` (mint-RGB) and `TS_BRIDGE` (BFA mint)
+transitions are accepted
 . A fee sanity check rejects a PSBT whose fee rate exceeds 3x the
 enclave's own Esplora estimate, fail-closed on a missing estimate (a
 compile-time floor applies only on non-mainnet chains).
@@ -387,10 +390,10 @@ MUST refuse to sign (fail closed) if any fails.
 | #   | Predicate                                                   | Status                                                                                                                                                            |
 |-----|-------------------------------------------------------------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | P1  | submitted RGB consignment is valid (`rgbstd` full validation) | OK                                                                                                                                                               |
-| P2  | consignment proves the expected transition                  | OK for the live swap flow: last transition MUST be `TS_TRANSFER`. `TS_BURN` is classified and amount-extracted, but mint/burn unlock is not wired yet       |
+| P2  | consignment proves the expected transition                  | Swap: last transition MUST be `TS_TRANSFER`. Burn: last transition MUST be `TS_BURN`, and every `TS_BRIDGE` it descends from is validated against its own verified `FundsIn` lock                     |
 | P3  | unlock amount is covered by the consignment-derived amount  | OK -- the amount comes from the consignment (host `rgb_amount` is ignored); comparison is coverage (`>=`), strict `==` pending per-output binding (**`[OPEN]`**) |
 | P4  | calldata is well-formed                                     | OK -- single pinned selector, 64 KiB cap, canonical ABI decode + re-encode byte-equality                                                            |
-| P5  | payload binds destination chain / contract / **recipient**  | chain + contract pinned; **`[OPEN]`** recipient not bound -- blocked on an EVM-destination commitment in the RGB burn schema (cross-repo)             |
+| P5  | payload binds destination chain / contract / **recipient**  | chain + contract pinned; recipient bound on the burn path: the BFA schema carries `MS_BURN_RECIPIENT` and the enclave refuses a release whose calldata names a different address                         |
 | P6  | payload binds the RGB `OpId` (cross-domain identifier)      | **`[OPEN -- dormant]`** the in-enclave `burnId` / `fundsInIds` derivation exists but is disabled for the swap rollout; backend ids are signed as received |
 | P7  | referenced Bitcoin txs are in accepted chain history        | OK                                                                                                                                                               |
 | P8  | Bitcoin inclusion proofs valid against the in-enclave chain | OK; plus, when populated, the calldata `(blockHeight, commitmentHash)` proof must match the enclave's own header (inert until the listener sends it)   |

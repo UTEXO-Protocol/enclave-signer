@@ -66,8 +66,12 @@ sequenceDiagram
     opt calldata proof slot populated
         Srv->>Cx: verify_btc_relay_agreement:<br/>decode (blockHeight, commitmentHash),<br/>enclave header at that height must match<br/>(inert while the listener sends an empty proof)
     end
-    Srv->>Cx: validate_funds_out_transfer:<br/>last transition == TS_TRANSFER AND<br/>consignment total_output ≥ amount read from calldata bytes
-    Note right of Cx: burnId / fundsInIds are preserved as received —<br/>the in-enclave OpId rewrite exists but is dormant<br/>until flows are routed by network id.<br/>Mint/burn unlock is not wired yet.
+    alt last transition == TS_BURN
+        Srv->>Cx: validate_funds_out_burn:<br/>MS_BURNED_ASSET ≥ amount from calldata AND<br/>MS_BURN_RECIPIENT[12..] == calldata recipient
+    else
+        Srv->>Cx: validate_funds_out_transfer:<br/>last transition == TS_TRANSFER AND<br/>consignment total_output ≥ amount read from calldata bytes
+    end
+    Note right of Cx: burnId / fundsInIds are preserved as received —<br/>the in-enclave OpId rewrite exists but is dormant<br/>until flows are routed by network id.
     Cx-->>Srv: Ok / CrossCheck err
 
     Note over Srv,Sign: 5 — Sign

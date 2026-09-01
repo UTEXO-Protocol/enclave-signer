@@ -108,7 +108,8 @@ pub fn validate_psbt_bytes(psbt_bytes: &[u8]) -> Result<()> {
 ///
 /// Enforces, fail-closed:
 ///   1. The consignment's last transition is an IFA `Transfer`
-///      (`ifa::TS_TRANSFER`) or an IFA `Inflation` (`ifa::TS_INFLATION`).
+///      (`ifa::TS_TRANSFER`), an IFA `Inflation` (`ifa::TS_INFLATION`) or a
+///      BFA `Bridge` mint (`bfa::TS_BRIDGE`).
 ///   2. Identity bind: `psbt.unsigned_tx.compute_txid()` equals the
 ///      consignment's last witness txid. A segwit txid commits to every
 ///      non-witness field, so equality means signing this PSBT finalizes
