@@ -65,9 +65,13 @@ aws-nitro-enclaves-nsm-api = "0.4"
 # `helios` is default but not mandatory: it has no L2 light client, so an
 # Arbitrum deployment runs on plain `evm-rpc`. It implies `evm-rpc`.
 #
-# Single-network EIFs: `--no-default-features --features vsock,rgb,evm-rpc,helios`
-# (RGB) or `--no-default-features --features vsock,ccd` (Concordium — no
-# bridge-signing path, so no Helios). Both are covered in CI.
+# Single-network EIFs, one flow each (see the RGB flow selection block below):
+#   RGB send/receive: `--no-default-features --features vsock,rgb,rgb-swap,evm-rpc,helios`
+#   RGB mint/burn:    `--no-default-features --features vsock,rgb,rgb-mint-burn,evm-rpc,helios`
+#   Concordium:       `--no-default-features --features vsock,ccd` (no
+#                     bridge-signing path, so no Helios).
+# All three are covered in CI. Naming no RGB flow does not build: the
+# `compile_error!` pair in lib.rs requires exactly one.
 default = ["rgb", "rgb-swap", "ccd", "helios"]
 
 # Network-selection umbrellas. Additive: enable one for a lean single-network
