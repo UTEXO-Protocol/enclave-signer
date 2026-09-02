@@ -219,7 +219,7 @@ pub mod sign_request {
         #[prost(message, tag="6")]
         CcdSource(super::CcdSource),
     }
-    #[derive(Clone, PartialEq, Eq, Hash, ::prost::Oneof)]
+    #[derive(Clone, PartialEq, ::prost::Oneof)]
     pub enum DestinationNetwork {
         #[prost(message, tag="4")]
         EvmDestination(super::EvmDestination),
@@ -354,7 +354,7 @@ pub struct LzReleaseParams {
     #[prost(bytes="vec", tag="3")]
     pub recipient: ::prost::alloc::vec::Vec<u8>,
 }
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+#[derive(Clone, PartialEq, ::prost::Message)]
 pub struct RgbDestination {
     /// Destination operation index.
     #[prost(uint64, tag="1")]
@@ -374,6 +374,12 @@ pub struct RgbDestination {
     /// keccak256(consignment).
     #[prost(bytes="vec", tag="6")]
     pub consignment_hash: ::prost::alloc::vec::Vec<u8>,
+    /// The EVM deposit behind every earlier mint this consignment descends from.
+    /// The terminal mint is bound to EvmSource.tx_hash instead, so listing it here
+    /// is refused: that is the only way a spent lock could be substituted for the
+    /// one this request pays with. Hints, never evidence - each is verified.
+    #[prost(message, repeated, tag="7")]
+    pub mint_ancestors: ::prost::alloc::vec::Vec<MintAncestor>,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct MerkleProofEntry {

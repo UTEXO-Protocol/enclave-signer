@@ -204,6 +204,11 @@ message RgbDestination {
   string asset_id = 4; // RGB asset identifier associated with the transfer.
   bytes consignment = 5; // Raw destination RGB consignment bytes.
   bytes consignment_hash = 6; // keccak256(consignment).
+  // The EVM deposit behind every earlier mint this consignment descends from.
+  // The terminal mint is bound to EvmSource.tx_hash instead, so listing it here
+  // is refused: that is the only way a spent lock could be substituted for the
+  // one this request pays with. Hints, never evidence - each is verified.
+  repeated MintAncestor mint_ancestors = 7;
 }
 
 message MerkleProofEntry {

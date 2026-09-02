@@ -339,8 +339,8 @@ fn ancestor_tx_hash(
         .find(|a| a.op_id.as_slice() == mint_opid.as_slice())
         .ok_or_else(|| {
             EnclaveError::CrossCheck(format!(
-                "no mint_ancestors entry for bridge transition 0x{} - the burn cannot be \
-                 validated without the EVM lock behind every mint it descends from",
+                "no mint_ancestors entry for bridge transition 0x{} - the operation cannot \
+                 be validated without the EVM lock behind every mint it descends from",
                 hex::encode(mint_opid)
             ))
         })?;
@@ -352,6 +352,44 @@ fn ancestor_tx_hash(
             ancestor.tx_hash.len()
         ))
     })
+}
+
+/// Pair every `TS_BRIDGE` in a mint consignment with the EVM deposit that must
+/// back it: the terminal mint with this request's own deposit, every ancestor
+/// with the lock the caller listed for it. Consignment order is preserved.
+///
+/// Pure, so the rule that decides which lock pays for which mint is testable
+/// without an EVM client - it is the one place a spent lock could be
+/// substituted for the one being paid now.
+#[cfg(feature = "bfa-mint")]
+fn mint_lock_plan(
+    mint_opids: &[[u8; 32]],
+    terminal_opid: &[u8; 32],
+    this_deposit: &[u8; 32],
+    ancestors: &[enclave_proto::MintAncestor],
+) -> Result<Vec<([u8; 32], [u8; 32])>> {
+    if ancestors
+        .iter()
+        .any(|a| a.op_id.as_slice() == terminal_opid.as_slice())
+    {
+        return Err(EnclaveError::CrossCheck(format!(
+            "mint_ancestors lists 0x{}, the mint this request authorises - its lock is this \
+             request's own deposit and nothing else",
+            hex::encode(terminal_opid)
+        )));
+    }
+
+    mint_opids
+        .iter()
+        .map(|opid| {
+            let lock = if opid == terminal_opid {
+                *this_deposit
+            } else {
+                ancestor_tx_hash(opid, ancestors)?
+            };
+            Ok((*opid, lock))
+        })
+        .collect()
 }
 
 /// Verify the `FundsIn` lock behind every mint a burn consignment descends
@@ -485,18 +523,29 @@ fn bfa_mint_events(
                 .into(),
         )
     })?;
-    let amount = verify_rgb_funds_in(
-        &**client,
-        &ctx.bridge_config.funds_in_contract,
-        ctx.evm_rpc_config.min_confirmations,
+    let plan = mint_lock_plan(
+        &binding.mint_opids,
+        &binding.terminal_opid,
         &tx_hash,
-        &binding.mint_opid,
+        &destination.mint_ancestors,
     )?;
 
-    Ok(vec![Event::new(
-        OpId::from(binding.mint_opid),
-        RevealedValue::from(amount),
-    )])
+    let mut events = Vec::with_capacity(plan.len());
+    for (mint_opid, lock) in plan {
+        let amount = verify_rgb_funds_in(
+            &**client,
+            &ctx.bridge_config.funds_in_contract,
+            ctx.evm_rpc_config.min_confirmations,
+            &lock,
+            &mint_opid,
+        )?;
+        events.push(Event::new(
+            OpId::from(mint_opid),
+            RevealedValue::from(amount),
+        ));
+    }
+
+    Ok(events)
 }
 
 fn handle_sign(ctx: &ServerContext, req: SignRequest) -> Result<EnclaveResponse> {
@@ -1566,6 +1615,104 @@ fn handle_set_clone(state: &EnclaveState, req: SetCloneRequest) -> Result<Enclav
 // the RGB/BTC stack (`spv`).
 #[cfg(all(test, feature = "spv"))]
 mod tests {
+    #[cfg(feature = "bfa-mint")]
+    mod mint_ancestry {
+        use crate::server::mint_lock_plan;
+        use enclave_proto::MintAncestor;
+
+        const DEPOSIT: [u8; 32] = [0xde; 32];
+
+        fn ancestor(op: u8, tx: u8) -> MintAncestor {
+            MintAncestor {
+                op_id: vec![op; 32],
+                tx_hash: vec![tx; 32],
+            }
+        }
+
+        /// The first mint on a bridge right carries nothing else, so the only
+        /// lock in play is the deposit that arrived with the request.
+        #[test]
+        fn a_first_mint_is_paid_by_this_requests_deposit() {
+            let terminal = [1u8; 32];
+            assert_eq!(
+                mint_lock_plan(&[terminal], &terminal, &DEPOSIT, &[]).unwrap(),
+                vec![(terminal, DEPOSIT)]
+            );
+        }
+
+        /// What the whole change is for: mint N carries mints 1..N-1, and each
+        /// of them is verified against the deposit that actually paid for it.
+        #[test]
+        fn a_chained_mint_pairs_each_predecessor_with_its_own_lock() {
+            let (first, second, terminal) = ([1u8; 32], [2u8; 32], [3u8; 32]);
+            let plan = mint_lock_plan(
+                &[first, second, terminal],
+                &terminal,
+                &DEPOSIT,
+                &[ancestor(1, 0xaa), ancestor(2, 0xbb)],
+            )
+            .unwrap();
+
+            assert_eq!(
+                plan,
+                vec![
+                    (first, [0xaa; 32]),
+                    (second, [0xbb; 32]),
+                    (terminal, DEPOSIT),
+                ],
+                "consignment order must survive, and only the terminal mint may use the deposit"
+            );
+        }
+
+        /// The replay this design has to refuse. Listing the terminal mint would
+        /// let a caller pay for it with a lock some earlier mint already spent.
+        #[test]
+        fn refuses_a_caller_that_lists_the_mint_being_authorised() {
+            let terminal = [3u8; 32];
+            let err = mint_lock_plan(
+                &[terminal],
+                &terminal,
+                &DEPOSIT,
+                &[MintAncestor {
+                    op_id: terminal.to_vec(),
+                    tx_hash: vec![0xaa; 32],
+                }],
+            )
+            .unwrap_err();
+
+            assert!(
+                err.to_string().contains("the mint this request authorises"),
+                "{err}"
+            );
+        }
+
+        /// A predecessor nobody accounted for must abort the mint rather than
+        /// reach consensus with its lock unchecked - the same rule the burn
+        /// direction already enforces.
+        #[test]
+        fn refuses_a_predecessor_with_no_listed_lock() {
+            let (first, terminal) = ([1u8; 32], [3u8; 32]);
+            let err = mint_lock_plan(&[first, terminal], &terminal, &DEPOSIT, &[]).unwrap_err();
+            assert!(err.to_string().contains("no mint_ancestors entry"), "{err}");
+        }
+
+        /// The terminal mint is identified by op id, not by position: a
+        /// consignment that lists it first must still pay for it with the
+        /// deposit, and the later transitions must bring their own locks.
+        #[test]
+        fn the_terminal_mint_is_found_by_op_id_not_by_position() {
+            let (terminal, later) = ([3u8; 32], [4u8; 32]);
+            let plan = mint_lock_plan(
+                &[terminal, later],
+                &terminal,
+                &DEPOSIT,
+                &[ancestor(4, 0xcc)],
+            )
+            .unwrap();
+            assert_eq!(plan, vec![(terminal, DEPOSIT), (later, [0xcc; 32])]);
+        }
+    }
+
     #[cfg(feature = "bfa-mint")]
     mod burn_ancestry {
         use crate::server::ancestor_tx_hash;

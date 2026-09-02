@@ -237,13 +237,33 @@ pub mod bfa {
     pub const MS_BURN_RECIPIENT: u16 = 1003;
 }
 
+/// Decode one parser-supplied OpId hex string into 32 bytes.
+#[cfg(feature = "bfa-mint")]
+fn decode_opid(hex_opid: &str) -> Result<[u8; 32]> {
+    let hex_opid = hex_opid.strip_prefix("0x").unwrap_or(hex_opid);
+    let bytes = hex::decode(hex_opid).map_err(|e| {
+        EnclaveError::CrossCheck(format!(
+            "BFA mint opid hex decode failed: {e} ({hex_opid:?})"
+        ))
+    })?;
+    bytes.try_into().map_err(|v: Vec<u8>| {
+        EnclaveError::CrossCheck(format!("BFA mint opid is not 32 bytes (got {})", v.len()))
+    })
+}
+
 /// What the enclave must verify on-chain before RGB consensus may see a BFA
-/// mint: which `FundsIn` log to fetch, and which contract may have emitted it.
+/// mint: which `FundsIn` logs to fetch, and which contract may have emitted
+/// them.
 #[cfg(feature = "bfa-mint")]
 pub struct BfaMintBinding {
-    /// OpId of the mint transition. Untrusted - it only selects the log; the
-    /// ether extension re-binds it to the operation inside consensus.
-    pub mint_opid: [u8; 32],
+    /// Every `TS_BRIDGE` OpId in the consignment, in consignment order.
+    /// Untrusted - each only selects the log to verify; the ether extension
+    /// re-binds it to the operation inside consensus.
+    pub mint_opids: Vec<[u8; 32]>,
+    /// The mint this request authorises: the OpId of the consignment's last
+    /// transition. It is the only one bound to the request's own deposit -
+    /// every other entry is an ancestor and must carry its own.
+    pub terminal_opid: [u8; 32],
     /// `bridgeLocation` exactly as the asset's genesis writes it.
     pub bridge_location: String,
 }
@@ -267,20 +287,6 @@ pub fn bfa_mint_binding(consignment_bytes: &[u8]) -> Result<Option<BfaMintBindin
     // here the OpId is needed *before* validation, to pick the log to verify.
     let (_, mint_op_ids, last_transition, _) = extract_transition_summary(consignment_bytes)?;
 
-    // One request verifies one EVM lock, so one mint per consignment - and a mint
-    // spends the bridge right its predecessor rolled forward, so mint N>1 carries
-    // mint N-1 in the history consensus re-runs `cea` over. An asset therefore
-    // supports exactly as many mints as it was issued bridge rights, ever; see
-    // "Chained mints: open design decision" in the BFA mint plan.
-    if mint_op_ids.len() != 1 {
-        return Err(EnclaveError::CrossCheck(format!(
-            "BFA consignment carries {} bridge transitions; the enclave verifies exactly one \
-             EVM lock per request, and every mint after the first on a bridge right carries its \
-             predecessor in history - so an asset supports only as many mints as it was issued \
-             bridge rights",
-            mint_op_ids.len()
-        )));
-    }
     let last = last_transition
         .ok_or_else(|| EnclaveError::CrossCheck("BFA consignment has no transitions".into()))?;
     if last.transition_type != bfa::TS_BRIDGE {
@@ -290,19 +296,28 @@ pub fn bfa_mint_binding(consignment_bytes: &[u8]) -> Result<Option<BfaMintBindin
             bfa::TS_BRIDGE
         )));
     }
+    let terminal_opid = decode_opid(&last.op_id)?;
 
-    let hex_opid = last.op_id.strip_prefix("0x").unwrap_or(&last.op_id);
-    let bytes = hex::decode(hex_opid).map_err(|e| {
-        EnclaveError::CrossCheck(format!(
-            "BFA mint opid hex decode failed: {e} ({hex_opid:?})"
-        ))
-    })?;
-    let mint_opid: [u8; 32] = bytes.try_into().map_err(|v: Vec<u8>| {
-        EnclaveError::CrossCheck(format!("BFA mint opid is not 32 bytes (got {})", v.len()))
-    })?;
+    // A mint spends the bridge right its predecessor rolled forward, so mint N
+    // carries mints 1..N-1 in the history consensus re-runs `cea` over. Each one
+    // needs its own event, so each needs its own verified lock.
+    let mut mint_opids = Vec::with_capacity(mint_op_ids.len());
+    for hex_opid in &mint_op_ids {
+        mint_opids.push(decode_opid(hex_opid)?);
+    }
+    // The terminal transition decides which deposit pays for this mint, so it
+    // must be one of the transitions actually in the consignment.
+    if !mint_opids.contains(&terminal_opid) {
+        return Err(EnclaveError::CrossCheck(
+            "BFA consignment's last transition is a bridge mint but is absent from the \
+             transition list - refusing to guess which mint this request authorises"
+                .into(),
+        ));
+    }
 
     Ok(Some(BfaMintBinding {
-        mint_opid,
+        mint_opids,
+        terminal_opid,
         bridge_location: genesis_bridge_location(&transfer)?,
     }))
 }
@@ -328,16 +343,7 @@ pub fn bfa_ancestry_binding(consignment_bytes: &[u8]) -> Result<Option<BfaAncest
 
     let mut opids = Vec::with_capacity(mint_op_ids.len());
     for hex_opid in &mint_op_ids {
-        let hex_opid = hex_opid.strip_prefix("0x").unwrap_or(hex_opid);
-        let bytes = hex::decode(hex_opid).map_err(|e| {
-            EnclaveError::CrossCheck(format!(
-                "BFA mint opid hex decode failed: {e} ({hex_opid:?})"
-            ))
-        })?;
-        let opid: [u8; 32] = bytes.try_into().map_err(|v: Vec<u8>| {
-            EnclaveError::CrossCheck(format!("BFA mint opid is not 32 bytes (got {})", v.len()))
-        })?;
-        opids.push(opid);
+        opids.push(decode_opid(hex_opid)?);
     }
 
     Ok(Some(BfaAncestryBinding {
