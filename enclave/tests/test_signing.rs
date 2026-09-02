@@ -506,7 +506,7 @@ fn sign_psbt_request(
             asset_id: String::new(),
             consignment: vec![],
             mint_ancestors: Vec::new(),
-        consignment_hash: vec![],
+            consignment_hash: vec![],
         })),
     }
 }
