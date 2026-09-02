@@ -104,6 +104,17 @@ pub struct BridgeConfig {
     /// measured into PCR0, so baking them in changes the identity that seed is
     /// bound to.
     pub btc_max_total_sats: u64,
+    /// Budget (sats) for send-RGB outputs the enclave cannot prove it controls
+    /// (`RGB_MAX_UNOWNED_SATS`). The recipient's witness output is blinded, so
+    /// the enclave bounds what leaves rather than identifying the payout.
+    /// `0` = unset; a production build then refuses send-RGB signing.
+    pub rgb_max_unowned_sats: u64,
+    /// Budget (sats) for plain-BTC outputs that do not pay back into the same
+    /// custody (`BTC_MAX_UNOWNED_SATS`). Covers `create_utxo` allocation dust
+    /// (1000 sats each, 5 by default), which is funded out of vanilla inputs so
+    /// its script is not one being spent. `0` = unset; a production build then
+    /// refuses plain-BTC signing.
+    pub btc_max_unowned_sats: u64,
     /// Address expected to emit `FundsIn`/`BridgeFundsIn` (env
     /// `FUNDS_IN_CONTRACT`), falling back to `bridge_contract` when unset. The
     /// deposit event comes from the bridge entry contract while
@@ -133,6 +144,8 @@ impl Default for BridgeConfig {
             gas_tx_allowed_selectors: Vec::new(),
             gas_tx_max_value_wei: None,
             btc_max_total_sats: 0,
+            rgb_max_unowned_sats: 0,
+            btc_max_unowned_sats: 0,
             funds_in_contract: [0u8; 20],
             max_consignment_bytes: DEFAULT_MAX_CONSIGNMENT_BYTES,
             max_merkle_proofs: DEFAULT_MAX_MERKLE_PROOFS,
@@ -215,6 +228,16 @@ impl BridgeConfig {
             .and_then(|s| s.parse::<u64>().ok())
             .unwrap_or(0);
 
+        let rgb_max_unowned_sats = std::env::var("RGB_MAX_UNOWNED_SATS")
+            .ok()
+            .and_then(|s| s.parse::<u64>().ok())
+            .unwrap_or(0);
+
+        let btc_max_unowned_sats = std::env::var("BTC_MAX_UNOWNED_SATS")
+            .ok()
+            .and_then(|s| s.parse::<u64>().ok())
+            .unwrap_or(0);
+
         // Separate FundsIn event-emitter pin; defaults to `bridge_contract`.
         let funds_in_contract = std::env::var("FUNDS_IN_CONTRACT")
             .ok()
@@ -258,6 +281,8 @@ impl BridgeConfig {
             gas_tx_allowed_selectors,
             gas_tx_max_value_wei,
             btc_max_total_sats,
+            rgb_max_unowned_sats,
+            btc_max_unowned_sats,
             funds_in_contract,
             max_consignment_bytes,
             max_merkle_proofs,

@@ -78,16 +78,43 @@ pub fn validate_btc_request(
     //    unconditionally. Anchored to the unsigned tx's outputs, which the
     //    segwit sighash commits to.
     let input_scripts = self_controlled_input_scripts(&psbt, keys);
+    let mut unowned_sat: u64 = 0;
     for i in 0..psbt.unsigned_tx.output.len() {
-        if !output_is_self_owned(&psbt, i, keys, &input_scripts) {
+        if output_is_self_owned(&psbt, i, &input_scripts) {
+            continue;
+        }
+        unowned_sat = unowned_sat
+            .checked_add(psbt.unsigned_tx.output[i].value.to_sat())
+            .ok_or_else(|| {
+                EnclaveError::CrossCheck("plain-BTC unowned output value overflow".into())
+            })?;
+    }
+
+    if unowned_sat > 0 {
+        if cfg.btc_max_unowned_sats == 0 {
+            // Unset must never read as "no limit".
+            #[cfg(all(feature = "rgb-validation", not(test)))]
+            {
+                return Err(EnclaveError::CrossCheck(format!(
+                    "plain-BTC PSBT pays {unowned_sat} sats to outputs the enclave cannot prove \
+                     pay back into the same custody, and BTC_MAX_UNOWNED_SATS is not pinned - \
+                     refusing to sign"
+                )));
+            }
+            #[cfg(not(all(feature = "rgb-validation", not(test))))]
+            tracing::warn!(
+                unowned_sat,
+                "plain-BTC signing: no BTC_MAX_UNOWNED_SATS pinned (non-production build) - \
+                 skipping the unowned-output budget"
+            );
+        } else if unowned_sat > cfg.btc_max_unowned_sats {
             return Err(EnclaveError::CrossCheck(format!(
-                "plain-BTC output {i} pays {} - refusing: the enclave cannot prove it controls \
-                 that script. An output must either repay an input this enclave co-signs, or \
-                 carry BIP-371 taproot metadata (PSBT_OUT_TAP_INTERNAL_KEY / _TREE / _BIP32_\
-                 DERIVATION) that reconstructs it from a key on one of this enclave's BIP-86 \
-                 accounts (vanilla, or colored for create_utxo allocation outputs). Plain-BTC \
-                 signing is self-pay only.",
-                hex::encode(psbt.unsigned_tx.output[i].script_pubkey.as_bytes())
+                "plain-BTC PSBT pays {unowned_sat} sats to outputs the enclave cannot prove pay \
+                 back into the same custody, over the pinned budget of {} sats - refusing to \
+                 sign. `create_utxo` allocation dust fits this budget; a redirect does not. An \
+                 output is proven when its script equals that of an input this enclave co-signs, \
+                 which is what address reuse guarantees for change.",
+                cfg.btc_max_unowned_sats
             )));
         }
     }
@@ -121,6 +148,79 @@ pub fn validate_btc_request(
         return Err(EnclaveError::CrossCheck(format!(
             "plain-BTC total input value {total_in_sat} sats exceeds pinned cap {} sats",
             cfg.btc_max_total_sats
+        )));
+    }
+
+    Ok(())
+}
+
+/// Bound the Bitcoin value a send-RGB PSBT moves to destinations this enclave
+/// cannot prove it controls.
+///
+/// Every other send-RGB bind is denominated in RGB asset units, so a witness tx
+/// can satisfy the ledger exactly and still sweep the bridge's Bitcoin backing.
+/// `check_psbt_fee_rate` misses it: a diverted sat is an output, not a fee, so
+/// diversion *lowers* the implied rate.
+///
+/// Plain-BTC requires every output to be self-owned; send-RGB cannot, because
+/// it pays the recipient a witness output and that seal is blinded. It bounds
+/// the total instead - dust fits, a sweep does not.
+///
+/// Ownership is the single rule in [`super::btc_ownership`]: no metadata is
+/// trusted.
+pub fn validate_rgb_psbt_sats(
+    psbt: &bitcoin::psbt::Psbt,
+    cfg: &BridgeConfig,
+    keys: &KeyManager,
+) -> Result<()> {
+    // `None` scope: change sits on Colored, vanilla funding on Vanilla. Widens
+    // what counts as ours, never what is signed.
+    let input_scripts =
+        crate::networks::rgb::btc_ownership::self_controlled_input_scripts_scoped(psbt, keys, None);
+
+    let mut unowned_sat: u64 = 0;
+    for (i, txout) in psbt.unsigned_tx.output.iter().enumerate() {
+        if input_scripts.contains(txout.script_pubkey.as_bytes()) {
+            continue;
+        }
+        unowned_sat = unowned_sat
+            .checked_add(txout.value.to_sat())
+            .ok_or_else(|| {
+                EnclaveError::CrossCheck(format!(
+                    "send-RGB unowned output value overflow at output {i}"
+                ))
+            })?;
+    }
+
+    if cfg.rgb_max_unowned_sats == 0 {
+        // Unset must never read as "no limit".
+        #[cfg(all(feature = "rgb-validation", not(test)))]
+        {
+            return Err(EnclaveError::CrossCheck(
+                "send-RGB signing requires RGB_MAX_UNOWNED_SATS to be pinned - refusing to \
+                 sign without a bound on the Bitcoin value payable to destinations the \
+                 enclave cannot prove it controls"
+                    .into(),
+            ));
+        }
+        #[cfg(not(all(feature = "rgb-validation", not(test))))]
+        {
+            tracing::warn!(
+                unowned_sat,
+                "send-RGB signing: no RGB_MAX_UNOWNED_SATS pinned (non-production build) - \
+                 skipping the unowned-output budget"
+            );
+            return Ok(());
+        }
+    }
+
+    if unowned_sat > cfg.rgb_max_unowned_sats {
+        return Err(EnclaveError::CrossCheck(format!(
+            "send-RGB PSBT pays {unowned_sat} sats to outputs this enclave cannot prove it \
+             controls, over the pinned budget of {} sats - refusing to sign (a \
+             recipient witness output is dust; this is the Bitcoin backing leaving \
+             the bridge)",
+            cfg.rgb_max_unowned_sats
         )));
     }
 
@@ -321,8 +421,122 @@ mod tests {
     fn cfg_with_cap(cap: u64) -> BridgeConfig {
         BridgeConfig {
             btc_max_total_sats: cap,
+            // Sized for `create_utxo` allocation dust (1000 sats x 5).
+            btc_max_unowned_sats: 5_000,
             ..Default::default()
         }
+    }
+
+    /// Budget config for the send-RGB sats gate.
+    fn rgb_cfg(budget: u64) -> BridgeConfig {
+        BridgeConfig {
+            rgb_max_unowned_sats: budget,
+            ..Default::default()
+        }
+    }
+
+    // --- send-RGB unowned-output budget (the BTC value-diversion PoC) ---
+
+    /// **The attack.** Two 5_000_000-sat bridge UTXOs are spent. The RGB legs
+    /// can be impeccable - recipient dust, change dust on a self-owned vout -
+    /// while the whole residual goes to an attacker script on an output that
+    /// carries no RGB assignment, so every asset-denominated bind ignores it.
+    /// The budget is what sees it.
+    #[test]
+    fn rgb_sats_gate_rejects_a_treasury_sweep() {
+        let keys = km();
+        let ours = our_address(&keys);
+        let psbt_bytes = psbt_from_our_address(
+            &keys,
+            &[5_000_000, 5_000_000],
+            &[
+                (foreign_address(), 546),       // recipient witness dust
+                (ours.spk.clone(), 546),        // bridge change, self-owned
+                (foreign_address(), 9_997_908), // the sweep
+            ],
+        );
+        let psbt = bitcoin::psbt::Psbt::deserialize(&psbt_bytes).unwrap();
+        let err = validate_rgb_psbt_sats(&psbt, &rgb_cfg(5_000), &keys).unwrap_err();
+        assert!(
+            err.to_string().contains("cannot prove it controls"),
+            "got: {err}"
+        );
+    }
+
+    /// The genuine shape still signs: recipient dust is well inside the budget
+    /// and the bridge change pays back to an input script (rule (A)).
+    #[test]
+    fn rgb_sats_gate_accepts_recipient_dust_with_self_owned_change() {
+        let keys = km();
+        let ours = our_address(&keys);
+        let psbt_bytes = psbt_from_our_address(
+            &keys,
+            &[5_000_000],
+            &[(foreign_address(), 1_500), (ours.spk.clone(), 4_998_000)],
+        );
+        let psbt = bitcoin::psbt::Psbt::deserialize(&psbt_bytes).unwrap();
+        assert!(validate_rgb_psbt_sats(&psbt, &rgb_cfg(5_000), &keys).is_ok());
+    }
+
+    /// The budget counts the whole unowned set, not the largest single output:
+    /// splitting the sweep across many outputs must not slip under it.
+    #[test]
+    fn rgb_sats_gate_sums_unowned_outputs() {
+        let keys = km();
+        let outputs: Vec<_> = (0..6).map(|_| (foreign_address(), 1_000)).collect();
+        let psbt_bytes = psbt_from_our_address(&keys, &[5_000_000], &outputs);
+        let psbt = bitcoin::psbt::Psbt::deserialize(&psbt_bytes).unwrap();
+        // 6 x 1_000 = 6_000 > 5_000, though every single output is under it.
+        let err = validate_rgb_psbt_sats(&psbt, &rgb_cfg(5_000), &keys).unwrap_err();
+        assert!(err.to_string().contains("6000 sats"), "got: {err}");
+    }
+
+    /// Rule (B) is not consulted: an output whose taproot tree merely mentions
+    /// one of our keys is NOT proof of control (the bridge script is a multisig
+    /// whose signer set the enclave does not know), so it counts against the
+    /// budget like any other unowned script.
+    #[test]
+    fn rgb_sats_gate_does_not_trust_a_leaf_mentioning_our_key() {
+        use bitcoin::psbt::Psbt;
+        let keys = km();
+        let ours = our_address(&keys);
+
+        // A script the enclave does not co-control, but whose tree holds a leaf
+        // naming our key alongside two attacker keys.
+        let secp = Secp256k1::new();
+        let leaf = multi_a_2_of_3(&[ours.xonly, foreign_xonly(0xC1), foreign_xonly(0xC2)]);
+        let internal = foreign_xonly(0xC3);
+        let info = TaprootBuilder::new()
+            .add_leaf(0, leaf.clone())
+            .unwrap()
+            .finalize(&secp, internal)
+            .unwrap();
+        let spk = ScriptBuf::new_p2tr(&secp, internal, info.merkle_root());
+
+        let psbt_bytes = psbt_from_our_address(&keys, &[5_000_000], &[(spk, 4_999_000)]);
+        let mut psbt = Psbt::deserialize(&psbt_bytes).unwrap();
+        // Full BIP-371 output metadata - exactly what rule (B) would have accepted.
+        psbt.outputs[0].tap_internal_key = Some(internal);
+        psbt.outputs[0].tap_tree = Some(
+            TaprootBuilder::new()
+                .add_leaf(0, leaf.clone())
+                .unwrap()
+                .try_into()
+                .unwrap(),
+        );
+        psbt.outputs[0].tap_key_origins.insert(
+            ours.xonly,
+            (
+                vec![TapLeafHash::from_script(&leaf, LeafVersion::TapScript)],
+                (*keys.master_fingerprint(), ours.path.clone()),
+            ),
+        );
+
+        let err = validate_rgb_psbt_sats(&psbt, &rgb_cfg(5_000), &keys).unwrap_err();
+        assert!(
+            err.to_string().contains("cannot prove it controls"),
+            "a leaf naming our key must not count as control; got: {err}"
+        );
     }
 
     #[test]
@@ -379,10 +593,7 @@ mod tests {
             psbt_bytes: psbt_from_our_address(&keys, &[50_000], &[(foreign_address(), 10_000)]),
         };
         let err = validate_btc_request(&req, &cfg_with_cap(100_000), &keys).unwrap_err();
-        assert!(
-            err.to_string().contains("cannot prove it controls"),
-            "got: {err}"
-        );
+        assert!(err.to_string().contains("same custody"), "got: {err}");
     }
 
     #[test]
@@ -398,8 +609,8 @@ mod tests {
         };
         let err = validate_btc_request(&req, &cfg_with_cap(100_000), &keys).unwrap_err();
         assert!(
-            err.to_string().contains("output 1"),
-            "the second output is the offending one; got: {err}"
+            err.to_string().contains("10000 sats"),
+            "only the foreign output counts against the budget; got: {err}"
         );
     }
 
@@ -452,16 +663,29 @@ mod tests {
     /// The self-pay rule needs no configuration, so an unset cap does not
     /// excuse a foreign output in any build profile.
     #[test]
-    fn foreign_output_is_rejected_even_with_no_cap_pinned() {
+    fn foreign_output_over_budget_is_rejected_whatever_the_value_cap_says() {
         let keys = km();
         let req = SignBtcRequest {
-            psbt_bytes: psbt_from_our_address(&keys, &[1_000], &[(foreign_address(), 900)]),
+            psbt_bytes: psbt_from_our_address(&keys, &[100_000], &[(foreign_address(), 90_000)]),
         };
-        let err = validate_btc_request(&req, &BridgeConfig::default(), &keys).unwrap_err();
-        assert!(
-            err.to_string().contains("cannot prove it controls"),
-            "got: {err}"
-        );
+        // Well inside `btc_max_total_sats`, far outside the unowned budget.
+        let err = validate_btc_request(&req, &cfg_with_cap(1_000_000), &keys).unwrap_err();
+        assert!(err.to_string().contains("same custody"), "got: {err}");
+    }
+
+    /// The shape rule (B) used to wave through, now bounded by value: five
+    /// 1000-sat colored allocations funded out of vanilla inputs, with the
+    /// vanilla change returning to the script being spent (address reuse).
+    #[test]
+    fn create_utxo_allocation_dust_fits_the_budget() {
+        let keys = km();
+        let ours = our_address(&keys);
+        let mut outputs: Vec<_> = (0..5).map(|_| (foreign_address(), 1_000)).collect();
+        outputs.push((ours.spk.clone(), 40_000));
+        let req = SignBtcRequest {
+            psbt_bytes: psbt_from_our_address(&keys, &[50_000], &outputs),
+        };
+        assert!(validate_btc_request(&req, &cfg_with_cap(100_000), &keys).is_ok());
     }
 
     /// With the cap unset, a production build fails closed on the amount

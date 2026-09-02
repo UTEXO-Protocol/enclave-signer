@@ -678,7 +678,7 @@ fn handle_sign(ctx: &ServerContext, req: SignRequest) -> Result<EnclaveResponse>
         })?;
         // Binds to the source's BridgeFundsIn.operationId, not
         // destination.operation_idx, which is a different id-space.
-        crate::networks::evm::evm_event::verify_funds_in_event(
+        let verified = crate::networks::evm::evm_event::verify_funds_in_event(
             &**client,
             // FundsIn is emitted by the bridge entry contract, which may differ
             // from the MultisigProxy pinned in EVM_PROXY_CONTRACT_ADDRESS (see config.rs).
@@ -688,6 +688,18 @@ fn handle_sign(ctx: &ServerContext, req: SignRequest) -> Result<EnclaveResponse>
             &source.funds_in_operation_id,
             req.amount,
             source.commission,
+        )?;
+
+        // Recipient bind: the checks above prove how much the recipient leg
+        // pays, not who it pays. The invoice in the log just verified says
+        // which seal the deposit authorised. Ungated: `evm-rpc` implies
+        // `rgb-validation`, so reaching here means the bind is compiled in.
+        let authorized = crate::networks::rgb::invoice::parse_authorized_recipient(
+            &verified.destination_address,
+        )?;
+        crate::networks::rgb::invoice::assert_recipient_authorized(
+            &destination_proof.rgb_recipient_seals,
+            &authorized,
         )?;
     }
 
@@ -767,11 +779,12 @@ fn handle_sign(ctx: &ServerContext, req: SignRequest) -> Result<EnclaveResponse>
             // CcdSource -> EvmDestination release is already authorized above;
             // applying the binding unconditionally rejected those signs.
             #[cfg(feature = "rgb-validation")]
-            if matches!(source_ref, SourceNetwork::RgbSource(_)) {
+            if let SourceNetwork::RgbSource(rgb_source) = source_ref {
                 apply_funds_out_binding(
                     ctx,
                     destination_proof.evm_funds_out.as_ref(),
                     source_validated.rgb_consignment.as_ref(),
+                    &rgb_source.merkle_proofs,
                 )?;
             }
             handle_sign_evm(ctx, destination, destination_proof.evm_funds_out.as_ref())
@@ -801,6 +814,7 @@ fn apply_funds_out_binding(
     ctx: &ServerContext,
     params: Option<&crate::networks::evm::validation::FundsOutParams>,
     validated: Option<&crate::networks::rgb::validation::ValidatedConsignment>,
+    merkle_proofs: &[crate::proto::MerkleProofEntry],
 ) -> Result<()> {
     use crate::networks::evm::crosscheck;
 
@@ -827,21 +841,23 @@ fn apply_funds_out_binding(
     // Defense-in-depth: every consignment witness tx must be mined.
     crosscheck::assert_witnesses_confirmed(validated)?;
 
-    // BtcRelay agreement: bind the calldata's (blockHeight, commitmentHash)
-    // `proof` to the header the enclave holds at that height. Inert
-    // until the listener populates `proof`. Requires the SPV header chain, which
-    // is always present under rgb-validation (spv is implied - see the
-    // lib.rs compile_error).
+    // BtcRelay agreement + source-block bind (#57 / #122): the calldata `proof`
+    // must name headers the enclave holds, and its `source` pair must be the
+    // block anchoring the consignment's last witness tx. Fail-closed on an
+    // empty `proof`. The SPV header chain is always present under
+    // rgb-validation (spv is implied - see lib.rs M-01 compile_error).
     #[cfg(feature = "spv")]
     {
+        // Fail on a poisoned lock rather than reading through it, matching
+        // `validate_source`: a poisoned header chain may be mid-reorg.
         let chain = ctx
             .header_chain
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        crosscheck::verify_btc_relay_agreement(params, &chain)?;
+            .map_err(|e| EnclaveError::Internal(format!("SPV header chain lock poisoned: {e}")))?;
+        crosscheck::verify_btc_relay_agreement(params, validated, merkle_proofs, &chain)?;
     }
     #[cfg(not(feature = "spv"))]
-    let _ = ctx;
+    let _ = (ctx, merkle_proofs);
 
     // Consignment-bound release. A transfer settles a swap; a burn settles a
     // redemption and additionally binds the payout target to the 32 bytes the
@@ -1147,7 +1163,26 @@ fn handle_sign_evm(
 }
 
 fn handle_sign_psbt(ctx: &ServerContext, req: RgbDestination) -> Result<EnclaveResponse> {
-    let (signed_psbt, inputs_signed) = ctx.state.sign_psbt(&req.psbt_bytes)?;
+    // Sats gate: every other send-RGB bind is in RGB asset units, so without
+    // this a witness tx can satisfy the ledger and still sweep the Bitcoin
+    // backing. dev-mode keeps the unbounded path.
+    #[cfg(not(feature = "dev-mode"))]
+    {
+        let psbt = crate::networks::rgb::psbt_validation::parse_psbt_shape(&req.psbt_bytes)?;
+        ctx.state.with_keys(|keys| {
+            crate::networks::rgb::btc_crosscheck::validate_rgb_psbt_sats(
+                &psbt,
+                &ctx.bridge_config,
+                keys,
+            )
+        })?;
+    }
+
+    // Colored account only: an unscoped sign co-signs every input the enclave
+    // can derive a key for, including vanilla inputs no send-RGB bind examines.
+    let (signed_psbt, inputs_signed) = ctx
+        .state
+        .sign_psbt_scoped(&req.psbt_bytes, Some(crate::keys::AccountType::Colored))?;
 
     // Reject a "successful" no-op: `sign_psbt` returns
     // Ok((bytes, 0)) when no input belongs to this enclave, which a caller

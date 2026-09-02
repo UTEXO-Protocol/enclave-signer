@@ -46,6 +46,8 @@ fn pinned_bridge_config() -> BridgeConfig {
 fn btc_capped_config(max_total_sats: u64) -> BridgeConfig {
     BridgeConfig {
         btc_max_total_sats: max_total_sats,
+        // Sized for `create_utxo` allocation dust (1000 sats x 5).
+        btc_max_unowned_sats: 5_000,
         ..Default::default()
     }
 }
@@ -1129,11 +1131,13 @@ fn test_sign_btc_accepts_create_utxo_colored_output() {
     let wallet = init_wallet(port);
     let ours = our_address(&wallet, 0, 0);
     let colored = our_colored_address(&wallet, 0, 0);
-    let change = our_address(&wallet, 1, 4);
 
+    // The real shape under address reuse: colored allocation dust (1000 sats
+    // each), with the vanilla change returning to the script being spent. The
+    // dust is bounded by BTC_MAX_UNOWNED_SATS, not waved through on metadata.
     let sign_req = EnclaveRequest {
         request: Some(Request::SignBtc(SignBtcRequest {
-            psbt_bytes: btc_psbt_to_ours(&ours, 60_000, &[(&colored, 20_000), (&change, 35_000)]),
+            psbt_bytes: btc_psbt_to_ours(&ours, 60_000, &[(&colored, 5_000), (&ours, 50_000)]),
         })),
     };
 
@@ -1163,7 +1167,7 @@ fn test_sign_btc_rejects_output_the_enclave_does_not_control() {
         Some(Response::Error(e)) => {
             assert_eq!(e.code, 3);
             assert!(
-                e.message.contains("cannot prove it controls"),
+                e.message.contains("same custody"),
                 "expected self-ownership rejection, got: {}",
                 e.message
             );
@@ -1228,7 +1232,7 @@ fn test_sign_btc_accepts_self_paying_psbt_under_cap() {
 /// A fresh change address the transaction does not spend from: accepted via the
 /// output's BIP-371 taproot metadata rather than by matching an input.
 #[test]
-fn test_sign_btc_accepts_fresh_change_address_with_output_metadata() {
+fn test_sign_btc_rejects_fresh_change_address_proven_only_by_metadata() {
     use bitcoin::psbt::Psbt;
     use bitcoin::taproot::TaprootBuilder;
 
@@ -1266,10 +1270,18 @@ fn test_sign_btc_accepts_fresh_change_address_with_output_metadata() {
     };
     let resp = common::send_request(port, &sign_req);
 
+    // Output metadata is coordinator-supplied. Rule (B) used to accept this;
+    // it is now refused, and 50_000 sats is far over the unowned budget.
+    // Address reuse is what makes change provable: it lands on a script the
+    // transaction is already spending.
     match &resp.response {
-        Some(Response::SignedPsbt(r)) => assert_eq!(r.inputs_signed, 1),
+        Some(Response::Error(e)) => assert!(
+            e.message.contains("same custody"),
+            "expected the custody rejection, got: {}",
+            e.message
+        ),
         other => panic!(
-            "change address proven by output metadata should sign, got {:?}",
+            "a change address proven only by output metadata must not sign, got {:?}",
             other
         ),
     }
