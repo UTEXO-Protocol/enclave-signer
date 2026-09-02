@@ -373,6 +373,10 @@ impl EnclaveClient {
                                 asset_id: req.rgb_asset_id,
                                 consignment: req.consignment,
                                 consignment_hash: req.consignment_hash,
+                                // As on the source side: the CLI cannot resolve
+                                // the deposits behind a chained mint, so one
+                                // signed through it fails closed in the enclave.
+                                mint_ancestors: Vec::new(),
                             },
                         ),
                     ),

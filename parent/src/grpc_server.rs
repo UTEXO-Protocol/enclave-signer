@@ -247,6 +247,16 @@ impl ParentAdapterService {
                         asset_id: payload.rgb_asset_id,
                         consignment: payload.consignment,
                         consignment_hash: payload.consignment_hash,
+                        // Same as the source direction: forwarded as given,
+                        // because the enclave verifies every pair on-chain.
+                        mint_ancestors: payload
+                            .mint_ancestors
+                            .into_iter()
+                            .map(|a| enclave_proto::MintAncestor {
+                                op_id: a.op_id,
+                                tx_hash: a.tx_hash,
+                            })
+                            .collect(),
                     },
                 )
             }
