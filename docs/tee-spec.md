@@ -201,7 +201,10 @@ backend's digest -- domain drift breaks the build.
 Which consignment shape a build signs is chosen at compile time by its RGB
 flow feature (`rgb-swap` or `rgb-mint-burn`, exactly one). A **swap** enclave
 signs `TS_TRANSFER` unlocks; a **mint/burn** enclave signs `TS_BURN` unlocks and
-nothing else. The two are separate instances with separate PCR0s -- neither
+nothing else, binding the release to the payout target the burn transition
+commits to (`MS_BURN_RECIPIENT`). The BFA line is a mint/burn build
+(`bfa-mint`), where a deposit is a bridge mint against a verified `FundsIn`
+lock. The two flows are separate instances with separate PCR0s -- neither
 binary contains the other's rules. Independently of the flow, the enclave
 preserves the backend-provided `burnId` / `fundsInIds`, and the in-enclave OpId
 rewrite stays dormant until flows are routed by network id (Sec 9, P6).
@@ -235,8 +238,9 @@ witness txid, input prevouts == witness prevouts, `SIGHASH_ALL` / taproot
 `DEFAULT` only, and the consignment's asset outputs must cover the credited
 amount. Which transition is accepted is the build's RGB flow: `TS_TRANSFER`
 under `rgb-swap` (coverage `>=`, since the surplus is bridge change),
-`TS_INFLATION` under `rgb-mint-burn` (strict `==`, since any surplus is an
-over-mint). A fee sanity check rejects a PSBT whose fee rate exceeds 3x the
+`TS_INFLATION` under `rgb-mint-burn` -- joined by `TS_BRIDGE` in a `bfa-mint`
+build -- with a strict `==`, since any surplus is an over-mint. A fee sanity
+check rejects a PSBT whose fee rate exceeds 3x the
 enclave's own Esplora estimate, fail-closed on a missing estimate (a
 compile-time floor applies only on non-mainnet chains).
 
@@ -415,10 +419,10 @@ MUST refuse to sign (fail closed) if any fails.
 | #   | Predicate                                                   | Status                                                                                                                                                            |
 |-----|-------------------------------------------------------------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | P1  | submitted RGB consignment is valid (`rgbstd` full validation) | OK                                                                                                                                                               |
-| P2  | consignment proves the expected transition                  | OK -- the last transition MUST be the one this build's RGB flow unlocks with: `TS_TRANSFER` under `rgb-swap`, `TS_BURN` (amount from `MS_BURNED_ASSET`) under `rgb-mint-burn`. Any other shape is refused |
+| P2  | consignment proves the expected transition                  | OK -- the last transition MUST be the one this build's RGB flow unlocks with: `TS_TRANSFER` under `rgb-swap`, `TS_BURN` (amount from `MS_BURNED_ASSET`) under `rgb-mint-burn`, where a `bfa-mint` build also validates every `TS_BRIDGE` the burn descends from against its own verified `FundsIn` lock. Any other shape is refused |
 | P3  | unlock amount is covered by the consignment-derived amount  | OK -- the amount comes from the consignment (host `rgb_amount` is ignored); comparison is coverage (`>=`), strict `==` pending per-output binding (**`[OPEN]`**) |
 | P4  | calldata is well-formed                                     | OK -- single pinned selector, 64 KiB cap, canonical ABI decode + re-encode byte-equality                                                            |
-| P5  | payload binds destination chain / contract / **recipient**  | chain + contract pinned; **`[OPEN]`** recipient not bound -- blocked on an EVM-destination commitment in the RGB burn schema (cross-repo)             |
+| P5  | payload binds destination chain / contract / **recipient**  | chain + contract pinned; recipient bound on the burn path: the BFA schema carries `MS_BURN_RECIPIENT` and the enclave refuses a release whose calldata names a different address                         |
 | P6  | payload binds the RGB `OpId` (cross-domain identifier)      | **`[OPEN -- dormant]`** the in-enclave `burnId` / `fundsInIds` derivation exists but is disabled for the swap rollout; backend ids are signed as received |
 | P7  | referenced Bitcoin txs are in accepted chain history        | OK                                                                                                                                                               |
 | P8  | Bitcoin inclusion proofs valid against the in-enclave chain | OK; plus the calldata `proof` is required (fail-closed): `source.height` is pinned to the block anchoring the consignment's last witness tx (re-verified under one lock guard), the enclave must hold a header at `latest.height`, and `latest` must be within `MAX_RELAY_TIP_LAG_BLOCKS = 100` of the enclave tip. The two `commitmentHash` words are **not** checked in-enclave: they are BtcRelay's `keccak256(StoredBlockHeader)` over relay-internal state (chainWork, lastDiffAdjustment, last ten timestamps), which the enclave cannot compute; `RGBVerifier` verifies each against the relay itself, so a manipulated commitment reverts on-chain (#57/#122) |

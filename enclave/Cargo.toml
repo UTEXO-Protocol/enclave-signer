@@ -46,8 +46,10 @@ rgb-consignment = { git = "https://github.com/UTEXO-Protocol/consignment-utils.g
 rgb-schemas = { version = "=0.11.1-rc.10", default-features = false, optional = true }
 # Invoice parsing for the send-RGB recipient bind. Sibling crate of `rgb-ops`
 # in the same repo and already in the lock at its rev, so this adds no new
-# third-party code.
-rgb-invoicing = { version = "0.11.1-rc.11", default-features = false, optional = true }
+# third-party code. Pinned to rc.10 like `rgb-schemas`: the BFA mirrors in the
+# workspace `[patch]` are cut from rc.10, and an rc.11 requirement would make
+# cargo ignore the patch and resolve upstream instead.
+rgb-invoicing = { version = "=0.11.1-rc.10", default-features = false, optional = true }
 attestation-verify = { path = "../attestation-verify" }
 serde = { version = "1", features = ["derive"] }
 
@@ -150,6 +152,22 @@ evm-rpc = ["rgb-validation", "dep:alloy", "dep:tokio"]
 # rejects at boot (production policy requires the trustless source). Shipped in
 # the production EIF. HEAVY build (2 alloy majors, revm, BLS, vendored OpenSSL).
 helios = ["evm-rpc", "dep:helios-ethereum"]
+# BFA (Bridged Fungible Asset) mint support. It widens the mint/burn flow to the
+# bridged schema, whose script ends with the `cea` ether-extension opcode the
+# default validator decodes as `Fail`. `evm-rpc` because the events that opcode
+# checks come from the enclave's own verified `FundsIn` read.
+#
+# `rgb-mint-burn`, not plain `rgb`: a BFA `Bridge` transition IS a mint, so its
+# rules belong to that flow and nowhere else. Pulling in the flow feature also
+# means a BFA build cannot accidentally be a `rgb-swap` one - `lib.rs` rejects
+# both flows at once, so `--features bfa-mint` on the default set fails to
+# compile rather than silently teaching the swap enclave a mint shape.
+#
+# The swap enclave is built without the feature and so keeps its behaviour, but
+# NOT its PCR0: the workspace `[patch.crates-io]` moves every build onto the BFA
+# RGB crates (and electrum-client 0.24), so every EIF here re-measures and the
+# signer set must rotate.
+bfa-mint = ["rgb-mint-burn", "evm-rpc"]
 
 [dev-dependencies]
 rand = "0.10.0"

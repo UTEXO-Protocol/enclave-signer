@@ -6,7 +6,15 @@
 //! contract these items keep.
 
 use crate::error::{EnclaveError, Result};
+#[cfg(feature = "bfa-mint")]
+use crate::networks::rgb::validation::bfa;
 use crate::networks::rgb::validation::{ifa, TransitionSummary};
+
+/// The mint shapes this build signs, spelled out for rejection messages.
+#[cfg(feature = "bfa-mint")]
+const MINT_SHAPES: &str = "Inflation or Bridge";
+#[cfg(not(feature = "bfa-mint"))]
+const MINT_SHAPES: &str = "Inflation";
 
 /// Human-readable flow name, used in rejection messages so an operator can
 /// tell "wrong shape" from "wrong enclave".
@@ -16,7 +24,19 @@ pub const FLOW_NAME: &str = "mint/burn";
 ///
 /// Also decides whether the consignment parser bothers extracting the last
 /// bundle's witness prevouts ([`crate::networks::rgb::validation`]).
+///
+/// BFA's `TS_BRIDGE` joins IFA `Inflation` only in a `bfa-mint` build. It is a
+/// mint in every way that matters here - it creates units against an EVM lock -
+/// so it takes the mint rules below, in particular the exact-equality amount
+/// bind that refuses an over-mint. A build without the feature has no code path
+/// that admits it at all.
 pub fn is_signing_transition(transition_type: u16) -> bool {
+    #[cfg(feature = "bfa-mint")]
+    {
+        if transition_type == bfa::TS_BRIDGE {
+            return true;
+        }
+    }
     transition_type == ifa::TS_INFLATION
 }
 
@@ -24,10 +44,9 @@ pub fn is_signing_transition(transition_type: u16) -> bool {
 pub fn assert_signing_transition(last: &TransitionSummary) -> Result<()> {
     if !is_signing_transition(last.transition_type) {
         return Err(EnclaveError::CrossCheck(format!(
-            "mint-RGB PSBT requires an Inflation transition (last transition_type = {}, want {}) \
-             - this enclave is built for the {FLOW_NAME} flow",
-            last.transition_type,
-            ifa::TS_INFLATION
+            "mint-RGB PSBT requires a {MINT_SHAPES} transition (last transition_type = {}) - \
+             this enclave is built for the {FLOW_NAME} flow",
+            last.transition_type
         )));
     }
     Ok(())
@@ -43,10 +62,8 @@ pub fn assert_committed_group(committed: &[&TransitionSummary]) -> Result<()> {
         if !is_signing_transition(t.transition_type) {
             return Err(EnclaveError::CrossCheck(format!(
                 "mint-RGB PSBT commits transition {} of type {} - the {FLOW_NAME} flow requires \
-                 Inflation ({})",
-                t.op_id,
-                t.transition_type,
-                ifa::TS_INFLATION
+                 {MINT_SHAPES}",
+                t.op_id, t.transition_type
             )));
         }
     }

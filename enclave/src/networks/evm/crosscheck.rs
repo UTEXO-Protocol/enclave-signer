@@ -81,6 +81,59 @@ pub fn validate_funds_out_amount(
     Ok(())
 }
 
+/// Redemption-side payout bind for the `fundsOut` burn flow: the target the
+/// burner committed to (`MS_BURN_RECIPIENT`) must equal the calldata
+/// `recipient`.
+///
+/// This is what makes a redemption unforgeable. Those 32 bytes sit inside the
+/// burn operation, so they are covered by its OpId and signed by whoever spent
+/// the burned units; binding them here means a release cannot be redirected by
+/// anyone who merely holds a copy of the consignment.
+///
+/// The shape and amount halves of the burn rule are NOT repeated here.
+/// [`validate_funds_out_amount`] runs first and, under `rgb-mint-burn`, its
+/// [`crate::networks::rgb::flow::funds_out_source_amount`] already rejects
+/// anything that is not a `Burn` covering the released amount. So a caller must
+/// run that first - this function assumes it did.
+#[cfg(feature = "rgb-mint-burn")]
+pub fn validate_funds_out_burn_recipient(
+    params: &FundsOutParams,
+    validated: &ValidatedConsignment,
+) -> Result<()> {
+    let last = validated.last_transition.as_ref().ok_or_else(|| {
+        EnclaveError::CrossCheck(
+            "burn fundsOut requires a consignment with at least one transition".into(),
+        )
+    })?;
+
+    let recipient = last.burn_recipient.as_deref().ok_or_else(|| {
+        EnclaveError::CrossCheck(
+            "burn transition carries no MS_BURN_RECIPIENT metadata - an IFA burn cannot authorise \
+             a bridged redemption"
+                .into(),
+        )
+    })?;
+    // 32 bytes holding a 20-byte EVM address in the low half, ABI-style. The
+    // high 12 must be zero: a non-zero prefix means the burner committed to
+    // something that is not this address, and silently truncating it would pay
+    // out to a target nobody signed.
+    if recipient.len() != 32 || recipient[..12] != [0u8; 12] {
+        return Err(EnclaveError::CrossCheck(format!(
+            "MS_BURN_RECIPIENT is not a left-padded EVM address: 0x{}",
+            hex::encode(recipient)
+        )));
+    }
+    if recipient[12..] != params.recipient.as_slice()[..] {
+        return Err(EnclaveError::CrossCheck(format!(
+            "recipient mismatch: burn commits to 0x{}, calldata releases to {}",
+            hex::encode(&recipient[12..]),
+            params.recipient
+        )));
+    }
+
+    Ok(())
+}
+
 // `apply_op_id_binding` / `op_id_to_calldata_id` were removed: they
 // rewrote `burnId` and `settlementData` in the signed
 // calldata, and both fields are now keyed on bridge-derived ids no RGB OpId
@@ -447,6 +500,107 @@ mod tests {
     // fundsOut amount tests - `validate_funds_out_amount` (+ the witness
     // recency guard `assert_witnesses_confirmed`).
 
+    // Redemption fundsOut tests - `validate_funds_out_burn_recipient`. The shape
+    // and amount halves belong to `validate_funds_out_amount` / the mint-burn
+    // flow, and are tested there.
+    #[cfg(feature = "rgb-mint-burn")]
+    mod burn {
+        use super::*;
+        use crate::networks::rgb::validation::{ifa, TransitionSummary, ValidatedConsignment};
+
+        const RECIPIENT: [u8; 20] = [0x42; 20];
+
+        fn calldata_to(recipient: Address, amount: u64) -> Vec<u8> {
+            fundsOutCall {
+                params: FundsOutParams {
+                    recipient,
+                    amount: U256::from(amount),
+                    burnId: U256::ZERO,
+                    sourceChainId: U256::ZERO,
+                    destinationChainId: U256::ZERO,
+                    sourceAddress: String::new(),
+                    proof: Bytes::new(),
+                    settlementData: Bytes::new(),
+                },
+            }
+            .abi_encode()
+        }
+
+        fn validated_with_last(transition: TransitionSummary) -> ValidatedConsignment {
+            ValidatedConsignment {
+                contract_id: "rgb:test".into(),
+                chain_net: "bc".into(),
+                witness_txids: vec![],
+                all_op_ids: vec![transition.op_id.clone()],
+                mint_op_ids: vec![],
+                last_transition: Some(transition),
+                last_witness_txid: None,
+                last_transfer_witness_prevouts: None,
+                last_transfer_op_id: None,
+                non_mined_witness_txids: vec![],
+                transitions_by_witness: vec![],
+            }
+        }
+
+        fn burn_transition(burned: Option<u64>, recipient: Option<Vec<u8>>) -> TransitionSummary {
+            TransitionSummary {
+                op_id: "burn-op".into(),
+                transition_type: ifa::TS_BURN,
+                // A burn has no output assignments; the destroyed value lives
+                // in the metadata, which is exactly why this must not be the
+                // quantity the release is bound to.
+                total_output_amount: 0,
+                asset_output_amount: 0,
+                outputs: Vec::new(),
+                burned_asset_amount: burned,
+                burn_recipient: recipient,
+            }
+        }
+
+        fn padded(addr: [u8; 20]) -> Vec<u8> {
+            let mut v = vec![0u8; 32];
+            v[12..].copy_from_slice(&addr);
+            v
+        }
+
+        #[test]
+        fn passes_when_the_burn_names_the_calldata_recipient() {
+            let cd = calldata_to(Address::from(RECIPIENT), 1000);
+            let validated =
+                validated_with_last(burn_transition(Some(1000), Some(padded(RECIPIENT))));
+            assert!(validate_funds_out_burn_recipient(&params_of(&cd), &validated).is_ok());
+        }
+
+        #[test]
+        fn rejects_an_ifa_burn_that_names_no_recipient() {
+            let cd = calldata_to(Address::from(RECIPIENT), 1000);
+            let validated = validated_with_last(burn_transition(Some(1000), None));
+            assert!(validate_funds_out_burn_recipient(&params_of(&cd), &validated).is_err());
+        }
+
+        /// The whole point of the field: a release must not go anywhere the
+        /// burner did not commit to.
+        #[test]
+        fn rejects_a_recipient_the_burn_did_not_commit_to() {
+            let cd = calldata_to(Address::from([0x99; 20]), 1000);
+            let validated =
+                validated_with_last(burn_transition(Some(1000), Some(padded(RECIPIENT))));
+            assert!(validate_funds_out_burn_recipient(&params_of(&cd), &validated).is_err());
+        }
+
+        /// A non-zero high half means the burner committed to something that is
+        /// not this address; truncating to the low 20 bytes would pay out to a
+        /// target nobody signed.
+        #[test]
+        fn rejects_a_recipient_with_a_dirty_high_half() {
+            let cd = calldata_to(Address::from(RECIPIENT), 1000);
+            let mut dirty = padded(RECIPIENT);
+            dirty[0] = 1;
+            let validated = validated_with_last(burn_transition(Some(1000), Some(dirty)));
+            assert!(validate_funds_out_burn_recipient(&params_of(&cd), &validated).is_err());
+        }
+    }
+
     mod transfer {
         use super::*;
         use crate::networks::rgb::validation::{ifa, TransitionSummary, ValidatedConsignment};
@@ -482,6 +636,7 @@ mod tests {
                 asset_output_amount: amount,
                 outputs: Vec::new(),
                 burned_asset_amount: None,
+                burn_recipient: None,
             }
         }
 
@@ -496,6 +651,10 @@ mod tests {
                 asset_output_amount: 0,
                 outputs: Vec::new(),
                 burned_asset_amount: Some(amount),
+                // The payout target is a separate bind
+                // (`validate_funds_out_burn_recipient`, tested in `mod burn`),
+                // so the amount cases here leave it unset.
+                burn_recipient: None,
             }
         }
 

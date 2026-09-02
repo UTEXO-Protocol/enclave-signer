@@ -67,6 +67,9 @@ sequenceDiagram
         Srv->>Cx: verify_btc_relay_agreement:<br/>decode (blockHeight, commitmentHash),<br/>enclave header at that height must match<br/>(inert while the listener sends an empty proof)
     end
     Srv->>Cx: validate_funds_out_amount:<br/>last transition == the build flow's unlock shape AND<br/>consignment-derived amount ≥ amount read from calldata bytes
+    opt rgb-mint-burn build
+        Srv->>Cx: validate_funds_out_burn_recipient:<br/>MS_BURN_RECIPIENT[12..] == calldata recipient
+    end
     Note right of Cx: burnId / fundsInIds are preserved as received —<br/>the in-enclave OpId rewrite exists but is dormant<br/>until flows are routed by network id.
     Cx-->>Srv: Ok / CrossCheck err
 

@@ -290,6 +290,7 @@ fn rgb_source(
             rgb_amount: amount,
             rgb_asset_id: rgb_asset_id.into(),
             merkle_proofs: vec![],
+            mint_ancestors: vec![],
         })),
     }
 }
@@ -517,6 +518,7 @@ async fn grpc_sign_psbt_roundtrip() {
         psbt_output_amount: 0,
         rgb_asset_id: String::new(),
         consignment: vec![],
+        mint_ancestors: vec![],
         consignment_hash: vec![],
     };
 

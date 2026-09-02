@@ -2,6 +2,8 @@ use bitcoin::psbt::Psbt;
 
 #[cfg(feature = "rgb-validation")]
 use super::flow;
+#[cfg(all(test, feature = "bfa-mint"))]
+use super::validation::bfa;
 #[cfg(feature = "rgb-validation")]
 use super::validation::{ifa, ValidatedConsignment};
 use crate::error::{EnclaveError, Result};
@@ -879,6 +881,7 @@ mod tests {
                 asset_output_amount,
                 outputs,
                 burned_asset_amount: None,
+                burn_recipient: None,
             }
         }
 
@@ -1359,6 +1362,22 @@ mod tests {
             assert!(
                 err.to_string().contains("mint-RGB amount mismatch"),
                 "expected over-mint rejection, got: {err}"
+            );
+        }
+
+        /// A BFA mint takes the mint rule, so a surplus over the credited amount is
+        /// refused. Under the transfer rule it would pass as change.
+        #[cfg(feature = "bfa-mint")]
+        #[test]
+        fn bfa_mint_surplus_is_refused_like_an_inflation_surplus() {
+            let psbt = psbt_with_two_inputs();
+            let mut validated = validated_for(&psbt, 1_000);
+            edit_signing_transition(&mut validated, |t| t.transition_type = bfa::TS_BRIDGE);
+            let err = validate_psbt_anchors_transition(&psbt, &validated, 900, 0, &owns_vout_1)
+                .unwrap_err();
+            assert!(
+                err.to_string().contains("mint-RGB amount mismatch"),
+                "a bridge mint must use the equality rule, got: {err}"
             );
         }
 

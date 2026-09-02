@@ -421,6 +421,8 @@ mod tests {
             // EVM destinations never reach the send-RGB PSBT bind.
             #[cfg(feature = "rgb-validation")]
             self_owned_psbt_outputs: None,
+            #[cfg(feature = "bfa-mint")]
+            bridge_events: &[],
         };
         f(&ctx)
     }

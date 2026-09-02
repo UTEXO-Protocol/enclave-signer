@@ -36,6 +36,16 @@ codegen-units = 1
 #
 # These revs must match parent/Cargo.toml exactly. Bump both together.
 [patch.crates-io]
-rgb-ops = { git = "https://github.com/rgb-protocol/rgb-ops", rev = "5308b9d46c91857513ff5be2459992264687632b" }
-rgb-invoicing = { git = "https://github.com/rgb-protocol/rgb-ops", rev = "5308b9d46c91857513ff5be2459992264687632b" }
+# BFA lives on the `s/bfa` branches of the RGB crates, mirrored into our org.
+# These replace the previous rgb-protocol rev pins, which carry no BFA schema.
+#
+# The mirrors are cut from 0.11.1-rc.10 while this crate previously resolved
+# rc.11, so the patch is ignored (cargo only warns) until the lock is updated
+# with `cargo update -p rgb-ops -p rgb-consensus -p rgb-invoicing -p rgb-schemas`.
+# That downgrade also pulls electrum-client 0.24 - see the REVERT note in
+# enclave/src/networks/rgb/validation.rs.
+rgb-consensus = { git = "https://github.com/UTEXO-Protocol/rgb-consensus-s-bfa", rev = "68a1470e22ae4bb6a38205404e484b264b4139ee" }
+rgb-ops = { git = "https://github.com/UTEXO-Protocol/rgb-ops-s-bfa", rev = "3bcc7d98d759a8b71bf94ad4a36371dcb7bf392b" }
+rgb-invoicing = { git = "https://github.com/UTEXO-Protocol/rgb-ops-s-bfa", rev = "3bcc7d98d759a8b71bf94ad4a36371dcb7bf392b" }
+rgb-schemas = { git = "https://github.com/UTEXO-Protocol/rgb-schemas-s-bfa", rev = "af4f91e6807a9680ab195c28719197b7811ac5d6" }
 rgb-strict-encoding = { git = "https://github.com/rgb-protocol/rgb-strict-encoding", rev = "7698a5e96a2a27d5bfa4cd3560da0e8af8e4a18a" }
