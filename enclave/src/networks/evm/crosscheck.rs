@@ -436,9 +436,13 @@ mod tests {
     }
 
     fn mock_funds_out_calldata_with_proof(amount: u64, proof: Bytes) -> Vec<u8> {
+        mock_funds_out_calldata_to(Address::ZERO, amount, proof)
+    }
+
+    fn mock_funds_out_calldata_to(recipient: Address, amount: u64, proof: Bytes) -> Vec<u8> {
         fundsOutCall {
             params: FundsOutParams {
-                recipient: Address::ZERO,
+                recipient,
                 amount: U256::from(amount),
                 burnId: U256::ZERO,
                 sourceChainId: U256::ZERO,
@@ -449,6 +453,28 @@ mod tests {
             },
         }
         .abi_encode()
+    }
+
+    /// A `ValidatedConsignment` carrying nothing but `transition` as its last.
+    /// The `fundsOut` cross-checks read `last_transition` only; the per-witness
+    /// grouping is the send-RGB PSBT bind's input.
+    #[cfg(feature = "rgb-validation")]
+    fn validated_with_last(
+        transition: crate::networks::rgb::validation::TransitionSummary,
+    ) -> crate::networks::rgb::validation::ValidatedConsignment {
+        crate::networks::rgb::validation::ValidatedConsignment {
+            contract_id: "rgb:test".into(),
+            chain_net: "bc".into(),
+            witness_txids: vec![],
+            all_op_ids: vec![transition.op_id.clone()],
+            mint_op_ids: vec![],
+            last_transition: Some(transition),
+            last_witness_txid: None,
+            last_transfer_witness_prevouts: None,
+            last_transfer_op_id: None,
+            non_mined_witness_txids: vec![],
+            transitions_by_witness: vec![],
+        }
     }
 
     /// The tuple encoding must round-trip through the decoder the cross-checks
@@ -506,41 +532,9 @@ mod tests {
     #[cfg(feature = "rgb-mint-burn")]
     mod burn {
         use super::*;
-        use crate::networks::rgb::validation::{ifa, TransitionSummary, ValidatedConsignment};
+        use crate::networks::rgb::validation::{ifa, TransitionSummary};
 
         const RECIPIENT: [u8; 20] = [0x42; 20];
-
-        fn calldata_to(recipient: Address, amount: u64) -> Vec<u8> {
-            fundsOutCall {
-                params: FundsOutParams {
-                    recipient,
-                    amount: U256::from(amount),
-                    burnId: U256::ZERO,
-                    sourceChainId: U256::ZERO,
-                    destinationChainId: U256::ZERO,
-                    sourceAddress: String::new(),
-                    proof: Bytes::new(),
-                    settlementData: Bytes::new(),
-                },
-            }
-            .abi_encode()
-        }
-
-        fn validated_with_last(transition: TransitionSummary) -> ValidatedConsignment {
-            ValidatedConsignment {
-                contract_id: "rgb:test".into(),
-                chain_net: "bc".into(),
-                witness_txids: vec![],
-                all_op_ids: vec![transition.op_id.clone()],
-                mint_op_ids: vec![],
-                last_transition: Some(transition),
-                last_witness_txid: None,
-                last_transfer_witness_prevouts: None,
-                last_transfer_op_id: None,
-                non_mined_witness_txids: vec![],
-                transitions_by_witness: vec![],
-            }
-        }
 
         fn burn_transition(burned: Option<u64>, recipient: Option<Vec<u8>>) -> TransitionSummary {
             TransitionSummary {
@@ -565,7 +559,7 @@ mod tests {
 
         #[test]
         fn passes_when_the_burn_names_the_calldata_recipient() {
-            let cd = calldata_to(Address::from(RECIPIENT), 1000);
+            let cd = mock_funds_out_calldata_to(Address::from(RECIPIENT), 1000, Bytes::new());
             let validated =
                 validated_with_last(burn_transition(Some(1000), Some(padded(RECIPIENT))));
             assert!(validate_funds_out_burn_recipient(&params_of(&cd), &validated).is_ok());
@@ -573,7 +567,7 @@ mod tests {
 
         #[test]
         fn rejects_an_ifa_burn_that_names_no_recipient() {
-            let cd = calldata_to(Address::from(RECIPIENT), 1000);
+            let cd = mock_funds_out_calldata_to(Address::from(RECIPIENT), 1000, Bytes::new());
             let validated = validated_with_last(burn_transition(Some(1000), None));
             assert!(validate_funds_out_burn_recipient(&params_of(&cd), &validated).is_err());
         }
@@ -582,7 +576,7 @@ mod tests {
         /// burner did not commit to.
         #[test]
         fn rejects_a_recipient_the_burn_did_not_commit_to() {
-            let cd = calldata_to(Address::from([0x99; 20]), 1000);
+            let cd = mock_funds_out_calldata_to(Address::from([0x99; 20]), 1000, Bytes::new());
             let validated =
                 validated_with_last(burn_transition(Some(1000), Some(padded(RECIPIENT))));
             assert!(validate_funds_out_burn_recipient(&params_of(&cd), &validated).is_err());
@@ -593,7 +587,7 @@ mod tests {
         /// target nobody signed.
         #[test]
         fn rejects_a_recipient_with_a_dirty_high_half() {
-            let cd = calldata_to(Address::from(RECIPIENT), 1000);
+            let cd = mock_funds_out_calldata_to(Address::from(RECIPIENT), 1000, Bytes::new());
             let mut dirty = padded(RECIPIENT);
             dirty[0] = 1;
             let validated = validated_with_last(burn_transition(Some(1000), Some(dirty)));
@@ -603,25 +597,7 @@ mod tests {
 
     mod transfer {
         use super::*;
-        use crate::networks::rgb::validation::{ifa, TransitionSummary, ValidatedConsignment};
-
-        fn validated_with_last(transition: TransitionSummary) -> ValidatedConsignment {
-            ValidatedConsignment {
-                contract_id: "rgb:test".into(),
-                chain_net: "bc".into(),
-                witness_txids: vec![],
-                all_op_ids: vec![transition.op_id.clone()],
-                mint_op_ids: vec![],
-                last_transition: Some(transition),
-                last_witness_txid: None,
-                last_transfer_witness_prevouts: None,
-                last_transfer_op_id: None,
-                non_mined_witness_txids: vec![],
-                // The fundsOut cross-check reads `last_transition` only; the
-                // per-witness grouping is the send-RGB PSBT bind's input.
-                transitions_by_witness: vec![],
-            }
-        }
+        use crate::networks::rgb::validation::{ifa, TransitionSummary};
 
         /// The last transition this build's RGB flow accepts on a `fundsOut`,
         /// carrying `amount` where that flow reads it: a Transfer's output

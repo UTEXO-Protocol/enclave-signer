@@ -147,16 +147,9 @@ pub fn validate_destination_anchor(
                 .into(),
         ));
     }
-    // Aggregate size cap (operator-configurable via `MAX_CONSIGNMENT_BYTES`),
-    // before the keccak hash and the rgbstd parse below - the destination
-    // consignment is otherwise bounded only by the generic 4 MB wire frame.
-    if destination.consignment.len() > ctx.bridge_config.max_consignment_bytes {
-        return Err(EnclaveError::CrossCheck(format!(
-            "send-RGB consignment too large: {} bytes (max {})",
-            destination.consignment.len(),
-            ctx.bridge_config.max_consignment_bytes
-        )));
-    }
+    // The destination consignment is otherwise bounded only by the generic
+    // 4 MB wire frame.
+    validation::assert_consignment_size(&destination.consignment, ctx.bridge_config, "send-RGB")?;
     // Integrity, not authorization: the listener
     // controls both `consignment` and `consignment_hash`, so a match only
     // proves the wire copy is intact. Authorization is the rgbstd validation
@@ -185,10 +178,7 @@ pub fn validate_destination_anchor(
     })?;
     // A BFA mint cannot be validated at all without the event `cea` checks it
     // against, so the caller verified the EVM lock before reaching here.
-    #[cfg(feature = "bfa-mint")]
     let validated = validator.validate_consignment(&destination.consignment, ctx.bridge_events)?;
-    #[cfg(not(feature = "bfa-mint"))]
-    let validated = validator.validate_consignment(&destination.consignment, &[])?;
 
     if validated.contract_id != destination.asset_id {
         return Err(EnclaveError::CrossCheck(format!(
@@ -510,7 +500,6 @@ mod tests {
                 rgb_validator: Some(&validator),
                 header_chain: &chain,
                 self_owned_psbt_outputs: Some(&self_owned),
-                #[cfg(feature = "bfa-mint")]
                 bridge_events: &[],
             };
             validate_destination_anchor(destination, 0, 0, &ctx).map(|(amount, _)| amount)

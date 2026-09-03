@@ -151,6 +151,13 @@ impl ParentAdapterService {
         }
     }
 
+    fn enclave_mint_ancestor(ancestor: grpc_proto::MintAncestor) -> enclave_proto::MintAncestor {
+        enclave_proto::MintAncestor {
+            op_id: ancestor.op_id,
+            tx_hash: ancestor.tx_hash,
+        }
+    }
+
     fn enclave_source_network(
         source: SourceProof,
     ) -> Result<enclave_proto::sign_request::SourceNetwork, Status> {
@@ -194,10 +201,7 @@ impl ParentAdapterService {
                     mint_ancestors: rgb
                         .mint_ancestors
                         .into_iter()
-                        .map(|a| enclave_proto::MintAncestor {
-                            op_id: a.op_id,
-                            tx_hash: a.tx_hash,
-                        })
+                        .map(Self::enclave_mint_ancestor)
                         .collect(),
                 }),
             ),
@@ -252,10 +256,7 @@ impl ParentAdapterService {
                         mint_ancestors: payload
                             .mint_ancestors
                             .into_iter()
-                            .map(|a| enclave_proto::MintAncestor {
-                                op_id: a.op_id,
-                                tx_hash: a.tx_hash,
-                            })
+                            .map(Self::enclave_mint_ancestor)
                             .collect(),
                     },
                 )

@@ -63,10 +63,7 @@ pub fn validate_source(
     // A burn consignment carries its whole mint ancestry, and every one of those
     // mint transitions ends in `cea` - consensus re-runs them, so it needs the
     // locks the enclave verified for itself.
-    #[cfg(feature = "bfa-mint")]
     let validated = validator.validate_consignment(&source.consignment, ctx.bridge_events)?;
-    #[cfg(not(feature = "bfa-mint"))]
-    let validated = validator.validate_consignment(&source.consignment, &[])?;
 
     if validated.contract_id.is_empty() {
         return Err(EnclaveError::CrossCheck(
@@ -122,6 +119,25 @@ pub fn validate_source(
     Ok(validated)
 }
 
+/// Aggregate size/compute cap (operator-configurable via
+/// `MAX_CONSIGNMENT_BYTES`), enforced before the keccak hash and the rgbstd
+/// parse so a request cannot force disproportionate work while staying under
+/// every per-field cap.
+///
+/// `label` names the direction in the rejection, e.g. `"RGB source"` or
+/// `"send-RGB"`. Shared so that lowering the cap cannot produce a different
+/// message depending on which caller happens to run first.
+pub fn assert_consignment_size(consignment: &[u8], cfg: &BridgeConfig, label: &str) -> Result<()> {
+    if consignment.len() > cfg.max_consignment_bytes {
+        return Err(EnclaveError::CrossCheck(format!(
+            "{label} consignment too large: {} bytes (max {})",
+            consignment.len(),
+            cfg.max_consignment_bytes
+        )));
+    }
+    Ok(())
+}
+
 fn validate_source_payload(source: &RgbSource, cfg: &BridgeConfig) -> Result<()> {
     if source.consignment.is_empty() {
         return Err(EnclaveError::CrossCheck(
@@ -129,16 +145,7 @@ fn validate_source_payload(source: &RgbSource, cfg: &BridgeConfig) -> Result<()>
                 .into(),
         ));
     }
-    // Aggregate size/compute caps, enforced before the keccak hash and the
-    // rgbstd parse so a request cannot force disproportionate work while
-    // staying under every per-field cap.
-    if source.consignment.len() > cfg.max_consignment_bytes {
-        return Err(EnclaveError::CrossCheck(format!(
-            "RGB source consignment too large: {} bytes (max {})",
-            source.consignment.len(),
-            cfg.max_consignment_bytes
-        )));
-    }
+    assert_consignment_size(&source.consignment, cfg, "RGB source")?;
     if source.merkle_proofs.len() > cfg.max_merkle_proofs {
         return Err(EnclaveError::CrossCheck(format!(
             "RGB source carries too many merkle proofs: {} (max {})",
@@ -252,27 +259,74 @@ fn decode_opid(hex_opid: &str) -> Result<[u8; 32]> {
 }
 
 /// What the enclave must verify on-chain before RGB consensus may see a BFA
-/// mint: which `FundsIn` logs to fetch, and which contract may have emitted
-/// them.
+/// operation: which `FundsIn` logs to fetch, and which contract may have
+/// emitted them.
+///
+/// Both directions read the same thing. A mint verifies one lock because it
+/// *is* one mint, but consensus re-runs the script of every transition in the
+/// consignment, so on either path every historical mint's `cea` needs its own
+/// verified event - and the burn path carries a whole ancestry of them. The
+/// mint direction additionally needs [`BfaBinding::terminal_opid`].
 #[cfg(feature = "bfa-mint")]
-pub struct BfaMintBinding {
+pub struct BfaBinding {
     /// Every `TS_BRIDGE` OpId in the consignment, in consignment order.
     /// Untrusted - each only selects the log to verify; the ether extension
     /// re-binds it to the operation inside consensus.
     pub mint_opids: Vec<[u8; 32]>,
-    /// The mint this request authorises: the OpId of the consignment's last
-    /// transition. It is the only one bound to the request's own deposit -
-    /// every other entry is an ancestor and must carry its own.
-    pub terminal_opid: [u8; 32],
-    /// `bridgeLocation` exactly as the asset's genesis writes it.
+    /// `bridgeLocation` exactly as the asset's genesis writes it, to compare
+    /// against the enclave's own `funds_in_contract` pin before any log is
+    /// trusted.
     pub bridge_location: String,
+    /// The consignment's last transition, or `None` when it has none. Only the
+    /// mint direction cares, via [`Self::terminal_opid`].
+    last_transition: Option<TransitionSummary>,
 }
 
-/// Read a BFA mint's binding out of raw consignment bytes, before validation.
-/// `Ok(None)` for every other schema, so the swap path is untouched.
 #[cfg(feature = "bfa-mint")]
-pub fn bfa_mint_binding(consignment_bytes: &[u8]) -> Result<Option<BfaMintBinding>> {
-    // Bytes that do not load are not a BFA mint as far as this stage is
+impl BfaBinding {
+    /// The mint this request authorises: the OpId of the consignment's last
+    /// transition. It is the only one bound to the request's own deposit -
+    /// every other entry in `mint_opids` is an ancestor and must carry its own.
+    ///
+    /// Mint-direction only, and every failure refuses the signature: a
+    /// consignment whose last transition is not a bridge mint, or whose last
+    /// transition is absent from the transition list, gives no answer to "which
+    /// deposit pays for this?" and must not be guessed at.
+    pub fn terminal_opid(&self) -> Result<[u8; 32]> {
+        let last = self
+            .last_transition
+            .as_ref()
+            .ok_or_else(|| EnclaveError::CrossCheck("BFA consignment has no transitions".into()))?;
+        if last.transition_type != bfa::TS_BRIDGE {
+            return Err(EnclaveError::CrossCheck(format!(
+                "BFA consignment's last transition is type {}, expected the bridge mint {}",
+                last.transition_type,
+                bfa::TS_BRIDGE
+            )));
+        }
+        let terminal_opid = decode_opid(&last.op_id)?;
+        // The terminal transition decides which deposit pays for this mint, so
+        // it must be one of the transitions actually in the consignment.
+        if !self.mint_opids.contains(&terminal_opid) {
+            return Err(EnclaveError::CrossCheck(
+                "BFA consignment's last transition is a bridge mint but is absent from the \
+                 transition list - refusing to guess which mint this request authorises"
+                    .into(),
+            ));
+        }
+        Ok(terminal_opid)
+    }
+}
+
+/// Read a BFA operation's binding out of raw consignment bytes, before
+/// validation. `Ok(None)` for every other schema, so the swap path is untouched.
+///
+/// A mint spends the bridge right its predecessor rolled forward, so mint N
+/// carries mints 1..N-1 in the history consensus re-runs `cea` over. Each one
+/// needs its own event, so each needs its own verified lock.
+#[cfg(feature = "bfa-mint")]
+pub fn bfa_binding(consignment_bytes: &[u8]) -> Result<Option<BfaBinding>> {
+    // Bytes that do not load are not a BFA operation as far as this stage is
     // concerned; `validate_consignment` reports the parse failure on the path
     // that owns it, so that ordering of error messages is preserved.
     let Ok(transfer) = Transfer::load(Cursor::new(consignment_bytes)) else {
@@ -284,85 +338,17 @@ pub fn bfa_mint_binding(consignment_bytes: &[u8]) -> Result<Option<BfaMintBindin
 
     // The flat parser, not `read_last_transfer_witness`: that one reports the
     // OpId rgbstd derived while walking a transfer it is about to validate, and
-    // here the OpId is needed *before* validation, to pick the log to verify.
+    // here the OpIds are needed *before* validation, to pick the logs to verify.
     let (_, mint_op_ids, last_transition, _) = extract_transition_summary(consignment_bytes)?;
 
-    let last = last_transition
-        .ok_or_else(|| EnclaveError::CrossCheck("BFA consignment has no transitions".into()))?;
-    if last.transition_type != bfa::TS_BRIDGE {
-        return Err(EnclaveError::CrossCheck(format!(
-            "BFA consignment's last transition is type {}, expected the bridge mint {}",
-            last.transition_type,
-            bfa::TS_BRIDGE
-        )));
-    }
-    let terminal_opid = decode_opid(&last.op_id)?;
-
-    // A mint spends the bridge right its predecessor rolled forward, so mint N
-    // carries mints 1..N-1 in the history consensus re-runs `cea` over. Each one
-    // needs its own event, so each needs its own verified lock.
-    let mut mint_opids = Vec::with_capacity(mint_op_ids.len());
-    for hex_opid in &mint_op_ids {
-        mint_opids.push(decode_opid(hex_opid)?);
-    }
-    // The terminal transition decides which deposit pays for this mint, so it
-    // must be one of the transitions actually in the consignment.
-    if !mint_opids.contains(&terminal_opid) {
-        return Err(EnclaveError::CrossCheck(
-            "BFA consignment's last transition is a bridge mint but is absent from the \
-             transition list - refusing to guess which mint this request authorises"
-                .into(),
-        ));
-    }
-
-    Ok(Some(BfaMintBinding {
-        mint_opids,
-        terminal_opid,
+    Ok(Some(BfaBinding {
+        mint_opids: mint_op_ids
+            .iter()
+            .map(|hex_opid| decode_opid(hex_opid))
+            .collect::<Result<Vec<_>>>()?,
         bridge_location: genesis_bridge_location(&transfer)?,
+        last_transition,
     }))
-}
-
-/// Every `TS_BRIDGE` transition a BFA consignment descends from, plus the
-/// asset's genesis `bridgeLocation`.
-///
-/// The mint direction verifies one lock because it *is* one mint. A burn is
-/// different: consensus re-runs the script of every transition in the
-/// consignment, so every historical mint's `cea` needs its own verified event.
-/// This is the flat parse, deliberately - the OpIds are needed *before*
-/// validation, to pick which logs to fetch.
-#[cfg(feature = "bfa-mint")]
-pub fn bfa_ancestry_binding(consignment_bytes: &[u8]) -> Result<Option<BfaAncestryBinding>> {
-    let Ok(transfer) = Transfer::load(Cursor::new(consignment_bytes)) else {
-        return Ok(None);
-    };
-    if transfer.genesis.schema_id != schemata::BFA_SCHEMA_ID {
-        return Ok(None);
-    }
-
-    let (_, mint_op_ids, _, _) = extract_transition_summary(consignment_bytes)?;
-
-    let mut opids = Vec::with_capacity(mint_op_ids.len());
-    for hex_opid in &mint_op_ids {
-        opids.push(decode_opid(hex_opid)?);
-    }
-
-    Ok(Some(BfaAncestryBinding {
-        mint_opids: opids,
-        bridge_location: genesis_bridge_location(&transfer)?,
-    }))
-}
-
-/// What the enclave must verify on-chain before RGB consensus may see a BFA
-/// burn: every mint in the consignment's ancestry, and the contract allowed to
-/// have emitted their `FundsIn` logs.
-#[cfg(feature = "bfa-mint")]
-pub struct BfaAncestryBinding {
-    /// OpIds of every `TS_BRIDGE` transition in the consignment. Untrusted -
-    /// they only select which logs to fetch; each one is then verified.
-    pub mint_opids: Vec<[u8; 32]>,
-    /// The asset's genesis `bridgeLocation`, to compare against the enclave's
-    /// own `funds_in_contract` pin before any log is trusted.
-    pub bridge_location: String,
 }
 
 /// Read the asset's `bridgeLocation` straight out of the genesis global state.
@@ -1228,7 +1214,7 @@ type LastTransferBinding = (Option<Vec<bitcoin::OutPoint>>, Option<[u8; 32]>);
 /// Mint transitions - the ones that map 1:1 to an EVM lock record. BFA's
 /// `TS_BRIDGE` counts only in a `bfa-mint` build, so a swap enclave classifies
 /// exactly what it classified before BFA existed.
-pub(super) fn is_mint_transition(transition_type: u16) -> bool {
+pub fn is_mint_transition(transition_type: u16) -> bool {
     #[cfg(feature = "bfa-mint")]
     {
         if transition_type == bfa::TS_BRIDGE {
@@ -1288,13 +1274,6 @@ fn extract_transition_summary(
         .map(|t: &TransitionInfo| t.op_id.clone())
         .collect();
 
-    let last_transition = transfer
-        .witnesses
-        .last()
-        .and_then(|w| w.transitions.last())
-        .map(transition_summary)
-        .transpose()?;
-
     // Every transition, grouped by the witness tx that commits it. One tx can
     // carry several, so reading only `last_transition` would leave the rest of
     // the value it moves unbound. The PSBT cross-check binds the whole group.
@@ -1306,6 +1285,13 @@ fn extract_transition_summary(
             w.transitions.iter().map(transition_summary).collect();
         transitions_by_witness.push((txid, summaries?));
     }
+
+    // Taken from the group rather than summarised a second time - it is the
+    // last witness's last transition either way.
+    let last_transition = transitions_by_witness
+        .last()
+        .and_then(|(_, summaries)| summaries.last())
+        .cloned();
 
     Ok((
         all_op_ids,
@@ -1382,72 +1368,71 @@ fn transition_summary(t: &TransitionInfo) -> Result<TransitionSummary> {
     })
 }
 
-/// Walk the rgbstd `Transfer` to the last witness bundle's last known
-/// transition and read the IFA `MS_BURNED_ASSET` value from its metadata. The
-/// flat parser drops `Transition.metadata`, so the unlock cross-check gets the
-/// destroyed amount from here.
+/// Raw metadata value `meta_type` carries on the last witness bundle's last
+/// known transition, if any. The flat parser drops `Transition.metadata`, so
+/// the cross-checks that need it walk the rgbstd `Transfer` through here.
+///
+/// `None` when the transfer has no bundle, that bundle no known transition, or
+/// the transition no value under that key - all three are "not declared" rather
+/// than errors, and each caller decides what a missing value means for it.
+fn last_transition_meta(transfer: &Transfer, meta_type: u16) -> Option<&[u8]> {
+    let known = transfer
+        .bundles
+        .iter()
+        .last()?
+        .bundle()
+        .known_transitions
+        .iter()
+        .last()?;
+    let key = MetaType::with(meta_type);
+    known
+        .transition
+        .metadata
+        .iter()
+        .find(|(mt, _)| **mt == key)
+        .map(|(_, mv)| mv.as_unconfined().as_slice())
+}
+
+/// The BFA `MS_BURN_RECIPIENT` metadata on the last transition - the 32 bytes
+/// naming where the redemption is owed.
+///
+/// `Ok(None)` when the key is absent (an IFA burn declares `burnedInflation`
+/// there instead), and `Err` when the blob is not exactly 32 bytes, because a
+/// release must never be pointed at a truncated or padded address.
+fn read_last_transition_burn_recipient(transfer: &Transfer) -> Result<Option<Vec<u8>>> {
+    let Some(raw) = last_transition_meta(transfer, bfa::MS_BURN_RECIPIENT) else {
+        return Ok(None);
+    };
+    if raw.len() != 32 {
+        return Err(EnclaveError::CrossCheck(format!(
+            "MS_BURN_RECIPIENT metadata is {} bytes, expected 32",
+            raw.len()
+        )));
+    }
+    Ok(Some(raw.to_vec()))
+}
+
+/// The IFA `MS_BURNED_ASSET` metadata on the last transition - the destroyed
+/// amount the unlock cross-check binds against.
 ///
 /// The value is a strict-encoded `rgbstd::Amount` (`u64`, 8 bytes,
 /// little-endian). Decoded manually rather than via
 /// `StrictDeserialize::from_strict_serialized`, to avoid threading the
 /// `rgb-strict-encoding`-as-`strict_encoding` rename through our deps.
 ///
-/// Returns `Ok(None)` when there is no last transition or the metadata key is
-/// absent (which for a `TS_BURN` implies a schema mismatch), and `Err` when the
-/// blob is the wrong size for a `u64`.
-/// Walk to the last known transition and read the BFA `MS_BURN_RECIPIENT`
-/// value from its metadata - the 32 bytes naming where the redemption is owed.
-///
-/// Returns `Ok(None)` when there is no last transition or the key is absent
-/// (an IFA burn declares `burnedInflation` there instead), and `Err` when the
-/// blob is not exactly 32 bytes, because a release must never be pointed at a
-/// truncated or padded address.
-fn read_last_transition_burn_recipient(transfer: &Transfer) -> Result<Option<Vec<u8>>> {
-    let Some(last_bundle) = transfer.bundles.iter().last() else {
-        return Ok(None);
-    };
-    let Some(known) = last_bundle.bundle().known_transitions.iter().last() else {
-        return Ok(None);
-    };
-    let recipient_meta_key = MetaType::with(bfa::MS_BURN_RECIPIENT);
-    for (mt, mv) in &known.transition.metadata {
-        if *mt != recipient_meta_key {
-            continue;
-        }
-        let raw: &[u8] = mv.as_unconfined().as_slice();
-        if raw.len() != 32 {
-            return Err(EnclaveError::CrossCheck(format!(
-                "MS_BURN_RECIPIENT metadata is {} bytes, expected 32",
-                raw.len()
-            )));
-        }
-        return Ok(Some(raw.to_vec()));
-    }
-    Ok(None)
-}
-
+/// `Ok(None)` when the key is absent (which for a `TS_BURN` implies a schema
+/// mismatch), and `Err` when the blob is the wrong size for a `u64`.
 fn read_last_transition_burned_asset(transfer: &Transfer) -> Result<Option<u64>> {
-    let Some(last_bundle) = transfer.bundles.iter().last() else {
+    let Some(raw) = last_transition_meta(transfer, ifa::MS_BURNED_ASSET) else {
         return Ok(None);
     };
-    let Some(known) = last_bundle.bundle().known_transitions.iter().last() else {
-        return Ok(None);
-    };
-    let burned_meta_key = MetaType::with(ifa::MS_BURNED_ASSET);
-    for (mt, mv) in &known.transition.metadata {
-        if *mt != burned_meta_key {
-            continue;
-        }
-        let raw: &[u8] = mv.as_unconfined().as_slice();
-        let bytes: [u8; 8] = raw.try_into().map_err(|_| {
-            EnclaveError::CrossCheck(format!(
-                "MS_BURNED_ASSET metadata is {} bytes, expected 8 (strict-encoded u64)",
-                raw.len()
-            ))
-        })?;
-        return Ok(Some(u64::from_le_bytes(bytes)));
-    }
-    Ok(None)
+    let bytes: [u8; 8] = raw.try_into().map_err(|_| {
+        EnclaveError::CrossCheck(format!(
+            "MS_BURNED_ASSET metadata is {} bytes, expected 8 (strict-encoded u64)",
+            raw.len()
+        ))
+    })?;
+    Ok(Some(u64::from_le_bytes(bytes)))
 }
 
 fn transition_output(assignment_type: u16, e: &FungibleEntry) -> Result<TransitionOutput> {
@@ -1847,38 +1832,73 @@ mod tests {
         assert!(decode_bridge_location(&[0, 1, 0xff]).is_err());
     }
 
-    /// The swap path must be untouched: a non-BFA consignment yields no binding
-    /// and so triggers no EVM lookup.
+    /// The schema gate the BFA pre-pass applies on both directions: an IFA or
+    /// swap consignment must trigger no EVM lookup and no ancestor requirement,
+    /// or every non-BFA mint and burn on the stand would start failing.
     #[cfg(feature = "bfa-mint")]
     #[test]
-    fn no_mint_binding_for_a_non_bfa_consignment() {
-        assert!(bfa_mint_binding(TRANSFER_FIXTURE).unwrap().is_none());
+    fn no_binding_for_a_non_bfa_consignment() {
+        assert!(bfa_binding(TRANSFER_FIXTURE).unwrap().is_none());
     }
 
     /// Undecodable bytes are left to `validate_consignment`, which owns that
-    /// error - reporting it from the mint pre-pass would reorder the messages
-    /// every other path already asserts on.
+    /// error - reporting it from the pre-pass would reorder the messages every
+    /// other path already asserts on.
     #[cfg(feature = "bfa-mint")]
     #[test]
-    fn mint_binding_defers_undecodable_bytes() {
-        assert!(bfa_mint_binding(b"not-a-consignment").unwrap().is_none());
+    fn binding_defers_undecodable_bytes() {
+        assert!(bfa_binding(b"not-a-consignment").unwrap().is_none());
     }
 
-    /// The burn ancestry pre-pass shares the mint pre-pass's schema gate: an
-    /// IFA or swap consignment must trigger no EVM lookup and no ancestor
-    /// requirement, or every non-BFA burn on the stand would start failing.
+    /// A `BfaBinding` whose last transition is `last`, over the given mint set.
     #[cfg(feature = "bfa-mint")]
-    #[test]
-    fn no_ancestry_binding_for_a_non_bfa_consignment() {
-        assert!(bfa_ancestry_binding(TRANSFER_FIXTURE).unwrap().is_none());
+    fn binding_with(mint_opids: Vec<[u8; 32]>, last: Option<(u16, [u8; 32])>) -> BfaBinding {
+        BfaBinding {
+            mint_opids,
+            bridge_location: "0x0".into(),
+            last_transition: last.map(|(transition_type, opid)| TransitionSummary {
+                op_id: hex::encode(opid),
+                transition_type,
+                total_output_amount: 0,
+                asset_output_amount: 0,
+                outputs: vec![],
+                burned_asset_amount: None,
+                burn_recipient: None,
+            }),
+        }
     }
 
+    /// The happy path: the last transition is a bridge mint that is also in the
+    /// mint list, so it names the deposit this request authorises.
     #[cfg(feature = "bfa-mint")]
     #[test]
-    fn ancestry_binding_defers_undecodable_bytes() {
-        assert!(bfa_ancestry_binding(b"not-a-consignment")
-            .unwrap()
-            .is_none());
+    fn terminal_opid_is_the_last_bridge_mint() {
+        let b = binding_with(vec![[1; 32], [2; 32]], Some((bfa::TS_BRIDGE, [2; 32])));
+        assert_eq!(b.terminal_opid().unwrap(), [2; 32]);
+    }
+
+    /// No transitions means no answer to "which deposit pays for this?".
+    #[cfg(feature = "bfa-mint")]
+    #[test]
+    fn terminal_opid_refuses_an_empty_consignment() {
+        assert!(binding_with(vec![], None).terminal_opid().is_err());
+    }
+
+    /// A BFA consignment ending in a non-bridge transition is not a mint request.
+    #[cfg(feature = "bfa-mint")]
+    #[test]
+    fn terminal_opid_refuses_a_non_bridge_last_transition() {
+        let b = binding_with(vec![[1; 32]], Some((ifa::TS_BURN, [1; 32])));
+        assert!(b.terminal_opid().is_err());
+    }
+
+    /// The last transition is a bridge mint, but the flat parser did not list it
+    /// among the mints - refuse rather than guess.
+    #[cfg(feature = "bfa-mint")]
+    #[test]
+    fn terminal_opid_refuses_a_last_mint_absent_from_the_list() {
+        let b = binding_with(vec![[1; 32]], Some((bfa::TS_BRIDGE, [9; 32])));
+        assert!(b.terminal_opid().is_err());
     }
 
     #[cfg(feature = "bfa-mint")]
@@ -2346,7 +2366,6 @@ mod tests {
                 header_chain: &chain,
                 // Source validation never reaches the destination PSBT bind.
                 self_owned_psbt_outputs: None,
-                #[cfg(feature = "bfa-mint")]
                 bridge_events: &[],
             };
             validate_source(source, &ctx)

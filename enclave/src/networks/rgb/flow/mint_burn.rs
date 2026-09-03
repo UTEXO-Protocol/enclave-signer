@@ -6,9 +6,7 @@
 //! contract these items keep.
 
 use crate::error::{EnclaveError, Result};
-#[cfg(feature = "bfa-mint")]
-use crate::networks::rgb::validation::bfa;
-use crate::networks::rgb::validation::{ifa, TransitionSummary};
+use crate::networks::rgb::validation::{ifa, is_mint_transition, TransitionSummary};
 
 /// The mint shapes this build signs, spelled out for rejection messages.
 #[cfg(feature = "bfa-mint")]
@@ -25,19 +23,14 @@ pub const FLOW_NAME: &str = "mint/burn";
 /// Also decides whether the consignment parser bothers extracting the last
 /// bundle's witness prevouts ([`crate::networks::rgb::validation`]).
 ///
-/// BFA's `TS_BRIDGE` joins IFA `Inflation` only in a `bfa-mint` build. It is a
-/// mint in every way that matters here - it creates units against an EVM lock -
-/// so it takes the mint rules below, in particular the exact-equality amount
-/// bind that refuses an over-mint. A build without the feature has no code path
-/// that admits it at all.
+/// The signing shape of this flow *is* the mint shape, so this is
+/// [`is_mint_transition`] rather than a second list that could drift from it.
+/// In particular BFA's `TS_BRIDGE`, which joins IFA `Inflation` only in a
+/// `bfa-mint` build, takes the mint rules below - notably the exact-equality
+/// amount bind that refuses an over-mint. A build without the feature has no
+/// code path that admits it at all.
 pub fn is_signing_transition(transition_type: u16) -> bool {
-    #[cfg(feature = "bfa-mint")]
-    {
-        if transition_type == bfa::TS_BRIDGE {
-            return true;
-        }
-    }
-    transition_type == ifa::TS_INFLATION
+    is_mint_transition(transition_type)
 }
 
 /// Gate on the consignment's last transition before the PSBT is bound to it.
