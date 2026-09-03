@@ -142,6 +142,24 @@ message RgbSource {
   bytes consignment_hash = 5; // keccak256(consignment).
   repeated MerkleProofEntry merkle_proofs = 6; // SPV proofs for witness transactions.
   uint64 commission = 7; // Commission reported by the source event.
+  // Every historical BFA mint the consignment descends from, paired with the
+  // EVM transaction that authorised it.
+  //
+  // A burn consignment necessarily carries its whole mint ancestry, and each
+  // of those mint transitions runs a script that demands a verified FundsIn
+  // event. The enclave cannot find those receipts on its own - unlike the mint
+  // direction, whose EvmSource already names its own tx_hash - so the listener
+  // supplies the pairs and the enclave verifies every one of them. A missing or
+  // mismatched entry fails the validation closed; these are hints, never
+  // evidence.
+  repeated MintAncestor mint_ancestors = 8;
+}
+
+// MintAncestor pairs one historical BFA mint transition with the EVM deposit
+// that backed it.
+message MintAncestor {
+  bytes op_id = 1; // 32-byte RGB OpId of the TS_BRIDGE transition.
+  bytes tx_hash = 2; // 32-byte EVM transaction hash of its FundsIn deposit.
 }
 
 // CcdSource is the validated Concordium source of a fundsIn operation (the
@@ -186,6 +204,11 @@ message RgbDestination {
   string asset_id = 4; // RGB asset identifier associated with the transfer.
   bytes consignment = 5; // Raw destination RGB consignment bytes.
   bytes consignment_hash = 6; // keccak256(consignment).
+  // The EVM deposit behind every earlier mint this consignment descends from.
+  // The terminal mint is bound to EvmSource.tx_hash instead, so listing it here
+  // is refused: that is the only way a spent lock could be substituted for the
+  // one this request pays with. Hints, never evidence - each is verified.
+  repeated MintAncestor mint_ancestors = 7;
 }
 
 message MerkleProofEntry {

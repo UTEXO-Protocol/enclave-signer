@@ -308,6 +308,10 @@ impl EnclaveClient {
                                 consignment_hash: req.consignment_hash,
                                 commission: req.calldata_commission,
                                 merkle_proofs: req.merkle_proofs,
+                                // The CLI has no way to resolve a mint's
+                                // backing deposit, so a BFA burn signed
+                                // through it fails closed in the enclave.
+                                mint_ancestors: Vec::new(),
                             },
                         ),
                     ),
@@ -369,6 +373,10 @@ impl EnclaveClient {
                                 asset_id: req.rgb_asset_id,
                                 consignment: req.consignment,
                                 consignment_hash: req.consignment_hash,
+                                // As on the source side: the CLI cannot resolve
+                                // the deposits behind a chained mint, so one
+                                // signed through it fails closed in the enclave.
+                                mint_ancestors: Vec::new(),
                             },
                         ),
                     ),

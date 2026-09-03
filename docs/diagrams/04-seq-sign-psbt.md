@@ -49,7 +49,7 @@ sequenceDiagram
     Srv->>Anchor: keccak256(consignment) == consignment_hash (integrity)
     Srv->>Anchor: asset pin: declared asset_id == validated contract_id<br/>== pinned RGB_ASSET_ID (unconditional on this path)
     Srv->>Anchor: PSBT unsigned txid == last witness txid —<br/>input prevouts == witness prevouts —<br/>sighash ALL / taproot DEFAULT only
-    Srv->>Anchor: last transition TS_TRANSFER or TS_INFLATION (mint-RGB) —<br/>asset_output_amount (OS_ASSET only)<br/>≥ amount − commission
+    Srv->>Anchor: last transition TS_TRANSFER, TS_INFLATION (mint-RGB)<br/>or TS_BRIDGE (BFA mint) —<br/>asset_output_amount (OS_ASSET only)<br/>≥ amount − commission
     Srv->>Anchor: fee sanity: implied fee rate ≤ 3x the<br/>enclave-fetched Esplora estimate, fail-closed<br/>(compile-time floor only on non-mainnet)
     Anchor-->>Srv: Ok / CrossCheck err
 
