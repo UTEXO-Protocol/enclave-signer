@@ -518,7 +518,6 @@ async fn grpc_sign_psbt_roundtrip() {
         psbt_output_amount: 0,
         rgb_asset_id: String::new(),
         consignment: vec![],
-        mint_ancestors: vec![],
         consignment_hash: vec![],
         // Plain PSBT roundtrip - no bridged mint, so no ancestors to prove.
         mint_ancestors: vec![],
