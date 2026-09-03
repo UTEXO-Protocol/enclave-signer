@@ -30,22 +30,49 @@ jobs:
       - name: Install system dependencies
         run: sudo apt-get update && sudo apt-get install -y pkg-config libssl-dev
 
-      # All private deps use ssh:// URLs in Cargo.toml; each repo requires its
-      # own deploy key (GitHub enforces unique public keys per repo).
-      # Pure-bash setup avoids the webfactory/ssh-agent Node.js 24 compat issue.
+      # Each private dep uses a per-repo SSH Host alias (e.g. github-rgb-consensus).
+      # The alias maps to github.com with IdentityFile + IdentitiesOnly yes, so
+      # SSH offers exactly ONE key per connection. Without this, the agent offers
+      # all keys in order; GitHub authenticates with the first accepted key and
+      # then refuses access to any repo that key is not authorised for.
       - name: Set up SSH for private deps
         run: |
-          mkdir -p ~/.ssh
+          mkdir -p ~/.ssh && chmod 700 ~/.ssh
           ssh-keyscan -H github.com >> ~/.ssh/known_hosts
-          eval "$(ssh-agent -s)"
-          echo "SSH_AUTH_SOCK=$SSH_AUTH_SOCK" >> "$GITHUB_ENV"
-          echo "SSH_AGENT_PID=$SSH_AGENT_PID" >> "$GITHUB_ENV"
-          echo "${{ secrets.FEDERATED_SIGNER_PROTO_DEPLOY_KEY }}" | ssh-add -
-          echo "${{ secrets.RGB_CONSIGNMENT_PARSER_DEPLOY_KEY }}" | ssh-add -
-          echo "${{ secrets.RGB_CONSENSUS_BFA_DEPLOY_KEY }}" | ssh-add -
-          echo "${{ secrets.RGB_OPS_BFA_DEPLOY_KEY }}" | ssh-add -
-          echo "${{ secrets.RGB_SCHEMAS_BFA_DEPLOY_KEY }}" | ssh-add -
-          ssh-add -l
+          printf '%s\n' "${{ secrets.FEDERATED_SIGNER_PROTO_DEPLOY_KEY }}" > ~/.ssh/key_federated
+          printf '%s\n' "${{ secrets.RGB_CONSIGNMENT_PARSER_DEPLOY_KEY }}"  > ~/.ssh/key_consignment
+          printf '%s\n' "${{ secrets.RGB_CONSENSUS_BFA_DEPLOY_KEY }}"       > ~/.ssh/key_consensus
+          printf '%s\n' "${{ secrets.RGB_OPS_BFA_DEPLOY_KEY }}"             > ~/.ssh/key_ops
+          printf '%s\n' "${{ secrets.RGB_SCHEMAS_BFA_DEPLOY_KEY }}"         > ~/.ssh/key_schemas
+          chmod 600 ~/.ssh/key_*
+          cat >> ~/.ssh/config << 'SSHCONF'
+          Host github-federated-signer
+            HostName github.com
+            User git
+            IdentityFile ~/.ssh/key_federated
+            IdentitiesOnly yes
+          Host github-rgb-consignment
+            HostName github.com
+            User git
+            IdentityFile ~/.ssh/key_consignment
+            IdentitiesOnly yes
+          Host github-rgb-consensus
+            HostName github.com
+            User git
+            IdentityFile ~/.ssh/key_consensus
+            IdentitiesOnly yes
+          Host github-rgb-ops
+            HostName github.com
+            User git
+            IdentityFile ~/.ssh/key_ops
+            IdentitiesOnly yes
+          Host github-rgb-schemas
+            HostName github.com
+            User git
+            IdentityFile ~/.ssh/key_schemas
+            IdentitiesOnly yes
+          SSHCONF
+          chmod 600 ~/.ssh/config
 
       - name: Cache cargo registry
         uses: actions/cache@v4
@@ -186,16 +213,36 @@ jobs:
 
       - name: Set up SSH for private BFA deps
         run: |
-          mkdir -p ~/.ssh
+          mkdir -p ~/.ssh && chmod 700 ~/.ssh
           ssh-keyscan -H github.com >> ~/.ssh/known_hosts
-          eval "$(ssh-agent -s)"
-          echo "SSH_AUTH_SOCK=$SSH_AUTH_SOCK" >> "$GITHUB_ENV"
-          echo "SSH_AGENT_PID=$SSH_AGENT_PID" >> "$GITHUB_ENV"
-          echo "${{ secrets.RGB_CONSIGNMENT_PARSER_DEPLOY_KEY }}" | ssh-add -
-          echo "${{ secrets.RGB_CONSENSUS_BFA_DEPLOY_KEY }}" | ssh-add -
-          echo "${{ secrets.RGB_OPS_BFA_DEPLOY_KEY }}" | ssh-add -
-          echo "${{ secrets.RGB_SCHEMAS_BFA_DEPLOY_KEY }}" | ssh-add -
-          ssh-add -l
+          printf '%s\n' "${{ secrets.RGB_CONSIGNMENT_PARSER_DEPLOY_KEY }}"  > ~/.ssh/key_consignment
+          printf '%s\n' "${{ secrets.RGB_CONSENSUS_BFA_DEPLOY_KEY }}"       > ~/.ssh/key_consensus
+          printf '%s\n' "${{ secrets.RGB_OPS_BFA_DEPLOY_KEY }}"             > ~/.ssh/key_ops
+          printf '%s\n' "${{ secrets.RGB_SCHEMAS_BFA_DEPLOY_KEY }}"         > ~/.ssh/key_schemas
+          chmod 600 ~/.ssh/key_*
+          cat >> ~/.ssh/config << 'SSHCONF'
+          Host github-rgb-consignment
+            HostName github.com
+            User git
+            IdentityFile ~/.ssh/key_consignment
+            IdentitiesOnly yes
+          Host github-rgb-consensus
+            HostName github.com
+            User git
+            IdentityFile ~/.ssh/key_consensus
+            IdentitiesOnly yes
+          Host github-rgb-ops
+            HostName github.com
+            User git
+            IdentityFile ~/.ssh/key_ops
+            IdentitiesOnly yes
+          Host github-rgb-schemas
+            HostName github.com
+            User git
+            IdentityFile ~/.ssh/key_schemas
+            IdentitiesOnly yes
+          SSHCONF
+          chmod 600 ~/.ssh/config
 
       - name: Cache cargo registry
         uses: actions/cache@v4
@@ -243,16 +290,36 @@ jobs:
 
       - name: Set up SSH for private BFA deps
         run: |
-          mkdir -p ~/.ssh
+          mkdir -p ~/.ssh && chmod 700 ~/.ssh
           ssh-keyscan -H github.com >> ~/.ssh/known_hosts
-          eval "$(ssh-agent -s)"
-          echo "SSH_AUTH_SOCK=$SSH_AUTH_SOCK" >> "$GITHUB_ENV"
-          echo "SSH_AGENT_PID=$SSH_AGENT_PID" >> "$GITHUB_ENV"
-          echo "${{ secrets.RGB_CONSIGNMENT_PARSER_DEPLOY_KEY }}" | ssh-add -
-          echo "${{ secrets.RGB_CONSENSUS_BFA_DEPLOY_KEY }}" | ssh-add -
-          echo "${{ secrets.RGB_OPS_BFA_DEPLOY_KEY }}" | ssh-add -
-          echo "${{ secrets.RGB_SCHEMAS_BFA_DEPLOY_KEY }}" | ssh-add -
-          ssh-add -l
+          printf '%s\n' "${{ secrets.RGB_CONSIGNMENT_PARSER_DEPLOY_KEY }}"  > ~/.ssh/key_consignment
+          printf '%s\n' "${{ secrets.RGB_CONSENSUS_BFA_DEPLOY_KEY }}"       > ~/.ssh/key_consensus
+          printf '%s\n' "${{ secrets.RGB_OPS_BFA_DEPLOY_KEY }}"             > ~/.ssh/key_ops
+          printf '%s\n' "${{ secrets.RGB_SCHEMAS_BFA_DEPLOY_KEY }}"         > ~/.ssh/key_schemas
+          chmod 600 ~/.ssh/key_*
+          cat >> ~/.ssh/config << 'SSHCONF'
+          Host github-rgb-consignment
+            HostName github.com
+            User git
+            IdentityFile ~/.ssh/key_consignment
+            IdentitiesOnly yes
+          Host github-rgb-consensus
+            HostName github.com
+            User git
+            IdentityFile ~/.ssh/key_consensus
+            IdentitiesOnly yes
+          Host github-rgb-ops
+            HostName github.com
+            User git
+            IdentityFile ~/.ssh/key_ops
+            IdentitiesOnly yes
+          Host github-rgb-schemas
+            HostName github.com
+            User git
+            IdentityFile ~/.ssh/key_schemas
+            IdentitiesOnly yes
+          SSHCONF
+          chmod 600 ~/.ssh/config
 
       - name: Cache cargo registry
         uses: actions/cache@v4
