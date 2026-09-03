@@ -44,8 +44,12 @@ codegen-units = 1
 # with `cargo update -p rgb-ops -p rgb-consensus -p rgb-invoicing -p rgb-schemas`.
 # That downgrade also pulls electrum-client 0.24 - see the REVERT note in
 # enclave/src/networks/rgb/validation.rs.
-rgb-consensus = { git = "https://github.com/UTEXO-Protocol/rgb-consensus-s-bfa", rev = "68a1470e22ae4bb6a38205404e484b264b4139ee" }
-rgb-ops = { git = "https://github.com/UTEXO-Protocol/rgb-ops-s-bfa", rev = "3bcc7d98d759a8b71bf94ad4a36371dcb7bf392b" }
-rgb-invoicing = { git = "https://github.com/UTEXO-Protocol/rgb-ops-s-bfa", rev = "3bcc7d98d759a8b71bf94ad4a36371dcb7bf392b" }
-rgb-schemas = { git = "https://github.com/UTEXO-Protocol/rgb-schemas-s-bfa", rev = "af4f91e6807a9680ab195c28719197b7811ac5d6" }
+#
+# Local builds: these three repos are private. You need an SSH key with read
+# access to rgb-consensus-s-bfa, rgb-ops-s-bfa, and rgb-schemas-s-bfa loaded
+# in your SSH agent (or in ~/.ssh/). Ask the team for a deploy key if needed.
+rgb-consensus = { git = "ssh://git@github-rgb-consensus/UTEXO-Protocol/rgb-consensus-s-bfa", rev = "68a1470e22ae4bb6a38205404e484b264b4139ee" }
+rgb-ops = { git = "ssh://git@github-rgb-ops/UTEXO-Protocol/rgb-ops-s-bfa", rev = "3bcc7d98d759a8b71bf94ad4a36371dcb7bf392b" }
+rgb-invoicing = { git = "ssh://git@github-rgb-ops/UTEXO-Protocol/rgb-ops-s-bfa", rev = "3bcc7d98d759a8b71bf94ad4a36371dcb7bf392b" }
+rgb-schemas = { git = "ssh://git@github-rgb-schemas/UTEXO-Protocol/rgb-schemas-s-bfa", rev = "af4f91e6807a9680ab195c28719197b7811ac5d6" }
 rgb-strict-encoding = { git = "https://github.com/rgb-protocol/rgb-strict-encoding", rev = "7698a5e96a2a27d5bfa4cd3560da0e8af8e4a18a" }

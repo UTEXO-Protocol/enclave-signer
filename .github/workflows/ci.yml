@@ -10,6 +10,9 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
+  # Cargo.toml uses ssh:// URLs for private deps; force Cargo to use the
+  # system git so it honours SSH_AUTH_SOCK set by the SSH setup step.
+  CARGO_NET_GIT_FETCH_WITH_CLI: "true"
 
 jobs:
   ci:
@@ -27,23 +30,49 @@ jobs:
       - name: Install system dependencies
         run: sudo apt-get update && sudo apt-get install -y pkg-config libssl-dev
 
-      # `federated-signer-proto` is reached over `ssh://`; the three BFA RGB
-      # mirrors use `https://` URLs rewritten to SSH below.
+      # Each private dep uses a per-repo SSH Host alias (e.g. github-rgb-consensus).
+      # The alias maps to github.com with IdentityFile + IdentitiesOnly yes, so
+      # SSH offers exactly ONE key per connection. Without this, the agent offers
+      # all keys in order; GitHub authenticates with the first accepted key and
+      # then refuses access to any repo that key is not authorised for.
       - name: Set up SSH for private deps
-        uses: webfactory/ssh-agent@v0.9.0
-        with:
-          ssh-private-key: |
-            ${{ secrets.FEDERATED_SIGNER_PROTO_DEPLOY_KEY }}
-            ${{ secrets.RGB_CONSIGNMENT_PARSER_DEPLOY_KEY }}
-            ${{ secrets.RGB_CONSENSUS_BFA_DEPLOY_KEY }}
-            ${{ secrets.RGB_OPS_BFA_DEPLOY_KEY }}
-            ${{ secrets.RGB_SCHEMAS_BFA_DEPLOY_KEY }}
-
-      - name: Rewrite HTTPS UTEXO-Protocol deps to SSH
         run: |
-          git config --global \
-            url."git@github.com:UTEXO-Protocol/".insteadOf \
-            "https://github.com/UTEXO-Protocol/"
+          mkdir -p ~/.ssh && chmod 700 ~/.ssh
+          ssh-keyscan -H github.com >> ~/.ssh/known_hosts
+          printf '%s\n' "${{ secrets.FEDERATED_SIGNER_PROTO_DEPLOY_KEY }}" > ~/.ssh/key_federated
+          printf '%s\n' "${{ secrets.RGB_CONSIGNMENT_PARSER_DEPLOY_KEY }}"  > ~/.ssh/key_consignment
+          printf '%s\n' "${{ secrets.RGB_CONSENSUS_BFA_DEPLOY_KEY }}"       > ~/.ssh/key_consensus
+          printf '%s\n' "${{ secrets.RGB_OPS_BFA_DEPLOY_KEY }}"             > ~/.ssh/key_ops
+          printf '%s\n' "${{ secrets.RGB_SCHEMAS_BFA_DEPLOY_KEY }}"         > ~/.ssh/key_schemas
+          chmod 600 ~/.ssh/key_*
+          cat >> ~/.ssh/config << 'SSHCONF'
+          Host github-federated-signer
+            HostName github.com
+            User git
+            IdentityFile ~/.ssh/key_federated
+            IdentitiesOnly yes
+          Host github-rgb-consignment
+            HostName github.com
+            User git
+            IdentityFile ~/.ssh/key_consignment
+            IdentitiesOnly yes
+          Host github-rgb-consensus
+            HostName github.com
+            User git
+            IdentityFile ~/.ssh/key_consensus
+            IdentitiesOnly yes
+          Host github-rgb-ops
+            HostName github.com
+            User git
+            IdentityFile ~/.ssh/key_ops
+            IdentitiesOnly yes
+          Host github-rgb-schemas
+            HostName github.com
+            User git
+            IdentityFile ~/.ssh/key_schemas
+            IdentitiesOnly yes
+          SSHCONF
+          chmod 600 ~/.ssh/config
 
       - name: Cache cargo registry
         uses: actions/cache@v4
@@ -194,19 +223,37 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y pkg-config libssl-dev
 
       - name: Set up SSH for private BFA deps
-        uses: webfactory/ssh-agent@v0.9.0
-        with:
-          ssh-private-key: |
-            ${{ secrets.RGB_CONSIGNMENT_PARSER_DEPLOY_KEY }}
-            ${{ secrets.RGB_CONSENSUS_BFA_DEPLOY_KEY }}
-            ${{ secrets.RGB_OPS_BFA_DEPLOY_KEY }}
-            ${{ secrets.RGB_SCHEMAS_BFA_DEPLOY_KEY }}
-
-      - name: Rewrite HTTPS UTEXO-Protocol deps to SSH
         run: |
-          git config --global \
-            url."git@github.com:UTEXO-Protocol/".insteadOf \
-            "https://github.com/UTEXO-Protocol/"
+          mkdir -p ~/.ssh && chmod 700 ~/.ssh
+          ssh-keyscan -H github.com >> ~/.ssh/known_hosts
+          printf '%s\n' "${{ secrets.RGB_CONSIGNMENT_PARSER_DEPLOY_KEY }}"  > ~/.ssh/key_consignment
+          printf '%s\n' "${{ secrets.RGB_CONSENSUS_BFA_DEPLOY_KEY }}"       > ~/.ssh/key_consensus
+          printf '%s\n' "${{ secrets.RGB_OPS_BFA_DEPLOY_KEY }}"             > ~/.ssh/key_ops
+          printf '%s\n' "${{ secrets.RGB_SCHEMAS_BFA_DEPLOY_KEY }}"         > ~/.ssh/key_schemas
+          chmod 600 ~/.ssh/key_*
+          cat >> ~/.ssh/config << 'SSHCONF'
+          Host github-rgb-consignment
+            HostName github.com
+            User git
+            IdentityFile ~/.ssh/key_consignment
+            IdentitiesOnly yes
+          Host github-rgb-consensus
+            HostName github.com
+            User git
+            IdentityFile ~/.ssh/key_consensus
+            IdentitiesOnly yes
+          Host github-rgb-ops
+            HostName github.com
+            User git
+            IdentityFile ~/.ssh/key_ops
+            IdentitiesOnly yes
+          Host github-rgb-schemas
+            HostName github.com
+            User git
+            IdentityFile ~/.ssh/key_schemas
+            IdentitiesOnly yes
+          SSHCONF
+          chmod 600 ~/.ssh/config
 
       - name: Cache cargo registry
         uses: actions/cache@v4
@@ -253,19 +300,37 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y pkg-config libssl-dev
 
       - name: Set up SSH for private BFA deps
-        uses: webfactory/ssh-agent@v0.9.0
-        with:
-          ssh-private-key: |
-            ${{ secrets.RGB_CONSIGNMENT_PARSER_DEPLOY_KEY }}
-            ${{ secrets.RGB_CONSENSUS_BFA_DEPLOY_KEY }}
-            ${{ secrets.RGB_OPS_BFA_DEPLOY_KEY }}
-            ${{ secrets.RGB_SCHEMAS_BFA_DEPLOY_KEY }}
-
-      - name: Rewrite HTTPS UTEXO-Protocol deps to SSH
         run: |
-          git config --global \
-            url."git@github.com:UTEXO-Protocol/".insteadOf \
-            "https://github.com/UTEXO-Protocol/"
+          mkdir -p ~/.ssh && chmod 700 ~/.ssh
+          ssh-keyscan -H github.com >> ~/.ssh/known_hosts
+          printf '%s\n' "${{ secrets.RGB_CONSIGNMENT_PARSER_DEPLOY_KEY }}"  > ~/.ssh/key_consignment
+          printf '%s\n' "${{ secrets.RGB_CONSENSUS_BFA_DEPLOY_KEY }}"       > ~/.ssh/key_consensus
+          printf '%s\n' "${{ secrets.RGB_OPS_BFA_DEPLOY_KEY }}"             > ~/.ssh/key_ops
+          printf '%s\n' "${{ secrets.RGB_SCHEMAS_BFA_DEPLOY_KEY }}"         > ~/.ssh/key_schemas
+          chmod 600 ~/.ssh/key_*
+          cat >> ~/.ssh/config << 'SSHCONF'
+          Host github-rgb-consignment
+            HostName github.com
+            User git
+            IdentityFile ~/.ssh/key_consignment
+            IdentitiesOnly yes
+          Host github-rgb-consensus
+            HostName github.com
+            User git
+            IdentityFile ~/.ssh/key_consensus
+            IdentitiesOnly yes
+          Host github-rgb-ops
+            HostName github.com
+            User git
+            IdentityFile ~/.ssh/key_ops
+            IdentitiesOnly yes
+          Host github-rgb-schemas
+            HostName github.com
+            User git
+            IdentityFile ~/.ssh/key_schemas
+            IdentitiesOnly yes
+          SSHCONF
+          chmod 600 ~/.ssh/config
 
       - name: Cache cargo registry
         uses: actions/cache@v4

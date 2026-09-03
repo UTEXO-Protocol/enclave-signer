@@ -520,6 +520,8 @@ async fn grpc_sign_psbt_roundtrip() {
         consignment: vec![],
         mint_ancestors: vec![],
         consignment_hash: vec![],
+        // Plain PSBT roundtrip - no bridged mint, so no ancestors to prove.
+        mint_ancestors: vec![],
     };
 
     let req = sign_rgb_request(evm_source(0, 0), payload);
