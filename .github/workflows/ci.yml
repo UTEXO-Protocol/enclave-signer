@@ -27,26 +27,22 @@ jobs:
       - name: Install system dependencies
         run: sudo apt-get update && sudo apt-get install -y pkg-config libssl-dev
 
-      # `federated-signer-proto`, needed by `parent` — which this job also
-      # builds — is reached over `ssh://`, so it wants a key rather than the
-      # token step below.
-      - name: Set up SSH for the parent's private proto dep
+      # `federated-signer-proto` is reached over `ssh://`; the three BFA RGB
+      # mirrors use `https://` URLs rewritten to SSH below.
+      - name: Set up SSH for private deps
         uses: webfactory/ssh-agent@v0.9.0
         with:
-          ssh-private-key: ${{ secrets.FEDERATED_SIGNER_PROTO_DEPLOY_KEY }}
+          ssh-private-key: |
+            ${{ secrets.FEDERATED_SIGNER_PROTO_DEPLOY_KEY }}
+            ${{ secrets.RGB_CONSIGNMENT_PARSER_DEPLOY_KEY }}
+            ${{ secrets.RGB_CONSENSUS_BFA_DEPLOY_KEY }}
+            ${{ secrets.RGB_OPS_BFA_DEPLOY_KEY }}
+            ${{ secrets.RGB_SCHEMAS_BFA_DEPLOY_KEY }}
 
-      # The workspace `[patch.crates-io]` pins rgb-consensus / rgb-ops /
-      # rgb-invoicing / rgb-schemas to the PRIVATE `*-s-bfa` mirrors in our org,
-      # so every cargo build here needs a credential to fetch them. Rewriting
-      # the org prefix (not all of github.com) keeps the token off public deps
-      # like rgb-strict-encoding and helios. `federated-signer-proto` is an
-      # `ssh://` URL, so the SSH agent still covers it.
-      - name: Authenticate to the private UTEXO-Protocol RGB mirrors
-        env:
-          GH_PAT: ${{ secrets.DEVOPS_PAT }}
+      - name: Rewrite HTTPS UTEXO-Protocol deps to SSH
         run: |
           git config --global \
-            url."https://x-access-token:${GH_PAT}@github.com/UTEXO-Protocol/".insteadOf \
+            url."git@github.com:UTEXO-Protocol/".insteadOf \
             "https://github.com/UTEXO-Protocol/"
 
       - name: Cache cargo registry
@@ -197,18 +193,19 @@ jobs:
       - name: Install system dependencies
         run: sudo apt-get update && sudo apt-get install -y pkg-config libssl-dev
 
-      # The workspace `[patch.crates-io]` pins rgb-consensus / rgb-ops /
-      # rgb-invoicing / rgb-schemas to the PRIVATE `*-s-bfa` mirrors in our org,
-      # so every cargo build here needs a credential to fetch them. Rewriting
-      # the org prefix (not all of github.com) keeps the token off public deps
-      # like rgb-strict-encoding and helios. `federated-signer-proto` is an
-      # `ssh://` URL, so the SSH agent still covers it.
-      - name: Authenticate to the private UTEXO-Protocol RGB mirrors
-        env:
-          GH_PAT: ${{ secrets.DEVOPS_PAT }}
+      - name: Set up SSH for private BFA deps
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: |
+            ${{ secrets.RGB_CONSIGNMENT_PARSER_DEPLOY_KEY }}
+            ${{ secrets.RGB_CONSENSUS_BFA_DEPLOY_KEY }}
+            ${{ secrets.RGB_OPS_BFA_DEPLOY_KEY }}
+            ${{ secrets.RGB_SCHEMAS_BFA_DEPLOY_KEY }}
+
+      - name: Rewrite HTTPS UTEXO-Protocol deps to SSH
         run: |
           git config --global \
-            url."https://x-access-token:${GH_PAT}@github.com/UTEXO-Protocol/".insteadOf \
+            url."git@github.com:UTEXO-Protocol/".insteadOf \
             "https://github.com/UTEXO-Protocol/"
 
       - name: Cache cargo registry
@@ -255,18 +252,19 @@ jobs:
       - name: Install system dependencies
         run: sudo apt-get update && sudo apt-get install -y pkg-config libssl-dev
 
-      # The workspace `[patch.crates-io]` pins rgb-consensus / rgb-ops /
-      # rgb-invoicing / rgb-schemas to the PRIVATE `*-s-bfa` mirrors in our org,
-      # so every cargo build here needs a credential to fetch them. Rewriting
-      # the org prefix (not all of github.com) keeps the token off public deps
-      # like rgb-strict-encoding and helios. `federated-signer-proto` is an
-      # `ssh://` URL, so the SSH agent still covers it.
-      - name: Authenticate to the private UTEXO-Protocol RGB mirrors
-        env:
-          GH_PAT: ${{ secrets.DEVOPS_PAT }}
+      - name: Set up SSH for private BFA deps
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: |
+            ${{ secrets.RGB_CONSIGNMENT_PARSER_DEPLOY_KEY }}
+            ${{ secrets.RGB_CONSENSUS_BFA_DEPLOY_KEY }}
+            ${{ secrets.RGB_OPS_BFA_DEPLOY_KEY }}
+            ${{ secrets.RGB_SCHEMAS_BFA_DEPLOY_KEY }}
+
+      - name: Rewrite HTTPS UTEXO-Protocol deps to SSH
         run: |
           git config --global \
-            url."https://x-access-token:${GH_PAT}@github.com/UTEXO-Protocol/".insteadOf \
+            url."git@github.com:UTEXO-Protocol/".insteadOf \
             "https://github.com/UTEXO-Protocol/"
 
       - name: Cache cargo registry
