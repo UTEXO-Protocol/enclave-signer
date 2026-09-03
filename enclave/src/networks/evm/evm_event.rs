@@ -141,6 +141,14 @@ fn event_topic0(sig: &str) -> [u8; 32] {
     Keccak256::digest(sig.as_bytes()).into()
 }
 
+/// `topic0` of the two events this module selects logs by. Hashed once: both
+/// are looked up per log, and the BFA path loops over a whole mint ancestry.
+static BRIDGE_FUNDS_IN_TOPIC0: std::sync::LazyLock<[u8; 32]> =
+    std::sync::LazyLock::new(|| event_topic0(BRIDGE_FUNDS_IN_SIG));
+#[cfg(feature = "bfa-mint")]
+static FUNDS_IN_TOPIC0: std::sync::LazyLock<[u8; 32]> =
+    std::sync::LazyLock::new(|| event_topic0(FUNDS_IN_SIG));
+
 /// What a verified `BridgeFundsIn` deposit authorises. Only the fields later
 /// stages bind against; the rest is checked in [`verify_funds_in_event`].
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -189,7 +197,7 @@ pub fn verify_funds_in_event(
     let log = select_unique_log(
         &receipt,
         bridge_contract,
-        &event_topic0(BRIDGE_FUNDS_IN_SIG),
+        &BRIDGE_FUNDS_IN_TOPIC0,
         "BridgeFundsIn",
         evm_tx_hash,
     )?;
@@ -421,7 +429,7 @@ fn check_confirmation_depth(
 /// first data word and the amount the second.
 #[cfg(feature = "bfa-mint")]
 fn decode_funds_in(log: &LogEntry, expected_rgb_opid: &[u8; 32]) -> Result<u64> {
-    if log.topics.first() != Some(&event_topic0(FUNDS_IN_SIG)) {
+    if log.topics.first() != Some(&*FUNDS_IN_TOPIC0) {
         return Err(EnclaveError::CrossCheck(
             "log is not a FundsIn event".into(),
         ));
@@ -471,7 +479,7 @@ pub fn verify_rgb_funds_in(
     let log = select_unique_log(
         &receipt,
         funds_in_contract,
-        &event_topic0(FUNDS_IN_SIG),
+        &FUNDS_IN_TOPIC0,
         "FundsIn",
         evm_tx_hash,
     )?;

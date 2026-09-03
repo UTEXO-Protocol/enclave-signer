@@ -315,16 +315,6 @@ fn dispatch(request: EnclaveRequest, ctx: &ServerContext) -> EnclaveResponse {
     }
 }
 
-/// Verify the EVM lock a BFA mint commits to and return it as the one-element
-/// event set RGB consensus checks the minted amount against.
-///
-/// The OpId parsed out of the consignment is untrusted: it only selects which
-/// `FundsIn` log must exist. That log is verified through the same Helios-backed
-/// path the swap flow uses, against the contract pinned in config *and* named by
-/// the asset's genesis, and consensus re-binds both OpId and amount when `cea`
-/// runs. Empty vec when the consignment is not a BFA one, so the swap path is
-/// unaffected; every failure refuses the signature.
-#[cfg(feature = "bfa-mint")]
 /// The EVM tx hash the listener claims backs `mint_opid`.
 ///
 /// Fails closed: an unlisted mint, or one listed with a malformed hash, aborts
@@ -392,123 +382,137 @@ fn mint_lock_plan(
         .collect()
 }
 
+/// Verify the `FundsIn` lock paired with every mint in `plan` and return one
+/// `cea` event per mint, in plan order.
+///
+/// `plan` is `(mint OpId, EVM tx hash)`: the OpId is untrusted and only selects
+/// which log must exist, and the tx hash is a listener hint. Both are checked
+/// here against the enclave's own contract pin, through the same Helios-backed
+/// path the swap flow uses, and consensus re-binds OpId and amount when `cea`
+/// runs. Every failure refuses the signature.
+///
+/// `unavailable` names, in the rejection, what the missing EVM client would
+/// have been used to authorise.
+#[cfg(feature = "bfa-mint")]
+fn verify_mint_locks(
+    ctx: &ServerContext,
+    plan: &[([u8; 32], [u8; 32])],
+    unavailable: &str,
+) -> Result<Vec<rgbstd::vm::ether_extension::Event>> {
+    use crate::networks::evm::evm_event::verify_rgb_funds_in;
+    use rgbstd::vm::ether_extension::Event;
+    use rgbstd::{OpId, RevealedValue};
+
+    if plan.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let client = ctx
+        .evm_rpc_client
+        .as_ref()
+        .ok_or_else(|| EnclaveError::CrossCheck(unavailable.into()))?;
+
+    plan.iter()
+        .map(|(mint_opid, lock)| {
+            let amount = verify_rgb_funds_in(
+                &**client,
+                &ctx.bridge_config.funds_in_contract,
+                ctx.evm_rpc_config.min_confirmations,
+                lock,
+                mint_opid,
+            )?;
+            Ok(Event::new(
+                OpId::from(*mint_opid),
+                RevealedValue::from(amount),
+            ))
+        })
+        .collect()
+}
+
+/// The contract pin both directions apply before any log is trusted: the
+/// extension never checks which contract an event came from, so this is the
+/// only thing between a mint or a redemption and an attacker's contract.
+#[cfg(feature = "bfa-mint")]
+fn bfa_binding_for(
+    ctx: &ServerContext,
+    consignment: &[u8],
+    label: &str,
+) -> Result<Option<crate::networks::rgb::validation::BfaBinding>> {
+    use crate::networks::evm::evm_event::check_bridge_location;
+    use crate::networks::rgb::validation::{assert_consignment_size, bfa_binding};
+
+    // The same cap the anchor validation applies, repeated because that check
+    // now runs after this parse rather than before it.
+    assert_consignment_size(consignment, &ctx.bridge_config, label)?;
+
+    // Not a BFA consignment: the other schemas run no extension opcode, so an
+    // empty event set is correct rather than merely tolerated.
+    let Some(binding) = bfa_binding(consignment)? else {
+        return Ok(None);
+    };
+    check_bridge_location(
+        &binding.bridge_location,
+        &ctx.bridge_config.funds_in_contract,
+    )?;
+    Ok(Some(binding))
+}
+
 /// Verify the `FundsIn` lock behind every mint a burn consignment descends
 /// from, and return one `cea` event per mint.
 ///
 /// The listener supplies `(op_id, tx_hash)` pairs because only it can search
-/// the chain; they are hints. Every pair is fetched and checked here against
-/// the enclave's own contract pin, and a mint with no pair - or with one whose
-/// log does not bind to it - fails the whole validation. That is the point: a
-/// burn may only release funds that a real, verified lock once created.
+/// the chain; they are hints. Every pair is fetched and checked by
+/// [`verify_mint_locks`], and a mint with no pair - or with one whose log does
+/// not bind to it - fails the whole validation. That is the point: a burn may
+/// only release funds that a real, verified lock once created.
 #[cfg(feature = "bfa-mint")]
 fn bfa_burn_ancestry_events(
     ctx: &ServerContext,
     source: &enclave_proto::RgbSource,
 ) -> Result<Vec<rgbstd::vm::ether_extension::Event>> {
-    use crate::networks::evm::evm_event::{check_bridge_location, verify_rgb_funds_in};
-    use crate::networks::rgb::validation::bfa_ancestry_binding;
-    use rgbstd::vm::ether_extension::Event;
-    use rgbstd::{OpId, RevealedValue};
-
     if cfg!(feature = "dev-mode") {
         return Ok(Vec::new());
     }
-    if source.consignment.len() > ctx.bridge_config.max_consignment_bytes {
-        return Err(EnclaveError::CrossCheck(format!(
-            "RGB source consignment too large: {} bytes (max {})",
-            source.consignment.len(),
-            ctx.bridge_config.max_consignment_bytes
-        )));
-    }
 
-    let Some(binding) = bfa_ancestry_binding(&source.consignment)? else {
-        // Not a BFA consignment: the other schemas run no extension opcode, so
-        // an empty event set is correct rather than merely tolerated.
+    let Some(binding) = bfa_binding_for(ctx, &source.consignment, "RGB source")? else {
         return Ok(Vec::new());
     };
 
-    // The extension never checks which contract an event came from, so this is
-    // the only thing between a redemption and logs from an attacker's contract.
-    check_bridge_location(
-        &binding.bridge_location,
-        &ctx.bridge_config.funds_in_contract,
-    )?;
+    let plan = binding
+        .mint_opids
+        .iter()
+        .map(|opid| Ok((*opid, ancestor_tx_hash(opid, &source.mint_ancestors)?)))
+        .collect::<Result<Vec<_>>>()?;
 
-    if binding.mint_opids.is_empty() {
-        return Ok(Vec::new());
-    }
-
-    let client = ctx.evm_rpc_client.as_ref().ok_or_else(|| {
-        EnclaveError::CrossCheck(
-            "bfa-mint build but the EVM RPC client is unavailable - refusing to validate a burn \
-             without independently verifying the locks behind its mints"
-                .into(),
-        )
-    })?;
-
-    let mut events = Vec::with_capacity(binding.mint_opids.len());
-    for mint_opid in &binding.mint_opids {
-        let tx_hash = ancestor_tx_hash(mint_opid, &source.mint_ancestors)?;
-
-        let amount = verify_rgb_funds_in(
-            &**client,
-            &ctx.bridge_config.funds_in_contract,
-            ctx.evm_rpc_config.min_confirmations,
-            &tx_hash,
-            mint_opid,
-        )?;
-
-        events.push(Event::new(
-            OpId::from(*mint_opid),
-            RevealedValue::from(amount),
-        ));
-    }
-
-    Ok(events)
+    verify_mint_locks(
+        ctx,
+        &plan,
+        "bfa-mint build but the EVM RPC client is unavailable - refusing to validate a burn \
+         without independently verifying the locks behind its mints",
+    )
 }
 
+/// Verify the EVM lock a BFA mint commits to, plus the lock behind each of its
+/// ancestors, and return them as the event set RGB consensus checks the minted
+/// amounts against.
+///
+/// Empty vec when this is not an EVM-to-RGB request or the consignment is not a
+/// BFA one, so the swap path is unaffected.
 #[cfg(feature = "bfa-mint")]
 fn bfa_mint_events(
     ctx: &ServerContext,
-    source: &SourceNetwork,
-    destination: &DestinationNetwork,
+    source: &enclave_proto::EvmSource,
+    destination: &enclave_proto::RgbDestination,
 ) -> Result<Vec<rgbstd::vm::ether_extension::Event>> {
-    use crate::networks::evm::evm_event::{check_bridge_location, verify_rgb_funds_in};
-    use crate::networks::rgb::validation::bfa_mint_binding;
-    use rgbstd::vm::ether_extension::Event;
-    use rgbstd::{OpId, RevealedValue};
-
     // dev-mode compiles no destination-anchor validation, so these events would
     // have no consumer and the RPC call would be pure cost.
     if cfg!(feature = "dev-mode") {
         return Ok(Vec::new());
     }
 
-    let (SourceNetwork::EvmSource(source), DestinationNetwork::RgbDestination(destination)) =
-        (source, destination)
-    else {
+    let Some(binding) = bfa_binding_for(ctx, &destination.consignment, "send-RGB")? else {
         return Ok(Vec::new());
     };
-
-    // The same cap `validate_destination_anchor` applies, repeated because that
-    // check now runs after this parse rather than before it.
-    if destination.consignment.len() > ctx.bridge_config.max_consignment_bytes {
-        return Err(EnclaveError::CrossCheck(format!(
-            "send-RGB consignment too large: {} bytes (max {})",
-            destination.consignment.len(),
-            ctx.bridge_config.max_consignment_bytes
-        )));
-    }
-    let Some(binding) = bfa_mint_binding(&destination.consignment)? else {
-        return Ok(Vec::new());
-    };
-
-    // The extension never checks which contract an event came from, so this is
-    // the only thing between a mint and a log from an attacker's contract.
-    check_bridge_location(
-        &binding.bridge_location,
-        &ctx.bridge_config.funds_in_contract,
-    )?;
 
     let tx_hash: [u8; 32] = source.tx_hash.as_slice().try_into().map_err(|_| {
         EnclaveError::CrossCheck(format!(
@@ -516,36 +520,19 @@ fn bfa_mint_events(
             source.tx_hash.len()
         ))
     })?;
-    let client = ctx.evm_rpc_client.as_ref().ok_or_else(|| {
-        EnclaveError::CrossCheck(
-            "bfa-mint build but the EVM RPC client is unavailable - refusing to sign a mint \
-             without independently verifying its FundsIn lock"
-                .into(),
-        )
-    })?;
     let plan = mint_lock_plan(
         &binding.mint_opids,
-        &binding.terminal_opid,
+        &binding.terminal_opid()?,
         &tx_hash,
         &destination.mint_ancestors,
     )?;
 
-    let mut events = Vec::with_capacity(plan.len());
-    for (mint_opid, lock) in plan {
-        let amount = verify_rgb_funds_in(
-            &**client,
-            &ctx.bridge_config.funds_in_contract,
-            ctx.evm_rpc_config.min_confirmations,
-            &lock,
-            &mint_opid,
-        )?;
-        events.push(Event::new(
-            OpId::from(mint_opid),
-            RevealedValue::from(amount),
-        ));
-    }
-
-    Ok(events)
+    verify_mint_locks(
+        ctx,
+        &plan,
+        "bfa-mint build but the EVM RPC client is unavailable - refusing to sign a mint \
+         without independently verifying its FundsIn lock",
+    )
 }
 
 fn handle_sign(ctx: &ServerContext, req: SignRequest) -> Result<EnclaveResponse> {
@@ -605,12 +592,22 @@ fn handle_sign(ctx: &ServerContext, req: SignRequest) -> Result<EnclaveResponse>
     // Before destination validation, not after: a BFA mint's consignment cannot
     // be validated at all until the lock it commits to has been verified.
     #[cfg(feature = "bfa-mint")]
-    let bfa_bridge_events = match source_ref {
+    let bfa_bridge_events = match (source_ref, destination_ref) {
         // A burn: the events prove the locks behind the mints it descends from.
-        SourceNetwork::RgbSource(rgb) => bfa_burn_ancestry_events(ctx, rgb)?,
-        // A mint: the event proves the one lock it is being minted against.
-        _ => bfa_mint_events(ctx, source_ref, destination_ref)?,
+        (SourceNetwork::RgbSource(rgb), _) => bfa_burn_ancestry_events(ctx, rgb)?,
+        // A mint: the events prove the locks it and its ancestry were minted
+        // against.
+        (SourceNetwork::EvmSource(evm), DestinationNetwork::RgbDestination(rgb)) => {
+            bfa_mint_events(ctx, evm, rgb)?
+        }
+        // No BFA consignment on either side, so nothing for `cea` to check.
+        _ => Vec::new(),
     };
+    // Not gated on `bfa-mint`: `validate_consignment` takes the events
+    // unconditionally, so an empty set is already how "no BFA here" is spelled
+    // and every call site is spared a `#[cfg]` pair.
+    #[cfg(all(feature = "rgb-validation", not(feature = "bfa-mint")))]
+    let bfa_bridge_events: Vec<rgbstd::vm::ether_extension::Event> = Vec::new();
 
     let validation_ctx = ValidationContext {
         bridge_config: &ctx.bridge_config,
@@ -620,7 +617,7 @@ fn handle_sign(ctx: &ServerContext, req: SignRequest) -> Result<EnclaveResponse>
         header_chain: &ctx.header_chain,
         #[cfg(feature = "rgb-validation")]
         self_owned_psbt_outputs: Some(&self_owned_psbt_outputs),
-        #[cfg(feature = "bfa-mint")]
+        #[cfg(feature = "rgb-validation")]
         bridge_events: &bfa_bridge_events,
     };
     let source_validated = validate_source(req.amount, source_ref, &validation_ctx)?;
@@ -859,25 +856,22 @@ fn apply_funds_out_binding(
     #[cfg(not(feature = "spv"))]
     let _ = (ctx, merkle_proofs);
 
-    // Consignment-bound release. A transfer settles a swap; a burn settles a
-    // redemption and additionally binds the payout target to the 32 bytes the
-    // burner committed to. Dispatching on the last transition rather than on a
-    // caller-supplied flag keeps the consignment the authority on which rule
-    // applies.
-    let is_burn = validated
-        .last_transition
-        .as_ref()
-        .is_some_and(|t| t.transition_type == crate::networks::rgb::validation::ifa::TS_BURN);
-    if is_burn {
-        crosscheck::validate_funds_out_burn(params, validated)?;
-    } else {
-        crosscheck::validate_funds_out_transfer(params, validated)?;
-    }
+    // Consignment-bound release amount, under this build's RGB flow
+    // (`rgb-swap` = Transfer, `rgb-mint-burn` = Burn).
+    crosscheck::validate_funds_out_amount(params, validated)?;
 
-    // Swap / send-receive only for now. The backend-provided burnId and
-    // settlement fundsInIds are preserved; the EVM connector already selected
-    // the latter against the on-chain remaining balance. Mint/burn needs a
-    // network-id-routed path before its RGB OpId binding can be enabled.
+    // A burn settles a redemption, so it additionally binds the payout target
+    // to the 32 bytes the burner committed to (`MS_BURN_RECIPIENT`). Only the
+    // mint/burn flow has a burn, and `validate_funds_out_amount` has already
+    // rejected anything that is not one, so this needs no runtime type test -
+    // the swap enclave carries no redemption rule at all.
+    #[cfg(feature = "rgb-mint-burn")]
+    crosscheck::validate_funds_out_burn_recipient(params, validated)?;
+
+    // The backend-provided burnId and settlement fundsInIds are preserved; the
+    // EVM connector already selected the latter against the on-chain remaining
+    // balance. Mint/burn still needs a network-id-routed path before its RGB
+    // OpId binding can be enabled.
 
     Ok(())
 }

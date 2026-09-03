@@ -1,6 +1,8 @@
 pub mod btc_crosscheck;
 pub mod btc_ownership;
 #[cfg(feature = "rgb-validation")]
+pub mod flow;
+#[cfg(feature = "rgb-validation")]
 pub mod invoice;
 pub mod psbt_validation;
 pub mod signing;
@@ -74,7 +76,6 @@ fn route_proof_from_validated_consignment(
     validated: &validation::ValidatedConsignment,
 ) -> Result<RouteProof> {
     use crate::error::EnclaveError;
-    use validation::ifa;
 
     let last = validated.last_transition.as_ref().ok_or_else(|| {
         EnclaveError::CrossCheck(
@@ -82,20 +83,9 @@ fn route_proof_from_validated_consignment(
         )
     })?;
 
-    let amount = match last.transition_type {
-        ifa::TS_TRANSFER => last.total_output_amount,
-        ifa::TS_BURN => last.burned_asset_amount.ok_or_else(|| {
-            EnclaveError::CrossCheck(
-                "burn transition is missing MS_BURNED_ASSET metadata - cannot validate amount"
-                    .into(),
-            )
-        })?,
-        other => {
-            return Err(EnclaveError::CrossCheck(format!(
-                "unsupported RGB transition_type for route proof: {other}"
-            )));
-        }
-    };
+    // Which transition proves the withdrawal, and where its amount lives, is
+    // the flow's business - see `flow/`.
+    let amount = flow::funds_out_source_amount(last)?;
 
     Ok(RouteProof {
         amount,
@@ -157,16 +147,9 @@ pub fn validate_destination_anchor(
                 .into(),
         ));
     }
-    // Aggregate size cap (operator-configurable via `MAX_CONSIGNMENT_BYTES`),
-    // before the keccak hash and the rgbstd parse below - the destination
-    // consignment is otherwise bounded only by the generic 4 MB wire frame.
-    if destination.consignment.len() > ctx.bridge_config.max_consignment_bytes {
-        return Err(EnclaveError::CrossCheck(format!(
-            "send-RGB consignment too large: {} bytes (max {})",
-            destination.consignment.len(),
-            ctx.bridge_config.max_consignment_bytes
-        )));
-    }
+    // The destination consignment is otherwise bounded only by the generic
+    // 4 MB wire frame.
+    validation::assert_consignment_size(&destination.consignment, ctx.bridge_config, "send-RGB")?;
     // Integrity, not authorization: the listener
     // controls both `consignment` and `consignment_hash`, so a match only
     // proves the wire copy is intact. Authorization is the rgbstd validation
@@ -195,10 +178,7 @@ pub fn validate_destination_anchor(
     })?;
     // A BFA mint cannot be validated at all without the event `cea` checks it
     // against, so the caller verified the EVM lock before reaching here.
-    #[cfg(feature = "bfa-mint")]
     let validated = validator.validate_consignment(&destination.consignment, ctx.bridge_events)?;
-    #[cfg(not(feature = "bfa-mint"))]
-    let validated = validator.validate_consignment(&destination.consignment, &[])?;
 
     if validated.contract_id != destination.asset_id {
         return Err(EnclaveError::CrossCheck(format!(
@@ -289,6 +269,19 @@ mod tests {
         }
     }
 
+    /// A withdrawal consignment shaped for this build's flow, carrying
+    /// `amount` where that flow reads it.
+    #[cfg(feature = "rgb-swap")]
+    fn funds_out_consignment(amount: u64, op_id: &str) -> ValidatedConsignment {
+        validated_consignment(ifa::TS_TRANSFER, amount, None, op_id)
+    }
+
+    #[cfg(feature = "rgb-mint-burn")]
+    fn funds_out_consignment(amount: u64, op_id: &str) -> ValidatedConsignment {
+        validated_consignment(ifa::TS_BURN, 0, Some(amount), op_id)
+    }
+
+    #[cfg(feature = "rgb-swap")]
     #[test]
     fn route_proof_uses_transfer_output_amount() {
         let op_id = "0xAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
@@ -307,6 +300,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "rgb-mint-burn")]
     #[test]
     fn route_proof_uses_burn_metadata_amount() {
         let op_id = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
@@ -322,6 +316,7 @@ mod tests {
         assert_eq!(proof.operation_id.as_deref(), Some(op_id));
     }
 
+    #[cfg(feature = "rgb-mint-burn")]
     #[test]
     fn route_proof_rejects_burn_without_burned_amount() {
         let err = route_proof_from_validated_consignment(&validated_consignment(
@@ -337,15 +332,29 @@ mod tests {
 
     #[test]
     fn route_proof_rejects_non_hex_operation_id() {
-        let err = route_proof_from_validated_consignment(&validated_consignment(
-            ifa::TS_TRANSFER,
+        let err = route_proof_from_validated_consignment(&funds_out_consignment(
             100,
-            None,
             "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz",
         ))
         .unwrap_err();
 
         assert!(err.to_string().contains("not hex-decodable"));
+    }
+
+    /// The other flow's withdrawal shape must not authorize a release here.
+    #[test]
+    fn route_proof_rejects_the_other_flows_shape() {
+        let op_id = "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd";
+        #[cfg(feature = "rgb-swap")]
+        let wrong = validated_consignment(ifa::TS_BURN, 0, Some(700), op_id);
+        #[cfg(feature = "rgb-mint-burn")]
+        let wrong = validated_consignment(ifa::TS_TRANSFER, 700, None, op_id);
+
+        let err = route_proof_from_validated_consignment(&wrong).unwrap_err();
+        assert!(
+            err.to_string().contains("this enclave is built for the"),
+            "expected flow-shape rejection, got: {err}"
+        );
     }
 
     // Asset-identity binding, destination path. The legs are
@@ -491,7 +500,6 @@ mod tests {
                 rgb_validator: Some(&validator),
                 header_chain: &chain,
                 self_owned_psbt_outputs: Some(&self_owned),
-                #[cfg(feature = "bfa-mint")]
                 bridge_events: &[],
             };
             validate_destination_anchor(destination, 0, 0, &ctx).map(|(amount, _)| amount)

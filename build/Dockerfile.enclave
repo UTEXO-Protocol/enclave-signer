@@ -75,7 +75,10 @@ ENV CARGO_INCREMENTAL=0 \
 # production policy refuses to boot on the host-relayed RawRpc source. Operator
 # must set HELIOS_EXECUTION_RPC / HELIOS_CONSENSUS_RPC and run the exec+consensus
 # vsock-proxies (default ports 8003 / 8004).
-RUN cargo build --release --locked --features vsock,rgb,ccd,evm-rpc,helios
+# `rgb-swap` picks the send/receive RGB flow (see enclave/src/networks/rgb/flow/).
+# It is in the default feature set, but named here so the shipped flow is
+# explicit in the image that measures into PCR0.
+RUN cargo build --release --locked --features vsock,rgb,rgb-swap,ccd,evm-rpc,helios
 
 # --- Runtime ---
 # Pinned by digest (see header) - this rootfs is what ends up in the EIF, so its

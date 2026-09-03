@@ -67,10 +67,14 @@ aws-nitro-enclaves-nsm-api = "0.4"
 # `helios` is default but not mandatory: it has no L2 light client, so an
 # Arbitrum deployment runs on plain `evm-rpc`. It implies `evm-rpc`.
 #
-# Single-network EIFs: `--no-default-features --features vsock,rgb,evm-rpc,helios`
-# (RGB) or `--no-default-features --features vsock,ccd` (Concordium — no
-# bridge-signing path, so no Helios). Both are covered in CI.
-default = ["rgb", "ccd", "helios"]
+# Single-network EIFs, one flow each (see the RGB flow selection block below):
+#   RGB send/receive: `--no-default-features --features vsock,rgb,rgb-swap,evm-rpc,helios`
+#   RGB mint/burn:    `--no-default-features --features vsock,rgb,rgb-mint-burn,evm-rpc,helios`
+#   Concordium:       `--no-default-features --features vsock,ccd` (no
+#                     bridge-signing path, so no Helios).
+# All three are covered in CI. Naming no RGB flow does not build: the
+# `compile_error!` pair in lib.rs requires exactly one.
+default = ["rgb", "rgb-swap", "ccd", "helios"]
 
 # Network-selection umbrellas. Additive: enable one for a lean single-network
 # EIF, or both for the combined build. They gate only the request-handling
@@ -86,6 +90,27 @@ rgb = ["spv"]
 # `ccd` = the Concordium bridge stack. Light: no extra deps (ed25519 is always
 # on to keep key derivation / the attestation bundle uniform across builds).
 ccd = []
+
+# RGB flow selection. EXACTLY ONE is required whenever `rgb-validation` is on;
+# a `compile_error!` pair in lib.rs enforces it. The two flows ship as two
+# separate enclave instances with two PCR0s, so the choice is made at build
+# time and measured into the image - a send/receive enclave contains no mint
+# rule to reach.
+#
+# Both are `default = false` in the additive sense cargo means it, so a
+# mint/burn image MUST be built with `--no-default-features` (the default set
+# carries `rgb-swap`), exactly like the existing single-network EIFs:
+#   `--no-default-features --features vsock,rgb-mint-burn,evm-rpc,helios`
+#
+# The per-flow rules live in `enclave/src/networks/rgb/flow/{swap,mint_burn}.rs`;
+# everything else about consignment validation is shared.
+#
+# `rgb-swap` = pools/send-receive: the bridge holds an allocation and moves it
+# with IFA `Transfer` in both directions.
+rgb-swap = ["rgb"]
+# `rgb-mint-burn` = the bridge owns the contract's inflation rights: deposits
+# mint with IFA `Inflation`, withdrawals destroy with IFA `Burn`.
+rgb-mint-burn = ["rgb"]
 
 vsock = []
 # DANGER: allows importing a raw seed over the wire. Testing only.
@@ -127,15 +152,22 @@ evm-rpc = ["rgb-validation", "dep:alloy", "dep:tokio"]
 # rejects at boot (production policy requires the trustless source). Shipped in
 # the production EIF. HEAVY build (2 alloy majors, revm, BLS, vendored OpenSSL).
 helios = ["evm-rpc", "dep:helios-ethereum"]
-# BFA (Bridged Fungible Asset) mint support. Purely additive on top of `rgb`: it
-# only widens consignment validation to the bridged schema, whose script ends
-# with the `cea` ether-extension opcode the default validator decodes as `Fail`.
-# `evm-rpc` because the events that opcode checks come from the enclave's own
-# verified `FundsIn` read. The swap enclave is built without the feature and so
-# keeps its behaviour, but NOT its PCR0: the workspace `[patch.crates-io]` moves
-# every build onto the BFA RGB crates (and electrum-client 0.24), so every EIF
-# here re-measures and the signer set must rotate.
-bfa-mint = ["rgb", "evm-rpc"]
+# BFA (Bridged Fungible Asset) mint support. It widens the mint/burn flow to the
+# bridged schema, whose script ends with the `cea` ether-extension opcode the
+# default validator decodes as `Fail`. `evm-rpc` because the events that opcode
+# checks come from the enclave's own verified `FundsIn` read.
+#
+# `rgb-mint-burn`, not plain `rgb`: a BFA `Bridge` transition IS a mint, so its
+# rules belong to that flow and nowhere else. Pulling in the flow feature also
+# means a BFA build cannot accidentally be a `rgb-swap` one - `lib.rs` rejects
+# both flows at once, so `--features bfa-mint` on the default set fails to
+# compile rather than silently teaching the swap enclave a mint shape.
+#
+# The swap enclave is built without the feature and so keeps its behaviour, but
+# NOT its PCR0: the workspace `[patch.crates-io]` moves every build onto the BFA
+# RGB crates (and electrum-client 0.24), so every EIF here re-measures and the
+# signer set must rotate.
+bfa-mint = ["rgb-mint-burn", "evm-rpc"]
 
 [dev-dependencies]
 rand = "0.10.0"

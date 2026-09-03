@@ -1,10 +1,16 @@
 # syntax=docker/dockerfile:1.7
-# RGB-only enclave image (vsock + rgb + evm-rpc + helios) - handles the RGB/BTC bridge
-# only; Concordium (SignCcd / CcdSource) is not compiled in and its requests are
-# refused. For the Concordium bridge use Dockerfile.enclave.ccd; for both in one
-# binary use Dockerfile.enclave.
+# Mint/burn RGB enclave image (vsock + rgb + rgb-mint-burn + evm-rpc + helios).
+#
+# Same RGB-only shape as Dockerfile.enclave.rgb - Concordium (SignCcd /
+# CcdSource) is not compiled in and its requests are refused - but it selects
+# the OTHER RGB flow: deposits mint with an IFA `Inflation`, withdrawals destroy
+# with an IFA `Burn`. The send/receive rules are not in this binary, so this
+# enclave cannot sign a pools transfer even if one reached it.
+#
+# This is the second of the two enclave instances. It measures to its own PCR0
+# and runs alongside the swap enclave, never instead of it.
 # Usage:
-#   DOCKER_BUILDKIT=1 docker build -f build/Dockerfile.enclave.rgb -t utexo-bridge-enclave-rgb .
+#   DOCKER_BUILDKIT=1 docker build -f build/Dockerfile.enclave.mint-burn -t utexo-bridge-enclave-mint-burn .
 #
 # NO CREDENTIALS REQUIRED, same as Dockerfile.enclave: `enclave-proto/` is a
 # vendored in-tree slice of federated-signer-proto, and `rgb-consignment` now
@@ -44,8 +50,9 @@ WORKDIR /build/enclave
 #   -C debuginfo=0 / strip=symbols  drop debug info + symbol tables
 ENV CARGO_INCREMENTAL=0 \
     RUSTFLAGS="--remap-path-prefix=/build=/src -C debuginfo=0 -C strip=symbols"
-# `rgb` implies `spv` + `rgb-validation`. `--no-default-features` drops `ccd` so
-# this binary is RGB-only. `evm-rpc` adds in-enclave FundsIn verification,
+# `rgb` implies `spv` + `rgb-validation`. `--no-default-features` drops `ccd`
+# (so this binary is RGB-only) and also drops the default `rgb-swap`, which is
+# what lets the mint/burn flow be selected instead. `evm-rpc` adds in-enclave FundsIn verification,
 # pulling the alloy + tokio subtree; requires a second host vsock-proxy
 # (EVM_RPC_VSOCK_PORT, default 8002).
 #
@@ -55,9 +62,12 @@ ENV CARGO_INCREMENTAL=0 \
 # HELIOS_CONSENSUS_RPC / HELIOS_CHECKPOINT and run the exec+consensus
 # vsock-proxies (default ports 8003 / 8004).
 #
-# `rgb-swap` selects the send/receive RGB flow. Exactly one flow is required
-# under `rgb-validation`; the mint/burn image is Dockerfile.enclave.mint-burn.
-RUN cargo build --release --locked --no-default-features --features vsock,rgb,rgb-swap,evm-rpc,helios
+# `rgb-mint-burn` selects the mint/burn RGB flow: deposits mint with an IFA
+# `Inflation`, withdrawals destroy with an IFA `Burn`. Exactly one flow is
+# required under `rgb-validation`, and this image carries no send/receive rule
+# at all - the swap image is Dockerfile.enclave.rgb. Two flows, two PCR0s, two
+# running enclaves.
+RUN cargo build --release --locked --no-default-features --features vsock,rgb,rgb-mint-burn,evm-rpc,helios
 
 # --- Runtime ---
 # Pinned by DIGEST: this rootfs is what ends up in the EIF, so its digest drives

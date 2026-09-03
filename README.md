@@ -123,15 +123,16 @@ need Nitro hardware to *run* the enclave.
 # Build everything
 cargo build
 
-# Build with RGB validation support
-cargo build -p utexo-bridge-enclave --features rgb-validation
+# Build with RGB validation support. `rgb-swap` picks the send/receive RGB
+# flow; every rgb-validation build must name exactly one flow (see below).
+cargo build -p utexo-bridge-enclave --features rgb-validation,rgb-swap
 
 # Build with SPV verification (implies rgb-validation). With --features spv,
 # the enclave refuses to sign EVM transactions unless the request carries
 # valid Bitcoin SPV proofs for every consignment-anchor witness tx.
 # Without the feature, the enclave fails-closed if the request supplies
 # merkle_proofs at all (catches build mismatches against the listener).
-cargo build -p utexo-bridge-enclave --features spv
+cargo build -p utexo-bridge-enclave --features spv,rgb-swap
 
 # Build only the gRPC server (Parent Adapter)
 cargo build --manifest-path parent/Cargo.toml
@@ -140,8 +141,13 @@ cargo build --manifest-path parent/Cargo.toml
 ### Production (Nitro Enclave)
 
 ```bash
-# Build the enclave binary with vsock + RGB validation + SPV
-cargo build --release -p utexo-bridge-enclave --features vsock,rgb-validation,spv
+# Build the enclave binary with vsock + RGB validation + SPV, send/receive flow
+cargo build --release -p utexo-bridge-enclave --features vsock,rgb-validation,spv,rgb-swap
+
+# The mint/burn enclave is the same stack with the other flow. It is a separate
+# instance with its own PCR0, never a runtime switch. `--no-default-features` is
+# required: the default set carries `rgb-swap`.
+cargo build --release -p utexo-bridge-enclave --no-default-features --features vsock,rgb,rgb-mint-burn
 
 # Or build the full Enclave Image Format (EIF). No credentials needed --
 # this is the command a third party runs to reproduce PCR0.
@@ -291,11 +297,14 @@ nitro-cli terminate-enclave --enclave-id <enclave-id>
 # Run all tests
 cargo test
 
-# Run with RGB validation tests
-cargo test -p utexo-bridge-enclave --features rgb-validation
+# Run with RGB validation tests (send/receive flow)
+cargo test -p utexo-bridge-enclave --features rgb-validation,rgb-swap
+
+# Same, for the mint/burn flow
+cargo test -p utexo-bridge-enclave --no-default-features --features rgb,rgb-mint-burn
 
 # Run with SPV tests (implies rgb-validation; covers the full sign-path gate)
-cargo test -p utexo-bridge-enclave --features spv
+cargo test -p utexo-bridge-enclave --features spv,rgb-swap
 
 # Run with seed import tests
 cargo test -p utexo-bridge-enclave --features allow-seed-import
@@ -320,8 +329,20 @@ cargo test --manifest-path parent/Cargo.toml
 | `vsock` | Enable vsock transport (production, Linux only) |
 | `rgb-validation` | In-enclave RGB consignment validation via rgbstd + Esplora |
 | `spv` | Bitcoin SPV verification of consignment witness txids before signing EVM transactions. Implies `rgb-validation` (needed to extract witness txids). When OFF, `handle_sign_evm` additionally **rejects** any request that carries a non-empty `merkle_proofs` field — fail-closed against build mismatches between listener and enclave. |
+| `rgb-swap` | **RGB flow selection** — send/receive (pools): the bridge holds an allocation and moves it with IFA `Transfer` in both directions. In the default feature set. |
+| `rgb-mint-burn` | **RGB flow selection** — the bridge owns the contract's inflation rights: deposits mint with IFA `Inflation`, withdrawals destroy with IFA `Burn`. Needs `--no-default-features`. |
 | `allow-seed-import` | Allow raw 64-byte seed or BIP-39 mnemonic import (testing only, never enable in production) |
 | `dev-mode` | Skip cross-check validation on signing requests (development only) |
+
+**Exactly one RGB flow.** An `rgb-validation` build must enable `rgb-swap` or
+`rgb-mint-burn`, never both and never neither — a `compile_error!` pair in
+`enclave/src/lib.rs` enforces it, and CI asserts both guards fire. The two flows
+differ only in which RGB transition types they accept and how the amounts bind,
+but those are the checks that authorize value to move, so they are split per
+file (`enclave/src/networks/rgb/flow/`) and per image rather than branched at
+runtime: a send/receive enclave carries no mint rule to reach. Everything else
+about consignment validation — parsing, SPV anchoring, the PSBT txid bind,
+sighash guard, leg split and fee bound — is shared.
 
 ## Protocol
 

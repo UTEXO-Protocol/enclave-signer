@@ -31,7 +31,7 @@ sequenceDiagram
     Esplora-->>Rgb: witness tx data
     Rgb->>Rgb: rgbstd validate(chain_net, trusted_typesystem)
     Rgb->>Rgb: contract_id == declared asset_id<br/>(== pinned RGB_ASSET_ID when configured)
-    Rgb-->>Srv: SourceProof (amount from consignment —<br/>TS_TRANSFER total_output / TS_BURN burned amount —<br/>host rgb_amount is NOT used)
+    Rgb-->>Srv: SourceProof (amount from consignment, per build flow —<br/>rgb-swap ⇒ TS_TRANSFER total_output /<br/>rgb-mint-burn ⇒ TS_BURN burned amount —<br/>host rgb_amount is NOT used)
 
     Note over Srv,Chain: SPV gate (inside validate_source, feature spv)
     Srv->>Chain: lock chain
@@ -66,10 +66,9 @@ sequenceDiagram
     opt calldata proof slot populated
         Srv->>Cx: verify_btc_relay_agreement:<br/>decode (blockHeight, commitmentHash),<br/>enclave header at that height must match<br/>(inert while the listener sends an empty proof)
     end
-    alt last transition == TS_BURN
-        Srv->>Cx: validate_funds_out_burn:<br/>MS_BURNED_ASSET ≥ amount from calldata AND<br/>MS_BURN_RECIPIENT[12..] == calldata recipient
-    else
-        Srv->>Cx: validate_funds_out_transfer:<br/>last transition == TS_TRANSFER AND<br/>consignment total_output ≥ amount read from calldata bytes
+    Srv->>Cx: validate_funds_out_amount:<br/>last transition == the build flow's unlock shape AND<br/>consignment-derived amount ≥ amount read from calldata bytes
+    opt rgb-mint-burn build
+        Srv->>Cx: validate_funds_out_burn_recipient:<br/>MS_BURN_RECIPIENT[12..] == calldata recipient
     end
     Note right of Cx: burnId / fundsInIds are preserved as received —<br/>the in-enclave OpId rewrite exists but is dormant<br/>until flows are routed by network id.
     Cx-->>Srv: Ok / CrossCheck err

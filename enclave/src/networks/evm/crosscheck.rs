@@ -38,95 +38,73 @@ pub fn assert_witnesses_confirmed(validated: &ValidatedConsignment) -> Result<()
     Ok(())
 }
 
-/// Pools-side amount cross-check for the `fundsOut` transfer flow. Binds the
-/// release `amount` to the consignment's actual asset value:
+/// Amount cross-check for the `fundsOut` direction. Binds the release `amount`
+/// to the consignment's actual asset value:
 ///
-///   1. The consignment's most recent transition must be an IFA `Transfer`
-///      (`transition_type == ifa::TS_TRANSFER`).
-///   2. The transition's `total_output_amount` must cover the EVM-side release
-///      `amount`.
+///   1. The consignment's most recent transition must be the type this build's
+///      RGB flow accepts on a withdrawal - an IFA `Transfer` under `rgb-swap`,
+///      an IFA `Burn` under `rgb-mint-burn`.
+///   2. The amount that transition proves left the source must cover the
+///      EVM-side release `amount`.
+///
+/// Both legs come from [`crate::networks::rgb::flow::funds_out_source_amount`],
+/// the same function the route proof is built from, so the two cannot disagree
+/// about which transition authorized the release.
 ///
 /// Takes the decoded intent, which also replaces the old selector
 /// guard: `FundsOutParams` only exists after a successful `fundsOut` decode.
-pub fn validate_funds_out_transfer(
+pub fn validate_funds_out_amount(
     params: &FundsOutParams,
     validated: &ValidatedConsignment,
 ) -> Result<()> {
-    use crate::networks::rgb::validation::ifa;
+    use crate::networks::rgb::flow;
 
     let last = validated.last_transition.as_ref().ok_or_else(|| {
         EnclaveError::CrossCheck(
-            "pools fundsOut requires a consignment with at least one transition".into(),
+            "fundsOut requires a consignment with at least one transition".into(),
         )
     })?;
-    if last.transition_type != ifa::TS_TRANSFER {
-        return Err(EnclaveError::CrossCheck(format!(
-            "pools fundsOut requires a Transfer transition (last transition_type = {}, want {})",
-            last.transition_type,
-            ifa::TS_TRANSFER
-        )));
-    }
-
     // The consignment, not the listener-supplied `calldata_amount`, is the
     // authority on how much RGB moved.
+    let source_amount = flow::funds_out_source_amount(last)?;
+
     let calldata_amount: u64 = params
         .amount
         .try_into()
         .map_err(|_| EnclaveError::CrossCheck("fundsOut amount exceeds u64 range".into()))?;
-    if last.total_output_amount < calldata_amount {
+    if source_amount < calldata_amount {
         return Err(EnclaveError::CrossCheck(format!(
-            "transfer amount mismatch: consignment total_output_amount ({}) < calldata amount ({})",
-            last.total_output_amount, calldata_amount
+            "fundsOut amount mismatch: consignment proves {source_amount} asset units left the \
+             source, below the calldata amount ({calldata_amount})"
         )));
     }
     Ok(())
 }
 
-/// Redemption-side cross-check for the `fundsOut` burn flow. Binds the release
-/// to the burn that authorises it:
+/// Redemption-side payout bind for the `fundsOut` burn flow: the target the
+/// burner committed to (`MS_BURN_RECIPIENT`) must equal the calldata
+/// `recipient`.
 ///
-///   1. The consignment's most recent transition must be a `Burn`
-///      (`transition_type == ifa::TS_BURN`; BFA reuses the IFA type id).
-///   2. The destroyed amount (`MS_BURNED_ASSET`) must cover the EVM-side
-///      release `amount`.
-///   3. The payout target (`MS_BURN_RECIPIENT`) must equal the calldata
-///      `recipient`.
+/// This is what makes a redemption unforgeable. Those 32 bytes sit inside the
+/// burn operation, so they are covered by its OpId and signed by whoever spent
+/// the burned units; binding them here means a release cannot be redirected by
+/// anyone who merely holds a copy of the consignment.
 ///
-/// Point 3 is what makes a redemption unforgeable. Those 32 bytes sit inside
-/// the burn operation, so they are covered by its OpId and signed by whoever
-/// spent the burned units; binding them here means a release cannot be
-/// redirected by anyone who merely holds a copy of the consignment.
-pub fn validate_funds_out_burn(
+/// The shape and amount halves of the burn rule are NOT repeated here.
+/// [`validate_funds_out_amount`] runs first and, under `rgb-mint-burn`, its
+/// [`crate::networks::rgb::flow::funds_out_source_amount`] already rejects
+/// anything that is not a `Burn` covering the released amount. So a caller must
+/// run that first - this function assumes it did.
+#[cfg(feature = "rgb-mint-burn")]
+pub fn validate_funds_out_burn_recipient(
     params: &FundsOutParams,
     validated: &ValidatedConsignment,
 ) -> Result<()> {
-    use crate::networks::rgb::validation::ifa;
-
     let last = validated.last_transition.as_ref().ok_or_else(|| {
         EnclaveError::CrossCheck(
             "burn fundsOut requires a consignment with at least one transition".into(),
         )
     })?;
-    if last.transition_type != ifa::TS_BURN {
-        return Err(EnclaveError::CrossCheck(format!(
-            "burn fundsOut requires a Burn transition (last transition_type = {}, want {})",
-            last.transition_type,
-            ifa::TS_BURN
-        )));
-    }
-
-    let burned = last.burned_asset_amount.ok_or_else(|| {
-        EnclaveError::CrossCheck("burn transition carries no MS_BURNED_ASSET metadata".into())
-    })?;
-    let calldata_amount: u64 = params
-        .amount
-        .try_into()
-        .map_err(|_| EnclaveError::CrossCheck("fundsOut amount exceeds u64 range".into()))?;
-    if burned < calldata_amount {
-        return Err(EnclaveError::CrossCheck(format!(
-            "burn amount mismatch: destroyed ({burned}) < calldata amount ({calldata_amount})"
-        )));
-    }
 
     let recipient = last.burn_recipient.as_deref().ok_or_else(|| {
         EnclaveError::CrossCheck(
@@ -458,9 +436,13 @@ mod tests {
     }
 
     fn mock_funds_out_calldata_with_proof(amount: u64, proof: Bytes) -> Vec<u8> {
+        mock_funds_out_calldata_to(Address::ZERO, amount, proof)
+    }
+
+    fn mock_funds_out_calldata_to(recipient: Address, amount: u64, proof: Bytes) -> Vec<u8> {
         fundsOutCall {
             params: FundsOutParams {
-                recipient: Address::ZERO,
+                recipient,
                 amount: U256::from(amount),
                 burnId: U256::ZERO,
                 sourceChainId: U256::ZERO,
@@ -471,6 +453,28 @@ mod tests {
             },
         }
         .abi_encode()
+    }
+
+    /// A `ValidatedConsignment` carrying nothing but `transition` as its last.
+    /// The `fundsOut` cross-checks read `last_transition` only; the per-witness
+    /// grouping is the send-RGB PSBT bind's input.
+    #[cfg(feature = "rgb-validation")]
+    fn validated_with_last(
+        transition: crate::networks::rgb::validation::TransitionSummary,
+    ) -> crate::networks::rgb::validation::ValidatedConsignment {
+        crate::networks::rgb::validation::ValidatedConsignment {
+            contract_id: "rgb:test".into(),
+            chain_net: "bc".into(),
+            witness_txids: vec![],
+            all_op_ids: vec![transition.op_id.clone()],
+            mint_op_ids: vec![],
+            last_transition: Some(transition),
+            last_witness_txid: None,
+            last_transfer_witness_prevouts: None,
+            last_transfer_op_id: None,
+            non_mined_witness_txids: vec![],
+            transitions_by_witness: vec![],
+        }
     }
 
     /// The tuple encoding must round-trip through the decoder the cross-checks
@@ -519,48 +523,18 @@ mod tests {
         assert!(decode_funds_out_params(&legacy_flat_calldata(recipient)).is_err());
     }
 
-    // Pools fundsOut tests - `validate_funds_out_transfer` (+ the witness
+    // fundsOut amount tests - `validate_funds_out_amount` (+ the witness
     // recency guard `assert_witnesses_confirmed`).
 
-    // Redemption fundsOut tests - `validate_funds_out_burn`.
-
+    // Redemption fundsOut tests - `validate_funds_out_burn_recipient`. The shape
+    // and amount halves belong to `validate_funds_out_amount` / the mint-burn
+    // flow, and are tested there.
+    #[cfg(feature = "rgb-mint-burn")]
     mod burn {
         use super::*;
-        use crate::networks::rgb::validation::{ifa, TransitionSummary, ValidatedConsignment};
+        use crate::networks::rgb::validation::{ifa, TransitionSummary};
 
         const RECIPIENT: [u8; 20] = [0x42; 20];
-
-        fn calldata_to(recipient: Address, amount: u64) -> Vec<u8> {
-            fundsOutCall {
-                params: FundsOutParams {
-                    recipient,
-                    amount: U256::from(amount),
-                    burnId: U256::ZERO,
-                    sourceChainId: U256::ZERO,
-                    destinationChainId: U256::ZERO,
-                    sourceAddress: String::new(),
-                    proof: Bytes::new(),
-                    settlementData: Bytes::new(),
-                },
-            }
-            .abi_encode()
-        }
-
-        fn validated_with_last(transition: TransitionSummary) -> ValidatedConsignment {
-            ValidatedConsignment {
-                contract_id: "rgb:test".into(),
-                chain_net: "bc".into(),
-                witness_txids: vec![],
-                all_op_ids: vec![transition.op_id.clone()],
-                mint_op_ids: vec![],
-                last_transition: Some(transition),
-                last_witness_txid: None,
-                last_transfer_witness_prevouts: None,
-                last_transfer_op_id: None,
-                non_mined_witness_txids: vec![],
-                transitions_by_witness: vec![],
-            }
-        }
 
         fn burn_transition(burned: Option<u64>, recipient: Option<Vec<u8>>) -> TransitionSummary {
             TransitionSummary {
@@ -584,44 +558,28 @@ mod tests {
         }
 
         #[test]
-        fn passes_when_burn_covers_the_amount_and_names_the_recipient() {
-            let cd = calldata_to(Address::from(RECIPIENT), 1000);
+        fn passes_when_the_burn_names_the_calldata_recipient() {
+            let cd = mock_funds_out_calldata_to(Address::from(RECIPIENT), 1000, Bytes::new());
             let validated =
                 validated_with_last(burn_transition(Some(1000), Some(padded(RECIPIENT))));
-            assert!(validate_funds_out_burn(&params_of(&cd), &validated).is_ok());
-        }
-
-        #[test]
-        fn rejects_a_transfer_transition() {
-            let cd = calldata_to(Address::from(RECIPIENT), 1000);
-            let mut t = burn_transition(Some(1000), Some(padded(RECIPIENT)));
-            t.transition_type = ifa::TS_TRANSFER;
-            assert!(validate_funds_out_burn(&params_of(&cd), &validated_with_last(t)).is_err());
-        }
-
-        #[test]
-        fn rejects_releasing_more_than_was_burned() {
-            let cd = calldata_to(Address::from(RECIPIENT), 1001);
-            let validated =
-                validated_with_last(burn_transition(Some(1000), Some(padded(RECIPIENT))));
-            assert!(validate_funds_out_burn(&params_of(&cd), &validated).is_err());
+            assert!(validate_funds_out_burn_recipient(&params_of(&cd), &validated).is_ok());
         }
 
         #[test]
         fn rejects_an_ifa_burn_that_names_no_recipient() {
-            let cd = calldata_to(Address::from(RECIPIENT), 1000);
+            let cd = mock_funds_out_calldata_to(Address::from(RECIPIENT), 1000, Bytes::new());
             let validated = validated_with_last(burn_transition(Some(1000), None));
-            assert!(validate_funds_out_burn(&params_of(&cd), &validated).is_err());
+            assert!(validate_funds_out_burn_recipient(&params_of(&cd), &validated).is_err());
         }
 
         /// The whole point of the field: a release must not go anywhere the
         /// burner did not commit to.
         #[test]
         fn rejects_a_recipient_the_burn_did_not_commit_to() {
-            let cd = calldata_to(Address::from([0x99; 20]), 1000);
+            let cd = mock_funds_out_calldata_to(Address::from([0x99; 20]), 1000, Bytes::new());
             let validated =
                 validated_with_last(burn_transition(Some(1000), Some(padded(RECIPIENT))));
-            assert!(validate_funds_out_burn(&params_of(&cd), &validated).is_err());
+            assert!(validate_funds_out_burn_recipient(&params_of(&cd), &validated).is_err());
         }
 
         /// A non-zero high half means the burner committed to something that is
@@ -629,59 +587,64 @@ mod tests {
         /// target nobody signed.
         #[test]
         fn rejects_a_recipient_with_a_dirty_high_half() {
-            let cd = calldata_to(Address::from(RECIPIENT), 1000);
+            let cd = mock_funds_out_calldata_to(Address::from(RECIPIENT), 1000, Bytes::new());
             let mut dirty = padded(RECIPIENT);
             dirty[0] = 1;
             let validated = validated_with_last(burn_transition(Some(1000), Some(dirty)));
-            assert!(validate_funds_out_burn(&params_of(&cd), &validated).is_err());
+            assert!(validate_funds_out_burn_recipient(&params_of(&cd), &validated).is_err());
         }
     }
 
     mod transfer {
         use super::*;
-        use crate::networks::rgb::validation::{ifa, TransitionSummary, ValidatedConsignment};
+        use crate::networks::rgb::validation::{ifa, TransitionSummary};
 
-        fn validated_with_last(transition: TransitionSummary) -> ValidatedConsignment {
-            ValidatedConsignment {
-                contract_id: "rgb:test".into(),
-                chain_net: "bc".into(),
-                witness_txids: vec![],
-                all_op_ids: vec![transition.op_id.clone()],
-                mint_op_ids: vec![],
-                last_transition: Some(transition),
-                last_witness_txid: None,
-                last_transfer_witness_prevouts: None,
-                last_transfer_op_id: None,
-                non_mined_witness_txids: vec![],
-                // The fundsOut cross-check reads `last_transition` only; the
-                // per-witness grouping is the send-RGB PSBT bind's input.
-                transitions_by_witness: vec![],
-            }
-        }
-
-        fn transfer_transition(total_output_amount: u64) -> TransitionSummary {
+        /// The last transition this build's RGB flow accepts on a `fundsOut`,
+        /// carrying `amount` where that flow reads it: a Transfer's output
+        /// assignments under `rgb-swap`, a Burn's `MS_BURNED_ASSET` metadata
+        /// under `rgb-mint-burn`. Keeps the shared cases below flow-agnostic.
+        #[cfg(feature = "rgb-swap")]
+        fn source_transition(amount: u64) -> TransitionSummary {
             TransitionSummary {
                 op_id: "transfer-op".into(),
                 transition_type: ifa::TS_TRANSFER,
-                total_output_amount,
-                asset_output_amount: total_output_amount,
+                total_output_amount: amount,
+                asset_output_amount: amount,
                 outputs: Vec::new(),
                 burned_asset_amount: None,
                 burn_recipient: None,
             }
         }
 
+        #[cfg(feature = "rgb-mint-burn")]
+        fn source_transition(amount: u64) -> TransitionSummary {
+            TransitionSummary {
+                op_id: "burn-op".into(),
+                // A burn destroys units; it has no output assignments carrying
+                // them, so the amount lives in the metadata field only.
+                transition_type: ifa::TS_BURN,
+                total_output_amount: 0,
+                asset_output_amount: 0,
+                outputs: Vec::new(),
+                burned_asset_amount: Some(amount),
+                // The payout target is a separate bind
+                // (`validate_funds_out_burn_recipient`, tested in `mod burn`),
+                // so the amount cases here leave it unset.
+                burn_recipient: None,
+            }
+        }
+
         #[test]
-        fn passes_when_total_output_covers_calldata_amount() {
+        fn passes_when_source_amount_covers_calldata_amount() {
             let cd = mock_funds_out_calldata(1000);
-            let validated = validated_with_last(transfer_transition(1000));
-            assert!(validate_funds_out_transfer(&params_of(&cd), &validated).is_ok());
+            let validated = validated_with_last(source_transition(1000));
+            assert!(validate_funds_out_amount(&params_of(&cd), &validated).is_ok());
         }
 
         #[test]
         fn witnesses_confirmed_passes_when_all_mined() {
             // No non-mined witnesses surfaced -> the recency guard is a no-op.
-            let validated = validated_with_last(transfer_transition(1000));
+            let validated = validated_with_last(source_transition(1000));
             assert!(super::super::assert_witnesses_confirmed(&validated).is_ok());
         }
 
@@ -689,7 +652,7 @@ mod tests {
         fn witnesses_confirmed_rejects_non_mined() {
             // A tentative/ignored witness in the RGB->EVM direction is an
             // anomaly: the unlock settles an already-confirmed transfer.
-            let mut validated = validated_with_last(transfer_transition(1000));
+            let mut validated = validated_with_last(source_transition(1000));
             validated.non_mined_witness_txids = vec![[0xABu8; 32]];
             let err = super::super::assert_witnesses_confirmed(&validated).unwrap_err();
             assert!(
@@ -699,40 +662,41 @@ mod tests {
         }
 
         #[test]
-        fn passes_when_total_output_exceeds_calldata_amount() {
+        fn passes_when_source_amount_exceeds_calldata_amount() {
             let cd = mock_funds_out_calldata(1000);
-            let validated = validated_with_last(transfer_transition(2000));
-            assert!(validate_funds_out_transfer(&params_of(&cd), &validated).is_ok());
+            let validated = validated_with_last(source_transition(2000));
+            assert!(validate_funds_out_amount(&params_of(&cd), &validated).is_ok());
         }
 
         /// P0 regression: even with a valid consignment that deserializes
-        /// and validates, the EVM-side release cannot exceed the RGB-side
-        /// transfer total. A consignment for 1 unit must not authorise a
-        /// withdrawal for 10^9.
+        /// and validates, the EVM-side release cannot exceed what the RGB side
+        /// proves left the source. A consignment for 1 unit must not authorise
+        /// a withdrawal for 10^9.
         #[test]
-        fn rejects_when_total_output_less_than_calldata_amount() {
+        fn rejects_when_source_amount_less_than_calldata_amount() {
             let cd = mock_funds_out_calldata(1_000_000_000);
-            let validated = validated_with_last(transfer_transition(1));
-            let err = validate_funds_out_transfer(&params_of(&cd), &validated).unwrap_err();
+            let validated = validated_with_last(source_transition(1));
+            let err = validate_funds_out_amount(&params_of(&cd), &validated).unwrap_err();
             assert!(
-                err.to_string().contains("transfer amount mismatch"),
-                "expected transfer amount mismatch, got: {err}"
+                err.to_string().contains("fundsOut amount mismatch"),
+                "expected fundsOut amount mismatch, got: {err}"
             );
         }
 
-        /// A burn consignment arriving on the (single) `fundsOut`
-        /// selector must be rejected by the transfer check - this is how
-        /// mint/burn stays off until it's wired by contract address.
+        /// A consignment whose last transition is not the one this build's
+        /// flow withdraws with must be refused. `TS_INFLATION` is a deposit
+        /// shape in both flows, so it is wrong for either build - which is
+        /// also how a mint-shaped consignment stays out of a swap enclave.
         #[test]
-        fn rejects_when_last_transition_is_not_transfer() {
+        fn rejects_when_last_transition_is_not_the_flow_shape() {
             let cd = mock_funds_out_calldata(500);
-            let mut t = transfer_transition(500);
-            t.transition_type = ifa::TS_BURN;
+            let mut t = source_transition(500);
+            t.transition_type = ifa::TS_INFLATION;
             let validated = validated_with_last(t);
-            let err = validate_funds_out_transfer(&params_of(&cd), &validated).unwrap_err();
+            let err = validate_funds_out_amount(&params_of(&cd), &validated).unwrap_err();
             assert!(
-                err.to_string().contains("requires a Transfer transition"),
-                "expected Transfer-required rejection, got: {err}"
+                err.to_string().contains("this enclave is built for the"),
+                "expected flow-shape rejection, got: {err}"
             );
         }
 
@@ -752,7 +716,7 @@ mod tests {
                 non_mined_witness_txids: vec![],
                 transitions_by_witness: vec![],
             };
-            let err = validate_funds_out_transfer(&params_of(&cd), &validated).unwrap_err();
+            let err = validate_funds_out_amount(&params_of(&cd), &validated).unwrap_err();
             assert!(
                 err.to_string().contains("at least one transition"),
                 "expected no-transition rejection, got: {err}"
