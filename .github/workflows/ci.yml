@@ -10,6 +10,9 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
+  # Cargo.toml uses ssh:// URLs for private deps; force Cargo to use the
+  # system git so it honours the SSH agent loaded by webfactory/ssh-agent.
+  CARGO_NET_GIT_FETCH_WITH_CLI: "true"
 
 jobs:
   ci:
@@ -27,8 +30,8 @@ jobs:
       - name: Install system dependencies
         run: sudo apt-get update && sudo apt-get install -y pkg-config libssl-dev
 
-      # `federated-signer-proto` is reached over `ssh://`; the three BFA RGB
-      # mirrors use `https://` URLs rewritten to SSH below.
+      # All private deps use ssh:// URLs in Cargo.toml; each repo requires its
+      # own deploy key (GitHub enforces unique public keys per repo).
       - name: Set up SSH for private deps
         uses: webfactory/ssh-agent@v0.9.0
         with:
@@ -38,13 +41,6 @@ jobs:
             ${{ secrets.RGB_CONSENSUS_BFA_DEPLOY_KEY }}
             ${{ secrets.RGB_OPS_BFA_DEPLOY_KEY }}
             ${{ secrets.RGB_SCHEMAS_BFA_DEPLOY_KEY }}
-
-      - name: Rewrite HTTPS UTEXO-Protocol deps to SSH
-        run: |
-          git config --global \
-            url."git@github.com:UTEXO-Protocol/".insteadOf \
-            "https://github.com/UTEXO-Protocol/"
-          echo "CARGO_NET_GIT_FETCH_WITH_CLI=true" >> "$GITHUB_ENV"
 
       - name: Cache cargo registry
         uses: actions/cache@v4
@@ -192,13 +188,6 @@ jobs:
             ${{ secrets.RGB_OPS_BFA_DEPLOY_KEY }}
             ${{ secrets.RGB_SCHEMAS_BFA_DEPLOY_KEY }}
 
-      - name: Rewrite HTTPS UTEXO-Protocol deps to SSH
-        run: |
-          git config --global \
-            url."git@github.com:UTEXO-Protocol/".insteadOf \
-            "https://github.com/UTEXO-Protocol/"
-          echo "CARGO_NET_GIT_FETCH_WITH_CLI=true" >> "$GITHUB_ENV"
-
       - name: Cache cargo registry
         uses: actions/cache@v4
         with:
@@ -251,13 +240,6 @@ jobs:
             ${{ secrets.RGB_CONSENSUS_BFA_DEPLOY_KEY }}
             ${{ secrets.RGB_OPS_BFA_DEPLOY_KEY }}
             ${{ secrets.RGB_SCHEMAS_BFA_DEPLOY_KEY }}
-
-      - name: Rewrite HTTPS UTEXO-Protocol deps to SSH
-        run: |
-          git config --global \
-            url."git@github.com:UTEXO-Protocol/".insteadOf \
-            "https://github.com/UTEXO-Protocol/"
-          echo "CARGO_NET_GIT_FETCH_WITH_CLI=true" >> "$GITHUB_ENV"
 
       - name: Cache cargo registry
         uses: actions/cache@v4
