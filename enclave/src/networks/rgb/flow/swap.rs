@@ -89,3 +89,18 @@ pub fn funds_out_source_amount(last: &TransitionSummary) -> Result<u64> {
     }
     Ok(last.total_output_amount)
 }
+
+/// Bind the EVM release amount to what the consignment proves.
+///
+/// Coverage, not equality: `total_output_amount` on a Transfer is the
+/// bridge's leg plus the sender's change, so it may legitimately exceed the
+/// release.
+pub fn assert_funds_out_amount(source_amount: u64, calldata_amount: u64) -> Result<()> {
+    if source_amount < calldata_amount {
+        return Err(EnclaveError::CrossCheck(format!(
+            "fundsOut amount mismatch: consignment proves {source_amount} asset units left the \
+             source, below the calldata amount ({calldata_amount})"
+        )));
+    }
+    Ok(())
+}

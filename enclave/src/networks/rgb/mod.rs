@@ -2,7 +2,9 @@ pub mod btc_crosscheck;
 pub mod btc_ownership;
 #[cfg(feature = "rgb-validation")]
 pub mod flow;
-#[cfg(feature = "rgb-validation")]
+// The invoice bind reads a verified BridgeFundsIn log, so it only exists
+// where the enclave can fetch one (`evm-rpc` implies `rgb-validation`).
+#[cfg(feature = "evm-rpc")]
 pub mod invoice;
 pub mod psbt_validation;
 pub mod signing;

@@ -72,13 +72,8 @@ pub fn validate_funds_out_amount(
         .amount
         .try_into()
         .map_err(|_| EnclaveError::CrossCheck("fundsOut amount exceeds u64 range".into()))?;
-    if source_amount < calldata_amount {
-        return Err(EnclaveError::CrossCheck(format!(
-            "fundsOut amount mismatch: consignment proves {source_amount} asset units left the \
-             source, below the calldata amount ({calldata_amount})"
-        )));
-    }
-    Ok(())
+    // Coverage under rgb-swap, exact equality under rgb-mint-burn.
+    flow::assert_funds_out_amount(source_amount, calldata_amount)
 }
 
 /// Redemption-side payout bind for the `fundsOut` burn flow: the target the
@@ -661,11 +656,29 @@ mod tests {
             );
         }
 
+        /// A Transfer's total includes the sender's change, so surplus is
+        /// legitimate on the swap flow.
+        #[cfg(feature = "rgb-swap")]
         #[test]
         fn passes_when_source_amount_exceeds_calldata_amount() {
             let cd = mock_funds_out_calldata(1000);
             let validated = validated_with_last(source_transition(2000));
             assert!(validate_funds_out_amount(&params_of(&cd), &validated).is_ok());
+        }
+
+        /// I-06: a burn has no change leg and `fundsOut.amount` is gross, so
+        /// the release must equal the burned figure exactly. A release below
+        /// the burn would strand the difference.
+        #[cfg(feature = "rgb-mint-burn")]
+        #[test]
+        fn rejects_when_source_amount_exceeds_calldata_amount() {
+            let cd = mock_funds_out_calldata(1000);
+            let validated = validated_with_last(source_transition(2000));
+            let err = validate_funds_out_amount(&params_of(&cd), &validated).unwrap_err();
+            assert!(
+                err.to_string().contains("exact equality"),
+                "expected exact-equality rejection, got: {err}"
+            );
         }
 
         /// P0 regression: even with a valid consignment that deserializes

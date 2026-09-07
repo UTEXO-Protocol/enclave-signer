@@ -496,22 +496,19 @@ MUST refuse to sign (fail closed) if any fails.
 |-----|-------------------------------------------------------------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | P1  | submitted RGB consignment is valid (`rgbstd` full validation) | OK                                                                                                                                                               |
 | P2  | consignment proves the expected transition                  | OK -- the last transition MUST be the one this build's RGB flow unlocks with: `TS_TRANSFER` under `rgb-swap`, `TS_BURN` (amount from `MS_BURNED_ASSET`) under `rgb-mint-burn`, where a `bfa-mint` build also validates every `TS_BRIDGE` the burn descends from against its own verified `FundsIn` lock. Any other shape is refused |
-| P3  | unlock amount is covered by the consignment-derived amount  | OK for mint/burn (`MS_BURNED_ASSET`). **`[OPEN]`** for swap: the source amount is the transfer's `total_output_amount`, which includes the sender's revealed change leg, so a small deposit can cover a large release. Needs the bridge's receiving leg identified (blocked on the coordinator side). Comparison is coverage (`>=`) |
+| P3  | unlock amount equals the consignment-derived amount         | OK -- the amount is the burn's `MS_BURNED_ASSET` (host `rgb_amount` is ignored) and MUST equal `fundsOut.amount` exactly (`flow::assert_funds_out_amount`; `fundsOut.amount` is gross, commission is taken on-chain). Swap-only: coverage (`>=`), since a transfer's `total_output_amount` includes the sender's change leg (#58); not shipped |
 | P4  | calldata is well-formed                                     | OK -- two allowlisted selectors (`fundsOut`, `lzFundsOut`), 64 KiB cap, canonical ABI decode + re-encode byte-equality, `destinationChainId` rule per route |
-| P5  | payload binds destination chain / contract / **recipient**  | chain + contract pinned; recipient bound on the burn path: the BFA schema carries `MS_BURN_RECIPIENT` and the enclave refuses a release whose calldata names a different address. **`[OPEN]`** for swap: no recipient in the consignment to bind |
-| P6  | payload binds the RGB `OpId` (cross-domain identifier)      | **`[OPEN]`** the contract `burnId` / `settlementData` are unrelated to the consignment OpId; the enclave signs them as received and the route-level `operation_id` check is disabled |
+| P5  | payload binds destination chain / contract / **recipient**  | OK -- chain + contract pinned; the BFA burn carries `MS_BURN_RECIPIENT` and the enclave refuses a release whose calldata names a different address. Swap-only gap, not shipped: a transfer carries no recipient (#66) |
+| P6  | payload binds the RGB `OpId` (cross-domain identifier)      | **`[OPEN]`** -- `settlementData` (the `FundsIn` operation ids the release settles) and `sourceAddress` are signed as received; nothing ties them to the burn's verified mint ancestry. On-chain `burnId` is a hash of all release fields, so the same burn re-presented with different `settlementData` gets a new `burnId` and a second release. The enclave already verifies the ancestry locks, so it can bind `settlementData` to them; a durable per-burn guard stays on-chain |
 | P7  | referenced Bitcoin txs are in accepted chain history        | OK                                                                                                                                                               |
 | P8  | Bitcoin inclusion proofs valid against the in-enclave chain | OK; plus the calldata `proof` is required (fail-closed): `source.height` is pinned to the block anchoring the consignment's last witness tx (re-verified under one lock guard), the enclave must hold a header at `latest.height`, and `latest` must be within `MAX_RELAY_TIP_LAG_BLOCKS = 100` of the enclave tip. The two `commitmentHash` words are **not** checked in-enclave: they are BtcRelay's `keccak256(StoredBlockHeader)` over relay-internal state (chainWork, lastDiffAdjustment, last ten timestamps), which the enclave cannot compute; `RGBVerifier` verifies each against the relay itself, so a manipulated commitment reverts on-chain (#57/#122) |
 | P9  | corresponding EVM lock record exists for the same operation | on-chain for this direction; for EVM->RGB the enclave verifies `FundsIn` itself (Sec 7.2)                                                                         |
 | P10 | EVM execution payload matches the validated unlock intent   | selector, calldata layout, amount, chain, contract: OK; recipient and operation id: see P5 / P6                                                                   |
 | P11 | on any failure, refuse to sign                              | OK -- fail-closed                                                                                                                                                |
 
-> The swap-flow `[OPEN]`s share one root cause: the recipient, the amount
-> leg, and the operation id inside `fundsOut` calldata are not yet derived
-> from the validated consignment. P5 needs a schema change (cross-repo, done
-> for the burn path); P3 needs the receiving leg identified; P6 needs an agreed
-> derivation on the contract side. Until then those fields rest on the backend
-> plus the on-chain quorum and replay controls.
+> P6 is the one open predicate on the shipped mint/burn flow. Until it lands,
+> single-burn uniqueness rests on the backend plus the on-chain quorum; the
+> contract itself states it cannot prove one burn settles at most once.
 
 [Signing gate](diagrams/10-signing-gate.md)
 
@@ -531,11 +528,9 @@ MUST refuse to sign (fail closed) if any fails.
   ciphertext is bound to both handshake keys via HKDF; replay-guard nonces are
   recorded only **after** authentication succeeds, and the guard
   is TTL-bounded (1 h) with oldest-first eviction so it cannot be wedged.
-  **`[OPEN]`** authorization still rests on a static
-  cluster-wide secret, not bound into PCRs or the attested commitment.
-  **`[OPEN]`** the master seed stays resident for the enclave's
-  lifetime (the donor re-seals it per clone); fix requires a cloning redesign
-  or threshold keys.
+  By design: authorization rests on the operator's cluster-wide secret
+  delivered at runtime (not in PCRs), and the master seed stays resident so
+  the donor can re-seal it per clone. Both are accepted; no change planned.
 - **Federation / quorum:** unlock SHOULD require M-of-N enclave signatures;
   quorum is enforced on-chain in `MultisigProxy`. The EIP-712 digest is a pure
   function of `callData` / `nonce` / `deadline`, so quorum members sign
@@ -549,7 +544,7 @@ MUST refuse to sign (fail closed) if any fails.
 
 | ID        | Invariant                                                                                                                                                |
 |-----------|-----------------------------------------------------------------------------------------------------------------------------------------------------------|
-| **SI-1**  | A compromised parent/listener/backend alone MUST NOT yield a `fundsOut` signature. (Holds for mint/burn; for swap the recipient, amount leg and operation id are unbound -- P3/P5/P6 `[OPEN]`. A CCD source is trusted by design, Sec 7.9.) |
+| **SI-1**  | A compromised parent/listener/backend alone MUST NOT yield a `fundsOut` signature. (Holds for a first release of a burn. A second release of the same burn under new `settlementData` is not refused -- P6 `[OPEN]`. A CCD source is trusted by design, Sec 7.9.) |
 | **SI-2**  | A forged or malformed RGB consignment MUST NOT trigger signing. OK                                                                                       |
 | **SI-3**  | A Bitcoin inclusion proof inconsistent with the in-enclave PoW chain MUST NOT trigger signing. OK                                                        |
 | **SI-4**  | An EVM unlock payload not bound to the RGB `OpId` MUST NOT be accepted. **`[OPEN]` P6.**                                                                 |
@@ -598,33 +593,33 @@ mainnet/signet checkpoints · Electrum resolver with TLS terminated in-enclave �
 size caps · COSE pinning · xpriv zeroization · EIP-712 domain pinned to the
 deployed contract · fee sanity · CLI-driven cloning · regression suites in CI.
 
+**Scope:** the shipped flow is the BFA mint/burn enclave. Swap-only gaps
+(#58 amount leg, #66 recipient) are noted in Sec 9 and not listed here.
+
 **Open -- pre-mainnet:**
 
-1. **Swap `fundsOut` amount** (P3): bind the release to the leg the bridge
-   received, not the transfer total that includes sender change. Needs the
-   receiving leg identifiable (coordinator / hub change).
-2. **Swap recipient binding** (P5): the burn path binds `MS_BURN_RECIPIENT`;
-   the swap transfer carries no EVM destination to bind.
-3. **Operation-id binding** (P6): agree a derivation from the validated
-   consignment to the contract `burnId` / `settlementData`, then enforce it;
-   durable cluster-wide dedup stays on-chain.
-4. **Concordium source trust** (Sec 7.9): the enclave trusts the listener's
-   CCD finality check and signs caller-supplied hashes; an in-enclave
-   Concordium proof path does not exist.
-5. **Signer-set rotation** (cross-repo): no enclave membership gate for
-   co-signers; needs contracts (`btcDescriptorHash`) + listener support.
-6. **Cloning hardening**: bind the cloning secret / operator
-   identity into the attested measurement; redesign so the seed need not stay
-   resident.
-7. **Trustless EVM source**: `FundsIn` receipts are host-relayed raw RPC
-   evidence -- attested as `RawRpc`, and pinnable via `--expect-evm-source`.
-   No light client or L2-native proof path is in use.
-8. **Public reproducibility**: the RGB crates are pinned to private BFA
+1. **Burn-to-release binding** (P6, SI-4): bind `settlementData`'s operation
+   ids to the burn's enclave-verified mint ancestry, so one burn maps to one
+   canonical `burnId`. Enclave-side change; the ancestry verification it
+   needs already exists (`bfa_burn_ancestry_events`). Related: #159 (W-05)
+   asks for the same durable lock-record binding on the EVM -> RGB leg.
+2. **Public reproducibility**: the RGB crates are pinned to private BFA
    mirrors over SSH, so PCR0 is currently reproducible only by key holders.
-9. Smaller: attest `FUNDS_IN_CONTRACT` / BTC and RGB sats budgets; aggregate
-   (not just per-tx) gas-tx fee limiting; u64 amount ceiling;
-   reproducible-build determinism (apt / dnf versions float); testnet3
-   checkpoint; signet BIP-325 challenge verification.
+
+**Accepted, by design (no work planned):** Concordium source trusted from the
+listener (Sec 7.9); cloning authorised by a runtime operator secret with a
+resident seed (Sec 10); EVM receipts as host-relayed raw RPC evidence,
+attested as `RawRpc` (Sec 7.2); signer-set rotation handled outside the
+enclave.
+
+**Minor, decide whether to track:** `FUNDS_IN_CONTRACT` and the three sats
+budgets are enforced but not in the attested commitment (only the on/off
+bit of plain-BTC is); gas-tx fee ceilings are per transaction, not
+aggregate; wire amounts are `u64`, so a token with more than about 1.8e19
+base units per release is unrepresentable (refused, not truncated); apt /
+dnf package versions float in the image build; testnet3 has a placeholder
+SPV checkpoint (release builds refuse to boot on it); signet BIP-325
+challenge signatures are not verified.
 
 ---
 

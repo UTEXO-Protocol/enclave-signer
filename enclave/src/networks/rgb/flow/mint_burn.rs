@@ -111,3 +111,19 @@ pub fn funds_out_source_amount(last: &TransitionSummary) -> Result<u64> {
         )
     })
 }
+
+/// Bind the EVM release amount to what the consignment proves.
+///
+/// Exact equality: a burn destroys one figure and has no change leg, and
+/// `fundsOut.amount` is gross (commission is taken on-chain from it). A
+/// release below the burn strands units; one above it is unbacked.
+pub fn assert_funds_out_amount(source_amount: u64, calldata_amount: u64) -> Result<()> {
+    if source_amount != calldata_amount {
+        return Err(EnclaveError::CrossCheck(format!(
+            "fundsOut amount mismatch: consignment proves {source_amount} asset units were \
+             burned, calldata amount is {calldata_amount} - the {FLOW_NAME} flow requires \
+             exact equality"
+        )));
+    }
+    Ok(())
+}
