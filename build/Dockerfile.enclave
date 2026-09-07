@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile:1.7
-# Combined production enclave image (vsock + rgb + ccd + evm-rpc + helios) -
+# Combined production enclave image (vsock + rgb + ccd + evm-rpc) -
 # handles both the RGB/BTC and Concordium bridges in one binary. For a lean
 # single-network EIF, build Dockerfile.enclave.rgb (RGB only) or
 # Dockerfile.enclave.ccd (Concordium only).
@@ -71,14 +71,12 @@ ENV CARGO_INCREMENTAL=0 \
 # (EVM_RPC_VSOCK_PORT, default 8002).
 # `ccd` adds Concordium governance signing (SignCcd + CcdSource routes). The
 # umbrella `rgb` feature pulls in `spv`/`rgb-validation`.
-# `helios` makes FundsIn verification trustless and is required: the
-# production policy refuses to boot on the host-relayed RawRpc source. Operator
-# must set HELIOS_EXECUTION_RPC / HELIOS_CONSENSUS_RPC and run the exec+consensus
-# vsock-proxies (default ports 8003 / 8004).
+# `helios` is deliberately NOT enabled: the light-client path is unused in
+# production, so the attested evm_source is RawRpc.
 # `rgb-swap` picks the send/receive RGB flow (see enclave/src/networks/rgb/flow/).
 # It is in the default feature set, but named here so the shipped flow is
 # explicit in the image that measures into PCR0.
-RUN cargo build --release --locked --features vsock,rgb,rgb-swap,ccd,evm-rpc,helios
+RUN cargo build --release --locked --features vsock,rgb,rgb-swap,ccd,evm-rpc
 
 # --- Runtime ---
 # Pinned by digest (see header) - this rootfs is what ends up in the EIF, so its

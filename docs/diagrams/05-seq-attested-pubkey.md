@@ -14,7 +14,7 @@ sequenceDiagram
     participant RootCa as Embedded AWS Nitro<br/>root CA (PEM)
 
     Note over V,Lib: Verifier issues nonce
-    V->>Cli: attest-verify --endpoint ... --pcr0/1/2 ...<br/>--expect-vanilla-psbt --expect-evm-source raw|helios|disabled
+    V->>Cli: attest-verify --endpoint ... --pcr0/1/2 ...<br/>--expect-vanilla-psbt --expect-evm-source raw|disabled
     Cli->>Lib: verify_attested_pubkey(endpoint, expected_pcrs, expected_policy)
     Lib->>Lib: nonce := rand_32_bytes()
 
@@ -24,10 +24,10 @@ sequenceDiagram
     Parent->>Srv: GetAttestedPublicKeyRequest{nonce}
 
     Srv->>State: get_keys() (requires Phase::Active)
-    State-->>Srv: KeyInfo{evm_address, evm_uncompressed_pub,<br/>gas-tx key, btc keys, master_fingerprint,<br/>account xpubs vanilla+colored}
+    State-->>Srv: KeyInfo{evm_address, evm_uncompressed_pub,<br/>gas-tx key + address, btc keys, master_fingerprint,<br/>account xpubs vanilla+colored, ccd_ed25519_pub}
 
     Srv->>Srv: merge boot-pinned BridgeConfig<br/>(chain_id, bridge_contract, rgb_asset_id)<br/>into PublicKeysResponse
-    Srv->>Srv: bundle := canonical_pubkey_bundle(keys)<br/>(12 length-prefixed fields, proto order)
+    Srv->>Srv: bundle := canonical_pubkey_bundle(keys)<br/>(13 length-prefixed fields, proto order)
     Srv->>Srv: commitment := sha256(bundle ‖ policy_commitment)<br/>policy = boot-resolved SecurityPolicy
 
     Srv->>Att: get_attestation(nonce, pubkey=evm_uncompressed_pub, user_data=commitment)
@@ -66,5 +66,5 @@ sequenceDiagram
     Lib-->>Cli: AttestedPubkeyResult
     Cli-->>V: OK + printed bundle + PCRs
 
-    Note right of V: After OK the verifier knows:<br/>"AWS Nitro hardware certifies that an<br/>enclave with PCR0=X / PCR1=Y / PCR2=Z<br/>produced this signing pubkey, and the full<br/>key bundle PLUS the enclave's resolved<br/>security policy commit to user_data."<br/>A downgraded posture (vanilla on, raw<br/>instead of Helios, dev build) FAILS here.
+    Note right of V: After OK the verifier knows:<br/>"AWS Nitro hardware certifies that an<br/>enclave with PCR0=X / PCR1=Y / PCR2=Z<br/>produced this signing pubkey, and the full<br/>key bundle PLUS the enclave's resolved<br/>security policy commit to user_data."<br/>A downgraded posture (vanilla on, other<br/>EVM source, dev build) FAILS here.
 ```

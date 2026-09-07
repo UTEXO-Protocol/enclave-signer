@@ -1,9 +1,13 @@
 # enclave-proto (vendored)
 
-The wire protocol the Nitro enclave speaks, vendored so **the enclave builds
-with no credentials and no private dependencies**. Anyone can clone this repo
-and reproduce the EIF and its PCR measurements without access to any private
-UTEXO repository.
+The wire protocol the Nitro enclave speaks, vendored so **the proto schema
+adds no credential and no private dependency to the enclave build**. The goal
+is that anyone can clone this repo and reproduce the EIF and its PCR
+measurements without access to a private UTEXO repository.
+
+Current caveat: the root `Cargo.toml` pins the RGB crates to private BFA
+mirrors over SSH, so an enclave build does need those deploy keys today. That
+is a separate dependency; this crate stays credential-free.
 
 This is a *slice*, not a copy: only the `enclave` protobuf package is here.
 The bridge / node / orchestrator / parent / signer packages are not vendored —

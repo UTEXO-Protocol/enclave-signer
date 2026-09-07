@@ -78,27 +78,32 @@ Length-prefixed (u32 big-endian) concatenation of every field of
 
 ```
 canonical_bundle =
-    u32_be(len(evm_address))           || evm_address
-    u32_be(len(btc_compressed_pub))    || btc_compressed_pub
-    u32_be(len(btc_xpub))              || btc_xpub_utf8
-    u32_be(len(master_fingerprint))    || master_fingerprint
-    u32_be(len(account_xpub_vanilla))  || account_xpub_vanilla_utf8
-    u32_be(len(account_xpub_colored))  || account_xpub_colored_utf8
-    u32_be(len(evm_uncompressed_pub))  || evm_uncompressed_pub
-    u32_be(8)                          || chain_id_be8
-    u32_be(len(bridge_contract))       || bridge_contract       // 20 bytes (zeros = unset)
-    u32_be(len(rgb_asset_id))          || rgb_asset_id_utf8
+    u32_be(len(evm_address))                 || evm_address
+    u32_be(len(btc_compressed_pub))          || btc_compressed_pub
+    u32_be(len(btc_xpub))                    || btc_xpub_utf8
+    u32_be(len(master_fingerprint))          || master_fingerprint
+    u32_be(len(account_xpub_vanilla))        || account_xpub_vanilla_utf8
+    u32_be(len(account_xpub_colored))        || account_xpub_colored_utf8
+    u32_be(len(evm_uncompressed_pub))        || evm_uncompressed_pub
+    u32_be(8)                                || chain_id_be8
+    u32_be(len(bridge_contract))             || bridge_contract       // 20 bytes (zeros = unset)
+    u32_be(len(rgb_asset_id))                || rgb_asset_id_utf8
+    u32_be(len(evm_gas_tx_uncompressed_pub)) || evm_gas_tx_uncompressed_pub   // 64 bytes
+    u32_be(len(evm_gas_tx_address))          || evm_gas_tx_address            // 20 bytes
+    u32_be(len(ccd_ed25519_pub))             || ccd_ed25519_pub               // 32 bytes
 ```
 
-The last three fields are bridge config pinned at enclave boot from env
-(`EVM_CHAIN_ID`, `EVM_PROXY_CONTRACT_ADDRESS`, `RGB_ASSET_ID`). They commit the
-enclave to a specific chain / contract / asset triple — a misconfigured or
+Thirteen fields. `chain_id`, `bridge_contract` and `rgb_asset_id` are bridge
+config pinned at enclave boot from env (`EVM_CHAIN_ID`,
+`EVM_PROXY_CONTRACT_ADDRESS`, `RGB_ASSET_ID`). They commit the enclave to a
+specific chain / contract / asset triple — a misconfigured or
 maliciously-redirected enclave is observable through this commitment. (The
 attestation-bundle/proto field keeps the legacy name `bridge_contract`; its
 value is the MultisigProxy from `EVM_PROXY_CONTRACT_ADDRESS`.)
 Production deployments MUST set all three; the commitment for a dev /
 mock build with no env is `chain_id=0`, `bridge_contract=20 zero bytes`,
-`rgb_asset_id=""`.
+`rgb_asset_id=""`. The gas-tx key and the Concordium key are derived in every
+build, so the bundle has the same shape regardless of features.
 
 The verifier MUST use the same field set, the same order, and the same
 length-prefix encoding. The reference encoder is `canonical_pubkey_bundle`
@@ -122,12 +127,11 @@ policy_commitment =
     u8(0x01)                                        // production discriminant
     u8(allow_vanilla_psbt)                          // plain-BTC path enabled?
     u8(attestation_mode)                            // 1 = real NSM (0 = mock)
-    u8(evm_source)                                  // 0 disabled | 1 raw-rpc | 2 helios
+    u8(evm_source)                                  // 0 disabled | 1 raw-rpc (2 reserved)
     u8(btc_source)                                  // 1 = SPV-verified
     chain_id_be8 || bridge_contract(20)
     u32_be(len(rgb_asset_id)) || rgb_asset_id_utf8
-    // Helios trust root:
-    u8(0x00) | u8(0x01) || evm_checkpoint(32)       // pinned beacon block root
+    u8(0x00)                                        // evm_checkpoint absent (reserved slot)
     // Gas-tx (SignRawDigest) rule:
     gas_tx_allowed_to(20)                           // all-zero = gas path unpinned
     gas_tx_max_gas_limit_be8                        // gasLimit ceiling (0 = unset)
@@ -142,8 +146,8 @@ A production enclave commits the full production tuple; a dev/mock enclave
 commits just `[version, 0x00]`. Because the posture flags (`allow_vanilla_psbt`,
 `evm_source`, …) and the gas-tx rule are not on the wire, a verifier reconstructs
 the **expected** policy and requires the commitment to match — so an enclave that
-shipped with a downgraded posture (vanilla signing on, raw instead of
-Helios-verified RPC, an unpinned or wrong gas-tx rule, a dev build) fails
+shipped with a downgraded posture (vanilla signing on, a different EVM
+source, an unpinned or wrong gas-tx rule, a dev build) fails
 verification rather than being silently trusted.
 
 The gas-tx rule is the `SignRawDigest` allowlist: the pinned
@@ -159,11 +163,6 @@ An unset `GAS_TX_MAX_VALUE_WEI` commits as `0`, which is exactly the posture it
 enforces (no non-zero value is signable) — so "unpinned" is itself attested, the
 same way an unset destination commits as all-zero. `None` and `Some(0)` therefore
 produce identical bytes; one enforced rule cannot yield two attestations.
-
-The Helios checkpoint pins WHICH weak-subjectivity beacon block root
-the enclave trust-rooted EVM verification on, so two enclaves with identical PCRs
-but different checkpoints commit different `user_data`; `attest-verify` declares
-it via `--expect-helios-checkpoint`, required with `--expect-evm-source helios`.
 
 ## Where the expected PCRs come from
 
@@ -215,18 +214,17 @@ The `attest-verify` CLI in this repo runs the full recipe.
 ```bash
 # Production verification (against a real Nitro enclave). By default it expects a
 # production policy with plain-BTC signing DISABLED and the raw-RPC EVM data
-# source (what the shipped image uses).
+# source (`--expect-evm-source raw`, what the shipped image uses).
 attest-verify \
     --endpoint http://parent.example:50051 \
     --pcr0 <96-hex-chars> \
     --pcr1 <96-hex-chars> \
     --pcr2 <96-hex-chars>
 
-# Require the trustless Helios data source (fails if the enclave is only on raw
-# RPC), and/or expect the plain-BTC path enabled:
+# Expect the plain-BTC path enabled:
 attest-verify --endpoint http://parent.example:50051 \
     --pcr0 <..> --pcr1 <..> --pcr2 <..> \
-    --expect-evm-source helios --expect-vanilla-psbt
+    --expect-vanilla-psbt
 
 # Dev / CI verification (against an enclave built with --features mock-attestation).
 # --mock implies the expected policy is Development.
@@ -238,8 +236,8 @@ Exit codes:
 | Code | Meaning                                                         |
 |------|-----------------------------------------------------------------|
 | 0    | All eight checks passed                                         |
-| 1    | Verification failed (stderr explains why)                       |
-| 2    | Usage / IO / connection error                                   |
+| 1    | Verification failed, or the endpoint could not be reached (stderr explains why) |
+| 2    | Command-line usage error                                        |
 
 ## Threat model
 
@@ -261,7 +259,7 @@ Defended:
 - **Posture downgrade** — `user_data` also commits to the resolved
   security policy (signing modes, pins, attestation mode, data sources). An
   enclave that shipped with a weaker posture than expected — plain-BTC signing
-  enabled, a raw instead of Helios-verified EVM source, or a dev build — fails
+  enabled, a different EVM source, or a dev build — fails
   the commitment match against the verifier's expected policy.
 - **Fork to a different enclave image** — PCR mismatch on verify.
 - **Stale code (vulnerable image)** — operator publishes accepted PCRs;
@@ -285,10 +283,10 @@ NOT defended (out of scope for attestation):
 - Security policy: resolved in [`enclave/src/policy.rs`](../enclave/src/policy.rs);
   shared canonical encoding in [`attestation-verify/src/policy.rs`](../attestation-verify/src/policy.rs).
 - Wire definitions:
-  - Enclave wire: [`proto/enclave.proto`](../proto/enclave.proto)
+  - Enclave wire: [`enclave-proto/proto/enclave.proto`](../enclave-proto/proto/enclave.proto)
     (`GetAttestedPublicKeyRequest`/`Response`).
-  - Parent gRPC: [`proto/parentadapter.proto`](../proto/parentadapter.proto)
-    (`AttestedPublicKey` RPC).
+  - Parent gRPC: `proto/enclave/parent.proto` in the upstream
+    `federated-signer-proto` repo (`ParentService.AttestedPublicKey`).
 - Tests:
   - Enclave handler: [`enclave/tests/test_attested_pubkey.rs`](../enclave/tests/test_attested_pubkey.rs).
   - End-to-end gRPC: [`parent/tests/test_grpc_bridge.rs`](../parent/tests/test_grpc_bridge.rs)

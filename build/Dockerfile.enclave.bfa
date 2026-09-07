@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile:1.7
-# BFA mint enclave image (vsock + rgb + evm-rpc + helios + bfa-mint) - the
+# BFA mint enclave image (vsock + rgb + evm-rpc + bfa-mint) - the
 # RGB-only enclave plus the bridged-asset mint path. For the swap-only enclave
 # use Dockerfile.enclave.rgb; Concordium (SignCcd / CcdSource) is not compiled
 # in here either and its requests are refused.
@@ -54,11 +54,8 @@ ENV CARGO_INCREMENTAL=0 \
 # pulling the alloy + tokio subtree; requires a second host vsock-proxy
 # (EVM_RPC_VSOCK_PORT, default 8002).
 #
-# `helios` makes that verification trustless and is required: `rgb` turns
-# on the bridge-signing path, and the production policy refuses to boot on the
-# host-relayed RawRpc source. Operator must set HELIOS_EXECUTION_RPC /
-# HELIOS_CONSENSUS_RPC / HELIOS_CHECKPOINT and run the exec+consensus
-# vsock-proxies (default ports 8003 / 8004).
+# `helios` is deliberately NOT enabled: the light-client path is unused in
+# production, so the attested evm_source is RawRpc.
 #
 # `bfa-mint` widens consignment validation to the bridged schema and is the only
 # difference in compiled code from Dockerfile.enclave.rgb; it implies `rgb` +
@@ -78,7 +75,7 @@ RUN --mount=type=secret,id=github_token,required=true \
     chmod 0755 /usr/local/bin/gh-askpass; \
     git config --global url."https://x-access-token@github.com/UTEXO-Protocol/".insteadOf "https://github.com/UTEXO-Protocol/"; \
     GIT_ASKPASS=/usr/local/bin/gh-askpass GIT_TERMINAL_PROMPT=0 \
-    cargo build --release --locked --no-default-features --features vsock,rgb,evm-rpc,helios,bfa-mint
+    cargo build --release --locked --no-default-features --features vsock,rgb,evm-rpc,bfa-mint
 
 # --- Runtime ---
 # Pinned by DIGEST: this rootfs is what ends up in the EIF, so its digest drives

@@ -9,10 +9,10 @@ sequenceDiagram
     participant RN as Req NSM
     participant DN as Don NSM
 
-    Note over Req,Don: Both enclaves must have IDENTICAL PCRs<br/>(same compiled binary) for cloning to succeed.<br/>The cloning_secret is a pre-shared operator value,<br/>the donor reads it from UTEXO_CLONING_SECRET.
+    Note over Req,Don: Both enclaves must have IDENTICAL PCRs<br/>(same compiled binary) for cloning to succeed.<br/>The cloning_secret is a pre-shared operator value - the donor<br/>received it at runtime via InitializeKey.cloning_secret<br/>(or the legacy UTEXO_CLONING_SECRET env). Never in the image.
 
-    Note over Op,Req: Message 1 — operator tooling → requester<br/>(the parent's gRPC Clone RPC is currently a stub —<br/>the handshake runs over the enclave wire protocol,<br/>the parent acting only as an untrusted relay)
-    Op->>Parent: start cluster clone
+    Note over Op,Req: Message 1 — utexo-bridge-parent-cli clone → requester<br/>(the CLI talks to the requester over the enclave wire protocol<br/>and to the donor through its parent's gRPC Clone RPC -<br/>the parent is only an untrusted relay)
+    Op->>Parent: cli clone --cloning-secret --donor-grpc --donor-evm
     Parent->>Req: InitiateCloningRequest{cloning_secret, cluster_public_key=donor_evm}
     Req->>Req: ephemeral X25519 keypair (StaticSecret + PublicKey)
     Req->>Req: digest := HMAC-SHA256(secret, encryption_pubkey)
@@ -52,7 +52,7 @@ sequenceDiagram
     Req->>Req: state := Phase::Active(km)
     Req->>Req: replay_guard.check_and_record(verified.nonce)<br/>(after auth + commit)
     Req-->>Parent: SetCloneResponse{} (empty)
-    Parent-->>Op: Initialize OK (probes GetPublicKey for confirmation)
+    Parent-->>Op: clone OK — the CLI then calls GetPublicKey and<br/>asserts the local EVM address == --donor-evm
 
     Note over Req,Don: After SetClone the requester has the IDENTICAL HD seed<br/>as the donor and signs as the same address. Plaintext seed<br/>exists only inside the requester's TEE briefly<br/>(Zeroizing 64-byte buffer), ciphertext on the wire is bound to<br/>the per-handshake DH key by HKDF info = donor‖requester.
 ```

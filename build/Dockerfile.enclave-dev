@@ -33,9 +33,8 @@ WORKDIR /build/enclave
 # image in debug keeps `debug_assertions` on so the guard stays quiet while
 # still refusing the feature in any production (release) build.
 #
-# `--no-default-features` is REQUIRED: defaults are `rgb,ccd,helios`, and a plain
-# `--features` still applies them - `helios` would pull openssl-sys, which needs
-# `make` (not installed in this stage) and fails. Keep the list below explicit.
+# `--no-default-features` is REQUIRED: defaults are `rgb,rgb-swap,ccd`, and a
+# plain `--features` still applies them. Keep the list below explicit.
 # `ccd` is listed because Concordium signing sits behind that feature; without it
 # every CCD request answers "not compiled in".
 # `rgb-swap` is the RGB flow this dev image carries; `--no-default-features`

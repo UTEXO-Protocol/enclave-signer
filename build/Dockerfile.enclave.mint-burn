@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile:1.7
-# Mint/burn RGB enclave image (vsock + rgb + rgb-mint-burn + evm-rpc + helios).
+# Mint/burn RGB enclave image (vsock + rgb + rgb-mint-burn + evm-rpc).
 #
 # Same RGB-only shape as Dockerfile.enclave.rgb - Concordium (SignCcd /
 # CcdSource) is not compiled in and its requests are refused - but it selects
@@ -56,18 +56,15 @@ ENV CARGO_INCREMENTAL=0 \
 # pulling the alloy + tokio subtree; requires a second host vsock-proxy
 # (EVM_RPC_VSOCK_PORT, default 8002).
 #
-# `helios` makes that verification trustless and is required: `rgb` turns
-# on the bridge-signing path, and the production policy refuses to boot on the
-# host-relayed RawRpc source. Operator must set HELIOS_EXECUTION_RPC /
-# HELIOS_CONSENSUS_RPC / HELIOS_CHECKPOINT and run the exec+consensus
-# vsock-proxies (default ports 8003 / 8004).
+# `helios` is deliberately NOT enabled: the light-client path is unused in
+# production, so the attested evm_source is RawRpc.
 #
 # `rgb-mint-burn` selects the mint/burn RGB flow: deposits mint with an IFA
 # `Inflation`, withdrawals destroy with an IFA `Burn`. Exactly one flow is
 # required under `rgb-validation`, and this image carries no send/receive rule
 # at all - the swap image is Dockerfile.enclave.rgb. Two flows, two PCR0s, two
 # running enclaves.
-RUN cargo build --release --locked --no-default-features --features vsock,rgb,rgb-mint-burn,evm-rpc,helios
+RUN cargo build --release --locked --no-default-features --features vsock,rgb,rgb-mint-burn,evm-rpc
 
 # --- Runtime ---
 # Pinned by DIGEST: this rootfs is what ends up in the EIF, so its digest drives
