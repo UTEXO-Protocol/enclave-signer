@@ -129,12 +129,87 @@ pub fn validate_funds_out_burn_recipient(
     Ok(())
 }
 
-// `apply_op_id_binding` / `op_id_to_calldata_id` were removed: they
-// rewrote `burnId` and `settlementData` in the signed
-// calldata, and both fields are now keyed on bridge-derived ids no RGB OpId
-// yields. They are backend-supplied and enforced on-chain (`InvalidBurnId`,
-// `FundsInNotFound` / `AmountMismatch`). An enclave-side check would need the
-// deposit receipts via `evm_event::EvmReceiptProvider` - follow-up.
+/// Settlement bind for the BFA burn flow: `settlementData` must cite exactly
+/// the deposits behind the burn's mint ancestry.
+///
+/// `RgbSettlementModule.beforeFundsOut` decodes `settlementData` as
+/// `abi.encode(bytes32[] operationIds, uint256[] amounts)` and checks each
+/// pair against the `(operationId, netAmount)` it recorded at `FundsIn`. It
+/// does not know which deposits a given burn descends from; the enclave does,
+/// because it verified every ancestry lock's receipt itself
+/// ([`crate::networks::evm::evm_event::verify_rgb_funds_in`]). Requiring the
+/// cited set to equal that ancestry, pair for pair, ties the release to the
+/// burn: a second release of the same burn cannot cite other deposits to earn
+/// a fresh `burnId`.
+///
+/// Set equality, order-insensitive, no duplicates, canonical encoding. An
+/// empty lock set refuses: in this build every signable asset is bridged, so a
+/// burn with no verified deposit behind it settles nothing.
+#[cfg(feature = "bfa-mint")]
+pub fn validate_funds_out_settlement(
+    params: &FundsOutParams,
+    locks: &[crate::networks::evm::evm_event::VerifiedLock],
+) -> Result<()> {
+    use alloy_primitives::{B256, U256};
+    use alloy_sol_types::SolValue;
+
+    type Settlement = (Vec<B256>, Vec<U256>);
+
+    if locks.is_empty() {
+        return Err(EnclaveError::CrossCheck(
+            "fundsOut settles no verified deposit: the burn's mint ancestry carries no EVM lock \
+             this enclave verified - refusing to sign"
+                .into(),
+        ));
+    }
+
+    let decoded: Settlement = Settlement::abi_decode_params_validate(&params.settlementData)
+        .map_err(|e| {
+            EnclaveError::CrossCheck(format!("fundsOut settlementData does not decode: {e}"))
+        })?;
+    let (ids, amounts) = &decoded;
+    if ids.len() != amounts.len() {
+        return Err(EnclaveError::CrossCheck(format!(
+            "fundsOut settlementData cites {} ids but {} amounts",
+            ids.len(),
+            amounts.len()
+        )));
+    }
+    if decoded.abi_encode_params() != params.settlementData.as_ref() {
+        return Err(EnclaveError::CrossCheck(
+            "fundsOut settlementData is not canonically encoded".into(),
+        ));
+    }
+
+    let mut cited: Vec<([u8; 32], U256)> = ids
+        .iter()
+        .zip(amounts.iter())
+        .map(|(id, amount)| (id.0, *amount))
+        .collect();
+    cited.sort();
+    if cited.windows(2).any(|w| w[0].0 == w[1].0) {
+        return Err(EnclaveError::CrossCheck(
+            "fundsOut settlementData cites the same deposit twice".into(),
+        ));
+    }
+
+    let mut expected: Vec<([u8; 32], U256)> = locks
+        .iter()
+        .map(|lock| (lock.operation_id, U256::from(lock.net_amount)))
+        .collect();
+    expected.sort();
+    expected.dedup();
+
+    if cited != expected {
+        return Err(EnclaveError::CrossCheck(format!(
+            "fundsOut settlementData mismatch: calldata cites {} deposit(s), the burn's verified \
+             mint ancestry has {} - every (operationId, netAmount) pair must match",
+            cited.len(),
+            expected.len()
+        )));
+    }
+    Ok(())
+}
 
 /// One `(height, commitmentHash)` pair of the finality proof.
 #[derive(Debug, Clone, Copy)]
@@ -435,6 +510,15 @@ mod tests {
     }
 
     fn mock_funds_out_calldata_to(recipient: Address, amount: u64, proof: Bytes) -> Vec<u8> {
+        mock_funds_out_calldata_full(recipient, amount, proof, Bytes::new())
+    }
+
+    fn mock_funds_out_calldata_full(
+        recipient: Address,
+        amount: u64,
+        proof: Bytes,
+        settlement_data: Bytes,
+    ) -> Vec<u8> {
         fundsOutCall {
             params: FundsOutParams {
                 recipient,
@@ -444,7 +528,7 @@ mod tests {
                 destinationChainId: U256::ZERO,
                 sourceAddress: String::new(),
                 proof,
-                settlementData: Bytes::new(),
+                settlementData: settlement_data,
             },
         }
         .abi_encode()
@@ -733,6 +817,120 @@ mod tests {
             assert!(
                 err.to_string().contains("at least one transition"),
                 "expected no-transition rejection, got: {err}"
+            );
+        }
+    }
+
+    // Settlement bind - `validate_funds_out_settlement`.
+    #[cfg(feature = "bfa-mint")]
+    mod settlement {
+        use super::*;
+        use crate::networks::evm::evm_event::VerifiedLock;
+        use alloy_primitives::B256;
+        use alloy_sol_types::SolValue;
+
+        fn lock(tag: u8, net: u64) -> VerifiedLock {
+            VerifiedLock {
+                mint_opid: [tag; 32],
+                minted: net,
+                operation_id: [tag; 32],
+                net_amount: net,
+            }
+        }
+
+        fn settlement(pairs: &[(u8, u64)]) -> Bytes {
+            let ids: Vec<B256> = pairs.iter().map(|(t, _)| B256::from([*t; 32])).collect();
+            let amounts: Vec<U256> = pairs.iter().map(|(_, a)| U256::from(*a)).collect();
+            Bytes::from((ids, amounts).abi_encode_params())
+        }
+
+        fn check(pairs: &[(u8, u64)], locks: &[VerifiedLock]) -> Result<()> {
+            let cd =
+                mock_funds_out_calldata_full(Address::ZERO, 1000, Bytes::new(), settlement(pairs));
+            validate_funds_out_settlement(&params_of(&cd), locks)
+        }
+
+        #[test]
+        fn passes_when_the_cited_pairs_are_the_verified_locks() {
+            assert!(check(
+                &[(0xA1, 950), (0xB2, 20)],
+                &[lock(0xA1, 950), lock(0xB2, 20)]
+            )
+            .is_ok());
+        }
+
+        #[test]
+        fn order_does_not_matter() {
+            assert!(check(
+                &[(0xB2, 20), (0xA1, 950)],
+                &[lock(0xA1, 950), lock(0xB2, 20)]
+            )
+            .is_ok());
+        }
+
+        /// The P6 attack: a valid burn re-presented with other deposits cited,
+        /// which would earn a fresh `burnId` on-chain.
+        #[test]
+        fn rejects_a_deposit_the_burn_does_not_descend_from() {
+            let err = check(&[(0xC3, 950)], &[lock(0xA1, 950)]).unwrap_err();
+            assert!(err.to_string().contains("settlementData mismatch"), "{err}");
+        }
+
+        #[test]
+        fn rejects_a_missing_ancestry_deposit() {
+            let err = check(&[(0xA1, 950)], &[lock(0xA1, 950), lock(0xB2, 20)]).unwrap_err();
+            assert!(err.to_string().contains("settlementData mismatch"), "{err}");
+        }
+
+        #[test]
+        fn rejects_an_extra_cited_deposit() {
+            let err = check(&[(0xA1, 950), (0xB2, 20)], &[lock(0xA1, 950)]).unwrap_err();
+            assert!(err.to_string().contains("settlementData mismatch"), "{err}");
+        }
+
+        /// The module checks the full recorded netAmount per pair, so a wrong
+        /// amount is a wrong citation, not a rounding issue.
+        #[test]
+        fn rejects_a_wrong_net_amount() {
+            let err = check(&[(0xA1, 949)], &[lock(0xA1, 950)]).unwrap_err();
+            assert!(err.to_string().contains("settlementData mismatch"), "{err}");
+        }
+
+        #[test]
+        fn rejects_a_duplicated_citation() {
+            let err = check(&[(0xA1, 950), (0xA1, 950)], &[lock(0xA1, 950)]).unwrap_err();
+            assert!(err.to_string().contains("twice"), "{err}");
+        }
+
+        #[test]
+        fn rejects_when_no_lock_was_verified() {
+            let err = check(&[(0xA1, 950)], &[]).unwrap_err();
+            assert!(err.to_string().contains("no verified deposit"), "{err}");
+        }
+
+        #[test]
+        fn rejects_empty_settlement_data() {
+            let cd = mock_funds_out_calldata_full(Address::ZERO, 1000, Bytes::new(), Bytes::new());
+            let err =
+                validate_funds_out_settlement(&params_of(&cd), &[lock(0xA1, 950)]).unwrap_err();
+            assert!(err.to_string().contains("does not decode"), "{err}");
+        }
+
+        #[test]
+        fn rejects_non_canonical_settlement_data() {
+            let mut padded = settlement(&[(0xA1, 950)]).to_vec();
+            padded.extend_from_slice(&[0u8; 32]);
+            let cd = mock_funds_out_calldata_full(
+                Address::ZERO,
+                1000,
+                Bytes::new(),
+                Bytes::from(padded),
+            );
+            let err =
+                validate_funds_out_settlement(&params_of(&cd), &[lock(0xA1, 950)]).unwrap_err();
+            assert!(
+                err.to_string().contains("canonically") || err.to_string().contains("decode"),
+                "{err}"
             );
         }
     }

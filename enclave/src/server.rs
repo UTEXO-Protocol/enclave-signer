@@ -398,10 +398,8 @@ fn verify_mint_locks(
     ctx: &ServerContext,
     plan: &[([u8; 32], [u8; 32])],
     unavailable: &str,
-) -> Result<Vec<rgbstd::vm::ether_extension::Event>> {
+) -> Result<Vec<crate::networks::evm::evm_event::VerifiedLock>> {
     use crate::networks::evm::evm_event::verify_rgb_funds_in;
-    use rgbstd::vm::ether_extension::Event;
-    use rgbstd::{OpId, RevealedValue};
 
     if plan.is_empty() {
         return Ok(Vec::new());
@@ -414,18 +412,29 @@ fn verify_mint_locks(
 
     plan.iter()
         .map(|(mint_opid, lock)| {
-            let amount = verify_rgb_funds_in(
+            verify_rgb_funds_in(
                 &**client,
                 &ctx.bridge_config.funds_in_contract,
                 ctx.evm_rpc_config.min_confirmations,
                 lock,
                 mint_opid,
-            )?;
-            Ok(Event::new(
-                OpId::from(*mint_opid),
-                RevealedValue::from(amount),
-            ))
+            )
         })
+        .collect()
+}
+
+/// The `cea` events RGB consensus checks the mints against: one per verified
+/// lock, `(mint OpId, minted amount)`, in plan order.
+#[cfg(feature = "bfa-mint")]
+fn cea_events(
+    locks: &[crate::networks::evm::evm_event::VerifiedLock],
+) -> Vec<rgbstd::vm::ether_extension::Event> {
+    use rgbstd::vm::ether_extension::Event;
+    use rgbstd::{OpId, RevealedValue};
+
+    locks
+        .iter()
+        .map(|l| Event::new(OpId::from(l.mint_opid), RevealedValue::from(l.minted)))
         .collect()
 }
 
@@ -469,7 +478,7 @@ fn bfa_binding_for(
 fn bfa_burn_ancestry_events(
     ctx: &ServerContext,
     source: &enclave_proto::RgbSource,
-) -> Result<Vec<rgbstd::vm::ether_extension::Event>> {
+) -> Result<Vec<crate::networks::evm::evm_event::VerifiedLock>> {
     if cfg!(feature = "dev-mode") {
         return Ok(Vec::new());
     }
@@ -503,7 +512,7 @@ fn bfa_mint_events(
     ctx: &ServerContext,
     source: &enclave_proto::EvmSource,
     destination: &enclave_proto::RgbDestination,
-) -> Result<Vec<rgbstd::vm::ether_extension::Event>> {
+) -> Result<Vec<crate::networks::evm::evm_event::VerifiedLock>> {
     // dev-mode compiles no destination-anchor validation, so these events would
     // have no consumer and the RPC call would be pure cost.
     if cfg!(feature = "dev-mode") {
@@ -592,7 +601,7 @@ fn handle_sign(ctx: &ServerContext, req: SignRequest) -> Result<EnclaveResponse>
     // Before destination validation, not after: a BFA mint's consignment cannot
     // be validated at all until the lock it commits to has been verified.
     #[cfg(feature = "bfa-mint")]
-    let bfa_bridge_events = match (source_ref, destination_ref) {
+    let bfa_locks = match (source_ref, destination_ref) {
         // A burn: the events prove the locks behind the mints it descends from.
         (SourceNetwork::RgbSource(rgb), _) => bfa_burn_ancestry_events(ctx, rgb)?,
         // A mint: the events prove the locks it and its ancestry were minted
@@ -603,6 +612,8 @@ fn handle_sign(ctx: &ServerContext, req: SignRequest) -> Result<EnclaveResponse>
         // No BFA consignment on either side, so nothing for `cea` to check.
         _ => Vec::new(),
     };
+    #[cfg(feature = "bfa-mint")]
+    let bfa_bridge_events = cea_events(&bfa_locks);
     // Not gated on `bfa-mint`: `validate_consignment` takes the events
     // unconditionally, so an empty set is already how "no BFA here" is spelled
     // and every call site is spared a `#[cfg]` pair.
@@ -782,6 +793,8 @@ fn handle_sign(ctx: &ServerContext, req: SignRequest) -> Result<EnclaveResponse>
                     destination_proof.evm_funds_out.as_ref(),
                     source_validated.rgb_consignment.as_ref(),
                     &rgb_source.merkle_proofs,
+                    #[cfg(feature = "bfa-mint")]
+                    &bfa_locks,
                 )?;
             }
             handle_sign_evm(ctx, destination, destination_proof.evm_funds_out.as_ref())
@@ -812,6 +825,7 @@ fn apply_funds_out_binding(
     params: Option<&crate::networks::evm::validation::FundsOutParams>,
     validated: Option<&crate::networks::rgb::validation::ValidatedConsignment>,
     merkle_proofs: &[crate::proto::MerkleProofEntry],
+    #[cfg(feature = "bfa-mint")] locks: &[crate::networks::evm::evm_event::VerifiedLock],
 ) -> Result<()> {
     use crate::networks::evm::crosscheck;
 
@@ -868,10 +882,15 @@ fn apply_funds_out_binding(
     #[cfg(feature = "rgb-mint-burn")]
     crosscheck::validate_funds_out_burn_recipient(params, validated)?;
 
-    // The backend-provided burnId and settlement fundsInIds are preserved; the
-    // EVM connector already selected the latter against the on-chain remaining
-    // balance. Mint/burn still needs a network-id-routed path before its RGB
-    // OpId binding can be enabled.
+    // Settlement bind (spec P6): the deposits `settlementData` cites must be
+    // exactly the verified locks behind the burn's mint ancestry. On-chain
+    // `burnId` hashes every release field, so this is what makes one burn map
+    // to one `burnId` instead of one per `settlementData` the backend picks.
+    #[cfg(feature = "bfa-mint")]
+    crosscheck::validate_funds_out_settlement(params, locks)?;
+
+    // `burnId` itself is not recomputed here: the contract derives and
+    // checks it from the same fields (`InvalidBurnId`).
 
     Ok(())
 }

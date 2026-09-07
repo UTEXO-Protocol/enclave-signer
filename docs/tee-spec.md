@@ -236,6 +236,15 @@ domain separator is pinned by a regression test against the deployed
 drift breaks the build. The response echoes the calldata unchanged; nothing in
 the enclave rewrites it.
 
+**Settlement bind (`bfa-mint`).** `settlementData` is
+`abi.encode(bytes32[] operationIds, uint256[] netAmounts)`, the deposits the
+release settles. The enclave verifies every `FundsIn` lock behind the burn's
+mint ancestry itself (receipt, pinned emitter, RGB OpId, depth) and reads the
+`BridgeFundsIn` record from the same receipt. It then requires the cited
+pairs to equal those records exactly: set equality, no duplicates, canonical
+encoding, and at least one verified lock. On-chain `burnId` is the hash of
+every release field, so this is what makes one burn map to one `burnId`.
+
 Which consignment shape a build signs is chosen at compile time by its RGB
 flow feature (`rgb-swap` or `rgb-mint-burn`, exactly one). A **swap** enclave
 signs `TS_TRANSFER` unlocks; a **mint/burn** enclave signs `TS_BURN` unlocks and
@@ -499,16 +508,17 @@ MUST refuse to sign (fail closed) if any fails.
 | P3  | unlock amount equals the consignment-derived amount         | OK -- the amount is the burn's `MS_BURNED_ASSET` (host `rgb_amount` is ignored) and MUST equal `fundsOut.amount` exactly (`flow::assert_funds_out_amount`; `fundsOut.amount` is gross, commission is taken on-chain). Swap-only: coverage (`>=`), since a transfer's `total_output_amount` includes the sender's change leg (#58); not shipped |
 | P4  | calldata is well-formed                                     | OK -- two allowlisted selectors (`fundsOut`, `lzFundsOut`), 64 KiB cap, canonical ABI decode + re-encode byte-equality, `destinationChainId` rule per route |
 | P5  | payload binds destination chain / contract / **recipient**  | OK -- chain + contract pinned; the BFA burn carries `MS_BURN_RECIPIENT` and the enclave refuses a release whose calldata names a different address. Swap-only gap, not shipped: a transfer carries no recipient (#66) |
-| P6  | payload binds the RGB `OpId` (cross-domain identifier)      | **`[OPEN]`** -- `settlementData` (the `FundsIn` operation ids the release settles) and `sourceAddress` are signed as received; nothing ties them to the burn's verified mint ancestry. On-chain `burnId` is a hash of all release fields, so the same burn re-presented with different `settlementData` gets a new `burnId` and a second release. The enclave already verifies the ancestry locks, so it can bind `settlementData` to them; a durable per-burn guard stays on-chain |
+| P6  | payload binds the burn to its release (cross-domain identifier) | OK for `bfa-mint` -- `settlementData` must cite exactly the `(operationId, netAmount)` records of the verified locks behind the burn's mint ancestry (`validate_funds_out_settlement`); with amount, recipient, proof block and `destinationChainId` also bound, and `sourceChainId` bound on-chain to the record, the only release field the enclave leaves free is `sourceAddress` (a string the backend supplies). A plain IFA mint/burn image has no ancestry to bind and does not run this check |
 | P7  | referenced Bitcoin txs are in accepted chain history        | OK                                                                                                                                                               |
 | P8  | Bitcoin inclusion proofs valid against the in-enclave chain | OK; plus the calldata `proof` is required (fail-closed): `source.height` is pinned to the block anchoring the consignment's last witness tx (re-verified under one lock guard), the enclave must hold a header at `latest.height`, and `latest` must be within `MAX_RELAY_TIP_LAG_BLOCKS = 100` of the enclave tip. The two `commitmentHash` words are **not** checked in-enclave: they are BtcRelay's `keccak256(StoredBlockHeader)` over relay-internal state (chainWork, lastDiffAdjustment, last ten timestamps), which the enclave cannot compute; `RGBVerifier` verifies each against the relay itself, so a manipulated commitment reverts on-chain (#57/#122) |
 | P9  | corresponding EVM lock record exists for the same operation | on-chain for this direction; for EVM->RGB the enclave verifies `FundsIn` itself (Sec 7.2)                                                                         |
 | P10 | EVM execution payload matches the validated unlock intent   | selector, calldata layout, amount, chain, contract: OK; recipient and operation id: see P5 / P6                                                                   |
 | P11 | on any failure, refuse to sign                              | OK -- fail-closed                                                                                                                                                |
 
-> P6 is the one open predicate on the shipped mint/burn flow. Until it lands,
-> single-burn uniqueness rests on the backend plus the on-chain quorum; the
-> contract itself states it cannot prove one burn settles at most once.
+> Residual on P6: `sourceAddress` is not derived from the consignment, so a
+> release re-presented with a different `sourceAddress` still hashes to a new
+> `burnId`. Every other field is bound. Closing it needs an agreed canonical
+> value for that string (backend side).
 
 [Signing gate](diagrams/10-signing-gate.md)
 
@@ -544,10 +554,10 @@ MUST refuse to sign (fail closed) if any fails.
 
 | ID        | Invariant                                                                                                                                                |
 |-----------|-----------------------------------------------------------------------------------------------------------------------------------------------------------|
-| **SI-1**  | A compromised parent/listener/backend alone MUST NOT yield a `fundsOut` signature. (Holds for a first release of a burn. A second release of the same burn under new `settlementData` is not refused -- P6 `[OPEN]`. A CCD source is trusted by design, Sec 7.9.) |
+| **SI-1**  | A compromised parent/listener/backend alone MUST NOT yield a `fundsOut` signature. (Holds. The one free release field is `sourceAddress`, see P6. A CCD source is trusted by design, Sec 7.9.) |
 | **SI-2**  | A forged or malformed RGB consignment MUST NOT trigger signing. OK                                                                                       |
 | **SI-3**  | A Bitcoin inclusion proof inconsistent with the in-enclave PoW chain MUST NOT trigger signing. OK                                                        |
-| **SI-4**  | An EVM unlock payload not bound to the RGB `OpId` MUST NOT be accepted. **`[OPEN]` P6.**                                                                 |
+| **SI-4**  | An EVM unlock payload not bound to the burn it settles MUST NOT be accepted. OK on `bfa-mint` (settlement bind); `sourceAddress` residual, see P6         |
 | **SI-5**  | The seed MUST NOT leave the enclave in plaintext; only HKDF-sealed ciphertext crosses the wire, and only during a mutually-attested clone. OK             |
 | **SI-6**  | Cloning MUST require identical PCRs, same cluster pubkey, and the cloning secret -- cloning MUST NOT be an upgrade path. OK                               |
 | **SI-7**  | Confirmation depth, freshness, and size thresholds MUST NOT be host-configurable. OK (compile-time constants)                                            |
@@ -585,7 +595,8 @@ digests over decoded calldata · route-agnostic Bridge ABI with the
 consignment's block · per-output recipient-leg binding with enclave-derived
 destination amount · invoice recipient bind from the `BridgeFundsIn` event ·
 exclusive per-image RGB flows (`rgb-swap` / `rgb-mint-burn`) · BFA chained-mint
-ancestry verification · Concordium key and handlers · `SignRawMessage` removed ·
+ancestry verification · `settlementData` bound to the verified ancestry ·
+exact burn amount bind · Concordium key and handlers · `SignRawMessage` removed ·
 connection limits · config AND-logic · canonical ABI validation · hash-first
 ordering · zero-signature guard · bounded full header retention · typesystem
 pin · cert-chain hardening · replay-guard fixes · retarget-aligned and real
@@ -598,13 +609,14 @@ deployed contract · fee sanity · CLI-driven cloning · regression suites in CI
 
 **Open -- pre-mainnet:**
 
-1. **Burn-to-release binding** (P6, SI-4): bind `settlementData`'s operation
-   ids to the burn's enclave-verified mint ancestry, so one burn maps to one
-   canonical `burnId`. Enclave-side change; the ancestry verification it
-   needs already exists (`bfa_burn_ancestry_events`). Related: #159 (W-05)
-   asks for the same durable lock-record binding on the EVM -> RGB leg.
+1. **`sourceAddress` in `fundsOut`** (P6 residual): the last release field
+   the enclave does not bind. Needs a canonical value agreed with the backend
+   (for example the burn OpId, or empty), then a one-line enclave check.
 2. **Public reproducibility**: the RGB crates are pinned to private BFA
    mirrors over SSH, so PCR0 is currently reproducible only by key holders.
+3. **Listener proto bump**: the deployed listener pins a proto without
+   `mint_ancestors`, which every BFA burn and chained mint now needs. Without
+   it the enclave refuses (availability, never safety).
 
 **Accepted, by design (no work planned):** Concordium source trusted from the
 listener (Sec 7.9); cloning authorised by a runtime operator secret with a

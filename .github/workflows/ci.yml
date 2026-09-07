@@ -152,6 +152,17 @@ jobs:
       - name: Test (rgb mint/burn)
         run: cargo test -p utexo-bridge-enclave --no-default-features --features rgb,rgb-mint-burn,evm-rpc,mock-attestation,allow-seed-import
 
+      # BFA mint/burn EIF profile - the shipped production image. Mirrors
+      # Dockerfile.enclave.bfa: the mint/burn flow plus the bridged-asset mint
+      # path (chained-mint ancestry, settlementData bind). `bfa-mint` implies
+      # rgb-mint-burn + evm-rpc.
+      - name: Build (bfa-mint)
+        run: cargo build -p utexo-bridge-enclave --no-default-features --features vsock,rgb,evm-rpc,bfa-mint
+      - name: Clippy (bfa-mint)
+        run: cargo clippy -p utexo-bridge-enclave --no-default-features --features vsock,rgb,evm-rpc,bfa-mint --all-targets -- -D warnings
+      - name: Test (bfa-mint)
+        run: cargo test -p utexo-bridge-enclave --no-default-features --features rgb,bfa-mint,mock-attestation,allow-seed-import
+
       # CCD-only single-network EIF profile: ccd + shared EVM signing, no RGB
       # stack (no rgb-ops/rgb-consignment/rgb-schemas/spv). Mirrors
       # Dockerfile.enclave.ccd; RGB requests must be refused. The SignCcd

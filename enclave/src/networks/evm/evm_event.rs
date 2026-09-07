@@ -202,31 +202,16 @@ pub fn verify_funds_in_event(
         evm_tx_hash,
     )?;
 
-    // 5/6/7. Bind operationId + amounts. The three indexed fields are in topics;
-    //        everything else comes from `data`.
-    let operation_id = log
-        .topics
-        .get(BFI_OPERATION_ID_TOPIC)
-        .ok_or_else(|| {
-            EnclaveError::CrossCheck(format!(
-                "BridgeFundsIn log has {} topic(s); operationId is expected in topic{BFI_OPERATION_ID_TOPIC}",
-                log.topics.len()
-            ))
-        })?;
-
-    if log.data.len() < BFI_MIN_DATA_LEN {
-        return Err(EnclaveError::CrossCheck(format!(
-            "BridgeFundsIn data too short: {} bytes (need {BFI_MIN_DATA_LEN})",
-            log.data.len()
-        )));
-    }
-    let gross = decode_u64_word(&log.data, BFI_AMOUNT_OFF, "amount")?;
-    let net = decode_u64_word(&log.data, BFI_NET_AMOUNT_OFF, "netAmount")?;
-    let commission = decode_u64_word(&log.data, BFI_TOKEN_COMMISSION_OFF, "tokenCommission")?;
-    // Decoded here, where the log is already proven to come from the pinned
-    // bridge contract, so later stages bind against authenticated evidence.
-    let destination_address =
-        decode_abi_string(&log.data, BFI_DEST_ADDRESS_HEAD_OFF, "destinationAddress")?;
+    // 5/6/7. Bind operationId + amounts. Decoded here, where the log is
+    //        already proven to come from the pinned bridge contract, so later
+    //        stages bind against authenticated evidence.
+    let BridgeFundsInRecord {
+        operation_id,
+        gross,
+        net,
+        commission,
+        destination_address,
+    } = decode_bridge_funds_in(log)?;
 
     if expected_operation_id != operation_id.as_slice() {
         return Err(EnclaveError::CrossCheck(format!(
@@ -273,6 +258,47 @@ pub fn verify_funds_in_event(
     );
     Ok(VerifiedFundsIn {
         destination_address,
+    })
+}
+
+/// The fields of one `BridgeFundsIn` log, decoded from an emitter-pinned log.
+struct BridgeFundsInRecord {
+    operation_id: [u8; 32],
+    gross: u64,
+    net: u64,
+    commission: u64,
+    destination_address: String,
+}
+
+/// Decode a `BridgeFundsIn` log. The indexed `operationId` is in topic1;
+/// everything else comes from `data`. Callers must have selected `log` by
+/// pinned emitter and topic0 first.
+fn decode_bridge_funds_in(log: &LogEntry) -> Result<BridgeFundsInRecord> {
+    let operation_id = *log
+        .topics
+        .get(BFI_OPERATION_ID_TOPIC)
+        .ok_or_else(|| {
+            EnclaveError::CrossCheck(format!(
+                "BridgeFundsIn log has {} topic(s); operationId is expected in topic{BFI_OPERATION_ID_TOPIC}",
+                log.topics.len()
+            ))
+        })?;
+    if log.data.len() < BFI_MIN_DATA_LEN {
+        return Err(EnclaveError::CrossCheck(format!(
+            "BridgeFundsIn data too short: {} bytes (need {BFI_MIN_DATA_LEN})",
+            log.data.len()
+        )));
+    }
+    Ok(BridgeFundsInRecord {
+        operation_id,
+        gross: decode_u64_word(&log.data, BFI_AMOUNT_OFF, "amount")?,
+        net: decode_u64_word(&log.data, BFI_NET_AMOUNT_OFF, "netAmount")?,
+        commission: decode_u64_word(&log.data, BFI_TOKEN_COMMISSION_OFF, "tokenCommission")?,
+        destination_address: decode_abi_string(
+            &log.data,
+            BFI_DEST_ADDRESS_HEAD_OFF,
+            "destinationAddress",
+        )?,
     })
 }
 
@@ -459,7 +485,24 @@ fn decode_funds_in(log: &LogEntry, expected_rgb_opid: &[u8; 32]) -> Result<u64> 
     Ok(amount)
 }
 
-/// Verify the `FundsIn` lock a BFA mint commits to and return its amount.
+/// One verified EVM deposit behind a BFA mint.
+///
+/// `minted` is what the RGB side may issue (the `FundsIn` amount consensus
+/// checks the mint against). `operation_id` / `net_amount` are the
+/// `BridgeFundsIn` record the settlement module stored for this deposit, and
+/// therefore the only pair a `fundsOut.settlementData` may cite for it.
+#[cfg(feature = "bfa-mint")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VerifiedLock {
+    /// The mint this lock backs, as the caller named it and the `FundsIn`
+    /// log confirmed.
+    pub mint_opid: [u8; 32],
+    pub minted: u64,
+    pub operation_id: [u8; 32],
+    pub net_amount: u64,
+}
+
+/// Verify the `FundsIn` lock a BFA mint commits to and return the deposit.
 ///
 /// Same fail-closed scaffolding as [`verify_funds_in_event`] - receipt, success,
 /// pinned emitter, confirmation depth - but bound to the RGB OpId rather than to
@@ -467,6 +510,11 @@ fn decode_funds_in(log: &LogEntry, expected_rgb_opid: &[u8; 32]) -> Result<u64> 
 /// `funds_in_contract` and `min_confirmations` come from PINNED config, never the
 /// request; `rgb_opid` is parsed from the consignment and only selects which log
 /// must exist.
+///
+/// The same receipt must also carry exactly one `BridgeFundsIn` from the pinned
+/// contract: that is the `(operationId, netAmount)` record a later `fundsOut`
+/// must cite in `settlementData` (see `crosscheck::validate_funds_out_settlement`).
+/// Read here, where the log is already proven to come from the pinned emitter.
 #[cfg(feature = "bfa-mint")]
 pub fn verify_rgb_funds_in(
     provider: &dyn EvmReceiptProvider,
@@ -474,7 +522,7 @@ pub fn verify_rgb_funds_in(
     min_confirmations: u64,
     evm_tx_hash: &[u8; 32],
     rgb_opid: &[u8; 32],
-) -> Result<u64> {
+) -> Result<VerifiedLock> {
     let receipt = fetch_successful_receipt(provider, evm_tx_hash)?;
     let log = select_unique_log(
         &receipt,
@@ -483,17 +531,38 @@ pub fn verify_rgb_funds_in(
         "FundsIn",
         evm_tx_hash,
     )?;
-    let amount = decode_funds_in(log, rgb_opid)?;
+    let minted = decode_funds_in(log, rgb_opid)?;
+
+    let bridge_log = select_unique_log(
+        &receipt,
+        funds_in_contract,
+        &BRIDGE_FUNDS_IN_TOPIC0,
+        "BridgeFundsIn",
+        evm_tx_hash,
+    )?;
+    let BridgeFundsInRecord {
+        operation_id,
+        net: net_amount,
+        ..
+    } = decode_bridge_funds_in(bridge_log)?;
+
     let depth = check_confirmation_depth(provider, receipt.block_number, min_confirmations)?;
 
     tracing::info!(
         tx = %hex::encode(evm_tx_hash),
         rgb_opid = %hex::encode(rgb_opid),
-        amount,
+        operation_id = %hex::encode(operation_id),
+        minted,
+        net_amount,
         depth,
         "FundsIn lock for a BFA mint independently verified in-enclave"
     );
-    Ok(amount)
+    Ok(VerifiedLock {
+        mint_opid: *rgb_opid,
+        minted,
+        operation_id,
+        net_amount,
+    })
 }
 
 /// A BFA asset names its own bridge contract in genesis; only the pinned one may
@@ -1404,14 +1473,42 @@ mod tests {
     #[cfg(feature = "bfa-mint")]
     #[test]
     fn verify_rgb_funds_in_accepts_a_verified_lock() {
+        // A real deposit tx emits both: the RGB companion (minted amount) and
+        // the BridgeFundsIn record (operationId, netAmount).
         let p = FakeProvider {
-            receipt: Some(receipt_with(vec![rgb_companion_log(0xab, 100)], 100)),
+            receipt: Some(receipt_with(
+                vec![
+                    rgb_companion_log(0xab, 100),
+                    bridge_log(op_id(7), 1000, 950, 50),
+                ],
+                100,
+            )),
             head: 112,
         };
         assert_eq!(
             verify_rgb_funds_in(&p, &BRIDGE, 12, &TX, &word(0xab)).unwrap(),
-            100
+            VerifiedLock {
+                mint_opid: word(0xab),
+                minted: 100,
+                operation_id: op_id(7),
+                net_amount: 950,
+            }
         );
+    }
+
+    /// Without the record there is nothing a `fundsOut` could cite, so the
+    /// lock is not usable as settlement evidence.
+    #[cfg(feature = "bfa-mint")]
+    #[test]
+    fn verify_rgb_funds_in_requires_the_bridge_funds_in_record() {
+        let p = FakeProvider {
+            receipt: Some(receipt_with(vec![rgb_companion_log(0xab, 100)], 100)),
+            head: 112,
+        };
+        let e = verify_rgb_funds_in(&p, &BRIDGE, 12, &TX, &word(0xab))
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("no BridgeFundsIn log"), "got: {e}");
     }
 
     /// The extension never checks the emitter, so this filter is the only thing

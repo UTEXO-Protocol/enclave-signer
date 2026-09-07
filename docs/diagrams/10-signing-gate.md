@@ -60,6 +60,8 @@ flowchart TD
         p4t -->|no| p4tr[REFUSE — fundsOut amount bind]:::refuse
         p4t -->|yes| p4rc{"rgb-mint-burn:<br/>MS_BURN_RECIPIENT == calldata recipient?<br/>(swap: no recipient to bind)"}
         p4rc -->|no| p4rcr[REFUSE — burn recipient]:::refuse
+        p4rc -->|yes| p4st{"bfa-mint:<br/>settlementData pairs == verified<br/>ancestry BridgeFundsIn records?"}
+        p4st -->|no| p4str[REFUSE — settlement bind]:::refuse
     end
     p2d -->|yes| p4r
 
@@ -68,7 +70,7 @@ flowchart TD
         s2 --> s3[signature = ECDSA over digest<br/>Active KeyManager]
         s3 --> sR([RETURN signature + call_data unchanged]):::accept
     end
-    p4rc -->|yes| s1
+    p4st -->|yes| s1
 
     classDef refuse fill:#FADBD8,stroke:#922,color:#222
     classDef accept fill:#D5F5E3,stroke:#292,color:#222
@@ -76,9 +78,10 @@ flowchart TD
 
 ### Notes
 
-- `burnId` / `settlementData` inside the calldata are **signed as received**.
-  No in-enclave derivation from the validated consignment OpId exists; the
-  route-level `operation_id` check is disabled (spec P6).
+- `settlementData` is bound to the burn's verified mint ancestry on a
+  `bfa-mint` build. `burnId` is not recomputed in-enclave: the contract
+  derives it from the same fields. `sourceAddress` is the one release field
+  still signed as received (spec P6 residual).
 - Which unlock shape completes this gate is chosen at build time: an
   `rgb-swap` enclave signs `TS_TRANSFER` only, an `rgb-mint-burn` enclave
   `TS_BURN` only. They are separate instances with separate PCR0s; neither
@@ -105,5 +108,5 @@ consignment's block; burn-path recipient bind.
   unbound (spec P5).
 - Swap amount uses the transfer's `total_output_amount`, which includes the
   sender's change leg (spec P3).
-- OpId binding not implemented; backend `burnId` is signed as received
-  (spec P6).
+- `sourceAddress` is unbound; every other release field is (spec P6
+  residual).

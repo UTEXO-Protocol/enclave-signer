@@ -69,7 +69,10 @@ sequenceDiagram
     opt rgb-mint-burn build
         Srv->>Cx: validate_funds_out_burn_recipient:<br/>MS_BURN_RECIPIENT[12..] == calldata recipient
     end
-    Note right of Cx: burnId / settlementData are signed as received —<br/>no in-enclave OpId derivation exists (spec P6).<br/>commitmentHash words are relay-internal, not compared.
+    opt bfa-mint build
+        Srv->>Cx: validate_funds_out_settlement:<br/>settlementData (operationIds, netAmounts) ==<br/>BridgeFundsIn records of the verified ancestry locks,<br/>set equality, canonical, non-empty
+    end
+    Note right of Cx: burnId is not recomputed - the contract derives it<br/>from the same fields. sourceAddress stays free (spec P6).<br/>commitmentHash words are relay-internal, not compared.
     Cx-->>Srv: Ok / CrossCheck err
 
     Note over Srv,Sign: 5 — Sign
