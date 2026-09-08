@@ -1,4 +1,4 @@
-# Sign (EVM → RGB, bridge PSBT) — taproot + segwit-v0, anchored authorisation
+# Sign (EVM → RGB, bridge PSBT) — colored-account taproot signing
 
 Plain-BTC (non-bridge) PSBTs do **not** go through this path anymore: they use
 the separate `SignBtc` request, gated by the attested `allow_vanilla_psbt`
@@ -12,7 +12,7 @@ consignment, is scoped to the colored account, and bounds Bitcoin outputs it
 cannot prove by `RGB_MAX_UNOWNED_SATS` -- every other bind on this path is
 denominated in RGB asset units and says nothing about sats. Because signing is
 account-scoped, only the taproot pass runs here; the legacy SegWit v0 P2WSH
-pass exists only for the unscoped CLI `sign_psbt` path.
+pass exists only for the unscoped library `KeyManager::sign_psbt` path.
 
 ```mermaid
 sequenceDiagram
@@ -23,7 +23,7 @@ sequenceDiagram
     participant Evm as networks::evm::validation
     participant Evt as networks::evm::evm_event
     participant Rpc as EVM RPC<br/>loopback→vsock→host
-    participant Rgb as networks::rgb<br/>(rgb-ops + Electrum/Esplora + SPV)
+    participant Rgb as networks::rgb<br/>(rgb-ops + Electrum/Esplora)
     participant Anchor as networks::rgb::psbt_validation
     participant Inv as networks::rgb::invoice
     participant State as EnclaveState<br/>op_replay_guard
@@ -38,6 +38,10 @@ sequenceDiagram
 
     Note over Parent,Srv: Translate
     Parent->>Srv: Sign{source_network: EvmSource,<br/>destination_network: RgbDestination}
+
+    opt bfa-mint build
+        Srv->>Evt: bfa_mint_events: verify this mint and mint_ancestors locks<br/>BEFORE consignment validation; pass verified events into RGB validation
+    end
 
     Note over Srv,Evm: 1 — validate_source (EVM, skipped in dev-mode)
     Srv->>Evm: validate_source(EvmSource)
@@ -118,38 +122,19 @@ sequenceDiagram
 
     Km-->>Srv: (signed_psbt_bytes, inputs_signed)
     Srv->>Srv: reject inputs_signed == 0 (no-op not a contribution)
+    Srv->>State: commit replay reservation on success<br/>(rollback on error)
     Srv-->>Parent: SignedPsbtResponse
     Parent-->>Listener: gRPC Signature
     Listener-->>Orc: signed PSBT (assembles + broadcasts)
 ```
 
-## FundsIn verification predicate (`networks::evm::evm_event`)
+The sequence shows the raw-RPC provider used by the supplied images. A `helios`
+build with `HELIOS_EXECUTION_RPC` set uses checkpoint-verified receipts instead;
+failed initialization/sync leaves receipt-dependent signing unavailable.
 
-Bridge PSBT signing releases RGB against an EVM deposit. The listener-supplied
-`event_valid` / `event_finalized` booleans are **not trusted**; the enclave establishes validity + finality itself, fail-closed:
+The destination witness transaction is being signed and need not already be
+mined. The RGB→EVM source path has the separate complete SPV proof gate.
+The replay cache is volatile and per enclave, not a durable deposit ledger.
 
-1. **Receipt exists** for `evm_tx_hash` — `None` (not mined / host withheld) → refuse.
-2. **Receipt status == success** — a reverted tx emits no real deposit event.
-3. **Exactly one** `BridgeFundsIn` event from the **pinned** `FUNDS_IN_CONTRACT`
-   (falls back to `EVM_PROXY_CONTRACT_ADDRESS` — address from config, never the
-   request). Zero or two → refuse. The plain `FundsIn` event is never used
-   here: it carries an RGB OpId, a different id space.
-4. **Field binding** — topic-1 `operationId` == `funds_in_operation_id`
-   (the bridge transfer id, **not** the hub's `operation_idx`); gross
-   `amount` == request amount; `tokenCommission` == request commission;
-   `netAmount` ≤ `gross − commission` (lower is tolerated with a warning for
-   fee-on-transfer tokens). A `uint256` exceeding `u64` is rejected, not
-   truncated.
-5. **Confirmation depth** — `head − receipt.block` ≥ `EVM_MIN_CONFIRMATIONS`
-   (default 12); a receipt block above head (reorg) → refuse.
-6. **Recipient** — the event's `destinationAddress` is parsed as an RGB
-   invoice (blinded-seal beneficiary only) and the consignment's single
-   confidential recipient leg must equal that seal.
-
-**Provider selection (build/runtime):**
-- No `evm-rpc` feature → bridge PSBT signing is **refused** (deposit unverifiable).
-- `evm-rpc` → raw alloy JSON-RPC over the loopback vsock forwarder; responses are
-  **host-relayed evidence**, verified fail-closed but not trustless.
-- The selected source is part of the attested security policy.
-
-See [`10-signing-gate.md`](10-signing-gate.md) for the `fundsOut` (RGB → EVM) direction.
+See [the spec](../tee-spec.md#72-evm-lock---rgb-bridge-psbt) for deposit checks
+and [the signing gate](10-signing-gate.md) for RGB→EVM.

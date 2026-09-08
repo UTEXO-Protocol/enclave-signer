@@ -1,47 +1,14 @@
 # syntax=docker/dockerfile:1.7
 # Combined production enclave image (vsock + rgb + ccd + evm-rpc) -
-# handles both the RGB/BTC and Concordium bridges in one binary. For a lean
-# single-network EIF, build Dockerfile.enclave.rgb (RGB only) or
-# Dockerfile.enclave.ccd (Concordium only).
-# Usage:
-#   DOCKER_BUILDKIT=1 docker build -f build/Dockerfile.enclave -t utexo-bridge-enclave .
-#
-# NO CREDENTIALS REQUIRED. Every enclave dependency resolves over public HTTPS,
-# so anyone can run this build and reproduce PCR0. Keep it that way: a private
-# dep in the root workspace breaks public reproducibility, because cargo
-# materialises every git source in a workspace during resolution. Two things
-# make that hold:
-#   - `enclave-proto/` is an in-tree vendored slice of federated-signer-proto.
-#   - `parent/` is a separate cargo workspace, so its private
-#     federated-signer-proto dep never enters this build.
-#
-# Reproducible PCR0: the EIF packs the runtime-stage rootfs, so any base-image
-# drift changes PCR0. Both FROMs are pinned by digest; bump the tag and the
-# @sha256 together (resolve via `docker buildx imagetools inspect`).
-# `dockerfile:1.7` lets BuildKit honour SOURCE_DATE_EPOCH. OS package versions
-# are frozen by the digest pin, and the runtime RUN scrubs dnf/rpm state.
-
-# GLIBC PIN (runtime compat, not just build): the binary links against the
-# builder's glibc but runs on the amazonlinux:2023-minimal rootfs below, which
-# ships glibc 2.34. `rust:*-slim` is now Debian trixie (glibc >= 2.38) and
-# `aws-lc-sys` pulls a GLIBC_2.38 symbol, so a trixie build aborts at enclave
-# boot. Bullseye ships glibc 2.31, within what the runtime provides.
-#
-# `evm-rpc` pulls alloy 2.1.x, whose MSRV is rustc 1.91, so `1.96-slim-bullseye`
-# satisfies both constraints. Pin by digest; bump tag + digest together, and
-# keep to a *-bullseye tag (glibc <= 2.34), never trixie.
+# Private Cargo dependencies require BuildKit secrets (see README, Building).
+# Supply github_token, or one deploy key per repo; keys never enter image layers.
+# Example: docker build --secret id=github_token,env=GITHUB_TOKEN -f build/Dockerfile.enclave .
+# Production builder glibc must remain compatible with the AL2023 runtime.
 FROM rust:1.96-slim-bullseye@sha256:c593596210f729542a92aced6a8b0812bcc8d04c5f1b238e663b800d0e2e17bd AS builder
 
-# `git` + `ca-certificates`: the `[patch.crates-io]` block and the
-# rgb-consignment dep are public HTTPS git URLs, and `.cargo/config.toml` sets
-# `net.git-fetch-with-cli = true`. Nothing is fetched over SSH.
-# `protobuf-compiler` is not needed: the proto crate is vendored pre-generated
-# and no crate has a build.rs.
-# `cmake` (from PyPI, since bullseye's apt cmake 3.18 is too old) + `make`:
-# `aws-lc-sys` builds C sources via CMake. All builder-only, so none of it
-# reaches the runtime rootfs or the PCRs.
+# Builder-only tools: system Git and SSH for private dependencies.
 RUN apt-get update && apt-get install -y \
-    pkg-config libssl-dev git ca-certificates \
+    pkg-config libssl-dev git ca-certificates openssh-client \
     make python3 python3-pip \
     && pip3 install --no-cache-dir "cmake==3.31.6" \
     && rm -rf /var/lib/apt/lists/*
@@ -76,7 +43,13 @@ ENV CARGO_INCREMENTAL=0 \
 # `rgb-swap` picks the send/receive RGB flow (see enclave/src/networks/rgb/flow/).
 # It is in the default feature set, but named here so the shipped flow is
 # explicit in the image that measures into PCR0.
-RUN cargo build --release --locked --features vsock,rgb,rgb-swap,ccd,evm-rpc
+RUN --mount=type=secret,id=github_token \
+    --mount=type=secret,id=consignment_key \
+    --mount=type=secret,id=consensus_key \
+    --mount=type=secret,id=ops_key \
+    --mount=type=secret,id=schemas_key \
+    sh /build/build/with-private-deps.sh enclave cargo build --release --locked --features vsock,rgb,rgb-swap,ccd,evm-rpc
+
 
 # --- Runtime ---
 # Pinned by digest (see header) - this rootfs is what ends up in the EIF, so its

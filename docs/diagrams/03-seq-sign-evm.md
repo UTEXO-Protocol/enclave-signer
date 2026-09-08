@@ -22,6 +22,10 @@ sequenceDiagram
     Note over Parent,Srv: Translate gRPC → enclave wire
     Parent->>Srv: Sign{source_network: RgbSource,<br/>destination_network: EvmDestination}<br/>(TCP/vsock, length-prefixed proto)
 
+    opt bfa-mint build
+        Srv->>Srv: bfa_burn_ancestry_events:<br/>resolve mint_ancestors and verify each EVM lock<br/>through the selected receipt provider BEFORE RGB validation
+    end
+
     Note over Srv,Esplora: 1 — validate_source (RGB, skipped under dev-mode)
     Srv->>Rgb: validate_source(RgbSource)
     Rgb->>Rgb: cheap payload gate first:<br/>consignment bytes present, size caps,<br/>keccak256(consignment) == consignment_hash (integrity),<br/>asset_id declared
@@ -65,14 +69,14 @@ sequenceDiagram
     Srv->>Cx: require validated consignment for any fundsOut
     Srv->>Cx: assert_witnesses_confirmed (no unmined witness tx)
     Srv->>Cx: verify_btc_relay_agreement (proof REQUIRED, empty ⇒ REFUSE):<br/>decode (sourceHeight, sourceCommit, latestHeight, latestCommit),<br/>enclave holds header at latestHeight,<br/>tip − latestHeight ≤ 100,<br/>sourceHeight == block anchoring the last witness tx<br/>(re-derived from the consignment + SPV proof under one lock)
-    Srv->>Cx: validate_funds_out_amount:<br/>last transition == the build flow's unlock shape AND<br/>consignment-derived amount ≥ decoded calldata amount
+    Srv->>Cx: validate_funds_out_amount:<br/>last transition == the build flow's unlock shape AND<br/>swap: source amount ≥ calldata amount;<br/>mint/burn: burned amount == calldata amount
     opt rgb-mint-burn build
         Srv->>Cx: validate_funds_out_burn_recipient:<br/>MS_BURN_RECIPIENT[12..] == calldata recipient
     end
     opt bfa-mint build
         Srv->>Cx: validate_funds_out_settlement:<br/>settlementData (operationIds, netAmounts) ==<br/>BridgeFundsIn records of the verified ancestry locks,<br/>set equality, canonical, non-empty
     end
-    Note right of Cx: burnId is not recomputed - the contract derives it<br/>from the same fields. sourceAddress stays free (spec P6).<br/>commitmentHash words are relay-internal, not compared.
+    Note right of Cx: burnId and sourceAddress are signed as supplied.<br/>Settlement equality is set-based, not a unique release id (spec P6).<br/>commitmentHash words are relay-internal, not compared.
     Cx-->>Srv: Ok / CrossCheck err
 
     Note over Srv,Sign: 5 — Sign

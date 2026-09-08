@@ -1,39 +1,14 @@
 # syntax=docker/dockerfile:1.7
 # BFA mint enclave image (vsock + rgb + evm-rpc + bfa-mint) - the
-# RGB-only enclave plus the bridged-asset mint path. For the swap-only enclave
-# use Dockerfile.enclave.rgb; Concordium (SignCcd / CcdSource) is not compiled
-# in here either and its requests are refused.
-# Usage:
-#   DOCKER_BUILDKIT=1 docker build -f build/Dockerfile.enclave.bfa \
-#     --secret id=github_token,env=GITHUB_TOKEN -t utexo-bridge-enclave-bfa .
-#
-# A GITHUB TOKEN IS REQUIRED, unlike every other enclave image here. The
-# workspace `[patch.crates-io]` pins rgb-consensus / rgb-ops / rgb-invoicing /
-# rgb-schemas to PRIVATE UTEXO-Protocol mirrors of the unreleased BFA branches,
-# so cargo cannot resolve them anonymously. Say it plainly rather than pretend:
-# this image's PCR0 is reproducible only by someone with read access to those
-# mirrors, not by the public. That ends when BFA is released upstream and the
-# pins in Cargo.toml move back to public rgb-protocol URLs.
-
-# Builder base pinned by DIGEST, matching Dockerfile.enclave. Must stay on a
-# glibc <= the AL2023 runtime's (2.34): plain `rust:1.96-slim` is Debian trixie
-# (glibc 2.38) and produces a binary the runtime cannot load. `1.96-slim-bullseye`
-# gives glibc 2.31 and rustc >= 1.91 (alloy's MSRV). If a future dep needs a newer
-# rustc, bump to a newer *-bullseye tag, never trixie.
+# Private Cargo dependencies require BuildKit secrets (see README, Building).
+# Supply github_token, or one deploy key per repo; keys never enter image layers.
+# Example: docker build --secret id=github_token,env=GITHUB_TOKEN -f build/Dockerfile.enclave.bfa .
+# Production builder glibc must remain compatible with the AL2023 runtime.
 FROM rust:1.96-slim-bullseye@sha256:c593596210f729542a92aced6a8b0812bcc8d04c5f1b238e663b800d0e2e17bd AS builder
 
-# `git` + `ca-certificates`: every git dep resolves over HTTPS - three of them
-# private, see header - and `.cargo/config.toml` sets `net.git-fetch-with-cli =
-# true` so cargo shells out to system `git` rather than bundled libgit2, which
-# is also how the token below reaches the fetch. No `openssh-client`: nothing
-# here is fetched over SSH.
-# `cmake` (from PyPI, since bullseye's apt cmake 3.18 is too old) + `make`:
-# `aws-lc-sys` builds C sources via CMake. Builder-only, so none of it lands in
-# the runtime rootfs or PCR0.
-# `protobuf-compiler` is NOT needed: the proto crate is vendored pre-generated
-# and no crate in the workspace has a build.rs, so protoc never runs.
+# Builder-only tools: system Git and SSH for private dependencies.
 RUN apt-get update && apt-get install -y \
-    pkg-config libssl-dev git ca-certificates \
+    pkg-config libssl-dev git ca-certificates openssh-client \
     make python3 python3-pip \
     && pip3 install --no-cache-dir "cmake==3.31.6" \
     && rm -rf /var/lib/apt/lists/*
@@ -61,21 +36,12 @@ ENV CARGO_INCREMENTAL=0 \
 # difference in compiled code from Dockerfile.enclave.rgb; it implies `rgb` +
 # `evm-rpc`, both already listed.
 #
-# The token is never interpolated into a URL: the rewrite carries only the
-# username and git asks the askpass helper - which reads the tmpfs mount - for
-# the password, so no file left on disk holds it (see the deploy notes for why
-# an in-URL token would survive in cargo's FETCH_HEAD).
-RUN --mount=type=secret,id=github_token,required=true \
-    set -eu; \
-    [ -s /run/secrets/github_token ] || { \
-      echo "ERROR: secret 'github_token' is empty - it needs a GitHub token with read access to the private UTEXO-Protocol RGB mirrors" >&2; \
-      exit 1; \
-    }; \
-    printf '#!/bin/sh\ncat /run/secrets/github_token\n' > /usr/local/bin/gh-askpass; \
-    chmod 0755 /usr/local/bin/gh-askpass; \
-    git config --global url."https://x-access-token@github.com/UTEXO-Protocol/".insteadOf "https://github.com/UTEXO-Protocol/"; \
-    GIT_ASKPASS=/usr/local/bin/gh-askpass GIT_TERMINAL_PROMPT=0 \
-    cargo build --release --locked --no-default-features --features vsock,rgb,evm-rpc,bfa-mint
+RUN --mount=type=secret,id=github_token \
+    --mount=type=secret,id=consignment_key \
+    --mount=type=secret,id=consensus_key \
+    --mount=type=secret,id=ops_key \
+    --mount=type=secret,id=schemas_key \
+    sh /build/build/with-private-deps.sh enclave cargo build --release --locked --no-default-features --features vsock,rgb,evm-rpc,bfa-mint
 
 # --- Runtime ---
 # Pinned by DIGEST: this rootfs is what ends up in the EIF, so its digest drives

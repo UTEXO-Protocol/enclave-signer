@@ -11,13 +11,13 @@ After successful verification, the verifier knows:
 
 > "AWS Nitro hardware (which I trust like a TLS root CA) certifies that, at
 > time T (within nonce-freshness), an enclave running code with PCR0=X,
-> PCR1=Y, PCR2=Z produced public key K, and the full key bundle B **plus the
-> enclave's resolved security policy P** commit to user_data."
+> PCR1=Y, PCR2=Z produced public key K, and the key bundle B **plus the
+> enclave's committed security policy P** commit to user_data."
 
-The security policy `P` is the enclave's single, explicit posture —
-signing modes, the chain/contract/asset pins, the attestation mode, and the
-allowed data sources — resolved once at boot. Committing it into `user_data`
-lets a verifier check the whole posture as one attested value instead of
+The security policy `P` describes the enclave's committed posture —
+plain-BTC enablement, chain/contract/asset pins, attestation mode, gas
+rules and selected data sources — resolved once at boot. Committing it into `user_data`
+lets a verifier check the committed policy as one attested value instead of
 inferring it from build flags or configuration guesses.
 
 The chain of trust is:
@@ -55,7 +55,7 @@ verifier                                 parent gRPC                      enclav
 
 ## Bindings
 
-The NSM attestation document carries two caller-controlled fields. The enclave
+The NSM attestation document carries three caller-supplied fields. The enclave
 populates them as:
 
 | NSM field    | Bound value                                                                                 |
@@ -105,6 +105,10 @@ mock build with no env is `chain_id=0`, `bridge_contract=20 zero bytes`,
 `rgb_asset_id=""`. The gas-tx key and the Concordium key are derived in every
 build, so the bundle has the same shape regardless of features.
 
+The CLI reconstructs policy using the chain/contract/asset pins from the
+response. It authenticates these values but does not compare them to independent
+expected pins. Callers must compare them with their intended deployment.
+
 The verifier MUST use the same field set, the same order, and the same
 length-prefix encoding. The reference encoder is `canonical_pubkey_bundle`
 in [`enclave/src/server.rs`](../enclave/src/server.rs) and the reference
@@ -127,11 +131,11 @@ policy_commitment =
     u8(0x01)                                        // production discriminant
     u8(allow_vanilla_psbt)                          // plain-BTC path enabled?
     u8(attestation_mode)                            // 1 = real NSM (0 = mock)
-    u8(evm_source)                                  // 0 disabled | 1 raw-rpc (2 reserved)
+    u8(evm_source)                                  // 0 disabled | 1 raw-rpc | 2 Helios-verified
     u8(btc_source)                                  // 1 = SPV-verified
     chain_id_be8 || bridge_contract(20)
     u32_be(len(rgb_asset_id)) || rgb_asset_id_utf8
-    u8(0x00)                                        // evm_checkpoint absent (reserved slot)
+    u8(checkpoint_present)                          // 0 absent; 1 followed by 32-byte beacon root
     // Gas-tx (SignRawDigest) rule:
     gas_tx_allowed_to(20)                           // all-zero = gas path unpinned
     gas_tx_max_gas_limit_be8                        // gasLimit ceiling (0 = unset)
@@ -142,7 +146,11 @@ policy_commitment =
     u8(0x00)                                        // development discriminant
 ```
 
-A production enclave commits the full production tuple; a dev/mock enclave
+The tuple omits the deposit emitter, EVM confirmation depth, Bitcoin network,
+concrete sats budgets, resolver URLs and strict Helios checkpoint-age setting.
+Image-baked values remain measured in the EIF.
+
+A production enclave commits the production tuple; a dev/mock enclave
 commits just `[version, 0x00]`. Because the posture flags (`allow_vanilla_psbt`,
 `evm_source`, …) and the gas-tx rule are not on the wire, a verifier reconstructs
 the **expected** policy and requires the commitment to match — so an enclave that
@@ -221,10 +229,21 @@ attest-verify \
     --pcr1 <96-hex-chars> \
     --pcr2 <96-hex-chars>
 
+# Gas signing: also supply the image's exact expected rule when configured:
+# --expect-gas-tx-to <hex20> --expect-gas-max-gas-limit <units>
+# --expect-gas-max-fee-per-gas <wei> --expect-gas-max-value-wei <wei>
+# --expect-gas-selectors <comma-separated-hex4>
+# Omitted flags expect an unpinned gas rule, not values discovered from the enclave.
+
 # Expect the plain-BTC path enabled:
 attest-verify --endpoint http://parent.example:50051 \
     --pcr0 <..> --pcr1 <..> --pcr2 <..> \
     --expect-vanilla-psbt
+
+# Optional Helios build (not enabled in the supplied Dockerfiles):
+attest-verify --endpoint http://parent.example:50051 \
+    --pcr0 <..> --pcr1 <..> --pcr2 <..> \
+    --expect-evm-source helios --expect-helios-checkpoint <hex32>
 
 # Dev / CI verification (against an enclave built with --features mock-attestation).
 # --mock implies the expected policy is Development.

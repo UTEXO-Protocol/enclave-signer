@@ -21,6 +21,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Test private dependency build wiring
+        run: python3 -m unittest discover -s build/tests -v
+
       - name: Install Rust 1.96.1
         uses: dtolnay/rust-toolchain@master
         with:
@@ -179,8 +182,7 @@ jobs:
       # Guard that a no-spv build refuses to sign `fundsOut`
       # (test_no_spv_build_refuses_funds_out_even_without_merkle_proofs).
       # Skips the rgb-consignment dep entirely. Like every enclave build here it
-      # needs no credentials -- the property that makes the EIF publicly
-      # reproducible.
+      # still resolves the workspace's private RGB git sources using the keys above.
       - name: Build (minimal — no default features)
         run: cargo build -p utexo-bridge-enclave --no-default-features
 

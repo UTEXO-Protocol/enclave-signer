@@ -56,7 +56,7 @@ flowchart TD
         p4b -->|no| p4br[REFUSE — missing finality proof]:::refuse
         p4b -->|yes| p4bv{"proof (sourceHeight, sourceCommit,<br/>latestHeight, latestCommit):<br/>header held at latestHeight,<br/>tip − latestHeight ≤ 100,<br/>sourceHeight == consignment anchor block?"}
         p4bv -->|no| p4bvr[REFUSE — BtcRelay disagreement]:::refuse
-        p4bv -->|yes| p4t{"last transition == the build flow's unlock shape<br/>(TS_TRANSFER / TS_BURN) AND<br/>consignment-derived amount ≥<br/>decoded calldata amount?"}
+        p4bv -->|yes| p4t{"last transition == the build flow's unlock shape<br/>(TS_TRANSFER / TS_BURN) AND<br/>swap: source amount ≥ calldata amount;<br/>mint/burn: burned amount == calldata amount?"}
         p4t -->|no| p4tr[REFUSE — fundsOut amount bind]:::refuse
         p4t -->|yes| p4rc{"rgb-mint-burn:<br/>MS_BURN_RECIPIENT == calldata recipient?<br/>(swap: no recipient to bind)"}
         p4rc -->|no| p4rcr[REFUSE — burn recipient]:::refuse
@@ -79,9 +79,9 @@ flowchart TD
 ### Notes
 
 - `settlementData` is bound to the burn's verified mint ancestry on a
-  `bfa-mint` build. `burnId` is not recomputed in-enclave: the contract
-  derives it from the same fields. `sourceAddress` is the one release field
-  still signed as received (spec P6 residual).
+  `bfa-mint` build. `burnId` and `sourceAddress` are signed as supplied.
+  Set equality of settlement pairs does not establish a unique release
+  identifier or pair ordering (spec P6).
 - Which unlock shape completes this gate is chosen at build time: an
   `rgb-swap` enclave signs `TS_TRANSFER` only, an `rgb-mint-burn` enclave
   `TS_BURN` only. They are separate instances with separate PCR0s; neither
@@ -93,20 +93,7 @@ flowchart TD
   feature is a `compile_error!` in release builds, and a release bridge build
   refuses to boot without a valid attested `Production` policy.
 
-### Status
-
-**Closed since the original review:** amount bound to the consignment (host
-`rgb_amount` unused); canonical ABI validation; two allowlisted selectors
-pinned by ABI-derived tests; typed `TeeFundsOut` / `TeeLzFundsOut` digests
-over decoded fields; EIP-712 domain `MultisigProxy`/`1` pinned by a
-deployed-contract fixture test; chain / contract / asset env-pinned;
-`destinationChainId` rule; BtcRelay proof required and anchored to the
-consignment's block; burn-path recipient bind.
-
-**Remaining gaps:**
-- Recipient binding covers the burn path only. A swap's recipient is still
-  unbound (spec P5).
-- Swap amount uses the transfer's `total_output_amount`, which includes the
-  sender's change leg (spec P3).
-- `sourceAddress` is unbound; every other release field is (spec P6
-  residual).
+BFA ancestry locks are verified through the selected EVM provider before RGB
+validation. The diagram focuses on the subsequent authorization gates.
+Swap amount/recipient limitations and release-identifier limits are collected
+in [the spec](../tee-spec.md#13-implementation-status).

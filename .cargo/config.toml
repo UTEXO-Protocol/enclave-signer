@@ -2,9 +2,8 @@
 # git dependencies, rather than cargo's bundled libgit2, which does not pick up
 # an SSH agent reliably across platforms.
 #
-# The enclave workspace no longer needs this for auth -- all of its git deps are
-# public HTTPS. It is kept for `parent/`, whose `federated-signer-proto` dep is
-# still fetched over SSH, and because system git honours any `insteadOf` URL
-# rewrites a developer has configured.
+# Both workspaces resolve private dependencies through per-repository SSH
+# aliases. Docker builds configure them in build/with-private-deps.sh; CI sets
+# up the matching deploy keys. System Git also honors the token URL rewrites.
 [net]
 git-fetch-with-cli = true

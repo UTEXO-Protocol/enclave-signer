@@ -54,5 +54,5 @@ sequenceDiagram
     Req-->>Parent: SetCloneResponse{} (empty)
     Parent-->>Op: clone OK — the CLI then calls GetPublicKey and<br/>asserts the local EVM address == --donor-evm
 
-    Note over Req,Don: After SetClone the requester has the IDENTICAL HD seed<br/>as the donor and signs as the same address. Plaintext seed<br/>exists only inside the requester's TEE briefly<br/>(Zeroizing 64-byte buffer), ciphertext on the wire is bound to<br/>the per-handshake DH key by HKDF info = donor‖requester.
+    Note over Req,Don: After SetClone the requester has the IDENTICAL HD seed<br/>as the donor and signs as the same address. The seed remains resident in each TEE's SecretBox;<br/>temporary plaintext buffers are zeroized.<br/>Ciphertext on the wire is bound to<br/>the per-handshake DH key by HKDF info = donor‖requester.
 ```

@@ -7,8 +7,8 @@
 # its private `federated-signer-proto` dep made even
 # `cargo build -p utexo-bridge-enclave --no-default-features` demand that
 # credential — which would defeat the whole point of vendoring `enclave-proto/`.
-# Splitting the workspaces is what makes the enclave (and therefore PCR0)
-# reproducible by anyone. Keep it out of `members`.
+# Splitting keeps the parent proto dependency out of enclave resolution.
+# Private RGB mirrors still require credentials. Keep parent out of `members`.
 [workspace]
 members = [
     "attestation-verify",

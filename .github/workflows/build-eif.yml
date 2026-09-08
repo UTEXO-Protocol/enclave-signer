@@ -18,8 +18,11 @@ name: "Build EIF"
 # (apt/dnf) still float — pinning them is the next determinism step.
 #
 # Required repo config (Settings -> Secrets and variables -> Actions):
-#   secrets.FEDERATED_SIGNER_PROTO_DEPLOY_KEY  read-only deploy key; needed ONLY for the
-#                                              host-binaries (parent) step, not for the EIF
+#   secrets.FEDERATED_SIGNER_PROTO_DEPLOY_KEY  parent proto access
+#   secrets.RGB_CONSIGNMENT_PARSER_DEPLOY_KEY  consignment-utils access
+#   secrets.RGB_CONSENSUS_BFA_DEPLOY_KEY        rgb-consensus-s-bfa access
+#   secrets.RGB_OPS_BFA_DEPLOY_KEY              rgb-ops-s-bfa access
+#   secrets.RGB_SCHEMAS_BFA_DEPLOY_KEY          rgb-schemas-s-bfa access
 #   secrets.AWS_OIDC_ROLE_ARN                  IAM role to assume via OIDC for S3 upload
 #                                              (if unset, the S3 step is skipped and
 #                                               artifacts are only attached to the run)
@@ -80,15 +83,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # One deploy key, for ONE step. The EIF build itself needs no credentials
-      # at all — every enclave dep is public HTTPS, which is what makes PCR0
-      # reproducible by third parties. This key exists only for the
-      # "Build host binaries" step below, which builds the parent adapter and
-      # its private federated-signer-proto dep.
-      - name: Set up SSH for the parent's private proto dep
-        uses: webfactory/ssh-agent@v0.9.0
-        with:
-          ssh-private-key: ${{ secrets.FEDERATED_SIGNER_PROTO_DEPLOY_KEY }}
+      - name: Prepare private dependency keys
+        env:
+          PRIVATE_DEPS_DIR: ${{ runner.temp }}/private-deps
+          FEDERATED_SIGNER_PROTO_DEPLOY_KEY: ${{ secrets.FEDERATED_SIGNER_PROTO_DEPLOY_KEY }}
+          RGB_CONSIGNMENT_PARSER_DEPLOY_KEY: ${{ secrets.RGB_CONSIGNMENT_PARSER_DEPLOY_KEY }}
+          RGB_CONSENSUS_BFA_DEPLOY_KEY: ${{ secrets.RGB_CONSENSUS_BFA_DEPLOY_KEY }}
+          RGB_OPS_BFA_DEPLOY_KEY: ${{ secrets.RGB_OPS_BFA_DEPLOY_KEY }}
+          RGB_SCHEMAS_BFA_DEPLOY_KEY: ${{ secrets.RGB_SCHEMAS_BFA_DEPLOY_KEY }}
+        run: sh build/prepare-private-deps.sh
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -138,6 +141,7 @@ jobs:
 
       - name: Build EIF + measurements
         env:
+          PRIVATE_DEPS_DIR: ${{ runner.temp }}/private-deps
           OUT_DIR: ${{ github.workspace }}/artifacts
           NITRO_CLI_BLOBS: /home/runner/nitro-cli-dist/blobs
           DOCKERFILE: ${{ matrix.dockerfile }}
@@ -153,11 +157,13 @@ jobs:
       # do not depend on the host glibc version. Published next to the EIF under
       # the same git_sha so a host pulls a matching {EIF, parent, cli} set.
       - name: Build host binaries (parent + cli, static musl)
+        env:
+          PRIVATE_DEPS_DIR: ${{ runner.temp }}/private-deps
         run: |
           set -euxo pipefail
           # `parent/` is its own workspace (see the root Cargo.toml comment),
           # so build from inside it rather than with `-p` from the repo root.
-          cargo build --release --locked --manifest-path parent/Cargo.toml \
+          sh build/with-private-deps.sh parent cargo build --release --locked --manifest-path parent/Cargo.toml \
             --features vsock --target x86_64-unknown-linux-musl
           BIN=parent/target/x86_64-unknown-linux-musl/release
           cp "$BIN/utexo-bridge-parent" "$BIN/utexo-bridge-parent-cli" artifacts/
@@ -212,3 +218,7 @@ jobs:
           DEST="s3://${BUCKET}/eif/${{ github.sha }}/${{ matrix.s3_subpath }}"
           aws s3 cp artifacts/ "$DEST" --recursive
           echo "Published to $DEST"
+
+      - name: Remove private dependency keys
+        if: always()
+        run: rm -rf "${{ runner.temp }}/private-deps"

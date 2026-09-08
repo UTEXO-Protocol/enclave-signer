@@ -14,7 +14,7 @@ sequenceDiagram
     participant RootCa as Embedded AWS Nitro<br/>root CA (PEM)
 
     Note over V,Lib: Verifier issues nonce
-    V->>Cli: attest-verify --endpoint ... --pcr0/1/2 ...<br/>--expect-vanilla-psbt --expect-evm-source raw|disabled
+    V->>Cli: attest-verify --endpoint ... --pcr0/1/2 ...<br/>--expect-vanilla-psbt --expect-evm-source raw|helios|disabled
     Cli->>Lib: verify_attested_pubkey(endpoint, expected_pcrs, expected_policy)
     Lib->>Lib: nonce := rand_32_bytes()
 
@@ -63,6 +63,7 @@ sequenceDiagram
     Lib->>Lib: assert verified.enclave_pubkey ==<br/>response.evm_uncompressed_pub
     Lib->>Lib: rebuild canonical_bundle + EXPECTED policy<br/>(from CLI flags + wire pins),<br/>assert verified.user_data ==<br/>sha256(bundle ‖ expected_policy_bytes)
 
+    Note over Lib,Cli: Gas rule and Helios checkpoint come from expected-policy flags.<br/>Chain/contract/asset pins come from the authenticated response;<br/>caller must compare them with the intended deployment.
     Lib-->>Cli: AttestedPubkeyResult
     Cli-->>V: OK + printed bundle + PCRs
 

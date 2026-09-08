@@ -1,21 +1,14 @@
 # syntax=docker/dockerfile:1.4
 # Enclave (dev mode, TCP, no vsock)
-# Usage:
-#   DOCKER_BUILDKIT=1 docker build -f build/Dockerfile.enclave-dev -t utexo-bridge-enclave-dev .
-#
-# NO CREDENTIALS REQUIRED, same as Dockerfile.enclave: the enclave compiles
-# against the in-tree `enclave-proto/` slice and every git dep is public HTTPS.
-
-# ===== Builder Stage =====
+# Private Cargo dependencies require BuildKit secrets (see README, Building).
+# Supply github_token, or one deploy key per repo; keys never enter image layers.
+# Example: docker build --secret id=github_token,env=GITHUB_TOKEN -f build/Dockerfile.enclave-dev .
+# Production builder glibc must remain compatible with the AL2023 runtime.
 FROM rust:1.96-slim AS builder
 
-# `git` + `ca-certificates`: the `[patch.crates-io]` block and the
-# rgb-consignment dep are public HTTPS git URLs, and `.cargo/config.toml` sets
-# `net.git-fetch-with-cli = true` so cargo shells out to system `git` rather
-# than bundled libgit2. No SSH transport is used, so no `openssh-client`.
-# `protobuf-compiler` is NOT needed: no crate here has a build.rs.
+# Builder-only tools: system Git and SSH for private dependencies.
 RUN apt-get update && apt-get install -y \
-    pkg-config libssl-dev git ca-certificates \
+    pkg-config libssl-dev git ca-certificates openssh-client make cmake \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /build
@@ -39,7 +32,13 @@ WORKDIR /build/enclave
 # every CCD request answers "not compiled in".
 # `rgb-swap` is the RGB flow this dev image carries; `--no-default-features`
 # drops it along with the rest of the default set, so it must be named.
-RUN cargo build --no-default-features --features allow-seed-import,spv,rgb-swap,ccd,evm-rpc
+RUN --mount=type=secret,id=github_token \
+    --mount=type=secret,id=consignment_key \
+    --mount=type=secret,id=consensus_key \
+    --mount=type=secret,id=ops_key \
+    --mount=type=secret,id=schemas_key \
+    sh /build/build/with-private-deps.sh enclave cargo build --no-default-features --features allow-seed-import,spv,rgb-swap,ccd,evm-rpc
+
 
 # ===== Runtime Stage =====
 FROM debian:trixie-slim

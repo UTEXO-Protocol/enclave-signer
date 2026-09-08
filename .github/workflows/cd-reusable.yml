@@ -70,18 +70,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # Only the parent image needs a credential (federated-signer-proto). The
-      # enclave image needs none, but the two share this matrix job so the key
-      # is set up unconditionally; Dockerfile.enclave-dev simply ignores it.
-      - name: Set up SSH agent for the parent's private proto dep
-        uses: webfactory/ssh-agent@v0.9.0
-        with:
-          ssh-private-key: ${{ secrets.FEDERATED_SIGNER_PROTO_DEPLOY_KEY }}
-
-      - name: Prepare BuildKit key file
-        run: |
-          umask 077
-          printf '%s\n' '${{ secrets.FEDERATED_SIGNER_PROTO_DEPLOY_KEY }}' > /tmp/federated_key
+      - name: Prepare private dependency keys
+        env:
+          PRIVATE_DEPS_DIR: ${{ runner.temp }}/private-deps
+          FEDERATED_SIGNER_PROTO_DEPLOY_KEY: ${{ secrets.FEDERATED_SIGNER_PROTO_DEPLOY_KEY }}
+          RGB_CONSIGNMENT_PARSER_DEPLOY_KEY: ${{ secrets.RGB_CONSIGNMENT_PARSER_DEPLOY_KEY }}
+          RGB_CONSENSUS_BFA_DEPLOY_KEY: ${{ secrets.RGB_CONSENSUS_BFA_DEPLOY_KEY }}
+          RGB_OPS_BFA_DEPLOY_KEY: ${{ secrets.RGB_OPS_BFA_DEPLOY_KEY }}
+          RGB_SCHEMAS_BFA_DEPLOY_KEY: ${{ secrets.RGB_SCHEMAS_BFA_DEPLOY_KEY }}
+        run: sh build/prepare-private-deps.sh
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -101,10 +98,13 @@ jobs:
           context: .
           file: ${{ matrix.dockerfile }}
           push: true
-          ssh: default
           build-args: BUILDKIT_INLINE_CACHE=1
           secret-files: |
-            federated_key=/tmp/federated_key
+            consignment_key=${{ runner.temp }}/private-deps/consignment_key
+            consensus_key=${{ runner.temp }}/private-deps/consensus_key
+            ops_key=${{ runner.temp }}/private-deps/ops_key
+            schemas_key=${{ runner.temp }}/private-deps/schemas_key
+            federated_key=${{ runner.temp }}/private-deps/federated_key
           tags: |
             ${{ env.REGISTRY }}/${{ matrix.image }}:${{ matrix.tag }}
             ${{ env.REGISTRY }}/${{ matrix.image }}:${{ matrix.float }}
@@ -118,13 +118,20 @@ jobs:
           context: .
           file: ${{ matrix.dockerfile }}
           push: true
-          ssh: default
           build-args: BUILDKIT_INLINE_CACHE=1
           secret-files: |
-            federated_key=/tmp/federated_key
+            consignment_key=${{ runner.temp }}/private-deps/consignment_key
+            consensus_key=${{ runner.temp }}/private-deps/consensus_key
+            ops_key=${{ runner.temp }}/private-deps/ops_key
+            schemas_key=${{ runner.temp }}/private-deps/schemas_key
+            federated_key=${{ runner.temp }}/private-deps/federated_key
           tags: |
             ${{ env.REGISTRY }}/${{ matrix.image }}:${{ matrix.tag }}
             ${{ env.REGISTRY }}/${{ matrix.image }}:${{ matrix.float }}
+
+      - name: Remove private dependency keys
+        if: always()
+        run: rm -rf "${{ runner.temp }}/private-deps"
 
   dispatch:
     needs: [build, prepare]

@@ -15,7 +15,7 @@ flowchart TB
         PFr[framing.rs<br/>u32 LE len + protobuf]
         PALib[attest_verify.rs<br/>library half of CLI —<br/>rebuilds expected policy + bundle]
         PCli[bin/cli.rs<br/>utexo-bridge-parent-cli]
-        AVCli[attest-verify CLI<br/>--pcr0/1/2, --expect-vanilla-psbt,<br/>--expect-evm-source raw or disabled]
+        AVCli[attest-verify CLI<br/>--pcr0/1/2, --expect-vanilla-psbt,<br/>--expect-evm-source raw, helios or disabled]
         PMisc[config.rs / error.rs]
     end
 
@@ -47,7 +47,7 @@ flowchart TB
         subgraph NEVM [networks/evm/]
             NEV[validation.rs<br/>selectors fundsOut 0xdc771390 + lzFundsOut,<br/>canonical ABI decode + re-encode,<br/>64 KiB cap, pins, destinationChainId, deadline]
             NEC[crosscheck.rs<br/>witnesses-confirmed, BtcRelay proof<br/>anchored to consignment block,<br/>flow amount bind, burn recipient]
-            NEE[evm_event.rs<br/>independent FundsIn verify —<br/>alloy raw RPC, host-relayed evidence]
+            NEE[evm_event.rs<br/>independent FundsIn verify —<br/>raw RPC (supplied images)<br/>or optional checkpoint-verified Helios]
             NEG[gas_tx.rs<br/>gas-tx preimage allowlist:<br/>strict RLP + chain / to pins]
             NES[signing.rs<br/>EIP-712 MultisigProxy v1<br/>TeeFundsOut / TeeLzFundsOut digest]
         end
@@ -125,7 +125,7 @@ flowchart TB
 
     NRV -->|"Electrum 15 s or Esplora 30 s timeout,<br/>via loopback"| VFwd
     VFwd -->|"vsock CID 3:8001"| VP
-    VP -->|"real HTTP"| Esp
+    VP -->|"Electrum TCP/TLS or Esplora HTTP"| Esp
 
     NEE -.->|"eth_getTransactionReceipt /<br/>eth_blockNumber — host-relayed evidence"| VFwd
     VFwd -->|"vsock 8002"| VPe

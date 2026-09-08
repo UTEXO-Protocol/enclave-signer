@@ -32,7 +32,7 @@ sequenceDiagram
     Km-->>State: (KeyManager, Mnemonic)
 
     State->>State: *guard = Phase::Active(Box::new(km))
-    State-->>Srv: mnemonic (one-time return for log)
+    State-->>Srv: mnemonic (discarded by handler; never logged)
     opt cloning_secret non-empty
         Srv->>State: set_donor_cloning_secret(SecretBox) — arms this enclave as a clone donor
     end

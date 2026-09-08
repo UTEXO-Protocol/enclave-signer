@@ -1,34 +1,14 @@
 # syntax=docker/dockerfile:1.7
 # RGB-only enclave image (vsock + rgb + evm-rpc) - handles the RGB/BTC bridge
-# only; Concordium (SignCcd / CcdSource) is not compiled in and its requests are
-# refused. For the Concordium bridge use Dockerfile.enclave.ccd; for both in one
-# binary use Dockerfile.enclave.
-# Usage:
-#   DOCKER_BUILDKIT=1 docker build -f build/Dockerfile.enclave.rgb -t utexo-bridge-enclave-rgb .
-#
-# NO CREDENTIALS REQUIRED, same as Dockerfile.enclave: `enclave-proto/` is a
-# vendored in-tree slice of federated-signer-proto, and `rgb-consignment` now
-# resolves over public HTTPS, so there is no SSH mount and no BuildKit secret.
-# Keep it that way - a private dep here would break public PCR reproducibility.
-
-# Builder base pinned by DIGEST, matching Dockerfile.enclave. Must stay on a
-# glibc <= the AL2023 runtime's (2.34): plain `rust:1.96-slim` is Debian trixie
-# (glibc 2.38) and produces a binary the runtime cannot load. `1.96-slim-bullseye`
-# gives glibc 2.31 and rustc >= 1.91 (alloy's MSRV). If a future dep needs a newer
-# rustc, bump to a newer *-bullseye tag, never trixie.
+# Private Cargo dependencies require BuildKit secrets (see README, Building).
+# Supply github_token, or one deploy key per repo; keys never enter image layers.
+# Example: docker build --secret id=github_token,env=GITHUB_TOKEN -f build/Dockerfile.enclave.rgb .
+# Production builder glibc must remain compatible with the AL2023 runtime.
 FROM rust:1.96-slim-bullseye@sha256:c593596210f729542a92aced6a8b0812bcc8d04c5f1b238e663b800d0e2e17bd AS builder
 
-# `git` + `ca-certificates`: the workspace `[patch.crates-io]` and the
-# `rgb-consignment` dep are public HTTPS git URLs, and `.cargo/config.toml` sets
-# `net.git-fetch-with-cli = true` so cargo shells out to system `git` rather than
-# bundled libgit2. No `openssh-client`: nothing here is fetched over SSH.
-# `cmake` (from PyPI, since bullseye's apt cmake 3.18 is too old) + `make`:
-# `aws-lc-sys` builds C sources via CMake. Builder-only, so none of it lands in
-# the runtime rootfs or PCR0.
-# `protobuf-compiler` is NOT needed: the proto crate is vendored pre-generated
-# and no crate in the workspace has a build.rs, so protoc never runs.
+# Builder-only tools: system Git and SSH for private dependencies.
 RUN apt-get update && apt-get install -y \
-    pkg-config libssl-dev git ca-certificates \
+    pkg-config libssl-dev git ca-certificates openssh-client \
     make python3 python3-pip \
     && pip3 install --no-cache-dir "cmake==3.31.6" \
     && rm -rf /var/lib/apt/lists/*
@@ -54,7 +34,13 @@ ENV CARGO_INCREMENTAL=0 \
 #
 # `rgb-swap` selects the send/receive RGB flow. Exactly one flow is required
 # under `rgb-validation`; the mint/burn image is Dockerfile.enclave.mint-burn.
-RUN cargo build --release --locked --no-default-features --features vsock,rgb,rgb-swap,evm-rpc
+RUN --mount=type=secret,id=github_token \
+    --mount=type=secret,id=consignment_key \
+    --mount=type=secret,id=consensus_key \
+    --mount=type=secret,id=ops_key \
+    --mount=type=secret,id=schemas_key \
+    sh /build/build/with-private-deps.sh enclave cargo build --release --locked --no-default-features --features vsock,rgb,rgb-swap,evm-rpc
+
 
 # --- Runtime ---
 # Pinned by DIGEST: this rootfs is what ends up in the EIF, so its digest drives
