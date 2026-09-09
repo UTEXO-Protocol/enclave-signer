@@ -24,9 +24,9 @@ sequenceDiagram
 
     Note over Srv,Esplora: 1 — validate_source (RGB, skipped under dev-mode)
     Srv->>Rgb: validate_source(RgbSource)
-    Rgb->>Rgb: cheap payload gate first (W-04):<br/>consignment bytes present,<br/>keccak256(consignment) == consignment_hash (integrity),<br/>asset_id declared
+    Rgb->>Rgb: cheap payload gate first:<br/>consignment bytes present,<br/>keccak256(consignment) == consignment_hash (integrity),<br/>asset_id declared
     Rgb->>Rgb: Transfer::load(...), extract chain_net + witness_txids<br/>+ last transition + burned/total amounts
-    Rgb->>Rgb: trusted typesystem pinned per schema_id (W-09),<br/>unknown schema ⇒ REFUSE
+    Rgb->>Rgb: trusted typesystem pinned per schema_id,<br/>unknown schema ⇒ REFUSE
     Rgb->>Esplora: esplora_blocking (30 s timeout)
     Esplora-->>Rgb: witness tx data
     Rgb->>Rgb: rgbstd validate(chain_net, trusted_typesystem)
@@ -51,7 +51,7 @@ sequenceDiagram
     Srv->>Evm: validate_destination(EvmDestination)
     Evm->>Evm: calldata ≥ 4 bytes, ≤ 64 KiB
     Evm->>Evm: selector == 0xccddb768<br/>fundsOut(address,uint256,uint256,uint256,uint256,string,bytes,bytes)
-    Evm->>Evm: canonical ABI check (W-01): abi_decode_validate,<br/>then re-encode must byte-equal input
+    Evm->>Evm: canonical ABI check: abi_decode_validate,<br/>then re-encode must byte-equal input
     Evm->>Evm: decoded amount == declared calldata_amount (fits u64)
     Evm->>Evm: config pinned? chain_id / proxy_contract == env pins<br/>(unconfigured ⇒ REFUSE on bridge builds)
     Evm->>Evm: deadline strictly in the future
@@ -63,11 +63,11 @@ sequenceDiagram
     Note over Srv,Cx: 4 — apply_funds_out_binding (rgb-validation builds)
     Srv->>Cx: require validated consignment for any fundsOut
     Srv->>Cx: assert_witnesses_confirmed (no unmined witness tx)
-    opt calldata proof slot populated (#57/#122)
+    opt calldata proof slot populated
         Srv->>Cx: verify_btc_relay_agreement:<br/>decode (blockHeight, commitmentHash),<br/>enclave header at that height must match<br/>(inert while the listener sends an empty proof)
     end
     Srv->>Cx: validate_funds_out_transfer:<br/>last transition == TS_TRANSFER AND<br/>consignment total_output ≥ amount read from calldata bytes
-    Note right of Cx: burnId / fundsInIds are preserved as received (#168) —<br/>the in-enclave OpId rewrite exists but is dormant<br/>until flows are routed by network id.<br/>Mint/burn unlock is not wired yet.
+    Note right of Cx: burnId / fundsInIds are preserved as received —<br/>the in-enclave OpId rewrite exists but is dormant<br/>until flows are routed by network id.<br/>Mint/burn unlock is not wired yet.
     Cx-->>Srv: Ok / CrossCheck err
 
     Note over Srv,Sign: 5 — Sign

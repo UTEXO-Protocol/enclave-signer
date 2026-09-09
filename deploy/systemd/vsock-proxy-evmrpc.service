@@ -1,5 +1,5 @@
 [Unit]
-# EVM-RPC egress for the in-enclave FundsIn verification (evm-rpc feature, #60).
+# EVM-RPC egress for the in-enclave FundsIn verification (evm-rpc feature).
 # The enclave speaks PLAINTEXT JSON-RPC to its loopback 127.0.0.1:3444, which the
 # in-enclave forwarder relays over vsock port 8002. This proxy is the host side of
 # that vsock hop: vsock 8002 -> 127.0.0.1:8547 (the local nginx TLS/key shim) ->

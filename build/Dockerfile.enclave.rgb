@@ -1,0 +1,124 @@
+# syntax=docker/dockerfile:1.7
+# RGB-only enclave image (vsock + rgb + evm-rpc + helios) - handles the RGB/BTC bridge
+# only; Concordium (SignCcd / CcdSource) is not compiled in and its requests are
+# refused. For the Concordium bridge use Dockerfile.enclave.ccd; for both in one
+# binary use Dockerfile.enclave.
+# Usage:
+#   DOCKER_BUILDKIT=1 docker build -f build/Dockerfile.enclave.rgb -t utexo-bridge-enclave-rgb .
+#
+# NO CREDENTIALS REQUIRED, same as Dockerfile.enclave: `enclave-proto/` is a
+# vendored in-tree slice of federated-signer-proto, and `rgb-consignment` now
+# resolves over public HTTPS, so there is no SSH mount and no BuildKit secret.
+# Keep it that way - a private dep here would break public PCR reproducibility.
+
+# Builder base pinned by DIGEST, matching Dockerfile.enclave. Must stay on a
+# glibc <= the AL2023 runtime's (2.34): plain `rust:1.96-slim` is Debian trixie
+# (glibc 2.38) and produces a binary the runtime cannot load. `1.96-slim-bullseye`
+# gives glibc 2.31 and rustc >= 1.91 (alloy's MSRV). If a future dep needs a newer
+# rustc, bump to a newer *-bullseye tag, never trixie.
+FROM rust:1.96-slim-bullseye@sha256:c593596210f729542a92aced6a8b0812bcc8d04c5f1b238e663b800d0e2e17bd AS builder
+
+# `git` + `ca-certificates`: the workspace `[patch.crates-io]` and the
+# `rgb-consignment` dep are public HTTPS git URLs, and `.cargo/config.toml` sets
+# `net.git-fetch-with-cli = true` so cargo shells out to system `git` rather than
+# bundled libgit2. No `openssh-client`: nothing here is fetched over SSH.
+# `cmake` (from PyPI, since bullseye's apt cmake 3.18 is too old) + `make`:
+# `aws-lc-sys` builds C sources via CMake. Builder-only, so none of it lands in
+# the runtime rootfs or PCR0.
+# `protobuf-compiler` is NOT needed: the proto crate is vendored pre-generated
+# and no crate in the workspace has a build.rs, so protoc never runs.
+RUN apt-get update && apt-get install -y \
+    pkg-config libssl-dev git ca-certificates \
+    make python3 python3-pip \
+    && pip3 install --no-cache-dir "cmake==3.31.6" \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /build
+COPY . /build/
+
+WORKDIR /build/enclave
+
+# Deterministic compilation (PCR0 reproducibility), same as Dockerfile.enclave:
+#   CARGO_INCREMENTAL=0   no incremental artifacts
+#   --remap-path-prefix   strip the absolute build path from embedded paths
+#   -C debuginfo=0 / strip=symbols  drop debug info + symbol tables
+ENV CARGO_INCREMENTAL=0 \
+    RUSTFLAGS="--remap-path-prefix=/build=/src -C debuginfo=0 -C strip=symbols"
+# `rgb` implies `spv` + `rgb-validation`. `--no-default-features` drops `ccd` so
+# this binary is RGB-only. `evm-rpc` adds in-enclave FundsIn verification,
+# pulling the alloy + tokio subtree; requires a second host vsock-proxy
+# (EVM_RPC_VSOCK_PORT, default 8002).
+#
+# `helios` makes that verification trustless and is required: `rgb` turns
+# on the bridge-signing path, and the production policy refuses to boot on the
+# host-relayed RawRpc source. Operator must set HELIOS_EXECUTION_RPC /
+# HELIOS_CONSENSUS_RPC / HELIOS_CHECKPOINT and run the exec+consensus
+# vsock-proxies (default ports 8003 / 8004).
+RUN cargo build --release --locked --no-default-features --features vsock,rgb,evm-rpc,helios
+
+# --- Runtime ---
+# Pinned by DIGEST: this rootfs is what ends up in the EIF, so its digest drives
+# PCR0 directly. Bump tag + digest together, in step with Dockerfile.enclave.
+FROM public.ecr.aws/amazonlinux/amazonlinux:2023-minimal@sha256:8073d921f4ac1bf17fca94e16b0bc575e3fc17e4ccbe53b563160f02f0c7ccfc AS runtime
+
+# Deterministic runtime rootfs (PCR0/PCR2 reproducibility). dnf/rpm write state
+# with embedded timestamps and randomness (rpmdb, history, caches, logs);
+# rewrite-timestamp normalises mtimes but not file contents. Scrub it in the SAME
+# layer so the measured rootfs is stable. (rpmdb is not needed at runtime.)
+RUN dnf install -y socat iproute \
+    && dnf clean all \
+    && rm -rf \
+        /var/cache/dnf /var/cache/libdnf5 /var/cache/ldconfig \
+        /var/lib/dnf /var/lib/rpm /var/lib/rpm-state \
+        /var/log/* /tmp/* \
+    && :
+
+WORKDIR /app
+COPY --from=builder /build/target/release/utexo-bridge-enclave /app/utexo-bridge-enclave
+COPY build/entrypoint.sh /app/entrypoint.sh
+
+RUN chmod +x /app/utexo-bridge-enclave /app/entrypoint.sh
+
+# NOTE: the donor cloning secret is intentionally NOT baked here. It is
+# delivered at runtime via the `InitializeKey` message (CLI: `init
+# --cloning-secret <secret>`), so it never lands in the EIF / image layers and
+# the PCRs stay reproducible. See enclave/src/server.rs (handle_initialize).
+
+# Pinned bridge/indexer config - identical to Dockerfile.enclave; keep the two in
+# lockstep. `rgb` implies `spv` + `rgb-validation`, so this is a release
+# bridge-signing build and `SecurityPolicy::assert_valid_for_build` refuses to
+# boot without these pins (enclave/src/policy.rs). Public
+# identifiers, baked so PCR0 commits to them. Stage runs on Bitcoin MAINNET +
+# Arbitrum One (chain_id 42161). Electrum is pinned to 127.0.0.1 and reached over
+# the vsock forwarder (host runs
+# `vsock-proxy 8001 electrs-mainnet.utexo.com 50002`); TLS terminates in-enclave.
+# TWO-CONTRACT deployment: the EVM funds-out EIP-712 verifyingContract is the
+# MultisigProxy (EVM_PROXY_CONTRACT_ADDRESS), which DIFFERS from the bridge
+# *entry* contract that emits FundsIn (FUNDS_IN_CONTRACT, set below).
+ENV EVM_CHAIN_ID=42161 \
+    EVM_PROXY_CONTRACT_ADDRESS=0xC985c12bbCECe96A13A72A62FD75d8aB9381ef5A \
+    RGB_ASSET_ID=rgb:lJFja2kw-h_azlEd-7CNPxwf-UsvIDhH-UD0Y1f9-8f26jLk \
+    BITCOIN_NETWORK=bitcoin \
+    ELECTRUM_URL=ssl://electrs-mainnet.utexo.com:50002
+
+# In-enclave EVM `FundsIn` verification (evm-rpc) plus the plain-BTC
+# (`SignBtc`) and gas-tx (`SignRawDigest`) policy pins - identical to
+# Dockerfile.enclave. EVM_RPC_URL MUST be loopback: the enclave reaches the EVM
+# RPC only through the vsock forwarder (host runs
+# `vsock-proxy <EVM_RPC_VSOCK_PORT=8002> <arbitrum-rpc-host> <port>`); a
+# non-loopback value falls back to the default at boot (config.rs EvmRpcConfig).
+# FUNDS_IN_CONTRACT is set EXPLICITLY because it differs from
+# EVM_PROXY_CONTRACT_ADDRESS - unset, it falls back to the proxy address and
+# points FundsIn verification at the wrong contract. In a release
+# `rgb-validation` build the plain-BTC and gas-tx paths fail closed unless
+# BTC_MAX_TOTAL_SATS / GAS_TX_ALLOWED_TO are pinned.
+ENV EVM_RPC_URL=http://127.0.0.1:3444 \
+    EVM_MIN_CONFIRMATIONS=12 \
+    FUNDS_IN_CONTRACT=0x6711f1a319B37847fa0234181C34D883774c4951 \
+    GAS_TX_ALLOWED_TO=0x6711f1a319B37847fa0234181C34D883774c4951 \
+    BTC_MAX_TOTAL_SATS=1000000
+
+# Production logging. This env is measured into PCR0 - do not flip it to `debug`
+# for a production EIF.
+ENV RUST_LOG=info
+ENTRYPOINT ["/app/entrypoint.sh"]

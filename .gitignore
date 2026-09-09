@@ -1,6 +1,7 @@
 /target/
 .claude/
 .idea/
+/docs/raw
 
 # Local build artifacts (EIF, checksums, PCR measurements) — never committed,
 # published to S3 instead.

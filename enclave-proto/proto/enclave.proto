@@ -1,0 +1,329 @@
+// Parent Adapter -> Nitro Enclave internal wire protocol.
+//
+// This is not a gRPC service. The parent writes one length-prefixed
+// EnclaveRequest over TCP/vsock and reads one EnclaveResponse.
+syntax = "proto3";
+
+package enclave;
+
+option go_package = "github.com/UTEXO-Protocol/federated-signer-proto/go-gen/enclave;enclavepb";
+
+message EnclaveRequest {
+  reserved 4;
+
+  oneof request {
+    InitializeKeyRequest initialize_key = 1;
+    GetPublicKeyRequest get_public_key = 2;
+    SignRequest sign = 3;
+    SignRawMessageRequest sign_raw_message = 5;
+    ProxyFederationRequest proxy_federation = 6;
+    InitiateCloningRequest initiate_cloning = 7;
+    GetCloneRequest get_clone = 8;
+    SetCloneRequest set_clone = 9;
+    SignRawDigestRequest sign_raw_digest = 10;
+    SubmitHeadersRequest submit_headers = 11;
+    GetLastSavedBlockRequest get_last_saved_block = 12;
+    GetAttestedPublicKeyRequest get_attested_public_key = 13;
+    SignBtcRequest sign_btc = 14;
+    SignCcdRequest sign_ccd = 15;
+  }
+}
+
+message EnclaveResponse {
+  oneof response {
+    InitializeKeyResponse initialize_key = 1;
+    PublicKeysResponse public_keys = 2;
+    EvmSignatureResponse evm_signature = 3;
+    SignedPsbtResponse signed_psbt = 4;
+    RawSignatureResponse raw_signature = 5;
+    FederationSignatureResponse federation_sig = 6;
+    InitiateCloningResponse initiate_cloning = 7;
+    GetCloneResponse get_clone = 8;
+    SetCloneResponse set_clone = 9;
+    RawDigestSignatureResponse raw_digest_sig = 10;
+    SubmitHeadersResponse submit_headers = 11;
+    GetLastSavedBlockResponse get_last_saved_block = 12;
+    GetAttestedPublicKeyResponse get_attested_public_key = 13;
+    CcdSignatureResponse ccd_signature = 14;
+    ErrorResponse error = 15;
+  }
+}
+
+message InitializeKeyRequest {
+  // Empty seed and mnemonic generate a new mnemonic from enclave entropy.
+  // Non-empty = import raw 64-byte seed (requires `allow-seed-import` feature, testing only).
+  bytes seed = 1;
+  // BIP-39 mnemonic phrase (requires `allow-seed-import` feature, testing only).
+  // If non-empty, takes precedence over seed.
+  string mnemonic = 2;
+  // Donor-side cloning secret, delivered at runtime (NOT baked into the EIF, so
+  // it stays out of the PCRs). Optional: only set for enclaves that will serve
+  // GetClone. Empty = donor cloning disabled.
+  string cloning_secret = 3;
+}
+
+message InitializeKeyResponse {
+  bytes evm_address = 1; // 20 bytes: keccak256(uncompressed_pubkey[1..])[12..].
+  bytes btc_compressed_pub = 2; // 33-byte compressed secp256k1 public key.
+  string btc_xpub = 3; // Base58 BIP-32 extended public key.
+  bytes master_fingerprint = 4; // 4-byte BIP-32 master key fingerprint.
+  string account_xpub_vanilla = 5; // BIP-86 account xpub: m/86'/<coin>'/0'.
+  string account_xpub_colored = 6; // RGB BIP-86 account xpub: m/86'/827167'/0'.
+  bytes evm_uncompressed_pub = 7; // 64-byte secp256k1 X || Y, without 0x04 prefix.
+  uint64 chain_id = 8; // EVM chain ID pinned at enclave boot.
+  bytes bridge_contract = 9; // 20-byte bridge contract address pinned at enclave boot.
+  string rgb_asset_id = 10; // RGB asset identifier pinned at enclave boot.
+  bytes evm_gas_tx_uncompressed_pub = 11; // 64-byte gas transaction public key.
+  bytes evm_gas_tx_address = 12; // 20-byte Ethereum address of the gas transaction key.
+  bytes ccd_ed25519_pub = 13; // 32-byte Concordium Ed25519 governance public key.
+}
+
+message GetPublicKeyRequest {
+  // Empty request returns the full public-key bundle.
+}
+
+message PublicKeysResponse {
+  bytes evm_address = 1; // 20-byte Ethereum address of the primary signing key.
+  bytes btc_compressed_pub = 2; // 33-byte compressed Bitcoin public key.
+  string btc_xpub = 3; // Base58 BIP-32 extended public key.
+  bytes master_fingerprint = 4; // 4-byte BIP-32 master key fingerprint.
+  string account_xpub_vanilla = 5; // BIP-86 account xpub: m/86'/<coin>'/0'.
+  string account_xpub_colored = 6; // RGB BIP-86 account xpub: m/86'/827167'/0'.
+  bytes evm_uncompressed_pub = 7; // 64-byte secp256k1 X || Y, without 0x04 prefix.
+  uint64 chain_id = 8; // EVM chain ID pinned at enclave boot.
+  bytes bridge_contract = 9; // 20-byte bridge contract address pinned at enclave boot.
+  string rgb_asset_id = 10; // RGB asset identifier pinned at enclave boot.
+  bytes evm_gas_tx_uncompressed_pub = 11; // 64-byte gas transaction public key.
+  bytes evm_gas_tx_address = 12; // 20-byte Ethereum address of the gas transaction key.
+  bytes ccd_ed25519_pub = 13; // 32-byte Concordium Ed25519 governance public key.
+}
+
+message GetAttestedPublicKeyRequest {
+  bytes nonce = 1; // Fresh 32-byte nonce embedded in the attestation document.
+}
+
+message GetAttestedPublicKeyResponse {
+  PublicKeysResponse public_keys = 1; // Public-key bundle bound by the attestation.
+  bytes attestation_doc = 2; // COSE_Sign1 NSM document, or raw CBOR in mock mode.
+}
+
+message SignRequest {
+  uint64 amount = 1;
+
+  oneof source_network {
+    EvmSource evm_source = 2;
+    RgbSource rgb_source = 3;
+    CcdSource ccd_source = 6;
+  }
+
+  oneof destination_network {
+    EvmDestination evm_destination = 4;
+    RgbDestination rgb_destination = 5;
+  }
+}
+
+message EvmSource {
+  bytes tx_hash = 1; // 32-byte source EVM transaction hash.
+  bool event_valid = 2; // Whether the listener validated the source EVM event.
+  bool event_finalized = 3; // Whether the source EVM event is finalized.
+  bytes token = 4; // 20-byte ERC-20 address; empty for native currency.
+  bytes recipient = 5; // 20-byte recipient address.
+  uint64 commission = 6; // Commission reported by the source event.
+  // On-chain BridgeFundsIn.operationId of the source deposit, exactly 32 bytes.
+  // Required: the enclave binds the FundsIn log to it and refuses to sign
+  // without it. Not RgbDestination.operation_idx, which is a different id-space.
+  bytes funds_in_operation_id = 7;
+}
+
+message RgbSource {
+  bool consignment_valid = 1; // Listener-provided RGB validation result.
+  string asset_id = 3; // RGB asset identifier derived from the consignment.
+  bytes consignment = 4; // Raw RGB consignment bytes.
+  bytes consignment_hash = 5; // keccak256(consignment).
+  repeated MerkleProofEntry merkle_proofs = 6; // SPV proofs for witness transactions.
+  uint64 commission = 7; // Commission reported by the source event.
+}
+
+// CcdSource is the validated Concordium source of a fundsIn operation (the
+// finalized user->governance transfer or governance burn). The listener has
+// already validated finality and structure; the enclave trusts it and only
+// cross-checks the release amount (SignRequest.amount) against the destination.
+message CcdSource {
+  bytes tx_hash = 1; // Concordium source transaction hash (32 bytes).
+  uint64 commission = 2; // Commission reported by the source operation.
+}
+
+message EvmDestination {
+  bytes call_data = 1; // Raw ABI-encoded EVM function call.
+  uint64 nonce = 2; // Sequential MultisigProxy nonce.
+  uint64 deadline = 3; // Unix timestamp after which the signature is invalid.
+  uint64 chain_id = 4; // EVM chain ID used by the EIP-712 domain.
+  bytes proxy_contract = 5; // 20-byte EIP-712 verifying contract address.
+  uint64 calldata_amount = 6; // Amount pre-extracted from call_data.
+  uint64 calldata_commission = 7; // Commission pre-extracted from call_data.
+  // lz_release, if set, signals that this is an lzFundsOutCall release and
+  // carries the LZ-specific fields for TeeLzFundsOut digest derivation and
+  // crosscheck. Absent for direct fundsOutCall releases.
+  optional LzReleaseParams lz_release = 8;
+}
+
+// LzReleaseParams carries the LayerZero-specific crosscheck fields for an
+// lzFundsOutCall release. Absent means a direct fundsOutCall release.
+message LzReleaseParams {
+  // dst_eid is the LayerZero endpoint ID of the destination chain
+  // (e.g. ETH mainnet = 30101, ETH Sepolia = 40161).
+  uint32 dst_eid = 1;
+  // min_amount_ld is the minimum acceptable amount after LZ slippage.
+  uint64 min_amount_ld = 2;
+  // recipient is the 32-byte padded destination address on the target chain.
+  bytes recipient = 3;
+}
+
+message RgbDestination {
+  uint64 operation_idx = 1; // Destination operation index.
+  bytes psbt_bytes = 2; // Serialized PSBT to sign.
+  uint64 psbt_output_amount = 3; // Total non-change output amount.
+  string asset_id = 4; // RGB asset identifier associated with the transfer.
+  bytes consignment = 5; // Raw destination RGB consignment bytes.
+  bytes consignment_hash = 6; // keccak256(consignment).
+}
+
+message MerkleProofEntry {
+  bytes txid = 1; // 32-byte transaction ID in display byte order.
+  uint32 block_height = 2; // Height of the block containing the transaction.
+  uint32 tx_position = 3; // Transaction position in the block.
+  repeated bytes merkle_path = 4; // 32-byte sibling hashes from leaf to Merkle root.
+}
+
+message EvmSignatureResponse {
+  bytes signature = 1; // 65-byte Ethereum signature: r || s || v.
+  // The exact fundsOut calldata the signature commits to. For the RGB->EVM
+  // fundsOut path the enclave derives the OpId-bound fields (burnId,
+  // settlementData/fundsInIds) from the validated consignment and rewrites
+  // them, so this MAY differ from the call_data sent in EvmDestination. The
+  // caller MUST submit these bytes on-chain (the EIP-712 digest is keccak256
+  // over this calldata). Equal to the request's call_data on non-fundsOut /
+  // non-rgb-validation paths.
+  bytes call_data = 2;
+}
+
+message SignedPsbtResponse {
+  bytes signed_psbt = 1; // Serialized PSBT with enclave partial signatures.
+  uint32 inputs_signed = 2; // Number of inputs signed by the enclave.
+}
+
+// Plain-BTC PSBT signing (create_utxo / plain withdrawals). Distinct from the
+// bridge/RGB-send path (SignRequest): carries NO RGB consignment and NO EVM
+// correlation. The enclave authorises it ONLY against an operator-pinned output
+// allowlist + amount cap (env BTC_ALLOWED_SCRIPTS / BTC_MAX_TOTAL_SATS), never a
+// listener-supplied flag, and signs on the vanilla BIP-86 account so it can
+// never co-sign a colored (RGB-allocated) input. A production (rgb-validation)
+// build refuses to sign when the allowlist/cap are unconfigured (fail-closed).
+// Response is a SignedPsbtResponse, same as the RGB-send path. Audit M-01 / #69.
+message SignBtcRequest {
+  bytes psbt_bytes = 1; // Raw PSBT to sign (plain BTC; no consignment).
+}
+
+message SignRawMessageRequest {
+  bytes message = 1; // Arbitrary message wrapped and hashed using EIP-191 before signing.
+}
+
+message RawSignatureResponse {
+  bytes signature = 1; // 65-byte Ethereum signature: r || s || v.
+}
+
+message SignRawDigestRequest {
+  bytes digest = 1; // Optional; if set must equal keccak256(unsigned_tx). Dev-mode legacy path signs it directly.
+  bytes unsigned_tx = 2; // Unsigned gas-tx preimage (EIP-1559 / legacy EIP-155). Required in release builds for shape/allowlist gating (audit TEE-XC-09 / #68).
+}
+
+message RawDigestSignatureResponse {
+  bytes signature = 1; // 65-byte signature produced by the gas transaction key.
+}
+
+// SignCcdRequest asks the enclave to Ed25519-sign a Concordium account-transaction
+// hash with the governance key. The listener has already re-derived the hash and
+// verified the transaction structure/amounts; the enclave signs the hash directly.
+message SignCcdRequest {
+  bytes hash = 1; // Exactly 32 bytes, signed without additional hashing.
+}
+
+message CcdSignatureResponse {
+  bytes signature = 1; // 64-byte Concordium Ed25519 signature.
+  // 32-byte Ed25519 public key that produced `signature`. Ed25519 signatures are
+  // not recoverable, so the consumer cannot derive the signer the way it does on
+  // EVM; it needs the key to look the signature's credential and key index up in
+  // the governance account. Derived in the same operation as the signature, so
+  // the two cannot disagree.
+  bytes public_key = 2;
+}
+
+message ProxyFederationRequest {
+  bytes message_hash = 1; // 32-byte hash passed to the federation signer.
+}
+
+message FederationSignatureResponse {
+  bytes signature = 1; // 65-byte federation ECDSA signature.
+}
+
+message InitiateCloningRequest {
+  string cloning_secret = 1; // Pre-shared operator secret, never sent to the donor.
+  bytes cluster_public_key = 2; // 20-byte EVM address of the intended donor.
+}
+
+message InitiateCloningResponse {
+  bytes requester_attestation = 1; // NSM document binding the encryption key and digest.
+  bytes encryption_pubkey = 2; // 32-byte requester X25519 public key.
+  bytes cloning_digest = 3; // 32-byte HMAC-SHA256 over the encryption public key.
+}
+
+message GetCloneRequest {
+  bytes cluster_public_key = 1; // 20-byte EVM address that must match the donor.
+  bytes cloning_digest = 2; // 32-byte digest verified with the cloning secret.
+  bytes encryption_pubkey = 3; // 32-byte requester X25519 public key.
+  bytes requester_attestation = 4; // NSM document binding requester key and digest.
+}
+
+message GetCloneResponse {
+  bytes encrypted_seed = 1; // Seed encrypted using X25519, HKDF, and ChaCha20Poly1305.
+  bytes donor_pubkey = 2; // 32-byte donor ephemeral X25519 public key.
+  bytes donor_attestation = 3; // NSM document binding the donor public key.
+}
+
+message SetCloneRequest {
+  bytes encrypted_seed = 1; // Encrypted 64-byte seed returned by the donor.
+  bytes donor_pubkey = 2; // 32-byte donor ephemeral X25519 public key.
+  bytes donor_attestation = 3; // NSM document binding the donor public key.
+}
+
+message SetCloneResponse {}
+
+// Bitcoin header synchronization for in-enclave SPV validation.
+
+message SubmitHeadersRequest {
+  // Raw 80-byte Bitcoin headers (batch, contiguous, in ascending height order).
+  // Listener typically batches up to ~500 to keep gRPC messages small.
+  repeated bytes headers = 1;
+  // Block height of headers[0]. Headers must connect to the enclave's stored
+  // chain (i.e. start_height == last_saved_height + 1) — except for the very
+  // first batch which connects to the compiled-in checkpoint.
+  uint32 start_height = 2;
+}
+
+message SubmitHeadersResponse {
+  uint32 last_block_height = 1; // enclave's tip after applying this batch
+  bytes last_block_hash = 2; // 32 bytes
+  uint32 headers_accepted = 3; // number of headers from the batch that validated
+}
+
+message GetLastSavedBlockRequest {}
+
+message GetLastSavedBlockResponse {
+  uint32 block_height = 1; // Height of the latest accepted header.
+  bytes block_hash = 2; // 32-byte hash of the latest accepted header.
+}
+
+message ErrorResponse {
+  uint32 code = 1; // Stable enclave error category.
+  string message = 2; // Human-readable error description.
+}

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # start|stop a single Nitro enclave by CID, used by utexo-enclave@.service.
-# Identity is NOT bootstrapped here — a freshly (re)started enclave is empty;
+# Identity is NOT bootstrapped here - a freshly (re)started enclave is empty;
 # run `init`/`clone` separately (keys live only in enclave memory).
 #
 # At boot systemd starts all per-CID enclave units in parallel, but concurrent
@@ -33,7 +33,7 @@ case "$ACTION" in
     flock -w 180 9 || { echo "could not acquire enclave start lock for CID $CID" >&2; exit 1; }
     # DEBUG-MODE (op13 crash hunt): when ENCLAVE_DEBUG_MODE=1 in the unit env,
     # run the enclave with --debug-mode so `nitro-cli console` can attach and
-    # surface the in-enclave panic/backtrace. NOTE: debug-mode ZEROES PCR0/1/2 —
+    # surface the in-enclave panic/backtrace. NOTE: debug-mode ZEROES PCR0/1/2 -
     # attestation is insecure and the clone flow only passes because both peers
     # report zeroed PCRs. Never leave this enabled on a real production host.
     DEBUG_ARG=()

@@ -28,7 +28,7 @@ sequenceDiagram
 
     Srv->>Srv: merge boot-pinned BridgeConfig<br/>(chain_id, bridge_contract, rgb_asset_id)<br/>into PublicKeysResponse
     Srv->>Srv: bundle := canonical_pubkey_bundle(keys)<br/>(12 length-prefixed fields, proto order)
-    Srv->>Srv: commitment := sha256(bundle ‖ policy_commitment)<br/>policy = boot-resolved SecurityPolicy (C-01)
+    Srv->>Srv: commitment := sha256(bundle ‖ policy_commitment)<br/>policy = boot-resolved SecurityPolicy
 
     Srv->>Att: get_attestation(nonce, pubkey=evm_uncompressed_pub, user_data=commitment)
     alt mock-attestation feature

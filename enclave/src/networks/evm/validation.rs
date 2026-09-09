@@ -1,6 +1,5 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
-#[cfg(test)]
 use alloy_primitives::U256;
 use alloy_sol_types::{sol, SolCall};
 
@@ -9,28 +8,62 @@ use crate::networks::evm::{ADDRESS_LEN, HASH_LEN as TX_HASH_LEN};
 use crate::networks::{RouteProof, ValidationContext};
 use crate::proto::{EvmDestination, EvmSource};
 
-/// `keccak256("fundsOut(address,uint256,uint256,uint256,uint256,string,bytes,bytes)")[0..4]`.
-pub const FUNDS_OUT_SELECTOR_POOLS: [u8; 4] = [0xcc, 0xdd, 0xb7, 0x68];
+/// `keccak256("fundsOut((address,uint256,uint256,uint256,uint256,string,bytes,bytes))")[0..4]`.
+///
+/// Bundling the release fields into `FundsOutParams` moved the selector
+/// `0xccddb768` -> `0xdc771390`. A flat body read as a tuple lands one word off
+/// on every field, so the mismatch fails closed at the whitelist.
+pub const FUNDS_OUT_SELECTOR_POOLS: [u8; 4] = [0xdc, 0x77, 0x13, 0x90];
+
+/// `keccak256("lzFundsOut(uint256,uint256,uint256,uint256,string,bytes,bytes,uint32,bytes32,uint256,bytes)")[0..4]`.
+///
+/// Enclave wire format for `MultisigProxy.lzFundsOutCall`: individual params,
+/// no struct wrapper - analogous to `fundsOut` above. The selector distinguishes
+/// the two release paths in the allowlist and routes to `TeeLzFundsOut` digest.
+pub const LZ_FUNDS_OUT_SELECTOR: [u8; 4] = lzFundsOutCall::SELECTOR;
 
 /// Upper bound on `call_data` length. A legitimate `fundsOut` call is a few
-/// hundred bytes; anything past 64 KiB is either malformed or an attempt to
-/// blow up per-request work before any byte-level extraction or signing runs
-/// (audit I-06 / #90). Compile-time so the posture is PCR-attested, not
-/// host-tunable.
+/// hundred bytes, so anything past 64 KiB is malformed or a work-amplification
+/// attempt. Compile-time and PCR-attested.
 pub const MAX_FUNDS_OUT_CALL_DATA_LEN: usize = 64 * 1024;
 
-const ALLOWED_SELECTORS: &[[u8; 4]] = &[FUNDS_OUT_SELECTOR_POOLS];
+const ALLOWED_SELECTORS: &[[u8; 4]] = &[FUNDS_OUT_SELECTOR_POOLS, LZ_FUNDS_OUT_SELECTOR];
 
 sol! {
-    function fundsOut(
-        address recipient,
+    /// Mirrors `IBridge.FundsOutParams` (IBridge.sol:193-202). Field order fixes
+    /// both the ABI decode here and the `TeeFundsOut` struct hash in
+    /// [`super::signing::funds_out_digest`].
+    struct FundsOutParams {
+        address recipient;
+        uint256 amount;
+        uint256 burnId;
+        uint256 sourceChainId;
+        uint256 destinationChainId;
+        string sourceAddress;
+        bytes proof;
+        bytes settlementData;
+    }
+
+    /// Never reaches the chain - the proxy takes the struct directly. This is
+    /// only the enclave's wire format, which is why the protos still carry an
+    /// opaque `call_data` blob.
+    function fundsOut(FundsOutParams params);
+
+    /// Mirrors `IMultisigProxy.LzFundsOutParams` enclave wire format.
+    /// Individual params (no struct wrapper) analogous to `fundsOut` above.
+    /// Selector routes to `TeeLzFundsOut` digest in [`super::signing::lz_funds_out_digest`].
+    function lzFundsOut(
         uint256 amount,
         uint256 burnId,
         uint256 sourceChainId,
         uint256 destinationChainId,
         string sourceAddress,
         bytes proof,
-        bytes settlementData
+        bytes settlementData,
+        uint32 dstEid,
+        bytes32 recipient,
+        uint256 minAmountLD,
+        bytes extraOptions
     );
 }
 
@@ -58,14 +91,11 @@ pub fn validate_source(amount: u64, source: &EvmSource) -> Result<RouteProof> {
         )));
     }
 
-    // NOTE (audit M-06 / #51): the listener-supplied `event_valid` /
-    // `event_finalized` booleans are NO LONGER trusted here - anyone reaching
-    // the enclave could set both `true`. EVM-event validity and finality are
-    // now established independently by the enclave itself in `handle_sign` via
-    // `networks::evm::evm_event::verify_funds_in_event` (the `evm-rpc` feature:
-    // fetches the FundsIn receipt and checks the operationId/amount/depth
-    // against the pinned bridge contract). The proto fields remain (ignored)
-    // until the listener stops sending them.
+    // The listener-supplied `event_valid` / `event_finalized`
+    // booleans are not trusted here - anyone reaching the enclave could set
+    // both. Validity and finality come from
+    // `networks::evm::evm_event::verify_funds_in_event` in `handle_sign`. The
+    // proto fields remain, ignored, until the listener stops sending them.
 
     Ok(RouteProof {
         amount,
@@ -80,13 +110,16 @@ pub fn validate_source(amount: u64, source: &EvmSource) -> Result<RouteProof> {
 pub fn validate_destination(
     destination: &EvmDestination,
     ctx: &ValidationContext<'_>,
-) -> Result<RouteProof> {
+) -> Result<(RouteProof, Option<FundsOutParams>)> {
     if dev_mode_bypass() {
         let _ = ctx;
-        return Ok(RouteProof {
-            amount: destination.calldata_amount,
-            operation_id: None,
-        });
+        return Ok((
+            RouteProof {
+                amount: destination.calldata_amount,
+                operation_id: None,
+            },
+            None,
+        ));
     }
 
     let bridge_config = ctx.bridge_config;
@@ -97,8 +130,7 @@ pub fn validate_destination(
             destination.call_data.len()
         )));
     }
-    // Reject an oversize calldata before any offset extraction or signing
-    // (audit I-06 / #90).
+    // Reject an oversize calldata before any offset extraction or signing.
     if destination.call_data.len() > MAX_FUNDS_OUT_CALL_DATA_LEN {
         return Err(EnclaveError::CrossCheck(format!(
             "call_data too large: {} bytes (max {})",
@@ -116,7 +148,21 @@ pub fn validate_destination(
             hex::encode(selector)
         )));
     }
-    let proof = parse_proof_from_calldata(&destination.call_data)?;
+    // Decoded once here; later stages take the typed result. The
+    // LayerZero route has its own param shape and yields no `FundsOutParams`, so
+    // `signing::lz_funds_out_digest` re-decodes it. Both routes surface
+    // `destinationChainId` but mean different things by it, so
+    // `is_entrypoint_route` picks the matching check below.
+    let is_entrypoint_route = selector == LZ_FUNDS_OUT_SELECTOR;
+    let (proof, params, calldata_destination_chain_id) = if is_entrypoint_route {
+        let decoded = decode_lz_funds_out_params(&destination.call_data)?;
+        let chain_id = decoded.destinationChainId;
+        (lz_route_proof_from_params(&decoded)?, None, chain_id)
+    } else {
+        let params = decode_funds_out_params(&destination.call_data)?;
+        let chain_id = params.destinationChainId;
+        (route_proof_from_params(&params)?, Some(params), chain_id)
+    };
     if proof.amount != destination.calldata_amount {
         return Err(EnclaveError::CrossCheck(format!(
             "calldata amount mismatch: decoded {} != declared {}",
@@ -138,7 +184,7 @@ pub fn validate_destination(
     if !bridge_config.is_configured() {
         return Err(EnclaveError::CrossCheck(
             "bridge config unconfigured: set EVM_CHAIN_ID / EVM_PROXY_CONTRACT_ADDRESS / RGB_ASSET_ID \
-             — refusing to sign in listener-trusting mode"
+             - refusing to sign in listener-trusting mode"
                 .into(),
         ));
     }
@@ -147,6 +193,42 @@ pub fn validate_destination(
         return Err(EnclaveError::CrossCheck(format!(
             "chain_id mismatch: request {} != pinned {}",
             destination.chain_id, bridge_config.chain_id
+        )));
+    }
+    // Distinct from the request-level `chain_id` above, which only drives the
+    // EIP-712 domain.
+    //
+    // A direct pools payout settles on the very chain the tx runs on, so its
+    // calldata destinationChainId must equal the attested pin. An entrypoint
+    // (LayerZero) payout settles on a remote chain by design - Ethereum,
+    // Polygon, Plasma, Tron - so pinning it the same way made every
+    // cross-chain payout unsignable. The execution chain stays pinned
+    // for both routes by the `destination.chain_id` and `proxy_contract`
+    // checks above; the entrypoint route only has to name a real, remote
+    // destination. Beyond that the field is bound on-chain: `Bridge.fundsOut`
+    // folds it into the canonical `burnId` preimage and rejects a mismatch,
+    // so it cannot be varied on its own.
+    if is_entrypoint_route {
+        if calldata_destination_chain_id.is_zero() {
+            return Err(EnclaveError::CrossCheck(
+                "calldata destinationChainId must be > 0".into(),
+            ));
+        }
+        if bridge_config.chain_id != 0
+            && calldata_destination_chain_id == U256::from(bridge_config.chain_id)
+        {
+            return Err(EnclaveError::CrossCheck(format!(
+                "calldata destinationChainId {} equals the pinned execution chain - \
+                 a local payout must use the direct fundsOut route",
+                calldata_destination_chain_id
+            )));
+        }
+    } else if bridge_config.chain_id != 0
+        && calldata_destination_chain_id != U256::from(bridge_config.chain_id)
+    {
+        return Err(EnclaveError::CrossCheck(format!(
+            "calldata destinationChainId mismatch: {} != pinned {}",
+            calldata_destination_chain_id, bridge_config.chain_id
         )));
     }
     if bridge_config.bridge_contract != [0u8; ADDRESS_LEN]
@@ -167,19 +249,34 @@ pub fn validate_destination(
         return Err(EnclaveError::CrossCheck("request deadline expired".into()));
     }
 
-    Ok(proof)
+    Ok((proof, params))
 }
 
-fn parse_proof_from_calldata(call_data: &[u8]) -> Result<RouteProof> {
-    // Canonical-encoding enforcement (audit W-01 residual, #123): the ABI
-    // decoder is deliberately layout-permissive — overlapping or out-of-order
-    // dynamic tails and trailing junk all decode fine (`abi_decode_validate`
-    // only validates the decoded *values*). Re-encoding the decoded call and
-    // requiring byte equality pins the input to the one canonical layout.
-    // This matters because the calldata bytes are later partially rewritten
-    // by fixed offset (`apply_op_id_binding`), so every byte must sit exactly
-    // where the canonical layout puts it — and what the enclave signs must
-    // decode on-chain to exactly what it validated.
+/// Narrow a decoded release into the route-neutral proof.
+fn route_proof_from_params(params: &FundsOutParams) -> Result<RouteProof> {
+    let amount: u64 = params
+        .amount
+        .try_into()
+        .map_err(|_| EnclaveError::CrossCheck("fundsOut amount exceeds u64 range".into()))?;
+
+    Ok(RouteProof {
+        amount,
+        // Still `None`. `settlementData` cites bridge-derived deposit ids, not
+        // an RGB OpId, and `burnId` is not one either - so cross-network binding
+        // cannot be recovered from the calldata alone.
+        operation_id: None,
+    })
+}
+
+/// Decode a `fundsOut` calldata blob into the release fields, enforcing the
+/// canonical encoding. Shared with the signing path, which needs the fields to
+/// rebuild the `TeeFundsOut` struct hash.
+///
+/// The canonicity check lives here rather than only in the validator: a legacy
+/// flat body with a zero `recipient` decodes cleanly as a tuple, and only the
+/// re-encode catches it. Deferring to `validate_destination` would make the
+/// property depend on caller ordering.
+pub fn decode_funds_out_params(call_data: &[u8]) -> Result<FundsOutParams> {
     let decoded = fundsOutCall::abi_decode_validate(call_data)
         .map_err(|e| EnclaveError::CrossCheck(format!("invalid fundsOut calldata: {e}")))?;
     if decoded.abi_encode() != call_data {
@@ -189,25 +286,56 @@ fn parse_proof_from_calldata(call_data: &[u8]) -> Result<RouteProof> {
                 .into(),
         ));
     }
+    Ok(decoded.params)
+}
+
+/// Decode an `lzFundsOut` calldata blob, enforcing canonical encoding.
+/// Shared with [`super::signing::lz_funds_out_digest`] which needs every
+/// field to build the `TeeLzFundsOut` struct hash.
+pub fn decode_lz_funds_out_params(call_data: &[u8]) -> Result<lzFundsOutCall> {
+    let decoded = lzFundsOutCall::abi_decode_validate(call_data)
+        .map_err(|e| EnclaveError::CrossCheck(format!("invalid lzFundsOut calldata: {e}")))?;
+    if decoded.abi_encode() != call_data {
+        return Err(EnclaveError::CrossCheck(
+            "non-canonical lzFundsOut calldata encoding: re-encoding does not reproduce input"
+                .into(),
+        ));
+    }
+    Ok(decoded)
+}
+
+/// Narrow a decoded LayerZero release into the route-neutral proof, mirroring
+/// [`route_proof_from_params`] on the pools route.
+fn lz_route_proof_from_params(decoded: &lzFundsOutCall) -> Result<RouteProof> {
     let amount: u64 = decoded
         .amount
         .try_into()
-        .map_err(|_| EnclaveError::CrossCheck("fundsOut amount exceeds u64 range".into()))?;
-
+        .map_err(|_| EnclaveError::CrossCheck("lzFundsOut amount exceeds u64 range".into()))?;
     Ok(RouteProof {
         amount,
-        // TODO: derive this from fundsOut.settlementData once the new smart
-        // contract calldata shape is finalized. `burnId` is not the RGB opId
-        // and must not be used for cross-network operation binding.
         operation_id: None,
     })
 }
 
 #[cfg(test)]
 mod tests {
+    /// Drop the typed intent; these assertions cover the route proof.
+    fn validate_dest(
+        destination: &EvmDestination,
+        ctx: &ValidationContext<'_>,
+    ) -> Result<RouteProof> {
+        super::validate_destination(destination, ctx).map(|(proof, _)| proof)
+    }
+
+    /// Keeps the canonical-encoding regressions expressed against raw bytes.
+    fn parse_proof_from_calldata(call_data: &[u8]) -> Result<RouteProof> {
+        route_proof_from_params(&decode_funds_out_params(call_data)?)
+    }
+
     use super::*;
     use crate::config::BridgeConfig;
     use alloy_primitives::{Address, Bytes};
+    #[cfg(feature = "spv")]
     use std::sync::Mutex;
 
     fn source() -> EvmSource {
@@ -218,20 +346,39 @@ mod tests {
             token: vec![0x11; ADDRESS_LEN],
             recipient: vec![0x22; ADDRESS_LEN],
             commission: 50,
-            funds_in_operation_id: vec![0u8; 32],
+            funds_in_operation_id: vec![0x33; 32],
         }
     }
 
     fn funds_out_calldata(amount: u64, burn_id: u64) -> Vec<u8> {
         fundsOutCall {
-            recipient: Address::from([0x22; ADDRESS_LEN]),
-            amount: U256::from(amount),
-            burnId: U256::from(burn_id),
-            sourceChainId: U256::from(1u64),
-            destinationChainId: U256::from(1u64),
-            sourceAddress: String::new(),
-            proof: Bytes::new(),
-            settlementData: Bytes::new(),
+            params: FundsOutParams {
+                recipient: Address::from([0x22; ADDRESS_LEN]),
+                amount: U256::from(amount),
+                burnId: U256::from(burn_id),
+                sourceChainId: U256::from(1u64),
+                destinationChainId: U256::from(1u64),
+                sourceAddress: String::new(),
+                proof: Bytes::new(),
+                settlementData: Bytes::new(),
+            },
+        }
+        .abi_encode()
+    }
+
+    /// `funds_out_calldata` with `destinationChainId` overridden.
+    fn funds_out_calldata_for_chain(amount: u64, destination_chain_id: u64) -> Vec<u8> {
+        fundsOutCall {
+            params: FundsOutParams {
+                recipient: Address::from([0x22; ADDRESS_LEN]),
+                amount: U256::from(amount),
+                burnId: U256::from(7u64),
+                sourceChainId: U256::from(1u64),
+                destinationChainId: U256::from(destination_chain_id),
+                sourceAddress: String::new(),
+                proof: Bytes::new(),
+                settlementData: Bytes::new(),
+            },
         }
         .abi_encode()
     }
@@ -260,6 +407,7 @@ mod tests {
     }
 
     fn with_ctx<T>(config: &BridgeConfig, f: impl FnOnce(&ValidationContext<'_>) -> T) -> T {
+        #[cfg(feature = "spv")]
         let header_chain = Mutex::new(crate::networks::rgb::spv::HeaderChain::new(
             crate::networks::rgb::spv::Network::Regtest,
             crate::networks::rgb::spv::checkpoint_for(crate::networks::rgb::spv::Network::Regtest),
@@ -268,7 +416,11 @@ mod tests {
             bridge_config: config,
             #[cfg(feature = "rgb-validation")]
             rgb_validator: None,
+            #[cfg(feature = "spv")]
             header_chain: &header_chain,
+            // EVM destinations never reach the send-RGB PSBT bind.
+            #[cfg(feature = "rgb-validation")]
+            self_owned_psbt_outputs: None,
         };
         f(&ctx)
     }
@@ -276,7 +428,7 @@ mod tests {
     #[test]
     fn valid_destination_passes() {
         with_ctx(&config(), |ctx| {
-            let proof = validate_destination(&destination(), ctx).expect("valid destination");
+            let proof = validate_dest(&destination(), ctx).expect("valid destination");
             assert_eq!(proof.amount, 1000);
             assert_eq!(proof.operation_id, None);
         });
@@ -299,11 +451,10 @@ mod tests {
             .contains(&format!("evm_tx_hash must be {TX_HASH_LEN} bytes")));
     }
 
-    /// Audit M-06 / #51: the listener-supplied `event_valid` / `event_finalized`
-    /// booleans are no longer read by `validate_source`, so flipping them to
-    /// `false` does NOT change the outcome. EVM-event validity/finality is now
-    /// established independently by `evm_event::verify_funds_in_event` in the
-    /// handler (see that module's `issue_51_no_receipt_means_no_authorization`).
+    /// `validate_source` no longer reads the listener's
+    /// `event_valid` / `event_finalized` booleans, so flipping them changes
+    /// nothing. Validity and finality come from
+    /// `evm_event::verify_funds_in_event`.
     #[test]
     fn source_ignores_listener_evm_booleans() {
         let mut source = source();
@@ -318,9 +469,7 @@ mod tests {
         let mut destination = destination();
         destination.call_data[..4].copy_from_slice(&[0xDE, 0xAD, 0xBE, 0xEF]);
         with_ctx(&config(), |ctx| {
-            let msg = validate_destination(&destination, ctx)
-                .unwrap_err()
-                .to_string();
+            let msg = validate_dest(&destination, ctx).unwrap_err().to_string();
             // The error must both name the failing predicate and echo the
             // offending selector so an operator can see WHAT was rejected.
             assert!(
@@ -336,7 +485,7 @@ mod tests {
         // 3 bytes can't carry a 4-byte selector.
         destination.call_data = vec![0x1a, 0xd8, 0x80];
         with_ctx(&config(), |ctx| {
-            let err = validate_destination(&destination, ctx).unwrap_err();
+            let err = validate_dest(&destination, ctx).unwrap_err();
             assert!(
                 err.to_string().contains("call_data too short"),
                 "expected too-short rejection, got: {err}"
@@ -346,15 +495,15 @@ mod tests {
 
     #[test]
     fn rejects_calldata_over_size_cap() {
-        // A maximally packed calldata must be rejected up-front (audit I-06 /
-        // #90), before selector dispatch or any offset extraction. Start from
+        // A maximally packed calldata must be rejected up-front,
+        // before selector dispatch or any offset extraction. Start from
         // a valid fundsOut destination and pad the tail past the cap.
         let mut destination = destination();
         destination
             .call_data
             .resize(MAX_FUNDS_OUT_CALL_DATA_LEN + 1, 0u8);
         with_ctx(&config(), |ctx| {
-            let err = validate_destination(&destination, ctx).unwrap_err();
+            let err = validate_dest(&destination, ctx).unwrap_err();
             assert!(
                 err.to_string().contains("call_data too large"),
                 "expected too-large rejection, got: {err}"
@@ -374,7 +523,7 @@ mod tests {
         // The zero-padded tail may still fail the later ABI decode; assert
         // only that it is NOT the size error.
         with_ctx(&config(), |ctx| {
-            if let Err(e) = validate_destination(&destination, ctx) {
+            if let Err(e) = validate_dest(&destination, ctx) {
                 assert!(
                     !e.to_string().contains("call_data too large"),
                     "calldata exactly at the cap must not trip the size check, got: {e}"
@@ -388,11 +537,100 @@ mod tests {
         let mut destination = destination();
         destination.chain_id = 42;
         with_ctx(&config(), |ctx| {
-            assert!(validate_destination(&destination, ctx)
+            assert!(validate_dest(&destination, ctx)
                 .unwrap_err()
                 .to_string()
                 .contains("chain_id mismatch"));
         });
+    }
+
+    /// A release naming an unpinned chain is refused even when the
+    /// request-level `chain_id` matches.
+    #[test]
+    fn rejects_calldata_destination_chain_id_mismatch() {
+        let mut destination = destination();
+        destination.call_data = funds_out_calldata_for_chain(1000, 999);
+        with_ctx(&config(), |ctx| {
+            let err = destination_or_err(&destination, ctx);
+            assert!(
+                err.contains("destinationChainId mismatch"),
+                "expected destinationChainId rejection, got: {err}"
+            );
+        });
+    }
+
+    /// `lzFundsOut` calldata for an entrypoint-routed payout to a remote chain.
+    fn lz_funds_out_calldata(amount: u64, destination_chain_id: u64) -> Vec<u8> {
+        use alloy_primitives::FixedBytes;
+
+        let mut recipient = [0u8; 32];
+        recipient[31] = 0x05;
+
+        lzFundsOutCall {
+            amount: U256::from(amount),
+            burnId: U256::from(7u64),
+            sourceChainId: U256::from(1u64),
+            destinationChainId: U256::from(destination_chain_id),
+            sourceAddress: String::new(),
+            proof: Bytes::new(),
+            settlementData: Bytes::new(),
+            dstEid: 30101u32,
+            recipient: FixedBytes(recipient),
+            minAmountLD: U256::from(amount),
+            extraOptions: Bytes::new(),
+        }
+        .abi_encode()
+    }
+
+    fn lz_destination(destination_chain_id: u64) -> EvmDestination {
+        EvmDestination {
+            call_data: lz_funds_out_calldata(1000, destination_chain_id),
+            ..destination()
+        }
+    }
+
+    /// The entrypoint route settles on a remote chain, so its calldata
+    /// destinationChainId must NOT be pinned to the execution chain: pinning it
+    /// blocked every LayerZero payout (Ethereum, Polygon, Plasma, Tron).
+    #[test]
+    fn accepts_entrypoint_route_to_remote_chain() {
+        with_ctx(&config(), |ctx| {
+            let proof = validate_dest(&lz_destination(137), ctx)
+                .expect("entrypoint payout to a remote chain must validate");
+            assert_eq!(proof.amount, 1000);
+        });
+    }
+
+    /// The entrypoint route still has to name a real destination.
+    #[test]
+    fn rejects_entrypoint_route_with_zero_destination_chain_id() {
+        with_ctx(&config(), |ctx| {
+            let err = destination_or_err(&lz_destination(0), ctx);
+            assert!(
+                err.contains("destinationChainId must be > 0"),
+                "expected zero destinationChainId rejection, got: {err}"
+            );
+        });
+    }
+
+    /// A payout that lands back on the pinned execution chain is a direct
+    /// payout; routing it through the entrypoint digest is refused.
+    #[test]
+    fn rejects_entrypoint_route_to_pinned_chain() {
+        let config = config(); // pinned chain_id = 1
+        with_ctx(&config, |ctx| {
+            let err = destination_or_err(&lz_destination(1), ctx);
+            assert!(
+                err.contains("equals the pinned execution chain"),
+                "expected local-payout rejection, got: {err}"
+            );
+        });
+    }
+
+    fn destination_or_err(destination: &EvmDestination, ctx: &ValidationContext<'_>) -> String {
+        validate_dest(destination, ctx)
+            .expect_err("must reject")
+            .to_string()
     }
 
     #[test]
@@ -400,7 +638,7 @@ mod tests {
         let mut destination = destination();
         destination.chain_id = 0;
         with_ctx(&config(), |ctx| {
-            assert!(validate_destination(&destination, ctx)
+            assert!(validate_dest(&destination, ctx)
                 .unwrap_err()
                 .to_string()
                 .contains("chain_id must be > 0"));
@@ -412,7 +650,7 @@ mod tests {
         let mut destination = destination();
         destination.proxy_contract = vec![0xBB; ADDRESS_LEN]; // pinned is 0xAA
         with_ctx(&config(), |ctx| {
-            let err = validate_destination(&destination, ctx).unwrap_err();
+            let err = validate_dest(&destination, ctx).unwrap_err();
             assert!(
                 err.to_string().contains("proxy_contract mismatch"),
                 "got: {err}"
@@ -425,7 +663,7 @@ mod tests {
         let mut destination = destination();
         destination.proxy_contract = vec![];
         with_ctx(&config(), |ctx| {
-            assert!(validate_destination(&destination, ctx)
+            assert!(validate_dest(&destination, ctx)
                 .unwrap_err()
                 .to_string()
                 .contains(&format!("proxy_contract must be {ADDRESS_LEN} bytes")));
@@ -437,7 +675,7 @@ mod tests {
         let mut destination = destination();
         destination.deadline = 1; // Unix timestamp 1 is long expired
         with_ctx(&config(), |ctx| {
-            assert!(validate_destination(&destination, ctx)
+            assert!(validate_dest(&destination, ctx)
                 .unwrap_err()
                 .to_string()
                 .contains("deadline expired"));
@@ -449,7 +687,7 @@ mod tests {
         let mut config = config();
         config.rgb_asset_id.clear();
         with_ctx(&config, |ctx| {
-            assert!(validate_destination(&destination(), ctx).is_ok());
+            assert!(validate_dest(&destination(), ctx).is_ok());
         });
     }
 
@@ -458,7 +696,7 @@ mod tests {
         let mut destination = destination();
         destination.calldata_amount = 999;
         with_ctx(&config(), |ctx| {
-            assert!(validate_destination(&destination, ctx)
+            assert!(validate_dest(&destination, ctx)
                 .unwrap_err()
                 .to_string()
                 .contains("calldata amount mismatch"));
@@ -468,21 +706,23 @@ mod tests {
     #[test]
     fn rejects_uint256_amount_overflow() {
         let mut call = fundsOutCall {
-            recipient: Address::from([0x22; ADDRESS_LEN]),
-            amount: U256::from(u64::MAX) + U256::from(1u64),
-            burnId: U256::from(7u64),
-            sourceChainId: U256::from(1u64),
-            destinationChainId: U256::from(1u64),
-            sourceAddress: String::new(),
-            proof: Bytes::new(),
-            settlementData: Bytes::new(),
+            params: FundsOutParams {
+                recipient: Address::from([0x22; ADDRESS_LEN]),
+                amount: U256::from(u64::MAX) + U256::from(1u64),
+                burnId: U256::from(7u64),
+                sourceChainId: U256::from(1u64),
+                destinationChainId: U256::from(1u64),
+                sourceAddress: String::new(),
+                proof: Bytes::new(),
+                settlementData: Bytes::new(),
+            },
         }
         .abi_encode();
         call[..4].copy_from_slice(&FUNDS_OUT_SELECTOR_POOLS);
         let mut destination = destination();
         destination.call_data = call;
         with_ctx(&config(), |ctx| {
-            assert!(validate_destination(&destination, ctx)
+            assert!(validate_dest(&destination, ctx)
                 .unwrap_err()
                 .to_string()
                 .contains("exceeds u64 range"));
@@ -490,25 +730,27 @@ mod tests {
     }
 
     /// The hand-pinned selector constant and the alloy-derived ABI selector
-    /// must never drift apart (#65): the whitelist gates on the constant while
+    /// must never drift apart: the whitelist gates on the constant while
     /// decode/encode use the `sol!` type.
     #[test]
     fn funds_out_selector_matches_abi_derived_selector() {
         assert_eq!(FUNDS_OUT_SELECTOR_POOLS, fundsOutCall::SELECTOR);
     }
 
-    /// Canonical calldata with non-empty dynamic tails — the baseline the two
+    /// Canonical calldata with non-empty dynamic tails - the baseline the two
     /// non-canonical rejection tests below tamper with.
     fn funds_out_calldata_with_tails(amount: u64) -> Vec<u8> {
         fundsOutCall {
-            recipient: Address::from([0x22; ADDRESS_LEN]),
-            amount: U256::from(amount),
-            burnId: U256::from(7u64),
-            sourceChainId: U256::from(1u64),
-            destinationChainId: U256::from(1u64),
-            sourceAddress: "rgb-src".to_string(),
-            proof: Bytes::from(vec![0xCC; 64]),
-            settlementData: Bytes::from(vec![0xDD; 32]),
+            params: FundsOutParams {
+                recipient: Address::from([0x22; ADDRESS_LEN]),
+                amount: U256::from(amount),
+                burnId: U256::from(7u64),
+                sourceChainId: U256::from(1u64),
+                destinationChainId: U256::from(1u64),
+                sourceAddress: "rgb-src".to_string(),
+                proof: Bytes::from(vec![0xCC; 64]),
+                settlementData: Bytes::from(vec![0xDD; 32]),
+            },
         }
         .abi_encode()
     }
@@ -520,11 +762,9 @@ mod tests {
         assert_eq!(proof.amount, 1_234);
     }
 
-    /// audit W-01 residual (#123): the ABI decoder accepts trailing junk
-    /// after the last dynamic tail; the canonical re-encode check must not.
-    /// The calldata is later partially rewritten by byte offset
-    /// (`apply_op_id_binding`), so every byte must sit exactly where the
-    /// canonical layout puts it.
+    /// ABI residual: the ABI decoder accepts trailing junk
+    /// after the last dynamic tail; the canonical re-encode check must not, so
+    /// no unread bytes can ride along inside a signing request.
     #[test]
     fn rejects_calldata_with_trailing_junk() {
         let mut cd = funds_out_calldata_with_tails(1_234);
@@ -536,16 +776,16 @@ mod tests {
         );
     }
 
-    /// audit W-01 residual (#123): two dynamic-arg head words pointing at the
+    /// ABI residual: two dynamic-arg head words pointing at the
     /// same tail decode fine but are not a canonical encoding.
     #[test]
     fn rejects_calldata_with_overlapping_dynamic_tails() {
         let mut cd = funds_out_calldata_with_tails(1_234);
-        // Head words (selector included in the byte positions): arg 7
-        // (`proof`) offset word at bytes 196..228, arg 8 (`settlementData`)
-        // offset word at bytes 228..260. Point settlementData at proof's tail.
-        let proof_offset_word: [u8; 32] = cd[196..228].try_into().unwrap();
-        cd[228..260].copy_from_slice(&proof_offset_word);
+        // Offset words for `proof` (228..260) and `settlementData` (260..292),
+        // counting the selector and the tuple head pointer. Both are measured
+        // from the same tuple start, so copying one aliases the two tails.
+        let proof_offset_word: [u8; 32] = cd[228..260].try_into().unwrap();
+        cd[260..292].copy_from_slice(&proof_offset_word);
         let err = parse_proof_from_calldata(&cd).unwrap_err();
         assert!(
             err.to_string().contains("non-canonical fundsOut calldata"),

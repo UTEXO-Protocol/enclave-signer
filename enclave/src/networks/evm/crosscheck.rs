@@ -1,43 +1,23 @@
-//! RGB→EVM `fundsOut` cross-checks: bind the calldata the enclave signs to the
+//! RGB->EVM `fundsOut` cross-checks: bind the calldata the enclave signs to the
 //! consignment it validated. All logic here is `rgb-validation`-gated (the
 //! module is only compiled then) because every check reads a
 //! [`ValidatedConsignment`]; SPV builds additionally run the BtcRelay agreement
 //! check ([`verify_btc_relay_agreement`]).
 //!
-//! Ported from the pre-refactor `validation/evm_crosscheck.rs` (audit M-02/#93,
-//! #63/#97, #57/#122, 4th I-03/#95) and re-homed onto the `networks/evm` layout;
-//! the helpers now operate on `EvmDestination.call_data` bytes rather than the
-//! old flat `SignEvmRequest`.
-
-use sha3::{Digest, Keccak256};
+//! The helpers operate on `EvmDestination.call_data` bytes.
 
 use crate::error::{EnclaveError, Result};
-use crate::networks::evm::validation::FUNDS_OUT_SELECTOR_POOLS;
+use crate::networks::evm::validation::FundsOutParams;
 use crate::networks::rgb::spv::HeaderChain;
+use crate::networks::rgb::spv_validation;
 use crate::networks::rgb::validation::ValidatedConsignment;
+use crate::proto::MerkleProofEntry;
 
-/// Byte offset of `amount` in the `fundsOut` calldata. After the 4-byte
-/// selector and the 32-byte `recipient` head slot, `amount` (uint256) sits at
-/// byte 36..68.
-const FUNDS_OUT_AMOUNT_OFFSET: usize = 36;
+// Calldata is decoded via `sol!` ([`decode_funds_out_params`]), not at
+// hard-coded byte offsets: the `FundsOutParams` tuple shifts every field by one
+// head pointer word, so the old constants would be 32 bytes off.
 
-/// Byte offset of `burnId` (uint256) in the `fundsOut` calldata: after the
-/// selector, `recipient` (4..36) and `amount` (36..68), `burnId` sits at
-/// 68..100. Confirmed against `Bridge.sol` on `dev`.
-const FUNDS_OUT_BURN_ID_OFFSET: usize = 68;
-
-/// Byte offset of the `settlementData` head slot (its ABI tail offset word).
-/// `settlementData` is the 8th arg, so after the selector its head word sits at
-/// 4 + 7*32 = 228..260. The `abi.encode(uint256[] fundsInIds)` payload is in the
-/// tail.
-const FUNDS_OUT_SETTLEMENT_DATA_HEAD_OFFSET: usize = 4 + 7 * 32;
-
-/// Byte offset of the `proof` head slot (its ABI tail offset word). `proof` is
-/// the 7th arg, so its head word sits at 4 + 6*32 = 196. The tail decodes to
-/// `abi.encode(uint256 blockHeight, bytes32 commitmentHash)`.
-const FUNDS_OUT_PROOF_HEAD_OFFSET: usize = 4 + 6 * 32;
-
-/// Defense-in-depth for the RGB→EVM `fundsOut` direction (audit 4th I-03 / #95):
+/// Defense-in-depth for the RGB->EVM `fundsOut` direction:
 /// every consignment witness tx must be mined. rgbstd's per-witness ordinal map
 /// (otherwise discarded) is surfaced as `non_mined_witness_txids`; reject here
 /// so confirmation does not rest on the SPV header chain alone.
@@ -58,45 +38,21 @@ pub fn assert_witnesses_confirmed(validated: &ValidatedConsignment) -> Result<()
     Ok(())
 }
 
-/// Fail-closed selector guard for the selector-specific `fundsOut` validator
-/// [`validate_funds_out_transfer`].
-///
-/// It is only meaningful for the `fundsOut` selector
-/// ([`FUNDS_OUT_SELECTOR_POOLS`]), which the caller
-/// (`server::apply_funds_out_binding`) has already whitelisted before invoking
-/// it. It previously returned `Ok(())` for any other selector, so a future
-/// refactor that called it directly - skipping that whitelist - would get a
-/// *silent success* for an unsupported selector (audit I-03 / Oxorio I-10:
-/// caller-ordering instead of failing closed). Reject instead: a
-/// selector-specific validator handed the wrong selector is a programming
-/// error, so fail closed rather than pass.
-fn ensure_funds_out_selector(call_data: &[u8], validator: &str) -> Result<()> {
-    if call_data.len() < 4 || call_data[..4] != FUNDS_OUT_SELECTOR_POOLS {
-        return Err(EnclaveError::CrossCheck(format!(
-            "{validator} called with a non-fundsOut selector - selector-specific validators must \
-             only run after the fundsOut whitelist in apply_funds_out_binding"
-        )));
-    }
-    Ok(())
-}
-
 /// Pools-side amount cross-check for the `fundsOut` transfer flow. Binds the
-/// calldata `amount` to the consignment's actual asset value:
+/// release `amount` to the consignment's actual asset value:
 ///
 ///   1. The consignment's most recent transition must be an IFA `Transfer`
 ///      (`transition_type == ifa::TS_TRANSFER`).
 ///   2. The transition's `total_output_amount` must cover the EVM-side release
 ///      `amount`.
 ///
-/// Fails closed (does not no-op) if handed anything but the `fundsOut`
-/// selector - see [`ensure_funds_out_selector`] (audit I-03).
+/// Takes the decoded intent, which also replaces the old selector
+/// guard: `FundsOutParams` only exists after a successful `fundsOut` decode.
 pub fn validate_funds_out_transfer(
-    call_data: &[u8],
+    params: &FundsOutParams,
     validated: &ValidatedConsignment,
 ) -> Result<()> {
     use crate::networks::rgb::validation::ifa;
-
-    ensure_funds_out_selector(call_data, "validate_funds_out_transfer")?;
 
     let last = validated.last_transition.as_ref().ok_or_else(|| {
         EnclaveError::CrossCheck(
@@ -111,10 +67,12 @@ pub fn validate_funds_out_transfer(
         )));
     }
 
-    // Read `amount` straight from the calldata bytes rather than trusting the
-    // listener-supplied `calldata_amount`, then bind it to the consignment's
-    // output value — the consignment is the authority on how much RGB moved.
-    let calldata_amount = extract_uint256_as_u64(call_data, FUNDS_OUT_AMOUNT_OFFSET)?;
+    // The consignment, not the listener-supplied `calldata_amount`, is the
+    // authority on how much RGB moved.
+    let calldata_amount: u64 = params
+        .amount
+        .try_into()
+        .map_err(|_| EnclaveError::CrossCheck("fundsOut amount exceeds u64 range".into()))?;
     if last.total_output_amount < calldata_amount {
         return Err(EnclaveError::CrossCheck(format!(
             "transfer amount mismatch: consignment total_output_amount ({}) < calldata amount ({})",
@@ -124,436 +82,371 @@ pub fn validate_funds_out_transfer(
     Ok(())
 }
 
-/// The OpId → on-chain-id transform: `keccak256(op_id_bytes)`. This MUST match
-/// the derivation the backend uses when it builds the `fundsOut` calldata; the
-/// whole OpId binding hinges on this single function.
-fn op_id_to_calldata_id(op_id: &str) -> Result<[u8; 32]> {
-    let bytes = decode_op_id_to_bytes32(op_id)?;
-    Ok(Keccak256::digest(bytes).into())
+// `apply_op_id_binding` / `op_id_to_calldata_id` were removed: they
+// rewrote `burnId` and `settlementData` in the signed
+// calldata, and both fields are now keyed on bridge-derived ids no RGB OpId
+// yields. They are backend-supplied and enforced on-chain (`InvalidBurnId`,
+// `FundsInNotFound` / `AmountMismatch`). An enclave-side check would need the
+// deposit receipts via `evm_event::EvmReceiptProvider` - follow-up.
+
+/// One `(height, commitmentHash)` pair of the finality proof.
+#[derive(Debug, Clone, Copy)]
+struct ProofBlock {
+    height: u32,
+    /// Display (big-endian) byte order, as it appears in the calldata.
+    commitment: [u8; 32],
 }
 
-/// OpId binding applied to a `fundsOut` calldata before signing (audit
-/// TEE-SE-02 / M-02 / #93, spec §6/§7). The enclave does NOT trust the
-/// listener's `burnId`/`fundsInIds`; it derives them from the consignment it
-/// validated and **overwrites** the calldata it signs:
-///   - `burnId` (offset 68) := `keccak256(last_transfer_op_id)`; and
-///   - `settlementData` := `abi.encode(uint256[] fundsInIds)` over
-///     `op_id_to_calldata_id(opid)` for every IFA `TS_INFLATION` transition.
+/// BtcRelay agreement + consignment source-block bind (spec section 13,
+/// #57/#122). Before signing a `fundsOut`:
 ///
-/// Returns the rewritten calldata. Because the signature commits to
-/// `keccak256(callData)`, these bytes are authoritative — **the caller MUST
-/// submit exactly the returned bytes**.
-pub fn apply_op_id_binding(call_data: &[u8], validated: &ValidatedConsignment) -> Result<Vec<u8>> {
-    // burnId is derived from the rgbstd-VALIDATED OpId of the release
-    // (TS_TRANSFER) transition (`last_transfer_op_id`), not the flat parser
-    // (audit M-02 / #93). Fail closed if it wasn't extracted.
-    let op_id = validated.last_transfer_op_id.ok_or_else(|| {
-        EnclaveError::CrossCheck(
-            "OpId binding requires the validated OpId of the release transition, but none was \
-             extracted (the last transition is not a validated Transfer) - refusing to sign"
-                .into(),
-        )
-    })?;
-    let burn_id: [u8; 32] = Keccak256::digest(op_id).into();
-    let funds_in_ids: Vec<[u8; 32]> = validated
-        .mint_op_ids
-        .iter()
-        .map(|o| op_id_to_calldata_id(o))
-        .collect::<Result<_>>()?;
-
-    // The 8-word head (after the 4-byte selector) must be present to locate the
-    // burnId slot and the settlementData offset.
-    let head_end = FUNDS_OUT_SETTLEMENT_DATA_HEAD_OFFSET + 32; // 260
-    if call_data.len() < head_end {
-        return Err(EnclaveError::CrossCheck(format!(
-            "fundsOut calldata too short: need {head_end} head bytes, got {}",
-            call_data.len()
-        )));
-    }
-
-    let mut out = call_data.to_vec();
-
-    // (1) Overwrite burnId in place (a static head slot).
-    out[FUNDS_OUT_BURN_ID_OFFSET..FUNDS_OUT_BURN_ID_OFFSET + 32].copy_from_slice(&burn_id);
-
-    // (2) Replace settlementData (the last dynamic arg). Read its tail offset
-    //     (relative to the args start, byte 4), drop the old tail, and append a
-    //     fresh `abi.encode(uint256[] fundsInIds)`. The head offset word still
-    //     points at the same start, so it needs no update.
-    let sd_rel = bytes32_to_usize(&extract_bytes32(
-        &out,
-        FUNDS_OUT_SETTLEMENT_DATA_HEAD_OFFSET,
-    )?)?;
-    let sd_start = 4usize
-        .checked_add(sd_rel)
-        .ok_or_else(|| EnclaveError::CrossCheck("settlementData offset overflow".into()))?;
-    if sd_start < head_end || sd_start > out.len() {
-        return Err(EnclaveError::CrossCheck(format!(
-            "settlementData offset out of range: {sd_start} (head_end {head_end}, len {})",
-            out.len()
-        )));
-    }
-    out.truncate(sd_start);
-
-    // settlementData is a dynamic `bytes`: [length][payload], where payload is
-    // `abi.encode(uint256[])` = [0x20 offset][N][ids...].
-    let payload_len = 64 + funds_in_ids.len() * 32;
-    out.extend_from_slice(&u256_word(payload_len)); // bytes length
-    out.extend_from_slice(&u256_word(32)); // inner array offset (0x20)
-    out.extend_from_slice(&u256_word(funds_in_ids.len())); // N
-    for id in &funds_in_ids {
-        out.extend_from_slice(id);
-    }
-
-    Ok(out)
-}
-
-/// Encode a `usize` as a big-endian 32-byte ABI word.
-fn u256_word(n: usize) -> [u8; 32] {
-    let mut w = [0u8; 32];
-    w[24..].copy_from_slice(&(n as u64).to_be_bytes());
-    w
-}
-
-/// BtcRelay-agreement cross-check (bridge spec §13, #57/#122). Binds the
-/// calldata's claimed `proof = abi.encode(uint256 blockHeight, bytes32
-/// commitmentHash)` to the header the enclave holds at that height, so a
-/// listener can't split the contract's on-chain BtcRelay check away from the
-/// enclave's own SPV evidence. A no-op for non-`fundsOut` selectors and inert
-/// when the `proof` slot is empty (pre-migration).
+/// 1. find the block anchoring the consignment's last witness tx from its SPV
+///    Merkle proof, not from the calldata;
+/// 2. require a header there, proving the TEE is in sync;
+/// 3. require the calldata `proof` to name that same height.
 ///
-/// Byte order: the calldata `commitmentHash` is display (big-endian) order; the
-/// in-enclave `header.block_hash()` is internal order, so we reverse it before
-/// comparing.
-pub fn verify_btc_relay_agreement(call_data: &[u8], chain: &HeaderChain) -> Result<()> {
-    use bitcoin::hashes::Hash as _;
+/// The `proof` slot is `abi.encode(uint256 sourceHeight, bytes32 sourceCommit,
+/// uint256 latestHeight, bytes32 latestCommit)` (`RGBVerifier.sol:115-117`):
+/// `source` packaged the burn/transfer, `latest` is the relay tip. `latest` must
+/// also sit within `MAX_RELAY_TIP_LAG_BLOCKS` of the enclave tip, so freshness
+/// is not delegated to a relay the host also feeds. Empty `proof` = reject.
+///
+/// **The commitment words are not checked, by design.** They are BtcRelay's
+/// `keccak256(StoredBlockHeader)` over relay-internal state (chainWork,
+/// lastDiffAdjustment, the last ten timestamps), which the enclave cannot
+/// compute - comparing them to `header.block_hash()` made every release
+/// unsatisfiable. `RGBVerifier` checks each against the relay itself, so a
+/// manipulated commitment reverts on-chain. The enclave enforces what only it
+/// knows: which block the consignment is anchored in, by height.
+///
+/// Ordered cheapest-first: the pure calldata decode and the `latest` checks run
+/// before the anchor resolution, which reads the chain and redoes a Merkle
+/// verification.
+pub fn verify_btc_relay_agreement(
+    params: &FundsOutParams,
+    validated: &ValidatedConsignment,
+    merkle_proofs: &[MerkleProofEntry],
+    chain: &HeaderChain,
+) -> Result<()> {
+    let (source, latest) = decode_funds_out_proof(params)?;
 
-    if call_data.len() < 4 || call_data[..4] != FUNDS_OUT_SELECTOR_POOLS {
-        return Ok(());
-    }
-    let Some((block_height, commitment_hash)) = decode_funds_out_proof(call_data)? else {
-        // proof slot empty → no calldata commitment to bind (pre-migration).
-        return Ok(());
-    };
-
-    let header = chain.header_at(block_height).ok_or_else(|| {
-        EnclaveError::Spv(format!(
-            "fundsOut BtcRelay check: no header at block height {block_height} \
-             (chain tip = {}) — cannot confirm the calldata commitment against \
-             the enclave header chain",
-            chain.tip_height()
-        ))
-    })?;
-
-    let mut stored_display: [u8; 32] = header.block_hash().to_byte_array();
-    stored_display.reverse();
-    if stored_display != commitment_hash {
+    // The tip cannot precede the block it buries. Caught here so the error names
+    // the problem instead of surfacing as a header-lookup failure.
+    if latest.height < source.height {
         return Err(EnclaveError::Spv(format!(
-            "fundsOut BtcRelay check: calldata commitmentHash {} != enclave header \
-             hash {} at block height {block_height}",
-            hex::encode(commitment_hash),
-            hex::encode(stored_display)
+            "fundsOut BtcRelay check: proof latest height {} is below source height {} - \
+             the relay tip cannot precede the block that packaged the burn",
+            latest.height, source.height
         )));
     }
+
+    assert_header_present(chain, &latest, "latest")?;
+
+    // `latest` must actually be near the tip, else it proves only that some
+    // block existed and the relay could be arbitrarily far behind.
+    let lag = chain.tip_height().saturating_sub(latest.height);
+    if lag > MAX_RELAY_TIP_LAG_BLOCKS {
+        return Err(EnclaveError::Spv(format!(
+            "fundsOut BtcRelay check: proof latest height {} is {lag} blocks below the \
+             enclave tip {} (max {MAX_RELAY_TIP_LAG_BLOCKS}) - the relay's view is too \
+             stale to prove freshness",
+            latest.height,
+            chain.tip_height()
+        )));
+    }
+
+    // Recorded, not checked: an on-chain revert is otherwise opaque about which
+    // commitments were signed.
+    tracing::debug!(
+        source_height = source.height,
+        source_commit = %hex::encode(source.commitment),
+        latest_height = latest.height,
+        latest_commit = %hex::encode(latest.commitment),
+        "fundsOut relay proof accepted (commitments verified on-chain, not here)"
+    );
+
+    // The calldata's source block must be the consignment's own anchor. Height
+    // only - see the commitment note on this function.
+    let anchor = resolve_consignment_anchor(validated, merkle_proofs, chain)?;
+    if source.height != anchor.height {
+        return Err(EnclaveError::CrossCheck(format!(
+            "fundsOut source block mismatch: calldata proof cites height {}, but the \
+             consignment's last witness tx {} is anchored at height {} (enclave header hash {}) \
+             - refusing to sign",
+            source.height,
+            hex::encode(anchor.txid),
+            anchor.height,
+            hex::encode(anchor.commitment),
+        )));
+    }
+
     Ok(())
 }
 
-/// Decode the `fundsOut` `proof` slot into `(block_height, commitment_hash)`.
-/// Returns `Ok(None)` when the `proof` bytes are empty (pre-migration shape).
-fn decode_funds_out_proof(call_data: &[u8]) -> Result<Option<(u32, [u8; 32])>> {
-    // (1) proof tail offset, measured from the args start (byte 4).
-    let proof_offset = read_u256_as_usize(call_data, FUNDS_OUT_PROOF_HEAD_OFFSET)?;
-    let tail_start = 4usize
-        .checked_add(proof_offset)
-        .ok_or_else(|| EnclaveError::CrossCheck("fundsOut proof offset overflow".into()))?;
-
-    // (2) length word of the `bytes`.
-    let payload_start = tail_start
-        .checked_add(32)
-        .ok_or_else(|| EnclaveError::CrossCheck("fundsOut proof length overflow".into()))?;
-    if call_data.len() < payload_start {
-        return Err(EnclaveError::CrossCheck(format!(
-            "call_data too short for fundsOut proof length: need {payload_start}, got {}",
-            call_data.len()
-        )));
-    }
-    let proof_len = read_u256_as_usize(call_data, tail_start)?;
-    if proof_len == 0 {
-        return Ok(None);
-    }
-    if proof_len != 64 {
-        return Err(EnclaveError::CrossCheck(format!(
-            "fundsOut proof must be abi.encode(uint256 blockHeight, bytes32 commitmentHash) \
-             = 64 bytes, got {proof_len}"
-        )));
-    }
-
-    // (3) payload: [blockHeight: uint256][commitmentHash: bytes32].
-    let payload_end = payload_start
-        .checked_add(64)
-        .ok_or_else(|| EnclaveError::CrossCheck("fundsOut proof payload overflow".into()))?;
-    if call_data.len() < payload_end {
-        return Err(EnclaveError::CrossCheck(format!(
-            "call_data too short for fundsOut proof payload: need {payload_end}, got {}",
-            call_data.len()
-        )));
-    }
-    let payload = &call_data[payload_start..payload_end];
-
-    // blockHeight is a uint256 that must fit in u32 (Bitcoin heights do).
-    if payload[..28].iter().any(|&b| b != 0) {
-        return Err(EnclaveError::CrossCheck(
-            "fundsOut proof blockHeight exceeds u32 range".into(),
-        ));
-    }
-    let mut bh = [0u8; 4];
-    bh.copy_from_slice(&payload[28..32]);
-    let block_height = u32::from_be_bytes(bh);
-
-    let mut commitment_hash = [0u8; 32];
-    commitment_hash.copy_from_slice(&payload[32..64]);
-
-    Ok(Some((block_height, commitment_hash)))
+/// The Bitcoin block anchoring a consignment's last witness tx.
+#[derive(Debug, Clone, Copy)]
+struct ConsignmentAnchor {
+    height: u32,
+    /// Block hash in display (big-endian) order, as the calldata carries it.
+    commitment: [u8; 32],
+    /// Witness txid, display order. Error messages only.
+    txid: [u8; 32],
 }
 
-/// Read a 32-byte ABI word at `offset` and interpret it as a `usize`, range
-/// checked (the high bytes must be zero) rather than silently truncated.
-fn read_u256_as_usize(call_data: &[u8], offset: usize) -> Result<usize> {
-    let end = offset
-        .checked_add(32)
-        .ok_or_else(|| EnclaveError::CrossCheck("fundsOut word offset overflow".into()))?;
-    if call_data.len() < end {
-        return Err(EnclaveError::CrossCheck(format!(
-            "call_data too short: need {end} bytes, got {}",
-            call_data.len()
-        )));
-    }
-    let word = &call_data[offset..end];
-    if word[..24].iter().any(|&b| b != 0) {
-        return Err(EnclaveError::CrossCheck(
-            "fundsOut ABI word exceeds usize range".into(),
-        ));
-    }
-    let mut buf = [0u8; 8];
-    buf.copy_from_slice(&word[24..32]);
-    Ok(u64::from_be_bytes(buf) as usize)
-}
+/// Locate that block from evidence the enclave already trusts: the txid from
+/// the rgbstd-validated `Transfer`, the height from the tx's SPV proof, the hash
+/// from the enclave's own header chain. Nothing is read from the calldata. No
+/// header at that height means the enclave is behind the anchoring block, so it
+/// refuses.
+///
+/// The proof is re-verified here rather than relying on the earlier
+/// `validate_source_chain` pass: that ran under a different acquisition of the
+/// header-chain lock, and a concurrent `SubmitHeaders` reorg (up to
+/// `MAX_REORG_DEPTH = 100`, well past `SPV_MIN_CONFIRMATIONS = 6`) could have
+/// replaced the header in between. Inclusion and header hash must come from one
+/// consistent view.
+fn resolve_consignment_anchor(
+    validated: &ValidatedConsignment,
+    merkle_proofs: &[MerkleProofEntry],
+    chain: &HeaderChain,
+) -> Result<ConsignmentAnchor> {
+    use bitcoin::hashes::Hash as _;
 
-/// Read a uint256 from call_data at a byte offset, as u64. Fails if too short or
-/// the value exceeds u64.
-pub(crate) fn extract_uint256_as_u64(call_data: &[u8], offset: usize) -> Result<u64> {
-    let end = offset + 32;
-    if call_data.len() < end {
-        return Err(EnclaveError::CrossCheck(format!(
-            "call_data too short: need {} bytes, got {}",
-            end,
-            call_data.len()
-        )));
-    }
-    let slot = &call_data[offset..end];
-    if slot[..24].iter().any(|&b| b != 0) {
-        return Err(EnclaveError::CrossCheck(
-            "uint256 value exceeds u64 range".into(),
-        ));
-    }
-    let mut buf = [0u8; 8];
-    buf.copy_from_slice(&slot[24..32]);
-    Ok(u64::from_be_bytes(buf))
-}
+    let witness_txid = validated.last_witness_txid.ok_or_else(|| {
+        EnclaveError::CrossCheck(
+            "fundsOut requires a consignment with at least one witness bundle, but the validated \
+             consignment has no last witness txid - refusing to sign"
+                .into(),
+        )
+    })?;
+    // `MerkleProofEntry.txid` is display order; `Txid::to_byte_array` is internal.
+    let mut txid: [u8; 32] = witness_txid.to_byte_array();
+    txid.reverse();
 
-/// Read a full 32-byte word (a `bytes32`/`uint256` head slot) at a fixed offset.
-/// Safe only for the static `fundsOut` head slots.
-fn extract_bytes32(call_data: &[u8], offset: usize) -> Result<[u8; 32]> {
-    let end = offset + 32;
-    if call_data.len() < end {
-        return Err(EnclaveError::CrossCheck(format!(
-            "call_data too short: need {} bytes, got {}",
-            end,
-            call_data.len()
-        )));
-    }
-    call_data[offset..end]
-        .try_into()
-        .map_err(|_| EnclaveError::CrossCheck("bytes32 slice conversion failed".into()))
-}
+    // `validate_spv_proofs` enforced set equality against `witness_txids`, so a
+    // miss means the two views disagree. Fail closed.
+    let proof = merkle_proofs
+        .iter()
+        .find(|p| p.txid.as_slice() == txid)
+        .ok_or_else(|| {
+            EnclaveError::Spv(format!(
+                "fundsOut source block: no merkle proof for the consignment's last witness tx {} \
+                 - cannot determine the block that anchors it",
+                hex::encode(txid)
+            ))
+        })?;
 
-/// Decode an RGB OpId string (64-char hex of the 32-byte OpId) into raw bytes.
-/// Fails closed if not exactly 32 bytes of hex.
-fn decode_op_id_to_bytes32(op_id: &str) -> Result<[u8; 32]> {
-    let bytes = hex::decode(op_id).map_err(|e| {
-        EnclaveError::CrossCheck(format!(
-            "op_id is not hex-decodable (got {op_id:?}): {e} — burnId binding needs the \
-             32-byte OpId form"
+    let commitment = display_hash_at(chain, proof.block_height).ok_or_else(|| {
+        EnclaveError::Spv(format!(
+            "fundsOut source block: enclave holds no header at height {} (chain tip = {}) for the \
+             consignment's last witness tx {} - the TEE header chain is not in sync with \
+             the block that anchors this consignment",
+            proof.block_height,
+            chain.tip_height(),
+            hex::encode(txid)
         ))
     })?;
-    bytes.as_slice().try_into().map_err(|_| {
-        EnclaveError::CrossCheck(format!(
-            "op_id decodes to {} bytes, expected 32 (op_id {op_id:?})",
-            bytes.len()
-        ))
+
+    // Re-verify inclusion and depth against the chain just read, under this
+    // same lock guard (see the doc note on reorgs). The full set validator is
+    // reused on a one-element slice so the path-depth and txid-correspondence
+    // bounds it enforces apply here too.
+    spv_validation::validate_spv_proofs(
+        chain,
+        &[txid],
+        std::slice::from_ref(proof),
+        spv_validation::SPV_MIN_CONFIRMATIONS,
+    )?;
+
+    Ok(ConsignmentAnchor {
+        height: proof.block_height,
+        commitment,
+        txid,
     })
 }
 
-/// Interpret a 32-byte ABI word as a `usize`, failing closed if the high 24
-/// bytes are non-zero.
-fn bytes32_to_usize(word: &[u8; 32]) -> Result<usize> {
-    if word[..24].iter().any(|&b| b != 0) {
+/// Hash of the enclave's own header at `height`, in display (big-endian) order:
+/// the order calldata `commitmentHash` words carry. `None` when the enclave
+/// holds no header there (at or below the checkpoint, or beyond the tip).
+fn display_hash_at(chain: &HeaderChain, height: u32) -> Option<[u8; 32]> {
+    use bitcoin::hashes::Hash as _;
+
+    let mut display: [u8; 32] = chain.header_at(height)?.block_hash().to_byte_array();
+    display.reverse();
+    Some(display)
+}
+
+/// Confirm one proof pair against the in-enclave header chain.
+fn assert_header_present(chain: &HeaderChain, block: &ProofBlock, label: &str) -> Result<()> {
+    display_hash_at(chain, block.height)
+        .map(|_| ())
+        .ok_or_else(|| {
+            EnclaveError::Spv(format!(
+                "fundsOut BtcRelay check: no header at {label} block height {} \
+                 (chain tip = {}) - the enclave is behind the chain and cannot confirm the \
+                 block the calldata names",
+                block.height,
+                chain.tip_height()
+            ))
+        })
+}
+
+/// Number of bytes in the finality proof: four ABI words.
+const FUNDS_OUT_PROOF_LEN: usize = 4 * 32;
+
+/// How far the calldata's `latest` block may sit below the enclave's own tip.
+/// Without a bound the `latest` pair proves only that a block existed, so a
+/// listener could pass an ancient known block and the freshness half of the
+/// BtcRelay check would be vacuous.
+///
+/// Set to `MAX_REORG_DEPTH` (100 blocks, ~16 h on mainnet): generous next to
+/// the relay's own posting cadence, and the depth beyond which the enclave
+/// already refuses to rewrite history. Aliased rather than re-typed so the two
+/// cannot drift. Compile-time, not host-tunable.
+const MAX_RELAY_TIP_LAG_BLOCKS: u32 = crate::networks::rgb::spv::chain::MAX_REORG_DEPTH;
+
+/// Decode the `fundsOut` `proof` slot into its `(source, latest)` block pair.
+/// An empty slot is rejected: it leaves nothing to bind the anchor to.
+fn decode_funds_out_proof(params: &FundsOutParams) -> Result<(ProofBlock, ProofBlock)> {
+    let proof = &params.proof;
+    if proof.is_empty() {
         return Err(EnclaveError::CrossCheck(
-            "ABI offset/length word exceeds usize range".into(),
+            "fundsOut proof is empty: the calldata must carry the finality proof - \
+             abi.encode(uint256 sourceHeight, bytes32 sourceCommit, uint256 latestHeight, \
+             bytes32 latestCommit) - so the enclave can bind it to the consignment's \
+             anchoring block"
+                .into(),
         ));
     }
-    let mut buf = [0u8; 8];
-    buf.copy_from_slice(&word[24..32]);
-    Ok(u64::from_be_bytes(buf) as usize)
+    if proof.len() != FUNDS_OUT_PROOF_LEN {
+        return Err(EnclaveError::CrossCheck(format!(
+            "fundsOut proof must be abi.encode(uint256 sourceHeight, bytes32 sourceCommit, \
+             uint256 latestHeight, bytes32 latestCommit) = {FUNDS_OUT_PROOF_LEN} bytes, got {}",
+            proof.len()
+        )));
+    }
+
+    let source = ProofBlock {
+        height: proof_height(&proof[0..32], "sourceHeight")?,
+        commitment: proof[32..64]
+            .try_into()
+            .expect("32-byte slice always converts"),
+    };
+    let latest = ProofBlock {
+        height: proof_height(&proof[64..96], "latestHeight")?,
+        commitment: proof[96..128]
+            .try_into()
+            .expect("32-byte slice always converts"),
+    };
+
+    Ok((source, latest))
 }
+
+/// Read one proof height word as a `u32`. Bitcoin heights fit comfortably; a
+/// larger value is rejected rather than truncated.
+fn proof_height(word: &[u8], field: &str) -> Result<u32> {
+    if word[..28].iter().any(|&b| b != 0) {
+        return Err(EnclaveError::CrossCheck(format!(
+            "fundsOut proof {field} exceeds u32 range"
+        )));
+    }
+    let mut buf = [0u8; 4];
+    buf.copy_from_slice(&word[28..32]);
+    Ok(u32::from_be_bytes(buf))
+}
+
+// `extract_uint256_as_u64` moved to `evm_event`, its only remaining consumer.
+// `extract_bytes32`, `decode_op_id_to_bytes32` and `bytes32_to_usize` went with
+// the removed calldata rewrite.
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// Build a mock `fundsOut` calldata in the 8-arg shape
-    /// (`fundsOut(address,uint256,uint256,uint256,uint256,string,bytes,bytes)`
-    /// = [`FUNDS_OUT_SELECTOR_POOLS`]) with `amount` at
-    /// [`FUNDS_OUT_AMOUNT_OFFSET`] (byte 36). Remaining head slots are
-    /// zero-filled — none of the cross-checks here read them.
+    use alloy_primitives::{Address, Bytes, U256};
+    use alloy_sol_types::SolCall;
+
+    use crate::networks::evm::validation::{
+        decode_funds_out_params, fundsOutCall, FundsOutParams, FUNDS_OUT_SELECTOR_POOLS,
+    };
+
+    /// Decode a fixture blob into the intent the cross-checks now take.
+    fn params_of(call_data: &[u8]) -> FundsOutParams {
+        decode_funds_out_params(call_data).expect("fixture calldata must decode")
+    }
+
+    /// Build a `fundsOut(FundsOutParams)` calldata through the real ABI encoder.
+    ///
+    /// Encoded through `sol!` rather than hand-assembled head words, which
+    /// would have to reproduce the dynamic-tail arithmetic.
     fn mock_funds_out_calldata(amount: u64) -> Vec<u8> {
-        let mut data = Vec::with_capacity(4 + 8 * 32);
-        data.extend_from_slice(&FUNDS_OUT_SELECTOR_POOLS);
-        // recipient (32, address)
-        data.extend_from_slice(&[0u8; 32]);
-        // amount (uint256) @ offset 36
+        mock_funds_out_calldata_with_proof(amount, Bytes::new())
+    }
+
+    fn mock_funds_out_calldata_with_proof(amount: u64, proof: Bytes) -> Vec<u8> {
+        fundsOutCall {
+            params: FundsOutParams {
+                recipient: Address::ZERO,
+                amount: U256::from(amount),
+                burnId: U256::ZERO,
+                sourceChainId: U256::ZERO,
+                destinationChainId: U256::ZERO,
+                sourceAddress: String::new(),
+                proof,
+                settlementData: Bytes::new(),
+            },
+        }
+        .abi_encode()
+    }
+
+    /// The tuple encoding must round-trip through the decoder the cross-checks
+    /// rely on. Replaces the old `abi_layout` module's hard-coded head offsets.
+    #[test]
+    fn mock_calldata_decodes_back_to_its_fields() {
+        let cd = mock_funds_out_calldata_with_proof(1_234, Bytes::from(vec![0xAB; 128]));
+        let params = decode_funds_out_params(&cd).expect("tuple calldata must decode");
+        assert_eq!(params.amount, U256::from(1_234u64));
+        assert_eq!(params.proof.len(), 128);
+        assert_eq!(&cd[..4], &FUNDS_OUT_SELECTOR_POOLS);
+    }
+
+    /// Guard against a half-finished migration: a flat 8-argument body must not
+    /// decode as the tuple shape.
+    ///
+    /// With a zero `recipient`, as here, the ABI decoder accepts the legacy
+    /// body: the leading zero word reads as a tuple head pointer of 0, aliasing
+    /// the tuple onto those words so every field lines up. Only the canonical
+    /// re-encode check inside [`decode_funds_out_params`] rejects it. A
+    /// non-zero recipient fails the decode by itself, so this pins the harder
+    /// case.
+    fn legacy_flat_calldata(recipient: [u8; 32]) -> Vec<u8> {
+        let mut legacy = Vec::with_capacity(4 + 8 * 32);
+        legacy.extend_from_slice(&FUNDS_OUT_SELECTOR_POOLS);
+        legacy.extend_from_slice(&recipient);
         let mut amt = [0u8; 32];
-        amt[24..].copy_from_slice(&amount.to_be_bytes());
-        data.extend_from_slice(&amt);
-        // 6 more head slots zero-filled (burnId, sourceChainId,
-        // destinationChainId, srcAddrOffset, proofOffset, settlementDataOffset).
-        data.extend_from_slice(&[0u8; 32 * 6]);
-        data
-    }
-
-    /// Parse the `fundsOut` `settlementData` (`abi.encode(uint256[] fundsInIds)`)
-    /// and return each `fundsInId` as a raw 32-byte word.
-    ///
-    /// Two levels of ABI indirection: (1) the `settlementData` head slot at
-    /// [`FUNDS_OUT_SETTLEMENT_DATA_HEAD_OFFSET`] holds a tail offset measured from
-    /// the start of the argument block (byte 4); (2) at that tail the `bytes` has
-    /// a length word followed by its payload, which is itself
-    /// `abi.encode(uint256[])` = `[0x20 offset][len N][N words]`. Every read is
-    /// bounds-checked (via [`extract_bytes32`]) and every offset/length is range
-    /// checked (via [`bytes32_to_usize`]); a malformed or truncated blob is a hard
-    /// error. Returns an empty vec when `settlementData` is empty.
-    ///
-    /// The enclave OVERWRITES `settlementData` ([`apply_op_id_binding`]) rather
-    /// than reading it, so this reader exists only to verify, in tests, that the
-    /// writer's encoding round-trips — hence it lives in the test module.
-    fn extract_funds_in_ids(call_data: &[u8]) -> Result<Vec<[u8; 32]>> {
-        // (1) settlementData tail offset (relative to the args start = byte 4).
-        let rel = bytes32_to_usize(&extract_bytes32(
-            call_data,
-            FUNDS_OUT_SETTLEMENT_DATA_HEAD_OFFSET,
-        )?)?;
-        let sd_start = 4usize
-            .checked_add(rel)
-            .ok_or_else(|| EnclaveError::CrossCheck("settlementData offset overflow".into()))?;
-
-        // settlementData `bytes`: [length word][payload].
-        let sd_len = bytes32_to_usize(&extract_bytes32(call_data, sd_start)?)?;
-        if sd_len == 0 {
-            return Ok(vec![]); // no fundsInIds claimed
-        }
-        let sd_body = sd_start
-            .checked_add(32)
-            .ok_or_else(|| EnclaveError::CrossCheck("settlementData body overflow".into()))?;
-        let sd_end = sd_body
-            .checked_add(sd_len)
-            .ok_or_else(|| EnclaveError::CrossCheck("settlementData length overflow".into()))?;
-        if call_data.len() < sd_end {
-            return Err(EnclaveError::CrossCheck(format!(
-                "call_data too short for settlementData: need {sd_end}, got {}",
-                call_data.len()
-            )));
-        }
-        let sd = &call_data[sd_body..sd_end];
-
-        // (2) sd = abi.encode(uint256[]) = [offset (0x20)][len N][N words].
-        let arr_off = bytes32_to_usize(&extract_bytes32(sd, 0)?)?;
-        let n = bytes32_to_usize(&extract_bytes32(sd, arr_off)?)?;
-        let elems_start = arr_off.checked_add(32).ok_or_else(|| {
-            EnclaveError::CrossCheck("fundsInIds elements offset overflow".into())
-        })?;
-        let span = n
-            .checked_mul(32)
-            .and_then(|x| elems_start.checked_add(x))
-            .ok_or_else(|| EnclaveError::CrossCheck("fundsInIds array size overflow".into()))?;
-        if sd.len() < span {
-            return Err(EnclaveError::CrossCheck(format!(
-                "settlementData too short for {n} fundsInIds: need {span}, got {}",
-                sd.len()
-            )));
-        }
-
-        let mut ids = Vec::with_capacity(n);
-        for i in 0..n {
-            ids.push(extract_bytes32(sd, elems_start + i * 32)?);
-        }
-        Ok(ids)
+        amt[24..].copy_from_slice(&1_000u64.to_be_bytes());
+        legacy.extend_from_slice(&amt); // amount, at the old flat offset 36
+        legacy.extend_from_slice(&[0u8; 32 * 6]); // remaining flat head slots
+        legacy
     }
 
     #[test]
-    fn extract_uint256_works() {
-        let mut data = vec![0u8; 40];
-        // Put value 42 at offset 8 (bytes 8..40)
-        data[39] = 42;
-        assert_eq!(extract_uint256_as_u64(&data, 8).unwrap(), 42);
+    fn rejects_legacy_flat_encoding_zero_recipient() {
+        assert!(
+            decode_funds_out_params(&legacy_flat_calldata([0u8; 32])).is_err(),
+            "a flat-encoded body must fail closed, not alias onto the tuple layout"
+        );
     }
 
     #[test]
-    fn extract_uint256_rejects_short_data() {
-        let data = vec![0u8; 10];
-        assert!(extract_uint256_as_u64(&data, 0).is_err());
+    fn rejects_legacy_flat_encoding_real_recipient() {
+        let mut recipient = [0u8; 32];
+        recipient[12..].copy_from_slice(&[0x22; 20]);
+        assert!(decode_funds_out_params(&legacy_flat_calldata(recipient)).is_err());
     }
 
-    #[test]
-    fn extract_uint256_rejects_overflow() {
-        let mut data = vec![0u8; 32];
-        data[0] = 1; // high byte set — exceeds u64
-        assert!(extract_uint256_as_u64(&data, 0).is_err());
-    }
-
-    #[test]
-    fn extract_bytes32_works() {
-        let mut data = vec![0u8; 4 + 32 + 32 + 32];
-        let mut word = [0u8; 32];
-        word[0] = 0xab;
-        word[31] = 0xcd;
-        data[68..100].copy_from_slice(&word); // burnId head slot
-        assert_eq!(extract_bytes32(&data, 68).unwrap(), word);
-    }
-
-    #[test]
-    fn extract_bytes32_rejects_short_data() {
-        let data = vec![0u8; 90]; // burnId slot ends at 100
-        assert!(extract_bytes32(&data, 68).is_err());
-    }
-
-    #[test]
-    fn bytes32_to_usize_works() {
-        let mut w = [0u8; 32];
-        w[24..].copy_from_slice(&320u64.to_be_bytes());
-        assert_eq!(bytes32_to_usize(&w).unwrap(), 320);
-    }
-
-    #[test]
-    fn bytes32_to_usize_rejects_out_of_range() {
-        let mut w = [0u8; 32];
-        w[0] = 1; // high byte set — exceeds usize/u64
-        assert!(bytes32_to_usize(&w).is_err());
-    }
-
-    // =========================================================================
-    // Pools fundsOut tests — `validate_funds_out_transfer` (+ the #95 witness
+    // Pools fundsOut tests - `validate_funds_out_transfer` (+ the witness
     // recency guard `assert_witnesses_confirmed`).
-    // =========================================================================
 
     mod transfer {
         use super::*;
@@ -567,10 +460,13 @@ mod tests {
                 all_op_ids: vec![transition.op_id.clone()],
                 mint_op_ids: vec![],
                 last_transition: Some(transition),
-                last_transfer_witness_txid: None,
+                last_witness_txid: None,
                 last_transfer_witness_prevouts: None,
                 last_transfer_op_id: None,
                 non_mined_witness_txids: vec![],
+                // The fundsOut cross-check reads `last_transition` only; the
+                // per-witness grouping is the send-RGB PSBT bind's input.
+                transitions_by_witness: vec![],
             }
         }
 
@@ -589,13 +485,12 @@ mod tests {
         fn passes_when_total_output_covers_calldata_amount() {
             let cd = mock_funds_out_calldata(1000);
             let validated = validated_with_last(transfer_transition(1000));
-            assert!(validate_funds_out_transfer(&cd, &validated).is_ok());
+            assert!(validate_funds_out_transfer(&params_of(&cd), &validated).is_ok());
         }
 
         #[test]
         fn witnesses_confirmed_passes_when_all_mined() {
-            // No non-mined witnesses surfaced -> the recency guard is a no-op
-            // (audit 4th I-03 / #95).
+            // No non-mined witnesses surfaced -> the recency guard is a no-op.
             let validated = validated_with_last(transfer_transition(1000));
             assert!(super::super::assert_witnesses_confirmed(&validated).is_ok());
         }
@@ -617,7 +512,7 @@ mod tests {
         fn passes_when_total_output_exceeds_calldata_amount() {
             let cd = mock_funds_out_calldata(1000);
             let validated = validated_with_last(transfer_transition(2000));
-            assert!(validate_funds_out_transfer(&cd, &validated).is_ok());
+            assert!(validate_funds_out_transfer(&params_of(&cd), &validated).is_ok());
         }
 
         /// P0 regression: even with a valid consignment that deserializes
@@ -628,7 +523,7 @@ mod tests {
         fn rejects_when_total_output_less_than_calldata_amount() {
             let cd = mock_funds_out_calldata(1_000_000_000);
             let validated = validated_with_last(transfer_transition(1));
-            let err = validate_funds_out_transfer(&cd, &validated).unwrap_err();
+            let err = validate_funds_out_transfer(&params_of(&cd), &validated).unwrap_err();
             assert!(
                 err.to_string().contains("transfer amount mismatch"),
                 "expected transfer amount mismatch, got: {err}"
@@ -636,7 +531,7 @@ mod tests {
         }
 
         /// A burn consignment arriving on the (single) `fundsOut`
-        /// selector must be rejected by the transfer check — this is how
+        /// selector must be rejected by the transfer check - this is how
         /// mint/burn stays off until it's wired by contract address.
         #[test]
         fn rejects_when_last_transition_is_not_transfer() {
@@ -644,7 +539,7 @@ mod tests {
             let mut t = transfer_transition(500);
             t.transition_type = ifa::TS_BURN;
             let validated = validated_with_last(t);
-            let err = validate_funds_out_transfer(&cd, &validated).unwrap_err();
+            let err = validate_funds_out_transfer(&params_of(&cd), &validated).unwrap_err();
             assert!(
                 err.to_string().contains("requires a Transfer transition"),
                 "expected Transfer-required rejection, got: {err}"
@@ -661,388 +556,23 @@ mod tests {
                 all_op_ids: vec![],
                 mint_op_ids: vec![],
                 last_transition: None,
-                last_transfer_witness_txid: None,
+                last_witness_txid: None,
                 last_transfer_witness_prevouts: None,
                 last_transfer_op_id: None,
                 non_mined_witness_txids: vec![],
+                transitions_by_witness: vec![],
             };
-            let err = validate_funds_out_transfer(&cd, &validated).unwrap_err();
+            let err = validate_funds_out_transfer(&params_of(&cd), &validated).unwrap_err();
             assert!(
                 err.to_string().contains("at least one transition"),
                 "expected no-transition rejection, got: {err}"
             );
         }
-
-        #[test]
-        fn rejects_non_funds_out_selector() {
-            // Calldata with a selector that isn't `fundsOut` — the
-            // selector-specific validator fails closed instead of silently
-            // passing (audit I-03: the pre-#127 contract was a no-op; a caller
-            // skipping the `apply_funds_out_binding` whitelist must not get an
-            // `Ok`).
-            let mut cd = vec![0u8; 4 + 8 * 32];
-            cd[..4].copy_from_slice(&[0xde, 0xad, 0xbe, 0xef]);
-            let validated = validated_with_last(transfer_transition(0));
-            let err = validate_funds_out_transfer(&cd, &validated).unwrap_err();
-            assert!(
-                err.to_string().contains("non-fundsOut selector"),
-                "expected the fail-closed selector guard, got: {err}"
-            );
-        }
     }
 
-    // =========================================================================
-    // OpId binding — `apply_op_id_binding` (audit TEE-SE-02, spec §6/§7). The
-    // enclave derives burnId / fundsInIds from the consignment it validated and
-    // OVERWRITES them in the calldata it signs. No listener-supplied OpId is
-    // trusted or even read. `extract_funds_in_ids` confirms the writer's
-    // settlementData round-trips through the reader.
-    // =========================================================================
-
-    mod op_id_binding {
-        use super::*;
-        use crate::networks::rgb::validation::{ifa, TransitionSummary, ValidatedConsignment};
-        use sha3::{Digest, Keccak256};
-
-        const OP_ID: &str = "74c1d59264894a1bd44887fe84b36739c024bd50188e69baeeda845569313543";
-        const MINT_A: &str = "f5106c6ddb8b8fd3d1de3bda0106ae13ef0705dc36bfc543566362e5e8dd4bd5";
-        const MINT_B: &str = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff";
-
-        /// The binding transform: keccak256 of the raw 32-byte OpId.
-        fn id(op_id: &str) -> [u8; 32] {
-            Keccak256::digest(hex::decode(op_id).unwrap()).into()
-        }
-
-        fn u256(n: usize) -> [u8; 32] {
-            let mut w = [0u8; 32];
-            w[24..].copy_from_slice(&(n as u64).to_be_bytes());
-            w
-        }
-
-        /// Build `fundsOut` calldata with the given `burnId` (offset 68) and
-        /// `fundsInIds` (encoded in `settlementData = abi.encode(uint256[])`).
-        /// `sourceAddress` and `proof` are present but empty. The ABI tail
-        /// layout mirrors what `extract_funds_in_ids` traverses.
-        fn mock_funds_out(burn_id: [u8; 32], funds_in_ids: &[[u8; 32]]) -> Vec<u8> {
-            let mut d = Vec::new();
-            d.extend_from_slice(&FUNDS_OUT_SELECTOR_POOLS);
-            d.extend_from_slice(&[0u8; 32]); // recipient
-            d.extend_from_slice(&[0u8; 32]); // amount
-            d.extend_from_slice(&burn_id); // burnId @68
-            d.extend_from_slice(&[0u8; 32]); // sourceChainId
-            d.extend_from_slice(&[0u8; 32]); // destinationChainId
-            d.extend_from_slice(&u256(256)); // sourceAddress tail offset (rel byte 4)
-            d.extend_from_slice(&u256(288)); // proof tail offset
-            d.extend_from_slice(&u256(320)); // settlementData tail offset
-            d.extend_from_slice(&u256(0)); // sourceAddress length = 0
-            d.extend_from_slice(&u256(0)); // proof length = 0
-                                           // settlementData bytes = abi.encode(uint256[]) = [0x20][N][ids...]
-            let payload_len = 64 + funds_in_ids.len() * 32;
-            d.extend_from_slice(&u256(payload_len)); // settlementData length
-            d.extend_from_slice(&u256(32)); // inner array offset (0x20)
-            d.extend_from_slice(&u256(funds_in_ids.len())); // N
-            for fid in funds_in_ids {
-                d.extend_from_slice(fid);
-            }
-            d
-        }
-
-        fn transition(op_id: &str, transition_type: u16) -> TransitionSummary {
-            TransitionSummary {
-                op_id: op_id.into(),
-                transition_type,
-                total_output_amount: 0,
-                asset_output_amount: 0,
-                outputs: Vec::new(),
-                burned_asset_amount: None,
-            }
-        }
-
-        /// The validated last-transfer OpId bytes for a given hex OpId - the
-        /// authoritative burnId source (`ValidatedConsignment::last_transfer_op_id`).
-        fn op_id_bytes(op_id: &str) -> [u8; 32] {
-            hex::decode(op_id).unwrap().try_into().unwrap()
-        }
-
-        fn validated(
-            last: Option<TransitionSummary>,
-            mint_op_ids: Vec<String>,
-        ) -> ValidatedConsignment {
-            // The burnId is derived from the rgbstd-VALIDATED OpId, so mirror
-            // production: `last_transfer_op_id` carries the same OpId as the
-            // last transition (set by `read_last_transfer_witness` for a
-            // TS_TRANSFER last transition).
-            let last_transfer_op_id = last.as_ref().map(|t| op_id_bytes(&t.op_id));
-            ValidatedConsignment {
-                contract_id: "rgb:test".into(),
-                chain_net: "bc".into(),
-                witness_txids: vec![],
-                all_op_ids: last
-                    .as_ref()
-                    .map(|t| vec![t.op_id.clone()])
-                    .unwrap_or_default(),
-                mint_op_ids,
-                last_transition: last,
-                last_transfer_witness_txid: None,
-                last_transfer_witness_prevouts: None,
-                last_transfer_op_id,
-                non_mined_witness_txids: vec![],
-            }
-        }
-
-        // ---- apply_op_id_binding (override, not verify) ----
-
-        /// Writes burnId@68 = keccak256(validated OpId), overriding whatever the
-        /// bridge put there. The OpId is sourced from the rgbstd-validated
-        /// transfer (`last_transfer_op_id`), not the flat parser (audit M-02 / #93).
-        #[test]
-        fn writes_burn_id_from_validated_op_id() {
-            let cd = mock_funds_out([0xEE; 32], &[]); // bogus burnId in input
-            let v = validated(Some(transition(OP_ID, ifa::TS_TRANSFER)), vec![]);
-            let out = apply_op_id_binding(&cd, &v).unwrap();
-            assert_eq!(
-                extract_bytes32(&out, FUNDS_OUT_BURN_ID_OFFSET).unwrap(),
-                id(OP_ID)
-            );
-        }
-
-        /// Fail closed when no validated OpId was extracted (e.g. a non-Transfer
-        /// last transition): the enclave must refuse rather than fall back to a
-        /// listener- or flat-parser-supplied burnId.
-        #[test]
-        fn rejects_when_validated_op_id_missing() {
-            let cd = mock_funds_out([0xEE; 32], &[]);
-            let mut v = validated(Some(transition(OP_ID, ifa::TS_TRANSFER)), vec![]);
-            v.last_transfer_op_id = None;
-            let err = apply_op_id_binding(&cd, &v).unwrap_err();
-            assert!(
-                err.to_string()
-                    .contains("validated OpId of the release transition"),
-                "got: {err}"
-            );
-        }
-
-        /// Writes ALL mint OpIds into settlementData, overriding the bridge's set.
-        #[test]
-        fn writes_all_mint_funds_in_ids() {
-            let cd = mock_funds_out([0xEE; 32], &[[0x11; 32], [0x22; 32]]);
-            let v = validated(
-                Some(transition(OP_ID, ifa::TS_BURN)),
-                vec![MINT_A.into(), MINT_B.into()],
-            );
-            let out = apply_op_id_binding(&cd, &v).unwrap();
-            assert_eq!(
-                extract_funds_in_ids(&out).unwrap(),
-                vec![id(MINT_A), id(MINT_B)]
-            );
-        }
-
-        /// No mints in the consignment → empty fundsInIds (not an error).
-        #[test]
-        fn writes_empty_funds_in_ids_when_no_mints() {
-            let cd = mock_funds_out([0xEE; 32], &[[0x11; 32]]);
-            let v = validated(Some(transition(OP_ID, ifa::TS_BURN)), vec![]);
-            let out = apply_op_id_binding(&cd, &v).unwrap();
-            assert!(extract_funds_in_ids(&out).unwrap().is_empty());
-        }
-
-        /// Override, not verify: a fully bogus input (wrong burnId AND wrong
-        /// fundsInIds) is rewritten to the consignment's values.
-        #[test]
-        fn overrides_whatever_the_bridge_sent() {
-            let cd = mock_funds_out([0xEE; 32], &[[0xAB; 32]]);
-            let v = validated(Some(transition(OP_ID, ifa::TS_BURN)), vec![MINT_A.into()]);
-            let out = apply_op_id_binding(&cd, &v).unwrap();
-            assert_eq!(
-                extract_bytes32(&out, FUNDS_OUT_BURN_ID_OFFSET).unwrap(),
-                id(OP_ID)
-            );
-            assert_eq!(extract_funds_in_ids(&out).unwrap(), vec![id(MINT_A)]);
-        }
-
-        /// The non-OpId fields (recipient, amount) are left exactly as sent.
-        #[test]
-        fn preserves_non_op_id_fields() {
-            let mut cd = mock_funds_out([0xEE; 32], &[[0x11; 32]]);
-            cd[4..36].copy_from_slice(&u256(0xBEEF)); // recipient marker
-            cd[36..68].copy_from_slice(&u256(123_456)); // amount marker
-            let v = validated(Some(transition(OP_ID, ifa::TS_BURN)), vec![MINT_A.into()]);
-            let out = apply_op_id_binding(&cd, &v).unwrap();
-            assert_eq!(&out[4..36], &u256(0xBEEF));
-            assert_eq!(&out[36..68], &u256(123_456));
-        }
-
-        /// A mint OpId that isn't 32-byte hex can not be transformed - fail
-        /// closed. (The burnId now comes from the pre-validated
-        /// `last_transfer_op_id` bytes, so the only string-decoded OpIds left
-        /// are the `fundsInIds` mint set.)
-        #[test]
-        fn rejects_non_hex_op_id() {
-            let cd = mock_funds_out([0xEE; 32], &[]);
-            let v = validated(
-                Some(transition(OP_ID, ifa::TS_TRANSFER)),
-                vec!["not-hex".into()],
-            );
-            let err = apply_op_id_binding(&cd, &v).unwrap_err();
-            assert!(
-                err.to_string().contains("hex-decodable")
-                    || err.to_string().contains("expected 32"),
-                "expected op_id decode rejection, got: {err}"
-            );
-        }
-
-        /// Calldata too short to hold the fundsOut head is rejected.
-        #[test]
-        fn rejects_calldata_too_short() {
-            let v = validated(Some(transition(OP_ID, ifa::TS_BURN)), vec![]);
-            let err = apply_op_id_binding(&[0u8; 100], &v).unwrap_err();
-            assert!(err.to_string().contains("too short"), "got: {err}");
-        }
-
-        /// No validated release OpId to bind against -> hard error.
-        #[test]
-        fn rejects_no_transition() {
-            let cd = mock_funds_out([0xEE; 32], &[]);
-            let v = validated(None, vec![]);
-            let err = apply_op_id_binding(&cd, &v).unwrap_err();
-            assert!(
-                err.to_string()
-                    .contains("validated OpId of the release transition"),
-                "got: {err}"
-            );
-        }
-
-        // ---- settlementData ABI round-trip (writer vs reader agree) ----
-
-        #[test]
-        fn settlement_parser_round_trips() {
-            let ids = [id(MINT_A), id(MINT_B)];
-            let cd = mock_funds_out(id(OP_ID), &ids);
-            assert_eq!(extract_funds_in_ids(&cd).unwrap(), ids.to_vec());
-        }
-
-        #[test]
-        fn settlement_parser_empty() {
-            let cd = mock_funds_out(id(OP_ID), &[]);
-            assert!(extract_funds_in_ids(&cd).unwrap().is_empty());
-        }
-
-        /// #65: the rewritten calldata is what gets signed and later decoded
-        /// on-chain — starting from a canonical alloy encoding, the binding
-        /// output must (a) still ABI-decode, (b) carry exactly the
-        /// enclave-authored burnId and fundsInIds, and (c) remain canonical
-        /// (re-encoding the decoded call reproduces the rewritten bytes).
-        #[test]
-        fn binding_output_stays_canonical_abi() {
-            use crate::networks::evm::validation::fundsOutCall;
-            use alloy_primitives::{Address, Bytes, U256};
-            use alloy_sol_types::SolCall;
-
-            let cd = fundsOutCall {
-                recipient: Address::from([0x11; 20]),
-                amount: U256::from(1_000u64),
-                burnId: U256::from(7u64), // listener-supplied, must be overwritten
-                sourceChainId: U256::from(5u64),
-                destinationChainId: U256::from(6u64),
-                sourceAddress: "rgb-src".to_string(),
-                proof: Bytes::from(vec![0xCC; 64]),
-                settlementData: Bytes::new(),
-            }
-            .abi_encode();
-
-            let validated = validated(
-                Some(transition(OP_ID, ifa::TS_TRANSFER)),
-                vec![MINT_A.into(), MINT_B.into()],
-            );
-            let out = apply_op_id_binding(&cd, &validated).unwrap();
-
-            let decoded = fundsOutCall::abi_decode_validate(&out)
-                .expect("binding output must remain ABI-decodable");
-            assert_eq!(decoded.burnId, U256::from_be_bytes(id(OP_ID)));
-            assert_eq!(decoded.recipient, Address::from([0x11; 20]));
-            assert_eq!(decoded.proof, Bytes::from(vec![0xCC; 64]));
-            assert_eq!(
-                extract_funds_in_ids(&out).unwrap(),
-                vec![id(MINT_A), id(MINT_B)]
-            );
-            assert_eq!(
-                decoded.abi_encode(),
-                out,
-                "binding output must be a canonical encoding"
-            );
-        }
-    }
-
-    // =========================================================================
-    // #65 — pin the hand-derived rewrite offsets to the alloy-derived ABI
-    // layout so the constants cannot silently drift from the real encoding.
-    // =========================================================================
-
-    mod abi_layout {
-        use super::*;
-        use crate::networks::evm::validation::fundsOutCall;
-        use alloy_primitives::{Address, Bytes, U256};
-        use alloy_sol_types::SolCall;
-
-        fn marker_calldata() -> Vec<u8> {
-            fundsOutCall {
-                recipient: Address::from([0x11; 20]),
-                amount: U256::from(0xA1A2_A3A4u64),
-                burnId: U256::from_be_bytes([0xBB; 32]),
-                sourceChainId: U256::from(5u64),
-                destinationChainId: U256::from(6u64),
-                sourceAddress: "rgb-src".to_string(),
-                proof: Bytes::from(vec![0xCC; 64]),
-                settlementData: Bytes::from(vec![0xDD; 32]),
-            }
-            .abi_encode()
-        }
-
-        #[test]
-        fn amount_offset_matches_abi_layout() {
-            let cd = marker_calldata();
-            assert_eq!(
-                extract_uint256_as_u64(&cd, FUNDS_OUT_AMOUNT_OFFSET).unwrap(),
-                0xA1A2_A3A4
-            );
-        }
-
-        #[test]
-        fn burn_id_offset_matches_abi_layout() {
-            let cd = marker_calldata();
-            assert_eq!(
-                extract_bytes32(&cd, FUNDS_OUT_BURN_ID_OFFSET).unwrap(),
-                [0xBB; 32]
-            );
-        }
-
-        #[test]
-        fn proof_head_offset_matches_abi_layout() {
-            let cd = marker_calldata();
-            let proof_rel = read_u256_as_usize(&cd, FUNDS_OUT_PROOF_HEAD_OFFSET).unwrap();
-            let len = read_u256_as_usize(&cd, 4 + proof_rel).unwrap();
-            assert_eq!(len, 64);
-            assert_eq!(
-                &cd[4 + proof_rel + 32..4 + proof_rel + 32 + 64],
-                &[0xCC; 64][..]
-            );
-        }
-
-        #[test]
-        fn settlement_data_head_offset_matches_abi_layout() {
-            let cd = marker_calldata();
-            let sd_rel = read_u256_as_usize(&cd, FUNDS_OUT_SETTLEMENT_DATA_HEAD_OFFSET).unwrap();
-            let len = read_u256_as_usize(&cd, 4 + sd_rel).unwrap();
-            assert_eq!(len, 32);
-            assert_eq!(&cd[4 + sd_rel + 32..4 + sd_rel + 32 + 32], &[0xDD; 32][..]);
-        }
-    }
-
-    // =========================================================================
-    // BtcRelay-agreement cross-check (#57 / #122) — `verify_btc_relay_agreement`.
+    // BtcRelay-agreement cross-check - `verify_btc_relay_agreement`.
     // These exercise `proof` decoding and header comparison directly against a
     // synthetic regtest header chain.
-    // =========================================================================
 
     mod btc_relay {
         use super::*;
@@ -1051,6 +581,20 @@ mod tests {
         use bitcoin::consensus::serialize;
         use bitcoin::hashes::Hash as _;
 
+        /// Display-order txid of the consignment's single witness tx.
+        /// Deliberately NOT a palindrome: a byte-order slip in
+        /// `resolve_consignment_anchor` must fail the tests, not pass them.
+        const WITNESS_TXID: [u8; 32] = [
+            0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e,
+            0x0f, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b, 0x1c,
+            0x1d, 0x1e, 0x1f, 0x20,
+        ];
+
+        /// Block holding [`WITNESS_TXID`].
+        const ANCHOR_HEIGHT: u32 = 2;
+        /// Default tip: leaves the anchor 7 deep, past `SPV_MIN_CONFIRMATIONS`.
+        const TIP_HEIGHT: u32 = 8;
+
         /// Encode `n` as a big-endian 32-byte ABI word.
         fn u256_be(n: u64) -> [u8; 32] {
             let mut w = [0u8; 32];
@@ -1058,11 +602,14 @@ mod tests {
             w
         }
 
-        /// A regtest chain with a single synthetic header at height 1 (PoW is
-        /// skipped on regtest — same pattern as the `spv::chain` tests).
-        /// Returns the chain and the header's DISPLAY-order block hash — the
-        /// byte order the calldata `commitmentHash` carries.
-        fn chain_with_one_header() -> (HeaderChain, [u8; 32]) {
+        /// A regtest chain of `tip` synthetic headers (PoW is skipped on
+        /// regtest - same pattern as the `spv::chain` tests). The header at
+        /// [`ANCHOR_HEIGHT`] commits exactly one transaction, [`WITNESS_TXID`],
+        /// so a proof with an empty path reconstructs its Merkle root.
+        ///
+        /// Returns the chain and every header's DISPLAY-order hash, indexed by
+        /// height (slot 0 is the checkpoint placeholder).
+        fn chain_to(tip: u32) -> (HeaderChain, Vec<[u8; 32]>) {
             let mut chain = HeaderChain::new(
                 Network::Regtest,
                 Checkpoint {
@@ -1073,111 +620,395 @@ mod tests {
                     is_real: false,
                 },
             );
-            let header = Header {
-                version: Version::ONE,
-                prev_blockhash: bitcoin::BlockHash::from_byte_array([0u8; 32]),
-                merkle_root: bitcoin::TxMerkleNode::from_byte_array([0xAB; 32]),
-                time: 1_700_000_001,
-                bits: bitcoin::CompactTarget::from_consensus(0x207fffff),
-                nonce: 0,
-            };
-            chain.submit_headers(1, &[serialize(&header)]).unwrap();
-            let mut display: [u8; 32] = header.block_hash().to_byte_array();
-            display.reverse();
-            (chain, display)
+            let mut hashes = vec![[0u8; 32]];
+            let mut prev = bitcoin::BlockHash::from_byte_array([0u8; 32]);
+            for height in 1..=tip {
+                let merkle_root = if height == ANCHOR_HEIGHT {
+                    let mut internal = WITNESS_TXID;
+                    internal.reverse(); // Merkle math works in internal order
+                    bitcoin::TxMerkleNode::from_byte_array(internal)
+                } else {
+                    bitcoin::TxMerkleNode::from_byte_array([0xAB; 32])
+                };
+                let header = Header {
+                    version: Version::ONE,
+                    prev_blockhash: prev,
+                    merkle_root,
+                    time: 1_700_000_000 + height,
+                    bits: bitcoin::CompactTarget::from_consensus(0x207fffff),
+                    nonce: 0,
+                };
+                chain.submit_headers(height, &[serialize(&header)]).unwrap();
+                prev = header.block_hash();
+                let mut display: [u8; 32] = header.block_hash().to_byte_array();
+                display.reverse();
+                hashes.push(display);
+            }
+            (chain, hashes)
         }
 
-        /// `fundsOut` calldata carrying a well-formed `proof` tail. The 8 head
-        /// slots are zero except `proofOffset` (slot 6), which points at the
-        /// tail laid out right after the head (= 256 bytes from the args
-        /// start). Tail: `[length=64][blockHeight uint256][commitmentHash]`.
-        fn calldata_with_proof(block_height: u32, commitment_display: [u8; 32]) -> Vec<u8> {
-            let mut data = Vec::new();
-            data.extend_from_slice(&FUNDS_OUT_SELECTOR_POOLS);
-            let mut head = [0u8; 8 * 32];
-            head[6 * 32..7 * 32].copy_from_slice(&u256_be(256)); // proofOffset
-            data.extend_from_slice(&head);
-            data.extend_from_slice(&u256_be(64)); // proof bytes length
-            data.extend_from_slice(&u256_be(block_height as u64)); // blockHeight
-            data.extend_from_slice(&commitment_display); // commitmentHash
-            data
+        fn chain() -> (HeaderChain, Vec<[u8; 32]>) {
+            chain_to(TIP_HEIGHT)
         }
+
+        /// The 4-field finality proof payload:
+        /// `abi.encode(sourceHeight, sourceCommit, latestHeight, latestCommit)`.
+        fn proof_bytes(
+            source_height: u32,
+            source_commit: [u8; 32],
+            latest_height: u32,
+            latest_commit: [u8; 32],
+        ) -> Bytes {
+            let mut p = Vec::with_capacity(FUNDS_OUT_PROOF_LEN);
+            p.extend_from_slice(&u256_be(source_height as u64));
+            p.extend_from_slice(&source_commit);
+            p.extend_from_slice(&u256_be(latest_height as u64));
+            p.extend_from_slice(&latest_commit);
+            Bytes::from(p)
+        }
+
+        /// `fundsOut` calldata carrying the four-field finality proof.
+        fn calldata(sh: u32, sc: [u8; 32], lh: u32, lc: [u8; 32]) -> Vec<u8> {
+            mock_funds_out_calldata_with_proof(1_000, proof_bytes(sh, sc, lh, lc))
+        }
+
+        /// The well-formed case: `source` is the anchor block, `latest` the tip.
+        fn good_calldata(hashes: &[[u8; 32]]) -> Vec<u8> {
+            calldata(
+                ANCHOR_HEIGHT,
+                hashes[ANCHOR_HEIGHT as usize],
+                TIP_HEIGHT,
+                hashes[TIP_HEIGHT as usize],
+            )
+        }
+
+        /// A consignment anchored by [`WITNESS_TXID`], plus the SPV proof
+        /// placing it at `height`. The block at [`ANCHOR_HEIGHT`] holds only
+        /// that tx, so the path is empty and the position is 0.
+        fn anchored_at(height: u32) -> (ValidatedConsignment, Vec<MerkleProofEntry>) {
+            let mut internal = WITNESS_TXID;
+            internal.reverse();
+            let validated = ValidatedConsignment {
+                contract_id: "rgb:test".into(),
+                chain_net: "bc".into(),
+                witness_txids: vec![WITNESS_TXID],
+                all_op_ids: vec![],
+                mint_op_ids: vec![],
+                last_transition: None,
+                last_witness_txid: Some(bitcoin::Txid::from_byte_array(internal)),
+                last_transfer_witness_prevouts: None,
+                last_transfer_op_id: None,
+                non_mined_witness_txids: vec![],
+                transitions_by_witness: vec![],
+            };
+            let proofs = vec![MerkleProofEntry {
+                txid: WITNESS_TXID.to_vec(),
+                block_height: height,
+                tx_position: 0,
+                merkle_path: vec![],
+            }];
+            (validated, proofs)
+        }
+
+        /// Run the check against a consignment anchored at [`ANCHOR_HEIGHT`].
+        fn check(cd: &[u8], chain: &HeaderChain) -> Result<()> {
+            check_at(cd, chain, ANCHOR_HEIGHT)
+        }
+
+        /// Run the check against a consignment anchored at `anchor_height`.
+        fn check_at(cd: &[u8], chain: &HeaderChain, anchor_height: u32) -> Result<()> {
+            let (validated, proofs) = anchored_at(anchor_height);
+            verify_btc_relay_agreement(&params_of(cd), &validated, &proofs, chain)
+        }
+
+        // -- Calldata proof vs the enclave's own headers.
 
         #[test]
         fn passes_on_matching_commitment() {
-            let (chain, display_hash) = chain_with_one_header();
-            let cd = calldata_with_proof(1, display_hash);
-            assert!(verify_btc_relay_agreement(&cd, &chain).is_ok());
+            let (chain, hashes) = chain();
+            assert!(check(&good_calldata(&hashes), &chain).is_ok());
         }
 
+        /// Right height, wrong hash: the anchor bind owns the `source` half, so
+        /// this surfaces as a mismatch against the consignment's anchor.
         #[test]
-        fn rejects_mismatched_commitment() {
-            let (chain, _display_hash) = chain_with_one_header();
-            let cd = calldata_with_proof(1, [0x11; 32]);
-            let err = verify_btc_relay_agreement(&cd, &chain).unwrap_err();
-            assert!(err.to_string().contains("commitmentHash"), "got: {err}");
+        fn accepts_any_source_commitment_at_the_anchor_height() {
+            let (chain, hashes) = chain();
+            // BtcRelay's commitment is keccak256 over its own 160-byte record,
+            // which the enclave cannot compute. It is verified on-chain against
+            // the relay instead; the enclave binds the height.
+            let cd = calldata(
+                ANCHOR_HEIGHT,
+                [0x11; 32],
+                TIP_HEIGHT,
+                hashes[TIP_HEIGHT as usize],
+            );
+            assert!(check(&cd, &chain).is_ok());
         }
 
+        /// The bind that remains: a source height other than the consignment's
+        /// anchor is refused, whatever commitment accompanies it.
         #[test]
-        fn rejects_internal_order_commitment() {
-            // Defends the byte-order contract: feeding the INTERNAL-order hash
-            // (the un-reversed `block_hash()` bytes) must be rejected — the
-            // calldata convention is display order.
-            let (chain, mut display_hash) = chain_with_one_header();
-            display_hash.reverse(); // back to internal order
-            let cd = calldata_with_proof(1, display_hash);
-            assert!(verify_btc_relay_agreement(&cd, &chain).is_err());
-        }
-
-        #[test]
-        fn rejects_height_beyond_tip() {
-            let (chain, display_hash) = chain_with_one_header();
-            let cd = calldata_with_proof(99, display_hash);
-            let err = verify_btc_relay_agreement(&cd, &chain).unwrap_err();
+        fn rejects_a_source_height_that_is_not_the_anchor() {
+            let (chain, hashes) = chain();
+            let cd = calldata(
+                ANCHOR_HEIGHT + 1,
+                hashes[(ANCHOR_HEIGHT + 1) as usize],
+                TIP_HEIGHT,
+                hashes[TIP_HEIGHT as usize],
+            );
+            let err = check(&cd, &chain).unwrap_err();
             assert!(
-                err.to_string().contains("no header at block height 99"),
+                err.to_string().contains("source block mismatch"),
+                "got: {err}"
+            );
+        }
+
+        /// A `source` height the enclave holds no header for - here at the
+        /// checkpoint, below every stored header - cannot equal the anchor, so
+        /// the bind rejects it without a separate header lookup. (A height
+        /// ABOVE the tip trips the ordering guard first; see
+        /// `rejects_latest_below_source`.)
+        #[test]
+        fn rejects_source_height_with_no_header() {
+            let (chain, hashes) = chain();
+            let cd = calldata(0, hashes[0], TIP_HEIGHT, hashes[TIP_HEIGHT as usize]);
+            let err = check(&cd, &chain).unwrap_err();
+            assert!(
+                err.to_string().contains("source block mismatch"),
+                "got: {err}"
+            );
+        }
+
+        /// The relay-tip half of the proof is checked too, else freshness would
+        /// be delegated to a relay the untrusted host also feeds.
+        #[test]
+        fn rejects_unknown_latest_block() {
+            let (chain, hashes) = chain();
+            let cd = calldata(
+                ANCHOR_HEIGHT,
+                hashes[ANCHOR_HEIGHT as usize],
+                99,
+                hashes[TIP_HEIGHT as usize],
+            );
+            let err = check(&cd, &chain).unwrap_err();
+            assert!(
+                err.to_string()
+                    .contains("no header at latest block height 99"),
                 "got: {err}"
             );
         }
 
         #[test]
-        fn inert_when_proof_empty() {
-            // The current live calldata shape zero-fills the proof offset, so
-            // the decoder reads an empty `proof` and the check is a no-op.
-            let (chain, _) = chain_with_one_header();
-            let cd = mock_funds_out_calldata(1_000);
-            assert!(verify_btc_relay_agreement(&cd, &chain).is_ok());
+        fn accepts_any_latest_commitment_at_a_known_height() {
+            let (chain, hashes) = chain();
+            let cd = calldata(
+                ANCHOR_HEIGHT,
+                hashes[ANCHOR_HEIGHT as usize],
+                TIP_HEIGHT,
+                [0x11; 32],
+            );
+            assert!(check(&cd, &chain).is_ok());
+        }
+
+        /// What `latest` still proves: the enclave holds a header there, so it
+        /// is in sync with the chain the relay claims to be following.
+        #[test]
+        fn rejects_a_latest_height_the_enclave_has_no_header_for() {
+            let (chain, hashes) = chain();
+            let cd = calldata(
+                ANCHOR_HEIGHT,
+                hashes[ANCHOR_HEIGHT as usize],
+                TIP_HEIGHT + 1,
+                [0x11; 32],
+            );
+            let err = check(&cd, &chain).unwrap_err();
+            assert!(
+                err.to_string().contains("no header at latest block height"),
+                "got: {err}"
+            );
         }
 
         #[test]
-        fn noop_on_non_fundsout_selector() {
-            let (chain, _) = chain_with_one_header();
-            let cd = vec![0xde, 0xad, 0xbe, 0xef]; // not the fundsOut selector
-            assert!(verify_btc_relay_agreement(&cd, &chain).is_ok());
+        fn rejects_latest_below_source() {
+            let (chain, hashes) = chain();
+            let cd = calldata(
+                TIP_HEIGHT,
+                hashes[TIP_HEIGHT as usize],
+                ANCHOR_HEIGHT,
+                hashes[ANCHOR_HEIGHT as usize],
+            );
+            let err = check(&cd, &chain).unwrap_err();
+            assert!(
+                err.to_string().contains("cannot precede"),
+                "expected the tip-ordering guard, got: {err}"
+            );
+        }
+
+        /// A `latest` far below the enclave tip proves only that a block
+        /// existed, so the freshness half would be vacuous.
+        #[test]
+        fn rejects_stale_relay_tip() {
+            let (chain, hashes) = chain_to(MAX_RELAY_TIP_LAG_BLOCKS + 20);
+            let cd = calldata(
+                ANCHOR_HEIGHT,
+                hashes[ANCHOR_HEIGHT as usize],
+                ANCHOR_HEIGHT,
+                hashes[ANCHOR_HEIGHT as usize],
+            );
+            let err = check(&cd, &chain).unwrap_err();
+            assert!(
+                err.to_string().contains("too stale to prove freshness"),
+                "got: {err}"
+            );
+        }
+
+        /// A relay lagging inside the bound is still accepted.
+        #[test]
+        fn accepts_relay_tip_within_lag_bound() {
+            let (chain, hashes) = chain_to(MAX_RELAY_TIP_LAG_BLOCKS);
+            let latest = MAX_RELAY_TIP_LAG_BLOCKS / 2;
+            let cd = calldata(
+                ANCHOR_HEIGHT,
+                hashes[ANCHOR_HEIGHT as usize],
+                latest,
+                hashes[latest as usize],
+            );
+            assert!(check(&cd, &chain).is_ok());
+        }
+
+        /// Fail-closed: a zero-filled `proof` leaves nothing to bind the
+        /// anchoring block to.
+        #[test]
+        fn rejects_empty_proof() {
+            let (chain, _) = chain();
+            let cd = mock_funds_out_calldata(1_000);
+            let err = check(&cd, &chain).unwrap_err();
+            assert!(err.to_string().contains("proof is empty"), "got: {err}");
         }
 
         #[test]
         fn rejects_malformed_proof_length() {
-            let (chain, display_hash) = chain_with_one_header();
-            let mut cd = calldata_with_proof(1, display_hash);
-            // Corrupt the proof `bytes` length word (at byte 260) to a
-            // non-zero, non-64 value: a calldata that claims a proof must
-            // carry a 64-byte one.
-            cd[260..292].copy_from_slice(&u256_be(33));
-            let err = verify_btc_relay_agreement(&cd, &chain).unwrap_err();
-            assert!(err.to_string().contains("64 bytes"), "got: {err}");
+            let (chain, _) = chain();
+            let cd = mock_funds_out_calldata_with_proof(1_000, Bytes::from(vec![0u8; 33]));
+            let err = check(&cd, &chain).unwrap_err();
+            assert!(err.to_string().contains("128 bytes"), "got: {err}");
+        }
+
+        /// The pre-migration proof was a single 64-byte
+        /// `(blockHeight, commitmentHash)` pair. Accepting it would verify the
+        /// source block and leave the relay-freshness half unchecked.
+        #[test]
+        fn rejects_legacy_two_field_proof() {
+            let (chain, hashes) = chain();
+            let mut legacy = Vec::with_capacity(64);
+            legacy.extend_from_slice(&u256_be(ANCHOR_HEIGHT as u64));
+            legacy.extend_from_slice(&hashes[ANCHOR_HEIGHT as usize]);
+            let cd = mock_funds_out_calldata_with_proof(1_000, Bytes::from(legacy));
+            let err = check(&cd, &chain).unwrap_err();
+            assert!(err.to_string().contains("128 bytes"), "got: {err}");
         }
 
         #[test]
         fn rejects_blockheight_over_u32() {
-            let (chain, display_hash) = chain_with_one_header();
-            let mut cd = calldata_with_proof(1, display_hash);
-            // Set a blockHeight word (at byte 292) that overflows u32.
+            let (chain, hashes) = chain();
             let mut huge = [0u8; 32];
             huge[20] = 0x01; // a bit set above the low 4 bytes
-            cd[292..324].copy_from_slice(&huge);
-            let err = verify_btc_relay_agreement(&cd, &chain).unwrap_err();
+            let mut payload = Vec::with_capacity(FUNDS_OUT_PROOF_LEN);
+            payload.extend_from_slice(&huge); // sourceHeight
+            payload.extend_from_slice(&hashes[ANCHOR_HEIGHT as usize]);
+            payload.extend_from_slice(&u256_be(TIP_HEIGHT as u64));
+            payload.extend_from_slice(&hashes[TIP_HEIGHT as usize]);
+            let cd = mock_funds_out_calldata_with_proof(1_000, Bytes::from(payload));
+            let err = check(&cd, &chain).unwrap_err();
             assert!(err.to_string().contains("u32 range"), "got: {err}");
+        }
+
+        // -- Source-block bind: the calldata `source` pair must be the block
+        // -- anchoring the consignment's last witness tx.
+
+        /// A different but real block - one the enclave knows, so the BtcRelay
+        /// half passes - must still be refused.
+        #[test]
+        fn rejects_source_block_that_is_not_the_consignment_anchor() {
+            let (chain, hashes) = chain();
+            let other = ANCHOR_HEIGHT + 1;
+            let cd = calldata(
+                other,
+                hashes[other as usize],
+                TIP_HEIGHT,
+                hashes[TIP_HEIGHT as usize],
+            );
+            let err = check(&cd, &chain).unwrap_err();
+            assert!(
+                err.to_string().contains("source block mismatch"),
+                "got: {err}"
+            );
+        }
+
+        /// No header at the anchoring height: refuse rather than trust the
+        /// calldata.
+        #[test]
+        fn rejects_when_tee_has_no_header_at_anchor_height() {
+            let (chain, hashes) = chain();
+            let err = check_at(&good_calldata(&hashes), &chain, 99).unwrap_err();
+            assert!(err.to_string().contains("not in sync"), "got: {err}");
+        }
+
+        /// The anchor's own SPV proof is re-verified here, under the same lock
+        /// guard the header is read with, so a reorg between the source-chain
+        /// pass and this one cannot slip a substituted header through.
+        #[test]
+        fn rejects_when_anchor_proof_does_not_reconstruct_the_root() {
+            let (chain, hashes) = chain();
+            // Block ANCHOR_HEIGHT + 1 commits a different Merkle root.
+            let err = check_at(&good_calldata(&hashes), &chain, ANCHOR_HEIGHT + 1).unwrap_err();
+            assert!(err.to_string().contains("failed"), "got: {err}");
+        }
+
+        /// Depth is re-checked too: an anchor at the tip is only 1 confirmation
+        /// deep, short of `SPV_MIN_CONFIRMATIONS`.
+        #[test]
+        fn rejects_when_anchor_is_too_shallow() {
+            let (chain, hashes) = chain();
+            let err = check_at(&good_calldata(&hashes), &chain, TIP_HEIGHT).unwrap_err();
+            assert!(
+                err.to_string().contains("insufficient confirmations"),
+                "got: {err}"
+            );
+        }
+
+        #[test]
+        fn rejects_when_no_merkle_proof_covers_the_last_witness_tx() {
+            let (chain, hashes) = chain();
+            let (validated, mut proofs) = anchored_at(ANCHOR_HEIGHT);
+            proofs[0].txid = vec![0x01; 32];
+            let err = verify_btc_relay_agreement(
+                &params_of(&good_calldata(&hashes)),
+                &validated,
+                &proofs,
+                &chain,
+            )
+            .unwrap_err();
+            assert!(err.to_string().contains("no merkle proof"), "got: {err}");
+        }
+
+        #[test]
+        fn rejects_when_consignment_has_no_witness_bundle() {
+            let (chain, hashes) = chain();
+            let (mut validated, proofs) = anchored_at(ANCHOR_HEIGHT);
+            validated.last_witness_txid = None;
+            let err = verify_btc_relay_agreement(
+                &params_of(&good_calldata(&hashes)),
+                &validated,
+                &proofs,
+                &chain,
+            )
+            .unwrap_err();
+            assert!(
+                err.to_string().contains("no last witness txid"),
+                "got: {err}"
+            );
         }
     }
 }
