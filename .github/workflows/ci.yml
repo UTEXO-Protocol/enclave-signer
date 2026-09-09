@@ -21,6 +21,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Test private dependency build wiring
+        run: python3 -m unittest discover -s build/tests -v
+
       - name: Install Rust 1.96.1
         uses: dtolnay/rust-toolchain@master
         with:
@@ -92,9 +95,8 @@ jobs:
       - name: Check formatting
         run: cargo fmt --all -- --check
 
-      # Defaults are the production posture (rgb + ccd + helios), so the steps
-      # below exercise the signing path shipped in the EIF. Heavy build; the
-      # cache above absorbs it.
+      # Defaults are rgb + rgb-swap + ccd, so the steps below exercise the
+      # signing path shipped in the combined EIF (minus vsock / evm-rpc).
       - name: Build (default features)
         run: cargo build --workspace
 
@@ -120,29 +122,49 @@ jobs:
         run: cargo test --manifest-path parent/Cargo.toml
 
       # Production build profile: the exact feature set shipped in the EIF
-      # (build/Dockerfile.enclave). `helios` is shipped but optional at boot,
-      # and makes this a heavy build (alloy major, revm, BLS, vendored OpenSSL).
+      # (build/Dockerfile.enclave). `helios` is not shipped.
       - name: Build (production combo)
-        run: cargo build -p utexo-bridge-enclave --features vsock,rgb,ccd,evm-rpc,helios
+        run: cargo build -p utexo-bridge-enclave --features vsock,rgb,rgb-swap,ccd,evm-rpc
 
       - name: Clippy (production combo)
-        run: cargo clippy -p utexo-bridge-enclave --features vsock,rgb,ccd,evm-rpc,helios --all-targets -- -D warnings
+        run: cargo clippy -p utexo-bridge-enclave --features vsock,rgb,rgb-swap,ccd,evm-rpc --all-targets -- -D warnings
 
       # SPV path coverage. Cannot use vsock here (Linux runner without
       # vsock support); spv pulls in rgb-validation transitively, which is
       # what the SPV unit + integration tests exercise.
-      - name: Test (--features spv)
-        run: cargo test -p utexo-bridge-enclave --features spv
+      - name: Test (--features spv,rgb-swap)
+        run: cargo test -p utexo-bridge-enclave --features spv,rgb-swap
 
-      # RGB-only EIF profile, `ccd` dropped. Mirrors Dockerfile.enclave.rgb;
-      # keeps helios (this build still has the bridge-signing path).
+      # RGB-only EIF profile, `ccd` dropped. Mirrors Dockerfile.enclave.rgb.
       # CCD requests (SignCcd / CcdSource) must be refused here.
       - name: Build (rgb-only)
-        run: cargo build -p utexo-bridge-enclave --no-default-features --features vsock,rgb,evm-rpc,helios
+        run: cargo build -p utexo-bridge-enclave --no-default-features --features vsock,rgb,rgb-swap,evm-rpc
       - name: Clippy (rgb-only)
-        run: cargo clippy -p utexo-bridge-enclave --no-default-features --features vsock,rgb,evm-rpc,helios --all-targets -- -D warnings
+        run: cargo clippy -p utexo-bridge-enclave --no-default-features --features vsock,rgb,rgb-swap,evm-rpc --all-targets -- -D warnings
       - name: Test (rgb-only)
-        run: cargo test -p utexo-bridge-enclave --no-default-features --features rgb,evm-rpc,helios,mock-attestation,allow-seed-import
+        run: cargo test -p utexo-bridge-enclave --no-default-features --features rgb,rgb-swap,evm-rpc,mock-attestation,allow-seed-import
+
+      # Mint/burn RGB EIF profile - the second enclave instance. Same stack as
+      # the rgb-only lane above with the other flow selected, so the mint and
+      # burn rules in networks/rgb/flow/mint_burn.rs are actually compiled and
+      # exercised. Mirrors Dockerfile.enclave.mint-burn.
+      - name: Build (rgb mint/burn)
+        run: cargo build -p utexo-bridge-enclave --no-default-features --features vsock,rgb,rgb-mint-burn,evm-rpc
+      - name: Clippy (rgb mint/burn)
+        run: cargo clippy -p utexo-bridge-enclave --no-default-features --features vsock,rgb,rgb-mint-burn,evm-rpc --all-targets -- -D warnings
+      - name: Test (rgb mint/burn)
+        run: cargo test -p utexo-bridge-enclave --no-default-features --features rgb,rgb-mint-burn,evm-rpc,mock-attestation,allow-seed-import
+
+      # BFA mint/burn EIF profile - the shipped production image. Mirrors
+      # Dockerfile.enclave.bfa: the mint/burn flow plus the bridged-asset mint
+      # path (chained-mint ancestry, settlementData bind). `bfa-mint` implies
+      # rgb-mint-burn + evm-rpc.
+      - name: Build (bfa-mint)
+        run: cargo build -p utexo-bridge-enclave --no-default-features --features vsock,rgb,evm-rpc,bfa-mint
+      - name: Clippy (bfa-mint)
+        run: cargo clippy -p utexo-bridge-enclave --no-default-features --features vsock,rgb,evm-rpc,bfa-mint --all-targets -- -D warnings
+      - name: Test (bfa-mint)
+        run: cargo test -p utexo-bridge-enclave --no-default-features --features rgb,bfa-mint,mock-attestation,allow-seed-import
 
       # CCD-only single-network EIF profile: ccd + shared EVM signing, no RGB
       # stack (no rgb-ops/rgb-consignment/rgb-schemas/spv). Mirrors
@@ -156,12 +178,11 @@ jobs:
         run: cargo test -p utexo-bridge-enclave --no-default-features --features ccd,mock-attestation,allow-seed-import
 
       # Minimal build: no features at all (`--no-default-features` drops the
-      # default rgb/ccd/helios set). Keeps the no-SPV path compiling and exercises the
+      # default rgb/rgb-swap/ccd set). Keeps the no-SPV path compiling and exercises the
       # Guard that a no-spv build refuses to sign `fundsOut`
       # (test_no_spv_build_refuses_funds_out_even_without_merkle_proofs).
       # Skips the rgb-consignment dep entirely. Like every enclave build here it
-      # needs no credentials -- the property that makes the EIF publicly
-      # reproducible.
+      # still resolves the workspace's private RGB git sources using the keys above.
       - name: Build (minimal — no default features)
         run: cargo build -p utexo-bridge-enclave --no-default-features
 
@@ -344,3 +365,32 @@ jobs:
             exit 1
           fi
           echo "OK: rgb-validation-without-spv correctly rejected via the compile_error guard"
+
+      # The two RGB flows ship as two enclave instances. Enabling both would put
+      # two sets of value-moving rules in one binary; enabling neither would
+      # leave the build with no rule at all. Both must fail to compile.
+      - name: Assert both RGB flows at once is rejected
+        run: |
+          if cargo build -p utexo-bridge-enclave --no-default-features --features spv,rgb-swap,rgb-mint-burn 2>build.log; then
+            echo "::error::build unexpectedly SUCCEEDED with both rgb-swap and rgb-mint-burn — the compile_error guard is missing or not firing"
+            exit 1
+          fi
+          if ! grep -q "mutually exclusive" build.log; then
+            echo "::error::build failed, but not via the expected compile_error guard (rgb-swap / rgb-mint-burn are mutually exclusive)"
+            cat build.log
+            exit 1
+          fi
+          echo "OK: both-flows build correctly rejected via the compile_error guard"
+
+      - name: Assert rgb-validation with no flow is rejected
+        run: |
+          if cargo build -p utexo-bridge-enclave --no-default-features --features spv 2>build.log; then
+            echo "::error::build unexpectedly SUCCEEDED with rgb-validation but no flow — the compile_error guard is missing or not firing"
+            exit 1
+          fi
+          if ! grep -q "rgb-validation requires a flow" build.log; then
+            echo "::error::build failed, but not via the expected compile_error guard (rgb-validation requires a flow)"
+            cat build.log
+            exit 1
+          fi
+          echo "OK: no-flow build correctly rejected via the compile_error guard"

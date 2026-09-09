@@ -1,9 +1,11 @@
 # enclave-proto (vendored)
 
-The wire protocol the Nitro enclave speaks, vendored so **the enclave builds
-with no credentials and no private dependencies**. Anyone can clone this repo
-and reproduce the EIF and its PCR measurements without access to any private
-UTEXO repository.
+The wire protocol the Nitro enclave speaks, vendored so **the proto schema
+adds no credential and no private dependency to the enclave build**. The schema itself adds no private build dependency.
+
+Current caveat: the root `Cargo.toml` pins the RGB crates to private BFA
+mirrors over SSH, so an enclave build does need those deploy keys today. That
+is a separate dependency; this crate stays credential-free.
 
 This is a *slice*, not a copy: only the `enclave` protobuf package is here.
 The bridge / node / orchestrator / parent / signer packages are not vendored —
@@ -24,7 +26,7 @@ here as the human-readable source of truth for the schema, not as a build input.
 
 To change the wire protocol: change it upstream, regenerate there, then re-sync
 BOTH files here and update the Provenance tables below.
-`tests/vendored_provenance.rs` fails the build if the files and the tables
+`tests/vendored_provenance.rs` fails the test suite if the files and the tables
 disagree, or if the commit recorded below drifts from the `rev` that
 `parent/Cargo.toml` pins.
 
@@ -55,7 +57,7 @@ diff /tmp/fsp/rust-gen/src/enclave/enclave.rs enclave-proto/src/enclave.rs
 diff /tmp/fsp/proto/enclave/enclave.proto     enclave-proto/proto/enclave.proto
 ```
 
-Or check the upstream blob hashes without a clone:
+Or compare local blob hashes with the recorded upstream hashes below:
 
 ```bash
 git hash-object enclave-proto/src/enclave.rs enclave-proto/proto/enclave.proto

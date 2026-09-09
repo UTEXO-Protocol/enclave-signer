@@ -1,8 +1,8 @@
 # syntax=docker/dockerfile:1.7
-# RGB-only enclave image (vsock + rgb + evm-rpc) - handles the RGB/BTC bridge
+# Mint/burn RGB enclave image (vsock + rgb + rgb-mint-burn + evm-rpc).
 # Private Cargo dependencies require BuildKit secrets (see README, Building).
 # Supply github_token, or one deploy key per repo; keys never enter image layers.
-# Example: docker build --secret id=github_token,env=GITHUB_TOKEN -f build/Dockerfile.enclave.rgb .
+# Example: docker build --secret id=github_token,env=GITHUB_TOKEN -f build/Dockerfile.enclave.mint-burn .
 # Production builder glibc must remain compatible with the AL2023 runtime.
 FROM rust:1.96-slim-bullseye@sha256:c593596210f729542a92aced6a8b0812bcc8d04c5f1b238e663b800d0e2e17bd AS builder
 
@@ -24,22 +24,26 @@ WORKDIR /build/enclave
 #   -C debuginfo=0 / strip=symbols  drop debug info + symbol tables
 ENV CARGO_INCREMENTAL=0 \
     RUSTFLAGS="--remap-path-prefix=/build=/src -C debuginfo=0 -C strip=symbols"
-# `rgb` implies `spv` + `rgb-validation`. `--no-default-features` drops `ccd` so
-# this binary is RGB-only. `evm-rpc` adds in-enclave FundsIn verification,
+# `rgb` implies `spv` + `rgb-validation`. `--no-default-features` drops `ccd`
+# (so this binary is RGB-only) and also drops the default `rgb-swap`, which is
+# what lets the mint/burn flow be selected instead. `evm-rpc` adds in-enclave FundsIn verification,
 # pulling the alloy + tokio subtree; requires a second host vsock-proxy
 # (EVM_RPC_VSOCK_PORT, default 8002).
 #
 # `helios` is deliberately NOT enabled: the light-client path is unused in
 # production, so the attested evm_source is RawRpc.
 #
-# `rgb-swap` selects the send/receive RGB flow. Exactly one flow is required
-# under `rgb-validation`; the mint/burn image is Dockerfile.enclave.mint-burn.
+# `rgb-mint-burn` selects the mint/burn RGB flow: deposits mint with an IFA
+# `Inflation`, withdrawals destroy with an IFA `Burn`. Exactly one flow is
+# required under `rgb-validation`, and this image carries no send/receive rule
+# at all - the swap image is Dockerfile.enclave.rgb. Two flows, two PCR0s, two
+# running enclaves.
 RUN --mount=type=secret,id=github_token \
     --mount=type=secret,id=consignment_key \
     --mount=type=secret,id=consensus_key \
     --mount=type=secret,id=ops_key \
     --mount=type=secret,id=schemas_key \
-    sh /build/build/with-private-deps.sh enclave cargo build --release --locked --no-default-features --features vsock,rgb,rgb-swap,evm-rpc
+    sh /build/build/with-private-deps.sh enclave cargo build --release --locked --no-default-features --features vsock,rgb,rgb-mint-burn,evm-rpc
 
 
 # --- Runtime ---

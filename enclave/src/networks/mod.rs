@@ -45,8 +45,9 @@ pub struct ValidationContext<'a> {
         Option<crate::networks::rgb::psbt_validation::SelfOwnedOutpoint<'a>>,
     /// EVM lock events the enclave verified itself, handed to RGB consensus so
     /// the ether extension can re-check a BFA mint's amount. Empty on every
-    /// other path; a BFA consignment with an empty set is refused.
-    #[cfg(feature = "bfa-mint")]
+    /// other path (including every build without `bfa-mint`); a BFA consignment
+    /// with an empty set is refused.
+    #[cfg(feature = "rgb-validation")]
     pub bridge_events: &'a [rgbstd::vm::ether_extension::Event],
 }
 

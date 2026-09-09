@@ -9,12 +9,9 @@
 # runner. It does not touch S3 - uploading is the caller's job (the build-eif
 # workflow handles AWS auth + S3).
 #
-# NO CREDENTIALS REQUIRED, with one exception. Every enclave dependency resolves
-# over public HTTPS, so a third party can run this and reproduce the PCRs it
-# prints. The exception is DOCKERFILE=Dockerfile.enclave.bfa, whose RGB deps are
-# private mirrors of the unreleased BFA branches: it needs GITHUB_TOKEN, and its
-# PCRs are only reproducible by someone with read access to them. `parent/`,
-# which does need a private crate, is a separate workspace this never touches.
+# Every variant resolves private RGB dependencies. Supply GITHUB_TOKEN with
+# read access, or PRIVATE_DEPS_DIR containing the per-repository deploy keys.
+# Credentials enter the build only through BuildKit secret mounts.
 #
 # Reproducible PCRs: PCR0/PCR1 depend on the nitro-cli version and its blobs
 # (kernel/init), not just our code. Pin nitro-cli to the same version the target
@@ -33,8 +30,9 @@
 #   OUT_DIR                output directory for artifacts (default: build/)
 #   IMAGE_TAG              docker tag for the builder image (default: utexo-bridge-enclave:latest)
 #   NITRO_CLI_BLOBS        override blobs dir for `nitro-cli build-enclave`
-#   GITHUB_TOKEN           Dockerfile.enclave.bfa only: token with read access
-#                          to the private UTEXO-Protocol RGB mirrors
+#   GITHUB_TOKEN           token with read access to the private RGB dependencies
+#   PRIVATE_DEPS_DIR       alternatively, directory of per-repository key files
+#                          (consignment_key, consensus_key, ops_key, schemas_key)
 # NOTE: the donor cloning secret is NOT baked into the EIF. It is delivered at
 # runtime via the InitializeKey message (CLI: `init --cloning-secret <secret>`),
 # keeping the build secret-free and the PCRs reproducible.
@@ -46,10 +44,12 @@ PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 OUT_DIR="${OUT_DIR:-$SCRIPT_DIR}"
 IMAGE_TAG="${IMAGE_TAG:-utexo-bridge-enclave:latest}"
 # Which enclave image to build. Defaults to the combined (rgb+ccd) image; set
-# DOCKERFILE=Dockerfile.enclave.rgb or Dockerfile.enclave.ccd for a lean
-# single-network EIF, or Dockerfile.enclave.bfa for the BFA mint EIF (that one
-# additionally needs GITHUB_TOKEN). EIF_NAME names the output .eif (and thus the
-# SHA256SUMS entry); default keeps the historical artifact name.
+# DOCKERFILE=Dockerfile.enclave.rgb (send/receive RGB flow),
+# Dockerfile.enclave.mint-burn (mint/burn RGB flow), Dockerfile.enclave.ccd for a
+# lean single-network EIF, or Dockerfile.enclave.bfa for the BFA mint EIF - which
+# is the mint/burn flow on the bridged schema. Every variant
+# needs private dependency credentials. EIF_NAME names the output .eif (and thus the SHA256SUMS
+# entry); default keeps the historical artifact name.
 DOCKERFILE="${DOCKERFILE:-Dockerfile.enclave}"
 EIF_NAME="${EIF_NAME:-utexo-bridge-enclave.eif}"
 EIF_PATH="$OUT_DIR/$EIF_NAME"
@@ -65,16 +65,21 @@ command -v docker   &>/dev/null || { echo "Error: docker not found"; exit 1; }
 command -v nitro-cli &>/dev/null || { echo "Error: nitro-cli not found (install + pin to the host version)"; exit 1; }
 command -v jq       &>/dev/null || { echo "Error: jq not found"; exit 1; }
 
-# The BFA mint image is the one enclave build needing a credential. Check it
-# here so it fails with this message rather than a cargo authentication error
-# several minutes into the build.
+# The same credential setup applies to every enclave Dockerfile.
 SECRET_ARGS=()
-if [ "$DOCKERFILE" = "Dockerfile.enclave.bfa" ]; then
-    [ -n "${GITHUB_TOKEN:-}" ] || {
-        echo "Error: $DOCKERFILE needs GITHUB_TOKEN set to a GitHub token with read access to the private UTEXO-Protocol RGB mirrors (rgb-consensus-s-bfa, rgb-ops-s-bfa, rgb-schemas-s-bfa)"
-        exit 1
-    }
+if [ -n "${GITHUB_TOKEN:-}" ]; then
     SECRET_ARGS=(--secret "id=github_token,env=GITHUB_TOKEN")
+elif [ -n "${PRIVATE_DEPS_DIR:-}" ]; then
+    for key in consignment_key consensus_key ops_key schemas_key; do
+        [ -s "$PRIVATE_DEPS_DIR/$key" ] || {
+            echo "Error: missing private dependency key file: $key" >&2
+            exit 1
+        }
+        SECRET_ARGS+=(--secret "id=$key,src=$PRIVATE_DEPS_DIR/$key")
+    done
+else
+    echo "Error: set GITHUB_TOKEN or PRIVATE_DEPS_DIR for the private RGB dependencies" >&2
+    exit 1
 fi
 
 mkdir -p "$OUT_DIR"

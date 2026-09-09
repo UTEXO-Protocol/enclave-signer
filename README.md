@@ -1,457 +1,482 @@
-# utexo-bridge-signer
+# enclave-signer
 
-Cryptographic signing service for the UTEXO RGB-EVM bridge, running inside an [AWS Nitro Enclave](https://aws.amazon.com/ec2/nitro/nitro-enclaves/). The enclave generates HD wallet keys, signs EVM (EIP-712) and BTC (PSBT) transactions, and validates RGB consignments against an Esplora indexer — all within the TEE so private keys never leave the enclave.
+Signing service for the UTEXO bridge, running inside an
+[AWS Nitro Enclave](https://aws.amazon.com/ec2/nitro/nitro-enclaves/). The
+enclave generates the HD wallet keys, validates every bridge operation itself
+(RGB consignments, Bitcoin SPV inclusion, EVM `FundsIn` receipts), and only
+then signs: EIP-712 `fundsOut` releases for the EVM side, taproot PSBTs for the
+RGB/Bitcoin side, Ed25519 hashes for the Concordium side. Private keys are never exported in plaintext; cloning transfers an encrypted seed
+between attested enclaves. The security posture is resolved once at boot and committed into
+the attestation document, so a verifier checks it instead of trusting config.
+
+Deeper material:
+
+- [`docs/tee-spec.md`](docs/tee-spec.md) - implementation specification
+  (trust model, signing rules, limitations).
+- [`docs/pubkey-attestation.md`](docs/pubkey-attestation.md) - how to prove a
+  signing key belongs to attested enclave code, and the `attest-verify` CLI.
+- [`docs/diagrams/`](docs/diagrams/README.md) - Mermaid component, deployment,
+  sequence and state diagrams.
+- [`enclave-proto/README.md`](enclave-proto/README.md) - provenance of the
+  vendored wire schema and the re-sync procedure.
 
 ## Architecture
 
-```
-┌──────────────────────────────────────────────────────────────────┐
-│  Go Listener (federated-signer-node)                             │
-│  Receives signing requests from Orchestrator, enriches with      │
-│  EVM event data + RGB consignment, forwards via gRPC             │
-└───────────────────────┬──────────────────────────────────────────┘
-                        │ gRPC (upstream federated-signer-proto: proto/listener/listener.proto)
-                        ▼
-┌──────────────────────────────────────────────────────────────────┐
-│  EC2 Host                                                        │
-│                                                                  │
-│  utexo-bridge-parent (gRPC server + CLI)                         │
-│  ├── Translates gRPC → enclave wire protocol                     │
-│  ├── PSBTSigningFlow / EVMSigningFlow → SignPsbtRequest /        │
-│  │   SignEvmRequest (including consignment bytes)                 │
-│  └── TCP / vsock to enclave                                      │
-│                                                                  │
-│  vsock-proxy 8001 → Esplora API  (for RGB validation)            │
-│  vsock-proxy 8002 → EVM RPC      (for FundsIn verify, evm-rpc)   │
-│                                                                  │
-│  ┌────────────────────────────────────────────────────────────┐  │
-│  │  Nitro Enclave                                              │  │
-│  │                                                             │  │
-│  │  utexo-bridge-enclave                                       │  │
-│  │  ├── BIP-39 key gen (EVM m/44'/60', BTC m/84' + m/86')     │  │
-│  │  ├── EIP-712 signing (EVM → RGB direction)                  │  │
-│  │  ├── PSBT signing (RGB → EVM direction)                     │  │
-│  │  ├── RGB consignment validation (rgbstd + Esplora)          │  │
-│  │  ├── Cross-check validation (amounts, deadlines, calldata)  │  │
-│  │  ├── vsock forwarder (localhost → vsock → Esplora)          │  │
-│  │  └── Protobuf RPC server (vsock:5000 / TCP:5000)            │  │
-│  └────────────────────────────────────────────────────────────┘  │
-└──────────────────────────────────────────────────────────────────┘
-```
+The listener submits signing requests to the untrusted parent gRPC adapter.
+The parent forwards length-prefixed protobuf over vsock to the enclave, which
+owns the keys and applies route-specific validation. Bitcoin resolver and EVM
+provider access passes through host proxies; their trust assumptions differ.
 
-## Workspace crates
+See the [component diagram](docs/diagrams/01-components.md) and
+[deployment diagram](docs/diagrams/02-deployment.md).
+
+## Crates and binaries
 
 | Crate | Binary | Description |
 |-------|--------|-------------|
-| **`enclave/`** | `utexo-bridge-enclave` | Runs inside the Nitro Enclave. Key management, signing, RGB validation. |
-| **`parent/`** | `utexo-bridge-parent` | gRPC server (Parent Adapter) — translates Go Listener RPCs to enclave wire protocol. |
-| **`parent/`** | `utexo-bridge-parent-cli` | CLI tool for direct enclave interaction (testing, key init, manual signing). |
+| `enclave/` | `utexo-bridge-enclave` | Runs inside the Nitro Enclave. Keys, validation, signing, SPV chain, cloning, attestation. |
+| `enclave-proto/` | - | Vendored `enclave` protobuf package (pre-generated Rust, no `build.rs`). |
+| `attestation-verify/` | - | Nitro attestation verifier (COSE_Sign1, cert chain to the AWS root, PCRs) plus the canonical security-policy commitment encoding. Shared by enclave and parent. |
+| `parent/` | `utexo-bridge-parent` | gRPC server on the EC2 host. Translates `ParentService` RPCs to the enclave wire protocol. |
+| `parent/` | `utexo-bridge-parent-cli` | Direct enclave client: key init, cloning, keys, header sync, manual signing, REPL. |
+| `parent/` | `attest-verify` | Fetches an attested pubkey through the parent and verifies it end to end. |
+
+`parent/` is a **separate cargo workspace** (own `Cargo.lock`). See
+[Proto source](#proto-source) for why.
 
 ## What it does
 
 ### Key management
 
-- Generates a BIP-39 mnemonic from OS entropy (or imports a mnemonic phrase in test mode), derives a 64-byte seed, stores it in `SecretBox` (zeroize-on-drop)
-- EVM: derives `m/44'/60'/0'/0/0`, computes 20-byte address via `keccak256(uncompressed_pubkey[1..])[12..]`
-- BTC (legacy): derives `m/84'/0'/0'/0/0`, produces 33-byte compressed pubkey and BIP-32 xpub
-- BTC (BIP-86 taproot): derives two account-level xprivs for multisig descriptors:
-  - Vanilla: `m/86'/<coin>'/0'` (coin type 0 mainnet, 1 testnet)
-  - Colored (RGB): `m/86'/<rgb_coin>'/0'` (coin type 827166 mainnet, 827167 testnet)
-- Returns master fingerprint (4 bytes) for cosigner identification in multisig descriptors
+- Generates a BIP-39 mnemonic from OS entropy, derives the 64-byte seed and
+  keeps it in a `SecretBox` (zeroize on drop). Mnemonic or raw-seed import
+  exists only behind `allow-seed-import` (dev builds).
+- EVM bridge key `m/44'/60'/0'/0/0` (signs `fundsOut`); EVM gas-tx key
+  `m/44'/60'/0'/0/1` (signs the outer relay transaction).
+- BTC legacy key `m/84'/0'/0'/0/0` (P2WSH ECDSA, unscoped library signing only).
+- BIP-86 taproot accounts: vanilla `m/86'/<coin>'/0'` (coin 0 mainnet, 1
+  otherwise) and colored `m/86'/<rgb_coin>'/0'` (827166 mainnet, 827167
+  otherwise). Plain-BTC signing is scoped to vanilla, bridge PSBTs to colored.
+- Concordium governance key: Ed25519, SLIP-0010, `m/44'/919'/0'/0'/0'`.
+- Returns the master fingerprint and both account xpubs for multisig
+  descriptors.
+- The EVM address is the cluster identity. A cloned enclave installs the same
+  seed and must derive the same address before it goes `Active`.
 
 ### Signing
 
-- **EVM (EIP-712)** — Signs typed data for the MultisigProxy contract (fundsOut). Builds EIP-712 domain from chain_id + proxy_contract, computes struct hash from calldata/nonce/deadline, signs with recoverable ECDSA (65 bytes: r+s+v).
-- **PSBT (SegWit v0 P2WSH + Taproot)** — Signs matching inputs in a partially signed Bitcoin transaction. Auto-detects input type:
-  - **Taproot script-path** (BIP-341/BIP-340): Matches via `tap_key_origins` fingerprint, derives child keys per-input, signs with Schnorr into `tap_script_sigs`. Supports `multi_a()` tapscripts.
-  - **SegWit v0 P2WSH** (legacy): Matches by BIP-32 derivation path or witness script pubkey, signs with ECDSA into `partial_sigs`.
-- **Raw message** — Signs arbitrary bytes (keccak256-hashed) for fundsIn authorization (1-of-n).
+All bridge signing goes through one `Sign` request with a source network and a
+destination network. Accepted routes: RGB -> EVM, EVM -> RGB, CCD -> EVM.
 
-### Validation (before signing)
+- **RGB -> EVM (`fundsOut`)** - EIP-712 `TeeFundsOut` (pools route, selector
+  `0xdc771390`) or `TeeLzFundsOut` (LayerZero route) over the decoded calldata
+  fields, domain `MultisigProxy` / `1` / pinned chain id / pinned proxy. 65-byte
+  recoverable ECDSA signature.
+- **EVM -> RGB (bridge PSBT)** - taproot script-path Schnorr signatures on the
+  colored account, only after the EVM deposit and the RGB consignment are
+  verified and bound to the PSBT.
+- **CCD -> EVM** - same `fundsOut` digest, with a Concordium source the
+  listener has already validated (the enclave binds only the amount).
+- **`SignBtc`** - plain-BTC PSBT on the vanilla account. Off unless the
+  attested policy enables it.
+- **`SignRawDigest`** - EVM gas transaction. The enclave RLP-decodes the
+  unsigned tx, applies the attested allowlist (chain, `to`, fee caps, value
+  cap, calldata selectors) and computes the digest itself.
+- **`SignCcd`** - Ed25519 signature over a 32-byte Concordium hash.
+- **`SignRawMessage`** - removed. The wire variant stays for compatibility and
+  the enclave refuses it.
 
-- **RGB consignment validation** (feature `rgb-validation`) — Deserializes the RGB `Transfer` consignment, creates an Esplora-backed resolver, runs rgbstd's full validation pipeline inside the TEE. Replaces trusting the Go Listener's boolean.
-- **Consignment hash integrity** — Verifies `keccak256(consignment) == consignment_hash` to catch tampering.
-- **Amount cross-checks** — Verifies `rgb_amount >= calldata_amount + commission`, extracts and compares amounts from raw calldata bytes.
-- **Calldata extraction** — Reads uint256 values at ABI offsets to verify declared amounts match actual calldata.
-- **Deadline check** — Rejects expired signing requests.
-- **Chain/domain validation** — Requires valid `chain_id` and 20-byte `proxy_contract` for EIP-712 domain.
+### Validation before signing
 
-### gRPC bridge (Parent Adapter)
+- **RGB consignment** - `rgb-ops` full validation inside the TEE with the
+  trusted type system pinned per schema id, against an Electrum or Esplora
+  resolver reached through the vsock forwarder. Contract id must equal the
+  declared asset id and the pinned `RGB_ASSET_ID`.
+- **Bitcoin SPV** - the enclave keeps its own header chain (PoW-validated on
+  mainnet; signet/regtest exceptions are in the spec), fed by
+  `SubmitHeaders`. For RGB→EVM, every consignment witness tx needs a Merkle proof against a
+  stored header at depth >= 6. Chain tip must be fresh (2 h).
+- **EVM `FundsIn`** - the enclave fetches the receipt itself (`evm-rpc`),
+  requires success, a unique `BridgeFundsIn` event from the
+  pinned `FUNDS_IN_CONTRACT`, matching `operationId` / amount / commission,
+  and depth >= `EVM_MIN_CONFIRMATIONS`. Listener flags are ignored. The default raw-RPC path trusts the
+  receipt and head returned by the host relay; optional Helios verification is
+  described in the [spec](docs/tee-spec.md#72-evm-lock---rgb-bridge-psbt).
+- **PSBT bind** - PSBT txid == consignment witness txid, prevouts match,
+  sighash `ALL` / taproot `DEFAULT` only, per-output recipient legs, recipient
+  seal == the invoice in the `FundsIn` event, fee rate <= 3x the enclave's own
+  estimate, unowned sats <= `RGB_MAX_UNOWNED_SATS`.
+- **`fundsOut` calldata** - allowlisted selector, canonical ABI (decode and
+  re-encode must byte-match), amount == declared, chain / contract pins,
+  `destinationChainId` rule per route, deadline in the future, BtcRelay
+  finality proof anchored to the consignment's block.
+- **Flow shape** - a `rgb-swap` build accepts IFA `Transfer` only; a
+  `rgb-mint-burn` build accepts `Inflation` / `Burn` (and BFA `Bridge` with
+  `bfa-mint`). Separate images, separate PCR0.
+- **Replay** - `fundsOut` replay is the on-chain nonce in the digest. EVM -> RGB
+  requests get a soft in-memory dedup (24 h) keyed by the deposit.
 
-- Implements `FederatedSignerNode` from the upstream federated-signer-proto repo (`proto/listener/listener.proto`) (the Go Listener's gRPC interface)
-- Translates `PSBTSigningFlow` / `EVMSigningFlow` into enclave-native `SignPsbtRequest` / `SignEvmRequest`
-- Passes consignment bytes through for in-enclave validation
-- 30-second timeout on enclave requests, binds to localhost only
+### Attested security policy
 
-## Enclave operations
+`SecurityPolicy` is resolved once at boot from build flags and env pins and is
+`Production { pins, allow_vanilla_psbt, evm_source, gas-tx rule }` or
+`Development { reason }`. A release `rgb-validation` build refuses
+to boot unless it resolves to a valid `Production` policy. The policy is
+committed into the attestation `user_data`; `attest-verify` rebuilds the
+expected policy and fails on any downgrade. Details in
+[`docs/pubkey-attestation.md`](docs/pubkey-attestation.md).
 
-| Operation | Description |
-|-----------|-------------|
-| `InitializeKey` | Generate keys from OS entropy (or import raw seed / BIP-39 mnemonic in test mode) |
-| `GetPublicKey` | Retrieve EVM address, BTC pubkeys, master fingerprint, and BIP-86 account xpubs (vanilla + colored) |
-| `SignEvm` | EIP-712 typed data signing with cross-check validation |
-| `SignPsbt` | Taproot (Schnorr) + SegWit v0 P2WSH (ECDSA) PSBT signing with cross-check validation |
-| `ProxyFederation` | Federation signature proxy (stub, not yet wired) |
+### gRPC bridge (parent)
+
+- Implements `parent.ParentService` from `federated-signer-proto`
+  (`proto/enclave/parent.proto`): `Sign`, `PublicKey`, `Initialize`, `Clone`,
+  `GetLastSavedBlock`, `SubmitHeaders`, `AttestedPublicKey`.
+- `Sign` routes by `data_type`: `TRANSACTION` -> enclave `Sign` (EVM / RGB /
+  CCD payload), `EVM_GAS_TX` -> `SignRawDigest`, `BTC_UTXO` -> `SignBtc`.
+  EVM destinations must be listed in `EVM_NETWORK_IDS`.
+- One new TCP or vsock connection per RPC, 30 s timeout. No TLS, no health
+  service. Readiness is checked with a port probe or a `get-keys` call.
+
+## Enclave requests
+
+Wire format: `[4-byte little-endian length][protobuf EnclaveRequest]`, one
+request per connection, 4 MiB frame cap. Schema:
+[`enclave-proto/proto/enclave.proto`](enclave-proto/proto/enclave.proto).
+
+| Request | Phase | Feature | Description |
+|---------|-------|---------|-------------|
+| `InitializeKey` | Initial | - | Generate keys from OS entropy. Optional donor `cloning_secret`. Mnemonic / seed import needs `allow-seed-import`. |
+| `GetPublicKey` | Active | - | EVM address + pubkeys, gas-tx key, BTC pubkey / xpub, fingerprint, account xpubs, CCD pubkey, boot pins. |
+| `GetAttestedPublicKey` | Active | - | Same bundle plus an NSM attestation document bound to nonce, pubkey and the policy commitment. |
+| `Sign` | Active | `rgb` / `ccd` | Bridge signing: RGB -> EVM, EVM -> RGB, CCD -> EVM. |
+| `SignBtc` | Active | - | Plain-BTC PSBT, vanilla account, policy-gated. |
+| `SignRawDigest` | Active | - | Gas-tx signing under the attested allowlist. |
+| `SignCcd` | Active | `ccd` | Ed25519 over a 32-byte hash. |
+| `SubmitHeaders` | any | `spv` | Feed Bitcoin headers (<= 10 000 per call, <= 100 000 per 60 s). |
+| `GetLastSavedBlock` | any | `spv` | Header-chain tip (checkpoint when empty). |
+| `InitiateCloning` | Initial | - | Requester side of the seed-cloning handshake. |
+| `GetClone` | Active | - | Donor side: verifies the requester attestation and seals the seed. |
+| `SetClone` | Cloning | - | Requester installs the sealed seed and goes `Active`. |
+| `SignRawMessage` | - | - | Removed. Always refused. |
+| `ProxyFederation` | - | - | Stub. Returns `NOT_READY`. |
+
+Error codes in `ErrorResponse`: `3` cross-check / SPV failure (the parent maps
+it to `FAILED_PRECONDITION`), `2` not ready, `1` everything else.
 
 ## Prerequisites
 
-- **Rust 1.91+** (stable) — `alloy` 2.1.x sets the floor; the enclave image
-  builds on 1.96.
-- **No credentials.** Every enclave dependency resolves over public HTTPS.
-  Building the **parent** additionally needs a deploy key for
-  `UTEXO-Protocol/federated-signer-proto`, the last private dep in the repo.
+- **Rust 1.96.1** - pinned in `rust-toolchain.toml`. The exact patch version
+  matters for reproducible PCR0.
+- **SSH deploy keys** - the workspace currently pins the RGB crates to private
+  BFA mirrors (`rgb-consensus-s-bfa`, `rgb-ops-s-bfa`, `rgb-schemas-s-bfa`,
+  `consignment-utils`) through the `github-rgb-*` SSH host aliases in
+  `Cargo.toml`. Every build, including the enclave, needs read access to them.
+  The parent additionally needs `federated-signer-proto`. CI wires the aliases
+  in `.github/workflows/ci.yml`; copy that `~/.ssh/config` shape locally.
+  Until the mirrors are public again, PCR0 is reproducible only by key holders.
+- **Docker + `nitro-cli`** for the EIF. Any x86_64 Linux host with Docker can
+  build an EIF and read its PCRs; Nitro hardware is needed only to run it.
 
 ```bash
-git clone https://github.com/UTEXO-Protocol/enclave-signer
-cargo build
+git clone git@github.com:UTEXO-Protocol/enclave-signer
+cargo build                                   # enclave workspace
+cargo build --manifest-path parent/Cargo.toml # parent workspace
 ```
-
-No submodules. The enclave's slice of the proto schema is vendored in-tree at
-[`enclave-proto/`](enclave-proto/), and `parent/` is a separate cargo workspace
-so its private dep never enters an enclave build.
-
-For building the Nitro Enclave image: Docker + `nitro-cli`. A Nitro-capable EC2
-instance is **not** required to produce an EIF and read its PCRs — any x86_64
-Linux host with Docker works (CI does this on a plain GitHub runner). You only
-need Nitro hardware to *run* the enclave.
 
 ## Building
 
-### Local development (TCP mode)
+### Feature sets
+
+The production feature sets are below. Single-network images use
+`--no-default-features`:
 
 ```bash
-# Build everything
-cargo build
+# Combined (what build/Dockerfile.enclave ships)
+cargo build --release -p utexo-bridge-enclave --no-default-features --features vsock,rgb,rgb-swap,ccd,evm-rpc
 
-# Build with RGB validation support
-cargo build -p utexo-bridge-enclave --features rgb-validation
+# RGB send/receive only
+cargo build --release -p utexo-bridge-enclave --no-default-features --features vsock,rgb,rgb-swap,evm-rpc
 
-# Build with SPV verification (implies rgb-validation). With --features spv,
-# the enclave refuses to sign EVM transactions unless the request carries
-# valid Bitcoin SPV proofs for every consignment-anchor witness tx.
-# Without the feature, the enclave fails-closed if the request supplies
-# merkle_proofs at all (catches build mismatches against the listener).
-cargo build -p utexo-bridge-enclave --features spv
+# RGB mint/burn only (separate instance, separate PCR0)
+cargo build --release -p utexo-bridge-enclave --no-default-features --features vsock,rgb,rgb-mint-burn,evm-rpc
 
-# Build only the gRPC server (Parent Adapter)
-cargo build --manifest-path parent/Cargo.toml
+# Concordium only
+cargo build --release -p utexo-bridge-enclave --no-default-features --features vsock,ccd
+
+# Local TCP dev build (debug profile, seed import allowed)
+cargo build -p utexo-bridge-enclave --no-default-features --features allow-seed-import,spv,rgb-swap,ccd,evm-rpc
 ```
 
-### Production (Nitro Enclave)
+Compile-time guards in `enclave/src/lib.rs`: `rgb-validation` requires `spv`;
+exactly one of `rgb-swap` / `rgb-mint-burn` whenever `rgb-validation` is on;
+`allow-seed-import`, `mock-attestation`, `dev-mode` do not compile in a release
+profile. CI asserts every guard fires.
+
+### Enclave image (EIF)
 
 ```bash
-# Build the enclave binary with vsock + RGB validation + SPV
-cargo build --release -p utexo-bridge-enclave --features vsock,rgb-validation,spv
-
-# Or build the full Enclave Image Format (EIF). No credentials needed --
-# this is the command a third party runs to reproduce PCR0.
-./build/build-enclave.sh
+./build/build-enclave.sh                                  # Dockerfile.enclave (combined)
+DOCKERFILE=Dockerfile.enclave.rgb       ./build/build-enclave.sh
+DOCKERFILE=Dockerfile.enclave.mint-burn ./build/build-enclave.sh
+DOCKERFILE=Dockerfile.enclave.ccd       ./build/build-enclave.sh
+DOCKERFILE=Dockerfile.enclave.bfa       ./build/build-enclave.sh
 ```
 
-The build script builds a Docker image, converts it to an EIF via `nitro-cli build-enclave`, and outputs PCR measurements (PCR0/1/2) for KMS attestation policies.
+All Dockerfiles resolve private dependencies. Supply either a GitHub token
+with read access to those repositories, or the same per-repository deploy keys
+used by Rust CI. Credentials are mounted as BuildKit secrets during Cargo's
+build step; they are not copied into image layers.
+
+```bash
+# GITHUB_TOKEN must already be exported; the value is not a build argument.
+docker build --secret id=github_token,env=GITHUB_TOKEN \
+  -f build/Dockerfile.enclave-dev -t utexo-bridge-enclave-dev .
+
+# EIF: uses GITHUB_TOKEN, or PRIVATE_DEPS_DIR if no token is set.
+PRIVATE_DEPS_DIR=/absolute/path/to/private-deps ./build/build-enclave.sh
+```
+
+The key directory contains `consignment_key`, `consensus_key`, `ops_key`, and
+`schemas_key`; parent builds also need `federated_key`. Keep it outside the
+checkout, with directory mode `700` and key files `600`. For a direct Docker
+build with keys, pass each file as `--secret id=<name>,src=<absolute-path>`.
+`make build_*` uses the token option by default; `DOCKER_AUTH_ARGS` can override
+it with those key-file arguments.
+
+CD and EIF workflows reuse the five deploy-key secrets configured for Rust CI:
+`RGB_CONSIGNMENT_PARSER_DEPLOY_KEY`, `RGB_CONSENSUS_BFA_DEPLOY_KEY`,
+`RGB_OPS_BFA_DEPLOY_KEY`, `RGB_SCHEMAS_BFA_DEPLOY_KEY`, and
+`FEDERATED_SIGNER_PROTO_DEPLOY_KEY`. The workflow's automatic `GITHUB_TOKEN`
+is used for image publishing, not cross-repository dependency access.
+
+The script builds the Docker image with `SOURCE_DATE_EPOCH` set to the commit
+time, converts it with `nitro-cli build-enclave`, and writes the EIF,
+`PCR.json` and `SHA256SUMS` to `build/`. Reproducibility inputs: pinned
+toolchain, digest-pinned base images, `--locked`, `CARGO_INCREMENTAL=0`,
+path-prefix remapping, pre-generated proto code. Known drift: apt / dnf
+package versions still float.
+
+`.github/workflows/build-eif.yml` builds the `combined`, `rgb`,
+`rgb-mint-burn` and `ccd` variants on a plain runner with `nitro-cli 1.4.5`
+and uploads EIF + PCRs + host binaries to `s3://<bucket>/eif/<git_sha>/`.
+`release-eif.yml` deploys one of those to the stage hosts over SSM using
+`deploy/deploy-host.sh`. The `cd-*.yml` workflows push container images for
+the parent and the **dev** enclave image only.
+
+The production Dockerfiles bake the bridge pins as `ENV` (`EVM_CHAIN_ID`,
+`EVM_PROXY_CONTRACT_ADDRESS`, `RGB_ASSET_ID`, `FUNDS_IN_CONTRACT`,
+`GAS_TX_ALLOWED_TO`, `BTC_MAX_TOTAL_SATS`, `ELECTRUM_URL`, ...), so they are
+measured into PCR0. The cloning secret is never baked.
 
 ## Running
 
-### Local development
-
-Start the enclave server (TCP on `127.0.0.1:5000`):
+### Local development (TCP)
 
 ```bash
+# Enclave on 127.0.0.1:5000
 RUST_LOG=debug cargo run -p utexo-bridge-enclave
+
+# Parent gRPC server (GRPC_PORT defaults to 5000; pick another port when both run on one host)
+RUST_LOG=debug GRPC_PORT=50051 cargo run --manifest-path parent/Cargo.toml
+
+# CLI (shell function works in bash and zsh)
+cli() { cargo run --manifest-path parent/Cargo.toml --bin utexo-bridge-parent-cli -- "$@"; }
+cli init
+cli get-keys
+cli get-last-saved-block
+cli --help
 ```
 
-Start the gRPC server (Parent Adapter on `127.0.0.1:5000`):
+`--addr host:port` or `--addr vsock://<cid>:<port>` selects the enclave.
+Initialize once: use `cli init --cloning-secret <secret>` instead of `cli init`
+to configure a donor. Use a fresh requester for `cli clone`; initialization
+and cloning are alternative ways to enter `Active`. Signing subcommands require
+complete proofs and configured pins; see their `--help` and the spec.
+
+### Production (Nitro)
 
 ```bash
-RUST_LOG=debug cargo run --manifest-path parent/Cargo.toml
-```
-
-Use the CLI tool directly:
-
-```bash
-# Initialize keys (generate new mnemonic)
-cargo run --manifest-path parent/Cargo.toml --bin utexo-bridge-parent-cli -- init
-
-# Initialize keys from a known mnemonic (requires allow-seed-import feature)
-cargo run --manifest-path parent/Cargo.toml --features allow-seed-import --bin utexo-bridge-parent-cli -- \
-  init-mnemonic "word1 word2 word3 ... word12"
-
-# Get public keys
-cargo run --manifest-path parent/Cargo.toml --bin utexo-bridge-parent-cli -- get-keys
-
-# Sign an EVM transaction
-cargo run --manifest-path parent/Cargo.toml --bin utexo-bridge-parent-cli -- sign-evm \
-  --call-data <hex> --nonce 1 --deadline 9999999999 \
-  --chain-id 1 --proxy-contract <hex>
-
-# Interactive REPL
-cargo run --manifest-path parent/Cargo.toml --bin utexo-bridge-parent-cli -- interactive
-```
-
-### Production (Nitro Enclave)
-
-```bash
-# Start the enclave
-nitro-cli run-enclave \
-  --cpu-count 2 --memory 512 --enclave-cid 16 \
+nitro-cli run-enclave --cpu-count 2 --memory 3072 --enclave-cid 16 \
   --eif-path build/utexo-bridge-enclave.eif
 
-# Start vsock-proxy for Esplora access (on the host)
-vsock-proxy 8001 <esplora-host> <esplora-port>
+# Host-side proxies (allowlist each upstream)
+vsock-proxy 8001 <electrum-host> 50002          # ELECTRUM_URL upstream
+vsock-proxy 8002 127.0.0.1 8547                 # EVM JSON-RPC (nginx adds TLS + key, see deploy/host-prep-evmrpc.sh)
 
-# Start vsock-proxy for the EVM RPC (on the host) — only for `evm-rpc` builds,
-# used by in-enclave FundsIn verification. Allowlist to the RPC endpoint.
-vsock-proxy 8002 <evm-rpc-host> <evm-rpc-port>
-
-# Trustless (Helios) variant — only for `helios` builds (experimental).
-# Two upstreams Helios verifies against a pinned checkpoint:
-vsock-proxy 8003 <evm-execution-rpc-host> <port>   # HELIOS_EXECUTION_RPC
-vsock-proxy 8004 <beacon-consensus-rpc-host> <port> # HELIOS_CONSENSUS_RPC
-
-# Start the gRPC server (Parent Adapter)
-GRPC_PORT=5000 USE_VSOCK=true cargo run --release --manifest-path parent/Cargo.toml
+GRPC_HOST=0.0.0.0 GRPC_PORT=50051 USE_VSOCK=true ENCLAVE_VSOCK_CID=16 ./utexo-bridge-parent
 ```
 
-### Debug mode (Nitro Enclave)
+`deploy/deploy-host.sh` installs the systemd units for a three-enclave host:
+CIDs 16 / 18 / 20 with parents on ports 50051 / 50052 / 50053. It verifies the
+EIF checksum and PCR0 against the S3 manifest before and after start. Keys
+live only in enclave memory; a restart wipes them and the enclave must be
+initialised or cloned again.
 
-By default, a running enclave has no console output — `RUST_LOG` output is siloed inside the TEE. To see logs, run the enclave with `--debug-mode`:
+### Debug mode
 
-```bash
-nitro-cli run-enclave \
-  --cpu-count 2 --memory 512 --enclave-cid 16 \
-  --eif-path build/utexo-bridge-enclave.eif \
-  --debug-mode
-```
-
-> **Note:** In debug mode, PCR0/PCR1/PCR2 are all zeroed. KMS attestation policies that check PCR values will reject the enclave. Use debug mode only for development/testing — never in production.
-
-Once the enclave is running, attach to its console:
+`nitro-cli run-enclave ... --debug-mode` zeroes PCR0/1/2, so attestation
+against pinned PCRs fails. Use it only to read logs:
 
 ```bash
 nitro-cli console --enclave-id $(nitro-cli describe-enclaves | jq -r '.[0].EnclaveID')
-```
-
-This streams the enclave's stdout/stderr (i.e. `RUST_LOG` output) to your terminal. `Ctrl+C` detaches without stopping the enclave.
-
-To list running enclaves and their IDs:
-
-```bash
 nitro-cli describe-enclaves
+nitro-cli terminate-enclave --enclave-id <id>
 ```
 
-To terminate an enclave:
+## Environment variables
 
-```bash
-nitro-cli terminate-enclave --enclave-id <enclave-id>
-```
+### Enclave
 
-### Environment variables
-
-#### Enclave
+Bridge pins (all three required for a `Production` policy):
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `RUST_LOG` | (none) | Log level (e.g., `info`, `debug`) |
-| `ESPLORA_URL` | `http://127.0.0.1:3443` | Esplora API endpoint for RGB validation |
-| `BITCOIN_NETWORK` | `bitcoin` | One of: `bitcoin`, `testnet`, `signet`, `regtest`. Affects BIP-86 coin type (0 vs 1) and xpub prefix (xpub vs tpub). |
-| `SPV_CHECKPOINT` | (unset) | **Local/dev builds only** (debug, `cfg(test)`, or `allow-seed-import` — i.e. what `build/Dockerfile.enclave-dev` produces). Moves the SPV boot checkpoint forward so the initial header sync doesn't replay every block since the compiled-in anchor. Format `height:block_hash` or `height:block_hash:bits:time`, where `block_hash` is 64 hex chars in explorer (display) order, `bits` is hex and **must** carry a `0x` prefix, and `time` is a Unix timestamp. The two-field form inherits `bits`/`time` from the compiled checkpoint and is rejected on PoW networks (mainnet/testnet3), which consume both. A production-shaped build **refuses to boot** when this is set: the checkpoint is the SPV trust anchor and must come from the constant PCR0 commits to. Example: `SPV_CHECKPOINT=430000:000000ac5fccb8a26d3bf859952e164b4fb65190c8f29c8339c6a2c39f3aeb66`. |
-| `BTC_MAX_TOTAL_SATS` | (unset) | Cap on the total input value a single plain-BTC (`SignBtc`) transaction may spend. An `rgb-validation` build refuses plain-BTC signing while unset. |
-| `BTC_MAX_UNOWNED_SATS` | (unset) | Budget (sats) for plain-BTC outputs that do **not** pay back into the same custody — i.e. whose `script_pubkey` is not that of an input the enclave co-signs. Sized for `create_utxo` allocation dust (1000 sats each, 5 by default), so `5000` is the floor and `20000` leaves headroom. An `rgb-validation` build refuses plain-BTC signing while unset. Replaces the removed "a tap leaf mentions one of our keys" rule, which a host could forge (see `networks/rgb/btc_ownership.rs`). |
-| `RGB_MAX_UNOWNED_SATS` | (unset) | Budget (sats) for send-RGB (`SignPsbt`) outputs the enclave cannot prove it controls. The recipient's witness output is blinded, so the enclave bounds what leaves rather than identifying the payout — size it from the bridge's `WITNESSED_SATOSHI_AMOUNT` (`1000` → `10000` leaves headroom). An `rgb-validation` build refuses send-RGB signing while unset. Without it, every send-RGB bind is denominated in RGB asset units and nothing bounds the Bitcoin value the transaction moves. |
-| `GAS_TX_ALLOWED_TO` | (unset) | 0x-hex destination a gas-key transaction (`SignRawDigest`) may target. Unset refuses all gas-tx signing in a release build. Together with the three pins below this forms the gas-tx rule, which is folded into the attested `SecurityPolicy`, so a verifier confirms it rather than trusting configuration (see `networks/evm/gas_tx.rs`). |
-| `GAS_TX_MAX_GAS_LIMIT` | (unset) | Ceiling on a gas tx's `gasLimit`. `0`/unset refuses all gas-tx signing. With `GAS_TX_MAX_FEE_PER_GAS` this bounds the most ETH a *single* signed gas tx can burn as fees (`gasLimit * maxFeePerGas`). Not an aggregate cap — rate limiting belongs outside the enclave. |
-| `GAS_TX_MAX_FEE_PER_GAS` | (unset) | Ceiling (wei) on a gas tx's per-gas fee: `maxFeePerGas` and `maxPriorityFeePerGas` for EIP-1559, `gasPrice` for legacy. `0`/unset refuses all gas-tx signing. |
-| `GAS_TX_ALLOWED_SELECTORS` | (unset) | Comma-separated 4-byte hex function selectors (e.g. `0xdeadbeef,0x7ae8f736`) a gas tx's calldata may invoke. Every signed gas tx must lead with a selector in this set; empty calldata is refused (a bare call still invokes the destination's `fallback`/`receive`). Empty/unset refuses all gas-tx signing. A malformed entry is dropped with a boot warning rather than poisoning the list. This replaces the old unverifiable "the destination is an EOA so calldata is inert" assumption. |
-| `GAS_TX_MAX_VALUE_WEI` | (unset) | Ceiling (wei) on the native `value` a gas-key transaction (`SignRawDigest`) may carry. Only the payable `lzFundsOutCall` may carry value, and only when `to` is also the pinned `BRIDGE_CONTRACT`; every other selector still requires `value == 0`. The carve-out widens the *value* rule only — `lzFundsOutCall` must still appear in `GAS_TX_ALLOWED_SELECTORS`. Unset or unparseable refuses any non-zero value, so deployments not using the LayerZero release path need no configuration. The fee is not bound into the `TeeLzFundsOut` payload, so this ceiling bounds the blast radius (see `networks/evm/gas_tx.rs`). |
-| `ESPLORA_VSOCK_PORT` | `8001` | vsock port for the host's vsock-proxy |
-| `EVM_RPC_URL` | `http://127.0.0.1:3444` | Loopback EVM JSON-RPC endpoint for in-enclave FundsIn verification (`evm-rpc` builds). MUST be loopback — reached via the vsock forwarder. Responses are relayed by the untrusted host (evidence verified fail-closed; trustless only once Helios lands). |
-| `EVM_RPC_VSOCK_PORT` | `8002` | vsock port for the host's EVM-RPC vsock-proxy (`evm-rpc` builds) |
-| `EVM_MIN_CONFIRMATIONS` | `12` | Minimum confirmation depth a FundsIn receipt must have (`evm-rpc` / `helios` builds) |
-| `HELIOS_EXECUTION_RPC` | (unset) | **`helios` builds (experimental).** Loopback execution RPC Helios verifies. **Setting this selects the trustless Helios path** over the raw path. |
-| `HELIOS_CONSENSUS_RPC` | `http://127.0.0.1:18550` | Loopback beacon (consensus) RPC for Helios light-client sync (`helios` builds) |
-| `HELIOS_CHECKPOINT` | (unset; **required once `HELIOS_EXECUTION_RPC` selects the Helios path**) | 0x 32-byte weak-subjectivity beacon block root, refreshed < ~2 weeks old. Without it Helios init fails closed (no untrusted community fallback). |
-| `HELIOS_STRICT_CHECKPOINT_AGE` | `true` | Refuse a `HELIOS_CHECKPOINT` older than the safe weak-subjectivity window (~2 weeks) — Helios init fails closed instead of syncing from a stale trust root. Only the literal `false` or `0` disable it; any other value leaves it on. Disable for local/dev replay only. |
-| `HELIOS_NETWORK` | `mainnet` | `mainnet` \| `sepolia` \| `holesky` (`helios` builds). Must be consistent with the pinned `EVM_CHAIN_ID` (mainnet=1 / sepolia=11155111 / holesky=17000) or Helios init fails closed. |
-| `HELIOS_EXECUTION_VSOCK_PORT` / `HELIOS_CONSENSUS_VSOCK_PORT` | `8003` / `8004` | vsock ports for the host's Helios exec/consensus proxies |
-| `HELIOS_EXECUTION_LOCAL_PORT` / `HELIOS_CONSENSUS_LOCAL_PORT` | `18545` / `18550` | Loopback ports the enclave exposes those upstreams on |
+| `EVM_CHAIN_ID` | `0` | Pinned chain id. Must match the destination chain and the direct-route `destinationChainId`. |
+| `EVM_PROXY_CONTRACT_ADDRESS` | zero | MultisigProxy address: EIP-712 `verifyingContract` and the `to` of the payable `lzFundsOutCall` carve-out. Attested as `bridge_contract`. |
+| `RGB_ASSET_ID` | empty | Pinned RGB contract id. Enforced on every bridge PSBT, and on `fundsOut` when the bridge is configured. |
+| `FUNDS_IN_CONTRACT` | falls back to the proxy | Emitter of `FundsIn` / `BridgeFundsIn`. Set it explicitly when the two contracts differ. Not yet in the attested commitment. |
 
-#### Parent Adapter
+Value bounds (fail closed while unset in a production build):
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `GRPC_PORT` | `5000` | Port for the gRPC server |
-| `ENCLAVE_ADDR` | `127.0.0.1:5000` | Enclave TCP address (dev mode) |
-| `USE_VSOCK` | `false` | Use vsock instead of TCP |
-| `ENCLAVE_VSOCK_CID` | `16` | Enclave vsock CID (production) |
-| `ENCLAVE_VSOCK_PORT` | `5000` | Enclave vsock port |
+| `BTC_MAX_TOTAL_SATS` | `0` | Cap on total input value of one plain-BTC (`SignBtc`) transaction. Non-zero also flips `allow_vanilla_psbt` in the attested policy. |
+| `BTC_MAX_UNOWNED_SATS` | `0` | Plain-BTC output budget for scripts the enclave does not prove it controls (allocation dust, fresh change). |
+| `RGB_MAX_UNOWNED_SATS` | `0` | Bridge-PSBT output budget for sats the enclave cannot prove it controls. Size it from the bridge's witnessed satoshi amount. |
+| `GAS_TX_ALLOWED_TO` | unset | Only `to` a gas tx may target. |
+| `GAS_TX_MAX_GAS_LIMIT` | `0` | Ceiling on `gasLimit`. |
+| `GAS_TX_MAX_FEE_PER_GAS` | `0` | Ceiling (wei) on `maxFeePerGas` / `maxPriorityFeePerGas` / legacy `gasPrice`. |
+| `GAS_TX_ALLOWED_SELECTORS` | empty | Comma-separated 4-byte selectors a gas tx may call. Empty calldata is refused. Malformed entries are dropped with a warning. |
+| `GAS_TX_MAX_VALUE_WEI` | unset | Ceiling on native `value`; only `lzFundsOutCall` to the pinned proxy may carry value. |
+
+The gas-tx rule is part of the attested policy. Unset pins commit as zero.
+
+Data sources and transport:
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `BITCOIN_NETWORK` | `bitcoin` | `bitcoin`, `testnet`, `signet`, `regtest`. Selects the SPV checkpoint, coin types and xpub prefix. Baked into the image. |
+| `ELECTRUM_URL` / `ESPLORA_URL` | `http://127.0.0.1:3443` | Consignment resolver. `ssl://host:port` or `tcp://host:port` selects Electrum: the forwarder listens on that port and pins `host` to loopback in `/etc/hosts` so TLS terminates inside the enclave. Anything else is Esplora REST on loopback 3443. |
+| `ESPLORA_VSOCK_PORT` | `8001` | Host vsock-proxy port for the resolver. |
+| `EVM_RPC_URL` | `http://127.0.0.1:3444` | Loopback EVM JSON-RPC (`evm-rpc`). A non-loopback value is replaced by the default. |
+| `EVM_RPC_VSOCK_PORT` | `8002` | Host vsock-proxy port for the EVM RPC. |
+| `EVM_MIN_CONFIRMATIONS` | `12` | Minimum depth of a `FundsIn` receipt. |
+| `ENCLAVE_LISTEN_ADDR` | `127.0.0.1:5000` | TCP listen address, non-vsock builds only. |
+| `RUST_LOG` | unset | Log filter. |
+
+Optional Helios configuration (`--features helios`, with one RGB flow):
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `HELIOS_EXECUTION_RPC` | unset | Setting this selects Helios; use `http://127.0.0.1:18545` with the default forwarder. Unset selects raw RPC. |
+| `HELIOS_CONSENSUS_RPC` | `http://127.0.0.1:18550` | Beacon RPC endpoint. |
+| `HELIOS_NETWORK` | `mainnet` | Code accepts `mainnet`, `sepolia`, `holesky`; must match pinned `EVM_CHAIN_ID`. |
+| `HELIOS_CHECKPOINT` | unset | Required 32-byte beacon block root, hex; committed in the production policy. |
+| `HELIOS_STRICT_CHECKPOINT_AGE` | `true` | `false` or `0` disables strict checkpoint-age checking. |
+| `HELIOS_EXECUTION_LOCAL_PORT` / `HELIOS_EXECUTION_VSOCK_PORT` | `18545` / `8003` | Execution RPC forwarder ports. |
+| `HELIOS_CONSENSUS_LOCAL_PORT` / `HELIOS_CONSENSUS_VSOCK_PORT` | `18550` / `8004` | Consensus RPC forwarder ports. |
+
+Selected Helios initialization/sync failure leaves the provider unavailable;
+receipt-dependent signing refuses instead of falling back to raw RPC.
+
+Limits and dev knobs:
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `MAX_CONSIGNMENT_BYTES` | 1 MiB | Consignment size cap. |
+| `MAX_MERKLE_PROOFS` | `256` | Proof-count cap per request. |
+| `MAX_TOTAL_PROOF_BYTES` | 128 KiB | Aggregate proof-bytes cap per request. |
+| `SPV_CHECKPOINT` | unset | Dev builds only: `height:hash[:bits:time]` moves the SPV anchor forward. A production-shaped build refuses to boot when set. |
+| `UTEXO_CLONING_SECRET` | unset | Legacy donor secret. Prefer `init --cloning-secret` at runtime. |
+
+### Parent
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `GRPC_HOST` | `127.0.0.1` | Bind address. Deployments use `0.0.0.0`. |
+| `GRPC_PORT` | `5000` | gRPC port. Deployments use 50051-50053. |
+| `ENCLAVE_ADDR` | `127.0.0.1:5000` | Enclave TCP address (dev). |
+| `USE_VSOCK` | `false` | `true` / `1` selects vsock (Linux only). |
+| `ENCLAVE_VSOCK_CID` | `16` | Enclave CID. |
+| `ENCLAVE_VSOCK_PORT` | `5000` | Enclave vsock port. |
+| `EVM_NETWORK_IDS` | empty | Comma-separated network ids that count as EVM destinations for `Sign`. Empty rejects every EVM-destination transaction. |
+| `RUST_LOG` | unset | Log filter. |
 
 ## Testing
 
 ```bash
-# Run all tests
-cargo test
-
-# Run with RGB validation tests
-cargo test -p utexo-bridge-enclave --features rgb-validation
-
-# Run with SPV tests (implies rgb-validation; covers the full sign-path gate)
-cargo test -p utexo-bridge-enclave --features spv
-
-# Run with seed import tests
-cargo test -p utexo-bridge-enclave --features allow-seed-import
-
-# Run gRPC bridge integration tests
-cargo test --manifest-path parent/Cargo.toml
+cargo test                                                              # enclave workspace, default features
+cargo test -p utexo-bridge-enclave --features spv,rgb-swap              # full RGB sign-path gate
+cargo test -p utexo-bridge-enclave --no-default-features --features rgb,rgb-mint-burn
+cargo test -p utexo-bridge-enclave --features evm-rpc
+cargo test -p utexo-bridge-enclave --features mock-attestation,allow-seed-import
+cargo test --manifest-path parent/Cargo.toml                            # gRPC bridge + attest-verify e2e
 ```
 
-### Test coverage (96 tests)
-
-| Category | Count | What it covers |
-|----------|-------|----------------|
-| Enclave unit tests | 62 | Key derivation (BIP-84 + BIP-86), mnemonic import, master fingerprint, taproot Schnorr signing, framing, EIP-712 digest, cross-checks, consignment hash integrity, RGB deserialization |
-| Enclave integration tests | 20 | Full wire-protocol: keygen, signing roundtrips, cross-check rejections, consignment hash via real TCP |
-| gRPC bridge tests | 7 | Full gRPC → Parent Adapter → mock enclave roundtrips, error paths, consignment passthrough verification |
-| RGB validator unit tests | 2 | Bad bytes rejection, unknown network rejection |
+Coverage: key derivation and fingerprints, framing, EIP-712 digests pinned to
+the deployed contract, calldata canonicalisation, gas-tx allowlist, consignment
+fixtures per flow, PSBT binding and fee gate, SPV chain / reorg / Merkle,
+attestation verification incl. crafted cert chains, cloning handshake, wire
+roundtrips over TCP, gRPC translation with a mock enclave, vendored-proto
+provenance. `build/smoke-test.sh` drives a live enclave through the CLI.
 
 ## Feature flags
 
-| Feature | Description |
-|---------|-------------|
-| `vsock` | Enable vsock transport (production, Linux only) |
-| `rgb-validation` | In-enclave RGB consignment validation via rgbstd + Esplora |
-| `spv` | Bitcoin SPV verification of consignment witness txids before signing EVM transactions. Implies `rgb-validation` (needed to extract witness txids). When OFF, `handle_sign_evm` additionally **rejects** any request that carries a non-empty `merkle_proofs` field — fail-closed against build mismatches between listener and enclave. |
-| `allow-seed-import` | Allow raw 64-byte seed or BIP-39 mnemonic import (testing only, never enable in production) |
-| `dev-mode` | Skip cross-check validation on signing requests (development only) |
+| Feature | Implies | Description |
+|---------|---------|-------------|
+| `rgb` | `spv` | RGB / Bitcoin bridge stack. |
+| `ccd` | - | Concordium stack (Ed25519 is always compiled; this gates the handlers). |
+| `rgb-swap` | `rgb` | RGB flow: send/receive with IFA `Transfer`. In the default set. |
+| `rgb-mint-burn` | `rgb` | RGB flow: deposits mint with IFA `Inflation`, withdrawals `Burn`. Needs `--no-default-features`. |
+| `bfa-mint` | `rgb-mint-burn`, `evm-rpc` | Bridged Fungible Asset schema: `Bridge` transitions verified against the enclave's own `FundsIn` reads. |
+| `spv` | `rgb-validation` | In-enclave Bitcoin header chain and witness inclusion proofs. |
+| `rgb-validation` | rgb crates | In-enclave consignment validation. Requires `spv`. |
+| `evm-rpc` | `rgb-validation` | In-enclave `FundsIn` verification over host-relayed JSON-RPC. Without it the enclave refuses every bridge PSBT. |
+| `helios` | `evm-rpc` | Optional checkpoint-verified EVM provider; selected by `HELIOS_EXECUTION_RPC`. Not enabled in the supplied Dockerfiles. |
+| `vsock` | - | vsock listener and forwarders (Linux). |
+| `allow-seed-import` | - | Mnemonic / raw-seed import. Dev only, does not compile in release. |
+| `dev-mode` | - | Skips cross-check validation. Dev only, does not compile in release. |
+| `mock-attestation` | - | Raw-CBOR attestation with zero PCRs. Dev only, does not compile in release. |
 
-## Protocol
-
-### Enclave wire protocol
-
-Wire format: `[4-byte LE length][protobuf payload]`
-
-All messages are defined in
-[`enclave-proto/proto/enclave.proto`](enclave-proto/proto/enclave.proto), the
-vendored copy this repo actually compiles.
-The enclave accepts one `EnclaveRequest` per connection and returns one
-`EnclaveResponse`.
-
-### gRPC interface (Parent Adapter)
-
-Defined in `proto/enclave/parent.proto` in the upstream
-[federated-signer-proto](https://github.com/UTEXO-Protocol/federated-signer-proto)
-repo, which the parent consumes as a git dependency (not vendored here).
-The Go Listener connects to the parent gRPC service, which transforms requests
-before forwarding them to the enclave.
-
-### Enriched payloads
-
-`proto/enriched/payload.proto` in the upstream
-[federated-signer-proto](https://github.com/UTEXO-Protocol/federated-signer-proto)
-repo defines `EnrichedPsbtPayload` and `EnrichedEvmPayload` for the enriched
-data format. Parent-side only; not vendored here.
-
-### Proto source
-
-The schema is split deliberately, and so are the cargo workspaces:
+## Proto source
 
 | | Enclave | Parent |
 |---|---|---|
-| Schema | [`enclave-proto/`](enclave-proto/), vendored in-tree | `federated-signer-proto`, git dep over SSH |
+| Schema | `enclave-proto/`, vendored in-tree | `federated-signer-proto`, git dep over SSH |
 | Packages | `enclave` only | `bridge` / `node` / `orchestrator` / `parent` / `signer` |
-| Workspace | repo root | `parent/` (its own root + lockfile) |
-| Credentials to build | none for the proto | deploy key required |
+| Workspace | repo root | `parent/` (own root + lockfile) |
 
-```toml
-# enclave/Cargo.toml
-enclave-proto = { path = "../enclave-proto" }
+Cargo materialises every git source in a workspace before it knows which
+crates a `-p` build compiles. Keeping `parent/` out of the root workspace is
+what keeps its private proto dep out of the enclave dependency graph. Build
+the parent with `--manifest-path parent/Cargo.toml`, never `-p`.
 
-# parent/Cargo.toml
-federated-signer-proto = { git = "ssh://git@github.com/UTEXO-Protocol/federated-signer-proto.git", rev = "..." }
-```
-
-**Why the workspaces are split.** Cargo materialises every git source declared
-anywhere in a workspace during resolution, before it knows which crates a `-p`
-build actually compiles. While `parent` was a member, its private proto dep made
-even `cargo build -p utexo-bridge-enclave --no-default-features` demand that
-credential — which would have defeated the point of vendoring. Splitting them is
-what makes the enclave, and therefore PCR0, reproducible by anyone. Build the
-parent from its own directory:
-
-```bash
-cargo build --manifest-path parent/Cargo.toml     # not `-p utexo-bridge-parent`
-```
-
-**Why the generated code is committed.** `protoc` / buf plugin versions affect
-the generated Rust, and no crate in either workspace has a `build.rs`. Shipping
-pre-generated code keeps the codegen toolchain out of the inputs that determine
-the enclave binary — and therefore out of PCR0.
-
-Provenance, verification against upstream, and the re-sync procedure are in
-[`enclave-proto/README.md`](enclave-proto/README.md). The two sides are pinned
-to the same upstream commit and must be re-synced together; re-syncing changes
-PCR0, so treat it as a measurement-affecting change.
+The generated Rust is committed because `protoc` / prost-build versions change
+the output and would otherwise enter PCR0. Both sides pin the same upstream
+commit; `enclave-proto/tests/vendored_provenance.rs` fails when they drift.
+Re-syncing changes PCR0. Procedure in
+[`enclave-proto/README.md`](enclave-proto/README.md).
 
 ## Security model
 
-- **No unsafe code** — `#![deny(unsafe_code)]` enforced in the enclave crate.
-- **Zeroize-on-drop** — All seeds and private keys wrapped in `SecretBox`. Memory zeroed on drop.
-- **In-enclave RGB validation** — Consignments validated inside the TEE via rgbstd, not trusted from external sources.
-- **In-enclave EVM FundsIn verification** (`evm-rpc`) — bridge-mode `signPsbt` confirms the EVM deposit itself via `eth_getTransactionReceipt`, instead of trusting the listener's `evm_event_valid`/`evm_event_finalized` flags. The RPC is reached through the untrusted host, so responses are treated as evidence (verified fail-closed) and this becomes trustless only once Helios verifies them. A build **without** this feature refuses bridge-mode `signPsbt` outright (the deposit cannot be verified), so production EIFs MUST enable `evm-rpc` (or `helios`).
-- **Trustless EVM verification via Helios** (`helios` — EXPERIMENTAL, default-OFF, not in the shipped EIF) — embeds the a16z Helios light client so the enclave cryptographically verifies the execution/consensus RPCs against a pinned weak-subjectivity checkpoint before accepting a FundsIn receipt. Runtime-selectable (`HELIOS_EXECUTION_RPC` set → verified path, else the raw path) and fail-closed (an unsynced/errored Helios refuses signing, never downgrades). Heavy build (a second alloy major, revm, BLS, vendored OpenSSL); no production experience yet.
-- **Cross-check validation** — Amount consistency, calldata extraction, deadline, and chain/domain checks before any signature is produced.
-- **Seed import gated** — Raw seed import requires `allow-seed-import` feature, never enabled in production.
-- **Nitro Enclave isolation** — No persistent storage, no network access (only vsock), no shell.
-- **vsock-proxy allowlist** — Enclave can only reach Esplora (and, for `evm-rpc` builds, the EVM RPC) through the host's vsock-proxy with explicit allowlist.
-- **Release hardening** — `opt-level = "z"`, LTO, symbol stripping, `panic = "abort"`, single codegen unit.
-- **gRPC localhost-only** — Parent Adapter binds to `127.0.0.1`, not `0.0.0.0`.
+- **Untrusted host.** Requests from the parent, listener and backend are checked inside the
+  enclave. Bitcoin witness inclusion is checked against its header chain.
+  Raw EVM RPC receipts/head and Concordium source validation remain trust
+  dependencies; see the spec for network-specific limits.
+- **Attested posture.** Build flags and pins resolve to one `SecurityPolicy`
+  committed into the attestation. A downgraded posture fails verification.
+- **Fail closed.** Missing feature, missing pin, missing receipt, missing
+  proof, zero inputs signed: refuse, never sign with less verification.
+- **Limits.** Bitcoin confirmation depth, freshness, reorg/retention caps and
+  connection limits are compiled in. `EVM_MIN_CONFIRMATIONS` and request-size
+  caps are read from environment; image-baked values are measured with the EIF.
+- **Key custody.** Seed and keys in `SecretBox`, zeroized on drop.
+  `#![deny(unsafe_code)]`. No persistence: keys exist only in enclave memory.
+- **Cloning.** X25519 + HKDF-SHA256 + ChaCha20-Poly1305, mutual attestation
+  with PCR equality, shared secret, replay guard recorded only after
+  authentication.
+- **Release hardening.** `opt-level = "z"`, LTO, stripped, `panic = "abort"`,
+  single codegen unit. Dev features are `compile_error!` in release.
 
-## Project structure
-
-```
-.
-├── Cargo.toml                        # Workspace root + [patch.crates-io] for RGB deps
-├── enclave-proto/                    # Vendored `enclave` schema slice (see its README)
-│   ├── proto/enclave.proto           # Enclave wire protocol, source of truth
-│   └── src/enclave.rs                # Pre-generated Rust, verbatim (no build.rs)
-├── enclave/
-│   ├── Cargo.toml
-│   └── src/
-│       ├── lib.rs                    # Library root + proto modules
-│       ├── main.rs                   # Entry point (vsock forwarder, RGB validator, listener)
-│       ├── server.rs                 # ServerContext, request dispatch, all handlers
-│       ├── keys.rs                   # BIP-39/BIP-32 key management (EnclaveState)
-│       ├── framing.rs                # Length-prefixed protobuf wire format
-│       ├── error.rs                  # Error types with gRPC code mapping
-│       ├── vsock_forwarder.rs        # TCP→vsock forwarder for Esplora access
-│       ├── signing/
-│       │   ├── evm.rs                # EIP-712 domain/digest construction
-│       │   └── psbt.rs               # SegWit v0 P2WSH PSBT signing
-│       └── validation/
-│           ├── evm_crosscheck.rs     # EVM request cross-checks (amounts, calldata, hash)
-│           ├── psbt_crosscheck.rs    # PSBT request cross-checks
-│           └── rgb.rs                # RGB consignment validation (rgbstd + Esplora)
-├── parent/                           # SEPARATE cargo workspace (own Cargo.lock)
-│   ├── Cargo.toml
-│   └── src/
-│       ├── lib.rs                    # Library root + grpc_proto + enclave_proto modules
-│       ├── main.rs                   # gRPC server startup (tonic)
-│       ├── grpc_server.rs            # EnclaveService implementation (translation layer)
-│       ├── config.rs                 # Environment-based configuration
-│       ├── client.rs                 # Enclave TCP/vsock RPC client
-│       ├── framing.rs                # Wire format (shared with enclave)
-│       ├── error.rs                  # Error types
-│       └── bin/
-│           └── cli.rs                # CLI tool (init, get-keys, sign-evm, sign-psbt, REPL)
-├── build/
-│   ├── Dockerfile.enclave            # Multi-stage Docker build
-│   ├── build-enclave.sh              # EIF build + PCR extraction
-│   ├── deploy-to-ec2.sh             # rsync to Nitro EC2 instance
-│   ├── entrypoint.sh                 # Enclave runtime init (loopback + exec)
-│   └── smoke-test.sh                 # Comprehensive RPC smoke tests
-└── .vscode/
-    └── settings.json                 # Rust Analyzer: enables rgb-validation + allow-seed-import
-```
-
-## License
-
-TBD
+Known limitations are listed in
+[`docs/tee-spec.md`](docs/tee-spec.md#13-implementation-status).
