@@ -315,6 +315,239 @@ fn dispatch(request: EnclaveRequest, ctx: &ServerContext) -> EnclaveResponse {
     }
 }
 
+/// Verify the EVM lock a BFA mint commits to and return it as the one-element
+/// event set RGB consensus checks the minted amount against.
+///
+/// The OpId parsed out of the consignment is untrusted: it only selects which
+/// `FundsIn` log must exist. That log is verified through the same Helios-backed
+/// path the swap flow uses, against the contract pinned in config *and* named by
+/// the asset's genesis, and consensus re-binds both OpId and amount when `cea`
+/// runs. Empty vec when the consignment is not a BFA one, so the swap path is
+/// unaffected; every failure refuses the signature.
+#[cfg(feature = "bfa-mint")]
+/// The EVM tx hash the listener claims backs `mint_opid`.
+///
+/// Fails closed: an unlisted mint, or one listed with a malformed hash, aborts
+/// the burn rather than validating with that mint's lock unchecked.
+#[cfg(feature = "bfa-mint")]
+fn ancestor_tx_hash(
+    mint_opid: &[u8; 32],
+    ancestors: &[enclave_proto::MintAncestor],
+) -> Result<[u8; 32]> {
+    let ancestor = ancestors
+        .iter()
+        .find(|a| a.op_id.as_slice() == mint_opid.as_slice())
+        .ok_or_else(|| {
+            EnclaveError::CrossCheck(format!(
+                "no mint_ancestors entry for bridge transition 0x{} - the operation cannot \
+                 be validated without the EVM lock behind every mint it descends from",
+                hex::encode(mint_opid)
+            ))
+        })?;
+
+    ancestor.tx_hash.as_slice().try_into().map_err(|_| {
+        EnclaveError::CrossCheck(format!(
+            "mint_ancestors tx_hash for 0x{} must be 32 bytes, got {}",
+            hex::encode(mint_opid),
+            ancestor.tx_hash.len()
+        ))
+    })
+}
+
+/// Pair every `TS_BRIDGE` in a mint consignment with the EVM deposit that must
+/// back it: the terminal mint with this request's own deposit, every ancestor
+/// with the lock the caller listed for it. Consignment order is preserved.
+///
+/// Pure, so the rule that decides which lock pays for which mint is testable
+/// without an EVM client - it is the one place a spent lock could be
+/// substituted for the one being paid now.
+#[cfg(feature = "bfa-mint")]
+fn mint_lock_plan(
+    mint_opids: &[[u8; 32]],
+    terminal_opid: &[u8; 32],
+    this_deposit: &[u8; 32],
+    ancestors: &[enclave_proto::MintAncestor],
+) -> Result<Vec<([u8; 32], [u8; 32])>> {
+    if ancestors
+        .iter()
+        .any(|a| a.op_id.as_slice() == terminal_opid.as_slice())
+    {
+        return Err(EnclaveError::CrossCheck(format!(
+            "mint_ancestors lists 0x{}, the mint this request authorises - its lock is this \
+             request's own deposit and nothing else",
+            hex::encode(terminal_opid)
+        )));
+    }
+
+    mint_opids
+        .iter()
+        .map(|opid| {
+            let lock = if opid == terminal_opid {
+                *this_deposit
+            } else {
+                ancestor_tx_hash(opid, ancestors)?
+            };
+            Ok((*opid, lock))
+        })
+        .collect()
+}
+
+/// Verify the `FundsIn` lock behind every mint a burn consignment descends
+/// from, and return one `cea` event per mint.
+///
+/// The listener supplies `(op_id, tx_hash)` pairs because only it can search
+/// the chain; they are hints. Every pair is fetched and checked here against
+/// the enclave's own contract pin, and a mint with no pair - or with one whose
+/// log does not bind to it - fails the whole validation. That is the point: a
+/// burn may only release funds that a real, verified lock once created.
+#[cfg(feature = "bfa-mint")]
+fn bfa_burn_ancestry_events(
+    ctx: &ServerContext,
+    source: &enclave_proto::RgbSource,
+) -> Result<Vec<rgbstd::vm::ether_extension::Event>> {
+    use crate::networks::evm::evm_event::{check_bridge_location, verify_rgb_funds_in};
+    use crate::networks::rgb::validation::bfa_ancestry_binding;
+    use rgbstd::vm::ether_extension::Event;
+    use rgbstd::{OpId, RevealedValue};
+
+    if cfg!(feature = "dev-mode") {
+        return Ok(Vec::new());
+    }
+    if source.consignment.len() > ctx.bridge_config.max_consignment_bytes {
+        return Err(EnclaveError::CrossCheck(format!(
+            "RGB source consignment too large: {} bytes (max {})",
+            source.consignment.len(),
+            ctx.bridge_config.max_consignment_bytes
+        )));
+    }
+
+    let Some(binding) = bfa_ancestry_binding(&source.consignment)? else {
+        // Not a BFA consignment: the other schemas run no extension opcode, so
+        // an empty event set is correct rather than merely tolerated.
+        return Ok(Vec::new());
+    };
+
+    // The extension never checks which contract an event came from, so this is
+    // the only thing between a redemption and logs from an attacker's contract.
+    check_bridge_location(
+        &binding.bridge_location,
+        &ctx.bridge_config.funds_in_contract,
+    )?;
+
+    if binding.mint_opids.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let client = ctx.evm_rpc_client.as_ref().ok_or_else(|| {
+        EnclaveError::CrossCheck(
+            "bfa-mint build but the EVM RPC client is unavailable - refusing to validate a burn \
+             without independently verifying the locks behind its mints"
+                .into(),
+        )
+    })?;
+
+    let mut events = Vec::with_capacity(binding.mint_opids.len());
+    for mint_opid in &binding.mint_opids {
+        let tx_hash = ancestor_tx_hash(mint_opid, &source.mint_ancestors)?;
+
+        let amount = verify_rgb_funds_in(
+            &**client,
+            &ctx.bridge_config.funds_in_contract,
+            ctx.evm_rpc_config.min_confirmations,
+            &tx_hash,
+            mint_opid,
+        )?;
+
+        events.push(Event::new(
+            OpId::from(*mint_opid),
+            RevealedValue::from(amount),
+        ));
+    }
+
+    Ok(events)
+}
+
+#[cfg(feature = "bfa-mint")]
+fn bfa_mint_events(
+    ctx: &ServerContext,
+    source: &SourceNetwork,
+    destination: &DestinationNetwork,
+) -> Result<Vec<rgbstd::vm::ether_extension::Event>> {
+    use crate::networks::evm::evm_event::{check_bridge_location, verify_rgb_funds_in};
+    use crate::networks::rgb::validation::bfa_mint_binding;
+    use rgbstd::vm::ether_extension::Event;
+    use rgbstd::{OpId, RevealedValue};
+
+    // dev-mode compiles no destination-anchor validation, so these events would
+    // have no consumer and the RPC call would be pure cost.
+    if cfg!(feature = "dev-mode") {
+        return Ok(Vec::new());
+    }
+
+    let (SourceNetwork::EvmSource(source), DestinationNetwork::RgbDestination(destination)) =
+        (source, destination)
+    else {
+        return Ok(Vec::new());
+    };
+
+    // The same cap `validate_destination_anchor` applies, repeated because that
+    // check now runs after this parse rather than before it.
+    if destination.consignment.len() > ctx.bridge_config.max_consignment_bytes {
+        return Err(EnclaveError::CrossCheck(format!(
+            "send-RGB consignment too large: {} bytes (max {})",
+            destination.consignment.len(),
+            ctx.bridge_config.max_consignment_bytes
+        )));
+    }
+    let Some(binding) = bfa_mint_binding(&destination.consignment)? else {
+        return Ok(Vec::new());
+    };
+
+    // The extension never checks which contract an event came from, so this is
+    // the only thing between a mint and a log from an attacker's contract.
+    check_bridge_location(
+        &binding.bridge_location,
+        &ctx.bridge_config.funds_in_contract,
+    )?;
+
+    let tx_hash: [u8; 32] = source.tx_hash.as_slice().try_into().map_err(|_| {
+        EnclaveError::CrossCheck(format!(
+            "evm_tx_hash must be 32 bytes, got {}",
+            source.tx_hash.len()
+        ))
+    })?;
+    let client = ctx.evm_rpc_client.as_ref().ok_or_else(|| {
+        EnclaveError::CrossCheck(
+            "bfa-mint build but the EVM RPC client is unavailable - refusing to sign a mint \
+             without independently verifying its FundsIn lock"
+                .into(),
+        )
+    })?;
+    let plan = mint_lock_plan(
+        &binding.mint_opids,
+        &binding.terminal_opid,
+        &tx_hash,
+        &destination.mint_ancestors,
+    )?;
+
+    let mut events = Vec::with_capacity(plan.len());
+    for (mint_opid, lock) in plan {
+        let amount = verify_rgb_funds_in(
+            &**client,
+            &ctx.bridge_config.funds_in_contract,
+            ctx.evm_rpc_config.min_confirmations,
+            &lock,
+            &mint_opid,
+        )?;
+        events.push(Event::new(
+            OpId::from(mint_opid),
+            RevealedValue::from(amount),
+        ));
+    }
+
+    Ok(events)
+}
+
 fn handle_sign(ctx: &ServerContext, req: SignRequest) -> Result<EnclaveResponse> {
     let source_ref = req
         .source_network
@@ -369,6 +602,16 @@ fn handle_sign(ctx: &ServerContext, req: SignRequest) -> Result<EnclaveResponse>
         })
     };
 
+    // Before destination validation, not after: a BFA mint's consignment cannot
+    // be validated at all until the lock it commits to has been verified.
+    #[cfg(feature = "bfa-mint")]
+    let bfa_bridge_events = match source_ref {
+        // A burn: the events prove the locks behind the mints it descends from.
+        SourceNetwork::RgbSource(rgb) => bfa_burn_ancestry_events(ctx, rgb)?,
+        // A mint: the event proves the one lock it is being minted against.
+        _ => bfa_mint_events(ctx, source_ref, destination_ref)?,
+    };
+
     let validation_ctx = ValidationContext {
         bridge_config: &ctx.bridge_config,
         #[cfg(feature = "rgb-validation")]
@@ -377,6 +620,8 @@ fn handle_sign(ctx: &ServerContext, req: SignRequest) -> Result<EnclaveResponse>
         header_chain: &ctx.header_chain,
         #[cfg(feature = "rgb-validation")]
         self_owned_psbt_outputs: Some(&self_owned_psbt_outputs),
+        #[cfg(feature = "bfa-mint")]
+        bridge_events: &bfa_bridge_events,
     };
     let source_validated = validate_source(req.amount, source_ref, &validation_ctx)?;
 
@@ -614,8 +859,20 @@ fn apply_funds_out_binding(
     #[cfg(not(feature = "spv"))]
     let _ = (ctx, merkle_proofs);
 
-    // Consignment-bound release amount (transfer flow).
-    crosscheck::validate_funds_out_transfer(params, validated)?;
+    // Consignment-bound release. A transfer settles a swap; a burn settles a
+    // redemption and additionally binds the payout target to the 32 bytes the
+    // burner committed to. Dispatching on the last transition rather than on a
+    // caller-supplied flag keeps the consignment the authority on which rule
+    // applies.
+    let is_burn = validated
+        .last_transition
+        .as_ref()
+        .is_some_and(|t| t.transition_type == crate::networks::rgb::validation::ifa::TS_BURN);
+    if is_burn {
+        crosscheck::validate_funds_out_burn(params, validated)?;
+    } else {
+        crosscheck::validate_funds_out_transfer(params, validated)?;
+    }
 
     // Swap / send-receive only for now. The backend-provided burnId and
     // settlement fundsInIds are preserved; the EVM connector already selected
@@ -1393,6 +1650,160 @@ fn handle_set_clone(state: &EnclaveState, req: SetCloneRequest) -> Result<Enclav
 // the RGB/BTC stack (`spv`).
 #[cfg(all(test, feature = "spv"))]
 mod tests {
+    #[cfg(feature = "bfa-mint")]
+    mod mint_ancestry {
+        use crate::server::mint_lock_plan;
+        use enclave_proto::MintAncestor;
+
+        const DEPOSIT: [u8; 32] = [0xde; 32];
+
+        fn ancestor(op: u8, tx: u8) -> MintAncestor {
+            MintAncestor {
+                op_id: vec![op; 32],
+                tx_hash: vec![tx; 32],
+            }
+        }
+
+        /// The first mint on a bridge right carries nothing else, so the only
+        /// lock in play is the deposit that arrived with the request.
+        #[test]
+        fn a_first_mint_is_paid_by_this_requests_deposit() {
+            let terminal = [1u8; 32];
+            assert_eq!(
+                mint_lock_plan(&[terminal], &terminal, &DEPOSIT, &[]).unwrap(),
+                vec![(terminal, DEPOSIT)]
+            );
+        }
+
+        /// What the whole change is for: mint N carries mints 1..N-1, and each
+        /// of them is verified against the deposit that actually paid for it.
+        #[test]
+        fn a_chained_mint_pairs_each_predecessor_with_its_own_lock() {
+            let (first, second, terminal) = ([1u8; 32], [2u8; 32], [3u8; 32]);
+            let plan = mint_lock_plan(
+                &[first, second, terminal],
+                &terminal,
+                &DEPOSIT,
+                &[ancestor(1, 0xaa), ancestor(2, 0xbb)],
+            )
+            .unwrap();
+
+            assert_eq!(
+                plan,
+                vec![
+                    (first, [0xaa; 32]),
+                    (second, [0xbb; 32]),
+                    (terminal, DEPOSIT),
+                ],
+                "consignment order must survive, and only the terminal mint may use the deposit"
+            );
+        }
+
+        /// The replay this design has to refuse. Listing the terminal mint would
+        /// let a caller pay for it with a lock some earlier mint already spent.
+        #[test]
+        fn refuses_a_caller_that_lists_the_mint_being_authorised() {
+            let terminal = [3u8; 32];
+            let err = mint_lock_plan(
+                &[terminal],
+                &terminal,
+                &DEPOSIT,
+                &[MintAncestor {
+                    op_id: terminal.to_vec(),
+                    tx_hash: vec![0xaa; 32],
+                }],
+            )
+            .unwrap_err();
+
+            assert!(
+                err.to_string().contains("the mint this request authorises"),
+                "{err}"
+            );
+        }
+
+        /// A predecessor nobody accounted for must abort the mint rather than
+        /// reach consensus with its lock unchecked - the same rule the burn
+        /// direction already enforces.
+        #[test]
+        fn refuses_a_predecessor_with_no_listed_lock() {
+            let (first, terminal) = ([1u8; 32], [3u8; 32]);
+            let err = mint_lock_plan(&[first, terminal], &terminal, &DEPOSIT, &[]).unwrap_err();
+            assert!(err.to_string().contains("no mint_ancestors entry"), "{err}");
+        }
+
+        /// The terminal mint is identified by op id, not by position: a
+        /// consignment that lists it first must still pay for it with the
+        /// deposit, and the later transitions must bring their own locks.
+        #[test]
+        fn the_terminal_mint_is_found_by_op_id_not_by_position() {
+            let (terminal, later) = ([3u8; 32], [4u8; 32]);
+            let plan = mint_lock_plan(
+                &[terminal, later],
+                &terminal,
+                &DEPOSIT,
+                &[ancestor(4, 0xcc)],
+            )
+            .unwrap();
+            assert_eq!(plan, vec![(terminal, DEPOSIT), (later, [0xcc; 32])]);
+        }
+    }
+
+    #[cfg(feature = "bfa-mint")]
+    mod burn_ancestry {
+        use crate::server::ancestor_tx_hash;
+        use enclave_proto::MintAncestor;
+
+        fn ancestor(op: u8, tx: u8) -> MintAncestor {
+            MintAncestor {
+                op_id: vec![op; 32],
+                tx_hash: vec![tx; 32],
+            }
+        }
+
+        #[test]
+        fn returns_the_tx_hash_listed_for_that_mint() {
+            let ancestors = vec![ancestor(1, 0xaa), ancestor(2, 0xbb)];
+            assert_eq!(
+                ancestor_tx_hash(&[2u8; 32], &ancestors).unwrap(),
+                [0xbb; 32]
+            );
+        }
+
+        /// The whole point of the pre-pass. A mint the listener did not account
+        /// for must abort the burn - never validate with its lock unchecked,
+        /// which is what would let an unbacked mint be redeemed on EVM.
+        #[test]
+        fn rejects_a_mint_with_no_listed_ancestor() {
+            let err = ancestor_tx_hash(&[9u8; 32], &[ancestor(1, 0xaa)]).unwrap_err();
+            assert!(err.to_string().contains("no mint_ancestors entry"), "{err}");
+        }
+
+        #[test]
+        fn rejects_an_empty_ancestor_list() {
+            assert!(ancestor_tx_hash(&[1u8; 32], &[]).is_err());
+        }
+
+        /// A short hash would otherwise be silently padded by a lenient decoder
+        /// and look up a different transaction.
+        #[test]
+        fn rejects_a_tx_hash_that_is_not_32_bytes() {
+            let listed = MintAncestor {
+                op_id: vec![1u8; 32],
+                tx_hash: vec![0xaa; 31],
+            };
+            let err = ancestor_tx_hash(&[1u8; 32], &[listed]).unwrap_err();
+            assert!(err.to_string().contains("must be 32 bytes"), "{err}");
+        }
+
+        /// An op id that merely shares a prefix is a different transition.
+        #[test]
+        fn matches_the_op_id_exactly() {
+            let mut near = ancestor(1, 0xaa);
+            near.op_id[31] = 2;
+            assert!(ancestor_tx_hash(&[1u8; 32], &[near]).is_err());
+        }
+    }
+
     use super::*;
     use std::time::{Duration, SystemTime};
 

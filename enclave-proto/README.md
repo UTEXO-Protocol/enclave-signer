@@ -33,8 +33,8 @@ disagree, or if the commit recorded below drifts from the `rev` that
 | | |
 |---|---|
 | Upstream | https://github.com/UTEXO-Protocol/federated-signer-proto |
-| Commit | `359a421245cf5b78078426c2b98a3a92bb63ab07` ("Merge branch 'main' into vs/signer-groups-support") |
-| Commit date | 2026-08-17T22:27:11+03:00 |
+| Commit | `18c5d271d40a049ec0ffc8f3a970ef042d8b7ffb` ("feat: carry mint ancestry on the mint path", branch `bfa`) |
+| Commit date | 2026-09-02T09:29:35+03:00 |
 
 This is the same commit `parent/Cargo.toml` still pins as a git dependency, so
 both crates compile against one schema version. Keep them in lockstep.
@@ -48,7 +48,7 @@ both crates compile against one schema version. Keep them in lockstep.
 Verify against upstream (needs read access to the private repo):
 
 ```bash
-REV=359a421245cf5b78078426c2b98a3a92bb63ab07
+REV=18c5d271d40a049ec0ffc8f3a970ef042d8b7ffb
 git clone https://github.com/UTEXO-Protocol/federated-signer-proto /tmp/fsp
 git -C /tmp/fsp checkout "$REV"
 diff /tmp/fsp/rust-gen/src/enclave/enclave.rs enclave-proto/src/enclave.rs
@@ -63,8 +63,8 @@ git hash-object enclave-proto/src/enclave.rs enclave-proto/proto/enclave.proto
 
 | File | Upstream blob hash |
 |---|---|
-| `rust-gen/src/enclave/enclave.rs` | `bfb9857f6a24cd85d2a9324ea1e19ad6a7291f5a` |
-| `proto/enclave/enclave.proto` | `9060c2dbebfad3eb0025f72e297dfd3884b2bd81` |
+| `rust-gen/src/enclave/enclave.rs` | `dcdc121e83278ac83a7723c31bc2a18c511186d5` |
+| `proto/enclave/enclave.proto` | `2068a6e78bbdfe03f2f06ade4551f3123a846910` |
 
 ## Why only `prost`
 

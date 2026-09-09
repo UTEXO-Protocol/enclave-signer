@@ -1,0 +1,94 @@
+# syntax=docker/dockerfile:1.4
+# Enclave (dev mode, TCP, no vsock) WITH the BFA mint path.
+# Usage:
+#   DOCKER_BUILDKIT=1 docker build -f build/Dockerfile.enclave-dev.bfa \
+#     --secret id=github_token,src=<file> -t utexo-bridge-enclave-dev .
+#
+# This is Dockerfile.enclave-dev plus `bfa-mint`, and unlike its sibling it DOES
+# need a credential: on branch `bfa` the workspace `[patch.crates-io]` resolves
+# four RGB crates from three PRIVATE UTEXO-Protocol mirrors, so an anonymous
+# build gets HTTP 401 at dependency resolution.
+#
+# Unlike Dockerfile.enclave.bfa this image bakes NO RGB_ASSET_ID: a dev-mode
+# enclave is not measured into a PCR the contract trusts, and the stand supplies
+# its pins through the environment.
+
+# ===== Builder Stage =====
+FROM rust:1.96-slim AS builder
+
+# `git` + `ca-certificates`: the `[patch.crates-io]` block and the
+# rgb-consignment dep are public HTTPS git URLs, and `.cargo/config.toml` sets
+# `net.git-fetch-with-cli = true` so cargo shells out to system `git` rather
+# than bundled libgit2. No SSH transport is used, so no `openssh-client`.
+# `protobuf-compiler` is NOT needed: no crate here has a build.rs.
+# `make` and `cmake` are here and not in the credential-free sibling: the private
+# RGB mirrors pull `aws-lc-sys`, which builds C sources through CMake.
+RUN apt-get update && apt-get install -y \
+    pkg-config libssl-dev git ca-certificates make cmake \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /build
+COPY . /build/
+
+WORKDIR /build/enclave
+# Dev image still gets `spv` so the new code path is exercised even
+# without the production-only `vsock,rgb-validation` combo. Without spv,
+# the enclave fails-closed on any request that carries merkle_proofs,
+# which is what we want - build mismatch should always fail loudly.
+#
+# DEBUG build (no `--release`): `allow-seed-import` is one of the dev-only
+# features that `compile_error!`s in a release build (`debug_assertions`
+# off) - see the release guards in `enclave/src/lib.rs`. Building the dev
+# image in debug keeps `debug_assertions` on so the guard stays quiet while
+# still refusing the feature in any production (release) build.
+#
+# `--no-default-features` is REQUIRED: defaults are `rgb,ccd,helios`, and a plain
+# `--features` still applies them - `helios` would pull openssl-sys, which needs
+# `make` (not installed in this stage) and fails. Keep the list below explicit.
+# `ccd` is listed because Concordium signing sits behind that feature; without it
+# every CCD request answers "not compiled in".
+#
+# `bfa-mint` is the only difference in compiled code from Dockerfile.enclave-dev.
+# `ccd` stays in the list: init-enclaves.sh ends by asking each adapter for its
+# CCD_GOVERNANCE public key and fails the whole run if that answers "not
+# compiled in".
+#
+# The token is never interpolated into a URL: the rewrite carries only the
+# username and git asks the askpass helper - which reads the tmpfs mount - for
+# the password, so no file left on disk holds it. An in-URL token would survive
+# in cargo's FETCH_HEAD inside the builder layer.
+RUN --mount=type=secret,id=github_token,required=true \
+    set -eu; \
+    [ -s /run/secrets/github_token ] || { \
+      echo "ERROR: secret 'github_token' is empty - it needs a GitHub token with read access to the private UTEXO-Protocol RGB mirrors" >&2; \
+      exit 1; \
+    }; \
+    printf '#!/bin/sh\ncat /run/secrets/github_token\n' > /usr/local/bin/gh-askpass; \
+    chmod 0755 /usr/local/bin/gh-askpass; \
+    git config --global url."https://x-access-token@github.com/UTEXO-Protocol/".insteadOf "https://github.com/UTEXO-Protocol/"; \
+    GIT_ASKPASS=/usr/local/bin/gh-askpass GIT_TERMINAL_PROMPT=0 \
+    cargo build --no-default-features --features allow-seed-import,spv,ccd,evm-rpc,bfa-mint
+
+# ===== Runtime Stage =====
+FROM debian:trixie-slim
+
+RUN apt-get update && apt-get install -y \
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/* \
+    && useradd -u 1000 -m enclave
+
+WORKDIR /home/enclave
+
+COPY --from=builder /build/target/debug/utexo-bridge-enclave ./utexo-bridge-enclave
+
+RUN chown -R enclave:enclave .
+
+USER enclave
+
+ENV ENCLAVE_LISTEN_ADDR=0.0.0.0:5000
+ENV BITCOIN_NETWORK=testnet
+ENV RUST_LOG=debug
+
+EXPOSE 5000
+
+ENTRYPOINT ["./utexo-bridge-enclave"]

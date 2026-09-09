@@ -1,4 +1,7 @@
 /target/
+# `parent/` is its own workspace (see the root Cargo.toml), so the anchored
+# rule above does not cover its build dir.
+/parent/target/
 .claude/
 .idea/
 /docs/raw

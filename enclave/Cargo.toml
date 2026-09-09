@@ -42,12 +42,14 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 # RGB consignment validation (optional, behind rgb-validation feature)
 rgb-ops = { version = "0.11.1-rc.7", features = ["esplora_blocking", "electrum_blocking"], optional = true }
-rgb-consignment = { git = "https://github.com/UTEXO-Protocol/consignment-utils.git", rev = "6a792af035cc5b011a790831a0732d420a2413e0", default-features = false, optional = true }
+rgb-consignment = { git = "ssh://git@github-rgb-consignment/UTEXO-Protocol/consignment-utils.git", rev = "6a792af035cc5b011a790831a0732d420a2413e0", default-features = false, optional = true }
 rgb-schemas = { version = "=0.11.1-rc.10", default-features = false, optional = true }
 # Invoice parsing for the send-RGB recipient bind. Sibling crate of `rgb-ops`
 # in the same repo and already in the lock at its rev, so this adds no new
-# third-party code.
-rgb-invoicing = { version = "0.11.1-rc.11", default-features = false, optional = true }
+# third-party code. Pinned to rc.10 like `rgb-schemas`: the BFA mirrors in the
+# workspace `[patch]` are cut from rc.10, and an rc.11 requirement would make
+# cargo ignore the patch and resolve upstream instead.
+rgb-invoicing = { version = "=0.11.1-rc.10", default-features = false, optional = true }
 attestation-verify = { path = "../attestation-verify" }
 serde = { version = "1", features = ["derive"] }
 
@@ -125,6 +127,15 @@ evm-rpc = ["rgb-validation", "dep:alloy", "dep:tokio"]
 # rejects at boot (production policy requires the trustless source). Shipped in
 # the production EIF. HEAVY build (2 alloy majors, revm, BLS, vendored OpenSSL).
 helios = ["evm-rpc", "dep:helios-ethereum"]
+# BFA (Bridged Fungible Asset) mint support. Purely additive on top of `rgb`: it
+# only widens consignment validation to the bridged schema, whose script ends
+# with the `cea` ether-extension opcode the default validator decodes as `Fail`.
+# `evm-rpc` because the events that opcode checks come from the enclave's own
+# verified `FundsIn` read. The swap enclave is built without the feature and so
+# keeps its behaviour, but NOT its PCR0: the workspace `[patch.crates-io]` moves
+# every build onto the BFA RGB crates (and electrum-client 0.24), so every EIF
+# here re-measures and the signer set must rotate.
+bfa-mint = ["rgb", "evm-rpc"]
 
 [dev-dependencies]
 rand = "0.10.0"

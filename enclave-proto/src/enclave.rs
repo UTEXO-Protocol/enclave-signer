@@ -219,7 +219,7 @@ pub mod sign_request {
         #[prost(message, tag="6")]
         CcdSource(super::CcdSource),
     }
-    #[derive(Clone, PartialEq, Eq, Hash, ::prost::Oneof)]
+    #[derive(Clone, PartialEq, ::prost::Oneof)]
     pub enum DestinationNetwork {
         #[prost(message, tag="4")]
         EvmDestination(super::EvmDestination),
@@ -273,6 +273,29 @@ pub struct RgbSource {
     /// Commission reported by the source event.
     #[prost(uint64, tag="7")]
     pub commission: u64,
+    /// Every historical BFA mint the consignment descends from, paired with the
+    /// EVM transaction that authorised it.
+    ///
+    /// A burn consignment necessarily carries its whole mint ancestry, and each
+    /// of those mint transitions runs a script that demands a verified FundsIn
+    /// event. The enclave cannot find those receipts on its own - unlike the mint
+    /// direction, whose EvmSource already names its own tx_hash - so the listener
+    /// supplies the pairs and the enclave verifies every one of them. A missing or
+    /// mismatched entry fails the validation closed; these are hints, never
+    /// evidence.
+    #[prost(message, repeated, tag="8")]
+    pub mint_ancestors: ::prost::alloc::vec::Vec<MintAncestor>,
+}
+/// MintAncestor pairs one historical BFA mint transition with the EVM deposit
+/// that backed it.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct MintAncestor {
+    /// 32-byte RGB OpId of the TS_BRIDGE transition.
+    #[prost(bytes="vec", tag="1")]
+    pub op_id: ::prost::alloc::vec::Vec<u8>,
+    /// 32-byte EVM transaction hash of its FundsIn deposit.
+    #[prost(bytes="vec", tag="2")]
+    pub tx_hash: ::prost::alloc::vec::Vec<u8>,
 }
 /// CcdSource is the validated Concordium source of a fundsIn operation (the
 /// finalized user->governance transfer or governance burn). The listener has
@@ -331,7 +354,7 @@ pub struct LzReleaseParams {
     #[prost(bytes="vec", tag="3")]
     pub recipient: ::prost::alloc::vec::Vec<u8>,
 }
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+#[derive(Clone, PartialEq, ::prost::Message)]
 pub struct RgbDestination {
     /// Destination operation index.
     #[prost(uint64, tag="1")]
@@ -351,6 +374,12 @@ pub struct RgbDestination {
     /// keccak256(consignment).
     #[prost(bytes="vec", tag="6")]
     pub consignment_hash: ::prost::alloc::vec::Vec<u8>,
+    /// The EVM deposit behind every earlier mint this consignment descends from.
+    /// The terminal mint is bound to EvmSource.tx_hash instead, so listing it here
+    /// is refused: that is the only way a spent lock could be substituted for the
+    /// one this request pays with. Hints, never evidence - each is verified.
+    #[prost(message, repeated, tag="7")]
+    pub mint_ancestors: ::prost::alloc::vec::Vec<MintAncestor>,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct MerkleProofEntry {

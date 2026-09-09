@@ -43,6 +43,11 @@ pub struct ValidationContext<'a> {
     #[cfg(feature = "rgb-validation")]
     pub self_owned_psbt_outputs:
         Option<crate::networks::rgb::psbt_validation::SelfOwnedOutpoint<'a>>,
+    /// EVM lock events the enclave verified itself, handed to RGB consensus so
+    /// the ether extension can re-check a BFA mint's amount. Empty on every
+    /// other path; a BFA consignment with an empty set is refused.
+    #[cfg(feature = "bfa-mint")]
+    pub bridge_events: &'a [rgbstd::vm::ether_extension::Event],
 }
 
 /// Outcome of validating a source network: the route proof, plus the validated
@@ -249,6 +254,7 @@ mod tests {
             psbt_output_amount: destination_amount,
             asset_id: "rgb:test-asset".into(),
             consignment: vec![],
+            mint_ancestors: Vec::new(),
             consignment_hash: vec![],
         })
     }
@@ -261,6 +267,7 @@ mod tests {
             consignment_hash: vec![0x02; 32],
             merkle_proofs: vec![],
             commission: 20,
+            mint_ancestors: vec![],
         })
     }
 

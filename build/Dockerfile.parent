@@ -42,6 +42,11 @@ RUN mkdir -p /root/.ssh && \
 WORKDIR /build
 COPY . /build/
 
+# The parent depends on the enclave crate with default features, so on branch
+# `bfa` its build also resolves four RGB crates from private UTEXO-Protocol
+# mirrors. The rewrite below sends those over the SSH identity already mounted
+# here rather than adding a second credential.
+#
 # `--mount=type=ssh` exposes the SSH_AUTH_SOCK forwarded by `--ssh default`.
 # In CD we also pass the deploy key as a BuildKit secret so git uses exactly
 # that identity (a shared agent may offer the wrong key first, and GitHub then
@@ -54,6 +59,7 @@ RUN --mount=type=ssh \
       install -m 600 /run/secrets/federated_key /tmp/federated_key; \
       export GIT_SSH_COMMAND="ssh -i /tmp/federated_key -o IdentitiesOnly=yes"; \
     fi; \
+    git config --global url."git@github.com:UTEXO-Protocol/".insteadOf "https://github.com/UTEXO-Protocol/"; \
     cd /build/parent && cargo build --release
 
 # ===== Runtime Stage =====

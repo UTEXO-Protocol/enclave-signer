@@ -75,8 +75,9 @@ flowchart TD
 - `burnId` / `fundsInIds` inside the calldata are **preserved as received**
 . The in-enclave OpId rewrite (`burnId` derived from the validated
   consignment OpId) is implemented but dormant until flows are
-  routed by network id; mint/burn unlock (`TS_BURN` consignments) cannot
-  complete this gate — only the swap flow (`TS_TRANSFER`) signs.
+  routed by network id. Both the swap flow (`TS_TRANSFER`) and the BFA
+  mint/burn flow (`TS_BURN`, with every `TS_BRIDGE` in its ancestry
+  checked against its own verified `FundsIn` lock) complete this gate.
 - `dev-mode` builds bypass the validation subgraphs entirely; every dev
   feature is a `compile_error!` in release builds, and a release bridge build
   refuses to boot without a valid attested `Production` policy.
@@ -90,8 +91,9 @@ deployed-contract fixture test; chain / contract / asset env-pinned; BtcRelay
 proof agreement wired (inert until the listener populates it).
 
 **Remaining gaps:**
-- Recipient not derived from / bound to the RGB payload (blocked on an
-  EVM-destination commitment in the RGB burn schema, cross-repo).
+- Recipient binding covers the burn path only: a `TS_BURN` commits its
+  payout target in `MS_BURN_RECIPIENT` and the enclave refuses a release
+  naming a different address. A swap's recipient is still unbound.
 - OpId binding dormant (see note above); backend `burnId` is signed as
   received.
 - Amount bind is coverage (`≥`), not strict `==` (per-output recipient-leg
