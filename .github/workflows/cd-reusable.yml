@@ -63,7 +63,7 @@ jobs:
             float: ${{ needs.prepare.outputs.float_parent }}
           - name: enclave
             image: utexo-bridge-enclave
-            dockerfile: ./build/Dockerfile.enclave-dev
+            dockerfile: ./build/Dockerfile.enclave-dev.bfa
             tag: ${{ needs.prepare.outputs.tag_enclave }}
             float: ${{ needs.prepare.outputs.float_enclave }}
       fail-fast: false
