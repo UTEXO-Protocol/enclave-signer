@@ -15,7 +15,7 @@ use utexo_bridge_parent::enclave_proto::{InitializeKeyResponse, PublicKeysRespon
 )]
 struct Cli {
     /// Enclave address: `host:port` (TCP, dev builds) or `vsock://<cid>:<port>`
-    /// (Nitro, vsock builds — e.g. `vsock://18:5000`). On a vsock build you MUST
+    /// (Nitro, vsock builds - e.g. `vsock://18:5000`). On a vsock build you MUST
     /// pass a `vsock://` addr or set ENCLAVE_VSOCK_CID; it will not default to CID 16.
     #[arg(long, default_value = "127.0.0.1:5000")]
     addr: String,
@@ -92,11 +92,9 @@ enum Command {
         /// EVM commission
         #[arg(long, default_value = "0")]
         evm_commission: u64,
-        /// On-chain BridgeFundsIn.operationId of the source deposit (bridge
-        /// transfer id). The enclave #60 check binds the on-chain operationId to
-        /// this value.
-        #[arg(long, default_value = "0")]
-        evm_funds_in_operation_id: u64,
+        /// On-chain BridgeFundsIn.operationId, 32-byte hex. Required.
+        #[arg(long, default_value = "")]
+        evm_funds_in_operation_id: String,
         /// PSBT total non-change output amount
         #[arg(long, default_value = "0")]
         psbt_output_amount: u64,
@@ -113,12 +111,6 @@ enum Command {
         #[arg(long, default_value = "")]
         consignment: String,
     },
-    /// Sign a raw message (fundsIn authorization, 1-of-n)
-    SignRawMessage {
-        /// Hex-encoded message bytes
-        #[arg(long)]
-        message: String,
-    },
     /// Get the enclave's current SPV chain tip (height + hash).
     /// Listener calls this on startup to know where to resume header sync.
     GetLastSavedBlock,
@@ -127,7 +119,7 @@ enum Command {
     /// Headers are read from a file: one hex-encoded 80-byte header per line,
     /// in ascending height order. Empty lines and lines starting with `#` are
     /// ignored. Pass an empty file to send a no-op batch (useful for smoke
-    /// testing — proves the dispatch path without a fixture chain).
+    /// testing - proves the dispatch path without a fixture chain).
     SubmitHeaders {
         /// Block height of the first header in the batch.
         #[arg(long)]
@@ -362,6 +354,7 @@ fn main() {
                 merkle_proofs: vec![],
                 consignment: vec![],
                 consignment_hash: vec![],
+                lz_release: None,
             };
             match client.sign_evm(req) {
                 Ok(r) => {
@@ -420,9 +413,27 @@ fn main() {
                     }
                 }
             };
+            let funds_in_operation_id = match hex::decode(
+                evm_funds_in_operation_id
+                    .strip_prefix("0x")
+                    .unwrap_or(&evm_funds_in_operation_id),
+            ) {
+                Ok(d) if d.len() == 32 => d,
+                Ok(d) => {
+                    eprintln!(
+                        "--evm-funds-in-operation-id must be 32 bytes (BridgeFundsIn operationId), got {}",
+                        d.len()
+                    );
+                    process::exit(1);
+                }
+                Err(e) => {
+                    eprintln!("Invalid hex evm_funds_in_operation_id: {}", e);
+                    process::exit(1);
+                }
+            };
             let req = SignPsbtRequest {
                 evm_tx_hash: tx_hash,
-                evm_funds_in_operation_id,
+                evm_funds_in_operation_id: funds_in_operation_id,
                 operation_idx: 0,
                 evm_event_valid,
                 evm_event_finalized,
@@ -440,24 +451,6 @@ fn main() {
                 Ok(r) => {
                     println!("Signed PSBT: {}", hex::encode(&r.signed_psbt));
                     println!("Inputs signed: {}", r.inputs_signed);
-                }
-                Err(e) => {
-                    eprintln!("Error: {}", e);
-                    process::exit(1);
-                }
-            }
-        }
-        Command::SignRawMessage { message } => {
-            let msg_bytes = match hex::decode(&message) {
-                Ok(d) => d,
-                Err(e) => {
-                    eprintln!("Invalid hex message: {}", e);
-                    process::exit(1);
-                }
-            };
-            match client.sign_raw_message(msg_bytes) {
-                Ok(r) => {
-                    println!("Signature (65 bytes): {}", hex::encode(&r.signature));
                 }
                 Err(e) => {
                     eprintln!("Error: {}", e);
@@ -599,7 +592,7 @@ fn read_headers_file(path: &std::path::Path) -> std::io::Result<Vec<Vec<u8>>> {
                 format!("line {}: invalid hex: {}", lineno + 1, e),
             )
         })?;
-        // Don't enforce 80 bytes here — the enclave will reject on parse.
+        // Don't enforce 80 bytes here - the enclave will reject on parse.
         // Keeping the CLI permissive lets us deliberately send malformed
         // headers in smoke tests.
         headers.push(bytes);

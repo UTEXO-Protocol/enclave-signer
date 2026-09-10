@@ -1,5 +1,11 @@
 pub mod btc_crosscheck;
 pub mod btc_ownership;
+#[cfg(feature = "rgb-validation")]
+pub mod flow;
+// The invoice bind reads a verified BridgeFundsIn log, so it only exists
+// where the enclave can fetch one (`evm-rpc` implies `rgb-validation`).
+#[cfg(feature = "evm-rpc")]
+pub mod invoice;
 pub mod psbt_validation;
 pub mod signing;
 pub mod spv;
@@ -72,7 +78,6 @@ fn route_proof_from_validated_consignment(
     validated: &validation::ValidatedConsignment,
 ) -> Result<RouteProof> {
     use crate::error::EnclaveError;
-    use validation::ifa;
 
     let last = validated.last_transition.as_ref().ok_or_else(|| {
         EnclaveError::CrossCheck(
@@ -80,20 +85,9 @@ fn route_proof_from_validated_consignment(
         )
     })?;
 
-    let amount = match last.transition_type {
-        ifa::TS_TRANSFER => last.total_output_amount,
-        ifa::TS_BURN => last.burned_asset_amount.ok_or_else(|| {
-            EnclaveError::CrossCheck(
-                "burn transition is missing MS_BURNED_ASSET metadata — cannot validate amount"
-                    .into(),
-            )
-        })?,
-        other => {
-            return Err(EnclaveError::CrossCheck(format!(
-                "unsupported RGB transition_type for route proof: {other}"
-            )));
-        }
-    };
+    // Which transition proves the withdrawal, and where its amount lives, is
+    // the flow's business - see `flow/`.
+    let amount = flow::funds_out_source_amount(last)?;
 
     Ok(RouteProof {
         amount,
@@ -136,13 +130,17 @@ pub fn validate_destination(
     Ok(())
 }
 
+/// Returns the **recipient leg** of the bound consignment in asset units - see
+/// [`psbt_validation::validate_psbt_anchors_transition`]. This is the
+/// enclave-derived destination amount the route-level cross-check uses, in
+/// place of the host-supplied `psbt_output_amount`.
 #[cfg(feature = "rgb-validation")]
 pub fn validate_destination_anchor(
     destination: &RgbDestination,
     source_amount: u64,
     source_commission: u64,
     ctx: &ValidationContext<'_>,
-) -> Result<()> {
+) -> Result<(u64, Vec<String>)> {
     use crate::error::EnclaveError;
 
     if destination.consignment.is_empty() {
@@ -151,21 +149,13 @@ pub fn validate_destination_anchor(
                 .into(),
         ));
     }
-    // Aggregate size cap (operator-configurable via `MAX_CONSIGNMENT_BYTES`),
-    // before the keccak hash and the rgbstd parse below — the destination
-    // consignment is otherwise bounded only by the generic 4 MB wire frame.
-    if destination.consignment.len() > ctx.bridge_config.max_consignment_bytes {
-        return Err(EnclaveError::CrossCheck(format!(
-            "send-RGB consignment too large: {} bytes (max {})",
-            destination.consignment.len(),
-            ctx.bridge_config.max_consignment_bytes
-        )));
-    }
-    // Wire-tamper detection, mirroring the EVM path's defence-in-depth check.
-    // INTEGRITY, NOT AUTHORIZATION (audit I-02 / Oxorio I-09): the listener
+    // The destination consignment is otherwise bounded only by the generic
+    // 4 MB wire frame.
+    validation::assert_consignment_size(&destination.consignment, ctx.bridge_config, "send-RGB")?;
+    // Integrity, not authorization: the listener
     // controls both `consignment` and `consignment_hash`, so a match only
-    // proves the wire copy is intact - authorization is the full rgbstd
-    // validation + witness-txid bind below, never this hash.
+    // proves the wire copy is intact. Authorization is the rgbstd validation
+    // plus the witness-txid bind below.
     if destination.consignment_hash.is_empty() {
         return Err(EnclaveError::CrossCheck(
             "consignment present but consignment_hash is missing".into(),
@@ -188,7 +178,9 @@ pub fn validate_destination_anchor(
             "send-RGB PSBT carries a consignment but the RGB validator is not configured".into(),
         )
     })?;
-    let validated = validator.validate_consignment(&destination.consignment)?;
+    // A BFA mint cannot be validated at all without the event `cea` checks it
+    // against, so the caller verified the EVM lock before reaching here.
+    let validated = validator.validate_consignment(&destination.consignment, ctx.bridge_events)?;
 
     if validated.contract_id != destination.asset_id {
         return Err(EnclaveError::CrossCheck(format!(
@@ -196,15 +188,12 @@ pub fn validate_destination_anchor(
             validated.contract_id, destination.asset_id
         )));
     }
-    // Asset-identity pin (audit TEE-SE-01). Fail closed when RGB_ASSET_ID is not
-    // pinned: dev-ng refused to bind a send-RGB PSBT to an unpinned asset in
-    // every non-dev-mode build (this function is already dev-mode-gated at the
-    // dispatch), mirroring the EVM funds-out path's `!is_configured()` gate. An
-    // unconfigured yet rgb-validation-enabled enclave must not sign in
-    // listener-trusting mode.
+    // Asset-identity pin, fail-closed when RGB_ASSET_ID is
+    // unset: an unconfigured yet rgb-validation-enabled enclave must not sign in
+    // listener-trusting mode. Mirrors the EVM funds-out `!is_configured()` gate.
     if ctx.bridge_config.rgb_asset_id.is_empty() {
         return Err(EnclaveError::CrossCheck(
-            "asset-identity pin missing: RGB_ASSET_ID is not configured — refusing to bind a \
+            "asset-identity pin missing: RGB_ASSET_ID is not configured - refusing to bind a \
              send-RGB PSBT to an unpinned asset"
                 .into(),
         ));
@@ -218,19 +207,33 @@ pub fn validate_destination_anchor(
 
     let psbt = bitcoin::psbt::Psbt::deserialize(&destination.psbt_bytes)
         .map_err(|e| EnclaveError::CrossCheck(format!("psbt_bytes is not a valid PSBT: {e}")))?;
-    psbt_validation::validate_psbt_anchors_transition(
+    // Fail closed: the per-output recipient bind needs to tell a
+    // bridge change output from a payout, and it cannot do that without the
+    // enclave's own keys. No resolver means no bind, so refuse to sign.
+    let self_owned = ctx.self_owned_psbt_outputs.ok_or_else(|| {
+        EnclaveError::CrossCheck(
+            "send-RGB PSBT cannot be bound: no self-owned-output resolver is wired in, so the \
+             enclave cannot distinguish bridge change from a payout to a third party"
+                .into(),
+        )
+    })?;
+    // `legs.recipient_seals` is surfaced, not compared here: the invoice is
+    // only authenticated once the FundsIn receipt is verified, in `handle_sign`.
+    let legs = psbt_validation::validate_psbt_anchors_transition(
         &psbt,
         &validated,
         source_amount,
         source_commission,
+        self_owned,
     )?;
 
-    // Fee-rate sanity (#55), after the pure anchor checks so the (cached)
-    // Esplora round-trip is the last thing that can reject. Fail-closed when
-    // the estimate is unavailable: the host controls the Esplora egress, so
-    // "no estimate → skip" would let the host disable the check.
+    // Fee-rate sanity, after the pure anchor checks so the cached Esplora
+    // round-trip is the last thing that can reject. Fail-closed when the
+    // estimate is unavailable, since the host controls that egress.
     let recommended = validator.recommended_fee_rate_sat_vb()?;
-    psbt_validation::check_psbt_fee_rate(&psbt, recommended)
+    psbt_validation::check_psbt_fee_rate(&psbt, recommended)?;
+
+    Ok((legs.recipient, legs.recipient_seals))
 }
 
 #[cfg(all(test, feature = "rgb-validation"))]
@@ -257,14 +260,30 @@ mod tests {
                 asset_output_amount: total_output_amount,
                 outputs: vec![],
                 burned_asset_amount,
+                burn_recipient: None,
             }),
-            last_transfer_witness_txid: None,
+            last_witness_txid: None,
             last_transfer_witness_prevouts: None,
             last_transfer_op_id: None,
             non_mined_witness_txids: vec![],
+            // These cases never reach the PSBT bind (garbage `psbt_bytes`).
+            transitions_by_witness: vec![],
         }
     }
 
+    /// A withdrawal consignment shaped for this build's flow, carrying
+    /// `amount` where that flow reads it.
+    #[cfg(feature = "rgb-swap")]
+    fn funds_out_consignment(amount: u64, op_id: &str) -> ValidatedConsignment {
+        validated_consignment(ifa::TS_TRANSFER, amount, None, op_id)
+    }
+
+    #[cfg(feature = "rgb-mint-burn")]
+    fn funds_out_consignment(amount: u64, op_id: &str) -> ValidatedConsignment {
+        validated_consignment(ifa::TS_BURN, 0, Some(amount), op_id)
+    }
+
+    #[cfg(feature = "rgb-swap")]
     #[test]
     fn route_proof_uses_transfer_output_amount() {
         let op_id = "0xAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
@@ -283,6 +302,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "rgb-mint-burn")]
     #[test]
     fn route_proof_uses_burn_metadata_amount() {
         let op_id = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
@@ -298,6 +318,7 @@ mod tests {
         assert_eq!(proof.operation_id.as_deref(), Some(op_id));
     }
 
+    #[cfg(feature = "rgb-mint-burn")]
     #[test]
     fn route_proof_rejects_burn_without_burned_amount() {
         let err = route_proof_from_validated_consignment(&validated_consignment(
@@ -313,10 +334,8 @@ mod tests {
 
     #[test]
     fn route_proof_rejects_non_hex_operation_id() {
-        let err = route_proof_from_validated_consignment(&validated_consignment(
-            ifa::TS_TRANSFER,
+        let err = route_proof_from_validated_consignment(&funds_out_consignment(
             100,
-            None,
             "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz",
         ))
         .unwrap_err();
@@ -324,23 +343,30 @@ mod tests {
         assert!(err.to_string().contains("not hex-decodable"));
     }
 
-    // =========================================================================
-    // Asset-identity binding, DESTINATION path — successor of the dropped
-    // `evm_crosscheck::asset_bind` suite (audit TEE-SE-01). Its target,
-    // `bind_asset_identity`, was removed in the networks/ split; the legs are
-    // now INLINED in `validate_destination_anchor` after
-    // `validate_consignment`, so that function is the narrowest callable
-    // unit. Driven end-to-end with the in-tree mainnet transfer fixture
-    // validated offline against a stub Esplora (the resolver only phones
-    // home for the genesis-hash chain-identity check; the fixture embeds its
-    // witness txs, registered as tentative via `add_consignment_txes`).
+    /// The other flow's withdrawal shape must not authorize a release here.
+    #[test]
+    fn route_proof_rejects_the_other_flows_shape() {
+        let op_id = "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd";
+        #[cfg(feature = "rgb-swap")]
+        let wrong = validated_consignment(ifa::TS_BURN, 0, Some(700), op_id);
+        #[cfg(feature = "rgb-mint-burn")]
+        let wrong = validated_consignment(ifa::TS_TRANSFER, 700, None, op_id);
+
+        let err = route_proof_from_validated_consignment(&wrong).unwrap_err();
+        assert!(
+            err.to_string().contains("this enclave is built for the"),
+            "expected flow-shape rejection, got: {err}"
+        );
+    }
+
+    // Asset-identity binding, destination path. The legs are
+    // inlined in `validate_destination_anchor` after `validate_consignment`, so
+    // that function is the narrowest callable unit. Driven end-to-end with the
+    // in-tree mainnet transfer fixture against a stub Esplora.
     //
-    // Path asymmetry (deliberate): this path enforces the RGB_ASSET_ID pin
-    // UNCONDITIONALLY — a post-merge strengthening — whereas the source path
-    // (`validation::validate_source`) gates it on
-    // `BridgeConfig::is_configured()`; see
-    // `validation::tests::asset_bind::pin_check_skipped_when_config_unconfigured`.
-    // =========================================================================
+    // Deliberate asymmetry: this path enforces the RGB_ASSET_ID pin
+    // unconditionally, while the source path gates it on
+    // `BridgeConfig::is_configured()`.
 
     mod asset_bind {
         use super::*;
@@ -366,13 +392,13 @@ mod tests {
             let id = t.contract_id().to_string();
             assert_eq!(
                 id, FIXTURE_ASSET_ID,
-                "transfer fixture contract id drifted — update FIXTURE_ASSET_ID"
+                "transfer fixture contract id drifted - update FIXTURE_ASSET_ID"
             );
             id
         }
 
         /// Stub Esplora serving only `GET /block-height/0` with the mainnet
-        /// genesis hash — all offline rgbstd validation of the fixture needs:
+        /// genesis hash - all offline rgbstd validation of the fixture needs:
         /// the resolver phones home only for the genesis-hash chain-identity
         /// check, and the fixture embeds its witness txs (registered as
         /// tentative via `add_consignment_txes`).
@@ -421,7 +447,7 @@ mod tests {
             }
         }
 
-        /// Fully-empty operator config — no RGB_ASSET_ID pin at all.
+        /// Fully-empty operator config - no RGB_ASSET_ID pin at all.
         fn unconfigured_config() -> BridgeConfig {
             BridgeConfig {
                 chain_id: 0,
@@ -433,11 +459,9 @@ mod tests {
         }
 
         /// A destination around the fixture consignment, hash-bound, with
-        /// deliberately garbage `psbt_bytes`: PSBT deserialization runs
-        /// strictly AFTER every asset-binding leg, so its distinctive error
-        /// is this suite's proof that the binding was traversed (a PSBT
-        /// genuinely anchored to the fixture's mainnet witness tx is not
-        /// constructible in a unit test).
+        /// deliberately garbage `psbt_bytes`. PSBT deserialization runs after
+        /// every asset-binding leg, so its distinctive error proves the binding
+        /// was traversed.
         fn fixture_destination(asset_id: &str) -> RgbDestination {
             RgbDestination {
                 operation_idx: 0,
@@ -445,6 +469,7 @@ mod tests {
                 psbt_output_amount: 0,
                 asset_id: asset_id.into(),
                 consignment: TRANSFER_FIXTURE.to_vec(),
+                mint_ancestors: Vec::new(),
                 consignment_hash: Keccak256::digest(TRANSFER_FIXTURE).to_vec(),
             }
         }
@@ -454,7 +479,7 @@ mod tests {
         fn run_validate_destination_anchor(
             destination: &RgbDestination,
             config: &BridgeConfig,
-        ) -> Result<()> {
+        ) -> Result<u64> {
             let url = spawn_stub_esplora();
             let validator = RgbValidator::new(url, "bitcoin").expect("validator");
             let chain = Mutex::new(HeaderChain::new(
@@ -467,12 +492,19 @@ mod tests {
                     is_real: false,
                 },
             ));
+            // Every case in this suite fails before the PSBT stage (the
+            // fixture's `psbt_bytes` are deliberately garbage), so the
+            // resolver is never called - but it must be present, or the
+            // fail-closed guard would mask the error each test asserts on.
+            let self_owned = |_: &bitcoin::psbt::Psbt, _: bitcoin::OutPoint| Ok(false);
             let ctx = ValidationContext {
                 bridge_config: config,
                 rgb_validator: Some(&validator),
                 header_chain: &chain,
+                self_owned_psbt_outputs: Some(&self_owned),
+                bridge_events: &[],
             };
-            validate_destination_anchor(destination, 0, 0, &ctx)
+            validate_destination_anchor(destination, 0, 0, &ctx).map(|(amount, _)| amount)
         }
 
         /// Happy path (old `binds_when_contract_id_matches_pin`): validated
@@ -495,13 +527,9 @@ mod tests {
             );
         }
 
-        /// Old `binds_when_declared_is_empty`, semantics INVERTED by a
-        /// deliberate post-merge strengthening: the destination must declare
-        /// its asset — an empty `asset_id` fails closed before the validator
-        /// even runs, instead of binding via the pin alone. This same
-        /// rejection carries the old
-        /// `rejects_foreign_asset_even_when_declared_is_empty` guarantee:
-        /// with an empty declared id *nothing* binds, foreign or not.
+        /// The destination must declare its asset: an empty `asset_id` fails
+        /// closed before the validator runs, rather than binding via the pin
+        /// alone. With an empty declared id nothing binds, foreign or not.
         #[test]
         fn rejects_when_declared_is_empty() {
             let err = run_validate_destination_anchor(
@@ -516,12 +544,10 @@ mod tests {
             );
         }
 
-        /// Old `rejects_foreign_asset_even_when_declared_is_empty`, adapted:
-        /// empty declarations are rejected up-front (previous test), so the
-        /// closest reachable form of the TEE-SE-01 funds-theft path is a
-        /// listener that *colludes* — declaring the foreign asset
-        /// consistently with the consignment. The pin must still reject it:
-        /// RGB_ASSET_ID is load-bearing regardless of what the listener says.
+        /// Empty declarations are rejected up-front, so the reachable form of
+        /// the funds-theft path is a listener that declares the
+        /// foreign asset consistently with the consignment. The RGB_ASSET_ID
+        /// pin must still reject it.
         #[test]
         fn rejects_foreign_asset_even_when_declared_agrees() {
             let id = fixture_asset_id();
@@ -537,11 +563,10 @@ mod tests {
             );
         }
 
-        /// Old `rejects_when_pin_absent` — semantics carry, STRENGTHENED:
-        /// this path fails closed on a missing RGB_ASSET_ID pin
-        /// UNCONDITIONALLY (no `is_configured()` gate), a deliberate
-        /// post-merge hardening. An rgb-validation-enabled enclave with no
-        /// pin must not sign a send-RGB PSBT in listener-trusting mode.
+        /// This path fails closed on a missing RGB_ASSET_ID pin
+        /// unconditionally, with no `is_configured()` gate: an
+        /// rgb-validation-enabled enclave with no pin must not sign a send-RGB
+        /// PSBT in listener-trusting mode.
         #[test]
         fn rejects_when_pin_absent() {
             let id = fixture_asset_id();
@@ -554,9 +579,8 @@ mod tests {
             );
         }
 
-        /// Old `rejects_when_declared_disagrees_with_validated`: the listener
-        /// declares a different asset than the validated identity. Fires on
-        /// the declared-vs-validated leg (which runs before the pin block).
+        /// The listener declares a different asset than the validated
+        /// identity. Fires on the declared-vs-validated leg, before the pin.
         #[test]
         fn rejects_when_declared_disagrees_with_validated() {
             let err = run_validate_destination_anchor(
@@ -571,17 +595,12 @@ mod tests {
             );
         }
 
-        // Old `rejects_when_contract_id_absent`: NOT portable to this path.
-        // This path has no explicit empty-contract_id guard; the property is
-        // enforced structurally instead — `asset_id` must be non-empty and
-        // equal the validated contract_id, so an empty validated identity can
-        // never bind. It is also unreachable through the narrowest callable
-        // unit: `RgbValidator::validate_consignment` derives contract_id from
-        // the consignment's genesis (never empty for a loadable Transfer) and
-        // `ValidationContext.rgb_validator` is the concrete type, so no
-        // fabricated ValidatedConsignment can be injected. Recorded as
-        // not-feasible in the restoration report. The source path keeps an
-        // explicit (equally unreachable) guard — see
-        // `validation::validate_source`.
+        // An absent contract_id has no explicit guard on this path: the
+        // property is structural, since `asset_id` must be non-empty and equal
+        // the validated contract_id. It is also unreachable through the
+        // narrowest callable unit, because `validate_consignment` derives
+        // contract_id from the consignment's genesis and no fabricated
+        // ValidatedConsignment can be injected. The source path keeps an
+        // explicit (equally unreachable) guard.
     }
 }

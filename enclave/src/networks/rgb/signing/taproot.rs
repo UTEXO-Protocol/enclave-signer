@@ -25,14 +25,14 @@ pub struct TaprootSignJob {
 /// Scan all PSBT inputs for taproot script-path leaves whose script contains
 /// one of our keys, and emit a sign job per (input, leaf, xonly) triple.
 ///
-/// Authorization is anchored to `witness_utxo.script_pubkey` — for each
+/// Authorization is anchored to `witness_utxo.script_pubkey` - for each
 /// `(control_block, script)` entry in `tap_scripts`, the control block must
 /// prove the script's inclusion under the on-chain output key (BIP-341). The
 /// candidate xonly key must (1) appear as a 32-byte push inside the verified
 /// leaf script, (2) be claimed by a `tap_key_origins` entry whose fingerprint
 /// matches ours, (3) appear in that entry's `leaf_hashes` for *this* leaf,
 /// and (4) match the xonly pubkey our claimed BIP-86 derivation actually
-/// derives — closing the gap where a coordinator could forge `tap_key_origins`
+/// derives - closing the gap where a coordinator could forge `tap_key_origins`
 /// to point our fingerprint at someone else's key.
 pub fn find_taproot_sign_jobs(
     psbt: &Psbt,
@@ -157,10 +157,8 @@ pub fn sign_taproot_inputs(
     let mut signed_count = 0;
 
     for job in jobs {
-        // Derive the child secret key for this input
         let child_secret = key_manager.derive_btc_child(job.account_type, &job.child_path)?;
 
-        // Compute taproot script-path sighash
         let sighash = sighash_cache
             .taproot_script_spend_signature_hash(
                 job.input_index,
@@ -172,7 +170,7 @@ pub fn sign_taproot_inputs(
 
         let msg = Message::from_digest(*sighash.as_byte_array());
 
-        // Create keypair for Schnorr signing (no tweak for script-path spend)
+        // No tweak: a script-path spend signs with the untweaked child key.
         let keypair = Keypair::from_secret_key(&secp, &child_secret);
         let schnorr_sig = secp.sign_schnorr_no_aux_rand(&msg, &keypair);
 
@@ -546,7 +544,7 @@ mod tests {
         assert!(jobs.is_empty());
     }
 
-    // === Account-scoped signing (plain-BTC path guard, M-01/#69) ===
+    // === Account-scoped signing (plain-BTC path guard) ===
 
     fn our_xonly_colored(km: &KeyManager) -> XOnlyPublicKey {
         let secp = Secp256k1::new();
@@ -565,7 +563,7 @@ mod tests {
     fn our_colored_full_path() -> DerivationPath {
         DerivationPath::from(vec![
             ChildNumber::from_hardened_idx(86).unwrap(),
-            ChildNumber::from_hardened_idx(827167).unwrap(), // RGB coin type → Colored
+            ChildNumber::from_hardened_idx(827167).unwrap(), // RGB coin type -> Colored
             ChildNumber::from_hardened_idx(0).unwrap(),
             ChildNumber::Normal { index: 0 },
             ChildNumber::Normal { index: 0 },

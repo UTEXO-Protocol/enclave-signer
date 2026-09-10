@@ -1,6 +1,9 @@
 //! Integration tests for the SPV header-sync RPCs (`SubmitHeaders`,
-//! `GetLastSavedBlock`) — exercises the full wire path: TCP framing →
-//! `dispatch` → `ServerContext.header_chain` → response.
+//! `GetLastSavedBlock`) - exercises the full wire path: TCP framing ->
+//! `dispatch` -> `ServerContext.header_chain` -> response.
+//!
+//! SPV/RGB-only: gated with `spv` (a `ccd`-only build has no header chain).
+#![cfg(feature = "spv")]
 
 use bitcoin::consensus::serialize;
 use bitcoin::hashes::Hash;

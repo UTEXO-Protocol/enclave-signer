@@ -18,7 +18,7 @@ pub enum Network {
     /// Default global signet OR a custom signet, distinguished only by the
     /// challenge script that's also a compile-time constant. Header
     /// validation behaviour is identical (signature in coinbase witness,
-    /// not enforced in PR 2 — see `validation.rs`).
+    /// not enforced in PR 2 - see `validation.rs`).
     Signet,
     Testnet3,
     Regtest,
@@ -90,7 +90,7 @@ pub enum SpvError {
 
     #[error(
         "alternative chain has weaker or equal cumulative work; rejecting reorg \
-         (this is normal — best chain wins)"
+         (this is normal - best chain wins)"
     )]
     WeakerChain,
 
@@ -106,7 +106,7 @@ pub enum SpvError {
     #[error("no header at height {0}")]
     HeaderNotFound(BlockHeight),
 
-    #[error("checkpoint placeholder — refusing to operate")]
+    #[error("checkpoint placeholder - refusing to operate")]
     CheckpointPlaceholder,
 }
 

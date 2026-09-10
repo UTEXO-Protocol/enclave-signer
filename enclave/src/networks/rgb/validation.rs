@@ -16,8 +16,13 @@ use rgb_consignment::{
 use rgbstd::containers::{ConsignmentExt, FileContent, Transfer};
 use rgbstd::indexers::esplora_blocking::esplora_client;
 use rgbstd::indexers::AnyResolver;
+#[cfg(feature = "bfa-mint")]
+use rgbstd::persistence::{MemContract, MemContractState};
 use rgbstd::schema::{MetaType, TransitionType};
-use rgbstd::validation::ValidationConfig;
+use rgbstd::validation::{ValidationConfig, ValidationError};
+use rgbstd::vm::ether_extension::Event;
+#[cfg(feature = "bfa-mint")]
+use rgbstd::vm::ether_extension::{BridgedContract, IssuedAmountCheckExt};
 use rgbstd::ChainNet;
 use sha3::{Digest, Keccak256};
 
@@ -31,8 +36,7 @@ use super::spv_validation;
 
 /// Validate all fields and source-chain evidence owned by an RGB source.
 ///
-/// This deliberately does not inspect or care about the destination network.
-/// For an RGB source, the source-chain proof is:
+/// Does not inspect the destination network. The source-chain proof is:
 ///
 /// 1. raw consignment bytes must be present, hash-bound, and pass full
 ///    in-enclave RGB validation;
@@ -56,11 +60,14 @@ pub fn validate_source(
         )
     })?;
 
-    let validated = validator.validate_consignment(&source.consignment)?;
+    // A burn consignment carries its whole mint ancestry, and every one of those
+    // mint transitions ends in `cea` - consensus re-runs them, so it needs the
+    // locks the enclave verified for itself.
+    let validated = validator.validate_consignment(&source.consignment, ctx.bridge_events)?;
 
     if validated.contract_id.is_empty() {
         return Err(EnclaveError::CrossCheck(
-            "validated consignment has empty contract_id — cannot bind asset identity".into(),
+            "validated consignment has empty contract_id - cannot bind asset identity".into(),
         ));
     }
     if validated.contract_id != source.asset_id {
@@ -72,7 +79,7 @@ pub fn validate_source(
     if ctx.bridge_config.is_configured() {
         if ctx.bridge_config.rgb_asset_id.is_empty() {
             return Err(EnclaveError::CrossCheck(
-                "bridge config pinned chain/contract but RGB_ASSET_ID is empty — \
+                "bridge config pinned chain/contract but RGB_ASSET_ID is empty - \
                  set all three env vars or none"
                     .into(),
             ));
@@ -112,6 +119,25 @@ pub fn validate_source(
     Ok(validated)
 }
 
+/// Aggregate size/compute cap (operator-configurable via
+/// `MAX_CONSIGNMENT_BYTES`), enforced before the keccak hash and the rgbstd
+/// parse so a request cannot force disproportionate work while staying under
+/// every per-field cap.
+///
+/// `label` names the direction in the rejection, e.g. `"RGB source"` or
+/// `"send-RGB"`. Shared so that lowering the cap cannot produce a different
+/// message depending on which caller happens to run first.
+pub fn assert_consignment_size(consignment: &[u8], cfg: &BridgeConfig, label: &str) -> Result<()> {
+    if consignment.len() > cfg.max_consignment_bytes {
+        return Err(EnclaveError::CrossCheck(format!(
+            "{label} consignment too large: {} bytes (max {})",
+            consignment.len(),
+            cfg.max_consignment_bytes
+        )));
+    }
+    Ok(())
+}
+
 fn validate_source_payload(source: &RgbSource, cfg: &BridgeConfig) -> Result<()> {
     if source.consignment.is_empty() {
         return Err(EnclaveError::CrossCheck(
@@ -119,17 +145,7 @@ fn validate_source_payload(source: &RgbSource, cfg: &BridgeConfig) -> Result<()>
                 .into(),
         ));
     }
-    // Aggregate size/compute caps (operator-configurable, defaulting to the
-    // `DEFAULT_*` constants), enforced before the keccak hash and the full
-    // rgbstd parse below so a request cannot force disproportionate
-    // parsing/hashing while staying under every per-field cap.
-    if source.consignment.len() > cfg.max_consignment_bytes {
-        return Err(EnclaveError::CrossCheck(format!(
-            "RGB source consignment too large: {} bytes (max {})",
-            source.consignment.len(),
-            cfg.max_consignment_bytes
-        )));
-    }
+    assert_consignment_size(&source.consignment, cfg, "RGB source")?;
     if source.merkle_proofs.len() > cfg.max_merkle_proofs {
         return Err(EnclaveError::CrossCheck(format!(
             "RGB source carries too many merkle proofs: {} (max {})",
@@ -148,16 +164,11 @@ fn validate_source_payload(source: &RgbSource, cfg: &BridgeConfig) -> Result<()>
             cfg.max_total_proof_bytes
         )));
     }
-    // Hash integrity check between listener-supplied bytes and the pre-computed
-    // keccak. This is INTEGRITY, NOT AUTHORIZATION (audit I-02 / Oxorio I-09):
-    // the listener controls BOTH `consignment` and `consignment_hash`, so a
-    // match only proves the wire copy was not corrupted in transit - it says
-    // nothing about whether the consignment authorizes this release.
-    // Authorization comes solely from the independent in-enclave RGB validation
-    // (`validate_consignment` below, `rgbstd::Transfer::validate` against an
-    // Esplora resolver), SPV anchoring, and the binding of validated facts
-    // (contract_id / op_id / amount). Keep this as defence-in-depth tamper
-    // detection; never read a hash match as proof of intent.
+    // Integrity, NOT authorization: the listener
+    // controls both `consignment` and `consignment_hash`, so a match only
+    // proves the wire copy was not corrupted. Authorization comes from the
+    // in-enclave RGB validation, SPV anchoring, and the binding of validated
+    // facts (contract_id / op_id / amount).
     if source.consignment_hash.is_empty() {
         return Err(EnclaveError::CrossCheck(
             "consignment present but consignment_hash is missing".into(),
@@ -179,18 +190,16 @@ fn validate_source_payload(source: &RgbSource, cfg: &BridgeConfig) -> Result<()>
 }
 
 /// Schema-defined `transition_type` and `metadata` keys for the Inflatable
-/// Fungible Asset (IFA) schema we use for USDT. Sourced from the
-/// `rgb-protocol/rgb-schemas` `src/lib.rs` definitions (`TS_*` for
-/// transition-type ids, `MS_*` for metadata-type ids). Constants are tied
-/// to the schema's contract — rotating the schema = updating these.
+/// Fungible Asset (IFA) schema used for USDT, from `rgb-protocol/rgb-schemas`
+/// (`TS_*` transition-type ids, `MS_*` metadata-type ids). Rotating the schema
+/// means updating these.
 pub mod ifa {
     /// IFA transition that moves an existing asset allocation from one
     /// owner to another. Pools-mode swaps use this on their last
     /// transition.
     pub const TS_TRANSFER: u16 = 10000;
-    /// IFA transition that mints new units against the contract's
-    /// inflation rights. Mint-mode locks produce this server-side; the
-    /// enclave reads OpIds of these transitions for spec §6 OpId binding.
+    /// IFA transition that mints new units against the contract's inflation
+    /// rights. The enclave reads its OpIds for spec section 6 OpId binding.
     pub const TS_INFLATION: u16 = 8000;
     /// IFA transition that destroys asset units. Mint-burn unlock flows
     /// produce a burn on their last transition; the destroyed amount is
@@ -203,39 +212,210 @@ pub mod ifa {
     pub const MS_BURNED_ASSET: u16 = 1001;
 
     /// IFA fungible assignment type for regular asset ownership
-    /// (`assetOwner`) — the allocations that actually carry asset units.
+    /// (`assetOwner`) - the allocations that actually carry asset units.
     pub const OS_ASSET: u16 = 4000;
     /// IFA fungible assignment type carrying the remaining right-to-mint
-    /// (`inflationAllowance`). Its `amount` is mint *capacity*, not asset
-    /// units — summing it together with `OS_ASSET` would let an inflation
-    /// consignment claim allowance as minted value (#54).
+    /// (`inflationAllowance`). Its `amount` is mint capacity, not asset units;
+    /// summing it with `OS_ASSET` would let a consignment claim allowance as
+    /// minted value.
     pub const OS_INFLATION: u16 = 4010;
 }
 
-/// Resolve the **trusted** strict type-system the validator must pin a
-/// consignment against, sourced from the canonical `rgb-schemas` crate by the
-/// consignment's `schema_id` — exactly as rgb-lib does
-/// (`AssetSchema::types()` → `InflatableFungibleAsset::types()` etc.).
+/// Transition and assignment types of the BFA (Bridged Fungible Asset) schema.
 ///
-/// **Audit 4th W-01 / #92.** RGB's `ValidationConfig.trusted_typesystem` must
-/// come from an enclave-pinned source, never from the consignment under
-/// validation: feeding `transfer.types` back in makes rgbstd compare the
-/// consignment's types against themselves (`validator.rs::validate_schema`),
-/// so the control always passes and a malicious consignment can ship its own
-/// type definitions for the schema's `SemId`s. Instead we look the schema_id
-/// up against the schema definitions compiled into `rgb-schemas` and hand the
-/// validator *that* type system; rgbstd then rejects any consignment whose
-/// types differ from the canonical set.
+/// BFA mints differently from IFA: the right it spends is DECLARATIVE - `OS_BRIDGE`
+/// carries no amount at all - and the minted amount is checked by RGB consensus
+/// against the bridge contract's `FundsIn` log rather than against a right the
+/// wallet holds. Transfer and burn keep IFA's types and values.
+#[cfg(feature = "rgb-validation")]
+pub mod bfa {
+    /// BFA transition that mints units against an EVM lock. The enclave reads its
+    /// OpIds for the same OpId binding it does for IFA `TS_INFLATION`.
+    pub const TS_BRIDGE: u16 = 8014;
+    /// BFA declarative assignment type carrying the right to mint (`bridgeRight`).
+    /// Unlike IFA's `OS_INFLATION` it holds no amount, so it can never be summed
+    /// into a minted total by mistake.
+    pub const OS_BRIDGE: u16 = 4014;
+    /// BFA burn metadata carrying where the redemption is owed on the EVM side:
+    /// 32 opaque bytes the schema makes mandatory on every `TS_BURN`. Consensus
+    /// neither interprets nor validates them, but they sit inside the burn
+    /// operation, so they are covered by its OpId and signed by whoever spent
+    /// the burned units - which is what lets a release trust them.
+    pub const MS_BURN_RECIPIENT: u16 = 1003;
+}
+
+/// Decode one parser-supplied OpId hex string into 32 bytes.
+#[cfg(feature = "bfa-mint")]
+fn decode_opid(hex_opid: &str) -> Result<[u8; 32]> {
+    let hex_opid = hex_opid.strip_prefix("0x").unwrap_or(hex_opid);
+    let bytes = hex::decode(hex_opid).map_err(|e| {
+        EnclaveError::CrossCheck(format!(
+            "BFA mint opid hex decode failed: {e} ({hex_opid:?})"
+        ))
+    })?;
+    bytes.try_into().map_err(|v: Vec<u8>| {
+        EnclaveError::CrossCheck(format!("BFA mint opid is not 32 bytes (got {})", v.len()))
+    })
+}
+
+/// What the enclave must verify on-chain before RGB consensus may see a BFA
+/// operation: which `FundsIn` logs to fetch, and which contract may have
+/// emitted them.
 ///
-/// All four standard fungible/collectible schemas are accepted here; the
-/// bridge additionally pins the exact asset via `contract_id` →
-/// `RGB_ASSET_ID` (`bind_asset_identity`), so schema breadth at this layer is
-/// not asset-scoping. An **unknown** schema_id is rejected fail-closed.
+/// Both directions read the same thing. A mint verifies one lock because it
+/// *is* one mint, but consensus re-runs the script of every transition in the
+/// consignment, so on either path every historical mint's `cea` needs its own
+/// verified event - and the burn path carries a whole ancestry of them. The
+/// mint direction additionally needs [`BfaBinding::terminal_opid`].
+#[cfg(feature = "bfa-mint")]
+pub struct BfaBinding {
+    /// Every `TS_BRIDGE` OpId in the consignment, in consignment order.
+    /// Untrusted - each only selects the log to verify; the ether extension
+    /// re-binds it to the operation inside consensus.
+    pub mint_opids: Vec<[u8; 32]>,
+    /// `bridgeLocation` exactly as the asset's genesis writes it, to compare
+    /// against the enclave's own `funds_in_contract` pin before any log is
+    /// trusted.
+    pub bridge_location: String,
+    /// The consignment's last transition, or `None` when it has none. Only the
+    /// mint direction cares, via [`Self::terminal_opid`].
+    last_transition: Option<TransitionSummary>,
+}
+
+#[cfg(feature = "bfa-mint")]
+impl BfaBinding {
+    /// The mint this request authorises: the OpId of the consignment's last
+    /// transition. It is the only one bound to the request's own deposit -
+    /// every other entry in `mint_opids` is an ancestor and must carry its own.
+    ///
+    /// Mint-direction only, and every failure refuses the signature: a
+    /// consignment whose last transition is not a bridge mint, or whose last
+    /// transition is absent from the transition list, gives no answer to "which
+    /// deposit pays for this?" and must not be guessed at.
+    pub fn terminal_opid(&self) -> Result<[u8; 32]> {
+        let last = self
+            .last_transition
+            .as_ref()
+            .ok_or_else(|| EnclaveError::CrossCheck("BFA consignment has no transitions".into()))?;
+        if last.transition_type != bfa::TS_BRIDGE {
+            return Err(EnclaveError::CrossCheck(format!(
+                "BFA consignment's last transition is type {}, expected the bridge mint {}",
+                last.transition_type,
+                bfa::TS_BRIDGE
+            )));
+        }
+        let terminal_opid = decode_opid(&last.op_id)?;
+        // The terminal transition decides which deposit pays for this mint, so
+        // it must be one of the transitions actually in the consignment.
+        if !self.mint_opids.contains(&terminal_opid) {
+            return Err(EnclaveError::CrossCheck(
+                "BFA consignment's last transition is a bridge mint but is absent from the \
+                 transition list - refusing to guess which mint this request authorises"
+                    .into(),
+            ));
+        }
+        Ok(terminal_opid)
+    }
+}
+
+/// Read a BFA operation's binding out of raw consignment bytes, before
+/// validation. `Ok(None)` for every other schema, so the swap path is untouched.
 ///
-/// Schema ids are compared by their canonical string form so the comparison
-/// is robust to `rgb-schemas` resolving a different `rgb-consensus` build than
-/// the enclave's validator (the `SchemaId` *value* is a content commitment and
-/// stringifies identically across versions).
+/// A mint spends the bridge right its predecessor rolled forward, so mint N
+/// carries mints 1..N-1 in the history consensus re-runs `cea` over. Each one
+/// needs its own event, so each needs its own verified lock.
+#[cfg(feature = "bfa-mint")]
+pub fn bfa_binding(consignment_bytes: &[u8]) -> Result<Option<BfaBinding>> {
+    // Bytes that do not load are not a BFA operation as far as this stage is
+    // concerned; `validate_consignment` reports the parse failure on the path
+    // that owns it, so that ordering of error messages is preserved.
+    let Ok(transfer) = Transfer::load(Cursor::new(consignment_bytes)) else {
+        return Ok(None);
+    };
+    if transfer.genesis.schema_id != schemata::BFA_SCHEMA_ID {
+        return Ok(None);
+    }
+
+    // The flat parser, not `read_last_transfer_witness`: that one reports the
+    // OpId rgbstd derived while walking a transfer it is about to validate, and
+    // here the OpIds are needed *before* validation, to pick the logs to verify.
+    let (_, mint_op_ids, last_transition, _) = extract_transition_summary(consignment_bytes)?;
+
+    Ok(Some(BfaBinding {
+        mint_opids: mint_op_ids
+            .iter()
+            .map(|hex_opid| decode_opid(hex_opid))
+            .collect::<Result<Vec<_>>>()?,
+        bridge_location: genesis_bridge_location(&transfer)?,
+        last_transition,
+    }))
+}
+
+/// Read the asset's `bridgeLocation` straight out of the genesis global state.
+///
+/// Hand-decoded because `BfaWrapper::bridge_location()` needs a *validated*
+/// contract and panics on anything unexpected, and the enclave builds with
+/// `panic = "abort"`. `BridgeLocation::Ethereum(TinyString)` strict-encodes as
+/// a one-byte union tag, a one-byte length, then the address string.
+#[cfg(feature = "bfa-mint")]
+fn genesis_bridge_location(transfer: &Transfer) -> Result<String> {
+    let values = transfer
+        .genesis
+        .globals
+        .get(&schemata::GS_BRIDGE_LOCATION)
+        .ok_or_else(|| {
+            EnclaveError::CrossCheck("BFA genesis carries no bridgeLocation global state".into())
+        })?;
+    if values.len() != 1 {
+        return Err(EnclaveError::CrossCheck(format!(
+            "BFA genesis carries {} bridgeLocation values, expected exactly one",
+            values.len()
+        )));
+    }
+    decode_bridge_location(values[0].as_slice())
+}
+
+/// Strict-decode one `BridgeLocation` blob. See [`genesis_bridge_location`].
+#[cfg(feature = "bfa-mint")]
+fn decode_bridge_location(raw: &[u8]) -> Result<String> {
+    /// `tags = order` on a single-variant union, so `Ethereum` is tag 0.
+    const ETHEREUM_TAG: u8 = 0;
+
+    let (&tag, rest) = raw
+        .split_first()
+        .ok_or_else(|| EnclaveError::CrossCheck("BFA bridgeLocation blob is empty".into()))?;
+    if tag != ETHEREUM_TAG {
+        return Err(EnclaveError::CrossCheck(format!(
+            "BFA bridgeLocation union tag {tag} is not the Ethereum variant"
+        )));
+    }
+    let (&len, addr) = rest.split_first().ok_or_else(|| {
+        EnclaveError::CrossCheck("BFA bridgeLocation blob has no length byte".into())
+    })?;
+    if addr.len() != usize::from(len) {
+        return Err(EnclaveError::CrossCheck(format!(
+            "BFA bridgeLocation declares {len} bytes but carries {}",
+            addr.len()
+        )));
+    }
+    String::from_utf8(addr.to_vec())
+        .map_err(|e| EnclaveError::CrossCheck(format!("BFA bridgeLocation is not utf-8: {e}")))
+}
+
+/// Resolve the trusted strict type-system to pin a consignment against, keyed
+/// on its `schema_id` and sourced from the canonical `rgb-schemas` crate.
+///
+/// `ValidationConfig.trusted_typesystem` must never come
+/// from the consignment under validation. Feeding `transfer.types` back in
+/// makes rgbstd compare the consignment's types against themselves, so the
+/// control always passes and a malicious consignment can ship its own type
+/// definitions for the schema's `SemId`s.
+///
+/// All four standard fungible/collectible schemas are accepted; the exact asset
+/// is pinned separately via `contract_id` -> `RGB_ASSET_ID`. An unknown
+/// schema_id is rejected fail-closed. Schema ids are compared by canonical
+/// string form so the comparison survives `rgb-schemas` resolving a different
+/// `rgb-consensus` build than the validator.
 #[cfg(feature = "rgb-validation")]
 fn trusted_typesystem_for_schema(schema_id: &str) -> Result<rgbstd::TypeSystem> {
     use rgbstd::contract::IssuerWrapper;
@@ -243,6 +423,15 @@ fn trusted_typesystem_for_schema(schema_id: &str) -> Result<rgbstd::TypeSystem> 
         CollectibleFungibleAsset, InflatableFungibleAsset, NonInflatableAsset, UniqueDigitalAsset,
         CFA_SCHEMA_ID, IFA_SCHEMA_ID, NIA_SCHEMA_ID, UDA_SCHEMA_ID,
     };
+
+    // Only a `bfa-mint` build knows the bridged schema; without the feature it
+    // falls through to the fail-closed arm exactly as it did before BFA existed.
+    #[cfg(feature = "bfa-mint")]
+    {
+        if schema_id == schemata::BFA_SCHEMA_ID.to_string() {
+            return Ok(schemata::BridgedFungibleAsset::types());
+        }
+    }
 
     let types = if schema_id == IFA_SCHEMA_ID.to_string() {
         InflatableFungibleAsset::types()
@@ -254,7 +443,7 @@ fn trusted_typesystem_for_schema(schema_id: &str) -> Result<rgbstd::TypeSystem> 
         UniqueDigitalAsset::types()
     } else {
         return Err(EnclaveError::CrossCheck(format!(
-            "consignment uses unknown/unsupported RGB schema {schema_id} — refusing to validate \
+            "consignment uses unknown/unsupported RGB schema {schema_id} - refusing to validate \
              (cannot source a trusted type system)"
         )));
     };
@@ -273,72 +462,63 @@ pub struct ValidatedConsignment {
     /// presented to a mainnet enclave).
     pub chain_net: String,
     /// Bitcoin txids that anchor each transition bundle in the consignment,
-    /// in **display (big-endian) byte order** — same encoding as
+    /// in **display (big-endian) byte order** - same encoding as
     /// `MerkleProofEntry.txid` on the wire. Deduplicated and sorted so
     /// equality checks against the listener's set are stable.
     pub witness_txids: Vec<[u8; 32]>,
     /// Every state-transition `op_id` in the consignment, in witness order
-    /// (bundle k's transitions before bundle k+1's). Spec §6 requires
-    /// every mint OpId committed to EVM state to be cross-checked across
-    /// RGB validations. The downstream filter for "which of these is a
-    /// mint" lives in a follow-up PR once the IFA-schema `MINT`
-    /// `transition_type` constant is confirmed.
+    /// (bundle k's transitions before bundle k+1's). Spec section 6 requires
+    /// every mint OpId committed to EVM state to be cross-checked across RGB
+    /// validations.
     pub all_op_ids: Vec<String>,
     /// The `op_id`s of every IFA `TS_INFLATION` (mint) transition in the
-    /// consignment, in witness order — the subset of [`Self::all_op_ids`]
-    /// that corresponds to EVM lock records (`fundsIn`). The `fundsOut`
-    /// calldata's `fundsInIds[]` (inside `settlementData`) must each
-    /// correspond to one of these (under the agreed OpId→id transform), so
-    /// a release can only consume locks this consignment's RGB history
-    /// actually inflated (spec §6 / §7). See
-    /// `evm::validation::apply_op_id_binding`.
+    /// consignment, in witness order - the subset of [`Self::all_op_ids`]
+    /// that corresponds to EVM lock records (`fundsIn`).
+    ///
+    /// Not currently consumed by the EVM side: on the route-agnostic Bridge
+    /// the `fundsOut` citation comes from deposit receipts and is enforced
+    /// on-chain by `RgbSettlementModule.beforeFundsOut`. Kept as the RGB half
+    /// of that correspondence.
     pub mint_op_ids: Vec<String>,
-    /// The most recent state transition — the change of state the EVM
-    /// action this consignment authorises commits to. Follow-up PRs
-    /// classify this as Transfer-to-federation (pools / spec §9.2,
-    /// §9.3) or Burn (mint-burn unlock / spec §8) and extract the
-    /// authoritative amount + destination binding from it. `None` only
-    /// for malformed transfers with no transition bundles, which rgbstd
-    /// validation rejects upstream — kept as `Option` for type
-    /// completeness.
+    /// The most recent state transition: the state change the EVM action this
+    /// consignment authorises commits to. `None` only for malformed transfers
+    /// with no transition bundles, which rgbstd rejects upstream.
     pub last_transition: Option<TransitionSummary>,
-    /// Bitcoin txid of the witness transaction anchoring the consignment's
-    /// **last** transition — the freshly-composed transfer in the send-RGB
-    /// (EVM-lock → RGB-send) direction. The PSBT being signed in that flow
-    /// IS this witness transaction; the PSBT cross-check binds
-    /// `psbt.unsigned_tx.compute_txid()` to this value so a signed PSBT
-    /// can't move bridge BTC without finalizing exactly the validated RGB
-    /// transition. A `bitcoin::Txid` (not display-order bytes) so the
-    /// comparison is type-safe and avoids the txid byte-order footgun.
-    /// `None` only for a consignment with no bundles (rgbstd rejects those).
-    pub last_transfer_witness_txid: Option<bitcoin::Txid>,
-    /// Bitcoin input prevouts of that same witness transaction, when the
-    /// consignment embeds the full witness tx (`PubWitness::Tx`, which the
-    /// rgb-lib sender does for a freshly-composed transfer). Used by the
-    /// PSBT cross-check as a redundant per-input canary over the txid bind:
-    /// the set of PSBT input outpoints must equal this set. `None` when the
-    /// consignment carries only the witness txid (`PubWitness::Txid`), in
-    /// which case the txid identity bind alone anchors every input.
+    /// Bitcoin txid of the witness transaction anchoring the last transition,
+    /// whatever its transition type (burn included).
+    ///
+    /// Two consumers. In the send-RGB direction the PSBT being signed IS that
+    /// witness tx, and the PSBT cross-check binds
+    /// `psbt.unsigned_tx.compute_txid()` to this after gating on the last
+    /// transition being a Transfer or Inflation. The RGB->EVM `fundsOut`
+    /// source-block bind uses it ungated, so it works for transfer and burn
+    /// alike.
+    ///
+    /// A `bitcoin::Txid` rather than display-order bytes, to avoid the txid
+    /// byte-order footgun. `None` only for a consignment with no bundles.
+    pub last_witness_txid: Option<bitcoin::Txid>,
+    /// Bitcoin input prevouts of that witness transaction, when the
+    /// consignment embeds the full tx (`PubWitness::Tx`). Used by the PSBT
+    /// cross-check as a redundant per-input canary over the txid bind. `None`
+    /// for `PubWitness::Txid`, where the txid bind alone anchors every input.
     pub last_transfer_witness_prevouts: Option<Vec<bitcoin::OutPoint>>,
     /// Authoritative OpId (32-byte commitment hash) of the consignment's
     /// **last** transition, read from the rgbstd-**validated** `Transfer`
     /// (`KnownTransition.opid` of the same last bundle as
-    /// `last_transfer_witness_txid`), NOT from the flat `rgb_consignment`
+    /// `last_witness_txid`), NOT from the flat `rgb_consignment`
     /// parser. This is the value `validate()` authenticated and anchored on
-    /// chain, so deriving the EVM `fundsOut` `burnId` from it
-    /// (`evm::validation::apply_op_id_binding`, audit M-02 / #93) binds the
-    /// contract's single-use `consumedBurnIds` guard to validated consignment
-    /// data, not a parallel/unauthenticated parse. `None` only for a
-    /// consignment with no bundles (rgbstd rejects those) or a non-Transfer
-    /// last transition (the burnId binding only applies to the transfer flow).
+    /// chain.
+    ///
+    /// No longer feeds the EVM `fundsOut` `burnId`: the new
+    /// Bridge derives that itself and reverts `InvalidBurnId` otherwise. `None`
+    /// for a consignment with no bundles or a non-Transfer last transition.
     pub last_transfer_op_id: Option<[u8; 32]>,
     /// Witness txids that rgbstd `validate()` classified as **not mined**
     /// (`WitnessOrd::Tentative` / `Ignored`), in **display (big-endian) byte
     /// order** - same encoding as [`Self::witness_txids`]. `validate()` already
     /// hard-rejects `Archived`/unresolvable witnesses, so only these softer
     /// not-yet-confirmed states reach here, and only because this set is built
-    /// from the rgbstd status that was previously discarded (audit 4th
-    /// I-03 / #95).
+    /// from the rgbstd status that was previously discarded.
     ///
     /// A non-empty set is **expected** for the send-RGB (EVM-lock -> RGB-send)
     /// PSBT path: that witness tx is freshly composed and unbroadcast, so it is
@@ -348,6 +528,29 @@ pub struct ValidatedConsignment {
     /// defense-in-depth atop the SPV depth check (see
     /// `evm::validation::assert_witnesses_confirmed`).
     pub non_mined_witness_txids: Vec<[u8; 32]>,
+    /// Every transition in the consignment, grouped by the witness tx that
+    /// commits it.
+    ///
+    /// A single Bitcoin transaction commits a bundle, which may hold several
+    /// transitions. Binding only [`Self::last_transition`] would let an
+    /// attacker park a large transfer earlier in the bundle, so the send-RGB
+    /// PSBT cross-check binds the whole group via
+    /// [`Self::transitions_committed_by`].
+    pub transitions_by_witness: Vec<(bitcoin::Txid, Vec<TransitionSummary>)>,
+}
+
+impl ValidatedConsignment {
+    /// Every transition committed by witness transaction `txid`.
+    ///
+    /// Empty when the consignment commits nothing to that transaction - which
+    /// callers must treat as a rejection, not as "nothing to check".
+    pub fn transitions_committed_by(&self, txid: bitcoin::Txid) -> Vec<&TransitionSummary> {
+        self.transitions_by_witness
+            .iter()
+            .filter(|(witness_txid, _)| *witness_txid == txid)
+            .flat_map(|(_, transitions)| transitions.iter())
+            .collect()
+    }
 }
 
 /// Flat summary of one RGB state transition. Mirrors
@@ -355,14 +558,9 @@ pub struct ValidatedConsignment {
 /// doesn't leak into our public surface.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TransitionSummary {
-    /// Operation id — the 64-char lowercase hex of the 32-byte RGB OpId, as
-    /// the consignment parser yields it (verified by the fixture test). The
-    /// EVM OpId cross-check compares this as a string; the `fundsInIds`
-    /// value-binding hex-decodes it to 32 bytes
-    /// (`evm::crosscheck::decode_op_id_to_bytes32`), so the hex form is
-    /// load-bearing - not baid64. (The `burnId` is bound instead from the
-    /// rgbstd-validated [`ValidatedConsignment::last_transfer_op_id`], not this
-    /// flat-parser value - audit M-02 / #93.)
+    /// Operation id: 64-char lowercase hex of the 32-byte RGB OpId, as the
+    /// parser yields it. The hex form is load-bearing, not baid64 -
+    /// `evm::crosscheck::decode_op_id_to_bytes32` decodes it to 32 bytes.
     pub op_id: String,
     /// IFA-schema transition-type id; compare against [`ifa::TS_TRANSFER`]
     /// / [`ifa::TS_BURN`] / [`ifa::TS_INFLATION`] to classify the EVM
@@ -371,40 +569,43 @@ pub struct TransitionSummary {
     /// Sum of all fungible amounts across all output assignments of this
     /// transition. For a Transfer this is the total of recipient + change
     /// outputs; for a Burn this is **zero** because burns have no output
-    /// assignments — the destroyed amount lives in [`Self::burned_asset_amount`].
+    /// assignments - the destroyed amount lives in [`Self::burned_asset_amount`].
     pub total_output_amount: u64,
     /// Sum of the fungible amounts on `OS_ASSET`-typed output assignments
-    /// only — the allocations that actually carry asset units. For a
+    /// only - the allocations that actually carry asset units. For a
     /// Transfer this equals [`Self::total_output_amount`] (transfers move
     /// only `OS_ASSET`); for an Inflation (mint) it is the freshly minted
     /// value, **excluding** the `OS_INFLATION` allowance outputs, whose
-    /// amounts are remaining mint capacity, not asset units (#54).
+    /// amounts are remaining mint capacity, not asset units.
     pub asset_output_amount: u64,
     /// Concrete output assignments, each tagged with a destination seal
     /// and an amount. Empty for Burn transitions.
     pub outputs: Vec<TransitionOutput>,
-    /// Asset units destroyed by this transition, read from the IFA
-    /// `MS_BURNED_ASSET` metadata field. `Some(0)` is allowed by the
-    /// schema (partial burn writing 0 to OS_ASSET), but for our
-    /// mint-burn unlock flow the bridge only ever signs unlocks against
-    /// transitions where this is strictly positive — the EVM-crosscheck
-    /// layer enforces that.
+    /// Asset units destroyed by this transition, from the IFA
+    /// `MS_BURNED_ASSET` metadata field. `Some(0)` is schema-legal, but the
+    /// EVM cross-check layer requires it strictly positive to sign an unlock.
     ///
-    /// `None` when:
-    /// * the transition is not a burn (`transition_type != ifa::TS_BURN`); or
-    /// * the burn transition is malformed (missing or wrong-sized
-    ///   `MS_BURNED_ASSET` metadata) — rgbstd validation would have
-    ///   already rejected such a consignment, so reaching this branch
-    ///   in practice indicates an internal contract / schema mismatch.
+    /// `None` when the transition is not a burn, or when a burn transition is
+    /// malformed (which rgbstd validation should already have rejected).
     pub burned_asset_amount: Option<u64>,
+    /// Where the burn's proceeds are owed on the EVM side, from the BFA
+    /// `MS_BURN_RECIPIENT` metadata field: exactly 32 bytes, as the schema
+    /// requires. `None` for a non-burn, and for an IFA burn, which declares
+    /// `burnedInflation` in that slot instead.
+    pub burn_recipient: Option<Vec<u8>>,
 }
 
 /// One fungible output assignment on a state transition.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TransitionOutput {
+    /// IFA fungible assignment type ([`ifa::OS_ASSET`] or
+    /// [`ifa::OS_INFLATION`]). Load-bearing: only `OS_ASSET` entries carry
+    /// asset units, so the per-output recipient bind must filter on this just
+    /// as `asset_output_amount` does.
+    pub assignment_type: u16,
     /// Amount in the asset's smallest unit.
     pub amount: u64,
-    /// Destination seal — either a revealed `txid:vout` or a hidden
+    /// Destination seal - either a revealed `txid:vout` or a hidden
     /// commitment.
     pub seal: OutputSeal,
 }
@@ -413,10 +614,10 @@ pub struct TransitionOutput {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum OutputSeal {
     /// Concrete `txid:vout`. `txid` is `None` when the seal points at the
-    /// witness tx of its containing bundle — resolve by combining with
+    /// witness tx of its containing bundle - resolve by combining with
     /// the bundle's witness txid in display order.
     Revealed {
-        /// Display-order bytes — matches `witness_txids` encoding.
+        /// Display-order bytes - matches `witness_txids` encoding.
         txid: Option<[u8; 32]>,
         vout: u32,
     },
@@ -424,45 +625,41 @@ pub enum OutputSeal {
     Confidential { secret_seal: String },
 }
 
-/// Hard cap on any single blocking Esplora HTTP call (connect + read), in
-/// seconds. The Esplora egress runs through the host-controlled vsock proxy,
-/// and consignment validation happens *on the signing path* — without a
-/// timeout a stalled host pins the worker thread indefinitely (audit final
-/// I-03 / #87). Aligned with `conn.rs`'s `TOTAL_REQUEST_TIMEOUT` so a single
-/// stalled egress call cannot outlive its enclosing request budget.
-/// Compile-time (PCR-attested), deliberately not host-tunable.
+/// Hard cap on a single blocking Esplora HTTP call (connect + read), in
+/// seconds. The egress runs through the host-controlled vsock proxy on the
+/// signing path, so without a timeout a stalled host pins the worker
+/// thread. Aligned with `conn.rs`'s `TOTAL_REQUEST_TIMEOUT`.
+/// Compile-time and PCR-attested, not host-tunable.
 const ESPLORA_HTTP_TIMEOUT_SECS: u64 = 30;
 
-/// Per-socket timeout (seconds) for the **Electrum** witness resolver — the
-/// production signing path (`ssl://…:50002` over the vsock forwarder). The
-/// Electrum analog of [`ESPLORA_HTTP_TIMEOUT_SECS`] and the SAME audit issue
-/// (final I-03 / #87): `electrum_client::Config::default()` leaves
-/// `timeout: None`, so a stalled electrs read blocks the worker thread
-/// *forever*. Observed in production: an op13 RGB consignment validation stalled
-/// on an electrs witness lookup, pinned every worker on an unbounded read, the
-/// connection queue overflowed (cap 16), and the enclave then dropped ALL
-/// requests incl. the health probe — surfacing on the parent as
-/// `enclave read failed: failed to fill whole buffer`. `electrum-client` retries
-/// `retry` times on error, so worst-case blocking is ~`(retry+1) *` this; kept
-/// within the `conn.rs` `TOTAL_REQUEST_TIMEOUT` budget. Fed to
-/// `Config::builder().timeout(Some(Duration))`. Compile-time (PCR-attested),
-/// not host-tunable.
+/// Per-socket timeout (seconds) for the Electrum witness resolver, the
+/// production signing path. Electrum analog of [`ESPLORA_HTTP_TIMEOUT_SECS`]
+/// and the same problem: `Config::default()` leaves
+/// `timeout: None`, so a stalled electrs read blocks the worker thread forever
+/// and eventually wedges the whole enclave. `electrum-client` retries `retry`
+/// times, so worst-case blocking is ~`(retry+1) *` this; kept within the
+/// `conn.rs` `TOTAL_REQUEST_TIMEOUT` budget. Compile-time and PCR-attested.
 const ELECTRUM_WITNESS_TIMEOUT_SECS: u64 = 15;
 
-/// How long a fetched fee estimate stays fresh (#55). Fee markets move on
+// TEMPORARY, tied to the BFA dependency base. The `s/bfa` RGB branches are cut
+// from 0.11.1-rc.10, which pins electrum-client 0.24, while this crate targets
+// the 0.25 API that came with rc.11: `timeout` took a `Duration` and
+// `estimate_fee` a second argument. The three call sites below were stepped
+// back to the 0.24 shapes purely so the branch builds. REVERT THEM once the
+// `s/bfa` branches are rebased onto rc.11 - this is an upstream fix, not ours.
+
+/// How long a fetched fee estimate stays fresh. Fee markets move on
 /// block cadence, so a minute of staleness is immaterial while keeping the
 /// sign-path from hitting Esplora on every request.
 const FEE_ESTIMATE_TTL: std::time::Duration = std::time::Duration::from_secs(60);
 
-/// Confirmation target (blocks) used for the recommended fee rate (#55).
+/// Confirmation target (blocks) used for the recommended fee rate.
 const FEE_ESTIMATE_TARGET: u16 = 6;
 
 /// Fee-rate floor (sat/vB) for non-mainnet chains, which have no fee market and
-/// so answer `/fee-estimates` with `{}` (#55 refused every send-RGB PSBT there).
-/// Compile-time, never host-supplied, and reachable only via PCR0-attested
-/// `chain_net`: serving `{}` to dodge the check yields this tighter-than-real
-/// floor, so it only self-DoSes. Generous because non-mainnet coins are
-/// valueless; it just keeps the path enforced against a runaway burn.
+/// answer `/fee-estimates` with `{}`. Compile-time and reachable only via
+/// PCR0-attested `chain_net`, so serving `{}` to dodge the check only yields a
+/// tighter floor. Generous, since non-mainnet coins are valueless.
 const NON_MAINNET_FALLBACK_FEE_RATE_SAT_VB: f64 = 10.0;
 
 /// Validates RGB consignments using rgbstd and a witness resolver.
@@ -470,14 +667,14 @@ const NON_MAINNET_FALLBACK_FEE_RATE_SAT_VB: f64 = 10.0;
 /// The resolver backend is chosen from the URL scheme at validation time:
 /// `ssl://` / `tcp://` -> Electrum (`electrum-client`), anything else
 /// (`http://` / `https://`) -> Esplora REST. Production uses an Electrum
-/// endpoint (`ssl://…:50002`) reached through the vsock forwarder; with an
+/// endpoint (`ssl://...:50002`) reached through the vsock forwarder; with an
 /// `ssl://` URL the TLS handshake terminates inside the enclave against the
 /// real server cert, so the host relays only ciphertext.
 #[derive(Debug)]
 pub struct RgbValidator {
     indexer_url: String,
     chain_net: ChainNet,
-    /// Cached `(fetched_at, sat/vB)` recommended fee rate (#55), guarded for
+    /// Cached `(fetched_at, sat/vB)` recommended fee rate, guarded for
     /// the multi-threaded worker pool. `None` until the first fetch.
     fee_estimate_cache: std::sync::Mutex<Option<(std::time::Instant, f64)>>,
     /// Per-request HTTP timeout, [`ESPLORA_HTTP_TIMEOUT_SECS`] in production.
@@ -489,7 +686,7 @@ impl RgbValidator {
     /// Create a new validator.
     ///
     /// - `indexer_url`: witness-resolver endpoint. `ssl://host:port` /
-    ///   `tcp://host:port` selects Electrum; `http(s)://…` selects Esplora.
+    ///   `tcp://host:port` selects Electrum; `http(s)://...` selects Esplora.
     ///   Through the vsock forwarder this is typically `ssl://<host>:50002`
     ///   (Electrum) or the legacy `http://127.0.0.1:3443` (Esplora).
     /// - `bitcoin_network`: One of "bitcoin", "testnet", "signet", "regtest".
@@ -523,15 +720,13 @@ impl RgbValidator {
     }
 
     /// Recommended fee rate (sat/vB) from the enclave's own witness-indexer
-    /// egress, for the send-RGB PSBT fee-rate sanity check (#55). The backend
-    /// mirrors the resolver — Electrum (`estimate_fee`) for an ssl://|tcp://
-    /// endpoint, else Esplora `/fee-estimates` (confirmation target
-    /// [`FEE_ESTIMATE_TARGET`], nearest available) — cached for
-    /// [`FEE_ESTIMATE_TTL`]. FAIL-CLOSED when the fetch fails or the rate is
-    /// unusable: the host controls the egress, so "estimate unavailable" must
-    /// never mean "skip the check". The one exception is an honest "no fee
-    /// market" answer on a non-mainnet chain, which yields
-    /// [`NON_MAINNET_FALLBACK_FEE_RATE_SAT_VB`] rather than a refusal.
+    /// egress, for the send-RGB PSBT fee-rate check. The backend mirrors the
+    /// resolver: Electrum `estimate_fee` for ssl://|tcp://, else Esplora
+    /// `/fee-estimates` at [`FEE_ESTIMATE_TARGET`]. Cached for
+    /// [`FEE_ESTIMATE_TTL`]. Fail-closed when the fetch fails or the rate is
+    /// unusable. The one exception is an honest "no fee market" answer on a
+    /// non-mainnet chain, which yields
+    /// [`NON_MAINNET_FALLBACK_FEE_RATE_SAT_VB`].
     pub fn recommended_fee_rate_sat_vb(&self) -> Result<f64> {
         let now = std::time::Instant::now();
         let mut cache = self
@@ -544,13 +739,9 @@ impl RgbValidator {
             }
         }
 
-        // Backend mirrors the witness resolver (see validate_consignment): an
-        // ssl://|tcp:// endpoint is Electrum, anything else Esplora REST.
-        // Production reaches an Electrum server (ssl://…:50002) over the vsock
-        // forwarder — Esplora has no equivalent endpoint here — so the fee
-        // estimate must ride the SAME backend. Both paths are FAIL-CLOSED: a
-        // failed fetch is a refusal, never a skipped check (the host controls
-        // the egress, #55).
+        // Backend mirrors the witness resolver: ssl://|tcp:// is Electrum,
+        // anything else Esplora REST. Both paths are fail-closed - a failed
+        // fetch is a refusal, never a skipped check.
         let is_electrum =
             self.indexer_url.starts_with("ssl://") || self.indexer_url.starts_with("tcp://");
         let rate = if is_electrum {
@@ -569,6 +760,60 @@ impl RgbValidator {
         Ok(rate)
     }
 
+    /// Fetch a raw transaction by txid from the witness indexer.
+    ///
+    /// The egress is host-controlled, so the bytes are re-hashed and must match
+    /// `txid`: a lying host can only make the fetch fail. Used by the send-RGB
+    /// change-leg proof (W-06 / #52) to read the script of an outpoint that is
+    /// not in the PSBT.
+    pub fn fetch_transaction(&self, txid: bitcoin::Txid) -> Result<bitcoin::Transaction> {
+        // Backend and timeouts mirror the witness resolver (final I-03 / #87).
+        let is_electrum =
+            self.indexer_url.starts_with("ssl://") || self.indexer_url.starts_with("tcp://");
+        let tx = if is_electrum {
+            use rgbstd::indexers::electrum_blocking::electrum_client::{
+                Client, Config, ElectrumApi,
+            };
+            let cfg = Config::builder()
+                .timeout(Some(ELECTRUM_WITNESS_TIMEOUT_SECS as u8))
+                .build();
+            let client = Client::from_config(&self.indexer_url, cfg).map_err(|e| {
+                EnclaveError::CrossCheck(format!(
+                    "electrum client creation failed while resolving outpoint tx {txid}: {e}"
+                ))
+            })?;
+            let raw = client.transaction_get_raw(&txid).map_err(|e| {
+                EnclaveError::CrossCheck(format!("electrum fetch of tx {txid} failed: {e}"))
+            })?;
+            bitcoin::consensus::deserialize::<bitcoin::Transaction>(&raw).map_err(|e| {
+                EnclaveError::CrossCheck(format!(
+                    "electrum returned bytes for tx {txid} that do not decode: {e}"
+                ))
+            })?
+        } else {
+            let client = esplora_client::Builder::new(&self.indexer_url)
+                .timeout(self.http_timeout_secs)
+                .build_blocking();
+            client
+                .get_tx(&txid)
+                .map_err(|e| {
+                    EnclaveError::CrossCheck(format!("esplora fetch of tx {txid} failed: {e}"))
+                })?
+                .ok_or_else(|| {
+                    EnclaveError::CrossCheck(format!("esplora does not know tx {txid}"))
+                })?
+        };
+
+        let got = tx.compute_txid();
+        if got != txid {
+            return Err(EnclaveError::CrossCheck(format!(
+                "indexer returned tx {got} for a request for tx {txid} - refusing to trust its \
+                 outputs"
+            )));
+        }
+        Ok(tx)
+    }
+
     /// Esplora `/fee-estimates` backend for [`Self::recommended_fee_rate_sat_vb`].
     /// Fetches the confirmation-target rate (nearest available) in sat/vB.
     fn esplora_fee_rate_sat_vb(&self) -> Result<f64> {
@@ -577,8 +822,8 @@ impl RgbValidator {
             .build_blocking();
         let estimates = client.get_fee_estimates().map_err(|e| {
             EnclaveError::CrossCheck(format!(
-                "fee-estimate fetch failed — refusing to sign a send-RGB PSBT without a \
-                 fee-rate sanity bound (#55): {e}"
+                "fee-estimate fetch failed - refusing to sign a send-RGB PSBT without a \
+                 fee-rate sanity bound: {e}"
             ))
         })?;
 
@@ -597,7 +842,7 @@ impl RgbValidator {
             Some(rate) => Ok(rate),
             None if self.chain_net == ChainNet::BitcoinMainnet => Err(EnclaveError::CrossCheck(
                 "fee-estimate response carried no targets - refusing to sign a send-RGB \
-                 PSBT without a fee-rate sanity bound (#55)"
+                 PSBT without a fee-rate sanity bound"
                     .into(),
             )),
             None => {
@@ -605,47 +850,44 @@ impl RgbValidator {
                     chain_net = ?self.chain_net,
                     fallback_sat_vb = NON_MAINNET_FALLBACK_FEE_RATE_SAT_VB,
                     "fee-estimate response carried no targets; falling back to the pinned \
-                     non-mainnet floor (#55)"
+                     non-mainnet floor"
                 );
                 Ok(NON_MAINNET_FALLBACK_FEE_RATE_SAT_VB)
             }
         }
     }
 
-    /// Electrum `estimate_fee` backend for [`Self::recommended_fee_rate_sat_vb`].
-    /// Production path: our witness indexer is an Electrum server (ssl://…:50002)
-    /// reached over the same vsock forwarder as consignment validation, so the
-    /// fee estimate does not need a separate Esplora egress. Electrum reports
-    /// the rate in BTC per 1000 vbytes; we convert to sat/vB (×100_000). It
-    /// answers a non-positive value when it cannot estimate (no fee market /
-    /// insufficient data): mainnet treats that as fail-closed, non-mainnet falls
-    /// back to the pinned floor — mirroring the Esplora empty-map semantics (#55).
+    /// Electrum `estimate_fee` backend for
+    /// [`Self::recommended_fee_rate_sat_vb`], the production path. Electrum
+    /// reports BTC per 1000 vbytes; converted to sat/vB. A non-positive answer
+    /// means it cannot estimate: fail-closed on mainnet, falls back to the
+    /// pinned floor elsewhere, mirroring the Esplora empty-map case.
     fn electrum_fee_rate_sat_vb(&self) -> Result<f64> {
         use rgbstd::indexers::electrum_blocking::electrum_client::{Client, ElectrumApi};
         let client = Client::new(&self.indexer_url).map_err(|e| {
             EnclaveError::CrossCheck(format!(
-                "electrum fee-estimate client creation failed — refusing to sign a send-RGB \
-                 PSBT without a fee-rate sanity bound (#55): {e}"
+                "electrum fee-estimate client creation failed - refusing to sign a send-RGB \
+                 PSBT without a fee-rate sanity bound: {e}"
             ))
         })?;
         let btc_per_kvb = client
-            // electrum-client 0.25 added a second `mode: Option<EstimationMode>`
-            // arg; `None` keeps the server-default estimation we relied on before.
-            .estimate_fee(FEE_ESTIMATE_TARGET as usize, None)
+            // electrum-client 0.24 takes only the target and always uses the
+            // server-default estimation. See the REVERT note above FEE_ESTIMATE_TTL.
+            .estimate_fee(FEE_ESTIMATE_TARGET as usize)
             .map_err(|e| {
                 EnclaveError::CrossCheck(format!(
-                    "electrum fee-estimate fetch failed — refusing to sign a send-RGB PSBT \
-                     without a fee-rate sanity bound (#55): {e}"
+                    "electrum fee-estimate fetch failed - refusing to sign a send-RGB PSBT \
+                     without a fee-rate sanity bound: {e}"
                 ))
             })?;
 
         // Electrum returns BTC/kvB; a non-positive value (typically -1) means
-        // "cannot estimate". Mirror the Esplora empty-map handling (#55).
+        // "cannot estimate". Mirror the Esplora empty-map handling.
         if btc_per_kvb <= 0.0 {
             if self.chain_net == ChainNet::BitcoinMainnet {
                 return Err(EnclaveError::CrossCheck(
                     "electrum returned no fee estimate - refusing to sign a send-RGB PSBT \
-                     without a fee-rate sanity bound (#55)"
+                     without a fee-rate sanity bound"
                         .into(),
                 ));
             }
@@ -653,18 +895,27 @@ impl RgbValidator {
                 chain_net = ?self.chain_net,
                 fallback_sat_vb = NON_MAINNET_FALLBACK_FEE_RATE_SAT_VB,
                 "electrum returned no fee estimate; falling back to the pinned non-mainnet \
-                 floor (#55)"
+                 floor"
             );
             return Ok(NON_MAINNET_FALLBACK_FEE_RATE_SAT_VB);
         }
 
-        // BTC/kvB -> sat/vB: ×1e8 sat/BTC ÷ 1000 vB/kvB = ×100_000.
+        // BTC/kvB -> sat/vB: x1e8 sat/BTC / 1000 vB/kvB = x100_000.
         Ok(btc_per_kvb * 100_000.0)
     }
 
     /// Validate raw consignment bytes. Returns extracted data on success,
     /// or a `CrossCheck` error if validation fails.
-    pub fn validate_consignment(&self, consignment_bytes: &[u8]) -> Result<ValidatedConsignment> {
+    ///
+    /// `bridge_events` are the EVM lock events RGB consensus checks a BFA mint
+    /// against; they are ignored by every other schema. The caller must have
+    /// verified each one itself - the extension binds amount and OpId, not the
+    /// emitting contract.
+    pub fn validate_consignment(
+        &self,
+        consignment_bytes: &[u8],
+        #[cfg_attr(not(feature = "bfa-mint"), allow(unused_variables))] bridge_events: &[Event],
+    ) -> Result<ValidatedConsignment> {
         let start = std::time::Instant::now();
         let bytes_len = consignment_bytes.len();
         tracing::info!(
@@ -688,18 +939,15 @@ impl RgbValidator {
             "deserialized RGB transfer"
         );
 
-        // Pre-validation extraction: cheap, no networking, no consumption
-        // of `transfer` (rgbstd::Transfer::validate consumes self further
-        // down). chain_net + witness_txids are needed by the SPV crosscheck;
-        // we read them out before validate() runs because validate() takes
-        // ownership.
+        // Pre-validation extraction: no networking, and it must run before
+        // `validate()` takes ownership of `transfer`. chain_net +
+        // witness_txids are needed by the SPV crosscheck.
         let chain_net = transfer.genesis.chain_net.prefix().to_string();
         let mut txid_set: BTreeSet<[u8; 32]> = BTreeSet::new();
         for wb in transfer.bundles.iter() {
-            // rgbstd's Txid stringifies in display order; decoding the hex
-            // gives us display-order bytes (no reversal needed at this
-            // boundary — reversal happens later, only inside the Merkle
-            // verifier where internal-order is required).
+            // rgbstd's Txid stringifies in display order, so decoding the
+            // hex gives display-order bytes. Reversal happens later, inside
+            // the Merkle verifier, which needs internal order.
             let display_hex = wb.witness_id().to_string();
             let bytes = hex::decode(&display_hex).map_err(|e| {
                 EnclaveError::CrossCheck(format!(
@@ -716,72 +964,59 @@ impl RgbValidator {
         }
         let witness_txids: Vec<[u8; 32]> = txid_set.into_iter().collect();
 
-        // F1 extraction: walk the consignment a second time via
-        // `rgb_consignment::parse` to pull out transition op_ids, types,
-        // and output assignments in a flat shape. We do the second parse
-        // (rather than reaching into the rgbstd `Transfer` directly)
-        // because the parser already exposes the typed `TransitionInfo` /
-        // `FungibleAllocation` shape this code path needs, and the rgbstd
-        // walk would duplicate ~80 lines we'd then have to keep in sync
-        // with rgb-ops's evolving internal types. The parse cost is small
-        // relative to the network validation below.
-        let (all_op_ids, mint_op_ids, mut last_transition) =
+        // Second walk via `rgb_consignment::parse` for op_ids, types, and
+        // output assignments in a flat shape. The parser already exposes the
+        // typed `TransitionInfo` / `FungibleAllocation` shape needed here; a
+        // direct rgbstd walk would duplicate it against evolving internal
+        // types. The parse cost is small next to the network validation.
+        let (all_op_ids, mint_op_ids, mut last_transition, transitions_by_witness) =
             extract_transition_summary(consignment_bytes)?;
         let transitions_count = all_op_ids.len();
 
-        // Burn-amount extraction: the parser doesn't surface
-        // `Transition.metadata`, so we read the IFA `MS_BURNED_ASSET`
-        // metadata field directly from rgbstd's `Transfer`. Only the
-        // last transition matters for the unlock cross-check; if it's
-        // not a burn, the field stays `None`.
+        // The parser drops `Transition.metadata`, so read IFA
+        // `MS_BURNED_ASSET` straight from rgbstd's `Transfer`. Only the last
+        // transition matters; a non-burn leaves the field `None`.
         if let Some(ref mut last) = last_transition {
             if last.transition_type == ifa::TS_BURN {
                 last.burned_asset_amount = read_last_transition_burned_asset(&transfer)?;
+                last.burn_recipient = read_last_transition_burn_recipient(&transfer)?;
             }
         }
 
-        // Witness-tx identity binding for the send-RGB (EVM-lock → RGB-send)
-        // PSBT path. We extract the last bundle's witness txid (and, when the
-        // bundle embeds the full tx, its input prevouts) so the PSBT
-        // cross-check can prove the PSBT being signed IS this witness
-        // transaction. Gated on the last transition being a Transfer (the
-        // pools-mode send shape) or an Inflation (the mint-RGB shape, #54);
-        // the consistency check inside reads the parsed transition type to
-        // ensure the txid and the transition come from the same witness.
-        let (last_transfer_witness_txid, last_transfer_witness_prevouts, last_transfer_op_id) =
-            match last_transition {
-                Some(ref last)
-                    if matches!(last.transition_type, ifa::TS_TRANSFER | ifa::TS_INFLATION) =>
-                {
-                    read_last_transfer_witness(&transfer, last.transition_type)?
-                }
-                _ => (None, None, None),
-            };
+        // Last bundle's witness tx, ungated by transition type, so the fundsOut
+        // source-block bind also works on a burn. The PSBT path applies its own
+        // transition-type gate before reading this.
+        let last_witness_txid = transfer.bundles.iter().last().map(|wb| wb.witness_id());
 
-        // 2. Create the witness resolver. Backend is picked from the URL
-        //    scheme: ssl://|tcp:// -> Electrum, otherwise Esplora REST.
-        //    Electrum (ssl://) is the production path: TLS terminates inside
-        //    the enclave against the real server cert (the host forwards only
-        //    ciphertext over vsock), so a compromised host cannot feed forged
-        //    witness data. On the Esplora path the `.timeout()` is load-bearing
-        //    (audit final I-03 / #87): a blocking call on the signing path
-        //    through the host-controlled vsock proxy — transport errors (incl.
-        //    timeouts) propagate immediately, so one stalled call costs at most
-        //    the timeout, never an unbounded hang.
+        // Rest of the send-RGB PSBT binding for that same bundle: its input
+        // prevouts when the bundle embeds the full tx, plus the validated OpId.
+        // Gated on the last transition being the type this build's flow signs
+        // (see `super::flow`); the check inside asserts the transition type and
+        // the witness agree.
+        let (last_transfer_witness_prevouts, last_transfer_op_id) = match last_transition {
+            Some(ref last) if super::flow::is_signing_transition(last.transition_type) => {
+                read_last_transfer_witness(&transfer, last.transition_type)?
+            }
+            _ => (None, None),
+        };
+
+        // 2. Create the witness resolver. Backend from the URL scheme:
+        //    ssl://|tcp:// -> Electrum, otherwise Esplora REST. Electrum is
+        //    the production path: TLS terminates inside the enclave against
+        //    the real server cert, so a compromised host cannot forge witness
+        // data. The Esplora `.timeout()` is load-bearing - it bounds a
+        // stalled call on the signing path.
         let is_electrum =
             self.indexer_url.starts_with("ssl://") || self.indexer_url.starts_with("tcp://");
         let mut resolver = if is_electrum {
-            // Bound the blocking electrs reads with a real socket timeout — the
-            // Electrum analog of the Esplora `.timeout()` below. Without it
-            // `Config::default()` has `timeout: None`, so a stalled electrs read
-            // pins the worker thread forever and wedges the whole enclave (see
-            // ELECTRUM_WITNESS_TIMEOUT_SECS). Same crate re-export as the fee
-            // client so the `Config` type matches `AnyResolver::electrum_blocking`.
+            // Bound the blocking electrs reads: `Config::default()` has
+            // `timeout: None`, so a stalled read pins the worker thread
+            // forever (see ELECTRUM_WITNESS_TIMEOUT_SECS). Same crate
+            // re-export as the fee client so the `Config` type matches
+            // `AnyResolver::electrum_blocking`.
             use rgbstd::indexers::electrum_blocking::electrum_client;
             let electrum_cfg = electrum_client::Config::builder()
-                .timeout(Some(std::time::Duration::from_secs(
-                    ELECTRUM_WITNESS_TIMEOUT_SECS,
-                )))
+                .timeout(Some(ELECTRUM_WITNESS_TIMEOUT_SECS as u8))
                 .build();
             AnyResolver::electrum_blocking(&self.indexer_url, Some(electrum_cfg)).map_err(|e| {
                 tracing::error!(indexer_url = %self.indexer_url, "electrum resolver creation failed: {e}");
@@ -800,13 +1035,10 @@ impl RgbValidator {
         // treats them as tentative witnesses (not yet mined).
         resolver.add_consignment_txes(&transfer);
 
-        // Pin the trusted type system (audit 4th W-01 / #92). Source it from
-        // the canonical `rgb-schemas` definitions keyed on the consignment's
-        // schema_id, NOT from `transfer.types`. Passing the consignment's own
-        // types makes rgbstd compare them against themselves (always passes);
-        // the canonical set makes `validate()` reject any consignment that
-        // ships substituted type definitions for the schema's SemIds. An
-        // unknown schema_id is rejected fail-closed inside the helper.
+        // Pin the trusted type system from the
+        // canonical `rgb-schemas` definitions, NOT from `transfer.types` -
+        // the consignment's own types would be compared against themselves.
+        // An unknown schema_id is rejected fail-closed inside the helper.
         let schema_id = transfer.genesis.schema_id.to_string();
         let trusted_typesystem = trusted_typesystem_for_schema(&schema_id).inspect_err(|_| {
             tracing::warn!(%contract_id, %schema_id, "no trusted type system for consignment schema");
@@ -822,36 +1054,64 @@ impl RgbValidator {
 
         // 4. Run full RGB validation (makes blocking HTTP calls to Esplora).
         tracing::debug!(%contract_id, "calling rgbstd validate (this may block on Esplora)");
-        let valid = transfer.validate(&resolver, &config).map_err(|e| {
+        // A BFA mint script ends with `cea`, which the plain validator decodes as
+        // `Fail` and so rejects every mint; only the ether extension can run it.
+        #[cfg(feature = "bfa-mint")]
+        let validation_result = if schema_id == schemata::BFA_SCHEMA_ID.to_string() {
+            // Fail closed, and say why: `cea` would reject an empty event set as
+            // an opaque script failure, and validating a mint with no verified
+            // lock behind it is the same as accepting an unbacked mint.
+            if bridge_events.is_empty() {
+                return Err(EnclaveError::CrossCheck(
+                    "BFA consignment supplied without a verified FundsIn event - refusing to \
+                     validate a mint with nothing backing it"
+                        .into(),
+                ));
+            }
+            let events: Vec<Event> = bridge_events.to_vec();
+
+            let schema = transfer.schema.clone();
+            let contract = transfer.contract_id();
+            transfer
+                .validate_with_extension::<IssuedAmountCheckExt, BridgedContract<'_, MemContract<MemContractState>>>(
+                    &resolver,
+                    &config,
+                    ((&schema, contract), &events),
+                )
+        } else {
+            transfer.validate(&resolver, &config)
+        };
+        #[cfg(not(feature = "bfa-mint"))]
+        let validation_result = transfer.validate(&resolver, &config);
+
+        let valid = validation_result.map_err(|e| {
+            // ValidationError carries the Failure that condemned the consignment,
+            // but its Display is a doc comment that drops it - so on its own the
+            // log says only "invalid" and an operator has nothing to act on.
+            let detail = match &e {
+                ValidationError::InvalidConsignment(failure) => failure.to_string(),
+                other => other.to_string(),
+            };
             tracing::warn!(
                 %contract_id,
                 elapsed_ms = start.elapsed().as_millis() as u64,
+                %detail,
                 "RGB validation failed: {e}"
             );
-            EnclaveError::CrossCheck(format!("RGB consignment validation failed: {e}"))
+            EnclaveError::CrossCheck(format!("RGB consignment validation failed: {e}: {detail}"))
         })?;
 
-        // Inspect the validation status for warnings only. We deliberately do
-        // NOT derive witness confirmation from `tx_ord_map` here (#95 follow-up).
+        // Warnings only. Witness confirmation is deliberately NOT derived
+        // from `tx_ord_map` (follow-up): rgb-ops' `resolve_witness`
+        // hard-codes every consignment-supplied tx to `WitnessOrd::Tentative`
+        // regardless of on-chain depth, so reading it as "not yet mined"
+        // rejected every fundsOut.
         //
-        // The enclave feeds the consignment's witness txs to the resolver via
-        // `add_consignment_txes` (above) so rgbstd can validate the DAG from the
-        // bundled txs without trusting the host esplora for tx *contents*. But
-        // rgb-ops' `AnyResolver::resolve_witness` hard-codes every
-        // consignment-supplied tx to `WitnessOrd::Tentative` (indexers/any.rs)
-        // — it never consults the indexer for them — so `tx_ord_map` reports ALL
-        // bundled witnesses as tentative regardless of on-chain depth. Reading
-        // that as a "not-yet-mined" signal rejected EVERY fundsOut, even for
-        // deeply-confirmed witnesses (SPV verified them at the same time).
-        //
-        // Confirmation for the RGB->EVM direction is enforced authoritatively
-        // and unconditionally by the in-enclave SPV header chain:
-        // `validate_source` calls `spv_validation::validate_source_chain`, which
-        // requires a valid SPV merkle proof for EVERY witness txid at
-        // `SPV_MIN_CONFIRMATIONS` depth and errors before signing otherwise.
-        // That is the correct, trusted recency gate; the `tx_ord_map` layer is
-        // left empty. `non_mined_witness_txids` is retained (always empty) so the
-        // `assert_witnesses_confirmed` call site stays a structural guard.
+        // Confirmation for the RGB->EVM direction comes from the in-enclave
+        // SPV header chain instead: `validate_source` requires a valid merkle
+        // proof for every witness txid at `SPV_MIN_CONFIRMATIONS` depth.
+        // `non_mined_witness_txids` stays empty so the
+        // `assert_witnesses_confirmed` call site remains a structural guard.
         let status = valid.validation_status();
         for warning in &status.warnings {
             tracing::warn!(%contract_id, "RGB validation warning: {warning}");
@@ -877,50 +1137,44 @@ impl RgbValidator {
             all_op_ids,
             mint_op_ids,
             last_transition,
-            last_transfer_witness_txid,
+            last_witness_txid,
             last_transfer_witness_prevouts,
             last_transfer_op_id,
             non_mined_witness_txids,
+            transitions_by_witness,
         })
     }
 }
 
-/// Extract the witness-tx identity binding for the consignment's **last**
-/// transition out of the rgbstd `Transfer`: the witness txid of the bundle
-/// carrying the most recent transition, and — when that bundle embeds the
-/// full witness tx (`PubWitness::Tx`) — its Bitcoin input prevouts. Consumed
-/// by the send-RGB PSBT cross-check to bind the PSBT being signed to the
-/// consignment's `TS_TRANSFER` witness transaction.
+/// Extract the rest of the witness-tx identity binding for the consignment's
+/// **last** transition out of the rgbstd `Transfer`: when that bundle embeds
+/// the full witness tx (`PubWitness::Tx`), its Bitcoin input prevouts.
+/// Consumed by the send-RGB PSBT cross-check alongside
+/// [`ValidatedConsignment::last_witness_txid`], which names the same bundle.
 ///
-/// Reads the **same** `transfer.bundles.iter().last()` bundle that
-/// [`read_last_transition_burned_asset`] uses, and asserts that bundle's last
-/// known transition type equals `expected_type` (the type the flat
-/// `rgb_consignment` parser reported for the last transition). The parser
-/// walk (`transfer.witnesses.last()`) and the rgbstd walk
-/// (`transfer.bundles.iter().last()`) are two independent traversals of the
-/// same data; binding a txid from one transition while gating on another
-/// would be a latent mismatch, so a disagreement is rejected fail-closed.
+/// Reads the same `transfer.bundles.iter().last()` bundle as
+/// [`read_last_transition_burned_asset`] and asserts its last known transition
+/// type equals `expected_type`, the type the flat parser reported. The two
+/// walks are independent traversals of the same data, so a disagreement is
+/// rejected fail-closed.
 ///
-/// Also returns the validated OpId (32-byte commitment hash) of that last
-/// transition, read from the same rgbstd bundle - the authoritative source for
-/// the EVM `fundsOut` burnId binding (audit M-02 / #93), NOT the flat parser.
+/// Also returns the validated OpId of that transition, read from the rgbstd
+/// bundle rather than the flat parser.
 ///
-/// Returns `(None, None, None)` only when the transfer has no bundles — a state
-/// rgbstd validation rejects upstream.
+/// Returns `(None, None)` only for a bundle-less transfer, which rgbstd
+/// rejects upstream.
 fn read_last_transfer_witness(
     transfer: &Transfer,
     expected_type: u16,
 ) -> Result<LastTransferBinding> {
     let Some(last_bundle) = transfer.bundles.iter().last() else {
-        return Ok((None, None, None));
+        return Ok((None, None));
     };
 
-    // Read the authoritative OpId of the validated last transition from the
-    // same bundle. rgbstd's `OpId` is the transition's commitment hash; its
-    // `Display` is lowercase hex of the 32 bytes, so we hex-decode it back to
-    // the raw array. Sourcing it here (the validated object) rather than from
-    // the flat `rgb_consignment` parser is what makes the EVM burnId binding a
-    // derivation from validated data (audit M-02 / #93).
+    // OpId of the validated last transition, from the same bundle. rgbstd's
+    // `OpId` displays as lowercase hex of its 32-byte commitment hash, so
+    // hex-decode it back. Sourced from the validated object, not the flat
+    // parser.
     let mut op_id: Option<[u8; 32]> = None;
     if let Some(known) = last_bundle.bundle().known_transitions.iter().last() {
         let actual = known.transition.transition_type;
@@ -928,7 +1182,7 @@ fn read_last_transfer_witness(
         if actual != expected {
             return Err(EnclaveError::CrossCheck(format!(
                 "consignment last-bundle transition type {actual} disagrees with parsed last \
-                 transition type {expected} — refusing to bind PSBT to an ambiguous witness"
+                 transition type {expected} - refusing to bind PSBT to an ambiguous witness"
             )));
         }
         let opid_hex = known.opid.to_string();
@@ -943,44 +1197,53 @@ fn read_last_transfer_witness(
         op_id = Some(arr);
     }
 
-    // `witness_id()` is `bitcoin::Txid` (rgb re-exports the same bitcoin 0.32
-    // crate the enclave depends on), so no byte-order conversion is needed.
-    let txid = last_bundle.witness_id();
     let prevouts = last_bundle
         .pub_witness
         .tx()
         .map(|tx| tx.input.iter().map(|txin| txin.previous_output).collect());
 
-    Ok((Some(txid), prevouts, op_id))
+    Ok((prevouts, op_id))
 }
 
 /// Binding data for the consignment's last transfer bundle:
-/// `(witness txid, witness input prevouts, validated last-transition OpId)`.
-/// All `Option` because a bundle-less transfer (rejected upstream by rgbstd)
-/// yields `(None, None, None)`. See [`read_last_transfer_witness`].
-type LastTransferBinding = (
-    Option<bitcoin::Txid>,
-    Option<Vec<bitcoin::OutPoint>>,
-    Option<[u8; 32]>,
-);
+/// `(witness input prevouts, validated last-transition OpId)`. Both `Option`
+/// because a bundle-less transfer (rejected upstream by rgbstd) yields
+/// `(None, None)`. See [`read_last_transfer_witness`].
+type LastTransferBinding = (Option<Vec<bitcoin::OutPoint>>, Option<[u8; 32]>);
+
+/// Mint transitions - the ones that map 1:1 to an EVM lock record. BFA's
+/// `TS_BRIDGE` counts only in a `bfa-mint` build, so a swap enclave classifies
+/// exactly what it classified before BFA existed.
+pub fn is_mint_transition(transition_type: u16) -> bool {
+    #[cfg(feature = "bfa-mint")]
+    {
+        if transition_type == bfa::TS_BRIDGE {
+            return true;
+        }
+    }
+    transition_type == ifa::TS_INFLATION
+}
 
 /// Parse the consignment with `rgb_consignment::parse` and pull out the
-/// flat transition summary (every op_id + the most recent transition's
-/// shape). Errors if the consignment isn't a Transfer or if any field
-/// fails to decode.
+/// flat transition summary (every op_id, the most recent transition's shape,
+/// and every transition grouped by the witness tx that commits it). Errors if
+/// the consignment isn't a Transfer or if any field fails to decode.
 #[allow(clippy::type_complexity)]
 fn extract_transition_summary(
     consignment_bytes: &[u8],
-) -> Result<(Vec<String>, Vec<String>, Option<TransitionSummary>)> {
+) -> Result<(
+    Vec<String>,
+    Vec<String>,
+    Option<TransitionSummary>,
+    Vec<(bitcoin::Txid, Vec<TransitionSummary>)>,
+)> {
     let info = rgb_consignment::parse(consignment_bytes)
         .map_err(|e| EnclaveError::CrossCheck(format!("rgb-consignment parse failed: {e}")))?;
 
     let transfer = match info {
         ConsignmentInfo::Transfer(t) => t,
-        // A Contract / Kit can't authorise an EVM action — the listener
-        // wouldn't send one over SignEvm, but reject explicitly so a
-        // mistaken upload fails closed instead of silently passing the
-        // SPV stage.
+        // A Contract / Kit cannot authorise an EVM action. Rejected
+        // explicitly so a mistaken upload fails closed.
         ConsignmentInfo::Contract(_) => {
             return Err(EnclaveError::CrossCheck(
                 "consignment is a Contract, expected Transfer".into(),
@@ -1000,25 +1263,56 @@ fn extract_transition_summary(
         .map(|t: &TransitionInfo| t.op_id.clone())
         .collect();
 
-    // The mint (IFA `TS_INFLATION`) subset — these map 1:1 to EVM lock
+    // The mint (IFA `TS_INFLATION`) subset - these map 1:1 to EVM lock
     // records (`fundsIn`). The `fundsOut` `fundsInIds[]` must each correspond
-    // to one of these (spec §6).
+    // to one of these (spec section 6).
     let mint_op_ids: Vec<String> = transfer
         .witnesses
         .iter()
         .flat_map(|w: &WitnessInfo| w.transitions.iter())
-        .filter(|t: &&TransitionInfo| t.transition_type == ifa::TS_INFLATION)
+        .filter(|t: &&TransitionInfo| is_mint_transition(t.transition_type))
         .map(|t: &TransitionInfo| t.op_id.clone())
         .collect();
 
-    let last_transition = transfer
-        .witnesses
-        .last()
-        .and_then(|w| w.transitions.last())
-        .map(transition_summary)
-        .transpose()?;
+    // Every transition, grouped by the witness tx that commits it. One tx can
+    // carry several, so reading only `last_transition` would leave the rest of
+    // the value it moves unbound. The PSBT cross-check binds the whole group.
+    let mut transitions_by_witness: Vec<(bitcoin::Txid, Vec<TransitionSummary>)> =
+        Vec::with_capacity(transfer.witnesses.len());
+    for w in transfer.witnesses.iter() {
+        let txid = txid_from_display_hex(&w.txid)?;
+        let summaries: Result<Vec<TransitionSummary>> =
+            w.transitions.iter().map(transition_summary).collect();
+        transitions_by_witness.push((txid, summaries?));
+    }
 
-    Ok((all_op_ids, mint_op_ids, last_transition))
+    // Taken from the group rather than summarised a second time - it is the
+    // last witness's last transition either way.
+    let last_transition = transitions_by_witness
+        .last()
+        .and_then(|(_, summaries)| summaries.last())
+        .cloned();
+
+    Ok((
+        all_op_ids,
+        mint_op_ids,
+        last_transition,
+        transitions_by_witness,
+    ))
+}
+
+/// Parse a display-order (big-endian) txid hex string into a `bitcoin::Txid`.
+///
+/// The parser stringifies txids in display order while `bitcoin::Txid` stores
+/// them reversed, so the flip lives here rather than at each comparison site.
+fn txid_from_display_hex(display_hex: &str) -> Result<bitcoin::Txid> {
+    use bitcoin::hashes::Hash;
+
+    let mut raw = decode_display_txid(display_hex)?;
+    raw.reverse();
+    Ok(bitcoin::Txid::from_raw_hash(
+        bitcoin::hashes::sha256d::Hash::from_byte_array(raw),
+    ))
 }
 
 fn transition_summary(t: &TransitionInfo) -> Result<TransitionSummary> {
@@ -1034,10 +1328,8 @@ fn transition_summary(t: &TransitionInfo) -> Result<TransitionSummary> {
                 })
             })?;
 
-    // Asset units only: `OS_ASSET`-typed allocations. An Inflation (mint)
-    // transition also carries `OS_INFLATION` allowance outputs whose amounts
-    // are remaining mint *capacity* — counting those as minted value would
-    // let a mint consignment cover an EVM lock it never minted for (#54).
+    // `OS_ASSET` allocations only. An Inflation transition also carries
+    // `OS_INFLATION` outputs whose amounts are mint capacity, not value.
     let asset_output_amount: u64 = t
         .fungible_allocations
         .iter()
@@ -1054,7 +1346,12 @@ fn transition_summary(t: &TransitionInfo) -> Result<TransitionSummary> {
     let outputs: Result<Vec<TransitionOutput>> = t
         .fungible_allocations
         .iter()
-        .flat_map(|a: &FungibleAllocation| a.entries.iter().map(transition_output))
+        .flat_map(|a: &FungibleAllocation| {
+            let assignment_type = a.assignment_type;
+            a.entries
+                .iter()
+                .map(move |e| transition_output(assignment_type, e))
+        })
         .collect();
 
     Ok(TransitionSummary {
@@ -1063,59 +1360,82 @@ fn transition_summary(t: &TransitionInfo) -> Result<TransitionSummary> {
         total_output_amount,
         asset_output_amount,
         outputs: outputs?,
-        // Filled by `read_last_transition_burned_asset` if the
-        // transition is a burn; the parser doesn't expose metadata so
-        // we leave this `None` here.
+        // Filled by `read_last_transition_burned_asset` /
+        // `read_last_transition_burn_recipient` if the transition is a burn;
+        // the parser doesn't expose metadata so we leave these `None` here.
         burned_asset_amount: None,
+        burn_recipient: None,
     })
 }
 
-/// Walk the rgbstd `Transfer` to the last witness bundle's last known
-/// transition and pull the IFA `MS_BURNED_ASSET` value out of its
-/// metadata. The parser drops `Transition.metadata` on the floor — we
-/// read it here directly so the unlock cross-check has the destroyed
-/// amount available.
+/// Raw metadata value `meta_type` carries on the last witness bundle's last
+/// known transition, if any. The flat parser drops `Transition.metadata`, so
+/// the cross-checks that need it walk the rgbstd `Transfer` through here.
 ///
-/// The metadata value for `MS_BURNED_ASSET` is a strict-encoded
-/// `rgbstd::Amount`, which is defined as `pub struct Amount(u64)` with
-/// the standard `StrictEncode` derive — i.e. 8 bytes, little-endian.
-/// We decode the `u64` manually rather than reaching for
-/// `StrictDeserialize::from_strict_serialized` to avoid threading
-/// the `rgb-strict-encoding`-as-`strict_encoding` rename through
-/// our deps; the encoding shape has been stable since RGB 0.11 and
-/// changes here would break wire compatibility upstream regardless.
-///
-/// Returns `Ok(None)` if there's no last transition (a validated
-/// transfer should never produce that) or if the metadata key is
-/// absent — rgbstd validation rejects a `TS_BURN` transition with no
-/// `MS_BURNED_ASSET`, so reaching the `None` branch in production
-/// implies a schema mismatch. Returns `Err` if the metadata blob is
-/// the wrong size for a `u64`.
-fn read_last_transition_burned_asset(transfer: &Transfer) -> Result<Option<u64>> {
-    let Some(last_bundle) = transfer.bundles.iter().last() else {
-        return Ok(None);
-    };
-    let Some(known) = last_bundle.bundle().known_transitions.iter().last() else {
-        return Ok(None);
-    };
-    let burned_meta_key = MetaType::with(ifa::MS_BURNED_ASSET);
-    for (mt, mv) in &known.transition.metadata {
-        if *mt != burned_meta_key {
-            continue;
-        }
-        let raw: &[u8] = mv.as_unconfined().as_slice();
-        let bytes: [u8; 8] = raw.try_into().map_err(|_| {
-            EnclaveError::CrossCheck(format!(
-                "MS_BURNED_ASSET metadata is {} bytes, expected 8 (strict-encoded u64)",
-                raw.len()
-            ))
-        })?;
-        return Ok(Some(u64::from_le_bytes(bytes)));
-    }
-    Ok(None)
+/// `None` when the transfer has no bundle, that bundle no known transition, or
+/// the transition no value under that key - all three are "not declared" rather
+/// than errors, and each caller decides what a missing value means for it.
+fn last_transition_meta(transfer: &Transfer, meta_type: u16) -> Option<&[u8]> {
+    let known = transfer
+        .bundles
+        .iter()
+        .last()?
+        .bundle()
+        .known_transitions
+        .iter()
+        .last()?;
+    let key = MetaType::with(meta_type);
+    known
+        .transition
+        .metadata
+        .iter()
+        .find(|(mt, _)| **mt == key)
+        .map(|(_, mv)| mv.as_unconfined().as_slice())
 }
 
-fn transition_output(e: &FungibleEntry) -> Result<TransitionOutput> {
+/// The BFA `MS_BURN_RECIPIENT` metadata on the last transition - the 32 bytes
+/// naming where the redemption is owed.
+///
+/// `Ok(None)` when the key is absent (an IFA burn declares `burnedInflation`
+/// there instead), and `Err` when the blob is not exactly 32 bytes, because a
+/// release must never be pointed at a truncated or padded address.
+fn read_last_transition_burn_recipient(transfer: &Transfer) -> Result<Option<Vec<u8>>> {
+    let Some(raw) = last_transition_meta(transfer, bfa::MS_BURN_RECIPIENT) else {
+        return Ok(None);
+    };
+    if raw.len() != 32 {
+        return Err(EnclaveError::CrossCheck(format!(
+            "MS_BURN_RECIPIENT metadata is {} bytes, expected 32",
+            raw.len()
+        )));
+    }
+    Ok(Some(raw.to_vec()))
+}
+
+/// The IFA `MS_BURNED_ASSET` metadata on the last transition - the destroyed
+/// amount the unlock cross-check binds against.
+///
+/// The value is a strict-encoded `rgbstd::Amount` (`u64`, 8 bytes,
+/// little-endian). Decoded manually rather than via
+/// `StrictDeserialize::from_strict_serialized`, to avoid threading the
+/// `rgb-strict-encoding`-as-`strict_encoding` rename through our deps.
+///
+/// `Ok(None)` when the key is absent (which for a `TS_BURN` implies a schema
+/// mismatch), and `Err` when the blob is the wrong size for a `u64`.
+fn read_last_transition_burned_asset(transfer: &Transfer) -> Result<Option<u64>> {
+    let Some(raw) = last_transition_meta(transfer, ifa::MS_BURNED_ASSET) else {
+        return Ok(None);
+    };
+    let bytes: [u8; 8] = raw.try_into().map_err(|_| {
+        EnclaveError::CrossCheck(format!(
+            "MS_BURNED_ASSET metadata is {} bytes, expected 8 (strict-encoded u64)",
+            raw.len()
+        ))
+    })?;
+    Ok(Some(u64::from_le_bytes(bytes)))
+}
+
+fn transition_output(assignment_type: u16, e: &FungibleEntry) -> Result<TransitionOutput> {
     let seal = match &e.seal {
         SealInfo::Revealed { txid, vout } => {
             let txid_bytes = txid
@@ -1132,6 +1452,7 @@ fn transition_output(e: &FungibleEntry) -> Result<TransitionOutput> {
         },
     };
     Ok(TransitionOutput {
+        assignment_type,
         amount: e.amount,
         seal,
     })
@@ -1155,11 +1476,8 @@ fn decode_display_txid(hex_str: &str) -> Result<[u8; 32]> {
 mod tests {
     use super::*;
 
-    // Fixtures borrowed from the rgb-consignment-parser repo
-    // (`test-data/consignment_out` and `test-data/asset`). Both are
-    // mainnet NIA artefacts produced by the upstream rgb-lib test
-    // harness; we ship them in-tree so the unit tests don't depend on
-    // network access or the parser repo's working copy.
+    // Fixtures from the rgb-consignment-parser repo (`test-data/`). Mainnet
+    // NIA artefacts, shipped in-tree so the tests need no network access.
     const TRANSFER_FIXTURE: &[u8] =
         include_bytes!("../../../tests/fixtures/transfer_consignment.rgbc");
     const CONTRACT_FIXTURE: &[u8] =
@@ -1175,7 +1493,7 @@ mod tests {
     fn rejects_invalid_bytes() {
         let validator = RgbValidator::new("http://localhost:1".to_string(), "regtest").unwrap();
         let err = validator
-            .validate_consignment(b"not-a-consignment")
+            .validate_consignment(b"not-a-consignment", &[])
             .unwrap_err();
         assert!(
             err.to_string().contains("deserialization failed"),
@@ -1244,7 +1562,7 @@ mod tests {
 
     #[test]
     fn fee_estimate_rejects_empty_response_on_mainnet() {
-        // Anomalous on mainnet: the non-mainnet floor must not leak here (#55).
+        // Anomalous on mainnet: the non-mainnet floor must not leak here.
         let url = spawn_fee_stub(vec![r#"{}"#]);
         let v = RgbValidator::new(url, "bitcoin").unwrap();
         let err = v.recommended_fee_rate_sat_vb().unwrap_err();
@@ -1279,7 +1597,7 @@ mod tests {
 
     #[test]
     fn fee_estimate_fails_closed_when_unreachable_on_non_mainnet() {
-        // The #55 threat (host suppresses the egress): the floor must not
+        // The threat (host suppresses the egress): the floor must not
         // rescue a failed fetch, only an honest empty response earns it.
         let v = RgbValidator::new("http://127.0.0.1:1".into(), "signet").unwrap();
         let err = v.recommended_fee_rate_sat_vb().unwrap_err();
@@ -1303,7 +1621,7 @@ mod tests {
     #[test]
     fn fee_estimate_fails_closed_when_unreachable() {
         // Nothing listening: the fetch error must propagate as a refusal, not
-        // a skip — the host controls this egress (#55).
+        // a skip - the host controls this egress.
         let v = RgbValidator::new("http://127.0.0.1:1".into(), "bitcoin").unwrap();
         let err = v.recommended_fee_rate_sat_vb().unwrap_err();
         assert!(
@@ -1314,18 +1632,16 @@ mod tests {
 
     #[test]
     fn stalled_esplora_times_out_instead_of_hanging() {
-        // audit final I-03 / #87: consignment validation makes blocking HTTP
-        // calls through the host-controlled vsock proxy. A host that accepts
-        // the connection and never responds must cost at most the HTTP
-        // timeout — pre-fix this call hung the worker thread forever.
+        // A host that accepts the connection and
+        // never responds must cost at most the HTTP timeout.
         use std::net::TcpListener;
 
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind stalled stub");
         let addr = listener.local_addr().unwrap();
         std::thread::spawn(move || {
-            // Accept and hold every connection open without ever writing a
-            // byte; keeping the streams alive prevents an early RST that
-            // would fail fast for the wrong reason.
+            // Hold every connection open without writing a byte; keeping the
+            // streams alive avoids an early RST that would fail fast for the
+            // wrong reason.
             let mut held = Vec::new();
             for stream in listener.incoming() {
                 let Ok(stream) = stream else { break };
@@ -1338,7 +1654,7 @@ mod tests {
             .with_http_timeout(2);
         let start = std::time::Instant::now();
         let err = validator
-            .validate_consignment(TRANSFER_FIXTURE)
+            .validate_consignment(TRANSFER_FIXTURE, &[])
             .unwrap_err();
         let elapsed = start.elapsed();
         assert!(
@@ -1353,11 +1669,8 @@ mod tests {
         assert!(err.to_string().contains("unknown bitcoin network"));
     }
 
-    /// #54: `asset_output_amount` must count only `OS_ASSET`-typed
-    /// allocations. An inflation (mint) transition also carries
-    /// `OS_INFLATION` allowance outputs whose amounts are remaining mint
-    /// capacity — counting them as minted value would let a mint consignment
-    /// cover an EVM lock it never minted for.
+    /// `asset_output_amount` must count only `OS_ASSET` allocations, not
+    /// the `OS_INFLATION` allowance outputs that carry mint capacity.
     #[test]
     fn transition_summary_excludes_inflation_allowance_from_asset_amount() {
         let alloc = |assignment_type: u16, amount: u64| FungibleAllocation {
@@ -1387,12 +1700,12 @@ mod tests {
         assert_eq!(summary.total_output_amount, 1_000_500);
     }
 
-    /// For a Transfer everything is `OS_ASSET`, so the two sums agree — the
+    /// For a Transfer everything is `OS_ASSET`, so the two sums agree - the
     /// invariant the PSBT amount bind relies on when it switched from
-    /// `total_output_amount` to `asset_output_amount` (#54).
+    /// `total_output_amount` to `asset_output_amount`.
     #[test]
     fn transfer_fixture_asset_amount_equals_total() {
-        let (_, _, last_transition) =
+        let (_, _, last_transition, _) =
             extract_transition_summary(TRANSFER_FIXTURE).expect("transfer parse");
         let last = last_transition.expect("transfer has a last transition");
         assert_eq!(last.transition_type, ifa::TS_TRANSFER);
@@ -1401,7 +1714,7 @@ mod tests {
 
     #[test]
     fn extracts_op_ids_and_last_transition_from_transfer_fixture() {
-        let (all_op_ids, mint_op_ids, last_transition) =
+        let (all_op_ids, mint_op_ids, last_transition, _) =
             extract_transition_summary(TRANSFER_FIXTURE).expect("transfer parse");
 
         // Fixture is a Transfer with two witness bundles, one transition
@@ -1441,7 +1754,7 @@ mod tests {
 
     #[test]
     fn trusted_typesystem_sourced_from_schema_not_consignment() {
-        // The W-01 fix (#92): the trusted type system must come from the
+        // The trusted type system must come from the
         // canonical rgb-schemas definitions, not from `transfer.types`.
         // The in-tree fixture is an NIA consignment, so its schema_id resolves
         // to a canonical type system whose id matches NIA's.
@@ -1471,7 +1784,7 @@ mod tests {
     fn ifa_constants_match_rgb_schemas_definitions() {
         // Lock these to the values published in
         // `rgb-protocol/rgb-schemas/src/lib.rs`. If upstream renumbers
-        // them, this test fails loud — the consequences of a silent
+        // them, this test fails loud - the consequences of a silent
         // mismatch (mis-classifying a Transfer as a Burn or vice versa)
         // would be much worse than a CI break.
         assert_eq!(ifa::TS_TRANSFER, 10000);
@@ -1481,10 +1794,166 @@ mod tests {
     }
 
     #[test]
+    fn bfa_constants_match_schema() {
+        // Same reasoning as the IFA constants above, and one addition worth
+        // stating: BFA reuses IFA's transfer and burn types but mints through
+        // its own `TS_BRIDGE`, and its mint right `OS_BRIDGE` is declarative -
+        // it carries no amount, so unlike `OS_INFLATION` it can never be summed
+        // into a minted total. These numbers are still marked TODO upstream; if
+        // they move, this fails loud rather than mis-classifying a mint.
+        assert_eq!(bfa::TS_BRIDGE, 8014);
+        assert_eq!(bfa::OS_BRIDGE, 4014);
+        assert_ne!(bfa::TS_BRIDGE, ifa::TS_INFLATION);
+        assert_ne!(bfa::OS_BRIDGE, ifa::OS_INFLATION);
+    }
+
+    /// `BridgeLocation::Ethereum(TinyString)` strict-encodes as a one-byte
+    /// union tag (first variant, `tags = order`), a one-byte length, then the
+    /// address. Pinned here so a change in that layout fails loudly rather than
+    /// as an unexplained "invalid bridge location" at mint time.
+    #[cfg(feature = "bfa-mint")]
+    #[test]
+    fn decodes_the_genesis_bridge_location_layout() {
+        let addr = "0x1111111111111111111111111111111111111111";
+        let mut blob = vec![0u8, addr.len() as u8];
+        blob.extend_from_slice(addr.as_bytes());
+        assert_eq!(decode_bridge_location(&blob).unwrap(), addr);
+    }
+
+    #[cfg(feature = "bfa-mint")]
+    #[test]
+    fn refuses_a_malformed_bridge_location_blob() {
+        assert!(decode_bridge_location(&[]).is_err());
+        // Unknown union tag: a future non-Ethereum variant must not be guessed at.
+        assert!(decode_bridge_location(&[1, 2, b'a', b'b']).is_err());
+        assert!(decode_bridge_location(&[0]).is_err());
+        // Declared length disagrees with the bytes that follow.
+        assert!(decode_bridge_location(&[0, 4, b'a', b'b']).is_err());
+        assert!(decode_bridge_location(&[0, 1, 0xff]).is_err());
+    }
+
+    /// The schema gate the BFA pre-pass applies on both directions: an IFA or
+    /// swap consignment must trigger no EVM lookup and no ancestor requirement,
+    /// or every non-BFA mint and burn on the stand would start failing.
+    #[cfg(feature = "bfa-mint")]
+    #[test]
+    fn no_binding_for_a_non_bfa_consignment() {
+        assert!(bfa_binding(TRANSFER_FIXTURE).unwrap().is_none());
+    }
+
+    /// Undecodable bytes are left to `validate_consignment`, which owns that
+    /// error - reporting it from the pre-pass would reorder the messages every
+    /// other path already asserts on.
+    #[cfg(feature = "bfa-mint")]
+    #[test]
+    fn binding_defers_undecodable_bytes() {
+        assert!(bfa_binding(b"not-a-consignment").unwrap().is_none());
+    }
+
+    /// A `BfaBinding` whose last transition is `last`, over the given mint set.
+    #[cfg(feature = "bfa-mint")]
+    fn binding_with(mint_opids: Vec<[u8; 32]>, last: Option<(u16, [u8; 32])>) -> BfaBinding {
+        BfaBinding {
+            mint_opids,
+            bridge_location: "0x0".into(),
+            last_transition: last.map(|(transition_type, opid)| TransitionSummary {
+                op_id: hex::encode(opid),
+                transition_type,
+                total_output_amount: 0,
+                asset_output_amount: 0,
+                outputs: vec![],
+                burned_asset_amount: None,
+                burn_recipient: None,
+            }),
+        }
+    }
+
+    /// The happy path: the last transition is a bridge mint that is also in the
+    /// mint list, so it names the deposit this request authorises.
+    #[cfg(feature = "bfa-mint")]
+    #[test]
+    fn terminal_opid_is_the_last_bridge_mint() {
+        let b = binding_with(vec![[1; 32], [2; 32]], Some((bfa::TS_BRIDGE, [2; 32])));
+        assert_eq!(b.terminal_opid().unwrap(), [2; 32]);
+    }
+
+    /// No transitions means no answer to "which deposit pays for this?".
+    #[cfg(feature = "bfa-mint")]
+    #[test]
+    fn terminal_opid_refuses_an_empty_consignment() {
+        assert!(binding_with(vec![], None).terminal_opid().is_err());
+    }
+
+    /// A BFA consignment ending in a non-bridge transition is not a mint request.
+    #[cfg(feature = "bfa-mint")]
+    #[test]
+    fn terminal_opid_refuses_a_non_bridge_last_transition() {
+        let b = binding_with(vec![[1; 32]], Some((ifa::TS_BURN, [1; 32])));
+        assert!(b.terminal_opid().is_err());
+    }
+
+    /// The last transition is a bridge mint, but the flat parser did not list it
+    /// among the mints - refuse rather than guess.
+    #[cfg(feature = "bfa-mint")]
+    #[test]
+    fn terminal_opid_refuses_a_last_mint_absent_from_the_list() {
+        let b = binding_with(vec![[1; 32]], Some((bfa::TS_BRIDGE, [9; 32])));
+        assert!(b.terminal_opid().is_err());
+    }
+
+    #[cfg(feature = "bfa-mint")]
+    #[test]
+    fn bfa_schema_resolves_a_trusted_typesystem() {
+        // The release path runs every consignment through this resolver, and it
+        // fails closed on an unknown schema. Without BFA registered a bridged
+        // asset could be minted but never released.
+        use schemata::BFA_SCHEMA_ID;
+
+        trusted_typesystem_for_schema(&BFA_SCHEMA_ID.to_string())
+            .expect("BFA must resolve a trusted type system");
+    }
+
+    /// The swap enclave must not have gained BFA behaviour: every BFA branch is
+    /// feature-gated, so a bridged consignment fails closed as it did before.
+    #[cfg(not(feature = "bfa-mint"))]
+    #[test]
+    fn bfa_schema_is_unknown_without_the_feature() {
+        use schemata::BFA_SCHEMA_ID;
+
+        assert!(trusted_typesystem_for_schema(&BFA_SCHEMA_ID.to_string()).is_err());
+    }
+
+    /// `bfa-mint` implies `rgb-mint-burn`, so a BFA `Bridge` is a mint here and
+    /// a signing shape for the flow. Without the feature it is neither, in
+    /// either flow - that is what keeps a swap enclave free of any mint rule.
+    #[test]
+    fn bridge_transitions_count_as_mints_only_with_the_feature() {
+        assert!(is_mint_transition(ifa::TS_INFLATION));
+        assert_eq!(
+            is_mint_transition(bfa::TS_BRIDGE),
+            cfg!(feature = "bfa-mint")
+        );
+        assert_eq!(
+            super::super::flow::is_signing_transition(bfa::TS_BRIDGE),
+            cfg!(feature = "bfa-mint")
+        );
+    }
+
+    #[test]
     fn last_transition_carries_revealed_and_confidential_seals() {
-        let (_, _, last_transition) =
+        let (_, _, last_transition, _) =
             extract_transition_summary(TRANSFER_FIXTURE).expect("transfer parse");
         let last = last_transition.expect("transfer has a last transition");
+
+        // Both legs are `OS_ASSET` - the assignment tag the per-output
+        // recipient bind filters on. Asserted against real
+        // consignment bytes so the tag can't silently drift from the parser.
+        assert!(
+            last.outputs
+                .iter()
+                .all(|o| o.assignment_type == ifa::OS_ASSET),
+            "transfer fixture legs should all be OS_ASSET"
+        );
 
         // First entry is the change leg: revealed with no explicit txid
         // (points at the witness tx itself), vout=1, amount as above.
@@ -1516,33 +1985,27 @@ mod tests {
     #[test]
     fn extracts_last_transfer_witness_from_transfer_fixture() {
         // `read_last_transfer_witness` works off the rgbstd `Transfer`
-        // directly, so it needs no Esplora/network — load the fixture and
+        // directly, so it needs no Esplora/network - load the fixture and
         // assert the witness-tx binding data the PSBT cross-check relies on.
         let transfer =
             Transfer::load(Cursor::new(TRANSFER_FIXTURE)).expect("load transfer fixture");
 
         // The fixture's last transition is a Transfer (type 10000, asserted in
         // `extracts_op_ids_and_last_transition_from_transfer_fixture`).
-        let (txid, prevouts, op_id) =
+        let (prevouts, op_id) =
             read_last_transfer_witness(&transfer, ifa::TS_TRANSFER).expect("extract witness");
-
-        // Every validated transfer has at least one bundle, so the txid is set.
-        let txid = txid.expect("transfer fixture has a witness txid");
-        // It must equal the last bundle's witness id (the bundle we bind to).
         let last_bundle = transfer.bundles.iter().last().expect("fixture has bundles");
-        let expected = last_bundle.witness_id();
-        assert_eq!(txid, expected);
 
         // The rgb-lib sender embeds the full witness tx for a freshly-composed
         // transfer, so the prevouts (the witness tx's Bitcoin inputs) are
-        // present and non-empty — the per-input canary is available.
+        // present and non-empty - the per-input canary is available.
         let prevouts = prevouts.expect("fixture embeds the full witness tx (PubWitness::Tx)");
         assert!(
             !prevouts.is_empty(),
             "witness tx must spend at least one input"
         );
 
-        // The validated OpId (canonical burnId source, #93) must be present and
+        // The validated OpId (canonical burnId source) must be present and
         // equal the last bundle's last known-transition opid, read straight
         // from the validated object - not the flat parser.
         let op_id = op_id.expect("transfer fixture yields a validated opid");
@@ -1580,7 +2043,7 @@ mod tests {
         let msg = err.to_string();
         assert!(
             msg.contains("Contract") && msg.contains("expected Transfer"),
-            "expected Contract→Transfer rejection, got: {msg}"
+            "expected Contract->Transfer rejection, got: {msg}"
         );
     }
 
@@ -1593,16 +2056,14 @@ mod tests {
         );
     }
 
-    // =========================================================================
-    // Consignment-flag pins — successors of the dropped
+    // Consignment-flag pins - successors of the dropped
     // `validation::evm_crosscheck` tests `accepts_valid_consignment_hash` /
     // `ignores_consignment_valid_flag_when_bytes_present` (+ the P0 companion
     // `rejects_empty_consignment_even_with_valid_flag`). Their target,
     // `validate_evm_request`'s payload gate, is now `validate_source_payload`
     // in this file. The wire type (`proto::RgbSource`) STILL carries the
     // host-supplied `consignment_valid: bool` (tag 1); the gate never reads
-    // it — validity comes from the bytes, never the flag.
-    // =========================================================================
+    // it - validity comes from the bytes, never the flag.
 
     /// keccak256(bytes) in the wire shape `validate_source_payload` expects.
     fn keccak(bytes: &[u8]) -> Vec<u8> {
@@ -1622,12 +2083,13 @@ mod tests {
             consignment_hash: keccak(TRANSFER_FIXTURE),
             merkle_proofs: vec![],
             commission: 0,
+            mint_ancestors: vec![],
         }
     }
 
     /// Old `accepts_valid_consignment_hash`: consignment bytes plus their
     /// matching keccak256 pass the payload gate. `Ok` here is "past the hash
-    /// check" in full — everything after this gate in `validate_source` is
+    /// check" in full - everything after this gate in `validate_source` is
     /// validator/SPV work, not payload shape.
     #[test]
     fn accepts_valid_consignment_hash() {
@@ -1697,7 +2159,7 @@ mod tests {
     }
 
     /// Proofs that each stay under the per-path-depth cap but exceed the
-    /// aggregate byte budget are rejected by the aggregate gate — the case the
+    /// aggregate byte budget are rejected by the aggregate gate - the case the
     /// per-field caps miss.
     #[test]
     fn rejects_aggregate_proof_bytes_over_budget() {
@@ -1726,7 +2188,7 @@ mod tests {
 
     /// Old `ignores_consignment_valid_flag_when_bytes_present`: an identical
     /// payload must validate identically whatever the host claims in
-    /// `consignment_valid` — the gate never reads the flag.
+    /// `consignment_valid` - the gate never reads the flag.
     #[test]
     fn ignores_consignment_valid_flag_when_bytes_present() {
         let mut source = fixture_source("rgb:any-declared-asset");
@@ -1738,7 +2200,7 @@ mod tests {
 
     /// Old `rejects_empty_consignment_even_with_valid_flag` (P0 regression):
     /// a host-supplied `consignment_valid: true` with no consignment bytes
-    /// must be rejected — the flag can never substitute for the bytes.
+    /// must be rejected - the flag can never substitute for the bytes.
     #[test]
     fn rejects_empty_consignment_even_with_valid_flag() {
         let mut source = fixture_source("rgb:any-declared-asset");
@@ -1765,9 +2227,8 @@ mod tests {
         );
     }
 
-    // =========================================================================
-    // Asset-identity binding, SOURCE path — successor of the dropped
-    // `evm_crosscheck::asset_bind` suite (audit TEE-SE-01). Its target,
+    // Asset-identity binding, SOURCE path - successor of the dropped
+    // `evm_crosscheck::asset_bind` suite. Its target,
     // `bind_asset_identity`, was removed in the networks/ split; the legs are
     // now INLINED in `validate_source` (this file) after
     // `validate_consignment`, so the narrowest callable unit is
@@ -1781,7 +2242,6 @@ mod tests {
     // is gated on `BridgeConfig::is_configured()`; the destination path
     // (`validate_destination_anchor`, `networks/rgb/mod.rs`) enforces the pin
     // unconditionally.
-    // =========================================================================
 
     mod asset_bind {
         use super::*;
@@ -1801,13 +2261,13 @@ mod tests {
             let id = t.contract_id().to_string();
             assert_eq!(
                 id, FIXTURE_ASSET_ID,
-                "transfer fixture contract id drifted — update FIXTURE_ASSET_ID"
+                "transfer fixture contract id drifted - update FIXTURE_ASSET_ID"
             );
             id
         }
 
         /// Stub Esplora serving only `GET /block-height/0` with the mainnet
-        /// genesis hash — all offline rgbstd validation of the fixture needs:
+        /// genesis hash - all offline rgbstd validation of the fixture needs:
         /// the resolver phones home only for the genesis-hash chain-identity
         /// check, and the fixture embeds its witness txs (registered as
         /// tentative via `add_consignment_txes`).
@@ -1856,7 +2316,7 @@ mod tests {
             }
         }
 
-        /// Fully-empty operator config (`is_configured() == false`) — the
+        /// Fully-empty operator config (`is_configured() == false`) - the
         /// legacy dev/mock posture.
         fn unconfigured_config() -> BridgeConfig {
             BridgeConfig {
@@ -1904,13 +2364,16 @@ mod tests {
                 bridge_config: config,
                 rgb_validator: Some(&validator),
                 header_chain: &chain,
+                // Source validation never reaches the destination PSBT bind.
+                self_owned_psbt_outputs: None,
+                bridge_events: &[],
             };
             validate_source(source, &ctx)
         }
 
         /// Happy path (old `binds_when_contract_id_matches_pin`): validated
         /// contract_id == declared asset_id == pinned RGB_ASSET_ID. Every
-        /// binding leg passes and validation proceeds to the SPV stage —
+        /// binding leg passes and validation proceeds to the SPV stage -
         /// the failure there is *past* the binding, and specifically past
         /// the staleness + chain-net checks too.
         #[test]
@@ -1930,7 +2393,7 @@ mod tests {
 
         /// Old `binds_when_declared_is_empty`, semantics INVERTED by a
         /// deliberate post-merge strengthening: the networks/ split requires
-        /// the RGB source to declare its asset — an empty `asset_id` now
+        /// the RGB source to declare its asset - an empty `asset_id` now
         /// fails closed in `validate_source_payload` instead of binding via
         /// the pin alone. This same rejection is what carries the old
         /// `rejects_foreign_asset_even_when_declared_is_empty` guarantee:
@@ -1947,8 +2410,8 @@ mod tests {
 
         /// Old `rejects_foreign_asset_even_when_declared_is_empty`, adapted:
         /// empty declarations are now rejected up-front (previous test), so
-        /// the closest reachable form of the TEE-SE-01 funds-theft path is a
-        /// listener that *colludes* — declaring the foreign asset
+        /// the closest reachable form of the funds-theft path is a
+        /// listener that *colludes* - declaring the foreign asset
         /// consistently with the consignment. The pin must still reject it:
         /// RGB_ASSET_ID is load-bearing regardless of what the listener says.
         #[test]
@@ -1983,19 +2446,19 @@ mod tests {
             );
         }
 
-        /// Old `rejects_when_pin_absent` — the source-path ASYMMETRY: here
+        /// Old `rejects_when_pin_absent` - the source-path ASYMMETRY: here
         /// the pin block is gated on `BridgeConfig::is_configured()`, so a
         /// fully-empty config skips the pin and the binding degrades to
         /// declared == validated, proceeding to SPV (this test pins exactly
         /// that). It does NOT fail closed here; the unconditional fail-closed
         /// successor lives on the destination path
         /// (`networks/rgb/mod.rs::tests::asset_bind::rejects_when_pin_absent`)
-        /// and, for this RGB→EVM direction, in the EVM destination's
+        /// and, for this RGB->EVM direction, in the EVM destination's
         /// `!is_configured()` rejection (`networks/evm/validation.rs`,
         /// `not(test)`-gated, asserted at the integration layer). The inner
         /// "pinned chain/contract but RGB_ASSET_ID is empty" branch in
         /// `validate_source` is unreachable: `is_configured()` already
-        /// requires a non-empty RGB_ASSET_ID (audit 4th M-03 / #94).
+        /// requires a non-empty RGB_ASSET_ID.
         #[test]
         fn pin_check_skipped_when_config_unconfigured() {
             let id = fixture_asset_id();
@@ -2015,7 +2478,7 @@ mod tests {
         // narrowest callable unit: `RgbValidator::validate_consignment`
         // derives contract_id from the consignment's genesis, which is never
         // empty for a loadable Transfer, and `ValidationContext.rgb_validator`
-        // is the concrete type — there is no seam to inject a fabricated
+        // is the concrete type - there is no seam to inject a fabricated
         // ValidatedConsignment. Recorded as not-feasible in the restoration
         // report rather than weakened into a vacuous test.
     }

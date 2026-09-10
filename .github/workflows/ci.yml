@@ -10,6 +10,9 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
+  # Cargo.toml uses ssh:// URLs for private deps; force Cargo to use the
+  # system git so it honours SSH_AUTH_SOCK set by the SSH setup step.
+  CARGO_NET_GIT_FETCH_WITH_CLI: "true"
 
 jobs:
   ci:
@@ -18,31 +21,61 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Rust 1.96
+      - name: Test private dependency build wiring
+        run: python3 -m unittest discover -s build/tests -v
+
+      - name: Install Rust 1.96.1
         uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: "1.96"
+          toolchain: "1.96.1"
           components: rustfmt, clippy
 
       - name: Install system dependencies
-        run: sudo apt-get update && sudo apt-get install -y pkg-config libssl-dev protobuf-compiler
+        run: sudo apt-get update && sudo apt-get install -y pkg-config libssl-dev
 
-      # The `rgb-consignment` dep (used by the rgb-validation / spv
-      # feature combos) and the `federated-signer-proto` dep are hosted
-      # in private repos and fetched over SSH. Load read-only deploy
-      # keys registered on UTEXO-Protocol/rgb-consignment-parser and
-      # UTEXO-Protocol/federated-signer-proto into the agent so cargo's
-      # `git fetch` can authenticate. The default feature set now
-      # includes `spv` (which pulls `rgb-validation`), so every build
-      # below needs these keys — including the minimal
-      # `--no-default-features` build, which still fetches the private
-      # proto crate.
-      - name: Set up SSH for private RGB deps
-        uses: webfactory/ssh-agent@v0.9.0
-        with:
-          ssh-private-key: |
-            ${{ secrets.RGB_CONSIGNMENT_PARSER_DEPLOY_KEY }}
-            ${{ secrets.FEDERATED_SIGNER_PROTO_DEPLOY_KEY }}
+      # Each private dep uses a per-repo SSH Host alias (e.g. github-rgb-consensus).
+      # The alias maps to github.com with IdentityFile + IdentitiesOnly yes, so
+      # SSH offers exactly ONE key per connection. Without this, the agent offers
+      # all keys in order; GitHub authenticates with the first accepted key and
+      # then refuses access to any repo that key is not authorised for.
+      - name: Set up SSH for private deps
+        run: |
+          mkdir -p ~/.ssh && chmod 700 ~/.ssh
+          ssh-keyscan -H github.com >> ~/.ssh/known_hosts
+          printf '%s\n' "${{ secrets.FEDERATED_SIGNER_PROTO_DEPLOY_KEY }}" > ~/.ssh/key_federated
+          printf '%s\n' "${{ secrets.RGB_CONSIGNMENT_PARSER_DEPLOY_KEY }}"  > ~/.ssh/key_consignment
+          printf '%s\n' "${{ secrets.RGB_CONSENSUS_BFA_DEPLOY_KEY }}"       > ~/.ssh/key_consensus
+          printf '%s\n' "${{ secrets.RGB_OPS_BFA_DEPLOY_KEY }}"             > ~/.ssh/key_ops
+          printf '%s\n' "${{ secrets.RGB_SCHEMAS_BFA_DEPLOY_KEY }}"         > ~/.ssh/key_schemas
+          chmod 600 ~/.ssh/key_*
+          cat >> ~/.ssh/config << 'SSHCONF'
+          Host github-federated-signer
+            HostName github.com
+            User git
+            IdentityFile ~/.ssh/key_federated
+            IdentitiesOnly yes
+          Host github-rgb-consignment
+            HostName github.com
+            User git
+            IdentityFile ~/.ssh/key_consignment
+            IdentitiesOnly yes
+          Host github-rgb-consensus
+            HostName github.com
+            User git
+            IdentityFile ~/.ssh/key_consensus
+            IdentitiesOnly yes
+          Host github-rgb-ops
+            HostName github.com
+            User git
+            IdentityFile ~/.ssh/key_ops
+            IdentitiesOnly yes
+          Host github-rgb-schemas
+            HostName github.com
+            User git
+            IdentityFile ~/.ssh/key_schemas
+            IdentitiesOnly yes
+          SSHCONF
+          chmod 600 ~/.ssh/config
 
       - name: Cache cargo registry
         uses: actions/cache@v4
@@ -51,15 +84,19 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
+            parent/target
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-
 
+      # NOTE: `parent/` is a SEPARATE cargo workspace (see the root Cargo.toml
+      # comment), so `--workspace` here covers only enclave / enclave-proto /
+      # attestation-verify. Parent gets its own steps below; keep them in sync
+      # when adding checks.
       - name: Check formatting
         run: cargo fmt --all -- --check
 
-      # The default feature set is now `spv` (which pulls `rgb-validation`), so
-      # the default build/clippy/test below exercise the production signing
-      # path — the SPV-anchored fundsOut flow shipped in the EIF.
+      # Defaults are rgb + rgb-swap + ccd, so the steps below exercise the
+      # signing path shipped in the combined EIF (minus vsock / evm-rpc).
       - name: Build (default features)
         run: cargo build --workspace
 
@@ -71,27 +108,81 @@ jobs:
       - name: Test (default features)
         run: cargo test --workspace
 
+      # --- parent workspace (separate lockfile, separate target dir) ---------
+      - name: Check formatting (parent)
+        run: cargo fmt --all --manifest-path parent/Cargo.toml -- --check
+
+      - name: Build (parent)
+        run: cargo build --manifest-path parent/Cargo.toml
+
+      - name: Clippy (parent)
+        run: cargo clippy --manifest-path parent/Cargo.toml --all-targets -- -D warnings
+
+      - name: Test (parent)
+        run: cargo test --manifest-path parent/Cargo.toml
+
       # Production build profile: the exact feature set shipped in the EIF
-      # (build/Dockerfile.enclave). `helios` is required in production (#77) and
-      # makes this a heavy build (2nd alloy major, revm, BLS, vendored OpenSSL).
+      # (build/Dockerfile.enclave). `helios` is not shipped.
       - name: Build (production combo)
-        run: cargo build -p utexo-bridge-enclave --features vsock,rgb-validation,spv,evm-rpc,helios
+        run: cargo build -p utexo-bridge-enclave --features vsock,rgb,rgb-swap,ccd,evm-rpc
 
       - name: Clippy (production combo)
-        run: cargo clippy -p utexo-bridge-enclave --features vsock,rgb-validation,spv,evm-rpc,helios --all-targets -- -D warnings
+        run: cargo clippy -p utexo-bridge-enclave --features vsock,rgb,rgb-swap,ccd,evm-rpc --all-targets -- -D warnings
 
       # SPV path coverage. Cannot use vsock here (Linux runner without
       # vsock support); spv pulls in rgb-validation transitively, which is
       # what the SPV unit + integration tests exercise.
-      - name: Test (--features spv)
-        run: cargo test -p utexo-bridge-enclave --features spv
+      - name: Test (--features spv,rgb-swap)
+        run: cargo test -p utexo-bridge-enclave --features spv,rgb-swap
+
+      # RGB-only EIF profile, `ccd` dropped. Mirrors Dockerfile.enclave.rgb.
+      # CCD requests (SignCcd / CcdSource) must be refused here.
+      - name: Build (rgb-only)
+        run: cargo build -p utexo-bridge-enclave --no-default-features --features vsock,rgb,rgb-swap,evm-rpc
+      - name: Clippy (rgb-only)
+        run: cargo clippy -p utexo-bridge-enclave --no-default-features --features vsock,rgb,rgb-swap,evm-rpc --all-targets -- -D warnings
+      - name: Test (rgb-only)
+        run: cargo test -p utexo-bridge-enclave --no-default-features --features rgb,rgb-swap,evm-rpc,mock-attestation,allow-seed-import
+
+      # Mint/burn RGB EIF profile - the second enclave instance. Same stack as
+      # the rgb-only lane above with the other flow selected, so the mint and
+      # burn rules in networks/rgb/flow/mint_burn.rs are actually compiled and
+      # exercised. Mirrors Dockerfile.enclave.mint-burn.
+      - name: Build (rgb mint/burn)
+        run: cargo build -p utexo-bridge-enclave --no-default-features --features vsock,rgb,rgb-mint-burn,evm-rpc
+      - name: Clippy (rgb mint/burn)
+        run: cargo clippy -p utexo-bridge-enclave --no-default-features --features vsock,rgb,rgb-mint-burn,evm-rpc --all-targets -- -D warnings
+      - name: Test (rgb mint/burn)
+        run: cargo test -p utexo-bridge-enclave --no-default-features --features rgb,rgb-mint-burn,evm-rpc,mock-attestation,allow-seed-import
+
+      # BFA mint/burn EIF profile - the shipped production image. Mirrors
+      # Dockerfile.enclave.bfa: the mint/burn flow plus the bridged-asset mint
+      # path (chained-mint ancestry, settlementData bind). `bfa-mint` implies
+      # rgb-mint-burn + evm-rpc.
+      - name: Build (bfa-mint)
+        run: cargo build -p utexo-bridge-enclave --no-default-features --features vsock,rgb,evm-rpc,bfa-mint
+      - name: Clippy (bfa-mint)
+        run: cargo clippy -p utexo-bridge-enclave --no-default-features --features vsock,rgb,evm-rpc,bfa-mint --all-targets -- -D warnings
+      - name: Test (bfa-mint)
+        run: cargo test -p utexo-bridge-enclave --no-default-features --features rgb,bfa-mint,mock-attestation,allow-seed-import
+
+      # CCD-only single-network EIF profile: ccd + shared EVM signing, no RGB
+      # stack (no rgb-ops/rgb-consignment/rgb-schemas/spv). Mirrors
+      # Dockerfile.enclave.ccd; RGB requests must be refused. The SignCcd
+      # integration suite (test_sign_ccd.rs) is gated on ccd+allow-seed-import.
+      - name: Build (ccd-only)
+        run: cargo build -p utexo-bridge-enclave --no-default-features --features vsock,ccd
+      - name: Clippy (ccd-only)
+        run: cargo clippy -p utexo-bridge-enclave --no-default-features --features vsock,ccd,mock-attestation,allow-seed-import --all-targets -- -D warnings
+      - name: Test (ccd-only)
+        run: cargo test -p utexo-bridge-enclave --no-default-features --features ccd,mock-attestation,allow-seed-import
 
       # Minimal build: no features at all (`--no-default-features` drops the
-      # now-default `spv`). Keeps the no-SPV path compiling and exercises the
-      # M-01 / #61 guard that a no-spv build refuses to sign `fundsOut`
+      # default rgb/rgb-swap/ccd set). Keeps the no-SPV path compiling and exercises the
+      # Guard that a no-spv build refuses to sign `fundsOut`
       # (test_no_spv_build_refuses_funds_out_even_without_merkle_proofs).
-      # Skips the private `rgb-consignment` dep, but still fetches the private
-      # `federated-signer-proto` crate — the SSH agent set up above covers it.
+      # Skips the rgb-consignment dep entirely. Like every enclave build here it
+      # still resolves the workspace's private RGB git sources using the keys above.
       - name: Build (minimal — no default features)
         run: cargo build -p utexo-bridge-enclave --no-default-features
 
@@ -101,7 +192,7 @@ jobs:
       - name: Test (minimal — no default features)
         run: cargo test -p utexo-bridge-enclave --no-default-features
 
-      # In-enclave EVM FundsIn verification (#60). The predicate + decoding
+      # In-enclave EVM FundsIn verification. The predicate + decoding
       # tests use a FakeProvider, so no real RPC is needed in CI.
       - name: Test (--features evm-rpc)
         run: cargo test -p utexo-bridge-enclave --features evm-rpc
@@ -133,24 +224,46 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Rust 1.96
+      - name: Install Rust 1.96.1
         uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: "1.96"
+          toolchain: "1.96.1"
 
       - name: Install system dependencies
-        run: sudo apt-get update && sudo apt-get install -y pkg-config libssl-dev protobuf-compiler
+        run: sudo apt-get update && sudo apt-get install -y pkg-config libssl-dev
 
-      # `rgb-consignment` is an optional git dep, but cargo still resolves
-      # (and fetches) it from its pinned lockfile revision even when the
-      # feature is off — so the build needs the deploy key to reach the
-      # `compile_error!`, just like the `ci` job above.
-      - name: Set up SSH for private RGB deps
-        uses: webfactory/ssh-agent@v0.9.0
-        with:
-          ssh-private-key: |
-            ${{ secrets.RGB_CONSIGNMENT_PARSER_DEPLOY_KEY }}
-            ${{ secrets.FEDERATED_SIGNER_PROTO_DEPLOY_KEY }}
+      - name: Set up SSH for private BFA deps
+        run: |
+          mkdir -p ~/.ssh && chmod 700 ~/.ssh
+          ssh-keyscan -H github.com >> ~/.ssh/known_hosts
+          printf '%s\n' "${{ secrets.RGB_CONSIGNMENT_PARSER_DEPLOY_KEY }}"  > ~/.ssh/key_consignment
+          printf '%s\n' "${{ secrets.RGB_CONSENSUS_BFA_DEPLOY_KEY }}"       > ~/.ssh/key_consensus
+          printf '%s\n' "${{ secrets.RGB_OPS_BFA_DEPLOY_KEY }}"             > ~/.ssh/key_ops
+          printf '%s\n' "${{ secrets.RGB_SCHEMAS_BFA_DEPLOY_KEY }}"         > ~/.ssh/key_schemas
+          chmod 600 ~/.ssh/key_*
+          cat >> ~/.ssh/config << 'SSHCONF'
+          Host github-rgb-consignment
+            HostName github.com
+            User git
+            IdentityFile ~/.ssh/key_consignment
+            IdentitiesOnly yes
+          Host github-rgb-consensus
+            HostName github.com
+            User git
+            IdentityFile ~/.ssh/key_consensus
+            IdentitiesOnly yes
+          Host github-rgb-ops
+            HostName github.com
+            User git
+            IdentityFile ~/.ssh/key_ops
+            IdentitiesOnly yes
+          Host github-rgb-schemas
+            HostName github.com
+            User git
+            IdentityFile ~/.ssh/key_schemas
+            IdentitiesOnly yes
+          SSHCONF
+          chmod 600 ~/.ssh/config
 
       - name: Cache cargo registry
         uses: actions/cache@v4
@@ -159,6 +272,7 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
+            parent/target
           key: ${{ runner.os }}-cargo-release-guards-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-release-guards-
 
@@ -176,7 +290,7 @@ jobs:
           echo "OK: release build correctly rejected '${{ matrix.feature }}' via the compile_error guard"
 
   # Assert that enabling `rgb-validation` without `spv` fails to compile via the
-  # `compile_error!` in lib.rs (audit M-01 / #61). Without SPV, a consignment's
+  # `compile_error!` in lib.rs. Without SPV, a consignment's
   # witness txs are anchored only through the host-controlled Esplora resolver,
   # so the enclave must never be built that way. Runs separately from `ci`
   # because the build is expected to fail. Unlike `release-guards` this is not
@@ -187,24 +301,46 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Rust 1.96
+      - name: Install Rust 1.96.1
         uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: "1.96"
+          toolchain: "1.96.1"
 
       - name: Install system dependencies
-        run: sudo apt-get update && sudo apt-get install -y pkg-config libssl-dev protobuf-compiler
+        run: sudo apt-get update && sudo apt-get install -y pkg-config libssl-dev
 
-      # `--features rgb-validation` pulls the private `rgb-consignment` dep, and
-      # cargo also resolves the private `federated-signer-proto` git dep from the
-      # lockfile, both fetched before it reaches our crate's `compile_error!`, so
-      # both deploy keys are required here just like the `ci` job above.
-      - name: Set up SSH for private RGB deps
-        uses: webfactory/ssh-agent@v0.9.0
-        with:
-          ssh-private-key: |
-            ${{ secrets.RGB_CONSIGNMENT_PARSER_DEPLOY_KEY }}
-            ${{ secrets.FEDERATED_SIGNER_PROTO_DEPLOY_KEY }}
+      - name: Set up SSH for private BFA deps
+        run: |
+          mkdir -p ~/.ssh && chmod 700 ~/.ssh
+          ssh-keyscan -H github.com >> ~/.ssh/known_hosts
+          printf '%s\n' "${{ secrets.RGB_CONSIGNMENT_PARSER_DEPLOY_KEY }}"  > ~/.ssh/key_consignment
+          printf '%s\n' "${{ secrets.RGB_CONSENSUS_BFA_DEPLOY_KEY }}"       > ~/.ssh/key_consensus
+          printf '%s\n' "${{ secrets.RGB_OPS_BFA_DEPLOY_KEY }}"             > ~/.ssh/key_ops
+          printf '%s\n' "${{ secrets.RGB_SCHEMAS_BFA_DEPLOY_KEY }}"         > ~/.ssh/key_schemas
+          chmod 600 ~/.ssh/key_*
+          cat >> ~/.ssh/config << 'SSHCONF'
+          Host github-rgb-consignment
+            HostName github.com
+            User git
+            IdentityFile ~/.ssh/key_consignment
+            IdentitiesOnly yes
+          Host github-rgb-consensus
+            HostName github.com
+            User git
+            IdentityFile ~/.ssh/key_consensus
+            IdentitiesOnly yes
+          Host github-rgb-ops
+            HostName github.com
+            User git
+            IdentityFile ~/.ssh/key_ops
+            IdentitiesOnly yes
+          Host github-rgb-schemas
+            HostName github.com
+            User git
+            IdentityFile ~/.ssh/key_schemas
+            IdentitiesOnly yes
+          SSHCONF
+          chmod 600 ~/.ssh/config
 
       - name: Cache cargo registry
         uses: actions/cache@v4
@@ -213,6 +349,7 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
+            parent/target
           key: ${{ runner.os }}-cargo-feature-guards-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-feature-guards-
 
@@ -228,3 +365,32 @@ jobs:
             exit 1
           fi
           echo "OK: rgb-validation-without-spv correctly rejected via the compile_error guard"
+
+      # The two RGB flows ship as two enclave instances. Enabling both would put
+      # two sets of value-moving rules in one binary; enabling neither would
+      # leave the build with no rule at all. Both must fail to compile.
+      - name: Assert both RGB flows at once is rejected
+        run: |
+          if cargo build -p utexo-bridge-enclave --no-default-features --features spv,rgb-swap,rgb-mint-burn 2>build.log; then
+            echo "::error::build unexpectedly SUCCEEDED with both rgb-swap and rgb-mint-burn — the compile_error guard is missing or not firing"
+            exit 1
+          fi
+          if ! grep -q "mutually exclusive" build.log; then
+            echo "::error::build failed, but not via the expected compile_error guard (rgb-swap / rgb-mint-burn are mutually exclusive)"
+            cat build.log
+            exit 1
+          fi
+          echo "OK: both-flows build correctly rejected via the compile_error guard"
+
+      - name: Assert rgb-validation with no flow is rejected
+        run: |
+          if cargo build -p utexo-bridge-enclave --no-default-features --features spv 2>build.log; then
+            echo "::error::build unexpectedly SUCCEEDED with rgb-validation but no flow — the compile_error guard is missing or not firing"
+            exit 1
+          fi
+          if ! grep -q "rgb-validation requires a flow" build.log; then
+            echo "::error::build failed, but not via the expected compile_error guard (rgb-validation requires a flow)"
+            cat build.log
+            exit 1
+          fi
+          echo "OK: no-flow build correctly rejected via the compile_error guard"

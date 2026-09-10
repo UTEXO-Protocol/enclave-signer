@@ -1,3 +1,36 @@
+# Its OWN workspace, deliberately separate from the enclave workspace at the
+# repo root — see the comment there. In short: the parent needs the private
+# `federated-signer-proto` crate, and a shared workspace would force that
+# credential onto every enclave build, breaking public PCR0 reproducibility.
+#
+# Consequence: build the parent from THIS directory (`cd parent && cargo build`),
+# not with `-p utexo-bridge-parent` from the repo root. It also carries its own
+# Cargo.lock, and the `[patch.crates-io]` / `[profile.release]` blocks below
+# duplicate the root ones — keep them in sync.
+[workspace]
+
+[profile.release]
+opt-level = "z"
+lto = true
+strip = true
+panic = "abort"
+codegen-units = 1
+
+# Must mirror the root workspace EXACTLY: the dev-dependency on
+# `utexo-bridge-enclave` pulls its default features (`spv` -> `rgb-validation`),
+# so the RGB crates land in this graph too. Pinned by rev rather than branch —
+# with `branch = "master"` this workspace resolved to a newer commit than the
+# root and the two compiled against different rgb-ops. Bump both together.
+[patch.crates-io]
+# Mirrors the root block verbatim, including rgb-consensus: the `s/bfa` rgb-ops
+# references the ether extension, so it does not build against a crates.io
+# rgb-consensus of the same version.
+rgb-consensus = { git = "ssh://git@github-rgb-consensus/UTEXO-Protocol/rgb-consensus-s-bfa", rev = "68a1470e22ae4bb6a38205404e484b264b4139ee" }
+rgb-ops = { git = "ssh://git@github-rgb-ops/UTEXO-Protocol/rgb-ops-s-bfa", rev = "3bcc7d98d759a8b71bf94ad4a36371dcb7bf392b" }
+rgb-invoicing = { git = "ssh://git@github-rgb-ops/UTEXO-Protocol/rgb-ops-s-bfa", rev = "3bcc7d98d759a8b71bf94ad4a36371dcb7bf392b" }
+rgb-schemas = { git = "ssh://git@github-rgb-schemas/UTEXO-Protocol/rgb-schemas-s-bfa", rev = "af4f91e6807a9680ab195c28719197b7811ac5d6" }
+rgb-strict-encoding = { git = "https://github.com/rgb-protocol/rgb-strict-encoding", rev = "7698a5e96a2a27d5bfa4cd3560da0e8af8e4a18a" }
+
 [package]
 name = "utexo-bridge-parent"
 version = "0.1.0"
@@ -19,7 +52,11 @@ path = "src/bin/attest_verify.rs"
 prost = "0.14"
 tonic = "0.14"
 tokio = { version = "1", features = ["full"] }
-federated-signer-proto = { git = "ssh://git@github.com/UTEXO-Protocol/federated-signer-proto.git", rev = "08ab48be2f42ec1ae11d93672f630dc2035245c5", package = "federated-signer-proto" }
+# Full schema from the shared upstream repo (bridge / node / orchestrator /
+# parent / signer packages). The parent runs on the untrusted host, so needing a
+# credential to build it costs nothing. Keep this rev in lockstep with the
+# vendored slice in `enclave-proto/` — see its README.
+federated-signer-proto = { git = "ssh://git@github-federated-signer/UTEXO-Protocol/federated-signer-proto.git", rev = "18c5d271d40a049ec0ffc8f3a970ef042d8b7ffb", package = "federated-signer-proto" }
 clap = { version = "4", features = ["derive"] }
 
 thiserror = "2"

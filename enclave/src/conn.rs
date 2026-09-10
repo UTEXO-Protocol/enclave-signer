@@ -1,4 +1,4 @@
-//! Connection-level resource limits for the request socket (audit M-03 / #83).
+//! Connection-level resource limits for the request socket.
 //!
 //! The enclave reads a single length-prefixed request, replies, and closes
 //! (see `framing` + `server::handle_connection`). Without deadlines a peer that
@@ -18,10 +18,9 @@
 //! pool ([`WORKER_THREADS`]) fed by a bounded queue ([`MAX_QUEUED_CONNECTIONS`])
 //! so one slow-but-bounded request can't starve the rest.
 //!
-//! Sole ingress is the parent over vsock (already treated as untrusted, and
-//! able to withhold traffic or kill the enclave outright), so this is
-//! availability defense-in-depth on a stateless single-request signer. The
-//! limits are compile-time constants (PCR-attested), not env-tunable.
+//! Sole ingress is the parent over vsock, already untrusted and able to kill
+//! the enclave outright, so this is availability defense in depth. The limits
+//! are compile-time constants (PCR-attested), not env-tunable.
 
 use std::io::{self, Read, Write};
 use std::time::{Duration, Instant};
@@ -60,9 +59,7 @@ impl SocketTimeout for std::net::TcpStream {
     }
 }
 
-// Production socket. vsock is Linux-only; mirrors the TcpStream impl exactly
-// (the vsock crate's VsockStream provides the same std-style setters). Not
-// compiled (or testable) off Linux.
+// Production socket. vsock is Linux-only and mirrors the TcpStream impl.
 #[cfg(all(feature = "vsock", target_os = "linux"))]
 impl SocketTimeout for vsock::VsockStream {
     fn set_read_timeout(&self, dur: Option<Duration>) -> io::Result<()> {

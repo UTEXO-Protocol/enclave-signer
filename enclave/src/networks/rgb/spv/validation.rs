@@ -1,28 +1,21 @@
 //! Per-header validation primitives. Pure functions; no chain state lives here.
 //!
-//! The `HeaderChain` orchestrates batches and supplies prior-header context;
-//! these helpers answer the small questions: "does this header chain to its
-//! predecessor", "is the PoW met", "is its `nBits` what we expect at this
-//! height".
+//! `HeaderChain` orchestrates batches and supplies prior-header context; these
+//! helpers answer whether a header chains to its predecessor, whether its PoW
+//! is met, and whether its `nBits` is right for the height.
 //!
-//! ## Network-specific behaviour
+//! Per network:
 //!
-//! - **Mainnet, testnet3**: full PoW + retarget enforcement.
-//!   `validate_pow` checks `block_hash <= target_from_nBits`; `expected_bits`
-//!   re-derives the expected `nBits` so an attacker can't submit a chain
-//!   with arbitrarily low difficulty.
-//! - **Signet**: PoW is trivial, so this module does NOT verify it. Real
-//!   signet validation is the BIP-325 signature, which lives in the
-//!   *coinbase witness commitment* of each block — a piece of data the
-//!   current `SubmitHeadersRequest` proto does not carry. PR 2 therefore
-//!   only enforces chain linkage on signet. Strict signet validation
-//!   requires extending the proto with `repeated bytes coinbase_txs`; see
-//!   docs/spv-review.md for context.
-//! - **Regtest**: everything is trivial; chain linkage only.
+//! - Mainnet, testnet3: full PoW + retarget enforcement. `expected_bits`
+//!   re-derives the required `nBits`, so a chain with arbitrarily low
+//!   difficulty is rejected.
+//! - Signet: PoW is trivial and not verified. Real signet validation is the
+//!   BIP-325 signature in the coinbase witness commitment, which
+//!   `SubmitHeadersRequest` does not carry, so only chain linkage is enforced.
+//! - Regtest: chain linkage only.
 //!
-//! Testnet3's "min-difficulty-after-20-minutes" exception is *not*
-//! implemented here — testnet3 isn't a target environment. Adding it would
-//! require another branch in `expected_bits` and adjacent fixtures.
+//! Testnet3's min-difficulty-after-20-minutes exception is not implemented,
+//! since testnet3 is not a target environment.
 
 use bitcoin::block::Header;
 use bitcoin::pow::CompactTarget;
@@ -53,7 +46,7 @@ pub fn check_linkage(
 }
 
 /// Run PoW check: `block_hash <= target_from_nBits(header.bits)`. Skipped on
-/// networks where PoW is trivial (signet, regtest) — see module docs.
+/// networks where PoW is trivial (signet, regtest) - see module docs.
 pub fn check_pow(header: &Header, height: BlockHeight, network: Network) -> Result<()> {
     if !network.enforces_pow() {
         return Ok(());
@@ -173,10 +166,8 @@ mod tests {
 
     #[test]
     fn signet_skips_pow_check() {
-        // Construct a header whose hash is bigger than the target — would
-        // fail mainnet PoW, but should pass on signet because PoW is skipped.
-        // Easiest way: take block 1 and mutate the nonce. The resulting
-        // header almost certainly does not satisfy PoW.
+        // A header whose hash exceeds the target: mainnet PoW fails, signet
+        // and regtest pass. Built by mutating block 1's nonce.
         let mut bytes = hex::decode(MAINNET_BLOCK_1_HEADER_HEX).unwrap();
         // Flip the last byte (part of nonce) to break PoW.
         let last = bytes.len() - 1;

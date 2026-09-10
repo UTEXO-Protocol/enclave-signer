@@ -11,8 +11,8 @@ stateDiagram-v2
     Cloning : signing DISABLED
 
     Active : holds Box of KeyManager (seed in SecretBox)
-    Active : signing ENABLED
-    Active : get_keys() / sign_evm / sign_psbt OK
+    Active : signing permitted subject to validation and policy
+    Active : get_keys() available; signing remains feature and policy gated
 
     Initial --> Active : initialize_from_entropy() — first enclave, OS entropy
     Initial --> Active : initialize_from_seed/mnemonic() — feature allow-seed-import, dev only
@@ -20,7 +20,8 @@ stateDiagram-v2
 
     Cloning --> Active : complete_cloning() (SetClone — decrypt + install peer seed, assert evm_address == cluster_public_key)
 
-    Active --> Active : Sign / SignBtc / SignRawMessage / SignRawDigest / GetAttestedPublicKey (no state change)
+    Active --> Active : Sign / SignBtc / SignRawDigest / SignCcd / GetAttestedPublicKey (no state change)
+    Initial --> Initial : SubmitHeaders / GetLastSavedBlock (no keys needed, any phase)
     Active --> Active : GetClone (donor — exports sealed seed, stays Active)
 
     note right of Active
@@ -29,6 +30,6 @@ stateDiagram-v2
         ensure_initial() rejects any second initialize attempt
         with AlreadyInitialized. Upgrades/rotation happen by
         standing up a NEW cluster (new PCRs) — never by mutating
-        an Active enclave (spec Sec 16.5).
+        an Active enclave.
     end note
 ```

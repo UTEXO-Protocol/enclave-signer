@@ -1,72 +1,27 @@
 # syntax=docker/dockerfile:1.4
 # Parent Adapter (gRPC proxy to Enclave)
-# Usage:
-#   DOCKER_BUILDKIT=1 docker build --ssh default \
-#     -f build/Dockerfile.parent -t utexo-bridge-parent .
-#
-# `--ssh default` is required because Cargo fetches the pinned generated
-# `federated-signer-proto` Rust crate from GitHub over SSH. Parent also needs it
-# because cargo's workspace resolver may fetch every git source declared
-# anywhere in the workspace before it knows which crates a `-p` build compiles.
-#
-# Dev (TCP to enclave container):
-#   docker run -e ENCLAVE_ADDR=enclave:5000 utexo-bridge-parent
-#
-# Production (vsock to Nitro enclave):
-#   docker run --device /dev/vsock:/dev/vsock \
-#     -e USE_VSOCK=true -e ENCLAVE_VSOCK_CID=16 \
-#     utexo-bridge-parent
-
-# ===== Builder Stage =====
+# Private Cargo dependencies require BuildKit secrets (see README, Building).
+# Supply github_token, or one deploy key per repo; keys never enter image layers.
+# Example: docker build --secret id=github_token,env=GITHUB_TOKEN -f build/Dockerfile.parent .
+# Production builder glibc must remain compatible with the AL2023 runtime.
 FROM rust:1.96-slim AS builder
 
-# `git` + `ca-certificates`: the workspace `[patch.crates-io]` rewrites
-# rgb-consensus / rgb-ops / rgb-invoicing / rgb-strict-encoding to public
-# git URLs, and `.cargo/config.toml` sets `net.git-fetch-with-cli = true`
-# so cargo shells out to system `git` instead of bundled libgit2.
-# `openssh-client` is required because cargo's workspace resolver also
-# fetches the private `rgb-consignment` git source (declared optional in
-# `enclave/Cargo.toml`) even when building `-p utexo-bridge-parent` —
-# the resolution is workspace-wide, not target-scoped.
+# Builder-only tools: system Git and SSH for private dependencies.
 RUN apt-get update && apt-get install -y \
-    pkg-config libssl-dev protobuf-compiler git ca-certificates openssh-client \
+    pkg-config libssl-dev git ca-certificates openssh-client make cmake \
     && rm -rf /var/lib/apt/lists/*
-
-# Trust github.com's SSH host key so the build doesn't prompt or fail
-# on host-key verification when fetching the private parser dep.
-RUN mkdir -p /root/.ssh && \
-    ssh-keyscan -t ed25519,ecdsa github.com >> /root/.ssh/known_hosts
 
 WORKDIR /build
 COPY . /build/
 
-# `--mount=type=ssh` exposes the SSH_AUTH_SOCK forwarded by `--ssh default`.
-# In CD we also pass both deploy keys as BuildKit secrets to avoid SSH key
-# collisions when two private repos live on github.com.
-RUN --mount=type=ssh \
-    --mount=type=secret,id=federated_key,required=false \
-    --mount=type=secret,id=consignment_key,required=false \
-    set -eu; \
-    if [ -f /run/secrets/federated_key ] && [ -f /run/secrets/consignment_key ]; then \
-      install -m 600 /run/secrets/federated_key /tmp/federated_key; \
-      install -m 600 /run/secrets/consignment_key /tmp/consignment_key; \
-      printf "%s\n" \
-        "Host github.com-federated" \
-        "  HostName github.com" \
-        "  User git" \
-        "  IdentityFile /tmp/federated_key" \
-        "  IdentitiesOnly yes" \
-        "Host github.com-consignment" \
-        "  HostName github.com" \
-        "  User git" \
-        "  IdentityFile /tmp/consignment_key" \
-        "  IdentitiesOnly yes" \
-        > /tmp/ci_ssh_config; \
-      export GIT_SSH_COMMAND="ssh -F /tmp/ci_ssh_config"; \
-      git config --global url."ssh://git@github.com-federated/UTEXO-Protocol/federated-signer-proto.git".insteadOf "ssh://git@github.com/UTEXO-Protocol/federated-signer-proto.git"; \
-      git config --global url."ssh://git@github.com-consignment/UTEXO-Protocol/rgb-consignment-parser.git".insteadOf "ssh://git@github.com/UTEXO-Protocol/rgb-consignment-parser.git"; \
-    fi; \
-    cargo build --release -p utexo-bridge-parent
+WORKDIR /build/parent
+RUN --mount=type=secret,id=github_token \
+    --mount=type=secret,id=consignment_key \
+    --mount=type=secret,id=consensus_key \
+    --mount=type=secret,id=ops_key \
+    --mount=type=secret,id=schemas_key \
+    --mount=type=secret,id=federated_key \
+    sh /build/build/with-private-deps.sh parent cargo build --release
 
 # ===== Runtime Stage =====
 FROM debian:bookworm-slim
@@ -78,7 +33,8 @@ RUN apt-get update && apt-get install -y \
 
 WORKDIR /home/parent
 
-COPY --from=builder /build/target/release/utexo-bridge-parent ./utexo-bridge-parent
+# `parent/` is its own workspace, so its target dir is nested, not at /build.
+COPY --from=builder /build/parent/target/release/utexo-bridge-parent ./utexo-bridge-parent
 
 RUN chown -R parent:parent .
 

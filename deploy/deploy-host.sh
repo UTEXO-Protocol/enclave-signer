@@ -10,17 +10,17 @@
 # It does NOT bootstrap identity. A fresh/restarted enclave has no key; after this
 # run `utexo-bridge-parent-cli init --cloning-secret ...` on a donor, or
 # `... clone ...` on a requester. (Identity lives in enclave memory and is lost
-# on restart/reboot — see TODO #5 for KMS-sealed DR. #7 only makes the PROCESSES
+# on restart/reboot - see TODO #5 for KMS-sealed DR. #7 only makes the PROCESSES
 # come back automatically; the enclaves come up empty.)
 #
 # The systemd units / ctl scripts / udev / tmpfiles installed here are embedded
 # below as heredocs so this script is self-contained over SSM. They are the same
-# files kept (canonical, reviewable) under deploy/systemd/ in the repo — keep both
+# files kept (canonical, reviewable) under deploy/systemd/ in the repo - keep both
 # in sync.
 #
 # Usage (run as root, e.g. via SSM):
 #   GIT_SHA=<40-hex> BUCKET=<s3-bucket> AWS_REGION=<region> CLUSTER_DIR=<path> bash deploy-host.sh
-# No infra identifiers or paths are baked in (public repo) — pass them via env.
+# No infra identifiers or paths are baked in (public repo) - pass them via env.
 set -euo pipefail
 
 GIT_SHA="${GIT_SHA:?GIT_SHA required (40-hex commit)}"
@@ -229,22 +229,42 @@ done
 
 # --- 6. verify runtime PCR matches the manifest ----------------------------
 # In debug-mode the running enclave reports zeroed PCR0, so a manifest match is
-# impossible by design — skip the runtime check (the static EIF measurement in
+# impossible by design - skip the runtime check (the static EIF measurement in
 # step 3 already verified the artifact). Only meaningful for a production EIF.
 if [ "$ENCLAVE_DEBUG_MODE" = "1" ]; then
   log "ENCLAVE_DEBUG_MODE=1 — skipping runtime PCR0 check (PCRs zeroed under --debug-mode)"
-  asubuntu 'nitro-cli describe-enclaves' | python3 -c 'import json,sys; print("running CIDs:", sorted(e["EnclaveCID"] for e in json.load(sys.stdin)))'
+  # Still assert the exact enclave set (F09-AF-07): an empty/partial list is a FAIL.
+  asubuntu 'nitro-cli describe-enclaves' | python3 - "${CIDS[*]}" <<'PY'
+import json, sys
+want = sorted(int(x) for x in sys.argv[1].split())
+d = json.load(sys.stdin)
+running = sorted(e["EnclaveCID"] for e in d if e.get("State") == "RUNNING")
+print("running CIDs (debug):", running, "want:", want)
+if running != want:
+    sys.exit(f"enclave set mismatch (debug-mode): want {want}, running {running}")
+print(f"OK (debug): exactly {len(want)} enclaves RUNNING")
+PY
 else
 asubuntu 'nitro-cli describe-enclaves' > /tmp/desc.json
-python3 - "$MAN_PCR" <<'PY'
+# F09-AF-07: require the EXACT expected CID set, all in RUNNING state, each with a
+# matching PCR0. Previously an empty enclave list passed silently (no mismatch to
+# find), so a host with zero/partial enclaves could report a "successful" deploy.
+python3 - "$MAN_PCR" "${CIDS[*]}" <<'PY'
 import json, sys
-man = sys.argv[1]
+man  = sys.argv[1]
+want = sorted(int(x) for x in sys.argv[2].split())
 d = json.load(open("/tmp/desc.json"))
+running = sorted(e["EnclaveCID"] for e in d if e.get("State") == "RUNNING")
+allcids = sorted(e["EnclaveCID"] for e in d)
+print("running CIDs:", allcids, "state=RUNNING:", running, "want:", want)
+if running != want:
+    missing = [c for c in want if c not in running]
+    extra   = [c for c in running if c not in want]
+    sys.exit(f"enclave set mismatch: want {want}, running {running} (missing {missing}, extra {extra})")
 bad = [e["EnclaveCID"] for e in d if e.get("Measurements", {}).get("PCR0") != man]
-print("running CIDs:", sorted(e["EnclaveCID"] for e in d))
 if bad:
     sys.exit(f"runtime PCR0 mismatch on CID {bad}")
-print("runtime PCR0 == manifest on all enclaves")
+print(f"OK: exactly {len(want)} enclaves RUNNING with matching PCR0")
 PY
 fi
 
@@ -253,6 +273,12 @@ for CID in "${CIDS[@]}"; do
   systemctl restart "utexo-parent@$CID"
 done
 sleep 4
-ss -ltnp | grep -E '5005[123]' || { log "parents not listening"; exit 1; }
+# F09-AF-07: require ALL expected parent ports to be listening, not "at least one"
+# of them (a single surviving parent must not make a partial cluster look healthy).
+WANT_PORTS=(); for CID in "${CIDS[@]}"; do WANT_PORTS+=("${PORT[$CID]}"); done
+LISTEN="$(ss -ltnH 2>/dev/null | awk '{print $4}' | grep -oE '[0-9]+$' | sort -u)"
+miss=(); for p in "${WANT_PORTS[@]}"; do printf '%s\n' "$LISTEN" | grep -qx "$p" || miss+=("$p"); done
+[ "${#miss[@]}" -eq 0 ] || { log "parents NOT listening on: ${miss[*]} (want ${WANT_PORTS[*]})"; exit 1; }
+log "all parent ports listening: ${WANT_PORTS[*]}"
 
 log "deploy OK (git_sha $GIT_SHA) — systemd-managed; run init/clone to bootstrap identity"

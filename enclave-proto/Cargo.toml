@@ -1,0 +1,11 @@
+[package]
+name = "enclave-proto"
+version = "0.1.0"
+edition = "2021"
+description = "Enclave wire protocol types (vendored slice of federated-signer-proto)"
+publish = false
+
+[dependencies]
+# The only dependency. `enclave.proto` declares no services and imports nothing,
+# so the generated code needs prost alone — no tonic, no prost-types, no bytes.
+prost = "0.14.3"

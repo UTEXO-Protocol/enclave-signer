@@ -1,0 +1,61 @@
+# syntax=docker/dockerfile:1.7
+# Concordium-only enclave image (vsock + ccd) - handles the Concordium bridge
+# Private Cargo dependencies require BuildKit secrets (see README, Building).
+# Supply github_token, or one deploy key per repo; keys never enter image layers.
+# Example: docker build --secret id=github_token,env=GITHUB_TOKEN -f build/Dockerfile.enclave.ccd .
+# Production builder glibc must remain compatible with the AL2023 runtime.
+FROM rust:1.96-slim-bullseye@sha256:c593596210f729542a92aced6a8b0812bcc8d04c5f1b238e663b800d0e2e17bd AS builder
+
+# Builder-only tools: system Git and SSH for private dependencies.
+RUN apt-get update && apt-get install -y \
+    pkg-config libssl-dev git ca-certificates openssh-client \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /build
+COPY . /build/
+
+WORKDIR /build/enclave
+
+# Deterministic compilation (PCR0 reproducibility), same as Dockerfile.enclave:
+#   CARGO_INCREMENTAL=0   no incremental artifacts
+#   --remap-path-prefix   strip the absolute build path from embedded paths
+#   -C debuginfo=0 / strip=symbols  drop debug info + symbol tables
+ENV CARGO_INCREMENTAL=0 \
+    RUSTFLAGS="--remap-path-prefix=/build=/src -C debuginfo=0 -C strip=symbols"
+# `--no-default-features --features vsock,ccd`: Concordium + shared EVM signing
+# only. No `rgb`/`spv`/`rgb-validation`/`evm-rpc`, so the heavy RGB deps are not
+# compiled. `--locked` pins to Cargo.lock exactly, so a rebuild of the same
+# commit cannot re-resolve a git dep and shift PCR0.
+RUN --mount=type=secret,id=github_token \
+    --mount=type=secret,id=consignment_key \
+    --mount=type=secret,id=consensus_key \
+    --mount=type=secret,id=ops_key \
+    --mount=type=secret,id=schemas_key \
+    sh /build/build/with-private-deps.sh enclave cargo build --release --locked --no-default-features --features vsock,ccd
+
+
+# --- Runtime ---
+# Pinned by DIGEST: this rootfs is what ends up in the EIF, so its digest drives
+# PCR0 directly. Bump tag + digest together, in step with Dockerfile.enclave.
+FROM public.ecr.aws/amazonlinux/amazonlinux:2023-minimal@sha256:8073d921f4ac1bf17fca94e16b0bc575e3fc17e4ccbe53b563160f02f0c7ccfc AS runtime
+
+# Deterministic runtime rootfs (PCR0/PCR2 reproducibility). dnf/rpm write state
+# with embedded timestamps and randomness (rpmdb, history, caches, logs);
+# rewrite-timestamp normalises mtimes but not file contents. Scrub it in the SAME
+# layer so the measured rootfs is stable. (rpmdb is not needed at runtime.)
+RUN dnf install -y socat iproute \
+    && dnf clean all \
+    && rm -rf \
+        /var/cache/dnf /var/cache/libdnf5 /var/cache/ldconfig \
+        /var/lib/dnf /var/lib/rpm /var/lib/rpm-state \
+        /var/log/* /tmp/* \
+    && :
+
+WORKDIR /app
+COPY --from=builder /build/target/release/utexo-bridge-enclave /app/utexo-bridge-enclave
+COPY build/entrypoint.sh /app/entrypoint.sh
+
+RUN chmod +x /app/utexo-bridge-enclave /app/entrypoint.sh
+
+ENV RUST_LOG=info
+ENTRYPOINT ["/app/entrypoint.sh"]

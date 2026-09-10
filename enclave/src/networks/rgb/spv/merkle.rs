@@ -7,16 +7,13 @@
 //! Wire format note: Bitcoin merkle nodes are computed in *internal* (little-
 //! endian) byte order, but block explorers (Esplora included) typically
 //! display txids and sibling hashes in *display* (big-endian) byte order.
-//! The verifier here operates strictly on internal-order bytes — callers are
+//! The verifier here operates strictly on internal-order bytes - callers are
 //! responsible for reversing display-order hex strings before passing them in.
 //!
-//! Bitcoin's classic Merkle tree has a known degenerate property: when a
-//! level has an odd number of nodes, the last node is duplicated. This is
-//! handled implicitly here because the proof-walk shape encodes the choice
-//! at each step (sibling-on-the-right vs sibling-on-the-left), which the
-//! prover already accounts for. We do not synthesise the duplication
-//! ourselves; we trust the supplied path. The position index is what tells
-//! us whether each sibling is on the left or the right.
+//! Bitcoin duplicates the last node on odd levels. That is handled implicitly:
+//! the prover accounts for it when emitting the path, and the position index
+//! decides which side each sibling is on. The duplication is never synthesised
+//! here.
 
 use bitcoin::hashes::{sha256d, Hash};
 
@@ -42,7 +39,7 @@ pub enum MerkleError {
 ///
 /// Returns `Ok(())` on inclusion, an error otherwise.
 ///
-/// `path` may be empty — that's the legitimate case where the block contains
+/// `path` may be empty - that's the legitimate case where the block contains
 /// exactly one transaction (the coinbase) and the txid *is* the merkle root.
 pub fn verify_merkle_proof(
     txid: &Sha256d,
@@ -55,8 +52,8 @@ pub fn verify_merkle_proof(
 
     for (i, sibling) in path.iter().enumerate() {
         if sibling.len() != 32 {
-            // unreachable given the [u8; 32] type, but kept defensively for
-            // the day we accept Vec<Vec<u8>> at the boundary
+            // Unreachable given [u8; 32]; kept for a future Vec<Vec<u8>>
+            // boundary.
             return Err(MerkleError::BadSiblingLength {
                 index: i,
                 len: sibling.len(),
@@ -177,7 +174,7 @@ mod tests {
         let n23 = dsha256_pair(&t2, &t3);
         let root = dsha256_pair(&n01, &n23);
 
-        // Right path for t0 but claim it's at position 1 — should hash with
+        // Right path for t0 but claim it's at position 1 - should hash with
         // t1 on the wrong side and miss the root.
         assert!(matches!(
             verify_merkle_proof(&t0, 1, &[t1, n23], &root),
@@ -200,10 +197,9 @@ mod tests {
         let n22 = dsha256_pair(&t2, &t2);
         let root = dsha256_pair(&n01, &n22);
 
-        // Proof for t2 in the 3-tx block: position 2, sibling at level 0 is
-        // t2 itself (the duplicated copy), level 1 sibling is n01.
-        // The prover IS responsible for emitting t2 as the level-0 sibling —
-        // this is Esplora's behaviour and matches Bitcoin Core.
+        // Proof for t2: position 2, level-0 sibling is t2 itself (the
+        // duplicate), level-1 sibling is n01. The prover emits that duplicate,
+        // matching Esplora and Bitcoin Core.
         assert!(verify_merkle_proof(&t2, 2, &[t2, n01], &root).is_ok());
     }
 }
