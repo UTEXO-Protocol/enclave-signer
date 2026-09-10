@@ -1562,16 +1562,20 @@ fn handle_get_clone(state: &EnclaveState, req: GetCloneRequest) -> Result<Enclav
         Ok(())
     })?;
 
-    // 6. Replay-check + record the nonce from the verified document, only
-    //    after the checks above have passed, so an unauthenticated handshake
-    //    never consumes replay-guard capacity. With the count-cap removal
-    // this closes the secret-less cloning-availability DoS.
+    // 6. Reserve the nonce from the verified document (replay-check + record
+    //    with rollback-on-drop), only after the checks above have passed so an
+    //    unauthenticated handshake never consumes replay-guard capacity. With
+    //    the count-cap removal this closes the secret-less cloning-availability
+    //    DoS. The reservation is committed only after the seal + donor
+    //    attestation below succeed (F03-AF-02 / F03-AF-04): a transient failure
+    //    after the record rolls the nonce back, so a legitimate retry is not
+    //    self-blocked by its own earlier attempt.
     let nonce_array: [u8; 32] = verified
         .nonce
         .as_slice()
         .try_into()
         .map_err(|_| EnclaveError::Attestation("attestation nonce has wrong length".into()))?;
-    state.replay_guard.check_and_record(nonce_array)?;
+    let reservation = state.replay_guard.reserve(nonce_array)?;
 
     // 7. Seal the seed under a fresh donor ephemeral keypair.
     let (encrypted_seed, donor_pubkey) =
@@ -1582,6 +1586,9 @@ fn handle_get_clone(state: &EnclaveState, req: GetCloneRequest) -> Result<Enclav
     //    not an old one replayed by the parent.
     let donor_nonce = fresh_nonce()?;
     let donor_attestation = attestation::get_attestation(&donor_nonce, Some(&donor_pubkey), None)?;
+
+    // Seal + donor attestation succeeded: keep the nonce recorded.
+    reservation.commit();
 
     tracing::info!(
         cluster_pk = %hex::encode(our_evm),
@@ -1621,10 +1628,24 @@ fn handle_set_clone(state: &EnclaveState, req: SetCloneRequest) -> Result<Enclav
         return Err(EnclaveError::PubkeyMismatch);
     }
 
-    // 3. Decrypt seed, derive KeyManager, identity check, and commit the
+    // 3. Extract and freshness-reserve the donor nonce BEFORE mutating state
+    //    (F03-AF-03). Placed after the pubkey binding above so a rejected /
+    //    unauthenticated handshake never consumes replay-guard capacity, but
+    //    before `complete_cloning` so a malformed (wrong-length) or replayed
+    //    donor nonce cannot drive the Cloning -> Active transition. The
+    //    reservation rolls back on any failure below, so the state transition
+    //    and the replay record commit together or not at all.
+    let nonce_array: [u8; 32] = verified
+        .nonce
+        .as_slice()
+        .try_into()
+        .map_err(|_| EnclaveError::Attestation("attestation nonce has wrong length".into()))?;
+    let reservation = state.replay_guard.reserve(nonce_array)?;
+
+    // 4. Decrypt seed, derive KeyManager, identity check, and commit the
     //    Cloning -> Active transition - all atomically under the state
     //    lock via `complete_cloning`. On any failure the state stays in
-    //    Cloning and the handshake can be retried.
+    //    Cloning, the reservation rolls back, and the handshake can be retried.
     let network = state.network();
     let mut cluster_public_key = [0u8; 20];
     state.complete_cloning(|session| {
@@ -1639,15 +1660,8 @@ fn handle_set_clone(state: &EnclaveState, req: SetCloneRequest) -> Result<Enclav
         Ok(km)
     })?;
 
-    // 4. Replay-check + record the donor nonce only *after* the pubkey
-    //    binding and the seed/identity checks above have passed, so a
-    // rejected handshake never consumes replay-guard capacity.
-    let nonce_array: [u8; 32] = verified
-        .nonce
-        .as_slice()
-        .try_into()
-        .map_err(|_| EnclaveError::Attestation("attestation nonce has wrong length".into()))?;
-    state.replay_guard.check_and_record(nonce_array)?;
+    // Transition committed: keep the donor nonce recorded.
+    reservation.commit();
 
     tracing::info!(
         cluster_pk = %hex::encode(cluster_public_key),

@@ -8,8 +8,11 @@
 # Artifact-only: the host never builds or clones the repo.
 #
 # It does NOT bootstrap identity. A fresh/restarted enclave has no key; after this
-# run `utexo-bridge-parent-cli init --cloning-secret ...` on a donor, or
-# `... clone ...` on a requester. (Identity lives in enclave memory and is lost
+# run, with the REQUIRED top-level `--addr vsock://<CID>:5000` (CID 16/18/20; or set
+# ENCLAVE_VSOCK_CID) placed BEFORE the subcommand - the vsock CLI refuses to guess a CID:
+#   `utexo-bridge-parent-cli --addr vsock://16:5000 init  --cloning-secret ...`  on a donor, or
+#   `utexo-bridge-parent-cli --addr vsock://16:5000 clone ...`                   on a requester.
+# (Identity lives in enclave memory and is lost
 # on restart/reboot - see TODO #5 for KMS-sealed DR. #7 only makes the PROCESSES
 # come back automatically; the enclaves come up empty.)
 #

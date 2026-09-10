@@ -167,11 +167,14 @@ mod nsm {
             }
         };
 
-        let pcr0 = read(0)?;
-        let pcr1 = read(1)?;
-        let pcr2 = read(2)?;
+        // AF-21: read all PCRs first, then ALWAYS release the NSM fd before
+        // propagating any read error. The previous `read(i)?` ordering skipped
+        // `nsm_exit(fd)` on the error path, leaking the NSM descriptor.
+        let pcr0 = read(0);
+        let pcr1 = read(1);
+        let pcr2 = read(2);
         nsm_exit(fd);
-        Ok(ExpectedPcrs::new(pcr0, pcr1, pcr2))
+        Ok(ExpectedPcrs::new(pcr0?, pcr1?, pcr2?))
     }
 }
 
