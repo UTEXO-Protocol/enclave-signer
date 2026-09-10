@@ -1628,10 +1628,24 @@ fn handle_set_clone(state: &EnclaveState, req: SetCloneRequest) -> Result<Enclav
         return Err(EnclaveError::PubkeyMismatch);
     }
 
-    // 3. Decrypt seed, derive KeyManager, identity check, and commit the
+    // 3. Extract and freshness-reserve the donor nonce BEFORE mutating state
+    //    (F03-AF-03). Placed after the pubkey binding above so a rejected /
+    //    unauthenticated handshake never consumes replay-guard capacity, but
+    //    before `complete_cloning` so a malformed (wrong-length) or replayed
+    //    donor nonce cannot drive the Cloning -> Active transition. The
+    //    reservation rolls back on any failure below, so the state transition
+    //    and the replay record commit together or not at all.
+    let nonce_array: [u8; 32] = verified
+        .nonce
+        .as_slice()
+        .try_into()
+        .map_err(|_| EnclaveError::Attestation("attestation nonce has wrong length".into()))?;
+    let reservation = state.replay_guard.reserve(nonce_array)?;
+
+    // 4. Decrypt seed, derive KeyManager, identity check, and commit the
     //    Cloning -> Active transition - all atomically under the state
     //    lock via `complete_cloning`. On any failure the state stays in
-    //    Cloning and the handshake can be retried.
+    //    Cloning, the reservation rolls back, and the handshake can be retried.
     let network = state.network();
     let mut cluster_public_key = [0u8; 20];
     state.complete_cloning(|session| {
@@ -1646,15 +1660,8 @@ fn handle_set_clone(state: &EnclaveState, req: SetCloneRequest) -> Result<Enclav
         Ok(km)
     })?;
 
-    // 4. Replay-check + record the donor nonce only *after* the pubkey
-    //    binding and the seed/identity checks above have passed, so a
-    // rejected handshake never consumes replay-guard capacity.
-    let nonce_array: [u8; 32] = verified
-        .nonce
-        .as_slice()
-        .try_into()
-        .map_err(|_| EnclaveError::Attestation("attestation nonce has wrong length".into()))?;
-    state.replay_guard.check_and_record(nonce_array)?;
+    // Transition committed: keep the donor nonce recorded.
+    reservation.commit();
 
     tracing::info!(
         cluster_pk = %hex::encode(cluster_public_key),
