@@ -1562,16 +1562,20 @@ fn handle_get_clone(state: &EnclaveState, req: GetCloneRequest) -> Result<Enclav
         Ok(())
     })?;
 
-    // 6. Replay-check + record the nonce from the verified document, only
-    //    after the checks above have passed, so an unauthenticated handshake
-    //    never consumes replay-guard capacity. With the count-cap removal
-    // this closes the secret-less cloning-availability DoS.
+    // 6. Reserve the nonce from the verified document (replay-check + record
+    //    with rollback-on-drop), only after the checks above have passed so an
+    //    unauthenticated handshake never consumes replay-guard capacity. With
+    //    the count-cap removal this closes the secret-less cloning-availability
+    //    DoS. The reservation is committed only after the seal + donor
+    //    attestation below succeed (F03-AF-02 / F03-AF-04): a transient failure
+    //    after the record rolls the nonce back, so a legitimate retry is not
+    //    self-blocked by its own earlier attempt.
     let nonce_array: [u8; 32] = verified
         .nonce
         .as_slice()
         .try_into()
         .map_err(|_| EnclaveError::Attestation("attestation nonce has wrong length".into()))?;
-    state.replay_guard.check_and_record(nonce_array)?;
+    let reservation = state.replay_guard.reserve(nonce_array)?;
 
     // 7. Seal the seed under a fresh donor ephemeral keypair.
     let (encrypted_seed, donor_pubkey) =
@@ -1582,6 +1586,9 @@ fn handle_get_clone(state: &EnclaveState, req: GetCloneRequest) -> Result<Enclav
     //    not an old one replayed by the parent.
     let donor_nonce = fresh_nonce()?;
     let donor_attestation = attestation::get_attestation(&donor_nonce, Some(&donor_pubkey), None)?;
+
+    // Seal + donor attestation succeeded: keep the nonce recorded.
+    reservation.commit();
 
     tracing::info!(
         cluster_pk = %hex::encode(our_evm),
