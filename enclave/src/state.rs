@@ -19,14 +19,32 @@ pub struct CloningSession {
     pub session: CloneSession,
     /// 20-byte EVM address of the donor we intend to clone from.
     pub cluster_public_key: [u8; 20],
+    /// Monotonic instant the handshake was opened (`InitiateCloning`). Used to
+    /// expire an abandoned session so a fresh initiation can replace it
+    /// (F03-AF-01). `Instant` is monotonic, so it is immune to wall-clock steps
+    /// (e.g. the PTP clock-sync adjustments).
+    created_at: Instant,
 }
 
 impl CloningSession {
     pub fn new(session: CloneSession, cluster_public_key: [u8; 20]) -> Self {
+        Self::new_at(session, cluster_public_key, Instant::now())
+    }
+
+    /// [`new`](Self::new) with an injectable open time, so the expiry logic is
+    /// testable without sleeping.
+    fn new_at(session: CloneSession, cluster_public_key: [u8; 20], created_at: Instant) -> Self {
         Self {
             session,
             cluster_public_key,
+            created_at,
         }
+    }
+
+    /// True once the session has outlived [`CLONING_SESSION_TTL`] measured
+    /// against `now`; such a session is treated as abandoned.
+    fn is_expired(&self, now: Instant) -> bool {
+        now.saturating_duration_since(self.created_at) >= CLONING_SESSION_TTL
     }
 }
 
@@ -45,6 +63,16 @@ const DEFAULT_NONCE_TTL: Duration = Duration::from_secs(60 * 60);
 
 /// Default hard memory ceiling on recorded nonces.
 const DEFAULT_NONCE_MAX: usize = 10_000;
+
+/// How long an in-progress `Cloning` handshake stays valid before it is treated
+/// as abandoned (F03-AF-01). During this window the requester holds only an
+/// ephemeral X25519 secret and NO seed, so replacing a stale session is safe.
+/// The full donor round-trip completes in seconds; five minutes generously
+/// covers a slow multi-stage CLI while letting a wedged requester self-recover
+/// (a lost `InitiateCloning` response or a failed CLI run) without a restart. A
+/// still-live session is still protected, so a concurrent duplicate cannot
+/// hijack an in-flight handshake.
+const CLONING_SESSION_TTL: Duration = Duration::from_secs(5 * 60);
 
 /// Default TTL for the PSBT bridge-operation dedup guard. Much longer than the
 /// nonce TTL: an EVM->RGB deposit can be retried while unsettled, so the window
@@ -358,11 +386,30 @@ impl EnclaveState {
         Ok(())
     }
 
-    /// Transition `Initial -> Cloning`, consuming the supplied session.
-    /// Rejected from any other phase.
+    /// Transition `-> Cloning`, consuming the supplied session.
+    ///
+    /// Allowed from `Initial`, or from a `Cloning` phase whose session has
+    /// expired (F03-AF-01): an abandoned handshake (a lost `InitiateCloning`
+    /// response or a failed CLI run) no longer wedges the requester until a
+    /// restart - a fresh initiation replaces it once the old one is past
+    /// [`CLONING_SESSION_TTL`]. A still-live `Cloning` session and any `Active`
+    /// phase are rejected with `AlreadyInitialized`.
     pub fn enter_cloning(&self, session: CloningSession) -> Result<()> {
+        self.enter_cloning_at(session, Instant::now())
+    }
+
+    /// Time-injected core of [`enter_cloning`]. `now` is the point the existing
+    /// session's expiry is measured against; the public method passes
+    /// `Instant::now()`. Split out so the expiry logic is testable.
+    fn enter_cloning_at(&self, session: CloningSession, now: Instant) -> Result<()> {
         let mut guard = self.lock_phase()?;
-        ensure_initial(&guard)?;
+        match &*guard {
+            Phase::Initial => {}
+            // Abandoned (expired) handshake: a fresh initiation may replace it.
+            Phase::Cloning(existing) if existing.is_expired(now) => {}
+            // Live Cloning session or already Active: refuse.
+            _ => return Err(EnclaveError::AlreadyInitialized),
+        }
         *guard = Phase::Cloning(session);
         Ok(())
     }
@@ -616,6 +663,65 @@ mod tests {
         *state.inner.lock().unwrap() =
             Phase::Cloning(CloningSession::new(CloneSession::new(), [0u8; 20]));
         let err = state.initialize_from_seed([42u8; 64]).unwrap_err();
+        assert!(matches!(err, EnclaveError::AlreadyInitialized));
+    }
+
+    // AF-01: an abandoned Cloning session must not wedge the requester until a
+    // restart. A live session is protected; one past the TTL is replaceable.
+    #[test]
+    fn enter_cloning_replaces_expired_but_protects_live_session() {
+        let state = EnclaveState::new(Network::Bitcoin);
+        let t0 = Instant::now();
+
+        // First initiation from Initial succeeds.
+        state
+            .enter_cloning_at(
+                CloningSession::new_at(CloneSession::new(), [1u8; 20], t0),
+                t0,
+            )
+            .unwrap();
+        assert_eq!(state.phase_name(), "cloning");
+
+        // A second initiation while the session is still live is rejected,
+        // so a concurrent duplicate cannot hijack the in-flight handshake.
+        let err = state
+            .enter_cloning_at(
+                CloningSession::new_at(CloneSession::new(), [2u8; 20], t0),
+                t0 + Duration::from_secs(10),
+            )
+            .unwrap_err();
+        assert!(matches!(err, EnclaveError::AlreadyInitialized));
+        state
+            .with_cloning_session(|s| {
+                assert_eq!(s.cluster_public_key, [1u8; 20], "live session untouched");
+                Ok(())
+            })
+            .unwrap();
+
+        // Once the session is past the TTL it is abandoned: a fresh initiation
+        // replaces it and self-recovers the requester without a restart.
+        let later = t0 + CLONING_SESSION_TTL + Duration::from_secs(1);
+        state
+            .enter_cloning_at(
+                CloningSession::new_at(CloneSession::new(), [3u8; 20], later),
+                later,
+            )
+            .unwrap();
+        state
+            .with_cloning_session(|s| {
+                assert_eq!(s.cluster_public_key, [3u8; 20], "expired session replaced");
+                Ok(())
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn enter_cloning_rejected_once_active() {
+        let state = EnclaveState::new(Network::Bitcoin);
+        state.initialize_from_seed([42u8; 64]).unwrap();
+        let err = state
+            .enter_cloning(CloningSession::new(CloneSession::new(), [1u8; 20]))
+            .unwrap_err();
         assert!(matches!(err, EnclaveError::AlreadyInitialized));
     }
 
