@@ -92,6 +92,10 @@ pub mod networks;
 pub mod policy;
 pub mod server;
 pub mod state;
+#[cfg(feature = "rgb-swap")]
+pub mod swap_kms;
+#[cfg(feature = "rgb-swap")]
+pub mod swap_persistence;
 
 #[cfg(all(feature = "vsock", target_os = "linux"))]
 pub mod vsock_forwarder;

@@ -8,7 +8,7 @@ FROM rust:1.96-slim AS builder
 
 # Builder-only tools: system Git and SSH for private dependencies.
 RUN apt-get update && apt-get install -y \
-    pkg-config libssl-dev git ca-certificates openssh-client make cmake \
+    pkg-config libssl-dev git ca-certificates openssh-client make perl cmake \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /build

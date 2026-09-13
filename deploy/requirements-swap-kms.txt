@@ -1,0 +1,2 @@
+# Includes S3 PutObject IfNoneMatch support; boto3 brings matching botocore.
+boto3>=1.36.0,<2

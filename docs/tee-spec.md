@@ -10,6 +10,14 @@ assumptions. Known gaps are collected in Sec 13.
 
 ---
 
+**RGB swap key lifecycle update:** `rgb-swap` now uses attested AWS KMS seed
+generation/recovery and encrypted S3 persistence. Its clone RPCs are disabled;
+restore requires the expected EVM identity. The entropy/cloning lifecycle
+below applies to mint/burn and CCD-only builds. See the
+[KMS persistence specification and deployment guide](swap-kms-persistence.md)
+for the swap flow, policies, and storage trust assumptions. Signing validation,
+derivation paths, and signature formats are unchanged.
+
 ## 1. Purpose
 
 The enclave signer is the authorization component of the bridge. It runs inside

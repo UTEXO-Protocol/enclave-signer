@@ -94,6 +94,44 @@ fn main() {
 
     let state = EnclaveState::new(bitcoin_network);
 
+    #[cfg(feature = "rgb-swap")]
+    let state = {
+        // Explicit development import builds can run without AWS. Empty init
+        // still fails closed; there is no ephemeral-generation fallback. The
+        // existing release guard forbids allow-seed-import in production.
+        let import_only = cfg!(feature = "allow-seed-import")
+            && [
+                "SWAP_KMS_KEY_ARN",
+                "SWAP_KMS_REGION",
+                "SWAP_KMS_SEED_ID",
+                "SWAP_KMS_ALLOW_CREATE",
+                "SWAP_KMS_EXPECTED_EVM_ADDRESS",
+            ]
+            .iter()
+            .all(|name| std::env::var_os(name).is_none());
+        if import_only {
+            tracing::warn!("development import-only mode: swap KMS is unconfigured; empty InitializeKey requests will fail");
+            state
+        } else {
+            use utexo_bridge_enclave::swap_persistence::PersistentSwapSeed;
+            let source = PersistentSwapSeed::from_env()
+                .unwrap_or_else(|e| panic!("RGB swap KMS configuration is required: {e}"));
+            #[cfg(all(feature = "vsock", target_os = "linux"))]
+            {
+                use utexo_bridge_enclave::{swap_kms, swap_persistence, vsock_forwarder};
+                // TLS terminates in the KMS client, which checks AWS's certificate.
+                vsock_forwarder::start_forwarder(swap_kms::LOCAL_PORT, swap_kms::VSOCK_PORT)
+                    .expect("start KMS HTTPS forwarder");
+                vsock_forwarder::start_forwarder(
+                    swap_persistence::BROKER_LOCAL_PORT,
+                    swap_persistence::BROKER_VSOCK_PORT,
+                )
+                .expect("start encrypted seed broker forwarder");
+            }
+            state.with_swap_seed_source(Box::new(source))
+        }
+    };
+
     // Pinned bridge config from env. Folded into the attestation `user_data`
     // commitment and cross-checked on every SignEvm. Production deployments
     // must set EVM_CHAIN_ID, EVM_PROXY_CONTRACT_ADDRESS, RGB_ASSET_ID - a misconfigured
@@ -179,6 +217,7 @@ fn main() {
     // never lands in the EIF or the PCRs. `UTEXO_CLONING_SECRET` is a legacy/dev
     // fallback only and must not be baked into a release EIF. Needed only by
     // enclaves that serve `GetClone`. Never logged; `SecretBox` zeroizes it.
+    #[cfg(not(feature = "rgb-swap"))]
     if let Ok(secret) = std::env::var("UTEXO_CLONING_SECRET") {
         if !secret.is_empty() {
             if let Err(e) = state.set_donor_cloning_secret(secret) {

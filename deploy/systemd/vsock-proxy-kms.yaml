@@ -1,0 +1,4 @@
+# Replace REPLACE_AWS_REGION with the EIF's SWAP_KMS_REGION.
+# Only the regional KMS endpoint is reachable through this dedicated relay.
+allowlist:
+- {address: kms.REPLACE_AWS_REGION.amazonaws.com, port: 443}

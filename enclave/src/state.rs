@@ -244,6 +244,8 @@ impl Phase {
 pub struct EnclaveState {
     inner: Mutex<Phase>,
     network: Network,
+    #[cfg(feature = "rgb-swap")]
+    swap_seed_source: Option<Box<dyn crate::swap_persistence::SwapSeedSource>>,
     /// Operator-configured cloning secret for the *donor* role. Required
     /// when serving `GetClone`; not used in the requester role (the
     /// requester receives the secret via `InitiateCloningRequest`).
@@ -278,6 +280,8 @@ impl EnclaveState {
         Self {
             inner: Mutex::new(Phase::Initial),
             network,
+            #[cfg(feature = "rgb-swap")]
+            swap_seed_source: None,
             donor_cloning_secret: Mutex::new(None),
             replay_guard: NonceReplayGuard::default(),
             op_replay_guard: NonceReplayGuard::with_capacity(
@@ -289,6 +293,31 @@ impl EnclaveState {
 
     pub fn network(&self) -> Network {
         self.network
+    }
+
+    /// Configure the swap seed source before exposing the request listener.
+    #[cfg(feature = "rgb-swap")]
+    pub fn with_swap_seed_source(
+        mut self,
+        source: Box<dyn crate::swap_persistence::SwapSeedSource>,
+    ) -> Self {
+        self.swap_seed_source = Some(source);
+        self
+    }
+
+    /// Activate only after durable persistence and attested recovery succeed.
+    /// Holding the phase lock prevents concurrent initializations or signing
+    /// against a seed whose persistence has not yet completed.
+    #[cfg(feature = "rgb-swap")]
+    pub fn initialize_from_swap_kms(&self) -> Result<()> {
+        let mut guard = self.lock_phase()?;
+        ensure_initial(&guard)?;
+        let source = self.swap_seed_source.as_ref().ok_or_else(|| {
+            EnclaveError::InvalidRequest("RGB swaps require KMS persistence configuration".into())
+        })?;
+        let manager = source.load_keys(self.network)?;
+        *guard = Phase::Active(Box::new(manager));
+        Ok(())
     }
 
     /// Configure the donor-side cloning secret. Called at startup from an

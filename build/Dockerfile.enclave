@@ -9,7 +9,7 @@ FROM rust:1.96-slim-bullseye@sha256:c593596210f729542a92aced6a8b0812bcc8d04c5f1b
 # Builder-only tools: system Git and SSH for private dependencies.
 RUN apt-get update && apt-get install -y \
     pkg-config libssl-dev git ca-certificates openssh-client \
-    make python3 python3-pip \
+    make perl python3 python3-pip \
     && pip3 install --no-cache-dir "cmake==3.31.6" \
     && rm -rf /var/lib/apt/lists/*
 
@@ -134,5 +134,24 @@ ENV EVM_RPC_URL=http://127.0.0.1:3444 \
 # This env is measured into PCR0, so do not flip it to `debug` for a production
 # EIF. For a verbose build, use a throwaway branch and run the enclave with
 # `--debug-mode`, which zeroes the PCRs anyway.
+# Public KMS identity/recovery pins. Nitro does not inherit the parent host's
+# environment: pass these build arguments when producing the swap EIF.
+ARG SWAP_KMS_KEY_ARN
+ARG SWAP_KMS_REGION
+ARG SWAP_KMS_SEED_ID
+ARG SWAP_KMS_ALLOW_CREATE=0
+ARG SWAP_KMS_EXPECTED_EVM_ADDRESS=
+ENV SWAP_KMS_KEY_ARN=${SWAP_KMS_KEY_ARN} \
+    SWAP_KMS_REGION=${SWAP_KMS_REGION} \
+    SWAP_KMS_SEED_ID=${SWAP_KMS_SEED_ID} \
+    SWAP_KMS_ALLOW_CREATE=${SWAP_KMS_ALLOW_CREATE} \
+    SWAP_KMS_EXPECTED_EVM_ADDRESS=${SWAP_KMS_EXPECTED_EVM_ADDRESS}
+RUN test -n "$SWAP_KMS_KEY_ARN" && test -n "$SWAP_KMS_REGION" && test -n "$SWAP_KMS_SEED_ID" \
+    && case "$SWAP_KMS_ALLOW_CREATE" in \
+        0) test -n "$SWAP_KMS_EXPECTED_EVM_ADDRESS" ;; \
+        1) test -z "$SWAP_KMS_EXPECTED_EVM_ADDRESS" ;; \
+        *) exit 1 ;; \
+       esac
+
 ENV RUST_LOG=info
 ENTRYPOINT ["/app/entrypoint.sh"]

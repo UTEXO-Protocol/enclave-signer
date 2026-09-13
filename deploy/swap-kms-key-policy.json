@@ -1,0 +1,168 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "AllowSeparateKeyAdministrator",
+      "Effect": "Allow",
+      "Principal": { "AWS": "arn:aws:iam::REPLACE_ACCOUNT_ID:role/REPLACE_KEY_ADMIN_ROLE" },
+      "Action": [
+        "kms:DescribeKey",
+        "kms:GetKeyPolicy",
+        "kms:PutKeyPolicy",
+        "kms:ListKeyPolicies",
+        "kms:UpdateKeyDescription",
+        "kms:EnableKey",
+        "kms:DisableKey",
+        "kms:EnableKeyRotation",
+        "kms:DisableKeyRotation",
+        "kms:GetKeyRotationStatus",
+        "kms:ListResourceTags",
+        "kms:TagResource",
+        "kms:UntagResource",
+        "kms:ListGrants",
+        "kms:RevokeGrant"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "AllowBootstrapGenerateDataKey",
+      "Effect": "Allow",
+      "Principal": { "AWS": "arn:aws:iam::REPLACE_ACCOUNT_ID:role/REPLACE_SIGNER_ROLE" },
+      "Action": "kms:GenerateDataKey",
+      "Resource": "*",
+      "Condition": {
+        "StringEqualsIgnoreCase": {
+          "kms:RecipientAttestation:PCR0": "REPLACE_BOOTSTRAP_PCR0"
+        },
+        "StringEquals": {
+          "kms:EncryptionContext:application": "utexo-enclave-signer",
+          "kms:EncryptionContext:flow": "rgb-swap",
+          "kms:EncryptionContext:seed_id": "REPLACE_SEED_ID",
+          "kms:EncryptionContext:bitcoin_network": "REPLACE_BITCOIN_NETWORK"
+        },
+        "ForAllValues:StringEquals": {
+          "kms:EncryptionContextKeys": [ "application", "flow", "seed_id", "bitcoin_network" ]
+        }
+      }
+    },
+    {
+      "Sid": "AllowAttestedSeedRecovery",
+      "Effect": "Allow",
+      "Principal": { "AWS": "arn:aws:iam::REPLACE_ACCOUNT_ID:role/REPLACE_SIGNER_ROLE" },
+      "Action": "kms:Decrypt",
+      "Resource": "*",
+      "Condition": {
+        "StringEqualsIgnoreCase": {
+          "kms:RecipientAttestation:PCR0": [ "REPLACE_BOOTSTRAP_PCR0", "REPLACE_RESTORE_PCR0" ]
+        },
+        "StringEquals": {
+          "kms:EncryptionContext:application": "utexo-enclave-signer",
+          "kms:EncryptionContext:flow": "rgb-swap",
+          "kms:EncryptionContext:seed_id": "REPLACE_SEED_ID",
+          "kms:EncryptionContext:bitcoin_network": "REPLACE_BITCOIN_NETWORK"
+        },
+        "ForAllValues:StringEquals": {
+          "kms:EncryptionContextKeys": [ "application", "flow", "seed_id", "bitcoin_network" ]
+        }
+      }
+    },
+    {
+      "Sid": "DenySignerRequestsWithoutRecipientAttestation",
+      "Effect": "Deny",
+      "Principal": { "AWS": "arn:aws:iam::REPLACE_ACCOUNT_ID:role/REPLACE_SIGNER_ROLE" },
+      "Action": [ "kms:GenerateDataKey", "kms:Decrypt" ],
+      "Resource": "*",
+      "Condition": { "Null": { "kms:RecipientAttestation:PCR0": "true" } }
+    },
+    {
+      "Sid": "DenyGenerateDataKeyOutsideBootstrapImage",
+      "Effect": "Deny",
+      "Principal": { "AWS": "arn:aws:iam::REPLACE_ACCOUNT_ID:role/REPLACE_SIGNER_ROLE" },
+      "Action": "kms:GenerateDataKey",
+      "Resource": "*",
+      "Condition": {
+        "StringNotEqualsIgnoreCase": { "kms:RecipientAttestation:PCR0": "REPLACE_BOOTSTRAP_PCR0" }
+      }
+    },
+    {
+      "Sid": "DenyDecryptOutsideApprovedImages",
+      "Effect": "Deny",
+      "Principal": { "AWS": "arn:aws:iam::REPLACE_ACCOUNT_ID:role/REPLACE_SIGNER_ROLE" },
+      "Action": "kms:Decrypt",
+      "Resource": "*",
+      "Condition": {
+        "StringNotEqualsIgnoreCase": {
+          "kms:RecipientAttestation:PCR0": [ "REPLACE_BOOTSTRAP_PCR0", "REPLACE_RESTORE_PCR0" ]
+        }
+      }
+    },
+    {
+      "Sid": "DenyWrongOrMissingApplication",
+      "Effect": "Deny",
+      "Principal": { "AWS": "arn:aws:iam::REPLACE_ACCOUNT_ID:role/REPLACE_SIGNER_ROLE" },
+      "Action": [ "kms:GenerateDataKey", "kms:Decrypt" ],
+      "Resource": "*",
+      "Condition": {
+        "StringNotEquals": { "kms:EncryptionContext:application": "utexo-enclave-signer" }
+      }
+    },
+    {
+      "Sid": "DenyWrongOrMissingFlow",
+      "Effect": "Deny",
+      "Principal": { "AWS": "arn:aws:iam::REPLACE_ACCOUNT_ID:role/REPLACE_SIGNER_ROLE" },
+      "Action": [ "kms:GenerateDataKey", "kms:Decrypt" ],
+      "Resource": "*",
+      "Condition": { "StringNotEquals": { "kms:EncryptionContext:flow": "rgb-swap" } }
+    },
+    {
+      "Sid": "DenyWrongOrMissingSeedIdentity",
+      "Effect": "Deny",
+      "Principal": { "AWS": "arn:aws:iam::REPLACE_ACCOUNT_ID:role/REPLACE_SIGNER_ROLE" },
+      "Action": [ "kms:GenerateDataKey", "kms:Decrypt" ],
+      "Resource": "*",
+      "Condition": { "StringNotEquals": { "kms:EncryptionContext:seed_id": "REPLACE_SEED_ID" } }
+    },
+    {
+      "Sid": "DenyWrongOrMissingBitcoinNetwork",
+      "Effect": "Deny",
+      "Principal": { "AWS": "arn:aws:iam::REPLACE_ACCOUNT_ID:role/REPLACE_SIGNER_ROLE" },
+      "Action": [ "kms:GenerateDataKey", "kms:Decrypt" ],
+      "Resource": "*",
+      "Condition": {
+        "StringNotEquals": { "kms:EncryptionContext:bitcoin_network": "REPLACE_BITCOIN_NETWORK" }
+      }
+    },
+    {
+      "Sid": "DenyUnexpectedEncryptionContextKeys",
+      "Effect": "Deny",
+      "Principal": { "AWS": "arn:aws:iam::REPLACE_ACCOUNT_ID:role/REPLACE_SIGNER_ROLE" },
+      "Action": [ "kms:GenerateDataKey", "kms:Decrypt" ],
+      "Resource": "*",
+      "Condition": {
+        "ForAnyValue:StringNotEquals": {
+          "kms:EncryptionContextKeys": [ "application", "flow", "seed_id", "bitcoin_network" ]
+        }
+      }
+    },
+    {
+      "Sid": "DenySignerAlternateSeedCreationAndPolicyChanges",
+      "Effect": "Deny",
+      "Principal": { "AWS": "arn:aws:iam::REPLACE_ACCOUNT_ID:role/REPLACE_SIGNER_ROLE" },
+      "Action": [
+        "kms:Encrypt",
+        "kms:ReEncrypt*",
+        "kms:GenerateDataKeyWithoutPlaintext",
+        "kms:GenerateDataKeyPair*",
+        "kms:CreateGrant",
+        "kms:PutKeyPolicy",
+        "kms:ReplicateKey",
+        "kms:UpdatePrimaryRegion",
+        "kms:ImportKeyMaterial",
+        "kms:DeleteImportedKeyMaterial",
+        "kms:DisableKey",
+        "kms:ScheduleKeyDeletion"
+      ],
+      "Resource": "*"
+    }
+  ]
+}

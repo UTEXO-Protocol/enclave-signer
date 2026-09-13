@@ -1,0 +1,35 @@
+[Unit]
+Description=UTEXO RGB swaps KMS ciphertext and instance credential broker
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+DynamicUser=yes
+# Dedicated swaps configuration; do not enable this unit for rgb-mint-burn.
+# Required: AWS_REGION, SWAP_KMS_SEED_ID, SWAP_KMS_S3_BUCKET,
+# SWAP_KMS_S3_KEY, SWAP_KMS_ALLOWED_CIDS (comma-separated swaps enclave CIDs).
+EnvironmentFile=/etc/utexo/swap-kms.env
+Environment=PYTHONDONTWRITEBYTECODE=1
+Environment=PYTHONUNBUFFERED=1
+Environment=AWS_EC2_METADATA_V1_DISABLED=true
+ExecStart=/opt/utexo-swap-kms/venv/bin/python /opt/utexo-swap-kms/swap-seed-broker.py
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_VSOCK AF_INET AF_INET6 AF_UNIX
+LockPersonality=yes
+RestrictSUIDSGID=yes
+CapabilityBoundingSet=
+UMask=0077
+TasksMax=32
+MemoryMax=256M
+
+[Install]
+WantedBy=multi-user.target

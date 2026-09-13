@@ -48,6 +48,15 @@ See the [component diagram](docs/diagrams/01-components.md) and
 
 ### Key management
 
+**RGB swaps:** keys now initialize through attested AWS KMS generation/recovery,
+with the encrypted 64-byte seed persisted in S3. Configure the swap EIF and host
+broker using [the KMS persistence guide](docs/swap-kms-persistence.md). Restoration
+is the default; initial creation requires explicit bootstrap configuration.
+Swap replicas restore the same seed instead of using peer cloning. Signing and
+HD derivation remain unchanged. RGB mint/burn and CCD-only builds retain the
+existing generation and cloning lifecycle described below.
+
+
 - Generates a BIP-39 mnemonic from OS entropy, derives the 64-byte seed and
   keeps it in a `SecretBox` (zeroize on drop). Mnemonic or raw-seed import
   exists only behind `allow-seed-import` (dev builds).
@@ -145,7 +154,7 @@ request per connection, 4 MiB frame cap. Schema:
 
 | Request | Phase | Feature | Description |
 |---------|-------|---------|-------------|
-| `InitializeKey` | Initial | - | Generate keys from OS entropy. Optional donor `cloning_secret`. Mnemonic / seed import needs `allow-seed-import`. |
+| `InitializeKey` | Initial | - | Swaps: recover/create through KMS persistence. Other builds: OS entropy, optional donor `cloning_secret`. Dev seed imports require `allow-seed-import`. |
 | `GetPublicKey` | Active | - | EVM address + pubkeys, gas-tx key, BTC pubkey / xpub, fingerprint, account xpubs, CCD pubkey, boot pins. |
 | `GetAttestedPublicKey` | Active | - | Same bundle plus an NSM attestation document bound to nonce, pubkey and the policy commitment. |
 | `Sign` | Active | `rgb` / `ccd` | Bridge signing: RGB -> EVM, EVM -> RGB, CCD -> EVM. |
@@ -273,21 +282,25 @@ measured into PCR0. The cloning secret is never baked.
 ### Local development (TCP)
 
 ```bash
-# Enclave on 127.0.0.1:5000
-RUST_LOG=debug cargo run -p utexo-bridge-enclave
+# Development-only imports on 127.0.0.1:5000 (never enable for a release)
+RUST_LOG=debug cargo run -p utexo-bridge-enclave --features allow-seed-import
 
 # Parent gRPC server (GRPC_PORT defaults to 5000; pick another port when both run on one host)
 RUST_LOG=debug GRPC_PORT=50051 cargo run --manifest-path parent/Cargo.toml
 
 # CLI (shell function works in bash and zsh)
 cli() { cargo run --manifest-path parent/Cargo.toml --bin utexo-bridge-parent-cli -- "$@"; }
-cli init
+# Public test mnemonic only; never fund this development identity.
+cli init-mnemonic "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about"
 cli get-keys
 cli get-last-saved-block
 cli --help
 ```
 
 `--addr host:port` or `--addr vsock://<cid>:<port>` selects the enclave.
+For swaps, follow the [KMS setup guide](docs/swap-kms-persistence.md) and use
+`cli init` for bootstrap or recovery. The commands below describe the other builds.
+
 Initialize once: use `cli init --cloning-secret <secret>` instead of `cli init`
 to configure a donor. Use a fresh requester for `cli clone`; initialization
 and cloning are alternative ways to enter `Active`. Signing subcommands require
@@ -308,9 +321,10 @@ GRPC_HOST=0.0.0.0 GRPC_PORT=50051 USE_VSOCK=true ENCLAVE_VSOCK_CID=16 ./utexo-br
 
 `deploy/deploy-host.sh` installs the systemd units for a three-enclave host:
 CIDs 16 / 18 / 20 with parents on ports 50051 / 50052 / 50053. It verifies the
-EIF checksum and PCR0 against the S3 manifest before and after start. Keys
-live only in enclave memory; a restart wipes them and the enclave must be
-initialised or cloned again.
+EIF checksum and PCR0 against the S3 manifest before and after start. After a
+restart, swap images recover persisted keys through `init`; install their
+[additional KMS broker and relay](docs/swap-kms-persistence.md) first. Mint/burn
+and CCD-only images retain initialization or peer cloning after restart.
 
 ### Debug mode
 
@@ -471,8 +485,10 @@ Re-syncing changes PCR0. Procedure in
   connection limits are compiled in. `EVM_MIN_CONFIRMATIONS` and request-size
   caps are read from environment; image-baked values are measured with the EIF.
 - **Key custody.** Seed and keys in `SecretBox`, zeroized on drop.
-  `#![deny(unsafe_code)]`. No persistence: keys exist only in enclave memory.
-- **Cloning.** X25519 + HKDF-SHA256 + ChaCha20-Poly1305, mutual attestation
+  `#![deny(unsafe_code)]`. Swap seeds persist as KMS ciphertext in S3;
+  plaintext signing keys exist only in enclave memory. Mint/burn and CCD-only
+  keys retain their existing in-memory lifecycle.
+- **Cloning (mint/burn and CCD-only).** X25519 + HKDF-SHA256 + ChaCha20-Poly1305, mutual attestation
   with PCR equality, shared secret, replay guard recorded only after
   authentication.
 - **Release hardening.** `opt-level = "z"`, LTO, stripped, `panic = "abort"`,

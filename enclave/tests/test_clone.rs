@@ -1,3 +1,5 @@
+#![cfg(not(feature = "rgb-swap"))]
+
 //! Integration tests for the cloning handshake.
 //!
 //! Run with `--features mock-attestation,allow-seed-import`. Mock attestation

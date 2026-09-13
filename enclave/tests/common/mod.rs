@@ -38,6 +38,8 @@ pub fn start_test_server_with_config(
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
     let state = EnclaveState::new(bitcoin::Network::Bitcoin);
+    #[cfg(feature = "rgb-swap")]
+    let state = state.with_swap_seed_source(Box::new(TestSwapSeedSource));
     configure(&state);
     // Tests run with the placeholder Regtest checkpoint. The header chain
     // is initialised but empty; tests that don't push headers leave it
@@ -88,4 +90,21 @@ pub fn send_request(port: u16, req: &EnclaveRequest) -> EnclaveResponse {
     let mut stream = TcpStream::connect(format!("127.0.0.1:{}", port)).unwrap();
     framing::write_message(&mut stream, req).unwrap();
     framing::read_message(&mut stream).unwrap()
+}
+
+// This source exists only in the test harness. Production empty InitializeKey
+// requests must complete KMS recovery and durable storage before activation.
+#[cfg(feature = "rgb-swap")]
+struct TestSwapSeedSource;
+
+#[cfg(feature = "rgb-swap")]
+impl utexo_bridge_enclave::swap_persistence::SwapSeedSource for TestSwapSeedSource {
+    fn load_keys(
+        &self,
+        network: bitcoin::Network,
+    ) -> utexo_bridge_enclave::error::Result<utexo_bridge_enclave::keys::KeyManager> {
+        let mut seed = zeroize::Zeroizing::new([0u8; 64]);
+        getrandom::fill(&mut *seed).unwrap();
+        utexo_bridge_enclave::keys::KeyManager::from_seed(*seed, network)
+    }
 }
