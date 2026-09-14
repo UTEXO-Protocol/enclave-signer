@@ -151,11 +151,6 @@ impl AwsCredentials {
     }
 }
 
-pub struct GeneratedSeed {
-    pub seed: Zeroizing<[u8; SEED_BYTES]>,
-    pub ciphertext_blob: Vec<u8>,
-}
-
 pub struct SwapKmsClient {
     config: SwapKmsConfig,
     credentials: AwsCredentials,
@@ -178,11 +173,17 @@ struct HelperRequest<'a> {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct HelperResponse {
+struct GenerateResponse {
+    key_arn: String,
+    ciphertext: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DecryptResponse {
     key_arn: String,
     #[serde(deserialize_with = "deserialize_seed")]
     seed: Zeroizing<String>,
-    ciphertext: Option<String>,
 }
 
 fn deserialize_seed<'de, D: serde::Deserializer<'de>>(
@@ -205,15 +206,11 @@ impl SwapKmsClient {
         })
     }
 
-    /// Persist the ciphertext and decrypt the committed winner before activation.
-    pub fn generate_seed(&self) -> Result<GeneratedSeed> {
-        let response = self.call("generate", None)?;
-        let ciphertext_blob = decode_ciphertext(response.ciphertext.as_deref())?;
-        let seed = decode_seed(&response.seed)?;
-        Ok(GeneratedSeed {
-            seed,
-            ciphertext_blob,
-        })
+    /// The helper validates and erases the generated seed, returning only the
+    /// ciphertext. Recover the committed winner separately before activation.
+    pub fn generate_ciphertext(&self) -> Result<Vec<u8>> {
+        let bytes = self.call("generate", None)?;
+        parse_generate_response(&bytes, &self.config.key_arn)
     }
 
     pub fn decrypt_seed(&self, ciphertext_blob: &[u8]) -> Result<Zeroizing<[u8; SEED_BYTES]>> {
@@ -221,14 +218,11 @@ impl SwapKmsClient {
             return Err(fail("invalid persisted KMS ciphertext length"));
         }
         let ciphertext = BASE64.encode(ciphertext_blob);
-        let response = self.call("decrypt", Some(&ciphertext))?;
-        if response.ciphertext.is_some() {
-            return Err(fail("unexpected ciphertext in helper recovery response"));
-        }
-        decode_seed(&response.seed)
+        let bytes = self.call("decrypt", Some(&ciphertext))?;
+        parse_decrypt_response(&bytes, &self.config.key_arn)
     }
 
-    fn call(&self, operation: &str, ciphertext: Option<&str>) -> Result<HelperResponse> {
+    fn call(&self, operation: &str, ciphertext: Option<&str>) -> Result<Zeroizing<Vec<u8>>> {
         let network = self.network.to_string();
         // Borrow secret strings during serialization instead of making an
         // intermediate JSON Value containing additional unprotected copies.
@@ -247,8 +241,7 @@ impl SwapKmsClient {
             serde_json::to_vec(&request)
                 .map_err(|_| fail("failed to encode SDK helper request"))?,
         );
-        let bytes = run_helper(helper_command(), &request, HELPER_TIMEOUT)?;
-        parse_response(&bytes, &self.config.key_arn)
+        run_helper(helper_command(), &request, HELPER_TIMEOUT)
     }
 }
 
@@ -322,13 +315,22 @@ fn run_helper(
     })
 }
 
-fn parse_response(bytes: &[u8], key_arn: &str) -> Result<HelperResponse> {
-    let response: HelperResponse =
+fn parse_generate_response(bytes: &[u8], key_arn: &str) -> Result<Vec<u8>> {
+    let response: GenerateResponse =
         serde_json::from_slice(bytes).map_err(|_| fail("invalid SDK helper response"))?;
     if response.key_arn != key_arn {
         return Err(fail("SDK helper returned an unexpected KMS key"));
     }
-    Ok(response)
+    decode_ciphertext(&response.ciphertext)
+}
+
+fn parse_decrypt_response(bytes: &[u8], key_arn: &str) -> Result<Zeroizing<[u8; SEED_BYTES]>> {
+    let response: DecryptResponse =
+        serde_json::from_slice(bytes).map_err(|_| fail("invalid SDK helper response"))?;
+    if response.key_arn != key_arn {
+        return Err(fail("SDK helper returned an unexpected KMS key"));
+    }
+    decode_seed(&response.seed)
 }
 
 fn decode_seed(encoded: &str) -> Result<Zeroizing<[u8; SEED_BYTES]>> {
@@ -346,8 +348,7 @@ fn decode_seed(encoded: &str) -> Result<Zeroizing<[u8; SEED_BYTES]>> {
     Ok(seed)
 }
 
-fn decode_ciphertext(encoded: Option<&str>) -> Result<Vec<u8>> {
-    let encoded = encoded.ok_or_else(|| fail("SDK helper omitted ciphertext"))?;
+fn decode_ciphertext(encoded: &str) -> Result<Vec<u8>> {
     if encoded.len() > MAX_CIPHERTEXT_BYTES.div_ceil(3) * 4 {
         return Err(fail("SDK helper ciphertext exceeded size limit"));
     }
@@ -405,31 +406,63 @@ mod tests {
     }
 
     #[test]
-    fn validates_helper_key_identity_and_seed_material() {
+    fn generation_accepts_only_ciphertext_for_the_expected_key() {
+        let data = serde_json::to_vec(
+            &json!({"key_arn":config().key_arn,"ciphertext":BASE64.encode([17;64])}),
+        )
+        .unwrap();
+        assert_eq!(
+            parse_generate_response(&data, &config().key_arn).unwrap(),
+            [17; 64]
+        );
+        assert!(parse_generate_response(&data, "different-key").is_err());
+        for value in [
+            json!({"key_arn":config().key_arn}),
+            json!({"key_arn":config().key_arn,"ciphertext":null}),
+            json!({"key_arn":config().key_arn,"ciphertext":BASE64.encode([17;64]),"seed":BASE64.encode([42;64])}),
+            json!({"key_arn":config().key_arn,"ciphertext":BASE64.encode([17;64]),"seed":null}),
+        ] {
+            assert!(parse_generate_response(
+                &serde_json::to_vec(&value).unwrap(),
+                &config().key_arn
+            )
+            .is_err());
+        }
+    }
+
+    #[test]
+    fn decryption_accepts_only_seed_material_for_the_expected_key() {
         let data =
             serde_json::to_vec(&json!({"key_arn":config().key_arn,"seed":BASE64.encode([42;64])}))
                 .unwrap();
-        let response = parse_response(&data, &config().key_arn).unwrap();
-        assert_eq!(*decode_seed(&response.seed).unwrap(), [42; 64]);
-        assert!(parse_response(&data, "different-key").is_err());
+        assert_eq!(
+            *parse_decrypt_response(&data, &config().key_arn).unwrap(),
+            [42; 64]
+        );
+        assert!(parse_decrypt_response(&data, "different-key").is_err());
         assert!(decode_seed(&BASE64.encode([0; 63])).is_err());
         assert!(decode_seed("invalid-base64").is_err());
-        let data = serde_json::to_vec(
-            &json!({"key_arn":config().key_arn,"seed":BASE64.encode([42;64]),"debug":"secret"}),
-        )
-        .unwrap();
-        assert!(parse_response(&data, &config().key_arn).is_err());
+        for value in [
+            json!({"key_arn":config().key_arn,"seed":BASE64.encode([42;64]),"debug":"secret"}),
+            json!({"key_arn":config().key_arn,"seed":BASE64.encode([42;64]),"ciphertext":BASE64.encode([17;64])}),
+            json!({"key_arn":config().key_arn,"seed":BASE64.encode([42;64]),"ciphertext":null}),
+            json!({"key_arn":config().key_arn,"ciphertext":BASE64.encode([17;64])}),
+        ] {
+            assert!(parse_decrypt_response(
+                &serde_json::to_vec(&value).unwrap(),
+                &config().key_arn
+            )
+            .is_err());
+        }
     }
 
     #[test]
     fn ciphertext_limits_are_enforced() {
-        for invalid in [None, Some(""), Some("%%%")] {
+        for invalid in ["", "%%%"] {
             assert!(decode_ciphertext(invalid).is_err());
         }
-        assert!(
-            decode_ciphertext(Some(&BASE64.encode(vec![0; MAX_CIPHERTEXT_BYTES + 1]))).is_err()
-        );
-        assert!(decode_ciphertext(Some(&BASE64.encode(vec![0; MAX_CIPHERTEXT_BYTES]))).is_ok());
+        assert!(decode_ciphertext(&BASE64.encode(vec![0; MAX_CIPHERTEXT_BYTES + 1])).is_err());
+        assert!(decode_ciphertext(&BASE64.encode(vec![0; MAX_CIPHERTEXT_BYTES])).is_ok());
     }
 
     #[test]

@@ -44,11 +44,7 @@ trait SeedKms {
 
 impl SeedKms for SwapKmsClient {
     fn generate(&self) -> Result<Vec<u8>> {
-        let generated = self.generate_seed()?;
-        // Even on creation, recover the committed blob through KMS. This
-        // verifies recovery and handles two replicas racing to bootstrap.
-        drop(generated.seed);
-        Ok(generated.ciphertext_blob)
+        self.generate_ciphertext()
     }
 
     fn decrypt(&self, ciphertext: &[u8]) -> Result<Zeroizing<[u8; 64]>> {
@@ -75,6 +71,8 @@ fn recover_seed(
         }
     };
     validate_ciphertext(&ciphertext)?;
+    // This is the only step that returns plaintext to Rust: recover the blob
+    // returned by persistence, including the winner of concurrent bootstrap.
     kms.decrypt(&ciphertext)
 }
 

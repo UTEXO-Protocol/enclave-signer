@@ -74,6 +74,14 @@ while read -r name version commit url; do
     fi
     cmake -GNinja -S "$source_dir" -B "$build_dir/build/$name" "$@"
     cmake --build "$build_dir/build/$name" --parallel "$jobs" --target install
+    if [ "$name" = aws-nitro-enclaves-sdk-c ]; then
+        # The exported CMS functions' header is omitted by upstream install.
+        # Install the pinned header verbatim; consumers need only this prefix.
+        install -D -m 644 "$source_dir/include/aws/nitro_enclaves/internal/cms.h" \
+            "$prefix/include/aws/nitro_enclaves/internal/cms.h"
+        (cd "$prefix" && sha256sum include/aws/nitro_enclaves/internal/cms.h \
+            > share/swap-kms/headers.sha256)
+    fi
     if [ "$name" = aws-lc ]; then
         # The distro Go tool may expand go.sum while running code generators.
         # It is generated checksum metadata; retain the pinned upstream file
@@ -89,7 +97,6 @@ fi
 
 cmake -GNinja -S "$repo_dir/enclave/kms-tool" -B "$build_dir/build/swap-kms-tool" \
     -DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH="$prefix" \
-    -DCMAKE_INSTALL_PREFIX="$prefix" -DBUILD_SHARED_LIBS=OFF \
-    -DNITRO_SDK_SOURCE_DIR="$build_dir/src/aws-nitro-enclaves-sdk-c"
+    -DCMAKE_INSTALL_PREFIX="$prefix" -DBUILD_SHARED_LIBS=OFF
 cmake --build "$build_dir/build/swap-kms-tool" --parallel "$jobs" --target install
 strip "$prefix/bin/swap-kms-tool" "$prefix/lib/libnsm.so"

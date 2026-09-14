@@ -101,39 +101,6 @@ static struct json_object *parse_json(const char *data, size_t length) {
     return object;
 }
 
-static bool valid_key_arn(const char *arn, const char *region) {
-    char prefix[64];
-    int prefix_length = snprintf(prefix, sizeof(prefix), "arn:aws:kms:%s:", region);
-    if (prefix_length <= 0 || (size_t)prefix_length >= sizeof(prefix) ||
-        strncmp(arn, prefix, (size_t)prefix_length)) {
-        return false;
-    }
-    const char *account = arn + prefix_length;
-    if (strlen(account) < 17) {
-        return false;
-    }
-    for (size_t i = 0; i < 12; i++) {
-        if (!isdigit((unsigned char)account[i])) {
-            return false;
-        }
-    }
-    if (strncmp(account + 12, ":key/", 5)) {
-        return false;
-    }
-    const char *id = account + 17;
-    bool multi_region = !strncmp(id, "mrk-", 4);
-    if (strlen(id) != 36) {
-        return false;
-    }
-    for (size_t i = multi_region ? 4 : 0; i < 36; i++) {
-        bool separator = !multi_region && (i == 8 || i == 13 || i == 18 || i == 23);
-        if (separator ? id[i] != '-' : !isxdigit((unsigned char)id[i])) {
-            return false;
-        }
-    }
-    return true;
-}
-
 static bool read_input(struct input *input) {
     char raw[MESSAGE_LIMIT + 1];
     size_t length = fread(raw, 1, sizeof(raw), stdin);
@@ -171,33 +138,10 @@ static bool read_input(struct input *input) {
             return false;
         }
     }
-    size_t region_length = strlen(input->region);
-    if (input->region[0] == '-' || input->region[region_length - 1] == '-' ||
-        !strncmp(input->region, "cn-", 3) || !strncmp(input->region, "us-gov-", 7) ||
-        !strncmp(input->region, "us-iso", 6)) {
-        return false;
-    }
-    for (const char *c = input->region; *c; c++) {
-        if (!(*c >= 'a' && *c <= 'z') && !isdigit((unsigned char)*c) && *c != '-') {
-            return false;
-        }
-    }
-    for (const char *c = input->seed_id; *c; c++) {
-        if (!isalnum((unsigned char)*c) && *c != '-' && *c != '_' && *c != '.') {
-            return false;
-        }
-    }
-    for (const char *c = input->access_key; *c; c++) {
-        if (!isalnum((unsigned char)*c)) {
-            return false;
-        }
-    }
-    if (strcmp(input->network, "bitcoin") && strcmp(input->network, "testnet") &&
-        strcmp(input->network, "testnet4") && strcmp(input->network, "signet") &&
-        strcmp(input->network, "regtest")) {
-        return false;
-    }
-    return valid_key_arn(input->key_arn, input->region);
+    /* Rust validates the measured region/key/seed configuration and typed
+     * Bitcoin network before starting this fixed helper. Keep IPC bounds,
+     * string types and framing here; do not maintain a second policy parser. */
+    return true;
 }
 
 static bool add_context(struct aws_allocator *allocator, struct aws_hash_table *context, const struct input *input) {
@@ -338,37 +282,26 @@ static bool unwrap_seed(struct aws_nitro_enclaves_kms_client *client, struct aws
     return ok;
 }
 
-static bool print_result(struct aws_allocator *allocator, const char *key_arn, const struct aws_byte_buf *seed,
-                         const struct aws_byte_buf *ciphertext) {
-    struct aws_byte_buf encoded_seed = {0}, encoded_ciphertext = {0};
-    struct aws_byte_cursor seed_cursor = aws_byte_cursor_from_buf(seed);
+static bool print_result(struct aws_allocator *allocator, const struct input *input,
+                         const char *field, const struct aws_byte_buf *value) {
+    struct aws_byte_buf encoded = {0};
+    struct aws_byte_cursor cursor = aws_byte_cursor_from_buf(value);
     size_t capacity = 0;
     bool ok = false;
-    if (aws_base64_compute_encoded_len(seed->len, &capacity) ||
-        aws_byte_buf_init(&encoded_seed, allocator, capacity) || aws_base64_encode(&seed_cursor, &encoded_seed)) {
+    if (aws_base64_compute_encoded_len(value->len, &capacity) ||
+        aws_byte_buf_init(&encoded, allocator, capacity) || aws_base64_encode(&cursor, &encoded)) {
         goto done;
     }
-    if (ciphertext) {
-        struct aws_byte_cursor cursor = aws_byte_cursor_from_buf(ciphertext);
-        if (aws_base64_compute_encoded_len(ciphertext->len, &capacity) ||
-            aws_byte_buf_init(&encoded_ciphertext, allocator, capacity) || aws_base64_encode(&cursor, &encoded_ciphertext)) {
-            goto done;
-        }
-    }
-    /* The validated ARN and base64 alphabet need no JSON escaping. stdout is
-     * unbuffered, avoiding another retained stdio copy of the seed. */
-    if (fprintf(stdout, "{\"key_arn\":\"%s\",\"seed\":\"%.*s\"", key_arn,
-                (int)encoded_seed.len, encoded_seed.buffer) < 0) {
-        goto done;
-    }
-    if (ciphertext && fprintf(stdout, ",\"ciphertext\":\"%.*s\"", (int)encoded_ciphertext.len,
-                              encoded_ciphertext.buffer) < 0) {
-        goto done;
-    }
-    ok = fputs("}\n", stdout) >= 0;
+    /* Escape the input ARN through json-c; output framing must not depend on
+     * duplicating Rust's ARN validation. field is an operation-specific literal.
+     * Only recovery returns a seed; generation returns ciphertext alone. */
+    struct json_object *arn = NULL;
+    json_object_object_get_ex(input->json, "key_arn", &arn);
+    ok = fprintf(stdout, "{\"key_arn\":%s,\"%s\":\"%.*s\"}\n",
+                 json_object_to_json_string_ext(arn, JSON_C_TO_STRING_PLAIN), field,
+                 (int)encoded.len, encoded.buffer) >= 0;
 done:
-    aws_byte_buf_clean_up_secure(&encoded_seed);
-    aws_byte_buf_clean_up_secure(&encoded_ciphertext);
+    aws_byte_buf_clean_up_secure(&encoded);
     return ok;
 }
 
@@ -381,19 +314,20 @@ static bool run_operation(struct aws_nitro_enclaves_kms_client *client, const st
     bool ok = false;
     if (!strcmp(input->operation, "generate")) {
         struct aws_kms_generate_data_key_response *response = aws_kms_generate_data_key_response_from_json(client->allocator, json);
-        if (response && response->key_id && !strcmp(aws_string_c_str(response->key_id), input->key_arn) &&
-            response->plaintext.len == 0 && response->ciphertext_blob.len > 0 &&
+        /* call_kms already checked KeyId and rejected plaintext. Validate the
+         * generated Recipient envelope before permitting the first S3 write,
+         * but keep its seed inside this process and wipe it below. */
+        if (response && response->ciphertext_blob.len > 0 &&
             response->ciphertext_blob.len <= CIPHERTEXT_LIMIT &&
             unwrap_seed(client, &response->ciphertext_for_recipient, &seed)) {
-            ok = print_result(client->allocator, input->key_arn, &seed, &response->ciphertext_blob);
+            ok = print_result(client->allocator, input, "ciphertext", &response->ciphertext_blob);
         }
         aws_kms_generate_data_key_response_destroy(response);
     } else {
         struct aws_kms_decrypt_response *response = aws_kms_decrypt_response_from_json(client->allocator, json);
-        if (response && response->key_id && !strcmp(aws_string_c_str(response->key_id), input->key_arn) &&
-            response->plaintext.len == 0 && response->encryption_algorithm == AWS_EA_SYMMETRIC_DEFAULT &&
+        if (response && response->encryption_algorithm == AWS_EA_SYMMETRIC_DEFAULT &&
             unwrap_seed(client, &response->ciphertext_for_recipient, &seed)) {
-            ok = print_result(client->allocator, input->key_arn, &seed, NULL);
+            ok = print_result(client->allocator, input, "seed", &seed);
         }
         aws_kms_decrypt_response_destroy(response);
     }

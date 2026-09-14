@@ -26,6 +26,13 @@ No AWS source is patched. Credentials and sensitive results cross a bounded
 stdin/stdout pipe; they are not command-line arguments or process environment.
 See [the helper](../enclave/kms-tool) and [build script](../build/build-swap-kms-tool.sh).
 
+The helper is application-owned integration code with an explicit
+[maintenance and upgrade policy](../enclave/kms-tool/README.md#ownership-and-upgrade-policy).
+Rust owns configuration validation; C retains bounded IPC and KMS-response
+validation. Generation returns ciphertext only. Its recipient seed is validated
+and wiped inside the helper before storage is allowed; only decryption of the
+committed S3 blob returns a seed to Rust.
+
 The adapter retains one reference to the SDK's CRT bootstrap until the KMS
 client is destroyed. This prevents a closed HTTP connection from destroying
 its event loop before connection cleanup with the pinned SDK/CRT versions.
