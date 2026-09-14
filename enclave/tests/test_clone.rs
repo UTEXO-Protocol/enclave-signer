@@ -19,7 +19,9 @@ use utexo_bridge_enclave::proto::*;
 // stable, non-secret seed we can embed in integration tests.
 const DONOR_MNEMONIC: &str =
     "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
-const CLONING_SECRET: &str = "test-operator-cloning-secret";
+// >= 32 bytes / >= 8 distinct so it clears the fail-closed strength gate in
+// `validate_cloning_secret` (F03-AF-26).
+const CLONING_SECRET: &str = "test-operator-cloning-secret-0123456789abcdef";
 
 fn initialize_key_from_mnemonic(port: u16, mnemonic: &str) -> PublicKeysResponse {
     let resp = send_request(
@@ -197,7 +199,13 @@ fn clone_rejects_wrong_cloning_secret() {
     let requester_port = start_requester();
 
     // Requester uses a DIFFERENT secret than the donor was configured with.
-    let init = initiate_cloning(requester_port, "wrong-secret", &donor_keys.evm_address);
+    // Still >= 32 bytes so it passes the strength gate (F03-AF-26) and the
+    // rejection lands on the donor's HMAC-digest check, not on length.
+    let init = initiate_cloning(
+        requester_port,
+        "wrong-operator-cloning-secret-0123456789abcdef",
+        &donor_keys.evm_address,
+    );
     let err = request_get_clone(donor_port, &donor_keys.evm_address, &init)
         .expect_err("GetClone should reject a mismatched digest");
     assert!(
