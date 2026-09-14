@@ -60,12 +60,37 @@ impl ParentAdapterService {
             tokio::task::spawn_blocking(move || {
                 use crate::framing;
 
+                // F03-AF-18: the outer `tokio::time::timeout` stops *awaiting*
+                // this task but cannot cancel a `spawn_blocking` thread, and a
+                // cancelled caller likewise leaves the thread running. Without
+                // socket deadlines an enclave that accepts the connection but
+                // never replies (or a black-holed address) would pin this
+                // blocking-pool thread indefinitely, well past the 30s public
+                // timeout, so repeated abandoned calls could exhaust the pool.
+                // Bound connect + read + write on BOTH transports so the thread
+                // always returns within ENCLAVE_TIMEOUT even after the outer
+                // timeout has already fired.
                 match target {
                     EnclaveTarget::Tcp(addr) => {
-                        let mut stream = std::net::TcpStream::connect(&addr).map_err(|e| {
-                            Status::unavailable(format!("enclave connection failed: {e}"))
-                        })?;
+                        use std::net::ToSocketAddrs;
+                        let sockaddr = addr
+                            .to_socket_addrs()
+                            .map_err(|e| {
+                                Status::unavailable(format!("enclave addr resolve failed: {e}"))
+                            })?
+                            .next()
+                            .ok_or_else(|| {
+                                Status::unavailable(
+                                    "enclave addr resolved to no endpoints".to_string(),
+                                )
+                            })?;
+                        let mut stream =
+                            std::net::TcpStream::connect_timeout(&sockaddr, ENCLAVE_TIMEOUT)
+                                .map_err(|e| {
+                                    Status::unavailable(format!("enclave connection failed: {e}"))
+                                })?;
                         stream.set_read_timeout(Some(ENCLAVE_TIMEOUT)).ok();
+                        stream.set_write_timeout(Some(ENCLAVE_TIMEOUT)).ok();
                         framing::write_message(&mut stream, &req)
                             .map_err(|e| Status::internal(format!("enclave write failed: {e}")))?;
                         let resp: EnclaveResponse = framing::read_message(&mut stream)
@@ -78,6 +103,9 @@ impl ParentAdapterService {
                             .map_err(|e| {
                                 Status::unavailable(format!("enclave vsock connection failed: {e}"))
                             })?;
+                        // Previously the vsock branch had NO socket deadlines.
+                        stream.set_read_timeout(Some(ENCLAVE_TIMEOUT)).ok();
+                        stream.set_write_timeout(Some(ENCLAVE_TIMEOUT)).ok();
                         framing::write_message(&mut stream, &req)
                             .map_err(|e| Status::internal(format!("enclave write failed: {e}")))?;
                         let resp: EnclaveResponse = framing::read_message(&mut stream)
