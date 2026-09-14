@@ -4,18 +4,27 @@
 # Supply github_token, or one deploy key per repo; keys never enter image layers.
 # Example: docker build --secret id=github_token,env=GITHUB_TOKEN -f build/Dockerfile.enclave .
 # Production builder glibc must remain compatible with the AL2023 runtime.
-FROM rust:1.96-slim-bullseye@sha256:c593596210f729542a92aced6a8b0812bcc8d04c5f1b238e663b800d0e2e17bd AS builder
+FROM rust:1.96-slim-bullseye@sha256:c593596210f729542a92aced6a8b0812bcc8d04c5f1b238e663b800d0e2e17bd AS kms-tool-builder
 
-# Builder-only tools: system Git and SSH for private dependencies.
-RUN apt-get update && apt-get install -y \
+# The snapshot matches this Rust image's Debian snapshot date. Live Bullseye
+# security indexes can refer to removed packages; the snapshot retains them.
+# Keep this builder on glibc 2.31, compatible with the AL2023 runtime (2.34).
+RUN sed -i 's|http://deb.debian.org/debian-security|https://snapshot.debian.org/archive/debian-security/20260623T000000Z|g; s|http://deb.debian.org/debian|https://snapshot.debian.org/archive/debian/20260623T000000Z|g' /etc/apt/sources.list \
+    && apt-get -o Acquire::Check-Valid-Until=false update && apt-get install -y \
     pkg-config libssl-dev git ca-certificates openssh-client \
-    make perl python3 python3-pip \
+    make perl python3 python3-pip ninja-build golang gcc g++ \
     && pip3 install --no-cache-dir "cmake==3.31.6" \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /build
 COPY . /build/
 
+# Official AWS Nitro SDK, using the dependency revisions of kmstool_enclave_cli.
+# This helper is included only in the swap images. It keeps KMS TLS, SigV4,
+# attestation and recipient-envelope processing inside the enclave.
+RUN sh /build/build/build-swap-kms-tool.sh
+
+FROM kms-tool-builder AS builder
 WORKDIR /build/enclave
 # Deterministic compilation (PCR0 reproducibility, Step 4):
 #   CARGO_INCREMENTAL=0   no incremental artifacts (release already off; explicit)
@@ -61,7 +70,7 @@ FROM public.ecr.aws/amazonlinux/amazonlinux:2023-minimal@sha256:8073d921f4ac1bf1
 # embedded timestamps (rpmdb, dnf history, caches, logs), which rewrite-timestamp
 # does not normalise, so it is scrubbed in the same layer. rpmdb is not needed at
 # runtime.
-RUN dnf install -y socat iproute \
+RUN dnf install -y socat iproute ca-certificates libgcc \
     && dnf clean all \
     && rm -rf \
         /var/cache/dnf /var/cache/libdnf5 /var/cache/ldconfig \
@@ -71,6 +80,9 @@ RUN dnf install -y socat iproute \
 
 WORKDIR /app
 COPY --from=builder /build/target/release/utexo-bridge-enclave /app/utexo-bridge-enclave
+COPY --from=kms-tool-builder /opt/swap-kms/bin/swap-kms-tool /usr/local/bin/swap-kms-tool
+COPY --from=kms-tool-builder /opt/swap-kms/lib/libnsm.so /usr/lib64/libnsm.so
+COPY --from=kms-tool-builder /opt/swap-kms/share/swap-kms /usr/share/swap-kms
 COPY build/entrypoint.sh /app/entrypoint.sh
 
 RUN chmod +x /app/utexo-bridge-enclave /app/entrypoint.sh

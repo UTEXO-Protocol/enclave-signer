@@ -118,10 +118,9 @@ fn main() {
                 .unwrap_or_else(|e| panic!("RGB swap KMS configuration is required: {e}"));
             #[cfg(all(feature = "vsock", target_os = "linux"))]
             {
-                use utexo_bridge_enclave::{swap_kms, swap_persistence, vsock_forwarder};
-                // TLS terminates in the KMS client, which checks AWS's certificate.
-                vsock_forwarder::start_forwarder(swap_kms::LOCAL_PORT, swap_kms::VSOCK_PORT)
-                    .expect("start KMS HTTPS forwarder");
+                use utexo_bridge_enclave::{swap_persistence, vsock_forwarder};
+                // The official SDK helper connects directly to parent CID 3,
+                // vsock port 8003, and terminates KMS TLS inside the enclave.
                 vsock_forwarder::start_forwarder(
                     swap_persistence::BROKER_LOCAL_PORT,
                     swap_persistence::BROKER_VSOCK_PORT,

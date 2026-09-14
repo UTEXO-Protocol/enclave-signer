@@ -3892,7 +3892,6 @@ dependencies = [
  "tokio",
  "tokio-rustls 0.26.4",
  "tower-service",
- "webpki-roots 1.0.9",
 ]
 
 [[package]]
@@ -5676,9 +5675,7 @@ dependencies = [
  "base64 0.22.1",
  "bytes",
  "encoding_rs",
- "futures-channel",
  "futures-core",
- "futures-util",
  "h2 0.4.15",
  "hickory-resolver",
  "http 1.5.0",
@@ -5695,8 +5692,6 @@ dependencies = [
  "once_cell",
  "percent-encoding",
  "pin-project-lite",
- "quinn",
- "rustls 0.23.43",
  "rustls-pki-types",
  "serde",
  "serde_json",
@@ -5704,7 +5699,6 @@ dependencies = [
  "sync_wrapper",
  "tokio",
  "tokio-native-tls",
- "tokio-rustls 0.26.4",
  "tower 0.5.3",
  "tower-http",
  "tower-service",
@@ -5712,7 +5706,6 @@ dependencies = [
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "web-sys",
- "webpki-roots 1.0.9",
 ]
 
 [[package]]
@@ -6345,7 +6338,6 @@ dependencies = [
  "aws-lc-rs",
  "log",
  "once_cell",
- "ring",
  "rustls-pki-types",
  "rustls-webpki 0.103.13",
  "subtle",
@@ -7823,11 +7815,9 @@ dependencies = [
  "hmac",
  "k256",
  "nix 0.31.3",
- "openssl",
  "prost",
  "rand 0.10.2",
  "rand_core 0.6.4",
- "reqwest 0.12.28",
  "rgb-consignment",
  "rgb-invoicing",
  "rgb-ops",
@@ -7839,7 +7829,6 @@ dependencies = [
  "sha3 0.10.9",
  "subtle",
  "thiserror 2.0.19",
- "time",
  "tokio",
  "tracing",
  "tracing-subscriber 0.3.23",
@@ -8054,15 +8043,6 @@ name = "webpki-roots"
 version = "0.25.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5f20c57d8d7db6d3b86154206ae5d8fba62dd39573114de97c2cb0578251f8e1"
-
-[[package]]
-name = "webpki-roots"
-version = "1.0.9"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7dcd9d09a39985f5344844e66b0c530a33843579125f23e21e9f0f220850f22a"
-dependencies = [
- "rustls-pki-types",
-]
 
 [[package]]
 name = "widestring"

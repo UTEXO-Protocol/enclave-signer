@@ -10,6 +10,35 @@ dedicated symmetric encryption KMS key. These bytes are the seed passed to the
 existing key derivation code. Transaction validation, derivation paths, and
 signing algorithms are unchanged; no transaction uses KMS `Sign`.
 
+## Official AWS dependency
+
+The swap enclave invokes `/usr/local/bin/swap-kms-tool`, a small adapter linked
+against the unmodified [AWS Nitro Enclaves SDK for C](https://github.com/aws/aws-nitro-enclaves-sdk-c/tree/cd61b6187c8b20867ba4368d1ae62c5790c0269a).
+It uses the same SDK and dependency versions as AWS's `kmstool_enclave_cli`:
+AWS-LC, s2n-tls, AWS Common Runtime libraries, json-c, and libnsm. The SDK handles
+AWS request signing, TLS, recipient-key generation, NSM attestation, and CMS
+recipient-envelope decryption. Rust retains seed persistence and signing logic.
+
+The stock CLI exposes 16/32-byte data-key sizes and no encryption-context option.
+Our adapter uses the SDK's REST API to send `GenerateDataKey(NumberOfBytes=64)`
+and `Decrypt` with the existing context, then calls its CMS decryption routine.
+No AWS source is patched. Credentials and sensitive results cross a bounded
+stdin/stdout pipe; they are not command-line arguments or process environment.
+See [the helper](../enclave/kms-tool) and [build script](../build/build-swap-kms-tool.sh).
+
+[The dependency manifest](../build/swap-kms-dependencies.tsv) pins every upstream
+source to an immutable Git commit matching AWS's build. Both swap Dockerfiles
+build static SDK/CRT libraries and ship the helper, `libnsm.so`, CA certificates,
+and provenance under `/usr/share/swap-kms`. The builder uses glibc 2.31, older
+than the AL2023 runtime's 2.34. Mint/burn images do not build or ship this helper.
+
+NSM v0.4.0 does not publish a Cargo lockfile. Its Rust dependencies are resolved
+once per fresh build/cache, built with that lock, and the resulting
+`nsm-Cargo.lock` is included in the image provenance. A checked-in NSM lockfile
+is still needed before claiming byte-for-byte reproducibility across fresh
+builds; preserve the resolved lock with release artifacts. The main Rust
+workspace continues to use its checked-in `Cargo.lock` with `--locked`.
+
 ## Storage and trust boundaries
 
 ```mermaid
@@ -108,9 +137,9 @@ credentials through the normal provider chain. Do not place static access keys
 in the EIF. The broker unit's `DynamicUser` and `ProtectHome` settings intentionally
 do not depend on a login user's AWS profile.
 
-| Enclave loopback | Parent vsock | Destination |
+| Enclave path | Parent vsock | Destination |
 | --- | --- | --- |
-| `127.0.0.1:3445` | CID 3, port `8003` | Blind TLS relay to `kms.<region>.amazonaws.com:443` |
+| SDK helper, direct vsock | CID 3, port `8003` | Blind TLS relay to `kms.<region>.amazonaws.com:443` |
 | `127.0.0.1:3446` | CID 3, port `8004` | Credential and ciphertext broker |
 
 Keep the KMS relay separate from the existing EVM RPC/nginx path. Do not
@@ -254,7 +283,9 @@ setting absent and initialize from a supplied test seed/mnemonic. An empty
 Partially supplied KMS configuration is an error. This development feature is
 already prohibited by the release build guard and does not alter the production
 lifecycle. The in-process test harness uses an injected seed source instead of
-AWS; the KMS client tests exercise CMS and HTTPS rejection separately.
+AWS. Local emulator tests live separately on `kms-testing`; they replace NSM
+attestation and transport routing only in the test helper. Production images
+use the SDK's real NSM and verified HTTPS transport.
 
 ## Required live validation before production use
 

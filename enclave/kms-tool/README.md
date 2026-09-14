@@ -1,0 +1,13 @@
+# RGB-swap KMS helper
+
+`swap-kms-tool` links the unmodified official [AWS Nitro Enclaves SDK for C](https://github.com/aws/aws-nitro-enclaves-sdk-c/tree/cd61b6187c8b20867ba4368d1ae62c5790c0269a), using the same AWS libraries as `kmstool_enclave_cli`. The dependency build pins the SDK and its dependencies to immutable revisions.
+
+The stock CLI's `genkey` command exposes only 16- and 32-byte key specs. RGB swaps retain their existing 64-byte seed and four-field encryption context. This adapter builds SDK request structures with `NumberOfBytes=64`, invokes the SDK's authenticated HTTPS REST client, and checks the KMS response's key ARN, absence of plaintext, and decrypt algorithm before recipient unwrap. Attestation, RSA generation, CMS parsing, RSA-OAEP and AES decryption all call the official SDK code used by kmstool; no SDK source patch or replacement cryptography is included.
+
+Each invocation uses direct vsock to parent CID 3, port 8003. The configured region determines the SDK's KMS hostname, TLS certificate verification, SNI and SigV4 scope. NSM entropy seeds the operating system pool through the SDK before its TLS and ephemeral RSA operations. KMS generates the persistent seed itself.
+
+The measured Rust enclave invokes `/usr/local/bin/swap-kms-tool` once per request, using private stdin/stdout pipes. Input is one JSON object containing `operation` (`generate` or `decrypt`), `region`, full `key_arn`, `seed_id`, `bitcoin_network`, `access_key_id`, `secret_access_key`, and `session_token`. Decrypt additionally requires base64 `ciphertext`. Output contains `key_arn` and the base64 `seed`; generate also returns base64 `ciphertext`. The four KMS encryption context entries are constructed internally: `application=utexo-enclave-signer`, `flow=rgb-swap`, `seed_id`, and `bitcoin_network`.
+
+Messages are limited to 64 KiB, ciphertext blobs to 6144 bytes, and unwrapped seeds to exactly 64 bytes. Core dumps are disabled; execution, CPU and address space are bounded. Credentials and seeds never enter command arguments, environment variables, temporary files or logs. Owned raw seed and credential buffers are erased during cleanup; json-c's input copies exist only for the short-lived helper process. Rust clears the child environment and rejects failed, oversized or malformed responses.
+
+Build with CMake using the installed dependency prefix and `-DNITRO_SDK_SOURCE_DIR=/path/to/pinned/sdk`. The source path supplies the official exported CMS functions' internal header, which upstream does not install. The helper and NSM runtime library are included only in RGB-swap images. Signing, HD derivation, S3 ciphertext persistence and RGB mint/burn behavior remain in their existing components.
