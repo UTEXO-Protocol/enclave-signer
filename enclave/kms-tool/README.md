@@ -1,8 +1,8 @@
 # RGB-swap KMS helper
 
-`swap-kms-tool` links the unmodified official [AWS Nitro Enclaves SDK for C](https://github.com/aws/aws-nitro-enclaves-sdk-c/tree/cd61b6187c8b20867ba4368d1ae62c5790c0269a), using the same AWS libraries as `kmstool_enclave_cli` at maintained, security-updated versions. The dependency build pins the SDK and its dependencies to immutable revisions; it intentionally does not copy the obsolete dependency versions in upstream’s sample Dockerfile.
+`swap-kms-tool` links the official [AWS Nitro Enclaves SDK for C](https://github.com/aws/aws-nitro-enclaves-sdk-c/tree/cd61b6187c8b20867ba4368d1ae62c5790c0269a), using the same AWS libraries as `kmstool_enclave_cli` at maintained, security-updated versions. The dependency build pins the SDK and its dependencies to immutable revisions; it intentionally does not copy the obsolete dependency versions in upstream’s sample Dockerfile.
 
-The stock CLI's `genkey` command exposes only 16- and 32-byte key specs. RGB swaps retain their existing 64-byte seed and four-field encryption context. This adapter builds SDK request structures with `NumberOfBytes=64`, invokes the SDK's authenticated HTTPS REST client, and checks the KMS response's key ARN, absence of plaintext, and decrypt algorithm before recipient unwrap. Attestation, RSA generation, CMS parsing, RSA-OAEP and AES decryption all call the official SDK code used by kmstool; no SDK source patch or replacement cryptography is included.
+The stock CLI's `genkey` command exposes only 16- and 32-byte key specs. RGB swaps retain their existing 64-byte seed and four-field encryption context. This adapter builds SDK request structures with `NumberOfBytes=64`, invokes the SDK's authenticated HTTPS REST client, and checks the KMS response's key ARN, absence of plaintext, and decrypt algorithm before recipient unwrap. Attestation, RSA generation, CMS parsing, RSA-OAEP and AES decryption all call the official SDK code used by kmstool; no replacement cryptography is included. A scoped SDK patch makes REST request completion and error cleanup safe; its base revision, patch and effective source hashes ship in provenance.
 
 Each invocation uses direct vsock to parent CID 3, port 8003. The configured region determines the SDK's KMS hostname, TLS certificate verification, SNI and SigV4 scope. NSM entropy seeds the operating system pool through the SDK before its TLS and ephemeral RSA operations. KMS generates the persistent seed itself.
 
@@ -41,7 +41,7 @@ not make it a stable public API. Both that dependency and the bootstrap wrapper
 must be reviewed on SDK upgrades. CRT 1.0 also needs explicit installed CMake
 module/library paths for this SDK and build-time inclusion of its official
 hash-table and Linux vsock headers where upstream relied on transitive include
-order. These scoped compiler/CMake settings preserve unmodified upstream sources. Do not remove checks merely to reduce line
+order. These scoped compiler/CMake settings preserve upstream code apart from that explicit cleanup patch. Do not remove checks merely to reduce line
 count or replace them with additional response-interception wrappers.
 
 For an upgrade, compare the pinned SDK/CRT sources and API ownership rules,
@@ -77,3 +77,25 @@ which includes the [release deallocation correction](https://github.com/json-c/j
 and subsequent object-lifetime/failed-insertion corrections. This is an explicit
 post-release source pin until a stable release includes those fixes; it is not
 a local patch or a change to release assertion behavior.
+
+## Scoped SDK cleanup patch
+
+`build/patches/nitro-sdk-cleanup.patch` fixes two uninitialized local pointers in
+SDK `source/rest.c`: `stream` and `sign_request` can otherwise reach cleanup
+before their declarations on early failures. It initializes them to `NULL`,
+checks partial allocations and makes partial response destruction safe. A
+completion predicate records completion under the request mutex so synchronous
+notifications are not lost and spurious wakes cannot end the wait early;
+mutex/condition resources are released on both exits. TLS, SigV4, attestation and CMS algorithms remain
+the upstream implementation. GCC builds retain the SDK's `-Werror` checks;
+there is no blanket suppression of the uninitialized-variable diagnostic.
+
+This is a maintained application patch until an official SDK revision contains
+the correction. The build applies it only over a clean pinned SDK checkout and
+then requires the complete tracked diff to match the checked-in patch exactly.
+Reused caches with any other changes fail; use a fresh dependency build
+directory when changing the patch. Runtime provenance includes the
+original SDK commit, patch SHA-256 and effective `rest.c` SHA-256 in
+`share/swap-kms/sdk-source.json`, plus the patch itself. Fault-injection tests
+exercise SDK early cleanup, synchronous/asynchronous completion and spurious
+wakes through test-only linker wrappers.

@@ -33,6 +33,7 @@ WORKDIR /build
 # Resolve only public native sources in this stage. Rust/application edits do
 # not invalidate the dependency build, and private source arrives later.
 COPY build/build-swap-kms-tool.sh build/swap-kms-dependencies.tsv build/swap-kms-nsm.Cargo.lock /build/build/
+COPY build/patches/nitro-sdk-cleanup.patch /build/build/patches/
 RUN SWAP_KMS_DEPENDENCIES_ONLY=1 sh /build/build/build-swap-kms-tool.sh
 COPY enclave/kms-tool /build/enclave/kms-tool/
 

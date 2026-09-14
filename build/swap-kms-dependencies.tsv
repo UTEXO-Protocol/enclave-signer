@@ -1,5 +1,5 @@
 # name version immutable-commit https-git-url
-# Official SDK with current patched AWS-LC/CRT releases; sources stay unmodified.
+# Official SDK with reviewed cleanup patch and current security-updated dependencies.
 # json-c includes upstream Release/NDEBUG cleanup and object-lifetime fixes after 0.19.
 # s2n >=1.7.6 fixes GHSA-684c-v35q-fvx7; aws-c-http >=0.11.0 fixes GHSA-rmjr-3qpm-vh98.
 aws-lc v5.8.0 a3d1e685552f05a9ad04a2946962c03e97bdecac https://github.com/awslabs/aws-lc.git

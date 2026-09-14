@@ -1,4 +1,4 @@
-/* RGB-swap custody adapter for the unmodified AWS Nitro Enclaves SDK for C. */
+/* RGB-swap custody adapter for the official AWS Nitro Enclaves SDK for C. */
 #include <aws/common/hash_table.h>
 #include <aws/nitro_enclaves/kms.h>
 #include <aws/nitro_enclaves/nitro_enclaves.h>
