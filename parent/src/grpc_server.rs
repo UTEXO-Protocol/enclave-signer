@@ -99,6 +99,12 @@ impl ParentAdapterService {
     /// Unwrap an enclave error response into a gRPC Status.
     fn enclave_error_to_status(err: &enclave_proto::ErrorResponse) -> Status {
         match err.code {
+            // ERROR_CODE_NOT_READY: enclave reached but not in a state that can
+            // serve this call yet (uninitialised, wrong FSM state, or a build
+            // without the SPV header chain). This is a caller-visible,
+            // retryable/precondition condition — surfacing it as INTERNAL (5xx
+            // semantics) hid it behind generic server errors (F03-AF-11).
+            2 => Status::unavailable(err.message.clone()),
             3 => Status::failed_precondition(err.message.clone()),
             _ => Status::internal(format!(
                 "enclave error (code {}): {}",
