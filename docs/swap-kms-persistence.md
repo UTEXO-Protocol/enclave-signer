@@ -13,7 +13,7 @@ signing algorithms are unchanged; no transaction uses KMS `Sign`.
 ## Official AWS dependency
 
 The swap enclave invokes `/usr/local/bin/swap-kms-tool`, a small adapter linked
-against the unmodified [AWS Nitro Enclaves SDK for C](https://github.com/aws/aws-nitro-enclaves-sdk-c/tree/cd61b6187c8b20867ba4368d1ae62c5790c0269a).
+against the pinned [AWS Nitro Enclaves SDK for C](https://github.com/aws/aws-nitro-enclaves-sdk-c/tree/cd61b6187c8b20867ba4368d1ae62c5790c0269a).
 It uses the same official SDK and library codebases as AWS's `kmstool_enclave_cli`:
 AWS-LC, s2n-tls, AWS Common Runtime libraries, json-c, and libnsm. The library
 versions are deliberately newer than the upstream sample Dockerfile to include
@@ -25,7 +25,18 @@ recipient-envelope decryption. Rust retains seed persistence and signing logic.
 The stock CLI exposes 16/32-byte data-key sizes and no encryption-context option.
 Our adapter uses the SDK's REST API to send `GenerateDataKey(NumberOfBytes=64)`
 and `Decrypt` with the existing context, then calls its CMS decryption routine.
-No AWS source is patched. Credentials and sensitive results cross a bounded
+A small [SDK request-lifecycle patch](../build/patches/nitro-sdk-cleanup.patch)
+initializes cleanup pointers, handles partial allocation failures, and publishes
+completion under the request mutex. This prevents invalid cleanup and lost or
+spurious wakeups; the official TLS, SigV4, attestation, and CMS implementations
+remain in use. The patch is maintained until an official SDK release includes
+the fixes. Its exact diff is verified on every build, and the base commit, patch
+hash, and effective source hash are recorded in image provenance. Native fault
+tests exercise real SDK cleanup and synchronous/asynchronous completion.
+The separate upstream connection-setup wait can still miss an early
+notification. The helper's 12-second deadline bounds this availability failure;
+initialization fails closed and can be retried.
+Credentials and sensitive results cross a bounded
 stdin/stdout pipe; they are not command-line arguments or process environment.
 See [the helper](../enclave/kms-tool) and [build script](../build/build-swap-kms-tool.sh).
 
