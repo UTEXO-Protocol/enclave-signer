@@ -559,6 +559,21 @@ IwLz3/Y=
             let value: ciborium::Value = ciborium::from_reader(data)
                 .map_err(|e| VerifyError::Attestation(format!("invalid CBOR: {e}")))?;
 
+            // RFC 8152 §2: a COSE_Sign1 object may be serialized bare (a 4-item
+            // array) or wrapped in CBOR tag 18. AWS NSM emits the bare form, but
+            // accept the tagged form for interop (F03-AF-14). Only tag 18 is
+            // unwrapped; any other tag is rejected. Every crypto check below is
+            // unchanged - this only strips a standards-compliant envelope.
+            let value = match value {
+                ciborium::Value::Tag(18, inner) => *inner,
+                ciborium::Value::Tag(tag, _) => {
+                    return Err(VerifyError::Attestation(format!(
+                        "unexpected CBOR tag {tag} on COSE_Sign1 (expected 18)"
+                    )));
+                }
+                other => other,
+            };
+
             let arr = value
                 .as_array()
                 .ok_or_else(|| VerifyError::Attestation("COSE_Sign1 must be array".into()))?;
@@ -619,6 +634,46 @@ IwLz3/Y=
         use x509_cert::der::oid::AssociatedOid;
         use x509_cert::ext::pkix::KeyUsages;
         use x509_cert::ext::Extension;
+
+        // --- COSE_Sign1 envelope (F03-AF-14) -------------------------------
+
+        fn sample_cose_array() -> ciborium::Value {
+            ciborium::Value::Array(vec![
+                ciborium::Value::Bytes(vec![0xa1, 0x01, 0x38, 0x22]), // protected {1:-35}
+                ciborium::Value::Map(vec![]),
+                ciborium::Value::Bytes(vec![1, 2, 3]),
+                ciborium::Value::Bytes(vec![4, 5, 6, 7]),
+            ])
+        }
+
+        fn encode(v: &ciborium::Value) -> Vec<u8> {
+            let mut buf = Vec::new();
+            ciborium::into_writer(v, &mut buf).expect("encode cbor");
+            buf
+        }
+
+        #[test]
+        fn cose_from_bytes_accepts_tag18_wrapper() {
+            let arr = sample_cose_array();
+            let bare = CoseSign1::from_bytes(&encode(&arr)).expect("bare parses");
+
+            let tagged = ciborium::Value::Tag(18, Box::new(arr));
+            let tagged = CoseSign1::from_bytes(&encode(&tagged)).expect("tag-18 parses");
+
+            // Same fields whether wrapped or not - only the envelope differs.
+            assert_eq!(bare.protected, tagged.protected);
+            assert_eq!(bare.payload, tagged.payload);
+            assert_eq!(bare.signature, tagged.signature);
+        }
+
+        #[test]
+        fn cose_from_bytes_rejects_non_18_tag() {
+            let tagged = ciborium::Value::Tag(17, Box::new(sample_cose_array()));
+            assert!(matches!(
+                CoseSign1::from_bytes(&encode(&tagged)),
+                Err(VerifyError::Attestation(_))
+            ));
+        }
 
         // --- helpers -------------------------------------------------------
 
