@@ -1,4 +1,7 @@
+use std::time::Duration;
+
 use tonic::transport::Server;
+use tower::limit::GlobalConcurrencyLimitLayer;
 use tracing_subscriber::EnvFilter;
 
 use utexo_bridge_parent::config::Config;
@@ -39,9 +42,30 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let service = ParentAdapterService::new(target, cfg.evm_network_ids);
     let listen_addr = format!("{}:{}", cfg.grpc_host, cfg.grpc_port).parse()?;
 
-    tracing::info!(%listen_addr, "starting gRPC server");
+    // Perimeter / DoS hardening for the donor gRPC adapter (F03-AF-13). The
+    // clone seed-export path is already gated cryptographically (HMAC cloning
+    // secret + requester attestation + PCR + pubkey/digest binding + nonce);
+    // these limits are defense-in-depth so an unauthenticated peer cannot pin
+    // unbounded work or hold connections/streams open indefinitely:
+    //   - GlobalConcurrencyLimitLayer: shared semaphore caps in-flight requests
+    //     across ALL connections (opening more sockets does not raise the cap).
+    //   - concurrency_limit_per_connection + max_concurrent_streams: bound the
+    //     per-connection fan-out.
+    //   - timeout: shed a request whose handler hangs instead of leaking a permit.
+    let per_conn = cfg.grpc_max_concurrent_per_conn;
+    tracing::info!(
+        %listen_addr,
+        max_concurrent = cfg.grpc_max_concurrent,
+        max_concurrent_per_conn = per_conn,
+        request_timeout_secs = cfg.grpc_request_timeout_secs,
+        "starting gRPC server"
+    );
 
     Server::builder()
+        .layer(GlobalConcurrencyLimitLayer::new(cfg.grpc_max_concurrent))
+        .concurrency_limit_per_connection(per_conn)
+        .max_concurrent_streams(Some(per_conn as u32))
+        .timeout(Duration::from_secs(cfg.grpc_request_timeout_secs))
         .add_service(ParentServiceServer::new(service))
         .serve(listen_addr)
         .await?;

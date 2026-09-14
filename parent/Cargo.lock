@@ -4209,6 +4209,7 @@ dependencies = [
  "thiserror 2.0.20",
  "tokio",
  "tonic",
+ "tower",
  "tracing",
  "tracing-subscriber",
  "utexo-bridge-enclave",
