@@ -1576,6 +1576,15 @@ fn handle_get_clone(state: &EnclaveState, req: GetCloneRequest) -> Result<Enclav
         return Err(EnclaveError::DigestMismatch);
     }
 
+    // 5b. Optional hard export-quota gate (F03-AF-10, opt-in via
+    //     CLONE_EXPORT_HARD_CAP). Runs only after the request is fully
+    //     authenticated (so it cannot be probed/tripped by an unauthenticated
+    //     caller) and before any nonce is reserved or seed is sealed, so a
+    //     quota-refused request neither consumes replay capacity nor produces
+    //     ciphertext. Disabled by default (cap 0) — no behaviour change unless
+    //     the operator opts in.
+    state.check_export_quota()?;
+
     // 6. Reserve the nonce from the verified document (replay-check + record
     //    with rollback-on-drop), only after the checks above have passed so an
     //    unauthenticated handshake never consumes replay-guard capacity. With
@@ -1606,8 +1615,9 @@ fn handle_get_clone(state: &EnclaveState, req: GetCloneRequest) -> Result<Enclav
 
     // F03-AF-10 (telemetry): a donor never consumes its seed, so it can export
     // repeatedly. Make each export observable (and optionally alert on volume
-    // via CLONE_EXPORT_SOFT_CAP). This does NOT cap exports - a hard quota /
-    // revocation is an owner custody-policy decision (see OWNER-DECISIONS).
+    // via CLONE_EXPORT_SOFT_CAP). Hard enforcement, when opted in via
+    // CLONE_EXPORT_HARD_CAP, already ran fail-closed at step 5b above; the
+    // concrete quota number stays an owner custody choice (see OWNER-DECISIONS).
     let export_count = state.record_seed_export(&req_encryption_pk);
     tracing::info!(
         cluster_pk = %hex::encode(our_evm),

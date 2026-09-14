@@ -95,6 +95,19 @@ const DEFAULT_OP_DEDUP_MAX: usize = 100_000;
 /// on anomalous export volume without changing handshake behavior.
 const CLONE_EXPORT_SOFT_CAP_ENV: &str = "CLONE_EXPORT_SOFT_CAP";
 
+/// Env var naming an optional **hard** quota on the number of successful seed
+/// exports this donor instance will serve via `GetClone` (F03-AF-10, opt-in
+/// enforcement slice). `0` (the default when unset/invalid) disables it — the
+/// shipped default behaviour is unchanged (export never blocked), so a legitimate
+/// recovery re-clone is never broken by an operator who has not opted in.
+/// When set to `N > 0`, exactly `N` exports are allowed and the `N+1`-th is
+/// **rejected fail-closed** *after* full authentication (secret + attestation +
+/// PCR + pubkey/digest binding) but *before* the seed is sealed. The concrete
+/// number stays an owner custody choice; this only provides the mechanism.
+/// Volatile (resets on restart) — matches the volatile export counter; picking a
+/// durable/cluster-wide quota is the deferred owner decision (see OWNER-DECISIONS).
+const CLONE_EXPORT_HARD_CAP_ENV: &str = "CLONE_EXPORT_HARD_CAP";
+
 /// Replay guard for attestation nonces, bounded by **time** (not just
 /// count) so a flooding parent cannot permanently wedge cloning.
 ///
@@ -335,18 +348,24 @@ pub struct EnclaveState {
     pub op_replay_guard: NonceReplayGuard,
 
     /// Lifetime count of successful seed exports served by this instance as a
-    /// donor (F03-AF-10, telemetry). An `Active` donor never consumes its seed,
-    /// so it can export repeatedly; this counter makes that observable. It does
-    /// NOT gate export - the audit flags a hard quota/revocation as a
-    /// custody-policy decision the owner must version, since a wrong cap would
-    /// block legitimate recovery re-clones. Volatile (resets on restart), which
-    /// is fine: it is an alerting signal, not a durable custody ledger.
+    /// donor (F03-AF-10). An `Active` donor never consumes its seed, so it can
+    /// export repeatedly; this counter makes that observable and also backs the
+    /// opt-in hard quota ([`Self::check_export_quota`]). By default it only
+    /// observes (no gating); a hard cap is opt-in because a wrong cap would block
+    /// legitimate recovery re-clones. Volatile (resets on restart): an alerting
+    /// signal + coarse custody bound, not a durable ledger.
     seed_export_count: AtomicU64,
 
     /// Soft alerting threshold for [`Self::seed_export_count`]. `0` disables it
     /// (the default). Read once at construction from
     /// [`CLONE_EXPORT_SOFT_CAP_ENV`]; crossing it warns but never blocks.
     seed_export_soft_cap: u64,
+
+    /// Optional **hard** export quota (F03-AF-10, opt-in). `0` disables it (the
+    /// default); `N > 0` allows exactly `N` successful exports and rejects the
+    /// rest fail-closed. Read once at construction from
+    /// [`CLONE_EXPORT_HARD_CAP_ENV`]. See [`Self::check_export_quota`].
+    seed_export_hard_cap: u64,
 }
 
 impl Default for EnclaveState {
@@ -371,7 +390,40 @@ impl EnclaveState {
                 .ok()
                 .and_then(|v| v.trim().parse::<u64>().ok())
                 .unwrap_or(0),
+            seed_export_hard_cap: std::env::var(CLONE_EXPORT_HARD_CAP_ENV)
+                .ok()
+                .and_then(|v| v.trim().parse::<u64>().ok())
+                .unwrap_or(0),
         }
+    }
+
+    /// Opt-in **hard** export-quota gate (F03-AF-10). Returns `Err` when a hard
+    /// cap is configured (`CLONE_EXPORT_HARD_CAP > 0`) and this instance has
+    /// already served that many successful exports, so the caller rejects the
+    /// `GetClone` *before* sealing the seed. Non-mutating: the counter is only
+    /// advanced by [`Self::record_seed_export`] after a real export, so exactly
+    /// `cap` exports are admitted and the `cap+1`-th is refused. Disabled by
+    /// default (`cap == 0` → always `Ok`), so existing deployments and legitimate
+    /// recovery re-clones are unaffected. The check-then-record window is not
+    /// atomic across concurrent `GetClone`s; the cap is a coarse custody bound,
+    /// not a precise ledger.
+    pub fn check_export_quota(&self) -> Result<()> {
+        let cap = self.seed_export_hard_cap;
+        if cap > 0 {
+            let served = self.seed_export_count.load(Ordering::Relaxed);
+            if served >= cap {
+                tracing::warn!(
+                    seed_export_count = served,
+                    hard_cap = cap,
+                    "GetClone: seed-export HARD cap reached - export refused \
+                     (F03-AF-10, fail-closed). Rotate/re-provision to lift."
+                );
+                return Err(EnclaveError::Clone(format!(
+                    "seed-export hard cap reached ({served}/{cap}); export refused"
+                )));
+            }
+        }
+        Ok(())
     }
 
     /// Record a successful donor seed export and return the new lifetime count
@@ -745,6 +797,35 @@ mod tests {
         let state = EnclaveState::new(Network::Bitcoin);
         let err = state.sign_psbt(&[0u8; 8]).unwrap_err();
         assert!(matches!(err, EnclaveError::KeyNotInitialized));
+    }
+
+    // F03-AF-10: opt-in hard export quota admits exactly `cap` exports, then
+    // refuses fail-closed. Field is set directly (same-module) to avoid a
+    // process-global env-var race across parallel tests.
+    #[test]
+    fn export_hard_cap_blocks_after_quota() {
+        let mut state = EnclaveState::new(Network::Bitcoin);
+        state.seed_export_hard_cap = 2;
+        let pk = [7u8; 32];
+        assert!(state.check_export_quota().is_ok());
+        assert_eq!(state.record_seed_export(&pk), 1);
+        assert!(state.check_export_quota().is_ok());
+        assert_eq!(state.record_seed_export(&pk), 2);
+        // Quota reached: the cap+1-th export is refused before sealing.
+        let err = state.check_export_quota().unwrap_err();
+        assert!(matches!(err, EnclaveError::Clone(_)));
+    }
+
+    // Default (cap 0) never gates, no matter how many exports were served.
+    #[test]
+    fn export_hard_cap_disabled_by_default() {
+        let state = EnclaveState::new(Network::Bitcoin);
+        assert_eq!(state.seed_export_hard_cap, 0);
+        let pk = [9u8; 32];
+        for _ in 0..1000 {
+            state.record_seed_export(&pk);
+        }
+        assert!(state.check_export_quota().is_ok());
     }
 
     #[test]
