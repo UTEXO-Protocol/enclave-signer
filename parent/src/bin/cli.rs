@@ -30,8 +30,14 @@ enum Command {
     Init {
         /// Donor cloning secret, delivered at runtime (not baked into the EIF).
         /// Set only on enclaves that should serve clone requests.
+        /// DEPRECATED on the command line: visible in `ps` / shell history / SSM
+        /// logs (F03-AF-06). Prefer --cloning-secret-file or UTEXO_CLONING_SECRET.
         #[arg(long)]
         cloning_secret: Option<String>,
+        /// Read the cloning secret from this file instead of argv (F03-AF-06).
+        /// Takes precedence over UTEXO_CLONING_SECRET and --cloning-secret.
+        #[arg(long)]
+        cloning_secret_file: Option<PathBuf>,
     },
     /// Initialize from a hex-encoded 64-byte seed (testing only)
     InitSeed {
@@ -137,8 +143,14 @@ enum Command {
     Clone {
         /// Pre-shared operator cloning secret (must match the donor enclave's
         /// baked UTEXO_CLONING_SECRET).
+        /// DEPRECATED on the command line: visible in `ps` / shell history / SSM
+        /// logs (F03-AF-06). Prefer --cloning-secret-file or UTEXO_CLONING_SECRET.
         #[arg(long)]
-        cloning_secret: String,
+        cloning_secret: Option<String>,
+        /// Read the cloning secret from this file instead of argv (F03-AF-06).
+        /// Takes precedence over UTEXO_CLONING_SECRET and --cloning-secret.
+        #[arg(long)]
+        cloning_secret_file: Option<PathBuf>,
         /// Donor parent-adapter gRPC endpoint, e.g. http://10.0.1.23:50051
         #[arg(long)]
         donor_grpc: String,
@@ -278,7 +290,17 @@ fn main() {
     let client = EnclaveClient::new(&cli.addr);
 
     match cli.command {
-        Command::Init { cloning_secret } => {
+        Command::Init {
+            cloning_secret,
+            cloning_secret_file,
+        } => {
+            let cloning_secret = match resolve_cloning_secret(cloning_secret, cloning_secret_file) {
+                Ok(s) => s,
+                Err(e) => {
+                    eprintln!("Error: {e}");
+                    process::exit(1);
+                }
+            };
             match client.initialize_keys_with_secret(None, cloning_secret) {
                 Ok(r) => print_init_response(&r),
                 Err(e) => {
@@ -493,16 +515,73 @@ fn main() {
         }
         Command::Clone {
             cloning_secret,
+            cloning_secret_file,
             donor_grpc,
             donor_evm,
         } => {
-            if let Err(e) = run_clone(&client, &cloning_secret, &donor_grpc, &donor_evm) {
+            let secret = match resolve_cloning_secret(cloning_secret, cloning_secret_file) {
+                Ok(Some(s)) => s,
+                Ok(None) => {
+                    eprintln!(
+                        "Error: a cloning secret is required for clone — pass \
+                         --cloning-secret-file, set UTEXO_CLONING_SECRET, or (deprecated) \
+                         --cloning-secret"
+                    );
+                    process::exit(1);
+                }
+                Err(e) => {
+                    eprintln!("Error: {e}");
+                    process::exit(1);
+                }
+            };
+            if let Err(e) = run_clone(&client, &secret, &donor_grpc, &donor_evm) {
                 eprintln!("Error: {}", e);
                 process::exit(1);
             }
         }
         Command::Interactive => run_interactive(&client),
     }
+}
+
+/// Resolve the operator cloning secret WITHOUT forcing it onto the command line
+/// (F03-AF-06). A `--cloning-secret <value>` arg is visible in `ps`, shell
+/// history and SSM command logs, so the secret can be observed by any host-level
+/// viewer and reused to authorize another requester. Priority (most to least
+/// preferred): `--cloning-secret-file` > `UTEXO_CLONING_SECRET` env >
+/// `--cloning-secret` (deprecated; warns). Returns `Ok(None)` only when every
+/// source is absent, which is valid for `init` on a non-donor enclave.
+fn resolve_cloning_secret(
+    arg: Option<String>,
+    file: Option<PathBuf>,
+) -> Result<Option<String>, Box<dyn std::error::Error>> {
+    if let Some(path) = file {
+        let raw = std::fs::read_to_string(&path).map_err(|e| {
+            format!(
+                "failed to read --cloning-secret-file {}: {e}",
+                path.display()
+            )
+        })?;
+        let s = raw.trim().to_string();
+        if s.is_empty() {
+            return Err(format!("--cloning-secret-file {} is empty", path.display()).into());
+        }
+        return Ok(Some(s));
+    }
+    if let Ok(env_val) = std::env::var("UTEXO_CLONING_SECRET") {
+        let s = env_val.trim().to_string();
+        if !s.is_empty() {
+            return Ok(Some(s));
+        }
+    }
+    if let Some(s) = arg {
+        eprintln!(
+            "WARNING: --cloning-secret on the command line is visible in `ps`, shell history \
+             and SSM logs (F03-AF-06); prefer --cloning-secret-file or the UTEXO_CLONING_SECRET \
+             env var."
+        );
+        return Ok(Some(s));
+    }
+    Ok(None)
 }
 
 /// Drive the donor->requester cloning handshake. `client` targets the local
@@ -566,11 +645,50 @@ fn run_clone(
     );
 
     println!("[3/4] SetClone on local enclave...");
-    client.set_clone(
+    // F03-AF-05: SetClone may commit the requester to Active and only then have
+    // its response lost/undecodable in transit. A bare `?` here would exit the
+    // CLI with a hard error even though the expected identity is already
+    // installed, misleading operators/automation into a needless "recovery".
+    // On error we reconcile read-only: query the requester's identity ONCE (no
+    // blind SetClone retry) and let the normal verification below decide. Only a
+    // requester that is NOT Active (or is Active with the WRONG identity) is a
+    // real failure.
+    if let Err(set_err) = client.set_clone(
         clone_resp.encrypted_seed,
         clone_resp.donor_pubkey,
         clone_resp.donor_attestation,
-    )?;
+    ) {
+        eprintln!("[3/4] SetClone returned an error: {set_err}");
+        eprintln!("      reconciling (read-only get-keys, no SetClone retry)...");
+        match client.get_public_keys() {
+            Ok(k) => {
+                let got = hex::encode(&k.evm_address);
+                let want = hex::encode(&donor_addr);
+                if got == want {
+                    eprintln!(
+                        "      RECOVERED: requester is Active with the expected EVM 0x{got} \
+                         despite the SetClone transport error — continuing to full verification."
+                    );
+                    // fall through: the verification below re-queries and runs
+                    // the same 13-field donor cross-check as the happy path.
+                } else {
+                    return Err(format!(
+                        "SetClone failed ({set_err}); requester IS Active but with identity \
+                         0x{got}, not the expected donor 0x{want} — DO NOT trust this clone"
+                    )
+                    .into());
+                }
+            }
+            Err(get_err) => {
+                return Err(format!(
+                    "SetClone failed ({set_err}); requester is not initialized \
+                     (get-keys: {get_err}) — clone did not complete (still Cloning/Initial), \
+                     no identity installed"
+                )
+                .into());
+            }
+        }
+    }
 
     println!("[4/5] Verifying cloned identity (local)...");
     let keys = client.get_public_keys()?;
