@@ -43,12 +43,9 @@ while read -r name version commit url; do
     done
 
     if [ "$name" = aws-nitro-enclaves-nsm-api ]; then
-        # Upstream v0.4.0 does not ship a Cargo.lock. Resolve it once for this
-        # build/cache, build against it, and preserve it in the image provenance.
-        # Other dependency sources are pinned by immutable commits above.
-        if [ ! -f "$source_dir/Cargo.lock" ]; then
-            (cd "$source_dir" && cargo generate-lockfile)
-        fi
+        # Upstream v0.4.0 has no lockfile; use our resolved, checked-in lock
+        # without modifying the SDK or its dependency source code.
+        cp "$script_dir/swap-kms-nsm.Cargo.lock" "$source_dir/Cargo.lock"
         # An explicit SONAME permits the runtime to load libnsm from its default
         # library directory instead of embedding this build prefix in DT_NEEDED.
         (cd "$source_dir" && CARGO_TARGET_DIR="$source_dir/target" cargo rustc \
@@ -69,8 +66,20 @@ while read -r name version commit url; do
     if [ "$name" = aws-c-io ]; then
         set -- "$@" -DUSE_VSOCK=ON
     fi
+    if [ "$name" = aws-nitro-enclaves-sdk-c ]; then
+        # GCC 10 diagnoses an upstream allocation-failure cleanup path in
+        # rest.c. Keep the SDK source unchanged and retain the warning; this
+        # exception is scoped to this diagnostic in the SDK, not our helper.
+        set -- "$@" -DCMAKE_C_FLAGS=-Wno-error=maybe-uninitialized
+    fi
     cmake -GNinja -S "$source_dir" -B "$build_dir/build/$name" "$@"
     cmake --build "$build_dir/build/$name" --parallel "$jobs" --target install
+    if [ "$name" = aws-lc ]; then
+        # The distro Go tool may expand go.sum while running code generators.
+        # It is generated checksum metadata; retain the pinned upstream file
+        # so a second build of this cache verifies the same clean source tree.
+        git -C "$source_dir" restore --source=HEAD -- go.sum
+    fi
 done < "$manifest"
 
 cp "$manifest" "$prefix/share/swap-kms/dependencies.tsv"

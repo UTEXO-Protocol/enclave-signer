@@ -4,6 +4,7 @@
 #include <aws/nitro_enclaves/internal/cms.h>
 #include <aws/common/encoding.h>
 #include <aws/io/stream.h>
+#include <aws/io/channel_bootstrap.h>
 #include <json-c/json.h>
 
 #include <ctype.h>
@@ -18,6 +19,25 @@
 #define MESSAGE_LIMIT (64 * 1024)
 #define CIPHERTEXT_LIMIT 6144
 #define SEED_BYTES 64
+
+/* This SDK releases its bootstrap immediately after connecting. With its
+ * pinned CRT, a peer closing HTTP can then tear down the event loop before
+ * kms_client_destroy releases the connection. Keep a reference until that
+ * release; all creation, transport and destruction still use official APIs.
+ * This one-shot process creates exactly one KMS client. */
+static struct aws_client_bootstrap *retained_bootstrap;
+
+struct aws_client_bootstrap *__real_aws_client_bootstrap_new(
+    struct aws_allocator *allocator, const struct aws_client_bootstrap_options *options);
+
+struct aws_client_bootstrap *__wrap_aws_client_bootstrap_new(
+    struct aws_allocator *allocator, const struct aws_client_bootstrap_options *options) {
+    struct aws_client_bootstrap *bootstrap = __real_aws_client_bootstrap_new(allocator, options);
+    if (bootstrap) {
+        retained_bootstrap = aws_client_bootstrap_acquire(bootstrap);
+    }
+    return bootstrap;
+}
 
 struct input {
     struct json_object *json;
@@ -420,6 +440,7 @@ int main(int argc, char **argv) {
         }
     }
     aws_nitro_enclaves_kms_client_destroy(client);
+    aws_client_bootstrap_release(retained_bootstrap);
     aws_nitro_enclaves_kms_client_config_destroy(config);
     aws_string_destroy(region);
     aws_string_destroy_secure(access_key);

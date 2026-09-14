@@ -26,18 +26,23 @@ No AWS source is patched. Credentials and sensitive results cross a bounded
 stdin/stdout pipe; they are not command-line arguments or process environment.
 See [the helper](../enclave/kms-tool) and [build script](../build/build-swap-kms-tool.sh).
 
+The adapter retains one reference to the SDK's CRT bootstrap until the KMS
+client is destroyed. This prevents a closed HTTP connection from destroying
+its event loop before connection cleanup with the pinned SDK/CRT versions.
+A linker wrapper adds that reference through the official bootstrap APIs;
+it leaves the SDK's transport, cryptography, and normal releases unchanged.
+
 [The dependency manifest](../build/swap-kms-dependencies.tsv) pins every upstream
 source to an immutable Git commit matching AWS's build. Both swap Dockerfiles
 build static SDK/CRT libraries and ship the helper, `libnsm.so`, CA certificates,
 and provenance under `/usr/share/swap-kms`. The builder uses glibc 2.31, older
 than the AL2023 runtime's 2.34. Mint/burn images do not build or ship this helper.
 
-NSM v0.4.0 does not publish a Cargo lockfile. Its Rust dependencies are resolved
-once per fresh build/cache, built with that lock, and the resulting
-`nsm-Cargo.lock` is included in the image provenance. A checked-in NSM lockfile
-is still needed before claiming byte-for-byte reproducibility across fresh
-builds; preserve the resolved lock with release artifacts. The main Rust
-workspace continues to use its checked-in `Cargo.lock` with `--locked`.
+NSM v0.4.0 does not publish a Cargo lockfile. The build supplies our checked-in
+[`swap-kms-nsm.Cargo.lock`](../build/swap-kms-nsm.Cargo.lock), builds with
+`--locked`, and includes that lock as `nsm-Cargo.lock` in the image provenance.
+The main Rust workspace also continues to use its checked-in `Cargo.lock`
+with `--locked`.
 
 ## Storage and trust boundaries
 

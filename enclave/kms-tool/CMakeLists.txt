@@ -12,6 +12,7 @@ find_package(LibJsonC REQUIRED)
 find_package(aws-nitro-enclaves-sdk-c CONFIG REQUIRED)
 
 add_executable(swap-kms-tool main.c)
+target_link_options(swap-kms-tool PRIVATE "-Wl,--wrap=aws_client_bootstrap_new")
 target_compile_features(swap-kms-tool PRIVATE c_std_11)
 target_compile_options(swap-kms-tool PRIVATE -Wall -Wextra -Werror -Wpedantic)
 target_include_directories(swap-kms-tool PRIVATE "${NITRO_SDK_SOURCE_DIR}/include")
