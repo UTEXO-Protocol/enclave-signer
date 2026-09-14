@@ -1527,7 +1527,22 @@ fn handle_get_clone(state: &EnclaveState, req: GetCloneRequest) -> Result<Enclav
         )));
     }
 
-    // 2. Verify the requester attestation chain + PCRs. `None` for the
+    // 2. Digest authenticity: HMAC(donor_secret, encryption_pubkey) must
+    //    match. Proves the caller holds the operator's cloning secret. This
+    //    gate uses only cheap wire values, so it runs BEFORE the expensive
+    //    attestation verification below: an unauthenticated caller is rejected
+    //    without tying up a worker on certificate-chain / COSE-signature work
+    //    (F03-AF-20). The pubkey/digest bindings (steps 4-5) still tie these
+    //    same wire values to the NSM-signed attestation, so moving this up
+    //    loosens nothing.
+    state.with_donor_cloning_secret(|secret| {
+        if !cloning::verify_cloning_digest(secret, &req_encryption_pk, &req_digest) {
+            return Err(EnclaveError::DigestMismatch);
+        }
+        Ok(())
+    })?;
+
+    // 3. Verify the requester attestation chain + PCRs. `None` for the
     //    expected nonce: we have not seen the requester's nonce before,
     //    so freshness is enforced by the replay guard once the binding and
     //    authenticity checks below have passed.
@@ -1535,14 +1550,14 @@ fn handle_get_clone(state: &EnclaveState, req: GetCloneRequest) -> Result<Enclav
     let verified =
         attestation::verify_peer_attestation(&req.requester_attestation, &expected_pcrs, None)?;
 
-    // 3. Pubkey binding: the attestation's `public_key` field must equal
+    // 4. Pubkey binding: the attestation's `public_key` field must equal
     //    the one the parent put on the wire. Otherwise the parent could
     //    have swapped it for a key it controls.
     if verified.enclave_pubkey.as_slice() != req_encryption_pk {
         return Err(EnclaveError::PubkeyMismatch);
     }
 
-    // 4. Digest binding: the attestation's `user_data` must equal the
+    // 5. Digest binding: the attestation's `user_data` must equal the
     //    digest on the wire - NSM-signed, so parent-proof.
     let user_data = verified.user_data.as_deref().ok_or_else(|| {
         EnclaveError::Attestation("requester attestation missing user_data (cloning digest)".into())
@@ -1550,15 +1565,6 @@ fn handle_get_clone(state: &EnclaveState, req: GetCloneRequest) -> Result<Enclav
     if user_data != req_digest {
         return Err(EnclaveError::DigestMismatch);
     }
-
-    // 5. Digest authenticity: HMAC(donor_secret, encryption_pubkey) must
-    //    match. Proves the requester was issued by the same operator.
-    state.with_donor_cloning_secret(|secret| {
-        if !cloning::verify_cloning_digest(secret, &req_encryption_pk, &req_digest) {
-            return Err(EnclaveError::DigestMismatch);
-        }
-        Ok(())
-    })?;
 
     // 6. Reserve the nonce from the verified document (replay-check + record
     //    with rollback-on-drop), only after the checks above have passed so an
