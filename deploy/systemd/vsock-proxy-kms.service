@@ -5,6 +5,7 @@ After=network-online.target nitro-enclaves-allocator.service
 
 [Service]
 Type=simple
+DynamicUser=yes
 # Replace REPLACE_AWS_REGION here and in vsock-proxy-kms.yaml. TLS is
 # authenticated inside the enclave; this proxy only forwards encrypted bytes.
 # Do not use an HTTP proxy, TLS termination, or the EVM nginx shim for KMS.
@@ -15,6 +16,15 @@ NoNewPrivileges=yes
 ProtectSystem=strict
 ProtectHome=yes
 PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+LockPersonality=yes
+RestrictSUIDSGID=yes
+CapabilityBoundingSet=
+UMask=0077
+TasksMax=32
+MemoryMax=128M
 RestrictAddressFamilies=AF_VSOCK AF_INET AF_INET6 AF_UNIX
 
 [Install]

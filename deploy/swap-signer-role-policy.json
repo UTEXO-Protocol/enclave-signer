@@ -1,0 +1,47 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "DenyActionsOutsideDedicatedSeedRole",
+      "Effect": "Deny",
+      "NotAction": ["kms:GenerateDataKey", "kms:Decrypt", "s3:GetObject", "s3:PutObject", "s3:ListBucket"],
+      "Resource": "*"
+    },
+    {
+      "Sid": "AllowOnlyAttestedSeedKey",
+      "Effect": "Allow",
+      "Action": ["kms:GenerateDataKey", "kms:Decrypt"],
+      "Resource": "REPLACE_KMS_KEY_ARN"
+    },
+    {
+      "Sid": "DenyOtherKmsKeys",
+      "Effect": "Deny",
+      "Action": ["kms:GenerateDataKey", "kms:Decrypt"],
+      "NotResource": "REPLACE_KMS_KEY_ARN"
+    },
+    {
+      "Sid": "AllowOnlySeedCiphertext",
+      "Effect": "Allow",
+      "Action": ["s3:GetObject", "s3:PutObject"],
+      "Resource": "arn:aws:s3:::REPLACE_SEED_BUCKET/REPLACE_SEED_OBJECT_KEY"
+    },
+    {
+      "Sid": "DenyOtherObjects",
+      "Effect": "Deny",
+      "Action": ["s3:GetObject", "s3:PutObject"],
+      "NotResource": "arn:aws:s3:::REPLACE_SEED_BUCKET/REPLACE_SEED_OBJECT_KEY"
+    },
+    {
+      "Sid": "AllowMissingSeedDetection",
+      "Effect": "Allow",
+      "Action": "s3:ListBucket",
+      "Resource": "arn:aws:s3:::REPLACE_SEED_BUCKET"
+    },
+    {
+      "Sid": "DenyOtherBucketListing",
+      "Effect": "Deny",
+      "Action": "s3:ListBucket",
+      "NotResource": "arn:aws:s3:::REPLACE_SEED_BUCKET"
+    }
+  ]
+}

@@ -48,9 +48,32 @@
         "s3:PutBucketVersioning",
         "s3:PutLifecycleConfiguration",
         "s3:PutBucketObjectLockConfiguration",
+        "s3:PutBucketPublicAccessBlock",
+        "s3:PutBucketOwnershipControls",
+        "s3:PutBucketAcl",
+        "s3:PutEncryptionConfiguration",
+        "s3:PutReplicationConfiguration",
         "s3:DeleteBucket"
       ],
       "Resource": "arn:aws:s3:::REPLACE_SEED_BUCKET"
+    },
+    {
+      "Sid": "DenySignerObjectAccessAndRetentionChanges",
+      "Effect": "Deny",
+      "Principal": { "AWS": "arn:aws:iam::REPLACE_ACCOUNT_ID:role/REPLACE_SIGNER_ROLE" },
+      "Action": [
+        "s3:PutObjectAcl",
+        "s3:PutObjectVersionAcl",
+        "s3:UpdateObjectEncryption",
+        "s3:PutObjectRetention",
+        "s3:PutObjectLegalHold",
+        "s3:BypassGovernanceRetention",
+        "s3:PutObjectTagging",
+        "s3:PutObjectVersionTagging",
+        "s3:DeleteObjectTagging",
+        "s3:DeleteObjectVersionTagging"
+      ],
+      "Resource": "arn:aws:s3:::REPLACE_SEED_BUCKET/REPLACE_SEED_OBJECT_KEY"
     },
     {
       "Sid": "DenyInsecureTransport",

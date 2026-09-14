@@ -28,7 +28,8 @@ LockPersonality=yes
 RestrictSUIDSGID=yes
 CapabilityBoundingSet=
 UMask=0077
-TasksMax=32
+# Main thread + 16 connection workers + 16 bounded AWS-operation workers.
+TasksMax=40
 MemoryMax=256M
 
 [Install]

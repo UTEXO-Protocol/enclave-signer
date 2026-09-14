@@ -2,6 +2,7 @@
 
 import base64
 import concurrent.futures
+import errno
 import importlib.util
 import io
 import json
@@ -11,6 +12,7 @@ import socket
 import struct
 import sys
 import threading
+import time
 import unittest
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
@@ -111,21 +113,11 @@ class SeedBrokerTests(unittest.TestCase):
         self.assertEqual(self.create(b"loser"), {"ciphertext": "ZXhpc3Rpbmcgd2lubmVy"})
         self.assertEqual(self.s3.value, b"existing winner")
 
-    def test_conflict_409_without_winner_retries_conditional_create(self):
-        original_put = self.s3.put_object
-        self.s3.put_object = Mock(side_effect=[aws_error("ConditionalRequestConflict", 409), {}])
-
-        def get_object(**kwargs):
-            if self.s3.put_object.call_count == 1:
-                raise aws_error("NoSuchKey", 404)
-            original_put(Bucket="seed-bucket", Key="swaps/seed.kms", Body=b"candidate", IfNoneMatch="*")
-            return {"Body": io.BytesIO(self.s3.value), "ContentLength": len(self.s3.value)}
-
-        self.s3.get_object = Mock(side_effect=get_object)
-        with patch.object(broker_module.time, "sleep"):
-            self.assertEqual(self.create(b"candidate"), {"ciphertext": "Y2FuZGlkYXRl"})
-        self.assertEqual(self.s3.put_object.call_count, 2)
-        self.assertTrue(all(call.kwargs["IfNoneMatch"] == "*" for call in self.s3.put_object.call_args_list))
+    def test_conflict_without_winner_fails_without_multiplying_aws_timeouts(self):
+        self.s3.put_object = Mock(side_effect=aws_error("ConditionalRequestConflict", 409))
+        self.assertEqual(self.create(b"candidate"), {"error": "storage_conflict"})
+        self.s3.put_object.assert_called_once()
+        self.assertEqual(len(self.s3.gets), 1)
 
     def test_conflict_409_with_winner_reads_winner_without_new_write(self):
         self.s3.value = b"winner"
@@ -137,7 +129,59 @@ class SeedBrokerTests(unittest.TestCase):
         self.s3.put_object = Mock(side_effect=aws_error("ConditionalRequestConflict", 409))
         with patch.object(broker_module.time, "sleep"):
             self.assertEqual(self.create(b"candidate"), {"error": "storage_conflict"})
-        self.assertEqual(self.s3.put_object.call_count, broker_module.CREATE_ATTEMPTS)
+        self.assertEqual(self.s3.put_object.call_count, 1)
+
+    def test_timeout_returns_before_slow_put_and_retry_recovers_late_commit(self):
+        entered, finish, done = threading.Event(), threading.Event(), threading.Event()
+        original_put = self.s3.put_object
+
+        def slow_put(**kwargs):
+            entered.set()
+            finish.wait(timeout=3)
+            original_put(**kwargs)
+            done.set()
+
+        self.s3.put_object = slow_put
+        try:
+            start = time.monotonic()
+            with patch.object(broker_module, "OPERATION_TIMEOUT_SECONDS", 0.03):
+                self.assertEqual(self.create(b"late committed"), {"error": "operation_timeout"})
+            self.assertLess(time.monotonic() - start, 0.5)
+            self.assertTrue(entered.is_set())
+            self.assertIsNone(self.s3.value)
+            finish.set()
+            self.assertTrue(done.wait(timeout=1))
+            self.assertEqual(self.request("load"), {"ciphertext": "bGF0ZSBjb21taXR0ZWQ="})
+        finally:
+            finish.set()
+
+    def test_timed_out_workers_keep_capacity_until_aws_actually_finishes(self):
+        finish, done = threading.Event(), threading.Event()
+
+        def stalled(_request):
+            try:
+                finish.wait(timeout=3)
+                return {"ciphertext": None}
+            finally:
+                done.set()
+
+        self.broker.operation_slots = threading.BoundedSemaphore(1)
+        self.broker._response = Mock(side_effect=stalled)
+        try:
+            with patch.object(broker_module, "OPERATION_TIMEOUT_SECONDS", 0.03):
+                self.assertEqual(self.request("load"), {"error": "operation_timeout"})
+                self.assertEqual(self.request("load"), {"error": "broker_busy"})
+            self.broker._response.assert_called_once()
+        finally:
+            finish.set()
+            self.assertTrue(done.wait(timeout=1))
+
+    def test_sdk_has_no_automatic_retries(self):
+        session = Mock()
+        broker_module.SeedBroker(self.config, session=session)
+        config = session.client.call_args.kwargs["config"]
+        self.assertEqual(config.retries["total_max_attempts"], 1)
+        self.assertEqual((config.connect_timeout, config.read_timeout), (1, 2))
 
     def test_successful_put_is_not_accepted_when_readback_fails(self):
         self.s3.get_object = Mock(side_effect=aws_error("AccessDenied", 403))
@@ -287,6 +331,26 @@ class ProtocolTests(unittest.TestCase):
         connection.recv.assert_not_called()
         broker.response.assert_not_called()
 
+    def test_transient_accept_failure_is_sanitized_and_does_not_stop_listener(self):
+        connection = Mock()
+        listener = Mock()
+        listener.accept.side_effect = [OSError("secret must not be logged"), (connection, (20, 1234)), KeyboardInterrupt]
+        broker = Mock(config=SimpleNamespace(allowed_cids=frozenset({16})))
+        with self.assertLogs(broker_module.LOGGER, level="WARNING") as logs:
+            with patch.object(broker_module.time, "sleep") as sleep:
+                with self.assertRaises(KeyboardInterrupt):
+                    broker_module.serve(listener, broker)
+        connection.close.assert_called_once()
+        sleep.assert_called_once_with(0.1)
+        self.assertNotIn("secret", "".join(logs.output))
+
+    def test_broken_listener_exits_for_supervisor_restart(self):
+        listener = Mock()
+        listener.accept.side_effect = OSError(errno.EBADF, "bad descriptor")
+        with self.assertRaises(OSError):
+            broker_module.serve(listener, Mock())
+        listener.accept.assert_called_once()
+
     def test_total_request_deadline_prevents_slow_stream_from_extending_timeout(self):
         connection = Mock()
         connection.recv.return_value = b"x"
@@ -333,6 +397,11 @@ class ConfigurationTests(unittest.TestCase):
                 with patch.dict(os.environ, environment, clear=True):
                     with self.assertRaisesRegex(broker_module.BrokerError, "invalid_configuration"):
                         broker_module.Config.from_environment()
+
+    def test_port_cannot_diverge_from_measured_enclave_forwarder(self):
+        with patch.dict(os.environ, dict(self.environment, SWAP_KMS_BROKER_PORT="9000"), clear=True):
+            with self.assertRaisesRegex(broker_module.BrokerError, "invalid_configuration"):
+                broker_module.Config.from_environment()
 
 
 if __name__ == "__main__":

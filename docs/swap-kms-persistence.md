@@ -14,8 +14,11 @@ signing algorithms are unchanged; no transaction uses KMS `Sign`.
 
 The swap enclave invokes `/usr/local/bin/swap-kms-tool`, a small adapter linked
 against the unmodified [AWS Nitro Enclaves SDK for C](https://github.com/aws/aws-nitro-enclaves-sdk-c/tree/cd61b6187c8b20867ba4368d1ae62c5790c0269a).
-It uses the same SDK and dependency versions as AWS's `kmstool_enclave_cli`:
-AWS-LC, s2n-tls, AWS Common Runtime libraries, json-c, and libnsm. The SDK handles
+It uses the same official SDK and library codebases as AWS's `kmstool_enclave_cli`:
+AWS-LC, s2n-tls, AWS Common Runtime libraries, json-c, and libnsm. The library
+versions are deliberately newer than the upstream sample Dockerfile to include
+published security fixes: AWS-LC 5.8.0, s2n-tls 1.7.10, CRT libraries 1.0.0,
+json-c 0.19 and NSM 0.5.2. The SDK handles
 AWS request signing, TLS, recipient-key generation, NSM attestation, and CMS
 recipient-envelope decryption. Rust retains seed persistence and signing logic.
 
@@ -40,12 +43,12 @@ A linker wrapper adds that reference through the official bootstrap APIs;
 it leaves the SDK's transport, cryptography, and normal releases unchanged.
 
 [The dependency manifest](../build/swap-kms-dependencies.tsv) pins every upstream
-source to an immutable Git commit matching AWS's build. Both swap Dockerfiles
+source to an immutable reviewed Git commit. Both swap Dockerfiles
 build static SDK/CRT libraries and ship the helper, `libnsm.so`, CA certificates,
 and provenance under `/usr/share/swap-kms`. The builder uses glibc 2.31, older
 than the AL2023 runtime's 2.34. Mint/burn images do not build or ship this helper.
 
-NSM v0.4.0 does not publish a Cargo lockfile. The build supplies our checked-in
+The NSM build uses our checked-in
 [`swap-kms-nsm.Cargo.lock`](../build/swap-kms-nsm.Cargo.lock), builds with
 `--locked`, and includes that lock as `nsm-Cargo.lock` in the image provenance.
 The main Rust workspace also continues to use its checked-in `Cargo.lock`
@@ -149,6 +152,19 @@ credentials through the normal provider chain. Do not place static access keys
 in the EIF. The broker unit's `DynamicUser` and `ProtectHome` settings intentionally
 do not depend on a login user's AWS profile.
 
+**An allowlisted CID receives the full instance-role credentials.** CIDs are
+reusable addresses, not authenticated image identities; another enclave assigned
+that CID can request those credentials. The broker cannot narrow credentials
+after obtaining them. Apply [the dedicated signer-role policy](../deploy/swap-signer-role-policy.json)
+as an inline policy on the exact signer role. Its explicit denies restrict the
+role to generation/decryption at one key, read/create at one object, and listing
+one dedicated bucket even if a broader identity policy is accidentally attached.
+It also denies role assumption, IAM changes and account-wide S3 protection
+changes. Do not reuse a role that needs unrelated SSM, deployment or application
+permissions. Review every policy and trust relationship on this role using an
+administrator identity. KMS recipient attestation remains the image authorization
+boundary; the CID allowlist only reduces local access to this narrow role.
+
 | Enclave path | Parent vsock | Destination |
 | --- | --- | --- |
 | SDK helper, direct vsock | CID 3, port `8003` | Blind TLS relay to `kms.<region>.amazonaws.com:443` |
@@ -157,13 +173,20 @@ do not depend on a login user's AWS profile.
 Keep the KMS relay separate from the existing EVM RPC/nginx path. Do not
 terminate KMS TLS on the parent. This endpoint template targets the standard
 AWS commercial partition; do not assume it supports other endpoint suffixes.
+Ports 8003/8004 are reserved for the swap custody services. A swap build with
+optional Helios uses execution/consensus defaults 8005/8006 and rejects an
+explicit Helios override colliding with custody ports. Non-swap Helios defaults
+remain 8003/8004. The broker rejects a
+`SWAP_KMS_BROKER_PORT` override other than `8004`, matching the measured forwarder.
 
 ## KMS and S3 policies
 
-Start with [the key policy template](../deploy/swap-kms-key-policy.json) and
-[the bucket policy template](../deploy/swap-seed-bucket-policy.json). Replace
-every `REPLACE_*` value before applying them. These files are templates; the
-repository does not create or update AWS resources automatically.
+Use [the deployment validator](../deploy/validate-swap-kms-deployment.py) to render
+and check [the key policy](../deploy/swap-kms-key-policy.json),
+[the bucket policy](../deploy/swap-seed-bucket-policy.json), and
+[the signer-role policy](../deploy/swap-signer-role-policy.json) against approved
+release artifacts. Do not apply the `REPLACE_*` templates directly. The tool
+never creates or changes AWS resources.
 
 The key template names separate key administrator and signer IAM roles. The
 administrator must exist and retain policy-update access; do not use the
@@ -184,14 +207,23 @@ APIs, and signer policy/grant changes. The latter prevent a parent from using
 conditions on both operations; see [Nitro Enclaves condition keys](https://docs.aws.amazon.com/kms/latest/developerguide/conditions-nitro-enclave.html).
 Never authorize all-zero debug-mode PCRs.
 
-Use a dedicated private S3 general purpose bucket, enable versioning and Block
-Public Access, and exclude seed objects from lifecycle expiration. The bucket
+Use a dedicated private S3 general purpose bucket. **Versioning and all four
+Block Public Access settings must be enabled; Object Ownership must be
+`BucketOwnerEnforced` (ACLs disabled).** Exclude seed objects from lifecycle
+expiration and archive transitions that make recovery unavailable. The bucket
 template grants object access only at the configured key and requires
 `If-None-Match: *` for every write there. It denies object and version deletion
-and prevents the signer from changing the bucket's protection settings. A
+and denies signer changes to bucket policy, versioning, lifecycle, Object Lock,
+Block Public Access, ownership, ACLs, default encryption and replication. Object
+ACL/version ACL, storage re-encryption, retention, legal-hold and tag changes are also denied to the
+signer; changing a tag must not make a protected seed match an expiration rule. A
 bucket-wide `ListBucket` permission lets a missing seed return `404` instead of
 an ambiguous `403`; this is why the example uses a dedicated bucket. See
 [GetObject permissions](https://docs.aws.amazon.com/AmazonS3/latest/API/API_GetObject.html).
+The bucket API's `PutPublicAccessBlock` permission is named
+`s3:PutBucketPublicAccessBlock`, including deletion of that setting; account-level
+settings are governed separately. See the [S3 API permission mapping](https://docs.aws.amazon.com/AmazonS3/latest/userguide/using-with-s3-policy-actions.html)
+and [Object Ownership guidance](https://docs.aws.amazon.com/AmazonS3/latest/userguide/about-object-ownership.html).
 
 Concurrent initializers adopt the ciphertext committed by the first successful
 conditional write. Versioning alone does not enforce immutability: a delete
@@ -204,8 +236,71 @@ and [bucket-policy enforcement](https://docs.aws.amazon.com/AmazonS3/latest/user
 The S3 object is already encrypted with KMS. Default S3 SSE-S3 can provide its
 additional storage encryption. Do not configure S3 SSE-KMS using this
 attestation-only key: S3 cannot supply the enclave recipient attestation. If
-organization policy requires SSE-KMS, use a separate storage key and separately
-scoped S3 permissions.
+organization policy requires SSE-KMS, it needs a separately reviewed storage-key
+and IAM design. The supplied role policy and validator intentionally support
+SSE-S3: they deny KMS access to any second key. Do not expand the attestation-only
+key policy to make S3 encryption work or silently bypass the deployment gate.
+
+### Bind policy approval to the actual EIF
+
+Create an independent release approval from
+[`swap-kms-approval.example.json`](../deploy/swap-kms-approval.example.json).
+Record the approver and review reference, real account/roles/key/context/storage,
+and the SHA256, PCR0 and paths for every approved EIF and its `PCR.json`. A
+release reviewer must inspect the source, build provenance and public settings
+before signing off on these values. Do not generate an approval from an arbitrary
+image just to make validation pass. Hashes cannot establish that an image was
+reviewed, and a validator cannot identify every possible fixture key.
+
+Run with trusted `nitro-cli` 1.4.5 or newer on the deployment/release host:
+
+```bash
+python3 deploy/validate-swap-kms-deployment.py \
+  --approval releases/swap-approval.json --output-dir releases/policies-bootstrap
+```
+
+The tool rereads each actual EIF with `nitro-cli describe-eif`, checks CRC and
+any image signature, recomputes the whole-file SHA256, compares actual PCR0/1/2
+with the recorded build measurements and approved PCR0, and checks its Docker
+environment metadata for the exact KMS key, region, seed ID, network, creation
+mode and restore identity. Whole-file digest approval also binds the metadata;
+Docker metadata alone is not proof of a trusted build. Placeholders, zero/debug
+or obvious fixture PCRs, known fixture accounts/keys, unexpected KMS settings,
+static credentials and inconsistent restore identities fail validation.
+[AWS describes the actual-EIF measurements returned by this command](https://docs.aws.amazon.com/enclaves/latest/user/cmd-nitro-describe-eif.html).
+
+Use `phase: "bootstrap"` with one bootstrap image for the first initialization;
+`phase: "transition"` with that bootstrap and one or more restore images while
+verifying recovery; and `phase: "restore"` with restore images only afterward.
+The renderer keeps the Allow and Deny PCR lists identical in scope. In restore
+phase it removes generation permission, adds an unconditional generation deny,
+and removes every bootstrap PCR. Multiple restore images can overlap during an
+upgrade only when their expected public identity is identical.
+
+Apply the reviewed key policy to the approval's exact KMS key ARN, the bucket
+policy to its exact bucket, and the role policy to its exact signer role through
+your normal administrator deployment process. Fetch those effective policy
+documents back into files with the same three filenames and revalidate them:
+
+```bash
+python3 deploy/validate-swap-kms-deployment.py \
+  --approval releases/swap-approval.json --policy-dir releases/applied-policies
+```
+
+This rejects extra grants, changed principals/context/PCRs and omitted denials
+in the supplied policy documents. It does not query AWS, inspect unrelated IAM
+policies or establish that downloaded files came from the right AWS resources;
+retain the AWS resource IDs and administrator verification with the release.
+Before funding a signer, also run `--production-ready --live-evidence PATH`
+against the final restore approval and applied policy documents. Evidence must
+have the same `approval_reference` and a `checks` object containing each of
+`approved_bootstrap_and_restore`, `restore_identity_after_restart`,
+`missing_recipient_denied`, `unapproved_pcr_denied`, `debug_pcr_denied`,
+`wrong_context_denied`, `overwrite_and_delete_denied`, and
+`independent_backup_recovery`. Each value is
+`{"passed": true, "evidence": "reference to retained AWS/Nitro test records"}`.
+These references are reviewed live-test evidence, not a substitute for running
+the tests. The tool requires every item and restore-only policy authority.
 
 ## Parent installation
 
@@ -213,7 +308,7 @@ On the Nitro parent, from a checked-out release of this repository:
 
 ```bash
 sudo install -d -m 0755 /opt/utexo-swap-kms /etc/utexo /etc/nitro_enclaves
-sudo python3 -m venv /opt/utexo-swap-kms/venv
+sudo python3.11 -m venv /opt/utexo-swap-kms/venv
 sudo /opt/utexo-swap-kms/venv/bin/pip install -r deploy/requirements-swap-kms.txt
 sudo install -m 0644 deploy/swap-seed-broker.py /opt/utexo-swap-kms/swap-seed-broker.py
 sudo install -m 0644 deploy/systemd/utexo-swap-seed-broker.service /etc/systemd/system/
@@ -222,6 +317,10 @@ sudo install -m 0644 deploy/systemd/vsock-proxy-kms.yaml /etc/nitro_enclaves/
 ```
 
 Create the broker environment file shown above with mode `0600`, owned by root.
+The broker dependency lock requires Python 3.10 or newer; install a supported
+Python version (the example uses 3.11). Pip installs the complete exact-version,
+SHA256-verified wheel lock, including transitive dependencies. Update that lock
+only together with broker and custody E2E validation.
 Replace `REPLACE_AWS_REGION` in **both** installed KMS proxy files with the EIF's
 region. Ensure the installed `vsock-proxy` path is `/usr/bin/vsock-proxy` or
 adjust the unit for that host. Permit outbound HTTPS to regional KMS and S3,
@@ -237,6 +336,21 @@ deployment script does not install this dedicated swap configuration. Missing
 or invalid measured configuration, including a missing restore address pin,
 prevents swap process startup. An unavailable broker/KMS/storage service makes
 initialization fail; the operator can restore the service and retry `init`.
+Both supplied services run as dynamic unprivileged users with empty capability
+sets. Ports 8003/8004 are unprivileged; do not run the relay as root to work around
+an installation or file-read-permission problem.
+
+Initialization has one aggregate custody deadline of 25 seconds, within the
+30-second request budget. Each broker exchange is capped at eight seconds and
+each helper invocation at twelve seconds, shrinking to the remaining aggregate
+time. The broker's AWS-operation response deadline is seven seconds. Each
+conditional create performs at most one PUT and one GET, with no hidden SDK or
+application retry loop. A stalled operation retains its bounded worker slot
+until it actually exits, preventing retries from creating unlimited workers.
+Timeouts leave the enclave uninitialized. A conditional PUT already in flight
+can still commit after a timeout; retry `init` after connectivity recovers so the
+next load recovers that durable winner. Never delete the object or generate a
+replacement seed to resolve a timeout.
 
 ## Bootstrap, restart, and upgrade
 
@@ -246,9 +360,9 @@ initialization fail; the operator can restore the service and retry `init`.
    produces different public keys. Plan an explicit signer rotation if an
    existing deployment must move from ephemeral keys.
 2. Build the RGB swap EIF with public settings and `SWAP_KMS_ALLOW_CREATE=1`.
-   Record `build/PCR.json`. Install the broker and relay, then authorize this
-   bootstrap PCR0 in the key policy. Until the restore image is available, use
-   the bootstrap PCR0 for both measurement placeholders.
+   Record the EIF, SHA256 and `build/PCR.json`. Install the broker and relay, then
+   approve and validate the `bootstrap` phase policies before authorizing that
+   measured image. At this phase only the bootstrap PCR0 permits decryption.
 3. Run the measured production EIF without debug mode. Issue
    `utexo-bridge-parent-cli --addr vsock://18:5000 init`, with the actual CID.
    Supply no seed, mnemonic, or cloning secret. Initialization must commit a
@@ -258,15 +372,15 @@ initialization fail; the operator can restore the service and retry `init`.
    do not rely on the parent's success response as proof of durable storage.
 4. Build the normal image with the same key ARN, region, seed ID, and network,
    `SWAP_KMS_ALLOW_CREATE=0`, and the verified EVM address in
-   `SWAP_KMS_EXPECTED_EVM_ADDRESS`. Record its PCR0 and update **both** the allow
-   and deny measurement lists in the KMS policy before starting it. Configuration
+   `SWAP_KMS_EXPECTED_EVM_ADDRESS`. Approve and validate the `transition` phase
+   policies with both actual EIFs before starting it. Configuration
    changes, including the creation flag and address pin, change PCR0.
 5. Start the normal EIF and issue `init`. Verify that all public keys match the
    bootstrap result. Restart the enclave, repeat `init`, and compare again.
-   Finish bootstrap by removing `AllowBootstrapGenerateDataKey`, removing the
-   bootstrap PCR0 from both decryption measurement lists, and replacing
-   `DenyGenerateDataKeyOutsideBootstrapImage` with an unconditional signer
-   `kms:GenerateDataKey` deny. Retire the bootstrap EIF.
+   Finish bootstrap by approving, validating and applying the `restore` phase
+   policies. This removes the bootstrap PCR0 and generation allow and installs
+   an unconditional signer generation deny. Retire the bootstrap EIF, retain
+   live validation evidence, and pass the production gate before funding.
 
 Keep bootstrap and restore artifacts at distinct locations (for example,
 `OUT_DIR=build/swap-bootstrap` and `OUT_DIR=build/swap-restore`). The EIF workflow
@@ -275,7 +389,7 @@ or separately managed publication paths. Changing repository variables at the
 same SHA must not overwrite an already published image or PCR manifest.
 
 For each subsequent code/configuration upgrade, build a restore-only EIF,
-authorize its new PCR0 in both KMS decryption statements, verify recovery of
+approve and validate its PCR0 in a restore-only policy rollout, verify recovery of
 the existing identity, and retire the old measurement after rollout. Preserve
 the key ARN, seed ID, network context, and ciphertext. KMS automatic rotation
 under the same key is separate from changing to a different key ARN; moving
@@ -286,6 +400,36 @@ requests are rejected, so a live donor enclave and cloning secret are no longer
 needed for this flow. Persistence preserves signing keys only; it does not
 introduce cross-instance coordination for application state or authorize
 multiple replicas to sign concurrently.
+
+### Recover a poisoned bootstrap before funding
+
+The broker treats ciphertext as opaque. An allowlisted caller or a compromised
+instance role can win the first conditional write with unusable data. KMS and
+the enclave reject it, but the object intentionally cannot be overwritten or
+deleted by the signer. This is an availability and deployment-control boundary.
+Only assign bootstrap CIDs to the reviewed image, keep the dedicated role off
+other workloads, and independently verify successful restore before registering
+or funding the public identity.
+
+If bootstrap fails on a committed blob, stop initializers and investigate with
+an independent administrator. Preserve the object/version and deployment logs;
+first distinguish a wrong key/context/policy or delayed write from invalid data.
+If the signer has **never been funded or registered**, quarantine the failed
+deployment and start a new logical seed ID, new KMS key and new dedicated bucket
+or object under fresh bootstrap/restore approvals. Keep the old object and its
+deletion protection intact, revoke the old role's access, and discard every
+public identity from the abandoned attempt. This recovers service without
+adding a permanent break-glass deletion exception.
+
+For an existing funded or registered identity, never start a new bootstrap or
+clear its object. Recover the original ciphertext/version from the independently
+verified backup with administrator incident procedures, preserve its exact key
+and context, and verify the pinned identity using a restore-only EIF. If an
+unusable primary object must remain protected, configure a separately protected
+recovery object containing the **same original ciphertext** and narrow the role
+and bucket policy accordingly. Changing the seed ID, key or expected address
+would create a different signer and is not recovery. KMS/S3 administrators remain
+trusted; the signer receives no deletion or retention-bypass privilege.
 
 ## Local development without AWS
 
@@ -316,6 +460,7 @@ deploying a funded signer:
 | Signer-role KMS calls without Recipient or with unapproved/debug PCR0 | Both generation and decryption are denied. |
 | Wrong/missing/extra encryption context and alternate KMS encryption APIs | Requests are denied. |
 | Attempted unconditional overwrite or object/version deletion | S3 denies it; original ciphertext remains. |
+| Signer changes to public access, ownership, ACLs, encryption, retention, or another AWS resource | Explicit role/bucket denies reject them. |
 | Unallowlisted enclave CID | Broker closes the connection before returning credentials. |
 | Swap clone requests | Rejected. |
 | `rgb-mint-burn` initialization, cloning, and signing regression checks | Existing behavior remains intact. |

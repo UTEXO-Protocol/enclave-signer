@@ -15,9 +15,11 @@ static AWS credentials; boto3 refreshes role credentials when needed.
 import argparse
 import base64
 import binascii
+import errno
 import json
 import logging
 import os
+import queue
 import socket
 import struct
 import threading
@@ -32,8 +34,10 @@ from botocore.exceptions import BotoCoreError, ClientError
 
 MAX_FRAME_BYTES = 65536
 MAX_CIPHERTEXT_BYTES = 6144
-CREATE_ATTEMPTS = 4
 REQUEST_TIMEOUT_SECONDS = 10
+# Fits inside the enclave's eight-second broker exchange deadline. SDK socket
+# timeouts alone cannot bound DNS, credential-provider refresh, or body trickle.
+OPERATION_TIMEOUT_SECONDS = 7
 MAX_CONNECTIONS = 16
 LOGGER = logging.getLogger("swap-seed-broker")
 
@@ -67,7 +71,9 @@ class Config:
             raise BrokerError("invalid_configuration") from None
         if (not tcp and not cids) or any(cid <= 3 or cid >= 0xFFFFFFFF for cid in cids):
             raise BrokerError("invalid_configuration")
-        if not 1 <= port <= 0xFFFFFFFF:
+        # The measured enclave forwards to this fixed port. Reject an old
+        # override rather than silently listening somewhere unreachable.
+        if port != 8004:
             raise BrokerError("invalid_configuration")
         config = cls(
             seed_id=required("SWAP_KMS_SEED_ID"),
@@ -113,18 +119,24 @@ class SeedBroker:
         # Credential resolution may initialize a provider on first use. Resolve
         # under a lock, and freeze again on every request to refresh expiring roles.
         self.credentials_lock = threading.Lock()
+        # Timed-out AWS calls cannot be cancelled safely by Python. Retain their
+        # slots until they really finish, bounding stalled workers across retries.
+        self.operation_slots = threading.BoundedSemaphore(MAX_CONNECTIONS)
         self.s3 = s3 if s3 is not None else self.session.client(
             "s3",
             region_name=config.region,
             config=AwsConfig(
-                connect_timeout=2,
-                read_timeout=5,
-                retries={"mode": "standard", "total_max_attempts": 2},
+                connect_timeout=1,
+                read_timeout=2,
+                retries={"mode": "standard", "total_max_attempts": 1},
                 max_pool_connections=MAX_CONNECTIONS,
             ),
         )
 
     def credentials(self):
+        # CID authorization grants the FULL instance role, not just this broker's
+        # S3 operations. CID reuse is not an image identity; IAM must be dedicated
+        # and least privilege. KMS independently verifies recipient attestation.
         with self.credentials_lock:
             credentials = self.session.get_credentials()
             if credentials is None:
@@ -164,30 +176,27 @@ class SeedBroker:
     def create(self, ciphertext):
         # Even the winner must return a successful GET of the committed object,
         # never its uncommitted proposal. Losing enclaves decrypt this same blob.
-        for attempt in range(CREATE_ATTEMPTS):
-            try:
-                self.s3.put_object(
-                    Bucket=self.config.bucket,
-                    Key=self.config.key,
-                    Body=ciphertext,
-                    ContentType="application/octet-stream",
-                    IfNoneMatch="*",
-                )
-            except ClientError as error:
-                status = error.response.get("ResponseMetadata", {}).get("HTTPStatusCode")
-                code = error.response.get("Error", {}).get("Code")
-                if (status, code) not in (
-                    (412, "PreconditionFailed"),
-                    (409, "ConditionalRequestConflict"),
-                ):
-                    raise BrokerError("storage_unavailable") from None
-            committed = self.load()
-            if committed is not None:
-                return committed
-            # A concurrent delete can produce a 409 or erase a newly committed
-            # key. IAM/bucket policy should prohibit deletion; retry is bounded.
-            if attempt + 1 < CREATE_ATTEMPTS:
-                time.sleep(0.05 * (2 ** attempt))
+        try:
+            self.s3.put_object(
+                Bucket=self.config.bucket,
+                Key=self.config.key,
+                Body=ciphertext,
+                ContentType="application/octet-stream",
+                IfNoneMatch="*",
+            )
+        except ClientError as error:
+            status = error.response.get("ResponseMetadata", {}).get("HTTPStatusCode")
+            code = error.response.get("Error", {}).get("Code")
+            if (status, code) not in (
+                (412, "PreconditionFailed"),
+                (409, "ConditionalRequestConflict"),
+            ):
+                raise BrokerError("storage_unavailable") from None
+        committed = self.load()
+        if committed is not None:
+            return committed
+        # No internal retry loop: a new InitializeKey starts by loading the
+        # durable winner, including any PUT committed after an earlier timeout.
         raise BrokerError("storage_conflict")
 
     def dispatch(self, request):
@@ -206,7 +215,7 @@ class SeedBroker:
             return {"ciphertext": None if ciphertext is None else encode_ciphertext(ciphertext)}
         return {"ciphertext": encode_ciphertext(self.create(decode_ciphertext(request["ciphertext"])))}
 
-    def response(self, request):
+    def _response(self, request):
         try:
             return self.dispatch(request)
         except BrokerError as error:
@@ -216,6 +225,31 @@ class SeedBroker:
         except Exception:
             # Never serialize AWS errors, SDK tracebacks, request data, or creds.
             return {"error": "internal_error"}
+
+    def response(self, request):
+        if not self.operation_slots.acquire(blocking=False):
+            LOGGER.warning("operation_capacity_exhausted")
+            return {"error": "broker_busy"}
+        result = queue.Queue(maxsize=1)
+
+        def execute():
+            try:
+                result.put(self._response(request))
+            finally:
+                self.operation_slots.release()
+
+        try:
+            threading.Thread(target=execute, daemon=True).start()
+        except Exception:
+            self.operation_slots.release()
+            return {"error": "internal_error"}
+        try:
+            return result.get(timeout=OPERATION_TIMEOUT_SECONDS)
+        except queue.Empty:
+            # An in-flight conditional PUT can still commit. Never return its
+            # proposal as persisted, cancel/rewrite it, or retry it here.
+            LOGGER.warning("operation_timeout")
+            return {"error": "operation_timeout"}
 
 
 def read_exact(connection, size, deadline):
@@ -284,10 +318,24 @@ def serve(listener, broker, tcp=False):
             slots.release()
 
     while True:
-        connection, peer = listener.accept()
+        try:
+            connection, peer = listener.accept()
+        except OSError as error:
+            if error.errno in (errno.EBADF, errno.ENOTSOCK, errno.EINVAL):
+                # A closed/broken listener needs systemd to restart the service.
+                raise
+            # No OS/SDK exception text: it can contain request/configuration
+            # data. Back off to avoid a tight loop on descriptor exhaustion.
+            LOGGER.warning("accept_failed")
+            time.sleep(0.1)
+            continue
         # Reject unknown enclave CIDs before reading any request or returning
         # credentials. TCP mode is an explicit development-only opt-in.
-        if not peer_allowed(peer, broker.config, tcp) or not slots.acquire(blocking=False):
+        if not peer_allowed(peer, broker.config, tcp):
+            connection.close()
+            continue
+        if not slots.acquire(blocking=False):
+            LOGGER.warning("connection_capacity_exhausted")
             connection.close()
             continue
         try:
@@ -329,6 +377,10 @@ def main():
             serve(listener, broker, tcp=bool(args.tcp))
     except KeyboardInterrupt:
         return 0
+    except BrokerError as error:
+        # BrokerError messages are exclusively constant, non-sensitive codes.
+        LOGGER.error("%s", error)
+        return 1
     except Exception:
         LOGGER.error("startup or listener failed; verify broker configuration and AWS connectivity")
         return 1

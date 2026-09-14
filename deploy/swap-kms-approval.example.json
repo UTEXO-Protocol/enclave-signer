@@ -1,0 +1,25 @@
+{
+  "version": 1,
+  "phase": "bootstrap",
+  "approved_by": "REPLACE_INDEPENDENT_RELEASE_REVIEWER",
+  "approval_reference": "REPLACE_RELEASE_APPROVAL_REFERENCE",
+  "account_id": "REPLACE_ACCOUNT_ID",
+  "signer_role": "REPLACE_SIGNER_ROLE",
+  "key_admin_role": "REPLACE_KEY_ADMIN_ROLE",
+  "key_arn": "REPLACE_KMS_KEY_ARN",
+  "region": "REPLACE_AWS_REGION",
+  "seed_id": "REPLACE_SEED_ID",
+  "bitcoin_network": "bitcoin",
+  "bucket": "REPLACE_SEED_BUCKET",
+  "object_key": "REPLACE_SEED_OBJECT_KEY",
+  "images": [
+    {
+      "eif": "REPLACE_PATH_RELATIVE_TO_APPROVAL/enclave.eif",
+      "pcr_file": "REPLACE_PATH_RELATIVE_TO_APPROVAL/PCR.json",
+      "sha256": "REPLACE_INDEPENDENTLY_APPROVED_EIF_SHA256",
+      "pcr0": "REPLACE_INDEPENDENTLY_APPROVED_PCR0",
+      "mode": "bootstrap",
+      "expected_evm_address": ""
+    }
+  ]
+}

@@ -1,2 +1,13 @@
-# Includes S3 PutObject IfNoneMatch support; boto3 brings matching botocore.
-boto3>=1.36.0,<2
+# Python >=3.10. Full transitive wheel lock; pip verifies hashes automatically.
+# Installer is pinned too; new venvs may bundle an obsolete pip.
+# Update all pins together after broker/policy tests and E2E, then review hashes.
+--require-hashes
+--only-binary=:all:
+boto3==1.43.94 --hash=sha256:2534bf331acd2f448b9cf8317f4eed453c65d9e0b7de254e77c99d390ac57aec
+botocore==1.43.94 --hash=sha256:1dfb86603a87fdaebda2540db56aef5b226ec58ab72c13ca56737e4d66dea9ab
+jmespath==1.1.0 --hash=sha256:a5663118de4908c91729bea0acadca56526eb2698e83de10cd116ae0f4e97c64
+python-dateutil==2.9.0.post0 --hash=sha256:a8b2bc7bffae282281c8140a97d3aa9c14da0b136dfe83f850eea9a5f7470427
+s3transfer==0.19.2 --hash=sha256:d8168eccca828cbb2cd573675333f3bddd254313a9c42494b84c76b539e8ba25
+six==1.17.0 --hash=sha256:4721f391ed90541fddacab5acf947aa0d3dc7d27b2e1e8eda2be8970586c3274
+urllib3==2.7.0 --hash=sha256:9fb4c81ebbb1ce9531cce37674bbc6f1360472bc18ca9a553ede278ef7276897
+pip==26.2.1 --hash=sha256:71138adf1f4ca900cdb7d289c21b7494329f2332b6d85f0e1c42108c0384ed3e
