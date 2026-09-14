@@ -61,10 +61,19 @@ These are documented integration gaps; no upstream acceptance is assumed.
 ## Security dependency baseline
 
 The manifest uses AWS-LC 5.8.0, s2n-tls 1.7.10, the coordinated AWS CRT 1.0.0
-releases, json-c 0.19 and NSM 0.5.2 with SDK 0.4.5. These contain the fixes for
+releases, json-c after 0.19 at commit `2094974`, and NSM 0.5.2 with SDK 0.4.5. These contain the fixes for
 [s2n TLS record authentication](https://github.com/aws/s2n-tls/security/advisories/GHSA-684c-v35q-fvx7)
 and [HTTP/2 HPACK memory corruption](https://github.com/awslabs/aws-c-http/security/advisories/GHSA-rmjr-3qpm-vh98).
 The Docker builder verifies architecture-specific SHA-256 hashes of Go 1.27.1
 because AWS-LC requires Go 1.20 or newer; Bullseye's Go 1.15 is unsupported.
 Recheck the official advisories when updating pins; the manifest is a reviewed
 snapshot, not an assurance against future vulnerabilities.
+
+The json-c 0.19 release omits container deallocation under `NDEBUG`: its free
+call is inside an assertion. Release sanitizer stress tests detected the leak.
+The manifest therefore pins the unmodified upstream snapshot through
+[`2094974`](https://github.com/json-c/json-c/commit/2094974201fc75b07673110cc40a3e144cbd3b0d),
+which includes the [release deallocation correction](https://github.com/json-c/json-c/commit/f291fa81c6f21d925ea771a8cca597f5886309cc)
+and subsequent object-lifetime/failed-insertion corrections. This is an explicit
+post-release source pin until a stable release includes those fixes; it is not
+a local patch or a change to release assertion behavior.

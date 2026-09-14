@@ -18,7 +18,7 @@ It uses the same official SDK and library codebases as AWS's `kmstool_enclave_cl
 AWS-LC, s2n-tls, AWS Common Runtime libraries, json-c, and libnsm. The library
 versions are deliberately newer than the upstream sample Dockerfile to include
 published security fixes: AWS-LC 5.8.0, s2n-tls 1.7.10, CRT libraries 1.0.0,
-json-c 0.19 and NSM 0.5.2. The SDK handles
+json-c 0.19 with upstream post-release cleanup fixes (`2094974`), and NSM 0.5.2. The SDK handles
 AWS request signing, TLS, recipient-key generation, NSM attestation, and CMS
 recipient-envelope decryption. Rust retains seed persistence and signing logic.
 
