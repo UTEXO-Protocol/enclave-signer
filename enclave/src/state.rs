@@ -108,6 +108,36 @@ const CLONE_EXPORT_SOFT_CAP_ENV: &str = "CLONE_EXPORT_SOFT_CAP";
 /// and block every legitimate handshake. The trade-off is a
 /// bounded replay window: replaying an evicted nonce only re-seals the seed to
 /// the encryption pubkey already bound inside that attestation.
+///
+/// # Security posture — bounded-volatile freshness (F03-AF-09, DECIDE)
+///
+/// This guard is deliberately **per-instance and in-memory (volatile)**, and we
+/// accept that as the shipped posture. Its explicit limits:
+///
+/// - **Restart clears it.** After an enclave restart the set is empty, so a
+///   nonce seen before the restart would be admitted again.
+/// - **No cross-instance / sibling freshness.** A nonce accepted by donor A is
+///   unknown to a sibling donor B; the set is not shared cluster-wide.
+/// - **Overflow evicts oldest** (availability over strict rejection), giving a
+///   bounded replay window inside a `ttl`.
+///
+/// Why this is acceptable without durable/cluster-wide state: a replayed nonce
+/// does **not** create a new recipient or leak the seed to an unauthorised
+/// party. Every accepted `GetClone` is already gated by peer attestation +
+/// PCR match + the `encryption_pubkey`↔attestation binding + the HMAC cloning
+/// digest (including the AF-07 target-cluster binding) + the AF-26 secret
+/// strength floor. The digest is computed over the encryption pubkey, so a
+/// replay can only ever re-seal the seed to the **same** pubkey already
+/// authorised inside that transcript — i.e. to a recipient the operator already
+/// approved. The replay guard is therefore defense-in-depth against
+/// resubmission, not the sole control on seed export.
+///
+/// Making freshness **durable and cluster-wide** (surviving restart, shared
+/// across sibling donors, closing the sibling-guard gap) is a deliberate
+/// **owner decision** deferred here: it requires cross-instance shared state
+/// plus versioning/migration/rollback, whereas the audit notes that changing
+/// only the local `ttl`/`max` needs no migration. Until then the posture above
+/// is the documented, accepted position (see `OWNER-DECISIONS` D2/AF-09).
 pub struct NonceReplayGuard {
     inner: Mutex<GuardState>,
     max: usize,
