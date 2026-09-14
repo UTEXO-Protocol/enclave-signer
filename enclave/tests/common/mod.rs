@@ -102,6 +102,7 @@ impl utexo_bridge_enclave::swap_persistence::SwapSeedSource for TestSwapSeedSour
     fn load_keys(
         &self,
         network: bitcoin::Network,
+        _deadline: std::time::Instant,
     ) -> utexo_bridge_enclave::error::Result<utexo_bridge_enclave::keys::KeyManager> {
         let mut seed = zeroize::Zeroizing::new([0u8; 64]);
         getrandom::fill(&mut *seed).unwrap();

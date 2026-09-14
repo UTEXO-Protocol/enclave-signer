@@ -3,7 +3,7 @@
 
 use std::io::{Read, Write};
 use std::net::{Ipv4Addr, SocketAddr, TcpStream};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use base64::{engine::general_purpose::STANDARD, Engine};
 use bitcoin::Network;
@@ -11,15 +11,21 @@ use serde::Deserialize;
 use serde_json::json;
 use zeroize::Zeroizing;
 
+use crate::conn::{remaining_until, DeadlineStream};
 use crate::error::{EnclaveError, Result};
 use crate::keys::KeyManager;
-use crate::swap_kms::{AwsCredentials, SwapKmsClient, SwapKmsConfig};
+use crate::swap_kms::{
+    deserialize_secret, AwsCredentials, SwapKmsClient, SwapKmsConfig, MAX_CIPHERTEXT_BYTES,
+    MAX_MESSAGE_BYTES,
+};
 
 pub const BROKER_LOCAL_PORT: u16 = 3446;
 pub const BROKER_VSOCK_PORT: u32 = 8004;
-const MAX_FRAME: usize = 64 * 1024;
-const MAX_CIPHERTEXT: usize = 6144;
-const TIMEOUT: Duration = Duration::from_secs(15);
+// Leave room inside the 30-second parent/request timeout for ingress and reply.
+pub const RECOVERY_TIMEOUT: Duration = Duration::from_secs(25);
+pub(crate) const RESPONSE_RESERVE: Duration = Duration::from_secs(2);
+// The broker's own seven-second operation deadline expires before this cap.
+const BROKER_TIMEOUT: Duration = Duration::from_secs(8);
 
 fn failure(message: &str) -> EnclaveError {
     EnclaveError::InvalidRequest(format!("swap persistence: {message}"))
@@ -28,27 +34,29 @@ fn failure(message: &str) -> EnclaveError {
 /// Production installs a persistent source at boot. Tests can inject a source
 /// without teaching the production wire protocol to accept plaintext seeds.
 pub trait SwapSeedSource: Send + Sync {
-    fn load_keys(&self, network: Network) -> Result<KeyManager>;
+    /// Bound every external operation by this same absolute deadline. The state
+    /// machine also checks it immediately before activating the returned keys.
+    fn load_keys(&self, network: Network, deadline: Instant) -> Result<KeyManager>;
 }
 
 trait SeedStore {
-    fn load(&self) -> Result<Option<Vec<u8>>>;
+    fn load(&self, deadline: Instant) -> Result<Option<Vec<u8>>>;
     /// Atomically create if absent, then return the persisted winning blob.
-    fn create(&self, ciphertext: &[u8]) -> Result<Vec<u8>>;
+    fn create(&self, ciphertext: &[u8], deadline: Instant) -> Result<Vec<u8>>;
 }
 
 trait SeedKms {
-    fn generate(&self) -> Result<Vec<u8>>;
-    fn decrypt(&self, ciphertext: &[u8]) -> Result<Zeroizing<[u8; 64]>>;
+    fn generate(&self, deadline: Instant) -> Result<Vec<u8>>;
+    fn decrypt(&self, ciphertext: &[u8], deadline: Instant) -> Result<Zeroizing<[u8; 64]>>;
 }
 
 impl SeedKms for SwapKmsClient {
-    fn generate(&self) -> Result<Vec<u8>> {
-        self.generate_ciphertext()
+    fn generate(&self, deadline: Instant) -> Result<Vec<u8>> {
+        self.generate_ciphertext(deadline)
     }
 
-    fn decrypt(&self, ciphertext: &[u8]) -> Result<Zeroizing<[u8; 64]>> {
-        self.decrypt_seed(ciphertext)
+    fn decrypt(&self, ciphertext: &[u8], deadline: Instant) -> Result<Zeroizing<[u8; 64]>> {
+        self.decrypt_seed(ciphertext, deadline)
     }
 }
 
@@ -56,13 +64,17 @@ fn recover_seed(
     store: &impl SeedStore,
     kms: &impl SeedKms,
     allow_create: bool,
+    deadline: Instant,
 ) -> Result<Zeroizing<[u8; 64]>> {
-    let ciphertext = match store.load()? {
+    remaining_until(deadline)?;
+    let ciphertext = match store.load(deadline)? {
         Some(blob) => blob,
         None if allow_create => {
-            let blob = kms.generate()?;
+            remaining_until(deadline)?;
+            let blob = kms.generate(deadline)?;
             validate_ciphertext(&blob)?;
-            store.create(&blob)?
+            remaining_until(deadline)?;
+            store.create(&blob, deadline)?
         }
         None => {
             return Err(failure(
@@ -73,11 +85,14 @@ fn recover_seed(
     validate_ciphertext(&ciphertext)?;
     // This is the only step that returns plaintext to Rust: recover the blob
     // returned by persistence, including the winner of concurrent bootstrap.
-    kms.decrypt(&ciphertext)
+    remaining_until(deadline)?;
+    let seed = kms.decrypt(&ciphertext, deadline)?;
+    remaining_until(deadline)?;
+    Ok(seed)
 }
 
 fn validate_ciphertext(blob: &[u8]) -> Result<()> {
-    if blob.is_empty() || blob.len() > MAX_CIPHERTEXT {
+    if blob.is_empty() || blob.len() > MAX_CIPHERTEXT_BYTES {
         return Err(failure("invalid ciphertext length"));
     }
     Ok(())
@@ -126,11 +141,11 @@ impl PersistentSwapSeed {
 }
 
 impl SwapSeedSource for PersistentSwapSeed {
-    fn load_keys(&self, network: Network) -> Result<KeyManager> {
+    fn load_keys(&self, network: Network, deadline: Instant) -> Result<KeyManager> {
         // Refresh short-lived instance-role credentials on every attempt.
-        let credentials = self.broker.credentials()?;
+        let credentials = self.broker.credentials(deadline)?;
         let kms = SwapKmsClient::new(self.config.clone(), credentials, network)?;
-        let seed = recover_seed(&self.broker, &kms, self.allow_create)?;
+        let seed = recover_seed(&self.broker, &kms, self.allow_create, deadline)?;
         restore_keys(seed, network, self.expected_evm_address)
     }
 }
@@ -167,12 +182,16 @@ struct SeedBroker {
 }
 
 impl SeedBroker {
-    fn request<T: serde::de::DeserializeOwned>(&self, request: serde_json::Value) -> Result<T> {
-        let mut stream = TcpStream::connect_timeout(&self.address, TIMEOUT)?;
-        stream.set_read_timeout(Some(TIMEOUT))?;
-        stream.set_write_timeout(Some(TIMEOUT))?;
+    fn request<T: serde::de::DeserializeOwned>(
+        &self,
+        request: serde_json::Value,
+        deadline: Instant,
+    ) -> Result<T> {
+        let deadline = deadline.min(Instant::now() + BROKER_TIMEOUT);
+        let stream = TcpStream::connect_timeout(&self.address, remaining_until(deadline)?)?;
+        let mut stream = DeadlineStream::with_deadline(stream, deadline, BROKER_TIMEOUT);
         let bytes = serde_json::to_vec(&request).map_err(|_| failure("encode broker request"))?;
-        if bytes.len() > MAX_FRAME {
+        if bytes.len() > MAX_MESSAGE_BYTES {
             return Err(failure("broker request too large"));
         }
         stream.write_all(&(bytes.len() as u32).to_be_bytes())?;
@@ -180,7 +199,7 @@ impl SeedBroker {
         let mut length = [0u8; 4];
         stream.read_exact(&mut length)?;
         let length = u32::from_be_bytes(length) as usize;
-        if length == 0 || length > MAX_FRAME {
+        if length == 0 || length > MAX_MESSAGE_BYTES {
             return Err(failure("invalid broker response length"));
         }
         // Responses may contain AWS credentials. Avoid Debug/logging and
@@ -191,16 +210,19 @@ impl SeedBroker {
             .map_err(|_| failure("broker request failed or response invalid"))
     }
 
-    fn credentials(&self) -> Result<AwsCredentials> {
+    fn credentials(&self, deadline: Instant) -> Result<AwsCredentials> {
         #[derive(Deserialize)]
         #[serde(deny_unknown_fields)]
         struct Credentials {
-            access_key_id: String,
-            secret_access_key: String,
-            session_token: String,
+            #[serde(deserialize_with = "deserialize_secret")]
+            access_key_id: Zeroizing<String>,
+            #[serde(deserialize_with = "deserialize_secret")]
+            secret_access_key: Zeroizing<String>,
+            #[serde(deserialize_with = "deserialize_secret")]
+            session_token: Zeroizing<String>,
         }
-        let c: Credentials = self.request(json!({"op": "credentials"}))?;
-        AwsCredentials::new(c.access_key_id, c.secret_access_key, c.session_token)
+        let c: Credentials = self.request(json!({"op": "credentials"}), deadline)?;
+        AwsCredentials::from_protected(c.access_key_id, c.secret_access_key, c.session_token)
     }
 }
 
@@ -228,15 +250,18 @@ fn decode_blob(response: BlobResponse) -> Result<Option<Vec<u8>>> {
 }
 
 impl SeedStore for SeedBroker {
-    fn load(&self) -> Result<Option<Vec<u8>>> {
-        decode_blob(self.request(json!({"op": "load", "seed_id": self.seed_id}))?)
+    fn load(&self, deadline: Instant) -> Result<Option<Vec<u8>>> {
+        decode_blob(self.request(json!({"op": "load", "seed_id": self.seed_id}), deadline)?)
     }
 
-    fn create(&self, ciphertext: &[u8]) -> Result<Vec<u8>> {
+    fn create(&self, ciphertext: &[u8], deadline: Instant) -> Result<Vec<u8>> {
         validate_ciphertext(ciphertext)?;
-        decode_blob(self.request(json!({
-            "op": "create", "seed_id": self.seed_id, "ciphertext": STANDARD.encode(ciphertext),
-        }))?)?
+        decode_blob(self.request(
+            json!({
+                "op": "create", "seed_id": self.seed_id, "ciphertext": STANDARD.encode(ciphertext),
+            }),
+            deadline,
+        )?)?
         .ok_or_else(|| failure("broker did not return a committed seed"))
     }
 }
@@ -254,13 +279,13 @@ mod tests {
         race_winner: Option<Vec<u8>>,
     }
     impl SeedStore for Store {
-        fn load(&self) -> Result<Option<Vec<u8>>> {
+        fn load(&self, _deadline: Instant) -> Result<Option<Vec<u8>>> {
             if self.fail_read.get() {
                 return Err(failure("read failed"));
             }
             Ok(self.saved.borrow().clone())
         }
-        fn create(&self, blob: &[u8]) -> Result<Vec<u8>> {
+        fn create(&self, blob: &[u8], _deadline: Instant) -> Result<Vec<u8>> {
             if self.fail_write.get() {
                 return Err(failure("write failed"));
             }
@@ -277,11 +302,11 @@ mod tests {
         fail_decrypt: bool,
     }
     impl SeedKms for Kms {
-        fn generate(&self) -> Result<Vec<u8>> {
+        fn generate(&self, _deadline: Instant) -> Result<Vec<u8>> {
             self.generates.set(self.generates.get() + 1);
             Ok(vec![42; 64]) // Opaque ciphertext stand-in; never a production backend.
         }
-        fn decrypt(&self, blob: &[u8]) -> Result<Zeroizing<[u8; 64]>> {
+        fn decrypt(&self, blob: &[u8], _deadline: Instant) -> Result<Zeroizing<[u8; 64]>> {
             self.decrypts.set(self.decrypts.get() + 1);
             if self.fail_decrypt {
                 return Err(failure("KMS denied"));
@@ -316,9 +341,10 @@ mod tests {
     fn bootstrap_then_restart_and_replica_preserve_keys_and_signatures() {
         let store = Store::default();
         let kms = Kms::default();
-        let first = recover_seed(&store, &kms, true).unwrap();
-        let restored = recover_seed(&store, &kms, false).unwrap();
-        let replica = recover_seed(&store, &kms, false).unwrap();
+        let first = recover_seed(&store, &kms, true, Instant::now() + RECOVERY_TIMEOUT).unwrap();
+        let restored =
+            recover_seed(&store, &kms, false, Instant::now() + RECOVERY_TIMEOUT).unwrap();
+        let replica = recover_seed(&store, &kms, false, Instant::now() + RECOVERY_TIMEOUT).unwrap();
         assert_eq!(*first, *restored);
         assert_eq!(*first, *replica);
         assert_eq!(kms.generates.get(), 1);
@@ -333,9 +359,9 @@ mod tests {
     fn restore_never_regenerates_missing_or_unreadable_seed() {
         let store = Store::default();
         let kms = Kms::default();
-        assert!(recover_seed(&store, &kms, false).is_err());
+        assert!(recover_seed(&store, &kms, false, Instant::now() + RECOVERY_TIMEOUT).is_err());
         store.fail_read.set(true);
-        assert!(recover_seed(&store, &kms, true).is_err());
+        assert!(recover_seed(&store, &kms, true, Instant::now() + RECOVERY_TIMEOUT).is_err());
         assert_eq!(kms.generates.get(), 0);
         assert_eq!(kms.decrypts.get(), 0);
     }
@@ -347,7 +373,7 @@ mod tests {
             ..Store::default()
         };
         let kms = Kms::default();
-        assert!(recover_seed(&store, &kms, true).is_err());
+        assert!(recover_seed(&store, &kms, true, Instant::now() + RECOVERY_TIMEOUT).is_err());
         assert_eq!(kms.decrypts.get(), 0);
         assert!(store.saved.borrow().is_none());
     }
@@ -358,7 +384,13 @@ mod tests {
             race_winner: Some(vec![17; 64]),
             ..Store::default()
         };
-        let seed = recover_seed(&store, &Kms::default(), true).unwrap();
+        let seed = recover_seed(
+            &store,
+            &Kms::default(),
+            true,
+            Instant::now() + RECOVERY_TIMEOUT,
+        )
+        .unwrap();
         assert_eq!(*seed, [17; 64]);
     }
 
@@ -372,10 +404,10 @@ mod tests {
             fail_decrypt: true,
             ..Kms::default()
         };
-        assert!(recover_seed(&store, &kms, true).is_err());
+        assert!(recover_seed(&store, &kms, true, Instant::now() + RECOVERY_TIMEOUT).is_err());
         assert_eq!(kms.generates.get(), 0);
         *store.saved.borrow_mut() = Some(vec![]);
-        assert!(recover_seed(&store, &kms, true).is_err());
+        assert!(recover_seed(&store, &kms, true, Instant::now() + RECOVERY_TIMEOUT).is_err());
         assert_eq!(kms.decrypts.get(), 1);
     }
 
@@ -392,5 +424,157 @@ mod tests {
         })
         .unwrap()
         .is_none());
+    }
+    fn mock_broker(
+        reply: impl FnOnce(TcpStream) + Send + 'static,
+    ) -> (SeedBroker, std::thread::JoinHandle<serde_json::Value>) {
+        let listener = std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let broker = SeedBroker {
+            address: listener.local_addr().unwrap(),
+            seed_id: "pool-1".into(),
+        };
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
+            let mut prefix = [0; 4];
+            stream.read_exact(&mut prefix).unwrap();
+            let mut body = vec![0; u32::from_be_bytes(prefix) as usize];
+            stream.read_exact(&mut body).unwrap();
+            let request = serde_json::from_slice(&body).unwrap();
+            reply(stream);
+            request
+        });
+        (broker, server)
+    }
+
+    fn frame(value: serde_json::Value) -> Vec<u8> {
+        let body = serde_json::to_vec(&value).unwrap();
+        let mut frame = (body.len() as u32).to_be_bytes().to_vec();
+        frame.extend_from_slice(&body);
+        frame
+    }
+
+    #[test]
+    fn broker_socket_protocol_supports_fragmented_frames_for_all_operations() {
+        let reply = frame(json!({"ciphertext": STANDARD.encode([17;64])}));
+        let (broker, server) = mock_broker(move |mut stream| {
+            for chunk in reply.chunks(3) {
+                stream.write_all(chunk).unwrap();
+            }
+        });
+        assert_eq!(
+            broker
+                .load(Instant::now() + Duration::from_secs(2))
+                .unwrap()
+                .unwrap(),
+            vec![17; 64]
+        );
+        assert_eq!(
+            server.join().unwrap(),
+            json!({"op":"load", "seed_id":"pool-1"})
+        );
+        let (broker, server) = mock_broker(|mut stream| {
+            stream
+                .write_all(&frame(json!({"ciphertext": STANDARD.encode([99;64])})))
+                .unwrap();
+        });
+        assert_eq!(
+            broker
+                .create(&[17; 64], Instant::now() + Duration::from_secs(2))
+                .unwrap(),
+            vec![99; 64]
+        );
+        assert_eq!(
+            server.join().unwrap(),
+            json!({"op":"create", "seed_id":"pool-1", "ciphertext":STANDARD.encode([17;64])})
+        );
+        let (broker, server) = mock_broker(|mut stream| {
+            stream.write_all(&frame(json!({"access_key_id":"AKID", "secret_access_key":"secret", "session_token":"token"}))).unwrap();
+        });
+        assert!(broker
+            .credentials(Instant::now() + Duration::from_secs(2))
+            .is_ok());
+        assert_eq!(server.join().unwrap(), json!({"op":"credentials"}));
+    }
+
+    #[test]
+    fn broker_socket_rejects_oversized_empty_truncated_or_error_frames() {
+        for reply in [
+            0u32.to_be_bytes().to_vec(),
+            ((MAX_MESSAGE_BYTES + 1) as u32).to_be_bytes().to_vec(),
+            vec![0, 0],
+            vec![0, 0, 0, 10, b'{', b'}'],
+            frame(json!({"error":"s3_error"})),
+            frame(json!({"ciphertext":null,"unexpected":true})),
+        ] {
+            let (broker, server) = mock_broker(move |mut stream| {
+                stream.write_all(&reply).unwrap();
+            });
+            assert!(broker
+                .load(Instant::now() + Duration::from_secs(2))
+                .is_err());
+            server.join().unwrap();
+        }
+    }
+
+    #[test]
+    fn broker_deadline_bounds_prefix_and_body_trickle() {
+        for trickle_prefix in [true, false] {
+            let (broker, server) = mock_broker(move |mut stream| {
+                let response = frame(json!({"ciphertext": STANDARD.encode([17;64])}));
+                let bytes = if trickle_prefix {
+                    &response[..]
+                } else {
+                    stream.write_all(&response[..4]).unwrap();
+                    &response[4..]
+                };
+                for byte in bytes {
+                    std::thread::sleep(Duration::from_millis(25));
+                    if stream.write_all(&[*byte]).is_err() {
+                        break;
+                    }
+                }
+            });
+            let started = Instant::now();
+            assert!(broker.load(started + Duration::from_millis(70)).is_err());
+            assert!(started.elapsed() < Duration::from_millis(500));
+            server.join().unwrap();
+        }
+    }
+
+    #[test]
+    fn repeated_broker_operations_share_one_deadline() {
+        let listener = std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let broker = SeedBroker {
+            address: listener.local_addr().unwrap(),
+            seed_id: "pool-1".into(),
+        };
+        let server = std::thread::spawn(move || {
+            for _ in 0..2 {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut prefix = [0; 4];
+                stream.read_exact(&mut prefix).unwrap();
+                let mut body = vec![0; u32::from_be_bytes(prefix) as usize];
+                stream.read_exact(&mut body).unwrap();
+                std::thread::sleep(Duration::from_millis(80));
+                let _ = stream.write_all(&frame(json!({"ciphertext":null})));
+            }
+        });
+        let deadline = Instant::now() + Duration::from_millis(130);
+        assert!(broker.load(deadline).unwrap().is_none());
+        assert!(broker.load(deadline).is_err());
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn exhausted_recovery_budget_never_generates_or_decrypts() {
+        let store = Store::default();
+        let kms = Kms::default();
+        assert!(recover_seed(&store, &kms, true, Instant::now()).is_err());
+        assert_eq!(kms.generates.get(), 0);
+        assert_eq!(kms.decrypts.get(), 0);
+        assert!(store.saved.borrow().is_none());
     }
 }

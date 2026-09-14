@@ -60,7 +60,7 @@ pub enum EnclaveError {
     #[error("pubkey mismatch: attestation pubkey does not match claimed pubkey")]
     PubkeyMismatch,
 
-    #[error("identity mismatch: cloned seed does not derive to expected address")]
+    #[error("identity mismatch: recovered seed does not derive to expected address")]
     IdentityMismatch,
 
     #[error("spv: {0}")]

@@ -213,7 +213,9 @@ impl Drop for ReplayReservation<'_> {
 /// Enclave lifecycle phase.
 ///
 /// Valid transitions (see `EnclaveState`):
-///   Initial  -> Active   (InitializeKey / InitializeFromEntropy)
+///   Initial  -> Active   (local InitializeKey / InitializeFromEntropy)
+///   Initial  -> Initializing -> Active (RGB-swap KMS recovery)
+///   Initializing -> Initial (failed or expired RGB-swap recovery)
 ///   Initial  -> Cloning  (InitiateCloning, wired in PR 4)
 ///   Cloning  -> Active   (SetClone,      wired in PR 4)
 ///   Active   -> Active   (GetClone handled by donor without state change)
@@ -224,6 +226,10 @@ impl Drop for ReplayReservation<'_> {
 pub enum Phase {
     /// No keys, waiting for an initialize request.
     Initial,
+    /// Swap custody recovery owns the initialization reservation, with no lock
+    /// held while it waits for the host broker or KMS helper.
+    #[cfg(feature = "rgb-swap")]
+    Initializing,
     /// Cloning handshake in progress, waiting for SetClone.
     Cloning(CloningSession),
     /// Keys loaded, ready to sign.
@@ -234,6 +240,8 @@ impl Phase {
     pub fn name(&self) -> &'static str {
         match self {
             Phase::Initial => "initial",
+            #[cfg(feature = "rgb-swap")]
+            Phase::Initializing => "initializing",
             Phase::Cloning(_) => "cloning",
             Phase::Active(_) => "active",
         }
@@ -306,16 +314,40 @@ impl EnclaveState {
     }
 
     /// Activate only after durable persistence and attested recovery succeed.
-    /// Holding the phase lock prevents concurrent initializations or signing
-    /// against a seed whose persistence has not yet completed.
     #[cfg(feature = "rgb-swap")]
     pub fn initialize_from_swap_kms(&self) -> Result<()> {
-        let mut guard = self.lock_phase()?;
-        ensure_initial(&guard)?;
+        self.initialize_from_swap_kms_until(
+            Instant::now() + crate::swap_persistence::RECOVERY_TIMEOUT,
+        )
+    }
+
+    /// The caller supplies its absolute request deadline minus response time.
+    /// Reserve the phase briefly, then release its lock during all external I/O:
+    /// other workers can reject initialization/signing immediately. A failed,
+    /// expired or panicking recovery drops the reservation back to Initial.
+    #[cfg(feature = "rgb-swap")]
+    pub fn initialize_from_swap_kms_until(&self, deadline: Instant) -> Result<()> {
+        let deadline = deadline.min(Instant::now() + crate::swap_persistence::RECOVERY_TIMEOUT);
+        crate::conn::remaining_until(deadline)?;
         let source = self.swap_seed_source.as_ref().ok_or_else(|| {
             EnclaveError::InvalidRequest("RGB swaps require KMS persistence configuration".into())
         })?;
-        let manager = source.load_keys(self.network)?;
+        {
+            let mut guard = self.lock_phase()?;
+            ensure_initial(&guard)?;
+            *guard = Phase::Initializing;
+        }
+        let _reservation = SwapInitialization { state: self };
+        let manager = source.load_keys(self.network, deadline)?;
+        let mut guard = self.lock_phase()?;
+        crate::conn::remaining_until(deadline)?;
+        // No other transition accepts Initializing. Keep the check explicit so
+        // future lifecycle changes cannot overwrite an unrelated identity.
+        if !matches!(*guard, Phase::Initializing) {
+            return Err(EnclaveError::NotReady {
+                state: guard.name().into(),
+            });
+        }
         *guard = Phase::Active(Box::new(manager));
         Ok(())
     }
@@ -349,7 +381,7 @@ impl EnclaveState {
         }
     }
 
-    /// Returns the name of the current phase ("initial", "cloning", "active").
+    /// Returns the current phase: initial, initializing (swaps), cloning or active.
     pub fn phase_name(&self) -> &'static str {
         self.inner.lock().map(|g| g.name()).unwrap_or("poisoned")
     }
@@ -542,7 +574,22 @@ impl EnclaveState {
         let guard = self.lock_phase()?;
         match &*guard {
             Phase::Active(km) => f(km),
-            Phase::Initial | Phase::Cloning(_) => Err(EnclaveError::KeyNotInitialized),
+            _ => Err(EnclaveError::KeyNotInitialized),
+        }
+    }
+}
+
+#[cfg(feature = "rgb-swap")]
+struct SwapInitialization<'a> {
+    state: &'a EnclaveState,
+}
+
+#[cfg(feature = "rgb-swap")]
+impl Drop for SwapInitialization<'_> {
+    fn drop(&mut self) {
+        let mut phase = self.state.inner.lock().unwrap_or_else(|p| p.into_inner());
+        if matches!(*phase, Phase::Initializing) {
+            *phase = Phase::Initial;
         }
     }
 }
@@ -550,6 +597,10 @@ impl EnclaveState {
 fn ensure_initial(phase: &Phase) -> Result<()> {
     match phase {
         Phase::Initial => Ok(()),
+        #[cfg(feature = "rgb-swap")]
+        Phase::Initializing => Err(EnclaveError::NotReady {
+            state: phase.name().into(),
+        }),
         _ => Err(EnclaveError::AlreadyInitialized),
     }
 }

@@ -19,8 +19,8 @@ use zeroize::Zeroizing;
 use crate::error::{EnclaveError, Result};
 
 const HELPER_PATH: &str = "/usr/local/bin/swap-kms-tool";
-const HELPER_TIMEOUT: Duration = Duration::from_secs(40);
-const MAX_MESSAGE_BYTES: usize = 64 * 1024;
+const HELPER_TIMEOUT: Duration = Duration::from_secs(12);
+pub(crate) const MAX_MESSAGE_BYTES: usize = 64 * 1024;
 pub const MAX_CIPHERTEXT_BYTES: usize = 6144;
 const SEED_BYTES: usize = 64;
 
@@ -100,10 +100,6 @@ impl SwapKmsConfig {
         }
         Ok(())
     }
-
-    pub fn kms_host(&self) -> String {
-        format!("kms.{}.amazonaws.com", self.region)
-    }
 }
 
 /// Temporary EC2 role credentials can be relayed by the parent. They authorize
@@ -122,10 +118,22 @@ impl AwsCredentials {
         secret_access_key: String,
         session_token: String,
     ) -> Result<Self> {
+        Self::from_protected(
+            Zeroizing::new(access_key_id),
+            Zeroizing::new(secret_access_key),
+            Zeroizing::new(session_token),
+        )
+    }
+
+    pub(crate) fn from_protected(
+        access_key_id: Zeroizing<String>,
+        secret_access_key: Zeroizing<String>,
+        session_token: Zeroizing<String>,
+    ) -> Result<Self> {
         let credentials = Self {
-            access_key_id: Zeroizing::new(access_key_id),
-            secret_access_key: Zeroizing::new(secret_access_key),
-            session_token: Zeroizing::new(session_token),
+            access_key_id,
+            secret_access_key,
+            session_token,
         };
         if credentials.access_key_id.is_empty()
             || credentials.access_key_id.len() > 128
@@ -182,11 +190,11 @@ struct GenerateResponse {
 #[serde(deny_unknown_fields)]
 struct DecryptResponse {
     key_arn: String,
-    #[serde(deserialize_with = "deserialize_seed")]
+    #[serde(deserialize_with = "deserialize_secret")]
     seed: Zeroizing<String>,
 }
 
-fn deserialize_seed<'de, D: serde::Deserializer<'de>>(
+pub(crate) fn deserialize_secret<'de, D: serde::Deserializer<'de>>(
     deserializer: D,
 ) -> std::result::Result<Zeroizing<String>, D::Error> {
     String::deserialize(deserializer).map(Zeroizing::new)
@@ -208,21 +216,30 @@ impl SwapKmsClient {
 
     /// The helper validates and erases the generated seed, returning only the
     /// ciphertext. Recover the committed winner separately before activation.
-    pub fn generate_ciphertext(&self) -> Result<Vec<u8>> {
-        let bytes = self.call("generate", None)?;
+    pub fn generate_ciphertext(&self, deadline: Instant) -> Result<Vec<u8>> {
+        let bytes = self.call("generate", None, deadline)?;
         parse_generate_response(&bytes, &self.config.key_arn)
     }
 
-    pub fn decrypt_seed(&self, ciphertext_blob: &[u8]) -> Result<Zeroizing<[u8; SEED_BYTES]>> {
+    pub fn decrypt_seed(
+        &self,
+        ciphertext_blob: &[u8],
+        deadline: Instant,
+    ) -> Result<Zeroizing<[u8; SEED_BYTES]>> {
         if ciphertext_blob.is_empty() || ciphertext_blob.len() > MAX_CIPHERTEXT_BYTES {
             return Err(fail("invalid persisted KMS ciphertext length"));
         }
         let ciphertext = BASE64.encode(ciphertext_blob);
-        let bytes = self.call("decrypt", Some(&ciphertext))?;
+        let bytes = self.call("decrypt", Some(&ciphertext), deadline)?;
         parse_decrypt_response(&bytes, &self.config.key_arn)
     }
 
-    fn call(&self, operation: &str, ciphertext: Option<&str>) -> Result<Zeroizing<Vec<u8>>> {
+    fn call(
+        &self,
+        operation: &str,
+        ciphertext: Option<&str>,
+        deadline: Instant,
+    ) -> Result<Zeroizing<Vec<u8>>> {
         let network = self.network.to_string();
         // Borrow secret strings during serialization instead of making an
         // intermediate JSON Value containing additional unprotected copies.
@@ -241,7 +258,11 @@ impl SwapKmsClient {
             serde_json::to_vec(&request)
                 .map_err(|_| fail("failed to encode SDK helper request"))?,
         );
-        run_helper(helper_command(), &request, HELPER_TIMEOUT)
+        run_helper(
+            helper_command(),
+            &request,
+            deadline.min(Instant::now() + HELPER_TIMEOUT),
+        )
     }
 }
 
@@ -256,8 +277,9 @@ fn helper_command() -> Command {
 fn run_helper(
     mut command: Command,
     request: &[u8],
-    timeout: Duration,
+    deadline: Instant,
 ) -> Result<Zeroizing<Vec<u8>>> {
+    crate::conn::remaining_until(deadline)?;
     if request.len() > MAX_MESSAGE_BYTES {
         return Err(fail("SDK helper request exceeded size limit"));
     }
@@ -271,7 +293,6 @@ fn run_helper(
         .map_err(|_| fail("cannot start the AWS Nitro SDK helper"))?;
     let mut input = child.stdin.take().expect("piped helper stdin");
     let output = child.stdout.take().expect("piped helper stdout");
-    let deadline = Instant::now() + timeout;
     std::thread::scope(|scope| {
         // Separate pipes avoid deadlock even if a helper exits early or fills
         // stdout while request input is still being written.
@@ -284,12 +305,18 @@ fn run_helper(
             Ok::<_, std::io::Error>(bytes)
         });
         let status = loop {
+            if Instant::now() >= deadline {
+                break Err(fail("AWS Nitro SDK helper timed out"));
+            }
             match child.try_wait() {
                 Ok(Some(status)) => break Ok(status),
-                Ok(None) if Instant::now() < deadline => {
-                    std::thread::sleep(Duration::from_millis(10));
+                Ok(None) => {
+                    std::thread::sleep(
+                        deadline
+                            .saturating_duration_since(Instant::now())
+                            .min(Duration::from_millis(10)),
+                    );
                 }
-                Ok(None) => break Err(fail("AWS Nitro SDK helper timed out")),
                 Err(_) => break Err(fail("failed to wait for AWS Nitro SDK helper")),
             }
         };
@@ -377,6 +404,37 @@ mod tests {
             region: "eu-west-1".into(),
             seed_id: "pool-1".into(),
         }
+    }
+
+    #[test]
+    fn bitcoin_network_names_fit_the_official_helper_contract() {
+        for network in [
+            Network::Bitcoin,
+            Network::Testnet,
+            Network::Testnet4,
+            Network::Signet,
+            Network::Regtest,
+        ] {
+            let name = network.to_string();
+            assert!((1..=8).contains(&name.len()));
+            assert!(name.bytes().all(|b| b.is_ascii_graphic()));
+        }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn expired_helper_deadline_never_spawns_a_process() {
+        // If a process were started, spawning this nonexistent executable
+        // would return a different error instead of the deadline error.
+        let error = run_helper(
+            Command::new("/nonexistent/expired-helper"),
+            b"{}",
+            Instant::now(),
+        )
+        .unwrap_err();
+        assert!(
+            matches!(error, EnclaveError::Io(ref e) if e.kind() == std::io::ErrorKind::TimedOut)
+        );
     }
 
     #[test]
@@ -486,7 +544,7 @@ mod tests {
         let error = run_helper(
             fake_helper("exec sleep 10"),
             b"{}",
-            Duration::from_millis(50),
+            Instant::now() + Duration::from_millis(50),
         )
         .unwrap_err();
         assert!(error.to_string().contains("timed out"));
@@ -496,19 +554,29 @@ mod tests {
     #[test]
     #[cfg(unix)]
     fn helper_output_and_exit_status_fail_closed() {
-        assert!(run_helper(fake_helper("exit 1"), b"{}", Duration::from_secs(2)).is_err());
+        assert!(run_helper(
+            fake_helper("exit 1"),
+            b"{}",
+            Instant::now() + Duration::from_secs(2)
+        )
+        .is_err());
         let output = run_helper(
             fake_helper("cat"),
             b"{\"test\":true}",
-            Duration::from_secs(2),
+            Instant::now() + Duration::from_secs(2),
         )
         .unwrap();
         assert_eq!(output.as_slice(), b"{\"test\":true}");
-        assert!(run_helper(fake_helper("exec yes x"), b"{}", Duration::from_secs(2)).is_err());
+        assert!(run_helper(
+            fake_helper("exec yes x"),
+            b"{}",
+            Instant::now() + Duration::from_secs(2)
+        )
+        .is_err());
         assert!(run_helper(
             fake_helper("cat"),
             &vec![0; MAX_MESSAGE_BYTES + 1],
-            Duration::from_secs(2)
+            Instant::now() + Duration::from_secs(2)
         )
         .is_err());
     }

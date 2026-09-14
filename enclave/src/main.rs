@@ -303,7 +303,11 @@ fn main() {
             let exec_vsock: u32 = std::env::var("HELIOS_EXECUTION_VSOCK_PORT")
                 .ok()
                 .and_then(|s| s.parse().ok())
-                .unwrap_or(8003);
+                .unwrap_or(if cfg!(feature = "rgb-swap") {
+                    8005
+                } else {
+                    8003
+                });
             let cons_local: u16 = std::env::var("HELIOS_CONSENSUS_LOCAL_PORT")
                 .ok()
                 .and_then(|s| s.parse().ok())
@@ -311,7 +315,20 @@ fn main() {
             let cons_vsock: u32 = std::env::var("HELIOS_CONSENSUS_VSOCK_PORT")
                 .ok()
                 .and_then(|s| s.parse().ok())
-                .unwrap_or(8004);
+                .unwrap_or(if cfg!(feature = "rgb-swap") {
+                    8006
+                } else {
+                    8004
+                });
+            // Swap custody reserves 8003 for KMS and 8004 for the broker.
+            // Keep the non-swap defaults; fail early on an explicit collision.
+            #[cfg(feature = "rgb-swap")]
+            assert!(
+                ![exec_vsock, cons_vsock]
+                    .iter()
+                    .any(|port| matches!(port, 8003 | 8004)),
+                "Helios vsock ports must not use the reserved swap KMS/broker ports 8003/8004"
+            );
             tracing::info!(
                 exec_local,
                 exec_vsock,
@@ -529,7 +546,7 @@ where
     let ctx = Arc::new(ctx);
     // Bounded queue doubles as the connection cap: a full queue means all
     // workers are busy and the backlog is at its limit.
-    let (tx, rx) = sync_channel::<S>(MAX_QUEUED_CONNECTIONS);
+    let (tx, rx) = sync_channel::<(S, std::time::Instant)>(MAX_QUEUED_CONNECTIONS);
     let rx = Arc::new(Mutex::new(rx));
 
     for worker_id in 0..WORKER_THREADS {
@@ -549,10 +566,9 @@ where
                 guard.recv()
             };
             match next {
-                Ok(stream) => {
-                    let stream =
-                        DeadlineStream::new(stream, TOTAL_REQUEST_TIMEOUT, IO_IDLE_TIMEOUT);
-                    server::handle_connection(stream, &ctx);
+                Ok((stream, deadline)) => {
+                    let stream = DeadlineStream::with_deadline(stream, deadline, IO_IDLE_TIMEOUT);
+                    server::handle_connection_until(stream, &ctx, deadline);
                 }
                 // All senders dropped: the listener is gone, so is the process.
                 Err(_) => break,
@@ -562,17 +578,21 @@ where
 
     for stream in incoming {
         match stream {
-            Ok(stream) => match tx.try_send(stream) {
-                Ok(()) => tracing::debug!("connection queued"),
-                Err(TrySendError::Full(_)) => tracing::warn!(
-                    cap = MAX_QUEUED_CONNECTIONS,
-                    "connection queue full; dropping connection (slow-request backpressure)"
-                ),
-                Err(TrySendError::Disconnected(_)) => {
-                    tracing::error!("no workers available; stopping accept loop");
-                    break;
+            // Count queue wait in the same budget as framing and custody;
+            // otherwise work could begin after the parent has timed out.
+            Ok(stream) => {
+                match tx.try_send((stream, std::time::Instant::now() + TOTAL_REQUEST_TIMEOUT)) {
+                    Ok(()) => tracing::debug!("connection queued"),
+                    Err(TrySendError::Full(_)) => tracing::warn!(
+                        cap = MAX_QUEUED_CONNECTIONS,
+                        "connection queue full; dropping connection (slow-request backpressure)"
+                    ),
+                    Err(TrySendError::Disconnected(_)) => {
+                        tracing::error!("no workers available; stopping accept loop");
+                        break;
+                    }
                 }
-            },
+            }
             Err(e) => tracing::error!("accept error: {e}"),
         }
     }

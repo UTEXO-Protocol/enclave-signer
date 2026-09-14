@@ -166,16 +166,33 @@ impl ServerContext {
 
 /// Handle a single connection: read one request, dispatch, write one response, close.
 pub fn handle_connection(stream: impl Read + Write, ctx: &ServerContext) {
-    if let Err(e) = process_connection(stream, ctx) {
+    handle_connection_until(
+        stream,
+        ctx,
+        std::time::Instant::now() + crate::conn::TOTAL_REQUEST_TIMEOUT,
+    );
+}
+
+/// Preserve the ingress socket deadline through swap custody initialization.
+pub fn handle_connection_until(
+    stream: impl Read + Write,
+    ctx: &ServerContext,
+    deadline: std::time::Instant,
+) {
+    if let Err(e) = process_connection(stream, ctx, deadline) {
         tracing::error!("connection error: {}", e);
     }
 }
 
-fn process_connection(mut stream: impl Read + Write, ctx: &ServerContext) -> Result<()> {
+fn process_connection(
+    mut stream: impl Read + Write,
+    ctx: &ServerContext,
+    deadline: std::time::Instant,
+) -> Result<()> {
     tracing::debug!("reading request");
     let request: EnclaveRequest = framing::read_message(&mut stream)?;
 
-    let response = dispatch(request, ctx);
+    let response = dispatch(request, ctx, deadline);
 
     framing::write_message(&mut stream, &response)?;
     tracing::debug!("response written");
@@ -194,7 +211,11 @@ fn unsupported_build(network: &str) -> EnclaveError {
     ))
 }
 
-fn dispatch(request: EnclaveRequest, ctx: &ServerContext) -> EnclaveResponse {
+fn dispatch(
+    request: EnclaveRequest,
+    ctx: &ServerContext,
+    deadline: std::time::Instant,
+) -> EnclaveResponse {
     let result = match request.request {
         Some(Request::InitializeKey(req)) => {
             let path = if !req.mnemonic.is_empty() {
@@ -209,7 +230,7 @@ fn dispatch(request: EnclaveRequest, ctx: &ServerContext) -> EnclaveResponse {
                 "seed-import"
             };
             tracing::info!("request: InitializeKey ({})", path);
-            handle_initialize(ctx, req)
+            handle_initialize(ctx, req, deadline)
         }
         Some(Request::GetPublicKey(req)) => {
             tracing::info!("request: GetPublicKey");
@@ -909,7 +930,11 @@ fn apply_funds_out_binding(
     Ok(())
 }
 
-fn handle_initialize(ctx: &ServerContext, req: InitializeKeyRequest) -> Result<EnclaveResponse> {
+fn handle_initialize(
+    ctx: &ServerContext,
+    req: InitializeKeyRequest,
+    _deadline: std::time::Instant,
+) -> Result<EnclaveResponse> {
     let state = &ctx.state;
     #[cfg(feature = "rgb-swap")]
     if !req.cloning_secret.is_empty() {
@@ -933,7 +958,12 @@ fn handle_initialize(ctx: &ServerContext, req: InitializeKeyRequest) -> Result<E
     } else if req.seed.is_empty() {
         #[cfg(feature = "rgb-swap")]
         {
-            state.initialize_from_swap_kms()?;
+            let deadline = _deadline
+                .checked_sub(crate::swap_persistence::RESPONSE_RESERVE)
+                .ok_or_else(|| {
+                    EnclaveError::InvalidRequest("initialization request deadline exceeded".into())
+                })?;
+            state.initialize_from_swap_kms_until(deadline)?;
             tracing::info!("swap keys initialized from KMS persistence");
         }
         #[cfg(not(feature = "rgb-swap"))]
