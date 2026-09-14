@@ -514,8 +514,9 @@ fn run_clone(
     donor_grpc: &str,
     donor_evm: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    use rand::RngCore;
     use utexo_bridge_parent::grpc_proto::parent_service_client::ParentServiceClient;
-    use utexo_bridge_parent::grpc_proto::CloneRequest;
+    use utexo_bridge_parent::grpc_proto::{AttestedPublicKeyRequest, CloneRequest};
 
     let donor_addr = hex::decode(donor_evm.trim_start_matches("0x"))?;
     if donor_addr.len() != 20 {
@@ -571,17 +572,105 @@ fn run_clone(
         clone_resp.donor_attestation,
     )?;
 
-    println!("[4/4] Verifying cloned identity...");
+    println!("[4/5] Verifying cloned identity (local)...");
     let keys = client.get_public_keys()?;
     let local_evm = hex::encode(&keys.evm_address);
     let want_evm = hex::encode(&donor_addr);
     print_keys_response(&keys);
-    if local_evm == want_evm {
-        println!("\nOK: cloned EVM address matches donor (0x{local_evm})");
+    if local_evm != want_evm {
+        return Err(
+            format!("clone mismatch: local EVM 0x{local_evm} != donor 0x{want_evm}").into(),
+        );
+    }
+    println!("      local EVM matches --donor-evm (0x{local_evm})");
+
+    // F03-AF-08: completion + the EVM check above only assert the primary EVM
+    // address. The same seed under a different baked Bitcoin/config could share
+    // that address while other derived fields differ. Same-PCR clones cannot
+    // diverge (identical baked config), but the CLI is the operator's
+    // independent gate, so cross-check ALL 13 identity/config fields against the
+    // donor's own reported bundle rather than trusting a single field.
+    println!("[5/5] Cross-checking full identity bundle against the donor...");
+    let mut nonce = [0u8; 32];
+    rand::thread_rng().fill_bytes(&mut nonce);
+    let donor_bundle = rt.block_on(async {
+        let endpoint = tonic::transport::Endpoint::from_shared(donor_grpc.to_string())?
+            .connect_timeout(DONOR_CONNECT_TIMEOUT)
+            .timeout(DONOR_RPC_TIMEOUT);
+        let mut grpc = ParentServiceClient::new(endpoint.connect().await?);
+        let resp = grpc
+            .attested_public_key(AttestedPublicKeyRequest {
+                nonce: nonce.to_vec(),
+            })
+            .await?;
+        Ok::<_, Box<dyn std::error::Error>>(resp.into_inner())
+    })?;
+
+    let mismatches = identity_field_mismatches(&keys, &donor_bundle);
+    if mismatches.is_empty() {
+        println!("\nOK: cloned identity matches the donor on all 13 fields (EVM 0x{local_evm})");
         Ok(())
     } else {
-        Err(format!("clone mismatch: local EVM 0x{local_evm} != donor 0x{want_evm}").into())
+        Err(format!(
+            "clone identity mismatch on {} of 13 field(s): {} - the requester derived a \
+             DIFFERENT identity/config than the donor despite a matching EVM address",
+            mismatches.len(),
+            mismatches.join(", ")
+        )
+        .into())
     }
+}
+
+/// Compare the local (requester) key bundle against the donor's reported bundle
+/// across all 13 identity/config fields (F03-AF-08). Returns the names of the
+/// fields that differ; an empty result means byte-identical identities. The
+/// donor bundle rides the authenticated clone endpoint, so this is an equality
+/// check on the reported values, complementing the EVM-only assertion.
+fn identity_field_mismatches(
+    local: &PublicKeysResponse,
+    donor: &utexo_bridge_parent::grpc_proto::AttestedPublicKeyResponse,
+) -> Vec<&'static str> {
+    let mut diff = Vec::new();
+    if local.evm_address != donor.evm_address {
+        diff.push("evm_address");
+    }
+    if local.evm_uncompressed_pub != donor.evm_uncompressed_pub {
+        diff.push("evm_uncompressed_pub");
+    }
+    if local.btc_compressed_pub != donor.btc_compressed_pub {
+        diff.push("btc_compressed_pub");
+    }
+    if local.btc_xpub != donor.btc_xpub {
+        diff.push("btc_xpub");
+    }
+    if local.master_fingerprint != donor.master_fingerprint {
+        diff.push("master_fingerprint");
+    }
+    if local.account_xpub_vanilla != donor.account_xpub_vanilla {
+        diff.push("account_xpub_vanilla");
+    }
+    if local.account_xpub_colored != donor.account_xpub_colored {
+        diff.push("account_xpub_colored");
+    }
+    if local.chain_id != donor.chain_id {
+        diff.push("chain_id");
+    }
+    if local.bridge_contract != donor.bridge_contract {
+        diff.push("bridge_contract");
+    }
+    if local.rgb_asset_id != donor.rgb_asset_id {
+        diff.push("rgb_asset_id");
+    }
+    if local.evm_gas_tx_uncompressed_pub != donor.evm_gas_tx_uncompressed_pub {
+        diff.push("evm_gas_tx_uncompressed_pub");
+    }
+    if local.evm_gas_tx_address != donor.evm_gas_tx_address {
+        diff.push("evm_gas_tx_address");
+    }
+    if local.ccd_ed25519_pub != donor.ccd_ed25519_pub {
+        diff.push("ccd_ed25519_pub");
+    }
+    diff
 }
 
 /// Parse a headers file: one hex-encoded 80-byte header per line, blank lines
