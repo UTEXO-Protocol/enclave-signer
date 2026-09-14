@@ -1604,8 +1604,14 @@ fn handle_get_clone(state: &EnclaveState, req: GetCloneRequest) -> Result<Enclav
     // Seal + donor attestation succeeded: keep the nonce recorded.
     reservation.commit();
 
+    // F03-AF-10 (telemetry): a donor never consumes its seed, so it can export
+    // repeatedly. Make each export observable (and optionally alert on volume
+    // via CLONE_EXPORT_SOFT_CAP). This does NOT cap exports - a hard quota /
+    // revocation is an owner custody-policy decision (see OWNER-DECISIONS).
+    let export_count = state.record_seed_export(&req_encryption_pk);
     tracing::info!(
         cluster_pk = %hex::encode(our_evm),
+        seed_export_count = export_count,
         "GetClone: sealed seed for requester"
     );
 

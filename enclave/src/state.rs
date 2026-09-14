@@ -1,4 +1,5 @@
 use std::collections::{HashSet, VecDeque};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
@@ -84,6 +85,15 @@ const DEFAULT_OP_DEDUP_TTL: Duration = Duration::from_secs(24 * 60 * 60);
 /// entry. On overflow inside one TTL window the oldest entry is evicted rather
 /// than wedging signing. See [`EnclaveState::op_replay_guard`].
 const DEFAULT_OP_DEDUP_MAX: usize = 100_000;
+
+/// Env var naming a **soft** alerting threshold on the number of times this
+/// donor instance has exported its seed via `GetClone` (F03-AF-10, telemetry
+/// slice). `0` (the default when unset/invalid) disables the threshold: export
+/// is *never* blocked here, because a hard quota is a custody/recovery policy
+/// decision the owner must version (a wrong cap breaks legitimate re-cloning).
+/// When set > 0, crossing it only emits a loud warning so operators can alert
+/// on anomalous export volume without changing handshake behavior.
+const CLONE_EXPORT_SOFT_CAP_ENV: &str = "CLONE_EXPORT_SOFT_CAP";
 
 /// Replay guard for attestation nonces, bounded by **time** (not just
 /// count) so a flooding parent cannot permanently wedge cloning.
@@ -293,6 +303,20 @@ pub struct EnclaveState {
     /// It stops honest listener retries and naive same-tuple replay; the
     /// durable guard is an on-chain ticket.
     pub op_replay_guard: NonceReplayGuard,
+
+    /// Lifetime count of successful seed exports served by this instance as a
+    /// donor (F03-AF-10, telemetry). An `Active` donor never consumes its seed,
+    /// so it can export repeatedly; this counter makes that observable. It does
+    /// NOT gate export - the audit flags a hard quota/revocation as a
+    /// custody-policy decision the owner must version, since a wrong cap would
+    /// block legitimate recovery re-clones. Volatile (resets on restart), which
+    /// is fine: it is an alerting signal, not a durable custody ledger.
+    seed_export_count: AtomicU64,
+
+    /// Soft alerting threshold for [`Self::seed_export_count`]. `0` disables it
+    /// (the default). Read once at construction from
+    /// [`CLONE_EXPORT_SOFT_CAP_ENV`]; crossing it warns but never blocks.
+    seed_export_soft_cap: u64,
 }
 
 impl Default for EnclaveState {
@@ -312,7 +336,39 @@ impl EnclaveState {
                 DEFAULT_OP_DEDUP_MAX,
                 DEFAULT_OP_DEDUP_TTL,
             ),
+            seed_export_count: AtomicU64::new(0),
+            seed_export_soft_cap: std::env::var(CLONE_EXPORT_SOFT_CAP_ENV)
+                .ok()
+                .and_then(|v| v.trim().parse::<u64>().ok())
+                .unwrap_or(0),
         }
+    }
+
+    /// Record a successful donor seed export and return the new lifetime count
+    /// (F03-AF-10, telemetry). Emits a security-relevant log on every export;
+    /// if a soft cap is configured and now exceeded, emits an additional loud
+    /// warning. Never blocks - enforcement is an owner custody-policy decision.
+    pub fn record_seed_export(&self, requester_pk: &[u8; 32]) -> u64 {
+        let count = self.seed_export_count.fetch_add(1, Ordering::Relaxed) + 1;
+        tracing::warn!(
+            seed_export_count = count,
+            requester_pk = %hex::encode(requester_pk),
+            "GetClone: donor exported its seed (F03-AF-10 telemetry)"
+        );
+        if self.seed_export_soft_cap > 0 && count > self.seed_export_soft_cap {
+            tracing::warn!(
+                seed_export_count = count,
+                soft_cap = self.seed_export_soft_cap,
+                "GetClone: seed-export soft cap exceeded - review donor custody \
+                 (alert only, export not blocked)"
+            );
+        }
+        count
+    }
+
+    /// Current lifetime seed-export count for this instance (F03-AF-10).
+    pub fn seed_export_count(&self) -> u64 {
+        self.seed_export_count.load(Ordering::Relaxed)
     }
 
     pub fn network(&self) -> Network {
@@ -586,6 +642,18 @@ mod tests {
         let state = EnclaveState::new(Network::Bitcoin);
         assert_eq!(state.phase_name(), "initial");
         assert!(!state.is_initialized());
+    }
+
+    #[test]
+    fn seed_export_counter_increments_monotonically() {
+        // F03-AF-10 (telemetry): each donor export bumps the lifetime counter
+        // and returns the new value; it never blocks regardless of count.
+        let state = EnclaveState::new(Network::Bitcoin);
+        assert_eq!(state.seed_export_count(), 0);
+        assert_eq!(state.record_seed_export(&[1u8; 32]), 1);
+        assert_eq!(state.record_seed_export(&[2u8; 32]), 2);
+        assert_eq!(state.record_seed_export(&[3u8; 32]), 3);
+        assert_eq!(state.seed_export_count(), 3);
     }
 
     #[test]
