@@ -314,6 +314,9 @@ def main():
             if host != "127.0.0.1" or not 1 <= port <= 65535:
                 raise BrokerError("invalid_tcp_address")
             listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            # Permit immediate development-process restart while accepted TCP
+            # connections are in TIME_WAIT. The production vsock path is unchanged.
+            listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             address = (host, port)
         else:
             listener = socket.socket(socket.AF_VSOCK, socket.SOCK_STREAM)
