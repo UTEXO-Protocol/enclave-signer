@@ -233,6 +233,33 @@ fn clone_rejects_wrong_cluster_public_key() {
 }
 
 #[test]
+fn clone_donor_rejects_request_armed_for_a_different_target() {
+    // F03-AF-07: the requester arms a digest for cluster identity X (not this
+    // donor). A relaying parent then rewrites the plaintext `cluster_public_key`
+    // wire field to the donor's OWN address to slip past the donor self-check
+    // (step 1). Before the target was folded into the HMAC this cleared the
+    // digest gate and the donor exported its seed; now the digest - computed by
+    // the requester over X - fails to verify against the donor's own identity,
+    // so no seed is ever sealed.
+    let (donor_port, donor_keys) = start_donor();
+    let requester_port = start_requester();
+
+    // Requester is armed for a foreign target, so its digest binds to X.
+    let foreign_target = [0xDEu8; 20];
+    let init = initiate_cloning(requester_port, CLONING_SECRET, &foreign_target);
+
+    // Parent forwards with cluster_public_key = the donor's real address to
+    // satisfy step 1, but leaves the requester's X-bound digest untouched.
+    let err = request_get_clone(donor_port, &donor_keys.evm_address, &init)
+        .expect_err("donor must reject a request armed for a different target identity");
+    assert!(
+        err.message.contains("digest") || err.message.contains("cloning"),
+        "expected a digest-binding rejection (F03-AF-07), got: {}",
+        err.message
+    );
+}
+
+#[test]
 fn clone_rejects_tampered_ciphertext() {
     let (donor_port, donor_keys) = start_donor();
     let requester_port = start_requester();
@@ -416,8 +443,21 @@ fn clone_donor_rejects_wire_pubkey_not_matching_attestation() {
         .clone()
         .try_into()
         .expect("32-byte pubkey");
-    tampered.cloning_digest =
-        utexo_bridge_enclave::cloning::make_cloning_digest(CLONING_SECRET, &tampered_pk).to_vec();
+    // F03-AF-07: the digest is now bound to the target donor cluster identity,
+    // so recompute it over the donor's own EVM address (the value this request
+    // carries in `cluster_public_key`) - otherwise it would abort at the
+    // target-binding check instead of the pubkey-binding check under test.
+    let donor_target: [u8; 20] = donor_keys
+        .evm_address
+        .clone()
+        .try_into()
+        .expect("20-byte donor evm address");
+    tampered.cloning_digest = utexo_bridge_enclave::cloning::make_cloning_digest(
+        CLONING_SECRET,
+        &tampered_pk,
+        &donor_target,
+    )
+    .to_vec();
     assert_ne!(
         tampered.encryption_pubkey, init.encryption_pubkey,
         "the tampered wire pubkey must differ from the attested one"

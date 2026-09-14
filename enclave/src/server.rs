@@ -1467,7 +1467,13 @@ fn handle_initiate_cloning(
     let encryption_pubkey = session.public_key();
 
     let nonce = fresh_nonce()?;
-    let cloning_digest = cloning::make_cloning_digest(&req.cloning_secret, &encryption_pubkey);
+    // F03-AF-07: bind the digest to the *target* cluster identity this
+    // requester intends to clone from. In a legitimate clone the donor shares
+    // this same cluster identity, so `cluster_public_key` here == the donor's
+    // own EVM address. Folding it in stops a relaying parent from redirecting
+    // this armed request to a donor of a different identity.
+    let cloning_digest =
+        cloning::make_cloning_digest(&req.cloning_secret, &encryption_pubkey, &cluster_public_key);
 
     // Bind both the X25519 pubkey and the digest into the NSM signature:
     // the parent cannot rewrite either without invalidating the attestation.
@@ -1527,16 +1533,20 @@ fn handle_get_clone(state: &EnclaveState, req: GetCloneRequest) -> Result<Enclav
         )));
     }
 
-    // 2. Digest authenticity: HMAC(donor_secret, encryption_pubkey) must
-    //    match. Proves the caller holds the operator's cloning secret. This
-    //    gate uses only cheap wire values, so it runs BEFORE the expensive
-    //    attestation verification below: an unauthenticated caller is rejected
-    //    without tying up a worker on certificate-chain / COSE-signature work
-    //    (F03-AF-20). The pubkey/digest bindings (steps 4-5) still tie these
-    //    same wire values to the NSM-signed attestation, so moving this up
-    //    loosens nothing.
+    // 2. Digest authenticity: HMAC(donor_secret, encryption_pubkey ‖ our_evm)
+    //    must match. Proves the caller holds the operator's cloning secret AND
+    //    that the request was armed for *this* donor's cluster identity
+    //    (F03-AF-07). We bind to `req_cluster_pk`, which step 1 already proved
+    //    equals `our_evm`, so a request armed for a different identity fails
+    //    here before any seed is exported. This gate uses only cheap wire
+    //    values, so it runs BEFORE the expensive attestation verification
+    //    below: an unauthenticated caller is rejected without tying up a worker
+    //    on certificate-chain / COSE-signature work (F03-AF-20). The
+    //    pubkey/digest bindings (steps 4-5) still tie these same wire values to
+    //    the NSM-signed attestation, so moving this up loosens nothing.
     state.with_donor_cloning_secret(|secret| {
-        if !cloning::verify_cloning_digest(secret, &req_encryption_pk, &req_digest) {
+        if !cloning::verify_cloning_digest(secret, &req_encryption_pk, &req_cluster_pk, &req_digest)
+        {
             return Err(EnclaveError::DigestMismatch);
         }
         Ok(())

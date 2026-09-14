@@ -97,25 +97,43 @@ impl std::fmt::Debug for CloneSession {
     }
 }
 
-/// Compute HMAC-SHA256(secret, encryption_pubkey).
+/// Compute HMAC-SHA256(secret, encryption_pubkey ‖ target_cluster_pk).
 ///
 /// Proves the holder of the cloning secret authorized the request without
-/// sending the secret. The message is the raw 32 bytes of the X25519 pubkey, so
-/// there is no canonicalization ambiguity.
-pub fn make_cloning_digest(secret: &str, encryption_pubkey: &[u8; 32]) -> [u8; 32] {
+/// sending the secret, AND binds the request to the *intended donor cluster
+/// identity* (F03-AF-07). Both message parts are fixed-width (32 + 20 bytes),
+/// so the concatenation is unambiguous without a length prefix.
+///
+/// Why bind the target: without it the digest is target-agnostic, so a
+/// malicious/relaying parent can take a requester armed for cluster identity X
+/// and replay it to a donor of a *different* cluster identity Y (setting the
+/// plaintext `cluster_public_key` wire field to Y to satisfy the donor's own
+/// self-check). The donor Y would then export its sealed seed before the
+/// requester's downstream identity check can reject the mismatched result. With
+/// the target folded in, the requester's digest is computed over X while donor
+/// Y recomputes over its own identity Y → the HMAC mismatches and Y refuses to
+/// export at all.
+pub fn make_cloning_digest(
+    secret: &str,
+    encryption_pubkey: &[u8; 32],
+    target_cluster_pk: &[u8; 20],
+) -> [u8; 32] {
     let mut mac = <HmacSha256 as Mac>::new_from_slice(secret.as_bytes())
         .expect("HMAC accepts any key length");
     mac.update(encryption_pubkey);
+    mac.update(target_cluster_pk);
     mac.finalize().into_bytes().into()
 }
 
-/// Constant-time verification of a cloning digest.
+/// Constant-time verification of a cloning digest, including the target
+/// cluster-identity binding (F03-AF-07).
 pub fn verify_cloning_digest(
     secret: &str,
     encryption_pubkey: &[u8; 32],
+    target_cluster_pk: &[u8; 20],
     digest: &[u8; 32],
 ) -> bool {
-    let expected = make_cloning_digest(secret, encryption_pubkey);
+    let expected = make_cloning_digest(secret, encryption_pubkey, target_cluster_pk);
     expected.ct_eq(digest).into()
 }
 
@@ -263,8 +281,9 @@ mod tests {
     fn digest_roundtrip_ok() {
         let secret = "correct horse battery staple";
         let pubkey = [7u8; 32];
-        let digest = make_cloning_digest(secret, &pubkey);
-        assert!(verify_cloning_digest(secret, &pubkey, &digest));
+        let target = [3u8; 20];
+        let digest = make_cloning_digest(secret, &pubkey, &target);
+        assert!(verify_cloning_digest(secret, &pubkey, &target, &digest));
     }
 
     #[test]
@@ -316,24 +335,43 @@ mod tests {
     #[test]
     fn digest_rejects_wrong_secret() {
         let pubkey = [7u8; 32];
-        let digest = make_cloning_digest("right", &pubkey);
-        assert!(!verify_cloning_digest("wrong", &pubkey, &digest));
+        let target = [3u8; 20];
+        let digest = make_cloning_digest("right", &pubkey, &target);
+        assert!(!verify_cloning_digest("wrong", &pubkey, &target, &digest));
     }
 
     #[test]
     fn digest_rejects_wrong_pubkey() {
         let secret = "s";
-        let digest = make_cloning_digest(secret, &[1u8; 32]);
-        assert!(!verify_cloning_digest(secret, &[2u8; 32], &digest));
+        let target = [3u8; 20];
+        let digest = make_cloning_digest(secret, &[1u8; 32], &target);
+        assert!(!verify_cloning_digest(secret, &[2u8; 32], &target, &digest));
+    }
+
+    #[test]
+    fn digest_rejects_wrong_target_cluster_pk() {
+        // F03-AF-07: a digest armed for target X must not verify against a
+        // different donor cluster identity Y, even with the same secret and
+        // encryption pubkey. This is the core relay-to-wrong-donor guard.
+        let secret = "correct horse battery staple";
+        let pubkey = [7u8; 32];
+        let digest = make_cloning_digest(secret, &pubkey, &[0xAAu8; 20]);
+        assert!(!verify_cloning_digest(
+            secret,
+            &pubkey,
+            &[0xBBu8; 20],
+            &digest
+        ));
     }
 
     #[test]
     fn digest_detects_single_bit_flip() {
         let secret = "s";
         let pubkey = [9u8; 32];
-        let mut digest = make_cloning_digest(secret, &pubkey);
+        let target = [3u8; 20];
+        let mut digest = make_cloning_digest(secret, &pubkey, &target);
         digest[0] ^= 0x01;
-        assert!(!verify_cloning_digest(secret, &pubkey, &digest));
+        assert!(!verify_cloning_digest(secret, &pubkey, &target, &digest));
     }
 
     #[test]
