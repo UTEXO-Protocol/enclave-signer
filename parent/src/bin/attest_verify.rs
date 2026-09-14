@@ -171,9 +171,9 @@ fn parse_expect_gas_to(s: &Option<String>) -> Result<[u8; 20]> {
 fn parse_hex20(s: &str, flag: &str) -> Result<[u8; 20]> {
     let stripped = s.strip_prefix("0x").unwrap_or(s);
     let bytes = hex::decode(stripped).with_context(|| format!("{flag} '{s}' is not hex"))?;
-    bytes.try_into().map_err(|v: Vec<u8>| {
-        anyhow::anyhow!("{flag} must be 20 bytes, got {}", v.len())
-    })
+    bytes
+        .try_into()
+        .map_err(|v: Vec<u8>| anyhow::anyhow!("{flag} must be 20 bytes, got {}", v.len()))
 }
 
 /// Parse `--expect-gas-selectors` (comma-separated 4-byte hex) into selectors.
