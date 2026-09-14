@@ -1452,11 +1452,9 @@ fn handle_initiate_cloning(
     state: &EnclaveState,
     req: InitiateCloningRequest,
 ) -> Result<EnclaveResponse> {
-    if req.cloning_secret.is_empty() {
-        return Err(EnclaveError::InvalidRequest(
-            "cloning_secret is required".into(),
-        ));
-    }
+    // F03-AF-26: fail-closed strength gate (also covers the empty case). The
+    // secret is the HMAC key, so a weak one is offline-brute-forceable.
+    cloning::validate_cloning_secret(&req.cloning_secret)?;
     let cluster_public_key: [u8; 20] =
         req.cluster_public_key.as_slice().try_into().map_err(|_| {
             EnclaveError::InvalidRequest(format!(

@@ -119,6 +119,53 @@ pub fn verify_cloning_digest(
     expected.ct_eq(digest).into()
 }
 
+/// Fail-closed strength floor for an operator-supplied cloning secret
+/// (F03-AF-26). The secret is used *directly* as the HMAC-SHA256 key in
+/// [`make_cloning_digest`], so a captured `(encryption_pubkey, digest)` pair
+/// lets an attacker offline-brute-force a weak secret and forge requester
+/// authorization. 32 bytes is the minimum accepted length.
+pub const MIN_CLONING_SECRET_BYTES: usize = 32;
+
+/// Minimum distinct byte values - a cheap floor against degenerate low-entropy
+/// secrets (`"aaaa..."`, `"0101..."`). A uniformly random 32-byte secret has
+/// ~32 distinct bytes; even hex-encoded (16 symbols) it clears this. This is a
+/// floor, NOT an entropy oracle (true entropy of an arbitrary string is
+/// unknowable in-enclave), so the operator still owns generation/rotation.
+pub const MIN_CLONING_SECRET_DISTINCT_BYTES: usize = 8;
+
+/// Reject an empty / too-short / degenerate-entropy cloning secret before it is
+/// ever used as an HMAC key (F03-AF-26). Called on both entry points: the donor
+/// `init` ([`crate::state::EnclaveState::set_donor_cloning_secret`]) and the
+/// requester `InitiateCloning` handler. Wire-compatible: the secret is still
+/// carried the same way, only trivially weak values are now refused fail-closed.
+pub fn validate_cloning_secret(secret: &str) -> Result<()> {
+    let bytes = secret.as_bytes();
+    if bytes.is_empty() {
+        return Err(EnclaveError::InvalidRequest(
+            "cloning_secret is required".into(),
+        ));
+    }
+    if bytes.len() < MIN_CLONING_SECRET_BYTES {
+        return Err(EnclaveError::InvalidRequest(format!(
+            "cloning_secret too short: {} bytes < {MIN_CLONING_SECRET_BYTES} minimum",
+            bytes.len()
+        )));
+    }
+    let mut seen = [false; 256];
+    let mut distinct = 0usize;
+    for &b in bytes {
+        if !core::mem::replace(&mut seen[b as usize], true) {
+            distinct += 1;
+        }
+    }
+    if distinct < MIN_CLONING_SECRET_DISTINCT_BYTES {
+        return Err(EnclaveError::InvalidRequest(format!(
+            "cloning_secret too low-entropy: {distinct} distinct bytes < {MIN_CLONING_SECRET_DISTINCT_BYTES} minimum"
+        )));
+    }
+    Ok(())
+}
+
 /// Donor side: seal `seed` to the requester's X25519 pubkey using a fresh
 /// ephemeral keypair. Returns `(ciphertext, our_pubkey)`.
 ///
@@ -218,6 +265,52 @@ mod tests {
         let pubkey = [7u8; 32];
         let digest = make_cloning_digest(secret, &pubkey);
         assert!(verify_cloning_digest(secret, &pubkey, &digest));
+    }
+
+    #[test]
+    fn validate_secret_rejects_empty() {
+        assert!(matches!(
+            validate_cloning_secret(""),
+            Err(EnclaveError::InvalidRequest(_))
+        ));
+    }
+
+    #[test]
+    fn validate_secret_rejects_too_short() {
+        // 31 bytes (< 32), high distinct so it fails ONLY on length.
+        let s = "0123456789abcdef0123456789abcde";
+        assert_eq!(s.len(), 31);
+        assert!(matches!(
+            validate_cloning_secret(s),
+            Err(EnclaveError::InvalidRequest(_))
+        ));
+    }
+
+    #[test]
+    fn validate_secret_rejects_low_entropy() {
+        // 64 bytes but a single distinct value -> trivially brute-forceable.
+        let s = "a".repeat(64);
+        assert!(matches!(
+            validate_cloning_secret(&s),
+            Err(EnclaveError::InvalidRequest(_))
+        ));
+    }
+
+    #[test]
+    fn validate_secret_accepts_64_hex() {
+        // Shape of the real stage secret: 32 random bytes hex-encoded ->
+        // 64 chars, 16 distinct symbols.
+        let s = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        assert_eq!(s.len(), 64);
+        assert!(validate_cloning_secret(s).is_ok());
+    }
+
+    #[test]
+    fn validate_secret_accepts_min_length_boundary() {
+        // Exactly the 32-byte floor, well-distributed.
+        let s = "0123456789abcdef0123456789abcdef";
+        assert_eq!(s.len(), MIN_CLONING_SECRET_BYTES);
+        assert!(validate_cloning_secret(s).is_ok());
     }
 
     #[test]

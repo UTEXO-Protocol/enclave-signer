@@ -6,7 +6,7 @@ use bip39::Mnemonic;
 use bitcoin::Network;
 use secrecy::{ExposeSecret, SecretBox};
 
-use crate::cloning::CloneSession;
+use crate::cloning::{validate_cloning_secret, CloneSession};
 use crate::error::{EnclaveError, Result};
 use crate::keys::{KeyInfo, KeyManager};
 
@@ -323,7 +323,12 @@ impl EnclaveState {
     /// operator-provided env var (e.g. `UTEXO_CLONING_SECRET`). Idempotent
     /// and overwrites any previous value. The secret is wrapped in
     /// `SecretBox` for zeroize-on-drop.
+    ///
+    /// Rejects empty / too-short / degenerate-entropy secrets fail-closed
+    /// (F03-AF-26): the value is used directly as an HMAC key, so a weak
+    /// secret is offline-brute-forceable from a captured digest.
     pub fn set_donor_cloning_secret(&self, secret: String) -> Result<()> {
+        validate_cloning_secret(&secret)?;
         let mut guard = self
             .donor_cloning_secret
             .lock()
