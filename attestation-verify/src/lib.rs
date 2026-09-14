@@ -179,6 +179,34 @@ pub fn build_mock_document_with_pcrs(
 
 // Shared helpers
 
+/// Production fail-closed guard against debug-mode enclaves (F03-AF-12 /
+/// F02-AF-08). A genuine enclave measured in production has non-zero PCR0/1/2;
+/// all-zero PCRs mean it booted in debug mode with NO measurement. Since every
+/// debug enclave shares those all-zero PCRs, accepting them would let any debug
+/// EIF (with a genuine NSM signature) impersonate the trusted enclave — the
+/// bytewise `verify_pcrs` check passes when both expected and actual are zero.
+///
+/// Compiled in only when the `allow-debug-pcrs` feature is OFF (the release
+/// default); a debug EIF built with the feature skips this and accepts zero
+/// PCRs so stage clone drills can run in `ENCLAVE_DEBUG_MODE`.
+#[cfg(not(feature = "allow-debug-pcrs"))]
+fn reject_debug_pcrs(pcrs: &HashMap<u32, Vec<u8>>) -> Result<()> {
+    let all_zero = [0u32, 1, 2].iter().all(|idx| {
+        pcrs.get(idx)
+            .map(|p| !p.is_empty() && p.iter().all(|&b| b == 0))
+            .unwrap_or(false)
+    });
+    if all_zero {
+        return Err(VerifyError::Attestation(
+            "all-zero PCR0/1/2: attestation is from a debug-mode enclave (no measurement) \
+             and is rejected by the production verifier; build with the unsafe \
+             `allow-debug-pcrs` feature only for debug/stage drills"
+                .into(),
+        ));
+    }
+    Ok(())
+}
+
 fn verify_pcrs(pcrs: &HashMap<u32, Vec<u8>>, expected: &ExpectedPcrs) -> Result<()> {
     let check = |idx: u32, expected_bytes: &[u8; 48]| -> Result<()> {
         let actual = pcrs
@@ -281,6 +309,13 @@ IwLz3/Y=
         verify_certificate_chain(&attestation.certificate, &attestation.cabundle, &cose)?;
 
         let nonce = check_nonce(&attestation.nonce, expected_nonce)?;
+
+        // F03-AF-12: reject debug-mode (all-zero) PCRs before the bytewise
+        // expected/actual comparison, so a zeroed `expected` cannot match a
+        // zeroed `actual`. Compiled out under `allow-debug-pcrs` (debug EIFs).
+        #[cfg(not(feature = "allow-debug-pcrs"))]
+        reject_debug_pcrs(&attestation.pcrs)?;
+
         verify_pcrs(&attestation.pcrs, expected_pcrs)?;
 
         let enclave_pubkey = attestation
@@ -991,6 +1026,35 @@ mod mock {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // F03-AF-12: the debug-PCR guard is compiled in only for the production
+    // (default) build; a debug EIF (`allow-debug-pcrs`) skips it by design.
+    #[cfg(not(feature = "allow-debug-pcrs"))]
+    #[test]
+    fn reject_debug_pcrs_flags_all_zero_but_allows_measured() {
+        let zeros = || vec![0u8; 48];
+        let mut all_zero = HashMap::new();
+        all_zero.insert(0u32, zeros());
+        all_zero.insert(1u32, zeros());
+        all_zero.insert(2u32, zeros());
+        assert!(
+            reject_debug_pcrs(&all_zero).is_err(),
+            "all-zero PCR0/1/2 must be rejected by the production verifier"
+        );
+
+        // A single measured (non-zero) PCR is enough to clear the debug guard;
+        // the real bytewise expected/actual check still runs afterwards.
+        let mut measured = all_zero.clone();
+        measured.insert(0u32, vec![1u8; 48]);
+        assert!(reject_debug_pcrs(&measured).is_ok());
+
+        // A fully measured set passes the guard.
+        let mut full = HashMap::new();
+        full.insert(0u32, vec![0xa1u8; 48]);
+        full.insert(1u32, vec![0xb2u8; 48]);
+        full.insert(2u32, vec![0xc3u8; 48]);
+        assert!(reject_debug_pcrs(&full).is_ok());
+    }
 
     #[test]
     fn expected_pcrs_from_hex_roundtrip() {

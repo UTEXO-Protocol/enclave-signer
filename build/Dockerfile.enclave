@@ -57,12 +57,18 @@ ENV CARGO_INCREMENTAL=0 \
 # `rgb-swap` picks the send/receive RGB flow (see enclave/src/networks/rgb/flow/).
 # It is in the default feature set, but named here so the shipped flow is
 # explicit in the image that measures into PCR0.
+# F03-AF-12: optional EXTRA cargo features for DEBUG EIFs ONLY (e.g.
+# `allow-debug-pcrs`, which lets stage clone-drills running in
+# ENCLAVE_DEBUG_MODE — where the runtime PCRs are all zero — verify each
+# other). Empty by default, so production images are byte-identical and PCR0 is
+# unchanged. NEVER pass this for a production build.
+ARG ENCLAVE_DEBUG_FEATURES=""
 RUN --mount=type=secret,id=github_token \
     --mount=type=secret,id=consignment_key \
     --mount=type=secret,id=consensus_key \
     --mount=type=secret,id=ops_key \
     --mount=type=secret,id=schemas_key \
-    sh /build/build/with-private-deps.sh enclave cargo build --release --locked --features vsock,rgb,rgb-swap,ccd,evm-rpc
+    sh /build/build/with-private-deps.sh enclave cargo build --release --locked --features vsock,rgb,rgb-swap,ccd,evm-rpc${ENCLAVE_DEBUG_FEATURES:+,${ENCLAVE_DEBUG_FEATURES}}
 
 
 # --- Runtime ---
