@@ -1,14 +1,15 @@
 # name version immutable-commit https-git-url
-# Versions match AWS SDK containers/Dockerfile.al2 at the SDK commit below.
-aws-lc v1.12.0 cb7712dfa896d32d55992e2cb13d5fa54fb77002 https://github.com/awslabs/aws-lc.git
-s2n-tls v1.3.46 e954ee5dc878c5c343d35574e7d07246a1e59314 https://github.com/aws/s2n-tls.git
-aws-c-common v0.8.0 be35e65a6c67ae2ffd126516c9783ac1dd2e8910 https://github.com/awslabs/aws-c-common.git
-aws-c-sdkutils v0.1.2 e3c23f4aca31d9e66df25827645f72cbcbfb657a https://github.com/awslabs/aws-c-sdkutils.git
-aws-c-cal v0.5.18 1458c70a26877345ca28e333a092096afd410774 https://github.com/awslabs/aws-c-cal.git
-aws-c-io v0.11.0 8f4508f5ec7d2949d5545e2b1ddcd1beb47a76a8 https://github.com/awslabs/aws-c-io.git
-aws-c-compression v0.2.14 5fab8bc5ab5321d86f6d153b06062419080820ec https://github.com/awslabs/aws-c-compression.git
-aws-c-http v0.7.6 0600662610aa871a11aebe6ed67a11997317cbef https://github.com/awslabs/aws-c-http.git
-aws-c-auth v0.6.15 831fa583b83574db29cbae139b42e0d7a1d1ebb8 https://github.com/awslabs/aws-c-auth.git
-json-c json-c-0.16-20220414 2f2ddc1f2dbca56c874e8f9c31b5b963202d80e7 https://github.com/json-c/json-c.git
-aws-nitro-enclaves-nsm-api v0.4.0 4b851f3006c6fa98f23dcffb2cba03b39de9b8af https://github.com/aws/aws-nitro-enclaves-nsm-api.git
-aws-nitro-enclaves-sdk-c main-2026-03-31 cd61b6187c8b20867ba4368d1ae62c5790c0269a https://github.com/aws/aws-nitro-enclaves-sdk-c.git
+# Official SDK with current patched AWS-LC/CRT releases; sources stay unmodified.
+# s2n >=1.7.6 fixes GHSA-684c-v35q-fvx7; aws-c-http >=0.11.0 fixes GHSA-rmjr-3qpm-vh98.
+aws-lc v5.8.0 a3d1e685552f05a9ad04a2946962c03e97bdecac https://github.com/awslabs/aws-lc.git
+s2n-tls v1.7.10 bce022f4195c290175b70e925e08a458221608f0 https://github.com/aws/s2n-tls.git
+aws-c-common v1.0.0 3d274e1af954592b344a33fdf042af37b936f3d5 https://github.com/awslabs/aws-c-common.git
+aws-c-sdkutils v1.0.0 de0fbe807a409158c3fa285bafb88120c8989609 https://github.com/awslabs/aws-c-sdkutils.git
+aws-c-cal v1.0.0 2441187f3bdbe0f0fe7fa5dd1736be98227ad556 https://github.com/awslabs/aws-c-cal.git
+aws-c-io v1.0.0 1685abcd331dcced3da63b8d4cd3ced38a8bb14a https://github.com/awslabs/aws-c-io.git
+aws-c-compression v1.0.0 891312c058e69a4d55f569f79dde1ee221982532 https://github.com/awslabs/aws-c-compression.git
+aws-c-http v1.0.0 2b563f8a7bd67a902a8b558bb44113748045877c https://github.com/awslabs/aws-c-http.git
+aws-c-auth v1.0.0 055e822f021d1cab11d608b94ac34de250986134 https://github.com/awslabs/aws-c-auth.git
+json-c json-c-0.19-20260627 aa716cd8d663c976b99b0f30f102ee1d8ef63146 https://github.com/json-c/json-c.git
+aws-nitro-enclaves-nsm-api v0.5.2 1993eeb0620d35f5cefc50b17638b432325328f9 https://github.com/aws/aws-nitro-enclaves-nsm-api.git
+aws-nitro-enclaves-sdk-c v0.4.5 cd61b6187c8b20867ba4368d1ae62c5790c0269a https://github.com/aws/aws-nitro-enclaves-sdk-c.git

@@ -1,6 +1,6 @@
 # RGB-swap KMS helper
 
-`swap-kms-tool` links the unmodified official [AWS Nitro Enclaves SDK for C](https://github.com/aws/aws-nitro-enclaves-sdk-c/tree/cd61b6187c8b20867ba4368d1ae62c5790c0269a), using the same AWS libraries as `kmstool_enclave_cli`. The dependency build pins the SDK and its dependencies to immutable revisions.
+`swap-kms-tool` links the unmodified official [AWS Nitro Enclaves SDK for C](https://github.com/aws/aws-nitro-enclaves-sdk-c/tree/cd61b6187c8b20867ba4368d1ae62c5790c0269a), using the same AWS libraries as `kmstool_enclave_cli` at maintained, security-updated versions. The dependency build pins the SDK and its dependencies to immutable revisions; it intentionally does not copy the obsolete dependency versions in upstream’s sample Dockerfile.
 
 The stock CLI's `genkey` command exposes only 16- and 32-byte key specs. RGB swaps retain their existing 64-byte seed and four-field encryption context. This adapter builds SDK request structures with `NumberOfBytes=64`, invokes the SDK's authenticated HTTPS REST client, and checks the KMS response's key ARN, absence of plaintext, and decrypt algorithm before recipient unwrap. Attestation, RSA generation, CMS parsing, RSA-OAEP and AES decryption all call the official SDK code used by kmstool; no SDK source patch or replacement cryptography is included.
 
@@ -8,7 +8,9 @@ Each invocation uses direct vsock to parent CID 3, port 8003. The configured reg
 
 The measured Rust enclave invokes `/usr/local/bin/swap-kms-tool` once per request, using private stdin/stdout pipes. Input is one JSON object containing `operation` (`generate` or `decrypt`), `region`, full `key_arn`, `seed_id`, `bitcoin_network`, `access_key_id`, `secret_access_key`, and `session_token`. Decrypt additionally requires base64 `ciphertext`. Generation returns exactly `key_arn` and base64 `ciphertext`. Decryption returns exactly `key_arn` and base64 `seed`; Rust rejects fields belonging to the other operation, including null fields. The four KMS encryption context entries are constructed internally: `application=utexo-enclave-signer`, `flow=rgb-swap`, `seed_id`, and `bitcoin_network`.
 
-Messages are limited to 64 KiB, ciphertext blobs to 6144 bytes, and unwrapped seeds to exactly 64 bytes. Core dumps are disabled; execution, CPU and address space are bounded. Credentials and seeds never enter command arguments, environment variables, temporary files or logs. Owned raw seed and credential buffers are erased during cleanup; json-c's input copies exist only for the short-lived helper process. Rust clears the child environment and rejects failed, oversized or malformed responses.
+Messages are limited to 64 KiB, ciphertext blobs to 6144 bytes, and unwrapped seeds to exactly 64 bytes. Core dumps are disabled; execution, CPU and address space are bounded. Credentials and seeds never enter command arguments, environment variables, temporary files or logs. Owned raw seed and credential buffers are erased during cleanup. Live json-c credential strings are overwritten through its public API immediately after creating the SDK credential strings, including rejected-input cleanup. Stdin is unbuffered to avoid another stdio credential copy. json-c parser scratch allocations remain protected by the short-lived process boundary; this is not a guarantee that every library-owned allocation is wiped. Rust clears the child environment and rejects failed, oversized or malformed responses.
+
+The build executes a native regression test proving that the pinned json-c erases the original credential allocation, including the maximum IPC string length. NSM uses upstream’s `libnsm.so.0` SONAME in the runtime; the unversioned symlink is needed only while linking.
 
 Build with CMake using only `-DCMAKE_PREFIX_PATH=/path/to/installed/prefix`. The dependency build installs the official exported CMS functions' header verbatim and records its checksum in `share/swap-kms/headers.sha256`. It uses json-c's installed CMake package; no separate SDK source path is required when building this helper. The helper and NSM runtime library are included only in RGB-swap images. Signing, HD derivation, S3 ciphertext persistence and RGB mint/burn behavior remain in their existing components.
 
@@ -31,12 +33,15 @@ retains only the behavior needed around the SDK:
   generation convenience API lacks our byte-count/context combination. Using
   them directly would remove checks or change the seed/policy contract. The
   short CMS call sequence uses the same exported AWS functions as kmstool.
-- A bootstrap reference keeps the pinned CRT event loop alive until connection
+- A bootstrap reference keeps the SDK-owned event loop alive until connection
   cleanup. Removing it can crash when the peer closes its HTTP response.
 
 The CMS header is under upstream's `internal/` directory. Installing it does
 not make it a stable public API. Both that dependency and the bootstrap wrapper
-must be reviewed on SDK upgrades. Do not remove checks merely to reduce line
+must be reviewed on SDK upgrades. CRT 1.0 also needs explicit installed CMake
+module/library paths for this SDK and build-time inclusion of its official
+hash-table and Linux vsock headers where upstream relied on transitive include
+order. These scoped compiler/CMake settings preserve unmodified upstream sources. Do not remove checks merely to reduce line
 count or replace them with additional response-interception wrappers.
 
 For an upgrade, compare the pinned SDK/CRT sources and API ownership rules,
@@ -52,3 +57,14 @@ GenerateDataKey request API supporting byte count and encryption context, a
 public recipient-unwrapping API or decrypt API exposing response metadata, and
 a client lifetime fix retaining its bootstrap through connection destruction.
 These are documented integration gaps; no upstream acceptance is assumed.
+
+## Security dependency baseline
+
+The manifest uses AWS-LC 5.8.0, s2n-tls 1.7.10, the coordinated AWS CRT 1.0.0
+releases, json-c 0.19 and NSM 0.5.2 with SDK 0.4.5. These contain the fixes for
+[s2n TLS record authentication](https://github.com/aws/s2n-tls/security/advisories/GHSA-684c-v35q-fvx7)
+and [HTTP/2 HPACK memory corruption](https://github.com/awslabs/aws-c-http/security/advisories/GHSA-rmjr-3qpm-vh98).
+The Docker builder verifies architecture-specific SHA-256 hashes of Go 1.27.1
+because AWS-LC requires Go 1.20 or newer; Bullseye's Go 1.15 is unsupported.
+Recheck the official advisories when updating pins; the manifest is a reviewed
+snapshot, not an assurance against future vulnerabilities.

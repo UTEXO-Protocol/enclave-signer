@@ -1,4 +1,5 @@
 /* RGB-swap custody adapter for the unmodified AWS Nitro Enclaves SDK for C. */
+#include <aws/common/hash_table.h>
 #include <aws/nitro_enclaves/kms.h>
 #include <aws/nitro_enclaves/nitro_enclaves.h>
 #include <aws/nitro_enclaves/internal/cms.h>
@@ -59,8 +60,26 @@ static void wipe(void *buffer, size_t length) {
     }
 }
 
-/* json-c owns its parsed strings. These copies live only in this short-lived
- * process; credentials are never passed through argv, environment or files. */
+/* Erase live parsed credential copies through json-c's public mutator before
+ * freeing them. For the pinned json-c, a same-length replacement reuses the
+ * existing allocation (covered by the native test); no private layout access.
+ * json-c parser scratch allocations still have process-lifetime confidentiality. */
+static void erase_input_credentials(struct json_object *json) {
+    static const char zeros[MESSAGE_LIMIT] = {0};
+    const char *fields[] = {"access_key_id", "secret_access_key", "session_token"};
+    for (size_t i = 0; i < sizeof(fields) / sizeof(fields[0]); i++) {
+        struct json_object *value = NULL;
+        if (json_object_object_get_ex(json, fields[i], &value) &&
+            json_object_get_type(value) == json_type_string) {
+            int length = json_object_get_string_len(value);
+            if (length > 0 && length <= MESSAGE_LIMIT) {
+                (void)json_object_set_string_len(value, zeros, length);
+            }
+        }
+    }
+}
+
+/* Credentials are never passed through argv, environment or files. */
 static const char *string_field(struct json_object *object, const char *name, size_t min, size_t max) {
     struct json_object *value = NULL;
     if (!json_object_object_get_ex(object, name, &value) ||
@@ -340,16 +359,19 @@ int main(int argc, char **argv) {
     (void)argv;
     struct rlimit no_core = {0, 0};
     struct rlimit address_space = {1024ULL * 1024 * 1024, 1024ULL * 1024 * 1024};
-    struct rlimit cpu = {30, 30};
+    struct rlimit cpu = {12, 12};
     /* The SDK buffers HTTP responses; bound the process as well as the parsed
-     * message. Rust independently enforces a 40-second timeout and pipe cap. */
+     * message. Rust also caps each helper at 12 seconds and uses the remaining
+     * aggregate recovery budget when that is shorter. */
     if (argc != 1 || setrlimit(RLIMIT_CORE, &no_core) || setrlimit(RLIMIT_AS, &address_space) ||
-        setrlimit(RLIMIT_CPU, &cpu) || prctl(PR_SET_DUMPABLE, 0) || setvbuf(stdout, NULL, _IONBF, 0)) {
+        setrlimit(RLIMIT_CPU, &cpu) || prctl(PR_SET_DUMPABLE, 0) || setvbuf(stdin, NULL, _IONBF, 0) ||
+        setvbuf(stdout, NULL, _IONBF, 0)) {
         return EXIT_FAILURE;
     }
-    alarm(35);
+    alarm(12);
     struct input input = {0};
     if (!read_input(&input)) {
+        erase_input_credentials(input.json);
         json_object_put(input.json);
         return EXIT_FAILURE;
     }
@@ -359,6 +381,7 @@ int main(int argc, char **argv) {
     struct aws_string *access_key = aws_string_new_from_c_str(allocator, input.access_key);
     struct aws_string *secret_key = aws_string_new_from_c_str(allocator, input.secret_key);
     struct aws_string *session_token = aws_string_new_from_c_str(allocator, input.session_token);
+    erase_input_credentials(input.json);
     struct aws_socket_endpoint endpoint = {.address = "3", .port = 8003};
     struct aws_nitro_enclaves_kms_client_configuration *config = NULL;
     struct aws_nitro_enclaves_kms_client *client = NULL;

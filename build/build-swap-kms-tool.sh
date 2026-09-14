@@ -1,5 +1,5 @@
 #!/bin/sh
-# Build the same unmodified SDK and CRT dependencies as kmstool_enclave_cli.
+# Build the unmodified kmstool SDK with pinned, security-updated CRT dependencies.
 # Requires Linux, C/C++ compilers, CMake, Ninja, Git, Go, Perl and Rust/Cargo.
 set -eu
 
@@ -18,10 +18,13 @@ mkdir -p "$build_dir/src" "$prefix/lib" "$prefix/include" "$prefix/share/swap-km
 
 # AWS libraries are static; only libnsm and platform libc libraries are shared.
 # Pin build paths in Cargo output as well as the enclave's release binary.
+export GIT_TERMINAL_PROMPT=0
 export CARGO_INCREMENTAL=0
 export RUSTFLAGS="${RUSTFLAGS:-} --remap-path-prefix=$build_dir=/swap-kms-build -C debuginfo=0"
 
-while read -r name version commit url; do
+# Keep the manifest on a separate descriptor: build tools must never consume
+# dependency records as stdin or prompt for credentials in an unattended build.
+while read -r name version commit url <&3; do
     case "$name" in ''|'#'*) continue ;; esac
     source_dir="$build_dir/src/$name"
     if [ ! -d "$source_dir/.git" ]; then
@@ -43,16 +46,16 @@ while read -r name version commit url; do
     done
 
     if [ "$name" = aws-nitro-enclaves-nsm-api ]; then
-        # Upstream v0.4.0 has no lockfile; use our resolved, checked-in lock
+        # Use our resolved, checked-in workspace lock
         # without modifying the SDK or its dependency source code.
         cp "$script_dir/swap-kms-nsm.Cargo.lock" "$source_dir/Cargo.lock"
-        # An explicit SONAME permits the runtime to load libnsm from its default
-        # library directory instead of embedding this build prefix in DT_NEEDED.
-        (cd "$source_dir" && CARGO_TARGET_DIR="$source_dir/target" cargo rustc \
-            --locked --release --jobs "$jobs" -p nsm-lib --lib -- \
-            -C link-arg=-Wl,-soname,libnsm.so)
+        # NSM 0.5.2 sets its official libnsm.so.0 SONAME. Preserve it in
+        # the runtime; the unversioned symlink is only for build-time discovery.
+        (cd "$source_dir" && CARGO_TARGET_DIR="$source_dir/target" cargo build \
+            --locked --release --jobs "$jobs" -p nsm-lib --lib)
         cp "$source_dir/Cargo.lock" "$prefix/share/swap-kms/nsm-Cargo.lock"
-        install -m 755 "$source_dir/target/release/libnsm.so" "$prefix/lib/libnsm.so"
+        install -m 755 "$source_dir/target/release/libnsm.so" "$prefix/lib/libnsm.so.0"
+        ln -sfn libnsm.so.0 "$prefix/lib/libnsm.so"
         install -m 644 "$source_dir/target/release/nsm.h" "$prefix/include/nsm.h"
         continue
     fi
@@ -63,14 +66,27 @@ while read -r name version commit url; do
         -DCMAKE_INSTALL_PREFIX="$prefix" -DCMAKE_INSTALL_LIBDIR=lib \
         -DBUILD_TESTING=OFF -DBUILD_SHARED_LIBS=OFF \
         -DCMAKE_POSITION_INDEPENDENT_CODE=ON
+    if [ "$name" = aws-lc ]; then
+        set -- "$@" -DENABLE_SOURCE_MODIFICATION=OFF
+    fi
     if [ "$name" = aws-c-io ]; then
-        set -- "$@" -DUSE_VSOCK=ON
+        # CRT 1.0.0 declares sockaddr_vm in socket_impl.h before its
+        # platform include. Supply the Linux headers via compiler options;
+        # upstream sources remain byte-identical to the pinned commit.
+        set -- "$@" -DUSE_VSOCK=ON \
+            "-DCMAKE_C_FLAGS=-include sys/socket.h -include linux/vm_sockets.h"
     fi
     if [ "$name" = aws-nitro-enclaves-sdk-c ]; then
         # GCC 10 diagnoses an upstream allocation-failure cleanup path in
         # rest.c. Keep the SDK source unchanged and retain the warning; this
         # exception is scoped to this diagnostic in the SDK, not our helper.
-        set -- "$@" -DCMAKE_C_FLAGS=-Wno-error=maybe-uninitialized
+        # CRT 1.0 no longer injects its installed modules into callers'
+        # global module path. The SDK still includes those official modules.
+        # Its example also relied on a removed transitive hash-table
+        # include. Use the official header explicitly without patching source.
+        set -- "$@" "-DCMAKE_C_FLAGS=-Wno-error=maybe-uninitialized -I$prefix/include -include aws/common/hash_table.h" \
+            "-DCMAKE_MODULE_PATH=$prefix/lib/cmake/aws-c-common/modules" \
+            "-DLIBRARY_DIRECTORY=$prefix/lib"
     fi
     cmake -GNinja -S "$source_dir" -B "$build_dir/build/$name" "$@"
     cmake --build "$build_dir/build/$name" --parallel "$jobs" --target install
@@ -88,7 +104,7 @@ while read -r name version commit url; do
         # so a second build of this cache verifies the same clean source tree.
         git -C "$source_dir" restore --source=HEAD -- go.sum
     fi
-done < "$manifest"
+done 3< "$manifest" </dev/null
 
 cp "$manifest" "$prefix/share/swap-kms/dependencies.tsv"
 if [ "${SWAP_KMS_DEPENDENCIES_ONLY:-0}" = 1 ]; then
@@ -97,6 +113,7 @@ fi
 
 cmake -GNinja -S "$repo_dir/enclave/kms-tool" -B "$build_dir/build/swap-kms-tool" \
     -DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH="$prefix" \
-    -DCMAKE_INSTALL_PREFIX="$prefix" -DBUILD_SHARED_LIBS=OFF
+    -DCMAKE_INSTALL_PREFIX="$prefix" -DBUILD_SHARED_LIBS=OFF -DBUILD_TESTING=ON
 cmake --build "$build_dir/build/swap-kms-tool" --parallel "$jobs" --target install
-strip "$prefix/bin/swap-kms-tool" "$prefix/lib/libnsm.so"
+ctest --test-dir "$build_dir/build/swap-kms-tool" --output-on-failure
+strip "$prefix/bin/swap-kms-tool" "$prefix/lib/libnsm.so.0"

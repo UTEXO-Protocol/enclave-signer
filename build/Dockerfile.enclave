@@ -12,19 +12,37 @@ FROM rust:1.96-slim-bullseye@sha256:c593596210f729542a92aced6a8b0812bcc8d04c5f1b
 RUN sed -i 's|http://deb.debian.org/debian-security|https://snapshot.debian.org/archive/debian-security/20260623T000000Z|g; s|http://deb.debian.org/debian|https://snapshot.debian.org/archive/debian/20260623T000000Z|g' /etc/apt/sources.list \
     && apt-get -o Acquire::Check-Valid-Until=false update && apt-get install -y \
     pkg-config libssl-dev git ca-certificates openssh-client \
-    make perl python3 python3-pip ninja-build golang gcc g++ \
+    make perl python3 python3-pip ninja-build curl gcc g++ \
     && pip3 install --no-cache-dir "cmake==3.31.6" \
     && rm -rf /var/lib/apt/lists/*
 
-WORKDIR /build
-COPY . /build/
+# AWS-LC requires Go >=1.20. Pin a supported Go toolchain and verify the
+# official archive rather than use Bullseye's obsolete Go 1.15 package.
+RUN case "$(dpkg --print-architecture)" in \
+        amd64) go_sha=63d339f0da5ab53635a56f2490a7984dfe12dfcff22ad749f63edaf590168445 ;; \
+        arm64) go_sha=3450b45a3f9ee8568792736a5c5e70a1f2e9b36c35a8f74958c03e51d7d92bec ;; \
+        *) exit 1 ;; \
+    esac \
+    && curl --fail --silent --show-error --location "https://go.dev/dl/go1.27.1.linux-$(dpkg --print-architecture).tar.gz" -o /tmp/go.tar.gz \
+    && echo "$go_sha  /tmp/go.tar.gz" | sha256sum --check --strict \
+    && tar -C /usr/local -xzf /tmp/go.tar.gz \
+    && rm /tmp/go.tar.gz
+ENV PATH="/usr/local/go/bin:${PATH}" GOTOOLCHAIN=local
 
-# Official AWS Nitro SDK, using the dependency revisions of kmstool_enclave_cli.
+WORKDIR /build
+# Resolve only public native sources in this stage. Rust/application edits do
+# not invalidate the dependency build, and private source arrives later.
+COPY build/build-swap-kms-tool.sh build/swap-kms-dependencies.tsv build/swap-kms-nsm.Cargo.lock /build/build/
+RUN SWAP_KMS_DEPENDENCIES_ONLY=1 sh /build/build/build-swap-kms-tool.sh
+COPY enclave/kms-tool /build/enclave/kms-tool/
+
+# Official AWS Nitro SDK with security-updated, immutable AWS dependency pins.
 # This helper is included only in the swap images. It keeps KMS TLS, SigV4,
 # attestation and recipient-envelope processing inside the enclave.
 RUN sh /build/build/build-swap-kms-tool.sh
 
 FROM kms-tool-builder AS builder
+COPY . /build/
 WORKDIR /build/enclave
 # Deterministic compilation (PCR0 reproducibility, Step 4):
 #   CARGO_INCREMENTAL=0   no incremental artifacts (release already off; explicit)
@@ -81,7 +99,7 @@ RUN dnf install -y socat iproute ca-certificates libgcc \
 WORKDIR /app
 COPY --from=builder /build/target/release/utexo-bridge-enclave /app/utexo-bridge-enclave
 COPY --from=kms-tool-builder /opt/swap-kms/bin/swap-kms-tool /usr/local/bin/swap-kms-tool
-COPY --from=kms-tool-builder /opt/swap-kms/lib/libnsm.so /usr/lib64/libnsm.so
+COPY --from=kms-tool-builder /opt/swap-kms/lib/libnsm.so.0 /usr/lib64/libnsm.so.0
 COPY --from=kms-tool-builder /opt/swap-kms/share/swap-kms /usr/share/swap-kms
 COPY build/entrypoint.sh /app/entrypoint.sh
 
