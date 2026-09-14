@@ -114,8 +114,13 @@ impl PersistentSwapSeed {
             Err(_) => return Err(failure("invalid expected address configuration")),
         };
         validate_mode(allow_create, expected_evm_address)?;
+        #[cfg(feature = "local-kms-e2e")]
+        let broker_port =
+            crate::swap_kms::local_e2e_port("SWAP_KMS_E2E_BROKER_PORT", BROKER_LOCAL_PORT)?;
+        #[cfg(not(feature = "local-kms-e2e"))]
+        let broker_port = BROKER_LOCAL_PORT;
         let broker = SeedBroker {
-            address: SocketAddr::from((Ipv4Addr::LOCALHOST, BROKER_LOCAL_PORT)),
+            address: SocketAddr::from((Ipv4Addr::LOCALHOST, broker_port)),
             seed_id: config.seed_id.clone(),
         };
         Ok(Self {

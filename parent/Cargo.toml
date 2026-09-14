@@ -48,6 +48,11 @@ path = "src/bin/cli.rs"
 name = "attest-verify"
 path = "src/bin/attest_verify.rs"
 
+[[bin]]
+name = "kms-e2e-grpc-client"
+path = "../testing/kms/grpc-client.rs"
+required-features = ["local-kms-e2e"]
+
 [dependencies]
 prost = "0.14"
 tonic = "0.14"
@@ -82,6 +87,8 @@ vsock = "0.5"
 [features]
 default = []
 vsock = []
+# Testing-branch-only gRPC driver; does not change the parent service behavior.
+local-kms-e2e = []
 
 [dev-dependencies]
 # Real enclave (with mock-attestation + seed-import) for end-to-end tests

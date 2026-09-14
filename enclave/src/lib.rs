@@ -36,6 +36,10 @@ dev_feature_release_guard!(
     "`dev-mode` must not be enabled in a release build (debug_assertions off): \
      it skips all signing cross-checks."
 );
+dev_feature_release_guard!(
+    "local-kms-e2e",
+    "`local-kms-e2e` must not be enabled in a release build: it trusts a local test CA and mock KMS Recipient PCRs."
+);
 
 // `rgb-validation` asks a resolver whether a consignment's witness txs are
 // mined. Without `spv` that resolver is the host-controlled Esplora endpoint,

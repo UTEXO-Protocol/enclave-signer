@@ -1,0 +1,7 @@
+# All dependencies are local testing tools; never install these in the enclave.
+moto[server,iam,kms,s3,sts]==5.2.3
+boto3==1.43.93
+cbor2==6.1.4
+asn1crypto==1.5.1
+cryptography==50.0.1
+requests==2.34.2

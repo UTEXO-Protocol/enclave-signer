@@ -12,3 +12,6 @@
 
 # Python build-wiring tests
 __pycache__/
+
+# kms-testing branch only: downloaded open-source emulator dependencies.
+/testing/kms/node_modules/

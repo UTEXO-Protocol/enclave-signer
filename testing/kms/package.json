@@ -1,0 +1,11 @@
+{
+  "name": "enclave-signer-local-kms-e2e",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Testing-only independent evaluation of the production AWS policy templates",
+  "dependencies": {
+    "@actsecurity/iam-simulate": "0.1.177",
+    "@actsecurity/iam-policy": "0.1.111"
+  }
+}

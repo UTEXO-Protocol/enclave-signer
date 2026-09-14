@@ -6,3 +6,5 @@
 .github/
 .vscode/
 *.eif
+.artifacts/
+testing/kms/node_modules/

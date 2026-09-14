@@ -193,7 +193,11 @@ impl SwapKmsClient {
         network: Network,
     ) -> Result<Self> {
         config.validate()?;
-        let http = https_client(&config.kms_host(), LOCAL_PORT)?;
+        #[cfg(feature = "local-kms-e2e")]
+        let local_port = local_e2e_port("SWAP_KMS_E2E_PORT", LOCAL_PORT)?;
+        #[cfg(not(feature = "local-kms-e2e"))]
+        let local_port = LOCAL_PORT;
+        let http = https_client(&config.kms_host(), local_port)?;
         Ok(Self {
             config,
             credentials,
@@ -305,7 +309,7 @@ impl SwapKmsClient {
 }
 
 fn https_client(host: &str, local_port: u16) -> Result<Client> {
-    Client::builder()
+    let builder = Client::builder()
         .use_rustls_tls()
         .https_only(true)
         .no_proxy()
@@ -315,9 +319,35 @@ fn https_client(host: &str, local_port: u16) -> Result<Client> {
         // Keep the real hostname in the URL, Host header and TLS SNI.
         // There is deliberately no port in the URL: an explicit URL port
         // would override this TCP destination in reqwest.
-        .resolve(host, SocketAddr::from((Ipv4Addr::LOCALHOST, local_port)))
+        .resolve(host, SocketAddr::from((Ipv4Addr::LOCALHOST, local_port)));
+    // The test harness issues a certificate for the pinned AWS hostname.
+    // Keep certificate and hostname validation enabled, including in tests.
+    #[cfg(feature = "local-kms-e2e")]
+    let builder = match std::env::var_os("SWAP_KMS_E2E_CA_PEM") {
+        Some(path) => {
+            let pem = std::fs::read(path).map_err(|_| fail("failed to read local E2E CA"))?;
+            let ca =
+                reqwest::Certificate::from_pem(&pem).map_err(|_| fail("invalid local E2E CA"))?;
+            builder.add_root_certificate(ca)
+        }
+        None => builder,
+    };
+    builder
         .build()
         .map_err(|_| fail("failed to construct KMS HTTPS client"))
+}
+
+#[cfg(feature = "local-kms-e2e")]
+pub(crate) fn local_e2e_port(name: &str, default: u16) -> Result<u16> {
+    match std::env::var(name) {
+        Err(std::env::VarError::NotPresent) => Ok(default),
+        Ok(value) => value
+            .parse::<u16>()
+            .ok()
+            .filter(|port| *port != 0)
+            .ok_or_else(|| fail(format!("{name} must be a nonzero TCP port"))),
+        Err(_) => Err(fail(format!("invalid {name}"))),
+    }
 }
 
 #[derive(Deserialize)]
@@ -388,7 +418,26 @@ impl Recipient {
         let mut nonce = [0u8; 32];
         getrandom::fill(&mut nonce)
             .map_err(|_| fail("failed to generate KMS attestation nonce"))?;
+        #[cfg(not(feature = "local-kms-e2e"))]
         let attestation = crate::attestation::get_attestation(&nonce, Some(&public_key), None)?;
+        #[cfg(feature = "local-kms-e2e")]
+        let attestation = {
+            // Only KMS Recipient documents use these simulated measurements;
+            // ordinary public-key/peer attestation behavior remains unchanged.
+            let pcr0 = std::env::var("SWAP_KMS_E2E_PCR0")
+                .map_err(|_| fail("SWAP_KMS_E2E_PCR0 is required for local KMS tests"))?;
+            let pcrs = attestation_verify::ExpectedPcrs::from_hex(
+                &pcr0,
+                &"00".repeat(48),
+                &"00".repeat(48),
+            )?;
+            attestation_verify::build_mock_document_with_pcrs(
+                &nonce,
+                Some(&public_key),
+                None,
+                &pcrs,
+            )?
+        };
         Ok(Self {
             private_key,
             request: json!({

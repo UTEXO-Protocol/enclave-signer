@@ -11,6 +11,11 @@ path = "src/lib.rs"
 name = "utexo-bridge-enclave"
 path = "src/main.rs"
 
+[[bin]]
+name = "kms-e2e-client"
+path = "../testing/kms/client.rs"
+required-features = ["local-kms-e2e"]
+
 [dependencies]
 bip39 = { version = "2.1", features = ["zeroize"] }
 bitcoin = { version = "0.32", features = ["std"] }
@@ -142,6 +147,9 @@ spv = ["rgb-validation"]
 # Mock attestation path: skip NSM / COSE / cert-chain checks and use raw CBOR docs.
 # Testing only — never enable in production builds.
 mock-attestation = ["attestation-verify/mock"]
+# Local emulator harness only, carried exclusively on the kms-testing branch.
+# Adds a local CA and mock Recipient PCR0; it never disables TLS validation.
+local-kms-e2e = ["rgb-swap", "mock-attestation"]
 # Independent in-enclave EVM `FundsIn` event verification for signPsbt.
 # Default-OFF. When ON, bridge-mode signPsbt fetches the deposit receipt via an
 # in-enclave alloy JSON-RPC client (loopback -> vsock forwarder -> host EVM RPC)
