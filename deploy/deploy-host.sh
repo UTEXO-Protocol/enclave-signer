@@ -45,6 +45,19 @@ declare -A PORT=([16]=50051 [18]=50052 [20]=50053)
 log(){ echo "[deploy $(date -u +%H:%M:%S)] $*"; }
 asubuntu(){ su - ubuntu -c "$1"; }
 
+# F03-AF-13: bind parent gRPC to the private ENI, not 0.0.0.0. Stage hosts have
+# no public IP today, but 0.0.0.0 would expose the adapter on any future public
+# interface. Override with GRPC_HOST=<addr> if you must bind elsewhere.
+if [ -z "${GRPC_HOST:-}" ]; then
+  _tok=$(curl -fsS -X PUT "http://169.254.169.254/latest/api/token" \
+    -H "X-aws-ec2-metadata-token-ttl-seconds: 60")
+  GRPC_HOST=$(curl -fsS -H "X-aws-ec2-metadata-token: $_tok" \
+    http://169.254.169.254/latest/meta-data/local-ipv4)
+  unset _tok
+  [ -n "$GRPC_HOST" ] || { log "FATAL: empty private IPv4 from IMDS"; exit 1; }
+fi
+log "parent gRPC bind GRPC_HOST=$GRPC_HOST (private ENI)"
+
 # Ensure the `ne` group exists + ubuntu is a member (idempotent; the udev rule
 # below relies on the group). Group membership is persistent across reboots.
 getent group ne >/dev/null || groupadd -g 986 ne
@@ -201,7 +214,7 @@ EOF
 for CID in "${CIDS[@]}"; do
   cat > "/etc/utexo/parent-$CID.env" <<EOF
 CLUSTER_DIR=$DIR
-GRPC_HOST=0.0.0.0
+GRPC_HOST=$GRPC_HOST
 GRPC_PORT=${PORT[$CID]}
 USE_VSOCK=true
 ENCLAVE_VSOCK_CID=$CID
