@@ -108,6 +108,16 @@ if grep -qE '^ARG[[:space:]]+RGB_ASSET_ID' "$SCRIPT_DIR/$DOCKERFILE"; then
     echo "    rgb asset id : $RGB_ASSET_ID"
 fi
 
+# F03-AF-12: optional EXTRA cargo features for DEBUG EIFs only (e.g.
+# `allow-debug-pcrs`, so stage clone-drills in ENCLAVE_DEBUG_MODE can verify
+# each other's all-zero-PCR attestations). Forwarded to the Dockerfile's
+# `ARG ENCLAVE_DEBUG_FEATURES` only when explicitly set; unset => production
+# build is byte-identical and PCR0 is unchanged. NEVER set for a production EIF.
+if [ -n "${ENCLAVE_DEBUG_FEATURES:-}" ]; then
+    BUILD_ARGS+=(--build-arg "ENCLAVE_DEBUG_FEATURES=$ENCLAVE_DEBUG_FEATURES")
+    echo "    DEBUG feats  : $ENCLAVE_DEBUG_FEATURES  (⚠ NON-PRODUCTION EIF)"
+fi
+
 # --- 1. Build the docker image ---------------------------------------------
 # Deterministic timestamps: SOURCE_DATE_EPOCH (commit time, stable per git_sha)
 # + `rewrite-timestamp=true` make BuildKit normalise file mtimes in the exported

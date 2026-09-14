@@ -33,6 +33,15 @@ name: "Build EIF"
 
 on:
   workflow_dispatch:
+    inputs:
+      debug_features:
+        description: >-
+          DANGER, debug EIFs only (F03-AF-12): extra cargo features to append,
+          e.g. `allow-debug-pcrs` so stage clone-drills in ENCLAVE_DEBUG_MODE can
+          verify each other. Leave EMPTY for production builds (empty => PCR0
+          unchanged). Never set this for a release.
+        required: false
+        default: ""
   push:
     tags: ["v*"]
 
@@ -147,6 +156,9 @@ jobs:
           DOCKERFILE: ${{ matrix.dockerfile }}
           EIF_NAME: ${{ matrix.eif_name }}
           IMAGE_TAG: utexo-bridge-enclave-${{ matrix.variant }}:latest
+          # F03-AF-12: empty for normal/tag builds (PCR0 unchanged); set only via
+          # manual workflow_dispatch to produce an UNSAFE debug EIF.
+          ENCLAVE_DEBUG_FEATURES: ${{ github.event.inputs.debug_features || '' }}
         run: |
           set -euxo pipefail
           mkdir -p "$OUT_DIR"
