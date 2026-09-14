@@ -70,7 +70,7 @@ push_enclave_dev: ## Push enclave dev docker image.
 	docker push $(IMAGE_ENCLAVE_DEV_BACKUP) && \
 	docker push $(IMAGE_ENCLAVE_DEV_LATEST)
 
-docker: ## Build and push all production docker images.
+docker: ## Build and push production images; requires the measured SWAP_KMS_* configuration (see README).
 	$(MAKE) build_parent push_parent build_enclave push_enclave
 
 docker_dev: ## Build and push all dev docker images (parent + enclave-dev).

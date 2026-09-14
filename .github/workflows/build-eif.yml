@@ -218,6 +218,7 @@ jobs:
           path: |
             artifacts/${{ matrix.eif_name }}
             artifacts/PCR.json
+            artifacts/EIF-DESCRIBE.json
             artifacts/SHA256SUMS
             artifacts/metadata.json
             artifacts/utexo-bridge-parent

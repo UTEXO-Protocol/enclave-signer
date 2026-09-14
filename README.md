@@ -223,6 +223,24 @@ profile. CI asserts every guard fires.
 
 ### Enclave image (EIF)
 
+The combined and RGB-swap images require measured KMS configuration. Export
+the following public values from your deployment configuration before running
+their build commands or `make docker` / `make build_enclave_rgb`:
+
+```bash
+export SWAP_KMS_KEY_ARN="arn:aws:kms:<region>:<account-id>:key/<key-id>"
+export SWAP_KMS_REGION="<region>"
+export SWAP_KMS_SEED_ID="<stable-seed-id>"
+export SWAP_KMS_ALLOW_CREATE=0
+export SWAP_KMS_EXPECTED_EVM_ADDRESS="<verified-existing-signer-address>"
+```
+
+Replace the placeholders; use your verified signer address for recovery. For
+the first bootstrap only, set `SWAP_KMS_ALLOW_CREATE=1` and unset
+`SWAP_KMS_EXPECTED_EVM_ADDRESS`. Follow the [bootstrap and recovery
+procedure](docs/swap-kms-persistence.md) before funding the signer. These KMS
+values are not needed for mint/burn, BFA, or CCD-only builds.
+
 ```bash
 ./build/build-enclave.sh                                  # Dockerfile.enclave (combined)
 DOCKERFILE=Dockerfile.enclave.rgb       ./build/build-enclave.sh
@@ -300,6 +318,11 @@ cli --help
 `--addr host:port` or `--addr vsock://<cid>:<port>` selects the enclave.
 For swaps, follow the [KMS setup guide](docs/swap-kms-persistence.md) and use
 `cli init` for bootstrap or recovery. The commands below describe the other builds.
+
+`Dockerfile.enclave-dev` uses the same development import-only mode: initialize
+it with `init-mnemonic` using a public test mnemonic. It intentionally has no
+KMS helper or persisted production seed, and empty `init` fails closed. Use the
+isolated `kms-testing` branch for local KMS persistence integration tests.
 
 Initialize once: use `cli init --cloning-secret <secret>` instead of `cli init`
 to configure a donor. Use a fresh requester for `cli clone`; initialization

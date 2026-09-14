@@ -15,6 +15,32 @@ env:
   CARGO_NET_GIT_FETCH_WITH_CLI: "true"
 
 jobs:
+  native-kms:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+
+      # This stage uses public pinned AWS sources only. Building it on every
+      # PR catches C/SDK/toolchain failures without private repository secrets.
+      - name: Build official KMS helper
+        run: |
+          docker buildx build --platform linux/amd64 --load \
+            --target kms-tool-builder -t swap-kms-native-ci \
+            -f build/Dockerfile.enclave.rgb .
+
+      - name: Verify native helper rejects malformed IPC
+        run: |
+          set +e
+          printf '{}\n' | docker run --rm -i \
+            --env LD_LIBRARY_PATH=/opt/swap-kms/lib \
+            --entrypoint /opt/swap-kms/bin/swap-kms-tool \
+            swap-kms-native-ci > helper-output.txt
+          status=$?
+          set -e
+          test "$status" -eq 1
+          test ! -s helper-output.txt
+
   ci:
     runs-on: ubuntu-latest
 
