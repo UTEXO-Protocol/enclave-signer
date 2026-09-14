@@ -29,10 +29,15 @@ pub enum VerifyMode {
 /// verifier reconstructs the expected posture here and requires a match, so a
 /// downgraded enclave is rejected.
 ///
-/// Chain/contract/asset pins come from the wire response, which the public-key
-/// bundle already binds, so a production expectation states only the posture
-/// flags plus the gas-tx rule - the latter is not on the wire and must be
-/// declared here.
+/// The chain/contract/asset pins ride the wire response (which the public-key
+/// bundle already binds), so stating them is optional. When the operator DOES
+/// declare them via `expected_chain_id` / `expected_bridge_contract` /
+/// `expected_rgb_asset_id`, the verifier checks the (authenticated) wire value
+/// equals the declared one and fails otherwise — without them the reference CLI
+/// authenticates whatever the enclave reports but cannot tell an operator's
+/// intended deployment apart from a valid attestation of the WRONG chain,
+/// contract or RGB asset (F02-AF-04). The gas-tx rule is never on the wire and
+/// must always be declared here.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ExpectedPolicy {
     /// Expect a production bridge enclave with these posture flags.
@@ -45,6 +50,17 @@ pub enum ExpectedPolicy {
         /// commitment so an enclave that trust-rooted on a different checkpoint
         /// fails verification.
         evm_checkpoint: Option<[u8; 32]>,
+        /// Operator's intended EVM chain id. `Some` => the wire `chain_id` must
+        /// equal it or verification fails; `None` => trust the wire value (legacy
+        /// behaviour). Lets onboarding pin the deployment's chain via the CLI.
+        expected_chain_id: Option<u64>,
+        /// Operator's intended bridge/MultisigProxy contract (20 bytes). `Some`
+        /// => the wire `bridge_contract` must equal it or verification fails.
+        expected_bridge_contract: Option<[u8; 20]>,
+        /// Operator's intended RGB asset id. `Some` => the wire `rgb_asset_id`
+        /// must equal it or verification fails. An empty string pins "no RGB
+        /// asset" (pure-EVM / pure-CCD builds).
+        expected_rgb_asset_id: Option<String>,
         /// Expected gas-tx (`SignRawDigest`) rule the enclave committed.
         /// An all-zero destination, zero caps, and empty selectors mean
         /// the operator did not pin the gas path, which the enclave attests as
@@ -194,6 +210,9 @@ fn expected_attested_policy(
             allow_vanilla_psbt,
             evm_source,
             evm_checkpoint,
+            expected_chain_id,
+            expected_bridge_contract,
+            expected_rgb_asset_id,
             gas_tx_allowed_to,
             gas_tx_max_gas_limit,
             gas_tx_max_fee_per_gas,
@@ -211,6 +230,40 @@ fn expected_attested_policy(
                         resp.bridge_contract.len()
                     )
                 })?;
+
+            // Compare the operator's declared deployment pins against the
+            // authenticated wire values BEFORE folding them into the expected
+            // commitment. Without this, the reference CLI would happily accept a
+            // valid attestation of the wrong chain / contract / asset because it
+            // reconstructs the expected policy from the very values it is meant
+            // to be checking (F02-AF-04).
+            if let Some(want) = expected_chain_id {
+                if *want != resp.chain_id {
+                    bail!(
+                        "chain_id mismatch: enclave attests {} but --expect-chain-id is {want}",
+                        resp.chain_id
+                    );
+                }
+            }
+            if let Some(want) = expected_bridge_contract {
+                if want != &bridge_contract {
+                    bail!(
+                        "bridge_contract mismatch: enclave attests 0x{} but \
+                         --expect-bridge-contract is 0x{}",
+                        hex::encode(bridge_contract),
+                        hex::encode(want),
+                    );
+                }
+            }
+            if let Some(want) = expected_rgb_asset_id {
+                if want != &resp.rgb_asset_id {
+                    bail!(
+                        "rgb_asset_id mismatch: enclave attests {:?} but --expect-rgb-asset-id is {want:?}",
+                        resp.rgb_asset_id
+                    );
+                }
+            }
+
             Ok(AttestedPolicy::Production {
                 allow_vanilla_psbt: *allow_vanilla_psbt,
                 // A real-verified production enclave always uses real (NSM)
@@ -232,5 +285,97 @@ fn expected_attested_policy(
                 gas_tx_allowed_selectors: gas_tx_allowed_selectors.clone(),
             })
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A production expectation with the three deployment pins set to `pins`
+    /// (chain_id, bridge_contract, rgb_asset_id) and everything else neutral.
+    fn expect_prod(
+        chain_id: Option<u64>,
+        bridge_contract: Option<[u8; 20]>,
+        rgb_asset_id: Option<String>,
+    ) -> ExpectedPolicy {
+        ExpectedPolicy::Production {
+            allow_vanilla_psbt: false,
+            evm_source: EvmDataSource::RawRpc,
+            evm_checkpoint: None,
+            expected_chain_id: chain_id,
+            expected_bridge_contract: bridge_contract,
+            expected_rgb_asset_id: rgb_asset_id,
+            gas_tx_allowed_to: [0u8; 20],
+            gas_tx_max_gas_limit: 0,
+            gas_tx_max_fee_per_gas: 0,
+            gas_tx_max_value_wei: 0,
+            gas_tx_allowed_selectors: Vec::new(),
+        }
+    }
+
+    /// A wire response pinned to chain 42161, contract 0x11.., asset "rgb:abc".
+    fn wire() -> AttestedPublicKeyResponse {
+        AttestedPublicKeyResponse {
+            chain_id: 42161,
+            bridge_contract: vec![0x11u8; 20],
+            rgb_asset_id: "rgb:abc".to_string(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn unset_pins_trust_the_wire() {
+        // Legacy behaviour: no operator pins => accept whatever the enclave
+        // attests (still authenticated, just not compared).
+        let got = expected_attested_policy(&expect_prod(None, None, None), &wire())
+            .expect("unset pins must not reject");
+        match got {
+            AttestedPolicy::Production {
+                chain_id,
+                rgb_asset_id,
+                ..
+            } => {
+                assert_eq!(chain_id, 42161);
+                assert_eq!(rgb_asset_id, "rgb:abc");
+            }
+            AttestedPolicy::Development => panic!("expected production policy"),
+        }
+    }
+
+    #[test]
+    fn matching_pins_are_accepted() {
+        let exp = expect_prod(Some(42161), Some([0x11u8; 20]), Some("rgb:abc".into()));
+        assert!(expected_attested_policy(&exp, &wire()).is_ok());
+    }
+
+    #[test]
+    fn wrong_chain_id_is_rejected() {
+        let exp = expect_prod(Some(1), None, None);
+        let err = expected_attested_policy(&exp, &wire()).expect_err("wrong chain must fail");
+        assert!(format!("{err:#}").contains("chain_id mismatch"));
+    }
+
+    #[test]
+    fn wrong_bridge_contract_is_rejected() {
+        let exp = expect_prod(None, Some([0x22u8; 20]), None);
+        let err = expected_attested_policy(&exp, &wire()).expect_err("wrong contract must fail");
+        assert!(format!("{err:#}").contains("bridge_contract mismatch"));
+    }
+
+    #[test]
+    fn wrong_rgb_asset_is_rejected() {
+        let exp = expect_prod(None, None, Some("rgb:other".into()));
+        let err = expected_attested_policy(&exp, &wire()).expect_err("wrong asset must fail");
+        assert!(format!("{err:#}").contains("rgb_asset_id mismatch"));
+    }
+
+    #[test]
+    fn empty_asset_pin_matches_empty_wire() {
+        // A pure-EVM / pure-CCD build ships no RGB asset; pinning "" must match.
+        let mut w = wire();
+        w.rgb_asset_id = String::new();
+        let exp = expect_prod(None, None, Some(String::new()));
+        assert!(expected_attested_policy(&exp, &w).is_ok());
     }
 }

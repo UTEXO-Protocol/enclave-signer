@@ -133,8 +133,13 @@ mock build with no env is `chain_id=0`, `bridge_contract=20 zero bytes`,
 build, so the bundle has the same shape regardless of features.
 
 The CLI reconstructs policy using the chain/contract/asset pins from the
-response. It authenticates these values but does not compare them to independent
-expected pins. Callers must compare them with their intended deployment.
+response. These values are always authenticated (they are inside the signed
+commitment); to also compare them against the operator's intended deployment,
+pass `--expect-chain-id`, `--expect-bridge-contract` and/or
+`--expect-rgb-asset-id`. When set, verification fails unless the enclave attests
+exactly those pins, so onboarding can reject a valid attestation of the *wrong*
+chain, contract or RGB asset. When omitted, the pins are authenticated but not
+compared (legacy behaviour) — the caller must then compare them out of band.
 
 The verifier MUST use the same field set, the same order, and the same
 length-prefix encoding. The reference encoder is `canonical_pubkey_bundle`
@@ -261,6 +266,12 @@ attest-verify \
 # --expect-gas-max-fee-per-gas <wei> --expect-gas-max-value-wei <wei>
 # --expect-gas-selectors <comma-separated-hex4>
 # Omitted flags expect an unpinned gas rule, not values discovered from the enclave.
+
+# Deployment pins: compare the attested chain/contract/asset against the
+# operator's intended deployment (otherwise they are authenticated but not
+# compared). Verification fails on any mismatch:
+# --expect-chain-id <u64> --expect-bridge-contract <hex20> \
+# --expect-rgb-asset-id <asset>   # empty string pins "no RGB asset"
 
 # Expect the plain-BTC path enabled:
 attest-verify --endpoint http://parent.example:50051 \
