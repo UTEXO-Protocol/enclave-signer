@@ -485,4 +485,116 @@ mod tests {
         let (ct, _) = encrypt_seed_for_peer(&session.public_key(), &[0u8; 64]).unwrap();
         assert_eq!(ct.len(), 64 + 16);
     }
+
+    // ---- F03-AF-25: independent byte-level reference vectors ----
+    //
+    // A round trip through the same implementation only proves the encrypt and
+    // decrypt halves agree with *each other*; it cannot catch an unintended
+    // shared convention (a wrong domain string, pubkey order, encoding or nonce)
+    // that both sides happen to honour. These vectors pin every intermediate
+    // byte of the cloning transcript against values produced by a SEPARATE,
+    // OpenSSL-backed implementation (Python `cryptography` / `hmac`), so a silent
+    // change to the wire crypto is caught in CI and an independently built peer
+    // stays compatible. Vectors were produced by an OpenSSL-backed generator
+    // (Python `cryptography`/`hmac`) over fixed inputs, then pinned here.
+
+    /// Decode a fixed-width hex constant into a byte array.
+    fn hexn<const N: usize>(s: &str) -> [u8; N] {
+        hex::decode(s)
+            .expect("valid hex literal")
+            .try_into()
+            .expect("hex literal has the expected byte length")
+    }
+
+    #[test]
+    fn af25_cloning_digest_reference_vector() {
+        // Reference: HMAC-SHA256(secret_utf8, encryption_pubkey ‖ target)
+        // computed by Python `hmac`/`hashlib` (independent of RustCrypto).
+        let secret = "utexo-af25-fixed-reference-secret-0123456789";
+        let pubkey = hexn::<32>("030a11181f262d343b424950575e656c737a81888f969da4abb2b9c0c7ced5dc");
+        let target = hexn::<20>("05101b26313c47525d68737e89949faab5c0cbd6");
+        let want = hexn::<32>("ac9ab8ce85a4eabf160922d0077690807c434c4d338d1140fb3f8581605de25b");
+        assert_eq!(make_cloning_digest(secret, &pubkey, &target), want);
+        assert!(verify_cloning_digest(secret, &pubkey, &target, &want));
+
+        // AF-07 target binding at the byte level: the SAME secret+pubkey with a
+        // one-byte-different target maps to an independently-computed, distinct
+        // digest — never back to `want`.
+        let target_b = hexn::<20>("06111c27323d48535e69747f8a95a0abb6c1ccd7");
+        let want_b = hexn::<32>("642b1bb86f3e1b0526fb3932fa85ea1695b4e8feaa07607826158cccf805518e");
+        assert_eq!(make_cloning_digest(secret, &pubkey, &target_b), want_b);
+        assert_ne!(want, want_b);
+    }
+
+    #[test]
+    fn af25_seed_seal_reference_vector() {
+        // Reference for the full donor->requester seal chain
+        // X25519 -> HKDF-SHA256 -> ChaCha20Poly1305(IETF, zero nonce), every
+        // stage cross-checked against the OpenSSL-backed implementation.
+        let req_sk = hexn::<32>("0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20");
+        let donor_sk =
+            hexn::<32>("404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f");
+        let seed = hexn::<64>(
+            "070a0d101316191c1f2225282b2e3134373a3d404346494c4f5255585b5e6164\
+             676a6d707376797c7f8285888b8e9194979a9da0a3a6a9acafb2b5b8bbbec1c4",
+        );
+
+        let req_secret = StaticSecret::from(req_sk);
+        let donor_secret = StaticSecret::from(donor_sk);
+        let req_pub = PublicKey::from(&req_secret).to_bytes();
+        let donor_pub = PublicKey::from(&donor_secret).to_bytes();
+
+        // (a) X25519 public keys (clamped scalar * basepoint) match reference.
+        assert_eq!(
+            req_pub,
+            hexn::<32>("07a37cbc142093c8b755dc1b10e86cb426374ad16aa853ed0bdfc0b2b86d1c7c"),
+        );
+        assert_eq!(
+            donor_pub,
+            hexn::<32>("79a631eede1bf9c98f12032cdeadd0e7a079398fc786b88cc846ec89af85a51a"),
+        );
+
+        // (b) DH shared secret matches, and both peers derive it identically.
+        let shared = donor_secret.diffie_hellman(&PublicKey::from(req_pub));
+        assert_eq!(
+            shared.as_bytes(),
+            &hexn::<32>("ae4440cc8d7faddb2894172b78e3d745cafa0098bcc10d7ee0fda08fa85a9a2e"),
+        );
+        assert_eq!(
+            req_secret
+                .diffie_hellman(&PublicKey::from(donor_pub))
+                .as_bytes(),
+            shared.as_bytes(),
+        );
+
+        // (c) HKDF-SHA256(salt, shared, "seed-encryption" ‖ donor_pub ‖ req_pub).
+        let key = derive_symmetric_key(shared.as_bytes(), &donor_pub, &req_pub);
+        assert_eq!(
+            *key,
+            hexn::<32>("392ccd781d51995d3d1d73c4848432646bc6c2c220ef25826cd15c04bf61500f"),
+        );
+
+        // (d) ChaCha20Poly1305 (IETF, all-zero nonce) ciphertext = 64B seed + 16B tag.
+        let ct = encrypt_with_key(&key, &seed).expect("seal");
+        assert_eq!(
+            ct,
+            hex::decode(
+                "fd74236255f673bcda5c5f2b7b717466d48ad8327d365ddb8d82d0902df8bf74\
+                 7fd0a01de3ebddf96d38e026007a62a4cc9151b61ebd5c77c60101ffd7f732d8\
+                 581045088a7392fbdfeb22775e65216b",
+            )
+            .unwrap(),
+        );
+
+        // (e) the production decrypt path recovers the exact seed from the vector.
+        let session_pub = PublicKey::from(&req_secret);
+        let session = CloneSession {
+            secret: req_secret,
+            public: session_pub,
+        };
+        let recovered = session
+            .decrypt_seed_from_peer(&donor_pub, &ct)
+            .expect("unseal");
+        assert_eq!(*recovered, seed);
+    }
 }
