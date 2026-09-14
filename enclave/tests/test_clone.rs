@@ -403,11 +403,21 @@ fn clone_donor_rejects_wire_pubkey_not_matching_attestation() {
 
     let init = initiate_cloning(requester_port, CLONING_SECRET, &donor_keys.evm_address);
 
-    // Tamper only the wire pubkey; leave the attestation (which binds the real
-    // ephemeral pubkey) untouched. Any well-formed 32-byte key that is not the
-    // attested one exercises the binding check.
+    // Tamper the wire pubkey; leave the attestation (which binds the real
+    // ephemeral pubkey) untouched. Recompute a VALID cloning digest over the
+    // tampered pubkey so the request clears the HMAC auth gate - F03-AF-20 moved
+    // that gate ahead of attestation verify, so without a matching digest the
+    // request would abort on digest-mismatch before ever reaching the
+    // pubkey-binding check we want to exercise here.
     let mut tampered = init.clone();
     tampered.encryption_pubkey = vec![0x77u8; 32];
+    let tampered_pk: [u8; 32] = tampered
+        .encryption_pubkey
+        .clone()
+        .try_into()
+        .expect("32-byte pubkey");
+    tampered.cloning_digest =
+        utexo_bridge_enclave::cloning::make_cloning_digest(CLONING_SECRET, &tampered_pk).to_vec();
     assert_ne!(
         tampered.encryption_pubkey, init.encryption_pubkey,
         "the tampered wire pubkey must differ from the attested one"
