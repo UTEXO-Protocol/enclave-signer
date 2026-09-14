@@ -534,9 +534,18 @@ fn run_clone(
     );
 
     println!("[2/4] Clone via donor parent gRPC at {donor_grpc} ...");
+    // Bound the cross-host donor stage end-to-end. The vsock legs (steps
+    // 1/3/4) are already bounded by the enclave client's connect/read
+    // timeouts; without matching limits here a donor that accepts the TCP
+    // connection but never answers hangs the whole clone forever (F03-AF-19).
+    const DONOR_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+    const DONOR_RPC_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
     let rt = tokio::runtime::Runtime::new()?;
     let clone_resp = rt.block_on(async {
-        let mut grpc = ParentServiceClient::connect(donor_grpc.to_string()).await?;
+        let endpoint = tonic::transport::Endpoint::from_shared(donor_grpc.to_string())?
+            .connect_timeout(DONOR_CONNECT_TIMEOUT)
+            .timeout(DONOR_RPC_TIMEOUT);
+        let mut grpc = ParentServiceClient::new(endpoint.connect().await?);
         let req = CloneRequest {
             attestation: init.requester_attestation,
             encryption_pubkey: init.encryption_pubkey,
