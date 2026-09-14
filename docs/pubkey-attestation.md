@@ -20,6 +20,33 @@ rules and selected data sources — resolved once at boot. Committing it into `u
 lets a verifier check the committed policy as one attested value instead of
 inferring it from build flags or configuration guesses.
 
+### What attestation does NOT prove
+
+Real verification proves only that **approved, measured code (PCR0/1/2 = X/Y/Z)
+answered a fresh-nonce request with these public bytes at time T**. It does
+**not** establish any of the following, and consumers MUST NOT rely on them:
+
+- **Origin of key generation.** The document says nothing about *where or when*
+  the corresponding private key was first created. A measured enclave can just
+  as validly attest a key it generated at boot, restored from sealed storage, or
+  received over the enclave-to-enclave cloning protocol.
+- **Exclusive custody / uniqueness.** It does not prove the private key exists
+  in exactly one place. By design this bridge supports **seed cloning** (see
+  [`enclave/src/cloning.rs`](../enclave/src/cloning.rs) and `docs/tee-spec.md`):
+  a donor enclave hands its sealed seed to another enclave running the *same*
+  measurement, so the same signing key legitimately runs in more than one
+  enclave. Two valid attestations for the same `public_key` under the same PCRs
+  are expected, not an anomaly.
+- **Absence of a cloned/imported copy.** It cannot show that no party ever held
+  or copied the key material — only that a live instance of the measured code
+  holds it now.
+
+What binds trust is the *combination* of (a) the PCR-pinned measured code —
+whose review/audit is what actually constrains how keys are generated, sealed
+and cloned — and (b) the fresh-nonce signature proving a live instance of that
+code holds the key. The guarantee is **"an approved measured enclave controls
+this key now,"** not "this key was born here and lives only here."
+
 The chain of trust is:
 
 ```
@@ -289,6 +316,12 @@ NOT defended (out of scope for attestation):
 - Bugs in the enclave code _after_ measurement (PCRs only attest the
   binary; runtime correctness is a separate problem solved by code review,
   fuzzing, audits).
+- **Key origin / exclusivity.** The document does not prove where the private
+  key was generated, that it lives in only one enclave, or that no cloned or
+  imported copy exists — seed cloning is an explicit feature, so the same key
+  can run in multiple same-measurement enclaves. Constraints on how keys are
+  generated, sealed and cloned come from reviewing the PCR-pinned code, not from
+  the attestation document itself. See *What attestation does NOT prove* above.
 
 ## Code references
 
