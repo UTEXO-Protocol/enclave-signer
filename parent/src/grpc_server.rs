@@ -672,24 +672,35 @@ impl ParentService for ParentAdapterService {
         }
     }
 
-    /// Initialize - generates new keys in the enclave.
-    /// If cloning_secret is provided, it is forwarded as a BIP-39 mnemonic;
-    /// otherwise the enclave generates keys from OS entropy.
+    /// Initialize - generates fresh keys in the enclave from OS entropy and,
+    /// if a cloning secret is supplied, configures this enclave as a donor that
+    /// can serve clone requests.
+    ///
+    /// F03-AF-27: the public `InitializeRequest.cloning_secret` field is exactly
+    /// that - the donor cloning secret - and must be routed to the enclave's
+    /// `cloning_secret` field, mirroring the direct init path
+    /// (`EnclaveClient::initialize_keys_with_secret`). Previously it was
+    /// misrouted into the enclave's `mnemonic` (seed-import) field with an empty
+    /// donor secret, so on a release build (no `allow-seed-import`) any nonempty
+    /// value was rejected and the enclave stayed Initial, never becoming a
+    /// usable donor. Mnemonic/seed import stays an operator-only path
+    /// (CLI `init-mnemonic` / `init-seed`, gated by `allow-seed-import`); it is
+    /// intentionally NOT reachable through this public provisioning RPC.
     async fn initialize(
         &self,
         request: Request<InitializeRequest>,
     ) -> Result<Response<InitializeResponse>, Status> {
         let inner = request.into_inner();
         tracing::info!(
-            has_mnemonic = !inner.cloning_secret.is_empty(),
+            configures_donor = !inner.cloning_secret.is_empty(),
             "gRPC Initialize called"
         );
         let enclave_req = EnclaveRequest {
             request: Some(enclave_request::Request::InitializeKey(
                 enclave_proto::InitializeKeyRequest {
                     seed: vec![],
-                    mnemonic: inner.cloning_secret,
-                    cloning_secret: String::new(),
+                    mnemonic: String::new(),
+                    cloning_secret: inner.cloning_secret,
                 },
             )),
         };
