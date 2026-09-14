@@ -237,10 +237,15 @@ done
 if [ "$ENCLAVE_DEBUG_MODE" = "1" ]; then
   log "ENCLAVE_DEBUG_MODE=1 — skipping runtime PCR0 check (PCRs zeroed under --debug-mode)"
   # Still assert the exact enclave set (F09-AF-07): an empty/partial list is a FAIL.
-  asubuntu 'nitro-cli describe-enclaves' | python3 - "${CIDS[*]}" <<'PY'
+  # NB: write to a file and json.load() the file (NOT a pipe into `python3 -
+  # <<'PY'`): the heredoc already occupies stdin for the program text, so a
+  # piped `describe-enclaves` would be discarded and json.load(sys.stdin) reads
+  # empty -> JSONDecodeError, aborting the deploy before step 7 (parents).
+  asubuntu 'nitro-cli describe-enclaves' > /tmp/desc.json
+  python3 - "${CIDS[*]}" <<'PY'
 import json, sys
 want = sorted(int(x) for x in sys.argv[1].split())
-d = json.load(sys.stdin)
+d = json.load(open("/tmp/desc.json"))
 running = sorted(e["EnclaveCID"] for e in d if e.get("State") == "RUNNING")
 print("running CIDs (debug):", running, "want:", want)
 if running != want:
