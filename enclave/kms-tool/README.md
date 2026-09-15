@@ -10,7 +10,37 @@ The measured Rust enclave invokes `/usr/local/bin/swap-kms-tool` once per reques
 
 Messages are limited to 64 KiB, ciphertext blobs to 6144 bytes, and unwrapped seeds to exactly 64 bytes. Core dumps are disabled; execution, CPU and address space are bounded. Credentials and seeds never enter command arguments, environment variables, temporary files or logs. Owned raw seed and credential buffers are erased during cleanup. Live json-c credential strings are overwritten through its public API immediately after creating the SDK credential strings, including rejected-input cleanup. Stdin is unbuffered to avoid another stdio credential copy. json-c parser scratch allocations remain protected by the short-lived process boundary; this is not a guarantee that every library-owned allocation is wiped. Rust clears the child environment and rejects failed, oversized or malformed responses.
 
-The build executes a native regression test proving that the pinned json-c erases the original credential allocation, including the maximum IPC string length. NSM uses upstream’s `libnsm.so.0` SONAME in the runtime; the unversioned symlink is needed only while linking.
+The returned `key_arn` comes from the official SDK response's `key_id`, after
+an exact match against the measured request ARN. The preceding HTTP response
+gate independently checks the actual KMS `KeyId` before SDK parsing and CMS
+unwrap; an absent, malformed or different key cannot reach successful output.
+This follows the response contract for [GenerateDataKey](https://docs.aws.amazon.com/kms/latest/APIReference/API_GenerateDataKey.html)
+and [Decrypt](https://docs.aws.amazon.com/kms/latest/APIReference/API_Decrypt.html).
+
+Failures use a fixed exit-code contract; no raw HTTP body, SDK error string or
+service message is forwarded. Rust retains these categories while discarding
+child diagnostics. The adapter adds no automatic retry loop.
+
+| Exit | Meaning |
+| --- | --- |
+| 0 | Successful operation |
+| 64 | Invalid helper input or an allowlisted KMS configuration error |
+| 65 | Invalid response, key mismatch, TLS authentication or recipient-integrity failure |
+| 69 | Recognized transport failure; retryable within the caller's deadline |
+| 70 | Local SDK, NSM or resource failure; no retryability claim |
+| 75 | Authenticated KMS throttling, server or documented temporary failure |
+| 77 | KMS authentication or authorization failure |
+| 78 | KMS key state, key usage or ciphertext rejection |
+
+Only recognized SDK transport constants and authenticated HTTP status/error
+types receive retryable categories. Unknown or malformed service errors are
+invalid responses. KMS error classification reads an allowlisted `__type`,
+never the free-form message; see [KMS common errors](https://docs.aws.amazon.com/kms/latest/APIReference/CommonErrors.html).
+New service error types require an explicit review instead of optimistic retry.
+
+The build executes native response-contract tests covering both operations,
+wrong/malformed response keys, authoritative output and safe error categories.
+It also executes a regression test proving that the pinned json-c erases the original credential allocation, including the maximum IPC string length. NSM uses upstream’s `libnsm.so.0` SONAME in the runtime; the unversioned symlink is needed only while linking.
 
 Build with CMake using only `-DCMAKE_PREFIX_PATH=/path/to/installed/prefix`. The dependency build installs the official exported CMS functions' header verbatim and records its checksum in `share/swap-kms/headers.sha256`. It uses json-c's installed CMake package; no separate SDK source path is required when building this helper. The helper and NSM runtime library are included only in RGB-swap images. Signing, HD derivation, S3 ciphertext persistence and RGB mint/burn behavior remain in their existing components.
 

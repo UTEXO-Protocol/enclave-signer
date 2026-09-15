@@ -29,6 +29,10 @@ if(BUILD_TESTING)
     configure_helper_target(swap-kms-tool-input-tests)
     add_test(NAME credential-cleanup COMMAND swap-kms-tool-input-tests)
 
+    add_executable(swap-kms-tool-response-tests tests/response_contract.c)
+    configure_helper_target(swap-kms-tool-response-tests)
+    add_test(NAME response-contract COMMAND swap-kms-tool-response-tests)
+
     # Link-time fault injection exercises the installed SDK's actual request code.
     add_executable(swap-kms-sdk-cleanup-tests tests/sdk_cleanup.c)
     target_compile_features(swap-kms-sdk-cleanup-tests PRIVATE c_std_11)
