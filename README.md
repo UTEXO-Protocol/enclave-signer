@@ -110,9 +110,11 @@ destination network. Accepted routes: RGB -> EVM, EVM -> RGB, CCD -> EVM.
   re-encode must byte-match), amount == declared, chain / contract pins,
   `destinationChainId` rule per route, deadline in the future, BtcRelay
   finality proof anchored to the consignment's block.
-- **Flow shape** - a `rgb-swap` build accepts IFA `Transfer` only; a
-  `rgb-mint-burn` build accepts `Inflation` / `Burn` (and BFA `Bridge` with
-  `bfa-mint`). Separate images, separate PCR0.
+- **Schema** - BFA (Bridged Fungible Asset) is the only RGB schema accepted.
+  Every other schema id is refused fail-closed.
+- **Flow shape** - a `rgb-swap` build accepts BFA `Transfer` only; a
+  `rgb-mint-burn` build accepts BFA `Bridge` / `Burn`. Separate images,
+  separate PCR0.
 - **Replay** - `fundsOut` replay is the on-chain nonce in the digest. EVM -> RGB
   requests get a soft in-memory dedup (24 h) keyed by the deposit.
 
@@ -426,9 +428,9 @@ provenance. `build/smoke-test.sh` drives a live enclave through the CLI.
 |---------|---------|-------------|
 | `rgb` | `spv` | RGB / Bitcoin bridge stack. |
 | `ccd` | - | Concordium stack (Ed25519 is always compiled; this gates the handlers). |
-| `rgb-swap` | `rgb` | RGB flow: send/receive with IFA `Transfer`. In the default set. |
-| `rgb-mint-burn` | `rgb` | RGB flow: deposits mint with IFA `Inflation`, withdrawals `Burn`. Needs `--no-default-features`. |
-| `bfa-mint` | `rgb-mint-burn`, `evm-rpc` | Bridged Fungible Asset schema: `Bridge` transitions verified against the enclave's own `FundsIn` reads. |
+| `rgb-swap` | `rgb` | RGB flow: send/receive with BFA `Transfer`. In the default set. |
+| `rgb-mint-burn` | `rgb` | RGB flow: deposits mint with BFA `Bridge`, withdrawals `Burn`. Needs `--no-default-features`. |
+| `bfa-mint` | `rgb-mint-burn`, `evm-rpc` | Ether-extension validator for BFA `Bridge` mints, checked against the enclave's own `FundsIn` reads. BFA is the only accepted schema with or without it. |
 | `spv` | `rgb-validation` | In-enclave Bitcoin header chain and witness inclusion proofs. |
 | `rgb-validation` | rgb crates | In-enclave consignment validation. Requires `spv`. |
 | `evm-rpc` | `rgb-validation` | In-enclave `FundsIn` verification over host-relayed JSON-RPC. Without it the enclave refuses every bridge PSBT. |

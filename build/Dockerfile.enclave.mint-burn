@@ -33,8 +33,8 @@ ENV CARGO_INCREMENTAL=0 \
 # `helios` is deliberately NOT enabled: the light-client path is unused in
 # production, so the attested evm_source is RawRpc.
 #
-# `rgb-mint-burn` selects the mint/burn RGB flow: deposits mint with an IFA
-# `Inflation`, withdrawals destroy with an IFA `Burn`. Exactly one flow is
+# `rgb-mint-burn` selects the mint/burn RGB flow: deposits mint with a BFA
+# `Bridge`, withdrawals destroy with a BFA `Burn`. Exactly one flow is
 # required under `rgb-validation`, and this image carries no send/receive rule
 # at all - the swap image is Dockerfile.enclave.rgb. Two flows, two PCR0s, two
 # running enclaves.
