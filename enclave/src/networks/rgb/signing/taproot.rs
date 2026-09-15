@@ -294,16 +294,20 @@ mod tests {
     fn multi_a_2_of_3(keys: &[XOnlyPublicKey; 3]) -> ScriptBuf {
         let mut sorted = *keys;
         sorted.sort();
-        ScriptBuilder::new()
-            .push_x_only_key(&sorted[0])
-            .push_opcode(OP_CHECKSIG)
-            .push_x_only_key(&sorted[1])
-            .push_opcode(OP_CHECKSIGADD)
-            .push_x_only_key(&sorted[2])
-            .push_opcode(OP_CHECKSIGADD)
-            .push_int(2)
-            .push_opcode(OP_NUMEQUAL)
-            .into_script()
+        multi_a(2, &sorted)
+    }
+
+    /// miniscript `multi_a(threshold, keys)` encoding.
+    fn multi_a(threshold: i64, keys: &[XOnlyPublicKey]) -> ScriptBuf {
+        let mut b = ScriptBuilder::new();
+        for (i, key) in keys.iter().enumerate() {
+            b = b.push_x_only_key(key).push_opcode(if i == 0 {
+                OP_CHECKSIG
+            } else {
+                OP_CHECKSIGADD
+            });
+        }
+        b.push_int(threshold).push_opcode(OP_NUMEQUAL).into_script()
     }
 
     /// Build a taproot P2TR PSBT for testing.
@@ -627,9 +631,17 @@ mod tests {
     /// Like [`build_legit_taproot_psbt`] but the leaf + tap_key_origins use the
     /// COLORED (RGB) account key/path, so the resolved job is `AccountType::Colored`.
     fn build_colored_taproot_psbt(km: &KeyManager) -> Psbt {
+        let our = our_xonly_colored(km);
+        let leaf = multi_a_2_of_3(&[our, xonly_from_byte(0xA1), xonly_from_byte(0xA2)]);
+        colored_psbt_with_leaf(km, leaf).0
+    }
+
+    /// Colored-account PSBT committing to `leaf_script` under the NUMS internal
+    /// key, with every metadata gate (witness UTXO, control block, leaf hash,
+    /// fingerprint, derivation path) valid. Returns the PSBT and the leaf hash.
+    fn colored_psbt_with_leaf(km: &KeyManager, leaf_script: ScriptBuf) -> (Psbt, TapLeafHash) {
         let secp = Secp256k1::new();
         let our = our_xonly_colored(km);
-        let leaf_script = multi_a_2_of_3(&[our, xonly_from_byte(0xA1), xonly_from_byte(0xA2)]);
         let leaf_hash = TapLeafHash::from_script(&leaf_script, LeafVersion::TapScript);
 
         let internal_key = XOnlyPublicKey::from_slice(&NUMS_INTERNAL).unwrap();
@@ -676,7 +688,7 @@ mod tests {
                 (*km.master_fingerprint(), our_colored_full_path()),
             ),
         );
-        psbt
+        (psbt, leaf_hash)
     }
 
     #[test]
@@ -710,5 +722,64 @@ mod tests {
             scoped, 0,
             "plain-BTC (vanilla-scoped) signing must refuse a colored input"
         );
+    }
+
+    // === Colored signing: the key must hold a signature role in the approved leaf ===
+
+    #[test]
+    fn colored_signing_requires_a_signature_role_in_the_leaf() {
+        let km = KeyManager::from_seed([0x42u8; 64], Network::Testnet).unwrap();
+        let our = our_xonly_colored(&km);
+        let [a1, a2, a3, a4] = [0xA1, 0xA2, 0xA3, 0xA4].map(xonly_from_byte);
+        // Colored-scoped signing of `leaf`. Every metadata gate is valid, so
+        // the raw scanner always finds our key: only the leaf shape varies.
+        let sign = |leaf: ScriptBuf| {
+            let (psbt, leaf_hash) = colored_psbt_with_leaf(&km, leaf);
+            assert_eq!(
+                find_taproot_sign_jobs(&psbt, km.master_fingerprint(), &km).len(),
+                1
+            );
+            let (signed, n) = km
+                .sign_psbt_scoped(&psbt.serialize(), Some(AccountType::Colored))
+                .unwrap();
+            (n, Psbt::deserialize(&signed).unwrap(), leaf_hash)
+        };
+
+        // Approved quorum leaves: signed exactly once, for our key on that leaf.
+        for leaf in [
+            multi_a(2, &[our, a1, a2]),
+            multi_a(3, &[a1, a2, our, a3, a4]),
+        ] {
+            let (n, psbt, leaf_hash) = sign(leaf);
+            assert_eq!(n, 1);
+            assert_eq!(psbt.inputs[0].tap_script_sigs.len(), 1);
+            assert!(psbt.inputs[0]
+                .tap_script_sigs
+                .contains_key(&(our, leaf_hash)));
+        }
+
+        // Our key pushed outside an approved signature role: nothing signed.
+        let inert = ScriptBuilder::new()
+            .push_x_only_key(&our)
+            .push_opcode(OP_DROP)
+            .push_x_only_key(&a1)
+            .push_opcode(OP_CHECKSIG)
+            .into_script();
+        let near_match = ScriptBuilder::new()
+            .push_x_only_key(&our)
+            .push_opcode(OP_CHECKSIG)
+            .push_opcode(OP_DROP)
+            .push_opcode(bitcoin::opcodes::OP_TRUE)
+            .into_script();
+        let over_threshold = multi_a(2, &[our]);
+        let trailing_bypass = ScriptBuilder::from(multi_a(2, &[our, a1]).into_bytes())
+            .push_opcode(OP_DROP)
+            .push_opcode(bitcoin::opcodes::OP_TRUE)
+            .into_script();
+        for leaf in [inert, near_match, over_threshold, trailing_bypass] {
+            let (n, psbt, _) = sign(leaf.clone());
+            assert_eq!(n, 0, "{leaf}");
+            assert!(psbt.inputs[0].tap_script_sigs.is_empty(), "{leaf}");
+        }
     }
 }
