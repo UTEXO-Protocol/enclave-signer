@@ -36,8 +36,8 @@
 #   SWAP_KMS_KEY_ARN       required for combined/RGB swap images: full KMS key ARN
 #   SWAP_KMS_REGION        required for combined/RGB swap images: commercial AWS region
 #   SWAP_KMS_SEED_ID       required for combined/RGB swap images: stable seed identifier
-#   SWAP_KMS_ALLOW_CREATE  swaps bootstrap only: 1; normal recovery: 0 (default)
-#   SWAP_KMS_EXPECTED_EVM_ADDRESS  required for recovery; forbidden for bootstrap
+#   SWAP_KMS_EXPECTED_EVM_ADDRESS  optional existing signer identity pin; when set,
+#                                  missing ciphertext fails instead of creating a new identity
 # NOTE: the donor cloning secret is NOT baked into the EIF. It is delivered at
 # runtime via the InitializeKey message (CLI: `init --cloning-secret <secret>`),
 # keeping the build secret-free and the PCRs reproducible.
@@ -67,22 +67,10 @@ case "${DOCKERFILE##*/}" in
         : "${SWAP_KMS_KEY_ARN:?SWAP_KMS_KEY_ARN required for RGB swap builds}"
         : "${SWAP_KMS_REGION:?SWAP_KMS_REGION required for RGB swap builds}"
         : "${SWAP_KMS_SEED_ID:?SWAP_KMS_SEED_ID required for RGB swap builds}"
-        SWAP_KMS_ALLOW_CREATE="${SWAP_KMS_ALLOW_CREATE:-0}"
-        case "$SWAP_KMS_ALLOW_CREATE" in
-            0) : "${SWAP_KMS_EXPECTED_EVM_ADDRESS:?SWAP_KMS_EXPECTED_EVM_ADDRESS required for RGB swap recovery}" ;;
-            1)
-                if [ -n "${SWAP_KMS_EXPECTED_EVM_ADDRESS:-}" ]; then
-                    echo "Error: bootstrap cannot set SWAP_KMS_EXPECTED_EVM_ADDRESS" >&2
-                    exit 1
-                fi
-                ;;
-            *) echo "Error: SWAP_KMS_ALLOW_CREATE must be 0 or 1" >&2; exit 1 ;;
-        esac
         SWAP_KMS_ARGS=(
             --build-arg "SWAP_KMS_KEY_ARN=$SWAP_KMS_KEY_ARN"
             --build-arg "SWAP_KMS_REGION=$SWAP_KMS_REGION"
             --build-arg "SWAP_KMS_SEED_ID=$SWAP_KMS_SEED_ID"
-            --build-arg "SWAP_KMS_ALLOW_CREATE=$SWAP_KMS_ALLOW_CREATE"
             --build-arg "SWAP_KMS_EXPECTED_EVM_ADDRESS=${SWAP_KMS_EXPECTED_EVM_ADDRESS:-}"
         )
         ;;

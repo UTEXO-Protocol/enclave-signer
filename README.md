@@ -231,13 +231,13 @@ their build commands or `make docker` / `make build_enclave_rgb`:
 export SWAP_KMS_KEY_ARN="arn:aws:kms:<region>:<account-id>:key/<key-id>"
 export SWAP_KMS_REGION="<region>"
 export SWAP_KMS_SEED_ID="<stable-seed-id>"
-export SWAP_KMS_ALLOW_CREATE=0
-export SWAP_KMS_EXPECTED_EVM_ADDRESS="<verified-existing-signer-address>"
 ```
 
-Replace the placeholders; use your verified signer address for recovery. For
-the first bootstrap only, set `SWAP_KMS_ALLOW_CREATE=1` and unset
-`SWAP_KMS_EXPECTED_EVM_ADDRESS`. Follow the [bootstrap and recovery
+Replace the placeholders. Initialization automatically loads an existing saved
+seed or creates one when storage confirms the object is missing. For an existing
+signer, also set `SWAP_KMS_EXPECTED_EVM_ADDRESS` to its verified address; this
+prevents missing or substituted storage from silently replacing that identity.
+Follow the [bootstrap and recovery
 procedure](docs/swap-kms-persistence.md) before funding the signer. These KMS
 values are not needed for mint/burn, BFA, or CCD-only builds.
 

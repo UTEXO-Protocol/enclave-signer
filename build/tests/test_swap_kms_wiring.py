@@ -15,7 +15,8 @@ KMS_CONFIG = {
     "SWAP_KMS_SEED_ID": "swaps-test",
     "SWAP_KMS_EXPECTED_EVM_ADDRESS": "0x1111111111111111111111111111111111111111",
 }
-KMS_NAMES = tuple(KMS_CONFIG) + ("SWAP_KMS_ALLOW_CREATE",)
+KMS_NAMES = tuple(KMS_CONFIG)
+REQUIRED_KMS_NAMES = tuple(name for name in KMS_CONFIG if name != "SWAP_KMS_EXPECTED_EVM_ADDRESS")
 
 
 class SwapBuildTests(unittest.TestCase):
@@ -67,37 +68,29 @@ class SwapBuildTests(unittest.TestCase):
             capture_output=True, text=True,
         )
 
-    def test_swap_script_passes_all_measured_pins_and_defaults_to_restore(self):
+    def test_swap_script_passes_all_measured_pins(self):
         for dockerfile in ("Dockerfile.enclave", "Dockerfile.enclave.rgb"):
             with self.subTest(dockerfile=dockerfile):
                 result = self.run_script(dockerfile, KMS_CONFIG)
                 self.assertEqual(result.returncode, 73, result.stderr)
                 arguments = self.logs()[-1]["argv"]
-                for name, value in dict(KMS_CONFIG, SWAP_KMS_ALLOW_CREATE="0").items():
+                for name, value in KMS_CONFIG.items():
                     self.assertIn(f"{name}={value}", arguments)
 
-    def test_swap_script_passes_bootstrap_mode_without_an_identity_pin(self):
-        config = dict(KMS_CONFIG, SWAP_KMS_ALLOW_CREATE="1")
+    def test_swap_script_accepts_automatic_creation_without_an_identity_pin(self):
+        config = dict(KMS_CONFIG)
         del config["SWAP_KMS_EXPECTED_EVM_ADDRESS"]
         result = self.run_script("Dockerfile.enclave.rgb", config)
         self.assertEqual(result.returncode, 73, result.stderr)
-        self.assertIn("SWAP_KMS_ALLOW_CREATE=1", self.logs()[0]["argv"])
         self.assertIn("SWAP_KMS_EXPECTED_EVM_ADDRESS=", self.logs()[0]["argv"])
 
     def test_missing_swap_pins_fail_before_docker_runs(self):
-        for name in KMS_CONFIG:
+        for name in REQUIRED_KMS_NAMES:
             with self.subTest(name=name):
                 config = {key: value for key, value in KMS_CONFIG.items() if key != name}
                 result = self.run_script("Dockerfile.enclave.rgb", config)
                 self.assertNotEqual(result.returncode, 0)
                 self.assertIn(name, result.stderr)
-                self.assertEqual(self.logs(), [])
-
-    def test_invalid_bootstrap_mode_or_bootstrap_identity_pin_fails_early(self):
-        for config in (dict(KMS_CONFIG, SWAP_KMS_ALLOW_CREATE="yes"), dict(KMS_CONFIG, SWAP_KMS_ALLOW_CREATE="1")):
-            with self.subTest(mode=config["SWAP_KMS_ALLOW_CREATE"]):
-                result = self.run_script("Dockerfile.enclave", config)
-                self.assertNotEqual(result.returncode, 0)
                 self.assertEqual(self.logs(), [])
 
     def test_other_flow_scripts_neither_require_nor_pass_kms_build_arguments(self):
@@ -118,19 +111,18 @@ class SwapBuildTests(unittest.TestCase):
                     for name in KMS_NAMES:
                         index = call["argv"].index(name)
                         self.assertEqual(call["argv"][index - 1], "--build-arg")
-                    self.assertEqual(call["kms_env"], dict(KMS_CONFIG, SWAP_KMS_ALLOW_CREATE="0"))
+                    self.assertEqual(call["kms_env"], KMS_CONFIG)
 
     def test_make_accepts_command_line_pins_and_exports_them_without_shell_interpolation(self):
         result = self.run_make("build_enclave_rgb", {}, [f"{name}={value}" for name, value in KMS_CONFIG.items()])
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(self.logs()[0]["kms_env"], dict(KMS_CONFIG, SWAP_KMS_ALLOW_CREATE="0"))
+        self.assertEqual(self.logs()[0]["kms_env"], KMS_CONFIG)
 
-    def test_make_missing_recovery_pin_fails_before_docker(self):
+    def test_make_accepts_automatic_creation_without_an_identity_pin(self):
         config = {key: value for key, value in KMS_CONFIG.items() if key != "SWAP_KMS_EXPECTED_EVM_ADDRESS"}
         result = self.run_make("build_enclave", config)
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("SWAP_KMS_EXPECTED_EVM_ADDRESS", result.stderr)
-        self.assertEqual(self.logs(), [])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.logs()[0]["kms_env"], dict(config, SWAP_KMS_EXPECTED_EVM_ADDRESS=""))
 
     def test_ccd_make_target_does_not_gain_kms_env_or_build_arguments(self):
         result = self.run_make("build_enclave_ccd", {})

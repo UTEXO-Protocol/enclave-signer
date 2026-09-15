@@ -31,8 +31,7 @@ name: "Build EIF"
 #   vars.SWAP_KMS_KEY_ARN                      swaps: full KMS key ARN (required)
 #   vars.SWAP_KMS_REGION                       swaps: commercial AWS region (required)
 #   vars.SWAP_KMS_SEED_ID                      swaps: stable seed identifier (required)
-#   vars.SWAP_KMS_ALLOW_CREATE                 swaps: 1 for bootstrap; defaults to 0
-#   vars.SWAP_KMS_EXPECTED_EVM_ADDRESS         swaps: required in recovery, empty in bootstrap
+#   vars.SWAP_KMS_EXPECTED_EVM_ADDRESS         swaps: optional existing signer identity pin
 # No infra identifiers (account id, bucket, region) are hardcoded here — this is
 # a public repo; everything environment-specific comes from repo vars/secrets.
 
@@ -156,7 +155,6 @@ jobs:
           SWAP_KMS_KEY_ARN: ${{ vars.SWAP_KMS_KEY_ARN }}
           SWAP_KMS_REGION: ${{ vars.SWAP_KMS_REGION }}
           SWAP_KMS_SEED_ID: ${{ vars.SWAP_KMS_SEED_ID }}
-          SWAP_KMS_ALLOW_CREATE: ${{ vars.SWAP_KMS_ALLOW_CREATE || '0' }}
           SWAP_KMS_EXPECTED_EVM_ADDRESS: ${{ vars.SWAP_KMS_EXPECTED_EVM_ADDRESS }}
         run: |
           set -euxo pipefail

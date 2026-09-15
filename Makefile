@@ -10,13 +10,11 @@ DOCKER_AUTH_ARGS ?= --secret id=github_token,env=GITHUB_TOKEN
 # Public KMS pins are exported only for the two production swap targets.
 # Docker reads --build-arg NAME from the environment; values never become shell
 # source through Make expansion. Required pins may come from env or make args.
-SWAP_KMS_ALLOW_CREATE ?= 0
 SWAP_KMS_EXPECTED_EVM_ADDRESS ?=
-SWAP_KMS_BUILD_ARGS = --build-arg SWAP_KMS_KEY_ARN --build-arg SWAP_KMS_REGION --build-arg SWAP_KMS_SEED_ID --build-arg SWAP_KMS_ALLOW_CREATE --build-arg SWAP_KMS_EXPECTED_EVM_ADDRESS
+SWAP_KMS_BUILD_ARGS = --build-arg SWAP_KMS_KEY_ARN --build-arg SWAP_KMS_REGION --build-arg SWAP_KMS_SEED_ID --build-arg SWAP_KMS_EXPECTED_EVM_ADDRESS
 build_enclave build_enclave_rgb: export SWAP_KMS_KEY_ARN := $(SWAP_KMS_KEY_ARN)
 build_enclave build_enclave_rgb: export SWAP_KMS_REGION := $(SWAP_KMS_REGION)
 build_enclave build_enclave_rgb: export SWAP_KMS_SEED_ID := $(SWAP_KMS_SEED_ID)
-build_enclave build_enclave_rgb: export SWAP_KMS_ALLOW_CREATE := $(SWAP_KMS_ALLOW_CREATE)
 build_enclave build_enclave_rgb: export SWAP_KMS_EXPECTED_EVM_ADDRESS := $(SWAP_KMS_EXPECTED_EVM_ADDRESS)
 
 .PHONY: build_parent push_parent build_enclave push_enclave build_enclave_rgb push_enclave_rgb build_enclave_ccd push_enclave_ccd build_enclave_dev push_enclave_dev check_swap_kms_config docker docker_dev help
@@ -33,10 +31,6 @@ check_swap_kms_config:
 	@: "$${SWAP_KMS_KEY_ARN:?SWAP_KMS_KEY_ARN required for RGB swap builds}" \
 	   "$${SWAP_KMS_REGION:?SWAP_KMS_REGION required for RGB swap builds}" \
 	   "$${SWAP_KMS_SEED_ID:?SWAP_KMS_SEED_ID required for RGB swap builds}"
-	@case "$$SWAP_KMS_ALLOW_CREATE" in \
-	  0) : "$${SWAP_KMS_EXPECTED_EVM_ADDRESS:?SWAP_KMS_EXPECTED_EVM_ADDRESS required for RGB swap recovery}" ;; \
-	  1) test -z "$$SWAP_KMS_EXPECTED_EVM_ADDRESS" || { echo "Error: bootstrap cannot set SWAP_KMS_EXPECTED_EVM_ADDRESS" >&2; exit 1; } ;; \
-	  *) echo "Error: SWAP_KMS_ALLOW_CREATE must be 0 or 1" >&2; exit 1 ;; esac
 
 build_enclave: check_swap_kms_config ## Build combined enclave docker image (vsock+rgb+ccd+evm-rpc).
 	docker build $(DOCKER_AUTH_ARGS) $(SWAP_KMS_BUILD_ARGS) -f ./build/Dockerfile.enclave -t $(IMAGE_ENCLAVE_BACKUP) . && \
