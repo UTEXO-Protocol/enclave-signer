@@ -633,9 +633,14 @@ fn handle_sign(ctx: &ServerContext, req: SignRequest) -> Result<EnclaveResponse>
         // against.
         (SourceNetwork::EvmSource(evm), DestinationNetwork::RgbDestination(rgb)) => {
             #[cfg(feature = "rgb-mint-burn")]
-            { bfa_mint_events(ctx, evm, rgb)? }
+            {
+                bfa_mint_events(ctx, evm, rgb)?
+            }
             #[cfg(feature = "rgb-swap")]
-            { let _ = evm; bfa_transfer_ancestry_events(ctx, rgb)? }
+            {
+                let _ = evm;
+                bfa_transfer_ancestry_events(ctx, rgb)?
+            }
         }
         // No BFA consignment on either side, so nothing for `cea` to check.
         _ => Vec::new(),

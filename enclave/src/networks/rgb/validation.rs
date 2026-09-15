@@ -954,7 +954,8 @@ impl RgbValidator {
     pub fn validate_consignment(
         &self,
         consignment_bytes: &[u8],
-        #[cfg_attr(not(feature = "bfa-validation"), allow(unused_variables))] bridge_events: &[Event],
+        #[cfg_attr(not(feature = "bfa-validation"), allow(unused_variables))]
+        bridge_events: &[Event],
     ) -> Result<ValidatedConsignment> {
         let start = std::time::Instant::now();
         let bytes_len = consignment_bytes.len();
