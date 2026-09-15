@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 
 use bitcoin::bip32::Fingerprint;
-use bitcoin::blockdata::script::Instruction;
+use bitcoin::blockdata::script::{Instruction, Script};
 use bitcoin::hashes::Hash;
 use bitcoin::psbt::Psbt;
 use bitcoin::secp256k1::{Keypair, Message, Secp256k1};
@@ -124,6 +124,60 @@ pub fn find_taproot_sign_jobs(
     }
 
     jobs
+}
+
+/// Colored signing: `find_taproot_sign_jobs` plus the policy that a Colored
+/// key must hold a signature position in the approved quorum leaf.
+pub fn find_approved_colored_taproot_sign_jobs(
+    psbt: &Psbt,
+    master_fingerprint: &Fingerprint,
+    key_manager: &KeyManager,
+) -> Vec<TaprootSignJob> {
+    let mut jobs = find_taproot_sign_jobs(psbt, master_fingerprint, key_manager);
+    jobs.retain(|job| {
+        job.account_type != AccountType::Colored
+            || psbt.inputs[job.input_index]
+                .tap_scripts
+                .values()
+                .any(|(script, version)| {
+                    TapLeafHash::from_script(script, *version) == job.leaf_hash
+                        && approved_colored_signing_keys(script)
+                            .is_some_and(|keys| keys.contains(&job.xonly_pubkey))
+                })
+    });
+    jobs
+}
+
+/// Keys in the signature positions of the approved Colored leaf: the
+/// `multi_a(k, keys)` fragment the bridge wallet (rgb-lib) commits to, i.e.
+/// exactly `<k1> OP_CHECKSIG (<ki> OP_CHECKSIGADD)* <k> OP_NUMEQUAL` with
+/// `1 <= k <= n`. Any other shape, including a parse error, is not approved.
+fn approved_colored_signing_keys(script: &Script) -> Option<Vec<XOnlyPublicKey>> {
+    use bitcoin::blockdata::opcodes::all::{OP_CHECKSIG, OP_CHECKSIGADD, OP_NUMEQUAL};
+    use bitcoin::blockdata::opcodes::{Class, ClassifyContext};
+    use Instruction::{Op, PushBytes};
+    let insns = script
+        .instructions()
+        .map(|r| r.ok())
+        .collect::<Option<Vec<_>>>()?;
+    let (body, [Op(threshold), Op(OP_NUMEQUAL)]) = insns.split_last_chunk::<2>()? else {
+        return None;
+    };
+    // Threshold as OP_PUSHNUM_k: a quorum above 16 keys is not approved.
+    let Class::PushNum(threshold) = threshold.classify(ClassifyContext::TapScript) else {
+        return None;
+    };
+    let mut keys = Vec::with_capacity(body.len() / 2);
+    for (i, pair) in body.chunks(2).enumerate() {
+        let [PushBytes(key), Op(op)] = pair else {
+            return None;
+        };
+        if *op != if i == 0 { OP_CHECKSIG } else { OP_CHECKSIGADD } {
+            return None;
+        }
+        keys.push(XOnlyPublicKey::from_slice(key.as_bytes()).ok()?);
+    }
+    (threshold >= 1 && threshold as usize <= keys.len()).then_some(keys)
 }
 
 /// Sign taproot script-path inputs in the PSBT.

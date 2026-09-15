@@ -438,11 +438,21 @@ impl KeyManager {
         let mut signed_count = 0usize;
 
         // === Taproot signing (BIP-86 / BIP-340 Schnorr) ===
-        let mut taproot_jobs = crate::networks::rgb::signing::taproot::find_taproot_sign_jobs(
-            &psbt,
-            &self.master_fingerprint,
-            self,
-        );
+        // Colored scope (send-RGB path): the key must hold a signature role in
+        // the approved quorum leaf, not merely appear as a push in it.
+        let mut taproot_jobs = if allowed_account == Some(AccountType::Colored) {
+            crate::networks::rgb::signing::taproot::find_approved_colored_taproot_sign_jobs(
+                &psbt,
+                &self.master_fingerprint,
+                self,
+            )
+        } else {
+            crate::networks::rgb::signing::taproot::find_taproot_sign_jobs(
+                &psbt,
+                &self.master_fingerprint,
+                self,
+            )
+        };
         if let Some(account) = allowed_account {
             // Plain-BTC path: refuse any input that resolves to a different
             // account (e.g. Colored/RGB). Dropping the job means the input is
