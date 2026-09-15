@@ -152,14 +152,18 @@ evm-rpc = ["rgb-validation", "dep:alloy", "dep:tokio"]
 # (2 alloy majors, revm, BLS, vendored OpenSSL).
 helios = ["evm-rpc", "dep:helios-ethereum"]
 # Ether-extension validation of BFA mints. BFA is the only schema the enclave
-# admits with or without this feature; what the feature adds is the validator
-# that can actually RUN a BFA mint script, which ends in the `cea` opcode the
+# admits; this feature supplies the validator that can RUN a BFA mint script,
+# including one in a swap transfer's ancestry. The script ends in `cea`, which the
 # default validator decodes as `Fail`. `evm-rpc` because the events that opcode
 # checks come from the enclave's own verified `FundsIn` read.
 #
 # WITHOUT it an `rgb-validation` build admits BFA and then fails every mint (and
 # every consignment carrying mint ancestry) on that opcode.
 #
+# `bfa-validation` runs the ether extension in either RGB flow. A swap
+# consignment can contain historical Bridge mints even when its last transition
+# is a Transfer; it must verify their FundsIn locks before consensus runs.
+bfa-validation = ["evm-rpc"]
 # `rgb-mint-burn`, not plain `rgb`: a BFA `Bridge` transition IS a mint, so its
 # rules belong to that flow and nowhere else. Pulling in the flow feature also
 # means a BFA build cannot accidentally be a `rgb-swap` one - `lib.rs` rejects
@@ -169,7 +173,7 @@ helios = ["evm-rpc", "dep:helios-ethereum"]
 # Every EIF here re-measures regardless: the workspace `[patch.crates-io]` moves
 # every build onto the BFA RGB crates (and electrum-client 0.24), so the signer
 # set must rotate.
-bfa-mint = ["rgb-mint-burn", "evm-rpc"]
+bfa-mint = ["rgb-mint-burn", "bfa-validation"]
 
 [dev-dependencies]
 rand = "0.10.0"

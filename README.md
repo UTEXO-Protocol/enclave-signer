@@ -115,6 +115,9 @@ destination network. Accepted routes: RGB -> EVM, EVM -> RGB, CCD -> EVM.
 - **Flow shape** - a `rgb-swap` build accepts BFA `Transfer` only; a
   `rgb-mint-burn` build accepts BFA `Bridge` / `Burn`. Separate images,
   separate PCR0.
+  Production RGB images take the per-deployment BFA contract ID through the
+  `RGB_ASSET_ID` Docker build argument. The EIF workflow reads it from the
+  `BFA_RGB_ASSET_ID` repository variable and fails the image build if absent.
 - **Replay** - `fundsOut` replay is the on-chain nonce in the digest. EVM -> RGB
   requests get a soft in-memory dedup (24 h) keyed by the deposit.
 
@@ -430,7 +433,8 @@ provenance. `build/smoke-test.sh` drives a live enclave through the CLI.
 | `ccd` | - | Concordium stack (Ed25519 is always compiled; this gates the handlers). |
 | `rgb-swap` | `rgb` | RGB flow: send/receive with BFA `Transfer`. In the default set. |
 | `rgb-mint-burn` | `rgb` | RGB flow: deposits mint with BFA `Bridge`, withdrawals `Burn`. Needs `--no-default-features`. |
-| `bfa-mint` | `rgb-mint-burn`, `evm-rpc` | Ether-extension validator for BFA `Bridge` mints, checked against the enclave's own `FundsIn` reads. BFA is the only accepted schema with or without it. |
+| `bfa-mint` | `rgb-mint-burn`, `bfa-validation` | Mint/burn flow with BFA consensus and settlement checks against verified `FundsIn` locks. |
+| `bfa-validation` | `evm-rpc` | Runs BFA consensus with verified mint ancestry in either RGB flow. Required for BFA swaps and implied by `bfa-mint`. |
 | `spv` | `rgb-validation` | In-enclave Bitcoin header chain and witness inclusion proofs. |
 | `rgb-validation` | rgb crates | In-enclave consignment validation. Requires `spv`. |
 | `evm-rpc` | `rgb-validation` | In-enclave `FundsIn` verification over host-relayed JSON-RPC. Without it the enclave refuses every bridge PSBT. |

@@ -16,12 +16,12 @@ use rgb_consignment::{
 use rgbstd::containers::{ConsignmentExt, FileContent, Transfer};
 use rgbstd::indexers::esplora_blocking::esplora_client;
 use rgbstd::indexers::AnyResolver;
-#[cfg(feature = "bfa-mint")]
+#[cfg(feature = "bfa-validation")]
 use rgbstd::persistence::{MemContract, MemContractState};
 use rgbstd::schema::{MetaType, TransitionType};
 use rgbstd::validation::{ValidationConfig, ValidationError};
 use rgbstd::vm::ether_extension::Event;
-#[cfg(feature = "bfa-mint")]
+#[cfg(feature = "bfa-validation")]
 use rgbstd::vm::ether_extension::{BridgedContract, IssuedAmountCheckExt};
 use rgbstd::ChainNet;
 use sha3::{Digest, Keccak256};
@@ -298,7 +298,7 @@ pub mod bfa {
 }
 
 /// Decode one parser-supplied OpId hex string into 32 bytes.
-#[cfg(feature = "bfa-mint")]
+#[cfg(feature = "bfa-validation")]
 fn decode_opid(hex_opid: &str) -> Result<[u8; 32]> {
     let hex_opid = hex_opid.strip_prefix("0x").unwrap_or(hex_opid);
     let bytes = hex::decode(hex_opid).map_err(|e| {
@@ -320,7 +320,7 @@ fn decode_opid(hex_opid: &str) -> Result<[u8; 32]> {
 /// consignment, so on either path every historical mint's `cea` needs its own
 /// verified event - and the burn path carries a whole ancestry of them. The
 /// mint direction additionally needs [`BfaBinding::terminal_opid`].
-#[cfg(feature = "bfa-mint")]
+#[cfg(feature = "bfa-validation")]
 pub struct BfaBinding {
     /// Every `TS_BRIDGE` OpId in the consignment, in consignment order.
     /// Untrusted - each only selects the log to verify; the ether extension
@@ -335,7 +335,7 @@ pub struct BfaBinding {
     last_transition: Option<TransitionSummary>,
 }
 
-#[cfg(feature = "bfa-mint")]
+#[cfg(feature = "bfa-validation")]
 impl BfaBinding {
     /// The mint this request authorises: the OpId of the consignment's last
     /// transition. It is the only one bound to the request's own deposit -
@@ -377,7 +377,7 @@ impl BfaBinding {
 /// A mint spends the bridge right its predecessor rolled forward, so mint N
 /// carries mints 1..N-1 in the history consensus re-runs `cea` over. Each one
 /// needs its own event, so each needs its own verified lock.
-#[cfg(feature = "bfa-mint")]
+#[cfg(feature = "bfa-validation")]
 pub fn bfa_binding(consignment_bytes: &[u8]) -> Result<Option<BfaBinding>> {
     // Bytes that do not load are not a BFA operation as far as this stage is
     // concerned; `validate_consignment` reports the parse failure on the path
@@ -410,7 +410,7 @@ pub fn bfa_binding(consignment_bytes: &[u8]) -> Result<Option<BfaBinding>> {
 /// contract and panics on anything unexpected, and the enclave builds with
 /// `panic = "abort"`. `BridgeLocation::Ethereum(TinyString)` strict-encodes as
 /// a one-byte union tag, a one-byte length, then the address string.
-#[cfg(feature = "bfa-mint")]
+#[cfg(feature = "bfa-validation")]
 fn genesis_bridge_location(transfer: &Transfer) -> Result<String> {
     let values = transfer
         .genesis
@@ -429,7 +429,7 @@ fn genesis_bridge_location(transfer: &Transfer) -> Result<String> {
 }
 
 /// Strict-decode one `BridgeLocation` blob. See [`genesis_bridge_location`].
-#[cfg(feature = "bfa-mint")]
+#[cfg(feature = "bfa-validation")]
 fn decode_bridge_location(raw: &[u8]) -> Result<String> {
     /// `tags = order` on a single-variant union, so `Ethereum` is tag 0.
     const ETHEREUM_TAG: u8 = 0;
@@ -954,7 +954,7 @@ impl RgbValidator {
     pub fn validate_consignment(
         &self,
         consignment_bytes: &[u8],
-        #[cfg_attr(not(feature = "bfa-mint"), allow(unused_variables))] bridge_events: &[Event],
+        #[cfg_attr(not(feature = "bfa-validation"), allow(unused_variables))] bridge_events: &[Event],
     ) -> Result<ValidatedConsignment> {
         let start = std::time::Instant::now();
         let bytes_len = consignment_bytes.len();
@@ -1098,7 +1098,7 @@ impl RgbValidator {
         // `Fail` and so rejects every mint; only the ether extension can run it.
         // No schema branch: the gate above admits BFA and nothing else, so
         // every consignment reaching here needs the extension.
-        #[cfg(feature = "bfa-mint")]
+        #[cfg(feature = "bfa-validation")]
         let validation_result = {
             // Fail closed, and say why: `cea` would reject an empty event set as
             // an opaque script failure, and validating a mint with no verified
@@ -1121,7 +1121,7 @@ impl RgbValidator {
                     ((&schema, contract), &events),
                 )
         };
-        #[cfg(not(feature = "bfa-mint"))]
+        #[cfg(not(feature = "bfa-validation"))]
         let validation_result = transfer.validate(&resolver, &config);
 
         let valid = validation_result.map_err(|e| {
@@ -1832,7 +1832,7 @@ mod tests {
     /// union tag (first variant, `tags = order`), a one-byte length, then the
     /// address. Pinned here so a change in that layout fails loudly rather than
     /// as an unexplained "invalid bridge location" at mint time.
-    #[cfg(feature = "bfa-mint")]
+    #[cfg(feature = "bfa-validation")]
     #[test]
     fn decodes_the_genesis_bridge_location_layout() {
         let addr = "0x1111111111111111111111111111111111111111";
@@ -1841,7 +1841,7 @@ mod tests {
         assert_eq!(decode_bridge_location(&blob).unwrap(), addr);
     }
 
-    #[cfg(feature = "bfa-mint")]
+    #[cfg(feature = "bfa-validation")]
     #[test]
     fn refuses_a_malformed_bridge_location_blob() {
         assert!(decode_bridge_location(&[]).is_err());
@@ -1856,7 +1856,7 @@ mod tests {
     /// The schema gate the BFA pre-pass applies on both directions: bytes that
     /// are not a BFA operation must trigger no EVM lookup and no ancestor
     /// requirement.
-    #[cfg(feature = "bfa-mint")]
+    #[cfg(feature = "bfa-validation")]
     #[test]
     fn no_binding_for_a_non_bfa_consignment() {
         assert!(bfa_binding(TRANSFER_FIXTURE).unwrap().is_none());
@@ -1865,14 +1865,14 @@ mod tests {
     /// Undecodable bytes are left to `validate_consignment`, which owns that
     /// error - reporting it from the pre-pass would reorder the messages every
     /// other path already asserts on.
-    #[cfg(feature = "bfa-mint")]
+    #[cfg(feature = "bfa-validation")]
     #[test]
     fn binding_defers_undecodable_bytes() {
         assert!(bfa_binding(b"not-a-consignment").unwrap().is_none());
     }
 
     /// A `BfaBinding` whose last transition is `last`, over the given mint set.
-    #[cfg(feature = "bfa-mint")]
+    #[cfg(feature = "bfa-validation")]
     fn binding_with(mint_opids: Vec<[u8; 32]>, last: Option<(u16, [u8; 32])>) -> BfaBinding {
         BfaBinding {
             mint_opids,
@@ -1891,7 +1891,7 @@ mod tests {
 
     /// The happy path: the last transition is a bridge mint that is also in the
     /// mint list, so it names the deposit this request authorises.
-    #[cfg(feature = "bfa-mint")]
+    #[cfg(feature = "bfa-validation")]
     #[test]
     fn terminal_opid_is_the_last_bridge_mint() {
         let b = binding_with(vec![[1; 32], [2; 32]], Some((bfa::TS_BRIDGE, [2; 32])));
@@ -1899,14 +1899,14 @@ mod tests {
     }
 
     /// No transitions means no answer to "which deposit pays for this?".
-    #[cfg(feature = "bfa-mint")]
+    #[cfg(feature = "bfa-validation")]
     #[test]
     fn terminal_opid_refuses_an_empty_consignment() {
         assert!(binding_with(vec![], None).terminal_opid().is_err());
     }
 
     /// A BFA consignment ending in a non-bridge transition is not a mint request.
-    #[cfg(feature = "bfa-mint")]
+    #[cfg(feature = "bfa-validation")]
     #[test]
     fn terminal_opid_refuses_a_non_bridge_last_transition() {
         let b = binding_with(vec![[1; 32]], Some((bfa::TS_BURN, [1; 32])));
@@ -1915,7 +1915,7 @@ mod tests {
 
     /// The last transition is a bridge mint, but the flat parser did not list it
     /// among the mints - refuse rather than guess.
-    #[cfg(feature = "bfa-mint")]
+    #[cfg(feature = "bfa-validation")]
     #[test]
     fn terminal_opid_refuses_a_last_mint_absent_from_the_list() {
         let b = binding_with(vec![[1; 32]], Some((bfa::TS_BRIDGE, [9; 32])));

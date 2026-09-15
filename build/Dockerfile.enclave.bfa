@@ -90,6 +90,7 @@ RUN chmod +x /app/utexo-bridge-enclave /app/entrypoint.sh
 #   --build-arg RGB_ASSET_ID=rgb:<the issued BFA contract id>
 # Note the pin is single-valued, so this EIF signs for the BFA asset only.
 ARG RGB_ASSET_ID=""
+RUN test -n "$RGB_ASSET_ID"
 ENV EVM_CHAIN_ID=42161 \
     EVM_PROXY_CONTRACT_ADDRESS=0xC985c12bbCECe96A13A72A62FD75d8aB9381ef5A \
     RGB_ASSET_ID=${RGB_ASSET_ID} \
