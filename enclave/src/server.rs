@@ -1615,9 +1615,9 @@ fn handle_get_clone(ctx: &ServerContext, req: GetCloneRequest) -> Result<Enclave
     //     authenticated (so it cannot be probed/tripped by an unauthenticated
     //     caller) and before any nonce is reserved or seed is sealed, so a
     //     quota-refused request neither consumes replay capacity nor produces
-    //     ciphertext. Disabled by default (cap 0) — no behaviour change unless
-    //     the operator opts in.
-    state.check_export_quota()?;
+    //     ciphertext. Reserve atomically across workers; any later error drops
+    //     the reservation and returns its slot. Disabled by default (cap 0).
+    let export_reservation = state.reserve_export_quota()?;
 
     // 6. Reserve the nonce from the verified document (replay-check + record
     //    with rollback-on-drop), only after the checks above have passed so an
@@ -1661,7 +1661,7 @@ fn handle_get_clone(ctx: &ServerContext, req: GetCloneRequest) -> Result<Enclave
     // via CLONE_EXPORT_SOFT_CAP). Hard enforcement, when opted in via
     // CLONE_EXPORT_HARD_CAP, already ran fail-closed at step 5b above; the
     // concrete quota number stays an owner custody choice (see OWNER-DECISIONS).
-    let export_count = state.record_seed_export(&req_encryption_pk);
+    let export_count = export_reservation.commit(&req_encryption_pk);
     tracing::info!(
         cluster_pk = %hex::encode(our_evm),
         seed_export_count = export_count,

@@ -350,11 +350,16 @@ pub struct EnclaveState {
     /// Lifetime count of successful seed exports served by this instance as a
     /// donor (F03-AF-10). An `Active` donor never consumes its seed, so it can
     /// export repeatedly; this counter makes that observable and also backs the
-    /// opt-in hard quota ([`Self::check_export_quota`]). By default it only
+    /// export telemetry. The separate reservation counter enforces the
+    /// opt-in hard quota ([`Self::reserve_export_quota`]). By default it only
     /// observes (no gating); a hard cap is opt-in because a wrong cap would block
     /// legitimate recovery re-clones. Volatile (resets on restart): an alerting
     /// signal + coarse custody bound, not a durable ledger.
     seed_export_count: AtomicU64,
+
+    /// Successful exports plus exports in flight. Reserving a slot atomically
+    /// prevents concurrent GetClone calls from exceeding the per-instance cap.
+    seed_export_slots: AtomicU64,
 
     /// Soft alerting threshold for [`Self::seed_export_count`]. `0` disables it
     /// (the default). Read once at construction from
@@ -364,8 +369,32 @@ pub struct EnclaveState {
     /// Optional **hard** export quota (F03-AF-10, opt-in). `0` disables it (the
     /// default); `N > 0` allows exactly `N` successful exports and rejects the
     /// rest fail-closed. Read once at construction from
-    /// [`CLONE_EXPORT_HARD_CAP_ENV`]. See [`Self::check_export_quota`].
+    /// [`CLONE_EXPORT_HARD_CAP_ENV`]. See [`Self::reserve_export_quota`].
     seed_export_hard_cap: u64,
+}
+
+/// Holds one export slot until sealing and donor attestation both succeed.
+/// Any error before commit releases the slot, including nonce replay rejection.
+#[must_use = "hold the reservation until the export succeeds, then commit it"]
+pub struct ExportQuotaReservation<'a> {
+    state: &'a EnclaveState,
+    reserved: bool,
+}
+
+impl ExportQuotaReservation<'_> {
+    pub fn commit(mut self, requester_pk: &[u8; 32]) -> u64 {
+        // A successful export permanently consumes its slot for this process.
+        self.reserved = false;
+        self.state.record_seed_export(requester_pk)
+    }
+}
+
+impl Drop for ExportQuotaReservation<'_> {
+    fn drop(&mut self) {
+        if self.reserved {
+            self.state.seed_export_slots.fetch_sub(1, Ordering::Relaxed);
+        }
+    }
 }
 
 impl Default for EnclaveState {
@@ -386,6 +415,7 @@ impl EnclaveState {
                 DEFAULT_OP_DEDUP_TTL,
             ),
             seed_export_count: AtomicU64::new(0),
+            seed_export_slots: AtomicU64::new(0),
             seed_export_soft_cap: std::env::var(CLONE_EXPORT_SOFT_CAP_ENV)
                 .ok()
                 .and_then(|v| v.trim().parse::<u64>().ok())
@@ -399,31 +429,40 @@ impl EnclaveState {
 
     /// Opt-in **hard** export-quota gate (F03-AF-10). Returns `Err` when a hard
     /// cap is configured (`CLONE_EXPORT_HARD_CAP > 0`) and this instance has
-    /// already served that many successful exports, so the caller rejects the
-    /// `GetClone` *before* sealing the seed. Non-mutating: the counter is only
-    /// advanced by [`Self::record_seed_export`] after a real export, so exactly
-    /// `cap` exports are admitted and the `cap+1`-th is refused. Disabled by
-    /// default (`cap == 0` → always `Ok`), so existing deployments and legitimate
-    /// recovery re-clones are unaffected. The check-then-record window is not
-    /// atomic across concurrent `GetClone`s; the cap is a coarse custody bound,
-    /// not a precise ledger.
-    pub fn check_export_quota(&self) -> Result<()> {
+    /// already reserved that many slots, so the caller rejects `GetClone`
+    /// *before* sealing the seed. Slots cover completed and in-flight exports;
+    /// failed exports release their reservation on drop. Disabled by default
+    /// (`cap == 0`), so existing recovery re-clones are unaffected. This is a
+    /// strict concurrent bound within one process, not a durable cluster ledger.
+    pub fn reserve_export_quota(&self) -> Result<ExportQuotaReservation<'_>> {
         let cap = self.seed_export_hard_cap;
         if cap > 0 {
-            let served = self.seed_export_count.load(Ordering::Relaxed);
-            if served >= cap {
+            if let Err(used) =
+                self.seed_export_slots
+                    .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |used| {
+                        if used < cap {
+                            Some(used + 1)
+                        } else {
+                            None
+                        }
+                    })
+            {
                 tracing::warn!(
-                    seed_export_count = served,
+                    seed_export_count = self.seed_export_count.load(Ordering::Relaxed),
+                    reserved_or_completed = used,
                     hard_cap = cap,
                     "GetClone: seed-export HARD cap reached - export refused \
                      (F03-AF-10, fail-closed). Rotate/re-provision to lift."
                 );
                 return Err(EnclaveError::Clone(format!(
-                    "seed-export hard cap reached ({served}/{cap}); export refused"
+                    "seed-export hard cap reached ({used}/{cap}); export refused"
                 )));
             }
         }
-        Ok(())
+        Ok(ExportQuotaReservation {
+            state: self,
+            reserved: cap > 0,
+        })
     }
 
     /// Record a successful donor seed export and return the new lifetime count
@@ -810,12 +849,10 @@ mod tests {
         let mut state = EnclaveState::new(Network::Bitcoin);
         state.seed_export_hard_cap = 2;
         let pk = [7u8; 32];
-        assert!(state.check_export_quota().is_ok());
-        assert_eq!(state.record_seed_export(&pk), 1);
-        assert!(state.check_export_quota().is_ok());
-        assert_eq!(state.record_seed_export(&pk), 2);
+        assert_eq!(state.reserve_export_quota().unwrap().commit(&pk), 1);
+        assert_eq!(state.reserve_export_quota().unwrap().commit(&pk), 2);
         // Quota reached: the cap+1-th export is refused before sealing.
-        let err = state.check_export_quota().unwrap_err();
+        let err = state.reserve_export_quota().err().unwrap();
         assert!(matches!(err, EnclaveError::Clone(_)));
     }
 
@@ -826,9 +863,63 @@ mod tests {
         assert_eq!(state.seed_export_hard_cap, 0);
         let pk = [9u8; 32];
         for _ in 0..1000 {
-            state.record_seed_export(&pk);
+            state.reserve_export_quota().unwrap().commit(&pk);
         }
-        assert!(state.check_export_quota().is_ok());
+        assert!(state.reserve_export_quota().is_ok());
+        assert_eq!(state.seed_export_count.load(Ordering::Relaxed), 1000);
+        assert_eq!(state.seed_export_slots.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn export_hard_cap_releases_failed_reservations() {
+        let mut state = EnclaveState::new(Network::Bitcoin);
+        state.seed_export_hard_cap = 2;
+        let first = state.reserve_export_quota().unwrap();
+        let second = state.reserve_export_quota().unwrap();
+        assert!(state.reserve_export_quota().is_err());
+        assert_eq!(state.seed_export_count.load(Ordering::Relaxed), 0);
+        drop(first); // e.g. a replay error before sealing
+        state.reserve_export_quota().unwrap().commit(&[1; 32]);
+        assert!(state.reserve_export_quota().is_err());
+        drop(second); // e.g. a failed donor attestation after sealing
+        state.reserve_export_quota().unwrap().commit(&[2; 32]);
+        assert!(state.reserve_export_quota().is_err());
+        assert_eq!(state.seed_export_count.load(Ordering::Relaxed), 2);
+    }
+
+    #[test]
+    fn export_hard_cap_bounds_concurrent_in_flight_exports() {
+        use std::sync::Barrier;
+        let mut state = EnclaveState::new(Network::Bitcoin);
+        state.seed_export_hard_cap = 2;
+        let start = Barrier::new(16);
+        let reserved = Barrier::new(16);
+        let accepted = std::thread::scope(|scope| {
+            let handles: Vec<_> = (0..16)
+                .map(|_| {
+                    scope.spawn(|| {
+                        start.wait();
+                        let slot = state.reserve_export_quota();
+                        // No successful export is recorded until every worker
+                        // has tried admission: exercise the old race window.
+                        reserved.wait();
+                        if let Ok(slot) = slot {
+                            slot.commit(&[3; 32]);
+                            true
+                        } else {
+                            false
+                        }
+                    })
+                })
+                .collect();
+            handles
+                .into_iter()
+                .map(|h| usize::from(h.join().unwrap()))
+                .sum::<usize>()
+        });
+        assert_eq!(accepted, 2);
+        assert_eq!(state.seed_export_count.load(Ordering::Relaxed), 2);
+        assert!(state.reserve_export_quota().is_err());
     }
 
     #[test]
