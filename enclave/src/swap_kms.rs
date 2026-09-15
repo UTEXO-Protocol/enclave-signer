@@ -332,7 +332,7 @@ fn run_helper(
             .map_err(|_| fail("SDK helper output thread failed"))?;
         let status = status?;
         if !status.success() {
-            return Err(helper_exit_failure(status.code()));
+            return Err(helper_status_failure(status));
         }
         written.map_err(|_| fail("failed to write SDK helper request"))?;
         let bytes = received.map_err(|_| fail("failed to read SDK helper response"))?;
@@ -350,11 +350,26 @@ fn helper_failure(failure: CustodyFailure) -> EnclaveError {
     }
 }
 
+fn helper_status_failure(status: std::process::ExitStatus) -> EnclaveError {
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::ExitStatusExt;
+        // The helper's independent alarm is also a timeout, even if it wins
+        // the race against the enclosing Rust deadline.
+        // SIGALRM is 14 on the Linux helper target and macOS test host.
+        if status.signal() == Some(14) {
+            return helper_failure(CustodyFailure::Unavailable);
+        }
+    }
+    helper_exit_failure(status.code())
+}
+
 fn helper_exit_failure(code: Option<i32>) -> EnclaveError {
     // The measured helper emits only these fixed categories, never AWS text.
     // Unknown exit codes and signal termination are not assumed retryable.
     let failure = match code {
-        Some(64 | 78) => CustodyFailure::Configuration,
+        Some(64) => CustodyFailure::Configuration,
+        Some(78) => CustodyFailure::KeyOrCiphertext,
         Some(65) => CustodyFailure::InvalidResponse,
         Some(69 | 75) => CustodyFailure::Unavailable,
         Some(77) => CustodyFailure::AccessDenied,
@@ -468,7 +483,7 @@ mod tests {
             (70, CustodyFailure::Internal),
             (75, CustodyFailure::Unavailable),
             (77, CustodyFailure::AccessDenied),
-            (78, CustodyFailure::Configuration),
+            (78, CustodyFailure::KeyOrCiphertext),
             (1, CustodyFailure::Internal),
         ] {
             let mut command = Command::new("/bin/sh");
@@ -493,6 +508,22 @@ mod tests {
             helper_exit_failure(None),
             EnclaveError::Custody {
                 failure: CustodyFailure::Internal,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn helper_alarm_is_reported_as_retryable_timeout() {
+        let mut command = Command::new("/bin/sh");
+        command.args(["-c", "kill -ALRM $$"]);
+        let error =
+            run_helper(command, b"{}", Instant::now() + Duration::from_secs(2)).unwrap_err();
+        assert!(matches!(
+            error,
+            EnclaveError::Custody {
+                failure: CustodyFailure::Unavailable,
                 ..
             }
         ));

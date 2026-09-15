@@ -12,6 +12,8 @@ pub enum CustodyFailure {
     Unavailable,
     #[error("invalid_ciphertext; restore the saved ciphertext and verify the key")]
     InvalidCiphertext,
+    #[error("key_or_ciphertext_error; verify the configured KMS key and persisted ciphertext")]
+    KeyOrCiphertext,
     #[error("invalid_response; custody response was rejected")]
     InvalidResponse,
     #[error("internal_error; verify the enclave SDK and NSM runtime")]

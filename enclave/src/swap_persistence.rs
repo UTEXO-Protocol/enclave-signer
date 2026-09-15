@@ -71,8 +71,12 @@ fn recover_seed(
     // An expected identity makes missing ciphertext a recovery failure, so
     // neither KMS generation nor persistence can replace a lost pinned seed.
     let ciphertext = match store.load(deadline)? {
-        Some(blob) => blob,
+        Some(blob) => {
+            tracing::info!("RGB swap custody: loading saved identity");
+            blob
+        }
         None if expected_evm_address.is_none() => {
+            tracing::info!("RGB swap custody: no saved object; attempting conditional creation");
             remaining_until(deadline)?;
             let blob = kms.generate(deadline)?;
             validate_ciphertext(&blob)?;

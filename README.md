@@ -388,6 +388,19 @@ Value bounds (fail closed while unset in a production build):
 
 The gas-tx rule is part of the attested policy. Unset pins commit as zero.
 
+RGB swap custody (measured into swap EIFs; other flows do not require these):
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `SWAP_KMS_KEY_ARN` | required | Full symmetric KMS key ARN; aliases are rejected. |
+| `SWAP_KMS_REGION` | required | Commercial AWS region matching the key ARN. |
+| `SWAP_KMS_SEED_ID` | required | Stable signer identity used in the KMS encryption context and storage namespace. |
+| `SWAP_KMS_EXPECTED_EVM_ADDRESS` | empty | Optional first-start identity pin: 40 hex digits with optional `0x`. Pin the verified signer before funding; missing ciphertext then fails without replacement. |
+
+Startup reuses existing ciphertext or conditionally creates it after confirmed
+absence. No creation-mode setting is required. See the [deployment and recovery
+procedure](docs/swap-kms-persistence.md) for host broker/relay configuration.
+
 Data sources and transport:
 
 | Variable | Default | Description |
@@ -424,7 +437,7 @@ Limits and dev knobs:
 | `MAX_MERKLE_PROOFS` | `256` | Proof-count cap per request. |
 | `MAX_TOTAL_PROOF_BYTES` | 128 KiB | Aggregate proof-bytes cap per request. |
 | `SPV_CHECKPOINT` | unset | Dev builds only: `height:hash[:bits:time]` moves the SPV anchor forward. A production-shaped build refuses to boot when set. |
-| `UTEXO_CLONING_SECRET` | unset | Legacy donor secret. Prefer `init --cloning-secret` at runtime. |
+| `UTEXO_CLONING_SECRET` | unset | Legacy donor secret; ignored by RGB swaps, which reject cloning. For other flows prefer `init --cloning-secret` at runtime. |
 
 ### Parent
 
