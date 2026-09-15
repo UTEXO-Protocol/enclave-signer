@@ -92,9 +92,14 @@ SOURCE_DATE_EPOCH="${SOURCE_DATE_EPOCH:-$(git -C "$PROJECT_ROOT" log -1 --format
 export SOURCE_DATE_EPOCH
 
 echo "Building Docker image (buildx, SOURCE_DATE_EPOCH=$SOURCE_DATE_EPOCH)..."
+RGB_ASSET_ARGS=()
+if [ -n "${RGB_ASSET_ID:-}" ]; then
+    RGB_ASSET_ARGS=(--build-arg "RGB_ASSET_ID=$RGB_ASSET_ID")
+fi
 # `${a[@]+...}`: bash 3.2 treats an empty array as unset under `set -u`.
 DOCKER_BUILDKIT=1 docker buildx build \
     --build-arg SOURCE_DATE_EPOCH="$SOURCE_DATE_EPOCH" \
+    ${RGB_ASSET_ARGS[@]+"${RGB_ASSET_ARGS[@]}"} \
     ${SECRET_ARGS[@]+"${SECRET_ARGS[@]}"} \
     -f "$SCRIPT_DIR/$DOCKERFILE" \
     -t "$IMAGE_TAG" \

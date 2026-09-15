@@ -147,6 +147,7 @@ jobs:
           DOCKERFILE: ${{ matrix.dockerfile }}
           EIF_NAME: ${{ matrix.eif_name }}
           IMAGE_TAG: utexo-bridge-enclave-${{ matrix.variant }}:latest
+          RGB_ASSET_ID: ${{ vars.BFA_RGB_ASSET_ID }}
         run: |
           set -euxo pipefail
           mkdir -p "$OUT_DIR"
