@@ -1,7 +1,32 @@
 use thiserror::Error;
 
+/// Fixed custody diagnostics. Host/provider error strings never enter this API.
+#[cfg(feature = "rgb-swap")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
+pub enum CustodyFailure {
+    #[error("configuration_error; verify custody configuration")]
+    Configuration,
+    #[error("access_denied; verify credentials and custody policies")]
+    AccessDenied,
+    #[error("unavailable; retry the operation")]
+    Unavailable,
+    #[error("invalid_ciphertext; restore the saved ciphertext and verify the key")]
+    InvalidCiphertext,
+    #[error("invalid_response; custody response was rejected")]
+    InvalidResponse,
+    #[error("internal_error; verify the enclave SDK and NSM runtime")]
+    Internal,
+}
+
 #[derive(Debug, Error)]
 pub enum EnclaveError {
+    #[cfg(feature = "rgb-swap")]
+    #[error("swap custody {service}: {failure}")]
+    Custody {
+        service: &'static str,
+        failure: CustodyFailure,
+    },
+
     #[error("key not initialized")]
     KeyNotInitialized,
 
@@ -77,8 +102,13 @@ impl EnclaveError {
     /// Map error to a proto error code.
     pub fn error_code(&self) -> u32 {
         match self {
-            EnclaveError::CrossCheck(_) => 3,   // ERROR_CODE_VALIDATION_FAILED
-            EnclaveError::Spv(_) => 3,          // ERROR_CODE_VALIDATION_FAILED
+            #[cfg(feature = "rgb-swap")]
+            EnclaveError::Custody {
+                failure: CustodyFailure::Unavailable,
+                ..
+            } => 2,
+            EnclaveError::CrossCheck(_) => 3, // ERROR_CODE_VALIDATION_FAILED
+            EnclaveError::Spv(_) => 3,        // ERROR_CODE_VALIDATION_FAILED
             EnclaveError::NotReady { .. } => 2, // ERROR_CODE_NOT_READY
             _ => 1,
         }

@@ -12,7 +12,7 @@ use serde_json::json;
 use zeroize::Zeroizing;
 
 use crate::conn::{remaining_until, DeadlineStream};
-use crate::error::{EnclaveError, Result};
+use crate::error::{CustodyFailure, EnclaveError, Result};
 use crate::keys::KeyManager;
 use crate::swap_kms::{
     deserialize_secret, AwsCredentials, SwapKmsClient, SwapKmsConfig, MAX_CIPHERTEXT_BYTES,
@@ -168,26 +168,46 @@ impl SeedBroker {
         deadline: Instant,
     ) -> Result<T> {
         let deadline = deadline.min(Instant::now() + BROKER_TIMEOUT);
-        let stream = TcpStream::connect_timeout(&self.address, remaining_until(deadline)?)?;
+        let remaining = remaining_until(deadline).map_err(|_| broker_error("operation_timeout"))?;
+        let stream = TcpStream::connect_timeout(&self.address, remaining)
+            .map_err(|_| broker_error("aws_unavailable"))?;
         let mut stream = DeadlineStream::with_deadline(stream, deadline, BROKER_TIMEOUT);
         let bytes = serde_json::to_vec(&request).map_err(|_| failure("encode broker request"))?;
         if bytes.len() > MAX_MESSAGE_BYTES {
             return Err(failure("broker request too large"));
         }
-        stream.write_all(&(bytes.len() as u32).to_be_bytes())?;
-        stream.write_all(&bytes)?;
+        stream
+            .write_all(&(bytes.len() as u32).to_be_bytes())
+            .map_err(|_| broker_error("aws_unavailable"))?;
+        stream
+            .write_all(&bytes)
+            .map_err(|_| broker_error("aws_unavailable"))?;
         let mut length = [0u8; 4];
-        stream.read_exact(&mut length)?;
+        stream
+            .read_exact(&mut length)
+            .map_err(|_| broker_error("aws_unavailable"))?;
         let length = u32::from_be_bytes(length) as usize;
         if length == 0 || length > MAX_MESSAGE_BYTES {
-            return Err(failure("invalid broker response length"));
+            return Err(broker_error("invalid_response"));
         }
         // Responses may contain AWS credentials. Avoid Debug/logging and
         // erase the original JSON buffer as soon as typed parsing finishes.
         let mut response = Zeroizing::new(vec![0u8; length]);
-        stream.read_exact(&mut response)?;
-        serde_json::from_slice(&response)
-            .map_err(|_| failure("broker request failed or response invalid"))
+        stream
+            .read_exact(&mut response)
+            .map_err(|_| broker_error("aws_unavailable"))?;
+        // Parse only a bounded, exact error envelope before the typed success
+        // response. Borrow the code directly; do not copy credential fields into
+        // an intermediate JSON value or relay an untrusted host message.
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct BrokerFailure<'a> {
+            error: &'a str,
+        }
+        if let Ok(error) = serde_json::from_slice::<BrokerFailure<'_>>(&response) {
+            return Err(broker_error(error.error));
+        }
+        serde_json::from_slice(&response).map_err(|_| broker_error("invalid_response"))
     }
 
     fn credentials(&self, deadline: Instant) -> Result<AwsCredentials> {
@@ -203,6 +223,23 @@ impl SeedBroker {
         }
         let c: Credentials = self.request(json!({"op": "credentials"}), deadline)?;
         AwsCredentials::from_protected(c.access_key_id, c.secret_access_key, c.session_token)
+    }
+}
+
+fn broker_error(code: &str) -> EnclaveError {
+    let failure = match code {
+        "configuration_error" | "seed_id_not_allowed" => CustodyFailure::Configuration,
+        "access_denied" => CustodyFailure::AccessDenied,
+        "aws_unavailable" | "broker_busy" | "operation_timeout" | "request_timeout" => {
+            CustodyFailure::Unavailable
+        }
+        "invalid_ciphertext" => CustodyFailure::InvalidCiphertext,
+        "internal_error" => CustodyFailure::Internal,
+        _ => CustodyFailure::InvalidResponse,
+    };
+    EnclaveError::Custody {
+        service: "seed broker",
+        failure,
     }
 }
 
@@ -529,6 +566,34 @@ mod tests {
             assert!(broker
                 .load(Instant::now() + Duration::from_secs(2))
                 .is_err());
+            server.join().unwrap();
+        }
+    }
+
+    #[test]
+    fn broker_error_categories_are_preserved_without_host_text_or_creation() {
+        for (code, expected) in [
+            ("configuration_error", CustodyFailure::Configuration),
+            ("seed_id_not_allowed", CustodyFailure::Configuration),
+            ("access_denied", CustodyFailure::AccessDenied),
+            ("aws_unavailable", CustodyFailure::Unavailable),
+            ("broker_busy", CustodyFailure::Unavailable),
+            ("operation_timeout", CustodyFailure::Unavailable),
+            ("request_timeout", CustodyFailure::Unavailable),
+            ("invalid_ciphertext", CustodyFailure::InvalidCiphertext),
+            ("internal_error", CustodyFailure::Internal),
+            ("sensitive-host-text", CustodyFailure::InvalidResponse),
+        ] {
+            let (broker, server) = mock_broker(move |mut stream| {
+                stream.write_all(&frame(json!({"error":code}))).unwrap();
+            });
+            let kms = Kms::default();
+            let error = recover_seed(&broker, &kms, None, Instant::now() + Duration::from_secs(2))
+                .unwrap_err();
+            assert!(matches!(error, EnclaveError::Custody { failure, .. } if failure == expected));
+            assert!(!error.to_string().contains("sensitive-host-text"));
+            assert_eq!(kms.generates.get(), 0);
+            assert_eq!(kms.decrypts.get(), 0);
             server.join().unwrap();
         }
     }

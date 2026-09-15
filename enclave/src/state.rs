@@ -338,7 +338,8 @@ impl EnclaveState {
             *guard = Phase::Initializing;
         }
         let _reservation = SwapInitialization { state: self };
-        let manager = source.load_keys(self.network, deadline)?;
+        // Derivation and allocation can fail before the phase is locked.
+        let manager = Box::new(source.load_keys(self.network, deadline)?);
         let mut guard = self.lock_phase()?;
         crate::conn::remaining_until(deadline)?;
         // No other transition accepts Initializing. Keep the check explicit so
@@ -348,7 +349,7 @@ impl EnclaveState {
                 state: guard.name().into(),
             });
         }
-        *guard = Phase::Active(Box::new(manager));
+        *guard = Phase::Active(manager);
         Ok(())
     }
 
@@ -572,6 +573,24 @@ impl EnclaveState {
 
     fn with_active<T>(&self, f: impl FnOnce(&KeyManager) -> Result<T>) -> Result<T> {
         let guard = self.lock_phase()?;
+        #[cfg(all(feature = "rgb-swap", panic = "unwind"))]
+        {
+            // Active KeyManager fields are immutable and contain no interior
+            // mutability. A callback cannot corrupt the phase or key material.
+            // Drop its guard before resuming a callback panic, preserving the
+            // original panic while preventing an unrelated future request from
+            // finding a poisoned phase lock. Production panic=abort is unchanged.
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match &*guard {
+                Phase::Active(km) => f(km),
+                _ => Err(EnclaveError::KeyNotInitialized),
+            }));
+            drop(guard);
+            match result {
+                Ok(value) => value,
+                Err(panic) => std::panic::resume_unwind(panic),
+            }
+        }
+        #[cfg(not(all(feature = "rgb-swap", panic = "unwind")))]
         match &*guard {
             Phase::Active(km) => f(km),
             _ => Err(EnclaveError::KeyNotInitialized),
@@ -608,6 +627,20 @@ fn ensure_initial(phase: &Phase) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[cfg(all(feature = "rgb-swap", panic = "unwind"))]
+    fn panicking_read_only_key_callback_does_not_poison_swap_phase() {
+        let state = EnclaveState::new(Network::Bitcoin);
+        state.initialize_from_seed([42; 64]).unwrap();
+        let before = state.sign_evm(&[7; 32]).unwrap();
+        assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            state.with_keys::<()>(|_| panic!("injected read-only callback panic"))
+        }))
+        .is_err());
+        assert_eq!(state.phase_name(), "active");
+        assert_eq!(state.sign_evm(&[7; 32]).unwrap(), before);
+    }
 
     #[test]
     fn new_state_is_initial() {
