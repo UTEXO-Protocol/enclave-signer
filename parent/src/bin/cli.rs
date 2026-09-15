@@ -1,3 +1,6 @@
+#[path = "cli/clone_completion.rs"]
+mod clone_completion;
+
 use std::io::{self, BufRead, Write};
 use std::path::PathBuf;
 use std::process;
@@ -522,6 +525,7 @@ fn main() {
             let secret = match resolve_cloning_secret(cloning_secret, cloning_secret_file) {
                 Ok(Some(s)) => s,
                 Ok(None) => {
+                    println!("CLONE_RESULT_V1=preflight_error");
                     eprintln!(
                         "Error: a cloning secret is required for clone — pass \
                          --cloning-secret-file, set UTEXO_CLONING_SECRET, or (deprecated) \
@@ -530,13 +534,28 @@ fn main() {
                     process::exit(1);
                 }
                 Err(e) => {
+                    println!("CLONE_RESULT_V1=preflight_error");
                     eprintln!("Error: {e}");
                     process::exit(1);
                 }
             };
-            if let Err(e) = run_clone(&client, &secret, &donor_grpc, &donor_evm) {
-                eprintln!("Error: {}", e);
-                process::exit(1);
+            match run_clone(&client, &secret, &donor_grpc, &donor_evm) {
+                Ok(completion) => {
+                    println!("CLONE_RESULT_V1={}", completion.outcome.as_str());
+                    eprintln!("{}", completion.detail);
+                    // This is a one-shot command. Exit also terminates any I/O
+                    // worker still blocked after the reconciliation deadline.
+                    process::exit(if completion.outcome.is_success() {
+                        0
+                    } else {
+                        1
+                    });
+                }
+                Err(e) => {
+                    println!("CLONE_RESULT_V1=preflight_error");
+                    eprintln!("Error before SetClone: {e}");
+                    process::exit(1);
+                }
             }
         }
         Command::Interactive => run_interactive(&client),
@@ -592,7 +611,7 @@ fn run_clone(
     cloning_secret: &str,
     donor_grpc: &str,
     donor_evm: &str,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<clone_completion::Completion, Box<dyn std::error::Error>> {
     use rand::RngCore;
     use utexo_bridge_parent::grpc_proto::parent_service_client::ParentServiceClient;
     use utexo_bridge_parent::grpc_proto::{AttestedPublicKeyRequest, CloneRequest};
@@ -614,10 +633,8 @@ fn run_clone(
     );
 
     println!("[2/4] Clone via donor parent gRPC at {donor_grpc} ...");
-    // Bound the cross-host donor stage end-to-end. The vsock legs (steps
-    // 1/3/4) are already bounded by the enclave client's connect/read
-    // timeouts; without matching limits here a donor that accepts the TCP
-    // connection but never answers hangs the whole clone forever (F03-AF-19).
+    // Bound donor calls before SetClone. Completion and read-only
+    // reconciliation have their own caller deadline (F03-AF-05).
     const DONOR_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
     const DONOR_RPC_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
     let rt = tokio::runtime::Runtime::new()?;
@@ -644,71 +661,9 @@ fn run_clone(
         hex::encode(&clone_resp.donor_pubkey)
     );
 
-    println!("[3/4] SetClone on local enclave...");
-    // F03-AF-05: SetClone may commit the requester to Active and only then have
-    // its response lost/undecodable in transit. A bare `?` here would exit the
-    // CLI with a hard error even though the expected identity is already
-    // installed, misleading operators/automation into a needless "recovery".
-    // On error we reconcile read-only: query the requester's identity ONCE (no
-    // blind SetClone retry) and let the normal verification below decide. Only a
-    // requester that is NOT Active (or is Active with the WRONG identity) is a
-    // real failure.
-    if let Err(set_err) = client.set_clone(
-        clone_resp.encrypted_seed,
-        clone_resp.donor_pubkey,
-        clone_resp.donor_attestation,
-    ) {
-        eprintln!("[3/4] SetClone returned an error: {set_err}");
-        eprintln!("      reconciling (read-only get-keys, no SetClone retry)...");
-        match client.get_public_keys() {
-            Ok(k) => {
-                let got = hex::encode(&k.evm_address);
-                let want = hex::encode(&donor_addr);
-                if got == want {
-                    eprintln!(
-                        "      RECOVERED: requester is Active with the expected EVM 0x{got} \
-                         despite the SetClone transport error — continuing to full verification."
-                    );
-                    // fall through: the verification below re-queries and runs
-                    // the same 13-field donor cross-check as the happy path.
-                } else {
-                    return Err(format!(
-                        "SetClone failed ({set_err}); requester IS Active but with identity \
-                         0x{got}, not the expected donor 0x{want} — DO NOT trust this clone"
-                    )
-                    .into());
-                }
-            }
-            Err(get_err) => {
-                return Err(format!(
-                    "SetClone failed ({set_err}); requester is not initialized \
-                     (get-keys: {get_err}) — clone did not complete (still Cloning/Initial), \
-                     no identity installed"
-                )
-                .into());
-            }
-        }
-    }
-
-    println!("[4/5] Verifying cloned identity (local)...");
-    let keys = client.get_public_keys()?;
-    let local_evm = hex::encode(&keys.evm_address);
-    let want_evm = hex::encode(&donor_addr);
-    print_keys_response(&keys);
-    if local_evm != want_evm {
-        return Err(
-            format!("clone mismatch: local EVM 0x{local_evm} != donor 0x{want_evm}").into(),
-        );
-    }
-    println!("      local EVM matches --donor-evm (0x{local_evm})");
-
-    // F03-AF-08: completion + the EVM check above only assert the primary EVM
-    // address. The same seed under a different baked Bitcoin/config could share
-    // that address while other derived fields differ. Same-PCR clones cannot
-    // diverge (identical baked config), but the CLI is the operator's
-    // independent gate, so cross-check ALL 13 identity/config fields against the
-    // donor's own reported bundle rather than trusting a single field.
-    println!("[5/5] Cross-checking full identity bundle against the donor...");
+    // Fetch the comparison bundle BEFORE mutation: donor outages must not
+    // extend reconciliation after the requester has committed.
+    println!("[3/4] Fetching donor identity before SetClone...");
     let mut nonce = [0u8; 32];
     rand::thread_rng().fill_bytes(&mut nonce);
     let donor_bundle = rt.block_on(async {
@@ -724,71 +679,31 @@ fn run_clone(
         Ok::<_, Box<dyn std::error::Error>>(resp.into_inner())
     })?;
 
-    let mismatches = identity_field_mismatches(&keys, &donor_bundle);
-    if mismatches.is_empty() {
-        println!("\nOK: cloned identity matches the donor on all 13 fields (EVM 0x{local_evm})");
-        Ok(())
-    } else {
-        Err(format!(
-            "clone identity mismatch on {} of 13 field(s): {} - the requester derived a \
-             DIFFERENT identity/config than the donor despite a matching EVM address",
-            mismatches.len(),
-            mismatches.join(", ")
-        )
-        .into())
+    if donor_bundle.evm_address != donor_addr {
+        return Err("donor bundle does not match --donor-evm; SetClone was not sent".into());
     }
-}
 
-/// Compare the local (requester) key bundle against the donor's reported bundle
-/// across all 13 identity/config fields (F03-AF-08). Returns the names of the
-/// fields that differ; an empty result means byte-identical identities. The
-/// donor bundle rides the authenticated clone endpoint, so this is an equality
-/// check on the reported values, complementing the EVM-only assertion.
-fn identity_field_mismatches(
-    local: &PublicKeysResponse,
-    donor: &utexo_bridge_parent::grpc_proto::AttestedPublicKeyResponse,
-) -> Vec<&'static str> {
-    let mut diff = Vec::new();
-    if local.evm_address != donor.evm_address {
-        diff.push("evm_address");
+    println!("[4/4] SetClone and read-only identity reconciliation...");
+    let completion = clone_completion::complete(
+        client,
+        utexo_bridge_parent::enclave_proto::SetCloneRequest {
+            encrypted_seed: clone_resp.encrypted_seed,
+            donor_pubkey: clone_resp.donor_pubkey,
+            donor_attestation: clone_resp.donor_attestation,
+        },
+        &donor_addr,
+        &donor_bundle,
+    );
+    if let Some(keys) = &completion.keys {
+        print_keys_response(keys);
+        if completion.outcome.is_success() {
+            println!(
+                "OK: cloned identity matches the donor on all 13 fields (EVM 0x{})",
+                hex::encode(&keys.evm_address)
+            );
+        }
     }
-    if local.evm_uncompressed_pub != donor.evm_uncompressed_pub {
-        diff.push("evm_uncompressed_pub");
-    }
-    if local.btc_compressed_pub != donor.btc_compressed_pub {
-        diff.push("btc_compressed_pub");
-    }
-    if local.btc_xpub != donor.btc_xpub {
-        diff.push("btc_xpub");
-    }
-    if local.master_fingerprint != donor.master_fingerprint {
-        diff.push("master_fingerprint");
-    }
-    if local.account_xpub_vanilla != donor.account_xpub_vanilla {
-        diff.push("account_xpub_vanilla");
-    }
-    if local.account_xpub_colored != donor.account_xpub_colored {
-        diff.push("account_xpub_colored");
-    }
-    if local.chain_id != donor.chain_id {
-        diff.push("chain_id");
-    }
-    if local.bridge_contract != donor.bridge_contract {
-        diff.push("bridge_contract");
-    }
-    if local.rgb_asset_id != donor.rgb_asset_id {
-        diff.push("rgb_asset_id");
-    }
-    if local.evm_gas_tx_uncompressed_pub != donor.evm_gas_tx_uncompressed_pub {
-        diff.push("evm_gas_tx_uncompressed_pub");
-    }
-    if local.evm_gas_tx_address != donor.evm_gas_tx_address {
-        diff.push("evm_gas_tx_address");
-    }
-    if local.ccd_ed25519_pub != donor.ccd_ed25519_pub {
-        diff.push("ccd_ed25519_pub");
-    }
-    diff
+    Ok(completion)
 }
 
 /// Parse a headers file: one hex-encoded 80-byte header per line, blank lines
