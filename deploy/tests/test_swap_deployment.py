@@ -17,7 +17,7 @@ def measurement(label):
 
 
 def approval(phase="transition"):
-    images = [dict(eif="bootstrap.eif", pcr_file="bootstrap-PCR.json", sha256=hashlib.sha256(b"bootstrap").hexdigest(), pcr0=measurement("bootstrap"), mode="bootstrap", expected_evm_address=""), dict(eif="restore.eif", pcr_file="restore-PCR.json", sha256=hashlib.sha256(b"restore").hexdigest(), pcr0=measurement("restore"), mode="restore", expected_evm_address="0x7d024ab55b3b8a48d252fed98a48efbc559e2c31")]
+    images = [dict(eif="bootstrap.eif", pcr_file="bootstrap-PCR.json", sha256=hashlib.sha256(b"bootstrap").hexdigest(), pcr0=measurement("bootstrap"), expected_evm_address=""), dict(eif="restore.eif", pcr_file="restore-PCR.json", sha256=hashlib.sha256(b"restore").hexdigest(), pcr0=measurement("restore"), expected_evm_address="0x7d024ab55b3b8a48d252fed98a48efbc559e2c31")]
     if phase == "bootstrap":
         images = images[:1]
     elif phase == "restore":
@@ -43,6 +43,13 @@ class DeploymentApprovalTests(unittest.TestCase):
             else:
                 self.assertIn("AllowBootstrapGenerateDataKey", statements)
 
+    def test_image_mode_is_inferred_only_from_identity_pin(self):
+        a = approval()
+        self.assertEqual([m.image_mode(image) for image in a["images"]], ["bootstrap", "restore"])
+        a["images"][0]["mode"] = "bootstrap"
+        with self.assertRaises(m.ValidationError):
+            m.validate_approval(a)
+
     def test_multiple_restore_versions_require_same_pinned_identity(self):
         a = approval("restore")
         new = dict(a["images"][0], eif="new.eif", pcr0=measurement("new"))
@@ -61,7 +68,7 @@ class DeploymentApprovalTests(unittest.TestCase):
                     m.validate_approval(a)
 
     def test_rejects_debug_fixture_pcrs_empty_pins_and_wrong_phase(self):
-        for field, value in (("pcr0", "0" * 96), ("pcr0", "ab" * 48), ("sha256", "f" * 64), ("expected_evm_address", ""), ("expected_evm_address", "0x" + "0" * 40), ("mode", "bootstrap")):
+        for field, value in (("pcr0", "0" * 96), ("pcr0", "ab" * 48), ("sha256", "f" * 64), ("expected_evm_address", ""), ("expected_evm_address", "0x" + "0" * 40)):
             a = approval("restore")
             a["images"][0][field] = value
             with self.subTest(field=field), self.assertRaises(m.ValidationError):
@@ -139,7 +146,7 @@ class ArtifactBindingTests(unittest.TestCase):
         (self.directory / self.image["eif"]).write_bytes(b"restore")
         self.measurements = {"PCR0": self.image["pcr0"], "PCR1": measurement("kernel"), "PCR2": measurement("app")}
         (self.directory / self.image["pcr_file"]).write_text(json.dumps(self.measurements))
-        env = dict(zip(m.PUBLIC_PINS, (self.approved["key_arn"], self.approved["region"], self.approved["seed_id"], "0", self.image["expected_evm_address"])))
+        env = dict(zip(m.PUBLIC_PINS, (self.approved["key_arn"], self.approved["region"], self.approved["seed_id"], self.image["expected_evm_address"])))
         env["BITCOIN_NETWORK"] = "bitcoin"
         self.info = dict(CheckCRC=True, EifVersion=4, IsSigned=False, Measurements=self.measurements, Metadata={"DockerInfo": {"Config": {"Env": [f"{k}={v}" for k, v in env.items()]}}})
 
@@ -148,6 +155,15 @@ class ArtifactBindingTests(unittest.TestCase):
 
     def test_recomputes_digest_and_pcr_and_checks_baked_public_config(self):
         self.assertEqual(self.verify()["pcr0"], self.image["pcr0"])
+
+    def test_initial_image_without_identity_pin_needs_no_creation_setting(self):
+        self.approved["phase"] = "bootstrap"
+        self.image["expected_evm_address"] = ""
+        env = self.info["Metadata"]["DockerInfo"]["Config"]["Env"]
+        env[:] = ["SWAP_KMS_EXPECTED_EVM_ADDRESS=" if item.startswith("SWAP_KMS_EXPECTED_EVM_ADDRESS=") else item for item in env]
+        m.validate_approval(self.approved)
+        self.assertEqual(self.verify()["mode"], "bootstrap")
+        self.assertEqual(len([item for item in env if item.startswith("SWAP_KMS_")]), 4)
 
     def test_actual_eif_content_must_match_independent_approval(self):
         (self.directory / self.image["eif"]).write_bytes(b"other image")
@@ -181,7 +197,7 @@ class ArtifactBindingTests(unittest.TestCase):
             self.verify()
 
     def test_static_credentials_duplicate_and_test_environment_are_rejected(self):
-        for extra in ("AWS_SECRET_ACCESS_KEY=should-never-be-present", "SWAP_KMS_TEST_ENDPOINT=127.0.0.1", "SWAP_KMS_ALLOW_CREATE=1"):
+        for extra in ("AWS_SECRET_ACCESS_KEY=should-never-be-present", "SWAP_KMS_TEST_ENDPOINT=127.0.0.1", "SWAP_KMS_SEED_ID=duplicate"):
             env = self.info["Metadata"]["DockerInfo"]["Config"]["Env"]
             env.append(extra)
             with self.subTest(extra=extra), self.assertRaises(m.ValidationError):

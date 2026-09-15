@@ -18,7 +18,6 @@
       "pcr_file": "REPLACE_PATH_RELATIVE_TO_APPROVAL/PCR.json",
       "sha256": "REPLACE_INDEPENDENTLY_APPROVED_EIF_SHA256",
       "pcr0": "REPLACE_INDEPENDENTLY_APPROVED_PCR0",
-      "mode": "bootstrap",
       "expected_evm_address": ""
     }
   ]

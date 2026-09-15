@@ -76,7 +76,7 @@ sequenceDiagram
     E->>B: Load ciphertext for pinned seed ID
     B->>S: GetObject at configured bucket/key
     S-->>E: CiphertextBlob, via broker
-    opt Missing object and explicit bootstrap image
+    opt S3 confirms missing object and no existing identity is pinned
         E->>K: GenerateDataKey + context + Recipient attestation
         K-->>E: CiphertextBlob + CiphertextForRecipient
         E->>B: Create ciphertext if absent
@@ -107,8 +107,9 @@ object, or withhold service. Verify the stored object/version and backup using
 a separate administrator session after bootstrap, then test recovery on a fresh
 parent. This design protects seed confidentiality and checks recovered identity;
 it cannot guarantee availability or durability against a dishonest storage
-broker. The required restore address pin also rejects a different valid KMS
-seed generated under the same context.
+broker. Once the signer identity is known, pin its expected EVM address. A pin
+rejects a different valid KMS seed generated under the same context and stops
+initialization if the stored ciphertext is missing, before creating any seed.
 
 The ciphertext's authenticated encryption context is exactly:
 
@@ -138,8 +139,13 @@ with these names for swap image variants.
 | `SWAP_KMS_KEY_ARN` | Full ARN of a customer managed symmetric `ENCRYPT_DECRYPT` KMS key; no alias. |
 | `SWAP_KMS_REGION` | Region of that key and its HTTPS endpoint. |
 | `SWAP_KMS_SEED_ID` | Stable identity, unique to this logical swap signer: 1–128 ASCII letters, digits, dots, underscores, or hyphens. |
-| `SWAP_KMS_ALLOW_CREATE` | `0` by default. Only `1` authorizes first-time generation when storage reports a missing object. |
-| `SWAP_KMS_EXPECTED_EVM_ADDRESS` | Required EVM address pin for restore (`0x` plus 40 hex digits). Must be empty during bootstrap. Initialization fails if recovered keys differ. |
+| `SWAP_KMS_EXPECTED_EVM_ADDRESS` | Optional on first startup; pin the verified identity (`0x` plus 40 hex digits) before funding. When set, missing ciphertext or recovered keys that differ cause initialization to fail without creating a replacement seed. |
+
+Startup always loads the configured S3 object first. Existing ciphertext is
+decrypted and reused, whether or not an expected address is configured. Only a
+confirmed missing object with no identity pin permits generation and conditional
+creation. Storage errors, invalid ciphertext, and a missing object for a pinned
+identity fail initialization.
 
 The broker uses `/etc/utexo/swap-kms.env` on the parent:
 
@@ -273,12 +279,16 @@ python3 deploy/validate-swap-kms-deployment.py \
 The tool rereads each actual EIF with `nitro-cli describe-eif`, checks CRC and
 any image signature, recomputes the whole-file SHA256, compares actual PCR0/1/2
 with the recorded build measurements and approved PCR0, and checks its Docker
-environment metadata for the exact KMS key, region, seed ID, network, creation
-mode and restore identity. Whole-file digest approval also binds the metadata;
+environment metadata for the exact KMS key, region, seed ID, network, and
+expected identity. Whole-file digest approval also binds the metadata;
 Docker metadata alone is not proof of a trusted build. Placeholders, zero/debug
 or obvious fixture PCRs, known fixture accounts/keys, unexpected KMS settings,
 static credentials and inconsistent restore identities fail validation.
 [AWS describes the actual-EIF measurements returned by this command](https://docs.aws.amazon.com/enclaves/latest/user/cmd-nitro-describe-eif.html).
+
+An image is classified as bootstrap when its approved `expected_evm_address`
+is empty, and as restore when it pins the known identity. There is no separate
+image mode field or creation setting.
 
 Use `phase: "bootstrap"` with one bootstrap image for the first initialization;
 `phase: "transition"` with that bootstrap and one or more restore images while
@@ -286,7 +296,9 @@ verifying recovery; and `phase: "restore"` with restore images only afterward.
 The renderer keeps the Allow and Deny PCR lists identical in scope. In restore
 phase it removes generation permission, adds an unconditional generation deny,
 and removes every bootstrap PCR. Multiple restore images can overlap during an
-upgrade only when their expected public identity is identical.
+upgrade only when their expected public identity is identical. These phases
+govern the operational retirement of generation authority; startup always
+chooses recovery or first-time creation from the S3 result and identity pin.
 
 Apply the reviewed key policy to the approval's exact KMS key ARN, the bucket
 policy to its exact bucket, and the role policy to its exact signer role through
@@ -344,8 +356,9 @@ sudo systemctl enable --now vsock-proxy-kms.service utexo-swap-seed-broker.servi
 
 Start these services before issuing enclave initialization. The existing host
 deployment script does not install this dedicated swap configuration. Missing
-or invalid measured configuration, including a missing restore address pin,
-prevents swap process startup. An unavailable broker/KMS/storage service makes
+or invalid required measured configuration prevents swap process startup. The
+expected address is optional for a new signer; an invalid nonempty pin is
+rejected. An unavailable broker/KMS/storage service makes
 initialization fail; the operator can restore the service and retry `init`.
 Both supplied services run as dynamic unprivileged users with empty capability
 sets. Ports 8003/8004 are unprivileged; do not run the relay as root to work around
@@ -370,22 +383,25 @@ replacement seed to resolve a timeout.
    signer: importing its old seed into KMS is not implemented, and a new seed
    produces different public keys. Plan an explicit signer rotation if an
    existing deployment must move from ephemeral keys.
-2. Build the RGB swap EIF with public settings and `SWAP_KMS_ALLOW_CREATE=1`.
+2. Build the RGB swap EIF with public settings, leaving
+   `SWAP_KMS_EXPECTED_EVM_ADDRESS` empty for this new signer.
    Record the EIF, SHA256 and `build/PCR.json`. Install the broker and relay, then
    approve and validate the `bootstrap` phase policies before authorizing that
    measured image. At this phase only the bootstrap PCR0 permits decryption.
 3. Run the measured production EIF without debug mode. Issue
    `utexo-bridge-parent-cli --addr vsock://18:5000 init`, with the actual CID.
    Supply no seed, mnemonic, or cloning secret. Initialization must commit a
-   ciphertext and successfully decrypt that committed object before exposing
-   active keys. Record and verify the returned public keys and their attestation.
+   ciphertext when absent, or reuse the existing object, and successfully
+   decrypt that committed object before exposing active keys. Record and verify
+   the returned public keys and their attestation.
    Independently confirm the S3 object's existence/version and preserve a backup;
    do not rely on the parent's success response as proof of durable storage.
 4. Build the normal image with the same key ARN, region, seed ID, and network,
-   `SWAP_KMS_ALLOW_CREATE=0`, and the verified EVM address in
+   and the verified EVM address in
    `SWAP_KMS_EXPECTED_EVM_ADDRESS`. Approve and validate the `transition` phase
    policies with both actual EIFs before starting it. Configuration
-   changes, including the creation flag and address pin, change PCR0.
+   changes, including the address pin, change PCR0. The pin prevents missing
+   storage from creating a replacement identity.
 5. Start the normal EIF and issue `init`. Verify that all public keys match the
    bootstrap result. Restart the enclave, repeat `init`, and compare again.
    Finish bootstrap by approving, validating and applying the `restore` phase

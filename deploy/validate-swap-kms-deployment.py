@@ -15,7 +15,7 @@ import sys
 
 TEMPLATES = Path(__file__).resolve().parent
 POLICIES = ("swap-kms-key-policy.json", "swap-seed-bucket-policy.json", "swap-signer-role-policy.json")
-PUBLIC_PINS = ("SWAP_KMS_KEY_ARN", "SWAP_KMS_REGION", "SWAP_KMS_SEED_ID", "SWAP_KMS_ALLOW_CREATE", "SWAP_KMS_EXPECTED_EVM_ADDRESS")
+PUBLIC_PINS = ("SWAP_KMS_KEY_ARN", "SWAP_KMS_REGION", "SWAP_KMS_SEED_ID", "SWAP_KMS_EXPECTED_EVM_ADDRESS")
 LIVE_CHECKS = ("approved_bootstrap_and_restore", "restore_identity_after_restart", "missing_recipient_denied", "unapproved_pcr_denied", "debug_pcr_denied", "wrong_context_denied", "overwrite_and_delete_denied", "independent_backup_recovery")
 
 
@@ -58,6 +58,11 @@ def valid_hex(value, length):
     return isinstance(value, str) and re.fullmatch(r"[0-9a-fA-F]{%d}" % length, value) and len(set(value.lower())) > 2
 
 
+def image_mode(image):
+    """Identity protection follows the pin; there is no separate creation switch."""
+    return "bootstrap" if image["expected_evm_address"] == "" else "restore"
+
+
 def validate_approval(approval):
     expected = {"version", "phase", "approved_by", "approval_reference", "account_id", "signer_role", "key_admin_role", "key_arn", "region", "seed_id", "bitcoin_network", "bucket", "object_key", "images"}
     require(isinstance(approval, dict) and set(approval) == expected, "invalid approval fields")
@@ -85,16 +90,15 @@ def validate_approval(approval):
     require(isinstance(images, list) and 1 <= len(images) <= 8, "approve between one and eight images")
     modes, restore_addresses, seen = [], set(), set()
     for image in images:
-        require(isinstance(image, dict) and set(image) == {"eif", "pcr_file", "sha256", "pcr0", "mode", "expected_evm_address"}, "invalid image approval fields")
-        require(image["mode"] in ("bootstrap", "restore"), "invalid image mode")
+        require(isinstance(image, dict) and set(image) == {"eif", "pcr_file", "sha256", "pcr0", "expected_evm_address"}, "invalid image approval fields")
         require(public_text(image["eif"]) and public_text(image["pcr_file"]), "invalid image paths")
         require(valid_hex(image["sha256"], 64) and valid_hex(image["pcr0"], 96), "fixture, debug-zero, or invalid image digest/PCR0")
         pcr = image["pcr0"].lower()
         require(pcr not in seen, "duplicate image PCR0")
         seen.add(pcr)
-        modes.append(image["mode"])
+        modes.append(image_mode(image))
         address = image["expected_evm_address"]
-        if image["mode"] == "bootstrap":
+        if image_mode(image) == "bootstrap":
             require(address == "", "bootstrap must not pin an unknown identity")
         else:
             require(isinstance(address, str) and address.startswith("0x") and valid_hex(address[2:], 40), "restore requires a non-fixture public identity")
@@ -133,17 +137,17 @@ def verify_image(approval, image, directory, describe=describe_eif):
         env[name] = value
     require(not any(name.startswith("SWAP_KMS_") and name not in PUBLIC_PINS for name in env), "unexpected swap KMS setting in approved EIF")
     require(not any(name in env for name in ("AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN")), "static AWS credentials must not be embedded in an EIF")
-    expected = dict(zip(PUBLIC_PINS, (approval["key_arn"], approval["region"], approval["seed_id"], "1" if image["mode"] == "bootstrap" else "0", image["expected_evm_address"])))
+    expected = dict(zip(PUBLIC_PINS, (approval["key_arn"], approval["region"], approval["seed_id"], image["expected_evm_address"])))
     expected["BITCOIN_NETWORK"] = approval["bitcoin_network"]
     require(all(env.get(name) == value for name, value in expected.items()), "EIF public custody configuration differs from approval")
     # Recheck after describe-eif to catch accidental replacement during review.
     require(digest(path) == image["sha256"].lower(), "EIF changed during validation")
-    return {"sha256": image["sha256"].lower(), "pcr0": actual["PCR0"].lower(), "mode": image["mode"]}
+    return {"sha256": image["sha256"].lower(), "pcr0": actual["PCR0"].lower(), "mode": image_mode(image)}
 
 
 def rendered_policies(approval):
     pcrs = [image["pcr0"].lower() for image in approval["images"]]
-    bootstrap = next((i["pcr0"].lower() for i in approval["images"] if i["mode"] == "bootstrap"), pcrs[0])
+    bootstrap = next((i["pcr0"].lower() for i in approval["images"] if image_mode(i) == "bootstrap"), pcrs[0])
     replacements = {
         "REPLACE_ACCOUNT_ID": approval["account_id"], "REPLACE_SIGNER_ROLE": approval["signer_role"],
         "REPLACE_KEY_ADMIN_ROLE": approval["key_admin_role"], "REPLACE_KMS_KEY_ARN": approval["key_arn"],
