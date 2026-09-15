@@ -58,6 +58,20 @@ if [ -z "${GRPC_HOST:-}" ]; then
 fi
 log "parent gRPC bind GRPC_HOST=$GRPC_HOST (private ENI)"
 
+# Provision per-CID certificates and ACLs before deployment. Never generate or
+# fetch private keys into an EIF/build artifact. Check BEFORE stopping services.
+PARENT_TLS_DIR="${PARENT_TLS_DIR:-/etc/utexo/tls}"
+[[ "$PARENT_TLS_DIR" =~ ^/[a-zA-Z0-9_./-]+$ ]] || { log "invalid PARENT_TLS_DIR"; exit 1; }
+for CID in "${CIDS[@]}"; do
+  for file in server.pem server.key client-ca.pem clients.acl; do
+    tls_file="$PARENT_TLS_DIR/$CID/$file"
+    [ -s "$tls_file" ] && su -s /bin/sh ubuntu -c "test -r '$tls_file'" || {
+      log "FATAL: provision readable mTLS file $tls_file before deployment (docs/parent-mtls.md)"
+      exit 1
+    }
+  done
+done
+
 # Ensure the `ne` group exists + ubuntu is a member (idempotent; the udev rule
 # below relies on the group). Group membership is persistent across reboots.
 getent group ne >/dev/null || groupadd -g 986 ne
@@ -216,6 +230,12 @@ for CID in "${CIDS[@]}"; do
 CLUSTER_DIR=$DIR
 GRPC_HOST=$GRPC_HOST
 GRPC_PORT=${PORT[$CID]}
+GRPC_TLS_CERT_FILE=$PARENT_TLS_DIR/$CID/server.pem
+GRPC_TLS_KEY_FILE=$PARENT_TLS_DIR/$CID/server.key
+GRPC_TLS_CLIENT_CA_FILE=$PARENT_TLS_DIR/$CID/client-ca.pem
+GRPC_TLS_ACL_FILE=$PARENT_TLS_DIR/$CID/clients.acl
+GRPC_CLONE_MAX_PER_MINUTE=30
+GRPC_MAX_CONNECTIONS=64
 USE_VSOCK=true
 ENCLAVE_VSOCK_CID=$CID
 ENCLAVE_VSOCK_PORT=5000

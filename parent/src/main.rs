@@ -15,6 +15,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .init();
 
     let cfg = Config::from_env();
+    let security = utexo_bridge_parent::transport_security::ServerSecurity::from_env(
+        cfg.grpc_host
+            .parse()
+            .map_err(|_| "GRPC_HOST must be an IP address")?,
+    )?;
 
     let target = if cfg.use_vsock {
         #[cfg(target_os = "linux")]
@@ -40,7 +45,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     tracing::info!(evm_network_ids = ?cfg.evm_network_ids, "EVM network IDs for TRANSACTION routing");
     let service = ParentAdapterService::new(target, cfg.evm_network_ids);
-    let listen_addr = format!("{}:{}", cfg.grpc_host, cfg.grpc_port).parse()?;
+    let listen_addr = std::net::SocketAddr::new(cfg.grpc_host.parse()?, cfg.grpc_port);
 
     // Perimeter / DoS hardening for the donor gRPC adapter (F03-AF-13). The
     // clone seed-export path is already gated cryptographically (HMAC cloning
@@ -61,13 +66,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "starting gRPC server"
     );
 
-    Server::builder()
+    let incoming = utexo_bridge_parent::transport_security::LimitedIncoming::bind(
+        listen_addr,
+        security.max_connections,
+    )
+    .await?;
+    let mut server = Server::builder();
+    if let Some(tls) = security.tls {
+        server = server.tls_config(tls)?;
+    }
+    server
+        .layer(security.access)
         .layer(GlobalConcurrencyLimitLayer::new(cfg.grpc_max_concurrent))
+        .load_shed(true)
+        .max_connection_age(Duration::from_secs(300))
+        .max_connection_age_grace(Duration::from_secs(30))
         .concurrency_limit_per_connection(per_conn)
         .max_concurrent_streams(Some(per_conn as u32))
         .timeout(Duration::from_secs(cfg.grpc_request_timeout_secs))
         .add_service(ParentServiceServer::new(service))
-        .serve(listen_addr)
+        .serve_with_incoming(incoming)
         .await?;
 
     Ok(())

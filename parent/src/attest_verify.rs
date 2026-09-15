@@ -131,9 +131,11 @@ pub async fn verify_attested_pubkey(
     let mut nonce = [0u8; 32];
     rand::thread_rng().fill_bytes(&mut nonce);
 
-    let mut client = ParentServiceClient::connect(endpoint.to_string())
+    let channel = crate::transport_security::client_endpoint(endpoint)?
+        .connect()
         .await
         .with_context(|| format!("connecting to {endpoint}"))?;
+    let mut client = ParentServiceClient::new(channel);
 
     let response = client
         .attested_public_key(AttestedPublicKeyRequest {

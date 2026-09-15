@@ -24,6 +24,9 @@ use utexo_bridge_parent::{
     client::EnclaveClient, enclave_proto::*, framing, grpc_proto::AttestedPublicKeyResponse,
 };
 
+#[path = "support/pki.rs"]
+mod pki;
+
 const SECRET: &str = "0123456789abcdef0123456789abcdef";
 
 #[derive(Clone, Copy, Debug)]
@@ -198,6 +201,15 @@ fn start(donor: bool, fault: Fault) -> Enclave {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn cli_exit_codes_and_versioned_markers_follow_real_completion() {
+    run_cli_completion(false).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn mtls_cli_exit_codes_and_versioned_markers_follow_real_completion() {
+    run_cli_completion(true).await;
+}
+
+async fn run_cli_completion(secure: bool) {
     use std::process::{Command, Stdio};
     use utexo_bridge_parent::grpc_proto::parent_service_server::ParentServiceServer;
     use utexo_bridge_parent::grpc_server::{EnclaveTarget, ParentAdapterService};
@@ -209,8 +221,31 @@ async fn cli_exit_codes_and_versioned_markers_follow_real_completion() {
     drop(socket);
     let service =
         ParentAdapterService::new(EnclaveTarget::Tcp(donor.addr.clone()), Default::default());
+    let pki = pki::Pki::new();
+    let mut builder = tonic::transport::Server::builder();
+    // Exercise production mTLS/auth with the actual CLI and actual enclave clone handlers.
+    let access = if secure {
+        builder = builder
+            .tls_config(
+                tonic::transport::ServerTlsConfig::new()
+                    .identity(pki.identity("server"))
+                    .client_ca_root(tonic::transport::Certificate::from_pem(pki.read("ca.pem"))),
+            )
+            .unwrap();
+        Some(
+            utexo_bridge_parent::transport_security::AccessLayer::from_acl(
+                &pki.acl("operator"),
+                30,
+                Duration::from_secs(60),
+            )
+            .unwrap(),
+        )
+    } else {
+        None
+    };
     let server = tokio::spawn(async move {
-        tonic::transport::Server::builder()
+        builder
+            .layer(tower::util::option_layer(access))
             .add_service(ParentServiceServer::new(service))
             .serve(grpc_addr)
             .await
@@ -238,13 +273,29 @@ async fn cli_exit_codes_and_versioned_markers_follow_real_completion() {
         (Fault::Pending, "unknown", 1),
     ] {
         let requester = start(false, fault);
-        let mut child = Command::new(env!("CARGO_BIN_EXE_utexo-bridge-parent-cli"))
+        let mut command = Command::new(env!("CARGO_BIN_EXE_utexo-bridge-parent-cli"));
+        for key in [
+            "PARENT_TLS_CA_FILE",
+            "PARENT_TLS_CERT_FILE",
+            "PARENT_TLS_KEY_FILE",
+            "PARENT_TLS_SERVER_NAME",
+        ] {
+            command.env_remove(key);
+        }
+        if secure {
+            command
+                .env("PARENT_TLS_CA_FILE", pki.0.join("ca.pem"))
+                .env("PARENT_TLS_CERT_FILE", pki.0.join("operator.pem"))
+                .env("PARENT_TLS_KEY_FILE", pki.0.join("operator.key"))
+                .env("PARENT_TLS_SERVER_NAME", "parent.test");
+        }
+        let mut child = command
             .args([
                 "--addr",
                 &requester.addr,
                 "clone",
                 "--donor-grpc",
-                &format!("http://{grpc_addr}"),
+                &format!("{}://{grpc_addr}", if secure { "https" } else { "http" }),
                 "--donor-evm",
                 &evm,
             ])

@@ -625,6 +625,7 @@ fn run_clone(
         .into());
     }
 
+    let donor_endpoint = utexo_bridge_parent::transport_security::client_endpoint(donor_grpc)?;
     println!("[1/4] InitiateCloning on local enclave...");
     let init = client.initiate_cloning(cloning_secret, donor_addr.clone())?;
     println!(
@@ -635,13 +636,9 @@ fn run_clone(
     println!("[2/4] Clone via donor parent gRPC at {donor_grpc} ...");
     // Bound donor calls before SetClone. Completion and read-only
     // reconciliation have their own caller deadline (F03-AF-05).
-    const DONOR_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
-    const DONOR_RPC_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
     let rt = tokio::runtime::Runtime::new()?;
     let clone_resp = rt.block_on(async {
-        let endpoint = tonic::transport::Endpoint::from_shared(donor_grpc.to_string())?
-            .connect_timeout(DONOR_CONNECT_TIMEOUT)
-            .timeout(DONOR_RPC_TIMEOUT);
+        let endpoint = donor_endpoint.clone();
         let mut grpc = ParentServiceClient::new(endpoint.connect().await?);
         let req = CloneRequest {
             attestation: init.requester_attestation,
@@ -667,9 +664,7 @@ fn run_clone(
     let mut nonce = [0u8; 32];
     rand::thread_rng().fill_bytes(&mut nonce);
     let donor_bundle = rt.block_on(async {
-        let endpoint = tonic::transport::Endpoint::from_shared(donor_grpc.to_string())?
-            .connect_timeout(DONOR_CONNECT_TIMEOUT)
-            .timeout(DONOR_RPC_TIMEOUT);
+        let endpoint = donor_endpoint.clone();
         let mut grpc = ParentServiceClient::new(endpoint.connect().await?);
         let resp = grpc
             .attested_public_key(AttestedPublicKeyRequest {

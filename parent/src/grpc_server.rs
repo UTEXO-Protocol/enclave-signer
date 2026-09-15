@@ -734,10 +734,7 @@ impl ParentService for ParentAdapterService {
         request: Request<CloneRequest>,
     ) -> Result<Response<CloneResponse>, Status> {
         let inner = request.into_inner();
-        tracing::info!(
-            cluster_pk = %hex::encode(&inner.cluster_public_key),
-            "gRPC Clone called (donor GetClone)"
-        );
+        tracing::info!("gRPC Clone called (donor GetClone)");
 
         let enclave_req = EnclaveRequest {
             request: Some(enclave_request::Request::GetClone(

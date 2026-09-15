@@ -249,14 +249,16 @@ equals the expected production policy.
 
 ## Verification recipe (with `attest-verify`)
 
-The `attest-verify` CLI in this repo runs the full recipe.
+The `attest-verify` CLI in this repo runs the full recipe. Configure the client
+CA/certificate/key environment from [Parent mTLS](parent-mtls.md) first; an
+`observer` certificate is sufficient for verification.
 
 ```bash
 # Production verification (against a real Nitro enclave). By default it expects a
 # production policy with plain-BTC signing DISABLED and the raw-RPC EVM data
 # source (`--expect-evm-source raw`, what the shipped image uses).
 attest-verify \
-    --endpoint http://parent.example:50051 \
+    --endpoint https://parent.example:50051 \
     --pcr0 <96-hex-chars> \
     --pcr1 <96-hex-chars> \
     --pcr2 <96-hex-chars>
@@ -274,17 +276,19 @@ attest-verify \
 # --expect-rgb-asset-id <asset>   # empty string pins "no RGB asset"
 
 # Expect the plain-BTC path enabled:
-attest-verify --endpoint http://parent.example:50051 \
+attest-verify --endpoint https://parent.example:50051 \
     --pcr0 <..> --pcr1 <..> --pcr2 <..> \
     --expect-vanilla-psbt
 
 # Optional Helios build (not enabled in the supplied Dockerfiles):
-attest-verify --endpoint http://parent.example:50051 \
+attest-verify --endpoint https://parent.example:50051 \
     --pcr0 <..> --pcr1 <..> --pcr2 <..> \
     --expect-evm-source helios --expect-helios-checkpoint <hex32>
 
 # Dev / CI verification (against an enclave built with --features mock-attestation).
 # --mock implies the expected policy is Development.
+# For this loopback plaintext example, remove PARENT_TLS_* and explicitly
+# enable GRPC_ALLOW_INSECURE_LOOPBACK=true on the loopback-bound Parent.
 attest-verify --endpoint http://127.0.0.1:50051 --mock
 ```
 
