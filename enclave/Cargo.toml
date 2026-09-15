@@ -111,7 +111,7 @@ ccd = []
 #
 # `rgb-swap` = pools/send-receive: the bridge holds an allocation and moves it
 # with IFA `Transfer` in both directions.
-rgb-swap = ["rgb", "dep:base64", "dep:serde_json"]
+rgb-swap = ["rgb", "dep:base64", "dep:serde_json", "nix/poll"]
 # `rgb-mint-burn` = the bridge owns the contract's inflation rights: deposits
 # mint with IFA `Inflation`, withdrawals destroy with IFA `Burn`.
 rgb-mint-burn = ["rgb"]

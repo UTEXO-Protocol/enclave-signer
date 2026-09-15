@@ -120,11 +120,15 @@ fn main() {
                 use utexo_bridge_enclave::{swap_persistence, vsock_forwarder};
                 // The official SDK helper connects directly to parent CID 3,
                 // vsock port 8003, and terminates KMS TLS inside the enclave.
-                vsock_forwarder::start_forwarder(
+                if let Err(error) = vsock_forwarder::start_broker_forwarder(
                     swap_persistence::BROKER_LOCAL_PORT,
                     swap_persistence::BROKER_VSOCK_PORT,
-                )
-                .expect("start encrypted seed broker forwarder");
+                ) {
+                    tracing::error!(%error, "cannot start required swap seed broker forwarder");
+                    // Never connect custody to an unrelated listener occupying
+                    // this port, and never continue boot without its relay.
+                    std::process::exit(1);
+                }
             }
             state.with_swap_seed_source(Box::new(source))
         }
