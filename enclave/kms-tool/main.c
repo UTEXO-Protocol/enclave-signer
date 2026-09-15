@@ -135,6 +135,33 @@ static struct json_object *parse_json(const char *data, size_t length) {
     return object;
 }
 
+/* json-c replaces duplicate members. After its JSON validation, count structural
+ * member separators without decoding names or values. Accepted IPC has exactly
+ * eight/nine known string fields, so this raw count must equal the parsed count.
+ * Escaped quotes/colons stay inside strings; duplicate escaped names are caught
+ * as well. This is a flat-message shape check, not a second JSON parser. */
+static size_t json_member_separators(const char *data, size_t length) {
+    bool in_string = false, escaped = false;
+    size_t count = 0;
+    for (size_t i = 0; i < length; i++) {
+        char c = data[i];
+        if (in_string) {
+            if (escaped) {
+                escaped = false;
+            } else if (c == '\\') {
+                escaped = true;
+            } else if (c == '"') {
+                in_string = false;
+            }
+        } else if (c == '"') {
+            in_string = true;
+        } else if (c == ':') {
+            count++;
+        }
+    }
+    return count;
+}
+
 static bool read_input(struct input *input) {
     char raw[MESSAGE_LIMIT + 1];
     size_t length = fread(raw, 1, sizeof(raw), stdin);
@@ -143,6 +170,7 @@ static bool read_input(struct input *input) {
         return false;
     }
     input->json = parse_json(raw, length);
+    size_t raw_members = input->json ? json_member_separators(raw, length) : 0;
     wipe(raw, sizeof(raw));
     if (!input->json) {
         return false;
@@ -163,7 +191,8 @@ static bool read_input(struct input *input) {
     if (!generate && strcmp(input->operation, "decrypt")) {
         return false;
     }
-    if (json_object_object_length(input->json) != (generate ? 8 : 9)) {
+    size_t expected_members = generate ? 8 : 9;
+    if ((size_t)json_object_object_length(input->json) != expected_members || raw_members != expected_members) {
         return false;
     }
     if (!generate) {
@@ -538,7 +567,9 @@ int main(int argc, char **argv) {
         }
     }
     aws_nitro_enclaves_kms_client_destroy(client);
-    aws_client_bootstrap_release(retained_bootstrap);
+    if (retained_bootstrap) {
+        aws_client_bootstrap_release(retained_bootstrap);
+    }
     aws_nitro_enclaves_kms_client_config_destroy(config);
     aws_string_destroy(region);
     aws_string_destroy_secure(access_key);

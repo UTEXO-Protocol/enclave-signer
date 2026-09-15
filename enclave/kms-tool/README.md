@@ -8,6 +8,18 @@ Each invocation uses direct vsock to parent CID 3, port 8003. The configured reg
 
 The measured Rust enclave invokes `/usr/local/bin/swap-kms-tool` once per request, using private stdin/stdout pipes. Input is one JSON object containing `operation` (`generate` or `decrypt`), `region`, full `key_arn`, `seed_id`, `bitcoin_network`, `access_key_id`, `secret_access_key`, and `session_token`. Decrypt additionally requires base64 `ciphertext`. Generation returns exactly `key_arn` and base64 `ciphertext`. Decryption returns exactly `key_arn` and base64 `seed`; Rust rejects fields belonging to the other operation, including null fields. The four KMS encryption context entries are constructed internally: `application=utexo-enclave-signer`, `flow=rgb-swap`, `seed_id`, and `bitcoin_network`.
 
+Input is restricted to the exact eight/nine named string fields. After json-c
+validates JSON, a bounded count of structural member separators must equal the
+parsed field count. This rejects duplicate names, including escape-equivalent
+names, without replacing JSON parsing. The per-field ASCII check also rejects
+lone surrogates or other non-ASCII values accepted by a JSON parser.
+
+The `session_token` field is required but can be empty for long-term AWS
+credentials; the official credential and SigV4 APIs treat the token as optional.
+Temporary credentials, including the production EC2 role credentials, must
+include their issued token. The adapter does not infer credential type from an
+access-key prefix or reject valid tokenless credentials.
+
 Messages are limited to 64 KiB, ciphertext blobs to 6144 bytes, and unwrapped seeds to exactly 64 bytes. Core dumps are disabled; execution, CPU and address space are bounded. Credentials and seeds never enter command arguments, environment variables, temporary files or logs. Owned raw seed and credential buffers are erased during cleanup. Live json-c credential strings are overwritten through its public API immediately after creating the SDK credential strings, including rejected-input cleanup. Stdin is unbuffered to avoid another stdio credential copy. json-c parser scratch allocations remain protected by the short-lived process boundary; this is not a guarantee that every library-owned allocation is wiped. Rust clears the child environment and rejects failed, oversized or malformed responses.
 
 The returned `key_arn` comes from the official SDK response's `key_id`, after
@@ -40,7 +52,8 @@ New service error types require an explicit review instead of optimistic retry.
 
 The build executes native response-contract tests covering both operations,
 wrong/malformed response keys, authoritative output and safe error categories.
-It also executes a regression test proving that the pinned json-c erases the original credential allocation, including the maximum IPC string length. NSM uses upstream’s `libnsm.so.0` SONAME in the runtime; the unversioned symlink is needed only while linking.
+It also exercises real stdin parsing for duplicate/escaped names, surrogate and
+control values, and the official optional session-token contract, plus a regression test proving that the pinned json-c erases the original credential allocation, including the maximum IPC string length. NSM uses upstream’s `libnsm.so.0` SONAME in the runtime; the unversioned symlink is needed only while linking.
 
 Build with CMake using only `-DCMAKE_PREFIX_PATH=/path/to/installed/prefix`. The dependency build installs the official exported CMS functions' header verbatim and records its checksum in `share/swap-kms/headers.sha256`. It uses json-c's installed CMake package; no separate SDK source path is required when building this helper. The helper and NSM runtime library are included only in RGB-swap images. Signing, HD derivation, S3 ciphertext persistence and RGB mint/burn behavior remain in their existing components.
 
