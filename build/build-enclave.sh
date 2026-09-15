@@ -33,6 +33,10 @@
 #   GITHUB_TOKEN           token with read access to the private RGB dependencies
 #   PRIVATE_DEPS_DIR       alternatively, directory of per-repository key files
 #                          (consignment_key, consensus_key, ops_key, schemas_key)
+#   RGB_ASSET_ID           issued RGB contract id (e.g. rgb:<...>). REQUIRED for
+#                          Dockerfile.enclave.bfa, which declares it as a build
+#                          arg with no default; forwarded as --build-arg. Every
+#                          other image bakes a fixed asset via ENV and ignores it.
 # NOTE: the donor cloning secret is NOT baked into the EIF. It is delivered at
 # runtime via the InitializeKey message (CLI: `init --cloning-secret <secret>`),
 # keeping the build secret-free and the PCRs reproducible.
@@ -84,6 +88,36 @@ fi
 
 mkdir -p "$OUT_DIR"
 
+# --- 0. Required build args -------------------------------------------------
+# The BFA image (Dockerfile.enclave.bfa) is the only variant that declares
+# `ARG RGB_ASSET_ID` with no default: a BFA contract id differs from the IFA one
+# by construction, so it cannot be baked as a fixed ENV like the other images.
+# If the helper does not forward it, the build silently produces an EIF whose
+# RGB_ASSET_ID is empty -> partially-pinned config that `policy.rs` refuses at
+# boot (a dead artifact discovered only on the host). Detect the required build
+# arg in the selected Dockerfile, demand it, and forward it (F06-AF-38).
+BUILD_ARGS=()
+if grep -qE '^ARG[[:space:]]+RGB_ASSET_ID' "$SCRIPT_DIR/$DOCKERFILE"; then
+    if [ -z "${RGB_ASSET_ID:-}" ]; then
+        echo "Error: $DOCKERFILE requires RGB_ASSET_ID (the issued BFA contract id, e.g. rgb:<...>)." >&2
+        echo "       Set RGB_ASSET_ID=rgb:<contract-id> and re-run; an empty pin leaves the" >&2
+        echo "       enclave config partially set and policy.rs refuses to boot." >&2
+        exit 1
+    fi
+    BUILD_ARGS+=(--build-arg "RGB_ASSET_ID=$RGB_ASSET_ID")
+    echo "    rgb asset id : $RGB_ASSET_ID"
+fi
+
+# F03-AF-12: optional EXTRA cargo features for DEBUG EIFs only (e.g.
+# `allow-debug-pcrs`, so stage clone-drills in ENCLAVE_DEBUG_MODE can verify
+# each other's all-zero-PCR attestations). Forwarded to the Dockerfile's
+# `ARG ENCLAVE_DEBUG_FEATURES` only when explicitly set; unset => production
+# build is byte-identical and PCR0 is unchanged. NEVER set for a production EIF.
+if [ -n "${ENCLAVE_DEBUG_FEATURES:-}" ]; then
+    BUILD_ARGS+=(--build-arg "ENCLAVE_DEBUG_FEATURES=$ENCLAVE_DEBUG_FEATURES")
+    echo "    DEBUG feats  : $ENCLAVE_DEBUG_FEATURES  (⚠ NON-PRODUCTION EIF)"
+fi
+
 # --- 1. Build the docker image ---------------------------------------------
 # Deterministic timestamps: SOURCE_DATE_EPOCH (commit time, stable per git_sha)
 # + `rewrite-timestamp=true` make BuildKit normalise file mtimes in the exported
@@ -95,6 +129,7 @@ echo "Building Docker image (buildx, SOURCE_DATE_EPOCH=$SOURCE_DATE_EPOCH)..."
 # `${a[@]+...}`: bash 3.2 treats an empty array as unset under `set -u`.
 DOCKER_BUILDKIT=1 docker buildx build \
     --build-arg SOURCE_DATE_EPOCH="$SOURCE_DATE_EPOCH" \
+    ${BUILD_ARGS[@]+"${BUILD_ARGS[@]}"} \
     ${SECRET_ARGS[@]+"${SECRET_ARGS[@]}"} \
     -f "$SCRIPT_DIR/$DOCKERFILE" \
     -t "$IMAGE_TAG" \

@@ -179,6 +179,34 @@ pub fn build_mock_document_with_pcrs(
 
 // Shared helpers
 
+/// Production fail-closed guard against debug-mode enclaves (F03-AF-12 /
+/// F02-AF-08). A genuine enclave measured in production has non-zero PCR0/1/2;
+/// all-zero PCRs mean it booted in debug mode with NO measurement. Since every
+/// debug enclave shares those all-zero PCRs, accepting them would let any debug
+/// EIF (with a genuine NSM signature) impersonate the trusted enclave — the
+/// bytewise `verify_pcrs` check passes when both expected and actual are zero.
+///
+/// Compiled in only when the `allow-debug-pcrs` feature is OFF (the release
+/// default); a debug EIF built with the feature skips this and accepts zero
+/// PCRs so stage clone drills can run in `ENCLAVE_DEBUG_MODE`.
+#[cfg(not(feature = "allow-debug-pcrs"))]
+fn reject_debug_pcrs(pcrs: &HashMap<u32, Vec<u8>>) -> Result<()> {
+    let all_zero = [0u32, 1, 2].iter().all(|idx| {
+        pcrs.get(idx)
+            .map(|p| !p.is_empty() && p.iter().all(|&b| b == 0))
+            .unwrap_or(false)
+    });
+    if all_zero {
+        return Err(VerifyError::Attestation(
+            "all-zero PCR0/1/2: attestation is from a debug-mode enclave (no measurement) \
+             and is rejected by the production verifier; build with the unsafe \
+             `allow-debug-pcrs` feature only for debug/stage drills"
+                .into(),
+        ));
+    }
+    Ok(())
+}
+
 fn verify_pcrs(pcrs: &HashMap<u32, Vec<u8>>, expected: &ExpectedPcrs) -> Result<()> {
     let check = |idx: u32, expected_bytes: &[u8; 48]| -> Result<()> {
         let actual = pcrs
@@ -281,6 +309,13 @@ IwLz3/Y=
         verify_certificate_chain(&attestation.certificate, &attestation.cabundle, &cose)?;
 
         let nonce = check_nonce(&attestation.nonce, expected_nonce)?;
+
+        // F03-AF-12: reject debug-mode (all-zero) PCRs before the bytewise
+        // expected/actual comparison, so a zeroed `expected` cannot match a
+        // zeroed `actual`. Compiled out under `allow-debug-pcrs` (debug EIFs).
+        #[cfg(not(feature = "allow-debug-pcrs"))]
+        reject_debug_pcrs(&attestation.pcrs)?;
+
         verify_pcrs(&attestation.pcrs, expected_pcrs)?;
 
         let enclave_pubkey = attestation
@@ -559,6 +594,21 @@ IwLz3/Y=
             let value: ciborium::Value = ciborium::from_reader(data)
                 .map_err(|e| VerifyError::Attestation(format!("invalid CBOR: {e}")))?;
 
+            // RFC 8152 §2: a COSE_Sign1 object may be serialized bare (a 4-item
+            // array) or wrapped in CBOR tag 18. AWS NSM emits the bare form, but
+            // accept the tagged form for interop (F03-AF-14). Only tag 18 is
+            // unwrapped; any other tag is rejected. Every crypto check below is
+            // unchanged - this only strips a standards-compliant envelope.
+            let value = match value {
+                ciborium::Value::Tag(18, inner) => *inner,
+                ciborium::Value::Tag(tag, _) => {
+                    return Err(VerifyError::Attestation(format!(
+                        "unexpected CBOR tag {tag} on COSE_Sign1 (expected 18)"
+                    )));
+                }
+                other => other,
+            };
+
             let arr = value
                 .as_array()
                 .ok_or_else(|| VerifyError::Attestation("COSE_Sign1 must be array".into()))?;
@@ -619,6 +669,46 @@ IwLz3/Y=
         use x509_cert::der::oid::AssociatedOid;
         use x509_cert::ext::pkix::KeyUsages;
         use x509_cert::ext::Extension;
+
+        // --- COSE_Sign1 envelope (F03-AF-14) -------------------------------
+
+        fn sample_cose_array() -> ciborium::Value {
+            ciborium::Value::Array(vec![
+                ciborium::Value::Bytes(vec![0xa1, 0x01, 0x38, 0x22]), // protected {1:-35}
+                ciborium::Value::Map(vec![]),
+                ciborium::Value::Bytes(vec![1, 2, 3]),
+                ciborium::Value::Bytes(vec![4, 5, 6, 7]),
+            ])
+        }
+
+        fn encode(v: &ciborium::Value) -> Vec<u8> {
+            let mut buf = Vec::new();
+            ciborium::into_writer(v, &mut buf).expect("encode cbor");
+            buf
+        }
+
+        #[test]
+        fn cose_from_bytes_accepts_tag18_wrapper() {
+            let arr = sample_cose_array();
+            let bare = CoseSign1::from_bytes(&encode(&arr)).expect("bare parses");
+
+            let tagged = ciborium::Value::Tag(18, Box::new(arr));
+            let tagged = CoseSign1::from_bytes(&encode(&tagged)).expect("tag-18 parses");
+
+            // Same fields whether wrapped or not - only the envelope differs.
+            assert_eq!(bare.protected, tagged.protected);
+            assert_eq!(bare.payload, tagged.payload);
+            assert_eq!(bare.signature, tagged.signature);
+        }
+
+        #[test]
+        fn cose_from_bytes_rejects_non_18_tag() {
+            let tagged = ciborium::Value::Tag(17, Box::new(sample_cose_array()));
+            assert!(matches!(
+                CoseSign1::from_bytes(&encode(&tagged)),
+                Err(VerifyError::Attestation(_))
+            ));
+        }
 
         // --- helpers -------------------------------------------------------
 
@@ -936,6 +1026,35 @@ mod mock {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // F03-AF-12: the debug-PCR guard is compiled in only for the production
+    // (default) build; a debug EIF (`allow-debug-pcrs`) skips it by design.
+    #[cfg(not(feature = "allow-debug-pcrs"))]
+    #[test]
+    fn reject_debug_pcrs_flags_all_zero_but_allows_measured() {
+        let zeros = || vec![0u8; 48];
+        let mut all_zero = HashMap::new();
+        all_zero.insert(0u32, zeros());
+        all_zero.insert(1u32, zeros());
+        all_zero.insert(2u32, zeros());
+        assert!(
+            reject_debug_pcrs(&all_zero).is_err(),
+            "all-zero PCR0/1/2 must be rejected by the production verifier"
+        );
+
+        // A single measured (non-zero) PCR is enough to clear the debug guard;
+        // the real bytewise expected/actual check still runs afterwards.
+        let mut measured = all_zero.clone();
+        measured.insert(0u32, vec![1u8; 48]);
+        assert!(reject_debug_pcrs(&measured).is_ok());
+
+        // A fully measured set passes the guard.
+        let mut full = HashMap::new();
+        full.insert(0u32, vec![0xa1u8; 48]);
+        full.insert(1u32, vec![0xb2u8; 48]);
+        full.insert(2u32, vec![0xc3u8; 48]);
+        assert!(reject_debug_pcrs(&full).is_ok());
+    }
 
     #[test]
     fn expected_pcrs_from_hex_roundtrip() {

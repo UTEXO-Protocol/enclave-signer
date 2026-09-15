@@ -8,8 +8,11 @@
 # Artifact-only: the host never builds or clones the repo.
 #
 # It does NOT bootstrap identity. A fresh/restarted enclave has no key; after this
-# run `utexo-bridge-parent-cli init --cloning-secret ...` on a donor, or
-# `... clone ...` on a requester. (Identity lives in enclave memory and is lost
+# run, with the REQUIRED top-level `--addr vsock://<CID>:5000` (CID 16/18/20; or set
+# ENCLAVE_VSOCK_CID) placed BEFORE the subcommand - the vsock CLI refuses to guess a CID:
+#   `utexo-bridge-parent-cli --addr vsock://16:5000 init  --cloning-secret ...`  on a donor, or
+#   `utexo-bridge-parent-cli --addr vsock://16:5000 clone ...`                   on a requester.
+# (Identity lives in enclave memory and is lost
 # on restart/reboot - see TODO #5 for KMS-sealed DR. #7 only makes the PROCESSES
 # come back automatically; the enclaves come up empty.)
 #
@@ -41,6 +44,33 @@ declare -A PORT=([16]=50051 [18]=50052 [20]=50053)
 
 log(){ echo "[deploy $(date -u +%H:%M:%S)] $*"; }
 asubuntu(){ su - ubuntu -c "$1"; }
+
+# F03-AF-13: bind parent gRPC to the private ENI, not 0.0.0.0. Stage hosts have
+# no public IP today, but 0.0.0.0 would expose the adapter on any future public
+# interface. Override with GRPC_HOST=<addr> if you must bind elsewhere.
+if [ -z "${GRPC_HOST:-}" ]; then
+  _tok=$(curl -fsS -X PUT "http://169.254.169.254/latest/api/token" \
+    -H "X-aws-ec2-metadata-token-ttl-seconds: 60")
+  GRPC_HOST=$(curl -fsS -H "X-aws-ec2-metadata-token: $_tok" \
+    http://169.254.169.254/latest/meta-data/local-ipv4)
+  unset _tok
+  [ -n "$GRPC_HOST" ] || { log "FATAL: empty private IPv4 from IMDS"; exit 1; }
+fi
+log "parent gRPC bind GRPC_HOST=$GRPC_HOST (private ENI)"
+
+# Provision per-CID certificates and ACLs before deployment. Never generate or
+# fetch private keys into an EIF/build artifact. Check BEFORE stopping services.
+PARENT_TLS_DIR="${PARENT_TLS_DIR:-/etc/utexo/tls}"
+[[ "$PARENT_TLS_DIR" =~ ^/[a-zA-Z0-9_./-]+$ ]] || { log "invalid PARENT_TLS_DIR"; exit 1; }
+for CID in "${CIDS[@]}"; do
+  for file in server.pem server.key client-ca.pem clients.acl; do
+    tls_file="$PARENT_TLS_DIR/$CID/$file"
+    [ -s "$tls_file" ] && su -s /bin/sh ubuntu -c "test -r '$tls_file'" || {
+      log "FATAL: provision readable mTLS file $tls_file before deployment (docs/parent-mtls.md)"
+      exit 1
+    }
+  done
+done
 
 # Ensure the `ne` group exists + ubuntu is a member (idempotent; the udev rule
 # below relies on the group). Group membership is persistent across reboots.
@@ -198,8 +228,14 @@ EOF
 for CID in "${CIDS[@]}"; do
   cat > "/etc/utexo/parent-$CID.env" <<EOF
 CLUSTER_DIR=$DIR
-GRPC_HOST=0.0.0.0
+GRPC_HOST=$GRPC_HOST
 GRPC_PORT=${PORT[$CID]}
+GRPC_TLS_CERT_FILE=$PARENT_TLS_DIR/$CID/server.pem
+GRPC_TLS_KEY_FILE=$PARENT_TLS_DIR/$CID/server.key
+GRPC_TLS_CLIENT_CA_FILE=$PARENT_TLS_DIR/$CID/client-ca.pem
+GRPC_TLS_ACL_FILE=$PARENT_TLS_DIR/$CID/clients.acl
+GRPC_CLONE_MAX_PER_MINUTE=30
+GRPC_MAX_CONNECTIONS=64
 USE_VSOCK=true
 ENCLAVE_VSOCK_CID=$CID
 ENCLAVE_VSOCK_PORT=5000
@@ -234,10 +270,15 @@ done
 if [ "$ENCLAVE_DEBUG_MODE" = "1" ]; then
   log "ENCLAVE_DEBUG_MODE=1 — skipping runtime PCR0 check (PCRs zeroed under --debug-mode)"
   # Still assert the exact enclave set (F09-AF-07): an empty/partial list is a FAIL.
-  asubuntu 'nitro-cli describe-enclaves' | python3 - "${CIDS[*]}" <<'PY'
+  # NB: write to a file and json.load() the file (NOT a pipe into `python3 -
+  # <<'PY'`): the heredoc already occupies stdin for the program text, so a
+  # piped `describe-enclaves` would be discarded and json.load(sys.stdin) reads
+  # empty -> JSONDecodeError, aborting the deploy before step 7 (parents).
+  asubuntu 'nitro-cli describe-enclaves' > /tmp/desc.json
+  python3 - "${CIDS[*]}" <<'PY'
 import json, sys
 want = sorted(int(x) for x in sys.argv[1].split())
-d = json.load(sys.stdin)
+d = json.load(open("/tmp/desc.json"))
 running = sorted(e["EnclaveCID"] for e in d if e.get("State") == "RUNNING")
 print("running CIDs (debug):", running, "want:", want)
 if running != want:

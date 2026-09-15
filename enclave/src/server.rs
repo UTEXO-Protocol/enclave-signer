@@ -252,11 +252,11 @@ fn dispatch(request: EnclaveRequest, ctx: &ServerContext) -> EnclaveResponse {
         }
         Some(Request::GetClone(req)) => {
             tracing::info!("request: GetClone");
-            handle_get_clone(&ctx.state, req)
+            handle_get_clone(ctx, req)
         }
         Some(Request::SetClone(req)) => {
             tracing::info!("request: SetClone");
-            handle_set_clone(&ctx.state, req)
+            handle_set_clone(ctx, req)
         }
         Some(Request::SubmitHeaders(req)) => {
             tracing::info!(
@@ -1052,6 +1052,39 @@ fn canonical_pubkey_bundle(keys: &PublicKeysResponse) -> Vec<u8> {
     out
 }
 
+/// Clone response v1: exact identity/policy equality, tied to this sealed response.
+/// The version is inside signed NSM user_data; no protobuf relay changes needed.
+/// All inputs are public. Fixed-size transcript fields follow the bundle hash.
+fn clone_commitment(
+    bundle: &PublicKeysResponse,
+    policy: &[u8],
+    requester: &[u8; 32],
+    donor: &[u8; 32],
+    ciphertext: &[u8],
+) -> [u8; 36] {
+    use sha2::{Digest, Sha256};
+    let mut hash = Sha256::new();
+    hash.update(b"utexo/clone-response/v1\0");
+    hash.update(Sha256::digest(canonical_pubkey_bundle(bundle)));
+    hash.update(Sha256::digest(policy));
+    hash.update(requester);
+    hash.update(donor);
+    hash.update(Sha256::digest(ciphertext));
+    let mut out = [0u8; 36];
+    out[..4].copy_from_slice(&1u32.to_be_bytes());
+    out[4..].copy_from_slice(&hash.finalize());
+    out
+}
+
+fn verify_clone_commitment(actual: Option<&[u8]>, expected: &[u8; 36]) -> Result<()> {
+    if actual != Some(expected.as_slice()) {
+        return Err(EnclaveError::Attestation(
+            "clone response version/identity/policy/transcript mismatch".into(),
+        ));
+    }
+    Ok(())
+}
+
 fn handle_get_attested_public_key(
     ctx: &ServerContext,
     req: GetAttestedPublicKeyRequest,
@@ -1452,11 +1485,9 @@ fn handle_initiate_cloning(
     state: &EnclaveState,
     req: InitiateCloningRequest,
 ) -> Result<EnclaveResponse> {
-    if req.cloning_secret.is_empty() {
-        return Err(EnclaveError::InvalidRequest(
-            "cloning_secret is required".into(),
-        ));
-    }
+    // F03-AF-26: fail-closed strength gate (also covers the empty case). The
+    // secret is the HMAC key, so a weak one is offline-brute-forceable.
+    cloning::validate_cloning_secret(&req.cloning_secret)?;
     let cluster_public_key: [u8; 20] =
         req.cluster_public_key.as_slice().try_into().map_err(|_| {
             EnclaveError::InvalidRequest(format!(
@@ -1469,7 +1500,13 @@ fn handle_initiate_cloning(
     let encryption_pubkey = session.public_key();
 
     let nonce = fresh_nonce()?;
-    let cloning_digest = cloning::make_cloning_digest(&req.cloning_secret, &encryption_pubkey);
+    // F03-AF-07: bind the digest to the *target* cluster identity this
+    // requester intends to clone from. In a legitimate clone the donor shares
+    // this same cluster identity, so `cluster_public_key` here == the donor's
+    // own EVM address. Folding it in stops a relaying parent from redirecting
+    // this armed request to a donor of a different identity.
+    let cloning_digest =
+        cloning::make_cloning_digest(&req.cloning_secret, &encryption_pubkey, &cluster_public_key);
 
     // Bind both the X25519 pubkey and the digest into the NSM signature:
     // the parent cannot rewrite either without invalidating the attestation.
@@ -1496,7 +1533,8 @@ fn handle_initiate_cloning(
 /// attestation, matches PCRs, records the nonce against replay, checks
 /// pubkey + digest binding, verifies the digest against the configured
 /// donor-side cloning secret, and only then seals the seed.
-fn handle_get_clone(state: &EnclaveState, req: GetCloneRequest) -> Result<EnclaveResponse> {
+fn handle_get_clone(ctx: &ServerContext, req: GetCloneRequest) -> Result<EnclaveResponse> {
+    let state = &ctx.state;
     let req_cluster_pk: [u8; 20] = req.cluster_public_key.as_slice().try_into().map_err(|_| {
         EnclaveError::InvalidRequest(format!(
             "cluster_public_key must be 20 bytes, got {}",
@@ -1529,7 +1567,26 @@ fn handle_get_clone(state: &EnclaveState, req: GetCloneRequest) -> Result<Enclav
         )));
     }
 
-    // 2. Verify the requester attestation chain + PCRs. `None` for the
+    // 2. Digest authenticity: HMAC(donor_secret, encryption_pubkey ‖ our_evm)
+    //    must match. Proves the caller holds the operator's cloning secret AND
+    //    that the request was armed for *this* donor's cluster identity
+    //    (F03-AF-07). We bind to `req_cluster_pk`, which step 1 already proved
+    //    equals `our_evm`, so a request armed for a different identity fails
+    //    here before any seed is exported. This gate uses only cheap wire
+    //    values, so it runs BEFORE the expensive attestation verification
+    //    below: an unauthenticated caller is rejected without tying up a worker
+    //    on certificate-chain / COSE-signature work (F03-AF-20). The
+    //    pubkey/digest bindings (steps 4-5) still tie these same wire values to
+    //    the NSM-signed attestation, so moving this up loosens nothing.
+    state.with_donor_cloning_secret(|secret| {
+        if !cloning::verify_cloning_digest(secret, &req_encryption_pk, &req_cluster_pk, &req_digest)
+        {
+            return Err(EnclaveError::DigestMismatch);
+        }
+        Ok(())
+    })?;
+
+    // 3. Verify the requester attestation chain + PCRs. `None` for the
     //    expected nonce: we have not seen the requester's nonce before,
     //    so freshness is enforced by the replay guard once the binding and
     //    authenticity checks below have passed.
@@ -1537,14 +1594,14 @@ fn handle_get_clone(state: &EnclaveState, req: GetCloneRequest) -> Result<Enclav
     let verified =
         attestation::verify_peer_attestation(&req.requester_attestation, &expected_pcrs, None)?;
 
-    // 3. Pubkey binding: the attestation's `public_key` field must equal
+    // 4. Pubkey binding: the attestation's `public_key` field must equal
     //    the one the parent put on the wire. Otherwise the parent could
     //    have swapped it for a key it controls.
     if verified.enclave_pubkey.as_slice() != req_encryption_pk {
         return Err(EnclaveError::PubkeyMismatch);
     }
 
-    // 4. Digest binding: the attestation's `user_data` must equal the
+    // 5. Digest binding: the attestation's `user_data` must equal the
     //    digest on the wire - NSM-signed, so parent-proof.
     let user_data = verified.user_data.as_deref().ok_or_else(|| {
         EnclaveError::Attestation("requester attestation missing user_data (cloning digest)".into())
@@ -1553,25 +1610,29 @@ fn handle_get_clone(state: &EnclaveState, req: GetCloneRequest) -> Result<Enclav
         return Err(EnclaveError::DigestMismatch);
     }
 
-    // 5. Digest authenticity: HMAC(donor_secret, encryption_pubkey) must
-    //    match. Proves the requester was issued by the same operator.
-    state.with_donor_cloning_secret(|secret| {
-        if !cloning::verify_cloning_digest(secret, &req_encryption_pk, &req_digest) {
-            return Err(EnclaveError::DigestMismatch);
-        }
-        Ok(())
-    })?;
+    // 5b. Optional hard export-quota gate (F03-AF-10, opt-in via
+    //     CLONE_EXPORT_HARD_CAP). Runs only after the request is fully
+    //     authenticated (so it cannot be probed/tripped by an unauthenticated
+    //     caller) and before any nonce is reserved or seed is sealed, so a
+    //     quota-refused request neither consumes replay capacity nor produces
+    //     ciphertext. Reserve atomically across workers; any later error drops
+    //     the reservation and returns its slot. Disabled by default (cap 0).
+    let export_reservation = state.reserve_export_quota()?;
 
-    // 6. Replay-check + record the nonce from the verified document, only
-    //    after the checks above have passed, so an unauthenticated handshake
-    //    never consumes replay-guard capacity. With the count-cap removal
-    // this closes the secret-less cloning-availability DoS.
+    // 6. Reserve the nonce from the verified document (replay-check + record
+    //    with rollback-on-drop), only after the checks above have passed so an
+    //    unauthenticated handshake never consumes replay-guard capacity. With
+    //    the count-cap removal this closes the secret-less cloning-availability
+    //    DoS. The reservation is committed only after the seal + donor
+    //    attestation below succeed (F03-AF-02 / F03-AF-04): a transient failure
+    //    after the record rolls the nonce back, so a legitimate retry is not
+    //    self-blocked by its own earlier attempt.
     let nonce_array: [u8; 32] = verified
         .nonce
         .as_slice()
         .try_into()
         .map_err(|_| EnclaveError::Attestation("attestation nonce has wrong length".into()))?;
-    state.replay_guard.check_and_record(nonce_array)?;
+    let reservation = state.replay_guard.reserve(nonce_array)?;
 
     // 7. Seal the seed under a fresh donor ephemeral keypair.
     let (encrypted_seed, donor_pubkey) =
@@ -1581,10 +1642,29 @@ fn handle_get_clone(state: &EnclaveState, req: GetCloneRequest) -> Result<Enclav
     //    just produced so the requester can be sure this response is
     //    not an old one replayed by the parent.
     let donor_nonce = fresh_nonce()?;
-    let donor_attestation = attestation::get_attestation(&donor_nonce, Some(&donor_pubkey), None)?;
+    let bundle = build_public_keys_response(state.get_keys()?, &ctx.bridge_config);
+    let commitment = clone_commitment(
+        &bundle,
+        &ctx.policy.commitment_bytes(),
+        &req_encryption_pk,
+        &donor_pubkey,
+        &encrypted_seed,
+    );
+    let donor_attestation =
+        attestation::get_attestation(&donor_nonce, Some(&donor_pubkey), Some(&commitment))?;
 
+    // Seal + donor attestation succeeded: keep the nonce recorded.
+    reservation.commit();
+
+    // F03-AF-10 (telemetry): a donor never consumes its seed, so it can export
+    // repeatedly. Make each export observable (and optionally alert on volume
+    // via CLONE_EXPORT_SOFT_CAP). Hard enforcement, when opted in via
+    // CLONE_EXPORT_HARD_CAP, already ran fail-closed at step 5b above; the
+    // concrete quota number stays an owner custody choice (see OWNER-DECISIONS).
+    let export_count = export_reservation.commit(&req_encryption_pk);
     tracing::info!(
         cluster_pk = %hex::encode(our_evm),
+        seed_export_count = export_count,
         "GetClone: sealed seed for requester"
     );
 
@@ -1599,8 +1679,9 @@ fn handle_get_clone(state: &EnclaveState, req: GetCloneRequest) -> Result<Enclav
 
 /// Requester side. Transitions `Cloning -> Active`. Verifies the donor's
 /// attestation, unseals the ciphertext, and commits the derived keys
-/// only if the resulting EVM address matches `cluster_public_key`.
-fn handle_set_clone(state: &EnclaveState, req: SetCloneRequest) -> Result<EnclaveResponse> {
+/// only if the EVM target and signed full identity/policy/transcript match.
+fn handle_set_clone(ctx: &ServerContext, req: SetCloneRequest) -> Result<EnclaveResponse> {
+    let state = &ctx.state;
     let donor_pubkey: [u8; 32] = req.donor_pubkey.as_slice().try_into().map_err(|_| {
         EnclaveError::InvalidRequest(format!(
             "donor_pubkey must be 32 bytes, got {}",
@@ -1621,10 +1702,24 @@ fn handle_set_clone(state: &EnclaveState, req: SetCloneRequest) -> Result<Enclav
         return Err(EnclaveError::PubkeyMismatch);
     }
 
-    // 3. Decrypt seed, derive KeyManager, identity check, and commit the
+    // 3. Extract and freshness-reserve the donor nonce BEFORE mutating state
+    //    (F03-AF-03). Placed after the pubkey binding above so a rejected /
+    //    unauthenticated handshake never consumes replay-guard capacity, but
+    //    before `complete_cloning` so a malformed (wrong-length) or replayed
+    //    donor nonce cannot drive the Cloning -> Active transition. The
+    //    reservation rolls back on any failure below, so the state transition
+    //    and the replay record commit together or not at all.
+    let nonce_array: [u8; 32] = verified
+        .nonce
+        .as_slice()
+        .try_into()
+        .map_err(|_| EnclaveError::Attestation("attestation nonce has wrong length".into()))?;
+    let reservation = state.replay_guard.reserve(nonce_array)?;
+
+    // 4. Decrypt seed, derive KeyManager, identity check, and commit the
     //    Cloning -> Active transition - all atomically under the state
     //    lock via `complete_cloning`. On any failure the state stays in
-    //    Cloning and the handshake can be retried.
+    //    Cloning, the reservation rolls back, and the handshake can be retried.
     let network = state.network();
     let mut cluster_public_key = [0u8; 20];
     state.complete_cloning(|session| {
@@ -1635,19 +1730,21 @@ fn handle_set_clone(state: &EnclaveState, req: SetCloneRequest) -> Result<Enclav
         if km.evm_address() != &session.cluster_public_key {
             return Err(EnclaveError::IdentityMismatch);
         }
+        let bundle = build_public_keys_response(EnclaveState::key_info(&km), &ctx.bridge_config);
+        let expected = clone_commitment(
+            &bundle,
+            &ctx.policy.commitment_bytes(),
+            &session.session.public_key(),
+            &donor_pubkey,
+            &req.encrypted_seed,
+        );
+        verify_clone_commitment(verified.user_data.as_deref(), &expected)?;
         cluster_public_key = session.cluster_public_key;
         Ok(km)
     })?;
 
-    // 4. Replay-check + record the donor nonce only *after* the pubkey
-    //    binding and the seed/identity checks above have passed, so a
-    // rejected handshake never consumes replay-guard capacity.
-    let nonce_array: [u8; 32] = verified
-        .nonce
-        .as_slice()
-        .try_into()
-        .map_err(|_| EnclaveError::Attestation("attestation nonce has wrong length".into()))?;
-    state.replay_guard.check_and_record(nonce_array)?;
+    // Transition committed: keep the donor nonce recorded.
+    reservation.commit();
 
     tracing::info!(
         cluster_pk = %hex::encode(cluster_public_key),
@@ -1868,5 +1965,16 @@ mod tests {
         limiter
             .check(10, t0)
             .expect("backwards clock resets window");
+    }
+
+    #[test]
+    fn clone_commitment_requires_the_signed_identity_transcript() {
+        let expected = [0x5a; 36];
+        assert!(verify_clone_commitment(Some(&expected), &expected).is_ok());
+        assert!(verify_clone_commitment(None, &expected).is_err());
+
+        let mut altered = expected;
+        altered[35] ^= 1;
+        assert!(verify_clone_commitment(Some(&altered), &expected).is_err());
     }
 }

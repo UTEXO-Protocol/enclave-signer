@@ -60,12 +60,37 @@ impl ParentAdapterService {
             tokio::task::spawn_blocking(move || {
                 use crate::framing;
 
+                // F03-AF-18: the outer `tokio::time::timeout` stops *awaiting*
+                // this task but cannot cancel a `spawn_blocking` thread, and a
+                // cancelled caller likewise leaves the thread running. Without
+                // socket deadlines an enclave that accepts the connection but
+                // never replies (or a black-holed address) would pin this
+                // blocking-pool thread indefinitely, well past the 30s public
+                // timeout, so repeated abandoned calls could exhaust the pool.
+                // Bound connect + read + write on BOTH transports so the thread
+                // always returns within ENCLAVE_TIMEOUT even after the outer
+                // timeout has already fired.
                 match target {
                     EnclaveTarget::Tcp(addr) => {
-                        let mut stream = std::net::TcpStream::connect(&addr).map_err(|e| {
-                            Status::unavailable(format!("enclave connection failed: {e}"))
-                        })?;
+                        use std::net::ToSocketAddrs;
+                        let sockaddr = addr
+                            .to_socket_addrs()
+                            .map_err(|e| {
+                                Status::unavailable(format!("enclave addr resolve failed: {e}"))
+                            })?
+                            .next()
+                            .ok_or_else(|| {
+                                Status::unavailable(
+                                    "enclave addr resolved to no endpoints".to_string(),
+                                )
+                            })?;
+                        let mut stream =
+                            std::net::TcpStream::connect_timeout(&sockaddr, ENCLAVE_TIMEOUT)
+                                .map_err(|e| {
+                                    Status::unavailable(format!("enclave connection failed: {e}"))
+                                })?;
                         stream.set_read_timeout(Some(ENCLAVE_TIMEOUT)).ok();
+                        stream.set_write_timeout(Some(ENCLAVE_TIMEOUT)).ok();
                         framing::write_message(&mut stream, &req)
                             .map_err(|e| Status::internal(format!("enclave write failed: {e}")))?;
                         let resp: EnclaveResponse = framing::read_message(&mut stream)
@@ -78,6 +103,9 @@ impl ParentAdapterService {
                             .map_err(|e| {
                                 Status::unavailable(format!("enclave vsock connection failed: {e}"))
                             })?;
+                        // Previously the vsock branch had NO socket deadlines.
+                        stream.set_read_timeout(Some(ENCLAVE_TIMEOUT)).ok();
+                        stream.set_write_timeout(Some(ENCLAVE_TIMEOUT)).ok();
                         framing::write_message(&mut stream, &req)
                             .map_err(|e| Status::internal(format!("enclave write failed: {e}")))?;
                         let resp: EnclaveResponse = framing::read_message(&mut stream)
@@ -99,6 +127,12 @@ impl ParentAdapterService {
     /// Unwrap an enclave error response into a gRPC Status.
     fn enclave_error_to_status(err: &enclave_proto::ErrorResponse) -> Status {
         match err.code {
+            // ERROR_CODE_NOT_READY: enclave reached but not in a state that can
+            // serve this call yet (uninitialised, wrong FSM state, or a build
+            // without the SPV header chain). This is a caller-visible,
+            // retryable/precondition condition — surfacing it as INTERNAL (5xx
+            // semantics) hid it behind generic server errors (F03-AF-11).
+            2 => Status::unavailable(err.message.clone()),
             3 => Status::failed_precondition(err.message.clone()),
             _ => Status::internal(format!(
                 "enclave error (code {}): {}",
@@ -638,24 +672,35 @@ impl ParentService for ParentAdapterService {
         }
     }
 
-    /// Initialize - generates new keys in the enclave.
-    /// If cloning_secret is provided, it is forwarded as a BIP-39 mnemonic;
-    /// otherwise the enclave generates keys from OS entropy.
+    /// Initialize - generates fresh keys in the enclave from OS entropy and,
+    /// if a cloning secret is supplied, configures this enclave as a donor that
+    /// can serve clone requests.
+    ///
+    /// F03-AF-27: the public `InitializeRequest.cloning_secret` field is exactly
+    /// that - the donor cloning secret - and must be routed to the enclave's
+    /// `cloning_secret` field, mirroring the direct init path
+    /// (`EnclaveClient::initialize_keys_with_secret`). Previously it was
+    /// misrouted into the enclave's `mnemonic` (seed-import) field with an empty
+    /// donor secret, so on a release build (no `allow-seed-import`) any nonempty
+    /// value was rejected and the enclave stayed Initial, never becoming a
+    /// usable donor. Mnemonic/seed import stays an operator-only path
+    /// (CLI `init-mnemonic` / `init-seed`, gated by `allow-seed-import`); it is
+    /// intentionally NOT reachable through this public provisioning RPC.
     async fn initialize(
         &self,
         request: Request<InitializeRequest>,
     ) -> Result<Response<InitializeResponse>, Status> {
         let inner = request.into_inner();
         tracing::info!(
-            has_mnemonic = !inner.cloning_secret.is_empty(),
+            configures_donor = !inner.cloning_secret.is_empty(),
             "gRPC Initialize called"
         );
         let enclave_req = EnclaveRequest {
             request: Some(enclave_request::Request::InitializeKey(
                 enclave_proto::InitializeKeyRequest {
                     seed: vec![],
-                    mnemonic: inner.cloning_secret,
-                    cloning_secret: String::new(),
+                    mnemonic: String::new(),
+                    cloning_secret: inner.cloning_secret,
                 },
             )),
         };
@@ -689,10 +734,7 @@ impl ParentService for ParentAdapterService {
         request: Request<CloneRequest>,
     ) -> Result<Response<CloneResponse>, Status> {
         let inner = request.into_inner();
-        tracing::info!(
-            cluster_pk = %hex::encode(&inner.cluster_public_key),
-            "gRPC Clone called (donor GetClone)"
-        );
+        tracing::info!("gRPC Clone called (donor GetClone)");
 
         let enclave_req = EnclaveRequest {
             request: Some(enclave_request::Request::GetClone(

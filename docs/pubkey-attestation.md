@@ -20,6 +20,33 @@ rules and selected data sources — resolved once at boot. Committing it into `u
 lets a verifier check the committed policy as one attested value instead of
 inferring it from build flags or configuration guesses.
 
+### What attestation does NOT prove
+
+Real verification proves only that **approved, measured code (PCR0/1/2 = X/Y/Z)
+answered a fresh-nonce request with these public bytes at time T**. It does
+**not** establish any of the following, and consumers MUST NOT rely on them:
+
+- **Origin of key generation.** The document says nothing about *where or when*
+  the corresponding private key was first created. A measured enclave can just
+  as validly attest a key it generated at boot, restored from sealed storage, or
+  received over the enclave-to-enclave cloning protocol.
+- **Exclusive custody / uniqueness.** It does not prove the private key exists
+  in exactly one place. By design this bridge supports **seed cloning** (see
+  [`enclave/src/cloning.rs`](../enclave/src/cloning.rs) and `docs/tee-spec.md`):
+  a donor enclave hands its sealed seed to another enclave running the *same*
+  measurement, so the same signing key legitimately runs in more than one
+  enclave. Two valid attestations for the same `public_key` under the same PCRs
+  are expected, not an anomaly.
+- **Absence of a cloned/imported copy.** It cannot show that no party ever held
+  or copied the key material — only that a live instance of the measured code
+  holds it now.
+
+What binds trust is the *combination* of (a) the PCR-pinned measured code —
+whose review/audit is what actually constrains how keys are generated, sealed
+and cloned — and (b) the fresh-nonce signature proving a live instance of that
+code holds the key. The guarantee is **"an approved measured enclave controls
+this key now,"** not "this key was born here and lives only here."
+
 The chain of trust is:
 
 ```
@@ -106,8 +133,13 @@ mock build with no env is `chain_id=0`, `bridge_contract=20 zero bytes`,
 build, so the bundle has the same shape regardless of features.
 
 The CLI reconstructs policy using the chain/contract/asset pins from the
-response. It authenticates these values but does not compare them to independent
-expected pins. Callers must compare them with their intended deployment.
+response. These values are always authenticated (they are inside the signed
+commitment); to also compare them against the operator's intended deployment,
+pass `--expect-chain-id`, `--expect-bridge-contract` and/or
+`--expect-rgb-asset-id`. When set, verification fails unless the enclave attests
+exactly those pins, so onboarding can reject a valid attestation of the *wrong*
+chain, contract or RGB asset. When omitted, the pins are authenticated but not
+compared (legacy behaviour) — the caller must then compare them out of band.
 
 The verifier MUST use the same field set, the same order, and the same
 length-prefix encoding. The reference encoder is `canonical_pubkey_bundle`
@@ -217,14 +249,16 @@ equals the expected production policy.
 
 ## Verification recipe (with `attest-verify`)
 
-The `attest-verify` CLI in this repo runs the full recipe.
+The `attest-verify` CLI in this repo runs the full recipe. Configure the client
+CA/certificate/key environment from [Parent mTLS](parent-mtls.md) first; an
+`observer` certificate is sufficient for verification.
 
 ```bash
 # Production verification (against a real Nitro enclave). By default it expects a
 # production policy with plain-BTC signing DISABLED and the raw-RPC EVM data
 # source (`--expect-evm-source raw`, what the shipped image uses).
 attest-verify \
-    --endpoint http://parent.example:50051 \
+    --endpoint https://parent.example:50051 \
     --pcr0 <96-hex-chars> \
     --pcr1 <96-hex-chars> \
     --pcr2 <96-hex-chars>
@@ -235,18 +269,26 @@ attest-verify \
 # --expect-gas-selectors <comma-separated-hex4>
 # Omitted flags expect an unpinned gas rule, not values discovered from the enclave.
 
+# Deployment pins: compare the attested chain/contract/asset against the
+# operator's intended deployment (otherwise they are authenticated but not
+# compared). Verification fails on any mismatch:
+# --expect-chain-id <u64> --expect-bridge-contract <hex20> \
+# --expect-rgb-asset-id <asset>   # empty string pins "no RGB asset"
+
 # Expect the plain-BTC path enabled:
-attest-verify --endpoint http://parent.example:50051 \
+attest-verify --endpoint https://parent.example:50051 \
     --pcr0 <..> --pcr1 <..> --pcr2 <..> \
     --expect-vanilla-psbt
 
 # Optional Helios build (not enabled in the supplied Dockerfiles):
-attest-verify --endpoint http://parent.example:50051 \
+attest-verify --endpoint https://parent.example:50051 \
     --pcr0 <..> --pcr1 <..> --pcr2 <..> \
     --expect-evm-source helios --expect-helios-checkpoint <hex32>
 
 # Dev / CI verification (against an enclave built with --features mock-attestation).
 # --mock implies the expected policy is Development.
+# For this loopback plaintext example, remove PARENT_TLS_* and explicitly
+# enable GRPC_ALLOW_INSECURE_LOOPBACK=true on the loopback-bound Parent.
 attest-verify --endpoint http://127.0.0.1:50051 --mock
 ```
 
@@ -289,6 +331,12 @@ NOT defended (out of scope for attestation):
 - Bugs in the enclave code _after_ measurement (PCRs only attest the
   binary; runtime correctness is a separate problem solved by code review,
   fuzzing, audits).
+- **Key origin / exclusivity.** The document does not prove where the private
+  key was generated, that it lives in only one enclave, or that no cloned or
+  imported copy exists — seed cloning is an explicit feature, so the same key
+  can run in multiple same-measurement enclaves. Constraints on how keys are
+  generated, sealed and cloned come from reviewing the PCR-pinned code, not from
+  the attestation document itself. See *What attestation does NOT prove* above.
 
 ## Code references
 

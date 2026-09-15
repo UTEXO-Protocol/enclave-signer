@@ -167,9 +167,28 @@ mod nsm {
             }
         };
 
-        let pcr0 = read(0)?;
-        let pcr1 = read(1)?;
-        let pcr2 = read(2)?;
+        // AF-21: stop on the first read error and release the NSM fd on every path.
+        let pcr0 = match read(0) {
+            Ok(value) => value,
+            Err(error) => {
+                nsm_exit(fd);
+                return Err(error);
+            }
+        };
+        let pcr1 = match read(1) {
+            Ok(value) => value,
+            Err(error) => {
+                nsm_exit(fd);
+                return Err(error);
+            }
+        };
+        let pcr2 = match read(2) {
+            Ok(value) => value,
+            Err(error) => {
+                nsm_exit(fd);
+                return Err(error);
+            }
+        };
         nsm_exit(fd);
         Ok(ExpectedPcrs::new(pcr0, pcr1, pcr2))
     }

@@ -97,26 +97,91 @@ impl std::fmt::Debug for CloneSession {
     }
 }
 
-/// Compute HMAC-SHA256(secret, encryption_pubkey).
+/// Compute HMAC-SHA256(secret, encryption_pubkey ‖ target_cluster_pk).
 ///
 /// Proves the holder of the cloning secret authorized the request without
-/// sending the secret. The message is the raw 32 bytes of the X25519 pubkey, so
-/// there is no canonicalization ambiguity.
-pub fn make_cloning_digest(secret: &str, encryption_pubkey: &[u8; 32]) -> [u8; 32] {
+/// sending the secret, AND binds the request to the *intended donor cluster
+/// identity* (F03-AF-07). Both message parts are fixed-width (32 + 20 bytes),
+/// so the concatenation is unambiguous without a length prefix.
+///
+/// Why bind the target: without it the digest is target-agnostic, so a
+/// malicious/relaying parent can take a requester armed for cluster identity X
+/// and replay it to a donor of a *different* cluster identity Y (setting the
+/// plaintext `cluster_public_key` wire field to Y to satisfy the donor's own
+/// self-check). The donor Y would then export its sealed seed before the
+/// requester's downstream identity check can reject the mismatched result. With
+/// the target folded in, the requester's digest is computed over X while donor
+/// Y recomputes over its own identity Y → the HMAC mismatches and Y refuses to
+/// export at all.
+pub fn make_cloning_digest(
+    secret: &str,
+    encryption_pubkey: &[u8; 32],
+    target_cluster_pk: &[u8; 20],
+) -> [u8; 32] {
     let mut mac = <HmacSha256 as Mac>::new_from_slice(secret.as_bytes())
         .expect("HMAC accepts any key length");
     mac.update(encryption_pubkey);
+    mac.update(target_cluster_pk);
     mac.finalize().into_bytes().into()
 }
 
-/// Constant-time verification of a cloning digest.
+/// Constant-time verification of a cloning digest, including the target
+/// cluster-identity binding (F03-AF-07).
 pub fn verify_cloning_digest(
     secret: &str,
     encryption_pubkey: &[u8; 32],
+    target_cluster_pk: &[u8; 20],
     digest: &[u8; 32],
 ) -> bool {
-    let expected = make_cloning_digest(secret, encryption_pubkey);
+    let expected = make_cloning_digest(secret, encryption_pubkey, target_cluster_pk);
     expected.ct_eq(digest).into()
+}
+
+/// Fail-closed strength floor for an operator-supplied cloning secret
+/// (F03-AF-26). The secret is used *directly* as the HMAC-SHA256 key in
+/// [`make_cloning_digest`], so a captured `(encryption_pubkey, digest)` pair
+/// lets an attacker offline-brute-force a weak secret and forge requester
+/// authorization. 32 bytes is the minimum accepted length.
+pub const MIN_CLONING_SECRET_BYTES: usize = 32;
+
+/// Minimum distinct byte values - a cheap floor against degenerate low-entropy
+/// secrets (`"aaaa..."`, `"0101..."`). A uniformly random 32-byte secret has
+/// ~32 distinct bytes; even hex-encoded (16 symbols) it clears this. This is a
+/// floor, NOT an entropy oracle (true entropy of an arbitrary string is
+/// unknowable in-enclave), so the operator still owns generation/rotation.
+pub const MIN_CLONING_SECRET_DISTINCT_BYTES: usize = 8;
+
+/// Reject an empty / too-short / degenerate-entropy cloning secret before it is
+/// ever used as an HMAC key (F03-AF-26). Called on both entry points: the donor
+/// `init` ([`crate::state::EnclaveState::set_donor_cloning_secret`]) and the
+/// requester `InitiateCloning` handler. Wire-compatible: the secret is still
+/// carried the same way, only trivially weak values are now refused fail-closed.
+pub fn validate_cloning_secret(secret: &str) -> Result<()> {
+    let bytes = secret.as_bytes();
+    if bytes.is_empty() {
+        return Err(EnclaveError::InvalidRequest(
+            "cloning_secret is required".into(),
+        ));
+    }
+    if bytes.len() < MIN_CLONING_SECRET_BYTES {
+        return Err(EnclaveError::InvalidRequest(format!(
+            "cloning_secret too short: {} bytes < {MIN_CLONING_SECRET_BYTES} minimum",
+            bytes.len()
+        )));
+    }
+    let mut seen = [false; 256];
+    let mut distinct = 0usize;
+    for &b in bytes {
+        if !core::mem::replace(&mut seen[b as usize], true) {
+            distinct += 1;
+        }
+    }
+    if distinct < MIN_CLONING_SECRET_DISTINCT_BYTES {
+        return Err(EnclaveError::InvalidRequest(format!(
+            "cloning_secret too low-entropy: {distinct} distinct bytes < {MIN_CLONING_SECRET_DISTINCT_BYTES} minimum"
+        )));
+    }
+    Ok(())
 }
 
 /// Donor side: seal `seed` to the requester's X25519 pubkey using a fresh
@@ -216,31 +281,97 @@ mod tests {
     fn digest_roundtrip_ok() {
         let secret = "correct horse battery staple";
         let pubkey = [7u8; 32];
-        let digest = make_cloning_digest(secret, &pubkey);
-        assert!(verify_cloning_digest(secret, &pubkey, &digest));
+        let target = [3u8; 20];
+        let digest = make_cloning_digest(secret, &pubkey, &target);
+        assert!(verify_cloning_digest(secret, &pubkey, &target, &digest));
+    }
+
+    #[test]
+    fn validate_secret_rejects_empty() {
+        assert!(matches!(
+            validate_cloning_secret(""),
+            Err(EnclaveError::InvalidRequest(_))
+        ));
+    }
+
+    #[test]
+    fn validate_secret_rejects_too_short() {
+        // 31 bytes (< 32), high distinct so it fails ONLY on length.
+        let s = "0123456789abcdef0123456789abcde";
+        assert_eq!(s.len(), 31);
+        assert!(matches!(
+            validate_cloning_secret(s),
+            Err(EnclaveError::InvalidRequest(_))
+        ));
+    }
+
+    #[test]
+    fn validate_secret_rejects_low_entropy() {
+        // 64 bytes but a single distinct value -> trivially brute-forceable.
+        let s = "a".repeat(64);
+        assert!(matches!(
+            validate_cloning_secret(&s),
+            Err(EnclaveError::InvalidRequest(_))
+        ));
+    }
+
+    #[test]
+    fn validate_secret_accepts_64_hex() {
+        // Shape of the real stage secret: 32 random bytes hex-encoded ->
+        // 64 chars, 16 distinct symbols.
+        let s = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        assert_eq!(s.len(), 64);
+        assert!(validate_cloning_secret(s).is_ok());
+    }
+
+    #[test]
+    fn validate_secret_accepts_min_length_boundary() {
+        // Exactly the 32-byte floor, well-distributed.
+        let s = "0123456789abcdef0123456789abcdef";
+        assert_eq!(s.len(), MIN_CLONING_SECRET_BYTES);
+        assert!(validate_cloning_secret(s).is_ok());
     }
 
     #[test]
     fn digest_rejects_wrong_secret() {
         let pubkey = [7u8; 32];
-        let digest = make_cloning_digest("right", &pubkey);
-        assert!(!verify_cloning_digest("wrong", &pubkey, &digest));
+        let target = [3u8; 20];
+        let digest = make_cloning_digest("right", &pubkey, &target);
+        assert!(!verify_cloning_digest("wrong", &pubkey, &target, &digest));
     }
 
     #[test]
     fn digest_rejects_wrong_pubkey() {
         let secret = "s";
-        let digest = make_cloning_digest(secret, &[1u8; 32]);
-        assert!(!verify_cloning_digest(secret, &[2u8; 32], &digest));
+        let target = [3u8; 20];
+        let digest = make_cloning_digest(secret, &[1u8; 32], &target);
+        assert!(!verify_cloning_digest(secret, &[2u8; 32], &target, &digest));
+    }
+
+    #[test]
+    fn digest_rejects_wrong_target_cluster_pk() {
+        // F03-AF-07: a digest armed for target X must not verify against a
+        // different donor cluster identity Y, even with the same secret and
+        // encryption pubkey. This is the core relay-to-wrong-donor guard.
+        let secret = "correct horse battery staple";
+        let pubkey = [7u8; 32];
+        let digest = make_cloning_digest(secret, &pubkey, &[0xAAu8; 20]);
+        assert!(!verify_cloning_digest(
+            secret,
+            &pubkey,
+            &[0xBBu8; 20],
+            &digest
+        ));
     }
 
     #[test]
     fn digest_detects_single_bit_flip() {
         let secret = "s";
         let pubkey = [9u8; 32];
-        let mut digest = make_cloning_digest(secret, &pubkey);
+        let target = [3u8; 20];
+        let mut digest = make_cloning_digest(secret, &pubkey, &target);
         digest[0] ^= 0x01;
-        assert!(!verify_cloning_digest(secret, &pubkey, &digest));
+        assert!(!verify_cloning_digest(secret, &pubkey, &target, &digest));
     }
 
     #[test]
@@ -353,5 +484,117 @@ mod tests {
         let session = CloneSession::new();
         let (ct, _) = encrypt_seed_for_peer(&session.public_key(), &[0u8; 64]).unwrap();
         assert_eq!(ct.len(), 64 + 16);
+    }
+
+    // ---- F03-AF-25: independent byte-level reference vectors ----
+    //
+    // A round trip through the same implementation only proves the encrypt and
+    // decrypt halves agree with *each other*; it cannot catch an unintended
+    // shared convention (a wrong domain string, pubkey order, encoding or nonce)
+    // that both sides happen to honour. These vectors pin every intermediate
+    // byte of the cloning transcript against values produced by a SEPARATE,
+    // OpenSSL-backed implementation (Python `cryptography` / `hmac`), so a silent
+    // change to the wire crypto is caught in CI and an independently built peer
+    // stays compatible. Vectors were produced by an OpenSSL-backed generator
+    // (Python `cryptography`/`hmac`) over fixed inputs, then pinned here.
+
+    /// Decode a fixed-width hex constant into a byte array.
+    fn hexn<const N: usize>(s: &str) -> [u8; N] {
+        hex::decode(s)
+            .expect("valid hex literal")
+            .try_into()
+            .expect("hex literal has the expected byte length")
+    }
+
+    #[test]
+    fn af25_cloning_digest_reference_vector() {
+        // Reference: HMAC-SHA256(secret_utf8, encryption_pubkey ‖ target)
+        // computed by Python `hmac`/`hashlib` (independent of RustCrypto).
+        let secret = "utexo-af25-fixed-reference-secret-0123456789";
+        let pubkey = hexn::<32>("030a11181f262d343b424950575e656c737a81888f969da4abb2b9c0c7ced5dc");
+        let target = hexn::<20>("05101b26313c47525d68737e89949faab5c0cbd6");
+        let want = hexn::<32>("ac9ab8ce85a4eabf160922d0077690807c434c4d338d1140fb3f8581605de25b");
+        assert_eq!(make_cloning_digest(secret, &pubkey, &target), want);
+        assert!(verify_cloning_digest(secret, &pubkey, &target, &want));
+
+        // AF-07 target binding at the byte level: the SAME secret+pubkey with a
+        // one-byte-different target maps to an independently-computed, distinct
+        // digest — never back to `want`.
+        let target_b = hexn::<20>("06111c27323d48535e69747f8a95a0abb6c1ccd7");
+        let want_b = hexn::<32>("642b1bb86f3e1b0526fb3932fa85ea1695b4e8feaa07607826158cccf805518e");
+        assert_eq!(make_cloning_digest(secret, &pubkey, &target_b), want_b);
+        assert_ne!(want, want_b);
+    }
+
+    #[test]
+    fn af25_seed_seal_reference_vector() {
+        // Reference for the full donor->requester seal chain
+        // X25519 -> HKDF-SHA256 -> ChaCha20Poly1305(IETF, zero nonce), every
+        // stage cross-checked against the OpenSSL-backed implementation.
+        let req_sk = hexn::<32>("0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20");
+        let donor_sk =
+            hexn::<32>("404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f");
+        let seed = hexn::<64>(
+            "070a0d101316191c1f2225282b2e3134373a3d404346494c4f5255585b5e6164\
+             676a6d707376797c7f8285888b8e9194979a9da0a3a6a9acafb2b5b8bbbec1c4",
+        );
+
+        let req_secret = StaticSecret::from(req_sk);
+        let donor_secret = StaticSecret::from(donor_sk);
+        let req_pub = PublicKey::from(&req_secret).to_bytes();
+        let donor_pub = PublicKey::from(&donor_secret).to_bytes();
+
+        // (a) X25519 public keys (clamped scalar * basepoint) match reference.
+        assert_eq!(
+            req_pub,
+            hexn::<32>("07a37cbc142093c8b755dc1b10e86cb426374ad16aa853ed0bdfc0b2b86d1c7c"),
+        );
+        assert_eq!(
+            donor_pub,
+            hexn::<32>("79a631eede1bf9c98f12032cdeadd0e7a079398fc786b88cc846ec89af85a51a"),
+        );
+
+        // (b) DH shared secret matches, and both peers derive it identically.
+        let shared = donor_secret.diffie_hellman(&PublicKey::from(req_pub));
+        assert_eq!(
+            shared.as_bytes(),
+            &hexn::<32>("ae4440cc8d7faddb2894172b78e3d745cafa0098bcc10d7ee0fda08fa85a9a2e"),
+        );
+        assert_eq!(
+            req_secret
+                .diffie_hellman(&PublicKey::from(donor_pub))
+                .as_bytes(),
+            shared.as_bytes(),
+        );
+
+        // (c) HKDF-SHA256(salt, shared, "seed-encryption" ‖ donor_pub ‖ req_pub).
+        let key = derive_symmetric_key(shared.as_bytes(), &donor_pub, &req_pub);
+        assert_eq!(
+            *key,
+            hexn::<32>("392ccd781d51995d3d1d73c4848432646bc6c2c220ef25826cd15c04bf61500f"),
+        );
+
+        // (d) ChaCha20Poly1305 (IETF, all-zero nonce) ciphertext = 64B seed + 16B tag.
+        let ct = encrypt_with_key(&key, &seed).expect("seal");
+        assert_eq!(
+            ct,
+            hex::decode(
+                "fd74236255f673bcda5c5f2b7b717466d48ad8327d365ddb8d82d0902df8bf74\
+                 7fd0a01de3ebddf96d38e026007a62a4cc9151b61ebd5c77c60101ffd7f732d8\
+                 581045088a7392fbdfeb22775e65216b",
+            )
+            .unwrap(),
+        );
+
+        // (e) the production decrypt path recovers the exact seed from the vector.
+        let session_pub = PublicKey::from(&req_secret);
+        let session = CloneSession {
+            secret: req_secret,
+            public: session_pub,
+        };
+        let recovered = session
+            .decrypt_seed_from_peer(&donor_pub, &ct)
+            .expect("unseal");
+        assert_eq!(*recovered, seed);
     }
 }

@@ -1,4 +1,5 @@
 use std::collections::{HashSet, VecDeque};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
@@ -6,7 +7,7 @@ use bip39::Mnemonic;
 use bitcoin::Network;
 use secrecy::{ExposeSecret, SecretBox};
 
-use crate::cloning::CloneSession;
+use crate::cloning::{validate_cloning_secret, CloneSession};
 use crate::error::{EnclaveError, Result};
 use crate::keys::{KeyInfo, KeyManager};
 
@@ -19,14 +20,32 @@ pub struct CloningSession {
     pub session: CloneSession,
     /// 20-byte EVM address of the donor we intend to clone from.
     pub cluster_public_key: [u8; 20],
+    /// Monotonic instant the handshake was opened (`InitiateCloning`). Used to
+    /// expire an abandoned session so a fresh initiation can replace it
+    /// (F03-AF-01). `Instant` is monotonic, so it is immune to wall-clock steps
+    /// (e.g. the PTP clock-sync adjustments).
+    created_at: Instant,
 }
 
 impl CloningSession {
     pub fn new(session: CloneSession, cluster_public_key: [u8; 20]) -> Self {
+        Self::new_at(session, cluster_public_key, Instant::now())
+    }
+
+    /// [`new`](Self::new) with an injectable open time, so the expiry logic is
+    /// testable without sleeping.
+    fn new_at(session: CloneSession, cluster_public_key: [u8; 20], created_at: Instant) -> Self {
         Self {
             session,
             cluster_public_key,
+            created_at,
         }
+    }
+
+    /// True once the session has outlived [`CLONING_SESSION_TTL`] measured
+    /// against `now`; such a session is treated as abandoned.
+    fn is_expired(&self, now: Instant) -> bool {
+        now.saturating_duration_since(self.created_at) >= CLONING_SESSION_TTL
     }
 }
 
@@ -46,6 +65,16 @@ const DEFAULT_NONCE_TTL: Duration = Duration::from_secs(60 * 60);
 /// Default hard memory ceiling on recorded nonces.
 const DEFAULT_NONCE_MAX: usize = 10_000;
 
+/// How long an in-progress `Cloning` handshake stays valid before it is treated
+/// as abandoned (F03-AF-01). During this window the requester holds only an
+/// ephemeral X25519 secret and NO seed, so replacing a stale session is safe.
+/// The full donor round-trip completes in seconds; five minutes generously
+/// covers a slow multi-stage CLI while letting a wedged requester self-recover
+/// (a lost `InitiateCloning` response or a failed CLI run) without a restart. A
+/// still-live session is still protected, so a concurrent duplicate cannot
+/// hijack an in-flight handshake.
+const CLONING_SESSION_TTL: Duration = Duration::from_secs(5 * 60);
+
 /// Default TTL for the PSBT bridge-operation dedup guard. Much longer than the
 /// nonce TTL: an EVM->RGB deposit can be retried while unsettled, so the window
 /// must outlast normal listener retry/confirmation latency. See
@@ -56,6 +85,28 @@ const DEFAULT_OP_DEDUP_TTL: Duration = Duration::from_secs(24 * 60 * 60);
 /// entry. On overflow inside one TTL window the oldest entry is evicted rather
 /// than wedging signing. See [`EnclaveState::op_replay_guard`].
 const DEFAULT_OP_DEDUP_MAX: usize = 100_000;
+
+/// Env var naming a **soft** alerting threshold on the number of times this
+/// donor instance has exported its seed via `GetClone` (F03-AF-10, telemetry
+/// slice). `0` (the default when unset/invalid) disables the threshold: export
+/// is *never* blocked here, because a hard quota is a custody/recovery policy
+/// decision the owner must version (a wrong cap breaks legitimate re-cloning).
+/// When set > 0, crossing it only emits a loud warning so operators can alert
+/// on anomalous export volume without changing handshake behavior.
+const CLONE_EXPORT_SOFT_CAP_ENV: &str = "CLONE_EXPORT_SOFT_CAP";
+
+/// Env var naming an optional **hard** quota on the number of successful seed
+/// exports this donor instance will serve via `GetClone` (F03-AF-10, opt-in
+/// enforcement slice). `0` (the default when unset/invalid) disables it — the
+/// shipped default behaviour is unchanged (export never blocked), so a legitimate
+/// recovery re-clone is never broken by an operator who has not opted in.
+/// When set to `N > 0`, exactly `N` exports are allowed and the `N+1`-th is
+/// **rejected fail-closed** *after* full authentication (secret + attestation +
+/// PCR + pubkey/digest binding) but *before* the seed is sealed. The concrete
+/// number stays an owner custody choice; this only provides the mechanism.
+/// Volatile (resets on restart) — matches the volatile export counter; picking a
+/// durable/cluster-wide quota is the deferred owner decision (see OWNER-DECISIONS).
+const CLONE_EXPORT_HARD_CAP_ENV: &str = "CLONE_EXPORT_HARD_CAP";
 
 /// Replay guard for attestation nonces, bounded by **time** (not just
 /// count) so a flooding parent cannot permanently wedge cloning.
@@ -70,6 +121,36 @@ const DEFAULT_OP_DEDUP_MAX: usize = 100_000;
 /// and block every legitimate handshake. The trade-off is a
 /// bounded replay window: replaying an evicted nonce only re-seals the seed to
 /// the encryption pubkey already bound inside that attestation.
+///
+/// # Security posture — bounded-volatile freshness (F03-AF-09, DECIDE)
+///
+/// This guard is deliberately **per-instance and in-memory (volatile)**, and we
+/// accept that as the shipped posture. Its explicit limits:
+///
+/// - **Restart clears it.** After an enclave restart the set is empty, so a
+///   nonce seen before the restart would be admitted again.
+/// - **No cross-instance / sibling freshness.** A nonce accepted by donor A is
+///   unknown to a sibling donor B; the set is not shared cluster-wide.
+/// - **Overflow evicts oldest** (availability over strict rejection), giving a
+///   bounded replay window inside a `ttl`.
+///
+/// Why this is acceptable without durable/cluster-wide state: a replayed nonce
+/// does **not** create a new recipient or leak the seed to an unauthorised
+/// party. Every accepted `GetClone` is already gated by peer attestation +
+/// PCR match + the `encryption_pubkey`↔attestation binding + the HMAC cloning
+/// digest (including the AF-07 target-cluster binding) + the AF-26 secret
+/// strength floor. The digest is computed over the encryption pubkey, so a
+/// replay can only ever re-seal the seed to the **same** pubkey already
+/// authorised inside that transcript — i.e. to a recipient the operator already
+/// approved. The replay guard is therefore defense-in-depth against
+/// resubmission, not the sole control on seed export.
+///
+/// Making freshness **durable and cluster-wide** (surviving restart, shared
+/// across sibling donors, closing the sibling-guard gap) is a deliberate
+/// **owner decision** deferred here: it requires cross-instance shared state
+/// plus versioning/migration/rollback, whereas the audit notes that changing
+/// only the local `ttl`/`max` needs no migration. Until then the posture above
+/// is the documented, accepted position (see `OWNER-DECISIONS` D2/AF-09).
 pub struct NonceReplayGuard {
     inner: Mutex<GuardState>,
     max: usize,
@@ -265,6 +346,55 @@ pub struct EnclaveState {
     /// It stops honest listener retries and naive same-tuple replay; the
     /// durable guard is an on-chain ticket.
     pub op_replay_guard: NonceReplayGuard,
+
+    /// Lifetime count of successful seed exports served by this instance as a
+    /// donor (F03-AF-10). An `Active` donor never consumes its seed, so it can
+    /// export repeatedly; this counter makes that observable and also backs the
+    /// export telemetry. The separate reservation counter enforces the
+    /// opt-in hard quota ([`Self::reserve_export_quota`]). By default it only
+    /// observes (no gating); a hard cap is opt-in because a wrong cap would block
+    /// legitimate recovery re-clones. Volatile (resets on restart): an alerting
+    /// signal + coarse custody bound, not a durable ledger.
+    seed_export_count: AtomicU64,
+
+    /// Successful exports plus exports in flight. Reserving a slot atomically
+    /// prevents concurrent GetClone calls from exceeding the per-instance cap.
+    seed_export_slots: AtomicU64,
+
+    /// Soft alerting threshold for [`Self::seed_export_count`]. `0` disables it
+    /// (the default). Read once at construction from
+    /// [`CLONE_EXPORT_SOFT_CAP_ENV`]; crossing it warns but never blocks.
+    seed_export_soft_cap: u64,
+
+    /// Optional **hard** export quota (F03-AF-10, opt-in). `0` disables it (the
+    /// default); `N > 0` allows exactly `N` successful exports and rejects the
+    /// rest fail-closed. Read once at construction from
+    /// [`CLONE_EXPORT_HARD_CAP_ENV`]. See [`Self::reserve_export_quota`].
+    seed_export_hard_cap: u64,
+}
+
+/// Holds one export slot until sealing and donor attestation both succeed.
+/// Any error before commit releases the slot, including nonce replay rejection.
+#[must_use = "hold the reservation until the export succeeds, then commit it"]
+pub struct ExportQuotaReservation<'a> {
+    state: &'a EnclaveState,
+    reserved: bool,
+}
+
+impl ExportQuotaReservation<'_> {
+    pub fn commit(mut self, requester_pk: &[u8; 32]) -> u64 {
+        // A successful export permanently consumes its slot for this process.
+        self.reserved = false;
+        self.state.record_seed_export(requester_pk)
+    }
+}
+
+impl Drop for ExportQuotaReservation<'_> {
+    fn drop(&mut self) {
+        if self.reserved {
+            self.state.seed_export_slots.fetch_sub(1, Ordering::Relaxed);
+        }
+    }
 }
 
 impl Default for EnclaveState {
@@ -284,7 +414,82 @@ impl EnclaveState {
                 DEFAULT_OP_DEDUP_MAX,
                 DEFAULT_OP_DEDUP_TTL,
             ),
+            seed_export_count: AtomicU64::new(0),
+            seed_export_slots: AtomicU64::new(0),
+            seed_export_soft_cap: std::env::var(CLONE_EXPORT_SOFT_CAP_ENV)
+                .ok()
+                .and_then(|v| v.trim().parse::<u64>().ok())
+                .unwrap_or(0),
+            seed_export_hard_cap: std::env::var(CLONE_EXPORT_HARD_CAP_ENV)
+                .ok()
+                .and_then(|v| v.trim().parse::<u64>().ok())
+                .unwrap_or(0),
         }
+    }
+
+    /// Opt-in **hard** export-quota gate (F03-AF-10). Returns `Err` when a hard
+    /// cap is configured (`CLONE_EXPORT_HARD_CAP > 0`) and this instance has
+    /// already reserved that many slots, so the caller rejects `GetClone`
+    /// *before* sealing the seed. Slots cover completed and in-flight exports;
+    /// failed exports release their reservation on drop. Disabled by default
+    /// (`cap == 0`), so existing recovery re-clones are unaffected. This is a
+    /// strict concurrent bound within one process, not a durable cluster ledger.
+    pub fn reserve_export_quota(&self) -> Result<ExportQuotaReservation<'_>> {
+        let cap = self.seed_export_hard_cap;
+        if cap > 0 {
+            if let Err(used) =
+                self.seed_export_slots
+                    .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |used| {
+                        if used < cap {
+                            Some(used + 1)
+                        } else {
+                            None
+                        }
+                    })
+            {
+                tracing::warn!(
+                    seed_export_count = self.seed_export_count.load(Ordering::Relaxed),
+                    reserved_or_completed = used,
+                    hard_cap = cap,
+                    "GetClone: seed-export HARD cap reached - export refused \
+                     (F03-AF-10, fail-closed). Rotate/re-provision to lift."
+                );
+                return Err(EnclaveError::Clone(format!(
+                    "seed-export hard cap reached ({used}/{cap}); export refused"
+                )));
+            }
+        }
+        Ok(ExportQuotaReservation {
+            state: self,
+            reserved: cap > 0,
+        })
+    }
+
+    /// Record a successful donor seed export and return the new lifetime count
+    /// (F03-AF-10, telemetry). Emits a security-relevant log on every export;
+    /// if a soft cap is configured and now exceeded, emits an additional loud
+    /// warning. Never blocks - enforcement is an owner custody-policy decision.
+    pub fn record_seed_export(&self, requester_pk: &[u8; 32]) -> u64 {
+        let count = self.seed_export_count.fetch_add(1, Ordering::Relaxed) + 1;
+        tracing::warn!(
+            seed_export_count = count,
+            requester_pk = %hex::encode(requester_pk),
+            "GetClone: donor exported its seed (F03-AF-10 telemetry)"
+        );
+        if self.seed_export_soft_cap > 0 && count > self.seed_export_soft_cap {
+            tracing::warn!(
+                seed_export_count = count,
+                soft_cap = self.seed_export_soft_cap,
+                "GetClone: seed-export soft cap exceeded - review donor custody \
+                 (alert only, export not blocked)"
+            );
+        }
+        count
+    }
+
+    /// Current lifetime seed-export count for this instance (F03-AF-10).
+    pub fn seed_export_count(&self) -> u64 {
+        self.seed_export_count.load(Ordering::Relaxed)
     }
 
     pub fn network(&self) -> Network {
@@ -295,7 +500,12 @@ impl EnclaveState {
     /// operator-provided env var (e.g. `UTEXO_CLONING_SECRET`). Idempotent
     /// and overwrites any previous value. The secret is wrapped in
     /// `SecretBox` for zeroize-on-drop.
+    ///
+    /// Rejects empty / too-short / degenerate-entropy secrets fail-closed
+    /// (F03-AF-26): the value is used directly as an HMAC key, so a weak
+    /// secret is offline-brute-forceable from a captured digest.
     pub fn set_donor_cloning_secret(&self, secret: String) -> Result<()> {
+        validate_cloning_secret(&secret)?;
         let mut guard = self
             .donor_cloning_secret
             .lock()
@@ -358,11 +568,30 @@ impl EnclaveState {
         Ok(())
     }
 
-    /// Transition `Initial -> Cloning`, consuming the supplied session.
-    /// Rejected from any other phase.
+    /// Transition `-> Cloning`, consuming the supplied session.
+    ///
+    /// Allowed from `Initial`, or from a `Cloning` phase whose session has
+    /// expired (F03-AF-01): an abandoned handshake (a lost `InitiateCloning`
+    /// response or a failed CLI run) no longer wedges the requester until a
+    /// restart - a fresh initiation replaces it once the old one is past
+    /// [`CLONING_SESSION_TTL`]. A still-live `Cloning` session and any `Active`
+    /// phase are rejected with `AlreadyInitialized`.
     pub fn enter_cloning(&self, session: CloningSession) -> Result<()> {
+        self.enter_cloning_at(session, Instant::now())
+    }
+
+    /// Time-injected core of [`enter_cloning`]. `now` is the point the existing
+    /// session's expiry is measured against; the public method passes
+    /// `Instant::now()`. Split out so the expiry logic is testable.
+    fn enter_cloning_at(&self, session: CloningSession, now: Instant) -> Result<()> {
         let mut guard = self.lock_phase()?;
-        ensure_initial(&guard)?;
+        match &*guard {
+            Phase::Initial => {}
+            // Abandoned (expired) handshake: a fresh initiation may replace it.
+            Phase::Cloning(existing) if existing.is_expired(now) => {}
+            // Live Cloning session or already Active: refuse.
+            _ => return Err(EnclaveError::AlreadyInitialized),
+        }
         *guard = Phase::Cloning(session);
         Ok(())
     }
@@ -446,20 +675,23 @@ impl EnclaveState {
 
     /// Get public key info. Returns `KeyNotInitialized` if not in the `Active` phase.
     pub fn get_keys(&self) -> Result<KeyInfo> {
-        self.with_active(|km| {
-            Ok(KeyInfo {
-                evm_address: *km.evm_address(),
-                evm_uncompressed_pub: *km.evm_uncompressed_pub(),
-                evm_gas_tx_address: *km.evm_gas_tx_address(),
-                evm_gas_tx_uncompressed_pub: *km.evm_gas_tx_uncompressed_pub(),
-                btc_compressed_pubkey: *km.btc_compressed_pubkey(),
-                btc_xpub: km.btc_xpub().to_string(),
-                master_fingerprint: km.master_fingerprint().to_bytes(),
-                account_xpub_vanilla: km.account_xpub_vanilla().to_string(),
-                account_xpub_colored: km.account_xpub_colored().to_string(),
-                ccd_ed25519_pub: *km.ccd_ed25519_pub(),
-            })
-        })
+        self.with_active(|km| Ok(Self::key_info(km)))
+    }
+
+    /// Derive the public bundle without publishing candidate keys as Active.
+    pub(crate) fn key_info(km: &KeyManager) -> KeyInfo {
+        KeyInfo {
+            evm_address: *km.evm_address(),
+            evm_uncompressed_pub: *km.evm_uncompressed_pub(),
+            evm_gas_tx_address: *km.evm_gas_tx_address(),
+            evm_gas_tx_uncompressed_pub: *km.evm_gas_tx_uncompressed_pub(),
+            btc_compressed_pubkey: *km.btc_compressed_pubkey(),
+            btc_xpub: km.btc_xpub().to_string(),
+            master_fingerprint: km.master_fingerprint().to_bytes(),
+            account_xpub_vanilla: km.account_xpub_vanilla().to_string(),
+            account_xpub_colored: km.account_xpub_colored().to_string(),
+            ccd_ed25519_pub: *km.ccd_ed25519_pub(),
+        }
     }
 
     /// Sign a 32-byte EVM message hash. Returns 65-byte signature.
@@ -537,6 +769,18 @@ mod tests {
     }
 
     #[test]
+    fn seed_export_counter_increments_monotonically() {
+        // F03-AF-10 (telemetry): each donor export bumps the lifetime counter
+        // and returns the new value; it never blocks regardless of count.
+        let state = EnclaveState::new(Network::Bitcoin);
+        assert_eq!(state.seed_export_count(), 0);
+        assert_eq!(state.record_seed_export(&[1u8; 32]), 1);
+        assert_eq!(state.record_seed_export(&[2u8; 32]), 2);
+        assert_eq!(state.record_seed_export(&[3u8; 32]), 3);
+        assert_eq!(state.seed_export_count(), 3);
+    }
+
+    #[test]
     fn initial_to_active_via_entropy() {
         let state = EnclaveState::new(Network::Bitcoin);
         let mut entropy = [1u8; 32];
@@ -597,6 +841,87 @@ mod tests {
         assert!(matches!(err, EnclaveError::KeyNotInitialized));
     }
 
+    // F03-AF-10: opt-in hard export quota admits exactly `cap` exports, then
+    // refuses fail-closed. Field is set directly (same-module) to avoid a
+    // process-global env-var race across parallel tests.
+    #[test]
+    fn export_hard_cap_blocks_after_quota() {
+        let mut state = EnclaveState::new(Network::Bitcoin);
+        state.seed_export_hard_cap = 2;
+        let pk = [7u8; 32];
+        assert_eq!(state.reserve_export_quota().unwrap().commit(&pk), 1);
+        assert_eq!(state.reserve_export_quota().unwrap().commit(&pk), 2);
+        // Quota reached: the cap+1-th export is refused before sealing.
+        let err = state.reserve_export_quota().err().unwrap();
+        assert!(matches!(err, EnclaveError::Clone(_)));
+    }
+
+    // Default (cap 0) never gates, no matter how many exports were served.
+    #[test]
+    fn export_hard_cap_disabled_by_default() {
+        let state = EnclaveState::new(Network::Bitcoin);
+        assert_eq!(state.seed_export_hard_cap, 0);
+        let pk = [9u8; 32];
+        for _ in 0..1000 {
+            state.reserve_export_quota().unwrap().commit(&pk);
+        }
+        assert!(state.reserve_export_quota().is_ok());
+        assert_eq!(state.seed_export_count.load(Ordering::Relaxed), 1000);
+        assert_eq!(state.seed_export_slots.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn export_hard_cap_releases_failed_reservations() {
+        let mut state = EnclaveState::new(Network::Bitcoin);
+        state.seed_export_hard_cap = 2;
+        let first = state.reserve_export_quota().unwrap();
+        let second = state.reserve_export_quota().unwrap();
+        assert!(state.reserve_export_quota().is_err());
+        assert_eq!(state.seed_export_count.load(Ordering::Relaxed), 0);
+        drop(first); // e.g. a replay error before sealing
+        state.reserve_export_quota().unwrap().commit(&[1; 32]);
+        assert!(state.reserve_export_quota().is_err());
+        drop(second); // e.g. a failed donor attestation after sealing
+        state.reserve_export_quota().unwrap().commit(&[2; 32]);
+        assert!(state.reserve_export_quota().is_err());
+        assert_eq!(state.seed_export_count.load(Ordering::Relaxed), 2);
+    }
+
+    #[test]
+    fn export_hard_cap_bounds_concurrent_in_flight_exports() {
+        use std::sync::Barrier;
+        let mut state = EnclaveState::new(Network::Bitcoin);
+        state.seed_export_hard_cap = 2;
+        let start = Barrier::new(16);
+        let reserved = Barrier::new(16);
+        let accepted = std::thread::scope(|scope| {
+            let handles: Vec<_> = (0..16)
+                .map(|_| {
+                    scope.spawn(|| {
+                        start.wait();
+                        let slot = state.reserve_export_quota();
+                        // No successful export is recorded until every worker
+                        // has tried admission: exercise the old race window.
+                        reserved.wait();
+                        if let Ok(slot) = slot {
+                            slot.commit(&[3; 32]);
+                            true
+                        } else {
+                            false
+                        }
+                    })
+                })
+                .collect();
+            handles
+                .into_iter()
+                .map(|h| usize::from(h.join().unwrap()))
+                .sum::<usize>()
+        });
+        assert_eq!(accepted, 2);
+        assert_eq!(state.seed_export_count.load(Ordering::Relaxed), 2);
+        assert!(state.reserve_export_quota().is_err());
+    }
+
     #[test]
     fn cloning_phase_is_not_initialized() {
         let state = EnclaveState::new(Network::Bitcoin);
@@ -616,6 +941,65 @@ mod tests {
         *state.inner.lock().unwrap() =
             Phase::Cloning(CloningSession::new(CloneSession::new(), [0u8; 20]));
         let err = state.initialize_from_seed([42u8; 64]).unwrap_err();
+        assert!(matches!(err, EnclaveError::AlreadyInitialized));
+    }
+
+    // AF-01: an abandoned Cloning session must not wedge the requester until a
+    // restart. A live session is protected; one past the TTL is replaceable.
+    #[test]
+    fn enter_cloning_replaces_expired_but_protects_live_session() {
+        let state = EnclaveState::new(Network::Bitcoin);
+        let t0 = Instant::now();
+
+        // First initiation from Initial succeeds.
+        state
+            .enter_cloning_at(
+                CloningSession::new_at(CloneSession::new(), [1u8; 20], t0),
+                t0,
+            )
+            .unwrap();
+        assert_eq!(state.phase_name(), "cloning");
+
+        // A second initiation while the session is still live is rejected,
+        // so a concurrent duplicate cannot hijack the in-flight handshake.
+        let err = state
+            .enter_cloning_at(
+                CloningSession::new_at(CloneSession::new(), [2u8; 20], t0),
+                t0 + Duration::from_secs(10),
+            )
+            .unwrap_err();
+        assert!(matches!(err, EnclaveError::AlreadyInitialized));
+        state
+            .with_cloning_session(|s| {
+                assert_eq!(s.cluster_public_key, [1u8; 20], "live session untouched");
+                Ok(())
+            })
+            .unwrap();
+
+        // Once the session is past the TTL it is abandoned: a fresh initiation
+        // replaces it and self-recovers the requester without a restart.
+        let later = t0 + CLONING_SESSION_TTL + Duration::from_secs(1);
+        state
+            .enter_cloning_at(
+                CloningSession::new_at(CloneSession::new(), [3u8; 20], later),
+                later,
+            )
+            .unwrap();
+        state
+            .with_cloning_session(|s| {
+                assert_eq!(s.cluster_public_key, [3u8; 20], "expired session replaced");
+                Ok(())
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn enter_cloning_rejected_once_active() {
+        let state = EnclaveState::new(Network::Bitcoin);
+        state.initialize_from_seed([42u8; 64]).unwrap();
+        let err = state
+            .enter_cloning(CloningSession::new(CloneSession::new(), [1u8; 20]))
+            .unwrap_err();
         assert!(matches!(err, EnclaveError::AlreadyInitialized));
     }
 
