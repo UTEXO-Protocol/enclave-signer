@@ -17,7 +17,7 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
-from botocore.exceptions import ClientError, EndpointConnectionError
+from botocore.exceptions import ClientError, EndpointConnectionError, ParamValidationError
 
 
 SPEC = importlib.util.spec_from_file_location(
@@ -75,11 +75,11 @@ class SeedBrokerTests(unittest.TestCase):
         self.session = Mock()
         self.broker = broker_module.SeedBroker(self.config, self.session, self.s3)
 
-    def request(self, operation, **fields):
-        return self.broker.response({"op": operation, "seed_id": "swaps-prod", **fields})
+    def request(self, operation, peer=16, **fields):
+        return self.broker.response({"op": operation, "seed_id": "swaps-prod", **fields}, peer=peer)
 
-    def create(self, blob):
-        return self.request("create", ciphertext=base64.b64encode(blob).decode("ascii"))
+    def create(self, blob, peer=16):
+        return self.request("create", peer=peer, ciphertext=base64.b64encode(blob).decode("ascii"))
 
     def test_missing_then_create_then_restart_load_preserves_exact_ciphertext(self):
         self.assertEqual(self.request("load"), {"ciphertext": None})
@@ -99,7 +99,7 @@ class SeedBrokerTests(unittest.TestCase):
 
         def submit(index):
             barrier.wait(timeout=5)
-            return self.create(f"candidate-{index}".encode("ascii"))
+            return self.create(f"candidate-{index}".encode("ascii"), peer=16+index)
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=count) as pool:
             results = list(pool.map(submit, range(count)))
@@ -115,7 +115,7 @@ class SeedBrokerTests(unittest.TestCase):
 
     def test_conflict_without_winner_fails_without_multiplying_aws_timeouts(self):
         self.s3.put_object = Mock(side_effect=aws_error("ConditionalRequestConflict", 409))
-        self.assertEqual(self.create(b"candidate"), {"error": "storage_conflict"})
+        self.assertEqual(self.create(b"candidate"), {"error": "aws_unavailable"})
         self.s3.put_object.assert_called_once()
         self.assertEqual(len(self.s3.gets), 1)
 
@@ -128,7 +128,7 @@ class SeedBrokerTests(unittest.TestCase):
     def test_conflicts_are_bounded(self):
         self.s3.put_object = Mock(side_effect=aws_error("ConditionalRequestConflict", 409))
         with patch.object(broker_module.time, "sleep"):
-            self.assertEqual(self.create(b"candidate"), {"error": "storage_conflict"})
+            self.assertEqual(self.create(b"candidate"), {"error": "aws_unavailable"})
         self.assertEqual(self.s3.put_object.call_count, 1)
 
     def test_timeout_returns_before_slow_put_and_retry_recovers_late_commit(self):
@@ -165,7 +165,7 @@ class SeedBrokerTests(unittest.TestCase):
             finally:
                 done.set()
 
-        self.broker.operation_slots = threading.BoundedSemaphore(1)
+        self.broker.operation_slots = broker_module.Admission(1, 1)
         self.broker._response = Mock(side_effect=stalled)
         try:
             with patch.object(broker_module, "OPERATION_TIMEOUT_SECONDS", 0.03):
@@ -176,6 +176,69 @@ class SeedBrokerTests(unittest.TestCase):
             finish.set()
             self.assertTrue(done.wait(timeout=1))
 
+    def test_timed_out_cid_cannot_exhaust_another_cids_operation_capacity(self):
+        finish = threading.Event()
+        original = self.broker._response
+
+        def dispatch(request):
+            if request["op"] == "credentials":
+                finish.wait(timeout=3)
+                return {"error": "aws_unavailable"}
+            return original(request)
+
+        self.broker._response = Mock(side_effect=dispatch)
+        try:
+            with patch.object(broker_module, "OPERATION_TIMEOUT_SECONDS", 0.03):
+                with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+                    responses = list(pool.map(lambda _: self.broker.response({"op": "credentials"}, peer=16), range(2)))
+                self.assertEqual(responses, [{"error": "operation_timeout"}] * 2)
+                self.assertEqual(self.broker.response({"op": "credentials"}, peer=16), {"error": "broker_busy"})
+                self.assertEqual(self.request("load", peer=18), {"ciphertext": None})
+                self.assertEqual(self.broker._response.call_count, 3)
+                self.assertEqual(self.broker.operation_slots.peers.get(16), 2)
+        finally:
+            finish.set()
+
+    def test_operation_thread_failure_returns_its_global_and_cid_slots(self):
+        with patch.object(broker_module.threading,"Thread") as thread:
+            thread.return_value.start.side_effect=RuntimeError("sensitive system diagnostic")
+            self.assertEqual(self.request("load"),{"error":"internal_error"})
+        self.assertEqual(self.broker.operation_slots.total,0)
+        self.assertEqual(self.broker.operation_slots.peers,{})
+        self.assertEqual(self.request("load"),{"ciphertext":None})
+
+    def test_fast_cid_rate_limit_rejects_before_sdk_and_other_cid_can_progress(self):
+        now = [100.0]
+        self.broker.operation_rate = broker_module.RateLimit(4, 8, clock=lambda: now[0])
+        for _ in range(8):
+            self.assertEqual(self.request("load",peer=16), {"ciphertext":None})
+        self.assertEqual(len(self.s3.gets),8)
+        self.assertEqual(self.request("load",peer=16), {"error":"broker_busy"})
+        self.assertEqual(len(self.s3.gets),8)
+        self.assertEqual(self.request("load",peer=18), {"ciphertext":None})
+        now[0] += .25
+        self.assertEqual(self.request("load",peer=16), {"ciphertext":None})
+        self.assertEqual(self.request("load",peer=16), {"error":"broker_busy"})
+        now[0] += 100
+        self.assertTrue(all(self.broker.operation_rate.take(16) for _ in range(8)))
+        self.assertFalse(self.broker.operation_rate.take(16))
+
+    def test_provider_errors_have_fixed_categories_without_diagnostics(self):
+        errors = ((aws_error("AccessDenied", 403), "access_denied"),
+            (aws_error("SignatureDoesNotMatch", 403), "access_denied"),
+            (aws_error("NoSuchBucket", 404), "configuration_error"),
+            (aws_error("AuthorizationHeaderMalformed", 400), "configuration_error"),
+            (aws_error("ExpiredToken", 400), "aws_unavailable"),
+            (aws_error("InternalError", 500), "aws_unavailable"),
+            (ParamValidationError(report="sensitive credential value"), "configuration_error"))
+        for error, expected in errors:
+            with self.subTest(expected=expected):
+                self.s3.get_object = Mock(side_effect=error)
+                self.assertEqual(self.request("load"), {"error": expected})
+                self.assertFalse(self.s3.puts)
+        self.broker.dispatch = Mock(side_effect=broker_module.BrokerError("sensitive credential value"))
+        self.assertEqual(self.request("load"), {"error": "internal_error"})
+
     def test_sdk_has_no_automatic_retries(self):
         session = Mock()
         broker_module.SeedBroker(self.config, session=session)
@@ -185,7 +248,7 @@ class SeedBrokerTests(unittest.TestCase):
 
     def test_successful_put_is_not_accepted_when_readback_fails(self):
         self.s3.get_object = Mock(side_effect=aws_error("AccessDenied", 403))
-        self.assertEqual(self.create(b"candidate"), {"error": "storage_unavailable"})
+        self.assertEqual(self.create(b"candidate"), {"error": "access_denied"})
         self.assertEqual(self.s3.value, b"candidate")
         self.assertEqual(len(self.s3.puts), 1)
 
@@ -207,7 +270,7 @@ class SeedBrokerTests(unittest.TestCase):
         ):
             with self.subTest(error=error.response["Error"]["Code"]):
                 self.s3.get_object = Mock(side_effect=error)
-                self.assertEqual(self.request("load"), {"error": "storage_unavailable"})
+                self.assertEqual(self.request("load"), {"error": broker_module.aws_failure_code(error)})
                 self.assertEqual(self.s3.puts, [])
 
     def test_corrupt_stored_object_fails_closed_and_closes_stream(self):
@@ -218,7 +281,7 @@ class SeedBrokerTests(unittest.TestCase):
                 if size is not None:
                     response["ContentLength"] = size
                 self.s3.get_object = Mock(return_value=response)
-                self.assertEqual(self.request("load"), {"error": "invalid_stored_ciphertext"})
+                self.assertEqual(self.request("load"), {"error": "invalid_ciphertext"})
                 self.assertTrue(stream.closed)
                 self.assertEqual(self.s3.puts, [])
 
@@ -265,7 +328,7 @@ class SeedBrokerTests(unittest.TestCase):
 
     def test_credentials_failures_are_sanitized(self):
         self.session.get_credentials.return_value = None
-        self.assertEqual(self.broker.response({"op": "credentials"}), {"error": "credentials_unavailable"})
+        self.assertEqual(self.broker.response({"op": "credentials"}), {"error": "configuration_error"})
         self.session.get_credentials.side_effect = RuntimeError("SECRET_ACCESS_KEY must not leak")
         self.assertEqual(self.broker.response({"op": "credentials"}), {"error": "internal_error"})
 
@@ -280,7 +343,13 @@ class ProtocolTests(unittest.TestCase):
         try:
             client.settimeout(3)
             client.sendall(struct.pack(">I", len(body) if size is None else size) + body)
-            client.shutdown(socket.SHUT_WR)
+            try:
+                client.shutdown(socket.SHUT_WR)
+            except OSError as error:
+                # macOS may observe the one-shot server's close immediately
+                # after a complete frame; the response remains readable.
+                if error.errno != errno.ENOTCONN:
+                    raise
             header = client.recv(4)
             length = struct.unpack(">I", header)[0]
             response = bytearray()
@@ -296,7 +365,7 @@ class ProtocolTests(unittest.TestCase):
     def test_valid_request_uses_big_endian_framing_and_closes_connection(self):
         response, broker = self.exchange(b'{"op":"load","seed_id":"swaps-prod"}')
         self.assertEqual(response, {"ciphertext": None})
-        broker.response.assert_called_once_with({"op": "load", "seed_id": "swaps-prod"})
+        broker.response.assert_called_once_with({"op": "load", "seed_id": "swaps-prod"}, peer=0)
 
     def test_oversized_zero_and_truncated_frames_are_rejected(self):
         for body, size in ((b"", 65537), (b"", 0), (b"x", 20)):
@@ -344,6 +413,22 @@ class ProtocolTests(unittest.TestCase):
         sleep.assert_called_once_with(0.1)
         self.assertNotIn("secret", "".join(logs.output))
 
+    def test_connection_thread_start_failure_releases_slot_and_accepts_next_peer(self):
+        first, second = Mock(), Mock()
+        listener = Mock()
+        listener.accept.side_effect = [(first,(16,1)),(second,(16,2)),KeyboardInterrupt]
+        broker = Mock(config=SimpleNamespace(allowed_cids=frozenset({16})))
+        failed_thread, working_thread = Mock(), Mock()
+        failed_thread.start.side_effect = RuntimeError("sensitive system diagnostic")
+        with patch.object(broker_module,"MAX_CONNECTIONS_PER_CID",1), patch.object(broker_module.threading,"Thread",side_effect=[failed_thread,working_thread]), patch.object(broker_module.time,"sleep") as delay, self.assertLogs(broker_module.LOGGER,level="WARNING") as logs:
+            with self.assertRaises(KeyboardInterrupt):
+                broker_module.serve(listener,broker)
+        first.close.assert_called_once()
+        second.close.assert_not_called()
+        working_thread.start.assert_called_once()
+        delay.assert_called_once_with(.1)
+        self.assertNotIn("sensitive", "".join(logs.output))
+
     def test_broken_listener_exits_for_supervisor_restart(self):
         listener = Mock()
         listener.accept.side_effect = OSError(errno.EBADF, "bad descriptor")
@@ -358,6 +443,38 @@ class ProtocolTests(unittest.TestCase):
             with self.assertRaisesRegex(broker_module.BrokerError, "request_timeout"):
                 broker_module.read_exact(connection, 4, deadline=1)
         connection.recv.assert_called_once()
+
+    def test_one_cid_cannot_exhaust_connections_for_another_allowed_cid(self):
+        connections = [Mock() for _ in range(4)]
+        listener = Mock()
+        listener.accept.side_effect = [(connections[0], (16, 1)), (connections[1], (16, 2)),
+            (connections[2], (16, 3)), (connections[3], (18, 4)), KeyboardInterrupt]
+        broker = Mock(config=SimpleNamespace(allowed_cids=frozenset({16, 18})))
+        with patch.object(broker_module, "MAX_CONNECTIONS_PER_CID", 2):
+            with patch.object(broker_module.threading, "Thread") as thread:
+                with self.assertRaises(KeyboardInterrupt):
+                    broker_module.serve(listener, broker)
+        self.assertEqual(thread.call_count, 3)
+        self.assertEqual([call.kwargs["args"][1] for call in thread.call_args_list], [16, 16, 18])
+        connections[2].close.assert_called_once()
+        connections[2].recv.assert_not_called()
+        connections[3].close.assert_not_called()
+
+    def test_admission_returns_capacity_to_each_cid_after_release(self):
+        admission = broker_module.Admission(3, 2)
+        self.assertTrue(admission.acquire(16))
+        self.assertTrue(admission.acquire(16))
+        self.assertFalse(admission.acquire(16))
+        self.assertTrue(admission.acquire(18))
+        self.assertFalse(admission.acquire(20))
+        admission.release(16)
+        self.assertTrue(admission.acquire(20))
+        admission.release(16)
+        self.assertNotIn(16, admission.peers)
+        admission.release(18)
+        admission.release(20)
+        self.assertEqual(admission.total, 0)
+        self.assertEqual(admission.peers, {})
 
     def test_active_connection_count_is_bounded(self):
         first, excess = Mock(), Mock()
@@ -391,16 +508,16 @@ class ConfigurationTests(unittest.TestCase):
         self.assertEqual(config.key, "swaps/seed.kms")
 
     def test_vsock_cid_allowlist_is_required(self):
-        for value in ("", "3", "2", "-1", "4294967295", "invalid"):
+        for value in ("", "3", "2", "-1", "4294967295", "invalid", "16,,18", ",".join(str(cid) for cid in range(16,81))):
             with self.subTest(value=value):
                 environment = dict(self.environment, SWAP_KMS_ALLOWED_CIDS=value)
                 with patch.dict(os.environ, environment, clear=True):
-                    with self.assertRaisesRegex(broker_module.BrokerError, "invalid_configuration"):
+                    with self.assertRaisesRegex(broker_module.BrokerError, "configuration_error"):
                         broker_module.Config.from_environment()
 
     def test_port_cannot_diverge_from_measured_enclave_forwarder(self):
         with patch.dict(os.environ, dict(self.environment, SWAP_KMS_BROKER_PORT="9000"), clear=True):
-            with self.assertRaisesRegex(broker_module.BrokerError, "invalid_configuration"):
+            with self.assertRaisesRegex(broker_module.BrokerError, "configuration_error"):
                 broker_module.Config.from_environment()
 
 

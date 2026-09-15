@@ -1,0 +1,16 @@
+[Unit]
+Description=RGB swaps CID-limited KMS TLS relay socket
+Conflicts=vsock-proxy-kms.service nitro-enclaves-vsock-proxy.service
+After=nitro-enclaves-allocator.service
+
+[Socket]
+ListenStream=vsock:3:8003
+Accept=yes
+MaxConnections=16
+MaxConnectionsPerSource=2
+Backlog=16
+# The guard rejects unauthorized CIDs before outbound traffic. Admission uses
+# actual kernel peer CIDs, including connections that have sent no bytes yet.
+
+[Install]
+WantedBy=sockets.target

@@ -1,0 +1,6 @@
+[Unit]
+Description=Aggregate resource limits for RGB swaps KMS TLS relay connections
+
+[Slice]
+TasksMax=64
+MemoryMax=256M

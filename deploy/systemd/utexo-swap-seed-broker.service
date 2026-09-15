@@ -29,8 +29,11 @@ RestrictSUIDSGID=yes
 CapabilityBoundingSet=
 UMask=0077
 # Main thread + 16 connection workers + 16 bounded AWS-operation workers.
+# Per CID: at most four connections and two AWS-operation workers.
 TasksMax=40
 MemoryMax=256M
+LogRateLimitIntervalSec=30s
+LogRateLimitBurst=20
 
 [Install]
 WantedBy=multi-user.target

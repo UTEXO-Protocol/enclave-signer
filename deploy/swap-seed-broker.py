@@ -29,7 +29,8 @@ from typing import Optional
 
 import boto3
 from botocore.config import Config as AwsConfig
-from botocore.exceptions import BotoCoreError, ClientError
+from botocore.exceptions import (BotoCoreError, ClientError, ConfigParseError, InvalidConfigError,
+    NoCredentialsError, NoRegionError, ParamValidationError, PartialCredentialsError, ProfileNotFound)
 
 
 MAX_FRAME_BYTES = 65536
@@ -39,11 +40,81 @@ REQUEST_TIMEOUT_SECONDS = 10
 # timeouts alone cannot bound DNS, credential-provider refresh, or body trickle.
 OPERATION_TIMEOUT_SECONDS = 7
 MAX_CONNECTIONS = 16
+MAX_CONNECTIONS_PER_CID = 4
+MAX_OPERATIONS_PER_CID = 2
+OPERATIONS_PER_SECOND = 4
+OPERATION_BURST = 8
 LOGGER = logging.getLogger("swap-seed-broker")
 
 
+ERROR_CODES = frozenset({
+    "configuration_error", "access_denied", "aws_unavailable", "invalid_ciphertext",
+    "broker_busy", "operation_timeout", "request_timeout", "invalid_frame",
+    "invalid_request", "seed_id_not_allowed", "response_too_large", "internal_error",
+})
+
+
 class BrokerError(Exception):
-    """Only constant, non-sensitive codes may be exposed across the socket."""
+    """Only fixed codes can cross the socket or enter logs, even by accident."""
+    def __init__(self, code):
+        super().__init__(code if isinstance(code, str) and code in ERROR_CODES else "internal_error")
+
+
+def aws_failure_code(error):
+    if isinstance(error, (ConfigParseError, InvalidConfigError, NoCredentialsError,
+            NoRegionError, ParamValidationError, PartialCredentialsError, ProfileNotFound)):
+        return "configuration_error"
+    if isinstance(error, ClientError):
+        code = error.response.get("Error", {}).get("Code")
+        if code in {"AccessDenied", "AccessDeniedException", "UnauthorizedOperation",
+                "InvalidAccessKeyId", "InvalidClientTokenId", "SignatureDoesNotMatch"}:
+            return "access_denied"
+        if code in {"NoSuchBucket", "PermanentRedirect", "AuthorizationHeaderMalformed",
+                "IllegalLocationConstraintException", "InvalidRegion"}:
+            return "configuration_error"
+    return "aws_unavailable"
+
+
+class Admission:
+    """Nonblocking global and per-peer quotas; no queue or caller-chosen IDs."""
+    def __init__(self, total, per_peer):
+        self.total_limit, self.peer_limit = total, per_peer
+        self.lock = threading.Lock()
+        self.total, self.peers = 0, {}
+
+    def acquire(self, peer):
+        with self.lock:
+            count = self.peers.get(peer, 0)
+            if self.total >= self.total_limit or count >= self.peer_limit:
+                return False
+            self.total += 1
+            self.peers[peer] = count + 1
+            return True
+
+    def release(self, peer):
+        with self.lock:
+            self.total -= 1
+            count = self.peers[peer] - 1
+            if count:
+                self.peers[peer] = count
+            else:
+                del self.peers[peer]
+
+
+class RateLimit:
+    """Per-CID token bucket; requests are rejected immediately, never queued."""
+    def __init__(self, rate, burst, clock=time.monotonic):
+        self.rate, self.burst, self.clock = rate, burst, clock
+        self.lock, self.buckets = threading.Lock(), {}
+
+    def take(self, peer):
+        with self.lock:
+            now = self.clock()
+            tokens, previous = self.buckets.get(peer, (self.burst, now))
+            tokens = min(self.burst, tokens + max(0, now - previous) * self.rate)
+            accepted = tokens >= 1
+            self.buckets[peer] = (tokens - 1 if accepted else tokens, now)
+            return accepted
 
 
 @dataclass(frozen=True)
@@ -60,21 +131,23 @@ class Config:
         def required(name):
             value = os.environ.get(name, "")
             if not value or value != value.strip():
-                raise BrokerError("invalid_configuration")
+                raise BrokerError("configuration_error")
             return value
 
         try:
             cid_text = os.environ.get("SWAP_KMS_ALLOWED_CIDS", "")
-            cids = frozenset(int(value.strip()) for value in cid_text.split(",") if value.strip())
+            if len(cid_text) > 4096:
+                raise BrokerError("configuration_error")
+            cids = frozenset(int(value.strip()) for value in cid_text.split(",")) if cid_text else frozenset()
             port = int(os.environ.get("SWAP_KMS_BROKER_PORT", "8004"))
         except ValueError:
-            raise BrokerError("invalid_configuration") from None
-        if (not tcp and not cids) or any(cid <= 3 or cid >= 0xFFFFFFFF for cid in cids):
-            raise BrokerError("invalid_configuration")
+            raise BrokerError("configuration_error") from None
+        if (not tcp and not cids) or len(cids) > 64 or any(cid <= 3 or cid >= 0xFFFFFFFF for cid in cids):
+            raise BrokerError("configuration_error")
         # The measured enclave forwards to this fixed port. Reject an old
         # override rather than silently listening somewhere unreachable.
         if port != 8004:
-            raise BrokerError("invalid_configuration")
+            raise BrokerError("configuration_error")
         config = cls(
             seed_id=required("SWAP_KMS_SEED_ID"),
             bucket=required("SWAP_KMS_S3_BUCKET"),
@@ -84,7 +157,7 @@ class Config:
             port=port,
         )
         if len(config.seed_id.encode("utf-8")) > 256:
-            raise BrokerError("invalid_configuration")
+            raise BrokerError("configuration_error")
         return config
 
 
@@ -121,7 +194,8 @@ class SeedBroker:
         self.credentials_lock = threading.Lock()
         # Timed-out AWS calls cannot be cancelled safely by Python. Retain their
         # slots until they really finish, bounding stalled workers across retries.
-        self.operation_slots = threading.BoundedSemaphore(MAX_CONNECTIONS)
+        self.operation_slots = Admission(MAX_CONNECTIONS, MAX_OPERATIONS_PER_CID)
+        self.operation_rate = RateLimit(OPERATIONS_PER_SECOND, OPERATION_BURST)
         self.s3 = s3 if s3 is not None else self.session.client(
             "s3",
             region_name=config.region,
@@ -140,10 +214,10 @@ class SeedBroker:
         with self.credentials_lock:
             credentials = self.session.get_credentials()
             if credentials is None:
-                raise BrokerError("credentials_unavailable")
+                raise BrokerError("configuration_error")
             frozen = credentials.get_frozen_credentials()
         if not frozen.access_key or not frozen.secret_key:
-            raise BrokerError("credentials_unavailable")
+            raise BrokerError("configuration_error")
         return {
             "access_key_id": frozen.access_key,
             "secret_access_key": frozen.secret_key,
@@ -156,19 +230,19 @@ class SeedBroker:
         except ClientError as error:
             if is_missing_object(error):
                 return None
-            raise BrokerError("storage_unavailable") from None
+            raise BrokerError(aws_failure_code(error)) from None
         body = response["Body"]
         try:
             size = response.get("ContentLength")
             if size is not None and (type(size) is not int or not 0 < size <= MAX_CIPHERTEXT_BYTES):
-                raise BrokerError("invalid_stored_ciphertext")
+                raise BrokerError("invalid_ciphertext")
             blob = body.read(MAX_CIPHERTEXT_BYTES + 1)
             if (
                 not isinstance(blob, bytes)
                 or not 0 < len(blob) <= MAX_CIPHERTEXT_BYTES
                 or (size is not None and len(blob) != size)
             ):
-                raise BrokerError("invalid_stored_ciphertext")
+                raise BrokerError("invalid_ciphertext")
             return blob
         finally:
             body.close()
@@ -191,25 +265,33 @@ class SeedBroker:
                 (412, "PreconditionFailed"),
                 (409, "ConditionalRequestConflict"),
             ):
-                raise BrokerError("storage_unavailable") from None
+                raise BrokerError(aws_failure_code(error)) from None
         committed = self.load()
         if committed is not None:
             return committed
         # No internal retry loop: a new InitializeKey starts by loading the
         # durable winner, including any PUT committed after an earlier timeout.
-        raise BrokerError("storage_conflict")
+        raise BrokerError("aws_unavailable")
 
-    def dispatch(self, request):
+    def validate_request(self, request):
         if not isinstance(request, dict):
             raise BrokerError("invalid_request")
         operation = request.get("op")
         if operation == "credentials" and set(request) == {"op"}:
-            return self.credentials()
+            return
         expected = {"op", "seed_id", "ciphertext"} if operation == "create" else {"op", "seed_id"}
         if operation not in ("load", "create") or set(request) != expected:
             raise BrokerError("invalid_request")
         if request["seed_id"] != self.config.seed_id:
             raise BrokerError("seed_id_not_allowed")
+        if operation == "create":
+            decode_ciphertext(request["ciphertext"])
+
+    def dispatch(self, request):
+        self.validate_request(request)
+        operation = request["op"]
+        if operation == "credentials":
+            return self.credentials()
         if operation == "load":
             ciphertext = self.load()
             return {"ciphertext": None if ciphertext is None else encode_ciphertext(ciphertext)}
@@ -220,15 +302,23 @@ class SeedBroker:
             return self.dispatch(request)
         except BrokerError as error:
             return {"error": str(error)}
-        except (BotoCoreError, ClientError):
-            return {"error": "aws_unavailable"}
+        except (BotoCoreError, ClientError) as error:
+            return {"error": aws_failure_code(error)}
         except Exception:
             # Never serialize AWS errors, SDK tracebacks, request data, or creds.
             return {"error": "internal_error"}
 
-    def response(self, request):
-        if not self.operation_slots.acquire(blocking=False):
+    def response(self, request, peer=0):
+        try:
+            self.validate_request(request)
+        except BrokerError as error:
+            return {"error": str(error)}
+        if not self.operation_slots.acquire(peer):
             LOGGER.warning("operation_capacity_exhausted")
+            return {"error": "broker_busy"}
+        if not self.operation_rate.take(peer):
+            self.operation_slots.release(peer)
+            LOGGER.warning("operation_rate_exhausted")
             return {"error": "broker_busy"}
         result = queue.Queue(maxsize=1)
 
@@ -236,12 +326,12 @@ class SeedBroker:
             try:
                 result.put(self._response(request))
             finally:
-                self.operation_slots.release()
+                self.operation_slots.release(peer)
 
         try:
             threading.Thread(target=execute, daemon=True).start()
         except Exception:
-            self.operation_slots.release()
+            self.operation_slots.release(peer)
             return {"error": "internal_error"}
         try:
             return result.get(timeout=OPERATION_TIMEOUT_SECONDS)
@@ -286,10 +376,10 @@ def read_request(connection):
         raise BrokerError("invalid_request") from None
 
 
-def handle_connection(connection, broker):
+def handle_connection(connection, broker, peer=0):
     with connection:
         try:
-            response = broker.response(read_request(connection))
+            response = broker.response(read_request(connection), peer=peer)
         except BrokerError as error:
             response = {"error": str(error)}
         except (OSError, ValueError):
@@ -309,13 +399,13 @@ def peer_allowed(peer, config, tcp=False):
 
 
 def serve(listener, broker, tcp=False):
-    slots = threading.BoundedSemaphore(MAX_CONNECTIONS)
+    slots = Admission(MAX_CONNECTIONS, MAX_CONNECTIONS_PER_CID)
 
-    def worker(connection):
+    def worker(connection, peer):
         try:
-            handle_connection(connection, broker)
+            handle_connection(connection, broker, peer=peer)
         finally:
-            slots.release()
+            slots.release(peer)
 
     while True:
         try:
@@ -334,16 +424,19 @@ def serve(listener, broker, tcp=False):
         if not peer_allowed(peer, broker.config, tcp):
             connection.close()
             continue
-        if not slots.acquire(blocking=False):
+        peer = peer[0]
+        if not slots.acquire(peer):
             LOGGER.warning("connection_capacity_exhausted")
             connection.close()
             continue
         try:
-            threading.Thread(target=worker, args=(connection,), daemon=True).start()
+            threading.Thread(target=worker, args=(connection, peer), daemon=True).start()
         except Exception:
             connection.close()
-            slots.release()
-            raise
+            slots.release(peer)
+            LOGGER.warning("connection_worker_failed")
+            time.sleep(0.1)
+            continue
 
 
 def main():
@@ -360,7 +453,7 @@ def main():
             host, port_text = args.tcp.rsplit(":", 1)
             port = int(port_text)
             if host != "127.0.0.1" or not 1 <= port <= 65535:
-                raise BrokerError("invalid_tcp_address")
+                raise BrokerError("configuration_error")
             listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             # Permit immediate development-process restart while accepted TCP
             # connections are in TIME_WAIT. The production vsock path is unchanged.

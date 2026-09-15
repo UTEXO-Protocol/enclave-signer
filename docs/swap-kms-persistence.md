@@ -139,7 +139,7 @@ with these names for swap image variants.
 | `SWAP_KMS_KEY_ARN` | Full ARN of a customer managed symmetric `ENCRYPT_DECRYPT` KMS key; no alias. |
 | `SWAP_KMS_REGION` | Region of that key and its HTTPS endpoint. |
 | `SWAP_KMS_SEED_ID` | Stable identity, unique to this logical swap signer: 1–128 ASCII letters, digits, dots, underscores, or hyphens. |
-| `SWAP_KMS_EXPECTED_EVM_ADDRESS` | Optional on first startup; pin the verified identity (`0x` plus 40 hex digits) before funding. When set, missing ciphertext or recovered keys that differ cause initialization to fail without creating a replacement seed. |
+| `SWAP_KMS_EXPECTED_EVM_ADDRESS` | Optional on first startup; pin the verified identity before funding. Runtime accepts 40 hex digits with or without `0x`; release approvals require the canonical `0x` form. When set, missing ciphertext or recovered keys that differ cause initialization to fail without creating a replacement seed. |
 
 Startup always loads the configured S3 object first. Existing ciphertext is
 decrypted and reused, whether or not an expected address is configured. Only a
@@ -158,11 +158,18 @@ SWAP_KMS_ALLOWED_CIDS=18
 ```
 
 Set the actual region and assigned swap enclave CID; multiple authorized swap
-CIDs can be comma-separated. The seed ID must match the EIF. The broker fixes
+CIDs can be comma-separated (at most 64). The same allowlist controls both the
+broker and TLS relay. The seed ID must match the EIF. The broker fixes
 one bucket/key for its lifetime and rejects requests naming a different seed
 ID. Use one broker configuration per logical signer identity; do not point
 independent signer identities at one object. The supplied units cover one
-broker on one parent.
+broker on one parent. The broker admits at most 16 connections globally and
+four per CID, plus at most 16 AWS-operation workers globally and two per CID.
+Timed-out AWS workers retain their quota until they actually exit. A per-CID
+token bucket permits four AWS-dispatch operations per second with an initial
+burst of eight; excess requests receive a fixed busy response before AWS access.
+There is no waiting queue. These limits keep one allowlisted CID from occupying
+all broker slots or issuing an unlimited rate of S3 calls.
 
 Use a dedicated EC2 instance role with IMDSv2. Boto3 obtains and refreshes its
 credentials through the normal provider chain. Do not place static access keys
@@ -186,6 +193,24 @@ boundary; the CID allowlist only reduces local access to this narrow role.
 | --- | --- | --- |
 | SDK helper, direct vsock | CID 3, port `8003` | Blind TLS relay to `kms.<region>.amazonaws.com:443` |
 | `127.0.0.1:3446` | CID 3, port `8004` | Credential and ciphertext broker |
+
+The KMS listener is `utexo-swap-kms-relay.socket`: systemd accepts at most 16
+connections globally and two per source CID. A small
+[guard](../deploy/swap-kms-relay-guard.py) checks the accepted socket's family,
+local port and kernel-reported peer CID before executing distro `socat` to copy
+bytes to the single regional KMS endpoint. Its environment is cleared before
+exec. Each connection has a 15-second hard lifetime, a 12-second socat idle
+limit, and a three-second TCP connect limit. Per-instance and aggregate cgroup
+limits bound tasks, memory and descriptors; no TLS is terminated here.
+
+The official AWS proxy's
+[allowlist restricts destinations](https://github.com/aws/aws-nitro-enclaves-cli/blob/main/vsock_proxy/README.md),
+not caller CIDs. It is therefore replaced in this deployment by the guarded
+socket-activated relay. [systemd 252's source](https://github.com/systemd/systemd/blob/v252/src/core/socket.c)
+implements per-source admission by CID for VSOCK. The guard checks the running
+manager version and fails closed below 252 or when its socket contract is
+unavailable. CID reuse remains possible; the KMS policy independently checks
+attestation and the broker still grants full dedicated-role credentials.
 
 Keep the KMS relay separate from the existing EVM RPC/nginx path. Do not
 terminate KMS TLS on the parent. This endpoint template targets the standard
@@ -327,7 +352,11 @@ the tests. The tool requires every item and restore-only policy authority.
 
 ## Parent installation
 
-On the Nitro parent, from a checked-out release of this repository:
+The Nitro parent requires systemd 252 or newer, distro `socat` 1.7.4.4 or newer
+at `/usr/bin/socat`, and Python 3.10 or newer. Install the supported distro packages
+before deploying these units. The guard validates the running systemd manager,
+not just an installed client version. On the Nitro parent, from a checked-out
+release of this repository:
 
 ```bash
 sudo install -d -m 0755 /opt/utexo-swap-kms /etc/utexo /etc/nitro_enclaves
@@ -335,8 +364,10 @@ sudo python3.11 -m venv /opt/utexo-swap-kms/venv
 sudo /opt/utexo-swap-kms/venv/bin/pip install -r deploy/requirements-swap-kms.txt
 sudo install -m 0644 deploy/swap-seed-broker.py /opt/utexo-swap-kms/swap-seed-broker.py
 sudo install -m 0644 deploy/systemd/utexo-swap-seed-broker.service /etc/systemd/system/
-sudo install -m 0644 deploy/systemd/vsock-proxy-kms.service /etc/systemd/system/
-sudo install -m 0644 deploy/systemd/vsock-proxy-kms.yaml /etc/nitro_enclaves/
+sudo install -m 0644 deploy/swap-kms-relay-guard.py /opt/utexo-swap-kms/swap-kms-relay-guard.py
+sudo install -m 0644 deploy/systemd/utexo-swap-kms-relay.socket /etc/systemd/system/
+sudo install -m 0644 deploy/systemd/utexo-swap-kms-relay@.service /etc/systemd/system/
+sudo install -m 0644 deploy/systemd/utexo-swap-kms-relay.slice /etc/systemd/system/
 ```
 
 Create the broker environment file shown above with mode `0600`, owned by root.
@@ -344,14 +375,27 @@ The broker dependency lock requires Python 3.10 or newer; install a supported
 Python version (the example uses 3.11). Pip installs the complete exact-version,
 SHA256-verified wheel lock, including transitive dependencies. Update that lock
 only together with broker and custody E2E validation.
-Replace `REPLACE_AWS_REGION` in **both** installed KMS proxy files with the EIF's
-region. Ensure the installed `vsock-proxy` path is `/usr/bin/vsock-proxy` or
-adjust the unit for that host. Permit outbound HTTPS to regional KMS and S3,
-and instance-role access to IMDS.
+The relay derives the regional KMS hostname from `AWS_REGION` in this same
+file; it must match the EIF region. Permit outbound HTTPS to regional KMS and
+S3, instance-role access to IMDS, and read-only access to the local systemd
+manager for its version check.
+
+When upgrading, stop and disable the previous unrestricted KMS proxy before
+opening the new socket. This includes the dedicated old unit and AWS's default
+KMS proxy when installed. Remove any additional forwarding route to KMS that
+would bypass CID admission; an open second port defeats that restriction.
 
 ```bash
+for unit in vsock-proxy-kms.service nitro-enclaves-vsock-proxy.service; do
+  if systemctl cat "$unit" >/dev/null 2>&1; then
+    sudo systemctl disable --now "$unit"
+  fi
+done
 sudo systemctl daemon-reload
-sudo systemctl enable --now vsock-proxy-kms.service utexo-swap-seed-broker.service
+sudo systemd-analyze verify /etc/systemd/system/utexo-swap-kms-relay.socket \
+  /etc/systemd/system/utexo-swap-kms-relay@.service \
+  /etc/systemd/system/utexo-swap-kms-relay.slice
+sudo systemctl enable --now utexo-swap-kms-relay.socket utexo-swap-seed-broker.service
 ```
 
 Start these services before issuing enclave initialization. The existing host
@@ -360,8 +404,9 @@ or invalid required measured configuration prevents swap process startup. The
 expected address is optional for a new signer; an invalid nonempty pin is
 rejected. An unavailable broker/KMS/storage service makes
 initialization fail; the operator can restore the service and retry `init`.
-Both supplied services run as dynamic unprivileged users with empty capability
-sets. Ports 8003/8004 are unprivileged; do not run the relay as root to work around
+The broker and relay connection processes run as dynamic unprivileged users
+with empty capability sets. Ports 8003/8004 are unprivileged; do not run the
+relay as root to work around
 an installation or file-read-permission problem.
 
 Initialization has one aggregate custody deadline of 25 seconds, within the
@@ -374,7 +419,20 @@ until it actually exits, preventing retries from creating unlimited workers.
 Timeouts leave the enclave uninitialized. A conditional PUT already in flight
 can still commit after a timeout; retry `init` after connectivity recovers so the
 next load recovers that durable winner. Never delete the object or generate a
-replacement seed to resolve a timeout.
+replacement seed to resolve a timeout. Broker capacity/rate refusals and AWS
+unavailability are retryable with backoff. Fixed configuration/access-denied
+categories require checking measured settings or permissions; invalid stored
+ciphertext requires recovery investigation. Only fixed categories are exposed,
+never provider error text, signed requests, or credentials. These coarse
+categories intentionally reveal configuration/availability state to operators
+and the parent, which already observes storage requests and initialization;
+they do not reveal seed material or confidential provider diagnostics. Empty
+session tokens remain valid for AWS credentials that do not use a session token.
+
+The concurrency and rate limits constrain these local custody services; they
+cannot prevent the parent operator from stopping an enclave or exhausting host
+resources elsewhere. Before production use, verify allowed and disallowed CIDs,
+per-CID saturation and a second CID's progress on the actual Nitro parent.
 
 ## Bootstrap, restart, and upgrade
 

@@ -1,0 +1,37 @@
+[Unit]
+Description=RGB swaps authorized KMS TLS relay connection
+Wants=network-online.target
+After=network-online.target
+CollectMode=inactive-or-failed
+
+[Service]
+Type=exec
+DynamicUser=yes
+EnvironmentFile=/etc/utexo/swap-kms.env
+Environment=PYTHONDONTWRITEBYTECODE=1
+ExecStart=/opt/utexo-swap-kms/venv/bin/python /opt/utexo-swap-kms/swap-kms-relay-guard.py
+StandardInput=socket
+StandardOutput=socket
+StandardError=journal
+# Hard wall-time bound includes guard startup, DNS, connect, idle and trickle.
+RuntimeMaxSec=15
+TimeoutStopSec=1
+KillMode=control-group
+Slice=utexo-swap-kms-relay.slice
+TasksMax=4
+MemoryMax=32M
+LimitNOFILE=32
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+LockPersonality=yes
+RestrictSUIDSGID=yes
+CapabilityBoundingSet=
+RestrictAddressFamilies=AF_VSOCK AF_INET AF_INET6 AF_UNIX
+UMask=0077
+LogRateLimitIntervalSec=30s
+LogRateLimitBurst=20
