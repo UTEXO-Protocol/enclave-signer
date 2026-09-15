@@ -230,19 +230,20 @@ pub fn validate_rgb_psbt_sats(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bitcoin::bip32::{ChildNumber, DerivationPath};
+    use bitcoin::bip32::{ChildNumber, DerivationPath, Fingerprint};
     use bitcoin::blockdata::opcodes::all::{OP_CHECKSIG, OP_CHECKSIGADD, OP_NUMEQUAL};
     use bitcoin::blockdata::script::Builder as ScriptBuilder;
     use bitcoin::hashes::Hash;
     use bitcoin::psbt::Psbt;
     use bitcoin::secp256k1::{Keypair, Secp256k1, SecretKey};
-    use bitcoin::taproot::{LeafVersion, TapLeafHash, TaprootBuilder};
+    use bitcoin::taproot::{ControlBlock, LeafVersion, TapLeafHash, TaprootBuilder};
     use bitcoin::{
         Amount, Network, OutPoint, ScriptBuf, Sequence, Transaction, TxIn, TxOut, Txid,
         WPubkeyHash, Witness, XOnlyPublicKey,
     };
 
     use crate::keys::AccountType;
+    use crate::networks::rgb::signing::taproot::find_taproot_sign_jobs;
 
     /// NUMS internal key - unspendable key-path, as the bridge's taproot
     /// multisig addresses use.
@@ -704,5 +705,272 @@ mod tests {
         // Unit tests are always cfg(test): the dev fallback returns Ok.
         #[cfg(not(all(feature = "rgb-validation", not(test))))]
         assert!(result.is_ok());
+    }
+
+    // --- send-RGB budget: exempted value must come from the same script ---
+
+    /// The enclave's Colored key at m/86'/827167'/0'/0/0 and that path.
+    fn our_colored(keys: &KeyManager) -> (XOnlyPublicKey, DerivationPath) {
+        let secp = Secp256k1::new();
+        let child = [
+            ChildNumber::Normal { index: 0 },
+            ChildNumber::Normal { index: 0 },
+        ];
+        let sk = keys.derive_btc_child(AccountType::Colored, &child).unwrap();
+        let xonly = XOnlyPublicKey::from_keypair(&Keypair::from_secret_key(&secp, &sk)).0;
+        let path = DerivationPath::from(vec![
+            ChildNumber::from_hardened_idx(86).unwrap(),
+            ChildNumber::from_hardened_idx(827167).unwrap(),
+            ChildNumber::from_hardened_idx(0).unwrap(),
+            child[0],
+            child[1],
+        ]);
+        (xonly, path)
+    }
+
+    /// P2TR script committing to `leaves` under `internal`, plus each leaf's
+    /// control block.
+    fn tree(
+        internal: XOnlyPublicKey,
+        leaves: &[ScriptBuf],
+    ) -> (ScriptBuf, Vec<(ControlBlock, ScriptBuf)>) {
+        let secp = Secp256k1::new();
+        let info = TaprootBuilder::with_huffman_tree(leaves.iter().map(|l| (1, l.clone())))
+            .unwrap()
+            .finalize(&secp, internal)
+            .unwrap();
+        let controls = leaves
+            .iter()
+            .map(|leaf| {
+                let cb = info
+                    .control_block(&(leaf.clone(), LeafVersion::TapScript))
+                    .unwrap();
+                (cb, leaf.clone())
+            })
+            .collect();
+        (
+            ScriptBuf::new_p2tr(&secp, internal, info.merkle_root()),
+            controls,
+        )
+    }
+
+    /// A PSBT input: its prevout, the leaves revealed for it and the enclave
+    /// key origins claimed for it.
+    #[derive(Clone)]
+    struct Input {
+        spk: ScriptBuf,
+        sats: u64,
+        tap_scripts: Vec<(ControlBlock, ScriptBuf)>,
+        origins: Vec<(
+            XOnlyPublicKey,
+            Vec<TapLeafHash>,
+            Fingerprint,
+            DerivationPath,
+        )>,
+    }
+
+    /// An input whose committed `leaves` each hold the enclave's Colored key in
+    /// a signature slot, with every metadata gate valid.
+    fn colored_input(
+        keys: &KeyManager,
+        internal: XOnlyPublicKey,
+        sats: u64,
+        leaves: &[ScriptBuf],
+    ) -> Input {
+        let (our, path) = our_colored(keys);
+        let (spk, tap_scripts) = tree(internal, leaves);
+        let hashes = leaves
+            .iter()
+            .map(|l| TapLeafHash::from_script(l, LeafVersion::TapScript))
+            .collect();
+        Input {
+            spk,
+            sats,
+            tap_scripts,
+            origins: vec![(our, hashes, *keys.master_fingerprint(), path)],
+        }
+    }
+
+    /// Bridge input: the 2-of-3 quorum leaf under the NUMS internal key.
+    fn bridge_input(keys: &KeyManager, sats: u64) -> Input {
+        let (our, _) = our_colored(keys);
+        let leaf = multi_a_2_of_3(&[our, foreign_xonly(0xA1), foreign_xonly(0xA2)]);
+        let nums = XOnlyPublicKey::from_slice(&NUMS_INTERNAL).unwrap();
+        colored_input(keys, nums, sats, &[leaf])
+    }
+
+    /// Auxiliary input the attacker funds and can spend alone through its
+    /// internal key; its `leaves` still name the enclave key.
+    fn auxiliary_input(keys: &KeyManager, sats: u64, leaves: &[ScriptBuf]) -> Input {
+        colored_input(keys, foreign_xonly(0xA7), sats, leaves)
+    }
+
+    fn psbt_with(inputs: &[Input], outputs: &[(ScriptBuf, u64)]) -> Psbt {
+        let unsigned_tx = Transaction {
+            version: bitcoin::transaction::Version(2),
+            lock_time: bitcoin::absolute::LockTime::ZERO,
+            input: (0..inputs.len())
+                .map(|i| TxIn {
+                    previous_output: OutPoint {
+                        txid: Txid::from_raw_hash(bitcoin::hashes::sha256d::Hash::from_byte_array(
+                            [0x10 + i as u8; 32],
+                        )),
+                        vout: 0,
+                    },
+                    script_sig: ScriptBuf::new(),
+                    sequence: Sequence::MAX,
+                    witness: Witness::new(),
+                })
+                .collect(),
+            output: outputs
+                .iter()
+                .map(|(spk, sat)| TxOut {
+                    value: Amount::from_sat(*sat),
+                    script_pubkey: spk.clone(),
+                })
+                .collect(),
+        };
+        let mut psbt = Psbt::from_unsigned_tx(unsigned_tx).unwrap();
+        for (i, input) in inputs.iter().enumerate() {
+            psbt.inputs[i].witness_utxo = Some(TxOut {
+                value: Amount::from_sat(input.sats),
+                script_pubkey: input.spk.clone(),
+            });
+            for (cb, leaf) in &input.tap_scripts {
+                psbt.inputs[i]
+                    .tap_scripts
+                    .insert(cb.clone(), (leaf.clone(), LeafVersion::TapScript));
+            }
+            for (key, hashes, fp, path) in &input.origins {
+                psbt.inputs[i]
+                    .tap_key_origins
+                    .insert(*key, (hashes.clone(), (*fp, path.clone())));
+            }
+        }
+        psbt
+    }
+
+    /// A qualifying auxiliary input may exempt no more than the value it
+    /// brought in under its own script; bridge value routed to that script
+    /// stays inside the budget.
+    #[test]
+    fn bfa_btc_custody_uses_real_input_provenance() {
+        let keys = km();
+        let (our, path) = our_colored(&keys);
+        let cfg = rgb_cfg(1_000);
+        let a = |sats| bridge_input(&keys, sats);
+        let bridge_spk = a(0).spk;
+        let atk_leaf = multi_a_2_of_3(&[our, foreign_xonly(0xC1), foreign_xonly(0xC2)]);
+        let b = auxiliary_input(&keys, 1_000, std::slice::from_ref(&atk_leaf));
+        let b_spk = b.spk.clone();
+
+        // Sorted input indices the raw job finder qualifies, one per job.
+        let qualified = |psbt: &Psbt| {
+            let mut v: Vec<_> = find_taproot_sign_jobs(psbt, keys.master_fingerprint(), &keys)
+                .into_iter()
+                .map(|job| job.input_index)
+                .collect();
+            v.sort_unstable();
+            v
+        };
+        let accept = |psbt: &Psbt| validate_rgb_psbt_sats(psbt, &cfg, &keys).unwrap();
+        let reject = |psbt: &Psbt, unowned: u64| {
+            let err = validate_rgb_psbt_sats(psbt, &cfg, &keys).unwrap_err();
+            assert!(matches!(err, EnclaveError::CrossCheck(_)), "{err}");
+            assert!(
+                err.to_string().contains(&format!("pays {unowned} sats")),
+                "expected {unowned} unowned sats, got: {err}"
+            );
+        };
+
+        // Bridge value (A, 5_000_000) routed to the auxiliary script (B,
+        // 1_000), 1_000 sats fee: B exempts its own 1_000 sats and no more.
+        let attack = psbt_with(&[a(5_000_000), b.clone()], &[(b_spk.clone(), 5_000_000)]);
+        assert_eq!(qualified(&attack), [0, 1]);
+        reject(&attack, 4_999_000);
+
+        // Healthy: recipient dust plus change back to the bridge script.
+        accept(&psbt_with(
+            &[a(5_000_000)],
+            &[(foreign_address(), 1_000), (bridge_spk.clone(), 4_998_000)],
+        ));
+
+        // B failing a metadata gate contributes nothing.
+        let mut wrong_fp = b.clone();
+        wrong_fp.origins[0].2 = Fingerprint::from([0xDE, 0xAD, 0xBE, 0xEF]);
+        let mut wrong_cb = b.clone();
+        wrong_cb.tap_scripts = tree(foreign_xonly(0xC9), std::slice::from_ref(&atk_leaf)).1;
+        for bad in [wrong_fp, wrong_cb] {
+            let psbt = psbt_with(&[a(5_000_000), bad], &[(b_spk.clone(), 5_000_000)]);
+            assert_eq!(qualified(&psbt), [0]);
+            reject(&psbt, 5_000_000);
+        }
+
+        // Output-only metadata for B's script, B not an input: no allowance.
+        let mut psbt = psbt_with(&[a(5_000_000)], &[(b_spk.clone(), 4_999_000)]);
+        psbt.outputs[0].tap_internal_key = Some(foreign_xonly(0xA7));
+        psbt.outputs[0].tap_tree = Some(
+            TaprootBuilder::new()
+                .add_leaf(0, atk_leaf.clone())
+                .unwrap()
+                .try_into()
+                .unwrap(),
+        );
+        psbt.outputs[0].tap_key_origins.insert(
+            our,
+            (
+                vec![TapLeafHash::from_script(&atk_leaf, LeafVersion::TapScript)],
+                (*keys.master_fingerprint(), path),
+            ),
+        );
+        reject(&psbt, 4_999_000);
+
+        // Several outputs to B's script share B's single allowance.
+        reject(
+            &psbt_with(
+                &[a(5_000_000), b.clone()],
+                &[(b_spk.clone(), 3_000_000), (b_spk.clone(), 2_000_000)],
+            ),
+            4_999_000,
+        );
+
+        // Two auxiliary inputs on the same script each add their value once.
+        reject(
+            &psbt_with(
+                &[a(5_000_000), b.clone(), b.clone()],
+                &[(b_spk.clone(), 5_000_000)],
+            ),
+            4_998_000,
+        );
+
+        // One input with two qualifying leaves: two jobs, one allowance.
+        let two_leaves = auxiliary_input(
+            &keys,
+            1_000,
+            &[
+                atk_leaf.clone(),
+                multi_a_2_of_3(&[our, foreign_xonly(0xC3), foreign_xonly(0xC4)]),
+            ],
+        );
+        let psbt = psbt_with(
+            &[a(5_000_000), two_leaves.clone()],
+            &[(two_leaves.spk.clone(), 5_000_000)],
+        );
+        assert_eq!(qualified(&psbt), [0, 1, 1]);
+        reject(&psbt, 4_999_000);
+
+        // Boundary: excess over B's allowance equal to the budget passes, one
+        // sat more fails.
+        accept(&psbt_with(
+            &[a(5_000_000), b.clone()],
+            &[(b_spk.clone(), 2_000), (bridge_spk.clone(), 4_998_000)],
+        ));
+        reject(
+            &psbt_with(
+                &[a(5_000_000), b],
+                &[(b_spk, 2_001), (bridge_spk, 4_997_999)],
+            ),
+            1_001,
+        );
     }
 }
