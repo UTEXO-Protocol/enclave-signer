@@ -252,11 +252,11 @@ fn dispatch(request: EnclaveRequest, ctx: &ServerContext) -> EnclaveResponse {
         }
         Some(Request::GetClone(req)) => {
             tracing::info!("request: GetClone");
-            handle_get_clone(&ctx.state, req)
+            handle_get_clone(ctx, req)
         }
         Some(Request::SetClone(req)) => {
             tracing::info!("request: SetClone");
-            handle_set_clone(&ctx.state, req)
+            handle_set_clone(ctx, req)
         }
         Some(Request::SubmitHeaders(req)) => {
             tracing::info!(
@@ -1052,6 +1052,39 @@ fn canonical_pubkey_bundle(keys: &PublicKeysResponse) -> Vec<u8> {
     out
 }
 
+/// Clone response v1: exact identity/policy equality, tied to this sealed response.
+/// The version is inside signed NSM user_data; no protobuf relay changes needed.
+/// All inputs are public. Fixed-size transcript fields follow the bundle hash.
+fn clone_commitment(
+    bundle: &PublicKeysResponse,
+    policy: &[u8],
+    requester: &[u8; 32],
+    donor: &[u8; 32],
+    ciphertext: &[u8],
+) -> [u8; 36] {
+    use sha2::{Digest, Sha256};
+    let mut hash = Sha256::new();
+    hash.update(b"utexo/clone-response/v1\0");
+    hash.update(Sha256::digest(canonical_pubkey_bundle(bundle)));
+    hash.update(Sha256::digest(policy));
+    hash.update(requester);
+    hash.update(donor);
+    hash.update(Sha256::digest(ciphertext));
+    let mut out = [0u8; 36];
+    out[..4].copy_from_slice(&1u32.to_be_bytes());
+    out[4..].copy_from_slice(&hash.finalize());
+    out
+}
+
+fn verify_clone_commitment(actual: Option<&[u8]>, expected: &[u8; 36]) -> Result<()> {
+    if actual != Some(expected.as_slice()) {
+        return Err(EnclaveError::Attestation(
+            "clone response version/identity/policy/transcript mismatch".into(),
+        ));
+    }
+    Ok(())
+}
+
 fn handle_get_attested_public_key(
     ctx: &ServerContext,
     req: GetAttestedPublicKeyRequest,
@@ -1500,7 +1533,8 @@ fn handle_initiate_cloning(
 /// attestation, matches PCRs, records the nonce against replay, checks
 /// pubkey + digest binding, verifies the digest against the configured
 /// donor-side cloning secret, and only then seals the seed.
-fn handle_get_clone(state: &EnclaveState, req: GetCloneRequest) -> Result<EnclaveResponse> {
+fn handle_get_clone(ctx: &ServerContext, req: GetCloneRequest) -> Result<EnclaveResponse> {
+    let state = &ctx.state;
     let req_cluster_pk: [u8; 20] = req.cluster_public_key.as_slice().try_into().map_err(|_| {
         EnclaveError::InvalidRequest(format!(
             "cluster_public_key must be 20 bytes, got {}",
@@ -1608,7 +1642,16 @@ fn handle_get_clone(state: &EnclaveState, req: GetCloneRequest) -> Result<Enclav
     //    just produced so the requester can be sure this response is
     //    not an old one replayed by the parent.
     let donor_nonce = fresh_nonce()?;
-    let donor_attestation = attestation::get_attestation(&donor_nonce, Some(&donor_pubkey), None)?;
+    let bundle = build_public_keys_response(state.get_keys()?, &ctx.bridge_config);
+    let commitment = clone_commitment(
+        &bundle,
+        &ctx.policy.commitment_bytes(),
+        &req_encryption_pk,
+        &donor_pubkey,
+        &encrypted_seed,
+    );
+    let donor_attestation =
+        attestation::get_attestation(&donor_nonce, Some(&donor_pubkey), Some(&commitment))?;
 
     // Seal + donor attestation succeeded: keep the nonce recorded.
     reservation.commit();
@@ -1636,8 +1679,9 @@ fn handle_get_clone(state: &EnclaveState, req: GetCloneRequest) -> Result<Enclav
 
 /// Requester side. Transitions `Cloning -> Active`. Verifies the donor's
 /// attestation, unseals the ciphertext, and commits the derived keys
-/// only if the resulting EVM address matches `cluster_public_key`.
-fn handle_set_clone(state: &EnclaveState, req: SetCloneRequest) -> Result<EnclaveResponse> {
+/// only if the EVM target and signed full identity/policy/transcript match.
+fn handle_set_clone(ctx: &ServerContext, req: SetCloneRequest) -> Result<EnclaveResponse> {
+    let state = &ctx.state;
     let donor_pubkey: [u8; 32] = req.donor_pubkey.as_slice().try_into().map_err(|_| {
         EnclaveError::InvalidRequest(format!(
             "donor_pubkey must be 32 bytes, got {}",
@@ -1686,6 +1730,15 @@ fn handle_set_clone(state: &EnclaveState, req: SetCloneRequest) -> Result<Enclav
         if km.evm_address() != &session.cluster_public_key {
             return Err(EnclaveError::IdentityMismatch);
         }
+        let bundle = build_public_keys_response(EnclaveState::key_info(&km), &ctx.bridge_config);
+        let expected = clone_commitment(
+            &bundle,
+            &ctx.policy.commitment_bytes(),
+            &session.session.public_key(),
+            &donor_pubkey,
+            &req.encrypted_seed,
+        );
+        verify_clone_commitment(verified.user_data.as_deref(), &expected)?;
         cluster_public_key = session.cluster_public_key;
         Ok(km)
     })?;
@@ -1912,5 +1965,16 @@ mod tests {
         limiter
             .check(10, t0)
             .expect("backwards clock resets window");
+    }
+
+    #[test]
+    fn clone_commitment_requires_the_signed_identity_transcript() {
+        let expected = [0x5a; 36];
+        assert!(verify_clone_commitment(Some(&expected), &expected).is_ok());
+        assert!(verify_clone_commitment(None, &expected).is_err());
+
+        let mut altered = expected;
+        altered[35] ^= 1;
+        assert!(verify_clone_commitment(Some(&altered), &expected).is_err());
     }
 }
