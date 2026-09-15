@@ -63,13 +63,16 @@ impl SeedKms for SwapKmsClient {
 fn recover_seed(
     store: &impl SeedStore,
     kms: &impl SeedKms,
-    allow_create: bool,
+    expected_evm_address: Option<[u8; 20]>,
     deadline: Instant,
 ) -> Result<Zeroizing<[u8; 64]>> {
     remaining_until(deadline)?;
+    // Only an explicit missing-object response permits first-use creation.
+    // An expected identity makes missing ciphertext a recovery failure, so
+    // neither KMS generation nor persistence can replace a lost pinned seed.
     let ciphertext = match store.load(deadline)? {
         Some(blob) => blob,
-        None if allow_create => {
+        None if expected_evm_address.is_none() => {
             remaining_until(deadline)?;
             let blob = kms.generate(deadline)?;
             validate_ciphertext(&blob)?;
@@ -78,7 +81,7 @@ fn recover_seed(
         }
         None => {
             return Err(failure(
-                "saved seed is missing; restore never creates a new identity",
+                "saved seed is missing; a pinned identity cannot be replaced",
             ))
         }
     };
@@ -101,7 +104,6 @@ fn validate_ciphertext(blob: &[u8]) -> Result<()> {
 pub struct PersistentSwapSeed {
     config: SwapKmsConfig,
     broker: SeedBroker,
-    allow_create: bool,
     expected_evm_address: Option<[u8; 20]>,
 }
 
@@ -109,12 +111,6 @@ impl PersistentSwapSeed {
     /// These nonsecret values belong in the measured EIF configuration.
     pub fn from_env() -> Result<Self> {
         let config = SwapKmsConfig::from_env()?;
-        let allow_create = match std::env::var("SWAP_KMS_ALLOW_CREATE") {
-            Err(std::env::VarError::NotPresent) => false,
-            Ok(value) if value == "0" => false,
-            Ok(value) if value == "1" => true,
-            _ => return Err(failure("SWAP_KMS_ALLOW_CREATE must be 0 or 1")),
-        };
         let expected_evm_address = match std::env::var("SWAP_KMS_EXPECTED_EVM_ADDRESS") {
             Err(std::env::VarError::NotPresent) => None,
             Ok(value) if value.is_empty() => None,
@@ -126,7 +122,6 @@ impl PersistentSwapSeed {
             ),
             Err(_) => return Err(failure("invalid expected address configuration")),
         };
-        validate_mode(allow_create, expected_evm_address)?;
         let broker = SeedBroker {
             address: SocketAddr::from((Ipv4Addr::LOCALHOST, BROKER_LOCAL_PORT)),
             seed_id: config.seed_id.clone(),
@@ -134,7 +129,6 @@ impl PersistentSwapSeed {
         Ok(Self {
             config,
             broker,
-            allow_create,
             expected_evm_address,
         })
     }
@@ -145,22 +139,8 @@ impl SwapSeedSource for PersistentSwapSeed {
         // Refresh short-lived instance-role credentials on every attempt.
         let credentials = self.broker.credentials(deadline)?;
         let kms = SwapKmsClient::new(self.config.clone(), credentials, network)?;
-        let seed = recover_seed(&self.broker, &kms, self.allow_create, deadline)?;
+        let seed = recover_seed(&self.broker, &kms, self.expected_evm_address, deadline)?;
         restore_keys(seed, network, self.expected_evm_address)
-    }
-}
-
-fn validate_mode(allow_create: bool, expected: Option<[u8; 20]>) -> Result<()> {
-    // Never regenerate an identity whose ciphertext was lost, and never let an
-    // untrusted storage relay substitute a different valid same-context blob.
-    match (allow_create, expected) {
-        (true, Some(_)) => Err(failure(
-            "bootstrap cannot be combined with an expected existing address",
-        )),
-        (false, None) => Err(failure(
-            "restore requires SWAP_KMS_EXPECTED_EVM_ADDRESS to pin the saved identity",
-        )),
-        _ => Ok(()),
     }
 }
 
@@ -274,6 +254,7 @@ mod tests {
     #[derive(Default)]
     struct Store {
         saved: RefCell<Option<Vec<u8>>>,
+        creates: Cell<u32>,
         fail_read: Cell<bool>,
         fail_write: Cell<bool>,
         race_winner: Option<Vec<u8>>,
@@ -286,6 +267,7 @@ mod tests {
             Ok(self.saved.borrow().clone())
         }
         fn create(&self, blob: &[u8], _deadline: Instant) -> Result<Vec<u8>> {
+            self.creates.set(self.creates.get() + 1);
             if self.fail_write.get() {
                 return Err(failure("write failed"));
             }
@@ -318,14 +300,6 @@ mod tests {
     }
 
     #[test]
-    fn restore_requires_an_identity_pin_and_bootstrap_forbids_one() {
-        assert!(validate_mode(false, None).is_err());
-        assert!(validate_mode(true, Some([1; 20])).is_err());
-        assert!(validate_mode(true, None).is_ok());
-        assert!(validate_mode(false, Some([1; 20])).is_ok());
-    }
-
-    #[test]
     fn valid_ciphertext_for_a_different_identity_is_rejected() {
         let expected = *KeyManager::from_seed([42; 64], Network::Bitcoin)
             .unwrap()
@@ -341,14 +315,20 @@ mod tests {
     fn bootstrap_then_restart_and_replica_preserve_keys_and_signatures() {
         let store = Store::default();
         let kms = Kms::default();
-        let first = recover_seed(&store, &kms, true, Instant::now() + RECOVERY_TIMEOUT).unwrap();
-        let restored =
-            recover_seed(&store, &kms, false, Instant::now() + RECOVERY_TIMEOUT).unwrap();
-        let replica = recover_seed(&store, &kms, false, Instant::now() + RECOVERY_TIMEOUT).unwrap();
+        let first = recover_seed(&store, &kms, None, Instant::now() + RECOVERY_TIMEOUT).unwrap();
+        let a = KeyManager::from_seed(*first, Network::Bitcoin).unwrap();
+        let restored = recover_seed(&store, &kms, None, Instant::now() + RECOVERY_TIMEOUT).unwrap();
+        let replica = recover_seed(
+            &store,
+            &kms,
+            Some(*a.evm_address()),
+            Instant::now() + RECOVERY_TIMEOUT,
+        )
+        .unwrap();
         assert_eq!(*first, *restored);
         assert_eq!(*first, *replica);
         assert_eq!(kms.generates.get(), 1);
-        let a = KeyManager::from_seed(*first, Network::Bitcoin).unwrap();
+        assert_eq!(store.creates.get(), 1);
         let b = KeyManager::from_seed(*restored, Network::Bitcoin).unwrap();
         assert_eq!(a.evm_address(), b.evm_address());
         assert_eq!(a.account_xpub_colored(), b.account_xpub_colored());
@@ -356,14 +336,48 @@ mod tests {
     }
 
     #[test]
-    fn restore_never_regenerates_missing_or_unreadable_seed() {
+    fn pinned_missing_seed_and_unreadable_store_never_generate_or_write() {
         let store = Store::default();
         let kms = Kms::default();
-        assert!(recover_seed(&store, &kms, false, Instant::now() + RECOVERY_TIMEOUT).is_err());
+        assert!(recover_seed(
+            &store,
+            &kms,
+            Some([1; 20]),
+            Instant::now() + RECOVERY_TIMEOUT
+        )
+        .is_err());
         store.fail_read.set(true);
-        assert!(recover_seed(&store, &kms, true, Instant::now() + RECOVERY_TIMEOUT).is_err());
+        assert!(recover_seed(&store, &kms, None, Instant::now() + RECOVERY_TIMEOUT).is_err());
         assert_eq!(kms.generates.get(), 0);
         assert_eq!(kms.decrypts.get(), 0);
+        assert_eq!(store.creates.get(), 0);
+        assert!(store.saved.borrow().is_none());
+    }
+
+    #[test]
+    fn existing_ciphertext_is_reused_with_or_without_a_pin() {
+        let original = vec![42; 64];
+        let store = Store {
+            saved: RefCell::new(Some(original.clone())),
+            ..Store::default()
+        };
+        let kms = Kms::default();
+        let expected = *KeyManager::from_seed([42; 64], Network::Bitcoin)
+            .unwrap()
+            .evm_address();
+        for pin in [None, Some(expected), Some([1; 20])] {
+            let seed = recover_seed(&store, &kms, pin, Instant::now() + RECOVERY_TIMEOUT).unwrap();
+            let keys = restore_keys(seed, Network::Bitcoin, pin);
+            if pin == Some([1; 20]) {
+                assert!(matches!(keys, Err(EnclaveError::IdentityMismatch)));
+            } else {
+                assert_eq!(*keys.unwrap().evm_address(), expected);
+            }
+        }
+        assert_eq!(kms.generates.get(), 0);
+        assert_eq!(kms.decrypts.get(), 3);
+        assert_eq!(store.creates.get(), 0);
+        assert_eq!(*store.saved.borrow(), Some(original));
     }
 
     #[test]
@@ -373,7 +387,7 @@ mod tests {
             ..Store::default()
         };
         let kms = Kms::default();
-        assert!(recover_seed(&store, &kms, true, Instant::now() + RECOVERY_TIMEOUT).is_err());
+        assert!(recover_seed(&store, &kms, None, Instant::now() + RECOVERY_TIMEOUT).is_err());
         assert_eq!(kms.decrypts.get(), 0);
         assert!(store.saved.borrow().is_none());
     }
@@ -387,7 +401,7 @@ mod tests {
         let seed = recover_seed(
             &store,
             &Kms::default(),
-            true,
+            None,
             Instant::now() + RECOVERY_TIMEOUT,
         )
         .unwrap();
@@ -404,10 +418,10 @@ mod tests {
             fail_decrypt: true,
             ..Kms::default()
         };
-        assert!(recover_seed(&store, &kms, true, Instant::now() + RECOVERY_TIMEOUT).is_err());
+        assert!(recover_seed(&store, &kms, None, Instant::now() + RECOVERY_TIMEOUT).is_err());
         assert_eq!(kms.generates.get(), 0);
         *store.saved.borrow_mut() = Some(vec![]);
-        assert!(recover_seed(&store, &kms, true, Instant::now() + RECOVERY_TIMEOUT).is_err());
+        assert!(recover_seed(&store, &kms, None, Instant::now() + RECOVERY_TIMEOUT).is_err());
         assert_eq!(kms.decrypts.get(), 1);
     }
 
@@ -572,7 +586,7 @@ mod tests {
     fn exhausted_recovery_budget_never_generates_or_decrypts() {
         let store = Store::default();
         let kms = Kms::default();
-        assert!(recover_seed(&store, &kms, true, Instant::now()).is_err());
+        assert!(recover_seed(&store, &kms, None, Instant::now()).is_err());
         assert_eq!(kms.generates.get(), 0);
         assert_eq!(kms.decrypts.get(), 0);
         assert!(store.saved.borrow().is_none());

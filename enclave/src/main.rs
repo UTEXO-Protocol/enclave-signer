@@ -104,7 +104,6 @@ fn main() {
                 "SWAP_KMS_KEY_ARN",
                 "SWAP_KMS_REGION",
                 "SWAP_KMS_SEED_ID",
-                "SWAP_KMS_ALLOW_CREATE",
                 "SWAP_KMS_EXPECTED_EVM_ADDRESS",
             ]
             .iter()
