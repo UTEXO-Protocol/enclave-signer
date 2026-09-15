@@ -25,10 +25,11 @@
 //! Scope: this makes the plain-BTC path structurally self-pay. Withdrawals to
 //! an arbitrary user address remain out of scope.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use bitcoin::psbt::Psbt;
 
+use crate::error::{EnclaveError, Result};
 use crate::keys::{AccountType, KeyManager};
 use crate::networks::rgb::signing::taproot::find_taproot_sign_jobs;
 
@@ -62,6 +63,44 @@ pub fn self_controlled_input_scripts_scoped(
         .filter_map(|input| input.witness_utxo.as_ref())
         .map(|utxo| utxo.script_pubkey.as_bytes().to_vec())
         .collect()
+}
+
+/// Sats each script this enclave co-controls brought into the PSBT: the
+/// `witness_utxo` value of every input [`find_taproot_sign_jobs`] qualifies,
+/// counted once per input and summed by `script_pubkey`. Gives the send-RGB
+/// budget value provenance, where membership alone would let a small
+/// qualifying input exempt bridge value paid to its script.
+pub(crate) fn signable_input_value_allowances_scoped(
+    psbt: &Psbt,
+    keys: &KeyManager,
+    allowed_account: Option<AccountType>,
+) -> Result<HashMap<Vec<u8>, u64>> {
+    let mut inputs: Vec<usize> = find_taproot_sign_jobs(psbt, keys.master_fingerprint(), keys)
+        .into_iter()
+        .filter(|job| allowed_account.is_none_or(|want| job.account_type == want))
+        .map(|job| job.input_index)
+        .collect();
+    inputs.sort_unstable();
+    inputs.dedup();
+    let mut allowances = HashMap::new();
+    for i in inputs {
+        let utxo = psbt
+            .inputs
+            .get(i)
+            .and_then(|input| input.witness_utxo.as_ref())
+            .ok_or_else(|| {
+                EnclaveError::CrossCheck(format!(
+                    "input {i} qualified for signing without a witness_utxo"
+                ))
+            })?;
+        let sats = allowances
+            .entry(utxo.script_pubkey.to_bytes())
+            .or_insert(0u64);
+        *sats = sats.checked_add(utxo.value.to_sat()).ok_or_else(|| {
+            EnclaveError::CrossCheck(format!("input value overflow at input {i}"))
+        })?;
+    }
+    Ok(allowances)
 }
 
 /// Indices of every PSBT output that provably pays back to this enclave, on

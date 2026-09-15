@@ -167,7 +167,9 @@ pub fn validate_btc_request(
 /// the total instead - dust fits, a sweep does not.
 ///
 /// Ownership is the single rule in [`super::btc_ownership`]: no metadata is
-/// trusted.
+/// trusted, and an output is exempt only up to the value its script brought in
+/// through qualifying inputs, so a small qualifying input cannot exempt bridge
+/// value paid to its script.
 pub fn validate_rgb_psbt_sats(
     psbt: &bitcoin::psbt::Psbt,
     cfg: &BridgeConfig,
@@ -175,21 +177,26 @@ pub fn validate_rgb_psbt_sats(
 ) -> Result<()> {
     // `None` scope: change sits on Colored, vanilla funding on Vanilla. Widens
     // what counts as ours, never what is signed.
-    let input_scripts =
-        crate::networks::rgb::btc_ownership::self_controlled_input_scripts_scoped(psbt, keys, None);
+    let mut allowances =
+        crate::networks::rgb::btc_ownership::signable_input_value_allowances_scoped(
+            psbt, keys, None,
+        )?;
 
     let mut unowned_sat: u64 = 0;
     for (i, txout) in psbt.unsigned_tx.output.iter().enumerate() {
-        if input_scripts.contains(txout.script_pubkey.as_bytes()) {
-            continue;
-        }
-        unowned_sat = unowned_sat
-            .checked_add(txout.value.to_sat())
-            .ok_or_else(|| {
-                EnclaveError::CrossCheck(format!(
-                    "send-RGB unowned output value overflow at output {i}"
-                ))
-            })?;
+        let value = txout.value.to_sat();
+        let exempt = allowances
+            .get_mut(txout.script_pubkey.as_bytes())
+            .map_or(0, |remaining| {
+                let exempt = value.min(*remaining);
+                *remaining -= exempt;
+                exempt
+            });
+        unowned_sat = unowned_sat.checked_add(value - exempt).ok_or_else(|| {
+            EnclaveError::CrossCheck(format!(
+                "send-RGB unowned output value overflow at output {i}"
+            ))
+        })?;
     }
 
     if cfg.rgb_max_unowned_sats == 0 {
