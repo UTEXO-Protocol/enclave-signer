@@ -31,8 +31,8 @@ pub enum VerifyMode {
 ///
 /// Chain/contract/asset pins come from the wire response, which the public-key
 /// bundle already binds, so a production expectation states only the posture
-/// flags plus the gas-tx rule - the latter is not on the wire and must be
-/// declared here.
+/// flags and authorization rules that are not on the wire and must be declared
+/// independently by the verifier.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ExpectedPolicy {
     /// Expect a production bridge enclave with these posture flags.
@@ -45,6 +45,8 @@ pub enum ExpectedPolicy {
         /// commitment so an enclave that trust-rooted on a different checkpoint
         /// fails verification.
         evm_checkpoint: Option<[u8; 32]>,
+        funds_in_contract: [u8; 20],
+        evm_min_confirmations: u64,
         /// Expected gas-tx (`SignRawDigest`) rule the enclave committed.
         /// An all-zero destination, zero caps, and empty selectors mean
         /// the operator did not pin the gas path, which the enclave attests as
@@ -194,6 +196,8 @@ fn expected_attested_policy(
             allow_vanilla_psbt,
             evm_source,
             evm_checkpoint,
+            funds_in_contract,
+            evm_min_confirmations,
             gas_tx_allowed_to,
             gas_tx_max_gas_limit,
             gas_tx_max_fee_per_gas,
@@ -221,6 +225,8 @@ fn expected_attested_policy(
                 chain_id: resp.chain_id,
                 bridge_contract,
                 rgb_asset_id: resp.rgb_asset_id.clone(),
+                funds_in_contract: *funds_in_contract,
+                evm_min_confirmations: *evm_min_confirmations,
                 evm_checkpoint: *evm_checkpoint,
                 // Gas-tx rule: declared by the operator, not on the
                 // wire. `to_bytes` canonicalises the selector set, so the caller

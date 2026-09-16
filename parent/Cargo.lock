@@ -6367,7 +6367,7 @@ dependencies = [
 [[package]]
 name = "rgb-consignment"
 version = "0.1.0"
-source = "git+ssh://git@github-rgb-consignment/UTEXO-Protocol/consignment-utils.git?rev=6a792af035cc5b011a790831a0732d420a2413e0#6a792af035cc5b011a790831a0732d420a2413e0"
+source = "git+ssh://git@github.com/UTEXO-Protocol/consignment-utils.git?rev=6a792af035cc5b011a790831a0732d420a2413e0#6a792af035cc5b011a790831a0732d420a2413e0"
 dependencies = [
  "amplify",
  "rgb-ops",

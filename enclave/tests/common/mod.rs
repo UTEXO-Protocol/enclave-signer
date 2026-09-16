@@ -52,6 +52,7 @@ pub fn start_test_server_with_config(
         &bridge_config,
         EvmDataSource::Disabled,
         None,
+        0,
     );
     let ctx = Arc::new(ServerContext {
         state,

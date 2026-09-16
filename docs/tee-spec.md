@@ -121,6 +121,7 @@ the public-key bundle. This policy covers the fields below, not all configuratio
 ```
 SecurityPolicy = Production {
     chain_id, bridge_contract, rgb_asset_id,   -- operator pins
+    funds_in_contract, evm_min_confirmations,  -- deposit authorization rule
     allow_vanilla_psbt,                        -- plain-BTC signing on/off
     attestation: Real,                         -- always, in production
     evm_source:  Disabled | RawRpc | HeliosVerified,
@@ -138,7 +139,9 @@ SecurityPolicy = Production {
   build selects Helios through `HELIOS_EXECUTION_RPC`. Helios requires a
   valid checkpoint; the verifier pins both source and checkpoint.
 - **Boot gate:** a release `rgb-validation` build that does not resolve to a
-  valid `Production` policy MUST refuse to boot (panic). Independently, each
+  valid `Production` policy MUST refuse to boot (panic). The FundsIn contract
+  must be non-zero and the minimum confirmation depth must be greater than zero.
+  Independently, each
   dev feature is a `compile_error!` in any shipped release binary (non-test
   build with debug assertions off); `rgb-validation` without `spv` is a
   `compile_error!` in every profile, as is `rgb-validation` with both RGB flows
@@ -149,7 +152,8 @@ SecurityPolicy = Production {
   produce identical bytes. See [`pubkey-attestation.md`](pubkey-attestation.md).
 - **Verification:** `attest-verify` reconstructs the *expected* policy
   (`--expect-vanilla-psbt`, `--expect-evm-source raw|helios|disabled`,
-  `--expect-helios-checkpoint` and the gas-rule flags) and
+  `--expect-helios-checkpoint`, `--expect-funds-in-contract`,
+  `--expect-evm-min-confirmations`, and the gas-rule flags) and
   fails if the commitment differs -- a downgraded posture (vanilla signing on,
   a different EVM source, a dev build) fails verification instead of being
   silently trusted.
@@ -160,8 +164,7 @@ Inside the commitment: the whole gas-tx rule -- `GAS_TX_ALLOWED_TO`,
 instead of trusting the operator's configuration. An unset pin commits as its zero value, which is the posture it enforces, so
 "unpinned" is attested too.
 
-Not inside the policy commitment: `FUNDS_IN_CONTRACT`,
-`EVM_MIN_CONFIRMATIONS`, `BITCOIN_NETWORK`, resolver endpoints,
+Not inside the policy commitment: `BITCOIN_NETWORK`, resolver endpoints,
 `HELIOS_STRICT_CHECKPOINT_AGE`, request-size caps, and the concrete
 `BTC_MAX_TOTAL_SATS`, `BTC_MAX_UNOWNED_SATS` and `RGB_MAX_UNOWNED_SATS` values
 (only the `BTC_MAX_TOTAL_SATS` on/off boolean is attested).

@@ -157,6 +157,22 @@ pub fn sign_taproot_inputs(
     let mut signed_count = 0;
 
     for job in jobs {
+        let requested = psbt.inputs[job.input_index]
+            .sighash_type
+            .map(|ty| ty.to_u32())
+            .unwrap_or(0);
+
+        let sighash_type = match requested {
+            0x00 => TapSighashType::Default,
+            0x01 => TapSighashType::All,
+            _ => {
+                return Err(EnclaveError::Signing(format!(
+                    "unsupported taproot sighash 0x{requested:02x} for input {}: expected DEFAULT or ALL",
+                    job.input_index
+                )));
+            }
+        };
+
         let child_secret = key_manager.derive_btc_child(job.account_type, &job.child_path)?;
 
         let sighash = sighash_cache
@@ -164,7 +180,7 @@ pub fn sign_taproot_inputs(
                 job.input_index,
                 &Prevouts::All(&prevouts),
                 job.leaf_hash,
-                TapSighashType::Default,
+                sighash_type,
             )
             .map_err(|e| EnclaveError::Signing(format!("taproot sighash: {e}")))?;
 
@@ -174,10 +190,9 @@ pub fn sign_taproot_inputs(
         let keypair = Keypair::from_secret_key(&secp, &child_secret);
         let schnorr_sig = secp.sign_schnorr_no_aux_rand(&msg, &keypair);
 
-        // Insert tap_script_sig with Default sighash (empty sighash byte)
         let tap_sig = taproot::Signature {
             signature: schnorr_sig,
-            sighash_type: TapSighashType::Default,
+            sighash_type,
         };
         psbt.inputs[job.input_index]
             .tap_script_sigs
@@ -256,9 +271,26 @@ mod tests {
     /// Returns: (psbt, output_internal_key, leaf_script, leaf_hash, control_block).
     fn build_legit_taproot_psbt(
         km: &KeyManager,
+        account: AccountType,
     ) -> (Psbt, XOnlyPublicKey, ScriptBuf, TapLeafHash, ControlBlock) {
         let secp = Secp256k1::new();
-        let our = our_xonly(km);
+        let child_path = [
+            ChildNumber::Normal { index: 0 },
+            ChildNumber::Normal { index: 0 },
+        ];
+        let secret = km.derive_btc_child(account, &child_path).unwrap();
+        let our = XOnlyPublicKey::from_keypair(&Keypair::from_secret_key(&secp, &secret)).0;
+        let coin_type = match account {
+            AccountType::Vanilla => 1,
+            AccountType::Colored => 827167,
+        };
+        let full_path = DerivationPath::from(vec![
+            ChildNumber::from_hardened_idx(86).unwrap(),
+            ChildNumber::from_hardened_idx(coin_type).unwrap(),
+            ChildNumber::from_hardened_idx(0).unwrap(),
+            child_path[0],
+            child_path[1],
+        ]);
         let other1 = xonly_from_byte(0xA1);
         let other2 = xonly_from_byte(0xA2);
         let leaf_script = multi_a_2_of_3(&[our, other1, other2]);
@@ -303,16 +335,80 @@ mod tests {
         );
         psbt.inputs[0].tap_key_origins.insert(
             our,
-            (vec![leaf_hash], (*km.master_fingerprint(), our_full_path())),
+            (vec![leaf_hash], (*km.master_fingerprint(), full_path)),
         );
 
         (psbt, internal_key, leaf_script, leaf_hash, control_block)
     }
 
     #[test]
+    fn scoped_taproot_signing_honors_requested_sighash() {
+        let km = KeyManager::from_seed([0x42u8; 64], Network::Testnet).unwrap();
+        for requested in [
+            Some(TapSighashType::All),
+            Some(TapSighashType::Default),
+            None,
+        ] {
+            let (mut psbt, _, _, leaf_hash, _) =
+                build_legit_taproot_psbt(&km, AccountType::Colored);
+            psbt.inputs[0].sighash_type = requested.map(Into::into);
+            let (bytes, count) = km
+                .sign_psbt_scoped(&psbt.serialize(), Some(AccountType::Colored))
+                .unwrap();
+            assert_eq!(count, 1);
+
+            let signed = Psbt::deserialize(&bytes).unwrap();
+            let input = &signed.inputs[0];
+            assert_eq!(input.sighash_type, psbt.inputs[0].sighash_type);
+
+            let ((pubkey, _), signature) = input.tap_script_sigs.iter().next().unwrap();
+            let expected = requested.unwrap_or(TapSighashType::Default);
+            assert_eq!(signature.sighash_type, expected);
+            assert_eq!(
+                signature.to_vec().len(),
+                if expected == TapSighashType::All {
+                    65
+                } else {
+                    64
+                }
+            );
+
+            let prevouts = [input.witness_utxo.clone().unwrap()];
+            let hash = SighashCache::new(&signed.unsigned_tx)
+                .taproot_script_spend_signature_hash(
+                    0,
+                    &Prevouts::All(&prevouts),
+                    leaf_hash,
+                    expected,
+                )
+                .unwrap();
+            Secp256k1::verification_only()
+                .verify_schnorr(
+                    &signature.signature,
+                    &Message::from_digest(hash.to_byte_array()),
+                    pubkey,
+                )
+                .unwrap();
+        }
+    }
+
+    #[test]
+    fn scoped_taproot_signing_rejects_unsupported_sighash() {
+        let km = KeyManager::from_seed([0x42u8; 64], Network::Testnet).unwrap();
+        for raw in [0x02, 0x03, 0x81, 0x82, 0x83, 0xff, 0x101] {
+            let (mut psbt, _, _, _, _) = build_legit_taproot_psbt(&km, AccountType::Colored);
+            psbt.inputs[0].sighash_type = Some(bitcoin::psbt::PsbtSighashType::from_u32(raw));
+            let err = km
+                .sign_psbt_scoped(&psbt.serialize(), Some(AccountType::Colored))
+                .unwrap_err();
+            assert!(matches!(err, EnclaveError::Signing(_)), "{err}");
+        }
+    }
+
+    #[test]
     fn emits_one_job_for_legit_multi_a_leaf() {
         let km = KeyManager::from_seed([0x42u8; 64], Network::Testnet).unwrap();
-        let (psbt, _, _, leaf_hash, _) = build_legit_taproot_psbt(&km);
+        let (psbt, _, _, leaf_hash, _) = build_legit_taproot_psbt(&km, AccountType::Vanilla);
         let jobs = find_taproot_sign_jobs(&psbt, km.master_fingerprint(), &km);
         assert_eq!(jobs.len(), 1);
         assert_eq!(jobs[0].leaf_hash, leaf_hash);
@@ -327,7 +423,7 @@ mod tests {
         let secp = Secp256k1::new();
 
         // Build the legit PSBT (anchored output key).
-        let (mut psbt, _, _, _, _) = build_legit_taproot_psbt(&km);
+        let (mut psbt, _, _, _, _) = build_legit_taproot_psbt(&km, AccountType::Vanilla);
 
         // Build an UNRELATED tree whose control_block we'll splice in.
         let our = our_xonly(&km);
@@ -365,7 +461,7 @@ mod tests {
     #[test]
     fn skips_when_origins_fingerprint_wrong() {
         let km = KeyManager::from_seed([0x42u8; 64], Network::Testnet).unwrap();
-        let (mut psbt, _, _, leaf_hash, _) = build_legit_taproot_psbt(&km);
+        let (mut psbt, _, _, leaf_hash, _) = build_legit_taproot_psbt(&km, AccountType::Vanilla);
         let our = our_xonly(&km);
         psbt.inputs[0].tap_key_origins.insert(
             our,
@@ -385,7 +481,7 @@ mod tests {
     #[test]
     fn skips_when_origins_path_derives_to_different_xonly() {
         let km = KeyManager::from_seed([0x42u8; 64], Network::Testnet).unwrap();
-        let (mut psbt, _, _, leaf_hash, _) = build_legit_taproot_psbt(&km);
+        let (mut psbt, _, _, leaf_hash, _) = build_legit_taproot_psbt(&km, AccountType::Vanilla);
         // Replace origins with a foreign xonly under our fingerprint+path.
         let foreign = xonly_from_byte(0xEE);
         psbt.inputs[0].tap_key_origins.clear();
@@ -487,7 +583,7 @@ mod tests {
     #[test]
     fn skips_when_already_signed_for_leaf() {
         let km = KeyManager::from_seed([0x42u8; 64], Network::Testnet).unwrap();
-        let (mut psbt, _, _, leaf_hash, _) = build_legit_taproot_psbt(&km);
+        let (mut psbt, _, _, leaf_hash, _) = build_legit_taproot_psbt(&km, AccountType::Vanilla);
         let our = our_xonly(&km);
         // Insert any tap_script_sig under (our, leaf_hash); content doesn't matter.
         let secp = Secp256k1::new();
@@ -509,7 +605,7 @@ mod tests {
     #[test]
     fn skips_when_path_outside_bip86_accounts() {
         let km = KeyManager::from_seed([0x42u8; 64], Network::Testnet).unwrap();
-        let (mut psbt, _, _, leaf_hash, _) = build_legit_taproot_psbt(&km);
+        let (mut psbt, _, _, leaf_hash, _) = build_legit_taproot_psbt(&km, AccountType::Vanilla);
         let our = our_xonly(&km);
         // Replace path with m/44'/0'/...
         let bad_path = DerivationPath::from(vec![
@@ -528,7 +624,7 @@ mod tests {
     #[test]
     fn skips_when_witness_utxo_missing() {
         let km = KeyManager::from_seed([0x42u8; 64], Network::Testnet).unwrap();
-        let (mut psbt, _, _, _, _) = build_legit_taproot_psbt(&km);
+        let (mut psbt, _, _, _, _) = build_legit_taproot_psbt(&km, AccountType::Vanilla);
         psbt.inputs[0].witness_utxo = None;
         let jobs = find_taproot_sign_jobs(&psbt, km.master_fingerprint(), &km);
         assert!(jobs.is_empty());
@@ -537,7 +633,7 @@ mod tests {
     #[test]
     fn skips_when_witness_utxo_not_p2tr() {
         let km = KeyManager::from_seed([0x42u8; 64], Network::Testnet).unwrap();
-        let (mut psbt, _, _, _, _) = build_legit_taproot_psbt(&km);
+        let (mut psbt, _, _, _, _) = build_legit_taproot_psbt(&km, AccountType::Vanilla);
         psbt.inputs[0].witness_utxo.as_mut().unwrap().script_pubkey =
             ScriptBuf::new_p2wpkh(&bitcoin::WPubkeyHash::from_byte_array([0xCC; 20]));
         let jobs = find_taproot_sign_jobs(&psbt, km.master_fingerprint(), &km);
@@ -628,7 +724,7 @@ mod tests {
     #[test]
     fn scoped_vanilla_signs_a_vanilla_input() {
         let km = KeyManager::from_seed([0x42u8; 64], Network::Testnet).unwrap();
-        let (psbt, _, _, _, _) = build_legit_taproot_psbt(&km);
+        let (psbt, _, _, _, _) = build_legit_taproot_psbt(&km, AccountType::Vanilla);
         let bytes = psbt.serialize();
         let (_, signed) = km
             .sign_psbt_scoped(&bytes, Some(AccountType::Vanilla))

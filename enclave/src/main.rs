@@ -149,16 +149,31 @@ fn main() {
         (EvmDataSource::RawRpc, None)
     };
 
+    #[cfg(feature = "evm-rpc")]
+    let evm_rpc_config = utexo_bridge_enclave::config::EvmRpcConfig::from_env();
+    #[cfg(feature = "evm-rpc")]
+    let evm_min_confirmations = evm_rpc_config.min_confirmations;
+    #[cfg(not(feature = "evm-rpc"))]
+    let evm_min_confirmations = 0;
+
     // Resolve the security posture once from the build context,
     // pinned config, and selected data source. This is what gets committed into
     // attestation `user_data` and what the signing handlers consult.
     let build_ctx = BuildContext::current();
-    let policy = SecurityPolicy::resolve(&build_ctx, &bridge_config, evm_source, evm_checkpoint);
+    let policy = SecurityPolicy::resolve(
+        &build_ctx,
+        &bridge_config,
+        evm_source,
+        evm_checkpoint,
+        evm_min_confirmations,
+    );
     match &policy {
         SecurityPolicy::Production(p) => tracing::info!(
             chain_id = p.chain_id,
             allow_vanilla_psbt = p.allow_vanilla_psbt,
             evm_source = ?p.evm_source,
+            funds_in_contract = %hex::encode(p.funds_in_contract),
+            evm_min_confirmations = p.evm_min_confirmations,
             btc_source = ?p.btc_source,
             "resolved PRODUCTION security policy (committed into attestation user_data)"
         ),
@@ -373,7 +388,7 @@ fn main() {
     #[cfg(feature = "evm-rpc")]
     let (evm_rpc_client, evm_rpc_config) = {
         use utexo_bridge_enclave::networks::evm::evm_event::{AlloyEvmClient, EvmReceiptProvider};
-        let cfg = utexo_bridge_enclave::config::EvmRpcConfig::from_env();
+        let cfg = evm_rpc_config;
         type Boxed = Box<dyn EvmReceiptProvider + Send + Sync>;
 
         // Raw alloy provider: host-relayed, unverified.
