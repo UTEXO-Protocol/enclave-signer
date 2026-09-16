@@ -12,10 +12,12 @@
 //!     are co-signed, never a Colored (RGB-allocated) one.
 //!   * Output self-ownership ([`crate::networks::rgb::btc_ownership`]): every
 //!     output must pay back to a script this enclave co-controls, proven from
-//!     the PSBT and our own derivation. Either BIP-86 account counts, since
-//!     `create_utxo` funds Colored UTXOs from vanilla inputs; the rule is
-//!     about which inputs we spend. Replaces the `BTC_ALLOWED_SCRIPTS` allowlist,
-//!     which was unbootstrappable in production.
+//!     the PSBT and our own derivation, and only up to the value that script
+//!     itself brought in through the Vanilla inputs this path co-signs -
+//!     otherwise a small qualifying input would exempt bridge value paid to
+//!     its script. Change must therefore come back per script. Replaces the
+//!     `BTC_ALLOWED_SCRIPTS` allowlist, which was unbootstrappable in
+//!     production.
 //!   * Amount cap (`BTC_MAX_TOTAL_SATS`) on total input value spent, not
 //!     output value, so it also bounds value routed to miner fees.
 //!
@@ -31,8 +33,8 @@
 
 use crate::config::BridgeConfig;
 use crate::error::{EnclaveError, Result};
-use crate::keys::KeyManager;
-use crate::networks::rgb::btc_ownership::{output_is_self_owned, self_controlled_input_scripts};
+use crate::keys::{AccountType, KeyManager};
+use crate::networks::rgb::btc_ownership::unowned_output_sats;
 use crate::proto::SignBtcRequest;
 
 /// Validate a plain-BTC `SignBtcRequest` before signing: output self-ownership
@@ -74,21 +76,13 @@ pub fn validate_btc_request(
     }
 
     // 3. Output self-ownership: every output must pay back to a script this
-    //    enclave co-controls. Needs no operator configuration, so it runs
+    //    enclave co-controls, and only up to the value that script brought in -
+    //    membership alone would let a 1000-sat qualifying input exempt bridge
+    //    value paid to its script. `Vanilla` scope: that is the only account
+    //    this path co-signs. Needs no operator configuration, so it runs
     //    unconditionally. Anchored to the unsigned tx's outputs, which the
     //    segwit sighash commits to.
-    let input_scripts = self_controlled_input_scripts(&psbt, keys);
-    let mut unowned_sat: u64 = 0;
-    for i in 0..psbt.unsigned_tx.output.len() {
-        if output_is_self_owned(&psbt, i, &input_scripts) {
-            continue;
-        }
-        unowned_sat = unowned_sat
-            .checked_add(psbt.unsigned_tx.output[i].value.to_sat())
-            .ok_or_else(|| {
-                EnclaveError::CrossCheck("plain-BTC unowned output value overflow".into())
-            })?;
-    }
+    let unowned_sat = unowned_output_sats(&psbt, keys, Some(AccountType::Vanilla))?;
 
     if unowned_sat > 0 {
         if cfg.btc_max_unowned_sats == 0 {
@@ -113,7 +107,8 @@ pub fn validate_btc_request(
                  back into the same custody, over the pinned budget of {} sats - refusing to \
                  sign. `create_utxo` allocation dust fits this budget; a redirect does not. An \
                  output is proven when its script equals that of an input this enclave co-signs, \
-                 which is what address reuse guarantees for change.",
+                 which is what address reuse guarantees for change, and only up to the value that \
+                 script brought in.",
                 cfg.btc_max_unowned_sats
             )));
         }
@@ -166,10 +161,13 @@ pub fn validate_btc_request(
 /// it pays the recipient a witness output and that seal is blinded. It bounds
 /// the total instead - dust fits, a sweep does not.
 ///
-/// Ownership is the single rule in [`super::btc_ownership`]: no metadata is
-/// trusted, and an output is exempt only up to the value its script brought in
-/// through qualifying inputs, so a small qualifying input cannot exempt bridge
-/// value paid to its script.
+/// Ownership is proven the one way [`super::btc_ownership`] allows - an output
+/// script equal to that of an input we co-sign, no metadata trusted - and then
+/// capped by value: an output is exempt only up to what its own script brought
+/// in, so a small qualifying input cannot exempt bridge value paid to its
+/// script. Change must therefore come back per script; consolidating the
+/// change of two co-controlled scripts onto one counts the other script's
+/// value against the budget.
 pub fn validate_rgb_psbt_sats(
     psbt: &bitcoin::psbt::Psbt,
     cfg: &BridgeConfig,
@@ -177,27 +175,7 @@ pub fn validate_rgb_psbt_sats(
 ) -> Result<()> {
     // `None` scope: change sits on Colored, vanilla funding on Vanilla. Widens
     // what counts as ours, never what is signed.
-    let mut allowances =
-        crate::networks::rgb::btc_ownership::signable_input_value_allowances_scoped(
-            psbt, keys, None,
-        )?;
-
-    let mut unowned_sat: u64 = 0;
-    for (i, txout) in psbt.unsigned_tx.output.iter().enumerate() {
-        let value = txout.value.to_sat();
-        let exempt = allowances
-            .get_mut(txout.script_pubkey.as_bytes())
-            .map_or(0, |remaining| {
-                let exempt = value.min(*remaining);
-                *remaining -= exempt;
-                exempt
-            });
-        unowned_sat = unowned_sat.checked_add(value - exempt).ok_or_else(|| {
-            EnclaveError::CrossCheck(format!(
-                "send-RGB unowned output value overflow at output {i}"
-            ))
-        })?;
-    }
+    let unowned_sat = unowned_output_sats(psbt, keys, None)?;
 
     if cfg.rgb_max_unowned_sats == 0 {
         // Unset must never read as "no limit".
@@ -776,15 +754,15 @@ mod tests {
         )>,
     }
 
-    /// An input whose committed `leaves` each hold the enclave's Colored key in
-    /// a signature slot, with every metadata gate valid.
-    fn colored_input(
+    /// An input whose committed `leaves` each hold `our` in a signature slot,
+    /// with every metadata gate valid.
+    fn signable_input(
         keys: &KeyManager,
+        (our, path): (XOnlyPublicKey, DerivationPath),
         internal: XOnlyPublicKey,
         sats: u64,
         leaves: &[ScriptBuf],
     ) -> Input {
-        let (our, path) = our_colored(keys);
         let (spk, tap_scripts) = tree(internal, leaves);
         let hashes = leaves
             .iter()
@@ -796,6 +774,16 @@ mod tests {
             tap_scripts,
             origins: vec![(our, hashes, *keys.master_fingerprint(), path)],
         }
+    }
+
+    /// [`signable_input`] on the enclave's Colored key.
+    fn colored_input(
+        keys: &KeyManager,
+        internal: XOnlyPublicKey,
+        sats: u64,
+        leaves: &[ScriptBuf],
+    ) -> Input {
+        signable_input(keys, our_colored(keys), internal, sats, leaves)
     }
 
     /// Bridge input: the 2-of-3 quorum leaf under the NUMS internal key.
@@ -941,6 +929,18 @@ mod tests {
             4_999_000,
         );
 
+        // Two co-controlled scripts in, change consolidated onto one: the
+        // value the other script brought in is no longer exempt. Change must
+        // return per script.
+        let other_leaf = multi_a_2_of_3(&[our, foreign_xonly(0xB1), foreign_xonly(0xB2)]);
+        let nums = XOnlyPublicKey::from_slice(&NUMS_INTERNAL).unwrap();
+        let other = colored_input(&keys, nums, 1_000_000, std::slice::from_ref(&other_leaf));
+        assert_ne!(other.spk, bridge_spk);
+        reject(
+            &psbt_with(&[a(5_000_000), other], &[(bridge_spk.clone(), 5_999_000)]),
+            999_000,
+        );
+
         // Two auxiliary inputs on the same script each add their value once.
         reject(
             &psbt_with(
@@ -979,5 +979,102 @@ mod tests {
             ),
             1_001,
         );
+    }
+
+    // --- plain-BTC budget: the same value provenance ---
+
+    /// The plain-BTC mirror: a 1_000-sat auxiliary input whose leaf names the
+    /// enclave's Vanilla key exempts its own 1_000 sats and no more, so bridge
+    /// value routed to that script stays inside BTC_MAX_UNOWNED_SATS instead of
+    /// being bounded only by BTC_MAX_TOTAL_SATS.
+    #[test]
+    fn plain_btc_custody_uses_real_input_provenance() {
+        let keys = km();
+        let ours = our_address(&keys);
+        let vanilla = (ours.xonly, ours.path.clone());
+        // Unowned budget 5_000; total cap high enough not to mask it.
+        let cfg = cfg_with_cap(10_000_000);
+        let bridge = |sats| {
+            signable_input(
+                &keys,
+                vanilla.clone(),
+                ours.internal,
+                sats,
+                std::slice::from_ref(&ours.leaf),
+            )
+        };
+        let atk_leaf = multi_a_2_of_3(&[ours.xonly, foreign_xonly(0xC1), foreign_xonly(0xC2)]);
+        let aux = signable_input(
+            &keys,
+            vanilla.clone(),
+            foreign_xonly(0xA7),
+            1_000,
+            std::slice::from_ref(&atk_leaf),
+        );
+        let aux_spk = aux.spk.clone();
+
+        let req = |inputs: &[Input], outputs: &[(ScriptBuf, u64)]| SignBtcRequest {
+            psbt_bytes: psbt_with(inputs, outputs).serialize(),
+        };
+        let accept = |req: &SignBtcRequest| validate_btc_request(req, &cfg, &keys).unwrap();
+        let reject = |req: &SignBtcRequest, unowned: u64| {
+            let err = validate_btc_request(req, &cfg, &keys).unwrap_err();
+            assert!(
+                err.to_string().contains(&format!("pays {unowned} sats")),
+                "expected {unowned} unowned sats, got: {err}"
+            );
+        };
+
+        // Both inputs qualify on the Vanilla account, so membership alone
+        // exempted the whole output; the allowance caps it at 1_000.
+        let attack = psbt_with(
+            &[bridge(5_000_000), aux.clone()],
+            &[(aux_spk.clone(), 5_000_000)],
+        );
+        let mut qualified: Vec<_> =
+            find_taproot_sign_jobs(&attack, keys.master_fingerprint(), &keys)
+                .into_iter()
+                .map(|job| (job.input_index, job.account_type))
+                .collect();
+        qualified.sort_by_key(|(i, _)| *i);
+        assert_eq!(
+            qualified,
+            [(0, AccountType::Vanilla), (1, AccountType::Vanilla)]
+        );
+        reject(
+            &SignBtcRequest {
+                psbt_bytes: attack.serialize(),
+            },
+            4_999_000,
+        );
+
+        // Healthy: change back to the script that funded it.
+        accept(&req(&[bridge(5_000_000)], &[(ours.spk.clone(), 4_999_000)]));
+
+        // The auxiliary input failing a metadata gate contributes nothing.
+        let mut wrong_fp = aux.clone();
+        wrong_fp.origins[0].2 = Fingerprint::from([0xDE, 0xAD, 0xBE, 0xEF]);
+        reject(
+            &req(
+                &[bridge(5_000_000), wrong_fp],
+                &[(aux_spk.clone(), 5_000_000)],
+            ),
+            5_000_000,
+        );
+
+        // Two outputs to the auxiliary script share its single 1_000 allowance:
+        // 2_000 + 3_000 unowned is exactly the budget, one sat more is not.
+        let split = |second: u64| {
+            req(
+                &[bridge(5_000_000), aux.clone()],
+                &[
+                    (aux_spk.clone(), 3_000),
+                    (aux_spk.clone(), second),
+                    (ours.spk.clone(), 4_990_000),
+                ],
+            )
+        };
+        accept(&split(3_000));
+        reject(&split(3_001), 5_001);
     }
 }
