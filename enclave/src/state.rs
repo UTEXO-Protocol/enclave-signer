@@ -1,4 +1,4 @@
-use std::collections::{HashSet, VecDeque};
+use std::collections::{HashMap, VecDeque};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
@@ -76,11 +76,12 @@ pub struct NonceReplayGuard {
     ttl: Duration,
 }
 
-/// Membership set plus an insertion-ordered (oldest at front) queue that
-/// mirrors it. The queue drives both TTL eviction and oldest-first
-/// overflow eviction; the set gives O(1) duplicate detection.
+/// Membership map plus an insertion-ordered queue for TTL and capacity eviction.
+/// Generations identify the owner of each entry so stale rollback cannot remove
+/// a replacement reservation.
 struct GuardState {
-    seen: HashSet<[u8; 32]>,
+    seen: HashMap<[u8; 32], u64>,
+    next_generation: u64,
     order: VecDeque<(Instant, [u8; 32])>,
 }
 
@@ -94,7 +95,8 @@ impl NonceReplayGuard {
     pub fn with_capacity(max: usize, ttl: Duration) -> Self {
         Self {
             inner: Mutex::new(GuardState {
-                seen: HashSet::new(),
+                seen: HashMap::new(),
+                next_generation: 0,
                 order: VecDeque::new(),
             }),
             max,
@@ -102,15 +104,32 @@ impl NonceReplayGuard {
         }
     }
 
+    /// Reject a live replay without recording or evicting anything. A caller
+    /// must still reserve before signing to close the concurrent-check race.
+    pub fn check(&self, nonce: &[u8; 32]) -> Result<()> {
+        let g = self
+            .inner
+            .lock()
+            .map_err(|e| EnclaveError::Internal(format!("replay guard poisoned: {e}")))?;
+        if g.seen.contains_key(nonce)
+            && g.order
+                .iter()
+                .any(|(seen_at, key)| key == nonce && seen_at.elapsed() < self.ttl)
+        {
+            return Err(EnclaveError::NonceReplay);
+        }
+        Ok(())
+    }
+
     pub fn check_and_record(&self, nonce: [u8; 32]) -> Result<()> {
-        self.check_and_record_at(nonce, Instant::now())
+        self.check_and_record_at(nonce, Instant::now()).map(|_| ())
     }
 
     /// Time-injected core of [`check_and_record`]. `now` is the wall point
     /// against which TTL eviction is measured; the public method passes
     /// `Instant::now()`. Split out so the eviction logic is testable
     /// without sleeping.
-    fn check_and_record_at(&self, nonce: [u8; 32], now: Instant) -> Result<()> {
+    fn check_and_record_at(&self, nonce: [u8; 32], now: Instant) -> Result<u64> {
         let mut g = self
             .inner
             .lock()
@@ -128,9 +147,14 @@ impl NonceReplayGuard {
         }
 
         // 2. Replay check against what survives.
-        if g.seen.contains(&nonce) {
+        if g.seen.contains_key(&nonce) {
             return Err(EnclaveError::NonceReplay);
         }
+
+        let generation = g.next_generation;
+        g.next_generation = generation.checked_add(1).ok_or_else(|| {
+            EnclaveError::Internal("replay reservation generation exhausted".into())
+        })?;
 
         // 3. Hard memory ceiling. If a burst filled the set inside one TTL
         //    window, drop the oldest entries to admit the new nonce rather
@@ -145,9 +169,9 @@ impl NonceReplayGuard {
         }
 
         // 4. Record.
-        g.seen.insert(nonce);
+        g.seen.insert(nonce, generation);
         g.order.push_back((now, nonce));
-        Ok(())
+        Ok(generation)
     }
 
     /// Reserve `nonce`: [`check_and_record`](Self::check_and_record) it and
@@ -159,20 +183,25 @@ impl NonceReplayGuard {
     /// error does not self-block a legitimate retry. Reserving
     /// still rejects a concurrent duplicate up front.
     pub fn reserve(&self, nonce: [u8; 32]) -> Result<ReplayReservation<'_>> {
-        self.check_and_record(nonce)?;
+        self.reserve_at(nonce, Instant::now())
+    }
+
+    fn reserve_at(&self, nonce: [u8; 32], now: Instant) -> Result<ReplayReservation<'_>> {
+        let generation = self.check_and_record_at(nonce, now)?;
         Ok(ReplayReservation {
             guard: self,
             nonce,
+            generation,
             committed: false,
         })
     }
 
-    /// Drop a previously recorded nonce. No-op if it is absent (already
-    /// TTL-evicted). Only used by [`ReplayReservation`] rollback, so it must not
-    /// fail: a poisoned lock is recovered rather than propagated.
-    fn remove(&self, nonce: &[u8; 32]) {
+    /// Remove only the entry owned by this reservation. A missing or replaced
+    /// entry is left alone. Rollback must not fail, so a poisoned lock is recovered.
+    fn remove(&self, nonce: &[u8; 32], generation: u64) {
         let mut g = self.inner.lock().unwrap_or_else(|p| p.into_inner());
-        if g.seen.remove(nonce) {
+        if g.seen.get(nonce) == Some(&generation) {
+            g.seen.remove(nonce);
             if let Some(pos) = g.order.iter().position(|(_, n)| n == nonce) {
                 g.order.remove(pos);
             }
@@ -192,6 +221,7 @@ impl NonceReplayGuard {
 pub struct ReplayReservation<'a> {
     guard: &'a NonceReplayGuard,
     nonce: [u8; 32],
+    generation: u64,
     committed: bool,
 }
 
@@ -205,7 +235,7 @@ impl ReplayReservation<'_> {
 impl Drop for ReplayReservation<'_> {
     fn drop(&mut self) {
         if !self.committed {
-            self.guard.remove(&self.nonce);
+            self.guard.remove(&self.nonce, self.generation);
         }
     }
 }
@@ -631,6 +661,23 @@ mod tests {
     }
 
     #[test]
+    fn replay_precheck_allows_expired_keys_without_recording() {
+        let ttl = Duration::from_secs(60);
+        let guard = NonceReplayGuard::with_capacity(1, ttl);
+        guard
+            .check_and_record_at(nonce(1), Instant::now() - ttl)
+            .unwrap();
+        assert!(guard.check(&nonce(1)).is_ok());
+        assert!(guard.check(&nonce(2)).is_ok());
+        assert_eq!(guard.seen_count(), 1);
+        guard.reserve(nonce(1)).unwrap().commit();
+        assert!(matches!(
+            guard.check(&nonce(1)),
+            Err(EnclaveError::NonceReplay)
+        ));
+    }
+
+    #[test]
     fn replay_guard_rejects_duplicate_within_ttl() {
         let g = NonceReplayGuard::with_capacity(100, Duration::from_secs(3600));
         let t0 = Instant::now();
@@ -663,6 +710,61 @@ mod tests {
             .expect("retry after rollback succeeds")
             .commit();
         assert_eq!(g.seen_count(), 1);
+    }
+
+    #[test]
+    fn stale_rollback_preserves_replacement_after_eviction() {
+        for committed in [false, true] {
+            let g = NonceReplayGuard::with_capacity(1, Duration::from_secs(3600));
+            let key = nonce(1);
+            let old = g.reserve(key).unwrap();
+            g.reserve(nonce(2)).unwrap().commit();
+            let replacement = g.reserve(key).unwrap();
+            let replacement = if committed {
+                replacement.commit();
+                None
+            } else {
+                Some(replacement)
+            };
+
+            drop(old);
+            assert!(matches!(g.reserve(key), Err(EnclaveError::NonceReplay)));
+            drop(replacement);
+            if !committed {
+                assert!(
+                    g.reserve(key).is_ok(),
+                    "the current owner can still roll back"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn stale_rollback_preserves_replacement_after_expiry() {
+        for committed in [false, true] {
+            let ttl = Duration::from_secs(60);
+            let g = NonceReplayGuard::with_capacity(10, ttl);
+            let t0 = Instant::now();
+            let key = nonce(1);
+            let old = g.reserve_at(key, t0).unwrap();
+            let replacement = g.reserve_at(key, t0 + ttl).unwrap();
+            let replacement = if committed {
+                replacement.commit();
+                None
+            } else {
+                Some(replacement)
+            };
+
+            drop(old);
+            assert!(matches!(
+                g.reserve_at(key, t0 + ttl),
+                Err(EnclaveError::NonceReplay)
+            ));
+            drop(replacement);
+            if !committed {
+                assert!(g.reserve_at(key, t0 + ttl).is_ok());
+            }
+        }
     }
 
     #[test]

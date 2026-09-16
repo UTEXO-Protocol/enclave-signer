@@ -77,6 +77,16 @@ struct Cli {
     #[arg(long)]
     expect_helios_checkpoint: Option<String>,
 
+    /// Expected contract whose FundsIn events may authorize bridge signing.
+    /// Required for production verification.
+    #[arg(long)]
+    expect_funds_in_contract: Option<String>,
+
+    /// Expected minimum receipt confirmation depth. Required and non-zero for
+    /// production verification.
+    #[arg(long)]
+    expect_evm_min_confirmations: Option<u64>,
+
     /// Expected gas-tx (`SignRawDigest`) allowed destination the enclave pinned
     /// (`GAS_TX_ALLOWED_TO`), as 0x-hex. Omit if the operator left the gas path
     /// unpinned (the enclave then commits the all-zero destination and fails the
@@ -146,6 +156,26 @@ fn parse_expect_gas_to(s: &Option<String>) -> Result<[u8; 20]> {
     }
 }
 
+fn parse_expect_funds_in_contract(s: &Option<String>) -> Result<[u8; 20]> {
+    let s = s
+        .as_deref()
+        .context("--expect-funds-in-contract required (or pass --mock)")?;
+    let bytes = hex::decode(s.strip_prefix("0x").unwrap_or(s))
+        .with_context(|| format!("--expect-funds-in-contract '{s}' is not hex"))?;
+    bytes.try_into().map_err(|v: Vec<u8>| {
+        anyhow::anyhow!(
+            "--expect-funds-in-contract must be 20 bytes, got {}",
+            v.len()
+        )
+    })
+}
+
+fn parse_expect_evm_min_confirmations(value: Option<u64>) -> Result<u64> {
+    value
+        .filter(|n| *n > 0)
+        .context("--expect-evm-min-confirmations must be specified and greater than zero")
+}
+
 /// Parse `--expect-gas-selectors` (comma-separated 4-byte hex) into selectors.
 /// An empty string yields an empty allowlist.
 fn parse_expect_gas_selectors(s: &str) -> Result<Vec<[u8; 4]>> {
@@ -211,6 +241,10 @@ async fn run(cli: Cli) -> Result<()> {
             allow_vanilla_psbt: cli.expect_vanilla_psbt,
             evm_source,
             evm_checkpoint,
+            funds_in_contract: parse_expect_funds_in_contract(&cli.expect_funds_in_contract)?,
+            evm_min_confirmations: parse_expect_evm_min_confirmations(
+                cli.expect_evm_min_confirmations,
+            )?,
             gas_tx_allowed_to: parse_expect_gas_to(&cli.expect_gas_tx_to)?,
             gas_tx_max_gas_limit: cli.expect_gas_max_gas_limit,
             gas_tx_max_fee_per_gas: cli.expect_gas_max_fee_per_gas,

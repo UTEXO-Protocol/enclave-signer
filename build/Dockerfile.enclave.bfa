@@ -2,7 +2,7 @@
 # BFA mint enclave image (vsock + rgb + evm-rpc + bfa-mint) - the
 # Private Cargo dependencies require BuildKit secrets (see README, Building).
 # Supply github_token, or one deploy key per repo; keys never enter image layers.
-# Example: docker build --secret id=github_token,env=GITHUB_TOKEN -f build/Dockerfile.enclave.bfa .
+# Example: docker build --secret id=github_token,env=GITHUB_TOKEN --build-arg RGB_ASSET_ID="$RGB_ASSET_ID" -f build/Dockerfile.enclave.bfa .
 # Production builder glibc must remain compatible with the AL2023 runtime.
 FROM rust:1.96-slim-bullseye@sha256:c593596210f729542a92aced6a8b0812bcc8d04c5f1b238e663b800d0e2e17bd AS builder
 
@@ -82,11 +82,11 @@ RUN chmod +x /app/utexo-bridge-enclave /app/entrypoint.sh
 # TWO-CONTRACT deployment: the EVM funds-out EIP-712 verifyingContract is the
 # MultisigProxy (EVM_PROXY_CONTRACT_ADDRESS), which DIFFERS from the bridge
 # *entry* contract that emits FundsIn (FUNDS_IN_CONTRACT, set below).
-# The BFA asset id is a BUILD ARG with no default, unlike every other image
-# here: each BFA contract id is per-deployment, and baking
+# The BFA asset id is a BUILD ARG with no pinned default: each BFA contract id
+# is per-deployment, and baking
 # the swap asset would make this enclave refuse every mint at
-# `networks/rgb/mod.rs` after the EVM RPC has already been paid. Empty leaves
-# the config partially pinned, which `policy.rs` refuses at boot.
+# `networks/rgb/mod.rs` after the EVM RPC has already been paid. The build
+# helper and Dockerfile both reject an empty pin before building the image.
 #   --build-arg RGB_ASSET_ID=rgb:<the issued BFA contract id>
 # Note the pin is single-valued, so this EIF signs for the BFA asset only.
 ARG RGB_ASSET_ID=""

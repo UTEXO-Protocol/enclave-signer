@@ -20,7 +20,7 @@ use thiserror::Error;
 
 pub mod policy;
 pub use policy::{
-    AttestationMode, AttestedPolicy, BtcDataSource, EvmDataSource, POLICY_COMMITMENT_V2,
+    AttestationMode, AttestedPolicy, BtcDataSource, EvmDataSource, POLICY_COMMITMENT_V3,
 };
 
 // Public types

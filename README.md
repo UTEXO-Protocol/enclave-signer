@@ -224,8 +224,23 @@ profile. CI asserts every guard fires.
 DOCKERFILE=Dockerfile.enclave.rgb       ./build/build-enclave.sh
 DOCKERFILE=Dockerfile.enclave.mint-burn ./build/build-enclave.sh
 DOCKERFILE=Dockerfile.enclave.ccd       ./build/build-enclave.sh
-DOCKERFILE=Dockerfile.enclave.bfa       ./build/build-enclave.sh
+# Set RGB_ASSET_ID to the approved, issued BFA contract id first.
+RGB_ASSET_ID="${RGB_ASSET_ID:?Set the approved BFA contract id}" \
+  DOCKERFILE=Dockerfile.enclave.bfa ./build/build-enclave.sh
 ```
+
+BFA builds require an explicit `RGB_ASSET_ID`: the helper rejects a missing or
+blank value and forwards the asset as a Docker build argument.
+For direct Docker builds, supply `--build-arg RGB_ASSET_ID="$RGB_ASSET_ID"`.
+The asset is baked into the measured image; a host runtime environment override
+is not the provisioning path. Use the approved BFA asset, not the swap asset.
+
+Before deploying BFA, record the image/EIF checksum, approved asset, measured
+PCRs, registered key, and Parent endpoint together. Verify a genuine BFA request
+succeeds and an opposite-flow request is rejected. The current `build-eif`
+workflow does not publish a BFA variant; coordinate image publication and
+producer routing separately. BTC payout-budget validation (F06-AF-40) remains
+a separate control from this asset-provisioning fix (F06-NEW-AF-19).
 
 All Dockerfiles resolve private dependencies. Supply either a GitHub token
 with read access to those repositories, or the same per-repository deploy keys
@@ -339,7 +354,7 @@ Bridge pins (all three required for a `Production` policy):
 | `EVM_CHAIN_ID` | `0` | Pinned chain id. Must match the destination chain and the direct-route `destinationChainId`. |
 | `EVM_PROXY_CONTRACT_ADDRESS` | zero | MultisigProxy address: EIP-712 `verifyingContract` and the `to` of the payable `lzFundsOutCall` carve-out. Attested as `bridge_contract`. |
 | `RGB_ASSET_ID` | empty | Pinned RGB contract id. Enforced on every bridge PSBT, and on `fundsOut` when the bridge is configured. |
-| `FUNDS_IN_CONTRACT` | falls back to the proxy | Emitter of `FundsIn` / `BridgeFundsIn`. Set it explicitly when the two contracts differ. Not yet in the attested commitment. |
+| `FUNDS_IN_CONTRACT` | falls back to the proxy | Attested emitter of `FundsIn` / `BridgeFundsIn`. It must resolve to a non-zero address in production. |
 
 Value bounds (fail closed while unset in a production build):
 
@@ -365,7 +380,7 @@ Data sources and transport:
 | `ESPLORA_VSOCK_PORT` | `8001` | Host vsock-proxy port for the resolver. |
 | `EVM_RPC_URL` | `http://127.0.0.1:3444` | Loopback EVM JSON-RPC (`evm-rpc`). A non-loopback value is replaced by the default. |
 | `EVM_RPC_VSOCK_PORT` | `8002` | Host vsock-proxy port for the EVM RPC. |
-| `EVM_MIN_CONFIRMATIONS` | `12` | Minimum depth of a `FundsIn` receipt. |
+| `EVM_MIN_CONFIRMATIONS` | `12` | Attested minimum depth of a `FundsIn` receipt; zero is rejected at production boot. |
 | `ENCLAVE_LISTEN_ADDR` | `127.0.0.1:5000` | TCP listen address, non-vsock builds only. |
 | `RUST_LOG` | unset | Log filter. |
 
