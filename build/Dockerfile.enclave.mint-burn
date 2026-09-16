@@ -85,6 +85,13 @@ RUN chmod +x /app/utexo-bridge-enclave /app/entrypoint.sh
 # TWO-CONTRACT deployment: the EVM funds-out EIP-712 verifyingContract is the
 # MultisigProxy (EVM_PROXY_CONTRACT_ADDRESS), which DIFFERS from the bridge
 # *entry* contract that emits FundsIn (FUNDS_IN_CONTRACT, set below).
+# The BFA asset id is a BUILD ARG with no default, unlike every other image
+# here: each BFA contract id is per-deployment, and baking
+# the swap asset would make this enclave refuse every mint at
+# `networks/rgb/mod.rs` after the EVM RPC has already been paid. Empty leaves
+# the config partially pinned, which `policy.rs` refuses at boot.
+#   --build-arg RGB_ASSET_ID=rgb:<the issued BFA contract id>
+# Note the pin is single-valued, so this EIF signs for the BFA asset only.
 ARG RGB_ASSET_ID=""
 RUN test -n "$RGB_ASSET_ID"
 ENV EVM_CHAIN_ID=42161 \

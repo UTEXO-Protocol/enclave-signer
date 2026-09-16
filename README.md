@@ -224,8 +224,12 @@ profile. CI asserts every guard fires.
 DOCKERFILE=Dockerfile.enclave.rgb       ./build/build-enclave.sh
 DOCKERFILE=Dockerfile.enclave.mint-burn ./build/build-enclave.sh
 DOCKERFILE=Dockerfile.enclave.ccd       ./build/build-enclave.sh
-DOCKERFILE=Dockerfile.enclave.bfa       ./build/build-enclave.sh
 ```
+
+`Dockerfile.enclave.mint-burn` is the shipped BFA mint/burn image: `bfa-mint`
+pulls in `rgb-mint-burn` and `bfa-validation`, and `bfa-validation` pulls in
+`evm-rpc`. It needs `--build-arg RGB_ASSET_ID=rgb:<contract id>`, which has no
+default because each BFA contract id is per-deployment.
 
 All Dockerfiles resolve private dependencies. Supply either a GitHub token
 with read access to those repositories, or the same per-repository deploy keys
