@@ -645,7 +645,7 @@ mod tests {
         }
 
         #[test]
-        fn rejects_an_ifa_burn_that_names_no_recipient() {
+        fn rejects_a_burn_that_names_no_recipient() {
             let cd = mock_funds_out_calldata_to(Address::from(RECIPIENT), 1000, Bytes::new());
             let validated = validated_with_last(burn_transition(Some(1000), None));
             assert!(validate_funds_out_burn_recipient(&params_of(&cd), &validated).is_err());

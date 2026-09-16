@@ -242,9 +242,14 @@ fn dispatch(request: EnclaveRequest, ctx: &ServerContext) -> EnclaveResponse {
                 Err(unsupported_build("ccd"))
             }
         }
-        Some(Request::ProxyFederation(req)) => {
+        Some(Request::ProxyFederation(_req)) => {
             tracing::info!("request: ProxyFederation");
-            handle_proxy_federation(req)
+            return EnclaveResponse {
+                response: Some(Response::Error(ErrorResponse {
+                    code: 1,
+                    message: "unsupported request".into(),
+                })),
+            };
         }
         Some(Request::InitiateCloning(req)) => {
             tracing::info!("request: InitiateCloning");
@@ -1378,16 +1383,6 @@ fn handle_sign_ccd(state: &EnclaveState, req: SignCcdRequest) -> Result<EnclaveR
             // key to locate this signature's index on the governance account.
             // Read from the same call that signed.
             public_key: public_key.to_vec(),
-        })),
-    })
-}
-
-fn handle_proxy_federation(_req: ProxyFederationRequest) -> Result<EnclaveResponse> {
-    // Stub: federation proxy requires Listener integration (not yet wired)
-    Ok(EnclaveResponse {
-        response: Some(Response::Error(ErrorResponse {
-            code: 2, // NOT_READY
-            message: "federation proxy not yet connected to Listener".into(),
         })),
     })
 }
