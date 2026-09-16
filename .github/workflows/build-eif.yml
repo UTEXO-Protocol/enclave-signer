@@ -159,6 +159,7 @@ jobs:
           # F03-AF-12: empty for normal/tag builds (PCR0 unchanged); set only via
           # manual workflow_dispatch to produce an UNSAFE debug EIF.
           ENCLAVE_DEBUG_FEATURES: ${{ github.event.inputs.debug_features || '' }}
+          RGB_ASSET_ID: ${{ vars.BFA_RGB_ASSET_ID }}
         run: |
           set -euxo pipefail
           mkdir -p "$OUT_DIR"

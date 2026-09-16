@@ -294,8 +294,8 @@ witness txid, input prevouts == witness prevouts, `SIGHASH_ALL` / taproot
 build's flow accepts, and the group's asset outputs are checked against the
 credited amount. Which transition is accepted is the build's RGB flow:
 `TS_TRANSFER` under `rgb-swap` (coverage `>=`, since the surplus is bridge
-change), `TS_INFLATION` under `rgb-mint-burn` -- joined by `TS_BRIDGE` in a
-`bfa-mint` build -- with a strict `==`, since any surplus is an over-mint.
+change), `TS_BRIDGE` under `rgb-mint-burn` with a strict `==`, since any
+surplus is an over-mint.
 Independently, every `OS_ASSET` output is split into legs: a confidential
 (blinded) leg is the recipient, a revealed leg MUST be proven self-owned
 (script equality with an input the enclave co-signs, at most 4 off-PSBT change
@@ -515,7 +515,7 @@ delegated to the receiving contract and known gaps. Enforced checks fail closed.
 | P3  | unlock amount equals the consignment-derived amount         | OK -- the amount is the burn's `MS_BURNED_ASSET` (host `rgb_amount` is ignored) and MUST equal `fundsOut.amount` exactly (`flow::assert_funds_out_amount`; `fundsOut.amount` is gross, commission is taken on-chain). Swap: coverage (`>=`), since a transfer's `total_output_amount` includes the sender's change leg |
 | P4  | calldata is well-formed                                     | OK -- two allowlisted selectors (`fundsOut`, `lzFundsOut`), 64 KiB cap, canonical ABI decode + re-encode byte-equality, `destinationChainId` rule per route |
 | P5  | payload binds destination chain / contract / **recipient**  | OK -- chain + contract pinned; the BFA burn carries `MS_BURN_RECIPIENT` and the enclave refuses a release whose calldata names a different address. Swap gap: this burn-recipient check does not apply to transfers |
-| P6 | release identifiers and settlement | BFA checks canonical ABI and exact set equality of `(operationId, netAmount)` ancestry locks, with no duplicates and at least one lock. It does not derive `burnId` or `sourceAddress` from the RGB OpId. Plain IFA mint/burn does not run the settlement check. |
+| P6 | release identifiers and settlement | BFA checks canonical ABI and exact set equality of `(operationId, netAmount)` ancestry locks, with no duplicates and at least one lock. It does not derive `burnId` or `sourceAddress` from the RGB OpId. |
 | P7  | referenced Bitcoin txs are in accepted chain history        | OK                                                                                                                                                               |
 | P8  | Bitcoin inclusion proofs valid against the in-enclave chain | OK; plus the calldata `proof` is required (fail-closed): `source.height` is pinned to the block anchoring the consignment's last witness tx (re-verified under one lock guard), the enclave must hold a header at `latest.height`, and `latest` must be within `MAX_RELAY_TIP_LAG_BLOCKS = 100` of the enclave tip. The two `commitmentHash` words are **not** checked in-enclave: they are BtcRelay's `keccak256(StoredBlockHeader)` over relay-internal state (chainWork, lastDiffAdjustment, last ten timestamps), which the enclave cannot compute; `RGBVerifier` verifies each against the relay itself, so a manipulated commitment reverts on-chain (#57/#122) |
 | P9  | corresponding EVM lock record exists for the same operation | on-chain for this direction; for EVM->RGB the enclave verifies `FundsIn` itself (Sec 7.2)                                                                         |
@@ -595,8 +595,7 @@ Known limits to account for before deployment:
   BFA settlement validation binds the set of ancestry deposits, not every
   release field or its unique encoding/order. See Sec 9.
 - **Swap authorization:** the amount floor includes transfer change, and the
-  burn-recipient check does not apply to swaps. Plain IFA mint/burn does not
-  perform the BFA settlement check.
+  burn-recipient check does not apply to swaps.
 - **EVM/CCD trust:** supplied images use raw EVM RPC; CCD source validation
   trusts the listener. Optional Helios is implemented but absent from those
   images and the CI production feature matrix.

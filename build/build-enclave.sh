@@ -34,9 +34,9 @@
 #   PRIVATE_DEPS_DIR       alternatively, directory of per-repository key files
 #                          (consignment_key, consensus_key, ops_key, schemas_key)
 #   RGB_ASSET_ID           issued RGB contract id (e.g. rgb:<...>). REQUIRED for
-#                          Dockerfile.enclave.bfa, which declares it as a build
-#                          arg with no default; forwarded as --build-arg. Every
-#                          other image bakes a fixed asset via ENV and ignores it.
+#                          any selected Dockerfile declaring ARG RGB_ASSET_ID
+#                          (combined, rgb, mint-burn and bfa). Forwarded once as
+#                          --build-arg; images with a fixed ENV ignore it.
 # NOTE: the donor cloning secret is NOT baked into the EIF. It is delivered at
 # runtime via the InitializeKey message (CLI: `init --cloning-secret <secret>`),
 # keeping the build secret-free and the PCRs reproducible.
@@ -89,9 +89,9 @@ fi
 mkdir -p "$OUT_DIR"
 
 # --- 0. Required build args -------------------------------------------------
-# The BFA image (Dockerfile.enclave.bfa) is the only variant that declares
-# `ARG RGB_ASSET_ID` with no default: a BFA contract id differs from the IFA one
-# by construction, so it cannot be baked as a fixed ENV like the other images.
+# BFA-capable images declare `ARG RGB_ASSET_ID` with no default. Require the
+# issued BFA contract id for those recipes; an old IFA asset is not compatible.
+# A recipe with a fixed ENV pin does not require an external build argument.
 # If the helper does not forward it, the build silently produces an EIF whose
 # RGB_ASSET_ID is empty -> partially-pinned config that `policy.rs` refuses at
 # boot (a dead artifact discovered only on the host). Detect the required build

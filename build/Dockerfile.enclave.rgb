@@ -53,7 +53,7 @@ RUN --mount=type=secret,id=github_token \
     --mount=type=secret,id=consensus_key \
     --mount=type=secret,id=ops_key \
     --mount=type=secret,id=schemas_key \
-    sh /build/build/with-private-deps.sh enclave cargo build --release --locked --no-default-features --features vsock,rgb,rgb-swap,evm-rpc
+    sh /build/build/with-private-deps.sh enclave cargo build --release --locked --no-default-features --features vsock,rgb,rgb-swap,bfa-validation
 
 
 # --- Runtime ---
@@ -95,9 +95,11 @@ RUN chmod +x /app/utexo-bridge-enclave /app/entrypoint.sh
 # TWO-CONTRACT deployment: the EVM funds-out EIP-712 verifyingContract is the
 # MultisigProxy (EVM_PROXY_CONTRACT_ADDRESS), which DIFFERS from the bridge
 # *entry* contract that emits FundsIn (FUNDS_IN_CONTRACT, set below).
+ARG RGB_ASSET_ID=""
+RUN test -n "$RGB_ASSET_ID"
 ENV EVM_CHAIN_ID=42161 \
     EVM_PROXY_CONTRACT_ADDRESS=0xC985c12bbCECe96A13A72A62FD75d8aB9381ef5A \
-    RGB_ASSET_ID=rgb:lJFja2kw-h_azlEd-7CNPxwf-UsvIDhH-UD0Y1f9-8f26jLk \
+    RGB_ASSET_ID=${RGB_ASSET_ID} \
     BITCOIN_NETWORK=bitcoin \
     ELECTRUM_URL=ssl://electrs-mainnet.utexo.com:50002
 
