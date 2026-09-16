@@ -47,16 +47,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let service = ParentAdapterService::new(target, cfg.evm_network_ids);
     let listen_addr = std::net::SocketAddr::new(cfg.grpc_host.parse()?, cfg.grpc_port);
 
-    // Perimeter / DoS hardening for the donor gRPC adapter (F03-AF-13). The
-    // clone seed-export path is already gated cryptographically (HMAC cloning
-    // secret + requester attestation + PCR + pubkey/digest binding + nonce);
-    // these limits are defense-in-depth so an unauthenticated peer cannot pin
-    // unbounded work or hold connections/streams open indefinitely:
-    //   - GlobalConcurrencyLimitLayer: shared semaphore caps in-flight requests
-    //     across ALL connections (opening more sockets does not raise the cap).
-    //   - concurrency_limit_per_connection + max_concurrent_streams: bound the
-    //     per-connection fan-out.
-    //   - timeout: shed a request whose handler hangs instead of leaking a permit.
+    // Limit active requests across all connections. (F03-AF-13)
+    // Also limit requests per connection and handler duration.
+    // Clone authentication still applies inside the enclave.
     let per_conn = cfg.grpc_max_concurrent_per_conn;
     tracing::info!(
         %listen_addr,

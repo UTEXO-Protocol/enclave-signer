@@ -1,6 +1,6 @@
-//! F03-AF-08 handler/state regression tests. The mock attestation envelope is
-//! deliberately valid for this verifier, but has NO NSM signature. Real signed
-//! stage evidence is tracked separately; this suite isolates commitment checks.
+//! F03-AF-08: test identity commitments before state changes.
+//! These tests use mock attestation without an NSM signature.
+//! Real NSM tests run separately.
 #![cfg(all(feature = "mock-attestation", feature = "allow-seed-import"))]
 #[path = "common/clone_commitment.rs"]
 mod clone_commitment;
@@ -139,8 +139,7 @@ fn clone_identity_rejects_each_bundle_and_policy_field_before_active_and_allows_
         altered.donor_attestation =
             attestation::get_attestation(nonce, Some(&original.donor_pubkey), Some(&wrong))
                 .unwrap();
-        // Establish that the attestation layer accepts this envelope, so a
-        // rejection cannot be mistaken for bad signature/PCR/pubkey framing.
+        // Confirm that attestation checks pass before testing the commitment.
         let v = attestation::verify_peer_attestation(
             &altered.donor_attestation,
             &attestation::get_own_pcrs().unwrap(),

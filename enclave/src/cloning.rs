@@ -97,22 +97,9 @@ impl std::fmt::Debug for CloneSession {
     }
 }
 
-/// Compute HMAC-SHA256(secret, encryption_pubkey ‖ target_cluster_pk).
-///
-/// Proves the holder of the cloning secret authorized the request without
-/// sending the secret, AND binds the request to the *intended donor cluster
-/// identity* (F03-AF-07). Both message parts are fixed-width (32 + 20 bytes),
-/// so the concatenation is unambiguous without a length prefix.
-///
-/// Why bind the target: without it the digest is target-agnostic, so a
-/// malicious/relaying parent can take a requester armed for cluster identity X
-/// and replay it to a donor of a *different* cluster identity Y (setting the
-/// plaintext `cluster_public_key` wire field to Y to satisfy the donor's own
-/// self-check). The donor Y would then export its sealed seed before the
-/// requester's downstream identity check can reject the mismatched result. With
-/// the target folded in, the requester's digest is computed over X while donor
-/// Y recomputes over its own identity Y → the HMAC mismatches and Y refuses to
-/// export at all.
+/// Compute HMAC-SHA256(secret, encryption_pubkey || target_cluster_pk).
+/// Bind the request to its recipient key and intended donor. (F03-AF-07)
+/// The fixed field sizes are 32 bytes and 20 bytes.
 pub fn make_cloning_digest(
     secret: &str,
     encryption_pubkey: &[u8; 32],
@@ -125,8 +112,7 @@ pub fn make_cloning_digest(
     mac.finalize().into_bytes().into()
 }
 
-/// Constant-time verification of a cloning digest, including the target
-/// cluster-identity binding (F03-AF-07).
+/// Check the cloning digest in constant time, including the donor identity.
 pub fn verify_cloning_digest(
     secret: &str,
     encryption_pubkey: &[u8; 32],
@@ -137,25 +123,15 @@ pub fn verify_cloning_digest(
     expected.ct_eq(digest).into()
 }
 
-/// Fail-closed strength floor for an operator-supplied cloning secret
-/// (F03-AF-26). The secret is used *directly* as the HMAC-SHA256 key in
-/// [`make_cloning_digest`], so a captured `(encryption_pubkey, digest)` pair
-/// lets an attacker offline-brute-force a weak secret and forge requester
-/// authorization. 32 bytes is the minimum accepted length.
+/// Minimum cloning-secret length in bytes. (F03-AF-26)
 pub const MIN_CLONING_SECRET_BYTES: usize = 32;
 
-/// Minimum distinct byte values - a cheap floor against degenerate low-entropy
-/// secrets (`"aaaa..."`, `"0101..."`). A uniformly random 32-byte secret has
-/// ~32 distinct bytes; even hex-encoded (16 symbols) it clears this. This is a
-/// floor, NOT an entropy oracle (true entropy of an arbitrary string is
-/// unknowable in-enclave), so the operator still owns generation/rotation.
+/// Minimum number of distinct secret bytes.
+/// This check rejects repeated values but does not measure entropy.
 pub const MIN_CLONING_SECRET_DISTINCT_BYTES: usize = 8;
 
-/// Reject an empty / too-short / degenerate-entropy cloning secret before it is
-/// ever used as an HMAC key (F03-AF-26). Called on both entry points: the donor
-/// `init` ([`crate::state::EnclaveState::set_donor_cloning_secret`]) and the
-/// requester `InitiateCloning` handler. Wire-compatible: the secret is still
-/// carried the same way, only trivially weak values are now refused fail-closed.
+/// Reject weak secrets before donor init or InitiateCloning. (F03-AF-26)
+/// The operator must generate a random secret and manage its rotation.
 pub fn validate_cloning_secret(secret: &str) -> Result<()> {
     let bytes = secret.as_bytes();
     if bytes.is_empty() {
@@ -317,8 +293,7 @@ mod tests {
 
     #[test]
     fn validate_secret_accepts_64_hex() {
-        // Shape of the real stage secret: 32 random bytes hex-encoded ->
-        // 64 chars, 16 distinct symbols.
+        // Test a 64-character hexadecimal secret.
         let s = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
         assert_eq!(s.len(), 64);
         assert!(validate_cloning_secret(s).is_ok());
@@ -350,9 +325,7 @@ mod tests {
 
     #[test]
     fn digest_rejects_wrong_target_cluster_pk() {
-        // F03-AF-07: a digest armed for target X must not verify against a
-        // different donor cluster identity Y, even with the same secret and
-        // encryption pubkey. This is the core relay-to-wrong-donor guard.
+        // Reject a different donor identity with the same secret and requester key. (F03-AF-07)
         let secret = "correct horse battery staple";
         let pubkey = [7u8; 32];
         let digest = make_cloning_digest(secret, &pubkey, &[0xAAu8; 20]);
@@ -486,17 +459,9 @@ mod tests {
         assert_eq!(ct.len(), 64 + 16);
     }
 
-    // ---- F03-AF-25: independent byte-level reference vectors ----
-    //
-    // A round trip through the same implementation only proves the encrypt and
-    // decrypt halves agree with *each other*; it cannot catch an unintended
-    // shared convention (a wrong domain string, pubkey order, encoding or nonce)
-    // that both sides happen to honour. These vectors pin every intermediate
-    // byte of the cloning transcript against values produced by a SEPARATE,
-    // OpenSSL-backed implementation (Python `cryptography` / `hmac`), so a silent
-    // change to the wire crypto is caught in CI and an independently built peer
-    // stays compatible. Vectors were produced by an OpenSSL-backed generator
-    // (Python `cryptography`/`hmac`) over fixed inputs, then pinned here.
+    // F03-AF-25: fixed vectors from Python cryptography and hmac.
+    // The independent implementation uses OpenSSL.
+    // Check each step to detect changes to the wire format.
 
     /// Decode a fixed-width hex constant into a byte array.
     fn hexn<const N: usize>(s: &str) -> [u8; N] {
@@ -517,9 +482,7 @@ mod tests {
         assert_eq!(make_cloning_digest(secret, &pubkey, &target), want);
         assert!(verify_cloning_digest(secret, &pubkey, &target, &want));
 
-        // AF-07 target binding at the byte level: the SAME secret+pubkey with a
-        // one-byte-different target maps to an independently-computed, distinct
-        // digest — never back to `want`.
+        // Compare a one-byte target change with an independent digest. (F03-AF-07)
         let target_b = hexn::<20>("06111c27323d48535e69747f8a95a0abb6c1ccd7");
         let want_b = hexn::<32>("642b1bb86f3e1b0526fb3932fa85ea1695b4e8feaa07607826158cccf805518e");
         assert_eq!(make_cloning_digest(secret, &pubkey, &target_b), want_b);
@@ -528,9 +491,7 @@ mod tests {
 
     #[test]
     fn af25_seed_seal_reference_vector() {
-        // Reference for the full donor->requester seal chain
-        // X25519 -> HKDF-SHA256 -> ChaCha20Poly1305(IETF, zero nonce), every
-        // stage cross-checked against the OpenSSL-backed implementation.
+        // Check X25519, HKDF-SHA256, and ChaCha20Poly1305 against independent vectors.
         let req_sk = hexn::<32>("0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20");
         let donor_sk =
             hexn::<32>("404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f");

@@ -179,16 +179,9 @@ pub fn build_mock_document_with_pcrs(
 
 // Shared helpers
 
-/// Production fail-closed guard against debug-mode enclaves (F03-AF-12 /
-/// F02-AF-08). A genuine enclave measured in production has non-zero PCR0/1/2;
-/// all-zero PCRs mean it booted in debug mode with NO measurement. Since every
-/// debug enclave shares those all-zero PCRs, accepting them would let any debug
-/// EIF (with a genuine NSM signature) impersonate the trusted enclave — the
-/// bytewise `verify_pcrs` check passes when both expected and actual are zero.
-///
-/// Compiled in only when the `allow-debug-pcrs` feature is OFF (the release
-/// default); a debug EIF built with the feature skips this and accepts zero
-/// PCRs so stage clone drills can run in `ENCLAVE_DEBUG_MODE`.
+/// Reject all-zero PCR0/1/2. (F03-AF-12 / F02-AF-08)
+/// Debug enclaves share these values, so they cannot identify a trusted image.
+/// The allow-debug-pcrs feature disables this check for debug tests.
 #[cfg(not(feature = "allow-debug-pcrs"))]
 fn reject_debug_pcrs(pcrs: &HashMap<u32, Vec<u8>>) -> Result<()> {
     let all_zero = [0u32, 1, 2].iter().all(|idx| {
@@ -310,9 +303,7 @@ IwLz3/Y=
 
         let nonce = check_nonce(&attestation.nonce, expected_nonce)?;
 
-        // F03-AF-12: reject debug-mode (all-zero) PCRs before the bytewise
-        // expected/actual comparison, so a zeroed `expected` cannot match a
-        // zeroed `actual`. Compiled out under `allow-debug-pcrs` (debug EIFs).
+        // Reject all-zero PCRs before comparing them with expected values. (F03-AF-12)
         #[cfg(not(feature = "allow-debug-pcrs"))]
         reject_debug_pcrs(&attestation.pcrs)?;
 
@@ -594,11 +585,9 @@ IwLz3/Y=
             let value: ciborium::Value = ciborium::from_reader(data)
                 .map_err(|e| VerifyError::Attestation(format!("invalid CBOR: {e}")))?;
 
-            // RFC 8152 §2: a COSE_Sign1 object may be serialized bare (a 4-item
-            // array) or wrapped in CBOR tag 18. AWS NSM emits the bare form, but
-            // accept the tagged form for interop (F03-AF-14). Only tag 18 is
-            // unwrapped; any other tag is rejected. Every crypto check below is
-            // unchanged - this only strips a standards-compliant envelope.
+            // Accept a bare COSE_Sign1 array or CBOR tag 18. (RFC 8152, F03-AF-14)
+            // Reject other tags.
+            // The signature checks below still apply.
             let value = match value {
                 ciborium::Value::Tag(18, inner) => *inner,
                 ciborium::Value::Tag(tag, _) => {
@@ -1027,8 +1016,7 @@ mod mock {
 mod tests {
     use super::*;
 
-    // F03-AF-12: the debug-PCR guard is compiled in only for the production
-    // (default) build; a debug EIF (`allow-debug-pcrs`) skips it by design.
+    // Test the zero-PCR check when allow-debug-pcrs is disabled. (F03-AF-12)
     #[cfg(not(feature = "allow-debug-pcrs"))]
     #[test]
     fn reject_debug_pcrs_flags_all_zero_but_allows_measured() {
@@ -1042,8 +1030,8 @@ mod tests {
             "all-zero PCR0/1/2 must be rejected by the production verifier"
         );
 
-        // A single measured (non-zero) PCR is enough to clear the debug guard;
-        // the real bytewise expected/actual check still runs afterwards.
+        // One nonzero PCR passes this check.
+        // The verifier must still compare all expected PCR values.
         let mut measured = all_zero.clone();
         measured.insert(0u32, vec![1u8; 48]);
         assert!(reject_debug_pcrs(&measured).is_ok());

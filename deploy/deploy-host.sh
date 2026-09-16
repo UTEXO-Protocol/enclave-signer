@@ -1,29 +1,15 @@
 #!/usr/bin/env bash
-# Deploy the enclave-signer cluster on THIS host from S3 by git_sha.
+# Deploy the matching EIF, Parent, and CLI from S3 for one git_sha.
+# Verify checksums and PCRs before starting the services.
+# Start enclave CIDs 16/18/20 and Parent ports 50051/52/53.
 #
-# Pulls the matching {EIF, parent, cli} set (published by the build-eif CI
-# workflow under eif/<git_sha>/), verifies checksums and PCRs, installs systemd
-# units + Nitro udev/tmpfiles rules, then runs 3 enclaves (CID 16/18/20) + 3
-# parents (gRPC 50051/52/53) as systemd services so the cluster survives a reboot.
-# Artifact-only: the host never builds or clones the repo.
+# Initialize or clone keys after deployment.
+# Put --addr vsock://<CID>:5000 before the CLI subcommand.
+# Donor: cli --addr vsock://16:5000 init --cloning-secret-file <path>
+# Requester: cli --addr vsock://16:5000 clone ...
+# Restart clears enclave keys; systemd restores only the processes.
 #
-# It does NOT bootstrap identity. A fresh/restarted enclave has no key; after this
-# run, with the REQUIRED top-level `--addr vsock://<CID>:5000` (CID 16/18/20; or set
-# ENCLAVE_VSOCK_CID) placed BEFORE the subcommand - the vsock CLI refuses to guess a CID:
-#   `utexo-bridge-parent-cli --addr vsock://16:5000 init  --cloning-secret ...`  on a donor, or
-#   `utexo-bridge-parent-cli --addr vsock://16:5000 clone ...`                   on a requester.
-# (Identity lives in enclave memory and is lost
-# on restart/reboot - see TODO #5 for KMS-sealed DR. #7 only makes the PROCESSES
-# come back automatically; the enclaves come up empty.)
-#
-# The systemd units / ctl scripts / udev / tmpfiles installed here are embedded
-# below as heredocs so this script is self-contained over SSM. They are the same
-# files kept (canonical, reviewable) under deploy/systemd/ in the repo - keep both
-# in sync.
-#
-# Usage (run as root, e.g. via SSM):
-#   GIT_SHA=<40-hex> BUCKET=<s3-bucket> AWS_REGION=<region> CLUSTER_DIR=<path> bash deploy-host.sh
-# No infra identifiers or paths are baked in (public repo) - pass them via env.
+# Keep the embedded service files in sync with deploy/systemd/.
 set -euo pipefail
 
 GIT_SHA="${GIT_SHA:?GIT_SHA required (40-hex commit)}"
@@ -45,9 +31,8 @@ declare -A PORT=([16]=50051 [18]=50052 [20]=50053)
 log(){ echo "[deploy $(date -u +%H:%M:%S)] $*"; }
 asubuntu(){ su - ubuntu -c "$1"; }
 
-# F03-AF-13: bind parent gRPC to the private ENI, not 0.0.0.0. Stage hosts have
-# no public IP today, but 0.0.0.0 would expose the adapter on any future public
-# interface. Override with GRPC_HOST=<addr> if you must bind elsewhere.
+# Bind Parent gRPC to the private host address. (F03-AF-13)
+# Set GRPC_HOST to override the address.
 if [ -z "${GRPC_HOST:-}" ]; then
   _tok=$(curl -fsS -X PUT "http://169.254.169.254/latest/api/token" \
     -H "X-aws-ec2-metadata-token-ttl-seconds: 60")
@@ -58,8 +43,8 @@ if [ -z "${GRPC_HOST:-}" ]; then
 fi
 log "parent gRPC bind GRPC_HOST=$GRPC_HOST (private ENI)"
 
-# Provision per-CID certificates and ACLs before deployment. Never generate or
-# fetch private keys into an EIF/build artifact. Check BEFORE stopping services.
+# Check each CID certificate and ACL before stopping services.
+# Keep private keys out of build artifacts.
 PARENT_TLS_DIR="${PARENT_TLS_DIR:-/etc/utexo/tls}"
 [[ "$PARENT_TLS_DIR" =~ ^/[a-zA-Z0-9_./-]+$ ]] || { log "invalid PARENT_TLS_DIR"; exit 1; }
 for CID in "${CIDS[@]}"; do
@@ -269,11 +254,8 @@ done
 # step 3 already verified the artifact). Only meaningful for a production EIF.
 if [ "$ENCLAVE_DEBUG_MODE" = "1" ]; then
   log "ENCLAVE_DEBUG_MODE=1 — skipping runtime PCR0 check (PCRs zeroed under --debug-mode)"
-  # Still assert the exact enclave set (F09-AF-07): an empty/partial list is a FAIL.
-  # NB: write to a file and json.load() the file (NOT a pipe into `python3 -
-  # <<'PY'`): the heredoc already occupies stdin for the program text, so a
-  # piped `describe-enclaves` would be discarded and json.load(sys.stdin) reads
-  # empty -> JSONDecodeError, aborting the deploy before step 7 (parents).
+  # Check the complete CID set, including in debug mode.
+  # Read JSON from a file because the Python heredoc uses stdin.
   asubuntu 'nitro-cli describe-enclaves' > /tmp/desc.json
   python3 - "${CIDS[*]}" <<'PY'
 import json, sys

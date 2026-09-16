@@ -20,10 +20,8 @@ pub struct CloningSession {
     pub session: CloneSession,
     /// 20-byte EVM address of the donor we intend to clone from.
     pub cluster_public_key: [u8; 20],
-    /// Monotonic instant the handshake was opened (`InitiateCloning`). Used to
-    /// expire an abandoned session so a fresh initiation can replace it
-    /// (F03-AF-01). `Instant` is monotonic, so it is immune to wall-clock steps
-    /// (e.g. the PTP clock-sync adjustments).
+    /// Monotonic start time for session expiry. (F03-AF-01)
+    /// Wall-clock changes do not affect it.
     created_at: Instant,
 }
 
@@ -32,8 +30,7 @@ impl CloningSession {
         Self::new_at(session, cluster_public_key, Instant::now())
     }
 
-    /// [`new`](Self::new) with an injectable open time, so the expiry logic is
-    /// testable without sleeping.
+    /// Create a session with a fixed start time for expiry tests.
     fn new_at(session: CloneSession, cluster_public_key: [u8; 20], created_at: Instant) -> Self {
         Self {
             session,
@@ -42,8 +39,7 @@ impl CloningSession {
         }
     }
 
-    /// True once the session has outlived [`CLONING_SESSION_TTL`] measured
-    /// against `now`; such a session is treated as abandoned.
+    /// Return true when the session reaches [`CLONING_SESSION_TTL`].
     fn is_expired(&self, now: Instant) -> bool {
         now.saturating_duration_since(self.created_at) >= CLONING_SESSION_TTL
     }
@@ -65,14 +61,10 @@ const DEFAULT_NONCE_TTL: Duration = Duration::from_secs(60 * 60);
 /// Default hard memory ceiling on recorded nonces.
 const DEFAULT_NONCE_MAX: usize = 10_000;
 
-/// How long an in-progress `Cloning` handshake stays valid before it is treated
-/// as abandoned (F03-AF-01). During this window the requester holds only an
-/// ephemeral X25519 secret and NO seed, so replacing a stale session is safe.
-/// The full donor round-trip completes in seconds; five minutes generously
-/// covers a slow multi-stage CLI while letting a wedged requester self-recover
-/// (a lost `InitiateCloning` response or a failed CLI run) without a restart. A
-/// still-live session is still protected, so a concurrent duplicate cannot
-/// hijack an in-flight handshake.
+/// Time limit for a Cloning session. (F03-AF-01)
+/// An expired session can be replaced without a restart.
+/// The requester has no seed in this state.
+/// Reject replacement while the session is still valid.
 const CLONING_SESSION_TTL: Duration = Duration::from_secs(5 * 60);
 
 /// Default TTL for the PSBT bridge-operation dedup guard. Much longer than the
@@ -86,71 +78,28 @@ const DEFAULT_OP_DEDUP_TTL: Duration = Duration::from_secs(24 * 60 * 60);
 /// than wedging signing. See [`EnclaveState::op_replay_guard`].
 const DEFAULT_OP_DEDUP_MAX: usize = 100_000;
 
-/// Env var naming a **soft** alerting threshold on the number of times this
-/// donor instance has exported its seed via `GetClone` (F03-AF-10, telemetry
-/// slice). `0` (the default when unset/invalid) disables the threshold: export
-/// is *never* blocked here, because a hard quota is a custody/recovery policy
-/// decision the owner must version (a wrong cap breaks legitimate re-cloning).
-/// When set > 0, crossing it only emits a loud warning so operators can alert
-/// on anomalous export volume without changing handshake behavior.
+/// Environment variable for the export warning threshold. (F03-AF-10)
+/// An unset, zero, or invalid value disables the threshold.
+/// This threshold does not block exports.
 const CLONE_EXPORT_SOFT_CAP_ENV: &str = "CLONE_EXPORT_SOFT_CAP";
 
-/// Env var naming an optional **hard** quota on the number of successful seed
-/// exports this donor instance will serve via `GetClone` (F03-AF-10, opt-in
-/// enforcement slice). `0` (the default when unset/invalid) disables it — the
-/// shipped default behaviour is unchanged (export never blocked), so a legitimate
-/// recovery re-clone is never broken by an operator who has not opted in.
-/// When set to `N > 0`, exactly `N` exports are allowed and the `N+1`-th is
-/// **rejected fail-closed** *after* full authentication (secret + attestation +
-/// PCR + pubkey/digest binding) but *before* the seed is sealed. The concrete
-/// number stays an owner custody choice; this only provides the mechanism.
-/// Volatile (resets on restart) — matches the volatile export counter; picking a
-/// durable/cluster-wide quota is the deferred owner decision (see OWNER-DECISIONS).
+/// Environment variable for the export limit per enclave process. (F03-AF-10)
+/// An unset, zero, or invalid value disables the limit.
+/// A positive value limits successful exports.
+/// Check the limit after authentication and before encryption.
+/// Restart resets the count.
+/// Each enclave has a separate count.
 const CLONE_EXPORT_HARD_CAP_ENV: &str = "CLONE_EXPORT_HARD_CAP";
 
-/// Replay guard for attestation nonces, bounded by **time** (not just
-/// count) so a flooding parent cannot permanently wedge cloning.
-///
-/// Every incoming peer attestation contributes its nonce, and duplicates are
-/// rejected. Each entry carries the instant it was seen, and `check_and_record`
-/// first evicts entries older than `ttl`. `max` is a hard memory ceiling: when
-/// the set is still full after eviction, the oldest entry is dropped to admit
-/// the new one.
-///
-/// Rejecting when full instead would let a parent flood `max` distinct nonces
-/// and block every legitimate handshake. The trade-off is a
-/// bounded replay window: replaying an evicted nonce only re-seals the seed to
-/// the encryption pubkey already bound inside that attestation.
-///
-/// # Security posture — bounded-volatile freshness (F03-AF-09, DECIDE)
-///
-/// This guard is deliberately **per-instance and in-memory (volatile)**, and we
-/// accept that as the shipped posture. Its explicit limits:
-///
-/// - **Restart clears it.** After an enclave restart the set is empty, so a
-///   nonce seen before the restart would be admitted again.
-/// - **No cross-instance / sibling freshness.** A nonce accepted by donor A is
-///   unknown to a sibling donor B; the set is not shared cluster-wide.
-/// - **Overflow evicts oldest** (availability over strict rejection), giving a
-///   bounded replay window inside a `ttl`.
-///
-/// Why this is acceptable without durable/cluster-wide state: a replayed nonce
-/// does **not** create a new recipient or leak the seed to an unauthorised
-/// party. Every accepted `GetClone` is already gated by peer attestation +
-/// PCR match + the `encryption_pubkey`↔attestation binding + the HMAC cloning
-/// digest (including the AF-07 target-cluster binding) + the AF-26 secret
-/// strength floor. The digest is computed over the encryption pubkey, so a
-/// replay can only ever re-seal the seed to the **same** pubkey already
-/// authorised inside that transcript — i.e. to a recipient the operator already
-/// approved. The replay guard is therefore defense-in-depth against
-/// resubmission, not the sole control on seed export.
-///
-/// Making freshness **durable and cluster-wide** (surviving restart, shared
-/// across sibling donors, closing the sibling-guard gap) is a deliberate
-/// **owner decision** deferred here: it requires cross-instance shared state
-/// plus versioning/migration/rollback, whereas the audit notes that changing
-/// only the local `ttl`/`max` needs no migration. Until then the posture above
-/// is the documented, accepted position (see `OWNER-DECISIONS` D2/AF-09).
+/// Track nonces in memory for one enclave. (F03-AF-09)
+/// Restart clears the set.
+/// Each enclave has a separate set.
+/// Reject duplicate nonces in the set.
+/// Remove entries after their time limit.
+/// Evict the oldest entry when the set is full.
+/// A replay still needs valid attestation, PCRs, key binding, and HMAC.
+/// The HMAC binds the request to the same recipient key and donor.
+/// Persistent or shared replay protection requires a separate policy decision.
 pub struct NonceReplayGuard {
     inner: Mutex<GuardState>,
     max: usize,
@@ -347,29 +296,25 @@ pub struct EnclaveState {
     /// durable guard is an on-chain ticket.
     pub op_replay_guard: NonceReplayGuard,
 
-    /// Lifetime count of successful seed exports served by this instance as a
-    /// donor (F03-AF-10). An `Active` donor never consumes its seed, so it can
-    /// export repeatedly; this counter makes that observable and also backs the
-    /// export telemetry. The separate reservation counter enforces the
-    /// opt-in hard quota ([`Self::reserve_export_quota`]). By default it only
-    /// observes (no gating); a hard cap is opt-in because a wrong cap would block
-    /// legitimate recovery re-clones. Volatile (resets on restart): an alerting
-    /// signal + coarse custody bound, not a durable ledger.
+    /// Successful exports from this enclave process. (F03-AF-10)
+    /// Restart resets the count.
+    /// The separate slot counter enforces the hard quota.
     seed_export_count: AtomicU64,
 
     /// Successful exports plus exports in flight. Reserving a slot atomically
     /// prevents concurrent GetClone calls from exceeding the per-instance cap.
     seed_export_slots: AtomicU64,
 
-    /// Soft alerting threshold for [`Self::seed_export_count`]. `0` disables it
-    /// (the default). Read once at construction from
-    /// [`CLONE_EXPORT_SOFT_CAP_ENV`]; crossing it warns but never blocks.
+    /// Warning threshold for [`Self::seed_export_count`].
+    /// Read [`CLONE_EXPORT_SOFT_CAP_ENV`] at startup.
+    /// Zero disables the threshold.
+    /// This threshold does not block exports.
     seed_export_soft_cap: u64,
 
-    /// Optional **hard** export quota (F03-AF-10, opt-in). `0` disables it (the
-    /// default); `N > 0` allows exactly `N` successful exports and rejects the
-    /// rest fail-closed. Read once at construction from
-    /// [`CLONE_EXPORT_HARD_CAP_ENV`]. See [`Self::reserve_export_quota`].
+    /// Maximum successful exports for this enclave process.
+    /// Read [`CLONE_EXPORT_HARD_CAP_ENV`] at startup.
+    /// Zero disables the limit.
+    /// See [`Self::reserve_export_quota`].
     seed_export_hard_cap: u64,
 }
 
@@ -427,13 +372,12 @@ impl EnclaveState {
         }
     }
 
-    /// Opt-in **hard** export-quota gate (F03-AF-10). Returns `Err` when a hard
-    /// cap is configured (`CLONE_EXPORT_HARD_CAP > 0`) and this instance has
-    /// already reserved that many slots, so the caller rejects `GetClone`
-    /// *before* sealing the seed. Slots cover completed and in-flight exports;
-    /// failed exports release their reservation on drop. Disabled by default
-    /// (`cap == 0`), so existing recovery re-clones are unaffected. This is a
-    /// strict concurrent bound within one process, not a durable cluster ledger.
+    /// Reserve a slot before encrypting the seed. (F03-AF-10)
+    /// Count successful exports and exports in progress against the limit.
+    /// Return an error when no slot is available.
+    /// An error before commit releases the slot.
+    /// Zero disables the limit.
+    /// Restart resets all slots.
     pub fn reserve_export_quota(&self) -> Result<ExportQuotaReservation<'_>> {
         let cap = self.seed_export_hard_cap;
         if cap > 0 {
@@ -465,10 +409,10 @@ impl EnclaveState {
         })
     }
 
-    /// Record a successful donor seed export and return the new lifetime count
-    /// (F03-AF-10, telemetry). Emits a security-relevant log on every export;
-    /// if a soft cap is configured and now exceeded, emits an additional loud
-    /// warning. Never blocks - enforcement is an owner custody-policy decision.
+    /// Record a successful export and return the count. (F03-AF-10)
+    /// Log each export.
+    /// Emit a warning above the configured soft cap.
+    /// This method does not enforce the hard quota.
     pub fn record_seed_export(&self, requester_pk: &[u8; 32]) -> u64 {
         let count = self.seed_export_count.fetch_add(1, Ordering::Relaxed) + 1;
         tracing::warn!(
@@ -496,14 +440,9 @@ impl EnclaveState {
         self.network
     }
 
-    /// Configure the donor-side cloning secret. Called at startup from an
-    /// operator-provided env var (e.g. `UTEXO_CLONING_SECRET`). Idempotent
-    /// and overwrites any previous value. The secret is wrapped in
-    /// `SecretBox` for zeroize-on-drop.
-    ///
-    /// Rejects empty / too-short / degenerate-entropy secrets fail-closed
-    /// (F03-AF-26): the value is used directly as an HMAC key, so a weak
-    /// secret is offline-brute-forceable from a captured digest.
+    /// Set the donor cloning secret after checking its strength. (F03-AF-26)
+    /// Replace any previous secret.
+    /// SecretBox clears the bytes when it is dropped.
     pub fn set_donor_cloning_secret(&self, secret: String) -> Result<()> {
         validate_cloning_secret(&secret)?;
         let mut guard = self
@@ -568,21 +507,13 @@ impl EnclaveState {
         Ok(())
     }
 
-    /// Transition `-> Cloning`, consuming the supplied session.
-    ///
-    /// Allowed from `Initial`, or from a `Cloning` phase whose session has
-    /// expired (F03-AF-01): an abandoned handshake (a lost `InitiateCloning`
-    /// response or a failed CLI run) no longer wedges the requester until a
-    /// restart - a fresh initiation replaces it once the old one is past
-    /// [`CLONING_SESSION_TTL`]. A still-live `Cloning` session and any `Active`
-    /// phase are rejected with `AlreadyInitialized`.
+    /// Enter Cloning from Initial or an expired Cloning session. (F03-AF-01)
+    /// Return AlreadyInitialized for a valid Cloning session or Active state.
     pub fn enter_cloning(&self, session: CloningSession) -> Result<()> {
         self.enter_cloning_at(session, Instant::now())
     }
 
-    /// Time-injected core of [`enter_cloning`]. `now` is the point the existing
-    /// session's expiry is measured against; the public method passes
-    /// `Instant::now()`. Split out so the expiry logic is testable.
+    /// Use an explicit time to test session expiry.
     fn enter_cloning_at(&self, session: CloningSession, now: Instant) -> Result<()> {
         let mut guard = self.lock_phase()?;
         match &*guard {
@@ -770,8 +701,7 @@ mod tests {
 
     #[test]
     fn seed_export_counter_increments_monotonically() {
-        // F03-AF-10 (telemetry): each donor export bumps the lifetime counter
-        // and returns the new value; it never blocks regardless of count.
+        // Each successful export increases the counter. (F03-AF-10)
         let state = EnclaveState::new(Network::Bitcoin);
         assert_eq!(state.seed_export_count(), 0);
         assert_eq!(state.record_seed_export(&[1u8; 32]), 1);
@@ -841,9 +771,7 @@ mod tests {
         assert!(matches!(err, EnclaveError::KeyNotInitialized));
     }
 
-    // F03-AF-10: opt-in hard export quota admits exactly `cap` exports, then
-    // refuses fail-closed. Field is set directly (same-module) to avoid a
-    // process-global env-var race across parallel tests.
+    // Set the cap directly to avoid environment changes in parallel tests. (F03-AF-10)
     #[test]
     fn export_hard_cap_blocks_after_quota() {
         let mut state = EnclaveState::new(Network::Bitcoin);
@@ -944,8 +872,7 @@ mod tests {
         assert!(matches!(err, EnclaveError::AlreadyInitialized));
     }
 
-    // AF-01: an abandoned Cloning session must not wedge the requester until a
-    // restart. A live session is protected; one past the TTL is replaceable.
+    // Replace an expired session without a restart. (F03-AF-01)
     #[test]
     fn enter_cloning_replaces_expired_but_protects_live_session() {
         let state = EnclaveState::new(Network::Bitcoin);
@@ -960,8 +887,7 @@ mod tests {
             .unwrap();
         assert_eq!(state.phase_name(), "cloning");
 
-        // A second initiation while the session is still live is rejected,
-        // so a concurrent duplicate cannot hijack the in-flight handshake.
+        // Reject a second request while the session is valid.
         let err = state
             .enter_cloning_at(
                 CloningSession::new_at(CloneSession::new(), [2u8; 20], t0),
@@ -976,8 +902,7 @@ mod tests {
             })
             .unwrap();
 
-        // Once the session is past the TTL it is abandoned: a fresh initiation
-        // replaces it and self-recovers the requester without a restart.
+        // Replace the session after its time limit.
         let later = t0 + CLONING_SESSION_TTL + Duration::from_secs(1);
         state
             .enter_cloning_at(

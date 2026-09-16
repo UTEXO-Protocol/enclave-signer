@@ -562,13 +562,10 @@ fn main() {
     }
 }
 
-/// Resolve the operator cloning secret WITHOUT forcing it onto the command line
-/// (F03-AF-06). A `--cloning-secret <value>` arg is visible in `ps`, shell
-/// history and SSM command logs, so the secret can be observed by any host-level
-/// viewer and reused to authorize another requester. Priority (most to least
-/// preferred): `--cloning-secret-file` > `UTEXO_CLONING_SECRET` env >
-/// `--cloning-secret` (deprecated; warns). Returns `Ok(None)` only when every
-/// source is absent, which is valid for `init` on a non-donor enclave.
+/// Read the secret from file, environment, or the deprecated argument, in that order.
+/// Command-line arguments can expose the secret in process lists and logs. (F03-AF-06)
+/// Return None if all sources are absent.
+/// Init without a donor secret permits this result.
 fn resolve_cloning_secret(
     arg: Option<String>,
     file: Option<PathBuf>,

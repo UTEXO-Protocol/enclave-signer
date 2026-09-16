@@ -60,16 +60,8 @@ impl ParentAdapterService {
             tokio::task::spawn_blocking(move || {
                 use crate::framing;
 
-                // F03-AF-18: the outer `tokio::time::timeout` stops *awaiting*
-                // this task but cannot cancel a `spawn_blocking` thread, and a
-                // cancelled caller likewise leaves the thread running. Without
-                // socket deadlines an enclave that accepts the connection but
-                // never replies (or a black-holed address) would pin this
-                // blocking-pool thread indefinitely, well past the 30s public
-                // timeout, so repeated abandoned calls could exhaust the pool.
-                // Bound connect + read + write on BOTH transports so the thread
-                // always returns within ENCLAVE_TIMEOUT even after the outer
-                // timeout has already fired.
+                // The outer timeout cannot stop a blocking worker. (F03-AF-18)
+                // Use socket timeouts to limit each transport operation.
                 match target {
                     EnclaveTarget::Tcp(addr) => {
                         use std::net::ToSocketAddrs;
@@ -103,7 +95,7 @@ impl ParentAdapterService {
                             .map_err(|e| {
                                 Status::unavailable(format!("enclave vsock connection failed: {e}"))
                             })?;
-                        // Previously the vsock branch had NO socket deadlines.
+                        // Limit blocking reads and writes.
                         stream.set_read_timeout(Some(ENCLAVE_TIMEOUT)).ok();
                         stream.set_write_timeout(Some(ENCLAVE_TIMEOUT)).ok();
                         framing::write_message(&mut stream, &req)
@@ -127,11 +119,7 @@ impl ParentAdapterService {
     /// Unwrap an enclave error response into a gRPC Status.
     fn enclave_error_to_status(err: &enclave_proto::ErrorResponse) -> Status {
         match err.code {
-            // ERROR_CODE_NOT_READY: enclave reached but not in a state that can
-            // serve this call yet (uninitialised, wrong FSM state, or a build
-            // without the SPV header chain). This is a caller-visible,
-            // retryable/precondition condition — surfacing it as INTERNAL (5xx
-            // semantics) hid it behind generic server errors (F03-AF-11).
+            // Report NotReady as unavailable so the caller can retry. (F03-AF-11)
             2 => Status::unavailable(err.message.clone()),
             3 => Status::failed_precondition(err.message.clone()),
             _ => Status::internal(format!(
@@ -672,20 +660,9 @@ impl ParentService for ParentAdapterService {
         }
     }
 
-    /// Initialize - generates fresh keys in the enclave from OS entropy and,
-    /// if a cloning secret is supplied, configures this enclave as a donor that
-    /// can serve clone requests.
-    ///
-    /// F03-AF-27: the public `InitializeRequest.cloning_secret` field is exactly
-    /// that - the donor cloning secret - and must be routed to the enclave's
-    /// `cloning_secret` field, mirroring the direct init path
-    /// (`EnclaveClient::initialize_keys_with_secret`). Previously it was
-    /// misrouted into the enclave's `mnemonic` (seed-import) field with an empty
-    /// donor secret, so on a release build (no `allow-seed-import`) any nonempty
-    /// value was rejected and the enclave stayed Initial, never becoming a
-    /// usable donor. Mnemonic/seed import stays an operator-only path
-    /// (CLI `init-mnemonic` / `init-seed`, gated by `allow-seed-import`); it is
-    /// intentionally NOT reachable through this public provisioning RPC.
+    /// Generate fresh enclave keys and set the optional donor secret.
+    /// Map cloning_secret to the enclave cloning_secret field. (F03-AF-27)
+    /// This RPC does not import a mnemonic or seed.
     async fn initialize(
         &self,
         request: Request<InitializeRequest>,

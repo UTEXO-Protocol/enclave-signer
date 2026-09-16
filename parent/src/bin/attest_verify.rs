@@ -77,23 +77,22 @@ struct Cli {
     #[arg(long)]
     expect_helios_checkpoint: Option<String>,
 
-    /// Operator's intended EVM chain id. When set, verification FAILS unless the
-    /// enclave attests exactly this chain. Omit to authenticate the wire value
-    /// without comparing it. Ignored with --mock.
+    /// Require this EVM chain ID in the attestation.
+    /// Omit to verify the reported value without comparison.
+    /// Ignored with --mock.
     #[arg(long)]
     expect_chain_id: Option<u64>,
 
-    /// Operator's intended bridge/MultisigProxy contract as 0x-hex (20 bytes).
-    /// When set, verification FAILS unless the enclave attests exactly this
-    /// contract. Omit to authenticate the wire value without comparing it.
+    /// Require this bridge or MultisigProxy address as 20-byte 0x-hex.
+    /// Omit to verify the reported value without comparison.
     /// Ignored with --mock.
     #[arg(long)]
     expect_bridge_contract: Option<String>,
 
-    /// Operator's intended RGB asset id. When set, verification FAILS unless the
-    /// enclave attests exactly this asset. Pass an empty string to pin "no RGB
-    /// asset" (pure-EVM / pure-CCD builds). Omit to authenticate the wire value
-    /// without comparing it. Ignored with --mock.
+    /// Require this RGB asset ID in the attestation.
+    /// Use an empty string to require no RGB asset.
+    /// Omit to verify the reported value without comparison.
+    /// Ignored with --mock.
     #[arg(long)]
     expect_rgb_asset_id: Option<String>,
 
@@ -166,8 +165,7 @@ fn parse_expect_gas_to(s: &Option<String>) -> Result<[u8; 20]> {
     }
 }
 
-/// Parse a required `0x`-hex 20-byte address flag (e.g.
-/// `--expect-bridge-contract`) into 20 bytes.
+/// Parse a required 20-byte address in 0x-hex format.
 fn parse_hex20(s: &str, flag: &str) -> Result<[u8; 20]> {
     let stripped = s.strip_prefix("0x").unwrap_or(s);
     let bytes = hex::decode(stripped).with_context(|| format!("{flag} '{s}' is not hex"))?;

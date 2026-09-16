@@ -24,11 +24,7 @@ default = []
 # and verify them without cert-chain checks. PCR/nonce/pubkey binding still
 # enforced. Tests-only.
 mock = []
-# UNSAFE, debug builds ONLY. When OFF (production/release default), the real
-# verifier rejects attestation documents whose PCR0/1/2 are all zero, i.e.
-# enclaves booted in debug mode with no measurement (F03-AF-12 / F02-AF-08):
-# otherwise ANY debug EIF, sharing all-zero PCRs, could impersonate the trusted
-# enclave. When ON, all-zero PCRs are accepted so debug/stage clone drills (which
-# run enclaves in ENCLAVE_DEBUG_MODE) can verify each other. NEVER enable in a
-# production EIF.
+# Accept all-zero PCR0/1/2 for debug tests. (F03-AF-12 / F02-AF-08)
+# Debug PCRs cannot identify the peer image.
+# Do not enable this feature in production builds.
 allow-debug-pcrs = []

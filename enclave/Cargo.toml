@@ -134,11 +134,8 @@ spv = ["rgb-validation"]
 # Mock attestation path: skip NSM / COSE / cert-chain checks and use raw CBOR docs.
 # Testing only — never enable in production builds.
 mock-attestation = ["attestation-verify/mock"]
-# DANGER, debug EIFs ONLY (F03-AF-12): accept all-zero PCR0/1/2 in the real
-# peer-attestation verifier so stage clone drills running in ENCLAVE_DEBUG_MODE
-# (which zeroes the runtime PCRs) can verify each other. Production/release EIFs
-# MUST be built without this — otherwise any debug enclave, sharing all-zero
-# PCRs, could impersonate the trusted one. Never enable in a production build.
+# Accept all-zero peer PCRs for debug clone tests. (F03-AF-12)
+# Do not enable this feature in production builds.
 allow-debug-pcrs = ["attestation-verify/allow-debug-pcrs"]
 # Independent in-enclave EVM `FundsIn` event verification for signPsbt.
 # Default-OFF. When ON, bridge-mode signPsbt fetches the deposit receipt via an

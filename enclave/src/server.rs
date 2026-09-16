@@ -1090,9 +1090,9 @@ fn canonical_pubkey_bundle(keys: &PublicKeysResponse) -> Vec<u8> {
     out
 }
 
-/// Clone response v1: exact identity/policy equality, tied to this sealed response.
-/// The version is inside signed NSM user_data; no protobuf relay changes needed.
-/// All inputs are public. Fixed-size transcript fields follow the bundle hash.
+/// Bind the v1 identity and policy to this encrypted clone response.
+/// NSM signs the version and commitment in user_data.
+/// The transcript contains only public values.
 fn clone_commitment(
     bundle: &PublicKeysResponse,
     policy: &[u8],
@@ -1513,8 +1513,7 @@ fn handle_initiate_cloning(
     state: &EnclaveState,
     req: InitiateCloningRequest,
 ) -> Result<EnclaveResponse> {
-    // F03-AF-26: fail-closed strength gate (also covers the empty case). The
-    // secret is the HMAC key, so a weak one is offline-brute-forceable.
+    // Reject weak cloning secrets before use. (F03-AF-26)
     cloning::validate_cloning_secret(&req.cloning_secret)?;
     let cluster_public_key: [u8; 20] =
         req.cluster_public_key.as_slice().try_into().map_err(|_| {
@@ -1528,11 +1527,7 @@ fn handle_initiate_cloning(
     let encryption_pubkey = session.public_key();
 
     let nonce = fresh_nonce()?;
-    // F03-AF-07: bind the digest to the *target* cluster identity this
-    // requester intends to clone from. In a legitimate clone the donor shares
-    // this same cluster identity, so `cluster_public_key` here == the donor's
-    // own EVM address. Folding it in stops a relaying parent from redirecting
-    // this armed request to a donor of a different identity.
+    // Bind the digest to the intended donor EVM address. (F03-AF-07)
     let cloning_digest =
         cloning::make_cloning_digest(&req.cloning_secret, &encryption_pubkey, &cluster_public_key);
 
@@ -1595,17 +1590,9 @@ fn handle_get_clone(ctx: &ServerContext, req: GetCloneRequest) -> Result<Enclave
         )));
     }
 
-    // 2. Digest authenticity: HMAC(donor_secret, encryption_pubkey ‖ our_evm)
-    //    must match. Proves the caller holds the operator's cloning secret AND
-    //    that the request was armed for *this* donor's cluster identity
-    //    (F03-AF-07). We bind to `req_cluster_pk`, which step 1 already proved
-    //    equals `our_evm`, so a request armed for a different identity fails
-    //    here before any seed is exported. This gate uses only cheap wire
-    //    values, so it runs BEFORE the expensive attestation verification
-    //    below: an unauthenticated caller is rejected without tying up a worker
-    //    on certificate-chain / COSE-signature work (F03-AF-20). The
-    //    pubkey/digest bindings (steps 4-5) still tie these same wire values to
-    //    the NSM-signed attestation, so moving this up loosens nothing.
+    // 2. Check the HMAC against the requester key and donor address. (F03-AF-07)
+    // Reject unauthorized requests before costly attestation checks. (F03-AF-20)
+    // Steps 4 and 5 bind these values to the signed document.
     state.with_donor_cloning_secret(|secret| {
         if !cloning::verify_cloning_digest(secret, &req_encryption_pk, &req_cluster_pk, &req_digest)
         {
@@ -1638,23 +1625,15 @@ fn handle_get_clone(ctx: &ServerContext, req: GetCloneRequest) -> Result<Enclave
         return Err(EnclaveError::DigestMismatch);
     }
 
-    // 5b. Optional hard export-quota gate (F03-AF-10, opt-in via
-    //     CLONE_EXPORT_HARD_CAP). Runs only after the request is fully
-    //     authenticated (so it cannot be probed/tripped by an unauthenticated
-    //     caller) and before any nonce is reserved or seed is sealed, so a
-    //     quota-refused request neither consumes replay capacity nor produces
-    //     ciphertext. Reserve atomically across workers; any later error drops
-    //     the reservation and returns its slot. Disabled by default (cap 0).
+    // 5b. Reserve an export slot after authentication. (F03-AF-10)
+    // Use an atomic reservation to enforce the cap across workers.
+    // A later error releases the slot.
+    // A zero cap disables the limit.
     let export_reservation = state.reserve_export_quota()?;
 
-    // 6. Reserve the nonce from the verified document (replay-check + record
-    //    with rollback-on-drop), only after the checks above have passed so an
-    //    unauthenticated handshake never consumes replay-guard capacity. With
-    //    the count-cap removal this closes the secret-less cloning-availability
-    //    DoS. The reservation is committed only after the seal + donor
-    //    attestation below succeed (F03-AF-02 / F03-AF-04): a transient failure
-    //    after the record rolls the nonce back, so a legitimate retry is not
-    //    self-blocked by its own earlier attempt.
+    // 6. Reserve the verified nonce after authentication. (F03-AF-02 / F03-AF-04)
+    // Commit it after encryption and donor attestation succeed.
+    // An error releases the nonce so the requester can retry.
     let nonce_array: [u8; 32] = verified
         .nonce
         .as_slice()
@@ -1684,11 +1663,8 @@ fn handle_get_clone(ctx: &ServerContext, req: GetCloneRequest) -> Result<Enclave
     // Seal + donor attestation succeeded: keep the nonce recorded.
     reservation.commit();
 
-    // F03-AF-10 (telemetry): a donor never consumes its seed, so it can export
-    // repeatedly. Make each export observable (and optionally alert on volume
-    // via CLONE_EXPORT_SOFT_CAP). Hard enforcement, when opted in via
-    // CLONE_EXPORT_HARD_CAP, already ran fail-closed at step 5b above; the
-    // concrete quota number stays an owner custody choice (see OWNER-DECISIONS).
+    // Record the successful export. (F03-AF-10)
+    // The hard quota already applies through the reserved slot.
     let export_count = export_reservation.commit(&req_encryption_pk);
     tracing::info!(
         cluster_pk = %hex::encode(our_evm),
@@ -1730,13 +1706,8 @@ fn handle_set_clone(ctx: &ServerContext, req: SetCloneRequest) -> Result<Enclave
         return Err(EnclaveError::PubkeyMismatch);
     }
 
-    // 3. Extract and freshness-reserve the donor nonce BEFORE mutating state
-    //    (F03-AF-03). Placed after the pubkey binding above so a rejected /
-    //    unauthenticated handshake never consumes replay-guard capacity, but
-    //    before `complete_cloning` so a malformed (wrong-length) or replayed
-    //    donor nonce cannot drive the Cloning -> Active transition. The
-    //    reservation rolls back on any failure below, so the state transition
-    //    and the replay record commit together or not at all.
+    // 3. Validate and reserve the donor nonce before changing state. (F03-AF-03)
+    // An error releases the reservation.
     let nonce_array: [u8; 32] = verified
         .nonce
         .as_slice()
@@ -1744,10 +1715,9 @@ fn handle_set_clone(ctx: &ServerContext, req: SetCloneRequest) -> Result<Enclave
         .map_err(|_| EnclaveError::Attestation("attestation nonce has wrong length".into()))?;
     let reservation = state.replay_guard.reserve(nonce_array)?;
 
-    // 4. Decrypt seed, derive KeyManager, identity check, and commit the
-    //    Cloning -> Active transition - all atomically under the state
-    //    lock via `complete_cloning`. On any failure the state stays in
-    //    Cloning, the reservation rolls back, and the handshake can be retried.
+    // 4. Check the decrypted identity and policy before setting Active.
+    // Hold the state lock for the complete operation.
+    // On error, keep Cloning and release the nonce for a retry.
     let network = state.network();
     let mut cluster_public_key = [0u8; 20];
     state.complete_cloning(|session| {

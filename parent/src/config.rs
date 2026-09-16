@@ -23,16 +23,13 @@ pub struct Config {
     /// EVM network IDs - TRANSACTION with these network_ids routes to signEVM.
     pub evm_network_ids: HashSet<u32>,
 
-    /// Global cap on in-flight gRPC requests across ALL connections. Bounds the
-    /// work an unauthenticated peer can pin on the donor adapter regardless of
-    /// how many connections it opens (F03-AF-13, defense-in-depth).
+    /// Maximum active gRPC requests across all connections. (F03-AF-13)
     pub grpc_max_concurrent: usize,
 
     /// Per-connection cap on concurrent in-flight gRPC requests / HTTP/2 streams.
     pub grpc_max_concurrent_per_conn: usize,
 
-    /// Hard per-request timeout for the gRPC server. Sheds requests that hang
-    /// the handler (e.g. a slow enclave leg) instead of holding a permit forever.
+    /// Time limit for each gRPC handler.
     pub grpc_request_timeout_secs: u64,
 }
 

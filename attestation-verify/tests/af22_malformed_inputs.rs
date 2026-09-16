@@ -1,22 +1,10 @@
-//! F03-AF-22 — generated malformed-input evidence for the attestation parsers.
-//!
-//! The 4 MiB frame cap bounds how many bytes are *admitted*, but does not by
-//! itself prove bounded *processing* of every malformed protobuf/CBOR/COSE
-//! structure inside those bytes. This harness feeds a bounded, deterministic
-//! corpus — empty, every single byte, deterministic garbage, CBOR type
-//! confusion, truncated length headers, and moderate nesting — into the COSE +
-//! CBOR verifiers and asserts each input is handled gracefully: a rejecting
-//! `Err`, never a panic, hang, or unbounded allocation.
-//!
-//! Every input is at most a few KiB (well under the enclave's 4 MiB frame cap),
-//! so simply *completing* the run is the bounded-processing evidence the audit
-//! asks for. This is a probe harness, not a discovered exploit: a failure here
-//! (panic/crash/hang) would itself be the finding to fix.
+//! F03-AF-22: test malformed CBOR and COSE inputs.
+//! Use fixed inputs of a few KiB with limited nesting.
+//! These cases test rejection and panic handling, not all possible inputs.
 
 use attestation_verify::{verify_attestation, ExpectedPcrs};
 
-/// Deterministic (reproducible) pseudo-random byte source — a plain LCG so the
-/// corpus is identical on every run and in CI, with no external `rand` dep.
+/// Generate the same test bytes on each run without an external dependency.
 fn lcg_byte(state: &mut u64) -> u8 {
     *state = state
         .wrapping_mul(6364136223846793005)
@@ -24,14 +12,7 @@ fn lcg_byte(state: &mut u64) -> u8 {
     (*state >> 33) as u8
 }
 
-/// Build the bounded malformed-input corpus. Categories:
-///   - empty / every single byte (major-type coverage at the CBOR head),
-///   - deterministic garbage of assorted lengths,
-///   - well-formed CBOR of the *wrong* shape (type confusion vs the expected
-///     COSE array / attestation map),
-///   - truncated CBOR length headers (byte/array claim a length, body absent),
-///   - moderate definite-length array nesting (recursive `Value` decode),
-///     capped well below any stack-overflow threshold.
+/// Build fixed cases for empty data, invalid types, truncation, and nesting.
 fn malformed_corpus() -> Vec<Vec<u8>> {
     let mut out: Vec<Vec<u8>> = Vec::new();
 
@@ -64,16 +45,13 @@ fn malformed_corpus() -> Vec<Vec<u8>> {
     out.push(vec![0xc1, 0x00]); // wrong CBOR tag (1) instead of 18
     out.push(vec![0xd2, 0x80]); // tag 18 wrapping an empty array (not 4 items)
 
-    // truncated length headers — claim a length, provide no body. Bounded
-    // claims (<= 4 KiB) so a length-driven pre-allocation cannot blow memory.
+    // Claim up to 4 KiB without a body to test truncated length headers.
     out.push(vec![0x5a, 0x00, 0x00, 0x10, 0x00]); // byte string, len 4096, empty body
     out.push(vec![0x7a, 0x00, 0x00, 0x10, 0x00]); // text string, len 4096, empty body
     out.push(vec![0x9a, 0x00, 0x00, 0x10, 0x00]); // array, 4096 items, none present
     out.push(vec![0xba, 0x00, 0x00, 0x10, 0x00]); // map, 4096 pairs, none present
 
-    // moderate definite-length array nesting: `[[[ ... 0 ... ]]]`, exercises the
-    // recursive `ciborium::Value` decode in COSE parsing. Depths are kept well
-    // below any stack-overflow threshold (a few hundred small frames at most).
+    // Use nested arrays to test recursive decoding with limited depth.
     for depth in [16usize, 128] {
         let mut v = vec![0x81u8; depth]; // `depth` nested 1-element arrays
         v.push(0x00); // innermost element = integer 0
@@ -83,18 +61,15 @@ fn malformed_corpus() -> Vec<Vec<u8>> {
     out
 }
 
-/// The real (production) verifier requires a valid AWS Nitro certificate chain
-/// and ES384 signature, so NO crafted input can legitimately verify. Every
-/// corpus entry must therefore return `Err`, and — the load-bearing property —
-/// the whole run must complete without a panic, crash, hang or OOM.
+/// Reject each malformed input without a panic.
+/// No input has a valid Nitro certificate chain and signature.
 #[test]
 fn af22_real_verifier_rejects_every_malformed_input_gracefully() {
     let pcrs = ExpectedPcrs::zero();
     let nonce = [0u8; 32];
 
     for (i, input) in malformed_corpus().iter().enumerate() {
-        // No expected nonce and, separately, a fixed expected nonce: both paths
-        // must reject without panicking.
+        // Test with and without an expected nonce.
         let r1 = verify_attestation(input, &pcrs, None);
         assert!(
             r1.is_err(),
@@ -110,11 +85,9 @@ fn af22_real_verifier_rejects_every_malformed_input_gracefully() {
     }
 }
 
-/// Mock path (feature `mock`): a valid control document must verify, every
-/// proper truncation must be rejected as structurally broken, and arbitrary
-/// mutations/garbage must never panic (they may or may not reject, since a
-/// mutated non-structural byte can still parse — the guarantee under test is
-/// bounded, panic-free handling, not universal rejection).
+/// Verify the valid mock document.
+/// Reject truncated documents.
+/// Mutated inputs can pass, but must not cause a panic.
 #[cfg(feature = "mock")]
 mod mock_path {
     use super::*;

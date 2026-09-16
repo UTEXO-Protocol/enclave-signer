@@ -24,20 +24,11 @@ pub enum VerifyMode {
     Mock,
 }
 
-/// The security posture the caller expects the attested enclave to have.
-/// The enclave commits its resolved posture into `user_data`, and the
-/// verifier reconstructs the expected posture here and requires a match, so a
-/// downgraded enclave is rejected.
-///
-/// The chain/contract/asset pins ride the wire response (which the public-key
-/// bundle already binds), so stating them is optional. When the operator DOES
-/// declare them via `expected_chain_id` / `expected_bridge_contract` /
-/// `expected_rgb_asset_id`, the verifier checks the (authenticated) wire value
-/// equals the declared one and fails otherwise — without them the reference CLI
-/// authenticates whatever the enclave reports but cannot tell an operator's
-/// intended deployment apart from a valid attestation of the WRONG chain,
-/// contract or RGB asset (F02-AF-04). The gas-tx rule is never on the wire and
-/// must always be declared here.
+/// Expected security policy for the attested enclave.
+/// Compare it with the policy commitment in user_data.
+/// Optional chain, contract, and asset pins select the intended deployment. (F02-AF-04)
+/// Without these pins, verify the reported values without checking operator intent.
+/// The caller must always supply the expected gas transaction rule.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ExpectedPolicy {
     /// Expect a production bridge enclave with these posture flags.
@@ -50,16 +41,15 @@ pub enum ExpectedPolicy {
         /// commitment so an enclave that trust-rooted on a different checkpoint
         /// fails verification.
         evm_checkpoint: Option<[u8; 32]>,
-        /// Operator's intended EVM chain id. `Some` => the wire `chain_id` must
-        /// equal it or verification fails; `None` => trust the wire value (legacy
-        /// behaviour). Lets onboarding pin the deployment's chain via the CLI.
+        /// Expected EVM chain ID.
+        /// None accepts the authenticated chain ID without comparison.
         expected_chain_id: Option<u64>,
-        /// Operator's intended bridge/MultisigProxy contract (20 bytes). `Some`
-        /// => the wire `bridge_contract` must equal it or verification fails.
+        /// Expected 20-byte bridge or MultisigProxy address.
+        /// Some requires an exact match.
         expected_bridge_contract: Option<[u8; 20]>,
-        /// Operator's intended RGB asset id. `Some` => the wire `rgb_asset_id`
-        /// must equal it or verification fails. An empty string pins "no RGB
-        /// asset" (pure-EVM / pure-CCD builds).
+        /// Expected RGB asset ID.
+        /// Some requires an exact match.
+        /// An empty string requires no RGB asset.
         expected_rgb_asset_id: Option<String>,
         /// Expected gas-tx (`SignRawDigest`) rule the enclave committed.
         /// An all-zero destination, zero caps, and empty selectors mean
@@ -233,12 +223,7 @@ fn expected_attested_policy(
                     )
                 })?;
 
-            // Compare the operator's declared deployment pins against the
-            // authenticated wire values BEFORE folding them into the expected
-            // commitment. Without this, the reference CLI would happily accept a
-            // valid attestation of the wrong chain / contract / asset because it
-            // reconstructs the expected policy from the very values it is meant
-            // to be checking (F02-AF-04).
+            // Check operator pins before constructing the expected commitment. (F02-AF-04)
             if let Some(want) = expected_chain_id {
                 if *want != resp.chain_id {
                     bail!(
@@ -328,8 +313,7 @@ mod tests {
 
     #[test]
     fn unset_pins_trust_the_wire() {
-        // Legacy behaviour: no operator pins => accept whatever the enclave
-        // attests (still authenticated, just not compared).
+        // Without operator pins, authenticate values without comparing them.
         let got = expected_attested_policy(&expect_prod(None, None, None), &wire())
             .expect("unset pins must not reject");
         match got {

@@ -19,8 +19,7 @@ use utexo_bridge_enclave::proto::*;
 // stable, non-secret seed we can embed in integration tests.
 const DONOR_MNEMONIC: &str =
     "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
-// >= 32 bytes / >= 8 distinct so it clears the fail-closed strength gate in
-// `validate_cloning_secret` (F03-AF-26).
+// Use at least 32 bytes and eight distinct values. (F03-AF-26)
 const CLONING_SECRET: &str = "test-operator-cloning-secret-0123456789abcdef";
 
 fn initialize_key_from_mnemonic(port: u16, mnemonic: &str) -> PublicKeysResponse {
@@ -198,9 +197,7 @@ fn clone_rejects_wrong_cloning_secret() {
     let (donor_port, donor_keys) = start_donor();
     let requester_port = start_requester();
 
-    // Requester uses a DIFFERENT secret than the donor was configured with.
-    // Still >= 32 bytes so it passes the strength gate (F03-AF-26) and the
-    // rejection lands on the donor's HMAC-digest check, not on length.
+    // Use a strong secret so this case tests HMAC rejection. (F03-AF-26)
     let init = initiate_cloning(
         requester_port,
         "wrong-operator-cloning-secret-0123456789abcdef",
@@ -234,22 +231,16 @@ fn clone_rejects_wrong_cluster_public_key() {
 
 #[test]
 fn clone_donor_rejects_request_armed_for_a_different_target() {
-    // F03-AF-07: the requester arms a digest for cluster identity X (not this
-    // donor). A relaying parent then rewrites the plaintext `cluster_public_key`
-    // wire field to the donor's OWN address to slip past the donor self-check
-    // (step 1). Before the target was folded into the HMAC this cleared the
-    // digest gate and the donor exported its seed; now the digest - computed by
-    // the requester over X - fails to verify against the donor's own identity,
-    // so no seed is ever sealed.
+    // Change the target address without changing its HMAC. (F03-AF-07)
+    // The donor must reject the request before encrypting its seed.
     let (donor_port, donor_keys) = start_donor();
     let requester_port = start_requester();
 
-    // Requester is armed for a foreign target, so its digest binds to X.
+    // Create the digest for a different donor.
     let foreign_target = [0xDEu8; 20];
     let init = initiate_cloning(requester_port, CLONING_SECRET, &foreign_target);
 
-    // Parent forwards with cluster_public_key = the donor's real address to
-    // satisfy step 1, but leaves the requester's X-bound digest untouched.
+    // Use this donor address to pass the initial address check.
     let err = request_get_clone(donor_port, &donor_keys.evm_address, &init)
         .expect_err("donor must reject a request armed for a different target identity");
     assert!(
@@ -430,12 +421,8 @@ fn clone_donor_rejects_wire_pubkey_not_matching_attestation() {
 
     let init = initiate_cloning(requester_port, CLONING_SECRET, &donor_keys.evm_address);
 
-    // Tamper the wire pubkey; leave the attestation (which binds the real
-    // ephemeral pubkey) untouched. Recompute a VALID cloning digest over the
-    // tampered pubkey so the request clears the HMAC auth gate - F03-AF-20 moved
-    // that gate ahead of attestation verify, so without a matching digest the
-    // request would abort on digest-mismatch before ever reaching the
-    // pubkey-binding check we want to exercise here.
+    // Change the wire key but keep the original attestation.
+    // Use a valid HMAC to reach the attested-key check. (F03-AF-20)
     let mut tampered = init.clone();
     tampered.encryption_pubkey = vec![0x77u8; 32];
     let tampered_pk: [u8; 32] = tampered
@@ -443,10 +430,7 @@ fn clone_donor_rejects_wire_pubkey_not_matching_attestation() {
         .clone()
         .try_into()
         .expect("32-byte pubkey");
-    // F03-AF-07: the digest is now bound to the target donor cluster identity,
-    // so recompute it over the donor's own EVM address (the value this request
-    // carries in `cluster_public_key`) - otherwise it would abort at the
-    // target-binding check instead of the pubkey-binding check under test.
+    // Include the donor address so the HMAC passes the target check. (F03-AF-07)
     let donor_target: [u8; 20] = donor_keys
         .evm_address
         .clone()

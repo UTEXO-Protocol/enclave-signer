@@ -6,14 +6,9 @@
 # Production builder glibc must remain compatible with the AL2023 runtime.
 FROM rust:1.96-slim-bullseye@sha256:c593596210f729542a92aced6a8b0812bcc8d04c5f1b238e663b800d0e2e17bd AS builder
 
-# Builder-only tools: system Git and SSH for private dependencies.
-# TEMP (clone-audit, 2026-09-13): bullseye reached LTS EOL and deb.debian.org
-# purged the point-release .debs still named in the live index, so `apt-get
-# install` 404s repo-wide (breaks EIF builds on every branch). Pin apt to an
-# immutable snapshot.debian.org date to unblock; this also fixes apt-version
-# float (reproducible PCRs). Durable fix = dev-owned infra PR across all
-# build/Dockerfile.*; revert this block once merged. http:// (base slim image
-# has no ca-certificates yet); archive is still signed by debian-archive-keyring.
+# Use the signed Debian snapshot to avoid missing Bullseye packages.
+# HTTP is required until ca-certificates is installed.
+# Replace this temporary pin when the shared base-image update is ready.
 RUN set -eux; \
     printf '%s\n' \
       'deb http://snapshot.debian.org/archive/debian/20260801T000000Z bullseye main' \

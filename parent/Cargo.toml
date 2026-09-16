@@ -53,9 +53,7 @@ prost = "0.14"
 tonic = { version = "0.14", features = ["tls-ring"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 http = "1"
-# `limit` provides GlobalConcurrencyLimitLayer for the donor gRPC perimeter
-# (F03-AF-13). tonic already pulls tower in transitively; pin it as a direct
-# dep so the layer API is available.
+# Use GlobalConcurrencyLimitLayer to limit requests across connections. (F03-AF-13)
 tower = { version = "0.5", features = ["limit"] }
 tokio = { version = "1", features = ["full"] }
 tokio-stream = "0.1"

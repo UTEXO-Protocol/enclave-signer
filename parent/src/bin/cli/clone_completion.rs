@@ -1,8 +1,8 @@
-//! Completion contract for the one-shot clone CLI (F03-AF-05).
-//!
-//! Blocking TCP/vsock/DNS calls run on at most two workers. The command exits
-//! after reporting, terminating any outstanding I/O. Do not reuse this helper
-//! in a long-lived service: a deadline does not cancel an in-flight SetClone.
+//! F03-AF-05: report the result of one CLI clone attempt.
+//! Use at most two workers for blocking calls.
+//! Process exit stops any remaining workers.
+//! Do not use this helper in a service.
+//! A timeout does not cancel SetClone.
 
 use std::sync::mpsc;
 use std::time::Duration;
@@ -46,9 +46,9 @@ pub struct Completion {
     pub detail: String,
 }
 
-/// Send SetClone exactly once, then independently observe all 13 fields.
-/// Both blocking legs are bounded for the CLI caller (1.5s total wait budget).
-/// A timeout is uncertainty, never proof that a mutation did not happen.
+/// Send SetClone once, then read all 13 identity fields.
+/// Limit the total caller wait to 1.5 seconds.
+/// A timeout does not prove that SetClone failed.
 pub fn complete(
     client: &EnclaveClient,
     request: SetCloneRequest,
@@ -116,8 +116,9 @@ pub fn complete(
     }
 }
 
-/// Equality against the donor's reported bundle. The CLI does not authenticate
-/// this RPC; the enclave's AF-08 attested commitment is the trust gate.
+/// Compare all fields with the donor bundle.
+/// The CLI uses the configured transport authentication.
+/// The enclave checks the signed identity commitment. (F03-AF-08)
 pub fn identity_field_mismatches(
     local: &PublicKeysResponse,
     donor: &AttestedPublicKeyResponse,
