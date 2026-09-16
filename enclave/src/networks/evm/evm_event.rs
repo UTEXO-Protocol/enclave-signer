@@ -87,7 +87,7 @@ const BFI_MIN_DATA_LEN: usize = 8 * 32;
 /// `indexed` moves fields between topics and data but never changes it.
 pub const FUNDS_IN_SIG: &str = "FundsIn(address,uint256,uint256)";
 /// With `rgbOpId` indexed it is topic2; without, it is the first data word.
-#[cfg(feature = "bfa-mint")]
+#[cfg(feature = "bfa-validation")]
 const FI_RGB_OP_ID_TOPIC: usize = 2;
 
 /// An RGB invoice in the shape the pinned `rgb-invoicing` accepts:
@@ -145,7 +145,7 @@ fn event_topic0(sig: &str) -> [u8; 32] {
 /// are looked up per log, and the BFA path loops over a whole mint ancestry.
 static BRIDGE_FUNDS_IN_TOPIC0: std::sync::LazyLock<[u8; 32]> =
     std::sync::LazyLock::new(|| event_topic0(BRIDGE_FUNDS_IN_SIG));
-#[cfg(feature = "bfa-mint")]
+#[cfg(feature = "bfa-validation")]
 static FUNDS_IN_TOPIC0: std::sync::LazyLock<[u8; 32]> =
     std::sync::LazyLock::new(|| event_topic0(FUNDS_IN_SIG));
 
@@ -453,7 +453,7 @@ fn check_confirmation_depth(
 /// Both deployed layouts decode: with `rgbOpId` indexed the id is a topic and
 /// `data` holds only the amount; once the contract drops `indexed` the id is the
 /// first data word and the amount the second.
-#[cfg(feature = "bfa-mint")]
+#[cfg(feature = "bfa-validation")]
 fn decode_funds_in(log: &LogEntry, expected_rgb_opid: &[u8; 32]) -> Result<u64> {
     if log.topics.first() != Some(&*FUNDS_IN_TOPIC0) {
         return Err(EnclaveError::CrossCheck(
@@ -491,7 +491,7 @@ fn decode_funds_in(log: &LogEntry, expected_rgb_opid: &[u8; 32]) -> Result<u64> 
 /// checks the mint against). `operation_id` / `net_amount` are the
 /// `BridgeFundsIn` record the settlement module stored for this deposit, and
 /// therefore the only pair a `fundsOut.settlementData` may cite for it.
-#[cfg(feature = "bfa-mint")]
+#[cfg(feature = "bfa-validation")]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VerifiedLock {
     /// The mint this lock backs, as the caller named it and the `FundsIn`
@@ -515,7 +515,7 @@ pub struct VerifiedLock {
 /// contract: that is the `(operationId, netAmount)` record a later `fundsOut`
 /// must cite in `settlementData` (see `crosscheck::validate_funds_out_settlement`).
 /// Read here, where the log is already proven to come from the pinned emitter.
-#[cfg(feature = "bfa-mint")]
+#[cfg(feature = "bfa-validation")]
 pub fn verify_rgb_funds_in(
     provider: &dyn EvmReceiptProvider,
     funds_in_contract: &[u8; 20],
@@ -567,7 +567,7 @@ pub fn verify_rgb_funds_in(
 
 /// A BFA asset names its own bridge contract in genesis; only the pinned one may
 /// authorise a mint this federation signs.
-#[cfg(feature = "bfa-mint")]
+#[cfg(feature = "bfa-validation")]
 pub fn check_bridge_location(location: &str, pinned: &[u8; 20]) -> Result<()> {
     let hex_addr = location.strip_prefix("0x").unwrap_or(location);
     let mut addr = [0u8; 20];
@@ -1430,7 +1430,7 @@ mod tests {
 
     // ---- BFA: the `FundsIn` log whose id is the RGB OpId ----
 
-    #[cfg(feature = "bfa-mint")]
+    #[cfg(feature = "bfa-validation")]
     #[test]
     fn decodes_funds_in_with_an_indexed_operation_id() {
         // Deployed shape: FundsIn(address indexed sender, uint256 indexed rgbOpId, uint256 amount)
@@ -1438,7 +1438,7 @@ mod tests {
         assert_eq!(decode_funds_in(&log, &word(0xab)).unwrap(), 100);
     }
 
-    #[cfg(feature = "bfa-mint")]
+    #[cfg(feature = "bfa-validation")]
     #[test]
     fn decodes_funds_in_with_the_operation_id_in_data() {
         // Post-migration shape: only `sender` stays indexed.
@@ -1452,14 +1452,14 @@ mod tests {
         assert_eq!(decode_funds_in(&log, &word(0xab)).unwrap(), 100);
     }
 
-    #[cfg(feature = "bfa-mint")]
+    #[cfg(feature = "bfa-validation")]
     #[test]
     fn rejects_funds_in_for_a_different_operation_id() {
         let log = rgb_companion_log(0xab, 100);
         assert!(decode_funds_in(&log, &word(0xcd)).is_err());
     }
 
-    #[cfg(feature = "bfa-mint")]
+    #[cfg(feature = "bfa-validation")]
     #[test]
     fn rejects_funds_in_amount_above_u64() {
         let log = LogEntry {
@@ -1470,7 +1470,7 @@ mod tests {
         assert!(decode_funds_in(&log, &word(0xab)).is_err());
     }
 
-    #[cfg(feature = "bfa-mint")]
+    #[cfg(feature = "bfa-validation")]
     #[test]
     fn verify_rgb_funds_in_accepts_a_verified_lock() {
         // A real deposit tx emits both: the RGB companion (minted amount) and
@@ -1498,7 +1498,7 @@ mod tests {
 
     /// Without the record there is nothing a `fundsOut` could cite, so the
     /// lock is not usable as settlement evidence.
-    #[cfg(feature = "bfa-mint")]
+    #[cfg(feature = "bfa-validation")]
     #[test]
     fn verify_rgb_funds_in_requires_the_bridge_funds_in_record() {
         let p = FakeProvider {
@@ -1513,7 +1513,7 @@ mod tests {
 
     /// The extension never checks the emitter, so this filter is the only thing
     /// between a mint and a log from an attacker's contract.
-    #[cfg(feature = "bfa-mint")]
+    #[cfg(feature = "bfa-validation")]
     #[test]
     fn verify_rgb_funds_in_rejects_a_log_from_an_unpinned_contract() {
         let mut log = rgb_companion_log(0xab, 100);
@@ -1528,7 +1528,7 @@ mod tests {
         assert!(e.contains("no FundsIn log"), "got: {e}");
     }
 
-    #[cfg(feature = "bfa-mint")]
+    #[cfg(feature = "bfa-validation")]
     #[test]
     fn refuses_a_bridge_location_that_is_not_the_pinned_contract() {
         let pinned = [0x11u8; 20];

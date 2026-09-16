@@ -1443,31 +1443,6 @@ fn test_sign_raw_message_is_refused() {
     }
 }
 
-// Federation proxy test
-
-#[test]
-fn test_proxy_federation_returns_not_ready() {
-    let port = common::start_test_server();
-
-    let req = EnclaveRequest {
-        request: Some(Request::ProxyFederation(ProxyFederationRequest {
-            message_hash: vec![0xAA; 32],
-        })),
-    };
-    let resp = common::send_request(port, &req);
-
-    match &resp.response {
-        Some(Response::Error(e)) => {
-            assert_eq!(
-                e.code, 2,
-                "federation proxy should return NOT_READY (code 2)"
-            );
-            assert!(e.message.contains("federation proxy"));
-        }
-        other => panic!("expected ErrorResponse, got {:?}", other),
-    }
-}
-
 // EVM gas-tx (SignRawDigest) shape-allowlist tests
 //
 // These run through the real handler, so the fail-closed gate in

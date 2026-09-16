@@ -42,8 +42,8 @@ pub fn assert_witnesses_confirmed(validated: &ValidatedConsignment) -> Result<()
 /// to the consignment's actual asset value:
 ///
 ///   1. The consignment's most recent transition must be the type this build's
-///      RGB flow accepts on a withdrawal - an IFA `Transfer` under `rgb-swap`,
-///      an IFA `Burn` under `rgb-mint-burn`.
+///      RGB flow accepts on a withdrawal - a BFA `Transfer` under `rgb-swap`,
+///      a BFA `Burn` under `rgb-mint-burn`.
 ///   2. The amount that transition proves left the source must cover the
 ///      EVM-side release `amount`.
 ///
@@ -103,7 +103,7 @@ pub fn validate_funds_out_burn_recipient(
 
     let recipient = last.burn_recipient.as_deref().ok_or_else(|| {
         EnclaveError::CrossCheck(
-            "burn transition carries no MS_BURN_RECIPIENT metadata - an IFA burn cannot authorise \
+            "burn transition carries no MS_BURN_RECIPIENT metadata - this burn cannot authorise \
              a bridged redemption"
                 .into(),
         )
@@ -611,14 +611,14 @@ mod tests {
     #[cfg(feature = "rgb-mint-burn")]
     mod burn {
         use super::*;
-        use crate::networks::rgb::validation::{ifa, TransitionSummary};
+        use crate::networks::rgb::validation::{bfa, TransitionSummary};
 
         const RECIPIENT: [u8; 20] = [0x42; 20];
 
         fn burn_transition(burned: Option<u64>, recipient: Option<Vec<u8>>) -> TransitionSummary {
             TransitionSummary {
                 op_id: "burn-op".into(),
-                transition_type: ifa::TS_BURN,
+                transition_type: bfa::TS_BURN,
                 // A burn has no output assignments; the destroyed value lives
                 // in the metadata, which is exactly why this must not be the
                 // quantity the release is bound to.
@@ -645,7 +645,7 @@ mod tests {
         }
 
         #[test]
-        fn rejects_an_ifa_burn_that_names_no_recipient() {
+        fn rejects_a_burn_that_names_no_recipient() {
             let cd = mock_funds_out_calldata_to(Address::from(RECIPIENT), 1000, Bytes::new());
             let validated = validated_with_last(burn_transition(Some(1000), None));
             assert!(validate_funds_out_burn_recipient(&params_of(&cd), &validated).is_err());
@@ -676,7 +676,7 @@ mod tests {
 
     mod transfer {
         use super::*;
-        use crate::networks::rgb::validation::{ifa, TransitionSummary};
+        use crate::networks::rgb::validation::{bfa, TransitionSummary};
 
         /// The last transition this build's RGB flow accepts on a `fundsOut`,
         /// carrying `amount` where that flow reads it: a Transfer's output
@@ -686,7 +686,7 @@ mod tests {
         fn source_transition(amount: u64) -> TransitionSummary {
             TransitionSummary {
                 op_id: "transfer-op".into(),
-                transition_type: ifa::TS_TRANSFER,
+                transition_type: bfa::TS_TRANSFER,
                 total_output_amount: amount,
                 asset_output_amount: amount,
                 outputs: Vec::new(),
@@ -701,7 +701,7 @@ mod tests {
                 op_id: "burn-op".into(),
                 // A burn destroys units; it has no output assignments carrying
                 // them, so the amount lives in the metadata field only.
-                transition_type: ifa::TS_BURN,
+                transition_type: bfa::TS_BURN,
                 total_output_amount: 0,
                 asset_output_amount: 0,
                 outputs: Vec::new(),
@@ -781,14 +781,14 @@ mod tests {
         }
 
         /// A consignment whose last transition is not the one this build's
-        /// flow withdraws with must be refused. `TS_INFLATION` is a deposit
+        /// flow withdraws with must be refused. `TS_BRIDGE` is a deposit
         /// shape in both flows, so it is wrong for either build - which is
         /// also how a mint-shaped consignment stays out of a swap enclave.
         #[test]
         fn rejects_when_last_transition_is_not_the_flow_shape() {
             let cd = mock_funds_out_calldata(500);
             let mut t = source_transition(500);
-            t.transition_type = ifa::TS_INFLATION;
+            t.transition_type = bfa::TS_BRIDGE;
             let validated = validated_with_last(t);
             let err = validate_funds_out_amount(&params_of(&cd), &validated).unwrap_err();
             assert!(
