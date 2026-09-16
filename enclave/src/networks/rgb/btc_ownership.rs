@@ -6,10 +6,11 @@
 //! PCR0 identity that seed is bound to.
 //!
 //! An output is accepted on one rule: its `script_pubkey` equals that of an
-//! input for which
-//! [`find_taproot_sign_jobs`](crate::networks::rgb::signing::taproot::find_taproot_sign_jobs)
-//! produced a job. That job is control-block and derivation anchored, and the
-//! segwit sighash commits to the script.
+//! input this enclave co-controls, as resolved by
+//! [`find_controlled_taproot_leaves`](crate::networks::rgb::signing::taproot::find_controlled_taproot_leaves).
+//! That leaf is control-block and derivation anchored, and the segwit sighash
+//! commits to the script. Custody is structural: it does not depend on which
+//! of our signatures have already been merged into the PSBT.
 //!
 //! It proves custody is unchanged, not that only we can spend: the bridge is a
 //! multisig, and the other signers can move funds without us either way. It
@@ -30,12 +31,12 @@ use std::collections::HashSet;
 use bitcoin::psbt::Psbt;
 
 use crate::keys::{AccountType, KeyManager};
-use crate::networks::rgb::signing::taproot::find_taproot_sign_jobs;
+use crate::networks::rgb::signing::taproot::find_controlled_taproot_leaves;
 
 /// The `script_pubkey`s of every PSBT input this enclave provably co-controls
 /// on the plain-BTC (Vanilla) account.
 ///
-/// Membership comes from the signing-job resolver, so each entry carries the
+/// Membership comes from the custody resolver, so each entry carries the
 /// full input-side anchor chain: control block verified against the input's own
 /// output key, claimed key present in that leaf, and the claimed BIP-86
 /// derivation actually producing it.
@@ -55,7 +56,7 @@ pub fn self_controlled_input_scripts_scoped(
     keys: &KeyManager,
     allowed_account: Option<AccountType>,
 ) -> HashSet<Vec<u8>> {
-    find_taproot_sign_jobs(psbt, keys.master_fingerprint(), keys)
+    find_controlled_taproot_leaves(psbt, keys.master_fingerprint(), keys)
         .into_iter()
         .filter(|job| allowed_account.is_none_or(|want| job.account_type == want))
         .filter_map(|job| psbt.inputs.get(job.input_index))
@@ -89,7 +90,7 @@ pub fn output_is_self_owned(psbt: &Psbt, index: usize, input_scripts: &HashSet<V
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use bitcoin::bip32::{ChildNumber, DerivationPath};
     use bitcoin::blockdata::opcodes::all::{OP_CHECKSIG, OP_CHECKSIGADD, OP_NUMEQUAL};
@@ -108,7 +109,7 @@ mod tests {
 
     use crate::config::BridgeConfig;
     use crate::networks::rgb::btc_crosscheck::{validate_btc_request, validate_rgb_psbt_sats};
-    use crate::networks::rgb::signing::taproot::sign_taproot_inputs;
+    use crate::networks::rgb::signing::taproot::{outstanding_job_inputs, sign_taproot_inputs};
     use crate::proto::SignBtcRequest;
 
     /// NUMS internal key - unspendable key-path, as the bridge's multisig
@@ -119,11 +120,11 @@ mod tests {
         0x3a, 0xc0,
     ];
 
-    fn km() -> KeyManager {
+    pub(crate) fn km() -> KeyManager {
         KeyManager::from_seed([0x42u8; 64], Network::Testnet).unwrap()
     }
 
-    fn foreign_xonly(b: u8) -> XOnlyPublicKey {
+    pub(crate) fn foreign_xonly(b: u8) -> XOnlyPublicKey {
         let secp = Secp256k1::new();
         let sk = SecretKey::from_slice(&[b; 32]).unwrap();
         XOnlyPublicKey::from_keypair(&Keypair::from_secret_key(&secp, &sk)).0
@@ -131,7 +132,7 @@ mod tests {
 
     /// Our derived key at m/86'/<coin>'/0'/`chain`/`index` on `account`
     /// (testnet coin types: 1 for Vanilla, 827167 for Colored).
-    fn our_key_on(
+    pub(crate) fn our_key_on(
         keys: &KeyManager,
         account: AccountType,
         chain: u32,
@@ -186,7 +187,7 @@ mod tests {
 
     /// A 2-of-3 taproot address containing `participant`: returns its
     /// `script_pubkey`, the leaf, its hash, and the internal (NUMS) key.
-    fn multisig_address(
+    pub(crate) fn multisig_address(
         participant: XOnlyPublicKey,
     ) -> (ScriptBuf, ScriptBuf, TapLeafHash, XOnlyPublicKey) {
         let secp = Secp256k1::new();
@@ -204,7 +205,7 @@ mod tests {
 
     /// Unsigned PSBT with `n_inputs` distinct prevouts (no input metadata yet)
     /// and the given outputs. Output metadata is left empty for the caller.
-    fn psbt_with_n(n_inputs: usize, outputs: &[(ScriptBuf, u64)]) -> Psbt {
+    pub(crate) fn psbt_with_n(n_inputs: usize, outputs: &[(ScriptBuf, u64)]) -> Psbt {
         let unsigned_tx = Transaction {
             version: bitcoin::transaction::Version(2),
             lock_time: bitcoin::absolute::LockTime::ZERO,
@@ -243,7 +244,7 @@ mod tests {
 
     /// Fully populate input `index` (worth `value` sats) as a 2-of-3 multisig
     /// input we co-sign with the key at `account`/`chain`/`child`.
-    fn anchor_input(
+    pub(crate) fn anchor_input(
         psbt: &mut Psbt,
         index: usize,
         keys: &KeyManager,
@@ -454,22 +455,18 @@ mod tests {
         }
     }
 
-    /// Sign input `index` with our one leaf there, as the enclave itself does,
-    /// verify the signature independently, and return its map entry.
-    fn merge_own_signature(
-        psbt: &mut Psbt,
-        keys: &KeyManager,
+    /// Check the entry under `key` on input `index` against that input's own
+    /// script-spend sighash. Independent of the signer: rebuilds the message
+    /// from the PSBT's transaction and prevouts.
+    pub(crate) fn verify_own_signature(
+        psbt: &Psbt,
         index: usize,
-    ) -> ((XOnlyPublicKey, TapLeafHash), taproot::Signature) {
-        let jobs: Vec<_> = find_taproot_sign_jobs(psbt, keys.master_fingerprint(), keys)
-            .into_iter()
-            .filter(|job| job.input_index == index)
-            .collect();
-        assert_eq!(jobs.len(), 1);
-        assert_eq!(sign_taproot_inputs(psbt, keys, &jobs).unwrap(), 1);
-        let key = (jobs[0].xonly_pubkey, jobs[0].leaf_hash);
-        let sig = psbt.inputs[index].tap_script_sigs[&key];
-
+        key: (XOnlyPublicKey, TapLeafHash),
+    ) -> Result<taproot::Signature, String> {
+        let sig = *psbt.inputs[index]
+            .tap_script_sigs
+            .get(&key)
+            .ok_or_else(|| format!("input {index}: no entry under our key"))?;
         let prevouts: Vec<TxOut> = psbt
             .inputs
             .iter()
@@ -486,8 +483,26 @@ mod tests {
         let msg = Message::from_digest(*sighash.as_byte_array());
         Secp256k1::verification_only()
             .verify_schnorr(&sig.signature, &msg, &key.0)
-            .unwrap();
-        (key, sig)
+            .map_err(|e| format!("input {index}: {e}"))?;
+        Ok(sig)
+    }
+
+    /// Sign input `index` with our one leaf there, as the enclave itself does,
+    /// verify the signature independently, and return its map entry.
+    pub(crate) fn merge_own_signature(
+        psbt: &mut Psbt,
+        keys: &KeyManager,
+        index: usize,
+    ) -> ((XOnlyPublicKey, TapLeafHash), taproot::Signature) {
+        let jobs: Vec<_> = find_controlled_taproot_leaves(psbt, keys.master_fingerprint(), keys)
+            .into_iter()
+            .filter(|job| job.input_index == index)
+            .collect();
+        assert_eq!(jobs.len(), 1);
+        assert!(psbt.inputs[index].tap_script_sigs.is_empty());
+        assert_eq!(sign_taproot_inputs(psbt, keys, &jobs).unwrap(), 1);
+        let key = (jobs[0].xonly_pubkey, jobs[0].leaf_hash);
+        (key, verify_own_signature(psbt, index, key).unwrap())
     }
 
     struct MergeScenario {
@@ -501,6 +516,8 @@ mod tests {
         /// Second signing pass: signatures added, B's entry present, A's entry
         /// byte-identical to the one merged.
         second_pass: (usize, bool, bool),
+        /// Why either surviving entry failed independent verification.
+        unverified: Vec<String>,
     }
 
     /// Two eligible inputs A and B on `account`, change paying each script
@@ -535,10 +552,7 @@ mod tests {
         let prevouts_before: Vec<_> = psbt.inputs.iter().map(|i| i.witness_utxo.clone()).collect();
 
         let (key_a, sig_a) = merge_own_signature(&mut psbt, &keys, 0);
-        let jobs_after = find_taproot_sign_jobs(&psbt, keys.master_fingerprint(), &keys)
-            .into_iter()
-            .map(|job| job.input_index)
-            .collect();
+        let jobs_after = outstanding_job_inputs(&psbt, &keys);
         let prevouts_after: Vec<_> = psbt.inputs.iter().map(|i| i.witness_utxo.clone()).collect();
         let tx_unchanged = psbt.unsigned_tx == tx_before && prevouts_after == prevouts_before;
 
@@ -554,6 +568,20 @@ mod tests {
             signed_psbt.inputs[0].tap_script_sigs.get(&key_a) == Some(&sig_a),
         );
 
+        // A's merged entry and B's new one must both verify against their own
+        // sighash of the very same transaction.
+        let key_b = find_controlled_taproot_leaves(&signed_psbt, keys.master_fingerprint(), &keys)
+            .into_iter()
+            .find(|job| job.input_index == 1)
+            .map(|job| (job.xonly_pubkey, job.leaf_hash));
+        let unverified = [(0, Some(key_a)), (1, key_b)]
+            .into_iter()
+            .filter_map(|(index, key)| match key {
+                Some(key) => verify_own_signature(&signed_psbt, index, key).err(),
+                None => Some(format!("input {index}: no controlled leaf")),
+            })
+            .collect();
+
         MergeScenario {
             account,
             a_spk,
@@ -563,16 +591,12 @@ mod tests {
             jobs_after,
             tx_unchanged,
             second_pass,
+            unverified,
         }
     }
 
-    /// F06-NEW-AF-09 / F06-NEW-UT-08. Merging this enclave's own valid
-    /// signature on input A changes nothing about the transaction, its
-    /// prevouts or its outputs, and B still needs our signature - yet A's
-    /// change drops out of the owned set, so the same PSBT that passed both
-    /// sats gates unsigned now overshoots the unowned budget on the second
-    /// pass. Custody must depend on what the enclave controls, not on which
-    /// signatures are still missing.
+    /// F06-NEW-AF-09 / F06-NEW-UT-08: custody survives signature merging on
+    /// both accounts.
     #[test]
     fn bfa_ownership_is_independent_of_merge_progress() {
         let mut failures = Vec::new();
@@ -620,11 +644,90 @@ mod tests {
                     s.second_pass
                 ));
             }
+            for err in &s.unverified {
+                failures.push(format!("{tag}: signature invalid after second pass: {err}"));
+            }
         }
         assert!(
             failures.is_empty(),
             "custody depends on merge progress:\n{}",
             failures.join("\n")
         );
+    }
+
+    /// F06-NEW-PT-03, bounded to every signature subset over three mixed
+    /// inputs: custody is a function of the PSBT's structure alone. Only the
+    /// remaining work moves as entries are merged.
+    #[test]
+    fn custody_is_invariant_under_every_signature_subset() {
+        let keys = km();
+        let inputs = [
+            (AccountType::Vanilla, 0u32, 0u32),
+            (AccountType::Vanilla, 0, 1),
+            (AccountType::Colored, 0, 0),
+        ];
+        let spks: Vec<ScriptBuf> = inputs
+            .iter()
+            .map(|&(a, c, i)| multisig_address(our_key_on(&keys, a, c, i).0).0)
+            .collect();
+        let (foreign, _, _, _) = multisig_address(foreign_xonly(0xB1));
+        let mut outputs: Vec<(ScriptBuf, u64)> =
+            spks.iter().map(|spk| (spk.clone(), 90_000)).collect();
+        outputs.push((foreign, 1_000));
+
+        let mut unsigned = psbt_with_n(inputs.len(), &outputs);
+        for (idx, &(a, c, i)) in inputs.iter().enumerate() {
+            assert_eq!(
+                anchor_input(&mut unsigned, idx, &keys, a, c, i, 100_000),
+                spks[idx]
+            );
+        }
+
+        let owned_all = self_controlled_input_scripts_scoped(&unsigned, &keys, None);
+        let owned_vanilla =
+            self_controlled_input_scripts_scoped(&unsigned, &keys, Some(AccountType::Vanilla));
+        let indices = self_owned_output_indices(&unsigned, &keys);
+        let txid = unsigned.unsigned_tx.compute_txid();
+        assert_eq!(owned_all.len(), 3);
+        assert_eq!(owned_vanilla.len(), 2);
+        assert_eq!(indices, HashSet::from([0, 1, 2]));
+
+        // Sign every input once, then replay each subset of those entries.
+        let mut signed = unsigned.clone();
+        let jobs = find_controlled_taproot_leaves(&signed, keys.master_fingerprint(), &keys);
+        assert_eq!(jobs.len(), inputs.len());
+        assert_eq!(sign_taproot_inputs(&mut signed, &keys, &jobs).unwrap(), 3);
+
+        for mask in 0..(1 << inputs.len()) {
+            let mut psbt = unsigned.clone();
+            for idx in 0..inputs.len() {
+                if mask & (1 << idx) != 0 {
+                    psbt.inputs[idx].tap_script_sigs = signed.inputs[idx].tap_script_sigs.clone();
+                }
+            }
+
+            assert_eq!(
+                self_controlled_input_scripts_scoped(&psbt, &keys, None),
+                owned_all,
+                "subset {mask:03b}: controlled scripts moved"
+            );
+            assert_eq!(
+                self_controlled_input_scripts_scoped(&psbt, &keys, Some(AccountType::Vanilla)),
+                owned_vanilla,
+                "subset {mask:03b}: Vanilla-scoped scripts moved"
+            );
+            assert_eq!(
+                self_owned_output_indices(&psbt, &keys),
+                indices,
+                "subset {mask:03b}: owned outputs moved"
+            );
+            assert_eq!(psbt.unsigned_tx.compute_txid(), txid);
+
+            let remaining = outstanding_job_inputs(&psbt, &keys);
+            let outstanding: Vec<usize> = (0..inputs.len())
+                .filter(|idx| mask & (1 << idx) == 0)
+                .collect();
+            assert_eq!(remaining, outstanding, "subset {mask:03b}: wrong work left");
+        }
     }
 }

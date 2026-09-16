@@ -321,6 +321,13 @@ fn foreign_xonly(b: u8) -> bitcoin::XOnlyPublicKey {
 /// recognised as self-pay with no output metadata at all.
 #[allow(dead_code)]
 fn btc_psbt(from: &OurAddress, input_sats: u64, outputs: &[(bitcoin::ScriptBuf, u64)]) -> Vec<u8> {
+    btc_psbt_from(&[(from, input_sats)], outputs)
+}
+
+/// [`btc_psbt`] over any number of the enclave's own inputs, each on its own
+/// deterministic prevout.
+#[allow(dead_code)]
+fn btc_psbt_from(inputs: &[(&OurAddress, u64)], outputs: &[(bitcoin::ScriptBuf, u64)]) -> Vec<u8> {
     use bitcoin::hashes::Hash;
     use bitcoin::psbt::Psbt;
     use bitcoin::taproot::LeafVersion;
@@ -329,17 +336,17 @@ fn btc_psbt(from: &OurAddress, input_sats: u64, outputs: &[(bitcoin::ScriptBuf, 
     let unsigned_tx = Transaction {
         version: bitcoin::transaction::Version(2),
         lock_time: bitcoin::absolute::LockTime::ZERO,
-        input: vec![TxIn {
-            previous_output: OutPoint {
-                txid: Txid::from_raw_hash(bitcoin::hashes::sha256d::Hash::from_byte_array(
-                    [0u8; 32],
-                )),
-                vout: 0,
-            },
-            script_sig: ScriptBuf::new(),
-            sequence: Sequence::MAX,
-            witness: Witness::new(),
-        }],
+        input: (0..inputs.len())
+            .map(|i| TxIn {
+                previous_output: OutPoint {
+                    txid: Txid::from_byte_array([i as u8; 32]),
+                    vout: i as u32,
+                },
+                script_sig: ScriptBuf::new(),
+                sequence: Sequence::MAX,
+                witness: Witness::new(),
+            })
+            .collect(),
         output: outputs
             .iter()
             .map(|(spk, sat)| TxOut {
@@ -349,19 +356,21 @@ fn btc_psbt(from: &OurAddress, input_sats: u64, outputs: &[(bitcoin::ScriptBuf, 
             .collect(),
     };
     let mut psbt = Psbt::from_unsigned_tx(unsigned_tx).expect("from_unsigned_tx");
-    psbt.inputs[0].witness_utxo = Some(TxOut {
-        value: Amount::from_sat(input_sats),
-        script_pubkey: from.spk.clone(),
-    });
-    psbt.inputs[0].tap_internal_key = Some(from.internal);
-    psbt.inputs[0].tap_scripts.insert(
-        from.control.clone(),
-        (from.leaf.clone(), LeafVersion::TapScript),
-    );
-    psbt.inputs[0].tap_key_origins.insert(
-        from.xonly,
-        (vec![from.leaf_hash], (from.fingerprint, from.path.clone())),
-    );
+    for (i, (from, input_sats)) in inputs.iter().enumerate() {
+        psbt.inputs[i].witness_utxo = Some(TxOut {
+            value: Amount::from_sat(*input_sats),
+            script_pubkey: from.spk.clone(),
+        });
+        psbt.inputs[i].tap_internal_key = Some(from.internal);
+        psbt.inputs[i].tap_scripts.insert(
+            from.control.clone(),
+            (from.leaf.clone(), LeafVersion::TapScript),
+        );
+        psbt.inputs[i].tap_key_origins.insert(
+            from.xonly,
+            (vec![from.leaf_hash], (from.fingerprint, from.path.clone())),
+        );
+    }
     psbt.serialize()
 }
 
@@ -1144,6 +1153,117 @@ fn test_sign_btc_accepts_create_utxo_colored_output() {
     match &common::send_request(port, &sign_req).response {
         Some(Response::SignedPsbt(r)) => assert_eq!(r.inputs_signed, 1),
         other => panic!("create_utxo PSBT should sign, got {:?}", other),
+    }
+}
+
+/// F06-NEW-AF-09 / F06-IT-13: partial merges succeed; fully signed
+/// submissions remain refused.
+#[cfg(not(feature = "dev-mode"))]
+#[test]
+fn test_sign_btc_second_pass_after_partial_merge_still_signs() {
+    use bitcoin::hashes::Hash;
+    use bitcoin::psbt::Psbt;
+    use bitcoin::secp256k1::{Message, Secp256k1};
+    use bitcoin::sighash::{Prevouts, SighashCache, TapSighashType};
+    use bitcoin::TxOut;
+
+    let port = common::start_test_server_with_config(|_| {}, btc_capped_config(100_000));
+    let wallet = init_wallet(port);
+    let a = our_address(&wallet, 0, 0);
+    let b = our_address(&wallet, 0, 1);
+    assert_ne!(a.spk, b.spk);
+
+    let sign = |psbt_bytes: Vec<u8>| {
+        common::send_request(
+            port,
+            &EnclaveRequest {
+                request: Some(Request::SignBtc(SignBtcRequest { psbt_bytes })),
+            },
+        )
+        .response
+    };
+
+    let original = btc_psbt_from(
+        &[(&a, 40_000), (&b, 40_000)],
+        &[(a.spk.clone(), 39_000), (b.spk.clone(), 39_000)],
+    );
+
+    // Pass 1: both inputs are ours and unsigned.
+    let signed = match sign(original.clone()) {
+        Some(Response::SignedPsbt(r)) => {
+            assert_eq!(r.inputs_signed, 2);
+            Psbt::deserialize(&r.signed_psbt).expect("psbt")
+        }
+        other => panic!("first pass should sign both inputs, got {:?}", other),
+    };
+
+    // The orchestrator merged only A's contribution: same tx, same prevouts.
+    let mut partial = signed.clone();
+    partial.inputs[1].tap_script_sigs.clear();
+    let sig_a = signed.inputs[0]
+        .tap_script_sigs
+        .get(&(a.xonly, a.leaf_hash))
+        .copied()
+        .expect("A signed on pass 1");
+
+    let second = match sign(partial.serialize()) {
+        Some(Response::SignedPsbt(r)) => {
+            assert_eq!(r.inputs_signed, 1, "only B is left to sign");
+            Psbt::deserialize(&r.signed_psbt).expect("psbt")
+        }
+        other => panic!(
+            "F06-NEW-AF-09: second pass with A merged must sign B, got {:?}",
+            other
+        ),
+    };
+
+    assert_eq!(second.unsigned_tx, signed.unsigned_tx);
+    assert_eq!(
+        second.inputs[0]
+            .tap_script_sigs
+            .get(&(a.xonly, a.leaf_hash)),
+        Some(&sig_a),
+        "A's signature must come back untouched"
+    );
+
+    // Both signatures verify against the same sighashes, independently.
+    let prevouts: Vec<TxOut> = second
+        .inputs
+        .iter()
+        .map(|i| i.witness_utxo.clone().expect("witness_utxo"))
+        .collect();
+    let tx = second.unsigned_tx.clone();
+    let mut cache = SighashCache::new(&tx);
+    let secp = Secp256k1::verification_only();
+    for (index, addr) in [(0usize, &a), (1usize, &b)] {
+        let sig = second.inputs[index]
+            .tap_script_sigs
+            .get(&(addr.xonly, addr.leaf_hash))
+            .unwrap_or_else(|| panic!("input {index} must carry our signature"));
+        let sighash = cache
+            .taproot_script_spend_signature_hash(
+                index,
+                &Prevouts::All(&prevouts),
+                addr.leaf_hash,
+                TapSighashType::Default,
+            )
+            .expect("sighash");
+        secp.verify_schnorr(
+            &sig.signature,
+            &Message::from_digest(*sighash.as_byte_array()),
+            &addr.xonly,
+        )
+        .unwrap_or_else(|e| panic!("input {index} signature must verify: {e}"));
+    }
+
+    // Nothing left to do is still refused - custody is not a licence to no-op.
+    match sign(second.serialize()) {
+        Some(Response::Error(e)) => assert!(
+            e.message.contains("signed 0 inputs"),
+            "expected the no-op refusal, got: {}",
+            e.message
+        ),
+        other => panic!("a fully signed PSBT must not sign again, got {:?}", other),
     }
 }
 
