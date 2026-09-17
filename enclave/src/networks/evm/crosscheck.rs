@@ -829,14 +829,19 @@ mod tests {
         use alloy_primitives::B256;
         use alloy_sol_types::SolValue;
 
-        fn lock(tag: u8, net: u64) -> VerifiedLock {
-            VerifiedLock {
-                mint_opid: [tag; 32],
-                minted: net,
-                operation_id: [tag; 32],
-                net_amount: net,
-            }
-        }
+        const LOCK_A: VerifiedLock = VerifiedLock {
+            mint_opid: [0x51; 32],
+            minted: 100,
+            operation_id: [0xA1; 32],
+            net_amount: 950,
+        };
+
+        const LOCK_B: VerifiedLock = VerifiedLock {
+            mint_opid: [0x62; 32],
+            minted: 30,
+            operation_id: [0xB2; 32],
+            net_amount: 20,
+        };
 
         fn settlement(pairs: &[(u8, u64)]) -> Bytes {
             let ids: Vec<B256> = pairs.iter().map(|(t, _)| B256::from([*t; 32])).collect();
@@ -852,39 +857,37 @@ mod tests {
 
         #[test]
         fn passes_when_the_cited_pairs_are_the_verified_locks() {
-            assert!(check(
-                &[(0xA1, 950), (0xB2, 20)],
-                &[lock(0xA1, 950), lock(0xB2, 20)]
-            )
-            .is_ok());
+            assert!(check(&[(0xA1, 950), (0xB2, 20)], &[LOCK_A, LOCK_B]).is_ok());
         }
 
         #[test]
         fn order_does_not_matter() {
-            assert!(check(
-                &[(0xB2, 20), (0xA1, 950)],
-                &[lock(0xA1, 950), lock(0xB2, 20)]
-            )
-            .is_ok());
+            assert!(check(&[(0xB2, 20), (0xA1, 950)], &[LOCK_A, LOCK_B]).is_ok());
         }
 
         /// The P6 attack: a valid burn re-presented with other deposits cited,
         /// which would earn a fresh `burnId` on-chain.
         #[test]
         fn rejects_a_deposit_the_burn_does_not_descend_from() {
-            let err = check(&[(0xC3, 950)], &[lock(0xA1, 950)]).unwrap_err();
+            let err = check(&[(0xC3, 950)], &[LOCK_A]).unwrap_err();
+            assert!(err.to_string().contains("settlementData mismatch"), "{err}");
+        }
+
+        #[test]
+        fn rejects_a_citation_of_the_mint_pair_instead_of_the_bridge_record() {
+            let err = check(&[(LOCK_A.mint_opid[0], LOCK_A.minted)], &[LOCK_A]).unwrap_err();
             assert!(err.to_string().contains("settlementData mismatch"), "{err}");
         }
 
         #[test]
         fn rejects_a_missing_ancestry_deposit() {
-            let err = check(&[(0xA1, 950)], &[lock(0xA1, 950), lock(0xB2, 20)]).unwrap_err();
+            let err = check(&[(0xA1, 950)], &[LOCK_A, LOCK_B]).unwrap_err();
             assert!(err.to_string().contains("settlementData mismatch"), "{err}");
         }
 
         #[test]
         fn rejects_an_extra_cited_deposit() {
-            let err = check(&[(0xA1, 950), (0xB2, 20)], &[lock(0xA1, 950)]).unwrap_err();
+            let err = check(&[(0xA1, 950), (0xB2, 20)], &[LOCK_A]).unwrap_err();
             assert!(err.to_string().contains("settlementData mismatch"), "{err}");
         }
 
@@ -892,13 +895,13 @@ mod tests {
         /// amount is a wrong citation, not a rounding issue.
         #[test]
         fn rejects_a_wrong_net_amount() {
-            let err = check(&[(0xA1, 949)], &[lock(0xA1, 950)]).unwrap_err();
+            let err = check(&[(0xA1, 949)], &[LOCK_A]).unwrap_err();
             assert!(err.to_string().contains("settlementData mismatch"), "{err}");
         }
 
         #[test]
         fn rejects_a_duplicated_citation() {
-            let err = check(&[(0xA1, 950), (0xA1, 950)], &[lock(0xA1, 950)]).unwrap_err();
+            let err = check(&[(0xA1, 950), (0xA1, 950)], &[LOCK_A]).unwrap_err();
             assert!(err.to_string().contains("twice"), "{err}");
         }
 
@@ -911,8 +914,7 @@ mod tests {
         #[test]
         fn rejects_empty_settlement_data() {
             let cd = mock_funds_out_calldata_full(Address::ZERO, 1000, Bytes::new(), Bytes::new());
-            let err =
-                validate_funds_out_settlement(&params_of(&cd), &[lock(0xA1, 950)]).unwrap_err();
+            let err = validate_funds_out_settlement(&params_of(&cd), &[LOCK_A]).unwrap_err();
             assert!(err.to_string().contains("does not decode"), "{err}");
         }
 
@@ -926,8 +928,7 @@ mod tests {
                 Bytes::new(),
                 Bytes::from(padded),
             );
-            let err =
-                validate_funds_out_settlement(&params_of(&cd), &[lock(0xA1, 950)]).unwrap_err();
+            let err = validate_funds_out_settlement(&params_of(&cd), &[LOCK_A]).unwrap_err();
             assert!(
                 err.to_string().contains("canonically") || err.to_string().contains("decode"),
                 "{err}"
