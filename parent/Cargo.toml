@@ -80,12 +80,15 @@ sha2 = "0.10"
 # keccak256 for the CLI's consignment_hash integrity field (send-RGB PSBT path)
 sha3 = "0.10"
 rand = "0.8"
+zeroize = { version = "1.8", optional = true }
+libc = { version = "0.2", optional = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 vsock = "0.5"
 
 [features]
 default = []
+stage-bfa-temp = ["dep:zeroize", "dep:libc"]
 vsock = []
 
 [dev-dependencies]

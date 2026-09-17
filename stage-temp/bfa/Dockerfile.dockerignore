@@ -1,0 +1,15 @@
+**/target/
+.git
+.github
+local-ops
+START-HERE.md
+AGENT-CONTEXT.md
+SESSION-CONTEXT.md
+TODO.md
+**/*.eif
+**/*.pem
+**/*.key
+**/*.seed
+**/.env*
+**/artifacts/
+**/evidence/

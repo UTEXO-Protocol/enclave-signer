@@ -111,6 +111,7 @@ rgb-swap = ["rgb"]
 # with BFA `Bridge`, withdrawals destroy with BFA `Burn`.
 rgb-mint-burn = ["rgb"]
 
+stage-bfa-temp = ["vsock", "bfa-mint", "allow-seed-import", "allow-debug-pcrs"]
 vsock = []
 # DANGER: allows importing a raw seed over the wire. Testing only.
 allow-seed-import = []
