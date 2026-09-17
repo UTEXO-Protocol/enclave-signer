@@ -6,8 +6,17 @@
 # Production builder glibc must remain compatible with the AL2023 runtime.
 FROM rust:1.96-slim-bullseye@sha256:c593596210f729542a92aced6a8b0812bcc8d04c5f1b238e663b800d0e2e17bd AS builder
 
-# Builder-only tools: system Git and SSH for private dependencies.
-RUN apt-get update && apt-get install -y \
+# Use the signed Debian snapshot to avoid missing Bullseye packages.
+# HTTP is required until ca-certificates is installed.
+# Replace this temporary pin when the shared base-image update is ready.
+RUN set -eux; \
+    printf '%s\n' \
+      'deb http://snapshot.debian.org/archive/debian/20260801T000000Z bullseye main' \
+      'deb http://snapshot.debian.org/archive/debian-security/20260801T000000Z bullseye-security main' \
+      > /etc/apt/sources.list; \
+    rm -f /etc/apt/sources.list.d/*; \
+    printf 'Acquire::Check-Valid-Until "false";\nAcquire::Retries "5";\n' > /etc/apt/apt.conf.d/99snapshot; \
+    apt-get update && apt-get install -y \
     pkg-config libssl-dev git ca-certificates openssh-client \
     make python3 python3-pip \
     && pip3 install --no-cache-dir "cmake==3.31.6" \
@@ -26,29 +35,18 @@ WORKDIR /build/enclave
 # `--locked` below the compiled binary is stable across rebuilds of the same commit.
 ENV CARGO_INCREMENTAL=0 \
     RUSTFLAGS="--remap-path-prefix=/build=/src -C debuginfo=0 -C strip=symbols"
-# `spv` implies `rgb-validation`; listing both explicitly so the feature
-# set is visible at a glance.
-#
-# `--locked` pins to Cargo.lock exactly - without it the `?branch=...` git deps
-# (rgb-*) could re-resolve to a newer commit on a later rebuild and change the
-# binary (and thus PCR0).
-#
-# `evm-rpc` adds in-enclave FundsIn event verification, pulling the alloy
-# + tokio subtree. Requires a second host vsock-proxy for the EVM RPC
-# (EVM_RPC_VSOCK_PORT, default 8002).
-# `ccd` adds Concordium governance signing (SignCcd + CcdSource routes). The
-# umbrella `rgb` feature pulls in `spv`/`rgb-validation`.
-# `helios` is deliberately NOT enabled: the light-client path is unused in
-# production, so the attested evm_source is RawRpc.
-# `rgb-swap` picks the send/receive RGB flow (see enclave/src/networks/rgb/flow/).
-# It is in the default feature set, but named here so the shipped flow is
-# explicit in the image that measures into PCR0.
+# Build the RGB swap, BFA validation, and CCD features.
+# bfa-validation enables evm-rpc through the host proxy on port 8002.
+# This image uses RawRpc without Helios.
+# For debug tests only: allow-debug-pcrs accepts all-zero peer PCRs.
+# Leave this argument empty for production builds. (F03-AF-12)
+ARG ENCLAVE_DEBUG_FEATURES=""
 RUN --mount=type=secret,id=github_token \
     --mount=type=secret,id=consignment_key \
     --mount=type=secret,id=consensus_key \
     --mount=type=secret,id=ops_key \
     --mount=type=secret,id=schemas_key \
-    sh /build/build/with-private-deps.sh enclave cargo build --release --locked --features vsock,rgb,rgb-swap,ccd,bfa-validation
+    sh /build/build/with-private-deps.sh enclave cargo build --release --locked --features vsock,rgb,rgb-swap,ccd,bfa-validation${ENCLAVE_DEBUG_FEATURES:+,${ENCLAVE_DEBUG_FEATURES}}
 
 
 # --- Runtime ---

@@ -50,8 +50,13 @@ path = "src/bin/attest_verify.rs"
 
 [dependencies]
 prost = "0.14"
-tonic = "0.14"
+tonic = { version = "0.14", features = ["tls-ring"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+http = "1"
+# Use GlobalConcurrencyLimitLayer to limit requests across connections. (F03-AF-13)
+tower = { version = "0.5", features = ["limit"] }
 tokio = { version = "1", features = ["full"] }
+tokio-stream = "0.1"
 # Full schema from the shared upstream repo (bridge / node / orchestrator /
 # parent / signer packages). The parent runs on the untrusted host, so needing a
 # credential to build it costs nothing. Keep this rev in lockstep with the
@@ -84,6 +89,7 @@ default = []
 vsock = []
 
 [dev-dependencies]
+tonic-prost = "0.14"
 # Real enclave (with mock-attestation + seed-import) for end-to-end tests
 # that drive the full CLI verifier against a live enclave + gRPC stack.
 utexo-bridge-enclave = { path = "../enclave", features = ["mock-attestation", "allow-seed-import"] }

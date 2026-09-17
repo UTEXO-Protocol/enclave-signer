@@ -35,6 +35,23 @@ pub fn start_test_server_with_config(
     configure: impl FnOnce(&EnclaveState),
     bridge_config: BridgeConfig,
 ) -> u16 {
+    let policy = SecurityPolicy::resolve(
+        &BuildContext::current(),
+        &bridge_config,
+        EvmDataSource::Disabled,
+        None,
+    );
+    start_test_server_with_policy(configure, bridge_config, policy)
+}
+
+/// Explicit policy for clone commitment tests. This only constructs a test
+/// context; it does not bypass or test the production boot gate.
+#[allow(dead_code)]
+pub fn start_test_server_with_policy(
+    configure: impl FnOnce(&EnclaveState),
+    bridge_config: BridgeConfig,
+    policy: SecurityPolicy,
+) -> u16 {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
     let state = EnclaveState::new(bitcoin::Network::Bitcoin);
@@ -47,12 +64,6 @@ pub fn start_test_server_with_config(
         Network::Regtest,
         checkpoint_for(Network::Regtest),
     ));
-    let policy = SecurityPolicy::resolve(
-        &BuildContext::current(),
-        &bridge_config,
-        EvmDataSource::Disabled,
-        None,
-    );
     let ctx = Arc::new(ServerContext {
         state,
         bridge_config,

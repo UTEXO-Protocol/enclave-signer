@@ -1,41 +1,25 @@
 #!/usr/bin/env bash
-# Build the production enclave image (vsock + rgb-validation + spv), convert it
-# to an EIF, and emit the artifacts a deployment needs:
-#   - utexo-bridge-enclave.eif   the enclave image
-#   - PCR.json                   PCR0/1/2 measurements (from `nitro-cli describe-eif`)
-#   - SHA256SUMS                 sha256 of the EIF (integrity check before run-enclave)
+# Build an enclave image and convert it to an EIF.
+# Write the EIF, PCR.json, and SHA256SUMS to OUT_DIR.
+# The caller uploads these files to S3.
 #
-# Environment-agnostic: runs the same on a Nitro EC2 build host and on a CI
-# runner. It does not touch S3 - uploading is the caller's job (the build-eif
-# workflow handles AWS auth + S3).
+# Usage: ./build/build-enclave.sh
+# Environment:
+#   OUT_DIR          output directory (default: build/)
+#   IMAGE_TAG        image tag (default: utexo-bridge-enclave:latest)
+#   DOCKERFILE       recipe name (default: Dockerfile.enclave)
+#   EIF_NAME         output name (default: utexo-bridge-enclave.eif)
+#   NITRO_CLI_BLOBS   optional Nitro kernel/init directory
+#   GITHUB_TOKEN     private dependency token
+#   PRIVATE_DEPS_DIR alternative directory for per-repository deploy keys
+#   RGB_ASSET_ID     required when the recipe declares ARG RGB_ASSET_ID
+#   ENCLAVE_DEBUG_FEATURES optional test features; leave empty for production
+#   SOURCE_DATE_EPOCH build timestamp (default: commit time)
 #
-# Every variant resolves private RGB dependencies. Supply GITHUB_TOKEN with
-# read access, or PRIVATE_DEPS_DIR containing the per-repository deploy keys.
-# Credentials enter the build only through BuildKit secret mounts.
-#
-# Reproducible PCRs: PCR0/PCR1 depend on the nitro-cli version and its blobs
-# (kernel/init), not just our code. Pin nitro-cli to the same version the target
-# hosts run (stage is on 1.4.5) or the PCRs will not match.
-#
-# On the build side the EIF packs the runtime-stage rootfs, so the image build
-# must be deterministic: both base images are digest-pinned in
-# Dockerfile.enclave, and layer timestamps are normalised via SOURCE_DATE_EPOCH
-# plus BuildKit's `rewrite-timestamp` exporter (needs `docker buildx` with a
-# container/containerd builder). SOURCE_DATE_EPOCH defaults to the commit time.
-# OS package versions (apt/dnf) still float.
-#
-# Usage:
-#   ./build/build-enclave.sh
-# Tunables (env):
-#   OUT_DIR                output directory for artifacts (default: build/)
-#   IMAGE_TAG              docker tag for the builder image (default: utexo-bridge-enclave:latest)
-#   NITRO_CLI_BLOBS        override blobs dir for `nitro-cli build-enclave`
-#   GITHUB_TOKEN           token with read access to the private RGB dependencies
-#   PRIVATE_DEPS_DIR       alternatively, directory of per-repository key files
-#                          (consignment_key, consensus_key, ops_key, schemas_key)
-# NOTE: the donor cloning secret is NOT baked into the EIF. It is delivered at
-# runtime via the InitializeKey message (CLI: `init --cloning-secret <secret>`),
-# keeping the build secret-free and the PCRs reproducible.
+# BuildKit mounts credentials as secrets.
+# Supply the cloning secret at runtime through InitializeKey.
+# Use the target host's nitro-cli version to keep measurements consistent.
+# Normalize timestamps with buildx rewrite-timestamp for reproducible images.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -83,6 +67,28 @@ fi
 
 mkdir -p "$OUT_DIR"
 
+# Require an asset when the selected Dockerfile declares RGB_ASSET_ID.
+# Reject a missing asset before the build starts. (F06-AF-38)
+# A fixed ENV asset does not need a build argument.
+BUILD_ARGS=()
+if grep -qE '^ARG[[:space:]]+RGB_ASSET_ID' "$SCRIPT_DIR/$DOCKERFILE"; then
+    if [ -z "${RGB_ASSET_ID:-}" ]; then
+        echo "Error: $DOCKERFILE requires RGB_ASSET_ID (the issued BFA contract id, e.g. rgb:<...>)." >&2
+        echo "       Set RGB_ASSET_ID=rgb:<contract-id> and re-run; an empty pin leaves the" >&2
+        echo "       enclave config partially set and policy.rs refuses to boot." >&2
+        exit 1
+    fi
+    BUILD_ARGS+=(--build-arg "RGB_ASSET_ID=$RGB_ASSET_ID")
+    echo "    rgb asset id : $RGB_ASSET_ID"
+fi
+
+# Forward debug features only when set. (F03-AF-12)
+# Do not set ENCLAVE_DEBUG_FEATURES for production builds.
+if [ -n "${ENCLAVE_DEBUG_FEATURES:-}" ]; then
+    BUILD_ARGS+=(--build-arg "ENCLAVE_DEBUG_FEATURES=$ENCLAVE_DEBUG_FEATURES")
+    echo "    DEBUG feats  : $ENCLAVE_DEBUG_FEATURES  (⚠ NON-PRODUCTION EIF)"
+fi
+
 # --- 1. Build the docker image ---------------------------------------------
 # Deterministic timestamps: SOURCE_DATE_EPOCH (commit time, stable per git_sha)
 # + `rewrite-timestamp=true` make BuildKit normalise file mtimes in the exported
@@ -91,14 +97,10 @@ SOURCE_DATE_EPOCH="${SOURCE_DATE_EPOCH:-$(git -C "$PROJECT_ROOT" log -1 --format
 export SOURCE_DATE_EPOCH
 
 echo "Building Docker image (buildx, SOURCE_DATE_EPOCH=$SOURCE_DATE_EPOCH)..."
-RGB_ASSET_ARGS=()
-if [ -n "${RGB_ASSET_ID:-}" ]; then
-    RGB_ASSET_ARGS=(--build-arg "RGB_ASSET_ID=$RGB_ASSET_ID")
-fi
 # `${a[@]+...}`: bash 3.2 treats an empty array as unset under `set -u`.
 DOCKER_BUILDKIT=1 docker buildx build \
     --build-arg SOURCE_DATE_EPOCH="$SOURCE_DATE_EPOCH" \
-    ${RGB_ASSET_ARGS[@]+"${RGB_ASSET_ARGS[@]}"} \
+    ${BUILD_ARGS[@]+"${BUILD_ARGS[@]}"} \
     ${SECRET_ARGS[@]+"${SECRET_ARGS[@]}"} \
     -f "$SCRIPT_DIR/$DOCKERFILE" \
     -t "$IMAGE_TAG" \

@@ -33,6 +33,15 @@ name: "Build EIF"
 
 on:
   workflow_dispatch:
+    inputs:
+      debug_features:
+        description: >-
+          DANGER, debug EIFs only (F03-AF-12): extra cargo features to append,
+          e.g. `allow-debug-pcrs` so stage clone-drills in ENCLAVE_DEBUG_MODE can
+          verify each other. Leave EMPTY for production builds (empty => PCR0
+          unchanged). Never set this for a release.
+        required: false
+        default: ""
   push:
     tags: ["v*"]
 
@@ -147,6 +156,8 @@ jobs:
           DOCKERFILE: ${{ matrix.dockerfile }}
           EIF_NAME: ${{ matrix.eif_name }}
           IMAGE_TAG: utexo-bridge-enclave-${{ matrix.variant }}:latest
+          # Enable debug features only for manual test builds. (F03-AF-12)
+          ENCLAVE_DEBUG_FEATURES: ${{ github.event.inputs.debug_features || '' }}
           RGB_ASSET_ID: ${{ vars.BFA_RGB_ASSET_ID }}
         run: |
           set -euxo pipefail
@@ -182,6 +193,7 @@ jobs:
             "eif_name": "${{ matrix.eif_name }}",
             "nitro_cli_version": "${NITRO_CLI_VERSION}",
             "run_id": "${{ github.run_id }}",
+            "debug_features": "${{ github.event.inputs.debug_features }}",
             "built_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
           }
           EOF
@@ -190,7 +202,8 @@ jobs:
       - name: Upload run artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: eif-${{ github.sha }}${{ matrix.artifact_suffix }}
+          # Use a separate artifact name for debug builds of the same commit.
+          name: eif-${{ github.sha }}${{ matrix.artifact_suffix }}${{ github.event.inputs.debug_features != '' && '-debug' || '' }}
           path: |
             artifacts/${{ matrix.eif_name }}
             artifacts/PCR.json
@@ -216,7 +229,8 @@ jobs:
         run: |
           set -euxo pipefail
           [ -n "$BUCKET" ] || { echo "vars.EIF_S3_BUCKET is not set"; exit 1; }
-          DEST="s3://${BUCKET}/eif/${{ github.sha }}/${{ matrix.s3_subpath }}"
+          # Store debug EIFs in a separate S3 path to protect production artifacts.
+          DEST="s3://${BUCKET}/eif/${{ github.sha }}/${{ github.event.inputs.debug_features != '' && 'debug/' || '' }}${{ matrix.s3_subpath }}"
           aws s3 cp artifacts/ "$DEST" --recursive
           echo "Published to $DEST"
 

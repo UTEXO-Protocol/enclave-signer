@@ -19,7 +19,8 @@ use utexo_bridge_enclave::proto::*;
 // stable, non-secret seed we can embed in integration tests.
 const DONOR_MNEMONIC: &str =
     "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
-const CLONING_SECRET: &str = "test-operator-cloning-secret";
+// Use at least 32 bytes and eight distinct values. (F03-AF-26)
+const CLONING_SECRET: &str = "test-operator-cloning-secret-0123456789abcdef";
 
 fn initialize_key_from_mnemonic(port: u16, mnemonic: &str) -> PublicKeysResponse {
     let resp = send_request(
@@ -196,8 +197,12 @@ fn clone_rejects_wrong_cloning_secret() {
     let (donor_port, donor_keys) = start_donor();
     let requester_port = start_requester();
 
-    // Requester uses a DIFFERENT secret than the donor was configured with.
-    let init = initiate_cloning(requester_port, "wrong-secret", &donor_keys.evm_address);
+    // Use a strong secret so this case tests HMAC rejection. (F03-AF-26)
+    let init = initiate_cloning(
+        requester_port,
+        "wrong-operator-cloning-secret-0123456789abcdef",
+        &donor_keys.evm_address,
+    );
     let err = request_get_clone(donor_port, &donor_keys.evm_address, &init)
         .expect_err("GetClone should reject a mismatched digest");
     assert!(
@@ -220,6 +225,27 @@ fn clone_rejects_wrong_cluster_public_key() {
     assert!(
         err.message.contains("cluster_public_key") || err.message.contains("does not match"),
         "unexpected error: {}",
+        err.message
+    );
+}
+
+#[test]
+fn clone_donor_rejects_request_armed_for_a_different_target() {
+    // Change the target address without changing its HMAC. (F03-AF-07)
+    // The donor must reject the request before encrypting its seed.
+    let (donor_port, donor_keys) = start_donor();
+    let requester_port = start_requester();
+
+    // Create the digest for a different donor.
+    let foreign_target = [0xDEu8; 20];
+    let init = initiate_cloning(requester_port, CLONING_SECRET, &foreign_target);
+
+    // Use this donor address to pass the initial address check.
+    let err = request_get_clone(donor_port, &donor_keys.evm_address, &init)
+        .expect_err("donor must reject a request armed for a different target identity");
+    assert!(
+        err.message.contains("digest") || err.message.contains("cloning"),
+        "expected a digest-binding rejection (F03-AF-07), got: {}",
         err.message
     );
 }
@@ -395,11 +421,27 @@ fn clone_donor_rejects_wire_pubkey_not_matching_attestation() {
 
     let init = initiate_cloning(requester_port, CLONING_SECRET, &donor_keys.evm_address);
 
-    // Tamper only the wire pubkey; leave the attestation (which binds the real
-    // ephemeral pubkey) untouched. Any well-formed 32-byte key that is not the
-    // attested one exercises the binding check.
+    // Change the wire key but keep the original attestation.
+    // Use a valid HMAC to reach the attested-key check. (F03-AF-20)
     let mut tampered = init.clone();
     tampered.encryption_pubkey = vec![0x77u8; 32];
+    let tampered_pk: [u8; 32] = tampered
+        .encryption_pubkey
+        .clone()
+        .try_into()
+        .expect("32-byte pubkey");
+    // Include the donor address so the HMAC passes the target check. (F03-AF-07)
+    let donor_target: [u8; 20] = donor_keys
+        .evm_address
+        .clone()
+        .try_into()
+        .expect("20-byte donor evm address");
+    tampered.cloning_digest = utexo_bridge_enclave::cloning::make_cloning_digest(
+        CLONING_SECRET,
+        &tampered_pk,
+        &donor_target,
+    )
+    .to_vec();
     assert_ne!(
         tampered.encryption_pubkey, init.encryption_pubkey,
         "the tampered wire pubkey must differ from the attested one"

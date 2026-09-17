@@ -24,15 +24,11 @@ pub enum VerifyMode {
     Mock,
 }
 
-/// The security posture the caller expects the attested enclave to have.
-/// The enclave commits its resolved posture into `user_data`, and the
-/// verifier reconstructs the expected posture here and requires a match, so a
-/// downgraded enclave is rejected.
-///
-/// Chain/contract/asset pins come from the wire response, which the public-key
-/// bundle already binds, so a production expectation states only the posture
-/// flags plus the gas-tx rule - the latter is not on the wire and must be
-/// declared here.
+/// Expected security policy for the attested enclave.
+/// Compare it with the policy commitment in user_data.
+/// Optional chain, contract, and asset pins select the intended deployment. (F02-AF-04)
+/// Without these pins, verify the reported values without checking operator intent.
+/// The caller must always supply the expected gas transaction rule.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ExpectedPolicy {
     /// Expect a production bridge enclave with these posture flags.
@@ -45,6 +41,16 @@ pub enum ExpectedPolicy {
         /// commitment so an enclave that trust-rooted on a different checkpoint
         /// fails verification.
         evm_checkpoint: Option<[u8; 32]>,
+        /// Expected EVM chain ID.
+        /// None accepts the authenticated chain ID without comparison.
+        expected_chain_id: Option<u64>,
+        /// Expected 20-byte bridge or MultisigProxy address.
+        /// Some requires an exact match.
+        expected_bridge_contract: Option<[u8; 20]>,
+        /// Expected RGB asset ID.
+        /// Some requires an exact match.
+        /// An empty string requires no RGB asset.
+        expected_rgb_asset_id: Option<String>,
         /// Expected gas-tx (`SignRawDigest`) rule the enclave committed.
         /// An all-zero destination, zero caps, and empty selectors mean
         /// the operator did not pin the gas path, which the enclave attests as
@@ -115,9 +121,11 @@ pub async fn verify_attested_pubkey(
     let mut nonce = [0u8; 32];
     rand::thread_rng().fill_bytes(&mut nonce);
 
-    let mut client = ParentServiceClient::connect(endpoint.to_string())
+    let channel = crate::transport_security::client_endpoint(endpoint)?
+        .connect()
         .await
         .with_context(|| format!("connecting to {endpoint}"))?;
+    let mut client = ParentServiceClient::new(channel);
 
     let response = client
         .attested_public_key(AttestedPublicKeyRequest {
@@ -194,6 +202,9 @@ fn expected_attested_policy(
             allow_vanilla_psbt,
             evm_source,
             evm_checkpoint,
+            expected_chain_id,
+            expected_bridge_contract,
+            expected_rgb_asset_id,
             gas_tx_allowed_to,
             gas_tx_max_gas_limit,
             gas_tx_max_fee_per_gas,
@@ -211,6 +222,35 @@ fn expected_attested_policy(
                         resp.bridge_contract.len()
                     )
                 })?;
+
+            // Check operator pins before constructing the expected commitment. (F02-AF-04)
+            if let Some(want) = expected_chain_id {
+                if *want != resp.chain_id {
+                    bail!(
+                        "chain_id mismatch: enclave attests {} but --expect-chain-id is {want}",
+                        resp.chain_id
+                    );
+                }
+            }
+            if let Some(want) = expected_bridge_contract {
+                if want != &bridge_contract {
+                    bail!(
+                        "bridge_contract mismatch: enclave attests 0x{} but \
+                         --expect-bridge-contract is 0x{}",
+                        hex::encode(bridge_contract),
+                        hex::encode(want),
+                    );
+                }
+            }
+            if let Some(want) = expected_rgb_asset_id {
+                if want != &resp.rgb_asset_id {
+                    bail!(
+                        "rgb_asset_id mismatch: enclave attests {:?} but --expect-rgb-asset-id is {want:?}",
+                        resp.rgb_asset_id
+                    );
+                }
+            }
+
             Ok(AttestedPolicy::Production {
                 allow_vanilla_psbt: *allow_vanilla_psbt,
                 // A real-verified production enclave always uses real (NSM)
@@ -232,5 +272,96 @@ fn expected_attested_policy(
                 gas_tx_allowed_selectors: gas_tx_allowed_selectors.clone(),
             })
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A production expectation with the three deployment pins set to `pins`
+    /// (chain_id, bridge_contract, rgb_asset_id) and everything else neutral.
+    fn expect_prod(
+        chain_id: Option<u64>,
+        bridge_contract: Option<[u8; 20]>,
+        rgb_asset_id: Option<String>,
+    ) -> ExpectedPolicy {
+        ExpectedPolicy::Production {
+            allow_vanilla_psbt: false,
+            evm_source: EvmDataSource::RawRpc,
+            evm_checkpoint: None,
+            expected_chain_id: chain_id,
+            expected_bridge_contract: bridge_contract,
+            expected_rgb_asset_id: rgb_asset_id,
+            gas_tx_allowed_to: [0u8; 20],
+            gas_tx_max_gas_limit: 0,
+            gas_tx_max_fee_per_gas: 0,
+            gas_tx_max_value_wei: 0,
+            gas_tx_allowed_selectors: Vec::new(),
+        }
+    }
+
+    /// A wire response pinned to chain 42161, contract 0x11.., asset "rgb:abc".
+    fn wire() -> AttestedPublicKeyResponse {
+        AttestedPublicKeyResponse {
+            chain_id: 42161,
+            bridge_contract: vec![0x11u8; 20],
+            rgb_asset_id: "rgb:abc".to_string(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn unset_pins_trust_the_wire() {
+        // Without operator pins, authenticate values without comparing them.
+        let got = expected_attested_policy(&expect_prod(None, None, None), &wire())
+            .expect("unset pins must not reject");
+        match got {
+            AttestedPolicy::Production {
+                chain_id,
+                rgb_asset_id,
+                ..
+            } => {
+                assert_eq!(chain_id, 42161);
+                assert_eq!(rgb_asset_id, "rgb:abc");
+            }
+            AttestedPolicy::Development => panic!("expected production policy"),
+        }
+    }
+
+    #[test]
+    fn matching_pins_are_accepted() {
+        let exp = expect_prod(Some(42161), Some([0x11u8; 20]), Some("rgb:abc".into()));
+        assert!(expected_attested_policy(&exp, &wire()).is_ok());
+    }
+
+    #[test]
+    fn wrong_chain_id_is_rejected() {
+        let exp = expect_prod(Some(1), None, None);
+        let err = expected_attested_policy(&exp, &wire()).expect_err("wrong chain must fail");
+        assert!(format!("{err:#}").contains("chain_id mismatch"));
+    }
+
+    #[test]
+    fn wrong_bridge_contract_is_rejected() {
+        let exp = expect_prod(None, Some([0x22u8; 20]), None);
+        let err = expected_attested_policy(&exp, &wire()).expect_err("wrong contract must fail");
+        assert!(format!("{err:#}").contains("bridge_contract mismatch"));
+    }
+
+    #[test]
+    fn wrong_rgb_asset_is_rejected() {
+        let exp = expect_prod(None, None, Some("rgb:other".into()));
+        let err = expected_attested_policy(&exp, &wire()).expect_err("wrong asset must fail");
+        assert!(format!("{err:#}").contains("rgb_asset_id mismatch"));
+    }
+
+    #[test]
+    fn empty_asset_pin_matches_empty_wire() {
+        // A pure-EVM / pure-CCD build ships no RGB asset; pinning "" must match.
+        let mut w = wire();
+        w.rgb_asset_id = String::new();
+        let exp = expect_prod(None, None, Some(String::new()));
+        assert!(expected_attested_policy(&exp, &w).is_ok());
     }
 }
