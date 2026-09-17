@@ -408,8 +408,42 @@ Limits and dev knobs:
 | `USE_VSOCK` | `false` | `true` / `1` selects vsock (Linux only). |
 | `ENCLAVE_VSOCK_CID` | `16` | Enclave CID. |
 | `ENCLAVE_VSOCK_PORT` | `5000` | Enclave vsock port. |
+| `HEALTH_HOST` | `127.0.0.1` | Bind host for `GET /health`. Keep on loopback - unlike `GRPC_HOST`, do not set to `0.0.0.0` |
+| `HEALTH_PORT` | `5001` | Port for `GET /health` |
 | `EVM_NETWORK_IDS` | empty | Comma-separated network ids that count as EVM destinations for `Sign`. Empty rejects every EVM-destination transaction. |
 | `RUST_LOG` | unset | Log filter. |
+
+#### Readiness endpoint
+
+Deploy restarts the three enclaves one at a time to keep the 2-of-3 signing
+quorum. `GET /health` on the parent replaces the fixed sleep between them with a
+real signal:
+
+```bash
+curl -sS -o /dev/null -w '%{http_code}\n' http://127.0.0.1:5001/health
+```
+
+- `200` - the enclave's signing key is loaded **and** its Bitcoin header chain
+  passes the same staleness gate signing applies (`SPV_MAX_TIP_AGE_SECS`), so a
+  signing request would not bounce off a stale chain.
+- `503` - anything else: still starting, still catching up, key not initialized,
+  or the enclave is unreachable. "Not ready" and "cannot tell" are one answer to
+  a caller that is waiting, so the poller never has to special-case a `5xx`.
+
+The body carries the same fields as diagnostics (`key_loaded`, `spv_synced`,
+`phase`, `spv_tip_height`, `spv_tip_age_secs`), so a stuck deploy is debuggable
+from the poll log. Production binds it per parent on `50061` / `50062` /
+`50063` (`deploy/deploy-host.sh`); the Docker image wires the same probe into a
+`HEALTHCHECK`, so `docker inspect` reports it.
+
+This is an operations probe, not part of the signing API. It is loopback-only
+and must not be exposed off-host.
+
+The same answer is available from the CLI, for debugging from the host shell:
+
+```bash
+utexo-bridge-parent-cli --addr vsock://16 health
+```
 
 ## Testing
 

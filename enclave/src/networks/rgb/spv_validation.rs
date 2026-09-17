@@ -77,12 +77,7 @@ pub fn validate_source_chain(
         )
     })?;
 
-    assert_chain_not_stale(
-        chain,
-        now,
-        Duration::from_secs(SPV_MAX_TIP_AGE_SECS),
-        Duration::from_secs(SPV_MAX_TIP_FUTURE_SECS),
-    )?;
+    assert_chain_fresh(chain, now)?;
     assert_chain_net(&validated.chain_net, chain.network())?;
     validate_spv_proofs(
         chain,
@@ -164,6 +159,41 @@ pub fn validate_spv_proofs(
     let tip = chain.tip_height();
     for (i, proof) in proofs.iter().enumerate() {
         verify_one_proof(chain, tip, min_confirmations, i, proof)?;
+    }
+
+    Ok(())
+}
+
+/// The chain-freshness half of the signing precondition, with this module's
+/// bounds already bound. Signing calls it before validating proofs; the
+/// readiness probe calls it to answer "would signing pass right now". Both go
+/// through here so the two cannot drift apart.
+pub fn assert_chain_fresh(chain: &HeaderChain, now: SystemTime) -> Result<()> {
+    assert_chain_not_stale(
+        chain,
+        now,
+        Duration::from_secs(SPV_MAX_TIP_AGE_SECS),
+        Duration::from_secs(SPV_MAX_TIP_FUTURE_SECS),
+    )
+}
+
+/// The full signing precondition on the chain alone: fresh, and deep enough
+/// past the checkpoint to serve a proof at [`SPV_MIN_CONFIRMATIONS`].
+///
+/// Depth matters because `validate_spv_proofs` rejects anything shallower. A
+/// chain one block past the compiled-in checkpoint is fresh but cannot yet
+/// confirm anything, so a probe that checked freshness alone would report ready
+/// while every signing request still failed.
+pub fn assert_chain_ready(chain: &HeaderChain, now: SystemTime) -> Result<()> {
+    assert_chain_fresh(chain, now)?;
+
+    let depth = chain.len() as u32;
+    if depth < SPV_MIN_CONFIRMATIONS {
+        return Err(EnclaveError::Spv(format!(
+            "spv: chain is only {depth} block(s) past the checkpoint, need \
+             {SPV_MIN_CONFIRMATIONS} before a proof can reach the required \
+             confirmation depth"
+        )));
     }
 
     Ok(())

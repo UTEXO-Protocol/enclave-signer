@@ -114,6 +114,10 @@ enum Command {
     /// Get the enclave's current SPV chain tip (height + hash).
     /// Listener calls this on startup to know where to resume header sync.
     GetLastSavedBlock,
+    /// Ask the enclave whether it is ready to sign: key loaded and SPV chain
+    /// caught up. Same answer the parent's `GET /health` serves to deploy.
+    /// Exits 0 when ready, 1 when not.
+    Health,
     /// Push a batch of Bitcoin block headers into the enclave's SPV chain.
     ///
     /// Headers are read from a file: one hex-encoded 80-byte header per line,
@@ -462,6 +466,26 @@ fn main() {
             Ok(r) => {
                 println!("Block height: {}", r.block_height);
                 println!("Block hash:   {}", hex::encode(&r.block_hash));
+            }
+            Err(e) => {
+                eprintln!("Error: {}", e);
+                process::exit(1);
+            }
+        },
+        Command::Health => match client.health() {
+            Ok(r) => {
+                println!("Ready:            {}", r.ready);
+                println!("Key loaded:       {}", r.key_loaded);
+                println!("SPV synced:       {}", r.spv_synced);
+                println!("Phase:            {}", r.phase);
+                println!("SPV tip height:   {}", r.spv_tip_height);
+                println!(
+                    "SPV tip age:      {}s (max {}s)",
+                    r.spv_tip_age_secs, r.spv_max_tip_age_secs
+                );
+                if !r.ready {
+                    process::exit(1);
+                }
             }
             Err(e) => {
                 eprintln!("Error: {}", e);

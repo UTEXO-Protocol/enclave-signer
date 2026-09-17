@@ -38,6 +38,12 @@ ENCLAVE_MEMORY="${ENCLAVE_MEMORY:-3072}"
 ENCLAVE_DEBUG_MODE="${ENCLAVE_DEBUG_MODE:-0}"
 CIDS=(16 18 20)
 declare -A PORT=([16]=50051 [18]=50052 [20]=50053)
+# Readiness probe (`GET /health`), one per parent. Loopback-only. This script is
+# a cold deploy that ends before identity bootstrap, so it only provisions the
+# port; the rolling restart in `devops` is what polls it to hold the 2-of-3
+# quorum. Named HPORT so it cannot collide with the env var it emits - the same
+# reason PORT above is not named GRPC_PORT.
+declare -A HPORT=([16]=50061 [18]=50062 [20]=50063)
 
 log(){ echo "[deploy $(date -u +%H:%M:%S)] $*"; }
 asubuntu(){ su - ubuntu -c "$1"; }
@@ -200,6 +206,8 @@ for CID in "${CIDS[@]}"; do
 CLUSTER_DIR=$DIR
 GRPC_HOST=0.0.0.0
 GRPC_PORT=${PORT[$CID]}
+HEALTH_HOST=127.0.0.1
+HEALTH_PORT=${HPORT[$CID]}
 USE_VSOCK=true
 ENCLAVE_VSOCK_CID=$CID
 ENCLAVE_VSOCK_PORT=5000
@@ -273,9 +281,12 @@ for CID in "${CIDS[@]}"; do
   systemctl restart "utexo-parent@$CID"
 done
 sleep 4
-# F09-AF-07: require ALL expected parent ports to be listening, not "at least one"
-# of them (a single surviving parent must not make a partial cluster look healthy).
-WANT_PORTS=(); for CID in "${CIDS[@]}"; do WANT_PORTS+=("${PORT[$CID]}"); done
+# F09-AF-07: require ALL expected ports to be listening, not "at least one"
+# (a single surviving parent must not make a partial cluster look healthy).
+# Health ports too: a parent without its health endpoint would leave the next
+# rolling deploy polling a dead port. Liveness only - readiness stays false
+# until init/clone bootstraps identity.
+WANT_PORTS=(); for CID in "${CIDS[@]}"; do WANT_PORTS+=("${PORT[$CID]}" "${HPORT[$CID]}"); done
 LISTEN="$(ss -ltnH 2>/dev/null | awk '{print $4}' | grep -oE '[0-9]+$' | sort -u)"
 miss=(); for p in "${WANT_PORTS[@]}"; do printf '%s\n' "$LISTEN" | grep -qx "$p" || miss+=("$p"); done
 [ "${#miss[@]}" -eq 0 ] || { log "parents NOT listening on: ${miss[*]} (want ${WANT_PORTS[*]})"; exit 1; }
