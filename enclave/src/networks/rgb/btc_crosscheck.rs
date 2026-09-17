@@ -12,12 +12,10 @@
 //!     are co-signed, never a Colored (RGB-allocated) one.
 //!   * Output self-ownership ([`crate::networks::rgb::btc_ownership`]): every
 //!     output must pay back to a script this enclave co-controls, proven from
-//!     the PSBT and our own derivation, and only up to the value that script
-//!     itself brought in through the Vanilla inputs this path co-signs -
-//!     otherwise a small qualifying input would exempt bridge value paid to
-//!     its script. Change must therefore come back per script. Replaces the
-//!     `BTC_ALLOWED_SCRIPTS` allowlist, which was unbootstrappable in
-//!     production.
+//!     the PSBT and our own derivation, capped to the value that script
+//!     brought in through the Vanilla inputs this path co-signs. Change must
+//!     come back per script. Replaces the `BTC_ALLOWED_SCRIPTS` allowlist,
+//!     which was unbootstrappable in production.
 //!   * Amount cap (`BTC_MAX_TOTAL_SATS`) on total input value spent, not
 //!     output value, so it also bounds value routed to miner fees.
 //!
@@ -75,13 +73,10 @@ pub fn validate_btc_request(
         ));
     }
 
-    // 3. Output self-ownership: every output must pay back to a script this
-    //    enclave co-controls, and only up to the value that script brought in -
-    //    membership alone would let a 1000-sat qualifying input exempt bridge
-    //    value paid to its script. `Vanilla` scope: that is the only account
-    //    this path co-signs. Needs no operator configuration, so it runs
-    //    unconditionally. Anchored to the unsigned tx's outputs, which the
-    //    segwit sighash commits to.
+    // 3. Output self-ownership, capped by value: an output is exempt only up
+    //    to what its own script brought in (`Vanilla` scope, the only account
+    //    this path co-signs). Runs unconditionally, anchored to the unsigned
+    //    tx's outputs, which the segwit sighash commits to.
     let unowned_sat = unowned_output_sats(&psbt, keys, Some(AccountType::Vanilla))?;
 
     if unowned_sat > 0 {
@@ -105,10 +100,9 @@ pub fn validate_btc_request(
             return Err(EnclaveError::CrossCheck(format!(
                 "plain-BTC PSBT pays {unowned_sat} sats to outputs the enclave cannot prove pay \
                  back into the same custody, over the pinned budget of {} sats - refusing to \
-                 sign. `create_utxo` allocation dust fits this budget; a redirect does not. An \
-                 output is proven when its script equals that of an input this enclave co-signs, \
-                 which is what address reuse guarantees for change, and only up to the value that \
-                 script brought in.",
+                 sign. `create_utxo` allocation dust fits this budget; a redirect does not. \
+                 Proof: the output's script equals an input's script this enclave co-signs, up \
+                 to the value that input brought in.",
                 cfg.btc_max_unowned_sats
             )));
         }
@@ -161,13 +155,11 @@ pub fn validate_btc_request(
 /// it pays the recipient a witness output and that seal is blinded. It bounds
 /// the total instead - dust fits, a sweep does not.
 ///
-/// Ownership is proven the one way [`super::btc_ownership`] allows - an output
-/// script equal to that of an input we co-sign, no metadata trusted - and then
-/// capped by value: an output is exempt only up to what its own script brought
-/// in, so a small qualifying input cannot exempt bridge value paid to its
-/// script. Change must therefore come back per script; consolidating the
-/// change of two co-controlled scripts onto one counts the other script's
-/// value against the budget.
+/// Ownership is proven the one way [`super::btc_ownership`] allows: an output
+/// script equal to an input's script this enclave co-signs, no metadata
+/// trusted. The exempt amount is capped to what that script brought in.
+/// Consolidating two co-controlled scripts' change onto one script forfeits
+/// the other script's budget.
 pub fn validate_rgb_psbt_sats(
     psbt: &bitcoin::psbt::Psbt,
     cfg: &BridgeConfig,
@@ -983,10 +975,9 @@ mod tests {
 
     // --- plain-BTC budget: the same value provenance ---
 
-    /// The plain-BTC mirror: a 1_000-sat auxiliary input whose leaf names the
-    /// enclave's Vanilla key exempts its own 1_000 sats and no more, so bridge
-    /// value routed to that script stays inside BTC_MAX_UNOWNED_SATS instead of
-    /// being bounded only by BTC_MAX_TOTAL_SATS.
+    /// The plain-BTC mirror: a 1_000-sat auxiliary input exempts its own
+    /// 1_000 sats and no more, so bridge value routed to it stays under
+    /// BTC_MAX_UNOWNED_SATS, not just BTC_MAX_TOTAL_SATS.
     #[test]
     fn plain_btc_custody_uses_real_input_provenance() {
         let keys = km();

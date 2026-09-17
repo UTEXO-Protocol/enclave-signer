@@ -11,13 +11,11 @@
 //! produced a job. That job is control-block and derivation anchored, and the
 //! segwit sighash commits to the script.
 //!
-//! That rule answers "is this our custody", not "how much of it is ours": on
-//! its own, a small qualifying input would exempt bridge value paid to its
-//! script. So the two sats budgets in
-//! [`crate::networks::rgb::btc_crosscheck`] do not use membership; they exempt
-//! an output only up to what its own script brought in
-//! ([`unowned_output_sats`]). Membership alone still decides
-//! [`self_owned_output_indices`], which rules on RGB units, not sats.
+//! That rule proves custody, not amount: alone, it would let a small
+//! qualifying input exempt bridge value paid to its script. The sats budgets
+//! in [`crate::networks::rgb::btc_crosscheck`] cap the exempt value to what
+//! the script brought in ([`unowned_output_sats`]). Membership alone still
+//! decides [`self_owned_output_indices`], which checks RGB units, not sats.
 //!
 //! It proves custody is unchanged, not that only we can spend: the bridge is a
 //! multisig, and the other signers can move funds without us either way. It
@@ -66,11 +64,9 @@ pub fn self_controlled_input_scripts_scoped(
         .collect()
 }
 
-/// Sats each script this enclave co-controls brought into the PSBT: the
-/// `witness_utxo` value of every input [`find_taproot_sign_jobs`] qualifies,
-/// counted once per input and summed by `script_pubkey`. Gives the sats
-/// budgets value provenance, where membership alone would let a small
-/// qualifying input exempt bridge value paid to its script.
+/// Sats each co-controlled script brought into the PSBT, summed from each
+/// qualifying input's `witness_utxo` by `script_pubkey`. Caps how much value
+/// an output can exempt.
 fn signable_input_value_allowances_scoped(
     psbt: &Psbt,
     keys: &KeyManager,
@@ -104,14 +100,10 @@ fn signable_input_value_allowances_scoped(
     Ok(allowances)
 }
 
-/// Sats the outputs pay beyond what their own scripts brought in: each output
+/// Sats the outputs pay beyond what their own scripts brought in. Each output
 /// draws down its script's allowance
-/// ([`signable_input_value_allowances_scoped`]) in output order, and whatever
-/// it pays past that is unowned. Outputs sharing a script share one allowance,
-/// so a script can never exempt more than it funded.
-///
-/// This is the value-aware form of membership: change must come back to a
-/// script that funded it, per script, for its full value to be exempt.
+/// ([`signable_input_value_allowances_scoped`]); outputs sharing a script
+/// share one allowance, so a script never exempts more than it funded.
 pub(crate) fn unowned_output_sats(
     psbt: &Psbt,
     keys: &KeyManager,
