@@ -72,6 +72,13 @@ fn main() {
 
     tracing::info!("starting utexo-bridge-enclave");
 
+    // Start disciplining the clock from the hypervisor PTP source ASAP. Nitro
+    // enclaves free-run without NTP after boot (drift ~1s/day), which otherwise
+    // makes long-lived enclaves reject freshly-issued attestation/TLS certs as
+    // "not yet valid" (the clone clock-skew bug). Fail-soft: no-op if unavailable.
+    #[cfg(target_os = "linux")]
+    utexo_bridge_enclave::clocksync::spawn();
+
     let bitcoin_network_str = std::env::var("BITCOIN_NETWORK").unwrap_or_else(|_| "bitcoin".into());
     let bitcoin_network = match bitcoin_network_str.as_str() {
         "bitcoin" | "mainnet" => bitcoin::Network::Bitcoin,

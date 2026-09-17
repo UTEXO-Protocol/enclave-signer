@@ -1,9 +1,11 @@
 # enclave-proto (vendored)
 
-The wire protocol the Nitro enclave speaks, vendored so **the enclave builds
-with no credentials and no private dependencies**. Anyone can clone this repo
-and reproduce the EIF and its PCR measurements without access to any private
-UTEXO repository.
+The wire protocol the Nitro enclave speaks, vendored so **the proto schema
+adds no credential and no private dependency to the enclave build**. The schema itself adds no private build dependency.
+
+Current caveat: the root `Cargo.toml` pins the RGB crates to private BFA
+mirrors over SSH, so an enclave build does need those deploy keys today. That
+is a separate dependency; this crate stays credential-free.
 
 This is a *slice*, not a copy: only the `enclave` protobuf package is here.
 The bridge / node / orchestrator / parent / signer packages are not vendored —
@@ -24,7 +26,7 @@ here as the human-readable source of truth for the schema, not as a build input.
 
 To change the wire protocol: change it upstream, regenerate there, then re-sync
 BOTH files here and update the Provenance tables below.
-`tests/vendored_provenance.rs` fails the build if the files and the tables
+`tests/vendored_provenance.rs` fails the test suite if the files and the tables
 disagree, or if the commit recorded below drifts from the `rev` that
 `parent/Cargo.toml` pins.
 
@@ -33,8 +35,8 @@ disagree, or if the commit recorded below drifts from the `rev` that
 | | |
 |---|---|
 | Upstream | https://github.com/UTEXO-Protocol/federated-signer-proto |
-| Commit | `8577243bc62ccd73c424d1e0ae350cf1e93e8d0a` ("feat(enclave): add Health request/response for deploy readiness probes") |
-| Commit date | 2026-08-31T14:11:03+03:00 |
+| Commit | `3677a5a311e741f5940866f7fdd98a513ec9b79f` ("feat(enclave): add Health request/response for deploy readiness probes") |
+| Commit date | 2026-09-17T12:45:14+03:00 |
 
 This is the same commit `parent/Cargo.toml` still pins as a git dependency, so
 both crates compile against one schema version. Keep them in lockstep.
@@ -48,14 +50,14 @@ both crates compile against one schema version. Keep them in lockstep.
 Verify against upstream (needs read access to the private repo):
 
 ```bash
-REV=8577243bc62ccd73c424d1e0ae350cf1e93e8d0a
+REV=3677a5a311e741f5940866f7fdd98a513ec9b79f
 git clone https://github.com/UTEXO-Protocol/federated-signer-proto /tmp/fsp
 git -C /tmp/fsp checkout "$REV"
 diff /tmp/fsp/rust-gen/src/enclave/enclave.rs enclave-proto/src/enclave.rs
 diff /tmp/fsp/proto/enclave/enclave.proto     enclave-proto/proto/enclave.proto
 ```
 
-Or check the upstream blob hashes without a clone:
+Or compare local blob hashes with the recorded upstream hashes below:
 
 ```bash
 git hash-object enclave-proto/src/enclave.rs enclave-proto/proto/enclave.proto
@@ -63,8 +65,8 @@ git hash-object enclave-proto/src/enclave.rs enclave-proto/proto/enclave.proto
 
 | File | Upstream blob hash |
 |---|---|
-| `rust-gen/src/enclave/enclave.rs` | `160640afc3d0ce93139fa7fd40324baa08ec58dc` |
-| `proto/enclave/enclave.proto` | `46d2f504d9738afecd6e1693db63db38dba71c3f` |
+| `rust-gen/src/enclave/enclave.rs` | `d575d3efdf33eae38eb069acc81a2923bf09f71b` |
+| `proto/enclave/enclave.proto` | `e44aa7cb37a3b1ccbc531093500b86944df1db1a` |
 
 ## Why only `prost`
 

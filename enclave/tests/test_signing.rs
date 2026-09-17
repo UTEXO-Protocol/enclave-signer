@@ -92,6 +92,7 @@ fn valid_sign_evm_request(amount: u64, commission: u64) -> SignRequest {
             consignment_hash: placeholder_consignment_hash(),
             merkle_proofs: vec![],
             commission,
+            mint_ancestors: vec![],
         })),
         destination_network: Some(DestinationNetwork::EvmDestination(EvmDestination {
             call_data: mock_funds_out_calldata([0x22; 20], amount),
@@ -504,6 +505,7 @@ fn sign_psbt_request(
             psbt_output_amount,
             asset_id: String::new(),
             consignment: vec![],
+            mint_ancestors: Vec::new(),
             consignment_hash: vec![],
         })),
     }
@@ -1438,31 +1440,6 @@ fn test_sign_raw_message_is_refused() {
             );
         }
         other => panic!("expected ErrorResponse for SignRawMessage, got {:?}", other),
-    }
-}
-
-// Federation proxy test
-
-#[test]
-fn test_proxy_federation_returns_not_ready() {
-    let port = common::start_test_server();
-
-    let req = EnclaveRequest {
-        request: Some(Request::ProxyFederation(ProxyFederationRequest {
-            message_hash: vec![0xAA; 32],
-        })),
-    };
-    let resp = common::send_request(port, &req);
-
-    match &resp.response {
-        Some(Response::Error(e)) => {
-            assert_eq!(
-                e.code, 2,
-                "federation proxy should return NOT_READY (code 2)"
-            );
-            assert!(e.message.contains("federation proxy"));
-        }
-        other => panic!("expected ErrorResponse, got {:?}", other),
     }
 }
 

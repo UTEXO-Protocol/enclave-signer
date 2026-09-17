@@ -43,6 +43,12 @@ pub struct ValidationContext<'a> {
     #[cfg(feature = "rgb-validation")]
     pub self_owned_psbt_outputs:
         Option<crate::networks::rgb::psbt_validation::SelfOwnedOutpoint<'a>>,
+    /// EVM lock events the enclave verified itself, handed to RGB consensus so
+    /// the ether extension can re-check a BFA mint's amount. Empty on every
+    /// other path (including every build without `bfa-mint`); a BFA consignment
+    /// with an empty set is refused.
+    #[cfg(feature = "rgb-validation")]
+    pub bridge_events: &'a [rgbstd::vm::ether_extension::Event],
 }
 
 /// Outcome of validating a source network: the route proof, plus the validated
@@ -91,6 +97,10 @@ pub fn validate_source(
 pub struct DestinationProof {
     pub proof: RouteProof,
     pub evm_funds_out: Option<crate::networks::evm::validation::FundsOutParams>,
+    /// `utxob:...` seals of the send-RGB confidential recipient legs. Bound
+    /// against the deposit's invoice once that receipt is verified. Empty for
+    /// EVM destinations and builds without the bind.
+    pub rgb_recipient_seals: Vec<String>,
 }
 
 /// Dispatch destination-network validation to the owning network module.
@@ -112,6 +122,7 @@ pub fn validate_destination(
             Ok(DestinationProof {
                 proof,
                 evm_funds_out,
+                rgb_recipient_seals: Vec::new(),
             })
         }
         DestinationNetwork::RgbDestination(destination) => {
@@ -123,10 +134,11 @@ pub fn validate_destination(
             // binding fall back to the wire field, and they run no destination
             // cross-checks at all.
             #[cfg(all(feature = "rgb-validation", not(feature = "dev-mode")))]
-            let destination_amount =
+            let (destination_amount, rgb_recipient_seals) =
                 rgb::validate_destination_anchor(destination, amount, source_commission, ctx)?;
             #[cfg(not(all(feature = "rgb-validation", not(feature = "dev-mode"))))]
-            let destination_amount = destination.psbt_output_amount;
+            let (destination_amount, rgb_recipient_seals) =
+                (destination.psbt_output_amount, Vec::new());
 
             Ok(DestinationProof {
                 proof: RouteProof {
@@ -140,6 +152,7 @@ pub fn validate_destination(
                     operation_id: None,
                 },
                 evm_funds_out: None,
+                rgb_recipient_seals,
             })
         }
     }
@@ -242,6 +255,7 @@ mod tests {
             psbt_output_amount: destination_amount,
             asset_id: "rgb:test-asset".into(),
             consignment: vec![],
+            mint_ancestors: Vec::new(),
             consignment_hash: vec![],
         })
     }
@@ -254,6 +268,7 @@ mod tests {
             consignment_hash: vec![0x02; 32],
             merkle_proofs: vec![],
             commission: 20,
+            mint_ancestors: vec![],
         })
     }
 

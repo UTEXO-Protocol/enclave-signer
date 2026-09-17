@@ -159,6 +159,13 @@ impl ParentAdapterService {
         }
     }
 
+    fn enclave_mint_ancestor(ancestor: grpc_proto::MintAncestor) -> enclave_proto::MintAncestor {
+        enclave_proto::MintAncestor {
+            op_id: ancestor.op_id,
+            tx_hash: ancestor.tx_hash,
+        }
+    }
+
     fn enclave_source_network(
         source: SourceProof,
     ) -> Result<enclave_proto::sign_request::SourceNetwork, Status> {
@@ -196,6 +203,13 @@ impl ParentAdapterService {
                         .merkle_proofs
                         .into_iter()
                         .map(Self::enclave_merkle_proof)
+                        .collect(),
+                    // Forwarded as given: the enclave verifies every pair
+                    // against the chain, so the parent adds no trust here.
+                    mint_ancestors: rgb
+                        .mint_ancestors
+                        .into_iter()
+                        .map(Self::enclave_mint_ancestor)
                         .collect(),
                 }),
             ),
@@ -245,6 +259,13 @@ impl ParentAdapterService {
                         asset_id: payload.rgb_asset_id,
                         consignment: payload.consignment,
                         consignment_hash: payload.consignment_hash,
+                        // Same as the source direction: forwarded as given,
+                        // because the enclave verifies every pair on-chain.
+                        mint_ancestors: payload
+                            .mint_ancestors
+                            .into_iter()
+                            .map(Self::enclave_mint_ancestor)
+                            .collect(),
                     },
                 )
             }
