@@ -399,14 +399,22 @@ fn split_asset_legs(
 #[cfg(feature = "rgb-validation")]
 const FEE_RATE_HEADROOM: f64 = 3.0;
 
+/// Minimum signed fee rate agreed for bridge PSBTs; not caller-configurable.
+#[cfg(feature = "rgb-validation")]
+const MIN_FEE_RATE_SAT_VB: u64 = 1;
+
 /// Fee-rate sanity check for send-RGB PSBTs: the implied fee rate must
 /// not exceed [`FEE_RATE_HEADROOM`] x the enclave-fetched recommendation.
 /// Without this, a compromised host could burn bridge BTC as miner fees on an
 /// otherwise fully-validated PSBT.
 ///
 /// Fail-closed on degenerate shapes: `Psbt::fee()` errors, zero vsize, and NaN
-/// rates all reject. The rate is computed over `unsigned_tx.vsize()`, which
-/// overestimates the implied rate; the headroom absorbs that.
+/// rates all reject. The upper-bound rate is computed over `unsigned_tx.vsize()`,
+/// which overestimates the implied rate; the headroom absorbs that.
+///
+/// Require at least 1 sat/vB using the estimated signed size, including witnesses.
+/// Unsupported spend shapes fail closed. The finalizer must recheck the
+/// actual fee rate if it chooses a different witness or spend path.
 #[cfg(feature = "rgb-validation")]
 pub fn check_psbt_fee_rate(psbt: &Psbt, recommended_sat_vb: f64) -> Result<()> {
     let fee = psbt.fee().map_err(|e| {
@@ -432,6 +440,18 @@ pub fn check_psbt_fee_rate(psbt: &Psbt, recommended_sat_vb: f64) -> Result<()> {
         return Err(EnclaveError::CrossCheck(format!(
             "send-RGB PSBT fee rate too high: {rate:.2} sat/vB > {FEE_RATE_HEADROOM}x the \
              recommended {recommended_sat_vb:.2} sat/vB - refusing to burn bridge BTC as fees"
+        )));
+    }
+
+    let signed_vsize = super::psbt_fee_size::estimated_signed_vsize(psbt)?;
+    let minimum_fee = signed_vsize
+        .checked_mul(MIN_FEE_RATE_SAT_VB)
+        .ok_or_else(|| EnclaveError::CrossCheck("minimum PSBT fee calculation overflow".into()))?;
+    if fee.to_sat() < minimum_fee {
+        return Err(EnclaveError::CrossCheck(format!(
+            "send-RGB PSBT fee rate too low: {} sat for estimated signed size {signed_vsize} vB; \
+             need at least {minimum_fee} sat ({MIN_FEE_RATE_SAT_VB} sat/vB)",
+            fee.to_sat()
         )));
     }
     Ok(())
@@ -650,9 +670,11 @@ mod tests {
     mod fee_rate {
         use super::*;
 
-        /// One segwit-ish input carrying `witness_utxo` of `input_sats`, one
+        /// One native P2WPKH input carrying `witness_utxo` of `input_sats`, one
         /// output of `output_sats` - so `Psbt::fee()` = input - output.
         fn psbt_with_fee(input_sats: u64, output_sats: u64) -> Psbt {
+            let script_pubkey =
+                ScriptBuf::new_p2wpkh(&bitcoin::WPubkeyHash::from_byte_array([0x22; 20]));
             let unsigned_tx = Transaction {
                 version: bitcoin::transaction::Version(2),
                 lock_time: bitcoin::absolute::LockTime::ZERO,
@@ -669,15 +691,135 @@ mod tests {
                 }],
                 output: vec![TxOut {
                     value: Amount::from_sat(output_sats),
-                    script_pubkey: ScriptBuf::new(),
+                    script_pubkey: script_pubkey.clone(),
                 }],
             };
             let mut psbt = Psbt::from_unsigned_tx(unsigned_tx).expect("from_unsigned_tx");
             psbt.inputs[0].witness_utxo = Some(TxOut {
                 value: Amount::from_sat(input_sats),
-                script_pubkey: ScriptBuf::new(),
+                script_pubkey,
             });
             psbt
+        }
+
+        fn signed_vsize(psbt: &Psbt) -> u64 {
+            let mut tx = psbt.unsigned_tx.clone();
+            for input in &mut tx.input {
+                // Size-only placeholders: max ECDSA signature and compressed key.
+                input.witness = Witness::from_slice(&[vec![0; 73], vec![0; 33]]);
+            }
+            tx.vsize() as u64
+        }
+
+        #[test]
+        fn accepts_exactly_one_sat_per_estimated_signed_vbyte() {
+            let fee = signed_vsize(&psbt_with_fee(100_000, 100_000));
+            let psbt = psbt_with_fee(100_000, 100_000 - fee);
+            assert_eq!(psbt.fee().unwrap().to_sat(), signed_vsize(&psbt));
+            for recommended in [1.0, 10.0, 100.0] {
+                assert!(
+                    check_psbt_fee_rate(&psbt, recommended).is_ok(),
+                    "1 sat/vB must pass even when the recommendation is {recommended}"
+                );
+            }
+        }
+
+        #[test]
+        fn rejects_fees_below_signed_size_minimum() {
+            let psbt = psbt_with_fee(100_000, 100_000);
+            let unsigned_vsize = psbt.unsigned_tx.vsize() as u64;
+            let minimum = signed_vsize(&psbt);
+            assert!(minimum > unsigned_vsize);
+            for (fee, recommended) in [
+                (0, 10.0),
+                (1, 10.0), // One satoshi total, not one satoshi per vbyte.
+                (minimum - 1, 10.0),
+                (unsigned_vsize, 10.0), // Does not fund the future witness.
+                (20, 0.1),              // A low recommendation must not lower the floor.
+            ] {
+                let psbt = psbt_with_fee(100_000, 100_000 - fee);
+                assert_eq!(psbt.fee().unwrap().to_sat(), fee);
+                let err = check_psbt_fee_rate(&psbt, recommended).unwrap_err();
+                assert!(
+                    err.to_string().contains("fee rate too low"),
+                    "fee {fee} sat, recommendation {recommended}: {err}"
+                );
+            }
+        }
+
+        #[test]
+        fn taproot_multisig_floor_counts_script_control_block_and_cosigners() {
+            use bitcoin::opcodes::all::{OP_CHECKSIG, OP_CHECKSIGADD, OP_NUMEQUAL};
+            use bitcoin::script::Builder;
+            use bitcoin::secp256k1::{Keypair, Secp256k1, SecretKey, XOnlyPublicKey};
+            use bitcoin::taproot::{LeafVersion, TaprootBuilder};
+
+            let secp = Secp256k1::new();
+            let keys: Vec<_> = (1..=3)
+                .map(|byte| {
+                    let secret = SecretKey::from_slice(&[byte; 32]).unwrap();
+                    XOnlyPublicKey::from_keypair(&Keypair::from_secret_key(&secp, &secret)).0
+                })
+                .collect();
+            let script = Builder::new()
+                .push_x_only_key(&keys[0])
+                .push_opcode(OP_CHECKSIG)
+                .push_x_only_key(&keys[1])
+                .push_opcode(OP_CHECKSIGADD)
+                .push_x_only_key(&keys[2])
+                .push_opcode(OP_CHECKSIGADD)
+                .push_int(2)
+                .push_opcode(OP_NUMEQUAL)
+                .into_script();
+            let info = TaprootBuilder::new()
+                .add_leaf(0, script.clone())
+                .unwrap()
+                .finalize(&secp, keys[0])
+                .unwrap();
+            let control = info
+                .control_block(&(script.clone(), LeafVersion::TapScript))
+                .unwrap();
+            let mut psbt = psbt_with_fee(100_000, 100_000);
+            psbt.inputs[0].witness_utxo.as_mut().unwrap().script_pubkey =
+                ScriptBuf::new_p2tr_tweaked(info.output_key());
+            psbt.inputs[0]
+                .tap_scripts
+                .insert(control.clone(), (script.clone(), LeafVersion::TapScript));
+
+            let mut tx = psbt.unsigned_tx.clone();
+            tx.input[0].witness = Witness::from_slice(&[
+                vec![0; 65],
+                vec![0; 65],
+                vec![],
+                script.into_bytes(),
+                control.serialize(),
+            ]);
+            let minimum = tx.vsize() as u64;
+            assert!(minimum > psbt.unsigned_tx.vsize() as u64);
+            psbt.unsigned_tx.output[0].value = Amount::from_sat(100_000 - minimum);
+            check_psbt_fee_rate(&psbt, 10.0).expect("funded 2-of-3 Taproot witness");
+            psbt.unsigned_tx.output[0].value += Amount::from_sat(1);
+            let err = check_psbt_fee_rate(&psbt, 10.0).unwrap_err();
+            assert!(err.to_string().contains("fee rate too low"), "{err}");
+        }
+
+        #[test]
+        fn rejects_unknown_spend_shape_instead_of_using_unsigned_size() {
+            let mut psbt = psbt_with_fee(100_000, 99_000);
+            psbt.inputs[0].witness_utxo.as_mut().unwrap().script_pubkey = ScriptBuf::new();
+            let err = check_psbt_fee_rate(&psbt, 10.0).unwrap_err();
+            assert!(
+                err.to_string().contains("cannot estimate signed PSBT size"),
+                "{err}"
+            );
+        }
+
+        #[test]
+        fn conflicting_bounds_do_not_silently_raise_the_cap() {
+            let minimum = signed_vsize(&psbt_with_fee(100_000, 100_000));
+            let psbt = psbt_with_fee(100_000, 100_000 - minimum);
+            let err = check_psbt_fee_rate(&psbt, 0.1).unwrap_err();
+            assert!(err.to_string().contains("fee rate too high"), "{err}");
         }
 
         #[test]
@@ -704,6 +846,14 @@ mod tests {
                 err.to_string().contains("fee rate too high"),
                 "expected fee-rate rejection, got: {err}"
             );
+        }
+
+        #[test]
+        fn inflated_witness_cannot_weaken_the_upper_fee_limit() {
+            let mut psbt = psbt_with_fee(100_000, 97_000);
+            psbt.inputs[0].final_script_witness = Some(Witness::from_slice(&[vec![0; 1_000]]));
+            let err = check_psbt_fee_rate(&psbt, 10.0).unwrap_err();
+            assert!(err.to_string().contains("fee rate too high"), "{err}");
         }
 
         #[test]

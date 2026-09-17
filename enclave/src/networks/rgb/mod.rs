@@ -6,6 +6,8 @@ pub mod flow;
 // where the enclave can fetch one (`evm-rpc` implies `rgb-validation`).
 #[cfg(feature = "evm-rpc")]
 pub mod invoice;
+#[cfg(feature = "rgb-validation")]
+mod psbt_fee_size;
 pub mod psbt_validation;
 pub mod signing;
 pub mod spv;
