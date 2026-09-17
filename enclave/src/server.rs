@@ -33,10 +33,10 @@ pub struct ServerContext {
     /// `None` when the client could not be built; `handle_sign` fails closed on
     /// `None` in bridge mode. Reaches the RPC only through the loopback vsock
     /// forwarder, so responses are host-relayed and untrusted - see
-    /// [`crate::networks::evm::evm_event`].
+    /// [`crate::networks::evm::events`].
     #[cfg(feature = "evm-rpc")]
     pub evm_rpc_client:
-        Option<Box<dyn crate::networks::evm::evm_event::EvmReceiptProvider + Send + Sync>>,
+        Option<Box<dyn crate::networks::evm::events::EvmReceiptProvider + Send + Sync>>,
     /// Pinned EVM-RPC config (loopback URL + min confirmations).
     #[cfg(feature = "evm-rpc")]
     pub evm_rpc_config: crate::config::EvmRpcConfig,
@@ -409,8 +409,8 @@ fn verify_mint_locks(
     ctx: &ServerContext,
     plan: &[([u8; 32], [u8; 32])],
     unavailable: &str,
-) -> Result<Vec<crate::networks::evm::evm_event::VerifiedLock>> {
-    use crate::networks::evm::evm_event::verify_rgb_funds_in;
+) -> Result<Vec<crate::networks::evm::events::VerifiedLock>> {
+    use crate::networks::evm::events::verify_rgb_funds_in;
 
     if plan.is_empty() {
         return Ok(Vec::new());
@@ -438,7 +438,7 @@ fn verify_mint_locks(
 /// lock, `(mint OpId, minted amount)`, in plan order.
 #[cfg(feature = "bfa-validation")]
 fn cea_events(
-    locks: &[crate::networks::evm::evm_event::VerifiedLock],
+    locks: &[crate::networks::evm::events::VerifiedLock],
 ) -> Vec<rgbstd::vm::ether_extension::Event> {
     use rgbstd::vm::ether_extension::Event;
     use rgbstd::{OpId, RevealedValue};
@@ -458,7 +458,7 @@ fn bfa_binding_for(
     consignment: &[u8],
     label: &str,
 ) -> Result<Option<crate::networks::rgb::validation::BfaBinding>> {
-    use crate::networks::evm::evm_event::check_bridge_location;
+    use crate::networks::evm::events::check_bridge_location;
     use crate::networks::rgb::validation::{assert_consignment_size, bfa_binding};
 
     // The same cap the anchor validation applies, repeated because that check
@@ -489,7 +489,7 @@ fn bfa_binding_for(
 fn bfa_burn_ancestry_events(
     ctx: &ServerContext,
     source: &enclave_proto::RgbSource,
-) -> Result<Vec<crate::networks::evm::evm_event::VerifiedLock>> {
+) -> Result<Vec<crate::networks::evm::events::VerifiedLock>> {
     if cfg!(feature = "dev-mode") {
         return Ok(Vec::new());
     }
@@ -523,7 +523,7 @@ fn bfa_mint_events(
     ctx: &ServerContext,
     source: &enclave_proto::EvmSource,
     destination: &enclave_proto::RgbDestination,
-) -> Result<Vec<crate::networks::evm::evm_event::VerifiedLock>> {
+) -> Result<Vec<crate::networks::evm::events::VerifiedLock>> {
     // dev-mode compiles no destination-anchor validation, so these events would
     // have no consumer and the RPC call would be pure cost.
     if cfg!(feature = "dev-mode") {
@@ -561,7 +561,7 @@ fn bfa_mint_events(
 fn bfa_transfer_ancestry_events(
     ctx: &ServerContext,
     destination: &enclave_proto::RgbDestination,
-) -> Result<Vec<crate::networks::evm::evm_event::VerifiedLock>> {
+) -> Result<Vec<crate::networks::evm::events::VerifiedLock>> {
     if cfg!(feature = "dev-mode") {
         return Ok(Vec::new());
     }
@@ -730,7 +730,7 @@ fn handle_sign(ctx: &ServerContext, req: SignRequest) -> Result<EnclaveResponse>
         })?;
         // Binds to the source's BridgeFundsIn.operationId, not
         // destination.operation_idx, which is a different id-space.
-        let verified = crate::networks::evm::evm_event::verify_funds_in_event(
+        let verified = crate::networks::evm::events::verify_funds_in_event(
             &**client,
             // FundsIn is emitted by the bridge entry contract, which may differ
             // from the MultisigProxy pinned in EVM_PROXY_CONTRACT_ADDRESS (see config.rs).
@@ -869,7 +869,7 @@ fn apply_funds_out_binding(
     params: Option<&crate::networks::evm::validation::FundsOutParams>,
     validated: Option<&crate::networks::rgb::validation::ValidatedConsignment>,
     merkle_proofs: &[crate::proto::MerkleProofEntry],
-    #[cfg(feature = "bfa-mint")] locks: &[crate::networks::evm::evm_event::VerifiedLock],
+    #[cfg(feature = "bfa-mint")] locks: &[crate::networks::evm::events::VerifiedLock],
 ) -> Result<()> {
     use crate::networks::evm::crosscheck;
 
@@ -1467,7 +1467,7 @@ fn handle_get_last_saved_block(
 /// `(synced, tip_height, tip_time, tip_age_secs, max_tip_age_secs)`.
 #[cfg(feature = "spv")]
 fn spv_health(ctx: &ServerContext) -> (bool, u32, u32, u32, u32) {
-    use crate::networks::rgb::spv_validation::{assert_chain_ready, SPV_MAX_TIP_AGE_SECS};
+    use crate::networks::rgb::spv_crosscheck::{assert_chain_ready, SPV_MAX_TIP_AGE_SECS};
     use std::time::{SystemTime, UNIX_EPOCH};
 
     let now = SystemTime::now();

@@ -12,7 +12,7 @@ use crate::error::{EnclaveError, Result};
 /// funds_in_operation_id, rgb_asset_id)`. `chain_id` and `bridge_contract` come
 /// from the pinned [`crate::config::BridgeConfig`], not the request.
 /// `funds_in_operation_id` is the on-chain `BridgeFundsIn.operationId`, already
-/// verified by [`crate::networks::evm::evm_event::verify_funds_in_event`].
+/// verified by [`crate::networks::evm::events::verify_funds_in_event`].
 /// Variable-length fields are length-prefixed and a domain tag is
 /// mixed in, so distinct tuples cannot collide by concatenation ambiguity.
 ///

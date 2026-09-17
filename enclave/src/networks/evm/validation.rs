@@ -94,7 +94,7 @@ pub fn validate_source(amount: u64, source: &EvmSource) -> Result<RouteProof> {
     // The listener-supplied `event_valid` / `event_finalized`
     // booleans are not trusted here - anyone reaching the enclave could set
     // both. Validity and finality come from
-    // `networks::evm::evm_event::verify_funds_in_event` in `handle_sign`. The
+    // `networks::evm::events::verify_funds_in_event` in `handle_sign`. The
     // proto fields remain, ignored, until the listener stops sending them.
 
     Ok(RouteProof {
@@ -456,7 +456,7 @@ mod tests {
     /// `validate_source` no longer reads the listener's
     /// `event_valid` / `event_finalized` booleans, so flipping them changes
     /// nothing. Validity and finality come from
-    /// `evm_event::verify_funds_in_event`.
+    /// `events::verify_funds_in_event`.
     #[test]
     fn source_ignores_listener_evm_booleans() {
         let mut source = source();
