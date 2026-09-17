@@ -77,6 +77,9 @@ compile_error!(
 );
 
 pub mod attestation;
+// Boot sequence for `main.rs`: env parsing, forwarders, and the fail-closed
+// pins. In the library so it is covered by clippy/tests like everything else.
+pub mod bootstrap;
 pub mod cloning;
 // Disciplines CLOCK_REALTIME from the hypervisor PTP source (`/dev/ptp0`) so a
 // long-lived enclave does not drift and start rejecting valid attestation/TLS

@@ -68,9 +68,9 @@ design; the enclave binds only the amount.
 
 Four crates plus the infrastructure they touch:
 
-- **`enclave`** -- runs inside the TEE. Connection loop (`main.rs`, vsock in
-  prod / TCP in dev; hardening in `conn.rs`) -> `server.rs` dispatch -> `policy.rs` (security policy),
-  `keys.rs` / `state.rs` (key custody, phases), `cloning.rs`, `attestation.rs`,
+- **`enclave`** -- runs inside the TEE. Boot sequence (`main.rs` + `bootstrap.rs`), connection loop (vsock in
+  prod / TCP in dev; hardening in `conn.rs`) -> `server/dispatch.rs` -> `policy.rs` (security policy),
+  `keys.rs` / `state/` (key custody, phases), `cloning.rs`, `attestation.rs`,
   and the network validators under `networks/`:
   - `networks/rgb/` -- consignment validation, PSBT binding (`psbt_validation.rs`),
     invoice recipient bind (`invoice.rs`), taproot signing, the SPV header

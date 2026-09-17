@@ -5,7 +5,7 @@ sequenceDiagram
     actor Orc as Orchestrator
     participant Listener as Go Listener
     participant Parent as utexo-bridge-parent<br/>(grpc_server.rs)
-    participant Srv as enclave/server.rs<br/>handle_sign
+    participant Srv as enclave/server/sign.rs<br/>handle_sign
     participant Rgb as networks::rgb::validation<br/>RgbValidator
     participant Spv as networks::rgb::spv_crosscheck
     participant Chain as spv::HeaderChain
