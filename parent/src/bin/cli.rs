@@ -1,6 +1,10 @@
 #[path = "cli/clone_completion.rs"]
 mod clone_completion;
 
+#[cfg(feature = "stage-bfa-temp")]
+#[path = "../../../stage-temp/bfa/src/seed_file.rs"]
+mod stage_seed;
+
 use std::io::{self, BufRead, Write};
 use std::path::PathBuf;
 use std::process;
@@ -29,6 +33,14 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Import a retained stage seed and configure cloning in one request.
+    #[cfg(feature = "stage-bfa-temp")]
+    InitStageSeed {
+        #[arg(long)]
+        seed_file: PathBuf,
+        #[arg(long)]
+        cloning_secret_file: PathBuf,
+    },
     /// Initialize keys (generate new mnemonic in the enclave)
     Init {
         /// Donor cloning secret, delivered at runtime (not baked into the EIF).
@@ -325,6 +337,27 @@ fn main() {
                 process::exit(1);
             }
         },
+        #[cfg(feature = "stage-bfa-temp")]
+        Command::InitStageSeed {
+            seed_file,
+            cloning_secret_file,
+        } => {
+            let result = (|| -> Result<InitializeKeyResponse, Box<dyn std::error::Error>> {
+                let seed = stage_seed::read_seed(&seed_file)?;
+                let secret = stage_seed::read_secret(&cloning_secret_file)?;
+                Ok(client
+                    .initialize_keys_with_secret(Some(seed.to_vec()), Some(secret.to_string()))?)
+            })();
+            match result {
+                Ok(response) => print_init_response(&response),
+                Err(_) => {
+                    eprintln!(
+                        "Stage seed initialization failed; check protected files and enclave state"
+                    );
+                    process::exit(1);
+                }
+            }
+        }
         Command::InitMnemonic { words } => match client.initialize_keys_mnemonic(&words) {
             Ok(r) => print_init_response(&r),
             Err(e) => {

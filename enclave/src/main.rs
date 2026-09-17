@@ -99,6 +99,9 @@ fn main() {
     // must set EVM_CHAIN_ID, EVM_PROXY_CONTRACT_ADDRESS, RGB_ASSET_ID - a misconfigured
     // production enclave is detectable externally via the attestation bundle.
     let bridge_config = BridgeConfig::from_env();
+    #[cfg(feature = "stage-bfa-temp")]
+    utexo_bridge_enclave::stage_bfa_temp::validate_boot(&bridge_config)
+        .expect("invalid temporary BFA configuration");
     if bridge_config.is_configured() {
         tracing::info!(
             chain_id = bridge_config.chain_id,

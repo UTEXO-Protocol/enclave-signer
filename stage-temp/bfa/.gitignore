@@ -1,0 +1,6 @@
+/artifacts/
+/evidence/
+*.seed
+*.key
+*.pem
+.env*
