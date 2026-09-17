@@ -25,10 +25,9 @@ pub struct TaprootSignJob {
 /// Scan all PSBT inputs for taproot script-path leaves whose script contains
 /// one of our keys, and emit one entry per (input, leaf, xonly) triple.
 ///
-/// This is the custody anchor: it answers "does this enclave control this
-/// input", which depends only on the structure below and never on
-/// `tap_script_sigs` - an input stays ours once one of our signatures has
-/// been merged into it.
+/// This is the custody anchor. It checks control-block and derivation
+/// structure only, never `tap_script_sigs`. An input stays ours after we
+/// merge a signature into it.
 ///
 /// Authorization is anchored to `witness_utxo.script_pubkey` - for each
 /// `(control_block, script)` entry in `tap_scripts`, the control block must
@@ -144,9 +143,9 @@ pub fn find_taproot_sign_jobs(
         .collect()
 }
 
-/// Input indices of [`find_taproot_sign_jobs`], for tests asserting which
-/// signing work a PSBT still has. Keeps the custody modules free of any call
-/// to the job resolver, so one there is always a regression.
+/// Input indices of [`find_taproot_sign_jobs`], used only by tests to check
+/// signing work left on a PSBT. Custody code must never call the job
+/// resolver: that would be a regression.
 #[cfg(test)]
 pub(crate) fn outstanding_job_inputs(psbt: &Psbt, key_manager: &KeyManager) -> Vec<usize> {
     find_taproot_sign_jobs(psbt, key_manager.master_fingerprint(), key_manager)

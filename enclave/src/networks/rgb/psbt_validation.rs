@@ -974,8 +974,8 @@ mod tests {
             );
         }
 
-        /// F06-NEW-AF-09: asset change survives signature merging through the
-        /// real ownership oracle.
+        /// Asset change survives signature merging through the real
+        /// ownership oracle.
         #[cfg(feature = "rgb-swap")]
         #[test]
         fn change_leg_survives_merging_our_own_signature() {
@@ -1012,7 +1012,7 @@ mod tests {
 
             for (when, got) in [("before", before), ("after", after)] {
                 let legs = got.unwrap_or_else(|e| {
-                    panic!("F06-NEW-AF-09 asset legs {when} merging A: {e}");
+                    panic!("asset legs {when} merging A: {e}");
                 });
                 assert_eq!(legs.recipient, 900, "recipient leg {when} merging A");
                 assert_eq!(legs.change, 4_100, "change leg {when} merging A");

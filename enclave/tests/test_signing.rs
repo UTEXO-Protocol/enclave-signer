@@ -1156,8 +1156,7 @@ fn test_sign_btc_accepts_create_utxo_colored_output() {
     }
 }
 
-/// F06-NEW-AF-09 / F06-IT-13: partial merges succeed; fully signed
-/// submissions remain refused.
+/// Partial merges succeed. Fully signed submissions stay refused.
 #[cfg(not(feature = "dev-mode"))]
 #[test]
 fn test_sign_btc_second_pass_after_partial_merge_still_signs() {
@@ -1211,10 +1210,7 @@ fn test_sign_btc_second_pass_after_partial_merge_still_signs() {
             assert_eq!(r.inputs_signed, 1, "only B is left to sign");
             Psbt::deserialize(&r.signed_psbt).expect("psbt")
         }
-        other => panic!(
-            "F06-NEW-AF-09: second pass with A merged must sign B, got {:?}",
-            other
-        ),
+        other => panic!("second pass with A merged must sign B, got {:?}", other),
     };
 
     assert_eq!(second.unsigned_tx, signed.unsigned_tx);
@@ -1256,7 +1252,7 @@ fn test_sign_btc_second_pass_after_partial_merge_still_signs() {
         .unwrap_or_else(|e| panic!("input {index} signature must verify: {e}"));
     }
 
-    // Nothing left to do is still refused - custody is not a licence to no-op.
+    // A fully signed PSBT is still refused.
     match sign(second.serialize()) {
         Some(Response::Error(e)) => assert!(
             e.message.contains("signed 0 inputs"),

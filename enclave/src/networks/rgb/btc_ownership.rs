@@ -9,8 +9,8 @@
 //! input this enclave co-controls, as resolved by
 //! [`find_controlled_taproot_leaves`](crate::networks::rgb::signing::taproot::find_controlled_taproot_leaves).
 //! That leaf is control-block and derivation anchored, and the segwit sighash
-//! commits to the script. Custody is structural: it does not depend on which
-//! of our signatures have already been merged into the PSBT.
+//! commits to the script. Custody does not change when the PSBT merges one of
+//! our signatures.
 //!
 //! It proves custody is unchanged, not that only we can spend: the bridge is a
 //! multisig, and the other signers can move funds without us either way. It
@@ -417,7 +417,7 @@ pub(crate) mod tests {
         assert!(!owned(&psbt, &keys));
     }
 
-    // === F06-NEW-AF-09: custody must not depend on merge progress ===
+    // === custody must not depend on merge progress ===
 
     /// What the two sats gates and the ownership resolvers say about one PSBT.
     struct Gates {
@@ -595,8 +595,7 @@ pub(crate) mod tests {
         }
     }
 
-    /// F06-NEW-AF-09 / F06-NEW-UT-08: custody survives signature merging on
-    /// both accounts.
+    /// Custody survives signature merging on both accounts.
     #[test]
     fn bfa_ownership_is_independent_of_merge_progress() {
         let mut failures = Vec::new();
@@ -604,9 +603,9 @@ pub(crate) mod tests {
             merge_scenario(AccountType::Vanilla),
             merge_scenario(AccountType::Colored),
         ] {
-            let tag = format!("F06-NEW-AF-09 {:?}", s.account);
-            // Sanity: the unsigned control passes, and the scenario is the
-            // finding's (only B outstanding, nothing else changed).
+            let tag = format!("merge progress {:?}", s.account);
+            // Sanity: the unsigned control passes, only B is outstanding, and
+            // nothing else changed.
             let both = HashSet::from([s.a_spk.to_bytes(), s.b_spk.to_bytes()]);
             assert_eq!(s.before.owned, both, "{tag}: owned before");
             assert_eq!(
@@ -619,7 +618,7 @@ pub(crate) mod tests {
             assert_eq!(s.jobs_after, vec![1], "{tag}: only B outstanding");
             assert!(s.tx_unchanged, "{tag}: tx or prevouts changed");
 
-            // The finding.
+            // Custody must survive merging A's signature.
             if let Some(err) = &s.after.rgb {
                 failures.push(format!("{tag}: send-RGB gate after merging A: {err}"));
             }
@@ -655,9 +654,9 @@ pub(crate) mod tests {
         );
     }
 
-    /// F06-NEW-PT-03, bounded to every signature subset over three mixed
-    /// inputs: custody is a function of the PSBT's structure alone. Only the
-    /// remaining work moves as entries are merged.
+    /// Custody is a function of the PSBT structure alone, checked over every
+    /// signature subset on three mixed inputs. Only the remaining work moves
+    /// as entries merge.
     #[test]
     fn custody_is_invariant_under_every_signature_subset() {
         let keys = km();
