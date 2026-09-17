@@ -35,8 +35,14 @@ disagree, or if the commit recorded below drifts from the `rev` that
 | | |
 |---|---|
 | Upstream | https://github.com/UTEXO-Protocol/federated-signer-proto |
-| Commit | `18c5d271d40a049ec0ffc8f3a970ef042d8b7ffb` ("feat: carry mint ancestry on the mint path", branch `bfa`) |
-| Commit date | 2026-09-02T09:29:35+03:00 |
+| Commit | `176a3b117b68fa787dc6a85d904b6137b6e2ce01` ("Merge pull request #32 from UTEXO-Protocol/bfa") |
+| Commit date | 2026-09-09T16:47:03+03:00 |
+
+Re-synced from `18c5d271d40a049ec0ffc8f3a970ef042d8b7ffb` on 2026-09-17. The two
+commits have the SAME tree, so not one vendored byte changed and both blob
+hashes below are unchanged. The bump aligns the pin with what
+`federated-signer-node` pins (`go.mod`, rev `176a3b11`), so the enclave, the
+parent and the listener all name one schema version.
 
 This is the same commit `parent/Cargo.toml` still pins as a git dependency, so
 both crates compile against one schema version. Keep them in lockstep.
@@ -50,7 +56,7 @@ both crates compile against one schema version. Keep them in lockstep.
 Verify against upstream (needs read access to the private repo):
 
 ```bash
-REV=18c5d271d40a049ec0ffc8f3a970ef042d8b7ffb
+REV=176a3b117b68fa787dc6a85d904b6137b6e2ce01
 git clone https://github.com/UTEXO-Protocol/federated-signer-proto /tmp/fsp
 git -C /tmp/fsp checkout "$REV"
 diff /tmp/fsp/rust-gen/src/enclave/enclave.rs enclave-proto/src/enclave.rs

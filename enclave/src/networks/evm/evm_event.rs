@@ -83,9 +83,17 @@ pub(crate) const BFI_MAX_DEST_ADDRESS_LEN: usize = 2048;
 /// 7 static words + 1 dynamic-string offset word must be present.
 const BFI_MIN_DATA_LEN: usize = 8 * 32;
 
-/// Canonical `FundsIn` signature, whose operation id is the mint's RGB OpId.
-/// `indexed` moves fields between topics and data but never changes it.
-pub const FUNDS_IN_SIG: &str = "FundsIn(address,uint256,uint256)";
+/// Canonical `FundsIn` signature, verbatim from `bridge-smart-contracts`
+/// `IBridge.sol`, whose operation id is the mint's RGB OpId.
+///
+/// `indexed` moves a field between topics and data without changing the
+/// signature, so the two deployed layouts share one topic0. A field's TYPE does
+/// change it: `amount` became `uint64` when the contract added its own
+/// `AmountExceedsUint64` guard, which moved topic0 off
+/// `FundsIn(address,uint256,uint256)`. A stale signature fails silently - the
+/// filter matches zero logs and every mint reports "no FundsIn log". Hence the
+/// pinned topic0 test.
+pub const FUNDS_IN_SIG: &str = "FundsIn(address,uint256,uint64)";
 /// With `rgbOpId` indexed it is topic2; without, it is the first data word.
 #[cfg(feature = "bfa-validation")]
 const FI_RGB_OP_ID_TOPIC: usize = 2;
@@ -1092,6 +1100,29 @@ mod tests {
             hex::encode(event_topic0(BRIDGE_FUNDS_IN_SIG)),
             "96266da276e870bb3d9c25740c9e24ec6448fc7bbed72ca384c3b8952574014c",
             "BridgeFundsIn topic0 drifted"
+        );
+    }
+
+    #[cfg(feature = "bfa-validation")]
+    #[test]
+    fn funds_in_topic0_is_pinned() {
+        assert_eq!(
+            hex::encode(event_topic0(FUNDS_IN_SIG)),
+            "f1a18caea297591892fc07ea412a5e617d8e51e1155912d8871793e1d4e70f87",
+            "FundsIn topic0 drifted"
+        );
+    }
+
+    /// The `uint256` amount predates the contract's `AmountExceedsUint64`
+    /// guard. Reverting to it matches zero logs, which surfaces as "no FundsIn
+    /// log in tx" rather than as a signature problem - so pin it as forbidden.
+    #[cfg(feature = "bfa-validation")]
+    #[test]
+    fn legacy_funds_in_topic0_is_not_in_use() {
+        assert_ne!(
+            hex::encode(event_topic0(FUNDS_IN_SIG)),
+            "cf4f3270b7400c5ca42954767c516b7c595dcd8038cdd121945a474c616208f8",
+            "still filtering on the pre-uint64 FundsIn signature"
         );
     }
 
