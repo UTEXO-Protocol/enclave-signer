@@ -32,7 +32,7 @@ use crate::networks::ValidationContext;
 use crate::proto::RgbSource;
 
 #[cfg(feature = "spv")]
-use super::spv_validation;
+use super::spv_crosscheck;
 
 /// Which side of the bridge an asset binding is being made for. The two sides
 /// differ only in how they treat a missing `RGB_ASSET_ID` pin.
@@ -164,7 +164,7 @@ pub fn validate_source(
             .header_chain
             .lock()
             .map_err(|e| EnclaveError::Internal(format!("SPV header chain lock poisoned: {e}")))?;
-        spv_validation::validate_source_chain(
+        spv_crosscheck::validate_source_chain(
             &chain,
             Some(&validated),
             &source.merkle_proofs,
@@ -2652,7 +2652,7 @@ mod tests {
                 rgb_validator: Some(&validator),
                 header_chain: &chain,
                 #[cfg(feature = "spv")]
-                chain_pins: &crate::networks::rgb::spv_validation::ChainPins::new(),
+                chain_pins: &crate::networks::rgb::spv_crosscheck::ChainPins::new(),
                 // Source validation never reaches the destination PSBT bind.
                 self_owned_psbt_outputs: None,
                 bridge_events: &[],

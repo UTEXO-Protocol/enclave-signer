@@ -23,7 +23,7 @@ flowchart TB
             Replay[(NonceReplayGuard — cloning<br/>≤10 000 entries, 1 h TTL<br/>+ op_replay_guard — bridge ops<br/>≤100 000 entries, 24 h TTL)]
             Fwd[vsock_forwarder<br/>loopback → vsock, per-port<br/>Electrum port or 3443 / 3444<br/>Electrum host pinned to loopback in /etc/hosts]
             RgbVal[RgbValidator<br/>rgb-ops + Electrum or Esplora]
-            EvmVer[evm_event verifier<br/>raw RPC (supplied images)<br/>receipt/head correctness trusted]
+            EvmVer[events.rs verifier<br/>raw RPC (supplied images)<br/>receipt/head correctness trusted]
             NSM[/dev/nsm — Nitro Security Module/]
         end
     end

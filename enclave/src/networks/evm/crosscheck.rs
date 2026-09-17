@@ -9,8 +9,8 @@
 use crate::error::{EnclaveError, Result};
 use crate::networks::evm::validation::FundsOutParams;
 use crate::networks::rgb::spv::HeaderChain;
-use crate::networks::rgb::spv_validation;
-use crate::networks::rgb::spv_validation::ChainPins;
+use crate::networks::rgb::spv_crosscheck;
+use crate::networks::rgb::spv_crosscheck::ChainPins;
 use crate::networks::rgb::validation::ValidatedConsignment;
 use crate::proto::MerkleProofEntry;
 
@@ -138,7 +138,7 @@ pub fn validate_funds_out_burn_recipient(
 /// pair against the `(operationId, netAmount)` it recorded at `FundsIn`. It
 /// does not know which deposits a given burn descends from; the enclave does,
 /// because it verified every ancestry lock's receipt itself
-/// ([`crate::networks::evm::evm_event::verify_rgb_funds_in`]). Requiring the
+/// ([`crate::networks::evm::events::verify_rgb_funds_in`]). Requiring the
 /// cited set to equal that ancestry, pair for pair, ties the release to the
 /// burn: a second release of the same burn cannot cite other deposits to earn
 /// a fresh `burnId`.
@@ -149,7 +149,7 @@ pub fn validate_funds_out_burn_recipient(
 #[cfg(feature = "bfa-mint")]
 pub fn validate_funds_out_settlement(
     params: &FundsOutParams,
-    locks: &[crate::networks::evm::evm_event::VerifiedLock],
+    locks: &[crate::networks::evm::events::VerifiedLock],
 ) -> Result<()> {
     use alloy_primitives::{B256, U256};
     use alloy_sol_types::SolValue;
@@ -379,11 +379,11 @@ fn resolve_consignment_anchor(
     // same lock guard (see the doc note on reorgs). The full set validator is
     // reused on a one-element slice so the path-depth and txid-correspondence
     // bounds it enforces apply here too.
-    spv_validation::validate_spv_proofs(
+    spv_crosscheck::validate_spv_proofs(
         chain,
         &[txid],
         std::slice::from_ref(proof),
-        spv_validation::SPV_MIN_CONFIRMATIONS,
+        spv_crosscheck::SPV_MIN_CONFIRMATIONS,
     )?;
 
     Ok(ConsignmentAnchor {
@@ -483,7 +483,7 @@ fn proof_height(word: &[u8], field: &str) -> Result<u32> {
     Ok(u32::from_be_bytes(buf))
 }
 
-// `extract_uint256_as_u64` moved to `evm_event`, its only remaining consumer.
+// `extract_uint256_as_u64` moved to `events`, its only remaining consumer.
 // `extract_bytes32`, `decode_op_id_to_bytes32` and `bytes32_to_usize` went with
 // the removed calldata rewrite.
 
@@ -831,7 +831,7 @@ mod tests {
     #[cfg(feature = "bfa-mint")]
     mod settlement {
         use super::*;
-        use crate::networks::evm::evm_event::VerifiedLock;
+        use crate::networks::evm::events::VerifiedLock;
         use alloy_primitives::B256;
         use alloy_sol_types::SolValue;
 

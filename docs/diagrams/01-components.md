@@ -47,7 +47,7 @@ flowchart TB
         subgraph NEVM [networks/evm/]
             NEV[validation.rs<br/>selectors fundsOut 0xdc771390 + lzFundsOut,<br/>canonical ABI decode + re-encode,<br/>64 KiB cap, pins, destinationChainId, deadline]
             NEC[crosscheck.rs<br/>witnesses-confirmed, BtcRelay proof<br/>anchored to consignment block,<br/>flow amount bind, burn recipient]
-            NEE[evm_event.rs<br/>independent FundsIn verify —<br/>raw RPC (supplied images)<br/>or optional checkpoint-verified Helios]
+            NEE[events.rs<br/>independent FundsIn verify —<br/>raw RPC (supplied images)<br/>or optional checkpoint-verified Helios]
             NEG[gas_tx.rs<br/>gas-tx preimage allowlist:<br/>strict RLP + chain / to pins]
             NES[signing.rs<br/>EIP-712 MultisigProxy v1<br/>TeeFundsOut / TeeLzFundsOut digest]
         end
@@ -57,7 +57,7 @@ flowchart TB
             NRI[invoice.rs<br/>FundsIn destinationAddress →<br/>blinded seal == recipient leg]
             NRP[psbt_validation.rs<br/>PSBT ↔ consignment anchor,<br/>per-output legs, fee-rate 3x cap]
             NRB[btc_crosscheck.rs<br/>plain-BTC + send-RGB sats gates<br/>btc_ownership.rs custody rule<br/>+ total-sats cap + unowned budgets]
-            NRS[spv_validation.rs<br/>coverage + depth ≥ 6<br/>+ chain_net + staleness]
+            NRS[spv_crosscheck.rs<br/>coverage + depth ≥ 6<br/>+ chain_net + staleness]
             NRSIG[signing/<br/>psbt.rs P2WSH ECDSA<br/>taproot.rs BIP-341 Schnorr]
             subgraph SPVMOD [spv/]
                 SCh[chain.rs — HeaderChain<br/>full retention, 1M cap,<br/>bounded reorg ≤ 100]

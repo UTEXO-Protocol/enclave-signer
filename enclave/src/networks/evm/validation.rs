@@ -94,7 +94,7 @@ pub fn validate_source(amount: u64, source: &EvmSource) -> Result<RouteProof> {
     // The listener-supplied `event_valid` / `event_finalized`
     // booleans are not trusted here - anyone reaching the enclave could set
     // both. Validity and finality come from
-    // `networks::evm::evm_event::verify_funds_in_event` in `handle_sign`. The
+    // `networks::evm::events::verify_funds_in_event` in `handle_sign`. The
     // proto fields remain, ignored, until the listener stops sending them.
 
     Ok(RouteProof {
@@ -419,7 +419,7 @@ mod tests {
             #[cfg(feature = "spv")]
             header_chain: &header_chain,
             #[cfg(feature = "spv")]
-            chain_pins: &crate::networks::rgb::spv_validation::ChainPins::new(),
+            chain_pins: &crate::networks::rgb::spv_crosscheck::ChainPins::new(),
             // EVM destinations never reach the send-RGB PSBT bind.
             #[cfg(feature = "rgb-validation")]
             self_owned_psbt_outputs: None,
@@ -458,7 +458,7 @@ mod tests {
     /// `validate_source` no longer reads the listener's
     /// `event_valid` / `event_finalized` booleans, so flipping them changes
     /// nothing. Validity and finality come from
-    /// `evm_event::verify_funds_in_event`.
+    /// `events::verify_funds_in_event`.
     #[test]
     fn source_ignores_listener_evm_booleans() {
         let mut source = source();

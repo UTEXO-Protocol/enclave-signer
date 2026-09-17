@@ -387,7 +387,7 @@ fn main() {
     // trusted input.
     #[cfg(feature = "evm-rpc")]
     let (evm_rpc_client, evm_rpc_config) = {
-        use utexo_bridge_enclave::networks::evm::evm_event::{AlloyEvmClient, EvmReceiptProvider};
+        use utexo_bridge_enclave::networks::evm::events::{AlloyEvmClient, EvmReceiptProvider};
         let cfg = evm_rpc_config;
         type Boxed = Box<dyn EvmReceiptProvider + Send + Sync>;
 
@@ -418,7 +418,7 @@ fn main() {
             Some(hcfg) => {
                 // Pass the pinned EVM_CHAIN_ID so Helios rejects a
                 // HELIOS_NETWORK inconsistent with it (predicate 1).
-                match utexo_bridge_enclave::networks::evm::evm_event::HeliosEvmClient::new(
+                match utexo_bridge_enclave::networks::evm::events::HeliosEvmClient::new(
                     &hcfg,
                     bridge_config.chain_id,
                 ) {

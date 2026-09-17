@@ -33,10 +33,10 @@ pub struct ServerContext {
     /// `None` when the client could not be built; `handle_sign` fails closed on
     /// `None` in bridge mode. Reaches the RPC only through the loopback vsock
     /// forwarder, so responses are host-relayed and untrusted - see
-    /// [`crate::networks::evm::evm_event`].
+    /// [`crate::networks::evm::events`].
     #[cfg(feature = "evm-rpc")]
     pub evm_rpc_client:
-        Option<Box<dyn crate::networks::evm::evm_event::EvmReceiptProvider + Send + Sync>>,
+        Option<Box<dyn crate::networks::evm::events::EvmReceiptProvider + Send + Sync>>,
     /// Pinned EVM-RPC config (loopback URL + min confirmations).
     #[cfg(feature = "evm-rpc")]
     pub evm_rpc_config: crate::config::EvmRpcConfig,
@@ -434,8 +434,8 @@ fn verify_mint_locks(
     ctx: &ServerContext,
     plan: &[([u8; 32], [u8; 32])],
     unavailable: &str,
-) -> Result<Vec<crate::networks::evm::evm_event::VerifiedLock>> {
-    use crate::networks::evm::evm_event::verify_rgb_funds_in;
+) -> Result<Vec<crate::networks::evm::events::VerifiedLock>> {
+    use crate::networks::evm::events::verify_rgb_funds_in;
 
     if plan.is_empty() {
         return Ok(Vec::new());
@@ -463,7 +463,7 @@ fn verify_mint_locks(
 /// lock, `(mint OpId, minted amount)`, in plan order.
 #[cfg(feature = "bfa-validation")]
 fn cea_events(
-    locks: &[crate::networks::evm::evm_event::VerifiedLock],
+    locks: &[crate::networks::evm::events::VerifiedLock],
 ) -> Vec<rgbstd::vm::ether_extension::Event> {
     use rgbstd::vm::ether_extension::Event;
     use rgbstd::{OpId, RevealedValue};
@@ -483,7 +483,7 @@ fn bfa_binding_for(
     consignment: &[u8],
     label: &str,
 ) -> Result<Option<crate::networks::rgb::validation::BfaBinding>> {
-    use crate::networks::evm::evm_event::check_bridge_location;
+    use crate::networks::evm::events::check_bridge_location;
     use crate::networks::rgb::validation::{assert_consignment_size, bfa_binding};
 
     // The same cap the anchor validation applies, repeated because that check
@@ -514,7 +514,7 @@ fn bfa_binding_for(
 fn bfa_burn_ancestry_events(
     ctx: &ServerContext,
     source: &enclave_proto::RgbSource,
-) -> Result<Vec<crate::networks::evm::evm_event::VerifiedLock>> {
+) -> Result<Vec<crate::networks::evm::events::VerifiedLock>> {
     if cfg!(feature = "dev-mode") {
         return Ok(Vec::new());
     }
@@ -548,7 +548,7 @@ fn bfa_mint_events(
     ctx: &ServerContext,
     source: &enclave_proto::EvmSource,
     destination: &enclave_proto::RgbDestination,
-) -> Result<Vec<crate::networks::evm::evm_event::VerifiedLock>> {
+) -> Result<Vec<crate::networks::evm::events::VerifiedLock>> {
     // dev-mode compiles no destination-anchor validation, so these events would
     // have no consumer and the RPC call would be pure cost.
     if cfg!(feature = "dev-mode") {
@@ -586,7 +586,7 @@ fn bfa_mint_events(
 fn bfa_transfer_ancestry_events(
     ctx: &ServerContext,
     destination: &enclave_proto::RgbDestination,
-) -> Result<Vec<crate::networks::evm::evm_event::VerifiedLock>> {
+) -> Result<Vec<crate::networks::evm::events::VerifiedLock>> {
     if cfg!(feature = "dev-mode") {
         return Ok(Vec::new());
     }
@@ -688,7 +688,7 @@ fn handle_sign(
             })?;
             // Binds to the source's BridgeFundsIn.operationId, not
             // destination.operation_idx, which is a different id-space.
-            let verified = crate::networks::evm::evm_event::verify_funds_in_event(
+            let verified = crate::networks::evm::events::verify_funds_in_event(
                 &**client,
                 // FundsIn is emitted by the bridge entry contract, which may differ
                 // from the MultisigProxy pinned in EVM_PROXY_CONTRACT_ADDRESS (see config.rs).
@@ -780,7 +780,7 @@ fn handle_sign(
     // header-chain lock at return. `assert_chain_pins_unchanged` reads these
     // blocks again just before the key is used (F05-NEW-AF-08).
     #[cfg(feature = "spv")]
-    let chain_pins = crate::networks::rgb::spv_validation::ChainPins::new();
+    let chain_pins = crate::networks::rgb::spv_crosscheck::ChainPins::new();
 
     let validation_ctx = ValidationContext {
         bridge_config: &ctx.bridge_config,
@@ -931,8 +931,8 @@ fn apply_funds_out_binding(
     params: Option<&crate::networks::evm::validation::FundsOutParams>,
     validated: Option<&crate::networks::rgb::validation::ValidatedConsignment>,
     merkle_proofs: &[crate::proto::MerkleProofEntry],
-    #[cfg(feature = "spv")] pins: &crate::networks::rgb::spv_validation::ChainPins,
-    #[cfg(feature = "bfa-mint")] locks: &[crate::networks::evm::evm_event::VerifiedLock],
+    #[cfg(feature = "spv")] pins: &crate::networks::rgb::spv_crosscheck::ChainPins,
+    #[cfg(feature = "bfa-mint")] locks: &[crate::networks::evm::events::VerifiedLock],
 ) -> Result<()> {
     use crate::networks::evm::crosscheck;
 
@@ -1216,7 +1216,7 @@ fn handle_get_attested_public_key(
 #[cfg(feature = "spv")]
 fn assert_chain_pins_unchanged(
     ctx: &ServerContext,
-    pins: &crate::networks::rgb::spv_validation::ChainPins,
+    pins: &crate::networks::rgb::spv_crosscheck::ChainPins,
 ) -> Result<()> {
     if pins.is_empty() {
         return Ok(());
@@ -1238,7 +1238,7 @@ fn handle_sign_evm(
     ctx: &ServerContext,
     req: EvmDestination,
     params: Option<&crate::networks::evm::validation::FundsOutParams>,
-    #[cfg(feature = "spv")] pins: &crate::networks::rgb::spv_validation::ChainPins,
+    #[cfg(feature = "spv")] pins: &crate::networks::rgb::spv_crosscheck::ChainPins,
 ) -> Result<EnclaveResponse> {
     // Domain name/version are pinned to the deployed MultisigProxy and
     // regression-guarded by `test_domain_separator_matches_deployed_contract`.
@@ -1315,7 +1315,7 @@ fn handle_sign_evm(
 fn handle_sign_psbt(
     ctx: &ServerContext,
     req: RgbDestination,
-    #[cfg(feature = "spv")] pins: &crate::networks::rgb::spv_validation::ChainPins,
+    #[cfg(feature = "spv")] pins: &crate::networks::rgb::spv_crosscheck::ChainPins,
 ) -> Result<EnclaveResponse> {
     // Sats gate: every other send-RGB bind is in RGB asset units, so without
     // this a witness tx can satisfy the ledger and still sweep the Bitcoin
@@ -1570,7 +1570,7 @@ fn handle_get_last_saved_block(
 /// `(synced, tip_height, tip_time, tip_age_secs, max_tip_age_secs)`.
 #[cfg(feature = "spv")]
 fn spv_health(ctx: &ServerContext) -> (bool, u32, u32, u32, u32) {
-    use crate::networks::rgb::spv_validation::{assert_chain_ready, SPV_MAX_TIP_AGE_SECS};
+    use crate::networks::rgb::spv_crosscheck::{assert_chain_ready, SPV_MAX_TIP_AGE_SECS};
     use std::time::{SystemTime, UNIX_EPOCH};
 
     let now = SystemTime::now();
@@ -1878,7 +1878,7 @@ mod tests {
     #[cfg(all(feature = "evm-rpc", not(feature = "dev-mode")))]
     mod early_bridge_checks {
         use super::super::*;
-        use crate::networks::evm::evm_event::{EvmReceiptProvider, ReceiptData};
+        use crate::networks::evm::events::{EvmReceiptProvider, ReceiptData};
         use crate::networks::rgb::spv::{checkpoint_for, HeaderChain, Network};
         use std::sync::{
             atomic::{AtomicUsize, Ordering},
@@ -2244,7 +2244,7 @@ mod tests {
         use crate::config::{BridgeConfig, EvmRpcConfig};
         use crate::error::Result;
         use crate::framing;
-        use crate::networks::evm::evm_event::{EvmReceiptProvider, LogEntry, ReceiptData};
+        use crate::networks::evm::events::{EvmReceiptProvider, LogEntry, ReceiptData};
         use crate::networks::rgb::spv::{checkpoint_for, HeaderChain, Network};
         use crate::networks::rgb::validation::{
             bfa, OutputSeal, RgbValidator, TransitionOutput, TransitionSummary,

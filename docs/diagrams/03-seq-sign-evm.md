@@ -7,7 +7,7 @@ sequenceDiagram
     participant Parent as utexo-bridge-parent<br/>(grpc_server.rs)
     participant Srv as enclave/server.rs<br/>handle_sign
     participant Rgb as networks::rgb::validation<br/>RgbValidator
-    participant Spv as networks::rgb::spv_validation
+    participant Spv as networks::rgb::spv_crosscheck
     participant Chain as spv::HeaderChain
     participant Esplora as vsock_forwarder →<br/>Electrum / Esplora
     participant Evm as networks::evm::validation

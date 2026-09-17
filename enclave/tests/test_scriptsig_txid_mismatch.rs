@@ -51,7 +51,7 @@ use sha3::{Digest, Keccak256};
 use utexo_bridge_enclave::config::{BridgeConfig, EvmRpcConfig};
 use utexo_bridge_enclave::framing;
 use utexo_bridge_enclave::keys::{AccountType, KeyManager};
-use utexo_bridge_enclave::networks::evm::evm_event::{EvmReceiptProvider, LogEntry, ReceiptData};
+use utexo_bridge_enclave::networks::evm::events::{EvmReceiptProvider, LogEntry, ReceiptData};
 use utexo_bridge_enclave::networks::rgb::spv::{checkpoint_for, HeaderChain, Network as SpvNet};
 use utexo_bridge_enclave::networks::rgb::validation::RgbValidator;
 use utexo_bridge_enclave::policy::{BuildContext, EvmDataSource, SecurityPolicy};

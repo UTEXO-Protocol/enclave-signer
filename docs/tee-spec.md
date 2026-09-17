@@ -78,7 +78,7 @@ Four crates plus the infrastructure they touch:
     rules in `flow/{swap,mint_burn}.rs`;
   - `networks/evm/` -- `fundsOut` / `lzFundsOut` calldata validation and
     crosschecks, EIP-712 signing, `FundsIn` event verification
-    (`evm_event.rs`), gas-tx validation;
+    (`events.rs`), gas-tx validation;
   - `networks/ccd.rs` -- Concordium source (amount bind only, Sec 7.9).
 - **`enclave-proto`** -- the vendored `enclave` protobuf package, committed as
   pre-generated Rust so no codegen toolchain enters PCR0.
@@ -273,7 +273,7 @@ A bridge PSBT request MUST carry the EVM deposit tx hash **and** the RGB
 consignment; there is no consignment-less bridge mode. Listener-supplied
 `event_valid` / `event_finalized` booleans are ignored. The
 enclave establishes validity and finality itself, fail-closed
-(`evm_event::verify_funds_in_event`):
+(`events::verify_funds_in_event`):
 
 - a **successful receipt** must exist for `evm_tx_hash`, at depth >=
   `EVM_MIN_CONFIRMATIONS` (pinned config, default 12);
