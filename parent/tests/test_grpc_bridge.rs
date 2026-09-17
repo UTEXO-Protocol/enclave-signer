@@ -432,6 +432,31 @@ async fn grpc_public_key_rejects_unsupported_data_type() {
 }
 
 #[tokio::test]
+async fn grpc_public_key_rejects_unknown_data_type() {
+    let enclave_port = start_mock_enclave();
+    let grpc_port = start_grpc_server(enclave_port).await;
+
+    let mut client = ParentServiceClient::connect(format!("http://127.0.0.1:{grpc_port}"))
+        .await
+        .unwrap();
+
+    for data_type in [-1, i32::MAX] {
+        assert!(DataType::try_from(data_type).is_err());
+
+        let err = client
+            .public_key(PublicKeyRequest {
+                network_id: 0,
+                data_type,
+            })
+            .await
+            .unwrap_err();
+
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+        assert_eq!(err.message(), format!("unknown data_type: {data_type}"));
+    }
+}
+
+#[tokio::test]
 async fn grpc_sign_evm_roundtrip() {
     let enclave_port = start_mock_enclave();
     let grpc_port = start_grpc_server(enclave_port).await;
@@ -746,6 +771,40 @@ async fn grpc_evm_forwards_raw_consignment_bytes() {
 }
 
 // Error-path tests
+
+#[tokio::test]
+async fn grpc_sign_rejects_unknown_data_type() {
+    let enclave_port = start_mock_enclave();
+    let grpc_port = start_grpc_server(enclave_port).await;
+
+    let mut client = ParentServiceClient::connect(format!("http://127.0.0.1:{grpc_port}"))
+        .await
+        .unwrap();
+
+    for data_type in [-1, i32::MAX] {
+        assert!(DataType::try_from(data_type).is_err());
+
+        let payload = enriched::EnrichedEvmPayload {
+            call_data: vec![0xAB; 132],
+            nonce: 1,
+            deadline: u64::MAX,
+            chain_id: 1,
+            proxy_contract: vec![],
+            calldata_amount: 0,
+            calldata_commission: 0,
+            unsigned_tx: Vec::new(),
+            lz_release: None,
+        };
+
+        // Change only the type so missing payload fields cannot cause the rejection.
+        let mut req = sign_evm_request(rgb_source(0, 0, vec![], vec![], String::new()), payload);
+        req.common.as_mut().unwrap().data_type = data_type;
+
+        let err = client.sign(req).await.unwrap_err();
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+        assert_eq!(err.message(), format!("unknown data_type: {data_type}"));
+    }
+}
 
 #[tokio::test]
 async fn grpc_invalid_data_type_returns_error() {
