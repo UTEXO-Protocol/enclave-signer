@@ -97,12 +97,11 @@ pub fn validate_psbt_bytes(psbt_bytes: &[u8]) -> Result<()> {
 ///   1. The consignment's last transition is the type this flow signs.
 ///   2. Identity bind: `psbt.unsigned_tx.compute_txid()` equals the
 ///      consignment's last witness txid, and every input spends a native
-///      witness program. BIP-141 requires those to finalize with an empty
-///      `scriptSig`, and a txid commits to every non-witness field, so the
-///      unsigned txid is also the final one: signing this PSBT finalizes
-///      exactly the validated transition. An input that finalizes with a
-///      `scriptSig` (P2SH-wrapped SegWit, legacy) would move the txid off the
-///      one the consignment names, so it is refused here.
+///      witness program. A native witness program finalizes with an empty
+///      `scriptSig` (BIP-141), so the unsigned txid is the final txid and
+///      signing this PSBT finalizes the validated transition. An input that
+///      finalizes with a `scriptSig` (P2SH-wrapped SegWit, legacy) moves the
+///      txid off the one the consignment names, so it is refused here.
 ///   3. Per-input canary: when the consignment embeds the full witness tx, the
 ///      PSBT input outpoints must equal its prevout set. Redundant given (2);
 ///      a mismatch means a broken consignment invariant.
@@ -152,10 +151,9 @@ pub fn validate_psbt_anchors_transition(
     })?;
     flow::assert_signing_transition(last)?;
 
-    // Derive the txid from `unsigned_tx`, never a finalized/extracted tx; the
-    // input gate below is what makes the two the same value. The flow's
-    // transition gate above is what makes this last-bundle txid the
-    // transition's witness.
+    // Derive the txid from `unsigned_tx`, never a finalized tx; the input
+    // gate below makes the two equal. The transition gate above makes this
+    // bundle's txid the transition's witness.
     let expected = validated.last_witness_txid.ok_or_else(|| {
         EnclaveError::CrossCheck(
             "consignment carries no witness txid for its last transition - \

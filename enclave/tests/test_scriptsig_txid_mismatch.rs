@@ -1,13 +1,11 @@
-//! The send-RGB txid bind assumes every PSBT input finalizes with an empty
-//! `scriptSig`. A P2SH-wrapped SegWit input must push its redeemScript there
-//! (BIP-16), and the txid commits to it, so the transaction that can reach
-//! the chain is not the one the consignment names.
+//! The send-RGB txid bind assumes every input finalizes with an empty
+//! `scriptSig`. A P2SH-wrapped SegWit input pushes its redeemScript there
+//! (BIP-16), which changes the txid, so the broadcastable tx is not the one
+//! the consignment names.
 //!
-//! Driven through the wire and `handle_sign`, so the bridge-location pin, the
-//! enclave's own `FundsIn` read and the invoice recipient bind are all on the
-//! path. The BFA asset is issued here over regtest funding transactions; every
-//! PSBT prevout is the output its input spends. Mint-burn lane only: the build
-//! that signs a BFA `Bridge`.
+//! Runs through the wire and `handle_sign`: the bridge-location pin, the
+//! `FundsIn` read and the invoice bind are all on the path. Issues a BFA
+//! asset over regtest funding transactions. Mint-burn lane only.
 #![cfg(all(feature = "rgb-mint-burn", feature = "bfa-validation"))]
 
 use std::io::{Cursor, Read, Write};
@@ -218,10 +216,10 @@ struct Deposit {
     user_funding: Transaction,
 }
 
-/// Issue a BFA asset whose mint right sits on `bridge_funding:0`, then mint
-/// `MINTED` units to the user's blinded seal with a `Bridge` transition
-/// anchored (opret) in a witness tx that spends that right, plus `aux` if any,
-/// and rolls the right forward onto the bridge's change output.
+/// Issues a BFA asset whose mint right sits on `bridge_funding:0`. Mints
+/// `MINTED` units to the user's blinded seal via a `Bridge` transition
+/// anchored in a witness tx that spends that right and `aux`, if any, and
+/// rolls the right forward onto the bridge's change output.
 fn issue_and_mint(
     bridge_funding: &Transaction,
     bridge_spk: &ScriptBuf,
@@ -656,11 +654,10 @@ fn sign_ours(psbt: &mut Psbt, built: &Built) {
     );
 }
 
-/// Complete the PSBT as a finalizer would (a co-signer's second leaf
-/// signature, the auxiliary input's own signature), extract the transaction
-/// and re-verify it against the funding outputs: the control block commits to
-/// the leaf under the funding key, two leaf signatures verify, the pushed
-/// redeemScript hashes to the P2SH output and its P2WPKH signature verifies.
+/// Completes the PSBT as a finalizer would: a co-signer's second leaf
+/// signature, the auxiliary input's own signature. Extracts the transaction
+/// and re-verifies it: the control block commits to the leaf, two leaf
+/// signatures verify, and the pushed redeemScript's P2WPKH signature verifies.
 fn finalize(signed: &Psbt, leaf: &Leaf, our: XOnlyPublicKey, aux: Option<&Aux>) -> Transaction {
     let secp = Secp256k1::new();
     let cosigner = foreign(0xA1);
@@ -866,11 +863,10 @@ fn refuses_input_whose_finalized_script_sig_changes_the_bound_txid() {
     );
 }
 
-/// The consequence the refusal exists for, kept executable on a fixed build:
-/// the transaction a finalizer broadcasts from that PSBT has a different txid,
-/// and a consumer whose chain carries it cannot resolve the witness the
-/// consignment names. The leaf signature here is produced locally from the
-/// enclave's seed, so the evidence does not depend on the enclave signing.
+/// The consequence the refusal exists for: a finalizer's broadcast tx has a
+/// different txid, so a consumer cannot resolve the witness the consignment
+/// names. The leaf signature is produced locally from the enclave's seed, so
+/// the evidence does not depend on the enclave signing.
 #[test]
 fn finalized_wrapped_input_leaves_the_bound_witness_unresolvable() {
     let aux = wrapped_segwit_aux();
