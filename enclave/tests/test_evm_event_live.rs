@@ -13,7 +13,7 @@
 //! ```
 #![cfg(feature = "evm-rpc")]
 
-use utexo_bridge_enclave::networks::evm::evm_event::{verify_funds_in_event, AlloyEvmClient};
+use utexo_bridge_enclave::networks::evm::events::{verify_funds_in_event, AlloyEvmClient};
 
 struct Live {
     client: AlloyEvmClient,

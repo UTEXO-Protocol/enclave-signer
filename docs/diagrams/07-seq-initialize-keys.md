@@ -5,8 +5,8 @@ sequenceDiagram
     actor Op as Operator
     participant Cli as utexo-bridge-parent-cli<br/>bin/cli.rs
     participant PClient as EnclaveClient<br/>parent/client.rs
-    participant Srv as enclave/server.rs<br/>handle_initialize
-    participant State as EnclaveState<br/>state.rs
+    participant Srv as enclave/server/keys.rs<br/>handle_initialize
+    participant State as EnclaveState<br/>state/enclave.rs
     participant Km as KeyManager<br/>keys.rs
     participant Rand as getrandom<br/>(OS entropy)
 

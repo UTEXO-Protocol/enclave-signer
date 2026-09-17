@@ -19,9 +19,9 @@ sequenceDiagram
     actor Orc as Orchestrator
     participant Listener as Go Listener
     participant Parent as utexo-bridge-parent<br/>(grpc_server.rs)
-    participant Srv as enclave/server.rs<br/>handle_sign
+    participant Srv as enclave/server/sign.rs<br/>handle_sign
     participant Evm as networks::evm::validation
-    participant Evt as networks::evm::evm_event
+    participant Evt as networks::evm::events
     participant Rpc as EVM RPC<br/>loopback→vsock→host
     participant Rgb as networks::rgb<br/>(rgb-ops + Electrum/Esplora)
     participant Anchor as networks::rgb::psbt_validation

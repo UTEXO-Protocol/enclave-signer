@@ -1,7 +1,7 @@
 #[cfg(feature = "rgb-validation")]
 pub mod crosscheck;
 #[cfg(feature = "evm-rpc")]
-pub mod evm_event;
+pub mod events;
 pub mod gas_tx;
 pub mod signing;
 pub mod validation;
