@@ -49,9 +49,7 @@ pub fn start_test_server_with_config(
 #[cfg(all(feature = "evm-rpc", not(feature = "dev-mode")))]
 #[allow(dead_code)]
 pub fn start_test_server_with_evm_rpc(
-    client: Box<
-        dyn utexo_bridge_enclave::networks::evm::events::EvmReceiptProvider + Send + Sync,
-    >,
+    client: Box<dyn utexo_bridge_enclave::networks::evm::events::EvmReceiptProvider + Send + Sync>,
 ) -> u16 {
     start_test_server_inner(|_| {}, BridgeConfig::from_env(), Some(client))
 }
@@ -178,9 +176,7 @@ pub mod deposit_stub {
     use alloy_primitives::U256;
     use alloy_sol_types::{sol, SolEvent};
     use utexo_bridge_enclave::error::Result;
-    use utexo_bridge_enclave::networks::evm::events::{
-        EvmReceiptProvider, LogEntry, ReceiptData,
-    };
+    use utexo_bridge_enclave::networks::evm::events::{EvmReceiptProvider, LogEntry, ReceiptData};
 
     sol! {
         event BridgeFundsIn(

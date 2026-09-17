@@ -34,11 +34,11 @@ flowchart TB
 
     %% enclave crate
     subgraph ENC [enclave crate — utexo-bridge-enclave]
-        EMain[main.rs<br/>boot: resolve SecurityPolicy — a release<br/>bridge build panics unless valid Production —<br/>then listener loop vsock / TCP]
+        EMain[main.rs + bootstrap.rs<br/>boot: resolve SecurityPolicy — a release<br/>bridge build panics unless valid Production —<br/>then listener loop vsock / TCP]
         EConn[conn.rs<br/>DeadlineStream 10 s idle / 30 s total<br/>4 worker threads, queue of 16]
-        ESrv[server.rs<br/>ServerContext + handler dispatch<br/>+ SubmitHeaders rate limiter]
+        ESrv[server/<br/>context.rs ServerContext + dispatch.rs router<br/>+ rate_limit.rs SubmitHeaders budget]
         EPol[policy.rs<br/>SecurityPolicy<br/>Production / Development,<br/>resolved once at boot]
-        EState[state.rs<br/>Phase Initial / Cloning / Active<br/>NonceReplayGuard 1 h TTL<br/>op_replay_guard 24 h TTL]
+        EState[state/<br/>enclave.rs Phase Initial / Cloning / Active<br/>replay_guard.rs NonceReplayGuard 1 h TTL<br/>+ op_replay_guard 24 h TTL]
         EFr[framing.rs<br/>len-prefixed proto, 4 MiB cap]
         BCfg[config.rs — BridgeConfig env pins<br/>EVM_CHAIN_ID / EVM_PROXY_CONTRACT_ADDRESS / RGB_ASSET_ID<br/>GAS_TX_ALLOWED_TO / GAS_TX_MAX_GAS_LIMIT<br/>GAS_TX_MAX_FEE_PER_GAS / GAS_TX_MAX_VALUE_WEI<br/>GAS_TX_ALLOWED_SELECTORS<br/>FUNDS_IN_CONTRACT / BTC_MAX_TOTAL_SATS<br/>BTC_MAX_UNOWNED_SATS / RGB_MAX_UNOWNED_SATS]
         VFwd[vsock_forwarder.rs<br/>loopback → vsock, per-port instances<br/>Electrum ssl port or 3443→8001,<br/>3444→8002 EVM RPC]
@@ -52,7 +52,7 @@ flowchart TB
             NES[signing.rs<br/>EIP-712 MultisigProxy v1<br/>TeeFundsOut / TeeLzFundsOut digest]
         end
         subgraph NRGB [networks/rgb/]
-            NRV[validation.rs<br/>rgb-ops Transfer + Electrum/Esplora resolver,<br/>typesystem pinned per schema]
+            NRV[validation/<br/>indexer.rs Electrum/Esplora resolver,<br/>consensus.rs rgb-ops Transfer validation,<br/>consignment.rs decode, schema.rs typesystem pin]
             NRF[flow/swap.rs or flow/mint_burn.rs<br/>exactly one per image:<br/>accepted transitions + amount rule]
             NRI[invoice.rs<br/>FundsIn destinationAddress →<br/>blinded seal == recipient leg]
             NRP[psbt_validation.rs<br/>PSBT ↔ consignment anchor,<br/>per-output legs, fee-rate 3x cap]
