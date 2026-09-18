@@ -1120,7 +1120,7 @@ mod tests {
         let p = FakeProvider {
             receipt: Some(receipt_with(
                 vec![
-                    rgb_companion_log(7, 950),
+                    rgb_companion_log(7, 100),
                     bridge_log(op_id(7), 1000, 950, 50),
                 ],
                 100,
@@ -1138,7 +1138,7 @@ mod tests {
         let p = FakeProvider {
             receipt: Some(receipt_with(
                 vec![
-                    rgb_companion_log(7, 950),
+                    rgb_companion_log(7, 100),
                     bridge_log(op_id(7), 1000, 950, 999),
                 ],
                 100,
@@ -1154,7 +1154,7 @@ mod tests {
     #[test]
     fn rejects_rgb_companion_event_alone() {
         let p = FakeProvider {
-            receipt: Some(receipt_with(vec![rgb_companion_log(7, 950)], 100)),
+            receipt: Some(receipt_with(vec![rgb_companion_log(7, 100)], 100)),
             head: 112,
         };
         let e = verify(&p).unwrap_err().to_string();
