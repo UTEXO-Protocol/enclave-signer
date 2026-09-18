@@ -5,11 +5,17 @@
 //! exists after the enclave boots, and baking them into the image changes the
 //! PCR0 identity that seed is bound to.
 //!
-//! An output is accepted on one rule: its `script_pubkey` equals that of an
-//! input for which
+//! An output pays back into the same custody on one rule: its `script_pubkey`
+//! equals that of an input for which
 //! [`find_taproot_sign_jobs`](crate::networks::rgb::signing::taproot::find_taproot_sign_jobs)
 //! produced a job. That job is control-block and derivation anchored, and the
 //! segwit sighash commits to the script.
+//!
+//! That rule proves custody, not amount: alone, it would let a small
+//! qualifying input exempt bridge value paid to its script. The sats budgets
+//! in [`crate::networks::rgb::btc_crosscheck`] cap the exempt value to what
+//! the script brought in ([`unowned_output_sats`]). Membership alone still
+//! decides [`self_owned_output_indices`], which checks RGB units, not sats.
 //!
 //! It proves custody is unchanged, not that only we can spend: the bridge is a
 //! multisig, and the other signers can move funds without us either way. It
@@ -25,31 +31,25 @@
 //! Scope: this makes the plain-BTC path structurally self-pay. Withdrawals to
 //! an arbitrary user address remain out of scope.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use bitcoin::psbt::Psbt;
 
+use crate::error::{EnclaveError, Result};
 use crate::keys::{AccountType, KeyManager};
 use crate::networks::rgb::signing::taproot::find_taproot_sign_jobs;
 
-/// The `script_pubkey`s of every PSBT input this enclave provably co-controls
-/// on the plain-BTC (Vanilla) account.
+/// The `script_pubkey`s of every PSBT input this enclave provably co-controls.
 ///
 /// Membership comes from the signing-job resolver, so each entry carries the
 /// full input-side anchor chain: control block verified against the input's own
 /// output key, claimed key present in that leaf, and the claimed BIP-86
 /// derivation actually producing it.
-pub fn self_controlled_input_scripts(psbt: &Psbt, keys: &KeyManager) -> HashSet<Vec<u8>> {
-    self_controlled_input_scripts_scoped(psbt, keys, Some(AccountType::Vanilla))
-}
-
-/// [`self_controlled_input_scripts`] with the account filter made explicit.
 ///
 /// `allowed_account` is `Some(_)` for one BIP-86 account, `None` for either.
-/// The plain-BTC path pins `Vanilla`; the send-RGB change-leg proof
-/// passes `None`, since bridge change there sits on the Colored account.
-/// Widening the filter only widens which scripts count as ours, never what gets
-/// signed - that is `sign_psbt_scoped`'s job.
+/// The change-leg oracle passes `None`, since bridge change there sits on the
+/// Colored account. Widening the filter only widens which scripts count as
+/// ours, never what gets signed - that is `sign_psbt_scoped`'s job.
 pub fn self_controlled_input_scripts_scoped(
     psbt: &Psbt,
     keys: &KeyManager,
@@ -62,6 +62,69 @@ pub fn self_controlled_input_scripts_scoped(
         .filter_map(|input| input.witness_utxo.as_ref())
         .map(|utxo| utxo.script_pubkey.as_bytes().to_vec())
         .collect()
+}
+
+/// Sats each co-controlled script brought into the PSBT, summed from each
+/// qualifying input's `witness_utxo` by `script_pubkey`. Caps how much value
+/// an output can exempt.
+fn signable_input_value_allowances_scoped(
+    psbt: &Psbt,
+    keys: &KeyManager,
+    allowed_account: Option<AccountType>,
+) -> Result<HashMap<Vec<u8>, u64>> {
+    let mut inputs: Vec<usize> = find_taproot_sign_jobs(psbt, keys.master_fingerprint(), keys)
+        .into_iter()
+        .filter(|job| allowed_account.is_none_or(|want| job.account_type == want))
+        .map(|job| job.input_index)
+        .collect();
+    inputs.sort_unstable();
+    inputs.dedup();
+    let mut allowances = HashMap::new();
+    for i in inputs {
+        let utxo = psbt
+            .inputs
+            .get(i)
+            .and_then(|input| input.witness_utxo.as_ref())
+            .ok_or_else(|| {
+                EnclaveError::CrossCheck(format!(
+                    "input {i} qualified for signing without a witness_utxo"
+                ))
+            })?;
+        let sats = allowances
+            .entry(utxo.script_pubkey.to_bytes())
+            .or_insert(0u64);
+        *sats = sats.checked_add(utxo.value.to_sat()).ok_or_else(|| {
+            EnclaveError::CrossCheck(format!("input value overflow at input {i}"))
+        })?;
+    }
+    Ok(allowances)
+}
+
+/// Sats the outputs pay beyond what their own scripts brought in. Each output
+/// draws down its script's allowance
+/// ([`signable_input_value_allowances_scoped`]); outputs sharing a script
+/// share one allowance, so a script never exempts more than it funded.
+pub(crate) fn unowned_output_sats(
+    psbt: &Psbt,
+    keys: &KeyManager,
+    allowed_account: Option<AccountType>,
+) -> Result<u64> {
+    let mut allowances = signable_input_value_allowances_scoped(psbt, keys, allowed_account)?;
+    let mut unowned: u64 = 0;
+    for (i, txout) in psbt.unsigned_tx.output.iter().enumerate() {
+        let value = txout.value.to_sat();
+        let exempt = allowances
+            .get_mut(txout.script_pubkey.as_bytes())
+            .map_or(0, |remaining| {
+                let exempt = value.min(*remaining);
+                *remaining -= exempt;
+                exempt
+            });
+        unowned = unowned.checked_add(value - exempt).ok_or_else(|| {
+            EnclaveError::CrossCheck(format!("unowned output value overflow at output {i}"))
+        })?;
+    }
+    Ok(unowned)
 }
 
 /// Indices of every PSBT output that provably pays back to this enclave, on
@@ -255,7 +318,7 @@ mod tests {
     }
 
     fn owned(psbt: &Psbt, keys: &KeyManager) -> bool {
-        let inputs = self_controlled_input_scripts(psbt, keys);
+        let inputs = self_controlled_input_scripts_scoped(psbt, keys, Some(AccountType::Vanilla));
         output_is_self_owned(psbt, 0, &inputs)
     }
 
