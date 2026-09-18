@@ -110,9 +110,14 @@ destination network. Accepted routes: RGB -> EVM, EVM -> RGB, CCD -> EVM.
   re-encode must byte-match), amount == declared, chain / contract pins,
   `destinationChainId` rule per route, deadline in the future, BtcRelay
   finality proof anchored to the consignment's block.
-- **Flow shape** - a `rgb-swap` build accepts IFA `Transfer` only; a
-  `rgb-mint-burn` build accepts `Inflation` / `Burn` (and BFA `Bridge` with
-  `bfa-mint`). Separate images, separate PCR0.
+- **Schema** - BFA (Bridged Fungible Asset) is the only RGB schema accepted.
+  Every other schema id is refused fail-closed.
+- **Flow shape** - a `rgb-swap` build accepts BFA `Transfer` only; a
+  `rgb-mint-burn` build accepts BFA `Bridge` / `Burn`. Separate images,
+  separate PCR0.
+  Production RGB images take the per-deployment BFA contract ID through the
+  `RGB_ASSET_ID` Docker build argument. The EIF workflow reads it from the
+  `BFA_RGB_ASSET_ID` repository variable and fails the image build if absent.
 - **Replay** - `fundsOut` replay is the on-chain nonce in the digest. EVM -> RGB
   requests get a soft in-memory dedup (24 h) keyed by the deposit.
 
@@ -219,8 +224,12 @@ profile. CI asserts every guard fires.
 DOCKERFILE=Dockerfile.enclave.rgb       ./build/build-enclave.sh
 DOCKERFILE=Dockerfile.enclave.mint-burn ./build/build-enclave.sh
 DOCKERFILE=Dockerfile.enclave.ccd       ./build/build-enclave.sh
-DOCKERFILE=Dockerfile.enclave.bfa       ./build/build-enclave.sh
 ```
+
+`Dockerfile.enclave.mint-burn` is the shipped BFA mint/burn image: `bfa-mint`
+pulls in `rgb-mint-burn` and `bfa-validation`, and `bfa-validation` pulls in
+`evm-rpc`. It needs `--build-arg RGB_ASSET_ID=rgb:<contract id>`, which has no
+default because each BFA contract id is per-deployment.
 
 All Dockerfiles resolve private dependencies. Supply either a GitHub token
 with read access to those repositories, or the same per-repository deploy keys
@@ -399,8 +408,42 @@ Limits and dev knobs:
 | `USE_VSOCK` | `false` | `true` / `1` selects vsock (Linux only). |
 | `ENCLAVE_VSOCK_CID` | `16` | Enclave CID. |
 | `ENCLAVE_VSOCK_PORT` | `5000` | Enclave vsock port. |
+| `HEALTH_HOST` | `127.0.0.1` | Bind host for `GET /health`. Keep on loopback - unlike `GRPC_HOST`, do not set to `0.0.0.0` |
+| `HEALTH_PORT` | `5001` | Port for `GET /health` |
 | `EVM_NETWORK_IDS` | empty | Comma-separated network ids that count as EVM destinations for `Sign`. Empty rejects every EVM-destination transaction. |
 | `RUST_LOG` | unset | Log filter. |
+
+#### Readiness endpoint
+
+Deploy restarts the three enclaves one at a time to keep the 2-of-3 signing
+quorum. `GET /health` on the parent replaces the fixed sleep between them with a
+real signal:
+
+```bash
+curl -sS -o /dev/null -w '%{http_code}\n' http://127.0.0.1:5001/health
+```
+
+- `200` - the enclave's signing key is loaded **and** its Bitcoin header chain
+  passes the same staleness gate signing applies (`SPV_MAX_TIP_AGE_SECS`), so a
+  signing request would not bounce off a stale chain.
+- `503` - anything else: still starting, still catching up, key not initialized,
+  or the enclave is unreachable. "Not ready" and "cannot tell" are one answer to
+  a caller that is waiting, so the poller never has to special-case a `5xx`.
+
+The body carries the same fields as diagnostics (`key_loaded`, `spv_synced`,
+`phase`, `spv_tip_height`, `spv_tip_age_secs`), so a stuck deploy is debuggable
+from the poll log. Production binds it per parent on `50061` / `50062` /
+`50063` (`deploy/deploy-host.sh`); the Docker image wires the same probe into a
+`HEALTHCHECK`, so `docker inspect` reports it.
+
+This is an operations probe, not part of the signing API. It is loopback-only
+and must not be exposed off-host.
+
+The same answer is available from the CLI, for debugging from the host shell:
+
+```bash
+utexo-bridge-parent-cli --addr vsock://16 health
+```
 
 ## Testing
 
@@ -426,9 +469,10 @@ provenance. `build/smoke-test.sh` drives a live enclave through the CLI.
 |---------|---------|-------------|
 | `rgb` | `spv` | RGB / Bitcoin bridge stack. |
 | `ccd` | - | Concordium stack (Ed25519 is always compiled; this gates the handlers). |
-| `rgb-swap` | `rgb` | RGB flow: send/receive with IFA `Transfer`. In the default set. |
-| `rgb-mint-burn` | `rgb` | RGB flow: deposits mint with IFA `Inflation`, withdrawals `Burn`. Needs `--no-default-features`. |
-| `bfa-mint` | `rgb-mint-burn`, `evm-rpc` | Bridged Fungible Asset schema: `Bridge` transitions verified against the enclave's own `FundsIn` reads. |
+| `rgb-swap` | `rgb` | RGB flow: send/receive with BFA `Transfer`. In the default set. |
+| `rgb-mint-burn` | `rgb` | RGB flow: deposits mint with BFA `Bridge`, withdrawals `Burn`. Needs `--no-default-features`. |
+| `bfa-mint` | `rgb-mint-burn`, `bfa-validation` | Mint/burn flow with BFA consensus and settlement checks against verified `FundsIn` locks. |
+| `bfa-validation` | `evm-rpc` | Runs BFA consensus with verified mint ancestry in either RGB flow. Required for BFA swaps and implied by `bfa-mint`. |
 | `spv` | `rgb-validation` | In-enclave Bitcoin header chain and witness inclusion proofs. |
 | `rgb-validation` | rgb crates | In-enclave consignment validation. Requires `spv`. |
 | `evm-rpc` | `rgb-validation` | In-enclave `FundsIn` verification over host-relayed JSON-RPC. Without it the enclave refuses every bridge PSBT. |

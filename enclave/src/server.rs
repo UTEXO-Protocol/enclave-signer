@@ -242,9 +242,14 @@ fn dispatch(request: EnclaveRequest, ctx: &ServerContext) -> EnclaveResponse {
                 Err(unsupported_build("ccd"))
             }
         }
-        Some(Request::ProxyFederation(req)) => {
+        Some(Request::ProxyFederation(_req)) => {
             tracing::info!("request: ProxyFederation");
-            handle_proxy_federation(req)
+            return EnclaveResponse {
+                response: Some(Response::Error(ErrorResponse {
+                    code: 1,
+                    message: "unsupported request".into(),
+                })),
+            };
         }
         Some(Request::InitiateCloning(req)) => {
             tracing::info!("request: InitiateCloning");
@@ -290,6 +295,12 @@ fn dispatch(request: EnclaveRequest, ctx: &ServerContext) -> EnclaveResponse {
             tracing::info!("request: GetAttestedPublicKey");
             handle_get_attested_public_key(ctx, req)
         }
+        // Not feature-gated: every build must answer the readiness probe, and a
+        // build without `spv` reports SPV readiness vacuously.
+        Some(Request::Health(_)) => {
+            tracing::debug!("request: Health");
+            handle_health(ctx)
+        }
         None => {
             tracing::warn!("received empty request (no oneof variant set)");
             return EnclaveResponse {
@@ -319,7 +330,7 @@ fn dispatch(request: EnclaveRequest, ctx: &ServerContext) -> EnclaveResponse {
 ///
 /// Fails closed: an unlisted mint, or one listed with a malformed hash, aborts
 /// the burn rather than validating with that mint's lock unchecked.
-#[cfg(feature = "bfa-mint")]
+#[cfg(feature = "bfa-validation")]
 fn ancestor_tx_hash(
     mint_opid: &[u8; 32],
     ancestors: &[enclave_proto::MintAncestor],
@@ -351,7 +362,7 @@ fn ancestor_tx_hash(
 /// Pure, so the rule that decides which lock pays for which mint is testable
 /// without an EVM client - it is the one place a spent lock could be
 /// substituted for the one being paid now.
-#[cfg(feature = "bfa-mint")]
+#[cfg(all(feature = "bfa-validation", feature = "rgb-mint-burn"))]
 fn mint_lock_plan(
     mint_opids: &[[u8; 32]],
     terminal_opid: &[u8; 32],
@@ -393,7 +404,7 @@ fn mint_lock_plan(
 ///
 /// `unavailable` names, in the rejection, what the missing EVM client would
 /// have been used to authorise.
-#[cfg(feature = "bfa-mint")]
+#[cfg(feature = "bfa-validation")]
 fn verify_mint_locks(
     ctx: &ServerContext,
     plan: &[([u8; 32], [u8; 32])],
@@ -425,7 +436,7 @@ fn verify_mint_locks(
 
 /// The `cea` events RGB consensus checks the mints against: one per verified
 /// lock, `(mint OpId, minted amount)`, in plan order.
-#[cfg(feature = "bfa-mint")]
+#[cfg(feature = "bfa-validation")]
 fn cea_events(
     locks: &[crate::networks::evm::evm_event::VerifiedLock],
 ) -> Vec<rgbstd::vm::ether_extension::Event> {
@@ -441,7 +452,7 @@ fn cea_events(
 /// The contract pin both directions apply before any log is trusted: the
 /// extension never checks which contract an event came from, so this is the
 /// only thing between a mint or a redemption and an attacker's contract.
-#[cfg(feature = "bfa-mint")]
+#[cfg(feature = "bfa-validation")]
 fn bfa_binding_for(
     ctx: &ServerContext,
     consignment: &[u8],
@@ -474,7 +485,7 @@ fn bfa_binding_for(
 /// [`verify_mint_locks`], and a mint with no pair - or with one whose log does
 /// not bind to it - fails the whole validation. That is the point: a burn may
 /// only release funds that a real, verified lock once created.
-#[cfg(feature = "bfa-mint")]
+#[cfg(feature = "bfa-validation")]
 fn bfa_burn_ancestry_events(
     ctx: &ServerContext,
     source: &enclave_proto::RgbSource,
@@ -507,7 +518,7 @@ fn bfa_burn_ancestry_events(
 ///
 /// Empty vec when this is not an EVM-to-RGB request or the consignment is not a
 /// BFA one, so the swap path is unaffected.
-#[cfg(feature = "bfa-mint")]
+#[cfg(all(feature = "bfa-validation", feature = "rgb-mint-burn"))]
 fn bfa_mint_events(
     ctx: &ServerContext,
     source: &enclave_proto::EvmSource,
@@ -541,6 +552,31 @@ fn bfa_mint_events(
         &plan,
         "bfa-mint build but the EVM RPC client is unavailable - refusing to sign a mint \
          without independently verifying its FundsIn lock",
+    )
+}
+
+/// A swap transfer spends previously minted BFA allocations. Verify every
+/// mint in its consignment history before running the consensus extension.
+#[cfg(all(feature = "bfa-validation", feature = "rgb-swap"))]
+fn bfa_transfer_ancestry_events(
+    ctx: &ServerContext,
+    destination: &enclave_proto::RgbDestination,
+) -> Result<Vec<crate::networks::evm::evm_event::VerifiedLock>> {
+    if cfg!(feature = "dev-mode") {
+        return Ok(Vec::new());
+    }
+    let Some(binding) = bfa_binding_for(ctx, &destination.consignment, "send-RGB")? else {
+        return Ok(Vec::new());
+    };
+    let plan = binding
+        .mint_opids
+        .iter()
+        .map(|opid| Ok((*opid, ancestor_tx_hash(opid, &destination.mint_ancestors)?)))
+        .collect::<Result<Vec<_>>>()?;
+    verify_mint_locks(
+        ctx,
+        &plan,
+        "BFA transfer requires independent verification of its mint ancestry",
     )
 }
 
@@ -600,24 +636,32 @@ fn handle_sign(ctx: &ServerContext, req: SignRequest) -> Result<EnclaveResponse>
 
     // Before destination validation, not after: a BFA mint's consignment cannot
     // be validated at all until the lock it commits to has been verified.
-    #[cfg(feature = "bfa-mint")]
+    #[cfg(feature = "bfa-validation")]
     let bfa_locks = match (source_ref, destination_ref) {
         // A burn: the events prove the locks behind the mints it descends from.
         (SourceNetwork::RgbSource(rgb), _) => bfa_burn_ancestry_events(ctx, rgb)?,
         // A mint: the events prove the locks it and its ancestry were minted
         // against.
         (SourceNetwork::EvmSource(evm), DestinationNetwork::RgbDestination(rgb)) => {
-            bfa_mint_events(ctx, evm, rgb)?
+            #[cfg(feature = "rgb-mint-burn")]
+            {
+                bfa_mint_events(ctx, evm, rgb)?
+            }
+            #[cfg(feature = "rgb-swap")]
+            {
+                let _ = evm;
+                bfa_transfer_ancestry_events(ctx, rgb)?
+            }
         }
         // No BFA consignment on either side, so nothing for `cea` to check.
         _ => Vec::new(),
     };
-    #[cfg(feature = "bfa-mint")]
+    #[cfg(feature = "bfa-validation")]
     let bfa_bridge_events = cea_events(&bfa_locks);
     // Not gated on `bfa-mint`: `validate_consignment` takes the events
     // unconditionally, so an empty set is already how "no BFA here" is spelled
     // and every call site is spared a `#[cfg]` pair.
-    #[cfg(all(feature = "rgb-validation", not(feature = "bfa-mint")))]
+    #[cfg(all(feature = "rgb-validation", not(feature = "bfa-validation")))]
     let bfa_bridge_events: Vec<rgbstd::vm::ether_extension::Event> = Vec::new();
 
     let validation_ctx = ValidationContext {
@@ -1349,16 +1393,6 @@ fn handle_sign_ccd(state: &EnclaveState, req: SignCcdRequest) -> Result<EnclaveR
     })
 }
 
-fn handle_proxy_federation(_req: ProxyFederationRequest) -> Result<EnclaveResponse> {
-    // Stub: federation proxy requires Listener integration (not yet wired)
-    Ok(EnclaveResponse {
-        response: Some(Response::Error(ErrorResponse {
-            code: 2, // NOT_READY
-            message: "federation proxy not yet connected to Listener".into(),
-        })),
-    })
-}
-
 // SPV header sync handlers. The chain itself lives in `ctx.header_chain`,
 // initialised at boot from the compile-time checkpoint for the active
 // network (see main.rs).
@@ -1425,6 +1459,82 @@ fn handle_get_last_saved_block(
         response: Some(Response::GetLastSavedBlock(GetLastSavedBlockResponse {
             block_height: height,
             block_hash: hash.to_vec(),
+        })),
+    })
+}
+
+/// SPV half of the readiness answer:
+/// `(synced, tip_height, tip_time, tip_age_secs, max_tip_age_secs)`.
+#[cfg(feature = "spv")]
+fn spv_health(ctx: &ServerContext) -> (bool, u32, u32, u32, u32) {
+    use crate::networks::rgb::spv_validation::{assert_chain_ready, SPV_MAX_TIP_AGE_SECS};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    let now = SystemTime::now();
+    let chain = ctx
+        .header_chain
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+    let synced = assert_chain_ready(&chain, now).is_ok();
+    let (tip_height, tip_time) = (chain.tip_height(), chain.tip_time());
+    drop(chain);
+
+    let age = now
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+        .saturating_sub(u64::from(tip_time));
+
+    (
+        synced,
+        tip_height,
+        tip_time,
+        u32::try_from(age).unwrap_or(u32::MAX),
+        SPV_MAX_TIP_AGE_SECS as u32,
+    )
+}
+
+/// A `ccd`-only build carries no header chain and rejects SubmitHeaders, so
+/// there is nothing to sync. The zeroed heights say "not applicable here".
+#[cfg(not(feature = "spv"))]
+fn spv_health(_ctx: &ServerContext) -> (bool, u32, u32, u32, u32) {
+    (true, 0, 0, 0, 0)
+}
+
+/// Readiness probe for deploy orchestration: answers "could I sign right now?".
+///
+/// Ready means the key is loaded *and* the header chain passes
+/// `assert_chain_ready` - the same precondition signing applies - so a caller
+/// that sees `ready` will not immediately hit an SPV refusal.
+fn handle_health(ctx: &ServerContext) -> Result<EnclaveResponse> {
+    let key_loaded = ctx.state.is_initialized();
+    let phase = ctx.state.phase_name().to_string();
+    let (spv_synced, spv_tip_height, spv_tip_time, spv_tip_age_secs, spv_max_tip_age_secs) =
+        spv_health(ctx);
+
+    let ready = key_loaded && spv_synced;
+
+    tracing::debug!(
+        ready,
+        key_loaded,
+        spv_synced,
+        %phase,
+        spv_tip_height,
+        spv_tip_age_secs,
+        "Health"
+    );
+
+    Ok(EnclaveResponse {
+        response: Some(Response::Health(HealthResponse {
+            ready,
+            key_loaded,
+            spv_synced,
+            phase,
+            spv_tip_height,
+            spv_tip_time,
+            spv_tip_age_secs,
+            spv_max_tip_age_secs,
         })),
     })
 }

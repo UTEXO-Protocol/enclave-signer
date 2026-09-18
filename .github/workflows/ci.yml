@@ -124,10 +124,10 @@ jobs:
       # Production build profile: the exact feature set shipped in the EIF
       # (build/Dockerfile.enclave). `helios` is not shipped.
       - name: Build (production combo)
-        run: cargo build -p utexo-bridge-enclave --features vsock,rgb,rgb-swap,ccd,evm-rpc
+        run: cargo build -p utexo-bridge-enclave --features vsock,rgb,rgb-swap,ccd,bfa-validation
 
       - name: Clippy (production combo)
-        run: cargo clippy -p utexo-bridge-enclave --features vsock,rgb,rgb-swap,ccd,evm-rpc --all-targets -- -D warnings
+        run: cargo clippy -p utexo-bridge-enclave --features vsock,rgb,rgb-swap,ccd,bfa-validation --all-targets -- -D warnings
 
       # SPV path coverage. Cannot use vsock here (Linux runner without
       # vsock support); spv pulls in rgb-validation transitively, which is
@@ -138,32 +138,24 @@ jobs:
       # RGB-only EIF profile, `ccd` dropped. Mirrors Dockerfile.enclave.rgb.
       # CCD requests (SignCcd / CcdSource) must be refused here.
       - name: Build (rgb-only)
-        run: cargo build -p utexo-bridge-enclave --no-default-features --features vsock,rgb,rgb-swap,evm-rpc
+        run: cargo build -p utexo-bridge-enclave --no-default-features --features vsock,rgb,rgb-swap,bfa-validation
       - name: Clippy (rgb-only)
-        run: cargo clippy -p utexo-bridge-enclave --no-default-features --features vsock,rgb,rgb-swap,evm-rpc --all-targets -- -D warnings
+        run: cargo clippy -p utexo-bridge-enclave --no-default-features --features vsock,rgb,rgb-swap,bfa-validation --all-targets -- -D warnings
       - name: Test (rgb-only)
-        run: cargo test -p utexo-bridge-enclave --no-default-features --features rgb,rgb-swap,evm-rpc,mock-attestation,allow-seed-import
+        run: cargo test -p utexo-bridge-enclave --no-default-features --features rgb,rgb-swap,bfa-validation,mock-attestation,allow-seed-import
 
-      # Mint/burn RGB EIF profile - the second enclave instance. Same stack as
-      # the rgb-only lane above with the other flow selected, so the mint and
-      # burn rules in networks/rgb/flow/mint_burn.rs are actually compiled and
-      # exercised. Mirrors Dockerfile.enclave.mint-burn.
+      # BFA mint/burn EIF profile - the shipped production image, and the
+      # second enclave instance. Same stack as the rgb-only lane above with the
+      # other flow selected, so the mint and burn rules in
+      # networks/rgb/flow/mint_burn.rs are compiled and exercised. Mirrors
+      # Dockerfile.enclave.mint-burn. `bfa-mint` pulls in rgb-mint-burn and
+      # bfa-validation, and bfa-validation pulls in evm-rpc, so naming
+      # evm-rpc here would add nothing.
       - name: Build (rgb mint/burn)
-        run: cargo build -p utexo-bridge-enclave --no-default-features --features vsock,rgb,rgb-mint-burn,evm-rpc
+        run: cargo build -p utexo-bridge-enclave --no-default-features --features vsock,rgb,bfa-mint
       - name: Clippy (rgb mint/burn)
-        run: cargo clippy -p utexo-bridge-enclave --no-default-features --features vsock,rgb,rgb-mint-burn,evm-rpc --all-targets -- -D warnings
+        run: cargo clippy -p utexo-bridge-enclave --no-default-features --features vsock,rgb,bfa-mint --all-targets -- -D warnings
       - name: Test (rgb mint/burn)
-        run: cargo test -p utexo-bridge-enclave --no-default-features --features rgb,rgb-mint-burn,evm-rpc,mock-attestation,allow-seed-import
-
-      # BFA mint/burn EIF profile - the shipped production image. Mirrors
-      # Dockerfile.enclave.bfa: the mint/burn flow plus the bridged-asset mint
-      # path (chained-mint ancestry, settlementData bind). `bfa-mint` implies
-      # rgb-mint-burn + evm-rpc.
-      - name: Build (bfa-mint)
-        run: cargo build -p utexo-bridge-enclave --no-default-features --features vsock,rgb,evm-rpc,bfa-mint
-      - name: Clippy (bfa-mint)
-        run: cargo clippy -p utexo-bridge-enclave --no-default-features --features vsock,rgb,evm-rpc,bfa-mint --all-targets -- -D warnings
-      - name: Test (bfa-mint)
         run: cargo test -p utexo-bridge-enclave --no-default-features --features rgb,bfa-mint,mock-attestation,allow-seed-import
 
       # CCD-only single-network EIF profile: ccd + shared EVM signing, no RGB

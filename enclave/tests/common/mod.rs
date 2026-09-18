@@ -89,3 +89,50 @@ pub fn send_request(port: u16, req: &EnclaveRequest) -> EnclaveResponse {
     framing::write_message(&mut stream, req).unwrap();
     framing::read_message(&mut stream).unwrap()
 }
+
+/// Build `count` synthetic regtest headers chained from `prev_hash`, the first
+/// carrying `prev_time + 1`. The test server runs `Network::Regtest`, where
+/// header validation is chain-linkage only, so no real PoW has to be satisfied
+/// and timestamps are free to choose.
+#[cfg(feature = "spv")]
+#[allow(dead_code)]
+pub fn synth_chain_from(prev_hash: [u8; 32], prev_time: u32, count: u32) -> Vec<Vec<u8>> {
+    use bitcoin::consensus::serialize;
+    use bitcoin::hashes::Hash;
+
+    let mut prev = bitcoin::BlockHash::from_raw_hash(
+        bitcoin::hashes::sha256d::Hash::from_byte_array(prev_hash),
+    );
+    let mut out = Vec::with_capacity(count as usize);
+    for i in 0..count {
+        let header = bitcoin::block::Header {
+            version: bitcoin::block::Version::ONE,
+            prev_blockhash: prev,
+            merkle_root: bitcoin::TxMerkleNode::all_zeros(),
+            time: prev_time + 1 + i,
+            bits: bitcoin::CompactTarget::from_consensus(0x207fffff),
+            nonce: i,
+        };
+        out.push(serialize(&header));
+        prev = header.block_hash();
+    }
+    out
+}
+
+/// Push a header batch and return the raw response, so callers can assert on
+/// either the success or the error shape.
+#[cfg(feature = "spv")]
+#[allow(dead_code)]
+pub fn submit_headers(port: u16, start_height: u32, headers: Vec<Vec<u8>>) -> EnclaveResponse {
+    send_request(
+        port,
+        &EnclaveRequest {
+            request: Some(enclave_request::Request::SubmitHeaders(
+                SubmitHeadersRequest {
+                    headers,
+                    start_height,
+                },
+            )),
+        },
+    )
+}
