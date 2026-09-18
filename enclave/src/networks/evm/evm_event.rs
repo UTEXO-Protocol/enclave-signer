@@ -86,8 +86,6 @@ const BFI_MIN_DATA_LEN: usize = 8 * 32;
 /// Upgraded Bridge `FundsIn` signature. Only the sender is indexed; the RGB
 /// operation id and uint64 amount are encoded as two data words.
 pub const FUNDS_IN_SIG: &str = "FundsIn(address,uint256,uint64)";
-#[cfg(feature = "bfa-validation")]
-const FI_RGB_OP_ID_TOPIC: usize = 2;
 
 /// An RGB invoice in the shape the pinned `rgb-invoicing` accepts:
 /// `rgb:<contract>/<schema>/<state>/bc:utxob:<seal>`.
