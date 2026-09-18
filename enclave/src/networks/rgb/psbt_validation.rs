@@ -974,6 +974,51 @@ mod tests {
             );
         }
 
+        /// Asset change survives signature merging through the real
+        /// ownership oracle.
+        #[cfg(feature = "rgb-swap")]
+        #[test]
+        fn change_leg_survives_merging_our_own_signature() {
+            use crate::keys::AccountType;
+            use crate::networks::rgb::btc_ownership::{self, tests as fx};
+
+            let keys = fx::km();
+            let (a_spk, ..) =
+                fx::multisig_address(fx::our_key_on(&keys, AccountType::Colored, 0, 0).0);
+            let (b_spk, ..) =
+                fx::multisig_address(fx::our_key_on(&keys, AccountType::Colored, 0, 1).0);
+            let (foreign, ..) = fx::multisig_address(fx::foreign_xonly(0xB1));
+            let mut psbt = fx::psbt_with_n(2, &[(foreign, 1_000), (a_spk, 90_000), (b_spk, 8_000)]);
+            fx::anchor_input(&mut psbt, 0, &keys, AccountType::Colored, 0, 0, 100_000);
+            fx::anchor_input(&mut psbt, 1, &keys, AccountType::Colored, 0, 1, 100_000);
+
+            // The server's on-PSBT branch, verbatim.
+            let oracle = |psbt: &Psbt, outpoint: OutPoint| -> Result<bool> {
+                Ok(outpoint.txid == psbt.unsigned_tx.compute_txid()
+                    && btc_ownership::self_owned_output_indices(psbt, &keys)
+                        .contains(&outpoint.vout))
+            };
+
+            let legs = |psbt: &Psbt| {
+                let validated = validated_with(psbt, vec![confidential(900), revealed(4_100, 1)]);
+                validate_psbt_anchors_transition(psbt, &validated, 1_000, 100, &oracle)
+            };
+
+            let before = legs(&psbt);
+            let tx_before = psbt.unsigned_tx.clone();
+            fx::merge_own_signature(&mut psbt, &keys, 0);
+            let after = legs(&psbt);
+            assert_eq!(psbt.unsigned_tx, tx_before);
+
+            for (when, got) in [("before", before), ("after", after)] {
+                let legs = got.unwrap_or_else(|e| {
+                    panic!("asset legs {when} merging A: {e}");
+                });
+                assert_eq!(legs.recipient, 900, "recipient leg {when} merging A");
+                assert_eq!(legs.change, 4_100, "change leg {when} merging A");
+            }
+        }
+
         /// The over-send this whole bind exists for: a genuine
         /// 1_000-unit deposit, and a consignment that is rgbstd-valid, anchored
         /// to this exact PSBT, and pays 10_000_000 units to a blinded seal the
