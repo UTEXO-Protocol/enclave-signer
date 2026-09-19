@@ -31,6 +31,11 @@ pub struct ValidationContext<'a> {
     pub rgb_validator: Option<&'a RgbValidator>,
     #[cfg(feature = "spv")]
     pub header_chain: &'a Mutex<crate::networks::rgb::spv::HeaderChain>,
+    /// The blocks the SPV checks used. Each check records them under its own
+    /// lock guard. Checked again just before the key is used, so a reorg in
+    /// the gap refuses instead of signing old chain state (F05-NEW-AF-08).
+    #[cfg(feature = "spv")]
+    pub chain_pins: &'a crate::networks::rgb::spv_validation::ChainPins,
     /// Resolves whether a Bitcoin outpoint pays back to this enclave.
     /// Required by the send-RGB per-output recipient bind to tell
     /// bridge change from a payout to a third party. The outpoint may sit on

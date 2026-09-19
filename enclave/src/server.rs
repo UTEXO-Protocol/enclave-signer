@@ -664,12 +664,20 @@ fn handle_sign(ctx: &ServerContext, req: SignRequest) -> Result<EnclaveResponse>
     #[cfg(all(feature = "rgb-validation", not(feature = "bfa-validation")))]
     let bfa_bridge_events: Vec<rgbstd::vm::ether_extension::Event> = Vec::new();
 
+    // Holds every Bitcoin block the SPV checks below use. Each check drops the
+    // header-chain lock at return. `assert_chain_pins_unchanged` reads these
+    // blocks again just before the key is used (F05-NEW-AF-08).
+    #[cfg(feature = "spv")]
+    let chain_pins = crate::networks::rgb::spv_validation::ChainPins::new();
+
     let validation_ctx = ValidationContext {
         bridge_config: &ctx.bridge_config,
         #[cfg(feature = "rgb-validation")]
         rgb_validator: ctx.rgb_validator.as_ref(),
         #[cfg(feature = "spv")]
         header_chain: &ctx.header_chain,
+        #[cfg(feature = "spv")]
+        chain_pins: &chain_pins,
         #[cfg(feature = "rgb-validation")]
         self_owned_psbt_outputs: Some(&self_owned_psbt_outputs),
         #[cfg(feature = "rgb-validation")]
@@ -837,13 +845,26 @@ fn handle_sign(ctx: &ServerContext, req: SignRequest) -> Result<EnclaveResponse>
                     destination_proof.evm_funds_out.as_ref(),
                     source_validated.rgb_consignment.as_ref(),
                     &rgb_source.merkle_proofs,
+                    #[cfg(feature = "spv")]
+                    &chain_pins,
                     #[cfg(feature = "bfa-mint")]
                     &bfa_locks,
                 )?;
             }
-            handle_sign_evm(ctx, destination, destination_proof.evm_funds_out.as_ref())
+            handle_sign_evm(
+                ctx,
+                destination,
+                destination_proof.evm_funds_out.as_ref(),
+                #[cfg(feature = "spv")]
+                &chain_pins,
+            )
         }
-        DestinationNetwork::RgbDestination(destination) => handle_sign_psbt(ctx, destination),
+        DestinationNetwork::RgbDestination(destination) => handle_sign_psbt(
+            ctx,
+            destination,
+            #[cfg(feature = "spv")]
+            &chain_pins,
+        ),
     };
 
     // Commit the soft-guard reservation only once signing has succeeded. On
@@ -869,6 +890,7 @@ fn apply_funds_out_binding(
     params: Option<&crate::networks::evm::validation::FundsOutParams>,
     validated: Option<&crate::networks::rgb::validation::ValidatedConsignment>,
     merkle_proofs: &[crate::proto::MerkleProofEntry],
+    #[cfg(feature = "spv")] pins: &crate::networks::rgb::spv_validation::ChainPins,
     #[cfg(feature = "bfa-mint")] locks: &[crate::networks::evm::evm_event::VerifiedLock],
 ) -> Result<()> {
     use crate::networks::evm::crosscheck;
@@ -909,7 +931,7 @@ fn apply_funds_out_binding(
             .header_chain
             .lock()
             .map_err(|e| EnclaveError::Internal(format!("SPV header chain lock poisoned: {e}")))?;
-        crosscheck::verify_btc_relay_agreement(params, validated, merkle_proofs, &chain)?;
+        crosscheck::verify_btc_relay_agreement(params, validated, merkle_proofs, &chain, pins)?;
     }
     #[cfg(not(feature = "spv"))]
     let _ = (ctx, merkle_proofs);
@@ -1144,6 +1166,29 @@ fn handle_get_attested_public_key(
     })
 }
 
+/// Check that every pinned Bitcoin block still has the same hash. Takes a
+/// fresh header-chain lock. Call it just before the signing key is used.
+///
+/// Each SPV check drops the lock at return. Another worker can accept a reorg
+/// in that gap (F05-NEW-AF-08). An extension leaves the pinned heights alone
+/// and still signs. A reorg that replaces one refuses here.
+#[cfg(feature = "spv")]
+fn assert_chain_pins_unchanged(
+    ctx: &ServerContext,
+    pins: &crate::networks::rgb::spv_validation::ChainPins,
+) -> Result<()> {
+    if pins.is_empty() {
+        return Ok(());
+    }
+    // Fail on a poisoned lock, like the validation checks do. A poisoned
+    // header chain can be mid-reorg.
+    let chain = ctx
+        .header_chain
+        .lock()
+        .map_err(|e| EnclaveError::Internal(format!("SPV header chain lock poisoned: {e}")))?;
+    pins.assert_unchanged(&chain)
+}
+
 /// `params` comes from destination validation, so the digest commits to exactly
 /// the fields cross-checked there. `None` in dev-mode, which skips
 /// validation and therefore decodes here, and on the LayerZero route, whose
@@ -1152,6 +1197,7 @@ fn handle_sign_evm(
     ctx: &ServerContext,
     req: EvmDestination,
     params: Option<&crate::networks::evm::validation::FundsOutParams>,
+    #[cfg(feature = "spv")] pins: &crate::networks::rgb::spv_validation::ChainPins,
 ) -> Result<EnclaveResponse> {
     // Domain name/version are pinned to the deployed MultisigProxy and
     // regression-guarded by `test_domain_separator_matches_deployed_contract`.
@@ -1203,6 +1249,12 @@ fn handle_sign_evm(
         "EVM digest computed"
     );
 
+    // Last gate before the key. The chain the checks read must still be the
+    // chain the enclave holds. Both routes use it. The LayerZero digest skips
+    // the `fundsOut` binding, so the source check is its only SPV evidence.
+    #[cfg(feature = "spv")]
+    assert_chain_pins_unchanged(ctx, pins)?;
+
     let signature = ctx.state.sign_evm(&digest)?;
 
     tracing::info!(
@@ -1219,7 +1271,11 @@ fn handle_sign_evm(
     })
 }
 
-fn handle_sign_psbt(ctx: &ServerContext, req: RgbDestination) -> Result<EnclaveResponse> {
+fn handle_sign_psbt(
+    ctx: &ServerContext,
+    req: RgbDestination,
+    #[cfg(feature = "spv")] pins: &crate::networks::rgb::spv_validation::ChainPins,
+) -> Result<EnclaveResponse> {
     // Sats gate: every other send-RGB bind is in RGB asset units, so without
     // this a witness tx can satisfy the ledger and still sweep the Bitcoin
     // backing. dev-mode keeps the unbounded path.
@@ -1234,6 +1290,12 @@ fn handle_sign_psbt(ctx: &ServerContext, req: RgbDestination) -> Result<EnclaveR
             )
         })?;
     }
+
+    // Same gate as the EVM route. An RGB source's SPV evidence must still hold
+    // on the chain the enclave holds now. No-op when nothing is pinned. An EVM
+    // source carries no Bitcoin proof.
+    #[cfg(feature = "spv")]
+    assert_chain_pins_unchanged(ctx, pins)?;
 
     // Colored account only: an unscoped sign co-signs every input the enclave
     // can derive a key for, including vanilla inputs no send-RGB bind examines.
