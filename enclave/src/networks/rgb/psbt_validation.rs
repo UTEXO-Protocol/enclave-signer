@@ -259,7 +259,8 @@ pub fn validate_psbt_anchors_transition(
 ///     [`crate::networks::rgb::btc_ownership::self_owned_output_indices`];
 ///   * on an earlier tx - the tx is fetched and verified by
 ///     [`crate::networks::rgb::validation::RgbValidator::fetch_transaction`],
-///     then its `script_pubkey` must be an input script we co-control.
+///     then its `script_pubkey` must be in
+///     [`crate::networks::rgb::btc_ownership::asset_change_scripts`].
 #[cfg(feature = "rgb-validation")]
 pub type SelfOwnedOutpoint<'a> = &'a dyn Fn(&Psbt, bitcoin::OutPoint) -> Result<bool>;
 

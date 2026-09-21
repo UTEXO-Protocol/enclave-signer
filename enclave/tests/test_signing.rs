@@ -1287,16 +1287,23 @@ fn test_sign_btc_rejects_fresh_change_address_proven_only_by_metadata() {
     }
 }
 
-/// A small input on a script someone else can spend alone. Its one leaf pushes
-/// a key the enclave derives, the internal key is foreign.
-#[allow(dead_code)]
-fn foreign_input_with_our_leaf(wallet: &EnclaveWallet) -> OurAddress {
+/// A bridge input pays a script that a second, small input also spends. The
+/// second input qualifies for signing, but a foreign key spends its script.
+#[test]
+fn test_sign_btc_refuses_bridge_value_paid_to_a_foreign_input_script() {
     use bitcoin::blockdata::opcodes::all::OP_CHECKSIG;
     use bitcoin::blockdata::script::Builder;
+    use bitcoin::psbt::Psbt;
     use bitcoin::taproot::{LeafVersion, TapLeafHash, TaprootBuilder};
 
+    let port = common::start_test_server_with_config(|_| {}, btc_capped_config(100_000));
+    let wallet = init_wallet(port);
+    let bridge = our_address(&wallet, 0, 0);
+
+    // Small input: its one leaf pushes a key the enclave derives, the internal
+    // key is foreign.
     let secp = bitcoin::secp256k1::Secp256k1::new();
-    let ours = our_address(wallet, 0, 1);
+    let ours = our_address(&wallet, 0, 1);
     let leaf = Builder::new()
         .push_x_only_key(&ours.xonly)
         .push_opcode(OP_CHECKSIG)
@@ -1307,8 +1314,7 @@ fn foreign_input_with_our_leaf(wallet: &EnclaveWallet) -> OurAddress {
         .unwrap()
         .finalize(&secp, internal)
         .unwrap();
-
-    OurAddress {
+    let small = OurAddress {
         spk: bitcoin::ScriptBuf::new_p2tr(&secp, internal, info.merkle_root()),
         control: info
             .control_block(&(leaf.clone(), LeafVersion::TapScript))
@@ -1317,20 +1323,7 @@ fn foreign_input_with_our_leaf(wallet: &EnclaveWallet) -> OurAddress {
         leaf,
         internal,
         ..ours
-    }
-}
-
-/// A bridge input pays a script that a second, small input also spends. The
-/// second input qualifies for signing, but a foreign key spends its script.
-#[test]
-fn test_sign_btc_refuses_bridge_value_paid_to_a_foreign_input_script() {
-    use bitcoin::psbt::Psbt;
-    use bitcoin::taproot::LeafVersion;
-
-    let port = common::start_test_server_with_config(|_| {}, btc_capped_config(100_000));
-    let wallet = init_wallet(port);
-    let bridge = our_address(&wallet, 0, 0);
-    let small = foreign_input_with_our_leaf(&wallet);
+    };
 
     // Same transaction and amounts. Only the key origin on input 1 changes.
     let build = |small_qualifies: bool| {

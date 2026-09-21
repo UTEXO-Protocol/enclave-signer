@@ -11,6 +11,9 @@
 //! produced a job. That job is control-block and derivation anchored, and the
 //! segwit sighash commits to the script.
 //!
+//! A qualified script may have foreign spend paths. Outputs on it are exempt
+//! only up to the input value on that script.
+//!
 //! It proves custody is unchanged, not that only we can spend: the bridge is a
 //! multisig, and the other signers can move funds without us either way. It
 //! holds for bridge change because the wallet reuses addresses.
@@ -25,7 +28,7 @@
 //! Scope: this makes the plain-BTC path structurally self-pay. Withdrawals to
 //! an arbitrary user address remain out of scope.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use bitcoin::psbt::Psbt;
 
@@ -46,8 +49,8 @@ pub fn self_controlled_input_scripts(psbt: &Psbt, keys: &KeyManager) -> HashSet<
 /// [`self_controlled_input_scripts`] with the account filter made explicit.
 ///
 /// `allowed_account` is `Some(_)` for one BIP-86 account, `None` for either.
-/// The plain-BTC path pins `Vanilla`; the send-RGB change-leg proof
-/// passes `None`, since bridge change there sits on the Colored account.
+/// The plain-BTC path pins `Vanilla`; the send-RGB sats budget passes `None`,
+/// and the asset change oracle pins `Colored`.
 /// Widening the filter only widens which scripts count as ours, never what gets
 /// signed - that is `sign_psbt_scoped`'s job.
 pub fn self_controlled_input_scripts_scoped(
@@ -64,15 +67,25 @@ pub fn self_controlled_input_scripts_scoped(
         .collect()
 }
 
-/// Indices of every PSBT output that provably pays back to this enclave, on
-/// **either** BIP-86 account. Hoists the input resolution once and applies
-/// [`output_is_self_owned`] to each output.
+/// The Colored input script that can take bridge asset change. Empty unless the
+/// PSBT spends exactly one. A qualified input can have foreign spend paths, so a
+/// second Colored script makes custody ambiguous.
+pub fn asset_change_scripts(psbt: &Psbt, keys: &KeyManager) -> HashSet<Vec<u8>> {
+    let scripts = self_controlled_input_scripts_scoped(psbt, keys, Some(AccountType::Colored));
+    if scripts.len() == 1 {
+        scripts
+    } else {
+        HashSet::new()
+    }
+}
+
+/// Indices of every PSBT output on an [`asset_change_scripts`] script.
 ///
 /// The change-leg oracle for the send-RGB per-output amount bind:
 /// a revealed RGB seal counts as bridge change only when the Bitcoin output it
 /// names is one we control.
 pub fn self_owned_output_indices(psbt: &Psbt, keys: &KeyManager) -> HashSet<u32> {
-    let input_scripts = self_controlled_input_scripts_scoped(psbt, keys, None);
+    let input_scripts = asset_change_scripts(psbt, keys);
     (0..psbt.unsigned_tx.output.len())
         .filter(|&i| output_is_self_owned(psbt, i, &input_scripts))
         .map(|i| i as u32)
@@ -86,6 +99,31 @@ pub fn output_is_self_owned(psbt: &Psbt, index: usize, input_scripts: &HashSet<V
         return false;
     };
     input_scripts.contains(txout.script_pubkey.as_bytes())
+}
+
+/// Sats that the outputs pay outside the custody of the inputs. An output on a
+/// script in `input_scripts` is exempt up to the input value on that script.
+/// `None` on overflow.
+pub fn unowned_output_sats(psbt: &Psbt, input_scripts: &HashSet<Vec<u8>>) -> Option<u64> {
+    let mut room: HashMap<&[u8], u64> = HashMap::new();
+    for utxo in psbt.inputs.iter().filter_map(|i| i.witness_utxo.as_ref()) {
+        let spk = utxo.script_pubkey.as_bytes();
+        if input_scripts.contains(spk) {
+            let r = room.entry(spk).or_default();
+            *r = r.checked_add(utxo.value.to_sat())?;
+        }
+    }
+    let mut unowned: u64 = 0;
+    for txout in &psbt.unsigned_tx.output {
+        let mut sat = txout.value.to_sat();
+        if let Some(r) = room.get_mut(txout.script_pubkey.as_bytes()) {
+            let exempt = sat.min(*r);
+            *r -= exempt;
+            sat -= exempt;
+        }
+        unowned = unowned.checked_add(sat)?;
+    }
+    Some(unowned)
 }
 
 #[cfg(test)]
@@ -381,5 +419,71 @@ mod tests {
         let mut psbt = psbt_with(ScriptBuf::new(), p2wpkh);
         make_input_ours(&mut psbt, &keys);
         assert!(!owned(&psbt, &keys));
+    }
+
+    /// A Colored input: `leaf` under `internal`, with our Colored key claimed
+    /// in it. Returns its script and PSBT input.
+    fn colored_input(
+        keys: &KeyManager,
+        leaf: ScriptBuf,
+        internal: XOnlyPublicKey,
+    ) -> (ScriptBuf, bitcoin::psbt::Input) {
+        let secp = Secp256k1::new();
+        let (our, path) = our_colored_key(keys);
+        let leaf_hash = TapLeafHash::from_script(&leaf, LeafVersion::TapScript);
+        let info = TaprootBuilder::new()
+            .add_leaf(0, leaf.clone())
+            .unwrap()
+            .finalize(&secp, internal)
+            .unwrap();
+        let spk = ScriptBuf::new_p2tr(&secp, internal, info.merkle_root());
+        let control = info
+            .control_block(&(leaf.clone(), LeafVersion::TapScript))
+            .unwrap();
+        let mut input = bitcoin::psbt::Input {
+            witness_utxo: Some(TxOut {
+                value: Amount::from_sat(1_000),
+                script_pubkey: spk.clone(),
+            }),
+            tap_internal_key: Some(internal),
+            ..Default::default()
+        };
+        input
+            .tap_scripts
+            .insert(control, (leaf, LeafVersion::TapScript));
+        input
+            .tap_key_origins
+            .insert(our, (vec![leaf_hash], (*keys.master_fingerprint(), path)));
+        (spk, input)
+    }
+
+    /// The send-RGB change oracle: bridge asset change must not land on the
+    /// script of an input that only names our key in one leaf.
+    #[test]
+    fn change_oracle_rejects_output_on_a_foreign_input_script() {
+        let keys = km();
+        let (our, _) = our_colored_key(&keys);
+
+        // Input 0: the bridge 2-of-3 on the NUMS internal key.
+        let bridge_leaf = multi_a_2_of_3(&[our, foreign_xonly(0xA1), foreign_xonly(0xA2)]);
+        let nums = XOnlyPublicKey::from_slice(&NUMS_INTERNAL).unwrap();
+        let (bridge_spk, bridge) = colored_input(&keys, bridge_leaf, nums);
+        let mut psbt = psbt_with(ScriptBuf::new(), bridge_spk);
+        psbt.inputs[0] = bridge;
+        assert!(self_owned_output_indices(&psbt, &keys).contains(&0));
+
+        // Input 1: attacker-funded, internal key theirs, one leaf naming our key.
+        let leaf = ScriptBuilder::new()
+            .push_x_only_key(&our)
+            .push_opcode(OP_CHECKSIG)
+            .into_script();
+        let (spk, input) = colored_input(&keys, leaf, foreign_xonly(0xB1));
+        let mut txin = psbt.unsigned_tx.input[0].clone();
+        txin.previous_output.vout = 1;
+        psbt.unsigned_tx.input.push(txin);
+        psbt.inputs.push(input);
+        psbt.unsigned_tx.output[0].script_pubkey = spk;
+
+        assert!(!self_owned_output_indices(&psbt, &keys).contains(&0));
     }
 }

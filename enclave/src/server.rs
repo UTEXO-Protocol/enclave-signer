@@ -624,14 +624,8 @@ fn handle_sign(ctx: &ServerContext, req: SignRequest) -> Result<EnclaveResponse>
             )));
         };
         let script = txout.script_pubkey.as_bytes().to_vec();
-        ctx.state.with_keys(|keys| {
-            // `None` scope: bridge change sits on the Colored account. This
-            // widens what counts as ours, never what gets signed.
-            Ok(
-                btc_ownership::self_controlled_input_scripts_scoped(psbt, keys, None)
-                    .contains(&script),
-            )
-        })
+        ctx.state
+            .with_keys(|keys| Ok(btc_ownership::asset_change_scripts(psbt, keys).contains(&script)))
     };
 
     // Before destination validation, not after: a BFA mint's consignment cannot
