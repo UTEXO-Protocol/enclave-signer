@@ -1287,6 +1287,120 @@ fn test_sign_btc_rejects_fresh_change_address_proven_only_by_metadata() {
     }
 }
 
+/// A small input on a script someone else can spend alone. Its one leaf pushes
+/// a key the enclave derives, the internal key is foreign.
+#[allow(dead_code)]
+fn foreign_input_with_our_leaf(wallet: &EnclaveWallet) -> OurAddress {
+    use bitcoin::blockdata::opcodes::all::OP_CHECKSIG;
+    use bitcoin::blockdata::script::Builder;
+    use bitcoin::taproot::{LeafVersion, TapLeafHash, TaprootBuilder};
+
+    let secp = bitcoin::secp256k1::Secp256k1::new();
+    let ours = our_address(wallet, 0, 1);
+    let leaf = Builder::new()
+        .push_x_only_key(&ours.xonly)
+        .push_opcode(OP_CHECKSIG)
+        .into_script();
+    let internal = foreign_xonly(0xB1);
+    let info = TaprootBuilder::new()
+        .add_leaf(0, leaf.clone())
+        .unwrap()
+        .finalize(&secp, internal)
+        .unwrap();
+
+    OurAddress {
+        spk: bitcoin::ScriptBuf::new_p2tr(&secp, internal, info.merkle_root()),
+        control: info
+            .control_block(&(leaf.clone(), LeafVersion::TapScript))
+            .unwrap(),
+        leaf_hash: TapLeafHash::from_script(&leaf, LeafVersion::TapScript),
+        leaf,
+        internal,
+        ..ours
+    }
+}
+
+/// A bridge input pays a script that a second, small input also spends. The
+/// second input qualifies for signing, but a foreign key spends its script.
+#[test]
+fn test_sign_btc_refuses_bridge_value_paid_to_a_foreign_input_script() {
+    use bitcoin::psbt::Psbt;
+    use bitcoin::taproot::LeafVersion;
+
+    let port = common::start_test_server_with_config(|_| {}, btc_capped_config(100_000));
+    let wallet = init_wallet(port);
+    let bridge = our_address(&wallet, 0, 0);
+    let small = foreign_input_with_our_leaf(&wallet);
+
+    // Same transaction and amounts. Only the key origin on input 1 changes.
+    let build = |small_qualifies: bool| {
+        let mut psbt =
+            Psbt::deserialize(&btc_psbt(&bridge, 60_000, &[(small.spk.clone(), 55_000)])).unwrap();
+        let mut txin = psbt.unsigned_tx.input[0].clone();
+        txin.previous_output.vout = 1;
+        psbt.unsigned_tx.input.push(txin);
+        psbt.inputs.push(bitcoin::psbt::Input::default());
+        psbt.inputs[1].witness_utxo = Some(bitcoin::TxOut {
+            value: bitcoin::Amount::from_sat(1_000),
+            script_pubkey: small.spk.clone(),
+        });
+        psbt.inputs[1].tap_internal_key = Some(small.internal);
+        psbt.inputs[1].tap_scripts.insert(
+            small.control.clone(),
+            (small.leaf.clone(), LeafVersion::TapScript),
+        );
+        if small_qualifies {
+            psbt.inputs[1].tap_key_origins.insert(
+                small.xonly,
+                (
+                    vec![small.leaf_hash],
+                    (small.fingerprint, small.path.clone()),
+                ),
+            );
+        }
+        psbt.serialize()
+    };
+    let sign = |psbt_bytes: Vec<u8>| {
+        common::send_request(
+            port,
+            &EnclaveRequest {
+                request: Some(Request::SignBtc(SignBtcRequest { psbt_bytes })),
+            },
+        )
+        .response
+    };
+
+    for qualifies in [false, true] {
+        let psbt = Psbt::deserialize(&build(qualifies)).expect("fixture parses");
+        assert_eq!(psbt.inputs.len(), 2);
+        assert!(psbt.inputs.iter().all(|i| i.witness_utxo.is_some()));
+    }
+    assert_eq!(
+        Psbt::deserialize(&build(false)).unwrap().unsigned_tx,
+        Psbt::deserialize(&build(true)).unwrap().unsigned_tx
+    );
+
+    // Control: input 1 does not qualify, so the 55_000 sat output is over the
+    // 5_000 sat unowned budget.
+    let control = sign(build(false));
+    assert!(
+        matches!(&control, Some(Response::Error(_))),
+        "the output is over the unowned budget, got {:?}",
+        control
+    );
+
+    if let Some(Response::SignedPsbt(r)) = sign(build(true)) {
+        let signed = Psbt::deserialize(&r.signed_psbt).expect("signed psbt");
+        assert!(
+            !signed.inputs[0]
+                .tap_script_sigs
+                .contains_key(&(bridge.xonly, bridge.leaf_hash)),
+            "the enclave signed the 60_000 sat bridge input while 55_000 sats go to a script \
+             with a foreign spend path; the unowned budget is 5_000 sats"
+        );
+    }
+}
+
 // A production (rgb-validation) build refuses plain-BTC signing while the
 // value-spent cap is unconfigured - fail-closed, mirroring the EVM path. The
 // destination rule needs no config, so it is not part of this gate.
