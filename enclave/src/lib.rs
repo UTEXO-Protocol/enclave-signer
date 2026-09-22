@@ -107,6 +107,13 @@ compile_error!(
      mint path. Do not set direction cfgs by hand; `build.rs` derives them"
 );
 
+// A new flow needs its own explicit encryption context before enabling custody.
+// In particular, the current combined mint/burn image must retain its lifecycle.
+#[cfg(all(feature = "kms-persistence", not(feature = "rgb-swap")))]
+compile_error!(
+    "kms-persistence is currently supported only by rgb-swap; a new flow requires its own custody context"
+);
+
 pub mod attestation;
 // Boot sequence for `main.rs`: env parsing, forwarders, and the fail-closed
 // pins. In the library so it is covered by clippy/tests like everything else.
@@ -122,8 +129,12 @@ pub mod conn;
 pub mod error;
 pub mod framing;
 pub mod keys;
+#[cfg(feature = "kms-persistence")]
+pub mod kms;
 pub mod networks;
 pub mod policy;
+#[cfg(feature = "kms-persistence")]
+pub mod seed_persistence;
 pub mod server;
 pub mod state;
 #[cfg(test)]

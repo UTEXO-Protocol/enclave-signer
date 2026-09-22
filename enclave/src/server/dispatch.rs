@@ -3,6 +3,7 @@
 //! The only place that turns a handler `Err` into an `ErrorResponse`, so the
 //! handlers themselves stay in `Result` land.
 
+#[cfg(not(feature = "kms-persistence"))]
 use super::cloning::{handle_get_clone, handle_initiate_cloning, handle_set_clone};
 use super::context::ServerContext;
 use super::health::handle_health;
@@ -54,6 +55,7 @@ pub(super) fn wrong_signer_role(what: &str) -> EnclaveError {
 pub(super) fn dispatch(
     request: EnclaveRequest,
     ctx: &ServerContext,
+    deadline: std::time::Instant,
 ) -> (EnclaveResponse, Option<ReplayReservation<'_>>) {
     let mut reservation = None;
     let result = match request.request {
@@ -61,12 +63,16 @@ pub(super) fn dispatch(
             let path = if !req.mnemonic.is_empty() {
                 "mnemonic-import"
             } else if req.seed.is_empty() {
-                "entropy"
+                if cfg!(feature = "kms-persistence") {
+                    "kms"
+                } else {
+                    "entropy"
+                }
             } else {
                 "seed-import"
             };
             tracing::info!("request: InitializeKey ({})", path);
-            handle_initialize(ctx, req)
+            handle_initialize(ctx, req, deadline)
         }
         Some(Request::GetPublicKey(req)) => {
             tracing::info!("request: GetPublicKey");
@@ -136,14 +142,24 @@ pub(super) fn dispatch(
                 None,
             );
         }
+        #[cfg(feature = "kms-persistence")]
+        Some(Request::InitiateCloning(_) | Request::GetClone(_) | Request::SetClone(_)) => {
+            Err(EnclaveError::InvalidRequest(
+                "cloning is disabled with KMS persistence; initialize each replica from its configured seed"
+                    .into(),
+            ))
+        }
+        #[cfg(not(feature = "kms-persistence"))]
         Some(Request::InitiateCloning(req)) => {
             tracing::info!("request: InitiateCloning");
             handle_initiate_cloning(&ctx.state, req)
         }
+        #[cfg(not(feature = "kms-persistence"))]
         Some(Request::GetClone(req)) => {
             tracing::info!("request: GetClone");
             handle_get_clone(ctx, req)
         }
+        #[cfg(not(feature = "kms-persistence"))]
         Some(Request::SetClone(req)) => {
             tracing::info!("request: SetClone");
             handle_set_clone(ctx, req)

@@ -42,6 +42,11 @@
 #   GITHUB_TOKEN           token with read access to the private RGB dependencies
 #   PRIVATE_DEPS_DIR       alternatively, directory of per-repository key files
 #                          (consignment_key, consensus_key, ops_key, schemas_key)
+#   KMS_KEY_ARN       required for combined/RGB swap images: full KMS key ARN
+#   KMS_REGION        required for combined/RGB swap images: commercial AWS region
+#   KMS_SEED_ID       required for combined/RGB swap images: stable seed identifier
+#   KMS_EXPECTED_EVM_ADDRESS  optional existing signer identity pin; when set,
+#                                  missing ciphertext fails instead of creating a new identity
 # NOTE: the donor cloning secret is NOT baked into the EIF. It is delivered at
 # runtime via the InitializeKey message (CLI: `init --cloning-secret <secret>`),
 # keeping the build secret-free and the PCRs reproducible.
@@ -62,6 +67,20 @@ IMAGE_TAG="${IMAGE_TAG:-utexo-bridge-enclave:latest}"
 DOCKERFILE="${DOCKERFILE:-Dockerfile.enclave}"
 EIF_NAME="${EIF_NAME:-utexo-bridge-enclave.eif}"
 EIF_PATH="$OUT_DIR/$EIF_NAME"
+
+# Public KMS pins for the swap images (Dockerfile.enclave / .rgb), measured
+# into the EIF. Forwarded when set; the swap Dockerfiles themselves require
+# KMS_KEY_ARN, KMS_REGION and KMS_SEED_ID. Mint/burn never receive them.
+KMS_ARGS=()
+case "${DOCKERFILE##*/}" in
+    Dockerfile.enclave|Dockerfile.enclave.rgb)
+        for kms_var in KMS_KEY_ARN KMS_REGION KMS_SEED_ID KMS_EXPECTED_EVM_ADDRESS; do
+            if [ -n "${!kms_var:-}" ]; then
+                KMS_ARGS+=(--build-arg "$kms_var=${!kms_var}")
+            fi
+        done
+        ;;
+esac
 
 echo "=== Building UTEXO Bridge Enclave ==="
 echo "    project root : $PROJECT_ROOT"
@@ -127,6 +146,7 @@ echo "Building Docker image (buildx, SOURCE_DATE_EPOCH=$SOURCE_DATE_EPOCH)..."
 DOCKER_BUILDKIT=1 docker buildx build \
     --build-arg SOURCE_DATE_EPOCH="$SOURCE_DATE_EPOCH" \
     ${BUILD_ARGS[@]+"${BUILD_ARGS[@]}"} \
+    ${KMS_ARGS[@]+"${KMS_ARGS[@]}"} \
     ${SECRET_ARGS[@]+"${SECRET_ARGS[@]}"} \
     -f "$SCRIPT_DIR/$DOCKERFILE" \
     -t "$IMAGE_TAG" \

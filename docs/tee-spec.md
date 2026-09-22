@@ -10,6 +10,10 @@ assumptions. Known gaps are collected in Sec 13.
 
 ---
 
+With `kms-persistence`, initialization uses attested KMS seed generation/recovery
+and encrypted S3 storage; peer cloning is disabled. The entropy/cloning lifecycle
+below applies without that capability. See [KMS seed persistence](kms-persistence.md).
+
 ## 1. Purpose
 
 The enclave signer is the authorization component of the bridge. It runs inside

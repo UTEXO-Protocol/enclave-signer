@@ -273,7 +273,11 @@ pub fn start_vsock_forwarders() {
             let exec_vsock: u32 = std::env::var("HELIOS_EXECUTION_VSOCK_PORT")
                 .ok()
                 .and_then(|s| s.parse().ok())
-                .unwrap_or(8003);
+                .unwrap_or(if cfg!(feature = "kms-persistence") {
+                    8005
+                } else {
+                    8003
+                });
             let cons_local: u16 = std::env::var("HELIOS_CONSENSUS_LOCAL_PORT")
                 .ok()
                 .and_then(|s| s.parse().ok())
@@ -281,7 +285,20 @@ pub fn start_vsock_forwarders() {
             let cons_vsock: u32 = std::env::var("HELIOS_CONSENSUS_VSOCK_PORT")
                 .ok()
                 .and_then(|s| s.parse().ok())
-                .unwrap_or(8004);
+                .unwrap_or(if cfg!(feature = "kms-persistence") {
+                    8006
+                } else {
+                    8004
+                });
+            // KMS custody reserves 8003 for KMS and 8004 for the broker.
+            // Keep the non-custody defaults; fail early on an explicit collision.
+            #[cfg(feature = "kms-persistence")]
+            assert!(
+                ![exec_vsock, cons_vsock]
+                    .iter()
+                    .any(|port| matches!(port, 8003 | 8004)),
+                "Helios vsock ports must not use the reserved KMS/broker ports 8003/8004"
+            );
             tracing::info!(
                 exec_local,
                 exec_vsock,

@@ -14,8 +14,15 @@ use crate::proto::*;
 pub(super) fn handle_initialize(
     ctx: &ServerContext,
     req: InitializeKeyRequest,
+    _deadline: std::time::Instant,
 ) -> Result<EnclaveResponse> {
     let state = &ctx.state;
+    #[cfg(feature = "kms-persistence")]
+    if !req.cloning_secret.is_empty() {
+        return Err(EnclaveError::InvalidRequest(
+            "cloning_secret is not supported with KMS persistence".into(),
+        ));
+    }
     if !req.mnemonic.is_empty() {
         // Testing path: import from BIP-39 mnemonic phrase
         #[cfg(feature = "allow-seed-import")]
@@ -30,12 +37,25 @@ pub(super) fn handle_initialize(
             ));
         }
     } else if req.seed.is_empty() {
-        // Production path: generate from OS entropy
-        let mut entropy = [0u8; 32];
-        getrandom::fill(&mut entropy)
-            .map_err(|e| EnclaveError::Internal(format!("entropy generation failed: {}", e)))?;
-        let _mnemonic = state.initialize_from_entropy(&mut entropy)?;
-        tracing::info!("key initialized from new mnemonic");
+        #[cfg(feature = "kms-persistence")]
+        {
+            let deadline = _deadline
+                .checked_sub(crate::seed_persistence::RESPONSE_RESERVE)
+                .ok_or_else(|| {
+                    EnclaveError::InvalidRequest("initialization request deadline exceeded".into())
+                })?;
+            state.initialize_from_persistence_until(deadline)?;
+            tracing::info!("keys initialized from KMS persistence");
+        }
+        #[cfg(not(feature = "kms-persistence"))]
+        {
+            // Production path for mint/burn and CCD: generate from OS entropy
+            let mut entropy = [0u8; 32];
+            getrandom::fill(&mut entropy)
+                .map_err(|e| EnclaveError::Internal(format!("entropy generation failed: {}", e)))?;
+            let _mnemonic = state.initialize_from_entropy(&mut entropy)?;
+            tracing::info!("key initialized from new mnemonic");
+        }
     } else {
         // Testing path: import raw seed
         #[cfg(feature = "allow-seed-import")]

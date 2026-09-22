@@ -59,10 +59,11 @@ flowchart TB
   time; changes to the measured image require updating accepted measurements.
   `build-eif.yml` publishes EIF + `PCR.json` + `SHA256SUMS` to S3 under the git
   sha; `deploy/deploy-host.sh` verifies both before and after start.
-- Cloned enclaves share **one HD seed** via the cloning handshake
+- Without `kms-persistence`, cloned enclaves share **one HD seed** via the cloning handshake
   (`utexo-bridge-parent-cli clone`). Each node holds an identical `KeyManager`
   after `Cloning → Active`. Keys live only in memory; a restart needs re-init or
-  re-clone.
+  re-clone. With `kms-persistence`, initialize from the saved encrypted seed
+  instead; peer cloning is disabled. See [KMS seed persistence](../kms-persistence.md).
 - **Bridge-mode `signPsbt` requires the `evm-rpc` feature**: a build without it
   refuses bridge PSBTs, since it cannot independently verify the EVM `FundsIn`
   deposit. Operators MUST run the host `vsock-proxy` allowlist on 8002. Env:
@@ -72,5 +73,7 @@ Clones provide replicas of one signing identity. Independent quorum members
 need independently initialized seeds.
 
 Optional `helios` builds use execution and consensus forwarders on host vsock
-ports 8003/8004 (enclave loopback 18545/18550) when Helios is selected. These
+ports 8003/8004 (enclave loopback 18545/18550) when Helios is selected. With
+`kms-persistence`, KMS and seed storage reserve 8003/8004; Helios uses 8005/8006
+and rejects overrides that collide with the reserved ports. These
 replace the raw receipt provider and require a pinned beacon checkpoint.

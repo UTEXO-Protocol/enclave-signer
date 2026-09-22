@@ -15,6 +15,17 @@ env:
   CARGO_NET_GIT_FETCH_WITH_CLI: "true"
 
 jobs:
+  native-kms:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: Build official KMS helper
+        run: |
+          docker buildx build --platform linux/amd64 --load \
+            --target kms-tool-builder -t kms-native-ci \
+            -f build/Dockerfile.enclave.rgb .
+
   ci:
     runs-on: ubuntu-latest
 
@@ -196,16 +207,9 @@ jobs:
       - name: Test (--features evm-rpc)
         run: cargo test -p utexo-bridge-enclave --features evm-rpc
 
-      # Mock-attestation integration suite. The cloning handshake and attested
-      # public-key tests (enclave/tests/test_clone.rs, test_attested_pubkey.rs)
-      # are file-gated on `mock-attestation` + `allow-seed-import` — the mock
-      # path skips NSM/COSE/cert-chain but still enforces the pubkey, digest,
-      # nonce, and PCR bindings those tests assert. Without this step those
-      # suites (donor PCR-mismatch / wire-pubkey binding, attested-bundle
-      # parity) compile to nothing and never run. Debug profile only: the
-      # release compile_error guard for these dev features is asserted
-      # separately by the `release-guards` job.
-      - name: Test (mock-attestation integration — cloning + attestation)
+      # Swap persistence and attestation coverage. Legacy cloning excludes
+      # rgb-swap and runs in the CCD lane above.
+      - name: Test (mock-attestation integration — swaps + attestation)
         run: cargo test -p utexo-bridge-enclave --features mock-attestation,allow-seed-import
 
   # Assert the dev-only features `compile_error!` in a release build, so a
@@ -422,3 +426,17 @@ jobs:
             exit 1
           fi
           echo "OK: no-role build correctly rejected via the compile_error guard"
+
+      - name: Assert KMS persistence without a supported flow is rejected
+        run: |
+          for features in kms-persistence rgb-mint-burn,kms-persistence; do
+            if cargo check --locked -p utexo-bridge-enclave --no-default-features --features "$features" 2>build.log; then
+              echo "::error::KMS persistence unexpectedly compiled with '$features'"
+              exit 1
+            fi
+            if ! grep -q "kms-persistence is currently supported only by rgb-swap" build.log; then
+              echo "::error::build failed without the expected KMS flow guard for '$features'"
+              cat build.log
+              exit 1
+            fi
+          done
