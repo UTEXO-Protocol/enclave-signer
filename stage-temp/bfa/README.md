@@ -30,7 +30,14 @@ The optimized `stage-bfa-temp` Cargo profile keeps debug assertions enabled.
 The ordinary release profile still rejects seed import.
 
 The recipe uses Bitcoin mainnet and Arbitrum One (42161).
-Its proxy and FundsIn contract are the supplied stage addresses.
+The contract pins use the stage set supplied on 2026-09-22:
+- `EVM_PROXY_CONTRACT_ADDRESS`: Multisig `0x0584f124d56266c3583605a441545d48feea9b9e`.
+- `FUNDS_IN_CONTRACT` and `GAS_TX_ALLOWED_TO`: BridgeProxy `0x9f447017ca5f413dc86d9d69c772e9dfe16fb823`.
+
+The current build mode is `bootstrap` with an empty asset ID. Restore the retained stage seeds after deployment.
+The issuer will create a new asset for this BridgeProxy using the same signer keys.
+Then set the new asset ID, select `configured`, and rebuild the EIF.
+Verify the new asset's genesis `bridgeLocation` before enabling bridge operations.
 The backend RGB network ID is a separate setting. Configure it during the listener rollout.
 
 ## Manual build

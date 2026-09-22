@@ -24,7 +24,7 @@ COPY . /build/
 
 WORKDIR /build/enclave
 ARG STAGE_BFA_MODE
-ARG RGB_ASSET_ID="rgb:hkSZVMNx-8j22xlP-mf5fuTC-K_QgdFt-ULELD2a-sb6EaaI"
+ARG RGB_ASSET_ID=""
 ENV STAGE_BFA_MODE=${STAGE_BFA_MODE}
 RUN case "$STAGE_BFA_MODE" in bootstrap) test -z "$RGB_ASSET_ID" ;; configured) test -n "$RGB_ASSET_ID" ;; *) exit 1 ;; esac
 
@@ -63,11 +63,11 @@ COPY build/entrypoint.sh /app/entrypoint.sh
 RUN chmod +x /app/utexo-bridge-enclave /app/entrypoint.sh
 
 # Public stage pins. Seed material is supplied only after enclave startup.
-ARG RGB_ASSET_ID="rgb:hkSZVMNx-8j22xlP-mf5fuTC-K_QgdFt-ULELD2a-sb6EaaI"
+ARG RGB_ASSET_ID=""
 ENV EVM_CHAIN_ID=42161 \
-    EVM_PROXY_CONTRACT_ADDRESS=0xe21932af38b0665a78f0e36d4a08f205a3b1e75e \
-    FUNDS_IN_CONTRACT=0x2db3d8a4656c281f070bfecb87f4e1f7ba855790 \
-    GAS_TX_ALLOWED_TO=0x2db3d8a4656c281f070bfecb87f4e1f7ba855790 \
+    EVM_PROXY_CONTRACT_ADDRESS=0x0584f124d56266c3583605a441545d48feea9b9e \
+    FUNDS_IN_CONTRACT=0x9f447017ca5f413dc86d9d69c772e9dfe16fb823 \
+    GAS_TX_ALLOWED_TO=0x9f447017ca5f413dc86d9d69c772e9dfe16fb823 \
     RGB_ASSET_ID=${RGB_ASSET_ID} \
     BITCOIN_NETWORK=bitcoin \
     ELECTRUM_URL=ssl://electrs-mainnet.utexo.com:50002 \
