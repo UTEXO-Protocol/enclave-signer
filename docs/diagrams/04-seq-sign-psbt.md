@@ -54,7 +54,7 @@ sequenceDiagram
     Rgb-->>Srv: ValidatedConsignment / REFUSE
     Srv->>Anchor: keccak256(consignment) == consignment_hash (integrity)
     Srv->>Anchor: asset pin: declared asset_id == validated contract_id<br/>== pinned RGB_ASSET_ID (unconditional on this path)
-    Srv->>Anchor: PSBT unsigned txid == last witness txid —<br/>input prevouts == witness prevouts —<br/>sighash ALL / taproot DEFAULT only
+    Srv->>Anchor: PSBT unsigned txid == last witness txid —<br/>every input native SegWit (finalizes without scriptSig,<br/>so the unsigned txid is the final one) —<br/>input prevouts == witness prevouts —<br/>sighash ALL / taproot DEFAULT only
     Srv->>Anchor: every transition the PSBT commits to is the build flow's deposit shape:<br/>rgb-swap ⇒ TS_TRANSFER, group asset_output_amount ≥ amount − commission<br/>rgb-mint-burn ⇒ TS_BRIDGE,<br/>group asset_output_amount == amount − commission<br/>(OS_ASSET only - OS_BRIDGE mint right excluded)
     Srv->>Anchor: split OS_ASSET outputs into legs:<br/>confidential seal ⇒ recipient leg -<br/>revealed seal ⇒ must be self-owned (script == an input this enclave co-controls,<br/>≤ 4 off-PSBT change outpoints) else REFUSE -<br/>sum(recipient legs) == amount − commission exactly
     Srv->>Anchor: fee sanity: implied fee rate ≤ 3x the<br/>enclave-fetched estimate, fail-closed<br/>(compile-time floor only on non-mainnet)
