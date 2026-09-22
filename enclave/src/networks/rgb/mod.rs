@@ -496,6 +496,8 @@ mod tests {
                 bridge_config: config,
                 rgb_validator: Some(&validator),
                 header_chain: &chain,
+                #[cfg(feature = "spv")]
+                chain_pins: &crate::networks::rgb::spv_validation::ChainPins::new(),
                 self_owned_psbt_outputs: Some(&self_owned),
                 bridge_events: &[],
             };

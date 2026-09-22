@@ -10,6 +10,7 @@ use crate::error::{EnclaveError, Result};
 use crate::networks::evm::validation::FundsOutParams;
 use crate::networks::rgb::spv::HeaderChain;
 use crate::networks::rgb::spv_validation;
+use crate::networks::rgb::spv_validation::ChainPins;
 use crate::networks::rgb::validation::ValidatedConsignment;
 use crate::proto::MerkleProofEntry;
 
@@ -249,6 +250,7 @@ pub fn verify_btc_relay_agreement(
     validated: &ValidatedConsignment,
     merkle_proofs: &[MerkleProofEntry],
     chain: &HeaderChain,
+    pins: &ChainPins,
 ) -> Result<()> {
     let (source, latest) = decode_funds_out_proof(params)?;
 
@@ -263,6 +265,9 @@ pub fn verify_btc_relay_agreement(
     }
 
     assert_header_present(chain, &latest, "latest")?;
+    // Pin the relay's `latest` header too. A reorg that replaces it removes
+    // the freshness this check proved.
+    pins.pin(chain, latest.height)?;
 
     // `latest` must actually be near the tip, else it proves only that some
     // block existed and the relay could be arbitrarily far behind.
@@ -290,6 +295,7 @@ pub fn verify_btc_relay_agreement(
     // The calldata's source block must be the consignment's own anchor. Height
     // only - see the commitment note on this function.
     let anchor = resolve_consignment_anchor(validated, merkle_proofs, chain)?;
+    pins.pin(chain, anchor.height)?;
     if source.height != anchor.height {
         return Err(EnclaveError::CrossCheck(format!(
             "fundsOut source block mismatch: calldata proof cites height {}, but the \
@@ -829,14 +835,19 @@ mod tests {
         use alloy_primitives::B256;
         use alloy_sol_types::SolValue;
 
-        fn lock(tag: u8, net: u64) -> VerifiedLock {
-            VerifiedLock {
-                mint_opid: [tag; 32],
-                minted: net,
-                operation_id: [tag; 32],
-                net_amount: net,
-            }
-        }
+        const LOCK_A: VerifiedLock = VerifiedLock {
+            mint_opid: [0x51; 32],
+            minted: 100,
+            operation_id: [0xA1; 32],
+            net_amount: 950,
+        };
+
+        const LOCK_B: VerifiedLock = VerifiedLock {
+            mint_opid: [0x62; 32],
+            minted: 30,
+            operation_id: [0xB2; 32],
+            net_amount: 20,
+        };
 
         fn settlement(pairs: &[(u8, u64)]) -> Bytes {
             let ids: Vec<B256> = pairs.iter().map(|(t, _)| B256::from([*t; 32])).collect();
@@ -852,18 +863,14 @@ mod tests {
 
         #[test]
         fn passes_when_the_cited_pairs_are_the_verified_locks() {
-            assert!(check(
-                &[(0xA1, 950), (0xB2, 20)],
-                &[lock(0xA1, 950), lock(0xB2, 20)]
-            )
-            .is_ok());
+            assert!(check(&[(0xA1, 950), (0xB2, 20)], &[LOCK_A, LOCK_B]).is_ok());
         }
 
         // Characterizes the replay candidate, not a paid contract replay.
         // burnid_test.go uses the same pairs to exercise payout ID derivation.
         #[test]
         fn reordered_settlement_passes_with_different_committed_bytes() {
-            let locks = [lock(0xA1, 950), lock(0xB2, 20)];
+            let locks = [LOCK_A, LOCK_B];
             let original = [(0xA1, 950), (0xB2, 20)];
             let reordered = [(0xB2, 20), (0xA1, 950)];
             assert!(check(&original, &locks).is_ok());
@@ -874,27 +881,31 @@ mod tests {
             let original_hash = alloy_primitives::keccak256(settlement(&original));
             let reordered_hash = alloy_primitives::keccak256(settlement(&reordered));
             assert_ne!(original_hash, reordered_hash);
-            println!("original settlement hash: {original_hash}");
-            println!("reordered settlement hash: {reordered_hash}");
         }
 
         /// The P6 attack: a valid burn re-presented with other deposits cited,
         /// which would earn a fresh `burnId` on-chain.
         #[test]
         fn rejects_a_deposit_the_burn_does_not_descend_from() {
-            let err = check(&[(0xC3, 950)], &[lock(0xA1, 950)]).unwrap_err();
+            let err = check(&[(0xC3, 950)], &[LOCK_A]).unwrap_err();
+            assert!(err.to_string().contains("settlementData mismatch"), "{err}");
+        }
+
+        #[test]
+        fn rejects_a_citation_of_the_mint_pair_instead_of_the_bridge_record() {
+            let err = check(&[(LOCK_A.mint_opid[0], LOCK_A.minted)], &[LOCK_A]).unwrap_err();
             assert!(err.to_string().contains("settlementData mismatch"), "{err}");
         }
 
         #[test]
         fn rejects_a_missing_ancestry_deposit() {
-            let err = check(&[(0xA1, 950)], &[lock(0xA1, 950), lock(0xB2, 20)]).unwrap_err();
+            let err = check(&[(0xA1, 950)], &[LOCK_A, LOCK_B]).unwrap_err();
             assert!(err.to_string().contains("settlementData mismatch"), "{err}");
         }
 
         #[test]
         fn rejects_an_extra_cited_deposit() {
-            let err = check(&[(0xA1, 950), (0xB2, 20)], &[lock(0xA1, 950)]).unwrap_err();
+            let err = check(&[(0xA1, 950), (0xB2, 20)], &[LOCK_A]).unwrap_err();
             assert!(err.to_string().contains("settlementData mismatch"), "{err}");
         }
 
@@ -902,13 +913,13 @@ mod tests {
         /// amount is a wrong citation, not a rounding issue.
         #[test]
         fn rejects_a_wrong_net_amount() {
-            let err = check(&[(0xA1, 949)], &[lock(0xA1, 950)]).unwrap_err();
+            let err = check(&[(0xA1, 949)], &[LOCK_A]).unwrap_err();
             assert!(err.to_string().contains("settlementData mismatch"), "{err}");
         }
 
         #[test]
         fn rejects_a_duplicated_citation() {
-            let err = check(&[(0xA1, 950), (0xA1, 950)], &[lock(0xA1, 950)]).unwrap_err();
+            let err = check(&[(0xA1, 950), (0xA1, 950)], &[LOCK_A]).unwrap_err();
             assert!(err.to_string().contains("twice"), "{err}");
         }
 
@@ -921,8 +932,7 @@ mod tests {
         #[test]
         fn rejects_empty_settlement_data() {
             let cd = mock_funds_out_calldata_full(Address::ZERO, 1000, Bytes::new(), Bytes::new());
-            let err =
-                validate_funds_out_settlement(&params_of(&cd), &[lock(0xA1, 950)]).unwrap_err();
+            let err = validate_funds_out_settlement(&params_of(&cd), &[LOCK_A]).unwrap_err();
             assert!(err.to_string().contains("does not decode"), "{err}");
         }
 
@@ -936,8 +946,7 @@ mod tests {
                 Bytes::new(),
                 Bytes::from(padded),
             );
-            let err =
-                validate_funds_out_settlement(&params_of(&cd), &[lock(0xA1, 950)]).unwrap_err();
+            let err = validate_funds_out_settlement(&params_of(&cd), &[LOCK_A]).unwrap_err();
             assert!(
                 err.to_string().contains("canonically") || err.to_string().contains("decode"),
                 "{err}"
@@ -1093,7 +1102,13 @@ mod tests {
         /// Run the check against a consignment anchored at `anchor_height`.
         fn check_at(cd: &[u8], chain: &HeaderChain, anchor_height: u32) -> Result<()> {
             let (validated, proofs) = anchored_at(anchor_height);
-            verify_btc_relay_agreement(&params_of(cd), &validated, &proofs, chain)
+            verify_btc_relay_agreement(
+                &params_of(cd),
+                &validated,
+                &proofs,
+                chain,
+                &ChainPins::new(),
+            )
         }
 
         // -- Calldata proof vs the enclave's own headers.
@@ -1363,9 +1378,136 @@ mod tests {
                 &validated,
                 &proofs,
                 &chain,
+                &ChainPins::new(),
             )
             .unwrap_err();
             assert!(err.to_string().contains("no merkle proof"), "got: {err}");
+        }
+
+        // -- F05-NEW-AF-08: the chain can move after the last check.
+        //
+        // `verify_btc_relay_agreement` is the last chain read on the direct
+        // route. Its lock ends at return. A real reorg must close the gate.
+        // A real extension must not.
+
+        /// Build a longer chain from `from_height` and submit it the normal
+        /// way. No test state is written directly, so the accept rule is real.
+        fn submit_reorg(chain: &mut HeaderChain, from_height: u32, extra: u32) {
+            let pred = chain
+                .hash_at(from_height - 1)
+                .expect("reorg fixture needs a predecessor header");
+            let mut prev = <bitcoin::BlockHash as bitcoin::hashes::Hash>::from_byte_array(pred);
+            let mut raw = Vec::new();
+            for height in from_height..=(TIP_HEIGHT + extra) {
+                let header = Header {
+                    version: Version::ONE,
+                    prev_blockhash: prev,
+                    merkle_root: bitcoin::TxMerkleNode::from_byte_array([0xCD; 32]),
+                    time: 1_700_000_000 + height,
+                    bits: bitcoin::CompactTarget::from_consensus(0x207fffff),
+                    // Different from `chain_to`, so each new block gets a new
+                    // hash.
+                    nonce: 7,
+                };
+                prev = header.block_hash();
+                raw.push(serialize(&header));
+            }
+            let outcome = chain.submit_headers(from_height, &raw).unwrap();
+            assert!(
+                outcome.reorg_depth > 0,
+                "fixture must be a real reorg, got depth 0"
+            );
+        }
+
+        /// Extend the tip and rewrite nothing. The harmless control.
+        fn submit_extension(chain: &mut HeaderChain, count: u32) {
+            let mut prev = <bitcoin::BlockHash as bitcoin::hashes::Hash>::from_byte_array(
+                chain.hash_at(chain.tip_height()).expect("tip present"),
+            );
+            let start = chain.tip_height() + 1;
+            let mut raw = Vec::new();
+            for height in start..start + count {
+                let header = Header {
+                    version: Version::ONE,
+                    prev_blockhash: prev,
+                    merkle_root: bitcoin::TxMerkleNode::from_byte_array([0xEF; 32]),
+                    time: 1_700_000_000 + height,
+                    bits: bitcoin::CompactTarget::from_consensus(0x207fffff),
+                    nonce: 0,
+                };
+                prev = header.block_hash();
+                raw.push(serialize(&header));
+            }
+            let outcome = chain.submit_headers(start, &raw).unwrap();
+            assert_eq!(outcome.reorg_depth, 0, "control must not be a reorg");
+        }
+
+        /// Run the last check and return what it pinned.
+        fn check_pinning(chain: &HeaderChain, hashes: &[[u8; 32]]) -> ChainPins {
+            let pins = ChainPins::new();
+            let (validated, proofs) = anchored_at(ANCHOR_HEIGHT);
+            verify_btc_relay_agreement(
+                &params_of(&good_calldata(hashes)),
+                &validated,
+                &proofs,
+                chain,
+                &pins,
+            )
+            .expect("terminal check passes on the fixture chain");
+            pins
+        }
+
+        #[test]
+        fn pins_the_anchor_and_the_relay_latest_header() {
+            let (chain, hashes) = chain();
+            let pins = check_pinning(&chain, &hashes);
+            // The anchor block, and the relay's `latest` header.
+            assert_eq!(pins.len(), 2);
+        }
+
+        #[test]
+        fn accepted_extension_after_the_final_check_still_signs() {
+            let (mut chain, hashes) = chain();
+            let pins = check_pinning(&chain, &hashes);
+
+            submit_extension(&mut chain, 3);
+
+            pins.assert_unchanged(&chain)
+                .expect("an extension touches no pinned block");
+        }
+
+        #[test]
+        fn accepted_reorg_removing_the_anchor_after_the_final_check_refuses() {
+            let (mut chain, hashes) = chain();
+            let pins = check_pinning(&chain, &hashes);
+
+            submit_reorg(&mut chain, ANCHOR_HEIGHT, 2);
+
+            let err = pins.assert_unchanged(&chain).unwrap_err();
+            assert!(
+                matches!(err, EnclaveError::Spv(_)),
+                "reorg must surface as an Spv refusal, got: {err}"
+            );
+            assert!(
+                err.to_string().contains("chain reorg after validation"),
+                "got: {err}"
+            );
+        }
+
+        /// A reorg above the anchor still rewrites the relay's `latest`
+        /// header. The freshness the check proved no longer holds.
+        #[test]
+        fn accepted_reorg_replacing_the_relay_latest_header_refuses() {
+            let (mut chain, hashes) = chain();
+            let pins = check_pinning(&chain, &hashes);
+
+            submit_reorg(&mut chain, ANCHOR_HEIGHT + 3, 2);
+
+            let err = pins.assert_unchanged(&chain).unwrap_err();
+            assert!(
+                err.to_string().contains("chain reorg after validation"),
+                "got: {err}"
+            );
         }
 
         #[test]
@@ -1378,6 +1520,7 @@ mod tests {
                 &validated,
                 &proofs,
                 &chain,
+                &ChainPins::new(),
             )
             .unwrap_err();
             assert!(

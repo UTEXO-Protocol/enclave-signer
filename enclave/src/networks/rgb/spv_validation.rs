@@ -67,6 +67,7 @@ pub fn validate_source_chain(
     validated_consignment: Option<&ValidatedConsignment>,
     merkle_proofs: &[MerkleProofEntry],
     now: SystemTime,
+    pins: &ChainPins,
 ) -> Result<()> {
     let validated = validated_consignment.ok_or_else(|| {
         EnclaveError::Spv(
@@ -77,12 +78,7 @@ pub fn validate_source_chain(
         )
     })?;
 
-    assert_chain_not_stale(
-        chain,
-        now,
-        Duration::from_secs(SPV_MAX_TIP_AGE_SECS),
-        Duration::from_secs(SPV_MAX_TIP_FUTURE_SECS),
-    )?;
+    assert_chain_fresh(chain, now)?;
     assert_chain_net(&validated.chain_net, chain.network())?;
     validate_spv_proofs(
         chain,
@@ -91,8 +87,16 @@ pub fn validate_source_chain(
         SPV_MIN_CONFIRMATIONS,
     )?;
 
+    // Pin every block this check used, under the caller's lock guard. The guard
+    // ends at return, so `ChainPins::assert_unchanged` keeps the result true at
+    // signing time (F05-NEW-AF-08).
+    for proof in merkle_proofs {
+        pins.pin(chain, proof.block_height)?;
+    }
+
     tracing::info!(
         proofs_count = merkle_proofs.len(),
+        pinned_blocks = pins.len(),
         "SPV verification passed"
     );
 
@@ -164,6 +168,41 @@ pub fn validate_spv_proofs(
     let tip = chain.tip_height();
     for (i, proof) in proofs.iter().enumerate() {
         verify_one_proof(chain, tip, min_confirmations, i, proof)?;
+    }
+
+    Ok(())
+}
+
+/// The chain-freshness half of the signing precondition, with this module's
+/// bounds already bound. Signing calls it before validating proofs; the
+/// readiness probe calls it to answer "would signing pass right now". Both go
+/// through here so the two cannot drift apart.
+pub fn assert_chain_fresh(chain: &HeaderChain, now: SystemTime) -> Result<()> {
+    assert_chain_not_stale(
+        chain,
+        now,
+        Duration::from_secs(SPV_MAX_TIP_AGE_SECS),
+        Duration::from_secs(SPV_MAX_TIP_FUTURE_SECS),
+    )
+}
+
+/// The full signing precondition on the chain alone: fresh, and deep enough
+/// past the checkpoint to serve a proof at [`SPV_MIN_CONFIRMATIONS`].
+///
+/// Depth matters because `validate_spv_proofs` rejects anything shallower. A
+/// chain one block past the compiled-in checkpoint is fresh but cannot yet
+/// confirm anything, so a probe that checked freshness alone would report ready
+/// while every signing request still failed.
+pub fn assert_chain_ready(chain: &HeaderChain, now: SystemTime) -> Result<()> {
+    assert_chain_fresh(chain, now)?;
+
+    let depth = chain.len() as u32;
+    if depth < SPV_MIN_CONFIRMATIONS {
+        return Err(EnclaveError::Spv(format!(
+            "spv: chain is only {depth} block(s) past the checkpoint, need \
+             {SPV_MIN_CONFIRMATIONS} before a proof can reach the required \
+             confirmation depth"
+        )));
     }
 
     Ok(())
@@ -348,6 +387,105 @@ fn verify_one_proof(
     })?;
 
     Ok(())
+}
+
+/// The blocks the SPV checks used, re-checked before the key is used.
+///
+/// Each check drops the header-chain lock when it returns. Another worker can
+/// then accept a reorg before signing (F05-NEW-AF-08).
+///
+/// A check records every block it used here. `assert_unchanged` reads those
+/// heights again and refuses if a hash moved. An extension does not touch a
+/// pinned height, so it still signs.
+#[derive(Debug, Default)]
+pub struct ChainPins {
+    pinned: std::sync::Mutex<std::collections::BTreeMap<u32, [u8; 32]>>,
+}
+
+impl ChainPins {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Record the chain hash at `height`. Call it under the check's own lock
+    /// guard, so the pin and the check see one chain.
+    ///
+    /// A second pin with a different hash means two checks read two chains.
+    /// That is the race this guards, so it fails closed.
+    pub fn pin(&self, chain: &HeaderChain, height: u32) -> Result<()> {
+        let hash = chain.hash_at(height).ok_or_else(|| {
+            EnclaveError::Spv(format!(
+                "chain pin: enclave holds no header at height {height} (chain tip = {}) \
+                 - cannot pin a block the checks relied on",
+                chain.tip_height()
+            ))
+        })?;
+
+        let mut pinned = self.lock()?;
+        if let Some(previous) = pinned.insert(height, hash) {
+            if previous != hash {
+                return Err(EnclaveError::Spv(format!(
+                    "chain pin: height {height} was pinned as {} but now reads {} \
+                     - the header chain changed between two validation checks, refusing to sign",
+                    hex::encode(previous),
+                    hex::encode(hash)
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    /// Check every pinned block against `chain`. Call it under a fresh lock,
+    /// just before the signing key is used.
+    pub fn assert_unchanged(&self, chain: &HeaderChain) -> Result<()> {
+        let pinned = self.lock()?;
+
+        for (&height, &expected) in pinned.iter() {
+            match chain.hash_at(height) {
+                Some(current) if current == expected => {}
+                Some(current) => {
+                    return Err(EnclaveError::Spv(format!(
+                        "chain reorg after validation: height {height} was {} when checked but is \
+                         now {} (chain tip = {}) - refusing to sign against a replaced block",
+                        hex::encode(expected),
+                        hex::encode(current),
+                        chain.tip_height()
+                    )));
+                }
+                None => {
+                    return Err(EnclaveError::Spv(format!(
+                        "chain reorg after validation: height {height} was {} when checked but the \
+                         enclave now holds no header there (chain tip = {}) - refusing to sign",
+                        hex::encode(expected),
+                        chain.tip_height()
+                    )));
+                }
+            }
+        }
+
+        tracing::debug!(
+            pinned_blocks = pinned.len(),
+            tip_height = chain.tip_height(),
+            "chain pins re-checked at key use"
+        );
+        Ok(())
+    }
+
+    /// Count of pinned blocks. For logs and tests.
+    pub fn len(&self) -> usize {
+        self.lock().map(|p| p.len()).unwrap_or(0)
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// Fail on a poisoned lock. A panic left the pin set in an unknown state.
+    fn lock(&self) -> Result<std::sync::MutexGuard<'_, std::collections::BTreeMap<u32, [u8; 32]>>> {
+        self.pinned
+            .lock()
+            .map_err(|e| EnclaveError::Internal(format!("chain pin set lock poisoned: {e}")))
+    }
 }
 
 #[cfg(test)]
@@ -936,5 +1074,131 @@ mod tests {
         // should be a conscious decision, not an incidental edit.
         assert_eq!(SPV_MAX_TIP_AGE_SECS, 2 * 60 * 60);
         assert_eq!(SPV_MAX_TIP_FUTURE_SECS, 2 * 60 * 60);
+    }
+}
+
+/// F05-NEW-AF-08: the pin set checked before key use.
+#[cfg(test)]
+mod chain_pin_tests {
+    use super::*;
+    use crate::networks::rgb::spv::checkpoint::Checkpoint;
+    use bitcoin::block::{Header, Version};
+    use bitcoin::consensus::serialize;
+    use bitcoin::hashes::Hash;
+
+    fn empty_chain() -> HeaderChain {
+        HeaderChain::new(
+            Network::Regtest,
+            Checkpoint {
+                height: 0,
+                hash: [0u8; 32],
+                bits: 0x207fffff,
+                time: 1_700_000_000,
+                is_real: false,
+            },
+        )
+    }
+
+    fn header_at(prev: bitcoin::BlockHash, height: u32, nonce: u32) -> Header {
+        Header {
+            version: Version::ONE,
+            prev_blockhash: prev,
+            merkle_root: bitcoin::TxMerkleNode::from_byte_array([0xAB; 32]),
+            time: 1_700_000_000 + height,
+            bits: bitcoin::CompactTarget::from_consensus(0x207fffff),
+            nonce,
+        }
+    }
+
+    /// Submit `count` headers from `start`, chained from the block before.
+    fn submit(chain: &mut HeaderChain, start: u32, count: u32, nonce: u32) {
+        let mut prev = if start == 1 {
+            bitcoin::BlockHash::from_byte_array([0u8; 32])
+        } else {
+            bitcoin::BlockHash::from_byte_array(
+                chain.hash_at(start - 1).expect("predecessor present"),
+            )
+        };
+        let mut raw = Vec::new();
+        for height in start..start + count {
+            let h = header_at(prev, height, nonce);
+            prev = h.block_hash();
+            raw.push(serialize(&h));
+        }
+        chain.submit_headers(start, &raw).unwrap();
+    }
+
+    fn chain_of(count: u32) -> HeaderChain {
+        let mut chain = empty_chain();
+        submit(&mut chain, 1, count, 0);
+        chain
+    }
+
+    #[test]
+    fn empty_pin_set_passes() {
+        let chain = chain_of(5);
+        ChainPins::new().assert_unchanged(&chain).unwrap();
+        assert!(ChainPins::new().is_empty());
+    }
+
+    #[test]
+    fn pinning_a_height_the_enclave_has_no_header_for_fails() {
+        let chain = chain_of(5);
+        let err = ChainPins::new().pin(&chain, 99).unwrap_err();
+        assert!(err.to_string().contains("cannot pin"), "got: {err}");
+    }
+
+    #[test]
+    fn extension_leaves_pinned_blocks_alone() {
+        let mut chain = chain_of(5);
+        let pins = ChainPins::new();
+        pins.pin(&chain, 3).unwrap();
+
+        submit(&mut chain, 6, 4, 0);
+
+        pins.assert_unchanged(&chain).unwrap();
+        assert_eq!(pins.len(), 1);
+    }
+
+    #[test]
+    fn reorg_replacing_a_pinned_block_fails() {
+        let mut chain = chain_of(5);
+        let pins = ChainPins::new();
+        pins.pin(&chain, 3).unwrap();
+
+        // Longer chain from height 3. The normal accept rule takes it.
+        submit(&mut chain, 3, 6, 42);
+
+        let err = pins.assert_unchanged(&chain).unwrap_err();
+        assert!(
+            err.to_string().contains("chain reorg after validation"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn reorg_below_a_pinned_block_that_shortens_the_chain_fails() {
+        let chain = chain_of(20);
+        let pins = ChainPins::new();
+        pins.pin(&chain, 18).unwrap();
+
+        // The work rule forbids a stronger chain that ends below height 18.
+        // So test the other loss case: no header at 18 at all.
+        let mut short = empty_chain();
+        submit(&mut short, 1, 5, 0);
+        let err = pins.assert_unchanged(&short).unwrap_err();
+        assert!(err.to_string().contains("no header there"), "got: {err}");
+    }
+
+    #[test]
+    fn two_checks_reading_two_different_chains_fail_closed() {
+        let chain_a = chain_of(5);
+        let mut chain_b = empty_chain();
+        submit(&mut chain_b, 1, 5, 42);
+
+        let pins = ChainPins::new();
+        pins.pin(&chain_a, 3).unwrap();
+        let err = pins.pin(&chain_b, 3).unwrap_err();
+        assert!(err.to_string().contains("was pinned as"), "got: {err}");
     }
 }

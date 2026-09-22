@@ -292,8 +292,9 @@ enclave establishes validity and finality itself, fail-closed
   leg to equal that seal. Zero or two confidential legs refuse.
 
 The PSBT itself is bound to the validated consignment: unsigned txid ==
-witness txid, input prevouts == witness prevouts, `SIGHASH_ALL` / taproot
-`DEFAULT` only, every transition the PSBT commits to must be a shape the
+witness txid, every input a native SegWit output (so it finalizes with an
+empty `scriptSig` and the unsigned txid is the final txid), input prevouts ==
+witness prevouts, `SIGHASH_ALL` / taproot `DEFAULT` only, every transition the PSBT commits to must be a shape the
 build's flow accepts, and the group's asset outputs are checked against the
 credited amount. Which transition is accepted is the build's RGB flow:
 `TS_TRANSFER` under `rgb-swap` (coverage `>=`, since the surplus is bridge

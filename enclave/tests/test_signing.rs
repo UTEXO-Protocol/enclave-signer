@@ -321,6 +321,13 @@ fn foreign_xonly(b: u8) -> bitcoin::XOnlyPublicKey {
 /// recognised as self-pay with no output metadata at all.
 #[allow(dead_code)]
 fn btc_psbt(from: &OurAddress, input_sats: u64, outputs: &[(bitcoin::ScriptBuf, u64)]) -> Vec<u8> {
+    btc_psbt_from(&[(from, input_sats)], outputs)
+}
+
+/// [`btc_psbt`] over any number of the enclave's own inputs, each on its own
+/// deterministic prevout.
+#[allow(dead_code)]
+fn btc_psbt_from(inputs: &[(&OurAddress, u64)], outputs: &[(bitcoin::ScriptBuf, u64)]) -> Vec<u8> {
     use bitcoin::hashes::Hash;
     use bitcoin::psbt::Psbt;
     use bitcoin::taproot::LeafVersion;
@@ -329,17 +336,17 @@ fn btc_psbt(from: &OurAddress, input_sats: u64, outputs: &[(bitcoin::ScriptBuf, 
     let unsigned_tx = Transaction {
         version: bitcoin::transaction::Version(2),
         lock_time: bitcoin::absolute::LockTime::ZERO,
-        input: vec![TxIn {
-            previous_output: OutPoint {
-                txid: Txid::from_raw_hash(bitcoin::hashes::sha256d::Hash::from_byte_array(
-                    [0u8; 32],
-                )),
-                vout: 0,
-            },
-            script_sig: ScriptBuf::new(),
-            sequence: Sequence::MAX,
-            witness: Witness::new(),
-        }],
+        input: (0..inputs.len())
+            .map(|i| TxIn {
+                previous_output: OutPoint {
+                    txid: Txid::from_byte_array([i as u8; 32]),
+                    vout: i as u32,
+                },
+                script_sig: ScriptBuf::new(),
+                sequence: Sequence::MAX,
+                witness: Witness::new(),
+            })
+            .collect(),
         output: outputs
             .iter()
             .map(|(spk, sat)| TxOut {
@@ -349,19 +356,21 @@ fn btc_psbt(from: &OurAddress, input_sats: u64, outputs: &[(bitcoin::ScriptBuf, 
             .collect(),
     };
     let mut psbt = Psbt::from_unsigned_tx(unsigned_tx).expect("from_unsigned_tx");
-    psbt.inputs[0].witness_utxo = Some(TxOut {
-        value: Amount::from_sat(input_sats),
-        script_pubkey: from.spk.clone(),
-    });
-    psbt.inputs[0].tap_internal_key = Some(from.internal);
-    psbt.inputs[0].tap_scripts.insert(
-        from.control.clone(),
-        (from.leaf.clone(), LeafVersion::TapScript),
-    );
-    psbt.inputs[0].tap_key_origins.insert(
-        from.xonly,
-        (vec![from.leaf_hash], (from.fingerprint, from.path.clone())),
-    );
+    for (i, (from, input_sats)) in inputs.iter().enumerate() {
+        psbt.inputs[i].witness_utxo = Some(TxOut {
+            value: Amount::from_sat(*input_sats),
+            script_pubkey: from.spk.clone(),
+        });
+        psbt.inputs[i].tap_internal_key = Some(from.internal);
+        psbt.inputs[i].tap_scripts.insert(
+            from.control.clone(),
+            (from.leaf.clone(), LeafVersion::TapScript),
+        );
+        psbt.inputs[i].tap_key_origins.insert(
+            from.xonly,
+            (vec![from.leaf_hash], (from.fingerprint, from.path.clone())),
+        );
+    }
     psbt.serialize()
 }
 
@@ -976,10 +985,14 @@ fn test_sign_psbt_rejects_amount_mismatch() {
     match &resp.response {
         Some(Response::Error(e)) => {
             assert_eq!(e.code, 3);
+            // A bridge-mode PSBT is now refused up front unless the build can
+            // independently verify the FundsIn deposit, so this shared server
+            // (no EVM RPC client) stops at that gate before the amount check.
             assert!(
                 e.message.contains("amount mismatch")
                     || e.message.contains("consignment")
-                    || e.message.contains("rgb_validator"),
+                    || e.message.contains("rgb_validator")
+                    || e.message.contains("verifying the FundsIn deposit"),
                 "expected amount or RGB validation rejection, got: {}",
                 e.message
             );
@@ -1025,7 +1038,8 @@ fn test_sign_psbt_rejects_missing_evm_source_hash() {
         Some(Response::Error(e)) => {
             assert_eq!(e.code, 3);
             assert!(
-                e.message.contains("evm_tx_hash must be 32 bytes"),
+                e.message.contains("evm_tx_hash must be 32 bytes")
+                    || e.message.contains("verifying the FundsIn deposit"),
                 "expected missing tx hash rejection, got: {}",
                 e.message
             );
@@ -1076,8 +1090,11 @@ fn test_sign_psbt_zero_evm_hash_is_bridge_mode_not_vanilla() {
             assert_eq!(e.code, 3, "bridge cross-check failures use code 3");
             // Bridge mode ran and rejected the missing consignment binding -
             // the zeroed hash did NOT route the request onto the vanilla path.
+            // Either message proves bridge mode was taken: the vanilla path
+            // never reaches the FundsIn-verification gate.
             assert!(
-                e.message.contains("consignment"),
+                e.message.contains("consignment")
+                    || e.message.contains("verifying the FundsIn deposit"),
                 "expected a consignment-binding rejection (bridge mode), got: {}",
                 e.message
             );
@@ -1144,6 +1161,113 @@ fn test_sign_btc_accepts_create_utxo_colored_output() {
     match &common::send_request(port, &sign_req).response {
         Some(Response::SignedPsbt(r)) => assert_eq!(r.inputs_signed, 1),
         other => panic!("create_utxo PSBT should sign, got {:?}", other),
+    }
+}
+
+/// Partial merges succeed. Fully signed submissions stay refused.
+#[cfg(not(feature = "dev-mode"))]
+#[test]
+fn test_sign_btc_second_pass_after_partial_merge_still_signs() {
+    use bitcoin::hashes::Hash;
+    use bitcoin::psbt::Psbt;
+    use bitcoin::secp256k1::{Message, Secp256k1};
+    use bitcoin::sighash::{Prevouts, SighashCache, TapSighashType};
+    use bitcoin::TxOut;
+
+    let port = common::start_test_server_with_config(|_| {}, btc_capped_config(100_000));
+    let wallet = init_wallet(port);
+    let a = our_address(&wallet, 0, 0);
+    let b = our_address(&wallet, 0, 1);
+    assert_ne!(a.spk, b.spk);
+
+    let sign = |psbt_bytes: Vec<u8>| {
+        common::send_request(
+            port,
+            &EnclaveRequest {
+                request: Some(Request::SignBtc(SignBtcRequest { psbt_bytes })),
+            },
+        )
+        .response
+    };
+
+    let original = btc_psbt_from(
+        &[(&a, 40_000), (&b, 40_000)],
+        &[(a.spk.clone(), 39_000), (b.spk.clone(), 39_000)],
+    );
+
+    // Pass 1: both inputs are ours and unsigned.
+    let signed = match sign(original.clone()) {
+        Some(Response::SignedPsbt(r)) => {
+            assert_eq!(r.inputs_signed, 2);
+            Psbt::deserialize(&r.signed_psbt).expect("psbt")
+        }
+        other => panic!("first pass should sign both inputs, got {:?}", other),
+    };
+
+    // The orchestrator merged only A's contribution: same tx, same prevouts.
+    let mut partial = signed.clone();
+    partial.inputs[1].tap_script_sigs.clear();
+    let sig_a = signed.inputs[0]
+        .tap_script_sigs
+        .get(&(a.xonly, a.leaf_hash))
+        .copied()
+        .expect("A signed on pass 1");
+
+    let second = match sign(partial.serialize()) {
+        Some(Response::SignedPsbt(r)) => {
+            assert_eq!(r.inputs_signed, 1, "only B is left to sign");
+            Psbt::deserialize(&r.signed_psbt).expect("psbt")
+        }
+        other => panic!("second pass with A merged must sign B, got {:?}", other),
+    };
+
+    assert_eq!(second.unsigned_tx, signed.unsigned_tx);
+    assert_eq!(
+        second.inputs[0]
+            .tap_script_sigs
+            .get(&(a.xonly, a.leaf_hash)),
+        Some(&sig_a),
+        "A's signature must come back untouched"
+    );
+
+    // Both signatures verify against the same sighashes, independently.
+    let prevouts: Vec<TxOut> = second
+        .inputs
+        .iter()
+        .map(|i| i.witness_utxo.clone().expect("witness_utxo"))
+        .collect();
+    let tx = second.unsigned_tx.clone();
+    let mut cache = SighashCache::new(&tx);
+    let secp = Secp256k1::verification_only();
+    for (index, addr) in [(0usize, &a), (1usize, &b)] {
+        let sig = second.inputs[index]
+            .tap_script_sigs
+            .get(&(addr.xonly, addr.leaf_hash))
+            .unwrap_or_else(|| panic!("input {index} must carry our signature"));
+        let sighash = cache
+            .taproot_script_spend_signature_hash(
+                index,
+                &Prevouts::All(&prevouts),
+                addr.leaf_hash,
+                TapSighashType::Default,
+            )
+            .expect("sighash");
+        secp.verify_schnorr(
+            &sig.signature,
+            &Message::from_digest(*sighash.as_byte_array()),
+            &addr.xonly,
+        )
+        .unwrap_or_else(|e| panic!("input {index} signature must verify: {e}"));
+    }
+
+    // A fully signed PSBT is still refused.
+    match sign(second.serialize()) {
+        Some(Response::Error(e)) => assert!(
+            e.message.contains("signed 0 inputs"),
+            "expected the no-op refusal, got: {}",
+            e.message
+        ),
+        other => panic!("a fully signed PSBT must not sign again, got {:?}", other),
     }
 }
 
@@ -1284,6 +1408,113 @@ fn test_sign_btc_rejects_fresh_change_address_proven_only_by_metadata() {
             "a change address proven only by output metadata must not sign, got {:?}",
             other
         ),
+    }
+}
+
+/// A bridge input pays a script that a second, small input also spends. The
+/// second input qualifies for signing, but a foreign key spends its script.
+#[test]
+fn test_sign_btc_refuses_bridge_value_paid_to_a_foreign_input_script() {
+    use bitcoin::blockdata::opcodes::all::OP_CHECKSIG;
+    use bitcoin::blockdata::script::Builder;
+    use bitcoin::psbt::Psbt;
+    use bitcoin::taproot::{LeafVersion, TapLeafHash, TaprootBuilder};
+
+    let port = common::start_test_server_with_config(|_| {}, btc_capped_config(100_000));
+    let wallet = init_wallet(port);
+    let bridge = our_address(&wallet, 0, 0);
+
+    // Small input: its one leaf pushes a key the enclave derives, the internal
+    // key is foreign.
+    let secp = bitcoin::secp256k1::Secp256k1::new();
+    let ours = our_address(&wallet, 0, 1);
+    let leaf = Builder::new()
+        .push_x_only_key(&ours.xonly)
+        .push_opcode(OP_CHECKSIG)
+        .into_script();
+    let internal = foreign_xonly(0xB1);
+    let info = TaprootBuilder::new()
+        .add_leaf(0, leaf.clone())
+        .unwrap()
+        .finalize(&secp, internal)
+        .unwrap();
+    let small = OurAddress {
+        spk: bitcoin::ScriptBuf::new_p2tr(&secp, internal, info.merkle_root()),
+        control: info
+            .control_block(&(leaf.clone(), LeafVersion::TapScript))
+            .unwrap(),
+        leaf_hash: TapLeafHash::from_script(&leaf, LeafVersion::TapScript),
+        leaf,
+        internal,
+        ..ours
+    };
+
+    // Same transaction and amounts. Only the key origin on input 1 changes.
+    let build = |small_qualifies: bool| {
+        let mut psbt =
+            Psbt::deserialize(&btc_psbt(&bridge, 60_000, &[(small.spk.clone(), 55_000)])).unwrap();
+        let mut txin = psbt.unsigned_tx.input[0].clone();
+        txin.previous_output.vout = 1;
+        psbt.unsigned_tx.input.push(txin);
+        psbt.inputs.push(bitcoin::psbt::Input::default());
+        psbt.inputs[1].witness_utxo = Some(bitcoin::TxOut {
+            value: bitcoin::Amount::from_sat(1_000),
+            script_pubkey: small.spk.clone(),
+        });
+        psbt.inputs[1].tap_internal_key = Some(small.internal);
+        psbt.inputs[1].tap_scripts.insert(
+            small.control.clone(),
+            (small.leaf.clone(), LeafVersion::TapScript),
+        );
+        if small_qualifies {
+            psbt.inputs[1].tap_key_origins.insert(
+                small.xonly,
+                (
+                    vec![small.leaf_hash],
+                    (small.fingerprint, small.path.clone()),
+                ),
+            );
+        }
+        psbt.serialize()
+    };
+    let sign = |psbt_bytes: Vec<u8>| {
+        common::send_request(
+            port,
+            &EnclaveRequest {
+                request: Some(Request::SignBtc(SignBtcRequest { psbt_bytes })),
+            },
+        )
+        .response
+    };
+
+    for qualifies in [false, true] {
+        let psbt = Psbt::deserialize(&build(qualifies)).expect("fixture parses");
+        assert_eq!(psbt.inputs.len(), 2);
+        assert!(psbt.inputs.iter().all(|i| i.witness_utxo.is_some()));
+    }
+    assert_eq!(
+        Psbt::deserialize(&build(false)).unwrap().unsigned_tx,
+        Psbt::deserialize(&build(true)).unwrap().unsigned_tx
+    );
+
+    // Control: input 1 does not qualify, so the 55_000 sat output is over the
+    // 5_000 sat unowned budget.
+    let control = sign(build(false));
+    assert!(
+        matches!(&control, Some(Response::Error(_))),
+        "the output is over the unowned budget, got {:?}",
+        control
+    );
+
+    if let Some(Response::SignedPsbt(r)) = sign(build(true)) {
+        let signed = Psbt::deserialize(&r.signed_psbt).expect("signed psbt");
+        assert!(
+            !signed.inputs[0]
+                .tap_script_sigs
+                .contains_key(&(bridge.xonly, bridge.leaf_hash)),
+            "the enclave signed the 60_000 sat bridge input while 55_000 sats go to a script \
+             with a foreign spend path; the unowned budget is 5_000 sats"
+        );
     }
 }
 

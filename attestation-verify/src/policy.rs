@@ -73,6 +73,9 @@ pub enum AttestationMode {
 /// data source. A debug build, a dev feature, or an unpinned or non-bridge build
 /// is [`Development`](AttestedPolicy::Development), which a verifier of a
 /// production enclave must reject.
+// Resolved once at boot and committed to attestation user_data; the size
+// difference between the variants costs nothing here.
+#[allow(clippy::large_enum_variant)]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum AttestedPolicy {
     Production {

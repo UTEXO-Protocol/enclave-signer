@@ -169,6 +169,7 @@ pub fn validate_source(
             Some(&validated),
             &source.merkle_proofs,
             SystemTime::now(),
+            ctx.chain_pins,
         )?;
     }
 
@@ -722,6 +723,10 @@ pub struct RgbValidator {
     http_timeout_secs: u64,
     /// Socket timeout for fee lookups; only tests override the pinned default.
     electrum_fee_timeout_secs: u8,
+    /// Canned validation result and fee rate for the crate's own tests, so the
+    /// signing path runs with no indexer. Test-only by construction.
+    #[cfg(test)]
+    canned: Option<(ValidatedConsignment, f64)>,
 }
 
 impl RgbValidator {
@@ -751,7 +756,19 @@ impl RgbValidator {
             fee_estimate_cache: std::sync::Mutex::new(None),
             http_timeout_secs: ESPLORA_HTTP_TIMEOUT_SECS,
             electrum_fee_timeout_secs: ELECTRUM_WITNESS_TIMEOUT_SECS as u8,
+            #[cfg(test)]
+            canned: None,
         })
+    }
+
+    /// A validator that answers from `validated` and `fee_rate_sat_vb` instead
+    /// of the indexer. Test-only by construction.
+    #[cfg(test)]
+    pub fn canned(validated: ValidatedConsignment, fee_rate_sat_vb: f64) -> Self {
+        let mut v =
+            Self::new("http://indexer.invalid".into(), "bitcoin").expect("canned validator");
+        v.canned = Some((validated, fee_rate_sat_vb));
+        v
     }
 
     /// Shrink the HTTP timeout so the stalled-host test doesn't wait the
@@ -771,6 +788,10 @@ impl RgbValidator {
     /// non-mainnet chain, which yields
     /// [`NON_MAINNET_FALLBACK_FEE_RATE_SAT_VB`].
     pub fn recommended_fee_rate_sat_vb(&self) -> Result<f64> {
+        #[cfg(test)]
+        if let Some((_, rate)) = &self.canned {
+            return Ok(*rate);
+        }
         {
             let cache = self
                 .fee_estimate_cache
@@ -978,6 +999,10 @@ impl RgbValidator {
         #[cfg_attr(not(feature = "bfa-validation"), allow(unused_variables))]
         bridge_events: &[Event],
     ) -> Result<ValidatedConsignment> {
+        #[cfg(test)]
+        if let Some((validated, _)) = &self.canned {
+            return Ok(validated.clone());
+        }
         let start = std::time::Instant::now();
         let bytes_len = consignment_bytes.len();
         tracing::info!(
@@ -2626,6 +2651,8 @@ mod tests {
                 bridge_config: config,
                 rgb_validator: Some(&validator),
                 header_chain: &chain,
+                #[cfg(feature = "spv")]
+                chain_pins: &crate::networks::rgb::spv_validation::ChainPins::new(),
                 // Source validation never reaches the destination PSBT bind.
                 self_owned_psbt_outputs: None,
                 bridge_events: &[],

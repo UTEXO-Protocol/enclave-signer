@@ -23,6 +23,9 @@ pub use attestation_verify::{AttestationMode, AttestedPolicy, BtcDataSource, Evm
 
 /// The enclave's resolved security posture. See the module docs.
 #[derive(Clone, Debug, PartialEq, Eq)]
+// Resolved once at boot and committed to attestation user_data; the size
+// difference between the variants costs nothing here.
+#[allow(clippy::large_enum_variant)]
 pub enum SecurityPolicy {
     /// A fully-pinned, fail-closed bridge-signing enclave.
     Production(ProductionPolicy),
