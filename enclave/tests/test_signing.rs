@@ -956,9 +956,17 @@ fn test_no_evm_rpc_build_refuses_bridge_psbt() {
 }
 
 #[test]
-#[cfg(not(feature = "dev-mode"))]
+#[cfg(all(feature = "evm-rpc", not(feature = "dev-mode")))]
 fn test_sign_psbt_rejects_amount_mismatch() {
-    let port = common::start_test_server();
+    // A bridge-mode PSBT is refused before any RGB work unless the enclave can
+    // verify the FundsIn deposit itself, so wire a stub that reports the very
+    // deposit this request declares. What rejects below is then the RGB bind.
+    let port = common::start_test_server_with_evm_rpc(Box::new(common::deposit_stub::OneDeposit {
+        operation_id: [0x33; 32],
+        gross: 100,
+        commission: 20,
+        emitter: utexo_bridge_enclave::config::BridgeConfig::from_env().funds_in_contract,
+    }));
 
     let init_req = EnclaveRequest {
         request: Some(Request::InitializeKey(InitializeKeyRequest {
@@ -985,14 +993,10 @@ fn test_sign_psbt_rejects_amount_mismatch() {
     match &resp.response {
         Some(Response::Error(e)) => {
             assert_eq!(e.code, 3);
-            // A bridge-mode PSBT is now refused up front unless the build can
-            // independently verify the FundsIn deposit, so this shared server
-            // (no EVM RPC client) stops at that gate before the amount check.
             assert!(
                 e.message.contains("amount mismatch")
                     || e.message.contains("consignment")
-                    || e.message.contains("rgb_validator")
-                    || e.message.contains("verifying the FundsIn deposit"),
+                    || e.message.contains("rgb_validator"),
                 "expected amount or RGB validation rejection, got: {}",
                 e.message
             );
@@ -1008,7 +1012,7 @@ fn test_sign_psbt_rejects_amount_mismatch() {
 // skip every bridge predicate is gone. This is the core regression gate.
 #[cfg(feature = "rgb-validation")]
 #[test]
-#[cfg(not(feature = "dev-mode"))]
+#[cfg(all(feature = "evm-rpc", not(feature = "dev-mode")))]
 fn test_sign_psbt_rejects_missing_evm_source_hash() {
     let port = common::start_test_server();
 
@@ -1038,8 +1042,7 @@ fn test_sign_psbt_rejects_missing_evm_source_hash() {
         Some(Response::Error(e)) => {
             assert_eq!(e.code, 3);
             assert!(
-                e.message.contains("evm_tx_hash must be 32 bytes")
-                    || e.message.contains("verifying the FundsIn deposit"),
+                e.message.contains("evm_tx_hash must be 32 bytes"),
                 "expected missing tx hash rejection, got: {}",
                 e.message
             );
@@ -1055,9 +1058,16 @@ fn test_sign_psbt_rejects_missing_evm_source_hash() {
 // the zero-length hash rejected at the 32-byte length check.
 #[cfg(feature = "rgb-validation")]
 #[test]
-#[cfg(not(feature = "dev-mode"))]
+#[cfg(all(feature = "evm-rpc", not(feature = "dev-mode")))]
 fn test_sign_psbt_zero_evm_hash_is_bridge_mode_not_vanilla() {
-    let port = common::start_test_server();
+    // Deposit stub, so the run reaches the consignment bind rather than
+    // stopping at the FundsIn-verification gate.
+    let port = common::start_test_server_with_evm_rpc(Box::new(common::deposit_stub::OneDeposit {
+        operation_id: [0x33; 32],
+        gross: 1000,
+        commission: 0,
+        emitter: utexo_bridge_enclave::config::BridgeConfig::from_env().funds_in_contract,
+    }));
 
     let init_req = EnclaveRequest {
         request: Some(Request::InitializeKey(InitializeKeyRequest {
@@ -1090,11 +1100,8 @@ fn test_sign_psbt_zero_evm_hash_is_bridge_mode_not_vanilla() {
             assert_eq!(e.code, 3, "bridge cross-check failures use code 3");
             // Bridge mode ran and rejected the missing consignment binding -
             // the zeroed hash did NOT route the request onto the vanilla path.
-            // Either message proves bridge mode was taken: the vanilla path
-            // never reaches the FundsIn-verification gate.
             assert!(
-                e.message.contains("consignment")
-                    || e.message.contains("verifying the FundsIn deposit"),
+                e.message.contains("consignment"),
                 "expected a consignment-binding rejection (bridge mode), got: {}",
                 e.message
             );

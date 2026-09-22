@@ -35,6 +35,34 @@ pub fn start_test_server_with_config(
     configure: impl FnOnce(&EnclaveState),
     bridge_config: BridgeConfig,
 ) -> u16 {
+    start_test_server_inner(
+        configure,
+        bridge_config,
+        #[cfg(feature = "evm-rpc")]
+        None,
+    )
+}
+
+/// Same, with an EVM receipt provider wired in. A bridge-mode PSBT is refused
+/// up front unless the enclave can verify the FundsIn deposit itself, so any
+/// test that wants to reach the RGB checks has to supply one.
+#[cfg(all(feature = "evm-rpc", not(feature = "dev-mode")))]
+#[allow(dead_code)]
+pub fn start_test_server_with_evm_rpc(
+    client: Box<
+        dyn utexo_bridge_enclave::networks::evm::evm_event::EvmReceiptProvider + Send + Sync,
+    >,
+) -> u16 {
+    start_test_server_inner(|_| {}, BridgeConfig::from_env(), Some(client))
+}
+
+fn start_test_server_inner(
+    configure: impl FnOnce(&EnclaveState),
+    bridge_config: BridgeConfig,
+    #[cfg(feature = "evm-rpc")] evm_rpc_client: Option<
+        Box<dyn utexo_bridge_enclave::networks::evm::evm_event::EvmReceiptProvider + Send + Sync>,
+    >,
+) -> u16 {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
     let state = EnclaveState::new(bitcoin::Network::Bitcoin);
@@ -61,7 +89,7 @@ pub fn start_test_server_with_config(
         #[cfg(feature = "rgb-validation")]
         rgb_validator: None,
         #[cfg(feature = "evm-rpc")]
-        evm_rpc_client: None,
+        evm_rpc_client,
         #[cfg(feature = "evm-rpc")]
         evm_rpc_config: utexo_bridge_enclave::config::EvmRpcConfig::default(),
         #[cfg(feature = "spv")]
@@ -136,4 +164,82 @@ pub fn submit_headers(port: u16, start_height: u32, headers: Vec<Vec<u8>>) -> En
             )),
         },
     )
+}
+
+/// A stand-in EVM RPC that reports one confirmed `BridgeFundsIn` deposit.
+///
+/// A bridge-mode PSBT is refused before any RGB work unless the enclave can
+/// verify the deposit itself, so a test that wants to reach the RGB checks
+/// needs this. The log carries the gross and commission the request declares,
+/// so the deposit gate passes and the later checks are what reject.
+#[cfg(all(feature = "evm-rpc", not(feature = "dev-mode")))]
+#[allow(dead_code)]
+pub mod deposit_stub {
+    use alloy_primitives::U256;
+    use alloy_sol_types::{sol, SolEvent};
+    use utexo_bridge_enclave::error::Result;
+    use utexo_bridge_enclave::networks::evm::evm_event::{
+        EvmReceiptProvider, LogEntry, ReceiptData,
+    };
+
+    sol! {
+        event BridgeFundsIn(
+            bytes32 indexed operationId, bytes32 indexed sourceSender, address indexed sender,
+            uint256 senderNonce, uint256 amount, uint256 netAmount, uint256 tokenCommission,
+            uint256 nativeCommission, uint256 sourceChainId, uint256 destinationChainId,
+            string destinationAddress
+        );
+    }
+
+    /// An invoice `parse_authorized_recipient` accepts, so the deposit gate
+    /// gets past the recipient parse too.
+    const INVOICE: &str = "rgb:fuhLYX9G-eC8gDvf-V0XpYFH-ceSafoc-lGutAYq-~SExGU4/\
+                           XvmU3d4_nQQ8S7oagbXi07x5vjMm7P~ERukQNX6SC4M/BF/bc:utxob:\
+                           UzR~73lD-JyzirTn-engdWia-qjd5NyV-mndAmmo-EbxdVEG-L6OiP";
+
+    /// Block 100 against head 112 is a depth of 12, the default minimum.
+    const BLOCK: u64 = 100;
+    const HEAD: u64 = 112;
+
+    /// Answers for any tx hash: the tests that care about a malformed hash are
+    /// rejected on length before the client is consulted.
+    pub struct OneDeposit {
+        pub operation_id: [u8; 32],
+        pub gross: u64,
+        pub commission: u64,
+        /// Must equal `BridgeConfig::funds_in_contract`, else the log is not
+        /// from the pinned emitter and the gate rejects it.
+        pub emitter: [u8; 20],
+    }
+
+    impl EvmReceiptProvider for OneDeposit {
+        fn get_transaction_receipt(&self, _tx_hash: &[u8; 32]) -> Result<Option<ReceiptData>> {
+            let event = BridgeFundsIn {
+                operationId: self.operation_id.into(),
+                sourceSender: [0x5c; 32].into(),
+                sender: [0xde; 20].into(),
+                senderNonce: U256::ZERO,
+                amount: U256::from(self.gross),
+                netAmount: U256::from(self.gross - self.commission),
+                tokenCommission: U256::from(self.commission),
+                nativeCommission: U256::ZERO,
+                sourceChainId: U256::ZERO,
+                destinationChainId: U256::ZERO,
+                destinationAddress: INVOICE.into(),
+            };
+            Ok(Some(ReceiptData {
+                status_success: true,
+                block_number: BLOCK,
+                logs: vec![LogEntry {
+                    address: self.emitter,
+                    topics: event.encode_topics().into_iter().map(|t| t.0 .0).collect(),
+                    data: event.encode_data(),
+                }],
+            }))
+        }
+
+        fn get_block_number(&self) -> Result<u64> {
+            Ok(HEAD)
+        }
+    }
 }
