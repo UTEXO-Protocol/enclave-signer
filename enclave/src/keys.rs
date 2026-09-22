@@ -408,7 +408,8 @@ impl KeyManager {
     }
 
     /// Sign PSBT inputs matching our keys.
-    /// Auto-detects taproot (Schnorr, BIP-340) vs SegWit v0 P2WSH (ECDSA) per input.
+    /// Auto-detects taproot (Schnorr, BIP-340; script path or BIP-86 key path)
+    /// vs SegWit v0 P2WSH (ECDSA) per input.
     /// Returns the modified PSBT bytes and count of inputs signed.
     pub fn sign_psbt(&self, psbt_bytes: &[u8]) -> Result<(Vec<u8>, usize)> {
         self.sign_psbt_scoped(psbt_bytes, None)

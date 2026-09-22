@@ -196,7 +196,7 @@ fn emits_one_job_for_legit_multi_a_leaf() {
     let (psbt, _, _, leaf_hash, _) = build_legit_taproot_psbt(&km, AccountType::Vanilla);
     let jobs = find_taproot_sign_jobs(&psbt, km.master_fingerprint(), &km);
     assert_eq!(jobs.len(), 1);
-    assert_eq!(jobs[0].leaf_hash, leaf_hash);
+    assert_eq!(jobs[0].leaf_hash, Some(leaf_hash));
     assert_eq!(jobs[0].xonly_pubkey, our_xonly(&km));
 }
 
@@ -390,7 +390,7 @@ fn skips_when_already_signed_for_leaf() {
     assert_eq!(leaves.len(), 1);
     assert_eq!(leaves[0].input_index, 0);
     assert_eq!(leaves[0].xonly_pubkey, our);
-    assert_eq!(leaves[0].leaf_hash, leaf_hash);
+    assert_eq!(leaves[0].leaf_hash, Some(leaf_hash));
 }
 
 /// Another signer's *valid* contribution to the same leaf is not ours: it
@@ -431,7 +431,7 @@ fn another_signers_entry_does_not_consume_our_job() {
     ] {
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].xonly_pubkey, our);
-        assert_eq!(found[0].leaf_hash, leaf_hash);
+        assert_eq!(found[0].leaf_hash, Some(leaf_hash));
     }
 }
 
@@ -585,4 +585,223 @@ fn scoped_vanilla_refuses_a_colored_input() {
         scoped, 0,
         "plain-BTC (vanilla-scoped) signing must refuse a colored input"
     );
+}
+
+/// Key-path P2TR PSBT spending our `account` key at /0/0, tweaked with `merkle_root`.
+fn build_key_path_psbt(
+    km: &KeyManager,
+    account: AccountType,
+    merkle_root: Option<TapNodeHash>,
+) -> (Psbt, XOnlyPublicKey) {
+    let secp = Secp256k1::new();
+    let (internal, path) = match account {
+        AccountType::Vanilla => (our_xonly(km), our_full_path()),
+        AccountType::Colored => (our_xonly_colored(km), our_colored_full_path()),
+    };
+    let (output_key, _) = internal.tap_tweak(&secp, merkle_root);
+    let unsigned_tx = Transaction {
+        version: bitcoin::transaction::Version(2),
+        lock_time: bitcoin::blockdata::locktime::absolute::LockTime::ZERO,
+        input: vec![TxIn {
+            previous_output: OutPoint {
+                txid: Txid::from_byte_array([0xCC; 32]),
+                vout: 0,
+            },
+            script_sig: ScriptBuf::new(),
+            sequence: Sequence::MAX,
+            witness: bitcoin::Witness::default(),
+        }],
+        output: vec![TxOut {
+            value: Amount::from_sat(50_000),
+            script_pubkey: ScriptBuf::new_p2tr_tweaked(output_key),
+        }],
+    };
+    let mut psbt = Psbt::from_unsigned_tx(unsigned_tx).unwrap();
+    psbt.inputs[0].witness_utxo = Some(TxOut {
+        value: Amount::from_sat(100_000),
+        script_pubkey: ScriptBuf::new_p2tr_tweaked(output_key),
+    });
+    psbt.inputs[0].tap_internal_key = Some(internal);
+    psbt.inputs[0].tap_merkle_root = merkle_root;
+    psbt.inputs[0]
+        .tap_key_origins
+        .insert(internal, (vec![], (*km.master_fingerprint(), path)));
+    (psbt, output_key.to_x_only_public_key())
+}
+
+fn key_spend_sighash(psbt: &Psbt) -> Message {
+    let prevouts: Vec<TxOut> = psbt
+        .inputs
+        .iter()
+        .map(|i| i.witness_utxo.clone().unwrap())
+        .collect();
+    let sighash = SighashCache::new(&psbt.unsigned_tx)
+        .taproot_key_spend_signature_hash(0, &Prevouts::All(&prevouts), TapSighashType::Default)
+        .unwrap();
+    Message::from_digest(*sighash.as_byte_array())
+}
+
+#[test]
+fn emits_a_key_path_job_for_a_bip86_input() {
+    let km = KeyManager::from_seed([0x42u8; 64], Network::Testnet).unwrap();
+    let (psbt, _) = build_key_path_psbt(&km, AccountType::Vanilla, None);
+
+    let jobs = find_taproot_sign_jobs(&psbt, km.master_fingerprint(), &km);
+
+    assert_eq!(jobs.len(), 1);
+    assert_eq!(jobs[0].leaf_hash, None);
+    assert_eq!(jobs[0].merkle_root, None);
+    assert_eq!(jobs[0].xonly_pubkey, our_xonly(&km));
+    assert_eq!(jobs[0].account_type, AccountType::Vanilla);
+}
+
+#[test]
+fn key_path_job_resolves_the_colored_account() {
+    let km = KeyManager::from_seed([0x42u8; 64], Network::Testnet).unwrap();
+    let (psbt, _) = build_key_path_psbt(&km, AccountType::Colored, None);
+
+    let jobs = find_taproot_sign_jobs(&psbt, km.master_fingerprint(), &km);
+
+    assert_eq!(jobs.len(), 1);
+    assert_eq!(jobs[0].account_type, AccountType::Colored);
+}
+
+#[test]
+fn key_path_signature_verifies_against_the_output_key() {
+    let km = KeyManager::from_seed([0x42u8; 64], Network::Testnet).unwrap();
+    let (mut psbt, output_key) = build_key_path_psbt(&km, AccountType::Vanilla, None);
+    let jobs = find_taproot_sign_jobs(&psbt, km.master_fingerprint(), &km);
+
+    let signed = sign_taproot_inputs(&mut psbt, &km, &jobs).unwrap();
+
+    assert_eq!(signed, 1);
+    let sig = psbt.inputs[0].tap_key_sig.expect("key-path signature set");
+    assert_eq!(sig.sighash_type, TapSighashType::Default);
+    assert!(psbt.inputs[0].tap_script_sigs.is_empty());
+    Secp256k1::new()
+        .verify_schnorr(&sig.signature, &key_spend_sighash(&psbt), &output_key)
+        .expect("signature must verify against the on-chain output key");
+}
+
+#[test]
+fn key_path_with_a_merkle_root_signs_with_the_same_tweak() {
+    let km = KeyManager::from_seed([0x42u8; 64], Network::Testnet).unwrap();
+    let root = TapNodeHash::from_byte_array([0x77; 32]);
+    let (mut psbt, output_key) = build_key_path_psbt(&km, AccountType::Vanilla, Some(root));
+    let jobs = find_taproot_sign_jobs(&psbt, km.master_fingerprint(), &km);
+    assert_eq!(jobs.len(), 1);
+    assert_eq!(jobs[0].merkle_root, Some(root));
+
+    sign_taproot_inputs(&mut psbt, &km, &jobs).unwrap();
+
+    let sig = psbt.inputs[0].tap_key_sig.unwrap();
+    Secp256k1::new()
+        .verify_schnorr(&sig.signature, &key_spend_sighash(&psbt), &output_key)
+        .expect("tweaked signature must verify");
+}
+
+#[test]
+fn skips_key_path_when_the_output_key_is_not_the_tweaked_internal_key() {
+    let km = KeyManager::from_seed([0x42u8; 64], Network::Testnet).unwrap();
+    let (mut psbt, _) = build_key_path_psbt(&km, AccountType::Vanilla, None);
+    // The PSBT claims our internal key, but the coin is locked to someone else.
+    let secp = Secp256k1::new();
+    let (foreign, _) = xonly_from_byte(0xA1).tap_tweak(&secp, None);
+    psbt.inputs[0].witness_utxo.as_mut().unwrap().script_pubkey =
+        ScriptBuf::new_p2tr_tweaked(foreign);
+
+    assert!(find_taproot_sign_jobs(&psbt, km.master_fingerprint(), &km).is_empty());
+}
+
+#[test]
+fn skips_key_path_when_the_merkle_root_claim_does_not_match_the_output() {
+    let km = KeyManager::from_seed([0x42u8; 64], Network::Testnet).unwrap();
+    let (mut psbt, _) = build_key_path_psbt(&km, AccountType::Vanilla, None);
+    psbt.inputs[0].tap_merkle_root = Some(TapNodeHash::from_byte_array([0x77; 32]));
+
+    assert!(find_taproot_sign_jobs(&psbt, km.master_fingerprint(), &km).is_empty());
+}
+
+#[test]
+fn skips_key_path_when_origins_claim_another_fingerprint() {
+    let km = KeyManager::from_seed([0x42u8; 64], Network::Testnet).unwrap();
+    let (mut psbt, _) = build_key_path_psbt(&km, AccountType::Vanilla, None);
+    let internal = psbt.inputs[0].tap_internal_key.unwrap();
+    psbt.inputs[0].tap_key_origins.insert(
+        internal,
+        (
+            vec![],
+            (Fingerprint::from([0xDE, 0xAD, 0xBE, 0xEF]), our_full_path()),
+        ),
+    );
+
+    assert!(find_taproot_sign_jobs(&psbt, km.master_fingerprint(), &km).is_empty());
+}
+
+#[test]
+fn skips_key_path_when_the_claimed_path_derives_another_key() {
+    let km = KeyManager::from_seed([0x42u8; 64], Network::Testnet).unwrap();
+    let (mut psbt, _) = build_key_path_psbt(&km, AccountType::Vanilla, None);
+    let internal = psbt.inputs[0].tap_internal_key.unwrap();
+    let other_path = DerivationPath::from(vec![
+        ChildNumber::from_hardened_idx(86).unwrap(),
+        ChildNumber::from_hardened_idx(1).unwrap(),
+        ChildNumber::from_hardened_idx(0).unwrap(),
+        ChildNumber::Normal { index: 0 },
+        ChildNumber::Normal { index: 1 },
+    ]);
+    psbt.inputs[0]
+        .tap_key_origins
+        .insert(internal, (vec![], (*km.master_fingerprint(), other_path)));
+
+    assert!(find_taproot_sign_jobs(&psbt, km.master_fingerprint(), &km).is_empty());
+}
+
+#[test]
+fn skips_key_path_when_already_signed() {
+    let km = KeyManager::from_seed([0x42u8; 64], Network::Testnet).unwrap();
+    let (mut psbt, _) = build_key_path_psbt(&km, AccountType::Vanilla, None);
+    let jobs = find_taproot_sign_jobs(&psbt, km.master_fingerprint(), &km);
+    sign_taproot_inputs(&mut psbt, &km, &jobs).unwrap();
+
+    assert!(find_taproot_sign_jobs(&psbt, km.master_fingerprint(), &km).is_empty());
+    // Our key-path signature does not revoke custody.
+    let controlled = find_controlled_taproot_leaves(&psbt, km.master_fingerprint(), &km);
+    assert_eq!(controlled.len(), 1);
+    assert_eq!(controlled[0].leaf_hash, None);
+}
+
+#[test]
+fn script_path_input_without_our_internal_key_emits_no_key_path_job() {
+    let km = KeyManager::from_seed([0x42u8; 64], Network::Testnet).unwrap();
+    let (psbt, _, _, _, _) = build_legit_taproot_psbt(&km, AccountType::Vanilla);
+
+    let jobs = find_taproot_sign_jobs(&psbt, km.master_fingerprint(), &km);
+
+    assert_eq!(jobs.len(), 1);
+    assert!(jobs[0].leaf_hash.is_some());
+}
+
+#[test]
+fn key_path_signing_honors_requested_sighash() {
+    let km = KeyManager::from_seed([0x42u8; 64], Network::Testnet).unwrap();
+    let (mut psbt, output_key) = build_key_path_psbt(&km, AccountType::Vanilla, None);
+    psbt.inputs[0].sighash_type = Some(TapSighashType::All.into());
+    let jobs = find_taproot_sign_jobs(&psbt, km.master_fingerprint(), &km);
+
+    sign_taproot_inputs(&mut psbt, &km, &jobs).unwrap();
+
+    let sig = psbt.inputs[0].tap_key_sig.unwrap();
+    assert_eq!(sig.sighash_type, TapSighashType::All);
+    let prevouts = [psbt.inputs[0].witness_utxo.clone().unwrap()];
+    let hash = SighashCache::new(&psbt.unsigned_tx)
+        .taproot_key_spend_signature_hash(0, &Prevouts::All(&prevouts), TapSighashType::All)
+        .unwrap();
+    Secp256k1::new()
+        .verify_schnorr(
+            &sig.signature,
+            &Message::from_digest(*hash.as_byte_array()),
+            &output_key,
+        )
+        .unwrap();
 }

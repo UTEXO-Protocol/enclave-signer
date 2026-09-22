@@ -8,9 +8,9 @@
 //! An output is accepted on one rule: its `script_pubkey` equals that of an
 //! input this enclave co-controls, as resolved by
 //! [`find_controlled_taproot_leaves`](crate::networks::rgb::signing::taproot::find_controlled_taproot_leaves).
-//! That leaf is control-block and derivation anchored, and the segwit sighash
-//! commits to the script. Custody does not change when the PSBT merges one of
-//! our signatures.
+//! That spend is anchored to the output key (control block or key-path tweak)
+//! and to our derivation, and the sighash commits to the script. Custody does
+//! not change when the PSBT merges one of our signatures.
 //!
 //! A qualified script may have foreign spend paths. Outputs on it are exempt
 //! only up to the input value on that script.
@@ -39,10 +39,8 @@ use crate::networks::rgb::signing::taproot::find_controlled_taproot_leaves;
 /// The `script_pubkey`s of every PSBT input this enclave provably co-controls
 /// on the plain-BTC (Vanilla) account.
 ///
-/// Membership comes from the custody resolver, so each entry carries the
-/// full input-side anchor chain: control block verified against the input's own
-/// output key, claimed key present in that leaf, and the claimed BIP-86
-/// derivation actually producing it.
+/// Membership comes from the custody resolver, so every entry is anchored
+/// to the output key and to a BIP-86 derivation that really produces the key.
 pub fn self_controlled_input_scripts(psbt: &Psbt, keys: &KeyManager) -> HashSet<Vec<u8>> {
     self_controlled_input_scripts_scoped(psbt, keys, Some(AccountType::Vanilla))
 }
@@ -605,7 +603,10 @@ pub(crate) mod tests {
         assert_eq!(jobs.len(), 1);
         assert!(psbt.inputs[index].tap_script_sigs.is_empty());
         assert_eq!(sign_taproot_inputs(psbt, keys, &jobs).unwrap(), 1);
-        let key = (jobs[0].xonly_pubkey, jobs[0].leaf_hash);
+        let key = (
+            jobs[0].xonly_pubkey,
+            jobs[0].leaf_hash.expect("script-path leaf"),
+        );
         (key, verify_own_signature(psbt, index, key).unwrap())
     }
 
@@ -677,7 +678,7 @@ pub(crate) mod tests {
         let key_b = find_controlled_taproot_leaves(&signed_psbt, keys.master_fingerprint(), &keys)
             .into_iter()
             .find(|job| job.input_index == 1)
-            .map(|job| (job.xonly_pubkey, job.leaf_hash));
+            .and_then(|job| Some((job.xonly_pubkey, job.leaf_hash?)));
         let unverified = [(0, Some(key_a)), (1, key_b)]
             .into_iter()
             .filter_map(|(index, key)| match key {

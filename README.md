@@ -72,9 +72,9 @@ destination network. Accepted routes: RGB -> EVM, EVM -> RGB, CCD -> EVM.
   `0xdc771390`) or `TeeLzFundsOut` (LayerZero route) over the decoded calldata
   fields, domain `MultisigProxy` / `1` / pinned chain id / pinned proxy. 65-byte
   recoverable ECDSA signature.
-- **EVM -> RGB (bridge PSBT)** - taproot script-path Schnorr signatures on the
-  colored account, only after the EVM deposit and the RGB consignment are
-  verified and bound to the PSBT.
+- **EVM -> RGB (bridge PSBT)** - taproot Schnorr signatures on the colored
+  account (multisig script path or singlesig BIP-86 key path), only after the
+  EVM deposit and the RGB consignment are verified and bound to the PSBT.
 - **CCD -> EVM** - same `fundsOut` digest, with a Concordium source the
   listener has already validated (the enclave binds only the amount).
 - **`SignBtc`** - plain-BTC PSBT on the vanilla account. Off unless the
