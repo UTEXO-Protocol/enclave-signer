@@ -83,7 +83,7 @@ const NUMS_INTERNAL: [u8; 32] = [
 // The two logs `handle_sign` reads from the deposit receipt, in the shape
 // `IBridge.sol` emits them.
 sol! {
-    event FundsIn(address indexed sender, uint256 indexed rgbOpId, uint256 amount);
+    event FundsIn(address indexed sender, uint256 rgbOpId, uint64 amount);
     event BridgeFundsIn(
         bytes32 indexed operationId, bytes32 indexed sourceTx, address indexed sender,
         uint256 senderNonce, uint256 amount, uint256 netAmount, uint256 tokenCommission,
@@ -414,7 +414,7 @@ fn deposit_receipt(mint_opid: &OpId, invoice: &str) -> ReceiptData {
     let funds_in = FundsIn {
         sender: [0xde; 20].into(),
         rgbOpId: alloy_primitives::U256::from_be_bytes(opid.0),
-        amount: alloy_primitives::U256::from(MINTED),
+        amount: MINTED,
     };
     let bridge_funds_in = BridgeFundsIn {
         operationId: OPERATION_ID.into(),
