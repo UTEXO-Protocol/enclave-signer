@@ -38,6 +38,8 @@ pub fn start_test_server_with_config(
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
     let state = EnclaveState::new(bitcoin::Network::Bitcoin);
+    #[cfg(feature = "kms-persistence")]
+    let state = state.with_seed_source(Box::new(TestSeedSource));
     configure(&state);
     // Tests run with the placeholder Regtest checkpoint. The header chain
     // is initialised but empty; tests that don't push headers leave it
@@ -135,4 +137,22 @@ pub fn submit_headers(port: u16, start_height: u32, headers: Vec<Vec<u8>>) -> En
             )),
         },
     )
+}
+
+// This source exists only in the test harness. Production empty InitializeKey
+// requests must complete KMS recovery and durable storage before activation.
+#[cfg(feature = "kms-persistence")]
+struct TestSeedSource;
+
+#[cfg(feature = "kms-persistence")]
+impl utexo_bridge_enclave::seed_persistence::SeedSource for TestSeedSource {
+    fn load_keys(
+        &self,
+        network: bitcoin::Network,
+        _deadline: std::time::Instant,
+    ) -> utexo_bridge_enclave::error::Result<utexo_bridge_enclave::keys::KeyManager> {
+        let mut seed = zeroize::Zeroizing::new([0u8; 64]);
+        getrandom::fill(&mut *seed).unwrap();
+        utexo_bridge_enclave::keys::KeyManager::from_seed(*seed, network)
+    }
 }

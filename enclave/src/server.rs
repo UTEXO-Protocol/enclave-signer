@@ -166,16 +166,33 @@ impl ServerContext {
 
 /// Handle a single connection: read one request, dispatch, write one response, close.
 pub fn handle_connection(stream: impl Read + Write, ctx: &ServerContext) {
-    if let Err(e) = process_connection(stream, ctx) {
+    handle_connection_until(
+        stream,
+        ctx,
+        std::time::Instant::now() + crate::conn::TOTAL_REQUEST_TIMEOUT,
+    );
+}
+
+/// Preserve the ingress socket deadline through persistent seed initialization.
+pub fn handle_connection_until(
+    stream: impl Read + Write,
+    ctx: &ServerContext,
+    deadline: std::time::Instant,
+) {
+    if let Err(e) = process_connection(stream, ctx, deadline) {
         tracing::error!("connection error: {}", e);
     }
 }
 
-fn process_connection(mut stream: impl Read + Write, ctx: &ServerContext) -> Result<()> {
+fn process_connection(
+    mut stream: impl Read + Write,
+    ctx: &ServerContext,
+    deadline: std::time::Instant,
+) -> Result<()> {
     tracing::debug!("reading request");
     let request: EnclaveRequest = framing::read_message(&mut stream)?;
 
-    let (response, reservation) = dispatch(request, ctx);
+    let (response, reservation) = dispatch(request, ctx, deadline);
 
     framing::write_message(&mut stream, &response)?;
     tracing::debug!("response written");
@@ -206,6 +223,7 @@ fn unsupported_build(network: &str) -> EnclaveError {
 fn dispatch(
     request: EnclaveRequest,
     ctx: &ServerContext,
+    deadline: std::time::Instant,
 ) -> (EnclaveResponse, Option<ReplayReservation<'_>>) {
     let mut reservation = None;
     let result = match request.request {
@@ -213,12 +231,16 @@ fn dispatch(
             let path = if !req.mnemonic.is_empty() {
                 "mnemonic-import"
             } else if req.seed.is_empty() {
-                "entropy"
+                if cfg!(feature = "kms-persistence") {
+                    "kms"
+                } else {
+                    "entropy"
+                }
             } else {
                 "seed-import"
             };
             tracing::info!("request: InitializeKey ({})", path);
-            handle_initialize(ctx, req)
+            handle_initialize(ctx, req, deadline)
         }
         Some(Request::GetPublicKey(req)) => {
             tracing::info!("request: GetPublicKey");
@@ -270,14 +292,24 @@ fn dispatch(
                 None,
             );
         }
+        #[cfg(feature = "kms-persistence")]
+        Some(Request::InitiateCloning(_) | Request::GetClone(_) | Request::SetClone(_)) => {
+            Err(EnclaveError::InvalidRequest(
+                "cloning is disabled with KMS persistence; initialize each replica from its configured seed"
+                    .into(),
+            ))
+        }
+        #[cfg(not(feature = "kms-persistence"))]
         Some(Request::InitiateCloning(req)) => {
             tracing::info!("request: InitiateCloning");
             handle_initiate_cloning(&ctx.state, req)
         }
+        #[cfg(not(feature = "kms-persistence"))]
         Some(Request::GetClone(req)) => {
             tracing::info!("request: GetClone");
             handle_get_clone(&ctx.state, req)
         }
+        #[cfg(not(feature = "kms-persistence"))]
         Some(Request::SetClone(req)) => {
             tracing::info!("request: SetClone");
             handle_set_clone(&ctx.state, req)
@@ -978,8 +1010,18 @@ fn apply_funds_out_binding(
     Ok(())
 }
 
-fn handle_initialize(ctx: &ServerContext, req: InitializeKeyRequest) -> Result<EnclaveResponse> {
+fn handle_initialize(
+    ctx: &ServerContext,
+    req: InitializeKeyRequest,
+    _deadline: std::time::Instant,
+) -> Result<EnclaveResponse> {
     let state = &ctx.state;
+    #[cfg(feature = "kms-persistence")]
+    if !req.cloning_secret.is_empty() {
+        return Err(EnclaveError::InvalidRequest(
+            "cloning_secret is not supported with KMS persistence".into(),
+        ));
+    }
     if !req.mnemonic.is_empty() {
         // Testing path: import from BIP-39 mnemonic phrase
         #[cfg(feature = "allow-seed-import")]
@@ -994,12 +1036,25 @@ fn handle_initialize(ctx: &ServerContext, req: InitializeKeyRequest) -> Result<E
             ));
         }
     } else if req.seed.is_empty() {
-        // Production path: generate from OS entropy
-        let mut entropy = [0u8; 32];
-        getrandom::fill(&mut entropy)
-            .map_err(|e| EnclaveError::Internal(format!("entropy generation failed: {}", e)))?;
-        let _mnemonic = state.initialize_from_entropy(&mut entropy)?;
-        tracing::info!("key initialized from new mnemonic");
+        #[cfg(feature = "kms-persistence")]
+        {
+            let deadline = _deadline
+                .checked_sub(crate::seed_persistence::RESPONSE_RESERVE)
+                .ok_or_else(|| {
+                    EnclaveError::InvalidRequest("initialization request deadline exceeded".into())
+                })?;
+            state.initialize_from_persistence_until(deadline)?;
+            tracing::info!("keys initialized from KMS persistence");
+        }
+        #[cfg(not(feature = "kms-persistence"))]
+        {
+            // Existing mint/burn and CCD generation path.
+            let mut entropy = [0u8; 32];
+            getrandom::fill(&mut entropy)
+                .map_err(|e| EnclaveError::Internal(format!("entropy generation failed: {}", e)))?;
+            let _mnemonic = state.initialize_from_entropy(&mut entropy)?;
+            tracing::info!("key initialized from new mnemonic");
+        }
     } else {
         // Testing path: import raw seed
         #[cfg(feature = "allow-seed-import")]
@@ -1622,10 +1677,14 @@ fn handle_health(ctx: &ServerContext) -> Result<EnclaveResponse> {
 //
 // See proto/enclave.proto for the full protocol description.
 
+#[cfg(not(feature = "kms-persistence"))]
 use crate::attestation;
+#[cfg(not(feature = "kms-persistence"))]
 use crate::cloning::{self, CloneSession};
+#[cfg(not(feature = "kms-persistence"))]
 use crate::state::CloningSession;
 
+#[cfg(not(feature = "kms-persistence"))]
 fn fresh_nonce() -> Result<[u8; 32]> {
     let mut n = [0u8; 32];
     getrandom::fill(&mut n)
@@ -1637,6 +1696,7 @@ fn fresh_nonce() -> Result<[u8; 32]> {
 /// ephemeral X25519 keypair, binds it into an NSM attestation together
 /// with the HMAC digest of (cloning_secret, pubkey), and returns the
 /// three fields the parent needs to relay to the donor.
+#[cfg(not(feature = "kms-persistence"))]
 fn handle_initiate_cloning(
     state: &EnclaveState,
     req: InitiateCloningRequest,
@@ -1685,6 +1745,7 @@ fn handle_initiate_cloning(
 /// attestation, matches PCRs, records the nonce against replay, checks
 /// pubkey + digest binding, verifies the digest against the configured
 /// donor-side cloning secret, and only then seals the seed.
+#[cfg(not(feature = "kms-persistence"))]
 fn handle_get_clone(state: &EnclaveState, req: GetCloneRequest) -> Result<EnclaveResponse> {
     let req_cluster_pk: [u8; 20] = req.cluster_public_key.as_slice().try_into().map_err(|_| {
         EnclaveError::InvalidRequest(format!(
@@ -1789,6 +1850,7 @@ fn handle_get_clone(state: &EnclaveState, req: GetCloneRequest) -> Result<Enclav
 /// Requester side. Transitions `Cloning -> Active`. Verifies the donor's
 /// attestation, unseals the ciphertext, and commits the derived keys
 /// only if the resulting EVM address matches `cluster_public_key`.
+#[cfg(not(feature = "kms-persistence"))]
 fn handle_set_clone(state: &EnclaveState, req: SetCloneRequest) -> Result<EnclaveResponse> {
     let donor_pubkey: [u8; 32] = req.donor_pubkey.as_slice().try_into().map_err(|_| {
         EnclaveError::InvalidRequest(format!(
@@ -2088,7 +2150,12 @@ mod tests {
                 )),
             );
 
-            assert!(process_connection(stream, &ctx).is_err());
+            assert!(process_connection(
+                stream,
+                &ctx,
+                std::time::Instant::now() + crate::conn::TOTAL_REQUEST_TIMEOUT,
+            )
+            .is_err());
             assert_eq!(io_calls.load(Ordering::SeqCst), 0);
         }
     }

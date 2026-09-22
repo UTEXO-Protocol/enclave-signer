@@ -52,6 +52,14 @@ path = "src/bin/attest_verify.rs"
 prost = "0.14"
 tonic = "0.14"
 tokio = { version = "1", features = ["full"] }
+# The optional seed storage bridge uses the official role provider and S3 client.
+# SSO, credential subprocesses and SigV4a are unnecessary on the EC2 parent.
+aws-config = { version = "=1.12.0", default-features = false, features = ["default-https-client", "rt-tokio"] }
+aws-sdk-s3 = { version = "=1.146.0", default-features = false, features = ["default-https-client", "rt-tokio"] }
+aws-credential-types = "=1.3.0"
+base64 = "0.22"
+serde = { version = "1", features = ["derive"] }
+zeroize = "1"
 # Full schema from the shared upstream repo (bridge / node / orchestrator /
 # parent / signer packages). The parent runs on the untrusted host, so needing a
 # credential to build it costs nothing. Keep this rev in lockstep with the
@@ -85,6 +93,7 @@ rand = "0.8"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 vsock = "0.5"
+tokio-vsock = "=0.7.2"
 
 [features]
 default = []

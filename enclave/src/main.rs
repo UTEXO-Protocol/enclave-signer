@@ -94,6 +94,33 @@ fn main() {
 
     let state = EnclaveState::new(bitcoin_network);
 
+    #[cfg(feature = "kms-persistence")]
+    let state = {
+        // Explicit development import builds can run without AWS. Empty init
+        // still fails closed; there is no ephemeral-generation fallback. The
+        // existing release guard forbids allow-seed-import in production.
+        let import_only = cfg!(feature = "allow-seed-import")
+            && [
+                "KMS_KEY_ARN",
+                "KMS_REGION",
+                "KMS_SEED_ID",
+                "KMS_EXPECTED_EVM_ADDRESS",
+            ]
+            .iter()
+            .all(|name| std::env::var_os(name).is_none());
+        if import_only {
+            tracing::warn!("development import-only mode: KMS is unconfigured; empty InitializeKey requests will fail");
+            state
+        } else {
+            use utexo_bridge_enclave::{kms::CustodyFlow, seed_persistence::PersistentSeed};
+            // This application flow selects the measured custody namespace.
+            // The KMS client and native helper do not choose a default flow.
+            let source = PersistentSeed::from_env(CustodyFlow::RgbSwap)
+                .unwrap_or_else(|e| panic!("KMS persistence configuration is required: {e}"));
+            state.with_seed_source(Box::new(source))
+        }
+    };
+
     // Pinned bridge config from env. Folded into the attestation `user_data`
     // commitment and cross-checked on every SignEvm. Production deployments
     // must set EVM_CHAIN_ID, EVM_PROXY_CONTRACT_ADDRESS, RGB_ASSET_ID - a misconfigured
@@ -179,6 +206,7 @@ fn main() {
     // never lands in the EIF or the PCRs. `UTEXO_CLONING_SECRET` is a legacy/dev
     // fallback only and must not be baked into a release EIF. Needed only by
     // enclaves that serve `GetClone`. Never logged; `SecretBox` zeroizes it.
+    #[cfg(not(feature = "kms-persistence"))]
     if let Ok(secret) = std::env::var("UTEXO_CLONING_SECRET") {
         if !secret.is_empty() {
             if let Err(e) = state.set_donor_cloning_secret(secret) {
@@ -265,7 +293,11 @@ fn main() {
             let exec_vsock: u32 = std::env::var("HELIOS_EXECUTION_VSOCK_PORT")
                 .ok()
                 .and_then(|s| s.parse().ok())
-                .unwrap_or(8003);
+                .unwrap_or(if cfg!(feature = "kms-persistence") {
+                    8005
+                } else {
+                    8003
+                });
             let cons_local: u16 = std::env::var("HELIOS_CONSENSUS_LOCAL_PORT")
                 .ok()
                 .and_then(|s| s.parse().ok())
@@ -273,7 +305,20 @@ fn main() {
             let cons_vsock: u32 = std::env::var("HELIOS_CONSENSUS_VSOCK_PORT")
                 .ok()
                 .and_then(|s| s.parse().ok())
-                .unwrap_or(8004);
+                .unwrap_or(if cfg!(feature = "kms-persistence") {
+                    8006
+                } else {
+                    8004
+                });
+            // KMS custody reserves 8003 for KMS and 8004 for the broker.
+            // Keep the non-custody defaults; fail early on an explicit collision.
+            #[cfg(feature = "kms-persistence")]
+            assert!(
+                ![exec_vsock, cons_vsock]
+                    .iter()
+                    .any(|port| matches!(port, 8003 | 8004)),
+                "Helios vsock ports must not use the reserved KMS/broker ports 8003/8004"
+            );
             tracing::info!(
                 exec_local,
                 exec_vsock,
@@ -488,7 +533,7 @@ where
     let ctx = Arc::new(ctx);
     // Bounded queue doubles as the connection cap: a full queue means all
     // workers are busy and the backlog is at its limit.
-    let (tx, rx) = sync_channel::<DeadlineStream<S>>(MAX_QUEUED_CONNECTIONS);
+    let (tx, rx) = sync_channel::<(S, std::time::Instant)>(MAX_QUEUED_CONNECTIONS);
     let rx = Arc::new(Mutex::new(rx));
 
     for worker_id in 0..WORKER_THREADS {
@@ -508,7 +553,12 @@ where
                 guard.recv()
             };
             match next {
-                Ok(stream) => server::handle_connection(stream, &ctx),
+                Ok((stream, deadline)) => {
+                    // Preserve the accept-time budget through framing and
+                    // dispatch, including persistent seed initialization.
+                    let stream = DeadlineStream::with_deadline(stream, deadline, IO_IDLE_TIMEOUT);
+                    server::handle_connection_until(stream, &ctx, deadline);
+                }
                 // All senders dropped: the listener is gone, so is the process.
                 Err(_) => break,
             }
@@ -517,21 +567,21 @@ where
 
     for stream in incoming {
         match stream {
-            Ok(stream) => match tx.try_send(DeadlineStream::new(
-                stream,
-                TOTAL_REQUEST_TIMEOUT,
-                IO_IDLE_TIMEOUT,
-            )) {
-                Ok(()) => tracing::debug!("connection queued"),
-                Err(TrySendError::Full(_)) => tracing::warn!(
-                    cap = MAX_QUEUED_CONNECTIONS,
-                    "connection queue full; dropping connection (slow-request backpressure)"
-                ),
-                Err(TrySendError::Disconnected(_)) => {
-                    tracing::error!("no workers available; stopping accept loop");
-                    break;
+            // Count queue wait in the same budget as framing and custody;
+            // otherwise work could begin after the parent has timed out.
+            Ok(stream) => {
+                match tx.try_send((stream, std::time::Instant::now() + TOTAL_REQUEST_TIMEOUT)) {
+                    Ok(()) => tracing::debug!("connection queued"),
+                    Err(TrySendError::Full(_)) => tracing::warn!(
+                        cap = MAX_QUEUED_CONNECTIONS,
+                        "connection queue full; dropping connection (slow-request backpressure)"
+                    ),
+                    Err(TrySendError::Disconnected(_)) => {
+                        tracing::error!("no workers available; stopping accept loop");
+                        break;
+                    }
                 }
-            },
+            }
             Err(e) => tracing::error!("accept error: {e}"),
         }
     }

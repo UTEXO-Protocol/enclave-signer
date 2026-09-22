@@ -1,5 +1,8 @@
 # Enclave-to-enclave seed cloning — three-message handshake
 
+This lifecycle applies without `kms-persistence`. See
+[KMS seed persistence](../kms-persistence.md) for the alternative lifecycle.
+
 ```mermaid
 sequenceDiagram
     actor Op as Operator

@@ -76,6 +76,13 @@ compile_error!(
      may sign, and refusing to build is safer than defaulting to either"
 );
 
+// A new flow needs its own explicit encryption context before enabling custody.
+// In particular, the current combined mint/burn image must retain its lifecycle.
+#[cfg(all(feature = "kms-persistence", not(feature = "rgb-swap")))]
+compile_error!(
+    "kms-persistence is currently supported only by rgb-swap; a new flow requires its own custody context"
+);
+
 pub mod attestation;
 pub mod cloning;
 // Disciplines CLOCK_REALTIME from the hypervisor PTP source (`/dev/ptp0`) so a
@@ -88,8 +95,12 @@ pub mod conn;
 pub mod error;
 pub mod framing;
 pub mod keys;
+#[cfg(feature = "kms-persistence")]
+pub mod kms;
 pub mod networks;
 pub mod policy;
+#[cfg(feature = "kms-persistence")]
+pub mod seed_persistence;
 pub mod server;
 pub mod state;
 

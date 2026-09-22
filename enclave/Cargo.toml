@@ -53,6 +53,11 @@ rgb-invoicing = { version = "=0.11.1-rc.10", default-features = false, optional 
 attestation-verify = { path = "../attestation-verify" }
 serde = { version = "1", features = ["derive"] }
 
+# Optional seed custody. The official AWS Nitro SDK helper owns KMS
+# transport, authentication, attestation and Recipient envelope cryptography.
+base64 = { version = "0.22", optional = true }
+serde_json = { version = "1", optional = true }
+
 alloy = { version = "2.1.0", default-features = false, features = ["provider-http", "rpc-types-eth", "reqwest-rustls-tls"], optional = true }
 tokio = { version = "1.52.3", default-features = false, features = ["rt", "rt-multi-thread", "time"], optional = true }
 helios-ethereum = { git = "https://github.com/a16z/helios", tag = "0.11.1", optional = true }
@@ -106,10 +111,14 @@ ccd = []
 #
 # `rgb-swap` = pools/send-receive: the bridge holds an allocation and moves it
 # with BFA `Transfer` in both directions.
-rgb-swap = ["rgb"]
+rgb-swap = ["rgb", "kms-persistence"]
 # `rgb-mint-burn` = the bridge owns the contract's mint right: deposits mint
 # with BFA `Bridge`, withdrawals destroy with BFA `Burn`.
 rgb-mint-burn = ["rgb"]
+
+# Seed custody is a separate capability. Only rgb-swap selects it today;
+# a future mint-only flow must select its own measured custody context first.
+kms-persistence = ["dep:base64", "dep:serde_json", "nix/poll"]
 
 vsock = []
 # DANGER: allows importing a raw seed over the wire. Testing only.
