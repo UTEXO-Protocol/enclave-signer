@@ -470,12 +470,9 @@ fn main() {
     }
 }
 
-/// Accept loop with bounded concurrency and per-request deadlines.
-/// Each accepted socket is wrapped in a [`DeadlineStream`] (idle + total
-/// request timeouts) and handed to a fixed worker pool via a bounded queue;
-/// over-cap connections are dropped (closed) so one slow request can't starve
-/// the others. Generic over the socket type so the vsock and TCP branches share
-/// one implementation.
+/// Accept loop: a fixed worker pool behind a bounded queue. The deadline starts
+/// at accept, so queue wait counts and an expired connection fails its first
+/// read. Excess connections are dropped. Generic over the socket type.
 fn serve<I, S>(incoming: I, ctx: ServerContext)
 where
     I: IntoIterator<Item = std::io::Result<S>>,
@@ -491,7 +488,7 @@ where
     let ctx = Arc::new(ctx);
     // Bounded queue doubles as the connection cap: a full queue means all
     // workers are busy and the backlog is at its limit.
-    let (tx, rx) = sync_channel::<S>(MAX_QUEUED_CONNECTIONS);
+    let (tx, rx) = sync_channel::<DeadlineStream<S>>(MAX_QUEUED_CONNECTIONS);
     let rx = Arc::new(Mutex::new(rx));
 
     for worker_id in 0..WORKER_THREADS {
@@ -511,11 +508,7 @@ where
                 guard.recv()
             };
             match next {
-                Ok(stream) => {
-                    let stream =
-                        DeadlineStream::new(stream, TOTAL_REQUEST_TIMEOUT, IO_IDLE_TIMEOUT);
-                    server::handle_connection(stream, &ctx);
-                }
+                Ok(stream) => server::handle_connection(stream, &ctx),
                 // All senders dropped: the listener is gone, so is the process.
                 Err(_) => break,
             }
@@ -524,7 +517,11 @@ where
 
     for stream in incoming {
         match stream {
-            Ok(stream) => match tx.try_send(stream) {
+            Ok(stream) => match tx.try_send(DeadlineStream::new(
+                stream,
+                TOTAL_REQUEST_TIMEOUT,
+                IO_IDLE_TIMEOUT,
+            )) {
                 Ok(()) => tracing::debug!("connection queued"),
                 Err(TrySendError::Full(_)) => tracing::warn!(
                     cap = MAX_QUEUED_CONNECTIONS,

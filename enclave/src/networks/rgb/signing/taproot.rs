@@ -23,7 +23,11 @@ pub struct TaprootSignJob {
 }
 
 /// Scan all PSBT inputs for taproot script-path leaves whose script contains
-/// one of our keys, and emit a sign job per (input, leaf, xonly) triple.
+/// one of our keys, and emit one entry per (input, leaf, xonly) triple.
+///
+/// This is the custody anchor. It checks control-block and derivation
+/// structure only, never `tap_script_sigs`. An input stays ours after we
+/// merge a signature into it.
 ///
 /// Authorization is anchored to `witness_utxo.script_pubkey` - for each
 /// `(control_block, script)` entry in `tap_scripts`, the control block must
@@ -34,7 +38,7 @@ pub struct TaprootSignJob {
 /// and (4) match the xonly pubkey our claimed BIP-86 derivation actually
 /// derives - closing the gap where a coordinator could forge `tap_key_origins`
 /// to point our fingerprint at someone else's key.
-pub fn find_taproot_sign_jobs(
+pub fn find_controlled_taproot_leaves(
     psbt: &Psbt,
     master_fingerprint: &Fingerprint,
     key_manager: &KeyManager,
@@ -104,10 +108,6 @@ pub fn find_taproot_sign_jobs(
                     continue;
                 }
 
-                if input.tap_script_sigs.contains_key(&(xonly_pk, leaf_hash)) {
-                    continue;
-                }
-
                 if !emitted.insert((input_idx, leaf_hash, xonly_pk)) {
                     continue;
                 }
@@ -124,6 +124,34 @@ pub fn find_taproot_sign_jobs(
     }
 
     jobs
+}
+
+/// The signing work left on this PSBT: the controlled leaves that do not yet
+/// carry an entry under our key, whatever that entry contains.
+pub fn find_taproot_sign_jobs(
+    psbt: &Psbt,
+    master_fingerprint: &Fingerprint,
+    key_manager: &KeyManager,
+) -> Vec<TaprootSignJob> {
+    find_controlled_taproot_leaves(psbt, master_fingerprint, key_manager)
+        .into_iter()
+        .filter(|job| {
+            !psbt.inputs[job.input_index]
+                .tap_script_sigs
+                .contains_key(&(job.xonly_pubkey, job.leaf_hash))
+        })
+        .collect()
+}
+
+/// Input indices of [`find_taproot_sign_jobs`], used only by tests to check
+/// signing work left on a PSBT. Custody code must never call the job
+/// resolver: that would be a regression.
+#[cfg(test)]
+pub(crate) fn outstanding_job_inputs(psbt: &Psbt, key_manager: &KeyManager) -> Vec<usize> {
+    find_taproot_sign_jobs(psbt, key_manager.master_fingerprint(), key_manager)
+        .into_iter()
+        .map(|job| job.input_index)
+        .collect()
 }
 
 /// Sign taproot script-path inputs in the PSBT.
@@ -504,6 +532,56 @@ mod tests {
         );
         let jobs = find_taproot_sign_jobs(&psbt, km.master_fingerprint(), &km);
         assert!(jobs.is_empty());
+        // The entry suppresses re-signing without revoking custody: the leaf
+        // is still ours, whatever that entry turns out to contain.
+        let leaves = find_controlled_taproot_leaves(&psbt, km.master_fingerprint(), &km);
+        assert_eq!(leaves.len(), 1);
+        assert_eq!(leaves[0].input_index, 0);
+        assert_eq!(leaves[0].xonly_pubkey, our);
+        assert_eq!(leaves[0].leaf_hash, leaf_hash);
+    }
+
+    /// Another signer's *valid* contribution to the same leaf is not ours: it
+    /// neither consumes our job nor stands in for our custody.
+    #[test]
+    fn another_signers_entry_does_not_consume_our_job() {
+        let km = KeyManager::from_seed([0x42u8; 64], Network::Testnet).unwrap();
+        let (mut psbt, _, _, leaf_hash, _) = build_legit_taproot_psbt(&km);
+        let our = our_xonly(&km);
+        let secp = Secp256k1::new();
+        // 0xA1 is a real co-signer of this leaf (see build_legit_taproot_psbt).
+        let foreign_kp =
+            Keypair::from_secret_key(&secp, &SecretKey::from_slice(&[0xA1; 32]).unwrap());
+        let foreign = XOnlyPublicKey::from_keypair(&foreign_kp).0;
+
+        let prevouts = [psbt.inputs[0].witness_utxo.clone().unwrap()];
+        let sighash = SighashCache::new(&psbt.unsigned_tx)
+            .taproot_script_spend_signature_hash(
+                0,
+                &Prevouts::All(&prevouts),
+                leaf_hash,
+                TapSighashType::Default,
+            )
+            .unwrap();
+        let msg = Message::from_digest(*sighash.as_byte_array());
+        let foreign_sig = secp.sign_schnorr_no_aux_rand(&msg, &foreign_kp);
+        secp.verify_schnorr(&foreign_sig, &msg, &foreign).unwrap();
+        psbt.inputs[0].tap_script_sigs.insert(
+            (foreign, leaf_hash),
+            taproot::Signature {
+                signature: foreign_sig,
+                sighash_type: TapSighashType::Default,
+            },
+        );
+
+        for found in [
+            find_taproot_sign_jobs(&psbt, km.master_fingerprint(), &km),
+            find_controlled_taproot_leaves(&psbt, km.master_fingerprint(), &km),
+        ] {
+            assert_eq!(found.len(), 1);
+            assert_eq!(found[0].xonly_pubkey, our);
+            assert_eq!(found[0].leaf_hash, leaf_hash);
+        }
     }
 
     #[test]

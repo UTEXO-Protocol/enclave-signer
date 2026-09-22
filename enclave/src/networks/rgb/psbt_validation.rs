@@ -96,9 +96,12 @@ pub fn validate_psbt_bytes(psbt_bytes: &[u8]) -> Result<()> {
 /// Enforces, fail-closed:
 ///   1. The consignment's last transition is the type this flow signs.
 ///   2. Identity bind: `psbt.unsigned_tx.compute_txid()` equals the
-///      consignment's last witness txid. A segwit txid commits to every
-///      non-witness field, so equality means signing this PSBT finalizes
-///      exactly the validated transition.
+///      consignment's last witness txid, and every input spends a native
+///      witness program. A native witness program finalizes with an empty
+///      `scriptSig` (BIP-141), so the unsigned txid is the final txid and
+///      signing this PSBT finalizes the validated transition. An input that
+///      finalizes with a `scriptSig` (P2SH-wrapped SegWit, legacy) moves the
+///      txid off the one the consignment names, so it is refused here.
 ///   3. Per-input canary: when the consignment embeds the full witness tx, the
 ///      PSBT input outpoints must equal its prevout set. Redundant given (2);
 ///      a mismatch means a broken consignment invariant.
@@ -148,10 +151,9 @@ pub fn validate_psbt_anchors_transition(
     })?;
     flow::assert_signing_transition(last)?;
 
-    // Derive the txid from `unsigned_tx`, never a finalized/extracted tx
-    // (a non-segwit input's scriptSig would change the txid post-signing).
-    // The flow's transition gate above is what makes this last-bundle txid the
-    // transition's witness.
+    // Derive the txid from `unsigned_tx`, never a finalized tx; the input
+    // gate below makes the two equal. The transition gate above makes this
+    // bundle's txid the transition's witness.
     let expected = validated.last_witness_txid.ok_or_else(|| {
         EnclaveError::CrossCheck(
             "consignment carries no witness txid for its last transition - \
@@ -165,6 +167,22 @@ pub fn validate_psbt_anchors_transition(
             "PSBT does not finalize the consignment's transition: unsigned txid {psbt_txid} != \
              consignment witness txid {expected}"
         )));
+    }
+
+    for (i, input) in psbt.inputs.iter().enumerate() {
+        let Some(utxo) = input.witness_utxo.as_ref() else {
+            return Err(EnclaveError::CrossCheck(format!(
+                "send-RGB PSBT input {i} carries no witness_utxo - cannot prove it finalizes \
+                 without a scriptSig"
+            )));
+        };
+        if !utxo.script_pubkey.is_witness_program() {
+            return Err(EnclaveError::CrossCheck(format!(
+                "send-RGB PSBT input {i} spends a non-native-SegWit output; its finalized \
+                 scriptSig would change the txid the consignment binds ({psbt_txid}) - \
+                 refusing to sign"
+            )));
+        }
     }
 
     if let Some(ref prevouts) = validated.last_transfer_witness_prevouts {
@@ -778,7 +796,29 @@ mod tests {
                     },
                 ],
             };
-            Psbt::from_unsigned_tx(unsigned_tx).expect("from_unsigned_tx")
+            let mut psbt = Psbt::from_unsigned_tx(unsigned_tx).expect("from_unsigned_tx");
+            for input in psbt.inputs.iter_mut() {
+                input.witness_utxo = Some(TxOut {
+                    value: Amount::from_sat(50_000),
+                    script_pubkey: p2tr_spk(),
+                });
+            }
+            psbt
+        }
+
+        /// A native-SegWit script pubkey: the NUMS point as a bare P2TR output.
+        fn p2tr_spk() -> ScriptBuf {
+            use bitcoin::key::TapTweak;
+            const NUMS: [u8; 32] = [
+                0x50, 0x92, 0x9b, 0x74, 0xc1, 0xa0, 0x49, 0x54, 0xb7, 0x8b, 0x4b, 0x60, 0x35, 0xe9,
+                0x7a, 0x5e, 0x07, 0x8a, 0x5a, 0x0f, 0x28, 0xec, 0x96, 0xd5, 0x47, 0xbf, 0xee, 0x9a,
+                0xce, 0x80, 0x3a, 0xc0,
+            ];
+            ScriptBuf::new_p2tr_tweaked(
+                bitcoin::XOnlyPublicKey::from_slice(&NUMS)
+                    .unwrap()
+                    .dangerous_assume_tweaked(),
+            )
         }
 
         /// Stand-in ownership oracles. Fn items coerce to `SelfOwnedOutpoint`.
@@ -953,6 +993,79 @@ mod tests {
             );
         }
 
+        fn with_aux_prevout(psbt: &mut Psbt, spk: ScriptBuf) {
+            psbt.inputs[1].witness_utxo.as_mut().unwrap().script_pubkey = spk;
+        }
+
+        /// A vanilla P2WPKH funding input alongside ours: native SegWit, so it
+        /// finalizes with an empty `scriptSig` and the bind still holds.
+        #[test]
+        fn accepts_native_segwit_auxiliary_input() {
+            let mut psbt = psbt_with_two_inputs();
+            with_aux_prevout(
+                &mut psbt,
+                ScriptBuf::new_p2wpkh(&bitcoin::WPubkeyHash::from_byte_array([0xC1; 20])),
+            );
+            let validated = validated_for(&psbt, 1_000);
+            assert!(
+                validate_psbt_anchors_transition(&psbt, &validated, 1_000, 0, &owns_vout_1).is_ok()
+            );
+        }
+
+        /// A P2SH-wrapped SegWit input must push its redeemScript into
+        /// `scriptSig` (BIP-16), which moves the txid off the one the
+        /// consignment names.
+        #[test]
+        fn refuses_wrapped_segwit_auxiliary_input() {
+            let mut psbt = psbt_with_two_inputs();
+            let redeem = ScriptBuf::new_p2wpkh(&bitcoin::WPubkeyHash::from_byte_array([0xC1; 20]));
+            with_aux_prevout(&mut psbt, ScriptBuf::new_p2sh(&redeem.script_hash()));
+            psbt.inputs[1].redeem_script = Some(redeem.clone());
+            let validated = validated_for(&psbt, 1_000);
+            let err = validate_psbt_anchors_transition(&psbt, &validated, 1_000, 0, &owns_vout_1)
+                .unwrap_err();
+            assert!(err.to_string().contains("scriptSig"), "{err}");
+
+            // The finalization the refusal points at: pushing the redeemScript
+            // moves the txid off the one the consignment binds.
+            let mut finalized = psbt.unsigned_tx.clone();
+            finalized.input[1].script_sig = bitcoin::blockdata::script::Builder::new()
+                .push_slice(
+                    bitcoin::script::PushBytesBuf::try_from(redeem.to_bytes()).expect("redeem"),
+                )
+                .into_script();
+            assert_eq!(
+                validated.last_witness_txid,
+                Some(psbt.unsigned_tx.compute_txid())
+            );
+            assert_ne!(finalized.compute_txid(), psbt.unsigned_tx.compute_txid());
+        }
+
+        #[test]
+        fn refuses_legacy_auxiliary_input() {
+            let mut psbt = psbt_with_two_inputs();
+            with_aux_prevout(
+                &mut psbt,
+                ScriptBuf::new_p2pkh(&bitcoin::PubkeyHash::from_byte_array([0xC1; 20])),
+            );
+            let validated = validated_for(&psbt, 1_000);
+            let err = validate_psbt_anchors_transition(&psbt, &validated, 1_000, 0, &owns_vout_1)
+                .unwrap_err();
+            assert!(err.to_string().contains("scriptSig"), "{err}");
+        }
+
+        /// Without `witness_utxo` the enclave cannot know the input's script
+        /// type at all, so it cannot prove the txid is stable.
+        #[test]
+        fn refuses_input_without_witness_utxo() {
+            let mut psbt = psbt_with_two_inputs();
+            psbt.inputs[1].witness_utxo = None;
+            let validated = validated_for(&psbt, 1_000);
+            let err = validate_psbt_anchors_transition(&psbt, &validated, 1_000, 0, &owns_vout_1)
+                .unwrap_err();
+            assert!(err.to_string().contains("witness_utxo"), "{err}");
+        }
+
         /// The production pools-send shape: the recipient is paid exactly the
         /// credited amount on a blinded seal, and the rest of the bridge's
         /// allocation returns as change on a revealed seal pointing at an
@@ -973,6 +1086,51 @@ mod tests {
                 validate_psbt_anchors_transition(&psbt, &validated, 1_000, 100, &owns_vout_1)
                     .is_ok()
             );
+        }
+
+        /// Asset change survives signature merging through the real
+        /// ownership oracle.
+        #[cfg(feature = "rgb-swap")]
+        #[test]
+        fn change_leg_survives_merging_our_own_signature() {
+            use crate::keys::AccountType;
+            use crate::networks::rgb::btc_ownership::{self, tests as fx};
+
+            let keys = fx::km();
+            let (a_spk, ..) =
+                fx::multisig_address(fx::our_key_on(&keys, AccountType::Colored, 0, 0).0);
+            let (b_spk, ..) =
+                fx::multisig_address(fx::our_key_on(&keys, AccountType::Colored, 0, 1).0);
+            let (foreign, ..) = fx::multisig_address(fx::foreign_xonly(0xB1));
+            let mut psbt = fx::psbt_with_n(2, &[(foreign, 1_000), (a_spk, 90_000), (b_spk, 8_000)]);
+            fx::anchor_input(&mut psbt, 0, &keys, AccountType::Colored, 0, 0, 100_000);
+            fx::anchor_input(&mut psbt, 1, &keys, AccountType::Colored, 0, 1, 100_000);
+
+            // The server's on-PSBT branch, verbatim.
+            let oracle = |psbt: &Psbt, outpoint: OutPoint| -> Result<bool> {
+                Ok(outpoint.txid == psbt.unsigned_tx.compute_txid()
+                    && btc_ownership::self_owned_output_indices(psbt, &keys)
+                        .contains(&outpoint.vout))
+            };
+
+            let legs = |psbt: &Psbt| {
+                let validated = validated_with(psbt, vec![confidential(900), revealed(4_100, 1)]);
+                validate_psbt_anchors_transition(psbt, &validated, 1_000, 100, &oracle)
+            };
+
+            let before = legs(&psbt);
+            let tx_before = psbt.unsigned_tx.clone();
+            fx::merge_own_signature(&mut psbt, &keys, 0);
+            let after = legs(&psbt);
+            assert_eq!(psbt.unsigned_tx, tx_before);
+
+            for (when, got) in [("before", before), ("after", after)] {
+                let legs = got.unwrap_or_else(|e| {
+                    panic!("asset legs {when} merging A: {e}");
+                });
+                assert_eq!(legs.recipient, 900, "recipient leg {when} merging A");
+                assert_eq!(legs.change, 4_100, "change leg {when} merging A");
+            }
         }
 
         /// The over-send this whole bind exists for: a genuine
