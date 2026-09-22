@@ -322,7 +322,9 @@ impl ParentService for ParentAdapterService {
         let inner = request.into_inner();
 
         let common = Self::common_sign_request(&inner)?;
-        let data_type = DataType::try_from(common.data_type).unwrap_or(DataType::Transaction);
+        let data_type = DataType::try_from(common.data_type).map_err(|_| {
+            Status::invalid_argument(format!("unknown data_type: {}", common.data_type))
+        })?;
         let signer_network_id = common.dst_network_id;
 
         // Concordium: the listener has already validated the operation and
@@ -605,7 +607,9 @@ impl ParentService for ParentAdapterService {
         request: Request<PublicKeyRequest>,
     ) -> Result<Response<PublicKeyResponse>, Status> {
         let inner = request.into_inner();
-        let data_type = DataType::try_from(inner.data_type).unwrap_or(DataType::Transaction);
+        let data_type = DataType::try_from(inner.data_type).map_err(|_| {
+            Status::invalid_argument(format!("unknown data_type: {}", inner.data_type))
+        })?;
         tracing::info!(
             ?data_type,
             network_id = inner.network_id,
