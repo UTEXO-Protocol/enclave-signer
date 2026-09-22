@@ -418,6 +418,8 @@ mod tests {
             rgb_validator: None,
             #[cfg(feature = "spv")]
             header_chain: &header_chain,
+            #[cfg(feature = "spv")]
+            chain_pins: &crate::networks::rgb::spv_validation::ChainPins::new(),
             // EVM destinations never reach the send-RGB PSBT bind.
             #[cfg(feature = "rgb-validation")]
             self_owned_psbt_outputs: None,
