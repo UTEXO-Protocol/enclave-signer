@@ -277,7 +277,8 @@ pub fn validate_psbt_anchors_transition(
 ///     [`crate::networks::rgb::btc_ownership::self_owned_output_indices`];
 ///   * on an earlier tx - the tx is fetched and verified by
 ///     [`crate::networks::rgb::validation::RgbValidator::fetch_transaction`],
-///     then its `script_pubkey` must be an input script we co-control.
+///     then its `script_pubkey` must be in
+///     [`crate::networks::rgb::btc_ownership::asset_change_scripts`].
 #[cfg(feature = "rgb-validation")]
 pub type SelfOwnedOutpoint<'a> = &'a dyn Fn(&Psbt, bitcoin::OutPoint) -> Result<bool>;
 
@@ -1095,15 +1096,18 @@ mod tests {
             use crate::keys::AccountType;
             use crate::networks::rgb::btc_ownership::{self, tests as fx};
 
+            // The bridge shape: one Colored asset input carrying the change
+            // leg, plus a Vanilla input funding the fee. Exactly one Colored
+            // script, which is what `asset_change_scripts` accepts.
             let keys = fx::km();
             let (a_spk, ..) =
                 fx::multisig_address(fx::our_key_on(&keys, AccountType::Colored, 0, 0).0);
-            let (b_spk, ..) =
-                fx::multisig_address(fx::our_key_on(&keys, AccountType::Colored, 0, 1).0);
+            let (v_spk, ..) =
+                fx::multisig_address(fx::our_key_on(&keys, AccountType::Vanilla, 0, 0).0);
             let (foreign, ..) = fx::multisig_address(fx::foreign_xonly(0xB1));
-            let mut psbt = fx::psbt_with_n(2, &[(foreign, 1_000), (a_spk, 90_000), (b_spk, 8_000)]);
+            let mut psbt = fx::psbt_with_n(2, &[(foreign, 1_000), (a_spk, 90_000), (v_spk, 8_000)]);
             fx::anchor_input(&mut psbt, 0, &keys, AccountType::Colored, 0, 0, 100_000);
-            fx::anchor_input(&mut psbt, 1, &keys, AccountType::Colored, 0, 1, 100_000);
+            fx::anchor_input(&mut psbt, 1, &keys, AccountType::Vanilla, 0, 0, 100_000);
 
             // The server's on-PSBT branch, verbatim.
             let oracle = |psbt: &Psbt, outpoint: OutPoint| -> Result<bool> {

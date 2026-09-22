@@ -32,7 +32,7 @@
 use crate::config::BridgeConfig;
 use crate::error::{EnclaveError, Result};
 use crate::keys::KeyManager;
-use crate::networks::rgb::btc_ownership::{output_is_self_owned, self_controlled_input_scripts};
+use crate::networks::rgb::btc_ownership::{self_controlled_input_scripts, unowned_output_sats};
 use crate::proto::SignBtcRequest;
 
 /// Validate a plain-BTC `SignBtcRequest` before signing: output self-ownership
@@ -78,17 +78,9 @@ pub fn validate_btc_request(
     //    unconditionally. Anchored to the unsigned tx's outputs, which the
     //    segwit sighash commits to.
     let input_scripts = self_controlled_input_scripts(&psbt, keys);
-    let mut unowned_sat: u64 = 0;
-    for i in 0..psbt.unsigned_tx.output.len() {
-        if output_is_self_owned(&psbt, i, &input_scripts) {
-            continue;
-        }
-        unowned_sat = unowned_sat
-            .checked_add(psbt.unsigned_tx.output[i].value.to_sat())
-            .ok_or_else(|| {
-                EnclaveError::CrossCheck("plain-BTC unowned output value overflow".into())
-            })?;
-    }
+    let unowned_sat = unowned_output_sats(&psbt, &input_scripts).ok_or_else(|| {
+        EnclaveError::CrossCheck("plain-BTC unowned output value overflow".into())
+    })?;
 
     if unowned_sat > 0 {
         if cfg.btc_max_unowned_sats == 0 {
@@ -178,19 +170,8 @@ pub fn validate_rgb_psbt_sats(
     let input_scripts =
         crate::networks::rgb::btc_ownership::self_controlled_input_scripts_scoped(psbt, keys, None);
 
-    let mut unowned_sat: u64 = 0;
-    for (i, txout) in psbt.unsigned_tx.output.iter().enumerate() {
-        if input_scripts.contains(txout.script_pubkey.as_bytes()) {
-            continue;
-        }
-        unowned_sat = unowned_sat
-            .checked_add(txout.value.to_sat())
-            .ok_or_else(|| {
-                EnclaveError::CrossCheck(format!(
-                    "send-RGB unowned output value overflow at output {i}"
-                ))
-            })?;
-    }
+    let unowned_sat = unowned_output_sats(psbt, &input_scripts)
+        .ok_or_else(|| EnclaveError::CrossCheck("send-RGB unowned output value overflow".into()))?;
 
     if cfg.rgb_max_unowned_sats == 0 {
         // Unset must never read as "no limit".
