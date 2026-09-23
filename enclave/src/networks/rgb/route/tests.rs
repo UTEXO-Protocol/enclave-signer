@@ -1,6 +1,8 @@
 use super::*;
+#[cfg(rgb_to_evm)]
 use validation::{bfa, TransitionSummary, ValidatedConsignment};
 
+#[cfg(rgb_to_evm)]
 fn validated_consignment(
     transition_type: u16,
     total_output_amount: u64,
@@ -33,17 +35,17 @@ fn validated_consignment(
 
 /// A withdrawal consignment shaped for this build's flow, carrying
 /// `amount` where that flow reads it.
-#[cfg(feature = "rgb-swap")]
+#[cfg(all(feature = "rgb-swap", rgb_to_evm))]
 fn funds_out_consignment(amount: u64, op_id: &str) -> ValidatedConsignment {
     validated_consignment(bfa::TS_TRANSFER, amount, None, op_id)
 }
 
-#[cfg(feature = "rgb-mint-burn")]
+#[cfg(all(feature = "rgb-mint-burn", rgb_to_evm))]
 fn funds_out_consignment(amount: u64, op_id: &str) -> ValidatedConsignment {
     validated_consignment(bfa::TS_BURN, 0, Some(amount), op_id)
 }
 
-#[cfg(feature = "rgb-swap")]
+#[cfg(all(feature = "rgb-swap", rgb_to_evm, rgb_to_evm))]
 #[test]
 fn route_proof_uses_transfer_output_amount() {
     let op_id = "0xAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
@@ -62,7 +64,7 @@ fn route_proof_uses_transfer_output_amount() {
     );
 }
 
-#[cfg(feature = "rgb-mint-burn")]
+#[cfg(all(feature = "rgb-mint-burn", rgb_to_evm, rgb_to_evm))]
 #[test]
 fn route_proof_uses_burn_metadata_amount() {
     let op_id = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
@@ -78,7 +80,7 @@ fn route_proof_uses_burn_metadata_amount() {
     assert_eq!(proof.operation_id.as_deref(), Some(op_id));
 }
 
-#[cfg(feature = "rgb-mint-burn")]
+#[cfg(all(feature = "rgb-mint-burn", rgb_to_evm, rgb_to_evm))]
 #[test]
 fn route_proof_rejects_burn_without_burned_amount() {
     let err = route_proof_from_validated_consignment(&validated_consignment(
@@ -92,6 +94,7 @@ fn route_proof_rejects_burn_without_burned_amount() {
     assert!(err.to_string().contains("burn transition is missing"));
 }
 
+#[cfg(rgb_to_evm)]
 #[test]
 fn route_proof_rejects_non_hex_operation_id() {
     let err = route_proof_from_validated_consignment(&funds_out_consignment(
@@ -104,6 +107,7 @@ fn route_proof_rejects_non_hex_operation_id() {
 }
 
 /// The other flow's withdrawal shape must not authorize a release here.
+#[cfg(rgb_to_evm)]
 #[test]
 fn route_proof_rejects_the_other_flows_shape() {
     let op_id = "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd";
@@ -136,6 +140,7 @@ fn route_proof_rejects_the_other_flows_shape() {
 /// consignment, which the enclave now refuses at the schema gate before any
 /// of these reaches the asset bind. Drop every `#[ignore]` in this module
 /// once a BFA consignment lands in `enclave/tests/fixtures/`.
+#[cfg(evm_to_rgb)]
 mod asset_bind {
     use super::*;
     use crate::config::BridgeConfig;

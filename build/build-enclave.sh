@@ -46,7 +46,8 @@ OUT_DIR="${OUT_DIR:-$SCRIPT_DIR}"
 IMAGE_TAG="${IMAGE_TAG:-utexo-bridge-enclave:latest}"
 # Which enclave image to build. Defaults to the combined (rgb+ccd) image; set
 # DOCKERFILE=Dockerfile.enclave.rgb (send/receive RGB flow),
-# Dockerfile.enclave.mint-burn (the BFA mint/burn EIF), or
+# Dockerfile.enclave.mint / Dockerfile.enclave.burn (the two BFA mint/burn
+# signer EIFs), or
 # Dockerfile.enclave.ccd for a lean single-network EIF. Every variant
 # needs private dependency credentials. EIF_NAME names the output .eif (and thus the SHA256SUMS
 # entry); default keeps the historical artifact name.
@@ -55,7 +56,12 @@ EIF_NAME="${EIF_NAME:-utexo-bridge-enclave.eif}"
 EIF_PATH="$OUT_DIR/$EIF_NAME"
 
 ASSET_ARGS=()
-if [ "${DOCKERFILE##*/}" = "Dockerfile.enclave.bfa" ]; then
+# The BFA mint/burn images take the per-deployment asset id as a build arg.
+case "${DOCKERFILE##*/}" in
+    Dockerfile.enclave.mint|Dockerfile.enclave.burn) NEEDS_ASSET=1 ;;
+    *) NEEDS_ASSET=0 ;;
+esac
+if [ "$NEEDS_ASSET" = 1 ]; then
     if [[ ! "${RGB_ASSET_ID:-}" =~ [^[:space:]] ]]; then
         echo "Error: set RGB_ASSET_ID to the approved BFA contract id before building BFA" >&2
         exit 1

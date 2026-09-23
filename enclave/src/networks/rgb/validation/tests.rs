@@ -4,11 +4,19 @@
 use std::io::Cursor;
 
 use rgb_consignment::{FungibleAllocation, FungibleEntry, SealInfo, TransitionInfo};
-use rgbstd::containers::{ConsignmentExt, FileContent, Transfer};
+#[cfg(rgb_to_evm)]
+use rgbstd::containers::ConsignmentExt;
+use rgbstd::containers::{FileContent, Transfer};
+#[cfg(rgb_to_evm)]
 use sha3::{Digest, Keccak256};
 
+// The source-path tests below (payload gate, source asset bind) are the
+// RGB -> EVM direction.
+#[cfg(rgb_to_evm)]
 use crate::error::Result;
+#[cfg(rgb_to_evm)]
 use crate::networks::ValidationContext;
+#[cfg(rgb_to_evm)]
 use crate::proto::RgbSource;
 
 use super::asset_bind::*;
@@ -18,6 +26,7 @@ use super::bfa::*;
 use super::consignment::*;
 use super::indexer::*;
 use super::schema::*;
+#[cfg(rgb_to_evm)]
 use super::source::*;
 use super::types::*;
 
@@ -28,10 +37,12 @@ const TRANSFER_FIXTURE: &[u8] =
 const CONTRACT_FIXTURE: &[u8] =
     include_bytes!("../../../../tests/fixtures/contract_consignment.rgbc");
 
+use crate::config::BridgeConfig;
+#[cfg(rgb_to_evm)]
 use crate::config::{
-    BridgeConfig, DEFAULT_MAX_CONSIGNMENT_BYTES, DEFAULT_MAX_MERKLE_PROOFS,
-    DEFAULT_MAX_TOTAL_PROOF_BYTES,
+    DEFAULT_MAX_CONSIGNMENT_BYTES, DEFAULT_MAX_MERKLE_PROOFS, DEFAULT_MAX_TOTAL_PROOF_BYTES,
 };
+#[cfg(rgb_to_evm)]
 use crate::proto::MerkleProofEntry;
 
 #[test]
@@ -806,6 +817,7 @@ fn rejects_random_bytes_with_parse_error() {
 // it - validity comes from the bytes, never the flag.
 
 /// keccak256(bytes) in the wire shape `validate_source_payload` expects.
+#[cfg(rgb_to_evm)]
 fn keccak(bytes: &[u8]) -> Vec<u8> {
     Keccak256::digest(bytes).to_vec()
 }
@@ -815,6 +827,7 @@ fn keccak(bytes: &[u8]) -> Vec<u8> {
 /// `consignment_valid` is deliberately `false`: the flag is not
 /// authoritative, so anything that validates with this fixture also
 /// proves a `false` flag cannot veto byte-derived validity.
+#[cfg(rgb_to_evm)]
 fn fixture_source(asset_id: &str) -> RgbSource {
     RgbSource {
         consignment_valid: false,
@@ -831,6 +844,7 @@ fn fixture_source(asset_id: &str) -> RgbSource {
 /// matching keccak256 pass the payload gate. `Ok` here is "past the hash
 /// check" in full - everything after this gate in `validate_source` is
 /// validator/SPV work, not payload shape.
+#[cfg(rgb_to_evm)]
 #[test]
 fn accepts_valid_consignment_hash() {
     assert!(validate_source_payload(
@@ -843,6 +857,7 @@ fn accepts_valid_consignment_hash() {
 /// A consignment larger than the configured cap is rejected by the payload
 /// gate with the aggregate-size error *before* any rgbstd parse (the error
 /// is the size cap, not a decode failure).
+#[cfg(rgb_to_evm)]
 #[test]
 fn rejects_oversized_consignment_before_parse() {
     let mut source = fixture_source("rgb:any-declared-asset");
@@ -856,6 +871,7 @@ fn rejects_oversized_consignment_before_parse() {
 
 /// Boundary: a consignment exactly at the cap passes the aggregate gate
 /// (rejection is strictly `>` the cap).
+#[cfg(rgb_to_evm)]
 #[test]
 fn accepts_consignment_at_size_cap() {
     let mut source = fixture_source("rgb:any-declared-asset");
@@ -866,6 +882,7 @@ fn accepts_consignment_at_size_cap() {
 
 /// The caps are operator-configurable: a smaller `max_consignment_bytes`
 /// rejects a consignment the default would accept.
+#[cfg(rgb_to_evm)]
 #[test]
 fn honors_configured_consignment_cap() {
     let mut source = fixture_source("rgb:any-declared-asset");
@@ -886,6 +903,7 @@ fn honors_configured_consignment_cap() {
 
 /// Too many Merkle proofs is rejected on count alone, even when each proof
 /// is individually tiny.
+#[cfg(rgb_to_evm)]
 #[test]
 fn rejects_too_many_merkle_proofs() {
     let mut source = fixture_source("rgb:any-declared-asset");
@@ -901,6 +919,7 @@ fn rejects_too_many_merkle_proofs() {
 /// Proofs that each stay under the per-path-depth cap but exceed the
 /// aggregate byte budget are rejected by the aggregate gate - the case the
 /// per-field caps miss.
+#[cfg(rgb_to_evm)]
 #[test]
 fn rejects_aggregate_proof_bytes_over_budget() {
     // Each proof counts 32-byte txid + 32 siblings * 32 bytes = 1056 bytes,
@@ -929,6 +948,7 @@ fn rejects_aggregate_proof_bytes_over_budget() {
 /// Old `ignores_consignment_valid_flag_when_bytes_present`: an identical
 /// payload must validate identically whatever the host claims in
 /// `consignment_valid` - the gate never reads the flag.
+#[cfg(rgb_to_evm)]
 #[test]
 fn ignores_consignment_valid_flag_when_bytes_present() {
     let mut source = fixture_source("rgb:any-declared-asset");
@@ -941,6 +961,7 @@ fn ignores_consignment_valid_flag_when_bytes_present() {
 /// Old `rejects_empty_consignment_even_with_valid_flag` (P0 regression):
 /// a host-supplied `consignment_valid: true` with no consignment bytes
 /// must be rejected - the flag can never substitute for the bytes.
+#[cfg(rgb_to_evm)]
 #[test]
 fn rejects_empty_consignment_even_with_valid_flag() {
     let mut source = fixture_source("rgb:any-declared-asset");
@@ -955,6 +976,7 @@ fn rejects_empty_consignment_even_with_valid_flag() {
 }
 
 /// Symmetric pin: the flag cannot rescue a wrong hash either.
+#[cfg(rgb_to_evm)]
 #[test]
 fn rejects_consignment_hash_mismatch_even_with_valid_flag() {
     let mut source = fixture_source("rgb:any-declared-asset");
@@ -991,6 +1013,7 @@ fn rejects_consignment_hash_mismatch_even_with_valid_flag() {
 /// consignment, which the enclave now refuses at the schema gate before any
 /// of these reaches the asset bind. Drop every `#[ignore]` in this module
 /// once a BFA consignment lands in `enclave/tests/fixtures/`.
+#[cfg(rgb_to_evm)]
 mod asset_bind {
     use super::*;
     use crate::config::BridgeConfig;
@@ -1114,6 +1137,7 @@ mod asset_bind {
             header_chain: &chain,
             chain_pins: &crate::networks::rgb::spv_crosscheck::ChainPins::new(),
             // Source validation never reaches the destination PSBT bind.
+            #[cfg(evm_to_rgb)]
             self_owned_psbt_outputs: None,
             bridge_events: &[],
         };

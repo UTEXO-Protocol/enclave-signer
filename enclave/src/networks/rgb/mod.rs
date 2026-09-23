@@ -14,14 +14,19 @@
 //! - `flow/`: the per-flow rules (send/receive vs mint/burn).
 //! - `invoice.rs`: the send-RGB recipient bind.
 
+// The PSBT-side checks (`SignBtc`, the mint PSBT bind, the recipient invoice)
+// belong to the EVM -> RGB direction only.
+#[cfg(evm_to_rgb)]
 pub mod btc_crosscheck;
+#[cfg(evm_to_rgb)]
 pub mod btc_ownership;
 #[cfg(feature = "rgb-validation")]
 pub mod flow;
 // The invoice bind reads a verified BridgeFundsIn log, so it only exists
 // where the enclave can fetch one (`evm-rpc` implies `rgb-validation`).
-#[cfg(feature = "evm-rpc")]
+#[cfg(all(feature = "evm-rpc", evm_to_rgb))]
 pub mod invoice;
+#[cfg(evm_to_rgb)]
 pub mod psbt_validation;
 mod route;
 pub mod signing;
@@ -31,6 +36,9 @@ pub mod spv_crosscheck;
 #[cfg(feature = "rgb-validation")]
 pub mod validation;
 
-#[cfg(feature = "rgb-validation")]
+#[cfg(evm_to_rgb)]
+pub use route::validate_destination;
+#[cfg(all(feature = "rgb-validation", evm_to_rgb))]
 pub use route::validate_destination_anchor;
-pub use route::{validate_destination, validate_source};
+#[cfg(rgb_to_evm)]
+pub use route::validate_source;

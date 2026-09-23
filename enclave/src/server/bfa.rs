@@ -42,7 +42,7 @@ fn ancestor_tx_hash(
 /// Pure, so the rule that decides which lock pays for which mint is testable
 /// without an EVM client - it is the one place a spent lock could be
 /// substituted for the one being paid now.
-#[cfg(feature = "rgb-mint-burn")]
+#[cfg(all(feature = "rgb-mint-burn", evm_to_rgb))]
 fn mint_lock_plan(
     mint_opids: &[[u8; 32]],
     terminal_opid: &[u8; 32],
@@ -162,6 +162,7 @@ fn bfa_binding_for(
 /// [`verify_mint_locks`], and a mint with no pair - or with one whose log does
 /// not bind to it - fails the whole validation. That is the point: a burn may
 /// only release funds that a real, verified lock once created.
+#[cfg(rgb_to_evm)]
 pub(super) fn bfa_burn_ancestry_events(
     ctx: &ServerContext,
     source: &enclave_proto::RgbSource,
@@ -190,7 +191,7 @@ pub(super) fn bfa_burn_ancestry_events(
 ///
 /// Empty vec when this is not an EVM-to-RGB request or the consignment is not a
 /// BFA one, so the swap path is unaffected.
-#[cfg(feature = "rgb-mint-burn")]
+#[cfg(all(feature = "rgb-mint-burn", evm_to_rgb))]
 pub(super) fn bfa_mint_events(
     ctx: &ServerContext,
     source: &enclave_proto::EvmSource,
@@ -243,7 +244,7 @@ pub(super) fn bfa_transfer_ancestry_events(
     )
 }
 
-#[cfg(all(test, feature = "bfa-mint"))]
+#[cfg(all(test, feature = "bfa-mint", evm_to_rgb))]
 mod mint_ancestry {
     use super::mint_lock_plan;
     use enclave_proto::MintAncestor;

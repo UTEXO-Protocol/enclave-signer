@@ -146,7 +146,7 @@ pub fn find_taproot_sign_jobs(
 /// Input indices of [`find_taproot_sign_jobs`], used only by tests to check
 /// signing work left on a PSBT. Custody code must never call the job
 /// resolver: that would be a regression.
-#[cfg(test)]
+#[cfg(all(test, evm_to_rgb))]
 pub(crate) fn outstanding_job_inputs(psbt: &Psbt, key_manager: &KeyManager) -> Vec<usize> {
     find_taproot_sign_jobs(psbt, key_manager.master_fingerprint(), key_manager)
         .into_iter()

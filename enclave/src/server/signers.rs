@@ -4,7 +4,9 @@
 
 use super::context::ServerContext;
 use crate::error::{EnclaveError, Result};
+#[cfg(rgb_to_evm)]
 use crate::networks::evm::signing::{build_evm_domain, funds_out_digest, lz_funds_out_digest};
+#[cfg(rgb_to_evm)]
 use crate::networks::evm::validation::LZ_FUNDS_OUT_SELECTOR;
 use crate::proto::enclave_response::Response;
 use crate::proto::*;
@@ -37,6 +39,7 @@ fn assert_chain_pins_unchanged(
 /// `params` comes from destination validation, so the digest commits to exactly
 /// the fields cross-checked there. `None` on the LayerZero route, whose param
 /// shape is not `FundsOutParams` - `lz_funds_out_digest` decodes its own.
+#[cfg(rgb_to_evm)]
 pub(super) fn handle_sign_evm(
     ctx: &ServerContext,
     req: EvmDestination,
@@ -112,6 +115,7 @@ pub(super) fn handle_sign_evm(
     })
 }
 
+#[cfg(evm_to_rgb)]
 pub(super) fn handle_sign_psbt(
     ctx: &ServerContext,
     req: RgbDestination,
@@ -170,6 +174,7 @@ pub(super) fn handle_sign_psbt(
 /// ([`crate::networks::rgb::btc_crosscheck`]); a production build refuses to
 /// sign while that cap is unset. Its own request type is the structural half of
 /// the vanilla-bypass fix.
+#[cfg(evm_to_rgb)]
 pub(super) fn handle_sign_btc(ctx: &ServerContext, req: SignBtcRequest) -> Result<EnclaveResponse> {
     // Posture check: in production the plain-BTC path is reachable only when
     // the attested policy enables it. Same predicate
@@ -219,6 +224,7 @@ pub(super) fn handle_sign_btc(ctx: &ServerContext, req: SignBtcRequest) -> Resul
     })
 }
 
+#[cfg(rgb_to_evm)]
 pub(super) fn handle_sign_raw_digest(
     ctx: &ServerContext,
     req: SignRawDigestRequest,

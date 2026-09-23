@@ -101,7 +101,7 @@ pub(crate) const SAMPLE_INVOICE: &str = "rgb:fuhLYX9G-eC8gDvf-V0XpYFH-ceSafoc-lG
 
 /// The beneficiary [`SAMPLE_INVOICE`] names, in the form a confidential
 /// recipient leg carries.
-#[cfg(test)]
+#[cfg(all(test, evm_to_rgb))]
 pub(crate) const SAMPLE_INVOICE_SEAL: &str =
     "utxob:UzR~73lD-JyzirTn-engdWia-qjd5NyV-mndAmmo-EbxdVEG-L6OiP";
 
@@ -150,6 +150,7 @@ static FUNDS_IN_TOPIC0: std::sync::LazyLock<[u8; 32]> =
 /// What a verified `BridgeFundsIn` deposit authorises. Only the fields later
 /// stages bind against; the rest is checked in [`verify_funds_in_event`].
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg(evm_to_rgb)]
 pub struct VerifiedFundsIn {
     /// Verbatim from the log. For an RGB destination this is the user's
     /// invoice, which the send-RGB recipient bind parses.
@@ -169,6 +170,7 @@ pub struct VerifiedFundsIn {
 /// `expected_operation_id` is mandatory: exactly 32 bytes, or refuse. Empty is an
 /// error, not a skipped comparison.
 #[allow(clippy::too_many_arguments)]
+#[cfg(evm_to_rgb)]
 pub fn verify_funds_in_event(
     provider: &dyn EvmReceiptProvider,
     bridge_contract: &[u8; 20],
@@ -260,6 +262,9 @@ pub fn verify_funds_in_event(
 }
 
 /// The fields of one `BridgeFundsIn` log, decoded from an emitter-pinned log.
+/// The burn direction reads only the id and net amount, but decodes the whole
+/// log, so a malformed one is refused in both images.
+#[cfg_attr(not(evm_to_rgb), allow(dead_code))]
 struct BridgeFundsInRecord {
     operation_id: [u8; 32],
     gross: u64,
@@ -357,6 +362,7 @@ fn decode_abi_string(data: &[u8], head_off: usize, field: &str) -> Result<String
 }
 
 /// Equality assertion with a field-named fail-closed error.
+#[cfg(evm_to_rgb)]
 fn check_eq(field: &str, got: u64, want: u64) -> Result<()> {
     if got != want {
         return Err(EnclaveError::CrossCheck(format!(

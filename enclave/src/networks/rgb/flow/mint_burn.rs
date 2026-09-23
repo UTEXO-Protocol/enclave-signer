@@ -26,6 +26,7 @@ pub fn is_signing_transition(transition_type: u16) -> bool {
 }
 
 /// Gate on the consignment's last transition before the PSBT is bound to it.
+#[cfg(evm_to_rgb)]
 pub fn assert_signing_transition(last: &TransitionSummary) -> Result<()> {
     if !is_signing_transition(last.transition_type) {
         return Err(EnclaveError::CrossCheck(format!(
@@ -43,6 +44,7 @@ pub fn assert_signing_transition(last: &TransitionSummary) -> Result<()> {
 /// value under a rule that was never applied to it. In particular a `Transfer`
 /// smuggled into a mint bundle would get the mint's equality rule, which does
 /// not account for change.
+#[cfg(evm_to_rgb)]
 pub fn assert_committed_group(committed: &[&TransitionSummary]) -> Result<()> {
     for t in committed {
         if !is_signing_transition(t.transition_type) {
@@ -67,6 +69,7 @@ pub fn assert_committed_group(committed: &[&TransitionSummary]) -> Result<()> {
 ///
 /// `committed_asset_output` counts `OS_ASSET` only; an `OS_BRIDGE` output
 /// riding along is the declarative mint right, not minted value.
+#[cfg(evm_to_rgb)]
 pub fn assert_group_amount(
     committed_asset_output: u64,
     source_amount: u64,
@@ -91,6 +94,7 @@ pub fn assert_group_amount(
 /// [`crate::networks::rgb::validation`] reads off the rgbstd `Transfer`.
 /// Missing metadata on a burn implies a schema mismatch - fail closed rather
 /// than release against an unknown amount.
+#[cfg(rgb_to_evm)]
 pub fn funds_out_source_amount(last: &TransitionSummary) -> Result<u64> {
     if last.transition_type != bfa::TS_BURN {
         return Err(EnclaveError::CrossCheck(format!(
@@ -112,6 +116,7 @@ pub fn funds_out_source_amount(last: &TransitionSummary) -> Result<u64> {
 /// Exact equality: a burn destroys one figure and has no change leg, and
 /// `fundsOut.amount` is gross (commission is taken on-chain from it). A
 /// release below the burn strands units; one above it is unbacked.
+#[cfg(rgb_to_evm)]
 pub fn assert_funds_out_amount(source_amount: u64, calldata_amount: u64) -> Result<()> {
     if source_amount != calldata_amount {
         return Err(EnclaveError::CrossCheck(format!(

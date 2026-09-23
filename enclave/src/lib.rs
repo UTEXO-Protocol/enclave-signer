@@ -61,7 +61,7 @@ compile_error!(
     "rgb-swap and rgb-mint-burn are mutually exclusive: the send/receive and mint/burn flows \
      ship as separate enclave instances. Build one image per flow - the default feature set \
      carries `rgb-swap`, so a mint/burn image needs `--no-default-features --features \
-     vsock,rgb-mint-burn,evm-rpc,helios`"
+     vsock,rgb,mint-signer` (or `burn-signer`)"
 );
 #[cfg(all(
     feature = "rgb-validation",
@@ -72,6 +72,26 @@ compile_error!(
     "rgb-validation requires a flow: enable exactly one of `rgb-swap` (send/receive) or \
      `rgb-mint-burn`. Without one the enclave has no rule for which RGB transition types it \
      may sign, and refusing to build is safer than defaulting to either"
+);
+
+// Mint/burn signer role: the two directions are two images with two seeds, so
+// a mint/burn build must name exactly one. `build.rs` derives the direction
+// cfgs from the same two features.
+#[cfg(all(feature = "mint-signer", feature = "burn-signer"))]
+compile_error!(
+    "mint-signer and burn-signer are mutually exclusive: the mint (EVM -> RGB) and burn \
+     (RGB -> EVM) signers ship as separate enclave images with separate seeds. Build one \
+     image per role"
+);
+#[cfg(all(
+    feature = "rgb-mint-burn",
+    not(feature = "mint-signer"),
+    not(feature = "burn-signer")
+))]
+compile_error!(
+    "a mint/burn build requires a signer role: enable exactly one of `mint-signer` \
+     (EVM -> RGB) or `burn-signer` (RGB -> EVM), e.g. `--no-default-features --features \
+     vsock,rgb,mint-signer`"
 );
 
 pub mod attestation;

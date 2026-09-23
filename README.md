@@ -115,6 +115,11 @@ destination network. Accepted routes: RGB -> EVM, EVM -> RGB, CCD -> EVM.
 - **Flow shape** - a `rgb-swap` build accepts BFA `Transfer` only; a
   `rgb-mint-burn` build accepts BFA `Bridge` / `Burn`. Separate images,
   separate PCR0.
+- **Signer role** - the mint/burn flow ships as two enclaves with two seeds:
+  the **mint signer** (`mint-signer`, EVM -> RGB: mint PSBT and `SignBtc`)
+  and the **burn signer** (`burn-signer`, RGB -> EVM: `fundsOut` and its gas
+  tx). Each image contains only its own direction, refuses the other one, and
+  attests its role (`SignerRole` in the policy commitment).
   Production RGB images take the per-deployment BFA contract ID through the
   `RGB_ASSET_ID` Docker build argument. The EIF workflow reads it from the
   `BFA_RGB_ASSET_ID` repository variable and fails the image build if absent.
@@ -202,8 +207,9 @@ cargo build --release -p utexo-bridge-enclave --no-default-features --features v
 # RGB send/receive only
 cargo build --release -p utexo-bridge-enclave --no-default-features --features vsock,rgb,rgb-swap,evm-rpc
 
-# RGB mint/burn only (separate instance, separate PCR0)
-cargo build --release -p utexo-bridge-enclave --no-default-features --features vsock,rgb,rgb-mint-burn,evm-rpc
+# RGB mint/burn, one image per signer role (separate PCR0, separate seed)
+cargo build --release -p utexo-bridge-enclave --no-default-features --features vsock,rgb,mint-signer
+cargo build --release -p utexo-bridge-enclave --no-default-features --features vsock,rgb,burn-signer
 
 # Concordium only
 cargo build --release -p utexo-bridge-enclave --no-default-features --features vsock,ccd
@@ -214,6 +220,7 @@ cargo build -p utexo-bridge-enclave --no-default-features --features allow-seed-
 
 Compile-time guards in `enclave/src/lib.rs`: `rgb-validation` requires `spv`;
 exactly one of `rgb-swap` / `rgb-mint-burn` whenever `rgb-validation` is on;
+exactly one of `mint-signer` / `burn-signer` whenever `rgb-mint-burn` is on;
 `allow-seed-import` and `mock-attestation` do not compile in a release
 profile. CI asserts every guard fires.
 
@@ -222,13 +229,16 @@ profile. CI asserts every guard fires.
 ```bash
 ./build/build-enclave.sh                                  # Dockerfile.enclave (combined)
 DOCKERFILE=Dockerfile.enclave.rgb       ./build/build-enclave.sh
-DOCKERFILE=Dockerfile.enclave.mint-burn ./build/build-enclave.sh
+DOCKERFILE=Dockerfile.enclave.mint      ./build/build-enclave.sh
+DOCKERFILE=Dockerfile.enclave.burn      ./build/build-enclave.sh
 DOCKERFILE=Dockerfile.enclave.ccd       ./build/build-enclave.sh
 ```
 
-`Dockerfile.enclave.mint-burn` is the shipped BFA mint/burn image: `bfa-mint`
+`Dockerfile.enclave.mint` and `Dockerfile.enclave.burn` are the shipped BFA
+mint/burn images, one per signer role. Each role implies `bfa-mint`, which
 pulls in `rgb-mint-burn` and `bfa-validation`, and `bfa-validation` pulls in
-`evm-rpc`. It needs `--build-arg RGB_ASSET_ID=rgb:<contract id>`, which has no
+`evm-rpc`. The two run as separate enclaves, each initialized with its own
+seed: cloning only works between images with the same PCR0. Each needs `--build-arg RGB_ASSET_ID=rgb:<contract id>`, which has no
 default because each BFA contract id is per-deployment. The build helper and the
 Dockerfile both reject a missing or blank value before the image is built.
 The asset is baked into the measured image; a host runtime environment override
@@ -275,11 +285,13 @@ path-prefix remapping, pre-generated proto code. Known drift: apt / dnf
 package versions still float.
 
 `.github/workflows/build-eif.yml` builds the `combined`, `rgb`,
-`rgb-mint-burn` and `ccd` variants on a plain runner with `nitro-cli 1.4.5`
+`rgb-mint`, `rgb-burn` and `ccd` variants on a plain runner with `nitro-cli 1.4.5`
 and uploads EIF + PCRs + host binaries to `s3://<bucket>/eif/<git_sha>/`.
 `release-eif.yml` deploys one of those to the stage hosts over SSM using
 `deploy/deploy-host.sh`. The `cd-*.yml` workflows push container images for
-the parent and the **dev** enclave image only.
+the parent and the **dev** enclave images only (`utexo-bridge-enclave-mint`
+and `utexo-bridge-enclave-burn`, both from `Dockerfile.enclave-dev.bfa` with a
+`SIGNER_ROLE` build arg).
 
 The production Dockerfiles bake the bridge pins as `ENV` (`EVM_CHAIN_ID`,
 `EVM_PROXY_CONTRACT_ADDRESS`, `RGB_ASSET_ID`, `FUNDS_IN_CONTRACT`,
@@ -459,7 +471,8 @@ utexo-bridge-parent-cli --addr vsock://16 health
 ```bash
 cargo test                                                              # enclave workspace, default features
 cargo test -p utexo-bridge-enclave --features spv,rgb-swap              # full RGB sign-path gate
-cargo test -p utexo-bridge-enclave --no-default-features --features rgb,rgb-mint-burn
+cargo test -p utexo-bridge-enclave --no-default-features --features rgb,mint-signer,mock-attestation,allow-seed-import
+cargo test -p utexo-bridge-enclave --no-default-features --features rgb,burn-signer,mock-attestation,allow-seed-import
 cargo test -p utexo-bridge-enclave --features evm-rpc
 cargo test -p utexo-bridge-enclave --features mock-attestation,allow-seed-import
 cargo test --manifest-path parent/Cargo.toml                            # gRPC bridge + attest-verify e2e
@@ -481,6 +494,8 @@ provenance. `build/smoke-test.sh` drives a live enclave through the CLI.
 | `rgb-swap` | `rgb` | RGB flow: send/receive with BFA `Transfer`. In the default set. |
 | `rgb-mint-burn` | `rgb` | RGB flow: deposits mint with BFA `Bridge`, withdrawals `Burn`. Needs `--no-default-features`. |
 | `bfa-mint` | `rgb-mint-burn`, `bfa-validation` | Mint/burn flow with BFA consensus and settlement checks against verified `FundsIn` locks. |
+| `mint-signer` | `bfa-mint` | Mint/burn signer role: EVM -> RGB only (mint PSBT, `SignBtc`). Exactly one role per mint/burn build. |
+| `burn-signer` | `bfa-mint` | Mint/burn signer role: RGB -> EVM only (`fundsOut`, gas tx). Exactly one role per mint/burn build. |
 | `bfa-validation` | `evm-rpc` | Runs BFA consensus with verified mint ancestry in either RGB flow. Required for BFA swaps and implied by `bfa-mint`. |
 | `spv` | `rgb-validation` | In-enclave Bitcoin header chain and witness inclusion proofs. |
 | `rgb-validation` | rgb crates | In-enclave consignment validation. Requires `spv`. |

@@ -1,15 +1,22 @@
 //! RGB source validation: everything owned by the `RgbSource` payload, from
 //! field shape through to the SPV cross-check of its witness transactions.
 
+#[cfg(rgb_to_evm)]
 use super::asset_bind::{assert_asset_binding, AssetBindMode};
+#[cfg(rgb_to_evm)]
 use super::types::ValidatedConsignment;
 use crate::config::BridgeConfig;
 use crate::error::EnclaveError;
 use crate::error::Result;
+#[cfg(rgb_to_evm)]
 use crate::networks::rgb::spv_crosscheck;
+#[cfg(rgb_to_evm)]
 use crate::networks::ValidationContext;
+#[cfg(rgb_to_evm)]
 use crate::proto::RgbSource;
+#[cfg(rgb_to_evm)]
 use sha3::{Digest, Keccak256};
+#[cfg(rgb_to_evm)]
 use std::time::SystemTime;
 
 /// Validate all fields and source-chain evidence owned by an RGB source.
@@ -26,6 +33,7 @@ use std::time::SystemTime;
 /// 4. when built without `spv`, reject any supplied Merkle proofs so build
 ///    mismatches fail closed instead of silently ignoring host-provided SPV
 ///    evidence.
+#[cfg(rgb_to_evm)]
 pub fn validate_source(
     source: &RgbSource,
     ctx: &ValidationContext<'_>,
@@ -86,6 +94,7 @@ pub fn assert_consignment_size(consignment: &[u8], cfg: &BridgeConfig, label: &s
     Ok(())
 }
 
+#[cfg(rgb_to_evm)]
 pub(super) fn validate_source_payload(source: &RgbSource, cfg: &BridgeConfig) -> Result<()> {
     if source.consignment.is_empty() {
         return Err(EnclaveError::CrossCheck(

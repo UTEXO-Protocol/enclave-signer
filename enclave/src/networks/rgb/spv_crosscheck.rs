@@ -20,16 +20,23 @@
 //! order. Conversion happens once per hash, at the `verify_one_proof`
 //! boundary. Coverage checking stays in display order on both sides.
 
+#[cfg(rgb_to_evm)]
 use std::collections::BTreeSet;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+#[cfg(rgb_to_evm)]
 use bitcoin::hashes::Hash;
+#[cfg(rgb_to_evm)]
 use rgbstd::ChainNet;
 
 use crate::error::{EnclaveError, Result};
-use crate::networks::rgb::spv::{verify_merkle_proof, HeaderChain, MerkleError, Network};
+use crate::networks::rgb::spv::HeaderChain;
+#[cfg(rgb_to_evm)]
+use crate::networks::rgb::spv::{verify_merkle_proof, MerkleError, Network};
+#[cfg(rgb_to_evm)]
 use crate::proto::MerkleProofEntry;
 
+#[cfg(rgb_to_evm)]
 use super::validation::ValidatedConsignment;
 
 /// Confirmation depth required before the enclave will sign. Compile-time, not
@@ -55,6 +62,7 @@ pub const SPV_MAX_TIP_FUTURE_SECS: u64 = 2 * 60 * 60;
 /// false-rejects a real proof while bounding the hashing a hostile listener can
 /// demand. Checked in `validate_spv_proofs` before any hashing runs.
 /// Compile-time and PCR-attested, not host-tunable.
+#[cfg(rgb_to_evm)]
 pub const MAX_MERKLE_PATH_DEPTH: usize = 32;
 
 /// Validate the RGB source's Bitcoin anchoring before signing.
@@ -62,6 +70,7 @@ pub const MAX_MERKLE_PATH_DEPTH: usize = 32;
 /// The caller passes the already-validated consignment and the listener's
 /// Merkle proofs; this checks chain freshness, network binding, inclusion, and
 /// confirmation depth.
+#[cfg(rgb_to_evm)]
 pub fn validate_source_chain(
     chain: &HeaderChain,
     validated_consignment: Option<&ValidatedConsignment>,
@@ -109,6 +118,7 @@ pub fn validate_source_chain(
 /// RGB consignment, in **display byte order** (matches the wire format of
 /// `MerkleProofEntry.txid`). `proofs` are exactly the entries the listener
 /// supplied on the wire.
+#[cfg(rgb_to_evm)]
 pub fn validate_spv_proofs(
     chain: &HeaderChain,
     expected_txids: &[[u8; 32]],
@@ -269,6 +279,7 @@ pub fn assert_chain_not_stale(
 /// loosens rgbstd validation (e.g. accepting an unresolved consignment for
 /// some niche flow) can never accidentally let a wrong-network consignment
 /// reach the signing path.
+#[cfg(rgb_to_evm)]
 pub fn assert_chain_net(consignment_chain_net: &str, enclave_network: Network) -> Result<()> {
     let chain_net = expected_chain_net(enclave_network);
     let expected = chain_net.prefix();
@@ -287,6 +298,7 @@ pub fn assert_chain_net(consignment_chain_net: &str, enclave_network: Network) -
 /// `validation::rgb::RgbValidator::new`. Plain `BitcoinSignet` also covers
 /// our custom signet: the challenge script differs, but the rgb-core chain
 /// identity (and thus the consignment prefix) is the same `"sb"`.
+#[cfg(rgb_to_evm)]
 fn expected_chain_net(network: Network) -> ChainNet {
     match network {
         Network::Mainnet => ChainNet::BitcoinMainnet,
@@ -296,6 +308,7 @@ fn expected_chain_net(network: Network) -> ChainNet {
     }
 }
 
+#[cfg(rgb_to_evm)]
 fn verify_one_proof(
     chain: &HeaderChain,
     tip: u32,
@@ -412,6 +425,7 @@ impl ChainPins {
     ///
     /// A second pin with a different hash means two checks read two chains.
     /// That is the race this guards, so it fails closed.
+    #[cfg(rgb_to_evm)]
     pub fn pin(&self, chain: &HeaderChain, height: u32) -> Result<()> {
         let hash = chain.hash_at(height).ok_or_else(|| {
             EnclaveError::Spv(format!(
@@ -488,11 +502,12 @@ impl ChainPins {
     }
 }
 
-#[cfg(test)]
+// SPV proof and chain-pin checks run on the RGB -> EVM path only.
+#[cfg(all(test, rgb_to_evm))]
 mod tests;
 
 /// F05-NEW-AF-08: the pin set checked before key use.
-#[cfg(test)]
+#[cfg(all(test, rgb_to_evm))]
 mod chain_pin_tests {
     use super::*;
     use crate::networks::rgb::spv::checkpoint::Checkpoint;

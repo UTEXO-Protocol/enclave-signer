@@ -1,18 +1,31 @@
+#[cfg(rgb_to_evm)]
 use std::time::{SystemTime, UNIX_EPOCH};
 
+#[cfg(rgb_to_evm)]
 use alloy_primitives::U256;
-use alloy_sol_types::{sol, SolCall};
+use alloy_sol_types::sol;
+#[cfg(rgb_to_evm)]
+use alloy_sol_types::SolCall;
 
 use crate::error::{EnclaveError, Result};
-use crate::networks::evm::{ADDRESS_LEN, HASH_LEN as TX_HASH_LEN};
-use crate::networks::{RouteProof, ValidationContext};
-use crate::proto::{EvmDestination, EvmSource};
+#[cfg(rgb_to_evm)]
+use crate::networks::evm::ADDRESS_LEN;
+#[cfg(evm_to_rgb)]
+use crate::networks::evm::HASH_LEN as TX_HASH_LEN;
+use crate::networks::RouteProof;
+#[cfg(rgb_to_evm)]
+use crate::networks::ValidationContext;
+#[cfg(rgb_to_evm)]
+use crate::proto::EvmDestination;
+#[cfg(evm_to_rgb)]
+use crate::proto::EvmSource;
 
 /// `keccak256("fundsOut((address,uint256,uint256,uint256,uint256,string,bytes,bytes))")[0..4]`.
 ///
 /// Bundling the release fields into `FundsOutParams` moved the selector
 /// `0xccddb768` -> `0xdc771390`. A flat body read as a tuple lands one word off
 /// on every field, so the mismatch fails closed at the whitelist.
+#[cfg(rgb_to_evm)]
 pub const FUNDS_OUT_SELECTOR_POOLS: [u8; 4] = [0xdc, 0x77, 0x13, 0x90];
 
 /// `keccak256("lzFundsOut(uint256,uint256,uint256,uint256,string,bytes,bytes,uint32,bytes32,uint256,bytes)")[0..4]`.
@@ -20,13 +33,16 @@ pub const FUNDS_OUT_SELECTOR_POOLS: [u8; 4] = [0xdc, 0x77, 0x13, 0x90];
 /// Enclave wire format for `MultisigProxy.lzFundsOutCall`: individual params,
 /// no struct wrapper - analogous to `fundsOut` above. The selector distinguishes
 /// the two release paths in the allowlist and routes to `TeeLzFundsOut` digest.
+#[cfg(rgb_to_evm)]
 pub const LZ_FUNDS_OUT_SELECTOR: [u8; 4] = lzFundsOutCall::SELECTOR;
 
 /// Upper bound on `call_data` length. A legitimate `fundsOut` call is a few
 /// hundred bytes, so anything past 64 KiB is malformed or a work-amplification
 /// attempt. Compile-time and PCR-attested.
+#[cfg(rgb_to_evm)]
 pub const MAX_FUNDS_OUT_CALL_DATA_LEN: usize = 64 * 1024;
 
+#[cfg(rgb_to_evm)]
 const ALLOWED_SELECTORS: &[[u8; 4]] = &[FUNDS_OUT_SELECTOR_POOLS, LZ_FUNDS_OUT_SELECTOR];
 
 sol! {
@@ -71,6 +87,7 @@ sol! {
 ///
 /// Destination-network payload shape and cross-network amount consistency
 /// belong to the destination or route-level validator.
+#[cfg(evm_to_rgb)]
 pub fn validate_source(amount: u64, source: &EvmSource) -> Result<RouteProof> {
     if source.tx_hash.len() != TX_HASH_LEN {
         return Err(EnclaveError::CrossCheck(format!(
@@ -95,6 +112,7 @@ pub fn validate_source(amount: u64, source: &EvmSource) -> Result<RouteProof> {
 ///
 /// Source-network proof validation, including RGB consignments, assets,
 /// amounts, and SPV proofs, belongs to the source network validator.
+#[cfg(rgb_to_evm)]
 pub fn validate_destination(
     destination: &EvmDestination,
     ctx: &ValidationContext<'_>,
@@ -230,6 +248,7 @@ pub fn validate_destination(
 }
 
 /// Narrow a decoded release into the route-neutral proof.
+#[cfg(rgb_to_evm)]
 fn route_proof_from_params(params: &FundsOutParams) -> Result<RouteProof> {
     let amount: u64 = params
         .amount
@@ -253,6 +272,7 @@ fn route_proof_from_params(params: &FundsOutParams) -> Result<RouteProof> {
 /// flat body with a zero `recipient` decodes cleanly as a tuple, and only the
 /// re-encode catches it. Deferring to `validate_destination` would make the
 /// property depend on caller ordering.
+#[cfg(rgb_to_evm)]
 pub fn decode_funds_out_params(call_data: &[u8]) -> Result<FundsOutParams> {
     let decoded = fundsOutCall::abi_decode_validate(call_data)
         .map_err(|e| EnclaveError::CrossCheck(format!("invalid fundsOut calldata: {e}")))?;
@@ -269,6 +289,7 @@ pub fn decode_funds_out_params(call_data: &[u8]) -> Result<FundsOutParams> {
 /// Decode an `lzFundsOut` calldata blob, enforcing canonical encoding.
 /// Shared with [`super::signing::lz_funds_out_digest`] which needs every
 /// field to build the `TeeLzFundsOut` struct hash.
+#[cfg(rgb_to_evm)]
 pub fn decode_lz_funds_out_params(call_data: &[u8]) -> Result<lzFundsOutCall> {
     let decoded = lzFundsOutCall::abi_decode_validate(call_data)
         .map_err(|e| EnclaveError::CrossCheck(format!("invalid lzFundsOut calldata: {e}")))?;
@@ -283,6 +304,7 @@ pub fn decode_lz_funds_out_params(call_data: &[u8]) -> Result<lzFundsOutCall> {
 
 /// Narrow a decoded LayerZero release into the route-neutral proof, mirroring
 /// [`route_proof_from_params`] on the pools route.
+#[cfg(rgb_to_evm)]
 fn lz_route_proof_from_params(decoded: &lzFundsOutCall) -> Result<RouteProof> {
     let amount: u64 = decoded
         .amount
@@ -294,5 +316,8 @@ fn lz_route_proof_from_params(decoded: &lzFundsOutCall) -> Result<RouteProof> {
     })
 }
 
-#[cfg(test)]
+// Destination (`fundsOut`) checks: the RGB -> EVM direction.
+#[cfg(all(test, evm_to_rgb))]
+mod source_tests;
+#[cfg(all(test, rgb_to_evm))]
 mod tests;

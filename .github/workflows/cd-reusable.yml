@@ -61,9 +61,17 @@ jobs:
             dockerfile: ./build/Dockerfile.parent
             tag: ${{ needs.prepare.outputs.tag_parent }}
             float: ${{ needs.prepare.outputs.float_parent }}
-          - name: enclave
-            image: utexo-bridge-enclave
+          # Two signer roles, two enclaves: one image each.
+          - name: enclave-mint
+            image: utexo-bridge-enclave-mint
             dockerfile: ./build/Dockerfile.enclave-dev.bfa
+            signer_role: mint-signer
+            tag: ${{ needs.prepare.outputs.tag_enclave }}
+            float: ${{ needs.prepare.outputs.float_enclave }}
+          - name: enclave-burn
+            image: utexo-bridge-enclave-burn
+            dockerfile: ./build/Dockerfile.enclave-dev.bfa
+            signer_role: burn-signer
             tag: ${{ needs.prepare.outputs.tag_enclave }}
             float: ${{ needs.prepare.outputs.float_enclave }}
       fail-fast: false
@@ -98,7 +106,9 @@ jobs:
           context: .
           file: ${{ matrix.dockerfile }}
           push: true
-          build-args: BUILDKIT_INLINE_CACHE=1
+          build-args: |
+            BUILDKIT_INLINE_CACHE=1
+            SIGNER_ROLE=${{ matrix.signer_role }}
           secret-files: |
             consignment_key=${{ runner.temp }}/private-deps/consignment_key
             consensus_key=${{ runner.temp }}/private-deps/consensus_key
@@ -118,7 +128,9 @@ jobs:
           context: .
           file: ${{ matrix.dockerfile }}
           push: true
-          build-args: BUILDKIT_INLINE_CACHE=1
+          build-args: |
+            BUILDKIT_INLINE_CACHE=1
+            SIGNER_ROLE=${{ matrix.signer_role }}
           secret-files: |
             consignment_key=${{ runner.temp }}/private-deps/consignment_key
             consensus_key=${{ runner.temp }}/private-deps/consensus_key
@@ -147,11 +159,21 @@ jobs:
           client-payload: |
             {"group":"utexo-protocol","name":"parent-adapter","stage":"${{ inputs.stage }}","tag":"${{ needs.prepare.outputs.tag_parent }}"}
 
-      - name: Dispatch enclave
+      # One deploy per signer role: devops runs them as two services.
+      - name: Dispatch enclave-mint
         uses: peter-evans/repository-dispatch@v3
         with:
           token: ${{ secrets.DEVOPS_PAT }}
           repository: UTEXO-Protocol/devops
           event-type: deploy
           client-payload: |
-            {"group":"utexo-protocol","name":"enclave","stage":"${{ inputs.stage }}","tag":"${{ needs.prepare.outputs.tag_enclave }}"}
+            {"group":"utexo-protocol","name":"enclave-mint","stage":"${{ inputs.stage }}","tag":"${{ needs.prepare.outputs.tag_enclave }}"}
+
+      - name: Dispatch enclave-burn
+        uses: peter-evans/repository-dispatch@v3
+        with:
+          token: ${{ secrets.DEVOPS_PAT }}
+          repository: UTEXO-Protocol/devops
+          event-type: deploy
+          client-payload: |
+            {"group":"utexo-protocol","name":"enclave-burn","stage":"${{ inputs.stage }}","tag":"${{ needs.prepare.outputs.tag_enclave }}"}

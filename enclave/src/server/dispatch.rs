@@ -8,9 +8,12 @@ use super::context::ServerContext;
 use super::health::handle_health;
 use super::keys::{handle_get_attested_public_key, handle_get_public_key, handle_initialize};
 use super::sign::handle_sign;
+#[cfg(evm_to_rgb)]
+use super::signers::handle_sign_btc;
 #[cfg(feature = "ccd")]
 use super::signers::handle_sign_ccd;
-use super::signers::{handle_sign_btc, handle_sign_raw_digest};
+#[cfg(rgb_to_evm)]
+use super::signers::handle_sign_raw_digest;
 #[cfg(feature = "rgb-validation")]
 use super::spv::{handle_get_last_saved_block, handle_submit_headers};
 use crate::error::EnclaveError;
@@ -29,6 +32,20 @@ pub(super) fn unsupported_build(network: &str) -> EnclaveError {
         "enclave was not built with `{network}` support: this binary does not handle {network} \
          requests (rebuild with `--features {network}`)"
     ))
+}
+
+/// Error for a request that belongs to the other signer role: a mint signer
+/// never releases and a burn signer never mints.
+#[allow(dead_code)]
+pub(super) fn wrong_signer_role(what: &str) -> EnclaveError {
+    let role = if cfg!(feature = "mint-signer") {
+        "the mint signer (EVM -> RGB)"
+    } else if cfg!(feature = "burn-signer") {
+        "the burn signer (RGB -> EVM)"
+    } else {
+        "a combined signer"
+    };
+    EnclaveError::InvalidRequest(format!("this enclave is {role}: it does not sign {what}"))
 }
 
 /// Dispatch one request. A sign that reserved a replay key hands the
@@ -61,7 +78,16 @@ pub(super) fn dispatch(
         }),
         Some(Request::SignBtc(req)) => {
             tracing::info!("request: SignBtc");
-            handle_sign_btc(ctx, req)
+            // Plain-BTC signing prepares the UTXOs a mint spends.
+            #[cfg(evm_to_rgb)]
+            {
+                handle_sign_btc(ctx, req)
+            }
+            #[cfg(not(evm_to_rgb))]
+            {
+                let _ = req;
+                Err(wrong_signer_role("plain-BTC PSBTs"))
+            }
         }
         // Removed. The EIP-191 `personal_sign` path was
         // gated by no feature and no policy, and signed arbitrary caller-supplied
@@ -75,7 +101,16 @@ pub(super) fn dispatch(
         }
         Some(Request::SignRawDigest(req)) => {
             tracing::info!("request: SignRawDigest");
-            handle_sign_raw_digest(ctx, req)
+            // The gas tx pays for the `fundsOut` submission.
+            #[cfg(rgb_to_evm)]
+            {
+                handle_sign_raw_digest(ctx, req)
+            }
+            #[cfg(not(rgb_to_evm))]
+            {
+                let _ = req;
+                Err(wrong_signer_role("EVM gas transactions"))
+            }
         }
         Some(Request::SignCcd(req)) => {
             tracing::info!("request: SignCcd");

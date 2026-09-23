@@ -207,6 +207,7 @@ async fn e2e_attest_verify_fails_on_policy_mismatch() {
         VerifyMode::Mock,
         ExpectedPolicy::Production {
             allow_vanilla_psbt: false,
+            signer_role: attestation_verify::SignerRole::Mint,
             evm_source: EvmDataSource::RawRpc,
             evm_checkpoint: None,
             funds_in_contract: [0x11; 20],

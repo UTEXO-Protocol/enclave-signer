@@ -9,7 +9,9 @@
 //! by the binary against an in-process parent + enclave stack.
 
 use anyhow::{bail, Context, Result};
-use attestation_verify::{AttestationMode, AttestedPolicy, BtcDataSource, EvmDataSource};
+use attestation_verify::{
+    AttestationMode, AttestedPolicy, BtcDataSource, EvmDataSource, SignerRole,
+};
 use rand::RngCore;
 use sha2::{Digest, Sha256};
 
@@ -38,6 +40,9 @@ pub enum ExpectedPolicy {
     /// Expect a production bridge enclave with these posture flags.
     Production {
         allow_vanilla_psbt: bool,
+        /// The image the operator expects: a mint signer, a burn signer, or a
+        /// combined one. A burn signer that attests `Mint` fails verification.
+        signer_role: SignerRole,
         evm_source: EvmDataSource,
         /// The Helios weak-subjectivity checkpoint the operator expects the
         /// enclave to have pinned. `Some` (required) when `evm_source` is
@@ -194,6 +199,7 @@ fn expected_attested_policy(
         ExpectedPolicy::Development => Ok(AttestedPolicy::Development),
         ExpectedPolicy::Production {
             allow_vanilla_psbt,
+            signer_role,
             evm_source,
             evm_checkpoint,
             funds_in_contract,
@@ -217,6 +223,7 @@ fn expected_attested_policy(
                 })?;
             Ok(AttestedPolicy::Production {
                 allow_vanilla_psbt: *allow_vanilla_psbt,
+                signer_role: *signer_role,
                 // A real-verified production enclave always uses real (NSM)
                 // attestation; SPV is the only Bitcoin anchor source.
                 attestation: AttestationMode::Real,

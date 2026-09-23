@@ -126,10 +126,11 @@ both the enclave and every verifier share so the bytes are identical.
 
 ```
 policy_commitment =
-    u8(POLICY_COMMITMENT_V3 = 3)                    // version tag
+    u8(POLICY_COMMITMENT_V4 = 4)                    // version tag
     // Production (release, fully-pinned bridge signer):
     u8(0x01)                                        // production discriminant
     u8(allow_vanilla_psbt)                          // plain-BTC path enabled?
+    u8(signer_role)                                 // 0 combined | 1 mint | 2 burn (from build features)
     u8(attestation_mode)                            // 1 = real NSM (0 = mock)
     u8(evm_source)                                  // 0 disabled | 1 raw-rpc | 2 Helios-verified
     u8(btc_source)                                  // 1 = SPV-verified
@@ -230,8 +231,17 @@ attest-verify \
     --pcr0 <96-hex-chars> \
     --pcr1 <96-hex-chars> \
     --pcr2 <96-hex-chars> \
+    --expect-signer-role burn \
     --expect-funds-in-contract 0x6711f1a319B37847fa0234181C34D883774c4951 \
     --expect-evm-min-confirmations 12
+
+# --expect-signer-role is required: `mint` for the mint signer image
+# (Dockerfile.enclave.mint), `burn` for the burn signer
+# (Dockerfile.enclave.burn), `combined` for a swap image. A burn signer that
+# attests `mint` fails verification. A role attests the other role's path as
+# off whatever its env says: a burn signer never attests plain-BTC signing
+# (omit --expect-vanilla-psbt), a mint signer never attests a gas rule (omit
+# the --expect-gas-* flags).
 
 # Gas signing: also supply the image's exact expected rule when configured:
 # --expect-gas-tx-to <hex20> --expect-gas-max-gas-limit <units>
@@ -241,7 +251,7 @@ attest-verify \
 
 # Expect the plain-BTC path enabled:
 attest-verify --endpoint http://parent.example:50051 \
-    --pcr0 <..> --pcr1 <..> --pcr2 <..> \
+    --pcr0 <..> --pcr1 <..> --pcr2 <..> --expect-signer-role mint \
     --expect-funds-in-contract <hex20> --expect-evm-min-confirmations 12 \
     --expect-vanilla-psbt
 
