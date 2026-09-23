@@ -30,6 +30,9 @@ The optimized `stage-bfa-temp` Cargo profile keeps debug assertions enabled.
 The ordinary release profile still rejects seed import.
 
 The recipe uses Bitcoin mainnet and Arbitrum One (42161).
+`BTC_MAX_UNOWNED_SATS=10000` limits unowned outputs in BTC signing.
+`RGB_MAX_UNOWNED_SATS=10000` sets the separate limit for RGB signing.
+Both values are baked into the EIF. Rebuild and restore the retained stage seeds to apply changes.
 The contract pins use the stage set supplied on 2026-09-22:
 - `EVM_PROXY_CONTRACT_ADDRESS`: Multisig `0x0584f124d56266c3583605a441545d48feea9b9e`.
 - `FUNDS_IN_CONTRACT` and `GAS_TX_ALLOWED_TO`: BridgeProxy `0x9f447017ca5f413dc86d9d69c772e9dfe16fb823`.
