@@ -5,33 +5,44 @@
 //! exists after the enclave boots, and baking them into the image changes the
 //! PCR0 identity that seed is bound to.
 //!
-//! An output is accepted on one rule: its `script_pubkey` equals that of an
-//! input this enclave co-controls, as resolved by
+//! An output is accepted on either of two rules.
+//!
+//! (A) Its `script_pubkey` equals that of an input this enclave co-controls, as
+//! resolved by
 //! [`find_controlled_taproot_leaves`](crate::networks::rgb::signing::taproot::find_controlled_taproot_leaves).
 //! That spend is anchored to the output key (control block or key-path tweak)
 //! and to our derivation, and the sighash commits to the script. Custody does
-//! not change when the PSBT merges one of our signatures.
+//! not change when the PSBT merges one of our signatures. A qualified script
+//! may have foreign spend paths, so outputs on it are exempt only up to the
+//! input value on that script. It proves custody is unchanged, not that only
+//! we can spend: on a multisig bridge the other signers can move funds without
+//! us either way. It holds for bridge change because the wallet reuses
+//! addresses.
 //!
-//! A qualified script may have foreign spend paths. Outputs on it are exempt
-//! only up to the input value on that script.
-//!
-//! It proves custody is unchanged, not that only we can spend: the bridge is a
-//! multisig, and the other signers can move funds without us either way. It
-//! holds for bridge change because the wallet reuses addresses.
+//! (C) It is a BIP-86 key-path output of one of our own accounts: the claimed
+//! internal key derives from our seed at the claimed path, the output carries
+//! no script tree, and the key tweaked with an empty tree reproduces the
+//! script. The metadata only names the path; a forged claim cannot match the
+//! script. Only we can spend it, so it is exempt in full. This is what makes a
+//! singlesig bridge's fresh change and its `create_utxo` allocations provably
+//! ours.
 //!
 //! A previous rule (B) accepted an output whose taproot tree held any leaf
 //! pushing a key we derive. That proves nothing - a P2TR output is spendable by
 //! its internal key alone, and one leaf says nothing about the rest of the tree
-//! or its threshold. Removed. What it used to cover (fresh change indices,
-//! `create_utxo` dust) is bounded by value in
-//! [`crate::networks::rgb::btc_crosscheck`] instead.
+//! or its threshold. Removed; (C) refuses any output with a tree for the same
+//! reason. Whatever neither rule proves is bounded by value in
+//! [`crate::networks::rgb::btc_crosscheck`].
 //!
 //! Scope: this makes the plain-BTC path structurally self-pay. Withdrawals to
 //! an arbitrary user address remain out of scope.
 
 use std::collections::{HashMap, HashSet};
 
+use bitcoin::key::TapTweak;
 use bitcoin::psbt::Psbt;
+use bitcoin::secp256k1::{Keypair, Secp256k1};
+use bitcoin::{ScriptBuf, XOnlyPublicKey};
 
 use crate::keys::{AccountType, KeyManager};
 use crate::networks::rgb::signing::taproot::find_controlled_taproot_leaves;
@@ -78,7 +89,8 @@ pub fn asset_change_scripts(psbt: &Psbt, keys: &KeyManager) -> HashSet<Vec<u8>> 
     }
 }
 
-/// Indices of every PSBT output on an [`asset_change_scripts`] script.
+/// Indices of every PSBT output on an [`asset_change_scripts`] script, or
+/// proven ours on the Colored account by rule (C).
 ///
 /// The change-leg oracle for the send-RGB per-output amount bind:
 /// a revealed RGB seal counts as bridge change only when the Bitcoin output it
@@ -86,7 +98,10 @@ pub fn asset_change_scripts(psbt: &Psbt, keys: &KeyManager) -> HashSet<Vec<u8>> 
 pub fn self_owned_output_indices(psbt: &Psbt, keys: &KeyManager) -> HashSet<u32> {
     let input_scripts = asset_change_scripts(psbt, keys);
     (0..psbt.unsigned_tx.output.len())
-        .filter(|&i| output_is_self_owned(psbt, i, &input_scripts))
+        .filter(|&i| {
+            output_is_self_owned(psbt, i, &input_scripts)
+                || output_is_self_derived(psbt, i, keys, Some(AccountType::Colored))
+        })
         .map(|i| i as u32)
         .collect()
 }
@@ -100,10 +115,62 @@ pub fn output_is_self_owned(psbt: &Psbt, index: usize, input_scripts: &HashSet<V
     input_scripts.contains(txout.script_pubkey.as_bytes())
 }
 
+/// Rule (C): the output's claimed internal key is ours at the claimed BIP-86
+/// path, there is no script tree, and the empty-tree tweak of that key is the
+/// script. The twin of the key-path sign job, applied to an output.
+/// `allowed_account` is `Some(_)` for one BIP-86 account, `None` for either.
+pub fn output_is_self_derived(
+    psbt: &Psbt,
+    index: usize,
+    keys: &KeyManager,
+    allowed_account: Option<AccountType>,
+) -> bool {
+    let (Some(output), Some(txout)) = (psbt.outputs.get(index), psbt.unsigned_tx.output.get(index))
+    else {
+        return false;
+    };
+    if output.tap_tree.is_some() {
+        return false;
+    }
+    let Some(internal_key) = output.tap_internal_key else {
+        return false;
+    };
+    let Some((leaf_hashes, (fingerprint, derivation_path))) =
+        output.tap_key_origins.get(&internal_key)
+    else {
+        return false;
+    };
+    if !leaf_hashes.is_empty() || fingerprint != keys.master_fingerprint() {
+        return false;
+    }
+    let Some((account_type, child_path)) = keys.resolve_account_and_child_path(derivation_path)
+    else {
+        return false;
+    };
+    if allowed_account.is_some_and(|want| account_type != want) {
+        return false;
+    }
+    let Ok(child_secret) = keys.derive_btc_child(account_type, &child_path) else {
+        return false;
+    };
+    let secp = Secp256k1::new();
+    let (derived, _) =
+        XOnlyPublicKey::from_keypair(&Keypair::from_secret_key(&secp, &child_secret));
+    if derived != internal_key {
+        return false;
+    }
+    let (tweaked, _) = internal_key.tap_tweak(&secp, None);
+    txout.script_pubkey == ScriptBuf::new_p2tr_tweaked(tweaked)
+}
+
 /// Sats that the outputs pay outside the custody of the inputs. An output on a
-/// script in `input_scripts` is exempt up to the input value on that script.
-/// `None` on overflow.
-pub fn unowned_output_sats(psbt: &Psbt, input_scripts: &HashSet<Vec<u8>>) -> Option<u64> {
+/// script in `input_scripts` is exempt up to the input value on that script
+/// (rule A); a rule (C) output is exempt in full. `None` on overflow.
+pub fn unowned_output_sats(
+    psbt: &Psbt,
+    input_scripts: &HashSet<Vec<u8>>,
+    keys: &KeyManager,
+) -> Option<u64> {
     let mut room: HashMap<&[u8], u64> = HashMap::new();
     for utxo in psbt.inputs.iter().filter_map(|i| i.witness_utxo.as_ref()) {
         let spk = utxo.script_pubkey.as_bytes();
@@ -113,7 +180,10 @@ pub fn unowned_output_sats(psbt: &Psbt, input_scripts: &HashSet<Vec<u8>>) -> Opt
         }
     }
     let mut unowned: u64 = 0;
-    for txout in &psbt.unsigned_tx.output {
+    for (index, txout) in psbt.unsigned_tx.output.iter().enumerate() {
+        if output_is_self_derived(psbt, index, keys, None) {
+            continue;
+        }
         let mut sat = txout.value.to_sat();
         if let Some(r) = room.get_mut(txout.script_pubkey.as_bytes()) {
             let exempt = sat.min(*r);
@@ -326,7 +396,7 @@ pub(crate) mod tests {
 
     fn owned(psbt: &Psbt, keys: &KeyManager) -> bool {
         let inputs = self_controlled_input_scripts(psbt, keys);
-        output_is_self_owned(psbt, 0, &inputs)
+        output_is_self_owned(psbt, 0, &inputs) || output_is_self_derived(psbt, 0, keys, None)
     }
 
     // === Rule (A): repaying an input we co-control ===
@@ -419,10 +489,15 @@ pub(crate) mod tests {
         );
     }
 
-    /// Genuinely ours, but indistinguishable from a forged claim without
-    /// trusting the metadata. Address reuse removes the need to.
+    // === Rule (C): a BIP-86 key-path output of one of our accounts ===
+    //
+    // The metadata only names a path; the proof is that our key derived at
+    // that path, tweaked with an empty tree, reproduces the output script.
+
+    /// Fresh change on the Vanilla account: the script is rebuilt from our
+    /// derived key, so a forged claim cannot match it.
     #[test]
-    fn a_fresh_change_index_is_not_ownership() {
+    fn accepts_a_fresh_change_index_derived_from_our_key() {
         let keys = km();
         let secp = Secp256k1::new();
         let (our, path) = our_key(&keys, 1, 3);
@@ -435,10 +510,172 @@ pub(crate) mod tests {
             .tap_key_origins
             .insert(our, (vec![], (*keys.master_fingerprint(), path)));
 
-        assert!(
-            !owned(&psbt, &keys),
-            "change must land on a script the transaction already spends"
+        assert!(owned(&psbt, &keys));
+    }
+
+    /// `create_utxo` allocations land on the Colored account, whose scripts
+    /// never equal a Vanilla input's: rule (C) is what makes them ours.
+    #[test]
+    fn accepts_an_allocation_output_on_the_colored_account() {
+        let keys = km();
+        let secp = Secp256k1::new();
+        let (colored, path) = our_colored_key(&keys);
+        let spk = ScriptBuf::new_p2tr(&secp, colored, None);
+
+        let mut psbt = psbt_with(ScriptBuf::new(), spk);
+        make_input_ours(&mut psbt, &keys);
+        psbt.outputs[0].tap_internal_key = Some(colored);
+        psbt.outputs[0]
+            .tap_key_origins
+            .insert(colored, (vec![], (*keys.master_fingerprint(), path)));
+
+        assert!(owned(&psbt, &keys));
+    }
+
+    /// Our path under someone else's fingerprint: the derivation is not ours.
+    #[test]
+    fn rejects_a_derived_claim_under_a_foreign_fingerprint() {
+        let keys = km();
+        let secp = Secp256k1::new();
+        let (our, path) = our_key(&keys, 1, 3);
+        let spk = ScriptBuf::new_p2tr(&secp, our, None);
+
+        let mut psbt = psbt_with(ScriptBuf::new(), spk);
+        make_input_ours(&mut psbt, &keys);
+        psbt.outputs[0].tap_internal_key = Some(our);
+        psbt.outputs[0].tap_key_origins.insert(
+            our,
+            (
+                vec![],
+                (
+                    bitcoin::bip32::Fingerprint::from([0xDE, 0xAD, 0xBE, 0xEF]),
+                    path,
+                ),
+            ),
         );
+
+        assert!(!owned(&psbt, &keys));
+    }
+
+    /// A foreign key claimed under our fingerprint and path: deriving the path
+    /// gives a different key, so the claim is refused before the script check.
+    #[test]
+    fn rejects_a_foreign_key_claimed_on_our_path() {
+        let keys = km();
+        let secp = Secp256k1::new();
+        let (_, path) = our_key(&keys, 1, 3);
+        let foreign = foreign_xonly(0xC1);
+        let spk = ScriptBuf::new_p2tr(&secp, foreign, None);
+
+        let mut psbt = psbt_with(ScriptBuf::new(), spk);
+        make_input_ours(&mut psbt, &keys);
+        psbt.outputs[0].tap_internal_key = Some(foreign);
+        psbt.outputs[0]
+            .tap_key_origins
+            .insert(foreign, (vec![], (*keys.master_fingerprint(), path)));
+
+        assert!(!owned(&psbt, &keys));
+    }
+
+    /// Our key as the internal key of a script tree: the tree's leaves may let
+    /// others spend, so only an empty tree proves the output is ours alone.
+    #[test]
+    fn rejects_our_key_under_a_script_tree() {
+        let keys = km();
+        let secp = Secp256k1::new();
+        let (our, path) = our_key(&keys, 1, 3);
+        let leaf = multi_a_2_of_3(&[
+            foreign_xonly(0xA1),
+            foreign_xonly(0xA2),
+            foreign_xonly(0xA3),
+        ]);
+        let info = TaprootBuilder::new()
+            .add_leaf(0, leaf.clone())
+            .unwrap()
+            .finalize(&secp, our)
+            .unwrap();
+        let spk = ScriptBuf::new_p2tr(&secp, our, info.merkle_root());
+
+        let mut psbt = psbt_with(ScriptBuf::new(), spk);
+        make_input_ours(&mut psbt, &keys);
+        psbt.outputs[0].tap_internal_key = Some(our);
+        psbt.outputs[0].tap_tree = Some(
+            TaprootBuilder::new()
+                .add_leaf(0, leaf)
+                .unwrap()
+                .try_into()
+                .unwrap(),
+        );
+        psbt.outputs[0]
+            .tap_key_origins
+            .insert(our, (vec![], (*keys.master_fingerprint(), path)));
+
+        assert!(!owned(&psbt, &keys));
+    }
+
+    /// Correct claim, wrong script: the output pays a tweak of a different key.
+    #[test]
+    fn rejects_a_derived_claim_whose_script_does_not_match() {
+        let keys = km();
+        let secp = Secp256k1::new();
+        let (our, path) = our_key(&keys, 1, 3);
+        let spk = ScriptBuf::new_p2tr(&secp, foreign_xonly(0xC2), None);
+
+        let mut psbt = psbt_with(ScriptBuf::new(), spk);
+        make_input_ours(&mut psbt, &keys);
+        psbt.outputs[0].tap_internal_key = Some(our);
+        psbt.outputs[0]
+            .tap_key_origins
+            .insert(our, (vec![], (*keys.master_fingerprint(), path)));
+
+        assert!(!owned(&psbt, &keys));
+    }
+
+    /// A rule (C) output has no foreign spend path, so the budget exempts it
+    /// in full, not only up to the input value.
+    #[test]
+    fn a_derived_output_is_exempt_in_full_from_the_unowned_budget() {
+        let keys = km();
+        let secp = Secp256k1::new();
+        let (our, path) = our_key(&keys, 1, 3);
+        let spk = ScriptBuf::new_p2tr(&secp, our, None);
+
+        let mut psbt = psbt_with(ScriptBuf::new(), spk);
+        make_input_ours(&mut psbt, &keys);
+        psbt.unsigned_tx.output[0].value = Amount::from_sat(1_000_000);
+        psbt.outputs[0].tap_internal_key = Some(our);
+        psbt.outputs[0]
+            .tap_key_origins
+            .insert(our, (vec![], (*keys.master_fingerprint(), path)));
+
+        let inputs = self_controlled_input_scripts(&psbt, &keys);
+        assert_eq!(unowned_output_sats(&psbt, &inputs, &keys), Some(0));
+    }
+
+    /// Asset change is pinned to Colored: a rule (C) output on the Vanilla
+    /// account is ours in sats but is not bridge asset change.
+    #[test]
+    fn change_oracle_takes_a_derived_output_only_on_colored() {
+        let keys = km();
+        let secp = Secp256k1::new();
+        for (account, (key, path)) in [
+            (AccountType::Vanilla, our_key(&keys, 1, 3)),
+            (AccountType::Colored, our_colored_key(&keys)),
+        ] {
+            let spk = ScriptBuf::new_p2tr(&secp, key, None);
+            let mut psbt = psbt_with(ScriptBuf::new(), spk);
+            make_input_ours(&mut psbt, &keys);
+            psbt.outputs[0].tap_internal_key = Some(key);
+            psbt.outputs[0]
+                .tap_key_origins
+                .insert(key, (vec![], (*keys.master_fingerprint(), path)));
+
+            assert_eq!(
+                self_owned_output_indices(&psbt, &keys).contains(&0),
+                account == AccountType::Colored,
+                "{account:?}"
+            );
+        }
     }
 
     /// Non-taproot outputs can never be reconstructed from BIP-371 metadata, so
