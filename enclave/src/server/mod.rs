@@ -21,15 +21,15 @@ mod context;
 mod dispatch;
 mod health;
 mod keys;
-#[cfg(feature = "spv")]
+#[cfg(feature = "rgb-validation")]
 mod rate_limit;
 mod sign;
 mod signers;
-#[cfg(feature = "spv")]
+#[cfg(feature = "rgb-validation")]
 mod spv;
 mod wire;
 
 pub use context::ServerContext;
-#[cfg(feature = "spv")]
+#[cfg(feature = "rgb-validation")]
 pub use rate_limit::SubmitRateLimiter;
 pub use wire::handle_connection;

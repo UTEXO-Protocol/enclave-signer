@@ -21,7 +21,6 @@ use crate::error::Result;
 /// `RGB_ASSET_ID`. Schema ids are compared by canonical string form so the
 /// comparison survives `rgb-schemas` resolving a different `rgb-consensus`
 /// build than the validator.
-#[cfg(feature = "rgb-validation")]
 pub(super) fn trusted_typesystem_for_schema(
     schema_id: rgbstd::SchemaId,
 ) -> Result<rgbstd::TypeSystem> {
@@ -39,7 +38,6 @@ pub(super) fn trusted_typesystem_for_schema(
 /// `BridgedFungibleAsset::types()` rebuilds the standard type libraries and
 /// re-assembles three AluVM scripts on every call. It is a constant, so the
 /// enclave pays for it once instead of on every consignment.
-#[cfg(feature = "rgb-validation")]
 pub(super) static BFA_TYPES: std::sync::LazyLock<rgbstd::TypeSystem> =
     std::sync::LazyLock::new(|| {
         use rgbstd::contract::IssuerWrapper;

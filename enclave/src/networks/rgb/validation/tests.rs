@@ -1112,7 +1112,6 @@ mod asset_bind {
             bridge_config: config,
             rgb_validator: Some(&validator),
             header_chain: &chain,
-            #[cfg(feature = "spv")]
             chain_pins: &crate::networks::rgb::spv_crosscheck::ChainPins::new(),
             // Source validation never reaches the destination PSBT bind.
             self_owned_psbt_outputs: None,

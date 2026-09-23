@@ -26,7 +26,7 @@ sequenceDiagram
         Srv->>Srv: bfa_burn_ancestry_events:<br/>resolve mint_ancestors and verify each EVM lock<br/>through the selected receipt provider BEFORE RGB validation
     end
 
-    Note over Srv,Esplora: 1 — validate_source (RGB, skipped under dev-mode)
+    Note over Srv,Esplora: 1 — validate_source (RGB)
     Srv->>Rgb: validate_source(RgbSource)
     Rgb->>Rgb: cheap payload gate first:<br/>consignment bytes present, size caps,<br/>keccak256(consignment) == consignment_hash (integrity),<br/>asset_id declared
     Rgb->>Rgb: Transfer::load(...), extract chain_net + witness_txids<br/>+ last transition + burned/total amounts
@@ -51,7 +51,7 @@ sequenceDiagram
     end
     Spv-->>Srv: Ok / Spv err
 
-    Note over Srv,Evm: 2 — validate_destination (EVM, skipped under dev-mode)
+    Note over Srv,Evm: 2 — validate_destination (EVM)
     Srv->>Evm: validate_destination(EvmDestination)
     Evm->>Evm: calldata ≥ 4 bytes, ≤ 64 KiB
     Evm->>Evm: selector is fundsOut 0xdc771390 or lzFundsOut

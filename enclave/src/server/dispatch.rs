@@ -11,7 +11,7 @@ use super::sign::handle_sign;
 #[cfg(feature = "ccd")]
 use super::signers::handle_sign_ccd;
 use super::signers::{handle_sign_btc, handle_sign_raw_digest};
-#[cfg(feature = "spv")]
+#[cfg(feature = "rgb-validation")]
 use super::spv::{handle_get_last_saved_block, handle_submit_headers};
 use crate::error::EnclaveError;
 use crate::proto::enclave_request::Request;
@@ -119,11 +119,11 @@ pub(super) fn dispatch(
                 start_height = req.start_height,
                 "request: SubmitHeaders"
             );
-            #[cfg(feature = "spv")]
+            #[cfg(feature = "rgb-validation")]
             {
                 handle_submit_headers(ctx, req)
             }
-            #[cfg(not(feature = "spv"))]
+            #[cfg(not(feature = "rgb-validation"))]
             {
                 let _ = req;
                 Err(unsupported_build("rgb"))
@@ -131,11 +131,11 @@ pub(super) fn dispatch(
         }
         Some(Request::GetLastSavedBlock(req)) => {
             tracing::info!("request: GetLastSavedBlock");
-            #[cfg(feature = "spv")]
+            #[cfg(feature = "rgb-validation")]
             {
                 handle_get_last_saved_block(ctx, req)
             }
-            #[cfg(not(feature = "spv"))]
+            #[cfg(not(feature = "rgb-validation"))]
             {
                 let _ = req;
                 Err(unsupported_build("rgb"))

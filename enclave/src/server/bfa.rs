@@ -166,10 +166,6 @@ pub(super) fn bfa_burn_ancestry_events(
     ctx: &ServerContext,
     source: &enclave_proto::RgbSource,
 ) -> Result<Vec<crate::networks::evm::events::VerifiedLock>> {
-    if cfg!(feature = "dev-mode") {
-        return Ok(Vec::new());
-    }
-
     let Some(binding) = bfa_binding_for(ctx, &source.consignment, "RGB source")? else {
         return Ok(Vec::new());
     };
@@ -200,12 +196,6 @@ pub(super) fn bfa_mint_events(
     source: &enclave_proto::EvmSource,
     destination: &enclave_proto::RgbDestination,
 ) -> Result<Vec<crate::networks::evm::events::VerifiedLock>> {
-    // dev-mode compiles no destination-anchor validation, so these events would
-    // have no consumer and the RPC call would be pure cost.
-    if cfg!(feature = "dev-mode") {
-        return Ok(Vec::new());
-    }
-
     let Some(binding) = bfa_binding_for(ctx, &destination.consignment, "send-RGB")? else {
         return Ok(Vec::new());
     };
@@ -238,9 +228,6 @@ pub(super) fn bfa_transfer_ancestry_events(
     ctx: &ServerContext,
     destination: &enclave_proto::RgbDestination,
 ) -> Result<Vec<crate::networks::evm::events::VerifiedLock>> {
-    if cfg!(feature = "dev-mode") {
-        return Ok(Vec::new());
-    }
     let Some(binding) = bfa_binding_for(ctx, &destination.consignment, "send-RGB")? else {
         return Ok(Vec::new());
     };

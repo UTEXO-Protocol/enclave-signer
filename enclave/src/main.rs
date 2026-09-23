@@ -1,4 +1,4 @@
-// `TcpListener` is only used in the dev-mode TCP fallback. The import is gated
+// `TcpListener` is only used in the non-vsock TCP fallback. The import is gated
 // to match the block at the bottom of `main`, so the production build emits no
 // unused-import warning.
 #[cfg(not(all(feature = "vsock", target_os = "linux")))]
@@ -63,7 +63,7 @@ fn main() {
 
     #[cfg(feature = "rgb-validation")]
     let rgb_validator = bootstrap::build_rgb_validator();
-    #[cfg(feature = "spv")]
+    #[cfg(feature = "rgb-validation")]
     let header_chain = bootstrap::build_header_chain(&bitcoin_network_str);
     #[cfg(feature = "evm-rpc")]
     let (evm_rpc_client, evm_rpc_config) =
@@ -79,9 +79,9 @@ fn main() {
         evm_rpc_client,
         #[cfg(feature = "evm-rpc")]
         evm_rpc_config,
-        #[cfg(feature = "spv")]
+        #[cfg(feature = "rgb-validation")]
         header_chain,
-        #[cfg(feature = "spv")]
+        #[cfg(feature = "rgb-validation")]
         submit_rate_limiter: std::sync::Mutex::new(server::SubmitRateLimiter::default()),
     };
 

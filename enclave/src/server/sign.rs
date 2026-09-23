@@ -37,7 +37,6 @@ pub(super) fn handle_sign(
 
     // Reject known replays before network I/O without letting invalid requests
     // consume guard capacity. Reserve again immediately before signing.
-    #[cfg(not(feature = "dev-mode"))]
     precheck_operation(ctx, source_ref, destination_ref)?;
 
     // Reject an invalid deposit before RGB validation and fee/indexer I/O.
@@ -99,16 +98,16 @@ pub(super) fn handle_sign(
     // Holds every Bitcoin block the SPV checks below use. Each check drops the
     // header-chain lock at return. `assert_chain_pins_unchanged` reads these
     // blocks again just before the key is used (F05-NEW-AF-08).
-    #[cfg(feature = "spv")]
+    #[cfg(feature = "rgb-validation")]
     let chain_pins = crate::networks::rgb::spv_crosscheck::ChainPins::new();
 
     let validation_ctx = ValidationContext {
         bridge_config: &ctx.bridge_config,
         #[cfg(feature = "rgb-validation")]
         rgb_validator: ctx.rgb_validator.as_ref(),
-        #[cfg(feature = "spv")]
+        #[cfg(feature = "rgb-validation")]
         header_chain: &ctx.header_chain,
-        #[cfg(feature = "spv")]
+        #[cfg(feature = "rgb-validation")]
         chain_pins: &chain_pins,
         #[cfg(feature = "rgb-validation")]
         self_owned_psbt_outputs: Some(&self_owned_psbt_outputs),
@@ -138,7 +137,6 @@ pub(super) fn handle_sign(
     // Soft operation-uniqueness guard. The key is reserved before signing and
     // committed only after the response reaches the caller, so neither a
     // transient error nor a lost response self-blocks a retry.
-    #[cfg(not(feature = "dev-mode"))]
     let op_reservation = reserve_operation(ctx, source_ref, destination_ref)?;
 
     let destination = req.destination_network.ok_or_else(|| {
@@ -162,7 +160,6 @@ pub(super) fn handle_sign(
                     destination_proof.evm_funds_out.as_ref(),
                     source_validated.rgb_consignment.as_ref(),
                     &rgb_source.merkle_proofs,
-                    #[cfg(feature = "spv")]
                     &chain_pins,
                     #[cfg(feature = "bfa-mint")]
                     &bfa_locks,
@@ -172,28 +169,24 @@ pub(super) fn handle_sign(
                 ctx,
                 destination,
                 destination_proof.evm_funds_out.as_ref(),
-                #[cfg(feature = "spv")]
+                #[cfg(feature = "rgb-validation")]
                 &chain_pins,
             )
         }
         DestinationNetwork::RgbDestination(destination) => handle_sign_psbt(
             ctx,
             destination,
-            #[cfg(feature = "spv")]
+            #[cfg(feature = "rgb-validation")]
             &chain_pins,
         ),
     };
-
-    #[cfg(feature = "dev-mode")]
-    let op_reservation = None;
 
     // On error the reservation drops here and rolls the key back.
     result.map(|response| (response, op_reservation))
 }
 
 /// Bind an RGB->EVM `fundsOut` calldata to the validated consignment before the
-/// enclave signs it. Skipped in dev-mode (like the other cross-checks) and a
-/// no-op for non-`fundsOut` calldata. For the currently enabled swap flow, the
+/// enclave signs it. A no-op for non-`fundsOut` calldata. For the currently enabled swap flow, the
 /// backend-provided general bridge operation ids are validated but not rewritten.
 #[cfg(feature = "rgb-validation")]
 fn apply_funds_out_binding(
@@ -201,14 +194,10 @@ fn apply_funds_out_binding(
     params: Option<&crate::networks::evm::validation::FundsOutParams>,
     validated: Option<&crate::networks::rgb::validation::ValidatedConsignment>,
     merkle_proofs: &[crate::proto::MerkleProofEntry],
-    #[cfg(feature = "spv")] pins: &crate::networks::rgb::spv_crosscheck::ChainPins,
+    pins: &crate::networks::rgb::spv_crosscheck::ChainPins,
     #[cfg(feature = "bfa-mint")] locks: &[crate::networks::evm::events::VerifiedLock],
 ) -> Result<()> {
     use crate::networks::evm::crosscheck;
-
-    if cfg!(all(feature = "dev-mode", not(test))) {
-        return Ok(());
-    }
 
     // `Some` exactly when destination validation decoded a `fundsOut` calldata,
     // so the type replaces the old selector check.
@@ -234,7 +223,6 @@ fn apply_funds_out_binding(
     // block anchoring the consignment's last witness tx. Fail-closed on an
     // empty `proof`. The SPV header chain is always present under
     // rgb-validation (spv is implied - see lib.rs M-01 compile_error).
-    #[cfg(feature = "spv")]
     {
         // Fail on a poisoned lock rather than reading through it, matching
         // `validate_source`: a poisoned header chain may be mid-reorg.
@@ -244,8 +232,6 @@ fn apply_funds_out_binding(
             .map_err(|e| EnclaveError::Internal(format!("SPV header chain lock poisoned: {e}")))?;
         crosscheck::verify_btc_relay_agreement(params, validated, merkle_proofs, &chain, pins)?;
     }
-    #[cfg(not(feature = "spv"))]
-    let _ = (ctx, merkle_proofs);
 
     // Consignment-bound release amount, under this build's RGB flow
     // (`rgb-swap` = Transfer, `rgb-mint-burn` = Burn).
@@ -320,27 +306,26 @@ fn verified_bfa_locks(
 
 /// The recipient a verified deposit authorizes. Uninhabited on builds that
 /// never verify one, so their `Option` is always `None`.
-#[cfg(all(feature = "evm-rpc", not(feature = "dev-mode")))]
+#[cfg(feature = "evm-rpc")]
 use crate::networks::rgb::invoice::AuthorizedRecipient;
-#[cfg(not(all(feature = "evm-rpc", not(feature = "dev-mode"))))]
+#[cfg(not(feature = "evm-rpc"))]
 type AuthorizedRecipient = std::convert::Infallible;
 
 /// Prove the EVM `FundsIn` deposit behind an EVM->RGB request, fail-closed.
 ///
-/// Three builds, three behaviours, one name, so `handle_sign` needs no `#[cfg]`
+/// Two builds, two behaviours, one name, so `handle_sign` needs no `#[cfg]`
 /// for this step:
 ///
-///   * `evm-rpc` (not dev-mode): fetch the receipt through the enclave's own
-///     RPC client and return the recipient the deposit's invoice authorizes.
-///     Fully trustless only once Helios verifies the RPC.
-///   * no `evm-rpc` (not dev-mode): refuse. There is no evidence the deposit
-///     occurred - the consignment/PSBT checks prove the transfer shape, not
-///     that an EVM deposit backs it. Mirrors the no-`spv` `fundsOut` refusal.
-///   * dev-mode: no-op, the legacy path for local testing.
+///   * `evm-rpc`: fetch the receipt through the enclave's own RPC client and
+///     return the recipient the deposit's invoice authorizes. Fully trustless
+///     only once Helios verifies the RPC.
+///   * no `evm-rpc`: refuse. There is no evidence the deposit occurred - the
+///     consignment/PSBT checks prove the transfer shape, not that an EVM
+///     deposit backs it. Mirrors the no-`spv` `fundsOut` refusal.
 ///
 /// The result goes to [`bind_funds_in_recipient`] once RGB validation has
 /// proven the recipient seals.
-#[cfg(all(feature = "evm-rpc", not(feature = "dev-mode")))]
+#[cfg(feature = "evm-rpc")]
 fn verify_funds_in_deposit(
     ctx: &ServerContext,
     amount: u64,
@@ -391,7 +376,7 @@ fn verify_funds_in_deposit(
     ))
 }
 
-#[cfg(all(not(feature = "evm-rpc"), not(feature = "dev-mode")))]
+#[cfg(not(feature = "evm-rpc"))]
 fn verify_funds_in_deposit(
     _ctx: &ServerContext,
     _amount: u64,
@@ -417,20 +402,10 @@ fn verify_funds_in_deposit(
     Ok(None)
 }
 
-#[cfg(feature = "dev-mode")]
-fn verify_funds_in_deposit(
-    _ctx: &ServerContext,
-    _amount: u64,
-    _source: &SourceNetwork,
-    _destination: &DestinationNetwork,
-) -> Result<Option<AuthorizedRecipient>> {
-    Ok(None)
-}
-
 /// Check the recipient seals RGB validation proved against the recipient the
 /// verified deposit authorized. A no-op wherever [`verify_funds_in_deposit`]
 /// returns no recipient.
-#[cfg(all(feature = "evm-rpc", not(feature = "dev-mode")))]
+#[cfg(feature = "evm-rpc")]
 fn bind_funds_in_recipient(
     authorized: Option<AuthorizedRecipient>,
     destination_proof: &crate::networks::DestinationProof,
@@ -444,7 +419,7 @@ fn bind_funds_in_recipient(
     }
 }
 
-#[cfg(not(all(feature = "evm-rpc", not(feature = "dev-mode"))))]
+#[cfg(not(feature = "evm-rpc"))]
 fn bind_funds_in_recipient(
     _authorized: Option<AuthorizedRecipient>,
     _destination_proof: &crate::networks::DestinationProof,
@@ -453,7 +428,6 @@ fn bind_funds_in_recipient(
 }
 
 /// Replay-guard key of an EVM->RGB bridge sign. `None` for every other route.
-#[cfg(not(feature = "dev-mode"))]
 fn operation_key(
     ctx: &ServerContext,
     source: &SourceNetwork,
@@ -476,7 +450,6 @@ fn operation_key(
 /// Reject a known replay without recording anything, so an invalid request
 /// never consumes guard capacity. [`reserve_operation`] still runs before
 /// signing to close the concurrent-check race.
-#[cfg(not(feature = "dev-mode"))]
 fn precheck_operation(
     ctx: &ServerContext,
     source: &SourceNetwork,
@@ -505,7 +478,6 @@ fn precheck_operation(
 /// the durable guard is on-chain. The caller commits the reservation once the
 /// response reaches the caller, and dropping it un-committed rolls the key
 /// back, so neither a transient error nor a lost response consumes it.
-#[cfg(not(feature = "dev-mode"))]
 fn reserve_operation<'ctx>(
     ctx: &'ctx ServerContext,
     source: &SourceNetwork,
@@ -540,396 +512,22 @@ fn reserve_operation<'ctx>(
 /// so its retry is signed. `bfa-validation` is excluded: it needs EVM lock events.
 #[cfg(all(
     test,
-    feature = "spv",
     feature = "evm-rpc",
     feature = "rgb-swap",
-    not(feature = "bfa-validation"),
-    not(feature = "dev-mode")
+    not(feature = "bfa-validation")
 ))]
-mod bridge_operation_retry {
-    use std::io::{Cursor, Read, Write};
-
-    use sha3::{Digest, Keccak256};
-
-    use crate::config::{BridgeConfig, EvmRpcConfig};
-    use crate::error::Result;
-    use crate::framing;
-    use crate::networks::evm::events::{EvmReceiptProvider, LogEntry, ReceiptData};
-    use crate::networks::rgb::spv::{checkpoint_for, HeaderChain, Network};
-    use crate::networks::rgb::validation::{
-        bfa, OutputSeal, RgbValidator, TransitionOutput, TransitionSummary, ValidatedConsignment,
-    };
-    use crate::policy::{BuildContext, EvmDataSource, SecurityPolicy};
-    use crate::proto::enclave_request::Request;
-    use crate::proto::enclave_response::Response;
-    use crate::proto::sign_request::{DestinationNetwork, SourceNetwork};
-    use crate::proto::*;
-    use crate::server::{handle_connection, ServerContext, SubmitRateLimiter};
-    use crate::state::EnclaveState;
-
-    /// Fixed seed, so every derived key and every txid is the same on each
-    /// run.
-    const SEED: [u8; 64] = [0x21; 64];
-    const ASSET_ID: &str = "rgb:test-asset";
-    const BRIDGE_CONTRACT: [u8; 20] = [0xAA; 20];
-    const FUNDS_IN_CONTRACT: [u8; 20] = [0xBB; 20];
-    const DEPOSIT_TX: [u8; 32] = [0xCC; 32];
-    const OPERATION_ID: [u8; 32] = [0x33; 32];
-    const DEPOSIT_BLOCK: u64 = 100;
-    const GROSS: u64 = 100_000;
-    const COMMISSION: u64 = 1_000;
-    const NET: u64 = GROSS - COMMISSION;
-
-    /// Canonical `BridgeFundsIn` signature, as the deposit verifier selects
-    /// logs by.
-    const FUNDS_IN_SIG: &str = "BridgeFundsIn(bytes32,bytes32,address,uint256,uint256,\
-         uint256,uint256,uint256,uint256,uint256,string)";
-
-    /// The deposit's invoice and the blinded seal it names.
-    const INVOICE: &str =
-        "rgb:~/~/~/bc:utxob:dYwB28dy-yD6EBgm-MO~UKN_-FyEEdBL-E9hw8Oj-i9KxH5b-e9vZL";
-    const RECIPIENT_SEAL: &str = "utxob:dYwB28dy-yD6EBgm-MO~UKN_-FyEEdBL-E9hw8Oj-i9KxH5b-e9vZL";
-
-    /// NUMS internal key (BIP-341 unspendable key path), as the bridge's
-    /// taproot addresses use.
-    const NUMS_INTERNAL: [u8; 32] = [
-        0x50, 0x92, 0x9b, 0x74, 0xc1, 0xa0, 0x49, 0x54, 0xb7, 0x8b, 0x4b, 0x60, 0x35, 0xe9, 0x7a,
-        0x5e, 0x07, 0x8a, 0x5a, 0x0f, 0x28, 0xec, 0x96, 0xd5, 0x47, 0xbf, 0xee, 0x9a, 0xce, 0x80,
-        0x3a, 0xc0,
-    ];
-
-    /// A caller that is gone: the request still reads back, every write
-    /// fails.
-    struct DeadCaller(Cursor<Vec<u8>>);
-
-    impl Read for DeadCaller {
-        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-            self.0.read(buf)
-        }
-    }
-
-    impl Write for DeadCaller {
-        fn write(&mut self, _buf: &[u8]) -> std::io::Result<usize> {
-            Err(std::io::Error::new(
-                std::io::ErrorKind::BrokenPipe,
-                "caller is gone",
-            ))
-        }
-        fn flush(&mut self) -> std::io::Result<()> {
-            Ok(())
-        }
-    }
-
-    /// Stands in for the EVM RPC: one confirmed `BridgeFundsIn` deposit.
-    struct StubDeposit;
-
-    impl EvmReceiptProvider for StubDeposit {
-        fn get_transaction_receipt(&self, _tx_hash: &[u8; 32]) -> Result<Option<ReceiptData>> {
-            Ok(Some(ReceiptData {
-                status_success: true,
-                block_number: DEPOSIT_BLOCK,
-                logs: vec![LogEntry {
-                    address: FUNDS_IN_CONTRACT,
-                    topics: vec![
-                        Keccak256::digest(FUNDS_IN_SIG.as_bytes()).into(),
-                        OPERATION_ID,
-                    ],
-                    data: funds_in_data(),
-                }],
-            }))
-        }
-
-        fn get_block_number(&self) -> Result<u64> {
-            Ok(DEPOSIT_BLOCK + EvmRpcConfig::default().min_confirmations)
-        }
-    }
-
-    fn word(value: u64) -> [u8; 32] {
-        let mut w = [0u8; 32];
-        w[24..].copy_from_slice(&value.to_be_bytes());
-        w
-    }
-
-    /// `BridgeFundsIn` data: senderNonce, amount, netAmount, tokenCommission,
-    /// nativeCommission, sourceChainId, destinationChainId, then the
-    /// `destinationAddress` head word and its tail. `operationId` is indexed.
-    fn funds_in_data() -> Vec<u8> {
-        let mut data = Vec::new();
-        data.extend_from_slice(&word(0));
-        data.extend_from_slice(&word(GROSS));
-        data.extend_from_slice(&word(NET));
-        data.extend_from_slice(&word(COMMISSION));
-        data.extend_from_slice(&[0u8; 32 * 3]);
-        data.extend_from_slice(&word(8 * 32));
-        data.extend_from_slice(&word(INVOICE.len() as u64));
-        let mut tail = INVOICE.as_bytes().to_vec();
-        tail.resize(tail.len().div_ceil(32) * 32, 0);
-        data.extend_from_slice(&tail);
-        data
-    }
-
-    fn foreign_xonly(b: u8) -> bitcoin::XOnlyPublicKey {
-        let secp = bitcoin::secp256k1::Secp256k1::new();
-        let sk = bitcoin::secp256k1::SecretKey::from_slice(&[b; 32]).unwrap();
-        bitcoin::XOnlyPublicKey::from_keypair(&bitcoin::secp256k1::Keypair::from_secret_key(
-            &secp, &sk,
-        ))
-        .0
-    }
-
-    /// A taproot address the enclave has no key in.
-    fn foreign_address() -> bitcoin::ScriptBuf {
-        let secp = bitcoin::secp256k1::Secp256k1::new();
-        bitcoin::ScriptBuf::new_p2tr(&secp, foreign_xonly(0xB1), None)
-    }
-
-    /// The witness transaction of the deposit: one input on the enclave's
-    /// colored address `m/86'/827166'/0'/0/0` (a 2-of-3 taproot address, the
-    /// federation shape), the recipient's output, and colored change.
-    fn deposit_psbt(state: &EnclaveState) -> Vec<u8> {
-        use bitcoin::bip32::ChildNumber;
-        use bitcoin::blockdata::opcodes::all::{OP_CHECKSIG, OP_CHECKSIGADD, OP_NUMEQUAL};
-        use bitcoin::blockdata::script::Builder;
-        use bitcoin::hashes::Hash;
-        use bitcoin::psbt::Psbt;
-        use bitcoin::taproot::{LeafVersion, TapLeafHash, TaprootBuilder};
-        use bitcoin::{
-            Amount, OutPoint, ScriptBuf, Sequence, Transaction, TxIn, TxOut, Txid, Witness,
-        };
-        use std::str::FromStr;
-
-        let keys = state.get_keys().expect("keys");
-        let account_xpub =
-            bitcoin::bip32::Xpub::from_str(&keys.account_xpub_colored).expect("colored xpub");
-        let secp = bitcoin::secp256k1::Secp256k1::new();
-        let child = [
-            ChildNumber::Normal { index: 0 },
-            ChildNumber::Normal { index: 0 },
-        ];
-        let ours = account_xpub
-            .derive_pub(&secp, &child.to_vec())
-            .expect("derive child xpub")
-            .to_x_only_pub();
-
-        let mut keyset = [ours, foreign_xonly(0xA1), foreign_xonly(0xA2)];
-        keyset.sort();
-        let leaf = Builder::new()
-            .push_x_only_key(&keyset[0])
-            .push_opcode(OP_CHECKSIG)
-            .push_x_only_key(&keyset[1])
-            .push_opcode(OP_CHECKSIGADD)
-            .push_x_only_key(&keyset[2])
-            .push_opcode(OP_CHECKSIGADD)
-            .push_int(2)
-            .push_opcode(OP_NUMEQUAL)
-            .into_script();
-        let leaf_hash = TapLeafHash::from_script(&leaf, LeafVersion::TapScript);
-        let internal = bitcoin::XOnlyPublicKey::from_slice(&NUMS_INTERNAL).unwrap();
-        let info = TaprootBuilder::new()
-            .add_leaf(0, leaf.clone())
-            .unwrap()
-            .finalize(&secp, internal)
-            .unwrap();
-        let spk = ScriptBuf::new_p2tr(&secp, internal, info.merkle_root());
-        let control = info
-            .control_block(&(leaf.clone(), LeafVersion::TapScript))
-            .unwrap();
-        let path = bitcoin::bip32::DerivationPath::from(vec![
-            ChildNumber::from_hardened_idx(86).unwrap(),
-            ChildNumber::from_hardened_idx(827166).unwrap(),
-            ChildNumber::from_hardened_idx(0).unwrap(),
-            child[0],
-            child[1],
-        ]);
-
-        let unsigned_tx = Transaction {
-            version: bitcoin::transaction::Version(2),
-            lock_time: bitcoin::absolute::LockTime::ZERO,
-            input: vec![TxIn {
-                previous_output: OutPoint {
-                    txid: Txid::from_raw_hash(bitcoin::hashes::sha256d::Hash::from_byte_array(
-                        [0u8; 32],
-                    )),
-                    vout: 0,
-                },
-                script_sig: ScriptBuf::new(),
-                sequence: Sequence::MAX,
-                witness: Witness::new(),
-            }],
-            output: vec![
-                TxOut {
-                    value: Amount::from_sat(1_000),
-                    script_pubkey: foreign_address(),
-                },
-                TxOut {
-                    value: Amount::from_sat(58_000),
-                    script_pubkey: spk.clone(),
-                },
-            ],
-        };
-        let mut psbt = Psbt::from_unsigned_tx(unsigned_tx).expect("from_unsigned_tx");
-        psbt.inputs[0].witness_utxo = Some(TxOut {
-            value: Amount::from_sat(60_000),
-            script_pubkey: spk,
-        });
-        psbt.inputs[0].tap_internal_key = Some(internal);
-        psbt.inputs[0]
-            .tap_scripts
-            .insert(control, (leaf, LeafVersion::TapScript));
-        psbt.inputs[0].tap_key_origins.insert(
-            ours,
-            (
-                vec![leaf_hash],
-                (
-                    bitcoin::bip32::Fingerprint::from(keys.master_fingerprint),
-                    path,
-                ),
-            ),
-        );
-        psbt.serialize()
-    }
-
-    /// One BFA transfer paying the deposit's invoice, anchored to `txid`.
-    fn validated_consignment(txid: bitcoin::Txid) -> ValidatedConsignment {
-        let transition = TransitionSummary {
-            op_id: "11".repeat(32),
-            transition_type: bfa::TS_TRANSFER,
-            total_output_amount: NET,
-            asset_output_amount: NET,
-            outputs: vec![TransitionOutput {
-                assignment_type: bfa::OS_ASSET,
-                amount: NET,
-                seal: OutputSeal::Confidential {
-                    secret_seal: RECIPIENT_SEAL.into(),
-                },
-            }],
-            burned_asset_amount: None,
-            burn_recipient: None,
-        };
-        ValidatedConsignment {
-            contract_id: ASSET_ID.into(),
-            chain_net: "bc".into(),
-            witness_txids: vec![],
-            all_op_ids: vec![transition.op_id.clone()],
-            mint_op_ids: vec![],
-            last_transition: Some(transition.clone()),
-            last_witness_txid: Some(txid),
-            last_transfer_witness_prevouts: None,
-            last_transfer_op_id: None,
-            non_mined_witness_txids: vec![],
-            transitions_by_witness: vec![(txid, vec![transition])],
-        }
-    }
-
-    fn deposit_request(psbt_bytes: Vec<u8>) -> EnclaveRequest {
-        let consignment = b"answered by the canned validator".to_vec();
-        EnclaveRequest {
-            request: Some(Request::Sign(SignRequest {
-                amount: GROSS,
-                source_network: Some(SourceNetwork::EvmSource(EvmSource {
-                    tx_hash: DEPOSIT_TX.to_vec(),
-                    event_valid: true,
-                    event_finalized: true,
-                    token: vec![],
-                    recipient: vec![],
-                    commission: COMMISSION,
-                    funds_in_operation_id: OPERATION_ID.to_vec(),
-                })),
-                destination_network: Some(DestinationNetwork::RgbDestination(RgbDestination {
-                    operation_idx: 0,
-                    psbt_bytes,
-                    psbt_output_amount: NET,
-                    asset_id: ASSET_ID.into(),
-                    consignment_hash: Keccak256::digest(&consignment).to_vec(),
-                    consignment,
-                    mint_ancestors: Vec::new(),
-                })),
-            })),
-        }
-    }
-
-    fn framed(request: &EnclaveRequest) -> Vec<u8> {
-        let mut bytes = Vec::new();
-        framing::write_message(&mut bytes, request).expect("frame request");
-        bytes
-    }
-
-    /// Handle one request over a connection that stays up, and decode what
-    /// the caller received.
-    fn respond(ctx: &ServerContext, request: &EnclaveRequest) -> EnclaveResponse {
-        let request = framed(request);
-        let request_len = request.len();
-        let mut caller = Cursor::new(request);
-        handle_connection(&mut caller, ctx);
-        framing::read_message(&mut &caller.into_inner()[request_len..]).expect("response frame")
-    }
-
-    /// The caller never reads the first signature. The retry must be signed,
-    /// not refused as a duplicate.
-    #[test]
-    fn a_retry_is_signed_when_the_first_response_never_reached_the_caller() {
-        let bridge_config = BridgeConfig {
-            chain_id: 1,
-            bridge_contract: BRIDGE_CONTRACT,
-            funds_in_contract: FUNDS_IN_CONTRACT,
-            rgb_asset_id: ASSET_ID.into(),
-            rgb_max_unowned_sats: 5_000,
-            ..Default::default()
-        };
-        let policy = SecurityPolicy::resolve(
-            &BuildContext::current(),
-            &bridge_config,
-            EvmDataSource::Disabled,
-            None,
-            0,
-        );
-        let state = EnclaveState::new(bitcoin::Network::Bitcoin);
-        state.initialize_from_seed(SEED).expect("initialize keys");
-
-        let psbt_bytes = deposit_psbt(&state);
-        let txid = bitcoin::psbt::Psbt::deserialize(&psbt_bytes)
-            .expect("psbt")
-            .unsigned_tx
-            .compute_txid();
-
-        let ctx = ServerContext {
-            state,
-            bridge_config,
-            policy,
-            rgb_validator: Some(RgbValidator::canned(validated_consignment(txid), 50.0)),
-            evm_rpc_client: Some(Box::new(StubDeposit)),
-            evm_rpc_config: EvmRpcConfig::default(),
-            header_chain: std::sync::Mutex::new(HeaderChain::new(
-                Network::Regtest,
-                checkpoint_for(Network::Regtest),
-            )),
-            submit_rate_limiter: std::sync::Mutex::new(SubmitRateLimiter::default()),
-        };
-
-        let request = deposit_request(psbt_bytes);
-        handle_connection(DeadCaller(Cursor::new(framed(&request))), &ctx);
-
-        match respond(&ctx, &request).response {
-            Some(Response::SignedPsbt(r)) => assert_eq!(r.inputs_signed, 1),
-            other => panic!(
-                "the retry of an undelivered signature must be signed, got {:?}",
-                other
-            ),
-        }
-    }
-}
+mod bridge_operation_retry;
 
 /// The early deposit and replay checks run before any RGB work.
-#[cfg(all(test, feature = "spv", feature = "evm-rpc", not(feature = "dev-mode")))]
+#[cfg(all(test, feature = "evm-rpc"))]
 mod early_bridge_checks {
     use super::*;
     use crate::config::BridgeConfig;
     use crate::networks::evm::events::{EvmReceiptProvider, ReceiptData};
-    use crate::networks::rgb::spv::{checkpoint_for, HeaderChain, Network};
     use crate::state::EnclaveState;
     use std::sync::{
         atomic::{AtomicUsize, Ordering},
-        Arc, Mutex,
+        Arc,
     };
 
     struct MissingDeposit(Arc<AtomicUsize>);
@@ -949,10 +547,7 @@ mod early_bridge_checks {
         let mut ctx = ServerContext::new(
             EnclaveState::default(),
             BridgeConfig::default(),
-            Mutex::new(HeaderChain::new(
-                Network::Regtest,
-                checkpoint_for(Network::Regtest),
-            )),
+            crate::test_support::regtest_header_chain(),
         );
         ctx.evm_rpc_client = Some(Box::new(MissingDeposit(Arc::clone(calls))));
         ctx

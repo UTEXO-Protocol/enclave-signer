@@ -9,7 +9,7 @@
 //!
 //! SPV/RGB-only: a `ccd`-only build has no header chain and reports SPV
 //! readiness vacuously, which is a different assertion set.
-#![cfg(feature = "spv")]
+#![cfg(feature = "rgb-validation")]
 
 use std::time::{SystemTime, UNIX_EPOCH};
 

@@ -35,7 +35,7 @@ fn process_connection(mut stream: impl Read + Write, ctx: &ServerContext) -> Res
 
 /// A connection that aged out in the queue is not dispatched. Its first
 /// read fails.
-#[cfg(all(test, feature = "spv"))]
+#[cfg(all(test, feature = "rgb-validation"))]
 mod expired_pickup {
     use std::io::{self, Cursor, Read, Write};
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -46,7 +46,6 @@ mod expired_pickup {
     use crate::config::BridgeConfig;
     use crate::conn::{DeadlineStream, SocketTimeout, IO_IDLE_TIMEOUT};
     use crate::framing;
-    use crate::networks::rgb::spv::{checkpoint_for, HeaderChain, Network};
     use crate::proto::enclave_request::Request;
     use crate::proto::*;
     use crate::server::ServerContext;
@@ -111,10 +110,7 @@ mod expired_pickup {
         let ctx = ServerContext::new(
             EnclaveState::new(bitcoin::Network::Bitcoin),
             BridgeConfig::default(),
-            std::sync::Mutex::new(HeaderChain::new(
-                Network::Regtest,
-                checkpoint_for(Network::Regtest),
-            )),
+            crate::test_support::regtest_header_chain(),
         );
 
         assert!(process_connection(stream, &ctx).is_err());

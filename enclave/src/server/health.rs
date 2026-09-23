@@ -10,7 +10,7 @@ use crate::proto::*;
 
 /// SPV half of the readiness answer:
 /// `(synced, tip_height, tip_time, tip_age_secs, max_tip_age_secs)`.
-#[cfg(feature = "spv")]
+#[cfg(feature = "rgb-validation")]
 fn spv_health(ctx: &ServerContext) -> (bool, u32, u32, u32, u32) {
     use crate::networks::rgb::spv_crosscheck::{assert_chain_ready, SPV_MAX_TIP_AGE_SECS};
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -42,7 +42,7 @@ fn spv_health(ctx: &ServerContext) -> (bool, u32, u32, u32, u32) {
 
 /// A `ccd`-only build carries no header chain and rejects SubmitHeaders, so
 /// there is nothing to sync. The zeroed heights say "not applicable here".
-#[cfg(not(feature = "spv"))]
+#[cfg(not(feature = "rgb-validation"))]
 fn spv_health(_ctx: &ServerContext) -> (bool, u32, u32, u32, u32) {
     (true, 0, 0, 0, 0)
 }

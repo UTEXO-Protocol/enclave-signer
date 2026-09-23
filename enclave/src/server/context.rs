@@ -3,7 +3,7 @@
 //! Built once in `main.rs` and shared immutably. The only mutable parts are
 //! behind their own `Mutex` (the SPV header chain and its rate limiter).
 
-#[cfg(feature = "spv")]
+#[cfg(feature = "rgb-validation")]
 use super::rate_limit::SubmitRateLimiter;
 use crate::config::BridgeConfig;
 use crate::state::EnclaveState;
@@ -41,12 +41,12 @@ pub struct ServerContext {
     ///
     /// SPV-only: a `ccd`-only build carries no chain and rejects
     /// `SubmitHeaders` / `GetLastSavedBlock`.
-    #[cfg(feature = "spv")]
+    #[cfg(feature = "rgb-validation")]
     pub header_chain: std::sync::Mutex<crate::networks::rgb::spv::HeaderChain>,
     /// Cumulative rate limit for `SubmitHeaders`. The per-call cap lives
     /// in `HeaderChain::submit_headers`; this bounds the *aggregate* rate
     /// across calls so a flood of small batches can't keep the enclave busy.
-    #[cfg(feature = "spv")]
+    #[cfg(feature = "rgb-validation")]
     pub submit_rate_limiter: std::sync::Mutex<SubmitRateLimiter>,
 }
 
@@ -54,7 +54,7 @@ impl ServerContext {
     /// Construct a `ServerContext` from the always-present fields, hiding
     /// feature-gated fields like `rgb_validator` so external callers
     /// (e.g. the parent's E2E tests) don't need to mirror our cfg flags.
-    #[cfg(feature = "spv")]
+    #[cfg(feature = "rgb-validation")]
     pub fn new(
         state: EnclaveState,
         bridge_config: BridgeConfig,
@@ -74,7 +74,6 @@ impl ServerContext {
             state,
             bridge_config,
             policy,
-            #[cfg(feature = "rgb-validation")]
             rgb_validator: None,
             #[cfg(feature = "evm-rpc")]
             evm_rpc_client: None,
@@ -86,7 +85,7 @@ impl ServerContext {
     }
 
     /// `ccd`-only variant: no SPV header chain to pass in.
-    #[cfg(not(feature = "spv"))]
+    #[cfg(not(feature = "rgb-validation"))]
     pub fn new(state: EnclaveState, bridge_config: BridgeConfig) -> Self {
         // No EVM source is wired here, so resolve `Disabled`. A ccd-only build
         // has no bridge-signing path and the boot gate exempts it.

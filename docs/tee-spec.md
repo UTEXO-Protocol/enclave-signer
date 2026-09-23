@@ -93,8 +93,8 @@ Four crates plus the infrastructure they touch:
 **Cargo features.** `rgb` (implies `spv`, which implies `rgb-validation`),
 `ccd`, exactly one of `rgb-swap` / `rgb-mint-burn`, `evm-rpc`, `bfa-mint`,
 `vsock`. Production images are built with `--no-default-features` and an
-explicit set (README, Building). Dev-only features (`dev-mode`,
-`mock-attestation`, `allow-seed-import`) are `compile_error!` in release.
+explicit set (README, Building). Dev-only features
+(`mock-attestation`, `allow-seed-import`) are `compile_error!` in release.
 
 **Wire protocol** enclave<->parent: 4-byte little-endian length prefix + prost
 protobuf, 4 MiB frame cap, no version field (`framing.rs`). The consignment
@@ -130,8 +130,8 @@ SecurityPolicy = Production {
 } | Development { reason }
 ```
 
-- **Resolution** (`policy.rs`): any dev feature (`dev-mode`,
-  `mock-attestation`, `allow-seed-import`), a debug/test build, a non-bridge
+- **Resolution** (`policy.rs`): any dev feature
+  (`mock-attestation`, `allow-seed-import`), a debug/test build, a non-bridge
   build, or a missing pin resolves to `Development`. Only a release
   `rgb-validation` build with `EVM_CHAIN_ID`, `EVM_PROXY_CONTRACT_ADDRESS`, and
   `RGB_ASSET_ID` all set resolves to `Production`. `evm_source` is

@@ -17,7 +17,7 @@ use crate::state::EnclaveState;
 /// Each SPV check drops the lock at return. Another worker can accept a reorg
 /// in that gap (F05-NEW-AF-08). An extension leaves the pinned heights alone
 /// and still signs. A reorg that replaces one refuses here.
-#[cfg(feature = "spv")]
+#[cfg(feature = "rgb-validation")]
 fn assert_chain_pins_unchanged(
     ctx: &ServerContext,
     pins: &crate::networks::rgb::spv_crosscheck::ChainPins,
@@ -35,14 +35,13 @@ fn assert_chain_pins_unchanged(
 }
 
 /// `params` comes from destination validation, so the digest commits to exactly
-/// the fields cross-checked there. `None` in dev-mode, which skips
-/// validation and therefore decodes here, and on the LayerZero route, whose
-/// param shape is not `FundsOutParams` - `lz_funds_out_digest` decodes its own.
+/// the fields cross-checked there. `None` on the LayerZero route, whose param
+/// shape is not `FundsOutParams` - `lz_funds_out_digest` decodes its own.
 pub(super) fn handle_sign_evm(
     ctx: &ServerContext,
     req: EvmDestination,
     params: Option<&crate::networks::evm::validation::FundsOutParams>,
-    #[cfg(feature = "spv")] pins: &crate::networks::rgb::spv_crosscheck::ChainPins,
+    #[cfg(feature = "rgb-validation")] pins: &crate::networks::rgb::spv_crosscheck::ChainPins,
 ) -> Result<EnclaveResponse> {
     // Domain name/version are pinned to the deployed MultisigProxy and
     // regression-guarded by `test_domain_separator_matches_deployed_contract`.
@@ -66,18 +65,14 @@ pub(super) fn handle_sign_evm(
             req.deadline,
         )?
     } else {
-        // `params` is `Some` on the pools route whenever validation ran, so the
-        // digest commits to exactly the fields cross-checked there. Dev-mode
-        // skips validation and therefore decodes here.
-        let decoded_here;
-        let params = match params {
-            Some(params) => params,
-            None => {
-                decoded_here =
-                    crate::networks::evm::validation::decode_funds_out_params(&req.call_data)?;
-                &decoded_here
-            }
-        };
+        // Validation yields `params` for every non-LayerZero selector. `None`
+        // here is an LZ selector without `lz_release`: refuse, never re-decode.
+        let params = params.ok_or_else(|| {
+            EnclaveError::CrossCheck(
+                "fundsOut digest requires validated calldata params (LayerZero selector without                  lz_release?)"
+                    .into(),
+            )
+        })?;
         funds_out_digest(&domain, params, req.nonce, req.deadline)?
     };
 
@@ -97,7 +92,7 @@ pub(super) fn handle_sign_evm(
     // Last gate before the key. The chain the checks read must still be the
     // chain the enclave holds. Both routes use it. The LayerZero digest skips
     // the `fundsOut` binding, so the source check is its only SPV evidence.
-    #[cfg(feature = "spv")]
+    #[cfg(feature = "rgb-validation")]
     assert_chain_pins_unchanged(ctx, pins)?;
 
     let signature = ctx.state.sign_evm(&digest)?;
@@ -119,27 +114,24 @@ pub(super) fn handle_sign_evm(
 pub(super) fn handle_sign_psbt(
     ctx: &ServerContext,
     req: RgbDestination,
-    #[cfg(feature = "spv")] pins: &crate::networks::rgb::spv_crosscheck::ChainPins,
+    #[cfg(feature = "rgb-validation")] pins: &crate::networks::rgb::spv_crosscheck::ChainPins,
 ) -> Result<EnclaveResponse> {
     // Sats gate: every other send-RGB bind is in RGB asset units, so without
     // this a witness tx can satisfy the ledger and still sweep the Bitcoin
-    // backing. dev-mode keeps the unbounded path.
-    #[cfg(not(feature = "dev-mode"))]
-    {
-        let psbt = crate::networks::rgb::psbt_validation::parse_psbt_shape(&req.psbt_bytes)?;
-        ctx.state.with_keys(|keys| {
-            crate::networks::rgb::btc_crosscheck::validate_rgb_psbt_sats(
-                &psbt,
-                &ctx.bridge_config,
-                keys,
-            )
-        })?;
-    }
+    // backing.
+    let psbt = crate::networks::rgb::psbt_validation::parse_psbt_shape(&req.psbt_bytes)?;
+    ctx.state.with_keys(|keys| {
+        crate::networks::rgb::btc_crosscheck::validate_rgb_psbt_sats(
+            &psbt,
+            &ctx.bridge_config,
+            keys,
+        )
+    })?;
 
     // Same gate as the EVM route. An RGB source's SPV evidence must still hold
     // on the chain the enclave holds now. No-op when nothing is pinned. An EVM
     // source carries no Bitcoin proof.
-    #[cfg(feature = "spv")]
+    #[cfg(feature = "rgb-validation")]
     assert_chain_pins_unchanged(ctx, pins)?;
 
     // Colored account only: an unscoped sign co-signs every input the enclave
@@ -151,9 +143,7 @@ pub(super) fn handle_sign_psbt(
     // Reject a "successful" no-op: `sign_psbt` returns
     // Ok((bytes, 0)) when no input belongs to this enclave, which a caller
     // checking only RPC success would mis-count as a signer contribution.
-    // Partial signing (0 < count < num_inputs) is still allowed. dev-mode keeps
-    // the 0-count path for inspect/dry-run.
-    #[cfg(not(feature = "dev-mode"))]
+    // Partial signing (0 < count < num_inputs) is still allowed.
     if inputs_signed == 0 {
         return Err(EnclaveError::Signing(
             "sign_psbt signed 0 inputs: no PSBT input belongs to this enclave - refusing to \
@@ -194,10 +184,9 @@ pub(super) fn handle_sign_btc(ctx: &ServerContext, req: SignBtcRequest) -> Resul
         }
     }
 
-    // Output self-ownership + amount cap (skipped only in dev-mode). Runs
+    // Output self-ownership + amount cap. Runs
     // against the enclave's own keys, so an uninitialized enclave fails here
     // with KeyNotInitialized rather than reaching the signer.
-    #[cfg(not(feature = "dev-mode"))]
     ctx.state.with_keys(|keys| {
         crate::networks::rgb::btc_crosscheck::validate_btc_request(&req, &ctx.bridge_config, keys)
     })?;
@@ -211,7 +200,6 @@ pub(super) fn handle_sign_btc(ctx: &ServerContext, req: SignBtcRequest) -> Resul
 
     // Mirror the bridge path's guard: a 0-input signing is a no-op and
     // must not be returned as a successful signature in production.
-    #[cfg(not(feature = "dev-mode"))]
     if inputs_signed == 0 {
         return Err(EnclaveError::Signing(
             "sign_btc signed 0 inputs: no PSBT input belongs to this enclave - refusing to \
@@ -237,21 +225,8 @@ pub(super) fn handle_sign_raw_digest(
     // Gas-tx shape allowlist. Production refuses to
     // blind-sign an opaque digest: the request must carry the unsigned tx
     // preimage, which the enclave decodes, checks against the operator pins, and
-    // hashes itself (see `networks::evm::gas_tx`). dev-mode keeps the legacy
-    // opaque-digest path for local testing.
-    #[cfg(not(feature = "dev-mode"))]
+    // hashes itself (see `networks::evm::gas_tx`).
     let digest = crate::networks::evm::gas_tx::validate_gas_tx_request(&req, &ctx.bridge_config)?;
-
-    #[cfg(feature = "dev-mode")]
-    let digest: [u8; 32] = {
-        if req.digest.len() != 32 {
-            return Err(EnclaveError::InvalidRequest(format!(
-                "digest must be exactly 32 bytes, got {}",
-                req.digest.len()
-            )));
-        }
-        req.digest.as_slice().try_into().unwrap()
-    };
 
     let signature = ctx.state.sign_evm_gas_tx(&digest)?;
 

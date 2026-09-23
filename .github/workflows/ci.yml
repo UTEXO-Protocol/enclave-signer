@@ -211,7 +211,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        feature: [allow-seed-import, mock-attestation, dev-mode]
+        feature: [allow-seed-import, mock-attestation]
 
     steps:
       - uses: actions/checkout@v4

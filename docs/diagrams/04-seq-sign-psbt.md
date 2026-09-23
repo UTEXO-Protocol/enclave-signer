@@ -43,7 +43,7 @@ sequenceDiagram
         Srv->>Evt: bfa_mint_events: verify this mint and mint_ancestors locks<br/>BEFORE consignment validation; pass verified events into RGB validation
     end
 
-    Note over Srv,Evm: 1 — validate_source (EVM, skipped in dev-mode)
+    Note over Srv,Evm: 1 — validate_source (EVM)
     Srv->>Evm: validate_source(EvmSource)
     Evm->>Evm: len(evm_tx_hash) == 32
     Note right of Evm: listener event_valid / event_finalized<br/>are IGNORED — validity and finality<br/>are established below, never trusted

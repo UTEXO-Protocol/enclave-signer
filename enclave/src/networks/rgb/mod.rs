@@ -26,7 +26,7 @@ pub mod psbt_validation;
 mod route;
 pub mod signing;
 pub mod spv;
-#[cfg(feature = "spv")]
+#[cfg(feature = "rgb-validation")]
 pub mod spv_crosscheck;
 #[cfg(feature = "rgb-validation")]
 pub mod validation;

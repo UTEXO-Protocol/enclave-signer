@@ -5,7 +5,7 @@
 //! dependency does it here. Nothing in this module handles a request.
 
 use crate::config::BridgeConfig;
-#[cfg(feature = "spv")]
+#[cfg(feature = "rgb-validation")]
 use crate::networks::rgb::spv::{
     resolve_checkpoint, CheckpointSource, HeaderChain, Network, CHECKPOINT_ENV,
 };
@@ -36,7 +36,7 @@ fn indexer_url_from_env() -> String {
 /// URL's own port and return the host so it can be pinned to 127.0.0.1 (keeps
 /// in-enclave TLS validating the real cert). For http(s)/legacy esplora we keep
 /// the historical port 3443 and pin nothing.
-#[cfg(all(feature = "vsock", feature = "spv", target_os = "linux"))]
+#[cfg(all(feature = "vsock", feature = "rgb-validation", target_os = "linux"))]
 fn forwarder_target(url: &str) -> (u16, Option<String>) {
     for scheme in ["ssl://", "tcp://"] {
         if let Some(rest) = url.strip_prefix(scheme) {
@@ -54,7 +54,7 @@ fn forwarder_target(url: &str) -> (u16, Option<String>) {
 /// Append `127.0.0.1 <host>` to /etc/hosts (idempotent) so the enclave's
 /// outbound connection to `host` lands on the local vsock forwarder while the
 /// TLS layer still validates against `host`'s real certificate.
-#[cfg(all(feature = "vsock", feature = "spv", target_os = "linux"))]
+#[cfg(all(feature = "vsock", feature = "rgb-validation", target_os = "linux"))]
 fn pin_host_to_loopback(host: &str) -> std::io::Result<()> {
     use std::io::Write;
     let existing = std::fs::read_to_string("/etc/hosts").unwrap_or_default();
@@ -216,7 +216,7 @@ pub fn start_vsock_forwarders() {
     {
         // Esplora egress is only needed by the RGB/BTC stack (consignment
         // resolver + SPV). A `ccd`-only build starts no Esplora forwarder.
-        #[cfg(feature = "spv")]
+        #[cfg(feature = "rgb-validation")]
         {
             let vsock_port: u32 = std::env::var("ESPLORA_VSOCK_PORT")
                 .ok()
@@ -324,7 +324,7 @@ pub fn build_rgb_validator() -> Option<RgbValidator> {
 /// Panics on a checkpoint a release build must not run with - a placeholder,
 /// a retarget-misaligned one, or a malformed `SPV_CHECKPOINT` override. Those
 /// are build-time misconfigurations, and booting anyway wedges the chain.
-#[cfg(feature = "spv")]
+#[cfg(feature = "rgb-validation")]
 pub fn build_header_chain(bitcoin_network_str: &str) -> std::sync::Mutex<HeaderChain> {
     let spv_network = Network::from_env_str(bitcoin_network_str).unwrap_or_else(|e| {
         tracing::warn!(

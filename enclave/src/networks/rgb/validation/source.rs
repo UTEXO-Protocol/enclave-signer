@@ -6,12 +6,10 @@ use super::types::ValidatedConsignment;
 use crate::config::BridgeConfig;
 use crate::error::EnclaveError;
 use crate::error::Result;
-#[cfg(feature = "spv")]
 use crate::networks::rgb::spv_crosscheck;
 use crate::networks::ValidationContext;
 use crate::proto::RgbSource;
 use sha3::{Digest, Keccak256};
-#[cfg(feature = "spv")]
 use std::time::SystemTime;
 
 /// Validate all fields and source-chain evidence owned by an RGB source.
@@ -52,7 +50,6 @@ pub fn validate_source(
         AssetBindMode::Source,
     )?;
 
-    #[cfg(feature = "spv")]
     {
         let chain = ctx
             .header_chain
@@ -65,16 +62,6 @@ pub fn validate_source(
             SystemTime::now(),
             ctx.chain_pins,
         )?;
-    }
-
-    #[cfg(not(feature = "spv"))]
-    {
-        if !source.merkle_proofs.is_empty() {
-            return Err(EnclaveError::CrossCheck(
-                "RGB source supplied merkle_proofs but enclave was not built with --features spv"
-                    .into(),
-            ));
-        }
     }
 
     Ok(validated)
