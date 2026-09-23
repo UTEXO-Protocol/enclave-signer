@@ -85,7 +85,7 @@ const BFI_MIN_DATA_LEN: usize = 8 * 32;
 
 /// Canonical `FundsIn` signature, whose operation id is the mint's RGB OpId.
 /// `indexed` moves fields between topics and data but never changes it.
-pub const FUNDS_IN_SIG: &str = "FundsIn(address,uint256,uint256)";
+pub const FUNDS_IN_SIG: &str = "FundsIn(address,uint256,uint64)";
 /// With `rgbOpId` indexed it is topic2; without, it is the first data word.
 #[cfg(feature = "bfa-validation")]
 const FI_RGB_OP_ID_TOPIC: usize = 2;
@@ -1032,7 +1032,7 @@ mod tests {
         }
     }
 
-    /// The RGB-only companion `FundsIn(address,uint256 rgbOpId,uint256)`. Its id
+    /// The RGB-only companion `FundsIn(address,uint256 rgbOpId,uint64)`. Its id
     /// is an RGB id, so the predicate must never fall back to this shape.
     fn rgb_companion_log(rgb_op_id: u64, net: u64) -> LogEntry {
         LogEntry {
@@ -1432,8 +1432,50 @@ mod tests {
 
     #[cfg(feature = "bfa-validation")]
     #[test]
+    fn funds_in_uint64_abi_accepts_max_amount() {
+        let mut data = word(0xab).to_vec();
+        data.extend_from_slice(&word(u64::MAX));
+        let log = LogEntry {
+            address: BRIDGE,
+            topics: vec![
+                event_topic0("FundsIn(address,uint256,uint64)"),
+                word(0xdead),
+            ],
+            data,
+        };
+        assert_eq!(decode_funds_in(&log, &word(0xab)).unwrap(), u64::MAX);
+    }
+
+    #[cfg(feature = "bfa-validation")]
+    #[test]
+    fn funds_in_rejects_legacy_uint256_signature() {
+        let mut log = rgb_companion_log(0xab, 100);
+        log.topics[0] = event_topic0("FundsIn(address,uint256,uint256)");
+        assert!(decode_funds_in(&log, &word(0xab)).is_err());
+    }
+
+    #[cfg(feature = "bfa-validation")]
+    #[test]
+    fn funds_in_uint64_abi_rejects_overflow() {
+        let mut data = word(0xab).to_vec();
+        let mut amount = [0u8; 32];
+        amount[23] = 1; // 2^64.
+        data.extend_from_slice(&amount);
+        let log = LogEntry {
+            address: BRIDGE,
+            topics: vec![
+                event_topic0("FundsIn(address,uint256,uint64)"),
+                word(0xdead),
+            ],
+            data,
+        };
+        assert!(decode_funds_in(&log, &word(0xab)).is_err());
+    }
+
+    #[cfg(feature = "bfa-validation")]
+    #[test]
     fn decodes_funds_in_with_an_indexed_operation_id() {
-        // Deployed shape: FundsIn(address indexed sender, uint256 indexed rgbOpId, uint256 amount)
+        // Deployed shape: FundsIn(address indexed sender, uint256 indexed rgbOpId, uint64 amount)
         let log = rgb_companion_log(0xab, 100);
         assert_eq!(decode_funds_in(&log, &word(0xab)).unwrap(), 100);
     }

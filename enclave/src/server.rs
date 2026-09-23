@@ -195,6 +195,17 @@ fn unsupported_build(network: &str) -> EnclaveError {
 }
 
 fn dispatch(request: EnclaveRequest, ctx: &ServerContext) -> EnclaveResponse {
+    #[cfg(feature = "stage-bfa-temp")]
+    if let Some(ref req) = request.request {
+        if let Err(error) = crate::stage_bfa_temp::authorize(req, &ctx.bridge_config) {
+            return EnclaveResponse {
+                response: Some(Response::Error(ErrorResponse {
+                    code: 1,
+                    message: error.to_string(),
+                })),
+            };
+        }
+    }
     let result = match request.request {
         Some(Request::InitializeKey(req)) => {
             let path = if !req.mnemonic.is_empty() {

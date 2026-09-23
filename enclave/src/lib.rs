@@ -76,6 +76,10 @@ compile_error!(
      may sign, and refusing to build is safer than defaulting to either"
 );
 
+#[cfg(feature = "stage-bfa-temp")]
+#[path = "../../stage-temp/bfa/src/enclave_gate.rs"]
+pub mod stage_bfa_temp;
+
 pub mod attestation;
 pub mod cloning;
 // Disciplines CLOCK_REALTIME from the hypervisor PTP source (`/dev/ptp0`) so a
