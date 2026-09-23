@@ -143,7 +143,9 @@ fn parse_signer_role(s: Option<&str>) -> Result<SignerRole> {
         "burn" => Ok(SignerRole::Burn),
         "combined" => Ok(SignerRole::Combined),
         other => {
-            anyhow::bail!("invalid --expect-signer-role '{other}' (expected: mint | burn | combined)")
+            anyhow::bail!(
+                "invalid --expect-signer-role '{other}' (expected: mint | burn | combined)"
+            )
         }
     }
 }
