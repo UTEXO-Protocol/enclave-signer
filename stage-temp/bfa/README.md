@@ -35,7 +35,8 @@ The recipe uses Bitcoin mainnet and Arbitrum One (42161).
 Both values are baked into the EIF. Rebuild and restore the retained stage seeds to apply changes.
 The contract pins use the stage set supplied on 2026-09-22:
 - `EVM_PROXY_CONTRACT_ADDRESS`: Multisig `0x0584f124d56266c3583605a441545d48feea9b9e`.
-- `FUNDS_IN_CONTRACT` and `GAS_TX_ALLOWED_TO`: BridgeProxy `0x9f447017ca5f413dc86d9d69c772e9dfe16fb823`.
+- `GAS_TX_ALLOWED_TO`: Multisig `0x0584f124d56266c3583605a441545d48feea9b9e`. Gas transactions call the Multisig proxy.
+- `FUNDS_IN_CONTRACT`: BridgeProxy `0x9f447017ca5f413dc86d9d69c772e9dfe16fb823`.
 
 The current build mode is `configured` with asset `rgb:0xCZMKww-~LBSYFG-b_q5Vak-Yn1pgIc-P7UVc9m-EUOJ0mc`.
 Restore the retained stage seeds after deployment and compare all signer keys.
