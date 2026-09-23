@@ -452,7 +452,7 @@ pub struct RawSignatureResponse {
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct SignRawDigestRequest {
-    /// Optional; if set must equal keccak256(unsigned_tx).
+    /// Optional; if set must equal keccak256(unsigned_tx). Dev-mode legacy path signs it directly.
     #[prost(bytes="vec", tag="1")]
     pub digest: ::prost::alloc::vec::Vec<u8>,
     /// Unsigned gas-tx preimage (EIP-1559 / legacy EIP-155). Required in release builds for shape/allowlist gating (audit TEE-XC-09 / #68).
