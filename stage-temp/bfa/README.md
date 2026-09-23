@@ -33,6 +33,10 @@ The recipe uses Bitcoin mainnet and Arbitrum One (42161).
 `BTC_MAX_UNOWNED_SATS=10000` limits unowned outputs in BTC signing.
 `RGB_MAX_UNOWNED_SATS=10000` sets the separate limit for RGB signing.
 Both values are baked into the EIF. Rebuild and restore the retained stage seeds to apply changes.
+`GAS_TX_MAX_GAS_LIMIT=3000000` caps gas units per transaction.
+`GAS_TX_MAX_FEE_PER_GAS=200000000` caps the fee per gas at 200,000,000 wei (0.2 gwei).
+`GAS_TX_ALLOWED_SELECTORS=0xea69d33b` permits only this calldata selector.
+These limits and the selector are baked into the EIF and require a rebuild.
 The contract pins use the stage set supplied on 2026-09-22:
 - `EVM_PROXY_CONTRACT_ADDRESS`: Multisig `0x0584f124d56266c3583605a441545d48feea9b9e`.
 - `GAS_TX_ALLOWED_TO`: Multisig `0x0584f124d56266c3583605a441545d48feea9b9e`. Gas transactions call the Multisig proxy.
