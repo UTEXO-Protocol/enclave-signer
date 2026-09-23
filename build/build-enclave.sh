@@ -29,6 +29,7 @@
 # Tunables (env):
 #   OUT_DIR                output directory for artifacts (default: build/)
 #   IMAGE_TAG              docker tag for the builder image (default: utexo-bridge-enclave:latest)
+#   RGB_ASSET_ID           required approved asset pin for Dockerfile.enclave.bfa
 #   NITRO_CLI_BLOBS        override blobs dir for `nitro-cli build-enclave`
 #   GITHUB_TOKEN           token with read access to the private RGB dependencies
 #   PRIVATE_DEPS_DIR       alternatively, directory of per-repository key files
@@ -52,6 +53,15 @@ IMAGE_TAG="${IMAGE_TAG:-utexo-bridge-enclave:latest}"
 DOCKERFILE="${DOCKERFILE:-Dockerfile.enclave}"
 EIF_NAME="${EIF_NAME:-utexo-bridge-enclave.eif}"
 EIF_PATH="$OUT_DIR/$EIF_NAME"
+
+ASSET_ARGS=()
+if [ "${DOCKERFILE##*/}" = "Dockerfile.enclave.bfa" ]; then
+    if [[ ! "${RGB_ASSET_ID:-}" =~ [^[:space:]] ]]; then
+        echo "Error: set RGB_ASSET_ID to the approved BFA contract id before building BFA" >&2
+        exit 1
+    fi
+    ASSET_ARGS=(--build-arg "RGB_ASSET_ID=$RGB_ASSET_ID")
+fi
 
 echo "=== Building UTEXO Bridge Enclave ==="
 echo "    project root : $PROJECT_ROOT"
@@ -100,6 +110,7 @@ DOCKER_BUILDKIT=1 docker buildx build \
     --build-arg SOURCE_DATE_EPOCH="$SOURCE_DATE_EPOCH" \
     ${RGB_ASSET_ARGS[@]+"${RGB_ASSET_ARGS[@]}"} \
     ${SECRET_ARGS[@]+"${SECRET_ARGS[@]}"} \
+    ${ASSET_ARGS[@]+"${ASSET_ARGS[@]}"} \
     -f "$SCRIPT_DIR/$DOCKERFILE" \
     -t "$IMAGE_TAG" \
     --output "type=docker,rewrite-timestamp=true" \

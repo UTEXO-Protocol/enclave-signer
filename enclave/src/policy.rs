@@ -23,6 +23,9 @@ pub use attestation_verify::{AttestationMode, AttestedPolicy, BtcDataSource, Evm
 
 /// The enclave's resolved security posture. See the module docs.
 #[derive(Clone, Debug, PartialEq, Eq)]
+// Resolved once at boot and committed to attestation user_data; the size
+// difference between the variants costs nothing here.
+#[allow(clippy::large_enum_variant)]
 pub enum SecurityPolicy {
     /// A fully-pinned, fail-closed bridge-signing enclave.
     Production(ProductionPolicy),
@@ -44,6 +47,10 @@ pub struct ProductionPolicy {
     pub bridge_contract: [u8; 20],
     /// Pinned RGB asset id (`RGB_ASSET_ID`).
     pub rgb_asset_id: String,
+    /// Only this contract's FundsIn events may authorize bridge signing.
+    pub funds_in_contract: [u8; 20],
+    /// Minimum receipt depth required before a FundsIn deposit is accepted.
+    pub evm_min_confirmations: u64,
     /// Whether the plain-BTC (vanilla / create_utxo) signing path is authorised.
     /// Derived from the operator's `BTC_MAX_TOTAL_SATS` pin
     /// ([`BridgeConfig::allows_vanilla_btc`]); default fail-closed (false).
@@ -139,6 +146,7 @@ impl SecurityPolicy {
         bridge: &BridgeConfig,
         evm_source: EvmDataSource,
         evm_checkpoint: Option<[u8; 32]>,
+        evm_min_confirmations: u64,
     ) -> Self {
         // Any dev feature collapses the posture regardless of everything else.
         // (These are `compile_error!` in a release build - lib.rs - so in a real
@@ -168,6 +176,8 @@ impl SecurityPolicy {
             chain_id: bridge.chain_id,
             bridge_contract: bridge.bridge_contract,
             rgb_asset_id: bridge.rgb_asset_id.clone(),
+            funds_in_contract: bridge.funds_in_contract,
+            evm_min_confirmations,
             allow_vanilla_psbt: bridge.allows_vanilla_btc(),
             attestation: AttestationMode::Real,
             evm_source,
@@ -201,6 +211,8 @@ impl SecurityPolicy {
                 chain_id: p.chain_id,
                 bridge_contract: p.bridge_contract,
                 rgb_asset_id: p.rgb_asset_id.clone(),
+                funds_in_contract: p.funds_in_contract,
+                evm_min_confirmations: p.evm_min_confirmations,
                 evm_checkpoint: p.evm_checkpoint,
                 // An unset destination commits as all-zero - a value the gas
                 // path can never accept - so "unpinned" is itself attested.
@@ -256,6 +268,12 @@ impl ProductionPolicy {
                 "production policy is missing one or more of the chain/contract/asset pins".into(),
             );
         }
+        if self.funds_in_contract == [0u8; 20] {
+            return Err("production policy must pin a non-zero FundsIn contract".into());
+        }
+        if self.evm_min_confirmations == 0 {
+            return Err("production policy must require at least one EVM confirmation".into());
+        }
         if self.attestation != AttestationMode::Real {
             return Err(
                 "production policy must use real (NSM) attestation, not the mock path".into(),
@@ -302,6 +320,7 @@ mod tests {
             chain_id: 1,
             bridge_contract: [0x11; 20],
             rgb_asset_id: "rgb:asset".into(),
+            funds_in_contract: [0x22; 20],
             ..Default::default()
         }
     }
@@ -319,6 +338,7 @@ mod tests {
             &pinned_config(),
             EvmDataSource::HeliosVerified,
             a_checkpoint(),
+            12,
         );
         match &p {
             SecurityPolicy::Production(pp) => {
@@ -339,7 +359,7 @@ mod tests {
         // Helios has no L2 light client, so an Arbitrum image runs on raw RPC.
         // Every source boots, and each is recorded and attested.
         for source in [EvmDataSource::Disabled, EvmDataSource::RawRpc] {
-            let p = SecurityPolicy::resolve(&ctx, &pinned_config(), source, None);
+            let p = SecurityPolicy::resolve(&ctx, &pinned_config(), source, None, 12);
             match &p {
                 SecurityPolicy::Production(pp) => assert_eq!(pp.evm_source, source),
                 other => panic!("expected Production for {source:?}, got {other:?}"),
@@ -355,6 +375,7 @@ mod tests {
             &pinned_config(),
             EvmDataSource::HeliosVerified,
             a_checkpoint(),
+            12,
         );
         assert!(p.assert_valid_for_build(&ctx).is_ok());
     }
@@ -366,18 +387,58 @@ mod tests {
         // resolves to Production (so the missing pin is visible) but must NOT
         // pass the boot gate.
         let ctx = release_bridge_ctx();
-        let p =
-            SecurityPolicy::resolve(&ctx, &pinned_config(), EvmDataSource::HeliosVerified, None);
+        let p = SecurityPolicy::resolve(
+            &ctx,
+            &pinned_config(),
+            EvmDataSource::HeliosVerified,
+            None,
+            12,
+        );
         assert!(matches!(p, SecurityPolicy::Production(_)));
         let err = p.assert_valid_for_build(&ctx).unwrap_err();
         assert!(err.contains("checkpoint"), "got: {err}");
     }
 
     #[test]
+    fn production_rejects_a_zero_confirmation_rule() {
+        let ctx = release_bridge_ctx();
+        let policy =
+            SecurityPolicy::resolve(&ctx, &pinned_config(), EvmDataSource::RawRpc, None, 0);
+        let err = policy.assert_valid_for_build(&ctx).unwrap_err();
+        assert!(err.contains("confirmation"), "got: {err}");
+    }
+
+    #[test]
+    fn deposit_authorization_rule_is_carried_into_the_commitment() {
+        let ctx = release_bridge_ctx();
+        let base = pinned_config();
+        let mut other_emitter = base.clone();
+        other_emitter.funds_in_contract = [0x33; 20];
+        let expected = SecurityPolicy::resolve(&ctx, &base, EvmDataSource::RawRpc, None, 12);
+        let changed_emitter =
+            SecurityPolicy::resolve(&ctx, &other_emitter, EvmDataSource::RawRpc, None, 12);
+        let changed_depth = SecurityPolicy::resolve(&ctx, &base, EvmDataSource::RawRpc, None, 13);
+
+        assert_ne!(
+            expected.commitment_bytes(),
+            changed_emitter.commitment_bytes()
+        );
+        assert_ne!(
+            expected.commitment_bytes(),
+            changed_depth.commitment_bytes()
+        );
+    }
+
+    #[test]
     fn release_bridge_unconfigured_is_rejected_at_boot() {
         let ctx = release_bridge_ctx();
-        let p =
-            SecurityPolicy::resolve(&ctx, &BridgeConfig::default(), EvmDataSource::RawRpc, None);
+        let p = SecurityPolicy::resolve(
+            &ctx,
+            &BridgeConfig::default(),
+            EvmDataSource::RawRpc,
+            None,
+            12,
+        );
         assert_eq!(
             p,
             SecurityPolicy::Development {
@@ -396,7 +457,7 @@ mod tests {
             chain_id: 1,
             ..Default::default()
         };
-        let p = SecurityPolicy::resolve(&ctx, &partial, EvmDataSource::RawRpc, None);
+        let p = SecurityPolicy::resolve(&ctx, &partial, EvmDataSource::RawRpc, None, 12);
         assert!(matches!(p, SecurityPolicy::Development { .. }));
         assert!(p.assert_valid_for_build(&ctx).is_err());
     }
@@ -433,6 +494,7 @@ mod tests {
                 &pinned_config(),
                 EvmDataSource::HeliosVerified,
                 a_checkpoint(),
+                12,
             );
             assert_eq!(p, SecurityPolicy::Development { reason });
             // Even fully pinned, a dev feature in a release rgb build must not boot.
@@ -446,7 +508,7 @@ mod tests {
             debug_or_test: true,
             ..release_bridge_ctx()
         };
-        let p = SecurityPolicy::resolve(&ctx, &pinned_config(), EvmDataSource::RawRpc, None);
+        let p = SecurityPolicy::resolve(&ctx, &pinned_config(), EvmDataSource::RawRpc, None, 12);
         assert_eq!(
             p,
             SecurityPolicy::Development {
@@ -467,6 +529,7 @@ mod tests {
             &BridgeConfig::default(),
             EvmDataSource::Disabled,
             None,
+            0,
         );
         assert_eq!(
             p,
@@ -483,7 +546,7 @@ mod tests {
         let ctx = release_bridge_ctx();
         let mut cfg = pinned_config();
         // Unset BTC pins -> vanilla disabled (fail-closed).
-        let p = SecurityPolicy::resolve(&ctx, &cfg, EvmDataSource::RawRpc, None);
+        let p = SecurityPolicy::resolve(&ctx, &cfg, EvmDataSource::RawRpc, None, 12);
         assert!(matches!(
             p,
             SecurityPolicy::Production(ProductionPolicy {
@@ -493,7 +556,7 @@ mod tests {
         ));
         // Operator sets the cap -> vanilla enabled and attested.
         cfg.btc_max_total_sats = 100_000;
-        let p = SecurityPolicy::resolve(&ctx, &cfg, EvmDataSource::RawRpc, None);
+        let p = SecurityPolicy::resolve(&ctx, &cfg, EvmDataSource::RawRpc, None, 12);
         assert!(matches!(
             p,
             SecurityPolicy::Production(ProductionPolicy {
@@ -508,7 +571,8 @@ mod tests {
         // The gas-tx pins flow from BridgeConfig into the attested
         // policy, so pinning them changes the commitment a verifier checks.
         let ctx = release_bridge_ctx();
-        let unpinned = SecurityPolicy::resolve(&ctx, &pinned_config(), EvmDataSource::RawRpc, None);
+        let unpinned =
+            SecurityPolicy::resolve(&ctx, &pinned_config(), EvmDataSource::RawRpc, None, 12);
 
         let mut cfg = pinned_config();
         cfg.gas_tx_allowed_to = Some([0x77; 20]);
@@ -516,7 +580,7 @@ mod tests {
         cfg.gas_tx_max_fee_per_gas = 5_000;
         cfg.gas_tx_max_value_wei = Some(9_000);
         cfg.gas_tx_allowed_selectors = vec![[0xaa, 0xbb, 0xcc, 0xdd]];
-        let pinned = SecurityPolicy::resolve(&ctx, &cfg, EvmDataSource::RawRpc, None);
+        let pinned = SecurityPolicy::resolve(&ctx, &cfg, EvmDataSource::RawRpc, None, 12);
 
         assert_ne!(
             unpinned.commitment_bytes(),
@@ -550,8 +614,10 @@ mod tests {
         raised.gas_tx_max_value_wei = Some(1);
 
         assert_ne!(
-            SecurityPolicy::resolve(&ctx, &base, EvmDataSource::RawRpc, None).commitment_bytes(),
-            SecurityPolicy::resolve(&ctx, &raised, EvmDataSource::RawRpc, None).commitment_bytes(),
+            SecurityPolicy::resolve(&ctx, &base, EvmDataSource::RawRpc, None, 12)
+                .commitment_bytes(),
+            SecurityPolicy::resolve(&ctx, &raised, EvmDataSource::RawRpc, None, 12)
+                .commitment_bytes(),
             "raising GAS_TX_MAX_VALUE_WEI must change the attested commitment"
         );
     }
@@ -568,20 +634,23 @@ mod tests {
         zero.gas_tx_max_value_wei = Some(0);
 
         assert_eq!(
-            SecurityPolicy::resolve(&ctx, &unset, EvmDataSource::RawRpc, None).commitment_bytes(),
-            SecurityPolicy::resolve(&ctx, &zero, EvmDataSource::RawRpc, None).commitment_bytes(),
+            SecurityPolicy::resolve(&ctx, &unset, EvmDataSource::RawRpc, None, 12)
+                .commitment_bytes(),
+            SecurityPolicy::resolve(&ctx, &zero, EvmDataSource::RawRpc, None, 12)
+                .commitment_bytes(),
         );
     }
 
     #[test]
     fn evm_source_is_carried_into_the_commitment() {
         let ctx = release_bridge_ctx();
-        let raw = SecurityPolicy::resolve(&ctx, &pinned_config(), EvmDataSource::RawRpc, None);
+        let raw = SecurityPolicy::resolve(&ctx, &pinned_config(), EvmDataSource::RawRpc, None, 12);
         let helios = SecurityPolicy::resolve(
             &ctx,
             &pinned_config(),
             EvmDataSource::HeliosVerified,
             a_checkpoint(),
+            12,
         );
         // A raw-RPC deployment and a Helios deployment commit to different bytes,
         // so a verifier expecting one rejects the other (data source).
@@ -599,12 +668,14 @@ mod tests {
             &pinned_config(),
             EvmDataSource::HeliosVerified,
             Some([0xAA; 32]),
+            12,
         );
         let b = SecurityPolicy::resolve(
             &ctx,
             &pinned_config(),
             EvmDataSource::HeliosVerified,
             Some([0xBB; 32]),
+            12,
         );
         assert_ne!(a.commitment_bytes(), b.commitment_bytes());
     }
@@ -627,6 +698,7 @@ mod tests {
                 &pinned_config(),
                 EvmDataSource::RawRpc,
                 None,
+                12,
             )
             .commitment_bytes()
         );

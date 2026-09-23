@@ -866,9 +866,21 @@ mod tests {
             assert!(check(&[(0xA1, 950), (0xB2, 20)], &[LOCK_A, LOCK_B]).is_ok());
         }
 
+        // Characterizes the replay candidate, not a paid contract replay.
+        // burnid_test.go uses the same pairs to exercise payout ID derivation.
         #[test]
-        fn order_does_not_matter() {
-            assert!(check(&[(0xB2, 20), (0xA1, 950)], &[LOCK_A, LOCK_B]).is_ok());
+        fn reordered_settlement_passes_with_different_committed_bytes() {
+            let locks = [LOCK_A, LOCK_B];
+            let original = [(0xA1, 950), (0xB2, 20)];
+            let reordered = [(0xB2, 20), (0xA1, 950)];
+            assert!(check(&original, &locks).is_ok());
+            assert!(check(&reordered, &locks).is_ok());
+
+            // The settlement validator accepts both encodings, but burnId
+            // commits to their bytes rather than the normalized pair set.
+            let original_hash = alloy_primitives::keccak256(settlement(&original));
+            let reordered_hash = alloy_primitives::keccak256(settlement(&reordered));
+            assert_ne!(original_hash, reordered_hash);
         }
 
         /// The P6 attack: a valid burn re-presented with other deposits cited,

@@ -11,20 +11,20 @@
 //! hash mismatch.
 //!
 //! Wire contract: the discriminants and field order are load-bearing. Never
-//! renumber a variant or reorder fields - bump [`POLICY_COMMITMENT_V2`] and add
+//! renumber a variant or reorder fields - bump [`POLICY_COMMITMENT_V3`] and add
 //! a new arm instead.
 //!
-//! V2 extends the `Production` arm with the gas-tx signing rule,
-//! so the whole `SignRawDigest` policy is externally verifiable.
+//! V3 extends the `Production` arm with the FundsIn emitter and confirmation
+//! rule, so the deposit authorization policy is externally verifiable.
 
 /// Version tag prepended to every policy commitment. Lets a verifier reject a
 /// document produced by an enclave speaking a different policy-encoding version
 /// instead of silently mis-hashing it.
 ///
-/// V2 added the gas-tx rule to the `Production` arm; V1 predated
-/// it. Bumping the tag means a V1 verifier and a V2 enclave never silently
-/// agree on a hash.
-pub const POLICY_COMMITMENT_V2: u8 = 2;
+/// V3 adds the deposit emitter and confirmation rule; V2 added the gas-tx
+/// rule. Bumping the tag prevents older verifiers from silently agreeing on a
+/// differently shaped policy.
+pub const POLICY_COMMITMENT_V3: u8 = 3;
 
 /// Where the enclave gets the EVM `FundsIn` deposit evidence it verifies before
 /// signing an EVM->RGB bridge PSBT. Attested so a verifier can tell a trustless
@@ -73,6 +73,9 @@ pub enum AttestationMode {
 /// data source. A debug build, a dev feature, or an unpinned or non-bridge build
 /// is [`Development`](AttestedPolicy::Development), which a verifier of a
 /// production enclave must reject.
+// Resolved once at boot and committed to attestation user_data; the size
+// difference between the variants costs nothing here.
+#[allow(clippy::large_enum_variant)]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum AttestedPolicy {
     Production {
@@ -83,6 +86,10 @@ pub enum AttestedPolicy {
         chain_id: u64,
         bridge_contract: [u8; 20],
         rgb_asset_id: String,
+        /// Contract whose FundsIn events may authorize bridge signing.
+        funds_in_contract: [u8; 20],
+        /// Minimum EVM receipt depth required before a deposit may authorize signing.
+        evm_min_confirmations: u64,
         /// The Helios weak-subjectivity checkpoint (beacon block root) EVM
         /// verification trust-roots on. `Some` only for
         /// [`EvmDataSource::HeliosVerified`], and pinned here so a verifier
@@ -114,10 +121,11 @@ impl AttestedPolicy {
     /// `user_data`. Layout (see the WIRE CONTRACT note in the module docs):
     ///
     /// ```text
-    /// [POLICY_COMMITMENT_V2]
+    /// [POLICY_COMMITMENT_V3]
     /// Production:  [0x01][allow_vanilla u8][attestation u8][evm_source u8]
     ///              [btc_source u8][chain_id u64 BE][bridge_contract 20]
-    ///              [len(asset) u32 BE][asset bytes]
+    ///              [len(asset) u32 BE][asset bytes][funds_in_contract 20]
+    ///              [evm_min_confirmations u64 BE]
     ///              [evm_checkpoint: 0x00 | 0x01 ++ 32 bytes]
     ///              [gas_tx_allowed_to 20][gas_tx_max_gas_limit u64 BE]
     ///              [gas_tx_max_fee_per_gas u128 BE]
@@ -127,7 +135,7 @@ impl AttestedPolicy {
     /// ```
     pub fn to_bytes(&self) -> Vec<u8> {
         let mut out = Vec::new();
-        out.push(POLICY_COMMITMENT_V2);
+        out.push(POLICY_COMMITMENT_V3);
         match self {
             AttestedPolicy::Production {
                 allow_vanilla_psbt,
@@ -137,6 +145,8 @@ impl AttestedPolicy {
                 chain_id,
                 bridge_contract,
                 rgb_asset_id,
+                funds_in_contract,
+                evm_min_confirmations,
                 evm_checkpoint,
                 gas_tx_allowed_to,
                 gas_tx_max_gas_limit,
@@ -153,6 +163,8 @@ impl AttestedPolicy {
                 out.extend_from_slice(bridge_contract);
                 out.extend_from_slice(&(rgb_asset_id.len() as u32).to_be_bytes());
                 out.extend_from_slice(rgb_asset_id.as_bytes());
+                out.extend_from_slice(funds_in_contract);
+                out.extend_from_slice(&evm_min_confirmations.to_be_bytes());
                 // EVM verification checkpoint: a presence byte plus, when
                 // present, the 32-byte Helios beacon block root. Pins which
                 // checkpoint, so an attacker-chosen trust root cannot hide
@@ -208,6 +220,8 @@ mod tests {
             chain_id,
             bridge_contract: [contract; 20],
             rgb_asset_id: asset.into(),
+            funds_in_contract: [0x44; 20],
+            evm_min_confirmations: 12,
             evm_checkpoint: None,
             gas_tx_allowed_to: [0xAA; 20],
             gas_tx_max_gas_limit: 21_000,
@@ -238,6 +252,8 @@ mod tests {
                 chain_id,
                 bridge_contract,
                 rgb_asset_id,
+                funds_in_contract,
+                evm_min_confirmations,
                 evm_checkpoint,
                 ..
             } => AttestedPolicy::Production {
@@ -248,6 +264,8 @@ mod tests {
                 chain_id,
                 bridge_contract,
                 rgb_asset_id,
+                funds_in_contract,
+                evm_min_confirmations,
                 evm_checkpoint,
                 gas_tx_allowed_to: to,
                 gas_tx_max_gas_limit: max_gas,
@@ -261,10 +279,10 @@ mod tests {
 
     #[test]
     fn every_encoding_starts_with_the_version_tag() {
-        assert_eq!(base().to_bytes()[0], POLICY_COMMITMENT_V2);
+        assert_eq!(base().to_bytes()[0], POLICY_COMMITMENT_V3);
         assert_eq!(
             AttestedPolicy::Development.to_bytes()[0],
-            POLICY_COMMITMENT_V2
+            POLICY_COMMITMENT_V3
         );
     }
 
@@ -289,6 +307,27 @@ mod tests {
                 "posture change must alter the commitment"
             );
         }
+    }
+
+    #[test]
+    fn deposit_authorization_fields_change_the_bytes() {
+        let mut emitter = base();
+        if let AttestedPolicy::Production {
+            funds_in_contract, ..
+        } = &mut emitter
+        {
+            *funds_in_contract = [0x55; 20];
+        }
+        let mut confirmations = base();
+        if let AttestedPolicy::Production {
+            evm_min_confirmations,
+            ..
+        } = &mut confirmations
+        {
+            *evm_min_confirmations = 13;
+        }
+        assert_ne!(base().to_bytes(), emitter.to_bytes());
+        assert_ne!(base().to_bytes(), confirmations.to_bytes());
     }
 
     #[test]

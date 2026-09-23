@@ -125,6 +125,7 @@ impl ServerContext {
             &bridge_config,
             crate::policy::EvmDataSource::Disabled,
             None,
+            0,
         );
         Self {
             state,
@@ -151,6 +152,7 @@ impl ServerContext {
             &bridge_config,
             crate::policy::EvmDataSource::Disabled,
             None,
+            0,
         );
         Self {
             state,
@@ -617,6 +619,94 @@ fn handle_sign(
         EnclaveError::InvalidRequest("sign request has no destination_network".into())
     })?;
 
+    // Fail-closed when the FundsIn verifier is not compiled in. Without
+    // the `evm-rpc` feature there is no evidence the deposit
+    // occurred: the consignment/PSBT checks prove the transfer shape, not that
+    // an EVM deposit backs it. Mirrors the no-`spv` fundsOut refusal.
+    // dev-mode keeps the legacy path for local testing.
+    #[cfg(all(not(feature = "evm-rpc"), not(feature = "dev-mode")))]
+    if matches!(
+        (source_ref, destination_ref),
+        (
+            SourceNetwork::EvmSource(_),
+            DestinationNetwork::RgbDestination(_)
+        )
+    ) {
+        return Err(EnclaveError::CrossCheck(
+            "enclave was not built with --features evm-rpc: refusing to sign a bridge-mode PSBT \
+             without independently verifying the FundsIn deposit (the listener-supplied \
+             event_valid/event_finalized booleans are no longer trusted). \
+             Rebuild with `--features evm-rpc` (or `helios` for the trustless path)."
+                .into(),
+        ));
+    }
+
+    // Reject known replays before network I/O without letting invalid requests
+    // consume guard capacity. Reserve again immediately before signing.
+    #[cfg(not(feature = "dev-mode"))]
+    if let (SourceNetwork::EvmSource(source), DestinationNetwork::RgbDestination(destination)) =
+        (source_ref, destination_ref)
+    {
+        let op_key = crate::networks::rgb::psbt_validation::psbt_operation_key(
+            ctx.bridge_config.chain_id,
+            &ctx.bridge_config.bridge_contract,
+            &source.tx_hash,
+            &source.funds_in_operation_id,
+            &destination.asset_id,
+        );
+        ctx.state.op_replay_guard.check(&op_key).map_err(|e| {
+            if matches!(e, EnclaveError::NonceReplay) {
+                EnclaveError::CrossCheck("duplicate bridge operation: refusing to sign a replay (soft in-memory guard; durable guard is on-chain)".into())
+            } else {
+                e
+            }
+        })?;
+    }
+
+    // Reject an invalid deposit before RGB validation and fee/indexer I/O.
+    // Keep the authorized recipient for comparison with the proven RGB seals.
+    #[cfg(all(feature = "evm-rpc", not(feature = "dev-mode")))]
+    let authorized_recipient =
+        if let (SourceNetwork::EvmSource(source), DestinationNetwork::RgbDestination(_)) =
+            (source_ref, destination_ref)
+        {
+            let tx_hash: [u8; 32] = source.tx_hash.as_slice().try_into().map_err(|_| {
+                EnclaveError::CrossCheck(format!(
+                    "evm_tx_hash must be 32 bytes, got {}",
+                    source.tx_hash.len()
+                ))
+            })?;
+            // `funds_in_operation_id` is the on-chain BridgeFundsIn operationId as
+            // the full 32-byte word. It is required; `verify_funds_in_event` fails
+            // closed on an empty/short value.
+            let client = ctx.evm_rpc_client.as_ref().ok_or_else(|| {
+                EnclaveError::CrossCheck(
+                    "evm-rpc build but RPC client unavailable - refusing to sign a bridge PSBT \
+                 without independently verifying the FundsIn deposit"
+                        .into(),
+                )
+            })?;
+            // Binds to the source's BridgeFundsIn.operationId, not
+            // destination.operation_idx, which is a different id-space.
+            let verified = crate::networks::evm::evm_event::verify_funds_in_event(
+                &**client,
+                // FundsIn is emitted by the bridge entry contract, which may differ
+                // from the MultisigProxy pinned in EVM_PROXY_CONTRACT_ADDRESS (see config.rs).
+                &ctx.bridge_config.funds_in_contract,
+                ctx.evm_rpc_config.min_confirmations,
+                &tx_hash,
+                &source.funds_in_operation_id,
+                req.amount,
+                source.commission,
+            )?;
+
+            Some(crate::networks::rgb::invoice::parse_authorized_recipient(
+                &verified.destination_address,
+            )?)
+        } else {
+            None
+        };
+
     // Self-owned-outpoint oracle for the send-RGB per-output recipient bind.
     // A closure, so the key lock is held only for the resolution and never
     // across validation's Esplora/Electrum calls.
@@ -732,79 +822,13 @@ fn handle_sign(
         &destination_proof.proof,
     )?;
 
-    // Independent EVM `FundsIn` verification: confirm
-    // the deposit on-chain through the enclave's own RPC call rather than the
-    // listener's booleans. Fail-closed - a missing client or unmet predicate
-    // refuses the signature. Runs after the cheap local cross-checks and before
-    // the replay guard records the op, so the RPC is only paid on an otherwise
-    // valid request. Fully trustless only once Helios verifies it.
+    // The recipient comparison needs the seals proven by RGB validation.
     #[cfg(all(feature = "evm-rpc", not(feature = "dev-mode")))]
-    if let (SourceNetwork::EvmSource(source), DestinationNetwork::RgbDestination(_)) =
-        (source_ref, destination_ref)
-    {
-        let tx_hash: [u8; 32] = source.tx_hash.as_slice().try_into().map_err(|_| {
-            EnclaveError::CrossCheck(format!(
-                "evm_tx_hash must be 32 bytes, got {}",
-                source.tx_hash.len()
-            ))
-        })?;
-        // `funds_in_operation_id` is the on-chain BridgeFundsIn operationId as
-        // the full 32-byte word. It is required; `verify_funds_in_event` fails
-        // closed on an empty/short value.
-        let client = ctx.evm_rpc_client.as_ref().ok_or_else(|| {
-            EnclaveError::CrossCheck(
-                "evm-rpc build but RPC client unavailable - refusing to sign a bridge PSBT \
-                 without independently verifying the FundsIn deposit"
-                    .into(),
-            )
-        })?;
-        // Binds to the source's BridgeFundsIn.operationId, not
-        // destination.operation_idx, which is a different id-space.
-        let verified = crate::networks::evm::evm_event::verify_funds_in_event(
-            &**client,
-            // FundsIn is emitted by the bridge entry contract, which may differ
-            // from the MultisigProxy pinned in EVM_PROXY_CONTRACT_ADDRESS (see config.rs).
-            &ctx.bridge_config.funds_in_contract,
-            ctx.evm_rpc_config.min_confirmations,
-            &tx_hash,
-            &source.funds_in_operation_id,
-            req.amount,
-            source.commission,
-        )?;
-
-        // Recipient bind: the checks above prove how much the recipient leg
-        // pays, not who it pays. The invoice in the log just verified says
-        // which seal the deposit authorised. Ungated: `evm-rpc` implies
-        // `rgb-validation`, so reaching here means the bind is compiled in.
-        let authorized = crate::networks::rgb::invoice::parse_authorized_recipient(
-            &verified.destination_address,
-        )?;
+    if let Some(authorized) = authorized_recipient {
         crate::networks::rgb::invoice::assert_recipient_authorized(
             &destination_proof.rgb_recipient_seals,
             &authorized,
         )?;
-    }
-
-    // Fail-closed when the FundsIn verifier is not compiled in. Without
-    // the `evm-rpc` feature there is no evidence the deposit
-    // occurred: the consignment/PSBT checks prove the transfer shape, not that
-    // an EVM deposit backs it. Mirrors the no-`spv` fundsOut refusal.
-    // dev-mode keeps the legacy path for local testing.
-    #[cfg(all(not(feature = "evm-rpc"), not(feature = "dev-mode")))]
-    if matches!(
-        (source_ref, destination_ref),
-        (
-            SourceNetwork::EvmSource(_),
-            DestinationNetwork::RgbDestination(_)
-        )
-    ) {
-        return Err(EnclaveError::CrossCheck(
-            "enclave was not built with --features evm-rpc: refusing to sign a bridge-mode PSBT \
-             without independently verifying the FundsIn deposit (the listener-supplied \
-             event_valid/event_finalized booleans are no longer trusted). \
-             Rebuild with `--features evm-rpc` (or `helios` for the trustless path)."
-                .into(),
-        ));
     }
 
     // Soft operation-uniqueness guard: reject a same-op
@@ -1848,10 +1872,121 @@ fn handle_set_clone(state: &EnclaveState, req: SetCloneRequest) -> Result<Enclav
     })
 }
 
-// These tests cover only the SPV `SubmitRateLimiter`, so they are gated with
-// the RGB/BTC stack (`spv`).
+// Server tests using the RGB/BTC stack (`spv`).
 #[cfg(all(test, feature = "spv"))]
 mod tests {
+    #[cfg(all(feature = "evm-rpc", not(feature = "dev-mode")))]
+    mod early_bridge_checks {
+        use super::super::*;
+        use crate::networks::evm::evm_event::{EvmReceiptProvider, ReceiptData};
+        use crate::networks::rgb::spv::{checkpoint_for, HeaderChain, Network};
+        use std::sync::{
+            atomic::{AtomicUsize, Ordering},
+            Arc, Mutex,
+        };
+
+        struct MissingDeposit(Arc<AtomicUsize>);
+
+        impl EvmReceiptProvider for MissingDeposit {
+            fn get_transaction_receipt(&self, _: &[u8; 32]) -> Result<Option<ReceiptData>> {
+                self.0.fetch_add(1, Ordering::SeqCst);
+                Ok(None)
+            }
+
+            fn get_block_number(&self) -> Result<u64> {
+                panic!("a missing deposit must be rejected before querying the head")
+            }
+        }
+
+        fn context(calls: &Arc<AtomicUsize>) -> ServerContext {
+            let mut ctx = ServerContext::new(
+                EnclaveState::default(),
+                BridgeConfig::default(),
+                Mutex::new(HeaderChain::new(
+                    Network::Regtest,
+                    checkpoint_for(Network::Regtest),
+                )),
+            );
+            ctx.evm_rpc_client = Some(Box::new(MissingDeposit(Arc::clone(calls))));
+            ctx
+        }
+
+        fn request() -> SignRequest {
+            SignRequest {
+                amount: 1000,
+                source_network: Some(SourceNetwork::EvmSource(crate::proto::EvmSource {
+                    tx_hash: vec![1; 32],
+                    funds_in_operation_id: vec![2; 32],
+                    ..Default::default()
+                })),
+                // Deliberately invalid RGB data: the early checks must reject
+                // before consignment decoding, including BFA ancestry parsing.
+                destination_network: Some(DestinationNetwork::RgbDestination(RgbDestination {
+                    asset_id: "rgb:test".into(),
+                    ..Default::default()
+                })),
+            }
+        }
+
+        #[test]
+        fn missing_deposit_rejects_before_rgb_without_consuming_replay_capacity() {
+            let calls = Arc::new(AtomicUsize::new(0));
+            let mut ctx = context(&calls);
+            ctx.state.op_replay_guard = crate::state::NonceReplayGuard::with_capacity(
+                1,
+                std::time::Duration::from_secs(60),
+            );
+            let existing = [9; 32];
+            ctx.state
+                .op_replay_guard
+                .reserve(existing)
+                .unwrap()
+                .commit();
+            for expected_calls in 1..=2 {
+                let err = handle_sign(&ctx, request())
+                    .map(|(response, _)| response)
+                    .unwrap_err();
+                assert!(err.to_string().contains("receipt not found"), "{err}");
+                assert_eq!(calls.load(Ordering::SeqCst), expected_calls);
+                assert!(matches!(
+                    ctx.state.op_replay_guard.check(&existing),
+                    Err(EnclaveError::NonceReplay)
+                ));
+            }
+        }
+
+        #[test]
+        fn duplicate_rejects_before_deposit_rpc_and_rgb() {
+            let calls = Arc::new(AtomicUsize::new(0));
+            let ctx = context(&calls);
+            let key = crate::networks::rgb::psbt_validation::psbt_operation_key(
+                ctx.bridge_config.chain_id,
+                &ctx.bridge_config.bridge_contract,
+                &[1; 32],
+                &[2; 32],
+                "rgb:test",
+            );
+            let reservation = ctx.state.op_replay_guard.reserve(key).unwrap();
+            let err = handle_sign(&ctx, request())
+                .map(|(response, _)| response)
+                .unwrap_err();
+            assert!(
+                err.to_string().contains("duplicate bridge operation"),
+                "{err}"
+            );
+            reservation.commit();
+            let err = handle_sign(&ctx, request())
+                .map(|(response, _)| response)
+                .unwrap_err();
+            assert!(
+                err.to_string().contains("duplicate bridge operation"),
+                "{err}"
+            );
+            assert_eq!(calls.load(Ordering::SeqCst), 0);
+            assert_eq!(ctx.state.op_replay_guard.seen_count(), 1);
+        }
+    }
+
     #[cfg(feature = "bfa-mint")]
     mod mint_ancestry {
         use crate::server::mint_lock_plan;
@@ -2437,6 +2572,7 @@ mod tests {
                 &bridge_config,
                 EvmDataSource::Disabled,
                 None,
+                0,
             );
             let state = EnclaveState::new(bitcoin::Network::Bitcoin);
             state.initialize_from_seed(SEED).expect("initialize keys");

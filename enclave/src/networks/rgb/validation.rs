@@ -721,6 +721,8 @@ pub struct RgbValidator {
     /// Per-request HTTP timeout, [`ESPLORA_HTTP_TIMEOUT_SECS`] in production.
     /// Overridable only from tests (no env / host input reaches it).
     http_timeout_secs: u64,
+    /// Socket timeout for fee lookups; only tests override the pinned default.
+    electrum_fee_timeout_secs: u8,
     /// Canned validation result and fee rate for the crate's own tests, so the
     /// signing path runs with no indexer. Test-only by construction.
     #[cfg(test)]
@@ -753,6 +755,7 @@ impl RgbValidator {
             chain_net,
             fee_estimate_cache: std::sync::Mutex::new(None),
             http_timeout_secs: ESPLORA_HTTP_TIMEOUT_SECS,
+            electrum_fee_timeout_secs: ELECTRUM_WITNESS_TIMEOUT_SECS as u8,
             #[cfg(test)]
             canned: None,
         })
@@ -789,17 +792,20 @@ impl RgbValidator {
         if let Some((_, rate)) = &self.canned {
             return Ok(*rate);
         }
-        let now = std::time::Instant::now();
-        let mut cache = self
-            .fee_estimate_cache
-            .lock()
-            .map_err(|e| EnclaveError::Internal(format!("fee-estimate cache poisoned: {e}")))?;
-        if let Some((fetched_at, rate)) = *cache {
-            if now.duration_since(fetched_at) < FEE_ESTIMATE_TTL {
-                return Ok(rate);
+        {
+            let cache = self
+                .fee_estimate_cache
+                .lock()
+                .map_err(|e| EnclaveError::Internal(format!("fee-estimate cache poisoned: {e}")))?;
+            if let Some((fetched_at, rate)) = *cache {
+                if fetched_at.elapsed() < FEE_ESTIMATE_TTL {
+                    return Ok(rate);
+                }
             }
         }
 
+        // Concurrent cache misses may fetch independently; network I/O must
+        // never hold the shared cache lock.
         // Backend mirrors the witness resolver: ssl://|tcp:// is Electrum,
         // anything else Esplora REST. Both paths are fail-closed - a failed
         // fetch is a refusal, never a skipped check.
@@ -817,7 +823,18 @@ impl RgbValidator {
             )));
         }
 
-        *cache = Some((now, rate));
+        let fetched_at = std::time::Instant::now();
+        let mut cache = self
+            .fee_estimate_cache
+            .lock()
+            .map_err(|e| EnclaveError::Internal(format!("fee-estimate cache poisoned: {e}")))?;
+        // Do not overwrite a newer concurrent refresh.
+        if cache
+            .as_ref()
+            .is_none_or(|(cached_at, _)| *cached_at < fetched_at)
+        {
+            *cache = Some((fetched_at, rate));
+        }
         Ok(rate)
     }
 
@@ -924,8 +941,12 @@ impl RgbValidator {
     /// means it cannot estimate: fail-closed on mainnet, falls back to the
     /// pinned floor elsewhere, mirroring the Esplora empty-map case.
     fn electrum_fee_rate_sat_vb(&self) -> Result<f64> {
-        use rgbstd::indexers::electrum_blocking::electrum_client::{Client, ElectrumApi};
-        let client = Client::new(&self.indexer_url).map_err(|e| {
+        use rgbstd::indexers::electrum_blocking::electrum_client::{Client, Config, ElectrumApi};
+        let config = Config::builder()
+            .timeout(Some(self.electrum_fee_timeout_secs))
+            .retry(0)
+            .build();
+        let client = Client::from_config(&self.indexer_url, config).map_err(|e| {
             EnclaveError::CrossCheck(format!(
                 "electrum fee-estimate client creation failed - refusing to sign a send-RGB \
                  PSBT without a fee-rate sanity bound: {e}"
@@ -1609,6 +1630,110 @@ mod tests {
             20.0,
             "second call must hit the cache, not the stub"
         );
+    }
+
+    #[test]
+    fn fee_estimate_electrum_stall_times_out_and_fails_closed() {
+        use std::{io::BufRead, net::TcpListener, sync::mpsc, time::Duration};
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (release_tx, release_rx) = mpsc::channel();
+        let server = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            let mut request = String::new();
+            std::io::BufReader::new(&stream)
+                .read_line(&mut request)
+                .unwrap();
+            assert!(request.contains("blockchain.estimatefee"));
+            let _ = release_rx.recv_timeout(Duration::from_secs(5));
+        });
+        let mut validator = RgbValidator::new(format!("tcp://{addr}"), "bitcoin").unwrap();
+        validator.electrum_fee_timeout_secs = 1;
+        let (result_tx, result_rx) = mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            result_tx
+                .send(validator.recommended_fee_rate_sat_vb())
+                .unwrap();
+        });
+
+        let result = result_rx.recv_timeout(Duration::from_secs(3));
+        let _ = release_tx.send(());
+        server.join().unwrap();
+        worker.join().unwrap();
+        let err = result
+            .expect("silent Electrum must time out before the server closes")
+            .unwrap_err();
+        assert!(err.to_string().contains("refusing to sign"), "{err}");
+    }
+
+    #[test]
+    fn fee_estimate_stalled_refresh_does_not_block_other_requests() {
+        use std::{
+            io::{BufRead, Write},
+            net::TcpListener,
+            sync::{mpsc, Arc},
+            time::Duration,
+        };
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (started_tx, started_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let server = std::thread::spawn(move || {
+            let (first, _) = listener.accept().unwrap();
+            first
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            let mut request = String::new();
+            std::io::BufReader::new(&first)
+                .read_line(&mut request)
+                .unwrap();
+            started_tx.send(()).unwrap();
+            let stalled = std::thread::spawn(move || {
+                let _ = release_rx.recv_timeout(Duration::from_secs(5));
+                drop(first);
+            });
+            let (mut second, _) = listener.accept().unwrap();
+            second
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            request.clear();
+            std::io::BufReader::new(&second)
+                .read_line(&mut request)
+                .unwrap();
+            assert!(request.contains("blockchain.estimatefee"));
+            // Each fee fetch uses a fresh client, whose first request has ID 0.
+            second.write_all(b"{\"id\":0,\"result\":0.0002}\n").unwrap();
+            stalled.join().unwrap();
+        });
+        let validator = Arc::new(RgbValidator::new(format!("tcp://{addr}"), "bitcoin").unwrap());
+        let first_validator = Arc::clone(&validator);
+        let first = std::thread::spawn(move || first_validator.recommended_fee_rate_sat_vb());
+        started_rx.recv_timeout(Duration::from_secs(3)).unwrap();
+        let second_validator = Arc::clone(&validator);
+        let (result_tx, result_rx) = mpsc::channel();
+        let second = std::thread::spawn(move || {
+            result_tx
+                .send(second_validator.recommended_fee_rate_sat_vb())
+                .unwrap();
+        });
+        let result = result_rx.recv_timeout(Duration::from_secs(3));
+        let _ = release_tx.send(());
+        first.join().unwrap().unwrap_err();
+        second.join().unwrap();
+        server.join().unwrap();
+        assert_eq!(
+            result
+                .expect("another fetch must finish while the first is stalled")
+                .unwrap(),
+            20.0
+        );
+        // The failed concurrent fetch must not discard the successful refresh.
+        assert_eq!(validator.recommended_fee_rate_sat_vb().unwrap(), 20.0);
     }
 
     #[test]

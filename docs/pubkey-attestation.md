@@ -126,7 +126,7 @@ both the enclave and every verifier share so the bytes are identical.
 
 ```
 policy_commitment =
-    u8(POLICY_COMMITMENT_V2 = 2)                    // version tag
+    u8(POLICY_COMMITMENT_V3 = 3)                    // version tag
     // Production (release, fully-pinned bridge signer):
     u8(0x01)                                        // production discriminant
     u8(allow_vanilla_psbt)                          // plain-BTC path enabled?
@@ -135,6 +135,8 @@ policy_commitment =
     u8(btc_source)                                  // 1 = SPV-verified
     chain_id_be8 || bridge_contract(20)
     u32_be(len(rgb_asset_id)) || rgb_asset_id_utf8
+    funds_in_contract(20)                           // authorized event emitter
+    evm_min_confirmations_be8                       // required receipt depth
     u8(checkpoint_present)                          // 0 absent; 1 followed by 32-byte beacon root
     // Gas-tx (SignRawDigest) rule:
     gas_tx_allowed_to(20)                           // all-zero = gas path unpinned
@@ -146,9 +148,9 @@ policy_commitment =
     u8(0x00)                                        // development discriminant
 ```
 
-The tuple omits the deposit emitter, EVM confirmation depth, Bitcoin network,
-concrete sats budgets, resolver URLs and strict Helios checkpoint-age setting.
-Image-baked values remain measured in the EIF.
+The tuple omits the Bitcoin network, concrete sats budgets, resolver URLs and
+strict Helios checkpoint-age setting. Image-baked values remain measured in the
+EIF.
 
 A production enclave commits the production tuple; a dev/mock enclave
 commits just `[version, 0x00]`. Because the posture flags (`allow_vanilla_psbt`,
@@ -227,7 +229,9 @@ attest-verify \
     --endpoint http://parent.example:50051 \
     --pcr0 <96-hex-chars> \
     --pcr1 <96-hex-chars> \
-    --pcr2 <96-hex-chars>
+    --pcr2 <96-hex-chars> \
+    --expect-funds-in-contract 0x6711f1a319B37847fa0234181C34D883774c4951 \
+    --expect-evm-min-confirmations 12
 
 # Gas signing: also supply the image's exact expected rule when configured:
 # --expect-gas-tx-to <hex20> --expect-gas-max-gas-limit <units>
@@ -238,11 +242,13 @@ attest-verify \
 # Expect the plain-BTC path enabled:
 attest-verify --endpoint http://parent.example:50051 \
     --pcr0 <..> --pcr1 <..> --pcr2 <..> \
+    --expect-funds-in-contract <hex20> --expect-evm-min-confirmations 12 \
     --expect-vanilla-psbt
 
 # Optional Helios build (not enabled in the supplied Dockerfiles):
 attest-verify --endpoint http://parent.example:50051 \
     --pcr0 <..> --pcr1 <..> --pcr2 <..> \
+    --expect-funds-in-contract <hex20> --expect-evm-min-confirmations 12 \
     --expect-evm-source helios --expect-helios-checkpoint <hex32>
 
 # Dev / CI verification (against an enclave built with --features mock-attestation).
