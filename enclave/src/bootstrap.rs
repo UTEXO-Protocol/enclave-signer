@@ -381,14 +381,10 @@ pub fn build_header_chain(bitcoin_network_str: &str) -> std::sync::Mutex<HeaderC
 /// makes bridge signing fail closed; it never downgrades to an unverified
 /// path after a Helios sync failure.
 #[cfg(feature = "evm-rpc")]
-#[allow(clippy::type_complexity)]
 pub fn build_evm_rpc_client(
     bridge_config: &BridgeConfig,
-    cfg: crate::config::EvmRpcConfig,
-) -> (
-    Option<Box<dyn crate::networks::evm::events::EvmReceiptProvider + Send + Sync>>,
-    crate::config::EvmRpcConfig,
-) {
+    cfg: &crate::config::EvmRpcConfig,
+) -> Option<Box<dyn crate::networks::evm::events::EvmReceiptProvider + Send + Sync>> {
     // Only the Helios path reads the pinned chain id.
     #[cfg(not(feature = "helios"))]
     let _ = bridge_config;
@@ -446,5 +442,5 @@ pub fn build_evm_rpc_client(
     #[cfg(not(feature = "helios"))]
     let client: Option<Boxed> = build_alloy();
 
-    (client, cfg)
+    client
 }

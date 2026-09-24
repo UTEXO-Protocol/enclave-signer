@@ -23,6 +23,21 @@ sol! {
     }
 
     function fundsOut(FundsOutParams params);
+
+    // Mirrors the enclave's `lzFundsOut` wire format (validation.rs).
+    function lzFundsOut(
+        uint256 amount,
+        uint256 burnId,
+        uint256 sourceChainId,
+        uint256 destinationChainId,
+        string sourceAddress,
+        bytes proof,
+        bytes settlementData,
+        uint32 dstEid,
+        bytes32 recipient,
+        uint256 minAmountLD,
+        bytes extraOptions
+    );
 }
 
 /// Pinned `BridgeConfig` matching the defaults of `valid_sign_evm_request`.
@@ -602,6 +617,70 @@ fn test_sign_evm_accepts_ccd_source_funds_out() {
             "expected EvmSignature for CcdSource -> EvmDestination fundsOut, got {:?}",
             other
         ),
+    }
+}
+
+/// An lzFundsOut selector without `lz_release` yields no fundsOut params, so
+/// the EVM signer must refuse it with an error and no signature.
+#[cfg(all(feature = "rgb-validation", feature = "ccd"))]
+#[test]
+fn test_sign_evm_refuses_lz_selector_without_lz_release() {
+    let port = common::start_test_server_with_config(|_| {}, pinned_bridge_config());
+
+    let init_req = EnclaveRequest {
+        request: Some(Request::InitializeKey(InitializeKeyRequest {
+            seed: vec![],
+            mnemonic: String::new(),
+            cloning_secret: String::new(),
+        })),
+    };
+    common::send_request(port, &init_req);
+
+    let amount = 1000u64;
+    let commission = 50u64;
+    // Remote destination chain: the entrypoint route refuses the pinned one.
+    let call_data = lzFundsOutCall {
+        amount: U256::from(amount),
+        burnId: U256::ZERO,
+        sourceChainId: U256::ZERO,
+        destinationChainId: U256::from(137u64),
+        sourceAddress: String::new(),
+        proof: Bytes::new(),
+        settlementData: Bytes::new(),
+        dstEid: 30109,
+        recipient: [0x22; 32].into(),
+        minAmountLD: U256::from(amount),
+        extraOptions: Bytes::new(),
+    }
+    .abi_encode();
+    let sign_req = EnclaveRequest {
+        request: Some(Request::Sign(SignRequest {
+            amount: amount + commission + 100,
+            source_network: Some(SourceNetwork::CcdSource(CcdSource {
+                tx_hash: vec![0xCC; 32],
+                commission,
+            })),
+            destination_network: Some(DestinationNetwork::EvmDestination(EvmDestination {
+                call_data,
+                nonce: 1,
+                deadline: u64::MAX,
+                chain_id: 1,
+                proxy_contract: vec![0xAA; 20],
+                calldata_amount: amount,
+                calldata_commission: commission,
+                lz_release: None,
+            })),
+        })),
+    };
+    let resp = common::send_request(port, &sign_req);
+
+    match &resp.response {
+        Some(Response::Error(e)) => assert!(
+            e.message.contains("LayerZero selector without lz_release"),
+            "expected the missing lz_release refusal, got: {}",
+            e.message
+        ),
+        other => panic!("expected ErrorResponse and no signature, got {:?}", other),
     }
 }
 

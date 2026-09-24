@@ -4,7 +4,7 @@ use sha3::{Digest, Keccak256};
 
 use crate::config::{BridgeConfig, EvmRpcConfig};
 use crate::framing;
-use crate::networks::evm::events::{LogEntry, ReceiptData, BRIDGE_FUNDS_IN_SIG};
+use crate::networks::evm::events::{LogEntry, ReceiptData};
 use crate::networks::rgb::validation::{
     bfa, OutputSeal, RgbValidator, TransitionOutput, TransitionSummary, ValidatedConsignment,
 };
@@ -28,6 +28,11 @@ const OPERATION_ID: [u8; 32] = [0x33; 32];
 const DEPOSIT_BLOCK: u64 = 100;
 const GROSS: u64 = 100_000;
 const COMMISSION: u64 = 1_000;
+
+/// Canonical `BridgeFundsIn` signature, as the deposit verifier selects logs
+/// by. A local copy, so a changed production signature fails this test.
+const FUNDS_IN_SIG: &str = "BridgeFundsIn(bytes32,bytes32,address,uint256,uint256,\
+     uint256,uint256,uint256,uint256,uint256,string)";
 const NET: u64 = GROSS - COMMISSION;
 
 /// The deposit's invoice and the blinded seal it names.
@@ -72,7 +77,7 @@ fn stub_deposit() -> FakeEvm {
             logs: vec![LogEntry {
                 address: FUNDS_IN_CONTRACT,
                 topics: vec![
-                    Keccak256::digest(BRIDGE_FUNDS_IN_SIG.as_bytes()).into(),
+                    Keccak256::digest(FUNDS_IN_SIG.as_bytes()).into(),
                     OPERATION_ID,
                 ],
                 data: bridge_funds_in_data(GROSS, NET, COMMISSION, INVOICE),

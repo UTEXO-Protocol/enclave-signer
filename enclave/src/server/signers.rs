@@ -69,7 +69,8 @@ pub(super) fn handle_sign_evm(
         // here is an LZ selector without `lz_release`: refuse, never re-decode.
         let params = params.ok_or_else(|| {
             EnclaveError::CrossCheck(
-                "fundsOut digest requires validated calldata params (LayerZero selector without                  lz_release?)"
+                "fundsOut digest requires validated calldata params (LayerZero selector without \
+                 lz_release?)"
                     .into(),
             )
         })?;

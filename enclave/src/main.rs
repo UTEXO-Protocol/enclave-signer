@@ -66,8 +66,7 @@ fn main() {
     #[cfg(feature = "rgb-validation")]
     let header_chain = bootstrap::build_header_chain(&bitcoin_network_str);
     #[cfg(feature = "evm-rpc")]
-    let (evm_rpc_client, evm_rpc_config) =
-        bootstrap::build_evm_rpc_client(&bridge_config, evm_rpc_config);
+    let evm_rpc_client = bootstrap::build_evm_rpc_client(&bridge_config, &evm_rpc_config);
 
     let ctx = ServerContext {
         state,

@@ -35,6 +35,10 @@ pub(super) fn handle_sign(
         EnclaveError::InvalidRequest("sign request has no destination_network".into())
     })?;
 
+    // No deposit verifier compiled in: refuse before the replay guard is touched.
+    #[cfg(not(feature = "evm-rpc"))]
+    refuse_unverifiable_funds_in(source_ref, destination_ref)?;
+
     // Reject known replays before network I/O without letting invalid requests
     // consume guard capacity. Reserve again immediately before signing.
     precheck_operation(ctx, source_ref, destination_ref)?;
@@ -319,9 +323,8 @@ type AuthorizedRecipient = std::convert::Infallible;
 ///   * `evm-rpc`: fetch the receipt through the enclave's own RPC client and
 ///     return the recipient the deposit's invoice authorizes. Fully trustless
 ///     only once Helios verifies the RPC.
-///   * no `evm-rpc`: refuse. There is no evidence the deposit occurred - the
-///     consignment/PSBT checks prove the transfer shape, not that an EVM
-///     deposit backs it. Mirrors the no-`spv` `fundsOut` refusal.
+///   * no `evm-rpc`: a no-op. [`refuse_unverifiable_funds_in`] already
+///     refused every EVM->RGB request, before the replay precheck.
 ///
 /// The result goes to [`bind_funds_in_recipient`] once RGB validation has
 /// proven the recipient seals.
@@ -380,9 +383,21 @@ fn verify_funds_in_deposit(
 fn verify_funds_in_deposit(
     _ctx: &ServerContext,
     _amount: u64,
+    _source: &SourceNetwork,
+    _destination: &DestinationNetwork,
+) -> Result<Option<AuthorizedRecipient>> {
+    Ok(None)
+}
+
+/// Refuse an EVM->RGB request on a build without `evm-rpc`. There is no
+/// evidence the deposit occurred - the consignment/PSBT checks prove the
+/// transfer shape, not that an EVM deposit backs it. Mirrors the no-`spv`
+/// `fundsOut` refusal.
+#[cfg(not(feature = "evm-rpc"))]
+fn refuse_unverifiable_funds_in(
     source: &SourceNetwork,
     destination: &DestinationNetwork,
-) -> Result<Option<AuthorizedRecipient>> {
+) -> Result<()> {
     if matches!(
         (source, destination),
         (
@@ -399,7 +414,7 @@ fn verify_funds_in_deposit(
         ));
     }
 
-    Ok(None)
+    Ok(())
 }
 
 /// Check the recipient seals RGB validation proved against the recipient the
