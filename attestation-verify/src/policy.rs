@@ -31,11 +31,13 @@ pub const POLICY_COMMITMENT_V4: u8 = 4;
 #[repr(u8)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SignerRole {
-    /// Both directions in one image (the retired swap flow).
+    /// Both directions in one image: the swap and combined images
+    /// (`Dockerfile.enclave`, `Dockerfile.enclave.rgb`).
     Combined = 0,
     /// `mint-signer`: EVM -> RGB only. Refuses every `fundsOut` release.
     Mint = 1,
-    /// `burn-signer`: RGB -> EVM only. Refuses every RGB mint PSBT.
+    /// `burn-signer`: EVM releases only. Refuses every RGB mint PSBT. In a
+    /// `ccd` dev build it also signs CCD -> EVM; no shipped burn image has `ccd`.
     Burn = 2,
 }
 

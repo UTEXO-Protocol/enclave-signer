@@ -287,8 +287,9 @@ package versions still float.
 `.github/workflows/build-eif.yml` builds the `combined`, `rgb`,
 `rgb-mint`, `rgb-burn` and `ccd` variants on a plain runner with `nitro-cli 1.4.5`
 and uploads EIF + PCRs + host binaries to `s3://<bucket>/eif/<git_sha>/`.
-`release-eif.yml` deploys one of those to the stage hosts over SSM using
-`deploy/deploy-host.sh`. The `cd-*.yml` workflows push container images for
+`release-eif.yml` deploys the `combined` EIF only: `deploy/deploy-host.sh`
+fetches `eif/<git_sha>/utexo-bridge-enclave.eif` and runs it on every CID.
+The `rgb-mint` and `rgb-burn` EIFs have no release path yet. The `cd-*.yml` workflows push container images for
 the parent and the **dev** enclave images only (`utexo-bridge-enclave-mint`
 and `utexo-bridge-enclave-burn`, both from `Dockerfile.enclave-dev.bfa` with a
 `SIGNER_ROLE` build arg).

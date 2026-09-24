@@ -45,7 +45,7 @@ fn funds_out_consignment(amount: u64, op_id: &str) -> ValidatedConsignment {
     validated_consignment(bfa::TS_BURN, 0, Some(amount), op_id)
 }
 
-#[cfg(all(feature = "rgb-swap", rgb_to_evm, rgb_to_evm))]
+#[cfg(all(feature = "rgb-swap", rgb_to_evm))]
 #[test]
 fn route_proof_uses_transfer_output_amount() {
     let op_id = "0xAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
@@ -64,7 +64,7 @@ fn route_proof_uses_transfer_output_amount() {
     );
 }
 
-#[cfg(all(feature = "rgb-mint-burn", rgb_to_evm, rgb_to_evm))]
+#[cfg(all(feature = "rgb-mint-burn", rgb_to_evm))]
 #[test]
 fn route_proof_uses_burn_metadata_amount() {
     let op_id = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
@@ -80,7 +80,7 @@ fn route_proof_uses_burn_metadata_amount() {
     assert_eq!(proof.operation_id.as_deref(), Some(op_id));
 }
 
-#[cfg(all(feature = "rgb-mint-burn", rgb_to_evm, rgb_to_evm))]
+#[cfg(all(feature = "rgb-mint-burn", rgb_to_evm))]
 #[test]
 fn route_proof_rejects_burn_without_burned_amount() {
     let err = route_proof_from_validated_consignment(&validated_consignment(

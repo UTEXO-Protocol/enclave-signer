@@ -134,16 +134,28 @@ pub async fn verify_attested_pubkey(
         .context("AttestedPublicKey RPC failed")?
         .into_inner();
 
+    verify_attested_response(response, nonce, &expected_pcrs, mode, &expected_policy)
+}
+
+/// The checks of [`verify_attested_pubkey`] after the RPC: document, pubkey
+/// and policy commitment. Split out so tests can drive it without a server.
+pub fn verify_attested_response(
+    response: AttestedPublicKeyResponse,
+    nonce: [u8; 32],
+    expected_pcrs: &attestation_verify::ExpectedPcrs,
+    mode: VerifyMode,
+    expected_policy: &ExpectedPolicy,
+) -> Result<AttestedPubkeyResult> {
     let verified = match mode {
         VerifyMode::Real => attestation_verify::verify_attestation(
             &response.attestation_doc,
-            &expected_pcrs,
+            expected_pcrs,
             Some(&nonce),
         )
         .context("attestation verify failed")?,
         VerifyMode::Mock => attestation_verify::verify_mock_attestation(
             &response.attestation_doc,
-            &expected_pcrs,
+            expected_pcrs,
             Some(&nonce),
         )
         .context("mock attestation verify failed")?,
@@ -161,7 +173,7 @@ pub async fn verify_attested_pubkey(
     // Reconstruct the expected policy - pins from the wire response,
     // posture flags from `expected_policy` - and require the whole commitment to
     // match. A mismatch means the attested posture is not the expected one.
-    let attested_policy = expected_attested_policy(&expected_policy, &response)?;
+    let attested_policy = expected_attested_policy(expected_policy, &response)?;
     let mut preimage = canonical_bundle(&response);
     preimage.extend_from_slice(&attested_policy.to_bytes());
     let bundle_commitment: [u8; 32] = Sha256::digest(&preimage).into();
@@ -244,6 +256,81 @@ fn expected_attested_policy(
                 gas_tx_max_value_wei: *gas_tx_max_value_wei,
                 gas_tx_allowed_selectors: gas_tx_allowed_selectors.clone(),
             })
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn production(signer_role: SignerRole) -> ExpectedPolicy {
+        ExpectedPolicy::Production {
+            allow_vanilla_psbt: false,
+            signer_role,
+            evm_source: EvmDataSource::RawRpc,
+            evm_checkpoint: None,
+            funds_in_contract: [0x11; 20],
+            evm_min_confirmations: 12,
+            gas_tx_allowed_to: [0u8; 20],
+            gas_tx_max_gas_limit: 0,
+            gas_tx_max_fee_per_gas: 0,
+            gas_tx_max_value_wei: 0,
+            gas_tx_allowed_selectors: Vec::new(),
+        }
+    }
+
+    /// A response whose mock document commits to a production policy with
+    /// `attested_role`.
+    fn attested_response(attested_role: SignerRole, nonce: &[u8; 32]) -> AttestedPublicKeyResponse {
+        let pubkey = vec![0x04; 65];
+        let mut resp = AttestedPublicKeyResponse {
+            evm_uncompressed_pub: pubkey.clone(),
+            chain_id: 1,
+            bridge_contract: vec![0xAA; 20],
+            rgb_asset_id: "rgb:asset".into(),
+            ..Default::default()
+        };
+        let policy = expected_attested_policy(&production(attested_role), &resp).unwrap();
+        let mut preimage = canonical_bundle(&resp);
+        preimage.extend_from_slice(&policy.to_bytes());
+        let user_data: [u8; 32] = Sha256::digest(&preimage).into();
+        resp.attestation_doc =
+            attestation_verify::build_mock_document(nonce, Some(&pubkey), Some(&user_data))
+                .unwrap();
+        resp
+    }
+
+    fn verify(attested: SignerRole, expected: SignerRole) -> Result<AttestedPubkeyResult> {
+        let nonce = [0x42; 32];
+        verify_attested_response(
+            attested_response(attested, &nonce),
+            nonce,
+            &attestation_verify::ExpectedPcrs::zero(),
+            VerifyMode::Mock,
+            &production(expected),
+        )
+    }
+
+    #[test]
+    fn matching_signer_role_verifies() {
+        verify(SignerRole::Mint, SignerRole::Mint).unwrap();
+        verify(SignerRole::Burn, SignerRole::Burn).unwrap();
+    }
+
+    /// Everything but the role matches, so the role alone fails the check.
+    #[test]
+    fn wrong_signer_role_alone_fails() {
+        for (attested, expected) in [
+            (SignerRole::Burn, SignerRole::Mint),
+            (SignerRole::Mint, SignerRole::Burn),
+            (SignerRole::Combined, SignerRole::Mint),
+        ] {
+            let err = verify(attested, expected).unwrap_err();
+            assert!(
+                format!("{err:#}").contains("user_data"),
+                "attested {attested:?}, expected {expected:?}: {err:#}"
+            );
         }
     }
 }

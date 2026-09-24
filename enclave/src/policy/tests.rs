@@ -50,14 +50,15 @@ fn release_bridge_with_full_pins_is_production() {
     assert!(p.assert_valid_for_build(&release_bridge_ctx()).is_ok());
 }
 
+/// The attested role reads the features, so compare it with the direction
+/// cfgs the gates read. Catches drift between the two.
 #[test]
 fn build_context_reports_the_compiled_signer_role() {
-    let want = if cfg!(feature = "mint-signer") {
-        SignerRole::Mint
-    } else if cfg!(feature = "burn-signer") {
-        SignerRole::Burn
-    } else {
-        SignerRole::Combined
+    let want = match (cfg!(evm_to_rgb), cfg!(rgb_to_evm)) {
+        (true, false) => SignerRole::Mint,
+        (false, true) => SignerRole::Burn,
+        (true, true) => SignerRole::Combined,
+        (false, false) => unreachable!("build.rs always compiles one direction"),
     };
     assert_eq!(BuildContext::current().signer_role, want);
 }

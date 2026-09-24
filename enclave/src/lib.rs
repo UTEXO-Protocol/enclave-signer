@@ -94,6 +94,19 @@ compile_error!(
      vsock,rgb,mint-signer`"
 );
 
+// The attested role reads the features; every gate reads the `build.rs` cfgs.
+// A cfg forced from outside (e.g. RUSTFLAGS) must not let them disagree.
+#[cfg(all(feature = "mint-signer", rgb_to_evm))]
+compile_error!(
+    "mint-signer with the `rgb_to_evm` cfg set: the image would attest Mint but compile the \
+     release path. Do not set direction cfgs by hand; `build.rs` derives them"
+);
+#[cfg(all(feature = "burn-signer", evm_to_rgb))]
+compile_error!(
+    "burn-signer with the `evm_to_rgb` cfg set: the image would attest Burn but compile the \
+     mint path. Do not set direction cfgs by hand; `build.rs` derives them"
+);
+
 pub mod attestation;
 // Boot sequence for `main.rs`: env parsing, forwarders, and the fail-closed
 // pins. In the library so it is covered by clippy/tests like everything else.

@@ -51,14 +51,15 @@ fn spv_health(_ctx: &ServerContext) -> (bool, u32, u32, u32, u32) {
 ///
 /// Ready means the key is loaded *and* the header chain passes
 /// `assert_chain_ready` - the same precondition signing applies - so a caller
-/// that sees `ready` will not immediately hit an SPV refusal.
+/// that sees `ready` will not immediately hit an SPV refusal. A mint signer
+/// never reads the header chain, so it skips the SPV half.
 pub(super) fn handle_health(ctx: &ServerContext) -> Result<EnclaveResponse> {
     let key_loaded = ctx.state.is_initialized();
     let phase = ctx.state.phase_name().to_string();
     let (spv_synced, spv_tip_height, spv_tip_time, spv_tip_age_secs, spv_max_tip_age_secs) =
         spv_health(ctx);
 
-    let ready = key_loaded && spv_synced;
+    let ready = key_loaded && (spv_synced || !cfg!(rgb_to_evm));
 
     tracing::debug!(
         ready,

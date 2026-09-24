@@ -38,6 +38,27 @@ fn release_request() -> Request {
     })
 }
 
+/// A request whose source and destination belong to different directions:
+/// EVM -> EVM and RGB -> RGB. Each half names one direction.
+fn mixed_requests() -> [Request; 2] {
+    [
+        Request::Sign(SignRequest {
+            amount: 1_000,
+            source_network: Some(SourceNetwork::EvmSource(EvmSource::default())),
+            destination_network: Some(
+                DestinationNetwork::EvmDestination(EvmDestination::default()),
+            ),
+        }),
+        Request::Sign(SignRequest {
+            amount: 1_000,
+            source_network: Some(SourceNetwork::RgbSource(RgbSource::default())),
+            destination_network: Some(
+                DestinationNetwork::RgbDestination(RgbDestination::default()),
+            ),
+        }),
+    ]
+}
+
 #[cfg(feature = "mint-signer")]
 mod mint_signer {
     use super::*;
@@ -47,6 +68,41 @@ mod mint_signer {
         let msg = refusal(release_request());
         assert!(msg.contains("mint signer"), "{msg}");
         assert!(msg.contains("RGB -> EVM"), "{msg}");
+    }
+
+    /// A mixed pairing carries a release half, so the role check refuses it.
+    #[test]
+    fn refuses_a_mixed_pairing() {
+        for req in mixed_requests() {
+            let msg = refusal(req);
+            assert!(msg.contains("mint signer"), "{msg}");
+        }
+    }
+
+    /// No mint check reads the header chain, so a loaded key is enough.
+    #[test]
+    fn is_ready_without_headers() {
+        let port = common::start_test_server();
+        common::send_request(
+            port,
+            &EnclaveRequest {
+                request: Some(Request::InitializeKey(InitializeKeyRequest::default())),
+            },
+        );
+        let resp = common::send_request(
+            port,
+            &EnclaveRequest {
+                request: Some(Request::Health(HealthRequest::default())),
+            },
+        );
+        match resp.response {
+            Some(Response::Health(h)) => {
+                assert!(h.key_loaded);
+                assert!(!h.spv_synced);
+                assert!(h.ready, "a mint signer must not wait for SPV sync");
+            }
+            other => panic!("expected Health, got {other:?}"),
+        }
     }
 
     #[test]
@@ -74,6 +130,15 @@ mod burn_signer {
         let msg = refusal(mint_request());
         assert!(msg.contains("burn signer"), "{msg}");
         assert!(msg.contains("EVM -> RGB"), "{msg}");
+    }
+
+    /// A mixed pairing carries a mint half, so the role check refuses it.
+    #[test]
+    fn refuses_a_mixed_pairing() {
+        for req in mixed_requests() {
+            let msg = refusal(req);
+            assert!(msg.contains("burn signer"), "{msg}");
+        }
     }
 
     #[test]

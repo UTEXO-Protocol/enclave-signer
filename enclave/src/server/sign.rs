@@ -213,7 +213,8 @@ pub(super) fn handle_sign(
 }
 
 /// Refuse a route that belongs to the other signer role. A no-op on a build
-/// that carries both directions.
+/// that carries both directions. Refuses by exclusion: a burn build with `ccd`
+/// still signs CCD -> EVM.
 fn check_signer_role(source: &SourceNetwork, destination: &DestinationNetwork) -> Result<()> {
     #[cfg(not(evm_to_rgb))]
     if matches!(source, SourceNetwork::EvmSource(_))
