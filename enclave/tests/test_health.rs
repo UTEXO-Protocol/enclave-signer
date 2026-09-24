@@ -9,12 +9,12 @@
 //!
 //! SPV/RGB-only: a `ccd`-only build has no header chain and reports SPV
 //! readiness vacuously, which is a different assertion set.
-#![cfg(feature = "spv")]
+#![cfg(feature = "rgb-validation")]
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use utexo_bridge_enclave::networks::rgb::spv::{checkpoint_for, Network};
-use utexo_bridge_enclave::networks::rgb::spv_validation::{
+use utexo_bridge_enclave::networks::rgb::spv_crosscheck::{
     SPV_MAX_TIP_AGE_SECS, SPV_MIN_CONFIRMATIONS,
 };
 use utexo_bridge_enclave::proto::enclave_request::Request as EReq;

@@ -4,7 +4,7 @@ use std::thread;
 
 use utexo_bridge_enclave::config::BridgeConfig;
 use utexo_bridge_enclave::framing;
-#[cfg(feature = "spv")]
+#[cfg(feature = "rgb-validation")]
 use utexo_bridge_enclave::networks::rgb::spv::{checkpoint_for, HeaderChain, Network};
 use utexo_bridge_enclave::policy::{BuildContext, EvmDataSource, SecurityPolicy};
 use utexo_bridge_enclave::proto::*;
@@ -46,12 +46,10 @@ pub fn start_test_server_with_config(
 /// Same, with an EVM receipt provider wired in. A bridge-mode PSBT is refused
 /// up front unless the enclave can verify the FundsIn deposit itself, so any
 /// test that wants to reach the RGB checks has to supply one.
-#[cfg(all(feature = "evm-rpc", not(feature = "dev-mode")))]
+#[cfg(feature = "evm-rpc")]
 #[allow(dead_code)]
 pub fn start_test_server_with_evm_rpc(
-    client: Box<
-        dyn utexo_bridge_enclave::networks::evm::evm_event::EvmReceiptProvider + Send + Sync,
-    >,
+    client: Box<dyn utexo_bridge_enclave::networks::evm::events::EvmReceiptProvider + Send + Sync>,
 ) -> u16 {
     start_test_server_inner(|_| {}, BridgeConfig::from_env(), Some(client))
 }
@@ -60,7 +58,7 @@ fn start_test_server_inner(
     configure: impl FnOnce(&EnclaveState),
     bridge_config: BridgeConfig,
     #[cfg(feature = "evm-rpc")] evm_rpc_client: Option<
-        Box<dyn utexo_bridge_enclave::networks::evm::evm_event::EvmReceiptProvider + Send + Sync>,
+        Box<dyn utexo_bridge_enclave::networks::evm::events::EvmReceiptProvider + Send + Sync>,
     >,
 ) -> u16 {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -70,7 +68,7 @@ fn start_test_server_inner(
     // Tests run with the placeholder Regtest checkpoint. The header chain
     // is initialised but empty; tests that don't push headers leave it
     // alone, tests that do start from `checkpoint.height` (= 0). SPV-only.
-    #[cfg(feature = "spv")]
+    #[cfg(feature = "rgb-validation")]
     let header_chain = std::sync::Mutex::new(HeaderChain::new(
         Network::Regtest,
         checkpoint_for(Network::Regtest),
@@ -92,9 +90,9 @@ fn start_test_server_inner(
         evm_rpc_client,
         #[cfg(feature = "evm-rpc")]
         evm_rpc_config: utexo_bridge_enclave::config::EvmRpcConfig::default(),
-        #[cfg(feature = "spv")]
+        #[cfg(feature = "rgb-validation")]
         header_chain,
-        #[cfg(feature = "spv")]
+        #[cfg(feature = "rgb-validation")]
         submit_rate_limiter: std::sync::Mutex::new(server::SubmitRateLimiter::default()),
     });
 
@@ -123,7 +121,7 @@ pub fn send_request(port: u16, req: &EnclaveRequest) -> EnclaveResponse {
 /// carrying `prev_time + 1`. The test server runs `Network::Regtest`, where
 /// header validation is chain-linkage only, so no real PoW has to be satisfied
 /// and timestamps are free to choose.
-#[cfg(feature = "spv")]
+#[cfg(feature = "rgb-validation")]
 #[allow(dead_code)]
 pub fn synth_chain_from(prev_hash: [u8; 32], prev_time: u32, count: u32) -> Vec<Vec<u8>> {
     use bitcoin::consensus::serialize;
@@ -150,7 +148,7 @@ pub fn synth_chain_from(prev_hash: [u8; 32], prev_time: u32, count: u32) -> Vec<
 
 /// Push a header batch and return the raw response, so callers can assert on
 /// either the success or the error shape.
-#[cfg(feature = "spv")]
+#[cfg(feature = "rgb-validation")]
 #[allow(dead_code)]
 pub fn submit_headers(port: u16, start_height: u32, headers: Vec<Vec<u8>>) -> EnclaveResponse {
     send_request(
@@ -172,15 +170,13 @@ pub fn submit_headers(port: u16, start_height: u32, headers: Vec<Vec<u8>>) -> En
 /// verify the deposit itself, so a test that wants to reach the RGB checks
 /// needs this. The log carries the gross and commission the request declares,
 /// so the deposit gate passes and the later checks are what reject.
-#[cfg(all(feature = "evm-rpc", not(feature = "dev-mode")))]
+#[cfg(feature = "evm-rpc")]
 #[allow(dead_code)]
 pub mod deposit_stub {
     use alloy_primitives::U256;
     use alloy_sol_types::{sol, SolEvent};
     use utexo_bridge_enclave::error::Result;
-    use utexo_bridge_enclave::networks::evm::evm_event::{
-        EvmReceiptProvider, LogEntry, ReceiptData,
-    };
+    use utexo_bridge_enclave::networks::evm::events::{EvmReceiptProvider, LogEntry, ReceiptData};
 
     sol! {
         event BridgeFundsIn(

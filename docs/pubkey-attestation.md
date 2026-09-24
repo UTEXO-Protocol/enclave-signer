@@ -111,7 +111,7 @@ expected pins. Callers must compare them with their intended deployment.
 
 The verifier MUST use the same field set, the same order, and the same
 length-prefix encoding. The reference encoder is `canonical_pubkey_bundle`
-in [`enclave/src/server.rs`](../enclave/src/server.rs) and the reference
+in [`enclave/src/server/keys.rs`](../enclave/src/server/keys.rs) and the reference
 decoder/checker is `canonical_bundle` in
 [`parent/src/attest_verify.rs`](../parent/src/attest_verify.rs).
 
@@ -298,7 +298,7 @@ NOT defended (out of scope for attestation):
 
 ## Code references
 
-- Enclave-side handler: [`enclave/src/server.rs`](../enclave/src/server.rs)
+- Enclave-side handler: [`enclave/src/server/keys.rs`](../enclave/src/server/keys.rs)
   (`handle_get_attested_public_key`).
 - Parent gRPC handler: [`parent/src/grpc_server.rs`](../parent/src/grpc_server.rs)
   (`attested_public_key`).

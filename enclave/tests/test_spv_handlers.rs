@@ -3,7 +3,7 @@
 //! `dispatch` -> `ServerContext.header_chain` -> response.
 //!
 //! SPV/RGB-only: gated with `spv` (a `ccd`-only build has no header chain).
-#![cfg(feature = "spv")]
+#![cfg(feature = "rgb-validation")]
 
 use utexo_bridge_enclave::networks::rgb::spv::{checkpoint_for, Network};
 use utexo_bridge_enclave::proto::enclave_request::Request as EReq;

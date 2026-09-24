@@ -214,7 +214,7 @@ cargo build -p utexo-bridge-enclave --no-default-features --features allow-seed-
 
 Compile-time guards in `enclave/src/lib.rs`: `rgb-validation` requires `spv`;
 exactly one of `rgb-swap` / `rgb-mint-burn` whenever `rgb-validation` is on;
-`allow-seed-import`, `mock-attestation`, `dev-mode` do not compile in a release
+`allow-seed-import` and `mock-attestation` do not compile in a release
 profile. CI asserts every guard fires.
 
 ### Enclave image (EIF)
@@ -488,7 +488,6 @@ provenance. `build/smoke-test.sh` drives a live enclave through the CLI.
 | `helios` | `evm-rpc` | Optional checkpoint-verified EVM provider; selected by `HELIOS_EXECUTION_RPC`. Not enabled in the supplied Dockerfiles. |
 | `vsock` | - | vsock listener and forwarders (Linux). |
 | `allow-seed-import` | - | Mnemonic / raw-seed import. Dev only, does not compile in release. |
-| `dev-mode` | - | Skips cross-check validation. Dev only, does not compile in release. |
 | `mock-attestation` | - | Raw-CBOR attestation with zero PCRs. Dev only, does not compile in release. |
 
 ## Proto source

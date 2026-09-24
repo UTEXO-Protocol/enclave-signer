@@ -1,0 +1,1199 @@
+use super::*;
+use bitcoin::hashes::Hash;
+use bitcoin::{Amount, OutPoint, ScriptBuf, Sequence, Transaction, TxIn, TxOut, Txid, Witness};
+
+/// Minimal BIP-174-valid PSBT: one dummy input, one dummy output, no
+/// signatures. Stand-in for tests that exercise the fields around the PSBT
+/// rather than its contents.
+fn minimal_valid_psbt_bytes() -> Vec<u8> {
+    let unsigned_tx = Transaction {
+        version: bitcoin::transaction::Version(2),
+        lock_time: bitcoin::absolute::LockTime::ZERO,
+        input: vec![TxIn {
+            previous_output: OutPoint {
+                txid: Txid::from_raw_hash(bitcoin::hashes::sha256d::Hash::from_byte_array(
+                    [0u8; 32],
+                )),
+                vout: 0,
+            },
+            script_sig: ScriptBuf::new(),
+            sequence: Sequence::MAX,
+            witness: Witness::new(),
+        }],
+        output: vec![TxOut {
+            value: Amount::from_sat(1_000),
+            script_pubkey: ScriptBuf::new(),
+        }],
+    };
+    Psbt::from_unsigned_tx(unsigned_tx)
+        .expect("from_unsigned_tx")
+        .serialize()
+}
+
+// PSBT shape whitelist tests
+
+#[test]
+fn accepts_valid_psbt_bytes() {
+    assert!(validate_psbt_bytes(&minimal_valid_psbt_bytes()).is_ok());
+}
+
+#[test]
+fn rejects_empty_psbt_bytes() {
+    let err = validate_psbt_bytes(&[]).unwrap_err();
+    assert!(err.to_string().contains("psbt_bytes is empty"));
+}
+
+// PSBT shape whitelist rejection tests
+
+#[test]
+fn rejects_garbage_psbt_bytes() {
+    // Long enough to clear the empty-bytes guard but not a BIP-174 PSBT.
+    let err = validate_psbt_bytes(&[0xFF; 100]).unwrap_err();
+    assert!(
+        err.to_string().contains("not a valid PSBT"),
+        "expected PSBT parse rejection, got: {err}"
+    );
+}
+
+#[test]
+fn rejects_truncated_psbt_below_magic() {
+    // Shorter than the 5-byte BIP-174 magic prefix.
+    let err = validate_psbt_bytes(&[0x70, 0x73]).unwrap_err();
+    assert!(
+        err.to_string().contains("not a valid PSBT"),
+        "expected PSBT parse rejection, got: {err}"
+    );
+}
+
+#[test]
+fn rejects_psbt_with_no_inputs() {
+    // Build a PSBT whose unsigned tx has zero inputs. BIP-174 lets us
+    // serialise it; the validation layer is what enforces the
+    // "something to sign" invariant.
+    let unsigned_tx = Transaction {
+        version: bitcoin::transaction::Version(2),
+        lock_time: bitcoin::absolute::LockTime::ZERO,
+        input: vec![],
+        output: vec![TxOut {
+            value: Amount::from_sat(1_000),
+            script_pubkey: ScriptBuf::new(),
+        }],
+    };
+    let psbt = Psbt::from_unsigned_tx(unsigned_tx).expect("from_unsigned_tx");
+    let err = validate_psbt_bytes(&psbt.serialize()).unwrap_err();
+    assert!(
+        err.to_string().contains("no inputs"),
+        "expected no-inputs rejection, got: {err}"
+    );
+}
+
+// Operation-dedup key - `psbt_operation_key`
+
+#[test]
+fn op_key_is_deterministic() {
+    let a = psbt_operation_key(1, &[0x11; 20], &[0xAA; 32], &[0x07; 32], "rgb:asset");
+    let b = psbt_operation_key(1, &[0x11; 20], &[0xAA; 32], &[0x07; 32], "rgb:asset");
+    assert_eq!(a, b);
+}
+
+#[test]
+fn op_key_varies_with_every_field() {
+    let base = psbt_operation_key(1, &[0x11; 20], &[0xAA; 32], &[0x07; 32], "rgb:asset");
+    assert_ne!(
+        base,
+        psbt_operation_key(2, &[0x11; 20], &[0xAA; 32], &[0x07; 32], "rgb:asset"),
+        "chain_id must change the key"
+    );
+    assert_ne!(
+        base,
+        psbt_operation_key(1, &[0x22; 20], &[0xAA; 32], &[0x07; 32], "rgb:asset"),
+        "bridge_contract must change the key"
+    );
+    assert_ne!(
+        base,
+        psbt_operation_key(1, &[0x11; 20], &[0xBB; 32], &[0x07; 32], "rgb:asset"),
+        "evm_tx_hash must change the key"
+    );
+    assert_ne!(
+        base,
+        psbt_operation_key(1, &[0x11; 20], &[0xAA; 32], &[0x08; 32], "rgb:asset"),
+        "funds_in_operation_id must change the key"
+    );
+    assert_ne!(
+        base,
+        psbt_operation_key(1, &[0x11; 20], &[0xAA; 32], &[0x07; 32], "rgb:other"),
+        "rgb_asset_id must change the key"
+    );
+}
+
+#[test]
+fn op_key_length_prefix_blocks_concatenation_collision() {
+    // Without length-prefixing the variable fields, moving a byte across a
+    // field boundary would collide. The prefix must keep these distinct.
+    // evm_tx_hash / operationId are fixed at 32 bytes in practice, but the
+    // key fn must not rely on that for separation.
+    let k1 = psbt_operation_key(1, &[0x11; 20], b"AB", b"X", "C");
+    let k2 = psbt_operation_key(1, &[0x11; 20], b"A", b"X", "BC");
+    assert_ne!(k1, k2);
+}
+
+// Operation dedup end-to-end - `psbt_operation_key` + the soft replay guard.
+// Encodes the properties the EVM->RGB path relies on the guard for.
+mod operation_dedup {
+    use crate::error::EnclaveError;
+    use crate::networks::rgb::psbt_validation::psbt_operation_key;
+    use crate::state::NonceReplayGuard;
+    use std::time::Duration;
+
+    // A representative EVM->RGB operation key. Mirrors the server call site:
+    // pinned chain/contract, the request tx hash, the canonical on-chain
+    // `funds_in_operation_id`, and the RGB asset id.
+    fn op_key(tx: &[u8], funds_in_operation_id: &[u8]) -> [u8; 32] {
+        psbt_operation_key(1, &[0x11; 20], tx, funds_in_operation_id, "rgb:asset")
+    }
+
+    fn guard() -> NonceReplayGuard {
+        NonceReplayGuard::with_capacity(1000, Duration::from_secs(24 * 60 * 60))
+    }
+
+    #[test]
+    fn same_operation_is_rejected_within_one_instance() {
+        // A deposit signed once is refused on a same-op resubmission while
+        // the record is live (honest-listener-retry / naive-replay case).
+        let g = guard();
+        let k = op_key(&[0xAA; 32], &[0x07; 32]);
+        g.reserve(k)
+            .expect("first signing reserves the op")
+            .commit();
+        assert!(
+            matches!(g.reserve(k), Err(EnclaveError::NonceReplay)),
+            "the same operation must be refused as a replay"
+        );
+    }
+
+    #[test]
+    fn a_different_deposit_is_not_a_false_replay() {
+        // A different canonical operationId is a different deposit and signs.
+        let g = guard();
+        g.reserve(op_key(&[0xAA; 32], &[0x07; 32]))
+            .expect("first")
+            .commit();
+        g.reserve(op_key(&[0xAA; 32], &[0x08; 32]))
+            .expect("a different funds_in_operation_id is a different op")
+            .commit();
+    }
+
+    #[test]
+    fn restart_or_sibling_instance_admits_the_same_operation_again() {
+        // The guard is in-memory and per-instance: a fresh instance (an
+        // enclave restart, or a sibling enclave the host routed the duplicate
+        // to) has never seen the record and admits the same op again. This
+        // documents WHY the durable cross-instance exactly-once anchor lives
+        // on-chain (consumedBurnIds / fundsInRecords), not in this soft guard.
+        let k = op_key(&[0xAA; 32], &[0x07; 32]);
+        let first = guard();
+        first.reserve(k).expect("instance A reserves").commit();
+        assert!(matches!(first.reserve(k), Err(EnclaveError::NonceReplay)));
+
+        let second = guard(); // restart / sibling enclave
+        assert!(
+            second.reserve(k).is_ok(),
+            "a fresh instance does not share the soft guard - on-chain state \
+             is the durable anchor"
+        );
+    }
+}
+
+// send-RGB anchoring - `validate_psbt_anchors_transition`
+#[cfg(feature = "rgb-validation")]
+mod fee_rate {
+    use super::*;
+
+    /// One segwit-ish input carrying `witness_utxo` of `input_sats`, one
+    /// output of `output_sats` - so `Psbt::fee()` = input - output.
+    fn psbt_with_fee(input_sats: u64, output_sats: u64) -> Psbt {
+        let unsigned_tx = Transaction {
+            version: bitcoin::transaction::Version(2),
+            lock_time: bitcoin::absolute::LockTime::ZERO,
+            input: vec![TxIn {
+                previous_output: OutPoint {
+                    txid: Txid::from_raw_hash(bitcoin::hashes::sha256d::Hash::from_byte_array(
+                        [0x11; 32],
+                    )),
+                    vout: 0,
+                },
+                script_sig: ScriptBuf::new(),
+                sequence: Sequence::MAX,
+                witness: Witness::new(),
+            }],
+            output: vec![TxOut {
+                value: Amount::from_sat(output_sats),
+                script_pubkey: ScriptBuf::new(),
+            }],
+        };
+        let mut psbt = Psbt::from_unsigned_tx(unsigned_tx).expect("from_unsigned_tx");
+        psbt.inputs[0].witness_utxo = Some(TxOut {
+            value: Amount::from_sat(input_sats),
+            script_pubkey: ScriptBuf::new(),
+        });
+        psbt
+    }
+
+    #[test]
+    fn accepts_fee_rate_at_headroom() {
+        // rate == FEE_RATE_HEADROOM x recommended must pass (boundary is
+        // inclusive: reject only strictly above the cap).
+        let recommended = 10.0;
+        let vsize = psbt_with_fee(100_000, 100_000).unsigned_tx.vsize() as u64;
+        let fee_at_cap = (FEE_RATE_HEADROOM * recommended) as u64 * vsize;
+        let psbt = psbt_with_fee(100_000, 100_000 - fee_at_cap);
+        assert!(check_psbt_fee_rate(&psbt, recommended).is_ok());
+    }
+
+    #[test]
+    fn rejects_fee_rate_above_headroom() {
+        // One extra sat/vB above the cap -> reject; nothing else about the
+        // PSBT is wrong, so the error must be the fee-rate one.
+        let recommended = 10.0;
+        let vsize = psbt_with_fee(100_000, 100_000).unsigned_tx.vsize() as u64;
+        let fee_over_cap = ((FEE_RATE_HEADROOM * recommended) as u64 + 1) * vsize;
+        let psbt = psbt_with_fee(100_000, 100_000 - fee_over_cap);
+        let err = check_psbt_fee_rate(&psbt, recommended).unwrap_err();
+        assert!(
+            err.to_string().contains("fee rate too high"),
+            "expected fee-rate rejection, got: {err}"
+        );
+    }
+
+    #[test]
+    fn rejects_psbt_without_utxo_data() {
+        // No witness_utxo/non_witness_utxo -> the fee is uncomputable and
+        // the check must fail closed, not skip.
+        let psbt = Psbt::deserialize(&minimal_valid_psbt_bytes()).unwrap();
+        let err = check_psbt_fee_rate(&psbt, 10.0).unwrap_err();
+        assert!(
+            err.to_string().contains("cannot compute PSBT fee"),
+            "expected uncomputable-fee rejection, got: {err}"
+        );
+    }
+
+    #[test]
+    fn rejects_nan_recommendation() {
+        // A NaN limit must reject (the comparison is written as
+        // `!(rate <= limit)` so NaN can never pass). The recommendation
+        // is validated upstream, but the check must not rely on that.
+        let psbt = psbt_with_fee(100_000, 99_000);
+        assert!(check_psbt_fee_rate(&psbt, f64::NAN).is_err());
+    }
+}
+
+#[cfg(feature = "rgb-validation")]
+mod anchor {
+    use super::*;
+    use crate::networks::rgb::validation::{
+        bfa, OutputSeal, TransitionOutput, TransitionSummary, ValidatedConsignment,
+    };
+    use bitcoin::psbt::PsbtSighashType;
+    use bitcoin::{OutPoint, Txid};
+
+    /// Build a two-input, one-output unsigned tx + its Psbt. The two
+    /// prevouts are deterministic so a test can reproduce the exact
+    /// witness-tx input set.
+    fn psbt_with_two_inputs() -> Psbt {
+        let mk_outpoint = |seed: u8, vout: u32| OutPoint {
+            txid: Txid::from_raw_hash(bitcoin::hashes::sha256d::Hash::from_byte_array([seed; 32])),
+            vout,
+        };
+        let unsigned_tx = Transaction {
+            version: bitcoin::transaction::Version(2),
+            lock_time: bitcoin::absolute::LockTime::ZERO,
+            input: vec![
+                TxIn {
+                    previous_output: mk_outpoint(0x11, 0),
+                    script_sig: ScriptBuf::new(),
+                    sequence: Sequence::MAX,
+                    witness: Witness::new(),
+                },
+                TxIn {
+                    previous_output: mk_outpoint(0x22, 1),
+                    script_sig: ScriptBuf::new(),
+                    sequence: Sequence::MAX,
+                    witness: Witness::new(),
+                },
+            ],
+            // vout 0 is the recipient's Bitcoin payment, vout 1 the slot a
+            // bridge change seal points at.
+            output: vec![
+                TxOut {
+                    value: Amount::from_sat(1_000),
+                    script_pubkey: ScriptBuf::new(),
+                },
+                TxOut {
+                    value: Amount::from_sat(2_000),
+                    script_pubkey: ScriptBuf::new(),
+                },
+            ],
+        };
+        let mut psbt = Psbt::from_unsigned_tx(unsigned_tx).expect("from_unsigned_tx");
+        for input in psbt.inputs.iter_mut() {
+            input.witness_utxo = Some(TxOut {
+                value: Amount::from_sat(50_000),
+                script_pubkey: p2tr_spk(),
+            });
+        }
+        psbt
+    }
+
+    /// A native-SegWit script pubkey: the NUMS point as a bare P2TR output.
+    fn p2tr_spk() -> ScriptBuf {
+        use bitcoin::key::TapTweak;
+        const NUMS: [u8; 32] = [
+            0x50, 0x92, 0x9b, 0x74, 0xc1, 0xa0, 0x49, 0x54, 0xb7, 0x8b, 0x4b, 0x60, 0x35, 0xe9,
+            0x7a, 0x5e, 0x07, 0x8a, 0x5a, 0x0f, 0x28, 0xec, 0x96, 0xd5, 0x47, 0xbf, 0xee, 0x9a,
+            0xce, 0x80, 0x3a, 0xc0,
+        ];
+        ScriptBuf::new_p2tr_tweaked(
+            bitcoin::XOnlyPublicKey::from_slice(&NUMS)
+                .unwrap()
+                .dangerous_assume_tweaked(),
+        )
+    }
+
+    /// Stand-in ownership oracles. Fn items coerce to `SelfOwnedOutpoint`.
+    #[cfg(feature = "rgb-swap")]
+    fn owns_nothing(_: &Psbt, _: OutPoint) -> Result<bool> {
+        Ok(false)
+    }
+    fn owns_vout_1(psbt: &Psbt, outpoint: OutPoint) -> Result<bool> {
+        Ok(outpoint.txid == psbt.unsigned_tx.compute_txid() && outpoint.vout == 1)
+    }
+    #[cfg(feature = "rgb-swap")]
+    /// Owns vout 0 of [`OFF_TX_SEED`] - an existing wallet UTXO.
+    fn owns_off_tx_outpoint(_: &Psbt, outpoint: OutPoint) -> Result<bool> {
+        Ok(outpoint == off_tx_outpoint())
+    }
+
+    /// A recipient leg: paid to a blinded (`utxob:...`) seal.
+    fn confidential(amount: u64) -> TransitionOutput {
+        confidential_to(amount, "utxob:test-seal")
+    }
+
+    /// [`confidential`] with the seal named.
+    fn confidential_to(amount: u64, seal: &str) -> TransitionOutput {
+        TransitionOutput {
+            assignment_type: bfa::OS_ASSET,
+            amount,
+            seal: OutputSeal::Confidential {
+                secret_seal: seal.into(),
+            },
+        }
+    }
+
+    #[cfg(feature = "rgb-swap")]
+    /// A change leg: revealed on `vout` of the witness tx being signed
+    /// (`txid: None`, exactly as the in-tree transfer fixture encodes it).
+    fn revealed(amount: u64, vout: u32) -> TransitionOutput {
+        TransitionOutput {
+            assignment_type: bfa::OS_ASSET,
+            amount,
+            seal: OutputSeal::Revealed { txid: None, vout },
+        }
+    }
+
+    #[cfg(feature = "rgb-swap")]
+    /// Display-order seal bytes for the off-transaction change UTXO.
+    const OFF_TX_SEED: [u8; 32] = [0x77; 32];
+
+    #[cfg(feature = "rgb-swap")]
+    /// The same outpoint as a `bitcoin::OutPoint` (internal byte order).
+    fn off_tx_outpoint() -> OutPoint {
+        let mut internal = OFF_TX_SEED;
+        internal.reverse();
+        OutPoint {
+            txid: Txid::from_byte_array(internal),
+            vout: 0,
+        }
+    }
+
+    #[cfg(feature = "rgb-swap")]
+    /// A change leg on an existing wallet UTXO: an explicit txid that is
+    /// NOT the tx being signed. Emitted when there is no BTC change.
+    fn revealed_off_tx(amount: u64) -> TransitionOutput {
+        TransitionOutput {
+            assignment_type: bfa::OS_ASSET,
+            amount,
+            seal: OutputSeal::Revealed {
+                txid: Some(OFF_TX_SEED),
+                vout: 0,
+            },
+        }
+    }
+
+    /// The last-transition type this build's flow signs on a deposit.
+    /// Lets the shared PSBT-mechanics cases below (txid bind, prevout
+    /// canary, sighash, leg split) run unchanged under either flow.
+    #[cfg(feature = "rgb-swap")]
+    const SIGNING_TT: u16 = bfa::TS_TRANSFER;
+    #[cfg(feature = "rgb-mint-burn")]
+    const SIGNING_TT: u16 = bfa::TS_BRIDGE;
+
+    fn transfer_summary(outputs: Vec<TransitionOutput>) -> TransitionSummary {
+        summary("transfer-op", SIGNING_TT, outputs)
+    }
+
+    fn summary(
+        op_id: &str,
+        transition_type: u16,
+        outputs: Vec<TransitionOutput>,
+    ) -> TransitionSummary {
+        let asset_output_amount = outputs
+            .iter()
+            .filter(|o| o.assignment_type == bfa::OS_ASSET)
+            .map(|o| o.amount)
+            .sum();
+        TransitionSummary {
+            op_id: op_id.into(),
+            transition_type,
+            total_output_amount: outputs.iter().map(|o| o.amount).sum(),
+            asset_output_amount,
+            outputs,
+            burned_asset_amount: None,
+            burn_recipient: None,
+        }
+    }
+
+    /// A ValidatedConsignment bound to `psbt`'s actual txid + prevouts,
+    /// paying `recipient_amount` to a single blinded seal and nothing
+    /// back as change. The "happy" baseline every test then mutates.
+    fn validated_for(psbt: &Psbt, recipient_amount: u64) -> ValidatedConsignment {
+        validated_with(psbt, vec![confidential(recipient_amount)])
+    }
+
+    /// [`validated_for`] with the output legs of a single transition given
+    /// explicitly.
+    fn validated_with(psbt: &Psbt, outputs: Vec<TransitionOutput>) -> ValidatedConsignment {
+        validated_from(psbt, vec![transfer_summary(outputs)])
+    }
+
+    /// A ValidatedConsignment whose signed witness tx commits the whole
+    /// `transitions` bundle - the multi-transition shape the per-output
+    /// bind has to cover.
+    fn validated_from(psbt: &Psbt, transitions: Vec<TransitionSummary>) -> ValidatedConsignment {
+        let prevouts = psbt
+            .unsigned_tx
+            .input
+            .iter()
+            .map(|txin| txin.previous_output)
+            .collect();
+        let txid = psbt.unsigned_tx.compute_txid();
+        ValidatedConsignment {
+            contract_id: "rgb:test".into(),
+            chain_net: "bc".into(),
+            witness_txids: vec![],
+            all_op_ids: transitions.iter().map(|t| t.op_id.clone()).collect(),
+            mint_op_ids: vec![],
+            last_transition: transitions.last().cloned(),
+            last_witness_txid: Some(txid),
+            last_transfer_witness_prevouts: Some(prevouts),
+            last_transfer_op_id: None,
+            non_mined_witness_txids: vec![],
+            transitions_by_witness: vec![(txid, transitions)],
+        }
+    }
+
+    /// Apply `f` to the signing transition everywhere the validated
+    /// consignment records it. `last_transition` and
+    /// `transitions_by_witness` are two views of the same data, so a test
+    /// that edits only one would leave the binds reading stale values.
+    fn edit_signing_transition(
+        validated: &mut ValidatedConsignment,
+        f: impl Fn(&mut TransitionSummary),
+    ) {
+        if let Some(ref mut last) = validated.last_transition {
+            f(last);
+        }
+        for (_, transitions) in validated.transitions_by_witness.iter_mut() {
+            for t in transitions.iter_mut() {
+                f(t);
+            }
+        }
+    }
+
+    #[test]
+    fn passes_when_txid_inputs_and_amount_match() {
+        let psbt = psbt_with_two_inputs();
+        let validated = validated_for(&psbt, 1_000);
+        assert!(
+            validate_psbt_anchors_transition(&psbt, &validated, 1_000, 0, &owns_vout_1).is_ok()
+        );
+    }
+
+    fn with_aux_prevout(psbt: &mut Psbt, spk: ScriptBuf) {
+        psbt.inputs[1].witness_utxo.as_mut().unwrap().script_pubkey = spk;
+    }
+
+    /// A vanilla P2WPKH funding input alongside ours: native SegWit, so it
+    /// finalizes with an empty `scriptSig` and the bind still holds.
+    #[test]
+    fn accepts_native_segwit_auxiliary_input() {
+        let mut psbt = psbt_with_two_inputs();
+        with_aux_prevout(
+            &mut psbt,
+            ScriptBuf::new_p2wpkh(&bitcoin::WPubkeyHash::from_byte_array([0xC1; 20])),
+        );
+        let validated = validated_for(&psbt, 1_000);
+        assert!(
+            validate_psbt_anchors_transition(&psbt, &validated, 1_000, 0, &owns_vout_1).is_ok()
+        );
+    }
+
+    /// A P2SH-wrapped SegWit input must push its redeemScript into
+    /// `scriptSig` (BIP-16), which moves the txid off the one the
+    /// consignment names.
+    #[test]
+    fn refuses_wrapped_segwit_auxiliary_input() {
+        let mut psbt = psbt_with_two_inputs();
+        let redeem = ScriptBuf::new_p2wpkh(&bitcoin::WPubkeyHash::from_byte_array([0xC1; 20]));
+        with_aux_prevout(&mut psbt, ScriptBuf::new_p2sh(&redeem.script_hash()));
+        psbt.inputs[1].redeem_script = Some(redeem.clone());
+        let validated = validated_for(&psbt, 1_000);
+        let err = validate_psbt_anchors_transition(&psbt, &validated, 1_000, 0, &owns_vout_1)
+            .unwrap_err();
+        assert!(err.to_string().contains("scriptSig"), "{err}");
+
+        // The finalization the refusal points at: pushing the redeemScript
+        // moves the txid off the one the consignment binds.
+        let mut finalized = psbt.unsigned_tx.clone();
+        finalized.input[1].script_sig = bitcoin::blockdata::script::Builder::new()
+            .push_slice(bitcoin::script::PushBytesBuf::try_from(redeem.to_bytes()).expect("redeem"))
+            .into_script();
+        assert_eq!(
+            validated.last_witness_txid,
+            Some(psbt.unsigned_tx.compute_txid())
+        );
+        assert_ne!(finalized.compute_txid(), psbt.unsigned_tx.compute_txid());
+    }
+
+    #[test]
+    fn refuses_legacy_auxiliary_input() {
+        let mut psbt = psbt_with_two_inputs();
+        with_aux_prevout(
+            &mut psbt,
+            ScriptBuf::new_p2pkh(&bitcoin::PubkeyHash::from_byte_array([0xC1; 20])),
+        );
+        let validated = validated_for(&psbt, 1_000);
+        let err = validate_psbt_anchors_transition(&psbt, &validated, 1_000, 0, &owns_vout_1)
+            .unwrap_err();
+        assert!(err.to_string().contains("scriptSig"), "{err}");
+    }
+
+    /// Without `witness_utxo` the enclave cannot know the input's script
+    /// type at all, so it cannot prove the txid is stable.
+    #[test]
+    fn refuses_input_without_witness_utxo() {
+        let mut psbt = psbt_with_two_inputs();
+        psbt.inputs[1].witness_utxo = None;
+        let validated = validated_for(&psbt, 1_000);
+        let err = validate_psbt_anchors_transition(&psbt, &validated, 1_000, 0, &owns_vout_1)
+            .unwrap_err();
+        assert!(err.to_string().contains("witness_utxo"), "{err}");
+    }
+
+    /// The production pools-send shape: the recipient is paid exactly the
+    /// credited amount on a blinded seal, and the rest of the bridge's
+    /// allocation returns as change on a revealed seal pointing at an
+    /// output we control. `asset_output_amount` (5_000) exceeding
+    /// `net_credited` (900) is fine - the surplus is provably ours.
+    // Bridge-change shapes: only the send/receive flow has them.
+    // Every case below leans on an `asset_output_amount` surplus
+    // returning as change, which the mint rule rejects outright as
+    // an over-mint before the leg split is reached - see
+    // `rejects_mint_over_mint`.
+    #[cfg(feature = "rgb-swap")]
+    #[test]
+    fn passes_when_change_returns_to_a_bridge_owned_seal() {
+        let psbt = psbt_with_two_inputs();
+        // net credited = 1_000 - 100 = 900
+        let validated = validated_with(&psbt, vec![confidential(900), revealed(4_100, 1)]);
+        assert!(
+            validate_psbt_anchors_transition(&psbt, &validated, 1_000, 100, &owns_vout_1).is_ok()
+        );
+    }
+
+    /// Asset change survives signature merging through the real
+    /// ownership oracle.
+    #[cfg(feature = "rgb-swap")]
+    #[test]
+    fn change_leg_survives_merging_our_own_signature() {
+        use crate::keys::AccountType;
+        use crate::networks::rgb::btc_ownership::{self, tests as fx};
+
+        // The bridge shape: one Colored asset input carrying the change
+        // leg, plus a Vanilla input funding the fee. Exactly one Colored
+        // script, which is what `asset_change_scripts` accepts.
+        let keys = fx::km();
+        let (a_spk, ..) = fx::multisig_address(fx::our_key_on(&keys, AccountType::Colored, 0, 0).0);
+        let (v_spk, ..) = fx::multisig_address(fx::our_key_on(&keys, AccountType::Vanilla, 0, 0).0);
+        let (foreign, ..) = fx::multisig_address(fx::foreign_xonly(0xB1));
+        let mut psbt = fx::psbt_with_n(2, &[(foreign, 1_000), (a_spk, 90_000), (v_spk, 8_000)]);
+        fx::anchor_input(&mut psbt, 0, &keys, AccountType::Colored, 0, 0, 100_000);
+        fx::anchor_input(&mut psbt, 1, &keys, AccountType::Vanilla, 0, 0, 100_000);
+
+        // The server's on-PSBT branch, verbatim.
+        let oracle = |psbt: &Psbt, outpoint: OutPoint| -> Result<bool> {
+            Ok(outpoint.txid == psbt.unsigned_tx.compute_txid()
+                && btc_ownership::self_owned_output_indices(psbt, &keys).contains(&outpoint.vout))
+        };
+
+        let legs = |psbt: &Psbt| {
+            let validated = validated_with(psbt, vec![confidential(900), revealed(4_100, 1)]);
+            validate_psbt_anchors_transition(psbt, &validated, 1_000, 100, &oracle)
+        };
+
+        let before = legs(&psbt);
+        let tx_before = psbt.unsigned_tx.clone();
+        fx::merge_own_signature(&mut psbt, &keys, 0);
+        let after = legs(&psbt);
+        assert_eq!(psbt.unsigned_tx, tx_before);
+
+        for (when, got) in [("before", before), ("after", after)] {
+            let legs = got.unwrap_or_else(|e| {
+                panic!("asset legs {when} merging A: {e}");
+            });
+            assert_eq!(legs.recipient, 900, "recipient leg {when} merging A");
+            assert_eq!(legs.change, 4_100, "change leg {when} merging A");
+        }
+    }
+
+    /// The over-send this whole bind exists for: a genuine
+    /// 1_000-unit deposit, and a consignment that is rgbstd-valid, anchored
+    /// to this exact PSBT, and pays 10_000_000 units to a blinded seal the
+    /// attacker controls. Every other leg of the cross-check passes; the
+    /// aggregate bound (`asset_output_amount >= net_credited`) passes
+    /// vacuously. Only the recipient bind catches it.
+    #[cfg(feature = "rgb-swap")]
+    #[test]
+    fn rejects_over_send_to_a_blinded_seal() {
+        let psbt = psbt_with_two_inputs();
+        let validated = validated_with(&psbt, vec![confidential(10_000_000)]);
+        let err = validate_psbt_anchors_transition(&psbt, &validated, 1_000, 0, &owns_vout_1)
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("recipient amount mismatch"),
+            "expected over-send rejection, got: {err}"
+        );
+    }
+
+    /// The same drain routed through a *revealed* seal instead of a blinded
+    /// one. Counting revealed legs as change unconditionally would let this
+    /// through, so a revealed output we cannot prove is ours is refused.
+    #[cfg(feature = "rgb-swap")]
+    #[test]
+    fn rejects_change_on_an_output_we_do_not_control() {
+        let psbt = psbt_with_two_inputs();
+        let validated = validated_with(&psbt, vec![confidential(1_000), revealed(10_000_000, 1)]);
+        let err = validate_psbt_anchors_transition(&psbt, &validated, 1_000, 0, &owns_nothing)
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("cannot prove it controls"),
+            "expected unowned-change rejection, got: {err}"
+        );
+    }
+
+    /// A revealed seal naming a vout that does not exist on this tx is
+    /// equally unownable, and must be refused rather than ignored.
+    #[cfg(feature = "rgb-swap")]
+    #[test]
+    fn rejects_change_on_an_out_of_range_vout() {
+        let psbt = psbt_with_two_inputs();
+        let validated = validated_with(&psbt, vec![confidential(1_000), revealed(500, 9)]);
+        let err = validate_psbt_anchors_transition(&psbt, &validated, 1_000, 0, &owns_vout_1)
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("cannot prove it controls"),
+            "expected out-of-range-vout rejection, got: {err}"
+        );
+    }
+
+    /// With no BTC change, rgb-lib parks the RGB change on an existing
+    /// UTXO. Legitimate, on the same terms: the outpoint must be ours.
+    #[cfg(feature = "rgb-swap")]
+    #[test]
+    fn passes_when_change_lands_on_an_existing_bridge_utxo() {
+        let psbt = psbt_with_two_inputs();
+        let validated = validated_with(&psbt, vec![confidential(900), revealed_off_tx(4_100)]);
+        let legs =
+            validate_psbt_anchors_transition(&psbt, &validated, 900, 0, &owns_off_tx_outpoint)
+                .expect("off-tx change on a bridge-owned UTXO binds");
+        assert_eq!(legs.recipient, 900);
+    }
+
+    /// Same shape, outpoint we cannot prove. Accepting it unconditionally
+    /// would hand the change to whoever the host names.
+    #[cfg(feature = "rgb-swap")]
+    #[test]
+    fn rejects_off_tx_change_on_an_outpoint_we_cannot_prove() {
+        let psbt = psbt_with_two_inputs();
+        let validated = validated_with(&psbt, vec![confidential(900), revealed_off_tx(4_100)]);
+        let err =
+            validate_psbt_anchors_transition(&psbt, &validated, 900, 0, &owns_vout_1).unwrap_err();
+        assert!(
+            err.to_string().contains("cannot prove it controls"),
+            "expected unprovable off-tx change rejection, got: {err}"
+        );
+    }
+
+    /// A bundle naming more than [`MAX_OFF_TX_CHANGE_OUTPOINTS`] outpoints
+    /// is refused before the egress, not after.
+    #[cfg(feature = "rgb-swap")]
+    #[test]
+    fn rejects_too_many_distinct_off_tx_outpoints() {
+        let psbt = psbt_with_two_inputs();
+        let mut outputs = vec![confidential(900)];
+        for i in 0..=(MAX_OFF_TX_CHANGE_OUTPOINTS as u8) {
+            outputs.push(TransitionOutput {
+                assignment_type: bfa::OS_ASSET,
+                amount: 10,
+                seal: OutputSeal::Revealed {
+                    txid: Some([0xB0 + i; 32]),
+                    vout: 0,
+                },
+            });
+        }
+        let validated = validated_with(&psbt, outputs);
+        // Owns everything: the cap must bite on the count, not a verdict.
+        let owns_everything = |_: &Psbt, _: OutPoint| Ok(true);
+        let err = validate_psbt_anchors_transition(&psbt, &validated, 900, 0, &owns_everything)
+            .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("distinct off-transaction change outpoints"),
+            "expected off-tx lookup cap rejection, got: {err}"
+        );
+    }
+
+    /// Several change legs on one UTXO must hit the memo, not the indexer.
+    #[cfg(feature = "rgb-swap")]
+    #[test]
+    fn resolves_a_repeated_off_tx_outpoint_only_once() {
+        use std::cell::Cell;
+        let psbt = psbt_with_two_inputs();
+        let validated = validated_with(
+            &psbt,
+            vec![
+                confidential(900),
+                revealed_off_tx(2_000),
+                revealed_off_tx(2_100),
+            ],
+        );
+        let calls = Cell::new(0usize);
+        let oracle = |_: &Psbt, outpoint: OutPoint| {
+            calls.set(calls.get() + 1);
+            Ok(outpoint == off_tx_outpoint())
+        };
+        validate_psbt_anchors_transition(&psbt, &validated, 900, 0, &oracle)
+            .expect("two legs on one owned UTXO bind");
+        assert_eq!(calls.get(), 1, "the outpoint verdict should be memoised");
+    }
+
+    /// At per-output granularity: an `OS_BRIDGE` entry is the mint
+    /// *right*, not value delivered, so it must not be able to stand in
+    /// for the recipient leg.
+    #[cfg(feature = "rgb-mint-burn")]
+    #[test]
+    fn bridge_right_output_is_not_a_recipient_leg() {
+        let psbt = psbt_with_two_inputs();
+        let mut validated = validated_with(&psbt, vec![confidential(1_000)]);
+        edit_signing_transition(&mut validated, |t| {
+            // Allowance rides along confidentially. It must be skipped by
+            // the recipient sum, leaving 1_000 == net credited.
+            t.outputs.push(TransitionOutput {
+                assignment_type: bfa::OS_BRIDGE,
+                amount: 9_000_000,
+                seal: OutputSeal::Confidential {
+                    secret_seal: "utxob:allowance".into(),
+                },
+            });
+            t.total_output_amount = 9_001_000;
+        });
+        assert!(
+            validate_psbt_anchors_transition(&psbt, &validated, 1_000, 0, &owns_vout_1).is_ok(),
+            "OS_BRIDGE mint right must not count toward the recipient leg"
+        );
+    }
+
+    /// A transition with no `OS_ASSET` assignments at all delivers nothing,
+    /// so there is nothing to bind the credit to - fail closed rather than
+    /// treat a zero recipient sum as satisfying a zero credit.
+    #[test]
+    fn rejects_transition_without_asset_outputs() {
+        let psbt = psbt_with_two_inputs();
+        let mut validated = validated_with(&psbt, vec![confidential(1_000)]);
+        edit_signing_transition(&mut validated, |t| t.outputs = vec![]);
+        let err = validate_psbt_anchors_transition(&psbt, &validated, 1_000, 0, &owns_vout_1)
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("no OS_ASSET output assignments"),
+            "expected no-asset-output rejection, got: {err}"
+        );
+    }
+
+    /// One Bitcoin tx commits a *bundle*, which can hold several
+    /// transitions. Binding only the consignment's last one lets an
+    /// attacker park the drain in a sibling: here the last transition is
+    /// perfectly sized (1_000 = the credit) while its sibling ships
+    /// 10_000_000 to a blinded seal. Both are committed by the tx being
+    /// signed, so both must be bound.
+    #[cfg(feature = "rgb-swap")]
+    #[test]
+    fn rejects_over_send_in_a_sibling_transition() {
+        let psbt = psbt_with_two_inputs();
+        let validated = validated_from(
+            &psbt,
+            vec![
+                summary("drain-op", SIGNING_TT, vec![confidential(10_000_000)]),
+                summary("decoy-op", SIGNING_TT, vec![confidential(1_000)]),
+            ],
+        );
+        let err = validate_psbt_anchors_transition(&psbt, &validated, 1_000, 0, &owns_vout_1)
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("recipient amount mismatch"),
+            "expected sibling-transition rejection, got: {err}"
+        );
+    }
+
+    /// The legitimate multi-transition shape: a send funded from two
+    /// bridge UTXOs, so the bundle carries two transitions whose recipient
+    /// legs sum to the credit and whose change returns to us.
+    #[cfg(feature = "rgb-swap")]
+    #[test]
+    fn passes_when_a_bundle_splits_the_payout_across_transitions() {
+        let psbt = psbt_with_two_inputs();
+        // net credited = 1_000 - 100 = 900, paid 400 + 500.
+        let validated = validated_from(
+            &psbt,
+            vec![
+                summary(
+                    "leg-a",
+                    SIGNING_TT,
+                    vec![confidential(400), revealed(2_000, 1)],
+                ),
+                summary("leg-b", SIGNING_TT, vec![confidential(500)]),
+            ],
+        );
+        assert!(
+            validate_psbt_anchors_transition(&psbt, &validated, 1_000, 100, &owns_vout_1).is_ok()
+        );
+    }
+
+    /// The group gate covers every member, not just the last transition:
+    /// a sibling of another shape would move value under an amount rule
+    /// that was never written for it. A mixed bundle also has no single
+    /// aggregate rule (equality vs floor), so it is refused rather than
+    /// guessed at.
+    #[test]
+    fn rejects_foreign_transition_type_in_the_bundle() {
+        let psbt = psbt_with_two_inputs();
+        let validated = validated_from(
+            &psbt,
+            vec![
+                // Neither flow signs a Burn on a deposit.
+                summary("foreign-op", bfa::TS_BURN, vec![confidential(500)]),
+                summary("signing-op", SIGNING_TT, vec![confidential(500)]),
+            ],
+        );
+        let err = validate_psbt_anchors_transition(&psbt, &validated, 1_000, 0, &owns_vout_1)
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("flow requires"),
+            "expected foreign-transition rejection, got: {err}"
+        );
+    }
+
+    /// The txid bind can pass while the consignment commits its
+    /// transitions to a different witness entry. Nothing would then be
+    /// amount-bound, so an empty group is a rejection, not a free pass.
+    #[test]
+    fn rejects_when_no_transition_is_committed_by_the_signed_tx() {
+        let psbt = psbt_with_two_inputs();
+        let mut validated = validated_for(&psbt, 1_000);
+        let other =
+            Txid::from_raw_hash(bitcoin::hashes::sha256d::Hash::from_byte_array([0x77; 32]));
+        validated.transitions_by_witness[0].0 = other;
+        let err = validate_psbt_anchors_transition(&psbt, &validated, 1_000, 0, &owns_vout_1)
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("commits no transition"),
+            "expected uncommitted-witness rejection, got: {err}"
+        );
+    }
+
+    /// The two consignment walks (flat parser vs rgbstd) must agree on
+    /// which operation the signed tx carries. If `last_transition` is not
+    /// in the committed group, every downstream bind describes a different
+    /// operation than the one being signed.
+    #[test]
+    fn rejects_last_transition_not_in_the_committed_group() {
+        let psbt = psbt_with_two_inputs();
+        let mut validated = validated_for(&psbt, 1_000);
+        validated.last_transition.as_mut().unwrap().op_id = "some-other-op".into();
+        let err = validate_psbt_anchors_transition(&psbt, &validated, 1_000, 0, &owns_vout_1)
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("is not committed by the"),
+            "expected walk-disagreement rejection, got: {err}"
+        );
+    }
+
+    #[test]
+    fn rejects_txid_mismatch() {
+        let psbt = psbt_with_two_inputs();
+        let mut validated = validated_for(&psbt, 1_000);
+        validated.last_witness_txid = Some(Txid::from_raw_hash(
+            bitcoin::hashes::sha256d::Hash::from_byte_array([0xAB; 32]),
+        ));
+        let err = validate_psbt_anchors_transition(&psbt, &validated, 1_000, 0, &owns_vout_1)
+            .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("does not finalize the consignment's transition"),
+            "expected txid-mismatch rejection, got: {err}"
+        );
+    }
+
+    #[test]
+    fn rejects_missing_witness_txid() {
+        let psbt = psbt_with_two_inputs();
+        let mut validated = validated_for(&psbt, 1_000);
+        validated.last_witness_txid = None;
+        let err = validate_psbt_anchors_transition(&psbt, &validated, 1_000, 0, &owns_vout_1)
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("carries no witness txid"),
+            "expected missing-txid rejection, got: {err}"
+        );
+    }
+
+    #[test]
+    fn rejects_prevout_set_mismatch() {
+        // txid still matches (we don't touch it), but the recorded prevout
+        // set differs - the canary must fire.
+        let psbt = psbt_with_two_inputs();
+        let mut validated = validated_for(&psbt, 1_000);
+        validated.last_transfer_witness_prevouts = Some(vec![OutPoint {
+            txid: Txid::from_raw_hash(bitcoin::hashes::sha256d::Hash::from_byte_array([0x99; 32])),
+            vout: 7,
+        }]);
+        let err = validate_psbt_anchors_transition(&psbt, &validated, 1_000, 0, &owns_vout_1)
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("input outpoints do not match"),
+            "expected prevout-mismatch rejection, got: {err}"
+        );
+    }
+
+    #[test]
+    fn skips_prevout_canary_when_witness_tx_not_embedded() {
+        // PubWitness::Txid only -> prevouts None -> txid bind alone carries.
+        let psbt = psbt_with_two_inputs();
+        let mut validated = validated_for(&psbt, 1_000);
+        validated.last_transfer_witness_prevouts = None;
+        assert!(
+            validate_psbt_anchors_transition(&psbt, &validated, 1_000, 0, &owns_vout_1).is_ok()
+        );
+    }
+
+    /// For a mint, only `OS_ASSET`-typed outputs (the actually
+    /// minted units) may cover the credited amount - the `OS_BRIDGE`
+    /// mint right counted in `total_output_amount` must not.
+    #[cfg(feature = "rgb-mint-burn")]
+    #[test]
+    fn bridge_right_does_not_cover_credited_amount() {
+        let psbt = psbt_with_two_inputs();
+        let mut validated = validated_for(&psbt, 1_000);
+        edit_signing_transition(&mut validated, |t| {
+            // Minted 999 units; a large allowance rides along in the
+            // total. Net credited is 1_000 - must be rejected on the
+            // asset sum, not covered by the allowance-inflated total.
+            t.asset_output_amount = 999;
+            t.total_output_amount = 1_000_000;
+        });
+        let err = validate_psbt_anchors_transition(&psbt, &validated, 1_000, 0, &owns_vout_1)
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("asset_output_amount (999)"),
+            "expected asset-amount rejection, got: {err}"
+        );
+    }
+
+    /// A mint whose `OS_ASSET` output EXCEEDS the credited amount is an
+    /// over-mint and must be rejected. The old one-sided lower bound
+    /// (`asset_output_amount < net_credited`) accepted this surplus; the
+    /// mint path now requires exact equality.
+    #[cfg(feature = "rgb-mint-burn")]
+    #[test]
+    fn rejects_mint_over_mint() {
+        let psbt = psbt_with_two_inputs();
+        let mut validated = validated_for(&psbt, 1_000);
+        edit_signing_transition(&mut validated, |t| {
+            // Minted 1_500 against a 1_000 credit -> 500 over-mint.
+            t.asset_output_amount = 1_500;
+            t.total_output_amount = 1_500;
+        });
+        let err = validate_psbt_anchors_transition(&psbt, &validated, 1_000, 0, &owns_vout_1)
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("mint-RGB amount mismatch"),
+            "expected over-mint rejection, got: {err}"
+        );
+    }
+
+    /// The other side of `rejects_mint_over_mint`: the surplus expressed as
+    /// a credit below the minted output rather than an output above the
+    /// credit. Under the transfer rule this would pass as change.
+    #[cfg(feature = "rgb-mint-burn")]
+    #[test]
+    fn rejects_mint_credited_below_output() {
+        let psbt = psbt_with_two_inputs();
+        let validated = validated_for(&psbt, 1_000);
+        let err =
+            validate_psbt_anchors_transition(&psbt, &validated, 900, 0, &owns_vout_1).unwrap_err();
+        assert!(
+            err.to_string().contains("mint-RGB amount mismatch"),
+            "a bridge mint must use the equality rule, got: {err}"
+        );
+    }
+
+    /// A consignment shaped for a transition this build's flow does not
+    /// sign is refused up front. `TS_BURN` is a withdrawal shape in both
+    /// flows, so it is wrong on a deposit either way.
+    #[test]
+    fn rejects_transition_type_this_flow_does_not_sign() {
+        let psbt = psbt_with_two_inputs();
+        let mut validated = validated_for(&psbt, 1_000);
+        edit_signing_transition(&mut validated, |t| t.transition_type = bfa::TS_BURN);
+        let err = validate_psbt_anchors_transition(&psbt, &validated, 1_000, 0, &owns_vout_1)
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("this enclave is built for the"),
+            "expected flow-shape rejection, got: {err}"
+        );
+    }
+
+    #[test]
+    fn rejects_amount_under_net_credited() {
+        let psbt = psbt_with_two_inputs();
+        let validated = validated_for(&psbt, 999);
+        // net credited = 1_000 - 0 = 1_000 > 999
+        let err = validate_psbt_anchors_transition(&psbt, &validated, 1_000, 0, &owns_vout_1)
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("amount mismatch"),
+            "expected amount-mismatch rejection, got: {err}"
+        );
+    }
+
+    #[test]
+    fn rejects_non_all_sighash() {
+        let psbt = {
+            let mut p = psbt_with_two_inputs();
+            // SIGHASH_SINGLE | ANYONECANPAY = 0x83 - spliceable.
+            p.inputs[0].sighash_type = Some(PsbtSighashType::from_u32(0x83));
+            p
+        };
+        let validated = validated_for(&psbt, 1_000);
+        let err = validate_psbt_anchors_transition(&psbt, &validated, 1_000, 0, &owns_vout_1)
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("non-ALL sighash"),
+            "expected sighash rejection, got: {err}"
+        );
+    }
+
+    // --- AssetLegs::recipient_seals ---
+    //
+    // What the invoice bind compares against. The same walk that sums the
+    // recipient amount collects these, so each classification rule is
+    // asserted here too: a leg wrongly included or dropped would make the
+    // bind check the wrong thing.
+
+    #[test]
+    fn carries_the_blinded_seal_of_a_recipient_leg() {
+        let psbt = psbt_with_two_inputs();
+        let validated = validated_with(&psbt, vec![confidential_to(1_000, "utxob:recipient")]);
+        let legs = validate_psbt_anchors_transition(&psbt, &validated, 1_000, 0, &owns_vout_1)
+            .expect("single recipient leg binds");
+        assert_eq!(legs.recipient_seals, vec!["utxob:recipient".to_string()]);
+    }
+
+    /// Change is revealed. Including it would compare the invoice against
+    /// a bridge-owned output. Swap-only: the mint/burn flow has no
+    /// bridge-owned change leg to skip.
+    #[cfg(feature = "rgb-swap")]
+    #[test]
+    fn skips_revealed_change_legs() {
+        let psbt = psbt_with_two_inputs();
+        let validated = validated_with(
+            &psbt,
+            vec![
+                revealed(400, 1),
+                confidential_to(600, "utxob:recipient"),
+                revealed_off_tx(200),
+            ],
+        );
+        let owns_both =
+            |p: &Psbt, o: OutPoint| Ok(owns_vout_1(p, o)? || owns_off_tx_outpoint(p, o)?);
+        let legs = validate_psbt_anchors_transition(&psbt, &validated, 600, 0, &owns_both)
+            .expect("both change legs are bridge-owned");
+        assert_eq!(legs.recipient_seals, vec!["utxob:recipient".to_string()]);
+    }
+
+    /// Only `OS_ASSET` legs are recipient legs.
+    #[test]
+    fn skips_non_asset_assignments() {
+        let psbt = psbt_with_two_inputs();
+        let mut bridge_right = confidential_to(500, "utxob:bridge-right");
+        bridge_right.assignment_type = bfa::OS_BRIDGE;
+        let validated = validated_with(
+            &psbt,
+            vec![bridge_right, confidential_to(1_000, "utxob:recipient")],
+        );
+        let legs = validate_psbt_anchors_transition(&psbt, &validated, 1_000, 0, &owns_vout_1)
+            .expect("the bridge-right assignment is not a recipient leg");
+        assert_eq!(legs.recipient_seals, vec!["utxob:recipient".to_string()]);
+    }
+
+    /// The split shape the invoice bind refuses: both seals must be
+    /// surfaced, in consignment order, for it to see the second one.
+    #[test]
+    fn carries_every_confidential_leg_in_order() {
+        let psbt = psbt_with_two_inputs();
+        let validated = validated_with(
+            &psbt,
+            vec![
+                confidential_to(600, "utxob:recipient"),
+                confidential_to(400, "utxob:attacker"),
+            ],
+        );
+        let legs = validate_psbt_anchors_transition(&psbt, &validated, 1_000, 0, &owns_vout_1)
+            .expect("the amount bind sees only the 1_000 total");
+        assert_eq!(
+            legs.recipient_seals,
+            vec!["utxob:recipient".to_string(), "utxob:attacker".to_string()]
+        );
+    }
+
+    #[test]
+    fn accepts_sighash_all_and_default() {
+        for raw in [0x00u32, 0x01u32] {
+            let mut psbt = psbt_with_two_inputs();
+            psbt.inputs[0].sighash_type = Some(PsbtSighashType::from_u32(raw));
+            let validated = validated_for(&psbt, 1_000);
+            assert!(
+                validate_psbt_anchors_transition(&psbt, &validated, 1_000, 0, &owns_vout_1).is_ok(),
+                "sighash 0x{raw:02x} should be accepted"
+            );
+        }
+    }
+}

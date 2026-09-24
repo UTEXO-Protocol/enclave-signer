@@ -114,8 +114,6 @@ rgb-mint-burn = ["rgb"]
 vsock = []
 # DANGER: allows importing a raw seed over the wire. Testing only.
 allow-seed-import = []
-# Skips cross-check validation on signing requests. Development/testing only.
-dev-mode = []
 # In-enclave RGB consignment validation via rgbstd + Esplora. REQUIRES `spv`
 # (enforced by a `compile_error!` in lib.rs): without SPV the
 # only anchor for a consignment's witness txs is the host-controlled Esplora

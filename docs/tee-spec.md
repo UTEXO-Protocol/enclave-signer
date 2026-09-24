@@ -68,9 +68,9 @@ design; the enclave binds only the amount.
 
 Four crates plus the infrastructure they touch:
 
-- **`enclave`** -- runs inside the TEE. Connection loop (`main.rs`, vsock in
-  prod / TCP in dev; hardening in `conn.rs`) -> `server.rs` dispatch -> `policy.rs` (security policy),
-  `keys.rs` / `state.rs` (key custody, phases), `cloning.rs`, `attestation.rs`,
+- **`enclave`** -- runs inside the TEE. Boot sequence (`main.rs` + `bootstrap.rs`), connection loop (vsock in
+  prod / TCP in dev; hardening in `conn.rs`) -> `server/dispatch.rs` -> `policy.rs` (security policy),
+  `keys.rs` / `state/` (key custody, phases), `cloning.rs`, `attestation.rs`,
   and the network validators under `networks/`:
   - `networks/rgb/` -- consignment validation, PSBT binding (`psbt_validation.rs`),
     invoice recipient bind (`invoice.rs`), taproot signing, the SPV header
@@ -78,7 +78,7 @@ Four crates plus the infrastructure they touch:
     rules in `flow/{swap,mint_burn}.rs`;
   - `networks/evm/` -- `fundsOut` / `lzFundsOut` calldata validation and
     crosschecks, EIP-712 signing, `FundsIn` event verification
-    (`evm_event.rs`), gas-tx validation;
+    (`events.rs`), gas-tx validation;
   - `networks/ccd.rs` -- Concordium source (amount bind only, Sec 7.9).
 - **`enclave-proto`** -- the vendored `enclave` protobuf package, committed as
   pre-generated Rust so no codegen toolchain enters PCR0.
@@ -93,8 +93,8 @@ Four crates plus the infrastructure they touch:
 **Cargo features.** `rgb` (implies `spv`, which implies `rgb-validation`),
 `ccd`, exactly one of `rgb-swap` / `rgb-mint-burn`, `evm-rpc`, `bfa-mint`,
 `vsock`. Production images are built with `--no-default-features` and an
-explicit set (README, Building). Dev-only features (`dev-mode`,
-`mock-attestation`, `allow-seed-import`) are `compile_error!` in release.
+explicit set (README, Building). Dev-only features
+(`mock-attestation`, `allow-seed-import`) are `compile_error!` in release.
 
 **Wire protocol** enclave<->parent: 4-byte little-endian length prefix + prost
 protobuf, 4 MiB frame cap, no version field (`framing.rs`). The consignment
@@ -130,8 +130,8 @@ SecurityPolicy = Production {
 } | Development { reason }
 ```
 
-- **Resolution** (`policy.rs`): any dev feature (`dev-mode`,
-  `mock-attestation`, `allow-seed-import`), a debug/test build, a non-bridge
+- **Resolution** (`policy.rs`): any dev feature
+  (`mock-attestation`, `allow-seed-import`), a debug/test build, a non-bridge
   build, or a missing pin resolves to `Development`. Only a release
   `rgb-validation` build with `EVM_CHAIN_ID`, `EVM_PROXY_CONTRACT_ADDRESS`, and
   `RGB_ASSET_ID` all set resolves to `Production`. `evm_source` is
@@ -273,7 +273,7 @@ A bridge PSBT request MUST carry the EVM deposit tx hash **and** the RGB
 consignment; there is no consignment-less bridge mode. Listener-supplied
 `event_valid` / `event_finalized` booleans are ignored. The
 enclave establishes validity and finality itself, fail-closed
-(`evm_event::verify_funds_in_event`):
+(`events::verify_funds_in_event`):
 
 - a **successful receipt** must exist for `evm_tx_hash`, at depth >=
   `EVM_MIN_CONFIRMATIONS` (pinned config, default 12);

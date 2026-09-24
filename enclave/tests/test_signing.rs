@@ -23,6 +23,21 @@ sol! {
     }
 
     function fundsOut(FundsOutParams params);
+
+    // Mirrors the enclave's `lzFundsOut` wire format (validation.rs).
+    function lzFundsOut(
+        uint256 amount,
+        uint256 burnId,
+        uint256 sourceChainId,
+        uint256 destinationChainId,
+        string sourceAddress,
+        bytes proof,
+        bytes settlementData,
+        uint32 dstEid,
+        bytes32 recipient,
+        uint256 minAmountLD,
+        bytes extraOptions
+    );
 }
 
 /// Pinned `BridgeConfig` matching the defaults of `valid_sign_evm_request`.
@@ -107,7 +122,7 @@ fn valid_sign_evm_request(amount: u64, commission: u64) -> SignRequest {
     }
 }
 
-#[cfg(all(feature = "rgb-validation", not(feature = "dev-mode")))]
+#[cfg(feature = "rgb-validation")]
 fn rgb_source_mut(req: &mut SignRequest) -> &mut RgbSource {
     match req.source_network.as_mut() {
         Some(SourceNetwork::RgbSource(source)) => source,
@@ -405,88 +420,6 @@ fn btc_psbt_to_ours(from: &OurAddress, input_sats: u64, outputs: &[(&OurAddress,
     psbt.serialize()
 }
 
-/// Build a minimal 2-of-3 multisig PSBT for testing with a known pubkey.
-#[cfg(all(
-    feature = "allow-seed-import",
-    feature = "dev-mode",
-    not(feature = "rgb-validation")
-))]
-fn build_test_multisig_psbt(our_pubkey: &bitcoin::PublicKey) -> Vec<u8> {
-    use bitcoin::blockdata::opcodes::all::*;
-    use bitcoin::blockdata::script::Builder as ScriptBuilder;
-    use bitcoin::hashes::Hash;
-    use bitcoin::psbt::Psbt;
-    use bitcoin::secp256k1::{Secp256k1, SecretKey};
-    use bitcoin::{Amount, OutPoint, ScriptBuf, Sequence, Transaction, TxIn, TxOut, Txid};
-    let secp = Secp256k1::new();
-
-    let sk2 = SecretKey::from_slice(&[0x02; 32]).unwrap();
-    let pk2 = bitcoin::PublicKey::new(sk2.public_key(&secp));
-    let sk3 = SecretKey::from_slice(&[0x03; 32]).unwrap();
-    let pk3 = bitcoin::PublicKey::new(sk3.public_key(&secp));
-
-    let mut pubkeys = [*our_pubkey, pk2, pk3];
-    pubkeys.sort_by_key(|k| k.to_bytes());
-
-    let witness_script = ScriptBuilder::new()
-        .push_int(2)
-        .push_key(&pubkeys[0])
-        .push_key(&pubkeys[1])
-        .push_key(&pubkeys[2])
-        .push_int(3)
-        .push_opcode(OP_CHECKMULTISIG)
-        .into_script();
-
-    let unsigned_tx = Transaction {
-        version: bitcoin::transaction::Version(2),
-        lock_time: bitcoin::blockdata::locktime::absolute::LockTime::ZERO,
-        input: vec![TxIn {
-            previous_output: OutPoint {
-                txid: Txid::from_byte_array([0xAA; 32]),
-                vout: 0,
-            },
-            script_sig: ScriptBuf::new(),
-            sequence: Sequence::MAX,
-            witness: bitcoin::Witness::default(),
-        }],
-        output: vec![TxOut {
-            value: Amount::from_sat(50_000),
-            script_pubkey: ScriptBuf::new_p2wpkh(&bitcoin::WPubkeyHash::from_byte_array(
-                [0xBB; 20],
-            )),
-        }],
-    };
-
-    let mut psbt = Psbt::from_unsigned_tx(unsigned_tx).unwrap();
-
-    let witness_script_hash = bitcoin::WScriptHash::hash(witness_script.as_bytes());
-    psbt.inputs[0].witness_utxo = Some(TxOut {
-        value: Amount::from_sat(100_000),
-        script_pubkey: ScriptBuf::new_p2wsh(&witness_script_hash),
-    });
-    psbt.inputs[0].witness_script = Some(witness_script);
-
-    psbt.serialize()
-}
-
-/// Build a valid enriched RGB-destination SignRequest for testing.
-#[cfg(all(
-    feature = "allow-seed-import",
-    feature = "dev-mode",
-    not(feature = "rgb-validation")
-))]
-fn valid_sign_psbt_request(psbt_bytes: Vec<u8>) -> SignRequest {
-    sign_psbt_request(
-        vec![0xCC; 32],
-        true,
-        true,
-        100_000,
-        1_000,
-        psbt_bytes,
-        50_000,
-    )
-}
-
 fn sign_psbt_request(
     evm_tx_hash: Vec<u8>,
     evm_event_valid: bool,
@@ -547,7 +480,7 @@ fn test_sign_evm_before_init() {
 /// P0 regression: the host-supplied `consignment_valid` flag must not bypass
 /// validation. `consignment_valid: true` with `consignment: []` once produced a
 /// signature with no RGB backing; empty bytes are now rejected regardless.
-#[cfg(all(feature = "rgb-validation", not(feature = "dev-mode")))]
+#[cfg(feature = "rgb-validation")]
 #[test]
 fn test_sign_evm_rejects_consignment_valid_with_empty_bytes() {
     let port = common::start_test_server();
@@ -591,7 +524,7 @@ fn test_sign_evm_rejects_consignment_valid_with_empty_bytes() {
 /// The handler-level check fires when bytes are present but the in-enclave
 /// validator did not run: production must never sign fundsOut against
 /// unvalidated bytes. The harness leaves `rgb_validator` as `None`.
-#[cfg(all(feature = "rgb-validation", not(feature = "dev-mode")))]
+#[cfg(feature = "rgb-validation")]
 #[test]
 fn test_sign_evm_rejects_funds_out_without_validator() {
     // Pinned config so the request clears the production fail-closed gate
@@ -635,7 +568,7 @@ fn test_sign_evm_rejects_funds_out_without_validator() {
 /// path with the real fundsOut selector, which the
 /// `route_proofs_accept_ccd_source_to_evm_destination` unit test does not
 /// reach.
-#[cfg(all(feature = "rgb-validation", feature = "ccd", not(feature = "dev-mode")))]
+#[cfg(all(feature = "rgb-validation", feature = "ccd"))]
 #[test]
 fn test_sign_evm_accepts_ccd_source_funds_out() {
     let port = common::start_test_server_with_config(|_| {}, pinned_bridge_config());
@@ -687,12 +620,76 @@ fn test_sign_evm_accepts_ccd_source_funds_out() {
     }
 }
 
+/// An lzFundsOut selector without `lz_release` yields no fundsOut params, so
+/// the EVM signer must refuse it with an error and no signature.
+#[cfg(all(feature = "rgb-validation", feature = "ccd"))]
+#[test]
+fn test_sign_evm_refuses_lz_selector_without_lz_release() {
+    let port = common::start_test_server_with_config(|_| {}, pinned_bridge_config());
+
+    let init_req = EnclaveRequest {
+        request: Some(Request::InitializeKey(InitializeKeyRequest {
+            seed: vec![],
+            mnemonic: String::new(),
+            cloning_secret: String::new(),
+        })),
+    };
+    common::send_request(port, &init_req);
+
+    let amount = 1000u64;
+    let commission = 50u64;
+    // Remote destination chain: the entrypoint route refuses the pinned one.
+    let call_data = lzFundsOutCall {
+        amount: U256::from(amount),
+        burnId: U256::ZERO,
+        sourceChainId: U256::ZERO,
+        destinationChainId: U256::from(137u64),
+        sourceAddress: String::new(),
+        proof: Bytes::new(),
+        settlementData: Bytes::new(),
+        dstEid: 30109,
+        recipient: [0x22; 32].into(),
+        minAmountLD: U256::from(amount),
+        extraOptions: Bytes::new(),
+    }
+    .abi_encode();
+    let sign_req = EnclaveRequest {
+        request: Some(Request::Sign(SignRequest {
+            amount: amount + commission + 100,
+            source_network: Some(SourceNetwork::CcdSource(CcdSource {
+                tx_hash: vec![0xCC; 32],
+                commission,
+            })),
+            destination_network: Some(DestinationNetwork::EvmDestination(EvmDestination {
+                call_data,
+                nonce: 1,
+                deadline: u64::MAX,
+                chain_id: 1,
+                proxy_contract: vec![0xAA; 20],
+                calldata_amount: amount,
+                calldata_commission: commission,
+                lz_release: None,
+            })),
+        })),
+    };
+    let resp = common::send_request(port, &sign_req);
+
+    match &resp.response {
+        Some(Response::Error(e)) => assert!(
+            e.message.contains("LayerZero selector without lz_release"),
+            "expected the missing lz_release refusal, got: {}",
+            e.message
+        ),
+        other => panic!("expected ErrorResponse and no signature, got {:?}", other),
+    }
+}
+
 /// Fail-closed regression: a build that can validate
 /// consignments must refuse to sign with no operator config pinned, rather than
 /// degrading to the listener-trusting model. The integration harness builds the
 /// library without `cfg(test)`, so the production guard is active. The
 /// unconfigured `BridgeConfig` is built explicitly so env cannot interfere.
-#[cfg(all(feature = "rgb-validation", not(feature = "dev-mode")))]
+#[cfg(feature = "rgb-validation")]
 #[test]
 fn test_sign_evm_rejects_unconfigured_bridge_config() {
     let unconfigured = BridgeConfig {
@@ -740,7 +737,7 @@ fn test_sign_evm_rejects_unconfigured_bridge_config() {
 /// `not(rgb-validation)` implies `not(spv)` for any build that compiles. The
 /// refusal fires in RGB source validation, whose message names the missing
 /// `rgb-validation` feature.
-#[cfg(all(not(feature = "rgb-validation"), not(feature = "dev-mode")))]
+#[cfg(not(feature = "rgb-validation"))]
 #[test]
 fn test_no_spv_build_refuses_funds_out_even_without_merkle_proofs() {
     let port = common::start_test_server();
@@ -788,54 +785,6 @@ fn test_no_spv_build_refuses_funds_out_even_without_merkle_proofs() {
 
 // PSBT signing tests
 
-// A successful bridge (EVM -> RGB) PSBT roundtrip needs the FundsIn
-// cross-check bypassed. Without `rgb-validation` only `dev-mode` can sign one;
-// `evm-rpc` implies `rgb-validation`, so it cannot combine with
-// `not(rgb-validation)`. dev-mode is compile-guarded out of release builds.
-#[test]
-#[cfg(all(
-    feature = "allow-seed-import",
-    feature = "dev-mode",
-    not(feature = "rgb-validation")
-))]
-fn test_sign_psbt_roundtrip() {
-    let port = common::start_test_server();
-
-    let seed = [0x42u8; 64];
-    let init_req = EnclaveRequest {
-        request: Some(Request::InitializeKey(InitializeKeyRequest {
-            seed: seed.to_vec(),
-            mnemonic: String::new(),
-            cloning_secret: String::new(),
-        })),
-    };
-    let init_resp = common::send_request(port, &init_req);
-
-    let btc_pubkey_bytes = match &init_resp.response {
-        Some(Response::InitializeKey(r)) => r.btc_compressed_pub.clone(),
-        other => panic!("expected InitializeKeyResponse, got {:?}", other),
-    };
-
-    let our_pubkey = bitcoin::PublicKey::from_slice(&btc_pubkey_bytes).unwrap();
-    let psbt_bytes = build_test_multisig_psbt(&our_pubkey);
-
-    let sign_req = EnclaveRequest {
-        request: Some(Request::Sign(valid_sign_psbt_request(psbt_bytes))),
-    };
-    let sign_resp = common::send_request(port, &sign_req);
-
-    match &sign_resp.response {
-        Some(Response::SignedPsbt(r)) => {
-            assert!(r.inputs_signed > 0, "should have signed at least one input");
-            assert!(
-                !r.signed_psbt.is_empty(),
-                "signed PSBT bytes should not be empty"
-            );
-        }
-        other => panic!("expected SignedPsbtResponse, got {:?}", other),
-    }
-}
-
 #[test]
 fn test_sign_psbt_before_init() {
     let port = common::start_test_server();
@@ -866,7 +815,6 @@ fn test_sign_psbt_before_init() {
 /// is never rejected with the old boolean-driven messages; whatever else
 /// happens to it, the booleans are not what decide.
 #[test]
-#[cfg(not(feature = "dev-mode"))]
 fn test_sign_psbt_ignores_listener_evm_booleans() {
     let port = common::start_test_server();
 
@@ -908,11 +856,7 @@ fn test_sign_psbt_ignores_listener_evm_booleans() {
 /// refuse a bridge-mode PSBT rather than sign it on the removed listener
 /// booleans. Exercises the minimal build, where the `evm-rpc` fail-closed guard
 /// is the first bridge-mode gate.
-#[cfg(all(
-    not(feature = "rgb-validation"),
-    not(feature = "evm-rpc"),
-    not(feature = "dev-mode")
-))]
+#[cfg(not(feature = "rgb-validation"))]
 #[test]
 fn test_no_evm_rpc_build_refuses_bridge_psbt() {
     let port = common::start_test_server();
@@ -956,7 +900,7 @@ fn test_no_evm_rpc_build_refuses_bridge_psbt() {
 }
 
 #[test]
-#[cfg(all(feature = "evm-rpc", not(feature = "dev-mode")))]
+#[cfg(feature = "evm-rpc")]
 fn test_sign_psbt_rejects_amount_mismatch() {
     // A bridge-mode PSBT is refused before any RGB work unless the enclave can
     // verify the FundsIn deposit itself, so wire a stub that reports the very
@@ -1012,7 +956,7 @@ fn test_sign_psbt_rejects_amount_mismatch() {
 // skip every bridge predicate is gone. This is the core regression gate.
 #[cfg(feature = "rgb-validation")]
 #[test]
-#[cfg(all(feature = "evm-rpc", not(feature = "dev-mode")))]
+#[cfg(feature = "evm-rpc")]
 fn test_sign_psbt_rejects_missing_evm_source_hash() {
     let port = common::start_test_server();
 
@@ -1058,7 +1002,7 @@ fn test_sign_psbt_rejects_missing_evm_source_hash() {
 // the zero-length hash rejected at the 32-byte length check.
 #[cfg(feature = "rgb-validation")]
 #[test]
-#[cfg(all(feature = "evm-rpc", not(feature = "dev-mode")))]
+#[cfg(feature = "evm-rpc")]
 fn test_sign_psbt_zero_evm_hash_is_bridge_mode_not_vanilla() {
     // Deposit stub, so the run reaches the consignment bind rather than
     // stopping at the FundsIn-verification gate.
@@ -1172,7 +1116,6 @@ fn test_sign_btc_accepts_create_utxo_colored_output() {
 }
 
 /// Partial merges succeed. Fully signed submissions stay refused.
-#[cfg(not(feature = "dev-mode"))]
 #[test]
 fn test_sign_btc_second_pass_after_partial_merge_still_signs() {
     use bitcoin::hashes::Hash;
@@ -1562,7 +1505,7 @@ fn test_sign_btc_uncapped_fails_closed_under_rgb_validation() {
 
 // Consignment hash integrity tests (wire protocol integration)
 
-#[cfg(all(feature = "rgb-validation", not(feature = "dev-mode")))]
+#[cfg(feature = "rgb-validation")]
 #[test]
 fn test_sign_evm_rejects_consignment_hash_mismatch() {
     let port = common::start_test_server();
@@ -1604,7 +1547,7 @@ fn test_sign_evm_rejects_consignment_hash_mismatch() {
     }
 }
 
-#[cfg(all(feature = "rgb-validation", not(feature = "dev-mode")))]
+#[cfg(feature = "rgb-validation")]
 #[test]
 fn test_sign_evm_rejects_consignment_without_hash() {
     let port = common::start_test_server();
@@ -1685,11 +1628,9 @@ fn test_sign_raw_message_is_refused() {
 //
 // These run through the real handler, so the fail-closed gate in
 // `networks::evm::gas_tx` is active. They cover the accept path and the two
-// drain vectors. Gated on `not(dev-mode)`, where the handler keeps the legacy
-// opaque-digest path.
+// drain vectors.
 
 /// Minimal RLP encoder for building gas-tx fixtures.
-#[cfg(not(feature = "dev-mode"))]
 fn rlp_str(bytes: &[u8]) -> Vec<u8> {
     if bytes.len() == 1 && bytes[0] < 0x80 {
         return vec![bytes[0]];
@@ -1712,7 +1653,6 @@ fn rlp_str(bytes: &[u8]) -> Vec<u8> {
     out
 }
 
-#[cfg(not(feature = "dev-mode"))]
 fn rlp_scalar(v: u64) -> Vec<u8> {
     let trimmed: Vec<u8> = v
         .to_be_bytes()
@@ -1723,7 +1663,6 @@ fn rlp_scalar(v: u64) -> Vec<u8> {
     rlp_str(&trimmed)
 }
 
-#[cfg(not(feature = "dev-mode"))]
 fn rlp_list(items: &[Vec<u8>]) -> Vec<u8> {
     let mut payload = Vec::new();
     for it in items {
@@ -1748,7 +1687,6 @@ fn rlp_list(items: &[Vec<u8>]) -> Vec<u8> {
 }
 
 /// Unsigned EIP-1559 preimage: `0x02 || rlp([chainId, nonce, maxPrio, maxFee, gas, to, value, data, accessList])`.
-#[cfg(not(feature = "dev-mode"))]
 fn eip1559_unsigned(chain_id: u64, to: &[u8; 20], value: u64) -> Vec<u8> {
     let body = rlp_list(&[
         rlp_scalar(chain_id),
@@ -1768,7 +1706,6 @@ fn eip1559_unsigned(chain_id: u64, to: &[u8; 20], value: u64) -> Vec<u8> {
 
 /// `BridgeConfig` with the full gas-tx rule pinned: chain_id 1,
 /// destination 0xAA..., gas <= 30_000, fee <= 1_000 wei, selector 0xdeadbeef.
-#[cfg(not(feature = "dev-mode"))]
 fn gas_pinned_config() -> BridgeConfig {
     BridgeConfig {
         chain_id: 1,
@@ -1784,7 +1721,6 @@ fn gas_pinned_config() -> BridgeConfig {
 
 /// Unsigned EIP-1559 preimage with explicit gas/fee/data, for the cap and
 /// calldata-allowlist integration tests.
-#[cfg(not(feature = "dev-mode"))]
 fn eip1559_full(to: &[u8; 20], max_fee: u64, gas: u64, data: &[u8]) -> Vec<u8> {
     let body = rlp_list(&[
         rlp_scalar(1),       // chainId
@@ -1802,7 +1738,6 @@ fn eip1559_full(to: &[u8; 20], max_fee: u64, gas: u64, data: &[u8]) -> Vec<u8> {
     out
 }
 
-#[cfg(not(feature = "dev-mode"))]
 fn init(port: u16) {
     common::send_request(
         port,
@@ -1817,7 +1752,6 @@ fn init(port: u16) {
 }
 
 #[test]
-#[cfg(not(feature = "dev-mode"))]
 fn test_gas_tx_signs_pinned_destination() {
     let port = common::start_test_server_with_config(|_| {}, gas_pinned_config());
     init(port);
@@ -1841,7 +1775,6 @@ fn test_gas_tx_signs_pinned_destination() {
 }
 
 #[test]
-#[cfg(not(feature = "dev-mode"))]
 fn test_gas_tx_rejects_opaque_digest() {
     let port = common::start_test_server_with_config(|_| {}, gas_pinned_config());
     init(port);
@@ -1871,7 +1804,6 @@ fn test_gas_tx_rejects_opaque_digest() {
 }
 
 #[test]
-#[cfg(not(feature = "dev-mode"))]
 fn test_gas_tx_rejects_drain_to_attacker() {
     let port = common::start_test_server_with_config(|_| {}, gas_pinned_config());
     init(port);
@@ -1898,7 +1830,6 @@ fn test_gas_tx_rejects_drain_to_attacker() {
 }
 
 /// Send a gas-tx preimage through the real handler and return the response.
-#[cfg(not(feature = "dev-mode"))]
 fn sign_gas_tx(port: u16, unsigned_tx: Vec<u8>) -> EnclaveResponse {
     common::send_request(
         port,
@@ -1912,7 +1843,6 @@ fn sign_gas_tx(port: u16, unsigned_tx: Vec<u8>) -> EnclaveResponse {
 }
 
 #[test]
-#[cfg(not(feature = "dev-mode"))]
 fn test_gas_tx_rejects_gas_limit_over_cap() {
     let port = common::start_test_server_with_config(|_| {}, gas_pinned_config());
     init(port);
@@ -1929,7 +1859,6 @@ fn test_gas_tx_rejects_gas_limit_over_cap() {
 }
 
 #[test]
-#[cfg(not(feature = "dev-mode"))]
 fn test_gas_tx_rejects_fee_over_cap() {
     let port = common::start_test_server_with_config(|_| {}, gas_pinned_config());
     init(port);
@@ -1946,7 +1875,6 @@ fn test_gas_tx_rejects_fee_over_cap() {
 }
 
 #[test]
-#[cfg(not(feature = "dev-mode"))]
 fn test_gas_tx_signs_allowlisted_selector() {
     let port = common::start_test_server_with_config(|_| {}, gas_pinned_config());
     init(port);
@@ -1962,7 +1890,6 @@ fn test_gas_tx_signs_allowlisted_selector() {
 }
 
 #[test]
-#[cfg(not(feature = "dev-mode"))]
 fn test_gas_tx_rejects_disallowed_selector() {
     let port = common::start_test_server_with_config(|_| {}, gas_pinned_config());
     init(port);
@@ -1979,7 +1906,6 @@ fn test_gas_tx_rejects_disallowed_selector() {
 }
 
 #[test]
-#[cfg(not(feature = "dev-mode"))]
 fn test_gas_tx_fails_closed_when_caps_unpinned() {
     // A config that pins the destination but NOT the caps must refuse to sign:
     // an uncapped gas tx is never produced (fail-closed).

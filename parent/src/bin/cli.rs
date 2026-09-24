@@ -74,7 +74,7 @@ enum Command {
         /// Pre-extracted calldata commission
         #[arg(long, default_value = "0")]
         calldata_commission: u64,
-        /// Mark consignment as valid (required unless enclave is in dev-mode)
+        /// Mark consignment as valid
         #[arg(long)]
         consignment_valid: bool,
     },

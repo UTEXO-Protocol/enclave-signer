@@ -1,19 +1,18 @@
 #![deny(unsafe_code)]
 
-// Release guards (dev-mode). Three dev-only
-// features are catastrophic if accidentally enabled in a shipped build:
+// Release guards. Two dev-only features are catastrophic if accidentally
+// enabled in a shipped build:
 //
 //   * `allow-seed-import` - the parent can install a chosen seed on a fresh
 //     enclave, defeating the in-enclave key custody.
 //   * `mock-attestation`  - zero-PCR attestation documents are accepted, so
 //     a forged "enclave" passes verification.
-//   * `dev-mode`          - every signing cross-check is skipped.
 //
 // A release build (`debug_assertions` off) must never carry any of them, so
 // each trips a `compile_error!`. `not(test)` exempts `cargo test --release`,
 // which legitimately exercises the dev paths; local dev images build in debug.
 //
-// `dev_feature_release_guard!` keeps the three checks in one place.
+// `dev_feature_release_guard!` keeps the checks in one place.
 macro_rules! dev_feature_release_guard {
     ($feature:literal, $msg:literal) => {
         #[cfg(all(feature = $feature, not(debug_assertions), not(test)))]
@@ -31,11 +30,6 @@ dev_feature_release_guard!(
     "`mock-attestation` must not be enabled in a release build (debug_assertions off): \
      it accepts zero-PCR attestation documents."
 );
-dev_feature_release_guard!(
-    "dev-mode",
-    "`dev-mode` must not be enabled in a release build (debug_assertions off): \
-     it skips all signing cross-checks."
-);
 
 // `rgb-validation` asks a resolver whether a consignment's witness txs are
 // mined. Without `spv` that resolver is the host-controlled Esplora endpoint,
@@ -48,6 +42,10 @@ compile_error!(
      the host-controlled Esplora resolver - build with `--features spv` (which \
      pulls in rgb-validation)"
 );
+
+// With the Cargo implications and the flow guards below, `rgb`, `spv` and
+// `rgb-validation` are one switch in every build that compiles. Code gates the
+// RGB stack on `rgb-validation` only.
 
 // RGB flow selection is mutually exclusive and mandatory. The two flows are two
 // separate enclave instances with two PCR0s; the per-flow rules in
@@ -77,6 +75,9 @@ compile_error!(
 );
 
 pub mod attestation;
+// Boot sequence for `main.rs`: env parsing, forwarders, and the fail-closed
+// pins. In the library so it is covered by clippy/tests like everything else.
+pub mod bootstrap;
 pub mod cloning;
 // Disciplines CLOCK_REALTIME from the hypervisor PTP source (`/dev/ptp0`) so a
 // long-lived enclave does not drift and start rejecting valid attestation/TLS
@@ -92,6 +93,8 @@ pub mod networks;
 pub mod policy;
 pub mod server;
 pub mod state;
+#[cfg(test)]
+mod test_support;
 
 #[cfg(all(feature = "vsock", target_os = "linux"))]
 pub mod vsock_forwarder;
