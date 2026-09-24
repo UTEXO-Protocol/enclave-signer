@@ -63,7 +63,7 @@ struct Cli {
 
     /// Expected signer role, committed into attestation user_data: `mint`
     /// (EVM -> RGB only), `burn` (RGB -> EVM only), or `combined` (both
-    /// directions, the retired swap image). Required for production
+    /// directions, the combined and swap images). Required for production
     /// verification. Ignored with --mock.
     #[arg(long)]
     expect_signer_role: Option<String>,
@@ -328,4 +328,27 @@ fn print_ok(result: &AttestedPubkeyResult) {
         "  Nonce echoed          : 0x{}",
         hex::encode(v.nonce.clone())
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_signer_role_accepts_the_three_roles() {
+        assert_eq!(parse_signer_role(Some("mint")).unwrap(), SignerRole::Mint);
+        assert_eq!(parse_signer_role(Some("burn")).unwrap(), SignerRole::Burn);
+        assert_eq!(
+            parse_signer_role(Some("Combined")).unwrap(),
+            SignerRole::Combined
+        );
+    }
+
+    #[test]
+    fn parse_signer_role_rejects_missing_and_invalid() {
+        let missing = parse_signer_role(None).unwrap_err();
+        assert!(format!("{missing:#}").contains("required"), "{missing:#}");
+        let invalid = parse_signer_role(Some("minter")).unwrap_err();
+        assert!(format!("{invalid:#}").contains("invalid"), "{invalid:#}");
+    }
 }

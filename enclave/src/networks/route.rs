@@ -100,9 +100,7 @@ pub fn validate_source(
         }),
         #[allow(unreachable_patterns)]
         _ => Err(EnclaveError::InvalidRequest(
-            "source network not supported by this build (wrong signer role, or rebuild with \
-             `--features ccd`)"
-                .into(),
+            "source network not supported by this build (rebuild with `--features ccd`)".into(),
         )),
     }
 }

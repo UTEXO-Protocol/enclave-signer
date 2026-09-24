@@ -108,7 +108,7 @@ jobs:
           push: true
           build-args: |
             BUILDKIT_INLINE_CACHE=1
-            SIGNER_ROLE=${{ matrix.signer_role }}
+            ${{ matrix.signer_role && format('SIGNER_ROLE={0}', matrix.signer_role) || '' }}
           secret-files: |
             consignment_key=${{ runner.temp }}/private-deps/consignment_key
             consensus_key=${{ runner.temp }}/private-deps/consensus_key
@@ -130,7 +130,7 @@ jobs:
           push: true
           build-args: |
             BUILDKIT_INLINE_CACHE=1
-            SIGNER_ROLE=${{ matrix.signer_role }}
+            ${{ matrix.signer_role && format('SIGNER_ROLE={0}', matrix.signer_role) || '' }}
           secret-files: |
             consignment_key=${{ runner.temp }}/private-deps/consignment_key
             consensus_key=${{ runner.temp }}/private-deps/consensus_key

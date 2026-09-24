@@ -117,6 +117,8 @@ fn signer_role_attests_the_other_roles_paths_as_off() {
     assert!(mint.allow_vanilla_psbt);
     assert_eq!(mint.gas_tx_allowed_to, None);
     assert_eq!(mint.gas_tx_max_gas_limit, 0);
+    assert_eq!(mint.gas_tx_max_fee_per_gas, 0);
+    assert_eq!(mint.gas_tx_max_value_wei, None);
     assert!(mint.gas_tx_allowed_selectors.is_empty());
 
     let burn = resolve(SignerRole::Burn);

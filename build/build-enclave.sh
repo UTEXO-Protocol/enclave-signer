@@ -58,16 +58,14 @@ EIF_PATH="$OUT_DIR/$EIF_NAME"
 ASSET_ARGS=()
 # The BFA mint/burn images take the per-deployment asset id as a build arg.
 case "${DOCKERFILE##*/}" in
-    Dockerfile.enclave.mint|Dockerfile.enclave.burn) NEEDS_ASSET=1 ;;
-    *) NEEDS_ASSET=0 ;;
+    Dockerfile.enclave.mint|Dockerfile.enclave.burn)
+        if [[ ! "${RGB_ASSET_ID:-}" =~ [^[:space:]] ]]; then
+            echo "Error: set RGB_ASSET_ID to the approved BFA contract id before building BFA" >&2
+            exit 1
+        fi
+        ASSET_ARGS=(--build-arg "RGB_ASSET_ID=$RGB_ASSET_ID")
+        ;;
 esac
-if [ "$NEEDS_ASSET" = 1 ]; then
-    if [[ ! "${RGB_ASSET_ID:-}" =~ [^[:space:]] ]]; then
-        echo "Error: set RGB_ASSET_ID to the approved BFA contract id before building BFA" >&2
-        exit 1
-    fi
-    ASSET_ARGS=(--build-arg "RGB_ASSET_ID=$RGB_ASSET_ID")
-fi
 
 echo "=== Building UTEXO Bridge Enclave ==="
 echo "    project root : $PROJECT_ROOT"

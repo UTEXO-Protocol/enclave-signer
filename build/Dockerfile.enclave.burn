@@ -110,8 +110,10 @@ ENV EVM_CHAIN_ID=42161 \
 # EVM_PROXY_CONTRACT_ADDRESS - unset, it falls back to the proxy address and
 # points FundsIn verification at the wrong contract.
 # The burn signer also signs the gas tx that submits `fundsOut`
-# (`SignRawDigest`), which fails closed unless GAS_TX_ALLOWED_TO is pinned. The
-# plain-BTC (`SignBtc`) path is not compiled in.
+# (`SignRawDigest`). That fails closed unless GAS_TX_ALLOWED_TO,
+# GAS_TX_MAX_GAS_LIMIT and GAS_TX_MAX_FEE_PER_GAS are all pinned; only the first
+# is baked here, so this image signs no gas tx yet. The plain-BTC (`SignBtc`)
+# path is not compiled in.
 ENV EVM_RPC_URL=http://127.0.0.1:3444 \
     EVM_MIN_CONFIRMATIONS=12 \
     FUNDS_IN_CONTRACT=0x6711f1a319B37847fa0234181C34D883774c4951 \
