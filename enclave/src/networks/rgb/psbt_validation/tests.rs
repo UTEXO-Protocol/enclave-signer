@@ -632,9 +632,9 @@ mod anchor {
         // leg, plus a Vanilla input funding the fee. Exactly one Colored
         // script, which is what `asset_change_scripts` accepts.
         let keys = fx::km();
-        let (a_spk, ..) = fx::multisig_address(fx::our_key_on(&keys, AccountType::Colored, 0, 0).0);
-        let (v_spk, ..) = fx::multisig_address(fx::our_key_on(&keys, AccountType::Vanilla, 0, 0).0);
-        let (foreign, ..) = fx::multisig_address(fx::foreign_xonly(0xB1));
+        let a_spk = fx::our_address(&keys, AccountType::Colored, 0, 0);
+        let v_spk = fx::our_address(&keys, AccountType::Vanilla, 0, 0);
+        let foreign = fx::foreign_address(0xB1);
         let mut psbt = fx::psbt_with_n(2, &[(foreign, 1_000), (a_spk, 90_000), (v_spk, 8_000)]);
         fx::anchor_input(&mut psbt, 0, &keys, AccountType::Colored, 0, 0, 100_000);
         fx::anchor_input(&mut psbt, 1, &keys, AccountType::Vanilla, 0, 0, 100_000);

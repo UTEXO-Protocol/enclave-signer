@@ -13,13 +13,6 @@ use bitcoin::{
 
 use crate::keys::AccountType;
 
-/// NUMS internal key - unspendable key-path, as the bridge's taproot
-/// multisig addresses use.
-const NUMS_INTERNAL: [u8; 32] = [
-    0x50, 0x92, 0x9b, 0x74, 0xc1, 0xa0, 0x49, 0x54, 0xb7, 0x8b, 0x4b, 0x60, 0x35, 0xe9, 0x7a, 0x5e,
-    0x07, 0x8a, 0x5a, 0x0f, 0x28, 0xec, 0x96, 0xd5, 0x47, 0xbf, 0xee, 0x9a, 0xce, 0x80, 0x3a, 0xc0,
-];
-
 fn km() -> KeyManager {
     KeyManager::from_seed([0x42u8; 64], Network::Testnet).unwrap()
 }
@@ -45,15 +38,10 @@ fn multi_a_2_of_3(keys: &[XOnlyPublicKey; 3]) -> ScriptBuf {
         .into_script()
 }
 
-/// The enclave's own 2-of-3 taproot address at m/86'/1'/0'/0/0, plus the
-/// leaf, control block, and key origin an input needs to be recognised as
-/// co-controlled.
+/// The enclave's own BIP-86 key-path address at m/86'/1'/0'/0/0, plus the
+/// key and origin an input needs to be recognised as controlled.
 struct OurAddress {
     spk: ScriptBuf,
-    leaf: ScriptBuf,
-    leaf_hash: TapLeafHash,
-    internal: XOnlyPublicKey,
-    control: bitcoin::taproot::ControlBlock,
     xonly: XOnlyPublicKey,
     path: DerivationPath,
 }
@@ -66,22 +54,8 @@ fn our_address(keys: &KeyManager) -> OurAddress {
     ];
     let sk = keys.derive_btc_child(AccountType::Vanilla, &child).unwrap();
     let xonly = XOnlyPublicKey::from_keypair(&Keypair::from_secret_key(&secp, &sk)).0;
-    let leaf = multi_a_2_of_3(&[xonly, foreign_xonly(0xA1), foreign_xonly(0xA2)]);
-    let leaf_hash = TapLeafHash::from_script(&leaf, LeafVersion::TapScript);
-    let internal = XOnlyPublicKey::from_slice(&NUMS_INTERNAL).unwrap();
-    let info = TaprootBuilder::new()
-        .add_leaf(0, leaf.clone())
-        .unwrap()
-        .finalize(&secp, internal)
-        .unwrap();
     OurAddress {
-        spk: ScriptBuf::new_p2tr(&secp, internal, info.merkle_root()),
-        control: info
-            .control_block(&(leaf.clone(), LeafVersion::TapScript))
-            .unwrap(),
-        leaf,
-        leaf_hash,
-        internal,
+        spk: ScriptBuf::new_p2tr(&secp, xonly, None),
         xonly,
         path: DerivationPath::from(vec![
             ChildNumber::from_hardened_idx(86).unwrap(),
@@ -95,23 +69,11 @@ fn our_address(keys: &KeyManager) -> OurAddress {
 
 /// A taproot address the enclave has nothing to do with.
 fn foreign_address() -> ScriptBuf {
-    let secp = Secp256k1::new();
-    let leaf = multi_a_2_of_3(&[
-        foreign_xonly(0xB1),
-        foreign_xonly(0xB2),
-        foreign_xonly(0xB3),
-    ]);
-    let internal = XOnlyPublicKey::from_slice(&NUMS_INTERNAL).unwrap();
-    let info = TaprootBuilder::new()
-        .add_leaf(0, leaf)
-        .unwrap()
-        .finalize(&secp, internal)
-        .unwrap();
-    ScriptBuf::new_p2tr(&secp, internal, info.merkle_root())
+    ScriptBuf::new_p2tr(&Secp256k1::new(), foreign_xonly(0xB1), None)
 }
 
 /// Plain-BTC PSBT spending `input_sats` per input from the enclave's own
-/// address, paying `outputs`. Inputs carry full taproot metadata, so rule
+/// address, paying `outputs`. Inputs carry full key-path metadata, so rule
 /// (A) recognises any output paying back to that address.
 fn psbt_from_our_address(
     keys: &KeyManager,
@@ -170,17 +132,10 @@ fn psbt_inner(
                 script_pubkey: ours.spk.clone(),
             });
         }
-        p.inputs[i].tap_internal_key = Some(ours.internal);
-        p.inputs[i].tap_scripts.insert(
-            ours.control.clone(),
-            (ours.leaf.clone(), LeafVersion::TapScript),
-        );
+        p.inputs[i].tap_internal_key = Some(ours.xonly);
         p.inputs[i].tap_key_origins.insert(
             ours.xonly,
-            (
-                vec![ours.leaf_hash],
-                (*keys.master_fingerprint(), ours.path.clone()),
-            ),
+            (vec![], (*keys.master_fingerprint(), ours.path.clone())),
         );
     }
     p.serialize()
@@ -260,9 +215,9 @@ fn rgb_sats_gate_sums_unowned_outputs() {
 }
 
 /// Rule (B) is not consulted: an output whose taproot tree merely mentions
-/// one of our keys is NOT proof of control (the bridge script is a multisig
-/// whose signer set the enclave does not know), so it counts against the
-/// budget like any other unowned script.
+/// one of our keys is NOT proof of control (the rest of the tree and its
+/// internal key are someone else's), so it counts against the budget like any
+/// other unowned script.
 #[test]
 fn rgb_sats_gate_does_not_trust_a_leaf_mentioning_our_key() {
     use bitcoin::psbt::Psbt;

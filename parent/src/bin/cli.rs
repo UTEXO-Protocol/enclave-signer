@@ -78,7 +78,7 @@ enum Command {
         #[arg(long)]
         consignment_valid: bool,
     },
-    /// Sign a PSBT (SegWit v0 P2WSH multisig)
+    /// Sign a bridge PSBT (BIP-86 key-path taproot inputs)
     SignPsbt {
         /// Hex-encoded PSBT bytes
         #[arg(long)]

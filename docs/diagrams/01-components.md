@@ -58,7 +58,7 @@ flowchart TB
             NRP[psbt_validation.rs<br/>PSBT ↔ consignment anchor,<br/>per-output legs, fee-rate 3x cap]
             NRB[btc_crosscheck.rs<br/>plain-BTC + send-RGB sats gates<br/>btc_ownership.rs custody rule<br/>+ total-sats cap + unowned budgets]
             NRS[spv_crosscheck.rs<br/>coverage + depth ≥ 6<br/>+ chain_net + staleness]
-            NRSIG[signing/<br/>psbt.rs P2WSH ECDSA<br/>taproot.rs BIP-341 Schnorr]
+            NRSIG[signing/<br/>taproot.rs BIP-341 Schnorr<br/>key path only]
             subgraph SPVMOD [spv/]
                 SCh[chain.rs — HeaderChain<br/>full retention, 1M cap,<br/>bounded reorg ≤ 100]
                 SCp[checkpoint.rs<br/>compile-time anchors → PCR0]

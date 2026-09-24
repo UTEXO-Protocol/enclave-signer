@@ -2,10 +2,8 @@ use std::str::FromStr;
 
 use bip39::Mnemonic;
 use bitcoin::bip32::{ChainCode, ChildNumber, DerivationPath, Fingerprint, Xpriv, Xpub};
-use bitcoin::hashes::Hash;
 use bitcoin::psbt::Psbt;
-use bitcoin::secp256k1::{Message, PublicKey, Secp256k1, SecretKey};
-use bitcoin::sighash::{EcdsaSighashType, SighashCache};
+use bitcoin::secp256k1::{PublicKey, Secp256k1, SecretKey};
 use bitcoin::Network;
 use ed25519_dalek::{Signer, SigningKey as Ed25519SigningKey};
 use hmac::{Hmac, Mac};
@@ -16,6 +14,7 @@ use sha3::{Digest, Keccak256};
 use zeroize::Zeroize;
 
 use crate::error::{EnclaveError, Result};
+use crate::networks::rgb::signing::taproot::{find_taproot_sign_jobs, sign_taproot_inputs};
 
 /// RGB coin types for colored (RGB asset) operations. Mainnet/other split,
 /// matching `rgb-lib::utils::get_coin_type` - the host wallet derives the
@@ -86,7 +85,6 @@ pub struct KeyManager {
     seed: SecretBox<[u8; 64]>,
     evm_secret: SecretBox<[u8; 32]>,
     evm_gas_tx_secret: SecretBox<[u8; 32]>,
-    btc_secret: SecretBox<[u8; 32]>,
     evm_address: [u8; 20],
     evm_uncompressed_pub: [u8; 64],
     evm_gas_tx_address: [u8; 20],
@@ -188,18 +186,14 @@ impl KeyManager {
         let mut evm_gas_tx_address = [0u8; 20];
         evm_gas_tx_address.copy_from_slice(&gas_tx_hash[12..32]);
 
-        // === BTC Legacy: m/84'/0'/0'/0/0 (kept for backward compatibility) ===
+        // === BTC Legacy: m/84'/0'/0'/0/0 ===
+        // Only its public key is still published; nothing is signed with it.
         let btc_path = DerivationPath::from_str("m/84'/0'/0'/0/0")
             .map_err(|e| EnclaveError::InvalidKey(format!("invalid BTC path: {}", e)))?;
         let btc_xpriv = master
             .derive_priv(&secp, &btc_path)
             .map_err(|e| EnclaveError::InvalidKey(format!("BTC derivation failed: {}", e)))?;
-        let btc_secret_key = btc_xpriv.private_key;
-        let mut btc_secret_bytes = btc_secret_key.secret_bytes();
-        let btc_secret = SecretBox::new(Box::new(btc_secret_bytes));
-        btc_secret_bytes.zeroize();
-
-        let btc_pubkey = PublicKey::from_secret_key(&secp, &btc_secret_key);
+        let btc_pubkey = PublicKey::from_secret_key(&secp, &btc_xpriv.private_key);
         let mut btc_compressed_pubkey = [0u8; 33];
         btc_compressed_pubkey.copy_from_slice(&btc_pubkey.serialize());
 
@@ -254,7 +248,6 @@ impl KeyManager {
             seed: seed_box,
             evm_secret,
             evm_gas_tx_secret,
-            btc_secret,
             evm_address,
             evm_uncompressed_pub,
             evm_gas_tx_address,
@@ -407,10 +400,9 @@ impl KeyManager {
         Ok((signing_key.sign(hash).to_bytes(), self.concordium_pub))
     }
 
-    /// Sign PSBT inputs matching our keys.
-    /// Auto-detects taproot (Schnorr, BIP-340; script path or BIP-86 key path)
-    /// vs SegWit v0 P2WSH (ECDSA) per input.
-    /// Returns the modified PSBT bytes and count of inputs signed.
+    /// Sign the BIP-86 key-path taproot inputs (Schnorr, BIP-340) that resolve
+    /// to our keys on either account. Returns the modified PSBT bytes and the
+    /// count of inputs signed.
     pub fn sign_psbt(&self, psbt_bytes: &[u8]) -> Result<(Vec<u8>, usize)> {
         self.sign_psbt_scoped(psbt_bytes, None)
     }
@@ -419,109 +411,33 @@ impl KeyManager {
     /// BIP-86 account.
     ///
     /// `allowed_account`:
-    ///   * `None`: sign every input we can (taproot on any account, plus legacy
-    ///     P2WSH). Used by the consignment-bound bridge path (`SignPsbt`),
-    ///     where the consignment is the authorization.
-    ///   * `Some(account)`: sign only taproot inputs resolving to `account` and
-    ///     skip the legacy P2WSH path. `SignBtc` passes `Some(Vanilla)`, so the
-    ///     plain-BTC path can never co-sign a Colored (RGB-allocated) input
-    ///     (the structural half of the input-scoping fix).
+    ///   * `None`: sign key-path inputs on either account.
+    ///   * `Some(account)`: sign only inputs resolving to `account`. The bridge
+    ///     path (`SignPsbt`) passes `Some(Colored)` and `SignBtc` passes
+    ///     `Some(Vanilla)`, so the plain-BTC path can never sign a Colored
+    ///     (RGB-allocated) input.
     pub fn sign_psbt_scoped(
         &self,
         psbt_bytes: &[u8],
         allowed_account: Option<AccountType>,
     ) -> Result<(Vec<u8>, usize)> {
-        let secp = Secp256k1::new();
-
         let mut psbt = Psbt::deserialize(psbt_bytes)
             .map_err(|e| EnclaveError::Signing(format!("psbt deserialize: {e}")))?;
 
-        let mut signed_count = 0usize;
-
-        // === Taproot signing (BIP-86 / BIP-340 Schnorr) ===
-        let mut taproot_jobs = crate::networks::rgb::signing::taproot::find_taproot_sign_jobs(
-            &psbt,
-            &self.master_fingerprint,
-            self,
-        );
+        let mut jobs = find_taproot_sign_jobs(&psbt, &self.master_fingerprint, self);
         if let Some(account) = allowed_account {
-            // Plain-BTC path: refuse any input that resolves to a different
-            // account (e.g. Colored/RGB). Dropping the job means the input is
-            // left unsigned.
-            taproot_jobs.retain(|job| job.account_type == account);
+            // A job on another account is dropped, so that input stays unsigned.
+            jobs.retain(|job| job.account_type == account);
         }
-        if !taproot_jobs.is_empty() {
-            signed_count += crate::networks::rgb::signing::taproot::sign_taproot_inputs(
-                &mut psbt,
-                self,
-                &taproot_jobs,
-            )?;
-        }
-
-        // === Legacy SegWit v0 P2WSH signing (ECDSA) ===
-        // Skipped on an account-scoped call: the legacy key is not
-        // BIP-86-account-derived.
-        if allowed_account.is_some() {
-            return Ok((psbt.serialize(), signed_count));
-        }
-        let secret_key = SecretKey::from_slice(self.btc_secret.expose_secret())
-            .map_err(|e| EnclaveError::Signing(format!("btc key: {e}")))?;
-        let our_pubkey = secret_key.public_key(&secp);
-
-        let unsigned_tx = psbt.unsigned_tx.clone();
-        let mut sighash_cache = SighashCache::new(&unsigned_tx);
-
-        for i in 0..psbt.inputs.len() {
-            let crate::networks::rgb::signing::psbt::SegwitSignDecision::SignP2wsh {
-                witness_script,
-            } = crate::networks::rgb::signing::psbt::should_sign_segwit_input(
-                &psbt,
-                i,
-                &our_pubkey,
-            )
-            else {
-                continue;
-            };
-
-            // SAFETY: SignP2wsh is only returned when witness_utxo is present
-            // and committed to witness_script.
-            let witness_utxo_value = psbt.inputs[i]
-                .witness_utxo
-                .as_ref()
-                .expect("SignP2wsh implies witness_utxo present")
-                .value;
-
-            let sighash = sighash_cache
-                .p2wsh_signature_hash(
-                    i,
-                    &witness_script,
-                    witness_utxo_value,
-                    EcdsaSighashType::All,
-                )
-                .map_err(|e| EnclaveError::Signing(format!("sighash: {e}")))?;
-
-            let msg = Message::from_digest(sighash.to_byte_array());
-            let sig = secp.sign_ecdsa(&msg, &secret_key);
-
-            let bitcoin_sig = bitcoin::ecdsa::Signature {
-                signature: sig,
-                sighash_type: EcdsaSighashType::All,
-            };
-            psbt.inputs[i]
-                .partial_sigs
-                .insert(bitcoin::PublicKey::new(our_pubkey), bitcoin_sig);
-            signed_count += 1;
-        }
-
-        let signed_bytes = psbt.serialize();
-        Ok((signed_bytes, signed_count))
+        let signed_count = sign_taproot_inputs(&mut psbt, self, &jobs)?;
+        Ok((psbt.serialize(), signed_count))
     }
 }
 
 impl Drop for KeyManager {
     /// Wipe the BIP-86 account extended private keys on teardown.
     ///
-    /// Unlike `seed` / `evm_secret` / `btc_secret`, these are plain `Xpriv`
+    /// Unlike `seed` / `evm_secret`, these are plain `Xpriv`
     /// fields with no `SecretBox` zeroize-on-drop. Each carries a signing
     /// `private_key` and a sensitive `chain_code`; both are overwritten.
     fn drop(&mut self) {

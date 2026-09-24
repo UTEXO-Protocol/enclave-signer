@@ -39,13 +39,6 @@ const NET: u64 = GROSS - COMMISSION;
 const INVOICE: &str = "rgb:~/~/~/bc:utxob:dYwB28dy-yD6EBgm-MO~UKN_-FyEEdBL-E9hw8Oj-i9KxH5b-e9vZL";
 const RECIPIENT_SEAL: &str = "utxob:dYwB28dy-yD6EBgm-MO~UKN_-FyEEdBL-E9hw8Oj-i9KxH5b-e9vZL";
 
-/// NUMS internal key (BIP-341 unspendable key path), as the bridge's
-/// taproot addresses use.
-const NUMS_INTERNAL: [u8; 32] = [
-    0x50, 0x92, 0x9b, 0x74, 0xc1, 0xa0, 0x49, 0x54, 0xb7, 0x8b, 0x4b, 0x60, 0x35, 0xe9, 0x7a, 0x5e,
-    0x07, 0x8a, 0x5a, 0x0f, 0x28, 0xec, 0x96, 0xd5, 0x47, 0xbf, 0xee, 0x9a, 0xce, 0x80, 0x3a, 0xc0,
-];
-
 /// A caller that is gone: the request still reads back, every write
 /// fails.
 struct DeadCaller(Cursor<Vec<u8>>);
@@ -101,15 +94,12 @@ fn foreign_address() -> bitcoin::ScriptBuf {
 }
 
 /// The witness transaction of the deposit: one input on the enclave's
-/// colored address `m/86'/827166'/0'/0/0` (a 2-of-3 taproot address, the
-/// federation shape), the recipient's output, and colored change.
+/// colored key-path address `m/86'/827166'/0'/0/0`, the recipient's output,
+/// and colored change back to that address.
 fn deposit_psbt(state: &EnclaveState) -> Vec<u8> {
     use bitcoin::bip32::ChildNumber;
-    use bitcoin::blockdata::opcodes::all::{OP_CHECKSIG, OP_CHECKSIGADD, OP_NUMEQUAL};
-    use bitcoin::blockdata::script::Builder;
     use bitcoin::hashes::Hash;
     use bitcoin::psbt::Psbt;
-    use bitcoin::taproot::{LeafVersion, TapLeafHash, TaprootBuilder};
     use bitcoin::{Amount, OutPoint, ScriptBuf, Sequence, Transaction, TxIn, TxOut, Txid, Witness};
     use std::str::FromStr;
 
@@ -125,30 +115,7 @@ fn deposit_psbt(state: &EnclaveState) -> Vec<u8> {
         .derive_pub(&secp, &child.to_vec())
         .expect("derive child xpub")
         .to_x_only_pub();
-
-    let mut keyset = [ours, foreign_xonly(0xA1), foreign_xonly(0xA2)];
-    keyset.sort();
-    let leaf = Builder::new()
-        .push_x_only_key(&keyset[0])
-        .push_opcode(OP_CHECKSIG)
-        .push_x_only_key(&keyset[1])
-        .push_opcode(OP_CHECKSIGADD)
-        .push_x_only_key(&keyset[2])
-        .push_opcode(OP_CHECKSIGADD)
-        .push_int(2)
-        .push_opcode(OP_NUMEQUAL)
-        .into_script();
-    let leaf_hash = TapLeafHash::from_script(&leaf, LeafVersion::TapScript);
-    let internal = bitcoin::XOnlyPublicKey::from_slice(&NUMS_INTERNAL).unwrap();
-    let info = TaprootBuilder::new()
-        .add_leaf(0, leaf.clone())
-        .unwrap()
-        .finalize(&secp, internal)
-        .unwrap();
-    let spk = ScriptBuf::new_p2tr(&secp, internal, info.merkle_root());
-    let control = info
-        .control_block(&(leaf.clone(), LeafVersion::TapScript))
-        .unwrap();
+    let spk = ScriptBuf::new_p2tr(&secp, ours, None);
     let path = bitcoin::bip32::DerivationPath::from(vec![
         ChildNumber::from_hardened_idx(86).unwrap(),
         ChildNumber::from_hardened_idx(827166).unwrap(),
@@ -187,14 +154,11 @@ fn deposit_psbt(state: &EnclaveState) -> Vec<u8> {
         value: Amount::from_sat(60_000),
         script_pubkey: spk,
     });
-    psbt.inputs[0].tap_internal_key = Some(internal);
-    psbt.inputs[0]
-        .tap_scripts
-        .insert(control, (leaf, LeafVersion::TapScript));
+    psbt.inputs[0].tap_internal_key = Some(ours);
     psbt.inputs[0].tap_key_origins.insert(
         ours,
         (
-            vec![leaf_hash],
+            vec![],
             (
                 bitcoin::bip32::Fingerprint::from(keys.master_fingerprint),
                 path,

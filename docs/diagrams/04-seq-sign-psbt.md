@@ -10,9 +10,8 @@ vanilla BIP-86 account only.
 The bridge path below always requires the EVM deposit hash **and** the RGB
 consignment, is scoped to the colored account, and bounds Bitcoin outputs it
 cannot prove by `RGB_MAX_UNOWNED_SATS` -- every other bind on this path is
-denominated in RGB asset units and says nothing about sats. Because signing is
-account-scoped, only the taproot pass runs here; the legacy SegWit v0 P2WSH
-pass exists only for the unscoped library `KeyManager::sign_psbt` path.
+denominated in RGB asset units and says nothing about sats. Signing is
+account-scoped and BIP-86 key-path only.
 
 ```mermaid
 sequenceDiagram
@@ -33,7 +32,7 @@ sequenceDiagram
 
     Note over Orc,Listener: Intent
     Orc->>Listener: bridge intent (FundsIn deposit observed on EVM)
-    Listener->>Listener: fetch PSBT from rgb-multisig-bridge,<br/>enrich with EVM event fields + RGB consignment
+    Listener->>Listener: take PSBT + consignment from the request,<br/>enrich with EVM event fields
     Listener->>Parent: gRPC Sign(TRANSACTION, enriched payload)
 
     Note over Parent,Srv: Translate
@@ -89,24 +88,20 @@ sequenceDiagram
     Srv->>Srv: validate_rgb_psbt_sats: unowned output sats ≤ RGB_MAX_UNOWNED_SATS
     Srv->>Km: sign_psbt_scoped(psbt_bytes, AccountType::Colored)
     Km->>Km: Psbt::deserialize(...)
-    Note over Km: Taproot script-path (Schnorr) only —<br/>jobs on the vanilla account are dropped,<br/>the legacy P2WSH pass is skipped on a scoped call.
+    Note over Km: Taproot BIP-86 key-path (Schnorr) only —<br/>jobs on the vanilla account are dropped.
 
     Note over Km,Tap: Taproot pass
     Km->>Tap: find_taproot_sign_jobs(psbt, fp, key_manager)
     loop each input
         Tap->>Tap: witness_utxo.script_pubkey.is_p2tr() ?
         Tap->>Tap: output_key := spk[2..34]
-        loop (control_block, (script, leaf_version)) in tap_scripts
-            Tap->>Crypto: control_block.verify_taproot_commitment(output_key, script)
-            Note right of Tap: Anchor: rejects any leaf whose<br/>control block does not commit<br/>under the on-chain output_key.
-            loop 32-byte PushBytes in script
-                Tap->>Tap: tap_key_origins[xonly]?<br/>fp == master_fingerprint?<br/>leaf_hashes contains this leaf?
-                Tap->>Tap: resolve_account_and_child_path(<br/>BIP-86 path)
-                Tap->>Crypto: derive child secret,<br/>xonly(derived) == xonly_from_psbt
-                alt all match
-                    Tap->>Tap: emit TaprootSignJob
-                end
-            end
+        Tap->>Tap: tap_internal_key set?<br/>tap_key_origins[internal] fp == master_fingerprint?
+        Tap->>Tap: resolve_account_and_child_path(<br/>BIP-86 path)
+        Tap->>Crypto: derive child secret,<br/>xonly(derived) == tap_internal_key
+        Tap->>Crypto: tap_tweak(internal, tap_merkle_root) == output_key
+        Note right of Tap: Anchor: a forged origins claim fails the<br/>derivation, a foreign coin fails the tweak.<br/>Script-path inputs never yield a job.
+        alt all match and no tap_key_sig yet
+            Tap->>Tap: emit TaprootSignJob
         end
     end
     Tap-->>Km: jobs
@@ -114,9 +109,9 @@ sequenceDiagram
     alt jobs non-empty
         Km->>Km: sighash_cache (Prevouts::All)
         loop each TaprootSignJob
-            Km->>Crypto: taproot_script_spend_signature_hash(<br/>input, prevouts, leaf, Default)
-            Km->>Crypto: sign_schnorr_no_aux_rand(sighash, keypair)
-            Km->>Km: insert tap_script_sigs[(xonly, leaf_hash)]
+            Km->>Crypto: taproot_key_spend_signature_hash(<br/>input, prevouts, Default or All)
+            Km->>Crypto: sign_schnorr_no_aux_rand(sighash,<br/>keypair tweaked with merkle_root)
+            Km->>Km: set tap_key_sig
         end
     end
 

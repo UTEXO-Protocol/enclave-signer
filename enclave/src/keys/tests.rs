@@ -1,3 +1,5 @@
+use bitcoin::hashes::Hash;
+
 use super::*;
 use crate::state::EnclaveState;
 
@@ -333,22 +335,21 @@ fn test_sign_ccd_deterministic() {
     assert_eq!(km.sign_ccd(&hash).unwrap(), km.sign_ccd(&hash).unwrap());
 }
 
-/// Build a minimal 2-of-3 multisig PSBT for testing.
-fn build_test_multisig_psbt(our_pubkey: &bitcoin::PublicKey) -> Vec<u8> {
-    use bitcoin::blockdata::opcodes::all::*;
+/// The legacy segwit v0 P2WSH signer is gone: a 2-of-3 P2WSH input whose
+/// witness script names our legacy key, committed correctly, is not signed.
+#[test]
+fn p2wsh_input_naming_our_legacy_key_is_never_signed() {
+    use bitcoin::blockdata::opcodes::all::OP_CHECKMULTISIG;
     use bitcoin::blockdata::script::Builder as ScriptBuilder;
     use bitcoin::{Amount, OutPoint, ScriptBuf, Sequence, Transaction, TxIn, TxOut, Txid};
 
+    let km = KeyManager::from_seed([0x42u8; 64], Network::Bitcoin).unwrap();
     let secp = Secp256k1::new();
-
-    let sk2 = SecretKey::from_slice(&[0x02; 32]).unwrap();
-    let pk2 = bitcoin::PublicKey::new(sk2.public_key(&secp));
-    let sk3 = SecretKey::from_slice(&[0x03; 32]).unwrap();
-    let pk3 = bitcoin::PublicKey::new(sk3.public_key(&secp));
-
-    let mut pubkeys = [*our_pubkey, pk2, pk3];
+    let ours = bitcoin::PublicKey::from_slice(km.btc_compressed_pubkey()).unwrap();
+    let other =
+        |b: u8| bitcoin::PublicKey::new(SecretKey::from_slice(&[b; 32]).unwrap().public_key(&secp));
+    let mut pubkeys = [ours, other(0x02), other(0x03)];
     pubkeys.sort_by_key(|k| k.to_bytes());
-
     let witness_script = ScriptBuilder::new()
         .push_int(2)
         .push_key(&pubkeys[0])
@@ -377,48 +378,17 @@ fn build_test_multisig_psbt(our_pubkey: &bitcoin::PublicKey) -> Vec<u8> {
             )),
         }],
     };
-
     let mut psbt = Psbt::from_unsigned_tx(unsigned_tx).unwrap();
-
-    let witness_script_hash = bitcoin::WScriptHash::hash(witness_script.as_bytes());
     psbt.inputs[0].witness_utxo = Some(TxOut {
         value: Amount::from_sat(100_000),
-        script_pubkey: ScriptBuf::new_p2wsh(&witness_script_hash),
+        script_pubkey: ScriptBuf::new_p2wsh(&bitcoin::WScriptHash::hash(witness_script.as_bytes())),
     });
     psbt.inputs[0].witness_script = Some(witness_script);
 
-    psbt.serialize()
-}
-
-#[test]
-fn test_sign_psbt_one_input() {
-    let seed = [0x42u8; 64];
-    let km = KeyManager::from_seed(seed, Network::Bitcoin).unwrap();
-
-    let our_pubkey = bitcoin::PublicKey::from_slice(km.btc_compressed_pubkey()).unwrap();
-    let psbt_bytes = build_test_multisig_psbt(&our_pubkey);
-
-    let (signed_bytes, count) = km.sign_psbt(&psbt_bytes).unwrap();
-    assert_eq!(count, 1);
-
-    let signed_psbt = Psbt::deserialize(&signed_bytes).unwrap();
-    assert!(signed_psbt.inputs[0].partial_sigs.contains_key(&our_pubkey));
-}
-
-#[test]
-fn test_sign_psbt_skip_already_signed() {
-    let seed = [0x42u8; 64];
-    let km = KeyManager::from_seed(seed, Network::Bitcoin).unwrap();
-
-    let our_pubkey = bitcoin::PublicKey::from_slice(km.btc_compressed_pubkey()).unwrap();
-    let psbt_bytes = build_test_multisig_psbt(&our_pubkey);
-
-    let (signed_bytes, count1) = km.sign_psbt(&psbt_bytes).unwrap();
-    assert_eq!(count1, 1);
-
-    // Sign the already-signed PSBT again - should skip
-    let (_, count2) = km.sign_psbt(&signed_bytes).unwrap();
-    assert_eq!(count2, 0);
+    let (signed_bytes, count) = km.sign_psbt(&psbt.serialize()).unwrap();
+    assert_eq!(count, 0);
+    let signed = Psbt::deserialize(&signed_bytes).unwrap();
+    assert!(signed.inputs[0].partial_sigs.is_empty());
 }
 
 #[test]
@@ -431,179 +401,10 @@ fn test_sign_psbt_invalid_bytes() {
     assert!(result.is_err());
 }
 
-#[test]
-fn test_sign_psbt_no_matching_inputs() {
-    let mut entropy = [0u8; 32];
-    getrandom::fill(&mut entropy).unwrap();
-    let (km, _mnemonic) = KeyManager::generate(&mut entropy, Network::Bitcoin).unwrap();
-
-    let secp = Secp256k1::new();
-    let other_sk = SecretKey::from_slice(&[0x99; 32]).unwrap();
-    let other_pk = bitcoin::PublicKey::new(other_sk.public_key(&secp));
-    let psbt_bytes = build_test_multisig_psbt(&other_pk);
-
-    let (_, count) = km.sign_psbt(&psbt_bytes).unwrap();
-    assert_eq!(count, 0);
-}
-
-/// Adversarial: 2-of-3 P2WSH where the TEE is not a cosigner, but the PSBT
-/// places our pubkey in `bip32_derivation`. Must refuse.
-#[test]
-fn adversarial_psbt_forged_bip32_derivation_is_not_signed() {
-    use bitcoin::blockdata::opcodes::all::*;
-    use bitcoin::blockdata::script::Builder as ScriptBuilder;
-    use bitcoin::{Amount, OutPoint, ScriptBuf, Sequence, Transaction, TxIn, TxOut, Txid};
-
-    let seed = [0x42u8; 64];
-    let km = KeyManager::from_seed(seed, Network::Bitcoin).unwrap();
-    let our_pk = PublicKey::from_slice(km.btc_compressed_pubkey()).unwrap();
-    let our_btc_pk = bitcoin::PublicKey::new(our_pk);
-
-    let secp = Secp256k1::new();
-    let pk_other =
-        |b: u8| bitcoin::PublicKey::new(SecretKey::from_slice(&[b; 32]).unwrap().public_key(&secp));
-    let mut others = [pk_other(0xA1), pk_other(0xA2), pk_other(0xA3)];
-    others.sort_by_key(|k| k.to_bytes());
-
-    let witness_script = ScriptBuilder::new()
-        .push_int(2)
-        .push_key(&others[0])
-        .push_key(&others[1])
-        .push_key(&others[2])
-        .push_int(3)
-        .push_opcode(OP_CHECKMULTISIG)
-        .into_script();
-
-    let unsigned_tx = Transaction {
-        version: bitcoin::transaction::Version(2),
-        lock_time: bitcoin::blockdata::locktime::absolute::LockTime::ZERO,
-        input: vec![TxIn {
-            previous_output: OutPoint {
-                txid: Txid::from_byte_array([0xAA; 32]),
-                vout: 0,
-            },
-            script_sig: ScriptBuf::new(),
-            sequence: Sequence::MAX,
-            witness: bitcoin::Witness::default(),
-        }],
-        output: vec![TxOut {
-            value: Amount::from_sat(50_000),
-            script_pubkey: ScriptBuf::new_p2wpkh(&bitcoin::WPubkeyHash::from_byte_array(
-                [0xBB; 20],
-            )),
-        }],
-    };
-    let mut psbt = Psbt::from_unsigned_tx(unsigned_tx).unwrap();
-    let ws_hash = bitcoin::WScriptHash::hash(witness_script.as_bytes());
-    psbt.inputs[0].witness_utxo = Some(TxOut {
-        value: Amount::from_sat(100_000),
-        script_pubkey: ScriptBuf::new_p2wsh(&ws_hash),
-    });
-    psbt.inputs[0].witness_script = Some(witness_script);
-
-    // Plant our pubkey in bip32_derivation - the lie.
-    psbt.inputs[0].bip32_derivation.insert(
-        our_pk,
-        (
-            *km.master_fingerprint(),
-            bitcoin::bip32::DerivationPath::from(vec![]),
-        ),
-    );
-
-    let (signed_bytes, count) = km.sign_psbt(&psbt.serialize()).unwrap();
-    assert_eq!(
-        count, 0,
-        "TEE must not sign when it is not in witness_script"
-    );
-    let signed = Psbt::deserialize(&signed_bytes).unwrap();
-    assert!(!signed.inputs[0].partial_sigs.contains_key(&our_btc_pk));
-}
-
-/// Adversarial: `script_pubkey` commits to script A (without us) while the
-/// PSBT ships script B (with our pubkey) as `witness_script`. Must refuse,
-/// since sha256(B) != the script_pubkey's witness program.
-#[test]
-fn adversarial_psbt_witness_script_mismatch_is_not_signed() {
-    use bitcoin::blockdata::opcodes::all::*;
-    use bitcoin::blockdata::script::Builder as ScriptBuilder;
-    use bitcoin::{Amount, OutPoint, ScriptBuf, Sequence, Transaction, TxIn, TxOut, Txid};
-
-    let seed = [0x42u8; 64];
-    let km = KeyManager::from_seed(seed, Network::Bitcoin).unwrap();
-    let our_pk = PublicKey::from_slice(km.btc_compressed_pubkey()).unwrap();
-    let our_btc_pk = bitcoin::PublicKey::new(our_pk);
-
-    let secp = Secp256k1::new();
-    let pk_other =
-        |b: u8| bitcoin::PublicKey::new(SecretKey::from_slice(&[b; 32]).unwrap().public_key(&secp));
-
-    // Script A - what the on-chain UTXO actually commits to (no us).
-    let mut keys_a = [pk_other(0xA1), pk_other(0xA2), pk_other(0xA3)];
-    keys_a.sort_by_key(|k| k.to_bytes());
-    let script_a = ScriptBuilder::new()
-        .push_int(2)
-        .push_key(&keys_a[0])
-        .push_key(&keys_a[1])
-        .push_key(&keys_a[2])
-        .push_int(3)
-        .push_opcode(OP_CHECKMULTISIG)
-        .into_script();
-    let real_spk = ScriptBuf::new_p2wsh(&bitcoin::WScriptHash::hash(script_a.as_bytes()));
-
-    // Script B - what the attacker ships in PSBT (contains us).
-    let mut keys_b = [our_btc_pk, pk_other(0xA2), pk_other(0xA3)];
-    keys_b.sort_by_key(|k| k.to_bytes());
-    let script_b = ScriptBuilder::new()
-        .push_int(2)
-        .push_key(&keys_b[0])
-        .push_key(&keys_b[1])
-        .push_key(&keys_b[2])
-        .push_int(3)
-        .push_opcode(OP_CHECKMULTISIG)
-        .into_script();
-
-    let unsigned_tx = Transaction {
-        version: bitcoin::transaction::Version(2),
-        lock_time: bitcoin::blockdata::locktime::absolute::LockTime::ZERO,
-        input: vec![TxIn {
-            previous_output: OutPoint {
-                txid: Txid::from_byte_array([0xAA; 32]),
-                vout: 0,
-            },
-            script_sig: ScriptBuf::new(),
-            sequence: Sequence::MAX,
-            witness: bitcoin::Witness::default(),
-        }],
-        output: vec![TxOut {
-            value: Amount::from_sat(50_000),
-            script_pubkey: ScriptBuf::new_p2wpkh(&bitcoin::WPubkeyHash::from_byte_array(
-                [0xBB; 20],
-            )),
-        }],
-    };
-    let mut psbt = Psbt::from_unsigned_tx(unsigned_tx).unwrap();
-    psbt.inputs[0].witness_utxo = Some(TxOut {
-        value: Amount::from_sat(100_000),
-        script_pubkey: real_spk,
-    });
-    psbt.inputs[0].witness_script = Some(script_b);
-
-    let (signed_bytes, count) = km.sign_psbt(&psbt.serialize()).unwrap();
-    assert_eq!(
-        count, 0,
-        "TEE must not sign when witness_script does not hash to script_pubkey"
-    );
-    let signed = Psbt::deserialize(&signed_bytes).unwrap();
-    assert!(!signed.inputs[0].partial_sigs.contains_key(&our_btc_pk));
-}
-
-/// Build a taproot multi_a(2, pk1, pk2, pk3) PSBT for testing.
+/// Build a BIP-86 key-path taproot PSBT for testing.
 /// The signer's key is derived at m/86'/1'/0'/0/0 (vanilla testnet).
 fn build_test_taproot_psbt(km: &KeyManager) -> Vec<u8> {
     use bitcoin::bip32::ChildNumber;
-    use bitcoin::blockdata::opcodes::all::*;
-    use bitcoin::blockdata::script::Builder as ScriptBuilder;
-    use bitcoin::taproot::{LeafVersion, TapLeafHash, TaprootBuilder};
     use bitcoin::{
         Amount, OutPoint, ScriptBuf, Sequence, Transaction, TxIn, TxOut, Txid, XOnlyPublicKey,
     };
@@ -622,48 +423,7 @@ fn build_test_taproot_psbt(km: &KeyManager) -> Vec<u8> {
         .unwrap();
     let our_keypair = bitcoin::secp256k1::Keypair::from_secret_key(&secp, &our_secret);
     let (our_xonly, _parity) = XOnlyPublicKey::from_keypair(&our_keypair);
-
-    // Two other cosigner keys
-    let sk2 = SecretKey::from_slice(&[0x02; 32]).unwrap();
-    let kp2 = bitcoin::secp256k1::Keypair::from_secret_key(&secp, &sk2);
-    let (xonly2, _) = XOnlyPublicKey::from_keypair(&kp2);
-
-    let sk3 = SecretKey::from_slice(&[0x03; 32]).unwrap();
-    let kp3 = bitcoin::secp256k1::Keypair::from_secret_key(&secp, &sk3);
-    let (xonly3, _) = XOnlyPublicKey::from_keypair(&kp3);
-
-    // Build multi_a(2, pk1, pk2, pk3) tapscript:
-    // pk1 OP_CHECKSIG pk2 OP_CHECKSIGADD pk3 OP_CHECKSIGADD 2 OP_NUMEQUAL
-    let mut keys = [our_xonly, xonly2, xonly3];
-    keys.sort();
-
-    let tap_script = ScriptBuilder::new()
-        .push_x_only_key(&keys[0])
-        .push_opcode(OP_CHECKSIG)
-        .push_x_only_key(&keys[1])
-        .push_opcode(OP_CHECKSIGADD)
-        .push_x_only_key(&keys[2])
-        .push_opcode(OP_CHECKSIGADD)
-        .push_int(2)
-        .push_opcode(OP_NUMEQUAL)
-        .into_script();
-
-    let leaf_hash = TapLeafHash::from_script(&tap_script, LeafVersion::TapScript);
-
-    // Use an unspendable internal key (NUMS point)
-    let internal_key = XOnlyPublicKey::from_slice(&[
-        0x50, 0x92, 0x9b, 0x74, 0xc1, 0xa0, 0x49, 0x54, 0xb7, 0x8b, 0x4b, 0x60, 0x35, 0xe9, 0x7a,
-        0x5e, 0x07, 0x8a, 0x5a, 0x0f, 0x28, 0xec, 0x96, 0xd5, 0x47, 0xbf, 0xee, 0x9a, 0xce, 0x80,
-        0x3a, 0xc0,
-    ])
-    .unwrap();
-
-    let taproot_builder = TaprootBuilder::new()
-        .add_leaf(0, tap_script.clone())
-        .unwrap();
-    let taproot_spend_info = taproot_builder.finalize(&secp, internal_key).unwrap();
-
-    let script_pubkey = ScriptBuf::new_p2tr(&secp, internal_key, taproot_spend_info.merkle_root());
+    let script_pubkey = ScriptBuf::new_p2tr(&secp, our_xonly, None);
 
     let unsigned_tx = Transaction {
         version: bitcoin::transaction::Version(2),
@@ -679,7 +439,7 @@ fn build_test_taproot_psbt(km: &KeyManager) -> Vec<u8> {
         }],
         output: vec![TxOut {
             value: Amount::from_sat(50_000),
-            script_pubkey: ScriptBuf::new_p2tr_tweaked(taproot_spend_info.output_key()),
+            script_pubkey: script_pubkey.clone(),
         }],
     };
 
@@ -689,15 +449,7 @@ fn build_test_taproot_psbt(km: &KeyManager) -> Vec<u8> {
         value: Amount::from_sat(100_000),
         script_pubkey,
     });
-
-    psbt.inputs[0].tap_internal_key = Some(internal_key);
-
-    let control_block = taproot_spend_info
-        .control_block(&(tap_script.clone(), LeafVersion::TapScript))
-        .unwrap();
-    psbt.inputs[0]
-        .tap_scripts
-        .insert(control_block, (tap_script, LeafVersion::TapScript));
+    psbt.inputs[0].tap_internal_key = Some(our_xonly);
 
     let our_fingerprint = *km.master_fingerprint();
     let our_derivation = DerivationPath::from(vec![
@@ -707,10 +459,9 @@ fn build_test_taproot_psbt(km: &KeyManager) -> Vec<u8> {
         ChildNumber::Normal { index: 0 },
         ChildNumber::Normal { index: 0 },
     ]);
-    psbt.inputs[0].tap_key_origins.insert(
-        our_xonly,
-        (vec![leaf_hash], (our_fingerprint, our_derivation)),
-    );
+    psbt.inputs[0]
+        .tap_key_origins
+        .insert(our_xonly, (vec![], (our_fingerprint, our_derivation)));
 
     psbt.serialize()
 }
@@ -724,7 +475,7 @@ fn test_sign_taproot_psbt_one_input() {
     assert_eq!(count, 1);
 
     let signed_psbt = Psbt::deserialize(&signed_bytes).unwrap();
-    assert_eq!(signed_psbt.inputs[0].tap_script_sigs.len(), 1);
+    assert!(signed_psbt.inputs[0].tap_key_sig.is_some());
 }
 
 #[test]
@@ -761,275 +512,25 @@ fn test_sign_taproot_psbt_schnorr_signature_valid() {
     let (signed_bytes, _) = km.sign_psbt(&psbt_bytes).unwrap();
     let signed_psbt = Psbt::deserialize(&signed_bytes).unwrap();
 
-    let ((xonly_pk, _leaf_hash), tap_sig) =
-        signed_psbt.inputs[0].tap_script_sigs.iter().next().unwrap();
+    let tap_sig = signed_psbt.inputs[0].tap_key_sig.unwrap();
+    let witness_utxo = signed_psbt.inputs[0].witness_utxo.clone().unwrap();
+    let output_key =
+        bitcoin::XOnlyPublicKey::from_slice(&witness_utxo.script_pubkey.as_bytes()[2..34]).unwrap();
 
     let secp = Secp256k1::verification_only();
-    let schnorr_sig = &tap_sig.signature;
-
-    let prevouts = vec![signed_psbt.inputs[0].witness_utxo.clone().unwrap()];
+    let prevouts = vec![witness_utxo];
     let unsigned_tx = signed_psbt.unsigned_tx.clone();
     let mut cache = bitcoin::sighash::SighashCache::new(&unsigned_tx);
     let sighash = cache
-        .taproot_script_spend_signature_hash(
+        .taproot_key_spend_signature_hash(
             0,
             &bitcoin::sighash::Prevouts::All(&prevouts),
-            *_leaf_hash,
             bitcoin::sighash::TapSighashType::Default,
         )
         .unwrap();
 
     let msg = bitcoin::secp256k1::Message::from_digest(*sighash.as_byte_array());
-    assert!(secp.verify_schnorr(schnorr_sig, &msg, xonly_pk).is_ok());
-}
-
-/// Adversarial taproot: the committed leaf does not push our xonly key,
-/// but `tap_key_origins` claims our key participates. Must refuse.
-#[test]
-fn adversarial_taproot_psbt_forged_origins_is_not_signed() {
-    use bitcoin::bip32::ChildNumber;
-    use bitcoin::blockdata::opcodes::all::*;
-    use bitcoin::blockdata::script::Builder as ScriptBuilder;
-    use bitcoin::taproot::{LeafVersion, TapLeafHash, TaprootBuilder};
-    use bitcoin::{
-        Amount, OutPoint, ScriptBuf, Sequence, Transaction, TxIn, TxOut, Txid, XOnlyPublicKey,
-    };
-
-    let km = KeyManager::from_seed([0x42u8; 64], Network::Testnet).unwrap();
-    let secp = Secp256k1::new();
-
-    // Our xonly (BIP-86 vanilla testnet 0/0).
-    let our_secret = km
-        .derive_btc_child(
-            AccountType::Vanilla,
-            &[
-                ChildNumber::Normal { index: 0 },
-                ChildNumber::Normal { index: 0 },
-            ],
-        )
-        .unwrap();
-    let our_kp = bitcoin::secp256k1::Keypair::from_secret_key(&secp, &our_secret);
-    let (our_xonly, _) = XOnlyPublicKey::from_keypair(&our_kp);
-
-    // Build a leaf containing three FOREIGN xonly keys.
-    let foreign = |b: u8| {
-        let kp = bitcoin::secp256k1::Keypair::from_secret_key(
-            &secp,
-            &SecretKey::from_slice(&[b; 32]).unwrap(),
-        );
-        XOnlyPublicKey::from_keypair(&kp).0
-    };
-    let mut keys = [foreign(0xB1), foreign(0xB2), foreign(0xB3)];
-    keys.sort();
-    let leaf = ScriptBuilder::new()
-        .push_x_only_key(&keys[0])
-        .push_opcode(OP_CHECKSIG)
-        .push_x_only_key(&keys[1])
-        .push_opcode(OP_CHECKSIGADD)
-        .push_x_only_key(&keys[2])
-        .push_opcode(OP_CHECKSIGADD)
-        .push_int(2)
-        .push_opcode(OP_NUMEQUAL)
-        .into_script();
-    let leaf_hash = TapLeafHash::from_script(&leaf, LeafVersion::TapScript);
-
-    let internal_key = XOnlyPublicKey::from_slice(&[
-        0x50, 0x92, 0x9b, 0x74, 0xc1, 0xa0, 0x49, 0x54, 0xb7, 0x8b, 0x4b, 0x60, 0x35, 0xe9, 0x7a,
-        0x5e, 0x07, 0x8a, 0x5a, 0x0f, 0x28, 0xec, 0x96, 0xd5, 0x47, 0xbf, 0xee, 0x9a, 0xce, 0x80,
-        0x3a, 0xc0,
-    ])
-    .unwrap();
-    let info = TaprootBuilder::new()
-        .add_leaf(0, leaf.clone())
-        .unwrap()
-        .finalize(&secp, internal_key)
-        .unwrap();
-    let cb = info
-        .control_block(&(leaf.clone(), LeafVersion::TapScript))
-        .unwrap();
-
-    let unsigned_tx = Transaction {
-        version: bitcoin::transaction::Version(2),
-        lock_time: bitcoin::blockdata::locktime::absolute::LockTime::ZERO,
-        input: vec![TxIn {
-            previous_output: OutPoint {
-                txid: Txid::from_byte_array([0xAA; 32]),
-                vout: 0,
-            },
-            script_sig: ScriptBuf::new(),
-            sequence: Sequence::MAX,
-            witness: bitcoin::Witness::default(),
-        }],
-        output: vec![TxOut {
-            value: Amount::from_sat(50_000),
-            script_pubkey: ScriptBuf::new_p2tr_tweaked(info.output_key()),
-        }],
-    };
-    let mut psbt = Psbt::from_unsigned_tx(unsigned_tx).unwrap();
-    psbt.inputs[0].witness_utxo = Some(TxOut {
-        value: Amount::from_sat(100_000),
-        script_pubkey: ScriptBuf::new_p2tr_tweaked(info.output_key()),
-    });
-    psbt.inputs[0].tap_internal_key = Some(internal_key);
-    psbt.inputs[0]
-        .tap_scripts
-        .insert(cb, (leaf, LeafVersion::TapScript));
-
-    // The lie: claim our xonly is in this leaf, with our fingerprint and
-    // a real BIP-86 derivation that *does* derive to our xonly.
-    let our_path = bitcoin::bip32::DerivationPath::from(vec![
-        ChildNumber::from_hardened_idx(86).unwrap(),
-        ChildNumber::from_hardened_idx(1).unwrap(),
-        ChildNumber::from_hardened_idx(0).unwrap(),
-        ChildNumber::Normal { index: 0 },
-        ChildNumber::Normal { index: 0 },
-    ]);
-    psbt.inputs[0].tap_key_origins.insert(
-        our_xonly,
-        (vec![leaf_hash], (*km.master_fingerprint(), our_path)),
-    );
-
-    let (signed_bytes, count) = km.sign_psbt(&psbt.serialize()).unwrap();
-    assert_eq!(
-        count, 0,
-        "TEE must not sign when leaf does not push our key"
-    );
-    let signed = Psbt::deserialize(&signed_bytes).unwrap();
-    assert!(signed.inputs[0].tap_script_sigs.is_empty());
-}
-
-/// Adversarial taproot: `script_pubkey` commits to leaf A, but the PSBT
-/// ships a different leaf B (which DOES push our xonly) under a control
-/// block from an unrelated tree. `verify_taproot_commitment` must reject.
-#[test]
-fn adversarial_taproot_psbt_unverified_control_block_is_not_signed() {
-    use bitcoin::bip32::ChildNumber;
-    use bitcoin::blockdata::opcodes::all::*;
-    use bitcoin::blockdata::script::Builder as ScriptBuilder;
-    use bitcoin::taproot::{LeafVersion, TapLeafHash, TaprootBuilder};
-    use bitcoin::{
-        Amount, OutPoint, ScriptBuf, Sequence, Transaction, TxIn, TxOut, Txid, XOnlyPublicKey,
-    };
-
-    let km = KeyManager::from_seed([0x42u8; 64], Network::Testnet).unwrap();
-    let secp = Secp256k1::new();
-
-    let our_secret = km
-        .derive_btc_child(
-            AccountType::Vanilla,
-            &[
-                ChildNumber::Normal { index: 0 },
-                ChildNumber::Normal { index: 0 },
-            ],
-        )
-        .unwrap();
-    let our_kp = bitcoin::secp256k1::Keypair::from_secret_key(&secp, &our_secret);
-    let (our_xonly, _) = XOnlyPublicKey::from_keypair(&our_kp);
-
-    let foreign = |b: u8| {
-        let kp = bitcoin::secp256k1::Keypair::from_secret_key(
-            &secp,
-            &SecretKey::from_slice(&[b; 32]).unwrap(),
-        );
-        XOnlyPublicKey::from_keypair(&kp).0
-    };
-
-    // Tree REAL: committed leaf A (no us). This produces the on-chain output key.
-    let mut keys_a = [foreign(0xA1), foreign(0xA2), foreign(0xA3)];
-    keys_a.sort();
-    let leaf_a = ScriptBuilder::new()
-        .push_x_only_key(&keys_a[0])
-        .push_opcode(OP_CHECKSIG)
-        .push_x_only_key(&keys_a[1])
-        .push_opcode(OP_CHECKSIGADD)
-        .push_x_only_key(&keys_a[2])
-        .push_opcode(OP_CHECKSIGADD)
-        .push_int(2)
-        .push_opcode(OP_NUMEQUAL)
-        .into_script();
-    let internal_key_a = XOnlyPublicKey::from_slice(&[
-        0x50, 0x92, 0x9b, 0x74, 0xc1, 0xa0, 0x49, 0x54, 0xb7, 0x8b, 0x4b, 0x60, 0x35, 0xe9, 0x7a,
-        0x5e, 0x07, 0x8a, 0x5a, 0x0f, 0x28, 0xec, 0x96, 0xd5, 0x47, 0xbf, 0xee, 0x9a, 0xce, 0x80,
-        0x3a, 0xc0,
-    ])
-    .unwrap();
-    let info_a = TaprootBuilder::new()
-        .add_leaf(0, leaf_a.clone())
-        .unwrap()
-        .finalize(&secp, internal_key_a)
-        .unwrap();
-
-    // Tree FAKE: separate tree containing leaf B (with us). Its control
-    // block is valid for FAKE's output key but NOT for REAL's.
-    let mut keys_b = [our_xonly, foreign(0xB2), foreign(0xB3)];
-    keys_b.sort();
-    let leaf_b = ScriptBuilder::new()
-        .push_x_only_key(&keys_b[0])
-        .push_opcode(OP_CHECKSIG)
-        .push_x_only_key(&keys_b[1])
-        .push_opcode(OP_CHECKSIGADD)
-        .push_x_only_key(&keys_b[2])
-        .push_opcode(OP_CHECKSIGADD)
-        .push_int(2)
-        .push_opcode(OP_NUMEQUAL)
-        .into_script();
-    let leaf_b_hash = TapLeafHash::from_script(&leaf_b, LeafVersion::TapScript);
-    let internal_key_b = foreign(0xC0);
-    let info_b = TaprootBuilder::new()
-        .add_leaf(0, leaf_b.clone())
-        .unwrap()
-        .finalize(&secp, internal_key_b)
-        .unwrap();
-    let bad_cb = info_b
-        .control_block(&(leaf_b.clone(), LeafVersion::TapScript))
-        .unwrap();
-
-    let unsigned_tx = Transaction {
-        version: bitcoin::transaction::Version(2),
-        lock_time: bitcoin::blockdata::locktime::absolute::LockTime::ZERO,
-        input: vec![TxIn {
-            previous_output: OutPoint {
-                txid: Txid::from_byte_array([0xAA; 32]),
-                vout: 0,
-            },
-            script_sig: ScriptBuf::new(),
-            sequence: Sequence::MAX,
-            witness: bitcoin::Witness::default(),
-        }],
-        output: vec![TxOut {
-            value: Amount::from_sat(50_000),
-            script_pubkey: ScriptBuf::new_p2tr_tweaked(info_a.output_key()),
-        }],
-    };
-    let mut psbt = Psbt::from_unsigned_tx(unsigned_tx).unwrap();
-    // script_pubkey is REAL's output key (commits to leaf A).
-    psbt.inputs[0].witness_utxo = Some(TxOut {
-        value: Amount::from_sat(100_000),
-        script_pubkey: ScriptBuf::new_p2tr_tweaked(info_a.output_key()),
-    });
-    psbt.inputs[0].tap_internal_key = Some(internal_key_a);
-    // Attacker ships leaf B + bad_cb (which is for FAKE).
-    psbt.inputs[0]
-        .tap_scripts
-        .insert(bad_cb, (leaf_b, LeafVersion::TapScript));
-
-    let our_path = bitcoin::bip32::DerivationPath::from(vec![
-        ChildNumber::from_hardened_idx(86).unwrap(),
-        ChildNumber::from_hardened_idx(1).unwrap(),
-        ChildNumber::from_hardened_idx(0).unwrap(),
-        ChildNumber::Normal { index: 0 },
-        ChildNumber::Normal { index: 0 },
-    ]);
-    psbt.inputs[0].tap_key_origins.insert(
-        our_xonly,
-        (vec![leaf_b_hash], (*km.master_fingerprint(), our_path)),
-    );
-
-    let (signed_bytes, count) = km.sign_psbt(&psbt.serialize()).unwrap();
-    assert_eq!(
-        count, 0,
-        "TEE must not sign when control block fails to verify"
-    );
-    let signed = Psbt::deserialize(&signed_bytes).unwrap();
-    assert!(signed.inputs[0].tap_script_sigs.is_empty());
+    assert!(secp
+        .verify_schnorr(&tap_sig.signature, &msg, &output_key)
+        .is_ok());
 }
