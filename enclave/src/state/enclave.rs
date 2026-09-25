@@ -4,17 +4,33 @@
 //! phase behind a `Mutex` and refuses anything the current phase does not
 //! allow. [`Phase`] is the machine; `EnclaveState` is the door.
 
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
+use std::time::Instant;
 
 use bip39::Mnemonic;
 use bitcoin::Network;
 use secrecy::{ExposeSecret, SecretBox};
 
+use crate::cloning::validate_cloning_secret;
 use crate::error::{EnclaveError, Result};
 use crate::keys::{KeyInfo, KeyManager};
 
 use super::cloning_session::CloningSession;
 use super::replay_guard::{NonceReplayGuard, DEFAULT_OP_DEDUP_MAX, DEFAULT_OP_DEDUP_TTL};
+
+/// Environment variable for the export warning threshold. (F03-AF-10)
+/// An unset, zero, or invalid value disables the threshold.
+/// This threshold does not block exports.
+const CLONE_EXPORT_SOFT_CAP_ENV: &str = "CLONE_EXPORT_SOFT_CAP";
+
+/// Environment variable for the export limit per enclave process. (F03-AF-10)
+/// An unset, zero, or invalid value disables the limit.
+/// A positive value limits successful exports.
+/// Check the limit after authentication and before encryption.
+/// Restart resets the count.
+/// Each enclave has a separate count.
+const CLONE_EXPORT_HARD_CAP_ENV: &str = "CLONE_EXPORT_HARD_CAP";
 
 /// Enclave lifecycle phase.
 ///
@@ -71,6 +87,51 @@ pub struct EnclaveState {
     /// It stops honest listener retries and naive same-tuple replay; the
     /// durable guard is an on-chain ticket.
     pub op_replay_guard: NonceReplayGuard,
+
+    /// Successful exports from this enclave process. (F03-AF-10)
+    /// Restart resets the count.
+    /// The separate slot counter enforces the hard quota.
+    pub(super) seed_export_count: AtomicU64,
+
+    /// Successful exports plus exports in flight. Reserving a slot atomically
+    /// prevents concurrent GetClone calls from exceeding the per-instance cap.
+    pub(super) seed_export_slots: AtomicU64,
+
+    /// Warning threshold for [`Self::seed_export_count`].
+    /// Read [`CLONE_EXPORT_SOFT_CAP_ENV`] at startup.
+    /// Zero disables the threshold.
+    /// This threshold does not block exports.
+    seed_export_soft_cap: u64,
+
+    /// Maximum successful exports for this enclave process.
+    /// Read [`CLONE_EXPORT_HARD_CAP_ENV`] at startup.
+    /// Zero disables the limit.
+    /// See [`Self::reserve_export_quota`].
+    pub(super) seed_export_hard_cap: u64,
+}
+
+/// Holds one export slot until sealing and donor attestation both succeed.
+/// Any error before commit releases the slot, including nonce replay rejection.
+#[must_use = "hold the reservation until the export succeeds, then commit it"]
+pub struct ExportQuotaReservation<'a> {
+    state: &'a EnclaveState,
+    reserved: bool,
+}
+
+impl ExportQuotaReservation<'_> {
+    pub fn commit(mut self, requester_pk: &[u8; 32]) -> u64 {
+        // A successful export permanently consumes its slot for this process.
+        self.reserved = false;
+        self.state.record_seed_export(requester_pk)
+    }
+}
+
+impl Drop for ExportQuotaReservation<'_> {
+    fn drop(&mut self) {
+        if self.reserved {
+            self.state.seed_export_slots.fetch_sub(1, Ordering::Relaxed);
+        }
+    }
 }
 
 impl Default for EnclaveState {
@@ -90,18 +151,92 @@ impl EnclaveState {
                 DEFAULT_OP_DEDUP_MAX,
                 DEFAULT_OP_DEDUP_TTL,
             ),
+            seed_export_count: AtomicU64::new(0),
+            seed_export_slots: AtomicU64::new(0),
+            seed_export_soft_cap: std::env::var(CLONE_EXPORT_SOFT_CAP_ENV)
+                .ok()
+                .and_then(|v| v.trim().parse::<u64>().ok())
+                .unwrap_or(0),
+            seed_export_hard_cap: std::env::var(CLONE_EXPORT_HARD_CAP_ENV)
+                .ok()
+                .and_then(|v| v.trim().parse::<u64>().ok())
+                .unwrap_or(0),
         }
+    }
+
+    /// Reserve a slot before encrypting the seed. (F03-AF-10)
+    /// Count successful exports and exports in progress against the limit.
+    /// Return an error when no slot is available.
+    /// An error before commit releases the slot.
+    /// Zero disables the limit.
+    /// Restart resets all slots.
+    pub fn reserve_export_quota(&self) -> Result<ExportQuotaReservation<'_>> {
+        let cap = self.seed_export_hard_cap;
+        if cap > 0 {
+            if let Err(used) =
+                self.seed_export_slots
+                    .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |used| {
+                        if used < cap {
+                            Some(used + 1)
+                        } else {
+                            None
+                        }
+                    })
+            {
+                tracing::warn!(
+                    seed_export_count = self.seed_export_count.load(Ordering::Relaxed),
+                    reserved_or_completed = used,
+                    hard_cap = cap,
+                    "GetClone: seed-export HARD cap reached - export refused \
+                     (F03-AF-10, fail-closed). Rotate/re-provision to lift."
+                );
+                return Err(EnclaveError::Clone(format!(
+                    "seed-export hard cap reached ({used}/{cap}); export refused"
+                )));
+            }
+        }
+        Ok(ExportQuotaReservation {
+            state: self,
+            reserved: cap > 0,
+        })
+    }
+
+    /// Record a successful export and return the count. (F03-AF-10)
+    /// Log each export.
+    /// Emit a warning above the configured soft cap.
+    /// This method does not enforce the hard quota.
+    pub fn record_seed_export(&self, requester_pk: &[u8; 32]) -> u64 {
+        let count = self.seed_export_count.fetch_add(1, Ordering::Relaxed) + 1;
+        tracing::warn!(
+            seed_export_count = count,
+            requester_pk = %hex::encode(requester_pk),
+            "GetClone: donor exported its seed (F03-AF-10 telemetry)"
+        );
+        if self.seed_export_soft_cap > 0 && count > self.seed_export_soft_cap {
+            tracing::warn!(
+                seed_export_count = count,
+                soft_cap = self.seed_export_soft_cap,
+                "GetClone: seed-export soft cap exceeded - review donor custody \
+                 (alert only, export not blocked)"
+            );
+        }
+        count
+    }
+
+    /// Current lifetime seed-export count for this instance (F03-AF-10).
+    pub fn seed_export_count(&self) -> u64 {
+        self.seed_export_count.load(Ordering::Relaxed)
     }
 
     pub fn network(&self) -> Network {
         self.network
     }
 
-    /// Configure the donor-side cloning secret. Called at startup from an
-    /// operator-provided env var (e.g. `UTEXO_CLONING_SECRET`). Idempotent
-    /// and overwrites any previous value. The secret is wrapped in
-    /// `SecretBox` for zeroize-on-drop.
+    /// Set the donor cloning secret after checking its strength. (F03-AF-26)
+    /// Replace any previous secret.
+    /// SecretBox clears the bytes when it is dropped.
     pub fn set_donor_cloning_secret(&self, secret: String) -> Result<()> {
+        validate_cloning_secret(&secret)?;
         let mut guard = self
             .donor_cloning_secret
             .lock()
@@ -164,11 +299,22 @@ impl EnclaveState {
         Ok(())
     }
 
-    /// Transition `Initial -> Cloning`, consuming the supplied session.
-    /// Rejected from any other phase.
+    /// Enter Cloning from Initial or an expired Cloning session. (F03-AF-01)
+    /// Return AlreadyInitialized for a valid Cloning session or Active state.
     pub fn enter_cloning(&self, session: CloningSession) -> Result<()> {
+        self.enter_cloning_at(session, Instant::now())
+    }
+
+    /// Use an explicit time to test session expiry.
+    pub(super) fn enter_cloning_at(&self, session: CloningSession, now: Instant) -> Result<()> {
         let mut guard = self.lock_phase()?;
-        ensure_initial(&guard)?;
+        match &*guard {
+            Phase::Initial => {}
+            // Abandoned (expired) handshake: a fresh initiation may replace it.
+            Phase::Cloning(existing) if existing.is_expired(now) => {}
+            // Live Cloning session or already Active: refuse.
+            _ => return Err(EnclaveError::AlreadyInitialized),
+        }
         *guard = Phase::Cloning(session);
         Ok(())
     }
@@ -252,20 +398,23 @@ impl EnclaveState {
 
     /// Get public key info. Returns `KeyNotInitialized` if not in the `Active` phase.
     pub fn get_keys(&self) -> Result<KeyInfo> {
-        self.with_active(|km| {
-            Ok(KeyInfo {
-                evm_address: *km.evm_address(),
-                evm_uncompressed_pub: *km.evm_uncompressed_pub(),
-                evm_gas_tx_address: *km.evm_gas_tx_address(),
-                evm_gas_tx_uncompressed_pub: *km.evm_gas_tx_uncompressed_pub(),
-                btc_compressed_pubkey: *km.btc_compressed_pubkey(),
-                btc_xpub: km.btc_xpub().to_string(),
-                master_fingerprint: km.master_fingerprint().to_bytes(),
-                account_xpub_vanilla: km.account_xpub_vanilla().to_string(),
-                account_xpub_colored: km.account_xpub_colored().to_string(),
-                ccd_ed25519_pub: *km.ccd_ed25519_pub(),
-            })
-        })
+        self.with_active(|km| Ok(Self::key_info(km)))
+    }
+
+    /// Derive the public bundle without publishing candidate keys as Active.
+    pub(crate) fn key_info(km: &KeyManager) -> KeyInfo {
+        KeyInfo {
+            evm_address: *km.evm_address(),
+            evm_uncompressed_pub: *km.evm_uncompressed_pub(),
+            evm_gas_tx_address: *km.evm_gas_tx_address(),
+            evm_gas_tx_uncompressed_pub: *km.evm_gas_tx_uncompressed_pub(),
+            btc_compressed_pubkey: *km.btc_compressed_pubkey(),
+            btc_xpub: km.btc_xpub().to_string(),
+            master_fingerprint: km.master_fingerprint().to_bytes(),
+            account_xpub_vanilla: km.account_xpub_vanilla().to_string(),
+            account_xpub_colored: km.account_xpub_colored().to_string(),
+            ccd_ed25519_pub: *km.ccd_ed25519_pub(),
+        }
     }
 
     /// Sign a 32-byte EVM message hash. Returns 65-byte signature.

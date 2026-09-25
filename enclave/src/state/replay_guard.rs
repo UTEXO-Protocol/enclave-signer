@@ -28,19 +28,15 @@ pub(super) const DEFAULT_OP_DEDUP_TTL: Duration = Duration::from_secs(24 * 60 * 
 /// than wedging signing. See [`EnclaveState::op_replay_guard`].
 pub(super) const DEFAULT_OP_DEDUP_MAX: usize = 100_000;
 
-/// Replay guard for attestation nonces, bounded by **time** (not just
-/// count) so a flooding parent cannot permanently wedge cloning.
-///
-/// Every incoming peer attestation contributes its nonce, and duplicates are
-/// rejected. Each entry carries the instant it was seen, and `check_and_record`
-/// first evicts entries older than `ttl`. `max` is a hard memory ceiling: when
-/// the set is still full after eviction, the oldest entry is dropped to admit
-/// the new one.
-///
-/// Rejecting when full instead would let a parent flood `max` distinct nonces
-/// and block every legitimate handshake. The trade-off is a
-/// bounded replay window: replaying an evicted nonce only re-seals the seed to
-/// the encryption pubkey already bound inside that attestation.
+/// Track nonces in memory for one enclave. (F03-AF-09)
+/// Restart clears the set.
+/// Each enclave has a separate set.
+/// Reject duplicate nonces in the set.
+/// Remove entries after their time limit.
+/// Evict the oldest entry when the set is full.
+/// A replay still needs valid attestation, PCRs, key binding, and HMAC.
+/// The HMAC binds the request to the same recipient key and donor.
+/// Persistent or shared replay protection requires a separate policy decision.
 pub struct NonceReplayGuard {
     inner: Mutex<GuardState>,
     max: usize,

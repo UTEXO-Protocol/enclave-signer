@@ -442,6 +442,11 @@ the secret at runtime (`InitializeKey.cloning_secret`, or the legacy
 drives it: `InitiateCloning` on the new enclave, the parent `Clone` RPC on the
 donor, `SetClone` on the new enclave. [Cloning](diagrams/06-seq-cloning.md)
 
+After SetClone, the CLI performs a bounded read-only identity check, including
+when the response was lost. Automation must use the versioned
+[CLI completion results](clone-cli-results.md); an error or timeout alone does
+not establish whether keys were installed.
+
 ### 7.9 Concordium (`CcdSource`, `SignCcd`)
 
 `ccd` builds add two paths that follow the Concordium hash-signing model, where

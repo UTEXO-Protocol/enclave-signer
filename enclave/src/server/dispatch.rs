@@ -142,11 +142,11 @@ pub(super) fn dispatch(
         }
         Some(Request::GetClone(req)) => {
             tracing::info!("request: GetClone");
-            handle_get_clone(&ctx.state, req)
+            handle_get_clone(ctx, req)
         }
         Some(Request::SetClone(req)) => {
             tracing::info!("request: SetClone");
-            handle_set_clone(&ctx.state, req)
+            handle_set_clone(ctx, req)
         }
         Some(Request::SubmitHeaders(req)) => {
             tracing::info!(

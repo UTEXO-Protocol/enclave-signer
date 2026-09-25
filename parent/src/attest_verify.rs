@@ -34,7 +34,14 @@ pub enum VerifyMode {
 /// Chain/contract/asset pins come from the wire response, which the public-key
 /// bundle already binds, so a production expectation states only the posture
 /// flags and authorization rules that are not on the wire and must be declared
-/// independently by the verifier.
+/// independently by the verifier. Optional chain, contract
+/// and asset pins (F02-AF-04) additionally compare those wire values against
+/// the operator's intended deployment; without a pin the value is
+/// authenticated but not compared.
+///
+/// One value is built per verifier run, so the size gap between the two
+/// variants is irrelevant; boxing would only complicate the struct literals.
+#[allow(clippy::large_enum_variant)]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ExpectedPolicy {
     /// Expect a production bridge enclave with these posture flags.
@@ -50,6 +57,16 @@ pub enum ExpectedPolicy {
         /// commitment so an enclave that trust-rooted on a different checkpoint
         /// fails verification.
         evm_checkpoint: Option<[u8; 32]>,
+        /// Expected EVM chain ID.
+        /// None accepts the authenticated chain ID without comparison.
+        expected_chain_id: Option<u64>,
+        /// Expected 20-byte bridge or MultisigProxy address.
+        /// Some requires an exact match.
+        expected_bridge_contract: Option<[u8; 20]>,
+        /// Expected RGB asset ID.
+        /// Some requires an exact match.
+        /// An empty string requires no RGB asset.
+        expected_rgb_asset_id: Option<String>,
         funds_in_contract: [u8; 20],
         evm_min_confirmations: u64,
         /// Expected gas-tx (`SignRawDigest`) rule the enclave committed.
@@ -122,9 +139,11 @@ pub async fn verify_attested_pubkey(
     let mut nonce = [0u8; 32];
     rand::thread_rng().fill_bytes(&mut nonce);
 
-    let mut client = ParentServiceClient::connect(endpoint.to_string())
+    let channel = crate::transport_security::client_endpoint(endpoint)?
+        .connect()
         .await
         .with_context(|| format!("connecting to {endpoint}"))?;
+    let mut client = ParentServiceClient::new(channel);
 
     let response = client
         .attested_public_key(AttestedPublicKeyRequest {
@@ -214,6 +233,9 @@ fn expected_attested_policy(
             signer_role,
             evm_source,
             evm_checkpoint,
+            expected_chain_id,
+            expected_bridge_contract,
+            expected_rgb_asset_id,
             funds_in_contract,
             evm_min_confirmations,
             gas_tx_allowed_to,
@@ -233,6 +255,35 @@ fn expected_attested_policy(
                         resp.bridge_contract.len()
                     )
                 })?;
+
+            // Check operator pins before constructing the expected commitment. (F02-AF-04)
+            if let Some(want) = expected_chain_id {
+                if *want != resp.chain_id {
+                    bail!(
+                        "chain_id mismatch: enclave attests {} but --expect-chain-id is {want}",
+                        resp.chain_id
+                    );
+                }
+            }
+            if let Some(want) = expected_bridge_contract {
+                if want != &bridge_contract {
+                    bail!(
+                        "bridge_contract mismatch: enclave attests 0x{} but \
+                         --expect-bridge-contract is 0x{}",
+                        hex::encode(bridge_contract),
+                        hex::encode(want),
+                    );
+                }
+            }
+            if let Some(want) = expected_rgb_asset_id {
+                if want != &resp.rgb_asset_id {
+                    bail!(
+                        "rgb_asset_id mismatch: enclave attests {:?} but --expect-rgb-asset-id is {want:?}",
+                        resp.rgb_asset_id
+                    );
+                }
+            }
+
             Ok(AttestedPolicy::Production {
                 allow_vanilla_psbt: *allow_vanilla_psbt,
                 signer_role: *signer_role,
@@ -264,6 +315,31 @@ fn expected_attested_policy(
 mod tests {
     use super::*;
 
+    /// A production expectation with the three deployment pins set to `pins`
+    /// (chain_id, bridge_contract, rgb_asset_id) and everything else neutral.
+    fn expect_prod(
+        chain_id: Option<u64>,
+        bridge_contract: Option<[u8; 20]>,
+        rgb_asset_id: Option<String>,
+    ) -> ExpectedPolicy {
+        ExpectedPolicy::Production {
+            allow_vanilla_psbt: false,
+            evm_source: EvmDataSource::RawRpc,
+            signer_role: SignerRole::Combined,
+            evm_checkpoint: None,
+            funds_in_contract: [0x11; 20],
+            evm_min_confirmations: 12,
+            expected_chain_id: chain_id,
+            expected_bridge_contract: bridge_contract,
+            expected_rgb_asset_id: rgb_asset_id,
+            gas_tx_allowed_to: [0u8; 20],
+            gas_tx_max_gas_limit: 0,
+            gas_tx_max_fee_per_gas: 0,
+            gas_tx_max_value_wei: 0,
+            gas_tx_allowed_selectors: Vec::new(),
+        }
+    }
+
     fn production(signer_role: SignerRole) -> ExpectedPolicy {
         ExpectedPolicy::Production {
             allow_vanilla_psbt: false,
@@ -272,12 +348,79 @@ mod tests {
             evm_checkpoint: None,
             funds_in_contract: [0x11; 20],
             evm_min_confirmations: 12,
+            expected_chain_id: None,
+            expected_bridge_contract: None,
+            expected_rgb_asset_id: None,
             gas_tx_allowed_to: [0u8; 20],
             gas_tx_max_gas_limit: 0,
             gas_tx_max_fee_per_gas: 0,
             gas_tx_max_value_wei: 0,
             gas_tx_allowed_selectors: Vec::new(),
         }
+    }
+
+    /// A wire response pinned to chain 42161, contract 0x11.., asset "rgb:abc".
+    fn wire() -> AttestedPublicKeyResponse {
+        AttestedPublicKeyResponse {
+            chain_id: 42161,
+            bridge_contract: vec![0x11u8; 20],
+            rgb_asset_id: "rgb:abc".to_string(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn unset_pins_trust_the_wire() {
+        // Without operator pins, authenticate values without comparing them.
+        let got = expected_attested_policy(&expect_prod(None, None, None), &wire())
+            .expect("unset pins must not reject");
+        match got {
+            AttestedPolicy::Production {
+                chain_id,
+                rgb_asset_id,
+                ..
+            } => {
+                assert_eq!(chain_id, 42161);
+                assert_eq!(rgb_asset_id, "rgb:abc");
+            }
+            AttestedPolicy::Development => panic!("expected production policy"),
+        }
+    }
+
+    #[test]
+    fn matching_pins_are_accepted() {
+        let exp = expect_prod(Some(42161), Some([0x11u8; 20]), Some("rgb:abc".into()));
+        assert!(expected_attested_policy(&exp, &wire()).is_ok());
+    }
+
+    #[test]
+    fn wrong_chain_id_is_rejected() {
+        let exp = expect_prod(Some(1), None, None);
+        let err = expected_attested_policy(&exp, &wire()).expect_err("wrong chain must fail");
+        assert!(format!("{err:#}").contains("chain_id mismatch"));
+    }
+
+    #[test]
+    fn wrong_bridge_contract_is_rejected() {
+        let exp = expect_prod(None, Some([0x22u8; 20]), None);
+        let err = expected_attested_policy(&exp, &wire()).expect_err("wrong contract must fail");
+        assert!(format!("{err:#}").contains("bridge_contract mismatch"));
+    }
+
+    #[test]
+    fn wrong_rgb_asset_is_rejected() {
+        let exp = expect_prod(None, None, Some("rgb:other".into()));
+        let err = expected_attested_policy(&exp, &wire()).expect_err("wrong asset must fail");
+        assert!(format!("{err:#}").contains("rgb_asset_id mismatch"));
+    }
+
+    #[test]
+    fn empty_asset_pin_matches_empty_wire() {
+        // A pure-EVM / pure-CCD build ships no RGB asset; pinning "" must match.
+        let mut w = wire();
+        w.rgb_asset_id = String::new();
+        let exp = expect_prod(None, None, Some(String::new()));
+        assert!(expected_attested_policy(&exp, &w).is_ok());
     }
 
     /// A response whose mock document commits to a production policy with

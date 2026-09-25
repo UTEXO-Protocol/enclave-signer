@@ -6,8 +6,17 @@
 # Production builder glibc must remain compatible with the AL2023 runtime.
 FROM rust:1.96-slim-bullseye@sha256:c593596210f729542a92aced6a8b0812bcc8d04c5f1b238e663b800d0e2e17bd AS builder
 
-# Builder-only tools: system Git and SSH for private dependencies.
-RUN apt-get update && apt-get install -y \
+# Use the signed Debian snapshot to avoid missing Bullseye packages.
+# HTTP is required until ca-certificates is installed.
+# Replace this temporary pin when the shared base-image update is ready.
+RUN set -eux; \
+    printf '%s\n' \
+      'deb http://snapshot.debian.org/archive/debian/20260801T000000Z bullseye main' \
+      'deb http://snapshot.debian.org/archive/debian-security/20260801T000000Z bullseye-security main' \
+      > /etc/apt/sources.list; \
+    rm -f /etc/apt/sources.list.d/*; \
+    printf 'Acquire::Check-Valid-Until "false";\nAcquire::Retries "5";\n' > /etc/apt/apt.conf.d/99snapshot; \
+    apt-get update && apt-get install -y \
     pkg-config libssl-dev git ca-certificates openssh-client \
     make python3 python3-pip \
     && pip3 install --no-cache-dir "cmake==3.31.6" \

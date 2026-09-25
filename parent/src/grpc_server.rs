@@ -63,12 +63,29 @@ impl ParentAdapterService {
             tokio::task::spawn_blocking(move || {
                 use crate::framing;
 
+                // The outer timeout cannot stop a blocking worker. (F03-AF-18)
+                // Use socket timeouts to limit each transport operation.
                 match target {
                     EnclaveTarget::Tcp(addr) => {
-                        let mut stream = std::net::TcpStream::connect(&addr).map_err(|e| {
-                            Status::unavailable(format!("enclave connection failed: {e}"))
-                        })?;
+                        use std::net::ToSocketAddrs;
+                        let sockaddr = addr
+                            .to_socket_addrs()
+                            .map_err(|e| {
+                                Status::unavailable(format!("enclave addr resolve failed: {e}"))
+                            })?
+                            .next()
+                            .ok_or_else(|| {
+                                Status::unavailable(
+                                    "enclave addr resolved to no endpoints".to_string(),
+                                )
+                            })?;
+                        let mut stream =
+                            std::net::TcpStream::connect_timeout(&sockaddr, ENCLAVE_TIMEOUT)
+                                .map_err(|e| {
+                                    Status::unavailable(format!("enclave connection failed: {e}"))
+                                })?;
                         stream.set_read_timeout(Some(ENCLAVE_TIMEOUT)).ok();
+                        stream.set_write_timeout(Some(ENCLAVE_TIMEOUT)).ok();
                         framing::write_message(&mut stream, &req)
                             .map_err(|e| Status::internal(format!("enclave write failed: {e}")))?;
                         let resp: EnclaveResponse = framing::read_message(&mut stream)
@@ -86,6 +103,7 @@ impl ParentAdapterService {
                         // `timeout` only abandons the JoinHandle, it cannot
                         // cancel a `spawn_blocking` body already in a read.
                         stream.set_read_timeout(Some(ENCLAVE_TIMEOUT)).ok();
+                        stream.set_write_timeout(Some(ENCLAVE_TIMEOUT)).ok();
                         framing::write_message(&mut stream, &req)
                             .map_err(|e| Status::internal(format!("enclave write failed: {e}")))?;
                         let resp: EnclaveResponse = framing::read_message(&mut stream)
@@ -107,6 +125,8 @@ impl ParentAdapterService {
     /// Unwrap an enclave error response into a gRPC Status.
     fn enclave_error_to_status(err: &enclave_proto::ErrorResponse) -> Status {
         match err.code {
+            // Report NotReady as unavailable so the caller can retry. (F03-AF-11)
+            2 => Status::unavailable(err.message.clone()),
             3 => Status::failed_precondition(err.message.clone()),
             _ => Status::internal(format!(
                 "enclave error (code {}): {}",
@@ -650,24 +670,24 @@ impl ParentService for ParentAdapterService {
         }
     }
 
-    /// Initialize - generates new keys in the enclave.
-    /// If cloning_secret is provided, it is forwarded as a BIP-39 mnemonic;
-    /// otherwise the enclave generates keys from OS entropy.
+    /// Generate fresh enclave keys and set the optional donor secret.
+    /// Map cloning_secret to the enclave cloning_secret field. (F03-AF-27)
+    /// This RPC does not import a mnemonic or seed.
     async fn initialize(
         &self,
         request: Request<InitializeRequest>,
     ) -> Result<Response<InitializeResponse>, Status> {
         let inner = request.into_inner();
         tracing::info!(
-            has_mnemonic = !inner.cloning_secret.is_empty(),
+            configures_donor = !inner.cloning_secret.is_empty(),
             "gRPC Initialize called"
         );
         let enclave_req = EnclaveRequest {
             request: Some(enclave_request::Request::InitializeKey(
                 enclave_proto::InitializeKeyRequest {
                     seed: vec![],
-                    mnemonic: inner.cloning_secret,
-                    cloning_secret: String::new(),
+                    mnemonic: String::new(),
+                    cloning_secret: inner.cloning_secret,
                 },
             )),
         };
@@ -701,10 +721,7 @@ impl ParentService for ParentAdapterService {
         request: Request<CloneRequest>,
     ) -> Result<Response<CloneResponse>, Status> {
         let inner = request.into_inner();
-        tracing::info!(
-            cluster_pk = %hex::encode(&inner.cluster_public_key),
-            "gRPC Clone called (donor GetClone)"
-        );
+        tracing::info!("gRPC Clone called (donor GetClone)");
 
         let enclave_req = EnclaveRequest {
             request: Some(enclave_request::Request::GetClone(

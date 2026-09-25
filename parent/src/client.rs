@@ -81,6 +81,7 @@ fn parse_vsock_spec(spec: &str) -> Result<(u32, u32)> {
     Ok((cid, port))
 }
 
+#[derive(Clone)]
 pub struct EnclaveClient {
     addr: String,
 }

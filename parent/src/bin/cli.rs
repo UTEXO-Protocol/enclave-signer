@@ -1,3 +1,6 @@
+#[path = "cli/clone_completion.rs"]
+mod clone_completion;
+
 use std::io::{self, BufRead, Write};
 use std::path::PathBuf;
 use std::process;
@@ -30,8 +33,14 @@ enum Command {
     Init {
         /// Donor cloning secret, delivered at runtime (not baked into the EIF).
         /// Set only on enclaves that should serve clone requests.
+        /// DEPRECATED on the command line: visible in `ps` / shell history / SSM
+        /// logs (F03-AF-06). Prefer --cloning-secret-file or UTEXO_CLONING_SECRET.
         #[arg(long)]
         cloning_secret: Option<String>,
+        /// Read the cloning secret from this file instead of argv (F03-AF-06).
+        /// Takes precedence over UTEXO_CLONING_SECRET and --cloning-secret.
+        #[arg(long)]
+        cloning_secret_file: Option<PathBuf>,
     },
     /// Initialize from a hex-encoded 64-byte seed (testing only)
     InitSeed {
@@ -141,8 +150,14 @@ enum Command {
     Clone {
         /// Pre-shared operator cloning secret (must match the donor enclave's
         /// baked UTEXO_CLONING_SECRET).
+        /// DEPRECATED on the command line: visible in `ps` / shell history / SSM
+        /// logs (F03-AF-06). Prefer --cloning-secret-file or UTEXO_CLONING_SECRET.
         #[arg(long)]
-        cloning_secret: String,
+        cloning_secret: Option<String>,
+        /// Read the cloning secret from this file instead of argv (F03-AF-06).
+        /// Takes precedence over UTEXO_CLONING_SECRET and --cloning-secret.
+        #[arg(long)]
+        cloning_secret_file: Option<PathBuf>,
         /// Donor parent-adapter gRPC endpoint, e.g. http://10.0.1.23:50051
         #[arg(long)]
         donor_grpc: String,
@@ -282,7 +297,17 @@ fn main() {
     let client = EnclaveClient::new(&cli.addr);
 
     match cli.command {
-        Command::Init { cloning_secret } => {
+        Command::Init {
+            cloning_secret,
+            cloning_secret_file,
+        } => {
+            let cloning_secret = match resolve_cloning_secret(cloning_secret, cloning_secret_file) {
+                Ok(s) => s,
+                Err(e) => {
+                    eprintln!("Error: {e}");
+                    process::exit(1);
+                }
+            };
             match client.initialize_keys_with_secret(None, cloning_secret) {
                 Ok(r) => print_init_response(&r),
                 Err(e) => {
@@ -517,16 +542,86 @@ fn main() {
         }
         Command::Clone {
             cloning_secret,
+            cloning_secret_file,
             donor_grpc,
             donor_evm,
         } => {
-            if let Err(e) = run_clone(&client, &cloning_secret, &donor_grpc, &donor_evm) {
-                eprintln!("Error: {}", e);
-                process::exit(1);
+            let secret = match resolve_cloning_secret(cloning_secret, cloning_secret_file) {
+                Ok(Some(s)) => s,
+                Ok(None) => {
+                    println!("CLONE_RESULT_V1=preflight_error");
+                    eprintln!(
+                        "Error: a cloning secret is required for clone — pass \
+                         --cloning-secret-file, set UTEXO_CLONING_SECRET, or (deprecated) \
+                         --cloning-secret"
+                    );
+                    process::exit(1);
+                }
+                Err(e) => {
+                    println!("CLONE_RESULT_V1=preflight_error");
+                    eprintln!("Error: {e}");
+                    process::exit(1);
+                }
+            };
+            match run_clone(&client, &secret, &donor_grpc, &donor_evm) {
+                Ok(completion) => {
+                    println!("CLONE_RESULT_V1={}", completion.outcome.as_str());
+                    eprintln!("{}", completion.detail);
+                    // This is a one-shot command. Exit also terminates any I/O
+                    // worker still blocked after the reconciliation deadline.
+                    process::exit(if completion.outcome.is_success() {
+                        0
+                    } else {
+                        1
+                    });
+                }
+                Err(e) => {
+                    println!("CLONE_RESULT_V1=preflight_error");
+                    eprintln!("Error before SetClone: {e}");
+                    process::exit(1);
+                }
             }
         }
         Command::Interactive => run_interactive(&client),
     }
+}
+
+/// Read the secret from file, environment, or the deprecated argument, in that order.
+/// Command-line arguments can expose the secret in process lists and logs. (F03-AF-06)
+/// Return None if all sources are absent.
+/// Init without a donor secret permits this result.
+fn resolve_cloning_secret(
+    arg: Option<String>,
+    file: Option<PathBuf>,
+) -> Result<Option<String>, Box<dyn std::error::Error>> {
+    if let Some(path) = file {
+        let raw = std::fs::read_to_string(&path).map_err(|e| {
+            format!(
+                "failed to read --cloning-secret-file {}: {e}",
+                path.display()
+            )
+        })?;
+        let s = raw.trim().to_string();
+        if s.is_empty() {
+            return Err(format!("--cloning-secret-file {} is empty", path.display()).into());
+        }
+        return Ok(Some(s));
+    }
+    if let Ok(env_val) = std::env::var("UTEXO_CLONING_SECRET") {
+        let s = env_val.trim().to_string();
+        if !s.is_empty() {
+            return Ok(Some(s));
+        }
+    }
+    if let Some(s) = arg {
+        eprintln!(
+            "WARNING: --cloning-secret on the command line is visible in `ps`, shell history \
+             and SSM logs (F03-AF-06); prefer --cloning-secret-file or the UTEXO_CLONING_SECRET \
+             env var."
+        );
+        return Ok(Some(s));
+    }
+    Ok(None)
 }
 
 /// Drive the donor->requester cloning handshake. `client` targets the local
@@ -537,9 +632,10 @@ fn run_clone(
     cloning_secret: &str,
     donor_grpc: &str,
     donor_evm: &str,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<clone_completion::Completion, Box<dyn std::error::Error>> {
+    use rand::RngCore;
     use utexo_bridge_parent::grpc_proto::parent_service_client::ParentServiceClient;
-    use utexo_bridge_parent::grpc_proto::CloneRequest;
+    use utexo_bridge_parent::grpc_proto::{AttestedPublicKeyRequest, CloneRequest};
 
     let donor_addr = hex::decode(donor_evm.trim_start_matches("0x"))?;
     if donor_addr.len() != 20 {
@@ -550,6 +646,7 @@ fn run_clone(
         .into());
     }
 
+    let donor_endpoint = utexo_bridge_parent::transport_security::client_endpoint(donor_grpc)?;
     println!("[1/4] InitiateCloning on local enclave...");
     let init = client.initiate_cloning(cloning_secret, donor_addr.clone())?;
     println!(
@@ -558,9 +655,12 @@ fn run_clone(
     );
 
     println!("[2/4] Clone via donor parent gRPC at {donor_grpc} ...");
+    // Bound donor calls before SetClone. Completion and read-only
+    // reconciliation have their own caller deadline (F03-AF-05).
     let rt = tokio::runtime::Runtime::new()?;
     let clone_resp = rt.block_on(async {
-        let mut grpc = ParentServiceClient::connect(donor_grpc.to_string()).await?;
+        let endpoint = donor_endpoint.clone();
+        let mut grpc = ParentServiceClient::new(endpoint.connect().await?);
         let req = CloneRequest {
             attestation: init.requester_attestation,
             encryption_pubkey: init.encryption_pubkey,
@@ -579,24 +679,47 @@ fn run_clone(
         hex::encode(&clone_resp.donor_pubkey)
     );
 
-    println!("[3/4] SetClone on local enclave...");
-    client.set_clone(
-        clone_resp.encrypted_seed,
-        clone_resp.donor_pubkey,
-        clone_resp.donor_attestation,
-    )?;
+    // Fetch the comparison bundle BEFORE mutation: donor outages must not
+    // extend reconciliation after the requester has committed.
+    println!("[3/4] Fetching donor identity before SetClone...");
+    let mut nonce = [0u8; 32];
+    rand::thread_rng().fill_bytes(&mut nonce);
+    let donor_bundle = rt.block_on(async {
+        let endpoint = donor_endpoint.clone();
+        let mut grpc = ParentServiceClient::new(endpoint.connect().await?);
+        let resp = grpc
+            .attested_public_key(AttestedPublicKeyRequest {
+                nonce: nonce.to_vec(),
+            })
+            .await?;
+        Ok::<_, Box<dyn std::error::Error>>(resp.into_inner())
+    })?;
 
-    println!("[4/4] Verifying cloned identity...");
-    let keys = client.get_public_keys()?;
-    let local_evm = hex::encode(&keys.evm_address);
-    let want_evm = hex::encode(&donor_addr);
-    print_keys_response(&keys);
-    if local_evm == want_evm {
-        println!("\nOK: cloned EVM address matches donor (0x{local_evm})");
-        Ok(())
-    } else {
-        Err(format!("clone mismatch: local EVM 0x{local_evm} != donor 0x{want_evm}").into())
+    if donor_bundle.evm_address != donor_addr {
+        return Err("donor bundle does not match --donor-evm; SetClone was not sent".into());
     }
+
+    println!("[4/4] SetClone and read-only identity reconciliation...");
+    let completion = clone_completion::complete(
+        client,
+        utexo_bridge_parent::enclave_proto::SetCloneRequest {
+            encrypted_seed: clone_resp.encrypted_seed,
+            donor_pubkey: clone_resp.donor_pubkey,
+            donor_attestation: clone_resp.donor_attestation,
+        },
+        &donor_addr,
+        &donor_bundle,
+    );
+    if let Some(keys) = &completion.keys {
+        print_keys_response(keys);
+        if completion.outcome.is_success() {
+            println!(
+                "OK: cloned identity matches the donor on all 13 fields (EVM 0x{})",
+                hex::encode(&keys.evm_address)
+            );
+        }
+    }
+    Ok(completion)
 }
 
 /// Parse a headers file: one hex-encoded 80-byte header per line, blank lines

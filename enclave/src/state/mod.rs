@@ -15,5 +15,5 @@ mod replay_guard;
 mod tests;
 
 pub use cloning_session::CloningSession;
-pub use enclave::{EnclaveState, Phase};
+pub use enclave::{EnclaveState, ExportQuotaReservation, Phase};
 pub use replay_guard::{NonceReplayGuard, ReplayReservation};

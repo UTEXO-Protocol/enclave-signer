@@ -84,6 +84,25 @@ struct Cli {
     #[arg(long)]
     expect_helios_checkpoint: Option<String>,
 
+    /// Require this EVM chain ID in the attestation.
+    /// Omit to verify the reported value without comparison.
+    /// Ignored with --mock.
+    #[arg(long)]
+    expect_chain_id: Option<u64>,
+
+    /// Require this bridge or MultisigProxy address as 20-byte 0x-hex.
+    /// Omit to verify the reported value without comparison.
+    /// Ignored with --mock.
+    #[arg(long)]
+    expect_bridge_contract: Option<String>,
+
+    /// Require this RGB asset ID in the attestation.
+    /// Use an empty string to require no RGB asset.
+    /// Omit to verify the reported value without comparison.
+    /// Ignored with --mock.
+    #[arg(long)]
+    expect_rgb_asset_id: Option<String>,
+
     /// Expected contract whose FundsIn events may authorize bridge signing.
     /// Required for production verification.
     #[arg(long)]
@@ -178,18 +197,20 @@ fn parse_expect_gas_to(s: &Option<String>) -> Result<[u8; 20]> {
     }
 }
 
+/// Parse a required 20-byte address in 0x-hex format.
+fn parse_hex20(s: &str, flag: &str) -> Result<[u8; 20]> {
+    let stripped = s.strip_prefix("0x").unwrap_or(s);
+    let bytes = hex::decode(stripped).with_context(|| format!("{flag} '{s}' is not hex"))?;
+    bytes
+        .try_into()
+        .map_err(|v: Vec<u8>| anyhow::anyhow!("{flag} must be 20 bytes, got {}", v.len()))
+}
+
 fn parse_expect_funds_in_contract(s: &Option<String>) -> Result<[u8; 20]> {
     let s = s
         .as_deref()
         .context("--expect-funds-in-contract required (or pass --mock)")?;
-    let bytes = hex::decode(s.strip_prefix("0x").unwrap_or(s))
-        .with_context(|| format!("--expect-funds-in-contract '{s}' is not hex"))?;
-    bytes.try_into().map_err(|v: Vec<u8>| {
-        anyhow::anyhow!(
-            "--expect-funds-in-contract must be 20 bytes, got {}",
-            v.len()
-        )
-    })
+    parse_hex20(s, "--expect-funds-in-contract")
 }
 
 fn parse_expect_evm_min_confirmations(value: Option<u64>) -> Result<u64> {
@@ -259,11 +280,19 @@ async fn run(cli: Cli) -> Result<()> {
                  (the beacon block root the enclave pinned)"
             );
         }
+        let expected_bridge_contract = cli
+            .expect_bridge_contract
+            .as_deref()
+            .map(|s| parse_hex20(s, "--expect-bridge-contract"))
+            .transpose()?;
         let expected_policy = ExpectedPolicy::Production {
             allow_vanilla_psbt: cli.expect_vanilla_psbt,
             signer_role: parse_signer_role(cli.expect_signer_role.as_deref())?,
             evm_source,
             evm_checkpoint,
+            expected_chain_id: cli.expect_chain_id,
+            expected_bridge_contract,
+            expected_rgb_asset_id: cli.expect_rgb_asset_id.clone(),
             funds_in_contract: parse_expect_funds_in_contract(&cli.expect_funds_in_contract)?,
             evm_min_confirmations: parse_expect_evm_min_confirmations(
                 cli.expect_evm_min_confirmations,

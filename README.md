@@ -11,6 +11,8 @@ the attestation document, so a verifier checks it instead of trusting config.
 
 Deeper material:
 
+- [`docs/parent-mtls.md`](docs/parent-mtls.md) - required Parent/client mTLS, RPC roles and coordinated host rollout.
+
 - [`docs/tee-spec.md`](docs/tee-spec.md) - implementation specification
   (trust model, signing rules, limitations).
 - [`docs/pubkey-attestation.md`](docs/pubkey-attestation.md) - how to prove a

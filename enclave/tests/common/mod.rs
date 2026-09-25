@@ -35,9 +35,28 @@ pub fn start_test_server_with_config(
     configure: impl FnOnce(&EnclaveState),
     bridge_config: BridgeConfig,
 ) -> u16 {
+    let policy = SecurityPolicy::resolve(
+        &BuildContext::current(),
+        &bridge_config,
+        EvmDataSource::Disabled,
+        None,
+        0,
+    );
+    start_test_server_with_policy(configure, bridge_config, policy)
+}
+
+/// Explicit policy for clone commitment tests. This only constructs a test
+/// context; it does not bypass or test the production boot gate.
+#[allow(dead_code)]
+pub fn start_test_server_with_policy(
+    configure: impl FnOnce(&EnclaveState),
+    bridge_config: BridgeConfig,
+    policy: SecurityPolicy,
+) -> u16 {
     start_test_server_inner(
         configure,
         bridge_config,
+        policy,
         #[cfg(feature = "evm-rpc")]
         None,
     )
@@ -51,12 +70,21 @@ pub fn start_test_server_with_config(
 pub fn start_test_server_with_evm_rpc(
     client: Box<dyn utexo_bridge_enclave::networks::evm::events::EvmReceiptProvider + Send + Sync>,
 ) -> u16 {
-    start_test_server_inner(|_| {}, BridgeConfig::from_env(), Some(client))
+    let bridge_config = BridgeConfig::from_env();
+    let policy = SecurityPolicy::resolve(
+        &BuildContext::current(),
+        &bridge_config,
+        EvmDataSource::Disabled,
+        None,
+        0,
+    );
+    start_test_server_inner(|_| {}, bridge_config, policy, Some(client))
 }
 
 fn start_test_server_inner(
     configure: impl FnOnce(&EnclaveState),
     bridge_config: BridgeConfig,
+    policy: SecurityPolicy,
     #[cfg(feature = "evm-rpc")] evm_rpc_client: Option<
         Box<dyn utexo_bridge_enclave::networks::evm::events::EvmReceiptProvider + Send + Sync>,
     >,
@@ -73,13 +101,6 @@ fn start_test_server_inner(
         Network::Regtest,
         checkpoint_for(Network::Regtest),
     ));
-    let policy = SecurityPolicy::resolve(
-        &BuildContext::current(),
-        &bridge_config,
-        EvmDataSource::Disabled,
-        None,
-        0,
-    );
     let ctx = Arc::new(ServerContext {
         state,
         bridge_config,

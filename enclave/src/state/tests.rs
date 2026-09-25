@@ -1,5 +1,6 @@
 //! Tests for the phase machine and both replay guards.
 
+use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
 use bitcoin::Network;
@@ -7,10 +8,157 @@ use bitcoin::Network;
 use crate::cloning::CloneSession;
 use crate::error::EnclaveError;
 
+use super::cloning_session::CLONING_SESSION_TTL;
 use super::enclave::*;
 use super::replay_guard::*;
 
 use super::*;
+
+#[test]
+fn seed_export_counter_increments_monotonically() {
+    // Each successful export increases the counter. (F03-AF-10)
+    let state = EnclaveState::new(Network::Bitcoin);
+    assert_eq!(state.seed_export_count(), 0);
+    assert_eq!(state.record_seed_export(&[1u8; 32]), 1);
+    assert_eq!(state.record_seed_export(&[2u8; 32]), 2);
+    assert_eq!(state.record_seed_export(&[3u8; 32]), 3);
+    assert_eq!(state.seed_export_count(), 3);
+}
+
+// Set the cap directly to avoid environment changes in parallel tests. (F03-AF-10)
+#[test]
+fn export_hard_cap_blocks_after_quota() {
+    let mut state = EnclaveState::new(Network::Bitcoin);
+    state.seed_export_hard_cap = 2;
+    let pk = [7u8; 32];
+    assert_eq!(state.reserve_export_quota().unwrap().commit(&pk), 1);
+    assert_eq!(state.reserve_export_quota().unwrap().commit(&pk), 2);
+    // Quota reached: the cap+1-th export is refused before sealing.
+    let err = state.reserve_export_quota().err().unwrap();
+    assert!(matches!(err, EnclaveError::Clone(_)));
+}
+
+// Default (cap 0) never gates, no matter how many exports were served.
+#[test]
+fn export_hard_cap_disabled_by_default() {
+    let state = EnclaveState::new(Network::Bitcoin);
+    assert_eq!(state.seed_export_hard_cap, 0);
+    let pk = [9u8; 32];
+    for _ in 0..1000 {
+        state.reserve_export_quota().unwrap().commit(&pk);
+    }
+    assert!(state.reserve_export_quota().is_ok());
+    assert_eq!(state.seed_export_count.load(Ordering::Relaxed), 1000);
+    assert_eq!(state.seed_export_slots.load(Ordering::Relaxed), 0);
+}
+
+#[test]
+fn export_hard_cap_releases_failed_reservations() {
+    let mut state = EnclaveState::new(Network::Bitcoin);
+    state.seed_export_hard_cap = 2;
+    let first = state.reserve_export_quota().unwrap();
+    let second = state.reserve_export_quota().unwrap();
+    assert!(state.reserve_export_quota().is_err());
+    assert_eq!(state.seed_export_count.load(Ordering::Relaxed), 0);
+    drop(first); // e.g. a replay error before sealing
+    state.reserve_export_quota().unwrap().commit(&[1; 32]);
+    assert!(state.reserve_export_quota().is_err());
+    drop(second); // e.g. a failed donor attestation after sealing
+    state.reserve_export_quota().unwrap().commit(&[2; 32]);
+    assert!(state.reserve_export_quota().is_err());
+    assert_eq!(state.seed_export_count.load(Ordering::Relaxed), 2);
+}
+
+#[test]
+fn export_hard_cap_bounds_concurrent_in_flight_exports() {
+    use std::sync::Barrier;
+    let mut state = EnclaveState::new(Network::Bitcoin);
+    state.seed_export_hard_cap = 2;
+    let start = Barrier::new(16);
+    let reserved = Barrier::new(16);
+    let accepted = std::thread::scope(|scope| {
+        let handles: Vec<_> = (0..16)
+            .map(|_| {
+                scope.spawn(|| {
+                    start.wait();
+                    let slot = state.reserve_export_quota();
+                    // No successful export is recorded until every worker
+                    // has tried admission: exercise the old race window.
+                    reserved.wait();
+                    if let Ok(slot) = slot {
+                        slot.commit(&[3; 32]);
+                        true
+                    } else {
+                        false
+                    }
+                })
+            })
+            .collect();
+        handles
+            .into_iter()
+            .map(|h| usize::from(h.join().unwrap()))
+            .sum::<usize>()
+    });
+    assert_eq!(accepted, 2);
+    assert_eq!(state.seed_export_count.load(Ordering::Relaxed), 2);
+    assert!(state.reserve_export_quota().is_err());
+}
+
+// Replace an expired session without a restart. (F03-AF-01)
+#[test]
+fn enter_cloning_replaces_expired_but_protects_live_session() {
+    let state = EnclaveState::new(Network::Bitcoin);
+    let t0 = Instant::now();
+
+    // First initiation from Initial succeeds.
+    state
+        .enter_cloning_at(
+            CloningSession::new_at(CloneSession::new(), [1u8; 20], t0),
+            t0,
+        )
+        .unwrap();
+    assert_eq!(state.phase_name(), "cloning");
+
+    // Reject a second request while the session is valid.
+    let err = state
+        .enter_cloning_at(
+            CloningSession::new_at(CloneSession::new(), [2u8; 20], t0),
+            t0 + Duration::from_secs(10),
+        )
+        .unwrap_err();
+    assert!(matches!(err, EnclaveError::AlreadyInitialized));
+    state
+        .with_cloning_session(|s| {
+            assert_eq!(s.cluster_public_key, [1u8; 20], "live session untouched");
+            Ok(())
+        })
+        .unwrap();
+
+    // Replace the session after its time limit.
+    let later = t0 + CLONING_SESSION_TTL + Duration::from_secs(1);
+    state
+        .enter_cloning_at(
+            CloningSession::new_at(CloneSession::new(), [3u8; 20], later),
+            later,
+        )
+        .unwrap();
+    state
+        .with_cloning_session(|s| {
+            assert_eq!(s.cluster_public_key, [3u8; 20], "expired session replaced");
+            Ok(())
+        })
+        .unwrap();
+}
+
+#[test]
+fn enter_cloning_rejected_once_active() {
+    let state = EnclaveState::new(Network::Bitcoin);
+    state.initialize_from_seed([42u8; 64]).unwrap();
+    let err = state
+        .enter_cloning(CloningSession::new(CloneSession::new(), [1u8; 20]))
+        .unwrap_err();
+    assert!(matches!(err, EnclaveError::AlreadyInitialized));
+}
 
 #[test]
 fn new_state_is_initial() {

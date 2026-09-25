@@ -117,7 +117,7 @@ pub(super) fn handle_get_public_key(
 /// matching `canonical_pubkey_bundle`. A new field must be added to the bundle
 /// and to the verifier mirror in
 /// `parent/src/attest_verify.rs::canonical_bundle`.
-fn build_public_keys_response(
+pub(super) fn build_public_keys_response(
     keys: crate::keys::KeyInfo,
     cfg: &BridgeConfig,
 ) -> PublicKeysResponse {
@@ -171,6 +171,39 @@ fn canonical_pubkey_bundle(keys: &PublicKeysResponse) -> Vec<u8> {
     out
 }
 
+/// Bind the v1 identity and policy to this encrypted clone response.
+/// NSM signs the version and commitment in user_data.
+/// The transcript contains only public values.
+pub(super) fn clone_commitment(
+    bundle: &PublicKeysResponse,
+    policy: &[u8],
+    requester: &[u8; 32],
+    donor: &[u8; 32],
+    ciphertext: &[u8],
+) -> [u8; 36] {
+    use sha2::{Digest, Sha256};
+    let mut hash = Sha256::new();
+    hash.update(b"utexo/clone-response/v1\0");
+    hash.update(Sha256::digest(canonical_pubkey_bundle(bundle)));
+    hash.update(Sha256::digest(policy));
+    hash.update(requester);
+    hash.update(donor);
+    hash.update(Sha256::digest(ciphertext));
+    let mut out = [0u8; 36];
+    out[..4].copy_from_slice(&1u32.to_be_bytes());
+    out[4..].copy_from_slice(&hash.finalize());
+    out
+}
+
+pub(super) fn verify_clone_commitment(actual: Option<&[u8]>, expected: &[u8; 36]) -> Result<()> {
+    if actual != Some(expected.as_slice()) {
+        return Err(EnclaveError::Attestation(
+            "clone response version/identity/policy/transcript mismatch".into(),
+        ));
+    }
+    Ok(())
+}
+
 pub(super) fn handle_get_attested_public_key(
     ctx: &ServerContext,
     req: GetAttestedPublicKeyRequest,
@@ -217,4 +250,20 @@ pub(super) fn handle_get_attested_public_key(
             },
         )),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn clone_commitment_requires_the_signed_identity_transcript() {
+        let expected = [0x5a; 36];
+        assert!(verify_clone_commitment(Some(&expected), &expected).is_ok());
+        assert!(verify_clone_commitment(None, &expected).is_err());
+
+        let mut altered = expected;
+        altered[35] ^= 1;
+        assert!(verify_clone_commitment(Some(&altered), &expected).is_err());
+    }
 }
