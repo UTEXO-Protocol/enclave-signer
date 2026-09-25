@@ -6,7 +6,7 @@ sequenceDiagram
     participant Cli as attest-verify CLI<br/>(bin/attest_verify.rs)
     participant Lib as parent/attest_verify.rs<br/>verify_attested_pubkey
     participant Parent as utexo-bridge-parent<br/>(grpc_server.rs)
-    participant Srv as enclave/server.rs<br/>handle_get_attested_public_key
+    participant Srv as enclave/server/keys.rs<br/>handle_get_attested_public_key
     participant State as EnclaveState<br/>+ KeyManager
     participant Att as attestation.rs<br/>(NSM facade)
     participant NSM as /dev/nsm<br/>(NSM device)
@@ -14,7 +14,7 @@ sequenceDiagram
     participant RootCa as Embedded AWS Nitro<br/>root CA (PEM)
 
     Note over V,Lib: Verifier issues nonce
-    V->>Cli: attest-verify --endpoint ... --pcr0/1/2 ...<br/>--expect-vanilla-psbt --expect-evm-source raw|helios|disabled
+    V->>Cli: attest-verify --endpoint ... --pcr0/1/2 ...<br/>--expect-signer-role mint|burn|combined<br/>--expect-vanilla-psbt --expect-evm-source raw|helios|disabled
     Cli->>Lib: verify_attested_pubkey(endpoint, expected_pcrs, expected_policy)
     Lib->>Lib: nonce := rand_32_bytes()
 

@@ -1,7 +1,7 @@
 //! Independent v1 wire encoder and single-field negative cases. Shared by the
 //! mock handler regression test and the separately built Nitro test peer.
 use sha2::{Digest, Sha256};
-use utexo_bridge_enclave::policy::{AttestationMode, AttestedPolicy, EvmDataSource};
+use utexo_bridge_enclave::policy::{AttestationMode, AttestedPolicy, EvmDataSource, SignerRole};
 use utexo_bridge_enclave::proto::PublicKeysResponse;
 
 pub fn commitment(
@@ -92,13 +92,22 @@ pub fn policy_cases(policy: &AttestedPolicy) -> Vec<(&'static str, Vec<u8>)> {
         }};
     }
     alter!(allow_vanilla_psbt, !*allow_vanilla_psbt);
+    alter!(
+        signer_role,
+        if *signer_role == SignerRole::Mint {
+            SignerRole::Burn
+        } else {
+            SignerRole::Mint
+        }
+    );
     alter!(attestation, AttestationMode::Mock);
     alter!(evm_source, EvmDataSource::Disabled);
     // The current Rust enum has only SpvVerified. A peer using another policy
     // vocabulary can nevertheless sign a byte encoding with a different source.
+    // V4 layout: [version, production, vanilla, role, attestation, evm, btc].
     let mut btc_source = policy.to_bytes();
-    assert_eq!(&btc_source[..2], &[2, 1]);
-    btc_source[5] = 0;
+    assert_eq!(&btc_source[..2], &[4, 1]);
+    btc_source[6] = 0;
     cases.push(("btc_source", btc_source));
     alter!(chain_id, *chain_id ^ 1);
     alter!(bridge_contract, {
@@ -107,6 +116,12 @@ pub fn policy_cases(policy: &AttestedPolicy) -> Vec<(&'static str, Vec<u8>)> {
         x
     });
     alter!(rgb_asset_id, format!("{rgb_asset_id}x"));
+    alter!(funds_in_contract, {
+        let mut x = *funds_in_contract;
+        x[0] ^= 1;
+        x
+    });
+    alter!(evm_min_confirmations, *evm_min_confirmations ^ 1);
     alter!(evm_checkpoint, Some([0x91; 32]));
     alter!(gas_tx_allowed_to, {
         let mut x = *gas_tx_allowed_to;

@@ -23,14 +23,15 @@ fn context() -> (BridgeConfig, SecurityPolicy) {
     let policy = SecurityPolicy::resolve(
         &BuildContext {
             debug_or_test: false,
-            dev_mode: false,
             mock_attestation: false,
             allow_seed_import: false,
             rgb_validation: true,
+            signer_role: SignerRole::Combined,
         },
         &cfg,
         EvmDataSource::RawRpc,
         None,
+        12,
     );
     assert!(matches!(policy, SecurityPolicy::Production(_)));
     (cfg, policy)
@@ -75,7 +76,7 @@ fn clone_identity_rejects_each_bundle_and_policy_field_before_active_and_allows_
     let bundles = clone_commitment::bundle_cases(&keys);
     let policies = clone_commitment::policy_cases(&policy.attested());
     assert_eq!(bundles.len(), 13);
-    assert_eq!(policies.len(), 14);
+    assert_eq!(policies.len(), 17);
     let mut cases: Vec<_> = bundles
         .into_iter()
         .map(|(name, k)| (format!("bundle.{name}"), k, policy.commitment_bytes()))

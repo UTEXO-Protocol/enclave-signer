@@ -22,7 +22,7 @@ use std::process::ExitCode;
 use anyhow::{Context, Result};
 use clap::Parser;
 
-use attestation_verify::EvmDataSource;
+use attestation_verify::{EvmDataSource, SignerRole};
 use utexo_bridge_parent::attest_verify::{
     verify_attested_pubkey, AttestedPubkeyResult, ExpectedPolicy, VerifyMode,
 };
@@ -61,6 +61,13 @@ struct Cli {
     #[arg(long)]
     expect_vanilla_psbt: bool,
 
+    /// Expected signer role, committed into attestation user_data: `mint`
+    /// (EVM -> RGB only), `burn` (RGB -> EVM only), or `combined` (both
+    /// directions, the combined and swap images). Required for production
+    /// verification. Ignored with --mock.
+    #[arg(long)]
+    expect_signer_role: Option<String>,
+
     /// Expected EVM `FundsIn` deposit-verification data source the enclave must
     /// have committed to: `raw` (host-relayed RPC), `helios` (trustless,
     /// checkpoint-verified), or `disabled`. Defaults to `raw` - the source the
@@ -95,6 +102,16 @@ struct Cli {
     /// Ignored with --mock.
     #[arg(long)]
     expect_rgb_asset_id: Option<String>,
+
+    /// Expected contract whose FundsIn events may authorize bridge signing.
+    /// Required for production verification.
+    #[arg(long)]
+    expect_funds_in_contract: Option<String>,
+
+    /// Expected minimum receipt confirmation depth. Required and non-zero for
+    /// production verification.
+    #[arg(long)]
+    expect_evm_min_confirmations: Option<u64>,
 
     /// Expected gas-tx (`SignRawDigest`) allowed destination the enclave pinned
     /// (`GAS_TX_ALLOWED_TO`), as 0x-hex. Omit if the operator left the gas path
@@ -137,6 +154,21 @@ fn parse_checkpoint(s: &str) -> Result<[u8; 32]> {
     })
 }
 
+/// Parse the `--expect-signer-role` flag into a [`SignerRole`].
+fn parse_signer_role(s: Option<&str>) -> Result<SignerRole> {
+    let s = s.context("--expect-signer-role required: mint | burn | combined (or pass --mock)")?;
+    match s.to_ascii_lowercase().as_str() {
+        "mint" => Ok(SignerRole::Mint),
+        "burn" => Ok(SignerRole::Burn),
+        "combined" => Ok(SignerRole::Combined),
+        other => {
+            anyhow::bail!(
+                "invalid --expect-signer-role '{other}' (expected: mint | burn | combined)"
+            )
+        }
+    }
+}
+
 /// Parse the `--expect-evm-source` flag into an [`EvmDataSource`].
 fn parse_evm_source(s: &str) -> Result<EvmDataSource> {
     match s.to_ascii_lowercase().as_str() {
@@ -172,6 +204,19 @@ fn parse_hex20(s: &str, flag: &str) -> Result<[u8; 20]> {
     bytes
         .try_into()
         .map_err(|v: Vec<u8>| anyhow::anyhow!("{flag} must be 20 bytes, got {}", v.len()))
+}
+
+fn parse_expect_funds_in_contract(s: &Option<String>) -> Result<[u8; 20]> {
+    let s = s
+        .as_deref()
+        .context("--expect-funds-in-contract required (or pass --mock)")?;
+    parse_hex20(s, "--expect-funds-in-contract")
+}
+
+fn parse_expect_evm_min_confirmations(value: Option<u64>) -> Result<u64> {
+    value
+        .filter(|n| *n > 0)
+        .context("--expect-evm-min-confirmations must be specified and greater than zero")
 }
 
 /// Parse `--expect-gas-selectors` (comma-separated 4-byte hex) into selectors.
@@ -242,11 +287,16 @@ async fn run(cli: Cli) -> Result<()> {
             .transpose()?;
         let expected_policy = ExpectedPolicy::Production {
             allow_vanilla_psbt: cli.expect_vanilla_psbt,
+            signer_role: parse_signer_role(cli.expect_signer_role.as_deref())?,
             evm_source,
             evm_checkpoint,
             expected_chain_id: cli.expect_chain_id,
             expected_bridge_contract,
             expected_rgb_asset_id: cli.expect_rgb_asset_id.clone(),
+            funds_in_contract: parse_expect_funds_in_contract(&cli.expect_funds_in_contract)?,
+            evm_min_confirmations: parse_expect_evm_min_confirmations(
+                cli.expect_evm_min_confirmations,
+            )?,
             gas_tx_allowed_to: parse_expect_gas_to(&cli.expect_gas_tx_to)?,
             gas_tx_max_gas_limit: cli.expect_gas_max_gas_limit,
             gas_tx_max_fee_per_gas: cli.expect_gas_max_fee_per_gas,
@@ -307,4 +357,27 @@ fn print_ok(result: &AttestedPubkeyResult) {
         "  Nonce echoed          : 0x{}",
         hex::encode(v.nonce.clone())
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_signer_role_accepts_the_three_roles() {
+        assert_eq!(parse_signer_role(Some("mint")).unwrap(), SignerRole::Mint);
+        assert_eq!(parse_signer_role(Some("burn")).unwrap(), SignerRole::Burn);
+        assert_eq!(
+            parse_signer_role(Some("Combined")).unwrap(),
+            SignerRole::Combined
+        );
+    }
+
+    #[test]
+    fn parse_signer_role_rejects_missing_and_invalid() {
+        let missing = parse_signer_role(None).unwrap_err();
+        assert!(format!("{missing:#}").contains("required"), "{missing:#}");
+        let invalid = parse_signer_role(Some("minter")).unwrap_err();
+        assert!(format!("{invalid:#}").contains("invalid"), "{invalid:#}");
+    }
 }

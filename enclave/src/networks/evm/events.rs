@@ -56,7 +56,8 @@ fn extract_uint256_as_u64(data: &[u8], offset: usize) -> Result<u64> {
 /// Canonical `BridgeFundsIn` signature, verbatim from `bridge-smart-contracts`
 /// `IBridge.sol`. A stale signature fails silently: the filter matches zero
 /// logs and every deposit reports "no FundsIn log in tx".
-const BRIDGE_FUNDS_IN_SIG: &str = "BridgeFundsIn(bytes32,bytes32,address,uint256,uint256,\
+pub(crate) const BRIDGE_FUNDS_IN_SIG: &str =
+    "BridgeFundsIn(bytes32,bytes32,address,uint256,uint256,\
      uint256,uint256,uint256,uint256,uint256,string)";
 
 /// `operationId` is `topic1` (topic0 is the event signature itself).
@@ -83,12 +84,9 @@ pub(crate) const BFI_MAX_DEST_ADDRESS_LEN: usize = 2048;
 /// 7 static words + 1 dynamic-string offset word must be present.
 const BFI_MIN_DATA_LEN: usize = 8 * 32;
 
-/// Canonical `FundsIn` signature, whose operation id is the mint's RGB OpId.
-/// `indexed` moves fields between topics and data but never changes it.
-pub const FUNDS_IN_SIG: &str = "FundsIn(address,uint256,uint256)";
-/// With `rgbOpId` indexed it is topic2; without, it is the first data word.
-#[cfg(feature = "bfa-validation")]
-const FI_RGB_OP_ID_TOPIC: usize = 2;
+/// Upgraded Bridge `FundsIn` signature. Only the sender is indexed; the RGB
+/// operation id and uint64 amount are encoded as two data words.
+pub const FUNDS_IN_SIG: &str = "FundsIn(address,uint256,uint64)";
 
 /// An RGB invoice in the shape the pinned `rgb-invoicing` accepts:
 /// `rgb:<contract>/<schema>/<state>/bc:utxob:<seal>`.
@@ -103,7 +101,7 @@ pub(crate) const SAMPLE_INVOICE: &str = "rgb:fuhLYX9G-eC8gDvf-V0XpYFH-ceSafoc-lG
 
 /// The beneficiary [`SAMPLE_INVOICE`] names, in the form a confidential
 /// recipient leg carries.
-#[cfg(test)]
+#[cfg(all(test, evm_to_rgb))]
 pub(crate) const SAMPLE_INVOICE_SEAL: &str =
     "utxob:UzR~73lD-JyzirTn-engdWia-qjd5NyV-mndAmmo-EbxdVEG-L6OiP";
 
@@ -152,6 +150,7 @@ static FUNDS_IN_TOPIC0: std::sync::LazyLock<[u8; 32]> =
 /// What a verified `BridgeFundsIn` deposit authorises. Only the fields later
 /// stages bind against; the rest is checked in [`verify_funds_in_event`].
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg(evm_to_rgb)]
 pub struct VerifiedFundsIn {
     /// Verbatim from the log. For an RGB destination this is the user's
     /// invoice, which the send-RGB recipient bind parses.
@@ -171,6 +170,7 @@ pub struct VerifiedFundsIn {
 /// `expected_operation_id` is mandatory: exactly 32 bytes, or refuse. Empty is an
 /// error, not a skipped comparison.
 #[allow(clippy::too_many_arguments)]
+#[cfg(evm_to_rgb)]
 pub fn verify_funds_in_event(
     provider: &dyn EvmReceiptProvider,
     bridge_contract: &[u8; 20],
@@ -262,6 +262,9 @@ pub fn verify_funds_in_event(
 }
 
 /// The fields of one `BridgeFundsIn` log, decoded from an emitter-pinned log.
+/// The burn direction reads only the id and net amount, but decodes the whole
+/// log, so a malformed one is refused in both images.
+#[cfg_attr(not(evm_to_rgb), allow(dead_code))]
 struct BridgeFundsInRecord {
     operation_id: [u8; 32],
     gross: u64,
@@ -359,6 +362,7 @@ fn decode_abi_string(data: &[u8], head_off: usize, field: &str) -> Result<String
 }
 
 /// Equality assertion with a field-named fail-closed error.
+#[cfg(evm_to_rgb)]
 fn check_eq(field: &str, got: u64, want: u64) -> Result<()> {
     if got != want {
         return Err(EnclaveError::CrossCheck(format!(
@@ -460,21 +464,13 @@ fn decode_funds_in(log: &LogEntry, expected_rgb_opid: &[u8; 32]) -> Result<u64> 
             "log is not a FundsIn event".into(),
         ));
     }
-    let (rgb_op_id, amount) = if log.topics.len() > FI_RGB_OP_ID_TOPIC {
-        (
-            log.topics[FI_RGB_OP_ID_TOPIC],
-            extract_uint256_as_u64(&log.data, 0)?,
-        )
-    } else {
-        let id: [u8; 32] = log
-            .data
-            .get(..32)
-            .and_then(|w| w.try_into().ok())
-            .ok_or_else(|| {
-                EnclaveError::CrossCheck("FundsIn data too short for an operation id".into())
-            })?;
-        (id, extract_uint256_as_u64(&log.data, 32)?)
-    };
+    if log.topics.len() != 2 || log.data.len() != 64 {
+        return Err(EnclaveError::CrossCheck(
+            "unexpected FundsIn event layout".into(),
+        ));
+    }
+    let rgb_op_id: [u8; 32] = log.data[..32].try_into().expect("checked data length");
+    let amount = extract_uint256_as_u64(&log.data, 32)?;
     if &rgb_op_id != expected_rgb_opid {
         return Err(EnclaveError::CrossCheck(format!(
             "FundsIn rgbOpId mismatch: on-chain 0x{} != consignment 0x{}",
@@ -892,652 +888,4 @@ fn parse_checkpoint(checkpoint: Option<&str>) -> Result<alloy_primitives::B256> 
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    const BRIDGE: [u8; 20] = [0xB1; 20];
-    const OTHER: [u8; 20] = [0xC2; 20];
-    const TX: [u8; 32] = [0x11; 32];
-
-    /// In-memory provider for the predicate tests - no real RPC.
-    struct FakeProvider {
-        receipt: Option<ReceiptData>,
-        head: u64,
-    }
-    impl EvmReceiptProvider for FakeProvider {
-        fn get_transaction_receipt(&self, _tx_hash: &[u8; 32]) -> Result<Option<ReceiptData>> {
-            Ok(self.receipt.clone())
-        }
-        fn get_block_number(&self) -> Result<u64> {
-            Ok(self.head)
-        }
-    }
-
-    fn word(v: u64) -> [u8; 32] {
-        let mut w = [0u8; 32];
-        w[24..].copy_from_slice(&v.to_be_bytes());
-        w
-    }
-
-    /// A hash-shaped operationId - deliberately not a small left-padded integer.
-    fn op_id(tag: u8) -> [u8; 32] {
-        let mut id = [tag; 32];
-        id[0] = 0xF0 | (tag & 0x0F); // high bytes set: cannot fit a u64
-        id
-    }
-
-    /// BridgeFundsIn `data`: senderNonce, gross, net, commission,
-    /// nativeCommission, srcChain, destChain, then the `destinationAddress`
-    /// head word and its tail. `operationId` is NOT here - it is an indexed
-    /// topic.
-    fn bridge_data(gross: u64, net: u64, commission: u64) -> Vec<u8> {
-        bridge_data_with_dest(gross, net, commission, SAMPLE_INVOICE)
-    }
-
-    /// The real ABI shape: 8 head words, the last one the tail offset, then a
-    /// length word and padded bytes.
-    fn bridge_data_with_dest(gross: u64, net: u64, commission: u64, dest: &str) -> Vec<u8> {
-        let mut d = Vec::new();
-        d.extend_from_slice(&word(0)); // senderNonce
-        d.extend_from_slice(&word(gross));
-        d.extend_from_slice(&word(net));
-        d.extend_from_slice(&word(commission));
-        d.extend_from_slice(&[0u8; 32 * 3]); // nativeCommission, sourceChainId, destinationChainId
-        d.extend_from_slice(&word(8 * 32)); // tail offset: just past the head words
-        d.extend_from_slice(&word(dest.len() as u64));
-        let mut bytes = dest.as_bytes().to_vec();
-        bytes.resize(bytes.len().div_ceil(32) * 32, 0);
-        d.extend_from_slice(&bytes);
-        d
-    }
-
-    // --- destinationAddress tail decoding ---
-    //
-    // Attacker-shaped data on a host-relayed receipt, so every bound is
-    // asserted.
-
-    #[test]
-    fn decodes_the_destination_address_tail() {
-        let d = bridge_data_with_dest(1000, 950, 50, SAMPLE_INVOICE);
-        let got = decode_abi_string(&d, BFI_DEST_ADDRESS_HEAD_OFF, "destinationAddress").unwrap();
-        assert_eq!(got, SAMPLE_INVOICE);
-    }
-
-    #[test]
-    fn decodes_an_empty_destination_address() {
-        let d = bridge_data_with_dest(1000, 950, 50, "");
-        let got = decode_abi_string(&d, BFI_DEST_ADDRESS_HEAD_OFF, "destinationAddress").unwrap();
-        assert!(got.is_empty());
-    }
-
-    #[test]
-    fn rejects_a_tail_offset_past_the_data() {
-        let mut d = bridge_data_with_dest(1000, 950, 50, SAMPLE_INVOICE);
-        d[BFI_DEST_ADDRESS_HEAD_OFF..BFI_DEST_ADDRESS_HEAD_OFF + 32]
-            .copy_from_slice(&word(1_000_000));
-        let err =
-            decode_abi_string(&d, BFI_DEST_ADDRESS_HEAD_OFF, "destinationAddress").unwrap_err();
-        assert!(err.to_string().contains("past the"), "{err}");
-    }
-
-    #[test]
-    fn rejects_a_tail_length_past_the_data() {
-        let mut d = bridge_data_with_dest(1000, 950, 50, SAMPLE_INVOICE);
-        let len_at = 8 * 32;
-        // Under the size cap, so the bounds check is what must catch it.
-        d[len_at..len_at + 32].copy_from_slice(&word(1_000));
-        let err =
-            decode_abi_string(&d, BFI_DEST_ADDRESS_HEAD_OFF, "destinationAddress").unwrap_err();
-        assert!(err.to_string().contains("log data is"), "{err}");
-    }
-
-    #[test]
-    fn rejects_a_tail_over_the_size_cap() {
-        let huge = "x".repeat(BFI_MAX_DEST_ADDRESS_LEN + 1);
-        let d = bridge_data_with_dest(1000, 950, 50, &huge);
-        let err =
-            decode_abi_string(&d, BFI_DEST_ADDRESS_HEAD_OFF, "destinationAddress").unwrap_err();
-        assert!(err.to_string().contains("cap"), "{err}");
-    }
-
-    #[test]
-    fn rejects_a_non_utf8_tail() {
-        let mut d = bridge_data_with_dest(1000, 950, 50, "abcd");
-        let at = 9 * 32; // first byte of the string body
-        d[at] = 0xFF;
-        let err =
-            decode_abi_string(&d, BFI_DEST_ADDRESS_HEAD_OFF, "destinationAddress").unwrap_err();
-        assert!(err.to_string().contains("not valid UTF-8"), "{err}");
-    }
-
-    /// Without this the recipient bind has nothing to compare against.
-    #[test]
-    fn verified_funds_in_carries_the_destination_address() {
-        let p = happy_provider();
-        let v = verify_funds_in_event(&p, &BRIDGE, 12, &TX, &op_id(7), 1000, 50).unwrap();
-        assert_eq!(v.destination_address, SAMPLE_INVOICE);
-    }
-
-    /// topics: [topic0, operationId, sourceSender, sender].
-    fn bridge_log(op: [u8; 32], gross: u64, net: u64, commission: u64) -> LogEntry {
-        LogEntry {
-            address: BRIDGE,
-            topics: vec![
-                event_topic0(BRIDGE_FUNDS_IN_SIG),
-                op,
-                [0x5c; 32],   // sourceSender
-                word(0xdead), // sender
-            ],
-            data: bridge_data(gross, net, commission),
-        }
-    }
-
-    /// The RGB-only companion `FundsIn(address,uint256 rgbOpId,uint256)`. Its id
-    /// is an RGB id, so the predicate must never fall back to this shape.
-    fn rgb_companion_log(rgb_op_id: u64, net: u64) -> LogEntry {
-        LogEntry {
-            address: BRIDGE,
-            topics: vec![event_topic0(FUNDS_IN_SIG), word(0xdead), word(rgb_op_id)],
-            data: word(net).to_vec(),
-        }
-    }
-
-    fn receipt_with(logs: Vec<LogEntry>, block_number: u64) -> ReceiptData {
-        ReceiptData {
-            status_success: true,
-            block_number,
-            logs,
-        }
-    }
-
-    /// gross=1000, commission=50, net=950. head 112, block 100 -> depth 12.
-    fn happy_provider() -> FakeProvider {
-        FakeProvider {
-            receipt: Some(receipt_with(vec![bridge_log(op_id(7), 1000, 950, 50)], 100)),
-            head: 112,
-        }
-    }
-
-    /// Verify with the operationId bound - the only supported call shape.
-    fn verify(p: &FakeProvider) -> Result<()> {
-        verify_funds_in_event(p, &BRIDGE, 12, &TX, &op_id(7), 1000, 50).map(|_| ())
-    }
-
-    #[test]
-    fn extract_uint256_works() {
-        let mut data = vec![0u8; 40];
-        // Put value 42 at offset 8 (bytes 8..40)
-        data[39] = 42;
-        assert_eq!(extract_uint256_as_u64(&data, 8).unwrap(), 42);
-    }
-
-    #[test]
-    fn extract_uint256_rejects_short_data() {
-        let data = vec![0u8; 10];
-        assert!(extract_uint256_as_u64(&data, 0).is_err());
-    }
-
-    #[test]
-    fn extract_uint256_rejects_overflow() {
-        let mut data = vec![0u8; 32];
-        data[0] = 1; // high byte set - exceeds u64
-        assert!(extract_uint256_as_u64(&data, 0).is_err());
-    }
-
-    // ---- topic0 drift guards (offline-pinned known-good vectors) ----
-
-    #[test]
-    fn topic0_vectors_are_pinned() {
-        assert_eq!(
-            hex::encode(event_topic0(BRIDGE_FUNDS_IN_SIG)),
-            "96266da276e870bb3d9c25740c9e24ec6448fc7bbed72ca384c3b8952574014c",
-            "BridgeFundsIn topic0 drifted"
-        );
-    }
-
-    /// Pins the pre-migration topic0 so a silent revert to the 9-field signature
-    /// fails loudly here instead of looking like "no deposit found".
-    #[test]
-    fn legacy_topic0_is_not_in_use() {
-        assert_ne!(
-            hex::encode(event_topic0(BRIDGE_FUNDS_IN_SIG)),
-            "08f62fdb70e8436181cbb1e561f6059677b179778bb0e0b9789a277eca0767e5",
-            "still filtering on the pre-migration BridgeFundsIn signature"
-        );
-    }
-
-    // ---- happy path ----
-
-    #[test]
-    fn accepts_matching_bridge_funds_in() {
-        assert!(verify(&happy_provider()).is_ok());
-    }
-
-    #[test]
-    fn accepts_real_contract_dual_emit() {
-        // One deposit emits both events; the pair must not trip the ambiguity
-        // guard, since only BridgeFundsIn is a candidate.
-        let p = FakeProvider {
-            receipt: Some(receipt_with(
-                vec![
-                    rgb_companion_log(7, 950),
-                    bridge_log(op_id(7), 1000, 950, 50),
-                ],
-                100,
-            )),
-            head: 112,
-        };
-        assert!(verify(&p).is_ok());
-    }
-
-    #[test]
-    fn dual_emit_binds_via_bridge_shape_not_the_companion() {
-        // The pair must resolve to BridgeFundsIn, which binds tokenCommission.
-        // Commission is invisible to the companion event: passing would mean
-        // selection had fallen back to it.
-        let p = FakeProvider {
-            receipt: Some(receipt_with(
-                vec![
-                    rgb_companion_log(7, 950),
-                    bridge_log(op_id(7), 1000, 950, 999),
-                ],
-                100,
-            )),
-            head: 112,
-        };
-        let e = verify(&p).unwrap_err().to_string();
-        assert!(e.contains("tokenCommission mismatch"), "got: {e}");
-    }
-
-    /// A tx carrying only the companion `FundsIn` is not an authorised deposit:
-    /// its id is an RGB id and it binds no commission.
-    #[test]
-    fn rejects_rgb_companion_event_alone() {
-        let p = FakeProvider {
-            receipt: Some(receipt_with(vec![rgb_companion_log(7, 950)], 100)),
-            head: 112,
-        };
-        let e = verify(&p).unwrap_err().to_string();
-        assert!(e.contains("no BridgeFundsIn log"), "got: {e}");
-    }
-
-    #[test]
-    fn rejects_two_real_deposits_in_one_tx() {
-        // Uniqueness still holds WITHIN a shape: two distinct BridgeFundsIn
-        // logs are two deposits, and picking one is a guess.
-        let p = FakeProvider {
-            receipt: Some(receipt_with(
-                vec![
-                    bridge_log(op_id(7), 1000, 950, 50),
-                    bridge_log(op_id(8), 1000, 950, 50),
-                ],
-                100,
-            )),
-            head: 112,
-        };
-        let e = verify(&p).unwrap_err().to_string();
-        assert!(e.contains("ambiguous"), "got: {e}");
-    }
-
-    // ---- receipt-level rejections ----
-
-    #[test]
-    fn rejects_missing_receipt() {
-        let p = FakeProvider {
-            receipt: None,
-            head: 112,
-        };
-        let e = verify(&p).unwrap_err().to_string();
-        assert!(e.contains("receipt not found"), "got: {e}");
-    }
-
-    #[test]
-    fn rejects_reverted_tx() {
-        let mut r = receipt_with(vec![bridge_log(op_id(7), 1000, 950, 50)], 100);
-        r.status_success = false;
-        let p = FakeProvider {
-            receipt: Some(r),
-            head: 112,
-        };
-        let e = verify(&p).unwrap_err().to_string();
-        assert!(e.contains("reverted"), "got: {e}");
-    }
-
-    // ---- log-matching rejections ----
-
-    #[test]
-    fn rejects_log_from_wrong_contract() {
-        let mut log = bridge_log(op_id(7), 1000, 950, 50);
-        log.address = OTHER;
-        let p = FakeProvider {
-            receipt: Some(receipt_with(vec![log], 100)),
-            head: 112,
-        };
-        let e = verify(&p).unwrap_err().to_string();
-        assert!(e.contains("no BridgeFundsIn log"), "got: {e}");
-    }
-
-    #[test]
-    fn rejects_wrong_topic0() {
-        let mut log = bridge_log(op_id(7), 1000, 950, 50);
-        log.topics[0] = word(0x1234); // not a FundsIn topic
-        let p = FakeProvider {
-            receipt: Some(receipt_with(vec![log], 100)),
-            head: 112,
-        };
-        let e = verify(&p).unwrap_err().to_string();
-        assert!(e.contains("no BridgeFundsIn log"), "got: {e}");
-    }
-
-    #[test]
-    fn rejects_ambiguous_multiple_logs() {
-        let p = FakeProvider {
-            receipt: Some(receipt_with(
-                vec![
-                    bridge_log(op_id(7), 1000, 950, 50),
-                    bridge_log(op_id(7), 1000, 950, 50),
-                ],
-                100,
-            )),
-            head: 112,
-        };
-        let e = verify(&p).unwrap_err().to_string();
-        assert!(e.contains("ambiguous"), "got: {e}");
-    }
-
-    #[test]
-    fn ignores_unrelated_logs_and_accepts() {
-        let unrelated = LogEntry {
-            address: OTHER,
-            topics: vec![word(0x9999)],
-            data: vec![],
-        };
-        let p = FakeProvider {
-            receipt: Some(receipt_with(
-                vec![unrelated, bridge_log(op_id(7), 1000, 950, 50)],
-                100,
-            )),
-            head: 112,
-        };
-        assert!(verify(&p).is_ok());
-    }
-
-    // ---- field-mismatch rejections ----
-
-    #[test]
-    fn rejects_operation_id_mismatch() {
-        let p = FakeProvider {
-            receipt: Some(receipt_with(vec![bridge_log(op_id(8), 1000, 950, 50)], 100)),
-            head: 112,
-        };
-        let e = verify(&p).unwrap_err().to_string();
-        assert!(e.contains("operationId mismatch"), "got: {e}");
-    }
-
-    #[test]
-    fn rejects_amount_mismatch() {
-        let p = FakeProvider {
-            receipt: Some(receipt_with(vec![bridge_log(op_id(7), 999, 949, 50)], 100)),
-            head: 112,
-        };
-        let e = verify(&p).unwrap_err().to_string();
-        assert!(e.contains("amount mismatch"), "got: {e}");
-    }
-
-    #[test]
-    fn rejects_commission_mismatch() {
-        let p = FakeProvider {
-            receipt: Some(receipt_with(vec![bridge_log(op_id(7), 1000, 950, 40)], 100)),
-            head: 112,
-        };
-        let e = verify(&p).unwrap_err().to_string();
-        assert!(e.contains("tokenCommission mismatch"), "got: {e}");
-    }
-
-    #[test]
-    fn rejects_net_amount_above_gross_minus_commission() {
-        // gross-commission = 950 but the log claims 960.
-        let p = FakeProvider {
-            receipt: Some(receipt_with(vec![bridge_log(op_id(7), 1000, 960, 50)], 100)),
-            head: 112,
-        };
-        let e = verify(&p).unwrap_err().to_string();
-        assert!(e.contains("exceeds gross - commission"), "got: {e}");
-    }
-
-    /// Under-crediting is legitimate for a fee-on-transfer token and safe, so it
-    /// is accepted and logged rather than refused.
-    #[test]
-    fn accepts_net_amount_below_gross_minus_commission() {
-        let p = FakeProvider {
-            receipt: Some(receipt_with(vec![bridge_log(op_id(7), 1000, 900, 50)], 100)),
-            head: 112,
-        };
-        assert!(verify(&p).is_ok());
-    }
-
-    #[test]
-    fn rejects_commission_exceeding_gross() {
-        let p = FakeProvider {
-            receipt: Some(receipt_with(vec![bridge_log(op_id(7), 100, 0, 150)], 100)),
-            head: 112,
-        };
-        let e = verify_funds_in_event(&p, &BRIDGE, 12, &TX, &op_id(7), 100, 150)
-            .unwrap_err()
-            .to_string();
-        assert!(e.contains("exceeds gross amount"), "got: {e}");
-    }
-
-    /// A log without the indexed topics cannot be bound: fail closed rather than
-    /// reading a data word.
-    #[test]
-    fn rejects_log_without_operation_id_topic() {
-        let mut log = bridge_log(op_id(7), 1000, 950, 50);
-        log.topics.truncate(1); // topic0 only
-        let p = FakeProvider {
-            receipt: Some(receipt_with(vec![log], 100)),
-            head: 112,
-        };
-        let e = verify(&p).unwrap_err().to_string();
-        assert!(e.contains("operationId is expected in topic1"), "got: {e}");
-    }
-
-    /// A full-width id must round-trip - the old u64 decode rejected every
-    /// realistic one as "exceeds u64 range".
-    #[test]
-    fn binds_full_width_operation_id() {
-        let p = happy_provider();
-        assert!(verify(&p).is_ok(), "a 32-byte operationId must bind");
-        // ...and a different one must not.
-        let e = verify_funds_in_event(&p, &BRIDGE, 12, &TX, &op_id(9), 1000, 50)
-            .unwrap_err()
-            .to_string();
-        assert!(e.contains("operationId mismatch"), "got: {e}");
-    }
-
-    /// Regression guard: an absent id must refuse, not degrade to an unbound
-    /// check as it once did.
-    #[test]
-    fn rejects_when_operation_id_not_supplied() {
-        let e = verify_funds_in_event(&happy_provider(), &BRIDGE, 12, &TX, &[], 1000, 50)
-            .unwrap_err()
-            .to_string();
-        assert!(e.contains("must be exactly 32 bytes"), "got: {e}");
-    }
-
-    #[test]
-    fn still_rejects_amount_mismatch_with_matching_operation_id() {
-        let p = FakeProvider {
-            receipt: Some(receipt_with(vec![bridge_log(op_id(7), 999, 949, 50)], 100)),
-            head: 112,
-        };
-        let e = verify(&p).unwrap_err().to_string();
-        assert!(e.contains("amount mismatch"), "got: {e}");
-    }
-
-    /// A wrong-length id is a mis-encoding, not an absent one: refuse.
-    #[test]
-    fn rejects_malformed_expected_operation_id() {
-        let e = verify_funds_in_event(&happy_provider(), &BRIDGE, 12, &TX, &[0xAA; 8], 1000, 50)
-            .unwrap_err()
-            .to_string();
-        assert!(e.contains("must be exactly 32 bytes"), "got: {e}");
-    }
-
-    // ---- confirmation-depth rejections ----
-
-    #[test]
-    fn rejects_insufficient_depth() {
-        // head 111, block 100 -> depth 11 < 12.
-        let p = FakeProvider {
-            receipt: Some(receipt_with(vec![bridge_log(op_id(7), 1000, 950, 50)], 100)),
-            head: 111,
-        };
-        let e = verify(&p).unwrap_err().to_string();
-        assert!(e.contains("not final"), "got: {e}");
-    }
-
-    #[test]
-    fn accepts_exact_min_depth() {
-        // head 112, block 100 -> depth 12 == 12.
-        assert!(verify(&happy_provider()).is_ok());
-    }
-
-    #[test]
-    fn rejects_head_below_receipt_block() {
-        // head 99 < block 100 -> reorg.
-        let p = FakeProvider {
-            receipt: Some(receipt_with(vec![bridge_log(op_id(7), 1000, 950, 50)], 100)),
-            head: 99,
-        };
-        let e = verify(&p).unwrap_err().to_string();
-        assert!(e.contains("reorg"), "got: {e}");
-    }
-
-    // ---- regression: listener booleans can no longer authorize ----
-
-    #[test]
-    fn issue_51_no_receipt_means_no_authorization() {
-        // Simulates a request whose listener set evm_event_valid/finalized=true
-        // but for which no real deposit exists: verification must still reject,
-        // proving the removed booleans no longer gate signing.
-        let p = FakeProvider {
-            receipt: None,
-            head: 112,
-        };
-        assert!(verify(&p).is_err());
-    }
-
-    // ---- BFA: the `FundsIn` log whose id is the RGB OpId ----
-
-    #[cfg(feature = "bfa-validation")]
-    #[test]
-    fn decodes_funds_in_with_an_indexed_operation_id() {
-        // Deployed shape: FundsIn(address indexed sender, uint256 indexed rgbOpId, uint256 amount)
-        let log = rgb_companion_log(0xab, 100);
-        assert_eq!(decode_funds_in(&log, &word(0xab)).unwrap(), 100);
-    }
-
-    #[cfg(feature = "bfa-validation")]
-    #[test]
-    fn decodes_funds_in_with_the_operation_id_in_data() {
-        // Post-migration shape: only `sender` stays indexed.
-        let mut data = word(0xab).to_vec();
-        data.extend_from_slice(&word(100));
-        let log = LogEntry {
-            address: BRIDGE,
-            topics: vec![event_topic0(FUNDS_IN_SIG), word(0xdead)],
-            data,
-        };
-        assert_eq!(decode_funds_in(&log, &word(0xab)).unwrap(), 100);
-    }
-
-    #[cfg(feature = "bfa-validation")]
-    #[test]
-    fn rejects_funds_in_for_a_different_operation_id() {
-        let log = rgb_companion_log(0xab, 100);
-        assert!(decode_funds_in(&log, &word(0xcd)).is_err());
-    }
-
-    #[cfg(feature = "bfa-validation")]
-    #[test]
-    fn rejects_funds_in_amount_above_u64() {
-        let log = LogEntry {
-            address: BRIDGE,
-            topics: vec![event_topic0(FUNDS_IN_SIG), word(0xdead), word(0xab)],
-            data: [0x01; 32].to_vec(),
-        };
-        assert!(decode_funds_in(&log, &word(0xab)).is_err());
-    }
-
-    #[cfg(feature = "bfa-validation")]
-    #[test]
-    fn verify_rgb_funds_in_accepts_a_verified_lock() {
-        // A real deposit tx emits both: the RGB companion (minted amount) and
-        // the BridgeFundsIn record (operationId, netAmount).
-        let p = FakeProvider {
-            receipt: Some(receipt_with(
-                vec![
-                    rgb_companion_log(0xab, 100),
-                    bridge_log(op_id(7), 1000, 950, 50),
-                ],
-                100,
-            )),
-            head: 112,
-        };
-        assert_eq!(
-            verify_rgb_funds_in(&p, &BRIDGE, 12, &TX, &word(0xab)).unwrap(),
-            VerifiedLock {
-                mint_opid: word(0xab),
-                minted: 100,
-                operation_id: op_id(7),
-                net_amount: 950,
-            }
-        );
-    }
-
-    /// Without the record there is nothing a `fundsOut` could cite, so the
-    /// lock is not usable as settlement evidence.
-    #[cfg(feature = "bfa-validation")]
-    #[test]
-    fn verify_rgb_funds_in_requires_the_bridge_funds_in_record() {
-        let p = FakeProvider {
-            receipt: Some(receipt_with(vec![rgb_companion_log(0xab, 100)], 100)),
-            head: 112,
-        };
-        let e = verify_rgb_funds_in(&p, &BRIDGE, 12, &TX, &word(0xab))
-            .unwrap_err()
-            .to_string();
-        assert!(e.contains("no BridgeFundsIn log"), "got: {e}");
-    }
-
-    /// The extension never checks the emitter, so this filter is the only thing
-    /// between a mint and a log from an attacker's contract.
-    #[cfg(feature = "bfa-validation")]
-    #[test]
-    fn verify_rgb_funds_in_rejects_a_log_from_an_unpinned_contract() {
-        let mut log = rgb_companion_log(0xab, 100);
-        log.address = OTHER;
-        let p = FakeProvider {
-            receipt: Some(receipt_with(vec![log], 100)),
-            head: 112,
-        };
-        let e = verify_rgb_funds_in(&p, &BRIDGE, 12, &TX, &word(0xab))
-            .unwrap_err()
-            .to_string();
-        assert!(e.contains("no FundsIn log"), "got: {e}");
-    }
-
-    #[cfg(feature = "bfa-validation")]
-    #[test]
-    fn refuses_a_bridge_location_that_is_not_the_pinned_contract() {
-        let pinned = [0x11u8; 20];
-        assert!(
-            check_bridge_location("0x1111111111111111111111111111111111111111", &pinned).is_ok()
-        );
-        assert!(
-            check_bridge_location("0x2222222222222222222222222222222222222222", &pinned).is_err()
-        );
-        assert!(check_bridge_location("not-an-address", &pinned).is_err());
-    }
-}
+mod tests;

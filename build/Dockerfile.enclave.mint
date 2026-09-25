@@ -1,8 +1,8 @@
 # syntax=docker/dockerfile:1.7
-# Mint/burn RGB enclave image (vsock + rgb + rgb-mint-burn + evm-rpc).
+# Mint signer enclave image: EVM -> RGB only (vsock + rgb + mint-signer).
 # Private Cargo dependencies require BuildKit secrets (see README, Building).
 # Supply github_token, or one deploy key per repo; keys never enter image layers.
-# Example: docker build --secret id=github_token,env=GITHUB_TOKEN -f build/Dockerfile.enclave.mint-burn .
+# Example: docker build --secret id=github_token,env=GITHUB_TOKEN -f build/Dockerfile.enclave.mint .
 # Production builder glibc must remain compatible with the AL2023 runtime.
 FROM rust:1.96-slim-bullseye@sha256:c593596210f729542a92aced6a8b0812bcc8d04c5f1b238e663b800d0e2e17bd AS builder
 
@@ -42,17 +42,17 @@ ENV CARGO_INCREMENTAL=0 \
 # `helios` is deliberately NOT enabled: the light-client path is unused in
 # production, so the attested evm_source is RawRpc.
 #
-# `rgb-mint-burn` selects the mint/burn RGB flow: deposits mint with a BFA
-# `Bridge`, withdrawals destroy with a BFA `Burn`. Exactly one flow is
-# required under `rgb-validation`, and this image carries no send/receive rule
-# at all - the swap image is Dockerfile.enclave.rgb. Two flows, two PCR0s, two
-# running enclaves.
+# `mint-signer` (implies `bfa-mint` -> the mint/burn flow + BFA validation)
+# builds the EVM -> RGB direction only: it signs the RGB mint PSBT after
+# verifying the EVM lock, and signs create_utxo (`SignBtc`). It carries no
+# `fundsOut` release rule at all - the burn signer is Dockerfile.enclave.burn.
+# Two roles, two PCR0s, two seeds, two running enclaves.
 RUN --mount=type=secret,id=github_token \
     --mount=type=secret,id=consignment_key \
     --mount=type=secret,id=consensus_key \
     --mount=type=secret,id=ops_key \
     --mount=type=secret,id=schemas_key \
-    sh /build/build/with-private-deps.sh enclave cargo build --release --locked --no-default-features --features vsock,rgb,bfa-mint
+    sh /build/build/with-private-deps.sh enclave cargo build --release --locked --no-default-features --features vsock,rgb,mint-signer
 
 
 # --- Runtime ---
@@ -94,6 +94,13 @@ RUN chmod +x /app/utexo-bridge-enclave /app/entrypoint.sh
 # TWO-CONTRACT deployment: the EVM funds-out EIP-712 verifyingContract is the
 # MultisigProxy (EVM_PROXY_CONTRACT_ADDRESS), which DIFFERS from the bridge
 # *entry* contract that emits FundsIn (FUNDS_IN_CONTRACT, set below).
+# The BFA asset id is a BUILD ARG with no default, unlike every other image
+# here: each BFA contract id is per-deployment, and baking
+# the swap asset would make this enclave refuse every mint at
+# `networks/rgb/mod.rs` after the EVM RPC has already been paid. Empty leaves
+# the config partially pinned, which `policy.rs` refuses at boot.
+#   --build-arg RGB_ASSET_ID=rgb:<the issued BFA contract id>
+# Note the pin is single-valued, so this EIF signs for the BFA asset only.
 ARG RGB_ASSET_ID=""
 RUN test -n "$RGB_ASSET_ID"
 ENV EVM_CHAIN_ID=42161 \
@@ -102,21 +109,18 @@ ENV EVM_CHAIN_ID=42161 \
     BITCOIN_NETWORK=bitcoin \
     ELECTRUM_URL=ssl://electrs-mainnet.utexo.com:50002
 
-# In-enclave EVM `FundsIn` verification (evm-rpc) plus the plain-BTC
-# (`SignBtc`) and gas-tx (`SignRawDigest`) policy pins - identical to
-# Dockerfile.enclave. EVM_RPC_URL MUST be loopback: the enclave reaches the EVM
-# RPC only through the vsock forwarder (host runs
+# In-enclave EVM verification (evm-rpc). EVM_RPC_URL MUST be loopback: the
+# enclave reaches the EVM RPC only through the vsock forwarder (host runs
 # `vsock-proxy <EVM_RPC_VSOCK_PORT=8002> <arbitrum-rpc-host> <port>`); a
 # non-loopback value falls back to the default at boot (config.rs EvmRpcConfig).
 # FUNDS_IN_CONTRACT is set EXPLICITLY because it differs from
 # EVM_PROXY_CONTRACT_ADDRESS - unset, it falls back to the proxy address and
-# points FundsIn verification at the wrong contract. In a release
-# `rgb-validation` build the plain-BTC and gas-tx paths fail closed unless
-# BTC_MAX_TOTAL_SATS / GAS_TX_ALLOWED_TO are pinned.
+# points FundsIn verification at the wrong contract.
+# The mint signer also signs plain-BTC create_utxo PSBTs (`SignBtc`), which fail
+# closed unless BTC_MAX_TOTAL_SATS is pinned. The gas-tx path is not compiled in.
 ENV EVM_RPC_URL=http://127.0.0.1:3444 \
     EVM_MIN_CONFIRMATIONS=12 \
     FUNDS_IN_CONTRACT=0x6711f1a319B37847fa0234181C34D883774c4951 \
-    GAS_TX_ALLOWED_TO=0x6711f1a319B37847fa0234181C34D883774c4951 \
     BTC_MAX_TOTAL_SATS=1000000
 
 # Production logging. This env is measured into PCR0 - do not flip it to `debug`

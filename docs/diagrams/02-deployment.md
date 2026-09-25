@@ -23,7 +23,7 @@ flowchart TB
             Replay[(NonceReplayGuard — cloning<br/>≤10 000 entries, 1 h TTL<br/>+ op_replay_guard — bridge ops<br/>≤100 000 entries, 24 h TTL)]
             Fwd[vsock_forwarder<br/>loopback → vsock, per-port<br/>Electrum port or 3443 / 3444<br/>Electrum host pinned to loopback in /etc/hosts]
             RgbVal[RgbValidator<br/>rgb-ops + Electrum or Esplora]
-            EvmVer[evm_event verifier<br/>raw RPC (supplied images)<br/>receipt/head correctness trusted]
+            EvmVer[events.rs verifier<br/>raw RPC (supplied images)<br/>receipt/head correctness trusted]
             NSM[/dev/nsm — Nitro Security Module/]
         end
     end
@@ -55,7 +55,7 @@ flowchart TB
 ### Build / cluster notes
 
 - Built as an **EIF** via `nitro-cli build-enclave` from `build/Dockerfile.enclave`
-  (combined), `.rgb`, `.mint-burn`, `.ccd` or `.bfa`. PCR0/1/2 are pinned at build
+  (combined), `.rgb`, `.mint`, `.burn` or `.ccd`. PCR0/1/2 are pinned at build
   time; changes to the measured image require updating accepted measurements.
   `build-eif.yml` publishes EIF + `PCR.json` + `SHA256SUMS` to S3 under the git
   sha; `deploy/deploy-host.sh` verifies both before and after start.

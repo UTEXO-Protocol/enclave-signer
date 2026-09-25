@@ -10,8 +10,8 @@ ROOT = Path(__file__).resolve().parents[2]
 RGB_RECIPES = (
     'Dockerfile.enclave',
     'Dockerfile.enclave.rgb',
-    'Dockerfile.enclave.mint-burn',
-    'Dockerfile.enclave.bfa',
+    'Dockerfile.enclave.mint',
+    'Dockerfile.enclave.burn',
 )
 
 

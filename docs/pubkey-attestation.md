@@ -143,7 +143,7 @@ compared (legacy behaviour) — the caller must then compare them out of band.
 
 The verifier MUST use the same field set, the same order, and the same
 length-prefix encoding. The reference encoder is `canonical_pubkey_bundle`
-in [`enclave/src/server.rs`](../enclave/src/server.rs) and the reference
+in [`enclave/src/server/keys.rs`](../enclave/src/server/keys.rs) and the reference
 decoder/checker is `canonical_bundle` in
 [`parent/src/attest_verify.rs`](../parent/src/attest_verify.rs).
 
@@ -158,15 +158,18 @@ both the enclave and every verifier share so the bytes are identical.
 
 ```
 policy_commitment =
-    u8(POLICY_COMMITMENT_V2 = 2)                    // version tag
+    u8(POLICY_COMMITMENT_V4 = 4)                    // version tag
     // Production (release, fully-pinned bridge signer):
     u8(0x01)                                        // production discriminant
     u8(allow_vanilla_psbt)                          // plain-BTC path enabled?
+    u8(signer_role)                                 // 0 combined | 1 mint | 2 burn (from build features)
     u8(attestation_mode)                            // 1 = real NSM (0 = mock)
     u8(evm_source)                                  // 0 disabled | 1 raw-rpc | 2 Helios-verified
     u8(btc_source)                                  // 1 = SPV-verified
     chain_id_be8 || bridge_contract(20)
     u32_be(len(rgb_asset_id)) || rgb_asset_id_utf8
+    funds_in_contract(20)                           // authorized event emitter
+    evm_min_confirmations_be8                       // required receipt depth
     u8(checkpoint_present)                          // 0 absent; 1 followed by 32-byte beacon root
     // Gas-tx (SignRawDigest) rule:
     gas_tx_allowed_to(20)                           // all-zero = gas path unpinned
@@ -178,9 +181,9 @@ policy_commitment =
     u8(0x00)                                        // development discriminant
 ```
 
-The tuple omits the deposit emitter, EVM confirmation depth, Bitcoin network,
-concrete sats budgets, resolver URLs and strict Helios checkpoint-age setting.
-Image-baked values remain measured in the EIF.
+The tuple omits the Bitcoin network, concrete sats budgets, resolver URLs and
+strict Helios checkpoint-age setting. Image-baked values remain measured in the
+EIF.
 
 A production enclave commits the production tuple; a dev/mock enclave
 commits just `[version, 0x00]`. Because the posture flags (`allow_vanilla_psbt`,
@@ -261,7 +264,18 @@ attest-verify \
     --endpoint https://parent.example:50051 \
     --pcr0 <96-hex-chars> \
     --pcr1 <96-hex-chars> \
-    --pcr2 <96-hex-chars>
+    --pcr2 <96-hex-chars> \
+    --expect-signer-role burn \
+    --expect-funds-in-contract 0x6711f1a319B37847fa0234181C34D883774c4951 \
+    --expect-evm-min-confirmations 12
+
+# --expect-signer-role is required: `mint` for the mint signer image
+# (Dockerfile.enclave.mint), `burn` for the burn signer
+# (Dockerfile.enclave.burn), `combined` for a swap image. A burn signer that
+# attests `mint` fails verification. A role attests the other role's path as
+# off whatever its env says: a burn signer never attests plain-BTC signing
+# (omit --expect-vanilla-psbt), a mint signer never attests a gas rule (omit
+# the --expect-gas-* flags).
 
 # Gas signing: also supply the image's exact expected rule when configured:
 # --expect-gas-tx-to <hex20> --expect-gas-max-gas-limit <units>
@@ -277,12 +291,14 @@ attest-verify \
 
 # Expect the plain-BTC path enabled:
 attest-verify --endpoint https://parent.example:50051 \
-    --pcr0 <..> --pcr1 <..> --pcr2 <..> \
+    --pcr0 <..> --pcr1 <..> --pcr2 <..> --expect-signer-role mint \
+    --expect-funds-in-contract <hex20> --expect-evm-min-confirmations 12 \
     --expect-vanilla-psbt
 
 # Optional Helios build (not enabled in the supplied Dockerfiles):
 attest-verify --endpoint https://parent.example:50051 \
     --pcr0 <..> --pcr1 <..> --pcr2 <..> \
+    --expect-funds-in-contract <hex20> --expect-evm-min-confirmations 12 \
     --expect-evm-source helios --expect-helios-checkpoint <hex32>
 
 # Dev / CI verification (against an enclave built with --features mock-attestation).
@@ -340,7 +356,7 @@ NOT defended (out of scope for attestation):
 
 ## Code references
 
-- Enclave-side handler: [`enclave/src/server.rs`](../enclave/src/server.rs)
+- Enclave-side handler: [`enclave/src/server/keys.rs`](../enclave/src/server/keys.rs)
   (`handle_get_attested_public_key`).
 - Parent gRPC handler: [`parent/src/grpc_server.rs`](../parent/src/grpc_server.rs)
   (`attested_public_key`).

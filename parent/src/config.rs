@@ -31,6 +31,16 @@ pub struct Config {
 
     /// Time limit for each gRPC handler.
     pub grpc_request_timeout_secs: u64,
+
+    /// Host for the `GET /health` readiness endpoint. Loopback by default:
+    /// deploy polls it from the parent host, and it must not be exposed
+    /// off-host. Unlike `grpc_host`, do NOT set this to 0.0.0.0 in Docker.
+    pub health_host: String,
+
+    /// Port for the health endpoint. Separate from `grpc_port`: the gRPC
+    /// listener speaks h2 only, and the probe is plain HTTP/1.1 so a shell
+    /// script can curl it.
+    pub health_port: u16,
 }
 
 impl Config {
@@ -52,6 +62,8 @@ impl Config {
             grpc_max_concurrent: env_or("GRPC_MAX_CONCURRENT", 128usize).max(1),
             grpc_max_concurrent_per_conn: env_or("GRPC_MAX_CONCURRENT_PER_CONN", 32usize).max(1),
             grpc_request_timeout_secs: env_or("GRPC_REQUEST_TIMEOUT_SECS", 120u64).max(1),
+            health_host: std::env::var("HEALTH_HOST").unwrap_or_else(|_| "127.0.0.1".into()),
+            health_port: env_or("HEALTH_PORT", 5001),
         }
     }
 }

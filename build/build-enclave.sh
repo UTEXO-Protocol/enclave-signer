@@ -16,10 +16,35 @@
 #   ENCLAVE_DEBUG_FEATURES optional test features; leave empty for production
 #   SOURCE_DATE_EPOCH build timestamp (default: commit time)
 #
-# BuildKit mounts credentials as secrets.
-# Supply the cloning secret at runtime through InitializeKey.
-# Use the target host's nitro-cli version to keep measurements consistent.
-# Normalize timestamps with buildx rewrite-timestamp for reproducible images.
+# Every variant resolves private RGB dependencies. Supply GITHUB_TOKEN with
+# read access, or PRIVATE_DEPS_DIR containing the per-repository deploy keys.
+# Credentials enter the build only through BuildKit secret mounts.
+#
+# Reproducible PCRs: PCR0/PCR1 depend on the nitro-cli version and its blobs
+# (kernel/init), not just our code. Pin nitro-cli to the same version the target
+# hosts run (stage is on 1.4.5) or the PCRs will not match.
+#
+# On the build side the EIF packs the runtime-stage rootfs, so the image build
+# must be deterministic: both base images are digest-pinned in
+# Dockerfile.enclave, and layer timestamps are normalised via SOURCE_DATE_EPOCH
+# plus BuildKit's `rewrite-timestamp` exporter (needs `docker buildx` with a
+# container/containerd builder). SOURCE_DATE_EPOCH defaults to the commit time.
+# OS package versions (apt/dnf) still float.
+#
+# Usage:
+#   ./build/build-enclave.sh
+# Tunables (env):
+#   OUT_DIR                output directory for artifacts (default: build/)
+#   IMAGE_TAG              docker tag for the builder image (default: utexo-bridge-enclave:latest)
+#   RGB_ASSET_ID           required approved asset pin for every Dockerfile that
+#                          declares ARG RGB_ASSET_ID (combined, rgb, mint, burn)
+#   NITRO_CLI_BLOBS        override blobs dir for `nitro-cli build-enclave`
+#   GITHUB_TOKEN           token with read access to the private RGB dependencies
+#   PRIVATE_DEPS_DIR       alternatively, directory of per-repository key files
+#                          (consignment_key, consensus_key, ops_key, schemas_key)
+# NOTE: the donor cloning secret is NOT baked into the EIF. It is delivered at
+# runtime via the InitializeKey message (CLI: `init --cloning-secret <secret>`),
+# keeping the build secret-free and the PCRs reproducible.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -29,9 +54,9 @@ OUT_DIR="${OUT_DIR:-$SCRIPT_DIR}"
 IMAGE_TAG="${IMAGE_TAG:-utexo-bridge-enclave:latest}"
 # Which enclave image to build. Defaults to the combined (rgb+ccd) image; set
 # DOCKERFILE=Dockerfile.enclave.rgb (send/receive RGB flow),
-# Dockerfile.enclave.mint-burn (mint/burn RGB flow), Dockerfile.enclave.ccd for a
-# lean single-network EIF, or Dockerfile.enclave.bfa for the BFA mint EIF - which
-# is the mint/burn flow on the bridged schema. Every variant
+# Dockerfile.enclave.mint / Dockerfile.enclave.burn (the two BFA mint/burn
+# signer EIFs), or
+# Dockerfile.enclave.ccd for a lean single-network EIF. Every variant
 # needs private dependency credentials. EIF_NAME names the output .eif (and thus the SHA256SUMS
 # entry); default keeps the historical artifact name.
 DOCKERFILE="${DOCKERFILE:-Dockerfile.enclave}"

@@ -42,7 +42,8 @@ ENV CARGO_INCREMENTAL=0 \
 # production, so the attested evm_source is RawRpc.
 #
 # `rgb-swap` selects the send/receive RGB flow. Exactly one flow is required
-# under `rgb-validation`; the mint/burn image is Dockerfile.enclave.mint-burn.
+# under `rgb-validation`; the mint/burn images are Dockerfile.enclave.mint and
+# Dockerfile.enclave.burn.
 RUN --mount=type=secret,id=github_token \
     --mount=type=secret,id=consignment_key \
     --mount=type=secret,id=consensus_key \

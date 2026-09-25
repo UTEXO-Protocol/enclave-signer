@@ -55,13 +55,13 @@ See the [component diagram](docs/diagrams/01-components.md) and
   exists only behind `allow-seed-import` (dev builds).
 - EVM bridge key `m/44'/60'/0'/0/0` (signs `fundsOut`); EVM gas-tx key
   `m/44'/60'/0'/0/1` (signs the outer relay transaction).
-- BTC legacy key `m/84'/0'/0'/0/0` (P2WSH ECDSA, unscoped library signing only).
+- BTC legacy key `m/84'/0'/0'/0/0`: public key only, nothing is signed with it.
 - BIP-86 taproot accounts: vanilla `m/86'/<coin>'/0'` (coin 0 mainnet, 1
   otherwise) and colored `m/86'/<rgb_coin>'/0'` (827166 mainnet, 827167
   otherwise). Plain-BTC signing is scoped to vanilla, bridge PSBTs to colored.
 - Concordium governance key: Ed25519, SLIP-0010, `m/44'/919'/0'/0'/0'`.
-- Returns the master fingerprint and both account xpubs for multisig
-  descriptors.
+- Returns the master fingerprint and both account xpubs for the bridge
+  wallet's watch-only descriptors.
 - The EVM address is the cluster identity. A cloned enclave installs the same
   seed and must derive the same address before it goes `Active`.
 
@@ -74,9 +74,10 @@ destination network. Accepted routes: RGB -> EVM, EVM -> RGB, CCD -> EVM.
   `0xdc771390`) or `TeeLzFundsOut` (LayerZero route) over the decoded calldata
   fields, domain `MultisigProxy` / `1` / pinned chain id / pinned proxy. 65-byte
   recoverable ECDSA signature.
-- **EVM -> RGB (bridge PSBT)** - taproot script-path Schnorr signatures on the
-  colored account, only after the EVM deposit and the RGB consignment are
-  verified and bound to the PSBT.
+- **EVM -> RGB (bridge PSBT)** - taproot Schnorr signatures on the colored
+  account, BIP-86 key path only (the bridge wallet is singlesig; a script-path
+  input is never signed), only after the EVM deposit and the RGB consignment
+  are verified and bound to the PSBT.
 - **CCD -> EVM** - same `fundsOut` digest, with a Concordium source the
   listener has already validated (the enclave binds only the amount).
 - **`SignBtc`** - plain-BTC PSBT on the vanilla account. Off unless the
@@ -117,6 +118,11 @@ destination network. Accepted routes: RGB -> EVM, EVM -> RGB, CCD -> EVM.
 - **Flow shape** - a `rgb-swap` build accepts BFA `Transfer` only; a
   `rgb-mint-burn` build accepts BFA `Bridge` / `Burn`. Separate images,
   separate PCR0.
+- **Signer role** - the mint/burn flow ships as two enclaves with two seeds:
+  the **mint signer** (`mint-signer`, EVM -> RGB: mint PSBT and `SignBtc`)
+  and the **burn signer** (`burn-signer`, RGB -> EVM: `fundsOut` and its gas
+  tx). Each image contains only its own direction, refuses the other one, and
+  attests its role (`SignerRole` in the policy commitment).
   Production RGB images take the per-deployment BFA contract ID through the
   `RGB_ASSET_ID` Docker build argument. The EIF workflow reads it from the
   `BFA_RGB_ASSET_ID` repository variable and fails the image build if absent.
@@ -204,8 +210,9 @@ cargo build --release -p utexo-bridge-enclave --no-default-features --features v
 # RGB send/receive only
 cargo build --release -p utexo-bridge-enclave --no-default-features --features vsock,rgb,rgb-swap,evm-rpc
 
-# RGB mint/burn only (separate instance, separate PCR0)
-cargo build --release -p utexo-bridge-enclave --no-default-features --features vsock,rgb,rgb-mint-burn,evm-rpc
+# RGB mint/burn, one image per signer role (separate PCR0, separate seed)
+cargo build --release -p utexo-bridge-enclave --no-default-features --features vsock,rgb,mint-signer
+cargo build --release -p utexo-bridge-enclave --no-default-features --features vsock,rgb,burn-signer
 
 # Concordium only
 cargo build --release -p utexo-bridge-enclave --no-default-features --features vsock,ccd
@@ -216,7 +223,8 @@ cargo build -p utexo-bridge-enclave --no-default-features --features allow-seed-
 
 Compile-time guards in `enclave/src/lib.rs`: `rgb-validation` requires `spv`;
 exactly one of `rgb-swap` / `rgb-mint-burn` whenever `rgb-validation` is on;
-`allow-seed-import`, `mock-attestation`, `dev-mode` do not compile in a release
+exactly one of `mint-signer` / `burn-signer` whenever `rgb-mint-burn` is on;
+`allow-seed-import` and `mock-attestation` do not compile in a release
 profile. CI asserts every guard fires.
 
 ### Enclave image (EIF)
@@ -224,10 +232,26 @@ profile. CI asserts every guard fires.
 ```bash
 ./build/build-enclave.sh                                  # Dockerfile.enclave (combined)
 DOCKERFILE=Dockerfile.enclave.rgb       ./build/build-enclave.sh
-DOCKERFILE=Dockerfile.enclave.mint-burn ./build/build-enclave.sh
+DOCKERFILE=Dockerfile.enclave.mint      ./build/build-enclave.sh
+DOCKERFILE=Dockerfile.enclave.burn      ./build/build-enclave.sh
 DOCKERFILE=Dockerfile.enclave.ccd       ./build/build-enclave.sh
-DOCKERFILE=Dockerfile.enclave.bfa       ./build/build-enclave.sh
 ```
+
+`Dockerfile.enclave.mint` and `Dockerfile.enclave.burn` are the shipped BFA
+mint/burn images, one per signer role. Each role implies `bfa-mint`, which
+pulls in `rgb-mint-burn` and `bfa-validation`, and `bfa-validation` pulls in
+`evm-rpc`. The two run as separate enclaves, each initialized with its own
+seed: cloning only works between images with the same PCR0. Each needs `--build-arg RGB_ASSET_ID=rgb:<contract id>`, which has no
+default because each BFA contract id is per-deployment. The build helper and the
+Dockerfile both reject a missing or blank value before the image is built.
+The asset is baked into the measured image; a host runtime environment override
+is not the provisioning path. Use the approved BFA asset, not the swap asset.
+
+Before deploying, record the image/EIF checksum, approved asset, measured PCRs,
+registered key, and Parent endpoint together. Verify a genuine BFA request
+succeeds and an opposite-flow request is rejected. BTC payout-budget validation
+(F06-AF-40) remains a separate control from this asset-provisioning fix
+(F06-NEW-AF-19).
 
 All Dockerfiles resolve private dependencies. Supply either a GitHub token
 with read access to those repositories, or the same per-repository deploy keys
@@ -264,11 +288,14 @@ path-prefix remapping, pre-generated proto code. Known drift: apt / dnf
 package versions still float.
 
 `.github/workflows/build-eif.yml` builds the `combined`, `rgb`,
-`rgb-mint-burn` and `ccd` variants on a plain runner with `nitro-cli 1.4.5`
+`rgb-mint`, `rgb-burn` and `ccd` variants on a plain runner with `nitro-cli 1.4.5`
 and uploads EIF + PCRs + host binaries to `s3://<bucket>/eif/<git_sha>/`.
-`release-eif.yml` deploys one of those to the stage hosts over SSM using
-`deploy/deploy-host.sh`. The `cd-*.yml` workflows push container images for
-the parent and the **dev** enclave image only.
+`release-eif.yml` deploys the `combined` EIF only: `deploy/deploy-host.sh`
+fetches `eif/<git_sha>/utexo-bridge-enclave.eif` and runs it on every CID.
+The `rgb-mint` and `rgb-burn` EIFs have no release path yet. The `cd-*.yml` workflows push container images for
+the parent and the **dev** enclave images only (`utexo-bridge-enclave-mint`
+and `utexo-bridge-enclave-burn`, both from `Dockerfile.enclave-dev.bfa` with a
+`SIGNER_ROLE` build arg).
 
 The production Dockerfiles bake the bridge pins as `ENV` (`EVM_CHAIN_ID`,
 `EVM_PROXY_CONTRACT_ADDRESS`, `RGB_ASSET_ID`, `FUNDS_IN_CONTRACT`,
@@ -341,14 +368,14 @@ Bridge pins (all three required for a `Production` policy):
 | `EVM_CHAIN_ID` | `0` | Pinned chain id. Must match the destination chain and the direct-route `destinationChainId`. |
 | `EVM_PROXY_CONTRACT_ADDRESS` | zero | MultisigProxy address: EIP-712 `verifyingContract` and the `to` of the payable `lzFundsOutCall` carve-out. Attested as `bridge_contract`. |
 | `RGB_ASSET_ID` | empty | Pinned RGB contract id. Enforced on every bridge PSBT, and on `fundsOut` when the bridge is configured. |
-| `FUNDS_IN_CONTRACT` | falls back to the proxy | Emitter of `FundsIn` / `BridgeFundsIn`. Set it explicitly when the two contracts differ. Not yet in the attested commitment. |
+| `FUNDS_IN_CONTRACT` | falls back to the proxy | Attested emitter of `FundsIn` / `BridgeFundsIn`. It must resolve to a non-zero address in production. |
 
 Value bounds (fail closed while unset in a production build):
 
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `BTC_MAX_TOTAL_SATS` | `0` | Cap on total input value of one plain-BTC (`SignBtc`) transaction. Non-zero also flips `allow_vanilla_psbt` in the attested policy. |
-| `BTC_MAX_UNOWNED_SATS` | `0` | Plain-BTC output budget for scripts the enclave does not prove it controls (allocation dust, fresh change). |
+| `BTC_MAX_UNOWNED_SATS` | `0` | Plain-BTC output budget for scripts the enclave does not prove it controls. Outputs repaying a signed input or landing on the enclave's own BIP-86 key-path addresses (singlesig change, `create_utxo` allocations) are proven and do not count. |
 | `RGB_MAX_UNOWNED_SATS` | `0` | Bridge-PSBT output budget for sats the enclave cannot prove it controls. Size it from the bridge's witnessed satoshi amount. |
 | `GAS_TX_ALLOWED_TO` | unset | Only `to` a gas tx may target. |
 | `GAS_TX_MAX_GAS_LIMIT` | `0` | Ceiling on `gasLimit`. |
@@ -367,7 +394,7 @@ Data sources and transport:
 | `ESPLORA_VSOCK_PORT` | `8001` | Host vsock-proxy port for the resolver. |
 | `EVM_RPC_URL` | `http://127.0.0.1:3444` | Loopback EVM JSON-RPC (`evm-rpc`). A non-loopback value is replaced by the default. |
 | `EVM_RPC_VSOCK_PORT` | `8002` | Host vsock-proxy port for the EVM RPC. |
-| `EVM_MIN_CONFIRMATIONS` | `12` | Minimum depth of a `FundsIn` receipt. |
+| `EVM_MIN_CONFIRMATIONS` | `12` | Attested minimum depth of a `FundsIn` receipt; zero is rejected at production boot. |
 | `ENCLAVE_LISTEN_ADDR` | `127.0.0.1:5000` | TCP listen address, non-vsock builds only. |
 | `RUST_LOG` | unset | Log filter. |
 
@@ -406,15 +433,50 @@ Limits and dev knobs:
 | `USE_VSOCK` | `false` | `true` / `1` selects vsock (Linux only). |
 | `ENCLAVE_VSOCK_CID` | `16` | Enclave CID. |
 | `ENCLAVE_VSOCK_PORT` | `5000` | Enclave vsock port. |
+| `HEALTH_HOST` | `127.0.0.1` | Bind host for `GET /health`. Keep on loopback - unlike `GRPC_HOST`, do not set to `0.0.0.0` |
+| `HEALTH_PORT` | `5001` | Port for `GET /health` |
 | `EVM_NETWORK_IDS` | empty | Comma-separated network ids that count as EVM destinations for `Sign`. Empty rejects every EVM-destination transaction. |
 | `RUST_LOG` | unset | Log filter. |
+
+#### Readiness endpoint
+
+Deploy restarts the three enclaves one at a time so signing stays available.
+`GET /health` on the parent replaces the fixed sleep between them with a real
+signal:
+
+```bash
+curl -sS -o /dev/null -w '%{http_code}\n' http://127.0.0.1:5001/health
+```
+
+- `200` - the enclave's signing key is loaded **and** its Bitcoin header chain
+  passes the same staleness gate signing applies (`SPV_MAX_TIP_AGE_SECS`), so a
+  signing request would not bounce off a stale chain.
+- `503` - anything else: still starting, still catching up, key not initialized,
+  or the enclave is unreachable. "Not ready" and "cannot tell" are one answer to
+  a caller that is waiting, so the poller never has to special-case a `5xx`.
+
+The body carries the same fields as diagnostics (`key_loaded`, `spv_synced`,
+`phase`, `spv_tip_height`, `spv_tip_age_secs`), so a stuck deploy is debuggable
+from the poll log. Production binds it per parent on `50061` / `50062` /
+`50063` (`deploy/deploy-host.sh`); the Docker image wires the same probe into a
+`HEALTHCHECK`, so `docker inspect` reports it.
+
+This is an operations probe, not part of the signing API. It is loopback-only
+and must not be exposed off-host.
+
+The same answer is available from the CLI, for debugging from the host shell:
+
+```bash
+utexo-bridge-parent-cli --addr vsock://16 health
+```
 
 ## Testing
 
 ```bash
 cargo test                                                              # enclave workspace, default features
 cargo test -p utexo-bridge-enclave --features spv,rgb-swap              # full RGB sign-path gate
-cargo test -p utexo-bridge-enclave --no-default-features --features rgb,rgb-mint-burn
+cargo test -p utexo-bridge-enclave --no-default-features --features rgb,mint-signer,mock-attestation,allow-seed-import
+cargo test -p utexo-bridge-enclave --no-default-features --features rgb,burn-signer,mock-attestation,allow-seed-import
 cargo test -p utexo-bridge-enclave --features evm-rpc
 cargo test -p utexo-bridge-enclave --features mock-attestation,allow-seed-import
 cargo test --manifest-path parent/Cargo.toml                            # gRPC bridge + attest-verify e2e
@@ -436,6 +498,8 @@ provenance. `build/smoke-test.sh` drives a live enclave through the CLI.
 | `rgb-swap` | `rgb` | RGB flow: send/receive with BFA `Transfer`. In the default set. |
 | `rgb-mint-burn` | `rgb` | RGB flow: deposits mint with BFA `Bridge`, withdrawals `Burn`. Needs `--no-default-features`. |
 | `bfa-mint` | `rgb-mint-burn`, `bfa-validation` | Mint/burn flow with BFA consensus and settlement checks against verified `FundsIn` locks. |
+| `mint-signer` | `bfa-mint` | Mint/burn signer role: EVM -> RGB only (mint PSBT, `SignBtc`). Exactly one role per mint/burn build. |
+| `burn-signer` | `bfa-mint` | Mint/burn signer role: RGB -> EVM only (`fundsOut`, gas tx). Exactly one role per mint/burn build. |
 | `bfa-validation` | `evm-rpc` | Runs BFA consensus with verified mint ancestry in either RGB flow. Required for BFA swaps and implied by `bfa-mint`. |
 | `spv` | `rgb-validation` | In-enclave Bitcoin header chain and witness inclusion proofs. |
 | `rgb-validation` | rgb crates | In-enclave consignment validation. Requires `spv`. |
@@ -443,7 +507,6 @@ provenance. `build/smoke-test.sh` drives a live enclave through the CLI.
 | `helios` | `evm-rpc` | Optional checkpoint-verified EVM provider; selected by `HELIOS_EXECUTION_RPC`. Not enabled in the supplied Dockerfiles. |
 | `vsock` | - | vsock listener and forwarders (Linux). |
 | `allow-seed-import` | - | Mnemonic / raw-seed import. Dev only, does not compile in release. |
-| `dev-mode` | - | Skips cross-check validation. Dev only, does not compile in release. |
 | `mock-attestation` | - | Raw-CBOR attestation with zero PCRs. Dev only, does not compile in release. |
 
 ## Proto source
