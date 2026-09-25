@@ -12,11 +12,12 @@ use crate::error::{EnclaveError, Result};
 /// Estimate supported native-witness satisfactions, including all inputs.
 /// Hidden Taproot leaves and later finalizer changes are not bounded here;
 /// the finalizer must also check the actual transaction's fee rate.
-pub(super) fn estimated_signed_vsize(psbt: &Psbt) -> Result<u64> {
+pub(super) fn estimated_signed_vsize(psbt: &Psbt, key_path_inputs: &[usize]) -> Result<u64> {
     if psbt.inputs.is_empty() || psbt.inputs.len() != psbt.unsigned_tx.input.len() {
         return Err(size_error("inconsistent or empty PSBT"));
     }
 
+    let key_path_inputs: std::collections::HashSet<_> = key_path_inputs.iter().copied().collect();
     let mut weight = (psbt.unsigned_tx.base_size() as u64)
         .checked_mul(4)
         .and_then(|n| n.checked_add(2)) // Segwit marker and flag.
@@ -42,7 +43,7 @@ pub(super) fn estimated_signed_vsize(psbt: &Psbt) -> Result<u64> {
         let prevout = prevout.map_err(|err| fail(&format!("funding output unavailable: {err}")))?;
         let script = &prevout.script_pubkey;
         let estimated = if script.is_p2tr() {
-            taproot_witness_size(input, script).map_err(&fail)?
+            taproot_witness_size(input, script, key_path_inputs.contains(&index)).map_err(&fail)?
         } else if script.is_p2wpkh() {
             // Standard P2WPKH: DER signature plus sighash, compressed public key.
             witness_size(&[73, 33])
@@ -74,9 +75,14 @@ pub(super) fn estimated_signed_vsize(psbt: &Psbt) -> Result<u64> {
     Ok(weight.div_ceil(4))
 }
 
-fn taproot_witness_size(input: &Input, script: &Script) -> std::result::Result<u64, &'static str> {
+fn taproot_witness_size(
+    input: &Input,
+    script: &Script,
+    key_path: bool,
+) -> std::result::Result<u64, &'static str> {
     let secp = Secp256k1::verification_only();
-    if input.tap_scripts.is_empty() {
+    // Only the trusted signer resolver can select key-path despite disclosed leaves.
+    if key_path || input.tap_scripts.is_empty() {
         let internal_key = input
             .tap_internal_key
             .ok_or("Taproot spend metadata is missing")?;
@@ -294,12 +300,15 @@ mod tests {
         for (input, witness) in signed.input.iter_mut().zip(witnesses) {
             input.witness = witness;
         }
-        assert_eq!(estimated_signed_vsize(psbt).unwrap(), signed.vsize() as u64);
+        assert_eq!(
+            estimated_signed_vsize(psbt, &[]).unwrap(),
+            signed.vsize() as u64
+        );
         assert!(signed.vsize() > psbt.unsigned_tx.vsize());
     }
 
     fn assert_error(psbt: &Psbt, reason: &str) {
-        let error = estimated_signed_vsize(psbt).unwrap_err().to_string();
+        let error = estimated_signed_vsize(psbt, &[]).unwrap_err().to_string();
         assert!(
             error.contains("cannot estimate signed PSBT size"),
             "{error}"
@@ -440,9 +449,9 @@ mod tests {
         let mut psbt = psbt_with_script(ScriptBuf::new_p2wpkh(
             &public_key(2).wpubkey_hash().unwrap(),
         ));
-        let expected = estimated_signed_vsize(&psbt).unwrap();
+        let expected = estimated_signed_vsize(&psbt, &[]).unwrap();
         psbt.inputs[0].final_script_witness = Some(Witness::from_slice(&[vec![1]]));
-        assert_eq!(estimated_signed_vsize(&psbt).unwrap(), expected);
+        assert_eq!(estimated_signed_vsize(&psbt, &[]).unwrap(), expected);
     }
 
     #[test]
@@ -491,6 +500,7 @@ mod tests {
                 taproot_witness_size(
                     &psbt.inputs[0],
                     &psbt.inputs[0].witness_utxo.as_ref().unwrap().script_pubkey,
+                    false,
                 )
                 .unwrap(),
                 Witness::from_slice(&[vec![1; signature_len]]).size() as u64,
@@ -506,6 +516,7 @@ mod tests {
             taproot_witness_size(
                 &psbt.inputs[0],
                 &psbt.inputs[0].witness_utxo.as_ref().unwrap().script_pubkey,
+                false,
             )
             .unwrap(),
             Witness::from_slice(&[vec![1; 65]]).size() as u64,
@@ -529,7 +540,7 @@ mod tests {
             script.into_bytes(),
             control,
         ]));
-        estimated_signed_vsize(&psbt).expect("complete Taproot metadata");
+        estimated_signed_vsize(&psbt, &[]).expect("complete Taproot metadata");
         psbt.inputs[0].tap_scripts.clear();
         assert_error(&psbt, "metadata is missing");
 
@@ -546,7 +557,7 @@ mod tests {
             vec![1; 73],
             script.into_bytes(),
         ]));
-        estimated_signed_vsize(&psbt).expect("complete P2WSH metadata");
+        estimated_signed_vsize(&psbt, &[]).expect("complete P2WSH metadata");
         psbt.inputs[0].witness_script = None;
         assert_error(&psbt, "witness_script is missing");
     }
@@ -603,9 +614,9 @@ mod tests {
         previous.output[0] = psbt.inputs[0].witness_utxo.clone().unwrap();
         psbt.unsigned_tx.input[0].previous_output.txid = previous.compute_txid();
         psbt.inputs[0].non_witness_utxo = Some(previous);
-        let estimate = estimated_signed_vsize(&psbt).unwrap();
+        let estimate = estimated_signed_vsize(&psbt, &[]).unwrap();
         psbt.inputs[0].witness_utxo = None;
-        assert_eq!(estimated_signed_vsize(&psbt).unwrap(), estimate);
+        assert_eq!(estimated_signed_vsize(&psbt, &[]).unwrap(), estimate);
         psbt.unsigned_tx.input[0].previous_output.vout = 1;
         assert_error(&psbt, "funding output unavailable");
         psbt.inputs[0].non_witness_utxo = None;

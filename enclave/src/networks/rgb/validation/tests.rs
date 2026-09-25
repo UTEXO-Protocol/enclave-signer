@@ -1139,6 +1139,8 @@ mod asset_bind {
             // Source validation never reaches the destination PSBT bind.
             #[cfg(evm_to_rgb)]
             self_owned_psbt_outputs: None,
+            #[cfg(evm_to_rgb)]
+            psbt_fee_key_paths: None,
             bridge_events: &[],
         };
         validate_source(source, &ctx)

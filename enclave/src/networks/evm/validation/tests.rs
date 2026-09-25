@@ -88,6 +88,8 @@ fn with_ctx<T>(config: &BridgeConfig, f: impl FnOnce(&ValidationContext<'_>) -> 
         #[cfg(feature = "rgb-validation")]
         #[cfg(evm_to_rgb)]
         self_owned_psbt_outputs: None,
+        #[cfg(all(feature = "rgb-validation", evm_to_rgb))]
+        psbt_fee_key_paths: None,
         #[cfg(feature = "rgb-validation")]
         bridge_events: &[],
     };

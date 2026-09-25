@@ -241,6 +241,161 @@ mod fee_rate {
         psbt
     }
 
+    fn disclose_taproot_leaf(
+        input: &mut bitcoin::psbt::Input,
+        leaf: ScriptBuf,
+    ) -> bitcoin::taproot::ControlBlock {
+        use bitcoin::secp256k1::Secp256k1;
+        use bitcoin::taproot::{LeafVersion, TaprootBuilder};
+
+        let info = TaprootBuilder::new()
+            .add_leaf(0, leaf.clone())
+            .unwrap()
+            .finalize(&Secp256k1::new(), input.tap_internal_key.unwrap())
+            .unwrap();
+        let control = info
+            .control_block(&(leaf.clone(), LeafVersion::TapScript))
+            .unwrap();
+        input.tap_merkle_root = info.merkle_root();
+        input.witness_utxo.as_mut().unwrap().script_pubkey =
+            ScriptBuf::new_p2tr_tweaked(info.output_key());
+        input
+            .tap_scripts
+            .insert(control.clone(), (leaf, LeafVersion::TapScript));
+        control
+    }
+
+    #[test]
+    fn owned_key_path_floor_ignores_disclosed_leaves() {
+        use crate::keys::AccountType;
+        use crate::networks::rgb::btc_ownership::tests as fx;
+        use bitcoin::opcodes::all::{OP_CHECKSIG, OP_RETURN};
+        use bitcoin::script::Builder;
+        use bitcoin::sighash::TapSighashType;
+
+        let keys = fx::km();
+        for opcode in [OP_RETURN, OP_CHECKSIG] {
+            for requested in [TapSighashType::Default, TapSighashType::All] {
+                let mut psbt = psbt_with_fee(100_000, 100_000);
+                fx::anchor_input(&mut psbt, 0, &keys, AccountType::Colored, 0, 0, 100_000);
+                let internal = psbt.inputs[0].tap_internal_key.unwrap();
+                let leaf = if opcode == OP_CHECKSIG {
+                    Builder::new().push_x_only_key(&internal)
+                } else {
+                    Builder::new()
+                }
+                .push_opcode(opcode)
+                .into_script();
+                disclose_taproot_leaf(&mut psbt.inputs[0], leaf);
+                psbt.inputs[0].sighash_type = Some(requested.into());
+                let key_paths = fee_key_path_inputs(&psbt, &keys);
+                assert_eq!(key_paths, vec![0]);
+
+                let mut tx = psbt.unsigned_tx.clone();
+                let signature_len = if requested == TapSighashType::Default {
+                    64
+                } else {
+                    65
+                };
+                tx.input[0].witness = Witness::from_slice(&[vec![0; signature_len]]);
+                let minimum = tx.vsize() as u64;
+                psbt.unsigned_tx.output[0].value = Amount::from_sat(100_000 - minimum);
+                check_psbt_fee_rate(&psbt, 10.0, &key_paths).unwrap();
+
+                let (bytes, count) = keys
+                    .sign_psbt_scoped(&psbt.serialize(), Some(AccountType::Colored))
+                    .unwrap();
+                assert_eq!(count, 1);
+                let signed = Psbt::deserialize(&bytes).unwrap();
+                let signature = fx::verify_own_signature(&signed, 0).unwrap();
+                assert_eq!(signature.sighash_type, requested);
+                tx = signed.unsigned_tx.clone();
+                tx.input[0].witness = Witness::from_slice(&[signature.to_vec()]);
+                assert_eq!(tx.vsize() as u64, minimum);
+                // Merging a signature must not change the planned spend path.
+                assert_eq!(fee_key_path_inputs(&signed, &keys), key_paths);
+                check_psbt_fee_rate(&signed, 10.0, &key_paths).unwrap();
+
+                psbt.unsigned_tx.output[0].value += Amount::from_sat(1);
+                let err = check_psbt_fee_rate(&psbt, 10.0, &key_paths).unwrap_err();
+                assert!(err.to_string().contains("fee rate too low"), "{err}");
+            }
+        }
+    }
+
+    #[test]
+    fn foreign_script_path_with_complete_metadata_keeps_its_full_fee_floor() {
+        use crate::keys::AccountType;
+        use crate::networks::rgb::btc_ownership::tests as fx;
+        use bitcoin::opcodes::all::{OP_CHECKSIG, OP_CHECKSIGADD, OP_NUMEQUAL, OP_RETURN};
+        use bitcoin::script::Builder;
+
+        let keys = fx::km();
+        let mut psbt = fx::psbt_with_n(2, &[(fx::foreign_address(0xB1), 200_000)]);
+        fx::anchor_input(&mut psbt, 0, &keys, AccountType::Colored, 0, 0, 100_000);
+        disclose_taproot_leaf(
+            &mut psbt.inputs[0],
+            Builder::new().push_opcode(OP_RETURN).into_script(),
+        );
+        // BIP-341 NUMS internal key: the auxiliary input must use its script path.
+        let nums = "50929b74c1a04954b78b4b6035e97a5e078a5a0f28ec96d547bfee9ace803ac0"
+            .parse::<bitcoin::XOnlyPublicKey>()
+            .unwrap();
+        let forged_origin = psbt.inputs[0]
+            .tap_key_origins
+            .values()
+            .next()
+            .unwrap()
+            .clone();
+        let auxiliary = &mut psbt.inputs[1];
+        auxiliary.witness_utxo = Some(TxOut {
+            value: Amount::from_sat(100_000),
+            script_pubkey: ScriptBuf::new(),
+        });
+        auxiliary.tap_internal_key = Some(nums);
+        auxiliary.tap_key_origins.insert(nums, forged_origin);
+        let leaf = Builder::new()
+            .push_x_only_key(&fx::foreign_xonly(7))
+            .push_opcode(OP_CHECKSIG)
+            .push_x_only_key(&fx::foreign_xonly(8))
+            .push_opcode(OP_CHECKSIGADD)
+            .push_x_only_key(&fx::foreign_xonly(9))
+            .push_opcode(OP_CHECKSIGADD)
+            .push_int(2)
+            .push_opcode(OP_NUMEQUAL)
+            .into_script();
+        let control = disclose_taproot_leaf(auxiliary, leaf.clone());
+        let key_paths = fee_key_path_inputs(&psbt, &keys);
+        assert_eq!(
+            key_paths,
+            vec![0],
+            "forged origins cannot establish key ownership"
+        );
+
+        let mut tx = psbt.unsigned_tx.clone();
+        tx.input[0].witness = Witness::from_slice(&[vec![0; 64]]);
+        // Size-only signatures, including the auxiliary cosigners' sighash bytes.
+        tx.input[1].witness = Witness::from_slice(&[
+            vec![0; 65],
+            vec![0; 65],
+            vec![],
+            leaf.into_bytes(),
+            control.serialize(),
+        ]);
+        let minimum = tx.vsize() as u64;
+        psbt.unsigned_tx.output[0].value = Amount::from_sat(200_000 - minimum);
+        check_psbt_fee_rate(&psbt, 10.0, &key_paths).unwrap();
+
+        tx.input[1].witness = Witness::from_slice(&[vec![0; 64]]);
+        let key_path_only_fee = tx.vsize() as u64;
+        assert!(key_path_only_fee < minimum);
+        for fee in [key_path_only_fee, minimum - 1] {
+            psbt.unsigned_tx.output[0].value = Amount::from_sat(200_000 - fee);
+            let err = check_psbt_fee_rate(&psbt, 10.0, &key_paths).unwrap_err();
+            assert!(err.to_string().contains("fee rate too low"), "{err}");
+        }
+    }
+
     fn signed_vsize(psbt: &Psbt) -> u64 {
         let mut tx = psbt.unsigned_tx.clone();
         for input in &mut tx.input {
@@ -257,7 +412,7 @@ mod fee_rate {
         assert_eq!(psbt.fee().unwrap().to_sat(), signed_vsize(&psbt));
         for recommended in [1.0, 10.0, 100.0] {
             assert!(
-                check_psbt_fee_rate(&psbt, recommended).is_ok(),
+                check_psbt_fee_rate(&psbt, recommended, &[]).is_ok(),
                 "1 sat/vB must pass even when the recommendation is {recommended}"
             );
         }
@@ -278,7 +433,7 @@ mod fee_rate {
         ] {
             let psbt = psbt_with_fee(100_000, 100_000 - fee);
             assert_eq!(psbt.fee().unwrap().to_sat(), fee);
-            let err = check_psbt_fee_rate(&psbt, recommended).unwrap_err();
+            let err = check_psbt_fee_rate(&psbt, recommended, &[]).unwrap_err();
             assert!(
                 err.to_string().contains("fee rate too low"),
                 "fee {fee} sat, recommendation {recommended}: {err}"
@@ -333,9 +488,9 @@ mod fee_rate {
             assert!(minimum > psbt.unsigned_tx.vsize() as u64);
             psbt.unsigned_tx.output[0].value = Amount::from_sat(200_000 - minimum);
             assert_eq!(psbt.fee().unwrap().to_sat(), minimum);
-            check_psbt_fee_rate(&psbt, 10.0).expect("key-path inputs funded at 1 sat/vB");
+            check_psbt_fee_rate(&psbt, 10.0, &[]).expect("key-path inputs funded at 1 sat/vB");
             psbt.unsigned_tx.output[0].value += Amount::from_sat(1);
-            let err = check_psbt_fee_rate(&psbt, 10.0).unwrap_err();
+            let err = check_psbt_fee_rate(&psbt, 10.0, &[]).unwrap_err();
             assert!(err.to_string().contains("fee rate too low"), "{err}");
         }
     }
@@ -390,9 +545,9 @@ mod fee_rate {
         let minimum = tx.vsize() as u64;
         assert!(minimum > psbt.unsigned_tx.vsize() as u64);
         psbt.unsigned_tx.output[0].value = Amount::from_sat(100_000 - minimum);
-        check_psbt_fee_rate(&psbt, 10.0).expect("funded 2-of-3 Taproot witness");
+        check_psbt_fee_rate(&psbt, 10.0, &[]).expect("funded 2-of-3 Taproot witness");
         psbt.unsigned_tx.output[0].value += Amount::from_sat(1);
-        let err = check_psbt_fee_rate(&psbt, 10.0).unwrap_err();
+        let err = check_psbt_fee_rate(&psbt, 10.0, &[]).unwrap_err();
         assert!(err.to_string().contains("fee rate too low"), "{err}");
     }
 
@@ -400,7 +555,7 @@ mod fee_rate {
     fn rejects_unknown_spend_shape_instead_of_using_unsigned_size() {
         let mut psbt = psbt_with_fee(100_000, 99_000);
         psbt.inputs[0].witness_utxo.as_mut().unwrap().script_pubkey = ScriptBuf::new();
-        let err = check_psbt_fee_rate(&psbt, 10.0).unwrap_err();
+        let err = check_psbt_fee_rate(&psbt, 10.0, &[]).unwrap_err();
         assert!(
             err.to_string().contains("cannot estimate signed PSBT size"),
             "{err}"
@@ -411,7 +566,7 @@ mod fee_rate {
     fn conflicting_bounds_do_not_silently_raise_the_cap() {
         let minimum = signed_vsize(&psbt_with_fee(100_000, 100_000));
         let psbt = psbt_with_fee(100_000, 100_000 - minimum);
-        let err = check_psbt_fee_rate(&psbt, 0.1).unwrap_err();
+        let err = check_psbt_fee_rate(&psbt, 0.1, &[]).unwrap_err();
         assert!(err.to_string().contains("fee rate too high"), "{err}");
     }
 
@@ -423,7 +578,7 @@ mod fee_rate {
         let vsize = psbt_with_fee(100_000, 100_000).unsigned_tx.vsize() as u64;
         let fee_at_cap = (FEE_RATE_HEADROOM * recommended) as u64 * vsize;
         let psbt = psbt_with_fee(100_000, 100_000 - fee_at_cap);
-        assert!(check_psbt_fee_rate(&psbt, recommended).is_ok());
+        assert!(check_psbt_fee_rate(&psbt, recommended, &[]).is_ok());
     }
 
     #[test]
@@ -434,7 +589,7 @@ mod fee_rate {
         let vsize = psbt_with_fee(100_000, 100_000).unsigned_tx.vsize() as u64;
         let fee_over_cap = ((FEE_RATE_HEADROOM * recommended) as u64 + 1) * vsize;
         let psbt = psbt_with_fee(100_000, 100_000 - fee_over_cap);
-        let err = check_psbt_fee_rate(&psbt, recommended).unwrap_err();
+        let err = check_psbt_fee_rate(&psbt, recommended, &[]).unwrap_err();
         assert!(
             err.to_string().contains("fee rate too high"),
             "expected fee-rate rejection, got: {err}"
@@ -445,7 +600,7 @@ mod fee_rate {
     fn inflated_witness_cannot_weaken_the_upper_fee_limit() {
         let mut psbt = psbt_with_fee(100_000, 97_000);
         psbt.inputs[0].final_script_witness = Some(Witness::from_slice(&[vec![0; 1_000]]));
-        let err = check_psbt_fee_rate(&psbt, 10.0).unwrap_err();
+        let err = check_psbt_fee_rate(&psbt, 10.0, &[]).unwrap_err();
         assert!(err.to_string().contains("fee rate too high"), "{err}");
     }
 
@@ -454,7 +609,7 @@ mod fee_rate {
         // No witness_utxo/non_witness_utxo -> the fee is uncomputable and
         // the check must fail closed, not skip.
         let psbt = Psbt::deserialize(&minimal_valid_psbt_bytes()).unwrap();
-        let err = check_psbt_fee_rate(&psbt, 10.0).unwrap_err();
+        let err = check_psbt_fee_rate(&psbt, 10.0, &[]).unwrap_err();
         assert!(
             err.to_string().contains("cannot compute PSBT fee"),
             "expected uncomputable-fee rejection, got: {err}"
@@ -467,7 +622,7 @@ mod fee_rate {
         // `!(rate <= limit)` so NaN can never pass). The recommendation
         // is validated upstream, but the check must not rely on that.
         let psbt = psbt_with_fee(100_000, 99_000);
-        assert!(check_psbt_fee_rate(&psbt, f64::NAN).is_err());
+        assert!(check_psbt_fee_rate(&psbt, f64::NAN, &[]).is_err());
     }
 }
 
