@@ -438,9 +438,9 @@ Limits and dev knobs:
 
 #### Readiness endpoint
 
-Deploy restarts the three enclaves one at a time to keep the 2-of-3 signing
-quorum. `GET /health` on the parent replaces the fixed sleep between them with a
-real signal:
+Deploy restarts the three enclaves one at a time so signing stays available.
+`GET /health` on the parent replaces the fixed sleep between them with a real
+signal:
 
 ```bash
 curl -sS -o /dev/null -w '%{http_code}\n' http://127.0.0.1:5001/health
