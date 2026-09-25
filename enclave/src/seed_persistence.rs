@@ -17,8 +17,10 @@ use crate::error::{CustodyFailure, EnclaveError, Result};
 use crate::keys::KeyManager;
 use crate::kms::{
     deserialize_secret, AwsCredentials, CustodyFlow, KmsClient, KmsConfig, MAX_CIPHERTEXT_BYTES,
-    MAX_MESSAGE_BYTES,
 };
+
+/// Upper bound on one framed broker message in either direction.
+pub(crate) const MAX_MESSAGE_BYTES: usize = 64 * 1024;
 
 // TCP is only used by non-VSOCK development builds and unit fixtures.
 #[cfg(not(all(feature = "vsock", target_os = "linux", not(test))))]

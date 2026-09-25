@@ -53,10 +53,22 @@ rgb-invoicing = { version = "=0.11.1-rc.10", default-features = false, optional 
 attestation-verify = { path = "../attestation-verify" }
 serde = { version = "1", features = ["derive"] }
 
-# Optional seed custody. The official AWS Nitro SDK helper owns KMS
-# transport, authentication, attestation and Recipient envelope cryptography.
+# Optional seed custody. The official AWS SDK for KMS owns transport, SigV4
+# and the request/response model; the attestation document comes from
+# `aws-nitro-enclaves-nsm-api`; the Recipient envelope (CMS, RFC 5652) is
+# opened with RustCrypto. No C helper and no subprocess.
 base64 = { version = "0.22", optional = true }
 serde_json = { version = "1", optional = true }
+aws-sdk-kms = { version = "1.121", default-features = false, features = ["rt-tokio", "behavior-version-latest"], optional = true }
+aws-credential-types = { version = "1.3", optional = true }
+aws-smithy-http-client = { version = "1.4", default-features = false, features = ["rustls-ring"], optional = true }
+aws-smithy-types = { version = "1.8", optional = true }
+aws-smithy-runtime-api = { version = "1.18", optional = true }
+aws-smithy-async = { version = "1.3", features = ["rt-tokio"], optional = true }
+cms = { version = "0.2", optional = true }
+rsa = { version = "0.9", features = ["sha2"], optional = true }
+aes = { version = "0.8", optional = true }
+cbc = { version = "0.1", features = ["alloc"], optional = true }
 
 alloy = { version = "2.1.0", default-features = false, features = ["provider-http", "rpc-types-eth", "reqwest-rustls-tls"], optional = true }
 tokio = { version = "1.52.3", default-features = false, features = ["rt", "rt-multi-thread", "time"], optional = true }
@@ -119,7 +131,22 @@ rgb-mint-burn = ["rgb"]
 
 # Seed custody is a separate capability. Only rgb-swap selects it today;
 # a future mint-only flow must select its own measured custody context first.
-kms-persistence = ["dep:base64", "dep:serde_json", "nix/poll"]
+kms-persistence = [
+    "dep:base64",
+    "dep:serde_json",
+    "nix/poll",
+    "dep:tokio",
+    "dep:aws-sdk-kms",
+    "dep:aws-credential-types",
+    "dep:aws-smithy-http-client",
+    "dep:aws-smithy-types",
+    "dep:aws-smithy-runtime-api",
+    "dep:aws-smithy-async",
+    "dep:cms",
+    "dep:rsa",
+    "dep:aes",
+    "dep:cbc",
+]
 
 vsock = []
 # DANGER: allows importing a raw seed over the wire. Testing only.
@@ -202,3 +229,6 @@ burn-signer = ["bfa-mint"]
 
 [dev-dependencies]
 rand = "0.10.0"
+# Canned KMS HTTP exchanges for the `kms` unit tests.
+aws-smithy-http-client = { version = "1.4", default-features = false, features = ["rustls-ring", "test-util"] }
+http = "1"

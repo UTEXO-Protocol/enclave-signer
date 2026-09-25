@@ -194,6 +194,7 @@ fn canonical_pubkey_bundle(keys: &PublicKeysResponse) -> Vec<u8> {
 /// Bind the v1 identity and policy to this encrypted clone response.
 /// NSM signs the version and commitment in user_data.
 /// The transcript contains only public values.
+#[cfg(not(feature = "kms-persistence"))]
 pub(super) fn clone_commitment(
     bundle: &PublicKeysResponse,
     policy: &[u8],
@@ -215,6 +216,7 @@ pub(super) fn clone_commitment(
     out
 }
 
+#[cfg(not(feature = "kms-persistence"))]
 pub(super) fn verify_clone_commitment(actual: Option<&[u8]>, expected: &[u8; 36]) -> Result<()> {
     if actual != Some(expected.as_slice()) {
         return Err(EnclaveError::Attestation(
@@ -272,7 +274,7 @@ pub(super) fn handle_get_attested_public_key(
     })
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(feature = "kms-persistence")))]
 mod tests {
     use super::*;
 

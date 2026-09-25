@@ -46,7 +46,7 @@ fn main() {
         } else {
             use utexo_bridge_enclave::{kms::CustodyFlow, seed_persistence::PersistentSeed};
             // This application flow selects the measured custody namespace.
-            // The KMS client and native helper do not choose a default flow.
+            // The KMS client does not choose a default flow.
             let source = PersistentSeed::from_env(CustodyFlow::RgbSwap)
                 .unwrap_or_else(|e| panic!("KMS persistence configuration is required: {e}"));
             state.with_seed_source(Box::new(source))

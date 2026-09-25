@@ -15,17 +15,6 @@ env:
   CARGO_NET_GIT_FETCH_WITH_CLI: "true"
 
 jobs:
-  native-kms:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: docker/setup-buildx-action@v3
-      - name: Build official KMS helper
-        run: |
-          docker buildx build --platform linux/amd64 --load \
-            --target kms-tool-builder -t kms-native-ci \
-            -f build/Dockerfile.enclave.rgb .
-
   ci:
     runs-on: ubuntu-latest
 

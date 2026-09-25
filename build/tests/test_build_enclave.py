@@ -36,7 +36,8 @@ class BuildArgumentsTests(unittest.TestCase):
             stub.write_text('#!/bin/sh\nexit 99\n')
             stub.chmod(0o700)
         self.env = dict(os.environ)
-        for key in ('RGB_ASSET_ID', 'ENCLAVE_DEBUG_FEATURES', 'PRIVATE_DEPS_DIR'):
+        for key in ('RGB_ASSET_ID', 'ENCLAVE_DEBUG_FEATURES', 'PRIVATE_DEPS_DIR',
+                    'KMS_KEY_ARN', 'KMS_REGION', 'KMS_SEED_ID', 'KMS_EXPECTED_EVM_ADDRESS'):
             self.env.pop(key, None)
         self.env.update(
             PATH=f'{self.bin}:{os.environ["PATH"]}',
@@ -84,6 +85,23 @@ class BuildArgumentsTests(unittest.TestCase):
             'SOURCE_DATE_EPOCH=1700000000', 'RGB_ASSET_ID=rgb:test-bfa-asset',
             'ENCLAVE_DEBUG_FEATURES=allow-debug-pcrs',
         ])
+
+    def test_kms_pins_forwarded_only_to_swap_recipes(self):
+        pins = dict(KMS_KEY_ARN='arn:aws:kms:eu-west-1:123456789012:key/k',
+                    KMS_REGION='eu-west-1', KMS_SEED_ID='signer-1')
+        for recipe in ('Dockerfile.enclave', 'Dockerfile.enclave.rgb'):
+            with self.subTest(recipe=recipe):
+                result = self.invoke(recipe, RGB_ASSET_ID='rgb:test-bfa-asset', **pins)
+                self.assertEqual(result.returncode, 42, result.stderr)
+                self.assertEqual(self.captured_build_args(), [
+                    'SOURCE_DATE_EPOCH=1700000000', 'RGB_ASSET_ID=rgb:test-bfa-asset',
+                    'KMS_KEY_ARN=arn:aws:kms:eu-west-1:123456789012:key/k',
+                    'KMS_REGION=eu-west-1', 'KMS_SEED_ID=signer-1',
+                ])
+        result = self.invoke('Dockerfile.enclave.mint', RGB_ASSET_ID='rgb:test-bfa-asset', **pins)
+        self.assertEqual(result.returncode, 42, result.stderr)
+        self.assertEqual(self.captured_build_args(),
+                         ['SOURCE_DATE_EPOCH=1700000000', 'RGB_ASSET_ID=rgb:test-bfa-asset'])
 
     def test_ccd_does_not_require_asset(self):
         result = self.invoke('Dockerfile.enclave.ccd')

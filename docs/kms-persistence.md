@@ -18,11 +18,16 @@ then reads the committed object. Concurrent initializers recover that same
 winner. Storage errors, invalid ciphertext and decryption failures never fall
 back to a new seed. Replicas recover the saved seed instead of using peer cloning.
 
-The [native adapter](../enclave/kms-tool) uses the official AWS Nitro Enclaves
-SDK for TLS, AWS request signing, NSM attestation and recipient decryption.
-Credentials pass through private pipes; plaintext seed material stays inside
-KMS and the enclave. The durable object is `CiphertextBlob`, not the ephemeral
-`CiphertextForRecipient` encrypted to one invocation's recipient key.
+The [KMS client](../enclave/src/kms/mod.rs) is pure Rust and runs inside the
+signer process. The official `aws-sdk-kms` crate signs (SigV4) and sends
+`GenerateDataKey` / `Decrypt`; `aws-nitro-enclaves-nsm-api` produces the
+attestation document that carries a one-shot RSA-2048 recipient key; the
+`CiphertextForRecipient` envelope (CMS, RFC 5652: RSAES-OAEP-SHA-256 key
+transport, AES-256-CBC content) is opened with RustCrypto. TLS is rustls
+(`ring`) trusting only the Amazon Trust Services roots. Credentials arrive from
+the parent broker and live only for one call; plaintext seed material stays
+inside KMS and the enclave. The durable object is `CiphertextBlob`, not the
+ephemeral `CiphertextForRecipient` encrypted to one call's recipient key.
 
 ## Enclave configuration
 
@@ -72,8 +77,10 @@ connects to parent CID `3`, vsock port `8004`. Local development can instead set
 `KMS_BROKER_TCP=127.0.0.1:3446` with `USE_VSOCK=false`.
 
 In another terminal, or through your existing host supervisor, run AWS's
-standard `vsock-proxy` for the same KMS region. Its configuration and invocation
-follow the repository's existing egress-proxy pattern:
+standard `vsock-proxy` for the same KMS region. The enclave pins
+`kms.<region>.amazonaws.com` to loopback and forwards port 443 to vsock port
+`8003` (`KMS_VSOCK_PORT` overrides it), so TLS still validates the real KMS
+certificate and the proxy only relays bytes:
 
 ```bash
 export AWS_REGION=eu-central-1

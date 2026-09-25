@@ -339,7 +339,7 @@ For persisted keys, follow the [KMS setup guide](docs/kms-persistence.md) and us
 
 `Dockerfile.enclave-dev` uses the same development import-only mode: initialize
 it with `init-mnemonic` using a public test mnemonic. It intentionally has no
-KMS helper or persisted production seed, and empty `init` fails closed.
+KMS configuration or persisted production seed, and empty `init` fails closed.
 
 For peer cloning, use `cli init --cloning-secret <secret>` instead of `cli init`
 to configure a donor. Use a fresh requester for `cli clone`; initialization

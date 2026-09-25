@@ -54,7 +54,11 @@ fn forwarder_target(url: &str) -> (u16, Option<String>) {
 /// Append `127.0.0.1 <host>` to /etc/hosts (idempotent) so the enclave's
 /// outbound connection to `host` lands on the local vsock forwarder while the
 /// TLS layer still validates against `host`'s real certificate.
-#[cfg(all(feature = "vsock", feature = "rgb-validation", target_os = "linux"))]
+#[cfg(all(
+    feature = "vsock",
+    any(feature = "rgb-validation", feature = "kms-persistence"),
+    target_os = "linux"
+))]
 fn pin_host_to_loopback(host: &str) -> std::io::Result<()> {
     use std::io::Write;
     let existing = std::fs::read_to_string("/etc/hosts").unwrap_or_default();
@@ -238,6 +242,34 @@ pub fn start_vsock_forwarders() {
         );
             if let Err(e) = crate::vsock_forwarder::start_forwarder(local_port, vsock_port) {
                 tracing::error!("failed to start vsock forwarder: {e}");
+            }
+        }
+
+        // KMS egress for seed custody. The SDK connects to the real KMS host
+        // name on 443; that name is pinned to loopback here, so TLS still
+        // validates KMS's certificate while the host only relays bytes:
+        //   vsock-proxy <KMS_VSOCK_PORT> kms.<region>.amazonaws.com 443
+        // Skipped when KMS_REGION is unset (development import-only mode).
+        #[cfg(feature = "kms-persistence")]
+        if let Ok(region) = std::env::var("KMS_REGION") {
+            let host = crate::kms::endpoint_host(&region);
+            let vsock_port: u32 = std::env::var("KMS_VSOCK_PORT")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(crate::kms::DEFAULT_KMS_VSOCK_PORT);
+            match pin_host_to_loopback(&host) {
+                Ok(()) => tracing::info!("pinned {host} -> 127.0.0.1 for in-enclave TLS to KMS"),
+                Err(e) => tracing::error!("failed to pin {host} in /etc/hosts: {e}"),
+            }
+            tracing::info!(
+                local_port = crate::kms::KMS_PORT,
+                vsock_port,
+                "starting KMS vsock forwarder (host must run: vsock-proxy {vsock_port} {host} 443)"
+            );
+            if let Err(e) =
+                crate::vsock_forwarder::start_forwarder(crate::kms::KMS_PORT, vsock_port)
+            {
+                tracing::error!("failed to start KMS vsock forwarder: {e}");
             }
         }
 
