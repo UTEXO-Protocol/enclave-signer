@@ -32,10 +32,10 @@ const KEY_ARN: &str = "arn:aws:kms:eu-west-1:123456789012:key/12345678-1234-1234
 
 fn config() -> KmsConfig {
     KmsConfig {
-        flow: CustodyFlow::RgbSwap,
+        flow: CustodyFlow::RgbMint,
         key_arn: KEY_ARN.into(),
         region: "eu-west-1".into(),
-        seed_id: "pool-1".into(),
+        seed_id: "mint-pool-1".into(),
     }
 }
 
@@ -382,7 +382,7 @@ mod exchanges {
     }
 
     #[test]
-    fn decrypt_sends_the_measured_request_and_returns_the_seed() {
+    fn decrypt_sends_the_measured_mint_request_and_returns_the_seed() {
         let seed = [42u8; 64];
         let (client, replay) = client_with(
             200,
@@ -419,8 +419,8 @@ mod exchanges {
             body["EncryptionContext"],
             json!({
                 "application": "utexo-enclave-signer",
-                "flow": "rgb-swap",
-                "seed_id": "pool-1",
+                "flow": "rgb-mint",
+                "seed_id": "mint-pool-1",
                 "bitcoin_network": "bitcoin",
             })
         );
@@ -443,7 +443,7 @@ mod exchanges {
     }
 
     #[test]
-    fn generate_returns_only_the_durable_ciphertext() {
+    fn generate_sends_the_mint_context_and_returns_only_the_durable_ciphertext() {
         let (client, replay) = client_with(
             200,
             json!({
@@ -461,7 +461,15 @@ mod exchanges {
         let body = sent_body(&replay);
         assert_eq!(body["NumberOfBytes"], 64);
         assert_eq!(body["KeyId"], KEY_ARN);
-        assert_eq!(body["EncryptionContext"]["flow"], "rgb-swap");
+        assert_eq!(
+            body["EncryptionContext"],
+            json!({
+                "application": "utexo-enclave-signer",
+                "flow": "rgb-mint",
+                "seed_id": "mint-pool-1",
+                "bitcoin_network": "bitcoin",
+            })
+        );
         assert!(body.get("KeySpec").is_none());
     }
 

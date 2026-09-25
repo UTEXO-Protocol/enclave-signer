@@ -13,6 +13,9 @@ fn parent() -> Config {
         enclave_vsock_port: 5000,
         use_vsock: true,
         evm_network_ids: Default::default(),
+        grpc_max_concurrent: 128,
+        grpc_max_concurrent_per_conn: 32,
+        grpc_request_timeout_secs: 120,
     }
 }
 

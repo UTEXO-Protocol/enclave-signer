@@ -59,11 +59,12 @@ flowchart TB
   time; changes to the measured image require updating accepted measurements.
   `build-eif.yml` publishes EIF + `PCR.json` + `SHA256SUMS` to S3 under the git
   sha; `deploy/deploy-host.sh` verifies both before and after start.
-- Without `kms-persistence`, cloned enclaves share **one HD seed** via the cloning handshake
-  (`utexo-bridge-parent-cli clone`). Each node holds an identical `KeyManager`
+- Without `kms-persistence`, cloned enclaves share **one HD seed** via the
+  cloning handshake (`utexo-bridge-parent-cli clone`). Each node holds an identical `KeyManager`
   after `Cloning → Active`. Keys live only in memory; a restart needs re-init or
-  re-clone. With `kms-persistence`, initialize from the saved encrypted seed
-  instead; peer cloning is disabled. See [KMS seed persistence](../kms-persistence.md).
+  re-clone. Mint signers enable `kms-persistence` and recover the saved encrypted
+  seed instead; peer cloning is disabled. See
+  [KMS seed persistence](../kms-persistence.md).
 - **Bridge-mode `signPsbt` requires the `evm-rpc` feature**: a build without it
   refuses bridge PSBTs, since it cannot independently verify the EVM `FundsIn`
   deposit. Operators MUST run the host `vsock-proxy` allowlist on 8002. Env:

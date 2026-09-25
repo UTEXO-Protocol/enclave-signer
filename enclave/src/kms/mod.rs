@@ -59,18 +59,17 @@ pub const KMS_PORT: u16 = 443;
 pub const DEFAULT_KMS_VSOCK_PORT: u32 = 8003;
 const AMAZON_TRUST_ROOTS: &[u8] = include_bytes!("amazon_trust_roots.pem");
 
-/// Application-selected custody domain, compiled into the measured image.
-/// Add a distinct domain when another signing flow adopts KMS persistence;
-/// existing ciphertext must keep its original context value.
+/// Mint custody domain, compiled into the measured image. Neither host
+/// requests nor environment select the flow.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CustodyFlow {
-    RgbSwap,
+    RgbMint,
 }
 
 impl CustodyFlow {
     pub fn as_str(self) -> &'static str {
         match self {
-            Self::RgbSwap => "rgb-swap",
+            Self::RgbMint => "rgb-mint",
         }
     }
 }

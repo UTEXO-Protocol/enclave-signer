@@ -107,11 +107,11 @@ compile_error!(
      mint path. Do not set direction cfgs by hand; `build.rs` derives them"
 );
 
-// A new flow needs its own explicit encryption context before enabling custody.
-// In particular, the current combined mint/burn image must retain its lifecycle.
-#[cfg(all(feature = "kms-persistence", not(feature = "rgb-swap")))]
+// Only the mint signer owns a persistent seed. The role guards above also
+// reject attempts to combine it with another signing role or flow.
+#[cfg(all(feature = "kms-persistence", not(feature = "mint-signer")))]
 compile_error!(
-    "kms-persistence is currently supported only by rgb-swap; a new flow requires its own custody context"
+    "kms-persistence requires mint-signer; seed persistence is available only to the RGB mint signer"
 );
 
 pub mod attestation;

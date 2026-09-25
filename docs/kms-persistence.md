@@ -1,16 +1,16 @@
-# KMS seed persistence
+# Mint signer KMS seed persistence
 
-The `kms-persistence` capability uses AWS KMS to generate a 64-byte seed and S3 to
-persist its encrypted `CiphertextBlob`. On initialization the enclave loads the
-saved blob, decrypts it with KMS recipient attestation, and passes the seed to
-its existing key derivation. Signing stays inside the enclave; it does not use
+The `mint-signer` feature enables `kms-persistence`, using AWS KMS to generate a
+64-byte seed and S3 to persist its encrypted `CiphertextBlob`. On initialization
+the enclave loads the saved blob, decrypts it with KMS recipient attestation,
+and passes the seed to its existing key derivation. Signing stays inside the enclave; it does not use
 KMS Sign.
 
-The application selects a supported `CustodyFlow` at build time. Neither a
-host request nor an environment variable selects the custody flow. Each flow
-requires its own context, seed ID, S3 object and KMS permissions; unsupported
-build combinations are rejected at compile time. Preserve the original context
-when recovering existing ciphertext.
+The measured mint image selects `CustodyFlow::RgbMint`, whose encryption-context
+value is `rgb-mint`. Neither a host request nor an environment variable selects
+the custody flow. Builds enabling `kms-persistence` without `mint-signer` are
+rejected at compile time. Burn signers retain their existing OS-entropy and
+cloning lifecycle.
 
 Only a confirmed missing S3 object with no expected identity pin permits
 `GenerateDataKey(NumberOfBytes=64)`. The parent writes with `If-None-Match: *`,
@@ -31,8 +31,9 @@ ephemeral `CiphertextForRecipient` encrypted to one call's recipient key.
 
 ## Enclave configuration
 
-Set these public Docker build arguments for `Dockerfile.enclave.rgb` or the
-combined `Dockerfile.enclave`; `build/build-enclave.sh` also forwards them:
+Set these public Docker build arguments for `Dockerfile.enclave.mint` (the
+`rgb-mint` image variant); `build/build-enclave.sh` also forwards them. The mint
+image also requires its deployment-specific `RGB_ASSET_ID`:
 
 | Setting | Value |
 | --- | --- |
@@ -41,9 +42,9 @@ combined `Dockerfile.enclave`; `build/build-enclave.sh` also forwards them:
 | `KMS_SEED_ID` | Stable signer ID: 1–128 ASCII letters, digits, `.`, `_`, `-`. |
 | `KMS_EXPECTED_EVM_ADDRESS` | Empty for first bootstrap; then the verified EVM address, 40 hex digits with optional `0x`. |
 
-Keep the key ARN, seed ID and Bitcoin network unchanged when recovering an
-existing identity. A configured address pin rejects a different recovered seed
-and makes missing storage fail before generation. There is no creation switch.
+Keep the key ARN, `rgb-mint` flow context, seed ID and Bitcoin network unchanged
+when recovering an existing identity. A configured address pin rejects a
+different recovered seed and makes missing storage fail before generation. There is no creation switch.
 Configuration changes affect the image measurement and require updating KMS
 permissions. These endpoint settings support the standard AWS commercial partition.
 
@@ -52,13 +53,13 @@ permissions. These endpoint settings support the standard AWS commercial partiti
 The existing [Rust parent](../parent/src/seed_persistence.rs) returns AWS
 credentials and reads/conditionally creates one S3 object. It never receives
 the plaintext seed. Configure persistence on the parent process that serves
-this signer:
+this mint signer:
 
 ```bash
 export AWS_REGION=eu-central-1
-export KMS_SEED_ID=mainnet-signer-1
+export KMS_SEED_ID=mint-mainnet-signer-1
 export KMS_S3_BUCKET=YOUR_SEED_BUCKET
-export KMS_S3_KEY=signers/signer-1/seed.kms
+export KMS_S3_KEY=mint/signer-1/seed.kms
 export USE_VSOCK=true
 export ENCLAVE_VSOCK_CID=18
 ./utexo-bridge-parent
@@ -115,12 +116,12 @@ production PCR0 from `nitro-cli describe-eif --eif-path YOUR_IMAGE.eif` and
 exactly these public encryption-context fields:
 
 ```json
-{"application":"utexo-enclave-signer","flow":"COMPILED_FLOW","seed_id":"YOUR_SEED_ID","bitcoin_network":"bitcoin"}
+{"application":"utexo-enclave-signer","flow":"rgb-mint","seed_id":"YOUR_SEED_ID","bitcoin_network":"bitcoin"}
 ```
 
-Replace `COMPILED_FLOW` with the application's compiled
-[`CustodyFlow` value](../enclave/src/kms.rs) and `YOUR_SEED_ID` with `KMS_SEED_ID`.
-The enclave supplies this context automatically; policies must match it exactly.
+The flow is the compiled [`CustodyFlow::RgbMint`](../enclave/src/kms/mod.rs)
+value. Replace `YOUR_SEED_ID` with `KMS_SEED_ID`. The enclave supplies this
+context automatically; policies must match it exactly.
 
 Use the actual network: `bitcoin`, `testnet`, `signet`, or `regtest`. Reject
 unattested requests, wrong PCRs and changed/missing/extra context, including when
@@ -139,8 +140,8 @@ recovery before funding the signer.
 
 ## Bootstrap, restart and recovery
 
-1. Build a new signer's EIF without an address pin. Configure the parent, relay,
-   key and bucket policies for its actual CID, PCR0 and context.
+1. Build a new mint signer's EIF without an address pin. Configure the parent,
+   relay, key and bucket policies for its actual CID, PCR0 and context.
 2. Run the enclave without debug mode and issue
    `utexo-bridge-parent-cli --addr vsock://18:5000 init`. Supply no seed or cloning
    secret. Verify the public identity/attestation and independently back up the

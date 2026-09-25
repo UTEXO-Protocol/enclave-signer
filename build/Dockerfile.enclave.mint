@@ -78,10 +78,7 @@ COPY build/entrypoint.sh /app/entrypoint.sh
 
 RUN chmod +x /app/utexo-bridge-enclave /app/entrypoint.sh
 
-# NOTE: the donor cloning secret is intentionally NOT baked here. It is
-# delivered at runtime via the `InitializeKey` message (CLI: `init
-# --cloning-secret <secret>`), so it never lands in the EIF / image layers and
-# the PCRs stay reproducible. See enclave/src/server.rs (handle_initialize).
+# The mint signer restores its KMS-protected seed instead of peer cloning.
 
 # Pinned bridge/indexer config - identical to Dockerfile.enclave; keep the two in
 # lockstep. `rgb` implies `spv` + `rgb-validation`, so this is a release
@@ -122,6 +119,18 @@ ENV EVM_RPC_URL=http://127.0.0.1:3444 \
     EVM_MIN_CONFIRMATIONS=12 \
     FUNDS_IN_CONTRACT=0x6711f1a319B37847fa0234181C34D883774c4951 \
     BTC_MAX_TOTAL_SATS=1000000
+
+# Public KMS identity/recovery pins, measured into the mint EIF. Nitro does
+# not inherit these settings from the parent host.
+ARG KMS_KEY_ARN
+ARG KMS_REGION
+ARG KMS_SEED_ID
+ARG KMS_EXPECTED_EVM_ADDRESS=
+ENV KMS_KEY_ARN=${KMS_KEY_ARN} \
+    KMS_REGION=${KMS_REGION} \
+    KMS_SEED_ID=${KMS_SEED_ID} \
+    KMS_EXPECTED_EVM_ADDRESS=${KMS_EXPECTED_EVM_ADDRESS}
+RUN test -n "$KMS_KEY_ARN" && test -n "$KMS_REGION" && test -n "$KMS_SEED_ID"
 
 # Production logging. This env is measured into PCR0 - do not flip it to `debug`
 # for a production EIF.

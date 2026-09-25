@@ -6,7 +6,6 @@
 # Production builder glibc must remain compatible with the AL2023 runtime.
 FROM rust:1.96-slim-bullseye@sha256:c593596210f729542a92aced6a8b0812bcc8d04c5f1b238e663b800d0e2e17bd AS builder
 
-# Builder-only tools: system Git and SSH for private dependencies.
 # Use the signed Debian snapshot to avoid missing Bullseye packages.
 # HTTP is required until ca-certificates is installed.
 # Replace this temporary pin when the shared base-image update is ready.
@@ -135,17 +134,5 @@ ENV EVM_RPC_URL=http://127.0.0.1:3444 \
 # This env is measured into PCR0, so do not flip it to `debug` for a production
 # EIF. For a verbose build, use a throwaway branch and run the enclave with
 # `--debug-mode`, which zeroes the PCRs anyway.
-# Public KMS identity/recovery pins. Nitro does not inherit the parent host's
-# environment: pass these build arguments when producing the swap EIF.
-ARG KMS_KEY_ARN
-ARG KMS_REGION
-ARG KMS_SEED_ID
-ARG KMS_EXPECTED_EVM_ADDRESS=
-ENV KMS_KEY_ARN=${KMS_KEY_ARN} \
-    KMS_REGION=${KMS_REGION} \
-    KMS_SEED_ID=${KMS_SEED_ID} \
-    KMS_EXPECTED_EVM_ADDRESS=${KMS_EXPECTED_EVM_ADDRESS}
-RUN test -n "$KMS_KEY_ARN" && test -n "$KMS_REGION" && test -n "$KMS_SEED_ID"
-
 ENV RUST_LOG=info
 ENTRYPOINT ["/app/entrypoint.sh"]

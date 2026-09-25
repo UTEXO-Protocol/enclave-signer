@@ -150,7 +150,8 @@ jobs:
       # Dockerfile.enclave.burn). Each role implies `bfa-mint`, which pulls in
       # rgb-mint-burn, bfa-validation and evm-rpc. Each lane compiles and tests
       # only its own direction, and checks it refuses the other one
-      # (tests/test_signer_role.rs).
+      # (tests/test_signer_role.rs). Mint also exercises KMS persistence; burn
+      # retains the existing entropy/cloning lifecycle.
       - name: Build (rgb mint signer)
         run: cargo build -p utexo-bridge-enclave --no-default-features --features vsock,rgb,mint-signer
       - name: Clippy (rgb mint signer)
@@ -196,9 +197,16 @@ jobs:
       - name: Test (--features evm-rpc)
         run: cargo test -p utexo-bridge-enclave --features evm-rpc
 
-      # Swap persistence and attestation coverage. Legacy cloning excludes
-      # rgb-swap and runs in the CCD lane above.
-      - name: Test (mock-attestation integration — swaps + attestation)
+      # Mock-attestation integration suite. The cloning handshake and attested
+      # public-key tests (enclave/tests/test_clone.rs, test_attested_pubkey.rs)
+      # are file-gated on `mock-attestation` + `allow-seed-import` — the mock
+      # path skips NSM/COSE/cert-chain but still enforces the pubkey, digest,
+      # nonce, and PCR bindings those tests assert. Without this step those
+      # suites (donor PCR-mismatch / wire-pubkey binding, attested-bundle
+      # parity) compile to nothing and never run. Debug profile only: the
+      # release compile_error guard for these dev features is asserted
+      # separately by the `release-guards` job.
+      - name: Test (mock-attestation integration — cloning + attestation)
         run: cargo test -p utexo-bridge-enclave --features mock-attestation,allow-seed-import
 
   # Assert the dev-only features `compile_error!` in a release build, so a
@@ -416,15 +424,15 @@ jobs:
           fi
           echo "OK: no-role build correctly rejected via the compile_error guard"
 
-      - name: Assert KMS persistence without a supported flow is rejected
+      - name: Assert KMS persistence outside the mint signer is rejected
         run: |
-          for features in kms-persistence rgb-mint-burn,kms-persistence; do
+          for features in kms-persistence burn-signer,kms-persistence rgb-swap,kms-persistence ccd,kms-persistence; do
             if cargo check --locked -p utexo-bridge-enclave --no-default-features --features "$features" 2>build.log; then
               echo "::error::KMS persistence unexpectedly compiled with '$features'"
               exit 1
             fi
-            if ! grep -q "kms-persistence is currently supported only by rgb-swap" build.log; then
-              echo "::error::build failed without the expected KMS flow guard for '$features'"
+            if ! grep -q "kms-persistence requires mint-signer" build.log; then
+              echo "::error::build failed without the expected KMS signer guard for '$features'"
               cat build.log
               exit 1
             fi

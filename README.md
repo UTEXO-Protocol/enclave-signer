@@ -50,11 +50,11 @@ See the [component diagram](docs/diagrams/01-components.md) and
 
 ### Key management
 
-With `kms-persistence`, initialization generates or recovers a seed through
-attested AWS KMS and persists its encrypted ciphertext in S3. Replicas recover
-that seed; signing and HD derivation are unchanged. See the
-[KMS persistence guide](docs/kms-persistence.md). The generation and cloning
-lifecycle below applies without this capability.
+`mint-signer` enables `kms-persistence`: initialization generates or recovers a
+seed through attested AWS KMS and persists its encrypted ciphertext in S3. Mint
+replicas recover that seed; signing and HD derivation are unchanged. See the
+[mint KMS persistence guide](docs/kms-persistence.md). Burn signers and other
+builds without persistence retain the generation and cloning lifecycle below.
 
 - Generates a BIP-39 mnemonic from OS entropy, derives the 64-byte seed and
   keeps it in a `SecretBox` (zeroize on drop). Mnemonic or raw-seed import
@@ -230,15 +230,16 @@ cargo build -p utexo-bridge-enclave --no-default-features --features allow-seed-
 Compile-time guards in `enclave/src/lib.rs`: `rgb-validation` requires `spv`;
 exactly one of `rgb-swap` / `rgb-mint-burn` whenever `rgb-validation` is on;
 exactly one of `mint-signer` / `burn-signer` whenever `rgb-mint-burn` is on;
+`kms-persistence` requires `mint-signer`;
 `allow-seed-import` and `mock-attestation` do not compile in a release
 profile. CI asserts every guard fires.
 
 ### Enclave image (EIF)
 
-For images with KMS persistence, export `KMS_KEY_ARN`, `KMS_REGION`
-and `KMS_SEED_ID`. Set `KMS_EXPECTED_EVM_ADDRESS` when restoring a
-known identity. See [KMS setup](docs/kms-persistence.md) for the parent
-and policy requirements. Other images do not require these values.
+For `Dockerfile.enclave.mint`, export `KMS_KEY_ARN`, `KMS_REGION` and
+`KMS_SEED_ID`. Set `KMS_EXPECTED_EVM_ADDRESS` when restoring a known mint
+identity. See [mint KMS setup](docs/kms-persistence.md) for the parent and policy
+requirements. Other images do not require these values.
 
 ```bash
 ./build/build-enclave.sh                                  # Dockerfile.enclave (combined)
@@ -251,8 +252,10 @@ DOCKERFILE=Dockerfile.enclave.ccd       ./build/build-enclave.sh
 `Dockerfile.enclave.mint` and `Dockerfile.enclave.burn` are the shipped BFA
 mint/burn images, one per signer role. Each role implies `bfa-mint`, which
 pulls in `rgb-mint-burn` and `bfa-validation`, and `bfa-validation` pulls in
-`evm-rpc`. The two run as separate enclaves, each initialized with its own
-seed: cloning only works between images with the same PCR0. Each needs `--build-arg RGB_ASSET_ID=rgb:<contract id>`, which has no
+`evm-rpc`. The two run as separate enclaves with independent seeds. Mint
+signers use KMS persistence; burn signers retain OS-entropy initialization and
+cloning between images with the same PCR0. Each needs
+`--build-arg RGB_ASSET_ID=rgb:<contract id>`, which has no
 default because each BFA contract id is per-deployment. The build helper and the
 Dockerfile both reject a missing or blank value before the image is built.
 The asset is baked into the measured image; a host runtime environment override
@@ -318,30 +321,22 @@ measured into PCR0. The cloning secret is never baked.
 ### Local development (TCP)
 
 ```bash
-# Development-only imports on 127.0.0.1:5000 (never enable for a release)
-RUST_LOG=debug cargo run -p utexo-bridge-enclave --features allow-seed-import
+# Enclave on 127.0.0.1:5000
+RUST_LOG=debug cargo run -p utexo-bridge-enclave
 
 # Parent gRPC server (GRPC_PORT defaults to 5000; pick another port when both run on one host)
 RUST_LOG=debug GRPC_PORT=50051 cargo run --manifest-path parent/Cargo.toml
 
 # CLI (shell function works in bash and zsh)
 cli() { cargo run --manifest-path parent/Cargo.toml --bin utexo-bridge-parent-cli -- "$@"; }
-# Public test mnemonic only; never fund this development identity.
-cli init-mnemonic "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about"
+cli init
 cli get-keys
 cli get-last-saved-block
 cli --help
 ```
 
 `--addr host:port` or `--addr vsock://<cid>:<port>` selects the enclave.
-For persisted keys, follow the [KMS setup guide](docs/kms-persistence.md) and use
-`cli init` for bootstrap or recovery.
-
-`Dockerfile.enclave-dev` uses the same development import-only mode: initialize
-it with `init-mnemonic` using a public test mnemonic. It intentionally has no
-KMS configuration or persisted production seed, and empty `init` fails closed.
-
-For peer cloning, use `cli init --cloning-secret <secret>` instead of `cli init`
+Initialize once: use `cli init --cloning-secret <secret>` instead of `cli init`
 to configure a donor. Use a fresh requester for `cli clone`; initialization
 and cloning are alternative ways to enter `Active`. Signing subcommands require
 complete proofs and configured pins; see their `--help` and the spec.
@@ -361,10 +356,9 @@ GRPC_HOST=0.0.0.0 GRPC_PORT=50051 USE_VSOCK=true ENCLAVE_VSOCK_CID=16 ./utexo-br
 
 `deploy/deploy-host.sh` installs the systemd units for a three-enclave host:
 CIDs 16 / 18 / 20 with parents on ports 50051 / 50052 / 50053. It verifies the
-EIF checksum and PCR0 against the S3 manifest before and after start. Keys live
-only in enclave memory. After restart, initialize or clone according to the
-configured custody lifecycle; `kms-persistence` recovers the saved seed through
-`init` after [parent and relay setup](docs/kms-persistence.md).
+EIF checksum and PCR0 against the S3 manifest before and after start. Keys
+live only in enclave memory; a restart wipes them and the enclave must be
+initialised or cloned again.
 
 ### Debug mode
 
@@ -405,7 +399,7 @@ Value bounds (fail closed while unset in a production build):
 
 The gas-tx rule is part of the attested policy. Unset pins commit as zero.
 
-KMS custody (measured into EIFs that enable persistence):
+Mint signer KMS custody (measured into `Dockerfile.enclave.mint` EIFs):
 
 | Variable | Default | Description |
 |----------|---------|-------------|
@@ -528,11 +522,11 @@ provenance. `build/smoke-test.sh` drives a live enclave through the CLI.
 |---------|---------|-------------|
 | `rgb` | `spv` | RGB / Bitcoin bridge stack. |
 | `ccd` | - | Concordium stack (Ed25519 is always compiled; this gates the handlers). |
-| `rgb-swap` | `rgb`, `kms-persistence` | RGB flow: send/receive with BFA `Transfer`. In the default set. |
-| `kms-persistence` | - | Attested KMS seed generation/recovery with encrypted S3 persistence. Requires an explicitly supported custody flow. |
+| `rgb-swap` | `rgb` | RGB flow: send/receive with BFA `Transfer`. In the default set. |
+| `kms-persistence` | - | Attested KMS seed generation/recovery with encrypted S3 persistence. Requires `mint-signer`; custody context is `rgb-mint`. |
 | `rgb-mint-burn` | `rgb` | RGB flow: deposits mint with BFA `Bridge`, withdrawals `Burn`. Needs `--no-default-features`. |
 | `bfa-mint` | `rgb-mint-burn`, `bfa-validation` | Mint/burn flow with BFA consensus and settlement checks against verified `FundsIn` locks. |
-| `mint-signer` | `bfa-mint` | Mint/burn signer role: EVM -> RGB only (mint PSBT, `SignBtc`). Exactly one role per mint/burn build. |
+| `mint-signer` | `bfa-mint`, `kms-persistence` | Mint/burn signer role: EVM -> RGB only (mint PSBT, `SignBtc`). Exactly one role per mint/burn build. |
 | `burn-signer` | `bfa-mint` | Mint/burn signer role: RGB -> EVM only (`fundsOut`, gas tx). Exactly one role per mint/burn build. |
 | `bfa-validation` | `evm-rpc` | Runs BFA consensus with verified mint ancestry in either RGB flow. Required for BFA swaps and implied by `bfa-mint`. |
 | `spv` | `rgb-validation` | In-enclave Bitcoin header chain and witness inclusion proofs. |

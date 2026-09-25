@@ -124,13 +124,12 @@ ccd = []
 #
 # `rgb-swap` = pools/send-receive: the bridge holds an allocation and moves it
 # with BFA `Transfer` in both directions.
-rgb-swap = ["rgb", "kms-persistence"]
+rgb-swap = ["rgb"]
 # `rgb-mint-burn` = the bridge owns the contract's mint right: deposits mint
 # with BFA `Bridge`, withdrawals destroy with BFA `Burn`.
 rgb-mint-burn = ["rgb"]
 
-# Seed custody is a separate capability. Only rgb-swap selects it today;
-# a future mint-only flow must select its own measured custody context first.
+# Seed custody is a separate capability, enabled only by the mint signer.
 kms-persistence = [
     "dep:base64",
     "dep:serde_json",
@@ -223,7 +222,7 @@ bfa-mint = ["rgb-mint-burn", "bfa-validation"]
 # `evm_to_rgb` / `rgb_to_evm` cfgs the code gates on.
 #
 # `mint-signer` = EVM -> RGB: co-signs the RGB mint PSBT (and create_utxo).
-mint-signer = ["bfa-mint"]
+mint-signer = ["bfa-mint", "kms-persistence"]
 # `burn-signer` = RGB -> EVM: signs the `fundsOut` release (and its gas tx).
 burn-signer = ["bfa-mint"]
 

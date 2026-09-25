@@ -49,7 +49,7 @@ pub(super) fn handle_initialize(
         }
         #[cfg(not(feature = "kms-persistence"))]
         {
-            // Production path for mint/burn and CCD: generate from OS entropy
+            // Builds without persistence generate from OS entropy.
             let mut entropy = [0u8; 32];
             getrandom::fill(&mut entropy)
                 .map_err(|e| EnclaveError::Internal(format!("entropy generation failed: {}", e)))?;
