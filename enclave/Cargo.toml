@@ -68,10 +68,11 @@ aws-nitro-enclaves-nsm-api = "0.4"
 #
 # Single-network EIFs, one flow each (see the RGB flow selection block below):
 #   RGB send/receive: `--no-default-features --features vsock,rgb,rgb-swap,evm-rpc`
-#   RGB mint/burn:    `--no-default-features --features vsock,rgb,rgb-mint-burn,evm-rpc`
+#   RGB mint:         `--no-default-features --features vsock,rgb,mint-signer`
+#   RGB burn:         `--no-default-features --features vsock,rgb,burn-signer`
 #   Concordium:       `--no-default-features --features vsock,ccd` (no
 #                     bridge-signing path).
-# All three are covered in CI. Naming no RGB flow does not build: the
+# All are covered in CI. Naming no RGB flow does not build: the
 # `compile_error!` pair in lib.rs requires exactly one.
 default = ["rgb", "rgb-swap", "ccd"]
 
@@ -99,7 +100,7 @@ ccd = []
 # Both are `default = false` in the additive sense cargo means it, so a
 # mint/burn image MUST be built with `--no-default-features` (the default set
 # carries `rgb-swap`), exactly like the existing single-network EIFs:
-#   `--no-default-features --features vsock,rgb-mint-burn,evm-rpc`
+#   `--no-default-features --features vsock,rgb,mint-signer` (or `burn-signer`)
 #
 # The per-flow rules live in `enclave/src/networks/rgb/flow/{swap,mint_burn}.rs`;
 # everything else about consignment validation is shared.
@@ -172,6 +173,20 @@ bfa-validation = ["evm-rpc"]
 # every build onto the BFA RGB crates (and electrum-client 0.24), so the signer
 # set must rotate.
 bfa-mint = ["rgb-mint-burn", "bfa-validation"]
+
+# Mint/burn signer role. EXACTLY ONE is required whenever `rgb-mint-burn` is on
+# (lib.rs `compile_error!`s): the two directions ship as two enclave images with
+# two PCR0s and two seeds, so a mint signer contains no release rule to reach
+# and a burn signer no mint rule. The role is attested (`SignerRole`).
+#
+# Both keep `bfa-mint`: a burn consignment carries mint ancestry, so the burn
+# signer still runs BFA mint scripts. `build.rs` turns the role into the
+# `evm_to_rgb` / `rgb_to_evm` cfgs the code gates on.
+#
+# `mint-signer` = EVM -> RGB: co-signs the RGB mint PSBT (and create_utxo).
+mint-signer = ["bfa-mint"]
+# `burn-signer` = RGB -> EVM: signs the `fundsOut` release (and its gas tx).
+burn-signer = ["bfa-mint"]
 
 [dev-dependencies]
 rand = "0.10.0"

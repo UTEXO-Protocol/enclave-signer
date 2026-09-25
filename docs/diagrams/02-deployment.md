@@ -55,7 +55,7 @@ flowchart TB
 ### Build / cluster notes
 
 - Built as an **EIF** via `nitro-cli build-enclave` from `build/Dockerfile.enclave`
-  (combined), `.rgb`, `.mint-burn`, `.ccd` or `.bfa`. PCR0/1/2 are pinned at build
+  (combined), `.rgb`, `.mint`, `.burn` or `.ccd`. PCR0/1/2 are pinned at build
   time; changes to the measured image require updating accepted measurements.
   `build-eif.yml` publishes EIF + `PCR.json` + `SHA256SUMS` to S3 under the git
   sha; `deploy/deploy-host.sh` verifies both before and after start.

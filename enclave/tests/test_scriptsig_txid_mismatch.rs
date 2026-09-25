@@ -6,7 +6,8 @@
 //! Runs through the wire and `handle_sign`: the bridge-location pin, the
 //! `FundsIn` read and the invoice bind are all on the path. Issues a BFA
 //! asset over regtest funding transactions. Mint-burn lane only.
-#![cfg(all(feature = "rgb-mint-burn", feature = "bfa-validation"))]
+// A full mint over the wire: the EVM -> RGB direction.
+#![cfg(all(feature = "rgb-mint-burn", feature = "bfa-validation", evm_to_rgb))]
 
 use std::io::{Cursor, Read, Write};
 use std::sync::Mutex;

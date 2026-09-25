@@ -7,6 +7,8 @@ fn release_bridge_ctx() -> BuildContext {
         mock_attestation: false,
         allow_seed_import: false,
         rgb_validation: true,
+        // Both directions, so the gas and plain-BTC rules are all live.
+        signer_role: SignerRole::Combined,
     }
 }
 
@@ -46,6 +48,87 @@ fn release_bridge_with_full_pins_is_production() {
         other => panic!("expected Production, got {other:?}"),
     }
     assert!(p.assert_valid_for_build(&release_bridge_ctx()).is_ok());
+}
+
+/// The attested role reads the features, so compare it with the direction
+/// cfgs the gates read. Catches drift between the two.
+#[test]
+fn build_context_reports_the_compiled_signer_role() {
+    let want = match (cfg!(evm_to_rgb), cfg!(rgb_to_evm)) {
+        (true, false) => SignerRole::Mint,
+        (false, true) => SignerRole::Burn,
+        (true, true) => SignerRole::Combined,
+        (false, false) => unreachable!("build.rs always compiles one direction"),
+    };
+    assert_eq!(BuildContext::current().signer_role, want);
+}
+
+/// The role comes from the build, is carried into the production policy, and
+/// changes the attested commitment.
+#[test]
+fn signer_role_is_attested() {
+    let resolve = |signer_role| {
+        SecurityPolicy::resolve(
+            &BuildContext {
+                signer_role,
+                ..release_bridge_ctx()
+            },
+            &pinned_config(),
+            EvmDataSource::RawRpc,
+            None,
+            12,
+        )
+    };
+    let mint = resolve(SignerRole::Mint);
+    let burn = resolve(SignerRole::Burn);
+    match &burn {
+        SecurityPolicy::Production(p) => assert_eq!(p.signer_role, SignerRole::Burn),
+        other => panic!("expected Production, got {other:?}"),
+    }
+    assert_ne!(mint.commitment_bytes(), burn.commitment_bytes());
+}
+
+/// A role never attests the other role's path as live, even with its pins set.
+#[test]
+fn signer_role_attests_the_other_roles_paths_as_off() {
+    let config = BridgeConfig {
+        btc_max_total_sats: 1_000_000,
+        gas_tx_allowed_to: Some([0x33; 20]),
+        gas_tx_max_gas_limit: 100_000,
+        gas_tx_max_fee_per_gas: 1_000,
+        gas_tx_allowed_selectors: vec![[0xde, 0xad, 0xbe, 0xef]],
+        ..pinned_config()
+    };
+    let resolve = |signer_role| match SecurityPolicy::resolve(
+        &BuildContext {
+            signer_role,
+            ..release_bridge_ctx()
+        },
+        &config,
+        EvmDataSource::RawRpc,
+        None,
+        12,
+    ) {
+        SecurityPolicy::Production(p) => p,
+        other => panic!("expected Production, got {other:?}"),
+    };
+
+    let mint = resolve(SignerRole::Mint);
+    assert!(mint.allow_vanilla_psbt);
+    assert_eq!(mint.gas_tx_allowed_to, None);
+    assert_eq!(mint.gas_tx_max_gas_limit, 0);
+    assert_eq!(mint.gas_tx_max_fee_per_gas, 0);
+    assert_eq!(mint.gas_tx_max_value_wei, None);
+    assert!(mint.gas_tx_allowed_selectors.is_empty());
+
+    let burn = resolve(SignerRole::Burn);
+    assert!(!burn.allow_vanilla_psbt);
+    assert_eq!(burn.gas_tx_allowed_to, Some([0x33; 20]));
+    assert_eq!(burn.gas_tx_max_gas_limit, 100_000);
+
+    let combined = resolve(SignerRole::Combined);
+    assert!(combined.allow_vanilla_psbt);
+    assert_eq!(combined.gas_tx_allowed_to, Some([0x33; 20]));
 }
 
 #[test]

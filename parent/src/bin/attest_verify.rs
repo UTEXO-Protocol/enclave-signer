@@ -22,7 +22,7 @@ use std::process::ExitCode;
 use anyhow::{Context, Result};
 use clap::Parser;
 
-use attestation_verify::EvmDataSource;
+use attestation_verify::{EvmDataSource, SignerRole};
 use utexo_bridge_parent::attest_verify::{
     verify_attested_pubkey, AttestedPubkeyResult, ExpectedPolicy, VerifyMode,
 };
@@ -60,6 +60,13 @@ struct Cli {
     /// --mock. This posture is committed into attestation user_data.
     #[arg(long)]
     expect_vanilla_psbt: bool,
+
+    /// Expected signer role, committed into attestation user_data: `mint`
+    /// (EVM -> RGB only), `burn` (RGB -> EVM only), or `combined` (both
+    /// directions, the combined and swap images). Required for production
+    /// verification. Ignored with --mock.
+    #[arg(long)]
+    expect_signer_role: Option<String>,
 
     /// Expected EVM `FundsIn` deposit-verification data source the enclave must
     /// have committed to: `raw` (host-relayed RPC), `helios` (trustless,
@@ -126,6 +133,21 @@ fn parse_checkpoint(s: &str) -> Result<[u8; 32]> {
             v.len()
         )
     })
+}
+
+/// Parse the `--expect-signer-role` flag into a [`SignerRole`].
+fn parse_signer_role(s: Option<&str>) -> Result<SignerRole> {
+    let s = s.context("--expect-signer-role required: mint | burn | combined (or pass --mock)")?;
+    match s.to_ascii_lowercase().as_str() {
+        "mint" => Ok(SignerRole::Mint),
+        "burn" => Ok(SignerRole::Burn),
+        "combined" => Ok(SignerRole::Combined),
+        other => {
+            anyhow::bail!(
+                "invalid --expect-signer-role '{other}' (expected: mint | burn | combined)"
+            )
+        }
+    }
 }
 
 /// Parse the `--expect-evm-source` flag into an [`EvmDataSource`].
@@ -239,6 +261,7 @@ async fn run(cli: Cli) -> Result<()> {
         }
         let expected_policy = ExpectedPolicy::Production {
             allow_vanilla_psbt: cli.expect_vanilla_psbt,
+            signer_role: parse_signer_role(cli.expect_signer_role.as_deref())?,
             evm_source,
             evm_checkpoint,
             funds_in_contract: parse_expect_funds_in_contract(&cli.expect_funds_in_contract)?,
@@ -305,4 +328,27 @@ fn print_ok(result: &AttestedPubkeyResult) {
         "  Nonce echoed          : 0x{}",
         hex::encode(v.nonce.clone())
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_signer_role_accepts_the_three_roles() {
+        assert_eq!(parse_signer_role(Some("mint")).unwrap(), SignerRole::Mint);
+        assert_eq!(parse_signer_role(Some("burn")).unwrap(), SignerRole::Burn);
+        assert_eq!(
+            parse_signer_role(Some("Combined")).unwrap(),
+            SignerRole::Combined
+        );
+    }
+
+    #[test]
+    fn parse_signer_role_rejects_missing_and_invalid() {
+        let missing = parse_signer_role(None).unwrap_err();
+        assert!(format!("{missing:#}").contains("required"), "{missing:#}");
+        let invalid = parse_signer_role(Some("minter")).unwrap_err();
+        assert!(format!("{invalid:#}").contains("invalid"), "{invalid:#}");
+    }
 }

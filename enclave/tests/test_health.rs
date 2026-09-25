@@ -8,8 +8,9 @@
 //! make a not-yet-ready enclave advertise itself to deploy.
 //!
 //! SPV/RGB-only: a `ccd`-only build has no header chain and reports SPV
-//! readiness vacuously, which is a different assertion set.
-#![cfg(feature = "rgb-validation")]
+//! readiness vacuously, which is a different assertion set. A mint signer
+//! skips the SPV half too; `test_signer_role.rs` covers it.
+#![cfg(all(feature = "rgb-validation", rgb_to_evm))]
 
 use std::time::{SystemTime, UNIX_EPOCH};
 

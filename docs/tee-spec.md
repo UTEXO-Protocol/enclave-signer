@@ -92,7 +92,8 @@ Four crates plus the infrastructure they touch:
 
 **Cargo features.** `rgb` (implies `spv`, which implies `rgb-validation`),
 `ccd`, exactly one of `rgb-swap` / `rgb-mint-burn`, `evm-rpc`, `bfa-mint`,
-`vsock`. Production images are built with `--no-default-features` and an
+`vsock`, and for mint/burn exactly one signer role: `mint-signer` (EVM -> RGB)
+or `burn-signer` (RGB -> EVM), each implying `bfa-mint`. Production images are built with `--no-default-features` and an
 explicit set (README, Building). Dev-only features
 (`mock-attestation`, `allow-seed-import`) are `compile_error!` in release.
 
@@ -145,13 +146,15 @@ SecurityPolicy = Production {
   dev feature is a `compile_error!` in any shipped release binary (non-test
   build with debug assertions off); `rgb-validation` without `spv` is a
   `compile_error!` in every profile, as is `rgb-validation` with both RGB flows
-  (`rgb-swap` + `rgb-mint-burn`) or with neither.
+  (`rgb-swap` + `rgb-mint-burn`) or with neither, and `rgb-mint-burn` with
+  both signer roles or with neither.
 - **Attestation:** `user_data = sha256(canonical_pubkey_bundle ||
   policy_commitment)`. The commitment encoding is versioned and shared
   (`attestation-verify/src/policy.rs`), so the enclave and every verifier
   produce identical bytes. See [`pubkey-attestation.md`](pubkey-attestation.md).
 - **Verification:** `attest-verify` reconstructs the *expected* policy
-  (`--expect-vanilla-psbt`, `--expect-evm-source raw|helios|disabled`,
+  (`--expect-signer-role mint|burn|combined`, `--expect-vanilla-psbt`,
+  `--expect-evm-source raw|helios|disabled`,
   `--expect-helios-checkpoint`, `--expect-funds-in-contract`,
   `--expect-evm-min-confirmations`, and the gas-rule flags) and
   fails if the commitment differs -- a downgraded posture (vanilla signing on,
@@ -261,7 +264,11 @@ nothing else, binding the release to the payout target the burn transition
 commits to (`MS_BURN_RECIPIENT`). The BFA line is a mint/burn build
 (`bfa-mint`), where a deposit is a bridge mint against a verified `FundsIn`
 lock. The two flows are separate instances with separate PCR0s -- neither
-binary contains the other's rules. Independently of the flow, the enclave
+binary contains the other's rules. A mint/burn build is further split by
+signer role: the **mint signer** compiles only the EVM -> RGB direction (mint
+PSBT, `SignBtc`), the **burn signer** only the RGB -> EVM direction
+(`fundsOut`, gas tx). Each refuses the other direction, runs on its own seed,
+and attests its role in the policy commitment (`signer_role`). Independently of the flow, the enclave
 signs the backend-provided `burnId` / `settlementData` as received; no
 in-enclave derivation from the RGB OpId exists yet (Sec 9, P6).
 
@@ -584,7 +591,8 @@ anchored to the consignment; disallowed output script or value cap exceeded
 ## 13. Implementation status
 
 The repository supports swap, mint/burn, BFA mint/burn and CCD builds. Defaults
-include `rgb-swap` and `ccd`; the BFA Dockerfile selects `bfa-mint`. These are
+include `rgb-swap` and `ccd`; the BFA Dockerfiles select `mint-signer`
+(`Dockerfile.enclave.mint`) and `burn-signer` (`Dockerfile.enclave.burn`). These are
 build choices, not evidence of which image is deployed.
 
 Known limits to account for before deployment:

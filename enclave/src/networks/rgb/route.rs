@@ -5,25 +5,29 @@
 //! consignment parsing and rgbstd validation in [`super::validation`], PSBT
 //! anchoring in [`super::psbt_validation`], per-flow rules in [`super::flow`].
 
-#[cfg(feature = "rgb-validation")]
+#[cfg(all(feature = "rgb-validation", rgb_to_evm))]
 use super::flow;
+#[cfg(evm_to_rgb)]
 use super::psbt_validation;
 #[cfg(feature = "rgb-validation")]
 use super::validation;
-#[cfg(not(feature = "rgb-validation"))]
+#[cfg(all(not(feature = "rgb-validation"), rgb_to_evm))]
 use crate::error::EnclaveError;
 use crate::error::Result;
-#[cfg(feature = "rgb-validation")]
+#[cfg(all(feature = "rgb-validation", rgb_to_evm))]
 use crate::networks::RouteProof;
 use crate::networks::ValidationContext;
-use crate::proto::{RgbDestination, RgbSource};
-#[cfg(feature = "rgb-validation")]
+#[cfg(evm_to_rgb)]
+use crate::proto::RgbDestination;
+#[cfg(rgb_to_evm)]
+use crate::proto::RgbSource;
+#[cfg(all(feature = "rgb-validation", evm_to_rgb))]
 use sha3::{Digest, Keccak256};
 
 /// Validate an RGB source. The route amount is the consignment's, never the
 /// wire's. Field-level checks, consignment validation, asset binding, and SPV
 /// verification live in `validation.rs`.
-#[cfg(feature = "rgb-validation")]
+#[cfg(all(feature = "rgb-validation", rgb_to_evm))]
 pub fn validate_source(
     source: &RgbSource,
     ctx: &ValidationContext<'_>,
@@ -37,7 +41,7 @@ pub fn validate_source(
 }
 
 /// A build without RGB validation refuses every RGB source.
-#[cfg(not(feature = "rgb-validation"))]
+#[cfg(all(not(feature = "rgb-validation"), rgb_to_evm))]
 pub fn validate_source(
     _source: &RgbSource,
     _ctx: &ValidationContext<'_>,
@@ -48,7 +52,7 @@ pub fn validate_source(
     ))
 }
 
-#[cfg(feature = "rgb-validation")]
+#[cfg(all(feature = "rgb-validation", rgb_to_evm))]
 fn route_proof_from_validated_consignment(
     validated: &validation::ValidatedConsignment,
 ) -> Result<RouteProof> {
@@ -70,7 +74,7 @@ fn route_proof_from_validated_consignment(
     })
 }
 
-#[cfg(feature = "rgb-validation")]
+#[cfg(all(feature = "rgb-validation", rgb_to_evm))]
 fn normalize_rgb_operation_id(op_id: &str) -> Result<String> {
     use crate::error::EnclaveError;
 
@@ -91,6 +95,7 @@ fn normalize_rgb_operation_id(op_id: &str) -> Result<String> {
 }
 
 /// Validate fields owned by an RGB destination before route-level validation.
+#[cfg(evm_to_rgb)]
 pub fn validate_destination(
     destination: &RgbDestination,
     _ctx: &ValidationContext<'_>,
@@ -102,7 +107,7 @@ pub fn validate_destination(
 /// [`psbt_validation::validate_psbt_anchors_transition`]. This is the
 /// enclave-derived destination amount the route-level cross-check uses, in
 /// place of the host-supplied `psbt_output_amount`.
-#[cfg(feature = "rgb-validation")]
+#[cfg(all(feature = "rgb-validation", evm_to_rgb))]
 pub fn validate_destination_anchor(
     destination: &RgbDestination,
     source_amount: u64,

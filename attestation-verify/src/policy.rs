@@ -11,20 +11,35 @@
 //! hash mismatch.
 //!
 //! Wire contract: the discriminants and field order are load-bearing. Never
-//! renumber a variant or reorder fields - bump [`POLICY_COMMITMENT_V3`] and add
+//! renumber a variant or reorder fields - bump [`POLICY_COMMITMENT_V4`] and add
 //! a new arm instead.
 //!
-//! V3 extends the `Production` arm with the FundsIn emitter and confirmation
-//! rule, so the deposit authorization policy is externally verifiable.
+//! V4 adds the signer role, so a verifier can tell a mint signer from a burn
+//! signer. V3 added the FundsIn emitter and confirmation rule.
 
 /// Version tag prepended to every policy commitment. Lets a verifier reject a
 /// document produced by an enclave speaking a different policy-encoding version
 /// instead of silently mis-hashing it.
 ///
-/// V3 adds the deposit emitter and confirmation rule; V2 added the gas-tx
-/// rule. Bumping the tag prevents older verifiers from silently agreeing on a
-/// differently shaped policy.
-pub const POLICY_COMMITMENT_V3: u8 = 3;
+/// V4 adds the signer role; V3 the deposit emitter and confirmation rule; V2
+/// the gas-tx rule. Bumping the tag prevents older verifiers from silently
+/// agreeing on a differently shaped policy.
+pub const POLICY_COMMITMENT_V4: u8 = 4;
+
+/// Which bridge directions the image signs. Taken from the build features, so
+/// it is measured into PCR0 and no host config can widen it.
+#[repr(u8)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SignerRole {
+    /// Both directions in one image: the swap and combined images
+    /// (`Dockerfile.enclave`, `Dockerfile.enclave.rgb`).
+    Combined = 0,
+    /// `mint-signer`: EVM -> RGB only. Refuses every `fundsOut` release.
+    Mint = 1,
+    /// `burn-signer`: EVM releases only. Refuses every RGB mint PSBT. In a
+    /// `ccd` dev build it also signs CCD -> EVM; no shipped burn image has `ccd`.
+    Burn = 2,
+}
 
 /// Where the enclave gets the EVM `FundsIn` deposit evidence it verifies before
 /// signing an EVM->RGB bridge PSBT. Attested so a verifier can tell a trustless
@@ -80,6 +95,8 @@ pub enum AttestationMode {
 pub enum AttestedPolicy {
     Production {
         allow_vanilla_psbt: bool,
+        /// Bridge directions this image signs.
+        signer_role: SignerRole,
         attestation: AttestationMode,
         evm_source: EvmDataSource,
         btc_source: BtcDataSource,
@@ -121,8 +138,9 @@ impl AttestedPolicy {
     /// `user_data`. Layout (see the WIRE CONTRACT note in the module docs):
     ///
     /// ```text
-    /// [POLICY_COMMITMENT_V3]
-    /// Production:  [0x01][allow_vanilla u8][attestation u8][evm_source u8]
+    /// [POLICY_COMMITMENT_V4]
+    /// Production:  [0x01][allow_vanilla u8][signer_role u8][attestation u8]
+    ///              [evm_source u8]
     ///              [btc_source u8][chain_id u64 BE][bridge_contract 20]
     ///              [len(asset) u32 BE][asset bytes][funds_in_contract 20]
     ///              [evm_min_confirmations u64 BE]
@@ -135,10 +153,11 @@ impl AttestedPolicy {
     /// ```
     pub fn to_bytes(&self) -> Vec<u8> {
         let mut out = Vec::new();
-        out.push(POLICY_COMMITMENT_V3);
+        out.push(POLICY_COMMITMENT_V4);
         match self {
             AttestedPolicy::Production {
                 allow_vanilla_psbt,
+                signer_role,
                 attestation,
                 evm_source,
                 btc_source,
@@ -156,6 +175,7 @@ impl AttestedPolicy {
             } => {
                 out.push(0x01);
                 out.push(*allow_vanilla_psbt as u8);
+                out.push(*signer_role as u8);
                 out.push(*attestation as u8);
                 out.push(*evm_source as u8);
                 out.push(*btc_source as u8);
@@ -214,6 +234,7 @@ mod tests {
     ) -> AttestedPolicy {
         AttestedPolicy::Production {
             allow_vanilla_psbt: vanilla,
+            signer_role: SignerRole::Mint,
             attestation: AttestationMode::Real,
             evm_source: evm,
             btc_source: BtcDataSource::SpvVerified,
@@ -246,6 +267,7 @@ mod tests {
         match base() {
             AttestedPolicy::Production {
                 allow_vanilla_psbt,
+                signer_role,
                 attestation,
                 evm_source,
                 btc_source,
@@ -258,6 +280,7 @@ mod tests {
                 ..
             } => AttestedPolicy::Production {
                 allow_vanilla_psbt,
+                signer_role,
                 attestation,
                 evm_source,
                 btc_source,
@@ -279,10 +302,10 @@ mod tests {
 
     #[test]
     fn every_encoding_starts_with_the_version_tag() {
-        assert_eq!(base().to_bytes()[0], POLICY_COMMITMENT_V3);
+        assert_eq!(base().to_bytes()[0], POLICY_COMMITMENT_V4);
         assert_eq!(
             AttestedPolicy::Development.to_bytes()[0],
-            POLICY_COMMITMENT_V3
+            POLICY_COMMITMENT_V4
         );
     }
 
@@ -307,6 +330,23 @@ mod tests {
                 "posture change must alter the commitment"
             );
         }
+    }
+
+    #[test]
+    fn signer_role_changes_the_bytes() {
+        let encodings: Vec<Vec<u8>> = [SignerRole::Combined, SignerRole::Mint, SignerRole::Burn]
+            .into_iter()
+            .map(|role| {
+                let mut p = base();
+                if let AttestedPolicy::Production { signer_role, .. } = &mut p {
+                    *signer_role = role;
+                }
+                p.to_bytes()
+            })
+            .collect();
+        assert_ne!(encodings[0], encodings[1]);
+        assert_ne!(encodings[0], encodings[2]);
+        assert_ne!(encodings[1], encodings[2]);
     }
 
     #[test]

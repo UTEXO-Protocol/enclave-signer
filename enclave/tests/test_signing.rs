@@ -122,7 +122,7 @@ fn valid_sign_evm_request(amount: u64, commission: u64) -> SignRequest {
     }
 }
 
-#[cfg(feature = "rgb-validation")]
+#[cfg(all(feature = "rgb-validation", rgb_to_evm))]
 fn rgb_source_mut(req: &mut SignRequest) -> &mut RgbSource {
     match req.source_network.as_mut() {
         Some(SourceNetwork::RgbSource(source)) => source,
@@ -134,6 +134,7 @@ fn rgb_source_mut(req: &mut SignRequest) -> &mut RgbSource {
 /// `validate_psbt_bytes` shape-checking accepting the bytes - the actual
 /// signing path won't sign this (no witness data, no matchable keys), so
 /// only use it for tests that expect rejection BEFORE the signer runs.
+#[cfg(evm_to_rgb)]
 fn minimal_valid_psbt_bytes() -> Vec<u8> {
     use bitcoin::hashes::Hash;
     use bitcoin::psbt::Psbt;
@@ -420,6 +421,7 @@ fn btc_psbt_to_ours(from: &OurAddress, input_sats: u64, outputs: &[(&OurAddress,
     psbt.serialize()
 }
 
+#[cfg(evm_to_rgb)]
 fn sign_psbt_request(
     evm_tx_hash: Vec<u8>,
     evm_event_valid: bool,
@@ -480,7 +482,7 @@ fn test_sign_evm_before_init() {
 /// P0 regression: the host-supplied `consignment_valid` flag must not bypass
 /// validation. `consignment_valid: true` with `consignment: []` once produced a
 /// signature with no RGB backing; empty bytes are now rejected regardless.
-#[cfg(feature = "rgb-validation")]
+#[cfg(all(feature = "rgb-validation", rgb_to_evm))]
 #[test]
 fn test_sign_evm_rejects_consignment_valid_with_empty_bytes() {
     let port = common::start_test_server();
@@ -524,7 +526,7 @@ fn test_sign_evm_rejects_consignment_valid_with_empty_bytes() {
 /// The handler-level check fires when bytes are present but the in-enclave
 /// validator did not run: production must never sign fundsOut against
 /// unvalidated bytes. The harness leaves `rgb_validator` as `None`.
-#[cfg(feature = "rgb-validation")]
+#[cfg(all(feature = "rgb-validation", rgb_to_evm))]
 #[test]
 fn test_sign_evm_rejects_funds_out_without_validator() {
     // Pinned config so the request clears the production fail-closed gate
@@ -689,7 +691,7 @@ fn test_sign_evm_refuses_lz_selector_without_lz_release() {
 /// degrading to the listener-trusting model. The integration harness builds the
 /// library without `cfg(test)`, so the production guard is active. The
 /// unconfigured `BridgeConfig` is built explicitly so env cannot interfere.
-#[cfg(feature = "rgb-validation")]
+#[cfg(all(feature = "rgb-validation", rgb_to_evm))]
 #[test]
 fn test_sign_evm_rejects_unconfigured_bridge_config() {
     let unconfigured = BridgeConfig {
@@ -786,6 +788,7 @@ fn test_no_spv_build_refuses_funds_out_even_without_merkle_proofs() {
 // PSBT signing tests
 
 #[test]
+#[cfg(evm_to_rgb)]
 fn test_sign_psbt_before_init() {
     let port = common::start_test_server();
 
@@ -815,6 +818,7 @@ fn test_sign_psbt_before_init() {
 /// is never rejected with the old boolean-driven messages; whatever else
 /// happens to it, the booleans are not what decide.
 #[test]
+#[cfg(evm_to_rgb)]
 fn test_sign_psbt_ignores_listener_evm_booleans() {
     let port = common::start_test_server();
 
@@ -900,7 +904,7 @@ fn test_no_evm_rpc_build_refuses_bridge_psbt() {
 }
 
 #[test]
-#[cfg(feature = "evm-rpc")]
+#[cfg(all(feature = "evm-rpc", evm_to_rgb))]
 fn test_sign_psbt_rejects_amount_mismatch() {
     // A bridge-mode PSBT is refused before any RGB work unless the enclave can
     // verify the FundsIn deposit itself, so wire a stub that reports the very
@@ -954,7 +958,7 @@ fn test_sign_psbt_rejects_amount_mismatch() {
 // In a production (rgb-validation) build, a SignPsbt with no consignment is
 // rejected fail-closed - the empty-`evm_tx_hash` "vanilla mode" that used to
 // skip every bridge predicate is gone. This is the core regression gate.
-#[cfg(feature = "rgb-validation")]
+#[cfg(all(feature = "rgb-validation", evm_to_rgb))]
 #[test]
 #[cfg(feature = "evm-rpc")]
 fn test_sign_psbt_rejects_missing_evm_source_hash() {
@@ -1000,7 +1004,7 @@ fn test_sign_psbt_rejects_missing_evm_source_hash() {
 // unconditionally and fails closed when no consignment binds the PSBT.
 // Companion to `test_sign_psbt_rejects_missing_evm_source_hash`, which covers
 // the zero-length hash rejected at the 32-byte length check.
-#[cfg(feature = "rgb-validation")]
+#[cfg(all(feature = "rgb-validation", evm_to_rgb))]
 #[test]
 #[cfg(feature = "evm-rpc")]
 fn test_sign_psbt_zero_evm_hash_is_bridge_mode_not_vanilla() {
@@ -1066,6 +1070,7 @@ fn test_sign_psbt_zero_evm_hash_is_bridge_mode_not_vanilla() {
 // `InitializeKey` returns.
 
 #[test]
+#[cfg(evm_to_rgb)]
 fn test_sign_btc_before_init() {
     let port = common::start_test_server_with_config(|_| {}, btc_capped_config(100_000));
 
@@ -1094,6 +1099,7 @@ fn test_sign_btc_before_init() {
 /// vanilla change. Both destinations are the enclave's, so both must pass the
 /// self-ownership check and the PSBT must get signed.
 #[test]
+#[cfg(evm_to_rgb)]
 fn test_sign_btc_accepts_create_utxo_colored_output() {
     let port = common::start_test_server_with_config(|_| {}, btc_capped_config(100_000));
     let wallet = init_wallet(port);
@@ -1117,6 +1123,7 @@ fn test_sign_btc_accepts_create_utxo_colored_output() {
 
 /// Partial merges succeed. Fully signed submissions stay refused.
 #[test]
+#[cfg(evm_to_rgb)]
 fn test_sign_btc_second_pass_after_partial_merge_still_signs() {
     use bitcoin::hashes::Hash;
     use bitcoin::psbt::Psbt;
@@ -1222,6 +1229,7 @@ fn test_sign_btc_second_pass_after_partial_merge_still_signs() {
 }
 
 #[test]
+#[cfg(evm_to_rgb)]
 fn test_sign_btc_rejects_output_the_enclave_does_not_control() {
     let port = common::start_test_server_with_config(|_| {}, btc_capped_config(100_000));
     let wallet = init_wallet(port);
@@ -1251,6 +1259,7 @@ fn test_sign_btc_rejects_output_the_enclave_does_not_control() {
 }
 
 #[test]
+#[cfg(evm_to_rgb)]
 fn test_sign_btc_rejects_input_value_over_cap() {
     let port = common::start_test_server_with_config(|_| {}, btc_capped_config(100_000));
     let wallet = init_wallet(port);
@@ -1282,6 +1291,7 @@ fn test_sign_btc_rejects_input_value_over_cap() {
 /// usable - under the old allowlist an operator had no way to pin this address
 /// before the enclave that owns it existed.
 #[test]
+#[cfg(evm_to_rgb)]
 fn test_sign_btc_accepts_self_paying_psbt_under_cap() {
     let port = common::start_test_server_with_config(|_| {}, btc_capped_config(100_000));
     let wallet = init_wallet(port);
@@ -1306,6 +1316,7 @@ fn test_sign_btc_accepts_self_paying_psbt_under_cap() {
 /// A fresh change address the transaction does not spend from: accepted via the
 /// output's BIP-371 taproot metadata rather than by matching an input.
 #[test]
+#[cfg(evm_to_rgb)]
 fn test_sign_btc_rejects_fresh_change_address_proven_only_by_metadata() {
     use bitcoin::psbt::Psbt;
     use bitcoin::taproot::TaprootBuilder;
@@ -1364,6 +1375,7 @@ fn test_sign_btc_rejects_fresh_change_address_proven_only_by_metadata() {
 /// A bridge input pays a script that a second, small input also spends. The
 /// second input qualifies for signing, but a foreign key spends its script.
 #[test]
+#[cfg(evm_to_rgb)]
 fn test_sign_btc_refuses_bridge_value_paid_to_a_foreign_input_script() {
     use bitcoin::blockdata::opcodes::all::OP_CHECKSIG;
     use bitcoin::blockdata::script::Builder;
@@ -1471,7 +1483,7 @@ fn test_sign_btc_refuses_bridge_value_paid_to_a_foreign_input_script() {
 // A production (rgb-validation) build refuses plain-BTC signing while the
 // value-spent cap is unconfigured - fail-closed, mirroring the EVM path. The
 // destination rule needs no config, so it is not part of this gate.
-#[cfg(feature = "rgb-validation")]
+#[cfg(all(feature = "rgb-validation", evm_to_rgb))]
 #[test]
 fn test_sign_btc_uncapped_fails_closed_under_rgb_validation() {
     let port = common::start_test_server_with_config(|_| {}, BridgeConfig::default());
@@ -1505,7 +1517,7 @@ fn test_sign_btc_uncapped_fails_closed_under_rgb_validation() {
 
 // Consignment hash integrity tests (wire protocol integration)
 
-#[cfg(feature = "rgb-validation")]
+#[cfg(all(feature = "rgb-validation", rgb_to_evm))]
 #[test]
 fn test_sign_evm_rejects_consignment_hash_mismatch() {
     let port = common::start_test_server();
@@ -1547,7 +1559,7 @@ fn test_sign_evm_rejects_consignment_hash_mismatch() {
     }
 }
 
-#[cfg(feature = "rgb-validation")]
+#[cfg(all(feature = "rgb-validation", rgb_to_evm))]
 #[test]
 fn test_sign_evm_rejects_consignment_without_hash() {
     let port = common::start_test_server();
@@ -1631,6 +1643,7 @@ fn test_sign_raw_message_is_refused() {
 // drain vectors.
 
 /// Minimal RLP encoder for building gas-tx fixtures.
+#[cfg(rgb_to_evm)]
 fn rlp_str(bytes: &[u8]) -> Vec<u8> {
     if bytes.len() == 1 && bytes[0] < 0x80 {
         return vec![bytes[0]];
@@ -1653,6 +1666,7 @@ fn rlp_str(bytes: &[u8]) -> Vec<u8> {
     out
 }
 
+#[cfg(rgb_to_evm)]
 fn rlp_scalar(v: u64) -> Vec<u8> {
     let trimmed: Vec<u8> = v
         .to_be_bytes()
@@ -1663,6 +1677,7 @@ fn rlp_scalar(v: u64) -> Vec<u8> {
     rlp_str(&trimmed)
 }
 
+#[cfg(rgb_to_evm)]
 fn rlp_list(items: &[Vec<u8>]) -> Vec<u8> {
     let mut payload = Vec::new();
     for it in items {
@@ -1687,6 +1702,7 @@ fn rlp_list(items: &[Vec<u8>]) -> Vec<u8> {
 }
 
 /// Unsigned EIP-1559 preimage: `0x02 || rlp([chainId, nonce, maxPrio, maxFee, gas, to, value, data, accessList])`.
+#[cfg(rgb_to_evm)]
 fn eip1559_unsigned(chain_id: u64, to: &[u8; 20], value: u64) -> Vec<u8> {
     let body = rlp_list(&[
         rlp_scalar(chain_id),
@@ -1706,6 +1722,7 @@ fn eip1559_unsigned(chain_id: u64, to: &[u8; 20], value: u64) -> Vec<u8> {
 
 /// `BridgeConfig` with the full gas-tx rule pinned: chain_id 1,
 /// destination 0xAA..., gas <= 30_000, fee <= 1_000 wei, selector 0xdeadbeef.
+#[cfg(rgb_to_evm)]
 fn gas_pinned_config() -> BridgeConfig {
     BridgeConfig {
         chain_id: 1,
@@ -1721,6 +1738,7 @@ fn gas_pinned_config() -> BridgeConfig {
 
 /// Unsigned EIP-1559 preimage with explicit gas/fee/data, for the cap and
 /// calldata-allowlist integration tests.
+#[cfg(rgb_to_evm)]
 fn eip1559_full(to: &[u8; 20], max_fee: u64, gas: u64, data: &[u8]) -> Vec<u8> {
     let body = rlp_list(&[
         rlp_scalar(1),       // chainId
@@ -1738,6 +1756,7 @@ fn eip1559_full(to: &[u8; 20], max_fee: u64, gas: u64, data: &[u8]) -> Vec<u8> {
     out
 }
 
+#[cfg(rgb_to_evm)]
 fn init(port: u16) {
     common::send_request(
         port,
@@ -1752,6 +1771,7 @@ fn init(port: u16) {
 }
 
 #[test]
+#[cfg(rgb_to_evm)]
 fn test_gas_tx_signs_pinned_destination() {
     let port = common::start_test_server_with_config(|_| {}, gas_pinned_config());
     init(port);
@@ -1775,6 +1795,7 @@ fn test_gas_tx_signs_pinned_destination() {
 }
 
 #[test]
+#[cfg(rgb_to_evm)]
 fn test_gas_tx_rejects_opaque_digest() {
     let port = common::start_test_server_with_config(|_| {}, gas_pinned_config());
     init(port);
@@ -1804,6 +1825,7 @@ fn test_gas_tx_rejects_opaque_digest() {
 }
 
 #[test]
+#[cfg(rgb_to_evm)]
 fn test_gas_tx_rejects_drain_to_attacker() {
     let port = common::start_test_server_with_config(|_| {}, gas_pinned_config());
     init(port);
@@ -1830,6 +1852,7 @@ fn test_gas_tx_rejects_drain_to_attacker() {
 }
 
 /// Send a gas-tx preimage through the real handler and return the response.
+#[cfg(rgb_to_evm)]
 fn sign_gas_tx(port: u16, unsigned_tx: Vec<u8>) -> EnclaveResponse {
     common::send_request(
         port,
@@ -1843,6 +1866,7 @@ fn sign_gas_tx(port: u16, unsigned_tx: Vec<u8>) -> EnclaveResponse {
 }
 
 #[test]
+#[cfg(rgb_to_evm)]
 fn test_gas_tx_rejects_gas_limit_over_cap() {
     let port = common::start_test_server_with_config(|_| {}, gas_pinned_config());
     init(port);
@@ -1859,6 +1883,7 @@ fn test_gas_tx_rejects_gas_limit_over_cap() {
 }
 
 #[test]
+#[cfg(rgb_to_evm)]
 fn test_gas_tx_rejects_fee_over_cap() {
     let port = common::start_test_server_with_config(|_| {}, gas_pinned_config());
     init(port);
@@ -1875,6 +1900,7 @@ fn test_gas_tx_rejects_fee_over_cap() {
 }
 
 #[test]
+#[cfg(rgb_to_evm)]
 fn test_gas_tx_signs_allowlisted_selector() {
     let port = common::start_test_server_with_config(|_| {}, gas_pinned_config());
     init(port);
@@ -1890,6 +1916,7 @@ fn test_gas_tx_signs_allowlisted_selector() {
 }
 
 #[test]
+#[cfg(rgb_to_evm)]
 fn test_gas_tx_rejects_disallowed_selector() {
     let port = common::start_test_server_with_config(|_| {}, gas_pinned_config());
     init(port);
@@ -1906,6 +1933,7 @@ fn test_gas_tx_rejects_disallowed_selector() {
 }
 
 #[test]
+#[cfg(rgb_to_evm)]
 fn test_gas_tx_fails_closed_when_caps_unpinned() {
     // A config that pins the destination but NOT the caps must refuse to sign:
     // an uncapped gas tx is never produced (fail-closed).

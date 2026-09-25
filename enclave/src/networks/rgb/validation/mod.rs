@@ -30,5 +30,7 @@ pub use asset_bind::{assert_asset_binding, AssetBindMode};
 pub use bfa::{bfa_binding, BfaBinding};
 pub use consignment::is_mint_transition;
 pub use indexer::RgbValidator;
-pub use source::{assert_consignment_size, validate_source};
+pub use source::assert_consignment_size;
+#[cfg(rgb_to_evm)]
+pub use source::validate_source;
 pub use types::{OutputSeal, TransitionOutput, TransitionSummary, ValidatedConsignment};

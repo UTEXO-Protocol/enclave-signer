@@ -19,7 +19,9 @@
 
 use crate::config::BridgeConfig;
 
-pub use attestation_verify::{AttestationMode, AttestedPolicy, BtcDataSource, EvmDataSource};
+pub use attestation_verify::{
+    AttestationMode, AttestedPolicy, BtcDataSource, EvmDataSource, SignerRole,
+};
 
 /// The enclave's resolved security posture. See the module docs.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -55,6 +57,8 @@ pub struct ProductionPolicy {
     /// Derived from the operator's `BTC_MAX_TOTAL_SATS` pin
     /// ([`BridgeConfig::allows_vanilla_btc`]); default fail-closed (false).
     pub allow_vanilla_psbt: bool,
+    /// Bridge directions this image signs, from the build features.
+    pub signer_role: SignerRole,
     /// Expected attestation root of trust. Always [`AttestationMode::Real`] in a
     /// production build (mock is a `compile_error!` in release - see `lib.rs`).
     pub attestation: AttestationMode,
@@ -115,6 +119,8 @@ pub struct BuildContext {
     /// `rgb-validation`: the feature that turns on bridge signing. A release
     /// build with this on is the one the production policy must protect.
     pub rgb_validation: bool,
+    /// `mint-signer` / `burn-signer`, or both directions.
+    pub signer_role: SignerRole,
 }
 
 impl BuildContext {
@@ -125,6 +131,13 @@ impl BuildContext {
             mock_attestation: cfg!(feature = "mock-attestation"),
             allow_seed_import: cfg!(feature = "allow-seed-import"),
             rgb_validation: cfg!(feature = "rgb-validation"),
+            signer_role: if cfg!(feature = "mint-signer") {
+                SignerRole::Mint
+            } else if cfg!(feature = "burn-signer") {
+                SignerRole::Burn
+            } else {
+                SignerRole::Combined
+            },
         }
     }
 }
@@ -165,13 +178,18 @@ impl SecurityPolicy {
         if !bridge.is_configured() {
             return Self::dev(DevReason::Unconfigured);
         }
+        // A path the role does not compile in is attested as off, whatever the
+        // env pins say: `SignBtc` is mint-side, the gas tx burn-side.
+        let signs_plain_btc = ctx.signer_role != SignerRole::Burn;
+        let signs_gas_tx = ctx.signer_role != SignerRole::Mint;
         Self::Production(ProductionPolicy {
             chain_id: bridge.chain_id,
             bridge_contract: bridge.bridge_contract,
             rgb_asset_id: bridge.rgb_asset_id.clone(),
             funds_in_contract: bridge.funds_in_contract,
             evm_min_confirmations,
-            allow_vanilla_psbt: bridge.allows_vanilla_btc(),
+            allow_vanilla_psbt: signs_plain_btc && bridge.allows_vanilla_btc(),
+            signer_role: ctx.signer_role,
             attestation: AttestationMode::Real,
             evm_source,
             evm_checkpoint,
@@ -181,11 +199,23 @@ impl SecurityPolicy {
             // Gas-tx rule: reflect the same pins the request-time
             // `validate_gas_tx_request` enforces so the attested commitment and
             // the enforced policy cannot drift.
-            gas_tx_allowed_to: bridge.gas_tx_allowed_to,
-            gas_tx_max_gas_limit: bridge.gas_tx_max_gas_limit,
-            gas_tx_max_fee_per_gas: bridge.gas_tx_max_fee_per_gas,
-            gas_tx_max_value_wei: bridge.gas_tx_max_value_wei,
-            gas_tx_allowed_selectors: bridge.gas_tx_allowed_selectors.clone(),
+            gas_tx_allowed_to: bridge.gas_tx_allowed_to.filter(|_| signs_gas_tx),
+            gas_tx_max_gas_limit: if signs_gas_tx {
+                bridge.gas_tx_max_gas_limit
+            } else {
+                0
+            },
+            gas_tx_max_fee_per_gas: if signs_gas_tx {
+                bridge.gas_tx_max_fee_per_gas
+            } else {
+                0
+            },
+            gas_tx_max_value_wei: bridge.gas_tx_max_value_wei.filter(|_| signs_gas_tx),
+            gas_tx_allowed_selectors: if signs_gas_tx {
+                bridge.gas_tx_allowed_selectors.clone()
+            } else {
+                Vec::new()
+            },
         })
     }
 
@@ -198,6 +228,7 @@ impl SecurityPolicy {
         match self {
             Self::Production(p) => AttestedPolicy::Production {
                 allow_vanilla_psbt: p.allow_vanilla_psbt,
+                signer_role: p.signer_role,
                 attestation: p.attestation,
                 evm_source: p.evm_source,
                 btc_source: p.btc_source,

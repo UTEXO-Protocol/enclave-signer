@@ -15,7 +15,7 @@ flowchart TB
         PFr[framing.rs<br/>u32 LE len + protobuf]
         PALib[attest_verify.rs<br/>library half of CLI —<br/>rebuilds expected policy + bundle]
         PCli[bin/cli.rs<br/>utexo-bridge-parent-cli]
-        AVCli[attest-verify CLI<br/>--pcr0/1/2, --expect-vanilla-psbt,<br/>--expect-evm-source raw, helios or disabled]
+        AVCli[attest-verify CLI<br/>--pcr0/1/2, --expect-signer-role,<br/>--expect-vanilla-psbt,<br/>--expect-evm-source raw, helios or disabled]
         PMisc[config.rs / error.rs]
     end
 

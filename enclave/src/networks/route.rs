@@ -46,7 +46,7 @@ pub struct ValidationContext<'a> {
     /// A callback, so the key lock is taken only for that resolution and never
     /// across consignment validation's network round-trips. `None` fails the
     /// bind closed.
-    #[cfg(feature = "rgb-validation")]
+    #[cfg(all(feature = "rgb-validation", evm_to_rgb))]
     pub self_owned_psbt_outputs:
         Option<crate::networks::rgb::psbt_validation::SelfOwnedOutpoint<'a>>,
     /// EVM lock events the enclave verified itself, handed to RGB consensus so
@@ -73,7 +73,14 @@ pub fn validate_source(
     source: &SourceNetwork,
     ctx: &ValidationContext<'_>,
 ) -> Result<SourceProof> {
+    // Each direction reads only one of these.
+    #[cfg(not(evm_to_rgb))]
+    let _ = amount;
+    #[cfg(not(rgb_to_evm))]
+    let _ = ctx;
+
     match source {
+        #[cfg(evm_to_rgb)]
         SourceNetwork::EvmSource(source) => Ok(SourceProof {
             proof: evm::validation::validate_source(amount, source)?,
             #[cfg(feature = "rgb-validation")]
@@ -82,6 +89,7 @@ pub fn validate_source(
         // RGB is always compiled; `rgb::validate_source` fails closed (with a
         // "requires --features rgb-validation" message) on a build that lacks
         // the validator, so a `ccd`-only enclave refuses RGB sources there.
+        #[cfg(rgb_to_evm)]
         SourceNetwork::RgbSource(source) => rgb::validate_source(source, ctx),
         // Concordium source handling is gated with the `ccd` feature.
         #[cfg(feature = "ccd")]
@@ -116,13 +124,14 @@ pub fn validate_destination(
     destination: &DestinationNetwork,
     ctx: &ValidationContext<'_>,
 ) -> Result<DestinationProof> {
-    #[cfg(not(feature = "rgb-validation"))]
-    {
-        let _ = amount;
-        let _ = source_commission;
-    }
+    // Only the RGB (mint) destination binds the amounts.
+    #[cfg(not(evm_to_rgb))]
+    let _ = (amount, source_commission);
+    #[cfg(all(evm_to_rgb, not(feature = "rgb-validation")))]
+    let _ = amount;
 
     match destination {
+        #[cfg(rgb_to_evm)]
         DestinationNetwork::EvmDestination(destination) => {
             let (proof, evm_funds_out) = evm::validation::validate_destination(destination, ctx)?;
             Ok(DestinationProof {
@@ -131,6 +140,7 @@ pub fn validate_destination(
                 rgb_recipient_seals: Vec::new(),
             })
         }
+        #[cfg(evm_to_rgb)]
         DestinationNetwork::RgbDestination(destination) => {
             rgb::validate_destination(destination, ctx)?;
 
@@ -161,6 +171,10 @@ pub fn validate_destination(
                 rgb_recipient_seals,
             })
         }
+        #[allow(unreachable_patterns)]
+        _ => Err(EnclaveError::InvalidRequest(
+            "destination network not signed by this signer role".into(),
+        )),
     }
 }
 

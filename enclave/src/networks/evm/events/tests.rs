@@ -72,6 +72,7 @@ fn rejects_a_non_utf8_tail() {
 }
 
 /// Without this the recipient bind has nothing to compare against.
+#[cfg(evm_to_rgb)]
 #[test]
 fn verified_funds_in_carries_the_destination_address() {
     let p = happy_provider();
@@ -114,6 +115,7 @@ fn receipt_with(logs: Vec<LogEntry>, block_number: u64) -> ReceiptData {
 }
 
 /// gross=1000, commission=50, net=950. head 112, block 100 -> depth 12.
+#[cfg(evm_to_rgb)]
 fn happy_provider() -> FakeEvm {
     FakeEvm {
         receipt: Some(receipt_with(vec![bridge_log(op_id(7), 1000, 950, 50)], 100)),
@@ -122,6 +124,7 @@ fn happy_provider() -> FakeEvm {
 }
 
 /// Verify with the operationId bound - the only supported call shape.
+#[cfg(evm_to_rgb)]
 fn verify(p: &FakeEvm) -> Result<()> {
     verify_funds_in_event(p, &BRIDGE, 12, &TX, &op_id(7), 1000, 50).map(|_| ())
 }
@@ -176,11 +179,13 @@ fn legacy_topic0_is_not_in_use() {
 
 // ---- happy path ----
 
+#[cfg(evm_to_rgb)]
 #[test]
 fn accepts_matching_bridge_funds_in() {
     assert!(verify(&happy_provider()).is_ok());
 }
 
+#[cfg(evm_to_rgb)]
 #[test]
 fn accepts_real_contract_dual_emit() {
     // One deposit emits both events; the pair must not trip the ambiguity
@@ -198,6 +203,7 @@ fn accepts_real_contract_dual_emit() {
     assert!(verify(&p).is_ok());
 }
 
+#[cfg(evm_to_rgb)]
 #[test]
 fn dual_emit_binds_via_bridge_shape_not_the_companion() {
     // The pair must resolve to BridgeFundsIn, which binds tokenCommission.
@@ -219,6 +225,7 @@ fn dual_emit_binds_via_bridge_shape_not_the_companion() {
 
 /// A tx carrying only the companion `FundsIn` is not an authorised deposit:
 /// its id is an RGB id and it binds no commission.
+#[cfg(evm_to_rgb)]
 #[test]
 fn rejects_rgb_companion_event_alone() {
     let p = FakeEvm {
@@ -229,6 +236,7 @@ fn rejects_rgb_companion_event_alone() {
     assert!(e.contains("no BridgeFundsIn log"), "got: {e}");
 }
 
+#[cfg(evm_to_rgb)]
 #[test]
 fn rejects_two_real_deposits_in_one_tx() {
     // Uniqueness still holds WITHIN a shape: two distinct BridgeFundsIn
@@ -249,6 +257,7 @@ fn rejects_two_real_deposits_in_one_tx() {
 
 // ---- receipt-level rejections ----
 
+#[cfg(evm_to_rgb)]
 #[test]
 fn rejects_missing_receipt() {
     let p = FakeEvm {
@@ -259,6 +268,7 @@ fn rejects_missing_receipt() {
     assert!(e.contains("receipt not found"), "got: {e}");
 }
 
+#[cfg(evm_to_rgb)]
 #[test]
 fn rejects_reverted_tx() {
     let mut r = receipt_with(vec![bridge_log(op_id(7), 1000, 950, 50)], 100);
@@ -273,6 +283,7 @@ fn rejects_reverted_tx() {
 
 // ---- log-matching rejections ----
 
+#[cfg(evm_to_rgb)]
 #[test]
 fn rejects_log_from_wrong_contract() {
     let mut log = bridge_log(op_id(7), 1000, 950, 50);
@@ -285,6 +296,7 @@ fn rejects_log_from_wrong_contract() {
     assert!(e.contains("no BridgeFundsIn log"), "got: {e}");
 }
 
+#[cfg(evm_to_rgb)]
 #[test]
 fn rejects_wrong_topic0() {
     let mut log = bridge_log(op_id(7), 1000, 950, 50);
@@ -297,6 +309,7 @@ fn rejects_wrong_topic0() {
     assert!(e.contains("no BridgeFundsIn log"), "got: {e}");
 }
 
+#[cfg(evm_to_rgb)]
 #[test]
 fn rejects_ambiguous_multiple_logs() {
     let p = FakeEvm {
@@ -313,6 +326,7 @@ fn rejects_ambiguous_multiple_logs() {
     assert!(e.contains("ambiguous"), "got: {e}");
 }
 
+#[cfg(evm_to_rgb)]
 #[test]
 fn ignores_unrelated_logs_and_accepts() {
     let unrelated = LogEntry {
@@ -332,6 +346,7 @@ fn ignores_unrelated_logs_and_accepts() {
 
 // ---- field-mismatch rejections ----
 
+#[cfg(evm_to_rgb)]
 #[test]
 fn rejects_operation_id_mismatch() {
     let p = FakeEvm {
@@ -342,6 +357,7 @@ fn rejects_operation_id_mismatch() {
     assert!(e.contains("operationId mismatch"), "got: {e}");
 }
 
+#[cfg(evm_to_rgb)]
 #[test]
 fn rejects_amount_mismatch() {
     let p = FakeEvm {
@@ -352,6 +368,7 @@ fn rejects_amount_mismatch() {
     assert!(e.contains("amount mismatch"), "got: {e}");
 }
 
+#[cfg(evm_to_rgb)]
 #[test]
 fn rejects_commission_mismatch() {
     let p = FakeEvm {
@@ -362,6 +379,7 @@ fn rejects_commission_mismatch() {
     assert!(e.contains("tokenCommission mismatch"), "got: {e}");
 }
 
+#[cfg(evm_to_rgb)]
 #[test]
 fn rejects_net_amount_above_gross_minus_commission() {
     // gross-commission = 950 but the log claims 960.
@@ -375,6 +393,7 @@ fn rejects_net_amount_above_gross_minus_commission() {
 
 /// Under-crediting is legitimate for a fee-on-transfer token and safe, so it
 /// is accepted and logged rather than refused.
+#[cfg(evm_to_rgb)]
 #[test]
 fn accepts_net_amount_below_gross_minus_commission() {
     let p = FakeEvm {
@@ -384,6 +403,7 @@ fn accepts_net_amount_below_gross_minus_commission() {
     assert!(verify(&p).is_ok());
 }
 
+#[cfg(evm_to_rgb)]
 #[test]
 fn rejects_commission_exceeding_gross() {
     let p = FakeEvm {
@@ -398,6 +418,7 @@ fn rejects_commission_exceeding_gross() {
 
 /// A log without the indexed topics cannot be bound: fail closed rather than
 /// reading a data word.
+#[cfg(evm_to_rgb)]
 #[test]
 fn rejects_log_without_operation_id_topic() {
     let mut log = bridge_log(op_id(7), 1000, 950, 50);
@@ -412,6 +433,7 @@ fn rejects_log_without_operation_id_topic() {
 
 /// A full-width id must round-trip - the old u64 decode rejected every
 /// realistic one as "exceeds u64 range".
+#[cfg(evm_to_rgb)]
 #[test]
 fn binds_full_width_operation_id() {
     let p = happy_provider();
@@ -425,6 +447,7 @@ fn binds_full_width_operation_id() {
 
 /// Regression guard: an absent id must refuse, not degrade to an unbound
 /// check as it once did.
+#[cfg(evm_to_rgb)]
 #[test]
 fn rejects_when_operation_id_not_supplied() {
     let e = verify_funds_in_event(&happy_provider(), &BRIDGE, 12, &TX, &[], 1000, 50)
@@ -433,6 +456,7 @@ fn rejects_when_operation_id_not_supplied() {
     assert!(e.contains("must be exactly 32 bytes"), "got: {e}");
 }
 
+#[cfg(evm_to_rgb)]
 #[test]
 fn still_rejects_amount_mismatch_with_matching_operation_id() {
     let p = FakeEvm {
@@ -444,6 +468,7 @@ fn still_rejects_amount_mismatch_with_matching_operation_id() {
 }
 
 /// A wrong-length id is a mis-encoding, not an absent one: refuse.
+#[cfg(evm_to_rgb)]
 #[test]
 fn rejects_malformed_expected_operation_id() {
     let e = verify_funds_in_event(&happy_provider(), &BRIDGE, 12, &TX, &[0xAA; 8], 1000, 50)
@@ -454,6 +479,7 @@ fn rejects_malformed_expected_operation_id() {
 
 // ---- confirmation-depth rejections ----
 
+#[cfg(evm_to_rgb)]
 #[test]
 fn rejects_insufficient_depth() {
     // head 111, block 100 -> depth 11 < 12.
@@ -465,12 +491,14 @@ fn rejects_insufficient_depth() {
     assert!(e.contains("not final"), "got: {e}");
 }
 
+#[cfg(evm_to_rgb)]
 #[test]
 fn accepts_exact_min_depth() {
     // head 112, block 100 -> depth 12 == 12.
     assert!(verify(&happy_provider()).is_ok());
 }
 
+#[cfg(evm_to_rgb)]
 #[test]
 fn rejects_head_below_receipt_block() {
     // head 99 < block 100 -> reorg.
@@ -484,6 +512,7 @@ fn rejects_head_below_receipt_block() {
 
 // ---- regression: listener booleans can no longer authorize ----
 
+#[cfg(evm_to_rgb)]
 #[test]
 fn issue_51_no_receipt_means_no_authorization() {
     // Simulates a request whose listener set evm_event_valid/finalized=true
