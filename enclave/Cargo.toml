@@ -68,10 +68,11 @@ aws-nitro-enclaves-nsm-api = "0.4"
 #
 # Single-network EIFs, one flow each (see the RGB flow selection block below):
 #   RGB send/receive: `--no-default-features --features vsock,rgb,rgb-swap,evm-rpc`
-#   RGB mint/burn:    `--no-default-features --features vsock,rgb,rgb-mint-burn,evm-rpc`
+#   RGB mint:         `--no-default-features --features vsock,rgb,mint-signer`
+#   RGB burn:         `--no-default-features --features vsock,rgb,burn-signer`
 #   Concordium:       `--no-default-features --features vsock,ccd` (no
 #                     bridge-signing path).
-# All three are covered in CI. Naming no RGB flow does not build: the
+# All are covered in CI. Naming no RGB flow does not build: the
 # `compile_error!` pair in lib.rs requires exactly one.
 default = ["rgb", "rgb-swap", "ccd"]
 
@@ -99,23 +100,21 @@ ccd = []
 # Both are `default = false` in the additive sense cargo means it, so a
 # mint/burn image MUST be built with `--no-default-features` (the default set
 # carries `rgb-swap`), exactly like the existing single-network EIFs:
-#   `--no-default-features --features vsock,rgb-mint-burn,evm-rpc`
+#   `--no-default-features --features vsock,rgb,mint-signer` (or `burn-signer`)
 #
 # The per-flow rules live in `enclave/src/networks/rgb/flow/{swap,mint_burn}.rs`;
 # everything else about consignment validation is shared.
 #
 # `rgb-swap` = pools/send-receive: the bridge holds an allocation and moves it
-# with IFA `Transfer` in both directions.
+# with BFA `Transfer` in both directions.
 rgb-swap = ["rgb"]
-# `rgb-mint-burn` = the bridge owns the contract's inflation rights: deposits
-# mint with IFA `Inflation`, withdrawals destroy with IFA `Burn`.
+# `rgb-mint-burn` = the bridge owns the contract's mint right: deposits mint
+# with BFA `Bridge`, withdrawals destroy with BFA `Burn`.
 rgb-mint-burn = ["rgb"]
 
 vsock = []
 # DANGER: allows importing a raw seed over the wire. Testing only.
 allow-seed-import = []
-# Skips cross-check validation on signing requests. Development/testing only.
-dev-mode = []
 # In-enclave RGB consignment validation via rgbstd + Esplora. REQUIRES `spv`
 # (enforced by a `compile_error!` in lib.rs): without SPV the
 # only anchor for a consignment's witness txs is the host-controlled Esplora
@@ -134,6 +133,9 @@ spv = ["rgb-validation"]
 # Mock attestation path: skip NSM / COSE / cert-chain checks and use raw CBOR docs.
 # Testing only — never enable in production builds.
 mock-attestation = ["attestation-verify/mock"]
+# Accept all-zero peer PCRs for debug clone tests. (F03-AF-12)
+# Do not enable this feature in production builds.
+allow-debug-pcrs = ["attestation-verify/allow-debug-pcrs"]
 # Independent in-enclave EVM `FundsIn` event verification for signPsbt.
 # Default-OFF. When ON, bridge-mode signPsbt fetches the deposit receipt via an
 # in-enclave alloy JSON-RPC client (loopback -> vsock forwarder -> host EVM RPC)
@@ -151,22 +153,43 @@ evm-rpc = ["rgb-validation", "dep:alloy", "dep:tokio"]
 # production image or CI lane: it is kept compilable but unused. HEAVY build
 # (2 alloy majors, revm, BLS, vendored OpenSSL).
 helios = ["evm-rpc", "dep:helios-ethereum"]
-# BFA (Bridged Fungible Asset) mint support. It widens the mint/burn flow to the
-# bridged schema, whose script ends with the `cea` ether-extension opcode the
+# Ether-extension validation of BFA mints. BFA is the only schema the enclave
+# admits; this feature supplies the validator that can RUN a BFA mint script,
+# including one in a swap transfer's ancestry. The script ends in `cea`, which the
 # default validator decodes as `Fail`. `evm-rpc` because the events that opcode
 # checks come from the enclave's own verified `FundsIn` read.
 #
+# WITHOUT it an `rgb-validation` build admits BFA and then fails every mint (and
+# every consignment carrying mint ancestry) on that opcode.
+#
+# `bfa-validation` runs the ether extension in either RGB flow. A swap
+# consignment can contain historical Bridge mints even when its last transition
+# is a Transfer; it must verify their FundsIn locks before consensus runs.
+bfa-validation = ["evm-rpc"]
 # `rgb-mint-burn`, not plain `rgb`: a BFA `Bridge` transition IS a mint, so its
 # rules belong to that flow and nowhere else. Pulling in the flow feature also
 # means a BFA build cannot accidentally be a `rgb-swap` one - `lib.rs` rejects
 # both flows at once, so `--features bfa-mint` on the default set fails to
 # compile rather than silently teaching the swap enclave a mint shape.
 #
-# The swap enclave is built without the feature and so keeps its behaviour, but
-# NOT its PCR0: the workspace `[patch.crates-io]` moves every build onto the BFA
-# RGB crates (and electrum-client 0.24), so every EIF here re-measures and the
-# signer set must rotate.
-bfa-mint = ["rgb-mint-burn", "evm-rpc"]
+# Every EIF here re-measures regardless: the workspace `[patch.crates-io]` moves
+# every build onto the BFA RGB crates (and electrum-client 0.24), so the signer
+# set must rotate.
+bfa-mint = ["rgb-mint-burn", "bfa-validation"]
+
+# Mint/burn signer role. EXACTLY ONE is required whenever `rgb-mint-burn` is on
+# (lib.rs `compile_error!`s): the two directions ship as two enclave images with
+# two PCR0s and two seeds, so a mint signer contains no release rule to reach
+# and a burn signer no mint rule. The role is attested (`SignerRole`).
+#
+# Both keep `bfa-mint`: a burn consignment carries mint ancestry, so the burn
+# signer still runs BFA mint scripts. `build.rs` turns the role into the
+# `evm_to_rgb` / `rgb_to_evm` cfgs the code gates on.
+#
+# `mint-signer` = EVM -> RGB: co-signs the RGB mint PSBT (and create_utxo).
+mint-signer = ["bfa-mint"]
+# `burn-signer` = RGB -> EVM: signs the `fundsOut` release (and its gas tx).
+burn-signer = ["bfa-mint"]
 
 [dev-dependencies]
 rand = "0.10.0"

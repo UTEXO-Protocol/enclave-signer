@@ -6,8 +6,17 @@
 # Production builder glibc must remain compatible with the AL2023 runtime.
 FROM rust:1.96-slim-bullseye@sha256:c593596210f729542a92aced6a8b0812bcc8d04c5f1b238e663b800d0e2e17bd AS builder
 
-# Builder-only tools: system Git and SSH for private dependencies.
-RUN apt-get update && apt-get install -y \
+# Use the signed Debian snapshot to avoid missing Bullseye packages.
+# HTTP is required until ca-certificates is installed.
+# Replace this temporary pin when the shared base-image update is ready.
+RUN set -eux; \
+    printf '%s\n' \
+      'deb http://snapshot.debian.org/archive/debian/20260801T000000Z bullseye main' \
+      'deb http://snapshot.debian.org/archive/debian-security/20260801T000000Z bullseye-security main' \
+      > /etc/apt/sources.list; \
+    rm -f /etc/apt/sources.list.d/*; \
+    printf 'Acquire::Check-Valid-Until "false";\nAcquire::Retries "5";\n' > /etc/apt/apt.conf.d/99snapshot; \
+    apt-get update && apt-get install -y \
     pkg-config libssl-dev git ca-certificates openssh-client \
     make python3 python3-pip \
     && pip3 install --no-cache-dir "cmake==3.31.6" \
@@ -33,13 +42,14 @@ ENV CARGO_INCREMENTAL=0 \
 # production, so the attested evm_source is RawRpc.
 #
 # `rgb-swap` selects the send/receive RGB flow. Exactly one flow is required
-# under `rgb-validation`; the mint/burn image is Dockerfile.enclave.mint-burn.
+# under `rgb-validation`; the mint/burn images are Dockerfile.enclave.mint and
+# Dockerfile.enclave.burn.
 RUN --mount=type=secret,id=github_token \
     --mount=type=secret,id=consignment_key \
     --mount=type=secret,id=consensus_key \
     --mount=type=secret,id=ops_key \
     --mount=type=secret,id=schemas_key \
-    sh /build/build/with-private-deps.sh enclave cargo build --release --locked --no-default-features --features vsock,rgb,rgb-swap,evm-rpc
+    sh /build/build/with-private-deps.sh enclave cargo build --release --locked --no-default-features --features vsock,rgb,rgb-swap,bfa-validation
 
 
 # --- Runtime ---
@@ -81,9 +91,11 @@ RUN chmod +x /app/utexo-bridge-enclave /app/entrypoint.sh
 # TWO-CONTRACT deployment: the EVM funds-out EIP-712 verifyingContract is the
 # MultisigProxy (EVM_PROXY_CONTRACT_ADDRESS), which DIFFERS from the bridge
 # *entry* contract that emits FundsIn (FUNDS_IN_CONTRACT, set below).
+ARG RGB_ASSET_ID=""
+RUN test -n "$RGB_ASSET_ID"
 ENV EVM_CHAIN_ID=42161 \
     EVM_PROXY_CONTRACT_ADDRESS=0xC985c12bbCECe96A13A72A62FD75d8aB9381ef5A \
-    RGB_ASSET_ID=rgb:lJFja2kw-h_azlEd-7CNPxwf-UsvIDhH-UD0Y1f9-8f26jLk \
+    RGB_ASSET_ID=${RGB_ASSET_ID} \
     BITCOIN_NETWORK=bitcoin \
     ELECTRUM_URL=ssl://electrs-mainnet.utexo.com:50002
 

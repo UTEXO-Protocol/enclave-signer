@@ -1,26 +1,15 @@
 #!/usr/bin/env bash
-# Deploy the enclave-signer cluster on THIS host from S3 by git_sha.
+# Deploy the matching EIF, Parent, and CLI from S3 for one git_sha.
+# Verify checksums and PCRs before starting the services.
+# Start enclave CIDs 16/18/20 and Parent ports 50051/52/53.
 #
-# Pulls the matching {EIF, parent, cli} set (published by the build-eif CI
-# workflow under eif/<git_sha>/), verifies checksums and PCRs, installs systemd
-# units + Nitro udev/tmpfiles rules, then runs 3 enclaves (CID 16/18/20) + 3
-# parents (gRPC 50051/52/53) as systemd services so the cluster survives a reboot.
-# Artifact-only: the host never builds or clones the repo.
+# Initialize or clone keys after deployment.
+# Put --addr vsock://<CID>:5000 before the CLI subcommand.
+# Donor: cli --addr vsock://16:5000 init --cloning-secret-file <path>
+# Requester: cli --addr vsock://16:5000 clone ...
+# Restart clears enclave keys; systemd restores only the processes.
 #
-# It does NOT bootstrap identity. A fresh/restarted enclave has no key; after this
-# run `utexo-bridge-parent-cli init --cloning-secret ...` on a donor, or
-# `... clone ...` on a requester. (Identity lives in enclave memory and is lost
-# on restart/reboot - see TODO #5 for KMS-sealed DR. #7 only makes the PROCESSES
-# come back automatically; the enclaves come up empty.)
-#
-# The systemd units / ctl scripts / udev / tmpfiles installed here are embedded
-# below as heredocs so this script is self-contained over SSM. They are the same
-# files kept (canonical, reviewable) under deploy/systemd/ in the repo - keep both
-# in sync.
-#
-# Usage (run as root, e.g. via SSM):
-#   GIT_SHA=<40-hex> BUCKET=<s3-bucket> AWS_REGION=<region> CLUSTER_DIR=<path> bash deploy-host.sh
-# No infra identifiers or paths are baked in (public repo) - pass them via env.
+# Keep the embedded service files in sync with deploy/systemd/.
 set -euo pipefail
 
 GIT_SHA="${GIT_SHA:?GIT_SHA required (40-hex commit)}"
@@ -38,9 +27,41 @@ ENCLAVE_MEMORY="${ENCLAVE_MEMORY:-3072}"
 ENCLAVE_DEBUG_MODE="${ENCLAVE_DEBUG_MODE:-0}"
 CIDS=(16 18 20)
 declare -A PORT=([16]=50051 [18]=50052 [20]=50053)
+# Readiness probe (`GET /health`), one per parent. Loopback-only. This script is
+# a cold deploy that ends before identity bootstrap, so it only provisions the
+# port; the rolling restart in `devops` is what polls it to hold the 2-of-3
+# quorum. Named HPORT so it cannot collide with the env var it emits - the same
+# reason PORT above is not named GRPC_PORT.
+declare -A HPORT=([16]=50061 [18]=50062 [20]=50063)
 
 log(){ echo "[deploy $(date -u +%H:%M:%S)] $*"; }
 asubuntu(){ su - ubuntu -c "$1"; }
+
+# Bind Parent gRPC to the private host address. (F03-AF-13)
+# Set GRPC_HOST to override the address.
+if [ -z "${GRPC_HOST:-}" ]; then
+  _tok=$(curl -fsS -X PUT "http://169.254.169.254/latest/api/token" \
+    -H "X-aws-ec2-metadata-token-ttl-seconds: 60")
+  GRPC_HOST=$(curl -fsS -H "X-aws-ec2-metadata-token: $_tok" \
+    http://169.254.169.254/latest/meta-data/local-ipv4)
+  unset _tok
+  [ -n "$GRPC_HOST" ] || { log "FATAL: empty private IPv4 from IMDS"; exit 1; }
+fi
+log "parent gRPC bind GRPC_HOST=$GRPC_HOST (private ENI)"
+
+# Check each CID certificate and ACL before stopping services.
+# Keep private keys out of build artifacts.
+PARENT_TLS_DIR="${PARENT_TLS_DIR:-/etc/utexo/tls}"
+[[ "$PARENT_TLS_DIR" =~ ^/[a-zA-Z0-9_./-]+$ ]] || { log "invalid PARENT_TLS_DIR"; exit 1; }
+for CID in "${CIDS[@]}"; do
+  for file in server.pem server.key client-ca.pem clients.acl; do
+    tls_file="$PARENT_TLS_DIR/$CID/$file"
+    [ -s "$tls_file" ] && su -s /bin/sh ubuntu -c "test -r '$tls_file'" || {
+      log "FATAL: provision readable mTLS file $tls_file before deployment (docs/parent-mtls.md)"
+      exit 1
+    }
+  done
+done
 
 # Ensure the `ne` group exists + ubuntu is a member (idempotent; the udev rule
 # below relies on the group). Group membership is persistent across reboots.
@@ -198,8 +219,16 @@ EOF
 for CID in "${CIDS[@]}"; do
   cat > "/etc/utexo/parent-$CID.env" <<EOF
 CLUSTER_DIR=$DIR
-GRPC_HOST=0.0.0.0
+GRPC_HOST=$GRPC_HOST
 GRPC_PORT=${PORT[$CID]}
+GRPC_TLS_CERT_FILE=$PARENT_TLS_DIR/$CID/server.pem
+GRPC_TLS_KEY_FILE=$PARENT_TLS_DIR/$CID/server.key
+GRPC_TLS_CLIENT_CA_FILE=$PARENT_TLS_DIR/$CID/client-ca.pem
+GRPC_TLS_ACL_FILE=$PARENT_TLS_DIR/$CID/clients.acl
+GRPC_CLONE_MAX_PER_MINUTE=30
+GRPC_MAX_CONNECTIONS=64
+HEALTH_HOST=127.0.0.1
+HEALTH_PORT=${HPORT[$CID]}
 USE_VSOCK=true
 ENCLAVE_VSOCK_CID=$CID
 ENCLAVE_VSOCK_PORT=5000
@@ -233,11 +262,13 @@ done
 # step 3 already verified the artifact). Only meaningful for a production EIF.
 if [ "$ENCLAVE_DEBUG_MODE" = "1" ]; then
   log "ENCLAVE_DEBUG_MODE=1 — skipping runtime PCR0 check (PCRs zeroed under --debug-mode)"
-  # Still assert the exact enclave set (F09-AF-07): an empty/partial list is a FAIL.
-  asubuntu 'nitro-cli describe-enclaves' | python3 - "${CIDS[*]}" <<'PY'
+  # Check the complete CID set, including in debug mode.
+  # Read JSON from a file because the Python heredoc uses stdin.
+  asubuntu 'nitro-cli describe-enclaves' > /tmp/desc.json
+  python3 - "${CIDS[*]}" <<'PY'
 import json, sys
 want = sorted(int(x) for x in sys.argv[1].split())
-d = json.load(sys.stdin)
+d = json.load(open("/tmp/desc.json"))
 running = sorted(e["EnclaveCID"] for e in d if e.get("State") == "RUNNING")
 print("running CIDs (debug):", running, "want:", want)
 if running != want:
@@ -273,9 +304,12 @@ for CID in "${CIDS[@]}"; do
   systemctl restart "utexo-parent@$CID"
 done
 sleep 4
-# F09-AF-07: require ALL expected parent ports to be listening, not "at least one"
-# of them (a single surviving parent must not make a partial cluster look healthy).
-WANT_PORTS=(); for CID in "${CIDS[@]}"; do WANT_PORTS+=("${PORT[$CID]}"); done
+# F09-AF-07: require ALL expected ports to be listening, not "at least one"
+# (a single surviving parent must not make a partial cluster look healthy).
+# Health ports too: a parent without its health endpoint would leave the next
+# rolling deploy polling a dead port. Liveness only - readiness stays false
+# until init/clone bootstraps identity.
+WANT_PORTS=(); for CID in "${CIDS[@]}"; do WANT_PORTS+=("${PORT[$CID]}" "${HPORT[$CID]}"); done
 LISTEN="$(ss -ltnH 2>/dev/null | awk '{print $4}' | grep -oE '[0-9]+$' | sort -u)"
 miss=(); for p in "${WANT_PORTS[@]}"; do printf '%s\n' "$LISTEN" | grep -qx "$p" || miss+=("$p"); done
 [ "${#miss[@]}" -eq 0 ] || { log "parents NOT listening on: ${miss[*]} (want ${WANT_PORTS[*]})"; exit 1; }

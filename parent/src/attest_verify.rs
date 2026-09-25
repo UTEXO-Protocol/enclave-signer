@@ -9,7 +9,9 @@
 //! by the binary against an in-process parent + enclave stack.
 
 use anyhow::{bail, Context, Result};
-use attestation_verify::{AttestationMode, AttestedPolicy, BtcDataSource, EvmDataSource};
+use attestation_verify::{
+    AttestationMode, AttestedPolicy, BtcDataSource, EvmDataSource, SignerRole,
+};
 use rand::RngCore;
 use sha2::{Digest, Sha256};
 
@@ -31,13 +33,23 @@ pub enum VerifyMode {
 ///
 /// Chain/contract/asset pins come from the wire response, which the public-key
 /// bundle already binds, so a production expectation states only the posture
-/// flags plus the gas-tx rule - the latter is not on the wire and must be
-/// declared here.
+/// flags and authorization rules that are not on the wire and must be declared
+/// independently by the verifier. Optional chain, contract
+/// and asset pins (F02-AF-04) additionally compare those wire values against
+/// the operator's intended deployment; without a pin the value is
+/// authenticated but not compared.
+///
+/// One value is built per verifier run, so the size gap between the two
+/// variants is irrelevant; boxing would only complicate the struct literals.
+#[allow(clippy::large_enum_variant)]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ExpectedPolicy {
     /// Expect a production bridge enclave with these posture flags.
     Production {
         allow_vanilla_psbt: bool,
+        /// The image the operator expects: a mint signer, a burn signer, or a
+        /// combined one. A burn signer that attests `Mint` fails verification.
+        signer_role: SignerRole,
         evm_source: EvmDataSource,
         /// The Helios weak-subjectivity checkpoint the operator expects the
         /// enclave to have pinned. `Some` (required) when `evm_source` is
@@ -45,6 +57,18 @@ pub enum ExpectedPolicy {
         /// commitment so an enclave that trust-rooted on a different checkpoint
         /// fails verification.
         evm_checkpoint: Option<[u8; 32]>,
+        /// Expected EVM chain ID.
+        /// None accepts the authenticated chain ID without comparison.
+        expected_chain_id: Option<u64>,
+        /// Expected 20-byte bridge or MultisigProxy address.
+        /// Some requires an exact match.
+        expected_bridge_contract: Option<[u8; 20]>,
+        /// Expected RGB asset ID.
+        /// Some requires an exact match.
+        /// An empty string requires no RGB asset.
+        expected_rgb_asset_id: Option<String>,
+        funds_in_contract: [u8; 20],
+        evm_min_confirmations: u64,
         /// Expected gas-tx (`SignRawDigest`) rule the enclave committed.
         /// An all-zero destination, zero caps, and empty selectors mean
         /// the operator did not pin the gas path, which the enclave attests as
@@ -115,9 +139,11 @@ pub async fn verify_attested_pubkey(
     let mut nonce = [0u8; 32];
     rand::thread_rng().fill_bytes(&mut nonce);
 
-    let mut client = ParentServiceClient::connect(endpoint.to_string())
+    let channel = crate::transport_security::client_endpoint(endpoint)?
+        .connect()
         .await
         .with_context(|| format!("connecting to {endpoint}"))?;
+    let mut client = ParentServiceClient::new(channel);
 
     let response = client
         .attested_public_key(AttestedPublicKeyRequest {
@@ -127,16 +153,28 @@ pub async fn verify_attested_pubkey(
         .context("AttestedPublicKey RPC failed")?
         .into_inner();
 
+    verify_attested_response(response, nonce, &expected_pcrs, mode, &expected_policy)
+}
+
+/// The checks of [`verify_attested_pubkey`] after the RPC: document, pubkey
+/// and policy commitment. Split out so tests can drive it without a server.
+pub fn verify_attested_response(
+    response: AttestedPublicKeyResponse,
+    nonce: [u8; 32],
+    expected_pcrs: &attestation_verify::ExpectedPcrs,
+    mode: VerifyMode,
+    expected_policy: &ExpectedPolicy,
+) -> Result<AttestedPubkeyResult> {
     let verified = match mode {
         VerifyMode::Real => attestation_verify::verify_attestation(
             &response.attestation_doc,
-            &expected_pcrs,
+            expected_pcrs,
             Some(&nonce),
         )
         .context("attestation verify failed")?,
         VerifyMode::Mock => attestation_verify::verify_mock_attestation(
             &response.attestation_doc,
-            &expected_pcrs,
+            expected_pcrs,
             Some(&nonce),
         )
         .context("mock attestation verify failed")?,
@@ -154,7 +192,7 @@ pub async fn verify_attested_pubkey(
     // Reconstruct the expected policy - pins from the wire response,
     // posture flags from `expected_policy` - and require the whole commitment to
     // match. A mismatch means the attested posture is not the expected one.
-    let attested_policy = expected_attested_policy(&expected_policy, &response)?;
+    let attested_policy = expected_attested_policy(expected_policy, &response)?;
     let mut preimage = canonical_bundle(&response);
     preimage.extend_from_slice(&attested_policy.to_bytes());
     let bundle_commitment: [u8; 32] = Sha256::digest(&preimage).into();
@@ -192,8 +230,14 @@ fn expected_attested_policy(
         ExpectedPolicy::Development => Ok(AttestedPolicy::Development),
         ExpectedPolicy::Production {
             allow_vanilla_psbt,
+            signer_role,
             evm_source,
             evm_checkpoint,
+            expected_chain_id,
+            expected_bridge_contract,
+            expected_rgb_asset_id,
+            funds_in_contract,
+            evm_min_confirmations,
             gas_tx_allowed_to,
             gas_tx_max_gas_limit,
             gas_tx_max_fee_per_gas,
@@ -211,8 +255,38 @@ fn expected_attested_policy(
                         resp.bridge_contract.len()
                     )
                 })?;
+
+            // Check operator pins before constructing the expected commitment. (F02-AF-04)
+            if let Some(want) = expected_chain_id {
+                if *want != resp.chain_id {
+                    bail!(
+                        "chain_id mismatch: enclave attests {} but --expect-chain-id is {want}",
+                        resp.chain_id
+                    );
+                }
+            }
+            if let Some(want) = expected_bridge_contract {
+                if want != &bridge_contract {
+                    bail!(
+                        "bridge_contract mismatch: enclave attests 0x{} but \
+                         --expect-bridge-contract is 0x{}",
+                        hex::encode(bridge_contract),
+                        hex::encode(want),
+                    );
+                }
+            }
+            if let Some(want) = expected_rgb_asset_id {
+                if want != &resp.rgb_asset_id {
+                    bail!(
+                        "rgb_asset_id mismatch: enclave attests {:?} but --expect-rgb-asset-id is {want:?}",
+                        resp.rgb_asset_id
+                    );
+                }
+            }
+
             Ok(AttestedPolicy::Production {
                 allow_vanilla_psbt: *allow_vanilla_psbt,
+                signer_role: *signer_role,
                 // A real-verified production enclave always uses real (NSM)
                 // attestation; SPV is the only Bitcoin anchor source.
                 attestation: AttestationMode::Real,
@@ -221,6 +295,8 @@ fn expected_attested_policy(
                 chain_id: resp.chain_id,
                 bridge_contract,
                 rgb_asset_id: resp.rgb_asset_id.clone(),
+                funds_in_contract: *funds_in_contract,
+                evm_min_confirmations: *evm_min_confirmations,
                 evm_checkpoint: *evm_checkpoint,
                 // Gas-tx rule: declared by the operator, not on the
                 // wire. `to_bytes` canonicalises the selector set, so the caller
@@ -231,6 +307,173 @@ fn expected_attested_policy(
                 gas_tx_max_value_wei: *gas_tx_max_value_wei,
                 gas_tx_allowed_selectors: gas_tx_allowed_selectors.clone(),
             })
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A production expectation with the three deployment pins set to `pins`
+    /// (chain_id, bridge_contract, rgb_asset_id) and everything else neutral.
+    fn expect_prod(
+        chain_id: Option<u64>,
+        bridge_contract: Option<[u8; 20]>,
+        rgb_asset_id: Option<String>,
+    ) -> ExpectedPolicy {
+        ExpectedPolicy::Production {
+            allow_vanilla_psbt: false,
+            evm_source: EvmDataSource::RawRpc,
+            signer_role: SignerRole::Combined,
+            evm_checkpoint: None,
+            funds_in_contract: [0x11; 20],
+            evm_min_confirmations: 12,
+            expected_chain_id: chain_id,
+            expected_bridge_contract: bridge_contract,
+            expected_rgb_asset_id: rgb_asset_id,
+            gas_tx_allowed_to: [0u8; 20],
+            gas_tx_max_gas_limit: 0,
+            gas_tx_max_fee_per_gas: 0,
+            gas_tx_max_value_wei: 0,
+            gas_tx_allowed_selectors: Vec::new(),
+        }
+    }
+
+    fn production(signer_role: SignerRole) -> ExpectedPolicy {
+        ExpectedPolicy::Production {
+            allow_vanilla_psbt: false,
+            signer_role,
+            evm_source: EvmDataSource::RawRpc,
+            evm_checkpoint: None,
+            funds_in_contract: [0x11; 20],
+            evm_min_confirmations: 12,
+            expected_chain_id: None,
+            expected_bridge_contract: None,
+            expected_rgb_asset_id: None,
+            gas_tx_allowed_to: [0u8; 20],
+            gas_tx_max_gas_limit: 0,
+            gas_tx_max_fee_per_gas: 0,
+            gas_tx_max_value_wei: 0,
+            gas_tx_allowed_selectors: Vec::new(),
+        }
+    }
+
+    /// A wire response pinned to chain 42161, contract 0x11.., asset "rgb:abc".
+    fn wire() -> AttestedPublicKeyResponse {
+        AttestedPublicKeyResponse {
+            chain_id: 42161,
+            bridge_contract: vec![0x11u8; 20],
+            rgb_asset_id: "rgb:abc".to_string(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn unset_pins_trust_the_wire() {
+        // Without operator pins, authenticate values without comparing them.
+        let got = expected_attested_policy(&expect_prod(None, None, None), &wire())
+            .expect("unset pins must not reject");
+        match got {
+            AttestedPolicy::Production {
+                chain_id,
+                rgb_asset_id,
+                ..
+            } => {
+                assert_eq!(chain_id, 42161);
+                assert_eq!(rgb_asset_id, "rgb:abc");
+            }
+            AttestedPolicy::Development => panic!("expected production policy"),
+        }
+    }
+
+    #[test]
+    fn matching_pins_are_accepted() {
+        let exp = expect_prod(Some(42161), Some([0x11u8; 20]), Some("rgb:abc".into()));
+        assert!(expected_attested_policy(&exp, &wire()).is_ok());
+    }
+
+    #[test]
+    fn wrong_chain_id_is_rejected() {
+        let exp = expect_prod(Some(1), None, None);
+        let err = expected_attested_policy(&exp, &wire()).expect_err("wrong chain must fail");
+        assert!(format!("{err:#}").contains("chain_id mismatch"));
+    }
+
+    #[test]
+    fn wrong_bridge_contract_is_rejected() {
+        let exp = expect_prod(None, Some([0x22u8; 20]), None);
+        let err = expected_attested_policy(&exp, &wire()).expect_err("wrong contract must fail");
+        assert!(format!("{err:#}").contains("bridge_contract mismatch"));
+    }
+
+    #[test]
+    fn wrong_rgb_asset_is_rejected() {
+        let exp = expect_prod(None, None, Some("rgb:other".into()));
+        let err = expected_attested_policy(&exp, &wire()).expect_err("wrong asset must fail");
+        assert!(format!("{err:#}").contains("rgb_asset_id mismatch"));
+    }
+
+    #[test]
+    fn empty_asset_pin_matches_empty_wire() {
+        // A pure-EVM / pure-CCD build ships no RGB asset; pinning "" must match.
+        let mut w = wire();
+        w.rgb_asset_id = String::new();
+        let exp = expect_prod(None, None, Some(String::new()));
+        assert!(expected_attested_policy(&exp, &w).is_ok());
+    }
+
+    /// A response whose mock document commits to a production policy with
+    /// `attested_role`.
+    fn attested_response(attested_role: SignerRole, nonce: &[u8; 32]) -> AttestedPublicKeyResponse {
+        let pubkey = vec![0x04; 65];
+        let mut resp = AttestedPublicKeyResponse {
+            evm_uncompressed_pub: pubkey.clone(),
+            chain_id: 1,
+            bridge_contract: vec![0xAA; 20],
+            rgb_asset_id: "rgb:asset".into(),
+            ..Default::default()
+        };
+        let policy = expected_attested_policy(&production(attested_role), &resp).unwrap();
+        let mut preimage = canonical_bundle(&resp);
+        preimage.extend_from_slice(&policy.to_bytes());
+        let user_data: [u8; 32] = Sha256::digest(&preimage).into();
+        resp.attestation_doc =
+            attestation_verify::build_mock_document(nonce, Some(&pubkey), Some(&user_data))
+                .unwrap();
+        resp
+    }
+
+    fn verify(attested: SignerRole, expected: SignerRole) -> Result<AttestedPubkeyResult> {
+        let nonce = [0x42; 32];
+        verify_attested_response(
+            attested_response(attested, &nonce),
+            nonce,
+            &attestation_verify::ExpectedPcrs::zero(),
+            VerifyMode::Mock,
+            &production(expected),
+        )
+    }
+
+    #[test]
+    fn matching_signer_role_verifies() {
+        verify(SignerRole::Mint, SignerRole::Mint).unwrap();
+        verify(SignerRole::Burn, SignerRole::Burn).unwrap();
+    }
+
+    /// Everything but the role matches, so the role alone fails the check.
+    #[test]
+    fn wrong_signer_role_alone_fails() {
+        for (attested, expected) in [
+            (SignerRole::Burn, SignerRole::Mint),
+            (SignerRole::Mint, SignerRole::Burn),
+            (SignerRole::Combined, SignerRole::Mint),
+        ] {
+            let err = verify(attested, expected).unwrap_err();
+            assert!(
+                format!("{err:#}").contains("user_data"),
+                "attested {attested:?}, expected {expected:?}: {err:#}"
+            );
         }
     }
 }

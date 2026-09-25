@@ -11,9 +11,10 @@
 //! UTEXO_LIVE_AMOUNT=1000000 UTEXO_LIVE_COMMISSION=0 UTEXO_LIVE_MIN_CONF=1 \
 //!     cargo test -p utexo-bridge-enclave --features evm-rpc --test test_evm_event_live
 //! ```
-#![cfg(feature = "evm-rpc")]
+// FundsIn deposit verification: the EVM -> RGB direction.
+#![cfg(all(feature = "evm-rpc", evm_to_rgb))]
 
-use utexo_bridge_enclave::networks::evm::evm_event::{verify_funds_in_event, AlloyEvmClient};
+use utexo_bridge_enclave::networks::evm::events::{verify_funds_in_event, AlloyEvmClient};
 
 struct Live {
     client: AlloyEvmClient,

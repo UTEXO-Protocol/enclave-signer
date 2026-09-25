@@ -1,18 +1,12 @@
-//! Mint/burn flow rules. The bridge owns the contract's inflation rights: a
-//! deposit mints with an IFA `Inflation`, a withdrawal destroys units with an
-//! IFA `Burn`.
+//! Mint/burn flow rules. The bridge owns the contract's mint right: a
+//! deposit mints with a BFA `Bridge`, a withdrawal destroys units with a
+//! BFA `Burn`.
 //!
 //! See [`super`] for why this lives in its own file, and for the mirrored-name
 //! contract these items keep.
 
 use crate::error::{EnclaveError, Result};
-use crate::networks::rgb::validation::{ifa, is_mint_transition, TransitionSummary};
-
-/// The mint shapes this build signs, spelled out for rejection messages.
-#[cfg(feature = "bfa-mint")]
-const MINT_SHAPES: &str = "Inflation or Bridge";
-#[cfg(not(feature = "bfa-mint"))]
-const MINT_SHAPES: &str = "Inflation";
+use crate::networks::rgb::validation::{bfa, is_mint_transition, TransitionSummary};
 
 /// Human-readable flow name, used in rejection messages so an operator can
 /// tell "wrong shape" from "wrong enclave".
@@ -25,21 +19,21 @@ pub const FLOW_NAME: &str = "mint/burn";
 ///
 /// The signing shape of this flow *is* the mint shape, so this is
 /// [`is_mint_transition`] rather than a second list that could drift from it.
-/// In particular BFA's `TS_BRIDGE`, which joins IFA `Inflation` only in a
-/// `bfa-mint` build, takes the mint rules below - notably the exact-equality
-/// amount bind that refuses an over-mint. A build without the feature has no
-/// code path that admits it at all.
+/// BFA's `TS_BRIDGE` is the only mint shape, and it takes the mint rules below
+/// - notably the exact-equality amount bind that refuses an over-mint.
 pub fn is_signing_transition(transition_type: u16) -> bool {
     is_mint_transition(transition_type)
 }
 
 /// Gate on the consignment's last transition before the PSBT is bound to it.
+#[cfg(evm_to_rgb)]
 pub fn assert_signing_transition(last: &TransitionSummary) -> Result<()> {
     if !is_signing_transition(last.transition_type) {
         return Err(EnclaveError::CrossCheck(format!(
-            "mint-RGB PSBT requires a {MINT_SHAPES} transition (last transition_type = {}) - \
+            "mint-RGB PSBT requires a Bridge transition (last transition_type = {}, want {}) - \
              this enclave is built for the {FLOW_NAME} flow",
-            last.transition_type
+            last.transition_type,
+            bfa::TS_BRIDGE
         )));
     }
     Ok(())
@@ -50,13 +44,16 @@ pub fn assert_signing_transition(last: &TransitionSummary) -> Result<()> {
 /// value under a rule that was never applied to it. In particular a `Transfer`
 /// smuggled into a mint bundle would get the mint's equality rule, which does
 /// not account for change.
+#[cfg(evm_to_rgb)]
 pub fn assert_committed_group(committed: &[&TransitionSummary]) -> Result<()> {
     for t in committed {
         if !is_signing_transition(t.transition_type) {
             return Err(EnclaveError::CrossCheck(format!(
                 "mint-RGB PSBT commits transition {} of type {} - the {FLOW_NAME} flow requires \
-                 {MINT_SHAPES}",
-                t.op_id, t.transition_type
+                 Bridge ({})",
+                t.op_id,
+                t.transition_type,
+                bfa::TS_BRIDGE
             )));
         }
     }
@@ -70,8 +67,9 @@ pub fn assert_committed_group(committed: &[&TransitionSummary]) -> Result<()> {
 /// by the credit. Any surplus is an over-mint - free supply the bridge never
 /// received a deposit for.
 ///
-/// `committed_asset_output` counts `OS_ASSET` only; the `OS_INFLATION`
-/// allowance riding along is remaining mint capacity, not minted value.
+/// `committed_asset_output` counts `OS_ASSET` only; an `OS_BRIDGE` output
+/// riding along is the declarative mint right, not minted value.
+#[cfg(evm_to_rgb)]
 pub fn assert_group_amount(
     committed_asset_output: u64,
     source_amount: u64,
@@ -92,17 +90,18 @@ pub fn assert_group_amount(
 /// destroyed, and the shape gate that makes it meaningful.
 ///
 /// A `Burn` has no output assignments carrying the destroyed value, so the
-/// figure comes from the IFA `MS_BURNED_ASSET` metadata that
+/// figure comes from the BFA `MS_BURNED_ASSET` metadata that
 /// [`crate::networks::rgb::validation`] reads off the rgbstd `Transfer`.
 /// Missing metadata on a burn implies a schema mismatch - fail closed rather
 /// than release against an unknown amount.
+#[cfg(rgb_to_evm)]
 pub fn funds_out_source_amount(last: &TransitionSummary) -> Result<u64> {
-    if last.transition_type != ifa::TS_BURN {
+    if last.transition_type != bfa::TS_BURN {
         return Err(EnclaveError::CrossCheck(format!(
             "fundsOut requires a Burn transition (last transition_type = {}, want {}) - \
              this enclave is built for the {FLOW_NAME} flow",
             last.transition_type,
-            ifa::TS_BURN
+            bfa::TS_BURN
         )));
     }
     last.burned_asset_amount.ok_or_else(|| {
@@ -117,6 +116,7 @@ pub fn funds_out_source_amount(last: &TransitionSummary) -> Result<u64> {
 /// Exact equality: a burn destroys one figure and has no change leg, and
 /// `fundsOut.amount` is gross (commission is taken on-chain from it). A
 /// release below the burn strands units; one above it is unbacked.
+#[cfg(rgb_to_evm)]
 pub fn assert_funds_out_amount(source_amount: u64, calldata_amount: u64) -> Result<()> {
     if source_amount != calldata_amount {
         return Err(EnclaveError::CrossCheck(format!(

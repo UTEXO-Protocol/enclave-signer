@@ -50,14 +50,26 @@ path = "src/bin/attest_verify.rs"
 
 [dependencies]
 prost = "0.14"
-tonic = "0.14"
+tonic = { version = "0.14", features = ["tls-ring"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+http = "1"
+# Use GlobalConcurrencyLimitLayer to limit requests across connections. (F03-AF-13)
+tower = { version = "0.5", features = ["limit"] }
 tokio = { version = "1", features = ["full"] }
+tokio-stream = "0.1"
 # Full schema from the shared upstream repo (bridge / node / orchestrator /
 # parent / signer packages). The parent runs on the untrusted host, so needing a
 # credential to build it costs nothing. Keep this rev in lockstep with the
 # vendored slice in `enclave-proto/` — see its README.
-federated-signer-proto = { git = "ssh://git@github-federated-signer/UTEXO-Protocol/federated-signer-proto.git", rev = "18c5d271d40a049ec0ffc8f3a970ef042d8b7ffb", package = "federated-signer-proto" }
+federated-signer-proto = { git = "ssh://git@github-federated-signer/UTEXO-Protocol/federated-signer-proto.git", rev = "3677a5a311e741f5940866f7fdd98a513ec9b79f", package = "federated-signer-proto" }
 clap = { version = "4", features = ["derive"] }
+# The `GET /health` readiness probe. Both already resolve in this graph via
+# tonic, so the only lockfile addition is `serde_path_to_error` (axum's `json`
+# feature). Keep the version aligned with tonic's axum. Parent-only: the enclave
+# workspace and its PCR-measured binary are untouched.
+axum = "0.8"
+serde_json = "1"
+
 
 thiserror = "2"
 anyhow = "1"
@@ -84,6 +96,7 @@ default = []
 vsock = []
 
 [dev-dependencies]
+tonic-prost = "0.14"
 # Real enclave (with mock-attestation + seed-import) for end-to-end tests
 # that drive the full CLI verifier against a live enclave + gRPC stack.
 utexo-bridge-enclave = { path = "../enclave", features = ["mock-attestation", "allow-seed-import"] }

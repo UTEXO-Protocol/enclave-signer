@@ -5,7 +5,7 @@ sequenceDiagram
     participant Listener as Go Listener
     participant Esplora as Esplora API
     participant Parent as utexo-bridge-parent<br/>grpc_server.rs
-    participant Srv as enclave/server.rs<br/>handle_submit_headers
+    participant Srv as enclave/server/spv.rs<br/>handle_submit_headers
     participant Chain as spv::HeaderChain
     participant Val as spv::validation
     participant Cp as spv::checkpoint

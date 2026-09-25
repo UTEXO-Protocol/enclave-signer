@@ -124,10 +124,10 @@ jobs:
       # Production build profile: the exact feature set shipped in the EIF
       # (build/Dockerfile.enclave). `helios` is not shipped.
       - name: Build (production combo)
-        run: cargo build -p utexo-bridge-enclave --features vsock,rgb,rgb-swap,ccd,evm-rpc
+        run: cargo build -p utexo-bridge-enclave --features vsock,rgb,rgb-swap,ccd,bfa-validation
 
       - name: Clippy (production combo)
-        run: cargo clippy -p utexo-bridge-enclave --features vsock,rgb,rgb-swap,ccd,evm-rpc --all-targets -- -D warnings
+        run: cargo clippy -p utexo-bridge-enclave --features vsock,rgb,rgb-swap,ccd,bfa-validation --all-targets -- -D warnings
 
       # SPV path coverage. Cannot use vsock here (Linux runner without
       # vsock support); spv pulls in rgb-validation transitively, which is
@@ -138,33 +138,32 @@ jobs:
       # RGB-only EIF profile, `ccd` dropped. Mirrors Dockerfile.enclave.rgb.
       # CCD requests (SignCcd / CcdSource) must be refused here.
       - name: Build (rgb-only)
-        run: cargo build -p utexo-bridge-enclave --no-default-features --features vsock,rgb,rgb-swap,evm-rpc
+        run: cargo build -p utexo-bridge-enclave --no-default-features --features vsock,rgb,rgb-swap,bfa-validation
       - name: Clippy (rgb-only)
-        run: cargo clippy -p utexo-bridge-enclave --no-default-features --features vsock,rgb,rgb-swap,evm-rpc --all-targets -- -D warnings
+        run: cargo clippy -p utexo-bridge-enclave --no-default-features --features vsock,rgb,rgb-swap,bfa-validation --all-targets -- -D warnings
       - name: Test (rgb-only)
-        run: cargo test -p utexo-bridge-enclave --no-default-features --features rgb,rgb-swap,evm-rpc,mock-attestation,allow-seed-import
+        run: cargo test -p utexo-bridge-enclave --no-default-features --features rgb,rgb-swap,bfa-validation,mock-attestation,allow-seed-import
 
-      # Mint/burn RGB EIF profile - the second enclave instance. Same stack as
-      # the rgb-only lane above with the other flow selected, so the mint and
-      # burn rules in networks/rgb/flow/mint_burn.rs are actually compiled and
-      # exercised. Mirrors Dockerfile.enclave.mint-burn.
-      - name: Build (rgb mint/burn)
-        run: cargo build -p utexo-bridge-enclave --no-default-features --features vsock,rgb,rgb-mint-burn,evm-rpc
-      - name: Clippy (rgb mint/burn)
-        run: cargo clippy -p utexo-bridge-enclave --no-default-features --features vsock,rgb,rgb-mint-burn,evm-rpc --all-targets -- -D warnings
-      - name: Test (rgb mint/burn)
-        run: cargo test -p utexo-bridge-enclave --no-default-features --features rgb,rgb-mint-burn,evm-rpc,mock-attestation,allow-seed-import
+      # BFA mint/burn EIF profiles - the shipped production images. The flow
+      # ships as two signer roles, two enclaves: the mint signer (EVM -> RGB,
+      # Dockerfile.enclave.mint) and the burn signer (RGB -> EVM,
+      # Dockerfile.enclave.burn). Each role implies `bfa-mint`, which pulls in
+      # rgb-mint-burn, bfa-validation and evm-rpc. Each lane compiles and tests
+      # only its own direction, and checks it refuses the other one
+      # (tests/test_signer_role.rs).
+      - name: Build (rgb mint signer)
+        run: cargo build -p utexo-bridge-enclave --no-default-features --features vsock,rgb,mint-signer
+      - name: Clippy (rgb mint signer)
+        run: cargo clippy -p utexo-bridge-enclave --no-default-features --features vsock,rgb,mint-signer --all-targets -- -D warnings
+      - name: Test (rgb mint signer)
+        run: cargo test -p utexo-bridge-enclave --no-default-features --features rgb,mint-signer,mock-attestation,allow-seed-import
 
-      # BFA mint/burn EIF profile - the shipped production image. Mirrors
-      # Dockerfile.enclave.bfa: the mint/burn flow plus the bridged-asset mint
-      # path (chained-mint ancestry, settlementData bind). `bfa-mint` implies
-      # rgb-mint-burn + evm-rpc.
-      - name: Build (bfa-mint)
-        run: cargo build -p utexo-bridge-enclave --no-default-features --features vsock,rgb,evm-rpc,bfa-mint
-      - name: Clippy (bfa-mint)
-        run: cargo clippy -p utexo-bridge-enclave --no-default-features --features vsock,rgb,evm-rpc,bfa-mint --all-targets -- -D warnings
-      - name: Test (bfa-mint)
-        run: cargo test -p utexo-bridge-enclave --no-default-features --features rgb,bfa-mint,mock-attestation,allow-seed-import
+      - name: Build (rgb burn signer)
+        run: cargo build -p utexo-bridge-enclave --no-default-features --features vsock,rgb,burn-signer
+      - name: Clippy (rgb burn signer)
+        run: cargo clippy -p utexo-bridge-enclave --no-default-features --features vsock,rgb,burn-signer --all-targets -- -D warnings
+      - name: Test (rgb burn signer)
+        run: cargo test -p utexo-bridge-enclave --no-default-features --features rgb,burn-signer,mock-attestation,allow-seed-import
 
       # CCD-only single-network EIF profile: ccd + shared EVM signing, no RGB
       # stack (no rgb-ops/rgb-consignment/rgb-schemas/spv). Mirrors
@@ -219,7 +218,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        feature: [allow-seed-import, mock-attestation, dev-mode]
+        feature: [allow-seed-import, mock-attestation]
 
     steps:
       - uses: actions/checkout@v4
@@ -394,3 +393,32 @@ jobs:
             exit 1
           fi
           echo "OK: no-flow build correctly rejected via the compile_error guard"
+
+      # The mint and burn signers are two enclaves with two seeds. A mint/burn
+      # build must name exactly one role: both would put the mint and release
+      # rules in one binary, neither would leave the role unstated.
+      - name: Assert both signer roles at once is rejected
+        run: |
+          if cargo build -p utexo-bridge-enclave --no-default-features --features rgb,mint-signer,burn-signer 2>build.log; then
+            echo "::error::build unexpectedly SUCCEEDED with both mint-signer and burn-signer - the compile_error guard is missing or not firing"
+            exit 1
+          fi
+          if ! grep -q "mint-signer and burn-signer are mutually exclusive" build.log; then
+            echo "::error::build failed, but not via the expected compile_error guard (mint-signer / burn-signer are mutually exclusive)"
+            cat build.log
+            exit 1
+          fi
+          echo "OK: both-roles build correctly rejected via the compile_error guard"
+
+      - name: Assert mint/burn with no signer role is rejected
+        run: |
+          if cargo build -p utexo-bridge-enclave --no-default-features --features rgb,bfa-mint 2>build.log; then
+            echo "::error::build unexpectedly SUCCEEDED with bfa-mint but no signer role - the compile_error guard is missing or not firing"
+            exit 1
+          fi
+          if ! grep -q "a mint/burn build requires a signer role" build.log; then
+            echo "::error::build failed, but not via the expected compile_error guard (a mint/burn build requires a signer role)"
+            cat build.log
+            exit 1
+          fi
+          echo "OK: no-role build correctly rejected via the compile_error guard"

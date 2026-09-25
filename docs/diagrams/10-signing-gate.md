@@ -89,9 +89,8 @@ flowchart TD
 - With `bfa-mint` (a mint/burn build on the bridged schema) the burn carries
   mint ancestry: every `TS_BRIDGE` behind it is checked against its own
   verified `FundsIn` lock before the gate completes.
-- `dev-mode` builds bypass the validation subgraphs entirely; every dev
-  feature is a `compile_error!` in release builds, and a release bridge build
-  refuses to boot without a valid attested `Production` policy.
+- Every dev feature is a `compile_error!` in release builds, and a release
+  bridge build refuses to boot without a valid attested `Production` policy.
 
 BFA ancestry locks are verified through the selected EVM provider before RGB
 validation. The diagram focuses on the subsequent authorization gates.
