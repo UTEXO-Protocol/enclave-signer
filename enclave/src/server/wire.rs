@@ -11,16 +11,33 @@ use crate::proto::EnclaveRequest;
 
 /// Handle a single connection: read one request, dispatch, write one response, close.
 pub fn handle_connection(stream: impl Read + Write, ctx: &ServerContext) {
-    if let Err(e) = process_connection(stream, ctx) {
+    handle_connection_until(
+        stream,
+        ctx,
+        std::time::Instant::now() + crate::conn::TOTAL_REQUEST_TIMEOUT,
+    );
+}
+
+/// Preserve the ingress socket deadline through persistent seed initialization.
+pub fn handle_connection_until(
+    stream: impl Read + Write,
+    ctx: &ServerContext,
+    deadline: std::time::Instant,
+) {
+    if let Err(e) = process_connection(stream, ctx, deadline) {
         tracing::error!("connection error: {}", e);
     }
 }
 
-fn process_connection(mut stream: impl Read + Write, ctx: &ServerContext) -> Result<()> {
+fn process_connection(
+    mut stream: impl Read + Write,
+    ctx: &ServerContext,
+    deadline: std::time::Instant,
+) -> Result<()> {
     tracing::debug!("reading request");
     let request: EnclaveRequest = framing::read_message(&mut stream)?;
 
-    let (response, reservation) = dispatch(request, ctx);
+    let (response, reservation) = dispatch(request, ctx, deadline);
 
     framing::write_message(&mut stream, &response)?;
     tracing::debug!("response written");
@@ -113,7 +130,12 @@ mod expired_pickup {
             crate::test_support::regtest_header_chain(),
         );
 
-        assert!(process_connection(stream, &ctx).is_err());
+        assert!(process_connection(
+            stream,
+            &ctx,
+            std::time::Instant::now() + crate::conn::TOTAL_REQUEST_TIMEOUT,
+        )
+        .is_err());
         assert_eq!(io_calls.load(Ordering::SeqCst), 0);
     }
 }

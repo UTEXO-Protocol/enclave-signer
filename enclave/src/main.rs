@@ -26,6 +26,33 @@ fn main() {
     let bitcoin_network_str = bootstrap::bitcoin_network_str();
     let state = EnclaveState::new(bootstrap::resolve_bitcoin_network(&bitcoin_network_str));
 
+    #[cfg(feature = "kms-persistence")]
+    let state = {
+        // Explicit development import builds can run without AWS. Empty init
+        // still fails closed; there is no ephemeral-generation fallback. The
+        // existing release guard forbids allow-seed-import in production.
+        let import_only = cfg!(feature = "allow-seed-import")
+            && [
+                "KMS_KEY_ARN",
+                "KMS_REGION",
+                "KMS_SEED_ID",
+                "KMS_EXPECTED_EVM_ADDRESS",
+            ]
+            .iter()
+            .all(|name| std::env::var_os(name).is_none());
+        if import_only {
+            tracing::warn!("development import-only mode: KMS is unconfigured; empty InitializeKey requests will fail");
+            state
+        } else {
+            use utexo_bridge_enclave::{kms::CustodyFlow, seed_persistence::PersistentSeed};
+            // This application flow selects the measured custody namespace.
+            // The KMS client does not choose a default flow.
+            let source = PersistentSeed::from_env(CustodyFlow::RgbMint)
+                .unwrap_or_else(|e| panic!("KMS persistence configuration is required: {e}"));
+            state.with_seed_source(Box::new(source))
+        }
+    };
+
     // Pinned bridge config from env. Folded into the attestation `user_data`
     // commitment and cross-checked on every SignEvm.
     let bridge_config = BridgeConfig::from_env();
@@ -58,6 +85,9 @@ fn main() {
         panic!("{msg}");
     }
 
+    // Cloning is disabled with KMS persistence; every replica recovers the
+    // same seed from KMS, so no donor secret is installed.
+    #[cfg(not(feature = "kms-persistence"))]
     bootstrap::install_env_cloning_secret(&state);
     bootstrap::start_vsock_forwarders();
 
@@ -125,7 +155,7 @@ where
     let ctx = Arc::new(ctx);
     // Bounded queue doubles as the connection cap: a full queue means all
     // workers are busy and the backlog is at its limit.
-    let (tx, rx) = sync_channel::<DeadlineStream<S>>(MAX_QUEUED_CONNECTIONS);
+    let (tx, rx) = sync_channel::<(S, std::time::Instant)>(MAX_QUEUED_CONNECTIONS);
     let rx = Arc::new(Mutex::new(rx));
 
     for worker_id in 0..WORKER_THREADS {
@@ -145,7 +175,12 @@ where
                 guard.recv()
             };
             match next {
-                Ok(stream) => server::handle_connection(stream, &ctx),
+                Ok((stream, deadline)) => {
+                    // Preserve the accept-time budget through framing and
+                    // dispatch, including persistent seed initialization.
+                    let stream = DeadlineStream::with_deadline(stream, deadline, IO_IDLE_TIMEOUT);
+                    server::handle_connection_until(stream, &ctx, deadline);
+                }
                 // All senders dropped: the listener is gone, so is the process.
                 Err(_) => break,
             }
@@ -154,21 +189,21 @@ where
 
     for stream in incoming {
         match stream {
-            Ok(stream) => match tx.try_send(DeadlineStream::new(
-                stream,
-                TOTAL_REQUEST_TIMEOUT,
-                IO_IDLE_TIMEOUT,
-            )) {
-                Ok(()) => tracing::debug!("connection queued"),
-                Err(TrySendError::Full(_)) => tracing::warn!(
-                    cap = MAX_QUEUED_CONNECTIONS,
-                    "connection queue full; dropping connection (slow-request backpressure)"
-                ),
-                Err(TrySendError::Disconnected(_)) => {
-                    tracing::error!("no workers available; stopping accept loop");
-                    break;
+            // Count queue wait in the same budget as framing and custody;
+            // otherwise work could begin after the parent has timed out.
+            Ok(stream) => {
+                match tx.try_send((stream, std::time::Instant::now() + TOTAL_REQUEST_TIMEOUT)) {
+                    Ok(()) => tracing::debug!("connection queued"),
+                    Err(TrySendError::Full(_)) => tracing::warn!(
+                        cap = MAX_QUEUED_CONNECTIONS,
+                        "connection queue full; dropping connection (slow-request backpressure)"
+                    ),
+                    Err(TrySendError::Disconnected(_)) => {
+                        tracing::error!("no workers available; stopping accept loop");
+                        break;
+                    }
                 }
-            },
+            }
             Err(e) => tracing::error!("accept error: {e}"),
         }
     }

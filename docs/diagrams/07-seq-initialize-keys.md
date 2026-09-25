@@ -1,5 +1,8 @@
 # Initialize keys — first enclave in a cluster, from OS entropy
 
+This lifecycle applies to burn signers and other builds without `kms-persistence`.
+Mint signers use [KMS seed persistence](../kms-persistence.md) instead.
+
 ```mermaid
 sequenceDiagram
     actor Op as Operator

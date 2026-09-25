@@ -54,7 +54,11 @@ fn forwarder_target(url: &str) -> (u16, Option<String>) {
 /// Append `127.0.0.1 <host>` to /etc/hosts (idempotent) so the enclave's
 /// outbound connection to `host` lands on the local vsock forwarder while the
 /// TLS layer still validates against `host`'s real certificate.
-#[cfg(all(feature = "vsock", feature = "rgb-validation", target_os = "linux"))]
+#[cfg(all(
+    feature = "vsock",
+    any(feature = "rgb-validation", feature = "kms-persistence"),
+    target_os = "linux"
+))]
 fn pin_host_to_loopback(host: &str) -> std::io::Result<()> {
     use std::io::Write;
     let existing = std::fs::read_to_string("/etc/hosts").unwrap_or_default();
@@ -241,6 +245,34 @@ pub fn start_vsock_forwarders() {
             }
         }
 
+        // KMS egress for seed custody. The SDK connects to the real KMS host
+        // name on 443; that name is pinned to loopback here, so TLS still
+        // validates KMS's certificate while the host only relays bytes:
+        //   vsock-proxy <KMS_VSOCK_PORT> kms.<region>.amazonaws.com 443
+        // Skipped when KMS_REGION is unset (development import-only mode).
+        #[cfg(feature = "kms-persistence")]
+        if let Ok(region) = std::env::var("KMS_REGION") {
+            let host = crate::kms::endpoint_host(&region);
+            let vsock_port: u32 = std::env::var("KMS_VSOCK_PORT")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(crate::kms::DEFAULT_KMS_VSOCK_PORT);
+            match pin_host_to_loopback(&host) {
+                Ok(()) => tracing::info!("pinned {host} -> 127.0.0.1 for in-enclave TLS to KMS"),
+                Err(e) => tracing::error!("failed to pin {host} in /etc/hosts: {e}"),
+            }
+            tracing::info!(
+                local_port = crate::kms::KMS_PORT,
+                vsock_port,
+                "starting KMS vsock forwarder (host must run: vsock-proxy {vsock_port} {host} 443)"
+            );
+            if let Err(e) =
+                crate::vsock_forwarder::start_forwarder(crate::kms::KMS_PORT, vsock_port)
+            {
+                tracing::error!("failed to start KMS vsock forwarder: {e}");
+            }
+        }
+
         // Second forwarder for the EVM JSON-RPC used by in-enclave FundsIn
         // verification. Distinct loopback/vsock ports from Esplora
         // (3443/8001). Untrusted, host-controlled egress boundary;
@@ -273,7 +305,11 @@ pub fn start_vsock_forwarders() {
             let exec_vsock: u32 = std::env::var("HELIOS_EXECUTION_VSOCK_PORT")
                 .ok()
                 .and_then(|s| s.parse().ok())
-                .unwrap_or(8003);
+                .unwrap_or(if cfg!(feature = "kms-persistence") {
+                    8005
+                } else {
+                    8003
+                });
             let cons_local: u16 = std::env::var("HELIOS_CONSENSUS_LOCAL_PORT")
                 .ok()
                 .and_then(|s| s.parse().ok())
@@ -281,7 +317,20 @@ pub fn start_vsock_forwarders() {
             let cons_vsock: u32 = std::env::var("HELIOS_CONSENSUS_VSOCK_PORT")
                 .ok()
                 .and_then(|s| s.parse().ok())
-                .unwrap_or(8004);
+                .unwrap_or(if cfg!(feature = "kms-persistence") {
+                    8006
+                } else {
+                    8004
+                });
+            // KMS custody reserves 8003 for KMS and 8004 for the broker.
+            // Keep the non-custody defaults; fail early on an explicit collision.
+            #[cfg(feature = "kms-persistence")]
+            assert!(
+                ![exec_vsock, cons_vsock]
+                    .iter()
+                    .any(|port| matches!(port, 8003 | 8004)),
+                "Helios vsock ports must not use the reserved KMS/broker ports 8003/8004"
+            );
             tracing::info!(
                 exec_local,
                 exec_vsock,

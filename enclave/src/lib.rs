@@ -107,6 +107,13 @@ compile_error!(
      mint path. Do not set direction cfgs by hand; `build.rs` derives them"
 );
 
+// Only the mint signer owns a persistent seed. The role guards above also
+// reject attempts to combine it with another signing role or flow.
+#[cfg(all(feature = "kms-persistence", not(feature = "mint-signer")))]
+compile_error!(
+    "kms-persistence requires mint-signer; seed persistence is available only to the RGB mint signer"
+);
+
 pub mod attestation;
 // Boot sequence for `main.rs`: env parsing, forwarders, and the fail-closed
 // pins. In the library so it is covered by clippy/tests like everything else.
@@ -122,8 +129,12 @@ pub mod conn;
 pub mod error;
 pub mod framing;
 pub mod keys;
+#[cfg(feature = "kms-persistence")]
+pub mod kms;
 pub mod networks;
 pub mod policy;
+#[cfg(feature = "kms-persistence")]
+pub mod seed_persistence;
 pub mod server;
 pub mod state;
 #[cfg(test)]

@@ -164,6 +164,11 @@ jobs:
           # Enable debug features only for manual test builds. (F03-AF-12)
           ENCLAVE_DEBUG_FEATURES: ${{ github.event.inputs.debug_features || '' }}
           RGB_ASSET_ID: ${{ vars.BFA_RGB_ASSET_ID }}
+          # KMS custody is enabled only by the mint signer image.
+          KMS_KEY_ARN: ${{ matrix.variant == 'rgb-mint' && vars.KMS_KEY_ARN || '' }}
+          KMS_REGION: ${{ matrix.variant == 'rgb-mint' && vars.KMS_REGION || '' }}
+          KMS_SEED_ID: ${{ matrix.variant == 'rgb-mint' && vars.KMS_SEED_ID || '' }}
+          KMS_EXPECTED_EVM_ADDRESS: ${{ matrix.variant == 'rgb-mint' && vars.KMS_EXPECTED_EVM_ADDRESS || '' }}
         run: |
           set -euxo pipefail
           mkdir -p "$OUT_DIR"

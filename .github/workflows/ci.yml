@@ -150,7 +150,8 @@ jobs:
       # Dockerfile.enclave.burn). Each role implies `bfa-mint`, which pulls in
       # rgb-mint-burn, bfa-validation and evm-rpc. Each lane compiles and tests
       # only its own direction, and checks it refuses the other one
-      # (tests/test_signer_role.rs).
+      # (tests/test_signer_role.rs). Mint also exercises KMS persistence; burn
+      # retains the existing entropy/cloning lifecycle.
       - name: Build (rgb mint signer)
         run: cargo build -p utexo-bridge-enclave --no-default-features --features vsock,rgb,mint-signer
       - name: Clippy (rgb mint signer)
@@ -422,3 +423,17 @@ jobs:
             exit 1
           fi
           echo "OK: no-role build correctly rejected via the compile_error guard"
+
+      - name: Assert KMS persistence outside the mint signer is rejected
+        run: |
+          for features in kms-persistence burn-signer,kms-persistence rgb-swap,kms-persistence ccd,kms-persistence; do
+            if cargo check --locked -p utexo-bridge-enclave --no-default-features --features "$features" 2>build.log; then
+              echo "::error::KMS persistence unexpectedly compiled with '$features'"
+              exit 1
+            fi
+            if ! grep -q "kms-persistence requires mint-signer" build.log; then
+              echo "::error::build failed without the expected KMS signer guard for '$features'"
+              cat build.log
+              exit 1
+            fi
+          done
