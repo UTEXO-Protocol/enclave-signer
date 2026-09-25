@@ -276,6 +276,7 @@ mod asset_bind {
             header_chain: &chain,
             chain_pins: &crate::networks::rgb::spv_crosscheck::ChainPins::new(),
             self_owned_psbt_outputs: Some(&self_owned),
+            psbt_fee_key_paths: None,
             bridge_events: &[],
         };
         validate_destination_anchor(destination, 0, 0, &ctx).map(|(amount, _)| amount)

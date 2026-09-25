@@ -418,16 +418,43 @@ fn split_asset_legs(
 #[cfg(feature = "rgb-validation")]
 const FEE_RATE_HEADROOM: f64 = 3.0;
 
+/// Minimum signed fee rate agreed for bridge PSBTs; not caller-configurable.
+#[cfg(feature = "rgb-validation")]
+const MIN_FEE_RATE_SAT_VB: u64 = 1;
+
+/// Resolves the key-path inputs using enclave keys, not caller-supplied claims.
+#[cfg(feature = "rgb-validation")]
+pub type FeeKeyPathResolver<'a> = &'a dyn Fn(&Psbt) -> Result<Vec<usize>>;
+
+/// Match the Colored scope of the RGB signer, including already-signed inputs.
+#[cfg(feature = "rgb-validation")]
+pub(crate) fn fee_key_path_inputs(psbt: &Psbt, keys: &crate::keys::KeyManager) -> Vec<usize> {
+    super::signing::taproot::find_controlled_taproot_inputs(psbt, keys.master_fingerprint(), keys)
+        .into_iter()
+        .filter(|job| job.account_type == crate::keys::AccountType::Colored)
+        .map(|job| job.input_index)
+        .collect()
+}
+
 /// Fee-rate sanity check for send-RGB PSBTs: the implied fee rate must
 /// not exceed [`FEE_RATE_HEADROOM`] x the enclave-fetched recommendation.
 /// Without this, a compromised host could burn bridge BTC as miner fees on an
 /// otherwise fully-validated PSBT.
 ///
 /// Fail-closed on degenerate shapes: `Psbt::fee()` errors, zero vsize, and NaN
-/// rates all reject. The rate is computed over `unsigned_tx.vsize()`, which
-/// overestimates the implied rate; the headroom absorbs that.
+/// rates all reject. The upper-bound rate is computed over `unsigned_tx.vsize()`,
+/// which overestimates the implied rate; the headroom absorbs that.
+///
+/// Require at least 1 sat/vB using the estimated signed size, including witnesses.
+/// Unsupported spend shapes fail closed. The finalizer must recheck the
+/// actual fee rate if it chooses a different witness or spend path.
+/// `key_path_inputs` must come from `fee_key_path_inputs`, never the request.
 #[cfg(feature = "rgb-validation")]
-pub fn check_psbt_fee_rate(psbt: &Psbt, recommended_sat_vb: f64) -> Result<()> {
+pub fn check_psbt_fee_rate(
+    psbt: &Psbt,
+    recommended_sat_vb: f64,
+    key_path_inputs: &[usize],
+) -> Result<()> {
     let fee = psbt.fee().map_err(|e| {
         EnclaveError::CrossCheck(format!(
             "cannot compute PSBT fee (every input needs witness_utxo or non_witness_utxo): {e}"
@@ -451,6 +478,18 @@ pub fn check_psbt_fee_rate(psbt: &Psbt, recommended_sat_vb: f64) -> Result<()> {
         return Err(EnclaveError::CrossCheck(format!(
             "send-RGB PSBT fee rate too high: {rate:.2} sat/vB > {FEE_RATE_HEADROOM}x the \
              recommended {recommended_sat_vb:.2} sat/vB - refusing to burn bridge BTC as fees"
+        )));
+    }
+
+    let signed_vsize = super::psbt_fee_size::estimated_signed_vsize(psbt, key_path_inputs)?;
+    let minimum_fee = signed_vsize
+        .checked_mul(MIN_FEE_RATE_SAT_VB)
+        .ok_or_else(|| EnclaveError::CrossCheck("minimum PSBT fee calculation overflow".into()))?;
+    if fee.to_sat() < minimum_fee {
+        return Err(EnclaveError::CrossCheck(format!(
+            "send-RGB PSBT fee rate too low: {} sat for estimated signed size {signed_vsize} vB; \
+             need at least {minimum_fee} sat ({MIN_FEE_RATE_SAT_VB} sat/vB)",
+            fee.to_sat()
         )));
     }
     Ok(())

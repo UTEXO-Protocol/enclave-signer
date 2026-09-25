@@ -98,6 +98,15 @@ pub(super) fn handle_sign(
             .with_keys(|keys| Ok(btc_ownership::asset_change_scripts(psbt, keys).contains(&script)))
     };
 
+    #[cfg(all(feature = "rgb-validation", evm_to_rgb))]
+    let psbt_fee_key_paths = |psbt: &bitcoin::psbt::Psbt| {
+        ctx.state.with_keys(|keys| {
+            Ok(crate::networks::rgb::psbt_validation::fee_key_path_inputs(
+                psbt, keys,
+            ))
+        })
+    };
+
     // Before destination validation, not after: a BFA mint's consignment cannot
     // be validated at all until the lock it commits to has been verified.
     #[cfg(feature = "bfa-validation")]
@@ -127,6 +136,8 @@ pub(super) fn handle_sign(
         // Only the RGB-destination (mint) bind consults it.
         #[cfg(all(feature = "rgb-validation", evm_to_rgb))]
         self_owned_psbt_outputs: Some(&self_owned_psbt_outputs),
+        #[cfg(all(feature = "rgb-validation", evm_to_rgb))]
+        psbt_fee_key_paths: Some(&psbt_fee_key_paths),
         #[cfg(feature = "rgb-validation")]
         bridge_events: &bfa_bridge_events,
     };
