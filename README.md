@@ -53,13 +53,13 @@ See the [component diagram](docs/diagrams/01-components.md) and
   exists only behind `allow-seed-import` (dev builds).
 - EVM bridge key `m/44'/60'/0'/0/0` (signs `fundsOut`); EVM gas-tx key
   `m/44'/60'/0'/0/1` (signs the outer relay transaction).
-- BTC legacy key `m/84'/0'/0'/0/0` (P2WSH ECDSA, unscoped library signing only).
+- BTC legacy key `m/84'/0'/0'/0/0`: public key only, nothing is signed with it.
 - BIP-86 taproot accounts: vanilla `m/86'/<coin>'/0'` (coin 0 mainnet, 1
   otherwise) and colored `m/86'/<rgb_coin>'/0'` (827166 mainnet, 827167
   otherwise). Plain-BTC signing is scoped to vanilla, bridge PSBTs to colored.
 - Concordium governance key: Ed25519, SLIP-0010, `m/44'/919'/0'/0'/0'`.
-- Returns the master fingerprint and both account xpubs for multisig
-  descriptors.
+- Returns the master fingerprint and both account xpubs for the bridge
+  wallet's watch-only descriptors.
 - The EVM address is the cluster identity. A cloned enclave installs the same
   seed and must derive the same address before it goes `Active`.
 
@@ -72,9 +72,10 @@ destination network. Accepted routes: RGB -> EVM, EVM -> RGB, CCD -> EVM.
   `0xdc771390`) or `TeeLzFundsOut` (LayerZero route) over the decoded calldata
   fields, domain `MultisigProxy` / `1` / pinned chain id / pinned proxy. 65-byte
   recoverable ECDSA signature.
-- **EVM -> RGB (bridge PSBT)** - taproot script-path Schnorr signatures on the
-  colored account, only after the EVM deposit and the RGB consignment are
-  verified and bound to the PSBT.
+- **EVM -> RGB (bridge PSBT)** - taproot Schnorr signatures on the colored
+  account, BIP-86 key path only (the bridge wallet is singlesig; a script-path
+  input is never signed), only after the EVM deposit and the RGB consignment
+  are verified and bound to the PSBT.
 - **CCD -> EVM** - same `fundsOut` digest, with a Concordium source the
   listener has already validated (the enclave binds only the amount).
 - **`SignBtc`** - plain-BTC PSBT on the vanilla account. Off unless the
@@ -372,7 +373,7 @@ Value bounds (fail closed while unset in a production build):
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `BTC_MAX_TOTAL_SATS` | `0` | Cap on total input value of one plain-BTC (`SignBtc`) transaction. Non-zero also flips `allow_vanilla_psbt` in the attested policy. |
-| `BTC_MAX_UNOWNED_SATS` | `0` | Plain-BTC output budget for scripts the enclave does not prove it controls (allocation dust, fresh change). |
+| `BTC_MAX_UNOWNED_SATS` | `0` | Plain-BTC output budget for scripts the enclave does not prove it controls. Outputs repaying a signed input or landing on the enclave's own BIP-86 key-path addresses (singlesig change, `create_utxo` allocations) are proven and do not count. |
 | `RGB_MAX_UNOWNED_SATS` | `0` | Bridge-PSBT output budget for sats the enclave cannot prove it controls. Size it from the bridge's witnessed satoshi amount. |
 | `GAS_TX_ALLOWED_TO` | unset | Only `to` a gas tx may target. |
 | `GAS_TX_MAX_GAS_LIMIT` | `0` | Ceiling on `gasLimit`. |
@@ -437,9 +438,9 @@ Limits and dev knobs:
 
 #### Readiness endpoint
 
-Deploy restarts the three enclaves one at a time to keep the 2-of-3 signing
-quorum. `GET /health` on the parent replaces the fixed sleep between them with a
-real signal:
+Deploy restarts the three enclaves one at a time so signing stays available.
+`GET /health` on the parent replaces the fixed sleep between them with a real
+signal:
 
 ```bash
 curl -sS -o /dev/null -w '%{http_code}\n' http://127.0.0.1:5001/health

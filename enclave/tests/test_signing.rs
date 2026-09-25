@@ -175,8 +175,8 @@ struct EnclaveWallet {
     account_xpub_colored: bitcoin::bip32::Xpub,
 }
 
-/// NUMS internal key (BIP-341 unspendable key-path), as the bridge's taproot
-/// multisig addresses use.
+/// NUMS internal key (BIP-341 unspendable key path), for script-tree
+/// addresses the enclave must not treat as its own.
 #[allow(dead_code)]
 const NUMS_INTERNAL: [u8; 32] = [
     0x50, 0x92, 0x9b, 0x74, 0xc1, 0xa0, 0x49, 0x54, 0xb7, 0x8b, 0x4b, 0x60, 0x35, 0xe9, 0x7a, 0x5e,
@@ -210,17 +210,13 @@ fn init_wallet(port: u16) -> EnclaveWallet {
     }
 }
 
-/// One of the enclave's own 2-of-3 taproot addresses, derived from the account
+/// One of the enclave's own BIP-86 key-path addresses, derived from the account
 /// xpub at `m/86'/0'/0'/chain/index` (the test server runs on mainnet, so coin
 /// type 0). Returns the `script_pubkey` plus the material a PSBT needs to prove
 /// the address is the enclave's.
 #[allow(dead_code)]
 struct OurAddress {
     spk: bitcoin::ScriptBuf,
-    leaf: bitcoin::ScriptBuf,
-    leaf_hash: bitcoin::taproot::TapLeafHash,
-    internal: bitcoin::XOnlyPublicKey,
-    control: bitcoin::taproot::ControlBlock,
     xonly: bitcoin::XOnlyPublicKey,
     path: bitcoin::bip32::DerivationPath,
     fingerprint: bitcoin::bip32::Fingerprint,
@@ -247,9 +243,6 @@ fn address_on_account(
     index: u32,
 ) -> OurAddress {
     use bitcoin::bip32::ChildNumber;
-    use bitcoin::blockdata::opcodes::all::{OP_CHECKSIG, OP_CHECKSIGADD, OP_NUMEQUAL};
-    use bitcoin::blockdata::script::Builder;
-    use bitcoin::taproot::{LeafVersion, TapLeafHash, TaprootBuilder};
 
     let secp = bitcoin::secp256k1::Secp256k1::new();
     let child = [
@@ -261,35 +254,8 @@ fn address_on_account(
         .expect("derive child xpub");
     let ours = derived.to_x_only_pub();
 
-    // 2-of-3 with two keys the enclave doesn't hold - the federation shape.
-    let mut keys = [ours, foreign_xonly(0xA1), foreign_xonly(0xA2)];
-    keys.sort();
-    let leaf = Builder::new()
-        .push_x_only_key(&keys[0])
-        .push_opcode(OP_CHECKSIG)
-        .push_x_only_key(&keys[1])
-        .push_opcode(OP_CHECKSIGADD)
-        .push_x_only_key(&keys[2])
-        .push_opcode(OP_CHECKSIGADD)
-        .push_int(2)
-        .push_opcode(OP_NUMEQUAL)
-        .into_script();
-    let leaf_hash = TapLeafHash::from_script(&leaf, LeafVersion::TapScript);
-    let internal = bitcoin::XOnlyPublicKey::from_slice(&NUMS_INTERNAL).unwrap();
-    let info = TaprootBuilder::new()
-        .add_leaf(0, leaf.clone())
-        .unwrap()
-        .finalize(&secp, internal)
-        .unwrap();
-
     OurAddress {
-        spk: bitcoin::ScriptBuf::new_p2tr(&secp, internal, info.merkle_root()),
-        control: info
-            .control_block(&(leaf.clone(), LeafVersion::TapScript))
-            .unwrap(),
-        leaf,
-        leaf_hash,
-        internal,
+        spk: bitcoin::ScriptBuf::new_p2tr(&secp, ours, None),
         xonly: ours,
         fingerprint: wallet.fingerprint,
         path: bitcoin::bip32::DerivationPath::from(vec![
@@ -305,22 +271,8 @@ fn address_on_account(
 /// A taproot address the enclave has no key in.
 #[allow(dead_code)]
 fn foreign_address() -> bitcoin::ScriptBuf {
-    use bitcoin::blockdata::opcodes::all::OP_CHECKSIG;
-    use bitcoin::blockdata::script::Builder;
-    use bitcoin::taproot::TaprootBuilder;
-
     let secp = bitcoin::secp256k1::Secp256k1::new();
-    let leaf = Builder::new()
-        .push_x_only_key(&foreign_xonly(0xB1))
-        .push_opcode(OP_CHECKSIG)
-        .into_script();
-    let internal = bitcoin::XOnlyPublicKey::from_slice(&NUMS_INTERNAL).unwrap();
-    let info = TaprootBuilder::new()
-        .add_leaf(0, leaf)
-        .unwrap()
-        .finalize(&secp, internal)
-        .unwrap();
-    bitcoin::ScriptBuf::new_p2tr(&secp, internal, info.merkle_root())
+    bitcoin::ScriptBuf::new_p2tr(&secp, foreign_xonly(0xB1), None)
 }
 
 #[allow(dead_code)]
@@ -332,8 +284,8 @@ fn foreign_xonly(b: u8) -> bitcoin::XOnlyPublicKey {
 }
 
 /// Build a plain-BTC PSBT spending `input_sats` from the enclave's own address
-/// and paying `outputs`. Inputs carry the taproot metadata that makes them
-/// co-signable by the enclave, so an output paying back to `from.spk` is
+/// and paying `outputs`. Inputs carry the key-path metadata that makes them
+/// signable by the enclave, so an output paying back to `from.spk` is
 /// recognised as self-pay with no output metadata at all.
 #[allow(dead_code)]
 fn btc_psbt(from: &OurAddress, input_sats: u64, outputs: &[(bitcoin::ScriptBuf, u64)]) -> Vec<u8> {
@@ -346,7 +298,6 @@ fn btc_psbt(from: &OurAddress, input_sats: u64, outputs: &[(bitcoin::ScriptBuf, 
 fn btc_psbt_from(inputs: &[(&OurAddress, u64)], outputs: &[(bitcoin::ScriptBuf, u64)]) -> Vec<u8> {
     use bitcoin::hashes::Hash;
     use bitcoin::psbt::Psbt;
-    use bitcoin::taproot::LeafVersion;
     use bitcoin::{Amount, OutPoint, ScriptBuf, Sequence, Transaction, TxIn, TxOut, Txid, Witness};
 
     let unsigned_tx = Transaction {
@@ -377,26 +328,20 @@ fn btc_psbt_from(inputs: &[(&OurAddress, u64)], outputs: &[(bitcoin::ScriptBuf, 
             value: Amount::from_sat(*input_sats),
             script_pubkey: from.spk.clone(),
         });
-        psbt.inputs[i].tap_internal_key = Some(from.internal);
-        psbt.inputs[i].tap_scripts.insert(
-            from.control.clone(),
-            (from.leaf.clone(), LeafVersion::TapScript),
-        );
-        psbt.inputs[i].tap_key_origins.insert(
-            from.xonly,
-            (vec![from.leaf_hash], (from.fingerprint, from.path.clone())),
-        );
+        psbt.inputs[i].tap_internal_key = Some(from.xonly);
+        psbt.inputs[i]
+            .tap_key_origins
+            .insert(from.xonly, (vec![], (from.fingerprint, from.path.clone())));
     }
     psbt.serialize()
 }
 
 /// Like [`btc_psbt`], but each output is one of the enclave's own addresses and
-/// carries the BIP-371 metadata (`PSBT_OUT_TAP_INTERNAL_KEY` / `_TREE` /
-/// `_BIP32_DERIVATION`) that proves it - the shape `create_utxo` produces.
+/// carries the BIP-371 metadata (`PSBT_OUT_TAP_INTERNAL_KEY` /
+/// `_TAP_BIP32_DERIVATION`) that proves it - the shape `create_utxo` produces.
 #[allow(dead_code)]
 fn btc_psbt_to_ours(from: &OurAddress, input_sats: u64, outputs: &[(&OurAddress, u64)]) -> Vec<u8> {
     use bitcoin::psbt::Psbt;
-    use bitcoin::taproot::TaprootBuilder;
 
     let spks: Vec<(bitcoin::ScriptBuf, u64)> = outputs
         .iter()
@@ -405,18 +350,10 @@ fn btc_psbt_to_ours(from: &OurAddress, input_sats: u64, outputs: &[(&OurAddress,
     let mut psbt = Psbt::deserialize(&btc_psbt(from, input_sats, &spks)).expect("psbt");
 
     for (i, (out, _)) in outputs.iter().enumerate() {
-        psbt.outputs[i].tap_internal_key = Some(out.internal);
-        psbt.outputs[i].tap_tree = Some(
-            TaprootBuilder::new()
-                .add_leaf(0, out.leaf.clone())
-                .unwrap()
-                .try_into()
-                .unwrap(),
-        );
-        psbt.outputs[i].tap_key_origins.insert(
-            out.xonly,
-            (vec![out.leaf_hash], (out.fingerprint, out.path.clone())),
-        );
+        psbt.outputs[i].tap_internal_key = Some(out.xonly);
+        psbt.outputs[i]
+            .tap_key_origins
+            .insert(out.xonly, (vec![], (out.fingerprint, out.path.clone())));
     }
     psbt.serialize()
 }
@@ -1106,9 +1043,9 @@ fn test_sign_btc_accepts_create_utxo_colored_output() {
     let ours = our_address(&wallet, 0, 0);
     let colored = our_colored_address(&wallet, 0, 0);
 
-    // The real shape under address reuse: colored allocation dust (1000 sats
-    // each), with the vanilla change returning to the script being spent. The
-    // dust is bounded by BTC_MAX_UNOWNED_SATS, not waved through on metadata.
+    // The real shape: colored allocation outputs and vanilla change, each a
+    // key-path output of the enclave's own key. Rule (C) proves both from the
+    // output metadata, so none of it counts against BTC_MAX_UNOWNED_SATS.
     let sign_req = EnclaveRequest {
         request: Some(Request::SignBtc(SignBtcRequest {
             psbt_bytes: btc_psbt_to_ours(&ours, 60_000, &[(&colored, 5_000), (&ours, 50_000)]),
@@ -1129,7 +1066,7 @@ fn test_sign_btc_second_pass_after_partial_merge_still_signs() {
     use bitcoin::psbt::Psbt;
     use bitcoin::secp256k1::{Message, Secp256k1};
     use bitcoin::sighash::{Prevouts, SighashCache, TapSighashType};
-    use bitcoin::TxOut;
+    use bitcoin::{TxOut, XOnlyPublicKey};
 
     let port = common::start_test_server_with_config(|_| {}, btc_capped_config(100_000));
     let wallet = init_wallet(port);
@@ -1163,12 +1100,8 @@ fn test_sign_btc_second_pass_after_partial_merge_still_signs() {
 
     // The orchestrator merged only A's contribution: same tx, same prevouts.
     let mut partial = signed.clone();
-    partial.inputs[1].tap_script_sigs.clear();
-    let sig_a = signed.inputs[0]
-        .tap_script_sigs
-        .get(&(a.xonly, a.leaf_hash))
-        .copied()
-        .expect("A signed on pass 1");
+    partial.inputs[1].tap_key_sig = None;
+    let sig_a = signed.inputs[0].tap_key_sig.expect("A signed on pass 1");
 
     let second = match sign(partial.serialize()) {
         Some(Response::SignedPsbt(r)) => {
@@ -1180,10 +1113,8 @@ fn test_sign_btc_second_pass_after_partial_merge_still_signs() {
 
     assert_eq!(second.unsigned_tx, signed.unsigned_tx);
     assert_eq!(
-        second.inputs[0]
-            .tap_script_sigs
-            .get(&(a.xonly, a.leaf_hash)),
-        Some(&sig_a),
+        second.inputs[0].tap_key_sig,
+        Some(sig_a),
         "A's signature must come back untouched"
     );
 
@@ -1198,21 +1129,20 @@ fn test_sign_btc_second_pass_after_partial_merge_still_signs() {
     let secp = Secp256k1::verification_only();
     for (index, addr) in [(0usize, &a), (1usize, &b)] {
         let sig = second.inputs[index]
-            .tap_script_sigs
-            .get(&(addr.xonly, addr.leaf_hash))
+            .tap_key_sig
             .unwrap_or_else(|| panic!("input {index} must carry our signature"));
         let sighash = cache
-            .taproot_script_spend_signature_hash(
+            .taproot_key_spend_signature_hash(
                 index,
                 &Prevouts::All(&prevouts),
-                addr.leaf_hash,
                 TapSighashType::Default,
             )
             .expect("sighash");
+        let output_key = XOnlyPublicKey::from_slice(&addr.spk.as_bytes()[2..34]).unwrap();
         secp.verify_schnorr(
             &sig.signature,
             &Message::from_digest(*sighash.as_byte_array()),
-            &addr.xonly,
+            &output_key,
         )
         .unwrap_or_else(|e| panic!("input {index} signature must verify: {e}"));
     }
@@ -1313,29 +1243,50 @@ fn test_sign_btc_accepts_self_paying_psbt_under_cap() {
     }
 }
 
-/// A fresh change address the transaction does not spend from: accepted via the
-/// output's BIP-371 taproot metadata rather than by matching an input.
+/// A fresh change address on a script tree whose leaf names one of our keys,
+/// "proven" only by coordinator-supplied output metadata. Rule (B) used to
+/// accept this; the leaf says nothing about the rest of the tree, so it is
+/// refused. Key-path change of our own key is proven by rule (C) instead.
 #[test]
 #[cfg(evm_to_rgb)]
 fn test_sign_btc_rejects_fresh_change_address_proven_only_by_metadata() {
+    use bitcoin::blockdata::opcodes::all::{OP_CHECKSIG, OP_CHECKSIGADD, OP_NUMEQUAL};
+    use bitcoin::blockdata::script::Builder;
     use bitcoin::psbt::Psbt;
-    use bitcoin::taproot::TaprootBuilder;
+    use bitcoin::taproot::{LeafVersion, TapLeafHash, TaprootBuilder};
 
     let port = common::start_test_server_with_config(|_| {}, btc_capped_config(100_000));
     let wallet = init_wallet(port);
     let spend_from = our_address(&wallet, 0, 0);
     let change = our_address(&wallet, 1, 7);
 
-    let mut psbt = Psbt::deserialize(&btc_psbt(
-        &spend_from,
-        60_000,
-        &[(change.spk.clone(), 50_000)],
-    ))
-    .unwrap();
-    psbt.outputs[0].tap_internal_key = Some(change.internal);
+    let secp = bitcoin::secp256k1::Secp256k1::new();
+    let mut keys = [change.xonly, foreign_xonly(0xA1), foreign_xonly(0xA2)];
+    keys.sort();
+    let leaf = Builder::new()
+        .push_x_only_key(&keys[0])
+        .push_opcode(OP_CHECKSIG)
+        .push_x_only_key(&keys[1])
+        .push_opcode(OP_CHECKSIGADD)
+        .push_x_only_key(&keys[2])
+        .push_opcode(OP_CHECKSIGADD)
+        .push_int(2)
+        .push_opcode(OP_NUMEQUAL)
+        .into_script();
+    let internal = bitcoin::XOnlyPublicKey::from_slice(&NUMS_INTERNAL).unwrap();
+    let info = TaprootBuilder::new()
+        .add_leaf(0, leaf.clone())
+        .unwrap()
+        .finalize(&secp, internal)
+        .unwrap();
+    let change_spk = bitcoin::ScriptBuf::new_p2tr(&secp, internal, info.merkle_root());
+
+    let mut psbt =
+        Psbt::deserialize(&btc_psbt(&spend_from, 60_000, &[(change_spk, 50_000)])).unwrap();
+    psbt.outputs[0].tap_internal_key = Some(internal);
     psbt.outputs[0].tap_tree = Some(
         TaprootBuilder::new()
-            .add_leaf(0, change.leaf.clone())
+            .add_leaf(0, leaf.clone())
             .unwrap()
             .try_into()
             .unwrap(),
@@ -1343,7 +1294,7 @@ fn test_sign_btc_rejects_fresh_change_address_proven_only_by_metadata() {
     psbt.outputs[0].tap_key_origins.insert(
         change.xonly,
         (
-            vec![change.leaf_hash],
+            vec![TapLeafHash::from_script(&leaf, LeafVersion::TapScript)],
             (change.fingerprint, change.path.clone()),
         ),
     );
@@ -1355,10 +1306,7 @@ fn test_sign_btc_rejects_fresh_change_address_proven_only_by_metadata() {
     };
     let resp = common::send_request(port, &sign_req);
 
-    // Output metadata is coordinator-supplied. Rule (B) used to accept this;
-    // it is now refused, and 50_000 sats is far over the unowned budget.
-    // Address reuse is what makes change provable: it lands on a script the
-    // transaction is already spending.
+    // 50_000 sats is far over the unowned budget.
     match &resp.response {
         Some(Response::Error(e)) => assert!(
             e.message.contains("same custody"),
@@ -1373,69 +1321,57 @@ fn test_sign_btc_rejects_fresh_change_address_proven_only_by_metadata() {
 }
 
 /// A bridge input pays a script that a second, small input also spends. The
-/// second input qualifies for signing, but a foreign key spends its script.
+/// second input is our key path, but its output key also commits to a script
+/// tree with a foreign spend path, so paying its script is exempt only up to
+/// that input's own value.
 #[test]
 #[cfg(evm_to_rgb)]
 fn test_sign_btc_refuses_bridge_value_paid_to_a_foreign_input_script() {
     use bitcoin::blockdata::opcodes::all::OP_CHECKSIG;
     use bitcoin::blockdata::script::Builder;
+    use bitcoin::key::TapTweak;
     use bitcoin::psbt::Psbt;
-    use bitcoin::taproot::{LeafVersion, TapLeafHash, TaprootBuilder};
+    use bitcoin::taproot::TaprootBuilder;
 
     let port = common::start_test_server_with_config(|_| {}, btc_capped_config(100_000));
     let wallet = init_wallet(port);
     let bridge = our_address(&wallet, 0, 0);
 
-    // Small input: its one leaf pushes a key the enclave derives, the internal
-    // key is foreign.
+    // Small input: our key as the internal key, tweaked with a tree whose one
+    // leaf lets a foreign key spend.
     let secp = bitcoin::secp256k1::Secp256k1::new();
     let ours = our_address(&wallet, 0, 1);
     let leaf = Builder::new()
-        .push_x_only_key(&ours.xonly)
+        .push_x_only_key(&foreign_xonly(0xB1))
         .push_opcode(OP_CHECKSIG)
         .into_script();
-    let internal = foreign_xonly(0xB1);
     let info = TaprootBuilder::new()
-        .add_leaf(0, leaf.clone())
+        .add_leaf(0, leaf)
         .unwrap()
-        .finalize(&secp, internal)
+        .finalize(&secp, ours.xonly)
         .unwrap();
-    let small = OurAddress {
-        spk: bitcoin::ScriptBuf::new_p2tr(&secp, internal, info.merkle_root()),
-        control: info
-            .control_block(&(leaf.clone(), LeafVersion::TapScript))
-            .unwrap(),
-        leaf_hash: TapLeafHash::from_script(&leaf, LeafVersion::TapScript),
-        leaf,
-        internal,
-        ..ours
-    };
+    let merkle_root = info.merkle_root();
+    let (small_output_key, _) = ours.xonly.tap_tweak(&secp, merkle_root);
+    let small_spk = bitcoin::ScriptBuf::new_p2tr_tweaked(small_output_key);
 
     // Same transaction and amounts. Only the key origin on input 1 changes.
     let build = |small_qualifies: bool| {
         let mut psbt =
-            Psbt::deserialize(&btc_psbt(&bridge, 60_000, &[(small.spk.clone(), 55_000)])).unwrap();
+            Psbt::deserialize(&btc_psbt(&bridge, 60_000, &[(small_spk.clone(), 55_000)])).unwrap();
         let mut txin = psbt.unsigned_tx.input[0].clone();
         txin.previous_output.vout = 1;
         psbt.unsigned_tx.input.push(txin);
         psbt.inputs.push(bitcoin::psbt::Input::default());
         psbt.inputs[1].witness_utxo = Some(bitcoin::TxOut {
             value: bitcoin::Amount::from_sat(1_000),
-            script_pubkey: small.spk.clone(),
+            script_pubkey: small_spk.clone(),
         });
-        psbt.inputs[1].tap_internal_key = Some(small.internal);
-        psbt.inputs[1].tap_scripts.insert(
-            small.control.clone(),
-            (small.leaf.clone(), LeafVersion::TapScript),
-        );
+        psbt.inputs[1].tap_internal_key = Some(ours.xonly);
+        psbt.inputs[1].tap_merkle_root = merkle_root;
         if small_qualifies {
-            psbt.inputs[1].tap_key_origins.insert(
-                small.xonly,
-                (
-                    vec![small.leaf_hash],
-                    (small.fingerprint, small.path.clone()),
-                ),
-            );
+            psbt.inputs[1]
+                .tap_key_origins
+                .insert(ours.xonly, (vec![], (ours.fingerprint, ours.path.clone())));
         }
         psbt.serialize()
     };
@@ -1471,9 +1407,7 @@ fn test_sign_btc_refuses_bridge_value_paid_to_a_foreign_input_script() {
     if let Some(Response::SignedPsbt(r)) = sign(build(true)) {
         let signed = Psbt::deserialize(&r.signed_psbt).expect("signed psbt");
         assert!(
-            !signed.inputs[0]
-                .tap_script_sigs
-                .contains_key(&(bridge.xonly, bridge.leaf_hash)),
+            signed.inputs[0].tap_key_sig.is_none(),
             "the enclave signed the 60_000 sat bridge input while 55_000 sats go to a script \
              with a foreign spend path; the unowned budget is 5_000 sats"
         );

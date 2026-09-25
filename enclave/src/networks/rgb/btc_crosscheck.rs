@@ -77,7 +77,7 @@ pub fn validate_btc_request(
     //    unconditionally. Anchored to the unsigned tx's outputs, which the
     //    segwit sighash commits to.
     let input_scripts = self_controlled_input_scripts(&psbt, keys);
-    let unowned_sat = unowned_output_sats(&psbt, &input_scripts).ok_or_else(|| {
+    let unowned_sat = unowned_output_sats(&psbt, &input_scripts, keys).ok_or_else(|| {
         EnclaveError::CrossCheck("plain-BTC unowned output value overflow".into())
     })?;
 
@@ -102,9 +102,9 @@ pub fn validate_btc_request(
             return Err(EnclaveError::CrossCheck(format!(
                 "plain-BTC PSBT pays {unowned_sat} sats to outputs the enclave cannot prove pay \
                  back into the same custody, over the pinned budget of {} sats - refusing to \
-                 sign. `create_utxo` allocation dust fits this budget; a redirect does not. An \
-                 output is proven when its script equals that of an input this enclave co-signs, \
-                 which is what address reuse guarantees for change.",
+                 sign. An output is proven when its script equals that of an input this enclave \
+                 co-signs (address reuse for change) or when it is a BIP-86 key-path output of \
+                 one of the enclave's own accounts; a redirect is neither.",
                 cfg.btc_max_unowned_sats
             )));
         }
@@ -157,8 +157,8 @@ pub fn validate_btc_request(
 /// it pays the recipient a witness output and that seal is blinded. It bounds
 /// the total instead - dust fits, a sweep does not.
 ///
-/// Ownership is the single rule in [`super::btc_ownership`]: no metadata is
-/// trusted.
+/// Ownership is the rules in [`super::btc_ownership`]: metadata only names a
+/// path, the script check is the proof.
 pub fn validate_rgb_psbt_sats(
     psbt: &bitcoin::psbt::Psbt,
     cfg: &BridgeConfig,
@@ -169,7 +169,7 @@ pub fn validate_rgb_psbt_sats(
     let input_scripts =
         crate::networks::rgb::btc_ownership::self_controlled_input_scripts_scoped(psbt, keys, None);
 
-    let unowned_sat = unowned_output_sats(psbt, &input_scripts)
+    let unowned_sat = unowned_output_sats(psbt, &input_scripts, keys)
         .ok_or_else(|| EnclaveError::CrossCheck("send-RGB unowned output value overflow".into()))?;
 
     if cfg.rgb_max_unowned_sats == 0 {

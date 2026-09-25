@@ -186,8 +186,8 @@ own keys.
   - EVM bridge key (authorization): `m/44'/60'/0'/0/0`;
     `evm_address = keccak256(uncompressed_pub[1..])[12..]`.
   - EVM gas-tx key (outer tx signing, `SignRawDigest`): `m/44'/60'/0'/0/1`.
-  - BTC SegWit v0 (legacy P2WSH): `m/84'/0'/0'/0/0`. Used only by the
-    unscoped library signing path; both bridge paths are account-scoped and skip it.
+  - BTC legacy: `m/84'/0'/0'/0/0`. Only its public key is published; the
+    enclave signs nothing with it.
   - BIP-86 taproot: vanilla `m/86'/<coin>'/0'` (0 mainnet, 1 otherwise), colored
     (RGB) `m/86'/<rgb_coin>'/0'` (827166 mainnet, 827167 otherwise -- the split
     `rgb-lib` uses, so the host's colored addresses resolve).
@@ -309,8 +309,9 @@ change), `TS_BRIDGE` under `rgb-mint-burn` with a strict `==`, since any
 surplus is an over-mint.
 Independently, every `OS_ASSET` output is split into legs: a confidential
 (blinded) leg is the recipient, a revealed leg MUST be proven self-owned
-(script equality with an input the enclave co-signs, at most 4 off-PSBT change
-outpoints), and the recipient legs MUST sum exactly to `amount - commission`.
+(the script of the enclave's single Colored input, or a BIP-86 key-path output
+of its Colored account; at most 4 off-PSBT change outpoints), and the recipient
+legs MUST sum exactly to `amount - commission`.
 The destination amount the route check uses is this enclave-derived recipient
 total, not the wire `psbt_output_amount`. A fee sanity check rejects a PSBT
 whose fee rate exceeds 3x the enclave's own estimate (Electrum or Esplora),
@@ -343,7 +344,8 @@ custody their inputs were in are therefore bounded by `RGB_MAX_UNOWNED_SATS`,
 fail-closed while unset. The budget is a bound rather than an identity check
 because the recipient's seal is blinded: the enclave cannot tell which output is
 the payout, only how much may leave. Signing is scoped to the **colored** BIP-86
-account.
+account, key-path spends only: the bridge wallet is singlesig, and a script-path
+input is never signed.
 
 [Sign PSBT](diagrams/04-seq-sign-psbt.md)
 
@@ -355,15 +357,18 @@ reached by omitting bridge fields. It is gated by the attested policy
 authorization rules: every output must pay back into the custody its inputs were
 already in, except a budget of `BTC_MAX_UNOWNED_SATS` for those that do not, and
 total input value <= `BTC_MAX_TOTAL_SATS`. Signing is scoped to
-the **vanilla** BIP-86 account only -- it can structurally never co-sign a
+the **vanilla** BIP-86 account only -- it can structurally never sign a
 colored (RGB-allocated) input.
 
 The destination rule is self-proving, not pinned. An output is accepted when its
-`script_pubkey` equals that of an input the enclave co-signs -- control-block and
-derivation anchored, and committed to by the segwit sighash. That proves custody
-is unchanged, not that only the enclave can spend: the bridge is a multisig and
-the other signers can move funds regardless. It holds for change because the
-wallet reuses addresses.
+`script_pubkey` equals that of an input the enclave signs -- a BIP-86 key-path
+input anchored to our fingerprint, a derivation that reproduces the claimed
+internal key, and a tweak that reproduces the output key, all committed to by
+the segwit sighash -- or when it is itself a BIP-86 key-path output of one of the
+enclave's accounts (no script tree, script rebuilt from our derived key). The
+first holds for change because the wallet reuses addresses; an input tweaked
+with a script tree can still have foreign spend paths, so it exempts outputs
+only up to its own value.
 
 Outputs outside the proved input scripts may consume the configured unowned
 sats budget. A matching key in one taproot leaf alone is not treated as proof

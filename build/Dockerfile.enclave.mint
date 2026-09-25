@@ -34,7 +34,7 @@ ENV CARGO_INCREMENTAL=0 \
 # production, so the attested evm_source is RawRpc.
 #
 # `mint-signer` (implies `bfa-mint` -> the mint/burn flow + BFA validation)
-# builds the EVM -> RGB direction only: it co-signs the RGB mint PSBT after
+# builds the EVM -> RGB direction only: it signs the RGB mint PSBT after
 # verifying the EVM lock, and signs create_utxo (`SignBtc`). It carries no
 # `fundsOut` release rule at all - the burn signer is Dockerfile.enclave.burn.
 # Two roles, two PCR0s, two seeds, two running enclaves.

@@ -14,13 +14,13 @@ use std::sync::Mutex;
 
 use alloy_sol_types::{sol, SolEvent};
 use bitcoin::bip32::{ChildNumber, DerivationPath};
-use bitcoin::blockdata::opcodes::all::{OP_CHECKSIG, OP_CHECKSIGADD, OP_NUMEQUAL, OP_RETURN};
+use bitcoin::blockdata::opcodes::all::OP_RETURN;
 use bitcoin::blockdata::script::{Builder, PushBytesBuf};
 use bitcoin::hashes::Hash;
+use bitcoin::key::TapTweak;
 use bitcoin::psbt::Psbt;
 use bitcoin::secp256k1::{Keypair, Message, Secp256k1, SecretKey};
 use bitcoin::sighash::{EcdsaSighashType, Prevouts, SighashCache, TapSighashType};
-use bitcoin::taproot::{ControlBlock, LeafVersion, TapLeafHash, TaprootBuilder};
 use bitcoin::{
     absolute, transaction, Amount, Network, OutPoint, ScriptBuf, Sequence, Transaction, TxIn,
     TxOut, Txid, Witness, XOnlyPublicKey,
@@ -75,11 +75,6 @@ const BRIDGE_FUNDS: u64 = 10_000;
 const BRIDGE_CHANGE: u64 = 9_700;
 const AUX_FUNDS: u64 = 2_000;
 const USER_FUNDS: u64 = 1_000;
-/// Unspendable internal key, as the bridge's addresses use.
-const NUMS_INTERNAL: [u8; 32] = [
-    0x50, 0x92, 0x9b, 0x74, 0xc1, 0xa0, 0x49, 0x54, 0xb7, 0x8b, 0x4b, 0x60, 0x35, 0xe9, 0x7a, 0x5e,
-    0x07, 0x8a, 0x5a, 0x0f, 0x28, 0xec, 0x96, 0xd5, 0x47, 0xbf, 0xee, 0x9a, 0xce, 0x80, 0x3a, 0xc0,
-];
 
 // The two logs `handle_sign` reads from the deposit receipt, in the shape
 // `IBridge.sol` emits them.
@@ -112,43 +107,9 @@ fn colored_key(keys: &KeyManager) -> (XOnlyPublicKey, DerivationPath) {
     (xonly, path)
 }
 
-/// A 2-of-3 `multi_a` taproot output over `keys` behind the NUMS internal key.
-struct Leaf {
-    spk: ScriptBuf,
-    script: ScriptBuf,
-    hash: TapLeafHash,
-    control: ControlBlock,
-    keys: [XOnlyPublicKey; 3],
-}
-
-fn multisig_2_of_3(mut keys: [XOnlyPublicKey; 3]) -> Leaf {
-    let secp = Secp256k1::new();
-    keys.sort();
-    let script = Builder::new()
-        .push_x_only_key(&keys[0])
-        .push_opcode(OP_CHECKSIG)
-        .push_x_only_key(&keys[1])
-        .push_opcode(OP_CHECKSIGADD)
-        .push_x_only_key(&keys[2])
-        .push_opcode(OP_CHECKSIGADD)
-        .push_int(2)
-        .push_opcode(OP_NUMEQUAL)
-        .into_script();
-    let internal = XOnlyPublicKey::from_slice(&NUMS_INTERNAL).unwrap();
-    let info = TaprootBuilder::new()
-        .add_leaf(0, script.clone())
-        .unwrap()
-        .finalize(&secp, internal)
-        .unwrap();
-    Leaf {
-        spk: ScriptBuf::new_p2tr(&secp, internal, info.merkle_root()),
-        hash: TapLeafHash::from_script(&script, LeafVersion::TapScript),
-        control: info
-            .control_block(&(script.clone(), LeafVersion::TapScript))
-            .unwrap(),
-        script,
-        keys,
-    }
+/// The bridge's own BIP-86 key-path address for `our` key.
+fn bridge_address(our: XOnlyPublicKey) -> ScriptBuf {
+    ScriptBuf::new_p2tr(&Secp256k1::new(), our, None)
 }
 
 /// A regtest coinbase paying `value` to `spk` at output 0. `height` keeps the
@@ -538,35 +499,24 @@ struct Built {
     psbt: Psbt,
     deposit: Deposit,
     bridge_funding: Transaction,
-    leaf: Leaf,
-    our: XOnlyPublicKey,
 }
 
 /// One deposit as the coordinator would hand it over. The bridge's input is
-/// the 2-of-3 leaf on its funding output; `aux`, if any, is appended.
+/// its key-path funding output; `aux`, if any, is appended.
 fn build(aux: Option<&Aux>) -> Built {
     let keys = KeyManager::from_seed(SEED, Network::Regtest).unwrap();
     let (our, our_path) = colored_key(&keys);
-    let leaf = multisig_2_of_3([
-        our,
-        foreign(0xA1).x_only_public_key().0,
-        foreign(0xA2).x_only_public_key().0,
-    ]);
-    let bridge_funding = coinbase(101, BRIDGE_FUNDS, leaf.spk.clone());
-    let deposit = issue_and_mint(&bridge_funding, &leaf.spk, aux);
+    let bridge_spk = bridge_address(our);
+    let bridge_funding = coinbase(101, BRIDGE_FUNDS, bridge_spk.clone());
+    let deposit = issue_and_mint(&bridge_funding, &bridge_spk, aux);
 
     let mut psbt = Psbt::from_unsigned_tx(deposit.witness_tx.clone()).unwrap();
     psbt.inputs[0].witness_utxo = Some(bridge_funding.output[0].clone());
     psbt.inputs[0].non_witness_utxo = Some(bridge_funding.clone());
-    psbt.inputs[0].tap_internal_key = Some(leaf.control.internal_key);
-    psbt.inputs[0].tap_scripts.insert(
-        leaf.control.clone(),
-        (leaf.script.clone(), LeafVersion::TapScript),
-    );
-    psbt.inputs[0].tap_key_origins.insert(
-        our,
-        (vec![leaf.hash], (*keys.master_fingerprint(), our_path)),
-    );
+    psbt.inputs[0].tap_internal_key = Some(our);
+    psbt.inputs[0]
+        .tap_key_origins
+        .insert(our, (vec![], (*keys.master_fingerprint(), our_path)));
     if let Some(aux) = aux {
         psbt.inputs[1].witness_utxo = Some(aux.funding.output[0].clone());
         psbt.inputs[1].non_witness_utxo = Some(aux.funding.clone());
@@ -577,8 +527,6 @@ fn build(aux: Option<&Aux>) -> Built {
         psbt,
         deposit,
         bridge_funding,
-        leaf,
-        our,
     }
 }
 
@@ -622,10 +570,10 @@ fn signed_psbt(response: &EnclaveResponse) -> Result<(Psbt, u32), String> {
     }
 }
 
-/// Our leaf signature on input 0, from the same seed the enclave holds. Lets a
-/// test build the transaction a finalizer would broadcast even on a build where
-/// the enclave refuses to sign the PSBT.
-fn sign_ours(psbt: &mut Psbt, built: &Built) {
+/// Our key-path signature on input 0, from the same seed the enclave holds.
+/// Lets a test build the transaction a finalizer would broadcast even on a
+/// build where the enclave refuses to sign the PSBT.
+fn sign_ours(psbt: &mut Psbt) {
     let secp = Secp256k1::new();
     let keys = KeyManager::from_seed(SEED, Network::Regtest).unwrap();
     let child = [ChildNumber::from(0), ChildNumber::from(0)];
@@ -636,33 +584,25 @@ fn sign_ours(psbt: &mut Psbt, built: &Built) {
         .map(|i| i.witness_utxo.clone().unwrap())
         .collect();
     let sighash = SighashCache::new(psbt.unsigned_tx.clone())
-        .taproot_script_spend_signature_hash(
-            0,
-            &Prevouts::All(&prevouts),
-            built.leaf.hash,
-            TapSighashType::Default,
-        )
+        .taproot_key_spend_signature_hash(0, &Prevouts::All(&prevouts), TapSighashType::Default)
         .unwrap();
+    let tweaked = Keypair::from_secret_key(&secp, &sk).tap_tweak(&secp, None);
     let signature = secp.sign_schnorr_no_aux_rand(
         &Message::from_digest(*sighash.as_byte_array()),
-        &Keypair::from_secret_key(&secp, &sk),
+        &tweaked.to_keypair(),
     );
-    psbt.inputs[0].tap_script_sigs.insert(
-        (built.our, built.leaf.hash),
-        bitcoin::taproot::Signature {
-            signature,
-            sighash_type: TapSighashType::Default,
-        },
-    );
+    psbt.inputs[0].tap_key_sig = Some(bitcoin::taproot::Signature {
+        signature,
+        sighash_type: TapSighashType::Default,
+    });
 }
 
-/// Completes the PSBT as a finalizer would: a co-signer's second leaf
-/// signature, the auxiliary input's own signature. Extracts the transaction
-/// and re-verifies it: the control block commits to the leaf, two leaf
-/// signatures verify, and the pushed redeemScript's P2WPKH signature verifies.
-fn finalize(signed: &Psbt, leaf: &Leaf, our: XOnlyPublicKey, aux: Option<&Aux>) -> Transaction {
+/// Completes the PSBT as a finalizer would: our key-path signature, the
+/// auxiliary input's own signature. Extracts the transaction and re-verifies
+/// it: the key-path signature verifies against the output key, and the pushed
+/// redeemScript's P2WPKH signature verifies.
+fn finalize(signed: &Psbt, aux: Option<&Aux>) -> Transaction {
     let secp = Secp256k1::new();
-    let cosigner = foreign(0xA1);
     let mut psbt = signed.clone();
     let prevouts: Vec<TxOut> = psbt
         .inputs
@@ -677,35 +617,11 @@ fn finalize(signed: &Psbt, leaf: &Leaf, our: XOnlyPublicKey, aux: Option<&Aux>) 
         })
         .collect();
 
-    let mut cache = SighashCache::new(psbt.unsigned_tx.clone());
-    let sighash = cache
-        .taproot_script_spend_signature_hash(
-            0,
-            &Prevouts::All(&prevouts),
-            leaf.hash,
-            TapSighashType::Default,
-        )
-        .unwrap();
-    let ours = psbt.inputs[0].tap_script_sigs[&(our, leaf.hash)];
+    let ours = psbt.inputs[0].tap_key_sig.expect("our key-path signature");
     assert_eq!(ours.sighash_type, TapSighashType::Default);
-    let theirs =
-        secp.sign_schnorr_no_aux_rand(&Message::from_digest(*sighash.as_byte_array()), &cosigner);
-    // `multi_a` consumes signatures in reverse key order; an absent signer
-    // contributes an empty element.
-    let mut witness = Witness::new();
-    for k in leaf.keys.iter().rev() {
-        if *k == our {
-            witness.push(ours.to_vec());
-        } else if *k == cosigner.x_only_public_key().0 {
-            witness.push(theirs.as_ref());
-        } else {
-            witness.push([]);
-        }
-    }
-    witness.push(leaf.script.as_bytes());
-    witness.push(leaf.control.serialize());
-    psbt.inputs[0].final_script_witness = Some(witness);
+    psbt.inputs[0].final_script_witness = Some(Witness::p2tr_key_spend(&ours));
 
+    let mut cache = SighashCache::new(psbt.unsigned_tx.clone());
     if let Some(aux) = aux {
         let sighash = cache
             .p2wpkh_signature_hash(1, &aux.redeem, prevouts[1].value, EcdsaSighashType::All)
@@ -723,30 +639,17 @@ fn finalize(signed: &Psbt, leaf: &Leaf, our: XOnlyPublicKey, aux: Option<&Aux>) 
     let output_key =
         XOnlyPublicKey::from_slice(&prevouts[0].script_pubkey.as_bytes()[2..]).unwrap();
     let w = tx.input[0].witness.to_vec();
-    let control = ControlBlock::decode(&w[4]).unwrap();
-    let script = ScriptBuf::from_bytes(w[3].clone());
-    assert!(control.verify_taproot_commitment(&secp, output_key, &script));
+    assert_eq!(w.len(), 1, "a key-path spend carries one signature");
     let sighash = cache
-        .taproot_script_spend_signature_hash(
-            0,
-            &Prevouts::All(&prevouts),
-            TapLeafHash::from_script(&script, LeafVersion::TapScript),
-            TapSighashType::Default,
-        )
+        .taproot_key_spend_signature_hash(0, &Prevouts::All(&prevouts), TapSighashType::Default)
         .unwrap();
-    let msg = Message::from_digest(*sighash.as_byte_array());
-    let valid = leaf
-        .keys
-        .iter()
-        .rev()
-        .zip(&w)
-        .filter(|(_, item)| !item.is_empty())
-        .map(|(k, item)| {
-            let sig = bitcoin::secp256k1::schnorr::Signature::from_slice(item).unwrap();
-            secp.verify_schnorr(&sig, &msg, k).unwrap();
-        })
-        .count();
-    assert_eq!(valid, 2, "2-of-3 threshold on the final tx");
+    let sig = bitcoin::secp256k1::schnorr::Signature::from_slice(&w[0]).unwrap();
+    secp.verify_schnorr(
+        &sig,
+        &Message::from_digest(*sighash.as_byte_array()),
+        &output_key,
+    )
+    .expect("key-path signature verifies on the final tx");
     if tx.input.len() > 1 {
         let w = tx.input[1].witness.to_vec();
         let pubkey = bitcoin::PublicKey::from_slice(&w[1]).unwrap();
@@ -831,7 +734,7 @@ fn native_deposit_signs_and_finalizes_to_the_bound_txid() {
     assert_eq!(inputs_signed, 1);
     let bound = native.psbt.unsigned_tx.compute_txid();
     assert_eq!(bound_witness(&native.deposit.consignment), bound);
-    let final_tx = finalize(&signed, &native.leaf, native.our, None);
+    let final_tx = finalize(&signed, None);
     assert_eq!(final_tx.compute_txid(), bound);
     consumer_validates(
         &native.deposit,
@@ -867,8 +770,8 @@ fn refuses_input_whose_finalized_script_sig_changes_the_bound_txid() {
 
 /// The consequence the refusal exists for: a finalizer's broadcast tx has a
 /// different txid, so a consumer cannot resolve the witness the consignment
-/// names. The leaf signature is produced locally from the enclave's seed, so
-/// the evidence does not depend on the enclave signing.
+/// names. Our signature is produced locally from the enclave's seed, so the
+/// evidence does not depend on the enclave signing.
 #[test]
 fn finalized_wrapped_input_leaves_the_bound_witness_unresolvable() {
     let aux = wrapped_segwit_aux();
@@ -877,8 +780,8 @@ fn finalized_wrapped_input_leaves_the_bound_witness_unresolvable() {
     assert_eq!(bound_witness(&wrapped.deposit.consignment), bound);
 
     let mut psbt = wrapped.psbt.clone();
-    sign_ours(&mut psbt, &wrapped);
-    let final_tx = finalize(&psbt, &wrapped.leaf, wrapped.our, Some(&aux));
+    sign_ours(&mut psbt);
+    let final_tx = finalize(&psbt, Some(&aux));
     assert_ne!(final_tx.compute_txid(), bound);
 
     let err = consumer_validates(
