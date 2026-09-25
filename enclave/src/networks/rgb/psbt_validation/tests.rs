@@ -287,6 +287,60 @@ mod fee_rate {
     }
 
     #[test]
+    fn taproot_key_path_floor_counts_plain_and_rgb_inputs() {
+        use bitcoin::secp256k1::{Keypair, Secp256k1, SecretKey, XOnlyPublicKey};
+        use bitcoin::sighash::TapSighashType;
+        use bitcoin::taproot::TapNodeHash;
+
+        let secp = Secp256k1::new();
+        for requested in [
+            None,
+            Some(TapSighashType::Default),
+            Some(TapSighashType::All),
+        ] {
+            let mut psbt = psbt_with_fee(100_000, 200_000);
+            let mut second_input = psbt.unsigned_tx.input[0].clone();
+            second_input.previous_output.vout = 1;
+            psbt.unsigned_tx.input.push(second_input);
+            psbt.inputs.push(Default::default());
+            for (index, root) in [None, Some(TapNodeHash::from_byte_array([0x77; 32]))]
+                .into_iter()
+                .enumerate()
+            {
+                let secret = SecretKey::from_slice(&[index as u8 + 1; 32]).unwrap();
+                let key = XOnlyPublicKey::from_keypair(&Keypair::from_secret_key(&secp, &secret)).0;
+                let input = &mut psbt.inputs[index];
+                input.witness_utxo = Some(TxOut {
+                    value: Amount::from_sat(100_000),
+                    script_pubkey: ScriptBuf::new_p2tr(&secp, key, root),
+                });
+                input.tap_internal_key = Some(key);
+                input.tap_merkle_root = root;
+                input.sighash_type = requested.map(Into::into);
+            }
+
+            let mut signed = psbt.unsigned_tx.clone();
+            let signature_len = if requested == Some(TapSighashType::All) {
+                65
+            } else {
+                64
+            };
+            for input in &mut signed.input {
+                // Key-path witnesses contain only the signature, not the Tapret tree.
+                input.witness = Witness::from_slice(&[vec![0; signature_len]]);
+            }
+            let minimum = signed.vsize() as u64;
+            assert!(minimum > psbt.unsigned_tx.vsize() as u64);
+            psbt.unsigned_tx.output[0].value = Amount::from_sat(200_000 - minimum);
+            assert_eq!(psbt.fee().unwrap().to_sat(), minimum);
+            check_psbt_fee_rate(&psbt, 10.0).expect("key-path inputs funded at 1 sat/vB");
+            psbt.unsigned_tx.output[0].value += Amount::from_sat(1);
+            let err = check_psbt_fee_rate(&psbt, 10.0).unwrap_err();
+            assert!(err.to_string().contains("fee rate too low"), "{err}");
+        }
+    }
+
+    #[test]
     fn taproot_multisig_floor_counts_script_control_block_and_cosigners() {
         use bitcoin::opcodes::all::{OP_CHECKSIG, OP_CHECKSIGADD, OP_NUMEQUAL};
         use bitcoin::script::Builder;

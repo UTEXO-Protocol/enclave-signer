@@ -3,6 +3,7 @@ use bitcoin::blockdata::opcodes::all::{
 };
 use bitcoin::psbt::{Input, Psbt};
 use bitcoin::secp256k1::{Secp256k1, XOnlyPublicKey};
+use bitcoin::sighash::TapSighashType;
 use bitcoin::taproot::LeafVersion;
 use bitcoin::{Script, ScriptBuf};
 
@@ -79,12 +80,16 @@ fn taproot_witness_size(input: &Input, script: &Script) -> std::result::Result<u
         let internal_key = input
             .tap_internal_key
             .ok_or("Taproot spend metadata is missing")?;
-        if input.tap_merkle_root.is_some()
-            || ScriptBuf::new_p2tr(&secp, internal_key, None).as_script() != script
-        {
-            return Err("Taproot key-path estimate requires a matching no-tree output");
+        // A Tapret root changes the output key, not the key-path witness.
+        if ScriptBuf::new_p2tr(&secp, internal_key, input.tap_merkle_root).as_script() != script {
+            return Err("Taproot internal key/merkle root does not match the prevout");
         }
-        return Ok(witness_size(&[65]));
+        // DEFAULT omits the sighash byte; an existing ALL signature still needs it.
+        let has_sighash_byte = input.sighash_type.is_some_and(|ty| ty.to_u32() != 0)
+            || input
+                .tap_key_sig
+                .is_some_and(|sig| sig.sighash_type != TapSighashType::Default);
+        return Ok(witness_size(&[if has_sighash_byte { 65 } else { 64 }]));
     }
 
     let output_key = XOnlyPublicKey::from_slice(&script.as_bytes()[2..])
@@ -451,14 +456,60 @@ mod tests {
     }
 
     #[test]
-    fn permits_proven_no_tree_key_path_only() {
+    fn permits_key_path_with_matching_tweak() {
+        let key = public_key(1).inner.x_only_public_key().0;
+        for root in [
+            None,
+            Some(bitcoin::taproot::TapNodeHash::from_byte_array([0x77; 32])),
+        ] {
+            let mut psbt = psbt_with_script(ScriptBuf::new_p2tr(&Secp256k1::new(), key, root));
+            assert_error(&psbt, "metadata is missing");
+            psbt.inputs[0].tap_internal_key = Some(key);
+            psbt.inputs[0].tap_merkle_root = root;
+            assert_matches_serialization(&psbt, vec![Witness::from_slice(&[vec![1; 64]])]);
+            psbt.inputs[0].tap_internal_key = Some(public_key(2).inner.x_only_public_key().0);
+            assert_error(&psbt, "does not match the prevout");
+            psbt.inputs[0].tap_internal_key = Some(key);
+            psbt.inputs[0].tap_merkle_root =
+                Some(bitcoin::taproot::TapNodeHash::from_byte_array([0x88; 32]));
+            assert_error(&psbt, "does not match the prevout");
+        }
+    }
+
+    #[test]
+    fn key_path_counts_requested_and_existing_signature_sizes() {
         let key = public_key(1).inner.x_only_public_key().0;
         let mut psbt = psbt_with_script(ScriptBuf::new_p2tr(&Secp256k1::new(), key, None));
-        assert_error(&psbt, "metadata is missing");
         psbt.inputs[0].tap_internal_key = Some(key);
-        assert_matches_serialization(&psbt, vec![Witness::from_slice(&[vec![1; 65]])]);
-        psbt.inputs[0].tap_internal_key = Some(public_key(2).inner.x_only_public_key().0);
-        assert_error(&psbt, "matching no-tree output");
+        for (requested, signature_len) in [
+            (None, 64),
+            (Some(TapSighashType::Default), 64),
+            (Some(TapSighashType::All), 65),
+        ] {
+            psbt.inputs[0].sighash_type = requested.map(Into::into);
+            assert_eq!(
+                taproot_witness_size(
+                    &psbt.inputs[0],
+                    &psbt.inputs[0].witness_utxo.as_ref().unwrap().script_pubkey,
+                )
+                .unwrap(),
+                Witness::from_slice(&[vec![1; signature_len]]).size() as u64,
+            );
+        }
+        // An existing signature must not be sized as a shorter DEFAULT signature.
+        psbt.inputs[0].sighash_type = None;
+        psbt.inputs[0].tap_key_sig = Some(bitcoin::taproot::Signature {
+            signature: bitcoin::secp256k1::schnorr::Signature::from_slice(&[1; 64]).unwrap(),
+            sighash_type: TapSighashType::All,
+        });
+        assert_eq!(
+            taproot_witness_size(
+                &psbt.inputs[0],
+                &psbt.inputs[0].witness_utxo.as_ref().unwrap().script_pubkey,
+            )
+            .unwrap(),
+            Witness::from_slice(&[vec![1; 65]]).size() as u64,
+        );
     }
 
     #[test]
@@ -466,7 +517,7 @@ mod tests {
         let (mut psbt, _) = taproot_psbt(multi_a(2, 1), 0);
         psbt.inputs[0].tap_scripts.clear();
         psbt.inputs[0].tap_internal_key = Some(public_key(1).inner.x_only_public_key().0);
-        assert_error(&psbt, "matching no-tree output");
+        assert_error(&psbt, "does not match the prevout");
     }
 
     #[test]
