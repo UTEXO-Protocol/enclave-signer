@@ -38,6 +38,10 @@ pub enum VerifyMode {
 /// and asset pins (F02-AF-04) additionally compare those wire values against
 /// the operator's intended deployment; without a pin the value is
 /// authenticated but not compared.
+///
+/// One value is built per verifier run, so the size gap between the two
+/// variants is irrelevant; boxing would only complicate the struct literals.
+#[allow(clippy::large_enum_variant)]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ExpectedPolicy {
     /// Expect a production bridge enclave with these posture flags.
