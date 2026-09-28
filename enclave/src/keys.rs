@@ -368,7 +368,11 @@ impl KeyManager {
     }
 
     /// Sign a 32-byte message hash with the EVM secp256k1 key.
-    /// Returns 65 bytes: r(32) + s(32) + v(1) - Ethereum `ecrecover` convention.
+    ///
+    /// Returns 65 bytes: r(32) || s(32) || v(1), low-S normalized. The last
+    /// byte is the raw recovery id (0 or 1), not the 27/28 form Ethereum's
+    /// `ecrecover` expects: a caller passing it to `ecrecover` adds 27. EIP-1559
+    /// and other typed transactions take it as-is (`y_parity`).
     pub fn sign_evm(&self, message_hash: &[u8; 32]) -> Result<[u8; 65]> {
         let signing_key = K256SigningKey::from_slice(self.evm_secret.expose_secret())
             .map_err(|e| EnclaveError::Signing(format!("evm key: {e}")))?;
@@ -384,7 +388,8 @@ impl KeyManager {
     }
 
     /// Sign a 32-byte digest with the EVM gas TX key (m/44'/60'/0'/0/1).
-    /// Used exclusively for Ethereum gas transaction signing.
+    /// Used exclusively for Ethereum gas transaction signing. Same encoding
+    /// as [`Self::sign_evm`]: the last byte is the raw recovery id (0 or 1).
     pub fn sign_evm_gas_tx(&self, message_hash: &[u8; 32]) -> Result<[u8; 65]> {
         let signing_key = K256SigningKey::from_slice(self.evm_gas_tx_secret.expose_secret())
             .map_err(|e| EnclaveError::Signing(format!("evm gas tx key: {e}")))?;
