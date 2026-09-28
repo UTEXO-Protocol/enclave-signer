@@ -203,3 +203,141 @@ mod tests {
         assert!(verify_merkle_proof(&t2, 2, &[t2, n01], &root).is_ok());
     }
 }
+
+#[cfg(test)]
+mod coverage_tests {
+    use super::*;
+
+    fn pair(left: &Sha256d, right: &Sha256d) -> Sha256d {
+        let mut buf = [0u8; 64];
+        buf[..32].copy_from_slice(left);
+        buf[32..].copy_from_slice(right);
+        sha256d::Hash::hash(&buf).to_byte_array()
+    }
+
+    /// Bitcoin merkle root over a list of leaves, duplicating the last node
+    /// on odd levels. Reference implementation for the proofs below.
+    fn merkle_root(leaves: &[Sha256d]) -> Sha256d {
+        let mut level = leaves.to_vec();
+        while level.len() > 1 {
+            if level.len() % 2 == 1 {
+                level.push(*level.last().unwrap());
+            }
+            level = level.chunks(2).map(|c| pair(&c[0], &c[1])).collect();
+        }
+        level[0]
+    }
+
+    /// Sibling path for `position` in a tree over `leaves`.
+    fn merkle_path(leaves: &[Sha256d], position: usize) -> Vec<Sha256d> {
+        let mut level = leaves.to_vec();
+        let mut idx = position;
+        let mut path = Vec::new();
+        while level.len() > 1 {
+            if level.len() % 2 == 1 {
+                level.push(*level.last().unwrap());
+            }
+            path.push(level[idx ^ 1]);
+            level = level.chunks(2).map(|c| pair(&c[0], &c[1])).collect();
+            idx /= 2;
+        }
+        path
+    }
+
+    fn leaves(n: usize) -> Vec<Sha256d> {
+        (0..n).map(|i| [i as u8 + 1; 32]).collect()
+    }
+
+    #[test]
+    fn every_position_verifies_in_trees_of_every_small_size() {
+        for n in 1..=9 {
+            let l = leaves(n);
+            let root = merkle_root(&l);
+            for (pos, txid) in l.iter().enumerate() {
+                let path = merkle_path(&l, pos);
+                assert!(
+                    verify_merkle_proof(txid, pos as u32, &path, &root).is_ok(),
+                    "n={n} pos={pos}"
+                );
+                // The same path under any other position fails (except where
+                // the duplicated odd leaf makes two positions equivalent).
+                for other in 0..n {
+                    if other == pos {
+                        continue;
+                    }
+                    let ok = verify_merkle_proof(txid, other as u32, &path, &root).is_ok();
+                    let duplicate_twin = n % 2 == 1 && pos + 1 == n && other + 1 == n;
+                    assert!(!ok || duplicate_twin, "n={n} pos={pos} other={other}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn an_extra_or_missing_sibling_breaks_the_root() {
+        let l = leaves(4);
+        let root = merkle_root(&l);
+        let mut path = merkle_path(&l, 2);
+        path.push([0xEE; 32]);
+        assert!(matches!(
+            verify_merkle_proof(&l[2], 2, &path, &root),
+            Err(MerkleError::RootMismatch { .. })
+        ));
+        let short = &merkle_path(&l, 2)[..1];
+        assert!(matches!(
+            verify_merkle_proof(&l[2], 2, short, &root),
+            Err(MerkleError::RootMismatch { .. })
+        ));
+    }
+
+    #[test]
+    fn a_corrupted_txid_or_sibling_is_detected() {
+        let l = leaves(8);
+        let root = merkle_root(&l);
+        let path = merkle_path(&l, 5);
+        let mut bad_txid = l[5];
+        bad_txid[0] ^= 1;
+        assert!(verify_merkle_proof(&bad_txid, 5, &path, &root).is_err());
+        let mut bad_path = path.clone();
+        bad_path[2][31] ^= 1;
+        assert!(verify_merkle_proof(&l[5], 5, &bad_path, &root).is_err());
+        assert!(verify_merkle_proof(&l[5], 5, &path, &root).is_ok());
+    }
+
+    #[test]
+    fn position_bits_above_the_path_depth_are_ignored() {
+        // Only the low `path.len()` bits of the position select sides; the
+        // root commitment, not the position, is what binds the block.
+        let l = leaves(2);
+        let root = merkle_root(&l);
+        let path = merkle_path(&l, 0);
+        assert!(verify_merkle_proof(&l[0], 0, &path, &root).is_ok());
+        assert!(verify_merkle_proof(&l[0], 2, &path, &root).is_ok());
+        assert!(verify_merkle_proof(&l[0], u32::MAX - 1, &path, &root).is_ok());
+        assert!(verify_merkle_proof(&l[0], 1, &path, &root).is_err());
+    }
+
+    #[test]
+    fn root_mismatch_carries_the_computed_and_expected_roots() {
+        let txid = [0x42; 32];
+        let expected = [0x43; 32];
+        match verify_merkle_proof(&txid, 0, &[], &expected) {
+            Err(MerkleError::RootMismatch {
+                computed,
+                expected: e,
+            }) => {
+                assert_eq!(computed, txid);
+                assert_eq!(e, expected);
+            }
+            other => panic!("expected RootMismatch, got {other:?}"),
+        }
+        assert_eq!(
+            MerkleError::BadSiblingLength { index: 1, len: 3 },
+            MerkleError::BadSiblingLength { index: 1, len: 3 }
+        );
+        assert_ne!(
+            MerkleError::BadSiblingLength { index: 1, len: 3 },
+            MerkleError::BadSiblingLength { index: 2, len: 3 }
+        );
+    }
+}

@@ -1045,4 +1045,139 @@ mod tests {
         assert!(chain.header_at(101).is_some());
         assert!(chain.header_at(102).is_some());
     }
+
+    // ---- coverage: PoW / bits failures inside a batch, accessors, empty batch ----
+
+    const MAINNET_GENESIS_INTERNAL: [u8; 32] = [
+        0x6f, 0xe2, 0x8c, 0x0a, 0xb6, 0xf1, 0xb3, 0x72, 0xc1, 0xa6, 0xa2, 0x46, 0xae, 0x63, 0xf7,
+        0x4f, 0x93, 0x1e, 0x83, 0x65, 0xe1, 0x5a, 0x08, 0x9c, 0x68, 0xd6, 0x19, 0x00, 0x00, 0x00,
+        0x00, 0x00,
+    ];
+    const MAINNET_BLOCK_1_HEX: &str = "010000006fe28c0ab6f1b372c1a6a246ae63f74f931e8365e15a089c68d6190000000000982051fd1e4ba744bbbe680e1fee14677ba1a3c3540bf7b1cdb606e857233e0e61bc6649ffff001d01e36299";
+
+    fn genesis_chain() -> HeaderChain {
+        HeaderChain::new(
+            Network::Mainnet,
+            Checkpoint {
+                height: 0,
+                hash: MAINNET_GENESIS_INTERNAL,
+                bits: 0x1d00ffff,
+                time: 1_231_006_505,
+                is_real: false,
+            },
+        )
+    }
+
+    #[test]
+    fn mainnet_pow_failure_inside_a_batch_is_reported_at_its_height() {
+        let mut chain = genesis_chain();
+        let mut raw = hex::decode(MAINNET_BLOCK_1_HEX).unwrap();
+        let last = raw.len() - 1;
+        raw[last] ^= 0xff; // nonce
+        let err = chain.submit_headers(1, &[raw]).unwrap_err();
+        assert!(matches!(err, SpvError::PowFailed { height: 1 }), "{err}");
+        assert_eq!(chain.tip_height(), 0);
+        assert!(chain.is_empty());
+    }
+
+    #[test]
+    fn mainnet_bits_mismatch_inside_a_batch_is_reported_with_both_values() {
+        let mut chain = genesis_chain();
+        let mut raw = hex::decode(MAINNET_BLOCK_1_HEX).unwrap();
+        // bits occupy bytes 72..76 little-endian; 0x1d00ffff -> 0x1d00fffe.
+        raw[72] = 0xfe;
+        let err = chain.submit_headers(1, &[raw]).unwrap_err();
+        match err {
+            SpvError::BitsMismatch {
+                height,
+                got,
+                expected,
+            } => {
+                assert_eq!(height, 1);
+                assert_eq!(got, 0x1d00fffe);
+                assert_eq!(expected, 0x1d00ffff);
+            }
+            other => panic!("expected BitsMismatch, got {other}"),
+        }
+        assert!(chain.is_empty());
+    }
+
+    #[test]
+    fn mainnet_second_header_must_chain_to_the_first() {
+        let mut chain = genesis_chain();
+        let raw = hex::decode(MAINNET_BLOCK_1_HEX).unwrap();
+        chain.submit_headers(1, std::slice::from_ref(&raw)).unwrap();
+        // Block 1 again at height 2: its prev hash is genesis, not block 1.
+        let err = chain.submit_headers(2, &[raw]).unwrap_err();
+        assert!(matches!(err, SpvError::ChainLinkage { height: 2 }), "{err}");
+        assert_eq!(chain.tip_height(), 1);
+    }
+
+    #[test]
+    fn accessors_report_network_checkpoint_and_tip_time() {
+        let (mut chain, raws) = synthetic_regtest_setup();
+        assert_eq!(chain.network(), Network::Regtest);
+        assert_eq!(chain.checkpoint().height, 100);
+        assert_eq!(
+            chain.tip_time(),
+            1_700_000_000,
+            "falls back to the checkpoint time"
+        );
+        assert_eq!(chain.hash_at(99), None, "below the base is unknown");
+        assert_eq!(chain.hash_at(101), None, "not yet stored");
+        chain.submit_headers(101, &raws).unwrap();
+        assert_eq!(chain.tip_time(), 1_700_000_005, "last stored header's time");
+        assert_eq!(chain.hash_at(105), Some(chain.tip_hash()));
+        assert_eq!(chain.hash_at(106), None);
+        assert_eq!(chain.header_at(105).unwrap().time, 1_700_000_005);
+        // hash_at and header_at agree for every stored height.
+        for h in 101..=105 {
+            let header = chain.header_at(h).unwrap();
+            let hash: [u8; 32] = *Hash::as_byte_array(&header.block_hash());
+            assert_eq!(chain.hash_at(h), Some(hash));
+        }
+    }
+
+    #[test]
+    fn empty_batch_reports_the_current_tip_without_touching_the_chain() {
+        let (mut chain, raws) = synthetic_regtest_setup();
+        chain.submit_headers(101, &raws[..2]).unwrap();
+        let outcome = chain.submit_headers(999, &[]).unwrap();
+        assert_eq!(outcome.last_block_height, 102);
+        assert_eq!(outcome.last_block_hash, chain.tip_hash());
+        assert_eq!(outcome.headers_accepted, 0);
+        assert_eq!(outcome.reorg_depth, 0);
+        assert_eq!(chain.len(), 2);
+    }
+
+    #[test]
+    fn checks_run_in_order_cap_then_checkpoint_then_contiguity() {
+        let (mut chain, raws) = synthetic_regtest_setup();
+        // Oversized batch is refused even at an invalid start height.
+        let huge: Vec<Vec<u8>> = vec![Vec::new(); MAX_HEADERS_PER_SUBMIT + 1];
+        assert!(matches!(
+            chain.submit_headers(0, &huge).unwrap_err(),
+            SpvError::BatchTooLarge { .. }
+        ));
+        // Below-checkpoint beats non-contiguity.
+        assert!(matches!(
+            chain.submit_headers(0, &raws).unwrap_err(),
+            SpvError::BelowCheckpoint { .. }
+        ));
+        // A gap is refused before any header is parsed.
+        assert!(matches!(
+            chain.submit_headers(103, &[vec![0u8; 3]]).unwrap_err(),
+            SpvError::NonContiguous { got: 103, tip: 100 }
+        ));
+    }
+
+    #[test]
+    fn sum_work_is_none_for_no_headers_and_additive_otherwise() {
+        assert!(sum_work(std::iter::empty()).is_none());
+        let (_, raws) = synthetic_regtest_setup();
+        let headers: Vec<Header> = raws.iter().map(|r| deserialize(r).unwrap()).collect();
+        let one = sum_work(headers.iter().take(1)).unwrap();
+        let two = sum_work(headers.iter().take(2)).unwrap();
+        assert_eq!(two, one + one, "regtest headers carry equal work");
+    }
 }

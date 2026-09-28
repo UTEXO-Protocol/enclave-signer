@@ -503,4 +503,194 @@ mod tests {
         assert!(misaligned.assert_retarget_aligned(Network::Signet).is_ok());
         assert!(misaligned.assert_retarget_aligned(Network::Regtest).is_ok());
     }
+
+    // ---- coverage: spec parsing edges, alignment, constants ----
+
+    const SIGNET_HASH_DISPLAY: &str =
+        "000000ac5fccb8a26d3bf859952e164b4fb65190c8f29c8339c6a2c39f3aeb66";
+
+    #[test]
+    fn parse_spec_tolerates_surrounding_whitespace() {
+        let spec = format!("  334001 : {SIGNET_HASH_DISPLAY} : 0x1e0377ae : 1780464500  ");
+        let cp = parse_checkpoint_spec(&spec, Network::Signet, &SIGNET_CHECKPOINT).unwrap();
+        assert_eq!(cp.height, 334_001);
+        assert_eq!(cp.bits, 0x1e03_77ae);
+        assert_eq!(cp.time, 1_780_464_500);
+        assert!(cp.is_real);
+    }
+
+    #[test]
+    fn parse_spec_four_field_form_overrides_the_base_on_regtest() {
+        let spec = format!("5:{SIGNET_HASH_DISPLAY}:0x207fffff:1700000000");
+        let cp = parse_checkpoint_spec(&spec, Network::Regtest, &REGTEST_CHECKPOINT).unwrap();
+        assert_eq!(cp.height, 5);
+        assert_eq!(cp.bits, 0x207f_ffff);
+        assert_eq!(cp.time, 1_700_000_000);
+        // Display order in, internal order stored.
+        let mut expected = hex::decode(SIGNET_HASH_DISPLAY).unwrap();
+        expected.reverse();
+        assert_eq!(cp.hash.to_vec(), expected);
+    }
+
+    #[test]
+    fn parse_spec_rejects_wrong_field_counts() {
+        for (spec, n) in [
+            (format!("1:{SIGNET_HASH_DISPLAY}:0x1"), 3),
+            (format!("1:{SIGNET_HASH_DISPLAY}:0x1:2:3"), 5),
+            ("1".to_string(), 1),
+            (String::new(), 1),
+        ] {
+            let err =
+                parse_checkpoint_spec(&spec, Network::Regtest, &REGTEST_CHECKPOINT).unwrap_err();
+            assert!(
+                err.contains(&format!("got {n} field(s)")),
+                "{spec:?}: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn parse_spec_rejects_bad_heights() {
+        for h in ["-1", "abc", "1.5", "", "4294967296"] {
+            let spec = format!("{h}:{SIGNET_HASH_DISPLAY}");
+            let err =
+                parse_checkpoint_spec(&spec, Network::Regtest, &REGTEST_CHECKPOINT).unwrap_err();
+            assert!(err.contains("is not a block height"), "{h:?}: {err}");
+        }
+        let spec = format!("4294967295:{SIGNET_HASH_DISPLAY}");
+        assert_eq!(
+            parse_checkpoint_spec(&spec, Network::Regtest, &REGTEST_CHECKPOINT)
+                .unwrap()
+                .height,
+            u32::MAX
+        );
+    }
+
+    #[test]
+    fn parse_spec_rejects_bad_hashes() {
+        let odd = &SIGNET_HASH_DISPLAY[..63];
+        let err = parse_checkpoint_spec(&format!("1:{odd}"), Network::Regtest, &REGTEST_CHECKPOINT)
+            .unwrap_err();
+        assert!(err.contains("is not hex"), "{err}");
+        let short = &SIGNET_HASH_DISPLAY[..62];
+        let err =
+            parse_checkpoint_spec(&format!("1:{short}"), Network::Regtest, &REGTEST_CHECKPOINT)
+                .unwrap_err();
+        assert!(
+            err.contains("must be 32 bytes") && err.contains("got 31"),
+            "{err}"
+        );
+        let zeros = "00".repeat(32);
+        let err =
+            parse_checkpoint_spec(&format!("1:{zeros}"), Network::Regtest, &REGTEST_CHECKPOINT)
+                .unwrap_err();
+        assert!(err.contains("placeholder"), "{err}");
+        let err = parse_checkpoint_spec(
+            &format!("1:0x{zeros}"),
+            Network::Regtest,
+            &REGTEST_CHECKPOINT,
+        )
+        .unwrap_err();
+        assert!(err.contains("placeholder"), "{err}");
+    }
+
+    #[test]
+    fn parse_spec_rejects_bad_bits_and_time() {
+        for bits in ["0xzz", "0x1ffffffff", "0x", "1e0377ae", "0X1e0377ae"] {
+            let spec = format!("1:{SIGNET_HASH_DISPLAY}:{bits}:1700000000");
+            let err =
+                parse_checkpoint_spec(&spec, Network::Regtest, &REGTEST_CHECKPOINT).unwrap_err();
+            assert!(err.contains("bits"), "{bits:?}: {err}");
+        }
+        for time in ["-1", "x", "", "99999999999"] {
+            let spec = format!("1:{SIGNET_HASH_DISPLAY}:0x207fffff:{time}");
+            let err =
+                parse_checkpoint_spec(&spec, Network::Regtest, &REGTEST_CHECKPOINT).unwrap_err();
+            assert!(err.contains("is not a timestamp"), "{time:?}: {err}");
+        }
+    }
+
+    #[test]
+    fn parse_spec_two_field_form_is_refused_on_every_pow_network() {
+        let spec = format!("2016:{SIGNET_HASH_DISPLAY}");
+        for net in [Network::Mainnet, Network::Testnet3] {
+            let err = parse_checkpoint_spec(&spec, net, &checkpoint_for(net)).unwrap_err();
+            assert!(err.contains("enforces PoW"), "{net:?}: {err}");
+        }
+        // With all four fields a PoW network accepts it.
+        let spec = format!("2016:{SIGNET_HASH_DISPLAY}:0x1d00ffff:1231006505");
+        assert!(parse_checkpoint_spec(&spec, Network::Mainnet, &MAINNET_CHECKPOINT).is_ok());
+    }
+
+    #[test]
+    fn retarget_alignment_accepts_the_shipped_mainnet_anchor_and_exempts_non_pow() {
+        assert!(MAINNET_CHECKPOINT
+            .assert_retarget_aligned(Network::Mainnet)
+            .is_ok());
+        // Signet / regtest anchors are not boundary-aligned and need not be.
+        assert!(SIGNET_CHECKPOINT
+            .assert_retarget_aligned(Network::Signet)
+            .is_ok());
+        assert!(REGTEST_CHECKPOINT
+            .assert_retarget_aligned(Network::Regtest)
+            .is_ok());
+        let misaligned = Checkpoint {
+            height: 2017,
+            ..MAINNET_CHECKPOINT
+        };
+        let err = misaligned
+            .assert_retarget_aligned(Network::Mainnet)
+            .unwrap_err();
+        assert!(err.contains("2017") && err.contains("== 1"), "{err}");
+        assert!(misaligned
+            .assert_retarget_aligned(Network::Testnet3)
+            .is_err());
+        assert!(misaligned.assert_retarget_aligned(Network::Signet).is_ok());
+    }
+
+    #[test]
+    fn placeholder_checkpoints_are_tolerated_only_outside_release() {
+        // cfg(test) is always an exemption, so the placeholder passes here;
+        // the production refusal is compile-profile dependent by design.
+        let real: Vec<bool> = [
+            Network::Mainnet,
+            Network::Signet,
+            Network::Testnet3,
+            Network::Regtest,
+        ]
+        .into_iter()
+        .map(|n| checkpoint_for(n).is_real)
+        .collect();
+        assert_eq!(real, vec![true, true, false, true]);
+        assert!(checkpoint_for(Network::Testnet3)
+            .assert_real_in_release()
+            .is_ok());
+        assert!(checkpoint_override_allowed());
+    }
+
+    #[test]
+    fn shipped_hashes_match_their_documented_display_form() {
+        let display = |h: &[u8; 32]| {
+            let mut d = *h;
+            d.reverse();
+            hex::encode(d)
+        };
+        assert_eq!(
+            display(&MAINNET_CHECKPOINT.hash),
+            "00000000000000000001b472f1922f86148c8286609fb14be39e12b8bd14bb64"
+        );
+        assert_eq!(display(&SIGNET_CHECKPOINT.hash), SIGNET_HASH_DISPLAY);
+        assert_eq!(
+            display(&REGTEST_CHECKPOINT.hash),
+            "0f9188f13cb7b2c71f2a335e3a4fc328bf5beb436012afca590b1a11466e2206"
+        );
+        assert_eq!(REGTEST_CHECKPOINT.height, 0);
+        assert_eq!(REGTEST_CHECKPOINT.bits, 0x207fffff);
+    }
+
+    #[test]
+    fn checkpoint_source_variants_are_distinct() {
+        assert_ne!(CheckpointSource::Compiled, CheckpointSource::Env);
+        assert_eq!(CHECKPOINT_ENV, "SPV_CHECKPOINT");
+    }
 }

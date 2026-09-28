@@ -1306,4 +1306,308 @@ mod tests {
             "got: {err}"
         );
     }
+
+    // ---- coverage: cap boundaries, supplied digest, and the RLP decoder ----
+
+    #[test]
+    fn accepts_a_supplied_digest_that_matches_the_preimage() {
+        let tx = eip1559(CHAIN_ID, &ALLOWED_TO, 0);
+        let digest: [u8; 32] = Keccak256::digest(&tx).into();
+        let r = SignRawDigestRequest {
+            digest: digest.to_vec(),
+            unsigned_tx: tx,
+        };
+        assert_eq!(validate_gas_tx_request(&r, &cfg()).unwrap(), digest);
+    }
+
+    #[test]
+    fn accepts_gas_and_fees_exactly_at_the_caps() {
+        let fee = MAX_FEE_PER_GAS as u64;
+        let tx = eip1559_full(
+            CHAIN_ID,
+            &ALLOWED_TO,
+            0,
+            fee,
+            fee,
+            MAX_GAS_LIMIT,
+            &ALLOWED_SELECTOR,
+        );
+        assert!(validate_gas_tx_request(&req(tx), &cfg()).is_ok());
+        let tx = legacy_full(
+            CHAIN_ID,
+            &ALLOWED_TO,
+            0,
+            fee,
+            MAX_GAS_LIMIT,
+            &ALLOWED_SELECTOR,
+        );
+        assert!(validate_gas_tx_request(&req(tx), &cfg()).is_ok());
+        // One above either cap fails.
+        let tx = eip1559_full(
+            CHAIN_ID,
+            &ALLOWED_TO,
+            0,
+            fee,
+            fee,
+            MAX_GAS_LIMIT + 1,
+            &ALLOWED_SELECTOR,
+        );
+        assert!(validate_gas_tx_request(&req(tx), &cfg()).is_err());
+        let tx = eip1559_full(
+            CHAIN_ID,
+            &ALLOWED_TO,
+            0,
+            fee,
+            fee + 1,
+            MAX_GAS_LIMIT,
+            &ALLOWED_SELECTOR,
+        );
+        assert!(validate_gas_tx_request(&req(tx), &cfg()).is_err());
+    }
+
+    #[test]
+    fn accepts_long_calldata_through_the_long_string_and_long_list_paths() {
+        let mut data = ALLOWED_SELECTOR.to_vec();
+        data.extend_from_slice(&[0x11; 100]);
+        let tx = eip1559_with_data(CHAIN_ID, &ALLOWED_TO, 0, &data);
+        assert!(
+            tx.len() > 100,
+            "sanity: payload exceeds the short-form limit"
+        );
+        assert!(validate_gas_tx_request(&req(tx), &cfg()).is_ok());
+        let tx = legacy_with_data(CHAIN_ID, &ALLOWED_TO, 0, &data);
+        assert!(validate_gas_tx_request(&req(tx), &cfg()).is_ok());
+    }
+
+    #[test]
+    fn zero_chain_id_in_the_preimage_is_a_chain_mismatch() {
+        // A zero chain id encodes as the empty scalar; it decodes fine and
+        // then fails the pin comparison rather than the parser.
+        let tx = eip1559(0, &ALLOWED_TO, 0);
+        let err = validate_gas_tx_request(&req(tx), &cfg()).unwrap_err();
+        assert!(err.to_string().contains("chain_id 0 != pinned 1"), "{err}");
+    }
+
+    fn rlp_err(bytes: &[u8]) -> String {
+        match decode_canonical(bytes) {
+            Err(e) => e.to_string(),
+            Ok(_) => panic!("expected {bytes:02x?} to be rejected"),
+        }
+    }
+
+    #[test]
+    fn rlp_rejects_empty_input_and_trailing_bytes() {
+        assert!(rlp_err(&[]).contains("unexpected end of input"));
+        assert!(rlp_err(&[0x01, 0x02]).contains("trailing bytes"));
+        assert!(rlp_err(&[0xc0, 0xc0]).contains("trailing bytes"));
+    }
+
+    #[test]
+    fn rlp_rejects_non_canonical_single_byte_string() {
+        assert!(rlp_err(&[0x81, 0x05]).contains("non-canonical single-byte string"));
+        // 0x80 and above must use the 0x81 prefix, so that form is fine.
+        assert!(decode_canonical(&[0x81, 0x80]).is_ok());
+        assert!(decode_canonical(&[0x80]).is_ok(), "empty string");
+        assert!(decode_canonical(&[0x7f]).is_ok(), "single byte below 0x80");
+    }
+
+    #[test]
+    fn rlp_rejects_truncated_short_string_and_list() {
+        assert!(rlp_err(&[0x83, 0x01, 0x02]).contains("short string truncated"));
+        assert!(rlp_err(&[0xc3, 0x01]).contains("short list truncated"));
+    }
+
+    #[test]
+    fn rlp_rejects_truncated_long_string_and_list() {
+        let mut s = vec![0xb8, 0x38];
+        s.extend_from_slice(&[0x11; 55]); // declares 56, carries 55
+        assert!(rlp_err(&s).contains("long string truncated"));
+        let mut l = vec![0xf8, 0x38];
+        l.extend_from_slice(&[0x01; 55]);
+        assert!(rlp_err(&l).contains("long list truncated"));
+    }
+
+    #[test]
+    fn rlp_accepts_minimal_long_forms() {
+        let mut s = vec![0xb8, 0x38];
+        s.extend_from_slice(&[0x11; 56]);
+        assert!(decode_canonical(&s).is_ok());
+        let mut l = vec![0xf8, 0x38];
+        l.extend_from_slice(&[0x01; 56]);
+        assert!(decode_canonical(&l).is_ok());
+    }
+
+    #[test]
+    fn rlp_rejects_malformed_length_headers() {
+        assert!(rlp_err(&[0xb9, 0x01]).contains("length header truncated"));
+        assert!(rlp_err(&[0xf9]).contains("length header truncated"));
+        let mut leading_zero = vec![0xb9, 0x00, 0x40];
+        leading_zero.extend_from_slice(&[0; 64]);
+        assert!(rlp_err(&leading_zero).contains("leading zero"));
+        let mut short_payload = vec![0xb8, 0x10];
+        short_payload.extend_from_slice(&[0; 16]);
+        assert!(rlp_err(&short_payload).contains("non-canonical long form for short payload"));
+        let mut huge = vec![0xbf];
+        huge.extend_from_slice(&[0xff; 8]);
+        let msg = rlp_err(&huge);
+        assert!(
+            msg.contains("length overflow") || msg.contains("exceeds usize"),
+            "{msg}"
+        );
+    }
+
+    #[test]
+    fn rlp_accepts_nesting_at_the_depth_limit() {
+        // Depth counts from 0 at the top level, so MAX_RLP_DEPTH nested
+        // lists inside the outer one are still decodable.
+        let mut nested = rlp_list(&[]);
+        for _ in 0..MAX_RLP_DEPTH {
+            nested = rlp_list(&[nested]);
+        }
+        assert!(decode_canonical(&nested).is_ok());
+        let too_deep = rlp_list(&[nested]);
+        assert!(rlp_err(&too_deep).contains("nesting too deep"));
+    }
+
+    fn parse_err(raw: &[u8]) -> String {
+        match parse_gas_tx(raw) {
+            Err(e) => e.to_string(),
+            Ok(_) => panic!("expected {raw:02x?} to be rejected"),
+        }
+    }
+
+    #[test]
+    fn eip1559_body_must_be_a_list() {
+        assert!(parse_err(&[0x02, 0x80]).contains("expected a list, found a string"));
+        assert!(parse_err(&[0x02]).contains("unexpected end of input"));
+        assert!(parse_err(&[0x02, 0xc0]).contains("9 fields, got 0"));
+        assert!(parse_err(&[0xc0]).contains("9 fields, got 0"));
+    }
+
+    fn eip1559_items(items: [Vec<u8>; 9]) -> Vec<u8> {
+        let mut out = vec![TX_TYPE_EIP1559];
+        out.extend_from_slice(&rlp_list(&items));
+        out
+    }
+
+    fn base_items() -> [Vec<u8>; 9] {
+        [
+            rlp_scalar(CHAIN_ID),
+            rlp_scalar(7),
+            rlp_scalar(1),
+            rlp_scalar(100),
+            rlp_scalar(21_000),
+            rlp_str(&ALLOWED_TO),
+            rlp_scalar(0),
+            rlp_str(&ALLOWED_SELECTOR),
+            rlp_list(&[]),
+        ]
+    }
+
+    #[test]
+    fn scalars_wider_than_their_type_are_rejected() {
+        let mut items = base_items();
+        items[0] = rlp_str(&[1u8; 9]);
+        assert!(parse_err(&eip1559_items(items)).contains("integer exceeds u64"));
+        let mut items = base_items();
+        items[4] = rlp_str(&[1u8; 9]);
+        assert!(parse_err(&eip1559_items(items)).contains("integer exceeds u64"));
+        // Exactly 8 bytes fits.
+        let mut items = base_items();
+        items[4] = rlp_str(&[0x7f; 8]);
+        assert!(parse_gas_tx(&eip1559_items(items)).is_ok());
+    }
+
+    #[test]
+    fn scalar_fields_reject_leading_zeros_and_lists() {
+        let mut items = base_items();
+        items[6] = rlp_str(&[0x00, 0x01]);
+        assert!(parse_err(&eip1559_items(items)).contains("non-canonical scalar (leading zero)"));
+        let mut items = base_items();
+        items[4] = rlp_list(&[]);
+        assert!(parse_err(&eip1559_items(items)).contains("expected a scalar, found a list"));
+        let mut items = base_items();
+        items[3] = rlp_list(&[rlp_scalar(1)]);
+        assert!(parse_err(&eip1559_items(items)).contains("expected a scalar, found a list"));
+    }
+
+    #[test]
+    fn destination_field_must_be_exactly_20_bytes() {
+        let mut items = base_items();
+        items[5] = rlp_str(&[0xAA; 19]);
+        assert!(parse_err(&eip1559_items(items)).contains("must be a 20-byte address"));
+        let mut items = base_items();
+        items[5] = rlp_str(&[0xAA; 21]);
+        assert!(parse_err(&eip1559_items(items)).contains("must be a 20-byte address"));
+        let mut items = base_items();
+        items[5] = rlp_list(&[]);
+        assert!(
+            parse_err(&eip1559_items(items)).contains("expected an address string, found a list")
+        );
+    }
+
+    #[test]
+    fn legacy_trailer_rejects_a_non_zero_r_or_s() {
+        let mut items = [
+            rlp_scalar(7),
+            rlp_scalar(100),
+            rlp_scalar(21_000),
+            rlp_str(&ALLOWED_TO),
+            rlp_scalar(0),
+            rlp_str(&ALLOWED_SELECTOR),
+            rlp_scalar(CHAIN_ID),
+            rlp_scalar(0),
+            rlp_scalar(0),
+        ];
+        assert!(parse_gas_tx(&rlp_list(&items)).is_ok());
+        items[7] = rlp_scalar(1);
+        assert!(parse_err(&rlp_list(&items)).contains("trailer must be (chainId, 0, 0)"));
+        items[7] = rlp_scalar(0);
+        items[8] = rlp_scalar(1);
+        assert!(parse_err(&rlp_list(&items)).contains("trailer must be (chainId, 0, 0)"));
+        // A trailer element that is a list is a scalar error, not a trailer one.
+        items[8] = rlp_list(&[]);
+        assert!(parse_err(&rlp_list(&items)).contains("expected a scalar"));
+    }
+
+    #[test]
+    fn legacy_body_with_wrong_arity_is_rejected() {
+        let eight = rlp_list(&[
+            rlp_scalar(7),
+            rlp_scalar(100),
+            rlp_scalar(21_000),
+            rlp_str(&ALLOWED_TO),
+            rlp_scalar(0),
+            rlp_str(&ALLOWED_SELECTOR),
+            rlp_scalar(CHAIN_ID),
+            rlp_scalar(0),
+        ]);
+        assert!(parse_err(&eight).contains("legacy EIP-155 unsigned tx must have 9 fields, got 8"));
+    }
+
+    #[test]
+    fn parsed_fields_are_the_ones_the_allowlist_inspects() {
+        let tx = eip1559_full(5, &[0x33; 20], 9, 11, 13, 17, &[1, 2, 3, 4, 5]);
+        let parsed = parse_gas_tx(&tx).unwrap();
+        assert_eq!(parsed.chain_id, 5);
+        assert_eq!(parsed.to, [0x33; 20]);
+        assert_eq!(parsed.value, 9);
+        assert_eq!(parsed.max_priority_fee_per_gas, 11);
+        assert_eq!(parsed.max_fee_per_gas, 13);
+        assert_eq!(parsed.gas_limit, 17);
+        assert_eq!(parsed.selector, Some([1, 2, 3, 4]));
+        assert_eq!(parsed.data, &[1, 2, 3, 4, 5]);
+
+        let tx = legacy_full(6, &[0x44; 20], 0, 21, 23, &[]);
+        let parsed = parse_gas_tx(&tx).unwrap();
+        assert_eq!(parsed.chain_id, 6);
+        assert_eq!(parsed.max_fee_per_gas, 21);
+        assert_eq!(
+            parsed.max_priority_fee_per_gas, 21,
+            "legacy gasPrice fills both"
+        );
+        assert_eq!(parsed.gas_limit, 23);
+        assert_eq!(parsed.selector, None);
+        assert!(parsed.data.is_empty());
+    }
 }

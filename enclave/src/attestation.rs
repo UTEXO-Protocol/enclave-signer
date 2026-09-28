@@ -203,3 +203,63 @@ mod tests {
         assert_eq!(pcrs.pcr0, [0u8; 48]);
     }
 }
+
+// The real NSM path outside an enclave: `/dev/nsm` is absent on every CI
+// runner and developer machine, so the facade must surface a clean error
+// rather than panic or return a document.
+#[cfg(all(test, not(feature = "mock-attestation"), target_os = "linux"))]
+mod real_path_tests {
+    use super::*;
+
+    #[test]
+    fn get_attestation_without_an_nsm_device_fails_closed() {
+        let err = get_attestation(&[1u8; 32], Some(&[2u8; 32]), None).unwrap_err();
+        assert!(matches!(err, EnclaveError::Attestation(_)), "{err}");
+        assert!(err.to_string().contains("NSM"), "{err}");
+    }
+
+    #[test]
+    fn get_own_pcrs_without_an_nsm_device_fails_closed() {
+        let err = get_own_pcrs().unwrap_err();
+        assert!(matches!(err, EnclaveError::Attestation(_)), "{err}");
+    }
+
+    #[test]
+    fn verify_peer_attestation_uses_the_real_cose_verifier() {
+        // A raw-CBOR mock-style map is not a COSE_Sign1 array, so the real
+        // verifier rejects it: a mock document can never pass a real build.
+        let mut buf = Vec::new();
+        ciborium_map_into(&mut buf);
+        let err = verify_peer_attestation(&buf, &ExpectedPcrs::zero(), None).unwrap_err();
+        assert!(matches!(err, EnclaveError::Attestation(_)), "{err}");
+        assert!(err.to_string().contains("must be array"), "{err}");
+        let err = verify_peer_attestation(&[], &ExpectedPcrs::zero(), None).unwrap_err();
+        assert!(matches!(err, EnclaveError::Attestation(_)), "{err}");
+    }
+
+    /// CBOR `{}` without pulling ciborium into the enclave crate's deps.
+    fn ciborium_map_into(buf: &mut Vec<u8>) {
+        buf.push(0xa0);
+    }
+}
+
+#[cfg(test)]
+mod error_mapping_tests {
+    use super::*;
+
+    #[test]
+    fn expected_pcrs_reexport_is_the_verifier_type() {
+        let p = ExpectedPcrs::new([1u8; 48], [2u8; 48], [3u8; 48]);
+        let q: attestation_verify::ExpectedPcrs = p.clone();
+        assert_eq!(q.pcr2, [3u8; 48]);
+    }
+
+    #[test]
+    fn verify_errors_keep_their_category_and_text() {
+        let e: EnclaveError = attestation_verify::VerifyError::Certificate("chain".into()).into();
+        assert_eq!(e.to_string(), "certificate error: chain");
+        assert_eq!(e.error_code(), 1);
+        let e: EnclaveError = attestation_verify::VerifyError::Attestation("nonce".into()).into();
+        assert_eq!(e.to_string(), "attestation error: nonce");
+    }
+}

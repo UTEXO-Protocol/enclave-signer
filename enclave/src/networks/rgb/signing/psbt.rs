@@ -284,4 +284,91 @@ mod tests {
             SegwitSignDecision::Skip
         ));
     }
+
+    // ---- coverage: key encodings and the returned script ----
+
+    #[test]
+    fn skips_when_only_the_uncompressed_form_of_our_key_is_pushed() {
+        let (our_pk, our_bitcoin_pk) = ours();
+        let uncompressed = bitcoin::PublicKey {
+            compressed: false,
+            inner: our_bitcoin_pk.inner,
+        };
+        let script = ScriptBuilder::new()
+            .push_int(2)
+            .push_key(&uncompressed)
+            .push_key(&pk_from_byte(0x02))
+            .push_key(&pk_from_byte(0x03))
+            .push_int(3)
+            .push_opcode(OP_CHECKMULTISIG)
+            .into_script();
+        let psbt = build_psbt(script.clone(), p2wsh_for(&script));
+        assert!(matches!(
+            should_sign_segwit_input(&psbt, 0, &our_pk),
+            SegwitSignDecision::Skip
+        ));
+    }
+
+    #[test]
+    fn sign_decision_returns_the_validated_witness_script() {
+        let (our_pk, our_bitcoin_pk) = ours();
+        let script =
+            build_2of3_witness_script(&[our_bitcoin_pk, pk_from_byte(0x02), pk_from_byte(0x03)]);
+        let psbt = build_psbt(script.clone(), p2wsh_for(&script));
+        match should_sign_segwit_input(&psbt, 0, &our_pk) {
+            SegwitSignDecision::SignP2wsh { witness_script } => {
+                assert_eq!(witness_script, script)
+            }
+            SegwitSignDecision::Skip => panic!("must sign a legitimate 2-of-3"),
+        }
+    }
+
+    #[test]
+    fn signs_when_our_key_is_pushed_more_than_once() {
+        let (our_pk, our_bitcoin_pk) = ours();
+        let script = ScriptBuilder::new()
+            .push_int(2)
+            .push_key(&our_bitcoin_pk)
+            .push_key(&our_bitcoin_pk)
+            .push_key(&pk_from_byte(0x03))
+            .push_int(3)
+            .push_opcode(OP_CHECKMULTISIG)
+            .into_script();
+        let psbt = build_psbt(script.clone(), p2wsh_for(&script));
+        assert!(matches!(
+            should_sign_segwit_input(&psbt, 0, &our_pk),
+            SegwitSignDecision::SignP2wsh { .. }
+        ));
+    }
+
+    #[test]
+    fn a_partial_signature_from_someone_else_does_not_block_us() {
+        let (our_pk, our_bitcoin_pk) = ours();
+        let script =
+            build_2of3_witness_script(&[our_bitcoin_pk, pk_from_byte(0x02), pk_from_byte(0x03)]);
+        let mut psbt = build_psbt(script.clone(), p2wsh_for(&script));
+        psbt.inputs[0]
+            .partial_sigs
+            .insert(pk_from_byte(0x02), dummy_ecdsa_sig());
+        assert!(matches!(
+            should_sign_segwit_input(&psbt, 0, &our_pk),
+            SegwitSignDecision::SignP2wsh { .. }
+        ));
+    }
+
+    #[test]
+    fn a_non_multisig_script_containing_our_key_is_still_signable() {
+        // The predicate is about the key push under a committed script, not
+        // about the script template.
+        let (our_pk, our_bitcoin_pk) = ours();
+        let script = ScriptBuilder::new()
+            .push_key(&our_bitcoin_pk)
+            .push_opcode(bitcoin::blockdata::opcodes::all::OP_CHECKSIG)
+            .into_script();
+        let psbt = build_psbt(script.clone(), p2wsh_for(&script));
+        assert!(matches!(
+            should_sign_segwit_input(&psbt, 0, &our_pk),
+            SegwitSignDecision::SignP2wsh { .. }
+        ));
+    }
 }

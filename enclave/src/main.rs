@@ -539,3 +539,155 @@ where
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::{Read, Write};
+    use std::net::{TcpListener, TcpStream};
+    use std::sync::Mutex;
+
+    use utexo_bridge_enclave::framing;
+    use utexo_bridge_enclave::proto::enclave_request::Request;
+    use utexo_bridge_enclave::proto::enclave_response::Response;
+    use utexo_bridge_enclave::proto::*;
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    fn ctx() -> ServerContext {
+        let state = EnclaveState::new(bitcoin::Network::Bitcoin);
+        #[cfg(feature = "spv")]
+        {
+            ServerContext::new(
+                state,
+                BridgeConfig::default(),
+                Mutex::new(HeaderChain::new(
+                    Network::Regtest,
+                    utexo_bridge_enclave::networks::rgb::spv::checkpoint_for(Network::Regtest),
+                )),
+            )
+        }
+        #[cfg(not(feature = "spv"))]
+        {
+            ServerContext::new(state, BridgeConfig::default())
+        }
+    }
+
+    fn get_public_key_frame() -> Vec<u8> {
+        let req = EnclaveRequest {
+            request: Some(Request::GetPublicKey(GetPublicKeyRequest {})),
+        };
+        let mut buf = Vec::new();
+        framing::write_message(&mut buf, &req).unwrap();
+        buf
+    }
+
+    fn expect_not_initialized(stream: &mut TcpStream) {
+        let resp: EnclaveResponse = framing::read_message(stream).unwrap();
+        match resp.response {
+            Some(Response::Error(e)) => assert!(e.message.contains("key not initialized")),
+            other => panic!("expected an error response, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn serve_returns_once_the_accept_source_is_exhausted() {
+        let incoming: Vec<std::io::Result<TcpStream>> = Vec::new();
+        serve(incoming, ctx());
+    }
+
+    #[test]
+    fn serve_answers_requests_from_a_listener() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        std::thread::spawn(move || serve(listener.incoming(), ctx()));
+        // Several sequential connections are answered, one request each.
+        for _ in 0..3 {
+            let mut client = TcpStream::connect(addr).unwrap();
+            client.write_all(&get_public_key_frame()).unwrap();
+            expect_not_initialized(&mut client);
+            let mut rest = Vec::new();
+            client.read_to_end(&mut rest).unwrap();
+            assert!(rest.is_empty(), "one response per connection");
+        }
+    }
+
+    #[test]
+    fn serve_skips_accept_errors_and_still_handles_the_next_connection() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let mut client = TcpStream::connect(addr).unwrap();
+        let (server_side, _) = listener.accept().unwrap();
+        let incoming: Vec<std::io::Result<TcpStream>> =
+            vec![Err(std::io::Error::other("accept failed")), Ok(server_side)];
+        let handle = std::thread::spawn(move || serve(incoming, ctx()));
+        client.write_all(&get_public_key_frame()).unwrap();
+        expect_not_initialized(&mut client);
+        handle.join().unwrap();
+    }
+
+    #[test]
+    fn serve_handles_concurrent_connections() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        std::thread::spawn(move || serve(listener.incoming(), ctx()));
+        let clients: Vec<_> = (0..8)
+            .map(|_| {
+                std::thread::spawn(move || {
+                    let mut client = TcpStream::connect(addr).unwrap();
+                    client.write_all(&get_public_key_frame()).unwrap();
+                    expect_not_initialized(&mut client);
+                })
+            })
+            .collect();
+        for c in clients {
+            c.join().unwrap();
+        }
+    }
+
+    #[test]
+    fn serve_closes_a_silent_connection_on_its_deadline_without_a_response() {
+        // A client that connects and sends nothing must not park a worker
+        // forever: the DeadlineStream times the read out and the socket closes.
+        // Verified indirectly: after the silent client, a normal one is still
+        // served (the idle timeout is 10 s, so only check liveness here).
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        std::thread::spawn(move || serve(listener.incoming(), ctx()));
+        let _silent = TcpStream::connect(addr).unwrap();
+        let mut client = TcpStream::connect(addr).unwrap();
+        client.write_all(&get_public_key_frame()).unwrap();
+        expect_not_initialized(&mut client);
+    }
+
+    #[test]
+    fn indexer_url_prefers_electrum_then_esplora_then_the_default() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        std::env::remove_var("ELECTRUM_URL");
+        std::env::remove_var("ESPLORA_URL");
+        assert_eq!(indexer_url_from_env(), "http://127.0.0.1:3443");
+        std::env::set_var("ESPLORA_URL", "http://127.0.0.1:9999");
+        assert_eq!(indexer_url_from_env(), "http://127.0.0.1:9999");
+        std::env::set_var("ELECTRUM_URL", "ssl://electrs.example:50002");
+        assert_eq!(indexer_url_from_env(), "ssl://electrs.example:50002");
+        std::env::remove_var("ELECTRUM_URL");
+        std::env::remove_var("ESPLORA_URL");
+    }
+
+    #[cfg(all(feature = "vsock", feature = "spv", target_os = "linux"))]
+    #[test]
+    fn forwarder_target_parses_ssl_and_tcp_urls_and_falls_back_for_http() {
+        assert_eq!(
+            forwarder_target("ssl://electrs.example:50002"),
+            (50002, Some("electrs.example".to_string()))
+        );
+        assert_eq!(
+            forwarder_target("tcp://10.0.0.5:50001/path"),
+            (50001, Some("10.0.0.5".to_string()))
+        );
+        assert_eq!(forwarder_target("http://127.0.0.1:3443"), (3443, None));
+        assert_eq!(forwarder_target("ssl://nohost"), (3443, None));
+        assert_eq!(forwarder_target("ssl://host:notaport"), (3443, None));
+        assert_eq!(forwarder_target(""), (3443, None));
+    }
+}

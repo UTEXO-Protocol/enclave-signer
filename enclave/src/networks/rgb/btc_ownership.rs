@@ -382,4 +382,84 @@ mod tests {
         make_input_ours(&mut psbt, &keys);
         assert!(!owned(&psbt, &keys));
     }
+
+    // ---- coverage: index oracle, scoping, out-of-range ----
+
+    #[test]
+    fn self_owned_output_indices_marks_every_output_paying_our_input_script() {
+        let keys = km();
+        let mut psbt = psbt_with(ScriptBuf::new(), ScriptBuf::new());
+        let ours = make_input_ours(&mut psbt, &keys);
+        let (foreign_spk, _, _, _) = multisig_address(foreign_xonly(0xC1));
+        psbt.unsigned_tx.output = vec![
+            TxOut {
+                value: Amount::from_sat(1),
+                script_pubkey: ours.clone(),
+            },
+            TxOut {
+                value: Amount::from_sat(2),
+                script_pubkey: foreign_spk,
+            },
+            TxOut {
+                value: Amount::from_sat(3),
+                script_pubkey: ours,
+            },
+        ];
+        psbt.outputs = vec![Default::default(); 3];
+        let owned = self_owned_output_indices(&psbt, &keys);
+        assert_eq!(owned, [0u32, 2].into_iter().collect());
+    }
+
+    #[test]
+    fn output_index_out_of_range_is_never_owned() {
+        let keys = km();
+        let mut psbt = psbt_with(ScriptBuf::new(), ScriptBuf::new());
+        let ours = make_input_ours(&mut psbt, &keys);
+        psbt.unsigned_tx.output[0].script_pubkey = ours;
+        let inputs = self_controlled_input_scripts(&psbt, &keys);
+        assert!(output_is_self_owned(&psbt, 0, &inputs));
+        assert!(!output_is_self_owned(&psbt, 1, &inputs));
+        assert!(!output_is_self_owned(&psbt, usize::MAX, &inputs));
+        assert!(self_owned_output_indices(&psbt, &keys).contains(&0));
+    }
+
+    #[test]
+    fn account_scope_filters_which_inputs_count_as_ours() {
+        let keys = km();
+        let mut psbt = psbt_with(ScriptBuf::new(), ScriptBuf::new());
+        let ours = make_input_ours(&mut psbt, &keys); // Vanilla account
+        let vanilla =
+            self_controlled_input_scripts_scoped(&psbt, &keys, Some(AccountType::Vanilla));
+        assert!(vanilla.contains(ours.as_bytes()));
+        let any = self_controlled_input_scripts_scoped(&psbt, &keys, None);
+        assert!(any.contains(ours.as_bytes()));
+        let colored =
+            self_controlled_input_scripts_scoped(&psbt, &keys, Some(AccountType::Colored));
+        assert!(colored.is_empty(), "a vanilla input is not a colored one");
+        assert_eq!(self_controlled_input_scripts(&psbt, &keys), vanilla);
+    }
+
+    #[test]
+    fn an_input_with_no_taproot_metadata_proves_nothing() {
+        let keys = km();
+        let (foreign_spk, _, _, _) = multisig_address(foreign_xonly(0xC1));
+        let psbt = psbt_with(foreign_spk.clone(), foreign_spk);
+        assert!(self_controlled_input_scripts(&psbt, &keys).is_empty());
+        assert!(self_owned_output_indices(&psbt, &keys).is_empty());
+        assert!(!owned(&psbt, &keys));
+    }
+
+    #[test]
+    fn a_foreign_key_wallet_owns_nothing_in_our_psbt() {
+        let keys = km();
+        let other = KeyManager::from_seed([0x99u8; 64], Network::Testnet).unwrap();
+        let mut psbt = psbt_with(ScriptBuf::new(), ScriptBuf::new());
+        let ours = make_input_ours(&mut psbt, &keys);
+        psbt.unsigned_tx.output[0].script_pubkey = ours;
+        assert!(owned(&psbt, &keys));
+        assert!(
+            !owned(&psbt, &other),
+            "same PSBT, different seed: not theirs"
+        );
+    }
 }

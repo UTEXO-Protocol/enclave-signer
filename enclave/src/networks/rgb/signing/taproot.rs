@@ -657,4 +657,143 @@ mod tests {
             "plain-BTC (vanilla-scoped) signing must refuse a colored input"
         );
     }
+
+    // ---- coverage: leaf-hash claim, key-path inputs, signer edge cases ----
+
+    #[test]
+    fn skips_when_origins_do_not_claim_this_leaf() {
+        let km = KeyManager::from_seed([0x42u8; 64], Network::Testnet).unwrap();
+        let (mut psbt, _, _, _, _) = build_legit_taproot_psbt(&km);
+        let our = our_xonly(&km);
+        let (leaf_hashes, _) = psbt.inputs[0].tap_key_origins.get_mut(&our).unwrap();
+        *leaf_hashes = vec![TapLeafHash::from_script(
+            &ScriptBuf::new(),
+            LeafVersion::TapScript,
+        )];
+        assert!(find_taproot_sign_jobs(&psbt, km.master_fingerprint(), &km).is_empty());
+        // An empty claim list is also a non-claim.
+        let (leaf_hashes, _) = psbt.inputs[0].tap_key_origins.get_mut(&our).unwrap();
+        leaf_hashes.clear();
+        assert!(find_taproot_sign_jobs(&psbt, km.master_fingerprint(), &km).is_empty());
+    }
+
+    #[test]
+    fn key_path_only_input_yields_no_job() {
+        let km = KeyManager::from_seed([0x42u8; 64], Network::Testnet).unwrap();
+        let (mut psbt, _, _, _, _) = build_legit_taproot_psbt(&km);
+        psbt.inputs[0].tap_scripts.clear();
+        assert!(find_taproot_sign_jobs(&psbt, km.master_fingerprint(), &km).is_empty());
+    }
+
+    #[test]
+    fn a_leaf_without_our_key_yields_no_job_even_with_origins() {
+        let km = KeyManager::from_seed([0x42u8; 64], Network::Testnet).unwrap();
+        let (mut psbt, internal, _, leaf_hash, _) = build_legit_taproot_psbt(&km);
+        let secp = Secp256k1::new();
+        // Rebuild the output around a leaf of three foreign keys but keep the
+        // (now stale) origins entry claiming our key in `leaf_hash`.
+        let foreign = multi_a_2_of_3(&[
+            xonly_from_byte(0xB1),
+            xonly_from_byte(0xB2),
+            xonly_from_byte(0xB3),
+        ]);
+        let info = TaprootBuilder::new()
+            .add_leaf(0, foreign.clone())
+            .unwrap()
+            .finalize(&secp, internal)
+            .unwrap();
+        psbt.inputs[0].witness_utxo.as_mut().unwrap().script_pubkey =
+            ScriptBuf::new_p2tr(&secp, internal, info.merkle_root());
+        psbt.inputs[0].tap_scripts.clear();
+        psbt.inputs[0].tap_scripts.insert(
+            info.control_block(&(foreign.clone(), LeafVersion::TapScript))
+                .unwrap(),
+            (foreign, LeafVersion::TapScript),
+        );
+        let _ = leaf_hash;
+        assert!(find_taproot_sign_jobs(&psbt, km.master_fingerprint(), &km).is_empty());
+    }
+
+    #[test]
+    fn job_carries_the_resolved_account_and_child_path() {
+        let km = KeyManager::from_seed([0x42u8; 64], Network::Testnet).unwrap();
+        let (psbt, _, _, _, _) = build_legit_taproot_psbt(&km);
+        let jobs = find_taproot_sign_jobs(&psbt, km.master_fingerprint(), &km);
+        assert_eq!(jobs.len(), 1);
+        assert_eq!(jobs[0].input_index, 0);
+        assert_eq!(jobs[0].account_type, AccountType::Vanilla);
+        assert_eq!(
+            jobs[0].child_path,
+            vec![
+                ChildNumber::Normal { index: 0 },
+                ChildNumber::Normal { index: 0 }
+            ]
+        );
+    }
+
+    #[test]
+    fn signing_with_no_jobs_is_a_noop() {
+        let km = KeyManager::from_seed([0x42u8; 64], Network::Testnet).unwrap();
+        let (mut psbt, _, _, _, _) = build_legit_taproot_psbt(&km);
+        let before = psbt.clone();
+        assert_eq!(sign_taproot_inputs(&mut psbt, &km, &[]).unwrap(), 0);
+        assert_eq!(psbt, before);
+    }
+
+    #[test]
+    fn signing_fails_closed_when_any_input_lacks_witness_utxo() {
+        let km = KeyManager::from_seed([0x42u8; 64], Network::Testnet).unwrap();
+        let (mut psbt, _, _, _, _) = build_legit_taproot_psbt(&km);
+        // BIP-341 sighash needs every prevout, so a second input with no
+        // witness_utxo blocks signing of the first.
+        psbt.unsigned_tx.input.push(TxIn {
+            previous_output: OutPoint {
+                txid: Txid::from_byte_array([0xBB; 32]),
+                vout: 1,
+            },
+            script_sig: ScriptBuf::new(),
+            sequence: Sequence::MAX,
+            witness: bitcoin::Witness::default(),
+        });
+        psbt.inputs.push(Default::default());
+        let jobs = find_taproot_sign_jobs(&psbt, km.master_fingerprint(), &km);
+        assert_eq!(jobs.len(), 1, "input 0 is still recognised");
+        let err = sign_taproot_inputs(&mut psbt, &km, &jobs).unwrap_err();
+        assert!(
+            err.to_string().contains("missing witness_utxo for taproot"),
+            "{err}"
+        );
+        assert!(psbt.inputs[0].tap_script_sigs.is_empty(), "nothing signed");
+    }
+
+    #[test]
+    fn a_signed_leaf_is_not_offered_again() {
+        let km = KeyManager::from_seed([0x42u8; 64], Network::Testnet).unwrap();
+        let (mut psbt, _, _, leaf_hash, _) = build_legit_taproot_psbt(&km);
+        let jobs = find_taproot_sign_jobs(&psbt, km.master_fingerprint(), &km);
+        assert_eq!(sign_taproot_inputs(&mut psbt, &km, &jobs).unwrap(), 1);
+        assert!(psbt.inputs[0]
+            .tap_script_sigs
+            .contains_key(&(our_xonly(&km), leaf_hash)));
+        assert!(find_taproot_sign_jobs(&psbt, km.master_fingerprint(), &km).is_empty());
+        // Re-running the signer on the stale job list overwrites with the
+        // same deterministic signature rather than failing.
+        let first = psbt.inputs[0].tap_script_sigs[&(our_xonly(&km), leaf_hash)];
+        assert_eq!(sign_taproot_inputs(&mut psbt, &km, &jobs).unwrap(), 1);
+        assert_eq!(
+            psbt.inputs[0].tap_script_sigs[&(our_xonly(&km), leaf_hash)],
+            first
+        );
+    }
+
+    #[test]
+    fn a_different_wallet_finds_no_job_in_our_psbt() {
+        let km = KeyManager::from_seed([0x42u8; 64], Network::Testnet).unwrap();
+        let other = KeyManager::from_seed([0x43u8; 64], Network::Testnet).unwrap();
+        let (psbt, _, _, _, _) = build_legit_taproot_psbt(&km);
+        assert!(find_taproot_sign_jobs(&psbt, other.master_fingerprint(), &other).is_empty());
+        // Our fingerprint with the other wallet's keys derives a different
+        // xonly, which is the forged-origins guard.
+        assert!(find_taproot_sign_jobs(&psbt, km.master_fingerprint(), &other).is_empty());
+    }
 }

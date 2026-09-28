@@ -111,3 +111,48 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+mod runtime_tests {
+    use super::*;
+
+    #[test]
+    fn sync_from_ptp_is_fail_soft() {
+        // Without `/dev/ptp0` (every CI runner) the read fails with the open
+        // stage named; with a device but no CAP_SYS_TIME the set stage fails.
+        // Either way the function returns an error instead of panicking, and
+        // when it does succeed the applied offset is a sane wall-clock delta.
+        match sync_from_ptp() {
+            Err(msg) => assert!(
+                msg.starts_with("open /dev/ptp0")
+                    || msg.starts_with("read PTP clock")
+                    || msg.starts_with("set CLOCK_REALTIME"),
+                "{msg}"
+            ),
+            Ok(offset) => assert!(offset.abs() < 86_400, "offset {offset}s"),
+        }
+        if !std::path::Path::new(PTP_DEVICE).exists() {
+            assert!(sync_from_ptp().unwrap_err().starts_with("open /dev/ptp0"));
+        }
+    }
+
+    #[test]
+    fn spawn_does_not_panic_and_returns_immediately() {
+        let started = std::time::Instant::now();
+        spawn();
+        assert!(
+            started.elapsed() < SYNC_INTERVAL,
+            "spawn must not block on the sync loop"
+        );
+    }
+
+    #[test]
+    fn fd_to_clockid_is_always_negative_and_marks_the_clockfd_bits() {
+        for fd in [0, 1, 2, 3, 100, 1_000_000] {
+            let id = fd_to_clockid(fd);
+            assert!(id < 0, "fd {fd} -> {id}");
+            assert_eq!(id & 7, 3, "low three bits are CLOCKFD");
+            assert_eq!((!(id >> 3)) as RawFd, fd, "round-trips back to the fd");
+        }
+    }
+}

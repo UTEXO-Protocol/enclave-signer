@@ -632,3 +632,306 @@ mod tests {
         );
     }
 }
+
+/// `ProductionPolicy::check_invariants` on hand-built values (`resolve` can
+/// never produce most of the failing shapes), plus the resolution precedence
+/// and commitment identities the module docs promise.
+#[cfg(test)]
+mod invariant_tests {
+    use super::*;
+
+    fn prod() -> ProductionPolicy {
+        ProductionPolicy {
+            chain_id: 1,
+            bridge_contract: [1u8; 20],
+            rgb_asset_id: "rgb:asset".into(),
+            allow_vanilla_psbt: false,
+            attestation: AttestationMode::Real,
+            evm_source: EvmDataSource::RawRpc,
+            evm_checkpoint: None,
+            btc_source: BtcDataSource::SpvVerified,
+            gas_tx_allowed_to: None,
+            gas_tx_max_gas_limit: 0,
+            gas_tx_max_fee_per_gas: 0,
+            gas_tx_max_value_wei: None,
+            gas_tx_allowed_selectors: vec![],
+        }
+    }
+
+    fn release_bridge_ctx() -> BuildContext {
+        BuildContext {
+            debug_or_test: false,
+            dev_mode: false,
+            mock_attestation: false,
+            allow_seed_import: false,
+            rgb_validation: true,
+        }
+    }
+
+    #[test]
+    fn a_fully_pinned_real_spv_policy_passes() {
+        assert!(prod().check_invariants().is_ok());
+        let mut helios = prod();
+        helios.evm_source = EvmDataSource::HeliosVerified;
+        helios.evm_checkpoint = Some([7u8; 32]);
+        assert!(helios.check_invariants().is_ok());
+        let mut disabled = prod();
+        disabled.evm_source = EvmDataSource::Disabled;
+        assert!(disabled.check_invariants().is_ok());
+    }
+
+    #[test]
+    fn each_missing_pin_fails_the_invariants() {
+        let mut p = prod();
+        p.chain_id = 0;
+        assert!(p.check_invariants().unwrap_err().contains("pins"));
+        let mut p = prod();
+        p.bridge_contract = [0u8; 20];
+        assert!(p.check_invariants().unwrap_err().contains("pins"));
+        let mut p = prod();
+        p.rgb_asset_id.clear();
+        assert!(p.check_invariants().unwrap_err().contains("pins"));
+    }
+
+    #[test]
+    fn mock_attestation_fails_the_invariants() {
+        let mut p = prod();
+        p.attestation = AttestationMode::Mock;
+        let err = p.check_invariants().unwrap_err();
+        assert!(err.contains("real (NSM) attestation"), "{err}");
+    }
+
+    #[test]
+    fn helios_without_a_checkpoint_fails_but_a_checkpoint_on_raw_rpc_is_harmless() {
+        let mut p = prod();
+        p.evm_source = EvmDataSource::HeliosVerified;
+        assert!(p.check_invariants().unwrap_err().contains("checkpoint"));
+        let mut p = prod();
+        p.evm_checkpoint = Some([1u8; 32]);
+        assert!(p.check_invariants().is_ok());
+    }
+
+    #[test]
+    fn the_boot_gate_propagates_invariant_failures_only_for_release_bridge_builds() {
+        let mut bad = prod();
+        bad.attestation = AttestationMode::Mock;
+        let policy = SecurityPolicy::Production(bad);
+        assert!(policy
+            .assert_valid_for_build(&release_bridge_ctx())
+            .is_err());
+        // A non-bridge or debug context is exempt even with a broken policy.
+        let non_bridge = BuildContext {
+            rgb_validation: false,
+            ..release_bridge_ctx()
+        };
+        assert!(policy.assert_valid_for_build(&non_bridge).is_ok());
+        let debug = BuildContext {
+            debug_or_test: true,
+            ..release_bridge_ctx()
+        };
+        assert!(policy.assert_valid_for_build(&debug).is_ok());
+    }
+
+    #[test]
+    fn dev_flags_resolve_in_a_fixed_precedence() {
+        let cfg = BridgeConfig {
+            chain_id: 1,
+            bridge_contract: [1u8; 20],
+            rgb_asset_id: "rgb:a".into(),
+            ..Default::default()
+        };
+        let all = BuildContext {
+            debug_or_test: true,
+            dev_mode: true,
+            mock_attestation: true,
+            allow_seed_import: true,
+            rgb_validation: true,
+        };
+        let reason = |ctx: &BuildContext| match SecurityPolicy::resolve(
+            ctx,
+            &cfg,
+            EvmDataSource::RawRpc,
+            None,
+        ) {
+            SecurityPolicy::Development { reason } => reason,
+            other => panic!("expected Development, got {other:?}"),
+        };
+        assert_eq!(reason(&all), DevReason::DevMode);
+        assert_eq!(
+            reason(&BuildContext {
+                dev_mode: false,
+                ..all
+            }),
+            DevReason::MockAttestation
+        );
+        assert_eq!(
+            reason(&BuildContext {
+                dev_mode: false,
+                mock_attestation: false,
+                ..all
+            }),
+            DevReason::AllowSeedImport
+        );
+        assert_eq!(
+            reason(&BuildContext {
+                dev_mode: false,
+                mock_attestation: false,
+                allow_seed_import: false,
+                ..all
+            }),
+            DevReason::DebugBuild
+        );
+        // Release, non-bridge beats unconfigured.
+        assert_eq!(
+            reason(&BuildContext {
+                debug_or_test: false,
+                dev_mode: false,
+                mock_attestation: false,
+                allow_seed_import: false,
+                rgb_validation: false,
+            }),
+            DevReason::NonBridgeBuild
+        );
+    }
+
+    #[test]
+    fn unset_gas_destination_commits_as_the_zero_address() {
+        let mut none = prod();
+        none.gas_tx_allowed_to = None;
+        let mut zero = prod();
+        zero.gas_tx_allowed_to = Some([0u8; 20]);
+        assert_eq!(
+            SecurityPolicy::Production(none).commitment_bytes(),
+            SecurityPolicy::Production(zero).commitment_bytes()
+        );
+        let mut set = prod();
+        set.gas_tx_allowed_to = Some([9u8; 20]);
+        assert_ne!(
+            SecurityPolicy::Production(set).commitment_bytes(),
+            SecurityPolicy::Production(prod()).commitment_bytes()
+        );
+    }
+
+    #[test]
+    fn selector_order_does_not_change_the_commitment_but_membership_does() {
+        let mut a = prod();
+        a.gas_tx_allowed_selectors = vec![[1, 1, 1, 1], [2, 2, 2, 2]];
+        let mut b = prod();
+        b.gas_tx_allowed_selectors = vec![[2, 2, 2, 2], [1, 1, 1, 1]];
+        let mut c = prod();
+        c.gas_tx_allowed_selectors = vec![[3, 3, 3, 3]];
+        assert_eq!(
+            SecurityPolicy::Production(a).commitment_bytes(),
+            SecurityPolicy::Production(b).commitment_bytes()
+        );
+        assert_ne!(
+            SecurityPolicy::Production(c).commitment_bytes(),
+            SecurityPolicy::Production(prod()).commitment_bytes()
+        );
+    }
+
+    #[test]
+    fn attested_form_mirrors_every_production_field() {
+        let mut p = prod();
+        p.allow_vanilla_psbt = true;
+        p.evm_source = EvmDataSource::HeliosVerified;
+        p.evm_checkpoint = Some([4u8; 32]);
+        p.gas_tx_allowed_to = Some([5u8; 20]);
+        p.gas_tx_max_gas_limit = 6;
+        p.gas_tx_max_fee_per_gas = 7;
+        p.gas_tx_max_value_wei = Some(8);
+        p.gas_tx_allowed_selectors = vec![[9, 9, 9, 9]];
+        match SecurityPolicy::Production(p).attested() {
+            AttestedPolicy::Production {
+                allow_vanilla_psbt,
+                attestation,
+                evm_source,
+                btc_source,
+                chain_id,
+                bridge_contract,
+                rgb_asset_id,
+                evm_checkpoint,
+                gas_tx_allowed_to,
+                gas_tx_max_gas_limit,
+                gas_tx_max_fee_per_gas,
+                gas_tx_max_value_wei,
+                gas_tx_allowed_selectors,
+            } => {
+                assert!(allow_vanilla_psbt);
+                assert_eq!(attestation, AttestationMode::Real);
+                assert_eq!(evm_source, EvmDataSource::HeliosVerified);
+                assert_eq!(btc_source, BtcDataSource::SpvVerified);
+                assert_eq!(chain_id, 1);
+                assert_eq!(bridge_contract, [1u8; 20]);
+                assert_eq!(rgb_asset_id, "rgb:asset");
+                assert_eq!(evm_checkpoint, Some([4u8; 32]));
+                assert_eq!(gas_tx_allowed_to, [5u8; 20]);
+                assert_eq!(gas_tx_max_gas_limit, 6);
+                assert_eq!(gas_tx_max_fee_per_gas, 7);
+                assert_eq!(gas_tx_max_value_wei, 8);
+                assert_eq!(gas_tx_allowed_selectors, vec![[9, 9, 9, 9]]);
+            }
+            AttestedPolicy::Development => panic!("expected Production"),
+        }
+        assert_eq!(
+            SecurityPolicy::Development {
+                reason: DevReason::Unconfigured
+            }
+            .attested(),
+            AttestedPolicy::Development
+        );
+    }
+
+    #[test]
+    fn commitment_bytes_start_with_the_version_and_arm_tags() {
+        let prod_bytes = SecurityPolicy::Production(prod()).commitment_bytes();
+        assert_eq!(
+            &prod_bytes[..2],
+            &[attestation_verify::POLICY_COMMITMENT_V2, 0x01]
+        );
+        let dev_bytes = SecurityPolicy::Development {
+            reason: DevReason::DevMode,
+        }
+        .commitment_bytes();
+        assert_eq!(
+            dev_bytes,
+            vec![attestation_verify::POLICY_COMMITMENT_V2, 0x00]
+        );
+    }
+
+    #[test]
+    fn boot_gate_error_names_the_dev_reason() {
+        let ctx = release_bridge_ctx();
+        for (reason, needle) in [
+            (DevReason::MockAttestation, "MockAttestation"),
+            (DevReason::AllowSeedImport, "AllowSeedImport"),
+            (DevReason::Unconfigured, "Unconfigured"),
+            (DevReason::DevMode, "DevMode"),
+        ] {
+            let err = SecurityPolicy::Development { reason }
+                .assert_valid_for_build(&ctx)
+                .unwrap_err();
+            assert!(err.contains(needle), "{err}");
+            assert!(err.contains("refusing to boot"), "{err}");
+        }
+    }
+
+    #[test]
+    fn current_build_context_reflects_the_compiled_features() {
+        let ctx = BuildContext::current();
+        assert!(ctx.debug_or_test, "unit tests always run under cfg(test)");
+        assert_eq!(ctx.dev_mode, cfg!(feature = "dev-mode"));
+        assert_eq!(ctx.mock_attestation, cfg!(feature = "mock-attestation"));
+        assert_eq!(ctx.allow_seed_import, cfg!(feature = "allow-seed-import"));
+        assert_eq!(ctx.rgb_validation, cfg!(feature = "rgb-validation"));
+        // Whatever the features, a test build never resolves to Production.
+        let p = SecurityPolicy::resolve(
+            &ctx,
+            &BridgeConfig::default(),
+            EvmDataSource::Disabled,
+            None,
+        );
+        assert!(matches!(p, SecurityPolicy::Development { .. }));
+        assert!(p.assert_valid_for_build(&ctx).is_ok());
+    }
+}

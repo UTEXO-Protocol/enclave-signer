@@ -1514,4 +1514,76 @@ mod tests {
             }
         }
     }
+
+    // ---- coverage: op-key domain separation and shape parsing ----
+
+    #[test]
+    fn op_key_is_not_a_bare_hash_of_the_concatenated_fields() {
+        use sha3::{Digest, Keccak256};
+        let key = psbt_operation_key(1, &[2u8; 20], &[3u8; 32], &[4u8; 32], "rgb:x");
+        let mut naive = Keccak256::new();
+        naive.update(1u64.to_be_bytes());
+        naive.update([2u8; 20]);
+        naive.update([3u8; 32]);
+        naive.update([4u8; 32]);
+        naive.update(b"rgb:x");
+        let naive: [u8; 32] = naive.finalize().into();
+        assert_ne!(key, naive, "domain tag and length prefixes are mixed in");
+        assert_ne!(key, [0u8; 32]);
+    }
+
+    #[test]
+    fn op_key_accepts_empty_variable_fields_and_keeps_them_distinct() {
+        let a = psbt_operation_key(1, &[0u8; 20], &[], &[], "");
+        let b = psbt_operation_key(1, &[0u8; 20], &[0], &[], "");
+        let c = psbt_operation_key(1, &[0u8; 20], &[], &[0], "");
+        let d = psbt_operation_key(1, &[0u8; 20], &[], &[], "\0");
+        assert!(a != b && a != c && a != d && b != c && b != d && c != d);
+    }
+
+    fn two_input_psbt_bytes() -> Vec<u8> {
+        let input = |b: u8| TxIn {
+            previous_output: OutPoint {
+                txid: Txid::from_raw_hash(bitcoin::hashes::sha256d::Hash::from_byte_array([b; 32])),
+                vout: b as u32,
+            },
+            script_sig: ScriptBuf::new(),
+            sequence: Sequence::MAX,
+            witness: Witness::new(),
+        };
+        let unsigned_tx = Transaction {
+            version: bitcoin::transaction::Version(2),
+            lock_time: bitcoin::absolute::LockTime::ZERO,
+            input: vec![input(1), input(2)],
+            output: vec![TxOut {
+                value: Amount::from_sat(1_000),
+                script_pubkey: ScriptBuf::new(),
+            }],
+        };
+        Psbt::from_unsigned_tx(unsigned_tx).unwrap().serialize()
+    }
+
+    #[test]
+    fn parse_psbt_shape_returns_the_parsed_inputs() {
+        let psbt = parse_psbt_shape(&two_input_psbt_bytes()).unwrap();
+        assert_eq!(psbt.inputs.len(), 2);
+        assert_eq!(psbt.unsigned_tx.input[1].previous_output.vout, 2);
+        assert!(validate_psbt_bytes(&two_input_psbt_bytes()).is_ok());
+    }
+
+    #[test]
+    fn shape_errors_are_validation_failures_with_specific_texts() {
+        let empty = validate_psbt_bytes(&[]).unwrap_err();
+        assert_eq!(empty.error_code(), 3);
+        assert!(empty.to_string().contains("psbt_bytes is empty"));
+        let garbage = validate_psbt_bytes(b"psbt\xff\x00garbage").unwrap_err();
+        assert!(
+            garbage.to_string().contains("not a valid PSBT"),
+            "{garbage}"
+        );
+        // A valid PSBT with its magic corrupted is garbage too.
+        let mut bytes = two_input_psbt_bytes();
+        bytes[0] ^= 0xff;
+        assert!(validate_psbt_bytes(&bytes).is_err());
+    }
 }

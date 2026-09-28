@@ -794,4 +794,179 @@ mod tests {
             "expected canonical-encoding rejection of overlapping tails, got: {err}"
         );
     }
+
+    // ---- coverage: deadline boundary, unpinned config, LZ decode errors ----
+
+    fn now_secs() -> u64 {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+    }
+
+    #[test]
+    fn deadline_at_or_before_now_is_expired_and_a_future_one_passes() {
+        let now = now_secs();
+        for deadline in [0u64, now.saturating_sub(1), now] {
+            let mut destination = destination();
+            destination.deadline = deadline;
+            with_ctx(&config(), |ctx| {
+                assert!(
+                    destination_or_err(&destination, ctx).contains("deadline expired"),
+                    "deadline {deadline} must be expired"
+                );
+            });
+        }
+        let mut destination = destination();
+        destination.deadline = now + 120;
+        with_ctx(&config(), |ctx| {
+            assert!(validate_dest(&destination, ctx).is_ok())
+        });
+    }
+
+    #[test]
+    fn unpinned_config_skips_the_chain_and_proxy_pins() {
+        let unpinned = BridgeConfig::default();
+        let mut destination = destination();
+        destination.chain_id = 999;
+        destination.proxy_contract = vec![0x77; ADDRESS_LEN];
+        destination.call_data = funds_out_calldata_for_chain(1000, 5);
+        with_ctx(&unpinned, |ctx| {
+            let proof =
+                validate_dest(&destination, ctx).expect("unpinned config trusts the request");
+            assert_eq!(proof.amount, 1000);
+        });
+        // The structural checks still run: a zero chain id is refused.
+        destination.chain_id = 0;
+        with_ctx(&unpinned, |ctx| {
+            assert!(destination_or_err(&destination, ctx).contains("chain_id must be > 0"));
+        });
+    }
+
+    #[test]
+    fn proxy_contract_of_the_wrong_width_is_rejected() {
+        for len in [19usize, 21, 32] {
+            let mut destination = destination();
+            destination.proxy_contract = vec![0xAA; len];
+            with_ctx(&config(), |ctx| {
+                let err = destination_or_err(&destination, ctx);
+                assert!(
+                    err.contains(&format!(
+                        "proxy_contract must be {ADDRESS_LEN} bytes, got {len}"
+                    )),
+                    "{len}: {err}"
+                );
+            });
+        }
+    }
+
+    fn lz_calldata_with_amount(amount: U256) -> Vec<u8> {
+        use alloy_primitives::FixedBytes;
+        let mut recipient = [0u8; 32];
+        recipient[31] = 0x05;
+        lzFundsOutCall {
+            amount,
+            burnId: U256::from(7u64),
+            sourceChainId: U256::from(1u64),
+            destinationChainId: U256::from(137u64),
+            sourceAddress: String::new(),
+            proof: Bytes::new(),
+            settlementData: Bytes::new(),
+            dstEid: 30101u32,
+            recipient: FixedBytes(recipient),
+            minAmountLD: amount,
+            extraOptions: Bytes::new(),
+        }
+        .abi_encode()
+    }
+
+    #[test]
+    fn lz_amount_above_u64_is_rejected() {
+        let mut destination = lz_destination(137);
+        destination.call_data = lz_calldata_with_amount(U256::from(u64::MAX) + U256::from(1u64));
+        with_ctx(&config(), |ctx| {
+            assert!(destination_or_err(&destination, ctx).contains("lzFundsOut amount exceeds u64"));
+        });
+        // Exactly u64::MAX decodes and then trips the declared-amount check.
+        destination.call_data = lz_calldata_with_amount(U256::from(u64::MAX));
+        with_ctx(&config(), |ctx| {
+            assert!(destination_or_err(&destination, ctx).contains("calldata amount mismatch"));
+        });
+    }
+
+    #[test]
+    fn lz_declared_amount_must_match_the_calldata() {
+        let mut destination = lz_destination(137);
+        destination.calldata_amount = 999;
+        with_ctx(&config(), |ctx| {
+            let err = destination_or_err(&destination, ctx);
+            assert!(err.contains("decoded 1000 != declared 999"), "{err}");
+        });
+    }
+
+    #[test]
+    fn lz_non_canonical_or_truncated_calldata_is_rejected() {
+        let mut trailing = lz_funds_out_calldata(1000, 137);
+        trailing.push(0);
+        let err = decode_lz_funds_out_params(&trailing)
+            .err()
+            .expect("trailing byte must fail");
+        assert!(
+            err.to_string().contains("non-canonical lzFundsOut"),
+            "{err}"
+        );
+        let mut destination = lz_destination(137);
+        destination.call_data = trailing;
+        with_ctx(&config(), |ctx| {
+            assert!(destination_or_err(&destination, ctx).contains("non-canonical"));
+        });
+        let truncated = lz_funds_out_calldata(1000, 137)[..40].to_vec();
+        let err = decode_lz_funds_out_params(&truncated)
+            .err()
+            .expect("truncated calldata must fail");
+        assert!(
+            err.to_string().contains("invalid lzFundsOut calldata"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn pools_route_yields_typed_params_and_lz_route_does_not() {
+        with_ctx(&config(), |ctx| {
+            let (proof, params) = super::validate_destination(&destination(), ctx).unwrap();
+            assert_eq!(proof.amount, 1000);
+            let params = params.expect("pools route decodes FundsOutParams");
+            assert_eq!(params.amount, U256::from(1000u64));
+            assert_eq!(params.burnId, U256::from(7u64));
+            let (proof, params) = super::validate_destination(&lz_destination(137), ctx).unwrap();
+            assert_eq!(proof.amount, 1000);
+            assert!(
+                params.is_none(),
+                "the LZ route re-decodes its own shape later"
+            );
+        });
+    }
+
+    #[test]
+    fn route_selectors_are_distinct_and_abi_derived() {
+        assert_eq!(LZ_FUNDS_OUT_SELECTOR, lzFundsOutCall::SELECTOR);
+        assert_eq!(FUNDS_OUT_SELECTOR_POOLS, fundsOutCall::SELECTOR);
+        assert_ne!(LZ_FUNDS_OUT_SELECTOR, FUNDS_OUT_SELECTOR_POOLS);
+        assert_eq!(ALLOWED_SELECTORS.len(), 2);
+    }
+
+    #[test]
+    fn source_accepts_any_amount_and_ignores_the_other_fields() {
+        let mut s = source();
+        s.token = vec![];
+        s.recipient = vec![0; 5];
+        s.funds_in_operation_id = vec![];
+        s.commission = u64::MAX;
+        assert_eq!(validate_source(u64::MAX, &s).unwrap().amount, u64::MAX);
+        assert_eq!(validate_source(0, &s).unwrap().amount, 0);
+        for len in [0usize, 31, 33] {
+            s.tx_hash = vec![0xAA; len];
+            assert!(validate_source(1, &s).is_err(), "{len}");
+        }
+    }
 }

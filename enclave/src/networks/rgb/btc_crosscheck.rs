@@ -705,4 +705,147 @@ mod tests {
         #[cfg(not(all(feature = "rgb-validation", not(test))))]
         assert!(result.is_ok());
     }
+
+    // ---- coverage: overflow guards and budget boundaries ----
+
+    fn btc_req(psbt_bytes: Vec<u8>) -> SignBtcRequest {
+        SignBtcRequest { psbt_bytes }
+    }
+
+    #[test]
+    fn total_input_value_overflow_is_rejected() {
+        let keys = km();
+        let ours = our_address(&keys);
+        let psbt_bytes = psbt_from_our_address(&keys, &[u64::MAX, 1], &[(ours.spk.clone(), 1)]);
+        let err =
+            validate_btc_request(&btc_req(psbt_bytes), &cfg_with_cap(u64::MAX), &keys).unwrap_err();
+        assert!(
+            err.to_string().contains("total input value overflow"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn unowned_output_value_overflow_is_rejected() {
+        let keys = km();
+        let psbt_bytes = psbt_from_our_address(
+            &keys,
+            &[10_000],
+            &[(foreign_address(), u64::MAX), (foreign_address(), 1)],
+        );
+        let err =
+            validate_btc_request(&btc_req(psbt_bytes), &cfg_with_cap(u64::MAX), &keys).unwrap_err();
+        assert!(
+            err.to_string().contains("unowned output value overflow"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn unowned_budget_boundary_is_inclusive() {
+        let keys = km();
+        let ours = our_address(&keys);
+        let at = psbt_from_our_address(
+            &keys,
+            &[10_000],
+            &[(ours.spk.clone(), 1_000), (foreign_address(), 5_000)],
+        );
+        assert!(validate_btc_request(&btc_req(at), &cfg_with_cap(1_000_000), &keys).is_ok());
+        let over = psbt_from_our_address(
+            &keys,
+            &[10_000],
+            &[(ours.spk.clone(), 1_000), (foreign_address(), 5_001)],
+        );
+        let err =
+            validate_btc_request(&btc_req(over), &cfg_with_cap(1_000_000), &keys).unwrap_err();
+        assert!(
+            err.to_string().contains("over the pinned budget of 5000"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn unset_unowned_budget_takes_the_non_production_branch_under_test() {
+        // In a test build the unset budget warns and skips, so a foreign
+        // output is admitted; the production refusal is `not(test)`-gated.
+        let keys = km();
+        let psbt_bytes = psbt_from_our_address(&keys, &[10_000], &[(foreign_address(), 9_000)]);
+        let cfg = BridgeConfig {
+            btc_max_total_sats: 1_000_000,
+            btc_max_unowned_sats: 0,
+            ..Default::default()
+        };
+        assert!(validate_btc_request(&btc_req(psbt_bytes), &cfg, &keys).is_ok());
+    }
+
+    #[test]
+    fn value_cap_applies_to_the_sum_of_inputs_not_outputs() {
+        let keys = km();
+        let ours = our_address(&keys);
+        // Two inputs of 600 (1200 spent) but only 100 paid out: the cap is on
+        // the 1200.
+        let psbt_bytes = psbt_from_our_address(&keys, &[600, 600], &[(ours.spk.clone(), 100)]);
+        let err = validate_btc_request(&btc_req(psbt_bytes.clone()), &cfg_with_cap(1_199), &keys)
+            .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("1200 sats exceeds pinned cap 1199"),
+            "{err}"
+        );
+        assert!(validate_btc_request(&btc_req(psbt_bytes), &cfg_with_cap(1_200), &keys).is_ok());
+    }
+
+    #[test]
+    fn shape_errors_surface_before_any_value_check() {
+        let keys = km();
+        let err = validate_btc_request(&btc_req(vec![]), &cfg_with_cap(1), &keys).unwrap_err();
+        assert!(err.to_string().contains("psbt_bytes is empty"), "{err}");
+        let err =
+            validate_btc_request(&btc_req(vec![0xff; 20]), &cfg_with_cap(1), &keys).unwrap_err();
+        assert!(err.to_string().contains("not a valid PSBT"), "{err}");
+    }
+
+    #[test]
+    fn rgb_sats_budget_boundary_is_inclusive_and_unset_passes_under_test() {
+        let keys = km();
+        let ours = our_address(&keys);
+        let at = psbt_from_our_address(
+            &keys,
+            &[10_000],
+            &[(ours.spk.clone(), 4_000), (foreign_address(), 5_000)],
+        );
+        let psbt = Psbt::deserialize(&at).unwrap();
+        assert!(validate_rgb_psbt_sats(&psbt, &rgb_cfg(5_000), &keys).is_ok());
+        let err = validate_rgb_psbt_sats(&psbt, &rgb_cfg(4_999), &keys).unwrap_err();
+        assert!(err.to_string().contains("5000 sats"), "{err}");
+        // Unset budget: the test build warns and admits (production refuses).
+        assert!(validate_rgb_psbt_sats(&psbt, &rgb_cfg(0), &keys).is_ok());
+    }
+
+    #[test]
+    fn rgb_sats_unowned_overflow_names_the_output() {
+        let keys = km();
+        let bytes = psbt_from_our_address(
+            &keys,
+            &[10_000],
+            &[(foreign_address(), u64::MAX), (foreign_address(), 1)],
+        );
+        let psbt = Psbt::deserialize(&bytes).unwrap();
+        let err = validate_rgb_psbt_sats(&psbt, &rgb_cfg(5_000), &keys).unwrap_err();
+        assert!(err.to_string().contains("overflow at output 1"), "{err}");
+    }
+
+    #[test]
+    fn rgb_sats_gate_counts_only_outputs_we_cannot_prove() {
+        let keys = km();
+        let ours = our_address(&keys);
+        // Everything pays back to our input script: zero unowned, any budget.
+        let bytes = psbt_from_our_address(
+            &keys,
+            &[10_000],
+            &[(ours.spk.clone(), 5_000), (ours.spk.clone(), 4_000)],
+        );
+        let psbt = Psbt::deserialize(&bytes).unwrap();
+        assert!(validate_rgb_psbt_sats(&psbt, &rgb_cfg(1), &keys).is_ok());
+    }
 }
