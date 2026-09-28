@@ -469,3 +469,305 @@ fn a_second_frame_on_one_connection_is_not_answered() {
     let second: Result<EnclaveResponse, _> = framing::read_message(&mut stream);
     assert!(second.is_err(), "a pipelined second request was answered");
 }
+
+// ---- SPV trust on non-mainnet networks --------------------------------------------
+
+/// Headers must cost something to produce. On signet the enclave verifies
+/// neither proof of work nor the BIP-325 block signature, so a host can
+/// extend the enclave's signet chain with unmined headers for free - and
+/// signet is the network the production checkpoint pins.
+#[cfg(feature = "spv")]
+#[test]
+#[ignore = "FINDING: signet headers are accepted with zero work and no BIP-325 signature"]
+fn signet_headers_without_work_are_refused() {
+    use bitcoin::block::{Header, Version};
+    use bitcoin::consensus::serialize;
+    use bitcoin::hashes::Hash;
+    use utexo_bridge_enclave::networks::rgb::spv::{checkpoint_for, HeaderChain, Network};
+
+    let cp = checkpoint_for(Network::Signet);
+    let mut chain = HeaderChain::new(Network::Signet, cp);
+    let header = Header {
+        version: Version::ONE,
+        prev_blockhash: bitcoin::BlockHash::from_byte_array(cp.hash),
+        merkle_root: bitcoin::TxMerkleNode::from_byte_array([0x42; 32]),
+        time: cp.time + 600,
+        bits: bitcoin::CompactTarget::from_consensus(cp.bits),
+        nonce: 0, // no attempt at meeting the target
+    };
+    let hash = header.block_hash();
+    let target = bitcoin::Target::from_compact(header.bits);
+    assert!(
+        !target.is_met_by(hash),
+        "fixture must not accidentally satisfy the signet target"
+    );
+    assert!(
+        chain
+            .submit_headers(cp.height + 1, &[serialize(&header)])
+            .is_err(),
+        "an unmined signet header was accepted at height {}",
+        cp.height + 1
+    );
+}
+
+// ---- plain-BTC fee burn ----------------------------------------------------------------
+
+/// A plain-BTC PSBT that pays almost everything to miners must be refused:
+/// the spend cap bounds the inputs, but nothing bounds the fee itself, so a
+/// host can burn the whole cap on every signing.
+#[cfg(feature = "allow-seed-import")]
+#[test]
+#[ignore = "FINDING: no fee bound on the plain-BTC path; the whole spend cap can go to miners"]
+fn plain_btc_refuses_a_psbt_that_burns_the_inputs_as_fee() {
+    use common::taproot_fixture as fx;
+    use utexo_bridge_enclave::keys::{AccountType, KeyManager};
+
+    let km = KeyManager::from_mnemonic(MNEMONIC, bitcoin::Network::Bitcoin).unwrap();
+    let port = common::start_test_server_with_config(
+        |state| state.initialize_from_mnemonic(MNEMONIC).unwrap(),
+        BridgeConfig {
+            btc_max_total_sats: 1_000_000,
+            ..Default::default()
+        },
+    );
+    let mut psbt = fx::psbt_with_our_input(&km, AccountType::Vanilla, true);
+    // 100_000 sats in, 1 sat out, back to ourselves: 99_999 sats to miners.
+    psbt.unsigned_tx.output[0].value = bitcoin::Amount::from_sat(1);
+    let resp = send(
+        port,
+        Req::SignBtc(SignBtcRequest {
+            psbt_bytes: psbt.serialize(),
+        }),
+    );
+    expect_error(resp);
+}
+
+// ---- state machine ---------------------------------------------------------------------
+
+/// While a clone is in flight the enclave holds no committed keys; every
+/// signing entry point must refuse rather than sign with a half-installed
+/// identity.
+#[cfg(feature = "allow-seed-import")]
+#[test]
+fn nothing_signs_while_a_clone_is_in_flight() {
+    use common::taproot_fixture as fx;
+    use utexo_bridge_enclave::keys::{AccountType, KeyManager};
+
+    let port = common::start_test_server_with_config(
+        |_| {},
+        BridgeConfig {
+            btc_max_total_sats: 1_000_000,
+            ..Default::default()
+        },
+    );
+    match send(
+        port,
+        Req::InitiateCloning(InitiateCloningRequest {
+            cloning_secret: "s".into(),
+            cluster_public_key: vec![0x11; 20],
+        }),
+    )
+    .response
+    {
+        Some(Resp::InitiateCloning(_)) => {}
+        other => panic!("{other:?}"),
+    }
+
+    let km = KeyManager::from_mnemonic(MNEMONIC, bitcoin::Network::Bitcoin).unwrap();
+    let psbt = fx::psbt_with_our_input(&km, AccountType::Vanilla, true);
+    expect_error(send(
+        port,
+        Req::SignBtc(SignBtcRequest {
+            psbt_bytes: psbt.serialize(),
+        }),
+    ));
+    expect_error(send(
+        port,
+        Req::SignRawDigest(SignRawDigestRequest {
+            digest: vec![],
+            unsigned_tx: vec![0x02, 0xc0],
+        }),
+    ));
+    expect_error(send(
+        port,
+        Req::SignCcd(SignCcdRequest {
+            hash: vec![0xAB; 32],
+        }),
+    ));
+    expect_error(send(port, Req::GetPublicKey(GetPublicKeyRequest {})));
+    expect_error(send(
+        port,
+        Req::GetAttestedPublicKey(GetAttestedPublicKeyRequest {
+            nonce: vec![0x37; 32],
+        }),
+    ));
+    // And a second identity cannot be installed over the pending clone.
+    expect_error(send(
+        port,
+        Req::InitializeKey(InitializeKeyRequest {
+            seed: vec![],
+            mnemonic: MNEMONIC.into(),
+            cloning_secret: String::new(),
+        }),
+    ));
+}
+
+// ---- races -----------------------------------------------------------------------------
+
+/// Concurrent initialisations must install exactly one identity, and the
+/// key every later reader sees must be the one whose request succeeded.
+#[test]
+fn concurrent_initializations_install_exactly_one_identity() {
+    let port = common::start_test_server();
+    let handles: Vec<_> = (0..8)
+        .map(|_| {
+            std::thread::spawn(move || {
+                send(
+                    port,
+                    Req::InitializeKey(InitializeKeyRequest {
+                        seed: vec![],
+                        mnemonic: String::new(),
+                        cloning_secret: String::new(),
+                    }),
+                )
+            })
+        })
+        .collect();
+    let mut winners = Vec::new();
+    for h in handles {
+        if let Some(Resp::InitializeKey(r)) = h.join().unwrap().response {
+            winners.push(r.evm_address);
+        }
+    }
+    assert_eq!(winners.len(), 1, "exactly one InitializeKey may succeed");
+    match send(port, Req::GetPublicKey(GetPublicKeyRequest {})).response {
+        Some(Resp::PublicKeys(k)) => assert_eq!(k.evm_address, winners[0]),
+        other => panic!("{other:?}"),
+    }
+}
+
+/// The CCD replay guard reserves the key before signing, so concurrent
+/// duplicates race for one slot and exactly one release is signed.
+#[cfg(all(
+    feature = "ccd",
+    feature = "rgb-validation",
+    feature = "allow-seed-import"
+))]
+#[test]
+fn concurrent_duplicate_ccd_releases_yield_one_signature() {
+    use alloy_primitives::{Address, Bytes, U256};
+    use alloy_sol_types::SolCall;
+    use utexo_bridge_enclave::networks::evm::validation::{fundsOutCall, FundsOutParams};
+
+    let port = common::start_test_server_with_config(
+        |state| state.initialize_from_mnemonic(MNEMONIC).unwrap(),
+        pinned(),
+    );
+    let call_data = fundsOutCall {
+        params: FundsOutParams {
+            recipient: Address::from([0x11; 20]),
+            amount: U256::from(5u64),
+            burnId: U256::from(7u64),
+            sourceChainId: U256::from(919u64),
+            destinationChainId: U256::from(1u64),
+            sourceAddress: "ccd".into(),
+            proof: Bytes::new(),
+            settlementData: Bytes::new(),
+        },
+    }
+    .abi_encode();
+    let handles: Vec<_> = (0..8)
+        .map(|i| {
+            let call_data = call_data.clone();
+            std::thread::spawn(move || {
+                send(
+                    port,
+                    Req::Sign(SignRequest {
+                        amount: 5,
+                        source_network: Some(SourceNetwork::CcdSource(CcdSource {
+                            tx_hash: vec![0xCC; 32],
+                            commission: 0,
+                        })),
+                        destination_network: Some(DestinationNetwork::EvmDestination(
+                            EvmDestination {
+                                call_data,
+                                nonce: i, // a fresh nonce each time: still one deposit
+                                deadline: u64::MAX,
+                                chain_id: 1,
+                                proxy_contract: vec![0xAA; 20],
+                                calldata_amount: 5,
+                                calldata_commission: 0,
+                                lz_release: None,
+                            },
+                        )),
+                    }),
+                )
+            })
+        })
+        .collect();
+    let signed = handles
+        .into_iter()
+        .map(|h| h.join().unwrap().response)
+        .filter(|r| matches!(r, Some(Resp::EvmSignature(_))))
+        .count();
+    assert_eq!(signed, 1, "one deposit, one release");
+}
+
+/// An equal-length competing chain must not displace the one already
+/// accepted: Bitcoin keeps the first-seen tip, and letting a host flip
+/// between forks of equal work would let it toggle confirmations.
+#[cfg(feature = "spv")]
+#[test]
+fn an_equal_length_fork_does_not_replace_the_tip() {
+    use bitcoin::block::{Header, Version};
+    use bitcoin::consensus::serialize;
+    use bitcoin::hashes::Hash;
+    use utexo_bridge_enclave::networks::rgb::spv::{checkpoint_for, Network};
+
+    let port = common::start_test_server();
+    let main = regtest_headers(3);
+    let resp = send(
+        port,
+        Req::SubmitHeaders(SubmitHeadersRequest {
+            headers: main.clone(),
+            start_height: 1,
+        }),
+    );
+    let main_tip = match resp.response {
+        Some(Resp::SubmitHeaders(r)) => r.last_block_hash,
+        other => panic!("{other:?}"),
+    };
+
+    // A fork from height 2 with different contents and the same length.
+    let cp = checkpoint_for(Network::Regtest);
+    let mut prev = bitcoin::BlockHash::from_byte_array(cp.hash);
+    let mut fork = Vec::new();
+    for h in 1..=3u32 {
+        let header = Header {
+            version: Version::ONE,
+            prev_blockhash: prev,
+            merkle_root: bitcoin::TxMerkleNode::from_byte_array([0xF0 + h as u8; 32]),
+            time: 1_700_000_000 + h,
+            bits: bitcoin::CompactTarget::from_consensus(0x207fffff),
+            nonce: 1,
+        };
+        prev = header.block_hash();
+        fork.push(serialize(&header));
+    }
+    let _ = send(
+        port,
+        Req::SubmitHeaders(SubmitHeadersRequest {
+            headers: fork[1..].to_vec(),
+            start_height: 2,
+        }),
+    );
+    let now = match send(port, Req::GetLastSavedBlock(GetLastSavedBlockRequest {})).response {
+        Some(Resp::GetLastSavedBlock(r)) => r,
+        other => panic!("{other:?}"),
+    };
+    assert_eq!(now.block_height, 3);
+    assert_eq!(
+        now.block_hash, main_tip,
+        "an equal-length fork replaced the first-seen tip"
+    );
+}
