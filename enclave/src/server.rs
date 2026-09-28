@@ -739,37 +739,52 @@ fn handle_sign(ctx: &ServerContext, req: SignRequest) -> Result<EnclaveResponse>
     // (so a concurrent duplicate is rejected up front) and committed only after
     // it succeeds, so a transient error does not self-block a retry.
     #[cfg(not(feature = "dev-mode"))]
-    let _op_reservation = if let (
-        SourceNetwork::EvmSource(source),
-        DestinationNetwork::RgbDestination(destination),
-    ) = (source_ref, destination_ref)
-    {
-        let op_key = crate::networks::rgb::psbt_validation::psbt_operation_key(
-            ctx.bridge_config.chain_id,
-            &ctx.bridge_config.bridge_contract,
-            &source.tx_hash,
-            &source.funds_in_operation_id,
-            &destination.asset_id,
-        );
-        match ctx.state.op_replay_guard.reserve(op_key) {
-            Ok(reservation) => Some(reservation),
-            Err(EnclaveError::NonceReplay) => {
-                tracing::warn!(
-                    funds_in_operation_id = %hex::encode(&source.funds_in_operation_id),
-                    evm_tx_hash = %hex::encode(&source.tx_hash),
-                    "rejecting duplicate bridge PSBT operation (soft replay guard)"
-                );
-                return Err(EnclaveError::CrossCheck(
-                    "duplicate bridge operation: this (chain, contract, evm_tx_hash, \
-                     funds_in_operation_id, rgb_asset_id) was already signed recently - refusing \
-                     to sign a replay (soft in-memory guard; durable guard is on-chain)"
-                        .into(),
-                ));
+    let _op_reservation = {
+        // Which deposit this request releases, if the route carries one:
+        // EVM->RGB is keyed on the FundsIn deposit, CCD->EVM on the
+        // Concordium deposit tx. RGB->EVM is keyed on-chain by the burn.
+        let keyed = match (source_ref, destination_ref) {
+            (SourceNetwork::EvmSource(source), DestinationNetwork::RgbDestination(destination)) => {
+                Some((
+                    crate::networks::rgb::psbt_validation::psbt_operation_key(
+                        ctx.bridge_config.chain_id,
+                        &ctx.bridge_config.bridge_contract,
+                        &source.tx_hash,
+                        &source.funds_in_operation_id,
+                        &destination.asset_id,
+                    ),
+                    "(chain, contract, evm_tx_hash, funds_in_operation_id, rgb_asset_id)",
+                ))
             }
-            Err(e) => return Err(e),
+            #[cfg(feature = "ccd")]
+            (SourceNetwork::CcdSource(source), DestinationNetwork::EvmDestination(_)) => Some((
+                crate::networks::ccd::release_operation_key(
+                    ctx.bridge_config.chain_id,
+                    &ctx.bridge_config.bridge_contract,
+                    &source.tx_hash,
+                ),
+                "(chain, contract, ccd_tx_hash)",
+            )),
+            _ => None,
+        };
+        match keyed {
+            None => None,
+            Some((op_key, what)) => match ctx.state.op_replay_guard.reserve(op_key) {
+                Ok(reservation) => Some(reservation),
+                Err(EnclaveError::NonceReplay) => {
+                    tracing::warn!(
+                        op_key = %hex::encode(op_key),
+                        "rejecting duplicate bridge operation (soft replay guard)"
+                    );
+                    return Err(EnclaveError::CrossCheck(format!(
+                        "duplicate bridge operation: this {what} was already signed recently - \
+                         refusing to sign a replay (soft in-memory guard; durable guard is \
+                         on-chain)"
+                    )));
+                }
+                Err(e) => return Err(e),
+            },
         }
-    } else {
-        None
     };
 
     let destination = req.destination_network.ok_or_else(|| {
@@ -897,6 +912,12 @@ fn apply_funds_out_binding(
 
 fn handle_initialize(ctx: &ServerContext, req: InitializeKeyRequest) -> Result<EnclaveResponse> {
     let state = &ctx.state;
+    if !req.mnemonic.is_empty() && !req.seed.is_empty() {
+        // Ambiguous: the operator cannot tell which key was installed.
+        return Err(EnclaveError::InvalidRequest(
+            "InitializeKey carries both a seed and a mnemonic - send exactly one".into(),
+        ));
+    }
     if !req.mnemonic.is_empty() {
         // Testing path: import from BIP-39 mnemonic phrase
         #[cfg(feature = "allow-seed-import")]

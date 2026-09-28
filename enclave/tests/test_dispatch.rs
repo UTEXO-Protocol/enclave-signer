@@ -526,30 +526,27 @@ fn invalid_mnemonic_is_rejected_and_the_enclave_stays_initial() {
 
 #[cfg(feature = "allow-seed-import")]
 #[test]
-fn mnemonic_wins_over_seed_when_both_are_supplied() {
-    // The dispatcher routes on `mnemonic` first, so a request carrying both
-    // installs the mnemonic's wallet, not the seed's.
-    use utexo_bridge_enclave::keys::KeyManager;
+fn a_request_with_both_seed_and_mnemonic_is_refused_and_installs_nothing() {
+    // Ambiguous input: the operator could not tell which wallet was
+    // installed, so neither is.
     let port = common::start_test_server();
     let mnemonic =
         "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
-    let resp = match send(
+    let err = expect_error(send(
         port,
         Req::InitializeKey(InitializeKeyRequest {
             seed: vec![7u8; 64],
             mnemonic: mnemonic.into(),
             cloning_secret: String::new(),
         }),
-    )
-    .response
-    {
-        Some(Resp::InitializeKey(r)) => r,
-        other => panic!("expected InitializeKey, got {other:?}"),
-    };
-    let from_mnemonic = KeyManager::from_mnemonic(mnemonic, bitcoin::Network::Bitcoin).unwrap();
-    let from_seed = KeyManager::from_seed([7u8; 64], bitcoin::Network::Bitcoin).unwrap();
-    assert_eq!(resp.evm_address, from_mnemonic.evm_address().to_vec());
-    assert_ne!(resp.evm_address, from_seed.evm_address().to_vec());
+    ));
+    assert_eq!(err.code, CODE_GENERIC);
+    assert!(
+        err.message.contains("both a seed and a mnemonic"),
+        "{}",
+        err.message
+    );
+    assert_not_initialized(port);
 }
 
 #[test]
@@ -1586,9 +1583,14 @@ mod ccd_to_evm {
         let err = expect_error(send(port, Req::Sign(req)));
         assert_eq!(err.code, CODE_VALIDATION_FAILED, "{}", err.message);
         assert!(err.message.contains("amount mismatch"), "{}", err.message);
-        // Releasing less (a fee kept by the bridge) is allowed.
+        // Releasing less (a fee kept by the bridge) is allowed - for a
+        // different deposit, since the first one is now reserved.
         let mut req = request(5, 1);
         req.amount = 6;
+        req.source_network = Some(SourceNetwork::CcdSource(CcdSource {
+            tx_hash: vec![0xCD; 32],
+            commission: 0,
+        }));
         assert!(
             matches!(
                 send(port, Req::Sign(req)).response,

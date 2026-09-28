@@ -28,6 +28,30 @@ pub fn validate_source(amount: u64, source: &CcdSource) -> Result<RouteProof> {
     })
 }
 
+/// Replay-guard key for a Concordium deposit released on EVM. One deposit
+/// transaction authorises exactly one release, so the key binds the pinned
+/// chain and proxy to the deposit's tx hash and nothing else: a retry under a
+/// different nonce or calldata is still the same operation.
+///
+/// Consumed by the soft in-memory guard
+/// ([`crate::state::EnclaveState::op_replay_guard`]); the proxy's `burnId` is
+/// the durable guard.
+pub fn release_operation_key(
+    chain_id: u64,
+    bridge_contract: &[u8; 20],
+    ccd_tx_hash: &[u8],
+) -> [u8; 32] {
+    use sha3::{Digest, Keccak256};
+
+    let mut h = Keccak256::new();
+    h.update(b"utexo:ccd-release:v1");
+    h.update(chain_id.to_be_bytes());
+    h.update(bridge_contract);
+    h.update((ccd_tx_hash.len() as u64).to_be_bytes());
+    h.update(ccd_tx_hash);
+    h.finalize().into()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -91,5 +115,25 @@ mod tests {
     fn rejection_is_a_validation_failure_on_the_wire() {
         let err = validate_source(10, &source(0)).unwrap_err();
         assert_eq!(err.error_code(), 3);
+    }
+
+    #[test]
+    fn release_key_binds_chain_contract_and_deposit() {
+        let base = release_operation_key(1, &[0xAA; 20], &[0xCC; 32]);
+        assert_ne!(base, release_operation_key(2, &[0xAA; 20], &[0xCC; 32]));
+        assert_ne!(base, release_operation_key(1, &[0xAB; 20], &[0xCC; 32]));
+        assert_ne!(base, release_operation_key(1, &[0xAA; 20], &[0xCD; 32]));
+        assert_eq!(base, release_operation_key(1, &[0xAA; 20], &[0xCC; 32]));
+        // Distinct from the EVM->RGB key domain even on identical bytes.
+        assert_ne!(
+            base,
+            crate::networks::rgb::psbt_validation::psbt_operation_key(
+                1,
+                &[0xAA; 20],
+                &[0xCC; 32],
+                &[],
+                ""
+            )
+        );
     }
 }

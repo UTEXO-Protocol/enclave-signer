@@ -43,6 +43,25 @@ pub fn psbt_operation_key(
     h.finalize().into()
 }
 
+/// Refuse any input that asks for a sighash other than taproot
+/// `SIGHASH_DEFAULT` (0x00) or `SIGHASH_ALL` (0x01). The signer always signs
+/// ALL, so honouring the request is impossible and ignoring it would hand back
+/// a signature the PSBT's author did not ask for; anything else is spliceable.
+pub fn assert_sighash_all(psbt: &Psbt, label: &str) -> Result<()> {
+    for (i, input) in psbt.inputs.iter().enumerate() {
+        if let Some(sht) = input.sighash_type {
+            let raw = sht.to_u32();
+            if raw != 0x00 && raw != 0x01 {
+                return Err(EnclaveError::CrossCheck(format!(
+                    "PSBT input {i} requests non-ALL sighash 0x{raw:02x}; refusing to sign a \
+                     {label} PSBT under a spliceable sighash"
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Shape whitelist for a raw PSBT: refuse payloads that aren't even a legitimate
 /// PSBT before any other predicate runs. Catches three classes of garbage
 /// up-front:
@@ -186,18 +205,7 @@ pub fn validate_psbt_anchors_transition(
         }
     }
 
-    // 0x00 = taproot SIGHASH_DEFAULT, 0x01 = SIGHASH_ALL; anything else is spliceable.
-    for (i, input) in psbt.inputs.iter().enumerate() {
-        if let Some(sht) = input.sighash_type {
-            let raw = sht.to_u32();
-            if raw != 0x00 && raw != 0x01 {
-                return Err(EnclaveError::CrossCheck(format!(
-                    "PSBT input {i} requests non-ALL sighash 0x{raw:02x}; refusing to sign a \
-                     send-RGB PSBT under a spliceable sighash"
-                )));
-            }
-        }
-    }
+    assert_sighash_all(psbt, "send-RGB")?;
 
     // Every transition this tx commits, not just the last one: a Bitcoin tx
     // commits a bundle, which can hold several.

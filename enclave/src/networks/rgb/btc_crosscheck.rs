@@ -45,8 +45,9 @@ pub fn validate_btc_request(
     cfg: &BridgeConfig,
     keys: &KeyManager,
 ) -> Result<()> {
-    // 0. Shape whitelist (shared with the bridge path).
+    // 0. Shape whitelist and sighash discipline (shared with the bridge path).
     let psbt = crate::networks::rgb::psbt_validation::parse_psbt_shape(&req.psbt_bytes)?;
+    crate::networks::rgb::psbt_validation::assert_sighash_all(&psbt, "plain-BTC")?;
 
     // 1. Sum the value spent (for the cap). Every input must carry its
     //    witness_utxo; without it the value cannot be bounded.

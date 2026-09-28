@@ -236,7 +236,6 @@ fn gas_tx_signature_recovers_to_the_reported_gas_address() {
 /// preferring one lets an operator believe a different key was installed.
 #[cfg(feature = "allow-seed-import")]
 #[test]
-#[ignore = "FINDING: the mnemonic silently wins over the seed"]
 fn initialize_with_both_seed_and_mnemonic_is_refused() {
     let port = common::start_test_server();
     let resp = send(
@@ -248,21 +247,24 @@ fn initialize_with_both_seed_and_mnemonic_is_refused() {
         }),
     );
     let err = expect_error(resp);
-    assert!(!err.message.is_empty());
+    assert!(
+        err.message.contains("both a seed and a mnemonic"),
+        "{}",
+        err.message
+    );
 }
 
 // ---- replay ----------------------------------------------------------------------
 
 /// A Concordium deposit must not be releasable twice by the same enclave.
-/// The durable guard is the proxy's burnId; the enclave has a soft guard
-/// only for EVM->RGB. This documents that CCD->EVM has none in the enclave.
+/// The proxy's burnId is the durable guard; the enclave's soft guard must
+/// cover this route too.
 #[cfg(all(
     feature = "ccd",
     feature = "rgb-validation",
     feature = "allow-seed-import"
 ))]
 #[test]
-#[ignore = "FINDING: no enclave-side replay guard for CCD->EVM; the proxy burnId is the only guard"]
 fn ccd_release_is_not_signed_twice_by_the_enclave() {
     use alloy_primitives::{Address, Bytes, U256};
     use alloy_sol_types::SolCall;
@@ -308,17 +310,21 @@ fn ccd_release_is_not_signed_twice_by_the_enclave() {
         send(port, req()).response,
         Some(Resp::EvmSignature(_))
     ));
-    expect_error(send(port, req()));
+    let err = expect_error(send(port, req()));
+    assert!(
+        err.message.contains("duplicate bridge operation"),
+        "{}",
+        err.message
+    );
+    assert!(err.message.contains("ccd_tx_hash"), "{}", err.message);
 }
 
 // ---- plain-BTC sighash ------------------------------------------------------------
 
-/// A PSBT that asks for SIGHASH_NONE or SINGLE on the enclave's input must be
-/// refused, not silently signed with a different sighash: the wallet that
-/// assembled it expects the type it requested.
+/// A PSBT that asks for SIGHASH_NONE or SINGLE on the enclave's input is
+/// refused rather than signed with a different sighash than requested.
 #[cfg(feature = "allow-seed-import")]
 #[test]
-#[ignore = "FINDING: the requested sighash_type is ignored and SIGHASH_DEFAULT is signed instead"]
 fn plain_btc_refuses_a_non_default_sighash_request() {
     use bitcoin::psbt::PsbtSighashType;
     use bitcoin::sighash::TapSighashType;
@@ -343,7 +349,8 @@ fn plain_btc_refuses_a_non_default_sighash_request() {
                 psbt_bytes: psbt.serialize(),
             }),
         );
-        expect_error(resp);
+        let err = expect_error(resp);
+        assert!(err.message.contains("non-ALL sighash"), "{}", err.message);
     }
 }
 
