@@ -964,4 +964,109 @@ mod env_tests {
         assert_eq!(c.rpc_url, "http://127.0.0.1:3444");
         assert_eq!(c.min_confirmations, 12);
     }
+
+    #[cfg(feature = "helios")]
+    mod helios {
+        use super::ENV_LOCK;
+        use crate::config::HeliosConfig;
+
+        const VARS: [&str; 5] = [
+            "HELIOS_EXECUTION_RPC",
+            "HELIOS_CONSENSUS_RPC",
+            "HELIOS_NETWORK",
+            "HELIOS_CHECKPOINT",
+            "HELIOS_STRICT_CHECKPOINT_AGE",
+        ];
+
+        struct Scope {
+            _guard: std::sync::MutexGuard<'static, ()>,
+        }
+        impl Scope {
+            fn new(vars: &[(&str, &str)]) -> Self {
+                let guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+                for v in VARS {
+                    std::env::remove_var(v);
+                }
+                for (k, v) in vars {
+                    std::env::set_var(k, v);
+                }
+                Self { _guard: guard }
+            }
+        }
+        impl Drop for Scope {
+            fn drop(&mut self) {
+                for v in VARS {
+                    std::env::remove_var(v);
+                }
+            }
+        }
+
+        #[test]
+        fn unset_execution_rpc_selects_the_raw_path() {
+            let _s = Scope::new(&[("HELIOS_CONSENSUS_RPC", "http://127.0.0.1:1")]);
+            assert!(HeliosConfig::from_env().is_none());
+        }
+
+        #[test]
+        fn execution_rpc_alone_yields_the_documented_defaults() {
+            let _s = Scope::new(&[("HELIOS_EXECUTION_RPC", "http://127.0.0.1:18545")]);
+            let c = HeliosConfig::from_env().expect("selected");
+            assert_eq!(c.execution_rpc, "http://127.0.0.1:18545");
+            assert_eq!(c.consensus_rpc, "http://127.0.0.1:18550");
+            assert_eq!(c.network, "mainnet");
+            assert!(c.checkpoint.is_none(), "no community checkpoint fallback");
+            assert!(c.strict_checkpoint_age);
+        }
+
+        #[test]
+        fn every_variable_is_read() {
+            let _s = Scope::new(&[
+                ("HELIOS_EXECUTION_RPC", "http://localhost:1"),
+                ("HELIOS_CONSENSUS_RPC", "http://localhost:2"),
+                ("HELIOS_NETWORK", "sepolia"),
+                ("HELIOS_CHECKPOINT", "0xabcd"),
+                ("HELIOS_STRICT_CHECKPOINT_AGE", "false"),
+            ]);
+            let c = HeliosConfig::from_env().expect("selected");
+            assert_eq!(c.execution_rpc, "http://localhost:1");
+            assert_eq!(c.consensus_rpc, "http://localhost:2");
+            assert_eq!(c.network, "sepolia");
+            assert_eq!(c.checkpoint.as_deref(), Some("0xabcd"));
+            assert!(!c.strict_checkpoint_age);
+        }
+
+        #[test]
+        fn strict_checkpoint_age_is_off_only_for_false_or_zero() {
+            for (v, want) in [
+                ("false", false),
+                ("0", false),
+                ("true", true),
+                ("1", true),
+                ("no", true),
+                ("", true),
+                ("FALSE", true),
+            ] {
+                let _s = Scope::new(&[
+                    ("HELIOS_EXECUTION_RPC", "http://127.0.0.1:18545"),
+                    ("HELIOS_STRICT_CHECKPOINT_AGE", v),
+                ]);
+                assert_eq!(
+                    HeliosConfig::from_env().unwrap().strict_checkpoint_age,
+                    want,
+                    "HELIOS_STRICT_CHECKPOINT_AGE={v:?}"
+                );
+            }
+        }
+
+        #[test]
+        fn a_non_loopback_url_is_kept_and_only_logged() {
+            let _s = Scope::new(&[
+                ("HELIOS_EXECUTION_RPC", "http://10.0.0.5:8545"),
+                ("HELIOS_CONSENSUS_RPC", "http://beacon.example:5052"),
+            ]);
+            let c = HeliosConfig::from_env().expect("selected");
+            assert_eq!(c.execution_rpc, "http://10.0.0.5:8545");
+            assert_eq!(c.consensus_rpc, "http://beacon.example:5052");
+        }
+    }
 }

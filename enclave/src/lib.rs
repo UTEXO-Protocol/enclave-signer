@@ -99,3 +99,49 @@ pub mod vsock_forwarder;
 // Only the `enclave` package is vendored into the TEE build. The parent
 // adapter still exposes the other proto packages (see parent/src/lib.rs).
 pub use enclave_proto as proto;
+
+#[cfg(test)]
+mod feature_guard_tests {
+    /// Feature flags as runtime values, so the assertions below are not
+    /// constant-folded away (or flagged as such).
+    fn on(feature: &str) -> bool {
+        match feature {
+            "rgb" => cfg!(feature = "rgb"),
+            "spv" => cfg!(feature = "spv"),
+            "rgb-validation" => cfg!(feature = "rgb-validation"),
+            "rgb-swap" => cfg!(feature = "rgb-swap"),
+            "rgb-mint-burn" => cfg!(feature = "rgb-mint-burn"),
+            "bfa-mint" => cfg!(feature = "bfa-mint"),
+            "evm-rpc" => cfg!(feature = "evm-rpc"),
+            "helios" => cfg!(feature = "helios"),
+            other => panic!("unknown feature {other}"),
+        }
+    }
+
+    /// The `compile_error!` guards above cannot be unit-tested directly, but
+    /// every build that reaches these tests must satisfy the implications
+    /// they enforce.
+    #[test]
+    fn enabled_features_satisfy_the_guards() {
+        assert!(
+            !(on("rgb-swap") && on("rgb-mint-burn")),
+            "rgb-swap and rgb-mint-burn are mutually exclusive"
+        );
+        if on("rgb-validation") {
+            assert!(on("spv"), "rgb-validation implies spv");
+            assert!(
+                on("rgb-swap") || on("rgb-mint-burn"),
+                "rgb-validation requires a flow"
+            );
+        }
+        if on("rgb") || on("spv") {
+            assert!(on("rgb-validation"));
+        }
+        if on("bfa-mint") {
+            assert!(on("rgb-mint-burn") && on("evm-rpc"));
+        }
+        if on("helios") {
+            assert!(on("evm-rpc"));
+        }
+    }
+}

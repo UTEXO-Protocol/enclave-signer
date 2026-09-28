@@ -50,8 +50,15 @@ fn forwarder_target(url: &str) -> (u16, Option<String>) {
 /// TLS layer still validates against `host`'s real certificate.
 #[cfg(all(feature = "vsock", feature = "spv", target_os = "linux"))]
 fn pin_host_to_loopback(host: &str) -> std::io::Result<()> {
+    pin_host_in(std::path::Path::new("/etc/hosts"), host)
+}
+
+/// Append `127.0.0.1 {host}` to the hosts file at `path` unless some line
+/// already names `host` (as any whitespace-separated token).
+#[cfg(any(all(feature = "vsock", feature = "spv", target_os = "linux"), test))]
+fn pin_host_in(path: &std::path::Path, host: &str) -> std::io::Result<()> {
     use std::io::Write;
-    let existing = std::fs::read_to_string("/etc/hosts").unwrap_or_default();
+    let existing = std::fs::read_to_string(path).unwrap_or_default();
     if existing
         .lines()
         .any(|l| l.split_whitespace().any(|tok| tok == host))
@@ -61,7 +68,7 @@ fn pin_host_to_loopback(host: &str) -> std::io::Result<()> {
     let mut f = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
-        .open("/etc/hosts")?;
+        .open(path)?;
     writeln!(f, "127.0.0.1 {host}")
 }
 
@@ -689,5 +696,62 @@ mod tests {
         assert_eq!(forwarder_target("ssl://nohost"), (3443, None));
         assert_eq!(forwarder_target("ssl://host:notaport"), (3443, None));
         assert_eq!(forwarder_target(""), (3443, None));
+    }
+
+    mod hosts_pin {
+        use super::super::pin_host_in;
+
+        fn temp(name: &str) -> std::path::PathBuf {
+            std::env::temp_dir().join(format!("utexo-hosts-{}-{name}", std::process::id()))
+        }
+
+        #[test]
+        fn appends_a_loopback_line_when_the_host_is_absent() {
+            let path = temp("append");
+            std::fs::write(&path, "127.0.0.1 localhost\n").unwrap();
+            pin_host_in(&path, "esplora.example").unwrap();
+            let got = std::fs::read_to_string(&path).unwrap();
+            std::fs::remove_file(&path).ok();
+            assert_eq!(got, "127.0.0.1 localhost\n127.0.0.1 esplora.example\n");
+        }
+
+        #[test]
+        fn is_a_no_op_when_the_host_is_already_named() {
+            let path = temp("present");
+            // As an alias token, with tabs, and behind a different address.
+            let before = "10.0.0.1\tother.example esplora.example  # pinned\n";
+            std::fs::write(&path, before).unwrap();
+            pin_host_in(&path, "esplora.example").unwrap();
+            let got = std::fs::read_to_string(&path).unwrap();
+            std::fs::remove_file(&path).ok();
+            assert_eq!(got, before);
+        }
+
+        #[test]
+        fn a_prefix_or_suffix_match_does_not_count_as_present() {
+            let path = temp("prefix");
+            std::fs::write(&path, "127.0.0.1 esplora.example.com\n").unwrap();
+            pin_host_in(&path, "esplora.example").unwrap();
+            let got = std::fs::read_to_string(&path).unwrap();
+            std::fs::remove_file(&path).ok();
+            assert!(got.ends_with("127.0.0.1 esplora.example\n"), "{got}");
+        }
+
+        #[test]
+        fn creates_the_file_when_it_does_not_exist() {
+            let path = temp("create");
+            std::fs::remove_file(&path).ok();
+            pin_host_in(&path, "esplora.example").unwrap();
+            let got = std::fs::read_to_string(&path).unwrap();
+            std::fs::remove_file(&path).ok();
+            assert_eq!(got, "127.0.0.1 esplora.example\n");
+        }
+
+        #[test]
+        fn an_unwritable_path_is_an_io_error() {
+            // A directory cannot be opened for appending.
+            let err = pin_host_in(&std::env::temp_dir(), "esplora.example").unwrap_err();
+            assert!(!err.to_string().is_empty());
+        }
     }
 }

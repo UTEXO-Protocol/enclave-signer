@@ -1901,4 +1901,47 @@ mod tests {
             .to_string()
             .contains("rgbOpId mismatch"));
     }
+
+    #[cfg(feature = "helios")]
+    mod helios_checkpoint {
+        use super::*;
+
+        #[test]
+        fn accepts_a_32_byte_root_with_or_without_prefix() {
+            let hex = "ab".repeat(32);
+            let want = alloy_primitives::B256::from([0xab; 32]);
+            assert_eq!(parse_checkpoint(Some(&format!("0x{hex}"))).unwrap(), want);
+            assert_eq!(parse_checkpoint(Some(&hex)).unwrap(), want);
+            assert_eq!(parse_checkpoint(Some(&hex.to_uppercase())).unwrap(), want);
+        }
+
+        #[test]
+        fn a_missing_checkpoint_fails_closed() {
+            let e = parse_checkpoint(None).unwrap_err().to_string();
+            assert!(e.contains("HELIOS_CHECKPOINT is required"), "{e}");
+            assert!(e.contains("untrusted community checkpoint"), "{e}");
+        }
+
+        #[test]
+        fn malformed_checkpoints_are_rejected() {
+            let e = parse_checkpoint(Some("0xzz")).unwrap_err().to_string();
+            assert!(e.contains("HELIOS_CHECKPOINT not hex"), "{e}");
+            for len in [0usize, 31, 33] {
+                let e = parse_checkpoint(Some(&"ab".repeat(len)))
+                    .unwrap_err()
+                    .to_string();
+                assert!(
+                    e.contains(&format!("must be 32 bytes, got {len}")),
+                    "{len}: {e}"
+                );
+            }
+            let e = parse_checkpoint(Some("0x")).unwrap_err().to_string();
+            assert!(e.contains("got 0"), "{e}");
+        }
+
+        #[test]
+        fn boot_sync_timeout_is_the_documented_five_minutes() {
+            assert_eq!(HELIOS_BOOT_SYNC_TIMEOUT_SECS, 300);
+        }
+    }
 }

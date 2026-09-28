@@ -659,6 +659,8 @@ mod tests {
 
     // ---- run_clone against two real enclaves ---------------------------------
 
+    /// The enclaves are reached over TCP, which a vsock build refuses.
+    #[cfg(not(all(feature = "vsock", target_os = "linux")))]
     mod clone_flow {
         use super::*;
         use std::net::TcpListener;

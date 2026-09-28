@@ -1,3 +1,4 @@
+#[cfg(not(all(feature = "vsock", target_os = "linux")))]
 use std::time::Duration;
 
 use crate::enclave_proto::{
@@ -13,12 +14,14 @@ use crate::framing;
 /// Connect timeout. Localhost connect resolves in microseconds; this is
 /// only relevant when reaching across a network (or through a mis-routed
 /// vsock proxy).
+#[cfg(not(all(feature = "vsock", target_os = "linux")))]
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Read timeout for the response. Without it, a peer that accepts the TCP
 /// connection but never speaks our wire protocol hangs the CLI forever. Slow
 /// but legitimate operations (key generation, RGB consignment validation) must
 /// still fit inside this budget.
+#[cfg(not(all(feature = "vsock", target_os = "linux")))]
 const READ_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Debug, Clone)]

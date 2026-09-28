@@ -35,3 +35,20 @@ mod swap;
 pub use mint_burn::*;
 #[cfg(feature = "rgb-swap")]
 pub use swap::*;
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn exactly_one_flow_is_re_exported() {
+        #[cfg(feature = "rgb-swap")]
+        assert_eq!(super::FLOW_NAME, "send/receive");
+        #[cfg(feature = "rgb-mint-burn")]
+        assert_eq!(super::FLOW_NAME, "mint/burn");
+        let flows = [cfg!(feature = "rgb-swap"), cfg!(feature = "rgb-mint-burn")];
+        assert_eq!(
+            flows.iter().filter(|on| **on).count(),
+            1,
+            "the compile_error pair in lib.rs guarantees one flow"
+        );
+    }
+}

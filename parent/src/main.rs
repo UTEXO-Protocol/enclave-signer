@@ -12,28 +12,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .init();
 
     let cfg = Config::from_env();
-
-    let target = if cfg.use_vsock {
-        #[cfg(target_os = "linux")]
-        {
-            tracing::info!(
-                cid = cfg.enclave_vsock_cid,
-                port = cfg.enclave_vsock_port,
-                "enclave target: vsock"
-            );
-            EnclaveTarget::Vsock {
-                cid: cfg.enclave_vsock_cid,
-                port: cfg.enclave_vsock_port,
-            }
-        }
-        #[cfg(not(target_os = "linux"))]
-        {
-            return Err("vsock is only supported on Linux".into());
-        }
-    } else {
-        tracing::info!(addr = %cfg.enclave_addr, "enclave target: TCP");
-        EnclaveTarget::Tcp(cfg.enclave_addr)
-    };
+    let target = enclave_target(&cfg)?;
 
     tracing::info!(evm_network_ids = ?cfg.evm_network_ids, "EVM network IDs for TRANSACTION routing");
     let service = ParentAdapterService::new(target, cfg.evm_network_ids);
@@ -47,4 +26,73 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .await?;
 
     Ok(())
+}
+
+/// Pick the enclave transport the configuration asks for.
+fn enclave_target(cfg: &Config) -> Result<EnclaveTarget, Box<dyn std::error::Error>> {
+    if cfg.use_vsock {
+        #[cfg(target_os = "linux")]
+        {
+            tracing::info!(
+                cid = cfg.enclave_vsock_cid,
+                port = cfg.enclave_vsock_port,
+                "enclave target: vsock"
+            );
+            Ok(EnclaveTarget::Vsock {
+                cid: cfg.enclave_vsock_cid,
+                port: cfg.enclave_vsock_port,
+            })
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            Err("vsock is only supported on Linux".into())
+        }
+    } else {
+        tracing::info!(addr = %cfg.enclave_addr, "enclave target: TCP");
+        Ok(EnclaveTarget::Tcp(cfg.enclave_addr.clone()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn cfg(use_vsock: bool) -> Config {
+        Config {
+            grpc_host: "127.0.0.1".into(),
+            grpc_port: 1,
+            enclave_addr: "10.1.2.3:5000".into(),
+            enclave_vsock_cid: 18,
+            enclave_vsock_port: 6000,
+            use_vsock,
+            evm_network_ids: Default::default(),
+        }
+    }
+
+    #[test]
+    fn tcp_target_carries_the_configured_address() {
+        match enclave_target(&cfg(false)).unwrap() {
+            EnclaveTarget::Tcp(addr) => assert_eq!(addr, "10.1.2.3:5000"),
+            #[cfg(target_os = "linux")]
+            other => panic!(
+                "unexpected {}",
+                matches!(other, EnclaveTarget::Vsock { .. })
+            ),
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn vsock_target_carries_cid_and_port() {
+        match enclave_target(&cfg(true)).unwrap() {
+            EnclaveTarget::Vsock { cid, port } => assert_eq!((cid, port), (18, 6000)),
+            EnclaveTarget::Tcp(addr) => panic!("unexpected TCP target {addr}"),
+        }
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    #[test]
+    fn vsock_target_is_refused_off_linux() {
+        assert!(enclave_target(&cfg(true)).is_err());
+    }
 }

@@ -2483,3 +2483,89 @@ mod tests {
         // report rather than weakened into a vacuous test.
     }
 }
+
+// ---- pure helper coverage (no parser involved) ----
+#[cfg(test)]
+mod pure_tests {
+    use super::*;
+
+    #[test]
+    fn consignment_size_cap_is_inclusive_and_names_the_label() {
+        let cfg = BridgeConfig {
+            max_consignment_bytes: 16,
+            ..Default::default()
+        };
+        assert_consignment_size(&[], &cfg, "RGB source").unwrap();
+        assert_consignment_size(&[0; 16], &cfg, "RGB source").unwrap();
+        let err = assert_consignment_size(&[0; 17], &cfg, "send-RGB")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("send-RGB consignment too large: 17 bytes (max 16)"),
+            "{err}"
+        );
+        assert!(matches!(
+            assert_consignment_size(&[0; 17], &cfg, "x"),
+            Err(EnclaveError::CrossCheck(_))
+        ));
+    }
+
+    #[cfg(feature = "bfa-mint")]
+    #[test]
+    fn opid_hex_decodes_with_or_without_prefix_in_any_case() {
+        let hex = "0a".repeat(32);
+        assert_eq!(decode_opid(&hex).unwrap(), [0x0a; 32]);
+        assert_eq!(decode_opid(&format!("0x{hex}")).unwrap(), [0x0a; 32]);
+        assert_eq!(decode_opid(&hex.to_uppercase()).unwrap(), [0x0a; 32]);
+    }
+
+    #[cfg(feature = "bfa-mint")]
+    #[test]
+    fn opid_hex_rejects_bad_hex_and_wrong_widths() {
+        let err = decode_opid("0xzz").unwrap_err().to_string();
+        assert!(err.contains("BFA mint opid hex decode failed"), "{err}");
+        assert!(
+            err.contains("\"zz\""),
+            "the stripped input is quoted: {err}"
+        );
+        for len in [0usize, 31, 33] {
+            let err = decode_opid(&"0a".repeat(len)).unwrap_err().to_string();
+            assert!(
+                err.contains(&format!("BFA mint opid is not 32 bytes (got {len})")),
+                "{len}: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn mint_classification_follows_the_build() {
+        assert!(is_mint_transition(ifa::TS_INFLATION));
+        assert!(!is_mint_transition(ifa::TS_TRANSFER));
+        assert!(!is_mint_transition(ifa::TS_BURN));
+        assert!(!is_mint_transition(0));
+        assert!(!is_mint_transition(u16::MAX));
+        assert_eq!(
+            is_mint_transition(bfa::TS_BRIDGE),
+            cfg!(feature = "bfa-mint"),
+            "TS_BRIDGE is a mint only in a bfa-mint build"
+        );
+    }
+
+    #[test]
+    fn schema_constants_are_distinct_per_kind() {
+        let transitions = [
+            ifa::TS_TRANSFER,
+            ifa::TS_INFLATION,
+            ifa::TS_BURN,
+            bfa::TS_BRIDGE,
+        ];
+        for (i, a) in transitions.iter().enumerate() {
+            for b in &transitions[i + 1..] {
+                assert_ne!(a, b);
+            }
+        }
+        assert_ne!(ifa::OS_ASSET, ifa::OS_INFLATION);
+        assert_ne!(ifa::OS_ASSET, bfa::OS_BRIDGE);
+        assert_ne!(ifa::MS_BURNED_ASSET, bfa::MS_BURN_RECIPIENT);
+    }
+}
