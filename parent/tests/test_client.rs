@@ -1,5 +1,8 @@
 //! Coverage for the host-side `EnclaveClient`: every request it can build,
 //! every way the enclave can answer, and every transport failure.
+//!
+//! The client speaks TCP here, which a vsock build refuses by design.
+#![cfg(not(all(feature = "vsock", target_os = "linux")))]
 
 mod common;
 

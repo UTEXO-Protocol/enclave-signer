@@ -1279,3 +1279,338 @@ mod spv_wire {
         }
     }
 }
+
+/// Plain-BTC signing over the wire: the vanilla account, the ownership gate,
+/// and the production posture check.
+#[cfg(feature = "allow-seed-import")]
+mod sign_btc {
+    use super::*;
+    use common::taproot_fixture as fx;
+    use utexo_bridge_enclave::keys::{AccountType, KeyManager};
+    use utexo_bridge_enclave::policy::BuildContext;
+
+    const MNEMONIC: &str = "abandon abandon abandon abandon abandon abandon abandon abandon \
+                            abandon abandon abandon about";
+
+    fn km() -> KeyManager {
+        KeyManager::from_mnemonic(MNEMONIC, bitcoin::Network::Bitcoin).unwrap()
+    }
+
+    fn production_build() -> BuildContext {
+        BuildContext {
+            debug_or_test: false,
+            dev_mode: false,
+            mock_attestation: false,
+            allow_seed_import: false,
+            rgb_validation: cfg!(feature = "rgb-validation"),
+        }
+    }
+
+    /// Development posture with the plain-BTC spend cap pinned: the cap is
+    /// required in every build, the posture check only in production.
+    fn dev_cfg() -> BridgeConfig {
+        BridgeConfig {
+            btc_max_total_sats: 1_000_000,
+            ..Default::default()
+        }
+    }
+
+    fn server(cfg: BridgeConfig, build: BuildContext) -> u16 {
+        common::start_test_server_with_policy(
+            |state| state.initialize_from_mnemonic(MNEMONIC).unwrap(),
+            cfg,
+            build,
+        )
+    }
+
+    fn sign_btc(port: u16, psbt: &bitcoin::Psbt) -> EnclaveResponse {
+        send(
+            port,
+            Req::SignBtc(SignBtcRequest {
+                psbt_bytes: psbt.serialize(),
+            }),
+        )
+    }
+
+    fn expect_signed(resp: EnclaveResponse) -> SignedPsbtResponse {
+        match resp.response {
+            Some(Resp::SignedPsbt(r)) => r,
+            other => panic!("expected SignedPsbt, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn refuses_before_initialization() {
+        let port = common::start_test_server();
+        let psbt = fx::psbt_with_our_input(&km(), AccountType::Vanilla, true);
+        let err = expect_error(sign_btc(port, &psbt));
+        assert!(
+            err.message.to_lowercase().contains("initialized"),
+            "{}",
+            err.message
+        );
+    }
+
+    #[cfg(feature = "rgb-validation")]
+    #[test]
+    fn refuses_to_sign_without_a_pinned_spend_cap_in_any_posture() {
+        let port = server(BridgeConfig::default(), BuildContext::current());
+        let psbt = fx::psbt_with_our_input(&km(), AccountType::Vanilla, true);
+        let err = expect_error(sign_btc(port, &psbt));
+        assert!(
+            err.message.contains("BTC_MAX_TOTAL_SATS"),
+            "{}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn refuses_a_garbage_psbt() {
+        let port = server(BridgeConfig::default(), BuildContext::current());
+        let err = expect_error(send(
+            port,
+            Req::SignBtc(SignBtcRequest {
+                psbt_bytes: b"not a psbt".to_vec(),
+            }),
+        ));
+        assert!(!err.message.is_empty());
+    }
+
+    #[test]
+    fn signs_a_vanilla_input_that_pays_back_to_itself() {
+        let port = server(dev_cfg(), BuildContext::current());
+        let psbt = fx::psbt_with_our_input(&km(), AccountType::Vanilla, true);
+        let signed = expect_signed(sign_btc(port, &psbt));
+        assert_eq!(signed.inputs_signed, 1);
+        let out = bitcoin::Psbt::deserialize(&signed.signed_psbt).unwrap();
+        assert_eq!(
+            out.inputs[0].tap_script_sigs.len(),
+            1,
+            "one script-path signature for our leaf key"
+        );
+        assert_eq!(
+            out.unsigned_tx, psbt.unsigned_tx,
+            "the transaction itself is untouched"
+        );
+    }
+
+    #[test]
+    fn refuses_when_no_input_is_ours() {
+        let ours = fx::psbt_with_our_input(&km(), AccountType::Vanilla, true);
+        let pay_to = ours.inputs[0]
+            .witness_utxo
+            .as_ref()
+            .unwrap()
+            .script_pubkey
+            .clone();
+        let foreign = fx::psbt_with_foreign_input(pay_to);
+
+        // Without an unowned-output budget the payout itself is refused in a
+        // bridge build: the enclave cannot prove the output pays back into
+        // its custody.
+        #[cfg(feature = "rgb-validation")]
+        {
+            let port = server(dev_cfg(), BuildContext::current());
+            let err = expect_error(sign_btc(port, &foreign));
+            assert!(
+                err.message.contains("BTC_MAX_UNOWNED_SATS is not pinned"),
+                "{}",
+                err.message
+            );
+        }
+
+        // With a budget that covers it, signing proceeds and finds no input
+        // of ours.
+        let cfg = BridgeConfig {
+            btc_max_unowned_sats: 100_000,
+            ..dev_cfg()
+        };
+        let port = server(cfg, BuildContext::current());
+        let err = expect_error(sign_btc(port, &foreign));
+        assert!(err.message.contains("signed 0 inputs"), "{}", err.message);
+
+        // A budget that does not cover it is refused as over budget.
+        let cfg = BridgeConfig {
+            btc_max_unowned_sats: 1_000,
+            ..dev_cfg()
+        };
+        let port = server(cfg, BuildContext::current());
+        let err = expect_error(sign_btc(port, &foreign));
+        assert!(
+            err.message.contains("BTC_MAX_UNOWNED_SATS") || err.message.contains("budget"),
+            "{}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn a_colored_input_is_never_signed_on_the_plain_btc_path() {
+        // The colored key is not a vanilla input, so its own script does not
+        // count as custody here and the payout needs the unowned budget.
+        let cfg = BridgeConfig {
+            btc_max_unowned_sats: 100_000,
+            ..dev_cfg()
+        };
+        let port = server(cfg, BuildContext::current());
+        let psbt = fx::psbt_with_our_input(&km(), AccountType::Colored, true);
+        let err = expect_error(sign_btc(port, &psbt));
+        assert!(err.message.contains("signed 0 inputs"), "{}", err.message);
+    }
+
+    #[cfg(feature = "rgb-validation")]
+    #[test]
+    fn production_posture_without_a_vanilla_allowance_refuses() {
+        let port = server(pinned_config(), production_build());
+        let psbt = fx::psbt_with_our_input(&km(), AccountType::Vanilla, true);
+        let err = expect_error(sign_btc(port, &psbt));
+        assert!(
+            err.message.contains("vanilla") && err.message.contains("disabled"),
+            "{}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn production_posture_with_a_vanilla_allowance_signs_within_the_cap() {
+        let cfg = BridgeConfig {
+            btc_max_total_sats: 1_000_000,
+            ..pinned_config()
+        };
+        let port = server(cfg, production_build());
+        let psbt = fx::psbt_with_our_input(&km(), AccountType::Vanilla, true);
+        assert_eq!(expect_signed(sign_btc(port, &psbt)).inputs_signed, 1);
+    }
+
+    #[test]
+    fn production_posture_refuses_an_input_total_over_the_cap() {
+        let cfg = BridgeConfig {
+            btc_max_total_sats: 50_000,
+            ..pinned_config()
+        };
+        let port = server(cfg, production_build());
+        let psbt = fx::psbt_with_our_input(&km(), AccountType::Vanilla, true);
+        let err = expect_error(sign_btc(port, &psbt));
+        assert!(!err.message.is_empty());
+    }
+}
+
+/// A Concordium deposit released on EVM: the listener-trusted source, the
+/// pinned-bridge gate on the destination, and the signature itself.
+#[cfg(all(
+    feature = "ccd",
+    feature = "rgb-validation",
+    feature = "allow-seed-import"
+))]
+mod ccd_to_evm {
+    use super::*;
+    use alloy_primitives::{Address, Bytes, U256};
+    use alloy_sol_types::SolCall;
+    use utexo_bridge_enclave::networks::evm::validation::{fundsOutCall, FundsOutParams};
+
+    const MNEMONIC: &str = "abandon abandon abandon abandon abandon abandon abandon abandon \
+                            abandon abandon abandon about";
+
+    fn funds_out(amount: u64, destination_chain_id: u64) -> Vec<u8> {
+        fundsOutCall {
+            params: FundsOutParams {
+                recipient: Address::from([0x11; 20]),
+                amount: U256::from(amount),
+                burnId: U256::from(7u64),
+                sourceChainId: U256::from(919u64),
+                destinationChainId: U256::from(destination_chain_id),
+                sourceAddress: "ccd-account".into(),
+                proof: Bytes::new(),
+                settlementData: Bytes::new(),
+            },
+        }
+        .abi_encode()
+    }
+
+    fn request(amount: u64, cfg_chain: u64) -> SignRequest {
+        SignRequest {
+            amount,
+            source_network: Some(SourceNetwork::CcdSource(CcdSource {
+                tx_hash: vec![0xCC; 32],
+                commission: 0,
+            })),
+            destination_network: Some(DestinationNetwork::EvmDestination(EvmDestination {
+                call_data: funds_out(amount, cfg_chain),
+                nonce: 1,
+                deadline: u64::MAX,
+                chain_id: cfg_chain,
+                proxy_contract: vec![0xAA; 20],
+                calldata_amount: amount,
+                calldata_commission: 0,
+                lz_release: None,
+            })),
+        }
+    }
+
+    fn server(cfg: BridgeConfig) -> u16 {
+        common::start_test_server_with_config(
+            |state| state.initialize_from_mnemonic(MNEMONIC).unwrap(),
+            cfg,
+        )
+    }
+
+    #[test]
+    fn an_unconfigured_bridge_refuses_to_sign_in_listener_trusting_mode() {
+        let port = server(BridgeConfig::default());
+        let err = expect_error(send(port, Req::Sign(request(5, 1))));
+        assert!(
+            err.message.contains("bridge config unconfigured"),
+            "{}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn a_pinned_bridge_signs_the_release() {
+        let port = server(pinned_config());
+        let resp = send(port, Req::Sign(request(5, 1)));
+        match resp.response {
+            Some(Resp::EvmSignature(r)) => {
+                assert_eq!(r.signature.len(), 65);
+                assert_eq!(r.call_data, funds_out(5, 1));
+            }
+            other => panic!("expected EvmSignature, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_release_larger_than_the_deposit_is_refused_but_a_smaller_one_is_not() {
+        let port = server(pinned_config());
+        // Releasing more than was deposited is refused.
+        let mut req = request(5, 1);
+        req.amount = 4;
+        let err = expect_error(send(port, Req::Sign(req)));
+        assert_eq!(err.code, CODE_VALIDATION_FAILED, "{}", err.message);
+        assert!(err.message.contains("amount mismatch"), "{}", err.message);
+        // Releasing less (a fee kept by the bridge) is allowed.
+        let mut req = request(5, 1);
+        req.amount = 6;
+        assert!(
+            matches!(
+                send(port, Req::Sign(req)).response,
+                Some(Resp::EvmSignature(_))
+            ),
+            "a release below the deposit signs"
+        );
+    }
+
+    #[test]
+    fn a_short_ccd_tx_hash_is_refused_before_the_destination() {
+        let port = server(pinned_config());
+        let mut req = request(5, 1);
+        req.source_network = Some(SourceNetwork::CcdSource(CcdSource {
+            tx_hash: vec![0xCC; 31],
+            commission: 0,
+        }));
+        let err = expect_error(send(port, Req::Sign(req)));
+        assert!(
+            err.message.contains("CCD source tx_hash must be 32 bytes"),
+            "{}",
+            err.message
+        );
+    }
+}

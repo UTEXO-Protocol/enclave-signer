@@ -909,6 +909,28 @@ mod tests {
         }
 
         #[test]
+        fn rejects_mismatched_id_and_amount_counts() {
+            use alloy_primitives::{B256, U256};
+            use alloy_sol_types::SolValue;
+            let data: Bytes = (
+                vec![B256::from([1u8; 32])],
+                vec![U256::from(1u64), U256::from(2u64)],
+            )
+                .abi_encode_params()
+                .into();
+            let params = params_of(&mock_funds_out_calldata_full(
+                Address::ZERO,
+                1_000,
+                Bytes::new(),
+                data,
+            ));
+            let err = validate_funds_out_settlement(&params, &[lock(1, 1)])
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains("cites 1 ids but 2 amounts"), "{err}");
+        }
+
+        #[test]
         fn rejects_empty_settlement_data() {
             let cd = mock_funds_out_calldata_full(Address::ZERO, 1000, Bytes::new(), Bytes::new());
             let err =

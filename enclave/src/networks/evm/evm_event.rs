@@ -1944,4 +1944,162 @@ mod tests {
             assert_eq!(HELIOS_BOOT_SYNC_TIMEOUT_SECS, 300);
         }
     }
+
+    /// The alloy-backed client against a scripted JSON-RPC endpoint.
+    #[cfg(feature = "evm-rpc")]
+    mod alloy_client {
+        use super::*;
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+
+        /// A minimal HTTP/1.1 JSON-RPC responder. `reply(method)` returns the
+        /// JSON after `"id":N,` (`"result": ...` or `"error": ...`), or `None`
+        /// to leave the request unanswered.
+        fn rpc_server(reply: impl Fn(&str) -> Option<String> + Send + 'static) -> String {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let url = format!("http://{}", listener.local_addr().unwrap());
+            std::thread::spawn(move || {
+                for stream in listener.incoming().flatten() {
+                    let mut stream = stream;
+                    let mut raw = Vec::new();
+                    let mut buf = [0u8; 4096];
+                    let (head_end, body_len) = loop {
+                        let n = match stream.read(&mut buf) {
+                            Ok(0) | Err(_) => break (raw.len(), 0),
+                            Ok(n) => n,
+                        };
+                        raw.extend_from_slice(&buf[..n]);
+                        if let Some(pos) = raw.windows(4).position(|w| w == b"\r\n\r\n") {
+                            let head = String::from_utf8_lossy(&raw[..pos]).to_ascii_lowercase();
+                            let len = head
+                                .lines()
+                                .find_map(|l| l.strip_prefix("content-length:"))
+                                .and_then(|v| v.trim().parse::<usize>().ok())
+                                .unwrap_or(0);
+                            break (pos + 4, len);
+                        }
+                    };
+                    while raw.len() < head_end + body_len {
+                        let n = match stream.read(&mut buf) {
+                            Ok(0) | Err(_) => break,
+                            Ok(n) => n,
+                        };
+                        raw.extend_from_slice(&buf[..n]);
+                    }
+                    let body = String::from_utf8_lossy(&raw[head_end..]).to_string();
+                    let id = body
+                        .split("\"id\":")
+                        .nth(1)
+                        .and_then(|t| t.trim_start().split(|c: char| !c.is_ascii_digit()).next())
+                        .unwrap_or("1")
+                        .to_string();
+                    let method = body
+                        .split("\"method\":\"")
+                        .nth(1)
+                        .and_then(|t| t.split('"').next())
+                        .unwrap_or("")
+                        .to_string();
+                    let Some(tail) = reply(&method) else {
+                        std::thread::sleep(std::time::Duration::from_secs(30));
+                        continue;
+                    };
+                    let json = format!("{{\"jsonrpc\":\"2.0\",\"id\":{id},{tail}}}");
+                    let resp = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{json}",
+                        json.len()
+                    );
+                    let _ = stream.write_all(resp.as_bytes());
+                    let _ = stream.flush();
+                }
+            });
+            url
+        }
+
+        fn receipt_json(block_number: &str) -> String {
+            let h = "0x".to_string() + &"11".repeat(32);
+            let bh = "0x".to_string() + &"22".repeat(32);
+            let addr = "0x".to_string() + &"b1".repeat(20);
+            let bloom = "0x".to_string() + &"00".repeat(256);
+            format!(
+                "{{\"transactionHash\":\"{h}\",\"transactionIndex\":\"0x0\",\"blockHash\":\"{bh}\",\
+                 \"blockNumber\":{block_number},\"from\":\"{addr}\",\"to\":\"{addr}\",\
+                 \"cumulativeGasUsed\":\"0x5208\",\"gasUsed\":\"0x5208\",\"effectiveGasPrice\":\"0x1\",\
+                 \"contractAddress\":null,\"logsBloom\":\"{bloom}\",\"status\":\"0x1\",\"type\":\"0x2\",\
+                 \"logs\":[{{\"address\":\"{addr}\",\"topics\":[\"{h}\",\"{bh}\"],\"data\":\"0x0102\",\
+                 \"blockHash\":\"{bh}\",\"blockNumber\":{block_number},\"transactionHash\":\"{h}\",\
+                 \"transactionIndex\":\"0x0\",\"logIndex\":\"0x0\",\"removed\":false}}]}}"
+            )
+        }
+
+        #[test]
+        fn head_and_receipt_are_fetched_and_mapped() {
+            let url = rpc_server(|m| match m {
+                "eth_blockNumber" => Some("\"result\":\"0x10\"".into()),
+                "eth_getTransactionReceipt" => {
+                    Some(format!("\"result\":{}", receipt_json("\"0x64\"")))
+                }
+                _ => Some("\"result\":null".into()),
+            });
+            let client = AlloyEvmClient::new(&url).unwrap();
+            assert_eq!(client.get_block_number().unwrap(), 16);
+            let r = client
+                .get_transaction_receipt(&[0x11; 32])
+                .unwrap()
+                .expect("receipt present");
+            assert!(r.status_success);
+            assert_eq!(r.block_number, 100);
+            assert_eq!(r.logs.len(), 1);
+            assert_eq!(r.logs[0].address, [0xb1; 20]);
+            assert_eq!(r.logs[0].topics, vec![[0x11; 32], [0x22; 32]]);
+            assert_eq!(r.logs[0].data, vec![1, 2]);
+        }
+
+        #[test]
+        fn a_missing_receipt_is_none_and_an_unmined_one_is_refused() {
+            let url = rpc_server(|m| match m {
+                "eth_getTransactionReceipt" => Some("\"result\":null".into()),
+                _ => Some("\"result\":\"0x1\"".into()),
+            });
+            let client = AlloyEvmClient::new(&url).unwrap();
+            assert!(client
+                .get_transaction_receipt(&[0x11; 32])
+                .unwrap()
+                .is_none());
+
+            let url = rpc_server(|m| match m {
+                "eth_getTransactionReceipt" => Some(format!("\"result\":{}", receipt_json("null"))),
+                _ => Some("\"result\":\"0x1\"".into()),
+            });
+            let client = AlloyEvmClient::new(&url).unwrap();
+            let e = client
+                .get_transaction_receipt(&[0x11; 32])
+                .expect_err("pending receipt must fail")
+                .to_string();
+            assert!(e.contains("no block_number"), "{e}");
+        }
+
+        #[test]
+        fn rpc_errors_are_reported_per_method() {
+            let url =
+                rpc_server(|_| Some("\"error\":{\"code\":-32000,\"message\":\"boom\"}".into()));
+            let client = AlloyEvmClient::new(&url).unwrap();
+            let e = client.get_block_number().unwrap_err().to_string();
+            assert!(e.contains("eth_blockNumber failed"), "{e}");
+            let e = client
+                .get_transaction_receipt(&[0x11; 32])
+                .expect_err("must fail")
+                .to_string();
+            assert!(e.contains("eth_getTransactionReceipt failed"), "{e}");
+        }
+
+        #[test]
+        fn a_stalled_endpoint_times_out_instead_of_hanging() {
+            let url = rpc_server(|_| None);
+            let client = AlloyEvmClient::new(&url).unwrap();
+            let started = std::time::Instant::now();
+            let e = client.get_block_number().unwrap_err().to_string();
+            assert!(e.contains("timed out"), "{e}");
+            assert!(started.elapsed() < EVM_RPC_CALL_TIMEOUT + std::time::Duration::from_secs(5));
+        }
+    }
 }

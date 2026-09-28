@@ -2050,4 +2050,212 @@ mod tests {
             assert!(err.contains("fundsOut proof must be"), "{err}");
         }
     }
+
+    /// The signing handlers behind a validated request, called directly.
+    #[cfg(feature = "rgb-validation")]
+    mod sign_handlers {
+        use crate::config::BridgeConfig;
+        use crate::networks::evm::validation::{
+            decode_funds_out_params, fundsOutCall, lzFundsOutCall, FundsOutParams,
+        };
+        use crate::networks::rgb::spv::{checkpoint_for, HeaderChain, Network};
+        use crate::proto::enclave_response::Response;
+        use crate::proto::{EvmDestination, LzReleaseParams, RgbDestination};
+        use crate::server::{handle_sign_evm, handle_sign_psbt, ServerContext};
+        use crate::state::EnclaveState;
+        use alloy_primitives::{Address, Bytes, FixedBytes, U256};
+        use alloy_sol_types::SolCall;
+
+        const MNEMONIC: &str = "abandon abandon abandon abandon abandon abandon abandon \
+                                abandon abandon abandon abandon about";
+
+        fn ctx(initialized: bool) -> ServerContext {
+            let state = EnclaveState::new(bitcoin::Network::Bitcoin);
+            if initialized {
+                state.initialize_from_mnemonic(MNEMONIC).unwrap();
+            }
+            ServerContext::new(
+                state,
+                BridgeConfig::default(),
+                std::sync::Mutex::new(HeaderChain::new(
+                    Network::Regtest,
+                    checkpoint_for(Network::Regtest),
+                )),
+            )
+        }
+
+        fn funds_out_calldata() -> Vec<u8> {
+            fundsOutCall {
+                params: FundsOutParams {
+                    recipient: Address::ZERO,
+                    amount: U256::from(5u64),
+                    burnId: U256::ZERO,
+                    sourceChainId: U256::ZERO,
+                    destinationChainId: U256::ZERO,
+                    sourceAddress: String::new(),
+                    proof: Bytes::new(),
+                    settlementData: Bytes::new(),
+                },
+            }
+            .abi_encode()
+        }
+
+        fn lz_calldata() -> Vec<u8> {
+            let mut recipient = [0u8; 32];
+            recipient[31] = 0x05;
+            lzFundsOutCall {
+                amount: U256::from(1u64),
+                burnId: U256::from(3u64),
+                sourceChainId: U256::from(84u64),
+                destinationChainId: U256::from(1u64),
+                sourceAddress: "addr".into(),
+                proof: Bytes::new(),
+                settlementData: Bytes::new(),
+                dstEid: 30101,
+                recipient: FixedBytes(recipient),
+                minAmountLD: U256::from(1u64),
+                extraOptions: Bytes::new(),
+            }
+            .abi_encode()
+        }
+
+        fn lz_release() -> LzReleaseParams {
+            let mut recipient = vec![0u8; 32];
+            recipient[31] = 0x05;
+            LzReleaseParams {
+                dst_eid: 30101,
+                min_amount_ld: 1,
+                recipient,
+            }
+        }
+
+        fn dest(call_data: Vec<u8>, lz_release: Option<LzReleaseParams>) -> EvmDestination {
+            EvmDestination {
+                call_data,
+                nonce: 1,
+                deadline: 2,
+                chain_id: 1,
+                proxy_contract: vec![0xAB; 20],
+                calldata_amount: 0,
+                calldata_commission: 0,
+                lz_release,
+            }
+        }
+
+        fn signature_of(resp: crate::proto::EnclaveResponse) -> (Vec<u8>, Vec<u8>) {
+            match resp.response {
+                Some(Response::EvmSignature(r)) => (r.signature, r.call_data),
+                other => panic!("expected EvmSignature, got {other:?}"),
+            }
+        }
+
+        #[test]
+        fn funds_out_release_is_signed_and_the_calldata_echoed() {
+            let ctx = ctx(true);
+            let cd = funds_out_calldata();
+            let (sig, echoed) =
+                signature_of(handle_sign_evm(&ctx, dest(cd.clone(), None), None).unwrap());
+            assert_eq!(sig.len(), 65);
+            assert_eq!(echoed, cd);
+
+            // Pre-decoded params produce the very same digest and signature.
+            let params = decode_funds_out_params(&cd).unwrap();
+            let (again, _) =
+                signature_of(handle_sign_evm(&ctx, dest(cd.clone(), None), Some(&params)).unwrap());
+            assert_eq!(again, sig, "deterministic ECDSA over one digest");
+
+            // A different nonce is a different digest.
+            let mut d = dest(cd, None);
+            d.nonce = 2;
+            let (other, _) = signature_of(handle_sign_evm(&ctx, d, None).unwrap());
+            assert_ne!(other, sig);
+        }
+
+        #[test]
+        fn lz_release_takes_the_lz_digest() {
+            let ctx = ctx(true);
+            let (lz_sig, echoed) = signature_of(
+                handle_sign_evm(&ctx, dest(lz_calldata(), Some(lz_release())), None).unwrap(),
+            );
+            assert_eq!(lz_sig.len(), 65);
+            assert_eq!(echoed, lz_calldata());
+            let (plain_sig, _) = signature_of(
+                handle_sign_evm(&ctx, dest(funds_out_calldata(), None), None).unwrap(),
+            );
+            assert_ne!(lz_sig, plain_sig);
+        }
+
+        #[test]
+        fn lz_calldata_without_lz_release_falls_to_the_funds_out_decoder_and_fails() {
+            let ctx = ctx(true);
+            let err = handle_sign_evm(&ctx, dest(lz_calldata(), None), None)
+                .expect_err("lz calldata is not a fundsOut call");
+            assert!(!err.to_string().is_empty());
+        }
+
+        #[test]
+        fn a_bad_domain_or_missing_keys_refuses_to_sign() {
+            let ctx = ctx(true);
+            let mut d = dest(funds_out_calldata(), None);
+            d.proxy_contract = vec![0xAB; 19];
+            let err = handle_sign_evm(&ctx, d, None).unwrap_err().to_string();
+            assert!(err.contains("proxy_contract"), "{err}");
+
+            let uninitialized = super::sign_handlers::ctx(false);
+            let err = handle_sign_evm(&uninitialized, dest(funds_out_calldata(), None), None)
+                .unwrap_err()
+                .to_string();
+            assert!(err.to_lowercase().contains("initialized"), "{err}");
+        }
+
+        fn rgb_dest(psbt_bytes: Vec<u8>) -> RgbDestination {
+            RgbDestination {
+                operation_idx: 1,
+                psbt_bytes,
+                psbt_output_amount: 0,
+                asset_id: "rgb:test".into(),
+                consignment: Vec::new(),
+                consignment_hash: Vec::new(),
+                mint_ancestors: Vec::new(),
+            }
+        }
+
+        #[test]
+        fn send_rgb_signing_refuses_garbage_and_a_psbt_with_no_input_of_ours() {
+            let ctx = ctx(true);
+            let err = handle_sign_psbt(&ctx, rgb_dest(b"nope".to_vec()))
+                .unwrap_err()
+                .to_string();
+            assert!(!err.is_empty());
+
+            // A well-formed PSBT the enclave holds no key for.
+            use bitcoin::hashes::Hash;
+            let tx = bitcoin::Transaction {
+                version: bitcoin::transaction::Version(2),
+                lock_time: bitcoin::absolute::LockTime::ZERO,
+                input: vec![bitcoin::TxIn {
+                    previous_output: bitcoin::OutPoint {
+                        txid: bitcoin::Txid::from_byte_array([0xCC; 32]),
+                        vout: 0,
+                    },
+                    script_sig: bitcoin::ScriptBuf::new(),
+                    sequence: bitcoin::Sequence::MAX,
+                    witness: bitcoin::Witness::default(),
+                }],
+                output: vec![bitcoin::TxOut {
+                    value: bitcoin::Amount::from_sat(1_000),
+                    script_pubkey: bitcoin::ScriptBuf::new(),
+                }],
+            };
+            let mut psbt = bitcoin::Psbt::from_unsigned_tx(tx).unwrap();
+            psbt.inputs[0].witness_utxo = Some(bitcoin::TxOut {
+                value: bitcoin::Amount::from_sat(2_000),
+                script_pubkey: bitcoin::ScriptBuf::new(),
+            });
+            let err = handle_sign_psbt(&ctx, rgb_dest(psbt.serialize()))
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains("signed 0 inputs"), "{err}");
+        }
+    }
 }

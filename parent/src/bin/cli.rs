@@ -215,12 +215,18 @@ fn print_bridge_config(chain_id: u64, bridge_contract: &[u8], rgb_asset_id: &str
 
 fn run_interactive(client: &EnclaveClient) {
     let stdin = io::stdin();
+    let mut stdout = io::stdout();
+    run_interactive_io(client, &mut stdin.lock(), &mut stdout);
+}
+
+/// The REPL over explicit streams, so it can be driven from a test.
+fn run_interactive_io(client: &EnclaveClient, input: &mut impl BufRead, out: &mut impl Write) {
     loop {
-        print!("enclave> ");
-        io::stdout().flush().unwrap();
+        let _ = write!(out, "enclave> ");
+        let _ = out.flush();
 
         let mut line = String::new();
-        if stdin.lock().read_line(&mut line).unwrap_or(0) == 0 {
+        if input.read_line(&mut line).unwrap_or(0) == 0 {
             break; // EOF
         }
 
@@ -260,7 +266,10 @@ fn run_interactive(client: &EnclaveClient) {
                 Err(e) => eprintln!("Error: {}", e),
             },
             "help" => {
-                println!("Commands: init, init-seed <hex>, init-mnemonic <words>, get-keys, help, quit, exit");
+                let _ = writeln!(
+                    out,
+                    "Commands: init, init-seed <hex>, init-mnemonic <words>, get-keys, help, quit, exit"
+                );
             }
             "quit" | "exit" => break,
             "" => {}
@@ -274,46 +283,43 @@ fn main() {
         .with_env_filter(EnvFilter::from_default_env())
         .init();
 
-    let cli = Cli::parse();
+    if let Err(message) = run(Cli::parse()) {
+        eprintln!("{message}");
+        process::exit(1);
+    }
+}
+
+/// Execute one parsed command. Every failure is returned as the message the
+/// binary prints before exiting non-zero.
+fn run(cli: Cli) -> Result<(), String> {
     let client = EnclaveClient::new(&cli.addr);
 
     match cli.command {
         Command::Init { cloning_secret } => {
-            match client.initialize_keys_with_secret(None, cloning_secret) {
-                Ok(r) => print_init_response(&r),
-                Err(e) => {
-                    eprintln!("Error: {}", e);
-                    process::exit(1);
-                }
-            }
+            let r = client
+                .initialize_keys_with_secret(None, cloning_secret)
+                .map_err(|e| format!("Error: {e}"))?;
+            print_init_response(&r);
         }
-        Command::InitSeed { hex: hex_str } => match hex::decode(&hex_str) {
-            Ok(seed) => match client.initialize_keys(Some(seed)) {
-                Ok(r) => print_init_response(&r),
-                Err(e) => {
-                    eprintln!("Error: {}", e);
-                    process::exit(1);
-                }
-            },
-            Err(e) => {
-                eprintln!("Invalid hex: {}", e);
-                process::exit(1);
-            }
-        },
-        Command::InitMnemonic { words } => match client.initialize_keys_mnemonic(&words) {
-            Ok(r) => print_init_response(&r),
-            Err(e) => {
-                eprintln!("Error: {}", e);
-                process::exit(1);
-            }
-        },
-        Command::GetKeys => match client.get_public_keys() {
-            Ok(r) => print_keys_response(&r),
-            Err(e) => {
-                eprintln!("Error: {}", e);
-                process::exit(1);
-            }
-        },
+        Command::InitSeed { hex: hex_str } => {
+            let seed = hex::decode(&hex_str).map_err(|e| format!("Invalid hex: {e}"))?;
+            let r = client
+                .initialize_keys(Some(seed))
+                .map_err(|e| format!("Error: {e}"))?;
+            print_init_response(&r);
+        }
+        Command::InitMnemonic { words } => {
+            let r = client
+                .initialize_keys_mnemonic(&words)
+                .map_err(|e| format!("Error: {e}"))?;
+            print_init_response(&r);
+        }
+        Command::GetKeys => {
+            let r = client
+                .get_public_keys()
+                .map_err(|e| format!("Error: {e}"))?;
+            print_keys_response(&r);
+        }
         Command::SignEvm {
             call_data,
             nonce,
@@ -326,20 +332,10 @@ fn main() {
             calldata_commission,
             consignment_valid,
         } => {
-            let data = match hex::decode(&call_data) {
-                Ok(d) => d,
-                Err(e) => {
-                    eprintln!("Invalid hex call_data: {}", e);
-                    process::exit(1);
-                }
-            };
-            let proxy = match hex::decode(&proxy_contract) {
-                Ok(d) => d,
-                Err(e) => {
-                    eprintln!("Invalid hex proxy_contract: {}", e);
-                    process::exit(1);
-                }
-            };
+            let data =
+                hex::decode(&call_data).map_err(|e| format!("Invalid hex call_data: {e}"))?;
+            let proxy = hex::decode(&proxy_contract)
+                .map_err(|e| format!("Invalid hex proxy_contract: {e}"))?;
             let req = SignEvmRequest {
                 call_data: data,
                 nonce,
@@ -356,15 +352,8 @@ fn main() {
                 consignment_hash: vec![],
                 lz_release: None,
             };
-            match client.sign_evm(req) {
-                Ok(r) => {
-                    println!("EVM signature (65 bytes): {}", hex::encode(&r.signature));
-                }
-                Err(e) => {
-                    eprintln!("Error: {}", e);
-                    process::exit(1);
-                }
-            }
+            let r = client.sign_evm(req).map_err(|e| format!("Error: {e}"))?;
+            println!("EVM signature (65 bytes): {}", hex::encode(&r.signature));
         }
         Command::SignPsbt {
             psbt,
@@ -378,23 +367,11 @@ fn main() {
             rgb_asset_id,
             consignment,
         } => {
-            let psbt_bytes = match hex::decode(&psbt) {
-                Ok(d) => d,
-                Err(e) => {
-                    eprintln!("Invalid hex PSBT: {}", e);
-                    process::exit(1);
-                }
-            };
+            let psbt_bytes = hex::decode(&psbt).map_err(|e| format!("Invalid hex PSBT: {e}"))?;
             let consignment_bytes = if consignment.is_empty() {
                 vec![]
             } else {
-                match hex::decode(&consignment) {
-                    Ok(d) => d,
-                    Err(e) => {
-                        eprintln!("Invalid hex consignment: {}", e);
-                        process::exit(1);
-                    }
-                }
+                hex::decode(&consignment).map_err(|e| format!("Invalid hex consignment: {e}"))?
             };
             let consignment_hash = if consignment_bytes.is_empty() {
                 vec![]
@@ -405,32 +382,20 @@ fn main() {
             let tx_hash = if evm_tx_hash.is_empty() {
                 vec![]
             } else {
-                match hex::decode(&evm_tx_hash) {
-                    Ok(d) => d,
-                    Err(e) => {
-                        eprintln!("Invalid hex evm_tx_hash: {}", e);
-                        process::exit(1);
-                    }
-                }
+                hex::decode(&evm_tx_hash).map_err(|e| format!("Invalid hex evm_tx_hash: {e}"))?
             };
-            let funds_in_operation_id = match hex::decode(
+            let funds_in_operation_id = hex::decode(
                 evm_funds_in_operation_id
                     .strip_prefix("0x")
                     .unwrap_or(&evm_funds_in_operation_id),
-            ) {
-                Ok(d) if d.len() == 32 => d,
-                Ok(d) => {
-                    eprintln!(
-                        "--evm-funds-in-operation-id must be 32 bytes (BridgeFundsIn operationId), got {}",
-                        d.len()
-                    );
-                    process::exit(1);
-                }
-                Err(e) => {
-                    eprintln!("Invalid hex evm_funds_in_operation_id: {}", e);
-                    process::exit(1);
-                }
-            };
+            )
+            .map_err(|e| format!("Invalid hex evm_funds_in_operation_id: {e}"))?;
+            if funds_in_operation_id.len() != 32 {
+                return Err(format!(
+                    "--evm-funds-in-operation-id must be 32 bytes (BridgeFundsIn operationId), got {}",
+                    funds_in_operation_id.len()
+                ));
+            }
             let req = SignPsbtRequest {
                 evm_tx_hash: tx_hash,
                 evm_funds_in_operation_id: funds_in_operation_id,
@@ -447,62 +412,41 @@ fn main() {
                 consignment: consignment_bytes,
                 consignment_hash,
             };
-            match client.sign_psbt(req) {
-                Ok(r) => {
-                    println!("Signed PSBT: {}", hex::encode(&r.signed_psbt));
-                    println!("Inputs signed: {}", r.inputs_signed);
-                }
-                Err(e) => {
-                    eprintln!("Error: {}", e);
-                    process::exit(1);
-                }
-            }
+            let r = client.sign_psbt(req).map_err(|e| format!("Error: {e}"))?;
+            println!("Signed PSBT: {}", hex::encode(&r.signed_psbt));
+            println!("Inputs signed: {}", r.inputs_signed);
         }
-        Command::GetLastSavedBlock => match client.get_last_saved_block() {
-            Ok(r) => {
-                println!("Block height: {}", r.block_height);
-                println!("Block hash:   {}", hex::encode(&r.block_hash));
-            }
-            Err(e) => {
-                eprintln!("Error: {}", e);
-                process::exit(1);
-            }
-        },
+        Command::GetLastSavedBlock => {
+            let r = client
+                .get_last_saved_block()
+                .map_err(|e| format!("Error: {e}"))?;
+            println!("Block height: {}", r.block_height);
+            println!("Block hash:   {}", hex::encode(&r.block_hash));
+        }
         Command::SubmitHeaders {
             start_height,
             headers_file,
         } => {
-            let headers = match read_headers_file(&headers_file) {
-                Ok(h) => h,
-                Err(e) => {
-                    eprintln!("Error reading {}: {}", headers_file.display(), e);
-                    process::exit(1);
-                }
-            };
-            match client.submit_headers(start_height, headers) {
-                Ok(r) => {
-                    println!("Last block height: {}", r.last_block_height);
-                    println!("Last block hash:   {}", hex::encode(&r.last_block_hash));
-                    println!("Headers accepted:  {}", r.headers_accepted);
-                }
-                Err(e) => {
-                    eprintln!("Error: {}", e);
-                    process::exit(1);
-                }
-            }
+            let headers = read_headers_file(&headers_file)
+                .map_err(|e| format!("Error reading {}: {e}", headers_file.display()))?;
+            let r = client
+                .submit_headers(start_height, headers)
+                .map_err(|e| format!("Error: {e}"))?;
+            println!("Last block height: {}", r.last_block_height);
+            println!("Last block hash:   {}", hex::encode(&r.last_block_hash));
+            println!("Headers accepted:  {}", r.headers_accepted);
         }
         Command::Clone {
             cloning_secret,
             donor_grpc,
             donor_evm,
         } => {
-            if let Err(e) = run_clone(&client, &cloning_secret, &donor_grpc, &donor_evm) {
-                eprintln!("Error: {}", e);
-                process::exit(1);
-            }
+            run_clone(&client, &cloning_secret, &donor_grpc, &donor_evm)
+                .map_err(|e| format!("Error: {e}"))?;
         }
         Command::Interactive => run_interactive(&client),
     }
+    Ok(())
 }
 
 /// Drive the donor->requester cloning handshake. `client` targets the local
@@ -799,6 +743,266 @@ mod tests {
             let err = run_clone(&requester, "s", "http://127.0.0.1:1", &donor_evm)
                 .expect_err("dead donor gRPC");
             assert!(!err.to_string().is_empty());
+        }
+    }
+
+    /// Every subcommand through `run`, against a real enclave.
+    #[cfg(not(all(feature = "vsock", target_os = "linux")))]
+    mod dispatch {
+        use super::*;
+        use std::net::TcpListener;
+        use std::sync::Arc;
+
+        use utexo_bridge_enclave::config::BridgeConfig;
+        use utexo_bridge_enclave::networks::rgb::spv::{checkpoint_for, HeaderChain, Network};
+        use utexo_bridge_enclave::server::{self as enclave_server, ServerContext};
+        use utexo_bridge_enclave::state::EnclaveState;
+
+        const MNEMONIC: &str = "abandon abandon abandon abandon abandon abandon abandon \
+                                abandon abandon abandon abandon about";
+
+        fn start_enclave() -> String {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let addr = listener.local_addr().unwrap();
+            let ctx = Arc::new(ServerContext::new(
+                EnclaveState::new(bitcoin::Network::Bitcoin),
+                BridgeConfig::from_env(),
+                std::sync::Mutex::new(HeaderChain::new(
+                    Network::Regtest,
+                    checkpoint_for(Network::Regtest),
+                )),
+            ));
+            std::thread::spawn(move || {
+                for stream in listener.incoming().flatten() {
+                    enclave_server::handle_connection(stream, &ctx);
+                }
+            });
+            addr.to_string()
+        }
+
+        fn cli(addr: &str, args: &[&str]) -> Cli {
+            let mut all = vec!["utexo-bridge-parent-cli", "--addr", addr];
+            all.extend_from_slice(args);
+            Cli::try_parse_from(all).expect("valid arguments")
+        }
+
+        fn run_err(addr: &str, args: &[&str]) -> String {
+            run(cli(addr, args)).expect_err("expected an error")
+        }
+
+        #[test]
+        fn init_variants_get_keys_and_reinit_refusal() {
+            let addr = start_enclave();
+            run_err(&addr, &["get-keys"]);
+            run(cli(&addr, &["init-mnemonic", MNEMONIC])).unwrap();
+            run(cli(&addr, &["get-keys"])).unwrap();
+            assert!(run_err(&addr, &["init"]).starts_with("Error: "));
+            assert!(run_err(&addr, &["init", "--cloning-secret", "s"]).starts_with("Error: "));
+
+            let addr = start_enclave();
+            run(cli(&addr, &["init-seed", &"5c".repeat(64)])).unwrap();
+            let addr = start_enclave();
+            run(cli(&addr, &["init"])).unwrap();
+            let addr = start_enclave();
+            run(cli(&addr, &["init", "--cloning-secret", "operator"])).unwrap();
+        }
+
+        #[test]
+        fn init_seed_rejects_bad_hex_before_connecting() {
+            let msg = run_err("127.0.0.1:1", &["init-seed", "zz"]);
+            assert!(msg.starts_with("Invalid hex: "), "{msg}");
+        }
+
+        #[test]
+        fn unreachable_enclave_is_reported_for_each_command() {
+            for args in [
+                vec!["init"],
+                vec!["init-mnemonic", MNEMONIC],
+                vec!["get-keys"],
+                vec!["get-last-saved-block"],
+                vec![
+                    "sign-evm",
+                    "--call-data",
+                    "aa",
+                    "--nonce",
+                    "1",
+                    "--deadline",
+                    "1",
+                ],
+            ] {
+                let msg = run_err("127.0.0.1:1", &args);
+                assert!(
+                    msg.starts_with("Error: connection failed"),
+                    "{args:?}: {msg}"
+                );
+            }
+        }
+
+        #[test]
+        fn sign_evm_validates_hex_then_lets_the_enclave_refuse() {
+            let addr = start_enclave();
+            run(cli(&addr, &["init-mnemonic", MNEMONIC])).unwrap();
+            let base = ["sign-evm", "--nonce", "1", "--deadline", "1"];
+            let mut a = base.to_vec();
+            a.extend(["--call-data", "zz"]);
+            assert!(run_err(&addr, &a).starts_with("Invalid hex call_data"));
+            let mut a = base.to_vec();
+            a.extend(["--call-data", "aa", "--proxy-contract", "zz"]);
+            assert!(run_err(&addr, &a).starts_with("Invalid hex proxy_contract"));
+            let mut a = base.to_vec();
+            a.extend(["--call-data", "aa", "--consignment-valid"]);
+            assert!(run_err(&addr, &a).starts_with("Error: enclave returned error"));
+        }
+
+        #[test]
+        fn sign_psbt_validates_every_hex_field_then_lets_the_enclave_refuse() {
+            let addr = start_enclave();
+            run(cli(&addr, &["init-mnemonic", MNEMONIC])).unwrap();
+            let opid = "0x".to_string() + &"33".repeat(32);
+            assert!(run_err(&addr, &["sign-psbt", "--psbt", "zz"]).starts_with("Invalid hex PSBT"));
+            assert!(
+                run_err(&addr, &["sign-psbt", "--psbt", "aa", "--consignment", "zz"])
+                    .starts_with("Invalid hex consignment")
+            );
+            assert!(
+                run_err(&addr, &["sign-psbt", "--psbt", "aa", "--evm-tx-hash", "zz"])
+                    .starts_with("Invalid hex evm_tx_hash")
+            );
+            assert!(run_err(
+                &addr,
+                &[
+                    "sign-psbt",
+                    "--psbt",
+                    "aa",
+                    "--evm-funds-in-operation-id",
+                    "zz"
+                ]
+            )
+            .starts_with("Invalid hex evm_funds_in_operation_id"));
+            let msg = run_err(
+                &addr,
+                &[
+                    "sign-psbt",
+                    "--psbt",
+                    "aa",
+                    "--evm-funds-in-operation-id",
+                    "0x1234",
+                ],
+            );
+            assert!(
+                msg.contains("must be 32 bytes") && msg.contains("got 2"),
+                "{msg}"
+            );
+            let msg = run_err(
+                &addr,
+                &[
+                    "sign-psbt",
+                    "--psbt",
+                    "aa",
+                    "--evm-funds-in-operation-id",
+                    &opid,
+                    "--evm-tx-hash",
+                    &"11".repeat(32),
+                    "--consignment",
+                    "c0c0",
+                ],
+            );
+            assert!(msg.starts_with("Error: enclave returned error"), "{msg}");
+        }
+
+        #[test]
+        fn header_chain_commands_talk_to_the_real_chain() {
+            let addr = start_enclave();
+            run(cli(&addr, &["get-last-saved-block"])).unwrap();
+
+            let msg = run_err(
+                &addr,
+                &[
+                    "submit-headers",
+                    "--start-height",
+                    "1",
+                    "--headers-file",
+                    "/nonexistent/h",
+                ],
+            );
+            assert!(msg.starts_with("Error reading /nonexistent/h"), "{msg}");
+
+            let empty = temp_file("empty-headers.txt", "# none\n");
+            run(cli(
+                &addr,
+                &[
+                    "submit-headers",
+                    "--start-height",
+                    "1",
+                    "--headers-file",
+                    empty.to_str().unwrap(),
+                ],
+            ))
+            .unwrap();
+            std::fs::remove_file(&empty).ok();
+
+            let bad = temp_file("bad-headers.txt", &format!("{}\n", "00".repeat(80)));
+            let msg = run_err(
+                &addr,
+                &[
+                    "submit-headers",
+                    "--start-height",
+                    "1",
+                    "--headers-file",
+                    bad.to_str().unwrap(),
+                ],
+            );
+            std::fs::remove_file(&bad).ok();
+            assert!(msg.starts_with("Error: enclave returned error"), "{msg}");
+        }
+
+        #[test]
+        fn clone_command_reports_handshake_failures() {
+            let msg = run_err(
+                "127.0.0.1:1",
+                &[
+                    "clone",
+                    "--cloning-secret",
+                    "s",
+                    "--donor-grpc",
+                    "http://127.0.0.1:1",
+                    "--donor-evm",
+                    "0x1234",
+                ],
+            );
+            assert!(msg.contains("must be a 20-byte address"), "{msg}");
+        }
+
+        #[test]
+        fn the_repl_runs_every_command_and_stops_on_quit_or_eof() {
+            let addr = start_enclave();
+            let client = EnclaveClient::new(&addr);
+            let script = format!(
+                "help\n\nbogus\ninit-seed\ninit-seed zz\nget-keys\ninit-mnemonic\n\
+                 init-mnemonic {MNEMONIC}\nget-keys\ninit\ninit-seed {}\nquit\nget-keys\n",
+                "5c".repeat(64)
+            );
+            let mut out = Vec::new();
+            run_interactive_io(&client, &mut script.as_bytes(), &mut out);
+            let out = String::from_utf8(out).unwrap();
+            assert!(out.contains("Commands: init"), "{out}");
+            // Twelve prompts: one per line up to and including `quit`.
+            assert_eq!(out.matches("enclave> ").count(), 12, "{out}");
+
+            // EOF without quit also ends the loop.
+            let mut out = Vec::new();
+            run_interactive_io(&client, &mut "exit\n".as_bytes(), &mut out);
+            run_interactive_io(&client, &mut "".as_bytes(), &mut out);
+            assert_eq!(
+                String::from_utf8(out).unwrap().matches("enclave> ").count(),
+                2
+            );
+        }
+
+        #[test]
+        fn main_style_exit_path_formats_the_error() {
+            let err = run(cli("127.0.0.1:1", &["get-keys"])).unwrap_err();
+            assert!(err.starts_with("Error: "));
         }
     }
 }
