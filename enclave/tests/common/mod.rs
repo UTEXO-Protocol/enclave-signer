@@ -204,7 +204,7 @@ pub mod deposit_stub {
             bytes32 indexed operationId, bytes32 indexed sourceSender, address indexed sender,
             uint256 senderNonce, uint256 amount, uint256 netAmount, uint256 tokenCommission,
             uint256 nativeCommission, uint256 sourceChainId, uint256 destinationChainId,
-            string destinationAddress
+            string destinationAddress, bytes settlementData
         );
     }
 
@@ -243,6 +243,7 @@ pub mod deposit_stub {
                 sourceChainId: U256::ZERO,
                 destinationChainId: U256::ZERO,
                 destinationAddress: INVOICE.into(),
+                settlementData: Default::default(),
             };
             Ok(Some(ReceiptData {
                 status_success: true,

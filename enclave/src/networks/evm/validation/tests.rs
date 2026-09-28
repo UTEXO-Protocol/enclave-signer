@@ -10,7 +10,7 @@ fn parse_proof_from_calldata(call_data: &[u8]) -> Result<RouteProof> {
 
 use super::*;
 use crate::config::BridgeConfig;
-use alloy_primitives::{Address, Bytes};
+use alloy_primitives::{Address, Bytes, FixedBytes};
 #[cfg(feature = "rgb-validation")]
 use std::sync::Mutex;
 
@@ -25,6 +25,7 @@ fn funds_out_calldata(amount: u64, burn_id: u64) -> Vec<u8> {
             sourceAddress: String::new(),
             proof: Bytes::new(),
             settlementData: Bytes::new(),
+            sourceBurnTxId: FixedBytes([0x5b; 32]),
         },
     }
     .abi_encode()
@@ -42,6 +43,7 @@ fn funds_out_calldata_for_chain(amount: u64, destination_chain_id: u64) -> Vec<u
             sourceAddress: String::new(),
             proof: Bytes::new(),
             settlementData: Bytes::new(),
+            sourceBurnTxId: FixedBytes([0x5b; 32]),
         },
     }
     .abi_encode()
@@ -217,6 +219,7 @@ fn lz_funds_out_calldata(amount: u64, destination_chain_id: u64) -> Vec<u8> {
         recipient: FixedBytes(recipient),
         minAmountLD: U256::from(amount),
         extraOptions: Bytes::new(),
+        sourceBurnTxId: FixedBytes([0x5b; 32]),
     }
     .abi_encode()
 }
@@ -354,6 +357,7 @@ fn rejects_uint256_amount_overflow() {
             sourceAddress: String::new(),
             proof: Bytes::new(),
             settlementData: Bytes::new(),
+            sourceBurnTxId: FixedBytes([0x5b; 32]),
         },
     }
     .abi_encode();
@@ -389,6 +393,7 @@ fn funds_out_calldata_with_tails(amount: u64) -> Vec<u8> {
             sourceAddress: "rgb-src".to_string(),
             proof: Bytes::from(vec![0xCC; 64]),
             settlementData: Bytes::from(vec![0xDD; 32]),
+            sourceBurnTxId: FixedBytes([0x5b; 32]),
         },
     }
     .abi_encode()

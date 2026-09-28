@@ -71,9 +71,11 @@ All bridge signing goes through one `Sign` request with a source network and a
 destination network. Accepted routes: RGB -> EVM, EVM -> RGB, CCD -> EVM.
 
 - **RGB -> EVM (`fundsOut`)** - EIP-712 `TeeFundsOut` (pools route, selector
-  `0xdc771390`) or `TeeLzFundsOut` (LayerZero route) over the decoded calldata
+  `0x340276aa`) or `TeeLzFundsOut` (LayerZero route) over the decoded calldata
   fields, domain `MultisigProxy` / `1` / pinned chain id / pinned proxy. 65-byte
-  recoverable ECDSA signature.
+  recoverable ECDSA signature. The calldata's `sourceBurnTxId` must be the RGB
+  OpId of the consignment's settling transition, and `sourceAddress` must be
+  empty (RGB has no source address).
 - **EVM -> RGB (bridge PSBT)** - taproot Schnorr signatures on the colored
   account, BIP-86 key path only (the bridge wallet is singlesig; a script-path
   input is never signed), only after the EVM deposit and the RGB consignment

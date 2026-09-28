@@ -8,15 +8,17 @@ use crate::proto::{EvmDestination, LzReleaseParams};
 const DOMAIN_TYPE_HASH_STR: &str =
     "EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)";
 
-/// EIP-712 type string for `MultisigProxy.fundsOutCall` (MultisigProxy.sol:143-144),
+/// EIP-712 type string for `MultisigProxy.fundsOutCall` (MultisigProxy.sol:173-175),
 /// replacing the generic `BridgeOperation(bytes4,bytes,uint256,uint256)`: the proxy
 /// no longer takes opaque calldata, so the digest commits to the release fields.
+/// `sourceBurnTxId` joined the struct in bridge PR #152, right after
+/// `settlementData`.
 ///
 /// Signing the old struct recovers a different address, which surfaces on-chain
 /// only as an unregistered-signer rejection. There is no interop window.
 const TEE_FUNDS_OUT_TYPE_HASH_STR: &str = "TeeFundsOut(address recipient,uint256 amount,\
      uint256 burnId,uint256 sourceChainId,uint256 destinationChainId,string sourceAddress,\
-     bytes proof,bytes settlementData,uint256 nonce,uint256 deadline)";
+     bytes proof,bytes settlementData,bytes32 sourceBurnTxId,uint256 nonce,uint256 deadline)";
 
 /// EIP-712 domain separator components.
 /// Must match the deployed MultisigProxy contract exactly.
@@ -71,8 +73,9 @@ pub fn build_evm_domain(req: &EvmDestination) -> Result<Eip712Domain> {
 /// Build the EIP-712 digest that `MultisigProxy.fundsOutCall` verifies, from a
 /// `fundsOut(FundsOutParams)` calldata blob.
 ///
-/// Mirrors `MultisigProxy._fundsOutStructHash` (MultisigProxy.sol:293-315): ten
-/// words, `string`/`bytes` pre-hashed. Domain separator unchanged.
+/// Mirrors `MultisigProxy._fundsOutStructHash` (MultisigProxy.sol:334-359):
+/// eleven words, `string`/`bytes` pre-hashed, `bytes32 sourceBurnTxId` as-is.
+/// Domain separator unchanged.
 ///
 /// Decoded rather than hashed whole, so the enclave commits to the individual
 /// values the transactor will submit.
@@ -88,7 +91,7 @@ pub fn funds_out_digest(
     let struct_hash = {
         let type_hash = Keccak256::digest(TEE_FUNDS_OUT_TYPE_HASH_STR.as_bytes());
 
-        let mut buf = Vec::with_capacity(HASH_LEN * 11);
+        let mut buf = Vec::with_capacity(HASH_LEN * 12);
         buf.extend_from_slice(&type_hash);
         buf.extend_from_slice(&abi_encode_address(&params.recipient.into_array()));
         // Full-width uint256s - never narrowed to the cross-checks' u64.
@@ -100,6 +103,8 @@ pub fn funds_out_digest(
         buf.extend_from_slice(&Keccak256::digest(params.sourceAddress.as_bytes()));
         buf.extend_from_slice(&Keccak256::digest(&params.proof));
         buf.extend_from_slice(&Keccak256::digest(&params.settlementData));
+        // bytes32 sourceBurnTxId: a static word, used as-is (not pre-hashed).
+        buf.extend_from_slice(&params.sourceBurnTxId.0);
         buf.extend_from_slice(&abi_encode_u256(nonce));
         buf.extend_from_slice(&abi_encode_u256(deadline));
 
@@ -110,19 +115,21 @@ pub fn funds_out_digest(
     Ok(eip712_digest(domain, &struct_hash))
 }
 
-/// EIP-712 type string for `MultisigProxy.lzFundsOutCall` (MultisigProxy.sol:147).
-/// Thirteen fields: the seven shared with `TeeFundsOut` plus four LZ-specific ones.
+/// EIP-712 type string for `MultisigProxy.lzFundsOutCall` (MultisigProxy.sol:176-178).
+/// Fourteen fields: the eight shared with `TeeFundsOut` plus four LZ-specific
+/// ones, with `sourceBurnTxId` (bridge PR #152) after `extraOptions`.
 const TEE_LZ_FUNDS_OUT_TYPE_HASH_STR: &str = "TeeLzFundsOut(uint256 amount,uint256 burnId,\
      uint256 sourceChainId,uint256 destinationChainId,string sourceAddress,\
      bytes proof,bytes settlementData,uint32 dstEid,bytes32 recipient,\
-     uint256 minAmountLD,bytes extraOptions,uint256 nonce,uint256 deadline)";
+     uint256 minAmountLD,bytes extraOptions,bytes32 sourceBurnTxId,uint256 nonce,\
+     uint256 deadline)";
 
 /// Build the EIP-712 digest that `MultisigProxy.lzFundsOutCall` verifies.
 ///
-/// Mirrors `MultisigProxy._lzFundsOutStructHash` (MultisigProxy.sol:388-413):
-/// thirteen words - dynamic fields pre-hashed, `dstEid` (uint32) padded to
-/// 32 bytes. The `lz_release` proto fields are crosschecked against the decoded
-/// calldata before the digest is built.
+/// Mirrors `MultisigProxy._lzFundsOutStructHash` (MultisigProxy.sol:505-544):
+/// fourteen words - dynamic fields pre-hashed, `dstEid` (uint32) padded to
+/// 32 bytes, `sourceBurnTxId` (bytes32) as-is. The `lz_release` proto fields
+/// are crosschecked against the decoded calldata before the digest is built.
 pub fn lz_funds_out_digest(
     domain: &Eip712Domain,
     call_data: &[u8],
@@ -165,7 +172,7 @@ pub fn lz_funds_out_digest(
     let struct_hash = {
         let type_hash = Keccak256::digest(TEE_LZ_FUNDS_OUT_TYPE_HASH_STR.as_bytes());
 
-        let mut buf = Vec::with_capacity(HASH_LEN * 14);
+        let mut buf = Vec::with_capacity(HASH_LEN * 15);
         buf.extend_from_slice(&type_hash);
         buf.extend_from_slice(&params.amount.to_be_bytes::<HASH_LEN>());
         buf.extend_from_slice(&params.burnId.to_be_bytes::<HASH_LEN>());
@@ -180,6 +187,7 @@ pub fn lz_funds_out_digest(
         buf.extend_from_slice(&recipient_bytes);
         buf.extend_from_slice(&params.minAmountLD.to_be_bytes::<HASH_LEN>());
         buf.extend_from_slice(&Keccak256::digest(&params.extraOptions));
+        buf.extend_from_slice(&params.sourceBurnTxId.0);
         buf.extend_from_slice(&abi_encode_u256(nonce));
         buf.extend_from_slice(&abi_encode_u256(deadline));
 

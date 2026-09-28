@@ -42,20 +42,23 @@ fn test_domain_separator_deterministic() {
     assert_ne!(hash1, [0u8; HASH_LEN]);
 }
 
-/// Reference calldata from `cast calldata`, over the fields listed in
-/// [`test_digest_matches_foundry_vector`].
+/// Reference calldata over the fields listed in
+/// [`test_digest_matches_reference_vector`]: the pre-#152 Foundry vector with
+/// `sourceBurnTxId = 0xdd..dd` appended (one more head word, so every dynamic
+/// tail offset moved up by 0x20).
 fn reference_call_data() -> Vec<u8> {
     decode(concat!(
-        "dc771390",
+        "340276aa",
         "0000000000000000000000000000000000000000000000000000000000000020",
         "000000000000000000000000f39fd6e51aad88f6f4ce6ab8827279cfffb92266",
         "00000000000000000000000000000000000000000000000000000000000f4240",
         "00000000000000000000000000000000000000000000000000000000075bcd15",
         "0000000000000000000000000000000000000000000000000000000000000060",
         "0000000000000000000000000000000000000000000000000000000000007a69",
-        "0000000000000000000000000000000000000000000000000000000000000100",
-        "0000000000000000000000000000000000000000000000000000000000000140",
-        "00000000000000000000000000000000000000000000000000000000000001e0",
+        "0000000000000000000000000000000000000000000000000000000000000120",
+        "0000000000000000000000000000000000000000000000000000000000000160",
+        "0000000000000000000000000000000000000000000000000000000000000200",
+        "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
         "0000000000000000000000000000000000000000000000000000000000000011",
         "7267623a6c6f63616c6e65742d74657374000000000000000000000000000000",
         "0000000000000000000000000000000000000000000000000000000000000080",
@@ -95,7 +98,23 @@ fn test_tee_funds_out_typehash_matches_contract() {
         Keccak256::digest(TEE_FUNDS_OUT_TYPE_HASH_STR.as_bytes()).into();
     assert_eq!(
         hex::encode(type_hash),
+        "7b1c067721d3d07e40255c970c458626d43b425ca4bb0449b42baa0766cdae45"
+    );
+    // The pre-#152 string (no `sourceBurnTxId`) must be gone: the proxy no
+    // longer verifies that struct.
+    assert_ne!(
+        hex::encode(type_hash),
         "e84f4b6ff956c2d754ac4310166ee6df5e488aa5a36cd65cf367cf80aff7c608"
+    );
+}
+
+#[test]
+fn test_tee_lz_funds_out_typehash_matches_contract() {
+    let type_hash: [u8; HASH_LEN] =
+        Keccak256::digest(TEE_LZ_FUNDS_OUT_TYPE_HASH_STR.as_bytes()).into();
+    assert_eq!(
+        hex::encode(type_hash),
+        "5b65e176d2ff704611f5ee5f0709dee77247e909ddf326ff947b248ee80cdf9e"
     );
 }
 
@@ -133,21 +152,83 @@ fn test_undecodable_call_data_rejected() {
 
 /// Cross-implementation vector: Solidity, Go and this module must agree
 /// byte-for-byte, or the chain recovers a garbage signer and reports it only
-/// as "not a registered enclave signer". Calldata and digest come from
-/// Foundry, not from this module's own helpers.
+/// as "not a registered enclave signer".
 ///
 /// Fields: recipient 0xf39F...2266, amount 1_000_000, burnId 123_456_789,
 /// sourceChainId 96, destinationChainId 31337, sourceAddress
 /// "rgb:localnet-test", proof = abi.encode(101, 0xaa..., 107, 0xbb...),
-/// settlementData = abi.encode([0xcc...], [999]), nonce 3,
-/// deadline 1_700_000_000, on the Arbitrum One domain.
+/// settlementData = abi.encode([0xcc...], [999]), sourceBurnTxId 0xdd..dd,
+/// nonce 3, deadline 1_700_000_000, on the Arbitrum One domain.
+///
+/// The pinned digest was produced by alloy's own EIP-712 encoder over the
+/// `TeeFundsOut` struct (an independent implementation of the hand-rolled
+/// encoding here), and [`test_digest_matches_alloy_eip712`] re-derives it at
+/// test time. The pre-#152 Foundry vector for the same fields was
+/// `fed59f73...3de5`; re-pin from Foundry once the contracts repo publishes a
+/// post-#152 vector.
 #[test]
-fn test_digest_matches_foundry_vector() {
+fn test_digest_matches_reference_vector() {
     let digest =
         funds_out_digest(&arbitrum_domain(), &reference_params(), 3, 1_700_000_000).unwrap();
     assert_eq!(
         hex::encode(digest),
-        "fed59f73692c4af5ef0bcec16b76fdc50c0a5fc15a32b38264043b8a1c283de5"
+        "8535655116c6f440c2f63e7cc8141e4ffd1cab3876164a2962ee127dcb57389f"
+    );
+}
+
+/// The hand-rolled struct hash against alloy's `SolStruct` EIP-712 encoding
+/// of the same `TeeFundsOut` type string: two encoders, one digest.
+#[test]
+fn test_digest_matches_alloy_eip712() {
+    use alloy_primitives::{Address, U256};
+    use alloy_sol_types::{sol, SolStruct};
+
+    sol! {
+        struct TeeFundsOut {
+            address recipient;
+            uint256 amount;
+            uint256 burnId;
+            uint256 sourceChainId;
+            uint256 destinationChainId;
+            string sourceAddress;
+            bytes proof;
+            bytes settlementData;
+            bytes32 sourceBurnTxId;
+            uint256 nonce;
+            uint256 deadline;
+        }
+    }
+    // The `sol!` type string must be the one the module hashes.
+    assert_eq!(
+        TeeFundsOut::eip712_encode_type(),
+        TEE_FUNDS_OUT_TYPE_HASH_STR
+    );
+
+    let domain = arbitrum_domain();
+    let p = reference_params();
+    let typed = TeeFundsOut {
+        recipient: p.recipient,
+        amount: p.amount,
+        burnId: p.burnId,
+        sourceChainId: p.sourceChainId,
+        destinationChainId: p.destinationChainId,
+        sourceAddress: p.sourceAddress.clone(),
+        proof: p.proof.clone(),
+        settlementData: p.settlementData.clone(),
+        sourceBurnTxId: p.sourceBurnTxId,
+        nonce: U256::from(3u64),
+        deadline: U256::from(1_700_000_000u64),
+    };
+    let alloy_domain = alloy_sol_types::Eip712Domain::new(
+        Some(domain.name.clone().into()),
+        Some(domain.version.clone().into()),
+        Some(U256::from(domain.chain_id)),
+        Some(Address::from(domain.verifying_contract)),
+        None,
+    );
+    assert_eq!(
+        funds_out_digest(&domain, &p, 3, 1_700_000_000).unwrap(),
+        typed.eip712_signing_hash(&alloy_domain).0
     );
 }
 
@@ -219,6 +300,7 @@ fn lz_test_calldata() -> Vec<u8> {
         recipient: FixedBytes(recipient),
         minAmountLD: U256::from(1u64),
         extraOptions: Bytes::new(),
+        sourceBurnTxId: FixedBytes([0x5b; 32]),
     }
     .abi_encode()
 }
@@ -282,6 +364,7 @@ fn test_lz_different_dst_eid_different_digest() {
         recipient: FixedBytes(recipient),
         minAmountLD: U256::from(1u64),
         extraOptions: Bytes::new(),
+        sourceBurnTxId: FixedBytes([0x5b; 32]),
     }
     .abi_encode();
 

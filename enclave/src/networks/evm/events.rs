@@ -56,16 +56,20 @@ fn extract_uint256_as_u64(data: &[u8], offset: usize) -> Result<u64> {
 /// Canonical `BridgeFundsIn` signature, verbatim from `bridge-smart-contracts`
 /// `IBridge.sol`. A stale signature fails silently: the filter matches zero
 /// logs and every deposit reports "no FundsIn log in tx".
+///
+/// Bridge PR #152 appended `bytes settlementData` (the opaque route payload);
+/// the enclave does not decode it, but the signature - and so `topic0` - moved.
 pub(crate) const BRIDGE_FUNDS_IN_SIG: &str =
     "BridgeFundsIn(bytes32,bytes32,address,uint256,uint256,\
-     uint256,uint256,uint256,uint256,uint256,string)";
+     uint256,uint256,uint256,uint256,uint256,string,bytes)";
 
 /// `operationId` is `topic1` (topic0 is the event signature itself).
 const BFI_OPERATION_ID_TOPIC: usize = 1;
 
 /// Byte offsets of the NON-INDEXED `BridgeFundsIn` data words (each 32 bytes).
 /// Order: senderNonce, amount(gross), netAmount, tokenCommission,
-/// nativeCommission, sourceChainId, destinationChainId, <string offset>.
+/// nativeCommission, sourceChainId, destinationChainId, <string offset>,
+/// <settlementData offset>.
 ///
 /// The amount offsets survived the event change only by coincidence
 /// (`senderNonce` took the slot `operationId` vacated), so a half-done
@@ -81,8 +85,10 @@ const BFI_DEST_ADDRESS_HEAD_OFF: usize = 224;
 /// The single cap on this string: the invoice parser reuses it rather than
 /// declaring a second one that could drift.
 pub(crate) const BFI_MAX_DEST_ADDRESS_LEN: usize = 2048;
-/// 7 static words + 1 dynamic-string offset word must be present.
-const BFI_MIN_DATA_LEN: usize = 8 * 32;
+/// 7 static words + 2 dynamic-tail offset words (`destinationAddress`,
+/// `settlementData`) must be present. The `settlementData` tail itself is
+/// not read: the deposit's settlement payload does not enter this predicate.
+const BFI_MIN_DATA_LEN: usize = 9 * 32;
 
 /// Upgraded Bridge `FundsIn` signature. Only the sender is indexed; the RGB
 /// operation id and uint64 amount are encoded as two data words.

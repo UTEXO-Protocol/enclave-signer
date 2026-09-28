@@ -1,6 +1,6 @@
 use super::*;
 
-use alloy_primitives::{Address, Bytes, U256};
+use alloy_primitives::{Address, Bytes, FixedBytes, U256};
 use alloy_sol_types::SolCall;
 
 use crate::networks::evm::validation::{
@@ -34,6 +34,28 @@ fn mock_funds_out_calldata_full(
     proof: Bytes,
     settlement_data: Bytes,
 ) -> Vec<u8> {
+    mock_funds_out_calldata_identity(
+        recipient,
+        amount,
+        proof,
+        settlement_data,
+        String::new(),
+        SOURCE_BURN_TX_ID,
+    )
+}
+
+/// A non-zero `sourceBurnTxId` for the fixtures whose check is not this
+/// field; [`source_burn`] pins the real bind.
+const SOURCE_BURN_TX_ID: [u8; 32] = [0x5b; 32];
+
+fn mock_funds_out_calldata_identity(
+    recipient: Address,
+    amount: u64,
+    proof: Bytes,
+    settlement_data: Bytes,
+    source_address: String,
+    source_burn_tx_id: [u8; 32],
+) -> Vec<u8> {
     fundsOutCall {
         params: FundsOutParams {
             recipient,
@@ -41,9 +63,10 @@ fn mock_funds_out_calldata_full(
             burnId: U256::ZERO,
             sourceChainId: U256::ZERO,
             destinationChainId: U256::ZERO,
-            sourceAddress: String::new(),
+            sourceAddress: source_address,
             proof,
             settlementData: settlement_data,
+            sourceBurnTxId: FixedBytes(source_burn_tx_id),
         },
     }
     .abi_encode()
@@ -81,7 +104,7 @@ fn mock_calldata_decodes_back_to_its_fields() {
     assert_eq!(&cd[..4], &FUNDS_OUT_SELECTOR_POOLS);
 }
 
-/// Guard against a half-finished migration: a flat 8-argument body must not
+/// Guard against a half-finished migration: a flat 9-argument body must not
 /// decode as the tuple shape.
 ///
 /// With a zero `recipient`, as here, the ABI decoder accepts the legacy
@@ -91,13 +114,13 @@ fn mock_calldata_decodes_back_to_its_fields() {
 /// non-zero recipient fails the decode by itself, so this pins the harder
 /// case.
 fn legacy_flat_calldata(recipient: [u8; 32]) -> Vec<u8> {
-    let mut legacy = Vec::with_capacity(4 + 8 * 32);
+    let mut legacy = Vec::with_capacity(4 + 9 * 32);
     legacy.extend_from_slice(&FUNDS_OUT_SELECTOR_POOLS);
     legacy.extend_from_slice(&recipient);
     let mut amt = [0u8; 32];
     amt[24..].copy_from_slice(&1_000u64.to_be_bytes());
     legacy.extend_from_slice(&amt); // amount, at the old flat offset 36
-    legacy.extend_from_slice(&[0u8; 32 * 6]); // remaining flat head slots
+    legacy.extend_from_slice(&[0u8; 32 * 7]); // remaining flat head slots
     legacy
 }
 
@@ -114,6 +137,132 @@ fn rejects_legacy_flat_encoding_real_recipient() {
     let mut recipient = [0u8; 32];
     recipient[12..].copy_from_slice(&[0x22; 20]);
     assert!(decode_funds_out_params(&legacy_flat_calldata(recipient)).is_err());
+}
+
+/// A calldata in the shape the bridge accepted before PR #152 (no
+/// `sourceBurnTxId`, selector `0xdc771390`) must fail closed: the enclave
+/// would otherwise sign an intent the new `MultisigProxy` cannot verify.
+#[test]
+fn rejects_pre_source_burn_tx_id_calldata() {
+    let current = mock_funds_out_calldata(1_000);
+    // Drop the appended static word: the tuple then has eight fields, so
+    // every dynamic tail offset is one word too large for its head.
+    let mut legacy = current.clone();
+    legacy[..4].copy_from_slice(&[0xdc, 0x77, 0x13, 0x90]);
+    assert!(
+        decode_funds_out_params(&legacy).is_err(),
+        "old selector must not decode"
+    );
+    assert!(
+        decode_funds_out_params(&current).is_ok(),
+        "the current shape is what the fixture builder emits"
+    );
+}
+
+// Source-burn identity - `validate_funds_out_source_burn_tx_id` and
+// `validate_funds_out_source_address`. Flow-agnostic: the bind reads the last
+// transition's OpId only, whatever its type.
+mod source_burn {
+    use super::*;
+    use crate::networks::rgb::validation::{bfa, TransitionSummary};
+
+    /// OpId as the consignment parser yields it: 64 lowercase hex chars.
+    const OP_ID_HEX: &str = "a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90";
+
+    fn op_id_bytes() -> [u8; 32] {
+        hex::decode(OP_ID_HEX).unwrap().try_into().unwrap()
+    }
+
+    fn settling_transition(op_id: &str) -> TransitionSummary {
+        TransitionSummary {
+            op_id: op_id.into(),
+            transition_type: bfa::TS_TRANSFER,
+            total_output_amount: 1000,
+            asset_output_amount: 1000,
+            outputs: Vec::new(),
+            burned_asset_amount: None,
+            burn_recipient: None,
+        }
+    }
+
+    fn calldata_with(source_address: &str, source_burn_tx_id: [u8; 32]) -> Vec<u8> {
+        mock_funds_out_calldata_identity(
+            Address::ZERO,
+            1000,
+            Bytes::new(),
+            Bytes::new(),
+            source_address.to_string(),
+            source_burn_tx_id,
+        )
+    }
+
+    #[test]
+    fn passes_when_the_calldata_cites_the_settling_op_id() {
+        let cd = calldata_with("", op_id_bytes());
+        let validated = validated_with_last(settling_transition(OP_ID_HEX));
+        assert!(validate_funds_out_source_burn_tx_id(&params_of(&cd), &validated).is_ok());
+    }
+
+    #[test]
+    fn accepts_a_0x_prefixed_op_id() {
+        let cd = calldata_with("", op_id_bytes());
+        let validated = validated_with_last(settling_transition(&format!("0x{OP_ID_HEX}")));
+        assert!(validate_funds_out_source_burn_tx_id(&params_of(&cd), &validated).is_ok());
+    }
+
+    /// The whole point of the bind: a fresh id here would be a fresh `burnId`
+    /// for a burn already settled.
+    #[test]
+    fn rejects_an_id_that_is_not_the_settling_op_id() {
+        let mut other = op_id_bytes();
+        other[31] ^= 0x01;
+        let cd = calldata_with("", other);
+        let validated = validated_with_last(settling_transition(OP_ID_HEX));
+        let err = validate_funds_out_source_burn_tx_id(&params_of(&cd), &validated).unwrap_err();
+        assert!(err.to_string().contains("sourceBurnTxId mismatch"), "{err}");
+    }
+
+    #[test]
+    fn rejects_a_zero_id() {
+        let cd = calldata_with("", [0u8; 32]);
+        let validated = validated_with_last(settling_transition(OP_ID_HEX));
+        let err = validate_funds_out_source_burn_tx_id(&params_of(&cd), &validated).unwrap_err();
+        assert!(err.to_string().contains("is zero"), "{err}");
+    }
+
+    #[test]
+    fn rejects_a_consignment_with_no_transition() {
+        let cd = calldata_with("", op_id_bytes());
+        let mut validated = validated_with_last(settling_transition(OP_ID_HEX));
+        validated.last_transition = None;
+        assert!(validate_funds_out_source_burn_tx_id(&params_of(&cd), &validated).is_err());
+    }
+
+    /// A malformed op_id is an inconsistency inside the validated consignment,
+    /// never something to paper over with a partial compare.
+    #[test]
+    fn rejects_a_non_hex_or_short_op_id() {
+        let cd = calldata_with("", op_id_bytes());
+        for bad in ["burn-op", "abcd", &OP_ID_HEX[..62]] {
+            let validated = validated_with_last(settling_transition(bad));
+            assert!(
+                validate_funds_out_source_burn_tx_id(&params_of(&cd), &validated).is_err(),
+                "op_id {bad:?} must refuse"
+            );
+        }
+    }
+
+    #[test]
+    fn source_address_must_be_empty_on_an_rgb_route() {
+        let ok = calldata_with("", op_id_bytes());
+        assert!(validate_funds_out_source_address(&params_of(&ok)).is_ok());
+        let bad = calldata_with("rgb:some-sender", op_id_bytes());
+        let err = validate_funds_out_source_address(&params_of(&bad)).unwrap_err();
+        assert!(
+            err.to_string().contains("sourceAddress must be empty"),
+            "{err}"
+        );
+    }
 }
 
 // fundsOut amount tests - `validate_funds_out_amount` (+ the witness

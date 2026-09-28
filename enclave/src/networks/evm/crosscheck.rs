@@ -130,6 +130,86 @@ pub fn validate_funds_out_burn_recipient(
     Ok(())
 }
 
+/// Source-burn bind (bridge PR #152): `sourceBurnTxId` must be the RGB OpId of
+/// the transition this release settles - the consignment's last transition,
+/// the one [`validate_funds_out_amount`] reads the released amount from.
+///
+/// On-chain, `sourceBurnTxId` is the only `burnId` input that says WHICH burn
+/// is settled: `Bridge.fundsOut` and `rebalanceLiquidity` fold it into the
+/// shared `BURN_TYPEHASH` key and reject zero, but cannot check it against
+/// anything - the field is attested by the enclave. A backend that put a fresh
+/// id in this slot would derive a fresh `burnId` for a burn already paid, so
+/// the bind here is what makes one validated burn map to one id.
+///
+/// `op_id` is the parser's 64-char hex form of the 32-byte OpId; the calldata
+/// word must equal those bytes exactly.
+pub fn validate_funds_out_source_burn_tx_id(
+    params: &FundsOutParams,
+    validated: &ValidatedConsignment,
+) -> Result<()> {
+    let last = validated.last_transition.as_ref().ok_or_else(|| {
+        EnclaveError::CrossCheck(
+            "fundsOut requires a consignment with at least one transition".into(),
+        )
+    })?;
+
+    let expected = decode_op_id_to_bytes32(&last.op_id)?;
+    let cited: [u8; 32] = params.sourceBurnTxId.0;
+
+    // The Bridge rejects zero on its own (`ZeroSourceBurnTxId`); refusing here
+    // keeps the enclave from attesting an intent that can never settle.
+    if cited == [0u8; 32] {
+        return Err(EnclaveError::CrossCheck(
+            "fundsOut sourceBurnTxId is zero: the calldata must carry the RGB OpId of the \
+             transition being settled"
+                .into(),
+        ));
+    }
+    if cited != expected {
+        return Err(EnclaveError::CrossCheck(format!(
+            "fundsOut sourceBurnTxId mismatch: calldata cites 0x{}, but the validated \
+             consignment's settling transition is OpId 0x{} - refusing to sign",
+            hex::encode(cited),
+            hex::encode(expected)
+        )));
+    }
+    Ok(())
+}
+
+/// RGB has no source-address concept, so `sourceAddress` MUST be empty on every
+/// RGB route (`RGBVerifier.UnexpectedSourceAddress`, bridge PR #152). It is
+/// hashed into `burnId`, so a non-empty value would let one burn derive a
+/// second replay key; enforced here as well so the enclave never attests such
+/// an intent in the first place.
+pub fn validate_funds_out_source_address(params: &FundsOutParams) -> Result<()> {
+    if !params.sourceAddress.is_empty() {
+        return Err(EnclaveError::CrossCheck(format!(
+            "fundsOut sourceAddress must be empty on an RGB route (RGB has no source-address \
+             concept and it is hashed into burnId), got {:?}",
+            params.sourceAddress
+        )));
+    }
+    Ok(())
+}
+
+/// Decode a `TransitionSummary::op_id` (64 hex chars, optional `0x`) to the
+/// 32-byte word the calldata carries. A malformed id is an internal
+/// inconsistency in the validated consignment, so refuse rather than guess.
+fn decode_op_id_to_bytes32(op_id: &str) -> Result<[u8; 32]> {
+    let normalized = op_id.strip_prefix("0x").unwrap_or(op_id);
+    let bytes = hex::decode(normalized).map_err(|e| {
+        EnclaveError::CrossCheck(format!(
+            "validated consignment op_id {op_id:?} is not hex-decodable: {e}"
+        ))
+    })?;
+    bytes.as_slice().try_into().map_err(|_| {
+        EnclaveError::CrossCheck(format!(
+            "validated consignment op_id {op_id:?} is not a 32-byte OpId ({} bytes)",
+            bytes.len()
+        ))
+    })
+}
+
 /// Settlement bind for the BFA burn flow: `settlementData` must cite exactly
 /// the deposits behind the burn's mint ancestry.
 ///
@@ -484,8 +564,8 @@ fn proof_height(word: &[u8], field: &str) -> Result<u32> {
 }
 
 // `extract_uint256_as_u64` moved to `events`, its only remaining consumer.
-// `extract_bytes32`, `decode_op_id_to_bytes32` and `bytes32_to_usize` went with
-// the removed calldata rewrite.
+// `extract_bytes32` and `bytes32_to_usize` went with the removed calldata
+// rewrite; `decode_op_id_to_bytes32` came back for the `sourceBurnTxId` bind.
 
 #[cfg(test)]
 mod tests;

@@ -20,15 +20,16 @@ use crate::proto::EvmDestination;
 #[cfg(evm_to_rgb)]
 use crate::proto::EvmSource;
 
-/// `keccak256("fundsOut((address,uint256,uint256,uint256,uint256,string,bytes,bytes))")[0..4]`.
+/// `keccak256("fundsOut((address,uint256,uint256,uint256,uint256,string,bytes,bytes,bytes32))")[0..4]`.
 ///
 /// Bundling the release fields into `FundsOutParams` moved the selector
-/// `0xccddb768` -> `0xdc771390`. A flat body read as a tuple lands one word off
-/// on every field, so the mismatch fails closed at the whitelist.
+/// `0xccddb768` -> `0xdc771390`; appending `sourceBurnTxId` (bridge PR #152)
+/// moved it again to `0x340276aa`. A body in either older shape fails closed
+/// at the whitelist, so a half-migrated backend cannot get a signature.
 #[cfg(rgb_to_evm)]
-pub const FUNDS_OUT_SELECTOR_POOLS: [u8; 4] = [0xdc, 0x77, 0x13, 0x90];
+pub const FUNDS_OUT_SELECTOR_POOLS: [u8; 4] = [0x34, 0x02, 0x76, 0xaa];
 
-/// `keccak256("lzFundsOut(uint256,uint256,uint256,uint256,string,bytes,bytes,uint32,bytes32,uint256,bytes)")[0..4]`.
+/// `keccak256("lzFundsOut(uint256,uint256,uint256,uint256,string,bytes,bytes,uint32,bytes32,uint256,bytes,bytes32)")[0..4]`.
 ///
 /// Enclave wire format for `MultisigProxy.lzFundsOutCall`: individual params,
 /// no struct wrapper - analogous to `fundsOut` above. The selector distinguishes
@@ -46,9 +47,14 @@ pub const MAX_FUNDS_OUT_CALL_DATA_LEN: usize = 64 * 1024;
 const ALLOWED_SELECTORS: &[[u8; 4]] = &[FUNDS_OUT_SELECTOR_POOLS, LZ_FUNDS_OUT_SELECTOR];
 
 sol! {
-    /// Mirrors `IBridge.FundsOutParams` (IBridge.sol:193-202). Field order fixes
+    /// Mirrors `IBridge.FundsOutParams` (IBridge.sol:293-303). Field order fixes
     /// both the ABI decode here and the `TeeFundsOut` struct hash in
     /// [`super::signing::funds_out_digest`].
+    ///
+    /// `sourceBurnTxId` (bridge PR #152) is the RGB OpId of the burn transition:
+    /// the only field that says WHICH burn is settled. The Bridge folds it into
+    /// `burnId` but cannot verify it; the enclave binds it to the validated
+    /// consignment in [`super::crosscheck::validate_funds_out_source_burn_tx_id`].
     struct FundsOutParams {
         address recipient;
         uint256 amount;
@@ -58,6 +64,7 @@ sol! {
         string sourceAddress;
         bytes proof;
         bytes settlementData;
+        bytes32 sourceBurnTxId;
     }
 
     /// Never reaches the chain - the proxy takes the struct directly. This is
@@ -79,7 +86,8 @@ sol! {
         uint32 dstEid,
         bytes32 recipient,
         uint256 minAmountLD,
-        bytes extraOptions
+        bytes extraOptions,
+        bytes32 sourceBurnTxId
     );
 }
 

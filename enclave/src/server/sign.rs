@@ -284,6 +284,13 @@ fn apply_funds_out_binding(
     // (`rgb-swap` = Transfer, `rgb-mint-burn` = Burn).
     crosscheck::validate_funds_out_amount(params, validated)?;
 
+    // Burn identity (bridge PR #152): `sourceBurnTxId` is the only `burnId`
+    // input that names WHICH RGB operation is settled, and the contract takes
+    // it on the enclave's word. Bind it to the settling transition's OpId, and
+    // keep `sourceAddress` at its one canonical (empty) RGB value.
+    crosscheck::validate_funds_out_source_burn_tx_id(params, validated)?;
+    crosscheck::validate_funds_out_source_address(params)?;
+
     // A burn settles a redemption, so it additionally binds the payout target
     // to the 32 bytes the burner committed to (`MS_BURN_RECIPIENT`). Only the
     // mint/burn flow has a burn, and `validate_funds_out_amount` has already
@@ -294,13 +301,16 @@ fn apply_funds_out_binding(
 
     // Settlement bind (spec P6): the deposits `settlementData` cites must be
     // exactly the verified locks behind the burn's mint ancestry. On-chain
-    // `burnId` hashes every release field, so this is what makes one burn map
-    // to one `burnId` instead of one per `settlementData` the backend picks.
+    // `burnId` hashes `settlementData` too, so this is what keeps the backend
+    // from earning a second `burnId` for one burn by citing other deposits.
     #[cfg(feature = "bfa-mint")]
     crosscheck::validate_funds_out_settlement(params, locks)?;
 
     // `burnId` itself is not recomputed here: the contract derives and
-    // checks it from the same fields (`InvalidBurnId`).
+    // checks it from the same fields (`InvalidBurnId`). Its preimage is
+    // `BURN_TYPEHASH, bridge, chainId, token, amount, sourceChainId,
+    // destinationChainId, keccak(sourceAddress), keccak(settlementData),
+    // sourceBurnTxId` - every enclave-checkable input is bound above.
 
     Ok(())
 }
