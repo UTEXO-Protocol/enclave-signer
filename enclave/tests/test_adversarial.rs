@@ -771,3 +771,259 @@ fn an_equal_length_fork_does_not_replace_the_tip() {
         "an equal-length fork replaced the first-seen tip"
     );
 }
+
+// ---- CCD deposits are taken on the listener's word ----------------------------------
+
+/// A release must be backed by evidence of the deposit it settles. For a
+/// Concordium source the enclave holds none: any claimed tx hash and any
+/// amount is signed. A compromised host can therefore mint releases at will
+/// on this route; the EVM->RGB route verifies its deposit on-chain.
+#[cfg(all(
+    feature = "ccd",
+    feature = "rgb-validation",
+    feature = "allow-seed-import"
+))]
+#[test]
+#[ignore = "FINDING: CCD->EVM releases carry no deposit evidence; any tx hash and amount is signed"]
+fn ccd_release_requires_evidence_of_the_deposit() {
+    use alloy_primitives::{Address, Bytes, U256};
+    use alloy_sol_types::SolCall;
+    use utexo_bridge_enclave::networks::evm::validation::{fundsOutCall, FundsOutParams};
+
+    let port = common::start_test_server_with_config(
+        |state| state.initialize_from_mnemonic(MNEMONIC).unwrap(),
+        pinned(),
+    );
+    let amount = 1_000_000_000_000_000_000u64;
+    let call_data = fundsOutCall {
+        params: FundsOutParams {
+            recipient: Address::from([0x66; 20]),
+            amount: U256::from(amount),
+            burnId: U256::from(1u64),
+            sourceChainId: U256::from(919u64),
+            destinationChainId: U256::from(1u64),
+            sourceAddress: "nobody".into(),
+            proof: Bytes::new(),
+            settlementData: Bytes::new(),
+        },
+    }
+    .abi_encode();
+    let resp = send(
+        port,
+        Req::Sign(SignRequest {
+            amount,
+            source_network: Some(SourceNetwork::CcdSource(CcdSource {
+                tx_hash: vec![0xDE; 32], // no such deposit exists anywhere
+                commission: 0,
+            })),
+            destination_network: Some(DestinationNetwork::EvmDestination(EvmDestination {
+                call_data,
+                nonce: 1,
+                deadline: u64::MAX,
+                chain_id: 1,
+                proxy_contract: vec![0xAA; 20],
+                calldata_amount: amount,
+                calldata_commission: 0,
+                lz_release: None,
+            })),
+        }),
+    );
+    expect_error(resp);
+}
+
+/// The replay guard evicts its oldest entry when full. A flood of distinct
+/// operations therefore re-opens the first one within the TTL - and on a
+/// route where the host can invent operations for free that flood is cheap.
+#[test]
+#[ignore = "FINDING: the replay guard evicts on overflow, so a flood re-enables an old operation's replay"]
+fn a_flood_of_operations_does_not_reopen_an_old_one() {
+    use std::time::Duration;
+    use utexo_bridge_enclave::state::NonceReplayGuard;
+
+    let guard = NonceReplayGuard::with_capacity(3, Duration::from_secs(3600));
+    guard.reserve([1; 32]).unwrap().commit();
+    for k in 2..=4u8 {
+        guard.reserve([k; 32]).unwrap().commit();
+    }
+    assert!(
+        guard.reserve([1; 32]).is_err(),
+        "the first operation became signable again after three others"
+    );
+}
+
+// ---- EVM destination pins ---------------------------------------------------------------
+
+/// The chain id inside the calldata must agree with the pinned chain, not
+/// just the request's `chain_id` field.
+#[cfg(all(
+    feature = "ccd",
+    feature = "rgb-validation",
+    feature = "allow-seed-import"
+))]
+#[test]
+fn calldata_destination_chain_id_must_match_the_pinned_chain() {
+    use alloy_primitives::{Address, Bytes, U256};
+    use alloy_sol_types::SolCall;
+    use utexo_bridge_enclave::networks::evm::validation::{fundsOutCall, FundsOutParams};
+
+    let port = common::start_test_server_with_config(
+        |state| state.initialize_from_mnemonic(MNEMONIC).unwrap(),
+        pinned(),
+    );
+    let call_data = fundsOutCall {
+        params: FundsOutParams {
+            recipient: Address::from([0x11; 20]),
+            amount: U256::from(5u64),
+            burnId: U256::from(7u64),
+            sourceChainId: U256::from(919u64),
+            destinationChainId: U256::from(2u64), // pinned chain is 1
+            sourceAddress: "ccd".into(),
+            proof: Bytes::new(),
+            settlementData: Bytes::new(),
+        },
+    }
+    .abi_encode();
+    let resp = send(
+        port,
+        Req::Sign(SignRequest {
+            amount: 5,
+            source_network: Some(SourceNetwork::CcdSource(CcdSource {
+                tx_hash: vec![0xCC; 32],
+                commission: 0,
+            })),
+            destination_network: Some(DestinationNetwork::EvmDestination(EvmDestination {
+                call_data,
+                nonce: 1,
+                deadline: u64::MAX,
+                chain_id: 1,
+                proxy_contract: vec![0xAA; 20],
+                calldata_amount: 5,
+                calldata_commission: 0,
+                lz_release: None,
+            })),
+        }),
+    );
+    expect_error(resp);
+}
+
+// ---- cloning inputs ------------------------------------------------------------------------
+
+/// A cluster key that is not an EVM address cannot open a cloning session,
+/// and a refused attempt leaves the enclave initialisable.
+#[test]
+fn initiate_cloning_rejects_a_cluster_key_that_is_not_20_bytes() {
+    let port = common::start_test_server();
+    for len in [0usize, 19, 21, 32] {
+        expect_error(send(
+            port,
+            Req::InitiateCloning(InitiateCloningRequest {
+                cloning_secret: "s".into(),
+                cluster_public_key: vec![0x11; len],
+            }),
+        ));
+    }
+    assert!(matches!(
+        send(
+            port,
+            Req::InitializeKey(InitializeKeyRequest {
+                seed: vec![],
+                mnemonic: String::new(),
+                cloning_secret: String::new(),
+            }),
+        )
+        .response,
+        Some(Resp::InitializeKey(_))
+    ));
+}
+
+/// A donor running different code (other PCRs) must not be able to hand the
+/// requester a seed, even one that decrypts and derives the right address.
+#[cfg(feature = "mock-attestation")]
+#[test]
+fn set_clone_rejects_a_donor_attestation_with_foreign_pcrs() {
+    use utexo_bridge_enclave::cloning;
+    use utexo_bridge_enclave::keys::KeyManager;
+
+    let seed = [0x5c; 64];
+    let cluster = KeyManager::from_seed(seed, bitcoin::Network::Bitcoin)
+        .unwrap()
+        .evm_address()
+        .to_vec();
+    let port = common::start_test_server();
+    let requester_pk: [u8; 32] = match send(
+        port,
+        Req::InitiateCloning(InitiateCloningRequest {
+            cloning_secret: "s".into(),
+            cluster_public_key: cluster,
+        }),
+    )
+    .response
+    {
+        Some(Resp::InitiateCloning(r)) => r.encryption_pubkey.try_into().unwrap(),
+        other => panic!("{other:?}"),
+    };
+    let (ciphertext, donor_pub) = cloning::encrypt_seed_for_peer(&requester_pk, &seed).unwrap();
+    let foreign = attestation_verify::ExpectedPcrs::new([0xAA; 48], [0u8; 48], [0u8; 48]);
+    let doc = attestation_verify::build_mock_document_with_pcrs(
+        &[0x99; 32],
+        Some(&donor_pub),
+        None,
+        &foreign,
+    )
+    .unwrap();
+    expect_error(send(
+        port,
+        Req::SetClone(SetCloneRequest {
+            encrypted_seed: ciphertext,
+            donor_pubkey: donor_pub.to_vec(),
+            donor_attestation: doc,
+        }),
+    ));
+    // Still no identity.
+    expect_error(send(port, Req::GetPublicKey(GetPublicKeyRequest {})));
+}
+
+// ---- attestation nonce ------------------------------------------------------------------
+
+/// The attestation nonce is the verifier's freshness proof; a short one
+/// weakens it and must be refused rather than padded or truncated.
+#[cfg(feature = "mock-attestation")]
+#[test]
+fn attested_public_key_rejects_a_nonce_that_is_not_32_bytes() {
+    let port = common::start_test_server_with_config(
+        |state| state.initialize_from_mnemonic(MNEMONIC).unwrap(),
+        BridgeConfig::default(),
+    );
+    for len in [0usize, 16, 31, 33] {
+        expect_error(send(
+            port,
+            Req::GetAttestedPublicKey(GetAttestedPublicKeyRequest {
+                nonce: vec![0x37; len],
+            }),
+        ));
+    }
+}
+
+// ---- request shape -----------------------------------------------------------------------
+
+/// Concordium deposits are never released as RGB; the pair is refused as a
+/// route, before any key is touched.
+#[cfg(feature = "ccd")]
+#[test]
+fn ccd_source_to_rgb_destination_is_refused() {
+    let port = common::start_test_server();
+    let err = expect_error(send(
+        port,
+        Req::Sign(SignRequest {
+            amount: 1,
+            source_network: Some(SourceNetwork::CcdSource(CcdSource {
+                tx_hash: vec![0xCC; 32],
+                commission: 0,
+            })),
+            destination_network: Some(
+                DestinationNetwork::RgbDestination(RgbDestination::default()),
+            ),
+        }),
+    ));
+    assert!(!err.message.is_empty());
+}
