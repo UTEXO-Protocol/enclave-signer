@@ -475,10 +475,11 @@ mod btc_relay {
         0x1f, 0x20,
     ];
 
-    /// Block holding [`WITNESS_TXID`].
-    const ANCHOR_HEIGHT: u32 = 2;
+    /// Block holding [`WITNESS_TXID`]. Its ten prior timestamps are above
+    /// the checkpoint.
+    const ANCHOR_HEIGHT: u32 = 11;
     /// Default tip: leaves the anchor 7 deep, past `SPV_MIN_CONFIRMATIONS`.
-    const TIP_HEIGHT: u32 = 8;
+    const TIP_HEIGHT: u32 = 17;
 
     /// Encode `n` as a big-endian 32-byte ABI word.
     fn u256_be(n: u64) -> [u8; 32] {
@@ -487,26 +488,72 @@ mod btc_relay {
         w
     }
 
-    /// A regtest chain of `tip` synthetic headers (PoW is skipped on
-    /// regtest - same pattern as the `spv::chain` tests). The header at
+    /// Raise the nonce until the header meets its own target, so the
+    /// relay accepts it too.
+    fn mined(mut header: Header) -> Header {
+        while header.validate_pow(header.target()).is_err() {
+            header.nonce += 1;
+        }
+        header
+    }
+
+    /// The checkpoint block every fixture chain starts from.
+    fn h0() -> Header {
+        mined(Header {
+            version: Version::ONE,
+            prev_blockhash: bitcoin::BlockHash::from_byte_array([0u8; 32]),
+            merkle_root: bitcoin::TxMerkleNode::from_byte_array([0u8; 32]),
+            time: 1_700_000_000,
+            bits: bitcoin::CompactTarget::from_consensus(0x207fffff),
+            nonce: 0,
+        })
+    }
+
+    /// BtcRelay's commitment at `height`: `keccak256` of the 160-byte
+    /// `StoredBlockHeader` that `updateChain` derives from the record
+    /// seeded at [`h0`].
+    fn relay_commit(chain: &HeaderChain, height: u32) -> [u8; 32] {
+        let mut header = h0();
+        let mut times = [header.time; 10];
+        let mut last_diff = header.time;
+        let mut work = header.work();
+        for h in 1..=height {
+            times.rotate_left(1);
+            times[9] = header.time;
+            header = *chain.header_at(h).expect("model needs every header");
+            work = work + header.work();
+            if h % 2016 == 0 {
+                last_diff = header.time;
+            }
+        }
+        let mut record = serialize(&header);
+        record.extend_from_slice(&work.to_be_bytes());
+        record.extend_from_slice(&height.to_be_bytes());
+        record.extend_from_slice(&last_diff.to_be_bytes());
+        for t in times {
+            record.extend_from_slice(&t.to_be_bytes());
+        }
+        alloy_primitives::keccak256(&record).0
+    }
+
+    /// A regtest chain of `tip` mined headers above [`h0`]. The header at
     /// [`ANCHOR_HEIGHT`] commits exactly one transaction, [`WITNESS_TXID`],
     /// so a proof with an empty path reconstructs its Merkle root.
     ///
-    /// Returns the chain and every header's DISPLAY-order hash, indexed by
-    /// height (slot 0 is the checkpoint placeholder).
+    /// Returns the chain and the relay commitment at every height.
     fn chain_to(tip: u32) -> (HeaderChain, Vec<[u8; 32]>) {
+        let h0 = h0();
         let mut chain = HeaderChain::new(
             Network::Regtest,
             Checkpoint {
                 height: 0,
-                hash: [0u8; 32],
+                hash: h0.block_hash().to_byte_array(),
                 bits: 0x207fffff,
-                time: 1_700_000_000,
+                time: h0.time,
                 is_real: false,
             },
         );
-        let mut hashes = vec![[0u8; 32]];
-        let mut prev = bitcoin::BlockHash::from_byte_array([0u8; 32]);
+        let mut prev = h0.block_hash();
         for height in 1..=tip {
             let merkle_root = if height == ANCHOR_HEIGHT {
                 let mut internal = WITNESS_TXID;
@@ -515,21 +562,19 @@ mod btc_relay {
             } else {
                 bitcoin::TxMerkleNode::from_byte_array([0xAB; 32])
             };
-            let header = Header {
+            let header = mined(Header {
                 version: Version::ONE,
                 prev_blockhash: prev,
                 merkle_root,
                 time: 1_700_000_000 + height,
                 bits: bitcoin::CompactTarget::from_consensus(0x207fffff),
                 nonce: 0,
-            };
+            });
             chain.submit_headers(height, &[serialize(&header)]).unwrap();
             prev = header.block_hash();
-            let mut display: [u8; 32] = header.block_hash().to_byte_array();
-            display.reverse();
-            hashes.push(display);
         }
-        (chain, hashes)
+        let commits = (0..=tip).map(|h| relay_commit(&chain, h)).collect();
+        (chain, commits)
     }
 
     fn chain() -> (HeaderChain, Vec<[u8; 32]>) {
@@ -900,16 +945,16 @@ mod btc_relay {
         let mut prev = <bitcoin::BlockHash as bitcoin::hashes::Hash>::from_byte_array(pred);
         let mut raw = Vec::new();
         for height in from_height..=(TIP_HEIGHT + extra) {
-            let header = Header {
+            let header = mined(Header {
                 version: Version::ONE,
                 prev_blockhash: prev,
+                // Different from `chain_to`, so each new block gets a new
+                // hash.
                 merkle_root: bitcoin::TxMerkleNode::from_byte_array([0xCD; 32]),
                 time: 1_700_000_000 + height,
                 bits: bitcoin::CompactTarget::from_consensus(0x207fffff),
-                // Different from `chain_to`, so each new block gets a new
-                // hash.
-                nonce: 7,
-            };
+                nonce: 0,
+            });
             prev = header.block_hash();
             raw.push(serialize(&header));
         }
@@ -928,14 +973,14 @@ mod btc_relay {
         let start = chain.tip_height() + 1;
         let mut raw = Vec::new();
         for height in start..start + count {
-            let header = Header {
+            let header = mined(Header {
                 version: Version::ONE,
                 prev_blockhash: prev,
                 merkle_root: bitcoin::TxMerkleNode::from_byte_array([0xEF; 32]),
                 time: 1_700_000_000 + height,
                 bits: bitcoin::CompactTarget::from_consensus(0x207fffff),
                 nonce: 0,
-            };
+            });
             prev = header.block_hash();
             raw.push(serialize(&header));
         }
@@ -1008,6 +1053,42 @@ mod btc_relay {
         assert!(
             err.to_string().contains("chain reorg after validation"),
             "got: {err}"
+        );
+    }
+
+    /// The enclave holds branch A, with the burn in `A[11]`. The relay
+    /// follows branch B. The proof cites B's relay records at the anchor
+    /// height and at B's tip. The heights agree, the blocks do not.
+    #[test]
+    fn rejects_a_source_commitment_from_another_branch() {
+        let (mut chain_a, _) = chain();
+        submit_extension(&mut chain_a, 3);
+        let (mut chain_b, _) = chain();
+        submit_reorg(&mut chain_b, ANCHOR_HEIGHT, 2);
+
+        let h = ANCHOR_HEIGHT;
+        assert_eq!(chain_a.hash_at(h - 1), chain_b.hash_at(h - 1));
+        assert_ne!(chain_a.hash_at(h), chain_b.hash_at(h));
+        for chain in [&chain_a, &chain_b] {
+            for j in 1..=chain.tip_height() {
+                let header = chain.header_at(j).unwrap();
+                assert!(header.validate_pow(header.target()).is_ok());
+            }
+        }
+
+        let latest = chain_b.tip_height();
+        let source_b = relay_commit(&chain_b, h);
+        let cd = calldata(h, source_b, latest, relay_commit(&chain_b, latest));
+        let err = check(&cd, &chain_a).expect_err("a branch-B source commitment must be refused");
+        let msg = err.to_string();
+        assert!(
+            msg.contains(&format!("relay commitment mismatch at source height {h}")),
+            "got: {msg}"
+        );
+        assert!(msg.contains(&hex::encode(source_b)), "got: {msg}");
+        assert!(
+            msg.contains(&hex::encode(relay_commit(&chain_a, h))),
+            "got: {msg}"
         );
     }
 
