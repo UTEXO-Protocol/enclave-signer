@@ -1027,3 +1027,271 @@ fn ccd_source_to_rgb_destination_is_refused() {
     ));
     assert!(!err.message.is_empty());
 }
+
+// ---- gas-tx signing volume ------------------------------------------------------------
+
+/// The gas key pays real gas. Signing the same nonce twice is never useful
+/// to the bridge, only to a host that wants a spare, differently-priced
+/// transaction; nothing in the enclave dedups or rate-limits gas signing.
+#[cfg(all(not(feature = "dev-mode"), feature = "allow-seed-import"))]
+#[test]
+#[ignore = "FINDING: gas-tx signing has no per-nonce dedup or rate limit; any number of signatures for one nonce"]
+fn gas_tx_does_not_sign_the_same_nonce_twice() {
+    fn rlp_str(bytes: &[u8]) -> Vec<u8> {
+        if bytes.len() == 1 && bytes[0] < 0x80 {
+            return vec![bytes[0]];
+        }
+        let mut out = vec![0x80 + bytes.len() as u8];
+        out.extend_from_slice(bytes);
+        out
+    }
+    fn rlp_scalar(v: u64) -> Vec<u8> {
+        let be = v.to_be_bytes();
+        let trimmed: Vec<u8> = be.iter().copied().skip_while(|&b| b == 0).collect();
+        rlp_str(&trimmed)
+    }
+    fn rlp_list(items: &[Vec<u8>]) -> Vec<u8> {
+        let payload: Vec<u8> = items.concat();
+        let mut out = vec![0xc0 + payload.len() as u8];
+        out.extend_from_slice(&payload);
+        out
+    }
+    let to = [0x5A; 20];
+    let selector = [0xde, 0xad, 0xbe, 0xef];
+    let cfg = BridgeConfig {
+        gas_tx_allowed_to: Some(to),
+        gas_tx_max_gas_limit: 100_000,
+        gas_tx_max_fee_per_gas: 1_000_000_000,
+        gas_tx_allowed_selectors: vec![selector],
+        ..pinned()
+    };
+    let port = common::start_test_server_with_config(
+        |state| state.initialize_from_mnemonic(MNEMONIC).unwrap(),
+        cfg,
+    );
+    let preimage_with_fee = |max_fee: u64| {
+        let body = rlp_list(&[
+            rlp_scalar(1),
+            rlp_scalar(3), // the same nonce every time
+            rlp_scalar(1_000),
+            rlp_scalar(max_fee),
+            rlp_scalar(50_000),
+            rlp_str(&to),
+            rlp_scalar(0),
+            rlp_str(&selector),
+            rlp_list(&[]),
+        ]);
+        let mut p = vec![0x02];
+        p.extend_from_slice(&body);
+        p
+    };
+    let sign = |unsigned_tx: Vec<u8>| {
+        send(
+            port,
+            Req::SignRawDigest(SignRawDigestRequest {
+                digest: vec![],
+                unsigned_tx,
+            }),
+        )
+    };
+    assert!(matches!(
+        sign(preimage_with_fee(1_000_000)).response,
+        Some(Resp::RawDigestSig(_))
+    ));
+    expect_error(sign(preimage_with_fee(2_000_000)));
+}
+
+// ---- plain-BTC spend cap boundary --------------------------------------------------------
+
+/// The cap bounds the value spent per transaction inclusively: exactly the
+/// cap signs, one sat more does not.
+#[cfg(feature = "allow-seed-import")]
+#[test]
+fn plain_btc_spend_cap_is_inclusive() {
+    use common::taproot_fixture as fx;
+    use utexo_bridge_enclave::keys::{AccountType, KeyManager};
+
+    let km = KeyManager::from_mnemonic(MNEMONIC, bitcoin::Network::Bitcoin).unwrap();
+    let psbt = fx::psbt_with_our_input(&km, AccountType::Vanilla, true);
+    let input_value = psbt.inputs[0].witness_utxo.as_ref().unwrap().value.to_sat();
+    for (cap, ok) in [(input_value, true), (input_value - 1, false)] {
+        let port = common::start_test_server_with_config(
+            |state| state.initialize_from_mnemonic(MNEMONIC).unwrap(),
+            BridgeConfig {
+                btc_max_total_sats: cap,
+                ..Default::default()
+            },
+        );
+        let resp = send(
+            port,
+            Req::SignBtc(SignBtcRequest {
+                psbt_bytes: psbt.serialize(),
+            }),
+        );
+        assert_eq!(
+            matches!(resp.response, Some(Resp::SignedPsbt(_))),
+            ok,
+            "cap {cap} for {input_value} sats in"
+        );
+    }
+}
+
+// ---- reorg bound -------------------------------------------------------------------------
+
+fn regtest_fork(count: u32, salt: u8) -> Vec<Vec<u8>> {
+    use bitcoin::block::{Header, Version};
+    use bitcoin::consensus::serialize;
+    use bitcoin::hashes::Hash;
+    use utexo_bridge_enclave::networks::rgb::spv::{checkpoint_for, Network};
+    let mut prev = bitcoin::BlockHash::from_byte_array(checkpoint_for(Network::Regtest).hash);
+    let mut out = Vec::new();
+    for h in 1..=count {
+        let header = Header {
+            version: Version::ONE,
+            prev_blockhash: prev,
+            merkle_root: bitcoin::TxMerkleNode::from_byte_array([salt ^ (h as u8); 32]),
+            time: 1_700_000_000 + h,
+            bits: bitcoin::CompactTarget::from_consensus(0x207fffff),
+            nonce: 0,
+        };
+        prev = header.block_hash();
+        out.push(serialize(&header));
+    }
+    out
+}
+
+/// A longer fork may replace at most MAX_REORG_DEPTH blocks; a deeper one
+/// is refused and the chain is untouched.
+#[cfg(feature = "spv")]
+#[test]
+fn a_reorg_deeper_than_the_bound_is_refused() {
+    use utexo_bridge_enclave::networks::rgb::spv::chain::MAX_REORG_DEPTH;
+    let port = common::start_test_server();
+    let main_len = MAX_REORG_DEPTH + 5;
+    let resp = send(
+        port,
+        Req::SubmitHeaders(SubmitHeadersRequest {
+            headers: regtest_headers(main_len),
+            start_height: 1,
+        }),
+    );
+    let main_tip = match resp.response {
+        Some(Resp::SubmitHeaders(r)) => r.last_block_hash,
+        other => panic!("{other:?}"),
+    };
+
+    // A longer fork replacing every block since the checkpoint: too deep.
+    let fork = regtest_fork(main_len + 1, 0x80);
+    expect_error(send(
+        port,
+        Req::SubmitHeaders(SubmitHeadersRequest {
+            headers: fork,
+            start_height: 1,
+        }),
+    ));
+    let now = match send(port, Req::GetLastSavedBlock(GetLastSavedBlockRequest {})).response {
+        Some(Resp::GetLastSavedBlock(r)) => r,
+        other => panic!("{other:?}"),
+    };
+    assert_eq!((now.block_height, now.block_hash), (main_len, main_tip));
+
+    // A longer fork exactly at the bound is accepted.
+    let start = main_len - MAX_REORG_DEPTH + 1;
+    let full = regtest_fork(main_len + 1, 0x80);
+    // Rebuild the fork so it links to the main chain at `start - 1`.
+    let mut linked = regtest_headers(start - 1);
+    linked.truncate((start - 1) as usize);
+    let _ = full;
+    let fork_from_main = {
+        use bitcoin::block::{Header, Version};
+        use bitcoin::consensus::{deserialize, serialize};
+        use bitcoin::hashes::Hash;
+        let main = regtest_headers(main_len);
+        let base: Header = deserialize(&main[(start - 2) as usize]).unwrap();
+        let mut prev = base.block_hash();
+        let mut out = Vec::new();
+        for h in start..=main_len + 1 {
+            let header = Header {
+                version: Version::ONE,
+                prev_blockhash: prev,
+                merkle_root: bitcoin::TxMerkleNode::from_byte_array([0xC0 ^ (h as u8); 32]),
+                time: 1_700_000_000 + h,
+                bits: bitcoin::CompactTarget::from_consensus(0x207fffff),
+                nonce: 0,
+            };
+            prev = header.block_hash();
+            out.push(serialize(&header));
+        }
+        out
+    };
+    let resp = send(
+        port,
+        Req::SubmitHeaders(SubmitHeadersRequest {
+            headers: fork_from_main,
+            start_height: start,
+        }),
+    );
+    match resp.response {
+        Some(Resp::SubmitHeaders(r)) => assert_eq!(r.last_block_height, main_len + 1),
+        other => panic!("reorg at the bound refused: {other:?}"),
+    }
+}
+
+// ---- init versus clone race ------------------------------------------------------------------
+
+/// Initialising and starting a clone race for the same empty slot; exactly
+/// one may win.
+#[test]
+fn init_and_initiate_cloning_race_yields_one_owner() {
+    let port = common::start_test_server();
+    let mut handles = Vec::new();
+    for i in 0..8 {
+        handles.push(std::thread::spawn(move || {
+            let req = if i % 2 == 0 {
+                Req::InitializeKey(InitializeKeyRequest {
+                    seed: vec![],
+                    mnemonic: String::new(),
+                    cloning_secret: String::new(),
+                })
+            } else {
+                Req::InitiateCloning(InitiateCloningRequest {
+                    cloning_secret: "s".into(),
+                    cluster_public_key: vec![0x11; 20],
+                })
+            };
+            send(port, req)
+        }));
+    }
+    let winners = handles
+        .into_iter()
+        .map(|h| h.join().unwrap().response)
+        .filter(|r| {
+            matches!(
+                r,
+                Some(Resp::InitializeKey(_)) | Some(Resp::InitiateCloning(_))
+            )
+        })
+        .count();
+    assert_eq!(winners, 1);
+}
+
+// ---- Merkle position bound ----------------------------------------------------------------
+
+/// A position with bits beyond the path depth names a leaf the tree does
+/// not have; it must not verify as if those bits were absent.
+#[cfg(feature = "spv")]
+#[test]
+#[ignore = "FINDING: Merkle positions beyond the path depth are accepted (high bits ignored)"]
+fn merkle_position_beyond_the_path_depth_is_refused() {
+    use sha2::{Digest, Sha256};
+    use utexo_bridge_enclave::networks::rgb::spv::verify_merkle_proof;
+
+    let a = [0xA1u8; 32];
+    let b = [0xB2u8; 32];
+    let root: [u8; 32] = Sha256::digest(Sha256::digest([a, b].concat())).into();
+    assert!(verify_merkle_proof(&a, 0, &[b], &root).is_ok());
+    assert!(
+        verify_merkle_proof(&a, 2, &[b], &root).is_err(),
+        "position 2 in a two-leaf tree verified"
+    );
+}
