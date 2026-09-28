@@ -1537,3 +1537,140 @@ fn error_messages_do_not_echo_secret_material() {
     ));
     assert!(!err.message.contains(secret), "{}", err.message);
 }
+
+// ---- co-control is not custody ------------------------------------------------------------------
+
+/// The self-pay rule accepts an output whose script matches a PSBT input the
+/// enclave "co-controls": a leaf in that input's taproot tree carries one of
+/// the enclave's public keys. That key is public (the account xpub is
+/// served by GetPublicKey), so a host can build a tree with one leaf holding
+/// the enclave's key and another holding only its own, fund it, and offer it
+/// as a second input. An output to that script then reads as custody while
+/// the host alone can spend it.
+#[cfg(feature = "allow-seed-import")]
+#[test]
+#[ignore = "FINDING: an output to a host-built tree that merely contains the enclave's key counts as self-owned"]
+fn plain_btc_refuses_an_output_to_a_tree_the_host_can_spend_alone() {
+    use bitcoin::bip32::{ChildNumber, DerivationPath};
+    use bitcoin::blockdata::opcodes::all::OP_CHECKSIG;
+    use bitcoin::blockdata::script::Builder as ScriptBuilder;
+    use bitcoin::hashes::Hash;
+    use bitcoin::key::{Keypair, Secp256k1, XOnlyPublicKey};
+    use bitcoin::secp256k1::SecretKey;
+    use bitcoin::taproot::{LeafVersion, TapLeafHash, TaprootBuilder};
+    use bitcoin::{Amount, OutPoint, ScriptBuf, Sequence, TxIn, TxOut, Txid, Witness};
+    use common::taproot_fixture as fx;
+    use utexo_bridge_enclave::keys::{AccountType, KeyManager};
+
+    let secp = Secp256k1::new();
+    let km = KeyManager::from_mnemonic(MNEMONIC, bitcoin::Network::Bitcoin).unwrap();
+
+    // The enclave's vanilla key at m/86'/0'/0'/0/0 - derivable by anyone
+    // holding the published account xpub.
+    let child = [
+        ChildNumber::Normal { index: 0 },
+        ChildNumber::Normal { index: 0 },
+    ];
+    let ours = XOnlyPublicKey::from_keypair(&Keypair::from_secret_key(
+        &secp,
+        &km.derive_btc_child(AccountType::Vanilla, &child).unwrap(),
+    ))
+    .0;
+    let our_path = DerivationPath::from(vec![
+        ChildNumber::from_hardened_idx(86).unwrap(),
+        ChildNumber::from_hardened_idx(0).unwrap(),
+        ChildNumber::from_hardened_idx(0).unwrap(),
+        child[0],
+        child[1],
+    ]);
+    assert!(
+        km.resolve_account_and_child_path(&our_path).is_some(),
+        "fixture path must resolve on mainnet"
+    );
+
+    // The host's tree: leaf 0 spends with the host's key alone, leaf 1 with ours.
+    let host = XOnlyPublicKey::from_keypair(&Keypair::from_secret_key(
+        &secp,
+        &SecretKey::from_slice(&[0xB7; 32]).unwrap(),
+    ))
+    .0;
+    let host_leaf = ScriptBuilder::new()
+        .push_x_only_key(&host)
+        .push_opcode(OP_CHECKSIG)
+        .into_script();
+    let our_leaf = ScriptBuilder::new()
+        .push_x_only_key(&ours)
+        .push_opcode(OP_CHECKSIG)
+        .into_script();
+    let internal = XOnlyPublicKey::from_slice(&[
+        0x50, 0x92, 0x9b, 0x74, 0xc1, 0xa0, 0x49, 0x54, 0xb7, 0x8b, 0x4b, 0x60, 0x35, 0xe9, 0x7a,
+        0x5e, 0x07, 0x8a, 0x5a, 0x0f, 0x28, 0xec, 0x96, 0xd5, 0x47, 0xbf, 0xee, 0x9a, 0xce, 0x80,
+        0x3a, 0xc0,
+    ])
+    .unwrap();
+    let spend_info = TaprootBuilder::new()
+        .add_leaf(1, host_leaf)
+        .unwrap()
+        .add_leaf(1, our_leaf.clone())
+        .unwrap()
+        .finalize(&secp, internal)
+        .unwrap();
+    let host_script = ScriptBuf::new_p2tr(&secp, internal, spend_info.merkle_root());
+    let control_block = spend_info
+        .control_block(&(our_leaf.clone(), LeafVersion::TapScript))
+        .unwrap();
+    let our_leaf_hash = TapLeafHash::from_script(&our_leaf, LeafVersion::TapScript);
+
+    // Input 0: a genuine bridge UTXO. Input 1: the host's planted UTXO.
+    // Output: everything to the host's script.
+    let mut psbt = fx::psbt_with_our_input(&km, AccountType::Vanilla, true);
+    psbt.unsigned_tx.input.push(TxIn {
+        previous_output: OutPoint {
+            txid: Txid::from_byte_array([0xB7; 32]),
+            vout: 0,
+        },
+        script_sig: ScriptBuf::new(),
+        sequence: Sequence::MAX,
+        witness: Witness::default(),
+    });
+    psbt.inputs.push(Default::default());
+    psbt.inputs[1].witness_utxo = Some(TxOut {
+        value: Amount::from_sat(10_000),
+        script_pubkey: host_script.clone(),
+    });
+    psbt.inputs[1].tap_internal_key = Some(internal);
+    psbt.inputs[1]
+        .tap_scripts
+        .insert(control_block, (our_leaf, LeafVersion::TapScript));
+    psbt.inputs[1].tap_key_origins.insert(
+        ours,
+        (vec![our_leaf_hash], (*km.master_fingerprint(), our_path)),
+    );
+    psbt.unsigned_tx.output[0] = TxOut {
+        value: Amount::from_sat(105_000),
+        script_pubkey: host_script,
+    };
+
+    let port = common::start_test_server_with_config(
+        |state| state.initialize_from_mnemonic(MNEMONIC).unwrap(),
+        BridgeConfig {
+            btc_max_total_sats: 1_000_000,
+            ..Default::default()
+        },
+    );
+    let resp = send(
+        port,
+        Req::SignBtc(SignBtcRequest {
+            psbt_bytes: psbt.serialize(),
+        }),
+    );
+    match resp.response {
+        Some(Resp::Error(_)) => {}
+        Some(Resp::SignedPsbt(r)) => panic!(
+            "signed {} input(s) of a transaction paying 105_000 sats to a script the host \
+             can spend alone",
+            r.inputs_signed
+        ),
+        other => panic!("{other:?}"),
+    }
+}
