@@ -234,3 +234,248 @@ fn expected_attested_policy(
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn resp() -> AttestedPublicKeyResponse {
+        AttestedPublicKeyResponse {
+            evm_address: vec![0x01; 20],
+            evm_uncompressed_pub: vec![0x02; 64],
+            btc_compressed_pub: vec![0x03; 33],
+            btc_xpub: "xpub".into(),
+            master_fingerprint: vec![0x04; 4],
+            account_xpub_vanilla: "tpubV".into(),
+            account_xpub_colored: "tpubC".into(),
+            attestation_doc: vec![0xAA; 10],
+            chain_id: 0x0102_0304_0506_0708,
+            bridge_contract: vec![0x05; 20],
+            rgb_asset_id: "rgb:asset".into(),
+            evm_gas_tx_uncompressed_pub: vec![0x06; 64],
+            evm_gas_tx_address: vec![0x07; 20],
+            ccd_ed25519_pub: vec![0x08; 32],
+        }
+    }
+
+    fn production() -> ExpectedPolicy {
+        ExpectedPolicy::Production {
+            allow_vanilla_psbt: true,
+            evm_source: EvmDataSource::HeliosVerified,
+            evm_checkpoint: Some([0x42; 32]),
+            gas_tx_allowed_to: [0x11; 20],
+            gas_tx_max_gas_limit: 21_000,
+            gas_tx_max_fee_per_gas: 5,
+            gas_tx_max_value_wei: 6,
+            gas_tx_allowed_selectors: vec![[9, 9, 9, 9], [1, 1, 1, 1]],
+        }
+    }
+
+    /// Split a bundle back into its `[len u32 BE][bytes]` parts.
+    fn parts(bundle: &[u8]) -> Vec<Vec<u8>> {
+        let mut out = Vec::new();
+        let mut i = 0;
+        while i < bundle.len() {
+            let len = u32::from_be_bytes(bundle[i..i + 4].try_into().unwrap()) as usize;
+            i += 4;
+            out.push(bundle[i..i + len].to_vec());
+            i += len;
+        }
+        out
+    }
+
+    #[test]
+    fn canonical_bundle_is_thirteen_length_prefixed_parts_in_wire_order() {
+        let r = resp();
+        let p = parts(&canonical_bundle(&r));
+        assert_eq!(p.len(), 13);
+        assert_eq!(p[0], r.evm_address);
+        assert_eq!(p[1], r.btc_compressed_pub);
+        assert_eq!(p[2], r.btc_xpub.as_bytes());
+        assert_eq!(p[3], r.master_fingerprint);
+        assert_eq!(p[4], r.account_xpub_vanilla.as_bytes());
+        assert_eq!(p[5], r.account_xpub_colored.as_bytes());
+        assert_eq!(p[6], r.evm_uncompressed_pub);
+        assert_eq!(p[7], 0x0102_0304_0506_0708u64.to_be_bytes());
+        assert_eq!(p[8], r.bridge_contract);
+        assert_eq!(p[9], r.rgb_asset_id.as_bytes());
+        assert_eq!(p[10], r.evm_gas_tx_uncompressed_pub);
+        assert_eq!(p[11], r.evm_gas_tx_address);
+        assert_eq!(p[12], r.ccd_ed25519_pub);
+
+        // The attestation document carries the commitment; it is not part of
+        // what is committed.
+        let mut other = r.clone();
+        other.attestation_doc = vec![0xBB; 3];
+        assert_eq!(canonical_bundle(&other), canonical_bundle(&r));
+    }
+
+    #[test]
+    fn canonical_bundle_length_prefixes_defeat_boundary_shifts() {
+        // "ab" + "c" and "a" + "bc" collide under plain concatenation.
+        let mut a = resp();
+        a.account_xpub_vanilla = "ab".into();
+        a.account_xpub_colored = "c".into();
+        let mut b = resp();
+        b.account_xpub_vanilla = "a".into();
+        b.account_xpub_colored = "bc".into();
+        assert_ne!(canonical_bundle(&a), canonical_bundle(&b));
+
+        // An empty part still occupies its 4-byte zero prefix.
+        let mut e = resp();
+        e.rgb_asset_id = String::new();
+        let p = parts(&canonical_bundle(&e));
+        assert_eq!(p.len(), 13);
+        assert!(p[9].is_empty());
+    }
+
+    #[test]
+    fn every_committed_field_changes_the_bundle() {
+        let base = canonical_bundle(&resp());
+        type Mutation = fn(&mut AttestedPublicKeyResponse);
+        let mutations: Vec<(&str, Mutation)> = vec![
+            ("evm_address", |r| r.evm_address[0] ^= 1),
+            ("btc_compressed_pub", |r| r.btc_compressed_pub[0] ^= 1),
+            ("btc_xpub", |r| r.btc_xpub.push('!')),
+            ("master_fingerprint", |r| r.master_fingerprint[0] ^= 1),
+            ("account_xpub_vanilla", |r| r.account_xpub_vanilla.push('!')),
+            ("account_xpub_colored", |r| r.account_xpub_colored.push('!')),
+            ("evm_uncompressed_pub", |r| r.evm_uncompressed_pub[0] ^= 1),
+            ("chain_id", |r| r.chain_id ^= 1),
+            ("bridge_contract", |r| r.bridge_contract[0] ^= 1),
+            ("rgb_asset_id", |r| r.rgb_asset_id.push('!')),
+            ("evm_gas_tx_uncompressed_pub", |r| {
+                r.evm_gas_tx_uncompressed_pub[0] ^= 1
+            }),
+            ("evm_gas_tx_address", |r| r.evm_gas_tx_address[0] ^= 1),
+            ("ccd_ed25519_pub", |r| r.ccd_ed25519_pub[0] ^= 1),
+        ];
+        for (name, mutate) in mutations {
+            let mut r = resp();
+            mutate(&mut r);
+            assert_ne!(canonical_bundle(&r), base, "{name} must be committed");
+        }
+    }
+
+    #[test]
+    fn development_expectation_ignores_the_wire_pins() {
+        let mut r = resp();
+        r.bridge_contract = Vec::new();
+        assert_eq!(
+            expected_attested_policy(&ExpectedPolicy::Development, &r).unwrap(),
+            AttestedPolicy::Development
+        );
+    }
+
+    #[test]
+    fn production_expectation_takes_pins_from_the_wire_and_posture_from_the_caller() {
+        let r = resp();
+        match expected_attested_policy(&production(), &r).unwrap() {
+            AttestedPolicy::Production {
+                allow_vanilla_psbt,
+                attestation,
+                evm_source,
+                btc_source,
+                chain_id,
+                bridge_contract,
+                rgb_asset_id,
+                evm_checkpoint,
+                gas_tx_allowed_to,
+                gas_tx_max_gas_limit,
+                gas_tx_max_fee_per_gas,
+                gas_tx_max_value_wei,
+                gas_tx_allowed_selectors,
+            } => {
+                assert!(allow_vanilla_psbt);
+                assert_eq!(attestation, AttestationMode::Real);
+                assert_eq!(evm_source, EvmDataSource::HeliosVerified);
+                assert_eq!(btc_source, BtcDataSource::SpvVerified);
+                assert_eq!(chain_id, r.chain_id);
+                assert_eq!(bridge_contract, [0x05; 20]);
+                assert_eq!(rgb_asset_id, "rgb:asset");
+                assert_eq!(evm_checkpoint, Some([0x42; 32]));
+                assert_eq!(gas_tx_allowed_to, [0x11; 20]);
+                assert_eq!(gas_tx_max_gas_limit, 21_000);
+                assert_eq!(gas_tx_max_fee_per_gas, 5);
+                assert_eq!(gas_tx_max_value_wei, 6);
+                // Forwarded as declared; `to_bytes` canonicalises the set.
+                assert_eq!(gas_tx_allowed_selectors, vec![[9, 9, 9, 9], [1, 1, 1, 1]]);
+            }
+            AttestedPolicy::Development => panic!("expected a production policy"),
+        }
+    }
+
+    #[test]
+    fn production_expectation_rejects_a_bridge_contract_that_is_not_20_bytes() {
+        for len in [0usize, 19, 21, 32] {
+            let mut r = resp();
+            r.bridge_contract = vec![0x05; len];
+            let err = expected_attested_policy(&production(), &r).unwrap_err();
+            let msg = format!("{err:#}");
+            assert!(
+                msg.contains(&format!("wire bridge_contract is {len} bytes, expected 20")),
+                "{msg}"
+            );
+        }
+    }
+
+    #[test]
+    fn selector_order_does_not_change_the_committed_policy() {
+        let r = resp();
+        let a = expected_attested_policy(&production(), &r).unwrap();
+        let swapped = match production() {
+            ExpectedPolicy::Production {
+                allow_vanilla_psbt,
+                evm_source,
+                evm_checkpoint,
+                gas_tx_allowed_to,
+                gas_tx_max_gas_limit,
+                gas_tx_max_fee_per_gas,
+                gas_tx_max_value_wei,
+                gas_tx_allowed_selectors,
+            } => ExpectedPolicy::Production {
+                allow_vanilla_psbt,
+                evm_source,
+                evm_checkpoint,
+                gas_tx_allowed_to,
+                gas_tx_max_gas_limit,
+                gas_tx_max_fee_per_gas,
+                gas_tx_max_value_wei,
+                gas_tx_allowed_selectors: gas_tx_allowed_selectors.into_iter().rev().collect(),
+            },
+            ExpectedPolicy::Development => unreachable!(),
+        };
+        let b = expected_attested_policy(&swapped, &r).unwrap();
+        assert_ne!(a, b, "the declared order is kept on the value");
+        assert_eq!(a.to_bytes(), b.to_bytes(), "but not in the commitment");
+    }
+
+    #[test]
+    fn a_different_posture_commits_to_different_bytes() {
+        let r = resp();
+        let helios = expected_attested_policy(&production(), &r).unwrap();
+        let raw = ExpectedPolicy::Production {
+            allow_vanilla_psbt: false,
+            evm_source: EvmDataSource::RawRpc,
+            evm_checkpoint: None,
+            gas_tx_allowed_to: [0u8; 20],
+            gas_tx_max_gas_limit: 0,
+            gas_tx_max_fee_per_gas: 0,
+            gas_tx_max_value_wei: 0,
+            gas_tx_allowed_selectors: Vec::new(),
+        };
+        let raw = expected_attested_policy(&raw, &r).unwrap();
+        assert_ne!(helios.to_bytes(), raw.to_bytes());
+        assert_ne!(raw.to_bytes(), AttestedPolicy::Development.to_bytes());
+    }
+
+    #[test]
+    fn expectation_types_compare_and_clone() {
+        assert_eq!(VerifyMode::Real, VerifyMode::Real);
+        assert_ne!(VerifyMode::Real, VerifyMode::Mock);
+        let p = production();
+        assert_eq!(p.clone(), p);
+        assert_ne!(p, ExpectedPolicy::Development);
+        assert!(format!("{p:?}").contains("Production"));
+    }
+}

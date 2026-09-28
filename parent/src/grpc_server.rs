@@ -849,3 +849,402 @@ impl ParentService for ParentAdapterService {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::grpc_proto::{
+        EnrichedBtcPayload, EnrichedEvmPayload, EnrichedRgbPayload, EvmSource, MerkleProofEntry,
+        MintAncestor, RgbSource,
+    };
+    use enclave_proto::sign_request::{DestinationNetwork, SourceNetwork};
+
+    type Svc = ParentAdapterService;
+
+    fn proof(chain: Option<source_proof::Chain>) -> SourceProof {
+        SourceProof {
+            source_network_id: 84,
+            token: String::new(),
+            amount: 10,
+            commission: 7,
+            recipient: String::new(),
+            finalized: true,
+            chain,
+        }
+    }
+
+    fn evm_chain(opid_len: usize) -> source_proof::Chain {
+        source_proof::Chain::Evm(EvmSource {
+            tx_hash: vec![0xAA; 32],
+            funds_in_operation_id: vec![0x33; opid_len],
+        })
+    }
+
+    fn merkle() -> MerkleProofEntry {
+        MerkleProofEntry {
+            txid: vec![0x1D; 32],
+            block_height: 200,
+            tx_position: 3,
+            merkle_path: vec![vec![0x2A; 32], vec![0x2B; 32]],
+        }
+    }
+
+    fn ancestor() -> MintAncestor {
+        MintAncestor {
+            op_id: vec![0x0A; 32],
+            tx_hash: vec![0x0B; 32],
+        }
+    }
+
+    fn evm_payload() -> EnrichedEvmPayload {
+        EnrichedEvmPayload {
+            call_data: vec![0xAB; 4],
+            nonce: 1,
+            deadline: 2,
+            chain_id: 3,
+            proxy_contract: vec![0x04; 20],
+            calldata_amount: 5,
+            calldata_commission: 6,
+            unsigned_tx: vec![0x07],
+            lz_release: None,
+        }
+    }
+
+    fn rgb_payload() -> EnrichedRgbPayload {
+        EnrichedRgbPayload {
+            operation_idx: 9,
+            psbt_bytes: vec![0x70; 8],
+            psbt_output_amount: 11,
+            rgb_asset_id: "rgb:asset".into(),
+            consignment: vec![0xC0; 3],
+            consignment_hash: vec![0xC1; 32],
+            mint_ancestors: vec![ancestor()],
+        }
+    }
+
+    #[test]
+    fn decode_hex_field_accepts_empty_prefixed_and_bare_hex() {
+        assert_eq!(
+            Svc::decode_hex_field("f", String::new()).unwrap(),
+            Vec::<u8>::new()
+        );
+        assert_eq!(
+            Svc::decode_hex_field("f", "0x0aff".into()).unwrap(),
+            vec![0x0a, 0xff]
+        );
+        assert_eq!(
+            Svc::decode_hex_field("f", "0AFF".into()).unwrap(),
+            vec![0x0a, 0xff]
+        );
+        // A bare prefix decodes to nothing rather than failing.
+        assert_eq!(
+            Svc::decode_hex_field("f", "0x".into()).unwrap(),
+            Vec::<u8>::new()
+        );
+    }
+
+    #[test]
+    fn decode_hex_field_names_the_field_on_bad_hex() {
+        for bad in ["0xzz", "abc", "0x0"] {
+            let status = Svc::decode_hex_field("SourceProof.token", bad.into()).unwrap_err();
+            assert_eq!(status.code(), tonic::Code::InvalidArgument, "{bad}");
+            assert!(
+                status
+                    .message()
+                    .starts_with("SourceProof.token must be hex bytes: "),
+                "{bad}: {}",
+                status.message()
+            );
+        }
+    }
+
+    #[test]
+    fn decode_hex_or_raw_field_falls_back_to_the_raw_string() {
+        assert_eq!(
+            Svc::decode_hex_or_raw_field("0x0aff".into()),
+            vec![0x0a, 0xff]
+        );
+        assert_eq!(
+            Svc::decode_hex_or_raw_field("0aff".into()),
+            vec![0x0a, 0xff]
+        );
+        assert_eq!(
+            Svc::decode_hex_or_raw_field("utxob:abc".into()),
+            b"utxob:abc".to_vec()
+        );
+        // Non-hex keeps its prefix: the enclave sees exactly what the listener saw.
+        assert_eq!(
+            Svc::decode_hex_or_raw_field("0xzz".into()),
+            b"0xzz".to_vec()
+        );
+        assert_eq!(
+            Svc::decode_hex_or_raw_field(String::new()),
+            Vec::<u8>::new()
+        );
+    }
+
+    #[test]
+    fn enclave_error_code_3_is_failed_precondition_verbatim_and_others_internal() {
+        let s = Svc::enclave_error_to_status(&enclave_proto::ErrorResponse {
+            code: 3,
+            message: "amount mismatch".into(),
+        });
+        assert_eq!(s.code(), tonic::Code::FailedPrecondition);
+        assert_eq!(s.message(), "amount mismatch");
+
+        for code in [0, 1, 2, 4, u32::MAX] {
+            let s = Svc::enclave_error_to_status(&enclave_proto::ErrorResponse {
+                code,
+                message: "boom".into(),
+            });
+            assert_eq!(s.code(), tonic::Code::Internal, "code {code}");
+            assert_eq!(s.message(), format!("enclave error (code {code}): boom"));
+        }
+    }
+
+    #[test]
+    fn common_and_source_accessors_report_the_missing_part() {
+        let empty = grpc_proto::SignRequest {
+            common: None,
+            source: None,
+            data: None,
+        };
+        let s = Svc::common_sign_request(&empty).unwrap_err();
+        assert_eq!(s.code(), tonic::Code::InvalidArgument);
+        assert_eq!(s.message(), "SignRequest.common is missing");
+        let s = Svc::source_proof(&empty).unwrap_err();
+        assert_eq!(s.code(), tonic::Code::InvalidArgument);
+        assert_eq!(s.message(), "SignRequest.source is missing");
+
+        let full = grpc_proto::SignRequest {
+            common: Some(CommonSignRequest {
+                src_network_id: 1,
+                dst_network_id: 84,
+                data_type: DataType::Transaction as i32,
+            }),
+            source: Some(proof(Some(evm_chain(32)))),
+            data: None,
+        };
+        assert_eq!(Svc::common_sign_request(&full).unwrap().dst_network_id, 84);
+        assert_eq!(Svc::source_proof(&full).unwrap().amount, 10);
+    }
+
+    #[test]
+    fn merkle_proof_and_mint_ancestor_map_field_for_field() {
+        let m = Svc::enclave_merkle_proof(merkle());
+        assert_eq!(m.txid, vec![0x1D; 32]);
+        assert_eq!(m.block_height, 200);
+        assert_eq!(m.tx_position, 3);
+        assert_eq!(m.merkle_path, vec![vec![0x2A; 32], vec![0x2B; 32]]);
+
+        let a = Svc::enclave_mint_ancestor(ancestor());
+        assert_eq!(a.op_id, vec![0x0A; 32]);
+        assert_eq!(a.tx_hash, vec![0x0B; 32]);
+    }
+
+    #[test]
+    fn evm_source_maps_fields_and_marks_the_event_valid() {
+        let mut p = proof(Some(evm_chain(32)));
+        p.token = format!("0x{}", "11".repeat(20));
+        p.recipient = "utxob:seal".into();
+        p.finalized = false;
+        match Svc::enclave_source_network(p).unwrap() {
+            SourceNetwork::EvmSource(e) => {
+                assert_eq!(e.tx_hash, vec![0xAA; 32]);
+                assert!(e.event_valid);
+                assert!(!e.event_finalized);
+                assert_eq!(e.token, vec![0x11; 20]);
+                assert_eq!(e.recipient, b"utxob:seal".to_vec());
+                assert_eq!(e.commission, 7);
+                assert_eq!(e.funds_in_operation_id, vec![0x33; 32]);
+            }
+            other => panic!("expected EVM source, got {other:?}"),
+        }
+
+        // A hex recipient decodes to bytes; an empty token stays empty.
+        let mut p = proof(Some(evm_chain(32)));
+        p.recipient = format!("0x{}", "22".repeat(20));
+        match Svc::enclave_source_network(p).unwrap() {
+            SourceNetwork::EvmSource(e) => {
+                assert_eq!(e.recipient, vec![0x22; 20]);
+                assert!(e.token.is_empty());
+            }
+            other => panic!("expected EVM source, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn evm_source_rejects_an_operation_id_that_is_not_32_bytes() {
+        for len in [0usize, 31, 33] {
+            let s = Svc::enclave_source_network(proof(Some(evm_chain(len)))).unwrap_err();
+            assert_eq!(s.code(), tonic::Code::InvalidArgument, "len {len}");
+            assert!(s.message().contains("must be 32 bytes"), "{}", s.message());
+            assert!(
+                s.message().contains(&format!("got {len}")),
+                "{}",
+                s.message()
+            );
+        }
+    }
+
+    #[test]
+    fn evm_source_with_a_bad_token_is_invalid_argument() {
+        let mut p = proof(Some(evm_chain(32)));
+        p.token = "0xnothex".into();
+        let s = Svc::enclave_source_network(p).unwrap_err();
+        assert_eq!(s.code(), tonic::Code::InvalidArgument);
+        assert!(s
+            .message()
+            .starts_with("SourceProof.token must be hex bytes"));
+    }
+
+    #[test]
+    fn rgb_source_maps_proofs_and_ancestors_and_marks_the_consignment_valid() {
+        let chain = source_proof::Chain::Rgb(RgbSource {
+            consignment: vec![0xC0; 3],
+            consignment_hash: vec![0xC1; 32],
+            rgb_amount: 10,
+            rgb_asset_id: "rgb:asset".into(),
+            merkle_proofs: vec![merkle()],
+            mint_ancestors: vec![ancestor()],
+        });
+        match Svc::enclave_source_network(proof(Some(chain))).unwrap() {
+            SourceNetwork::RgbSource(r) => {
+                assert!(r.consignment_valid);
+                assert_eq!(r.asset_id, "rgb:asset");
+                assert_eq!(r.consignment, vec![0xC0; 3]);
+                assert_eq!(r.consignment_hash, vec![0xC1; 32]);
+                assert_eq!(r.commission, 7);
+                assert_eq!(r.merkle_proofs.len(), 1);
+                assert_eq!(r.merkle_proofs[0].block_height, 200);
+                assert_eq!(r.mint_ancestors.len(), 1);
+                assert_eq!(r.mint_ancestors[0].op_id, vec![0x0A; 32]);
+            }
+            other => panic!("expected RGB source, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn ccd_source_maps_the_hash_and_commission() {
+        let mut chain = source_proof::Chain::Ccd(Default::default());
+        if let source_proof::Chain::Ccd(c) = &mut chain {
+            c.tx_hash = vec![0x0C; 32];
+        }
+        match Svc::enclave_source_network(proof(Some(chain))).unwrap() {
+            SourceNetwork::CcdSource(c) => {
+                assert_eq!(c.tx_hash, vec![0x0C; 32]);
+                assert_eq!(c.commission, 7);
+            }
+            other => panic!("expected CCD source, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn source_without_chain_evidence_is_invalid_argument() {
+        let s = Svc::enclave_source_network(proof(None)).unwrap_err();
+        assert_eq!(s.code(), tonic::Code::InvalidArgument);
+        assert_eq!(s.message(), "source proof has no chain-specific evidence");
+    }
+
+    #[test]
+    fn evm_destination_maps_fields_including_the_lz_release() {
+        match Svc::enclave_destination_network(sign_request::Data::EvmData(evm_payload())) {
+            DestinationNetwork::EvmDestination(d) => {
+                assert_eq!(d.call_data, vec![0xAB; 4]);
+                assert_eq!(d.nonce, 1);
+                assert_eq!(d.deadline, 2);
+                assert_eq!(d.chain_id, 3);
+                assert_eq!(d.proxy_contract, vec![0x04; 20]);
+                assert_eq!(d.calldata_amount, 5);
+                assert_eq!(d.calldata_commission, 6);
+                assert!(d.lz_release.is_none());
+            }
+            other => panic!("expected EVM destination, got {other:?}"),
+        }
+
+        let mut p = evm_payload();
+        p.lz_release = Some(Default::default());
+        if let Some(lr) = p.lz_release.as_mut() {
+            lr.dst_eid = 30101;
+            lr.min_amount_ld = 12;
+            lr.recipient = vec![0x13; 32];
+        }
+        match Svc::enclave_destination_network(sign_request::Data::EvmData(p)) {
+            DestinationNetwork::EvmDestination(d) => {
+                let lr = d.lz_release.expect("lz release forwarded");
+                assert_eq!(lr.dst_eid, 30101);
+                assert_eq!(lr.min_amount_ld, 12);
+                assert_eq!(lr.recipient, vec![0x13; 32]);
+            }
+            other => panic!("expected EVM destination, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rgb_destination_maps_fields_including_ancestors() {
+        match Svc::enclave_destination_network(sign_request::Data::RgbData(rgb_payload())) {
+            DestinationNetwork::RgbDestination(d) => {
+                assert_eq!(d.operation_idx, 9);
+                assert_eq!(d.psbt_bytes, vec![0x70; 8]);
+                assert_eq!(d.psbt_output_amount, 11);
+                assert_eq!(d.asset_id, "rgb:asset");
+                assert_eq!(d.consignment, vec![0xC0; 3]);
+                assert_eq!(d.consignment_hash, vec![0xC1; 32]);
+                assert_eq!(d.mint_ancestors.len(), 1);
+                assert_eq!(d.mint_ancestors[0].tx_hash, vec![0x0B; 32]);
+            }
+            other => panic!("expected RGB destination, got {other:?}"),
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "BtcData is handled by the BTC_UTXO dispatch")]
+    fn btc_data_never_reaches_destination_mapping() {
+        let _ = Svc::enclave_destination_network(sign_request::Data::BtcData(EnrichedBtcPayload {
+            psbt_bytes: vec![0x70],
+        }));
+    }
+
+    #[test]
+    #[should_panic(expected = "CCD sign requests are handled before destination dispatch")]
+    fn ccd_data_never_reaches_destination_mapping() {
+        let _ = Svc::enclave_destination_network(sign_request::Data::CcdData(Default::default()));
+    }
+
+    #[test]
+    fn cross_network_route_rejects_only_same_network_pairs() {
+        let evm_src = SourceNetwork::EvmSource(Default::default());
+        let rgb_src = SourceNetwork::RgbSource(Default::default());
+        let ccd_src = SourceNetwork::CcdSource(Default::default());
+        let evm_dst = DestinationNetwork::EvmDestination(Default::default());
+        let rgb_dst = DestinationNetwork::RgbDestination(Default::default());
+
+        for (src, dst) in [(&evm_src, &evm_dst), (&rgb_src, &rgb_dst)] {
+            let s = Svc::validate_cross_network_route(src, dst).unwrap_err();
+            assert_eq!(s.code(), tonic::Code::InvalidArgument);
+            assert_eq!(
+                s.message(),
+                "source and destination networks must be different"
+            );
+        }
+        for (src, dst) in [
+            (&evm_src, &rgb_dst),
+            (&rgb_src, &evm_dst),
+            (&ccd_src, &evm_dst),
+            (&ccd_src, &rgb_dst),
+        ] {
+            Svc::validate_cross_network_route(src, dst).unwrap();
+        }
+    }
+
+    #[test]
+    fn service_clones_with_its_evm_network_set() {
+        let svc = Svc::new(
+            EnclaveTarget::Tcp("127.0.0.1:1".into()),
+            HashSet::from([84, 1]),
+        );
+        let copy = Clone::clone(&svc);
+        assert_eq!(copy.evm_network_ids, HashSet::from([84, 1]));
+        assert!(matches!(copy.target, EnclaveTarget::Tcp(ref a) if a == "127.0.0.1:1"));
+    }
+}
