@@ -1935,4 +1935,119 @@ mod tests {
             .check(1, SystemTime::now())
             .is_ok());
     }
+
+    /// The `fundsOut` binding guard in front of `handle_sign_evm`.
+    #[cfg(feature = "rgb-validation")]
+    mod funds_out_binding {
+        use super::super::apply_funds_out_binding;
+        use crate::config::BridgeConfig;
+        use crate::networks::evm::validation::FundsOutParams;
+        use crate::networks::rgb::spv::{checkpoint_for, HeaderChain, Network};
+        use crate::networks::rgb::validation::ValidatedConsignment;
+        use crate::server::ServerContext;
+        use crate::state::EnclaveState;
+        use alloy_primitives::{Address, Bytes, U256};
+
+        fn ctx() -> ServerContext {
+            ServerContext::new(
+                EnclaveState::new(bitcoin::Network::Bitcoin),
+                BridgeConfig::default(),
+                std::sync::Mutex::new(HeaderChain::new(
+                    Network::Regtest,
+                    checkpoint_for(Network::Regtest),
+                )),
+            )
+        }
+
+        fn params(proof: Vec<u8>) -> FundsOutParams {
+            FundsOutParams {
+                recipient: Address::ZERO,
+                amount: U256::from(1u64),
+                burnId: U256::ZERO,
+                sourceChainId: U256::ZERO,
+                destinationChainId: U256::ZERO,
+                sourceAddress: String::new(),
+                proof: Bytes::from(proof),
+                settlementData: Bytes::new(),
+            }
+        }
+
+        fn validated(non_mined: Vec<[u8; 32]>) -> ValidatedConsignment {
+            ValidatedConsignment {
+                contract_id: "rgb:test".into(),
+                chain_net: "bc".into(),
+                witness_txids: vec![],
+                all_op_ids: vec![],
+                mint_op_ids: vec![],
+                last_transition: None,
+                last_witness_txid: None,
+                last_transfer_witness_prevouts: None,
+                last_transfer_op_id: None,
+                non_mined_witness_txids: non_mined,
+                transitions_by_witness: vec![],
+            }
+        }
+
+        fn apply(
+            ctx: &ServerContext,
+            params: Option<&FundsOutParams>,
+            validated: Option<&ValidatedConsignment>,
+        ) -> crate::error::Result<()> {
+            apply_funds_out_binding(
+                ctx,
+                params,
+                validated,
+                &[],
+                #[cfg(feature = "bfa-mint")]
+                &[],
+            )
+        }
+
+        #[test]
+        fn a_release_that_is_not_funds_out_is_a_no_op() {
+            let ctx = ctx();
+            apply(&ctx, None, None).unwrap();
+            apply(&ctx, None, Some(&validated(vec![]))).unwrap();
+        }
+
+        #[test]
+        fn funds_out_without_a_validated_consignment_is_refused() {
+            let err = apply(&ctx(), Some(&params(vec![0xAB; 128])), None)
+                .unwrap_err()
+                .to_string();
+            assert!(
+                err.contains("requires a validated RGB source consignment"),
+                "{err}"
+            );
+        }
+
+        #[test]
+        fn funds_out_with_an_unmined_witness_is_refused_first() {
+            let err = apply(
+                &ctx(),
+                Some(&params(vec![0xAB; 128])),
+                Some(&validated(vec![[0x77; 32]])),
+            )
+            .unwrap_err()
+            .to_string();
+            assert!(err.contains("witness tx to be mined"), "{err}");
+            assert!(err.contains(&hex::encode([0x77; 32])), "{err}");
+        }
+
+        #[test]
+        fn funds_out_with_an_empty_proof_is_refused_by_the_relay_check() {
+            let err = apply(&ctx(), Some(&params(vec![])), Some(&validated(vec![])))
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains("fundsOut proof is empty"), "{err}");
+        }
+
+        #[test]
+        fn funds_out_with_a_malformed_proof_is_refused_by_the_relay_check() {
+            let err = apply(&ctx(), Some(&params(vec![1; 64])), Some(&validated(vec![])))
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains("fundsOut proof must be"), "{err}");
+        }
+    }
 }

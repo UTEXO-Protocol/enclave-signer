@@ -599,3 +599,204 @@ fn read_headers_file(path: &std::path::Path) -> std::io::Result<Vec<Vec<u8>>> {
     }
     Ok(headers)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ---- headers file --------------------------------------------------------
+
+    fn temp_file(name: &str, contents: &str) -> PathBuf {
+        let path =
+            std::env::temp_dir().join(format!("utexo-cli-test-{}-{name}", std::process::id()));
+        std::fs::write(&path, contents).unwrap();
+        path
+    }
+
+    #[test]
+    fn read_headers_file_skips_blanks_and_comments_and_keeps_order() {
+        let path = temp_file(
+            "ok.txt",
+            &format!(
+                "# leading comment\n\n  {}  \n{}\n# trailing\n",
+                "ab".repeat(80),
+                "cd".repeat(3)
+            ),
+        );
+        let headers = read_headers_file(&path).unwrap();
+        std::fs::remove_file(&path).ok();
+        // Lengths are not enforced here: the enclave rejects on parse.
+        assert_eq!(headers, vec![vec![0xab; 80], vec![0xcd; 3]]);
+    }
+
+    #[test]
+    fn read_headers_file_reports_the_line_of_invalid_hex() {
+        let path = temp_file("bad.txt", "aabb\n# c\n\nzz\n");
+        let err = read_headers_file(&path).unwrap_err();
+        std::fs::remove_file(&path).ok();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+        assert!(err.to_string().starts_with("line 4: invalid hex"), "{err}");
+    }
+
+    #[test]
+    fn read_headers_file_empty_and_missing() {
+        let path = temp_file("empty.txt", "\n# nothing\n");
+        assert!(read_headers_file(&path).unwrap().is_empty());
+        std::fs::remove_file(&path).ok();
+        let err = read_headers_file(std::path::Path::new("/nonexistent/headers.txt")).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::NotFound);
+    }
+
+    #[test]
+    fn printers_handle_configured_and_unconfigured_bridges() {
+        print_bridge_config(0, &[0u8; 20], "");
+        print_bridge_config(1, &[0u8; 20], "");
+        print_bridge_config(0, &[1u8; 20], "");
+        print_bridge_config(0, &[0u8; 20], "rgb:x");
+        print_init_response(&InitializeKeyResponse::default());
+        print_keys_response(&PublicKeysResponse::default());
+    }
+
+    // ---- run_clone against two real enclaves ---------------------------------
+
+    mod clone_flow {
+        use super::*;
+        use std::net::TcpListener;
+        use std::sync::Arc;
+
+        use utexo_bridge_enclave::config::BridgeConfig;
+        use utexo_bridge_enclave::networks::rgb::spv::{checkpoint_for, HeaderChain, Network};
+        use utexo_bridge_enclave::server::{self as enclave_server, ServerContext};
+        use utexo_bridge_enclave::state::EnclaveState;
+        use utexo_bridge_parent::grpc_proto::parent_service_server::ParentServiceServer;
+        use utexo_bridge_parent::grpc_server::{EnclaveTarget, ParentAdapterService};
+
+        /// A fresh, uninitialised real enclave. Returns its TCP address.
+        fn start_enclave() -> String {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let addr = listener.local_addr().unwrap();
+            let ctx = Arc::new(ServerContext::new(
+                EnclaveState::new(bitcoin::Network::Bitcoin),
+                BridgeConfig::from_env(),
+                std::sync::Mutex::new(HeaderChain::new(
+                    Network::Regtest,
+                    checkpoint_for(Network::Regtest),
+                )),
+            ));
+            std::thread::spawn(move || {
+                for stream in listener.incoming().flatten() {
+                    enclave_server::handle_connection(stream, &ctx);
+                }
+            });
+            addr.to_string()
+        }
+
+        /// The donor's parent gRPC, on its own runtime thread (`run_clone`
+        /// builds a runtime of its own, so the test must not be async).
+        fn start_donor_grpc(enclave_addr: &str) -> String {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let addr = listener.local_addr().unwrap();
+            drop(listener);
+            let enclave_addr = enclave_addr.to_string();
+            std::thread::spawn(move || {
+                let rt = tokio::runtime::Runtime::new().unwrap();
+                rt.block_on(async move {
+                    let service = ParentAdapterService::new(
+                        EnclaveTarget::Tcp(enclave_addr),
+                        Default::default(),
+                    );
+                    tonic::transport::Server::builder()
+                        .add_service(ParentServiceServer::new(service))
+                        .serve(addr)
+                        .await
+                        .unwrap();
+                });
+            });
+            for _ in 0..100 {
+                if std::net::TcpStream::connect(addr).is_ok() {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            format!("http://{addr}")
+        }
+
+        /// A donor enclave initialised with `secret`, behind its parent gRPC.
+        /// Returns `(donor_grpc_url, donor_evm_hex)`.
+        fn donor(secret: &str) -> (String, String) {
+            let enclave = start_enclave();
+            let init = EnclaveClient::new(&enclave)
+                .initialize_keys_with_secret(None, Some(secret.into()))
+                .expect("donor initialises with its cloning secret");
+            (
+                start_donor_grpc(&enclave),
+                format!("0x{}", hex::encode(&init.evm_address)),
+            )
+        }
+
+        #[test]
+        fn a_requester_clones_the_donor_identity_end_to_end() {
+            let (donor_grpc, donor_evm) = donor("operator");
+            let requester = EnclaveClient::new(&start_enclave());
+
+            run_clone(&requester, "operator", &donor_grpc, &donor_evm)
+                .expect("full clone handshake succeeds");
+
+            let keys = requester.get_public_keys().unwrap();
+            assert_eq!(format!("0x{}", hex::encode(&keys.evm_address)), donor_evm);
+        }
+
+        #[test]
+        fn a_wrong_secret_is_refused_by_the_donor() {
+            let (donor_grpc, donor_evm) = donor("operator");
+            let requester = EnclaveClient::new(&start_enclave());
+            let err = run_clone(&requester, "not-the-secret", &donor_grpc, &donor_evm)
+                .expect_err("donor must refuse a digest under the wrong secret");
+            assert!(err.to_string().contains("enclave error"), "{err}");
+            // The requester is left in the Cloning phase, not Active.
+            assert!(requester.get_public_keys().is_err());
+        }
+
+        #[test]
+        fn a_donor_address_that_is_not_the_donors_is_refused() {
+            let (donor_grpc, _donor_evm) = donor("operator");
+            let requester = EnclaveClient::new(&start_enclave());
+            let other = format!("0x{}", "42".repeat(20));
+            let err = run_clone(&requester, "operator", &donor_grpc, &other)
+                .expect_err("donor must refuse a request addressed to another enclave");
+            assert!(err.to_string().contains("enclave error"), "{err}");
+        }
+
+        #[test]
+        fn malformed_donor_addresses_are_rejected_before_any_connection() {
+            // Nothing listens here: reaching the enclave would fail differently.
+            let requester = EnclaveClient::new("127.0.0.1:1");
+            let err = run_clone(&requester, "s", "http://127.0.0.1:1", "0x1234").unwrap_err();
+            assert!(
+                err.to_string()
+                    .contains("must be a 20-byte address, got 2 bytes"),
+                "{err}"
+            );
+            let err = run_clone(&requester, "s", "http://127.0.0.1:1", "zz").unwrap_err();
+            assert!(!err.to_string().contains("20-byte"), "{err}");
+        }
+
+        #[test]
+        fn an_unreachable_requester_or_donor_fails_the_handshake() {
+            let donor_evm = format!("0x{}", "42".repeat(20));
+            let err = run_clone(
+                &EnclaveClient::new("127.0.0.1:1"),
+                "s",
+                "http://127.0.0.1:1",
+                &donor_evm,
+            )
+            .unwrap_err();
+            assert!(err.to_string().contains("connection failed"), "{err}");
+
+            let requester = EnclaveClient::new(&start_enclave());
+            let err = run_clone(&requester, "s", "http://127.0.0.1:1", &donor_evm)
+                .expect_err("dead donor gRPC");
+            assert!(!err.to_string().is_empty());
+        }
+    }
+}

@@ -272,3 +272,296 @@ fn print_ok(result: &AttestedPubkeyResult) {
         hex::encode(v.nonce.clone())
     );
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn cli(args: &[&str]) -> Cli {
+        Cli::try_parse_from(std::iter::once("attest-verify").chain(args.iter().copied()))
+            .expect("valid arguments")
+    }
+
+    fn zero_pcr() -> String {
+        "00".repeat(48)
+    }
+
+    fn err_of<T>(r: Result<T>) -> String {
+        match r {
+            Ok(_) => panic!("expected an error"),
+            Err(e) => format!("{e:#}"),
+        }
+    }
+
+    // ---- flag parsers -------------------------------------------------------
+
+    #[test]
+    fn parse_checkpoint_accepts_32_bytes_with_or_without_prefix() {
+        let hex = "ab".repeat(32);
+        assert_eq!(parse_checkpoint(&hex).unwrap(), [0xab; 32]);
+        assert_eq!(parse_checkpoint(&format!("0x{hex}")).unwrap(), [0xab; 32]);
+    }
+
+    #[test]
+    fn parse_checkpoint_rejects_bad_hex_and_wrong_length() {
+        assert!(err_of(parse_checkpoint("0xzz")).contains("not valid hex"));
+        let msg = err_of(parse_checkpoint(&"ab".repeat(31)));
+        assert!(
+            msg.contains("must be 32 bytes") && msg.contains("got 31"),
+            "{msg}"
+        );
+        let msg = err_of(parse_checkpoint(""));
+        assert!(msg.contains("got 0"), "{msg}");
+    }
+
+    #[test]
+    fn parse_evm_source_accepts_every_alias_case_insensitively() {
+        for s in ["raw", "RAW", "raw-rpc", "RawRpc"] {
+            assert_eq!(parse_evm_source(s).unwrap(), EvmDataSource::RawRpc, "{s}");
+        }
+        for s in ["helios", "HELIOS", "helios-verified"] {
+            assert_eq!(
+                parse_evm_source(s).unwrap(),
+                EvmDataSource::HeliosVerified,
+                "{s}"
+            );
+        }
+        for s in ["disabled", "none", "OFF"] {
+            assert_eq!(parse_evm_source(s).unwrap(), EvmDataSource::Disabled, "{s}");
+        }
+        let msg = err_of(parse_evm_source("bogus"));
+        assert!(msg.contains("invalid --expect-evm-source 'bogus'"), "{msg}");
+    }
+
+    #[test]
+    fn parse_expect_gas_to_defaults_to_the_unpinned_zero_address() {
+        assert_eq!(parse_expect_gas_to(&None).unwrap(), [0u8; 20]);
+        let hex = "11".repeat(20);
+        assert_eq!(
+            parse_expect_gas_to(&Some(format!("0x{hex}"))).unwrap(),
+            [0x11; 20]
+        );
+        assert_eq!(parse_expect_gas_to(&Some(hex)).unwrap(), [0x11; 20]);
+        assert!(err_of(parse_expect_gas_to(&Some("0xzz".into()))).contains("is not hex"));
+        let msg = err_of(parse_expect_gas_to(&Some("11".repeat(19))));
+        assert!(msg.contains("must be 20 bytes, got 19"), "{msg}");
+    }
+
+    #[test]
+    fn parse_expect_gas_selectors_handles_lists_prefixes_and_errors() {
+        assert!(parse_expect_gas_selectors("").unwrap().is_empty());
+        assert!(parse_expect_gas_selectors(" , ,").unwrap().is_empty());
+        assert_eq!(
+            parse_expect_gas_selectors(" 0xaabbccdd , 01020304 ,, ").unwrap(),
+            vec![[0xaa, 0xbb, 0xcc, 0xdd], [1, 2, 3, 4]]
+        );
+        let msg = err_of(parse_expect_gas_selectors("0xaabbcc"));
+        assert!(msg.contains("'0xaabbcc' must be exactly 4 bytes"), "{msg}");
+        let msg = err_of(parse_expect_gas_selectors("aabbccdd,zz"));
+        assert!(msg.contains("'zz' is not hex"), "{msg}");
+    }
+
+    // ---- run(): flag validation before any network access -------------------
+
+    #[tokio::test]
+    async fn run_without_mock_requires_every_pcr() {
+        let z = zero_pcr();
+        let msg = err_of(run(cli(&["--pcr1", &z, "--pcr2", &z])).await);
+        assert!(msg.contains("--pcr0 required"), "{msg}");
+        let msg = err_of(run(cli(&["--pcr0", &z, "--pcr2", &z])).await);
+        assert!(msg.contains("--pcr1 required"), "{msg}");
+        let msg = err_of(run(cli(&["--pcr0", &z, "--pcr1", &z])).await);
+        assert!(msg.contains("--pcr2 required"), "{msg}");
+    }
+
+    #[tokio::test]
+    async fn run_rejects_invalid_pcr_hex() {
+        let z = zero_pcr();
+        let msg = err_of(run(cli(&["--pcr0", "zz", "--pcr1", &z, "--pcr2", &z])).await);
+        assert!(msg.contains("invalid PCR hex"), "{msg}");
+    }
+
+    #[tokio::test]
+    async fn run_rejects_helios_without_a_checkpoint() {
+        let z = zero_pcr();
+        let msg = err_of(
+            run(cli(&[
+                "--pcr0",
+                &z,
+                "--pcr1",
+                &z,
+                "--pcr2",
+                &z,
+                "--expect-evm-source",
+                "helios",
+            ]))
+            .await,
+        );
+        assert!(msg.contains("requires --expect-helios-checkpoint"), "{msg}");
+    }
+
+    #[tokio::test]
+    async fn run_rejects_malformed_expectation_flags() {
+        let z = zero_pcr();
+        let base = |extra: &[&str]| {
+            let mut v = vec!["--pcr0", "", "--pcr1", "", "--pcr2", ""];
+            v[1] = "PCR";
+            v[3] = "PCR";
+            v[5] = "PCR";
+            let mut owned: Vec<String> = v
+                .into_iter()
+                .map(|a| if a == "PCR" { z.clone() } else { a.to_string() })
+                .collect();
+            owned.extend(extra.iter().map(|s| s.to_string()));
+            owned
+        };
+        let cases: [(&[&str], &str); 4] = [
+            (
+                &["--expect-evm-source", "bogus"],
+                "invalid --expect-evm-source",
+            ),
+            (&["--expect-gas-tx-to", "0x12"], "must be 20 bytes"),
+            (&["--expect-gas-selectors", "0xaabb"], "exactly 4 bytes"),
+            (
+                &[
+                    "--expect-evm-source",
+                    "helios",
+                    "--expect-helios-checkpoint",
+                    "zz",
+                ],
+                "not valid hex",
+            ),
+        ];
+        for (extra, needle) in cases {
+            let args = base(extra);
+            let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+            let msg = err_of(run(cli(&refs)).await);
+            assert!(msg.contains(needle), "{extra:?}: {msg}");
+        }
+    }
+
+    #[tokio::test]
+    async fn run_fails_to_connect_to_a_dead_endpoint_in_both_modes() {
+        let msg = err_of(run(cli(&["--mock", "--endpoint", "http://127.0.0.1:1"])).await);
+        assert!(msg.contains("connecting to http://127.0.0.1:1"), "{msg}");
+
+        let z = zero_pcr();
+        let msg = err_of(
+            run(cli(&[
+                "--pcr0",
+                &z,
+                "--pcr1",
+                &z,
+                "--pcr2",
+                &z,
+                "--endpoint",
+                "http://127.0.0.1:1",
+            ]))
+            .await,
+        );
+        assert!(msg.contains("connecting to http://127.0.0.1:1"), "{msg}");
+    }
+
+    // ---- run(): against the real in-process stack ---------------------------
+
+    mod live {
+        use super::*;
+        use std::net::TcpListener;
+        use std::sync::Arc;
+
+        use tonic::transport::Server;
+        use utexo_bridge_enclave::config::BridgeConfig;
+        use utexo_bridge_enclave::networks::rgb::spv::{checkpoint_for, HeaderChain, Network};
+        use utexo_bridge_enclave::server::{self as enclave_server, ServerContext};
+        use utexo_bridge_enclave::state::EnclaveState;
+        use utexo_bridge_parent::grpc_proto::parent_service_server::ParentServiceServer;
+        use utexo_bridge_parent::grpc_server::{EnclaveTarget, ParentAdapterService};
+
+        const MNEMONIC: &str = "abandon abandon abandon abandon abandon abandon abandon abandon \
+                                abandon abandon abandon about";
+
+        fn start_enclave() -> u16 {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let port = listener.local_addr().unwrap().port();
+            let state = EnclaveState::new(bitcoin::Network::Bitcoin);
+            state.initialize_from_mnemonic(MNEMONIC).unwrap();
+            let ctx = Arc::new(ServerContext::new(
+                state,
+                BridgeConfig::from_env(),
+                std::sync::Mutex::new(HeaderChain::new(
+                    Network::Regtest,
+                    checkpoint_for(Network::Regtest),
+                )),
+            ));
+            std::thread::spawn(move || {
+                for stream in listener.incoming().flatten() {
+                    enclave_server::handle_connection(stream, &ctx);
+                }
+            });
+            port
+        }
+
+        async fn start_parent(enclave_port: u16) -> String {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let addr = listener.local_addr().unwrap();
+            drop(listener);
+            let service = ParentAdapterService::new(
+                EnclaveTarget::Tcp(format!("127.0.0.1:{enclave_port}")),
+                Default::default(),
+            );
+            tokio::spawn(async move {
+                Server::builder()
+                    .add_service(ParentServiceServer::new(service))
+                    .serve(addr)
+                    .await
+                    .unwrap();
+            });
+            for _ in 0..50 {
+                if std::net::TcpStream::connect(addr).is_ok() {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+            format!("http://{addr}")
+        }
+
+        #[tokio::test]
+        async fn mock_mode_verifies_the_live_stack_and_prints_the_bundle() {
+            let endpoint = start_parent(start_enclave()).await;
+            run(cli(&["--mock", "--endpoint", &endpoint]))
+                .await
+                .expect("mock verification of the live stack succeeds");
+
+            // The success printer runs over a freshly verified result.
+            let result = verify_attested_pubkey(
+                &endpoint,
+                attestation_verify::ExpectedPcrs::zero(),
+                VerifyMode::Mock,
+                ExpectedPolicy::Development,
+            )
+            .await
+            .unwrap();
+            print_ok(&result);
+        }
+
+        #[tokio::test]
+        async fn real_mode_rejects_the_mock_stack() {
+            let endpoint = start_parent(start_enclave()).await;
+            let z = zero_pcr();
+            let msg = err_of(
+                run(cli(&[
+                    "--pcr0",
+                    &z,
+                    "--pcr1",
+                    &z,
+                    "--pcr2",
+                    &z,
+                    "--endpoint",
+                    &endpoint,
+                ]))
+                .await,
+            );
+            assert!(msg.contains("attestation verify failed"), "{msg}");
+        }
+    }
+}

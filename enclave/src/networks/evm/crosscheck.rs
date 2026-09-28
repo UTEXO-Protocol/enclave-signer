@@ -1089,6 +1089,33 @@ mod tests {
         // -- Calldata proof vs the enclave's own headers.
 
         #[test]
+        fn rejects_a_proof_height_wider_than_u32() {
+            let (chain, hashes) = chain();
+            let good = proof_bytes(
+                ANCHOR_HEIGHT,
+                hashes[ANCHOR_HEIGHT as usize],
+                TIP_HEIGHT,
+                hashes[TIP_HEIGHT as usize],
+            )
+            .to_vec();
+
+            // Any of the 28 high bytes of `sourceHeight` set.
+            for i in [0usize, 13, 27] {
+                let mut p = good.clone();
+                p[i] = 1;
+                let cd = mock_funds_out_calldata_with_proof(1_000, Bytes::from(p));
+                let err = check(&cd, &chain).unwrap_err().to_string();
+                assert!(err.contains("sourceHeight exceeds u32 range"), "{i}: {err}");
+            }
+            // Same for `latestHeight` (word 3).
+            let mut p = good;
+            p[64 + 27] = 1;
+            let cd = mock_funds_out_calldata_with_proof(1_000, Bytes::from(p));
+            let err = check(&cd, &chain).unwrap_err().to_string();
+            assert!(err.contains("latestHeight exceeds u32 range"), "{err}");
+        }
+
+        #[test]
         fn passes_on_matching_commitment() {
             let (chain, hashes) = chain();
             assert!(check(&good_calldata(&hashes), &chain).is_ok());

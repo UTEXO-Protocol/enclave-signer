@@ -612,6 +612,149 @@ IwLz3/Y=
         }
     }
 
+    /// Certificate-signature checks against synthetic P-384 certificates:
+    /// the embedded root's shape, re-keyed and re-signed under test keys.
+    #[cfg(test)]
+    pub(crate) mod cert_signing_tests {
+        use super::*;
+        use p384::ecdsa::signature::Signer;
+        use p384::ecdsa::SigningKey;
+        use x509_cert::der::asn1::BitString;
+
+        pub(crate) fn key(seed: u8) -> SigningKey {
+            SigningKey::from_slice(&[seed; 48]).expect("scalar in range")
+        }
+
+        /// The embedded root's certificate, holding `holder`'s public key and
+        /// signed over its TBS by `issuer`.
+        pub(crate) fn cert_signed_by(issuer: &SigningKey, holder: &SigningKey) -> Certificate {
+            let mut cert = Certificate::from_der(root_cert_der()).expect("embedded root parses");
+            let point = holder.verifying_key().to_encoded_point(false);
+            cert.tbs_certificate
+                .subject_public_key_info
+                .subject_public_key = BitString::from_bytes(point.as_bytes()).unwrap();
+            let tbs = cert.tbs_certificate.to_der().unwrap();
+            let sig: Signature = issuer.sign(&tbs);
+            cert.signature = BitString::from_bytes(sig.to_der().as_bytes()).unwrap();
+            cert
+        }
+
+        pub(crate) fn cert_der_signed_by(issuer: &SigningKey, holder: &SigningKey) -> Vec<u8> {
+            cert_signed_by(issuer, holder).to_der().unwrap()
+        }
+
+        fn err(r: Result<()>) -> String {
+            match r {
+                Ok(()) => panic!("expected a certificate error"),
+                Err(VerifyError::Certificate(m)) => m,
+                Err(other) => panic!("expected a certificate error, got {other}"),
+            }
+        }
+
+        #[test]
+        fn a_correctly_signed_subject_verifies_under_its_issuer() {
+            let ca = key(0x11);
+            let leaf = key(0x22);
+            let ca_cert = cert_signed_by(&ca, &ca);
+            let leaf_cert = cert_signed_by(&ca, &leaf);
+            verify_issuer_signed_subject(&ca_cert, &leaf_cert).unwrap();
+            // Self-signed: a root verifies under itself.
+            verify_issuer_signed_subject(&ca_cert, &ca_cert).unwrap();
+        }
+
+        #[test]
+        fn a_subject_signed_by_another_key_is_rejected() {
+            let ca = key(0x11);
+            let other = key(0x33);
+            let ca_cert = cert_signed_by(&ca, &ca);
+            let leaf_cert = cert_signed_by(&other, &key(0x22));
+            assert_eq!(
+                err(verify_issuer_signed_subject(&ca_cert, &leaf_cert)),
+                "certificate signature invalid"
+            );
+            // And the leaf does not verify under a CA it was not issued by even
+            // when that CA holds the leaf's own key.
+            let same_key_cert = cert_signed_by(&ca, &key(0x22));
+            assert_eq!(
+                err(verify_issuer_signed_subject(&same_key_cert, &leaf_cert)),
+                "certificate signature invalid"
+            );
+        }
+
+        #[test]
+        fn a_tbs_edited_after_signing_is_rejected() {
+            let ca = key(0x11);
+            let ca_cert = cert_signed_by(&ca, &ca);
+            let mut leaf_cert = cert_signed_by(&ca, &key(0x22));
+            // Swap the certified key after the fact: the signature no longer
+            // covers the TBS.
+            let point = key(0x44).verifying_key().to_encoded_point(false);
+            leaf_cert
+                .tbs_certificate
+                .subject_public_key_info
+                .subject_public_key = BitString::from_bytes(point.as_bytes()).unwrap();
+            assert_eq!(
+                err(verify_issuer_signed_subject(&ca_cert, &leaf_cert)),
+                "certificate signature invalid"
+            );
+        }
+
+        #[test]
+        fn a_signature_that_is_not_der_is_rejected_before_verification() {
+            let ca = key(0x11);
+            let ca_cert = cert_signed_by(&ca, &ca);
+            let mut leaf_cert = cert_signed_by(&ca, &key(0x22));
+
+            // Raw r||s (the COSE form) is not accepted on a certificate.
+            let tbs = leaf_cert.tbs_certificate.to_der().unwrap();
+            let raw: Signature = ca.sign(&tbs);
+            leaf_cert.signature = BitString::from_bytes(&raw.to_bytes()).unwrap();
+            assert!(err(verify_issuer_signed_subject(&ca_cert, &leaf_cert))
+                .starts_with("invalid cert signature"));
+
+            // Truncated DER.
+            leaf_cert.signature = BitString::from_bytes(&[0x30, 0x01, 0x00]).unwrap();
+            assert!(err(verify_issuer_signed_subject(&ca_cert, &leaf_cert))
+                .starts_with("invalid cert signature"));
+
+            // Empty.
+            leaf_cert.signature = BitString::from_bytes(&[]).unwrap();
+            assert!(err(verify_issuer_signed_subject(&ca_cert, &leaf_cert))
+                .starts_with("invalid cert signature"));
+        }
+
+        #[test]
+        fn extract_p384_pubkey_rejects_keys_that_are_not_p384_points() {
+            let mut cert = cert_signed_by(&key(0x11), &key(0x11));
+            for bad in [vec![], vec![0x04; 65], vec![0x04; 97], vec![0x02; 49]] {
+                cert.tbs_certificate
+                    .subject_public_key_info
+                    .subject_public_key = BitString::from_bytes(&bad).unwrap();
+                let msg = match extract_p384_pubkey(&cert) {
+                    Ok(_) => panic!("{} bytes must not parse as a P-384 key", bad.len()),
+                    Err(VerifyError::Certificate(m)) => m,
+                    Err(other) => panic!("unexpected {other}"),
+                };
+                assert!(msg.starts_with("invalid P-384 key"), "{msg}");
+            }
+            // A compressed point is a valid SEC1 encoding.
+            let compressed = key(0x22).verifying_key().to_encoded_point(true);
+            cert.tbs_certificate
+                .subject_public_key_info
+                .subject_public_key = BitString::from_bytes(compressed.as_bytes()).unwrap();
+            assert_eq!(
+                extract_p384_pubkey(&cert).unwrap(),
+                *key(0x22).verifying_key()
+            );
+        }
+
+        #[test]
+        fn the_embedded_root_is_self_signed() {
+            let root = Certificate::from_der(root_cert_der()).unwrap();
+            verify_issuer_signed_subject(&root, &root).unwrap();
+        }
+    }
+
     #[cfg(test)]
     mod hardening_tests {
         use super::*;
@@ -1694,5 +1837,41 @@ mod coverage_tests {
             assert!(v.enclave_pubkey.is_empty());
             assert_eq!(v.user_data, Some(vec![]));
         }
+    }
+
+    #[test]
+    fn real_rejects_an_intermediate_the_root_did_not_sign() {
+        // [root, synthetic]: the synthetic certificate is well-formed, in its
+        // validity window and P-384, but the AWS root never signed it.
+        use real::cert_signing_tests::{cert_der_signed_by, key};
+        let ca = key(0x11);
+        let p = payload(
+            vec![real::root_cert_der().to_vec(), cert_der_signed_by(&ca, &ca)],
+            cert_der_signed_by(&ca, &key(0x22)),
+            Some(vec![0; 32]),
+            Some(vec![1; 64]),
+        );
+        let doc = cose_sign1(-35, Value::Bytes(p), vec![1; 96]);
+        let msg = certificate_err(verify_attestation(&doc, &zero_pcrs(), None));
+        assert_eq!(msg, "certificate signature invalid");
+    }
+
+    #[test]
+    fn real_rejects_a_leaf_the_intermediate_did_not_sign() {
+        // [root, root] then a synthetic leaf: the walk reaches the leaf and
+        // finds the (duplicated) root did not sign it.
+        use real::cert_signing_tests::{cert_der_signed_by, key};
+        let p = payload(
+            vec![
+                real::root_cert_der().to_vec(),
+                real::root_cert_der().to_vec(),
+            ],
+            cert_der_signed_by(&key(0x11), &key(0x22)),
+            Some(vec![0; 32]),
+            Some(vec![1; 64]),
+        );
+        let doc = cose_sign1(-35, Value::Bytes(p), vec![1; 96]);
+        let msg = certificate_err(verify_attestation(&doc, &zero_pcrs(), None));
+        assert_eq!(msg, "certificate signature invalid");
     }
 }

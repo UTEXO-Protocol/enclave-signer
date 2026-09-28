@@ -444,3 +444,93 @@ impl EnclaveClient {
         }
     }
 }
+
+#[cfg(all(test, feature = "vsock", target_os = "linux"))]
+mod vsock_tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn parse_vsock_spec_defaults_the_port_to_5000() {
+        assert_eq!(parse_vsock_spec("16").unwrap(), (16, 5000));
+        assert_eq!(parse_vsock_spec("18:6000").unwrap(), (18, 6000));
+        assert_eq!(parse_vsock_spec("3:1").unwrap(), (3, 1));
+    }
+
+    #[test]
+    fn parse_vsock_spec_rejects_a_bad_cid_or_port() {
+        for (bad, needle) in [
+            ("", "invalid vsock cid"),
+            ("x", "invalid vsock cid"),
+            ("-1", "invalid vsock cid"),
+            (":5000", "invalid vsock cid"),
+            ("16:", "invalid vsock port"),
+            ("16:y", "invalid vsock port"),
+            ("16:5000:1", "invalid vsock port"),
+        ] {
+            match parse_vsock_spec(bad) {
+                Err(ParentError::Connection(m)) => assert!(m.contains(needle), "{bad:?}: {m}"),
+                other => panic!("{bad:?}: unexpected {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn a_vsock_addr_with_a_bad_spec_is_refused_before_connecting() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let err = EnclaveClient::new("vsock://nope")
+            .get_public_keys()
+            .unwrap_err();
+        match err {
+            ParentError::Connection(m) => assert!(m.contains("invalid vsock cid"), "{m}"),
+            other => panic!("unexpected {other}"),
+        }
+    }
+
+    #[test]
+    fn a_plain_addr_refuses_to_default_to_cid_16() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::remove_var("ENCLAVE_VSOCK_CID");
+        let err = EnclaveClient::new("127.0.0.1:5000")
+            .get_public_keys()
+            .unwrap_err();
+        match err {
+            ParentError::Connection(m) => {
+                assert!(m.contains("Refusing to default to CID 16"), "{m}")
+            }
+            other => panic!("unexpected {other}"),
+        }
+    }
+
+    #[test]
+    fn an_explicit_cid_is_attempted_and_reports_the_target_on_failure() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // No AF_VSOCK peer exists here, so the connect fails; the error must
+        // still name the CID and port that were tried.
+        let err = EnclaveClient::new("vsock://16:5001")
+            .get_public_keys()
+            .unwrap_err();
+        match err {
+            ParentError::Connection(m) => {
+                assert!(m.contains("vsock connect cid=16 port=5001"), "{m}")
+            }
+            other => panic!("unexpected {other}"),
+        }
+
+        std::env::set_var("ENCLAVE_VSOCK_CID", "17");
+        std::env::set_var("ENCLAVE_VSOCK_PORT", "5002");
+        let err = EnclaveClient::new("127.0.0.1:5000")
+            .get_public_keys()
+            .unwrap_err();
+        std::env::remove_var("ENCLAVE_VSOCK_CID");
+        std::env::remove_var("ENCLAVE_VSOCK_PORT");
+        match err {
+            ParentError::Connection(m) => {
+                assert!(m.contains("vsock connect cid=17 port=5002"), "{m}")
+            }
+            other => panic!("unexpected {other}"),
+        }
+    }
+}
