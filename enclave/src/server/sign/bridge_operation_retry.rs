@@ -260,6 +260,7 @@ fn a_retry_is_signed_when_the_first_response_never_reached_the_caller() {
         &bridge_config,
         EvmDataSource::Disabled,
         None,
+        None,
         0,
     );
     let state = EnclaveState::new(bitcoin::Network::Bitcoin);

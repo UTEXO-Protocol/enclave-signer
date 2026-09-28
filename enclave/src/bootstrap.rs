@@ -5,13 +5,17 @@
 //! dependency does it here. Nothing in this module handles a request.
 
 use crate::config::BridgeConfig;
+#[cfg(feature = "evm-rpc")]
+use crate::config::{EvmRpcConfig, EvmRpcTransport};
 #[cfg(feature = "rgb-validation")]
 use crate::networks::rgb::spv::{
     resolve_checkpoint, CheckpointSource, HeaderChain, Network, CHECKPOINT_ENV,
 };
 #[cfg(feature = "rgb-validation")]
 use crate::networks::rgb::validation::RgbValidator;
-use crate::policy::{EvmDataSource, SecurityPolicy};
+use crate::policy::SecurityPolicy;
+#[cfg(feature = "evm-rpc")]
+use crate::policy::{EvmDataSource, EvmRpcTlsPin};
 use crate::state::EnclaveState;
 
 /// Install the tracing subscriber. `RUST_LOG` picks the filter.
@@ -130,19 +134,19 @@ pub fn log_bridge_config(bridge_config: &BridgeConfig) {
     }
 }
 
-/// Which EVM `FundsIn` deposit-verification source this build and deployment
-/// uses, plus the Helios checkpoint when that path is selected.
+/// Which EVM `FundsIn` deposit-verification source this deployment uses, plus
+/// the Helios checkpoint or the TLS pin of that source.
 ///
 /// Decided the same way the RPC client is built in [`build_evm_rpc_client`]:
-/// no `evm-rpc` means none; `helios` plus `HELIOS_EXECUTION_RPC` means the
-/// trustless path; otherwise the raw host-relayed RPC.
-pub fn resolve_evm_data_source() -> (EvmDataSource, Option<[u8; 32]>) {
-    #[cfg(not(feature = "evm-rpc"))]
-    let out = (EvmDataSource::Disabled, None);
-    #[cfg(all(feature = "evm-rpc", not(feature = "helios")))]
-    let out = (EvmDataSource::RawRpc, None);
-    #[cfg(all(feature = "evm-rpc", feature = "helios"))]
-    let out = if std::env::var("HELIOS_EXECUTION_RPC").is_ok() {
+/// `helios` plus `HELIOS_EXECUTION_RPC` means the trustless path; otherwise
+/// the transport of `cfg`. An invalid transport has no pin, so a production
+/// build refuses to boot.
+#[cfg(feature = "evm-rpc")]
+pub fn resolve_evm_data_source(
+    cfg: &EvmRpcConfig,
+) -> (EvmDataSource, Option<[u8; 32]>, Option<EvmRpcTlsPin>) {
+    #[cfg(feature = "helios")]
+    if std::env::var("HELIOS_EXECUTION_RPC").is_ok() {
         // The pinned weak-subjectivity checkpoint is Helios's trust root, so
         // it is committed into the attested policy: a verifier confirms which
         // checkpoint the enclave synced from, not just that it is in Helios
@@ -152,11 +156,20 @@ pub fn resolve_evm_data_source() -> (EvmDataSource, Option<[u8; 32]>) {
             .ok()
             .and_then(|s| hex::decode(s.strip_prefix("0x").unwrap_or(&s)).ok())
             .and_then(|b| <[u8; 32]>::try_from(b).ok());
-        (EvmDataSource::HeliosVerified, checkpoint)
-    } else {
-        (EvmDataSource::RawRpc, None)
-    };
-    out
+        return (EvmDataSource::HeliosVerified, checkpoint, None);
+    }
+    match &cfg.transport {
+        EvmRpcTransport::Plain => (EvmDataSource::RawRpc, None, None),
+        EvmRpcTransport::PinnedTls(tls) => {
+            use sha2::Digest;
+            let pin = EvmRpcTlsPin {
+                host: tls.host.clone(),
+                ca_sha256: sha2::Sha256::digest(&tls.ca_der).into(),
+            };
+            (EvmDataSource::PinnedTlsRpc, None, Some(pin))
+        }
+        EvmRpcTransport::Invalid(_) => (EvmDataSource::PinnedTlsRpc, None, None),
+    }
 }
 
 /// Say which posture was resolved. This is what gets committed into the
@@ -167,6 +180,7 @@ pub fn log_policy(policy: &SecurityPolicy) {
             chain_id = p.chain_id,
             allow_vanilla_psbt = p.allow_vanilla_psbt,
             evm_source = ?p.evm_source,
+            evm_rpc_tls = ?p.evm_rpc_tls,
             funds_in_contract = %hex::encode(p.funds_in_contract),
             evm_min_confirmations = p.evm_min_confirmations,
             btc_source = ?p.btc_source,
@@ -376,14 +390,14 @@ pub fn build_header_chain(bitcoin_network_str: &str) -> std::sync::Mutex<HeaderC
 
 /// Build the in-enclave EVM RPC client for independent `FundsIn` verification.
 ///
-/// The URL must be the loopback forwarder. Responses are host-relayed and
-/// treated as evidence to verify, never as trusted input. A `None` client
-/// makes bridge signing fail closed; it never downgrades to an unverified
-/// path after a Helios sync failure.
+/// The URL must be the loopback forwarder. Responses are treated as evidence
+/// to verify, never as trusted input. A `None` client makes bridge signing
+/// fail closed; it never downgrades to an unverified path after a Helios sync
+/// failure or a bad TLS pin.
 #[cfg(feature = "evm-rpc")]
 pub fn build_evm_rpc_client(
     bridge_config: &BridgeConfig,
-    cfg: &crate::config::EvmRpcConfig,
+    cfg: &EvmRpcConfig,
 ) -> Option<Box<dyn crate::networks::evm::events::EvmReceiptProvider + Send + Sync>> {
     // Only the Helios path reads the pinned chain id.
     #[cfg(not(feature = "helios"))]
@@ -392,17 +406,36 @@ pub fn build_evm_rpc_client(
     use crate::networks::evm::events::{AlloyEvmClient, EvmReceiptProvider};
     type Boxed = Box<dyn EvmReceiptProvider + Send + Sync>;
 
-    // Raw alloy provider: host-relayed, unverified.
     let build_alloy = || -> Option<Boxed> {
-        match AlloyEvmClient::new(&cfg.rpc_url) {
-            Ok(c) => {
-                tracing::info!(
+        let built = match &cfg.transport {
+            EvmRpcTransport::Plain => {
+                tracing::warn!(
                     rpc_url = %cfg.rpc_url,
-                    min_confirmations = cfg.min_confirmations,
-                    "EVM FundsIn verification: raw alloy path (host-relayed/unverified)"
+                    "EVM FundsIn verification: plaintext RPC, the host can forge responses \
+                     (dev and test builds only)"
                 );
-                Some(Box::new(c) as Boxed)
+                AlloyEvmClient::new(&cfg.rpc_url)
             }
+            EvmRpcTransport::PinnedTls(tls) => {
+                tracing::info!(
+                    host = %tls.host,
+                    local_port = tls.local_port,
+                    "EVM FundsIn verification: pinned TLS (host must run: vsock-proxy \
+                     <EVM_RPC_VSOCK_PORT> {} {})",
+                    tls.host,
+                    tls.tls_port
+                );
+                AlloyEvmClient::with_pinned_tls(tls)
+            }
+            EvmRpcTransport::Invalid(reason) => {
+                tracing::error!(
+                    "invalid EVM RPC config: {reason} - bridge signing will fail closed"
+                );
+                return None;
+            }
+        };
+        match built {
+            Ok(c) => Some(Box::new(c) as Boxed),
             Err(e) => {
                 tracing::error!("failed to init EVM RPC client: {e}");
                 None

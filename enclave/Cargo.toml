@@ -55,6 +55,9 @@ serde = { version = "1", features = ["derive"] }
 
 alloy = { version = "2.1.0", default-features = false, features = ["provider-http", "rpc-types-eth", "reqwest-rustls-tls"], optional = true }
 tokio = { version = "1.52.3", default-features = false, features = ["rt", "rt-multi-thread", "time"], optional = true }
+# Parse and check the pinned EVM RPC CA. Both are already in the lock under reqwest.
+rustls-pki-types = { version = "1.15", optional = true }
+webpki = { package = "rustls-webpki", version = "0.103", default-features = false, optional = true }
 helios-ethereum = { git = "https://github.com/a16z/helios", tag = "0.11.1", optional = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
@@ -145,7 +148,7 @@ allow-debug-pcrs = ["attestation-verify/allow-debug-pcrs"]
 # lives behind it. NOTE: RPC responses are relayed by the UNTRUSTED host, so this
 # is the predicate + plumbing layer and only becomes trustless once Helios
 # verifies the RPC.
-evm-rpc = ["rgb-validation", "dep:alloy", "dep:tokio"]
+evm-rpc = ["rgb-validation", "dep:alloy", "dep:tokio", "dep:rustls-pki-types", "dep:webpki"]
 # Trustless variant of `evm-rpc`: the Helios light client verifies the EVM
 # RPC against a pinned weak-subjectivity checkpoint before accepting a FundsIn
 # receipt. Runtime-selectable: with HELIOS_EXECUTION_RPC set the enclave uses the
@@ -193,3 +196,5 @@ burn-signer = ["bfa-mint"]
 
 [dev-dependencies]
 rand = "0.10.0"
+# The in-test TLS server of `tests/test_evm_rpc_tls.rs`. Already in the lock.
+rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs", "std", "tls12"] }

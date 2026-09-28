@@ -34,19 +34,27 @@ fn main() {
     // Resolve the security posture once from the build context, pinned config,
     // and selected data source. This is what gets committed into attestation
     // `user_data` and what the signing handlers consult.
-    let (evm_source, evm_checkpoint) = bootstrap::resolve_evm_data_source();
     #[cfg(feature = "evm-rpc")]
     let evm_rpc_config = utexo_bridge_enclave::config::EvmRpcConfig::from_env();
     #[cfg(feature = "evm-rpc")]
+    let (evm_source, evm_checkpoint, evm_rpc_tls) =
+        bootstrap::resolve_evm_data_source(&evm_rpc_config);
+    #[cfg(feature = "evm-rpc")]
     let evm_min_confirmations = evm_rpc_config.min_confirmations;
     #[cfg(not(feature = "evm-rpc"))]
-    let evm_min_confirmations = 0;
+    let (evm_source, evm_checkpoint, evm_rpc_tls, evm_min_confirmations) = (
+        utexo_bridge_enclave::policy::EvmDataSource::Disabled,
+        None,
+        None,
+        0,
+    );
     let build_ctx = BuildContext::current();
     let policy = SecurityPolicy::resolve(
         &build_ctx,
         &bridge_config,
         evm_source,
         evm_checkpoint,
+        evm_rpc_tls,
         evm_min_confirmations,
     );
     bootstrap::log_policy(&policy);

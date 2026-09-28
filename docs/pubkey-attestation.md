@@ -158,19 +158,21 @@ both the enclave and every verifier share so the bytes are identical.
 
 ```
 policy_commitment =
-    u8(POLICY_COMMITMENT_V4 = 4)                    // version tag
+    u8(POLICY_COMMITMENT_V5 = 5)                    // version tag
     // Production (release, fully-pinned bridge signer):
     u8(0x01)                                        // production discriminant
     u8(allow_vanilla_psbt)                          // plain-BTC path enabled?
     u8(signer_role)                                 // 0 combined | 1 mint | 2 burn (from build features)
     u8(attestation_mode)                            // 1 = real NSM (0 = mock)
-    u8(evm_source)                                  // 0 disabled | 1 raw-rpc | 2 Helios-verified
+    u8(evm_source)                                  // 0 disabled | 1 plaintext rpc (dev) | 2 Helios-verified | 3 pinned TLS rpc
     u8(btc_source)                                  // 1 = SPV-verified
     chain_id_be8 || bridge_contract(20)
     u32_be(len(rgb_asset_id)) || rgb_asset_id_utf8
     funds_in_contract(20)                           // authorized event emitter
     evm_min_confirmations_be8                       // required receipt depth
     u8(checkpoint_present)                          // 0 absent; 1 followed by 32-byte beacon root
+    u8(evm_rpc_tls_present)                         // 0 absent; 1 followed by:
+      u32_be(len(host)) || host || ca_sha256(32)    //   EVM_RPC_HOST, SHA-256 of the CA DER
     // Gas-tx (SignRawDigest) rule:
     gas_tx_allowed_to(20)                           // all-zero = gas path unpinned
     gas_tx_max_gas_limit_be8                        // gasLimit ceiling (0 = unset)

@@ -13,6 +13,8 @@
 #   GITHUB_TOKEN     private dependency token
 #   PRIVATE_DEPS_DIR alternative directory for per-repository deploy keys
 #   RGB_ASSET_ID     required when the recipe declares ARG RGB_ASSET_ID
+#   EVM_RPC_HOST, EVM_RPC_TLS_CA_PEM  the EVM RPC TLS pins; the recipe fails
+#                    without them when it declares them
 #   ENCLAVE_DEBUG_FEATURES optional test features; leave empty for production
 #   SOURCE_DATE_EPOCH build timestamp (default: commit time)
 #
@@ -107,6 +109,14 @@ if grep -qE '^ARG[[:space:]]+RGB_ASSET_ID' "$SCRIPT_DIR/$DOCKERFILE"; then
     BUILD_ARGS+=(--build-arg "RGB_ASSET_ID=$RGB_ASSET_ID")
     echo "    rgb asset id : $RGB_ASSET_ID"
 fi
+
+# Forward the EVM RPC TLS pins when set. A recipe that declares them fails
+# its build without them.
+for pin in EVM_RPC_HOST EVM_RPC_TLS_CA_PEM; do
+    if [ -n "${!pin:-}" ]; then
+        BUILD_ARGS+=(--build-arg "$pin=${!pin}")
+    fi
+done
 
 # Forward debug features only when set. (F03-AF-12)
 # Do not set ENCLAVE_DEBUG_FEATURES for production builds.

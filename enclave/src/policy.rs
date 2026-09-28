@@ -20,7 +20,7 @@
 use crate::config::BridgeConfig;
 
 pub use attestation_verify::{
-    AttestationMode, AttestedPolicy, BtcDataSource, EvmDataSource, SignerRole,
+    AttestationMode, AttestedPolicy, BtcDataSource, EvmDataSource, EvmRpcTlsPin, SignerRole,
 };
 
 /// The enclave's resolved security posture. See the module docs.
@@ -62,15 +62,18 @@ pub struct ProductionPolicy {
     /// Expected attestation root of trust. Always [`AttestationMode::Real`] in a
     /// production build (mock is a `compile_error!` in release - see `lib.rs`).
     pub attestation: AttestationMode,
-    /// EVM `FundsIn` deposit-verification source (raw RPC vs Helios-verified vs
-    /// disabled). Recorded and attested so a verifier can tell a trustless
-    /// deployment apart from a host-relayed one.
+    /// EVM `FundsIn` deposit-verification source (pinned TLS, plaintext RPC,
+    /// Helios-verified or disabled). Recorded and attested so a verifier can
+    /// tell a trustless deployment apart from a host-relayed one.
     pub evm_source: EvmDataSource,
     /// The Helios weak-subjectivity checkpoint (beacon block root) EVM
     /// verification trust-roots on. `Some`, and required, only when
     /// `evm_source` is [`EvmDataSource::HeliosVerified`]. Attested so a verifier
     /// confirms which checkpoint the enclave synced from.
     pub evm_checkpoint: Option<[u8; 32]>,
+    /// The EVM RPC TLS host and CA hash. Required when `evm_source` is
+    /// [`EvmDataSource::PinnedTlsRpc`].
+    pub evm_rpc_tls: Option<EvmRpcTlsPin>,
     /// Bitcoin anchor-verification source. Always SPV in a production build.
     pub btc_source: BtcDataSource,
     /// Gas-tx (`SignRawDigest`) allowed destination (`GAS_TX_ALLOWED_TO`), or
@@ -155,6 +158,7 @@ impl SecurityPolicy {
         bridge: &BridgeConfig,
         evm_source: EvmDataSource,
         evm_checkpoint: Option<[u8; 32]>,
+        evm_rpc_tls: Option<EvmRpcTlsPin>,
         evm_min_confirmations: u64,
     ) -> Self {
         // Any dev feature collapses the posture regardless of everything else.
@@ -193,6 +197,7 @@ impl SecurityPolicy {
             attestation: AttestationMode::Real,
             evm_source,
             evm_checkpoint,
+            evm_rpc_tls,
             // `rgb-validation` implies `spv` (lib.rs `compile_error!`), so a
             // bridge build always anchors witness txs via the SPV header chain.
             btc_source: BtcDataSource::SpvVerified,
@@ -238,6 +243,7 @@ impl SecurityPolicy {
                 funds_in_contract: p.funds_in_contract,
                 evm_min_confirmations: p.evm_min_confirmations,
                 evm_checkpoint: p.evm_checkpoint,
+                evm_rpc_tls: p.evm_rpc_tls.clone(),
                 // An unset destination commits as all-zero - a value the gas
                 // path can never accept - so "unpinned" is itself attested.
                 gas_tx_allowed_to: p.gas_tx_allowed_to.unwrap_or([0u8; 20]),
@@ -284,8 +290,8 @@ impl SecurityPolicy {
 
 impl ProductionPolicy {
     /// Invariants that must hold before a production enclave signs anything.
-    /// Bitcoin anchors must be SPV-verified; the EVM source is attested, not
-    /// gated.
+    /// Bitcoin anchors must be SPV-verified, and the EVM RPC must be
+    /// authenticated.
     pub fn check_invariants(&self) -> Result<(), String> {
         if self.chain_id == 0 || self.bridge_contract == [0u8; 20] || self.rgb_asset_id.is_empty() {
             return Err(
@@ -308,10 +314,25 @@ impl ProductionPolicy {
                 "production policy must anchor Bitcoin witness txs via the SPV header chain".into(),
             );
         }
-        // The EVM source is not gated: Helios has no Arbitrum light client, so
-        // an L2 image runs on host-relayed RPC. It stays attested, so verifiers
-        // judge the posture; `Disabled` fails closed per request. Helios with no
-        // pinned checkpoint would bootstrap untrusted, so that stays rejected.
+        // Helios has no Arbitrum light client, so an L2 image reads the RPC
+        // over pinned TLS. `Disabled` fails closed per request. Plaintext lets
+        // the host forge a receipt, so it is rejected.
+        if self.evm_source == EvmDataSource::RawRpc {
+            return Err(
+                "production policy reads the EVM RPC over plaintext. Set EVM_RPC_URL to \
+                 https:// with EVM_RPC_HOST and EVM_RPC_TLS_CA_PEM; plaintext is for dev and \
+                 test builds only."
+                    .into(),
+            );
+        }
+        if self.evm_source == EvmDataSource::PinnedTlsRpc && self.evm_rpc_tls.is_none() {
+            return Err(
+                "production policy uses the pinned TLS EVM source without a valid pin. Set \
+                 EVM_RPC_URL to https:// with a valid EVM_RPC_HOST and EVM_RPC_TLS_CA_PEM."
+                    .into(),
+            );
+        }
+        // Helios with no pinned checkpoint would bootstrap untrusted.
         if self.evm_source == EvmDataSource::HeliosVerified && self.evm_checkpoint.is_none() {
             return Err(
                 "production policy uses the Helios EVM source but pins no weak-subjectivity \

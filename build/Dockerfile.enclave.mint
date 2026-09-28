@@ -118,7 +118,18 @@ ENV EVM_CHAIN_ID=42161 \
 # points FundsIn verification at the wrong contract.
 # The mint signer also signs plain-BTC create_utxo PSBTs (`SignBtc`), which fail
 # closed unless BTC_MAX_TOTAL_SATS is pinned. The gas-tx path is not compiled in.
-ENV EVM_RPC_URL=http://127.0.0.1:3444 \
+# TLS to the EVM RPC ends inside the enclave, so the host relays ciphertext.
+# EVM_RPC_HOST is the endpoint host name. EVM_RPC_TLS_CA_PEM is the CA that
+# issued its certificate, the only root the client trusts. Both are measured
+# into PCR0 and attested. The host runs
+# `vsock-proxy 8002 <EVM_RPC_HOST> <EVM_RPC_TLS_PORT>`.
+ARG EVM_RPC_HOST=""
+ARG EVM_RPC_TLS_CA_PEM=""
+RUN test -n "$EVM_RPC_HOST" && test -n "$EVM_RPC_TLS_CA_PEM"
+ENV EVM_RPC_HOST=${EVM_RPC_HOST} \
+    EVM_RPC_TLS_CA_PEM=${EVM_RPC_TLS_CA_PEM} \
+    EVM_RPC_TLS_PORT=443
+ENV EVM_RPC_URL=https://127.0.0.1:3444 \
     EVM_MIN_CONFIRMATIONS=12 \
     FUNDS_IN_CONTRACT=0x6711f1a319B37847fa0234181C34D883774c4951 \
     BTC_MAX_TOTAL_SATS=1000000

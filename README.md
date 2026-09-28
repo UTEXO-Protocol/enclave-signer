@@ -335,7 +335,7 @@ nitro-cli run-enclave --cpu-count 2 --memory 3072 --enclave-cid 16 \
 
 # Host-side proxies (allowlist each upstream)
 vsock-proxy 8001 <electrum-host> 50002          # ELECTRUM_URL upstream
-vsock-proxy 8002 127.0.0.1 8547                 # EVM JSON-RPC (nginx adds TLS + key, see deploy/host-prep-evmrpc.sh)
+vsock-proxy 8002 <EVM_RPC_HOST> 443             # EVM JSON-RPC over TLS to the pinned host (see deploy/host-prep-evmrpc.sh)
 
 GRPC_HOST=0.0.0.0 GRPC_PORT=50051 USE_VSOCK=true ENCLAVE_VSOCK_CID=16 ./utexo-bridge-parent
 ```

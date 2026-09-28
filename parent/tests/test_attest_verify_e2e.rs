@@ -210,6 +210,7 @@ async fn e2e_attest_verify_fails_on_policy_mismatch() {
             signer_role: attestation_verify::SignerRole::Mint,
             evm_source: EvmDataSource::RawRpc,
             evm_checkpoint: None,
+            evm_rpc_tls: None,
             expected_chain_id: None,
             expected_bridge_contract: None,
             expected_rgb_asset_id: None,

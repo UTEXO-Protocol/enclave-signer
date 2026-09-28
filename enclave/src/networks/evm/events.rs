@@ -585,11 +585,11 @@ pub fn check_bridge_location(location: &str, pinned: &[u8; 20]) -> Result<()> {
 /// alloy/reqwest set no default request timeout. [`crate::conn::DeadlineStream`]
 /// bounds only the request socket I/O, and a client-side timeout does not cancel
 /// an in-flight `block_on`, so a few such stalls pin every worker and wedge the
-/// enclave. 15s covers a healthy fetch through loopback -> vsock -> nginx.
+/// enclave. 15s covers a healthy fetch through loopback -> vsock -> the RPC.
 const EVM_RPC_CALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
 
 /// Production [`EvmReceiptProvider`]: an alloy JSON-RPC client over the
-/// in-enclave loopback URL that a vsock forwarder tunnels to the host EVM RPC.
+/// in-enclave loopback URL that a vsock forwarder tunnels to the EVM RPC.
 /// alloy is async, so a single-worker tokio runtime is built at boot and each
 /// call is driven via `block_on`. One worker suffices and keeps the type
 /// `Send + Sync` for the shared `ServerContext`.
@@ -599,20 +599,52 @@ pub struct AlloyEvmClient {
 }
 
 impl AlloyEvmClient {
-    /// Build the client against `rpc_url` (must be the loopback forwarder URL).
+    /// Build a plaintext client against `rpc_url` (must be the loopback
+    /// forwarder URL). The host can forge every response: dev and test only.
     pub fn new(rpc_url: &str) -> Result<Self> {
-        let runtime = tokio::runtime::Builder::new_multi_thread()
+        let url = rpc_url.parse().map_err(|e| {
+            EnclaveError::CrossCheck(format!("evm-rpc: invalid rpc_url {rpc_url:?}: {e}"))
+        })?;
+        Ok(Self {
+            runtime: Self::runtime()?,
+            provider: alloy::providers::RootProvider::new_http(url),
+        })
+    }
+
+    /// Build a client that ends TLS inside the enclave. It trusts only the
+    /// pinned CA, checks the certificate against the pinned host, and sends
+    /// the connection to the loopback forwarder. The host relays ciphertext.
+    pub fn with_pinned_tls(tls: &crate::config::EvmRpcTls) -> Result<Self> {
+        use alloy::transports::http::reqwest;
+        let err = |e: reqwest::Error| {
+            EnclaveError::CrossCheck(format!("evm-rpc: failed to build the TLS client: {e}"))
+        };
+        let client = reqwest::Client::builder()
+            .https_only(true)
+            .tls_certs_only([reqwest::Certificate::from_der(&tls.ca_der).map_err(err)?])
+            .resolve(&tls.host, ([127, 0, 0, 1], tls.local_port).into())
+            .no_proxy()
+            .timeout(EVM_RPC_CALL_TIMEOUT)
+            .build()
+            .map_err(err)?;
+        // No port in the URL, so `resolve` picks the forwarder port.
+        let url = format!("https://{}", tls.host).parse().map_err(|e| {
+            EnclaveError::CrossCheck(format!("evm-rpc: invalid host {:?}: {e}", tls.host))
+        })?;
+        Ok(Self {
+            runtime: Self::runtime()?,
+            provider: alloy::providers::ProviderBuilder::default().connect_reqwest(client, url),
+        })
+    }
+
+    fn runtime() -> Result<tokio::runtime::Runtime> {
+        tokio::runtime::Builder::new_multi_thread()
             .worker_threads(1)
             .enable_all()
             .build()
             .map_err(|e| {
                 EnclaveError::CrossCheck(format!("evm-rpc: failed to build tokio runtime: {e}"))
-            })?;
-        let url = rpc_url.parse().map_err(|e| {
-            EnclaveError::CrossCheck(format!("evm-rpc: invalid rpc_url {rpc_url:?}: {e}"))
-        })?;
-        let provider = alloy::providers::RootProvider::new_http(url);
-        Ok(Self { runtime, provider })
+            })
     }
 }
 

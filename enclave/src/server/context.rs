@@ -68,6 +68,7 @@ impl ServerContext {
             &bridge_config,
             crate::policy::EvmDataSource::Disabled,
             None,
+            None,
             0,
         );
         Self {
@@ -93,6 +94,7 @@ impl ServerContext {
             &crate::policy::BuildContext::current(),
             &bridge_config,
             crate::policy::EvmDataSource::Disabled,
+            None,
             None,
             0,
         );
