@@ -20,14 +20,9 @@ use crate::proto::EvmDestination;
 #[cfg(evm_to_rgb)]
 use crate::proto::EvmSource;
 
-/// `keccak256("fundsOut((address,uint256,uint256,uint256,uint256,string,bytes,bytes,bytes32))")[0..4]`.
-///
-/// Bundling the release fields into `FundsOutParams` moved the selector
-/// `0xccddb768` -> `0xdc771390`; appending `sourceBurnTxId` (bridge PR #152)
-/// moved it again to `0x340276aa`. A body in either older shape fails closed
-/// at the whitelist, so a half-migrated backend cannot get a signature.
+/// Selector of the direct `fundsOut(FundsOutParams)` enclave wire call.
 #[cfg(rgb_to_evm)]
-pub const FUNDS_OUT_SELECTOR_POOLS: [u8; 4] = [0x34, 0x02, 0x76, 0xaa];
+pub const FUNDS_OUT_SELECTOR_POOLS: [u8; 4] = fundsOutCall::SELECTOR;
 
 /// `keccak256("lzFundsOut(uint256,uint256,uint256,uint256,string,bytes,bytes,uint32,bytes32,uint256,bytes,bytes32)")[0..4]`.
 ///
