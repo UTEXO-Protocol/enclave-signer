@@ -1,7 +1,7 @@
 //! Compile-time checkpoint + network constants - the trust anchors for the
 //! in-enclave header chain.
 //!
-//! A checkpoint is `(height, block_hash, bits, time)`. On boot the enclave
+//! A checkpoint is `(height, block_hash, bits, time, chain_work)`. On boot the enclave
 //! starts empty; the Listener feeds headers starting at `height + 1`, and
 //! the first header must chain to `block_hash`. Every checkpoint here ends
 //! up in PCR0 because it's compiled in, so changing one means re-attestation.
@@ -40,6 +40,11 @@ pub struct Checkpoint {
     /// Set to true once the values are real (not placeholders). Production
     /// builds refuse to start otherwise.
     pub is_real: bool,
+    /// Cumulative work up to and including this block, big-endian: the
+    /// `chainwork` field of Bitcoin Core's `getblockheader`. BtcRelay records
+    /// carry it, so the enclave needs it to rebuild them. `None` when unknown:
+    /// then the enclave refuses every `fundsOut`.
+    pub chain_work: Option<[u8; 32]>,
 }
 
 /// Mainnet checkpoint - block 951 552 (2026-05-29). Retarget-boundary aligned
@@ -57,6 +62,13 @@ pub const MAINNET_CHECKPOINT: Checkpoint = Checkpoint {
     bits: 0x1702_068f,
     time: 1_780_050_586,
     is_real: true,
+    // getblockheader chainwork:
+    // 00000000000000000000000000000000000000012bc52b13ac6c5ed1704149f2
+    chain_work: Some([
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x01, 0x2b, 0xc5, 0x2b, 0x13, 0xac, 0x6c, 0x5e, 0xd1, 0x70, 0x41,
+        0x49, 0xf2,
+    ]),
 };
 
 /// UTEXO custom signet checkpoint - block 334 000 (2026-06-02).
@@ -71,6 +83,9 @@ pub const SIGNET_CHECKPOINT: Checkpoint = Checkpoint {
     bits: 0x1e03_77ae,
     time: 1_780_464_472,
     is_real: true,
+    // Not known yet: the value is `getblockheader` chainwork of this block on
+    // the UTEXO signet node. Until it is set, signet `fundsOut` is refused.
+    chain_work: None,
 };
 
 /// Testnet3 checkpoint. PLACEHOLDER - testnet3 isn't a target environment
@@ -81,6 +96,7 @@ pub const TESTNET3_CHECKPOINT: Checkpoint = Checkpoint {
     bits: 0,
     time: 0,
     is_real: false,
+    chain_work: None,
 };
 
 /// Regtest checkpoint - the deterministic regtest genesis block (height 0).
@@ -97,6 +113,11 @@ pub const REGTEST_CHECKPOINT: Checkpoint = Checkpoint {
     bits: 0x207fffff, // regtest min difficulty
     time: 1_296_688_602,
     is_real: true,
+    // Genesis work: 2.
+    chain_work: Some([
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 2,
+    ]),
 };
 
 impl Checkpoint {
@@ -154,7 +175,8 @@ pub fn checkpoint_for(network: Network) -> Checkpoint {
 
 /// Env var that moves the boot checkpoint forward in local/dev builds.
 ///
-/// Format: `height:block_hash` or `height:block_hash:bits:time`
+/// Format: `height:block_hash`, `height:block_hash:bits:time` or
+/// `height:block_hash:bits:time:chainwork`
 ///   * `height` - decimal block height.
 ///   * `block_hash` - 64 hex chars in **display order** (what an explorer or
 ///     `getblockhash` prints), optional `0x` prefix.
@@ -162,6 +184,11 @@ pub fn checkpoint_for(network: Network) -> Checkpoint {
 ///     decimal `bits` copied out of an Esplora JSON body errors instead of
 ///     being misread as hex).
 ///   * `time` - the block's Unix timestamp, decimal.
+///   * `chainwork` - 64 hex chars, as `getblockheader` prints it, optional
+///     `0x` prefix.
+///
+/// Only the five-field form sets `chain_work`. The shorter forms set `None`,
+/// and the enclave then refuses every `fundsOut`.
 ///
 /// The two-field form inherits `bits`/`time` from the compiled-in checkpoint.
 /// That is only sound where `nBits` is never checked and the epoch-start lookup
@@ -225,13 +252,14 @@ pub fn parse_checkpoint_spec(
     base: &Checkpoint,
 ) -> std::result::Result<Checkpoint, String> {
     let fields: Vec<&str> = spec.trim().split(':').map(str::trim).collect();
-    let (height_s, hash_s, bits_time) = match fields.as_slice() {
-        [h, hash] => (*h, *hash, None),
-        [h, hash, bits, time] => (*h, *hash, Some((*bits, *time))),
+    let (height_s, hash_s, bits_time, work_s) = match fields.as_slice() {
+        [h, hash] => (*h, *hash, None, None),
+        [h, hash, bits, time] => (*h, *hash, Some((*bits, *time)), None),
+        [h, hash, bits, time, work] => (*h, *hash, Some((*bits, *time)), Some(*work)),
         _ => {
             return Err(format!(
-                "{CHECKPOINT_ENV} must be `height:block_hash` or `height:block_hash:bits:time`, \
-                 got {} field(s) in {spec:?}",
+                "{CHECKPOINT_ENV} must be `height:block_hash`, `height:block_hash:bits:time` or \
+                 `height:block_hash:bits:time:chainwork`, got {} field(s) in {spec:?}",
                 fields.len()
             ))
         }
@@ -287,12 +315,27 @@ pub fn parse_checkpoint_spec(
         }
     };
 
+    let chain_work = match work_s {
+        Some(work_s) => {
+            let work = hex::decode(work_s.strip_prefix("0x").unwrap_or(work_s))
+                .map_err(|e| format!("{CHECKPOINT_ENV}: chainwork {work_s:?} is not hex: {e}"))?;
+            Some(work.try_into().map_err(|v: Vec<u8>| {
+                format!(
+                    "{CHECKPOINT_ENV}: chainwork must be 32 bytes (64 hex chars), got {}",
+                    v.len()
+                )
+            })?)
+        }
+        None => None,
+    };
+
     Ok(Checkpoint {
         height,
         hash,
         bits,
         time,
         is_real: true,
+        chain_work,
     })
 }
 

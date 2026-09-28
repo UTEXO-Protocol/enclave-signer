@@ -60,6 +60,20 @@ fn parse_spec_round_trips_the_signet_constant() {
     assert_eq!(cp.bits, SIGNET_CHECKPOINT.bits);
     assert_eq!(cp.time, SIGNET_CHECKPOINT.time);
     assert!(cp.is_real);
+    assert_eq!(
+        cp.chain_work, None,
+        "only the five-field form sets chainwork"
+    );
+}
+
+#[test]
+fn parse_spec_five_field_form_sets_chainwork() {
+    let spec =
+        "951552:00000000000000000001b472f1922f86148c8286609fb14be39e12b8bd14bb64:0x1702068f:\
+                1780050586:0x00000000000000000000000000000000000000012bc52b13ac6c5ed1704149f2";
+    let cp = parse_checkpoint_spec(spec, Network::Mainnet, &MAINNET_CHECKPOINT).unwrap();
+    assert_eq!(cp.chain_work, MAINNET_CHECKPOINT.chain_work);
+    assert!(cp.chain_work.is_some());
 }
 
 #[test]
@@ -120,6 +134,9 @@ fn parse_spec_rejects_malformed_specs() {
         "334000:0000000000000000000000000000000000000000000000000000000000000000",
         // bad time
         "334000:000000ac5fccb8a26d3bf859952e164b4fb65190c8f29c8339c6a2c39f3aeb66:0x1e0377ae:soon",
+        // chainwork not hex / wrong length
+        "334000:000000ac5fccb8a26d3bf859952e164b4fb65190c8f29c8339c6a2c39f3aeb66:0x1e0377ae:1780464472:zz",
+        "334000:000000ac5fccb8a26d3bf859952e164b4fb65190c8f29c8339c6a2c39f3aeb66:0x1e0377ae:1780464472:0x0102",
     ];
     for spec in cases {
         assert!(
@@ -159,6 +176,7 @@ fn assert_retarget_aligned_rejects_misaligned_pow_checkpoint() {
         bits: 0x1702_0f79,
         time: 1_779_141_269,
         is_real: true,
+        chain_work: None,
     };
     assert!(misaligned
         .assert_retarget_aligned(Network::Mainnet)

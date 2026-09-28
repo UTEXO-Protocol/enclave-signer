@@ -524,6 +524,7 @@ mod chain_pin_tests {
                 bits: 0x207fffff,
                 time: 1_700_000_000,
                 is_real: false,
+                chain_work: None,
             },
         )
     }

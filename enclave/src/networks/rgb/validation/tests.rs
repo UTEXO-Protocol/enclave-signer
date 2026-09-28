@@ -1118,6 +1118,7 @@ mod asset_bind {
                 bits: 0x1d00_ffff,
                 time: now,
                 is_real: false,
+                chain_work: None,
             },
         ))
     }

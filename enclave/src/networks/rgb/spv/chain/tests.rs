@@ -16,6 +16,7 @@ fn synthetic_regtest_setup() -> (HeaderChain, Vec<Vec<u8>>) {
         bits: 0x207fffff,
         time: 1_700_000_000,
         is_real: false,
+        chain_work: None,
     };
     let chain = HeaderChain::new(Network::Regtest, checkpoint);
 
@@ -158,6 +159,7 @@ fn mainnet_block_1_appends_after_genesis_checkpoint() {
         bits: 0x1d00ffff,
         time: 1_231_006_505,
         is_real: false,
+        chain_work: None,
     };
     let mut chain = HeaderChain::new(Network::Mainnet, cp);
 
@@ -334,6 +336,7 @@ fn non_pow_network_skips_epoch_lookup_across_retarget_boundary() {
         bits: 0x207fffff,
         time: 1_700_000_000,
         is_real: false,
+        chain_work: None,
     };
     let mut chain = HeaderChain::new(Network::Regtest, checkpoint);
 
@@ -363,6 +366,7 @@ fn th1_epoch_start_resolves_at_first_boundary_above_aligned_checkpoint() {
         bits: 0x1702_068f,
         time: 1_780_050_586,
         is_real: true,
+        chain_work: None,
     };
     assert_eq!(cp.height % RETARGET_INTERVAL, 0, "precondition: aligned");
     let chain = HeaderChain::new(Network::Mainnet, cp);
@@ -386,6 +390,7 @@ fn th2_misaligned_checkpoint_wedges_at_first_boundary() {
         bits: 0x1702_0f79,
         time: 1_779_141_269,
         is_real: true,
+        chain_work: None,
     };
     assert_ne!(cp.height % RETARGET_INTERVAL, 0, "precondition: misaligned");
     let chain = HeaderChain::new(Network::Mainnet, cp);
@@ -412,6 +417,7 @@ fn retains_full_history_from_checkpoint() {
         bits: 0x207fffff,
         time: 1_700_000_000,
         is_real: false,
+        chain_work: None,
     };
     let mut chain = HeaderChain::new(Network::Regtest, cp);
 
@@ -468,6 +474,7 @@ fn epoch_start_resolves_from_retained_history() {
         bits: 0x207fffff,
         time: 1_700_000_000,
         is_real: false,
+        chain_work: None,
     };
     let mut chain = HeaderChain::new(Network::Regtest, cp);
     let (raws, _) = synth_chain_from(cp.hash, cp.time, 1, 4200);
@@ -504,6 +511,7 @@ fn reorg_near_tip_with_full_retention() {
         bits: 0x207fffff,
         time: 1_700_000_000,
         is_real: false,
+        chain_work: None,
     };
     let mut chain = HeaderChain::new(Network::Regtest, cp);
     let (raws, _) = synth_chain_from(cp.hash, cp.time, 1, 4200);
@@ -534,6 +542,7 @@ fn rejects_extension_past_retention_cap() {
         bits: 0x207fffff,
         time: 1_700_000_000,
         is_real: false,
+        chain_work: None,
     };
     let mut chain = HeaderChain::new(Network::Regtest, cp);
     // Shrink the cap so we can hit it without building a million headers.

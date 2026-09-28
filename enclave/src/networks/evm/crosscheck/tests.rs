@@ -461,6 +461,7 @@ mod settlement {
 
 mod btc_relay {
     use super::*;
+    use crate::networks::rgb::spv::checkpoint::{parse_checkpoint_spec, REGTEST_CHECKPOINT};
     use crate::networks::rgb::spv::{Checkpoint, HeaderChain, Network};
     use bitcoin::block::{Header, Version};
     use bitcoin::consensus::serialize;
@@ -483,9 +484,7 @@ mod btc_relay {
 
     /// Encode `n` as a big-endian 32-byte ABI word.
     fn u256_be(n: u64) -> [u8; 32] {
-        let mut w = [0u8; 32];
-        w[24..].copy_from_slice(&n.to_be_bytes());
-        w
+        U256::from(n).to_be_bytes()
     }
 
     /// Raise the nonce until the header meets its own target, so the
@@ -509,14 +508,13 @@ mod btc_relay {
         })
     }
 
-    /// BtcRelay's commitment at `height`: `keccak256` of the 160-byte
-    /// `StoredBlockHeader` that `updateChain` derives from the record
-    /// seeded at [`h0`].
-    fn relay_commit(chain: &HeaderChain, height: u32) -> [u8; 32] {
+    /// BtcRelay's 160-byte `StoredBlockHeader` at `height`, as
+    /// `updateChain` derives it from the record seeded at [`h0`].
+    fn relay_model(chain: &HeaderChain, height: u32) -> Vec<u8> {
         let mut header = h0();
         let mut times = [header.time; 10];
         let mut last_diff = header.time;
-        let mut work = header.work();
+        let mut work = bitcoin::Work::from_be_bytes(chain.checkpoint().chain_work.unwrap());
         for h in 1..=height {
             times.rotate_left(1);
             times[9] = header.time;
@@ -533,7 +531,12 @@ mod btc_relay {
         for t in times {
             record.extend_from_slice(&t.to_be_bytes());
         }
-        alloy_primitives::keccak256(&record).0
+        record
+    }
+
+    /// BtcRelay's commitment at `height`: `keccak256` of [`relay_model`].
+    fn relay_commit(chain: &HeaderChain, height: u32) -> [u8; 32] {
+        alloy_primitives::keccak256(relay_model(chain, height)).0
     }
 
     /// A regtest chain of `tip` mined headers above [`h0`]. The header at
@@ -551,6 +554,7 @@ mod btc_relay {
                 bits: 0x207fffff,
                 time: h0.time,
                 is_real: false,
+                chain_work: REGTEST_CHECKPOINT.chain_work,
             },
         );
         let mut prev = h0.block_hash();
@@ -665,21 +669,22 @@ mod btc_relay {
         assert!(check(&good_calldata(&hashes), &chain).is_ok());
     }
 
-    /// Right height, wrong hash: the anchor bind owns the `source` half, so
-    /// this surfaces as a mismatch against the consignment's anchor.
+    /// Right height, wrong commitment.
     #[test]
-    fn accepts_any_source_commitment_at_the_anchor_height() {
+    fn rejects_a_source_commitment_that_is_not_the_relay_record() {
         let (chain, hashes) = chain();
-        // BtcRelay's commitment is keccak256 over its own 160-byte record,
-        // which the enclave cannot compute. It is verified on-chain against
-        // the relay instead; the enclave binds the height.
         let cd = calldata(
             ANCHOR_HEIGHT,
             [0x11; 32],
             TIP_HEIGHT,
             hashes[TIP_HEIGHT as usize],
         );
-        assert!(check(&cd, &chain).is_ok());
+        let err = check(&cd, &chain).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("relay commitment mismatch at source height 11"),
+            "got: {err}"
+        );
     }
 
     /// The bind that remains: a source height other than the consignment's
@@ -735,16 +740,25 @@ mod btc_relay {
         );
     }
 
+    /// The relay's tip is on another branch above the anchor.
     #[test]
-    fn accepts_any_latest_commitment_at_a_known_height() {
-        let (chain, hashes) = chain();
+    fn rejects_a_latest_commitment_from_another_branch() {
+        let (mut chain_a, hashes) = chain();
+        submit_extension(&mut chain_a, 3);
+        let (mut chain_b, _) = chain();
+        submit_reorg(&mut chain_b, ANCHOR_HEIGHT + 3, 1);
         let cd = calldata(
             ANCHOR_HEIGHT,
             hashes[ANCHOR_HEIGHT as usize],
             TIP_HEIGHT,
-            [0x11; 32],
+            relay_commit(&chain_b, TIP_HEIGHT),
         );
-        assert!(check(&cd, &chain).is_ok());
+        let err = check(&cd, &chain_a).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("relay commitment mismatch at latest height 17"),
+            "got: {err}"
+        );
     }
 
     /// What `latest` still proves: the enclave holds a header there, so it
@@ -1090,6 +1104,106 @@ mod btc_relay {
             msg.contains(&hex::encode(relay_commit(&chain_a, h))),
             "got: {msg}"
         );
+    }
+
+    /// Honest commitments across a retarget boundary.
+    #[test]
+    fn accepts_relay_commitments_across_a_retarget_boundary() {
+        let (chain, hashes) = chain_to(2030);
+        let cd = calldata(ANCHOR_HEIGHT, hashes[11], 2016, hashes[2016]);
+        check(&cd, &chain).expect("honest commitments pass");
+    }
+
+    #[test]
+    fn relay_record_refuses_a_height_below_the_checkpoint_window() {
+        let (chain, _) = chain();
+        let err = relay_record(&chain, 9).unwrap_err();
+        assert!(
+            err.to_string().contains("below its checkpoint"),
+            "got: {err}"
+        );
+    }
+
+    /// A chain of 30 mined headers above a checkpoint at height 2000, from
+    /// a `SPV_CHECKPOINT` spec. `chain_work` is appended to the spec.
+    fn chain_above_2000(chain_work: &str) -> HeaderChain {
+        let base = h0();
+        let spec = format!(
+            "2000:{}:0x207fffff:{}{chain_work}",
+            base.block_hash(),
+            base.time
+        );
+        let cp = parse_checkpoint_spec(&spec, Network::Regtest, &REGTEST_CHECKPOINT).unwrap();
+        let mut chain = HeaderChain::new(Network::Regtest, cp);
+        let mut prev = base.block_hash();
+        for height in 2001..=2030 {
+            let header = mined(Header {
+                version: Version::ONE,
+                prev_blockhash: prev,
+                merkle_root: bitcoin::TxMerkleNode::from_byte_array([0xAB; 32]),
+                time: 1_700_000_000 + height,
+                bits: bitcoin::CompactTarget::from_consensus(0x207fffff),
+                nonce: 0,
+            });
+            chain.submit_headers(height, &[serialize(&header)]).unwrap();
+            prev = header.block_hash();
+        }
+        chain
+    }
+
+    #[test]
+    fn relay_record_refuses_a_missing_epoch_start() {
+        // Work of 2001 regtest blocks: 2001 * 2.
+        let chain = chain_above_2000(&format!(":{:064x}", 2001 * 2));
+        // Epoch start 0 is below the checkpoint.
+        let err = relay_record(&chain, 2015).unwrap_err();
+        assert!(err.to_string().contains("epoch start 0"), "got: {err}");
+
+        // Epoch start 2016 is held.
+        let record = relay_record(&chain, 2020).unwrap();
+        assert_eq!(&record[..80], serialize(chain.header_at(2020).unwrap()));
+        assert_eq!(record[80..112], u256_be(2021 * 2));
+        assert_eq!(record[112..116], 2020u32.to_be_bytes());
+        assert_eq!(record[116..120], (1_700_000_000u32 + 2016).to_be_bytes());
+        for (i, h) in (2010..2020u32).enumerate() {
+            assert_eq!(
+                record[120 + 4 * i..124 + 4 * i],
+                (1_700_000_000 + h).to_be_bytes()
+            );
+        }
+    }
+
+    #[test]
+    fn relay_record_refuses_a_checkpoint_without_chainwork() {
+        let chain = chain_above_2000("");
+        let err = relay_record(&chain, 2020).unwrap_err();
+        assert!(err.to_string().contains("has no chainwork"), "got: {err}");
+    }
+
+    /// Records produced by `StoredBlockHeaderTestnet.updateChain` for the
+    /// headers of `chain_to(2030)`, seeded at [`h0`] with chainwork 2.
+    #[test]
+    fn relay_record_matches_the_relay_contract() {
+        let (chain, _) = chain_to(2030);
+        let fixture = include_str!("../../../../tests/fixtures/btc_relay_records.txt");
+        let mut lines = 0;
+        for line in fixture.lines() {
+            let (height, record) = line.split_once(' ').unwrap();
+            let height: u32 = height.parse().unwrap();
+            let record = hex::decode(record).unwrap();
+            assert_eq!(
+                relay_record(&chain, height).unwrap().to_vec(),
+                record,
+                "height {height}"
+            );
+            assert_eq!(
+                relay_model(&chain, height),
+                record,
+                "model at height {height}"
+            );
+            lines += 1;
+        }
+        assert_eq!(lines, 5);
     }
 
     #[test]
