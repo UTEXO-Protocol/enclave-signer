@@ -108,3 +108,63 @@ pub fn start_forwarder(local_port: u16, vsock_port: u32) -> io::Result<()> {
 
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Read;
+    use std::net::{TcpListener, TcpStream};
+    use std::time::Duration;
+
+    /// A loopback port nothing listens on (bound, then released).
+    fn free_port() -> u16 {
+        TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port()
+    }
+
+    #[test]
+    fn binds_the_local_port_and_refuses_a_second_binding() {
+        let port = free_port();
+        start_forwarder(port, 5000).expect("first forwarder binds");
+        let err = start_forwarder(port, 5000).expect_err("port is taken");
+        assert_eq!(err.kind(), io::ErrorKind::AddrInUse);
+    }
+
+    #[test]
+    fn a_connection_is_dropped_when_no_vsock_peer_answers() {
+        // Nothing serves CID 3 here, so the forwarder's vsock connect fails
+        // and it closes the TCP side without forwarding a byte.
+        let port = free_port();
+        start_forwarder(port, 5000).unwrap();
+        let mut tcp = None;
+        for _ in 0..50 {
+            if let Ok(s) = TcpStream::connect(("127.0.0.1", port)) {
+                tcp = Some(s);
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let mut tcp = tcp.expect("the forwarder accepts on loopback");
+        tcp.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        let mut buf = [0u8; 8];
+        match tcp.read(&mut buf) {
+            Ok(0) => {}
+            Ok(n) => panic!("forwarder relayed {n} bytes with no peer"),
+            Err(e) => assert!(
+                matches!(
+                    e.kind(),
+                    io::ErrorKind::ConnectionReset | io::ErrorKind::BrokenPipe
+                ),
+                "unexpected {e}"
+            ),
+        }
+    }
+
+    #[test]
+    fn the_parent_cid_is_the_nitro_constant() {
+        assert_eq!(PARENT_CID, 3);
+    }
+}
