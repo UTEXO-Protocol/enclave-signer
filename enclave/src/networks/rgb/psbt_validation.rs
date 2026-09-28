@@ -1513,6 +1513,98 @@ mod tests {
                 );
             }
         }
+
+        // ---- coverage: remaining anchor legs ----
+
+        #[test]
+        fn requires_a_last_transition() {
+            let psbt = psbt_with_two_inputs();
+            let mut validated = validated_for(&psbt, 1_000);
+            validated.last_transition = None;
+            let err = validate_psbt_anchors_transition(&psbt, &validated, 1_000, 0, &owns_vout_1)
+                .unwrap_err();
+            assert!(err.to_string().contains("at least one transition"), "{err}");
+        }
+
+        #[test]
+        fn committed_asset_total_overflow_is_rejected() {
+            let psbt = psbt_with_two_inputs();
+            let validated = validated_from(
+                &psbt,
+                vec![
+                    summary("a", SIGNING_TT, vec![confidential(u64::MAX)]),
+                    summary("b", SIGNING_TT, vec![confidential(1)]),
+                ],
+            );
+            let err =
+                validate_psbt_anchors_transition(&psbt, &validated, u64::MAX, 0, &owns_vout_1)
+                    .unwrap_err();
+            assert!(err.to_string().contains("overflows u64"), "{err}");
+        }
+
+        #[cfg(feature = "rgb-swap")]
+        #[test]
+        fn ownership_oracle_errors_propagate() {
+            fn oracle_down(_: &Psbt, _: OutPoint) -> Result<bool> {
+                Err(EnclaveError::Internal("oracle down".into()))
+            }
+            let psbt = psbt_with_two_inputs();
+            let validated = validated_with(&psbt, vec![confidential(900), revealed(100, 1)]);
+            let err = validate_psbt_anchors_transition(&psbt, &validated, 1_000, 100, &oracle_down)
+                .unwrap_err();
+            assert!(matches!(err, EnclaveError::Internal(_)), "{err}");
+            assert!(err.to_string().contains("oracle down"), "{err}");
+        }
+
+        #[test]
+        fn anyonecanpay_all_is_a_spliceable_sighash() {
+            let psbt_clean = psbt_with_two_inputs();
+            let validated = validated_for(&psbt_clean, 1_000);
+            let mut psbt = psbt_clean;
+            psbt.inputs[1].sighash_type = Some(PsbtSighashType::from_u32(0x81));
+            let err = validate_psbt_anchors_transition(&psbt, &validated, 1_000, 0, &owns_vout_1)
+                .unwrap_err();
+            assert!(
+                err.to_string()
+                    .contains("input 1 requests non-ALL sighash 0x81"),
+                "{err}"
+            );
+        }
+
+        #[test]
+        fn returned_legs_carry_amounts_and_seals() {
+            let psbt = psbt_with_two_inputs();
+            let validated = validated_with(
+                &psbt,
+                vec![
+                    confidential_to(400, "utxob:a"),
+                    confidential_to(600, "utxob:b"),
+                ],
+            );
+            let legs = validate_psbt_anchors_transition(&psbt, &validated, 1_000, 0, &owns_vout_1)
+                .unwrap();
+            assert_eq!(legs.recipient, 1_000);
+            assert_eq!(legs.change, 0);
+            assert_eq!(legs.recipient_seals, vec!["utxob:a", "utxob:b"]);
+            assert!(format!("{legs:?}").contains("recipient_seals"));
+        }
+
+        #[test]
+        fn a_zero_credit_deposit_must_pay_nothing_to_recipients() {
+            let psbt = psbt_with_two_inputs();
+            // Commission equal to the amount: net credited is 0, so any
+            // confidential leg is an over-send.
+            let validated = validated_with(&psbt, vec![confidential(1)]);
+            let err = validate_psbt_anchors_transition(&psbt, &validated, 100, 100, &owns_vout_1)
+                .unwrap_err();
+            assert!(err.to_string().contains("amount mismatch"), "{err}");
+        }
+
+        #[test]
+        fn max_off_tx_outpoints_constant_is_pinned() {
+            assert_eq!(MAX_OFF_TX_CHANGE_OUTPOINTS, 4);
+            assert_eq!(FEE_RATE_HEADROOM, 3.0);
+        }
     }
 
     // ---- coverage: op-key domain separation and shape parsing ----

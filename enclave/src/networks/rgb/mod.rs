@@ -359,6 +359,157 @@ mod tests {
         );
     }
 
+    // ---- coverage: route-proof edges and the anchor's early legs ----
+
+    #[test]
+    fn route_proof_requires_a_last_transition() {
+        let mut v = funds_out_consignment(100, &"a".repeat(64));
+        v.last_transition = None;
+        let err = route_proof_from_validated_consignment(&v).unwrap_err();
+        assert!(err.to_string().contains("at least one transition"), "{err}");
+    }
+
+    #[test]
+    fn route_proof_requires_a_32_byte_hex_operation_id() {
+        for bad in [
+            "",
+            "abc",
+            &"a".repeat(63),
+            &"a".repeat(65),
+            &format!("0x{}", "a".repeat(63)),
+        ] {
+            let err = route_proof_from_validated_consignment(&funds_out_consignment(100, bad))
+                .unwrap_err();
+            assert!(err.to_string().contains("32-byte hex"), "{bad:?}: {err}");
+        }
+        let upper = format!("0x{}", "AB".repeat(32));
+        let proof =
+            route_proof_from_validated_consignment(&funds_out_consignment(5, &upper)).unwrap();
+        assert_eq!(
+            proof.operation_id.as_deref(),
+            Some("ab".repeat(32).as_str())
+        );
+        assert_eq!(proof.amount, 5);
+    }
+
+    #[test]
+    fn normalize_operation_id_strips_the_prefix_and_lowercases() {
+        assert_eq!(
+            normalize_rgb_operation_id(&format!("0x{}", "F".repeat(64))).unwrap(),
+            "f".repeat(64)
+        );
+        assert_eq!(
+            normalize_rgb_operation_id(&"0".repeat(64)).unwrap(),
+            "0".repeat(64)
+        );
+        assert!(normalize_rgb_operation_id(&"g".repeat(64)).is_err());
+        assert!(normalize_rgb_operation_id("0x").is_err());
+    }
+
+    mod anchor_legs {
+        use super::*;
+        use crate::config::BridgeConfig;
+        use crate::networks::rgb::spv::{checkpoint_for, HeaderChain, Network};
+        use crate::proto::RgbDestination;
+        use sha3::{Digest, Keccak256};
+        use std::sync::Mutex;
+
+        fn destination(consignment: Vec<u8>) -> RgbDestination {
+            RgbDestination {
+                operation_idx: 1,
+                psbt_bytes: vec![],
+                psbt_output_amount: 1,
+                asset_id: "rgb:test-asset".into(),
+                consignment: consignment.clone(),
+                mint_ancestors: Vec::new(),
+                consignment_hash: Keccak256::digest(&consignment).to_vec(),
+            }
+        }
+
+        fn with_ctx<T>(cfg: &BridgeConfig, f: impl FnOnce(&ValidationContext<'_>) -> T) -> T {
+            let header_chain = Mutex::new(HeaderChain::new(
+                Network::Regtest,
+                checkpoint_for(Network::Regtest),
+            ));
+            let ctx = ValidationContext {
+                bridge_config: cfg,
+                rgb_validator: None,
+                header_chain: &header_chain,
+                self_owned_psbt_outputs: None,
+                bridge_events: &[],
+            };
+            f(&ctx)
+        }
+
+        fn anchor_err(d: &RgbDestination, cfg: &BridgeConfig) -> String {
+            with_ctx(cfg, |ctx| {
+                validate_destination_anchor(d, 1, 0, ctx)
+                    .expect_err("must reject")
+                    .to_string()
+            })
+        }
+
+        #[test]
+        fn empty_consignment_is_refused_first() {
+            let mut d = destination(vec![]);
+            d.consignment_hash.clear();
+            assert!(anchor_err(&d, &BridgeConfig::default()).contains("requires a consignment"));
+        }
+
+        #[test]
+        fn oversized_consignment_is_refused_before_hashing() {
+            let cfg = BridgeConfig {
+                max_consignment_bytes: 8,
+                ..Default::default()
+            };
+            let d = destination(vec![1u8; 9]);
+            let err = anchor_err(&d, &cfg);
+            assert!(
+                err.contains("send-RGB consignment too large: 9 bytes (max 8)"),
+                "{err}"
+            );
+            // Exactly at the cap moves on to the next leg.
+            let d = destination(vec![1u8; 8]);
+            assert!(!anchor_err(&d, &cfg).contains("too large"));
+        }
+
+        #[test]
+        fn hash_must_be_present_and_match() {
+            let mut d = destination(vec![1, 2, 3]);
+            d.consignment_hash.clear();
+            assert!(
+                anchor_err(&d, &BridgeConfig::default()).contains("consignment_hash is missing")
+            );
+            let mut d = destination(vec![1, 2, 3]);
+            d.consignment_hash[0] ^= 1;
+            assert!(anchor_err(&d, &BridgeConfig::default()).contains("hash mismatch"));
+        }
+
+        #[test]
+        fn asset_id_must_be_declared() {
+            let mut d = destination(vec![1, 2, 3]);
+            d.asset_id.clear();
+            assert!(anchor_err(&d, &BridgeConfig::default()).contains("asset_id is empty"));
+        }
+
+        #[test]
+        fn a_missing_validator_fails_closed_after_the_wire_checks() {
+            let d = destination(vec![1, 2, 3]);
+            let err = anchor_err(&d, &BridgeConfig::default());
+            assert!(err.contains("RGB validator is not configured"), "{err}");
+        }
+
+        #[cfg(not(feature = "dev-mode"))]
+        #[test]
+        fn rgb_destination_shape_check_rejects_garbage_psbt() {
+            let d = destination(vec![1, 2, 3]);
+            with_ctx(&BridgeConfig::default(), |ctx| {
+                let err = validate_destination(&d, ctx).unwrap_err();
+                assert!(err.to_string().contains("psbt_bytes is empty"), "{err}");
+            });
+        }
+    }
+
     // Asset-identity binding, destination path. The legs are
     // inlined in `validate_destination_anchor` after `validate_consignment`, so
     // that function is the narrowest callable unit. Driven end-to-end with the

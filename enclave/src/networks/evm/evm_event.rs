@@ -1538,4 +1538,367 @@ mod tests {
         );
         assert!(check_bridge_location("not-an-address", &pinned).is_err());
     }
+
+    // ---- coverage: provider failures, helper predicates, the alloy client ----
+
+    /// A provider whose RPC calls fail outright (host path down).
+    struct ErrProvider {
+        receipt_err: bool,
+        head_err: bool,
+    }
+    impl EvmReceiptProvider for ErrProvider {
+        fn get_transaction_receipt(&self, _tx_hash: &[u8; 32]) -> Result<Option<ReceiptData>> {
+            if self.receipt_err {
+                Err(EnclaveError::CrossCheck("rpc: receipt call failed".into()))
+            } else {
+                Ok(Some(receipt_with(
+                    vec![bridge_log(op_id(7), 1000, 950, 50)],
+                    100,
+                )))
+            }
+        }
+        fn get_block_number(&self) -> Result<u64> {
+            if self.head_err {
+                Err(EnclaveError::CrossCheck("rpc: head call failed".into()))
+            } else {
+                Ok(112)
+            }
+        }
+    }
+
+    fn verify_with(p: &ErrProvider) -> Result<()> {
+        verify_funds_in_event(p, &BRIDGE, 12, &TX, &op_id(7), 1000, 50).map(|_| ())
+    }
+
+    #[test]
+    fn provider_errors_propagate_fail_closed() {
+        let e = verify_with(&ErrProvider {
+            receipt_err: true,
+            head_err: false,
+        })
+        .unwrap_err()
+        .to_string();
+        assert!(e.contains("receipt call failed"), "{e}");
+        let e = verify_with(&ErrProvider {
+            receipt_err: false,
+            head_err: true,
+        })
+        .unwrap_err()
+        .to_string();
+        assert!(e.contains("head call failed"), "{e}");
+        assert!(verify_with(&ErrProvider {
+            receipt_err: false,
+            head_err: false,
+        })
+        .is_ok());
+    }
+
+    #[test]
+    fn fetch_successful_receipt_names_each_failure() {
+        let missing = FakeProvider {
+            receipt: None,
+            head: 0,
+        };
+        let e = fetch_successful_receipt(&missing, &TX)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            e.contains("receipt not found") && e.contains(&hex::encode(TX)),
+            "{e}"
+        );
+        let mut reverted = receipt_with(vec![], 5);
+        reverted.status_success = false;
+        let p = FakeProvider {
+            receipt: Some(reverted),
+            head: 0,
+        };
+        let e = fetch_successful_receipt(&p, &TX).unwrap_err().to_string();
+        assert!(e.contains("reverted"), "{e}");
+        let ok = fetch_successful_receipt(&happy_provider(), &TX).unwrap();
+        assert_eq!(ok.block_number, 100);
+        assert_eq!(ok.logs.len(), 1);
+    }
+
+    #[test]
+    fn select_unique_log_filters_on_emitter_and_topic0() {
+        let good = bridge_log(op_id(1), 1, 1, 0);
+        let mut other_emitter = good.clone();
+        other_emitter.address = OTHER;
+        let mut other_topic = good.clone();
+        other_topic.topics[0] = event_topic0("Other()");
+        let mut no_topics = good.clone();
+        no_topics.topics.clear();
+        let receipt = receipt_with(vec![other_emitter, other_topic, no_topics, good.clone()], 1);
+        let picked = select_unique_log(
+            &receipt,
+            &BRIDGE,
+            &BRIDGE_FUNDS_IN_TOPIC0,
+            "BridgeFundsIn",
+            &TX,
+        )
+        .unwrap();
+        assert_eq!(picked.topics, good.topics);
+
+        let none = receipt_with(vec![], 1);
+        let e = select_unique_log(
+            &none,
+            &BRIDGE,
+            &BRIDGE_FUNDS_IN_TOPIC0,
+            "BridgeFundsIn",
+            &TX,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(e.contains("no BridgeFundsIn log"), "{e}");
+
+        let two = receipt_with(vec![good.clone(), good], 1);
+        let e = select_unique_log(&two, &BRIDGE, &BRIDGE_FUNDS_IN_TOPIC0, "BridgeFundsIn", &TX)
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("ambiguous"), "{e}");
+    }
+
+    #[test]
+    fn decode_bridge_funds_in_rejects_short_data_and_missing_topic() {
+        let mut log = bridge_log(op_id(3), 10, 9, 1);
+        log.data.truncate(BFI_MIN_DATA_LEN - 1);
+        let e = decode_bridge_funds_in(&log)
+            .err()
+            .expect("must fail")
+            .to_string();
+        assert!(e.contains("data too short"), "{e}");
+
+        let mut log = bridge_log(op_id(3), 10, 9, 1);
+        log.topics.truncate(1);
+        let e = decode_bridge_funds_in(&log)
+            .err()
+            .expect("must fail")
+            .to_string();
+        assert!(e.contains("operationId is expected in topic1"), "{e}");
+
+        let log = bridge_log(op_id(3), 10, 9, 1);
+        let rec = decode_bridge_funds_in(&log).unwrap();
+        assert_eq!(rec.operation_id, op_id(3));
+        assert_eq!((rec.gross, rec.net, rec.commission), (10, 9, 1));
+        assert_eq!(rec.destination_address, SAMPLE_INVOICE);
+    }
+
+    #[test]
+    fn decode_bridge_funds_in_rejects_a_value_wider_than_u64() {
+        let mut log = bridge_log(op_id(3), 10, 9, 1);
+        log.data[BFI_AMOUNT_OFF] = 1; // high byte of `amount`
+        let e = decode_bridge_funds_in(&log)
+            .err()
+            .expect("must fail")
+            .to_string();
+        assert!(
+            e.contains("FundsIn amount") && e.contains("never truncated"),
+            "{e}"
+        );
+    }
+
+    #[test]
+    fn decode_abi_string_rejects_an_overflowing_tail_offset() {
+        let mut d = bridge_data_with_dest(1, 1, 0, "x");
+        d[BFI_DEST_ADDRESS_HEAD_OFF..BFI_DEST_ADDRESS_HEAD_OFF + 32]
+            .copy_from_slice(&word(u64::MAX));
+        let e = decode_abi_string(&d, BFI_DEST_ADDRESS_HEAD_OFF, "destinationAddress")
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("tail offset overflow"), "{e}");
+    }
+
+    #[test]
+    fn decode_abi_string_accepts_the_maximum_length_exactly() {
+        let max = "y".repeat(BFI_MAX_DEST_ADDRESS_LEN);
+        let d = bridge_data_with_dest(1, 1, 0, &max);
+        assert_eq!(
+            decode_abi_string(&d, BFI_DEST_ADDRESS_HEAD_OFF, "destinationAddress").unwrap(),
+            max
+        );
+    }
+
+    #[test]
+    fn check_eq_and_confirmation_depth_boundaries() {
+        assert!(check_eq("amount", 5, 5).is_ok());
+        let e = check_eq("amount", 5, 6).unwrap_err().to_string();
+        assert!(
+            e.contains("amount mismatch: on-chain 5 != request 6"),
+            "{e}"
+        );
+
+        let at = FakeProvider {
+            receipt: None,
+            head: 112,
+        };
+        assert_eq!(check_confirmation_depth(&at, 100, 12).unwrap(), 12);
+        assert_eq!(check_confirmation_depth(&at, 112, 0).unwrap(), 0);
+        let e = check_confirmation_depth(&at, 101, 12)
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("not final: depth 11 < required 12"), "{e}");
+        let e = check_confirmation_depth(&at, 113, 0)
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("reorg"), "{e}");
+    }
+
+    #[test]
+    fn topic0_is_keccak_of_the_signature() {
+        let sig = "Transfer(address,address,uint256)";
+        let expected: [u8; 32] = Keccak256::digest(sig.as_bytes()).into();
+        assert_eq!(event_topic0(sig), expected);
+        assert_eq!(*BRIDGE_FUNDS_IN_TOPIC0, event_topic0(BRIDGE_FUNDS_IN_SIG));
+        assert_ne!(
+            event_topic0(BRIDGE_FUNDS_IN_SIG),
+            event_topic0(FUNDS_IN_SIG)
+        );
+    }
+
+    #[test]
+    fn extract_uint256_accepts_u64_max_and_rejects_the_next_bit() {
+        let mut data = vec![0u8; 64];
+        data[56..64].copy_from_slice(&u64::MAX.to_be_bytes());
+        assert_eq!(extract_uint256_as_u64(&data, 32).unwrap(), u64::MAX);
+        data[55] = 1;
+        assert!(extract_uint256_as_u64(&data, 32).is_err());
+        // A window that runs off the end is a short-data error, not a panic.
+        assert!(extract_uint256_as_u64(&data, 33).is_err());
+    }
+
+    #[test]
+    fn verify_rejects_a_bridge_funds_in_whose_net_exceeds_gross_minus_commission_by_one() {
+        let p = FakeProvider {
+            receipt: Some(receipt_with(vec![bridge_log(op_id(7), 1000, 951, 50)], 100)),
+            head: 112,
+        };
+        let e = verify(&p).unwrap_err().to_string();
+        assert!(
+            e.contains("netAmount (951) exceeds gross - commission (950)"),
+            "{e}"
+        );
+        // Exactly gross - commission passes; below passes with a warning.
+        for net in [950u64, 0] {
+            let p = FakeProvider {
+                receipt: Some(receipt_with(vec![bridge_log(op_id(7), 1000, net, 50)], 100)),
+                head: 112,
+            };
+            assert!(verify(&p).is_ok(), "net {net}");
+        }
+    }
+
+    #[test]
+    fn verify_checks_the_operation_id_before_the_amounts() {
+        // Wrong id AND wrong amounts: the id is what the error names.
+        let p = FakeProvider {
+            receipt: Some(receipt_with(vec![bridge_log(op_id(8), 1, 1, 0)], 100)),
+            head: 112,
+        };
+        let e = verify(&p).unwrap_err().to_string();
+        assert!(e.contains("operationId mismatch"), "{e}");
+    }
+
+    #[test]
+    fn alloy_client_rejects_an_unparsable_url_and_fails_fast_on_a_closed_port() {
+        let e = AlloyEvmClient::new("not a url")
+            .err()
+            .expect("bad url")
+            .to_string();
+        assert!(e.contains("invalid rpc_url"), "{e}");
+
+        // Constructing against a closed loopback port succeeds (no I/O yet);
+        // the first call fails with a transport error rather than hanging.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+        let client = AlloyEvmClient::new(&format!("http://127.0.0.1:{port}")).unwrap();
+        let e = client.get_block_number().unwrap_err().to_string();
+        assert!(e.contains("eth_blockNumber failed"), "{e}");
+        let e = client.get_transaction_receipt(&TX).unwrap_err().to_string();
+        assert!(e.contains("eth_getTransactionReceipt failed"), "{e}");
+    }
+
+    #[test]
+    fn receipt_and_log_types_are_plain_data() {
+        let log = bridge_log(op_id(1), 1, 1, 0);
+        let receipt = receipt_with(vec![log.clone()], 7);
+        let copy = receipt.clone();
+        assert_eq!(copy.block_number, 7);
+        assert!(copy.status_success);
+        assert_eq!(copy.logs[0].address, log.address);
+        let v = VerifiedFundsIn {
+            destination_address: "d".into(),
+        };
+        assert_eq!(v.clone(), v);
+        assert!(format!("{v:?}").contains("destination_address"));
+    }
+
+    #[cfg(feature = "bfa-mint")]
+    #[test]
+    fn check_bridge_location_accepts_bare_and_upper_case_hex_and_rejects_bad_widths() {
+        let pinned = [0xabu8; 20];
+        assert!(check_bridge_location(&"ab".repeat(20), &pinned).is_ok());
+        assert!(check_bridge_location(&format!("0x{}", "AB".repeat(20)), &pinned).is_ok());
+        let e = check_bridge_location(&"ab".repeat(19), &pinned)
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("invalid bridge location"), "{e}");
+        assert!(check_bridge_location(&"ab".repeat(21), &pinned).is_err());
+        assert!(check_bridge_location("", &pinned).is_err());
+        let e = check_bridge_location(&"cd".repeat(20), &pinned)
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("not the pinned funds-in contract"), "{e}");
+    }
+
+    #[cfg(feature = "bfa-mint")]
+    #[test]
+    fn verify_rgb_funds_in_refuses_reverts_ambiguity_and_shallow_depth() {
+        let logs = || {
+            vec![
+                rgb_companion_log(0xab, 100),
+                bridge_log(op_id(7), 1000, 950, 50),
+            ]
+        };
+        let mut reverted = receipt_with(logs(), 100);
+        reverted.status_success = false;
+        let p = FakeProvider {
+            receipt: Some(reverted),
+            head: 112,
+        };
+        assert!(verify_rgb_funds_in(&p, &BRIDGE, 12, &TX, &word(0xab))
+            .unwrap_err()
+            .to_string()
+            .contains("reverted"));
+
+        let mut two = logs();
+        two.push(rgb_companion_log(0xab, 100));
+        let p = FakeProvider {
+            receipt: Some(receipt_with(two, 100)),
+            head: 112,
+        };
+        assert!(verify_rgb_funds_in(&p, &BRIDGE, 12, &TX, &word(0xab))
+            .unwrap_err()
+            .to_string()
+            .contains("ambiguous"));
+
+        let p = FakeProvider {
+            receipt: Some(receipt_with(logs(), 100)),
+            head: 111,
+        };
+        assert!(verify_rgb_funds_in(&p, &BRIDGE, 12, &TX, &word(0xab))
+            .unwrap_err()
+            .to_string()
+            .contains("not final"));
+
+        // A mismatching RGB op id is refused even with everything else right.
+        let p = FakeProvider {
+            receipt: Some(receipt_with(logs(), 100)),
+            head: 112,
+        };
+        assert!(verify_rgb_funds_in(&p, &BRIDGE, 12, &TX, &word(0xac))
+            .unwrap_err()
+            .to_string()
+            .contains("rgbOpId mismatch"));
+    }
 }

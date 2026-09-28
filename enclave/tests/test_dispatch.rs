@@ -1206,3 +1206,76 @@ mod mock_clone {
         assert!(err.message.contains("nonce replay"), "{}", err.message);
     }
 }
+
+#[cfg(feature = "spv")]
+mod spv_wire {
+    use super::*;
+
+    /// The aggregate submit budget is enforced on the wire: ten maximal
+    /// batches (100k headers, none of which parse) are admitted to the
+    /// limiter, the eleventh trips it before any header is looked at.
+    #[test]
+    fn submit_headers_rate_limit_is_enforced_across_calls() {
+        let port = common::start_test_server();
+        let batch = || SubmitHeadersRequest {
+            headers: vec![Vec::new(); 10_000],
+            start_height: 1,
+        };
+        for i in 0..10 {
+            let err = expect_error(send(port, Req::SubmitHeaders(batch())));
+            assert_eq!(err.code, CODE_VALIDATION_FAILED, "call {i}");
+            assert!(
+                err.message.contains("header parse failed"),
+                "call {i}: {}",
+                err.message
+            );
+        }
+        let err = expect_error(send(port, Req::SubmitHeaders(batch())));
+        assert_eq!(err.code, CODE_VALIDATION_FAILED);
+        assert!(
+            err.message.contains("rate limit exceeded"),
+            "{}",
+            err.message
+        );
+        // The chain itself never advanced.
+        match send(port, Req::GetLastSavedBlock(GetLastSavedBlockRequest {})).response {
+            Some(Resp::GetLastSavedBlock(r)) => assert_eq!(r.block_height, 0),
+            other => panic!("expected GetLastSavedBlock, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn oversized_batch_is_refused_before_the_checkpoint_check() {
+        let port = common::start_test_server();
+        let err = expect_error(send(
+            port,
+            Req::SubmitHeaders(SubmitHeadersRequest {
+                headers: vec![Vec::new(); 10_001],
+                start_height: 0,
+            }),
+        ));
+        assert_eq!(err.code, CODE_VALIDATION_FAILED);
+        assert!(err.message.contains("per-call cap"), "{}", err.message);
+    }
+
+    #[test]
+    fn empty_batch_is_a_noop_that_reports_the_checkpoint() {
+        let port = common::start_test_server();
+        match send(
+            port,
+            Req::SubmitHeaders(SubmitHeadersRequest {
+                headers: vec![],
+                start_height: 999,
+            }),
+        )
+        .response
+        {
+            Some(Resp::SubmitHeaders(r)) => {
+                assert_eq!(r.last_block_height, 0);
+                assert_eq!(r.headers_accepted, 0);
+                assert_eq!(r.last_block_hash.len(), 32);
+            }
+            other => panic!("expected SubmitHeaders, got {other:?}"),
+        }
+    }
+}

@@ -1869,4 +1869,70 @@ mod tests {
             .check(10, t0)
             .expect("backwards clock resets window");
     }
+
+    #[test]
+    fn rate_limiter_zero_count_and_first_call_over_budget() {
+        let mut limiter = SubmitRateLimiter::default();
+        let t0 = SystemTime::UNIX_EPOCH + Duration::from_secs(3_000_000);
+        limiter.check(0, t0).expect("zero headers is free");
+        limiter
+            .check(MAX_HEADERS_PER_RATE_WINDOW, t0)
+            .expect("exactly the budget in one call");
+        limiter.check(0, t0).expect("zero still free at the budget");
+        let mut fresh = SubmitRateLimiter::default();
+        let err = fresh
+            .check(MAX_HEADERS_PER_RATE_WINDOW + 1, t0)
+            .unwrap_err();
+        assert!(matches!(err, EnclaveError::Spv(_)), "{err}");
+        assert!(err.to_string().contains("rate limit exceeded"), "{err}");
+        assert_eq!(err.error_code(), 3);
+    }
+
+    #[test]
+    fn rate_limiter_saturates_instead_of_overflowing() {
+        let mut limiter = SubmitRateLimiter::default();
+        let t0 = SystemTime::UNIX_EPOCH + Duration::from_secs(3_000_000);
+        limiter.check(1, t0).unwrap();
+        assert!(limiter.check(u64::MAX, t0).is_err());
+        // Still rejected inside the window, admitted again after it.
+        assert!(limiter.check(1, t0 + Duration::from_secs(1)).is_err());
+        assert!(limiter.check(1, t0 + RATE_LIMIT_WINDOW).is_ok());
+    }
+
+    #[test]
+    fn rate_limiter_window_boundary_is_exclusive_of_the_last_second() {
+        let mut limiter = SubmitRateLimiter::default();
+        let t0 = SystemTime::UNIX_EPOCH + Duration::from_secs(3_000_000);
+        limiter.check(MAX_HEADERS_PER_RATE_WINDOW, t0).unwrap();
+        assert!(limiter
+            .check(1, t0 + RATE_LIMIT_WINDOW - Duration::from_millis(1))
+            .is_err());
+        assert!(limiter.check(1, t0 + RATE_LIMIT_WINDOW).is_ok());
+    }
+
+    #[test]
+    fn server_context_new_resolves_a_development_policy_under_test() {
+        use crate::networks::rgb::spv::{checkpoint_for, HeaderChain, Network};
+        let ctx = ServerContext::new(
+            EnclaveState::new(bitcoin::Network::Bitcoin),
+            BridgeConfig::default(),
+            std::sync::Mutex::new(HeaderChain::new(
+                Network::Regtest,
+                checkpoint_for(Network::Regtest),
+            )),
+        );
+        assert!(matches!(
+            ctx.policy,
+            crate::policy::SecurityPolicy::Development { .. }
+        ));
+        #[cfg(feature = "rgb-validation")]
+        assert!(ctx.rgb_validator.is_none());
+        assert_eq!(ctx.header_chain.lock().unwrap().tip_height(), 0);
+        assert!(ctx
+            .submit_rate_limiter
+            .lock()
+            .unwrap()
+            .check(1, SystemTime::now())
+            .is_ok());
+    }
 }

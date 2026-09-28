@@ -937,4 +937,187 @@ mod tests {
         assert_eq!(SPV_MAX_TIP_AGE_SECS, 2 * 60 * 60);
         assert_eq!(SPV_MAX_TIP_FUTURE_SECS, 2 * 60 * 60);
     }
+
+    // ---- coverage: the composed source-chain check and remaining edges ----
+
+    use crate::networks::rgb::validation::ValidatedConsignment;
+
+    fn consignment_with(chain_net: &str, witness_txids: Vec<[u8; 32]>) -> ValidatedConsignment {
+        ValidatedConsignment {
+            contract_id: "rgb:test".into(),
+            chain_net: chain_net.into(),
+            witness_txids,
+            all_op_ids: vec![],
+            mint_op_ids: vec![],
+            last_transition: None,
+            last_witness_txid: None,
+            last_transfer_witness_prevouts: None,
+            last_transfer_op_id: None,
+            non_mined_witness_txids: vec![],
+            transitions_by_witness: vec![],
+        }
+    }
+
+    fn now_at_tip(chain: &HeaderChain) -> SystemTime {
+        unix(u64::from(chain.tip_time()))
+    }
+
+    #[test]
+    fn source_chain_requires_a_validated_consignment() {
+        let target = synth_headers(1).into_iter().next().unwrap();
+        let chain = chain_burying(target, 5);
+        let err = validate_source_chain(&chain, None, &[], now_at_tip(&chain)).unwrap_err();
+        assert!(matches!(err, EnclaveError::Spv(_)), "{err}");
+        assert!(
+            err.to_string().contains("non-empty validated consignment"),
+            "{err}"
+        );
+        assert_eq!(err.error_code(), 3);
+    }
+
+    #[test]
+    fn source_chain_happy_path_binds_net_freshness_and_proofs() {
+        let target = synth_headers(1).into_iter().next().unwrap();
+        let chain = chain_burying(target, 5);
+        let (txid_display, proof) = single_tx_proof(chain.header_at(1).unwrap(), 1);
+        let validated = consignment_with("bcrt", vec![txid_display]);
+        validate_source_chain(&chain, Some(&validated), &[proof], now_at_tip(&chain)).unwrap();
+    }
+
+    #[test]
+    fn source_chain_checks_staleness_then_net_then_proofs() {
+        let target = synth_headers(1).into_iter().next().unwrap();
+        let chain = chain_burying(target, 5);
+        let (txid_display, proof) = single_tx_proof(chain.header_at(1).unwrap(), 1);
+
+        // Stale tip AND wrong net AND no proofs: staleness is reported.
+        let wrong_net = consignment_with("bc", vec![txid_display]);
+        let stale_now = unix(u64::from(chain.tip_time()) + SPV_MAX_TIP_AGE_SECS + 1);
+        let err = validate_source_chain(&chain, Some(&wrong_net), &[], stale_now).unwrap_err();
+        assert!(err.to_string().contains("too stale"), "{err}");
+
+        // Fresh tip, wrong net: the net is reported before the proofs.
+        let err =
+            validate_source_chain(&chain, Some(&wrong_net), &[], now_at_tip(&chain)).unwrap_err();
+        assert!(err.to_string().contains("does not match"), "{err}");
+
+        // Fresh tip, right net, no proofs for the expected txid.
+        let right_net = consignment_with("bcrt", vec![txid_display]);
+        let err =
+            validate_source_chain(&chain, Some(&right_net), &[], now_at_tip(&chain)).unwrap_err();
+        assert!(err.to_string().contains("missing merkle proofs"), "{err}");
+
+        // Everything right but the proof is too shallow: the depth rule holds
+        // inside the composed check too.
+        let shallow = chain_burying(synth_headers(1).into_iter().next().unwrap(), 2);
+        let err = validate_source_chain(&shallow, Some(&right_net), &[proof], now_at_tip(&shallow))
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("insufficient confirmations"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn source_chain_with_no_witnesses_and_no_proofs_passes_when_fresh() {
+        let target = synth_headers(1).into_iter().next().unwrap();
+        let chain = chain_burying(target, 5);
+        let validated = consignment_with("bcrt", vec![]);
+        validate_source_chain(&chain, Some(&validated), &[], now_at_tip(&chain)).unwrap();
+    }
+
+    #[test]
+    fn proof_height_of_u32_max_is_rejected_without_underflow() {
+        let target = synth_headers(1).into_iter().next().unwrap();
+        let chain = chain_burying(target, 5);
+        let (txid_display, mut proof) = single_tx_proof(chain.header_at(1).unwrap(), 1);
+        proof.block_height = u32::MAX;
+        let err = validate_spv_proofs(&chain, &[txid_display], &[proof], SPV_MIN_CONFIRMATIONS)
+            .unwrap_err();
+        assert!(err.to_string().contains("no header at height"), "{err}");
+    }
+
+    #[test]
+    fn wrong_position_in_a_two_tx_block_is_a_root_mismatch() {
+        let leaf0 = [0x10u8; 32];
+        let leaf1 = [0x20u8; 32];
+        let prev = bitcoin::BlockHash::from_byte_array([0u8; 32]);
+        let block = build_two_tx_block(leaf0, leaf1, prev, 1_700_000_001);
+        let chain = chain_burying(block.header, 5);
+        let proof = MerkleProofEntry {
+            txid: block.txid0_display.to_vec(),
+            block_height: 1,
+            tx_position: 1, // it is at position 0
+            merkle_path: block.path_for_tx0,
+        };
+        let err = validate_spv_proofs(
+            &chain,
+            &[block.txid0_display],
+            &[proof],
+            SPV_MIN_CONFIRMATIONS,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("computed root"), "{err}");
+    }
+
+    #[test]
+    fn a_path_exactly_at_the_depth_cap_passes_the_depth_gate() {
+        let target = synth_headers(1).into_iter().next().unwrap();
+        let chain = chain_burying(target, 5);
+        let (txid_display, _) = single_tx_proof(chain.header_at(1).unwrap(), 1);
+        let proof = MerkleProofEntry {
+            txid: txid_display.to_vec(),
+            block_height: 1,
+            tx_position: 0,
+            merkle_path: vec![vec![0u8; 32]; MAX_MERKLE_PATH_DEPTH],
+        };
+        let err = validate_spv_proofs(&chain, &[txid_display], &[proof], SPV_MIN_CONFIRMATIONS)
+            .unwrap_err();
+        // Past the depth gate: the failure is the root, not the depth.
+        assert!(err.to_string().contains("computed root"), "{err}");
+        assert!(!err.to_string().contains("too deep"), "{err}");
+    }
+
+    #[test]
+    fn min_confirmations_of_one_accepts_the_tip_block_itself() {
+        let target = synth_headers(1).into_iter().next().unwrap();
+        let chain = chain_burying(target, 0);
+        let (txid_display, proof) = single_tx_proof(chain.header_at(1).unwrap(), 1);
+        validate_spv_proofs(&chain, &[txid_display], std::slice::from_ref(&proof), 1).unwrap();
+        assert!(validate_spv_proofs(&chain, &[txid_display], &[proof], 2).is_err());
+    }
+
+    #[test]
+    fn assert_chain_net_rejects_every_cross_pairing_and_empty() {
+        let nets = [
+            ("bc", Network::Mainnet),
+            ("sb", Network::Signet),
+            ("tb3", Network::Testnet3),
+            ("bcrt", Network::Regtest),
+        ];
+        for (prefix, _) in nets {
+            for (_, network) in nets {
+                let ok = assert_chain_net(prefix, network).is_ok();
+                let matching = nets.iter().any(|(p, n)| *p == prefix && *n == network);
+                assert_eq!(ok, matching, "{prefix} vs {network:?}");
+            }
+        }
+        assert!(assert_chain_net("", Network::Mainnet).is_err());
+        assert!(assert_chain_net("BC", Network::Mainnet).is_err());
+    }
+
+    #[test]
+    fn staleness_future_boundary_is_inclusive() {
+        let tip = 1_700_000_100u32;
+        let chain = chain_with_tip_time(tip);
+        let max_future = Duration::from_secs(SPV_MAX_TIP_FUTURE_SECS);
+        let max_age = Duration::from_secs(SPV_MAX_TIP_AGE_SECS);
+        let at = unix(u64::from(tip) - SPV_MAX_TIP_FUTURE_SECS);
+        assert!(assert_chain_not_stale(&chain, at, max_age, max_future).is_ok());
+        let past = unix(u64::from(tip) - SPV_MAX_TIP_FUTURE_SECS - 1);
+        let err = assert_chain_not_stale(&chain, past, max_age, max_future).unwrap_err();
+        assert!(err.to_string().contains("in the future"), "{err}");
+        // A tip exactly `now` is neither stale nor future.
+        assert!(assert_chain_not_stale(&chain, unix(u64::from(tip)), max_age, max_future).is_ok());
+    }
 }

@@ -1376,4 +1376,147 @@ mod tests {
             );
         }
     }
+
+    // ---- coverage: shape edges shared by both flows ----
+    mod edges {
+        use super::*;
+        use crate::networks::rgb::validation::{ifa, TransitionSummary};
+
+        #[cfg(feature = "rgb-swap")]
+        fn source_transition(amount: u64) -> TransitionSummary {
+            TransitionSummary {
+                op_id: "transfer-op".into(),
+                transition_type: ifa::TS_TRANSFER,
+                total_output_amount: amount,
+                asset_output_amount: amount,
+                outputs: Vec::new(),
+                burned_asset_amount: None,
+                burn_recipient: None,
+            }
+        }
+
+        #[cfg(feature = "rgb-mint-burn")]
+        fn source_transition(amount: u64) -> TransitionSummary {
+            TransitionSummary {
+                op_id: "burn-op".into(),
+                transition_type: ifa::TS_BURN,
+                total_output_amount: 0,
+                asset_output_amount: 0,
+                outputs: Vec::new(),
+                burned_asset_amount: Some(amount),
+                burn_recipient: None,
+            }
+        }
+
+        fn calldata_with_amount(amount: U256) -> Vec<u8> {
+            fundsOutCall {
+                params: FundsOutParams {
+                    recipient: Address::ZERO,
+                    amount,
+                    burnId: U256::ZERO,
+                    sourceChainId: U256::ZERO,
+                    destinationChainId: U256::ZERO,
+                    sourceAddress: String::new(),
+                    proof: Bytes::new(),
+                    settlementData: Bytes::new(),
+                },
+            }
+            .abi_encode()
+        }
+
+        #[test]
+        fn funds_out_amount_requires_a_transition() {
+            let mut validated = validated_with_last(source_transition(1_000));
+            validated.last_transition = None;
+            let err =
+                validate_funds_out_amount(&params_of(&mock_funds_out_calldata(1_000)), &validated)
+                    .unwrap_err();
+            assert!(err.to_string().contains("at least one transition"), "{err}");
+        }
+
+        #[test]
+        fn funds_out_amount_above_u64_is_rejected_after_the_shape_gate() {
+            let validated = validated_with_last(source_transition(u64::MAX));
+            let cd = calldata_with_amount(U256::from(u64::MAX) + U256::from(1u64));
+            let err = validate_funds_out_amount(&params_of(&cd), &validated).unwrap_err();
+            assert!(err.to_string().contains("exceeds u64 range"), "{err}");
+            // Exactly u64::MAX decodes and matches the source.
+            let cd = calldata_with_amount(U256::from(u64::MAX));
+            assert!(validate_funds_out_amount(&params_of(&cd), &validated).is_ok());
+        }
+
+        #[test]
+        fn funds_out_amount_zero_release_against_zero_source() {
+            let validated = validated_with_last(source_transition(0));
+            assert!(
+                validate_funds_out_amount(&params_of(&mock_funds_out_calldata(0)), &validated)
+                    .is_ok()
+            );
+            assert!(
+                validate_funds_out_amount(&params_of(&mock_funds_out_calldata(1)), &validated)
+                    .is_err()
+            );
+        }
+
+        #[test]
+        fn witnesses_confirmed_lists_every_unmined_txid() {
+            let mut validated = validated_with_last(source_transition(1));
+            validated.non_mined_witness_txids = vec![[0xAB; 32], [0xCD; 32]];
+            let err = assert_witnesses_confirmed(&validated)
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains("2 witness(es)"), "{err}");
+            assert!(
+                err.contains(&"ab".repeat(32)) && err.contains(&"cd".repeat(32)),
+                "{err}"
+            );
+            assert!(matches!(
+                assert_witnesses_confirmed(&validated),
+                Err(EnclaveError::CrossCheck(_))
+            ));
+        }
+
+        #[test]
+        fn transitions_committed_by_groups_by_witness_txid() {
+            use bitcoin::hashes::Hash;
+            let a = bitcoin::Txid::from_byte_array([1u8; 32]);
+            let b = bitcoin::Txid::from_byte_array([2u8; 32]);
+            let mut validated = validated_with_last(source_transition(1));
+            validated.transitions_by_witness = vec![
+                (a, vec![source_transition(1), source_transition(2)]),
+                (b, vec![source_transition(3)]),
+                (a, vec![source_transition(4)]),
+            ];
+            let for_a = validated.transitions_committed_by(a);
+            assert_eq!(for_a.len(), 3, "both bundles committed by `a` are merged");
+            assert_eq!(validated.transitions_committed_by(b).len(), 1);
+            assert!(validated
+                .transitions_committed_by(bitcoin::Txid::from_byte_array([9u8; 32]))
+                .is_empty());
+        }
+
+        #[cfg(feature = "rgb-mint-burn")]
+        #[test]
+        fn burn_recipient_rejects_a_wrong_width_commitment() {
+            let cd = mock_funds_out_calldata_to(Address::from([0x42; 20]), 1000, Bytes::new());
+            let mut t = source_transition(1000);
+            t.burn_recipient = Some(vec![0u8; 31]);
+            let err = validate_funds_out_burn_recipient(&params_of(&cd), &validated_with_last(t))
+                .unwrap_err();
+            assert!(
+                err.to_string().contains("not a left-padded EVM address"),
+                "{err}"
+            );
+            let mut t = source_transition(1000);
+            t.burn_recipient = Some(vec![0u8; 33]);
+            assert!(
+                validate_funds_out_burn_recipient(&params_of(&cd), &validated_with_last(t))
+                    .is_err()
+            );
+            let mut validated = validated_with_last(source_transition(1000));
+            validated.last_transition = None;
+            let err = validate_funds_out_burn_recipient(&params_of(&cd), &validated).unwrap_err();
+            assert!(err.to_string().contains("at least one transition"), "{err}");
+        }
+    }
 }
