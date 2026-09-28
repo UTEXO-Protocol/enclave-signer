@@ -250,7 +250,7 @@ IwLz3/Y=
 
     /// DER bytes of the embedded root cert. Parsed once and compared to
     /// `cabundle[0]` bytewise on every verify.
-    fn root_cert_der() -> &'static [u8] {
+    pub(super) fn root_cert_der() -> &'static [u8] {
         static ROOT: OnceLock<Vec<u8>> = OnceLock::new();
         ROOT.get_or_init(|| {
             let lines: Vec<&str> = AWS_NITRO_ROOT_CERT_PEM
@@ -1020,6 +1020,679 @@ mod tests {
                 verify_mock_attestation(&[0xffu8; 16], &ExpectedPcrs::zero(), Some(&[0u8; 32]))
                     .unwrap_err();
             assert!(matches!(err, VerifyError::Attestation(_)));
+        }
+    }
+}
+
+// Coverage of the paths the modules above leave untested: every rejection
+// branch of the real (COSE) parser that can be reached without an AWS-signed
+// document, the PCR / nonce helpers on each index and each `Option` arm, the
+// `ExpectedPcrs` constructors field by field, and the error type's wire text.
+#[cfg(test)]
+mod coverage_tests {
+    use super::*;
+    use ciborium::value::Integer;
+    use ciborium::Value;
+
+    fn cbor(v: &Value) -> Vec<u8> {
+        let mut buf = Vec::new();
+        ciborium::into_writer(v, &mut buf).unwrap();
+        buf
+    }
+
+    fn int(i: i128) -> Value {
+        Value::Integer(Integer::try_from(i).unwrap())
+    }
+
+    /// CBOR bytes of a COSE protected header `{1: alg}`.
+    fn protected(alg: i128) -> Vec<u8> {
+        cbor(&Value::Map(vec![(int(1), int(alg))]))
+    }
+
+    /// A syntactically well-formed COSE_Sign1 envelope (ES384, arbitrary
+    /// payload, 96-byte signature) with no valid certificate chain behind it.
+    fn cose_sign1(alg: i128, payload: Value, signature: Vec<u8>) -> Vec<u8> {
+        cbor(&Value::Array(vec![
+            Value::Bytes(protected(alg)),
+            Value::Map(vec![]),
+            payload,
+            Value::Bytes(signature),
+        ]))
+    }
+
+    /// A CBOR attestation payload with the given optional fields, so the real
+    /// parser can be driven past the envelope stage.
+    fn payload(
+        cabundle: Vec<Vec<u8>>,
+        certificate: Vec<u8>,
+        nonce: Option<Vec<u8>>,
+        public_key: Option<Vec<u8>>,
+    ) -> Vec<u8> {
+        let mut pcrs = HashMap::new();
+        for i in 0..3u32 {
+            pcrs.insert(i, vec![0u8; 48]);
+        }
+        let doc = AttestationDocument {
+            module_id: "i-test".into(),
+            timestamp: 1,
+            digest: "SHA384".into(),
+            pcrs,
+            certificate,
+            cabundle,
+            public_key,
+            user_data: None,
+            nonce,
+        };
+        let mut buf = Vec::new();
+        ciborium::into_writer(&doc, &mut buf).unwrap();
+        buf
+    }
+
+    fn zero_pcrs() -> ExpectedPcrs {
+        ExpectedPcrs::zero()
+    }
+
+    fn attestation_err<T: std::fmt::Debug>(r: Result<T>) -> String {
+        match r {
+            Err(VerifyError::Attestation(s)) => s,
+            other => panic!("expected VerifyError::Attestation, got {other:?}"),
+        }
+    }
+
+    fn certificate_err<T: std::fmt::Debug>(r: Result<T>) -> String {
+        match r {
+            Err(VerifyError::Certificate(s)) => s,
+            other => panic!("expected VerifyError::Certificate, got {other:?}"),
+        }
+    }
+
+    // ---- real path: COSE_Sign1 envelope parsing -------------------------
+
+    #[test]
+    fn real_rejects_empty_input() {
+        let msg = attestation_err(verify_attestation(&[], &zero_pcrs(), None));
+        assert!(msg.contains("invalid CBOR"), "got: {msg}");
+    }
+
+    #[test]
+    fn real_rejects_non_cbor_bytes() {
+        let msg = attestation_err(verify_attestation(&[0xff; 8], &zero_pcrs(), None));
+        assert!(msg.contains("invalid CBOR"), "got: {msg}");
+    }
+
+    #[test]
+    fn real_rejects_cbor_that_is_not_an_array() {
+        let doc = cbor(&Value::Map(vec![(int(1), int(2))]));
+        let msg = attestation_err(verify_attestation(&doc, &zero_pcrs(), None));
+        assert!(msg.contains("must be array"), "got: {msg}");
+    }
+
+    #[test]
+    fn real_rejects_array_with_wrong_arity() {
+        for n in [0usize, 3, 5] {
+            let items: Vec<Value> = (0..n).map(|_| Value::Bytes(vec![])).collect();
+            let doc = cbor(&Value::Array(items));
+            let msg = attestation_err(verify_attestation(&doc, &zero_pcrs(), None));
+            assert!(msg.contains("4 elements"), "arity {n}: got {msg}");
+        }
+    }
+
+    #[test]
+    fn real_rejects_non_bytes_protected_header() {
+        let doc = cbor(&Value::Array(vec![
+            Value::Text("not bytes".into()),
+            Value::Map(vec![]),
+            Value::Bytes(vec![1]),
+            Value::Bytes(vec![0; 96]),
+        ]));
+        let msg = attestation_err(verify_attestation(&doc, &zero_pcrs(), None));
+        assert!(msg.contains("protected header"), "got: {msg}");
+    }
+
+    #[test]
+    fn real_rejects_non_bytes_payload() {
+        let doc = cbor(&Value::Array(vec![
+            Value::Bytes(protected(-35)),
+            Value::Map(vec![]),
+            Value::Text("payload".into()),
+            Value::Bytes(vec![0; 96]),
+        ]));
+        let msg = attestation_err(verify_attestation(&doc, &zero_pcrs(), None));
+        assert!(msg.contains("invalid payload"), "got: {msg}");
+    }
+
+    #[test]
+    fn real_rejects_non_bytes_signature() {
+        let doc = cbor(&Value::Array(vec![
+            Value::Bytes(protected(-35)),
+            Value::Map(vec![]),
+            Value::Bytes(vec![1]),
+            Value::Integer(Integer::try_from(7_i128).unwrap()),
+        ]));
+        let msg = attestation_err(verify_attestation(&doc, &zero_pcrs(), None));
+        assert!(msg.contains("invalid signature"), "got: {msg}");
+    }
+
+    #[test]
+    fn real_rejects_detached_payload() {
+        // A null payload is a valid COSE_Sign1 (detached), but an attestation
+        // document must carry its payload inline.
+        let doc = cose_sign1(-35, Value::Null, vec![0; 96]);
+        let msg = attestation_err(verify_attestation(&doc, &zero_pcrs(), None));
+        assert!(msg.contains("missing COSE payload"), "got: {msg}");
+    }
+
+    #[test]
+    fn real_rejects_wrong_algorithm_before_reading_payload() {
+        // ES256 (-7) is checked before the payload is parsed, so even a
+        // garbage payload reports the algorithm problem.
+        let doc = cose_sign1(-7, Value::Bytes(vec![0xff]), vec![0; 96]);
+        let msg = attestation_err(verify_attestation(&doc, &zero_pcrs(), None));
+        assert!(msg.contains("unexpected COSE alg -7"), "got: {msg}");
+    }
+
+    #[test]
+    fn real_rejects_protected_header_that_is_not_a_map() {
+        let doc = cbor(&Value::Array(vec![
+            Value::Bytes(cbor(&Value::Array(vec![]))),
+            Value::Map(vec![]),
+            Value::Bytes(vec![1]),
+            Value::Bytes(vec![0; 96]),
+        ]));
+        let msg = attestation_err(verify_attestation(&doc, &zero_pcrs(), None));
+        assert!(msg.contains("must be a map"), "got: {msg}");
+    }
+
+    #[test]
+    fn real_rejects_non_integer_alg() {
+        let hdr = cbor(&Value::Map(vec![(int(1), Value::Text("ES384".into()))]));
+        let doc = cbor(&Value::Array(vec![
+            Value::Bytes(hdr),
+            Value::Map(vec![]),
+            Value::Bytes(vec![1]),
+            Value::Bytes(vec![0; 96]),
+        ]));
+        let msg = attestation_err(verify_attestation(&doc, &zero_pcrs(), None));
+        assert!(msg.contains("alg must be an integer"), "got: {msg}");
+    }
+
+    #[test]
+    fn real_rejects_undecodable_protected_header_bytes() {
+        let doc = cbor(&Value::Array(vec![
+            Value::Bytes(vec![0xff, 0xff]),
+            Value::Map(vec![]),
+            Value::Bytes(vec![1]),
+            Value::Bytes(vec![0; 96]),
+        ]));
+        let msg = attestation_err(verify_attestation(&doc, &zero_pcrs(), None));
+        assert!(msg.contains("invalid COSE protected header"), "got: {msg}");
+    }
+
+    #[test]
+    fn real_rejects_payload_that_is_not_an_attestation_document() {
+        let doc = cose_sign1(-35, Value::Bytes(cbor(&int(42))), vec![0; 96]);
+        let msg = attestation_err(verify_attestation(&doc, &zero_pcrs(), None));
+        assert!(msg.contains("failed to parse attestation"), "got: {msg}");
+    }
+
+    #[test]
+    fn real_rejects_payload_missing_required_fields() {
+        // `timestamp` and `pcrs` have no serde default, so a map without them
+        // must not deserialize.
+        let map = cbor(&Value::Map(vec![(
+            Value::Text("module_id".into()),
+            Value::Text("x".into()),
+        )]));
+        let doc = cose_sign1(-35, Value::Bytes(map), vec![0; 96]);
+        let msg = attestation_err(verify_attestation(&doc, &zero_pcrs(), None));
+        assert!(msg.contains("failed to parse attestation"), "got: {msg}");
+    }
+
+    // ---- real path: certificate chain --------------------------------------
+
+    #[test]
+    fn real_rejects_empty_cabundle() {
+        let p = payload(vec![], vec![], Some(vec![0; 32]), Some(vec![1; 64]));
+        let doc = cose_sign1(-35, Value::Bytes(p), vec![0; 96]);
+        let msg = certificate_err(verify_attestation(&doc, &zero_pcrs(), None));
+        assert!(msg.contains("empty certificate bundle"), "got: {msg}");
+    }
+
+    #[test]
+    fn real_rejects_foreign_root_at_cabundle_zero() {
+        let p = payload(
+            vec![vec![0x30, 0x03, 0x02, 0x01, 0x01]],
+            vec![],
+            Some(vec![0; 32]),
+            Some(vec![1; 64]),
+        );
+        let doc = cose_sign1(-35, Value::Bytes(p), vec![0; 96]);
+        let msg = certificate_err(verify_attestation(&doc, &zero_pcrs(), None));
+        assert!(msg.contains("not the AWS Nitro root CA"), "got: {msg}");
+    }
+
+    #[test]
+    fn real_rejects_undecodable_intermediate_certificate() {
+        // Root is genuine; cabundle[1] is not DER.
+        let p = payload(
+            vec![real::root_cert_der().to_vec(), vec![0xde, 0xad]],
+            vec![],
+            Some(vec![0; 32]),
+            Some(vec![1; 64]),
+        );
+        let doc = cose_sign1(-35, Value::Bytes(p), vec![0; 96]);
+        let msg = certificate_err(verify_attestation(&doc, &zero_pcrs(), None));
+        assert!(msg.contains("failed to parse cabundle[1]"), "got: {msg}");
+    }
+
+    #[test]
+    fn real_rejects_undecodable_signing_certificate() {
+        // Root is genuine and valid; the end-entity cert is garbage.
+        let p = payload(
+            vec![real::root_cert_der().to_vec()],
+            vec![0xde, 0xad, 0xbe, 0xef],
+            Some(vec![0; 32]),
+            Some(vec![1; 64]),
+        );
+        let doc = cose_sign1(-35, Value::Bytes(p), vec![0; 96]);
+        let msg = certificate_err(verify_attestation(&doc, &zero_pcrs(), None));
+        assert!(msg.contains("failed to parse signing cert"), "got: {msg}");
+    }
+
+    #[test]
+    fn real_root_alone_as_signing_cert_fails_cose_signature_not_chain() {
+        // Root as both trust anchor and leaf: the chain has one link, so no
+        // issuer step runs, the root's KeyUsage permits digitalSignature, and
+        // the check that finally fails is the COSE signature over the envelope
+        // (zeroes are not a valid signature). Proves the walk reaches the
+        // signature stage rather than rejecting on structure.
+        let p = payload(
+            vec![real::root_cert_der().to_vec()],
+            real::root_cert_der().to_vec(),
+            Some(vec![0; 32]),
+            Some(vec![1; 64]),
+        );
+        let doc = cose_sign1(-35, Value::Bytes(p), vec![1; 96]);
+        let msg = attestation_err(verify_attestation(&doc, &zero_pcrs(), None));
+        assert!(
+            msg.contains("COSE signature verification failed"),
+            "got: {msg}"
+        );
+    }
+
+    #[test]
+    fn real_rejects_short_cose_signature_after_chain() {
+        let p = payload(
+            vec![real::root_cert_der().to_vec()],
+            real::root_cert_der().to_vec(),
+            Some(vec![0; 32]),
+            Some(vec![1; 64]),
+        );
+        let doc = cose_sign1(-35, Value::Bytes(p), vec![1; 64]);
+        let msg = attestation_err(verify_attestation(&doc, &zero_pcrs(), None));
+        assert!(msg.contains("96-byte raw"), "got: {msg}");
+    }
+
+    #[test]
+    fn real_walks_a_duplicated_anchor_down_to_the_leaf_signature_check() {
+        // [root, root] then root as leaf: the second root is checked as a
+        // subordinate of the first. Its signature validates (self-signed) but
+        // it is not the trust anchor, so it consumes budget; with the root's
+        // BasicConstraints carrying no pathLen the budget is chain length (3)
+        // and the walk continues to the leaf's COSE check. Confirms the walk
+        // does not stop early on a duplicated anchor.
+        let p = payload(
+            vec![
+                real::root_cert_der().to_vec(),
+                real::root_cert_der().to_vec(),
+            ],
+            real::root_cert_der().to_vec(),
+            Some(vec![0; 32]),
+            Some(vec![1; 64]),
+        );
+        let doc = cose_sign1(-35, Value::Bytes(p), vec![1; 96]);
+        let msg = attestation_err(verify_attestation(&doc, &zero_pcrs(), None));
+        assert!(
+            msg.contains("COSE signature verification failed"),
+            "got: {msg}"
+        );
+    }
+
+    #[test]
+    fn cose_sig_structure_is_deterministic_and_binds_payload() {
+        let a =
+            real::CoseSign1::from_bytes(&cose_sign1(-35, Value::Bytes(vec![1, 2]), vec![0; 96]))
+                .unwrap();
+        let b =
+            real::CoseSign1::from_bytes(&cose_sign1(-35, Value::Bytes(vec![1, 2]), vec![0; 96]))
+                .unwrap();
+        let c =
+            real::CoseSign1::from_bytes(&cose_sign1(-35, Value::Bytes(vec![1, 3]), vec![0; 96]))
+                .unwrap();
+        assert_eq!(a.sig_structure().unwrap(), b.sig_structure().unwrap());
+        assert_ne!(a.sig_structure().unwrap(), c.sig_structure().unwrap());
+        // Sig_structure = ["Signature1", protected, external_aad, payload].
+        let v: Value = ciborium::from_reader(a.sig_structure().unwrap().as_slice()).unwrap();
+        let arr = v.as_array().unwrap();
+        assert_eq!(arr.len(), 4);
+        assert_eq!(arr[0], Value::Text("Signature1".into()));
+        assert_eq!(arr[1], Value::Bytes(protected(-35)));
+        assert_eq!(arr[2], Value::Bytes(vec![]));
+        assert_eq!(arr[3], Value::Bytes(vec![1, 2]));
+    }
+
+    #[test]
+    fn cose_sig_structure_with_detached_payload_uses_empty_bytes() {
+        let cose = real::CoseSign1::from_bytes(&cose_sign1(-35, Value::Null, vec![0; 96])).unwrap();
+        assert!(cose.payload.is_none());
+        let v: Value = ciborium::from_reader(cose.sig_structure().unwrap().as_slice()).unwrap();
+        assert_eq!(v.as_array().unwrap()[3], Value::Bytes(vec![]));
+    }
+
+    #[test]
+    fn embedded_root_certificate_parses_and_is_self_consistent() {
+        use x509_cert::der::Decode;
+        let der = real::root_cert_der();
+        let cert = x509_cert::Certificate::from_der(der).expect("embedded root parses");
+        assert_eq!(cert.tbs_certificate.issuer, cert.tbs_certificate.subject);
+        // Validity window published by AWS: 2019-10-28 .. 2049-10-28.
+        let nb = cert
+            .tbs_certificate
+            .validity
+            .not_before
+            .to_unix_duration()
+            .as_secs();
+        let na = cert
+            .tbs_certificate
+            .validity
+            .not_after
+            .to_unix_duration()
+            .as_secs();
+        assert_eq!(nb, 1_572_269_285);
+        assert_eq!(na, 2_519_044_085);
+        // Idempotent: the OnceLock returns the same bytes every time.
+        assert_eq!(der, real::root_cert_der());
+    }
+
+    // ---- shared helpers: PCRs --------------------------------------------
+
+    #[test]
+    fn verify_pcrs_accepts_exact_match_and_ignores_extra_indices() {
+        let mut pcrs = HashMap::new();
+        pcrs.insert(0, vec![1u8; 48]);
+        pcrs.insert(1, vec![2u8; 48]);
+        pcrs.insert(2, vec![3u8; 48]);
+        pcrs.insert(3, vec![9u8; 48]); // PCR3 is not part of the policy
+        let expected = ExpectedPcrs::new([1u8; 48], [2u8; 48], [3u8; 48]);
+        assert!(verify_pcrs(&pcrs, &expected).is_ok());
+    }
+
+    #[test]
+    fn verify_pcrs_reports_each_missing_index() {
+        for missing in 0..3u32 {
+            let mut pcrs = HashMap::new();
+            for i in 0..3u32 {
+                if i != missing {
+                    pcrs.insert(i, vec![0u8; 48]);
+                }
+            }
+            let msg = attestation_err(verify_pcrs(&pcrs, &ExpectedPcrs::zero()));
+            assert_eq!(msg, format!("Missing PCR{missing}"));
+        }
+    }
+
+    #[test]
+    fn verify_pcrs_reports_each_mismatched_index_with_hex() {
+        for bad in 0..3u32 {
+            let mut pcrs = HashMap::new();
+            for i in 0..3u32 {
+                pcrs.insert(i, vec![if i == bad { 0xab } else { 0 }; 48]);
+            }
+            match verify_pcrs(&pcrs, &ExpectedPcrs::zero()) {
+                Err(VerifyError::PcrMismatch {
+                    pcr,
+                    expected,
+                    actual,
+                }) => {
+                    assert_eq!(pcr, bad);
+                    assert_eq!(expected, "00".repeat(48));
+                    assert_eq!(actual, "ab".repeat(48));
+                }
+                other => panic!("PCR{bad}: expected PcrMismatch, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn verify_pcrs_rejects_wrong_length_value() {
+        // A 47-byte PCR0 can never equal a 48-byte expectation.
+        let mut pcrs = HashMap::new();
+        pcrs.insert(0, vec![0u8; 47]);
+        pcrs.insert(1, vec![0u8; 48]);
+        pcrs.insert(2, vec![0u8; 48]);
+        assert!(matches!(
+            verify_pcrs(&pcrs, &ExpectedPcrs::zero()),
+            Err(VerifyError::PcrMismatch { pcr: 0, .. })
+        ));
+    }
+
+    #[test]
+    fn verify_pcrs_checks_lowest_index_first() {
+        // With PCR0 and PCR2 both wrong the error names PCR0.
+        let mut pcrs = HashMap::new();
+        pcrs.insert(0, vec![1u8; 48]);
+        pcrs.insert(1, vec![0u8; 48]);
+        pcrs.insert(2, vec![1u8; 48]);
+        assert!(matches!(
+            verify_pcrs(&pcrs, &ExpectedPcrs::zero()),
+            Err(VerifyError::PcrMismatch { pcr: 0, .. })
+        ));
+    }
+
+    // ---- shared helpers: nonce -----------------------------------------------
+
+    #[test]
+    fn check_nonce_requires_presence_even_without_expectation() {
+        let msg = attestation_err(check_nonce(&None, None));
+        assert!(msg.contains("missing nonce"), "got: {msg}");
+        let msg = attestation_err(check_nonce(&None, Some(&[0u8; 32])));
+        assert!(msg.contains("missing nonce"), "got: {msg}");
+    }
+
+    #[test]
+    fn check_nonce_returns_document_nonce_when_no_expectation() {
+        let got = check_nonce(&Some(vec![7u8; 32]), None).unwrap();
+        assert_eq!(got, vec![7u8; 32]);
+        // Any length passes through when nothing is expected; the caller's
+        // replay guard is responsible for the shape.
+        let got = check_nonce(&Some(vec![1, 2, 3]), None).unwrap();
+        assert_eq!(got, vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn check_nonce_enforces_byte_equality_with_expectation() {
+        let exp = [5u8; 32];
+        assert_eq!(
+            check_nonce(&Some(exp.to_vec()), Some(&exp)).unwrap(),
+            exp.to_vec()
+        );
+        let mut flipped = exp;
+        flipped[31] ^= 1;
+        let msg = attestation_err(check_nonce(&Some(flipped.to_vec()), Some(&exp)));
+        assert_eq!(msg, "nonce mismatch");
+        // A prefix of the expected nonce is not equal to it.
+        let msg = attestation_err(check_nonce(&Some(exp[..31].to_vec()), Some(&exp)));
+        assert_eq!(msg, "nonce mismatch");
+    }
+
+    // ---- ExpectedPcrs ---------------------------------------------------------
+
+    #[test]
+    fn expected_pcrs_new_keeps_each_field_in_place() {
+        let p = ExpectedPcrs::new([1u8; 48], [2u8; 48], [3u8; 48]);
+        assert_eq!(p.pcr0, [1u8; 48]);
+        assert_eq!(p.pcr1, [2u8; 48]);
+        assert_eq!(p.pcr2, [3u8; 48]);
+        let z = ExpectedPcrs::zero();
+        assert!(z.pcr0.iter().chain(&z.pcr1).chain(&z.pcr2).all(|&b| b == 0));
+    }
+
+    #[test]
+    fn expected_pcrs_from_hex_accepts_upper_and_mixed_case() {
+        let upper = "AB".repeat(48);
+        let mixed = "aB".repeat(48);
+        let lower = "ab".repeat(48);
+        let p = ExpectedPcrs::from_hex(&upper, &mixed, &lower).unwrap();
+        assert_eq!(p.pcr0, [0xab; 48]);
+        assert_eq!(p.pcr1, [0xab; 48]);
+        assert_eq!(p.pcr2, [0xab; 48]);
+    }
+
+    #[test]
+    fn expected_pcrs_from_hex_reports_the_first_bad_field() {
+        let ok = "00".repeat(48);
+        let short = "00".repeat(47);
+        let long = "00".repeat(49);
+        let odd = "0".repeat(95);
+        let prefixed = format!("0x{}", "00".repeat(47)); // 'x' is not hex
+        for (i, bad) in [
+            short.as_str(),
+            long.as_str(),
+            odd.as_str(),
+            prefixed.as_str(),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            assert!(
+                ExpectedPcrs::from_hex(bad, &ok, &ok).is_err(),
+                "case {i} pcr0"
+            );
+            assert!(
+                ExpectedPcrs::from_hex(&ok, bad, &ok).is_err(),
+                "case {i} pcr1"
+            );
+            assert!(
+                ExpectedPcrs::from_hex(&ok, &ok, bad).is_err(),
+                "case {i} pcr2"
+            );
+        }
+        let msg = attestation_err(ExpectedPcrs::from_hex(&short, &ok, &ok));
+        assert_eq!(msg, "PCR must be 48 bytes");
+        let msg = attestation_err(ExpectedPcrs::from_hex(&ok, &ok, &odd));
+        assert!(msg.to_lowercase().contains("odd"), "got: {msg}");
+    }
+
+    #[test]
+    fn expected_pcrs_from_hex_rejects_empty_strings() {
+        assert!(ExpectedPcrs::from_hex("", "", "").is_err());
+    }
+
+    // ---- VerifyError --------------------------------------------------------
+
+    #[test]
+    fn verify_error_display_texts() {
+        assert_eq!(
+            VerifyError::Attestation("x".into()).to_string(),
+            "attestation error: x"
+        );
+        assert_eq!(
+            VerifyError::Certificate("y".into()).to_string(),
+            "certificate error: y"
+        );
+        assert_eq!(
+            VerifyError::PcrMismatch {
+                pcr: 2,
+                expected: "aa".into(),
+                actual: "bb".into(),
+            }
+            .to_string(),
+            "PCR mismatch: PCR2 expected=aa, actual=bb"
+        );
+    }
+
+    // ---- mock path (feature-gated) ----------------------------------------
+
+    #[cfg(feature = "mock")]
+    mod mock_coverage {
+        use super::*;
+
+        #[test]
+        fn mock_document_with_custom_pcrs_verifies_against_the_same_pcrs() {
+            let nonce = [9u8; 32];
+            let pcrs = ExpectedPcrs::new([1u8; 48], [2u8; 48], [3u8; 48]);
+            let doc = build_mock_document_with_pcrs(&nonce, Some(&[4u8; 64]), None, &pcrs).unwrap();
+            let v = verify_mock_attestation(&doc, &pcrs, Some(&nonce)).unwrap();
+            assert_eq!(v.pcrs[&0], vec![1u8; 48]);
+            assert_eq!(v.pcrs[&1], vec![2u8; 48]);
+            assert_eq!(v.pcrs[&2], vec![3u8; 48]);
+            assert_eq!(v.enclave_pubkey, vec![4u8; 64]);
+            assert!(v.user_data.is_none());
+            assert!(v.timestamp > 0, "mock doc stamps the build time");
+        }
+
+        #[test]
+        fn mock_rejects_mismatch_on_pcr1_and_pcr2_individually() {
+            let nonce = [9u8; 32];
+            let doc = build_mock_document(&nonce, Some(&[0u8; 32]), None).unwrap();
+            let bad1 = ExpectedPcrs::new([0u8; 48], [1u8; 48], [0u8; 48]);
+            assert!(matches!(
+                verify_mock_attestation(&doc, &bad1, Some(&nonce)),
+                Err(VerifyError::PcrMismatch { pcr: 1, .. })
+            ));
+            let bad2 = ExpectedPcrs::new([0u8; 48], [0u8; 48], [1u8; 48]);
+            assert!(matches!(
+                verify_mock_attestation(&doc, &bad2, Some(&nonce)),
+                Err(VerifyError::PcrMismatch { pcr: 2, .. })
+            ));
+        }
+
+        #[test]
+        fn mock_rejects_document_without_nonce() {
+            let doc = payload(vec![], vec![], None, Some(vec![1u8; 32]));
+            let msg = attestation_err(verify_mock_attestation(&doc, &ExpectedPcrs::zero(), None));
+            assert!(msg.contains("missing nonce"), "got: {msg}");
+        }
+
+        #[test]
+        fn mock_checks_nonce_before_pcrs_and_pcrs_before_pubkey() {
+            // Wrong nonce AND wrong PCRs AND no pubkey: the nonce is reported.
+            let doc = payload(vec![], vec![], Some(vec![1u8; 32]), None);
+            let bad = ExpectedPcrs::new([1u8; 48], [0u8; 48], [0u8; 48]);
+            let msg = attestation_err(verify_mock_attestation(&doc, &bad, Some(&[2u8; 32])));
+            assert_eq!(msg, "nonce mismatch");
+            // Right nonce, wrong PCRs, no pubkey: PCRs are reported.
+            assert!(matches!(
+                verify_mock_attestation(&doc, &bad, Some(&[1u8; 32])),
+                Err(VerifyError::PcrMismatch { pcr: 0, .. })
+            ));
+            // Right nonce and PCRs, no pubkey: pubkey is reported.
+            let msg = attestation_err(verify_mock_attestation(
+                &doc,
+                &ExpectedPcrs::zero(),
+                Some(&[1u8; 32]),
+            ));
+            assert_eq!(msg, "missing public key");
+        }
+
+        #[test]
+        fn mock_document_is_not_accepted_by_the_real_verifier() {
+            // A raw-CBOR mock doc is a map, not a COSE_Sign1 array, so the
+            // production path must never accept it.
+            let doc = build_mock_document(&[0u8; 32], Some(&[1u8; 32]), None).unwrap();
+            let msg = attestation_err(verify_attestation(&doc, &ExpectedPcrs::zero(), None));
+            assert!(msg.contains("must be array"), "got: {msg}");
+        }
+
+        #[test]
+        fn mock_empty_pubkey_and_user_data_roundtrip() {
+            // An empty (but present) pubkey is "present": binding is the
+            // caller's concern, presence is the verifier's.
+            let nonce = [3u8; 32];
+            let doc = build_mock_document(&nonce, Some(&[]), Some(&[])).unwrap();
+            let v = verify_mock_attestation(&doc, &ExpectedPcrs::zero(), Some(&nonce)).unwrap();
+            assert!(v.enclave_pubkey.is_empty());
+            assert_eq!(v.user_data, Some(vec![]));
         }
     }
 }

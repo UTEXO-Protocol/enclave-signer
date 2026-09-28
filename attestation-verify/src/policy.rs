@@ -386,3 +386,171 @@ mod tests {
         assert_ne!(one.to_bytes(), two.to_bytes());
     }
 }
+
+// Exact byte-layout tests: the module docs call the discriminants and field
+// order a wire contract, so pin the literal encoding rather than only the
+// "different inputs differ" property the tests above check.
+#[cfg(test)]
+mod layout_tests {
+    use super::*;
+
+    #[test]
+    fn development_encodes_to_exactly_two_bytes() {
+        assert_eq!(
+            AttestedPolicy::Development.to_bytes(),
+            vec![POLICY_COMMITMENT_V2, 0x00]
+        );
+    }
+
+    #[test]
+    fn version_tag_is_two() {
+        assert_eq!(POLICY_COMMITMENT_V2, 2);
+    }
+
+    #[test]
+    fn enum_discriminants_are_pinned() {
+        assert_eq!(EvmDataSource::Disabled as u8, 0);
+        assert_eq!(EvmDataSource::RawRpc as u8, 1);
+        assert_eq!(EvmDataSource::HeliosVerified as u8, 2);
+        assert_eq!(BtcDataSource::SpvVerified as u8, 1);
+        assert_eq!(AttestationMode::Mock as u8, 0);
+        assert_eq!(AttestationMode::Real as u8, 1);
+    }
+
+    #[test]
+    fn production_encodes_field_by_field_in_documented_order() {
+        let p = AttestedPolicy::Production {
+            allow_vanilla_psbt: true,
+            attestation: AttestationMode::Real,
+            evm_source: EvmDataSource::RawRpc,
+            btc_source: BtcDataSource::SpvVerified,
+            chain_id: 0x0102_0304_0506_0708,
+            bridge_contract: [0xBC; 20],
+            rgb_asset_id: "ab".into(),
+            evm_checkpoint: None,
+            gas_tx_allowed_to: [0xAA; 20],
+            gas_tx_max_gas_limit: 0x11,
+            gas_tx_max_fee_per_gas: 0x22,
+            gas_tx_max_value_wei: 0x33,
+            gas_tx_allowed_selectors: vec![[2, 2, 2, 2], [1, 1, 1, 1]],
+        };
+        let mut want = vec![POLICY_COMMITMENT_V2, 0x01, 1, 1, 1, 1];
+        want.extend_from_slice(&[1, 2, 3, 4, 5, 6, 7, 8]);
+        want.extend_from_slice(&[0xBC; 20]);
+        want.extend_from_slice(&[0, 0, 0, 2, b'a', b'b']);
+        want.push(0x00); // no checkpoint
+        want.extend_from_slice(&[0xAA; 20]);
+        want.extend_from_slice(&0x11u64.to_be_bytes());
+        want.extend_from_slice(&0x22u128.to_be_bytes());
+        want.extend_from_slice(&0x33u128.to_be_bytes());
+        want.extend_from_slice(&[0, 0, 0, 2]);
+        want.extend_from_slice(&[1, 1, 1, 1, 2, 2, 2, 2]); // sorted
+        assert_eq!(p.to_bytes(), want);
+        // Fixed-width part + asset + selectors.
+        assert_eq!(
+            p.to_bytes().len(),
+            1 + 1 + 4 + 8 + 20 + 4 + 2 + 1 + 20 + 8 + 16 + 16 + 4 + 8
+        );
+    }
+
+    #[test]
+    fn production_checkpoint_is_presence_byte_plus_32_bytes() {
+        let base = AttestedPolicy::Production {
+            allow_vanilla_psbt: false,
+            attestation: AttestationMode::Mock,
+            evm_source: EvmDataSource::HeliosVerified,
+            btc_source: BtcDataSource::SpvVerified,
+            chain_id: 1,
+            bridge_contract: [0; 20],
+            rgb_asset_id: String::new(),
+            evm_checkpoint: Some([0xCC; 32]),
+            gas_tx_allowed_to: [0; 20],
+            gas_tx_max_gas_limit: 0,
+            gas_tx_max_fee_per_gas: 0,
+            gas_tx_max_value_wei: 0,
+            gas_tx_allowed_selectors: vec![],
+        };
+        let bytes = base.to_bytes();
+        // Header (6) + chain_id (8) + contract (20) + asset len (4) + 0 asset.
+        let cp_at = 6 + 8 + 20 + 4;
+        assert_eq!(bytes[cp_at], 0x01);
+        assert_eq!(&bytes[cp_at + 1..cp_at + 33], &[0xCC; 32]);
+        // Mock attestation and vanilla=false show up as their discriminants.
+        assert_eq!(&bytes[2..6], &[0, 0, 2, 1]);
+        // Empty selector list is a zero count at the very end.
+        assert_eq!(&bytes[bytes.len() - 4..], &[0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn attestation_mode_and_btc_source_change_the_bytes() {
+        let make = |attestation: AttestationMode| AttestedPolicy::Production {
+            allow_vanilla_psbt: false,
+            attestation,
+            evm_source: EvmDataSource::Disabled,
+            btc_source: BtcDataSource::SpvVerified,
+            chain_id: 1,
+            bridge_contract: [1; 20],
+            rgb_asset_id: "a".into(),
+            evm_checkpoint: None,
+            gas_tx_allowed_to: [0; 20],
+            gas_tx_max_gas_limit: 0,
+            gas_tx_max_fee_per_gas: 0,
+            gas_tx_max_value_wei: 0,
+            gas_tx_allowed_selectors: vec![],
+        };
+        assert_ne!(
+            make(AttestationMode::Mock).to_bytes(),
+            make(AttestationMode::Real).to_bytes()
+        );
+    }
+
+    #[test]
+    fn encoding_is_deterministic_across_calls_and_clones() {
+        let p = AttestedPolicy::Production {
+            allow_vanilla_psbt: true,
+            attestation: AttestationMode::Real,
+            evm_source: EvmDataSource::RawRpc,
+            btc_source: BtcDataSource::SpvVerified,
+            chain_id: 42,
+            bridge_contract: [7; 20],
+            rgb_asset_id: "rgb:asset".into(),
+            evm_checkpoint: Some([1; 32]),
+            gas_tx_allowed_to: [9; 20],
+            gas_tx_max_gas_limit: 1,
+            gas_tx_max_fee_per_gas: 2,
+            gas_tx_max_value_wei: 3,
+            gas_tx_allowed_selectors: vec![[4, 4, 4, 4]],
+        };
+        assert_eq!(p.to_bytes(), p.clone().to_bytes());
+        assert_eq!(p, p.clone());
+    }
+
+    #[test]
+    fn to_bytes_does_not_mutate_the_selector_order_of_the_value() {
+        // Canonicalisation happens on a copy; the policy value itself keeps
+        // the operator's order so logs match the env.
+        let p = AttestedPolicy::Production {
+            allow_vanilla_psbt: false,
+            attestation: AttestationMode::Real,
+            evm_source: EvmDataSource::RawRpc,
+            btc_source: BtcDataSource::SpvVerified,
+            chain_id: 1,
+            bridge_contract: [1; 20],
+            rgb_asset_id: "a".into(),
+            evm_checkpoint: None,
+            gas_tx_allowed_to: [0; 20],
+            gas_tx_max_gas_limit: 0,
+            gas_tx_max_fee_per_gas: 0,
+            gas_tx_max_value_wei: 0,
+            gas_tx_allowed_selectors: vec![[9, 9, 9, 9], [1, 1, 1, 1]],
+        };
+        let _ = p.to_bytes();
+        match &p {
+            AttestedPolicy::Production {
+                gas_tx_allowed_selectors,
+                ..
+            } => assert_eq!(gas_tx_allowed_selectors, &vec![[9, 9, 9, 9], [1, 1, 1, 1]]),
+            AttestedPolicy::Development => unreachable!(),
+        }
+    }
+}

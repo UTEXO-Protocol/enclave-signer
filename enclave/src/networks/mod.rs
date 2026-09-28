@@ -431,3 +431,399 @@ mod tests {
         assert!(err.to_string().contains("unsupported"));
     }
 }
+
+#[cfg(test)]
+mod dispatch_tests {
+    use super::*;
+    #[cfg(feature = "ccd")]
+    use crate::proto::CcdSource;
+    #[cfg(not(feature = "rgb-validation"))]
+    use crate::proto::RgbSource;
+    use crate::proto::{EvmDestination, EvmSource, RgbDestination};
+    #[cfg(feature = "spv")]
+    use std::sync::Mutex;
+
+    /// Same shape as the EVM validator's own test helper, so it compiles under
+    /// every feature combination CI builds.
+    fn with_ctx<T>(config: &BridgeConfig, f: impl FnOnce(&ValidationContext<'_>) -> T) -> T {
+        #[cfg(feature = "spv")]
+        let header_chain = Mutex::new(crate::networks::rgb::spv::HeaderChain::new(
+            crate::networks::rgb::spv::Network::Regtest,
+            crate::networks::rgb::spv::checkpoint_for(crate::networks::rgb::spv::Network::Regtest),
+        ));
+        let ctx = ValidationContext {
+            bridge_config: config,
+            #[cfg(feature = "rgb-validation")]
+            rgb_validator: None,
+            #[cfg(feature = "spv")]
+            header_chain: &header_chain,
+            #[cfg(feature = "rgb-validation")]
+            self_owned_psbt_outputs: None,
+            #[cfg(feature = "rgb-validation")]
+            bridge_events: &[],
+        };
+        f(&ctx)
+    }
+
+    fn pinned() -> BridgeConfig {
+        BridgeConfig {
+            chain_id: 1,
+            bridge_contract: [0xAA; 20],
+            rgb_asset_id: "rgb:test".into(),
+            ..Default::default()
+        }
+    }
+
+    fn evm_source(tx_hash_len: usize) -> SourceNetwork {
+        SourceNetwork::EvmSource(EvmSource {
+            tx_hash: vec![0xAA; tx_hash_len],
+            event_valid: false,
+            event_finalized: false,
+            token: vec![],
+            recipient: vec![],
+            commission: 3,
+            funds_in_operation_id: vec![],
+        })
+    }
+
+    fn funds_out_calldata(amount: u64) -> Vec<u8> {
+        use crate::networks::evm::validation::{fundsOutCall, FundsOutParams};
+        use alloy_primitives::{Address, Bytes, U256};
+        use alloy_sol_types::SolCall;
+        fundsOutCall {
+            params: FundsOutParams {
+                recipient: Address::from([0x22; 20]),
+                amount: U256::from(amount),
+                burnId: U256::from(7u64),
+                sourceChainId: U256::from(1u64),
+                destinationChainId: U256::from(1u64),
+                sourceAddress: String::new(),
+                proof: Bytes::new(),
+                settlementData: Bytes::new(),
+            },
+        }
+        .abi_encode()
+    }
+
+    fn evm_destination(amount: u64) -> DestinationNetwork {
+        DestinationNetwork::EvmDestination(EvmDestination {
+            call_data: funds_out_calldata(amount),
+            nonce: 1,
+            deadline: u64::MAX,
+            chain_id: 1,
+            proxy_contract: vec![0xAA; 20],
+            calldata_amount: amount,
+            calldata_commission: 0,
+            lz_release: None,
+        })
+    }
+
+    /// A BIP-174-valid PSBT with one input and one output, enough to pass
+    /// the RGB destination's shape check without any signing material.
+    #[allow(dead_code)]
+    fn minimal_psbt() -> Vec<u8> {
+        use bitcoin::hashes::Hash;
+        use bitcoin::{
+            Amount, OutPoint, ScriptBuf, Sequence, Transaction, TxIn, TxOut, Txid, Witness,
+        };
+        let tx = Transaction {
+            version: bitcoin::transaction::Version(2),
+            lock_time: bitcoin::absolute::LockTime::ZERO,
+            input: vec![TxIn {
+                previous_output: OutPoint {
+                    txid: Txid::from_byte_array([0u8; 32]),
+                    vout: 0,
+                },
+                script_sig: ScriptBuf::new(),
+                sequence: Sequence::MAX,
+                witness: Witness::new(),
+            }],
+            output: vec![TxOut {
+                value: Amount::from_sat(1_000),
+                script_pubkey: ScriptBuf::new(),
+            }],
+        };
+        bitcoin::psbt::Psbt::from_unsigned_tx(tx)
+            .unwrap()
+            .serialize()
+    }
+
+    #[allow(dead_code)]
+    fn rgb_destination(psbt_bytes: Vec<u8>, amount: u64) -> DestinationNetwork {
+        DestinationNetwork::RgbDestination(RgbDestination {
+            operation_idx: 1,
+            psbt_bytes,
+            psbt_output_amount: amount,
+            asset_id: "rgb:test".into(),
+            consignment: vec![],
+            mint_ancestors: Vec::new(),
+            consignment_hash: vec![],
+        })
+    }
+
+    // ---- amount comparison --------------------------------------------------
+
+    #[test]
+    fn amount_check_accepts_equal_and_surplus_source() {
+        assert!(validate_amount_covers_destination(10, 10).is_ok());
+        assert!(validate_amount_covers_destination(11, 10).is_ok());
+        assert!(validate_amount_covers_destination(u64::MAX, 0).is_ok());
+        assert!(validate_amount_covers_destination(0, 0).is_ok());
+    }
+
+    #[test]
+    fn amount_check_rejects_any_shortfall_with_both_numbers() {
+        match validate_amount_covers_destination(9, 10) {
+            Err(EnclaveError::CrossCheck(msg)) => {
+                assert!(msg.contains("(9)") && msg.contains("(10)"), "{msg}");
+            }
+            other => panic!("expected CrossCheck, got {other:?}"),
+        }
+        assert!(validate_amount_covers_destination(0, 1).is_err());
+        assert!(validate_amount_covers_destination(u64::MAX - 1, u64::MAX).is_err());
+    }
+
+    // ---- operation-id binding (kept for when the binding returns) ----------
+
+    #[test]
+    fn operation_ids_match_when_both_present_and_equal() {
+        let a = RouteProof {
+            amount: 1,
+            operation_id: Some("op".into()),
+        };
+        assert!(validate_operation_ids_match(&a, &a.clone()).is_ok());
+    }
+
+    #[test]
+    fn operation_ids_reject_mismatch_and_each_missing_side() {
+        let with = |id: Option<&str>| RouteProof {
+            amount: 1,
+            operation_id: id.map(str::to_string),
+        };
+        let err = validate_operation_ids_match(&with(Some("a")), &with(Some("b"))).unwrap_err();
+        assert!(err.to_string().contains("operation mismatch"), "{err}");
+        let err = validate_operation_ids_match(&with(None), &with(Some("b"))).unwrap_err();
+        assert!(err.to_string().contains("source route proof"), "{err}");
+        let err = validate_operation_ids_match(&with(Some("a")), &with(None)).unwrap_err();
+        assert!(err.to_string().contains("destination route proof"), "{err}");
+        assert!(validate_operation_ids_match(&with(None), &with(None)).is_err());
+    }
+
+    // ---- validate_source dispatch --------------------------------------------
+
+    #[test]
+    fn evm_source_dispatches_and_binds_the_request_amount() {
+        with_ctx(&pinned(), |ctx| {
+            let out = validate_source(500, &evm_source(32), ctx).unwrap();
+            assert_eq!(
+                out.proof,
+                RouteProof {
+                    amount: 500,
+                    operation_id: None
+                }
+            );
+            #[cfg(feature = "rgb-validation")]
+            assert!(out.rgb_consignment.is_none());
+        });
+    }
+
+    #[test]
+    fn evm_source_with_a_bad_tx_hash_is_rejected_at_dispatch() {
+        with_ctx(&pinned(), |ctx| {
+            let err = validate_source(500, &evm_source(31), ctx)
+                .err()
+                .expect("short tx hash must fail");
+            assert!(matches!(err, EnclaveError::CrossCheck(_)), "{err}");
+            assert!(err.to_string().contains("evm_tx_hash"), "{err}");
+        });
+    }
+
+    #[cfg(not(feature = "rgb-validation"))]
+    #[test]
+    fn rgb_source_fails_closed_on_a_build_without_the_validator() {
+        let source = SourceNetwork::RgbSource(RgbSource {
+            consignment_valid: true,
+            asset_id: "rgb:test".into(),
+            consignment: vec![1, 2, 3],
+            consignment_hash: vec![0; 32],
+            merkle_proofs: vec![],
+            commission: 0,
+            mint_ancestors: vec![],
+        });
+        with_ctx(&pinned(), |ctx| match validate_source(1, &source, ctx) {
+            Err(EnclaveError::CrossCheck(msg)) => {
+                assert!(msg.contains("rgb-validation"), "{msg}")
+            }
+            other => panic!("expected CrossCheck, got {:?}", other.map(|p| p.proof)),
+        });
+    }
+
+    #[cfg(feature = "ccd")]
+    #[test]
+    fn ccd_source_dispatches_on_a_ccd_build() {
+        let source = SourceNetwork::CcdSource(CcdSource {
+            tx_hash: vec![0xCC; 32],
+            commission: 1,
+        });
+        with_ctx(&pinned(), |ctx| {
+            let out = validate_source(77, &source, ctx).unwrap();
+            assert_eq!(out.proof.amount, 77);
+            assert!(out.proof.operation_id.is_none());
+        });
+        let bad = SourceNetwork::CcdSource(CcdSource {
+            tx_hash: vec![0xCC; 16],
+            commission: 1,
+        });
+        with_ctx(&pinned(), |ctx| {
+            assert!(matches!(
+                validate_source(77, &bad, ctx),
+                Err(EnclaveError::CrossCheck(_))
+            ));
+        });
+    }
+
+    #[cfg(not(feature = "ccd"))]
+    #[test]
+    fn ccd_source_is_refused_on_a_build_without_ccd() {
+        let source = SourceNetwork::CcdSource(crate::proto::CcdSource {
+            tx_hash: vec![0xCC; 32],
+            commission: 1,
+        });
+        with_ctx(&pinned(), |ctx| match validate_source(77, &source, ctx) {
+            Err(EnclaveError::InvalidRequest(msg)) => {
+                assert!(msg.contains("not supported"), "{msg}")
+            }
+            other => panic!("expected InvalidRequest, got {:?}", other.map(|p| p.proof)),
+        });
+    }
+
+    // ---- validate_destination dispatch ---------------------------------------
+
+    #[test]
+    fn evm_destination_dispatches_with_decoded_calldata_and_no_rgb_seals() {
+        with_ctx(&pinned(), |ctx| {
+            let out = validate_destination(1_000, 0, &evm_destination(1_000), ctx).unwrap();
+            assert_eq!(out.proof.amount, 1_000);
+            assert!(out.proof.operation_id.is_none());
+            assert!(out.rgb_recipient_seals.is_empty());
+            let params = out.evm_funds_out.expect("pools route decodes its params");
+            assert_eq!(params.amount, alloy_primitives::U256::from(1_000u64));
+            assert_eq!(params.recipient.into_array(), [0x22; 20]);
+        });
+    }
+
+    #[test]
+    fn evm_destination_rejects_an_unknown_selector_at_dispatch() {
+        let mut bad = evm_destination(1_000);
+        if let DestinationNetwork::EvmDestination(d) = &mut bad {
+            d.call_data[0] ^= 0xff;
+        }
+        with_ctx(&pinned(), |ctx| {
+            let err = validate_destination(1_000, 0, &bad, ctx)
+                .err()
+                .expect("unknown selector must fail");
+            assert!(matches!(err, EnclaveError::CrossCheck(_)), "{err}");
+            assert!(err.to_string().contains("selector"), "{err}");
+        });
+    }
+
+    #[test]
+    fn evm_destination_ignores_source_commission_in_its_proof() {
+        // The commission argument only feeds the RGB destination sum.
+        with_ctx(&pinned(), |ctx| {
+            let a = validate_destination(1_000, 0, &evm_destination(1_000), ctx).unwrap();
+            let b = validate_destination(1_000, 999, &evm_destination(1_000), ctx).unwrap();
+            assert_eq!(a.proof, b.proof);
+        });
+    }
+
+    #[cfg(all(not(feature = "rgb-validation"), not(feature = "dev-mode")))]
+    #[test]
+    fn rgb_destination_without_the_validator_sums_wire_amount_and_commission() {
+        with_ctx(&pinned(), |ctx| {
+            let out =
+                validate_destination(0, 25, &rgb_destination(minimal_psbt(), 100), ctx).unwrap();
+            assert_eq!(out.proof.amount, 125);
+            assert!(out.proof.operation_id.is_none());
+            assert!(out.evm_funds_out.is_none());
+            assert!(out.rgb_recipient_seals.is_empty());
+        });
+    }
+
+    #[cfg(all(not(feature = "rgb-validation"), not(feature = "dev-mode")))]
+    #[test]
+    fn rgb_destination_amount_plus_commission_overflow_is_rejected() {
+        with_ctx(&pinned(), |ctx| {
+            match validate_destination(0, 1, &rgb_destination(minimal_psbt(), u64::MAX), ctx) {
+                Err(EnclaveError::CrossCheck(msg)) => assert!(msg.contains("overflow"), "{msg}"),
+                other => panic!("expected CrossCheck, got {:?}", other.map(|p| p.proof)),
+            }
+            // Exactly at the ceiling is fine.
+            let out = validate_destination(0, 0, &rgb_destination(minimal_psbt(), u64::MAX), ctx)
+                .unwrap();
+            assert_eq!(out.proof.amount, u64::MAX);
+        });
+    }
+
+    #[cfg(not(feature = "dev-mode"))]
+    #[test]
+    fn rgb_destination_with_malformed_psbt_bytes_is_rejected_before_any_sum() {
+        with_ctx(&pinned(), |ctx| {
+            for bytes in [Vec::new(), b"psbt".to_vec(), vec![0xff; 40]] {
+                let r = validate_destination(0, 0, &rgb_destination(bytes.clone(), 1), ctx);
+                assert!(r.is_err(), "{} bytes must be rejected", bytes.len());
+            }
+        });
+    }
+
+    // ---- route pairing ---------------------------------------------------------
+
+    #[test]
+    fn route_proofs_evm_to_evm_is_unsupported() {
+        let p = RouteProof {
+            amount: 1,
+            operation_id: None,
+        };
+        let err = validate_route_proofs(&evm_source(32), &evm_destination(1), &p, &p).unwrap_err();
+        assert!(matches!(err, EnclaveError::InvalidRequest(_)), "{err}");
+    }
+
+    #[cfg(feature = "ccd")]
+    #[test]
+    fn route_proofs_ccd_to_rgb_is_unsupported() {
+        let p = RouteProof {
+            amount: 1,
+            operation_id: None,
+        };
+        let ccd = SourceNetwork::CcdSource(CcdSource {
+            tx_hash: vec![0xCC; 32],
+            commission: 0,
+        });
+        let err =
+            validate_route_proofs(&ccd, &rgb_destination(minimal_psbt(), 1), &p, &p).unwrap_err();
+        assert!(matches!(err, EnclaveError::InvalidRequest(_)), "{err}");
+    }
+
+    #[test]
+    fn route_proof_equality_covers_both_fields() {
+        let a = RouteProof {
+            amount: 1,
+            operation_id: Some("x".into()),
+        };
+        assert_eq!(a, a.clone());
+        assert_ne!(
+            a,
+            RouteProof {
+                amount: 2,
+                operation_id: Some("x".into())
+            }
+        );
+        assert_ne!(
+            a,
+            RouteProof {
+                amount: 1,
+                operation_id: None
+            }
+        );
+    }
+}

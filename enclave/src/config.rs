@@ -627,3 +627,341 @@ mod tests {
         assert!(!is_loopback_url("http://evil.com/127.0.0.1"));
     }
 }
+
+/// `from_env` reads process-global state, so these tests serialise on one
+/// mutex, set exactly the variables they need, and clear them again. The
+/// only other readers of these names are the enclave binary and the
+/// integration harness, both of which run in other processes.
+#[cfg(test)]
+mod env_tests {
+    use super::*;
+    use std::sync::{Mutex, MutexGuard};
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    const BRIDGE_VARS: &[&str] = &[
+        "EVM_CHAIN_ID",
+        "EVM_PROXY_CONTRACT_ADDRESS",
+        "RGB_ASSET_ID",
+        "GAS_TX_ALLOWED_TO",
+        "GAS_TX_MAX_GAS_LIMIT",
+        "GAS_TX_MAX_FEE_PER_GAS",
+        "GAS_TX_ALLOWED_SELECTORS",
+        "GAS_TX_MAX_VALUE_WEI",
+        "BTC_MAX_TOTAL_SATS",
+        "RGB_MAX_UNOWNED_SATS",
+        "BTC_MAX_UNOWNED_SATS",
+        "FUNDS_IN_CONTRACT",
+        "MAX_CONSIGNMENT_BYTES",
+        "MAX_MERKLE_PROOFS",
+        "MAX_TOTAL_PROOF_BYTES",
+        "EVM_RPC_URL",
+        "EVM_MIN_CONFIRMATIONS",
+    ];
+
+    /// Holds the lock and clears every variable on construction and drop, so a
+    /// failing assertion in one test cannot leak state into the next.
+    struct EnvScope {
+        _guard: MutexGuard<'static, ()>,
+    }
+
+    impl EnvScope {
+        fn new() -> Self {
+            let guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+            for v in BRIDGE_VARS {
+                std::env::remove_var(v);
+            }
+            Self { _guard: guard }
+        }
+        fn set(&self, pairs: &[(&str, &str)]) {
+            for (k, v) in pairs {
+                std::env::set_var(k, v);
+            }
+        }
+    }
+
+    impl Drop for EnvScope {
+        fn drop(&mut self) {
+            for v in BRIDGE_VARS {
+                std::env::remove_var(v);
+            }
+        }
+    }
+
+    fn assert_is_default(c: &BridgeConfig) {
+        let d = BridgeConfig::default();
+        assert_eq!(c.chain_id, d.chain_id);
+        assert_eq!(c.bridge_contract, d.bridge_contract);
+        assert_eq!(c.rgb_asset_id, d.rgb_asset_id);
+        assert_eq!(c.gas_tx_allowed_to, d.gas_tx_allowed_to);
+        assert_eq!(c.gas_tx_max_gas_limit, d.gas_tx_max_gas_limit);
+        assert_eq!(c.gas_tx_max_fee_per_gas, d.gas_tx_max_fee_per_gas);
+        assert_eq!(c.gas_tx_allowed_selectors, d.gas_tx_allowed_selectors);
+        assert_eq!(c.gas_tx_max_value_wei, d.gas_tx_max_value_wei);
+        assert_eq!(c.btc_max_total_sats, d.btc_max_total_sats);
+        assert_eq!(c.rgb_max_unowned_sats, d.rgb_max_unowned_sats);
+        assert_eq!(c.btc_max_unowned_sats, d.btc_max_unowned_sats);
+        assert_eq!(c.funds_in_contract, d.funds_in_contract);
+        assert_eq!(c.max_consignment_bytes, d.max_consignment_bytes);
+        assert_eq!(c.max_merkle_proofs, d.max_merkle_proofs);
+        assert_eq!(c.max_total_proof_bytes, d.max_total_proof_bytes);
+    }
+
+    #[test]
+    fn empty_env_is_the_default_unconfigured_config() {
+        let _env = EnvScope::new();
+        let c = BridgeConfig::from_env();
+        assert_is_default(&c);
+        assert!(!c.is_configured());
+        assert!(!c.is_partially_configured());
+        assert!(!c.allows_vanilla_btc());
+    }
+
+    #[test]
+    fn default_caps_are_the_documented_constants() {
+        let d = BridgeConfig::default();
+        assert_eq!(d.max_consignment_bytes, 1024 * 1024);
+        assert_eq!(d.max_merkle_proofs, 256);
+        assert_eq!(d.max_total_proof_bytes, 128 * 1024);
+        assert_eq!(DEFAULT_MAX_CONSIGNMENT_BYTES, d.max_consignment_bytes);
+        assert_eq!(DEFAULT_MAX_MERKLE_PROOFS, d.max_merkle_proofs);
+        assert_eq!(DEFAULT_MAX_TOTAL_PROOF_BYTES, d.max_total_proof_bytes);
+    }
+
+    #[test]
+    fn fully_pinned_env_is_parsed_field_by_field() {
+        let env = EnvScope::new();
+        env.set(&[
+            ("EVM_CHAIN_ID", "42161"),
+            (
+                "EVM_PROXY_CONTRACT_ADDRESS",
+                "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            ),
+            ("RGB_ASSET_ID", "rgb:asset-id"),
+            (
+                "GAS_TX_ALLOWED_TO",
+                "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            ),
+            ("GAS_TX_MAX_GAS_LIMIT", "300000"),
+            (
+                "GAS_TX_MAX_FEE_PER_GAS",
+                "340282366920938463463374607431768211455",
+            ),
+            (
+                "GAS_TX_ALLOWED_SELECTORS",
+                "0xdeadbeef, 01020304 ,,0xDEADBEEF",
+            ),
+            ("GAS_TX_MAX_VALUE_WEI", " 12345 "),
+            ("BTC_MAX_TOTAL_SATS", "100000"),
+            ("RGB_MAX_UNOWNED_SATS", "2000"),
+            ("BTC_MAX_UNOWNED_SATS", "5000"),
+            (
+                "FUNDS_IN_CONTRACT",
+                "0xcccccccccccccccccccccccccccccccccccccccc",
+            ),
+            ("MAX_CONSIGNMENT_BYTES", "4096"),
+            ("MAX_MERKLE_PROOFS", "7"),
+            ("MAX_TOTAL_PROOF_BYTES", "999"),
+        ]);
+        let c = BridgeConfig::from_env();
+        assert_eq!(c.chain_id, 42161);
+        assert_eq!(c.bridge_contract, [0xaa; 20]);
+        assert_eq!(c.rgb_asset_id, "rgb:asset-id");
+        assert_eq!(c.gas_tx_allowed_to, Some([0xbb; 20]));
+        assert_eq!(c.gas_tx_max_gas_limit, 300_000);
+        assert_eq!(c.gas_tx_max_fee_per_gas, u128::MAX);
+        assert_eq!(
+            c.gas_tx_allowed_selectors,
+            vec![
+                [0xde, 0xad, 0xbe, 0xef],
+                [0x01, 0x02, 0x03, 0x04],
+                [0xde, 0xad, 0xbe, 0xef]
+            ],
+            "entries are kept in order, trimmed, blanks dropped, case-insensitive hex"
+        );
+        assert_eq!(c.gas_tx_max_value_wei, Some(12_345));
+        assert_eq!(c.btc_max_total_sats, 100_000);
+        assert_eq!(c.rgb_max_unowned_sats, 2_000);
+        assert_eq!(c.btc_max_unowned_sats, 5_000);
+        assert_eq!(c.funds_in_contract, [0xcc; 20]);
+        assert_eq!(c.max_consignment_bytes, 4096);
+        assert_eq!(c.max_merkle_proofs, 7);
+        assert_eq!(c.max_total_proof_bytes, 999);
+        assert!(c.is_configured());
+        assert!(!c.is_partially_configured());
+        assert!(c.allows_vanilla_btc());
+    }
+
+    #[test]
+    fn funds_in_contract_defaults_to_the_proxy_pin_when_unset() {
+        let env = EnvScope::new();
+        env.set(&[(
+            "EVM_PROXY_CONTRACT_ADDRESS",
+            "0x1111111111111111111111111111111111111111",
+        )]);
+        let c = BridgeConfig::from_env();
+        assert_eq!(c.funds_in_contract, [0x11; 20]);
+        // And a malformed FUNDS_IN_CONTRACT also falls back to the pin.
+        env.set(&[("FUNDS_IN_CONTRACT", "not-an-address")]);
+        let c = BridgeConfig::from_env();
+        assert_eq!(c.funds_in_contract, [0x11; 20]);
+    }
+
+    #[test]
+    fn malformed_values_degrade_to_the_fail_closed_zero_or_none() {
+        let env = EnvScope::new();
+        env.set(&[
+            ("EVM_CHAIN_ID", "not-a-number"),
+            ("EVM_PROXY_CONTRACT_ADDRESS", "0x1234"),
+            ("GAS_TX_ALLOWED_TO", "0xzz"),
+            ("GAS_TX_MAX_GAS_LIMIT", "-1"),
+            ("GAS_TX_MAX_FEE_PER_GAS", "1.5"),
+            ("GAS_TX_MAX_VALUE_WEI", "1e18"),
+            ("BTC_MAX_TOTAL_SATS", ""),
+            ("RGB_MAX_UNOWNED_SATS", "x"),
+            ("BTC_MAX_UNOWNED_SATS", "99999999999999999999999"),
+        ]);
+        let c = BridgeConfig::from_env();
+        assert_eq!(c.chain_id, 0);
+        assert_eq!(c.bridge_contract, [0u8; 20]);
+        assert_eq!(c.gas_tx_allowed_to, None);
+        assert_eq!(c.gas_tx_max_gas_limit, 0);
+        assert_eq!(c.gas_tx_max_fee_per_gas, 0);
+        assert_eq!(c.gas_tx_max_value_wei, None);
+        assert_eq!(c.btc_max_total_sats, 0);
+        assert_eq!(c.rgb_max_unowned_sats, 0);
+        assert_eq!(c.btc_max_unowned_sats, 0);
+        assert!(!c.is_configured());
+        assert!(!c.allows_vanilla_btc());
+    }
+
+    #[test]
+    fn a_partial_pin_set_is_reported_as_partially_configured() {
+        let env = EnvScope::new();
+        env.set(&[("EVM_CHAIN_ID", "1"), ("RGB_ASSET_ID", "rgb:x")]);
+        let c = BridgeConfig::from_env();
+        assert!(!c.is_configured());
+        assert!(c.is_partially_configured());
+    }
+
+    #[test]
+    fn selector_list_drops_malformed_entries_without_poisoning_the_rest() {
+        let env = EnvScope::new();
+        env.set(&[(
+            "GAS_TX_ALLOWED_SELECTORS",
+            "0xdeadbeef,0xdeadbeefaa,abc,0xgggggggg,,0x01020304",
+        )]);
+        let c = BridgeConfig::from_env();
+        assert_eq!(
+            c.gas_tx_allowed_selectors,
+            vec![[0xde, 0xad, 0xbe, 0xef], [0x01, 0x02, 0x03, 0x04]]
+        );
+        env.set(&[("GAS_TX_ALLOWED_SELECTORS", "")]);
+        assert!(BridgeConfig::from_env().gas_tx_allowed_selectors.is_empty());
+        env.set(&[("GAS_TX_ALLOWED_SELECTORS", " , , ")]);
+        assert!(BridgeConfig::from_env().gas_tx_allowed_selectors.is_empty());
+    }
+
+    #[test]
+    fn zero_and_unparseable_caps_fall_back_to_defaults_but_positive_values_stick() {
+        let env = EnvScope::new();
+        env.set(&[
+            ("MAX_CONSIGNMENT_BYTES", "0"),
+            ("MAX_MERKLE_PROOFS", "abc"),
+            ("MAX_TOTAL_PROOF_BYTES", "-5"),
+        ]);
+        let c = BridgeConfig::from_env();
+        assert_eq!(c.max_consignment_bytes, DEFAULT_MAX_CONSIGNMENT_BYTES);
+        assert_eq!(c.max_merkle_proofs, DEFAULT_MAX_MERKLE_PROOFS);
+        assert_eq!(c.max_total_proof_bytes, DEFAULT_MAX_TOTAL_PROOF_BYTES);
+        env.set(&[("MAX_CONSIGNMENT_BYTES", "1")]);
+        assert_eq!(BridgeConfig::from_env().max_consignment_bytes, 1);
+    }
+
+    #[test]
+    fn gas_value_ceiling_accepts_zero_and_u128_max_and_rejects_negatives() {
+        let env = EnvScope::new();
+        env.set(&[("GAS_TX_MAX_VALUE_WEI", "0")]);
+        assert_eq!(BridgeConfig::from_env().gas_tx_max_value_wei, Some(0));
+        env.set(&[("GAS_TX_MAX_VALUE_WEI", &u128::MAX.to_string())]);
+        assert_eq!(
+            BridgeConfig::from_env().gas_tx_max_value_wei,
+            Some(u128::MAX)
+        );
+        env.set(&[("GAS_TX_MAX_VALUE_WEI", "-1")]);
+        assert_eq!(BridgeConfig::from_env().gas_tx_max_value_wei, None);
+        env.set(&[("GAS_TX_MAX_VALUE_WEI", "0x10")]);
+        assert_eq!(BridgeConfig::from_env().gas_tx_max_value_wei, None);
+    }
+
+    #[test]
+    fn allows_vanilla_btc_tracks_only_the_total_sats_cap() {
+        let mut c = BridgeConfig::default();
+        assert!(!c.allows_vanilla_btc());
+        c.btc_max_unowned_sats = 5_000;
+        assert!(
+            !c.allows_vanilla_btc(),
+            "the unowned budget alone does not enable the path"
+        );
+        c.btc_max_total_sats = 1;
+        assert!(c.allows_vanilla_btc());
+    }
+
+    #[test]
+    fn address_pins_accept_upper_case_hex() {
+        let env = EnvScope::new();
+        env.set(&[
+            (
+                "EVM_PROXY_CONTRACT_ADDRESS",
+                "0xABCDEFABCDEFABCDEFABCDEFABCDEFABCDEFABCD",
+            ),
+            (
+                "GAS_TX_ALLOWED_TO",
+                "ABCDEFABCDEFABCDEFABCDEFABCDEFABCDEFABCD",
+            ),
+        ]);
+        let c = BridgeConfig::from_env();
+        let expected = hex::decode("abcdefabcdefabcdefabcdefabcdefabcdefabcd").unwrap();
+        assert_eq!(c.bridge_contract.to_vec(), expected);
+        assert_eq!(c.gas_tx_allowed_to.map(|a| a.to_vec()), Some(expected));
+    }
+
+    #[test]
+    fn parse_eth_address_rejects_empty_and_prefix_only() {
+        assert!(parse_eth_address("").is_err());
+        assert!(parse_eth_address("0x").is_err());
+        assert!(parse_eth_address("0x0x0102030405060708090a0b0c0d0e0f1011121314").is_err());
+        // 21 bytes.
+        assert!(parse_eth_address("0102030405060708090a0b0c0d0e0f101112131415").is_err());
+    }
+
+    #[cfg(feature = "evm-rpc")]
+    #[test]
+    fn evm_rpc_config_defaults_and_env_overrides() {
+        let env = EnvScope::new();
+        let d = EvmRpcConfig::default();
+        assert_eq!(d.rpc_url, "http://127.0.0.1:3444");
+        assert_eq!(d.min_confirmations, 12);
+        let c = EvmRpcConfig::from_env();
+        assert_eq!(c.rpc_url, d.rpc_url);
+        assert_eq!(c.min_confirmations, d.min_confirmations);
+
+        env.set(&[
+            ("EVM_RPC_URL", "http://localhost:8545"),
+            ("EVM_MIN_CONFIRMATIONS", "3"),
+        ]);
+        let c = EvmRpcConfig::from_env();
+        assert_eq!(c.rpc_url, "http://localhost:8545");
+        assert_eq!(c.min_confirmations, 3);
+
+        // A non-loopback URL is refused back to the default; a malformed
+        // confirmation count falls back to 12.
+        env.set(&[
+            ("EVM_RPC_URL", "http://10.0.0.1:8545"),
+            ("EVM_MIN_CONFIRMATIONS", "many"),
+        ]);
+        let c = EvmRpcConfig::from_env();
+        assert_eq!(c.rpc_url, "http://127.0.0.1:3444");
+        assert_eq!(c.min_confirmations, 12);
+    }
+}

@@ -558,3 +558,309 @@ mod tests {
         assert!(lz_funds_out_digest(&domain, &call_data, &lz_release, 0, 999_999).is_err());
     }
 }
+
+#[cfg(test)]
+mod coverage_tests {
+    use super::*;
+    use crate::networks::evm::validation::{decode_funds_out_params, lzFundsOutCall};
+    use alloy_primitives::{Bytes, FixedBytes, U256};
+    use alloy_sol_types::SolCall;
+
+    fn destination(chain_id: u64, proxy_len: usize) -> EvmDestination {
+        EvmDestination {
+            call_data: vec![],
+            nonce: 1,
+            deadline: 1,
+            chain_id,
+            proxy_contract: vec![0xAB; proxy_len],
+            calldata_amount: 0,
+            calldata_commission: 0,
+            lz_release: None,
+        }
+    }
+
+    #[test]
+    fn build_evm_domain_fills_the_pinned_name_and_version() {
+        let d = build_evm_domain(&destination(42161, ADDRESS_LEN)).unwrap();
+        assert_eq!(d.name, "MultisigProxy");
+        assert_eq!(d.version, "1");
+        assert_eq!(d.chain_id, 42161);
+        assert_eq!(d.verifying_contract, [0xAB; ADDRESS_LEN]);
+    }
+
+    #[cfg(not(feature = "dev-mode"))]
+    #[test]
+    fn build_evm_domain_rejects_zero_chain_id() {
+        let err = build_evm_domain(&destination(0, ADDRESS_LEN))
+            .err()
+            .expect("zero chain id must fail");
+        assert!(matches!(err, EnclaveError::CrossCheck(_)), "{err}");
+        assert!(err.to_string().contains("chain_id"), "{err}");
+    }
+
+    #[cfg(not(feature = "dev-mode"))]
+    #[test]
+    fn build_evm_domain_rejects_proxy_of_the_wrong_width() {
+        for len in [0usize, 19, 21, 32] {
+            let err = build_evm_domain(&destination(1, len))
+                .err()
+                .expect("bad proxy width must fail");
+            assert!(matches!(err, EnclaveError::CrossCheck(_)), "{len}: {err}");
+            assert!(
+                err.to_string().contains(&format!("got {len}")),
+                "{len}: {err}"
+            );
+        }
+    }
+
+    #[cfg(feature = "dev-mode")]
+    #[test]
+    fn build_evm_domain_falls_back_in_dev_mode() {
+        let d = build_evm_domain(&destination(0, 0)).unwrap();
+        assert_eq!(d.chain_id, 1);
+        assert_eq!(d.verifying_contract, [0u8; ADDRESS_LEN]);
+    }
+
+    #[test]
+    fn domain_separator_changes_with_every_field() {
+        let base = Eip712Domain {
+            name: "MultisigProxy".into(),
+            version: "1".into(),
+            chain_id: 1,
+            verifying_contract: [1u8; ADDRESS_LEN],
+        };
+        let variants = [
+            Eip712Domain {
+                name: "Other".into(),
+                ..dup(&base)
+            },
+            Eip712Domain {
+                version: "2".into(),
+                ..dup(&base)
+            },
+            Eip712Domain {
+                chain_id: 2,
+                ..dup(&base)
+            },
+            Eip712Domain {
+                verifying_contract: [2u8; ADDRESS_LEN],
+                ..dup(&base)
+            },
+        ];
+        for v in &variants {
+            assert_ne!(v.separator_hash(), base.separator_hash());
+        }
+    }
+
+    fn dup(d: &Eip712Domain) -> Eip712Domain {
+        Eip712Domain {
+            name: d.name.clone(),
+            version: d.version.clone(),
+            chain_id: d.chain_id,
+            verifying_contract: d.verifying_contract,
+        }
+    }
+
+    #[test]
+    fn abi_encode_u32_is_right_aligned() {
+        let e = abi_encode_u32(0x0102_0304);
+        assert!(e[..28].iter().all(|&b| b == 0));
+        assert_eq!(&e[28..], &[1, 2, 3, 4]);
+        assert_eq!(abi_encode_u32(0), [0u8; HASH_LEN]);
+        assert_eq!(&abi_encode_u32(u32::MAX)[28..], &[0xff; 4]);
+    }
+
+    #[test]
+    fn eip712_digest_is_keccak_of_1901_domain_struct() {
+        let domain = Eip712Domain {
+            name: "MultisigProxy".into(),
+            version: "1".into(),
+            chain_id: 5,
+            verifying_contract: [9u8; ADDRESS_LEN],
+        };
+        let struct_hash = [0x5a; HASH_LEN];
+        let mut pre = vec![0x19, 0x01];
+        pre.extend_from_slice(&domain.separator_hash());
+        pre.extend_from_slice(&struct_hash);
+        let expected: [u8; HASH_LEN] = Keccak256::digest(&pre).into();
+        assert_eq!(eip712_digest(&domain, &struct_hash), expected);
+    }
+
+    fn pools_calldata() -> Vec<u8> {
+        use crate::networks::evm::validation::{fundsOutCall, FundsOutParams};
+        fundsOutCall {
+            params: FundsOutParams {
+                recipient: alloy_primitives::Address::from([0x22; ADDRESS_LEN]),
+                amount: U256::from(1_000u64),
+                burnId: U256::from(7u64),
+                sourceChainId: U256::from(1u64),
+                destinationChainId: U256::from(1u64),
+                sourceAddress: "src".into(),
+                proof: Bytes::from(vec![1, 2]),
+                settlementData: Bytes::from(vec![3]),
+            },
+        }
+        .abi_encode()
+    }
+
+    #[test]
+    fn funds_out_digest_binds_deadline_domain_and_every_param() {
+        let domain = build_evm_domain(&destination(1, ADDRESS_LEN)).unwrap();
+        let params = decode_funds_out_params(&pools_calldata()).unwrap();
+        let base = funds_out_digest(&domain, &params, 1, 100).unwrap();
+        assert_ne!(base, funds_out_digest(&domain, &params, 1, 101).unwrap());
+        let other_domain = build_evm_domain(&destination(2, ADDRESS_LEN)).unwrap();
+        assert_ne!(
+            base,
+            funds_out_digest(&other_domain, &params, 1, 100).unwrap()
+        );
+        let mut p = decode_funds_out_params(&pools_calldata()).unwrap();
+        p.settlementData = Bytes::from(vec![4]);
+        assert_ne!(base, funds_out_digest(&domain, &p, 1, 100).unwrap());
+        let mut p = decode_funds_out_params(&pools_calldata()).unwrap();
+        p.sourceAddress = "other".into();
+        assert_ne!(base, funds_out_digest(&domain, &p, 1, 100).unwrap());
+        let mut p = decode_funds_out_params(&pools_calldata()).unwrap();
+        p.burnId = U256::from(8u64);
+        assert_ne!(base, funds_out_digest(&domain, &p, 1, 100).unwrap());
+    }
+
+    fn lz_domain() -> Eip712Domain {
+        Eip712Domain {
+            name: "MultisigProxy".into(),
+            version: "1".into(),
+            chain_id: 42161,
+            verifying_contract: [0u8; ADDRESS_LEN],
+        }
+    }
+
+    fn lz_call(min_amount_ld: U256) -> lzFundsOutCall {
+        let mut recipient = [0u8; 32];
+        recipient[31] = 0x05;
+        lzFundsOutCall {
+            amount: U256::from(1u64),
+            burnId: U256::from(3u64),
+            sourceChainId: U256::from(84u64),
+            destinationChainId: U256::from(1u64),
+            sourceAddress: "addr".into(),
+            proof: Bytes::new(),
+            settlementData: Bytes::new(),
+            dstEid: 30101,
+            recipient: FixedBytes(recipient),
+            minAmountLD: min_amount_ld,
+            extraOptions: Bytes::new(),
+        }
+    }
+
+    fn lz_release(min_amount_ld: u64) -> LzReleaseParams {
+        let mut recipient = vec![0u8; 32];
+        recipient[31] = 0x05;
+        LzReleaseParams {
+            dst_eid: 30101,
+            min_amount_ld,
+            recipient,
+        }
+    }
+
+    #[test]
+    fn lz_digest_rejects_calldata_shorter_than_a_selector() {
+        for len in [0usize, 1, 3] {
+            let err = lz_funds_out_digest(&lz_domain(), &vec![0u8; len], &lz_release(1), 1, 1)
+                .unwrap_err();
+            assert!(matches!(err, EnclaveError::CrossCheck(_)), "{len}: {err}");
+            assert!(err.to_string().contains("at least 4 bytes"), "{len}: {err}");
+        }
+    }
+
+    #[test]
+    fn lz_digest_rejects_undecodable_and_non_canonical_calldata() {
+        let selector_only = lz_call(U256::from(1u64)).abi_encode()[..4].to_vec();
+        let err =
+            lz_funds_out_digest(&lz_domain(), &selector_only, &lz_release(1), 1, 1).unwrap_err();
+        assert!(
+            err.to_string().contains("invalid lzFundsOut calldata"),
+            "{err}"
+        );
+
+        let mut trailing = lz_call(U256::from(1u64)).abi_encode();
+        trailing.push(0);
+        let err = lz_funds_out_digest(&lz_domain(), &trailing, &lz_release(1), 1, 1).unwrap_err();
+        assert!(err.to_string().contains("non-canonical"), "{err}");
+
+        // The pools selector is not an lzFundsOut call.
+        let err =
+            lz_funds_out_digest(&lz_domain(), &pools_calldata(), &lz_release(1), 1, 1).unwrap_err();
+        assert!(matches!(err, EnclaveError::CrossCheck(_)), "{err}");
+    }
+
+    #[test]
+    fn lz_digest_rejects_min_amount_mismatch_and_u64_overflow() {
+        let call = lz_call(U256::from(1u64)).abi_encode();
+        let err = lz_funds_out_digest(&lz_domain(), &call, &lz_release(2), 1, 1).unwrap_err();
+        assert!(err.to_string().contains("min_amount_ld"), "{err}");
+
+        let wide = lz_call(U256::from(u64::MAX) + U256::from(1u64)).abi_encode();
+        let err =
+            lz_funds_out_digest(&lz_domain(), &wide, &lz_release(u64::MAX), 1, 1).unwrap_err();
+        assert!(err.to_string().contains("exceeds u64"), "{err}");
+
+        // Exactly u64::MAX fits.
+        let max = lz_call(U256::from(u64::MAX)).abi_encode();
+        assert!(lz_funds_out_digest(&lz_domain(), &max, &lz_release(u64::MAX), 1, 1).is_ok());
+    }
+
+    #[test]
+    fn lz_digest_binds_deadline_and_recipient_and_domain() {
+        let call = lz_call(U256::from(1u64)).abi_encode();
+        let base = lz_funds_out_digest(&lz_domain(), &call, &lz_release(1), 1, 10).unwrap();
+        assert_ne!(
+            base,
+            lz_funds_out_digest(&lz_domain(), &call, &lz_release(1), 1, 11).unwrap()
+        );
+        let other_domain = Eip712Domain {
+            chain_id: 1,
+            ..lz_domain()
+        };
+        assert_ne!(
+            base,
+            lz_funds_out_digest(&other_domain, &call, &lz_release(1), 1, 10).unwrap()
+        );
+        let mut other_recipient = lz_call(U256::from(1u64));
+        other_recipient.recipient = FixedBytes([0x06; 32]);
+        let mut release = lz_release(1);
+        release.recipient = vec![0x06; 32];
+        assert_ne!(
+            base,
+            lz_funds_out_digest(&lz_domain(), &other_recipient.abi_encode(), &release, 1, 10)
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn lz_digest_rejects_a_recipient_of_the_wrong_width_on_the_wire() {
+        let call = lz_call(U256::from(1u64)).abi_encode();
+        let mut release = lz_release(1);
+        release.recipient = vec![0x05; 31];
+        let err = lz_funds_out_digest(&lz_domain(), &call, &release, 1, 1).unwrap_err();
+        assert!(err.to_string().contains("recipient"), "{err}");
+    }
+
+    #[test]
+    fn lz_typehash_string_lists_thirteen_fields_in_contract_order() {
+        let inner = TEE_LZ_FUNDS_OUT_TYPE_HASH_STR
+            .strip_prefix("TeeLzFundsOut(")
+            .and_then(|s| s.strip_suffix(')'))
+            .unwrap();
+        let fields: Vec<&str> = inner.split(',').collect();
+        assert_eq!(fields.len(), 13);
+        assert_eq!(fields[0], "uint256 amount");
+        assert_eq!(fields[7], "uint32 dstEid");
+        assert_eq!(fields[8], "bytes32 recipient");
+        assert_eq!(fields[12], "uint256 deadline");
+        let inner = TEE_FUNDS_OUT_TYPE_HASH_STR
+            .strip_prefix("TeeFundsOut(")
+            .and_then(|s| s.strip_suffix(')'))
+            .unwrap();
+        assert_eq!(inner.split(',').count(), 10);
+    }
+}

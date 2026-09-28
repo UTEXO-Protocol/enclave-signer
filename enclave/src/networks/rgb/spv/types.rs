@@ -111,3 +111,121 @@ pub enum SpvError {
 }
 
 pub type Result<T> = std::result::Result<T, SpvError>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn from_env_str_accepts_every_documented_alias() {
+        assert_eq!(Network::from_env_str("bitcoin"), Ok(Network::Mainnet));
+        assert_eq!(Network::from_env_str("mainnet"), Ok(Network::Mainnet));
+        assert_eq!(Network::from_env_str("signet"), Ok(Network::Signet));
+        assert_eq!(Network::from_env_str("testnet"), Ok(Network::Testnet3));
+        assert_eq!(Network::from_env_str("testnet3"), Ok(Network::Testnet3));
+        assert_eq!(Network::from_env_str("regtest"), Ok(Network::Regtest));
+    }
+
+    #[test]
+    fn from_env_str_is_exact_match_only() {
+        for s in [
+            "", "Bitcoin", "MAINNET", " mainnet", "mainnet ", "testnet4", "main", "reg", "sig",
+        ] {
+            assert_eq!(Network::from_env_str(s), Err("unknown network"), "{s:?}");
+        }
+    }
+
+    #[test]
+    fn pow_is_enforced_only_on_mainnet_and_testnet3() {
+        assert!(Network::Mainnet.enforces_pow());
+        assert!(Network::Testnet3.enforces_pow());
+        assert!(!Network::Signet.enforces_pow());
+        assert!(!Network::Regtest.enforces_pow());
+    }
+
+    #[test]
+    fn bitcoin_params_map_to_the_matching_network() {
+        assert_eq!(
+            Network::Mainnet.as_bitcoin_params().network,
+            bitcoin::Network::Bitcoin
+        );
+        assert_eq!(
+            Network::Signet.as_bitcoin_params().network,
+            bitcoin::Network::Signet
+        );
+        assert_eq!(
+            Network::Testnet3.as_bitcoin_params().network,
+            bitcoin::Network::Testnet
+        );
+        assert_eq!(
+            Network::Regtest.as_bitcoin_params().network,
+            bitcoin::Network::Regtest
+        );
+        // Regtest allows min-difficulty blocks; mainnet does not.
+        assert!(
+            Network::Regtest
+                .as_bitcoin_params()
+                .allow_min_difficulty_blocks
+        );
+        assert!(
+            !Network::Mainnet
+                .as_bitcoin_params()
+                .allow_min_difficulty_blocks
+        );
+    }
+
+    #[test]
+    fn spv_error_messages_name_their_parameters() {
+        let cases: Vec<(SpvError, &[&str])> = vec![
+            (
+                SpvError::HeaderParse {
+                    index: 3,
+                    message: "bad".into(),
+                },
+                &["index 3", "bad"],
+            ),
+            (SpvError::ChainLinkage { height: 5 }, &["height 5"]),
+            (SpvError::PowFailed { height: 6 }, &["height 6", "PoW"]),
+            (
+                SpvError::BitsMismatch {
+                    height: 7,
+                    got: 0x1d00ffff,
+                    expected: 0x1c00ffff,
+                },
+                &["height 7", "0x1d00ffff", "0x1c00ffff"],
+            ),
+            (
+                SpvError::NonContiguous { got: 10, tip: 8 },
+                &["10", "tip 8"],
+            ),
+            (
+                SpvError::BelowCheckpoint {
+                    got: 1,
+                    checkpoint: 2,
+                },
+                &["start_height 1", "checkpoint 2"],
+            ),
+            (
+                SpvError::ReorgTooDeep { depth: 9, max: 4 },
+                &["depth 9", "maximum 4"],
+            ),
+            (SpvError::WeakerChain, &["weaker or equal"]),
+            (
+                SpvError::BatchTooLarge { len: 3, max: 2 },
+                &["3 headers", "cap of 2"],
+            ),
+            (
+                SpvError::ChainTooLong { len: 30, max: 20 },
+                &["retain 30", "cap of 20"],
+            ),
+            (SpvError::HeaderNotFound(11), &["height 11"]),
+            (SpvError::CheckpointPlaceholder, &["placeholder"]),
+        ];
+        for (err, needles) in cases {
+            let text = err.to_string();
+            for needle in needles {
+                assert!(text.contains(needle), "{text:?} lacks {needle:?}");
+            }
+        }
+    }
+}

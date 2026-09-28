@@ -226,4 +226,190 @@ mod tests {
             "00000000839a8e6886ab5951d76f411475428afc90947ee320161bbf18eb6048"
         );
     }
+
+    // ---- coverage: negative PoW / bits branches and retarget math -----------
+
+    fn broken_pow_header() -> Header {
+        let mut bytes = hex::decode(MAINNET_BLOCK_1_HEADER_HEX).unwrap();
+        let last = bytes.len() - 1;
+        bytes[last] ^= 0xFF;
+        deserialize::<Header>(&bytes).unwrap()
+    }
+
+    #[test]
+    fn pow_failure_reports_the_height_on_every_pow_network() {
+        let bad = broken_pow_header();
+        for net in [Network::Mainnet, Network::Testnet3] {
+            let err = check_pow(&bad, 123, net).unwrap_err();
+            assert!(
+                matches!(err, SpvError::PowFailed { height: 123 }),
+                "{net:?}: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn full_validation_accepts_block_1_with_its_own_bits() {
+        let h1 = parse_hex_header(MAINNET_BLOCK_1_HEADER_HEX);
+        let bits = h1.bits.to_consensus();
+        validate_header_full(
+            &h1,
+            1,
+            &MAINNET_GENESIS_HASH_INTERNAL,
+            Some(bits),
+            Network::Mainnet,
+        )
+        .unwrap();
+        // `None` for the bits expectation skips the nBits comparison.
+        validate_header_full(
+            &h1,
+            1,
+            &MAINNET_GENESIS_HASH_INTERNAL,
+            None,
+            Network::Mainnet,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn full_validation_reports_bits_mismatch_with_both_values() {
+        let h1 = parse_hex_header(MAINNET_BLOCK_1_HEADER_HEX);
+        let got = h1.bits.to_consensus();
+        let expected = got - 1;
+        match validate_header_full(
+            &h1,
+            1,
+            &MAINNET_GENESIS_HASH_INTERNAL,
+            Some(expected),
+            Network::Mainnet,
+        ) {
+            Err(SpvError::BitsMismatch {
+                height,
+                got: g,
+                expected: e,
+            }) => {
+                assert_eq!(height, 1);
+                assert_eq!(g, got);
+                assert_eq!(e, expected);
+            }
+            other => panic!("expected BitsMismatch, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn full_validation_checks_linkage_before_bits_and_bits_before_pow() {
+        // Wrong prev hash AND wrong bits AND broken PoW: linkage wins.
+        let bad = broken_pow_header();
+        let err = validate_header_full(&bad, 1, &[0u8; 32], Some(0), Network::Mainnet).unwrap_err();
+        assert!(matches!(err, SpvError::ChainLinkage { height: 1 }), "{err}");
+        // Right prev hash, wrong bits, broken PoW: bits wins.
+        let err = validate_header_full(
+            &bad,
+            1,
+            &MAINNET_GENESIS_HASH_INTERNAL,
+            Some(0),
+            Network::Mainnet,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(err, SpvError::BitsMismatch { height: 1, .. }),
+            "{err}"
+        );
+        // Right prev hash, right bits, broken PoW: PoW is the failure.
+        let bits = bad.bits.to_consensus();
+        let err = validate_header_full(
+            &bad,
+            1,
+            &MAINNET_GENESIS_HASH_INTERNAL,
+            Some(bits),
+            Network::Mainnet,
+        )
+        .unwrap_err();
+        assert!(matches!(err, SpvError::PowFailed { height: 1 }), "{err}");
+        // On regtest the same header passes: PoW is not enforced.
+        validate_header_full(
+            &bad,
+            1,
+            &MAINNET_GENESIS_HASH_INTERNAL,
+            Some(bits),
+            Network::Regtest,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn expected_bits_at_a_retarget_boundary_follows_the_timespan() {
+        use bitcoin::pow::Target;
+        let prev_bits = 0x1d00ffff;
+        let two_weeks: u32 = 14 * 24 * 60 * 60;
+        let epoch_start = 1_000_000;
+        // Exactly on schedule: the difficulty is unchanged.
+        let same = expected_bits(
+            2016,
+            prev_bits,
+            epoch_start + two_weeks,
+            epoch_start,
+            Network::Mainnet,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(same, prev_bits);
+        // Blocks came far too fast: the target shrinks (harder).
+        let faster = expected_bits(
+            2016,
+            prev_bits,
+            epoch_start + 1,
+            epoch_start,
+            Network::Mainnet,
+        )
+        .unwrap()
+        .unwrap();
+        assert!(
+            Target::from_compact(CompactTarget::from_consensus(faster))
+                < Target::from_compact(CompactTarget::from_consensus(prev_bits))
+        );
+        // Clamped at 4x: a timespan of 1 and of two_weeks/4 give the same bits.
+        let quarter = expected_bits(
+            2016,
+            prev_bits,
+            epoch_start + two_weeks / 4,
+            epoch_start,
+            Network::Mainnet,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(faster, quarter);
+        // Time going backwards saturates to a zero timespan, same clamp.
+        let backwards = expected_bits(
+            2016,
+            prev_bits,
+            epoch_start - 5,
+            epoch_start,
+            Network::Mainnet,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(backwards, faster);
+        // Testnet3 is a PoW network too.
+        assert!(expected_bits(2016, prev_bits, 0, 0, Network::Testnet3)
+            .unwrap()
+            .is_some());
+    }
+
+    #[test]
+    fn expected_bits_off_boundary_ignores_the_timestamps() {
+        let prev_bits = 0x1d00ffff;
+        for h in [1u32, 2015, 2017, 4031] {
+            let a = expected_bits(h, prev_bits, 0, 0, Network::Mainnet).unwrap();
+            let b = expected_bits(h, prev_bits, 5_000, 1, Network::Mainnet).unwrap();
+            assert_eq!(a, Some(prev_bits), "height {h}");
+            assert_eq!(a, b, "height {h}");
+        }
+    }
+
+    #[test]
+    fn retarget_interval_is_bitcoins_2016() {
+        assert_eq!(RETARGET_INTERVAL, 2016);
+        assert!(is_retarget_height(u32::MAX - (u32::MAX % 2016)));
+    }
 }

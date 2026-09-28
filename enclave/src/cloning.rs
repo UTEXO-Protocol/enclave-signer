@@ -196,10 +196,11 @@ fn decrypt_with_key(key: &Zeroizing<[u8; 32]>, ciphertext: &[u8]) -> Result<Zero
         .decrypt((&ZERO_NONCE).into(), ciphertext)
         .map_err(|e| EnclaveError::Clone(format!("seed unseal failed: {e}")))?;
     if plaintext.len() != 64 {
+        // Read the length before zeroizing: `Vec::zeroize` also truncates.
+        let len = plaintext.len();
         plaintext.zeroize();
         return Err(EnclaveError::Clone(format!(
-            "decrypted seed has wrong length: {}",
-            plaintext.len()
+            "decrypted seed has wrong length: {len}"
         )));
     }
     let mut seed = Zeroizing::new([0u8; 64]);
@@ -353,5 +354,201 @@ mod tests {
         let session = CloneSession::new();
         let (ct, _) = encrypt_seed_for_peer(&session.public_key(), &[0u8; 64]).unwrap();
         assert_eq!(ct.len(), 64 + 16);
+    }
+}
+
+#[cfg(test)]
+mod coverage_tests {
+    use super::*;
+
+    /// Curve25519 low-order points besides the all-zero one: the identity
+    /// (1) and an order-8 point. All must be rejected as non-contributory.
+    const LOW_ORDER_POINTS: [[u8; 32]; 2] = [
+        [
+            1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0,
+        ],
+        [
+            0xe0, 0xeb, 0x7a, 0x7c, 0x3b, 0x41, 0xb8, 0xae, 0x16, 0x56, 0xe3, 0xfa, 0xf1, 0x9f,
+            0xc4, 0x6a, 0xda, 0x09, 0x8d, 0xeb, 0x9c, 0x32, 0xb1, 0xfd, 0x86, 0x62, 0x05, 0x16,
+            0x5f, 0x49, 0xb8, 0x00,
+        ],
+    ];
+
+    #[test]
+    fn encrypt_and_decrypt_reject_every_known_low_order_point() {
+        let requester = CloneSession::new();
+        let (ciphertext, _) = encrypt_seed_for_peer(&requester.public_key(), &[1u8; 64]).unwrap();
+        for point in LOW_ORDER_POINTS {
+            assert!(
+                matches!(
+                    encrypt_seed_for_peer(&point, &[1u8; 64]),
+                    Err(EnclaveError::Clone(_))
+                ),
+                "encrypt must reject {point:?}"
+            );
+            assert!(
+                matches!(
+                    requester.decrypt_seed_from_peer(&point, &ciphertext),
+                    Err(EnclaveError::Clone(_))
+                ),
+                "decrypt must reject {point:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn decrypt_rejects_empty_and_tag_only_ciphertext() {
+        let requester = CloneSession::new();
+        let (_, donor_pub) = encrypt_seed_for_peer(&requester.public_key(), &[1u8; 64]).unwrap();
+        for ct in [Vec::new(), vec![0u8; 15], vec![0u8; 16]] {
+            let err = requester
+                .decrypt_seed_from_peer(&donor_pub, &ct)
+                .unwrap_err();
+            assert!(matches!(err, EnclaveError::Clone(_)), "{}: {err}", ct.len());
+            assert!(err.to_string().contains("seed unseal failed"), "{err}");
+        }
+    }
+
+    #[test]
+    fn decrypt_rejects_truncated_and_extended_ciphertext() {
+        let requester = CloneSession::new();
+        let (ct, donor_pub) = encrypt_seed_for_peer(&requester.public_key(), &[1u8; 64]).unwrap();
+        let truncated = &ct[..ct.len() - 1];
+        assert!(matches!(
+            requester.decrypt_seed_from_peer(&donor_pub, truncated),
+            Err(EnclaveError::Clone(_))
+        ));
+        let mut extended = ct.clone();
+        extended.push(0);
+        assert!(matches!(
+            requester.decrypt_seed_from_peer(&donor_pub, &extended),
+            Err(EnclaveError::Clone(_))
+        ));
+    }
+
+    #[test]
+    fn decrypt_rejects_a_correctly_sealed_plaintext_of_the_wrong_length() {
+        // The AEAD accepts the box, but the payload is not a 64-byte seed.
+        // Reached via the internal helpers because the public sealer only
+        // ever seals 64 bytes.
+        let key = Zeroizing::new([0x42u8; 32]);
+        for len in [0usize, 32, 63, 65, 128] {
+            let ct = encrypt_with_key(&key, &vec![7u8; len]).unwrap();
+            let err = decrypt_with_key(&key, &ct).unwrap_err();
+            match err {
+                EnclaveError::Clone(msg) => assert!(
+                    msg.contains("wrong length") && msg.contains(&len.to_string()),
+                    "{len}: {msg}"
+                ),
+                other => panic!("expected Clone, got {other:?}"),
+            }
+        }
+        let ct = encrypt_with_key(&key, &[7u8; 64]).unwrap();
+        assert_eq!(*decrypt_with_key(&key, &ct).unwrap(), [7u8; 64]);
+    }
+
+    #[test]
+    fn symmetric_key_binds_both_pubkeys_and_their_order() {
+        let shared = [0x33u8; 32];
+        let a = [1u8; 32];
+        let b = [2u8; 32];
+        let k_ab = derive_symmetric_key(&shared, &a, &b);
+        let k_ba = derive_symmetric_key(&shared, &b, &a);
+        let k_ab2 = derive_symmetric_key(&shared, &a, &b);
+        assert_eq!(*k_ab, *k_ab2, "deterministic");
+        assert_ne!(*k_ab, *k_ba, "donor/requester order is part of the info");
+        let k_other = derive_symmetric_key(&[0x34u8; 32], &a, &b);
+        assert_ne!(*k_ab, *k_other, "shared secret is bound");
+        let k_c = derive_symmetric_key(&shared, &a, &[3u8; 32]);
+        assert_ne!(*k_ab, *k_c, "each pubkey is bound");
+    }
+
+    #[test]
+    fn a_ciphertext_cannot_be_opened_under_a_key_derived_with_swapped_pubkeys() {
+        // Both sides compute donor||requester; a side that got the order wrong
+        // derives a different key and fails the tag.
+        let shared = [0x33u8; 32];
+        let a = [1u8; 32];
+        let b = [2u8; 32];
+        let ct = encrypt_with_key(&derive_symmetric_key(&shared, &a, &b), &[9u8; 64]).unwrap();
+        assert!(decrypt_with_key(&derive_symmetric_key(&shared, &b, &a), &ct).is_err());
+        assert!(decrypt_with_key(&derive_symmetric_key(&shared, &a, &b), &ct).is_ok());
+    }
+
+    #[test]
+    fn digest_accepts_empty_secret_and_binds_it() {
+        // HMAC accepts an empty key; the digest still binds the pubkey and
+        // differs from any non-empty secret.
+        let pk = [4u8; 32];
+        let d = make_cloning_digest("", &pk);
+        assert!(verify_cloning_digest("", &pk, &d));
+        assert!(!verify_cloning_digest(" ", &pk, &d));
+        assert_ne!(d, make_cloning_digest("x", &pk));
+    }
+
+    #[test]
+    fn digest_is_deterministic_and_secret_length_independent_of_output() {
+        let pk = [4u8; 32];
+        let long = "s".repeat(1_000);
+        let d1 = make_cloning_digest(&long, &pk);
+        let d2 = make_cloning_digest(&long, &pk);
+        assert_eq!(d1, d2);
+        assert_eq!(d1.len(), 32);
+        assert_ne!(d1, make_cloning_digest(&"s".repeat(999), &pk));
+    }
+
+    #[test]
+    fn digest_rejects_all_zero_and_flipped_high_byte() {
+        let pk = [4u8; 32];
+        let secret = "s";
+        let d = make_cloning_digest(secret, &pk);
+        assert!(!verify_cloning_digest(secret, &pk, &[0u8; 32]));
+        let mut flipped = d;
+        flipped[31] ^= 0x80;
+        assert!(!verify_cloning_digest(secret, &pk, &flipped));
+    }
+
+    #[test]
+    fn same_seed_seals_differently_each_time() {
+        // Fresh donor ephemeral keypair per call: two seals of the same seed
+        // to the same requester must not share a ciphertext or a donor key.
+        let requester = CloneSession::new();
+        let (c1, d1) = encrypt_seed_for_peer(&requester.public_key(), &[1u8; 64]).unwrap();
+        let (c2, d2) = encrypt_seed_for_peer(&requester.public_key(), &[1u8; 64]).unwrap();
+        assert_ne!(c1, c2);
+        assert_ne!(d1, d2);
+        assert_eq!(
+            *requester.decrypt_seed_from_peer(&d1, &c1).unwrap(),
+            [1u8; 64]
+        );
+        assert_eq!(
+            *requester.decrypt_seed_from_peer(&d2, &c2).unwrap(),
+            [1u8; 64]
+        );
+        // Cross-pairing the donor keys fails.
+        assert!(requester.decrypt_seed_from_peer(&d1, &c2).is_err());
+    }
+
+    #[test]
+    fn default_session_is_a_fresh_keypair() {
+        let a = CloneSession::default();
+        let b = CloneSession::default();
+        assert_ne!(a.public_key(), b.public_key());
+        let dbg = format!("{a:?}");
+        assert!(dbg.contains(&hex::encode(a.public_key())));
+        assert!(dbg.contains("<redacted>"));
+    }
+
+    #[test]
+    fn roundtrip_preserves_every_seed_byte_pattern() {
+        for seed in [[0u8; 64], [0xffu8; 64], core::array::from_fn(|i| i as u8)] {
+            let requester = CloneSession::new();
+            let (ct, donor) = encrypt_seed_for_peer(&requester.public_key(), &seed).unwrap();
+            assert_eq!(
+                *requester.decrypt_seed_from_peer(&donor, &ct).unwrap(),
+                seed
+            );
+        }
     }
 }

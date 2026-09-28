@@ -752,3 +752,486 @@ mod tests {
             .is_ok());
     }
 }
+
+#[cfg(test)]
+mod coverage_tests {
+    use super::*;
+
+    const MNEMONIC: &str =
+        "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
+
+    fn nonce(i: u32) -> [u8; 32] {
+        let mut n = [0u8; 32];
+        n[..4].copy_from_slice(&i.to_be_bytes());
+        n
+    }
+
+    fn cloning_state() -> EnclaveState {
+        let state = EnclaveState::new(Network::Bitcoin);
+        state
+            .enter_cloning(CloningSession::new(CloneSession::new(), [0x11; 20]))
+            .unwrap();
+        state
+    }
+
+    fn active_state() -> EnclaveState {
+        let state = EnclaveState::new(Network::Bitcoin);
+        state.initialize_from_seed([7u8; 64]).unwrap();
+        state
+    }
+
+    // ---- construction ----------------------------------------------------
+
+    #[test]
+    fn default_state_is_mainnet_and_initial() {
+        let s = EnclaveState::default();
+        assert_eq!(s.network(), Network::Bitcoin);
+        assert_eq!(s.phase_name(), "initial");
+        let s = EnclaveState::new(Network::Regtest);
+        assert_eq!(s.network(), Network::Regtest);
+    }
+
+    #[test]
+    fn phase_names_are_stable() {
+        assert_eq!(Phase::Initial.name(), "initial");
+        assert_eq!(
+            Phase::Cloning(CloningSession::new(CloneSession::new(), [0; 20])).name(),
+            "cloning"
+        );
+        let km = KeyManager::from_seed([1u8; 64], Network::Bitcoin).unwrap();
+        assert_eq!(Phase::Active(Box::new(km)).name(), "active");
+    }
+
+    #[test]
+    fn cloning_session_debug_shows_cluster_key_and_redacts_secret() {
+        let s = CloningSession::new(CloneSession::new(), [0xAB; 20]);
+        let dbg = format!("{s:?}");
+        assert!(dbg.contains(&"ab".repeat(20)), "{dbg}");
+        assert!(dbg.contains("<redacted>"), "{dbg}");
+        assert_eq!(s.cluster_public_key, [0xAB; 20]);
+    }
+
+    // ---- initialisation ------------------------------------------------------
+
+    #[test]
+    fn invalid_mnemonic_leaves_state_initial_so_a_retry_can_succeed() {
+        let state = EnclaveState::new(Network::Bitcoin);
+        let err = state
+            .initialize_from_mnemonic("not a mnemonic")
+            .unwrap_err();
+        assert!(matches!(err, EnclaveError::InvalidKey(_)), "{err}");
+        assert_eq!(state.phase_name(), "initial");
+        assert!(!state.is_initialized());
+        state.initialize_from_mnemonic(MNEMONIC).unwrap();
+        assert!(state.is_initialized());
+    }
+
+    #[test]
+    fn initialize_from_entropy_wipes_the_caller_entropy() {
+        let state = EnclaveState::new(Network::Bitcoin);
+        let mut entropy = [0x5a; 32];
+        let mnemonic = state.initialize_from_entropy(&mut entropy).unwrap();
+        assert_eq!(entropy, [0u8; 32], "entropy must be zeroized after use");
+        assert_eq!(mnemonic.word_count(), 24, "256-bit entropy -> 24 words");
+    }
+
+    #[test]
+    fn same_entropy_yields_same_identity() {
+        let a = EnclaveState::new(Network::Bitcoin);
+        let b = EnclaveState::new(Network::Bitcoin);
+        a.initialize_from_entropy(&mut [9u8; 32]).unwrap();
+        b.initialize_from_entropy(&mut [9u8; 32]).unwrap();
+        assert_eq!(a.evm_address().unwrap(), b.evm_address().unwrap());
+        let c = EnclaveState::new(Network::Bitcoin);
+        c.initialize_from_entropy(&mut [8u8; 32]).unwrap();
+        assert_ne!(a.evm_address().unwrap(), c.evm_address().unwrap());
+    }
+
+    #[test]
+    fn seed_and_mnemonic_init_are_rejected_from_active() {
+        let state = active_state();
+        assert!(matches!(
+            state.initialize_from_seed([1u8; 64]),
+            Err(EnclaveError::AlreadyInitialized)
+        ));
+        assert!(matches!(
+            state.initialize_from_mnemonic(MNEMONIC),
+            Err(EnclaveError::AlreadyInitialized)
+        ));
+        assert!(matches!(
+            state.initialize_from_entropy(&mut [1u8; 32]),
+            Err(EnclaveError::AlreadyInitialized)
+        ));
+    }
+
+    #[test]
+    fn mnemonic_and_entropy_init_are_rejected_from_cloning() {
+        let state = cloning_state();
+        assert!(matches!(
+            state.initialize_from_mnemonic(MNEMONIC),
+            Err(EnclaveError::AlreadyInitialized)
+        ));
+        assert!(matches!(
+            state.initialize_from_entropy(&mut [1u8; 32]),
+            Err(EnclaveError::AlreadyInitialized)
+        ));
+        assert_eq!(state.phase_name(), "cloning");
+    }
+
+    // ---- donor cloning secret ------------------------------------------------
+
+    #[test]
+    fn donor_secret_unset_is_not_ready() {
+        let state = EnclaveState::new(Network::Bitcoin);
+        let err = state.with_donor_cloning_secret(|_| Ok(())).unwrap_err();
+        match &err {
+            EnclaveError::NotReady { state } => {
+                assert_eq!(state, "donor cloning secret not configured")
+            }
+            other => panic!("expected NotReady, got {other:?}"),
+        }
+        assert_eq!(err.error_code(), 2);
+    }
+
+    #[test]
+    fn donor_secret_is_readable_only_inside_the_closure_and_overwritable() {
+        let state = EnclaveState::new(Network::Bitcoin);
+        state.set_donor_cloning_secret("first".into()).unwrap();
+        let seen = state
+            .with_donor_cloning_secret(|s| Ok(s.to_string()))
+            .unwrap();
+        assert_eq!(seen, "first");
+        // Idempotent overwrite.
+        state.set_donor_cloning_secret("second".into()).unwrap();
+        let seen = state
+            .with_donor_cloning_secret(|s| Ok(s.to_string()))
+            .unwrap();
+        assert_eq!(seen, "second");
+        // Closure errors propagate untouched.
+        let err = state
+            .with_donor_cloning_secret(|_| Err::<(), _>(EnclaveError::DigestMismatch))
+            .unwrap_err();
+        assert!(matches!(err, EnclaveError::DigestMismatch));
+    }
+
+    #[test]
+    fn donor_secret_is_independent_of_the_key_phase() {
+        // Setting the secret does not require (or change) an Active phase.
+        let state = EnclaveState::new(Network::Bitcoin);
+        state.set_donor_cloning_secret("s".into()).unwrap();
+        assert_eq!(state.phase_name(), "initial");
+        assert!(state.with_donor_cloning_secret(|_| Ok(())).is_ok());
+    }
+
+    // ---- cloning transitions ----------------------------------------------
+
+    #[test]
+    fn enter_cloning_from_initial_moves_to_cloning() {
+        let state = cloning_state();
+        assert_eq!(state.phase_name(), "cloning");
+        assert!(!state.is_initialized());
+        let pk = state
+            .with_cloning_session(|s| Ok(s.cluster_public_key))
+            .unwrap();
+        assert_eq!(pk, [0x11; 20]);
+    }
+
+    #[test]
+    fn enter_cloning_is_rejected_from_active_and_cloning() {
+        let active = active_state();
+        assert!(matches!(
+            active.enter_cloning(CloningSession::new(CloneSession::new(), [0; 20])),
+            Err(EnclaveError::AlreadyInitialized)
+        ));
+        assert_eq!(active.phase_name(), "active");
+
+        let cloning = cloning_state();
+        assert!(matches!(
+            cloning.enter_cloning(CloningSession::new(CloneSession::new(), [0x22; 20])),
+            Err(EnclaveError::AlreadyInitialized)
+        ));
+        // The original session is untouched.
+        let pk = cloning
+            .with_cloning_session(|s| Ok(s.cluster_public_key))
+            .unwrap();
+        assert_eq!(pk, [0x11; 20]);
+    }
+
+    #[test]
+    fn with_cloning_session_is_not_ready_outside_cloning() {
+        for (state, name) in [
+            (EnclaveState::new(Network::Bitcoin), "initial"),
+            (active_state(), "active"),
+        ] {
+            match state.with_cloning_session(|_| Ok(())) {
+                Err(EnclaveError::NotReady { state }) => assert_eq!(state, name),
+                other => panic!("expected NotReady, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn initialize_from_cloned_seed_requires_cloning_phase() {
+        for (state, name) in [
+            (EnclaveState::new(Network::Bitcoin), "initial"),
+            (active_state(), "active"),
+        ] {
+            match state.initialize_from_cloned_seed([3u8; 64]) {
+                Err(EnclaveError::NotReady { state }) => assert_eq!(state, name),
+                other => panic!("expected NotReady, got {other:?}"),
+            }
+        }
+        let state = cloning_state();
+        state.initialize_from_cloned_seed([3u8; 64]).unwrap();
+        assert_eq!(state.phase_name(), "active");
+        let expected = KeyManager::from_seed([3u8; 64], Network::Bitcoin).unwrap();
+        assert_eq!(state.evm_address().unwrap(), *expected.evm_address());
+    }
+
+    #[test]
+    fn complete_cloning_success_moves_to_active_with_the_returned_keys() {
+        let state = cloning_state();
+        let network = state.network();
+        state
+            .complete_cloning(|session| {
+                assert_eq!(session.cluster_public_key, [0x11; 20]);
+                KeyManager::from_seed([4u8; 64], network)
+            })
+            .unwrap();
+        assert!(state.is_initialized());
+        let expected = KeyManager::from_seed([4u8; 64], Network::Bitcoin).unwrap();
+        assert_eq!(state.evm_address().unwrap(), *expected.evm_address());
+        assert_eq!(state.with_seed(|s| Ok(*s)).unwrap(), [4u8; 64]);
+    }
+
+    #[test]
+    fn complete_cloning_failure_keeps_cloning_phase_for_retry() {
+        let state = cloning_state();
+        let err = state
+            .complete_cloning(|_| Err(EnclaveError::IdentityMismatch))
+            .unwrap_err();
+        assert!(matches!(err, EnclaveError::IdentityMismatch));
+        assert_eq!(state.phase_name(), "cloning");
+        // A retry with a good closure then succeeds.
+        let network = state.network();
+        state
+            .complete_cloning(|_| KeyManager::from_seed([5u8; 64], network))
+            .unwrap();
+        assert_eq!(state.phase_name(), "active");
+    }
+
+    #[test]
+    fn complete_cloning_is_not_ready_outside_cloning() {
+        for (state, name) in [
+            (EnclaveState::new(Network::Bitcoin), "initial"),
+            (active_state(), "active"),
+        ] {
+            let network = state.network();
+            match state.complete_cloning(|_| KeyManager::from_seed([1u8; 64], network)) {
+                Err(EnclaveError::NotReady { state }) => assert_eq!(state, name),
+                other => panic!("expected NotReady, got {other:?}"),
+            }
+        }
+        // Active stays active with its original identity.
+        let active = active_state();
+        let before = active.evm_address().unwrap();
+        let network = active.network();
+        let _ = active.complete_cloning(|_| KeyManager::from_seed([1u8; 64], network));
+        assert_eq!(active.evm_address().unwrap(), before);
+    }
+
+    // ---- accessors that need Active --------------------------------------
+
+    #[test]
+    fn active_only_accessors_fail_from_initial_and_cloning() {
+        for state in [EnclaveState::new(Network::Bitcoin), cloning_state()] {
+            assert!(matches!(
+                state.with_seed(|_| Ok(())),
+                Err(EnclaveError::KeyNotInitialized)
+            ));
+            assert!(matches!(
+                state.evm_address(),
+                Err(EnclaveError::KeyNotInitialized)
+            ));
+            assert!(matches!(
+                state.sign_ccd(&[0u8; 32]),
+                Err(EnclaveError::KeyNotInitialized)
+            ));
+            assert!(matches!(
+                state.sign_evm_gas_tx(&[0u8; 32]),
+                Err(EnclaveError::KeyNotInitialized)
+            ));
+            assert!(matches!(
+                state.sign_psbt_scoped(&[0u8; 8], Some(crate::keys::AccountType::Vanilla)),
+                Err(EnclaveError::KeyNotInitialized)
+            ));
+            assert!(matches!(
+                state.with_keys(|_| Ok(())),
+                Err(EnclaveError::KeyNotInitialized)
+            ));
+            assert!(matches!(
+                state.sign_evm(&[0u8; 32]),
+                Err(EnclaveError::KeyNotInitialized)
+            ));
+        }
+    }
+
+    #[test]
+    fn active_accessors_agree_with_the_key_manager() {
+        let state = active_state();
+        let km = KeyManager::from_seed([7u8; 64], Network::Bitcoin).unwrap();
+        let info = state.get_keys().unwrap();
+        assert_eq!(info.evm_address, *km.evm_address());
+        assert_eq!(info.evm_uncompressed_pub, *km.evm_uncompressed_pub());
+        assert_eq!(info.evm_gas_tx_address, *km.evm_gas_tx_address());
+        assert_eq!(
+            info.evm_gas_tx_uncompressed_pub,
+            *km.evm_gas_tx_uncompressed_pub()
+        );
+        assert_eq!(info.btc_compressed_pubkey, *km.btc_compressed_pubkey());
+        assert_eq!(info.btc_xpub, km.btc_xpub().to_string());
+        assert_eq!(info.master_fingerprint, km.master_fingerprint().to_bytes());
+        assert_eq!(
+            info.account_xpub_vanilla,
+            km.account_xpub_vanilla().to_string()
+        );
+        assert_eq!(
+            info.account_xpub_colored,
+            km.account_xpub_colored().to_string()
+        );
+        assert_eq!(info.ccd_ed25519_pub, *km.ccd_ed25519_pub());
+        assert_eq!(state.evm_address().unwrap(), *km.evm_address());
+        assert_eq!(state.with_seed(|s| Ok(*s)).unwrap(), [7u8; 64]);
+        assert_eq!(
+            state.sign_evm(&[1u8; 32]).unwrap(),
+            km.sign_evm(&[1u8; 32]).unwrap()
+        );
+        assert_eq!(
+            state.sign_evm_gas_tx(&[1u8; 32]).unwrap(),
+            km.sign_evm_gas_tx(&[1u8; 32]).unwrap()
+        );
+        assert_eq!(
+            state.sign_ccd(&[1u8; 32]).unwrap(),
+            km.sign_ccd(&[1u8; 32]).unwrap()
+        );
+        assert_eq!(
+            state.with_keys(|k| Ok(*k.evm_address())).unwrap(),
+            *km.evm_address()
+        );
+    }
+
+    #[test]
+    fn sign_psbt_scoped_rejects_garbage_bytes_once_active() {
+        let state = active_state();
+        let err = state
+            .sign_psbt_scoped(b"not a psbt", Some(crate::keys::AccountType::Vanilla))
+            .unwrap_err();
+        assert!(matches!(err, EnclaveError::Signing(_)), "{err}");
+        let err = state.sign_psbt(b"not a psbt").unwrap_err();
+        assert!(matches!(err, EnclaveError::Signing(_)), "{err}");
+    }
+
+    // ---- replay guard edges ------------------------------------------------
+
+    #[test]
+    fn replay_guard_ttl_boundary_evicts_at_exactly_ttl() {
+        // Eviction uses `>=`, so an entry seen exactly `ttl` ago is gone.
+        let ttl = Duration::from_secs(10);
+        let g = NonceReplayGuard::with_capacity(10, ttl);
+        let t0 = Instant::now();
+        g.check_and_record_at(nonce(1), t0).unwrap();
+        // One nanosecond short of the TTL: still a replay.
+        assert!(matches!(
+            g.check_and_record_at(nonce(1), t0 + ttl - Duration::from_nanos(1)),
+            Err(EnclaveError::NonceReplay)
+        ));
+        // Exactly the TTL: evicted, so the same nonce is admitted again.
+        g.check_and_record_at(nonce(1), t0 + ttl).unwrap();
+        assert_eq!(g.seen_count(), 1);
+    }
+
+    #[test]
+    fn replay_guard_time_going_backwards_does_not_evict() {
+        let g = NonceReplayGuard::with_capacity(10, Duration::from_secs(10));
+        let t0 = Instant::now() + Duration::from_secs(100);
+        g.check_and_record_at(nonce(1), t0).unwrap();
+        // `saturating_duration_since` clamps to zero for an earlier `now`.
+        assert!(matches!(
+            g.check_and_record_at(nonce(1), t0 - Duration::from_secs(50)),
+            Err(EnclaveError::NonceReplay)
+        ));
+    }
+
+    #[test]
+    fn replay_guard_default_capacity_admits_many_distinct_nonces() {
+        let g = NonceReplayGuard::default();
+        for i in 0..1_000u32 {
+            g.check_and_record(nonce(i)).unwrap();
+        }
+        assert_eq!(g.seen_count(), 1_000);
+        for i in 0..1_000u32 {
+            assert!(matches!(
+                g.check_and_record(nonce(i)),
+                Err(EnclaveError::NonceReplay)
+            ));
+        }
+    }
+
+    #[test]
+    fn replay_guard_capacity_one_keeps_only_the_latest() {
+        let g = NonceReplayGuard::with_capacity(1, Duration::from_secs(3600));
+        let t0 = Instant::now();
+        g.check_and_record_at(nonce(1), t0).unwrap();
+        g.check_and_record_at(nonce(2), t0).unwrap();
+        assert_eq!(g.seen_count(), 1);
+        assert!(matches!(
+            g.check_and_record_at(nonce(2), t0),
+            Err(EnclaveError::NonceReplay)
+        ));
+        // nonce(1) was evicted, so it is admitted again.
+        g.check_and_record_at(nonce(1), t0).unwrap();
+    }
+
+    #[test]
+    fn reservation_rollback_removes_only_its_own_nonce() {
+        let g = NonceReplayGuard::with_capacity(10, Duration::from_secs(3600));
+        g.reserve(nonce(1)).unwrap().commit();
+        {
+            let _r = g.reserve(nonce(2)).unwrap();
+            assert_eq!(g.seen_count(), 2);
+        }
+        assert_eq!(g.seen_count(), 1);
+        assert!(matches!(
+            g.reserve(nonce(1)),
+            Err(EnclaveError::NonceReplay)
+        ));
+        g.reserve(nonce(2)).unwrap().commit();
+        assert_eq!(g.seen_count(), 2);
+    }
+
+    #[test]
+    fn reserve_drop_reserve_cycle_repeats_indefinitely() {
+        let g = NonceReplayGuard::with_capacity(10, Duration::from_secs(3600));
+        for _ in 0..5 {
+            let r = g.reserve(nonce(9)).unwrap();
+            drop(r);
+            assert_eq!(g.seen_count(), 0);
+        }
+    }
+
+    #[test]
+    fn state_carries_two_independent_guards() {
+        let state = EnclaveState::new(Network::Bitcoin);
+        state.replay_guard.check_and_record(nonce(1)).unwrap();
+        // The op dedup guard has its own key space.
+        state.op_replay_guard.check_and_record(nonce(1)).unwrap();
+        assert!(matches!(
+            state.replay_guard.check_and_record(nonce(1)),
+            Err(EnclaveError::NonceReplay)
+        ));
+        assert!(matches!(
+            state.op_replay_guard.check_and_record(nonce(1)),
+            Err(EnclaveError::NonceReplay)
+        ));
+    }
+}
