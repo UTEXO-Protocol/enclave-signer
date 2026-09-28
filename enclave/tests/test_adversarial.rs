@@ -1030,12 +1030,14 @@ fn ccd_source_to_rgb_destination_is_refused() {
 
 // ---- gas-tx signing volume ------------------------------------------------------------
 
-/// The gas key pays real gas. Signing the same nonce twice is never useful
-/// to the bridge, only to a host that wants a spare, differently-priced
-/// transaction; nothing in the enclave dedups or rate-limits gas signing.
+/// The gas key pays real gas and nothing bounds how many transactions the
+/// host may have signed: fresh nonces drain the gas balance at up to
+/// gas_limit x max_fee each, and one nonce signed twice is a spare. Neither
+/// moves bridged funds (`to` and `value` are pinned); the exposure is the
+/// gas balance, so a signing rate limit or fee budget is the fitting bound.
 #[cfg(all(not(feature = "dev-mode"), feature = "allow-seed-import"))]
 #[test]
-#[ignore = "FINDING: gas-tx signing has no per-nonce dedup or rate limit; any number of signatures for one nonce"]
+#[ignore = "FINDING: gas-tx signing is unbounded in count (no rate limit or fee budget); griefing of the gas balance only"]
 fn gas_tx_does_not_sign_the_same_nonce_twice() {
     fn rlp_str(bytes: &[u8]) -> Vec<u8> {
         if bytes.len() == 1 && bytes[0] < 0x80 {
@@ -1294,4 +1296,244 @@ fn merkle_position_beyond_the_path_depth_is_refused() {
         verify_merkle_proof(&a, 2, &[b], &root).is_err(),
         "position 2 in a two-leaf tree verified"
     );
+}
+
+// ---- key material inputs -----------------------------------------------------------------
+
+/// A seed of the wrong width and a mnemonic with a bad checksum are refused,
+/// and the enclave stays initialisable afterwards.
+#[cfg(feature = "allow-seed-import")]
+#[test]
+fn malformed_seed_or_mnemonic_is_refused_and_installs_nothing() {
+    let port = common::start_test_server();
+    for len in [0usize, 32, 63, 65] {
+        if len == 0 {
+            continue; // empty seed means "generate"
+        }
+        expect_error(send(
+            port,
+            Req::InitializeKey(InitializeKeyRequest {
+                seed: vec![7u8; len],
+                mnemonic: String::new(),
+                cloning_secret: String::new(),
+            }),
+        ));
+    }
+    for words in [
+        "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon",
+        "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon",
+        "",
+    ] {
+        if words.is_empty() {
+            continue;
+        }
+        expect_error(send(
+            port,
+            Req::InitializeKey(InitializeKeyRequest {
+                seed: vec![],
+                mnemonic: words.into(),
+                cloning_secret: String::new(),
+            }),
+        ));
+    }
+    expect_error(send(port, Req::GetPublicKey(GetPublicKeyRequest {})));
+    assert!(matches!(
+        send(
+            port,
+            Req::InitializeKey(InitializeKeyRequest {
+                seed: vec![],
+                mnemonic: MNEMONIC.into(),
+                cloning_secret: String::new(),
+            }),
+        )
+        .response,
+        Some(Resp::InitializeKey(_))
+    ));
+}
+
+// ---- calldata width -------------------------------------------------------------------------
+
+/// A fundsOut amount wider than u64 must be refused, never truncated into a
+/// smaller release that would pass the amount cross-check.
+#[cfg(all(
+    feature = "ccd",
+    feature = "rgb-validation",
+    feature = "allow-seed-import"
+))]
+#[test]
+fn calldata_amount_wider_than_u64_is_refused() {
+    use alloy_primitives::{Address, Bytes, U256};
+    use alloy_sol_types::SolCall;
+    use utexo_bridge_enclave::networks::evm::validation::{fundsOutCall, FundsOutParams};
+
+    let port = common::start_test_server_with_config(
+        |state| state.initialize_from_mnemonic(MNEMONIC).unwrap(),
+        pinned(),
+    );
+    // 2^64 + 5: truncation to u64 would read as 5.
+    let wide = (U256::from(1u64) << 64) + U256::from(5u64);
+    let call_data = fundsOutCall {
+        params: FundsOutParams {
+            recipient: Address::from([0x11; 20]),
+            amount: wide,
+            burnId: U256::from(7u64),
+            sourceChainId: U256::from(919u64),
+            destinationChainId: U256::from(1u64),
+            sourceAddress: "ccd".into(),
+            proof: Bytes::new(),
+            settlementData: Bytes::new(),
+        },
+    }
+    .abi_encode();
+    expect_error(send(
+        port,
+        Req::Sign(SignRequest {
+            amount: 5,
+            source_network: Some(SourceNetwork::CcdSource(CcdSource {
+                tx_hash: vec![0xCC; 32],
+                commission: 0,
+            })),
+            destination_network: Some(DestinationNetwork::EvmDestination(EvmDestination {
+                call_data,
+                nonce: 1,
+                deadline: u64::MAX,
+                chain_id: 1,
+                proxy_contract: vec![0xAA; 20],
+                calldata_amount: 5,
+                calldata_commission: 0,
+                lz_release: None,
+            })),
+        }),
+    ));
+}
+
+// ---- SetClone race ------------------------------------------------------------------------------
+
+/// Several concurrent SetClone deliveries of one valid payload must commit
+/// the identity once; the rest are refused and the identity is the donor's.
+#[cfg(feature = "mock-attestation")]
+#[test]
+fn concurrent_set_clone_commits_once() {
+    use utexo_bridge_enclave::cloning;
+    use utexo_bridge_enclave::keys::KeyManager;
+
+    let seed = [0x5c; 64];
+    let cluster = KeyManager::from_seed(seed, bitcoin::Network::Bitcoin)
+        .unwrap()
+        .evm_address()
+        .to_vec();
+    let port = common::start_test_server();
+    let requester_pk: [u8; 32] = match send(
+        port,
+        Req::InitiateCloning(InitiateCloningRequest {
+            cloning_secret: "s".into(),
+            cluster_public_key: cluster.clone(),
+        }),
+    )
+    .response
+    {
+        Some(Resp::InitiateCloning(r)) => r.encryption_pubkey.try_into().unwrap(),
+        other => panic!("{other:?}"),
+    };
+    let (ciphertext, donor_pub) = cloning::encrypt_seed_for_peer(&requester_pk, &seed).unwrap();
+    let doc = attestation_verify::build_mock_document(&[0x99; 32], Some(&donor_pub), None).unwrap();
+
+    let handles: Vec<_> = (0..6)
+        .map(|_| {
+            let (ciphertext, doc) = (ciphertext.clone(), doc.clone());
+            std::thread::spawn(move || {
+                send(
+                    port,
+                    Req::SetClone(SetCloneRequest {
+                        encrypted_seed: ciphertext,
+                        donor_pubkey: donor_pub.to_vec(),
+                        donor_attestation: doc,
+                    }),
+                )
+            })
+        })
+        .collect();
+    let ok = handles
+        .into_iter()
+        .map(|h| h.join().unwrap().response)
+        .filter(|r| matches!(r, Some(Resp::SetClone(_))))
+        .count();
+    assert_eq!(ok, 1, "exactly one SetClone may commit");
+    match send(port, Req::GetPublicKey(GetPublicKeyRequest {})).response {
+        Some(Resp::PublicKeys(k)) => assert_eq!(k.evm_address, cluster),
+        other => panic!("{other:?}"),
+    }
+}
+
+// ---- secret material in error text ---------------------------------------------------------
+
+/// Error messages travel back to the host and into its logs; they must never
+/// carry the mnemonic, seed bytes or cloning secret that caused them.
+#[cfg(feature = "allow-seed-import")]
+#[test]
+fn error_messages_do_not_echo_secret_material() {
+    let port = common::start_test_server();
+
+    // A mnemonic with a bad checksum, made of recognisable words.
+    let phrase = "zoo zoo zoo zoo zoo zoo zoo zoo zoo zoo zoo zoo";
+    let err = expect_error(send(
+        port,
+        Req::InitializeKey(InitializeKeyRequest {
+            seed: vec![],
+            mnemonic: phrase.into(),
+            cloning_secret: String::new(),
+        }),
+    ));
+    assert!(!err.message.contains("zoo"), "{}", err.message);
+
+    // A seed of the wrong width, made of a distinctive byte.
+    let err = expect_error(send(
+        port,
+        Req::InitializeKey(InitializeKeyRequest {
+            seed: vec![0xE7; 63],
+            mnemonic: String::new(),
+            cloning_secret: String::new(),
+        }),
+    ));
+    assert!(
+        !err.message.to_lowercase().contains("e7e7"),
+        "{}",
+        err.message
+    );
+
+    // A cloning secret on a request that is refused.
+    let secret = "hunter2-the-operator-secret";
+    let err = expect_error(send(
+        port,
+        Req::InitiateCloning(InitiateCloningRequest {
+            cloning_secret: secret.into(),
+            cluster_public_key: vec![0x11; 19],
+        }),
+    ));
+    assert!(!err.message.contains(secret), "{}", err.message);
+
+    // And on a donor that refuses a clone.
+    let donor = common::start_test_server();
+    assert!(matches!(
+        send(
+            donor,
+            Req::InitializeKey(InitializeKeyRequest {
+                seed: vec![],
+                mnemonic: String::new(),
+                cloning_secret: secret.into(),
+            }),
+        )
+        .response,
+        Some(Resp::InitializeKey(_))
+    ));
+    let err = expect_error(send(
+        donor,
+        Req::GetClone(GetCloneRequest {
+            cluster_public_key: vec![0x22; 20],
+            cloning_digest: vec![0x33; 32],
+            encryption_pubkey: vec![0x44; 32],
+            requester_attestation: vec![0x55; 8],
+        }),
+    ));
+    assert!(!err.message.contains(secret), "{}", err.message);
 }
