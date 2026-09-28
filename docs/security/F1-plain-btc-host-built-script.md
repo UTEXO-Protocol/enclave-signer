@@ -146,3 +146,23 @@ The existing probe becomes the regression guard, and each stage adds its own pos
 - [ ] An input whose tree does not rebuild is not signed; the response reports zero inputs signed and the production guard refuses.
 - [ ] Unset `BTC_COSIGNER_XPUBS` in a production build refuses plain-BTC and send-RGB signing.
 - [ ] Policy commitment changes when the xpubs or template change (extend the `policy.rs` invariant tests).
+
+## Status against pull request 240
+
+Not reproducible on `audit_fixes` (head `acdde48`, pull request 240 into `dev`). The probe above, copied unchanged and run against that head in the `ccd` + `allow-seed-import` lane with `btc_max_unowned_sats` pinned to 1,000, is refused:
+
+```
+cross-check failed: plain-BTC PSBT pays 105000 sats to outputs the enclave cannot prove
+pay back into the same custody, over the pinned budget of 1000 sats - refusing to sign.
+```
+
+That branch rewrites `btc_ownership.rs` around three rules that correspond to options A, C and a partial B above:
+
+- An input is ours only when it is a BIP-86 key-path spend: the claimed internal key derives from our seed at the claimed path and, tweaked with `tap_merkle_root`, reproduces the output key. Script-path inputs are never ours (`find_controlled_taproot_inputs`).
+- An output on a co-signed input script is exempt only up to the input value on that script (`unowned_output_sats`).
+- An output is fully ours when its claimed internal key derives from our seed and it carries no script tree (`output_is_self_derived`).
+- The asset change oracle accepts exactly one Colored input script (`asset_change_scripts`).
+
+The exposure that branch documents itself, a planted input whose internal key is ours but whose tree carries a foreign leaf, is bounded per transaction by `BTC_MAX_UNOWNED_SATS`, which is 0 unless the operator pins it for allocation dust. The analysis in this document describes the code on `dev` and on `claude/gallant-pascal-snk3xu`, which pull request 240 has not merged into yet.
+
+Other probes from this branch against the same head, same lane: F5 (fee burn) and F9 (seed plus mnemonic accepted) still reproduce; F4 (replay-guard flood) and F6 (gas-tx count) still reproduce; F10 (sighash) is closed there by the signer refusing anything but DEFAULT or ALL. F2, F3, F7 and F8 are feature-gated out of that lane; by code reading, that branch still skips work on signet, still accepts any 32-byte CCD hash, still ignores high Merkle position bits, and keys its replay guard only on the EVM-to-RGB direction.
