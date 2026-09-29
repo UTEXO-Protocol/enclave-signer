@@ -106,7 +106,7 @@ and 8002); the enclave has no direct network stack. With an
 port and pins `host` to loopback in `/etc/hosts`, so TLS terminates inside the
 enclave against the real certificate. Esplora REST uses loopback 3443, EVM RPC
 3444. The EVM RPC client connects to `https://<EVM_RPC_HOST>` through loopback
-3444, so TLS ends inside the enclave; it trusts only `EVM_RPC_TLS_CA_PEM`. The
+3444, so TLS ends inside the enclave; it trusts only `EVM_RPC_TLS_CA_DER_HEX`. The
 host runs `vsock-proxy 8002 <EVM_RPC_HOST> <EVM_RPC_TLS_PORT>`.
 
 **Connection hardening:** fixed pool of 4 worker threads, bounded

@@ -13,8 +13,9 @@
 #   GITHUB_TOKEN     private dependency token
 #   PRIVATE_DEPS_DIR alternative directory for per-repository deploy keys
 #   RGB_ASSET_ID     required when the recipe declares ARG RGB_ASSET_ID
-#   EVM_RPC_HOST, EVM_RPC_TLS_CA_PEM  the EVM RPC TLS pins; the recipe fails
-#                    without them when it declares them
+#   EVM_RPC_HOST, EVM_RPC_TLS_CA_DER_HEX  the EVM RPC TLS pins, required when
+#                    the recipe declares them (rejected before the build starts
+#                    if missing, the same way as RGB_ASSET_ID)
 #   ENCLAVE_DEBUG_FEATURES optional test features; leave empty for production
 #   SOURCE_DATE_EPOCH build timestamp (default: commit time)
 #
@@ -110,10 +111,14 @@ if grep -qE '^ARG[[:space:]]+RGB_ASSET_ID' "$SCRIPT_DIR/$DOCKERFILE"; then
     echo "    rgb asset id : $RGB_ASSET_ID"
 fi
 
-# Forward the EVM RPC TLS pins when set. A recipe that declares them fails
-# its build without them.
-for pin in EVM_RPC_HOST EVM_RPC_TLS_CA_PEM; do
-    if [ -n "${!pin:-}" ]; then
+# Require an EVM RPC TLS pin when the selected Dockerfile declares it.
+# Reject a missing pin before the build starts, same as RGB_ASSET_ID.
+for pin in EVM_RPC_HOST EVM_RPC_TLS_CA_DER_HEX; do
+    if grep -qE "^ARG[[:space:]]+$pin" "$SCRIPT_DIR/$DOCKERFILE"; then
+        if [ -z "${!pin:-}" ]; then
+            echo "Error: $DOCKERFILE requires $pin (the EVM RPC TLS pin)." >&2
+            exit 1
+        fi
         BUILD_ARGS+=(--build-arg "$pin=${!pin}")
     fi
 done

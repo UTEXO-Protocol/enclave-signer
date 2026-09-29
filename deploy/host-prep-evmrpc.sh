@@ -65,6 +65,14 @@ systemctl enable --now vsock-proxy-evmrpc.service >/dev/null 2>&1 || true
 systemctl restart vsock-proxy-evmrpc.service
 sleep 1
 
-# --- 3. status summary -------------------------------------------------------
+# --- 3. self-test: eth_chainId direct to the pinned endpoint ----------------
+log "self-test: eth_chainId via https://${HOST}:${PORT}/"
+CHAIN=$(curl -s --max-time 10 "https://${HOST}:${PORT}/" \
+  -H 'content-type: application/json' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"eth_chainId","params":[]}' | jq -r '.result // empty')
+[ "$CHAIN" = "0xa4b1" ] || { log "ERROR: chainId != 0xa4b1 (Arbitrum One 42161) — wrong EVM_RPC_HOST, or it does not serve JSON-RPC at /?"; exit 1; }
+log "OK: EVM_RPC_HOST reachable (chain 42161)"
+
+# --- 4. status summary -------------------------------------------------------
 systemctl --no-pager --lines=0 status vsock-proxy-evmrpc.service 2>/dev/null | grep -E 'Active:|Loaded:' || true
 log "host-prep-evmrpc DONE"

@@ -260,8 +260,11 @@ CA/certificate/key environment from [Parent mTLS](parent-mtls.md) first; an
 
 ```bash
 # Production verification (against a real Nitro enclave). By default it expects a
-# production policy with plain-BTC signing DISABLED and the raw-RPC EVM data
-# source (`--expect-evm-source raw`, what the shipped image uses).
+# production policy with plain-BTC signing DISABLED and the pinned-TLS EVM data
+# source (`--expect-evm-source tls`, what the shipped image uses), which needs the
+# host and CA pin the image was built with. Compute the CA hash from the same
+# DER the image commits to:
+#   openssl x509 -in ca.pem -outform der | openssl dgst -sha256 -hex
 attest-verify \
     --endpoint https://parent.example:50051 \
     --pcr0 <96-hex-chars> \
@@ -269,7 +272,9 @@ attest-verify \
     --pcr2 <96-hex-chars> \
     --expect-signer-role burn \
     --expect-funds-in-contract 0x6711f1a319B37847fa0234181C34D883774c4951 \
-    --expect-evm-min-confirmations 12
+    --expect-evm-min-confirmations 12 \
+    --expect-evm-rpc-host <rpc host> \
+    --expect-evm-rpc-ca-sha256 <64-hex-chars>
 
 # --expect-signer-role is required: `mint` for the mint signer image
 # (Dockerfile.enclave.mint), `burn` for the burn signer

@@ -624,13 +624,18 @@ impl AlloyEvmClient {
             .tls_certs_only([reqwest::Certificate::from_der(&tls.ca_der).map_err(err)?])
             .resolve(&tls.host, ([127, 0, 0, 1], tls.local_port).into())
             .no_proxy()
+            // Only the pinned host can redirect. It could still point at a
+            // peer the CA never certified.
+            .redirect(reqwest::redirect::Policy::none())
             .timeout(EVM_RPC_CALL_TIMEOUT)
             .build()
             .map_err(err)?;
         // No port in the URL, so `resolve` picks the forwarder port.
-        let url = format!("https://{}", tls.host).parse().map_err(|e| {
-            EnclaveError::CrossCheck(format!("evm-rpc: invalid host {:?}: {e}", tls.host))
-        })?;
+        let url = format!("https://{}{}", tls.host, tls.path)
+            .parse()
+            .map_err(|e| {
+                EnclaveError::CrossCheck(format!("evm-rpc: invalid host {:?}: {e}", tls.host))
+            })?;
         Ok(Self {
             runtime: Self::runtime()?,
             provider: alloy::providers::ProviderBuilder::default().connect_reqwest(client, url),

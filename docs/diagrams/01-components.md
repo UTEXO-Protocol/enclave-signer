@@ -15,7 +15,7 @@ flowchart TB
         PFr[framing.rs<br/>u32 LE len + protobuf]
         PALib[attest_verify.rs<br/>library half of CLI —<br/>rebuilds expected policy + bundle]
         PCli[bin/cli.rs<br/>utexo-bridge-parent-cli]
-        AVCli[attest-verify CLI<br/>--pcr0/1/2, --expect-signer-role,<br/>--expect-vanilla-psbt,<br/>--expect-evm-source raw, helios or disabled]
+        AVCli[attest-verify CLI<br/>--pcr0/1/2, --expect-signer-role,<br/>--expect-vanilla-psbt,<br/>--expect-evm-source tls, raw, helios or disabled,<br/>--expect-evm-rpc-host, --expect-evm-rpc-ca-sha256]
         PMisc[config.rs / error.rs]
     end
 
@@ -47,7 +47,7 @@ flowchart TB
         subgraph NEVM [networks/evm/]
             NEV[validation.rs<br/>selectors fundsOut 0xdc771390 + lzFundsOut,<br/>canonical ABI decode + re-encode,<br/>64 KiB cap, pins, destinationChainId, deadline]
             NEC[crosscheck.rs<br/>witnesses-confirmed, BtcRelay proof<br/>anchored to consignment block,<br/>flow amount bind, burn recipient]
-            NEE[events.rs<br/>independent FundsIn verify —<br/>raw RPC (supplied images)<br/>or optional checkpoint-verified Helios]
+            NEE[events.rs<br/>independent FundsIn verify —<br/>pinned-TLS RPC (supplied images)<br/>or optional checkpoint-verified Helios]
             NEG[gas_tx.rs<br/>gas-tx preimage allowlist:<br/>strict RLP + chain / to pins]
             NES[signing.rs<br/>EIP-712 MultisigProxy v1<br/>TeeFundsOut / TeeLzFundsOut digest]
         end

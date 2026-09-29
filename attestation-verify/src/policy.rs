@@ -64,8 +64,8 @@ pub enum EvmDataSource {
     PinnedTlsRpc = 3,
 }
 
-/// The TLS pin of the EVM RPC endpoint: the host name the certificate must
-/// match and the SHA-256 of the DER of the only trusted CA.
+/// The TLS pin of the EVM RPC endpoint. `host` is the name the certificate
+/// must match. `ca_sha256` is the SHA-256 of the DER of the only trusted CA.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct EvmRpcTlsPin {
     pub host: String,

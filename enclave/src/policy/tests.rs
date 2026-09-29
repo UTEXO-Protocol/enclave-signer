@@ -176,12 +176,12 @@ fn production_accepts_an_authenticated_evm_source_and_attests_it() {
 #[cfg(feature = "evm-rpc")]
 #[test]
 fn production_boots_only_with_a_pinned_tls_evm_rpc() {
-    let ca = include_str!("../../tests/fixtures/evm_rpc_tls/ca_a.pem");
-    let boot = |url: &str, host: Option<&str>, pem: Option<&str>| {
+    let ca = include_str!("../../tests/fixtures/evm_rpc_tls/ca_a.der.hex");
+    let boot = |url: &str, host: Option<&str>, ca_hex: Option<&str>| {
         let cfg = crate::config::EvmRpcConfig::from_vars(|name| match name {
             "EVM_RPC_URL" => Some(url.into()),
             "EVM_RPC_HOST" => host.map(Into::into),
-            "EVM_RPC_TLS_CA_PEM" => pem.map(Into::into),
+            "EVM_RPC_TLS_CA_DER_HEX" => ca_hex.map(Into::into),
             _ => None,
         });
         let (source, checkpoint, pin) = crate::bootstrap::resolve_evm_data_source(&cfg);

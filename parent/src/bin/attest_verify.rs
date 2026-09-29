@@ -81,7 +81,7 @@ struct Cli {
     #[arg(long)]
     expect_evm_rpc_host: Option<String>,
 
-    /// Expected SHA-256 of the DER of the EVM RPC CA (`EVM_RPC_TLS_CA_PEM`), 64
+    /// Expected SHA-256 of the DER of the EVM RPC CA (`EVM_RPC_TLS_CA_DER_HEX`), 64
     /// hex characters. REQUIRED when `--expect-evm-source tls`. Ignored
     /// otherwise.
     #[arg(long)]

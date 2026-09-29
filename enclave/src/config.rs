@@ -348,7 +348,7 @@ fn parse_eth_address(s: &str) -> Result<[u8; 20]> {
 /// Operational plumbing, not part of the committed identity: like
 /// [`BridgeConfig::funds_in_contract`] it is not folded into the attestation
 /// bundle. The EVM data source and the TLS pin (host and CA hash) are
-/// attested in the security policy; the URL and the ports are not.
+/// attested in the security policy. The URL and the ports are not.
 ///
 /// Trust boundary: `rpc_url` must be loopback. The enclave reaches the EVM RPC
 /// only through the vsock forwarder ([`crate::vsock_forwarder`]), so the host
@@ -386,14 +386,15 @@ pub enum EvmRpcTransport {
 #[cfg(feature = "evm-rpc")]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EvmRpcTls {
-    /// `EVM_RPC_HOST`: the name for SNI and the certificate check.
+    /// `EVM_RPC_HOST`: the name for SNI and the certificate check, lowercased.
     pub host: String,
-    /// DER of `EVM_RPC_TLS_CA_PEM`, the only trusted root.
+    /// DER of `EVM_RPC_TLS_CA_DER_HEX`, the only trusted root.
     pub ca_der: Vec<u8>,
-    /// `EVM_RPC_TLS_PORT` (default 443): the port the host proxy dials.
-    pub tls_port: u16,
     /// The forwarder port in `rpc_url`. The client sends `host` here.
     pub local_port: u16,
+    /// Path and query of `EVM_RPC_URL`, sent to the real host. `/` when
+    /// `EVM_RPC_URL` has none.
+    pub path: String,
 }
 
 #[cfg(feature = "evm-rpc")]
@@ -408,8 +409,8 @@ impl EvmRpcConfig {
         Self::from_vars(|name| std::env::var(name).ok())
     }
 
-    /// Load from `EVM_RPC_URL`, `EVM_MIN_CONFIRMATIONS`, `EVM_RPC_HOST`,
-    /// `EVM_RPC_TLS_CA_PEM` and `EVM_RPC_TLS_PORT`, read through `var`.
+    /// Load from `EVM_RPC_URL`, `EVM_MIN_CONFIRMATIONS`, `EVM_RPC_HOST` and
+    /// `EVM_RPC_TLS_CA_DER_HEX`, read through `var`.
     ///
     /// A non-loopback `EVM_RPC_URL` is rejected back to the default and
     /// logged: routing EVM RPC anywhere but the vsock forwarder would bypass
@@ -434,7 +435,7 @@ impl EvmRpcConfig {
         let transport = if rpc_url.starts_with("https://") {
             EvmRpcTls::from_vars(&rpc_url, &var)
                 .map_or_else(EvmRpcTransport::Invalid, EvmRpcTransport::PinnedTls)
-        } else if ["EVM_RPC_HOST", "EVM_RPC_TLS_CA_PEM", "EVM_RPC_TLS_PORT"]
+        } else if ["EVM_RPC_HOST", "EVM_RPC_TLS_CA_DER_HEX"]
             .iter()
             .any(|name| var(name).is_some())
         {
@@ -456,49 +457,46 @@ impl EvmRpcTls {
         url: &str,
         var: &impl Fn(&str) -> Option<String>,
     ) -> std::result::Result<Self, String> {
-        use rustls_pki_types::{pem::PemObject, CertificateDer};
+        use rustls_pki_types::{CertificateDer, DnsName};
 
         let host = var("EVM_RPC_HOST").ok_or("EVM_RPC_HOST is not set")?;
-        let host_ok = (1..=253).contains(&host.len())
-            && host
-                .bytes()
-                .all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'-')
-            && !host.starts_with('.')
-            && !host.ends_with('.');
-        if !host_ok {
+        // `DnsName` rejects an empty label, a label over 63 bytes, a label
+        // starting with a hyphen, and an all-numeric last label (no IPv4
+        // literals). It allows a trailing dot and `_`, so those are checked
+        // here.
+        if host.contains('_') || host.ends_with('.') {
             return Err(format!("EVM_RPC_HOST {host:?} is not a host name"));
         }
-        let pem = var("EVM_RPC_TLS_CA_PEM").ok_or("EVM_RPC_TLS_CA_PEM is not set")?;
-        let certs = CertificateDer::pem_slice_iter(pem.as_bytes())
-            .collect::<std::result::Result<Vec<_>, _>>()
-            .map_err(|e| format!("EVM_RPC_TLS_CA_PEM is not PEM: {e}"))?;
-        let [ca] = <[_; 1]>::try_from(certs).map_err(|c| {
-            format!(
-                "EVM_RPC_TLS_CA_PEM holds {} certificates, it must hold one",
-                c.len()
-            )
-        })?;
+        let dns_name = DnsName::try_from(host.as_str())
+            .map_err(|_| format!("EVM_RPC_HOST {host:?} is not a host name"))?;
+        // SNI and the Host header go out lowercase.
+        let host = dns_name.to_lowercase_owned().as_ref().to_string();
+
+        let der_hex = var("EVM_RPC_TLS_CA_DER_HEX").ok_or("EVM_RPC_TLS_CA_DER_HEX is not set")?;
+        // One line: Nitro's `/env` writes one entry per line. A multi-line
+        // PEM would arrive truncated.
+        let ca_der = hex::decode(der_hex.trim())
+            .map_err(|e| format!("EVM_RPC_TLS_CA_DER_HEX is not hex: {e}"))?;
+        let ca = CertificateDer::from(ca_der);
         // The same check the client root store makes, so a bad CA never
         // gets an attested pin.
         webpki::anchor_from_trusted_cert(&ca)
-            .map_err(|e| format!("EVM_RPC_TLS_CA_PEM is not a valid CA certificate: {e}"))?;
-        let tls_port = match var("EVM_RPC_TLS_PORT") {
-            None => 443,
-            Some(p) => p
-                .parse::<u16>()
-                .ok()
-                .filter(|&p| p != 0)
-                .ok_or_else(|| format!("EVM_RPC_TLS_PORT {p:?} is not 1-65535"))?,
-        };
-        let local_port = alloy::transports::http::reqwest::Url::parse(url)
-            .ok()
-            .and_then(|u| u.port_or_known_default())
+            .map_err(|e| format!("EVM_RPC_TLS_CA_DER_HEX is not a valid CA certificate: {e}"))?;
+
+        let parsed_url = alloy::transports::http::reqwest::Url::parse(url)
+            .map_err(|e| format!("EVM_RPC_URL {url:?} is invalid: {e}"))?;
+        let local_port = parsed_url
+            .port_or_known_default()
             .ok_or_else(|| format!("EVM_RPC_URL {url:?} has no port"))?;
+        let path = match parsed_url.query() {
+            Some(q) => format!("{}?{}", parsed_url.path(), q),
+            None => parsed_url.path().to_string(),
+        };
         Ok(Self {
             host,
             ca_der: ca.to_vec(),
-            tls_port,
             local_port,
+            path,
         })
     }
 }
@@ -741,15 +739,16 @@ mod tests {
         .transport
     }
 
+    /// Hex of the CA's DER, one line, the form `EVM_RPC_TLS_CA_DER_HEX` carries.
     #[cfg(feature = "evm-rpc")]
-    const CA_PEM: &str = include_str!("../tests/fixtures/evm_rpc_tls/ca_a.pem");
+    const CA_HEX: &str = include_str!("../tests/fixtures/evm_rpc_tls/ca_a.der.hex");
 
     #[cfg(feature = "evm-rpc")]
-    fn tls_vars<'a>(host: &'a str, pem: &'a str) -> [(&'a str, &'a str); 3] {
+    fn tls_vars<'a>(host: &'a str, ca_hex: &'a str) -> [(&'a str, &'a str); 3] {
         [
             ("EVM_RPC_URL", "https://127.0.0.1:3444"),
             ("EVM_RPC_HOST", host),
-            ("EVM_RPC_TLS_CA_PEM", pem),
+            ("EVM_RPC_TLS_CA_DER_HEX", ca_hex),
         ]
     }
 
@@ -758,21 +757,21 @@ mod tests {
     fn url_scheme_and_pins_pick_the_evm_rpc_transport() {
         use EvmRpcTransport::*;
         let http = ("EVM_RPC_URL", "http://127.0.0.1:3444");
-        let [https, host, pem] = tls_vars("rpc.test", CA_PEM);
+        let [https, host, ca] = tls_vars("rpc.test", CA_HEX);
         assert_eq!(evm_rpc_transport(&[]), Plain);
         assert_eq!(evm_rpc_transport(&[http]), Plain);
-        let PinnedTls(tls) = evm_rpc_transport(&[https, host, pem]) else {
+        let PinnedTls(tls) = evm_rpc_transport(&[https, host, ca]) else {
             panic!("valid pins must give pinned TLS");
         };
         assert_eq!(tls.host, "rpc.test");
-        assert_eq!((tls.tls_port, tls.local_port), (443, 3444));
-        let invalid: [&[(&str, &str)]; 6] = [
-            &[http, host, pem],
+        assert_eq!(tls.local_port, 3444);
+        assert_eq!(tls.path, "/");
+        let invalid: [&[(&str, &str)]; 5] = [
+            &[http, host, ca],
             &[http, host],
-            &[http, ("EVM_RPC_TLS_PORT", "443")],
             &[https],
             &[https, host],
-            &[https, pem],
+            &[https, ca],
         ];
         for vars in invalid {
             assert!(matches!(evm_rpc_transport(vars), Invalid(_)), "{vars:?}");
@@ -781,52 +780,70 @@ mod tests {
 
     #[cfg(feature = "evm-rpc")]
     #[test]
+    fn evm_rpc_url_path_and_query_are_carried_to_the_pinned_host() {
+        use EvmRpcTransport::PinnedTls;
+        let [_, host, ca] = tls_vars("rpc.test", CA_HEX);
+        let url = ("EVM_RPC_URL", "https://127.0.0.1:3444/v2/some-key?x=1");
+        let PinnedTls(tls) = evm_rpc_transport(&[url, host, ca]) else {
+            panic!("valid pins must give pinned TLS");
+        };
+        assert_eq!(tls.path, "/v2/some-key?x=1");
+    }
+
+    #[cfg(feature = "evm-rpc")]
+    #[test]
     fn evm_rpc_host_must_be_a_host_name() {
-        let long = "a".repeat(253);
+        // A DNS name up to 253 bytes total, no label over 63.
+        let long = [
+            "a".repeat(63),
+            "a".repeat(63),
+            "a".repeat(63),
+            "a".repeat(61),
+        ]
+        .join(".");
+        assert_eq!(long.len(), 253);
         for host in ["rpc.test", "a", "rpc-1.Example.com", &long] {
-            let got = evm_rpc_transport(&tls_vars(host, CA_PEM));
+            let got = evm_rpc_transport(&tls_vars(host, CA_HEX));
             assert!(matches!(got, EvmRpcTransport::PinnedTls(_)), "{host}");
         }
-        let too_long = "a".repeat(254);
+        let too_long_label = "a".repeat(64);
         for host in [
             "",
             ".rpc.test",
             "rpc.test.",
+            "rpc..test",
+            "-rpc.test",
             "https://rpc.test",
             "rpc.test/v2",
             "rpc.test:443",
             "rpc test",
             "rpc.test\n",
             "rpc_test",
-            &too_long,
+            "127.0.0.1",
+            &too_long_label,
         ] {
-            let got = evm_rpc_transport(&tls_vars(host, CA_PEM));
+            let got = evm_rpc_transport(&tls_vars(host, CA_HEX));
             assert!(matches!(got, EvmRpcTransport::Invalid(_)), "{host:?}");
         }
     }
 
     #[cfg(feature = "evm-rpc")]
     #[test]
-    fn evm_rpc_ca_must_be_one_valid_certificate() {
-        let bad_der = "-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----\n";
-        let two = format!("{CA_PEM}{CA_PEM}");
-        for pem in ["", "not pem", bad_der, &two] {
-            let got = evm_rpc_transport(&tls_vars("rpc.test", pem));
-            assert!(matches!(got, EvmRpcTransport::Invalid(_)), "{pem:?}");
-        }
+    fn evm_rpc_host_is_lowercased() {
+        use EvmRpcTransport::PinnedTls;
+        let PinnedTls(tls) = evm_rpc_transport(&tls_vars("RPC.Test", CA_HEX)) else {
+            panic!("a valid mixed-case host must still give pinned TLS");
+        };
+        assert_eq!(tls.host, "rpc.test");
     }
 
     #[cfg(feature = "evm-rpc")]
     #[test]
-    fn evm_rpc_tls_port_must_be_1_to_65535() {
-        let [https, host, pem] = tls_vars("rpc.test", CA_PEM);
-        let port = |p| evm_rpc_transport(&[https, host, pem, ("EVM_RPC_TLS_PORT", p)]);
-        let EvmRpcTransport::PinnedTls(tls) = port("8443") else {
-            panic!("8443 is a valid port");
-        };
-        assert_eq!(tls.tls_port, 8443);
-        for p in ["0", "65536", "https", ""] {
-            assert!(matches!(port(p), EvmRpcTransport::Invalid(_)), "{p:?}");
+    fn evm_rpc_ca_must_be_a_valid_certificate() {
+        let truncated = &CA_HEX[..CA_HEX.len() - 20];
+        for ca_hex in ["", "not hex", "abc", truncated] {
+            let got = evm_rpc_transport(&tls_vars("rpc.test", ca_hex));
+            assert!(matches!(got, EvmRpcTransport::Invalid(_)), "{ca_hex:?}");
         }
     }
 }

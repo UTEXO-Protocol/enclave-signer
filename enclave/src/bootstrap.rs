@@ -421,9 +421,8 @@ pub fn build_evm_rpc_client(
                     host = %tls.host,
                     local_port = tls.local_port,
                     "EVM FundsIn verification: pinned TLS (host must run: vsock-proxy \
-                     <EVM_RPC_VSOCK_PORT> {} {})",
+                     <EVM_RPC_VSOCK_PORT> {} <EVM_RPC_TLS_PORT>)",
                     tls.host,
-                    tls.tls_port
                 );
                 AlloyEvmClient::with_pinned_tls(tls)
             }

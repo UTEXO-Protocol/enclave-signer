@@ -36,7 +36,8 @@ class BuildArgumentsTests(unittest.TestCase):
             stub.write_text('#!/bin/sh\nexit 99\n')
             stub.chmod(0o700)
         self.env = dict(os.environ)
-        for key in ('RGB_ASSET_ID', 'ENCLAVE_DEBUG_FEATURES', 'PRIVATE_DEPS_DIR'):
+        for key in ('RGB_ASSET_ID', 'ENCLAVE_DEBUG_FEATURES', 'PRIVATE_DEPS_DIR',
+                    'EVM_RPC_HOST', 'EVM_RPC_TLS_CA_DER_HEX'):
             self.env.pop(key, None)
         self.env.update(
             PATH=f'{self.bin}:{os.environ["PATH"]}',
@@ -67,21 +68,39 @@ class BuildArgumentsTests(unittest.TestCase):
                 self.assertIn('requires RGB_ASSET_ID', result.stderr)
                 self.assertFalse(self.argv.exists())
 
+    def test_rgb_recipes_reject_missing_evm_rpc_pins(self):
+        for recipe in RGB_RECIPES:
+            with self.subTest(recipe=recipe, pin='EVM_RPC_HOST'):
+                result = self.invoke(recipe, RGB_ASSET_ID='rgb:test-bfa-asset')
+                self.assertEqual(result.returncode, 1, result.stderr)
+                self.assertIn('requires EVM_RPC_HOST', result.stderr)
+                self.assertFalse(self.argv.exists())
+            with self.subTest(recipe=recipe, pin='EVM_RPC_TLS_CA_DER_HEX'):
+                result = self.invoke(recipe, RGB_ASSET_ID='rgb:test-bfa-asset',
+                                     EVM_RPC_HOST='rpc.test')
+                self.assertEqual(result.returncode, 1, result.stderr)
+                self.assertIn('requires EVM_RPC_TLS_CA_DER_HEX', result.stderr)
+                self.assertFalse(self.argv.exists())
+
     def test_rgb_asset_forwarded_once_without_implicit_debug(self):
         for recipe in RGB_RECIPES:
             with self.subTest(recipe=recipe):
-                result = self.invoke(recipe, RGB_ASSET_ID='rgb:test-bfa-asset')
+                result = self.invoke(recipe, RGB_ASSET_ID='rgb:test-bfa-asset',
+                                     EVM_RPC_HOST='rpc.test', EVM_RPC_TLS_CA_DER_HEX='ab')
                 self.assertEqual(result.returncode, 42, result.stderr)
                 self.assertEqual(self.captured_build_args(), [
                     'SOURCE_DATE_EPOCH=1700000000', 'RGB_ASSET_ID=rgb:test-bfa-asset',
+                    'EVM_RPC_HOST=rpc.test', 'EVM_RPC_TLS_CA_DER_HEX=ab',
                 ])
 
     def test_combined_forwards_asset_and_explicit_debug_together(self):
         result = self.invoke('Dockerfile.enclave', RGB_ASSET_ID='rgb:test-bfa-asset',
+                             EVM_RPC_HOST='rpc.test', EVM_RPC_TLS_CA_DER_HEX='ab',
                              ENCLAVE_DEBUG_FEATURES='allow-debug-pcrs')
         self.assertEqual(result.returncode, 42, result.stderr)
         self.assertEqual(self.captured_build_args(), [
             'SOURCE_DATE_EPOCH=1700000000', 'RGB_ASSET_ID=rgb:test-bfa-asset',
+            'EVM_RPC_HOST=rpc.test', 'EVM_RPC_TLS_CA_DER_HEX=ab',
             'ENCLAVE_DEBUG_FEATURES=allow-debug-pcrs',
         ])
 

@@ -37,8 +37,12 @@ const BRIDGE: [u8; 20] = [0xB1; 20];
 const TX: [u8; 32] = [0x11; 32];
 const OP_ID: [u8; 32] = [0xAB; 32];
 const MINT_OPID: [u8; 32] = [0xCD; 32];
-const CA_A_PEM: &str = include_str!("fixtures/evm_rpc_tls/ca_a.pem");
-const CA_B_PEM: &str = include_str!("fixtures/evm_rpc_tls/ca_b.pem");
+/// Hex of the CA's DER: the one-line form `EVM_RPC_TLS_CA_DER_HEX` carries.
+const CA_A_HEX: &str = include_str!("fixtures/evm_rpc_tls/ca_a.der.hex");
+const CA_B_HEX: &str = include_str!("fixtures/evm_rpc_tls/ca_b.der.hex");
+/// PEM of CA A, for `pinned_ca_is_the_only_trusted_root` to add to a system
+/// trust store the client must not consult.
+const CA_A_CERT_PEM: &str = include_str!("fixtures/evm_rpc_tls/ca_a.pem");
 /// Leaves signed by CA A: (certificate, key).
 const RPC_TEST: (&str, &str) = (
     include_str!("fixtures/evm_rpc_tls/rpc_test.pem"),
@@ -148,6 +152,65 @@ fn serve(leaf: Option<(&str, &str)>, truncate: bool) -> u16 {
     port
 }
 
+/// Accepts a connection and never answers.
+fn serve_hang() -> u16 {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let _stream = stream.unwrap();
+            std::thread::sleep(Duration::from_secs(60));
+        }
+    });
+    port
+}
+
+/// Answers every request, over TLS with the `rpc.test` leaf, with a 307 to
+/// another host.
+fn serve_redirect() -> u16 {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let (cert, key) = RPC_TEST;
+    let cert = CertificateDer::from_pem_slice(cert.as_bytes()).unwrap();
+    let key = PrivateKeyDer::from_pem_slice(key.as_bytes()).unwrap();
+    let cfg = Arc::new(
+        rustls::ServerConfig::builder()
+            .with_no_client_auth()
+            .with_single_cert(vec![cert], key)
+            .unwrap(),
+    );
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let stream = stream.unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(1)))
+                .unwrap();
+            let conn = rustls::ServerConnection::new(cfg.clone()).unwrap();
+            let mut tls = rustls::StreamOwned::new(conn, stream);
+            {
+                let mut reader = BufReader::new(&mut tls);
+                let mut len = 0;
+                for line in reader.by_ref().lines().map_while(Result::ok) {
+                    if let Some(v) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                        len = v.trim().parse().unwrap();
+                    }
+                    if line.is_empty() || line == "\r" {
+                        break;
+                    }
+                }
+                let mut body = vec![0; len];
+                let _ = reader.read_exact(&mut body);
+            }
+            let _ = write!(
+                tls,
+                "HTTP/1.1 307 Temporary Redirect\r\nLocation: https://attacker.test/\r\n\
+                 Content-Length: 0\r\nConnection: close\r\n\r\n"
+            );
+        }
+    });
+    port
+}
+
 /// Answers one JSON-RPC request with the forged receipt or block 112.
 fn answer(stream: impl Read + Write, truncate: bool) {
     let mut reader = BufReader::new(stream);
@@ -189,12 +252,12 @@ fn answer(stream: impl Read + Write, truncate: bool) {
 }
 
 /// The image's client: `https://` to the forwarder port, pinned to
-/// `rpc.test` and `ca_pem`.
-fn pinned_client(port: u16, ca_pem: &str) -> Box<dyn EvmReceiptProvider + Send + Sync> {
+/// `rpc.test` and `ca_der_hex`.
+fn pinned_client(port: u16, ca_der_hex: &str) -> Box<dyn EvmReceiptProvider + Send + Sync> {
     let cfg = EvmRpcConfig::from_vars(|name| match name {
         "EVM_RPC_URL" => Some(format!("https://127.0.0.1:{port}")),
         "EVM_RPC_HOST" => Some("rpc.test".into()),
-        "EVM_RPC_TLS_CA_PEM" => Some(ca_pem.into()),
+        "EVM_RPC_TLS_CA_DER_HEX" => Some(ca_der_hex.into()),
         _ => None,
     });
     build_evm_rpc_client(&BridgeConfig::default(), &cfg).expect("valid pins build a client")
@@ -203,35 +266,35 @@ fn pinned_client(port: u16, ca_pem: &str) -> Box<dyn EvmReceiptProvider + Send +
 #[cfg(evm_to_rgb)]
 #[test]
 fn pinned_ca_and_host_return_the_deposit() {
-    let client = pinned_client(serve(Some(RPC_TEST), false), CA_A_PEM);
+    let client = pinned_client(serve(Some(RPC_TEST), false), CA_A_HEX);
     verify_funds_in_event(&*client, &BRIDGE, 12, &TX, &OP_ID, 1000, 50).unwrap();
 }
 
 #[test]
 fn pinned_ca_and_host_return_the_ancestor_mint_lock() {
-    let client = pinned_client(serve(Some(RPC_TEST), false), CA_A_PEM);
+    let client = pinned_client(serve(Some(RPC_TEST), false), CA_A_HEX);
     verify_rgb_funds_in(&*client, &BRIDGE, 12, &TX, &MINT_OPID).unwrap();
 }
 
 #[test]
 fn tls_failure_refuses_to_sign() {
     let cases = [
-        ("unknown CA", serve(Some(RPC_TEST), false), CA_B_PEM),
+        ("unknown CA", serve(Some(RPC_TEST), false), CA_B_HEX),
         (
             "leaf for other.test",
             serve(Some(OTHER_TEST), false),
-            CA_A_PEM,
+            CA_A_HEX,
         ),
         (
             "expired leaf",
             serve(Some(EXPIRED_RPC_TEST), false),
-            CA_A_PEM,
+            CA_A_HEX,
         ),
-        ("close mid-response", serve(Some(RPC_TEST), true), CA_A_PEM),
-        ("plaintext server", serve(None, false), CA_A_PEM),
+        ("close mid-response", serve(Some(RPC_TEST), true), CA_A_HEX),
+        ("plaintext server", serve(None, false), CA_A_HEX),
     ];
-    for (case, port, ca_pem) in cases {
-        let client = pinned_client(port, ca_pem);
+    for (case, port, ca_hex) in cases {
+        let client = pinned_client(port, ca_hex);
         #[cfg(evm_to_rgb)]
         assert!(
             verify_funds_in_event(&*client, &BRIDGE, 12, &TX, &OP_ID, 1000, 50).is_err(),
@@ -252,8 +315,49 @@ fn proxy_env_has_no_effect() {
     }
     std::env::remove_var("NO_PROXY");
     std::env::remove_var("no_proxy");
-    let client = pinned_client(serve(Some(RPC_TEST), false), CA_A_PEM);
+    let client = pinned_client(serve(Some(RPC_TEST), false), CA_A_HEX);
     verify_rgb_funds_in(&*client, &BRIDGE, 12, &TX, &MINT_OPID).unwrap();
+}
+
+/// CA A is trusted through the system store, but only CA B is pinned. If the
+/// client merged the pin with system roots, the CA A leaf would validate.
+/// `tls_certs_only` must make the pin the sole trust anchor.
+#[test]
+fn pinned_ca_is_the_only_trusted_root() {
+    let path = std::env::temp_dir().join("evm_rpc_tls_test_ca_a.pem");
+    std::fs::write(&path, CA_A_CERT_PEM).unwrap();
+    std::env::set_var("SSL_CERT_FILE", &path);
+    let client = pinned_client(serve(Some(RPC_TEST), false), CA_B_HEX);
+    assert!(
+        verify_rgb_funds_in(&*client, &BRIDGE, 12, &TX, &MINT_OPID).is_err(),
+        "a leaf trusted only through the system store must be refused"
+    );
+}
+
+/// A hung RPC must fail closed within `EVM_RPC_CALL_TIMEOUT`, not wedge the
+/// enclave forever.
+#[test]
+fn timeout_refuses_to_sign() {
+    let client = pinned_client(serve_hang(), CA_A_HEX);
+    let start = std::time::Instant::now();
+    let got = verify_rgb_funds_in(&*client, &BRIDGE, 12, &TX, &MINT_OPID);
+    assert!(got.is_err(), "a hung RPC must refuse to sign");
+    assert!(
+        start.elapsed() < Duration::from_secs(20),
+        "must fail within the 15s call timeout, took {:?}",
+        start.elapsed()
+    );
+}
+
+/// Only the pinned endpoint can redirect. It could still point at a peer
+/// the pinned CA never certified.
+#[test]
+fn pinned_host_redirect_is_not_followed() {
+    let client = pinned_client(serve_redirect(), CA_A_HEX);
+    assert!(
+        verify_rgb_funds_in(&*client, &BRIDGE, 12, &TX, &MINT_OPID).is_err(),
+        "a redirect from the pinned host must not be followed"
+    );
 }
 
 #[cfg(evm_to_rgb)]
@@ -262,7 +366,7 @@ fn host_forged_receipt_is_refused() {
     let port = serve(None, false);
     std::env::set_var("EVM_RPC_URL", format!("https://127.0.0.1:{port}"));
     std::env::set_var("EVM_RPC_HOST", "rpc.test");
-    std::env::set_var("EVM_RPC_TLS_CA_PEM", CA_A_PEM);
+    std::env::set_var("EVM_RPC_TLS_CA_DER_HEX", CA_A_HEX);
 
     let cfg = EvmRpcConfig::from_env();
     let client = build_evm_rpc_client(&BridgeConfig::default(), &cfg).expect("client");

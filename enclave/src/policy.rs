@@ -320,7 +320,7 @@ impl ProductionPolicy {
         if self.evm_source == EvmDataSource::RawRpc {
             return Err(
                 "production policy reads the EVM RPC over plaintext. Set EVM_RPC_URL to \
-                 https:// with EVM_RPC_HOST and EVM_RPC_TLS_CA_PEM; plaintext is for dev and \
+                 https:// with EVM_RPC_HOST and EVM_RPC_TLS_CA_DER_HEX; plaintext is for dev and \
                  test builds only."
                     .into(),
             );
@@ -328,7 +328,7 @@ impl ProductionPolicy {
         if self.evm_source == EvmDataSource::PinnedTlsRpc && self.evm_rpc_tls.is_none() {
             return Err(
                 "production policy uses the pinned TLS EVM source without a valid pin. Set \
-                 EVM_RPC_URL to https:// with a valid EVM_RPC_HOST and EVM_RPC_TLS_CA_PEM."
+                 EVM_RPC_URL to https:// with a valid EVM_RPC_HOST and EVM_RPC_TLS_CA_DER_HEX."
                     .into(),
             );
         }
