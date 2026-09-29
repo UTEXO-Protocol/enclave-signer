@@ -296,7 +296,8 @@ pub fn validate_funds_out_settlement(
 #[derive(Debug, Clone, Copy)]
 struct ProofBlock {
     height: u32,
-    /// Display (big-endian) byte order, as it appears in the calldata.
+    /// BtcRelay's `keccak256` of its 160-byte record at `height`, as the
+    /// calldata carries it.
     commitment: [u8; 32],
 }
 
@@ -306,7 +307,9 @@ struct ProofBlock {
 /// 1. find the block anchoring the consignment's last witness tx from its SPV
 ///    Merkle proof, not from the calldata;
 /// 2. require a header there, proving the TEE is in sync;
-/// 3. require the calldata `proof` to name that same height.
+/// 3. require the calldata `proof` to name that same height;
+/// 4. require both commitment words to equal the relay record the enclave
+///    rebuilds from its own chain ([`relay_record`]).
 ///
 /// The `proof` slot is `abi.encode(uint256 sourceHeight, bytes32 sourceCommit,
 /// uint256 latestHeight, bytes32 latestCommit)` (`RGBVerifier.sol:115-117`):
@@ -314,17 +317,13 @@ struct ProofBlock {
 /// also sit within `MAX_RELAY_TIP_LAG_BLOCKS` of the enclave tip, so freshness
 /// is not delegated to a relay the host also feeds. Empty `proof` = reject.
 ///
-/// **The commitment words are not checked, by design.** They are BtcRelay's
-/// `keccak256(StoredBlockHeader)` over relay-internal state (chainWork,
-/// lastDiffAdjustment, the last ten timestamps), which the enclave cannot
-/// compute - comparing them to `header.block_hash()` made every release
-/// unsatisfiable. `RGBVerifier` checks each against the relay itself, so a
-/// manipulated commitment reverts on-chain. The enclave enforces what only it
-/// knows: which block the consignment is anchored in, by height.
+/// `RGBVerifier` checks each commitment by height only. Step 4 proves the relay
+/// holds the enclave's block at that height.
 ///
 /// Ordered cheapest-first: the pure calldata decode and the `latest` checks run
 /// before the anchor resolution, which reads the chain and redoes a Merkle
-/// verification.
+/// verification. The commitment checks run last: they sum the work of every
+/// header above the checkpoint.
 pub fn verify_btc_relay_agreement(
     params: &FundsOutParams,
     validated: &ValidatedConsignment,
@@ -362,18 +361,6 @@ pub fn verify_btc_relay_agreement(
         )));
     }
 
-    // Recorded, not checked: an on-chain revert is otherwise opaque about which
-    // commitments were signed.
-    tracing::debug!(
-        source_height = source.height,
-        source_commit = %hex::encode(source.commitment),
-        latest_height = latest.height,
-        latest_commit = %hex::encode(latest.commitment),
-        "fundsOut relay proof accepted (commitments verified on-chain, not here)"
-    );
-
-    // The calldata's source block must be the consignment's own anchor. Height
-    // only - see the commitment note on this function.
     let anchor = resolve_consignment_anchor(validated, merkle_proofs, chain)?;
     pins.pin(chain, anchor.height)?;
     if source.height != anchor.height {
@@ -388,7 +375,80 @@ pub fn verify_btc_relay_agreement(
         )));
     }
 
+    assert_relay_commitment(chain, &source, "source")?;
+    assert_relay_commitment(chain, &latest, "latest")
+}
+
+/// Refuse unless the calldata commitment is `keccak256` of the relay record
+/// the enclave rebuilds at that height.
+///
+/// The relay's deploy does not check the timestamps and `lastDiffAdjustment`
+/// of its own checkpoint record. If they are wrong, its records differ from
+/// the true ones for ten blocks or up to the next epoch start, and the enclave
+/// refuses there. That fails closed.
+fn assert_relay_commitment(chain: &HeaderChain, block: &ProofBlock, label: &str) -> Result<()> {
+    let expected = alloy_primitives::keccak256(relay_record(chain, block.height)?).0;
+    if block.commitment != expected {
+        return Err(EnclaveError::CrossCheck(format!(
+            "fundsOut relay commitment mismatch at {label} height {}: calldata 0x{}, enclave \
+             record 0x{}: the relay does not hold the enclave's block there, refusing to sign",
+            block.height,
+            hex::encode(block.commitment),
+            hex::encode(expected),
+        )));
+    }
     Ok(())
+}
+
+/// Rebuild BtcRelay's 160-byte `StoredBlockHeader` record from the enclave chain.
+///
+/// Refuse heights that need a block below the checkpoint: the relay seeds those
+/// values at deploy and does not check them, so the enclave cannot know them.
+fn relay_record(chain: &HeaderChain, height: u32) -> Result<[u8; 160]> {
+    let cp = chain.checkpoint();
+    let header = chain.header_at(height).ok_or_else(|| {
+        EnclaveError::Spv(format!(
+            "fundsOut relay record: no header at height {height} (checkpoint {}, tip {})",
+            cp.height,
+            chain.tip_height()
+        ))
+    })?;
+    let cp_work = cp.chain_work.ok_or_else(|| {
+        EnclaveError::Spv(format!(
+            "fundsOut relay record: the checkpoint at height {} has no chainwork, so the enclave \
+             cannot rebuild relay records. Set the fifth field of {}. Refusing to sign",
+            cp.height,
+            crate::networks::rgb::spv::checkpoint::CHECKPOINT_ENV
+        ))
+    })?;
+
+    let epoch_start = height - height % crate::networks::rgb::spv::validation::RETARGET_INTERVAL;
+    if height < cp.height + 10 || epoch_start < cp.height {
+        return Err(EnclaveError::Spv(format!(
+            "fundsOut relay record at height {height} needs the times of blocks {}..{height} \
+             and of epoch start {epoch_start}, but the enclave holds no block below its \
+             checkpoint at height {} - refusing to sign",
+            height.saturating_sub(10),
+            cp.height
+        )));
+    }
+    // The chain holds every height above the checkpoint. The checkpoint gives
+    // only its time.
+    let time_at = |h: u32| chain.header_at(h).map_or(cp.time, |header| header.time);
+
+    let work = (cp.height + 1..=height)
+        .filter_map(|h| chain.header_at(h))
+        .fold(bitcoin::Work::from_be_bytes(cp_work), |w, h| w + h.work());
+
+    let mut record = [0u8; 160];
+    record[..80].copy_from_slice(&bitcoin::consensus::serialize(header));
+    record[80..112].copy_from_slice(&work.to_be_bytes());
+    record[112..116].copy_from_slice(&height.to_be_bytes());
+    record[116..120].copy_from_slice(&time_at(epoch_start).to_be_bytes());
+    for (i, h) in (height - 10..height).enumerate() {
+        record[120 + 4 * i..124 + 4 * i].copy_from_slice(&time_at(h).to_be_bytes());
+    }
+    Ok(record)
 }
 
 /// The Bitcoin block anchoring a consignment's last witness tx.

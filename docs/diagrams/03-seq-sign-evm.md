@@ -68,7 +68,7 @@ sequenceDiagram
     Note over Srv,Cx: 4 — apply_funds_out_binding (rgb-validation builds)
     Srv->>Cx: require validated consignment for any fundsOut
     Srv->>Cx: assert_witnesses_confirmed (no unmined witness tx)
-    Srv->>Cx: verify_btc_relay_agreement (proof REQUIRED, empty ⇒ REFUSE):<br/>decode (sourceHeight, sourceCommit, latestHeight, latestCommit),<br/>enclave holds header at latestHeight,<br/>tip − latestHeight ≤ 100,<br/>sourceHeight == block anchoring the last witness tx<br/>(re-derived from the consignment + SPV proof under one lock)
+    Srv->>Cx: verify_btc_relay_agreement (proof REQUIRED, empty ⇒ REFUSE):<br/>decode (sourceHeight, sourceCommit, latestHeight, latestCommit),<br/>enclave holds header at latestHeight,<br/>tip − latestHeight ≤ 100,<br/>sourceHeight == block anchoring the last witness tx<br/>(re-derived from the consignment + SPV proof under one lock),<br/>sourceCommit, latestCommit == keccak256 of the relay record the enclave rebuilds
     Srv->>Cx: validate_funds_out_amount:<br/>last transition == the build flow's unlock shape AND<br/>swap: source amount ≥ calldata amount;<br/>mint/burn: burned amount == calldata amount
     Srv->>Cx: validate_funds_out_source_burn_tx_id:<br/>calldata sourceBurnTxId == last transition OpId (non-zero)
     Srv->>Cx: validate_funds_out_source_address:<br/>sourceAddress == "" (RGB has no source address)

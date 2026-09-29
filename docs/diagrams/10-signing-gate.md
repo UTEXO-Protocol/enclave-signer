@@ -54,7 +54,7 @@ flowchart TD
         p4w -->|no| p4wr[REFUSE — unmined witness]:::refuse
         p4w -->|yes| p4b{"calldata proof non-empty?"}
         p4b -->|no| p4br[REFUSE — missing finality proof]:::refuse
-        p4b -->|yes| p4bv{"proof (sourceHeight, sourceCommit,<br/>latestHeight, latestCommit):<br/>header held at latestHeight,<br/>tip − latestHeight ≤ 100,<br/>sourceHeight == consignment anchor block?"}
+        p4b -->|yes| p4bv{"proof (sourceHeight, sourceCommit,<br/>latestHeight, latestCommit):<br/>header held at latestHeight,<br/>tip − latestHeight ≤ 100,<br/>sourceHeight == consignment anchor block,<br/>both commits == enclave-rebuilt relay records?"}
         p4bv -->|no| p4bvr[REFUSE — BtcRelay disagreement]:::refuse
         p4bv -->|yes| p4t{"last transition == the build flow's unlock shape<br/>(TS_TRANSFER / TS_BURN) AND<br/>swap: source amount ≥ calldata amount;<br/>mint/burn: burned amount == calldata amount?"}
         p4t -->|no| p4tr[REFUSE — fundsOut amount bind]:::refuse

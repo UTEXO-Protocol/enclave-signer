@@ -263,6 +263,7 @@ mod asset_bind {
                 bits: 0x1d00_ffff,
                 time: 1_700_000_000,
                 is_real: false,
+                chain_work: None,
             },
         ));
         // Every case in this suite fails before the PSBT stage (the

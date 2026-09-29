@@ -422,7 +422,7 @@ Limits and dev knobs:
 | `MAX_CONSIGNMENT_BYTES` | 1 MiB | Consignment size cap. |
 | `MAX_MERKLE_PROOFS` | `256` | Proof-count cap per request. |
 | `MAX_TOTAL_PROOF_BYTES` | 128 KiB | Aggregate proof-bytes cap per request. |
-| `SPV_CHECKPOINT` | unset | Dev builds only: `height:hash[:bits:time]` moves the SPV anchor forward. A production-shaped build refuses to boot when set. |
+| `SPV_CHECKPOINT` | unset | Dev builds only: `height:hash[:bits:time[:chainwork]]` moves the SPV anchor forward. Without `chainwork` (Core's `getblockheader` value) every `fundsOut` is refused. A production-shaped build refuses to boot when set. |
 | `UTEXO_CLONING_SECRET` | unset | Legacy donor secret. Prefer `init --cloning-secret` at runtime. |
 
 ### Parent
