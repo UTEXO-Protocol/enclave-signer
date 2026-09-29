@@ -49,6 +49,10 @@ pub struct ValidationContext<'a> {
     #[cfg(all(feature = "rgb-validation", evm_to_rgb))]
     pub self_owned_psbt_outputs:
         Option<crate::networks::rgb::psbt_validation::SelfOwnedOutpoint<'a>>,
+    /// Selects owned key-path inputs for fee sizing without holding keys across I/O.
+    /// Without a resolver, disclosed scripts retain conservative script-path sizing.
+    #[cfg(all(feature = "rgb-validation", evm_to_rgb))]
+    pub psbt_fee_key_paths: Option<crate::networks::rgb::psbt_validation::FeeKeyPathResolver<'a>>,
     /// EVM lock events the enclave verified itself, handed to RGB consensus so
     /// the ether extension can re-check a BFA mint's amount. Empty on every
     /// other path (including every build without `bfa-mint`); a BFA consignment
