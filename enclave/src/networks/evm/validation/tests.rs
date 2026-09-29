@@ -1,6 +1,13 @@
 /// Drop the typed intent; these assertions cover the route proof.
 fn validate_dest(destination: &EvmDestination, ctx: &ValidationContext<'_>) -> Result<RouteProof> {
-    super::validate_destination(destination, ctx).map(|(proof, _)| proof)
+    super::validate_destination(destination, ctx).map(|(proof, _, _)| proof)
+}
+
+/// Keep only the decoded source fields; these assertions cover the identity.
+fn source_of(destination: &EvmDestination, ctx: &ValidationContext<'_>) -> SourceIdentity {
+    super::validate_destination(destination, ctx)
+        .expect("valid destination")
+        .2
 }
 
 /// Keeps the canonical-encoding regressions expressed against raw bytes.
@@ -437,4 +444,111 @@ fn rejects_calldata_with_overlapping_dynamic_tails() {
         err.to_string().contains("non-canonical fundsOut calldata"),
         "expected canonical-encoding rejection of overlapping tails, got: {err}"
     );
+}
+
+// ---- source identity: `sourceChainId` / `sourceAddress` on both routes ----
+
+fn rgb_source() -> SourceIdentity {
+    SourceIdentity {
+        chain_id: U256::from(RGB_SOURCE_CHAIN_ID),
+        address: String::new(),
+    }
+}
+
+#[test]
+fn rgb_source_identity_accepts_the_rgb_network_id_and_empty_address() {
+    validate_rgb_source_identity(&rgb_source()).expect("canonical RGB source");
+}
+
+#[test]
+fn rgb_source_identity_rejects_a_foreign_source_chain() {
+    // The pair (sourceChainId, destinationChainId) picks the verifier and
+    // commission rate on chain, so any id but the RGB one must refuse -
+    // including the execution chain's own id and zero.
+    for foreign in [0u64, 1, 42161, RGB_SOURCE_CHAIN_ID + 1] {
+        let source = SourceIdentity {
+            chain_id: U256::from(foreign),
+            ..rgb_source()
+        };
+        let err = validate_rgb_source_identity(&source)
+            .expect_err("foreign source chain must refuse")
+            .to_string();
+        assert!(
+            err.contains("sourceChainId") && err.contains(&RGB_SOURCE_CHAIN_ID.to_string()),
+            "{foreign}: {err}"
+        );
+    }
+}
+
+#[test]
+fn rgb_source_identity_rejects_a_non_empty_source_address() {
+    let source = SourceIdentity {
+        address: "rgb:some-sender".into(),
+        ..rgb_source()
+    };
+    let err = validate_rgb_source_identity(&source)
+        .expect_err("non-empty sourceAddress must refuse")
+        .to_string();
+    assert!(err.contains("sourceAddress must be empty"), "{err}");
+}
+
+/// `sourceChainId` and `sourceAddress` are surfaced from the direct route's
+/// calldata, so the handler binds what will actually be signed.
+#[test]
+fn direct_route_surfaces_its_source_identity() {
+    let mut destination = destination();
+    destination.call_data = fundsOutCall {
+        params: FundsOutParams {
+            recipient: Address::from([0x22; ADDRESS_LEN]),
+            amount: U256::from(1000u64),
+            burnId: U256::from(7u64),
+            sourceChainId: U256::from(RGB_SOURCE_CHAIN_ID),
+            destinationChainId: U256::from(1u64),
+            sourceAddress: "who".into(),
+            proof: Bytes::new(),
+            settlementData: Bytes::new(),
+            sourceBurnTxId: FixedBytes([0x5b; 32]),
+        },
+    }
+    .abi_encode();
+    with_ctx(&config(), |ctx| {
+        assert_eq!(
+            source_of(&destination, ctx),
+            SourceIdentity {
+                chain_id: U256::from(RGB_SOURCE_CHAIN_ID),
+                address: "who".into(),
+            }
+        );
+    });
+}
+
+/// Same for the LayerZero route, which yields no `FundsOutParams`: the
+/// identity is the only typed view of its source fields the handler gets.
+#[test]
+fn entrypoint_route_surfaces_its_source_identity() {
+    let mut destination = destination();
+    destination.call_data = lzFundsOutCall {
+        amount: U256::from(1000u64),
+        burnId: U256::from(7u64),
+        sourceChainId: U256::from(5u64),
+        destinationChainId: U256::from(137u64),
+        sourceAddress: "lz-who".into(),
+        proof: Bytes::new(),
+        settlementData: Bytes::new(),
+        dstEid: 30101u32,
+        recipient: FixedBytes([0x05; 32]),
+        minAmountLD: U256::from(1000u64),
+        extraOptions: Bytes::new(),
+        sourceBurnTxId: FixedBytes([0x5b; 32]),
+    }
+    .abi_encode();
+    with_ctx(&config(), |ctx| {
+        assert_eq!(
+            source_of(&destination, ctx),
+            SourceIdentity {
+                chain_id: U256::from(5u64),
+                address: "lz-who".into(),
+            }
+        );
+    });
 }

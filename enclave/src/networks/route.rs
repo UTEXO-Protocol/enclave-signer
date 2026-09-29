@@ -115,6 +115,10 @@ pub fn validate_source(
 pub struct DestinationProof {
     pub proof: RouteProof,
     pub evm_funds_out: Option<crate::networks::evm::validation::FundsOutParams>,
+    /// Source fields of an EVM release calldata (both routes), for the
+    /// handler to bind against the request's source network. `None` for RGB
+    /// destinations.
+    pub evm_source_identity: Option<crate::networks::evm::validation::SourceIdentity>,
     /// `utxob:...` seals of the send-RGB confidential recipient legs. Bound
     /// against the deposit's invoice once that receipt is verified. Empty for
     /// EVM destinations and builds without the bind.
@@ -137,10 +141,12 @@ pub fn validate_destination(
     match destination {
         #[cfg(rgb_to_evm)]
         DestinationNetwork::EvmDestination(destination) => {
-            let (proof, evm_funds_out) = evm::validation::validate_destination(destination, ctx)?;
+            let (proof, evm_funds_out, source) =
+                evm::validation::validate_destination(destination, ctx)?;
             Ok(DestinationProof {
                 proof,
                 evm_funds_out,
+                evm_source_identity: Some(source),
                 rgb_recipient_seals: Vec::new(),
             })
         }
@@ -172,6 +178,7 @@ pub fn validate_destination(
                     operation_id: None,
                 },
                 evm_funds_out: None,
+                evm_source_identity: None,
                 rgb_recipient_seals,
             })
         }

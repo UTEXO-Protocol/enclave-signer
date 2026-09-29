@@ -37,6 +37,19 @@ pub const FUNDS_OUT_SELECTOR_POOLS: [u8; 4] = [0x34, 0x02, 0x76, 0xaa];
 #[cfg(rgb_to_evm)]
 pub const LZ_FUNDS_OUT_SELECTOR: [u8; 4] = lzFundsOutCall::SELECTOR;
 
+/// Chain id the bridge assigns to the RGB network: `networks.IDUtexo` in
+/// bridge-utexo and the `96 -> <evm>` routes the contracts' `DeployAll`
+/// registers. A protocol constant, not a deployment knob, so it is pinned in
+/// code and measured into PCR0 with the rest of the image.
+///
+/// `sourceChainId` is not a label: the Router and CommissionManager key the
+/// verifier, the settlement module and the commission rate on the
+/// `(sourceChainId, destinationChainId)` pair, so a forged value steers an
+/// RGB release through a foreign verifier or rate. Enforced by
+/// [`validate_rgb_source_identity`] on both release routes.
+#[cfg(rgb_to_evm)]
+pub const RGB_SOURCE_CHAIN_ID: u64 = 96;
+
 /// Upper bound on `call_data` length. A legitimate `fundsOut` call is a few
 /// hundred bytes, so anything past 64 KiB is malformed or a work-amplification
 /// attempt. Compile-time and PCR-attested.
@@ -116,15 +129,60 @@ pub fn validate_source(amount: u64, source: &EvmSource) -> Result<RouteProof> {
     })
 }
 
+/// The source-side fields of a release calldata, decoded route-neutrally so
+/// the handler can bind them to the request's actual source network. Both the
+/// direct `fundsOut` and the LayerZero `lzFundsOut` shapes carry them.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SourceIdentity {
+    /// Calldata `sourceChainId`.
+    pub chain_id: alloy_primitives::U256,
+    /// Calldata `sourceAddress`.
+    pub address: String,
+}
+
+/// Bind a release's source fields to an RGB source, on either route.
+///
+/// - `sourceChainId` MUST be [`RGB_SOURCE_CHAIN_ID`]: it selects which
+///   verifier, settlement module and commission rate judge the release.
+/// - `sourceAddress` MUST be empty: RGB has no source-address concept
+///   (`RGBVerifier.UnexpectedSourceAddress`, bridge PR #152) and the field is
+///   hashed into `burnId`, so any other value would let one burn derive a
+///   second replay key. Refused here so the enclave never attests such an
+///   intent in the first place.
+///
+/// Called by the sign handler only when the request's source is an RGB
+/// source; a CCD-sourced release names its own chain.
+#[cfg(rgb_to_evm)]
+pub fn validate_rgb_source_identity(source: &SourceIdentity) -> Result<()> {
+    if source.chain_id != U256::from(RGB_SOURCE_CHAIN_ID) {
+        return Err(EnclaveError::CrossCheck(format!(
+            "calldata sourceChainId {} != RGB network id {RGB_SOURCE_CHAIN_ID}: the source chain \
+             selects the verifier, settlement module and commission rate - refusing to sign an \
+             RGB release under a foreign source chain",
+            source.chain_id
+        )));
+    }
+    if !source.address.is_empty() {
+        return Err(EnclaveError::CrossCheck(format!(
+            "calldata sourceAddress must be empty on an RGB route (RGB has no source-address \
+             concept and it is hashed into burnId), got {:?}",
+            source.address
+        )));
+    }
+    Ok(())
+}
+
 /// Validate only destination-EVM concerns.
 ///
 /// Source-network proof validation, including RGB consignments, assets,
-/// amounts, and SPV proofs, belongs to the source network validator.
+/// amounts, and SPV proofs, belongs to the source network validator. The
+/// returned [`SourceIdentity`] is decoded here but judged by the handler,
+/// which knows the request's source network.
 #[cfg(rgb_to_evm)]
 pub fn validate_destination(
     destination: &EvmDestination,
     ctx: &ValidationContext<'_>,
-) -> Result<(RouteProof, Option<FundsOutParams>)> {
+) -> Result<(RouteProof, Option<FundsOutParams>, SourceIdentity)> {
     let bridge_config = ctx.bridge_config;
 
     if destination.call_data.len() < 4 {
@@ -157,14 +215,24 @@ pub fn validate_destination(
     // `destinationChainId` but mean different things by it, so
     // `is_entrypoint_route` picks the matching check below.
     let is_entrypoint_route = selector == LZ_FUNDS_OUT_SELECTOR;
-    let (proof, params, calldata_destination_chain_id) = if is_entrypoint_route {
+    let (proof, params, calldata_destination_chain_id, source) = if is_entrypoint_route {
         let decoded = decode_lz_funds_out_params(&destination.call_data)?;
+        let proof = lz_route_proof_from_params(&decoded)?;
         let chain_id = decoded.destinationChainId;
-        (lz_route_proof_from_params(&decoded)?, None, chain_id)
+        let source = SourceIdentity {
+            chain_id: decoded.sourceChainId,
+            address: decoded.sourceAddress,
+        };
+        (proof, None, chain_id, source)
     } else {
         let params = decode_funds_out_params(&destination.call_data)?;
+        let proof = route_proof_from_params(&params)?;
         let chain_id = params.destinationChainId;
-        (route_proof_from_params(&params)?, Some(params), chain_id)
+        let source = SourceIdentity {
+            chain_id: params.sourceChainId,
+            address: params.sourceAddress.clone(),
+        };
+        (proof, Some(params), chain_id, source)
     };
     if proof.amount != destination.calldata_amount {
         return Err(EnclaveError::CrossCheck(format!(
@@ -252,7 +320,7 @@ pub fn validate_destination(
         return Err(EnclaveError::CrossCheck("request deadline expired".into()));
     }
 
-    Ok((proof, params))
+    Ok((proof, params, source))
 }
 
 /// Narrow a decoded release into the route-neutral proof.

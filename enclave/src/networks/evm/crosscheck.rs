@@ -176,22 +176,6 @@ pub fn validate_funds_out_source_burn_tx_id(
     Ok(())
 }
 
-/// RGB has no source-address concept, so `sourceAddress` MUST be empty on every
-/// RGB route (`RGBVerifier.UnexpectedSourceAddress`, bridge PR #152). It is
-/// hashed into `burnId`, so a non-empty value would let one burn derive a
-/// second replay key; enforced here as well so the enclave never attests such
-/// an intent in the first place.
-pub fn validate_funds_out_source_address(params: &FundsOutParams) -> Result<()> {
-    if !params.sourceAddress.is_empty() {
-        return Err(EnclaveError::CrossCheck(format!(
-            "fundsOut sourceAddress must be empty on an RGB route (RGB has no source-address \
-             concept and it is hashed into burnId), got {:?}",
-            params.sourceAddress
-        )));
-    }
-    Ok(())
-}
-
 /// Decode a `TransitionSummary::op_id` (64 hex chars, optional `0x`) to the
 /// 32-byte word the calldata carries. A malformed id is an internal
 /// inconsistency in the validated consignment, so refuse rather than guess.

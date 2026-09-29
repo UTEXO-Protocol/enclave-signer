@@ -187,6 +187,23 @@ pub(super) fn handle_sign(
             // RGB-source-only. A CCD source carries no consignment and a
             // CcdSource -> EvmDestination release is already authorized above;
             // applying the binding unconditionally rejected those signs.
+            //
+            // Source identity first, on both release routes: an RGB-sourced
+            // release must name the RGB network id as `sourceChainId` (it
+            // selects the verifier, settlement module and commission rate on
+            // chain) and carry an empty `sourceAddress`. Not gated on
+            // `rgb-validation`: it needs no consignment, only the calldata.
+            if matches!(source_ref, SourceNetwork::RgbSource(_)) {
+                let source = destination_proof
+                    .evm_source_identity
+                    .as_ref()
+                    .ok_or_else(|| {
+                        EnclaveError::Internal(
+                            "EVM destination validated without a source identity".into(),
+                        )
+                    })?;
+                crate::networks::evm::validation::validate_rgb_source_identity(source)?;
+            }
             #[cfg(feature = "rgb-validation")]
             if let SourceNetwork::RgbSource(rgb_source) = source_ref {
                 apply_funds_out_binding(
@@ -297,10 +314,10 @@ fn apply_funds_out_binding(
 
     // Burn identity (bridge PR #152): `sourceBurnTxId` is the only `burnId`
     // input that names WHICH RGB operation is settled, and the contract takes
-    // it on the enclave's word. Bind it to the settling transition's OpId, and
-    // keep `sourceAddress` at its one canonical (empty) RGB value.
+    // it on the enclave's word. Bind it to the settling transition's OpId.
+    // (`sourceChainId` / `sourceAddress` are bound route-neutrally by
+    // `validate_rgb_source_identity` in `handle_sign`, before this runs.)
     crosscheck::validate_funds_out_source_burn_tx_id(params, validated)?;
-    crosscheck::validate_funds_out_source_address(params)?;
 
     // A burn settles a redemption, so it additionally binds the payout target
     // to the 32 bytes the burner committed to (`MS_BURN_RECIPIENT`). Only the
