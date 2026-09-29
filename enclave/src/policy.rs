@@ -51,6 +51,9 @@ pub struct ProductionPolicy {
     pub rgb_asset_id: String,
     /// Only this contract's FundsIn events may authorize bridge signing.
     pub funds_in_contract: [u8; 20],
+    /// The ERC-20 the Bridge releases (`TOKEN_CONTRACT`): a `burnId` preimage
+    /// input, so the recomputed `burnId` the enclave enforces is attested.
+    pub token_contract: [u8; 20],
     /// Minimum receipt depth required before a FundsIn deposit is accepted.
     pub evm_min_confirmations: u64,
     /// Whether the plain-BTC (vanilla / create_utxo) signing path is authorised.
@@ -187,6 +190,7 @@ impl SecurityPolicy {
             bridge_contract: bridge.bridge_contract,
             rgb_asset_id: bridge.rgb_asset_id.clone(),
             funds_in_contract: bridge.funds_in_contract,
+            token_contract: bridge.token_contract,
             evm_min_confirmations,
             allow_vanilla_psbt: signs_plain_btc && bridge.allows_vanilla_btc(),
             signer_role: ctx.signer_role,
@@ -236,6 +240,7 @@ impl SecurityPolicy {
                 bridge_contract: p.bridge_contract,
                 rgb_asset_id: p.rgb_asset_id.clone(),
                 funds_in_contract: p.funds_in_contract,
+                token_contract: p.token_contract,
                 evm_min_confirmations: p.evm_min_confirmations,
                 evm_checkpoint: p.evm_checkpoint,
                 // An unset destination commits as all-zero - a value the gas
@@ -294,6 +299,12 @@ impl ProductionPolicy {
         }
         if self.funds_in_contract == [0u8; 20] {
             return Err("production policy must pin a non-zero FundsIn contract".into());
+        }
+        if self.token_contract == [0u8; 20] {
+            return Err(
+                "production policy must pin a non-zero TOKEN_CONTRACT (burnId preimage input)"
+                    .into(),
+            );
         }
         if self.evm_min_confirmations == 0 {
             return Err("production policy must require at least one EVM confirmation".into());

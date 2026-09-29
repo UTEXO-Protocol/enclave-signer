@@ -188,22 +188,26 @@ pub(super) fn handle_sign(
             // CcdSource -> EvmDestination release is already authorized above;
             // applying the binding unconditionally rejected those signs.
             //
-            // Source identity first, on both release routes: an RGB-sourced
-            // release must name the RGB network id as `sourceChainId` (it
-            // selects the verifier, settlement module and commission rate on
-            // chain) and carry an empty `sourceAddress`. Not gated on
-            // `rgb-validation`: it needs no consignment, only the calldata.
+            // Burn identity first, on both release routes and before any
+            // consignment work: it needs only the calldata and the pins.
+            let release = destination_proof
+                .evm_release_identity
+                .as_ref()
+                .ok_or_else(|| {
+                    EnclaveError::Internal(
+                        "EVM destination validated without a release identity".into(),
+                    )
+                })?;
+            // An RGB-sourced release must name the RGB network id as
+            // `sourceChainId` (it selects the verifier, settlement module and
+            // commission rate on chain) and carry an empty `sourceAddress`.
             if matches!(source_ref, SourceNetwork::RgbSource(_)) {
-                let source = destination_proof
-                    .evm_source_identity
-                    .as_ref()
-                    .ok_or_else(|| {
-                        EnclaveError::Internal(
-                            "EVM destination validated without a source identity".into(),
-                        )
-                    })?;
-                crate::networks::evm::validation::validate_rgb_source_identity(source)?;
+                crate::networks::evm::validation::validate_rgb_source_identity(release)?;
             }
+            // `burnId` must be the one the Bridge derives from the bound
+            // fields and the pinned Bridge / chain id / token. The contract
+            // reverts on a mismatch too; this fails earlier and says why.
+            crate::networks::evm::validation::validate_burn_id(&ctx.bridge_config, release)?;
             #[cfg(feature = "rgb-validation")]
             if let SourceNetwork::RgbSource(rgb_source) = source_ref {
                 apply_funds_out_binding(
@@ -334,14 +338,9 @@ fn apply_funds_out_binding(
     #[cfg(feature = "bfa-mint")]
     crosscheck::validate_funds_out_settlement(params, locks)?;
 
-    // `burnId` itself is not recomputed here: the contract derives and
-    // checks it from the same fields (`InvalidBurnId`). Its preimage is
-    // `BURN_TYPEHASH, bridge, chainId, token, amount, sourceChainId,
-    // keccak(sourceAddress), keccak(settlementData), sourceBurnTxId` -
-    // every enclave-checkable input is bound above. `destinationChainId`
-    // left the key in bridge PR #155: it names where the value goes, not
-    // which burn it came from, so one burn cannot settle once per
-    // destination (release vs rebalance).
+    // `burnId` is recomputed from these same fields plus the pinned Bridge,
+    // chain id and token by `validate_burn_id` in `handle_sign`, before this
+    // binding runs; the contract derives and checks it again (`InvalidBurnId`).
 
     Ok(())
 }

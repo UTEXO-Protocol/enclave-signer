@@ -3,8 +3,8 @@ fn validate_dest(destination: &EvmDestination, ctx: &ValidationContext<'_>) -> R
     super::validate_destination(destination, ctx).map(|(proof, _, _)| proof)
 }
 
-/// Keep only the decoded source fields; these assertions cover the identity.
-fn source_of(destination: &EvmDestination, ctx: &ValidationContext<'_>) -> SourceIdentity {
+/// Keep only the decoded burn fields; these assertions cover the identity.
+fn release_of(destination: &EvmDestination, ctx: &ValidationContext<'_>) -> ReleaseIdentity {
     super::validate_destination(destination, ctx)
         .expect("valid destination")
         .2
@@ -446,18 +446,22 @@ fn rejects_calldata_with_overlapping_dynamic_tails() {
     );
 }
 
-// ---- source identity: `sourceChainId` / `sourceAddress` on both routes ----
+// ---- release identity: source fields and burnId on both routes ----
 
-fn rgb_source() -> SourceIdentity {
-    SourceIdentity {
-        chain_id: U256::from(RGB_SOURCE_CHAIN_ID),
-        address: String::new(),
+fn rgb_release() -> ReleaseIdentity {
+    ReleaseIdentity {
+        burn_id: U256::ZERO,
+        amount: U256::from(1000u64),
+        source_chain_id: U256::from(RGB_SOURCE_CHAIN_ID),
+        source_address: String::new(),
+        settlement_data: Vec::new(),
+        source_burn_tx_id: [0x5b; 32],
     }
 }
 
 #[test]
 fn rgb_source_identity_accepts_the_rgb_network_id_and_empty_address() {
-    validate_rgb_source_identity(&rgb_source()).expect("canonical RGB source");
+    validate_rgb_source_identity(&rgb_release()).expect("canonical RGB source");
 }
 
 #[test]
@@ -466,11 +470,11 @@ fn rgb_source_identity_rejects_a_foreign_source_chain() {
     // commission rate on chain, so any id but the RGB one must refuse -
     // including the execution chain's own id and zero.
     for foreign in [0u64, 1, 42161, RGB_SOURCE_CHAIN_ID + 1] {
-        let source = SourceIdentity {
-            chain_id: U256::from(foreign),
-            ..rgb_source()
+        let release = ReleaseIdentity {
+            source_chain_id: U256::from(foreign),
+            ..rgb_release()
         };
-        let err = validate_rgb_source_identity(&source)
+        let err = validate_rgb_source_identity(&release)
             .expect_err("foreign source chain must refuse")
             .to_string();
         assert!(
@@ -482,20 +486,20 @@ fn rgb_source_identity_rejects_a_foreign_source_chain() {
 
 #[test]
 fn rgb_source_identity_rejects_a_non_empty_source_address() {
-    let source = SourceIdentity {
-        address: "rgb:some-sender".into(),
-        ..rgb_source()
+    let release = ReleaseIdentity {
+        source_address: "rgb:some-sender".into(),
+        ..rgb_release()
     };
-    let err = validate_rgb_source_identity(&source)
+    let err = validate_rgb_source_identity(&release)
         .expect_err("non-empty sourceAddress must refuse")
         .to_string();
     assert!(err.contains("sourceAddress must be empty"), "{err}");
 }
 
-/// `sourceChainId` and `sourceAddress` are surfaced from the direct route's
-/// calldata, so the handler binds what will actually be signed.
+/// Every burn-identifying field is surfaced from the direct route's calldata,
+/// so the handler binds what will actually be signed.
 #[test]
-fn direct_route_surfaces_its_source_identity() {
+fn direct_route_surfaces_its_release_identity() {
     let mut destination = destination();
     destination.call_data = fundsOutCall {
         params: FundsOutParams {
@@ -506,49 +510,189 @@ fn direct_route_surfaces_its_source_identity() {
             destinationChainId: U256::from(1u64),
             sourceAddress: "who".into(),
             proof: Bytes::new(),
-            settlementData: Bytes::new(),
+            settlementData: Bytes::from(vec![0xd0, 0x0d]),
             sourceBurnTxId: FixedBytes([0x5b; 32]),
         },
     }
     .abi_encode();
     with_ctx(&config(), |ctx| {
         assert_eq!(
-            source_of(&destination, ctx),
-            SourceIdentity {
-                chain_id: U256::from(RGB_SOURCE_CHAIN_ID),
-                address: "who".into(),
+            release_of(&destination, ctx),
+            ReleaseIdentity {
+                burn_id: U256::from(7u64),
+                amount: U256::from(1000u64),
+                source_chain_id: U256::from(RGB_SOURCE_CHAIN_ID),
+                source_address: "who".into(),
+                settlement_data: vec![0xd0, 0x0d],
+                source_burn_tx_id: [0x5b; 32],
             }
         );
     });
 }
 
 /// Same for the LayerZero route, which yields no `FundsOutParams`: the
-/// identity is the only typed view of its source fields the handler gets.
+/// identity is the only typed view of its burn fields the handler gets.
 #[test]
-fn entrypoint_route_surfaces_its_source_identity() {
+fn entrypoint_route_surfaces_its_release_identity() {
     let mut destination = destination();
     destination.call_data = lzFundsOutCall {
         amount: U256::from(1000u64),
-        burnId: U256::from(7u64),
+        burnId: U256::from(9u64),
         sourceChainId: U256::from(5u64),
         destinationChainId: U256::from(137u64),
         sourceAddress: "lz-who".into(),
         proof: Bytes::new(),
-        settlementData: Bytes::new(),
+        settlementData: Bytes::from(vec![0xe1]),
         dstEid: 30101u32,
         recipient: FixedBytes([0x05; 32]),
         minAmountLD: U256::from(1000u64),
         extraOptions: Bytes::new(),
-        sourceBurnTxId: FixedBytes([0x5b; 32]),
+        sourceBurnTxId: FixedBytes([0x6c; 32]),
     }
     .abi_encode();
     with_ctx(&config(), |ctx| {
         assert_eq!(
-            source_of(&destination, ctx),
-            SourceIdentity {
-                chain_id: U256::from(5u64),
-                address: "lz-who".into(),
+            release_of(&destination, ctx),
+            ReleaseIdentity {
+                burn_id: U256::from(9u64),
+                amount: U256::from(1000u64),
+                source_chain_id: U256::from(5u64),
+                source_address: "lz-who".into(),
+                settlement_data: vec![0xe1],
+                source_burn_tx_id: [0x6c; 32],
             }
         );
     });
+}
+
+// ---- burnId recompute ----
+
+/// Pins the enclave's recompute to the contract formula, encoded here with
+/// alloy's `abi.encode` of the nine-word static tuple rather than the manual
+/// concatenation the implementation uses.
+fn contract_burn_id(cfg: &BridgeConfig, release: &ReleaseIdentity) -> U256 {
+    use alloy_primitives::{keccak256, B256};
+    use alloy_sol_types::SolValue;
+
+    let typehash: B256 = keccak256(
+        "UtexoBurnId(address bridge,uint256 chainId,address token,uint256 amount,\
+         uint256 sourceChainId,bytes32 sourceAddressHash,bytes32 settlementDataHash,\
+         bytes32 sourceBurnTxId)",
+    );
+    let encoded = (
+        typehash,
+        Address::from(cfg.funds_in_contract),
+        U256::from(cfg.chain_id),
+        Address::from(cfg.token_contract),
+        release.amount,
+        release.source_chain_id,
+        keccak256(release.source_address.as_bytes()),
+        keccak256(&release.settlement_data),
+        B256::from(release.source_burn_tx_id),
+    )
+        .abi_encode();
+    assert_eq!(encoded.len(), 9 * 32, "nine static words");
+    U256::from_be_bytes(keccak256(encoded).0)
+}
+
+fn token_pinned_config() -> BridgeConfig {
+    BridgeConfig {
+        chain_id: 42161,
+        funds_in_contract: [0xb1; ADDRESS_LEN],
+        token_contract: [0x70; ADDRESS_LEN],
+        ..config()
+    }
+}
+
+#[test]
+fn burn_id_recompute_matches_the_contract_formula() {
+    let cfg = token_pinned_config();
+    let release = ReleaseIdentity {
+        amount: U256::from(123_456u64),
+        settlement_data: vec![0xaa, 0xbb, 0xcc],
+        ..rgb_release()
+    };
+    assert_eq!(
+        expected_burn_id(&cfg, &release),
+        contract_burn_id(&cfg, &release)
+    );
+}
+
+#[test]
+fn burn_id_recompute_binds_every_input() {
+    // Each preimage input on its own must move the id, so none can be
+    // varied without the contract deriving a different key.
+    let cfg = token_pinned_config();
+    let base = rgb_release();
+    let base_id = expected_burn_id(&cfg, &base);
+
+    let variants = [
+        ReleaseIdentity {
+            amount: U256::from(1001u64),
+            ..base.clone()
+        },
+        ReleaseIdentity {
+            source_chain_id: U256::from(97u64),
+            ..base.clone()
+        },
+        ReleaseIdentity {
+            source_address: "x".into(),
+            ..base.clone()
+        },
+        ReleaseIdentity {
+            settlement_data: vec![0x01],
+            ..base.clone()
+        },
+        ReleaseIdentity {
+            source_burn_tx_id: [0x5c; 32],
+            ..base.clone()
+        },
+    ];
+    for v in &variants {
+        assert_ne!(expected_burn_id(&cfg, v), base_id, "{v:?}");
+    }
+    for other_cfg in [
+        BridgeConfig {
+            chain_id: 1,
+            ..token_pinned_config()
+        },
+        BridgeConfig {
+            funds_in_contract: [0xb2; ADDRESS_LEN],
+            ..token_pinned_config()
+        },
+        BridgeConfig {
+            token_contract: [0x71; ADDRESS_LEN],
+            ..token_pinned_config()
+        },
+    ] {
+        assert_ne!(expected_burn_id(&other_cfg, &base), base_id);
+    }
+}
+
+#[test]
+fn burn_id_check_accepts_the_derived_id_and_refuses_any_other() {
+    let cfg = token_pinned_config();
+    let mut release = rgb_release();
+    release.burn_id = expected_burn_id(&cfg, &release);
+    validate_burn_id(&cfg, &release).expect("the derived id must pass");
+
+    release.burn_id += U256::from(1u64);
+    let err = validate_burn_id(&cfg, &release)
+        .expect_err("a foreign burnId must refuse")
+        .to_string();
+    assert!(
+        err.contains("burnId") && err.contains("InvalidBurnId"),
+        "{err}"
+    );
+}
+
+#[test]
+fn burn_id_check_is_skipped_while_the_token_is_unpinned() {
+    // Dev builds have no token pin; production cannot boot without one, so
+    // skipping here never reaches a release image.
+    let cfg = BridgeConfig {
+        token_contract: [0u8; ADDRESS_LEN],
+        ..token_pinned_config()
+    };
+    validate_burn_id(&cfg, &rgb_release()).expect("unpinned token skips the recompute");
 }

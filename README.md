@@ -301,7 +301,7 @@ and `utexo-bridge-enclave-burn`, both from `Dockerfile.enclave-dev.bfa` with a
 
 The production Dockerfiles bake the bridge pins as `ENV` (`EVM_CHAIN_ID`,
 `EVM_PROXY_CONTRACT_ADDRESS`, `RGB_ASSET_ID`, `FUNDS_IN_CONTRACT`,
-`GAS_TX_ALLOWED_TO`, `BTC_MAX_TOTAL_SATS`, `ELECTRUM_URL`, ...), so they are
+`TOKEN_CONTRACT`, `GAS_TX_ALLOWED_TO`, `BTC_MAX_TOTAL_SATS`, `ELECTRUM_URL`, ...), so they are
 measured into PCR0. The cloning secret is never baked.
 
 ## Running
@@ -371,6 +371,7 @@ Bridge pins (all three required for a `Production` policy):
 | `EVM_PROXY_CONTRACT_ADDRESS` | zero | MultisigProxy address: EIP-712 `verifyingContract` and the `to` of the payable `lzFundsOutCall` carve-out. Attested as `bridge_contract`. |
 | `RGB_ASSET_ID` | empty | Pinned RGB contract id. Enforced on every bridge PSBT, and on `fundsOut` when the bridge is configured. |
 | `FUNDS_IN_CONTRACT` | falls back to the proxy | Attested emitter of `FundsIn` / `BridgeFundsIn`. It must resolve to a non-zero address in production. |
+| `TOKEN_CONTRACT` | zero | The ERC-20 the Bridge releases (`Bridge.TOKEN`). A `burnId` preimage input: the enclave recomputes `burnId` from it and refuses a mismatch. Attested; must be non-zero in production. |
 
 Value bounds (fail closed while unset in a production build):
 

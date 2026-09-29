@@ -7,6 +7,8 @@ use alloy_sol_types::sol;
 #[cfg(rgb_to_evm)]
 use alloy_sol_types::SolCall;
 
+#[cfg(rgb_to_evm)]
+use crate::config::BridgeConfig;
 use crate::error::{EnclaveError, Result};
 #[cfg(rgb_to_evm)]
 use crate::networks::evm::ADDRESS_LEN;
@@ -129,15 +131,89 @@ pub fn validate_source(amount: u64, source: &EvmSource) -> Result<RouteProof> {
     })
 }
 
-/// The source-side fields of a release calldata, decoded route-neutrally so
-/// the handler can bind them to the request's actual source network. Both the
-/// direct `fundsOut` and the LayerZero `lzFundsOut` shapes carry them.
+/// The fields of a release calldata that identify WHICH burn it settles,
+/// decoded route-neutrally: both the direct `fundsOut` and the LayerZero
+/// `lzFundsOut` shapes carry them. They are exactly the `burnId` preimage
+/// inputs plus the `burnId` the backend derived, so the handler can bind the
+/// source fields to the request's source network and recompute `burnId`.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct SourceIdentity {
+pub struct ReleaseIdentity {
+    /// Calldata `burnId`, as the backend derived it.
+    pub burn_id: alloy_primitives::U256,
+    /// Calldata `amount`, full width.
+    pub amount: alloy_primitives::U256,
     /// Calldata `sourceChainId`.
-    pub chain_id: alloy_primitives::U256,
+    pub source_chain_id: alloy_primitives::U256,
     /// Calldata `sourceAddress`.
-    pub address: String,
+    pub source_address: String,
+    /// Calldata `settlementData`.
+    pub settlement_data: Vec<u8>,
+    /// Calldata `sourceBurnTxId`.
+    pub source_burn_tx_id: [u8; 32],
+}
+
+/// `Bridge.BURN_TYPEHASH` preimage, verbatim from `Bridge.sol` (bridge PRs
+/// #152 and #155). `recipient`, `proof` and `destinationChainId` are absent
+/// by design: the key is shared with `rebalanceLiquidity`.
+#[cfg(rgb_to_evm)]
+const BURN_TYPEHASH_STR: &str = "UtexoBurnId(address bridge,uint256 chainId,address token,\
+     uint256 amount,uint256 sourceChainId,bytes32 sourceAddressHash,\
+     bytes32 settlementDataHash,bytes32 sourceBurnTxId)";
+
+/// Recompute `burnId` exactly as `Bridge._deriveBurnIdFromFields` does:
+///
+/// ```text
+/// keccak256(abi.encode(BURN_TYPEHASH, bridge, chainId, token, amount,
+///     sourceChainId, keccak256(sourceAddress), keccak256(settlementData),
+///     sourceBurnTxId))
+/// ```
+///
+/// `bridge` is `address(this)` inside the Bridge, i.e. the pinned
+/// `FUNDS_IN_CONTRACT` (the contract that emits `BridgeFundsIn`); `chainId`
+/// the pinned `EVM_CHAIN_ID`; `token` the pinned `TOKEN_CONTRACT`. Nine static
+/// words, so `abi.encode` is plain concatenation.
+#[cfg(rgb_to_evm)]
+pub fn expected_burn_id(cfg: &BridgeConfig, release: &ReleaseIdentity) -> U256 {
+    use sha3::{Digest, Keccak256};
+
+    let mut buf = Vec::with_capacity(32 * 9);
+    buf.extend_from_slice(&Keccak256::digest(BURN_TYPEHASH_STR.as_bytes()));
+    buf.extend_from_slice(&[0u8; 12]);
+    buf.extend_from_slice(&cfg.funds_in_contract);
+    buf.extend_from_slice(&U256::from(cfg.chain_id).to_be_bytes::<32>());
+    buf.extend_from_slice(&[0u8; 12]);
+    buf.extend_from_slice(&cfg.token_contract);
+    buf.extend_from_slice(&release.amount.to_be_bytes::<32>());
+    buf.extend_from_slice(&release.source_chain_id.to_be_bytes::<32>());
+    buf.extend_from_slice(&Keccak256::digest(release.source_address.as_bytes()));
+    buf.extend_from_slice(&Keccak256::digest(&release.settlement_data));
+    buf.extend_from_slice(&release.source_burn_tx_id);
+    U256::from_be_bytes::<32>(Keccak256::digest(&buf).into())
+}
+
+/// Refuse a release whose `burnId` is not the one the Bridge will derive.
+///
+/// The contract performs the same check and reverts (`InvalidBurnId`), so
+/// this adds no authority; it fails at sign time, with the expected value in
+/// the error, instead of on chain. Both routes. Skipped while
+/// `TOKEN_CONTRACT` is unpinned (dev builds): a production policy cannot boot
+/// without it ([`crate::policy::ProductionPolicy::check_invariants`]).
+#[cfg(rgb_to_evm)]
+pub fn validate_burn_id(cfg: &BridgeConfig, release: &ReleaseIdentity) -> Result<()> {
+    if cfg.token_contract == [0u8; ADDRESS_LEN] {
+        return Ok(());
+    }
+    let expected = expected_burn_id(cfg, release);
+    if release.burn_id != expected {
+        return Err(EnclaveError::CrossCheck(format!(
+            "calldata burnId {:#x} != {:#x}, the burnId the Bridge derives from the bound fields \
+             (FUNDS_IN_CONTRACT, EVM_CHAIN_ID, TOKEN_CONTRACT, amount, sourceChainId, \
+             sourceAddress, settlementData, sourceBurnTxId) - refusing to sign a release the \
+             contract would revert with InvalidBurnId",
+            release.burn_id, expected
+        )));
+    }
+    Ok(())
 }
 
 /// Bind a release's source fields to an RGB source, on either route.
@@ -153,20 +229,20 @@ pub struct SourceIdentity {
 /// Called by the sign handler only when the request's source is an RGB
 /// source; a CCD-sourced release names its own chain.
 #[cfg(rgb_to_evm)]
-pub fn validate_rgb_source_identity(source: &SourceIdentity) -> Result<()> {
-    if source.chain_id != U256::from(RGB_SOURCE_CHAIN_ID) {
+pub fn validate_rgb_source_identity(source: &ReleaseIdentity) -> Result<()> {
+    if source.source_chain_id != U256::from(RGB_SOURCE_CHAIN_ID) {
         return Err(EnclaveError::CrossCheck(format!(
             "calldata sourceChainId {} != RGB network id {RGB_SOURCE_CHAIN_ID}: the source chain \
              selects the verifier, settlement module and commission rate - refusing to sign an \
              RGB release under a foreign source chain",
-            source.chain_id
+            source.source_chain_id
         )));
     }
-    if !source.address.is_empty() {
+    if !source.source_address.is_empty() {
         return Err(EnclaveError::CrossCheck(format!(
             "calldata sourceAddress must be empty on an RGB route (RGB has no source-address \
              concept and it is hashed into burnId), got {:?}",
-            source.address
+            source.source_address
         )));
     }
     Ok(())
@@ -176,13 +252,14 @@ pub fn validate_rgb_source_identity(source: &SourceIdentity) -> Result<()> {
 ///
 /// Source-network proof validation, including RGB consignments, assets,
 /// amounts, and SPV proofs, belongs to the source network validator. The
-/// returned [`SourceIdentity`] is decoded here but judged by the handler,
-/// which knows the request's source network.
+/// returned [`ReleaseIdentity`] is decoded here but judged by the handler:
+/// the source fields against the request's source network, the `burnId`
+/// against the pinned Bridge, chain id and token.
 #[cfg(rgb_to_evm)]
 pub fn validate_destination(
     destination: &EvmDestination,
     ctx: &ValidationContext<'_>,
-) -> Result<(RouteProof, Option<FundsOutParams>, SourceIdentity)> {
+) -> Result<(RouteProof, Option<FundsOutParams>, ReleaseIdentity)> {
     let bridge_config = ctx.bridge_config;
 
     if destination.call_data.len() < 4 {
@@ -215,24 +292,32 @@ pub fn validate_destination(
     // `destinationChainId` but mean different things by it, so
     // `is_entrypoint_route` picks the matching check below.
     let is_entrypoint_route = selector == LZ_FUNDS_OUT_SELECTOR;
-    let (proof, params, calldata_destination_chain_id, source) = if is_entrypoint_route {
+    let (proof, params, calldata_destination_chain_id, release) = if is_entrypoint_route {
         let decoded = decode_lz_funds_out_params(&destination.call_data)?;
         let proof = lz_route_proof_from_params(&decoded)?;
         let chain_id = decoded.destinationChainId;
-        let source = SourceIdentity {
-            chain_id: decoded.sourceChainId,
-            address: decoded.sourceAddress,
+        let release = ReleaseIdentity {
+            burn_id: decoded.burnId,
+            amount: decoded.amount,
+            source_chain_id: decoded.sourceChainId,
+            source_address: decoded.sourceAddress,
+            settlement_data: decoded.settlementData.to_vec(),
+            source_burn_tx_id: decoded.sourceBurnTxId.0,
         };
-        (proof, None, chain_id, source)
+        (proof, None, chain_id, release)
     } else {
         let params = decode_funds_out_params(&destination.call_data)?;
         let proof = route_proof_from_params(&params)?;
         let chain_id = params.destinationChainId;
-        let source = SourceIdentity {
-            chain_id: params.sourceChainId,
-            address: params.sourceAddress.clone(),
+        let release = ReleaseIdentity {
+            burn_id: params.burnId,
+            amount: params.amount,
+            source_chain_id: params.sourceChainId,
+            source_address: params.sourceAddress.clone(),
+            settlement_data: params.settlementData.to_vec(),
+            source_burn_tx_id: params.sourceBurnTxId.0,
         };
-        (proof, Some(params), chain_id, source)
+        (proof, Some(params), chain_id, release)
     };
     if proof.amount != destination.calldata_amount {
         return Err(EnclaveError::CrossCheck(format!(
@@ -320,7 +405,7 @@ pub fn validate_destination(
         return Err(EnclaveError::CrossCheck("request deadline expired".into()));
     }
 
-    Ok((proof, params, source))
+    Ok((proof, params, release))
 }
 
 /// Narrow a decoded release into the route-neutral proof.

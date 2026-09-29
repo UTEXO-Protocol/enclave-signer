@@ -278,8 +278,14 @@ release. An RGB-sourced release (direct `fundsOut` and LayerZero `lzFundsOut`
 alike) MUST carry `sourceChainId == 96`, the bridge's RGB network id, pinned as
 a compile-time constant (`RGB_SOURCE_CHAIN_ID`) and so measured into PCR0. The
 `sourceAddress` rule above applies to both routes the same way
-(`validate_rgb_source_identity`). A CCD-sourced release is not subject to it. `burnId` itself is still not recomputed in-enclave: the contract
-derives it from the same fields and reverts on a mismatch (`InvalidBurnId`).
+(`validate_rgb_source_identity`). A CCD-sourced release is not subject to it.
+
+**`burnId` recompute.** `burnId` is also recomputed in-enclave, exactly as
+`Bridge._deriveBurnIdFromFields` does, from the pinned `FUNDS_IN_CONTRACT`
+(the Bridge), `EVM_CHAIN_ID` and `TOKEN_CONTRACT` plus the bound calldata
+fields, and a mismatch refuses (`validate_burn_id`, both routes). The contract
+derives and checks it again and reverts on a mismatch (`InvalidBurnId`); the
+in-enclave check fails earlier and names the expected value.
 
 Which consignment shape a build signs is chosen at compile time by its RGB
 flow feature (`rgb-swap` or `rgb-mint-burn`, exactly one). A **swap** enclave
