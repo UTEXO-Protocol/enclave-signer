@@ -196,7 +196,7 @@ fn rejects_nonzero_value_the_other_drain() {
 /// release build carries no unused constant.
 const ONCHAIN_LZ_FUNDS_OUT_CALL_SIG: &str =
     "lzFundsOutCall((uint256,uint256,uint256,uint256,string,bytes,bytes,uint32,bytes32,\
-     uint256,bytes),uint256,uint256,uint256,bytes[])";
+     uint256,bytes,bytes32),uint256,uint256,uint256,bytes[])";
 
 /// Drift fails closed, so this catches a silently disabled carve-out.
 #[test]
