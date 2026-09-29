@@ -96,6 +96,7 @@ fn verify_mint_locks(
     }
 
     let client = ctx
+        .launch()?
         .evm_rpc_client
         .as_ref()
         .ok_or_else(|| EnclaveError::CrossCheck(unavailable.into()))?;

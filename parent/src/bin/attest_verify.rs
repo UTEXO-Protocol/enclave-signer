@@ -76,12 +76,18 @@ struct Cli {
     #[arg(long, default_value = "tls")]
     expect_evm_source: String,
 
+    /// Expected Electrum host the operator set at launch (the host of
+    /// `ELECTRUM_URL`). Required for production verification. Ignored with
+    /// --mock.
+    #[arg(long)]
+    expect_electrum_host: Option<String>,
+
     /// Expected EVM RPC TLS host (`EVM_RPC_HOST`). REQUIRED when
     /// `--expect-evm-source tls`. Ignored otherwise.
     #[arg(long)]
     expect_evm_rpc_host: Option<String>,
 
-    /// Expected SHA-256 of the DER of the EVM RPC CA (`EVM_RPC_TLS_CA_DER_HEX`), 64
+    /// Expected SHA-256 of the DER of the EVM RPC CA (`EVM_RPC_TLS_CA_DER_FILE`), 64
     /// hex characters. REQUIRED when `--expect-evm-source tls`. Ignored
     /// otherwise.
     #[arg(long)]
@@ -307,6 +313,10 @@ async fn run(cli: Cli) -> Result<()> {
                  (the beacon block root the enclave pinned)"
             );
         }
+        let electrum_host = cli
+            .expect_electrum_host
+            .clone()
+            .context("--expect-electrum-host required (or pass --mock)")?;
         let evm_rpc_tls = (evm_source == EvmDataSource::PinnedTlsRpc)
             .then(|| {
                 parse_evm_rpc_tls(
@@ -325,6 +335,7 @@ async fn run(cli: Cli) -> Result<()> {
             signer_role: parse_signer_role(cli.expect_signer_role.as_deref())?,
             evm_source,
             evm_checkpoint,
+            electrum_host,
             evm_rpc_tls,
             expected_chain_id: cli.expect_chain_id,
             expected_bridge_contract,

@@ -6,7 +6,7 @@
 
 use crate::config::BridgeConfig;
 #[cfg(feature = "evm-rpc")]
-use crate::config::{EvmRpcConfig, EvmRpcTransport};
+use crate::config::{EvmRpcConfig, EvmRpcTls};
 #[cfg(feature = "rgb-validation")]
 use crate::networks::rgb::spv::{
     resolve_checkpoint, CheckpointSource, HeaderChain, Network, CHECKPOINT_ENV,
@@ -25,41 +25,11 @@ pub fn init_tracing() {
         .init();
 }
 
-/// Witness-resolver endpoint. `ELECTRUM_URL` (e.g. `ssl://host:50002`) is the
-/// production path; `ESPLORA_URL` is the legacy REST fallback. Default targets
-/// the legacy esplora forwarder port for backwards compatibility.
-#[allow(dead_code)]
-fn indexer_url_from_env() -> String {
-    std::env::var("ELECTRUM_URL")
-        .or_else(|_| std::env::var("ESPLORA_URL"))
-        .unwrap_or_else(|_| "http://127.0.0.1:3443".into())
-}
-
-/// Map an indexer URL to (local forwarder listen port, optional hostname to pin
-/// to loopback). For `ssl://host:port` / `tcp://host:port` we listen on the
-/// URL's own port and return the host so it can be pinned to 127.0.0.1 (keeps
-/// in-enclave TLS validating the real cert). For http(s)/legacy esplora we keep
-/// the historical port 3443 and pin nothing.
-#[cfg(all(feature = "vsock", feature = "rgb-validation", target_os = "linux"))]
-fn forwarder_target(url: &str) -> (u16, Option<String>) {
-    for scheme in ["ssl://", "tcp://"] {
-        if let Some(rest) = url.strip_prefix(scheme) {
-            let hostport = rest.split('/').next().unwrap_or(rest);
-            if let Some((host, port)) = hostport.rsplit_once(':') {
-                if let Ok(p) = port.parse::<u16>() {
-                    return (p, Some(host.to_string()));
-                }
-            }
-        }
-    }
-    (3443, None)
-}
-
 /// Append `127.0.0.1 <host>` to /etc/hosts (idempotent) so the enclave's
 /// outbound connection to `host` lands on the local vsock forwarder while the
 /// TLS layer still validates against `host`'s real certificate.
 #[cfg(all(feature = "vsock", feature = "rgb-validation", target_os = "linux"))]
-fn pin_host_to_loopback(host: &str) -> std::io::Result<()> {
+pub fn pin_host_to_loopback(host: &str) -> std::io::Result<()> {
     use std::io::Write;
     let existing = std::fs::read_to_string("/etc/hosts").unwrap_or_default();
     if existing
@@ -139,11 +109,10 @@ pub fn log_bridge_config(bridge_config: &BridgeConfig) {
 ///
 /// Decided the same way the RPC client is built in [`build_evm_rpc_client`]:
 /// `helios` plus `HELIOS_EXECUTION_RPC` means the trustless path; otherwise
-/// the transport of `cfg`. An invalid transport has no pin, so a production
-/// build refuses to boot.
+/// the pinned TLS of `tls`.
 #[cfg(feature = "evm-rpc")]
 pub fn resolve_evm_data_source(
-    cfg: &EvmRpcConfig,
+    tls: &EvmRpcTls,
 ) -> (EvmDataSource, Option<[u8; 32]>, Option<EvmRpcTlsPin>) {
     #[cfg(feature = "helios")]
     if std::env::var("HELIOS_EXECUTION_RPC").is_ok() {
@@ -158,18 +127,12 @@ pub fn resolve_evm_data_source(
             .and_then(|b| <[u8; 32]>::try_from(b).ok());
         return (EvmDataSource::HeliosVerified, checkpoint, None);
     }
-    match &cfg.transport {
-        EvmRpcTransport::Plain => (EvmDataSource::RawRpc, None, None),
-        EvmRpcTransport::PinnedTls(tls) => {
-            use sha2::Digest;
-            let pin = EvmRpcTlsPin {
-                host: tls.host.clone(),
-                ca_sha256: sha2::Sha256::digest(&tls.ca_der).into(),
-            };
-            (EvmDataSource::PinnedTlsRpc, None, Some(pin))
-        }
-        EvmRpcTransport::Invalid(_) => (EvmDataSource::PinnedTlsRpc, None, None),
-    }
+    use sha2::Digest;
+    let pin = EvmRpcTlsPin {
+        host: tls.host.clone(),
+        ca_sha256: sha2::Sha256::digest(&tls.ca_der).into(),
+    };
+    (EvmDataSource::PinnedTlsRpc, None, Some(pin))
 }
 
 /// Say which posture was resolved. This is what gets committed into the
@@ -214,66 +177,14 @@ pub fn install_env_cloning_secret(state: &EnclaveState) {
     }
 }
 
-/// Start every vsock-to-TCP forwarder this build needs.
+/// Start the vsock-to-TCP forwarders this build needs at boot. The Electrum
+/// and EVM RPC forwarders start at launch, with the endpoints.
 ///
 /// No-op off Linux or without `vsock`. Untrusted egress in every case - the
 /// host relays these bytes; see `vsock_forwarder`'s trust-boundary note.
 pub fn start_vsock_forwarders() {
-    // The indexer forwarder lets the in-enclave witness resolver reach the
-    // host-side indexer. The host must run:
-    //   vsock-proxy <ESPLORA_VSOCK_PORT> <indexer-host> <indexer-port>
-    // 127.0.0.1:<local_port> is forwarded to vsock:<vsock_port>. For an Electrum
-    // ssl:// endpoint we listen on the URL's own port and pin its hostname to
-    // 127.0.0.1 in /etc/hosts, so TLS terminates inside the enclave against the
-    // real server cert and the host relays ciphertext only.
     #[cfg(all(feature = "vsock", target_os = "linux"))]
     {
-        // Esplora egress is only needed by the RGB/BTC stack (consignment
-        // resolver + SPV). A `ccd`-only build starts no Esplora forwarder.
-        #[cfg(feature = "rgb-validation")]
-        {
-            let vsock_port: u32 = std::env::var("ESPLORA_VSOCK_PORT")
-                .ok()
-                .and_then(|s| s.parse().ok())
-                .unwrap_or(8001);
-            let (local_port, host_pin) = forwarder_target(&indexer_url_from_env());
-            if let Some(host) = host_pin {
-                match pin_host_to_loopback(&host) {
-                    Ok(()) => tracing::info!(
-                        "pinned {host} -> 127.0.0.1 for in-enclave TLS over the vsock forwarder"
-                    ),
-                    Err(e) => tracing::error!("failed to pin {host} in /etc/hosts: {e}"),
-                }
-            }
-            tracing::info!(
-            local_port,
-            vsock_port,
-            "starting indexer vsock forwarder (host must run: vsock-proxy {vsock_port} <indexer-host> <indexer-port>)"
-        );
-            if let Err(e) = crate::vsock_forwarder::start_forwarder(local_port, vsock_port) {
-                tracing::error!("failed to start vsock forwarder: {e}");
-            }
-        }
-
-        // Second forwarder for the EVM JSON-RPC used by in-enclave FundsIn
-        // verification. Distinct loopback/vsock ports from Esplora
-        // (3443/8001). Untrusted, host-controlled egress boundary;
-        // the host must run: vsock-proxy <EVM_RPC_VSOCK_PORT> <evm-rpc-host> <port>.
-        #[cfg(feature = "evm-rpc")]
-        {
-            let evm_vsock_port: u32 = std::env::var("EVM_RPC_VSOCK_PORT")
-                .ok()
-                .and_then(|s| s.parse().ok())
-                .unwrap_or(8002);
-            tracing::info!(
-            evm_vsock_port,
-            "starting EVM RPC vsock forwarder (host must run: vsock-proxy {evm_vsock_port} <evm-rpc-host> <evm-rpc-port>)"
-        );
-            if let Err(e) = crate::vsock_forwarder::start_forwarder(3444, evm_vsock_port) {
-                tracing::error!("failed to start EVM RPC vsock forwarder: {e}");
-            }
-        }
-
         // Helios execution + consensus RPC forwarders (trustless EVM
         // verification). Helios verifies these UNTRUSTED upstreams against a
         // pinned checkpoint. Local ports mirror HeliosConfig defaults
@@ -313,11 +224,10 @@ pub fn start_vsock_forwarders() {
     }
 }
 
-/// Build the RGB consignment validator. Fails soft: a `None` makes the
-/// handlers that need it refuse, rather than stopping the enclave booting.
+/// Build the RGB consignment validator for the Electrum URL set at launch.
+/// A `None` refuses the launch.
 #[cfg(feature = "rgb-validation")]
-pub fn build_rgb_validator() -> Option<RgbValidator> {
-    let indexer_url = indexer_url_from_env();
+pub fn build_rgb_validator(indexer_url: String) -> Option<RgbValidator> {
     let network = std::env::var("BITCOIN_NETWORK").unwrap_or_else(|_| "bitcoin".into());
     match RgbValidator::new(indexer_url, &network) {
         Ok(v) => {
@@ -390,49 +300,33 @@ pub fn build_header_chain(bitcoin_network_str: &str) -> std::sync::Mutex<HeaderC
 
 /// Build the in-enclave EVM RPC client for independent `FundsIn` verification.
 ///
-/// The URL must be the loopback forwarder. Responses are treated as evidence
-/// to verify, never as trusted input. A `None` client makes bridge signing
-/// fail closed; it never downgrades to an unverified path after a Helios sync
-/// failure or a bad TLS pin.
+/// The client reaches the RPC through the loopback forwarder. Responses are
+/// treated as evidence to verify, never as trusted input. A `None` client
+/// refuses the launch; it never downgrades to an unverified path after a
+/// Helios sync failure.
 #[cfg(feature = "evm-rpc")]
 pub fn build_evm_rpc_client(
     bridge_config: &BridgeConfig,
     cfg: &EvmRpcConfig,
+    tls: &EvmRpcTls,
 ) -> Option<Box<dyn crate::networks::evm::events::EvmReceiptProvider + Send + Sync>> {
-    // Only the Helios path reads the pinned chain id.
+    // Only the Helios path reads the pinned chain id and `cfg`.
     #[cfg(not(feature = "helios"))]
-    let _ = bridge_config;
+    let _ = (bridge_config, cfg);
 
     use crate::networks::evm::events::{AlloyEvmClient, EvmReceiptProvider};
     type Boxed = Box<dyn EvmReceiptProvider + Send + Sync>;
 
     let build_alloy = || -> Option<Boxed> {
-        let built = match &cfg.transport {
-            EvmRpcTransport::Plain => {
-                tracing::warn!(
-                    rpc_url = %cfg.rpc_url,
-                    "EVM FundsIn verification: plaintext RPC, the host can forge responses \
-                     (dev and test builds only)"
-                );
-                AlloyEvmClient::new(&cfg.rpc_url)
-            }
-            EvmRpcTransport::PinnedTls(tls) => {
-                tracing::info!(
-                    host = %tls.host,
-                    local_port = tls.local_port,
-                    "EVM FundsIn verification: pinned TLS (host must run: vsock-proxy \
-                     <EVM_RPC_VSOCK_PORT> {} <EVM_RPC_TLS_PORT>)",
-                    tls.host,
-                );
-                AlloyEvmClient::with_pinned_tls(tls)
-            }
-            EvmRpcTransport::Invalid(reason) => {
-                tracing::error!(
-                    "invalid EVM RPC config: {reason} - bridge signing will fail closed"
-                );
-                return None;
-            }
-        };
+        tracing::info!(
+            host = %tls.host,
+            tls_port = tls.tls_port,
+            "EVM FundsIn verification: pinned TLS (host must run: vsock-proxy \
+             <EVM_RPC_VSOCK_PORT> {} {})",
+            tls.host,
+            tls.tls_port,
+        );
+        let built = AlloyEvmClient::with_pinned_tls(tls);
         match built {
             Ok(c) => Some(Box::new(c) as Boxed),
             Err(e) => {

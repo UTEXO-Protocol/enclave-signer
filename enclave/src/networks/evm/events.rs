@@ -599,18 +599,6 @@ pub struct AlloyEvmClient {
 }
 
 impl AlloyEvmClient {
-    /// Build a plaintext client against `rpc_url` (must be the loopback
-    /// forwarder URL). The host can forge every response: dev and test only.
-    pub fn new(rpc_url: &str) -> Result<Self> {
-        let url = rpc_url.parse().map_err(|e| {
-            EnclaveError::CrossCheck(format!("evm-rpc: invalid rpc_url {rpc_url:?}: {e}"))
-        })?;
-        Ok(Self {
-            runtime: Self::runtime()?,
-            provider: alloy::providers::RootProvider::new_http(url),
-        })
-    }
-
     /// Build a client that ends TLS inside the enclave. It trusts only the
     /// pinned CA, checks the certificate against the pinned host, and sends
     /// the connection to the loopback forwarder. The host relays ciphertext.
@@ -622,7 +610,9 @@ impl AlloyEvmClient {
         let client = reqwest::Client::builder()
             .https_only(true)
             .tls_certs_only([reqwest::Certificate::from_der(&tls.ca_der).map_err(err)?])
-            .resolve(&tls.host, ([127, 0, 0, 1], tls.local_port).into())
+            // The URL port wins over this port. The forwarder listens on the
+            // TLS port, so the Host header carries the real port.
+            .resolve(&tls.host, ([127, 0, 0, 1], 0).into())
             .no_proxy()
             // Only the pinned host can redirect. It could still point at a
             // peer the CA never certified.
@@ -630,8 +620,7 @@ impl AlloyEvmClient {
             .timeout(EVM_RPC_CALL_TIMEOUT)
             .build()
             .map_err(err)?;
-        // No port in the URL, so `resolve` picks the forwarder port.
-        let url = format!("https://{}{}", tls.host, tls.path)
+        let url = format!("https://{}:{}/", tls.host, tls.tls_port)
             .parse()
             .map_err(|e| {
                 EnclaveError::CrossCheck(format!("evm-rpc: invalid host {:?}: {e}", tls.host))

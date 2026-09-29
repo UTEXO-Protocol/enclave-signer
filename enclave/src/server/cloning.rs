@@ -170,7 +170,7 @@ pub(super) fn handle_get_clone(
     let bundle = build_public_keys_response(state.get_keys()?, &ctx.bridge_config);
     let commitment = clone_commitment(
         &bundle,
-        &ctx.policy.commitment_bytes(),
+        &ctx.launch()?.policy.commitment_bytes(),
         &req_encryption_pk,
         &donor_pubkey,
         &encrypted_seed,
@@ -252,7 +252,7 @@ pub(super) fn handle_set_clone(
         let bundle = build_public_keys_response(EnclaveState::key_info(&km), &ctx.bridge_config);
         let expected = clone_commitment(
             &bundle,
-            &ctx.policy.commitment_bytes(),
+            &ctx.launch()?.policy.commitment_bytes(),
             &session.session.public_key(),
             &donor_pubkey,
             &req.encrypted_seed,

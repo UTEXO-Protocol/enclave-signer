@@ -5,7 +5,7 @@ use crate::enclave_proto::{
     GetLastSavedBlockRequest, GetLastSavedBlockResponse, GetPublicKeyRequest, HealthRequest,
     HealthResponse, InitializeKeyRequest, InitializeKeyResponse, InitiateCloningRequest,
     InitiateCloningResponse, MerkleProofEntry, PublicKeysResponse, SetCloneRequest,
-    SignedPsbtResponse, SubmitHeadersRequest, SubmitHeadersResponse,
+    SetEndpointsRequest, SignedPsbtResponse, SubmitHeadersRequest, SubmitHeadersResponse,
 };
 use crate::error::{ParentError, Result};
 use crate::framing;
@@ -427,6 +427,26 @@ impl EnclaveClient {
         let resp = self.send_request(&req)?;
         match resp.response {
             Some(enclave_response::Response::Health(r)) => Ok(r),
+            Some(enclave_response::Response::Error(e)) => Err(ParentError::EnclaveError {
+                code: e.code,
+                message: e.message,
+            }),
+            other => Err(ParentError::Connection(format!(
+                "unexpected response variant: {:?}",
+                other
+            ))),
+        }
+    }
+
+    /// Set the chain endpoints once, at launch. The enclave refuses a second
+    /// set.
+    pub fn set_endpoints(&self, req: SetEndpointsRequest) -> Result<()> {
+        let req = EnclaveRequest {
+            request: Some(enclave_request::Request::SetEndpoints(req)),
+        };
+        let resp = self.send_request(&req)?;
+        match resp.response {
+            Some(enclave_response::Response::SetEndpoints(_)) => Ok(()),
             Some(enclave_response::Response::Error(e)) => Err(ParentError::EnclaveError {
                 code: e.code,
                 message: e.message,

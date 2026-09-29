@@ -7,6 +7,7 @@ mod bfa;
 mod cloning;
 mod context;
 mod dispatch;
+mod endpoints;
 mod health;
 mod keys;
 #[cfg(feature = "rgb-validation")]

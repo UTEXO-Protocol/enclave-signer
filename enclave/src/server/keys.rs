@@ -226,7 +226,7 @@ pub(super) fn handle_get_attested_public_key(
     // whole posture as one value: sha256(pubkey_bundle || policy_commitment).
     // The verifier mirror is `parent/src/attest_verify.rs::verify_attested_pubkey`.
     let mut preimage = canonical_pubkey_bundle(&public_keys);
-    preimage.extend_from_slice(&ctx.policy.commitment_bytes());
+    preimage.extend_from_slice(&ctx.launch()?.policy.commitment_bytes());
     let commitment: [u8; 32] = Sha256::digest(&preimage).into();
 
     let attestation_doc = crate::attestation::get_attestation(

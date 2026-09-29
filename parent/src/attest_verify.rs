@@ -57,6 +57,8 @@ pub enum ExpectedPolicy {
         /// commitment so an enclave that trust-rooted on a different checkpoint
         /// fails verification.
         evm_checkpoint: Option<[u8; 32]>,
+        /// The Electrum host the operator set at launch.
+        electrum_host: String,
         /// The EVM RPC TLS host and CA hash the operator expects. `Some`
         /// (required) when `evm_source` is [`EvmDataSource::PinnedTlsRpc`].
         evm_rpc_tls: Option<EvmRpcTlsPin>,
@@ -236,6 +238,7 @@ fn expected_attested_policy(
             signer_role,
             evm_source,
             evm_checkpoint,
+            electrum_host,
             evm_rpc_tls,
             expected_chain_id,
             expected_bridge_contract,
@@ -302,6 +305,7 @@ fn expected_attested_policy(
                 funds_in_contract: *funds_in_contract,
                 evm_min_confirmations: *evm_min_confirmations,
                 evm_checkpoint: *evm_checkpoint,
+                electrum_host: electrum_host.clone(),
                 evm_rpc_tls: evm_rpc_tls.clone(),
                 // Gas-tx rule: declared by the operator, not on the
                 // wire. `to_bytes` canonicalises the selector set, so the caller
@@ -332,6 +336,7 @@ mod tests {
             evm_source: EvmDataSource::RawRpc,
             signer_role: SignerRole::Combined,
             evm_checkpoint: None,
+            electrum_host: "electrum.test".into(),
             evm_rpc_tls: None,
             funds_in_contract: [0x11; 20],
             evm_min_confirmations: 12,
@@ -352,6 +357,7 @@ mod tests {
             signer_role,
             evm_source: EvmDataSource::PinnedTlsRpc,
             evm_checkpoint: None,
+            electrum_host: "electrum.test".into(),
             evm_rpc_tls: Some(EvmRpcTlsPin {
                 host: "rpc.test".into(),
                 ca_sha256: [0x33; 32],

@@ -31,66 +31,41 @@ fn main() {
     let bridge_config = BridgeConfig::from_env();
     bootstrap::log_bridge_config(&bridge_config);
 
-    // Resolve the security posture once from the build context, pinned config,
-    // and selected data source. This is what gets committed into attestation
-    // `user_data` and what the signing handlers consult.
+    // Fail closed at boot: a release rgb-validation build that does not resolve
+    // to a valid Production policy must never become reachable. Debug / test /
+    // non-bridge builds are exempt. The endpoint checks wait for
+    // `SetEndpoints`, which checks the full policy.
     #[cfg(feature = "evm-rpc")]
-    let evm_rpc_config = utexo_bridge_enclave::config::EvmRpcConfig::from_env();
-    #[cfg(feature = "evm-rpc")]
-    let (evm_source, evm_checkpoint, evm_rpc_tls) =
-        bootstrap::resolve_evm_data_source(&evm_rpc_config);
-    #[cfg(feature = "evm-rpc")]
-    let evm_min_confirmations = evm_rpc_config.min_confirmations;
+    let evm_min_confirmations =
+        utexo_bridge_enclave::config::EvmRpcConfig::from_env().min_confirmations;
     #[cfg(not(feature = "evm-rpc"))]
-    let (evm_source, evm_checkpoint, evm_rpc_tls, evm_min_confirmations) = (
-        utexo_bridge_enclave::policy::EvmDataSource::Disabled,
-        None,
-        None,
-        0,
-    );
+    let evm_min_confirmations = 0;
     let build_ctx = BuildContext::current();
     let policy = SecurityPolicy::resolve(
         &build_ctx,
         &bridge_config,
-        evm_source,
-        evm_checkpoint,
-        evm_rpc_tls,
+        utexo_bridge_enclave::policy::EvmDataSource::Disabled,
+        None,
+        None,
+        "",
         evm_min_confirmations,
     );
-    bootstrap::log_policy(&policy);
-
-    // Fail closed at boot: a release rgb-validation build that does not resolve
-    // to a valid Production policy must never become reachable. Debug / test /
-    // non-bridge builds are exempt.
-    if let Err(msg) = policy.assert_valid_for_build(&build_ctx) {
+    if let Err(msg) = policy.assert_valid_at_boot(&build_ctx) {
         panic!("{msg}");
     }
 
     bootstrap::install_env_cloning_secret(&state);
     bootstrap::start_vsock_forwarders();
 
-    #[cfg(feature = "rgb-validation")]
-    let rgb_validator = bootstrap::build_rgb_validator();
-    #[cfg(feature = "rgb-validation")]
-    let header_chain = bootstrap::build_header_chain(&bitcoin_network_str);
-    #[cfg(feature = "evm-rpc")]
-    let evm_rpc_client = bootstrap::build_evm_rpc_client(&bridge_config, &evm_rpc_config);
-
-    let ctx = ServerContext {
+    // The security policy, the chain clients and their forwarders come with
+    // `SetEndpoints`. Until then the enclave signs nothing.
+    let ctx = ServerContext::awaiting_launch(
         state,
         bridge_config,
-        policy,
         #[cfg(feature = "rgb-validation")]
-        rgb_validator,
-        #[cfg(feature = "evm-rpc")]
-        evm_rpc_client,
-        #[cfg(feature = "evm-rpc")]
-        evm_rpc_config,
-        #[cfg(feature = "rgb-validation")]
-        header_chain,
-        #[cfg(feature = "rgb-validation")]
-        submit_rate_limiter: std::sync::Mutex::new(server::SubmitRateLimiter::default()),
-    };
+        bootstrap::build_header_chain(&bitcoin_network_str),
+        build_ctx,
+    );
 
     #[cfg(all(feature = "vsock", target_os = "linux"))]
     {
