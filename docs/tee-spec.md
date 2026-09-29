@@ -260,8 +260,10 @@ encoding, and at least one verified lock.
 `sourceBurnTxId`, the RGB OpId of the burn being settled, and `Bridge.fundsOut`
 folds it into `burnId` under the `BURN_TYPEHASH` it shares with
 `rebalanceLiquidity` (`bridge, chainId, token, amount, sourceChainId,
-destinationChainId, keccak(sourceAddress), keccak(settlementData),
-sourceBurnTxId`; the moving finality `proof` and the `recipient` are out). The
+keccak(sourceAddress), keccak(settlementData), sourceBurnTxId`; the moving
+finality `proof`, the `recipient` and, since bridge PR #155,
+`destinationChainId` are out, so one burn cannot settle once per
+destination). The
 contract rejects a zero id but cannot check its meaning, so the enclave MUST:
 `sourceBurnTxId` equals the OpId of the consignment's settling transition (the
 same transition the amount is read from), and `sourceAddress` is empty

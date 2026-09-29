@@ -320,8 +320,11 @@ fn apply_funds_out_binding(
     // `burnId` itself is not recomputed here: the contract derives and
     // checks it from the same fields (`InvalidBurnId`). Its preimage is
     // `BURN_TYPEHASH, bridge, chainId, token, amount, sourceChainId,
-    // destinationChainId, keccak(sourceAddress), keccak(settlementData),
-    // sourceBurnTxId` - every enclave-checkable input is bound above.
+    // keccak(sourceAddress), keccak(settlementData), sourceBurnTxId` -
+    // every enclave-checkable input is bound above. `destinationChainId`
+    // left the key in bridge PR #155: it names where the value goes, not
+    // which burn it came from, so one burn cannot settle once per
+    // destination (release vs rebalance).
 
     Ok(())
 }
