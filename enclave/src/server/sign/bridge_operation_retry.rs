@@ -32,7 +32,7 @@ const COMMISSION: u64 = 1_000;
 /// Canonical `BridgeFundsIn` signature, as the deposit verifier selects logs
 /// by. A local copy, so a changed production signature fails this test.
 const FUNDS_IN_SIG: &str = "BridgeFundsIn(bytes32,bytes32,address,uint256,uint256,\
-     uint256,uint256,uint256,uint256,uint256,string)";
+     uint256,uint256,uint256,uint256,uint256,string,bytes)";
 const NET: u64 = GROSS - COMMISSION;
 
 /// The deposit's invoice and the blinded seal it names.
