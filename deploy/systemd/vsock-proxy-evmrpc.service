@@ -1,7 +1,8 @@
 [Unit]
 # EVM-RPC egress for the in-enclave FundsIn verification (evm-rpc feature).
 # The enclave speaks TLS to https://<EVM_RPC_HOST> through its loopback
-# 127.0.0.1:3444, which the in-enclave forwarder relays over vsock port 8002.
+# 127.0.0.1:<EVM_RPC_TLS_PORT>, which the in-enclave forwarder relays over vsock
+# port 8002.
 # TLS ends inside the enclave, so this proxy relays ciphertext only.
 # deploy/host-prep-evmrpc.sh writes the environment file and the allowlist.
 Description=vsock-proxy for enclave EVM RPC (evm-rpc FundsIn verify: vsock 8002 -> EVM_RPC_HOST:EVM_RPC_TLS_PORT)

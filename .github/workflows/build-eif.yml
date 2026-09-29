@@ -28,9 +28,6 @@ name: "Build EIF"
 #                                               artifacts are only attached to the run)
 #   vars.AWS_REGION                            AWS region for OIDC + S3 (e.g. eu-central-1)
 #   vars.EIF_S3_BUCKET                         target S3 bucket for the artifacts
-#   vars.EVM_RPC_HOST, vars.EVM_RPC_TLS_CA_DER_HEX  the EVM RPC TLS pins for the
-#                                              rgb/mint/burn/combined images (build-enclave.sh
-#                                              rejects the build for those without them)
 # No infra identifiers (account id, bucket, region) are hardcoded here — this is
 # a public repo; everything environment-specific comes from repo vars/secrets.
 
@@ -167,8 +164,6 @@ jobs:
           # Enable debug features only for manual test builds. (F03-AF-12)
           ENCLAVE_DEBUG_FEATURES: ${{ github.event.inputs.debug_features || '' }}
           RGB_ASSET_ID: ${{ vars.BFA_RGB_ASSET_ID }}
-          EVM_RPC_HOST: ${{ vars.EVM_RPC_HOST }}
-          EVM_RPC_TLS_CA_DER_HEX: ${{ vars.EVM_RPC_TLS_CA_DER_HEX }}
         run: |
           set -euxo pipefail
           mkdir -p "$OUT_DIR"

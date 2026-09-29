@@ -15,7 +15,7 @@ flowchart TB
         PFr[framing.rs<br/>u32 LE len + protobuf]
         PALib[attest_verify.rs<br/>library half of CLI —<br/>rebuilds expected policy + bundle]
         PCli[bin/cli.rs<br/>utexo-bridge-parent-cli]
-        AVCli[attest-verify CLI<br/>--pcr0/1/2, --expect-signer-role,<br/>--expect-vanilla-psbt,<br/>--expect-evm-source tls, raw, helios or disabled,<br/>--expect-evm-rpc-host, --expect-evm-rpc-ca-sha256]
+        AVCli[attest-verify CLI<br/>--pcr0/1/2, --expect-signer-role,<br/>--expect-vanilla-psbt,<br/>--expect-evm-source tls, raw, helios or disabled,<br/>--expect-electrum-host,<br/>--expect-evm-rpc-host, --expect-evm-rpc-ca-sha256]
         PMisc[config.rs / error.rs]
     end
 
@@ -41,13 +41,13 @@ flowchart TB
         EState[state/<br/>enclave.rs Phase Initial / Cloning / Active<br/>replay_guard.rs NonceReplayGuard 1 h TTL<br/>+ op_replay_guard 24 h TTL]
         EFr[framing.rs<br/>len-prefixed proto, 4 MiB cap]
         BCfg[config.rs — BridgeConfig env pins<br/>EVM_CHAIN_ID / EVM_PROXY_CONTRACT_ADDRESS / RGB_ASSET_ID<br/>GAS_TX_ALLOWED_TO / GAS_TX_MAX_GAS_LIMIT<br/>GAS_TX_MAX_FEE_PER_GAS / GAS_TX_MAX_VALUE_WEI<br/>GAS_TX_ALLOWED_SELECTORS<br/>FUNDS_IN_CONTRACT / BTC_MAX_TOTAL_SATS<br/>BTC_MAX_UNOWNED_SATS / RGB_MAX_UNOWNED_SATS]
-        VFwd[vsock_forwarder.rs<br/>loopback → vsock, per-port instances<br/>Electrum ssl port or 3443→8001,<br/>3444→8002 EVM RPC]
+        VFwd[vsock_forwarder.rs<br/>loopback → vsock, per-port instances<br/>started at SetEndpoints<br/>Electrum port→8001,<br/>EVM RPC TLS port→8002]
         KM[keys.rs — KeyManager<br/>BIP-39/32/44/84/86 + SLIP-0010 ed25519<br/>SecretBox seed + keys]
 
         subgraph NEVM [networks/evm/]
             NEV[validation.rs<br/>selectors fundsOut 0xdc771390 + lzFundsOut,<br/>canonical ABI decode + re-encode,<br/>64 KiB cap, pins, destinationChainId, deadline]
             NEC[crosscheck.rs<br/>witnesses-confirmed, BtcRelay proof<br/>anchored to consignment block,<br/>flow amount bind, burn recipient]
-            NEE[events.rs<br/>independent FundsIn verify —<br/>pinned-TLS RPC (supplied images)<br/>or optional checkpoint-verified Helios]
+            NEE[events.rs<br/>independent FundsIn verify,<br/>pinned-TLS RPC (supplied images)<br/>or optional checkpoint-verified Helios]
             NEG[gas_tx.rs<br/>gas-tx preimage allowlist:<br/>strict RLP + chain / to pins]
             NES[signing.rs<br/>EIP-712 MultisigProxy v1<br/>TeeFundsOut / TeeLzFundsOut digest]
         end

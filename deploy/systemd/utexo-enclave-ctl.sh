@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # start|stop a single Nitro enclave by CID, used by utexo-enclave@.service.
-# Identity is NOT bootstrapped here - a freshly (re)started enclave is empty;
-# run `init`/`clone` separately (keys live only in enclave memory).
+# `start` sets the chain endpoints on the fresh enclave. Identity is NOT
+# bootstrapped here - a freshly (re)started enclave is empty; run `init`/`clone`
+# separately (keys live only in enclave memory).
 #
 # At boot systemd starts all per-CID enclave units in parallel, but concurrent
 # `nitro-cli run-enclave` calls race on the shared CPU/memory pool and fail with
@@ -20,6 +21,27 @@ LOCK="/tmp/utexo-enclave-start.lock"
 enc_id() {
   nitro-cli describe-enclaves 2>/dev/null \
     | python3 -c "import json,sys; print(next((e['EnclaveID'] for e in json.load(sys.stdin) if e.get('EnclaveName')=='$NAME'), ''))"
+}
+
+# Set the chain endpoints once, on the fresh enclave. The enclave refuses a
+# second set and signs nothing without one. The CLI reads the values from the
+# unit env.
+set_endpoints() {
+  : "${CLI:?CLI env required (set in /etc/utexo/enclave.env)}"
+  # systemd sources this via EnvironmentFile; a manual `start` does not, so
+  # source it here too (idempotent: harmless if already in the environment).
+  if [ -r /etc/nitro_enclaves/vsock-proxy-evmrpc.env ]; then
+    set -a; . /etc/nitro_enclaves/vsock-proxy-evmrpc.env; set +a
+  fi
+  for _ in $(seq 30); do
+    # `health` exits 1 until the enclave is ready. Any answer will do.
+    case "$("$CLI" --addr "vsock://$CID:5000" health 2>/dev/null)" in
+      *"Endpoints set:"*) "$CLI" --addr "vsock://$CID:5000" set-endpoints; return ;;
+    esac
+    sleep 2
+  done
+  echo "enclave CID $CID did not answer health" >&2
+  return 1
 }
 
 case "$ACTION" in
@@ -44,7 +66,11 @@ case "$ACTION" in
       if nitro-cli run-enclave \
         --eif-path "$EIF" --cpu-count "$CPU" --memory "$MEM" \
         --enclave-cid "$CID" --enclave-name "$NAME" "${DEBUG_ARG[@]}" 9>&-; then
-        exit 0
+        exec 9>&-
+        set_endpoints && exit 0
+        echo "set-endpoints CID $CID failed; terminating the enclave" >&2
+        id="$(enc_id)"; [ -n "$id" ] && nitro-cli terminate-enclave --enclave-id "$id" || true
+        exit 1
       fi
       echo "run-enclave CID $CID attempt $attempt failed; cleaning up and retrying" >&2
       bad="$(enc_id)"; [ -n "$bad" ] && nitro-cli terminate-enclave --enclave-id "$bad" 9>&- || true

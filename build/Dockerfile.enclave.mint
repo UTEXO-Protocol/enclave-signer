@@ -88,9 +88,9 @@ RUN chmod +x /app/utexo-bridge-enclave /app/entrypoint.sh
 # bridge-signing build and `SecurityPolicy::assert_valid_for_build` refuses to
 # boot without these pins (enclave/src/policy.rs). Public
 # identifiers, baked so PCR0 commits to them. Stage runs on Bitcoin MAINNET +
-# Arbitrum One (chain_id 42161). Electrum is pinned to 127.0.0.1 and reached over
-# the vsock forwarder (host runs
-# `vsock-proxy 8001 electrs-mainnet.utexo.com 50002`); TLS terminates in-enclave.
+# Arbitrum One (chain_id 42161). Electrum is set at launch. The enclave pins its
+# host to 127.0.0.1 and reaches it over the vsock forwarder (host runs
+# `vsock-proxy 8001 <electrum host> <port>`); TLS terminates in-enclave.
 # TWO-CONTRACT deployment: the EVM funds-out EIP-712 verifyingContract is the
 # MultisigProxy (EVM_PROXY_CONTRACT_ADDRESS), which DIFFERS from the bridge
 # *entry* contract that emits FundsIn (FUNDS_IN_CONTRACT, set below).
@@ -106,27 +106,20 @@ RUN test -n "$RGB_ASSET_ID"
 ENV EVM_CHAIN_ID=42161 \
     EVM_PROXY_CONTRACT_ADDRESS=0xC985c12bbCECe96A13A72A62FD75d8aB9381ef5A \
     RGB_ASSET_ID=${RGB_ASSET_ID} \
-    BITCOIN_NETWORK=bitcoin \
-    ELECTRUM_URL=ssl://electrs-mainnet.utexo.com:50002
+    BITCOIN_NETWORK=bitcoin
 
-# In-enclave EVM verification (evm-rpc). EVM_RPC_URL MUST be loopback: the
-# enclave reaches the EVM RPC only through the vsock forwarder (host runs
-# `vsock-proxy <EVM_RPC_VSOCK_PORT=8002> <arbitrum-rpc-host> <port>`); a
-# non-loopback value falls back to the default at boot (config.rs EvmRpcConfig).
+# In-enclave EVM verification (evm-rpc). The enclave reaches the EVM RPC only
+# through the vsock forwarder (host runs
+# `vsock-proxy <EVM_RPC_VSOCK_PORT=8002> <rpc host> <tls port>`).
 # FUNDS_IN_CONTRACT is set EXPLICITLY because it differs from
 # EVM_PROXY_CONTRACT_ADDRESS - unset, it falls back to the proxy address and
 # points FundsIn verification at the wrong contract.
 # The mint signer also signs plain-BTC create_utxo PSBTs (`SignBtc`), which fail
 # closed unless BTC_MAX_TOTAL_SATS is pinned. The gas-tx path is not compiled in.
-# TLS to the EVM RPC ends inside the enclave: EVM_RPC_HOST and the CA hash
-# are measured into PCR0 and attested. See docs/tee-spec.md.
-ARG EVM_RPC_HOST=""
-ARG EVM_RPC_TLS_CA_DER_HEX=""
-RUN test -n "$EVM_RPC_HOST" && test -n "$EVM_RPC_TLS_CA_DER_HEX"
-ENV EVM_RPC_HOST=${EVM_RPC_HOST} \
-    EVM_RPC_TLS_CA_DER_HEX=${EVM_RPC_TLS_CA_DER_HEX}
-ENV EVM_RPC_URL=https://127.0.0.1:3444 \
-    EVM_MIN_CONFIRMATIONS=12 \
+# The Electrum URL and the EVM RPC host, CA and TLS port are not in the
+# image. The operator sets them at launch (SetEndpoints), and the attestation
+# commits them. See docs/tee-spec.md.
+ENV EVM_MIN_CONFIRMATIONS=12 \
     FUNDS_IN_CONTRACT=0x6711f1a319B37847fa0234181C34D883774c4951 \
     BTC_MAX_TOTAL_SATS=1000000
 

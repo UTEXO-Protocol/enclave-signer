@@ -4,23 +4,24 @@
 # Stands up, idempotently and reboot-safe, the host side of the in-enclave EVM
 # FundsIn verification (evm-rpc feature):
 #
-#   enclave https://<EVM_RPC_HOST> via 127.0.0.1:3444 (TLS ends in the enclave)
+#   enclave https://<EVM_RPC_HOST> via 127.0.0.1:<EVM_RPC_TLS_PORT> (TLS ends in the enclave)
 #     -> in-enclave vsock forwarder -> vsock port 8002
 #     -> [this host] vsock-proxy-evmrpc.service  (raw Vsock<->TCP, ciphertext)
 #     -> <EVM_RPC_HOST>:<EVM_RPC_TLS_PORT>
 #
-# EVM_RPC_HOST must equal the value baked into the enclave image.
+# utexo-enclave@.service reads the same env file and passes the host and port
+# to the enclave at launch.
 #
 # Usage (root):
 #   EVM_RPC_HOST=<rpc host> [EVM_RPC_TLS_PORT=443] bash host-prep-evmrpc.sh
 set -euo pipefail
 
-HOST="${EVM_RPC_HOST:?EVM_RPC_HOST required (the host name baked into the enclave image)}"
+HOST="${EVM_RPC_HOST:?EVM_RPC_HOST required (the host name the enclave gets at launch)}"
 PORT="${EVM_RPC_TLS_PORT:-443}"
 
 log(){ echo "[host-prep-evmrpc $(date -u +%H:%M:%S)] $*"; }
 
-# The enclave applies the same rules at boot.
+# The enclave applies the same rules at launch.
 if [ "${#HOST}" -gt 253 ] || ! [[ "$HOST" =~ ^[A-Za-z0-9-]([A-Za-z0-9.-]*[A-Za-z0-9-])?$ ]]; then
   log "ERROR: EVM_RPC_HOST is not a host name"; exit 1
 fi
@@ -70,7 +71,7 @@ log "self-test: eth_chainId via https://${HOST}:${PORT}/"
 CHAIN=$(curl -s --max-time 10 "https://${HOST}:${PORT}/" \
   -H 'content-type: application/json' \
   -d '{"jsonrpc":"2.0","id":1,"method":"eth_chainId","params":[]}' | jq -r '.result // empty')
-[ "$CHAIN" = "0xa4b1" ] || { log "ERROR: chainId != 0xa4b1 (Arbitrum One 42161) — wrong EVM_RPC_HOST, or it does not serve JSON-RPC at /?"; exit 1; }
+[ "$CHAIN" = "0xa4b1" ] || { log "ERROR: chainId != 0xa4b1 (Arbitrum One 42161), wrong EVM_RPC_HOST, or it does not serve JSON-RPC at /?"; exit 1; }
 log "OK: EVM_RPC_HOST reachable (chain 42161)"
 
 # --- 4. status summary -------------------------------------------------------

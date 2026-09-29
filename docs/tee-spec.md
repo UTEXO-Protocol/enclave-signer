@@ -101,13 +101,24 @@ explicit set (README, Building). Dev-only features
 protobuf, 4 MiB frame cap, no version field (`framing.rs`). The consignment
 resolver and the EVM RPC are reached through in-enclave loopback forwarders
 that bridge over vsock to host-side `vsock-proxy` instances (vsock ports 8001
-and 8002); the enclave has no direct network stack. With an
-`ELECTRUM_URL` of the form `ssl://host:port` the forwarder listens on that
-port and pins `host` to loopback in `/etc/hosts`, so TLS terminates inside the
-enclave against the real certificate. Esplora REST uses loopback 3443, EVM RPC
-3444. The EVM RPC client connects to `https://<EVM_RPC_HOST>` through loopback
-3444, so TLS ends inside the enclave; it trusts only `EVM_RPC_TLS_CA_DER_HEX`. The
-host runs `vsock-proxy 8002 <EVM_RPC_HOST> <EVM_RPC_TLS_PORT>`.
+and 8002); the enclave has no direct network stack.
+
+**Launch endpoints.** The endpoints are not in the image, so anyone can rebuild
+the EIF and get the same PCR0. The operator sends them once, after launch, in
+`SetEndpoints`: the Electrum URL, the EVM RPC host, the EVM RPC CA (DER) and
+the EVM RPC TLS port. The enclave refuses a second set; changing them needs a
+restart, which loses the keys. Until the set, the enclave refuses `Sign`,
+`SignBtc`, `SignRawDigest`, `SignCcd`, `GetAttestedPublicKey`, `GetClone` and
+`SetClone`, starts no Electrum or EVM RPC forwarder and opens no chain
+connection, and `Health` reports not ready. A refused set leaves the enclave
+unset, so a retry works.
+
+With an Electrum URL `ssl://host:port` (or `tcp://`) the forwarder listens on
+that port and pins `host` to loopback in `/etc/hosts`, so TLS terminates inside
+the enclave against the real certificate. The EVM RPC forwarder listens on the
+EVM RPC TLS port, and the client connects to `https://<host>:<port>/` through
+it, so TLS ends inside the enclave; it trusts only the CA of the set, in every
+build. The host runs `vsock-proxy 8002 <EVM_RPC_HOST> <EVM_RPC_TLS_PORT>`.
 
 **Connection hardening:** fixed pool of 4 worker threads, bounded
 queue of 16 connections, 10 s per-syscall idle timeout, 30 s total per-request
@@ -118,7 +129,8 @@ Diagrams: [components](diagrams/01-components.md) |
 
 ## 4. Security policy
 
-The enclave resolves a security policy once at boot and commits it alongside
+The enclave resolves a security policy once, when the endpoints are set at
+launch, and commits it alongside
 the public-key bundle. This policy covers the fields below, not all configuration.
 
 ```
@@ -128,7 +140,7 @@ SecurityPolicy = Production {
     allow_vanilla_psbt,                        -- plain-BTC signing on/off
     attestation: Real,                         -- always, in production
     evm_source:  Disabled | RawRpc | HeliosVerified | PinnedTlsRpc,
-    evm_checkpoint, evm_rpc_tls, gas_tx_rule,
+    evm_checkpoint, electrum_host, evm_rpc_tls, gas_tx_rule,
     btc_source:  SpvVerified,                  -- always, in production
 } | Development { reason }
 ```
@@ -139,14 +151,14 @@ SecurityPolicy = Production {
   `rgb-validation` build with `EVM_CHAIN_ID`, `EVM_PROXY_CONTRACT_ADDRESS`, and
   `RGB_ASSET_ID` all set resolves to `Production`. `evm_source` is
   `Disabled` without `evm-rpc`. Otherwise a `helios` build selects Helios
-  through `HELIOS_EXECUTION_RPC`; else an `https://` `EVM_RPC_URL` gives
-  `PinnedTlsRpc` with the host and the CA SHA-256, and `http://` gives
-  `RawRpc`. Helios requires a valid checkpoint; the verifier pins both source
+  through `HELIOS_EXECUTION_RPC`; else it is `PinnedTlsRpc` with the host
+  and the CA SHA-256 of the launch set. Helios requires a valid checkpoint; the verifier pins both source
   and checkpoint.
 - **Boot gate:** a release `rgb-validation` build that does not resolve to a
   valid `Production` policy MUST refuse to boot (panic). The FundsIn contract
   must be non-zero and the minimum confirmation depth must be greater than zero.
-  `RawRpc`, and `PinnedTlsRpc` without a valid host and CA, refuse to boot.
+  `SetEndpoints` runs the gate again with the endpoints and refuses the set on
+  an error: `RawRpc`, and `PinnedTlsRpc` without a valid host and CA.
   Independently, each
   dev feature is a `compile_error!` in any shipped release binary (non-test
   build with debug assertions off); `rgb-validation` without `spv` is a
@@ -159,7 +171,8 @@ SecurityPolicy = Production {
   produce identical bytes. See [`pubkey-attestation.md`](pubkey-attestation.md).
 - **Verification:** `attest-verify` reconstructs the *expected* policy
   (`--expect-signer-role mint|burn|combined`, `--expect-vanilla-psbt`,
-  `--expect-evm-source tls|helios|raw|disabled`, `--expect-evm-rpc-host`,
+  `--expect-evm-source tls|helios|raw|disabled`, `--expect-electrum-host`,
+  `--expect-evm-rpc-host`,
   `--expect-evm-rpc-ca-sha256`, `--expect-helios-checkpoint`,
   `--expect-funds-in-contract`,
   `--expect-evm-min-confirmations`, and the gas-rule flags) and
@@ -173,7 +186,8 @@ Inside the commitment: the whole gas-tx rule -- `GAS_TX_ALLOWED_TO`,
 instead of trusting the operator's configuration. An unset pin commits as its zero value, which is the posture it enforces, so
 "unpinned" is attested too.
 
-Not inside the policy commitment: `BITCOIN_NETWORK`, resolver endpoints,
+Not inside the policy commitment: `BITCOIN_NETWORK`, the Electrum scheme and
+port, the EVM RPC TLS port,
 `HELIOS_STRICT_CHECKPOINT_AGE`, request-size caps, and the concrete
 `BTC_MAX_TOTAL_SATS`, `BTC_MAX_UNOWNED_SATS` and `RGB_MAX_UNOWNED_SATS` values
 (only the `BTC_MAX_TOTAL_SATS` on/off boolean is attested).
