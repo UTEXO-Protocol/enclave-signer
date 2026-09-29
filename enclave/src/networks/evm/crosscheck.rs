@@ -6,6 +6,7 @@
 //!
 //! The helpers operate on `EvmDestination.call_data` bytes.
 
+use crate::config::BtcRelayMode;
 use crate::error::{EnclaveError, Result};
 use crate::networks::evm::validation::FundsOutParams;
 use crate::networks::rgb::spv::HeaderChain;
@@ -304,6 +305,17 @@ struct ProofBlock {
 /// `RGBVerifier` checks each commitment by height only. Step 4 proves the relay
 /// holds the enclave's block at that height.
 ///
+/// Step 4 depends on the operator's [`BtcRelayMode`] (`BTC_RELAY_MODE`):
+///
+/// - [`Required`](BtcRelayMode::Required), the default and the only mode a
+///   production policy boots with: both words must match, and a zero word is
+///   refused (the bridge sends zeros exactly when it has no relay configured).
+/// - [`None`](BtcRelayMode::None), a local stand with no BtcRelay: both words
+///   must be zero, and the compare is skipped. A non-zero word means the
+///   bridge and the enclave disagree about whether a relay exists: refused.
+///
+/// Steps 1-3 run in both modes. No build flag takes part in the choice.
+///
 /// Ordered cheapest-first: the pure calldata decode and the `latest` checks run
 /// before the anchor resolution, which reads the chain and redoes a Merkle
 /// verification. The commitment checks run last: they sum the work of every
@@ -314,6 +326,7 @@ pub fn verify_btc_relay_agreement(
     merkle_proofs: &[MerkleProofEntry],
     chain: &HeaderChain,
     pins: &ChainPins,
+    mode: BtcRelayMode,
 ) -> Result<()> {
     let (source, latest) = decode_funds_out_proof(params)?;
 
@@ -359,8 +372,46 @@ pub fn verify_btc_relay_agreement(
         )));
     }
 
-    assert_relay_commitment(chain, &source, "source")?;
-    assert_relay_commitment(chain, &latest, "latest")
+    let zero = |b: &ProofBlock| b.commitment == [0u8; 32];
+    match mode {
+        BtcRelayMode::Required => {
+            for (block, label) in [(&source, "source"), (&latest, "latest")] {
+                if zero(block) {
+                    return Err(EnclaveError::CrossCheck(format!(
+                        "fundsOut relay proof carries a zero {label} commitment at height {}: the \
+                         bridge has no BtcRelay configured, but this enclave runs with \
+                         {}=required - refusing to sign",
+                        block.height,
+                        crate::config::BTC_RELAY_MODE_ENV
+                    )));
+                }
+            }
+            assert_relay_commitment(chain, &source, "source")?;
+            assert_relay_commitment(chain, &latest, "latest")
+        }
+        BtcRelayMode::None => {
+            for (block, label) in [(&source, "source"), (&latest, "latest")] {
+                if !zero(block) {
+                    return Err(EnclaveError::CrossCheck(format!(
+                        "fundsOut relay proof carries a {label} commitment 0x{} at height {}, but \
+                         this enclave runs with {}=none (no BtcRelay on this stand): the bridge \
+                         and the enclave disagree about the relay - refusing to sign",
+                        hex::encode(block.commitment),
+                        block.height,
+                        crate::config::BTC_RELAY_MODE_ENV
+                    )));
+                }
+            }
+            tracing::warn!(
+                source_height = source.height,
+                latest_height = latest.height,
+                "fundsOut relay commitment compare skipped ({}=none): heights, anchor and \
+                 freshness bound only",
+                crate::config::BTC_RELAY_MODE_ENV
+            );
+            Ok(())
+        }
+    }
 }
 
 /// Refuse unless the calldata commitment is `keccak256` of the relay record

@@ -683,6 +683,13 @@ mod btc_relay {
     ///
     /// Returns the chain and the relay commitment at every height.
     fn chain_to(tip: u32) -> (HeaderChain, Vec<[u8; 32]>) {
+        chain_to_with_work(tip, REGTEST_CHECKPOINT.chain_work)
+    }
+
+    /// [`chain_to`] over a checkpoint with the given `chain_work`. With
+    /// `None` no relay record can be rebuilt, so the returned commitment
+    /// list is empty.
+    fn chain_to_with_work(tip: u32, chain_work: Option<[u8; 32]>) -> (HeaderChain, Vec<[u8; 32]>) {
         let h0 = h0();
         let mut chain = HeaderChain::new(
             Network::Regtest,
@@ -692,7 +699,7 @@ mod btc_relay {
                 bits: 0x207fffff,
                 time: h0.time,
                 is_real: false,
-                chain_work: REGTEST_CHECKPOINT.chain_work,
+                chain_work,
             },
         );
         let mut prev = h0.block_hash();
@@ -715,7 +722,11 @@ mod btc_relay {
             chain.submit_headers(height, &[serialize(&header)]).unwrap();
             prev = header.block_hash();
         }
-        let commits = (0..=tip).map(|h| relay_commit(&chain, h)).collect();
+        let commits = if chain_work.is_some() {
+            (0..=tip).map(|h| relay_commit(&chain, h)).collect()
+        } else {
+            Vec::new()
+        };
         (chain, commits)
     }
 
@@ -782,13 +793,29 @@ mod btc_relay {
         (validated, proofs)
     }
 
-    /// Run the check against a consignment anchored at [`ANCHOR_HEIGHT`].
+    /// Run the check against a consignment anchored at [`ANCHOR_HEIGHT`],
+    /// in the default `BTC_RELAY_MODE=required`.
     fn check(cd: &[u8], chain: &HeaderChain) -> Result<()> {
         check_at(cd, chain, ANCHOR_HEIGHT)
     }
 
-    /// Run the check against a consignment anchored at `anchor_height`.
+    /// Run the check against a consignment anchored at `anchor_height`, in
+    /// the default `BTC_RELAY_MODE=required`.
     fn check_at(cd: &[u8], chain: &HeaderChain, anchor_height: u32) -> Result<()> {
+        check_in(cd, chain, anchor_height, BtcRelayMode::Required)
+    }
+
+    /// [`check`] on a stand without a BtcRelay (`BTC_RELAY_MODE=none`).
+    fn check_no_relay(cd: &[u8], chain: &HeaderChain) -> Result<()> {
+        check_in(cd, chain, ANCHOR_HEIGHT, BtcRelayMode::None)
+    }
+
+    fn check_in(
+        cd: &[u8],
+        chain: &HeaderChain,
+        anchor_height: u32,
+        mode: BtcRelayMode,
+    ) -> Result<()> {
         let (validated, proofs) = anchored_at(anchor_height);
         verify_btc_relay_agreement(
             &params_of(cd),
@@ -796,7 +823,14 @@ mod btc_relay {
             &proofs,
             chain,
             &ChainPins::new(),
+            mode,
         )
+    }
+
+    /// The proof the bridge sends when it has no BtcRelay configured: real
+    /// heights, both commitment words zero.
+    fn zero_commit_calldata() -> Vec<u8> {
+        calldata(ANCHOR_HEIGHT, [0u8; 32], TIP_HEIGHT, [0u8; 32])
     }
 
     // -- Calldata proof vs the enclave's own headers.
@@ -805,6 +839,104 @@ mod btc_relay {
     fn passes_on_matching_commitment() {
         let (chain, hashes) = chain();
         assert!(check(&good_calldata(&hashes), &chain).is_ok());
+    }
+
+    // -- BTC_RELAY_MODE. The bridge zeroes both commitment words when it has
+    // no BtcRelay configured; only an enclave that says so accepts that.
+
+    /// `required` (the default) refuses a zero word before touching the
+    /// chain, and the message names the knob.
+    #[test]
+    fn required_mode_rejects_zero_commitments() {
+        let (chain, hashes) = chain();
+        let err = check(&zero_commit_calldata(), &chain).unwrap_err();
+        assert!(
+            err.to_string().contains("zero source commitment")
+                && err.to_string().contains("BTC_RELAY_MODE=required"),
+            "got: {err}"
+        );
+
+        // One zero word is just as refused.
+        let cd = calldata(
+            ANCHOR_HEIGHT,
+            hashes[ANCHOR_HEIGHT as usize],
+            TIP_HEIGHT,
+            [0u8; 32],
+        );
+        let err = check(&cd, &chain).unwrap_err();
+        assert!(
+            err.to_string().contains("zero latest commitment"),
+            "got: {err}"
+        );
+    }
+
+    /// `none`: both words zero, heights bound, compare skipped.
+    #[test]
+    fn none_mode_accepts_zero_commitments() {
+        let (chain, _) = chain();
+        assert!(check_no_relay(&zero_commit_calldata(), &chain).is_ok());
+    }
+
+    /// `none` needs no relay record, so no checkpoint chainwork either (the
+    /// shape of the built-in signet checkpoint).
+    #[test]
+    fn none_mode_needs_no_checkpoint_chainwork() {
+        let (chain, _) = chain_to_with_work(TIP_HEIGHT, None);
+        assert!(check_no_relay(&zero_commit_calldata(), &chain).is_ok());
+    }
+
+    /// `none` refuses a real commitment: the bridge thinks there is a relay,
+    /// the enclave was told there is none.
+    #[test]
+    fn none_mode_rejects_a_non_zero_commitment() {
+        let (chain, hashes) = chain();
+        let err = check_no_relay(&good_calldata(&hashes), &chain).unwrap_err();
+        assert!(
+            err.to_string().contains("BTC_RELAY_MODE=none")
+                && err.to_string().contains("disagree about the relay"),
+            "got: {err}"
+        );
+
+        let cd = calldata(
+            ANCHOR_HEIGHT,
+            [0u8; 32],
+            TIP_HEIGHT,
+            hashes[TIP_HEIGHT as usize],
+        );
+        let err = check_no_relay(&cd, &chain).unwrap_err();
+        assert!(err.to_string().contains("latest commitment"), "got: {err}");
+    }
+
+    /// `none` relaxes only step 4: the source height must still be the
+    /// consignment anchor.
+    #[test]
+    fn none_mode_still_binds_the_source_height() {
+        let (chain, _) = chain();
+        let cd = calldata(ANCHOR_HEIGHT + 1, [0u8; 32], TIP_HEIGHT, [0u8; 32]);
+        let err = check_no_relay(&cd, &chain).unwrap_err();
+        assert!(
+            err.to_string().contains("fundsOut source block mismatch"),
+            "got: {err}"
+        );
+    }
+
+    /// ... and the relay tip must still be fresh.
+    #[test]
+    fn none_mode_still_binds_relay_freshness() {
+        let (chain, _) = chain_to(TIP_HEIGHT + MAX_RELAY_TIP_LAG_BLOCKS + 1);
+        let err = check_no_relay(&zero_commit_calldata(), &chain).unwrap_err();
+        assert!(
+            err.to_string().contains("too stale to prove freshness"),
+            "got: {err}"
+        );
+    }
+
+    /// ... and an empty proof is still refused.
+    #[test]
+    fn none_mode_still_rejects_an_empty_proof() {
+        let (chain, _) = chain();
+        let cd = mock_funds_out_calldata_with_proof(1_000, Bytes::new());
+        assert!(check_no_relay(&cd, &chain).is_err());
     }
 
     /// Right height, wrong commitment.
@@ -1077,6 +1209,7 @@ mod btc_relay {
             &proofs,
             &chain,
             &ChainPins::new(),
+            BtcRelayMode::Required,
         )
         .unwrap_err();
         assert!(err.to_string().contains("no merkle proof"), "got: {err}");
@@ -1150,6 +1283,7 @@ mod btc_relay {
             &proofs,
             chain,
             &pins,
+            BtcRelayMode::Required,
         )
         .expect("terminal check passes on the fixture chain");
         pins
@@ -1355,6 +1489,7 @@ mod btc_relay {
             &proofs,
             &chain,
             &ChainPins::new(),
+            BtcRelayMode::Required,
         )
         .unwrap_err();
         assert!(

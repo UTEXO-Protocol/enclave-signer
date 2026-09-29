@@ -17,7 +17,7 @@
 //! Resolution and the boot gate take an explicit [`BuildContext`], so release
 //! behaviour is unit-testable without a release build.
 
-use crate::config::BridgeConfig;
+use crate::config::{BridgeConfig, BtcRelayMode};
 
 pub use attestation_verify::{
     AttestationMode, AttestedPolicy, BtcDataSource, EvmDataSource, SignerRole,
@@ -56,6 +56,12 @@ pub struct ProductionPolicy {
     pub token_contract: [u8; 20],
     /// Minimum receipt depth required before a FundsIn deposit is accepted.
     pub evm_min_confirmations: u64,
+    /// `fundsOut` proofs must carry BtcRelay commitments the enclave verifies
+    /// (`BTC_RELAY_MODE=required`). [`check_invariants`](Self::check_invariants)
+    /// refuses `false`, so a production enclave always has it `true`; that is
+    /// why it has no field in [`AttestedPolicy`] - `Production` already
+    /// commits to it.
+    pub btc_relay_required: bool,
     /// Whether the plain-BTC (vanilla / create_utxo) signing path is authorised.
     /// Derived from the operator's `BTC_MAX_TOTAL_SATS` pin
     /// ([`BridgeConfig::allows_vanilla_btc`]); default fail-closed (false).
@@ -192,6 +198,7 @@ impl SecurityPolicy {
             funds_in_contract: bridge.funds_in_contract,
             token_contract: bridge.token_contract,
             evm_min_confirmations,
+            btc_relay_required: bridge.btc_relay_mode == BtcRelayMode::Required,
             allow_vanilla_psbt: signs_plain_btc && bridge.allows_vanilla_btc(),
             signer_role: ctx.signer_role,
             attestation: AttestationMode::Real,
@@ -308,6 +315,13 @@ impl ProductionPolicy {
         }
         if self.evm_min_confirmations == 0 {
             return Err("production policy must require at least one EVM confirmation".into());
+        }
+        if !self.btc_relay_required {
+            return Err(format!(
+                "production policy must verify BtcRelay commitments on fundsOut: \
+                 {}=none is only for a local stand that has no BtcRelay",
+                crate::config::BTC_RELAY_MODE_ENV
+            ));
         }
         if self.attestation != AttestationMode::Real {
             return Err(

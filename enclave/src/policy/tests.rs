@@ -199,6 +199,46 @@ fn production_rejects_an_unpinned_token_contract() {
 }
 
 #[test]
+fn production_rejects_btc_relay_mode_none() {
+    // `none` exists for a local stand with no BtcRelay. A production signer
+    // must never boot with the relay compare off.
+    let ctx = release_bridge_ctx();
+    let mut cfg = pinned_config();
+    cfg.btc_relay_mode = BtcRelayMode::None;
+    let policy = SecurityPolicy::resolve(&ctx, &cfg, EvmDataSource::RawRpc, None, 12);
+    let err = policy.assert_valid_for_build(&ctx).unwrap_err();
+    assert!(err.contains("BTC_RELAY_MODE=none"), "got: {err}");
+}
+
+/// The default config (env unset) is `required`, so a pinned production
+/// config boots without naming the variable.
+#[test]
+fn production_defaults_to_btc_relay_required() {
+    let ctx = release_bridge_ctx();
+    let policy = SecurityPolicy::resolve(&ctx, &pinned_config(), EvmDataSource::RawRpc, None, 12);
+    match &policy {
+        SecurityPolicy::Production(p) => assert!(p.btc_relay_required),
+        other => panic!("expected Production, got {other:?}"),
+    }
+    assert!(policy.assert_valid_for_build(&ctx).is_ok());
+}
+
+/// A debug/dev build honours the env value and never gates on it: the
+/// posture is `Development` either way.
+#[test]
+fn dev_build_ignores_btc_relay_mode_for_the_boot_gate() {
+    let ctx = BuildContext {
+        debug_or_test: true,
+        ..release_bridge_ctx()
+    };
+    let mut cfg = pinned_config();
+    cfg.btc_relay_mode = BtcRelayMode::None;
+    let policy = SecurityPolicy::resolve(&ctx, &cfg, EvmDataSource::RawRpc, None, 12);
+    assert!(matches!(policy, SecurityPolicy::Development { .. }));
+    assert!(policy.assert_valid_for_build(&ctx).is_ok());
+}
+
+#[test]
 fn token_contract_is_carried_into_the_commitment() {
     let ctx = release_bridge_ctx();
     let base = pinned_config();

@@ -300,8 +300,11 @@ fn apply_funds_out_binding(
     // BtcRelay agreement + source-block bind (#57 / #122): the calldata `proof`
     // must name headers the enclave holds, and its `source` pair must be the
     // block anchoring the consignment's last witness tx. Fail-closed on an
-    // empty `proof`. The SPV header chain is always present under
-    // rgb-validation (spv is implied - see lib.rs M-01 compile_error).
+    // empty `proof`. Whether the commitment words are compared to the
+    // enclave-rebuilt relay records is the operator's `BTC_RELAY_MODE`
+    // (`required` by default; a production policy boots on nothing else).
+    // The SPV header chain is always present under rgb-validation (spv is
+    // implied - see lib.rs M-01 compile_error).
     {
         // Fail on a poisoned lock rather than reading through it, matching
         // `validate_source`: a poisoned header chain may be mid-reorg.
@@ -309,7 +312,14 @@ fn apply_funds_out_binding(
             .header_chain
             .lock()
             .map_err(|e| EnclaveError::Internal(format!("SPV header chain lock poisoned: {e}")))?;
-        crosscheck::verify_btc_relay_agreement(params, validated, merkle_proofs, &chain, pins)?;
+        crosscheck::verify_btc_relay_agreement(
+            params,
+            validated,
+            merkle_proofs,
+            &chain,
+            pins,
+            ctx.bridge_config.btc_relay_mode,
+        )?;
     }
 
     // Consignment-bound release amount, under this build's RGB flow
