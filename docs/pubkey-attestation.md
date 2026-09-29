@@ -158,7 +158,7 @@ both the enclave and every verifier share so the bytes are identical.
 
 ```
 policy_commitment =
-    u8(POLICY_COMMITMENT_V4 = 4)                    // version tag
+    u8(POLICY_COMMITMENT_V5 = 5)                    // version tag
     // Production (release, fully-pinned bridge signer):
     u8(0x01)                                        // production discriminant
     u8(allow_vanilla_psbt)                          // plain-BTC path enabled?
@@ -177,6 +177,7 @@ policy_commitment =
     gas_tx_max_fee_per_gas_be16                     // per-gas fee ceiling, wei (0 = unset)
     gas_tx_max_value_wei_be16                       // native-value ceiling, wei (0 = unset)
     u32_be(len(selectors)) || selector(4)...        // sorted + deduped 4-byte selectors
+    token_contract(20)                              // released ERC-20 (burnId preimage input), V5
     // Development (debug/test/dev-feature/non-bridge/unpinned build):
     u8(0x00)                                        // development discriminant
 ```
@@ -267,6 +268,7 @@ attest-verify \
     --pcr2 <96-hex-chars> \
     --expect-signer-role burn \
     --expect-funds-in-contract 0x6711f1a319B37847fa0234181C34D883774c4951 \
+    --expect-token-contract 0xFd086bC7CD5C481DCC9C85ebE478A1C0b69FCbb9 \
     --expect-evm-min-confirmations 12
 
 # --expect-signer-role is required: `mint` for the mint signer image
