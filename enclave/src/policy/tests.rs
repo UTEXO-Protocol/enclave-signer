@@ -18,6 +18,7 @@ fn pinned_config() -> BridgeConfig {
         bridge_contract: [0x11; 20],
         rgb_asset_id: "rgb:asset".into(),
         funds_in_contract: [0x22; 20],
+        token_contract: [0x33; 20],
         ..Default::default()
     }
 }
@@ -183,6 +184,31 @@ fn production_rejects_a_zero_confirmation_rule() {
     let policy = SecurityPolicy::resolve(&ctx, &pinned_config(), EvmDataSource::RawRpc, None, 0);
     let err = policy.assert_valid_for_build(&ctx).unwrap_err();
     assert!(err.contains("confirmation"), "got: {err}");
+}
+
+#[test]
+fn production_rejects_an_unpinned_token_contract() {
+    // The token is a burnId preimage input; without it the recompute would
+    // be skipped, which a production signer must not silently do.
+    let ctx = release_bridge_ctx();
+    let mut cfg = pinned_config();
+    cfg.token_contract = [0u8; 20];
+    let policy = SecurityPolicy::resolve(&ctx, &cfg, EvmDataSource::RawRpc, None, 12);
+    let err = policy.assert_valid_for_build(&ctx).unwrap_err();
+    assert!(err.contains("TOKEN_CONTRACT"), "got: {err}");
+}
+
+#[test]
+fn token_contract_is_carried_into_the_commitment() {
+    let ctx = release_bridge_ctx();
+    let base = pinned_config();
+    let mut other = base.clone();
+    other.token_contract = [0x44; 20];
+    assert_ne!(
+        SecurityPolicy::resolve(&ctx, &base, EvmDataSource::RawRpc, None, 12).commitment_bytes(),
+        SecurityPolicy::resolve(&ctx, &other, EvmDataSource::RawRpc, None, 12).commitment_bytes(),
+        "re-pinning TOKEN_CONTRACT must change the attested commitment"
+    );
 }
 
 #[test]

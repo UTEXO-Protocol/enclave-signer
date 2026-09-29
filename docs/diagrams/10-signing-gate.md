@@ -58,7 +58,9 @@ flowchart TD
         p4bv -->|no| p4bvr[REFUSE — BtcRelay disagreement]:::refuse
         p4bv -->|yes| p4t{"last transition == the build flow's unlock shape<br/>(TS_TRANSFER / TS_BURN) AND<br/>swap: source amount ≥ calldata amount;<br/>mint/burn: burned amount == calldata amount?"}
         p4t -->|no| p4tr[REFUSE — fundsOut amount bind]:::refuse
-        p4t -->|yes| p4rc{"rgb-mint-burn:<br/>MS_BURN_RECIPIENT == calldata recipient?<br/>(swap: no recipient to bind)"}
+        p4t -->|yes| p4id{"sourceBurnTxId == settling transition OpId<br/>(non-zero) AND sourceAddress empty?"}
+        p4id -->|no| p4idr[REFUSE — burn identity bind]:::refuse
+        p4id -->|yes| p4rc{"rgb-mint-burn:<br/>MS_BURN_RECIPIENT == calldata recipient?<br/>(swap: no recipient to bind)"}
         p4rc -->|no| p4rcr[REFUSE — burn recipient]:::refuse
         p4rc -->|yes| p4st{"bfa-mint:<br/>settlementData pairs == verified<br/>ancestry BridgeFundsIn records?"}
         p4st -->|no| p4str[REFUSE — settlement bind]:::refuse
@@ -78,10 +80,11 @@ flowchart TD
 
 ### Notes
 
-- `settlementData` is bound to the burn's verified mint ancestry on a
-  `bfa-mint` build. `burnId` and `sourceAddress` are signed as supplied.
-  Set equality of settlement pairs does not establish a unique release
-  identifier or pair ordering (spec P6).
+- `sourceBurnTxId` is bound to the settling transition's RGB OpId and
+  `sourceAddress` to the empty string on every RGB build; `settlementData` is
+  bound to the burn's verified mint ancestry on a `bfa-mint` build. `burnId`
+  is signed as supplied: the contract recomputes it from these bound fields
+  (`BURN_TYPEHASH`, bridge PR #152) and reverts on a mismatch (spec P6).
 - Which unlock shape completes this gate is chosen at build time: an
   `rgb-swap` enclave signs `TS_TRANSFER` only, an `rgb-mint-burn` enclave
   `TS_BURN` only. They are separate instances with separate PCR0s; neither

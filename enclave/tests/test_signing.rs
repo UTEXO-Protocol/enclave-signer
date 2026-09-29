@@ -1,6 +1,6 @@
 mod common;
 
-use alloy_primitives::{Address, Bytes, U256};
+use alloy_primitives::{Address, Bytes, FixedBytes, U256};
 use alloy_sol_types::{sol, SolCall};
 use utexo_bridge_enclave::config::BridgeConfig;
 use utexo_bridge_enclave::proto::enclave_request::Request;
@@ -20,6 +20,7 @@ sol! {
         string sourceAddress;
         bytes proof;
         bytes settlementData;
+        bytes32 sourceBurnTxId;
     }
 
     function fundsOut(FundsOutParams params);
@@ -36,7 +37,8 @@ sol! {
         uint32 dstEid,
         bytes32 recipient,
         uint256 minAmountLD,
-        bytes extraOptions
+        bytes extraOptions,
+        bytes32 sourceBurnTxId
     );
 }
 
@@ -74,11 +76,14 @@ fn mock_funds_out_calldata(recipient: [u8; 20], amount: u64) -> Vec<u8> {
             recipient: Address::from(recipient),
             amount: U256::from(amount),
             burnId: U256::ZERO,
-            sourceChainId: U256::ZERO,
+            // The RGB network id: an RGB-sourced release under any other
+            // sourceChainId is refused before the consignment binding.
+            sourceChainId: U256::from(96u64),
             destinationChainId: U256::from(1u64),
             sourceAddress: String::new(),
             proof: Bytes::new(),
             settlementData: Bytes::new(),
+            sourceBurnTxId: FixedBytes([0x5b; 32]),
         },
     }
     .abi_encode()
@@ -590,6 +595,7 @@ fn test_sign_evm_refuses_lz_selector_without_lz_release() {
         recipient: [0x22; 32].into(),
         minAmountLD: U256::from(amount),
         extraOptions: Bytes::new(),
+        sourceBurnTxId: FixedBytes([0x5b; 32]),
     }
     .abi_encode();
     let sign_req = EnclaveRequest {

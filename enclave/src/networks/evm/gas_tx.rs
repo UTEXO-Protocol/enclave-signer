@@ -39,7 +39,7 @@ const TX_TYPE_EIP1559: u8 = 0x02;
 /// NOT [`super::validation::LZ_FUNDS_OUT_SELECTOR`], which is the enclave's
 /// wire format for the same operation. A literal because keccak is not
 /// const-evaluable here; `onchain_lz_selector_matches_its_signature` pins it.
-const ONCHAIN_LZ_FUNDS_OUT_CALL_SELECTOR: [u8; 4] = [0x7a, 0xe8, 0xf7, 0x36];
+const ONCHAIN_LZ_FUNDS_OUT_CALL_SELECTOR: [u8; 4] = [0x8f, 0x6b, 0x30, 0x31];
 
 /// Maximum RLP nesting depth we will decode. A real transaction reaches
 /// depth ~4 (tx list -> accessList -> entry -> storage-key list); the cap is

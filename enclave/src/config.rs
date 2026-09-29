@@ -122,6 +122,12 @@ pub struct BridgeConfig {
     /// serve both lookups. These two contracts differ on this deployment, so
     /// `FUNDS_IN_CONTRACT` must be set explicitly.
     pub funds_in_contract: [u8; 20],
+    /// The ERC-20 the Bridge releases (`TOKEN_CONTRACT`, i.e. `Bridge.TOKEN`).
+    /// An input of the on-chain `burnId` preimage, so the enclave needs it to
+    /// recompute `burnId` (`networks::evm::validation::validate_burn_id`).
+    /// Zero = unset: the recompute is skipped in dev builds, and a production
+    /// policy refuses to boot ([`crate::policy::ProductionPolicy`]). Attested.
+    pub token_contract: [u8; 20],
     /// Aggregate request-size caps for the RGB signing path, operator-tunable
     /// via env (`MAX_CONSIGNMENT_BYTES` / `MAX_MERKLE_PROOFS` /
     /// `MAX_TOTAL_PROOF_BYTES`); each defaults to its `DEFAULT_*` constant when
@@ -147,6 +153,7 @@ impl Default for BridgeConfig {
             rgb_max_unowned_sats: 0,
             btc_max_unowned_sats: 0,
             funds_in_contract: [0u8; 20],
+            token_contract: [0u8; 20],
             max_consignment_bytes: DEFAULT_MAX_CONSIGNMENT_BYTES,
             max_merkle_proofs: DEFAULT_MAX_MERKLE_PROOFS,
             max_total_proof_bytes: DEFAULT_MAX_TOTAL_PROOF_BYTES,
@@ -244,6 +251,13 @@ impl BridgeConfig {
             .and_then(|s| parse_eth_address(&s).ok())
             .unwrap_or(bridge_contract);
 
+        // The released ERC-20, a `burnId` preimage input. Unset stays zero:
+        // dev skips the recompute, production refuses to boot.
+        let token_contract = std::env::var("TOKEN_CONTRACT")
+            .ok()
+            .and_then(|s| parse_eth_address(&s).ok())
+            .unwrap_or([0u8; 20]);
+
         // Migration guard: a deployment pinning only
         // GAS_TX_ALLOWED_TO refuses every gas tx until both caps are set.
         // Surfaced at boot rather than as a per-request rejection.
@@ -284,6 +298,7 @@ impl BridgeConfig {
             rgb_max_unowned_sats,
             btc_max_unowned_sats,
             funds_in_contract,
+            token_contract,
             max_consignment_bytes,
             max_merkle_proofs,
             max_total_proof_bytes,

@@ -71,9 +71,11 @@ All bridge signing goes through one `Sign` request with a source network and a
 destination network. Accepted routes: RGB -> EVM, EVM -> RGB, CCD -> EVM.
 
 - **RGB -> EVM (`fundsOut`)** - EIP-712 `TeeFundsOut` (pools route, selector
-  `0xdc771390`) or `TeeLzFundsOut` (LayerZero route) over the decoded calldata
+  `0x340276aa`) or `TeeLzFundsOut` (LayerZero route) over the decoded calldata
   fields, domain `MultisigProxy` / `1` / pinned chain id / pinned proxy. 65-byte
-  recoverable ECDSA signature.
+  recoverable ECDSA signature. The calldata's `sourceBurnTxId` must be the RGB
+  OpId of the consignment's settling transition, and `sourceAddress` must be
+  empty (RGB has no source address).
 - **EVM -> RGB (bridge PSBT)** - taproot Schnorr signatures on the colored
   account, BIP-86 key path only (the bridge wallet is singlesig; a script-path
   input is never signed), only after the EVM deposit and the RGB consignment
@@ -299,7 +301,7 @@ and `utexo-bridge-enclave-burn`, both from `Dockerfile.enclave-dev.bfa` with a
 
 The production Dockerfiles bake the bridge pins as `ENV` (`EVM_CHAIN_ID`,
 `EVM_PROXY_CONTRACT_ADDRESS`, `RGB_ASSET_ID`, `FUNDS_IN_CONTRACT`,
-`GAS_TX_ALLOWED_TO`, `BTC_MAX_TOTAL_SATS`, `ELECTRUM_URL`, ...), so they are
+`TOKEN_CONTRACT`, `GAS_TX_ALLOWED_TO`, `BTC_MAX_TOTAL_SATS`, `ELECTRUM_URL`, ...), so they are
 measured into PCR0. The cloning secret is never baked.
 
 ## Running
@@ -369,6 +371,7 @@ Bridge pins (all three required for a `Production` policy):
 | `EVM_PROXY_CONTRACT_ADDRESS` | zero | MultisigProxy address: EIP-712 `verifyingContract` and the `to` of the payable `lzFundsOutCall` carve-out. Attested as `bridge_contract`. |
 | `RGB_ASSET_ID` | empty | Pinned RGB contract id. Enforced on every bridge PSBT, and on `fundsOut` when the bridge is configured. |
 | `FUNDS_IN_CONTRACT` | falls back to the proxy | Attested emitter of `FundsIn` / `BridgeFundsIn`. It must resolve to a non-zero address in production. |
+| `TOKEN_CONTRACT` | zero | The ERC-20 the Bridge releases (`Bridge.TOKEN`). A `burnId` preimage input: the enclave recomputes `burnId` from it and refuses a mismatch. Attested; must be non-zero in production. |
 
 Value bounds (fail closed while unset in a production build):
 
