@@ -14,9 +14,13 @@ use tonic::transport::Server;
 use attestation_verify::EvmDataSource;
 use utexo_bridge_enclave::config::BridgeConfig;
 use utexo_bridge_enclave::networks::rgb::spv::{checkpoint_for, HeaderChain, Network};
+use utexo_bridge_enclave::policy::BuildContext;
 use utexo_bridge_enclave::server::{self as enclave_server, ServerContext};
 use utexo_bridge_enclave::state::EnclaveState;
 use utexo_bridge_parent::attest_verify::{verify_attested_pubkey, ExpectedPolicy, VerifyMode};
+use utexo_bridge_parent::client::EnclaveClient;
+use utexo_bridge_parent::enclave_proto::SetEndpointsRequest;
+use utexo_bridge_parent::error::ParentError;
 use utexo_bridge_parent::grpc_proto::parent_service_server::ParentServiceServer;
 use utexo_bridge_parent::grpc_server::{EnclaveTarget, ParentAdapterService};
 
@@ -210,6 +214,7 @@ async fn e2e_attest_verify_fails_on_policy_mismatch() {
             signer_role: attestation_verify::SignerRole::Mint,
             evm_source: EvmDataSource::RawRpc,
             evm_checkpoint: None,
+            electrum_host: "electrum.test".into(),
             evm_rpc_tls: None,
             expected_chain_id: None,
             expected_bridge_contract: None,
@@ -231,4 +236,68 @@ async fn e2e_attest_verify_fails_on_policy_mismatch() {
         msg.contains("user_data") || msg.contains("security posture") || msg.contains("policy"),
         "expected a policy/user_data mismatch error, got: {msg}"
     );
+}
+
+/// The parent sets the endpoints once, after launch. Before the set the
+/// enclave attests nothing and opens no chain connection.
+#[tokio::test]
+async fn e2e_endpoints_are_set_once_at_launch() {
+    // Stands in for Electrum. Nothing may connect to it.
+    let electrum = TcpListener::bind("127.0.0.1:0").unwrap();
+    electrum.set_nonblocking(true).unwrap();
+    let electrum_port = electrum.local_addr().unwrap().port();
+
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let enclave_port = listener.local_addr().unwrap().port();
+    let state = EnclaveState::new(bitcoin::Network::Bitcoin);
+    state
+        .initialize_from_mnemonic(TEST_MNEMONIC)
+        .expect("seed import");
+    let ctx = Arc::new(ServerContext::awaiting_launch(
+        state,
+        BridgeConfig::from_env(),
+        std::sync::Mutex::new(HeaderChain::new(
+            Network::Regtest,
+            checkpoint_for(Network::Regtest),
+        )),
+        BuildContext::current(),
+    ));
+    let served = ctx.clone();
+    std::thread::spawn(move || {
+        for s in listener.incoming().flatten() {
+            enclave_server::handle_connection(s, &served);
+        }
+    });
+    let grpc = format!(
+        "http://127.0.0.1:{}",
+        start_real_parent_grpc(enclave_port).await
+    );
+    let verify = || {
+        verify_attested_pubkey(
+            &grpc,
+            attestation_verify::ExpectedPcrs::zero(),
+            VerifyMode::Mock,
+            ExpectedPolicy::Development,
+        )
+    };
+    let client = EnclaveClient::new(&format!("127.0.0.1:{enclave_port}"));
+    let set = |host: &str| SetEndpointsRequest {
+        electrum_url: format!("tcp://{host}:{electrum_port}"),
+        ..Default::default()
+    };
+
+    assert!(verify().await.is_err(), "attested before the set");
+    assert!(!client.health().unwrap().endpoints_set);
+
+    client.set_endpoints(set("localhost")).unwrap();
+    assert!(client.health().unwrap().endpoints_set);
+    verify().await.expect("attests after the set");
+
+    let err = client.set_endpoints(set("other.test")).unwrap_err();
+    assert!(
+        matches!(&err, ParentError::EnclaveError { message, .. } if message.contains("already set")),
+        "{err:?}"
+    );
+    assert_eq!(ctx.launch().unwrap().endpoints.electrum_host, "localhost");
+    assert!(electrum.accept().is_err(), "a chain connection opened");
 }

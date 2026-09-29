@@ -41,6 +41,7 @@ pub fn start_test_server_with_config(
         EvmDataSource::Disabled,
         None,
         None,
+        "",
         0,
     );
     start_test_server_with_policy(configure, bridge_config, policy)
@@ -78,6 +79,7 @@ pub fn start_test_server_with_evm_rpc(
         EvmDataSource::Disabled,
         None,
         None,
+        "",
         0,
     );
     start_test_server_inner(|_| {}, bridge_config, policy, Some(client))
@@ -103,21 +105,17 @@ fn start_test_server_inner(
         Network::Regtest,
         checkpoint_for(Network::Regtest),
     ));
-    let ctx = Arc::new(ServerContext {
-        state,
-        bridge_config,
-        policy,
-        #[cfg(feature = "rgb-validation")]
-        rgb_validator: None,
-        #[cfg(feature = "evm-rpc")]
-        evm_rpc_client,
-        #[cfg(feature = "evm-rpc")]
-        evm_rpc_config: utexo_bridge_enclave::config::EvmRpcConfig::default(),
-        #[cfg(feature = "rgb-validation")]
-        header_chain,
-        #[cfg(feature = "rgb-validation")]
-        submit_rate_limiter: std::sync::Mutex::new(server::SubmitRateLimiter::default()),
-    });
+    #[cfg(feature = "rgb-validation")]
+    let mut ctx = ServerContext::new(state, bridge_config, header_chain);
+    #[cfg(not(feature = "rgb-validation"))]
+    let mut ctx = ServerContext::new(state, bridge_config);
+    let launch = ctx.launch.get_mut().unwrap();
+    launch.policy = policy;
+    #[cfg(feature = "evm-rpc")]
+    {
+        launch.evm_rpc_client = evm_rpc_client;
+    }
+    let ctx = Arc::new(ctx);
 
     thread::spawn(move || {
         for stream in listener.incoming() {

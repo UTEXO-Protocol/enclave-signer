@@ -5,23 +5,30 @@
 // The burn path reads the ancestor mint locks.
 #![cfg(feature = "bfa-validation")]
 
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::{BufRead, BufReader, Cursor, Read, Write};
 use std::net::TcpListener;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use alloy_primitives::U256;
 use alloy_sol_types::{sol, SolEvent};
 use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
-use utexo_bridge_enclave::bootstrap::build_evm_rpc_client;
-use utexo_bridge_enclave::config::{BridgeConfig, EvmRpcConfig};
+use utexo_bridge_enclave::config::BridgeConfig;
+use utexo_bridge_enclave::framing;
 use utexo_bridge_enclave::networks::evm::events::{verify_rgb_funds_in, EvmReceiptProvider};
+use utexo_bridge_enclave::networks::rgb::spv::{checkpoint_for, HeaderChain, Network};
 #[cfg(evm_to_rgb)]
 use utexo_bridge_enclave::networks::{
     evm::events::verify_funds_in_event,
     rgb::invoice::{assert_recipient_authorized, parse_authorized_recipient},
 };
+use utexo_bridge_enclave::policy::BuildContext;
+use utexo_bridge_enclave::proto::enclave_request::Request;
+use utexo_bridge_enclave::proto::enclave_response::Response;
+use utexo_bridge_enclave::proto::{EnclaveRequest, EnclaveResponse, SetEndpointsRequest};
+use utexo_bridge_enclave::server::{handle_connection, ServerContext};
+use utexo_bridge_enclave::state::EnclaveState;
 
 sol! {
     event BridgeFundsIn(
@@ -37,7 +44,7 @@ const BRIDGE: [u8; 20] = [0xB1; 20];
 const TX: [u8; 32] = [0x11; 32];
 const OP_ID: [u8; 32] = [0xAB; 32];
 const MINT_OPID: [u8; 32] = [0xCD; 32];
-/// Hex of the CA's DER: the one-line form `EVM_RPC_TLS_CA_DER_HEX` carries.
+/// Hex of the CA's DER.
 const CA_A_HEX: &str = include_str!("fixtures/evm_rpc_tls/ca_a.der.hex");
 const CA_B_HEX: &str = include_str!("fixtures/evm_rpc_tls/ca_b.der.hex");
 /// PEM of CA A, for `pinned_ca_is_the_only_trusted_root` to add to a system
@@ -211,6 +218,9 @@ fn serve_redirect() -> u16 {
     port
 }
 
+/// The Host header of every request `answer` read.
+static HOSTS: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
 /// Answers one JSON-RPC request with the forged receipt or block 112.
 fn answer(stream: impl Read + Write, truncate: bool) {
     let mut reader = BufReader::new(stream);
@@ -218,6 +228,9 @@ fn answer(stream: impl Read + Write, truncate: bool) {
     for line in reader.by_ref().lines().map_while(Result::ok) {
         if let Some(v) = line.to_ascii_lowercase().strip_prefix("content-length:") {
             len = v.trim().parse().unwrap();
+        }
+        if let Some(v) = line.to_ascii_lowercase().strip_prefix("host:") {
+            HOSTS.lock().unwrap().push(v.trim().to_string());
         }
         if line.is_empty() || line == "\r" {
             break;
@@ -251,16 +264,76 @@ fn answer(stream: impl Read + Write, truncate: bool) {
     );
 }
 
-/// The image's client: `https://` to the forwarder port, pinned to
-/// `rpc.test` and `ca_der_hex`.
+/// The client a launch set installs: TLS to `rpc.test` on `port`, under
+/// `ca_der_hex`.
 fn pinned_client(port: u16, ca_der_hex: &str) -> Box<dyn EvmReceiptProvider + Send + Sync> {
-    let cfg = EvmRpcConfig::from_vars(|name| match name {
-        "EVM_RPC_URL" => Some(format!("https://127.0.0.1:{port}")),
-        "EVM_RPC_HOST" => Some("rpc.test".into()),
-        "EVM_RPC_TLS_CA_DER_HEX" => Some(ca_der_hex.into()),
-        _ => None,
-    });
-    build_evm_rpc_client(&BridgeConfig::default(), &cfg).expect("valid pins build a client")
+    // With `vsock`, the set binds a forwarder on each port and pins the
+    // Electrum host in /etc/hosts. Give it free ports and `localhost`.
+    #[cfg(feature = "vsock")]
+    let (electrum_url, set_port) = {
+        let a = TcpListener::bind("127.0.0.1:0").unwrap();
+        let b = TcpListener::bind("127.0.0.1:0").unwrap();
+        (
+            format!("ssl://localhost:{}", a.local_addr().unwrap().port()),
+            b.local_addr().unwrap().port(),
+        )
+    };
+    #[cfg(not(feature = "vsock"))]
+    let (electrum_url, set_port) = ("ssl://electrum.test:1".to_string(), port);
+    let ctx = ServerContext::awaiting_launch(
+        EnclaveState::new(bitcoin::Network::Regtest),
+        BridgeConfig::default(),
+        std::sync::Mutex::new(HeaderChain::new(
+            Network::Regtest,
+            checkpoint_for(Network::Regtest),
+        )),
+        BuildContext::current(),
+    );
+    let set = EnclaveRequest {
+        request: Some(Request::SetEndpoints(SetEndpointsRequest {
+            electrum_url,
+            evm_rpc_host: "rpc.test".into(),
+            evm_rpc_ca_der: hex::decode(ca_der_hex.trim()).unwrap(),
+            evm_rpc_tls_port: set_port.into(),
+        })),
+    };
+    // The response lands after the request.
+    let mut wire = Cursor::new(Vec::new());
+    framing::write_message(&mut wire, &set).unwrap();
+    let request_len = wire.position();
+    wire.set_position(0);
+    handle_connection(&mut wire, &ctx);
+    wire.set_position(request_len);
+    let resp: EnclaveResponse = framing::read_message(&mut wire).unwrap();
+    assert!(
+        matches!(resp.response, Some(Response::SetEndpoints(_))),
+        "{resp:?}"
+    );
+    let launch = ctx.launch.into_inner().unwrap();
+    // The forwarder reaches the RPC only over vsock. Build the same client
+    // on the mock server's port.
+    #[cfg(feature = "vsock")]
+    {
+        let mut tls = launch.endpoints.evm_rpc_tls.unwrap();
+        tls.tls_port = port;
+        Box::new(
+            utexo_bridge_enclave::networks::evm::events::AlloyEvmClient::with_pinned_tls(&tls)
+                .unwrap(),
+        )
+    }
+    #[cfg(not(feature = "vsock"))]
+    launch.evm_rpc_client.unwrap()
+}
+
+/// The URL port selects the listener, so the Host header carries it.
+#[test]
+fn non_default_port_reaches_listener_with_host_header() {
+    let port = serve(Some(RPC_TEST), false);
+    assert_ne!(port, 443);
+    let client = pinned_client(port, CA_A_HEX);
+    verify_rgb_funds_in(&*client, &BRIDGE, 12, &TX, &MINT_OPID).unwrap();
+    let want = format!("rpc.test:{port}");
+    assert!(HOSTS.lock().unwrap().contains(&want), "no Host {want}");
 }
 
 #[cfg(evm_to_rgb)]
@@ -363,13 +436,8 @@ fn pinned_host_redirect_is_not_followed() {
 #[cfg(evm_to_rgb)]
 #[test]
 fn host_forged_receipt_is_refused() {
-    let port = serve(None, false);
-    std::env::set_var("EVM_RPC_URL", format!("https://127.0.0.1:{port}"));
-    std::env::set_var("EVM_RPC_HOST", "rpc.test");
-    std::env::set_var("EVM_RPC_TLS_CA_DER_HEX", CA_A_HEX);
-
-    let cfg = EvmRpcConfig::from_env();
-    let client = build_evm_rpc_client(&BridgeConfig::default(), &cfg).expect("client");
+    // The host answers in plaintext. The TLS handshake fails.
+    let client = pinned_client(serve(None, false), CA_A_HEX);
     // The mint path: the deposit predicate, the recipient bind, then the BFA
     // mint lock, all read through the same client.
     let got = verify_funds_in_event(&*client, &BRIDGE, 12, &TX, &OP_ID, 1000, 50)
