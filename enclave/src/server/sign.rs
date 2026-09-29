@@ -426,9 +426,15 @@ fn verify_funds_in_deposit(
     )?;
 
     // Recipient bind: the checks above prove how much the recipient leg
-    // pays, not who it pays. The invoice in the log just verified says
-    // which seal the deposit authorised. Ungated: `evm-rpc` implies
-    // `rgb-validation`, so reaching here means the bind is compiled in.
+    // pays, not who it pays. On the v2 Bridge `fundsIn` refuses a non-empty
+    // destinationAddress for RGB, so the deposit carries no invoice; the
+    // recipient is then bound through the OpId instead - `decode_funds_in`
+    // above required the deposit's rgbOpId to be the mint transition being
+    // signed, and that transition commits to its recipient seals. A legacy
+    // deposit that still carries an invoice keeps the seal bind as well.
+    if verified.destination_address.trim().is_empty() {
+        return Ok(None);
+    }
     Ok(Some(
         crate::networks::rgb::invoice::parse_authorized_recipient(&verified.destination_address)?,
     ))
