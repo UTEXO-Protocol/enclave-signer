@@ -18,6 +18,7 @@ fn regtest_chain_with(headers: Vec<Header>) -> HeaderChain {
             bits: 0x207fffff,
             time: 1_700_000_000,
             is_real: false,
+            chain_work: None,
         },
     );
     let raw_headers: Vec<Vec<u8>> = headers.iter().map(serialize).collect();
@@ -554,6 +555,7 @@ fn staleness_uses_checkpoint_time_when_no_headers() {
             bits: 0x207fffff,
             time: 1_700_000_000,
             is_real: false,
+            chain_work: None,
         },
     );
     assert_chain_not_stale(
