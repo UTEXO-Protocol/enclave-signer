@@ -76,7 +76,9 @@ fn mock_funds_out_calldata(recipient: [u8; 20], amount: u64) -> Vec<u8> {
             recipient: Address::from(recipient),
             amount: U256::from(amount),
             burnId: U256::ZERO,
-            sourceChainId: U256::ZERO,
+            // The RGB network id: an RGB-sourced release under any other
+            // sourceChainId is refused before the consignment binding.
+            sourceChainId: U256::from(96u64),
             destinationChainId: U256::from(1u64),
             sourceAddress: String::new(),
             proof: Bytes::new(),

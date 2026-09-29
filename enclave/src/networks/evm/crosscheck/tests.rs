@@ -159,9 +159,10 @@ fn rejects_pre_source_burn_tx_id_calldata() {
     );
 }
 
-// Source-burn identity - `validate_funds_out_source_burn_tx_id` and
-// `validate_funds_out_source_address`. Flow-agnostic: the bind reads the last
-// transition's OpId only, whatever its type.
+// Source-burn identity - `validate_funds_out_source_burn_tx_id`. Flow-agnostic:
+// the bind reads the last transition's OpId only, whatever its type.
+// (`sourceChainId` / `sourceAddress` are bound in `validation.rs`, see
+// `validate_rgb_source_identity`.)
 mod source_burn {
     use super::*;
     use crate::networks::rgb::validation::{bfa, TransitionSummary};
@@ -250,18 +251,6 @@ mod source_burn {
                 "op_id {bad:?} must refuse"
             );
         }
-    }
-
-    #[test]
-    fn source_address_must_be_empty_on_an_rgb_route() {
-        let ok = calldata_with("", op_id_bytes());
-        assert!(validate_funds_out_source_address(&params_of(&ok)).is_ok());
-        let bad = calldata_with("rgb:some-sender", op_id_bytes());
-        let err = validate_funds_out_source_address(&params_of(&bad)).unwrap_err();
-        assert!(
-            err.to_string().contains("sourceAddress must be empty"),
-            "{err}"
-        );
     }
 }
 

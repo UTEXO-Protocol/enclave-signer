@@ -260,14 +260,25 @@ encoding, and at least one verified lock.
 `sourceBurnTxId`, the RGB OpId of the burn being settled, and `Bridge.fundsOut`
 folds it into `burnId` under the `BURN_TYPEHASH` it shares with
 `rebalanceLiquidity` (`bridge, chainId, token, amount, sourceChainId,
-destinationChainId, keccak(sourceAddress), keccak(settlementData),
-sourceBurnTxId`; the moving finality `proof` and the `recipient` are out). The
+keccak(sourceAddress), keccak(settlementData), sourceBurnTxId`; the moving
+finality `proof`, the `recipient` and, since bridge PR #155,
+`destinationChainId` are out, so one burn cannot settle once per
+destination). The
 contract rejects a zero id but cannot check its meaning, so the enclave MUST:
 `sourceBurnTxId` equals the OpId of the consignment's settling transition (the
 same transition the amount is read from), and `sourceAddress` is empty
 (`RGBVerifier` reverts otherwise; RGB has no source-address concept). Together
 with the settlement bind this gives one validated burn exactly one `burnId`
-(Sec 9, P6). `burnId` itself is still not recomputed in-enclave: the contract
+(Sec 9, P6).
+
+**Source chain bind.** The Router and CommissionManager key the verifier, the
+settlement module and the commission rate on the `(sourceChainId,
+destinationChainId)` pair, so `sourceChainId` decides which contracts judge a
+release. An RGB-sourced release (direct `fundsOut` and LayerZero `lzFundsOut`
+alike) MUST carry `sourceChainId == 96`, the bridge's RGB network id, pinned as
+a compile-time constant (`RGB_SOURCE_CHAIN_ID`) and so measured into PCR0. The
+`sourceAddress` rule above applies to both routes the same way
+(`validate_rgb_source_identity`). A CCD-sourced release is not subject to it. `burnId` itself is still not recomputed in-enclave: the contract
 derives it from the same fields and reverts on a mismatch (`InvalidBurnId`).
 
 Which consignment shape a build signs is chosen at compile time by its RGB

@@ -126,7 +126,7 @@ const TEE_LZ_FUNDS_OUT_TYPE_HASH_STR: &str = "TeeLzFundsOut(uint256 amount,uint2
 
 /// Build the EIP-712 digest that `MultisigProxy.lzFundsOutCall` verifies.
 ///
-/// Mirrors `MultisigProxy._lzFundsOutStructHash` (MultisigProxy.sol:505-544):
+/// Mirrors `MultisigProxy._lzFundsOutStructHash` (MultisigProxy.sol:504-544):
 /// fourteen words - dynamic fields pre-hashed, `dstEid` (uint32) padded to
 /// 32 bytes, `sourceBurnTxId` (bytes32) as-is. The `lz_release` proto fields
 /// are crosschecked against the decoded calldata before the digest is built.
