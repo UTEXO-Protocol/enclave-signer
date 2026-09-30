@@ -6,6 +6,7 @@
 #[cfg(not(feature = "kms-persistence"))]
 use super::cloning::{handle_get_clone, handle_initiate_cloning, handle_set_clone};
 use super::context::ServerContext;
+use super::endpoints::handle_set_endpoints;
 use super::health::handle_health;
 use super::keys::{handle_get_attested_public_key, handle_get_public_key, handle_initialize};
 use super::sign::handle_sign;
@@ -78,16 +79,21 @@ pub(super) fn dispatch(
             tracing::info!("request: GetPublicKey");
             handle_get_public_key(ctx, req)
         }
-        Some(Request::Sign(req)) => handle_sign(ctx, req).map(|(response, reserved)| {
-            reservation = reserved;
-            response
-        }),
+        // Signing waits for the endpoints the operator sets at launch.
+        Some(Request::Sign(req)) => {
+            ctx.launch()
+                .and_then(|_| handle_sign(ctx, req))
+                .map(|(response, reserved)| {
+                    reservation = reserved;
+                    response
+                })
+        }
         Some(Request::SignBtc(req)) => {
             tracing::info!("request: SignBtc");
             // Plain-BTC signing prepares the UTXOs a mint spends.
             #[cfg(evm_to_rgb)]
             {
-                handle_sign_btc(ctx, req)
+                ctx.launch().and_then(|_| handle_sign_btc(ctx, req))
             }
             #[cfg(not(evm_to_rgb))]
             {
@@ -110,7 +116,7 @@ pub(super) fn dispatch(
             // The gas tx pays for the `fundsOut` submission.
             #[cfg(rgb_to_evm)]
             {
-                handle_sign_raw_digest(ctx, req)
+                ctx.launch().and_then(|_| handle_sign_raw_digest(ctx, req))
             }
             #[cfg(not(rgb_to_evm))]
             {
@@ -122,7 +128,7 @@ pub(super) fn dispatch(
             tracing::info!("request: SignCcd");
             #[cfg(feature = "ccd")]
             {
-                handle_sign_ccd(&ctx.state, req)
+                ctx.launch().and_then(|_| handle_sign_ccd(&ctx.state, req))
             }
             #[cfg(not(feature = "ccd"))]
             {
@@ -195,6 +201,10 @@ pub(super) fn dispatch(
         Some(Request::GetAttestedPublicKey(req)) => {
             tracing::info!("request: GetAttestedPublicKey");
             handle_get_attested_public_key(ctx, req)
+        }
+        Some(Request::SetEndpoints(req)) => {
+            tracing::info!("request: SetEndpoints");
+            handle_set_endpoints(ctx, req)
         }
         // Not feature-gated: every build must answer the readiness probe, and a
         // build without `spv` reports SPV readiness vacuously.

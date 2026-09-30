@@ -49,7 +49,7 @@ use rgbstd::{
 };
 use schemata::{BridgedFungibleAsset, OS_BRIDGE};
 use sha3::{Digest, Keccak256};
-use utexo_bridge_enclave::config::{BridgeConfig, EvmRpcConfig};
+use utexo_bridge_enclave::config::BridgeConfig;
 use utexo_bridge_enclave::framing;
 use utexo_bridge_enclave::keys::{AccountType, KeyManager};
 use utexo_bridge_enclave::networks::evm::events::{EvmReceiptProvider, LogEntry, ReceiptData};
@@ -62,7 +62,7 @@ use utexo_bridge_enclave::proto::sign_request::{DestinationNetwork, SourceNetwor
 use utexo_bridge_enclave::proto::{
     EnclaveRequest, EnclaveResponse, EvmSource, RgbDestination, SignRequest,
 };
-use utexo_bridge_enclave::server::{self, ServerContext, SubmitRateLimiter};
+use utexo_bridge_enclave::server::{self, ServerContext};
 use utexo_bridge_enclave::state::EnclaveState;
 
 const SEED: [u8; 64] = [0x42; 64];
@@ -84,7 +84,7 @@ sol! {
         bytes32 indexed operationId, bytes32 indexed sourceTx, address indexed sender,
         uint256 senderNonce, uint256 amount, uint256 netAmount, uint256 tokenCommission,
         uint256 nativeCommission, uint256 sourceChainId, uint256 destinationChainId,
-        string destinationAddress
+        string destinationAddress, bytes settlementData
     );
 }
 
@@ -390,6 +390,7 @@ fn deposit_receipt(mint_opid: &OpId, invoice: &str) -> ReceiptData {
         sourceChainId: alloy_primitives::U256::ZERO,
         destinationChainId: alloy_primitives::U256::ZERO,
         destinationAddress: invoice.into(),
+        settlementData: Default::default(),
     };
     ReceiptData {
         status_success: true,
@@ -463,21 +464,23 @@ fn context(contract_id: &ContractId, receipt: ReceiptData) -> ServerContext {
         &bridge_config,
         EvmDataSource::Disabled,
         None,
+        None,
+        "",
         0,
     );
-    ServerContext {
+    let mut ctx = ServerContext::new(
         state,
         bridge_config,
-        policy,
-        rgb_validator: Some(RgbValidator::new(spawn_regtest_stub(), "regtest").unwrap()),
-        evm_rpc_client: Some(Box::new(DepositChain(receipt))),
-        evm_rpc_config: EvmRpcConfig::default(),
-        header_chain: Mutex::new(HeaderChain::new(
+        Mutex::new(HeaderChain::new(
             SpvNet::Regtest,
             checkpoint_for(SpvNet::Regtest),
         )),
-        submit_rate_limiter: Mutex::new(SubmitRateLimiter::default()),
-    }
+    );
+    let launch = ctx.launch.get_mut().unwrap();
+    launch.policy = policy;
+    launch.rgb_validator = Some(RgbValidator::new(spawn_regtest_stub(), "regtest").unwrap());
+    launch.evm_rpc_client = Some(Box::new(DepositChain(receipt)));
+    ctx
 }
 
 /// One framed request in, one framed response out, as over vsock. The cursor

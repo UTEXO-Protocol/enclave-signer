@@ -1,2 +1,3 @@
-allowlist:
-- {address: 127.0.0.1, port: 8547}
+# Placeholder. deploy/host-prep-evmrpc.sh writes the real allowlist to
+# /etc/nitro_enclaves/vsock-proxy-evmrpc.yaml: {address: <EVM_RPC_HOST>, port: <EVM_RPC_TLS_PORT>}.
+allowlist: []

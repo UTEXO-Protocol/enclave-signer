@@ -5,13 +5,17 @@
 //! dependency does it here. Nothing in this module handles a request.
 
 use crate::config::BridgeConfig;
+#[cfg(feature = "evm-rpc")]
+use crate::config::{EvmRpcConfig, EvmRpcTls};
 #[cfg(feature = "rgb-validation")]
 use crate::networks::rgb::spv::{
     resolve_checkpoint, CheckpointSource, HeaderChain, Network, CHECKPOINT_ENV,
 };
 #[cfg(feature = "rgb-validation")]
 use crate::networks::rgb::validation::RgbValidator;
-use crate::policy::{EvmDataSource, SecurityPolicy};
+use crate::policy::SecurityPolicy;
+#[cfg(feature = "evm-rpc")]
+use crate::policy::{EvmDataSource, EvmRpcTlsPin};
 use crate::state::EnclaveState;
 
 /// Install the tracing subscriber. `RUST_LOG` picks the filter.
@@ -19,36 +23,6 @@ pub fn init_tracing() {
     tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .init();
-}
-
-/// Witness-resolver endpoint. `ELECTRUM_URL` (e.g. `ssl://host:50002`) is the
-/// production path; `ESPLORA_URL` is the legacy REST fallback. Default targets
-/// the legacy esplora forwarder port for backwards compatibility.
-#[allow(dead_code)]
-fn indexer_url_from_env() -> String {
-    std::env::var("ELECTRUM_URL")
-        .or_else(|_| std::env::var("ESPLORA_URL"))
-        .unwrap_or_else(|_| "http://127.0.0.1:3443".into())
-}
-
-/// Map an indexer URL to (local forwarder listen port, optional hostname to pin
-/// to loopback). For `ssl://host:port` / `tcp://host:port` we listen on the
-/// URL's own port and return the host so it can be pinned to 127.0.0.1 (keeps
-/// in-enclave TLS validating the real cert). For http(s)/legacy esplora we keep
-/// the historical port 3443 and pin nothing.
-#[cfg(all(feature = "vsock", feature = "rgb-validation", target_os = "linux"))]
-fn forwarder_target(url: &str) -> (u16, Option<String>) {
-    for scheme in ["ssl://", "tcp://"] {
-        if let Some(rest) = url.strip_prefix(scheme) {
-            let hostport = rest.split('/').next().unwrap_or(rest);
-            if let Some((host, port)) = hostport.rsplit_once(':') {
-                if let Ok(p) = port.parse::<u16>() {
-                    return (p, Some(host.to_string()));
-                }
-            }
-        }
-    }
-    (3443, None)
 }
 
 /// Append `127.0.0.1 <host>` to /etc/hosts (idempotent) so the enclave's
@@ -59,7 +33,7 @@ fn forwarder_target(url: &str) -> (u16, Option<String>) {
     any(feature = "rgb-validation", feature = "kms-persistence"),
     target_os = "linux"
 ))]
-fn pin_host_to_loopback(host: &str) -> std::io::Result<()> {
+pub fn pin_host_to_loopback(host: &str) -> std::io::Result<()> {
     use std::io::Write;
     let existing = std::fs::read_to_string("/etc/hosts").unwrap_or_default();
     if existing
@@ -104,6 +78,14 @@ pub fn resolve_bitcoin_network(bitcoin_network_str: &str) -> bitcoin::Network {
 /// fails closed on it, and the boot gate in `main` turns it fatal in a
 /// production build. This only makes it visible first.
 pub fn log_bridge_config(bridge_config: &BridgeConfig) {
+    if bridge_config.btc_relay_mode == crate::config::BtcRelayMode::None {
+        // Visible at boot, since a production policy refuses to start on it.
+        tracing::warn!(
+            "{}=none: fundsOut relay commitments are NOT verified (local stand without a \
+             BtcRelay); heights, anchor and freshness are still bound",
+            crate::config::BTC_RELAY_MODE_ENV
+        );
+    }
     // Production deployments must set EVM_CHAIN_ID, EVM_PROXY_CONTRACT_ADDRESS
     // and RGB_ASSET_ID. A misconfigured production enclave is detectable
     // externally via the attestation bundle.
@@ -112,6 +94,7 @@ pub fn log_bridge_config(bridge_config: &BridgeConfig) {
             chain_id = bridge_config.chain_id,
             bridge_contract = %hex::encode(bridge_config.bridge_contract),
             rgb_asset_id = %bridge_config.rgb_asset_id,
+            btc_relay_mode = ?bridge_config.btc_relay_mode,
             "bridge config pinned from env"
         );
     } else if bridge_config.is_partially_configured() {
@@ -134,19 +117,18 @@ pub fn log_bridge_config(bridge_config: &BridgeConfig) {
     }
 }
 
-/// Which EVM `FundsIn` deposit-verification source this build and deployment
-/// uses, plus the Helios checkpoint when that path is selected.
+/// Which EVM `FundsIn` deposit-verification source this deployment uses, plus
+/// the Helios checkpoint or the TLS pin of that source.
 ///
 /// Decided the same way the RPC client is built in [`build_evm_rpc_client`]:
-/// no `evm-rpc` means none; `helios` plus `HELIOS_EXECUTION_RPC` means the
-/// trustless path; otherwise the raw host-relayed RPC.
-pub fn resolve_evm_data_source() -> (EvmDataSource, Option<[u8; 32]>) {
-    #[cfg(not(feature = "evm-rpc"))]
-    let out = (EvmDataSource::Disabled, None);
-    #[cfg(all(feature = "evm-rpc", not(feature = "helios")))]
-    let out = (EvmDataSource::RawRpc, None);
-    #[cfg(all(feature = "evm-rpc", feature = "helios"))]
-    let out = if std::env::var("HELIOS_EXECUTION_RPC").is_ok() {
+/// `helios` plus `HELIOS_EXECUTION_RPC` means the trustless path; otherwise
+/// the pinned TLS of `tls`.
+#[cfg(feature = "evm-rpc")]
+pub fn resolve_evm_data_source(
+    tls: &EvmRpcTls,
+) -> (EvmDataSource, Option<[u8; 32]>, Option<EvmRpcTlsPin>) {
+    #[cfg(feature = "helios")]
+    if std::env::var("HELIOS_EXECUTION_RPC").is_ok() {
         // The pinned weak-subjectivity checkpoint is Helios's trust root, so
         // it is committed into the attested policy: a verifier confirms which
         // checkpoint the enclave synced from, not just that it is in Helios
@@ -156,11 +138,14 @@ pub fn resolve_evm_data_source() -> (EvmDataSource, Option<[u8; 32]>) {
             .ok()
             .and_then(|s| hex::decode(s.strip_prefix("0x").unwrap_or(&s)).ok())
             .and_then(|b| <[u8; 32]>::try_from(b).ok());
-        (EvmDataSource::HeliosVerified, checkpoint)
-    } else {
-        (EvmDataSource::RawRpc, None)
+        return (EvmDataSource::HeliosVerified, checkpoint, None);
+    }
+    use sha2::Digest;
+    let pin = EvmRpcTlsPin {
+        host: tls.host.clone(),
+        ca_sha256: sha2::Sha256::digest(&tls.ca_der).into(),
     };
-    out
+    (EvmDataSource::PinnedTlsRpc, None, Some(pin))
 }
 
 /// Say which posture was resolved. This is what gets committed into the
@@ -171,7 +156,9 @@ pub fn log_policy(policy: &SecurityPolicy) {
             chain_id = p.chain_id,
             allow_vanilla_psbt = p.allow_vanilla_psbt,
             evm_source = ?p.evm_source,
+            evm_rpc_tls = ?p.evm_rpc_tls,
             funds_in_contract = %hex::encode(p.funds_in_contract),
+            token_contract = %hex::encode(p.token_contract),
             evm_min_confirmations = p.evm_min_confirmations,
             btc_source = ?p.btc_source,
             "resolved PRODUCTION security policy (committed into attestation user_data)"
@@ -204,47 +191,14 @@ pub fn install_env_cloning_secret(state: &EnclaveState) {
     }
 }
 
-/// Start every vsock-to-TCP forwarder this build needs.
+/// Start the vsock-to-TCP forwarders this build needs at boot. The Electrum
+/// and EVM RPC forwarders start at launch, with the endpoints.
 ///
 /// No-op off Linux or without `vsock`. Untrusted egress in every case - the
 /// host relays these bytes; see `vsock_forwarder`'s trust-boundary note.
 pub fn start_vsock_forwarders() {
-    // The indexer forwarder lets the in-enclave witness resolver reach the
-    // host-side indexer. The host must run:
-    //   vsock-proxy <ESPLORA_VSOCK_PORT> <indexer-host> <indexer-port>
-    // 127.0.0.1:<local_port> is forwarded to vsock:<vsock_port>. For an Electrum
-    // ssl:// endpoint we listen on the URL's own port and pin its hostname to
-    // 127.0.0.1 in /etc/hosts, so TLS terminates inside the enclave against the
-    // real server cert and the host relays ciphertext only.
     #[cfg(all(feature = "vsock", target_os = "linux"))]
     {
-        // Esplora egress is only needed by the RGB/BTC stack (consignment
-        // resolver + SPV). A `ccd`-only build starts no Esplora forwarder.
-        #[cfg(feature = "rgb-validation")]
-        {
-            let vsock_port: u32 = std::env::var("ESPLORA_VSOCK_PORT")
-                .ok()
-                .and_then(|s| s.parse().ok())
-                .unwrap_or(8001);
-            let (local_port, host_pin) = forwarder_target(&indexer_url_from_env());
-            if let Some(host) = host_pin {
-                match pin_host_to_loopback(&host) {
-                    Ok(()) => tracing::info!(
-                        "pinned {host} -> 127.0.0.1 for in-enclave TLS over the vsock forwarder"
-                    ),
-                    Err(e) => tracing::error!("failed to pin {host} in /etc/hosts: {e}"),
-                }
-            }
-            tracing::info!(
-            local_port,
-            vsock_port,
-            "starting indexer vsock forwarder (host must run: vsock-proxy {vsock_port} <indexer-host> <indexer-port>)"
-        );
-            if let Err(e) = crate::vsock_forwarder::start_forwarder(local_port, vsock_port) {
-                tracing::error!("failed to start vsock forwarder: {e}");
-            }
-        }
-
         // KMS egress for seed custody. The SDK connects to the real KMS host
         // name on 443; that name is pinned to loopback here, so TLS still
         // validates KMS's certificate while the host only relays bytes:
@@ -270,25 +224,6 @@ pub fn start_vsock_forwarders() {
                 crate::vsock_forwarder::start_forwarder(crate::kms::KMS_PORT, vsock_port)
             {
                 tracing::error!("failed to start KMS vsock forwarder: {e}");
-            }
-        }
-
-        // Second forwarder for the EVM JSON-RPC used by in-enclave FundsIn
-        // verification. Distinct loopback/vsock ports from Esplora
-        // (3443/8001). Untrusted, host-controlled egress boundary;
-        // the host must run: vsock-proxy <EVM_RPC_VSOCK_PORT> <evm-rpc-host> <port>.
-        #[cfg(feature = "evm-rpc")]
-        {
-            let evm_vsock_port: u32 = std::env::var("EVM_RPC_VSOCK_PORT")
-                .ok()
-                .and_then(|s| s.parse().ok())
-                .unwrap_or(8002);
-            tracing::info!(
-            evm_vsock_port,
-            "starting EVM RPC vsock forwarder (host must run: vsock-proxy {evm_vsock_port} <evm-rpc-host> <evm-rpc-port>)"
-        );
-            if let Err(e) = crate::vsock_forwarder::start_forwarder(3444, evm_vsock_port) {
-                tracing::error!("failed to start EVM RPC vsock forwarder: {e}");
             }
         }
 
@@ -348,11 +283,10 @@ pub fn start_vsock_forwarders() {
     }
 }
 
-/// Build the RGB consignment validator. Fails soft: a `None` makes the
-/// handlers that need it refuse, rather than stopping the enclave booting.
+/// Build the RGB consignment validator for the Electrum URL set at launch.
+/// A `None` refuses the launch.
 #[cfg(feature = "rgb-validation")]
-pub fn build_rgb_validator() -> Option<RgbValidator> {
-    let indexer_url = indexer_url_from_env();
+pub fn build_rgb_validator(indexer_url: String) -> Option<RgbValidator> {
     let network = std::env::var("BITCOIN_NETWORK").unwrap_or_else(|_| "bitcoin".into());
     match RgbValidator::new(indexer_url, &network) {
         Ok(v) => {
@@ -425,33 +359,35 @@ pub fn build_header_chain(bitcoin_network_str: &str) -> std::sync::Mutex<HeaderC
 
 /// Build the in-enclave EVM RPC client for independent `FundsIn` verification.
 ///
-/// The URL must be the loopback forwarder. Responses are host-relayed and
+/// The client reaches the RPC through the loopback forwarder. Responses are
 /// treated as evidence to verify, never as trusted input. A `None` client
-/// makes bridge signing fail closed; it never downgrades to an unverified
-/// path after a Helios sync failure.
+/// refuses the launch; it never downgrades to an unverified path after a
+/// Helios sync failure.
 #[cfg(feature = "evm-rpc")]
 pub fn build_evm_rpc_client(
     bridge_config: &BridgeConfig,
-    cfg: &crate::config::EvmRpcConfig,
+    cfg: &EvmRpcConfig,
+    tls: &EvmRpcTls,
 ) -> Option<Box<dyn crate::networks::evm::events::EvmReceiptProvider + Send + Sync>> {
-    // Only the Helios path reads the pinned chain id.
+    // Only the Helios path reads the pinned chain id and `cfg`.
     #[cfg(not(feature = "helios"))]
-    let _ = bridge_config;
+    let _ = (bridge_config, cfg);
 
     use crate::networks::evm::events::{AlloyEvmClient, EvmReceiptProvider};
     type Boxed = Box<dyn EvmReceiptProvider + Send + Sync>;
 
-    // Raw alloy provider: host-relayed, unverified.
     let build_alloy = || -> Option<Boxed> {
-        match AlloyEvmClient::new(&cfg.rpc_url) {
-            Ok(c) => {
-                tracing::info!(
-                    rpc_url = %cfg.rpc_url,
-                    min_confirmations = cfg.min_confirmations,
-                    "EVM FundsIn verification: raw alloy path (host-relayed/unverified)"
-                );
-                Some(Box::new(c) as Boxed)
-            }
+        tracing::info!(
+            host = %tls.host,
+            tls_port = tls.tls_port,
+            "EVM FundsIn verification: pinned TLS (host must run: vsock-proxy \
+             <EVM_RPC_VSOCK_PORT> {} {})",
+            tls.host,
+            tls.tls_port,
+        );
+        let built = AlloyEvmClient::with_pinned_tls(tls);
+        match built {
+            Ok(c) => Some(Box::new(c) as Boxed),
             Err(e) => {
                 tracing::error!("failed to init EVM RPC client: {e}");
                 None

@@ -77,9 +77,11 @@ All bridge signing goes through one `Sign` request with a source network and a
 destination network. Accepted routes: RGB -> EVM, EVM -> RGB, CCD -> EVM.
 
 - **RGB -> EVM (`fundsOut`)** - EIP-712 `TeeFundsOut` (pools route, selector
-  `0xdc771390`) or `TeeLzFundsOut` (LayerZero route) over the decoded calldata
+  `0x340276aa`) or `TeeLzFundsOut` (LayerZero route) over the decoded calldata
   fields, domain `MultisigProxy` / `1` / pinned chain id / pinned proxy. 65-byte
-  recoverable ECDSA signature.
+  recoverable ECDSA signature. The calldata's `sourceBurnTxId` must be the RGB
+  OpId of the consignment's settling transition, and `sourceAddress` must be
+  empty (RGB has no source address).
 - **EVM -> RGB (bridge PSBT)** - taproot Schnorr signatures on the colored
   account, BIP-86 key path only (the bridge wallet is singlesig; a script-path
   input is never signed), only after the EVM deposit and the RGB consignment
@@ -137,10 +139,11 @@ destination network. Accepted routes: RGB -> EVM, EVM -> RGB, CCD -> EVM.
 
 ### Attested security policy
 
-`SecurityPolicy` is resolved once at boot from build flags and env pins and is
-`Production { pins, allow_vanilla_psbt, evm_source, gas-tx rule }` or
-`Development { reason }`. A release `rgb-validation` build refuses
-to boot unless it resolves to a valid `Production` policy. The policy is
+`SecurityPolicy` is resolved once at launch from build flags, env pins and the
+endpoints the operator sets, and is `Production { pins, allow_vanilla_psbt,
+evm_source, endpoints, gas-tx rule }` or `Development { reason }`. A release
+`rgb-validation` build refuses to boot unless its pins resolve to a valid
+`Production` policy, and refuses endpoints that do not. The policy is
 committed into the attestation `user_data`; `attest-verify` rebuilds the
 expected policy and fails on any downgrade. Details in
 [`docs/pubkey-attestation.md`](docs/pubkey-attestation.md).
@@ -313,8 +316,10 @@ and `utexo-bridge-enclave-burn`, both from `Dockerfile.enclave-dev.bfa` with a
 
 The production Dockerfiles bake the bridge pins as `ENV` (`EVM_CHAIN_ID`,
 `EVM_PROXY_CONTRACT_ADDRESS`, `RGB_ASSET_ID`, `FUNDS_IN_CONTRACT`,
-`GAS_TX_ALLOWED_TO`, `BTC_MAX_TOTAL_SATS`, `ELECTRUM_URL`, ...), so they are
-measured into PCR0. The cloning secret is never baked.
+`TOKEN_CONTRACT`, `GAS_TX_ALLOWED_TO`, `BTC_MAX_TOTAL_SATS`, ...), so they are
+measured into PCR0. The cloning secret is never baked. The chain endpoints are
+not in the image: anyone can rebuild the EIF and get the same PCR0 without
+knowing them.
 
 ## Running
 
@@ -329,6 +334,7 @@ RUST_LOG=debug GRPC_PORT=50051 cargo run --manifest-path parent/Cargo.toml
 
 # CLI (shell function works in bash and zsh)
 cli() { cargo run --manifest-path parent/Cargo.toml --bin utexo-bridge-parent-cli -- "$@"; }
+cli set-endpoints --electrum-url tcp://<host>:<port>   # once, before any signature
 cli init
 cli get-keys
 cli get-last-saved-block
@@ -349,7 +355,12 @@ nitro-cli run-enclave --cpu-count 2 --memory 3072 --enclave-cid 16 \
 
 # Host-side proxies (allowlist each upstream)
 vsock-proxy 8001 <electrum-host> 50002          # ELECTRUM_URL upstream
-vsock-proxy 8002 127.0.0.1 8547                 # EVM JSON-RPC (nginx adds TLS + key, see deploy/host-prep-evmrpc.sh)
+vsock-proxy 8002 <EVM_RPC_HOST> 443             # EVM JSON-RPC over TLS to the pinned host (see deploy/host-prep-evmrpc.sh)
+
+# Set the endpoints once. The enclave refuses a second set, and signs nothing
+# and opens no chain connection before it. A restart needs a new set.
+cli --addr vsock://16:5000 set-endpoints --electrum-url ssl://<electrum-host>:50002 \
+  --evm-rpc-host <EVM_RPC_HOST> --evm-rpc-tls-port 443 --evm-rpc-ca-der-file ca.der
 
 GRPC_HOST=0.0.0.0 GRPC_PORT=50051 USE_VSOCK=true ENCLAVE_VSOCK_CID=16 ./utexo-bridge-parent
 ```
@@ -383,6 +394,8 @@ Bridge pins (all three required for a `Production` policy):
 | `EVM_PROXY_CONTRACT_ADDRESS` | zero | MultisigProxy address: EIP-712 `verifyingContract` and the `to` of the payable `lzFundsOutCall` carve-out. Attested as `bridge_contract`. |
 | `RGB_ASSET_ID` | empty | Pinned RGB contract id. Enforced on every bridge PSBT, and on `fundsOut` when the bridge is configured. |
 | `FUNDS_IN_CONTRACT` | falls back to the proxy | Attested emitter of `FundsIn` / `BridgeFundsIn`. It must resolve to a non-zero address in production. |
+| `TOKEN_CONTRACT` | zero | The ERC-20 the Bridge releases (`Bridge.TOKEN`). A `burnId` preimage input: the enclave recomputes `burnId` from it and refuses a mismatch. Attested; must be non-zero in production. |
+| `BTC_RELAY_MODE` | `required` | `required`: every `fundsOut` proof must carry the two BtcRelay commitment words, and each must equal the relay record the enclave rebuilds from its own chain; a zero word is refused. `none`: the stand has no BtcRelay (route verifier `NullVerifier`), the bridge sends both words as zero and the enclave requires exactly that, still binding heights, anchor and freshness. A production policy refuses to boot on `none`. Any other value is treated as `required` with a boot warning. |
 
 Value bounds (fail closed while unset in a production build):
 
@@ -417,9 +430,7 @@ Data sources and transport:
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `BITCOIN_NETWORK` | `bitcoin` | `bitcoin`, `testnet`, `signet`, `regtest`. Selects the SPV checkpoint, coin types and xpub prefix. Baked into the image. |
-| `ELECTRUM_URL` / `ESPLORA_URL` | `http://127.0.0.1:3443` | Consignment resolver. `ssl://host:port` or `tcp://host:port` selects Electrum: the forwarder listens on that port and pins `host` to loopback in `/etc/hosts` so TLS terminates inside the enclave. Anything else is Esplora REST on loopback 3443. |
-| `ESPLORA_VSOCK_PORT` | `8001` | Host vsock-proxy port for the resolver. |
-| `EVM_RPC_URL` | `http://127.0.0.1:3444` | Loopback EVM JSON-RPC (`evm-rpc`). A non-loopback value is replaced by the default. |
+| `ESPLORA_VSOCK_PORT` | `8001` | Host vsock-proxy port for the Electrum resolver. |
 | `EVM_RPC_VSOCK_PORT` | `8002` | Host vsock-proxy port for the EVM RPC. |
 | `EVM_MIN_CONFIRMATIONS` | `12` | Attested minimum depth of a `FundsIn` receipt; zero is rejected at production boot. |
 | `ENCLAVE_LISTEN_ADDR` | `127.0.0.1:5000` | TCP listen address, non-vsock builds only. |
@@ -440,6 +451,18 @@ Optional Helios configuration (`--features helios`, with one RGB flow):
 Selected Helios initialization/sync failure leaves the provider unavailable;
 receipt-dependent signing refuses instead of falling back to raw RPC.
 
+Chain endpoints, set once at launch with `cli set-endpoints` (`SetEndpoints`),
+never in the image. The attested policy commits the Electrum host, the EVM RPC
+host and the SHA-256 of the CA. A build requires the values it uses and refuses
+the others:
+
+| Value (CLI flag / env) | Build | Description |
+|------------------------|-------|-------------|
+| `--electrum-url` / `ELECTRUM_URL` | `rgb-validation` | `ssl://host:port` or `tcp://host:port`. The forwarder listens on that port and pins `host` to loopback in `/etc/hosts`, so TLS terminates inside the enclave. |
+| `--evm-rpc-host` / `EVM_RPC_HOST` | `evm-rpc` | TLS host name of the EVM RPC. No scheme, path, port or IP literal. The JSON-RPC is served at `/`. |
+| `--evm-rpc-tls-port` / `EVM_RPC_TLS_PORT` | `evm-rpc` | TLS port, 1-65535, not the Electrum port. The forwarder listens on it. |
+| `--evm-rpc-ca-der-file` / `EVM_RPC_TLS_CA_DER_FILE` | `evm-rpc` | DER of the only CA the EVM RPC TLS trusts. |
+
 Limits and dev knobs:
 
 | Variable | Default | Description |
@@ -447,7 +470,7 @@ Limits and dev knobs:
 | `MAX_CONSIGNMENT_BYTES` | 1 MiB | Consignment size cap. |
 | `MAX_MERKLE_PROOFS` | `256` | Proof-count cap per request. |
 | `MAX_TOTAL_PROOF_BYTES` | 128 KiB | Aggregate proof-bytes cap per request. |
-| `SPV_CHECKPOINT` | unset | Dev builds only: `height:hash[:bits:time]` moves the SPV anchor forward. A production-shaped build refuses to boot when set. |
+| `SPV_CHECKPOINT` | unset | Dev builds only: `height:hash[:bits:time[:chainwork]]` moves the SPV anchor forward. Without `chainwork` (Core's `getblockheader` value) every `fundsOut` is refused under `BTC_RELAY_MODE=required`; `none` needs no chainwork. A production-shaped build refuses to boot when set. |
 | `UTEXO_CLONING_SECRET` | unset | Legacy donor secret; ignored with `kms-persistence`, which rejects cloning. Otherwise prefer `init --cloning-secret` at runtime. |
 
 ### Parent

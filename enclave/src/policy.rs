@@ -6,8 +6,9 @@
 //! is:
 //!
 //!   * fail-closed: a release `rgb-validation` build that does not resolve to a
-//!     valid [`SecurityPolicy::Production`] refuses to boot
-//!     ([`SecurityPolicy::assert_valid_for_build`]);
+//!     valid [`SecurityPolicy::Production`] refuses to boot or launch
+//!     ([`SecurityPolicy::assert_valid_at_boot`],
+//!     [`SecurityPolicy::assert_valid_for_build`]);
 //!   * attested: [`SecurityPolicy::commitment_bytes`] is folded into the
 //!     attestation `user_data` commitment, so a verifier checks the posture as
 //!     a single value;
@@ -17,10 +18,10 @@
 //! Resolution and the boot gate take an explicit [`BuildContext`], so release
 //! behaviour is unit-testable without a release build.
 
-use crate::config::BridgeConfig;
+use crate::config::{BridgeConfig, BtcRelayMode};
 
 pub use attestation_verify::{
-    AttestationMode, AttestedPolicy, BtcDataSource, EvmDataSource, SignerRole,
+    AttestationMode, AttestedPolicy, BtcDataSource, EvmDataSource, EvmRpcTlsPin, SignerRole,
 };
 
 /// The enclave's resolved security posture. See the module docs.
@@ -51,8 +52,17 @@ pub struct ProductionPolicy {
     pub rgb_asset_id: String,
     /// Only this contract's FundsIn events may authorize bridge signing.
     pub funds_in_contract: [u8; 20],
+    /// The ERC-20 the Bridge releases (`TOKEN_CONTRACT`): a `burnId` preimage
+    /// input, so the recomputed `burnId` the enclave enforces is attested.
+    pub token_contract: [u8; 20],
     /// Minimum receipt depth required before a FundsIn deposit is accepted.
     pub evm_min_confirmations: u64,
+    /// `fundsOut` proofs must carry BtcRelay commitments the enclave verifies
+    /// (`BTC_RELAY_MODE=required`). [`check_invariants`](Self::check_invariants)
+    /// refuses `false`, so a production enclave always has it `true`; that is
+    /// why it has no field in [`AttestedPolicy`] - `Production` already
+    /// commits to it.
+    pub btc_relay_required: bool,
     /// Whether the plain-BTC (vanilla / create_utxo) signing path is authorised.
     /// Derived from the operator's `BTC_MAX_TOTAL_SATS` pin
     /// ([`BridgeConfig::allows_vanilla_btc`]); default fail-closed (false).
@@ -62,15 +72,20 @@ pub struct ProductionPolicy {
     /// Expected attestation root of trust. Always [`AttestationMode::Real`] in a
     /// production build (mock is a `compile_error!` in release - see `lib.rs`).
     pub attestation: AttestationMode,
-    /// EVM `FundsIn` deposit-verification source (raw RPC vs Helios-verified vs
-    /// disabled). Recorded and attested so a verifier can tell a trustless
-    /// deployment apart from a host-relayed one.
+    /// EVM `FundsIn` deposit-verification source (pinned TLS, plaintext RPC,
+    /// Helios-verified or disabled). Recorded and attested so a verifier can
+    /// tell a trustless deployment apart from a host-relayed one.
     pub evm_source: EvmDataSource,
     /// The Helios weak-subjectivity checkpoint (beacon block root) EVM
     /// verification trust-roots on. `Some`, and required, only when
     /// `evm_source` is [`EvmDataSource::HeliosVerified`]. Attested so a verifier
     /// confirms which checkpoint the enclave synced from.
     pub evm_checkpoint: Option<[u8; 32]>,
+    /// Host of the Electrum server set at launch.
+    pub electrum_host: String,
+    /// The EVM RPC TLS host and CA hash. Required when `evm_source` is
+    /// [`EvmDataSource::PinnedTlsRpc`].
+    pub evm_rpc_tls: Option<EvmRpcTlsPin>,
     /// Bitcoin anchor-verification source. Always SPV in a production build.
     pub btc_source: BtcDataSource,
     /// Gas-tx (`SignRawDigest`) allowed destination (`GAS_TX_ALLOWED_TO`), or
@@ -144,7 +159,7 @@ impl BuildContext {
 
 impl SecurityPolicy {
     /// Resolve the single security posture from the build context, the pinned
-    /// [`BridgeConfig`], and the EVM data source selected at boot.
+    /// [`BridgeConfig`], and the endpoints set at launch.
     ///
     /// Fail-closed by construction: any dev feature, a debug/test build, a
     /// non-bridge build, or an unpinned config yields
@@ -155,6 +170,8 @@ impl SecurityPolicy {
         bridge: &BridgeConfig,
         evm_source: EvmDataSource,
         evm_checkpoint: Option<[u8; 32]>,
+        evm_rpc_tls: Option<EvmRpcTlsPin>,
+        electrum_host: &str,
         evm_min_confirmations: u64,
     ) -> Self {
         // Any dev feature collapses the posture regardless of everything else.
@@ -187,12 +204,16 @@ impl SecurityPolicy {
             bridge_contract: bridge.bridge_contract,
             rgb_asset_id: bridge.rgb_asset_id.clone(),
             funds_in_contract: bridge.funds_in_contract,
+            token_contract: bridge.token_contract,
             evm_min_confirmations,
+            btc_relay_required: bridge.btc_relay_mode == BtcRelayMode::Required,
             allow_vanilla_psbt: signs_plain_btc && bridge.allows_vanilla_btc(),
             signer_role: ctx.signer_role,
             attestation: AttestationMode::Real,
             evm_source,
             evm_checkpoint,
+            electrum_host: electrum_host.to_string(),
+            evm_rpc_tls,
             // `rgb-validation` implies `spv` (lib.rs `compile_error!`), so a
             // bridge build always anchors witness txs via the SPV header chain.
             btc_source: BtcDataSource::SpvVerified,
@@ -236,8 +257,11 @@ impl SecurityPolicy {
                 bridge_contract: p.bridge_contract,
                 rgb_asset_id: p.rgb_asset_id.clone(),
                 funds_in_contract: p.funds_in_contract,
+                token_contract: p.token_contract,
                 evm_min_confirmations: p.evm_min_confirmations,
                 evm_checkpoint: p.evm_checkpoint,
+                electrum_host: p.electrum_host.clone(),
+                evm_rpc_tls: p.evm_rpc_tls.clone(),
                 // An unset destination commits as all-zero - a value the gas
                 // path can never accept - so "unpinned" is itself attested.
                 gas_tx_allowed_to: p.gas_tx_allowed_to.unwrap_or([0u8; 20]),
@@ -259,10 +283,11 @@ impl SecurityPolicy {
         self.attested().to_bytes()
     }
 
-    /// Fail-closed boot gate. A release bridge-signing (`rgb-validation`) build
-    /// MUST resolve to a valid [`SecurityPolicy::Production`]; otherwise the
-    /// enclave refuses to become reachable (the caller `panic!`s at boot, the
-    /// same way a placeholder SPV checkpoint does).
+    /// Fail-closed launch gate. A release bridge-signing (`rgb-validation`)
+    /// build MUST resolve to a valid [`SecurityPolicy::Production`];
+    /// otherwise `SetEndpoints` refuses the set. At boot,
+    /// [`Self::assert_valid_at_boot`] runs the checks that do not need the
+    /// endpoints, and the caller `panic!`s on an error.
     ///
     /// Debug/test builds and non-bridge builds are exempt - they have no
     /// production bridge-signing path to protect.
@@ -280,13 +305,59 @@ impl SecurityPolicy {
             )),
         }
     }
+
+    /// Boot gate: [`Self::assert_valid_for_build`] without the endpoint
+    /// checks. The endpoints come at launch.
+    pub fn assert_valid_at_boot(&self, ctx: &BuildContext) -> Result<(), String> {
+        match self {
+            Self::Production(p) if !ctx.debug_or_test && ctx.rgb_validation => {
+                p.check_build_invariants()
+            }
+            _ => self.assert_valid_for_build(ctx),
+        }
+    }
 }
 
 impl ProductionPolicy {
     /// Invariants that must hold before a production enclave signs anything.
-    /// Bitcoin anchors must be SPV-verified; the EVM source is attested, not
-    /// gated.
+    /// Bitcoin anchors must be SPV-verified, and the EVM RPC must be
+    /// authenticated.
     pub fn check_invariants(&self) -> Result<(), String> {
+        self.check_build_invariants()?;
+        if self.electrum_host.is_empty() {
+            return Err("production policy has no Electrum host. Set it at launch.".into());
+        }
+        // Helios has no Arbitrum light client, so an L2 image reads the RPC
+        // over pinned TLS. `Disabled` fails closed per request. Plaintext lets
+        // the host forge a receipt, so it is rejected.
+        if self.evm_source == EvmDataSource::RawRpc {
+            return Err(
+                "production policy reads the EVM RPC over plaintext; plaintext is for dev and \
+                 test builds only."
+                    .into(),
+            );
+        }
+        if self.evm_source == EvmDataSource::PinnedTlsRpc && self.evm_rpc_tls.is_none() {
+            return Err(
+                "production policy uses the pinned TLS EVM source without a valid pin. Set \
+                 the EVM RPC host and CA at launch."
+                    .into(),
+            );
+        }
+        // Helios with no pinned checkpoint would bootstrap untrusted.
+        if self.evm_source == EvmDataSource::HeliosVerified && self.evm_checkpoint.is_none() {
+            return Err(
+                "production policy uses the Helios EVM source but pins no weak-subjectivity \
+                 checkpoint. Set HELIOS_CHECKPOINT to a recent beacon block root so the trust \
+                 root is fixed and attested."
+                    .into(),
+            );
+        }
+        Ok(())
+    }
+
+    /// The invariants that do not depend on the endpoints.
+    fn check_build_invariants(&self) -> Result<(), String> {
         if self.chain_id == 0 || self.bridge_contract == [0u8; 20] || self.rgb_asset_id.is_empty() {
             return Err(
                 "production policy is missing one or more of the chain/contract/asset pins".into(),
@@ -295,8 +366,21 @@ impl ProductionPolicy {
         if self.funds_in_contract == [0u8; 20] {
             return Err("production policy must pin a non-zero FundsIn contract".into());
         }
+        if self.token_contract == [0u8; 20] {
+            return Err(
+                "production policy must pin a non-zero TOKEN_CONTRACT (burnId preimage input)"
+                    .into(),
+            );
+        }
         if self.evm_min_confirmations == 0 {
             return Err("production policy must require at least one EVM confirmation".into());
+        }
+        if !self.btc_relay_required {
+            return Err(format!(
+                "production policy must verify BtcRelay commitments on fundsOut: \
+                 {}=none is only for a local stand that has no BtcRelay",
+                crate::config::BTC_RELAY_MODE_ENV
+            ));
         }
         if self.attestation != AttestationMode::Real {
             return Err(
@@ -306,18 +390,6 @@ impl ProductionPolicy {
         if self.btc_source != BtcDataSource::SpvVerified {
             return Err(
                 "production policy must anchor Bitcoin witness txs via the SPV header chain".into(),
-            );
-        }
-        // The EVM source is not gated: Helios has no Arbitrum light client, so
-        // an L2 image runs on host-relayed RPC. It stays attested, so verifiers
-        // judge the posture; `Disabled` fails closed per request. Helios with no
-        // pinned checkpoint would bootstrap untrusted, so that stays rejected.
-        if self.evm_source == EvmDataSource::HeliosVerified && self.evm_checkpoint.is_none() {
-            return Err(
-                "production policy uses the Helios EVM source but pins no weak-subjectivity \
-                 checkpoint. Set HELIOS_CHECKPOINT to a recent beacon block root so the trust \
-                 root is fixed and attested."
-                    .into(),
             );
         }
         Ok(())

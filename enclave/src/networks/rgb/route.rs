@@ -187,11 +187,16 @@ pub fn validate_destination_anchor(
         self_owned,
     )?;
 
+    let key_path_inputs = ctx
+        .psbt_fee_key_paths
+        .map(|resolve| resolve(&psbt))
+        .transpose()?
+        .unwrap_or_default();
     // Fee-rate sanity, after the pure anchor checks so the cached Esplora
     // round-trip is the last thing that can reject. Fail-closed when the
     // estimate is unavailable, since the host controls that egress.
     let recommended = validator.recommended_fee_rate_sat_vb()?;
-    psbt_validation::check_psbt_fee_rate(&psbt, recommended)?;
+    psbt_validation::check_psbt_fee_rate(&psbt, recommended, &key_path_inputs)?;
 
     Ok((legs.recipient, legs.recipient_seals))
 }

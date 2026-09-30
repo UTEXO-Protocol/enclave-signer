@@ -56,16 +56,20 @@ fn extract_uint256_as_u64(data: &[u8], offset: usize) -> Result<u64> {
 /// Canonical `BridgeFundsIn` signature, verbatim from `bridge-smart-contracts`
 /// `IBridge.sol`. A stale signature fails silently: the filter matches zero
 /// logs and every deposit reports "no FundsIn log in tx".
+///
+/// Bridge PR #152 appended `bytes settlementData` (the opaque route payload);
+/// the enclave does not decode it, but the signature - and so `topic0` - moved.
 pub(crate) const BRIDGE_FUNDS_IN_SIG: &str =
     "BridgeFundsIn(bytes32,bytes32,address,uint256,uint256,\
-     uint256,uint256,uint256,uint256,uint256,string)";
+     uint256,uint256,uint256,uint256,uint256,string,bytes)";
 
 /// `operationId` is `topic1` (topic0 is the event signature itself).
 const BFI_OPERATION_ID_TOPIC: usize = 1;
 
 /// Byte offsets of the NON-INDEXED `BridgeFundsIn` data words (each 32 bytes).
 /// Order: senderNonce, amount(gross), netAmount, tokenCommission,
-/// nativeCommission, sourceChainId, destinationChainId, <string offset>.
+/// nativeCommission, sourceChainId, destinationChainId, <string offset>,
+/// <settlementData offset>.
 ///
 /// The amount offsets survived the event change only by coincidence
 /// (`senderNonce` took the slot `operationId` vacated), so a half-done
@@ -81,8 +85,10 @@ const BFI_DEST_ADDRESS_HEAD_OFF: usize = 224;
 /// The single cap on this string: the invoice parser reuses it rather than
 /// declaring a second one that could drift.
 pub(crate) const BFI_MAX_DEST_ADDRESS_LEN: usize = 2048;
-/// 7 static words + 1 dynamic-string offset word must be present.
-const BFI_MIN_DATA_LEN: usize = 8 * 32;
+/// 7 static words + 2 dynamic-tail offset words (`destinationAddress`,
+/// `settlementData`) must be present. The `settlementData` tail itself is
+/// not read: the deposit's settlement payload does not enter this predicate.
+const BFI_MIN_DATA_LEN: usize = 9 * 32;
 
 /// Upgraded Bridge `FundsIn` signature. Only the sender is indexed; the RGB
 /// operation id and uint64 amount are encoded as two data words.
@@ -585,11 +591,11 @@ pub fn check_bridge_location(location: &str, pinned: &[u8; 20]) -> Result<()> {
 /// alloy/reqwest set no default request timeout. [`crate::conn::DeadlineStream`]
 /// bounds only the request socket I/O, and a client-side timeout does not cancel
 /// an in-flight `block_on`, so a few such stalls pin every worker and wedge the
-/// enclave. 15s covers a healthy fetch through loopback -> vsock -> nginx.
+/// enclave. 15s covers a healthy fetch through loopback -> vsock -> the RPC.
 const EVM_RPC_CALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
 
 /// Production [`EvmReceiptProvider`]: an alloy JSON-RPC client over the
-/// in-enclave loopback URL that a vsock forwarder tunnels to the host EVM RPC.
+/// in-enclave loopback URL that a vsock forwarder tunnels to the EVM RPC.
 /// alloy is async, so a single-worker tokio runtime is built at boot and each
 /// call is driven via `block_on`. One worker suffices and keeps the type
 /// `Send + Sync` for the shared `ServerContext`.
@@ -599,20 +605,46 @@ pub struct AlloyEvmClient {
 }
 
 impl AlloyEvmClient {
-    /// Build the client against `rpc_url` (must be the loopback forwarder URL).
-    pub fn new(rpc_url: &str) -> Result<Self> {
-        let runtime = tokio::runtime::Builder::new_multi_thread()
+    /// Build a client that ends TLS inside the enclave. It trusts only the
+    /// pinned CA, checks the certificate against the pinned host, and sends
+    /// the connection to the loopback forwarder. The host relays ciphertext.
+    pub fn with_pinned_tls(tls: &crate::config::EvmRpcTls) -> Result<Self> {
+        use alloy::transports::http::reqwest;
+        let err = |e: reqwest::Error| {
+            EnclaveError::CrossCheck(format!("evm-rpc: failed to build the TLS client: {e}"))
+        };
+        let client = reqwest::Client::builder()
+            .https_only(true)
+            .tls_certs_only([reqwest::Certificate::from_der(&tls.ca_der).map_err(err)?])
+            // The URL port wins over this port. The forwarder listens on the
+            // TLS port, so the Host header carries the real port.
+            .resolve(&tls.host, ([127, 0, 0, 1], 0).into())
+            .no_proxy()
+            // Only the pinned host can redirect. It could still point at a
+            // peer the CA never certified.
+            .redirect(reqwest::redirect::Policy::none())
+            .timeout(EVM_RPC_CALL_TIMEOUT)
+            .build()
+            .map_err(err)?;
+        let url = format!("https://{}:{}/", tls.host, tls.tls_port)
+            .parse()
+            .map_err(|e| {
+                EnclaveError::CrossCheck(format!("evm-rpc: invalid host {:?}: {e}", tls.host))
+            })?;
+        Ok(Self {
+            runtime: Self::runtime()?,
+            provider: alloy::providers::ProviderBuilder::default().connect_reqwest(client, url),
+        })
+    }
+
+    fn runtime() -> Result<tokio::runtime::Runtime> {
+        tokio::runtime::Builder::new_multi_thread()
             .worker_threads(1)
             .enable_all()
             .build()
             .map_err(|e| {
                 EnclaveError::CrossCheck(format!("evm-rpc: failed to build tokio runtime: {e}"))
-            })?;
-        let url = rpc_url.parse().map_err(|e| {
-            EnclaveError::CrossCheck(format!("evm-rpc: invalid rpc_url {rpc_url:?}: {e}"))
-        })?;
-        let provider = alloy::providers::RootProvider::new_http(url);
-        Ok(Self { runtime, provider })
+            })
     }
 }
 

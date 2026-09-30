@@ -65,28 +65,31 @@ sequenceDiagram
     Note over Srv: 3 — validate_route_proofs
     Srv->>Srv: source amount (consignment) ≥ destination amount
 
+    Srv->>Srv: validate_rgb_source_identity (RGB source, both routes):<br/>calldata sourceChainId == 96 (RGB network id, compile-time constant)<br/>AND sourceAddress == "" (RGB has no source address)
+    Srv->>Srv: validate_burn_id (both routes):<br/>calldata burnId == keccak(BURN_TYPEHASH, FUNDS_IN_CONTRACT, EVM_CHAIN_ID, TOKEN_CONTRACT,<br/>amount, sourceChainId, keccak(sourceAddress), keccak(settlementData), sourceBurnTxId)
     Note over Srv,Cx: 4 — apply_funds_out_binding (rgb-validation builds)
     Srv->>Cx: require validated consignment for any fundsOut
     Srv->>Cx: assert_witnesses_confirmed (no unmined witness tx)
-    Srv->>Cx: verify_btc_relay_agreement (proof REQUIRED, empty ⇒ REFUSE):<br/>decode (sourceHeight, sourceCommit, latestHeight, latestCommit),<br/>enclave holds header at latestHeight,<br/>tip − latestHeight ≤ 100,<br/>sourceHeight == block anchoring the last witness tx<br/>(re-derived from the consignment + SPV proof under one lock)
+    Srv->>Cx: verify_btc_relay_agreement (proof REQUIRED, empty ⇒ REFUSE):<br/>decode (sourceHeight, sourceCommit, latestHeight, latestCommit),<br/>enclave holds header at latestHeight,<br/>tip − latestHeight ≤ 100,<br/>sourceHeight == block anchoring the last witness tx<br/>(re-derived from the consignment + SPV proof under one lock),<br/>BTC_RELAY_MODE=required: sourceCommit, latestCommit == keccak256 of the relay record the enclave rebuilds (zero word ⇒ REFUSE);<br/>BTC_RELAY_MODE=none (local stand, never production): both words must be zero
     Srv->>Cx: validate_funds_out_amount:<br/>last transition == the build flow's unlock shape AND<br/>swap: source amount ≥ calldata amount;<br/>mint/burn: burned amount == calldata amount
+    Srv->>Cx: validate_funds_out_source_burn_tx_id:<br/>calldata sourceBurnTxId == last transition OpId (non-zero)
     opt rgb-mint-burn build
         Srv->>Cx: validate_funds_out_burn_recipient:<br/>MS_BURN_RECIPIENT[12..] == calldata recipient
     end
     opt bfa-mint build
         Srv->>Cx: validate_funds_out_settlement:<br/>settlementData (operationIds, netAmounts) ==<br/>BridgeFundsIn records of the verified ancestry locks,<br/>set equality, canonical, non-empty
     end
-    Note right of Cx: burnId and sourceAddress are signed as supplied.<br/>Settlement equality is set-based, not a unique release id (spec P6).<br/>commitmentHash words are relay-internal, not compared.
+    Note right of Cx: burnId is signed as supplied; the contract recomputes it<br/>from the bound fields (BURN_TYPEHASH, bridge PR #152) and reverts on mismatch.<br/>commitmentHash words are relay-internal, not compared.
     Cx-->>Srv: Ok / CrossCheck err
 
     Note over Srv,Sign: 5 — Sign
     Srv->>Sign: build_evm_domain(chain_id, proxy_contract)<br/>name "MultisigProxy", version "1"<br/>(pinned by contract-fixture test)
     alt lzFundsOut selector AND lz_release present
         Srv->>Sign: lz_funds_out_digest: request lz_release<br/>(dst_eid, min_amount_ld, recipient) must match decoded calldata
-        Sign->>Sign: structHash TeeLzFundsOut(13 decoded fields + nonce, deadline)
+        Sign->>Sign: structHash TeeLzFundsOut(12 decoded fields + nonce, deadline)
     else pools fundsOut
         Srv->>Sign: funds_out_digest(decoded FundsOutParams, nonce, deadline)
-        Sign->>Sign: structHash TeeFundsOut(10 decoded fields)
+        Sign->>Sign: structHash TeeFundsOut(9 decoded fields + nonce, deadline)
     end
     Sign->>Sign: digest = keccak256(0x1901 ‖ domSep ‖ structHash)
     Sign->>Sign: k256 ECDSA sign_prehash_recoverable (r‖s‖v)

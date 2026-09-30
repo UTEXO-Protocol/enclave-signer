@@ -30,7 +30,16 @@ const PARENT_CID: u32 = 3;
 ///
 /// The forwarder is fire-and-forget - it logs errors but never crashes the enclave.
 pub fn start_forwarder(local_port: u16, vsock_port: u32) -> io::Result<()> {
-    let listener = TcpListener::bind(format!("127.0.0.1:{local_port}"))?;
+    spawn(
+        TcpListener::bind(format!("127.0.0.1:{local_port}"))?,
+        vsock_port,
+    );
+    Ok(())
+}
+
+/// [`start_forwarder`] on a bound `listener`.
+pub fn spawn(listener: TcpListener, vsock_port: u32) {
+    let local_port = listener.local_addr().map_or(0, |a| a.port());
     tracing::info!(
         local_port,
         vsock_port,
@@ -105,6 +114,4 @@ pub fn start_forwarder(local_port: u16, vsock_port: u32) -> io::Result<()> {
             });
         }
     });
-
-    Ok(())
 }

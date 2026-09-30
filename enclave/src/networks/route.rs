@@ -49,6 +49,10 @@ pub struct ValidationContext<'a> {
     #[cfg(all(feature = "rgb-validation", evm_to_rgb))]
     pub self_owned_psbt_outputs:
         Option<crate::networks::rgb::psbt_validation::SelfOwnedOutpoint<'a>>,
+    /// Selects owned key-path inputs for fee sizing without holding keys across I/O.
+    /// Without a resolver, disclosed scripts retain conservative script-path sizing.
+    #[cfg(all(feature = "rgb-validation", evm_to_rgb))]
+    pub psbt_fee_key_paths: Option<crate::networks::rgb::psbt_validation::FeeKeyPathResolver<'a>>,
     /// EVM lock events the enclave verified itself, handed to RGB consensus so
     /// the ether extension can re-check a BFA mint's amount. Empty on every
     /// other path (including every build without `bfa-mint`); a BFA consignment
@@ -111,6 +115,10 @@ pub fn validate_source(
 pub struct DestinationProof {
     pub proof: RouteProof,
     pub evm_funds_out: Option<crate::networks::evm::validation::FundsOutParams>,
+    /// The burn-identifying fields of an EVM release calldata (both routes):
+    /// the handler binds the source fields to the request's source network
+    /// and recomputes `burnId`. `None` for RGB destinations.
+    pub evm_release_identity: Option<crate::networks::evm::validation::ReleaseIdentity>,
     /// `utxob:...` seals of the send-RGB confidential recipient legs. Bound
     /// against the deposit's invoice once that receipt is verified. Empty for
     /// EVM destinations and builds without the bind.
@@ -133,10 +141,12 @@ pub fn validate_destination(
     match destination {
         #[cfg(rgb_to_evm)]
         DestinationNetwork::EvmDestination(destination) => {
-            let (proof, evm_funds_out) = evm::validation::validate_destination(destination, ctx)?;
+            let (proof, evm_funds_out, release) =
+                evm::validation::validate_destination(destination, ctx)?;
             Ok(DestinationProof {
                 proof,
                 evm_funds_out,
+                evm_release_identity: Some(release),
                 rgb_recipient_seals: Vec::new(),
             })
         }
@@ -168,6 +178,7 @@ pub fn validate_destination(
                     operation_id: None,
                 },
                 evm_funds_out: None,
+                evm_release_identity: None,
                 rgb_recipient_seals,
             })
         }

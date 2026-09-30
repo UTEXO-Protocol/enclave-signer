@@ -36,6 +36,8 @@ fn context() -> (BridgeConfig, SecurityPolicy) {
         &cfg,
         EvmDataSource::RawRpc,
         None,
+        None,
+        "electrum.test",
         12,
     );
     assert!(matches!(policy, SecurityPolicy::Production(_)));
@@ -81,7 +83,7 @@ fn clone_identity_rejects_each_bundle_and_policy_field_before_active_and_allows_
     let bundles = clone_commitment::bundle_cases(&keys);
     let policies = clone_commitment::policy_cases(&policy.attested());
     assert_eq!(bundles.len(), 13);
-    assert_eq!(policies.len(), 17);
+    assert_eq!(policies.len(), 20);
     let mut cases: Vec<_> = bundles
         .into_iter()
         .map(|(name, k)| (format!("bundle.{name}"), k, policy.commitment_bytes()))

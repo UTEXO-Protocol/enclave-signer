@@ -77,7 +77,7 @@ pub(super) fn handle_sign(
         }
 
         // Fail closed: no indexer, no script, no way to tell change from payout.
-        let validator = ctx.rgb_validator.as_ref().ok_or_else(|| {
+        let validator = ctx.launch()?.rgb_validator.as_ref().ok_or_else(|| {
             EnclaveError::CrossCheck(
                 "send-RGB change seal names an outpoint outside the PSBT, but the RGB validator \
                  is not configured - the enclave cannot resolve that outpoint's script"
@@ -96,6 +96,15 @@ pub(super) fn handle_sign(
         let script = txout.script_pubkey.as_bytes().to_vec();
         ctx.state
             .with_keys(|keys| Ok(btc_ownership::asset_change_scripts(psbt, keys).contains(&script)))
+    };
+
+    #[cfg(all(feature = "rgb-validation", evm_to_rgb))]
+    let psbt_fee_key_paths = |psbt: &bitcoin::psbt::Psbt| {
+        ctx.state.with_keys(|keys| {
+            Ok(crate::networks::rgb::psbt_validation::fee_key_path_inputs(
+                psbt, keys,
+            ))
+        })
     };
 
     // Before destination validation, not after: a BFA mint's consignment cannot
@@ -119,7 +128,7 @@ pub(super) fn handle_sign(
     let validation_ctx = ValidationContext {
         bridge_config: &ctx.bridge_config,
         #[cfg(feature = "rgb-validation")]
-        rgb_validator: ctx.rgb_validator.as_ref(),
+        rgb_validator: ctx.launch()?.rgb_validator.as_ref(),
         #[cfg(feature = "rgb-validation")]
         header_chain: &ctx.header_chain,
         #[cfg(feature = "rgb-validation")]
@@ -127,6 +136,8 @@ pub(super) fn handle_sign(
         // Only the RGB-destination (mint) bind consults it.
         #[cfg(all(feature = "rgb-validation", evm_to_rgb))]
         self_owned_psbt_outputs: Some(&self_owned_psbt_outputs),
+        #[cfg(all(feature = "rgb-validation", evm_to_rgb))]
+        psbt_fee_key_paths: Some(&psbt_fee_key_paths),
         #[cfg(feature = "rgb-validation")]
         bridge_events: &bfa_bridge_events,
     };
@@ -176,6 +187,27 @@ pub(super) fn handle_sign(
             // RGB-source-only. A CCD source carries no consignment and a
             // CcdSource -> EvmDestination release is already authorized above;
             // applying the binding unconditionally rejected those signs.
+            //
+            // Burn identity first, on both release routes and before any
+            // consignment work: it needs only the calldata and the pins.
+            let release = destination_proof
+                .evm_release_identity
+                .as_ref()
+                .ok_or_else(|| {
+                    EnclaveError::Internal(
+                        "EVM destination validated without a release identity".into(),
+                    )
+                })?;
+            // An RGB-sourced release must name the RGB network id as
+            // `sourceChainId` (it selects the verifier, settlement module and
+            // commission rate on chain) and carry an empty `sourceAddress`.
+            if matches!(source_ref, SourceNetwork::RgbSource(_)) {
+                crate::networks::evm::validation::validate_rgb_source_identity(release)?;
+            }
+            // `burnId` must be the one the Bridge derives from the bound
+            // fields and the pinned Bridge / chain id / token. The contract
+            // reverts on a mismatch too; this fails earlier and says why.
+            crate::networks::evm::validation::validate_burn_id(&ctx.bridge_config, release)?;
             #[cfg(feature = "rgb-validation")]
             if let SourceNetwork::RgbSource(rgb_source) = source_ref {
                 apply_funds_out_binding(
@@ -268,8 +300,11 @@ fn apply_funds_out_binding(
     // BtcRelay agreement + source-block bind (#57 / #122): the calldata `proof`
     // must name headers the enclave holds, and its `source` pair must be the
     // block anchoring the consignment's last witness tx. Fail-closed on an
-    // empty `proof`. The SPV header chain is always present under
-    // rgb-validation (spv is implied - see lib.rs M-01 compile_error).
+    // empty `proof`. Whether the commitment words are compared to the
+    // enclave-rebuilt relay records is the operator's `BTC_RELAY_MODE`
+    // (`required` by default; a production policy boots on nothing else).
+    // The SPV header chain is always present under rgb-validation (spv is
+    // implied - see lib.rs M-01 compile_error).
     {
         // Fail on a poisoned lock rather than reading through it, matching
         // `validate_source`: a poisoned header chain may be mid-reorg.
@@ -277,12 +312,26 @@ fn apply_funds_out_binding(
             .header_chain
             .lock()
             .map_err(|e| EnclaveError::Internal(format!("SPV header chain lock poisoned: {e}")))?;
-        crosscheck::verify_btc_relay_agreement(params, validated, merkle_proofs, &chain, pins)?;
+        crosscheck::verify_btc_relay_agreement(
+            params,
+            validated,
+            merkle_proofs,
+            &chain,
+            pins,
+            ctx.bridge_config.btc_relay_mode,
+        )?;
     }
 
     // Consignment-bound release amount, under this build's RGB flow
     // (`rgb-swap` = Transfer, `rgb-mint-burn` = Burn).
     crosscheck::validate_funds_out_amount(params, validated)?;
+
+    // Burn identity (bridge PR #152): `sourceBurnTxId` is the only `burnId`
+    // input that names WHICH RGB operation is settled, and the contract takes
+    // it on the enclave's word. Bind it to the settling transition's OpId.
+    // (`sourceChainId` / `sourceAddress` are bound route-neutrally by
+    // `validate_rgb_source_identity` in `handle_sign`, before this runs.)
+    crosscheck::validate_funds_out_source_burn_tx_id(params, validated)?;
 
     // A burn settles a redemption, so it additionally binds the payout target
     // to the 32 bytes the burner committed to (`MS_BURN_RECIPIENT`). Only the
@@ -294,13 +343,14 @@ fn apply_funds_out_binding(
 
     // Settlement bind (spec P6): the deposits `settlementData` cites must be
     // exactly the verified locks behind the burn's mint ancestry. On-chain
-    // `burnId` hashes every release field, so this is what makes one burn map
-    // to one `burnId` instead of one per `settlementData` the backend picks.
+    // `burnId` hashes `settlementData` too, so this is what keeps the backend
+    // from earning a second `burnId` for one burn by citing other deposits.
     #[cfg(feature = "bfa-mint")]
     crosscheck::validate_funds_out_settlement(params, locks)?;
 
-    // `burnId` itself is not recomputed here: the contract derives and
-    // checks it from the same fields (`InvalidBurnId`).
+    // `burnId` is recomputed from these same fields plus the pinned Bridge,
+    // chain id and token by `validate_burn_id` in `handle_sign`, before this
+    // binding runs; the contract derives and checks it again (`InvalidBurnId`).
 
     Ok(())
 }
@@ -394,7 +444,7 @@ fn verify_funds_in_deposit(
     // `funds_in_operation_id` is the on-chain BridgeFundsIn operationId as
     // the full 32-byte word. It is required; `verify_funds_in_event` fails
     // closed on an empty/short value.
-    let client = ctx.evm_rpc_client.as_ref().ok_or_else(|| {
+    let client = ctx.launch()?.evm_rpc_client.as_ref().ok_or_else(|| {
         EnclaveError::CrossCheck(
             "evm-rpc build but RPC client unavailable - refusing to sign a bridge PSBT \
              without independently verifying the FundsIn deposit"
@@ -416,9 +466,15 @@ fn verify_funds_in_deposit(
     )?;
 
     // Recipient bind: the checks above prove how much the recipient leg
-    // pays, not who it pays. The invoice in the log just verified says
-    // which seal the deposit authorised. Ungated: `evm-rpc` implies
-    // `rgb-validation`, so reaching here means the bind is compiled in.
+    // pays, not who it pays. On the v2 Bridge `fundsIn` refuses a non-empty
+    // destinationAddress for RGB, so the deposit carries no invoice; the
+    // recipient is then bound through the OpId instead - `decode_funds_in`
+    // above required the deposit's rgbOpId to be the mint transition being
+    // signed, and that transition commits to its recipient seals. A legacy
+    // deposit that still carries an invoice keeps the seal bind as well.
+    if verified.destination_address.trim().is_empty() {
+        return Ok(None);
+    }
     Ok(Some(
         crate::networks::rgb::invoice::parse_authorized_recipient(&verified.destination_address)?,
     ))
@@ -612,7 +668,8 @@ mod early_bridge_checks {
             BridgeConfig::default(),
             crate::test_support::regtest_header_chain(),
         );
-        ctx.evm_rpc_client = Some(Box::new(MissingDeposit(Arc::clone(calls))));
+        ctx.launch.get_mut().unwrap().evm_rpc_client =
+            Some(Box::new(MissingDeposit(Arc::clone(calls))));
         ctx
     }
 

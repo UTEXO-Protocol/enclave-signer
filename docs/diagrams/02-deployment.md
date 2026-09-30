@@ -21,7 +21,7 @@ flowchart TB
             Headers[(Header chain<br/>in-memory)]
             State[(EnclaveState<br/>Phase + KeyManager in SecretBox)]
             Replay[(NonceReplayGuard — cloning<br/>≤10 000 entries, 1 h TTL<br/>+ op_replay_guard — bridge ops<br/>≤100 000 entries, 24 h TTL)]
-            Fwd[vsock_forwarder<br/>loopback → vsock, per-port<br/>Electrum port or 3443 / 3444<br/>Electrum host pinned to loopback in /etc/hosts]
+            Fwd[vsock_forwarder<br/>loopback → vsock, per-port<br/>Electrum port / EVM RPC TLS port<br/>Electrum host pinned to loopback in /etc/hosts]
             RgbVal[RgbValidator<br/>rgb-ops + Electrum or Esplora]
             EvmVer[events.rs verifier<br/>raw RPC (supplied images)<br/>receipt/head correctness trusted]
             NSM[/dev/nsm — Nitro Security Module/]
@@ -68,7 +68,10 @@ flowchart TB
 - **Bridge-mode `signPsbt` requires the `evm-rpc` feature**: a build without it
   refuses bridge PSBTs, since it cannot independently verify the EVM `FundsIn`
   deposit. Operators MUST run the host `vsock-proxy` allowlist on 8002. Env:
-  `EVM_RPC_URL` / `EVM_MIN_CONFIRMATIONS`. See the README env table.
+  `EVM_MIN_CONFIRMATIONS`. See the README env table.
+- **Endpoints at launch**: `utexo-enclave-ctl.sh start` sends `set-endpoints`
+  once to each fresh enclave (Electrum URL, EVM RPC host, CA, TLS port). Until
+  then the enclave signs nothing.
 
 Clones provide replicas of one signing identity. Independent quorum members
 need independently initialized seeds.

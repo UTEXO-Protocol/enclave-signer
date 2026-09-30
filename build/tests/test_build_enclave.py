@@ -82,10 +82,14 @@ class BuildArgumentsTests(unittest.TestCase):
                 self.assertFalse(self.argv.exists())
 
     def test_rgb_asset_forwarded_once_without_implicit_debug(self):
+        # Endpoint values in the caller's env never reach the build.
         for recipe in RGB_RECIPES:
             with self.subTest(recipe=recipe):
                 pins = KMS_PINS if recipe == 'Dockerfile.enclave.mint' else {}
-                result = self.invoke(recipe, RGB_ASSET_ID='rgb:test-bfa-asset', **pins)
+                result = self.invoke(recipe, RGB_ASSET_ID='rgb:test-bfa-asset',
+                                     ELECTRUM_URL='ssl://electrum.test:50002',
+                                     EVM_RPC_HOST='rpc.test', EVM_RPC_TLS_CA_DER_HEX='ab',
+                                     **pins)
                 self.assertEqual(result.returncode, 42, result.stderr)
                 expected = ['SOURCE_DATE_EPOCH=1700000000', 'RGB_ASSET_ID=rgb:test-bfa-asset']
                 expected.extend(f'{key}={value}' for key, value in pins.items())
@@ -185,6 +189,19 @@ class BuildArgumentsTests(unittest.TestCase):
         result = self.invoke('Dockerfile.enclave.ccd', RGB_ASSET_ID='rgb:test-bfa-asset')
         self.assertEqual(result.returncode, 42, result.stderr)
         self.assertEqual(self.captured_build_args(), ['SOURCE_DATE_EPOCH=1700000000'])
+
+
+class ImageInputsTests(unittest.TestCase):
+    RECIPES = RGB_RECIPES + ('Dockerfile.enclave.ccd',)
+
+    def test_no_build_input_names_an_endpoint(self):
+        files = [ROOT / 'build' / r for r in self.RECIPES]
+        files += [ROOT / 'build/build-enclave.sh', ROOT / '.github/workflows/build-eif.yml']
+        for path in files:
+            text = path.read_text()
+            for name in ('ELECTRUM_URL', 'EVM_RPC_HOST', 'EVM_RPC_TLS_CA', 'EVM_RPC_URL'):
+                with self.subTest(file=path.name, name=name):
+                    self.assertNotIn(name, text)
 
 
 if __name__ == '__main__':

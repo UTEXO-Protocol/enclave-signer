@@ -73,6 +73,7 @@ async fn health(
                 code,
                 Json(json!({
                     "ready": h.ready,
+                    "endpoints_set": h.endpoints_set,
                     "key_loaded": h.key_loaded,
                     "spv_synced": h.spv_synced,
                     "phase": h.phase,

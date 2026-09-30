@@ -18,6 +18,7 @@ fn pinned_config() -> BridgeConfig {
         bridge_contract: [0x11; 20],
         rgb_asset_id: "rgb:asset".into(),
         funds_in_contract: [0x22; 20],
+        token_contract: [0x33; 20],
         ..Default::default()
     }
 }
@@ -35,6 +36,8 @@ fn release_bridge_with_full_pins_is_production() {
         &pinned_config(),
         EvmDataSource::HeliosVerified,
         a_checkpoint(),
+        None,
+        "e.test",
         12,
     );
     match &p {
@@ -76,6 +79,8 @@ fn signer_role_is_attested() {
             &pinned_config(),
             EvmDataSource::RawRpc,
             None,
+            None,
+            "e.test",
             12,
         )
     };
@@ -107,6 +112,8 @@ fn signer_role_attests_the_other_roles_paths_as_off() {
         &config,
         EvmDataSource::RawRpc,
         None,
+        None,
+        "e.test",
         12,
     ) {
         SecurityPolicy::Production(p) => p,
@@ -131,13 +138,23 @@ fn signer_role_attests_the_other_roles_paths_as_off() {
     assert_eq!(combined.gas_tx_allowed_to, Some([0x33; 20]));
 }
 
+fn a_tls_pin() -> Option<EvmRpcTlsPin> {
+    Some(EvmRpcTlsPin {
+        host: "rpc.test".into(),
+        ca_sha256: [0x0d; 32],
+    })
+}
+
 #[test]
-fn production_accepts_any_evm_source_but_still_attests_it() {
+fn production_accepts_an_authenticated_evm_source_and_attests_it() {
     let ctx = release_bridge_ctx();
-    // Helios has no L2 light client, so an Arbitrum image runs on raw RPC.
-    // Every source boots, and each is recorded and attested.
-    for source in [EvmDataSource::Disabled, EvmDataSource::RawRpc] {
-        let p = SecurityPolicy::resolve(&ctx, &pinned_config(), source, None, 12);
+    // Helios has no L2 light client, so an Arbitrum image reads the RPC over
+    // pinned TLS. `Disabled` fails closed per request.
+    for (source, pin) in [
+        (EvmDataSource::Disabled, None),
+        (EvmDataSource::PinnedTlsRpc, a_tls_pin()),
+    ] {
+        let p = SecurityPolicy::resolve(&ctx, &pinned_config(), source, None, pin, "e.test", 12);
         match &p {
             SecurityPolicy::Production(pp) => assert_eq!(pp.evm_source, source),
             other => panic!("expected Production for {source:?}, got {other:?}"),
@@ -153,9 +170,79 @@ fn production_accepts_any_evm_source_but_still_attests_it() {
         &pinned_config(),
         EvmDataSource::HeliosVerified,
         a_checkpoint(),
+        None,
+        "e.test",
         12,
     );
     assert!(p.assert_valid_for_build(&ctx).is_ok());
+}
+
+/// The gate `SetEndpoints` runs, fed from a request as the handler feeds it.
+#[cfg(feature = "evm-rpc")]
+#[test]
+fn production_launches_only_with_a_pinned_tls_evm_rpc() {
+    let ca =
+        hex::decode(include_str!("../../tests/fixtures/evm_rpc_tls/ca_a.der.hex").trim()).unwrap();
+    let launch = |host: &str, ca_der: Vec<u8>| {
+        let e = crate::config::Endpoints::parse(&crate::proto::SetEndpointsRequest {
+            electrum_url: "ssl://electrum.test:50002".into(),
+            evm_rpc_host: host.into(),
+            evm_rpc_ca_der: ca_der,
+            evm_rpc_tls_port: 443,
+        })?;
+        let tls = e.evm_rpc_tls.as_ref().unwrap();
+        let (source, checkpoint, pin) = crate::bootstrap::resolve_evm_data_source(tls);
+        let ctx = release_bridge_ctx();
+        let p = SecurityPolicy::resolve(
+            &ctx,
+            &pinned_config(),
+            source,
+            checkpoint,
+            pin,
+            &e.electrum_host,
+            12,
+        );
+        p.assert_valid_for_build(&ctx).map(|()| p)
+    };
+    assert!(launch("", ca.clone()).is_err());
+    assert!(launch("rpc.test", Vec::new()).is_err());
+
+    let Ok(SecurityPolicy::Production(p)) = launch("rpc.test", ca) else {
+        panic!("a valid host and CA must launch");
+    };
+    assert_eq!(p.electrum_host, "electrum.test");
+    assert_eq!(p.evm_source, EvmDataSource::PinnedTlsRpc);
+    let pin = p.evm_rpc_tls.unwrap();
+    assert_eq!(pin.host, "rpc.test");
+    // `openssl x509 -in ca_a.pem -outform der | sha256sum`
+    assert_eq!(
+        hex::encode(pin.ca_sha256),
+        "58c6acf2c15d81e939016026ec90047f88282fb3bef4d19dd2a1ff893f2349a8"
+    );
+}
+
+#[test]
+fn evm_rpc_tls_pin_is_carried_into_the_commitment() {
+    let ctx = release_bridge_ctx();
+    let commit = |host: &str, ca_sha256| {
+        let pin = Some(EvmRpcTlsPin {
+            host: host.into(),
+            ca_sha256,
+        });
+        SecurityPolicy::resolve(
+            &ctx,
+            &pinned_config(),
+            EvmDataSource::PinnedTlsRpc,
+            None,
+            pin,
+            "e.test",
+            12,
+        )
+        .commitment_bytes()
+    };
+    let base = commit("rpc.test", [0x0d; 32]);
+    assert_ne!(base, commit("other.test", [0x0d; 32]));
+    assert_ne!(base, commit("rpc.test", [0x0e; 32]));
 }
 
 #[test]
@@ -170,6 +257,8 @@ fn production_helios_without_a_pinned_checkpoint_is_rejected_at_boot() {
         &pinned_config(),
         EvmDataSource::HeliosVerified,
         None,
+        None,
+        "e.test",
         12,
     );
     assert!(matches!(p, SecurityPolicy::Production(_)));
@@ -178,11 +267,122 @@ fn production_helios_without_a_pinned_checkpoint_is_rejected_at_boot() {
 }
 
 #[test]
+fn production_boots_without_endpoints_and_launches_only_with_them() {
+    let ctx = release_bridge_ctx();
+    let p = SecurityPolicy::resolve(
+        &ctx,
+        &pinned_config(),
+        EvmDataSource::Disabled,
+        None,
+        None,
+        "",
+        12,
+    );
+    assert!(p.assert_valid_at_boot(&ctx).is_ok());
+    let err = p.assert_valid_for_build(&ctx).unwrap_err();
+    assert!(err.contains("Electrum host"), "got: {err}");
+}
+
+#[test]
 fn production_rejects_a_zero_confirmation_rule() {
     let ctx = release_bridge_ctx();
-    let policy = SecurityPolicy::resolve(&ctx, &pinned_config(), EvmDataSource::RawRpc, None, 0);
+    let policy = SecurityPolicy::resolve(
+        &ctx,
+        &pinned_config(),
+        EvmDataSource::RawRpc,
+        None,
+        None,
+        "e.test",
+        0,
+    );
     let err = policy.assert_valid_for_build(&ctx).unwrap_err();
     assert!(err.contains("confirmation"), "got: {err}");
+}
+
+#[test]
+fn production_rejects_an_unpinned_token_contract() {
+    // The token is a burnId preimage input; without it the recompute would
+    // be skipped, which a production signer must not silently do.
+    let ctx = release_bridge_ctx();
+    let mut cfg = pinned_config();
+    cfg.token_contract = [0u8; 20];
+    let policy =
+        SecurityPolicy::resolve(&ctx, &cfg, EvmDataSource::RawRpc, None, None, "e.test", 12);
+    let err = policy.assert_valid_for_build(&ctx).unwrap_err();
+    assert!(err.contains("TOKEN_CONTRACT"), "got: {err}");
+}
+
+#[test]
+fn production_rejects_btc_relay_mode_none() {
+    // `none` exists for a local stand with no BtcRelay. A production signer
+    // must never boot with the relay compare off.
+    let ctx = release_bridge_ctx();
+    let mut cfg = pinned_config();
+    cfg.btc_relay_mode = BtcRelayMode::None;
+    let policy =
+        SecurityPolicy::resolve(&ctx, &cfg, EvmDataSource::RawRpc, None, None, "e.test", 12);
+    let err = policy.assert_valid_for_build(&ctx).unwrap_err();
+    assert!(err.contains("BTC_RELAY_MODE=none"), "got: {err}");
+}
+
+/// The default config (env unset) is `required`, so a pinned production
+/// config boots without naming the variable.
+#[test]
+fn production_defaults_to_btc_relay_required() {
+    let ctx = release_bridge_ctx();
+    let policy = SecurityPolicy::resolve(
+        &ctx,
+        &pinned_config(),
+        EvmDataSource::PinnedTlsRpc,
+        None,
+        a_tls_pin(),
+        "e.test",
+        12,
+    );
+    match &policy {
+        SecurityPolicy::Production(p) => assert!(p.btc_relay_required),
+        other => panic!("expected Production, got {other:?}"),
+    }
+    assert!(policy.assert_valid_for_build(&ctx).is_ok());
+}
+
+/// A debug/dev build honours the env value and never gates on it: the
+/// posture is `Development` either way.
+#[test]
+fn dev_build_ignores_btc_relay_mode_for_the_boot_gate() {
+    let ctx = BuildContext {
+        debug_or_test: true,
+        ..release_bridge_ctx()
+    };
+    let mut cfg = pinned_config();
+    cfg.btc_relay_mode = BtcRelayMode::None;
+    let policy =
+        SecurityPolicy::resolve(&ctx, &cfg, EvmDataSource::RawRpc, None, None, "e.test", 12);
+    assert!(matches!(policy, SecurityPolicy::Development { .. }));
+    assert!(policy.assert_valid_for_build(&ctx).is_ok());
+}
+
+#[test]
+fn token_contract_is_carried_into_the_commitment() {
+    let ctx = release_bridge_ctx();
+    let base = pinned_config();
+    let mut other = base.clone();
+    other.token_contract = [0x44; 20];
+    assert_ne!(
+        SecurityPolicy::resolve(&ctx, &base, EvmDataSource::RawRpc, None, None, "e.test", 12)
+            .commitment_bytes(),
+        SecurityPolicy::resolve(
+            &ctx,
+            &other,
+            EvmDataSource::RawRpc,
+            None,
+            None,
+            "e.test",
+            12
+        )
+        .commitment_bytes(),
+        "re-pinning TOKEN_CONTRACT must change the attested commitment"
+    );
 }
 
 #[test]
@@ -191,10 +391,19 @@ fn deposit_authorization_rule_is_carried_into_the_commitment() {
     let base = pinned_config();
     let mut other_emitter = base.clone();
     other_emitter.funds_in_contract = [0x33; 20];
-    let expected = SecurityPolicy::resolve(&ctx, &base, EvmDataSource::RawRpc, None, 12);
-    let changed_emitter =
-        SecurityPolicy::resolve(&ctx, &other_emitter, EvmDataSource::RawRpc, None, 12);
-    let changed_depth = SecurityPolicy::resolve(&ctx, &base, EvmDataSource::RawRpc, None, 13);
+    let expected =
+        SecurityPolicy::resolve(&ctx, &base, EvmDataSource::RawRpc, None, None, "e.test", 12);
+    let changed_emitter = SecurityPolicy::resolve(
+        &ctx,
+        &other_emitter,
+        EvmDataSource::RawRpc,
+        None,
+        None,
+        "e.test",
+        12,
+    );
+    let changed_depth =
+        SecurityPolicy::resolve(&ctx, &base, EvmDataSource::RawRpc, None, None, "e.test", 13);
 
     assert_ne!(
         expected.commitment_bytes(),
@@ -214,6 +423,8 @@ fn release_bridge_unconfigured_is_rejected_at_boot() {
         &BridgeConfig::default(),
         EvmDataSource::RawRpc,
         None,
+        None,
+        "e.test",
         12,
     );
     assert_eq!(
@@ -234,7 +445,15 @@ fn release_bridge_partially_pinned_is_rejected_at_boot() {
         chain_id: 1,
         ..Default::default()
     };
-    let p = SecurityPolicy::resolve(&ctx, &partial, EvmDataSource::RawRpc, None, 12);
+    let p = SecurityPolicy::resolve(
+        &ctx,
+        &partial,
+        EvmDataSource::RawRpc,
+        None,
+        None,
+        "e.test",
+        12,
+    );
     assert!(matches!(p, SecurityPolicy::Development { .. }));
     assert!(p.assert_valid_for_build(&ctx).is_err());
 }
@@ -264,6 +483,8 @@ fn each_dev_feature_forces_development_even_when_fully_pinned() {
             &pinned_config(),
             EvmDataSource::HeliosVerified,
             a_checkpoint(),
+            None,
+            "e.test",
             12,
         );
         assert_eq!(p, SecurityPolicy::Development { reason });
@@ -278,7 +499,15 @@ fn debug_build_is_development_and_exempt_from_the_boot_gate() {
         debug_or_test: true,
         ..release_bridge_ctx()
     };
-    let p = SecurityPolicy::resolve(&ctx, &pinned_config(), EvmDataSource::RawRpc, None, 12);
+    let p = SecurityPolicy::resolve(
+        &ctx,
+        &pinned_config(),
+        EvmDataSource::RawRpc,
+        None,
+        None,
+        "e.test",
+        12,
+    );
     assert_eq!(
         p,
         SecurityPolicy::Development {
@@ -299,6 +528,8 @@ fn minimal_non_bridge_release_is_exempt() {
         &BridgeConfig::default(),
         EvmDataSource::Disabled,
         None,
+        None,
+        "e.test",
         0,
     );
     assert_eq!(
@@ -316,7 +547,7 @@ fn allow_vanilla_psbt_tracks_the_btc_pins() {
     let ctx = release_bridge_ctx();
     let mut cfg = pinned_config();
     // Unset BTC pins -> vanilla disabled (fail-closed).
-    let p = SecurityPolicy::resolve(&ctx, &cfg, EvmDataSource::RawRpc, None, 12);
+    let p = SecurityPolicy::resolve(&ctx, &cfg, EvmDataSource::RawRpc, None, None, "e.test", 12);
     assert!(matches!(
         p,
         SecurityPolicy::Production(ProductionPolicy {
@@ -326,7 +557,7 @@ fn allow_vanilla_psbt_tracks_the_btc_pins() {
     ));
     // Operator sets the cap -> vanilla enabled and attested.
     cfg.btc_max_total_sats = 100_000;
-    let p = SecurityPolicy::resolve(&ctx, &cfg, EvmDataSource::RawRpc, None, 12);
+    let p = SecurityPolicy::resolve(&ctx, &cfg, EvmDataSource::RawRpc, None, None, "e.test", 12);
     assert!(matches!(
         p,
         SecurityPolicy::Production(ProductionPolicy {
@@ -341,7 +572,15 @@ fn gas_tx_rule_is_carried_into_the_commitment() {
     // The gas-tx pins flow from BridgeConfig into the attested
     // policy, so pinning them changes the commitment a verifier checks.
     let ctx = release_bridge_ctx();
-    let unpinned = SecurityPolicy::resolve(&ctx, &pinned_config(), EvmDataSource::RawRpc, None, 12);
+    let unpinned = SecurityPolicy::resolve(
+        &ctx,
+        &pinned_config(),
+        EvmDataSource::RawRpc,
+        None,
+        None,
+        "e.test",
+        12,
+    );
 
     let mut cfg = pinned_config();
     cfg.gas_tx_allowed_to = Some([0x77; 20]);
@@ -349,7 +588,8 @@ fn gas_tx_rule_is_carried_into_the_commitment() {
     cfg.gas_tx_max_fee_per_gas = 5_000;
     cfg.gas_tx_max_value_wei = Some(9_000);
     cfg.gas_tx_allowed_selectors = vec![[0xaa, 0xbb, 0xcc, 0xdd]];
-    let pinned = SecurityPolicy::resolve(&ctx, &cfg, EvmDataSource::RawRpc, None, 12);
+    let pinned =
+        SecurityPolicy::resolve(&ctx, &cfg, EvmDataSource::RawRpc, None, None, "e.test", 12);
 
     assert_ne!(
         unpinned.commitment_bytes(),
@@ -383,8 +623,18 @@ fn gas_tx_value_ceiling_alone_changes_the_commitment() {
     raised.gas_tx_max_value_wei = Some(1);
 
     assert_ne!(
-        SecurityPolicy::resolve(&ctx, &base, EvmDataSource::RawRpc, None, 12).commitment_bytes(),
-        SecurityPolicy::resolve(&ctx, &raised, EvmDataSource::RawRpc, None, 12).commitment_bytes(),
+        SecurityPolicy::resolve(&ctx, &base, EvmDataSource::RawRpc, None, None, "e.test", 12)
+            .commitment_bytes(),
+        SecurityPolicy::resolve(
+            &ctx,
+            &raised,
+            EvmDataSource::RawRpc,
+            None,
+            None,
+            "e.test",
+            12
+        )
+        .commitment_bytes(),
         "raising GAS_TX_MAX_VALUE_WEI must change the attested commitment"
     );
 }
@@ -401,20 +651,40 @@ fn unset_gas_tx_value_ceiling_commits_as_zero() {
     zero.gas_tx_max_value_wei = Some(0);
 
     assert_eq!(
-        SecurityPolicy::resolve(&ctx, &unset, EvmDataSource::RawRpc, None, 12).commitment_bytes(),
-        SecurityPolicy::resolve(&ctx, &zero, EvmDataSource::RawRpc, None, 12).commitment_bytes(),
+        SecurityPolicy::resolve(
+            &ctx,
+            &unset,
+            EvmDataSource::RawRpc,
+            None,
+            None,
+            "e.test",
+            12
+        )
+        .commitment_bytes(),
+        SecurityPolicy::resolve(&ctx, &zero, EvmDataSource::RawRpc, None, None, "e.test", 12)
+            .commitment_bytes(),
     );
 }
 
 #[test]
 fn evm_source_is_carried_into_the_commitment() {
     let ctx = release_bridge_ctx();
-    let raw = SecurityPolicy::resolve(&ctx, &pinned_config(), EvmDataSource::RawRpc, None, 12);
+    let raw = SecurityPolicy::resolve(
+        &ctx,
+        &pinned_config(),
+        EvmDataSource::RawRpc,
+        None,
+        None,
+        "e.test",
+        12,
+    );
     let helios = SecurityPolicy::resolve(
         &ctx,
         &pinned_config(),
         EvmDataSource::HeliosVerified,
         a_checkpoint(),
+        None,
+        "e.test",
         12,
     );
     // A raw-RPC deployment and a Helios deployment commit to different bytes,
@@ -433,6 +703,8 @@ fn evm_checkpoint_is_carried_into_the_commitment() {
         &pinned_config(),
         EvmDataSource::HeliosVerified,
         Some([0xAA; 32]),
+        None,
+        "e.test",
         12,
     );
     let b = SecurityPolicy::resolve(
@@ -440,6 +712,8 @@ fn evm_checkpoint_is_carried_into_the_commitment() {
         &pinned_config(),
         EvmDataSource::HeliosVerified,
         Some([0xBB; 32]),
+        None,
+        "e.test",
         12,
     );
     assert_ne!(a.commitment_bytes(), b.commitment_bytes());
@@ -463,6 +737,8 @@ fn development_commitment_is_stable_and_distinct() {
             &pinned_config(),
             EvmDataSource::RawRpc,
             None,
+            None,
+            "e.test",
             12,
         )
         .commitment_bytes()

@@ -9,7 +9,9 @@ use clap::{Parser, Subcommand};
 use tracing_subscriber::EnvFilter;
 
 use utexo_bridge_parent::client::{EnclaveClient, SignEvmRequest, SignPsbtRequest};
-use utexo_bridge_parent::enclave_proto::{InitializeKeyResponse, PublicKeysResponse};
+use utexo_bridge_parent::enclave_proto::{
+    InitializeKeyResponse, PublicKeysResponse, SetEndpointsRequest,
+};
 
 #[derive(Parser)]
 #[command(
@@ -123,10 +125,28 @@ enum Command {
     /// Get the enclave's current SPV chain tip (height + hash).
     /// Listener calls this on startup to know where to resume header sync.
     GetLastSavedBlock,
-    /// Ask the enclave whether it is ready to sign: key loaded and SPV chain
-    /// caught up. Same answer the parent's `GET /health` serves to deploy.
-    /// Exits 0 when ready, 1 when not.
+    /// Ask the enclave whether it is ready to sign: endpoints set, key loaded
+    /// and SPV chain caught up. Same answer the parent's `GET /health` serves
+    /// to deploy. Exits 0 when ready, 1 when not.
     Health,
+    /// Set the chain endpoints once, after launch. The enclave refuses a
+    /// second set. Each flag falls back to its environment variable. A value
+    /// that is not given is sent empty.
+    SetEndpoints {
+        /// `ssl://host:port` or `tcp://host:port`. Env: ELECTRUM_URL.
+        #[arg(long)]
+        electrum_url: Option<String>,
+        /// TLS host name of the EVM RPC. Env: EVM_RPC_HOST.
+        #[arg(long)]
+        evm_rpc_host: Option<String>,
+        /// TLS port of the EVM RPC. Env: EVM_RPC_TLS_PORT.
+        #[arg(long)]
+        evm_rpc_tls_port: Option<u32>,
+        /// DER file of the only CA the EVM RPC TLS trusts.
+        /// Env: EVM_RPC_TLS_CA_DER_FILE.
+        #[arg(long)]
+        evm_rpc_ca_der_file: Option<PathBuf>,
+    },
     /// Push a batch of Bitcoin block headers into the enclave's SPV chain.
     ///
     /// Headers are read from a file: one hex-encoded 80-byte header per line,
@@ -500,6 +520,7 @@ fn main() {
         Command::Health => match client.health() {
             Ok(r) => {
                 println!("Ready:            {}", r.ready);
+                println!("Endpoints set:    {}", r.endpoints_set);
                 println!("Key loaded:       {}", r.key_loaded);
                 println!("SPV synced:       {}", r.spv_synced);
                 println!("Phase:            {}", r.phase);
@@ -517,6 +538,49 @@ fn main() {
                 process::exit(1);
             }
         },
+        Command::SetEndpoints {
+            electrum_url,
+            evm_rpc_host,
+            evm_rpc_tls_port,
+            evm_rpc_ca_der_file,
+        } => {
+            let var = |name: &str| std::env::var(name).ok().filter(|v| !v.is_empty());
+            let fail = |msg: String| -> ! {
+                eprintln!("Error: {msg}");
+                process::exit(1)
+            };
+            let evm_rpc_tls_port = match evm_rpc_tls_port {
+                Some(p) => p,
+                None => var("EVM_RPC_TLS_PORT")
+                    .map(|p| {
+                        p.parse().unwrap_or_else(|_| {
+                            fail(format!("EVM_RPC_TLS_PORT {p:?} is not a port"))
+                        })
+                    })
+                    .unwrap_or(0),
+            };
+            let evm_rpc_ca_der = evm_rpc_ca_der_file
+                .or_else(|| var("EVM_RPC_TLS_CA_DER_FILE").map(PathBuf::from))
+                .map(|path| {
+                    std::fs::read(&path)
+                        .unwrap_or_else(|e| fail(format!("cannot read {}: {e}", path.display())))
+                })
+                .unwrap_or_default();
+            let req = SetEndpointsRequest {
+                electrum_url: electrum_url
+                    .or_else(|| var("ELECTRUM_URL"))
+                    .unwrap_or_default(),
+                evm_rpc_host: evm_rpc_host
+                    .or_else(|| var("EVM_RPC_HOST"))
+                    .unwrap_or_default(),
+                evm_rpc_ca_der,
+                evm_rpc_tls_port,
+            };
+            match client.set_endpoints(req) {
+                Ok(()) => println!("Endpoints set"),
+                Err(e) => fail(e.to_string()),
+            }
+        }
         Command::SubmitHeaders {
             start_height,
             headers_file,

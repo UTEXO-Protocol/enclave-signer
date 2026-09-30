@@ -3,6 +3,10 @@
 # Verify checksums and PCRs before starting the services.
 # Start enclave CIDs 16/18/20 and Parent ports 50051/52/53.
 #
+# Optional chain endpoints, set on each enclave at start:
+#   ELECTRUM_URL=ssl://<host>:<port>  EVM_RPC_TLS_CA_DER_FILE=<CA in DER>
+# The EVM RPC host and port come from host-prep-evmrpc.sh.
+#
 # Initialize or clone keys after deployment.
 # Put --addr vsock://<CID>:5000 before the CLI subcommand.
 # Donor: cli --addr vsock://16:5000 init --cloning-secret-file <path>
@@ -25,6 +29,8 @@ ENCLAVE_MEMORY="${ENCLAVE_MEMORY:-3072}"
 # runtime-PCR check is skipped (the static describe-eif measurement in step 3
 # still verifies the EIF file). Default 0 keeps the normal production path.
 ENCLAVE_DEBUG_MODE="${ENCLAVE_DEBUG_MODE:-0}"
+ELECTRUM_URL="${ELECTRUM_URL:-}"
+EVM_RPC_TLS_CA_DER_FILE="${EVM_RPC_TLS_CA_DER_FILE:-}"
 CIDS=(16 18 20)
 declare -A PORT=([16]=50051 [18]=50052 [20]=50053)
 # Readiness probe (`GET /health`), one per parent. Loopback-only. This script is
@@ -128,6 +134,26 @@ enc_id() {
   nitro-cli describe-enclaves 2>/dev/null \
     | python3 -c "import json,sys; print(next((e['EnclaveID'] for e in json.load(sys.stdin) if e.get('EnclaveName')=='$NAME'), ''))"
 }
+# Set the chain endpoints once, on the fresh enclave. The enclave refuses a
+# second set and signs nothing without one. The CLI reads the values from the
+# unit env.
+set_endpoints() {
+  : "${CLI:?CLI env required (set in /etc/utexo/enclave.env)}"
+  # systemd sources this via EnvironmentFile; a manual `start` does not, so
+  # source it here too (idempotent: harmless if already in the environment).
+  if [ -r /etc/nitro_enclaves/vsock-proxy-evmrpc.env ]; then
+    set -a; . /etc/nitro_enclaves/vsock-proxy-evmrpc.env; set +a
+  fi
+  for _ in $(seq 30); do
+    # `health` exits 1 until the enclave is ready. Any answer will do.
+    case "$("$CLI" --addr "vsock://$CID:5000" health 2>/dev/null)" in
+      *"Endpoints set:"*) "$CLI" --addr "vsock://$CID:5000" set-endpoints; return ;;
+    esac
+    sleep 2
+  done
+  echo "enclave CID $CID did not answer health" >&2
+  return 1
+}
 case "$ACTION" in
   start)
     : "${EIF:?EIF env required (set in /etc/utexo/enclave.env)}"
@@ -144,7 +170,11 @@ case "$ACTION" in
       if nitro-cli run-enclave \
         --eif-path "$EIF" --cpu-count "$CPU" --memory "$MEM" \
         --enclave-cid "$CID" --enclave-name "$NAME" "${DEBUG_ARG[@]}" 9>&-; then
-        exit 0
+        exec 9>&-
+        set_endpoints && exit 0
+        echo "set-endpoints CID $CID failed; terminating the enclave" >&2
+        id="$(enc_id)"; [ -n "$id" ] && nitro-cli terminate-enclave --enclave-id "$id" || true
+        exit 1
       fi
       echo "run-enclave CID $CID attempt $attempt failed; cleaning up and retrying" >&2
       bad="$(enc_id)"; [ -n "$bad" ] && nitro-cli terminate-enclave --enclave-id "$bad" 9>&- || true
@@ -182,8 +212,9 @@ Requires=nitro-enclaves-allocator.service
 Type=oneshot
 RemainAfterExit=yes
 User=ubuntu
-TimeoutStartSec=300
+TimeoutStartSec=390
 EnvironmentFile=/etc/utexo/enclave.env
+EnvironmentFile=-/etc/nitro_enclaves/vsock-proxy-evmrpc.env
 ExecStart=/usr/local/bin/utexo-enclave-ctl.sh start %i
 ExecStop=/usr/local/bin/utexo-enclave-ctl.sh stop %i
 
@@ -210,11 +241,18 @@ WantedBy=multi-user.target
 EOF
 
 # env files (host-specific values; not in the repo).
+if [ -n "$EVM_RPC_TLS_CA_DER_FILE" ]; then
+  install -m 0644 "$EVM_RPC_TLS_CA_DER_FILE" /etc/utexo/evm-rpc-ca.der
+  EVM_RPC_TLS_CA_DER_FILE=/etc/utexo/evm-rpc-ca.der
+fi
 cat > /etc/utexo/enclave.env <<EOF
 EIF=$EIF
 ENCLAVE_CPU_COUNT=$ENCLAVE_CPU_COUNT
 ENCLAVE_MEMORY=$ENCLAVE_MEMORY
 ENCLAVE_DEBUG_MODE=$ENCLAVE_DEBUG_MODE
+CLI=$DIR/utexo-bridge-parent-cli
+ELECTRUM_URL=$ELECTRUM_URL
+EVM_RPC_TLS_CA_DER_FILE=$EVM_RPC_TLS_CA_DER_FILE
 EOF
 for CID in "${CIDS[@]}"; do
   cat > "/etc/utexo/parent-$CID.env" <<EOF
