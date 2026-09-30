@@ -25,28 +25,35 @@ pub fn init_tracing() {
         .init();
 }
 
-/// Append `127.0.0.1 <host>` to /etc/hosts (idempotent) so the enclave's
-/// outbound connection to `host` lands on the local vsock forwarder while the
-/// TLS layer still validates against `host`'s real certificate.
-#[cfg(all(
-    feature = "vsock",
-    any(feature = "rgb-validation", feature = "kms-persistence"),
-    target_os = "linux"
-))]
-pub fn pin_host_to_loopback(host: &str) -> std::io::Result<()> {
-    use std::io::Write;
-    let existing = std::fs::read_to_string("/etc/hosts").unwrap_or_default();
-    if existing
-        .lines()
-        .any(|l| l.split_whitespace().any(|tok| tok == host))
-    {
+/// Add each missing `addr host` line to the hosts file at `path`, so the
+/// connection to `host` goes to its local vsock forwarder and TLS still checks
+/// the real certificate of `host`. All lines land in one rename, or none do.
+#[cfg(any(test, all(feature = "vsock", target_os = "linux")))]
+pub fn pin_hosts(
+    path: &std::path::Path,
+    entries: &[(std::net::Ipv4Addr, &str)],
+) -> std::io::Result<()> {
+    let existing = match std::fs::read_to_string(path) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        other => other?,
+    };
+    let missing: String = entries
+        .iter()
+        .map(|(addr, host)| format!("{addr} {host}\n"))
+        .filter(|line| !existing.lines().any(|l| l.trim() == line.trim_end()))
+        .collect();
+    if missing.is_empty() {
         return Ok(());
     }
-    let mut f = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open("/etc/hosts")?;
-    writeln!(f, "127.0.0.1 {host}")
+    let sep = if existing.is_empty() || existing.ends_with('\n') {
+        ""
+    } else {
+        "\n"
+    };
+    let mut tmp = path.as_os_str().to_owned();
+    tmp.push(".tmp");
+    std::fs::write(&tmp, format!("{existing}{sep}{missing}"))?;
+    std::fs::rename(&tmp, path)
 }
 
 /// The raw `BITCOIN_NETWORK` value, defaulted. Kept as a string because the
@@ -191,42 +198,14 @@ pub fn install_env_cloning_secret(state: &EnclaveState) {
     }
 }
 
-/// Start the vsock-to-TCP forwarders this build needs at boot. The Electrum
-/// and EVM RPC forwarders start at launch, with the endpoints.
+/// Start the vsock-to-TCP forwarders this build needs at boot. The Electrum,
+/// EVM RPC and KMS forwarders start at launch, with the endpoints.
 ///
 /// No-op off Linux or without `vsock`. Untrusted egress in every case - the
 /// host relays these bytes; see `vsock_forwarder`'s trust-boundary note.
 pub fn start_vsock_forwarders() {
     #[cfg(all(feature = "vsock", target_os = "linux"))]
     {
-        // KMS egress for seed custody. The SDK connects to the real KMS host
-        // name on 443; that name is pinned to loopback here, so TLS still
-        // validates KMS's certificate while the host only relays bytes:
-        //   vsock-proxy <KMS_VSOCK_PORT> kms.<region>.amazonaws.com 443
-        // Skipped when KMS_REGION is unset (development import-only mode).
-        #[cfg(feature = "kms-persistence")]
-        if let Ok(region) = std::env::var("KMS_REGION") {
-            let host = crate::kms::endpoint_host(&region);
-            let vsock_port: u32 = std::env::var("KMS_VSOCK_PORT")
-                .ok()
-                .and_then(|s| s.parse().ok())
-                .unwrap_or(crate::kms::DEFAULT_KMS_VSOCK_PORT);
-            match pin_host_to_loopback(&host) {
-                Ok(()) => tracing::info!("pinned {host} -> 127.0.0.1 for in-enclave TLS to KMS"),
-                Err(e) => tracing::error!("failed to pin {host} in /etc/hosts: {e}"),
-            }
-            tracing::info!(
-                local_port = crate::kms::KMS_PORT,
-                vsock_port,
-                "starting KMS vsock forwarder (host must run: vsock-proxy {vsock_port} {host} 443)"
-            );
-            if let Err(e) =
-                crate::vsock_forwarder::start_forwarder(crate::kms::KMS_PORT, vsock_port)
-            {
-                tracing::error!("failed to start KMS vsock forwarder: {e}");
-            }
-        }
-
         // Helios execution + consensus RPC forwarders (trustless EVM
         // verification). Helios verifies these UNTRUSTED upstreams against a
         // pinned checkpoint. Local ports mirror HeliosConfig defaults
@@ -428,4 +407,61 @@ pub fn build_evm_rpc_client(
     let client: Option<Boxed> = build_alloy();
 
     client
+}
+
+#[cfg(test)]
+mod tests {
+    use std::net::Ipv4Addr;
+    use std::path::PathBuf;
+
+    use super::pin_hosts;
+
+    const PINS: [(Ipv4Addr, &str); 2] = [
+        (Ipv4Addr::new(127, 0, 0, 1), "electrum.test"),
+        (Ipv4Addr::new(127, 0, 0, 2), "kms.eu-west-1.amazonaws.com"),
+    ];
+
+    /// A fresh hosts file next to the test binary, not in /tmp.
+    fn hosts(name: &str) -> PathBuf {
+        let dir = std::env::current_exe()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join(name);
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("hosts");
+        std::fs::write(&path, "127.0.0.1 localhost").unwrap();
+        path
+    }
+
+    #[test]
+    fn pins_are_written_once_and_together() {
+        let path = hosts("pins_are_written_once_and_together");
+        pin_hosts(&path, &PINS).unwrap();
+        let first = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(
+            first,
+            "127.0.0.1 localhost\n127.0.0.1 electrum.test\n127.0.0.2 kms.eu-west-1.amazonaws.com\n"
+        );
+        pin_hosts(&path, &PINS).unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), first);
+    }
+
+    #[test]
+    fn a_failed_pin_leaves_the_file_unchanged() {
+        let path = hosts("a_failed_pin_leaves_the_file_unchanged");
+        let before = std::fs::read(&path).unwrap();
+        // A directory in the way makes the write fail, also as root.
+        let tmp = path.with_extension("tmp");
+        std::fs::create_dir(&tmp).unwrap();
+        assert!(pin_hosts(&path, &PINS).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        std::fs::remove_dir(&tmp).unwrap();
+        pin_hosts(&path, &PINS).unwrap();
+        let after = std::fs::read_to_string(&path).unwrap();
+        for (addr, host) in PINS {
+            assert_eq!(after.matches(&format!("{addr} {host}")).count(), 1);
+        }
+    }
 }

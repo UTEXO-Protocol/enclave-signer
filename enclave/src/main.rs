@@ -26,33 +26,6 @@ fn main() {
     let bitcoin_network_str = bootstrap::bitcoin_network_str();
     let state = EnclaveState::new(bootstrap::resolve_bitcoin_network(&bitcoin_network_str));
 
-    #[cfg(feature = "kms-persistence")]
-    let state = {
-        // Explicit development import builds can run without AWS. Empty init
-        // still fails closed; there is no ephemeral-generation fallback. The
-        // existing release guard forbids allow-seed-import in production.
-        let import_only = cfg!(feature = "allow-seed-import")
-            && [
-                "KMS_KEY_ARN",
-                "KMS_REGION",
-                "KMS_SEED_ID",
-                "KMS_EXPECTED_EVM_ADDRESS",
-            ]
-            .iter()
-            .all(|name| std::env::var_os(name).is_none());
-        if import_only {
-            tracing::warn!("development import-only mode: KMS is unconfigured; empty InitializeKey requests will fail");
-            state
-        } else {
-            use utexo_bridge_enclave::{kms::CustodyFlow, seed_persistence::PersistentSeed};
-            // This application flow selects the measured custody namespace.
-            // The KMS client does not choose a default flow.
-            let source = PersistentSeed::from_env(CustodyFlow::RgbMint)
-                .unwrap_or_else(|e| panic!("KMS persistence configuration is required: {e}"));
-            state.with_seed_source(Box::new(source))
-        }
-    };
-
     // Pinned bridge config from env. Folded into the attestation `user_data`
     // commitment and cross-checked on every SignEvm.
     let bridge_config = BridgeConfig::from_env();

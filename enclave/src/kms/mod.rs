@@ -9,7 +9,7 @@
 //! only for the duration of the call; the durable object is `CiphertextBlob`.
 //!
 //! Transport. The SDK talks to `kms.<region>.amazonaws.com:443`. In a vsock
-//! build `bootstrap` pins that host name to 127.0.0.1 and forwards the port to
+//! build `SetEndpoints` pins that host name to [`KMS_LOOPBACK`] and forwards the port to
 //! the parent's `vsock-proxy` (port [`DEFAULT_KMS_VSOCK_PORT`]), so TLS still
 //! terminates inside the enclave against the real KMS certificate. Only the
 //! Amazon Trust Services roots are trusted; there is no system store.
@@ -55,6 +55,9 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const RECIPIENT_RSA_BITS: usize = 2048;
 /// KMS HTTPS port; a vsock build forwards it to the parent.
 pub const KMS_PORT: u16 = 443;
+/// The KMS forwarder listens here, so it does not collide with an EVM RPC
+/// forwarder on `127.0.0.1:443`.
+pub const KMS_LOOPBACK: std::net::Ipv4Addr = std::net::Ipv4Addr::new(127, 0, 0, 2);
 /// Parent `vsock-proxy` port for KMS (`KMS_VSOCK_PORT` overrides it).
 pub const DEFAULT_KMS_VSOCK_PORT: u32 = 8003;
 const AMAZON_TRUST_ROOTS: &[u8] = include_bytes!("amazon_trust_roots.pem");
@@ -74,8 +77,8 @@ impl CustodyFlow {
     }
 }
 
-/// Public configuration measured into the enclave image. Never accept an
-/// arbitrary KMS endpoint, key ARN or seed identifier from a host request.
+/// Public configuration. The operator sets it once, at launch
+/// (`SetEndpoints`), and the attested policy commits it.
 #[derive(Debug, Clone)]
 pub struct KmsConfig {
     pub flow: CustodyFlow,
@@ -85,19 +88,6 @@ pub struct KmsConfig {
 }
 
 impl KmsConfig {
-    pub fn from_env(flow: CustodyFlow) -> Result<Self> {
-        let read =
-            |name: &str| std::env::var(name).map_err(|_| fail(format!("{name} is required")));
-        let config = Self {
-            flow,
-            key_arn: read("KMS_KEY_ARN")?,
-            region: read("KMS_REGION")?,
-            seed_id: read("KMS_SEED_ID")?,
-        };
-        config.validate()?;
-        Ok(config)
-    }
-
     pub fn validate(&self) -> Result<()> {
         // Deliberately restrict endpoints to commercial AWS regions. Separate
         // partitions need their own pinned hostname/ARN validation rules.

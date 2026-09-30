@@ -18,6 +18,7 @@ use crate::keys::KeyManager;
 use crate::kms::{
     deserialize_secret, AwsCredentials, CustodyFlow, KmsClient, KmsConfig, MAX_CIPHERTEXT_BYTES,
 };
+use crate::policy::KmsPin;
 
 /// Upper bound on one framed broker message in either direction.
 pub(crate) const MAX_MESSAGE_BYTES: usize = 64 * 1024;
@@ -121,20 +122,16 @@ pub struct PersistentSeed {
 }
 
 impl PersistentSeed {
-    /// These nonsecret values belong in the measured EIF configuration.
-    pub fn from_env(flow: CustodyFlow) -> Result<Self> {
-        let config = KmsConfig::from_env(flow)?;
-        let expected_evm_address = match std::env::var("KMS_EXPECTED_EVM_ADDRESS") {
-            Err(std::env::VarError::NotPresent) => None,
-            Ok(value) if value.is_empty() => None,
-            Ok(value) => Some(
-                hex::decode(value.strip_prefix("0x").unwrap_or(&value))
-                    .ok()
-                    .and_then(|v| v.try_into().ok())
-                    .ok_or_else(|| failure("KMS_EXPECTED_EVM_ADDRESS must be 20-byte hex"))?,
-            ),
-            Err(_) => return Err(failure("invalid expected address configuration")),
+    /// Build the source from the KMS pin set at launch. The flow is the
+    /// caller's choice in code, never a host value.
+    pub fn new(flow: CustodyFlow, pin: &KmsPin) -> Result<Self> {
+        let config = KmsConfig {
+            flow,
+            key_arn: pin.key_arn.clone(),
+            region: pin.region.clone(),
+            seed_id: pin.seed_id.clone(),
         };
+        config.validate()?;
         let broker = SeedBroker {
             #[cfg(not(all(feature = "vsock", target_os = "linux", not(test))))]
             address: SocketAddr::from((Ipv4Addr::LOCALHOST, BROKER_LOCAL_PORT)),
@@ -143,7 +140,7 @@ impl PersistentSeed {
         Ok(Self {
             config,
             broker,
-            expected_evm_address,
+            expected_evm_address: pin.expected_evm_address,
         })
     }
 }

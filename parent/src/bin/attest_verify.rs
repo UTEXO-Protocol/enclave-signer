@@ -22,7 +22,7 @@ use std::process::ExitCode;
 use anyhow::{Context, Result};
 use clap::Parser;
 
-use attestation_verify::{EvmDataSource, EvmRpcTlsPin, SignerRole};
+use attestation_verify::{AttestedPolicy, EvmDataSource, EvmRpcTlsPin, KmsPin, SignerRole};
 use utexo_bridge_parent::attest_verify::{
     verify_attested_pubkey, AttestedPubkeyResult, ExpectedPolicy, VerifyMode,
 };
@@ -163,6 +163,26 @@ struct Cli {
     /// comma-separated 4-byte hex selectors. Default empty. Ignored with --mock.
     #[arg(long, default_value = "")]
     expect_gas_selectors: String,
+
+    /// Expected KMS key ARN set at launch (`KMS_KEY_ARN`). Required with
+    /// `--expect-signer-role mint`. Ignored with --mock.
+    #[arg(long)]
+    expect_kms_key_arn: Option<String>,
+
+    /// Expected KMS region set at launch (`KMS_REGION`). Required with
+    /// `--expect-signer-role mint`. Ignored with --mock.
+    #[arg(long)]
+    expect_kms_region: Option<String>,
+
+    /// Expected KMS seed id set at launch (`KMS_SEED_ID`). Required with
+    /// `--expect-signer-role mint`. Ignored with --mock.
+    #[arg(long)]
+    expect_kms_seed_id: Option<String>,
+
+    /// Expected EVM address of the KMS seed (`KMS_EXPECTED_EVM_ADDRESS`), as
+    /// 0x-hex. Omit to expect none. Ignored with --mock.
+    #[arg(long)]
+    expect_kms_evm_address: Option<String>,
 }
 
 /// Parse the `--expect-helios-checkpoint` flag into a 32-byte beacon block root.
@@ -190,6 +210,32 @@ fn parse_evm_rpc_tls(host: Option<&str>, ca_sha256: Option<&str>) -> Result<EvmR
         host: host.into(),
         ca_sha256,
     })
+}
+
+/// Parse the `--expect-kms-*` flags. The key ARN, region and seed id go
+/// together, and a mint signer requires them.
+fn parse_expect_kms(
+    role: SignerRole,
+    key_arn: Option<&str>,
+    region: Option<&str>,
+    seed_id: Option<&str>,
+    address: Option<&str>,
+) -> Result<Option<KmsPin>> {
+    match (key_arn, region, seed_id) {
+        (Some(key_arn), Some(region), Some(seed_id)) => Ok(Some(KmsPin {
+            key_arn: key_arn.into(),
+            region: region.into(),
+            seed_id: seed_id.into(),
+            expected_evm_address: address
+                .map(|a| parse_hex20(a, "--expect-kms-evm-address"))
+                .transpose()?,
+        })),
+        (None, None, None) if role != SignerRole::Mint && address.is_none() => Ok(None),
+        _ => anyhow::bail!(
+            "--expect-kms-key-arn, --expect-kms-region and --expect-kms-seed-id go together, \
+             and --expect-signer-role mint requires them"
+        ),
+    }
 }
 
 /// Parse the `--expect-signer-role` flag into a [`SignerRole`].
@@ -343,9 +389,17 @@ async fn run(cli: Cli) -> Result<()> {
             .as_deref()
             .map(|s| parse_hex20(s, "--expect-bridge-contract"))
             .transpose()?;
+        let signer_role = parse_signer_role(cli.expect_signer_role.as_deref())?;
+        let kms = parse_expect_kms(
+            signer_role,
+            cli.expect_kms_key_arn.as_deref(),
+            cli.expect_kms_region.as_deref(),
+            cli.expect_kms_seed_id.as_deref(),
+            cli.expect_kms_evm_address.as_deref(),
+        )?;
         let expected_policy = ExpectedPolicy::Production {
             allow_vanilla_psbt: cli.expect_vanilla_psbt,
-            signer_role: parse_signer_role(cli.expect_signer_role.as_deref())?,
+            signer_role,
             evm_source,
             evm_checkpoint,
             electrum_host,
@@ -363,6 +417,7 @@ async fn run(cli: Cli) -> Result<()> {
             gas_tx_max_fee_per_gas: cli.expect_gas_max_fee_per_gas,
             gas_tx_max_value_wei: cli.expect_gas_max_value_wei,
             gas_tx_allowed_selectors: parse_expect_gas_selectors(&cli.expect_gas_selectors)?,
+            kms,
         };
         (pcrs, VerifyMode::Real, expected_policy)
     };
@@ -401,6 +456,16 @@ fn print_ok(result: &AttestedPubkeyResult) {
         "  Bundle commitment     : 0x{}",
         hex::encode(result.bundle_commitment)
     );
+    if let AttestedPolicy::Production { kms: Some(k), .. } = &result.policy {
+        println!("  KMS key ARN           : {}", k.key_arn);
+        println!("  KMS region            : {}", k.region);
+        println!("  KMS seed id           : {}", k.seed_id);
+        println!(
+            "  KMS expected address  : {}",
+            k.expected_evm_address
+                .map_or("none".into(), |a| format!("0x{}", hex::encode(a)))
+        );
+    }
     println!(
         "  PCR0                  : 0x{}",
         hex::encode(v.pcrs.get(&0).map(|v| v.as_slice()).unwrap_or(&[]))
@@ -447,6 +512,30 @@ mod tests {
             parse_evm_source("tls").unwrap(),
             EvmDataSource::PinnedTlsRpc
         );
+    }
+
+    #[test]
+    fn mint_requires_the_kms_flags() {
+        let arn =
+            Some("arn:aws:kms:eu-west-1:123456789012:key/mrk-0123456789abcdef0123456789abcdef");
+        let (region, seed) = (Some("eu-west-1"), Some("seed-1"));
+        assert!(parse_expect_kms(SignerRole::Mint, None, None, None, None).is_err());
+        assert!(parse_expect_kms(SignerRole::Mint, arn, region, None, None).is_err());
+        assert!(parse_expect_kms(SignerRole::Burn, arn, None, None, None).is_err());
+        assert!(parse_expect_kms(SignerRole::Burn, None, None, None, Some("0x00")).is_err());
+        assert_eq!(
+            parse_expect_kms(SignerRole::Burn, None, None, None, None).unwrap(),
+            None
+        );
+        let pin = parse_expect_kms(SignerRole::Mint, arn, region, seed, None)
+            .unwrap()
+            .unwrap();
+        assert_eq!(pin.expected_evm_address, None);
+        let address = format!("0x{}", "ab".repeat(20));
+        let pin = parse_expect_kms(SignerRole::Mint, arn, region, seed, Some(&address))
+            .unwrap()
+            .unwrap();
+        assert_eq!(pin.expected_evm_address, Some([0xab; 20]));
     }
 
     #[test]

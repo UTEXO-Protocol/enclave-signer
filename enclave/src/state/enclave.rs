@@ -74,8 +74,9 @@ impl Phase {
 pub struct EnclaveState {
     pub(super) inner: Mutex<Phase>,
     network: Network,
+    /// Set once, at launch or by a test.
     #[cfg(feature = "kms-persistence")]
-    seed_source: Option<Box<dyn crate::seed_persistence::SeedSource>>,
+    seed_source: std::sync::OnceLock<Box<dyn crate::seed_persistence::SeedSource>>,
     /// Operator-configured cloning secret for the *donor* role. Required
     /// when serving `GetClone`; not used in the requester role (the
     /// requester receives the secret via `InitiateCloningRequest`).
@@ -156,7 +157,7 @@ impl EnclaveState {
             inner: Mutex::new(Phase::Initial),
             network,
             #[cfg(feature = "kms-persistence")]
-            seed_source: None,
+            seed_source: std::sync::OnceLock::new(),
             donor_cloning_secret: Mutex::new(None),
             replay_guard: NonceReplayGuard::default(),
             op_replay_guard: NonceReplayGuard::with_capacity(
@@ -250,8 +251,19 @@ impl EnclaveState {
         mut self,
         source: Box<dyn crate::seed_persistence::SeedSource>,
     ) -> Self {
-        self.seed_source = Some(source);
+        self.seed_source = std::sync::OnceLock::from(source);
         self
+    }
+
+    /// Install the seed source once. A second call is refused.
+    #[cfg(feature = "kms-persistence")]
+    pub fn set_seed_source(
+        &self,
+        source: Box<dyn crate::seed_persistence::SeedSource>,
+    ) -> Result<()> {
+        self.seed_source
+            .set(source)
+            .map_err(|_| EnclaveError::Internal("the seed source is already set".into()))
     }
 
     /// Activate only after durable persistence and attested recovery succeed.
@@ -270,7 +282,7 @@ impl EnclaveState {
     pub fn initialize_from_persistence_until(&self, deadline: Instant) -> Result<()> {
         let deadline = deadline.min(Instant::now() + crate::seed_persistence::RECOVERY_TIMEOUT);
         crate::conn::remaining_until(deadline)?;
-        let source = self.seed_source.as_ref().ok_or_else(|| {
+        let source = self.seed_source.get().ok_or_else(|| {
             EnclaveError::InvalidRequest("KMS persistence requires a configured seed source".into())
         })?;
         {
