@@ -158,7 +158,7 @@ both the enclave and every verifier share so the bytes are identical.
 
 ```
 policy_commitment =
-    u8(POLICY_COMMITMENT_V6 = 6)                    // version tag
+    u8(POLICY_COMMITMENT_V7 = 7)                    // version tag
     // Production (release, fully-pinned bridge signer):
     u8(0x01)                                        // production discriminant
     u8(allow_vanilla_psbt)                          // plain-BTC path enabled?
@@ -181,6 +181,10 @@ policy_commitment =
     gas_tx_max_value_wei_be16                       // native-value ceiling, wei (0 = unset)
     u32_be(len(selectors)) || selector(4)...        // sorted + deduped 4-byte selectors
     token_contract(20)                              // released ERC-20 (burnId preimage input), V5
+    u8(kms_present)                                 // 0 absent; 1 followed by (set at launch, V7):
+      u32_be(len(key_arn)) || key_arn || u32_be(len(region)) || region
+      || u32_be(len(seed_id)) || seed_id
+      || u8(address_present) [|| expected_evm_address(20)]
     // Development (debug/test/dev-feature/non-bridge/unpinned build):
     u8(0x00)                                        // development discriminant
 ```
@@ -188,9 +192,10 @@ policy_commitment =
 The tuple omits the Bitcoin network, concrete sats budgets, the Electrum scheme
 and port, the EVM RPC TLS port and strict Helios checkpoint-age setting.
 Image-baked values remain measured in the EIF. The endpoints are not in the
-image; the operator sets them once at launch (`SetEndpoints`), and the
-attestation shows them without a restart. Until the set,
-`GetAttestedPublicKey` is refused.
+image; the operator sets them and the KMS values once at launch
+(`SetEndpoints`), and the attestation shows them without a restart. Until the
+set, `GetAttestedPublicKey` is refused. The response carries the policy bytes
+that `user_data` commits (`attested_policy`), so a verifier can decode them.
 
 A production enclave commits the production tuple; a dev/mock enclave
 commits just `[version, 0x00]`. Because the posture flags (`allow_vanilla_psbt`,
@@ -249,9 +254,10 @@ Given `(public_keys_bundle, attestation_doc, nonce_sent, expected_pcrs)`:
    bytewise.
 6. Nonce check: `doc.nonce == nonce_sent`.
 7. Pubkey check: `doc.public_key == public_keys_bundle.evm_uncompressed_pub`.
-8. Commitment check: build the expected policy (from the expected posture +
-   the wire pins) and confirm
-   `doc.user_data == sha256(canonical_bundle(public_keys_bundle) || expected_policy)`.
+8. Commitment check: confirm
+   `doc.user_data == sha256(canonical_bundle(public_keys_bundle) || attested_policy)`,
+   decode `attested_policy`, and confirm it equals the expected policy (from
+   the expected posture + the wire pins).
 
 If all eight checks pass, the bridge's EVM address (`keccak256(evm_uncompressed_pub)[12..]`)
 is bound to the running TEE measurement *and* the enclave's attested posture
@@ -289,7 +295,9 @@ attest-verify \
 # attests `mint` fails verification. A role attests the other role's path as
 # off whatever its env says: a burn signer never attests plain-BTC signing
 # (omit --expect-vanilla-psbt), a mint signer never attests a gas rule (omit
-# the --expect-gas-* flags).
+# the --expect-gas-* flags). A mint signer also needs --expect-kms-key-arn,
+# --expect-kms-region and --expect-kms-seed-id, and --expect-kms-evm-address
+# when the operator set one.
 
 # Gas signing: also supply the image's exact expected rule when configured:
 # --expect-gas-tx-to <hex20> --expect-gas-max-gas-limit <units>
@@ -308,6 +316,7 @@ attest-verify --endpoint https://parent.example:50051 \
     --pcr0 <..> --pcr1 <..> --pcr2 <..> --expect-signer-role mint \
     --expect-funds-in-contract <hex20> --expect-evm-min-confirmations 12 \
     --expect-electrum-host <electrum host> \
+    --expect-kms-key-arn <arn> --expect-kms-region <region> --expect-kms-seed-id <id> \
     --expect-evm-rpc-host <rpc host> --expect-evm-rpc-ca-sha256 <64-hex-chars> \
     --expect-vanilla-psbt
 
@@ -316,6 +325,7 @@ attest-verify --endpoint https://parent.example:50051 \
     --pcr0 <..> --pcr1 <..> --pcr2 <..> --expect-signer-role mint \
     --expect-funds-in-contract <hex20> --expect-evm-min-confirmations 12 \
     --expect-electrum-host <electrum host> \
+    --expect-kms-key-arn <arn> --expect-kms-region <region> --expect-kms-seed-id <id> \
     --expect-evm-source helios --expect-helios-checkpoint <hex32>
 
 # Dev / CI verification (against an enclave built with --features mock-attestation).

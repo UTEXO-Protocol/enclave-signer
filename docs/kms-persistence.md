@@ -31,9 +31,9 @@ ephemeral `CiphertextForRecipient` encrypted to one call's recipient key.
 
 ## Enclave configuration
 
-Set these public Docker build arguments for `Dockerfile.enclave.mint` (the
-`rgb-mint` image variant); `build/build-enclave.sh` also forwards them. The mint
-image also requires its deployment-specific `RGB_ASSET_ID`:
+Set these public values at launch, in `SetEndpoints` (`cli set-endpoints`, or
+`/etc/utexo/enclave.env` with `deploy/deploy-host.sh`). The image does not
+carry them, and the attested policy commits them:
 
 | Setting | Value |
 | --- | --- |
@@ -45,8 +45,8 @@ image also requires its deployment-specific `RGB_ASSET_ID`:
 Keep the key ARN, `rgb-mint` flow context, seed ID and Bitcoin network unchanged
 when recovering an existing identity. A configured address pin rejects a
 different recovered seed and makes missing storage fail before generation. There is no creation switch.
-Configuration changes affect the image measurement and require updating KMS
-permissions. These endpoint settings support the standard AWS commercial partition.
+A verifier checks them with `attest-verify --expect-kms-key-arn`,
+`--expect-kms-region`, `--expect-kms-seed-id` and `--expect-kms-evm-address`. These endpoint settings support the standard AWS commercial partition.
 
 ## Parent integration
 
@@ -79,7 +79,7 @@ connects to parent CID `3`, vsock port `8004`. Local development can instead set
 
 In another terminal, or through your existing host supervisor, run AWS's
 standard `vsock-proxy` for the same KMS region. The enclave pins
-`kms.<region>.amazonaws.com` to loopback and forwards port 443 to vsock port
+`kms.<region>.amazonaws.com` to `127.0.0.2` and forwards port 443 to vsock port
 `8003` (`KMS_VSOCK_PORT` overrides it), so TLS still validates the real KMS
 certificate and the proxy only relays bytes:
 
@@ -140,15 +140,14 @@ recovery before funding the signer.
 
 ## Bootstrap, restart and recovery
 
-1. Build a new mint signer's EIF without an address pin. Configure the parent,
+1. Launch a new mint signer without an address pin. Configure the parent,
    relay, key and bucket policies for its actual CID, PCR0 and context.
 2. Run the enclave without debug mode and issue
    `utexo-bridge-parent-cli --addr vsock://18:5000 init`. Supply no seed or cloning
    secret. Verify the public identity/attestation and independently back up the
    saved S3 ciphertext. This does not import a legacy ephemeral seed.
-3. Rebuild with the verified `KMS_EXPECTED_EVM_ADDRESS`. Update the key's
-   approved PCR0 for the pinned image, start it, and verify identical keys after
-   initialization and restart. During a rollout, approved PCR0 may be a list in
+3. Set at launch the verified `KMS_EXPECTED_EVM_ADDRESS`, start the enclave,
+   and verify identical keys after initialization and restart. During a rollout, approved PCR0 may be a list in
    both the allow and deny conditions; retire the bootstrap measurement afterward.
 4. Before funding, remove `kms:GenerateDataKey` from the key's allow statement
    and add an unconditional deny for that action for the signer role. Keep

@@ -7,17 +7,10 @@ export DOCKER_BUILDKIT=1
 # Token stays in a BuildKit secret; override with per-repo --secret flags if needed.
 DOCKER_AUTH_ARGS ?= --secret id=github_token,env=GITHUB_TOKEN
 
-# Measured KMS settings apply only to the mint signer image.
 # Pass public values through Docker's environment form, not shell interpolation.
 IMAGE_ENCLAVE_MINT_BACKUP ?= $(REGISTRY_HOST)/utexo-bridge-enclave-mint$(ENVIRONMENT):$(CURRENT_DATE_TIME)-$(LATEST_COMMIT)
 IMAGE_ENCLAVE_MINT_LATEST ?= $(REGISTRY_HOST)/utexo-bridge-enclave-mint$(ENVIRONMENT):$(IMAGE_TAG)
-KMS_EXPECTED_EVM_ADDRESS ?=
-KMS_BUILD_ARGS = --build-arg KMS_KEY_ARN --build-arg KMS_REGION --build-arg KMS_SEED_ID --build-arg KMS_EXPECTED_EVM_ADDRESS
 build_enclave_mint: export RGB_ASSET_ID := $(RGB_ASSET_ID)
-build_enclave_mint: export KMS_KEY_ARN := $(KMS_KEY_ARN)
-build_enclave_mint: export KMS_REGION := $(KMS_REGION)
-build_enclave_mint: export KMS_SEED_ID := $(KMS_SEED_ID)
-build_enclave_mint: export KMS_EXPECTED_EVM_ADDRESS := $(KMS_EXPECTED_EVM_ADDRESS)
 
 .PHONY: build_parent push_parent build_enclave push_enclave build_enclave_rgb push_enclave_rgb build_enclave_ccd push_enclave_ccd build_enclave_dev push_enclave_dev build_enclave_mint push_enclave_mint check_mint_config docker docker_dev help
 
@@ -46,14 +39,11 @@ push_enclave_rgb: ## Push RGB-only enclave docker image.
 	docker push $(IMAGE_ENCLAVE_RGB_LATEST)
 
 check_mint_config:
-	@: "$${RGB_ASSET_ID:?RGB_ASSET_ID required for RGB mint builds}" \
-	   "$${KMS_KEY_ARN:?KMS_KEY_ARN required for RGB mint builds}" \
-	   "$${KMS_REGION:?KMS_REGION required for RGB mint builds}" \
-	   "$${KMS_SEED_ID:?KMS_SEED_ID required for RGB mint builds}"
+	@: "$${RGB_ASSET_ID:?RGB_ASSET_ID required for RGB mint builds}"
 
 build_enclave_mint: check_mint_config ## Build RGB mint signer image with KMS seed persistence.
-	docker build $(DOCKER_AUTH_ARGS) --build-arg RGB_ASSET_ID $(KMS_BUILD_ARGS) -f ./build/Dockerfile.enclave.mint -t $(IMAGE_ENCLAVE_MINT_BACKUP) . && \
-	docker build $(DOCKER_AUTH_ARGS) --build-arg RGB_ASSET_ID $(KMS_BUILD_ARGS) -f ./build/Dockerfile.enclave.mint -t $(IMAGE_ENCLAVE_MINT_LATEST) .
+	docker build $(DOCKER_AUTH_ARGS) --build-arg RGB_ASSET_ID -f ./build/Dockerfile.enclave.mint -t $(IMAGE_ENCLAVE_MINT_BACKUP) . && \
+	docker build $(DOCKER_AUTH_ARGS) --build-arg RGB_ASSET_ID -f ./build/Dockerfile.enclave.mint -t $(IMAGE_ENCLAVE_MINT_LATEST) .
 
 push_enclave_mint: ## Push RGB mint signer image.
 	docker push $(IMAGE_ENCLAVE_MINT_BACKUP) && \

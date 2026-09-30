@@ -239,10 +239,8 @@ profile. CI asserts every guard fires.
 
 ### Enclave image (EIF)
 
-For `Dockerfile.enclave.mint`, export `KMS_KEY_ARN`, `KMS_REGION` and
-`KMS_SEED_ID`. Set `KMS_EXPECTED_EVM_ADDRESS` when restoring a known mint
-identity. See [mint KMS setup](docs/kms-persistence.md) for the parent and policy
-requirements. Other images do not require these values.
+No image takes a KMS value: the mint enclave gets them at launch. See
+[mint KMS setup](docs/kms-persistence.md) for the parent and policy requirements.
 
 ```bash
 ./build/build-enclave.sh                                  # Dockerfile.enclave (combined)
@@ -317,9 +315,9 @@ and `utexo-bridge-enclave-burn`, both from `Dockerfile.enclave-dev.bfa` with a
 The production Dockerfiles bake the bridge pins as `ENV` (`EVM_CHAIN_ID`,
 `EVM_PROXY_CONTRACT_ADDRESS`, `RGB_ASSET_ID`, `FUNDS_IN_CONTRACT`,
 `TOKEN_CONTRACT`, `GAS_TX_ALLOWED_TO`, `BTC_MAX_TOTAL_SATS`, ...), so they are
-measured into PCR0. The cloning secret is never baked. The chain endpoints are
-not in the image: anyone can rebuild the EIF and get the same PCR0 without
-knowing them.
+measured into PCR0. The cloning secret is never baked. The chain endpoints and
+the KMS values are not in the image: anyone can rebuild the EIF and get the
+same PCR0 without knowing them.
 
 ## Running
 
@@ -360,7 +358,8 @@ vsock-proxy 8002 <EVM_RPC_HOST> 443             # EVM JSON-RPC over TLS to the p
 # Set the endpoints once. The enclave refuses a second set, and signs nothing
 # and opens no chain connection before it. A restart needs a new set.
 cli --addr vsock://16:5000 set-endpoints --electrum-url ssl://<electrum-host>:50002 \
-  --evm-rpc-host <EVM_RPC_HOST> --evm-rpc-tls-port 443 --evm-rpc-ca-der-file ca.der
+  --evm-rpc-host <EVM_RPC_HOST> --evm-rpc-tls-port 443 --evm-rpc-ca-der-file ca.der \
+  --kms-key-arn <KMS_KEY_ARN> --kms-region <KMS_REGION> --kms-seed-id <KMS_SEED_ID>   # mint only
 
 GRPC_HOST=0.0.0.0 GRPC_PORT=50051 USE_VSOCK=true ENCLAVE_VSOCK_CID=16 ./utexo-bridge-parent
 ```
@@ -412,16 +411,8 @@ Value bounds (fail closed while unset in a production build):
 
 The gas-tx rule is part of the attested policy. Unset pins commit as zero.
 
-Mint signer KMS custody (measured into `Dockerfile.enclave.mint` EIFs):
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `KMS_KEY_ARN` | required | Full symmetric KMS key ARN; aliases are rejected. |
-| `KMS_REGION` | required | Commercial AWS region matching the key ARN. |
-| `KMS_SEED_ID` | required | Stable signer identity used in the KMS encryption context and storage namespace. |
-| `KMS_EXPECTED_EVM_ADDRESS` | empty | Optional first-start identity pin: 40 hex digits with optional `0x`. Pin the verified signer before funding; missing ciphertext then fails without replacement. |
-
-Startup reuses existing ciphertext or conditionally creates it after confirmed
+Mint signer KMS custody is set at launch (see the launch table below).
+Initialization reuses existing ciphertext or conditionally creates it after confirmed
 absence. No creation-mode setting is required. See the [deployment and recovery
 procedure](docs/kms-persistence.md) for parent storage and relay configuration.
 
@@ -451,10 +442,10 @@ Optional Helios configuration (`--features helios`, with one RGB flow):
 Selected Helios initialization/sync failure leaves the provider unavailable;
 receipt-dependent signing refuses instead of falling back to raw RPC.
 
-Chain endpoints, set once at launch with `cli set-endpoints` (`SetEndpoints`),
-never in the image. The attested policy commits the Electrum host, the EVM RPC
-host and the SHA-256 of the CA. A build requires the values it uses and refuses
-the others:
+Chain endpoints and KMS values, set once at launch with `cli set-endpoints`
+(`SetEndpoints`), never in the image. The attested policy commits the Electrum
+host, the EVM RPC host, the SHA-256 of the CA and the four KMS values. A build
+requires the values it uses and refuses the others:
 
 | Value (CLI flag / env) | Build | Description |
 |------------------------|-------|-------------|
@@ -462,6 +453,10 @@ the others:
 | `--evm-rpc-host` / `EVM_RPC_HOST` | `evm-rpc` | TLS host name of the EVM RPC. No scheme, path, port or IP literal. The JSON-RPC is served at `/`. |
 | `--evm-rpc-tls-port` / `EVM_RPC_TLS_PORT` | `evm-rpc` | TLS port, 1-65535, not the Electrum port. The forwarder listens on it. |
 | `--evm-rpc-ca-der-file` / `EVM_RPC_TLS_CA_DER_FILE` | `evm-rpc` | DER of the only CA the EVM RPC TLS trusts. |
+| `--kms-key-arn` / `KMS_KEY_ARN` | `kms-persistence` | Full symmetric KMS key ARN; aliases are rejected. |
+| `--kms-region` / `KMS_REGION` | `kms-persistence` | Commercial AWS region matching the key ARN. The KMS forwarder listens on `127.0.0.2:443`. |
+| `--kms-seed-id` / `KMS_SEED_ID` | `kms-persistence` | Stable signer identity used in the KMS encryption context and storage namespace. |
+| `--kms-expected-evm-address` / `KMS_EXPECTED_EVM_ADDRESS` | `kms-persistence`, optional | Identity pin: 40 hex digits with optional `0x`. Pin the verified signer before funding; missing ciphertext then fails without replacement. |
 
 Limits and dev knobs:
 
