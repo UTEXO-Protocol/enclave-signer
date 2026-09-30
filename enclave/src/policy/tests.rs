@@ -189,6 +189,7 @@ fn production_launches_only_with_a_pinned_tls_evm_rpc() {
             evm_rpc_host: host.into(),
             evm_rpc_ca_der: ca_der,
             evm_rpc_tls_port: 443,
+            ..Default::default()
         })?;
         let tls = e.evm_rpc_tls.as_ref().unwrap();
         let (source, checkpoint, pin) = crate::bootstrap::resolve_evm_data_source(tls);
@@ -743,4 +744,31 @@ fn development_commitment_is_stable_and_distinct() {
         )
         .commitment_bytes()
     );
+}
+
+#[test]
+fn with_kms_is_committed_in_production_only() {
+    let pin = Some(KmsPin {
+        key_arn: "arn:aws:kms:eu-west-1:123456789012:key/mrk-0123456789abcdef0123456789abcdef"
+            .into(),
+        region: "eu-west-1".into(),
+        seed_id: "seed".into(),
+        expected_evm_address: None,
+    });
+    let prod = SecurityPolicy::resolve(
+        &release_bridge_ctx(),
+        &pinned_config(),
+        EvmDataSource::RawRpc,
+        None,
+        None,
+        "e.test",
+        12,
+    );
+    let pinned = prod.clone().with_kms(pin.clone());
+    assert_ne!(prod.commitment_bytes(), pinned.commitment_bytes());
+    assert!(matches!(pinned.attested(), AttestedPolicy::Production { kms, .. } if kms == pin));
+    let dev = SecurityPolicy::Development {
+        reason: DevReason::DebugBuild,
+    };
+    assert_eq!(dev.clone().with_kms(pin), dev);
 }
