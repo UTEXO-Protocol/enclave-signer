@@ -35,7 +35,7 @@ sol! {
         bytes32 indexed operationId, bytes32 indexed sourceSender, address indexed sender,
         uint256 senderNonce, uint256 amount, uint256 netAmount, uint256 tokenCommission,
         uint256 nativeCommission, uint256 sourceChainId, uint256 destinationChainId,
-        string destinationAddress
+        string destinationAddress, bytes settlementData
     );
     event FundsIn(address indexed sender, uint256 rgbOpId, uint64 amount);
 }
@@ -100,6 +100,7 @@ fn forged_receipt() -> String {
         sourceChainId: U256::ZERO,
         destinationChainId: U256::ZERO,
         destinationAddress: INVOICE.into(),
+        settlementData: Default::default(),
     };
     let lock = FundsIn {
         sender: [0xde; 20].into(),
