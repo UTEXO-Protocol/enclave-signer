@@ -220,6 +220,7 @@ async fn e2e_attest_verify_fails_on_policy_mismatch() {
             expected_bridge_contract: None,
             expected_rgb_asset_id: None,
             funds_in_contract: [0x11; 20],
+            token_contract: [0x22; 20],
             evm_min_confirmations: 12,
             gas_tx_allowed_to: [0u8; 20],
             gas_tx_max_gas_limit: 0,

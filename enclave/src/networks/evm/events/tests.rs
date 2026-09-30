@@ -47,7 +47,7 @@ fn rejects_a_tail_offset_past_the_data() {
 #[test]
 fn rejects_a_tail_length_past_the_data() {
     let mut d = bridge_funds_in_data(1000, 950, 50, SAMPLE_INVOICE);
-    let len_at = 8 * 32;
+    let len_at = 9 * 32;
     // Under the size cap, so the bounds check is what must catch it.
     d[len_at..len_at + 32].copy_from_slice(&word(1_000));
     let err = decode_abi_string(&d, BFI_DEST_ADDRESS_HEAD_OFF, "destinationAddress").unwrap_err();
@@ -65,7 +65,7 @@ fn rejects_a_tail_over_the_size_cap() {
 #[test]
 fn rejects_a_non_utf8_tail() {
     let mut d = bridge_funds_in_data(1000, 950, 50, "abcd");
-    let at = 9 * 32; // first byte of the string body
+    let at = 10 * 32; // first byte of the string body
     d[at] = 0xFF;
     let err = decode_abi_string(&d, BFI_DEST_ADDRESS_HEAD_OFF, "destinationAddress").unwrap_err();
     assert!(err.to_string().contains("not valid UTF-8"), "{err}");
@@ -156,7 +156,7 @@ fn extract_uint256_rejects_overflow() {
 fn topic0_vectors_are_pinned() {
     assert_eq!(
         hex::encode(event_topic0(BRIDGE_FUNDS_IN_SIG)),
-        "96266da276e870bb3d9c25740c9e24ec6448fc7bbed72ca384c3b8952574014c",
+        "f15e44b33fca27f251e63583a6666ef06fc5993fbabb58356f27d07cee2811ab",
         "BridgeFundsIn topic0 drifted"
     );
     assert_eq!(
@@ -166,14 +166,19 @@ fn topic0_vectors_are_pinned() {
     );
 }
 
-/// Pins the pre-migration topic0 so a silent revert to the 9-field signature
-/// fails loudly here instead of looking like "no deposit found".
+/// Pins the pre-migration topic0s so a silent revert to the 9-field or the
+/// 11-field (pre-`settlementData`, bridge PR #152) signature fails loudly here
+/// instead of looking like "no deposit found".
 #[test]
 fn legacy_topic0_is_not_in_use() {
+    let current = hex::encode(event_topic0(BRIDGE_FUNDS_IN_SIG));
     assert_ne!(
-        hex::encode(event_topic0(BRIDGE_FUNDS_IN_SIG)),
-        "08f62fdb70e8436181cbb1e561f6059677b179778bb0e0b9789a277eca0767e5",
-        "still filtering on the pre-migration BridgeFundsIn signature"
+        current, "08f62fdb70e8436181cbb1e561f6059677b179778bb0e0b9789a277eca0767e5",
+        "still filtering on the 9-field BridgeFundsIn signature"
+    );
+    assert_ne!(
+        current, "96266da276e870bb3d9c25740c9e24ec6448fc7bbed72ca384c3b8952574014c",
+        "still filtering on the pre-#152 BridgeFundsIn signature (no settlementData)"
     );
 }
 

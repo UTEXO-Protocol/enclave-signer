@@ -1,6 +1,6 @@
 use super::*;
 
-use alloy_primitives::{Address, Bytes, U256};
+use alloy_primitives::{Address, Bytes, FixedBytes, U256};
 use alloy_sol_types::SolCall;
 
 use crate::networks::evm::validation::{
@@ -34,6 +34,28 @@ fn mock_funds_out_calldata_full(
     proof: Bytes,
     settlement_data: Bytes,
 ) -> Vec<u8> {
+    mock_funds_out_calldata_identity(
+        recipient,
+        amount,
+        proof,
+        settlement_data,
+        String::new(),
+        SOURCE_BURN_TX_ID,
+    )
+}
+
+/// A non-zero `sourceBurnTxId` for the fixtures whose check is not this
+/// field; [`source_burn`] pins the real bind.
+const SOURCE_BURN_TX_ID: [u8; 32] = [0x5b; 32];
+
+fn mock_funds_out_calldata_identity(
+    recipient: Address,
+    amount: u64,
+    proof: Bytes,
+    settlement_data: Bytes,
+    source_address: String,
+    source_burn_tx_id: [u8; 32],
+) -> Vec<u8> {
     fundsOutCall {
         params: FundsOutParams {
             recipient,
@@ -41,9 +63,10 @@ fn mock_funds_out_calldata_full(
             burnId: U256::ZERO,
             sourceChainId: U256::ZERO,
             destinationChainId: U256::ZERO,
-            sourceAddress: String::new(),
+            sourceAddress: source_address,
             proof,
             settlementData: settlement_data,
+            sourceBurnTxId: FixedBytes(source_burn_tx_id),
         },
     }
     .abi_encode()
@@ -81,7 +104,7 @@ fn mock_calldata_decodes_back_to_its_fields() {
     assert_eq!(&cd[..4], &FUNDS_OUT_SELECTOR_POOLS);
 }
 
-/// Guard against a half-finished migration: a flat 8-argument body must not
+/// Guard against a half-finished migration: a flat 9-argument body must not
 /// decode as the tuple shape.
 ///
 /// With a zero `recipient`, as here, the ABI decoder accepts the legacy
@@ -91,13 +114,13 @@ fn mock_calldata_decodes_back_to_its_fields() {
 /// non-zero recipient fails the decode by itself, so this pins the harder
 /// case.
 fn legacy_flat_calldata(recipient: [u8; 32]) -> Vec<u8> {
-    let mut legacy = Vec::with_capacity(4 + 8 * 32);
+    let mut legacy = Vec::with_capacity(4 + 9 * 32);
     legacy.extend_from_slice(&FUNDS_OUT_SELECTOR_POOLS);
     legacy.extend_from_slice(&recipient);
     let mut amt = [0u8; 32];
     amt[24..].copy_from_slice(&1_000u64.to_be_bytes());
     legacy.extend_from_slice(&amt); // amount, at the old flat offset 36
-    legacy.extend_from_slice(&[0u8; 32 * 6]); // remaining flat head slots
+    legacy.extend_from_slice(&[0u8; 32 * 7]); // remaining flat head slots
     legacy
 }
 
@@ -114,6 +137,121 @@ fn rejects_legacy_flat_encoding_real_recipient() {
     let mut recipient = [0u8; 32];
     recipient[12..].copy_from_slice(&[0x22; 20]);
     assert!(decode_funds_out_params(&legacy_flat_calldata(recipient)).is_err());
+}
+
+/// A calldata in the shape the bridge accepted before PR #152 (no
+/// `sourceBurnTxId`, selector `0xdc771390`) must fail closed: the enclave
+/// would otherwise sign an intent the new `MultisigProxy` cannot verify.
+#[test]
+fn rejects_pre_source_burn_tx_id_calldata() {
+    let current = mock_funds_out_calldata(1_000);
+    // Drop the appended static word: the tuple then has eight fields, so
+    // every dynamic tail offset is one word too large for its head.
+    let mut legacy = current.clone();
+    legacy[..4].copy_from_slice(&[0xdc, 0x77, 0x13, 0x90]);
+    assert!(
+        decode_funds_out_params(&legacy).is_err(),
+        "old selector must not decode"
+    );
+    assert!(
+        decode_funds_out_params(&current).is_ok(),
+        "the current shape is what the fixture builder emits"
+    );
+}
+
+// Source-burn identity - `validate_funds_out_source_burn_tx_id`. Flow-agnostic:
+// the bind reads the last transition's OpId only, whatever its type.
+// (`sourceChainId` / `sourceAddress` are bound in `validation.rs`, see
+// `validate_rgb_source_identity`.)
+mod source_burn {
+    use super::*;
+    use crate::networks::rgb::validation::{bfa, TransitionSummary};
+
+    /// OpId as the consignment parser yields it: 64 lowercase hex chars.
+    const OP_ID_HEX: &str = "a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90";
+
+    fn op_id_bytes() -> [u8; 32] {
+        hex::decode(OP_ID_HEX).unwrap().try_into().unwrap()
+    }
+
+    fn settling_transition(op_id: &str) -> TransitionSummary {
+        TransitionSummary {
+            op_id: op_id.into(),
+            transition_type: bfa::TS_TRANSFER,
+            total_output_amount: 1000,
+            asset_output_amount: 1000,
+            outputs: Vec::new(),
+            burned_asset_amount: None,
+            burn_recipient: None,
+        }
+    }
+
+    fn calldata_with(source_address: &str, source_burn_tx_id: [u8; 32]) -> Vec<u8> {
+        mock_funds_out_calldata_identity(
+            Address::ZERO,
+            1000,
+            Bytes::new(),
+            Bytes::new(),
+            source_address.to_string(),
+            source_burn_tx_id,
+        )
+    }
+
+    #[test]
+    fn passes_when_the_calldata_cites_the_settling_op_id() {
+        let cd = calldata_with("", op_id_bytes());
+        let validated = validated_with_last(settling_transition(OP_ID_HEX));
+        assert!(validate_funds_out_source_burn_tx_id(&params_of(&cd), &validated).is_ok());
+    }
+
+    #[test]
+    fn accepts_a_0x_prefixed_op_id() {
+        let cd = calldata_with("", op_id_bytes());
+        let validated = validated_with_last(settling_transition(&format!("0x{OP_ID_HEX}")));
+        assert!(validate_funds_out_source_burn_tx_id(&params_of(&cd), &validated).is_ok());
+    }
+
+    /// The whole point of the bind: a fresh id here would be a fresh `burnId`
+    /// for a burn already settled.
+    #[test]
+    fn rejects_an_id_that_is_not_the_settling_op_id() {
+        let mut other = op_id_bytes();
+        other[31] ^= 0x01;
+        let cd = calldata_with("", other);
+        let validated = validated_with_last(settling_transition(OP_ID_HEX));
+        let err = validate_funds_out_source_burn_tx_id(&params_of(&cd), &validated).unwrap_err();
+        assert!(err.to_string().contains("sourceBurnTxId mismatch"), "{err}");
+    }
+
+    #[test]
+    fn rejects_a_zero_id() {
+        let cd = calldata_with("", [0u8; 32]);
+        let validated = validated_with_last(settling_transition(OP_ID_HEX));
+        let err = validate_funds_out_source_burn_tx_id(&params_of(&cd), &validated).unwrap_err();
+        assert!(err.to_string().contains("is zero"), "{err}");
+    }
+
+    #[test]
+    fn rejects_a_consignment_with_no_transition() {
+        let cd = calldata_with("", op_id_bytes());
+        let mut validated = validated_with_last(settling_transition(OP_ID_HEX));
+        validated.last_transition = None;
+        assert!(validate_funds_out_source_burn_tx_id(&params_of(&cd), &validated).is_err());
+    }
+
+    /// A malformed op_id is an inconsistency inside the validated consignment,
+    /// never something to paper over with a partial compare.
+    #[test]
+    fn rejects_a_non_hex_or_short_op_id() {
+        let cd = calldata_with("", op_id_bytes());
+        for bad in ["burn-op", "abcd", &OP_ID_HEX[..62]] {
+            let validated = validated_with_last(settling_transition(bad));
+            assert!(
+                validate_funds_out_source_burn_tx_id(&params_of(&cd), &validated).is_err(),
+                "op_id {bad:?} must refuse"
+            );
+        }
+    }
 }
 
 // fundsOut amount tests - `validate_funds_out_amount` (+ the witness
@@ -461,6 +599,7 @@ mod settlement {
 
 mod btc_relay {
     use super::*;
+    use crate::networks::rgb::spv::checkpoint::{parse_checkpoint_spec, REGTEST_CHECKPOINT};
     use crate::networks::rgb::spv::{Checkpoint, HeaderChain, Network};
     use bitcoin::block::{Header, Version};
     use bitcoin::consensus::serialize;
@@ -475,38 +614,95 @@ mod btc_relay {
         0x1f, 0x20,
     ];
 
-    /// Block holding [`WITNESS_TXID`].
-    const ANCHOR_HEIGHT: u32 = 2;
+    /// Block holding [`WITNESS_TXID`]. Its ten prior timestamps are above
+    /// the checkpoint.
+    const ANCHOR_HEIGHT: u32 = 11;
     /// Default tip: leaves the anchor 7 deep, past `SPV_MIN_CONFIRMATIONS`.
-    const TIP_HEIGHT: u32 = 8;
+    const TIP_HEIGHT: u32 = 17;
 
     /// Encode `n` as a big-endian 32-byte ABI word.
     fn u256_be(n: u64) -> [u8; 32] {
-        let mut w = [0u8; 32];
-        w[24..].copy_from_slice(&n.to_be_bytes());
-        w
+        U256::from(n).to_be_bytes()
     }
 
-    /// A regtest chain of `tip` synthetic headers (PoW is skipped on
-    /// regtest - same pattern as the `spv::chain` tests). The header at
+    /// Raise the nonce until the header meets its own target, so the
+    /// relay accepts it too.
+    fn mined(mut header: Header) -> Header {
+        while header.validate_pow(header.target()).is_err() {
+            header.nonce += 1;
+        }
+        header
+    }
+
+    /// The checkpoint block every fixture chain starts from.
+    fn h0() -> Header {
+        mined(Header {
+            version: Version::ONE,
+            prev_blockhash: bitcoin::BlockHash::from_byte_array([0u8; 32]),
+            merkle_root: bitcoin::TxMerkleNode::from_byte_array([0u8; 32]),
+            time: 1_700_000_000,
+            bits: bitcoin::CompactTarget::from_consensus(0x207fffff),
+            nonce: 0,
+        })
+    }
+
+    /// BtcRelay's 160-byte `StoredBlockHeader` at `height`, as
+    /// `updateChain` derives it from the record seeded at [`h0`].
+    fn relay_model(chain: &HeaderChain, height: u32) -> Vec<u8> {
+        let mut header = h0();
+        let mut times = [header.time; 10];
+        let mut last_diff = header.time;
+        let mut work = bitcoin::Work::from_be_bytes(chain.checkpoint().chain_work.unwrap());
+        for h in 1..=height {
+            times.rotate_left(1);
+            times[9] = header.time;
+            header = *chain.header_at(h).expect("model needs every header");
+            work = work + header.work();
+            if h % 2016 == 0 {
+                last_diff = header.time;
+            }
+        }
+        let mut record = serialize(&header);
+        record.extend_from_slice(&work.to_be_bytes());
+        record.extend_from_slice(&height.to_be_bytes());
+        record.extend_from_slice(&last_diff.to_be_bytes());
+        for t in times {
+            record.extend_from_slice(&t.to_be_bytes());
+        }
+        record
+    }
+
+    /// BtcRelay's commitment at `height`: `keccak256` of [`relay_model`].
+    fn relay_commit(chain: &HeaderChain, height: u32) -> [u8; 32] {
+        alloy_primitives::keccak256(relay_model(chain, height)).0
+    }
+
+    /// A regtest chain of `tip` mined headers above [`h0`]. The header at
     /// [`ANCHOR_HEIGHT`] commits exactly one transaction, [`WITNESS_TXID`],
     /// so a proof with an empty path reconstructs its Merkle root.
     ///
-    /// Returns the chain and every header's DISPLAY-order hash, indexed by
-    /// height (slot 0 is the checkpoint placeholder).
+    /// Returns the chain and the relay commitment at every height.
     fn chain_to(tip: u32) -> (HeaderChain, Vec<[u8; 32]>) {
+        chain_to_with_work(tip, REGTEST_CHECKPOINT.chain_work)
+    }
+
+    /// [`chain_to`] over a checkpoint with the given `chain_work`. With
+    /// `None` no relay record can be rebuilt, so the returned commitment
+    /// list is empty.
+    fn chain_to_with_work(tip: u32, chain_work: Option<[u8; 32]>) -> (HeaderChain, Vec<[u8; 32]>) {
+        let h0 = h0();
         let mut chain = HeaderChain::new(
             Network::Regtest,
             Checkpoint {
                 height: 0,
-                hash: [0u8; 32],
+                hash: h0.block_hash().to_byte_array(),
                 bits: 0x207fffff,
-                time: 1_700_000_000,
+                time: h0.time,
                 is_real: false,
+                chain_work,
             },
         );
-        let mut hashes = vec![[0u8; 32]];
-        let mut prev = bitcoin::BlockHash::from_byte_array([0u8; 32]);
+        let mut prev = h0.block_hash();
         for height in 1..=tip {
             let merkle_root = if height == ANCHOR_HEIGHT {
                 let mut internal = WITNESS_TXID;
@@ -515,21 +711,23 @@ mod btc_relay {
             } else {
                 bitcoin::TxMerkleNode::from_byte_array([0xAB; 32])
             };
-            let header = Header {
+            let header = mined(Header {
                 version: Version::ONE,
                 prev_blockhash: prev,
                 merkle_root,
                 time: 1_700_000_000 + height,
                 bits: bitcoin::CompactTarget::from_consensus(0x207fffff),
                 nonce: 0,
-            };
+            });
             chain.submit_headers(height, &[serialize(&header)]).unwrap();
             prev = header.block_hash();
-            let mut display: [u8; 32] = header.block_hash().to_byte_array();
-            display.reverse();
-            hashes.push(display);
         }
-        (chain, hashes)
+        let commits = if chain_work.is_some() {
+            (0..=tip).map(|h| relay_commit(&chain, h)).collect()
+        } else {
+            Vec::new()
+        };
+        (chain, commits)
     }
 
     fn chain() -> (HeaderChain, Vec<[u8; 32]>) {
@@ -595,13 +793,29 @@ mod btc_relay {
         (validated, proofs)
     }
 
-    /// Run the check against a consignment anchored at [`ANCHOR_HEIGHT`].
+    /// Run the check against a consignment anchored at [`ANCHOR_HEIGHT`],
+    /// in the default `BTC_RELAY_MODE=required`.
     fn check(cd: &[u8], chain: &HeaderChain) -> Result<()> {
         check_at(cd, chain, ANCHOR_HEIGHT)
     }
 
-    /// Run the check against a consignment anchored at `anchor_height`.
+    /// Run the check against a consignment anchored at `anchor_height`, in
+    /// the default `BTC_RELAY_MODE=required`.
     fn check_at(cd: &[u8], chain: &HeaderChain, anchor_height: u32) -> Result<()> {
+        check_in(cd, chain, anchor_height, BtcRelayMode::Required)
+    }
+
+    /// [`check`] on a stand without a BtcRelay (`BTC_RELAY_MODE=none`).
+    fn check_no_relay(cd: &[u8], chain: &HeaderChain) -> Result<()> {
+        check_in(cd, chain, ANCHOR_HEIGHT, BtcRelayMode::None)
+    }
+
+    fn check_in(
+        cd: &[u8],
+        chain: &HeaderChain,
+        anchor_height: u32,
+        mode: BtcRelayMode,
+    ) -> Result<()> {
         let (validated, proofs) = anchored_at(anchor_height);
         verify_btc_relay_agreement(
             &params_of(cd),
@@ -609,7 +823,14 @@ mod btc_relay {
             &proofs,
             chain,
             &ChainPins::new(),
+            mode,
         )
+    }
+
+    /// The proof the bridge sends when it has no BtcRelay configured: real
+    /// heights, both commitment words zero.
+    fn zero_commit_calldata() -> Vec<u8> {
+        calldata(ANCHOR_HEIGHT, [0u8; 32], TIP_HEIGHT, [0u8; 32])
     }
 
     // -- Calldata proof vs the enclave's own headers.
@@ -620,21 +841,120 @@ mod btc_relay {
         assert!(check(&good_calldata(&hashes), &chain).is_ok());
     }
 
-    /// Right height, wrong hash: the anchor bind owns the `source` half, so
-    /// this surfaces as a mismatch against the consignment's anchor.
+    // -- BTC_RELAY_MODE. The bridge zeroes both commitment words when it has
+    // no BtcRelay configured; only an enclave that says so accepts that.
+
+    /// `required` (the default) refuses a zero word before touching the
+    /// chain, and the message names the knob.
     #[test]
-    fn accepts_any_source_commitment_at_the_anchor_height() {
+    fn required_mode_rejects_zero_commitments() {
         let (chain, hashes) = chain();
-        // BtcRelay's commitment is keccak256 over its own 160-byte record,
-        // which the enclave cannot compute. It is verified on-chain against
-        // the relay instead; the enclave binds the height.
+        let err = check(&zero_commit_calldata(), &chain).unwrap_err();
+        assert!(
+            err.to_string().contains("zero source commitment")
+                && err.to_string().contains("BTC_RELAY_MODE=required"),
+            "got: {err}"
+        );
+
+        // One zero word is just as refused.
+        let cd = calldata(
+            ANCHOR_HEIGHT,
+            hashes[ANCHOR_HEIGHT as usize],
+            TIP_HEIGHT,
+            [0u8; 32],
+        );
+        let err = check(&cd, &chain).unwrap_err();
+        assert!(
+            err.to_string().contains("zero latest commitment"),
+            "got: {err}"
+        );
+    }
+
+    /// `none`: both words zero, heights bound, compare skipped.
+    #[test]
+    fn none_mode_accepts_zero_commitments() {
+        let (chain, _) = chain();
+        assert!(check_no_relay(&zero_commit_calldata(), &chain).is_ok());
+    }
+
+    /// `none` needs no relay record, so no checkpoint chainwork either (the
+    /// shape of the built-in signet checkpoint).
+    #[test]
+    fn none_mode_needs_no_checkpoint_chainwork() {
+        let (chain, _) = chain_to_with_work(TIP_HEIGHT, None);
+        assert!(check_no_relay(&zero_commit_calldata(), &chain).is_ok());
+    }
+
+    /// `none` refuses a real commitment: the bridge thinks there is a relay,
+    /// the enclave was told there is none.
+    #[test]
+    fn none_mode_rejects_a_non_zero_commitment() {
+        let (chain, hashes) = chain();
+        let err = check_no_relay(&good_calldata(&hashes), &chain).unwrap_err();
+        assert!(
+            err.to_string().contains("BTC_RELAY_MODE=none")
+                && err.to_string().contains("disagree about the relay"),
+            "got: {err}"
+        );
+
+        let cd = calldata(
+            ANCHOR_HEIGHT,
+            [0u8; 32],
+            TIP_HEIGHT,
+            hashes[TIP_HEIGHT as usize],
+        );
+        let err = check_no_relay(&cd, &chain).unwrap_err();
+        assert!(err.to_string().contains("latest commitment"), "got: {err}");
+    }
+
+    /// `none` relaxes only step 4: the source height must still be the
+    /// consignment anchor.
+    #[test]
+    fn none_mode_still_binds_the_source_height() {
+        let (chain, _) = chain();
+        let cd = calldata(ANCHOR_HEIGHT + 1, [0u8; 32], TIP_HEIGHT, [0u8; 32]);
+        let err = check_no_relay(&cd, &chain).unwrap_err();
+        assert!(
+            err.to_string().contains("fundsOut source block mismatch"),
+            "got: {err}"
+        );
+    }
+
+    /// ... and the relay tip must still be fresh.
+    #[test]
+    fn none_mode_still_binds_relay_freshness() {
+        let (chain, _) = chain_to(TIP_HEIGHT + MAX_RELAY_TIP_LAG_BLOCKS + 1);
+        let err = check_no_relay(&zero_commit_calldata(), &chain).unwrap_err();
+        assert!(
+            err.to_string().contains("too stale to prove freshness"),
+            "got: {err}"
+        );
+    }
+
+    /// ... and an empty proof is still refused.
+    #[test]
+    fn none_mode_still_rejects_an_empty_proof() {
+        let (chain, _) = chain();
+        let cd = mock_funds_out_calldata_with_proof(1_000, Bytes::new());
+        assert!(check_no_relay(&cd, &chain).is_err());
+    }
+
+    /// Right height, wrong commitment.
+    #[test]
+    fn rejects_a_source_commitment_that_is_not_the_relay_record() {
+        let (chain, hashes) = chain();
         let cd = calldata(
             ANCHOR_HEIGHT,
             [0x11; 32],
             TIP_HEIGHT,
             hashes[TIP_HEIGHT as usize],
         );
-        assert!(check(&cd, &chain).is_ok());
+        let err = check(&cd, &chain).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("relay commitment mismatch at source height 11"),
+            "got: {err}"
+        );
     }
 
     /// The bind that remains: a source height other than the consignment's
@@ -690,16 +1010,25 @@ mod btc_relay {
         );
     }
 
+    /// The relay's tip is on another branch above the anchor.
     #[test]
-    fn accepts_any_latest_commitment_at_a_known_height() {
-        let (chain, hashes) = chain();
+    fn rejects_a_latest_commitment_from_another_branch() {
+        let (mut chain_a, hashes) = chain();
+        submit_extension(&mut chain_a, 3);
+        let (mut chain_b, _) = chain();
+        submit_reorg(&mut chain_b, ANCHOR_HEIGHT + 3, 1);
         let cd = calldata(
             ANCHOR_HEIGHT,
             hashes[ANCHOR_HEIGHT as usize],
             TIP_HEIGHT,
-            [0x11; 32],
+            relay_commit(&chain_b, TIP_HEIGHT),
         );
-        assert!(check(&cd, &chain).is_ok());
+        let err = check(&cd, &chain_a).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("relay commitment mismatch at latest height 17"),
+            "got: {err}"
+        );
     }
 
     /// What `latest` still proves: the enclave holds a header there, so it
@@ -880,6 +1209,7 @@ mod btc_relay {
             &proofs,
             &chain,
             &ChainPins::new(),
+            BtcRelayMode::Required,
         )
         .unwrap_err();
         assert!(err.to_string().contains("no merkle proof"), "got: {err}");
@@ -900,16 +1230,16 @@ mod btc_relay {
         let mut prev = <bitcoin::BlockHash as bitcoin::hashes::Hash>::from_byte_array(pred);
         let mut raw = Vec::new();
         for height in from_height..=(TIP_HEIGHT + extra) {
-            let header = Header {
+            let header = mined(Header {
                 version: Version::ONE,
                 prev_blockhash: prev,
+                // Different from `chain_to`, so each new block gets a new
+                // hash.
                 merkle_root: bitcoin::TxMerkleNode::from_byte_array([0xCD; 32]),
                 time: 1_700_000_000 + height,
                 bits: bitcoin::CompactTarget::from_consensus(0x207fffff),
-                // Different from `chain_to`, so each new block gets a new
-                // hash.
-                nonce: 7,
-            };
+                nonce: 0,
+            });
             prev = header.block_hash();
             raw.push(serialize(&header));
         }
@@ -928,14 +1258,14 @@ mod btc_relay {
         let start = chain.tip_height() + 1;
         let mut raw = Vec::new();
         for height in start..start + count {
-            let header = Header {
+            let header = mined(Header {
                 version: Version::ONE,
                 prev_blockhash: prev,
                 merkle_root: bitcoin::TxMerkleNode::from_byte_array([0xEF; 32]),
                 time: 1_700_000_000 + height,
                 bits: bitcoin::CompactTarget::from_consensus(0x207fffff),
                 nonce: 0,
-            };
+            });
             prev = header.block_hash();
             raw.push(serialize(&header));
         }
@@ -953,6 +1283,7 @@ mod btc_relay {
             &proofs,
             chain,
             &pins,
+            BtcRelayMode::Required,
         )
         .expect("terminal check passes on the fixture chain");
         pins
@@ -1011,6 +1342,142 @@ mod btc_relay {
         );
     }
 
+    /// The enclave holds branch A, with the burn in `A[11]`. The relay
+    /// follows branch B. The proof cites B's relay records at the anchor
+    /// height and at B's tip. The heights agree, the blocks do not.
+    #[test]
+    fn rejects_a_source_commitment_from_another_branch() {
+        let (mut chain_a, _) = chain();
+        submit_extension(&mut chain_a, 3);
+        let (mut chain_b, _) = chain();
+        submit_reorg(&mut chain_b, ANCHOR_HEIGHT, 2);
+
+        let h = ANCHOR_HEIGHT;
+        assert_eq!(chain_a.hash_at(h - 1), chain_b.hash_at(h - 1));
+        assert_ne!(chain_a.hash_at(h), chain_b.hash_at(h));
+        for chain in [&chain_a, &chain_b] {
+            for j in 1..=chain.tip_height() {
+                let header = chain.header_at(j).unwrap();
+                assert!(header.validate_pow(header.target()).is_ok());
+            }
+        }
+
+        let latest = chain_b.tip_height();
+        let source_b = relay_commit(&chain_b, h);
+        let cd = calldata(h, source_b, latest, relay_commit(&chain_b, latest));
+        let err = check(&cd, &chain_a).expect_err("a branch-B source commitment must be refused");
+        let msg = err.to_string();
+        assert!(
+            msg.contains(&format!("relay commitment mismatch at source height {h}")),
+            "got: {msg}"
+        );
+        assert!(msg.contains(&hex::encode(source_b)), "got: {msg}");
+        assert!(
+            msg.contains(&hex::encode(relay_commit(&chain_a, h))),
+            "got: {msg}"
+        );
+    }
+
+    /// Honest commitments across a retarget boundary.
+    #[test]
+    fn accepts_relay_commitments_across_a_retarget_boundary() {
+        let (chain, hashes) = chain_to(2030);
+        let cd = calldata(ANCHOR_HEIGHT, hashes[11], 2016, hashes[2016]);
+        check(&cd, &chain).expect("honest commitments pass");
+    }
+
+    #[test]
+    fn relay_record_refuses_a_height_below_the_checkpoint_window() {
+        let (chain, _) = chain();
+        let err = relay_record(&chain, 9).unwrap_err();
+        assert!(
+            err.to_string().contains("below its checkpoint"),
+            "got: {err}"
+        );
+    }
+
+    /// A chain of 30 mined headers above a checkpoint at height 2000, from
+    /// a `SPV_CHECKPOINT` spec. `chain_work` is appended to the spec.
+    fn chain_above_2000(chain_work: &str) -> HeaderChain {
+        let base = h0();
+        let spec = format!(
+            "2000:{}:0x207fffff:{}{chain_work}",
+            base.block_hash(),
+            base.time
+        );
+        let cp = parse_checkpoint_spec(&spec, Network::Regtest, &REGTEST_CHECKPOINT).unwrap();
+        let mut chain = HeaderChain::new(Network::Regtest, cp);
+        let mut prev = base.block_hash();
+        for height in 2001..=2030 {
+            let header = mined(Header {
+                version: Version::ONE,
+                prev_blockhash: prev,
+                merkle_root: bitcoin::TxMerkleNode::from_byte_array([0xAB; 32]),
+                time: 1_700_000_000 + height,
+                bits: bitcoin::CompactTarget::from_consensus(0x207fffff),
+                nonce: 0,
+            });
+            chain.submit_headers(height, &[serialize(&header)]).unwrap();
+            prev = header.block_hash();
+        }
+        chain
+    }
+
+    #[test]
+    fn relay_record_refuses_a_missing_epoch_start() {
+        // Work of 2001 regtest blocks: 2001 * 2.
+        let chain = chain_above_2000(&format!(":{:064x}", 2001 * 2));
+        // Epoch start 0 is below the checkpoint.
+        let err = relay_record(&chain, 2015).unwrap_err();
+        assert!(err.to_string().contains("epoch start 0"), "got: {err}");
+
+        // Epoch start 2016 is held.
+        let record = relay_record(&chain, 2020).unwrap();
+        assert_eq!(&record[..80], serialize(chain.header_at(2020).unwrap()));
+        assert_eq!(record[80..112], u256_be(2021 * 2));
+        assert_eq!(record[112..116], 2020u32.to_be_bytes());
+        assert_eq!(record[116..120], (1_700_000_000u32 + 2016).to_be_bytes());
+        for (i, h) in (2010..2020u32).enumerate() {
+            assert_eq!(
+                record[120 + 4 * i..124 + 4 * i],
+                (1_700_000_000 + h).to_be_bytes()
+            );
+        }
+    }
+
+    #[test]
+    fn relay_record_refuses_a_checkpoint_without_chainwork() {
+        let chain = chain_above_2000("");
+        let err = relay_record(&chain, 2020).unwrap_err();
+        assert!(err.to_string().contains("has no chainwork"), "got: {err}");
+    }
+
+    /// Records produced by `StoredBlockHeaderTestnet.updateChain` for the
+    /// headers of `chain_to(2030)`, seeded at [`h0`] with chainwork 2.
+    #[test]
+    fn relay_record_matches_the_relay_contract() {
+        let (chain, _) = chain_to(2030);
+        let fixture = include_str!("../../../../tests/fixtures/btc_relay_records.txt");
+        let mut lines = 0;
+        for line in fixture.lines() {
+            let (height, record) = line.split_once(' ').unwrap();
+            let height: u32 = height.parse().unwrap();
+            let record = hex::decode(record).unwrap();
+            assert_eq!(
+                relay_record(&chain, height).unwrap().to_vec(),
+                record,
+                "height {height}"
+            );
+            assert_eq!(
+                relay_model(&chain, height),
+                record,
+                "model at height {height}"
+            );
+            lines += 1;
+        }
+        assert_eq!(lines, 5);
+    }
+
     #[test]
     fn rejects_when_consignment_has_no_witness_bundle() {
         let (chain, hashes) = chain();
@@ -1022,6 +1489,7 @@ mod btc_relay {
             &proofs,
             &chain,
             &ChainPins::new(),
+            BtcRelayMode::Required,
         )
         .unwrap_err();
         assert!(

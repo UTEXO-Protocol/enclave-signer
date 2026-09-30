@@ -73,6 +73,10 @@ pub enum ExpectedPolicy {
         /// An empty string requires no RGB asset.
         expected_rgb_asset_id: Option<String>,
         funds_in_contract: [u8; 20],
+        /// Expected ERC-20 the Bridge releases (`TOKEN_CONTRACT`), the
+        /// `burnId` preimage input the enclave pinned. Not on the wire; the
+        /// operator declares it and the commitment must match.
+        token_contract: [u8; 20],
         evm_min_confirmations: u64,
         /// Expected gas-tx (`SignRawDigest`) rule the enclave committed.
         /// An all-zero destination, zero caps, and empty selectors mean
@@ -244,6 +248,7 @@ fn expected_attested_policy(
             expected_bridge_contract,
             expected_rgb_asset_id,
             funds_in_contract,
+            token_contract,
             evm_min_confirmations,
             gas_tx_allowed_to,
             gas_tx_max_gas_limit,
@@ -315,6 +320,7 @@ fn expected_attested_policy(
                 gas_tx_max_fee_per_gas: *gas_tx_max_fee_per_gas,
                 gas_tx_max_value_wei: *gas_tx_max_value_wei,
                 gas_tx_allowed_selectors: gas_tx_allowed_selectors.clone(),
+                token_contract: *token_contract,
             })
         }
     }
@@ -339,6 +345,7 @@ mod tests {
             electrum_host: "electrum.test".into(),
             evm_rpc_tls: None,
             funds_in_contract: [0x11; 20],
+            token_contract: [0x22; 20],
             evm_min_confirmations: 12,
             expected_chain_id: chain_id,
             expected_bridge_contract: bridge_contract,
@@ -363,6 +370,7 @@ mod tests {
                 ca_sha256: [0x33; 32],
             }),
             funds_in_contract: [0x11; 20],
+            token_contract: [0x22; 20],
             evm_min_confirmations: 12,
             expected_chain_id: None,
             expected_bridge_contract: None,

@@ -84,7 +84,7 @@ sol! {
         bytes32 indexed operationId, bytes32 indexed sourceTx, address indexed sender,
         uint256 senderNonce, uint256 amount, uint256 netAmount, uint256 tokenCommission,
         uint256 nativeCommission, uint256 sourceChainId, uint256 destinationChainId,
-        string destinationAddress
+        string destinationAddress, bytes settlementData
     );
 }
 
@@ -390,6 +390,7 @@ fn deposit_receipt(mint_opid: &OpId, invoice: &str) -> ReceiptData {
         sourceChainId: alloy_primitives::U256::ZERO,
         destinationChainId: alloy_primitives::U256::ZERO,
         destinationAddress: invoice.into(),
+        settlementData: Default::default(),
     };
     ReceiptData {
         status_success: true,

@@ -125,6 +125,12 @@ struct Cli {
     #[arg(long)]
     expect_funds_in_contract: Option<String>,
 
+    /// Expected ERC-20 the Bridge releases (`TOKEN_CONTRACT`), the `burnId`
+    /// preimage input the enclave pinned, as 0x-hex. Required for production
+    /// verification.
+    #[arg(long)]
+    expect_token_contract: Option<String>,
+
     /// Expected minimum receipt confirmation depth. Required and non-zero for
     /// production verification.
     #[arg(long)]
@@ -246,6 +252,13 @@ fn parse_expect_funds_in_contract(s: &Option<String>) -> Result<[u8; 20]> {
     parse_hex20(s, "--expect-funds-in-contract")
 }
 
+fn parse_expect_token_contract(s: &Option<String>) -> Result<[u8; 20]> {
+    let s = s
+        .as_deref()
+        .context("--expect-token-contract required (or pass --mock)")?;
+    parse_hex20(s, "--expect-token-contract")
+}
+
 fn parse_expect_evm_min_confirmations(value: Option<u64>) -> Result<u64> {
     value
         .filter(|n| *n > 0)
@@ -341,6 +354,7 @@ async fn run(cli: Cli) -> Result<()> {
             expected_bridge_contract,
             expected_rgb_asset_id: cli.expect_rgb_asset_id.clone(),
             funds_in_contract: parse_expect_funds_in_contract(&cli.expect_funds_in_contract)?,
+            token_contract: parse_expect_token_contract(&cli.expect_token_contract)?,
             evm_min_confirmations: parse_expect_evm_min_confirmations(
                 cli.expect_evm_min_confirmations,
             )?,

@@ -14,19 +14,19 @@
 //! renumber a variant or reorder fields - bump [`POLICY_COMMITMENT_V6`] and add
 //! a new arm instead.
 //!
-//! V6 adds the Electrum host. V5 added the pinned TLS host and CA of the EVM
-//! RPC. V4 added the signer
-//! role, so a verifier can tell a mint signer from a burn signer. V3 added
-//! the FundsIn emitter and confirmation rule.
+//! V6 adds the Electrum host and the pinned TLS host and CA of the EVM RPC.
+//! V5 appended the released token contract (a `burnId` preimage input). V4
+//! added the signer role, so a verifier can tell a mint signer from a burn
+//! signer. V3 added the FundsIn emitter and confirmation rule.
 
 /// Version tag prepended to every policy commitment. Lets a verifier reject a
 /// document produced by an enclave speaking a different policy-encoding version
 /// instead of silently mis-hashing it.
 ///
-/// V6 adds the Electrum host; V5 the EVM RPC TLS pin; V4 the signer role; V3
-/// the deposit emitter and confirmation rule; V2 the gas-tx rule. Bumping the
-/// tag prevents older verifiers from silently agreeing on a differently shaped
-/// policy.
+/// V6 adds the Electrum host and the EVM RPC TLS pin; V5 the token contract;
+/// V4 the signer role; V3 the deposit emitter and confirmation rule; V2 the
+/// gas-tx rule. Bumping the tag prevents older verifiers from silently
+/// agreeing on a differently shaped policy.
 pub const POLICY_COMMITMENT_V6: u8 = 6;
 
 /// Which bridge directions the image signs. Taken from the build features, so
@@ -148,6 +148,11 @@ pub enum AttestedPolicy {
         /// by [`to_bytes`](AttestedPolicy::to_bytes) so the operator's env order
         /// never changes the commitment.
         gas_tx_allowed_selectors: Vec<[u8; 4]>,
+        /// The ERC-20 the Bridge releases (`TOKEN_CONTRACT`). An input of the
+        /// on-chain `burnId` preimage, which the enclave recomputes and
+        /// enforces; committed so a verifier confirms which token that rule is
+        /// pinned to. Appended in V5.
+        token_contract: [u8; 20],
     },
     Development,
 }
@@ -171,6 +176,7 @@ impl AttestedPolicy {
     ///              [gas_tx_max_fee_per_gas u128 BE]
     ///              [gas_tx_max_value_wei u128 BE]
     ///              [len(selectors) u32 BE][selector 4]...   (sorted, deduped)
+    ///              [token_contract 20]
     /// Development: [0x00]
     /// ```
     pub fn to_bytes(&self) -> Vec<u8> {
@@ -196,6 +202,7 @@ impl AttestedPolicy {
                 gas_tx_max_fee_per_gas,
                 gas_tx_max_value_wei,
                 gas_tx_allowed_selectors,
+                token_contract,
             } => {
                 out.push(0x01);
                 out.push(*allow_vanilla_psbt as u8);
@@ -245,6 +252,8 @@ impl AttestedPolicy {
                 for sel in &selectors {
                     out.extend_from_slice(sel);
                 }
+                // V5: the released token, a `burnId` preimage input.
+                out.extend_from_slice(token_contract);
             }
             AttestedPolicy::Development => {
                 out.push(0x00);
@@ -286,6 +295,7 @@ mod tests {
             gas_tx_max_fee_per_gas: 1_000,
             gas_tx_max_value_wei: 0,
             gas_tx_allowed_selectors: vec![[0xde, 0xad, 0xbe, 0xef]],
+            token_contract: [0x77; 20],
         }
     }
 
@@ -316,6 +326,7 @@ mod tests {
                 evm_checkpoint,
                 electrum_host,
                 evm_rpc_tls,
+                token_contract,
                 ..
             } => AttestedPolicy::Production {
                 allow_vanilla_psbt,
@@ -336,6 +347,7 @@ mod tests {
                 gas_tx_max_fee_per_gas: max_fee,
                 gas_tx_max_value_wei: max_value,
                 gas_tx_allowed_selectors: selectors,
+                token_contract,
             },
             AttestedPolicy::Development => unreachable!(),
         }
@@ -409,6 +421,22 @@ mod tests {
         }
         assert_ne!(base().to_bytes(), emitter.to_bytes());
         assert_ne!(base().to_bytes(), confirmations.to_bytes());
+    }
+
+    #[test]
+    fn token_contract_changes_the_bytes() {
+        // The token enters the burnId preimage the enclave enforces, so a
+        // verifier must see which one the rule is pinned to.
+        let mut other = base();
+        if let AttestedPolicy::Production { token_contract, .. } = &mut other {
+            *token_contract = [0x78; 20];
+        }
+        assert_ne!(base().to_bytes(), other.to_bytes());
+        // Appended last: the bytes before it are unchanged.
+        let a = base().to_bytes();
+        let b = other.to_bytes();
+        assert_eq!(a[..a.len() - 20], b[..b.len() - 20]);
+        assert_eq!(&a[a.len() - 20..], &[0x77; 20]);
     }
 
     #[test]

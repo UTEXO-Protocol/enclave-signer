@@ -122,6 +122,18 @@ pub struct BridgeConfig {
     /// serve both lookups. These two contracts differ on this deployment, so
     /// `FUNDS_IN_CONTRACT` must be set explicitly.
     pub funds_in_contract: [u8; 20],
+    /// The ERC-20 the Bridge releases (`TOKEN_CONTRACT`, i.e. `Bridge.TOKEN`).
+    /// An input of the on-chain `burnId` preimage, so the enclave needs it to
+    /// recompute `burnId` (`networks::evm::validation::validate_burn_id`).
+    /// Zero = unset: the recompute is skipped in dev builds, and a production
+    /// policy refuses to boot ([`crate::policy::ProductionPolicy`]). Attested.
+    pub token_contract: [u8; 20],
+    /// Whether a `fundsOut` proof must carry BtcRelay commitments the enclave
+    /// verifies against its own chain (`BTC_RELAY_MODE`). Unset = `required`,
+    /// which fails closed; `none` is only for a local stand that has no
+    /// BtcRelay, and a production policy refuses to boot on it
+    /// ([`crate::policy::ProductionPolicy::check_invariants`]).
+    pub btc_relay_mode: BtcRelayMode,
     /// Aggregate request-size caps for the RGB signing path, operator-tunable
     /// via env (`MAX_CONSIGNMENT_BYTES` / `MAX_MERKLE_PROOFS` /
     /// `MAX_TOTAL_PROOF_BYTES`); each defaults to its `DEFAULT_*` constant when
@@ -130,6 +142,45 @@ pub struct BridgeConfig {
     pub max_consignment_bytes: usize,
     pub max_merkle_proofs: usize,
     pub max_total_proof_bytes: usize,
+}
+
+/// Env var selecting [`BtcRelayMode`].
+pub const BTC_RELAY_MODE_ENV: &str = "BTC_RELAY_MODE";
+
+/// How the `fundsOut` finality proof's BtcRelay commitment words are checked.
+/// See `networks::evm::crosscheck::verify_btc_relay_agreement`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BtcRelayMode {
+    /// `BTC_RELAY_MODE=required` (the default): both commitment words must
+    /// equal the relay records the enclave rebuilds from its own chain. A
+    /// zero word is refused. The only mode a production policy accepts.
+    Required,
+    /// `BTC_RELAY_MODE=none`: the deployment has no BtcRelay (the route's
+    /// verifier is `NullVerifier`), so the bridge sends both words as zero
+    /// and the enclave requires exactly that. The height, anchor and
+    /// freshness binds still run. Refused by a production policy.
+    None,
+}
+
+impl BtcRelayMode {
+    /// Parse the env value. Unset is `Required`. Anything other than
+    /// `required` / `none` (case-insensitive, trimmed) is also `Required`,
+    /// with a boot warning: a typo must never turn the relay check off.
+    pub fn from_env_value(value: Option<String>) -> Self {
+        match value.as_deref().map(str::trim) {
+            None | Some("") => Self::Required,
+            Some(v) if v.eq_ignore_ascii_case("required") => Self::Required,
+            Some(v) if v.eq_ignore_ascii_case("none") => Self::None,
+            Some(v) => {
+                tracing::warn!(
+                    value = %v,
+                    "{BTC_RELAY_MODE_ENV}: unknown value, keeping `required` (expected `required` \
+                     or `none`)"
+                );
+                Self::Required
+            }
+        }
+    }
 }
 
 impl Default for BridgeConfig {
@@ -147,6 +198,8 @@ impl Default for BridgeConfig {
             rgb_max_unowned_sats: 0,
             btc_max_unowned_sats: 0,
             funds_in_contract: [0u8; 20],
+            token_contract: [0u8; 20],
+            btc_relay_mode: BtcRelayMode::Required,
             max_consignment_bytes: DEFAULT_MAX_CONSIGNMENT_BYTES,
             max_merkle_proofs: DEFAULT_MAX_MERKLE_PROOFS,
             max_total_proof_bytes: DEFAULT_MAX_TOTAL_PROOF_BYTES,
@@ -244,6 +297,15 @@ impl BridgeConfig {
             .and_then(|s| parse_eth_address(&s).ok())
             .unwrap_or(bridge_contract);
 
+        // The released ERC-20, a `burnId` preimage input. Unset stays zero:
+        // dev skips the recompute, production refuses to boot.
+        let token_contract = std::env::var("TOKEN_CONTRACT")
+            .ok()
+            .and_then(|s| parse_eth_address(&s).ok())
+            .unwrap_or([0u8; 20]);
+
+        let btc_relay_mode = BtcRelayMode::from_env_value(std::env::var(BTC_RELAY_MODE_ENV).ok());
+
         // Migration guard: a deployment pinning only
         // GAS_TX_ALLOWED_TO refuses every gas tx until both caps are set.
         // Surfaced at boot rather than as a per-request rejection.
@@ -284,6 +346,8 @@ impl BridgeConfig {
             rgb_max_unowned_sats,
             btc_max_unowned_sats,
             funds_in_contract,
+            token_contract,
+            btc_relay_mode,
             max_consignment_bytes,
             max_merkle_proofs,
             max_total_proof_bytes,
@@ -633,6 +697,43 @@ mod tests {
         let a = parse_eth_address("0102030405060708090a0b0c0d0e0f1011121314").unwrap();
         assert_eq!(a[0], 1);
         assert_eq!(a[19], 20);
+    }
+
+    #[test]
+    fn btc_relay_mode_defaults_to_required() {
+        assert_eq!(BtcRelayMode::from_env_value(None), BtcRelayMode::Required);
+        assert_eq!(
+            BtcRelayMode::from_env_value(Some("".into())),
+            BtcRelayMode::Required
+        );
+        assert_eq!(
+            BtcRelayMode::from_env_value(Some("required".into())),
+            BtcRelayMode::Required
+        );
+    }
+
+    #[test]
+    fn btc_relay_mode_none_must_be_spelled_out() {
+        assert_eq!(
+            BtcRelayMode::from_env_value(Some("none".into())),
+            BtcRelayMode::None
+        );
+        assert_eq!(
+            BtcRelayMode::from_env_value(Some(" None ".into())),
+            BtcRelayMode::None
+        );
+    }
+
+    /// A typo must fail closed, never relax the relay check.
+    #[test]
+    fn btc_relay_mode_unknown_value_stays_required() {
+        for v in ["off", "false", "0", "disabled", "nope"] {
+            assert_eq!(
+                BtcRelayMode::from_env_value(Some(v.into())),
+                BtcRelayMode::Required,
+                "{v}"
+            );
+        }
     }
 
     #[test]

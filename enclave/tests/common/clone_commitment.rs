@@ -121,6 +121,11 @@ pub fn policy_cases(policy: &AttestedPolicy) -> Vec<(&'static str, Vec<u8>)> {
         x[0] ^= 1;
         x
     });
+    alter!(token_contract, {
+        let mut x = *token_contract;
+        x[0] ^= 1;
+        x
+    });
     alter!(evm_min_confirmations, *evm_min_confirmations ^ 1);
     alter!(evm_checkpoint, Some([0x91; 32]));
     alter!(electrum_host, format!("{electrum_host}x"));

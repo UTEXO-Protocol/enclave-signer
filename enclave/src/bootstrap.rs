@@ -74,6 +74,14 @@ pub fn resolve_bitcoin_network(bitcoin_network_str: &str) -> bitcoin::Network {
 /// fails closed on it, and the boot gate in `main` turns it fatal in a
 /// production build. This only makes it visible first.
 pub fn log_bridge_config(bridge_config: &BridgeConfig) {
+    if bridge_config.btc_relay_mode == crate::config::BtcRelayMode::None {
+        // Visible at boot, since a production policy refuses to start on it.
+        tracing::warn!(
+            "{}=none: fundsOut relay commitments are NOT verified (local stand without a \
+             BtcRelay); heights, anchor and freshness are still bound",
+            crate::config::BTC_RELAY_MODE_ENV
+        );
+    }
     // Production deployments must set EVM_CHAIN_ID, EVM_PROXY_CONTRACT_ADDRESS
     // and RGB_ASSET_ID. A misconfigured production enclave is detectable
     // externally via the attestation bundle.
@@ -82,6 +90,7 @@ pub fn log_bridge_config(bridge_config: &BridgeConfig) {
             chain_id = bridge_config.chain_id,
             bridge_contract = %hex::encode(bridge_config.bridge_contract),
             rgb_asset_id = %bridge_config.rgb_asset_id,
+            btc_relay_mode = ?bridge_config.btc_relay_mode,
             "bridge config pinned from env"
         );
     } else if bridge_config.is_partially_configured() {
@@ -145,6 +154,7 @@ pub fn log_policy(policy: &SecurityPolicy) {
             evm_source = ?p.evm_source,
             evm_rpc_tls = ?p.evm_rpc_tls,
             funds_in_contract = %hex::encode(p.funds_in_contract),
+            token_contract = %hex::encode(p.token_contract),
             evm_min_confirmations = p.evm_min_confirmations,
             btc_source = ?p.btc_source,
             "resolved PRODUCTION security policy (committed into attestation user_data)"

@@ -6,6 +6,7 @@
 //!
 //! The helpers operate on `EvmDestination.call_data` bytes.
 
+use crate::config::BtcRelayMode;
 use crate::error::{EnclaveError, Result};
 use crate::networks::evm::validation::FundsOutParams;
 use crate::networks::rgb::spv::HeaderChain;
@@ -130,6 +131,70 @@ pub fn validate_funds_out_burn_recipient(
     Ok(())
 }
 
+/// Source-burn bind (bridge PR #152): `sourceBurnTxId` must be the RGB OpId of
+/// the transition this release settles - the consignment's last transition,
+/// the one [`validate_funds_out_amount`] reads the released amount from.
+///
+/// On-chain, `sourceBurnTxId` is the only `burnId` input that says WHICH burn
+/// is settled: `Bridge.fundsOut` and `rebalanceLiquidity` fold it into the
+/// shared `BURN_TYPEHASH` key and reject zero, but cannot check it against
+/// anything - the field is attested by the enclave. A backend that put a fresh
+/// id in this slot would derive a fresh `burnId` for a burn already paid, so
+/// the bind here is what makes one validated burn map to one id.
+///
+/// `op_id` is the parser's 64-char hex form of the 32-byte OpId; the calldata
+/// word must equal those bytes exactly.
+pub fn validate_funds_out_source_burn_tx_id(
+    params: &FundsOutParams,
+    validated: &ValidatedConsignment,
+) -> Result<()> {
+    let last = validated.last_transition.as_ref().ok_or_else(|| {
+        EnclaveError::CrossCheck(
+            "fundsOut requires a consignment with at least one transition".into(),
+        )
+    })?;
+
+    let expected = decode_op_id_to_bytes32(&last.op_id)?;
+    let cited: [u8; 32] = params.sourceBurnTxId.0;
+
+    // The Bridge rejects zero on its own (`ZeroSourceBurnTxId`); refusing here
+    // keeps the enclave from attesting an intent that can never settle.
+    if cited == [0u8; 32] {
+        return Err(EnclaveError::CrossCheck(
+            "fundsOut sourceBurnTxId is zero: the calldata must carry the RGB OpId of the \
+             transition being settled"
+                .into(),
+        ));
+    }
+    if cited != expected {
+        return Err(EnclaveError::CrossCheck(format!(
+            "fundsOut sourceBurnTxId mismatch: calldata cites 0x{}, but the validated \
+             consignment's settling transition is OpId 0x{} - refusing to sign",
+            hex::encode(cited),
+            hex::encode(expected)
+        )));
+    }
+    Ok(())
+}
+
+/// Decode a `TransitionSummary::op_id` (64 hex chars, optional `0x`) to the
+/// 32-byte word the calldata carries. A malformed id is an internal
+/// inconsistency in the validated consignment, so refuse rather than guess.
+fn decode_op_id_to_bytes32(op_id: &str) -> Result<[u8; 32]> {
+    let normalized = op_id.strip_prefix("0x").unwrap_or(op_id);
+    let bytes = hex::decode(normalized).map_err(|e| {
+        EnclaveError::CrossCheck(format!(
+            "validated consignment op_id {op_id:?} is not hex-decodable: {e}"
+        ))
+    })?;
+    bytes.as_slice().try_into().map_err(|_| {
+        EnclaveError::CrossCheck(format!(
+            "validated consignment op_id {op_id:?} is not a 32-byte OpId ({} bytes)",
+            bytes.len()
+        ))
+    })
+}
+
 /// Settlement bind for the BFA burn flow: `settlementData` must cite exactly
 /// the deposits behind the burn's mint ancestry.
 ///
@@ -216,7 +281,8 @@ pub fn validate_funds_out_settlement(
 #[derive(Debug, Clone, Copy)]
 struct ProofBlock {
     height: u32,
-    /// Display (big-endian) byte order, as it appears in the calldata.
+    /// BtcRelay's `keccak256` of its 160-byte record at `height`, as the
+    /// calldata carries it.
     commitment: [u8; 32],
 }
 
@@ -226,7 +292,9 @@ struct ProofBlock {
 /// 1. find the block anchoring the consignment's last witness tx from its SPV
 ///    Merkle proof, not from the calldata;
 /// 2. require a header there, proving the TEE is in sync;
-/// 3. require the calldata `proof` to name that same height.
+/// 3. require the calldata `proof` to name that same height;
+/// 4. require both commitment words to equal the relay record the enclave
+///    rebuilds from its own chain ([`relay_record`]).
 ///
 /// The `proof` slot is `abi.encode(uint256 sourceHeight, bytes32 sourceCommit,
 /// uint256 latestHeight, bytes32 latestCommit)` (`RGBVerifier.sol:115-117`):
@@ -234,23 +302,31 @@ struct ProofBlock {
 /// also sit within `MAX_RELAY_TIP_LAG_BLOCKS` of the enclave tip, so freshness
 /// is not delegated to a relay the host also feeds. Empty `proof` = reject.
 ///
-/// **The commitment words are not checked, by design.** They are BtcRelay's
-/// `keccak256(StoredBlockHeader)` over relay-internal state (chainWork,
-/// lastDiffAdjustment, the last ten timestamps), which the enclave cannot
-/// compute - comparing them to `header.block_hash()` made every release
-/// unsatisfiable. `RGBVerifier` checks each against the relay itself, so a
-/// manipulated commitment reverts on-chain. The enclave enforces what only it
-/// knows: which block the consignment is anchored in, by height.
+/// `RGBVerifier` checks each commitment by height only. Step 4 proves the relay
+/// holds the enclave's block at that height.
+///
+/// Step 4 depends on the operator's [`BtcRelayMode`] (`BTC_RELAY_MODE`):
+///
+/// - [`Required`](BtcRelayMode::Required), the default and the only mode a
+///   production policy boots with: both words must match, and a zero word is
+///   refused (the bridge sends zeros exactly when it has no relay configured).
+/// - [`None`](BtcRelayMode::None), a local stand with no BtcRelay: both words
+///   must be zero, and the compare is skipped. A non-zero word means the
+///   bridge and the enclave disagree about whether a relay exists: refused.
+///
+/// Steps 1-3 run in both modes. No build flag takes part in the choice.
 ///
 /// Ordered cheapest-first: the pure calldata decode and the `latest` checks run
 /// before the anchor resolution, which reads the chain and redoes a Merkle
-/// verification.
+/// verification. The commitment checks run last: they sum the work of every
+/// header above the checkpoint.
 pub fn verify_btc_relay_agreement(
     params: &FundsOutParams,
     validated: &ValidatedConsignment,
     merkle_proofs: &[MerkleProofEntry],
     chain: &HeaderChain,
     pins: &ChainPins,
+    mode: BtcRelayMode,
 ) -> Result<()> {
     let (source, latest) = decode_funds_out_proof(params)?;
 
@@ -282,18 +358,6 @@ pub fn verify_btc_relay_agreement(
         )));
     }
 
-    // Recorded, not checked: an on-chain revert is otherwise opaque about which
-    // commitments were signed.
-    tracing::debug!(
-        source_height = source.height,
-        source_commit = %hex::encode(source.commitment),
-        latest_height = latest.height,
-        latest_commit = %hex::encode(latest.commitment),
-        "fundsOut relay proof accepted (commitments verified on-chain, not here)"
-    );
-
-    // The calldata's source block must be the consignment's own anchor. Height
-    // only - see the commitment note on this function.
     let anchor = resolve_consignment_anchor(validated, merkle_proofs, chain)?;
     pins.pin(chain, anchor.height)?;
     if source.height != anchor.height {
@@ -308,7 +372,118 @@ pub fn verify_btc_relay_agreement(
         )));
     }
 
+    let zero = |b: &ProofBlock| b.commitment == [0u8; 32];
+    match mode {
+        BtcRelayMode::Required => {
+            for (block, label) in [(&source, "source"), (&latest, "latest")] {
+                if zero(block) {
+                    return Err(EnclaveError::CrossCheck(format!(
+                        "fundsOut relay proof carries a zero {label} commitment at height {}: the \
+                         bridge has no BtcRelay configured, but this enclave runs with \
+                         {}=required - refusing to sign",
+                        block.height,
+                        crate::config::BTC_RELAY_MODE_ENV
+                    )));
+                }
+            }
+            assert_relay_commitment(chain, &source, "source")?;
+            assert_relay_commitment(chain, &latest, "latest")
+        }
+        BtcRelayMode::None => {
+            for (block, label) in [(&source, "source"), (&latest, "latest")] {
+                if !zero(block) {
+                    return Err(EnclaveError::CrossCheck(format!(
+                        "fundsOut relay proof carries a {label} commitment 0x{} at height {}, but \
+                         this enclave runs with {}=none (no BtcRelay on this stand): the bridge \
+                         and the enclave disagree about the relay - refusing to sign",
+                        hex::encode(block.commitment),
+                        block.height,
+                        crate::config::BTC_RELAY_MODE_ENV
+                    )));
+                }
+            }
+            tracing::warn!(
+                source_height = source.height,
+                latest_height = latest.height,
+                "fundsOut relay commitment compare skipped ({}=none): heights, anchor and \
+                 freshness bound only",
+                crate::config::BTC_RELAY_MODE_ENV
+            );
+            Ok(())
+        }
+    }
+}
+
+/// Refuse unless the calldata commitment is `keccak256` of the relay record
+/// the enclave rebuilds at that height.
+///
+/// The relay's deploy does not check the timestamps and `lastDiffAdjustment`
+/// of its own checkpoint record. If they are wrong, its records differ from
+/// the true ones for ten blocks or up to the next epoch start, and the enclave
+/// refuses there. That fails closed.
+fn assert_relay_commitment(chain: &HeaderChain, block: &ProofBlock, label: &str) -> Result<()> {
+    let expected = alloy_primitives::keccak256(relay_record(chain, block.height)?).0;
+    if block.commitment != expected {
+        return Err(EnclaveError::CrossCheck(format!(
+            "fundsOut relay commitment mismatch at {label} height {}: calldata 0x{}, enclave \
+             record 0x{}: the relay does not hold the enclave's block there, refusing to sign",
+            block.height,
+            hex::encode(block.commitment),
+            hex::encode(expected),
+        )));
+    }
     Ok(())
+}
+
+/// Rebuild BtcRelay's 160-byte `StoredBlockHeader` record from the enclave chain.
+///
+/// Refuse heights that need a block below the checkpoint: the relay seeds those
+/// values at deploy and does not check them, so the enclave cannot know them.
+fn relay_record(chain: &HeaderChain, height: u32) -> Result<[u8; 160]> {
+    let cp = chain.checkpoint();
+    let header = chain.header_at(height).ok_or_else(|| {
+        EnclaveError::Spv(format!(
+            "fundsOut relay record: no header at height {height} (checkpoint {}, tip {})",
+            cp.height,
+            chain.tip_height()
+        ))
+    })?;
+    let cp_work = cp.chain_work.ok_or_else(|| {
+        EnclaveError::Spv(format!(
+            "fundsOut relay record: the checkpoint at height {} has no chainwork, so the enclave \
+             cannot rebuild relay records. Set the fifth field of {}. Refusing to sign",
+            cp.height,
+            crate::networks::rgb::spv::checkpoint::CHECKPOINT_ENV
+        ))
+    })?;
+
+    let epoch_start = height - height % crate::networks::rgb::spv::validation::RETARGET_INTERVAL;
+    if height < cp.height + 10 || epoch_start < cp.height {
+        return Err(EnclaveError::Spv(format!(
+            "fundsOut relay record at height {height} needs the times of blocks {}..{height} \
+             and of epoch start {epoch_start}, but the enclave holds no block below its \
+             checkpoint at height {} - refusing to sign",
+            height.saturating_sub(10),
+            cp.height
+        )));
+    }
+    // The chain holds every height above the checkpoint. The checkpoint gives
+    // only its time.
+    let time_at = |h: u32| chain.header_at(h).map_or(cp.time, |header| header.time);
+
+    let work = (cp.height + 1..=height)
+        .filter_map(|h| chain.header_at(h))
+        .fold(bitcoin::Work::from_be_bytes(cp_work), |w, h| w + h.work());
+
+    let mut record = [0u8; 160];
+    record[..80].copy_from_slice(&bitcoin::consensus::serialize(header));
+    record[80..112].copy_from_slice(&work.to_be_bytes());
+    record[112..116].copy_from_slice(&height.to_be_bytes());
+    record[116..120].copy_from_slice(&time_at(epoch_start).to_be_bytes());
+    for (i, h) in (height - 10..height).enumerate() {
+        record[120 + 4 * i..124 + 4 * i].copy_from_slice(&time_at(h).to_be_bytes());
+    }
+    Ok(record)
 }
 
 /// The Bitcoin block anchoring a consignment's last witness tx.
@@ -484,8 +659,8 @@ fn proof_height(word: &[u8], field: &str) -> Result<u32> {
 }
 
 // `extract_uint256_as_u64` moved to `events`, its only remaining consumer.
-// `extract_bytes32`, `decode_op_id_to_bytes32` and `bytes32_to_usize` went with
-// the removed calldata rewrite.
+// `extract_bytes32` and `bytes32_to_usize` went with the removed calldata
+// rewrite; `decode_op_id_to_bytes32` came back for the `sourceBurnTxId` bind.
 
 #[cfg(test)]
 mod tests;
