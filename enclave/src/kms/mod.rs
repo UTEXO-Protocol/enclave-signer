@@ -422,7 +422,7 @@ fn https_client() -> Result<SharedHttpClient> {
         .build()
         .map_err(|_| custody(CustodyFailure::Internal))?;
     Ok(aws_smithy_http_client::Builder::new()
-        .tls_provider(tls::Provider::Rustls(CryptoMode::Ring))
+        .tls_provider(tls::Provider::Rustls(CryptoMode::AwsLc))
         .tls_context(context)
         .build_https())
 }

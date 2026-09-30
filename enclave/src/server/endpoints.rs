@@ -51,7 +51,10 @@ pub(super) fn handle_set_endpoints(
         .assert_valid_for_build(&ctx.build_ctx)
         .map_err(EnclaveError::InvalidRequest)?;
 
-    #[cfg(all(feature = "vsock", target_os = "linux"))]
+    // The loopback binds and the /etc/hosts pin are real I/O the unit tests
+    // cannot do (port 443, root). Skipped under `cfg(test)`, as the other
+    // vsock-only paths are.
+    #[cfg(all(feature = "vsock", target_os = "linux", not(test)))]
     let listeners = bind_forwarders(&endpoints)?;
 
     #[cfg(feature = "rgb-validation")]
@@ -70,14 +73,19 @@ pub(super) fn handle_set_endpoints(
         policy,
     };
 
-    #[cfg(all(feature = "vsock", feature = "rgb-validation", target_os = "linux"))]
+    #[cfg(all(
+        feature = "vsock",
+        feature = "rgb-validation",
+        target_os = "linux",
+        not(test)
+    ))]
     crate::bootstrap::pin_host_to_loopback(&launch.endpoints.electrum_host).map_err(|e| {
         EnclaveError::Internal(format!(
             "cannot pin {} in /etc/hosts: {e}",
             launch.endpoints.electrum_host
         ))
     })?;
-    #[cfg(all(feature = "vsock", target_os = "linux"))]
+    #[cfg(all(feature = "vsock", target_os = "linux", not(test)))]
     for (listener, vsock_port) in listeners {
         crate::vsock_forwarder::spawn(listener, vsock_port);
     }
@@ -93,7 +101,7 @@ pub(super) fn handle_set_endpoints(
 
 /// Bind the loopback end of each forwarder this build needs. The host must
 /// run `vsock-proxy <vsock port> <host> <port>` for each.
-#[cfg(all(feature = "vsock", target_os = "linux"))]
+#[cfg(all(feature = "vsock", target_os = "linux", not(test)))]
 fn bind_forwarders(endpoints: &Endpoints) -> Result<Vec<(std::net::TcpListener, u32)>> {
     #[allow(unused_mut)]
     let mut listeners = Vec::new();
@@ -110,13 +118,23 @@ fn bind_forwarders(endpoints: &Endpoints) -> Result<Vec<(std::net::TcpListener, 
     Ok(listeners)
 }
 
-#[cfg(all(feature = "vsock", feature = "rgb-validation", target_os = "linux"))]
+#[cfg(all(
+    feature = "vsock",
+    feature = "rgb-validation",
+    target_os = "linux",
+    not(test)
+))]
 fn bind(port: u16) -> Result<std::net::TcpListener> {
     std::net::TcpListener::bind(format!("127.0.0.1:{port}"))
         .map_err(|e| EnclaveError::Internal(format!("cannot listen on 127.0.0.1:{port}: {e}")))
 }
 
-#[cfg(all(feature = "vsock", feature = "rgb-validation", target_os = "linux"))]
+#[cfg(all(
+    feature = "vsock",
+    feature = "rgb-validation",
+    target_os = "linux",
+    not(test)
+))]
 fn vsock_port(name: &str, default: u32) -> u32 {
     std::env::var(name)
         .ok()
@@ -190,11 +208,18 @@ mod tests {
     #[test]
     fn before_the_set_signing_and_attestation_are_refused() {
         let ctx = awaiting(BuildContext::current());
-        call(
-            &ctx,
-            Request::InitializeKey(InitializeKeyRequest::default()),
-        );
-        assert!(ctx.state.is_initialized());
+        // A persistence build fetches the seed from KMS, which a unit test
+        // has no access to; import a mnemonic there instead.
+        let init = InitializeKeyRequest {
+            mnemonic: if cfg!(feature = "kms-persistence") {
+                "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about".into()
+            } else {
+                String::new()
+            },
+            ..InitializeKeyRequest::default()
+        };
+        let got = call(&ctx, Request::InitializeKey(init));
+        assert!(ctx.state.is_initialized(), "{got:?}");
         for request in [
             Request::Sign(SignRequest::default()),
             Request::SignBtc(SignBtcRequest::default()),
