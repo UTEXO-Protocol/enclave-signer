@@ -372,10 +372,14 @@ Independently, every `OS_ASSET` output is split into legs: a confidential
 of its Colored account; at most 4 off-PSBT change outpoints), and the recipient
 legs MUST sum exactly to `amount - commission`.
 The destination amount the route check uses is this enclave-derived recipient
-total, not the wire `psbt_output_amount`. A fee sanity check rejects a PSBT
-whose fee rate exceeds 3x the enclave's own estimate (Electrum or Esplora),
-fail-closed on a missing estimate (a compile-time floor applies only on
-non-mainnet chains).
+total, not the wire `psbt_output_amount`. A pinned fee policy, shared with the
+plain-BTC `SignBtc` path, rejects a PSBT whose miner fee exceeds a compile-time
+maximum fee rate (over the unsigned size, which the host cannot pad) or a
+compile-time maximum absolute fee, and one that does not fund 1 sat/vB over its
+estimated signed size. The enclave fetches no fee estimate: a dynamic bound
+could strand a mint whose EVM lock already settled when the fee market moved,
+so the operational fee check belongs to the bridge, before the lock. Raising a
+ceiling ships a new enclave image, so it needs federation agreement.
 
 **EVM data source:** a build without `evm-rpc` refuses bridge PSBTs outright.
 With the default `evm-rpc` provider, TLS to the pinned host and CA ends inside
@@ -415,10 +419,14 @@ Vanilla (non-bridge) BTC signing is its own request and can no longer be
 reached by omitting bridge fields. It is gated by the attested policy
 (`allow_vanilla_psbt`, default **off**), and each request must satisfy the
 authorization rules: every output must pay back into the custody its inputs were
-already in, except a budget of `BTC_MAX_UNOWNED_SATS` for those that do not, and
-total input value <= `BTC_MAX_TOTAL_SATS`. Signing is scoped to
-the **vanilla** BIP-86 account only -- it can structurally never sign a
-colored (RGB-allocated) input.
+already in, except a budget of `BTC_MAX_UNOWNED_SATS` for those that do not,
+total input value <= `BTC_MAX_TOTAL_SATS`, and the miner fee within the pinned
+fee policy of Sec 7.2 (compile-time maximum fee rate and absolute fee, 1 sat/vB
+relay floor; needs no configuration, so it holds in every build). Self-owned
+outputs and the value cap bound one transaction; the fee policy is what stops a
+host from burning the wallet as miner fees across many of them. Signing is
+scoped to the **vanilla** BIP-86 account only -- it can structurally never sign
+a colored (RGB-allocated) input.
 
 The destination rule is self-proving, not pinned. An output is accepted when its
 `script_pubkey` equals that of an input the enclave signs -- a BIP-86 key-path
@@ -656,7 +664,8 @@ invalid consignment; unsupported or unclassified transition; amount not
 covered; malformed or non-canonical calldata; unpinned or mismatched
 chain/contract/asset; invalid or missing SPV proof; stale, future-dated, or
 incomplete header chain; cross-network consignment; missing/failed/shallow
-`FundsIn` verification; `operationId` mismatch; excessive fee rate; PSBT not
+`FundsIn` verification; `operationId` mismatch; fee over the pinned fee rate or
+absolute maximum, or under the relay floor (both PSBT paths); PSBT not
 anchored to the consignment; disallowed output script or value cap exceeded
 (plain BTC); non-allowlisted gas tx; wrong phase; expired deadline; duplicate bridge operation within the local cache window; oversized frame, field, or header batch.
 
