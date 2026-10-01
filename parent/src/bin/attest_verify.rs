@@ -22,7 +22,7 @@ use std::process::ExitCode;
 use anyhow::{Context, Result};
 use clap::Parser;
 
-use attestation_verify::{EvmDataSource, SignerRole};
+use attestation_verify::{EvmDataSource, EvmRpcTlsPin, SignerRole};
 use utexo_bridge_parent::attest_verify::{
     verify_attested_pubkey, AttestedPubkeyResult, ExpectedPolicy, VerifyMode,
 };
@@ -69,12 +69,29 @@ struct Cli {
     expect_signer_role: Option<String>,
 
     /// Expected EVM `FundsIn` deposit-verification data source the enclave must
-    /// have committed to: `raw` (host-relayed RPC), `helios` (trustless,
-    /// checkpoint-verified), or `disabled`. Defaults to `raw` - the source the
-    /// shipped image uses. Pass `helios` to require the trustless path and fail
-    /// verification if the enclave is only on raw RPC. Ignored with --mock.
-    #[arg(long, default_value = "raw")]
+    /// have committed to: `tls` (RPC over pinned TLS), `helios` (trustless,
+    /// checkpoint-verified), `raw` (plaintext, dev only), or `disabled`.
+    /// Defaults to `tls` - the source the shipped image uses. Ignored with
+    /// --mock.
+    #[arg(long, default_value = "tls")]
     expect_evm_source: String,
+
+    /// Expected Electrum host the operator set at launch (the host of
+    /// `ELECTRUM_URL`). Required for production verification. Ignored with
+    /// --mock.
+    #[arg(long)]
+    expect_electrum_host: Option<String>,
+
+    /// Expected EVM RPC TLS host (`EVM_RPC_HOST`). REQUIRED when
+    /// `--expect-evm-source tls`. Ignored otherwise.
+    #[arg(long)]
+    expect_evm_rpc_host: Option<String>,
+
+    /// Expected SHA-256 of the DER of the EVM RPC CA (`EVM_RPC_TLS_CA_DER_FILE`), 64
+    /// hex characters. REQUIRED when `--expect-evm-source tls`. Ignored
+    /// otherwise.
+    #[arg(long)]
+    expect_evm_rpc_ca_sha256: Option<String>,
 
     /// Expected Helios weak-subjectivity checkpoint (0x-prefixed 32-byte beacon
     /// block root) the enclave must have trust-rooted on. REQUIRED when
@@ -160,6 +177,21 @@ fn parse_checkpoint(s: &str) -> Result<[u8; 32]> {
     })
 }
 
+/// Parse `--expect-evm-rpc-host` and `--expect-evm-rpc-ca-sha256`. Both are
+/// required: a real TLS enclave always commits both.
+fn parse_evm_rpc_tls(host: Option<&str>, ca_sha256: Option<&str>) -> Result<EvmRpcTlsPin> {
+    let host = host.context("--expect-evm-source tls requires --expect-evm-rpc-host")?;
+    let ca = ca_sha256.context("--expect-evm-source tls requires --expect-evm-rpc-ca-sha256")?;
+    let ca_sha256 = hex::decode(ca)
+        .ok()
+        .and_then(|b| <[u8; 32]>::try_from(b).ok())
+        .context("--expect-evm-rpc-ca-sha256 must be 64 hex characters")?;
+    Ok(EvmRpcTlsPin {
+        host: host.into(),
+        ca_sha256,
+    })
+}
+
 /// Parse the `--expect-signer-role` flag into a [`SignerRole`].
 fn parse_signer_role(s: Option<&str>) -> Result<SignerRole> {
     let s = s.context("--expect-signer-role required: mint | burn | combined (or pass --mock)")?;
@@ -178,11 +210,12 @@ fn parse_signer_role(s: Option<&str>) -> Result<SignerRole> {
 /// Parse the `--expect-evm-source` flag into an [`EvmDataSource`].
 fn parse_evm_source(s: &str) -> Result<EvmDataSource> {
     match s.to_ascii_lowercase().as_str() {
+        "tls" | "pinned-tls" => Ok(EvmDataSource::PinnedTlsRpc),
         "raw" | "raw-rpc" | "rawrpc" => Ok(EvmDataSource::RawRpc),
         "helios" | "helios-verified" => Ok(EvmDataSource::HeliosVerified),
         "disabled" | "none" | "off" => Ok(EvmDataSource::Disabled),
         other => anyhow::bail!(
-            "invalid --expect-evm-source '{other}' (expected: raw | helios | disabled)"
+            "invalid --expect-evm-source '{other}' (expected: tls | helios | raw | disabled)"
         ),
     }
 }
@@ -293,6 +326,18 @@ async fn run(cli: Cli) -> Result<()> {
                  (the beacon block root the enclave pinned)"
             );
         }
+        let electrum_host = cli
+            .expect_electrum_host
+            .clone()
+            .context("--expect-electrum-host required (or pass --mock)")?;
+        let evm_rpc_tls = (evm_source == EvmDataSource::PinnedTlsRpc)
+            .then(|| {
+                parse_evm_rpc_tls(
+                    cli.expect_evm_rpc_host.as_deref(),
+                    cli.expect_evm_rpc_ca_sha256.as_deref(),
+                )
+            })
+            .transpose()?;
         let expected_bridge_contract = cli
             .expect_bridge_contract
             .as_deref()
@@ -303,6 +348,8 @@ async fn run(cli: Cli) -> Result<()> {
             signer_role: parse_signer_role(cli.expect_signer_role.as_deref())?,
             evm_source,
             evm_checkpoint,
+            electrum_host,
+            evm_rpc_tls,
             expected_chain_id: cli.expect_chain_id,
             expected_bridge_contract,
             expected_rgb_asset_id: cli.expect_rgb_asset_id.clone(),
@@ -384,6 +431,21 @@ mod tests {
         assert_eq!(
             parse_signer_role(Some("Combined")).unwrap(),
             SignerRole::Combined
+        );
+    }
+
+    #[test]
+    fn tls_source_needs_host_and_ca_hash() {
+        let hash = "ab".repeat(32);
+        assert!(parse_evm_rpc_tls(None, Some(&hash)).is_err());
+        assert!(parse_evm_rpc_tls(Some("rpc.test"), None).is_err());
+        assert!(parse_evm_rpc_tls(Some("rpc.test"), Some("abcd")).is_err());
+        let pin = parse_evm_rpc_tls(Some("rpc.test"), Some(&hash)).unwrap();
+        assert_eq!(pin.host, "rpc.test");
+        assert_eq!(pin.ca_sha256, [0xab; 32]);
+        assert_eq!(
+            parse_evm_source("tls").unwrap(),
+            EvmDataSource::PinnedTlsRpc
         );
     }
 

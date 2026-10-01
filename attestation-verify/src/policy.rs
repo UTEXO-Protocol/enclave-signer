@@ -11,10 +11,11 @@
 //! hash mismatch.
 //!
 //! Wire contract: the discriminants and field order are load-bearing. Never
-//! renumber a variant or reorder fields - bump [`POLICY_COMMITMENT_V5`] and add
+//! renumber a variant or reorder fields - bump [`POLICY_COMMITMENT_V6`] and add
 //! a new arm instead.
 //!
-//! V5 appends the released token contract (a `burnId` preimage input). V4
+//! V6 adds the Electrum host and the pinned TLS host and CA of the EVM RPC.
+//! V5 appended the released token contract (a `burnId` preimage input). V4
 //! added the signer role, so a verifier can tell a mint signer from a burn
 //! signer. V3 added the FundsIn emitter and confirmation rule.
 
@@ -22,10 +23,11 @@
 /// document produced by an enclave speaking a different policy-encoding version
 /// instead of silently mis-hashing it.
 ///
-/// V5 appends the token contract; V4 added the signer role; V3 the deposit
-/// emitter and confirmation rule; V2 the gas-tx rule. Bumping the tag prevents
-/// older verifiers from silently agreeing on a differently shaped policy.
-pub const POLICY_COMMITMENT_V5: u8 = 5;
+/// V6 adds the Electrum host and the EVM RPC TLS pin; V5 the token contract;
+/// V4 the signer role; V3 the deposit emitter and confirmation rule; V2 the
+/// gas-tx rule. Bumping the tag prevents older verifiers from silently
+/// agreeing on a differently shaped policy.
+pub const POLICY_COMMITMENT_V6: u8 = 6;
 
 /// Which bridge directions the image signs. Taken from the build features, so
 /// it is measured into PCR0 and no host config can widen it.
@@ -44,20 +46,32 @@ pub enum SignerRole {
 
 /// Where the enclave gets the EVM `FundsIn` deposit evidence it verifies before
 /// signing an EVM->RGB bridge PSBT. Attested so a verifier can tell a trustless
-/// deployment (Helios) apart from a host-relayed one (raw RPC) - the shipped
-/// image currently uses [`RawRpc`](EvmDataSource::RawRpc).
+/// deployment (Helios) apart from a host-relayed one - the shipped image uses
+/// [`PinnedTlsRpc`](EvmDataSource::PinnedTlsRpc).
 #[repr(u8)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum EvmDataSource {
     /// No in-enclave EVM verification compiled in (`evm-rpc` off). Bridge
     /// EVM->RGB signing fails closed per request.
     Disabled = 0,
-    /// Host-relayed JSON-RPC (`evm-rpc`): treated as evidence, verified
-    /// fail-closed, but NOT trustless - the host relays the responses.
+    /// Plaintext JSON-RPC over the host relay. The host can forge the
+    /// responses. Dev and test builds only.
     RawRpc = 1,
     /// Helios light client (`helios`): the RPC is cryptographically verified
     /// against a pinned weak-subjectivity checkpoint before use (trustless).
     HeliosVerified = 2,
+    /// JSON-RPC over TLS that ends inside the enclave. The host relays
+    /// ciphertext only. The endpoint is authenticated by the pinned CA and
+    /// host ([`EvmRpcTlsPin`]); the chain state is not verified.
+    PinnedTlsRpc = 3,
+}
+
+/// The TLS pin of the EVM RPC endpoint. `host` is the name the certificate
+/// must match. `ca_sha256` is the SHA-256 of the DER of the only trusted CA.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EvmRpcTlsPin {
+    pub host: String,
+    pub ca_sha256: [u8; 32],
 }
 
 /// Where the enclave gets the Bitcoin anchor evidence for RGB consignment
@@ -113,6 +127,10 @@ pub enum AttestedPolicy {
         /// [`EvmDataSource::HeliosVerified`], and pinned here so a verifier
         /// confirms which checkpoint the enclave synced from.
         evm_checkpoint: Option<[u8; 32]>,
+        /// Host of the Electrum server the operator set at launch.
+        electrum_host: String,
+        /// The EVM RPC TLS pin. `Some` only for [`EvmDataSource::PinnedTlsRpc`].
+        evm_rpc_tls: Option<EvmRpcTlsPin>,
         /// Gas-tx (`SignRawDigest`) rule. Pinned destination
         /// (all-zero when the operator left `GAS_TX_ALLOWED_TO` unset, which
         /// fails the gas path closed), the gas/fee ceilings, and the allowlisted
@@ -144,13 +162,16 @@ impl AttestedPolicy {
     /// `user_data`. Layout (see the WIRE CONTRACT note in the module docs):
     ///
     /// ```text
-    /// [POLICY_COMMITMENT_V5]
+    /// [POLICY_COMMITMENT_V6]
     /// Production:  [0x01][allow_vanilla u8][signer_role u8][attestation u8]
     ///              [evm_source u8]
     ///              [btc_source u8][chain_id u64 BE][bridge_contract 20]
     ///              [len(asset) u32 BE][asset bytes][funds_in_contract 20]
     ///              [evm_min_confirmations u64 BE]
     ///              [evm_checkpoint: 0x00 | 0x01 ++ 32 bytes]
+    ///              [len(electrum_host) u32 BE][electrum_host bytes]
+    ///              [evm_rpc_tls: 0x00 | 0x01 ++ len(host) u32 BE ++ host
+    ///               ++ ca_sha256 32]
     ///              [gas_tx_allowed_to 20][gas_tx_max_gas_limit u64 BE]
     ///              [gas_tx_max_fee_per_gas u128 BE]
     ///              [gas_tx_max_value_wei u128 BE]
@@ -160,7 +181,7 @@ impl AttestedPolicy {
     /// ```
     pub fn to_bytes(&self) -> Vec<u8> {
         let mut out = Vec::new();
-        out.push(POLICY_COMMITMENT_V5);
+        out.push(POLICY_COMMITMENT_V6);
         match self {
             AttestedPolicy::Production {
                 allow_vanilla_psbt,
@@ -174,6 +195,8 @@ impl AttestedPolicy {
                 funds_in_contract,
                 evm_min_confirmations,
                 evm_checkpoint,
+                electrum_host,
+                evm_rpc_tls,
                 gas_tx_allowed_to,
                 gas_tx_max_gas_limit,
                 gas_tx_max_fee_per_gas,
@@ -201,6 +224,17 @@ impl AttestedPolicy {
                     Some(cp) => {
                         out.push(0x01);
                         out.extend_from_slice(cp);
+                    }
+                    None => out.push(0x00),
+                }
+                out.extend_from_slice(&(electrum_host.len() as u32).to_be_bytes());
+                out.extend_from_slice(electrum_host.as_bytes());
+                match evm_rpc_tls {
+                    Some(pin) => {
+                        out.push(0x01);
+                        out.extend_from_slice(&(pin.host.len() as u32).to_be_bytes());
+                        out.extend_from_slice(pin.host.as_bytes());
+                        out.extend_from_slice(&pin.ca_sha256);
                     }
                     None => out.push(0x00),
                 }
@@ -254,6 +288,8 @@ mod tests {
             funds_in_contract: [0x44; 20],
             evm_min_confirmations: 12,
             evm_checkpoint: None,
+            electrum_host: "electrum.test".into(),
+            evm_rpc_tls: None,
             gas_tx_allowed_to: [0xAA; 20],
             gas_tx_max_gas_limit: 21_000,
             gas_tx_max_fee_per_gas: 1_000,
@@ -288,6 +324,8 @@ mod tests {
                 funds_in_contract,
                 evm_min_confirmations,
                 evm_checkpoint,
+                electrum_host,
+                evm_rpc_tls,
                 token_contract,
                 ..
             } => AttestedPolicy::Production {
@@ -302,6 +340,8 @@ mod tests {
                 funds_in_contract,
                 evm_min_confirmations,
                 evm_checkpoint,
+                electrum_host,
+                evm_rpc_tls,
                 gas_tx_allowed_to: to,
                 gas_tx_max_gas_limit: max_gas,
                 gas_tx_max_fee_per_gas: max_fee,
@@ -315,10 +355,10 @@ mod tests {
 
     #[test]
     fn every_encoding_starts_with_the_version_tag() {
-        assert_eq!(base().to_bytes()[0], POLICY_COMMITMENT_V5);
+        assert_eq!(base().to_bytes()[0], POLICY_COMMITMENT_V6);
         assert_eq!(
             AttestedPolicy::Development.to_bytes()[0],
-            POLICY_COMMITMENT_V5
+            POLICY_COMMITMENT_V6
         );
     }
 
@@ -425,6 +465,34 @@ mod tests {
             *evm_checkpoint = Some([0xCD; 32]);
         }
         assert_ne!(with_cp.to_bytes(), other_cp.to_bytes());
+    }
+
+    #[test]
+    fn electrum_host_changes_the_bytes() {
+        let mut other = base();
+        if let AttestedPolicy::Production { electrum_host, .. } = &mut other {
+            *electrum_host = "other.test".into();
+        }
+        assert_ne!(base().to_bytes(), other.to_bytes());
+    }
+
+    fn with_tls(host: &str, ca_sha256: [u8; 32]) -> AttestedPolicy {
+        let mut p = base();
+        if let AttestedPolicy::Production { evm_rpc_tls, .. } = &mut p {
+            *evm_rpc_tls = Some(EvmRpcTlsPin {
+                host: host.into(),
+                ca_sha256,
+            });
+        }
+        p
+    }
+
+    #[test]
+    fn evm_rpc_tls_pin_presence_host_and_ca_change_the_bytes() {
+        let pinned = with_tls("rpc.test", [1; 32]).to_bytes();
+        assert_ne!(base().to_bytes(), pinned);
+        assert_ne!(with_tls("other.test", [1; 32]).to_bytes(), pinned);
+        assert_ne!(with_tls("rpc.test", [2; 32]).to_bytes(), pinned);
     }
 
     #[test]

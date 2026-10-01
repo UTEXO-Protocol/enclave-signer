@@ -158,19 +158,22 @@ both the enclave and every verifier share so the bytes are identical.
 
 ```
 policy_commitment =
-    u8(POLICY_COMMITMENT_V5 = 5)                    // version tag
+    u8(POLICY_COMMITMENT_V6 = 6)                    // version tag
     // Production (release, fully-pinned bridge signer):
     u8(0x01)                                        // production discriminant
     u8(allow_vanilla_psbt)                          // plain-BTC path enabled?
     u8(signer_role)                                 // 0 combined | 1 mint | 2 burn (from build features)
     u8(attestation_mode)                            // 1 = real NSM (0 = mock)
-    u8(evm_source)                                  // 0 disabled | 1 raw-rpc | 2 Helios-verified
+    u8(evm_source)                                  // 0 disabled | 1 plaintext rpc (dev) | 2 Helios-verified | 3 pinned TLS rpc
     u8(btc_source)                                  // 1 = SPV-verified
     chain_id_be8 || bridge_contract(20)
     u32_be(len(rgb_asset_id)) || rgb_asset_id_utf8
     funds_in_contract(20)                           // authorized event emitter
     evm_min_confirmations_be8                       // required receipt depth
     u8(checkpoint_present)                          // 0 absent; 1 followed by 32-byte beacon root
+    u32_be(len(electrum_host)) || electrum_host     // Electrum host set at launch
+    u8(evm_rpc_tls_present)                         // 0 absent; 1 followed by:
+      u32_be(len(host)) || host || ca_sha256(32)    //   EVM RPC host, SHA-256 of the CA DER, set at launch
     // Gas-tx (SignRawDigest) rule:
     gas_tx_allowed_to(20)                           // all-zero = gas path unpinned
     gas_tx_max_gas_limit_be8                        // gasLimit ceiling (0 = unset)
@@ -182,9 +185,12 @@ policy_commitment =
     u8(0x00)                                        // development discriminant
 ```
 
-The tuple omits the Bitcoin network, concrete sats budgets, resolver URLs and
-strict Helios checkpoint-age setting. Image-baked values remain measured in the
-EIF.
+The tuple omits the Bitcoin network, concrete sats budgets, the Electrum scheme
+and port, the EVM RPC TLS port and strict Helios checkpoint-age setting.
+Image-baked values remain measured in the EIF. The endpoints are not in the
+image; the operator sets them once at launch (`SetEndpoints`), and the
+attestation shows them without a restart. Until the set,
+`GetAttestedPublicKey` is refused.
 
 A production enclave commits the production tuple; a dev/mock enclave
 commits just `[version, 0x00]`. Because the posture flags (`allow_vanilla_psbt`,
@@ -259,8 +265,11 @@ CA/certificate/key environment from [Parent mTLS](parent-mtls.md) first; an
 
 ```bash
 # Production verification (against a real Nitro enclave). By default it expects a
-# production policy with plain-BTC signing DISABLED and the raw-RPC EVM data
-# source (`--expect-evm-source raw`, what the shipped image uses).
+# production policy with plain-BTC signing DISABLED and the pinned-TLS EVM data
+# source (`--expect-evm-source tls`, what the shipped image uses), which needs the
+# Electrum host, the EVM RPC host and the CA the operator set at launch. Compute
+# the CA hash from the same DER the operator set:
+#   openssl x509 -in ca.pem -outform der | openssl dgst -sha256 -hex
 attest-verify \
     --endpoint https://parent.example:50051 \
     --pcr0 <96-hex-chars> \
@@ -269,7 +278,10 @@ attest-verify \
     --expect-signer-role burn \
     --expect-funds-in-contract 0x6711f1a319B37847fa0234181C34D883774c4951 \
     --expect-token-contract 0xFd086bC7CD5C481DCC9C85ebE478A1C0b69FCbb9 \
-    --expect-evm-min-confirmations 12
+    --expect-evm-min-confirmations 12 \
+    --expect-electrum-host <electrum host> \
+    --expect-evm-rpc-host <rpc host> \
+    --expect-evm-rpc-ca-sha256 <64-hex-chars>
 
 # --expect-signer-role is required: `mint` for the mint signer image
 # (Dockerfile.enclave.mint), `burn` for the burn signer
@@ -295,12 +307,15 @@ attest-verify \
 attest-verify --endpoint https://parent.example:50051 \
     --pcr0 <..> --pcr1 <..> --pcr2 <..> --expect-signer-role mint \
     --expect-funds-in-contract <hex20> --expect-evm-min-confirmations 12 \
+    --expect-electrum-host <electrum host> \
+    --expect-evm-rpc-host <rpc host> --expect-evm-rpc-ca-sha256 <64-hex-chars> \
     --expect-vanilla-psbt
 
 # Optional Helios build (not enabled in the supplied Dockerfiles):
 attest-verify --endpoint https://parent.example:50051 \
-    --pcr0 <..> --pcr1 <..> --pcr2 <..> \
+    --pcr0 <..> --pcr1 <..> --pcr2 <..> --expect-signer-role mint \
     --expect-funds-in-contract <hex20> --expect-evm-min-confirmations 12 \
+    --expect-electrum-host <electrum host> \
     --expect-evm-source helios --expect-helios-checkpoint <hex32>
 
 # Dev / CI verification (against an enclave built with --features mock-attestation).

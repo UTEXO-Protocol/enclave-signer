@@ -10,7 +10,7 @@
 
 use anyhow::{bail, Context, Result};
 use attestation_verify::{
-    AttestationMode, AttestedPolicy, BtcDataSource, EvmDataSource, SignerRole,
+    AttestationMode, AttestedPolicy, BtcDataSource, EvmDataSource, EvmRpcTlsPin, SignerRole,
 };
 use rand::RngCore;
 use sha2::{Digest, Sha256};
@@ -57,6 +57,11 @@ pub enum ExpectedPolicy {
         /// commitment so an enclave that trust-rooted on a different checkpoint
         /// fails verification.
         evm_checkpoint: Option<[u8; 32]>,
+        /// The Electrum host the operator set at launch.
+        electrum_host: String,
+        /// The EVM RPC TLS host and CA hash the operator expects. `Some`
+        /// (required) when `evm_source` is [`EvmDataSource::PinnedTlsRpc`].
+        evm_rpc_tls: Option<EvmRpcTlsPin>,
         /// Expected EVM chain ID.
         /// None accepts the authenticated chain ID without comparison.
         expected_chain_id: Option<u64>,
@@ -237,6 +242,8 @@ fn expected_attested_policy(
             signer_role,
             evm_source,
             evm_checkpoint,
+            electrum_host,
+            evm_rpc_tls,
             expected_chain_id,
             expected_bridge_contract,
             expected_rgb_asset_id,
@@ -303,6 +310,8 @@ fn expected_attested_policy(
                 funds_in_contract: *funds_in_contract,
                 evm_min_confirmations: *evm_min_confirmations,
                 evm_checkpoint: *evm_checkpoint,
+                electrum_host: electrum_host.clone(),
+                evm_rpc_tls: evm_rpc_tls.clone(),
                 // Gas-tx rule: declared by the operator, not on the
                 // wire. `to_bytes` canonicalises the selector set, so the caller
                 // need not pre-sort it.
@@ -333,6 +342,8 @@ mod tests {
             evm_source: EvmDataSource::RawRpc,
             signer_role: SignerRole::Combined,
             evm_checkpoint: None,
+            electrum_host: "electrum.test".into(),
+            evm_rpc_tls: None,
             funds_in_contract: [0x11; 20],
             token_contract: [0x22; 20],
             evm_min_confirmations: 12,
@@ -351,8 +362,13 @@ mod tests {
         ExpectedPolicy::Production {
             allow_vanilla_psbt: false,
             signer_role,
-            evm_source: EvmDataSource::RawRpc,
+            evm_source: EvmDataSource::PinnedTlsRpc,
             evm_checkpoint: None,
+            electrum_host: "electrum.test".into(),
+            evm_rpc_tls: Some(EvmRpcTlsPin {
+                host: "rpc.test".into(),
+                ca_sha256: [0x33; 32],
+            }),
             funds_in_contract: [0x11; 20],
             token_contract: [0x22; 20],
             evm_min_confirmations: 12,
@@ -482,6 +498,29 @@ mod tests {
                 format!("{err:#}").contains("user_data"),
                 "attested {attested:?}, expected {expected:?}: {err:#}"
             );
+        }
+    }
+
+    #[test]
+    fn wrong_evm_rpc_tls_pin_fails() {
+        let nonce = [0x42; 32];
+        for (host, ca_sha256) in [("other.test", [0x33; 32]), ("rpc.test", [0x44; 32])] {
+            let mut expected = production(SignerRole::Mint);
+            if let ExpectedPolicy::Production { evm_rpc_tls, .. } = &mut expected {
+                *evm_rpc_tls = Some(EvmRpcTlsPin {
+                    host: host.into(),
+                    ca_sha256,
+                });
+            }
+            let err = verify_attested_response(
+                attested_response(SignerRole::Mint, &nonce),
+                nonce,
+                &attestation_verify::ExpectedPcrs::zero(),
+                VerifyMode::Mock,
+                &expected,
+            )
+            .unwrap_err();
+            assert!(format!("{err:#}").contains("user_data"), "{err:#}");
         }
     }
 }

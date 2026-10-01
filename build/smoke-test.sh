@@ -5,6 +5,8 @@
 # Run this from the EC2 parent instance after the enclave is running.
 # It exercises every RPC endpoint via the parent CLI binary.
 #
+# A fresh enclave gets its endpoints from step 0. A running one is only checked.
+#
 # Usage:
 #   ./smoke-test.sh                     # TCP mode (dev, enclave on localhost:5000)
 #   ./smoke-test.sh --vsock             # vsock mode (production, CID 16 port 5000)
@@ -144,6 +146,27 @@ case "$ADDR" in
         echo ""
         ;;
 esac
+
+# ---------------------------------------------
+# 0. Endpoints: set once on a fresh enclave, else only check
+# ---------------------------------------------
+# The enclave refuses a second set. The CLI reads ELECTRUM_URL, EVM_RPC_HOST,
+# EVM_RPC_TLS_PORT and EVM_RPC_TLS_CA_DER_FILE.
+log "0. SetEndpoints (only when the enclave has none)"
+HEALTH_OUTPUT=$(run_parent health) || true
+if echo "$HEALTH_OUTPUT" | grep -q "Endpoints set: *true"; then
+    skip "SetEndpoints" "already set"
+elif echo "$HEALTH_OUTPUT" | grep -q "Endpoints set: *false"; then
+    SET_OUTPUT=$(run_parent set-endpoints) || true
+    HEALTH_OUTPUT=$(run_parent health) || true
+    if echo "$HEALTH_OUTPUT" | grep -q "Endpoints set: *true"; then
+        pass "SetEndpoints"
+    else
+        fail "SetEndpoints" "$SET_OUTPUT"
+    fi
+else
+    fail "SetEndpoints" "$HEALTH_OUTPUT"
+fi
 
 # ---------------------------------------------
 # 1. Initialize keys

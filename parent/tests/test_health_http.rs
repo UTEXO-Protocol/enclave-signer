@@ -28,6 +28,7 @@ fn ready_response(ready: bool) -> HealthResponse {
         spv_tip_time: 1_700_000_000,
         spv_tip_age_secs: if ready { 30 } else { 99_999 },
         spv_max_tip_age_secs: 7200,
+        endpoints_set: ready,
     }
 }
 

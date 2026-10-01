@@ -13,7 +13,7 @@ use crate::proto::enclave_request::Request;
 use crate::proto::enclave_response::Response;
 use crate::proto::sign_request::{DestinationNetwork, SourceNetwork};
 use crate::proto::*;
-use crate::server::{handle_connection, ServerContext, SubmitRateLimiter};
+use crate::server::{handle_connection, ServerContext};
 use crate::state::EnclaveState;
 use crate::test_support::{bridge_funds_in_data, regtest_header_chain, FakeEvm};
 
@@ -260,6 +260,8 @@ fn a_retry_is_signed_when_the_first_response_never_reached_the_caller() {
         &bridge_config,
         EvmDataSource::Disabled,
         None,
+        None,
+        "",
         0,
     );
     let state = EnclaveState::new(bitcoin::Network::Bitcoin);
@@ -271,16 +273,11 @@ fn a_retry_is_signed_when_the_first_response_never_reached_the_caller() {
         .unsigned_tx
         .compute_txid();
 
-    let ctx = ServerContext {
-        state,
-        bridge_config,
-        policy,
-        rgb_validator: Some(RgbValidator::canned(validated_consignment(txid), 50.0)),
-        evm_rpc_client: Some(Box::new(stub_deposit())),
-        evm_rpc_config: EvmRpcConfig::default(),
-        header_chain: regtest_header_chain(),
-        submit_rate_limiter: std::sync::Mutex::new(SubmitRateLimiter::default()),
-    };
+    let mut ctx = ServerContext::new(state, bridge_config, regtest_header_chain());
+    let launch = ctx.launch.get_mut().unwrap();
+    launch.policy = policy;
+    launch.rgb_validator = Some(RgbValidator::canned(validated_consignment(txid), 50.0));
+    launch.evm_rpc_client = Some(Box::new(stub_deposit()));
 
     let request = deposit_request(psbt_bytes);
     handle_connection(DeadCaller(Cursor::new(framed(&request))), &ctx);

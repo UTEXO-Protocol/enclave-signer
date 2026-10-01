@@ -409,58 +409,38 @@ fn parse_eth_address(s: &str) -> Result<[u8; 20]> {
 /// EVM JSON-RPC config for in-enclave `FundsIn` event verification,
 /// loaded at boot when the `evm-rpc` feature is built.
 ///
-/// Operational plumbing, not part of the committed identity: like
-/// [`BridgeConfig::funds_in_contract`] it is not folded into the attestation
-/// bundle. The choice of EVM data source (raw RPC vs Helios) is attested, as
-/// `evm_source` in the security policy; this URL is not.
-///
-/// Trust boundary: `rpc_url` must be loopback. The enclave reaches the EVM RPC
-/// only through the vsock forwarder ([`crate::vsock_forwarder`]), so responses
-/// are relayed by the untrusted host. `verify_funds_in_event` treats them as
-/// evidence and fails closed; full trustlessness needs Helios.
+/// The endpoint is not here: the operator sets it at launch ([`Endpoints`]).
 #[cfg(feature = "evm-rpc")]
 #[derive(Debug, Clone)]
 pub struct EvmRpcConfig {
-    /// Loopback URL of the in-enclave EVM RPC forwarder
-    /// (`EVM_RPC_URL`, default `http://127.0.0.1:3444`).
-    pub rpc_url: String,
     /// Minimum confirmation depth a `FundsIn` receipt must have, measured
     /// against the RPC head block (`EVM_MIN_CONFIRMATIONS`, default 12).
     pub min_confirmations: u64,
 }
 
+/// The TLS pin of the EVM RPC endpoint.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EvmRpcTls {
+    /// The name for SNI and the certificate check, lowercased.
+    pub host: String,
+    /// DER of the only trusted root.
+    pub ca_der: Vec<u8>,
+    /// The upstream TLS port. The forwarder listens on it in the enclave.
+    pub tls_port: u16,
+}
+
 #[cfg(feature = "evm-rpc")]
 impl EvmRpcConfig {
-    /// Default loopback RPC URL - the enclave side of the EVM vsock forwarder.
-    const DEFAULT_RPC_URL: &'static str = "http://127.0.0.1:3444";
     /// Default confirmation depth (~a safe head distance for most EVM chains).
     const DEFAULT_MIN_CONFIRMATIONS: u64 = 12;
 
-    /// Load from `EVM_RPC_URL` and `EVM_MIN_CONFIRMATIONS`. Both fall back to
-    /// safe defaults. A non-loopback `EVM_RPC_URL` is rejected back to the
-    /// default and logged: routing EVM RPC anywhere but the vsock forwarder
-    /// would bypass the only sanctioned egress path.
+    /// Load `EVM_MIN_CONFIRMATIONS` from the process environment.
     pub fn from_env() -> Self {
-        let rpc_url = match std::env::var("EVM_RPC_URL") {
-            Ok(url) if is_loopback_url(&url) => url,
-            Ok(url) => {
-                tracing::error!(
-                    %url,
-                    "EVM_RPC_URL is not loopback - ignoring and using the default vsock-forwarder \
-                     URL; the enclave must reach the EVM RPC only via the loopback forwarder"
-                );
-                Self::DEFAULT_RPC_URL.to_string()
-            }
-            Err(_) => Self::DEFAULT_RPC_URL.to_string(),
-        };
         let min_confirmations = std::env::var("EVM_MIN_CONFIRMATIONS")
             .ok()
             .and_then(|s| s.parse::<u64>().ok())
             .unwrap_or(Self::DEFAULT_MIN_CONFIRMATIONS);
-        Self {
-            rpc_url,
-            min_confirmations,
-        }
+        Self { min_confirmations }
     }
 }
 
@@ -468,7 +448,6 @@ impl EvmRpcConfig {
 impl Default for EvmRpcConfig {
     fn default() -> Self {
         Self {
-            rpc_url: Self::DEFAULT_RPC_URL.to_string(),
             min_confirmations: Self::DEFAULT_MIN_CONFIRMATIONS,
         }
     }
@@ -478,7 +457,7 @@ impl Default for EvmRpcConfig {
 /// `localhost`). Narrow and dependency-free. Matches the host exactly, after
 /// stripping scheme, userinfo, path, and port, so `127.0.0.1.evil.com` is not
 /// treated as loopback.
-#[cfg(feature = "evm-rpc")]
+#[cfg(feature = "helios")]
 fn is_loopback_url(url: &str) -> bool {
     let after_scheme = url.split_once("://").map(|(_, rest)| rest).unwrap_or(url);
     // Drop path/query/fragment, then any `userinfo@` prefix.
@@ -578,9 +557,131 @@ fn warn_if_not_loopback(var: &str, url: &str) {
     }
 }
 
+/// The chain endpoints the operator sets once, at launch (`SetEndpoints`).
+/// They are not in the image, so they do not change PCR0. The attested
+/// policy commits the Electrum host and the EVM RPC pin.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Endpoints {
+    /// `ssl://host:port` or `tcp://host:port`. Empty without `rgb-validation`.
+    pub electrum_url: String,
+    pub electrum_host: String,
+    pub electrum_port: u16,
+    /// `None` without `evm-rpc`.
+    pub evm_rpc_tls: Option<EvmRpcTls>,
+}
+
+impl Endpoints {
+    /// Check the values this build uses. A value the build does not use
+    /// must be empty.
+    pub fn parse(req: &crate::proto::SetEndpointsRequest) -> std::result::Result<Self, String> {
+        // Allow one trailing slash. The Electrum client does not.
+        let electrum_url = req
+            .electrum_url
+            .strip_suffix('/')
+            .unwrap_or(&req.electrum_url);
+        #[cfg(feature = "rgb-validation")]
+        let (electrum_host, electrum_port) = parse_electrum_url(electrum_url)?;
+        #[cfg(not(feature = "rgb-validation"))]
+        let (electrum_host, electrum_port) = {
+            unused("electrum_url", req.electrum_url.is_empty())?;
+            (String::new(), 0)
+        };
+
+        #[cfg(feature = "evm-rpc")]
+        let evm_rpc_tls = {
+            let host = parse_host("evm_rpc_host", &req.evm_rpc_host)?;
+            let ca = rustls_pki_types::CertificateDer::from(req.evm_rpc_ca_der.as_slice());
+            // The same check the client root store makes, so a bad CA never
+            // gets an attested pin.
+            webpki::anchor_from_trusted_cert(&ca)
+                .map_err(|e| format!("evm_rpc_ca_der is not a valid CA certificate: {e}"))?;
+            let tls_port = parse_port("evm_rpc_tls_port", req.evm_rpc_tls_port)?;
+            // Both forwarders listen on loopback in the enclave.
+            if tls_port == electrum_port {
+                return Err(format!(
+                    "evm_rpc_tls_port {tls_port} is also the Electrum port"
+                ));
+            }
+            Some(EvmRpcTls {
+                host,
+                ca_der: req.evm_rpc_ca_der.clone(),
+                tls_port,
+            })
+        };
+        #[cfg(not(feature = "evm-rpc"))]
+        let evm_rpc_tls = {
+            unused("evm_rpc_host", req.evm_rpc_host.is_empty())?;
+            unused("evm_rpc_ca_der", req.evm_rpc_ca_der.is_empty())?;
+            unused("evm_rpc_tls_port", req.evm_rpc_tls_port == 0)?;
+            None
+        };
+
+        Ok(Self {
+            electrum_url: electrum_url.to_string(),
+            electrum_host,
+            electrum_port,
+            evm_rpc_tls,
+        })
+    }
+}
+
+#[cfg(not(feature = "evm-rpc"))]
+fn unused(name: &str, empty: bool) -> std::result::Result<(), String> {
+    if empty {
+        Ok(())
+    } else {
+        Err(format!("{name} is set, but this build does not use it"))
+    }
+}
+
+#[cfg(feature = "rgb-validation")]
+fn parse_port(name: &str, port: u32) -> std::result::Result<u16, String> {
+    u16::try_from(port)
+        .ok()
+        .filter(|&p| p != 0)
+        .ok_or_else(|| format!("{name} {port} is not in 1-65535"))
+}
+
+/// `ssl://host:port` or `tcp://host:port`, nothing after the port.
+#[cfg(feature = "rgb-validation")]
+fn parse_electrum_url(url: &str) -> std::result::Result<(String, u16), String> {
+    let rest = url
+        .strip_prefix("ssl://")
+        .or_else(|| url.strip_prefix("tcp://"))
+        .ok_or_else(|| format!("electrum_url {url:?} is not ssl:// or tcp://"))?;
+    let (host, port) = rest
+        .rsplit_once(':')
+        .ok_or_else(|| format!("electrum_url {url:?} has no port"))?;
+    let port = port
+        .parse::<u32>()
+        .map_err(|_| format!("electrum_url {url:?} has a bad port"))?;
+    Ok((
+        parse_host("electrum_url host", host)?,
+        parse_port("electrum_url port", port)?,
+    ))
+}
+
+/// A DNS host name, lowercased. No scheme, `/`, `:`, whitespace or IP
+/// literal.
+#[cfg(feature = "rgb-validation")]
+fn parse_host(name: &str, host: &str) -> std::result::Result<String, String> {
+    use rustls_pki_types::DnsName;
+    // `DnsName` rejects an empty label, a label over 63 bytes, a label
+    // starting with a hyphen, and an all-numeric last label (no IPv4
+    // literals). It allows a trailing dot and `_`, so those are checked here.
+    if host.contains('_') || host.ends_with('.') {
+        return Err(format!("{name} {host:?} is not a host name"));
+    }
+    let dns_name =
+        DnsName::try_from(host).map_err(|_| format!("{name} {host:?} is not a host name"))?;
+    // SNI and the Host header go out lowercase.
+    Ok(dns_name.to_lowercase_owned().as_ref().to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::proto::SetEndpointsRequest;
 
     #[test]
     fn parse_eth_address_with_prefix() {
@@ -705,7 +806,7 @@ mod tests {
         assert!(c.is_partially_configured());
     }
 
-    #[cfg(feature = "evm-rpc")]
+    #[cfg(feature = "helios")]
     #[test]
     fn loopback_url_accepts_real_loopback() {
         assert!(is_loopback_url("http://127.0.0.1:3444"));
@@ -716,7 +817,7 @@ mod tests {
         assert!(is_loopback_url("http://user:pass@127.0.0.1:3444"));
     }
 
-    #[cfg(feature = "evm-rpc")]
+    #[cfg(feature = "helios")]
     #[test]
     fn loopback_url_rejects_lookalike_authorities() {
         // The old `starts_with` check accepted all of these.
@@ -726,5 +827,142 @@ mod tests {
         assert!(!is_loopback_url("http://[::1].evil.com"));
         assert!(!is_loopback_url("http://10.0.0.1:8545"));
         assert!(!is_loopback_url("http://evil.com/127.0.0.1"));
+    }
+
+    const CA_HEX: &str = include_str!("../tests/fixtures/evm_rpc_tls/ca_a.der.hex");
+
+    /// A valid set for this build: only the values it uses.
+    fn valid() -> SetEndpointsRequest {
+        let mut req = SetEndpointsRequest::default();
+        if cfg!(feature = "rgb-validation") {
+            req.electrum_url = "ssl://Electrum.test:50002".into();
+        }
+        if cfg!(feature = "evm-rpc") {
+            req.evm_rpc_host = "RPC.Test".into();
+            req.evm_rpc_ca_der = hex::decode(CA_HEX.trim()).unwrap();
+            req.evm_rpc_tls_port = 443;
+        }
+        req
+    }
+
+    fn parse_with(
+        edit: impl FnOnce(&mut SetEndpointsRequest),
+    ) -> std::result::Result<Endpoints, String> {
+        let mut req = valid();
+        edit(&mut req);
+        Endpoints::parse(&req)
+    }
+
+    #[test]
+    fn valid_endpoints_parse_and_hosts_are_lowercased() {
+        let e = parse_with(|_| {}).unwrap();
+        if cfg!(feature = "rgb-validation") {
+            assert_eq!(e.electrum_host, "electrum.test");
+            assert_eq!(e.electrum_port, 50002);
+        }
+        assert_eq!(e.evm_rpc_tls.is_some(), cfg!(feature = "evm-rpc"));
+        if let Some(tls) = e.evm_rpc_tls {
+            assert_eq!(tls.host, "rpc.test");
+            assert_eq!(tls.tls_port, 443);
+        }
+    }
+
+    #[cfg(feature = "rgb-validation")]
+    #[test]
+    fn electrum_url_must_be_ssl_or_tcp_host_and_port() {
+        assert!(parse_with(|r| r.electrum_url = "tcp://electrum.test:50001".into()).is_ok());
+        let e = parse_with(|r| r.electrum_url = "ssl://electrum.test:50002/".into()).unwrap();
+        assert_eq!(e.electrum_url, "ssl://electrum.test:50002");
+        for url in [
+            "",
+            "http://electrum.test:50001",
+            "electrum.test:50001",
+            "ssl://electrum.test",
+            "ssl://electrum.test:50002/x",
+            "ssl://electrum.test:0",
+            "ssl://electrum.test:65536",
+            "ssl://127.0.0.1:50002",
+            "ssl://electrum_test:50002",
+            "ssl://electrum test:50002",
+        ] {
+            assert!(
+                parse_with(|r| r.electrum_url = url.into()).is_err(),
+                "{url:?}"
+            );
+        }
+    }
+
+    #[cfg(feature = "evm-rpc")]
+    #[test]
+    fn evm_rpc_host_must_be_a_host_name() {
+        // A DNS name up to 253 bytes total, no label over 63.
+        let long = [
+            "a".repeat(63),
+            "a".repeat(63),
+            "a".repeat(63),
+            "a".repeat(61),
+        ]
+        .join(".");
+        assert_eq!(long.len(), 253);
+        for host in ["rpc.test", "a", "rpc-1.Example.com", &long] {
+            assert!(
+                parse_with(|r| r.evm_rpc_host = host.into()).is_ok(),
+                "{host}"
+            );
+        }
+        let too_long_label = "a".repeat(64);
+        for host in [
+            "",
+            ".rpc.test",
+            "rpc.test.",
+            "rpc..test",
+            "-rpc.test",
+            "https://rpc.test",
+            "rpc.test/v2",
+            "rpc.test:443",
+            "rpc test",
+            "rpc.test\n",
+            "rpc_test",
+            "127.0.0.1",
+            &too_long_label,
+        ] {
+            assert!(
+                parse_with(|r| r.evm_rpc_host = host.into()).is_err(),
+                "{host:?}"
+            );
+        }
+    }
+
+    #[cfg(feature = "evm-rpc")]
+    #[test]
+    fn evm_rpc_ca_must_be_a_valid_certificate() {
+        let der = hex::decode(CA_HEX.trim()).unwrap();
+        let truncated = der[..der.len() - 10].to_vec();
+        for ca in [Vec::new(), b"not der".to_vec(), truncated] {
+            assert!(
+                parse_with(|r| r.evm_rpc_ca_der = ca.clone()).is_err(),
+                "{ca:?}"
+            );
+        }
+    }
+
+    #[cfg(feature = "evm-rpc")]
+    #[test]
+    fn evm_rpc_tls_port_must_be_a_free_port() {
+        for port in [0, 65536, 50002] {
+            assert!(parse_with(|r| r.evm_rpc_tls_port = port).is_err(), "{port}");
+        }
+    }
+
+    #[test]
+    fn a_value_the_build_does_not_use_is_refused() {
+        if !cfg!(feature = "rgb-validation") {
+            assert!(parse_with(|r| r.electrum_url = "ssl://electrum.test:50002".into()).is_err());
+        }
+        if !cfg!(feature = "evm-rpc") {
+            assert!(parse_with(|r| r.evm_rpc_host = "rpc.test".into()).is_err());
+            assert!(parse_with(|r| r.evm_rpc_ca_der = vec![1]).is_err());
+            assert!(parse_with(|r| r.evm_rpc_tls_port = 443).is_err());
+        }
     }
 }

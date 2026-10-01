@@ -2,7 +2,7 @@
 //! TCP framing -> `dispatch` -> `EnclaveState` + `ServerContext.header_chain`
 //! -> response.
 //!
-//! Readiness is `key_loaded && spv_synced`, and `spv_synced` is the same
+//! Readiness is `endpoints_set && key_loaded && spv_synced`, and `spv_synced` is the same
 //! `assert_chain_ready` precondition signing applies. These tests pin every
 //! corner of that conjunction so a later change to either half cannot quietly
 //! make a not-yet-ready enclave advertise itself to deploy.
@@ -114,6 +114,8 @@ fn key_and_fresh_chain_is_ready() {
     let h = health(port);
 
     assert!(h.ready);
+    // The test server presets the endpoints.
+    assert!(h.endpoints_set);
     assert!(h.key_loaded);
     assert!(h.spv_synced);
     assert_eq!(h.spv_tip_height, SPV_MIN_CONFIRMATIONS);

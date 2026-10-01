@@ -77,7 +77,7 @@ pub(super) fn handle_sign(
         }
 
         // Fail closed: no indexer, no script, no way to tell change from payout.
-        let validator = ctx.rgb_validator.as_ref().ok_or_else(|| {
+        let validator = ctx.launch()?.rgb_validator.as_ref().ok_or_else(|| {
             EnclaveError::CrossCheck(
                 "send-RGB change seal names an outpoint outside the PSBT, but the RGB validator \
                  is not configured - the enclave cannot resolve that outpoint's script"
@@ -128,7 +128,7 @@ pub(super) fn handle_sign(
     let validation_ctx = ValidationContext {
         bridge_config: &ctx.bridge_config,
         #[cfg(feature = "rgb-validation")]
-        rgb_validator: ctx.rgb_validator.as_ref(),
+        rgb_validator: ctx.launch()?.rgb_validator.as_ref(),
         #[cfg(feature = "rgb-validation")]
         header_chain: &ctx.header_chain,
         #[cfg(feature = "rgb-validation")]
@@ -444,7 +444,7 @@ fn verify_funds_in_deposit(
     // `funds_in_operation_id` is the on-chain BridgeFundsIn operationId as
     // the full 32-byte word. It is required; `verify_funds_in_event` fails
     // closed on an empty/short value.
-    let client = ctx.evm_rpc_client.as_ref().ok_or_else(|| {
+    let client = ctx.launch()?.evm_rpc_client.as_ref().ok_or_else(|| {
         EnclaveError::CrossCheck(
             "evm-rpc build but RPC client unavailable - refusing to sign a bridge PSBT \
              without independently verifying the FundsIn deposit"
@@ -668,7 +668,8 @@ mod early_bridge_checks {
             BridgeConfig::default(),
             crate::test_support::regtest_header_chain(),
         );
-        ctx.evm_rpc_client = Some(Box::new(MissingDeposit(Arc::clone(calls))));
+        ctx.launch.get_mut().unwrap().evm_rpc_client =
+            Some(Box::new(MissingDeposit(Arc::clone(calls))));
         ctx
     }
 

@@ -27,6 +27,7 @@ message EnclaveRequest {
     SignBtcRequest sign_btc = 14;
     SignCcdRequest sign_ccd = 15;
     HealthRequest health = 16;
+    SetEndpointsRequest set_endpoints = 17;
   }
 }
 
@@ -48,6 +49,7 @@ message EnclaveResponse {
     CcdSignatureResponse ccd_signature = 14;
     ErrorResponse error = 15;
     HealthResponse health = 16;
+    SetEndpointsResponse set_endpoints = 17;
   }
 }
 
@@ -354,8 +356,8 @@ message GetLastSavedBlockResponse {
 message HealthRequest {}
 
 message HealthResponse {
-  // key_loaded && spv_synced. The only field a caller needs; the rest are
-  // diagnostics for logs.
+  // endpoints_set && key_loaded && spv_synced. The only field a caller needs;
+  // the rest are diagnostics for logs.
   bool ready = 1;
   // Signing key present, i.e. the phase state machine reached "active".
   bool key_loaded = 2;
@@ -374,7 +376,22 @@ message HealthResponse {
   uint32 spv_tip_age_secs = 7;
   // Max age spv_tip_age_secs is compared against.
   uint32 spv_max_tip_age_secs = 8;
+  // SetEndpoints was accepted.
+  bool endpoints_set = 9;
 }
+
+// The chain endpoints the enclave reads from. The operator sets them once,
+// after launch. The enclave refuses a second set. Until the set, the enclave
+// signs nothing and opens no chain connection. A build that does not use a
+// value requires it empty.
+message SetEndpointsRequest {
+  string electrum_url = 1; // ssl://host:port or tcp://host:port.
+  string evm_rpc_host = 2; // TLS name of the EVM RPC. No scheme, path or port.
+  bytes evm_rpc_ca_der = 3; // DER of the only CA the EVM RPC TLS trusts.
+  uint32 evm_rpc_tls_port = 4; // TLS port of the EVM RPC, 1-65535.
+}
+
+message SetEndpointsResponse {}
 
 message ErrorResponse {
   uint32 code = 1; // Stable enclave error category.
