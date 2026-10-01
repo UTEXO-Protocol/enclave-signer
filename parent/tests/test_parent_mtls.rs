@@ -149,13 +149,6 @@ async fn mtls_roles_rate_budget_and_revocation() {
                     .code(),
                 Code::PermissionDenied
             );
-            assert_eq!(
-                c.submit_headers(SubmitHeadersRequest::default())
-                    .await
-                    .unwrap_err()
-                    .code(),
-                Code::PermissionDenied
-            );
         } else {
             // Sign schema validation proves passage through auth without requesting a signature.
             assert_eq!(
@@ -165,8 +158,17 @@ async fn mtls_roles_rate_budget_and_revocation() {
                     .code(),
                 Code::InvalidArgument
             );
-            reached(c.submit_headers(SubmitHeadersRequest::default()).await);
         }
+        // No role may submit headers, and the request never reaches the enclave.
+        let before = calls.load(Ordering::SeqCst);
+        assert_eq!(
+            c.submit_headers(SubmitHeadersRequest::default())
+                .await
+                .unwrap_err()
+                .code(),
+            Code::PermissionDenied
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), before);
     }
     // Unknown method names must not inherit a role's read permission.
     let channel = pki

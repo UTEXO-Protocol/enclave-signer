@@ -16,6 +16,7 @@ use utexo_bridge_parent::enclave_proto::{
 };
 use utexo_bridge_parent::framing;
 use utexo_bridge_parent::grpc_server::{EnclaveTarget, ParentAdapterService};
+use utexo_bridge_parent::header_sync::{SyncState, SyncStatus};
 use utexo_bridge_parent::health;
 
 fn ready_response(ready: bool) -> HealthResponse {
@@ -62,6 +63,10 @@ fn start_mock_enclave(reply: Option<enclave_response::Response>) -> u16 {
 
 /// Serve the health router on a random port and return it.
 async fn start_health_server(enclave_port: u16) -> u16 {
+    start_health_server_with(enclave_port, SyncStatus::default()).await
+}
+
+async fn start_health_server_with(enclave_port: u16, sync: SyncStatus) -> u16 {
     let service = ParentAdapterService::new(
         EnclaveTarget::Tcp(format!("127.0.0.1:{enclave_port}")),
         HashSet::new(),
@@ -69,7 +74,8 @@ async fn start_health_server(enclave_port: u16) -> u16 {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
     tokio::spawn(async move {
-        axum::serve(listener, health::router(service))
+        let (_, rx) = tokio::sync::watch::channel(sync);
+        axum::serve(listener, health::router(service, rx))
             .await
             .unwrap();
     });
@@ -182,4 +188,38 @@ async fn unknown_path_is_404() {
     // The probe server serves exactly one route; nothing else is on it.
     let (status, _) = get(port, "/metrics");
     assert_eq!(status, 404);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn header_sync_is_reported_and_code_follows_ready() {
+    let stalled = SyncStatus {
+        state: SyncState::Stalled,
+        source_tip: Some(900_010),
+        enclave_tip: Some(900_000),
+        lag_blocks: Some(10),
+        tip_age_secs: Some(30),
+        last_ok_unix: Some(1_790_000_000),
+        last_error: Some("source down".into()),
+    };
+    let expected = r#""header_sync":{"enclave_tip":900000,"lag_blocks":10,"last_error":"source down","last_ok_unix":1790000000,"source_tip":900010,"state":"stalled","tip_age_secs":30}"#;
+
+    // A stalled sync does not change the code: it follows `ready`.
+    for (ready, code) in [(true, 200), (false, 503)] {
+        let enclave = start_mock_enclave(Some(enclave_response::Response::Health(ready_response(
+            ready,
+        ))));
+        let port = start_health_server_with(enclave, stalled.clone()).await;
+        let (status, body) = get(port, "/health");
+        assert_eq!(status, code);
+        assert!(body.contains(expected), "body: {body}");
+    }
+
+    // The object is there when the enclave cannot answer too.
+    let dead = TcpListener::bind("127.0.0.1:0").unwrap();
+    let dead_port = dead.local_addr().unwrap().port();
+    drop(dead);
+    let port = start_health_server_with(dead_port, stalled).await;
+    let (status, body) = get(port, "/health");
+    assert_eq!(status, 503);
+    assert!(body.contains(expected), "body: {body}");
 }

@@ -894,27 +894,30 @@ async fn grpc_get_last_saved_block_roundtrip() {
 }
 
 #[tokio::test]
-async fn grpc_submit_headers_roundtrip() {
-    let enclave_port = start_mock_enclave();
-    let grpc_port = start_grpc_server(enclave_port).await;
+async fn grpc_submit_headers_refused() {
+    // An enclave that must never see a connection.
+    let enclave = TcpListener::bind("127.0.0.1:0").unwrap();
+    enclave.set_nonblocking(true).unwrap();
+    let grpc_port = start_grpc_server(enclave.local_addr().unwrap().port()).await;
 
     let mut client = ParentServiceClient::connect(format!("http://127.0.0.1:{grpc_port}"))
         .await
         .unwrap();
 
-    let headers = vec![vec![0xAB; 80], vec![0xCD; 80], vec![0xEF; 80]];
-    let resp = client
+    let err = client
         .submit_headers(utexo_bridge_parent::grpc_proto::SubmitHeadersRequest {
-            headers: headers.clone(),
+            headers: vec![vec![0xAB; 80]],
             start_height: 215_001,
         })
         .await
-        .unwrap()
-        .into_inner();
+        .unwrap_err();
 
-    assert_eq!(resp.last_block_height, 215_003);
-    assert_eq!(resp.last_block_hash, vec![0x22; 32]);
-    assert_eq!(resp.headers_accepted, 3);
+    assert_eq!(err.code(), tonic::Code::PermissionDenied);
+    assert_eq!(
+        enclave.accept().unwrap_err().kind(),
+        std::io::ErrorKind::WouldBlock,
+        "SubmitHeaders must not reach the enclave"
+    );
 }
 
 #[tokio::test]
