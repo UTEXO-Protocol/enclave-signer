@@ -100,10 +100,15 @@ pub(super) fn handle_sign(
 
     #[cfg(all(feature = "rgb-validation", evm_to_rgb))]
     let psbt_fee_key_paths = |psbt: &bitcoin::psbt::Psbt| {
+        // Colored: the scope `sign_psbt_scoped` co-signs on the send-RGB path.
         ctx.state.with_keys(|keys| {
-            Ok(crate::networks::rgb::psbt_validation::fee_key_path_inputs(
-                psbt, keys,
-            ))
+            Ok(
+                crate::networks::rgb::psbt_validation::fee_key_path_inputs_scoped(
+                    psbt,
+                    keys,
+                    crate::keys::AccountType::Colored,
+                ),
+            )
         })
     };
 

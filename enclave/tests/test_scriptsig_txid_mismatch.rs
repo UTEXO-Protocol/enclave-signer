@@ -413,8 +413,9 @@ impl EvmReceiptProvider for DepositChain {
     }
 }
 
-/// Stub Esplora for a regtest validator: the genesis hash for the chain
-/// identity check and an empty fee-estimate map (regtest has no fee market).
+/// Stub Esplora for a regtest validator: only the genesis hash for the chain
+/// identity check. The enclave fetches no fee estimate; the fee policy is
+/// pinned at compile time.
 fn spawn_regtest_stub() -> String {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap();
@@ -428,8 +429,6 @@ fn spawn_regtest_stub() -> String {
                 bitcoin::constants::genesis_block(Network::Regtest)
                     .block_hash()
                     .to_string()
-            } else if req.starts_with("GET /fee-estimates") {
-                "{}".to_string()
             } else {
                 let _ = stream.write_all(b"HTTP/1.1 404 Not Found\r\ncontent-length: 0\r\n\r\n");
                 continue;

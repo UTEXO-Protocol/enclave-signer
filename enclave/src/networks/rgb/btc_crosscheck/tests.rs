@@ -12,6 +12,7 @@ use bitcoin::{
 };
 
 use crate::keys::AccountType;
+use crate::networks::rgb::psbt_validation::MAX_FEE_CAP_CROSSOVER_VB;
 
 fn km() -> KeyManager {
     KeyManager::from_seed([0x42u8; 64], Network::Testnet).unwrap()
@@ -475,6 +476,61 @@ fn rejects_a_fee_over_the_pinned_absolute_maximum() {
     };
     let err = validate_btc_request(&req, &cfg_with_cap(10_000_000), &keys).unwrap_err();
     assert!(err.to_string().contains("fee too high"), "got: {err}");
+}
+
+/// The fee floor sizes the signed transaction, so every input must be
+/// classifiable. A second P2TR input with no key-path metadata (not ours, not
+/// needed for ownership: the outputs still pay back to input 0's script) was
+/// signable before the fee policy; now the whole request is refused with a
+/// size error, not waved through on the output and amount checks alone.
+#[test]
+fn rejects_an_input_whose_signed_size_cannot_be_estimated() {
+    let keys = km();
+    let ours = our_address(&keys);
+    // Input 0 proves the 90_000-sat output on its own (an input exempts
+    // outputs up to its value); 20_000 sat over ~125 unsigned vB is under the
+    // rate cap, so only the size estimate can refuse.
+    let mut psbt = Psbt::deserialize(&psbt_from_our_address(
+        &keys,
+        &[100_000, 10_000],
+        &[(ours.spk.clone(), 90_000)],
+    ))
+    .unwrap();
+    let input = &mut psbt.inputs[1];
+    input.witness_utxo.as_mut().unwrap().script_pubkey = foreign_address();
+    input.tap_internal_key = None;
+    input.tap_key_origins.clear();
+    let req = SignBtcRequest {
+        psbt_bytes: psbt.serialize(),
+    };
+    let err = validate_btc_request(&req, &cfg_with_cap(1_000_000), &keys).unwrap_err();
+    let msg = err.to_string();
+    assert!(
+        msg.contains("cannot estimate signed PSBT size"),
+        "got: {msg}"
+    );
+    assert!(msg.contains("input 1"), "got: {msg}");
+}
+
+/// Above the crossover size the absolute cap refuses a rate the rate cap
+/// would accept; the error must say so instead of reading as a rate problem.
+#[test]
+fn absolute_cap_error_names_the_size_crossover() {
+    let keys = km();
+    let ours = our_address(&keys);
+    // One input + 12 outputs ~ 584 unsigned vB, 180 sat/vB: 105_120 sat.
+    let outputs: Vec<_> = (0..12).map(|_| (ours.spk.clone(), 1_000)).collect();
+    let fee = 105_120;
+    let req = SignBtcRequest {
+        psbt_bytes: psbt_from_our_address(&keys, &[12_000 + fee], &outputs),
+    };
+    let err = validate_btc_request(&req, &cfg_with_cap(10_000_000), &keys).unwrap_err();
+    let msg = err.to_string();
+    assert!(msg.contains("fee too high"), "got: {msg}");
+    assert!(
+        msg.contains(&format!("above {} vB", MAX_FEE_CAP_CROSSOVER_VB)),
+        "got: {msg}"
+    );
 }
 
 #[test]

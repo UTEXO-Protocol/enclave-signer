@@ -42,7 +42,7 @@ use bitcoin::secp256k1::{Keypair, Secp256k1};
 use bitcoin::{ScriptBuf, XOnlyPublicKey};
 
 use crate::keys::{AccountType, KeyManager};
-use crate::networks::rgb::signing::taproot::find_controlled_taproot_inputs;
+use crate::networks::rgb::signing::taproot::{find_controlled_taproot_inputs, TaprootSignJob};
 
 /// The `script_pubkey`s of every PSBT input this enclave provably controls
 /// on the plain-BTC (Vanilla) account.
@@ -65,8 +65,19 @@ pub fn self_controlled_input_scripts_scoped(
     keys: &KeyManager,
     allowed_account: Option<AccountType>,
 ) -> HashSet<Vec<u8>> {
-    find_controlled_taproot_inputs(psbt, keys.master_fingerprint(), keys)
-        .into_iter()
+    let jobs = find_controlled_taproot_inputs(psbt, keys.master_fingerprint(), keys);
+    controlled_input_scripts(psbt, &jobs, allowed_account)
+}
+
+/// [`self_controlled_input_scripts_scoped`] over an already-resolved job list,
+/// so a caller that also needs the jobs (fee sizing) derives each input once.
+/// `jobs` must come from [`find_controlled_taproot_inputs`] on this `psbt`.
+pub fn controlled_input_scripts(
+    psbt: &Psbt,
+    jobs: &[TaprootSignJob],
+    allowed_account: Option<AccountType>,
+) -> HashSet<Vec<u8>> {
+    jobs.iter()
         .filter(|job| allowed_account.is_none_or(|want| job.account_type == want))
         .filter_map(|job| psbt.inputs.get(job.input_index))
         .filter_map(|input| input.witness_utxo.as_ref())

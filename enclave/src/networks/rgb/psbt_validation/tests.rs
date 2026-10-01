@@ -288,7 +288,7 @@ mod fee_policy {
                 .into_script();
                 disclose_taproot_leaf(&mut psbt.inputs[0], leaf);
                 psbt.inputs[0].sighash_type = Some(requested.into());
-                let key_paths = fee_key_path_inputs(&psbt, &keys);
+                let key_paths = fee_key_path_inputs_scoped(&psbt, &keys, AccountType::Colored);
                 assert_eq!(key_paths, vec![0]);
 
                 let mut tx = psbt.unsigned_tx.clone();
@@ -313,7 +313,10 @@ mod fee_policy {
                 tx.input[0].witness = Witness::from_slice(&[signature.to_vec()]);
                 assert_eq!(tx.vsize() as u64, minimum);
                 // Merging a signature must not change the planned spend path.
-                assert_eq!(fee_key_path_inputs(&signed, &keys), key_paths);
+                assert_eq!(
+                    fee_key_path_inputs_scoped(&signed, &keys, AccountType::Colored),
+                    key_paths
+                );
                 check_psbt_fee(&signed, &key_paths, "send-RGB").unwrap();
 
                 psbt.unsigned_tx.output[0].value += Amount::from_sat(1);
@@ -365,7 +368,7 @@ mod fee_policy {
             .push_opcode(OP_NUMEQUAL)
             .into_script();
         let control = disclose_taproot_leaf(auxiliary, leaf.clone());
-        let key_paths = fee_key_path_inputs(&psbt, &keys);
+        let key_paths = fee_key_path_inputs_scoped(&psbt, &keys, AccountType::Colored);
         assert_eq!(
             key_paths,
             vec![0],
