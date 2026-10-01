@@ -422,10 +422,18 @@ fn split_asset_legs(
 pub const MAX_FEE_RATE_SAT_VB: u64 = 200;
 
 /// Pinned ceiling on the absolute miner fee (sats) of any PSBT this enclave
-/// signs. Bounds what one request can burn whatever the transaction's size. A
-/// `create_utxos` batch (one input, a handful of outputs) at
-/// [`MAX_FEE_RATE_SAT_VB`] stays well inside it.
+/// signs. Bounds what one request can burn whatever the transaction's size.
+///
+/// Crossover with [`MAX_FEE_RATE_SAT_VB`]: at the maximum rate this cap binds
+/// first for any transaction wider than [`MAX_FEE_CAP_CROSSOVER_VB`] unsigned
+/// vB (one key-path input plus roughly ten P2TR outputs). A wider
+/// `create_utxos` batch at a high rate must be split; the error names the
+/// crossover so the operator can tell a size problem from a rate problem.
 pub const MAX_FEE_SATS: u64 = 100_000;
+
+/// Unsigned vsize above which [`MAX_FEE_SATS`] binds before
+/// [`MAX_FEE_RATE_SAT_VB`] does.
+pub const MAX_FEE_CAP_CROSSOVER_VB: u64 = MAX_FEE_SATS / MAX_FEE_RATE_SAT_VB;
 
 /// Minimum signed fee rate agreed for bridge PSBTs; not caller-configurable.
 const MIN_FEE_RATE_SAT_VB: u64 = 1;
@@ -435,22 +443,31 @@ pub type FeeKeyPathResolver<'a> = &'a dyn Fn(&Psbt) -> Result<Vec<usize>>;
 
 /// Key-path inputs of `account` this enclave controls, including
 /// already-signed ones. Resolved from enclave keys, never from the request.
+/// `account` is the scope the signer co-signs on the calling path: Colored
+/// for send-RGB, Vanilla for plain-BTC.
 pub(crate) fn fee_key_path_inputs_scoped(
     psbt: &Psbt,
     keys: &crate::keys::KeyManager,
     account: crate::keys::AccountType,
 ) -> Vec<usize> {
-    super::signing::taproot::find_controlled_taproot_inputs(psbt, keys.master_fingerprint(), keys)
-        .into_iter()
+    let jobs = super::signing::taproot::find_controlled_taproot_inputs(
+        psbt,
+        keys.master_fingerprint(),
+        keys,
+    );
+    fee_key_path_inputs_of(&jobs, account)
+}
+
+/// [`fee_key_path_inputs_scoped`] over an already-resolved job list, for a
+/// caller that resolved the controlled inputs once for another check.
+pub(crate) fn fee_key_path_inputs_of(
+    jobs: &[super::signing::taproot::TaprootSignJob],
+    account: crate::keys::AccountType,
+) -> Vec<usize> {
+    jobs.iter()
         .filter(|job| job.account_type == account)
         .map(|job| job.input_index)
         .collect()
-}
-
-/// Match the Colored scope of the RGB signer, including already-signed inputs.
-#[cfg(feature = "rgb-validation")]
-pub(crate) fn fee_key_path_inputs(psbt: &Psbt, keys: &crate::keys::KeyManager) -> Vec<usize> {
-    fee_key_path_inputs_scoped(psbt, keys, crate::keys::AccountType::Colored)
 }
 
 /// Pinned fee policy for every PSBT the enclave signs. `path` names the
@@ -491,9 +508,12 @@ pub fn check_psbt_fee(psbt: &Psbt, key_path_inputs: &[usize], path: &str) -> Res
     }
 
     if fee > MAX_FEE_SATS {
+        let rate = fee as f64 / vsize as f64;
         return Err(EnclaveError::CrossCheck(format!(
-            "{path} PSBT fee too high: {fee} sat > the pinned maximum of {MAX_FEE_SATS} sat - \
-             refusing to burn custody BTC as fees"
+            "{path} PSBT fee too high: {fee} sat > the pinned maximum of {MAX_FEE_SATS} sat \
+             ({rate:.2} sat/vB over {vsize} unsigned vB; above {MAX_FEE_CAP_CROSSOVER_VB} vB \
+             the absolute cap binds before the {MAX_FEE_RATE_SAT_VB} sat/vB rate cap, so split \
+             a wider batch) - refusing to burn custody BTC as fees"
         )));
     }
 

@@ -423,10 +423,15 @@ already in, except a budget of `BTC_MAX_UNOWNED_SATS` for those that do not,
 total input value <= `BTC_MAX_TOTAL_SATS`, and the miner fee within the pinned
 fee policy of Sec 7.2 (compile-time maximum fee rate and absolute fee, 1 sat/vB
 relay floor; needs no configuration, so it holds in every build). Self-owned
-outputs and the value cap bound one transaction; the fee policy is what stops a
-host from burning the wallet as miner fees across many of them. Signing is
-scoped to the **vanilla** BIP-86 account only -- it can structurally never sign
-a colored (RGB-allocated) input.
+outputs, the value cap and the fee policy each bound **one** transaction: the
+fee policy caps what a single request can burn as miner fees, not what a host
+can burn across many requests. The enclave does not rate-limit `SignBtc`, so a
+compromised host can still burn up to the per-transaction fee cap of every UTXO
+it submits; the aggregate bound belongs out-of-enclave (host rate limiting,
+`BTC_MAX_TOTAL_SATS` sizing). The fee floor also needs every input to be
+sizeable (see Sec 7.2): an input the size estimator cannot classify refuses the
+whole request. Signing is scoped to the **vanilla** BIP-86 account only -- it
+can structurally never sign a colored (RGB-allocated) input.
 
 The destination rule is self-proving, not pinned. An output is accepted when its
 `script_pubkey` equals that of an input the enclave signs -- a BIP-86 key-path
