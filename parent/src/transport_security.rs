@@ -241,7 +241,7 @@ impl AccessLayer {
         let allowed = read
             || match role {
                 Role::CloneOperator => method == "Clone",
-                Role::Listener => matches!(method, "Sign" | "SubmitHeaders"),
+                Role::Listener => method == "Sign",
                 Role::Observer => false,
             };
         if !allowed {

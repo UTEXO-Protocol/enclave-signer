@@ -1,0 +1,374 @@
+//! Bitcoin headers from one Electrum server.
+//!
+//! Every call opens its own connection under one deadline and one byte cap,
+//! and the parent checks every reply field before it uses it.
+
+use std::io::{self, Read, Write};
+use std::net::{IpAddr, TcpStream, ToSocketAddrs};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+use anyhow::{bail, ensure, Context};
+use electrum_client::raw_client::RawClient;
+use electrum_client::{ElectrumApi, Param};
+use rustls::pki_types::{Der, ServerName, TrustAnchor};
+
+/// Limit for one source call: connect, TLS handshake and every read and write.
+pub const CALL_TIMEOUT: Duration = Duration::from_secs(15);
+/// Most headers one call returns.
+pub const MAX_HEADERS: u32 = 2016;
+/// Most bytes one call reads. 2,016 headers in hex are about 323 KB.
+const MAX_READ_BYTES: usize = 1 << 20;
+
+pub struct ElectrumSource {
+    host: String,
+    port: u16,
+    tls: Option<(Arc<rustls::ClientConfig>, ServerName<'static>)>,
+    timeout: Duration,
+}
+
+trait Stream: Read + Write + Send {}
+impl<T: Read + Write + Send> Stream for T {}
+
+impl ElectrumSource {
+    /// Parse `ssl://host:port`, or `tcp://ip:port` to a loopback IP. No I/O.
+    pub fn new(url: &str) -> anyhow::Result<Self> {
+        let (ssl, rest) = if let Some(rest) = url.strip_prefix("ssl://") {
+            (true, rest)
+        } else if let Some(rest) = url.strip_prefix("tcp://") {
+            (false, rest)
+        } else {
+            bail!("Electrum URL must start with ssl:// or tcp://");
+        };
+        let (host, port) = rest.rsplit_once(':').context("Electrum URL has no port")?;
+        let port: u16 = port.parse().context("Electrum URL has a bad port")?;
+        let host = host.trim_start_matches('[').trim_end_matches(']');
+        ensure!(
+            !host.is_empty() && port != 0,
+            "Electrum URL has no host or port"
+        );
+        let tls = if ssl {
+            let name = ServerName::try_from(host.to_string())
+                .context("Electrum URL has a bad host name")?;
+            let roots = webpki_roots::TLS_SERVER_ROOTS
+                .iter()
+                .map(|t| TrustAnchor {
+                    subject: Der::from_slice(t.subject),
+                    subject_public_key_info: Der::from_slice(t.spki),
+                    name_constraints: t.name_constraints.map(Der::from_slice),
+                })
+                .collect::<rustls::RootCertStore>();
+            let config = rustls::ClientConfig::builder_with_provider(Arc::new(
+                rustls::crypto::ring::default_provider(),
+            ))
+            .with_safe_default_protocol_versions()?
+            .with_root_certificates(roots)
+            .with_no_client_auth();
+            Some((Arc::new(config), name))
+        } else {
+            let ip: IpAddr = host
+                .parse()
+                .context("tcp:// is allowed only to a loopback IP")?;
+            ensure!(ip.is_loopback(), "tcp:// is allowed only to a loopback IP");
+            None
+        };
+        Ok(Self {
+            host: host.to_string(),
+            port,
+            tls,
+            timeout: CALL_TIMEOUT,
+        })
+    }
+
+    /// Height of the source tip.
+    pub fn tip(&self) -> anyhow::Result<u32> {
+        let client = self.connect()?;
+        let reply = client.raw_call("blockchain.headers.subscribe", [])?;
+        let height = reply["height"]
+            .as_u64()
+            .and_then(|h| u32::try_from(h).ok())
+            .context("source tip height is not a u32")?;
+        let header = reply["hex"].as_str().context("source tip has no header")?;
+        ensure!(
+            hex::decode(header).is_ok_and(|h| h.len() == 80),
+            "source tip header is not 80 bytes"
+        );
+        Ok(height)
+    }
+
+    /// Up to `count` headers from height `from`. Fewer when the source ends.
+    pub fn headers(&self, from: u32, count: u32) -> anyhow::Result<Vec<[u8; 80]>> {
+        ensure!(
+            (1..=MAX_HEADERS).contains(&count),
+            "bad header count {count}"
+        );
+        let client = self.connect()?;
+        let mut out: Vec<[u8; 80]> = Vec::with_capacity(count as usize);
+        while out.len() < count as usize {
+            let remaining = count - out.len() as u32;
+            let start = from
+                .checked_add(out.len() as u32)
+                .context("header height overflows")?;
+            let reply = client.raw_call(
+                "blockchain.block.headers",
+                [Param::U32(start), Param::U32(remaining)],
+            )?;
+            let n = reply["count"]
+                .as_u64()
+                .context("source reply has no count")?;
+            let raw = hex::decode(reply["hex"].as_str().context("source reply has no hex")?)
+                .context("source reply hex is bad")?;
+            ensure!(
+                raw.len() % 80 == 0 && (raw.len() / 80) as u64 == n,
+                "source reply count {n} does not match {} bytes",
+                raw.len()
+            );
+            ensure!(
+                n <= u64::from(remaining),
+                "source sent more headers than asked"
+            );
+            if n == 0 {
+                break;
+            }
+            out.extend(
+                raw.chunks_exact(80)
+                    .map(|c| <[u8; 80]>::try_from(c).unwrap()),
+            );
+        }
+        Ok(out)
+    }
+
+    fn connect(&self) -> anyhow::Result<RawClient<Box<dyn Stream>>> {
+        let deadline = Instant::now() + self.timeout;
+        let mut last = None;
+        let mut tcp = None;
+        for addr in (self.host.as_str(), self.port).to_socket_addrs()? {
+            match TcpStream::connect_timeout(&addr, time_left(deadline)?) {
+                Ok(s) => {
+                    tcp = Some(s);
+                    break;
+                }
+                Err(e) => last = Some(e),
+            }
+        }
+        let stream = DeadlineStream {
+            tcp: match (tcp, last) {
+                (Some(s), _) => s,
+                (None, Some(e)) => return Err(e).context("cannot connect to the source"),
+                (None, None) => bail!("source host resolves to no address"),
+            },
+            deadline,
+            budget: MAX_READ_BYTES,
+        };
+        let stream: Box<dyn Stream> = match &self.tls {
+            None => Box::new(stream),
+            Some((config, name)) => {
+                let conn = rustls::ClientConnection::new(config.clone(), name.clone())?;
+                let mut tls = rustls::StreamOwned::new(conn, stream);
+                while tls.conn.is_handshaking() {
+                    tls.conn
+                        .complete_io(&mut tls.sock)
+                        .context("TLS handshake with the source failed")?;
+                }
+                Box::new(tls)
+            }
+        };
+        Ok(RawClient::from(stream))
+    }
+}
+
+fn time_left(deadline: Instant) -> io::Result<Duration> {
+    deadline
+        .checked_duration_since(Instant::now())
+        .filter(|d| !d.is_zero())
+        .ok_or_else(|| io::Error::new(io::ErrorKind::TimedOut, "source call timed out"))
+}
+
+/// A TCP stream with one deadline for the whole call and a cap on bytes read.
+struct DeadlineStream {
+    tcp: TcpStream,
+    deadline: Instant,
+    budget: usize,
+}
+
+impl Read for DeadlineStream {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        if self.budget == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "source reply is too large",
+            ));
+        }
+        self.tcp.set_read_timeout(Some(time_left(self.deadline)?))?;
+        let cap = buf.len().min(self.budget);
+        let n = self.tcp.read(&mut buf[..cap])?;
+        self.budget -= n;
+        Ok(n)
+    }
+}
+
+impl Write for DeadlineStream {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.tcp
+            .set_write_timeout(Some(time_left(self.deadline)?))?;
+        self.tcp.write(buf)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.tcp.flush()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::{BufRead, BufReader};
+    use std::net::TcpListener;
+
+    #[test]
+    fn url_rules() {
+        assert!(ElectrumSource::new("ssl://electrum.example.com:50002").is_ok());
+        assert!(ElectrumSource::new("tcp://127.0.0.1:50001").is_ok());
+        assert!(ElectrumSource::new("tcp://[::1]:50001").is_ok());
+        for bad in [
+            "tcp://10.0.0.5:50001",
+            "tcp://localhost:50001",
+            "tcp://electrum.example.com:50001",
+            "http://127.0.0.1:50001",
+            "ssl://electrum.example.com",
+            "ssl://electrum.example.com:0",
+            "ssl://electrum.example.com:x",
+            "ssl://:50002",
+        ] {
+            assert!(ElectrumSource::new(bad).is_err(), "{bad} must be refused");
+        }
+    }
+
+    /// Serve one connection. Each request line gets the next scripted reply,
+    /// with `{id}` replaced by the request id. `None` sends nothing more.
+    fn serve(replies: Vec<Option<Vec<u8>>>) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("tcp://{}", listener.local_addr().unwrap());
+        std::thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let mut writer = stream;
+            for reply in replies {
+                let mut line = String::new();
+                if reader.read_line(&mut line).unwrap_or(0) == 0 {
+                    return;
+                }
+                let id = serde_json::from_str::<serde_json::Value>(&line).unwrap()["id"].clone();
+                let Some(reply) = reply else {
+                    std::thread::sleep(Duration::from_secs(30));
+                    return;
+                };
+                let reply = String::from_utf8(reply)
+                    .unwrap()
+                    .replace("{id}", &id.to_string());
+                let _ = writer.write_all(reply.as_bytes());
+            }
+            std::thread::sleep(Duration::from_secs(30));
+        });
+        url
+    }
+
+    fn result(body: &str) -> Option<Vec<u8>> {
+        Some(format!("{{\"jsonrpc\":\"2.0\",\"id\":{{id}},\"result\":{body}}}\n").into_bytes())
+    }
+
+    fn source(url: &str) -> ElectrumSource {
+        ElectrumSource {
+            timeout: Duration::from_secs(2),
+            ..ElectrumSource::new(url).unwrap()
+        }
+    }
+
+    #[test]
+    fn good_replies_parse() {
+        let h = "00".repeat(80);
+        let url = serve(vec![result(&format!("{{\"height\":7,\"hex\":\"{h}\"}}"))]);
+        assert_eq!(source(&url).tip().unwrap(), 7);
+
+        let url = serve(vec![
+            result(&format!(
+                "{{\"count\":2,\"hex\":\"{}\",\"max\":2016}}",
+                h.repeat(2)
+            )),
+            result(&format!("{{\"count\":1,\"hex\":\"{h}\",\"max\":2016}}")),
+        ]);
+        assert_eq!(source(&url).headers(5, 3).unwrap().len(), 3);
+
+        // An empty reply ends the read early.
+        let url = serve(vec![result("{\"count\":0,\"hex\":\"\",\"max\":2016}")]);
+        assert!(source(&url).headers(5, 3).unwrap().is_empty());
+    }
+
+    #[test]
+    fn malformed_replies_are_errors() {
+        let h = "00".repeat(80);
+        for body in [
+            "{\"count\":1,\"hex\":\"\"}".to_string(),
+            format!("{{\"count\":2,\"hex\":\"{h}\"}}"),
+            format!("{{\"count\":1,\"hex\":\"{h}00\"}}"),
+            format!("{{\"count\":1,\"hex\":\"{}\"}}", "zz".repeat(80)),
+            format!("{{\"count\":4,\"hex\":\"{}\"}}", h.repeat(4)),
+            "{\"count\":\"1\",\"hex\":7}".to_string(),
+            "[]".to_string(),
+        ] {
+            let url = serve(vec![result(&body)]);
+            assert!(source(&url).headers(5, 3).is_err(), "{body}");
+        }
+        for body in [
+            format!("{{\"height\":4294967296,\"hex\":\"{h}\"}}"),
+            format!("{{\"height\":-1,\"hex\":\"{h}\"}}"),
+            "{\"height\":7,\"hex\":\"00\"}".to_string(),
+            "null".to_string(),
+        ] {
+            let url = serve(vec![result(&body)]);
+            assert!(source(&url).tip().is_err(), "{body}");
+        }
+        let url = serve(vec![Some(b"not json\n".to_vec())]);
+        assert!(source(&url).tip().is_err());
+        assert!(source("tcp://127.0.0.1:1").headers(5, 0).is_err());
+        assert!(source("tcp://127.0.0.1:1")
+            .headers(5, MAX_HEADERS + 1)
+            .is_err());
+    }
+
+    #[test]
+    fn oversized_reply_is_an_error() {
+        let mut line = vec![b'a'; MAX_READ_BYTES + 1];
+        line.push(b'\n');
+        let url = serve(vec![Some(line)]);
+        let start = Instant::now();
+        assert!(source(&url).tip().is_err());
+        assert!(start.elapsed() < Duration::from_secs(3));
+    }
+
+    #[test]
+    fn silent_source_is_bounded() {
+        let url = serve(vec![None]);
+        let start = Instant::now();
+        assert!(source(&url).tip().is_err());
+        assert!(start.elapsed() < Duration::from_secs(3));
+    }
+
+    #[test]
+    fn slow_drip_source_is_bounded() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("tcp://{}", listener.local_addr().unwrap());
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            for _ in 0..30 {
+                if stream.write_all(b" ").is_err() {
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(500));
+            }
+        });
+        let start = Instant::now();
+        assert!(source(&url).tip().is_err());
+        assert!(start.elapsed() < Duration::from_secs(3));
+    }
+}

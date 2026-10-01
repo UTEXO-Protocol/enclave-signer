@@ -17,9 +17,11 @@ use axum::http::StatusCode;
 use axum::routing::get;
 use axum::{Json, Router};
 use serde_json::json;
+use tokio::sync::watch;
 
 use crate::enclave_proto::{enclave_request, enclave_response, EnclaveRequest, HealthResponse};
 use crate::grpc_server::ParentAdapterService;
+use crate::header_sync::SyncStatus;
 
 /// How long to wait before answering "cannot tell". Shorter than the 30s
 /// signing timeout so a probe answers within its own poll interval rather than
@@ -32,10 +34,10 @@ const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Build the router. Public so tests can serve it on an ephemeral port and
 /// exercise the real HTTP path deploy will curl.
-pub fn router(service: ParentAdapterService) -> Router {
+pub fn router(service: ParentAdapterService, sync: watch::Receiver<SyncStatus>) -> Router {
     Router::new()
         .route("/health", get(health))
-        .with_state(service)
+        .with_state((service, sync))
 }
 
 /// Bind the readiness port. Separate from [`serve`] so a bad `HEALTH_PORT`
@@ -54,15 +56,18 @@ pub async fn bind(addr: SocketAddr) -> std::io::Result<tokio::net::TcpListener> 
 pub async fn serve(
     listener: tokio::net::TcpListener,
     service: ParentAdapterService,
+    sync: watch::Receiver<SyncStatus>,
 ) -> std::io::Result<()> {
     tracing::info!(addr = ?listener.local_addr(), "starting health server");
-    axum::serve(listener, router(service)).await
+    axum::serve(listener, router(service, sync)).await
 }
 
 async fn health(
-    State(service): State<ParentAdapterService>,
+    State((service, sync)): State<(ParentAdapterService, watch::Receiver<SyncStatus>)>,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    match probe(&service).await {
+    let probed = probe(&service).await;
+    let header_sync = sync.borrow().clone();
+    match probed {
         Ok(h) => {
             let code = if h.ready {
                 StatusCode::OK
@@ -81,6 +86,7 @@ async fn health(
                     "spv_tip_time": h.spv_tip_time,
                     "spv_tip_age_secs": h.spv_tip_age_secs,
                     "spv_max_tip_age_secs": h.spv_max_tip_age_secs,
+                    "header_sync": header_sync,
                 })),
             )
         }
@@ -88,7 +94,7 @@ async fn health(
             tracing::warn!(error = %e, "health probe failed");
             (
                 StatusCode::SERVICE_UNAVAILABLE,
-                Json(json!({ "ready": false, "error": e })),
+                Json(json!({ "ready": false, "error": e, "header_sync": header_sync })),
             )
         }
     }
@@ -96,7 +102,7 @@ async fn health(
 
 /// Ask the enclave. Returns the reply, or a human-readable reason the probe
 /// could not answer.
-async fn probe(service: &ParentAdapterService) -> Result<HealthResponse, String> {
+pub(crate) async fn probe(service: &ParentAdapterService) -> Result<HealthResponse, String> {
     let req = EnclaveRequest {
         request: Some(enclave_request::Request::Health(Default::default())),
     };

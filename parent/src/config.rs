@@ -1,4 +1,9 @@
 use std::collections::HashSet;
+use std::time::Duration;
+
+use anyhow::Context;
+
+use crate::header_source::ElectrumSource;
 
 /// Parent Adapter configuration, populated from environment variables.
 pub struct Config {
@@ -68,9 +73,59 @@ impl Config {
     }
 }
 
+/// Parse `HEADER_ELECTRUM_URL` and `HEADER_SYNC_INTERVAL_SECS`. An unset or
+/// empty value takes its default. A malformed value is an error.
+pub fn header_sync(
+    url: Option<String>,
+    interval_secs: Option<String>,
+) -> anyhow::Result<(Option<ElectrumSource>, Duration)> {
+    let source = match url.as_deref() {
+        None | Some("") => None,
+        Some(url) => Some(ElectrumSource::new(url).context("HEADER_ELECTRUM_URL")?),
+    };
+    let secs = match interval_secs.as_deref() {
+        None | Some("") => 10,
+        Some(v) => v
+            .parse::<u64>()
+            .ok()
+            .filter(|s| (1..=600).contains(s))
+            .with_context(|| format!("HEADER_SYNC_INTERVAL_SECS must be 1..=600, got {v:?}"))?,
+    };
+    Ok((source, Duration::from_secs(secs)))
+}
+
 fn env_or<T: std::str::FromStr>(key: &str, default: T) -> T {
     std::env::var(key)
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(default)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse(url: Option<&str>, secs: Option<&str>) -> anyhow::Result<(bool, u64)> {
+        header_sync(url.map(Into::into), secs.map(Into::into))
+            .map(|(source, interval)| (source.is_some(), interval.as_secs()))
+    }
+
+    #[test]
+    fn header_sync_settings() {
+        assert_eq!(parse(None, None).unwrap(), (false, 10));
+        assert_eq!(parse(Some(""), Some("")).unwrap(), (false, 10));
+        assert_eq!(
+            parse(Some("ssl://e.example.com:50002"), Some("1")).unwrap(),
+            (true, 1)
+        );
+        assert_eq!(
+            parse(Some("tcp://127.0.0.1:50001"), Some("600")).unwrap(),
+            (true, 600)
+        );
+        assert!(parse(Some("tcp://192.0.2.1:50001"), None).is_err());
+        assert!(parse(Some("electrum:50002"), None).is_err());
+        for secs in ["0", "601", "-1", "ten"] {
+            assert!(parse(None, Some(secs)).is_err(), "{secs}");
+        }
+    }
 }

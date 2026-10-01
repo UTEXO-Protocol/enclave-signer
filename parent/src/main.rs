@@ -7,6 +7,7 @@ use tracing_subscriber::{prelude::*, EnvFilter};
 use utexo_bridge_parent::config::Config;
 use utexo_bridge_parent::grpc_proto::parent_service_server::ParentServiceServer;
 use utexo_bridge_parent::grpc_server::{EnclaveTarget, ParentAdapterService};
+use utexo_bridge_parent::header_sync::HeaderSync;
 use utexo_bridge_parent::health;
 
 #[tokio::main]
@@ -36,6 +37,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         cfg.grpc_host
             .parse()
             .map_err(|_| "GRPC_HOST must be an IP address")?,
+    )?;
+    let (header_source, header_interval) = utexo_bridge_parent::config::header_sync(
+        std::env::var("HEADER_ELECTRUM_URL").ok(),
+        std::env::var("HEADER_SYNC_INTERVAL_SECS").ok(),
     )?;
 
     let target = if cfg.use_vsock {
@@ -79,14 +84,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Bind the probe before serving anything, so a bad HEALTH_PORT fails here
     // rather than at the next deploy's first poll.
     let health_listener = health::bind(health_addr).await?;
+    let service = ParentAdapterService::new(target, cfg.evm_network_ids.clone());
+
+    // The enclave takes headers in every phase, so sync starts before keys and
+    // endpoints. A failed step never stops the gRPC server.
+    let (header_sync, sync_status) =
+        HeaderSync::new(service.clone(), header_source, header_interval);
+    tokio::spawn(header_sync.run());
+
     let broker = utexo_bridge_parent::seed_persistence::start(&cfg).await?;
-    let service = ParentAdapterService::new(target, cfg.evm_network_ids);
 
     // Serving it, though, is the lower-value half: these parents hold a 2-of-3
     // quorum, so a dead probe must not take signing down with it.
     let health_service = service.clone();
     tokio::spawn(async move {
-        if let Err(e) = health::serve(health_listener, health_service).await {
+        if let Err(e) = health::serve(health_listener, health_service, sync_status).await {
             tracing::error!(error = %e, "health server stopped; signing continues");
         }
     });

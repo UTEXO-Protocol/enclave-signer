@@ -5133,6 +5133,7 @@ dependencies = [
  "base64 0.22.1",
  "bitcoin",
  "clap",
+ "electrum-client",
  "federated-signer-proto",
  "hex",
  "http 1.5.0",
@@ -5154,6 +5155,7 @@ dependencies = [
  "tracing-subscriber",
  "utexo-bridge-enclave",
  "vsock",
+ "webpki-roots",
  "zeroize",
 ]
 

@@ -83,6 +83,9 @@ thiserror = "2"
 anyhow = "1"
 
 hex = "0.4"
+# Header sync source. Only the raw client is used, so no default feature.
+electrum-client = { version = "=0.24.1", default-features = false }
+webpki-roots = "=0.25.4"
 
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
