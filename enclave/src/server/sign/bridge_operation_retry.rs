@@ -276,7 +276,7 @@ fn a_retry_is_signed_when_the_first_response_never_reached_the_caller() {
     let mut ctx = ServerContext::new(state, bridge_config, regtest_header_chain());
     let launch = ctx.launch.get_mut().unwrap();
     launch.policy = policy;
-    launch.rgb_validator = Some(RgbValidator::canned(validated_consignment(txid), 50.0));
+    launch.rgb_validator = Some(RgbValidator::canned(validated_consignment(txid)));
     launch.evm_rpc_client = Some(Box::new(stub_deposit()));
 
     let request = deposit_request(psbt_bytes);

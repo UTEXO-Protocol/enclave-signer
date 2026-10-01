@@ -115,8 +115,9 @@ destination network. Accepted routes: RGB -> EVM, EVM -> RGB, CCD -> EVM.
   described in the [spec](docs/tee-spec.md#72-evm-lock---rgb-bridge-psbt).
 - **PSBT bind** - PSBT txid == consignment witness txid, prevouts match,
   sighash `ALL` / taproot `DEFAULT` only, per-output recipient legs, recipient
-  seal == the invoice in the `FundsIn` event, fee rate <= 3x the enclave's own
-  estimate, unowned sats <= `RGB_MAX_UNOWNED_SATS`.
+  seal == the invoice in the `FundsIn` event, miner fee within the pinned fee
+  policy (compile-time maximum fee rate and absolute fee, shared with
+  `SignBtc`), unowned sats <= `RGB_MAX_UNOWNED_SATS`.
 - **`fundsOut` calldata** - allowlisted selector, canonical ABI (decode and
   re-encode must byte-match), amount == declared, chain / contract pins,
   `destinationChainId` rule per route, deadline in the future, BtcRelay

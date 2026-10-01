@@ -170,9 +170,9 @@ pub(super) fn handle_sign_psbt(
 /// Sign a plain-BTC PSBT (create_utxo / UTXO management). Unlike
 /// [`handle_sign_psbt`] this path carries no RGB consignment and no EVM event.
 /// Authorized by proving every output pays back to a script the enclave
-/// controls, plus the operator-pinned amount cap
-/// ([`crate::networks::rgb::btc_crosscheck`]); a production build refuses to
-/// sign while that cap is unset. Its own request type is the structural half of
+/// controls, the pinned fee policy shared with the bridge path, plus the
+/// operator-pinned amount cap ([`crate::networks::rgb::btc_crosscheck`]); a
+/// production build refuses to sign while that cap is unset. Its own request type is the structural half of
 /// the vanilla-bypass fix.
 #[cfg(evm_to_rgb)]
 pub(super) fn handle_sign_btc(ctx: &ServerContext, req: SignBtcRequest) -> Result<EnclaveResponse> {
@@ -190,7 +190,7 @@ pub(super) fn handle_sign_btc(ctx: &ServerContext, req: SignBtcRequest) -> Resul
         }
     }
 
-    // Output self-ownership + amount cap. Runs
+    // Output self-ownership + fee policy + amount cap. Runs
     // against the enclave's own keys, so an uninitialized enclave fails here
     // with KeyNotInitialized rather than reaching the signer.
     ctx.state.with_keys(|keys| {

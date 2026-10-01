@@ -16,6 +16,11 @@
 //!     `create_utxo` funds Colored UTXOs from vanilla inputs; the rule is
 //!     about which inputs we spend. Replaces the `BTC_ALLOWED_SCRIPTS` allowlist,
 //!     which was unbootstrappable in production.
+//!   * Fee policy ([`crate::networks::rgb::psbt_validation::check_psbt_fee`]):
+//!     the miner fee is bounded by the pinned maximum fee rate and absolute
+//!     fee shared with the send-RGB path. Self-owned outputs and the amount
+//!     cap bound one transaction, not what a host can burn as fees across
+//!     many of them; this does.
 //!   * Amount cap (`BTC_MAX_TOTAL_SATS`) on total input value spent, not
 //!     output value, so it also bounds value routed to miner fees.
 //!
@@ -23,19 +28,20 @@
 //! address need a destination bound to verified evidence and remain out of
 //! scope.
 //!
-//! Fail-closed posture: the output check needs no configuration and runs in
-//! every build. The amount cap is operator-supplied, so a production
+//! Fail-closed posture: the output check and the fee policy need no
+//! configuration and run in every build. The amount cap is operator-supplied, so a production
 //! (`rgb-validation`) build refuses to sign while it is unset; default /
 //! `cfg(test)` builds fall back to a permissive dev path. The witness_utxo requirement runs in all builds.
 
 use crate::config::BridgeConfig;
 use crate::error::{EnclaveError, Result};
-use crate::keys::KeyManager;
+use crate::keys::{AccountType, KeyManager};
 use crate::networks::rgb::btc_ownership::{self_controlled_input_scripts, unowned_output_sats};
+use crate::networks::rgb::psbt_validation;
 use crate::proto::SignBtcRequest;
 
-/// Validate a plain-BTC `SignBtcRequest` before signing: output self-ownership
-/// plus the operator-pinned value-spent cap. Account scoping - never sign a
+/// Validate a plain-BTC `SignBtcRequest` before signing: output self-ownership,
+/// the pinned fee policy, plus the operator-pinned value-spent cap. Account scoping - never sign a
 /// Colored input - is enforced separately in the signer; see the module docs.
 ///
 /// Returns `Ok(())` when authorized, a `CrossCheck` error otherwise.
@@ -45,7 +51,7 @@ pub fn validate_btc_request(
     keys: &KeyManager,
 ) -> Result<()> {
     // 0. Shape whitelist (shared with the bridge path).
-    let psbt = crate::networks::rgb::psbt_validation::parse_psbt_shape(&req.psbt_bytes)?;
+    let psbt = psbt_validation::parse_psbt_shape(&req.psbt_bytes)?;
 
     // 1. Sum the value spent (for the cap). Every input must carry its
     //    witness_utxo; without it the value cannot be bounded.
@@ -110,7 +116,15 @@ pub fn validate_btc_request(
         }
     }
 
-    // 4. Amount cap on value spent (sum of input values), which also bounds
+    // 4. Pinned fee policy, shared with the send-RGB path. Before the amount
+    //    cap, whose dev fallback returns early: the fee bound needs no
+    //    configuration, so it holds in every build. Key-path sizing uses the
+    //    Vanilla account, the scope the signer co-signs on this path.
+    let key_path_inputs =
+        psbt_validation::fee_key_path_inputs_scoped(&psbt, keys, AccountType::Vanilla);
+    psbt_validation::check_psbt_fee(&psbt, &key_path_inputs, "plain-BTC")?;
+
+    // 5. Amount cap on value spent (sum of input values), which also bounds
     //    value routed to fees. Operator-supplied, so this dimension keeps the
     //    production fail-closed / dev-fallback split.
     if cfg.btc_max_total_sats == 0 {

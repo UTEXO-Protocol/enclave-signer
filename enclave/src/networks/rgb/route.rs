@@ -192,11 +192,10 @@ pub fn validate_destination_anchor(
         .map(|resolve| resolve(&psbt))
         .transpose()?
         .unwrap_or_default();
-    // Fee-rate sanity, after the pure anchor checks so the cached Esplora
-    // round-trip is the last thing that can reject. Fail-closed when the
-    // estimate is unavailable, since the host controls that egress.
-    let recommended = validator.recommended_fee_rate_sat_vb()?;
-    psbt_validation::check_psbt_fee_rate(&psbt, recommended, &key_path_inputs)?;
+    // Pinned fee policy, shared with the plain-BTC path. No fee estimate is
+    // fetched: a dynamic bound could strand a mint whose EVM lock already
+    // settled when the fee market moved, and the host controls that egress.
+    psbt_validation::check_psbt_fee(&psbt, &key_path_inputs, "send-RGB")?;
 
     Ok((legs.recipient, legs.recipient_seals))
 }
