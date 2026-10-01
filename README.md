@@ -104,8 +104,8 @@ destination network. Accepted routes: RGB -> EVM, EVM -> RGB, CCD -> EVM.
   resolver reached through the vsock forwarder. Contract id must equal the
   declared asset id and the pinned `RGB_ASSET_ID`.
 - **Bitcoin SPV** - the enclave keeps its own header chain (PoW-validated on
-  mainnet; signet/regtest exceptions are in the spec), fed by
-  `SubmitHeaders`. For RGB→EVM, every consignment witness tx needs a Merkle proof against a
+  mainnet; signet/regtest exceptions are in the spec), fed by the parent's
+  header sync from one Electrum server. For RGB→EVM, every consignment witness tx needs a Merkle proof against a
   stored header at depth >= 6. Chain tip must be fresh (2 h).
 - **EVM `FundsIn`** - the enclave fetches the receipt itself (`evm-rpc`),
   requires success, a unique `BridgeFundsIn` event from the
@@ -153,6 +153,9 @@ expected policy and fails on any downgrade. Details in
 - Implements `parent.ParentService` from `federated-signer-proto`
   (`proto/enclave/parent.proto`): `Sign`, `PublicKey`, `Initialize`, `Clone`,
   `GetLastSavedBlock`, `SubmitHeaders`, `AttestedPublicKey`.
+- `SubmitHeaders` answers `PERMISSION_DENIED` to every caller. The parent's
+  own header sync is the one writer: it reads headers from
+  `HEADER_ELECTRUM_URL` and sends them to its enclave.
 - `Sign` routes by `data_type`: `TRANSACTION` -> enclave `Sign` (EVM / RGB /
   CCD payload), `EVM_GAS_TX` -> `SignRawDigest`, `BTC_UTXO` -> `SignBtc`.
   EVM destinations must be listed in `EVM_NETWORK_IDS`.
@@ -174,7 +177,7 @@ request per connection, 4 MiB frame cap. Schema:
 | `SignBtc` | Active | - | Plain-BTC PSBT, vanilla account, policy-gated. |
 | `SignRawDigest` | Active | - | Gas-tx signing under the attested allowlist. |
 | `SignCcd` | Active | `ccd` | Ed25519 over a 32-byte hash. |
-| `SubmitHeaders` | any | `spv` | Feed Bitcoin headers (<= 10 000 per call, <= 100 000 per 60 s). |
+| `SubmitHeaders` | any | `spv` | Feed Bitcoin headers (<= 10 000 per call, <= 100 000 per 60 s). The parent's header sync is the one supported caller. |
 | `GetLastSavedBlock` | any | `spv` | Header-chain tip (checkpoint when empty). |
 | `InitiateCloning` | Initial | - | Requester side of the seed-cloning handshake. |
 | `GetClone` | Active | - | Donor side: verifies the requester attestation and seals the seed. |
@@ -480,6 +483,8 @@ Limits and dev knobs:
 | `ENCLAVE_VSOCK_PORT` | `5000` | Enclave vsock port. |
 | `HEALTH_HOST` | `127.0.0.1` | Bind host for `GET /health`. Keep on loopback - unlike `GRPC_HOST`, do not set to `0.0.0.0` |
 | `HEALTH_PORT` | `5001` | Port for `GET /health` |
+| `HEADER_ELECTRUM_URL` | unset | `ssl://host:port` (WebPKI roots, host name checked), or `tcp://` to a loopback IP. The parent's header sync reads Bitcoin headers here. Unset: `header_sync.state` is `unconfigured`. Malformed: the parent still serves, `header_sync.state` is `unconfigured` and `last_error` says why. Deploy passes it through; it does not copy `ELECTRUM_URL`, whose enclave-side rules differ. |
+| `HEADER_SYNC_INTERVAL_SECS` | `10` | Seconds between header sync steps, `1..=600`. A malformed value stops the parent at boot. |
 | `EVM_NETWORK_IDS` | empty | Comma-separated network ids that count as EVM destinations for `Sign`. Empty rejects every EVM-destination transaction. |
 | `RUST_LOG` | unset | Log filter. |
 
@@ -502,7 +507,16 @@ curl -sS -o /dev/null -w '%{http_code}\n' http://127.0.0.1:5001/health
 
 The body carries the same fields as diagnostics (`key_loaded`, `spv_synced`,
 `phase`, `spv_tip_height`, `spv_tip_age_secs`), so a stuck deploy is debuggable
-from the poll log. Production binds it per parent on `50061` / `50062` /
+from the poll log. It also carries the parent's header sync:
+
+```json
+"header_sync": {"state": "synced", "source_tip": 412345, "enclave_tip": 412345, "lag_blocks": 0, "tip_age_secs": 41, "last_ok_unix": 1790000000, "last_error": null}
+```
+
+`state` is `synced`, `syncing`, `stalled` (three failed steps in a row), `off`
+(a build with no header chain) or `unconfigured` (no `HEADER_ELECTRUM_URL`).
+It does not change the HTTP code. A rolling restart waits for `synced`, or
+`off`, before it moves to the next CID. Production binds it per parent on `50061` / `50062` /
 `50063` (`deploy/deploy-host.sh`); the Docker image wires the same probe into a
 `HEALTHCHECK`, so `docker inspect` reports it.
 

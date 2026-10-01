@@ -123,7 +123,7 @@ enum Command {
         consignment: String,
     },
     /// Get the enclave's current SPV chain tip (height + hash).
-    /// Listener calls this on startup to know where to resume header sync.
+    /// The parent's header sync reads it to find where to resume.
     GetLastSavedBlock,
     /// Ask the enclave whether it is ready to sign: endpoints set, key loaded
     /// and SPV chain caught up. Same answer the parent's `GET /health` serves
@@ -158,20 +158,6 @@ enum Command {
         /// EVM address the seed must give. Env: KMS_EXPECTED_EVM_ADDRESS.
         #[arg(long)]
         kms_expected_evm_address: Option<String>,
-    },
-    /// Push a batch of Bitcoin block headers into the enclave's SPV chain.
-    ///
-    /// Headers are read from a file: one hex-encoded 80-byte header per line,
-    /// in ascending height order. Empty lines and lines starting with `#` are
-    /// ignored. Pass an empty file to send a no-op batch (useful for smoke
-    /// testing - proves the dispatch path without a fixture chain).
-    SubmitHeaders {
-        /// Block height of the first header in the batch.
-        #[arg(long)]
-        start_height: u32,
-        /// Path to a file with one hex-encoded header per line (80 bytes = 160 hex chars).
-        #[arg(long)]
-        headers_file: PathBuf,
     },
     /// Clone the signing identity from a donor enclave into the local
     /// (requester) enclave. Runs the full three-step handshake:
@@ -607,29 +593,6 @@ fn main() {
                 Err(e) => fail(e.to_string()),
             }
         }
-        Command::SubmitHeaders {
-            start_height,
-            headers_file,
-        } => {
-            let headers = match read_headers_file(&headers_file) {
-                Ok(h) => h,
-                Err(e) => {
-                    eprintln!("Error reading {}: {}", headers_file.display(), e);
-                    process::exit(1);
-                }
-            };
-            match client.submit_headers(start_height, headers) {
-                Ok(r) => {
-                    println!("Last block height: {}", r.last_block_height);
-                    println!("Last block hash:   {}", hex::encode(&r.last_block_hash));
-                    println!("Headers accepted:  {}", r.headers_accepted);
-                }
-                Err(e) => {
-                    eprintln!("Error: {}", e);
-                    process::exit(1);
-                }
-            }
-        }
         Command::Clone {
             cloning_secret,
             cloning_secret_file,
@@ -812,27 +775,22 @@ fn run_clone(
     Ok(completion)
 }
 
-/// Parse a headers file: one hex-encoded 80-byte header per line, blank lines
-/// and `#` comments ignored. Wrong-length lines are surfaced as errors so
-/// silent corruption can't sneak in.
-fn read_headers_file(path: &std::path::Path) -> std::io::Result<Vec<Vec<u8>>> {
-    let contents = std::fs::read_to_string(path)?;
-    let mut headers = Vec::new();
-    for (lineno, raw) in contents.lines().enumerate() {
-        let line = raw.trim();
-        if line.is_empty() || line.starts_with('#') {
-            continue;
-        }
-        let bytes = hex::decode(line).map_err(|e| {
-            std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                format!("line {}: invalid hex: {}", lineno + 1, e),
-            )
-        })?;
-        // Don't enforce 80 bytes here - the enclave will reject on parse.
-        // Keeping the CLI permissive lets us deliberately send malformed
-        // headers in smoke tests.
-        headers.push(bytes);
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn submit_headers_is_not_a_command() {
+        let err = Cli::try_parse_from([
+            "utexo-bridge-parent-cli",
+            "submit-headers",
+            "--start-height",
+            "1",
+            "--headers-file",
+            "h.txt",
+        ])
+        .err()
+        .expect("submit-headers must not parse");
+        assert_eq!(err.kind(), clap::error::ErrorKind::InvalidSubcommand);
     }
-    Ok(headers)
 }

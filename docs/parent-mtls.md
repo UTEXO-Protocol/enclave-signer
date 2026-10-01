@@ -42,7 +42,9 @@ and more than 512 entries fail startup.
 
 - All three roles may call `PublicKey`, `AttestedPublicKey`, `GetLastSavedBlock`.
 - `clone-operator` may additionally call `Clone`.
-- `listener` may additionally call `Sign` and `SubmitHeaders`.
+- `listener` may additionally call `Sign`.
+- `SubmitHeaders` answers `PERMISSION_DENIED` to every caller, with or without
+  an ACL. The parent's own header sync is the one writer.
 - `observer` has no mutation permissions.
 - `Initialize` is denied for every network role. Initialize locally through the
   host CLI over vsock. Unknown RPCs are denied by default.

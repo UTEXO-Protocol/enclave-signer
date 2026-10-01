@@ -781,44 +781,15 @@ impl ParentService for ParentAdapterService {
         }
     }
 
-    /// SubmitHeaders - forwards a batch of raw 80-byte Bitcoin headers to the
-    /// enclave. A build without the SPV header chain returns NOT_READY.
+    /// SubmitHeaders - refused for every caller. The parent's own header sync
+    /// is the one writer.
     async fn submit_headers(
         &self,
-        request: Request<SubmitHeadersRequest>,
+        _request: Request<SubmitHeadersRequest>,
     ) -> Result<Response<SubmitHeadersResponse>, Status> {
-        let inner = request.into_inner();
-        tracing::info!(
-            headers_len = inner.headers.len(),
-            start_height = inner.start_height,
-            "gRPC SubmitHeaders called"
-        );
-
-        let enclave_req = EnclaveRequest {
-            request: Some(enclave_request::Request::SubmitHeaders(
-                enclave_proto::SubmitHeadersRequest {
-                    headers: inner.headers,
-                    start_height: inner.start_height,
-                },
-            )),
-        };
-
-        let resp = self.send_to_enclave(enclave_req).await?;
-
-        match resp.response {
-            Some(enclave_response::Response::SubmitHeaders(r)) => {
-                Ok(Response::new(SubmitHeadersResponse {
-                    last_block_height: r.last_block_height,
-                    last_block_hash: r.last_block_hash,
-                    headers_accepted: r.headers_accepted,
-                }))
-            }
-            Some(enclave_response::Response::Error(e)) => Err(Self::enclave_error_to_status(&e)),
-            other => Err(Status::internal(format!(
-                "unexpected enclave response for SubmitHeaders: {:?}",
-                other
-            ))),
-        }
+        Err(Status::permission_denied(
+            "SubmitHeaders is closed; the parent syncs headers itself",
+        ))
     }
 
     /// AttestedPublicKey - proves the bridge's signing pubkey was produced
