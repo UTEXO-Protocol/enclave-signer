@@ -74,14 +74,18 @@ impl Config {
 }
 
 /// Parse `HEADER_ELECTRUM_URL` and `HEADER_SYNC_INTERVAL_SECS`. An unset or
-/// empty value takes its default. A malformed value is an error.
+/// empty value takes its default. A malformed interval is an error that stops
+/// the parent. A malformed URL is returned as the inner `Err`: header sync
+/// reports it as `unconfigured`, and signing is not held hostage to it.
 pub fn header_sync(
     url: Option<String>,
     interval_secs: Option<String>,
-) -> anyhow::Result<(Option<ElectrumSource>, Duration)> {
+) -> anyhow::Result<(Result<Option<ElectrumSource>, String>, Duration)> {
     let source = match url.as_deref() {
-        None | Some("") => None,
-        Some(url) => Some(ElectrumSource::new(url).context("HEADER_ELECTRUM_URL")?),
+        None | Some("") => Ok(None),
+        Some(url) => ElectrumSource::new(url)
+            .map(Some)
+            .map_err(|e| format!("HEADER_ELECTRUM_URL: {e:#}")),
     };
     let secs = match interval_secs.as_deref() {
         None | Some("") => 10,
@@ -105,25 +109,33 @@ fn env_or<T: std::str::FromStr>(key: &str, default: T) -> T {
 mod tests {
     use super::*;
 
-    fn parse(url: Option<&str>, secs: Option<&str>) -> anyhow::Result<(bool, u64)> {
+    /// `(source set, interval)`; the source slot is `Err` for a bad URL.
+    fn parse(url: Option<&str>, secs: Option<&str>) -> anyhow::Result<(Result<bool, String>, u64)> {
         header_sync(url.map(Into::into), secs.map(Into::into))
-            .map(|(source, interval)| (source.is_some(), interval.as_secs()))
+            .map(|(source, interval)| (source.map(|s| s.is_some()), interval.as_secs()))
     }
 
     #[test]
     fn header_sync_settings() {
-        assert_eq!(parse(None, None).unwrap(), (false, 10));
-        assert_eq!(parse(Some(""), Some("")).unwrap(), (false, 10));
+        assert_eq!(parse(None, None).unwrap(), (Ok(false), 10));
+        assert_eq!(parse(Some(""), Some("")).unwrap(), (Ok(false), 10));
         assert_eq!(
             parse(Some("ssl://e.example.com:50002"), Some("1")).unwrap(),
-            (true, 1)
+            (Ok(true), 1)
         );
         assert_eq!(
             parse(Some("tcp://127.0.0.1:50001"), Some("600")).unwrap(),
-            (true, 600)
+            (Ok(true), 600)
         );
-        assert!(parse(Some("tcp://192.0.2.1:50001"), None).is_err());
-        assert!(parse(Some("electrum:50002"), None).is_err());
+        // A bad URL does not stop the parent; it is reported.
+        for url in ["tcp://192.0.2.1:50001", "electrum:50002"] {
+            let (source, secs) = parse(Some(url), None).unwrap();
+            assert!(
+                source.unwrap_err().starts_with("HEADER_ELECTRUM_URL: "),
+                "{url}"
+            );
+            assert_eq!(secs, 10);
+        }
         for secs in ["0", "601", "-1", "ten"] {
             assert!(parse(None, Some(secs)).is_err(), "{secs}");
         }

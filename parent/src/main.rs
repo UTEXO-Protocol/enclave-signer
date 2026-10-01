@@ -87,7 +87,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let service = ParentAdapterService::new(target, cfg.evm_network_ids.clone());
 
     // The enclave takes headers in every phase, so sync starts before keys and
-    // endpoints. A failed step never stops the gRPC server.
+    // endpoints. A failed step, or a bad HEADER_ELECTRUM_URL, never stops the
+    // gRPC server: both show up in `/health` as `header_sync`.
     let (header_sync, sync_status) =
         HeaderSync::new(service.clone(), header_source, header_interval);
     tokio::spawn(header_sync.run());

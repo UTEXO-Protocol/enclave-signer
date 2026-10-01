@@ -12,12 +12,11 @@ use bitcoin::block::{Header, Version};
 use bitcoin::consensus::{deserialize, serialize};
 use bitcoin::hashes::Hash;
 use bitcoin::{BlockHash, CompactTarget, TxMerkleNode};
-use sha2::{Digest, Sha256};
 use tokio::sync::watch;
 use tonic::Request;
 
 use utexo_bridge_enclave::config::BridgeConfig;
-use utexo_bridge_enclave::networks::rgb::spv::{checkpoint_for, HeaderChain, Network};
+use utexo_bridge_enclave::networks::rgb::spv::{checkpoint_for, Checkpoint, HeaderChain, Network};
 use utexo_bridge_enclave::server::{self as enclave_server, ServerContext};
 use utexo_bridge_enclave::state::EnclaveState;
 use utexo_bridge_parent::enclave_proto::{
@@ -39,8 +38,12 @@ const TEST_MNEMONIC: &str =
 
 type Chain = Vec<[u8; 80]>;
 
-fn sha256d(h: &[u8]) -> Vec<u8> {
-    Sha256::digest(Sha256::digest(h)).to_vec()
+fn block_hash(h: &[u8]) -> Vec<u8> {
+    deserialize::<Header>(h)
+        .unwrap()
+        .block_hash()
+        .to_byte_array()
+        .to_vec()
 }
 
 fn header_bytes(h: &Header) -> [u8; 80] {
@@ -188,14 +191,27 @@ fn serve_electrum(mut stream: TcpStream, state: &Mutex<(Chain, Mode)>) {
 type Log = Arc<Mutex<Vec<(Instant, EnclaveRequest)>>>;
 
 fn start_real_enclave() -> u16 {
+    start_real_enclave_at(checkpoint_for(Network::Regtest))
+}
+
+/// The regtest checkpoint moved to `chain[height]`.
+fn checkpoint_at(chain: &[[u8; 80]], height: u32) -> Checkpoint {
+    let header: Header = deserialize(&chain[height as usize]).unwrap();
+    Checkpoint {
+        height,
+        hash: header.block_hash().to_byte_array(),
+        bits: header.bits.to_consensus(),
+        time: header.time,
+        ..checkpoint_for(Network::Regtest)
+    }
+}
+
+fn start_real_enclave_at(checkpoint: Checkpoint) -> u16 {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
     let state = EnclaveState::new(bitcoin::Network::Bitcoin);
     state.initialize_from_mnemonic(TEST_MNEMONIC).unwrap();
-    let chain = Mutex::new(HeaderChain::new(
-        Network::Regtest,
-        checkpoint_for(Network::Regtest),
-    ));
+    let chain = Mutex::new(HeaderChain::new(Network::Regtest, checkpoint));
     let ctx = Arc::new(ServerContext::new(state, BridgeConfig::from_env(), chain));
     std::thread::spawn(move || {
         for s in listener.incoming().flatten() {
@@ -270,7 +286,7 @@ fn start_scripted_enclave(
             reply(enclave_response::Response::GetLastSavedBlock(
                 GetLastSavedBlockResponse {
                     block_height: h,
-                    block_hash: sha256d(&chain[h as usize]),
+                    block_hash: block_hash(&chain[h as usize]),
                 },
             ))
         }
@@ -283,7 +299,7 @@ fn start_scripted_enclave(
             reply(enclave_response::Response::SubmitHeaders(
                 SubmitHeadersResponse {
                     last_block_height: last,
-                    last_block_hash: sha256d(r.headers.last().unwrap()),
+                    last_block_hash: block_hash(r.headers.last().unwrap()),
                     headers_accepted: r.headers.len() as u32,
                 },
             ))
@@ -335,7 +351,7 @@ fn start_sync(
     url: Option<&str>,
 ) -> (tokio::task::JoinHandle<()>, watch::Receiver<SyncStatus>) {
     let source = url.map(|u| ElectrumSource::new(u).unwrap());
-    let (sync, rx) = HeaderSync::new(service(port), source, Duration::from_secs(1));
+    let (sync, rx) = HeaderSync::new(service(port), Ok(source), Duration::from_secs(1));
     (tokio::spawn(sync.run()), rx)
 }
 
@@ -381,7 +397,7 @@ async fn fresh_enclave_syncs_follows_and_resumes() {
     // More than two batches, with no node running.
     let (task, mut rx) = start_sync(relay, Some(&electrum.url));
     wait(&mut rx, 60, synced_at(4500)).await;
-    assert_eq!(enclave_tip(enclave), (4500, sha256d(&chain[4500])));
+    assert_eq!(enclave_tip(enclave), (4500, block_hash(&chain[4500])));
     let starts: Vec<u32> = submits(&log).iter().map(|(_, s)| s.start_height).collect();
     assert_eq!(starts, vec![1, 2017, 4033]);
 
@@ -414,18 +430,61 @@ async fn fork_1_and_100_replace_101_stalls() {
     let b = extend(&a[..300], 2, 2);
     electrum.set_chain(b.clone());
     wait(&mut rx, 20, synced_at(301)).await;
-    assert_eq!(enclave_tip(enclave), (301, sha256d(&b[301])));
+    assert_eq!(enclave_tip(enclave), (301, block_hash(&b[301])));
 
     // Forked 100 below the tip 301: headers 202..=301 differ.
     let c = extend(&b[..=201], 101, 3);
     electrum.set_chain(c.clone());
     wait(&mut rx, 20, synced_at(302)).await;
-    assert_eq!(enclave_tip(enclave), (302, sha256d(&c[302])));
+    assert_eq!(enclave_tip(enclave), (302, block_hash(&c[302])));
 
     // Forked 101 below the tip 302: headers 202..=302 differ.
     electrum.set_chain(extend(&c[..=201], 110, 4));
     wait(&mut rx, 20, stalled).await;
-    assert_eq!(enclave_tip(enclave), (302, sha256d(&c[302])));
+    assert_eq!(enclave_tip(enclave), (302, block_hash(&c[302])));
+    task.abort();
+}
+
+/// A fork repair near the checkpoint: the first rewind lands below it and the
+/// enclave refuses; the parent learns the checkpoint and repairs above it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn fork_near_checkpoint_repairs_above_it() {
+    let a = extend(&genesis(), 250, 1);
+    let electrum = Electrum::start(a.clone());
+    let enclave = start_real_enclave_at(checkpoint_at(&a, 200));
+    let (relay, log) = start_relay(enclave);
+    let (task, mut rx) = start_sync(relay, Some(&electrum.url));
+    wait(&mut rx, 30, synced_at(250)).await;
+    assert_eq!(submits(&log)[0].1.start_height, 201);
+
+    // Forked 1 below the tip. A 99-deep rewind would start at 151.
+    let b = extend(&a[..250], 2, 2);
+    electrum.set_chain(b.clone());
+    wait(&mut rx, 20, synced_at(251)).await;
+    assert_eq!(enclave_tip(enclave), (251, block_hash(&b[251])));
+    let starts: Vec<u32> = submits(&log)[1..]
+        .iter()
+        .map(|(_, s)| s.start_height)
+        .collect();
+    assert_eq!(
+        starts,
+        [151, 201],
+        "one refusal, then a repair above the checkpoint"
+    );
+
+    // Forked at the checkpoint: every repair starts just above it, and the
+    // enclave refuses each one.
+    electrum.set_chain(extend(&a[..200], 60, 3));
+    wait(&mut rx, 20, stalled).await;
+    assert_eq!(enclave_tip(enclave), (251, block_hash(&b[251])));
+    let starts: Vec<u32> = submits(&log)[3..]
+        .iter()
+        .map(|(_, s)| s.start_height)
+        .collect();
+    assert!(
+        !starts.is_empty() && starts.iter().all(|s| *s == 201),
+        "{starts:?}"
+    );
     task.abort();
 }
 
@@ -438,7 +497,7 @@ async fn foreign_chain_fresh_and_synced() {
     let enclave = start_real_enclave();
     let (task, mut rx) = start_sync(enclave, Some(&electrum.url));
     wait(&mut rx, 20, stalled).await;
-    assert_eq!(enclave_tip(enclave), (0, sha256d(&genesis()[0])));
+    assert_eq!(enclave_tip(enclave), (0, block_hash(&genesis()[0])));
     task.abort();
 
     // A synced enclave.
@@ -449,7 +508,7 @@ async fn foreign_chain_fresh_and_synced() {
     wait(&mut rx, 30, synced_at(300)).await;
     electrum.set_chain(foreign);
     wait(&mut rx, 20, stalled).await;
-    assert_eq!(enclave_tip(enclave), (300, sha256d(&a[300])));
+    assert_eq!(enclave_tip(enclave), (300, block_hash(&a[300])));
     task.abort();
 }
 
@@ -468,11 +527,11 @@ async fn long_catch_up_batches_and_rate() {
     for (_, s) in &sent {
         assert_eq!(s.start_height, next);
         assert!(!s.headers.is_empty() && s.headers.len() <= 2016);
-        let mut prev = sha256d(&chain[next as usize - 1]);
+        let mut prev = block_hash(&chain[next as usize - 1]);
         for h in &s.headers {
             assert_eq!(h.len(), 80);
             assert_eq!(h[4..36], prev[..]);
-            prev = sha256d(h);
+            prev = block_hash(h);
         }
         next += s.headers.len() as u32;
     }
@@ -545,7 +604,7 @@ async fn bad_reply_rereads_tip() {
         case(move |r| ok(
             r,
             r.headers.len() as u32 - 1,
-            sha256d(r.headers.last().unwrap())
+            block_hash(r.headers.last().unwrap())
         )),
         // A wrong hash.
         case(move |r| ok(r, r.headers.len() as u32, vec![0; 32])),
@@ -588,6 +647,7 @@ async fn unconfigured_is_stable() {
     task.abort();
 
     assert_eq!(rx.borrow().state, SyncState::Unconfigured);
+    assert_eq!(rx.borrow().last_error, None);
     assert!(seen
         .lock()
         .unwrap()
@@ -598,6 +658,30 @@ async fn unconfigured_is_stable() {
     assert!(log
         .iter()
         .all(|(_, r)| matches!(r.request, Some(enclave_request::Request::Health(_)))));
+}
+
+/// A bad `HEADER_ELECTRUM_URL` is `unconfigured` with the reason, not a crash.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn bad_url_is_unconfigured_with_reason() {
+    let (enclave, _log) = start_enclave_with(|_| health(7200));
+    let (sync, mut rx) = HeaderSync::new(
+        service(enclave),
+        Err("HEADER_ELECTRUM_URL: no port".into()),
+        Duration::from_secs(1),
+    );
+    let task = tokio::spawn(sync.run());
+    let st = wait(&mut rx, 10, |s| s.state == SyncState::Unconfigured).await;
+    assert_eq!(
+        st.last_error.as_deref(),
+        Some("HEADER_ELECTRUM_URL: no port")
+    );
+    tokio::time::sleep(Duration::from_millis(2500)).await;
+    assert_eq!(rx.borrow().state, SyncState::Unconfigured);
+    assert_eq!(
+        rx.borrow().last_error.as_deref(),
+        Some("HEADER_ELECTRUM_URL: no port")
+    );
+    task.abort();
 }
 
 /// `PublicKey` and `Sign` reach the enclave.
@@ -724,44 +808,9 @@ async fn malformed_source_then_recovers() {
 fn self_signed_tls_source_is_refused() {
     use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
 
-    let dir = std::path::Path::new(env!("CARGO_TARGET_TMPDIR"))
-        .join(format!("self-signed-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
-    let openssl = |args: &[&str]| {
-        assert!(std::process::Command::new("openssl")
-            .args(args)
-            .current_dir(&dir)
-            .status()
-            .unwrap()
-            .success());
-    };
-    openssl(&[
-        "req",
-        "-x509",
-        "-newkey",
-        "ed25519",
-        "-nodes",
-        "-keyout",
-        "key.pem",
-        "-out",
-        "cert.der",
-        "-outform",
-        "DER",
-        "-days",
-        "1",
-        "-subj",
-        "/CN=localhost",
-        "-addext",
-        "subjectAltName=DNS:localhost",
-    ]);
-    openssl(&[
-        "pkey", "-in", "key.pem", "-outform", "DER", "-out", "key.der",
-    ]);
-    let cert = CertificateDer::from(std::fs::read(dir.join("cert.der")).unwrap());
-    let key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(
-        std::fs::read(dir.join("key.der")).unwrap(),
-    ));
-    std::fs::remove_dir_all(&dir).unwrap();
+    let signed = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
+    let cert: CertificateDer<'static> = signed.cert.der().clone();
+    let key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(signed.key_pair.serialize_der()));
     let config = Arc::new(
         rustls::ServerConfig::builder_with_provider(Arc::new(
             rustls::crypto::ring::default_provider(),

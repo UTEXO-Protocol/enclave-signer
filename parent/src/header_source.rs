@@ -1,19 +1,23 @@
 //! Bitcoin headers from one Electrum server.
 //!
-//! Every call opens its own connection under one deadline and one byte cap,
-//! and the parent checks every reply field before it uses it.
+//! A [`Session`] is one connection under one deadline and one byte cap. A sync
+//! step opens one session for all its calls, and the parent checks every reply
+//! field before it uses it.
 
 use std::io::{self, Read, Write};
-use std::net::{IpAddr, TcpStream, ToSocketAddrs};
-use std::sync::Arc;
+use std::net::{IpAddr, SocketAddr, TcpStream, ToSocketAddrs};
+use std::sync::{mpsc, Arc};
 use std::time::{Duration, Instant};
 
 use anyhow::{bail, ensure, Context};
+use bitcoin::block::Header;
+use bitcoin::consensus::deserialize;
 use electrum_client::raw_client::RawClient;
 use electrum_client::{ElectrumApi, Param};
-use rustls::pki_types::{Der, ServerName, TrustAnchor};
+use rustls::pki_types::ServerName;
 
-/// Limit for one source call: connect, TLS handshake and every read and write.
+/// Limit for one session: name lookup, connect, TLS handshake and every read
+/// and write.
 pub const CALL_TIMEOUT: Duration = Duration::from_secs(15);
 /// Most headers one call returns.
 pub const MAX_HEADERS: u32 = 2016;
@@ -50,14 +54,8 @@ impl ElectrumSource {
         let tls = if ssl {
             let name = ServerName::try_from(host.to_string())
                 .context("Electrum URL has a bad host name")?;
-            let roots = webpki_roots::TLS_SERVER_ROOTS
-                .iter()
-                .map(|t| TrustAnchor {
-                    subject: Der::from_slice(t.subject),
-                    subject_public_key_info: Der::from_slice(t.spki),
-                    name_constraints: t.name_constraints.map(Der::from_slice),
-                })
-                .collect::<rustls::RootCertStore>();
+            let roots =
+                rustls::RootCertStore::from_iter(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
             let config = rustls::ClientConfig::builder_with_provider(Arc::new(
                 rustls::crypto::ring::default_provider(),
             ))
@@ -80,69 +78,12 @@ impl ElectrumSource {
         })
     }
 
-    /// Height of the source tip.
-    pub fn tip(&self) -> anyhow::Result<u32> {
-        let client = self.connect()?;
-        let reply = client.raw_call("blockchain.headers.subscribe", [])?;
-        let height = reply["height"]
-            .as_u64()
-            .and_then(|h| u32::try_from(h).ok())
-            .context("source tip height is not a u32")?;
-        let header = reply["hex"].as_str().context("source tip has no header")?;
-        ensure!(
-            hex::decode(header).is_ok_and(|h| h.len() == 80),
-            "source tip header is not 80 bytes"
-        );
-        Ok(height)
-    }
-
-    /// Up to `count` headers from height `from`. Fewer when the source ends.
-    pub fn headers(&self, from: u32, count: u32) -> anyhow::Result<Vec<[u8; 80]>> {
-        ensure!(
-            (1..=MAX_HEADERS).contains(&count),
-            "bad header count {count}"
-        );
-        let client = self.connect()?;
-        let mut out: Vec<[u8; 80]> = Vec::with_capacity(count as usize);
-        while out.len() < count as usize {
-            let remaining = count - out.len() as u32;
-            let start = from
-                .checked_add(out.len() as u32)
-                .context("header height overflows")?;
-            let reply = client.raw_call(
-                "blockchain.block.headers",
-                [Param::U32(start), Param::U32(remaining)],
-            )?;
-            let n = reply["count"]
-                .as_u64()
-                .context("source reply has no count")?;
-            let raw = hex::decode(reply["hex"].as_str().context("source reply has no hex")?)
-                .context("source reply hex is bad")?;
-            ensure!(
-                raw.len() % 80 == 0 && (raw.len() / 80) as u64 == n,
-                "source reply count {n} does not match {} bytes",
-                raw.len()
-            );
-            ensure!(
-                n <= u64::from(remaining),
-                "source sent more headers than asked"
-            );
-            if n == 0 {
-                break;
-            }
-            out.extend(
-                raw.chunks_exact(80)
-                    .map(|c| <[u8; 80]>::try_from(c).unwrap()),
-            );
-        }
-        Ok(out)
-    }
-
-    fn connect(&self) -> anyhow::Result<RawClient<Box<dyn Stream>>> {
+    /// Open one connection. Every call on it shares one deadline.
+    pub fn connect(&self) -> anyhow::Result<Session> {
         let deadline = Instant::now() + self.timeout;
         let mut last = None;
         let mut tcp = None;
-        for addr in (self.host.as_str(), self.port).to_socket_addrs()? {
+        for addr in resolve(&self.host, self.port, deadline)? {
             match TcpStream::connect_timeout(&addr, time_left(deadline)?) {
                 Ok(s) => {
                     tcp = Some(s);
@@ -173,7 +114,98 @@ impl ElectrumSource {
                 Box::new(tls)
             }
         };
-        Ok(RawClient::from(stream))
+        Ok(Session {
+            client: RawClient::from(stream),
+        })
+    }
+
+    /// Height and header of the source tip, on a connection of its own.
+    pub fn tip(&self) -> anyhow::Result<(u32, Header)> {
+        self.connect()?.tip()
+    }
+
+    /// Up to `count` headers from height `from`, on a connection of its own.
+    pub fn headers(&self, from: u32, count: u32) -> anyhow::Result<Vec<Header>> {
+        self.connect()?.headers(from, count)
+    }
+}
+
+/// One connection to the source.
+pub struct Session {
+    client: RawClient<Box<dyn Stream>>,
+}
+
+impl Session {
+    /// Height and header of the source tip.
+    pub fn tip(&self) -> anyhow::Result<(u32, Header)> {
+        let reply = self.client.raw_call("blockchain.headers.subscribe", [])?;
+        let height = reply["height"]
+            .as_u64()
+            .and_then(|h| u32::try_from(h).ok())
+            .context("source tip height is not a u32")?;
+        let header = reply["hex"].as_str().context("source tip has no header")?;
+        let raw = hex::decode(header).context("source tip header hex is bad")?;
+        ensure!(raw.len() == 80, "source tip header is not 80 bytes");
+        let header = deserialize(&raw).context("source tip header does not parse")?;
+        Ok((height, header))
+    }
+
+    /// Up to `count` headers from height `from`. Fewer when the source ends.
+    pub fn headers(&self, from: u32, count: u32) -> anyhow::Result<Vec<Header>> {
+        ensure!(
+            (1..=MAX_HEADERS).contains(&count),
+            "bad header count {count}"
+        );
+        let mut out: Vec<Header> = Vec::with_capacity(count as usize);
+        while out.len() < count as usize {
+            let remaining = count - out.len() as u32;
+            let start = from
+                .checked_add(out.len() as u32)
+                .context("header height overflows")?;
+            let reply = self.client.raw_call(
+                "blockchain.block.headers",
+                [Param::U32(start), Param::U32(remaining)],
+            )?;
+            let n = reply["count"]
+                .as_u64()
+                .context("source reply has no count")?;
+            let raw = hex::decode(reply["hex"].as_str().context("source reply has no hex")?)
+                .context("source reply hex is bad")?;
+            ensure!(
+                raw.len() % 80 == 0 && (raw.len() / 80) as u64 == n,
+                "source reply count {n} does not match {} bytes",
+                raw.len()
+            );
+            ensure!(
+                n <= u64::from(remaining),
+                "source sent more headers than asked"
+            );
+            if n == 0 {
+                break;
+            }
+            for chunk in raw.chunks_exact(80) {
+                out.push(deserialize(chunk).context("source header does not parse")?);
+            }
+        }
+        Ok(out)
+    }
+}
+
+/// Resolve `host` under `deadline`. The lookup runs on its own thread, since
+/// the resolver takes no deadline and a hung one must not hold the caller
+/// past the session's limit.
+fn resolve(host: &str, port: u16, deadline: Instant) -> anyhow::Result<Vec<SocketAddr>> {
+    if let Ok(ip) = host.parse::<IpAddr>() {
+        return Ok(vec![SocketAddr::new(ip, port)]);
+    }
+    let (tx, rx) = mpsc::channel();
+    let host = host.to_string();
+    std::thread::spawn(move || {
+        let _ = tx.send((host.as_str(), port).to_socket_addrs().map(Vec::from_iter));
+    });
+    match rx.recv_timeout(time_left(deadline)?) {
+        Ok(addrs) => addrs.context("cannot resolve the source host"),
+        Err(_) => bail!("resolving the source host timed out"),
     }
 }
 
@@ -288,7 +320,7 @@ mod tests {
     fn good_replies_parse() {
         let h = "00".repeat(80);
         let url = serve(vec![result(&format!("{{\"height\":7,\"hex\":\"{h}\"}}"))]);
-        assert_eq!(source(&url).tip().unwrap(), 7);
+        assert_eq!(source(&url).tip().unwrap().0, 7);
 
         let url = serve(vec![
             result(&format!(

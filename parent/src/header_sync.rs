@@ -1,15 +1,19 @@
 //! Keeps the enclave's header chain at the tip of one Electrum server.
 //!
 //! The parent holds no chain and no cursor. Each step reads the enclave tip,
-//! checks it against the source and sends the missing headers.
+//! checks it against the source on one connection and sends the missing
+//! headers.
 
 use std::collections::VecDeque;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{anyhow, bail, ensure, Context};
+use bitcoin::block::Header;
+use bitcoin::consensus::serialize;
+use bitcoin::hashes::Hash;
+use bitcoin::BlockHash;
 use serde::Serialize;
-use sha2::{Digest, Sha256};
 use tokio::sync::watch;
 use tokio::task::AbortHandle;
 
@@ -29,6 +33,8 @@ const RATE_WINDOW: Duration = Duration::from_secs(60);
 const STALL_AFTER: u32 = 3;
 const TIP_AGE_WARN_SECS: u32 = 3600;
 const TIP_AGE_ERROR_SECS: u32 = 7200;
+/// The enclave names its checkpoint in this refusal (`SpvError::BelowCheckpoint`).
+const BELOW_CHECKPOINT: &str = "below checkpoint ";
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -55,6 +61,8 @@ pub struct SyncStatus {
 pub struct HeaderSync {
     service: ParentAdapterService,
     source: Option<Arc<ElectrumSource>>,
+    /// Why there is no source, when `HEADER_ELECTRUM_URL` was set but bad.
+    source_error: Option<String>,
     interval: Duration,
     status: watch::Sender<SyncStatus>,
     /// A source call that timed out and may still run on a blocking thread.
@@ -62,24 +70,36 @@ pub struct HeaderSync {
     failures: u32,
     sent: VecDeque<(Instant, u32)>,
     age_level: u8,
+    /// The enclave's checkpoint height, once a refusal has named it. A fork
+    /// repair never starts at or below it.
+    floor: Option<u32>,
 }
 
 impl HeaderSync {
+    /// `source` is `Err` when `HEADER_ELECTRUM_URL` was set but does not
+    /// parse: the sync reports `unconfigured` with that error and the parent
+    /// keeps serving.
     pub fn new(
         service: ParentAdapterService,
-        source: Option<ElectrumSource>,
+        source: Result<Option<ElectrumSource>, String>,
         interval: Duration,
     ) -> (Self, watch::Receiver<SyncStatus>) {
         let (status, rx) = watch::channel(SyncStatus::default());
+        let (source, source_error) = match source {
+            Ok(source) => (source.map(Arc::new), None),
+            Err(e) => (None, Some(e)),
+        };
         let sync = Self {
             service,
-            source: source.map(Arc::new),
+            source,
+            source_error,
             interval,
             status,
             pending: None,
             failures: 0,
             sent: VecDeque::new(),
             age_level: 0,
+            floor: None,
         };
         (sync, rx)
     }
@@ -102,10 +122,14 @@ impl HeaderSync {
             .as_secs();
         let previous = self.status.borrow().state;
         let failures = &mut self.failures;
+        let source_error = &self.source_error;
         self.status.send_modify(|s| match result {
             Ok(state) => {
                 *failures = 0;
-                s.last_error = None;
+                s.last_error = match state {
+                    SyncState::Unconfigured => source_error.clone(),
+                    _ => None,
+                };
                 s.state = state;
                 if matches!(s.state, SyncState::Synced | SyncState::Syncing) {
                     s.last_ok_unix = Some(now);
@@ -123,9 +147,14 @@ impl HeaderSync {
         let state = self.status.borrow().state;
         if state != previous {
             match state {
-                SyncState::Unconfigured => {
-                    tracing::error!("HEADER_ELECTRUM_URL is not set; the parent syncs no headers")
-                }
+                SyncState::Unconfigured => match &self.source_error {
+                    Some(e) => {
+                        tracing::error!(error = %e, "HEADER_ELECTRUM_URL is bad; the parent syncs no headers")
+                    }
+                    None => tracing::error!(
+                        "HEADER_ELECTRUM_URL is not set; the parent syncs no headers"
+                    ),
+                },
                 SyncState::Stalled => tracing::error!("header sync stalled"),
                 _ => tracing::info!(?state, "header sync state"),
             }
@@ -148,59 +177,34 @@ impl HeaderSync {
 
         let (h, hash) = self.enclave_tip().await?;
         self.status.send_modify(|s| s.enclave_tip = Some(h));
-        let s = self.source_call(&source, |src| src.tip()).await?;
+        // A fork repair starts `REWIND` below the tip, but never at or below
+        // the checkpoint: the enclave refuses to rewrite history there.
+        let rewind_to = h
+            .saturating_sub(REWIND)
+            .max(self.floor.map_or(1, |f| f + 1));
+        let (s, batch) = self
+            .source_call(&source, move |src| fetch(src, h, hash, rewind_to))
+            .await?;
         self.status.send_modify(|st| {
             st.source_tip = Some(s);
             st.lag_blocks = Some(s.saturating_sub(h));
         });
-        ensure!(s >= h, "source tip {s} is below the enclave tip {h}");
-
-        let at_h = self
-            .source_call(&source, move |src| src.headers(h, 1))
-            .await?;
-        let at_h = at_h
-            .first()
-            .context("source has no header at the enclave tip")?;
-        let (start, prev) = if sha256d(at_h) == hash {
-            if s == h {
-                return Ok(SyncState::Synced);
-            }
-            (h + 1, Some(hash))
-        } else {
-            ensure!(
-                s > h,
-                "source header at {h} differs from the enclave; waiting for the source to get ahead"
-            );
-            (h.saturating_sub(REWIND).max(1), None)
+        let Some((start, headers)) = batch else {
+            return Ok(SyncState::Synced);
         };
-        let count = (s - start + 1).min(MAX_HEADERS);
-        let headers = self
-            .source_call(&source, move |src| src.headers(start, count))
-            .await?;
-        let last = headers.last().context("source sent no headers")?;
-        if let Some(prev) = prev {
-            ensure!(
-                headers[0][4..36] == prev,
-                "source header {start} does not link to the enclave tip"
-            );
-        }
-        for (i, pair) in headers.windows(2).enumerate() {
-            ensure!(
-                pair[1][4..36] == sha256d(&pair[0]),
-                "source header {} does not link to the one before",
-                start as usize + i + 1
-            );
-        }
 
         let len = headers.len() as u32;
         let last_height = start + len - 1;
-        let last_hash = sha256d(last);
+        let last_hash = headers
+            .last()
+            .context("source sent no headers")?
+            .block_hash();
         self.wait_for_rate(len).await;
-        let reply = self.submit(start, headers).await?;
+        let reply = self.submit(start, &headers).await?;
         ensure!(
             reply.headers_accepted == len
                 && reply.last_block_height == last_height
-                && reply.last_block_hash == last_hash,
+                && reply.last_block_hash == last_hash.as_byte_array(),
             "enclave reply does not match the batch {start}..={last_height}: accepted {}, tip {}",
             reply.headers_accepted,
             reply.last_block_height
@@ -275,7 +279,7 @@ impl HeaderSync {
         self.sent.push_back((Instant::now(), n));
     }
 
-    async fn enclave_tip(&self) -> anyhow::Result<(u32, [u8; 32])> {
+    async fn enclave_tip(&self) -> anyhow::Result<(u32, BlockHash)> {
         let req = EnclaveRequest {
             request: Some(enclave_request::Request::GetLastSavedBlock(
                 GetLastSavedBlockRequest {},
@@ -288,9 +292,7 @@ impl HeaderSync {
             .map_err(|s| anyhow!("enclave: {}", s.message()))?;
         match resp.response {
             Some(enclave_response::Response::GetLastSavedBlock(r)) => {
-                let hash = r
-                    .block_hash
-                    .try_into()
+                let hash = BlockHash::from_slice(&r.block_hash)
                     .map_err(|_| anyhow!("enclave tip hash is not 32 bytes"))?;
                 Ok((r.block_height, hash))
             }
@@ -302,14 +304,14 @@ impl HeaderSync {
     }
 
     async fn submit(
-        &self,
+        &mut self,
         start_height: u32,
-        headers: Vec<[u8; 80]>,
+        headers: &[Header],
     ) -> anyhow::Result<SubmitHeadersResponse> {
         let req = EnclaveRequest {
             request: Some(enclave_request::Request::SubmitHeaders(
                 SubmitHeadersRequest {
-                    headers: headers.iter().map(|h| h.to_vec()).collect(),
+                    headers: headers.iter().map(serialize).collect(),
                     start_height,
                 },
             )),
@@ -322,6 +324,13 @@ impl HeaderSync {
         match resp.response {
             Some(enclave_response::Response::SubmitHeaders(r)) => Ok(r),
             Some(enclave_response::Response::Error(e)) => {
+                if let Some(checkpoint) = checkpoint_in(&e.message) {
+                    tracing::info!(
+                        checkpoint,
+                        "enclave checkpoint learned; fork repairs stay above it"
+                    );
+                    self.floor = Some(checkpoint);
+                }
                 bail!("enclave refused headers (code {}): {}", e.code, e.message)
             }
             other => bail!("unexpected enclave response: {other:?}"),
@@ -329,6 +338,87 @@ impl HeaderSync {
     }
 }
 
-fn sha256d(header: &[u8; 80]) -> [u8; 32] {
-    Sha256::digest(Sha256::digest(header)).into()
+/// The headers the enclave is missing, from this start height.
+type Batch = (u32, Vec<Header>);
+
+/// On one connection: the source tip, and the batch the enclave is missing
+/// above its tip `h` (`None` when it has them all). A fork is repaired from
+/// `rewind_to`. Every header is checked to link to the one before.
+fn fetch(
+    src: &ElectrumSource,
+    h: u32,
+    hash: BlockHash,
+    rewind_to: u32,
+) -> anyhow::Result<(u32, Option<Batch>)> {
+    let session = src.connect()?;
+    let (s, tip_header) = session.tip()?;
+    ensure!(s >= h, "source tip {s} is below the enclave tip {h}");
+    let at_h = if s == h {
+        tip_header
+    } else {
+        *session
+            .headers(h, 1)?
+            .first()
+            .context("source has no header at the enclave tip")?
+    };
+    let (start, prev) = if at_h.block_hash() == hash {
+        if s == h {
+            return Ok((s, None));
+        }
+        (h + 1, Some(hash))
+    } else {
+        ensure!(
+            s > h,
+            "source header at {h} differs from the enclave; waiting for the source to get ahead"
+        );
+        ensure!(
+            rewind_to <= h,
+            "source header at {h} differs from the enclave at its checkpoint; the chains do not meet"
+        );
+        (rewind_to, None)
+    };
+    let count = (s - start + 1).min(MAX_HEADERS);
+    let headers = session.headers(start, count)?;
+    ensure!(!headers.is_empty(), "source sent no headers");
+    if let Some(prev) = prev {
+        ensure!(
+            headers[0].prev_blockhash == prev,
+            "source header {start} does not link to the enclave tip"
+        );
+    }
+    for (i, pair) in headers.windows(2).enumerate() {
+        ensure!(
+            pair[1].prev_blockhash == pair[0].block_hash(),
+            "source header {} does not link to the one before",
+            start as usize + i + 1
+        );
+    }
+    Ok((s, Some((start, headers))))
+}
+
+/// The checkpoint height an enclave `BelowCheckpoint` refusal names.
+fn checkpoint_in(message: &str) -> Option<u32> {
+    let rest = &message[message.find(BELOW_CHECKPOINT)? + BELOW_CHECKPOINT.len()..];
+    let digits = rest.split(|c: char| !c.is_ascii_digit()).next()?;
+    digits.parse().ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn checkpoint_is_read_from_the_enclave_refusal() {
+        let refusal = utexo_bridge_enclave::networks::rgb::spv::SpvError::BelowCheckpoint {
+            got: 151,
+            checkpoint: 200,
+        }
+        .to_string();
+        assert_eq!(checkpoint_in(&refusal), Some(200));
+        assert_eq!(
+            checkpoint_in("batch start_height 5 leaves a gap above tip 3"),
+            None
+        );
+        assert_eq!(checkpoint_in("below checkpoint x"), None);
+    }
 }

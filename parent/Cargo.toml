@@ -83,9 +83,11 @@ thiserror = "2"
 anyhow = "1"
 
 hex = "0.4"
-# Header sync source. Only the raw client is used, so no default feature.
+# Header sync: headers parse and hash with `bitcoin`, the source is the raw
+# Electrum client (no default feature), TLS trusts the WebPKI root bundle.
+bitcoin = "0.32"
 electrum-client = { version = "=0.24.1", default-features = false }
-webpki-roots = "=0.25.4"
+webpki-roots = "1.0"
 
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
@@ -112,4 +114,5 @@ tonic-prost = "0.14"
 # Real enclave (with mock-attestation + seed-import) for end-to-end tests
 # that drive the full CLI verifier against a live enclave + gRPC stack.
 utexo-bridge-enclave = { path = "../enclave", features = ["mock-attestation", "allow-seed-import"] }
-bitcoin = "0.32"
+# Self-signed test certificates, generated in-process: no openssl binary.
+rcgen = "0.13"
