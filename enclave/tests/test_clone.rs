@@ -1,6 +1,9 @@
+#![cfg(not(feature = "kms-persistence"))]
+
 //! Integration tests for the cloning handshake.
 //!
-//! Run with `--features mock-attestation,allow-seed-import`. Mock attestation
+//! Run with `--no-default-features --features ccd,mock-attestation,allow-seed-import`.
+//! KMS persistence disables cloning. Mock attestation
 //! skips NSM / COSE / cert-chain validation but still enforces pubkey, digest,
 //! nonce, and PCR binding. `allow-seed-import` only gives the donor a known
 //! fixed seed; the cloning path itself does not need it, since

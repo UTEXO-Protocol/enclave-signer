@@ -1,7 +1,12 @@
 //! F03-AF-08: test identity commitments before state changes.
 //! These tests use mock attestation without an NSM signature.
 //! Real NSM tests run separately.
-#![cfg(all(feature = "mock-attestation", feature = "allow-seed-import"))]
+// Cloning is disabled with KMS persistence (see `test_clone.rs`).
+#![cfg(all(
+    feature = "mock-attestation",
+    feature = "allow-seed-import",
+    not(feature = "kms-persistence")
+))]
 #[path = "common/clone_commitment.rs"]
 mod clone_commitment;
 mod common;

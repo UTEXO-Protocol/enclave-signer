@@ -1,7 +1,34 @@
 use thiserror::Error;
 
+/// Fixed custody diagnostics. Host/provider error strings never enter this API.
+#[cfg(feature = "kms-persistence")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
+pub enum CustodyFailure {
+    #[error("configuration_error; verify custody configuration")]
+    Configuration,
+    #[error("access_denied; verify credentials and custody policies")]
+    AccessDenied,
+    #[error("unavailable; retry the operation")]
+    Unavailable,
+    #[error("invalid_ciphertext; restore the saved ciphertext and verify the key")]
+    InvalidCiphertext,
+    #[error("key_or_ciphertext_error; verify the configured KMS key and persisted ciphertext")]
+    KeyOrCiphertext,
+    #[error("invalid_response; custody response was rejected")]
+    InvalidResponse,
+    #[error("internal_error; verify the enclave SDK and NSM runtime")]
+    Internal,
+}
+
 #[derive(Debug, Error)]
 pub enum EnclaveError {
+    #[cfg(feature = "kms-persistence")]
+    #[error("seed custody {service}: {failure}")]
+    Custody {
+        service: &'static str,
+        failure: CustodyFailure,
+    },
+
     #[error("key not initialized")]
     KeyNotInitialized,
 
@@ -60,7 +87,7 @@ pub enum EnclaveError {
     #[error("pubkey mismatch: attestation pubkey does not match claimed pubkey")]
     PubkeyMismatch,
 
-    #[error("identity mismatch: cloned seed does not derive to expected address")]
+    #[error("identity mismatch: recovered seed does not derive to expected address")]
     IdentityMismatch,
 
     #[error("spv: {0}")]
@@ -77,8 +104,13 @@ impl EnclaveError {
     /// Map error to a proto error code.
     pub fn error_code(&self) -> u32 {
         match self {
-            EnclaveError::CrossCheck(_) => 3,   // ERROR_CODE_VALIDATION_FAILED
-            EnclaveError::Spv(_) => 3,          // ERROR_CODE_VALIDATION_FAILED
+            #[cfg(feature = "kms-persistence")]
+            EnclaveError::Custody {
+                failure: CustodyFailure::Unavailable,
+                ..
+            } => 2,
+            EnclaveError::CrossCheck(_) => 3, // ERROR_CODE_VALIDATION_FAILED
+            EnclaveError::Spv(_) => 3,        // ERROR_CODE_VALIDATION_FAILED
             EnclaveError::NotReady { .. } => 2, // ERROR_CODE_NOT_READY
             _ => 1,
         }

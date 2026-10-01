@@ -10,6 +10,11 @@ assumptions. Known gaps are collected in Sec 13.
 
 ---
 
+`mint-signer` enables `kms-persistence`: initialization uses attested KMS seed
+generation/recovery and encrypted S3 storage; peer cloning is disabled. Burn
+signers and other builds without this capability retain the entropy/cloning
+lifecycle below. See [KMS seed persistence](kms-persistence.md).
+
 ## 1. Purpose
 
 The enclave signer is the authorization component of the bridge. It runs inside
@@ -93,8 +98,9 @@ Four crates plus the infrastructure they touch:
 **Cargo features.** `rgb` (implies `spv`, which implies `rgb-validation`),
 `ccd`, exactly one of `rgb-swap` / `rgb-mint-burn`, `evm-rpc`, `bfa-mint`,
 `vsock`, and for mint/burn exactly one signer role: `mint-signer` (EVM -> RGB)
-or `burn-signer` (RGB -> EVM), each implying `bfa-mint`. Production images are built with `--no-default-features` and an
-explicit set (README, Building). Dev-only features
+or `burn-signer` (RGB -> EVM), each implying `bfa-mint`. `mint-signer` also
+enables `kms-persistence`. Production images are built with
+`--no-default-features` and an explicit set (README, Building). Dev-only features
 (`mock-attestation`, `allow-seed-import`) are `compile_error!` in release.
 
 **Wire protocol** enclave<->parent: 4-byte little-endian length prefix + prost

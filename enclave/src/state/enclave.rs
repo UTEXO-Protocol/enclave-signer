@@ -35,7 +35,9 @@ const CLONE_EXPORT_HARD_CAP_ENV: &str = "CLONE_EXPORT_HARD_CAP";
 /// Enclave lifecycle phase.
 ///
 /// Valid transitions (see `EnclaveState`):
-///   Initial  -> Active   (InitializeKey / InitializeFromEntropy)
+///   Initial  -> Active   (local InitializeKey / InitializeFromEntropy)
+///   Initial  -> Initializing -> Active (KMS seed recovery)
+///   Initializing -> Initial (failed or expired seed recovery)
 ///   Initial  -> Cloning  (InitiateCloning, wired in PR 4)
 ///   Cloning  -> Active   (SetClone,      wired in PR 4)
 ///   Active   -> Active   (GetClone handled by donor without state change)
@@ -46,6 +48,10 @@ const CLONE_EXPORT_HARD_CAP_ENV: &str = "CLONE_EXPORT_HARD_CAP";
 pub enum Phase {
     /// No keys, waiting for an initialize request.
     Initial,
+    /// Seed custody recovery owns the initialization reservation, with no lock
+    /// held while it waits for the host broker or KMS helper.
+    #[cfg(feature = "kms-persistence")]
+    Initializing,
     /// Cloning handshake in progress, waiting for SetClone.
     Cloning(CloningSession),
     /// Keys loaded, ready to sign.
@@ -56,6 +62,8 @@ impl Phase {
     pub fn name(&self) -> &'static str {
         match self {
             Phase::Initial => "initial",
+            #[cfg(feature = "kms-persistence")]
+            Phase::Initializing => "initializing",
             Phase::Cloning(_) => "cloning",
             Phase::Active(_) => "active",
         }
@@ -66,6 +74,8 @@ impl Phase {
 pub struct EnclaveState {
     pub(super) inner: Mutex<Phase>,
     network: Network,
+    #[cfg(feature = "kms-persistence")]
+    seed_source: Option<Box<dyn crate::seed_persistence::SeedSource>>,
     /// Operator-configured cloning secret for the *donor* role. Required
     /// when serving `GetClone`; not used in the requester role (the
     /// requester receives the secret via `InitiateCloningRequest`).
@@ -145,6 +155,8 @@ impl EnclaveState {
         Self {
             inner: Mutex::new(Phase::Initial),
             network,
+            #[cfg(feature = "kms-persistence")]
+            seed_source: None,
             donor_cloning_secret: Mutex::new(None),
             replay_guard: NonceReplayGuard::default(),
             op_replay_guard: NonceReplayGuard::with_capacity(
@@ -232,6 +244,56 @@ impl EnclaveState {
         self.network
     }
 
+    /// Configure the persistent seed source before exposing the request listener.
+    #[cfg(feature = "kms-persistence")]
+    pub fn with_seed_source(
+        mut self,
+        source: Box<dyn crate::seed_persistence::SeedSource>,
+    ) -> Self {
+        self.seed_source = Some(source);
+        self
+    }
+
+    /// Activate only after durable persistence and attested recovery succeed.
+    #[cfg(feature = "kms-persistence")]
+    pub fn initialize_from_persistence(&self) -> Result<()> {
+        self.initialize_from_persistence_until(
+            Instant::now() + crate::seed_persistence::RECOVERY_TIMEOUT,
+        )
+    }
+
+    /// The caller supplies its absolute request deadline minus response time.
+    /// Reserve the phase briefly, then release its lock during all external I/O:
+    /// other workers can reject initialization/signing immediately. A failed,
+    /// expired or panicking recovery drops the reservation back to Initial.
+    #[cfg(feature = "kms-persistence")]
+    pub fn initialize_from_persistence_until(&self, deadline: Instant) -> Result<()> {
+        let deadline = deadline.min(Instant::now() + crate::seed_persistence::RECOVERY_TIMEOUT);
+        crate::conn::remaining_until(deadline)?;
+        let source = self.seed_source.as_ref().ok_or_else(|| {
+            EnclaveError::InvalidRequest("KMS persistence requires a configured seed source".into())
+        })?;
+        {
+            let mut guard = self.lock_phase()?;
+            ensure_initial(&guard)?;
+            *guard = Phase::Initializing;
+        }
+        let _reservation = SeedInitialization { state: self };
+        // Derivation and allocation can fail before the phase is locked.
+        let manager = Box::new(source.load_keys(self.network, deadline)?);
+        let mut guard = self.lock_phase()?;
+        crate::conn::remaining_until(deadline)?;
+        // No other transition accepts Initializing. Keep the check explicit so
+        // future lifecycle changes cannot overwrite an unrelated identity.
+        if !matches!(*guard, Phase::Initializing) {
+            return Err(EnclaveError::NotReady {
+                state: guard.name().into(),
+            });
+        }
+        *guard = Phase::Active(manager);
+        Ok(())
+    }
+
     /// Set the donor cloning secret after checking its strength. (F03-AF-26)
     /// Replace any previous secret.
     /// SecretBox clears the bytes when it is dropped.
@@ -261,7 +323,7 @@ impl EnclaveState {
         }
     }
 
-    /// Returns the name of the current phase ("initial", "cloning", "active").
+    /// Returns the current phase: initial, initializing (KMS persistence), cloning or active.
     pub fn phase_name(&self) -> &'static str {
         self.inner.lock().map(|g| g.name()).unwrap_or("poisoned")
     }
@@ -468,7 +530,25 @@ impl EnclaveState {
         let guard = self.lock_phase()?;
         match &*guard {
             Phase::Active(km) => f(km),
-            Phase::Initial | Phase::Cloning(_) => Err(EnclaveError::KeyNotInitialized),
+            _ => Err(EnclaveError::KeyNotInitialized),
+        }
+    }
+}
+
+/// Drop guard for the `Initializing` reservation: any exit from
+/// `initialize_from_persistence_until` that did not activate rolls the phase
+/// back to `Initial` so the next request can retry.
+#[cfg(feature = "kms-persistence")]
+struct SeedInitialization<'a> {
+    state: &'a EnclaveState,
+}
+
+#[cfg(feature = "kms-persistence")]
+impl Drop for SeedInitialization<'_> {
+    fn drop(&mut self) {
+        let mut phase = self.state.inner.lock().unwrap_or_else(|p| p.into_inner());
+        if matches!(*phase, Phase::Initializing) {
+            *phase = Phase::Initial;
         }
     }
 }
@@ -476,6 +556,10 @@ impl EnclaveState {
 fn ensure_initial(phase: &Phase) -> Result<()> {
     match phase {
         Phase::Initial => Ok(()),
+        #[cfg(feature = "kms-persistence")]
+        Phase::Initializing => Err(EnclaveError::NotReady {
+            state: phase.name().into(),
+        }),
         _ => Err(EnclaveError::AlreadyInitialized),
     }
 }

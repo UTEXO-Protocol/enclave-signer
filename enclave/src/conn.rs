@@ -84,9 +84,14 @@ impl<S: SocketTimeout> DeadlineStream<S> {
     /// Start the deadline clock now. `total` is the whole-request budget;
     /// `idle` caps any single syscall.
     pub fn new(inner: S, total: Duration, idle: Duration) -> Self {
+        Self::with_deadline(inner, Instant::now() + total, idle)
+    }
+
+    /// Use an existing aggregate deadline instead of restarting its budget.
+    pub fn with_deadline(inner: S, deadline: Instant, idle: Duration) -> Self {
         Self {
             inner,
-            deadline: Instant::now() + total,
+            deadline,
             idle,
         }
     }
@@ -94,15 +99,20 @@ impl<S: SocketTimeout> DeadlineStream<S> {
     /// Time left until the deadline, or `None` (with a ready-made error) if the
     /// budget is exhausted. The armed value is clamped to `idle`.
     fn arm(&self) -> io::Result<Duration> {
-        let remaining = self.deadline.saturating_duration_since(Instant::now());
-        if remaining.is_zero() {
-            return Err(io::Error::new(
-                io::ErrorKind::TimedOut,
-                "request deadline exceeded",
-            ));
-        }
-        Ok(remaining.min(self.idle))
+        Ok(remaining_until(self.deadline)?.min(self.idle))
     }
+}
+
+/// Shared absolute-deadline check for sockets and custody subprocesses.
+pub(crate) fn remaining_until(deadline: Instant) -> io::Result<Duration> {
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    if remaining.is_zero() {
+        return Err(io::Error::new(
+            io::ErrorKind::TimedOut,
+            "request deadline exceeded",
+        ));
+    }
+    Ok(remaining)
 }
 
 impl<S: Read + SocketTimeout> Read for DeadlineStream<S> {

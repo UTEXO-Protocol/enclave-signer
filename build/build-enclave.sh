@@ -42,6 +42,11 @@
 #   GITHUB_TOKEN           token with read access to the private RGB dependencies
 #   PRIVATE_DEPS_DIR       alternatively, directory of per-repository key files
 #                          (consignment_key, consensus_key, ops_key, schemas_key)
+#   KMS_KEY_ARN       required for the RGB mint image: full KMS key ARN
+#   KMS_REGION        required for the RGB mint image: commercial AWS region
+#   KMS_SEED_ID       required for the RGB mint image: stable seed identifier
+#   KMS_EXPECTED_EVM_ADDRESS  optional existing signer identity pin; when set,
+#                                  missing ciphertext fails instead of creating a new identity
 # NOTE: the donor cloning secret is NOT baked into the EIF. It is delivered at
 # runtime via the InitializeKey message (CLI: `init --cloning-secret <secret>`),
 # keeping the build secret-free and the PCRs reproducible.
@@ -108,6 +113,22 @@ if grep -qE '^ARG[[:space:]]+RGB_ASSET_ID' "$SCRIPT_DIR/$DOCKERFILE"; then
     echo "    rgb asset id : $RGB_ASSET_ID"
 fi
 
+# Only the mint image receives the public, measured KMS pins. Reject missing
+# required settings before Docker starts; the identity pin is optional at bootstrap.
+KMS_ARGS=()
+if [ "${DOCKERFILE##*/}" = Dockerfile.enclave.mint ]; then
+    for kms_var in KMS_KEY_ARN KMS_REGION KMS_SEED_ID; do
+        if [ -z "${!kms_var:-}" ]; then
+            echo "Error: $DOCKERFILE requires $kms_var." >&2
+            exit 1
+        fi
+        KMS_ARGS+=(--build-arg "$kms_var=${!kms_var}")
+    done
+    if [ -n "${KMS_EXPECTED_EVM_ADDRESS:-}" ]; then
+        KMS_ARGS+=(--build-arg "KMS_EXPECTED_EVM_ADDRESS=$KMS_EXPECTED_EVM_ADDRESS")
+    fi
+fi
+
 # Forward debug features only when set. (F03-AF-12)
 # Do not set ENCLAVE_DEBUG_FEATURES for production builds.
 if [ -n "${ENCLAVE_DEBUG_FEATURES:-}" ]; then
@@ -127,6 +148,7 @@ echo "Building Docker image (buildx, SOURCE_DATE_EPOCH=$SOURCE_DATE_EPOCH)..."
 DOCKER_BUILDKIT=1 docker buildx build \
     --build-arg SOURCE_DATE_EPOCH="$SOURCE_DATE_EPOCH" \
     ${BUILD_ARGS[@]+"${BUILD_ARGS[@]}"} \
+    ${KMS_ARGS[@]+"${KMS_ARGS[@]}"} \
     ${SECRET_ARGS[@]+"${SECRET_ARGS[@]}"} \
     -f "$SCRIPT_DIR/$DOCKERFILE" \
     -t "$IMAGE_TAG" \
