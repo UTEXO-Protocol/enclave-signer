@@ -131,6 +131,33 @@ KMS key deletion permissions. Do not authorize debug images or zero PCRs.
 See AWS's [recipient-attestation conditions](https://docs.aws.amazon.com/kms/latest/developerguide/conditions-attestation.html)
 and [conditional S3 writes](https://docs.aws.amazon.com/AmazonS3/latest/userguide/conditional-writes.html).
 
+Allow statements alone do not enforce any of this. A key policy that grants
+`kms:*` to the account root delegates to IAM, so a signer role whose identity
+policy allows `kms:Decrypt` is admitted through that statement and the
+conditions on its own Allow statement are never evaluated. Add explicit Deny
+statements for the signer principal; a Deny wins over every Allow. Keep one
+condition key per Deny: AWS ANDs the keys inside one condition block, so a
+`StringNotEquals` over several context keys fires only when every key is wrong.
+The `Not` operators also match when the key is absent, which denies unattested
+calls. Verified on Nitro hardware on 2026-10-01: a debug enclave (PCR0 zero) and
+a foreign `seed_id` are both refused only with this shape:
+
+```json
+{"Sid":"DenyUnlessAttestedImage","Effect":"Deny","Principal":{"AWS":"SIGNER_ROLE_ARN"},
+ "Action":["kms:GenerateDataKey","kms:Decrypt"],"Resource":"*",
+ "Condition":{"StringNotEqualsIgnoreCase":{"kms:RecipientAttestation:PCR0":"PRODUCTION_PCR0"}}},
+{"Sid":"DenyUnlessSeedId","Effect":"Deny","Principal":{"AWS":"SIGNER_ROLE_ARN"},
+ "Action":["kms:GenerateDataKey","kms:Decrypt"],"Resource":"*",
+ "Condition":{"StringNotEquals":{"kms:EncryptionContext:seed_id":"YOUR_SEED_ID"}}},
+{"Sid":"DenyExtraContextKeys","Effect":"Deny","Principal":{"AWS":"SIGNER_ROLE_ARN"},
+ "Action":["kms:GenerateDataKey","kms:Decrypt"],"Resource":"*",
+ "Condition":{"ForAnyValue:StringNotEquals":{"kms:EncryptionContextKeys":["application","flow","seed_id","bitcoin_network"]}}}
+```
+
+Repeat the `DenyUnlessSeedId` shape for `application`, `flow` and
+`bitcoin_network`. After bootstrap, add an unconditional Deny of
+`kms:GenerateDataKey` for the signer role.
+
 Enable bucket versioning, block public access, and retain an independently
 verified backup of the ciphertext and its key/context metadata. Exclude the
 object from expiration/replication rules that remove or replace it. S3 does not
