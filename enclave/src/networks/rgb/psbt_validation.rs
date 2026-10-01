@@ -412,72 +412,122 @@ fn split_asset_legs(
     Ok(legs)
 }
 
-/// Maximum multiple of the recommended fee rate a send-RGB PSBT may pay.
-/// Compile-time and PCR-attested, not host-tunable. 3x absorbs fee-market
-/// movement within the estimate's TTL plus the unsigned-vsize overestimate.
-#[cfg(feature = "rgb-validation")]
-const FEE_RATE_HEADROOM: f64 = 3.0;
+/// Pinned ceiling on the fee rate (sat/vB) of any PSBT this enclave signs,
+/// plain-BTC `SignBtc` and send-RGB `SignPsbt` alike. Compile-time and
+/// PCR-attested, not host-tunable: raising it ships a new enclave image, so
+/// the federation agrees to it. Generous on purpose: it is a safety ceiling
+/// against a host burning custody BTC as miner fees, not a fee estimator. The
+/// bridge checks the operational rate before it locks user funds, so a fee
+/// market move between the lock and signing cannot strand a mint here.
+pub const MAX_FEE_RATE_SAT_VB: u64 = 200;
+
+/// Pinned ceiling on the absolute miner fee (sats) of any PSBT this enclave
+/// signs. Bounds what one request can burn whatever the transaction's size.
+///
+/// Crossover with [`MAX_FEE_RATE_SAT_VB`]: at the maximum rate this cap binds
+/// first for any transaction wider than [`MAX_FEE_CAP_CROSSOVER_VB`] unsigned
+/// vB (one key-path input plus roughly ten P2TR outputs). A wider
+/// `create_utxos` batch at a high rate must be split; the error names the
+/// crossover so the operator can tell a size problem from a rate problem.
+pub const MAX_FEE_SATS: u64 = 100_000;
+
+/// Unsigned vsize above which [`MAX_FEE_SATS`] binds before
+/// [`MAX_FEE_RATE_SAT_VB`] does.
+pub const MAX_FEE_CAP_CROSSOVER_VB: u64 = MAX_FEE_SATS / MAX_FEE_RATE_SAT_VB;
 
 /// Minimum signed fee rate agreed for bridge PSBTs; not caller-configurable.
-#[cfg(feature = "rgb-validation")]
 const MIN_FEE_RATE_SAT_VB: u64 = 1;
 
 /// Resolves the key-path inputs using enclave keys, not caller-supplied claims.
-#[cfg(feature = "rgb-validation")]
 pub type FeeKeyPathResolver<'a> = &'a dyn Fn(&Psbt) -> Result<Vec<usize>>;
 
-/// Match the Colored scope of the RGB signer, including already-signed inputs.
+/// Key-path inputs of `account` this enclave controls, including
+/// already-signed ones. Resolved from enclave keys, never from the request.
+/// `account` is the scope the signer co-signs on the calling path: Colored
+/// for send-RGB, Vanilla for plain-BTC. Only the send-RGB resolver calls
+/// it; the plain-BTC path shares its jobs via [`fee_key_path_inputs_of`].
 #[cfg(feature = "rgb-validation")]
-pub(crate) fn fee_key_path_inputs(psbt: &Psbt, keys: &crate::keys::KeyManager) -> Vec<usize> {
-    super::signing::taproot::find_controlled_taproot_inputs(psbt, keys.master_fingerprint(), keys)
-        .into_iter()
-        .filter(|job| job.account_type == crate::keys::AccountType::Colored)
+pub(crate) fn fee_key_path_inputs_scoped(
+    psbt: &Psbt,
+    keys: &crate::keys::KeyManager,
+    account: crate::keys::AccountType,
+) -> Vec<usize> {
+    let jobs = super::signing::taproot::find_controlled_taproot_inputs(
+        psbt,
+        keys.master_fingerprint(),
+        keys,
+    );
+    fee_key_path_inputs_of(&jobs, account)
+}
+
+/// [`fee_key_path_inputs_scoped`] over an already-resolved job list, for a
+/// caller that resolved the controlled inputs once for another check.
+pub(crate) fn fee_key_path_inputs_of(
+    jobs: &[super::signing::taproot::TaprootSignJob],
+    account: crate::keys::AccountType,
+) -> Vec<usize> {
+    jobs.iter()
+        .filter(|job| job.account_type == account)
         .map(|job| job.input_index)
         .collect()
 }
 
-/// Fee-rate sanity check for send-RGB PSBTs: the implied fee rate must
-/// not exceed [`FEE_RATE_HEADROOM`] x the enclave-fetched recommendation.
-/// Without this, a compromised host could burn bridge BTC as miner fees on an
-/// otherwise fully-validated PSBT.
+/// Pinned fee policy for every PSBT the enclave signs. `path` names the
+/// signing path in errors (`"send-RGB"` / `"plain-BTC"`).
 ///
-/// Fail-closed on degenerate shapes: `Psbt::fee()` errors, zero vsize, and NaN
-/// rates all reject. The upper-bound rate is computed over `unsigned_tx.vsize()`,
-/// which overestimates the implied rate; the headroom absorbs that.
+/// Three bounds, all compile-time:
 ///
-/// Require at least 1 sat/vB using the estimated signed size, including witnesses.
-/// Unsupported spend shapes fail closed. The finalizer must recheck the
+///   * the absolute fee is at most [`MAX_FEE_SATS`];
+///   * the fee rate is at most [`MAX_FEE_RATE_SAT_VB`], computed over
+///     `unsigned_tx.vsize()`. The unsigned size carries no witnesses, so the
+///     host cannot pad it to lower the implied rate; it overestimates the
+///     signed rate by the witness share (under a fifth for key-path Taproot),
+///     which the generous ceiling absorbs;
+///   * the fee funds at least [`MIN_FEE_RATE_SAT_VB`] over the estimated
+///     signed size, witnesses included, so the transaction can relay.
+///
+/// Fail-closed on degenerate shapes: `Psbt::fee()` errors (a missing
+/// `witness_utxo` / `non_witness_utxo`), zero vsize, and spend shapes whose
+/// signed size cannot be estimated all reject. The finalizer must recheck the
 /// actual fee rate if it chooses a different witness or spend path.
-/// `key_path_inputs` must come from `fee_key_path_inputs`, never the request.
-#[cfg(feature = "rgb-validation")]
-pub fn check_psbt_fee_rate(
-    psbt: &Psbt,
-    recommended_sat_vb: f64,
-    key_path_inputs: &[usize],
-) -> Result<()> {
-    let fee = psbt.fee().map_err(|e| {
-        EnclaveError::CrossCheck(format!(
-            "cannot compute PSBT fee (every input needs witness_utxo or non_witness_utxo): {e}"
-        ))
-    })?;
-    let vsize = psbt.unsigned_tx.vsize();
+/// `key_path_inputs` must come from [`fee_key_path_inputs_scoped`], never
+/// the request.
+pub fn check_psbt_fee(psbt: &Psbt, key_path_inputs: &[usize], path: &str) -> Result<()> {
+    let fee = psbt
+        .fee()
+        .map_err(|e| {
+            EnclaveError::CrossCheck(format!(
+                "cannot compute PSBT fee (every input needs witness_utxo or \
+                 non_witness_utxo): {e}"
+            ))
+        })?
+        .to_sat();
+    let vsize = psbt.unsigned_tx.vsize() as u64;
     if vsize == 0 {
         return Err(EnclaveError::CrossCheck(
             "PSBT unsigned tx has zero vsize - cannot bound its fee rate".into(),
         ));
     }
-    let rate = fee.to_sat() as f64 / vsize as f64;
-    let limit = FEE_RATE_HEADROOM * recommended_sat_vb;
-    // `partial_cmp` (not `a > b`): an incomparable (NaN) rate or limit must
-    // reject, never pass.
-    let within_limit = matches!(
-        rate.partial_cmp(&limit),
-        Some(std::cmp::Ordering::Less | std::cmp::Ordering::Equal)
-    );
-    if !within_limit {
+
+    if fee > MAX_FEE_SATS {
+        let rate = fee as f64 / vsize as f64;
         return Err(EnclaveError::CrossCheck(format!(
-            "send-RGB PSBT fee rate too high: {rate:.2} sat/vB > {FEE_RATE_HEADROOM}x the \
-             recommended {recommended_sat_vb:.2} sat/vB - refusing to burn bridge BTC as fees"
+            "{path} PSBT fee too high: {fee} sat > the pinned maximum of {MAX_FEE_SATS} sat \
+             ({rate:.2} sat/vB over {vsize} unsigned vB; above {MAX_FEE_CAP_CROSSOVER_VB} vB \
+             the absolute cap binds before the {MAX_FEE_RATE_SAT_VB} sat/vB rate cap, so split \
+             a wider batch) - refusing to burn custody BTC as fees"
+        )));
+    }
+
+    let max_fee_for_size = vsize
+        .checked_mul(MAX_FEE_RATE_SAT_VB)
+        .ok_or_else(|| EnclaveError::CrossCheck("maximum PSBT fee calculation overflow".into()))?;
+    if fee > max_fee_for_size {
+        let rate = fee as f64 / vsize as f64;
+        return Err(EnclaveError::CrossCheck(format!(
+            "{path} PSBT fee rate too high: {rate:.2} sat/vB over {vsize} unsigned vB > the \
+             pinned maximum of {MAX_FEE_RATE_SAT_VB} sat/vB - refusing to burn custody BTC as \
+             fees"
         )));
     }
 
@@ -485,11 +535,10 @@ pub fn check_psbt_fee_rate(
     let minimum_fee = signed_vsize
         .checked_mul(MIN_FEE_RATE_SAT_VB)
         .ok_or_else(|| EnclaveError::CrossCheck("minimum PSBT fee calculation overflow".into()))?;
-    if fee.to_sat() < minimum_fee {
+    if fee < minimum_fee {
         return Err(EnclaveError::CrossCheck(format!(
-            "send-RGB PSBT fee rate too low: {} sat for estimated signed size {signed_vsize} vB; \
-             need at least {minimum_fee} sat ({MIN_FEE_RATE_SAT_VB} sat/vB)",
-            fee.to_sat()
+            "{path} PSBT fee rate too low: {fee} sat for estimated signed size {signed_vsize} \
+             vB; need at least {minimum_fee} sat ({MIN_FEE_RATE_SAT_VB} sat/vB)"
         )));
     }
     Ok(())

@@ -206,7 +206,7 @@ mod operation_dedup {
 
 // send-RGB anchoring - `validate_psbt_anchors_transition`
 #[cfg(feature = "rgb-validation")]
-mod fee_rate {
+mod fee_policy {
     use super::*;
 
     /// One native P2WPKH input carrying `witness_utxo` of `input_sats`, one
@@ -288,7 +288,7 @@ mod fee_rate {
                 .into_script();
                 disclose_taproot_leaf(&mut psbt.inputs[0], leaf);
                 psbt.inputs[0].sighash_type = Some(requested.into());
-                let key_paths = fee_key_path_inputs(&psbt, &keys);
+                let key_paths = fee_key_path_inputs_scoped(&psbt, &keys, AccountType::Colored);
                 assert_eq!(key_paths, vec![0]);
 
                 let mut tx = psbt.unsigned_tx.clone();
@@ -300,7 +300,7 @@ mod fee_rate {
                 tx.input[0].witness = Witness::from_slice(&[vec![0; signature_len]]);
                 let minimum = tx.vsize() as u64;
                 psbt.unsigned_tx.output[0].value = Amount::from_sat(100_000 - minimum);
-                check_psbt_fee_rate(&psbt, 10.0, &key_paths).unwrap();
+                check_psbt_fee(&psbt, &key_paths, "send-RGB").unwrap();
 
                 let (bytes, count) = keys
                     .sign_psbt_scoped(&psbt.serialize(), Some(AccountType::Colored))
@@ -313,11 +313,14 @@ mod fee_rate {
                 tx.input[0].witness = Witness::from_slice(&[signature.to_vec()]);
                 assert_eq!(tx.vsize() as u64, minimum);
                 // Merging a signature must not change the planned spend path.
-                assert_eq!(fee_key_path_inputs(&signed, &keys), key_paths);
-                check_psbt_fee_rate(&signed, 10.0, &key_paths).unwrap();
+                assert_eq!(
+                    fee_key_path_inputs_scoped(&signed, &keys, AccountType::Colored),
+                    key_paths
+                );
+                check_psbt_fee(&signed, &key_paths, "send-RGB").unwrap();
 
                 psbt.unsigned_tx.output[0].value += Amount::from_sat(1);
-                let err = check_psbt_fee_rate(&psbt, 10.0, &key_paths).unwrap_err();
+                let err = check_psbt_fee(&psbt, &key_paths, "send-RGB").unwrap_err();
                 assert!(err.to_string().contains("fee rate too low"), "{err}");
             }
         }
@@ -365,7 +368,7 @@ mod fee_rate {
             .push_opcode(OP_NUMEQUAL)
             .into_script();
         let control = disclose_taproot_leaf(auxiliary, leaf.clone());
-        let key_paths = fee_key_path_inputs(&psbt, &keys);
+        let key_paths = fee_key_path_inputs_scoped(&psbt, &keys, AccountType::Colored);
         assert_eq!(
             key_paths,
             vec![0],
@@ -384,14 +387,14 @@ mod fee_rate {
         ]);
         let minimum = tx.vsize() as u64;
         psbt.unsigned_tx.output[0].value = Amount::from_sat(200_000 - minimum);
-        check_psbt_fee_rate(&psbt, 10.0, &key_paths).unwrap();
+        check_psbt_fee(&psbt, &key_paths, "send-RGB").unwrap();
 
         tx.input[1].witness = Witness::from_slice(&[vec![0; 64]]);
         let key_path_only_fee = tx.vsize() as u64;
         assert!(key_path_only_fee < minimum);
         for fee in [key_path_only_fee, minimum - 1] {
             psbt.unsigned_tx.output[0].value = Amount::from_sat(200_000 - fee);
-            let err = check_psbt_fee_rate(&psbt, 10.0, &key_paths).unwrap_err();
+            let err = check_psbt_fee(&psbt, &key_paths, "send-RGB").unwrap_err();
             assert!(err.to_string().contains("fee rate too low"), "{err}");
         }
     }
@@ -410,12 +413,7 @@ mod fee_rate {
         let fee = signed_vsize(&psbt_with_fee(100_000, 100_000));
         let psbt = psbt_with_fee(100_000, 100_000 - fee);
         assert_eq!(psbt.fee().unwrap().to_sat(), signed_vsize(&psbt));
-        for recommended in [1.0, 10.0, 100.0] {
-            assert!(
-                check_psbt_fee_rate(&psbt, recommended, &[]).is_ok(),
-                "1 sat/vB must pass even when the recommendation is {recommended}"
-            );
-        }
+        check_psbt_fee(&psbt, &[], "send-RGB").expect("1 sat/vB over the signed size passes");
     }
 
     #[test]
@@ -424,19 +422,18 @@ mod fee_rate {
         let unsigned_vsize = psbt.unsigned_tx.vsize() as u64;
         let minimum = signed_vsize(&psbt);
         assert!(minimum > unsigned_vsize);
-        for (fee, recommended) in [
-            (0, 10.0),
-            (1, 10.0), // One satoshi total, not one satoshi per vbyte.
-            (minimum - 1, 10.0),
-            (unsigned_vsize, 10.0), // Does not fund the future witness.
-            (20, 0.1),              // A low recommendation must not lower the floor.
+        for fee in [
+            0,
+            1, // One satoshi total, not one satoshi per vbyte.
+            minimum - 1,
+            unsigned_vsize, // Does not fund the future witness.
         ] {
             let psbt = psbt_with_fee(100_000, 100_000 - fee);
             assert_eq!(psbt.fee().unwrap().to_sat(), fee);
-            let err = check_psbt_fee_rate(&psbt, recommended, &[]).unwrap_err();
+            let err = check_psbt_fee(&psbt, &[], "send-RGB").unwrap_err();
             assert!(
                 err.to_string().contains("fee rate too low"),
-                "fee {fee} sat, recommendation {recommended}: {err}"
+                "fee {fee} sat: {err}"
             );
         }
     }
@@ -488,9 +485,9 @@ mod fee_rate {
             assert!(minimum > psbt.unsigned_tx.vsize() as u64);
             psbt.unsigned_tx.output[0].value = Amount::from_sat(200_000 - minimum);
             assert_eq!(psbt.fee().unwrap().to_sat(), minimum);
-            check_psbt_fee_rate(&psbt, 10.0, &[]).expect("key-path inputs funded at 1 sat/vB");
+            check_psbt_fee(&psbt, &[], "send-RGB").expect("key-path inputs funded at 1 sat/vB");
             psbt.unsigned_tx.output[0].value += Amount::from_sat(1);
-            let err = check_psbt_fee_rate(&psbt, 10.0, &[]).unwrap_err();
+            let err = check_psbt_fee(&psbt, &[], "send-RGB").unwrap_err();
             assert!(err.to_string().contains("fee rate too low"), "{err}");
         }
     }
@@ -545,9 +542,9 @@ mod fee_rate {
         let minimum = tx.vsize() as u64;
         assert!(minimum > psbt.unsigned_tx.vsize() as u64);
         psbt.unsigned_tx.output[0].value = Amount::from_sat(100_000 - minimum);
-        check_psbt_fee_rate(&psbt, 10.0, &[]).expect("funded 2-of-3 Taproot witness");
+        check_psbt_fee(&psbt, &[], "send-RGB").expect("funded 2-of-3 Taproot witness");
         psbt.unsigned_tx.output[0].value += Amount::from_sat(1);
-        let err = check_psbt_fee_rate(&psbt, 10.0, &[]).unwrap_err();
+        let err = check_psbt_fee(&psbt, &[], "send-RGB").unwrap_err();
         assert!(err.to_string().contains("fee rate too low"), "{err}");
     }
 
@@ -555,41 +552,50 @@ mod fee_rate {
     fn rejects_unknown_spend_shape_instead_of_using_unsigned_size() {
         let mut psbt = psbt_with_fee(100_000, 99_000);
         psbt.inputs[0].witness_utxo.as_mut().unwrap().script_pubkey = ScriptBuf::new();
-        let err = check_psbt_fee_rate(&psbt, 10.0, &[]).unwrap_err();
+        let err = check_psbt_fee(&psbt, &[], "send-RGB").unwrap_err();
         assert!(
             err.to_string().contains("cannot estimate signed PSBT size"),
             "{err}"
         );
     }
 
-    #[test]
-    fn conflicting_bounds_do_not_silently_raise_the_cap() {
-        let minimum = signed_vsize(&psbt_with_fee(100_000, 100_000));
-        let psbt = psbt_with_fee(100_000, 100_000 - minimum);
-        let err = check_psbt_fee_rate(&psbt, 0.1, &[]).unwrap_err();
-        assert!(err.to_string().contains("fee rate too high"), "{err}");
+    /// `psbt_with_fee` plus `extra` zero-value P2WPKH outputs, so a test can
+    /// make the transaction large enough for the absolute cap to bind before
+    /// the rate cap does.
+    fn wide_psbt_with_fee(input_sats: u64, output_sats: u64, extra: usize) -> Psbt {
+        let mut psbt = psbt_with_fee(input_sats, output_sats);
+        for _ in 0..extra {
+            psbt.unsigned_tx.output.push(TxOut {
+                value: Amount::ZERO,
+                script_pubkey: psbt.unsigned_tx.output[0].script_pubkey.clone(),
+            });
+            psbt.outputs.push(Default::default());
+        }
+        psbt
     }
 
     #[test]
-    fn accepts_fee_rate_at_headroom() {
-        // rate == FEE_RATE_HEADROOM x recommended must pass (boundary is
-        // inclusive: reject only strictly above the cap).
-        let recommended = 10.0;
+    fn accepts_fee_rate_at_pinned_cap() {
+        // rate == MAX_FEE_RATE_SAT_VB over the unsigned size must pass
+        // (boundary is inclusive: reject only strictly above the cap).
         let vsize = psbt_with_fee(100_000, 100_000).unsigned_tx.vsize() as u64;
-        let fee_at_cap = (FEE_RATE_HEADROOM * recommended) as u64 * vsize;
+        let fee_at_cap = MAX_FEE_RATE_SAT_VB * vsize;
+        assert!(
+            fee_at_cap <= MAX_FEE_SATS,
+            "fixture must exercise the rate cap"
+        );
         let psbt = psbt_with_fee(100_000, 100_000 - fee_at_cap);
-        assert!(check_psbt_fee_rate(&psbt, recommended, &[]).is_ok());
+        check_psbt_fee(&psbt, &[], "send-RGB").expect("rate exactly at the pinned cap");
     }
 
     #[test]
-    fn rejects_fee_rate_above_headroom() {
-        // One extra sat/vB above the cap -> reject; nothing else about the
-        // PSBT is wrong, so the error must be the fee-rate one.
-        let recommended = 10.0;
+    fn rejects_fee_rate_above_pinned_cap() {
+        // One sat over the cap -> reject; nothing else about the PSBT is
+        // wrong, so the error must be the fee-rate one.
         let vsize = psbt_with_fee(100_000, 100_000).unsigned_tx.vsize() as u64;
-        let fee_over_cap = ((FEE_RATE_HEADROOM * recommended) as u64 + 1) * vsize;
+        let fee_over_cap = MAX_FEE_RATE_SAT_VB * vsize + 1;
         let psbt = psbt_with_fee(100_000, 100_000 - fee_over_cap);
-        let err = check_psbt_fee_rate(&psbt, recommended, &[]).unwrap_err();
+        let err = check_psbt_fee(&psbt, &[], "send-RGB").unwrap_err();
         assert!(
             err.to_string().contains("fee rate too high"),
             "expected fee-rate rejection, got: {err}"
@@ -597,10 +603,47 @@ mod fee_rate {
     }
 
     #[test]
+    fn absolute_cap_binds_whatever_the_size() {
+        // Wide enough that MAX_FEE_SATS sits under the rate cap, so the
+        // absolute ceiling is the one that decides.
+        let extra = 20;
+        let vsize = wide_psbt_with_fee(1_000_000, 1_000_000, extra)
+            .unsigned_tx
+            .vsize() as u64;
+        assert!(
+            MAX_FEE_RATE_SAT_VB * vsize > MAX_FEE_SATS,
+            "fixture must let the absolute cap bind first"
+        );
+
+        let at_cap = wide_psbt_with_fee(1_000_000, 1_000_000 - MAX_FEE_SATS, extra);
+        check_psbt_fee(&at_cap, &[], "send-RGB").expect("fee exactly at the absolute cap");
+
+        let over_cap = wide_psbt_with_fee(1_000_000, 1_000_000 - MAX_FEE_SATS - 1, extra);
+        let err = check_psbt_fee(&over_cap, &[], "send-RGB").unwrap_err();
+        assert!(err.to_string().contains("fee too high"), "{err}");
+    }
+
+    #[test]
+    fn rejects_a_fee_that_burns_most_of_the_input() {
+        // The #248 reproduction: 60_676 sat in, 1_000 sat back to custody,
+        // ~98% of the value to miners. Under the absolute cap, far over the
+        // rate cap.
+        let psbt = psbt_with_fee(60_676, 1_000);
+        let err = check_psbt_fee(&psbt, &[], "plain-BTC").unwrap_err();
+        assert!(
+            err.to_string().contains("plain-BTC PSBT fee rate too high"),
+            "{err}"
+        );
+    }
+
+    #[test]
     fn inflated_witness_cannot_weaken_the_upper_fee_limit() {
-        let mut psbt = psbt_with_fee(100_000, 97_000);
+        // The rate cap is taken over the unsigned size, so a padded witness
+        // supplied by the host does not lower the implied rate.
+        let vsize = psbt_with_fee(100_000, 100_000).unsigned_tx.vsize() as u64;
+        let mut psbt = psbt_with_fee(100_000, 100_000 - (MAX_FEE_RATE_SAT_VB * vsize + 1));
         psbt.inputs[0].final_script_witness = Some(Witness::from_slice(&[vec![0; 1_000]]));
-        let err = check_psbt_fee_rate(&psbt, 10.0, &[]).unwrap_err();
+        let err = check_psbt_fee(&psbt, &[], "send-RGB").unwrap_err();
         assert!(err.to_string().contains("fee rate too high"), "{err}");
     }
 
@@ -609,20 +652,11 @@ mod fee_rate {
         // No witness_utxo/non_witness_utxo -> the fee is uncomputable and
         // the check must fail closed, not skip.
         let psbt = Psbt::deserialize(&minimal_valid_psbt_bytes()).unwrap();
-        let err = check_psbt_fee_rate(&psbt, 10.0, &[]).unwrap_err();
+        let err = check_psbt_fee(&psbt, &[], "send-RGB").unwrap_err();
         assert!(
             err.to_string().contains("cannot compute PSBT fee"),
             "expected uncomputable-fee rejection, got: {err}"
         );
-    }
-
-    #[test]
-    fn rejects_nan_recommendation() {
-        // A NaN limit must reject (the comparison is written as
-        // `!(rate <= limit)` so NaN can never pass). The recommendation
-        // is validated upstream, but the check must not rely on that.
-        let psbt = psbt_with_fee(100_000, 99_000);
-        assert!(check_psbt_fee_rate(&psbt, f64::NAN, &[]).is_err());
     }
 }
 

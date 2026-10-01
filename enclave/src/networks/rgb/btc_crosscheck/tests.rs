@@ -12,6 +12,7 @@ use bitcoin::{
 };
 
 use crate::keys::AccountType;
+use crate::networks::rgb::psbt_validation::MAX_FEE_CAP_CROSSOVER_VB;
 
 fn km() -> KeyManager {
     KeyManager::from_seed([0x42u8; 64], Network::Testnet).unwrap()
@@ -364,8 +365,9 @@ fn rejects_input_value_over_cap() {
     let keys = km();
     let ours = our_address(&keys);
     let req = SignBtcRequest {
-        // input value 100_001 > cap; output pays back to us (so we reach the cap)
-        psbt_bytes: psbt_from_our_address(&keys, &[100_001], &[(ours.spk, 50_000)]),
+        // input value 100_001 > cap; output pays back to us at a sane fee
+        // (so we reach the cap, not the fee policy)
+        psbt_bytes: psbt_from_our_address(&keys, &[100_001], &[(ours.spk, 95_000)]),
     };
     let err = validate_btc_request(&req, &cfg_with_cap(100_000), &keys).unwrap_err();
     assert!(err.to_string().contains("exceeds pinned cap"), "got: {err}");
@@ -419,7 +421,8 @@ fn unpinned_cap_behaviour_matches_build_profile() {
     let keys = km();
     let ours = our_address(&keys);
     let req = SignBtcRequest {
-        psbt_bytes: psbt_from_our_address(&keys, &[1_000], &[(ours.spk, 900)]),
+        // 200 sat funds the ~111 vB signed size at the 1 sat/vB floor.
+        psbt_bytes: psbt_from_our_address(&keys, &[1_000], &[(ours.spk, 800)]),
     };
     let result = validate_btc_request(&req, &BridgeConfig::default(), &keys);
     #[cfg(all(feature = "rgb-validation", not(test)))]
@@ -427,4 +430,145 @@ fn unpinned_cap_behaviour_matches_build_profile() {
     // Unit tests are always cfg(test): the dev fallback returns Ok.
     #[cfg(not(all(feature = "rgb-validation", not(test))))]
     assert!(result.is_ok());
+}
+
+// --- pinned fee policy on the plain-BTC path (#248) ---
+
+/// **The attack.** A compromised host spends a custody UTXO back to custody,
+/// so every output is self-owned and the value cap is met, but ~98% of the
+/// input goes to miners. Repeated per UTXO, this drains the mint wallet.
+#[test]
+fn rejects_a_fee_that_burns_most_of_the_input() {
+    let keys = km();
+    let ours = our_address(&keys);
+    let req = SignBtcRequest {
+        // The #248 reproduction: 60_676 sat in, 1_000 sat out, 59_676 sat fee.
+        psbt_bytes: psbt_from_our_address(&keys, &[60_676], &[(ours.spk, 1_000)]),
+    };
+    let err = validate_btc_request(&req, &cfg_with_cap(100_000), &keys).unwrap_err();
+    assert!(
+        err.to_string().contains("plain-BTC PSBT fee rate too high"),
+        "got: {err}"
+    );
+}
+
+#[test]
+fn rejects_an_excessive_fee_spread_over_two_inputs() {
+    let keys = km();
+    let ours = our_address(&keys);
+    let req = SignBtcRequest {
+        // Each input alone is modest; together 59_000 sat over ~135 vB.
+        psbt_bytes: psbt_from_our_address(&keys, &[30_000, 30_000], &[(ours.spk, 1_000)]),
+    };
+    let err = validate_btc_request(&req, &cfg_with_cap(100_000), &keys).unwrap_err();
+    assert!(err.to_string().contains("fee rate too high"), "got: {err}");
+}
+
+#[test]
+fn rejects_a_fee_over_the_pinned_absolute_maximum() {
+    let keys = km();
+    let ours = our_address(&keys);
+    // A wide transaction (many self-owned outputs) so the absolute ceiling,
+    // not the rate, is what refuses.
+    let outputs: Vec<_> = (0..30).map(|_| (ours.spk.clone(), 1_000)).collect();
+    let req = SignBtcRequest {
+        psbt_bytes: psbt_from_our_address(&keys, &[1_000_000], &outputs),
+    };
+    let err = validate_btc_request(&req, &cfg_with_cap(10_000_000), &keys).unwrap_err();
+    assert!(err.to_string().contains("fee too high"), "got: {err}");
+}
+
+/// The fee floor sizes the signed transaction, so every input must be
+/// classifiable. A second P2TR input with no key-path metadata (not ours, not
+/// needed for ownership: the outputs still pay back to input 0's script) was
+/// signable before the fee policy; now the whole request is refused with a
+/// size error, not waved through on the output and amount checks alone.
+#[test]
+fn rejects_an_input_whose_signed_size_cannot_be_estimated() {
+    let keys = km();
+    let ours = our_address(&keys);
+    // Input 0 proves the 90_000-sat output on its own (an input exempts
+    // outputs up to its value); 20_000 sat over ~125 unsigned vB is under the
+    // rate cap, so only the size estimate can refuse.
+    let mut psbt = Psbt::deserialize(&psbt_from_our_address(
+        &keys,
+        &[100_000, 10_000],
+        &[(ours.spk.clone(), 90_000)],
+    ))
+    .unwrap();
+    let input = &mut psbt.inputs[1];
+    input.witness_utxo.as_mut().unwrap().script_pubkey = foreign_address();
+    input.tap_internal_key = None;
+    input.tap_key_origins.clear();
+    let req = SignBtcRequest {
+        psbt_bytes: psbt.serialize(),
+    };
+    let err = validate_btc_request(&req, &cfg_with_cap(1_000_000), &keys).unwrap_err();
+    let msg = err.to_string();
+    assert!(
+        msg.contains("cannot estimate signed PSBT size"),
+        "got: {msg}"
+    );
+    assert!(msg.contains("input 1"), "got: {msg}");
+}
+
+/// Above the crossover size the absolute cap refuses a rate the rate cap
+/// would accept; the error must say so instead of reading as a rate problem.
+#[test]
+fn absolute_cap_error_names_the_size_crossover() {
+    let keys = km();
+    let ours = our_address(&keys);
+    // One input + 12 outputs ~ 584 unsigned vB, 180 sat/vB: 105_120 sat.
+    let outputs: Vec<_> = (0..12).map(|_| (ours.spk.clone(), 1_000)).collect();
+    let fee = 105_120;
+    let req = SignBtcRequest {
+        psbt_bytes: psbt_from_our_address(&keys, &[12_000 + fee], &outputs),
+    };
+    let err = validate_btc_request(&req, &cfg_with_cap(10_000_000), &keys).unwrap_err();
+    let msg = err.to_string();
+    assert!(msg.contains("fee too high"), "got: {msg}");
+    assert!(
+        msg.contains(&format!("above {} vB", MAX_FEE_CAP_CROSSOVER_VB)),
+        "got: {msg}"
+    );
+}
+
+#[test]
+fn rejects_a_fee_below_the_signed_size_floor() {
+    let keys = km();
+    let ours = our_address(&keys);
+    let req = SignBtcRequest {
+        // 50 sat cannot fund ~111 signed vB at 1 sat/vB: unrelayable.
+        psbt_bytes: psbt_from_our_address(&keys, &[10_000], &[(ours.spk, 9_950)]),
+    };
+    let err = validate_btc_request(&req, &cfg_with_cap(100_000), &keys).unwrap_err();
+    assert!(err.to_string().contains("fee rate too low"), "got: {err}");
+}
+
+/// A normal `create_utxos` batch at a healthy mainnet rate keeps signing:
+/// one input, five allocations plus change, ~50 sat/vB.
+#[test]
+fn accepts_a_create_utxos_batch_at_a_normal_fee_rate() {
+    let keys = km();
+    let ours = our_address(&keys);
+    let mut outputs: Vec<_> = (0..5).map(|_| (foreign_address(), 1_000)).collect();
+    // ~310 unsigned vB * 50 sat/vB = 15_500 sat fee.
+    outputs.push((ours.spk.clone(), 100_000 - 5_000 - 15_500));
+    let req = SignBtcRequest {
+        psbt_bytes: psbt_from_our_address(&keys, &[100_000], &outputs),
+    };
+    validate_btc_request(&req, &cfg_with_cap(100_000), &keys).expect("create_utxos fee");
+}
+
+/// The fee policy needs no configuration: with the value cap unset, the dev
+/// fallback must not wave an excessive fee through in any build profile.
+#[test]
+fn fee_policy_holds_without_a_pinned_value_cap() {
+    let keys = km();
+    let ours = our_address(&keys);
+    let req = SignBtcRequest {
+        psbt_bytes: psbt_from_our_address(&keys, &[60_676], &[(ours.spk, 1_000)]),
+    };
+    let err = validate_btc_request(&req, &BridgeConfig::default(), &keys).unwrap_err();
+    assert!(err.to_string().contains("fee rate too high"), "got: {err}");
 }
