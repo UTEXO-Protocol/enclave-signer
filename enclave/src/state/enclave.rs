@@ -49,7 +49,7 @@ pub enum Phase {
     /// No keys, waiting for an initialize request.
     Initial,
     /// Seed custody recovery owns the initialization reservation, with no lock
-    /// held while it waits for the host broker or KMS helper.
+    /// held while it waits for the host broker or KMS.
     #[cfg(feature = "kms-persistence")]
     Initializing,
     /// Cloning handshake in progress, waiting for SetClone.

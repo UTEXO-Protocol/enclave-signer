@@ -1,22 +1,14 @@
 //! Seed custody through AWS KMS with Nitro recipient attestation.
 //!
-//! Pure Rust, in-process. The official `aws-sdk-kms` crate builds, signs
-//! (SigV4) and sends `GenerateDataKey` / `Decrypt`. The request carries a
-//! `Recipient`: an NSM attestation document (see `attestation`) that binds a
-//! one-shot RSA-2048 public key. KMS answers with `CiphertextForRecipient`, a
-//! CMS `EnvelopedData` encrypted to that key, which `recipient.rs` opens with
-//! RustCrypto. The plaintext seed exists only inside this address space and
-//! only for the duration of the call; the durable object is `CiphertextBlob`.
-//!
-//! Transport. The SDK talks to `kms.<region>.amazonaws.com:443`. In a vsock
-//! build `SetEndpoints` pins that host name to [`KMS_LOOPBACK`] and forwards the port to
-//! the parent's `vsock-proxy` (port [`DEFAULT_KMS_VSOCK_PORT`]), so TLS still
-//! terminates inside the enclave against the real KMS certificate. Only the
-//! Amazon Trust Services roots are trusted; there is no system store.
-//!
-//! Failures are reported as fixed [`CustodyFailure`] categories. Service
-//! messages never reach a wire error or a log line; only an allow-listed
-//! error code does.
+//! In-process Rust: `aws-sdk-kms` sends `GenerateDataKey` / `Decrypt` with an
+//! NSM attestation document carrying a one-shot RSA key, and `recipient.rs`
+//! opens the `CiphertextForRecipient` envelope. The plaintext seed exists only
+//! in this address space and only for the call; the parent, the proxy and S3
+//! handle ciphertext. TLS to `kms.<region>.amazonaws.com` ends in the enclave
+//! against the Amazon Trust Services roots, forwarded over vsock port
+//! [`DEFAULT_KMS_VSOCK_PORT`]. Failures surface as fixed [`CustodyFailure`]
+//! categories, never service text. Deployment, key policy and recovery rules
+//! are in `docs/kms-persistence.md`.
 
 use std::collections::HashMap;
 use std::future::Future;
@@ -63,26 +55,15 @@ pub const KMS_LOOPBACK: std::net::Ipv4Addr = std::net::Ipv4Addr::new(127, 0, 0, 
 pub const DEFAULT_KMS_VSOCK_PORT: u32 = 8003;
 const AMAZON_TRUST_ROOTS: &[u8] = include_bytes!("amazon_trust_roots.pem");
 
-/// Mint custody domain, compiled into the measured image. Neither host
-/// requests nor environment select the flow.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CustodyFlow {
-    RgbMint,
-}
-
-impl CustodyFlow {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::RgbMint => "rgb-mint",
-        }
-    }
-}
+/// Mint custody domain, the `flow` entry of the encryption context. It is
+/// compiled into the measured image (`kms-persistence` requires
+/// `mint-signer`); neither host requests nor environment select it.
+pub const CUSTODY_FLOW: &str = "rgb-mint";
 
 /// Public configuration. The operator sets it once, at launch
 /// (`SetEndpoints`), and the attested policy commits it.
 #[derive(Debug, Clone)]
 pub struct KmsConfig {
-    pub flow: CustodyFlow,
     pub key_arn: String,
     pub region: String,
     pub seed_id: String,
@@ -265,8 +246,10 @@ impl KmsClient {
     /// `CiphertextBlob` is returned; recover the committed winner separately
     /// before activation.
     pub fn generate_ciphertext(&self, deadline: Instant) -> Result<Vec<u8>> {
-        let budget = call_budget(deadline)?;
+        // RSA key generation and NSM attestation take real time; budget the
+        // network call only after they are done.
         let recipient = self.recipient()?;
+        let budget = call_budget(deadline)?;
         let client = self.sdk_client(budget)?;
         let key_arn = self.config.key_arn.clone();
         let context = self.encryption_context();
@@ -308,8 +291,10 @@ impl KmsClient {
         if ciphertext_blob.is_empty() || ciphertext_blob.len() > MAX_CIPHERTEXT_BYTES {
             return Err(fail("invalid persisted KMS ciphertext length"));
         }
-        let budget = call_budget(deadline)?;
+        // RSA key generation and NSM attestation take real time; budget the
+        // network call only after they are done.
         let recipient = self.recipient()?;
+        let budget = call_budget(deadline)?;
         let client = self.sdk_client(budget)?;
         let key_arn = self.config.key_arn.clone();
         let context = self.encryption_context();
@@ -337,15 +322,15 @@ impl KmsClient {
     }
 
     /// The four public context entries every policy must require verbatim
-    /// (see docs/kms-persistence.md). `flow` comes from the compiled custody
-    /// scope, never from host configuration.
+    /// (see docs/kms-persistence.md). `flow` is [`CUSTODY_FLOW`], never a
+    /// host value.
     fn encryption_context(&self) -> HashMap<String, String> {
         HashMap::from([
             (
                 "application".to_string(),
                 "utexo-enclave-signer".to_string(),
             ),
-            ("flow".to_string(), self.config.flow.as_str().to_string()),
+            ("flow".to_string(), CUSTODY_FLOW.to_string()),
             ("seed_id".to_string(), self.config.seed_id.clone()),
             ("bitcoin_network".to_string(), self.network.to_string()),
         ])

@@ -12,11 +12,18 @@ the custody flow. Builds enabling `kms-persistence` without `mint-signer` are
 rejected at compile time. Burn signers retain their existing OS-entropy and
 cloning lifecycle.
 
-Only a confirmed missing S3 object with no expected identity pin permits
-`GenerateDataKey(NumberOfBytes=64)`. The parent writes with `If-None-Match: *`,
-then reads the committed object. Concurrent initializers recover that same
-winner. Storage errors, invalid ciphertext and decryption failures never fall
-back to a new seed. Replicas recover the saved seed instead of using peer cloning.
+The address pin decides the direction. An unpinned launch only bootstraps: a
+confirmed missing S3 object permits `GenerateDataKey(NumberOfBytes=64)`, and an
+existing object is refused until the verified address is pinned, so the parent
+cannot make an unpinned image adopt a planted blob or generate over a saved
+identity. The parent writes with `If-None-Match: *`, then reads the committed
+object; the enclave activates that object only when it is the blob this call
+generated. A concurrent initializer that lost the race fails without decrypting
+anything and is relaunched with the winner's pin. A pinned launch only
+recovers: it loads the saved object, verifies the derived address, and treats a
+missing object as a failure. Storage errors, invalid ciphertext and decryption
+failures never fall back to a new seed. Replicas recover the saved seed with the
+pin instead of using peer cloning.
 
 The [KMS client](../enclave/src/kms/mod.rs) is pure Rust and runs inside the
 signer process. The official `aws-sdk-kms` crate signs (SigV4) and sends
@@ -44,7 +51,10 @@ carry them, and the attested policy commits them:
 
 Keep the key ARN, `rgb-mint` flow context, seed ID and Bitcoin network unchanged
 when recovering an existing identity. A configured address pin rejects a
-different recovered seed and makes missing storage fail before generation. There is no creation switch.
+different recovered seed and makes missing storage fail before generation; no
+pin makes an existing object fail before decryption. There is no creation switch.
+A development image built with `allow-seed-import` and launched with all KMS
+values empty is import-only: `init` needs a mnemonic, and an empty `init` fails.
 A verifier checks them with `attest-verify --expect-kms-key-arn`,
 `--expect-kms-region`, `--expect-kms-seed-id` and `--expect-kms-evm-address`. These endpoint settings support the standard AWS commercial partition.
 
@@ -151,11 +161,16 @@ a foreign `seed_id` are both refused only with this shape:
  "Condition":{"StringNotEquals":{"kms:EncryptionContext:seed_id":"YOUR_SEED_ID"}}},
 {"Sid":"DenyExtraContextKeys","Effect":"Deny","Principal":{"AWS":"SIGNER_ROLE_ARN"},
  "Action":["kms:GenerateDataKey","kms:Decrypt"],"Resource":"*",
- "Condition":{"ForAnyValue:StringNotEquals":{"kms:EncryptionContextKeys":["application","flow","seed_id","bitcoin_network"]}}}
+ "Condition":{"ForAnyValue:StringNotEquals":{"kms:EncryptionContextKeys":["application","flow","seed_id","bitcoin_network"]}}},
+{"Sid":"DenyPlantedCiphertext","Effect":"Deny","Principal":{"AWS":"*"},
+ "Action":["kms:Encrypt","kms:ReEncrypt*","kms:CreateGrant"],"Resource":"*"}
 ```
 
 Repeat the `DenyUnlessSeedId` shape for `application`, `flow` and
-`bitcoin_network`. After bootstrap, add an unconditional Deny of
+`bitcoin_network`. The last statement denies `kms:Encrypt`, `kms:ReEncrypt*`
+and grants to every principal: anyone allowed those calls could produce a
+ciphertext for a seed they know under the mint context, and the pinned
+enclave would decrypt it. After bootstrap, add an unconditional Deny of
 `kms:GenerateDataKey` for the signer role.
 
 Enable bucket versioning, block public access, and retain an independently
@@ -174,15 +189,18 @@ recovery before funding the signer.
    secret. Verify the public identity/attestation and independently back up the
    saved S3 ciphertext. This does not import a legacy ephemeral seed.
 3. Set at launch the verified `KMS_EXPECTED_EVM_ADDRESS`, start the enclave,
-   and verify identical keys after initialization and restart. During a rollout, approved PCR0 may be a list in
-   both the allow and deny conditions; retire the bootstrap measurement afterward.
+   and verify identical keys after initialization and restart. A restart before
+   the pin is set is refused with "saved seed exists"; it is not a fault, set the
+   pin. During a rollout, approved PCR0 may be a list in both the allow and deny
+   conditions; retire the bootstrap measurement afterward.
 4. Before funding, remove `kms:GenerateDataKey` from the key's allow statement
    and add an unconditional deny for that action for the signer role. Keep
    `kms:Decrypt` for the pinned image. Test restore on a fresh parent. Subsequent
    upgrades authorize the new measured image for decryption of the same seed.
 
 A timeout leaves initialization inactive; a conditional PUT may still complete.
-Retry after service recovery to load the committed winner. Custody calls are
+After service recovery, read the committed object, verify its identity, and
+relaunch with that address pinned. Custody calls are
 bounded and per-CID quotas/rate limits reject excess work. Never delete the blob,
 change its seed ID/key, or remove the address pin to fix a funded signer.
 Recover the original ciphertext/version from backup, using an administrator and

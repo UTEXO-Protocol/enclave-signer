@@ -15,9 +15,7 @@ use zeroize::Zeroizing;
 use crate::conn::{remaining_until, DeadlineStream};
 use crate::error::{CustodyFailure, EnclaveError, Result};
 use crate::keys::KeyManager;
-use crate::kms::{
-    deserialize_secret, AwsCredentials, CustodyFlow, KmsClient, KmsConfig, MAX_CIPHERTEXT_BYTES,
-};
+use crate::kms::{deserialize_secret, AwsCredentials, KmsClient, KmsConfig, MAX_CIPHERTEXT_BYTES};
 use crate::policy::KmsPin;
 
 /// Upper bound on one framed broker message in either direction.
@@ -77,23 +75,40 @@ fn recover_seed(
     deadline: Instant,
 ) -> Result<Zeroizing<[u8; 64]>> {
     remaining_until(deadline)?;
-    // Only an explicit missing-object response permits first-use creation.
-    // An expected identity makes missing ciphertext a recovery failure, so
-    // neither KMS generation nor persistence can replace a lost pinned seed.
-    let ciphertext = match store.load(deadline)? {
-        Some(blob) => {
+    // The pin decides the direction. Without one, the launch may only
+    // bootstrap: a confirmed missing object permits first-use creation, and an
+    // existing object is refused, so a parent cannot hand an unpinned image a
+    // planted blob or a `null` to make it generate over a saved identity. With
+    // a pin, only the saved object is accepted, so neither KMS generation nor
+    // persistence can replace a lost pinned seed.
+    let ciphertext = match (store.load(deadline)?, expected_evm_address) {
+        (Some(blob), Some(_)) => {
             tracing::info!("seed custody: loading saved identity");
             blob
         }
-        None if expected_evm_address.is_none() => {
+        (Some(_), None) => {
+            return Err(failure(
+                "saved seed exists; an unpinned launch only bootstraps, set KMS_EXPECTED_EVM_ADDRESS to recover it",
+            ))
+        }
+        (None, None) => {
             tracing::info!("seed custody: no saved object; attempting conditional creation");
             remaining_until(deadline)?;
             let blob = kms.generate(deadline)?;
             validate_ciphertext(&blob)?;
             remaining_until(deadline)?;
-            store.create(&blob, deadline)?
+            let committed = store.create(&blob, deadline)?;
+            // Activate only the blob this call generated. A different winner
+            // (a concurrent initializer, or a parent answering with a planted
+            // ciphertext) is never decrypted here; relaunch with its pin.
+            if committed != blob {
+                return Err(failure(
+                    "another initializer committed a different seed; pin its identity and restart",
+                ));
+            }
+            committed
         }
-        None => {
+        (None, Some(_)) => {
             return Err(failure(
                 "saved seed is missing; a pinned identity cannot be replaced",
             ))
@@ -122,11 +137,9 @@ pub struct PersistentSeed {
 }
 
 impl PersistentSeed {
-    /// Build the source from the KMS pin set at launch. The flow is the
-    /// caller's choice in code, never a host value.
-    pub fn new(flow: CustodyFlow, pin: &KmsPin) -> Result<Self> {
+    /// Build the source from the KMS pin set at launch.
+    pub fn new(pin: &KmsPin) -> Result<Self> {
         let config = KmsConfig {
-            flow,
             key_arn: pin.key_arn.clone(),
             region: pin.region.clone(),
             seed_id: pin.seed_id.clone(),
@@ -434,7 +447,17 @@ mod tests {
         let kms = Kms::default();
         let first = recover_seed(&store, &kms, None, Instant::now() + RECOVERY_TIMEOUT).unwrap();
         let a = KeyManager::from_seed(*first, Network::Bitcoin).unwrap();
-        let restored = recover_seed(&store, &kms, None, Instant::now() + RECOVERY_TIMEOUT).unwrap();
+        // An unpinned restart is refused without touching KMS; the pin is the
+        // only way to recover a saved identity.
+        assert!(recover_seed(&store, &kms, None, Instant::now() + RECOVERY_TIMEOUT).is_err());
+        assert_eq!(kms.decrypts.get(), 1);
+        let restored = recover_seed(
+            &store,
+            &kms,
+            Some(*a.evm_address()),
+            Instant::now() + RECOVERY_TIMEOUT,
+        )
+        .unwrap();
         let replica = recover_seed(
             &store,
             &kms,
@@ -472,7 +495,7 @@ mod tests {
     }
 
     #[test]
-    fn existing_ciphertext_is_reused_with_or_without_a_pin() {
+    fn existing_ciphertext_is_recovered_only_with_a_pin() {
         let original = vec![42; 64];
         let store = Store {
             saved: RefCell::new(Some(original.clone())),
@@ -482,7 +505,11 @@ mod tests {
         let expected = *KeyManager::from_seed([42; 64], Network::Bitcoin)
             .unwrap()
             .evm_address();
-        for pin in [None, Some(expected), Some([1; 20])] {
+        // No pin: the saved object is refused before any KMS call, so a parent
+        // cannot make an unpinned image adopt a blob it did not generate.
+        assert!(recover_seed(&store, &kms, None, Instant::now() + RECOVERY_TIMEOUT).is_err());
+        assert_eq!(kms.decrypts.get(), 0);
+        for pin in [Some(expected), Some([1; 20])] {
             let seed = recover_seed(&store, &kms, pin, Instant::now() + RECOVERY_TIMEOUT).unwrap();
             let keys = restore_keys(seed, Network::Bitcoin, pin);
             if pin == Some([1; 20]) {
@@ -492,7 +519,7 @@ mod tests {
             }
         }
         assert_eq!(kms.generates.get(), 0);
-        assert_eq!(kms.decrypts.get(), 3);
+        assert_eq!(kms.decrypts.get(), 2);
         assert_eq!(store.creates.get(), 0);
         assert_eq!(*store.saved.borrow(), Some(original));
     }
@@ -510,19 +537,32 @@ mod tests {
     }
 
     #[test]
-    fn concurrent_bootstrap_recovers_the_committed_winner() {
+    fn concurrent_bootstrap_loser_never_activates_the_winner() {
+        // The store commits a different blob than this call generated: either
+        // a concurrent initializer won, or the parent answered the create with
+        // a planted ciphertext. The loser fails without decrypting anything
+        // and the committed object stays intact for a pinned relaunch.
         let store = Store {
             race_winner: Some(vec![17; 64]),
             ..Store::default()
         };
+        let kms = Kms::default();
+        assert!(recover_seed(&store, &kms, None, Instant::now() + RECOVERY_TIMEOUT).is_err());
+        assert_eq!(kms.generates.get(), 1);
+        assert_eq!(kms.decrypts.get(), 0);
+        assert_eq!(*store.saved.borrow(), Some(vec![17; 64]));
+        let winner = *KeyManager::from_seed([17; 64], Network::Bitcoin)
+            .unwrap()
+            .evm_address();
         let seed = recover_seed(
             &store,
-            &Kms::default(),
-            None,
+            &kms,
+            Some(winner),
             Instant::now() + RECOVERY_TIMEOUT,
         )
         .unwrap();
         assert_eq!(*seed, [17; 64]);
+        assert_eq!(kms.generates.get(), 1);
     }
 
     #[test]
@@ -535,10 +575,11 @@ mod tests {
             fail_decrypt: true,
             ..Kms::default()
         };
-        assert!(recover_seed(&store, &kms, None, Instant::now() + RECOVERY_TIMEOUT).is_err());
+        let pin = Some([1; 20]);
+        assert!(recover_seed(&store, &kms, pin, Instant::now() + RECOVERY_TIMEOUT).is_err());
         assert_eq!(kms.generates.get(), 0);
         *store.saved.borrow_mut() = Some(vec![]);
-        assert!(recover_seed(&store, &kms, None, Instant::now() + RECOVERY_TIMEOUT).is_err());
+        assert!(recover_seed(&store, &kms, pin, Instant::now() + RECOVERY_TIMEOUT).is_err());
         assert_eq!(kms.decrypts.get(), 1);
     }
 

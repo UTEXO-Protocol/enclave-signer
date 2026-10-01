@@ -32,7 +32,6 @@ const KEY_ARN: &str = "arn:aws:kms:eu-west-1:123456789012:key/12345678-1234-1234
 
 fn config() -> KmsConfig {
     KmsConfig {
-        flow: CustodyFlow::RgbMint,
         key_arn: KEY_ARN.into(),
         region: "eu-west-1".into(),
         seed_id: "mint-pool-1".into(),

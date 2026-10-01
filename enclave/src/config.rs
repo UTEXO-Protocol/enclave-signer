@@ -631,7 +631,6 @@ impl Endpoints {
             None
         } else {
             let config = crate::kms::KmsConfig {
-                flow: crate::kms::CustodyFlow::RgbMint,
                 key_arn: req.kms_key_arn.clone(),
                 region: req.kms_region.clone(),
                 seed_id: req.kms_seed_id.clone(),

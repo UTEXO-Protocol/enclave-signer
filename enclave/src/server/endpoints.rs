@@ -55,15 +55,12 @@ pub(super) fn handle_set_endpoints(
         .assert_valid_for_build(&ctx.build_ctx)
         .map_err(EnclaveError::InvalidRequest)?;
 
-    // The application flow selects the custody namespace, not the host.
     // `set_seed_source` below refuses a second install natively.
     #[cfg(feature = "kms-persistence")]
     let seed_source = endpoints
         .kms
         .as_ref()
-        .map(|pin| {
-            crate::seed_persistence::PersistentSeed::new(crate::kms::CustodyFlow::RgbMint, pin)
-        })
+        .map(crate::seed_persistence::PersistentSeed::new)
         .transpose()?;
 
     // The loopback binds and the /etc/hosts pin are real I/O the unit tests
