@@ -14,8 +14,15 @@ use crate::proto::*;
 pub(super) fn handle_initialize(
     ctx: &ServerContext,
     req: InitializeKeyRequest,
+    _deadline: std::time::Instant,
 ) -> Result<EnclaveResponse> {
     let state = &ctx.state;
+    #[cfg(feature = "kms-persistence")]
+    if !req.cloning_secret.is_empty() {
+        return Err(EnclaveError::InvalidRequest(
+            "cloning_secret is not supported with KMS persistence".into(),
+        ));
+    }
     if !req.mnemonic.is_empty() {
         // Testing path: import from BIP-39 mnemonic phrase
         #[cfg(feature = "allow-seed-import")]
@@ -30,12 +37,27 @@ pub(super) fn handle_initialize(
             ));
         }
     } else if req.seed.is_empty() {
-        // Production path: generate from OS entropy
-        let mut entropy = [0u8; 32];
-        getrandom::fill(&mut entropy)
-            .map_err(|e| EnclaveError::Internal(format!("entropy generation failed: {}", e)))?;
-        let _mnemonic = state.initialize_from_entropy(&mut entropy)?;
-        tracing::info!("key initialized from new mnemonic");
+        #[cfg(feature = "kms-persistence")]
+        {
+            // The KMS values come with the launch.
+            ctx.launch()?;
+            let deadline = _deadline
+                .checked_sub(crate::seed_persistence::RESPONSE_RESERVE)
+                .ok_or_else(|| {
+                    EnclaveError::InvalidRequest("initialization request deadline exceeded".into())
+                })?;
+            state.initialize_from_persistence_until(deadline)?;
+            tracing::info!("keys initialized from KMS persistence");
+        }
+        #[cfg(not(feature = "kms-persistence"))]
+        {
+            // Builds without persistence generate from OS entropy.
+            let mut entropy = [0u8; 32];
+            getrandom::fill(&mut entropy)
+                .map_err(|e| EnclaveError::Internal(format!("entropy generation failed: {}", e)))?;
+            let _mnemonic = state.initialize_from_entropy(&mut entropy)?;
+            tracing::info!("key initialized from new mnemonic");
+        }
     } else {
         // Testing path: import raw seed
         #[cfg(feature = "allow-seed-import")]
@@ -174,6 +196,7 @@ fn canonical_pubkey_bundle(keys: &PublicKeysResponse) -> Vec<u8> {
 /// Bind the v1 identity and policy to this encrypted clone response.
 /// NSM signs the version and commitment in user_data.
 /// The transcript contains only public values.
+#[cfg(not(feature = "kms-persistence"))]
 pub(super) fn clone_commitment(
     bundle: &PublicKeysResponse,
     policy: &[u8],
@@ -195,6 +218,7 @@ pub(super) fn clone_commitment(
     out
 }
 
+#[cfg(not(feature = "kms-persistence"))]
 pub(super) fn verify_clone_commitment(actual: Option<&[u8]>, expected: &[u8; 36]) -> Result<()> {
     if actual != Some(expected.as_slice()) {
         return Err(EnclaveError::Attestation(
@@ -226,7 +250,8 @@ pub(super) fn handle_get_attested_public_key(
     // whole posture as one value: sha256(pubkey_bundle || policy_commitment).
     // The verifier mirror is `parent/src/attest_verify.rs::verify_attested_pubkey`.
     let mut preimage = canonical_pubkey_bundle(&public_keys);
-    preimage.extend_from_slice(&ctx.launch()?.policy.commitment_bytes());
+    let attested_policy = ctx.launch()?.policy.commitment_bytes();
+    preimage.extend_from_slice(&attested_policy);
     let commitment: [u8; 32] = Sha256::digest(&preimage).into();
 
     let attestation_doc = crate::attestation::get_attestation(
@@ -247,12 +272,13 @@ pub(super) fn handle_get_attested_public_key(
             GetAttestedPublicKeyResponse {
                 public_keys: Some(public_keys),
                 attestation_doc,
+                attested_policy,
             },
         )),
     })
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(feature = "kms-persistence")))]
 mod tests {
     use super::*;
 

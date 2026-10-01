@@ -109,6 +109,7 @@ message GetAttestedPublicKeyRequest {
 message GetAttestedPublicKeyResponse {
   PublicKeysResponse public_keys = 1; // Public-key bundle bound by the attestation.
   bytes attestation_doc = 2; // COSE_Sign1 NSM document, or raw CBOR in mock mode.
+  bytes attested_policy = 3; // Policy bytes that attestation user_data commits.
 }
 
 message SignRequest {
@@ -389,6 +390,10 @@ message SetEndpointsRequest {
   string evm_rpc_host = 2; // TLS name of the EVM RPC. No scheme, path or port.
   bytes evm_rpc_ca_der = 3; // DER of the only CA the EVM RPC TLS trusts.
   uint32 evm_rpc_tls_port = 4; // TLS port of the EVM RPC, 1-65535.
+  string kms_key_arn = 5; // Full ARN of the KMS key that wraps the seed.
+  string kms_region = 6; // AWS region of the KMS key.
+  string kms_seed_id = 7; // Name of the seed object the parent stores.
+  string kms_expected_evm_address = 8; // 20-byte hex EVM address the seed must give. Empty: none.
 }
 
 message SetEndpointsResponse {}

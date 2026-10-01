@@ -78,10 +78,7 @@ COPY build/entrypoint.sh /app/entrypoint.sh
 
 RUN chmod +x /app/utexo-bridge-enclave /app/entrypoint.sh
 
-# NOTE: the donor cloning secret is intentionally NOT baked here. It is
-# delivered at runtime via the `InitializeKey` message (CLI: `init
-# --cloning-secret <secret>`), so it never lands in the EIF / image layers and
-# the PCRs stay reproducible. See enclave/src/server.rs (handle_initialize).
+# The mint signer restores its KMS-protected seed instead of peer cloning.
 
 # Pinned bridge/indexer config - identical to Dockerfile.enclave; keep the two in
 # lockstep. `rgb` implies `spv` + `rgb-validation`, so this is a release

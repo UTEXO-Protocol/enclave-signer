@@ -129,9 +129,9 @@ enum Command {
     /// and SPV chain caught up. Same answer the parent's `GET /health` serves
     /// to deploy. Exits 0 when ready, 1 when not.
     Health,
-    /// Set the chain endpoints once, after launch. The enclave refuses a
-    /// second set. Each flag falls back to its environment variable. A value
-    /// that is not given is sent empty.
+    /// Set the chain endpoints and the KMS values once, after launch. The
+    /// enclave refuses a second set. Each flag falls back to its environment
+    /// variable. A value that is not given is sent empty.
     SetEndpoints {
         /// `ssl://host:port` or `tcp://host:port`. Env: ELECTRUM_URL.
         #[arg(long)]
@@ -146,6 +146,18 @@ enum Command {
         /// Env: EVM_RPC_TLS_CA_DER_FILE.
         #[arg(long)]
         evm_rpc_ca_der_file: Option<PathBuf>,
+        /// Full ARN of the KMS key that wraps the seed. Env: KMS_KEY_ARN.
+        #[arg(long)]
+        kms_key_arn: Option<String>,
+        /// AWS region of the KMS key. Env: KMS_REGION.
+        #[arg(long)]
+        kms_region: Option<String>,
+        /// Name of the seed object. Env: KMS_SEED_ID.
+        #[arg(long)]
+        kms_seed_id: Option<String>,
+        /// EVM address the seed must give. Env: KMS_EXPECTED_EVM_ADDRESS.
+        #[arg(long)]
+        kms_expected_evm_address: Option<String>,
     },
     /// Push a batch of Bitcoin block headers into the enclave's SPV chain.
     ///
@@ -543,6 +555,10 @@ fn main() {
             evm_rpc_host,
             evm_rpc_tls_port,
             evm_rpc_ca_der_file,
+            kms_key_arn,
+            kms_region,
+            kms_seed_id,
+            kms_expected_evm_address,
         } => {
             let var = |name: &str| std::env::var(name).ok().filter(|v| !v.is_empty());
             let fail = |msg: String| -> ! {
@@ -575,6 +591,16 @@ fn main() {
                     .unwrap_or_default(),
                 evm_rpc_ca_der,
                 evm_rpc_tls_port,
+                kms_key_arn: kms_key_arn
+                    .or_else(|| var("KMS_KEY_ARN"))
+                    .unwrap_or_default(),
+                kms_region: kms_region.or_else(|| var("KMS_REGION")).unwrap_or_default(),
+                kms_seed_id: kms_seed_id
+                    .or_else(|| var("KMS_SEED_ID"))
+                    .unwrap_or_default(),
+                kms_expected_evm_address: kms_expected_evm_address
+                    .or_else(|| var("KMS_EXPECTED_EVM_ADDRESS"))
+                    .unwrap_or_default(),
             };
             match client.set_endpoints(req) {
                 Ok(()) => println!("Endpoints set"),

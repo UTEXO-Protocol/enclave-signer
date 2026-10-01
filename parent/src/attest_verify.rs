@@ -10,7 +10,7 @@
 
 use anyhow::{bail, Context, Result};
 use attestation_verify::{
-    AttestationMode, AttestedPolicy, BtcDataSource, EvmDataSource, EvmRpcTlsPin, SignerRole,
+    AttestationMode, AttestedPolicy, BtcDataSource, EvmDataSource, EvmRpcTlsPin, KmsPin, SignerRole,
 };
 use rand::RngCore;
 use sha2::{Digest, Sha256};
@@ -87,6 +87,9 @@ pub enum ExpectedPolicy {
         gas_tx_max_fee_per_gas: u128,
         gas_tx_max_value_wei: u128,
         gas_tx_allowed_selectors: Vec<[u8; 4]>,
+        /// The KMS key, region, seed id and address the operator set at
+        /// launch. `None` expects no KMS pin.
+        kms: Option<KmsPin>,
     },
     /// Expect a dev/mock enclave (e.g. behind `--mock`). Never for production.
     Development,
@@ -101,6 +104,8 @@ pub struct AttestedPubkeyResult {
     pub verified: attestation_verify::VerifiedAttestation,
     pub bundle_commitment: [u8; 32],
     pub nonce_sent: [u8; 32],
+    /// The policy the enclave attests, decoded from the response.
+    pub policy: AttestedPolicy,
 }
 
 /// Build the canonical key bundle that the verifier hashes to check
@@ -198,12 +203,9 @@ pub fn verify_attested_response(
     }
 
     // The enclave commits to sha256(pubkey_bundle || policy_commitment).
-    // Reconstruct the expected policy - pins from the wire response,
-    // posture flags from `expected_policy` - and require the whole commitment to
-    // match. A mismatch means the attested posture is not the expected one.
-    let attested_policy = expected_attested_policy(expected_policy, &response)?;
+    // 1. Authenticate the policy bytes of the response against user_data.
     let mut preimage = canonical_bundle(&response);
-    preimage.extend_from_slice(&attested_policy.to_bytes());
+    preimage.extend_from_slice(&response.attested_policy);
     let bundle_commitment: [u8; 32] = Sha256::digest(&preimage).into();
     let user_data = verified
         .user_data
@@ -211,11 +213,21 @@ pub fn verify_attested_response(
         .context("attestation has no user_data field")?;
     if user_data != bundle_commitment {
         bail!(
-            "attestation `user_data` ({}) does not match sha256(canonical_bundle || policy) ({}) \
-             for the expected policy {expected_policy:?} - the enclave's attested public keys or \
-             security posture differ from what was expected",
+            "attestation `user_data` ({}) does not match sha256(canonical_bundle || policy) ({}): \
+             the policy bytes do not match the attestation",
             hex::encode(user_data),
             hex::encode(bundle_commitment),
+        );
+    }
+    // 2. Decode them.
+    let policy = AttestedPolicy::from_bytes(&response.attested_policy)?;
+    // 3. Compare them with the expected policy: pins from the wire response,
+    // posture flags from `expected_policy`. The bytes are canonical.
+    let expected = expected_attested_policy(expected_policy, &response)?;
+    if response.attested_policy != expected.to_bytes() {
+        bail!(
+            "the attested policy {policy:?} does not match the expected policy {expected:?}: \
+             the enclave's security posture differs from what was expected"
         );
     }
 
@@ -224,6 +236,7 @@ pub fn verify_attested_response(
         verified,
         bundle_commitment,
         nonce_sent: nonce,
+        policy,
     })
 }
 
@@ -255,6 +268,7 @@ fn expected_attested_policy(
             gas_tx_max_fee_per_gas,
             gas_tx_max_value_wei,
             gas_tx_allowed_selectors,
+            kms,
         } => {
             let bridge_contract: [u8; 20] = resp
                 .bridge_contract
@@ -321,6 +335,7 @@ fn expected_attested_policy(
                 gas_tx_max_value_wei: *gas_tx_max_value_wei,
                 gas_tx_allowed_selectors: gas_tx_allowed_selectors.clone(),
                 token_contract: *token_contract,
+                kms: kms.clone(),
             })
         }
     }
@@ -355,6 +370,7 @@ mod tests {
             gas_tx_max_fee_per_gas: 0,
             gas_tx_max_value_wei: 0,
             gas_tx_allowed_selectors: Vec::new(),
+            kms: None,
         }
     }
 
@@ -380,6 +396,7 @@ mod tests {
             gas_tx_max_fee_per_gas: 0,
             gas_tx_max_value_wei: 0,
             gas_tx_allowed_selectors: Vec::new(),
+            kms: None,
         }
     }
 
@@ -450,6 +467,11 @@ mod tests {
     /// A response whose mock document commits to a production policy with
     /// `attested_role`.
     fn attested_response(attested_role: SignerRole, nonce: &[u8; 32]) -> AttestedPublicKeyResponse {
+        attested_by(&production(attested_role), nonce)
+    }
+
+    /// A response whose mock document commits to `attested`.
+    fn attested_by(attested: &ExpectedPolicy, nonce: &[u8; 32]) -> AttestedPublicKeyResponse {
         let pubkey = vec![0x04; 65];
         let mut resp = AttestedPublicKeyResponse {
             evm_uncompressed_pub: pubkey.clone(),
@@ -458,9 +480,11 @@ mod tests {
             rgb_asset_id: "rgb:asset".into(),
             ..Default::default()
         };
-        let policy = expected_attested_policy(&production(attested_role), &resp).unwrap();
+        resp.attested_policy = expected_attested_policy(attested, &resp)
+            .unwrap()
+            .to_bytes();
         let mut preimage = canonical_bundle(&resp);
-        preimage.extend_from_slice(&policy.to_bytes());
+        preimage.extend_from_slice(&resp.attested_policy);
         let user_data: [u8; 32] = Sha256::digest(&preimage).into();
         resp.attestation_doc =
             attestation_verify::build_mock_document(nonce, Some(&pubkey), Some(&user_data))
@@ -495,7 +519,7 @@ mod tests {
         ] {
             let err = verify(attested, expected).unwrap_err();
             assert!(
-                format!("{err:#}").contains("user_data"),
+                format!("{err:#}").contains("expected policy"),
                 "attested {attested:?}, expected {expected:?}: {err:#}"
             );
         }
@@ -520,7 +544,86 @@ mod tests {
                 &expected,
             )
             .unwrap_err();
-            assert!(format!("{err:#}").contains("user_data"), "{err:#}");
+            assert!(format!("{err:#}").contains("expected policy"), "{err:#}");
         }
+    }
+
+    fn with_kms(kms: Option<KmsPin>) -> ExpectedPolicy {
+        let mut p = production(SignerRole::Mint);
+        if let ExpectedPolicy::Production { kms: k, .. } = &mut p {
+            *k = kms;
+        }
+        p
+    }
+
+    fn a_kms_pin() -> KmsPin {
+        KmsPin {
+            key_arn: "arn:aws:kms:eu-west-1:123456789012:key/mrk-0123456789abcdef0123456789abcdef"
+                .into(),
+            region: "eu-west-1".into(),
+            seed_id: "seed-1".into(),
+            expected_evm_address: Some([0x42; 20]),
+        }
+    }
+
+    fn verify_policy(
+        resp: AttestedPublicKeyResponse,
+        expected: &ExpectedPolicy,
+    ) -> Result<AttestedPubkeyResult> {
+        verify_attested_response(
+            resp,
+            [0x42; 32],
+            &attestation_verify::ExpectedPcrs::zero(),
+            VerifyMode::Mock,
+            expected,
+        )
+    }
+
+    #[test]
+    fn tampered_policy_bytes_fail() {
+        let expected = with_kms(Some(a_kms_pin()));
+        let good = attested_by(&expected, &[0x42; 32]);
+        let mut flipped = good.clone();
+        let last = flipped.attested_policy.len() - 1;
+        flipped.attested_policy[last] ^= 1;
+        let mut swapped = good.clone();
+        swapped.attested_policy = attested_by(&with_kms(None), &[0x42; 32]).attested_policy;
+        for resp in [flipped, swapped] {
+            let err = verify_policy(resp, &expected).unwrap_err();
+            assert!(
+                format!("{err:#}").contains("do not match the attestation"),
+                "{err:#}"
+            );
+        }
+        verify_policy(good, &expected).unwrap();
+    }
+
+    #[test]
+    fn wrong_kms_pin_fails() {
+        let resp = attested_by(&with_kms(Some(a_kms_pin())), &[0x42; 32]);
+        let edits: [fn(&mut KmsPin); 4] = [
+            |k| k.key_arn = k.key_arn.replace("mrk-0", "mrk-1"),
+            |k| k.region = "eu-west-2".into(),
+            |k| k.seed_id = "seed-2".into(),
+            |k| k.expected_evm_address = None,
+        ];
+        for edit in edits {
+            let mut pin = a_kms_pin();
+            edit(&mut pin);
+            let err = verify_policy(resp.clone(), &with_kms(Some(pin))).unwrap_err();
+            assert!(
+                format!("{err:#}").contains("does not match the expected policy"),
+                "{err:#}"
+            );
+        }
+        let err = verify_policy(resp.clone(), &with_kms(None)).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("does not match the expected policy"),
+            "{err:#}"
+        );
+        let ok = verify_policy(resp, &with_kms(Some(a_kms_pin()))).unwrap();
+        assert!(
+            matches!(ok.policy, AttestedPolicy::Production { kms: Some(k), .. } if k == a_kms_pin())
+        );
     }
 }

@@ -10,6 +10,11 @@ assumptions. Known gaps are collected in Sec 13.
 
 ---
 
+`mint-signer` enables `kms-persistence`: initialization uses attested KMS seed
+generation/recovery and encrypted S3 storage; peer cloning is disabled. Burn
+signers and other builds without this capability retain the entropy/cloning
+lifecycle below. See [KMS seed persistence](kms-persistence.md).
+
 ## 1. Purpose
 
 The enclave signer is the authorization component of the bridge. It runs inside
@@ -93,8 +98,9 @@ Four crates plus the infrastructure they touch:
 **Cargo features.** `rgb` (implies `spv`, which implies `rgb-validation`),
 `ccd`, exactly one of `rgb-swap` / `rgb-mint-burn`, `evm-rpc`, `bfa-mint`,
 `vsock`, and for mint/burn exactly one signer role: `mint-signer` (EVM -> RGB)
-or `burn-signer` (RGB -> EVM), each implying `bfa-mint`. Production images are built with `--no-default-features` and an
-explicit set (README, Building). Dev-only features
+or `burn-signer` (RGB -> EVM), each implying `bfa-mint`. `mint-signer` also
+enables `kms-persistence`. Production images are built with
+`--no-default-features` and an explicit set (README, Building). Dev-only features
 (`mock-attestation`, `allow-seed-import`) are `compile_error!` in release.
 
 **Wire protocol** enclave<->parent: 4-byte little-endian length prefix + prost
@@ -105,8 +111,9 @@ and 8002); the enclave has no direct network stack.
 
 **Launch endpoints.** The endpoints are not in the image, so anyone can rebuild
 the EIF and get the same PCR0. The operator sends them once, after launch, in
-`SetEndpoints`: the Electrum URL, the EVM RPC host, the EVM RPC CA (DER) and
-the EVM RPC TLS port. The enclave refuses a second set; changing them needs a
+`SetEndpoints`: the Electrum URL, the EVM RPC host, the EVM RPC CA (DER), the
+EVM RPC TLS port and, in a mint build, the KMS key ARN, region, seed id and
+expected EVM address. The enclave refuses a second set; changing them needs a
 restart, which loses the keys. Until the set, the enclave refuses `Sign`,
 `SignBtc`, `SignRawDigest`, `SignCcd`, `GetAttestedPublicKey`, `GetClone` and
 `SetClone`, starts no Electrum or EVM RPC forwarder and opens no chain

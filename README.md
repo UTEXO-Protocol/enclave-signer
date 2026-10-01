@@ -50,6 +50,12 @@ See the [component diagram](docs/diagrams/01-components.md) and
 
 ### Key management
 
+`mint-signer` enables `kms-persistence`: initialization generates or recovers a
+seed through attested AWS KMS and persists its encrypted ciphertext in S3. Mint
+replicas recover that seed; signing and HD derivation are unchanged. See the
+[mint KMS persistence guide](docs/kms-persistence.md). Burn signers and other
+builds without persistence retain the generation and cloning lifecycle below.
+
 - Generates a BIP-39 mnemonic from OS entropy, derives the 64-byte seed and
   keeps it in a `SecretBox` (zeroize on drop). Mnemonic or raw-seed import
   exists only behind `allow-seed-import` (dev builds).
@@ -161,7 +167,7 @@ request per connection, 4 MiB frame cap. Schema:
 
 | Request | Phase | Feature | Description |
 |---------|-------|---------|-------------|
-| `InitializeKey` | Initial | - | Generate keys from OS entropy. Optional donor `cloning_secret`. Mnemonic / seed import needs `allow-seed-import`. |
+| `InitializeKey` | Initial | - | Recover/create a persisted seed with `kms-persistence`; otherwise generate from OS entropy with optional donor `cloning_secret`. Dev seed imports require `allow-seed-import`. |
 | `GetPublicKey` | Active | - | EVM address + pubkeys, gas-tx key, BTC pubkey / xpub, fingerprint, account xpubs, CCD pubkey, boot pins. |
 | `GetAttestedPublicKey` | Active | - | Same bundle plus an NSM attestation document bound to nonce, pubkey and the policy commitment. |
 | `Sign` | Active | `rgb` / `ccd` | Bridge signing: RGB -> EVM, EVM -> RGB, CCD -> EVM. |
@@ -227,10 +233,14 @@ cargo build -p utexo-bridge-enclave --no-default-features --features allow-seed-
 Compile-time guards in `enclave/src/lib.rs`: `rgb-validation` requires `spv`;
 exactly one of `rgb-swap` / `rgb-mint-burn` whenever `rgb-validation` is on;
 exactly one of `mint-signer` / `burn-signer` whenever `rgb-mint-burn` is on;
+`kms-persistence` requires `mint-signer`;
 `allow-seed-import` and `mock-attestation` do not compile in a release
 profile. CI asserts every guard fires.
 
 ### Enclave image (EIF)
+
+No image takes a KMS value: the mint enclave gets them at launch. See
+[mint KMS setup](docs/kms-persistence.md) for the parent and policy requirements.
 
 ```bash
 ./build/build-enclave.sh                                  # Dockerfile.enclave (combined)
@@ -243,8 +253,10 @@ DOCKERFILE=Dockerfile.enclave.ccd       ./build/build-enclave.sh
 `Dockerfile.enclave.mint` and `Dockerfile.enclave.burn` are the shipped BFA
 mint/burn images, one per signer role. Each role implies `bfa-mint`, which
 pulls in `rgb-mint-burn` and `bfa-validation`, and `bfa-validation` pulls in
-`evm-rpc`. The two run as separate enclaves, each initialized with its own
-seed: cloning only works between images with the same PCR0. Each needs `--build-arg RGB_ASSET_ID=rgb:<contract id>`, which has no
+`evm-rpc`. The two run as separate enclaves with independent seeds. Mint
+signers use KMS persistence; burn signers retain OS-entropy initialization and
+cloning between images with the same PCR0. Each needs
+`--build-arg RGB_ASSET_ID=rgb:<contract id>`, which has no
 default because each BFA contract id is per-deployment. The build helper and the
 Dockerfile both reject a missing or blank value before the image is built.
 The asset is baked into the measured image; a host runtime environment override
@@ -303,9 +315,9 @@ and `utexo-bridge-enclave-burn`, both from `Dockerfile.enclave-dev.bfa` with a
 The production Dockerfiles bake the bridge pins as `ENV` (`EVM_CHAIN_ID`,
 `EVM_PROXY_CONTRACT_ADDRESS`, `RGB_ASSET_ID`, `FUNDS_IN_CONTRACT`,
 `TOKEN_CONTRACT`, `GAS_TX_ALLOWED_TO`, `BTC_MAX_TOTAL_SATS`, ...), so they are
-measured into PCR0. The cloning secret is never baked. The chain endpoints are
-not in the image: anyone can rebuild the EIF and get the same PCR0 without
-knowing them.
+measured into PCR0. The cloning secret is never baked. The chain endpoints and
+the KMS values are not in the image: anyone can rebuild the EIF and get the
+same PCR0 without knowing them.
 
 ## Running
 
@@ -346,7 +358,8 @@ vsock-proxy 8002 <EVM_RPC_HOST> 443             # EVM JSON-RPC over TLS to the p
 # Set the endpoints once. The enclave refuses a second set, and signs nothing
 # and opens no chain connection before it. A restart needs a new set.
 cli --addr vsock://16:5000 set-endpoints --electrum-url ssl://<electrum-host>:50002 \
-  --evm-rpc-host <EVM_RPC_HOST> --evm-rpc-tls-port 443 --evm-rpc-ca-der-file ca.der
+  --evm-rpc-host <EVM_RPC_HOST> --evm-rpc-tls-port 443 --evm-rpc-ca-der-file ca.der \
+  --kms-key-arn <KMS_KEY_ARN> --kms-region <KMS_REGION> --kms-seed-id <KMS_SEED_ID>   # mint only
 
 GRPC_HOST=0.0.0.0 GRPC_PORT=50051 USE_VSOCK=true ENCLAVE_VSOCK_CID=16 ./utexo-bridge-parent
 ```
@@ -398,6 +411,11 @@ Value bounds (fail closed while unset in a production build):
 
 The gas-tx rule is part of the attested policy. Unset pins commit as zero.
 
+Mint signer KMS custody is set at launch (see the launch table below).
+Initialization reuses existing ciphertext or conditionally creates it after confirmed
+absence. No creation-mode setting is required. See the [deployment and recovery
+procedure](docs/kms-persistence.md) for parent storage and relay configuration.
+
 Data sources and transport:
 
 | Variable | Default | Description |
@@ -418,16 +436,16 @@ Optional Helios configuration (`--features helios`, with one RGB flow):
 | `HELIOS_NETWORK` | `mainnet` | Code accepts `mainnet`, `sepolia`, `holesky`; must match pinned `EVM_CHAIN_ID`. |
 | `HELIOS_CHECKPOINT` | unset | Required 32-byte beacon block root, hex; committed in the production policy. |
 | `HELIOS_STRICT_CHECKPOINT_AGE` | `true` | `false` or `0` disables strict checkpoint-age checking. |
-| `HELIOS_EXECUTION_LOCAL_PORT` / `HELIOS_EXECUTION_VSOCK_PORT` | `18545` / `8003` | Execution RPC forwarder ports. |
-| `HELIOS_CONSENSUS_LOCAL_PORT` / `HELIOS_CONSENSUS_VSOCK_PORT` | `18550` / `8004` | Consensus RPC forwarder ports. |
+| `HELIOS_EXECUTION_LOCAL_PORT` / `HELIOS_EXECUTION_VSOCK_PORT` | `18545` / `8005` with `kms-persistence`, `8003` otherwise | Execution RPC forwarder ports. KMS persistence reserves vsock ports `8003`/`8004` for KMS and seed storage. |
+| `HELIOS_CONSENSUS_LOCAL_PORT` / `HELIOS_CONSENSUS_VSOCK_PORT` | `18550` / `8006` with `kms-persistence`, `8004` otherwise | Consensus RPC forwarder ports. KMS-enabled builds reject custody-port collisions. |
 
 Selected Helios initialization/sync failure leaves the provider unavailable;
 receipt-dependent signing refuses instead of falling back to raw RPC.
 
-Chain endpoints, set once at launch with `cli set-endpoints` (`SetEndpoints`),
-never in the image. The attested policy commits the Electrum host, the EVM RPC
-host and the SHA-256 of the CA. A build requires the values it uses and refuses
-the others:
+Chain endpoints and KMS values, set once at launch with `cli set-endpoints`
+(`SetEndpoints`), never in the image. The attested policy commits the Electrum
+host, the EVM RPC host, the SHA-256 of the CA and the four KMS values. A build
+requires the values it uses and refuses the others:
 
 | Value (CLI flag / env) | Build | Description |
 |------------------------|-------|-------------|
@@ -435,6 +453,10 @@ the others:
 | `--evm-rpc-host` / `EVM_RPC_HOST` | `evm-rpc` | TLS host name of the EVM RPC. No scheme, path, port or IP literal. The JSON-RPC is served at `/`. |
 | `--evm-rpc-tls-port` / `EVM_RPC_TLS_PORT` | `evm-rpc` | TLS port, 1-65535, not the Electrum port. The forwarder listens on it. |
 | `--evm-rpc-ca-der-file` / `EVM_RPC_TLS_CA_DER_FILE` | `evm-rpc` | DER of the only CA the EVM RPC TLS trusts. |
+| `--kms-key-arn` / `KMS_KEY_ARN` | `kms-persistence` | Full symmetric KMS key ARN; aliases are rejected. |
+| `--kms-region` / `KMS_REGION` | `kms-persistence` | Commercial AWS region matching the key ARN. The KMS forwarder listens on `127.0.0.2:443`. |
+| `--kms-seed-id` / `KMS_SEED_ID` | `kms-persistence` | Stable signer identity used in the KMS encryption context and storage namespace. |
+| `--kms-expected-evm-address` / `KMS_EXPECTED_EVM_ADDRESS` | `kms-persistence`, optional | Identity pin: 40 hex digits with optional `0x`. Pin the verified signer before funding; missing ciphertext then fails without replacement. |
 
 Limits and dev knobs:
 
@@ -444,7 +466,7 @@ Limits and dev knobs:
 | `MAX_MERKLE_PROOFS` | `256` | Proof-count cap per request. |
 | `MAX_TOTAL_PROOF_BYTES` | 128 KiB | Aggregate proof-bytes cap per request. |
 | `SPV_CHECKPOINT` | unset | Dev builds only: `height:hash[:bits:time[:chainwork]]` moves the SPV anchor forward. Without `chainwork` (Core's `getblockheader` value) every `fundsOut` is refused under `BTC_RELAY_MODE=required`; `none` needs no chainwork. A production-shaped build refuses to boot when set. |
-| `UTEXO_CLONING_SECRET` | unset | Legacy donor secret. Prefer `init --cloning-secret` at runtime. |
+| `UTEXO_CLONING_SECRET` | unset | Legacy donor secret; ignored with `kms-persistence`, which rejects cloning. Otherwise prefer `init --cloning-secret` at runtime. |
 
 ### Parent
 
@@ -519,9 +541,10 @@ provenance. `build/smoke-test.sh` drives a live enclave through the CLI.
 | `rgb` | `spv` | RGB / Bitcoin bridge stack. |
 | `ccd` | - | Concordium stack (Ed25519 is always compiled; this gates the handlers). |
 | `rgb-swap` | `rgb` | RGB flow: send/receive with BFA `Transfer`. In the default set. |
+| `kms-persistence` | - | Attested KMS seed generation/recovery with encrypted S3 persistence. Requires `mint-signer`; custody context is `rgb-mint`. |
 | `rgb-mint-burn` | `rgb` | RGB flow: deposits mint with BFA `Bridge`, withdrawals `Burn`. Needs `--no-default-features`. |
 | `bfa-mint` | `rgb-mint-burn`, `bfa-validation` | Mint/burn flow with BFA consensus and settlement checks against verified `FundsIn` locks. |
-| `mint-signer` | `bfa-mint` | Mint/burn signer role: EVM -> RGB only (mint PSBT, `SignBtc`). Exactly one role per mint/burn build. |
+| `mint-signer` | `bfa-mint`, `kms-persistence` | Mint/burn signer role: EVM -> RGB only (mint PSBT, `SignBtc`). Exactly one role per mint/burn build. |
 | `burn-signer` | `bfa-mint` | Mint/burn signer role: RGB -> EVM only (`fundsOut`, gas tx). Exactly one role per mint/burn build. |
 | `bfa-validation` | `evm-rpc` | Runs BFA consensus with verified mint ancestry in either RGB flow. Required for BFA swaps and implied by `bfa-mint`. |
 | `spv` | `rgb-validation` | In-enclave Bitcoin header chain and witness inclusion proofs. |
@@ -565,8 +588,9 @@ Re-syncing changes PCR0. Procedure in
   connection limits are compiled in. `EVM_MIN_CONFIRMATIONS` and request-size
   caps are read from environment; image-baked values are measured with the EIF.
 - **Key custody.** Seed and keys in `SecretBox`, zeroized on drop.
-  `#![deny(unsafe_code)]`. No persistence: keys exist only in enclave memory.
-- **Cloning.** X25519 + HKDF-SHA256 + ChaCha20-Poly1305, mutual attestation
+  `#![deny(unsafe_code)]`. With `kms-persistence`, seeds persist as KMS ciphertext
+  in S3; plaintext signing keys exist only in enclave memory.
+- **Cloning (without KMS persistence).** X25519 + HKDF-SHA256 + ChaCha20-Poly1305, mutual attestation
   with PCR equality, shared secret, replay guard recorded only after
   authentication.
 - **Release hardening.** `opt-level = "z"`, LTO, stripped, `panic = "abort"`,
