@@ -6,6 +6,9 @@
 # Optional chain endpoints, set on each enclave at start:
 #   ELECTRUM_URL=ssl://<host>:<port>  EVM_RPC_TLS_CA_DER_FILE=<CA in DER>
 # The EVM RPC host and port come from host-prep-evmrpc.sh.
+# KMS values, set on each enclave at start. A mint enclave requires the first three:
+#   KMS_KEY_ARN=<key ARN>  KMS_REGION=<region>  KMS_SEED_ID=<seed id>
+#   KMS_EXPECTED_EVM_ADDRESS=<0x address, optional>
 #
 # Initialize or clone keys after deployment.
 # Put --addr vsock://<CID>:5000 before the CLI subcommand.
@@ -31,6 +34,15 @@ ENCLAVE_MEMORY="${ENCLAVE_MEMORY:-3072}"
 ENCLAVE_DEBUG_MODE="${ENCLAVE_DEBUG_MODE:-0}"
 ELECTRUM_URL="${ELECTRUM_URL:-}"
 EVM_RPC_TLS_CA_DER_FILE="${EVM_RPC_TLS_CA_DER_FILE:-}"
+KMS_KEY_ARN="${KMS_KEY_ARN:-}"
+KMS_REGION="${KMS_REGION:-}"
+KMS_SEED_ID="${KMS_SEED_ID:-}"
+KMS_EXPECTED_EVM_ADDRESS="${KMS_EXPECTED_EVM_ADDRESS:-}"
+if [ -n "$KMS_KEY_ARN$KMS_REGION$KMS_SEED_ID" ] \
+  && { [ -z "$KMS_KEY_ARN" ] || [ -z "$KMS_REGION" ] || [ -z "$KMS_SEED_ID" ]; }; then
+  echo "KMS_KEY_ARN, KMS_REGION and KMS_SEED_ID go together" >&2
+  exit 1
+fi
 CIDS=(16 18 20)
 declare -A PORT=([16]=50051 [18]=50052 [20]=50053)
 # Readiness probe (`GET /health`), one per parent. Loopback-only. This script is
@@ -134,9 +146,7 @@ enc_id() {
   nitro-cli describe-enclaves 2>/dev/null \
     | python3 -c "import json,sys; print(next((e['EnclaveID'] for e in json.load(sys.stdin) if e.get('EnclaveName')=='$NAME'), ''))"
 }
-# Set the chain endpoints once, on the fresh enclave. The enclave refuses a
-# second set and signs nothing without one. The CLI reads the values from the
-# unit env.
+# Set endpoints and KMS values once from the unit env.
 set_endpoints() {
   : "${CLI:?CLI env required (set in /etc/utexo/enclave.env)}"
   # systemd sources this via EnvironmentFile; a manual `start` does not, so
@@ -253,6 +263,10 @@ ENCLAVE_DEBUG_MODE=$ENCLAVE_DEBUG_MODE
 CLI=$DIR/utexo-bridge-parent-cli
 ELECTRUM_URL=$ELECTRUM_URL
 EVM_RPC_TLS_CA_DER_FILE=$EVM_RPC_TLS_CA_DER_FILE
+KMS_KEY_ARN=$KMS_KEY_ARN
+KMS_REGION=$KMS_REGION
+KMS_SEED_ID=$KMS_SEED_ID
+KMS_EXPECTED_EVM_ADDRESS=$KMS_EXPECTED_EVM_ADDRESS
 EOF
 for CID in "${CIDS[@]}"; do
   cat > "/etc/utexo/parent-$CID.env" <<EOF

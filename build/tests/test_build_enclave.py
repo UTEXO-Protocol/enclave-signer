@@ -1,7 +1,6 @@
 """Build argument regression tests; stop before any Docker/Nitro build."""
 import json
 import os
-import re
 from pathlib import Path
 import subprocess
 import tempfile
@@ -82,18 +81,17 @@ class BuildArgumentsTests(unittest.TestCase):
                 self.assertFalse(self.argv.exists())
 
     def test_rgb_asset_forwarded_once_without_implicit_debug(self):
-        # Endpoint values in the caller's env never reach the build.
+        # Endpoint and KMS values in the caller's env never reach the build.
         for recipe in RGB_RECIPES:
             with self.subTest(recipe=recipe):
-                pins = KMS_PINS if recipe == 'Dockerfile.enclave.mint' else {}
                 result = self.invoke(recipe, RGB_ASSET_ID='rgb:test-bfa-asset',
                                      ELECTRUM_URL='ssl://electrum.test:50002',
                                      EVM_RPC_HOST='rpc.test', EVM_RPC_TLS_CA_DER_HEX='ab',
-                                     **pins)
+                                     **KMS_PINS)
                 self.assertEqual(result.returncode, 42, result.stderr)
-                expected = ['SOURCE_DATE_EPOCH=1700000000', 'RGB_ASSET_ID=rgb:test-bfa-asset']
-                expected.extend(f'{key}={value}' for key, value in pins.items())
-                self.assertEqual(self.captured_build_args(), expected)
+                self.assertEqual(self.captured_build_args(), [
+                    'SOURCE_DATE_EPOCH=1700000000', 'RGB_ASSET_ID=rgb:test-bfa-asset',
+                ])
 
     def test_combined_forwards_asset_and_explicit_debug_together(self):
         result = self.invoke('Dockerfile.enclave', RGB_ASSET_ID='rgb:test-bfa-asset',
@@ -104,7 +102,7 @@ class BuildArgumentsTests(unittest.TestCase):
             'ENCLAVE_DEBUG_FEATURES=allow-debug-pcrs',
         ])
 
-    def test_kms_pins_forwarded_only_to_mint_recipe(self):
+    def test_no_recipe_forwards_kms_pins(self):
         pins = dict(KMS_PINS, KMS_EXPECTED_EVM_ADDRESS='0x' + '12' * 20)
         for recipe in (*RGB_RECIPES, 'Dockerfile.enclave.ccd',
                        'Dockerfile.enclave-dev', 'Dockerfile.enclave-dev.bfa'):
@@ -114,31 +112,7 @@ class BuildArgumentsTests(unittest.TestCase):
                 expected = ['SOURCE_DATE_EPOCH=1700000000']
                 if recipe in RGB_RECIPES:
                     expected.append('RGB_ASSET_ID=rgb:test-bfa-asset')
-                if recipe == 'Dockerfile.enclave.mint':
-                    expected.extend(f'{key}={value}' for key, value in pins.items())
                 self.assertEqual(self.captured_build_args(), expected)
-
-    def test_mint_rejects_missing_kms_pins_before_docker(self):
-        for key in KMS_PINS:
-            with self.subTest(missing=key):
-                pins = dict(KMS_PINS, **{key: ''})
-                result = self.invoke('Dockerfile.enclave.mint',
-                                     RGB_ASSET_ID='rgb:test-bfa-asset', **pins)
-                self.assertEqual(result.returncode, 1, result.stderr)
-                self.assertIn('requires ' + key, result.stderr)
-                self.assertFalse(self.argv.exists())
-
-    def test_only_mint_image_embeds_kms_configuration(self):
-        for recipe in (ROOT / 'build').glob('Dockerfile*'):
-            with self.subTest(recipe=recipe.name):
-                text = recipe.read_text()
-                arguments = re.findall(r'^ARG (KMS_\w+)', text, re.MULTILINE)
-                expected = (
-                    [*KMS_PINS, 'KMS_EXPECTED_EVM_ADDRESS']
-                    if recipe.name == 'Dockerfile.enclave.mint' else []
-                )
-                self.assertEqual(arguments, expected)
-                self.assertEqual(bool(re.search(r'^ENV KMS_', text, re.MULTILINE)), bool(expected))
 
     def invoke_make(self, target, **extra):
         self.argv.unlink(missing_ok=True)
@@ -147,7 +121,7 @@ class BuildArgumentsTests(unittest.TestCase):
             env=dict(self.env, **extra), capture_output=True, text=True,
         )
 
-    def test_make_mint_passes_required_pins_as_environment_arguments(self):
+    def test_make_mint_passes_only_the_asset_as_environment_argument(self):
         pins = dict(KMS_PINS, KMS_EXPECTED_EVM_ADDRESS='0x' + '34' * 20,
                     RGB_ASSET_ID='rgb:test-bfa-asset')
         result = self.invoke_make('build_enclave_mint', **pins)
@@ -156,19 +130,16 @@ class BuildArgumentsTests(unittest.TestCase):
         self.assertEqual(argv[0], 'build')
         self.assertIn('./build/Dockerfile.enclave.mint', argv)
         self.assertEqual([argv[i + 1] for i, arg in enumerate(argv) if arg == '--build-arg'],
-                         ['RGB_ASSET_ID', *KMS_PINS, 'KMS_EXPECTED_EVM_ADDRESS'])
-        self.assertEqual(json.loads(self.docker_env.read_text()), pins)
+                         ['RGB_ASSET_ID'])
+        self.assertEqual(json.loads(self.docker_env.read_text())['RGB_ASSET_ID'],
+                         'rgb:test-bfa-asset')
         self.assertNotIn(self.env['GITHUB_TOKEN'], ' '.join(argv))
 
-    def test_make_mint_rejects_missing_required_pin_before_docker(self):
-        for key in ('RGB_ASSET_ID', *KMS_PINS):
-            with self.subTest(missing=key):
-                pins = dict(KMS_PINS, RGB_ASSET_ID='rgb:test-bfa-asset')
-                del pins[key]
-                result = self.invoke_make('build_enclave_mint', **pins)
-                self.assertEqual(result.returncode, 2, result.stderr)
-                self.assertIn(key + ' required', result.stderr)
-                self.assertFalse(self.argv.exists())
+    def test_make_mint_rejects_missing_asset_before_docker(self):
+        result = self.invoke_make('build_enclave_mint')
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertIn('RGB_ASSET_ID required', result.stderr)
+        self.assertFalse(self.argv.exists())
 
     def test_make_old_targets_have_no_kms_dependency_or_arguments(self):
         for target in ('build_enclave', 'build_enclave_rgb',
@@ -196,10 +167,12 @@ class ImageInputsTests(unittest.TestCase):
 
     def test_no_build_input_names_an_endpoint(self):
         files = [ROOT / 'build' / r for r in self.RECIPES]
-        files += [ROOT / 'build/build-enclave.sh', ROOT / '.github/workflows/build-eif.yml']
+        files += [ROOT / 'build/build-enclave.sh', ROOT / '.github/workflows/build-eif.yml',
+                  ROOT / 'Makefile']
         for path in files:
             text = path.read_text()
-            for name in ('ELECTRUM_URL', 'EVM_RPC_HOST', 'EVM_RPC_TLS_CA', 'EVM_RPC_URL'):
+            for name in ('ELECTRUM_URL', 'EVM_RPC_HOST', 'EVM_RPC_TLS_CA', 'EVM_RPC_URL',
+                         'KMS_KEY_ARN', 'KMS_REGION', 'KMS_SEED_ID', 'KMS_EXPECTED_EVM_ADDRESS'):
                 with self.subTest(file=path.name, name=name):
                     self.assertNotIn(name, text)
 

@@ -21,7 +21,7 @@
 use crate::config::{BridgeConfig, BtcRelayMode};
 
 pub use attestation_verify::{
-    AttestationMode, AttestedPolicy, BtcDataSource, EvmDataSource, EvmRpcTlsPin, SignerRole,
+    AttestationMode, AttestedPolicy, BtcDataSource, EvmDataSource, EvmRpcTlsPin, KmsPin, SignerRole,
 };
 
 /// The enclave's resolved security posture. See the module docs.
@@ -103,6 +103,8 @@ pub struct ProductionPolicy {
     pub gas_tx_max_value_wei: Option<u128>,
     /// Gas-tx calldata selector allowlist (`GAS_TX_ALLOWED_SELECTORS`).
     pub gas_tx_allowed_selectors: Vec<[u8; 4]>,
+    /// The KMS pin set at launch. See [`SecurityPolicy::with_kms`].
+    pub kms: Option<KmsPin>,
 }
 
 /// Why an enclave resolved to [`SecurityPolicy::Development`] rather than
@@ -237,7 +239,17 @@ impl SecurityPolicy {
             } else {
                 Vec::new()
             },
+            kms: None,
         })
+    }
+
+    /// Set the KMS pin of a production policy. A development policy does not
+    /// change.
+    pub fn with_kms(mut self, kms: Option<KmsPin>) -> Self {
+        if let Self::Production(p) = &mut self {
+            p.kms = kms;
+        }
+        self
     }
 
     fn dev(reason: DevReason) -> Self {
@@ -272,6 +284,7 @@ impl SecurityPolicy {
                 // is signable), so "unpinned" is itself attested.
                 gas_tx_max_value_wei: p.gas_tx_max_value_wei.unwrap_or(0),
                 gas_tx_allowed_selectors: p.gas_tx_allowed_selectors.clone(),
+                kms: p.kms.clone(),
             },
             Self::Development { .. } => AttestedPolicy::Development,
         }

@@ -557,9 +557,7 @@ fn warn_if_not_loopback(var: &str, url: &str) {
     }
 }
 
-/// The chain endpoints the operator sets once, at launch (`SetEndpoints`).
-/// They are not in the image, so they do not change PCR0. The attested
-/// policy commits the Electrum host and the EVM RPC pin.
+/// Endpoints and KMS pins set once at launch and committed in the attested policy.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Endpoints {
     /// `ssl://host:port` or `tcp://host:port`. Empty without `rgb-validation`.
@@ -568,6 +566,9 @@ pub struct Endpoints {
     pub electrum_port: u16,
     /// `None` without `evm-rpc`.
     pub evm_rpc_tls: Option<EvmRpcTls>,
+    /// `None` without `kms-persistence`, and in an import-only build with no
+    /// KMS values.
+    pub kms: Option<crate::policy::KmsPin>,
 }
 
 impl Endpoints {
@@ -616,16 +617,66 @@ impl Endpoints {
             None
         };
 
+        let kms_values = [
+            ("kms_key_arn", &req.kms_key_arn),
+            ("kms_region", &req.kms_region),
+            ("kms_seed_id", &req.kms_seed_id),
+            ("kms_expected_evm_address", &req.kms_expected_evm_address),
+        ];
+        #[cfg(feature = "kms-persistence")]
+        let kms = if cfg!(feature = "allow-seed-import")
+            && kms_values.iter().all(|(_, v)| v.is_empty())
+        {
+            // Development import-only mode.
+            None
+        } else {
+            let config = crate::kms::KmsConfig {
+                key_arn: req.kms_key_arn.clone(),
+                region: req.kms_region.clone(),
+                seed_id: req.kms_seed_id.clone(),
+            };
+            config.validate().map_err(|e| e.to_string())?;
+            // The Electrum pin must not catch the KMS host.
+            if electrum_host == config.endpoint_host() {
+                return Err(format!("electrum_url host {electrum_host} is the KMS host"));
+            }
+            let address = &req.kms_expected_evm_address;
+            let expected_evm_address = if address.is_empty() {
+                None
+            } else {
+                Some(
+                    hex::decode(address.strip_prefix("0x").unwrap_or(address))
+                        .ok()
+                        .and_then(|v| v.try_into().ok())
+                        .ok_or("kms_expected_evm_address must be 20-byte hex")?,
+                )
+            };
+            Some(crate::policy::KmsPin {
+                key_arn: config.key_arn,
+                region: config.region,
+                seed_id: config.seed_id,
+                expected_evm_address,
+            })
+        };
+        #[cfg(not(feature = "kms-persistence"))]
+        let kms = {
+            for (name, value) in kms_values {
+                unused(name, value.is_empty())?;
+            }
+            None
+        };
+
         Ok(Self {
             electrum_url: electrum_url.to_string(),
             electrum_host,
             electrum_port,
             evm_rpc_tls,
+            kms,
         })
     }
 }
 
-#[cfg(not(feature = "evm-rpc"))]
+#[cfg(not(all(feature = "evm-rpc", feature = "kms-persistence")))]
 fn unused(name: &str, empty: bool) -> std::result::Result<(), String> {
     if empty {
         Ok(())
@@ -842,8 +893,16 @@ mod tests {
             req.evm_rpc_ca_der = hex::decode(CA_HEX.trim()).unwrap();
             req.evm_rpc_tls_port = 443;
         }
+        if cfg!(feature = "kms-persistence") {
+            req.kms_key_arn = KEY_ARN.into();
+            req.kms_region = "eu-west-1".into();
+            req.kms_seed_id = "seed-1".into();
+        }
         req
     }
+
+    const KEY_ARN: &str =
+        "arn:aws:kms:eu-west-1:123456789012:key/mrk-0123456789abcdef0123456789abcdef";
 
     fn parse_with(
         edit: impl FnOnce(&mut SetEndpointsRequest),
@@ -963,6 +1022,72 @@ mod tests {
             assert!(parse_with(|r| r.evm_rpc_host = "rpc.test".into()).is_err());
             assert!(parse_with(|r| r.evm_rpc_ca_der = vec![1]).is_err());
             assert!(parse_with(|r| r.evm_rpc_tls_port = 443).is_err());
+        }
+    }
+
+    #[cfg(feature = "kms-persistence")]
+    #[test]
+    fn kms_values_are_checked_at_launch() {
+        let edits: [fn(&mut SetEndpointsRequest); 8] = [
+            |r| r.kms_key_arn = "arn:aws:kms:eu-west-1:123456789012:alias/seed".into(),
+            |r| r.kms_key_arn = KEY_ARN.replace("eu-west-1", "eu-west-2"),
+            |r| {
+                r.kms_region = "cn-north-1".into();
+                r.kms_key_arn = KEY_ARN.replace("eu-west-1", "cn-north-1");
+            },
+            |r| r.kms_seed_id = "seed 1".into(),
+            |r| r.kms_expected_evm_address = "00".repeat(19),
+            |r| r.kms_expected_evm_address = "zz".repeat(20),
+            |r| {
+                r.kms_region.clear();
+                r.kms_seed_id.clear();
+            },
+            |r| r.electrum_url = "ssl://kms.eu-west-1.amazonaws.com:50002".into(),
+        ];
+        for edit in edits {
+            assert!(parse_with(edit).is_err());
+        }
+        if cfg!(feature = "allow-seed-import") {
+            let e = parse_with(|r| {
+                r.kms_key_arn.clear();
+                r.kms_region.clear();
+                r.kms_seed_id.clear();
+            })
+            .unwrap();
+            assert_eq!(e.kms, None);
+        }
+        let e =
+            parse_with(|r| r.kms_expected_evm_address = format!("0x{}", "ab".repeat(20))).unwrap();
+        assert_eq!(
+            e.kms,
+            Some(crate::policy::KmsPin {
+                key_arn: KEY_ARN.into(),
+                region: "eu-west-1".into(),
+                seed_id: "seed-1".into(),
+                expected_evm_address: Some([0xab; 20]),
+            })
+        );
+        assert_eq!(
+            parse_with(|_| {})
+                .unwrap()
+                .kms
+                .unwrap()
+                .expected_evm_address,
+            None
+        );
+    }
+
+    #[cfg(not(feature = "kms-persistence"))]
+    #[test]
+    fn kms_values_are_refused_without_kms_persistence() {
+        let edits: [fn(&mut SetEndpointsRequest); 4] = [
+            |r| r.kms_key_arn = KEY_ARN.into(),
+            |r| r.kms_region = "eu-west-1".into(),
+            |r| r.kms_seed_id = "seed-1".into(),
+            |r| r.kms_expected_evm_address = "ab".repeat(20),
+        ];
+        for edit in edits {
+            assert!(parse_with(edit).is_err());
         }
     }
 }

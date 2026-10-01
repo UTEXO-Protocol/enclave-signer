@@ -296,6 +296,7 @@ fn pinned_client(port: u16, ca_der_hex: &str) -> Box<dyn EvmReceiptProvider + Se
             evm_rpc_host: "rpc.test".into(),
             evm_rpc_ca_der: hex::decode(ca_der_hex.trim()).unwrap(),
             evm_rpc_tls_port: set_port.into(),
+            ..Default::default()
         })),
     };
     // The response lands after the request.

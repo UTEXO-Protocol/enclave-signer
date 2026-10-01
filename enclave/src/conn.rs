@@ -103,7 +103,7 @@ impl<S: SocketTimeout> DeadlineStream<S> {
     }
 }
 
-/// Shared absolute-deadline check for sockets and custody subprocesses.
+/// Shared absolute-deadline check for sockets and custody calls.
 pub(crate) fn remaining_until(deadline: Instant) -> io::Result<Duration> {
     let remaining = deadline.saturating_duration_since(Instant::now());
     if remaining.is_zero() {

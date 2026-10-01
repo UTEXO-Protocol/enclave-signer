@@ -69,7 +69,7 @@ zeroize = "1"
 # parent / signer packages). The parent runs on the untrusted host, so needing a
 # credential to build it costs nothing. Keep this rev in lockstep with the
 # vendored slice in `enclave-proto/` — see its README.
-federated-signer-proto = { git = "ssh://git@github-federated-signer/UTEXO-Protocol/federated-signer-proto.git", rev = "e89f23e4533455d82462a8f1ba040865a48200a9", package = "federated-signer-proto" }
+federated-signer-proto = { git = "ssh://git@github-federated-signer/UTEXO-Protocol/federated-signer-proto.git", rev = "53e09934400527320c6b5c589be3a94d982a5830", package = "federated-signer-proto" }
 clap = { version = "4", features = ["derive"] }
 # The `GET /health` readiness probe. Both already resolve in this graph via
 # tonic, so the only lockfile addition is `serde_path_to_error` (axum's `json`

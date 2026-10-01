@@ -4,6 +4,7 @@
 //! then a real tonic gRPC server (Parent Adapter) pointing at it, and finally
 //! exercise the full path via a gRPC client.
 
+use attestation_verify::AttestedPolicy;
 use std::collections::HashSet;
 use std::net::TcpListener;
 
@@ -178,6 +179,8 @@ fn start_mock_enclave() -> u16 {
                         bundle.extend_from_slice(&(p.len() as u32).to_be_bytes());
                         bundle.extend_from_slice(p);
                     }
+                    let attested_policy = AttestedPolicy::Development.to_bytes();
+                    bundle.extend_from_slice(&attested_policy);
                     let commitment: [u8; 32] = sha2::Sha256::digest(&bundle).into();
                     let nonce: [u8; 32] = req
                         .nonce
@@ -195,6 +198,7 @@ fn start_mock_enclave() -> u16 {
                             enclave_proto::GetAttestedPublicKeyResponse {
                                 public_keys: Some(public_keys),
                                 attestation_doc: doc,
+                                attested_policy,
                             },
                         )),
                     }
@@ -968,6 +972,8 @@ async fn grpc_attested_public_key_roundtrip_and_verify() {
         bundle.extend_from_slice(&(p.len() as u32).to_be_bytes());
         bundle.extend_from_slice(p);
     }
+    assert_eq!(resp.attested_policy, AttestedPolicy::Development.to_bytes());
+    bundle.extend_from_slice(&resp.attested_policy);
     let expected: [u8; 32] = sha2::Sha256::digest(&bundle).into();
     assert_eq!(verified.user_data.as_deref(), Some(expected.as_slice()));
     assert_eq!(verified.nonce, nonce.to_vec());

@@ -13,13 +13,17 @@ use utexo_bridge_parent::health;
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let seed_configured = utexo_bridge_parent::seed_persistence::configured();
     tracing_subscriber::registry()
-        // SDK trace events may contain signed requests. Broker diagnostics use
-        // fixed categories and must stay safe even when RUST_LOG enables debug.
+        // SDK debug and trace events may contain signed requests, so those two
+        // levels are dropped for the AWS and HTTP stacks when the broker is
+        // configured. Their info, warn and error events stay: the gRPC and
+        // mTLS server share hyper and rustls. Broker diagnostics use fixed
+        // categories and are safe at every level.
         .with(
             tracing_subscriber::fmt::layer()
                 .with_filter(EnvFilter::from_default_env())
                 .with_filter(tracing_subscriber::filter::filter_fn(move |metadata| {
                     !seed_configured
+                        || *metadata.level() < tracing::Level::DEBUG
                         || !["aws_", "hyper", "h2", "rustls"]
                             .iter()
                             .any(|prefix| metadata.target().starts_with(prefix))

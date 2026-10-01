@@ -11,10 +11,10 @@
 //! hash mismatch.
 //!
 //! Wire contract: the discriminants and field order are load-bearing. Never
-//! renumber a variant or reorder fields - bump [`POLICY_COMMITMENT_V6`] and add
+//! renumber a variant or reorder fields - bump [`POLICY_COMMITMENT_V7`] and add
 //! a new arm instead.
 //!
-//! V6 adds the Electrum host and the pinned TLS host and CA of the EVM RPC.
+//! V7 adds the KMS pin the operator sets at launch. V6 added the Electrum host and the pinned TLS host and CA of the EVM RPC.
 //! V5 appended the released token contract (a `burnId` preimage input). V4
 //! added the signer role, so a verifier can tell a mint signer from a burn
 //! signer. V3 added the FundsIn emitter and confirmation rule.
@@ -23,11 +23,11 @@
 /// document produced by an enclave speaking a different policy-encoding version
 /// instead of silently mis-hashing it.
 ///
-/// V6 adds the Electrum host and the EVM RPC TLS pin; V5 the token contract;
+/// V7 adds the KMS pin; V6 the Electrum host and the EVM RPC TLS pin; V5 the token contract;
 /// V4 the signer role; V3 the deposit emitter and confirmation rule; V2 the
 /// gas-tx rule. Bumping the tag prevents older verifiers from silently
 /// agreeing on a differently shaped policy.
-pub const POLICY_COMMITMENT_V6: u8 = 6;
+pub const POLICY_COMMITMENT_V7: u8 = 7;
 
 /// Which bridge directions the image signs. Taken from the build features, so
 /// it is measured into PCR0 and no host config can widen it.
@@ -72,6 +72,17 @@ pub enum EvmDataSource {
 pub struct EvmRpcTlsPin {
     pub host: String,
     pub ca_sha256: [u8; 32],
+}
+
+/// The KMS key and seed object the operator set at launch. `Some` only in a
+/// `kms-persistence` build with KMS configured.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct KmsPin {
+    pub key_arn: String,
+    pub region: String,
+    pub seed_id: String,
+    /// The EVM address the recovered seed must give.
+    pub expected_evm_address: Option<[u8; 20]>,
 }
 
 /// Where the enclave gets the Bitcoin anchor evidence for RGB consignment
@@ -153,6 +164,8 @@ pub enum AttestedPolicy {
         /// enforces; committed so a verifier confirms which token that rule is
         /// pinned to. Appended in V5.
         token_contract: [u8; 20],
+        /// The KMS pin set at launch. Appended in V7.
+        kms: Option<KmsPin>,
     },
     Development,
 }
@@ -162,7 +175,7 @@ impl AttestedPolicy {
     /// `user_data`. Layout (see the WIRE CONTRACT note in the module docs):
     ///
     /// ```text
-    /// [POLICY_COMMITMENT_V6]
+    /// [POLICY_COMMITMENT_V7]
     /// Production:  [0x01][allow_vanilla u8][signer_role u8][attestation u8]
     ///              [evm_source u8]
     ///              [btc_source u8][chain_id u64 BE][bridge_contract 20]
@@ -177,11 +190,14 @@ impl AttestedPolicy {
     ///              [gas_tx_max_value_wei u128 BE]
     ///              [len(selectors) u32 BE][selector 4]...   (sorted, deduped)
     ///              [token_contract 20]
+    ///              [kms: 0x00 | 0x01 ++ len(arn) u32 BE ++ arn
+    ///               ++ len(region) u32 BE ++ region ++ len(seed_id) u32 BE
+    ///               ++ seed_id ++ (0x00 | 0x01 ++ address 20)]
     /// Development: [0x00]
     /// ```
     pub fn to_bytes(&self) -> Vec<u8> {
         let mut out = Vec::new();
-        out.push(POLICY_COMMITMENT_V6);
+        out.push(POLICY_COMMITMENT_V7);
         match self {
             AttestedPolicy::Production {
                 allow_vanilla_psbt,
@@ -203,6 +219,7 @@ impl AttestedPolicy {
                 gas_tx_max_value_wei,
                 gas_tx_allowed_selectors,
                 token_contract,
+                kms,
             } => {
                 out.push(0x01);
                 out.push(*allow_vanilla_psbt as u8);
@@ -254,12 +271,178 @@ impl AttestedPolicy {
                 }
                 // V5: the released token, a `burnId` preimage input.
                 out.extend_from_slice(token_contract);
+                match kms {
+                    Some(pin) => {
+                        out.push(0x01);
+                        for field in [&pin.key_arn, &pin.region, &pin.seed_id] {
+                            out.extend_from_slice(&(field.len() as u32).to_be_bytes());
+                            out.extend_from_slice(field.as_bytes());
+                        }
+                        match pin.expected_evm_address {
+                            Some(address) => {
+                                out.push(0x01);
+                                out.extend_from_slice(&address);
+                            }
+                            None => out.push(0x00),
+                        }
+                    }
+                    None => out.push(0x00),
+                }
             }
             AttestedPolicy::Development => {
                 out.push(0x00);
             }
         }
         out
+    }
+
+    /// The inverse of [`to_bytes`](AttestedPolicy::to_bytes). Refuses any
+    /// other version, an unknown tag, a short or long input, a string that is
+    /// not UTF-8 and a selector list that is not sorted and unique.
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, PolicyDecodeError> {
+        let mut r = Reader(bytes);
+        if r.u8()? != POLICY_COMMITMENT_V7 {
+            return Err(PolicyDecodeError("unknown policy version"));
+        }
+        let policy = match r.u8()? {
+            0x00 => AttestedPolicy::Development,
+            0x01 => {
+                let allow_vanilla_psbt = r.flag()?;
+                let signer_role = match r.u8()? {
+                    0 => SignerRole::Combined,
+                    1 => SignerRole::Mint,
+                    2 => SignerRole::Burn,
+                    _ => return Err(PolicyDecodeError("unknown signer role")),
+                };
+                let attestation = match r.u8()? {
+                    0 => AttestationMode::Mock,
+                    1 => AttestationMode::Real,
+                    _ => return Err(PolicyDecodeError("unknown attestation mode")),
+                };
+                let evm_source = match r.u8()? {
+                    0 => EvmDataSource::Disabled,
+                    1 => EvmDataSource::RawRpc,
+                    2 => EvmDataSource::HeliosVerified,
+                    3 => EvmDataSource::PinnedTlsRpc,
+                    _ => return Err(PolicyDecodeError("unknown EVM data source")),
+                };
+                let btc_source = match r.u8()? {
+                    1 => BtcDataSource::SpvVerified,
+                    _ => return Err(PolicyDecodeError("unknown BTC data source")),
+                };
+                let chain_id = u64::from_be_bytes(r.array()?);
+                let bridge_contract = r.array()?;
+                let rgb_asset_id = r.string()?;
+                let funds_in_contract = r.array()?;
+                let evm_min_confirmations = u64::from_be_bytes(r.array()?);
+                let evm_checkpoint = r.flag()?.then(|| r.array()).transpose()?;
+                let electrum_host = r.string()?;
+                let evm_rpc_tls = r
+                    .flag()?
+                    .then(|| -> Result<_, PolicyDecodeError> {
+                        Ok(EvmRpcTlsPin {
+                            host: r.string()?,
+                            ca_sha256: r.array()?,
+                        })
+                    })
+                    .transpose()?;
+                let gas_tx_allowed_to = r.array()?;
+                let gas_tx_max_gas_limit = u64::from_be_bytes(r.array()?);
+                let gas_tx_max_fee_per_gas = u128::from_be_bytes(r.array()?);
+                let gas_tx_max_value_wei = u128::from_be_bytes(r.array()?);
+                let count = r.len()?;
+                let mut gas_tx_allowed_selectors: Vec<[u8; 4]> = Vec::new();
+                for _ in 0..count {
+                    let selector = r.array()?;
+                    if gas_tx_allowed_selectors.last() >= Some(&selector) {
+                        return Err(PolicyDecodeError("selectors are not sorted and unique"));
+                    }
+                    gas_tx_allowed_selectors.push(selector);
+                }
+                let token_contract = r.array()?;
+                let kms = r
+                    .flag()?
+                    .then(|| -> Result<_, PolicyDecodeError> {
+                        Ok(KmsPin {
+                            key_arn: r.string()?,
+                            region: r.string()?,
+                            seed_id: r.string()?,
+                            expected_evm_address: r.flag()?.then(|| r.array()).transpose()?,
+                        })
+                    })
+                    .transpose()?;
+                AttestedPolicy::Production {
+                    allow_vanilla_psbt,
+                    signer_role,
+                    attestation,
+                    evm_source,
+                    btc_source,
+                    chain_id,
+                    bridge_contract,
+                    rgb_asset_id,
+                    funds_in_contract,
+                    evm_min_confirmations,
+                    evm_checkpoint,
+                    electrum_host,
+                    evm_rpc_tls,
+                    gas_tx_allowed_to,
+                    gas_tx_max_gas_limit,
+                    gas_tx_max_fee_per_gas,
+                    gas_tx_max_value_wei,
+                    gas_tx_allowed_selectors,
+                    token_contract,
+                    kms,
+                }
+            }
+            _ => return Err(PolicyDecodeError("unknown policy kind")),
+        };
+        if !r.0.is_empty() {
+            return Err(PolicyDecodeError("trailing bytes"));
+        }
+        Ok(policy)
+    }
+}
+
+/// Why [`AttestedPolicy::from_bytes`] refused its input.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+#[error("cannot decode the attested policy: {0}")]
+pub struct PolicyDecodeError(pub &'static str);
+
+struct Reader<'a>(&'a [u8]);
+
+impl Reader<'_> {
+    fn take(&mut self, n: usize) -> Result<&[u8], PolicyDecodeError> {
+        if self.0.len() < n {
+            return Err(PolicyDecodeError("truncated"));
+        }
+        let (head, rest) = self.0.split_at(n);
+        self.0 = rest;
+        Ok(head)
+    }
+
+    fn u8(&mut self) -> Result<u8, PolicyDecodeError> {
+        Ok(self.take(1)?[0])
+    }
+
+    fn array<const N: usize>(&mut self) -> Result<[u8; N], PolicyDecodeError> {
+        Ok(self.take(N)?.try_into().expect("take returns N bytes"))
+    }
+
+    fn flag(&mut self) -> Result<bool, PolicyDecodeError> {
+        match self.u8()? {
+            0x00 => Ok(false),
+            0x01 => Ok(true),
+            _ => Err(PolicyDecodeError("unknown presence byte")),
+        }
+    }
+
+    fn len(&mut self) -> Result<usize, PolicyDecodeError> {
+        Ok(u32::from_be_bytes(self.array()?) as usize)
+    }
+
+    fn string(&mut self) -> Result<String, PolicyDecodeError> {
+        let n = self.len()?;
+        String::from_utf8(self.take(n)?.to_vec()).map_err(|_| PolicyDecodeError("not UTF-8"))
     }
 }
 
@@ -296,6 +479,7 @@ mod tests {
             gas_tx_max_value_wei: 0,
             gas_tx_allowed_selectors: vec![[0xde, 0xad, 0xbe, 0xef]],
             token_contract: [0x77; 20],
+            kms: None,
         }
     }
 
@@ -327,6 +511,7 @@ mod tests {
                 electrum_host,
                 evm_rpc_tls,
                 token_contract,
+                kms,
                 ..
             } => AttestedPolicy::Production {
                 allow_vanilla_psbt,
@@ -348,6 +533,7 @@ mod tests {
                 gas_tx_max_value_wei: max_value,
                 gas_tx_allowed_selectors: selectors,
                 token_contract,
+                kms,
             },
             AttestedPolicy::Development => unreachable!(),
         }
@@ -355,10 +541,10 @@ mod tests {
 
     #[test]
     fn every_encoding_starts_with_the_version_tag() {
-        assert_eq!(base().to_bytes()[0], POLICY_COMMITMENT_V6);
+        assert_eq!(base().to_bytes()[0], POLICY_COMMITMENT_V7);
         assert_eq!(
             AttestedPolicy::Development.to_bytes()[0],
-            POLICY_COMMITMENT_V6
+            POLICY_COMMITMENT_V7
         );
     }
 
@@ -432,11 +618,11 @@ mod tests {
             *token_contract = [0x78; 20];
         }
         assert_ne!(base().to_bytes(), other.to_bytes());
-        // Appended last: the bytes before it are unchanged.
+        // Only the token bytes change. The KMS presence byte follows them.
         let a = base().to_bytes();
         let b = other.to_bytes();
-        assert_eq!(a[..a.len() - 20], b[..b.len() - 20]);
-        assert_eq!(&a[a.len() - 20..], &[0x77; 20]);
+        assert_eq!(a[..a.len() - 21], b[..b.len() - 21]);
+        assert_eq!(&a[a.len() - 21..a.len() - 1], &[0x77; 20]);
     }
 
     #[test]
@@ -493,6 +679,111 @@ mod tests {
         assert_ne!(base().to_bytes(), pinned);
         assert_ne!(with_tls("other.test", [1; 32]).to_bytes(), pinned);
         assert_ne!(with_tls("rpc.test", [2; 32]).to_bytes(), pinned);
+    }
+
+    fn a_kms_pin() -> KmsPin {
+        KmsPin {
+            key_arn: "arn:aws:kms:eu-west-1:123456789012:key/mrk-0123456789abcdef0123456789abcdef"
+                .into(),
+            region: "eu-west-1".into(),
+            seed_id: "seed-1".into(),
+            expected_evm_address: Some([0x42; 20]),
+        }
+    }
+
+    fn with_kms(kms: Option<KmsPin>) -> AttestedPolicy {
+        let mut p = base();
+        if let AttestedPolicy::Production { kms: k, .. } = &mut p {
+            *k = kms;
+        }
+        p
+    }
+
+    #[test]
+    fn kms_changes_the_bytes() {
+        let pinned = with_kms(Some(a_kms_pin())).to_bytes();
+        assert_ne!(base().to_bytes(), pinned);
+        let edits: [fn(&mut KmsPin); 4] = [
+            |k| k.key_arn.push('0'),
+            |k| k.region = "eu-west-2".into(),
+            |k| k.seed_id = "seed-2".into(),
+            |k| k.expected_evm_address = None,
+        ];
+        for edit in edits {
+            let mut pin = a_kms_pin();
+            edit(&mut pin);
+            assert_ne!(with_kms(Some(pin)).to_bytes(), pinned);
+        }
+    }
+
+    #[test]
+    fn from_bytes_inverts_to_bytes() {
+        let mut policies = vec![AttestedPolicy::Development, base()];
+        policies.push(with_kms(Some(a_kms_pin())));
+        policies.push(with_kms(Some(KmsPin {
+            expected_evm_address: None,
+            ..a_kms_pin()
+        })));
+        let mut full = with_tls("rpc.test", [1; 32]);
+        if let AttestedPolicy::Production {
+            evm_checkpoint,
+            gas_tx_allowed_selectors,
+            kms,
+            ..
+        } = &mut full
+        {
+            *evm_checkpoint = Some([0xAB; 32]);
+            *gas_tx_allowed_selectors = vec![[1, 1, 1, 1], [2, 2, 2, 2]];
+            *kms = Some(a_kms_pin());
+        }
+        policies.push(full);
+        for p in policies {
+            assert_eq!(AttestedPolicy::from_bytes(&p.to_bytes()), Ok(p));
+        }
+    }
+
+    #[test]
+    fn from_bytes_refuses_bad_input() {
+        let good = with_kms(Some(a_kms_pin())).to_bytes();
+        for n in 0..good.len() {
+            assert!(AttestedPolicy::from_bytes(&good[..n]).is_err(), "{n}");
+        }
+        let mut bad = vec![[&good[..], &[0]].concat()];
+        let mut v6 = good.clone();
+        v6[0] = 6;
+        bad.push(v6);
+        let mut kind = good.clone();
+        kind[1] = 2;
+        bad.push(kind);
+        let mut role = good.clone();
+        role[3] = 3;
+        bad.push(role);
+        // The Electrum host is "electrum.test"; make its first byte invalid UTF-8.
+        let at = good
+            .windows(13)
+            .position(|w| w == b"electrum.test")
+            .unwrap();
+        let mut utf8 = good.clone();
+        utf8[at] = 0xff;
+        bad.push(utf8);
+        let unsorted = base_with_gas(
+            [0xAA; 20],
+            21_000,
+            1_000,
+            0,
+            vec![[1, 1, 1, 1], [2, 2, 2, 2]],
+        )
+        .to_bytes();
+        let at = unsorted
+            .windows(8)
+            .position(|w| w == [1, 1, 1, 1, 2, 2, 2, 2])
+            .unwrap();
+        let mut swapped = unsorted.clone();
+        swapped[at..at + 8].copy_from_slice(&[2, 2, 2, 2, 1, 1, 1, 1]);
+        bad.push(swapped);
+        for b in bad {
+            assert!(AttestedPolicy::from_bytes(&b).is_err(), "{b:?}");
+        }
     }
 
     #[test]

@@ -32,7 +32,6 @@ const KEY_ARN: &str = "arn:aws:kms:eu-west-1:123456789012:key/12345678-1234-1234
 
 fn config() -> KmsConfig {
     KmsConfig {
-        flow: CustodyFlow::RgbMint,
         key_arn: KEY_ARN.into(),
         region: "eu-west-1".into(),
         seed_id: "mint-pool-1".into(),
@@ -238,6 +237,25 @@ fn recipient_envelope_round_trips_and_rejects_every_deviation() {
         e.recip_infos = RecipientInfos(SetOfVec::try_from(vec![first, second]).unwrap());
     });
     assert!(open_envelope(&key, &two_recipients).is_err());
+}
+
+/// KMS returns `CiphertextForRecipient` as streaming BER: indefinite lengths
+/// and a chunked, constructed encrypted content. The DER-only decode used to
+/// reject every real envelope, which the DER fixtures above never showed.
+#[test]
+fn recipient_envelope_accepts_streaming_ber_from_kms() {
+    let key = recipient_key();
+    let seed = [9u8; 64];
+    let der = seal(&key.to_public_key(), &seed);
+    let ber = super::ber::test_support::to_streaming_ber(&der);
+    assert_ne!(ber, der);
+    assert!(
+        ContentInfo::from_der(&ber).is_err(),
+        "strict DER must reject the BER form"
+    );
+    assert_eq!(open_envelope(&key, &ber).unwrap().as_slice(), &seed);
+    // Truncating the end-of-contents marker is still refused.
+    assert!(open_envelope(&key, &ber[..ber.len() - 2]).is_err());
 }
 
 #[test]

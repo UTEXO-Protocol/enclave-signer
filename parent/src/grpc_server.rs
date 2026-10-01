@@ -868,6 +868,7 @@ impl ParentService for ParentAdapterService {
                     evm_gas_tx_uncompressed_pub: pk.evm_gas_tx_uncompressed_pub,
                     evm_gas_tx_address: pk.evm_gas_tx_address,
                     ccd_ed25519_pub: pk.ccd_ed25519_pub,
+                    attested_policy: r.attested_policy,
                 }))
             }
             Some(enclave_response::Response::Error(e)) => Err(Self::enclave_error_to_status(&e)),

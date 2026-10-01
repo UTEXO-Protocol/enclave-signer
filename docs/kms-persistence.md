@@ -12,11 +12,18 @@ the custody flow. Builds enabling `kms-persistence` without `mint-signer` are
 rejected at compile time. Burn signers retain their existing OS-entropy and
 cloning lifecycle.
 
-Only a confirmed missing S3 object with no expected identity pin permits
-`GenerateDataKey(NumberOfBytes=64)`. The parent writes with `If-None-Match: *`,
-then reads the committed object. Concurrent initializers recover that same
-winner. Storage errors, invalid ciphertext and decryption failures never fall
-back to a new seed. Replicas recover the saved seed instead of using peer cloning.
+The address pin decides the direction. An unpinned launch only bootstraps: a
+confirmed missing S3 object permits `GenerateDataKey(NumberOfBytes=64)`, and an
+existing object is refused until the verified address is pinned, so the parent
+cannot make an unpinned image adopt a planted blob or generate over a saved
+identity. The parent writes with `If-None-Match: *`, then reads the committed
+object; the enclave activates that object only when it is the blob this call
+generated. A concurrent initializer that lost the race fails without decrypting
+anything and is relaunched with the winner's pin. A pinned launch only
+recovers: it loads the saved object, verifies the derived address, and treats a
+missing object as a failure. Storage errors, invalid ciphertext and decryption
+failures never fall back to a new seed. Replicas recover the saved seed with the
+pin instead of using peer cloning.
 
 The [KMS client](../enclave/src/kms/mod.rs) is pure Rust and runs inside the
 signer process. The official `aws-sdk-kms` crate signs (SigV4) and sends
@@ -31,9 +38,9 @@ ephemeral `CiphertextForRecipient` encrypted to one call's recipient key.
 
 ## Enclave configuration
 
-Set these public Docker build arguments for `Dockerfile.enclave.mint` (the
-`rgb-mint` image variant); `build/build-enclave.sh` also forwards them. The mint
-image also requires its deployment-specific `RGB_ASSET_ID`:
+Set these public values at launch, in `SetEndpoints` (`cli set-endpoints`, or
+`/etc/utexo/enclave.env` with `deploy/deploy-host.sh`). The image does not
+carry them, and the attested policy commits them:
 
 | Setting | Value |
 | --- | --- |
@@ -44,9 +51,12 @@ image also requires its deployment-specific `RGB_ASSET_ID`:
 
 Keep the key ARN, `rgb-mint` flow context, seed ID and Bitcoin network unchanged
 when recovering an existing identity. A configured address pin rejects a
-different recovered seed and makes missing storage fail before generation. There is no creation switch.
-Configuration changes affect the image measurement and require updating KMS
-permissions. These endpoint settings support the standard AWS commercial partition.
+different recovered seed and makes missing storage fail before generation; no
+pin makes an existing object fail before decryption. There is no creation switch.
+A development image built with `allow-seed-import` and launched with all KMS
+values empty is import-only: `init` needs a mnemonic, and an empty `init` fails.
+A verifier checks them with `attest-verify --expect-kms-key-arn`,
+`--expect-kms-region`, `--expect-kms-seed-id` and `--expect-kms-evm-address`. These endpoint settings support the standard AWS commercial partition.
 
 ## Parent integration
 
@@ -79,7 +89,7 @@ connects to parent CID `3`, vsock port `8004`. Local development can instead set
 
 In another terminal, or through your existing host supervisor, run AWS's
 standard `vsock-proxy` for the same KMS region. The enclave pins
-`kms.<region>.amazonaws.com` to loopback and forwards port 443 to vsock port
+`kms.<region>.amazonaws.com` to `127.0.0.2` and forwards port 443 to vsock port
 `8003` (`KMS_VSOCK_PORT` overrides it), so TLS still validates the real KMS
 certificate and the proxy only relays bytes:
 
@@ -131,6 +141,38 @@ KMS key deletion permissions. Do not authorize debug images or zero PCRs.
 See AWS's [recipient-attestation conditions](https://docs.aws.amazon.com/kms/latest/developerguide/conditions-attestation.html)
 and [conditional S3 writes](https://docs.aws.amazon.com/AmazonS3/latest/userguide/conditional-writes.html).
 
+Allow statements alone do not enforce any of this. A key policy that grants
+`kms:*` to the account root delegates to IAM, so a signer role whose identity
+policy allows `kms:Decrypt` is admitted through that statement and the
+conditions on its own Allow statement are never evaluated. Add explicit Deny
+statements for the signer principal; a Deny wins over every Allow. Keep one
+condition key per Deny: AWS ANDs the keys inside one condition block, so a
+`StringNotEquals` over several context keys fires only when every key is wrong.
+The `Not` operators also match when the key is absent, which denies unattested
+calls. Verified on Nitro hardware on 2026-10-01: a debug enclave (PCR0 zero) and
+a foreign `seed_id` are both refused only with this shape:
+
+```json
+{"Sid":"DenyUnlessAttestedImage","Effect":"Deny","Principal":{"AWS":"SIGNER_ROLE_ARN"},
+ "Action":["kms:GenerateDataKey","kms:Decrypt"],"Resource":"*",
+ "Condition":{"StringNotEqualsIgnoreCase":{"kms:RecipientAttestation:PCR0":"PRODUCTION_PCR0"}}},
+{"Sid":"DenyUnlessSeedId","Effect":"Deny","Principal":{"AWS":"SIGNER_ROLE_ARN"},
+ "Action":["kms:GenerateDataKey","kms:Decrypt"],"Resource":"*",
+ "Condition":{"StringNotEquals":{"kms:EncryptionContext:seed_id":"YOUR_SEED_ID"}}},
+{"Sid":"DenyExtraContextKeys","Effect":"Deny","Principal":{"AWS":"SIGNER_ROLE_ARN"},
+ "Action":["kms:GenerateDataKey","kms:Decrypt"],"Resource":"*",
+ "Condition":{"ForAnyValue:StringNotEquals":{"kms:EncryptionContextKeys":["application","flow","seed_id","bitcoin_network"]}}},
+{"Sid":"DenyPlantedCiphertext","Effect":"Deny","Principal":{"AWS":"*"},
+ "Action":["kms:Encrypt","kms:ReEncrypt*","kms:CreateGrant"],"Resource":"*"}
+```
+
+Repeat the `DenyUnlessSeedId` shape for `application`, `flow` and
+`bitcoin_network`. The last statement denies `kms:Encrypt`, `kms:ReEncrypt*`
+and grants to every principal: anyone allowed those calls could produce a
+ciphertext for a seed they know under the mint context, and the pinned
+enclave would decrypt it. After bootstrap, add an unconditional Deny of
+`kms:GenerateDataKey` for the signer role.
+
 Enable bucket versioning, block public access, and retain an independently
 verified backup of the ciphertext and its key/context metadata. Exclude the
 object from expiration/replication rules that remove or replace it. S3 does not
@@ -140,23 +182,25 @@ recovery before funding the signer.
 
 ## Bootstrap, restart and recovery
 
-1. Build a new mint signer's EIF without an address pin. Configure the parent,
+1. Launch a new mint signer without an address pin. Configure the parent,
    relay, key and bucket policies for its actual CID, PCR0 and context.
 2. Run the enclave without debug mode and issue
    `utexo-bridge-parent-cli --addr vsock://18:5000 init`. Supply no seed or cloning
    secret. Verify the public identity/attestation and independently back up the
    saved S3 ciphertext. This does not import a legacy ephemeral seed.
-3. Rebuild with the verified `KMS_EXPECTED_EVM_ADDRESS`. Update the key's
-   approved PCR0 for the pinned image, start it, and verify identical keys after
-   initialization and restart. During a rollout, approved PCR0 may be a list in
-   both the allow and deny conditions; retire the bootstrap measurement afterward.
+3. Set at launch the verified `KMS_EXPECTED_EVM_ADDRESS`, start the enclave,
+   and verify identical keys after initialization and restart. A restart before
+   the pin is set is refused with "saved seed exists"; it is not a fault, set the
+   pin. During a rollout, approved PCR0 may be a list in both the allow and deny
+   conditions; retire the bootstrap measurement afterward.
 4. Before funding, remove `kms:GenerateDataKey` from the key's allow statement
    and add an unconditional deny for that action for the signer role. Keep
    `kms:Decrypt` for the pinned image. Test restore on a fresh parent. Subsequent
    upgrades authorize the new measured image for decryption of the same seed.
 
 A timeout leaves initialization inactive; a conditional PUT may still complete.
-Retry after service recovery to load the committed winner. Custody calls are
+After service recovery, read the committed object, verify its identity, and
+relaunch with that address pinned. Custody calls are
 bounded and per-CID quotas/rate limits reject excess work. Never delete the blob,
 change its seed ID/key, or remove the address pin to fix a funded signer.
 Recover the original ciphertext/version from backup, using an administrator and

@@ -1,4 +1,5 @@
-//! `SetEndpoints`: the operator sets the chain endpoints once, at launch.
+//! `SetEndpoints`: the operator sets the chain endpoints and the KMS pin once,
+//! at launch.
 //!
 //! Every step that can fail runs before the slot is written. A refused set
 //! leaves the slot empty, so the operator can retry. A second set is refused
@@ -10,6 +11,8 @@ use crate::error::{EnclaveError, Result};
 use crate::policy::SecurityPolicy;
 use crate::proto::enclave_response::Response;
 use crate::proto::*;
+#[cfg(any(test, all(feature = "vsock", target_os = "linux")))]
+use std::net::{SocketAddrV4, TcpListener};
 
 pub(super) fn handle_set_endpoints(
     ctx: &ServerContext,
@@ -46,16 +49,25 @@ pub(super) fn handle_set_endpoints(
         evm_rpc_tls,
         &endpoints.electrum_host,
         evm_min_confirmations,
-    );
+    )
+    .with_kms(endpoints.kms.clone());
     policy
         .assert_valid_for_build(&ctx.build_ctx)
         .map_err(EnclaveError::InvalidRequest)?;
+
+    // `set_seed_source` below refuses a second install natively.
+    #[cfg(feature = "kms-persistence")]
+    let seed_source = endpoints
+        .kms
+        .as_ref()
+        .map(crate::seed_persistence::PersistentSeed::new)
+        .transpose()?;
 
     // The loopback binds and the /etc/hosts pin are real I/O the unit tests
     // cannot do (port 443, root). Skipped under `cfg(test)`, as the other
     // vsock-only paths are.
     #[cfg(all(feature = "vsock", target_os = "linux", not(test)))]
-    let listeners = bind_forwarders(&endpoints)?;
+    let listeners = bind_all(&forwarder_plan(&endpoints))?;
 
     #[cfg(feature = "rgb-validation")]
     let rgb_validator = crate::bootstrap::build_rgb_validator(endpoints.electrum_url.clone())
@@ -73,21 +85,39 @@ pub(super) fn handle_set_endpoints(
         policy,
     };
 
-    #[cfg(all(
-        feature = "vsock",
-        feature = "rgb-validation",
-        target_os = "linux",
-        not(test)
-    ))]
-    crate::bootstrap::pin_host_to_loopback(&launch.endpoints.electrum_host).map_err(|e| {
-        EnclaveError::Internal(format!(
-            "cannot pin {} in /etc/hosts: {e}",
-            launch.endpoints.electrum_host
-        ))
-    })?;
+    // The last step that can fail.
+    #[cfg(all(feature = "vsock", target_os = "linux", not(test)))]
+    {
+        let electrum = cfg!(feature = "rgb-validation").then(|| {
+            (
+                std::net::Ipv4Addr::LOCALHOST,
+                launch.endpoints.electrum_host.clone(),
+            )
+        });
+        #[cfg(feature = "kms-persistence")]
+        let kms = launch.endpoints.kms.as_ref().map(|k| {
+            (
+                crate::kms::KMS_LOOPBACK,
+                crate::kms::endpoint_host(&k.region),
+            )
+        });
+        #[cfg(not(feature = "kms-persistence"))]
+        let kms = None;
+        let pins: Vec<_> = electrum
+            .iter()
+            .chain(&kms)
+            .map(|(a, h)| (*a, h.as_str()))
+            .collect();
+        crate::bootstrap::pin_hosts(std::path::Path::new("/etc/hosts"), &pins)
+            .map_err(|e| EnclaveError::Internal(format!("cannot pin hosts in /etc/hosts: {e}")))?;
+    }
     #[cfg(all(feature = "vsock", target_os = "linux", not(test)))]
     for (listener, vsock_port) in listeners {
         crate::vsock_forwarder::spawn(listener, vsock_port);
+    }
+    #[cfg(feature = "kms-persistence")]
+    if let Some(source) = seed_source {
+        ctx.state.set_seed_source(Box::new(source))?;
     }
 
     crate::bootstrap::log_policy(&launch.policy);
@@ -99,41 +129,52 @@ pub(super) fn handle_set_endpoints(
     })
 }
 
-/// Bind the loopback end of each forwarder this build needs. The host must
-/// run `vsock-proxy <vsock port> <host> <port>` for each.
-#[cfg(all(feature = "vsock", target_os = "linux", not(test)))]
-fn bind_forwarders(endpoints: &Endpoints) -> Result<Vec<(std::net::TcpListener, u32)>> {
+/// The loopback end and the parent vsock port of each forwarder this build
+/// needs. The host must run `vsock-proxy <vsock port> <host> <port>` for each.
+#[cfg(any(test, all(feature = "vsock", target_os = "linux")))]
+// Each push depends on a feature.
+#[allow(clippy::vec_init_then_push)]
+fn forwarder_plan(endpoints: &Endpoints) -> Vec<(SocketAddrV4, u32)> {
     #[allow(unused_mut)]
-    let mut listeners = Vec::new();
+    let mut plan = Vec::new();
     #[cfg(feature = "rgb-validation")]
-    listeners.push((
-        bind(endpoints.electrum_port)?,
+    plan.push((
+        SocketAddrV4::new(std::net::Ipv4Addr::LOCALHOST, endpoints.electrum_port),
         vsock_port("ESPLORA_VSOCK_PORT", 8001),
     ));
     #[cfg(feature = "evm-rpc")]
     if let Some(tls) = &endpoints.evm_rpc_tls {
-        listeners.push((bind(tls.tls_port)?, vsock_port("EVM_RPC_VSOCK_PORT", 8002)));
+        plan.push((
+            SocketAddrV4::new(std::net::Ipv4Addr::LOCALHOST, tls.tls_port),
+            vsock_port("EVM_RPC_VSOCK_PORT", 8002),
+        ));
+    }
+    // KMS and EVM RPC both use port 443, so KMS takes its own address.
+    #[cfg(feature = "kms-persistence")]
+    if endpoints.kms.is_some() {
+        plan.push((
+            SocketAddrV4::new(crate::kms::KMS_LOOPBACK, crate::kms::KMS_PORT),
+            vsock_port("KMS_VSOCK_PORT", crate::kms::DEFAULT_KMS_VSOCK_PORT),
+        ));
     }
     let _ = endpoints;
-    Ok(listeners)
+    plan
+}
+
+#[cfg(any(test, all(feature = "vsock", target_os = "linux")))]
+fn bind_all(plan: &[(SocketAddrV4, u32)]) -> Result<Vec<(TcpListener, u32)>> {
+    plan.iter()
+        .map(|&(addr, vsock_port)| {
+            TcpListener::bind(addr)
+                .map(|listener| (listener, vsock_port))
+                .map_err(|e| EnclaveError::Internal(format!("cannot listen on {addr}: {e}")))
+        })
+        .collect()
 }
 
 #[cfg(all(
-    feature = "vsock",
     feature = "rgb-validation",
-    target_os = "linux",
-    not(test)
-))]
-fn bind(port: u16) -> Result<std::net::TcpListener> {
-    std::net::TcpListener::bind(format!("127.0.0.1:{port}"))
-        .map_err(|e| EnclaveError::Internal(format!("cannot listen on 127.0.0.1:{port}: {e}")))
-}
-
-#[cfg(all(
-    feature = "vsock",
-    feature = "rgb-validation",
-    target_os = "linux",
-    not(test)
+    any(test, all(feature = "vsock", target_os = "linux"))
 ))]
 fn vsock_port(name: &str, default: u32) -> u32 {
     std::env::var(name)
@@ -148,6 +189,8 @@ mod tests {
     use crate::policy::BuildContext;
     use crate::proto::enclave_request::Request;
     use crate::state::EnclaveState;
+    #[cfg(feature = "kms-persistence")]
+    use std::net::Ipv4Addr;
 
     fn awaiting(build_ctx: BuildContext) -> ServerContext {
         let bridge_config = crate::config::BridgeConfig::default();
@@ -165,7 +208,10 @@ mod tests {
         )
     }
 
-    /// A valid set for this build. `n` varies the hosts.
+    const KEY_ARN: &str =
+        "arn:aws:kms:eu-west-1:123456789012:key/mrk-0123456789abcdef0123456789abcdef";
+
+    /// A valid set for this build. `n` varies the hosts and the seed id.
     fn valid(n: u8) -> SetEndpointsRequest {
         let mut req = SetEndpointsRequest::default();
         if cfg!(feature = "rgb-validation") {
@@ -177,6 +223,11 @@ mod tests {
                 hex::decode(include_str!("../../tests/fixtures/evm_rpc_tls/ca_a.der.hex").trim())
                     .unwrap();
             req.evm_rpc_tls_port = 443;
+        }
+        if cfg!(feature = "kms-persistence") {
+            req.kms_key_arn = KEY_ARN.into();
+            req.kms_region = "eu-west-1".into();
+            req.kms_seed_id = format!("seed-{n}");
         }
         req
     }
@@ -265,12 +316,130 @@ mod tests {
                 ..valid(1)
             });
         }
+        if cfg!(feature = "kms-persistence") {
+            bad.push(SetEndpointsRequest {
+                kms_region: "eu-west-2".into(),
+                ..valid(1)
+            });
+            bad.push(SetEndpointsRequest {
+                kms_key_arn: "arn:aws:kms:eu-west-1:123456789012:alias/seed".into(),
+                ..valid(1)
+            });
+            bad.push(SetEndpointsRequest {
+                kms_seed_id: "seed 1".into(),
+                ..valid(1)
+            });
+            bad.push(SetEndpointsRequest {
+                kms_expected_evm_address: "00".repeat(19),
+                ..valid(1)
+            });
+        }
         for req in bad {
             assert!(handle_set_endpoints(&ctx, req.clone()).is_err(), "{req:?}");
             assert!(ctx.launch.get().is_none(), "{req:?}");
         }
         handle_set_endpoints(&ctx, valid(1)).unwrap();
         assert!(ctx.launch().is_ok());
+    }
+
+    #[cfg(feature = "kms-persistence")]
+    #[test]
+    fn a_set_with_a_seed_source_already_set_is_refused() {
+        struct Unused;
+        impl crate::seed_persistence::SeedSource for Unused {
+            fn load_keys(
+                &self,
+                _: bitcoin::Network,
+                _: std::time::Instant,
+            ) -> Result<crate::keys::KeyManager> {
+                unreachable!()
+            }
+        }
+        let mut ctx = awaiting(BuildContext::current());
+        ctx.state = EnclaveState::new(bitcoin::Network::Regtest).with_seed_source(Box::new(Unused));
+        assert!(handle_set_endpoints(&ctx, valid(1)).is_err());
+        assert!(ctx.launch.get().is_none());
+    }
+
+    /// The README launch: EVM RPC on port 443, and KMS in a mint build. Port
+    /// 443 maps to one free port, the other ports to any port.
+    #[test]
+    fn the_forwarders_bind_together() {
+        let plan = forwarder_plan(&Endpoints::parse(&valid(1)).unwrap());
+        let addrs: std::collections::HashSet<_> = plan.iter().map(|(a, _)| *a).collect();
+        assert_eq!(addrs.len(), plan.len(), "{plan:?}");
+        let free = TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        let plan: Vec<_> = plan
+            .into_iter()
+            .map(|(a, v)| {
+                let port = if a.port() == 443 { free } else { 0 };
+                (SocketAddrV4::new(*a.ip(), port), v)
+            })
+            .collect();
+        let listeners = bind_all(&plan).unwrap();
+        assert_eq!(listeners.len(), plan.len());
+        #[cfg(feature = "kms-persistence")]
+        {
+            let bound: Vec<_> = listeners
+                .iter()
+                .map(|(l, _)| l.local_addr().unwrap())
+                .collect();
+            for ip in [Ipv4Addr::LOCALHOST, crate::kms::KMS_LOOPBACK] {
+                assert!(bound.contains(&(ip, free).into()), "{bound:?}");
+            }
+            drop(listeners);
+            // Control: KMS on 127.0.0.1 collides with the EVM RPC forwarder.
+            let control: Vec<_> = plan
+                .iter()
+                .map(|&(a, v)| (SocketAddrV4::new(Ipv4Addr::LOCALHOST, a.port()), v))
+                .collect();
+            assert!(bind_all(&control).is_err());
+        }
+    }
+
+    #[cfg(feature = "kms-persistence")]
+    #[test]
+    fn no_broker_call_before_or_after_a_refused_set() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let broker = TcpListener::bind((
+            Ipv4Addr::LOCALHOST,
+            crate::seed_persistence::BROKER_LOCAL_PORT,
+        ))
+        .unwrap();
+        let connections: &'static AtomicUsize = Box::leak(Box::new(AtomicUsize::new(0)));
+        std::thread::spawn(move || {
+            // Count each connection and close it.
+            for _ in broker.incoming() {
+                connections.fetch_add(1, Ordering::SeqCst);
+            }
+        });
+        let ctx = awaiting(BuildContext::current());
+        let init = || {
+            call(
+                &ctx,
+                Request::InitializeKey(InitializeKeyRequest::default()),
+            )
+        };
+
+        assert!(not_ready(init()));
+        assert_eq!(connections.load(Ordering::SeqCst), 0);
+
+        let bad = SetEndpointsRequest {
+            kms_region: "eu-west-2".into(),
+            ..valid(1)
+        };
+        assert!(handle_set_endpoints(&ctx, bad).is_err());
+        assert!(not_ready(init()));
+        assert_eq!(connections.load(Ordering::SeqCst), 0);
+
+        handle_set_endpoints(&ctx, valid(1)).unwrap();
+        assert!(matches!(init(), Response::Error(_)));
+        assert!(!ctx.state.is_initialized());
+        assert_eq!(connections.load(Ordering::SeqCst), 1);
     }
 
     /// A release bridge build with no bridge pins resolves a policy that

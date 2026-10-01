@@ -111,8 +111,9 @@ and 8002); the enclave has no direct network stack.
 
 **Launch endpoints.** The endpoints are not in the image, so anyone can rebuild
 the EIF and get the same PCR0. The operator sends them once, after launch, in
-`SetEndpoints`: the Electrum URL, the EVM RPC host, the EVM RPC CA (DER) and
-the EVM RPC TLS port. The enclave refuses a second set; changing them needs a
+`SetEndpoints`: the Electrum URL, the EVM RPC host, the EVM RPC CA (DER), the
+EVM RPC TLS port and, in a mint build, the KMS key ARN, region, seed id and
+expected EVM address. The enclave refuses a second set; changing them needs a
 restart, which loses the keys. Until the set, the enclave refuses `Sign`,
 `SignBtc`, `SignRawDigest`, `SignCcd`, `GetAttestedPublicKey`, `GetClone` and
 `SetClone`, starts no Electrum or EVM RPC forwarder and opens no chain

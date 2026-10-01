@@ -206,6 +206,9 @@ pub struct GetAttestedPublicKeyResponse {
     /// COSE_Sign1 NSM document, or raw CBOR in mock mode.
     #[prost(bytes="vec", tag="2")]
     pub attestation_doc: ::prost::alloc::vec::Vec<u8>,
+    /// Policy bytes that attestation user_data commits.
+    #[prost(bytes="vec", tag="3")]
+    pub attested_policy: ::prost::alloc::vec::Vec<u8>,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct SignRequest {
@@ -662,6 +665,18 @@ pub struct SetEndpointsRequest {
     /// TLS port of the EVM RPC, 1-65535.
     #[prost(uint32, tag="4")]
     pub evm_rpc_tls_port: u32,
+    /// Full ARN of the KMS key that wraps the seed.
+    #[prost(string, tag="5")]
+    pub kms_key_arn: ::prost::alloc::string::String,
+    /// AWS region of the KMS key.
+    #[prost(string, tag="6")]
+    pub kms_region: ::prost::alloc::string::String,
+    /// Name of the seed object the parent stores.
+    #[prost(string, tag="7")]
+    pub kms_seed_id: ::prost::alloc::string::String,
+    /// 20-byte hex EVM address the seed must give. Empty: none.
+    #[prost(string, tag="8")]
+    pub kms_expected_evm_address: ::prost::alloc::string::String,
 }
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct SetEndpointsResponse {

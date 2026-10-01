@@ -23,9 +23,7 @@ enc_id() {
     | python3 -c "import json,sys; print(next((e['EnclaveID'] for e in json.load(sys.stdin) if e.get('EnclaveName')=='$NAME'), ''))"
 }
 
-# Set the chain endpoints once, on the fresh enclave. The enclave refuses a
-# second set and signs nothing without one. The CLI reads the values from the
-# unit env.
+# Set endpoints and KMS values once from the unit env.
 set_endpoints() {
   : "${CLI:?CLI env required (set in /etc/utexo/enclave.env)}"
   # systemd sources this via EnvironmentFile; a manual `start` does not, so
