@@ -6,6 +6,7 @@
 # Optional chain endpoints, set on each enclave at start:
 #   ELECTRUM_URL=ssl://<host>:<port>  EVM_RPC_TLS_CA_DER_FILE=<CA in DER>
 # The EVM RPC host and port come from host-prep-evmrpc.sh.
+# Each parent reads Bitcoin headers from HEADER_ELECTRUM_URL (default: ELECTRUM_URL).
 # KMS values, set on each enclave at start. A mint enclave requires the first three:
 #   KMS_KEY_ARN=<key ARN>  KMS_REGION=<region>  KMS_SEED_ID=<seed id>
 #   KMS_EXPECTED_EVM_ADDRESS=<0x address, optional>
@@ -284,6 +285,7 @@ HEALTH_PORT=${HPORT[$CID]}
 USE_VSOCK=true
 ENCLAVE_VSOCK_CID=$CID
 ENCLAVE_VSOCK_PORT=5000
+HEADER_ELECTRUM_URL=${HEADER_ELECTRUM_URL:-$ELECTRUM_URL}
 EOF
 done
 

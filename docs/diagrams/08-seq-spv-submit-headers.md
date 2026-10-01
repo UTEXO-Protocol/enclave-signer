@@ -1,28 +1,29 @@
-# SubmitHeaders — Listener-driven SPV chain sync
+# SubmitHeaders — parent-driven SPV chain sync
 
 ```mermaid
 sequenceDiagram
-    participant Listener as Go Listener
-    participant Esplora as Esplora API
-    participant Parent as utexo-bridge-parent<br/>grpc_server.rs
+    participant Electrum as Electrum server<br/>HEADER_ELECTRUM_URL
+    participant Parent as utexo-bridge-parent<br/>header_sync.rs
     participant Srv as enclave/server/spv.rs<br/>handle_submit_headers
     participant Chain as spv::HeaderChain
     participant Val as spv::validation
     participant Cp as spv::checkpoint
 
-    Note over Listener,Srv: Bootstrap
-    Listener->>Parent: gRPC GetLastSavedBlock
-    Parent->>Srv: GetLastSavedBlockRequest
-    Srv->>Chain: tip_height + tip_hash
-    Chain-->>Srv: (height, hash) — checkpoint when empty
-    Srv-->>Parent: GetLastSavedBlockResponse
-    Parent-->>Listener: tip = N
-
-    Note over Listener,Chain: Fetch + push loop
-    loop while remote_tip > N
-        Listener->>Esplora: fetch hashes + headers<br/>(/block-height/:h, /block/:hash/header)
-        Esplora-->>Listener: raw 80-byte headers
-        Listener->>Parent: gRPC SubmitHeaders{start_height=N+1, headers[]}
+    Note over Parent,Srv: Each step (external gRPC SubmitHeaders is refused)
+    loop every HEADER_SYNC_INTERVAL_SECS, at once while behind
+        Parent->>Srv: GetLastSavedBlockRequest
+        Srv->>Chain: tip_height + tip_hash
+        Chain-->>Srv: (height, hash) — checkpoint when empty
+        Srv-->>Parent: GetLastSavedBlockResponse (N, hash)
+        Parent->>Electrum: blockchain.headers.subscribe → tip S
+        Parent->>Electrum: blockchain.block.headers(N, 1)
+        alt header N hashes to hash
+            Parent->>Electrum: blockchain.block.headers(N+1, ≤ 2016)
+        else fork, and S > N
+            Parent->>Electrum: blockchain.block.headers(N−99, ≤ 2016)
+        end
+        Electrum-->>Parent: raw 80-byte headers
+        Parent->>Parent: check linkage; ≤ 50 000 headers per 60 s
         Parent->>Srv: SubmitHeadersRequest
 
         Srv->>Srv: rate limiter: ≤ 100 000 headers per 60 s window<br/>(cumulative, counted before validation)
@@ -55,8 +56,7 @@ sequenceDiagram
         Chain-->>Srv: SubmitOutcome{last_height, last_hash,<br/>headers_accepted, reorg_depth}
 
         Srv-->>Parent: SubmitHeadersResponse
-        Parent-->>Listener: last_block_height = N'
-        Listener->>Listener: N := N'
+        Parent->>Parent: require the whole batch accepted<br/>and its last hash; else reread the tip
     end
 
     Note over Chain: Boot-time invariants:<br/>— Checkpoint::assert_real_in_release() panics<br/> on placeholder checkpoint in release builds.<br/>— assert_retarget_aligned() panics (all profiles)<br/> on a non-retarget-aligned PoW checkpoint.<br/>— header_at(checkpoint.height) returns None<br/> (we never store the checkpoint header itself,<br/> only its hash/bits/time metadata).<br/>Retention: ALL headers from the checkpoint are kept<br/>(no sliding window - deep RGB anchors stay verifiable).

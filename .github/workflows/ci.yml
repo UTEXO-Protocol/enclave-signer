@@ -21,6 +21,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Enclave image inputs unchanged
+        if: github.event_name == 'pull_request'
+        run: git fetch --depth=1 origin "$GITHUB_BASE_REF" && git diff --exit-code FETCH_HEAD HEAD -- enclave enclave-proto Cargo.lock
+
       - name: Test private dependency build wiring
         run: python3 -m unittest discover -s build/tests -v
 
