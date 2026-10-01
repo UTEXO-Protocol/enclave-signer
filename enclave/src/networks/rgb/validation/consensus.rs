@@ -46,7 +46,7 @@ impl RgbValidator {
         bridge_events: &[Event],
     ) -> Result<ValidatedConsignment> {
         #[cfg(test)]
-        if let Some((validated, _)) = &self.canned {
+        if let Some(validated) = &self.canned {
             return Ok(validated.clone());
         }
         let start = std::time::Instant::now();

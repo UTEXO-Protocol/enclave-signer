@@ -1201,10 +1201,11 @@ fn test_sign_btc_rejects_input_value_over_cap() {
     let wallet = init_wallet(port);
     let ours = our_address(&wallet, 0, 0);
 
-    // Self-paying destination, but the input value spent exceeds the cap.
+    // Self-paying destination at a sane fee, but the input value spent
+    // exceeds the cap.
     let sign_req = EnclaveRequest {
         request: Some(Request::SignBtc(SignBtcRequest {
-            psbt_bytes: btc_psbt(&ours, 200_000, &[(ours.spk.clone(), 50_000)]),
+            psbt_bytes: btc_psbt(&ours, 200_000, &[(ours.spk.clone(), 190_000)]),
         })),
     };
     let resp = common::send_request(port, &sign_req);
@@ -1215,6 +1216,36 @@ fn test_sign_btc_rejects_input_value_over_cap() {
             assert!(
                 e.message.contains("exceeds pinned cap"),
                 "expected cap rejection, got: {}",
+                e.message
+            );
+        }
+        other => panic!("expected ErrorResponse, got {:?}", other),
+    }
+}
+
+/// #248 end to end: every output pays back to custody and the value cap is
+/// met, yet ~98% of the input would go to miners. The pinned fee policy
+/// refuses before the signer is reached.
+#[test]
+#[cfg(evm_to_rgb)]
+fn test_sign_btc_rejects_a_fee_that_burns_most_of_the_input() {
+    let port = common::start_test_server_with_config(|_| {}, btc_capped_config(100_000));
+    let wallet = init_wallet(port);
+    let ours = our_address(&wallet, 0, 0);
+
+    let sign_req = EnclaveRequest {
+        request: Some(Request::SignBtc(SignBtcRequest {
+            psbt_bytes: btc_psbt(&ours, 60_676, &[(ours.spk.clone(), 1_000)]),
+        })),
+    };
+    let resp = common::send_request(port, &sign_req);
+
+    match &resp.response {
+        Some(Response::Error(e)) => {
+            assert_eq!(e.code, 3);
+            assert!(
+                e.message.contains("plain-BTC PSBT fee rate too high"),
+                "expected fee-policy rejection, got: {}",
                 e.message
             );
         }

@@ -55,7 +55,7 @@ flowchart TB
             NRV[validation/<br/>indexer.rs Electrum/Esplora resolver,<br/>consensus.rs rgb-ops Transfer validation,<br/>consignment.rs decode, schema.rs typesystem pin]
             NRF[flow/swap.rs or flow/mint_burn.rs<br/>exactly one per image:<br/>accepted transitions + amount rule]
             NRI[invoice.rs<br/>FundsIn destinationAddress →<br/>blinded seal == recipient leg]
-            NRP[psbt_validation.rs<br/>PSBT ↔ consignment anchor,<br/>per-output legs, fee-rate 3x cap]
+            NRP[psbt_validation.rs<br/>PSBT ↔ consignment anchor,<br/>per-output legs, pinned fee policy<br/>(max rate + max fee, both PSBT paths)]
             NRB[btc_crosscheck.rs<br/>plain-BTC + send-RGB sats gates<br/>btc_ownership.rs custody rule<br/>+ total-sats cap + unowned budgets]
             NRS[spv_crosscheck.rs<br/>coverage + depth ≥ 6<br/>+ chain_net + staleness]
             NRSIG[signing/<br/>taproot.rs BIP-341 Schnorr<br/>key path only]
