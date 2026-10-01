@@ -444,7 +444,9 @@ pub type FeeKeyPathResolver<'a> = &'a dyn Fn(&Psbt) -> Result<Vec<usize>>;
 /// Key-path inputs of `account` this enclave controls, including
 /// already-signed ones. Resolved from enclave keys, never from the request.
 /// `account` is the scope the signer co-signs on the calling path: Colored
-/// for send-RGB, Vanilla for plain-BTC.
+/// for send-RGB, Vanilla for plain-BTC. Only the send-RGB resolver calls
+/// it; the plain-BTC path shares its jobs via [`fee_key_path_inputs_of`].
+#[cfg(feature = "rgb-validation")]
 pub(crate) fn fee_key_path_inputs_scoped(
     psbt: &Psbt,
     keys: &crate::keys::KeyManager,
