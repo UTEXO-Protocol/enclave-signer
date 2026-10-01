@@ -5,7 +5,9 @@
 //! wrapped with RSAES-OAEP (SHA-256, MGF1-SHA-256) to the public key from the
 //! attestation document, and the content is AES-256-CBC with PKCS#7 padding.
 //! That is the shape the AWS Nitro Enclaves SDK's `cms.c` accepts; every other
-//! algorithm or recipient type is rejected before any key is used.
+//! algorithm or recipient type is rejected before any key is used. KMS encodes
+//! the envelope as streaming BER, so it is normalised to DER (`ber.rs`) before
+//! the strict decode.
 
 use aes::cipher::{block_padding::Pkcs7, BlockDecryptMut, KeyIvInit};
 use cms::cert::x509::der::asn1::{ObjectIdentifier, OctetString};
@@ -43,7 +45,8 @@ pub(super) fn open_envelope(key: &RsaPrivateKey, envelope: &[u8]) -> Result<Zero
     if envelope.is_empty() || envelope.len() > MAX_ENVELOPE_BYTES {
         return Err(reject("envelope size"));
     }
-    let info = ContentInfo::from_der(envelope).map_err(|_| reject("envelope is not DER CMS"))?;
+    let der = super::ber::ber_to_der(envelope).ok_or_else(|| reject("envelope is not BER"))?;
+    let info = ContentInfo::from_der(&der).map_err(|_| reject("envelope is not CMS"))?;
     if info.content_type != ID_ENVELOPED_DATA {
         return Err(reject("content type is not EnvelopedData"));
     }

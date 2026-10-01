@@ -40,6 +40,7 @@ use zeroize::Zeroizing;
 use crate::attestation;
 use crate::error::{CustodyFailure, EnclaveError, Result};
 
+mod ber;
 mod recipient;
 #[cfg(test)]
 mod tests;

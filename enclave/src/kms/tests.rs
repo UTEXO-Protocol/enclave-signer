@@ -240,6 +240,25 @@ fn recipient_envelope_round_trips_and_rejects_every_deviation() {
     assert!(open_envelope(&key, &two_recipients).is_err());
 }
 
+/// KMS returns `CiphertextForRecipient` as streaming BER: indefinite lengths
+/// and a chunked, constructed encrypted content. The DER-only decode used to
+/// reject every real envelope, which the DER fixtures above never showed.
+#[test]
+fn recipient_envelope_accepts_streaming_ber_from_kms() {
+    let key = recipient_key();
+    let seed = [9u8; 64];
+    let der = seal(&key.to_public_key(), &seed);
+    let ber = super::ber::test_support::to_streaming_ber(&der);
+    assert_ne!(ber, der);
+    assert!(
+        ContentInfo::from_der(&ber).is_err(),
+        "strict DER must reject the BER form"
+    );
+    assert_eq!(open_envelope(&key, &ber).unwrap().as_slice(), &seed);
+    // Truncating the end-of-contents marker is still refused.
+    assert!(open_envelope(&key, &ber[..ber.len() - 2]).is_err());
+}
+
 #[test]
 fn service_errors_map_to_fixed_categories() {
     for (status, code, expected) in [
