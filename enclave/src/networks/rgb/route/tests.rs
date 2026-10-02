@@ -134,9 +134,10 @@ fn route_proof_rejects_the_other_flows_shape() {
 /// prove that the bind is in the request path. The rule tests in
 /// `validation::tests::asset_binding_rule` cannot show this.
 ///
-/// All tests are ignored for one reason: `transfer_consignment.rgbc` is an
-/// NIA consignment, and the schema gate refuses it before the asset bind.
-/// Remove each `#[ignore]` when a BFA fixture is in `enclave/tests/fixtures/`.
+/// They run on a real BFA consignment (see `BFA_FIXTURE`). Its ancestry holds
+/// a mint, and only a `bfa-validation` build can run a mint script, so the
+/// cases that have to get through RGB consensus are ignored without that
+/// feature.
 #[cfg(evm_to_rgb)]
 mod asset_bind {
     use super::*;
@@ -147,25 +148,45 @@ mod asset_bind {
     use std::io::Cursor;
     use std::sync::Mutex;
 
-    const TRANSFER_FIXTURE: &[u8] =
-        include_bytes!("../../../../tests/fixtures/transfer_consignment.rgbc");
+    /// A real BFA consignment from a bridge run on signet: one `Bridge` mint
+    /// of 100_000 units, then two `Burn`s. Its last transition is a burn, not
+    /// the mint a deposit PSBT finalizes - which is fine here: every case
+    /// below stops at or before PSBT parsing, ahead of the transition-type
+    /// gate.
+    const BFA_FIXTURE: &[u8] =
+        include_bytes!("../../../../tests/fixtures/bfa_burn_consignment.rgbc");
 
-    /// Contract id of `TRANSFER_FIXTURE`. [`fixture_asset_id`] derives it again
+    /// Contract id of `BFA_FIXTURE`. [`fixture_asset_id`] derives it again
     /// and asserts it, so a fixture change fails loudly.
-    const FIXTURE_ASSET_ID: &str = "rgb:fuhLYX9G-eC8gDvf-V0XpYFH-ceSafoc-lGutAYq-~SExGU4";
+    const FIXTURE_ASSET_ID: &str = "rgb:psO2jKZI-i4fudyA-ORTT8a~-SMaLO6u-69ELk2p-yPRGPJY";
 
     /// The validated asset identity: the genesis contract id of the fixture.
     fn fixture_asset_id() -> String {
-        let t = Transfer::load(Cursor::new(TRANSFER_FIXTURE)).expect("load transfer fixture");
+        let t = Transfer::load(Cursor::new(BFA_FIXTURE)).expect("load BFA fixture");
         let id = t.contract_id().to_string();
         assert_eq!(
             id, FIXTURE_ASSET_ID,
-            "transfer fixture contract id drifted - update FIXTURE_ASSET_ID"
+            "BFA fixture contract id drifted - update FIXTURE_ASSET_ID"
         );
         id
     }
 
-    /// Stub Esplora that serves only `GET /block-height/0` with the mainnet
+    /// The EVM lock behind the fixture's one mint, as the enclave's own
+    /// `FundsIn` read would report it: the mint's OpId and its 100_000 units.
+    /// RGB consensus (`cea`) refuses the mint without a matching event.
+    fn fixture_mint_events() -> Vec<rgbstd::vm::ether_extension::Event> {
+        let mint_opid: [u8; 32] =
+            hex::decode("6d72ee6970a5cd28ef6f00a67b95242e088941bd79980739c29a40fb4050e593")
+                .unwrap()
+                .try_into()
+                .unwrap();
+        vec![rgbstd::vm::ether_extension::Event::new(
+            rgbstd::OpId::from(mint_opid),
+            rgbstd::RevealedValue::new(100_000u64),
+        )]
+    }
+
+    /// Stub Esplora that serves only `GET /block-height/0` with the signet
     /// genesis hash. Offline rgbstd validation of the fixture needs only this.
     /// The resolver calls out only for the genesis-hash chain check. The
     /// fixture embeds its witness txs (added as tentative by
@@ -189,7 +210,7 @@ mod asset_bind {
                     );
                     continue;
                 }
-                let body = bitcoin::constants::genesis_block(bitcoin::Network::Bitcoin)
+                let body = bitcoin::constants::genesis_block(bitcoin::Network::Signet)
                     .block_hash()
                     .to_string();
                 let resp = format!(
@@ -235,9 +256,9 @@ mod asset_bind {
             psbt_bytes: b"not-a-psbt".to_vec(),
             psbt_output_amount: 0,
             asset_id: asset_id.into(),
-            consignment: TRANSFER_FIXTURE.to_vec(),
+            consignment: BFA_FIXTURE.to_vec(),
             mint_ancestors: Vec::new(),
-            consignment_hash: Keccak256::digest(TRANSFER_FIXTURE).to_vec(),
+            consignment_hash: Keccak256::digest(BFA_FIXTURE).to_vec(),
         }
     }
 
@@ -247,9 +268,10 @@ mod asset_bind {
         config: &BridgeConfig,
     ) -> Result<u64> {
         let url = spawn_stub_esplora();
-        let validator = RgbValidator::new(url, "bitcoin").expect("validator");
+        let validator = RgbValidator::new(url, "signet").expect("validator");
+        let events = fixture_mint_events();
         let chain = Mutex::new(HeaderChain::new(
-            Network::Mainnet,
+            Network::Signet,
             Checkpoint {
                 height: 0,
                 hash: [0u8; 32],
@@ -269,16 +291,18 @@ mod asset_bind {
             chain_pins: &crate::networks::rgb::spv_crosscheck::ChainPins::new(),
             self_owned_psbt_outputs: Some(&self_owned),
             psbt_fee_key_paths: None,
-            bridge_events: &[],
+            bridge_events: &events,
         };
         validate_destination_anchor(destination, 0, 0, &ctx).map(|(amount, _)| amount)
     }
 
     /// Happy path: validated contract_id == declared asset_id == pinned
     /// RGB_ASSET_ID. All binding checks pass and validation reaches the PSBT stage.
-    // Ignored: see the module note on the BFA fixture.
     #[test]
-    #[ignore]
+    #[cfg_attr(
+        not(feature = "bfa-validation"),
+        ignore = "needs bfa-validation to run the fixture's mint script"
+    )]
     fn binds_when_contract_id_matches_pin() {
         let id = fixture_asset_id();
         let err = run_validate_destination_anchor(&fixture_destination(&id), &pinned_config(&id))
@@ -313,9 +337,11 @@ mod asset_bind {
     /// Empty declarations fail first. Thus the reachable theft path is a
     /// listener that declares the foreign asset of the consignment. The
     /// RGB_ASSET_ID pin must still reject it.
-    // Ignored: see the module note on the BFA fixture.
     #[test]
-    #[ignore]
+    #[cfg_attr(
+        not(feature = "bfa-validation"),
+        ignore = "needs bfa-validation to run the fixture's mint script"
+    )]
     fn rejects_foreign_asset_even_when_declared_agrees() {
         let id = fixture_asset_id();
         let err = run_validate_destination_anchor(
@@ -333,9 +359,11 @@ mod asset_bind {
     /// This path always fails closed on a missing RGB_ASSET_ID pin, with no
     /// `is_configured()` gate. An enclave with no pin must not trust the
     /// listener to sign a send-RGB PSBT.
-    // Ignored: see the module note on the BFA fixture.
     #[test]
-    #[ignore]
+    #[cfg_attr(
+        not(feature = "bfa-validation"),
+        ignore = "needs bfa-validation to run the fixture's mint script"
+    )]
     fn rejects_when_pin_absent() {
         let id = fixture_asset_id();
         let err =
@@ -349,9 +377,11 @@ mod asset_bind {
 
     /// The listener declares an asset that is not the validated identity.
     /// The declared-vs-validated check fails before the pin check.
-    // Ignored: see the module note on the BFA fixture.
     #[test]
-    #[ignore]
+    #[cfg_attr(
+        not(feature = "bfa-validation"),
+        ignore = "needs bfa-validation to run the fixture's mint script"
+    )]
     fn rejects_when_declared_disagrees_with_validated() {
         let err = run_validate_destination_anchor(
             &fixture_destination("rgb:listener-lied"),

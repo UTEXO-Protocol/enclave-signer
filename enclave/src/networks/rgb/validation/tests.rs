@@ -36,6 +36,14 @@ const TRANSFER_FIXTURE: &[u8] =
 const CONTRACT_FIXTURE: &[u8] =
     include_bytes!("../../../../tests/fixtures/contract_consignment.rgbc");
 
+// A real BFA consignment, from a bridge run on signet: one `Bridge` mint of
+// 100_000 units, then two `Burn`s (50_000, then 10_000 - the terminal one,
+// leaving 40_000 as change). Same bytes as `tests/fixtures/bfa_two_burns.rgb`
+// in UTEXO-Protocol/rgb-lib. It embeds its witness txs, so validating it needs
+// no network beyond the genesis-hash check.
+const BFA_BURN_FIXTURE: &[u8] =
+    include_bytes!("../../../../tests/fixtures/bfa_burn_consignment.rgbc");
+
 use crate::config::BridgeConfig;
 #[cfg(rgb_to_evm)]
 use crate::config::{
@@ -170,16 +178,12 @@ fn extracts_op_ids_and_last_transition_from_transfer_fixture() {
     assert_eq!(last.burned_asset_amount, None);
 }
 
-// Ignored: `transfer_consignment.rgbc` is an NIA consignment, which
-// `trusted_typesystem_for_schema` refuses. Needs a BFA fixture in
-// `enclave/tests/fixtures/`.
 #[test]
-#[ignore]
 fn trusted_typesystem_sourced_from_schema_not_consignment() {
     // The trusted type system must come from rgb-schemas, not from
     // `transfer.types`. `non_bfa_schemas_are_rejected` covers non-BFA schemas.
     // This test checks that a valid consignment's types match the canonical ones.
-    let t = Transfer::load(Cursor::new(TRANSFER_FIXTURE)).expect("load transfer fixture");
+    let t = Transfer::load(Cursor::new(BFA_BURN_FIXTURE)).expect("load BFA fixture");
 
     let trusted = trusted_typesystem_for_schema(t.genesis.schema_id)
         .expect("fixture schema must be admitted");
@@ -724,9 +728,9 @@ fn rejects_consignment_hash_mismatch_even_with_valid_flag() {
 /// prove that the bind is in the request path. The rule tests in
 /// `validation::tests::asset_binding_rule` cannot show this.
 ///
-/// All tests are ignored for one reason: `transfer_consignment.rgbc` is an
-/// NIA consignment, and the schema gate refuses it before the asset bind.
-/// Remove each `#[ignore]` when a BFA fixture is in `enclave/tests/fixtures/`.
+/// They run on `BFA_BURN_FIXTURE`. Its ancestry holds a mint, and only a
+/// `bfa-validation` build can run a mint script, so the cases that have to
+/// get through RGB consensus are ignored without that feature.
 #[cfg(rgb_to_evm)]
 mod asset_bind {
     use super::*;
@@ -734,22 +738,48 @@ mod asset_bind {
     use crate::networks::rgb::spv::{Checkpoint, HeaderChain, Network};
     use std::sync::Mutex;
 
-    /// Contract id of `TRANSFER_FIXTURE`. [`fixture_asset_id`] derives it again
+    /// Contract id of `BFA_BURN_FIXTURE`. [`fixture_asset_id`] derives it again
     /// and asserts it, so a fixture change fails loudly.
-    const FIXTURE_ASSET_ID: &str = "rgb:fuhLYX9G-eC8gDvf-V0XpYFH-ceSafoc-lGutAYq-~SExGU4";
+    const FIXTURE_ASSET_ID: &str = "rgb:psO2jKZI-i4fudyA-ORTT8a~-SMaLO6u-69ELk2p-yPRGPJY";
 
     /// The validated asset identity: the genesis contract id of the fixture.
     fn fixture_asset_id() -> String {
-        let t = Transfer::load(Cursor::new(TRANSFER_FIXTURE)).expect("load transfer fixture");
+        let t = Transfer::load(Cursor::new(BFA_BURN_FIXTURE)).expect("load BFA fixture");
         let id = t.contract_id().to_string();
         assert_eq!(
             id, FIXTURE_ASSET_ID,
-            "transfer fixture contract id drifted - update FIXTURE_ASSET_ID"
+            "BFA fixture contract id drifted - update FIXTURE_ASSET_ID"
         );
         id
     }
 
-    /// Stub Esplora that serves only `GET /block-height/0` with the mainnet
+    /// An RGB source around the BFA fixture. Shadows the NIA-backed
+    /// [`super::fixture_source`], which the payload-gate tests keep using.
+    fn fixture_source(asset_id: &str) -> RgbSource {
+        RgbSource {
+            consignment: BFA_BURN_FIXTURE.to_vec(),
+            consignment_hash: keccak(BFA_BURN_FIXTURE),
+            ..super::fixture_source(asset_id)
+        }
+    }
+
+    /// The EVM lock behind the fixture's one mint, as the enclave's own
+    /// `FundsIn` read would report it: the mint's OpId and its 100_000 units.
+    /// RGB consensus (`cea`) refuses the mint - and so every burn descending
+    /// from it - without a matching event.
+    fn fixture_mint_events() -> Vec<rgbstd::vm::ether_extension::Event> {
+        let mint_opid: [u8; 32] =
+            hex::decode("6d72ee6970a5cd28ef6f00a67b95242e088941bd79980739c29a40fb4050e593")
+                .unwrap()
+                .try_into()
+                .unwrap();
+        vec![rgbstd::vm::ether_extension::Event::new(
+            rgbstd::OpId::from(mint_opid),
+            rgbstd::RevealedValue::new(100_000u64),
+        )]
+    }
+
+    /// Stub Esplora that serves only `GET /block-height/0` with the signet
     /// genesis hash. Offline rgbstd validation of the fixture needs only this.
     /// The resolver calls out only for the genesis-hash chain check. The
     /// fixture embeds its witness txs (added as tentative by
@@ -773,7 +803,7 @@ mod asset_bind {
                     );
                     continue;
                 }
-                let body = bitcoin::constants::genesis_block(bitcoin::Network::Bitcoin)
+                let body = bitcoin::constants::genesis_block(bitcoin::Network::Signet)
                     .block_hash()
                     .to_string();
                 let resp = format!(
@@ -810,18 +840,18 @@ mod asset_bind {
         }
     }
 
-    /// Mainnet header chain with a checkpoint time of "now". The SPV
+    /// Signet header chain with a checkpoint time of "now". The SPV
     /// staleness and chain-net checks pass, so a bound source reaches the
     /// Merkle-proof coverage check. Its "missing merkle proofs" error proves
-    /// that all asset-binding checks passed. A unit test cannot build real
-    /// proofs for the mainnet witness txs.
-    fn fresh_mainnet_chain() -> Mutex<HeaderChain> {
+    /// that all asset-binding checks passed. The fixture carries no proofs for
+    /// its witness txs.
+    fn fresh_signet_chain() -> Mutex<HeaderChain> {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_secs() as u32;
         Mutex::new(HeaderChain::new(
-            Network::Mainnet,
+            Network::Signet,
             Checkpoint {
                 height: 0,
                 hash: [0u8; 32],
@@ -834,14 +864,23 @@ mod asset_bind {
     }
 
     /// Runs `validate_source` with a stub-Esplora validator and a fresh
-    /// mainnet header chain.
+    /// signet header chain.
     fn run_validate_source(
         source: &RgbSource,
         config: &BridgeConfig,
     ) -> Result<ValidatedConsignment> {
+        run_validate_source_with_events(source, config, &fixture_mint_events())
+    }
+
+    /// [`run_validate_source`] with the verified EVM locks given explicitly.
+    fn run_validate_source_with_events(
+        source: &RgbSource,
+        config: &BridgeConfig,
+        events: &[rgbstd::vm::ether_extension::Event],
+    ) -> Result<ValidatedConsignment> {
         let url = spawn_stub_esplora();
-        let validator = RgbValidator::new(url, "bitcoin").expect("validator");
-        let chain = fresh_mainnet_chain();
+        let validator = RgbValidator::new(url, "signet").expect("validator");
+        let chain = fresh_signet_chain();
         let ctx = ValidationContext {
             bridge_config: config,
             rgb_validator: Some(&validator),
@@ -852,7 +891,7 @@ mod asset_bind {
             self_owned_psbt_outputs: None,
             #[cfg(evm_to_rgb)]
             psbt_fee_key_paths: None,
-            bridge_events: &[],
+            bridge_events: events,
         };
         validate_source(source, &ctx)
     }
@@ -860,9 +899,11 @@ mod asset_bind {
     /// Happy path: validated contract_id == declared asset_id == pinned
     /// RGB_ASSET_ID. The failure is in the SPV stage, after the binding and
     /// after the staleness and chain-net checks.
-    // Ignored: see the module note on the BFA fixture.
     #[test]
-    #[ignore]
+    #[cfg_attr(
+        not(feature = "bfa-validation"),
+        ignore = "needs bfa-validation to run the fixture's mint script"
+    )]
     fn binds_when_contract_id_matches_pin() {
         let id = fixture_asset_id();
         let err = run_validate_source(&fixture_source(&id), &pinned_config(&id)).unwrap_err();
@@ -892,9 +933,11 @@ mod asset_bind {
     /// Empty declarations fail first. Thus the reachable theft path is a
     /// colluding listener that declares the foreign asset of the consignment.
     /// The RGB_ASSET_ID pin must still reject it.
-    // Ignored: see the module note on the BFA fixture.
     #[test]
-    #[ignore]
+    #[cfg_attr(
+        not(feature = "bfa-validation"),
+        ignore = "needs bfa-validation to run the fixture's mint script"
+    )]
     fn rejects_foreign_asset_even_when_declared_agrees() {
         let id = fixture_asset_id();
         let err = run_validate_source(
@@ -911,9 +954,11 @@ mod asset_bind {
 
     /// The listener declares an asset that is not the validated identity.
     /// The declared-vs-validated check fails before the pin check.
-    // Ignored: see the module note on the BFA fixture.
     #[test]
-    #[ignore]
+    #[cfg_attr(
+        not(feature = "bfa-validation"),
+        ignore = "needs bfa-validation to run the fixture's mint script"
+    )]
     fn rejects_when_declared_disagrees_with_validated() {
         let err = run_validate_source(
             &fixture_source("rgb:listener-lied"),
@@ -934,9 +979,11 @@ mod asset_bind {
     /// (`networks/rgb/route/tests.rs::asset_bind::rejects_when_pin_absent`)
     /// and, for RGB->EVM, the EVM destination `!is_configured()` rejection
     /// (`networks/evm/validation.rs`, `not(test)`-gated).
-    // Ignored: see the module note on the BFA fixture.
     #[test]
-    #[ignore]
+    #[cfg_attr(
+        not(feature = "bfa-validation"),
+        ignore = "needs bfa-validation to run the fixture's mint script"
+    )]
     fn pin_check_skipped_when_config_unconfigured() {
         let id = fixture_asset_id();
         let err = run_validate_source(&fixture_source(&id), &unconfigured_config()).unwrap_err();
@@ -945,6 +992,75 @@ mod asset_bind {
             msg.contains("missing merkle proofs"),
             "expected to reach the SPV proof-coverage stage with the pin block skipped, \
              got: {msg}"
+        );
+    }
+
+    /// The whole validator over a real burn: RGB consensus accepts the
+    /// fixture (mint script against its EVM lock, both burn scripts), and the
+    /// summary the release binds read from carries the terminal burn - its
+    /// OpId, the 10_000 units it destroyed and the payout target it commits
+    /// to - not the earlier 50_000 burn in the same history.
+    #[test]
+    #[cfg(feature = "bfa-validation")]
+    fn validates_a_real_burn_and_reads_its_terminal_burn() {
+        let validator = RgbValidator::new(spawn_stub_esplora(), "signet").expect("validator");
+        let validated = validator
+            .validate_consignment(BFA_BURN_FIXTURE, &fixture_mint_events())
+            .expect("the BFA burn fixture passes RGB consensus");
+
+        assert_eq!(validated.contract_id, FIXTURE_ASSET_ID);
+        assert_eq!(validated.chain_net, "sb");
+        assert_eq!(
+            validated.mint_op_ids,
+            vec!["6d72ee6970a5cd28ef6f00a67b95242e088941bd79980739c29a40fb4050e593".to_string()]
+        );
+        assert_eq!(validated.all_op_ids.len(), 3, "one mint, two burns");
+
+        let last = validated.last_transition.expect("terminal transition");
+        assert_eq!(last.transition_type, bfa::TS_BURN);
+        assert_eq!(
+            last.op_id,
+            "b1477c16bbb2c78d7206084fd0288561ab614de4b09a3cb974d05a1a29011018"
+        );
+        assert_eq!(last.burned_asset_amount, Some(10_000));
+        assert_eq!(
+            last.asset_output_amount, 40_000,
+            "change kept by the burner"
+        );
+        assert_eq!(
+            last.burn_recipient.map(hex::encode).as_deref(),
+            Some("000000000000000000000000436365aab93332ad6555c78b6ab000fcea95c2eb")
+        );
+    }
+
+    /// The burn descends from a mint, and a mint is only valid against the
+    /// EVM lock the enclave verified itself. With no lock for it, or one for
+    /// the wrong amount, consensus refuses the whole consignment - so a burn
+    /// of units that were never backed cannot reach the release binds.
+    #[test]
+    #[cfg(feature = "bfa-validation")]
+    fn refuses_a_burn_whose_mint_has_no_matching_evm_lock() {
+        let id = fixture_asset_id();
+        let source = fixture_source(&id);
+        let config = pinned_config(&id);
+
+        let err = run_validate_source_with_events(&source, &config, &[]).unwrap_err();
+        assert!(
+            err.to_string().contains("without a verified FundsIn event"),
+            "expected a mint with no EVM lock to be refused, got: {err}"
+        );
+
+        let mut short = fixture_mint_events();
+        short[0] = rgbstd::vm::ether_extension::Event::new(
+            *short[0].reason(),
+            rgbstd::RevealedValue::new(99_999u64),
+        );
+        let err = run_validate_source_with_events(&source, &config, &short).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("evaluation of AluVM script for operation 6d72ee69")
+                && msg.contains("Some(1)"),
+            "expected the mint script to fail with ERRNO_ISSUED_MISMATCH, got: {msg}"
         );
     }
 
