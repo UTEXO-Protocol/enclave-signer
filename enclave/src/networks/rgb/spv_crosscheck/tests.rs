@@ -6,9 +6,8 @@ use bitcoin::block::{Header, Version};
 use bitcoin::consensus::serialize;
 use bitcoin::hashes::{sha256d, Hash};
 
-/// Builds a regtest synthetic chain rooted at a zero checkpoint. We use
-/// regtest so PoW is skipped - these tests focus on the SPV crosscheck
-/// logic, not header validation (2 covers that).
+/// Synthetic regtest chain on a zero checkpoint. Regtest skips PoW. These
+/// tests cover the SPV cross-check, not header validation (see chain.rs).
 fn regtest_chain_with(headers: Vec<Header>) -> HeaderChain {
     let mut chain = HeaderChain::new(
         Network::Regtest,
@@ -26,9 +25,8 @@ fn regtest_chain_with(headers: Vec<Header>) -> HeaderChain {
     chain
 }
 
-/// Build N synthetic regtest headers chaining from a zero prev_blockhash.
-/// Each header has a deterministic, distinct merkle_root so we can test
-/// proofs against a known root.
+/// N synthetic regtest headers from a zero prev_blockhash. Each header has a
+/// distinct, fixed merkle_root, so proofs can use a known root.
 fn synth_headers(count: u32) -> Vec<Header> {
     let mut prev = bitcoin::BlockHash::from_byte_array([0u8; 32]);
     let mut out = Vec::new();
@@ -50,13 +48,10 @@ fn synth_headers(count: u32) -> Vec<Header> {
     out
 }
 
-/// For a single-tx block, the Merkle root IS the txid (in internal
-/// order). To make a working "happy path" proof we use this fact.
-/// Returns (display-order txid, MerkleProofEntry).
+/// In a single-tx block, the Merkle root IS the txid (internal order). This
+/// gives a valid proof. Returns (display-order txid, MerkleProofEntry).
 fn single_tx_proof(header: &Header, block_height: u32) -> ([u8; 32], MerkleProofEntry) {
-    // header.merkle_root is internal-order. The txid that produces it
-    // (single-tx block, empty path) is the same bytes. Display-order
-    // is the reverse.
+    // Internal-order root == txid. Display order is the reverse.
     let internal: [u8; 32] = header.merkle_root.to_byte_array();
     let mut display = internal;
     display.reverse();
@@ -76,10 +71,8 @@ fn dsha256_pair(left: &[u8; 32], right: &[u8; 32]) -> [u8; 32] {
     sha256d::Hash::hash(&buf).to_byte_array()
 }
 
-/// Bundle of test fixtures for a 2-tx block - used by both happy and
-/// rejection paths. Factored into a struct to keep clippy happy with
-/// the `type_complexity` lint (which would otherwise fire on a 5-tuple
-/// return).
+/// Fixtures for a 2-tx block. A struct, not a 5-tuple, for clippy
+/// `type_complexity`.
 struct TwoTxBlock {
     header: Header,
     txid0_display: [u8; 32],
@@ -88,7 +81,7 @@ struct TwoTxBlock {
     path_for_tx1: Vec<Vec<u8>>,
 }
 
-/// Set up a 2-tx block: leaf0 + leaf1 -> root. Header points at root.
+/// A 2-tx block: leaf0 + leaf1 -> root. The header commits to root.
 fn build_two_tx_block(
     leaf0_internal: [u8; 32],
     leaf1_internal: [u8; 32],
@@ -121,9 +114,8 @@ fn build_two_tx_block(
     }
 }
 
-/// Helper: build a chain of `confirmations` headers where the header at
-/// height 1 has the merkle commitment we care about; subsequent headers
-/// are throwaway (they just bury the target block deep enough).
+/// Chain with `target_header` at height 1 and `depth_above` filler headers
+/// on top of it.
 fn chain_burying(target_header: Header, depth_above: u32) -> HeaderChain {
     let base_time = target_header.time;
     let mut headers = vec![target_header];
@@ -153,26 +145,19 @@ fn happy_path_single_tx_block_with_six_confirmations() {
     validate_spv_proofs(&chain, &[txid_display], &[proof], SPV_MIN_CONFIRMATIONS).unwrap();
 }
 
-/// Regression: an anchor far below `tip - HEADER_WINDOW` (~2122)
-/// still verifies. The old sliding window pruned the anchor's header, so
-/// SPV rejected every RGB consignment whose oldest witness was older than
-/// ~a day on 30s-block signet ("no header at height H (chain tip = T)").
-/// With full retention from the checkpoint the header resolves and the
-/// proof passes.
+/// Regression: an anchor more than 2122 blocks below the tip still verifies.
+/// Full retention keeps its header, so the proof does not fail with "no
+/// header at height H".
 #[test]
 fn deep_anchor_below_old_window_still_verifies() {
     let target = synth_headers(1).into_iter().next().unwrap();
-    // Derive the proof from the target before it is moved into the chain.
+    // Make the proof before the target moves into the chain.
     let (txid_display, proof) = single_tx_proof(&target, 1);
-    // Bury the target deep enough that the OLD sliding window would have
-    // pruned its header: prune_front advanced the base to
-    // floor_2016(tip - 2122), dropping the anchor at height 1 once that
-    // base >= 1 (tip >= 4138). 4200 buries it comfortably past that point,
-    // so this test genuinely fails on the pruning code and guards against
-    // its reintroduction.
+    // A window pruning to floor_2016(tip - 2122) drops height 1 when
+    // tip >= 4138. 4200 is past that, so pruning code fails this test.
     let chain = chain_burying(target, 4200);
     let tip = chain.tip_height();
-    let old_window = 100 + 2016 + 6; // former HEADER_WINDOW
+    let old_window = 100 + 2016 + 6; // pruning window size
     let old_pruned_base = (tip.saturating_sub(old_window) / 2016) * 2016;
     assert!(
         old_pruned_base >= 1,
@@ -207,9 +192,8 @@ fn rejects_block_height_beyond_tip() {
 
     let err =
         validate_spv_proofs(&chain, &[txid_display], &[proof], SPV_MIN_CONFIRMATIONS).unwrap_err();
-    // Either "no header at height" (because we don't store > tip) or
-    // "beyond chain tip" (the explicit underflow catch). Both are
-    // acceptable rejections.
+    // "no header at height" (nothing above tip) or "beyond chain tip"
+    // (underflow check). Both are valid.
     let msg = err.to_string();
     assert!(
         msg.contains("no header") || msg.contains("beyond"),
@@ -222,7 +206,7 @@ fn rejects_block_height_at_checkpoint_or_below() {
     let target = synth_headers(1).into_iter().next().unwrap();
     let chain = chain_burying(target, 5);
     let (txid_display, mut proof) = single_tx_proof(chain.header_at(1).unwrap(), 1);
-    proof.block_height = 0; // checkpoint height - we don't store its header
+    proof.block_height = 0; // checkpoint height: header not stored
 
     let err =
         validate_spv_proofs(&chain, &[txid_display], &[proof], SPV_MIN_CONFIRMATIONS).unwrap_err();
@@ -234,9 +218,8 @@ fn rejects_block_height_at_checkpoint_or_below() {
 
 #[test]
 fn rejects_extra_proof_for_unknown_txid() {
-    // We expect ONE txid, listener supplies that one PLUS a second
-    // unrelated proof. That extra proof must cause rejection - the
-    // contract is set equality.
+    // ONE expected txid, but the proofs have a second unrelated one. The
+    // rule is set equality, so this fails.
     let target = synth_headers(1).into_iter().next().unwrap();
     let chain = chain_burying(target, 5);
     let (txid_display, proof) = single_tx_proof(chain.header_at(1).unwrap(), 1);
@@ -265,7 +248,7 @@ fn rejects_missing_proof_for_expected_txid() {
     let chain = chain_burying(target, 5);
     let (txid_display, _proof) = single_tx_proof(chain.header_at(1).unwrap(), 1);
 
-    // Expected has TWO txids; listener provides ZERO proofs.
+    // TWO expected txids, ZERO proofs.
     let extra_txid = [0xEE; 32];
     let err = validate_spv_proofs(
         &chain,
@@ -301,8 +284,7 @@ fn rejects_duplicate_proof() {
 
 #[test]
 fn rejects_bad_merkle_path() {
-    // Build a 2-tx block, supply the right proof shape but with a
-    // wrong sibling - root reconstruction should mismatch.
+    // 2-tx block with a wrong sibling: the root does not match.
     let leaf0 = [0x10u8; 32];
     let leaf1 = [0x20u8; 32];
     let prev = bitcoin::BlockHash::from_byte_array([0u8; 32]);
@@ -310,7 +292,7 @@ fn rejects_bad_merkle_path() {
 
     let chain = chain_burying(block.header, 5);
 
-    // Supply a path with the WRONG sibling (all zeros instead of leaf1).
+    // WRONG sibling: all zeros, not leaf1.
     let proof = MerkleProofEntry {
         txid: block.txid0_display.to_vec(),
         block_height: 1,
@@ -395,9 +377,8 @@ fn rejects_short_merkle_path_entry() {
 
 #[test]
 fn rejects_overdeep_merkle_path() {
-    // A path deeper than any real block could produce is rejected before
-    // any Merkle hashing runs. Siblings are well-formed
-    // 32-byte hashes so the only failing predicate is the depth cap.
+    // A path deeper than any real block fails before Merkle hashing. The
+    // siblings are valid 32-byte hashes, so only the depth cap fails.
     let target = synth_headers(1).into_iter().next().unwrap();
     let chain = chain_burying(target, 5);
     let (txid_display, _proof) = single_tx_proof(chain.header_at(1).unwrap(), 1);
@@ -416,9 +397,8 @@ fn rejects_overdeep_merkle_path() {
 
 #[test]
 fn assert_chain_net_accepts_matching_pair() {
-    // Literal prefixes on purpose (not derived from `ChainNet::prefix()`):
-    // if an rgb-core upgrade ever changes the notation, this test must
-    // fail loudly instead of the contract silently shifting.
+    // Literal prefixes, not `ChainNet::prefix()`: if an rgb-core upgrade
+    // changes the notation, this test must fail.
     assert_chain_net("bc", Network::Mainnet).unwrap();
     assert_chain_net("sb", Network::Signet).unwrap();
     assert_chain_net("tb3", Network::Testnet3).unwrap();
@@ -433,18 +413,15 @@ fn assert_chain_net_rejects_mismatch() {
     let err = assert_chain_net("bc", Network::Signet).unwrap_err();
     assert!(err.to_string().contains("does not match"), "got: {err}");
 
-    // Regression: "bc:signet"-style notation is not what consignments
-    // carry (`genesis.chain_net.prefix()` yields `"sb"`); it used to be
-    // hardcoded as the expected value and blocked every signet sign.
+    // Regression: consignments carry `"sb"` (`genesis.chain_net.prefix()`),
+    // not "bc:signet"-style notation.
     let err = assert_chain_net("bc:signet", Network::Signet).unwrap_err();
     assert!(err.to_string().contains("does not match"), "got: {err}");
 }
 
 #[test]
 fn empty_expected_and_empty_proofs_is_ok() {
-    // A consignment with no witness bundles (degenerate) and no proofs
-    // is trivially OK - there's nothing to verify. Useful sanity check
-    // that we don't iterate an empty set into a panic.
+    // No witness bundles and no proofs: nothing to verify, and no panic.
     let target = synth_headers(1).into_iter().next().unwrap();
     let chain = chain_burying(target, 5);
     validate_spv_proofs(&chain, &[], &[], SPV_MIN_CONFIRMATIONS).unwrap();
@@ -452,9 +429,8 @@ fn empty_expected_and_empty_proofs_is_ok() {
 
 // ===== Staleness tests =====
 //
-// These hand `assert_chain_not_stale` an explicit `now` so the test
-// doesn't depend on wall clock. Synthetic headers in this file have
-// `time = 1_700_000_001 + i`, so we anchor `now` relative to that.
+// These pass an explicit `now` to `assert_chain_not_stale`, so they do not
+// depend on the wall clock. Synthetic headers have `time = 1_700_000_001 + i`.
 
 /// Build a chain whose tip header has the given `time` (Unix seconds).
 fn chain_with_tip_time(tip_time: u32) -> HeaderChain {
@@ -489,8 +465,7 @@ fn staleness_fresh_tip_passes() {
 #[test]
 fn staleness_tip_at_exact_max_age_passes() {
     let chain = chain_with_tip_time(1_700_000_000);
-    // Now = tip + exactly max_age. Boundary is inclusive (age == max_age
-    // is allowed; only age > max_age rejects).
+    // Now = tip + max_age. age == max_age passes; only age > max_age fails.
     assert_chain_not_stale(
         &chain,
         unix(1_700_000_000 + SPV_MAX_TIP_AGE_SECS),
@@ -517,7 +492,7 @@ fn staleness_old_tip_rejects() {
 #[test]
 fn staleness_far_future_tip_rejects() {
     let chain = chain_with_tip_time(1_700_000_000 + 4 * 60 * 60);
-    // Tip is 4h ahead of now; we allow up to 2h future skew.
+    // Tip is 4h ahead of now. The limit is 2h of future skew.
     let err = assert_chain_not_stale(
         &chain,
         unix(1_700_000_000),
@@ -531,7 +506,7 @@ fn staleness_far_future_tip_rejects() {
 #[test]
 fn staleness_near_future_tip_passes() {
     let chain = chain_with_tip_time(1_700_000_000 + 30 * 60);
-    // Tip 30 min in the future of now - within the consensus 2h grace.
+    // Tip is 30 min ahead of now: in the 2h consensus margin.
     assert_chain_not_stale(
         &chain,
         unix(1_700_000_000),
@@ -543,10 +518,8 @@ fn staleness_near_future_tip_passes() {
 
 #[test]
 fn staleness_uses_checkpoint_time_when_no_headers() {
-    // No headers pushed. Chain falls back to checkpoint.time, which in
-    // this test setup is 1_700_000_000. Now = +1h -> fresh; now = +3h
-    // -> stale. Same logic as a populated chain - checkpoint is just a
-    // header we don't store the body of.
+    // No headers: the chain uses checkpoint.time (1_700_000_000).
+    // Now = +1h -> fresh; now = +3h -> stale.
     let chain = HeaderChain::new(
         Network::Regtest,
         crate::networks::rgb::spv::checkpoint::Checkpoint {
@@ -578,10 +551,8 @@ fn staleness_uses_checkpoint_time_when_no_headers() {
 
 #[test]
 fn staleness_thresholds_are_what_we_documented() {
-    // Defensive: if anyone tightens these constants without
-    // understanding why, the test catches it. 2h on each side is
-    // deliberately generous; lowering is a security tradeoff that
-    // should be a conscious decision, not an incidental edit.
+    // 2h on each side is high on purpose. A lower value is a security
+    // tradeoff, so a change must also change this test.
     assert_eq!(SPV_MAX_TIP_AGE_SECS, 2 * 60 * 60);
     assert_eq!(SPV_MAX_TIP_FUTURE_SECS, 2 * 60 * 60);
 }

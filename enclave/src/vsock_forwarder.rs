@@ -1,17 +1,13 @@
-//! TCP-to-vsock forwarder for reaching external services (e.g., Esplora) from
-//! inside a Nitro enclave. Listens on localhost TCP and forwards each connection
-//! to the parent instance via vsock, where `vsock-proxy` relays to the real endpoint.
+//! TCP-to-vsock forwarder from the enclave to external services (for example
+//! Esplora). It listens on loopback TCP and sends each connection over vsock to
+//! the parent, where `vsock-proxy` relays it to the real endpoint.
 //!
-//! Trust boundary: everything reachable
-//! through this forwarder is host-controlled and untrusted. The host runs the
-//! `vsock-proxy` on the far end and can drop, delay, reorder, or forge any
-//! bytes. Data fetched over it is evidence to be verified by in-enclave SPV
-//! checking and rgbstd validation, never trusted input.
+//! Trust boundary: the host controls this path. It can drop, delay, reorder or
+//! forge bytes. The enclave verifies all data from it (SPV, rgbstd validation,
+//! in-enclave TLS) and never trusts it as input.
 //!
-//! The listener binds to loopback only, but it is a generic egress primitive:
-//! any code in the enclave process can tunnel host-bound traffic through it.
-//! Hardening would replace it with a typed Esplora client private to the
-//! RGB resolver path.
+//! The listener is loopback only, but it is a generic egress path: any code in
+//! the enclave process can use it.
 
 use std::io;
 use std::net::TcpListener;
@@ -21,14 +17,10 @@ use vsock::VsockStream;
 /// Parent instance CID in Nitro enclaves is always 3.
 const PARENT_CID: u32 = 3;
 
-/// Start a background forwarder thread that bridges `127.0.0.1:{local_port}`
-/// to vsock CID 3 (parent instance), port `vsock_port`.
+/// Start a background thread that forwards `127.0.0.1:{local_port}` to the
+/// parent (vsock CID 3), port `vsock_port`. Untrusted path: see the module docs.
 ///
-/// See the module-level TRUST BOUNDARY note: this is an untrusted,
-/// host-controlled egress path. Anything fetched through it must be verified
-/// (SPV + rgbstd validation), never trusted as input.
-///
-/// The forwarder is fire-and-forget - it logs errors but never crashes the enclave.
+/// Errors are logged and never stop the enclave.
 pub fn start_forwarder(local_port: u16, vsock_port: u32) -> io::Result<()> {
     spawn(
         TcpListener::bind(format!("127.0.0.1:{local_port}"))?,

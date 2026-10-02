@@ -1,27 +1,23 @@
 //! Bitcoin Merkle inclusion proof verification.
 //!
-//! Reconstructs a block's Merkle root from a single transaction id, its
-//! position in the block, and the sibling hashes along its path. The result
-//! is compared against the Merkle root committed in a validated block header.
+//! Rebuilds a block's Merkle root from one txid, its position in the block,
+//! and the sibling hashes on its path. Then compares it with the Merkle root
+//! of a validated block header.
 //!
-//! Wire format note: Bitcoin merkle nodes are computed in *internal* (little-
-//! endian) byte order, but block explorers (Esplora included) typically
-//! display txids and sibling hashes in *display* (big-endian) byte order.
-//! The verifier here operates strictly on internal-order bytes - callers are
-//! responsible for reversing display-order hex strings before passing them in.
+//! Byte order: all inputs are in internal (little-endian) order. Explorers
+//! such as Esplora show display (big-endian) order. Callers must reverse
+//! display-order hex before the call.
 //!
-//! Bitcoin duplicates the last node on odd levels. That is handled implicitly:
-//! the prover accounts for it when emitting the path, and the position index
-//! decides which side each sibling is on. The duplication is never synthesised
-//! here.
+//! Bitcoin duplicates the last node on odd levels. The prover puts that
+//! duplicate in the path, so this verifier does not make it.
 
 use bitcoin::hashes::{sha256d, Hash};
 
 /// 32-byte hash in Bitcoin internal byte order.
 pub type Sha256d = [u8; 32];
 
-/// Result of a Merkle inclusion check. Distinguishes "math is wrong" from
-/// "you fed me garbage" so callers can produce useful errors.
+/// Merkle inclusion check error. Bad input and a root mismatch are separate
+/// variants, so callers can give clear errors.
 #[derive(Debug, PartialEq, Eq)]
 pub enum MerkleError {
     /// A sibling hash in the path was the wrong length.
@@ -33,14 +29,12 @@ pub enum MerkleError {
     },
 }
 
-/// Verify that `txid` (in internal byte order) is included in a block whose
-/// `merkle_root` (also internal order) we already trust, given its `position`
-/// in the block's tx list and the `path` of sibling hashes from leaf to root.
+/// Verifies that `txid` is in a block with the trusted `merkle_root`. All
+/// hashes are in internal byte order. `position` is the tx index in the block.
+/// `path` holds the sibling hashes from leaf to root.
 ///
-/// Returns `Ok(())` on inclusion, an error otherwise.
-///
-/// `path` may be empty - that's the legitimate case where the block contains
-/// exactly one transaction (the coinbase) and the txid *is* the merkle root.
+/// An empty `path` is valid: a block with only the coinbase has txid ==
+/// merkle root.
 pub fn verify_merkle_proof(
     txid: &Sha256d,
     position: u32,
@@ -52,17 +46,15 @@ pub fn verify_merkle_proof(
 
     for (i, sibling) in path.iter().enumerate() {
         if sibling.len() != 32 {
-            // Unreachable given [u8; 32]; kept for a future Vec<Vec<u8>>
-            // boundary.
+            // Unreachable with [u8; 32]. Kept for a future Vec<Vec<u8>> input.
             return Err(MerkleError::BadSiblingLength {
                 index: i,
                 len: sibling.len(),
             });
         }
 
-        // Bottom bit of the position determines which side `current` is on:
-        //   bit == 0 -> we are the LEFT child, sibling is on the right.
-        //   bit == 1 -> we are the RIGHT child, sibling is on the left.
+        // Low bit of the position: 0 -> `current` is the left child,
+        // 1 -> `current` is the right child.
         let mut buf = [0u8; 64];
         if idx & 1 == 0 {
             buf[..32].copy_from_slice(&current);
@@ -91,7 +83,7 @@ mod tests {
     use super::*;
     use bitcoin::hashes::{sha256d, Hash};
 
-    /// Helper: double-SHA256 of two concatenated 32-byte hashes.
+    /// Double-SHA256 of two concatenated 32-byte hashes.
     fn dsha256_pair(left: &Sha256d, right: &Sha256d) -> Sha256d {
         let mut buf = [0u8; 64];
         buf[..32].copy_from_slice(left);
@@ -101,7 +93,7 @@ mod tests {
 
     #[test]
     fn empty_path_means_txid_equals_root() {
-        // Single-tx block: the txid IS the merkle root.
+        // Single-tx block: the txid is the merkle root.
         let txid: Sha256d = [0x42; 32];
         let root = txid;
         assert!(verify_merkle_proof(&txid, 0, &[], &root).is_ok());
@@ -174,8 +166,7 @@ mod tests {
         let n23 = dsha256_pair(&t2, &t3);
         let root = dsha256_pair(&n01, &n23);
 
-        // Right path for t0 but claim it's at position 1 - should hash with
-        // t1 on the wrong side and miss the root.
+        // Correct path for t0 at the wrong position: t1 goes on the wrong side.
         assert!(matches!(
             verify_merkle_proof(&t0, 1, &[t1, n23], &root),
             Err(MerkleError::RootMismatch { .. })
@@ -197,9 +188,8 @@ mod tests {
         let n22 = dsha256_pair(&t2, &t2);
         let root = dsha256_pair(&n01, &n22);
 
-        // Proof for t2: position 2, level-0 sibling is t2 itself (the
-        // duplicate), level-1 sibling is n01. The prover emits that duplicate,
-        // matching Esplora and Bitcoin Core.
+        // Proof for t2: the level-0 sibling is the t2 duplicate, the level-1
+        // sibling is n01. Esplora and Bitcoin Core emit the same path.
         assert!(verify_merkle_proof(&t2, 2, &[t2, n01], &root).is_ok());
     }
 }

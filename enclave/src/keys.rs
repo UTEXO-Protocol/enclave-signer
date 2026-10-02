@@ -16,9 +16,8 @@ use zeroize::Zeroize;
 use crate::error::{EnclaveError, Result};
 use crate::networks::rgb::signing::taproot::{find_taproot_sign_jobs, sign_taproot_inputs};
 
-/// RGB coin types for colored (RGB asset) operations. Mainnet/other split,
-/// matching `rgb-lib::utils::get_coin_type` - the host wallet derives the
-/// colored addresses this enclave must resolve.
+/// RGB coin types of the colored account, as in `rgb-lib::utils::get_coin_type`.
+/// The host wallet derives the colored addresses with them.
 const RGB_COIN_TYPE_MAINNET: u32 = 827166;
 const RGB_COIN_TYPE_TESTNET: u32 = 827167;
 
@@ -27,9 +26,8 @@ const CONCORDIUM_COIN_TYPE: u32 = 919;
 
 type HmacSha512 = Hmac<Sha512>;
 
-/// SLIP-0010 Ed25519 hardened key derivation. Returns the 32-byte private key at
-/// the given path. Every index is treated as hardened - SLIP-0010 Ed25519 only
-/// supports hardened derivation.
+/// SLIP-0010 Ed25519 key derivation. Returns the 32-byte private key at `path`.
+/// Every index is hardened: SLIP-0010 Ed25519 supports only hardened derivation.
 fn derive_ed25519_slip10(seed: &[u8; 64], path: &[u32]) -> [u8; 32] {
     // Master key: I = HMAC-SHA512(key="ed25519 seed", data=seed).
     let mut mac = HmacSha512::new_from_slice(b"ed25519 seed").expect("HMAC accepts any key length");
@@ -58,7 +56,7 @@ fn derive_ed25519_slip10(seed: &[u8; 64], path: &[u32]) -> [u8; 32] {
     key
 }
 
-/// Public key info extracted from KeyManager for responses.
+/// Public keys of a [`KeyManager`], for responses.
 pub struct KeyInfo {
     pub evm_address: [u8; 20],
     pub evm_uncompressed_pub: [u8; 64],
@@ -79,8 +77,7 @@ pub enum AccountType {
     Colored,
 }
 
-/// Holds HD wallet keys in memory. Secrets are wrapped in SecretBox for
-/// zeroize-on-drop. Public keys are stored in plain form.
+/// HD wallet keys in memory. Secrets are in `SecretBox` (zeroize on drop).
 pub struct KeyManager {
     seed: SecretBox<[u8; 64]>,
     evm_secret: SecretBox<[u8; 32]>,
@@ -91,15 +88,15 @@ pub struct KeyManager {
     evm_gas_tx_uncompressed_pub: [u8; 64],
     btc_compressed_pubkey: [u8; 33],
     btc_xpub: Xpub,
-    // BIP-86 taproot account keys
+    // BIP-86 taproot account keys.
     master_fingerprint: Fingerprint,
     account_xpriv_vanilla: Xpriv,
     account_xpub_vanilla: Xpub,
     account_xpriv_colored: Xpriv,
     account_xpub_colored: Xpub,
-    // Coin type used for vanilla derivation (0 = mainnet, 1 = testnet)
+    // Vanilla coin type: 0 mainnet, 1 other networks.
     vanilla_coin_type: u32,
-    // Coin type used for colored/RGB derivation (827166 mainnet, 827167 testnet)
+    // Colored coin type: 827166 mainnet, 827167 other networks.
     colored_coin_type: u32,
     // Concordium Ed25519 governance key (SLIP-0010, m/44'/919'/0'/0'/0').
     concordium_secret: SecretBox<[u8; 32]>,
@@ -107,8 +104,8 @@ pub struct KeyManager {
 }
 
 impl KeyManager {
-    /// Generate a new KeyManager from 256-bit entropy.
-    /// Returns both the manager and the BIP-39 mnemonic (caller logs once, then discards).
+    /// Generate a KeyManager from 256-bit entropy. Also returns the BIP-39
+    /// mnemonic. `entropy` is zeroized.
     pub fn generate(entropy: &mut [u8; 32], network: Network) -> Result<(Self, Mnemonic)> {
         let mnemonic = Mnemonic::from_entropy(entropy)
             .map_err(|e| EnclaveError::InvalidKey(format!("mnemonic generation failed: {}", e)))?;
@@ -119,7 +116,7 @@ impl KeyManager {
         Ok((manager, mnemonic))
     }
 
-    /// Create a KeyManager from a BIP-39 mnemonic phrase string.
+    /// Create a KeyManager from a BIP-39 mnemonic phrase.
     pub fn from_mnemonic(mnemonic_str: &str, network: Network) -> Result<Self> {
         let mnemonic = Mnemonic::from_str(mnemonic_str)
             .map_err(|e| EnclaveError::InvalidKey(format!("invalid mnemonic: {}", e)))?;
@@ -129,18 +126,15 @@ impl KeyManager {
 
     /// Create a KeyManager from a raw 64-byte BIP-39 seed.
     ///
-    /// The seed is moved into `SecretBox` before any derivation. Do not zeroize
-    /// the local seed before boxing, or the stored seed ends up all zeros and
-    /// cloning breaks.
+    /// Box the seed before you zeroize the local copy. Else the stored seed is
+    /// all zeros and cloning fails.
     pub fn from_seed(mut seed: [u8; 64], network: Network) -> Result<Self> {
         let seed_box = SecretBox::new(Box::new(seed));
         seed.zeroize();
 
         let secp = Secp256k1::new();
 
-        // Derive master key from seed.
-        // Use the actual network so xpub serialization produces the correct prefix
-        // (xpub for mainnet, tpub for testnet/signet/regtest).
+        // The network sets the xpub prefix: xpub on mainnet, tpub on others.
         let master = Xpriv::new_master(network, seed_box.expose_secret()).map_err(|e| {
             EnclaveError::InvalidKey(format!("master key derivation failed: {}", e))
         })?;
@@ -167,7 +161,7 @@ impl KeyManager {
         let mut evm_address = [0u8; 20];
         evm_address.copy_from_slice(&hash[12..32]);
 
-        // === EVM Gas TX: m/44'/60'/0'/0/1 (separate key for gas transaction signing) ===
+        // === EVM gas tx: m/44'/60'/0'/0/1, a separate key for gas txs ===
         let evm_gas_tx_path = DerivationPath::from_str("m/44'/60'/0'/0/1")
             .map_err(|e| EnclaveError::InvalidKey(format!("invalid EVM gas TX path: {}", e)))?;
         let evm_gas_tx_xpriv = master.derive_priv(&secp, &evm_gas_tx_path).map_err(|e| {
@@ -187,7 +181,7 @@ impl KeyManager {
         evm_gas_tx_address.copy_from_slice(&gas_tx_hash[12..32]);
 
         // === BTC Legacy: m/84'/0'/0'/0/0 ===
-        // Only its public key is still published; nothing is signed with it.
+        // Only its public key is published. It signs nothing.
         let btc_path = DerivationPath::from_str("m/84'/0'/0'/0/0")
             .map_err(|e| EnclaveError::InvalidKey(format!("invalid BTC path: {}", e)))?;
         let btc_xpriv = master
@@ -200,12 +194,10 @@ impl KeyManager {
         let btc_xpub = Xpub::from_priv(&secp, &btc_xpriv);
 
         // === BIP-86 Taproot accounts ===
-        // Vanilla coin type: 0 for mainnet, 1 for testnet/signet/regtest
         let vanilla_coin_type = match network {
             Network::Bitcoin => 0,
             _ => 1,
         };
-        // Colored (RGB) coin type: same mainnet / not-mainnet split.
         let colored_coin_type = match network {
             Network::Bitcoin => RGB_COIN_TYPE_MAINNET,
             _ => RGB_COIN_TYPE_TESTNET,
@@ -310,8 +302,8 @@ impl KeyManager {
         self.seed.expose_secret()
     }
 
-    /// Derive a child secret key from one of the BIP-86 account xprivs.
-    /// `child_path` is the relative path beyond the account level (e.g., [0, 7] for /0/7).
+    /// Derive a child secret key from a BIP-86 account xpriv. `child_path` is
+    /// relative to the account, for example `[0, 7]` for `/0/7`.
     pub fn derive_btc_child(
         &self,
         account: AccountType,
@@ -329,15 +321,14 @@ impl KeyManager {
         Ok(child_xpriv.private_key)
     }
 
-    /// Determine which account type a full derivation path belongs to,
-    /// and return the relative child path beyond the account level.
-    /// E.g., m/86'/1'/0'/0/7 -> (Vanilla, [0, 7]) on testnet.
+    /// Find the account of a full derivation path and the child path below it.
+    /// For example, m/86'/1'/0'/0/7 -> (Vanilla, [0, 7]) on testnet.
     pub fn resolve_account_and_child_path(
         &self,
         full_path: &DerivationPath,
     ) -> Option<(AccountType, Vec<ChildNumber>)> {
         let steps: Vec<ChildNumber> = full_path.into_iter().cloned().collect();
-        // Expect at least: 86' / coin_type' / 0' / ...
+        // At least 86' / coin_type' / 0'.
         if steps.len() < 3 {
             return None;
         }
@@ -360,8 +351,8 @@ impl KeyManager {
         Some((account_type, child_path))
     }
 
-    /// Sign a 32-byte message hash with the EVM secp256k1 key.
-    /// Returns 65 bytes: r(32) + s(32) + v(1) - Ethereum `ecrecover` convention.
+    /// Sign a 32-byte hash with the EVM secp256k1 key.
+    /// Returns r(32) || s(32) || v(1). v is the raw recovery id (no +27).
     pub fn sign_evm(&self, message_hash: &[u8; 32]) -> Result<[u8; 65]> {
         let signing_key = K256SigningKey::from_slice(self.evm_secret.expose_secret())
             .map_err(|e| EnclaveError::Signing(format!("evm key: {e}")))?;
@@ -376,8 +367,8 @@ impl KeyManager {
         Ok(result)
     }
 
-    /// Sign a 32-byte digest with the EVM gas TX key (m/44'/60'/0'/0/1).
-    /// Used exclusively for Ethereum gas transaction signing.
+    /// Sign a 32-byte digest with the EVM gas-tx key (m/44'/60'/0'/0/1).
+    /// Only for gas txs.
     pub fn sign_evm_gas_tx(&self, message_hash: &[u8; 32]) -> Result<[u8; 65]> {
         let signing_key = K256SigningKey::from_slice(self.evm_gas_tx_secret.expose_secret())
             .map_err(|e| EnclaveError::Signing(format!("evm gas tx key: {e}")))?;
@@ -392,30 +383,23 @@ impl KeyManager {
         Ok(result)
     }
 
-    /// Sign a 32-byte Concordium account-transaction hash with the governance
-    /// Ed25519 key. Concordium signs the transaction hash directly with plain
-    /// Ed25519 (no additional hashing). Returns the 64-byte signature.
+    /// Sign a 32-byte Concordium transaction hash with the governance Ed25519
+    /// key, with no more hashing. Returns the signature and the public key.
     pub fn sign_ccd(&self, hash: &[u8; 32]) -> Result<([u8; 64], [u8; 32])> {
         let signing_key = Ed25519SigningKey::from_bytes(self.concordium_secret.expose_secret());
         Ok((signing_key.sign(hash).to_bytes(), self.concordium_pub))
     }
 
-    /// Sign the BIP-86 key-path taproot inputs (Schnorr, BIP-340) that resolve
-    /// to our keys on either account. Returns the modified PSBT bytes and the
-    /// count of inputs signed.
+    /// Sign the BIP-86 key-path taproot inputs (BIP-340) of either account.
+    /// Returns the PSBT bytes and the number of signed inputs.
     pub fn sign_psbt(&self, psbt_bytes: &[u8]) -> Result<(Vec<u8>, usize)> {
         self.sign_psbt_scoped(psbt_bytes, None)
     }
 
-    /// Sign PSBT inputs matching our keys, optionally restricted to a single
-    /// BIP-86 account.
+    /// Sign the PSBT inputs of our keys, optionally of one BIP-86 account only.
     ///
-    /// `allowed_account`:
-    ///   * `None`: sign key-path inputs on either account.
-    ///   * `Some(account)`: sign only inputs resolving to `account`. The bridge
-    ///     path (`SignPsbt`) passes `Some(Colored)` and `SignBtc` passes
-    ///     `Some(Vanilla)`, so the plain-BTC path can never sign a Colored
-    ///     (RGB-allocated) input.
+    /// `SignPsbt` passes `Some(Colored)` and `SignBtc` passes `Some(Vanilla)`,
+    /// so the plain-BTC path never signs an RGB-allocated input.
     pub fn sign_psbt_scoped(
         &self,
         psbt_bytes: &[u8],
@@ -435,11 +419,8 @@ impl KeyManager {
 }
 
 impl Drop for KeyManager {
-    /// Wipe the BIP-86 account extended private keys on teardown.
-    ///
-    /// Unlike `seed` / `evm_secret`, these are plain `Xpriv`
-    /// fields with no `SecretBox` zeroize-on-drop. Each carries a signing
-    /// `private_key` and a sensitive `chain_code`; both are overwritten.
+    /// Wipe the BIP-86 account xprivs. They are plain `Xpriv`, not `SecretBox`,
+    /// so the private key and chain code are overwritten here.
     fn drop(&mut self) {
         self.account_xpriv_vanilla.private_key.non_secure_erase();
         self.account_xpriv_colored.private_key.non_secure_erase();

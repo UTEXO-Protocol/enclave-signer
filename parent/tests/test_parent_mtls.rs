@@ -1,5 +1,5 @@
-//! Actual TLS + generated Parent router + a counting enclave transport fixture.
-//! These checks do not establish deployed VPC rules or real NSM clone success.
+//! Real TLS, the generated Parent router and a counting enclave transport.
+//! These tests do not prove deployed VPC rules or a real NSM clone.
 use std::{
     collections::HashSet,
     sync::{
@@ -55,7 +55,7 @@ async fn server(
                     .unwrap();
                 let _: EnclaveRequest = framing::read_message(&mut stream).unwrap();
                 count.fetch_add(1, Ordering::SeqCst);
-                // Marker proves actual Parent handler reached the enclave transport.
+                // This marker shows that the Parent handler reached the enclave.
                 let reply = EnclaveResponse {
                     response: Some(enclave_response::Response::Error(ErrorResponse {
                         code: 3,
@@ -150,7 +150,7 @@ async fn mtls_roles_rate_budget_and_revocation() {
                 Code::PermissionDenied
             );
         } else {
-            // Sign schema validation proves passage through auth without requesting a signature.
+            // A schema error shows the request passed auth, with no signature.
             assert_eq!(
                 c.sign(utexo_bridge_parent::grpc_proto::SignRequest::default())
                     .await
@@ -159,7 +159,7 @@ async fn mtls_roles_rate_budget_and_revocation() {
                 Code::InvalidArgument
             );
         }
-        // No role may submit headers, and the request never reaches the enclave.
+        // No role can submit headers. The request does not reach the enclave.
         let before = calls.load(Ordering::SeqCst);
         assert_eq!(
             c.submit_headers(SubmitHeadersRequest::default())
@@ -235,7 +235,8 @@ async fn mtls_roles_rate_budget_and_revocation() {
     reached(ParentServiceClient::clone(&mut second, CloneRequest::default()).await);
     task.abort();
     backend.abort();
-    // Restart with replacement pin: old certificate still chains to CA but loses access.
+    // Restart with a new pin. The old certificate still chains to the CA but
+    // loses access.
     let (addr, _, task, backend) = server(&pki, "rotated", 2, Duration::from_secs(60), 4).await;
     let mut old = ParentServiceClient::new(
         pki.endpoint(addr, Some("operator"), "parent.test", "ca.pem")

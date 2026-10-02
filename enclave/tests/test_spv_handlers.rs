@@ -1,8 +1,8 @@
 //! Integration tests for the SPV header-sync RPCs (`SubmitHeaders`,
-//! `GetLastSavedBlock`) - exercises the full wire path: TCP framing ->
+//! `GetLastSavedBlock`). They use the full wire path: TCP framing ->
 //! `dispatch` -> `ServerContext.header_chain` -> response.
 //!
-//! SPV/RGB-only: gated with `spv` (a `ccd`-only build has no header chain).
+//! Gated with `spv`. A `ccd`-only build has no header chain.
 #![cfg(feature = "rgb-validation")]
 
 use utexo_bridge_enclave::networks::rgb::spv::{checkpoint_for, Network};
@@ -28,8 +28,8 @@ fn last_saved(port: u16) -> GetLastSavedBlockResponse {
 
 #[test]
 fn fresh_enclave_reports_checkpoint_as_tip() {
-    // Common test-server uses Regtest, whose checkpoint is the real regtest
-    // genesis block (height=0). On boot, that's the tip.
+    // The test server uses Regtest. Its checkpoint is the regtest genesis
+    // block at height 0, so a fresh enclave reports it as the tip.
     let port = start_test_server();
     let cp = checkpoint_for(Network::Regtest);
     let r = last_saved(port);
@@ -41,7 +41,6 @@ fn fresh_enclave_reports_checkpoint_as_tip() {
 fn submit_then_query_round_trip() {
     let port = start_test_server();
 
-    // Push 5 synthetic headers chained from the regtest genesis checkpoint.
     let cp = checkpoint_for(Network::Regtest);
     let headers = synth_chain_from(cp.hash, 1_700_000_000, 5);
     let resp = submit(port, 1, headers);
@@ -63,8 +62,8 @@ fn submit_then_query_round_trip() {
 #[test]
 fn submit_below_checkpoint_returns_error() {
     let port = start_test_server();
-    // Checkpoint is at height 0; submitting at height 0 is below-checkpoint
-    // territory because it would rewrite the trust anchor.
+    // The checkpoint is at height 0. A submit at height 0 would rewrite the
+    // trust anchor, so the enclave rejects it.
     let resp = submit(port, 0, synth_chain_from([0u8; 32], 1_700_000_000, 1));
 
     match resp.response {
@@ -103,10 +102,9 @@ fn submit_with_gap_returns_error() {
 fn batched_submits_advance_tip_monotonically() {
     let port = start_test_server();
 
-    // First batch of 3, chained from the regtest genesis checkpoint.
     let mut prev = checkpoint_for(Network::Regtest).hash;
     let batch1 = synth_chain_from(prev, 1_700_000_000, 3);
-    // Recompute prev = hash of last header in batch1 so batch2 chains.
+    // Batch 2 chains from the hash of the last header in batch 1.
     let last1: bitcoin::block::Header = bitcoin::consensus::deserialize(&batch1[2]).unwrap();
     prev = *bitcoin::hashes::Hash::as_byte_array(&last1.block_hash());
 
@@ -114,7 +112,6 @@ fn batched_submits_advance_tip_monotonically() {
     assert!(matches!(resp1.response, Some(ERes::SubmitHeaders(_))));
     assert_eq!(last_saved(port).block_height, 3);
 
-    // Second batch of 2, picking up where we left off.
     let batch2 = synth_chain_from(prev, 1_700_000_004, 2);
     let resp2 = submit(port, 4, batch2);
     match resp2.response {

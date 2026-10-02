@@ -1,8 +1,8 @@
-//! Running RGB consensus over a consignment.
+//! Runs RGB consensus over a consignment.
 //!
-//! The one place raw consignment bytes become a [`super::types::ValidatedConsignment`].
-//! A second `impl RgbValidator` block: the resolver plumbing it calls lives in
-//! [`super::indexer`], and this is the policy that decides what passes.
+//! This is the only place where raw consignment bytes become a
+//! [`super::types::ValidatedConsignment`]. The resolver plumbing is in
+//! [`super::indexer`]. This file holds the policy that decides what passes.
 
 use super::bfa;
 use super::consignment::{
@@ -32,13 +32,11 @@ use std::collections::BTreeSet;
 use std::io::Cursor;
 
 impl RgbValidator {
-    /// Validate raw consignment bytes. Returns extracted data on success,
-    /// or a `CrossCheck` error if validation fails.
+    /// Validates raw consignment bytes and returns the extracted data.
     ///
-    /// `bridge_events` are the EVM lock events RGB consensus checks a BFA mint
-    /// against; they are ignored by every other schema. The caller must have
-    /// verified each one itself - the extension binds amount and OpId, not the
-    /// emitting contract.
+    /// `bridge_events` are the EVM lock events that RGB consensus checks a BFA
+    /// mint against. The caller must verify each one. The extension binds
+    /// amount and OpId, not the emitting contract.
     pub fn validate_consignment(
         &self,
         consignment_bytes: &[u8],
@@ -57,7 +55,7 @@ impl RgbValidator {
             "starting RGB consignment validation"
         );
 
-        // 1. Deserialize the consignment from its file format (magic + strict-encoded).
+        // 1. Deserialize the consignment file format (magic + strict-encoded).
         let transfer = Transfer::load(Cursor::new(consignment_bytes)).map_err(|e| {
             tracing::warn!(bytes_len, "consignment deserialization failed: {e}");
             EnclaveError::CrossCheck(format!("consignment deserialization failed: {e}"))
@@ -72,15 +70,13 @@ impl RgbValidator {
             "deserialized RGB transfer"
         );
 
-        // Pre-validation extraction: no networking, and it must run before
-        // `validate()` takes ownership of `transfer`. chain_net +
-        // witness_txids are needed by the SPV crosscheck.
+        // Extract before `validate()` takes ownership of `transfer`. The SPV
+        // cross-check needs chain_net and witness_txids.
         let chain_net = transfer.genesis.chain_net.prefix().to_string();
         let mut txid_set: BTreeSet<[u8; 32]> = BTreeSet::new();
         for wb in transfer.bundles.iter() {
-            // rgbstd's Txid stringifies in display order, so decoding the
-            // hex gives display-order bytes. Reversal happens later, inside
-            // the Merkle verifier, which needs internal order.
+            // The rgbstd Txid string is in display order, so the hex decodes
+            // to display-order bytes. The Merkle verifier reverses them later.
             let display_hex = wb.witness_id().to_string();
             let bytes = hex::decode(&display_hex).map_err(|e| {
                 EnclaveError::CrossCheck(format!(
@@ -97,18 +93,15 @@ impl RgbValidator {
         }
         let witness_txids: Vec<[u8; 32]> = txid_set.into_iter().collect();
 
-        // Second walk via `rgb_consignment::parse` for op_ids, types, and
-        // output assignments in a flat shape. The parser already exposes the
-        // typed `TransitionInfo` / `FungibleAllocation` shape needed here; a
-        // direct rgbstd walk would duplicate it against evolving internal
-        // types. The parse cost is small next to the network validation.
+        // Second walk with `rgb_consignment::parse` for op_ids, types, and
+        // output assignments in a flat shape. A direct rgbstd walk would
+        // duplicate the parser against changing internal types.
         let (all_op_ids, mint_op_ids, mut last_transition, transitions_by_witness) =
             extract_transition_summary(consignment_bytes)?;
         let transitions_count = all_op_ids.len();
 
-        // The parser drops `Transition.metadata`, so read BFA
-        // `MS_BURNED_ASSET` straight from rgbstd's `Transfer`. Only the last
-        // transition matters; a non-burn leaves the field `None`.
+        // The parser drops `Transition.metadata`, so read the BFA burn metadata
+        // from the rgbstd `Transfer`. Only the last transition is read.
         if let Some(ref mut last) = last_transition {
             if last.transition_type == bfa::TS_BURN {
                 last.burned_asset_amount = read_last_transition_burned_asset(&transfer)?;
@@ -116,16 +109,14 @@ impl RgbValidator {
             }
         }
 
-        // Last bundle's witness tx, ungated by transition type, so the fundsOut
-        // source-block bind also works on a burn. The PSBT path applies its own
-        // transition-type gate before reading this.
+        // Witness tx of the last bundle, for all transition types, so the
+        // fundsOut source-block bind also works on a burn. The PSBT path does
+        // its own transition-type check.
         let last_witness_txid = transfer.bundles.iter().last().map(|wb| wb.witness_id());
 
-        // Rest of the send-RGB PSBT binding for that same bundle: its input
-        // prevouts when the bundle embeds the full tx, plus the validated OpId.
-        // Gated on the last transition being the type this build's flow signs
-        // (see `crate::networks::rgb::flow`); the check inside asserts the transition type and
-        // the witness agree.
+        // PSBT bind data for the same bundle: input prevouts (if the bundle
+        // has the full tx) and the validated OpId. Read only if this flow signs
+        // the last transition type (see `crate::networks::rgb::flow`).
         let (last_transfer_witness_prevouts, last_transfer_op_id) = match last_transition {
             Some(ref last)
                 if crate::networks::rgb::flow::is_signing_transition(last.transition_type) =>
@@ -135,19 +126,16 @@ impl RgbValidator {
             _ => (None, None),
         };
 
-        // 2. Create the witness resolver. Backend from the URL scheme:
-        //    ssl://|tcp:// -> Electrum, otherwise Esplora REST. Electrum is
-        //    the production path: TLS terminates inside the enclave against
-        //    the real server cert, so a compromised host cannot forge witness
-        // data. The Esplora `.timeout()` is load-bearing - it bounds a
-        // stalled call on the signing path.
+        // 2. Create the witness resolver. ssl:// or tcp:// selects Electrum,
+        //    other schemes select Esplora REST. Production uses Electrum: TLS
+        //    ends inside the enclave, so a compromised host cannot forge
+        //    witness data. The Esplora `.timeout()` limits a stalled call.
         let is_electrum =
             self.indexer_url.starts_with("ssl://") || self.indexer_url.starts_with("tcp://");
         let mut resolver = if is_electrum {
-            // Bound the blocking electrs reads: `Config::default()` has
-            // `timeout: None`, so a stalled read pins the worker thread
-            // forever (see ELECTRUM_WITNESS_TIMEOUT_SECS). Same crate
-            // re-export as the fee client so the `Config` type matches
+            // `Config::default()` has `timeout: None`, so a stalled read
+            // blocks the worker thread forever (see ELECTRUM_WITNESS_TIMEOUT_SECS).
+            // Use this re-export so that `Config` matches
             // `AnyResolver::electrum_blocking`.
             use rgbstd::indexers::electrum_blocking::electrum_client;
             let electrum_cfg = electrum_client::Config::builder()
@@ -166,14 +154,11 @@ impl RgbValidator {
             })?
         };
 
-        // Register transactions bundled in the consignment so the resolver
-        // treats them as tentative witnesses (not yet mined).
+        // The resolver treats the consignment txs as tentative (not mined).
         resolver.add_consignment_txes(&transfer);
 
-        // Pin the trusted type system from the
-        // canonical `rgb-schemas` definitions, NOT from `transfer.types` -
-        // the consignment's own types would be compared against themselves.
-        // An unknown schema_id is rejected fail-closed inside the helper.
+        // Use the trusted type system from `rgb-schemas`, NOT `transfer.types`.
+        // An unknown schema_id fails closed in the helper.
         let schema_id = transfer.genesis.schema_id;
         let trusted_typesystem = trusted_typesystem_for_schema(schema_id).inspect_err(|_| {
             tracing::warn!(%contract_id, %schema_id, "consignment schema is not admitted");
@@ -187,17 +172,15 @@ impl RgbValidator {
             ..Default::default()
         };
 
-        // 4. Run full RGB validation (makes blocking HTTP calls to Esplora).
+        // 4. Run full RGB validation (blocking calls to the indexer).
         tracing::debug!(%contract_id, "calling rgbstd validate (this may block on Esplora)");
-        // A BFA mint script ends with `cea`, which the plain validator decodes as
-        // `Fail` and so rejects every mint; only the ether extension can run it.
-        // No schema branch: the gate above admits BFA and nothing else, so
-        // every consignment reaching here needs the extension.
+        // A BFA mint script ends with `cea`. The plain validator decodes it as
+        // `Fail`, so only the ether extension can run it. The schema gate
+        // admits only BFA, so no schema branch is necessary.
         #[cfg(feature = "bfa-validation")]
         let validation_result = {
-            // Fail closed, and say why: `cea` would reject an empty event set as
-            // an opaque script failure, and validating a mint with no verified
-            // lock behind it is the same as accepting an unbacked mint.
+            // Fail closed with a clear reason. `cea` reports an empty event set
+            // as an opaque script failure. A mint with no verified lock is unbacked.
             if bridge_events.is_empty() {
                 return Err(EnclaveError::CrossCheck(
                     "BFA consignment supplied without a verified FundsIn event - refusing to \
@@ -220,9 +203,8 @@ impl RgbValidator {
         let validation_result = transfer.validate(&resolver, &config);
 
         let valid = validation_result.map_err(|e| {
-            // ValidationError carries the Failure that condemned the consignment,
-            // but its Display is a doc comment that drops it - so on its own the
-            // log says only "invalid" and an operator has nothing to act on.
+            // The ValidationError Display drops the Failure, so log the
+            // Failure for the operator.
             let detail = match &e {
                 ValidationError::InvalidConsignment(failure) => failure.to_string(),
                 other => other.to_string(),
@@ -236,17 +218,14 @@ impl RgbValidator {
             EnclaveError::CrossCheck(format!("RGB consignment validation failed: {e}: {detail}"))
         })?;
 
-        // Warnings only. Witness confirmation is deliberately NOT derived
-        // from `tx_ord_map` (follow-up): rgb-ops' `resolve_witness`
-        // hard-codes every consignment-supplied tx to `WitnessOrd::Tentative`
-        // regardless of on-chain depth, so reading it as "not yet mined"
-        // rejected every fundsOut.
+        // Warnings only. Witness confirmation does NOT come from `tx_ord_map`.
+        // rgb-ops `resolve_witness` sets each consignment tx to
+        // `WitnessOrd::Tentative` at any depth, which would reject each fundsOut.
         //
-        // Confirmation for the RGB->EVM direction comes from the in-enclave
-        // SPV header chain instead: `validate_source` requires a valid merkle
-        // proof for every witness txid at `SPV_MIN_CONFIRMATIONS` depth.
-        // `non_mined_witness_txids` stays empty so the
-        // `assert_witnesses_confirmed` call site remains a structural guard.
+        // RGB->EVM confirmation comes from the in-enclave SPV header chain.
+        // `validate_source` requires a Merkle proof for each witness txid at
+        // `SPV_MIN_CONFIRMATIONS` depth. `non_mined_witness_txids` stays empty,
+        // so the `assert_witnesses_confirmed` call site stays a structural guard.
         let status = valid.validation_status();
         for warning in &status.warnings {
             tracing::warn!(%contract_id, "RGB validation warning: {warning}");

@@ -1,11 +1,11 @@
-//! Request handling: one module per request family.
+//! Request handling, with one module for each request family.
 //!
-//! Wiring only. The flow is `wire.rs` -> `dispatch.rs` -> one handler module.
+//! The flow is `wire.rs` -> `dispatch.rs` -> one handler module.
 
 #[cfg(feature = "bfa-validation")]
 mod bfa;
-// Cloning is disabled with KMS persistence: every replica recovers the same
-// seed from KMS, so the donor/requester handshake has nothing to move.
+// KMS persistence disables cloning. All replicas recover the same seed from
+// KMS, so the cloning handshake has no purpose.
 #[cfg(not(feature = "kms-persistence"))]
 mod cloning;
 mod context;

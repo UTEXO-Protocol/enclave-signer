@@ -19,9 +19,9 @@ use rustls::pki_types::ServerName;
 /// Limit for one session: name lookup, connect, TLS handshake and every read
 /// and write.
 pub const CALL_TIMEOUT: Duration = Duration::from_secs(15);
-/// Most headers one call returns.
+/// Maximum headers per call.
 pub const MAX_HEADERS: u32 = 2016;
-/// Most bytes one call reads. 2,016 headers in hex are about 323 KB.
+/// Maximum bytes per call. 2,016 headers in hex are about 323 KB.
 const MAX_READ_BYTES: usize = 1 << 20;
 
 pub struct ElectrumSource {
@@ -191,9 +191,9 @@ impl Session {
     }
 }
 
-/// Resolve `host` under `deadline`. The lookup runs on its own thread, since
-/// the resolver takes no deadline and a hung one must not hold the caller
-/// past the session's limit.
+/// Resolve `host` before `deadline`. The lookup runs on its own thread
+/// because the resolver has no deadline. A hung lookup must not hold the
+/// caller past the session limit.
 fn resolve(host: &str, port: u16, deadline: Instant) -> anyhow::Result<Vec<SocketAddr>> {
     if let Ok(ip) = host.parse::<IpAddr>() {
         return Ok(vec![SocketAddr::new(ip, port)]);

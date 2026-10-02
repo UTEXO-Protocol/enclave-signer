@@ -14,11 +14,10 @@ use utexo_bridge_parent::health;
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let seed_configured = utexo_bridge_parent::seed_persistence::configured();
     tracing_subscriber::registry()
-        // SDK debug and trace events may contain signed requests, so those two
-        // levels are dropped for the AWS and HTTP stacks when the broker is
-        // configured. Their info, warn and error events stay: the gRPC and
-        // mTLS server share hyper and rustls. Broker diagnostics use fixed
-        // categories and are safe at every level.
+        // SDK debug and trace events can contain signed requests. When the
+        // broker is configured, drop those levels for the AWS and HTTP stacks.
+        // Keep info, warn and error: the gRPC and mTLS server also use hyper
+        // and rustls. Broker diagnostics use fixed categories and are safe.
         .with(
             tracing_subscriber::fmt::layer()
                 .with_filter(EnvFilter::from_default_env())
@@ -69,9 +68,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let listen_addr = std::net::SocketAddr::new(cfg.grpc_host.parse()?, cfg.grpc_port);
     let health_addr = format!("{}:{}", cfg.health_host, cfg.health_port).parse()?;
 
-    // Limit active requests across all connections. (F03-AF-13)
-    // Also limit requests per connection and handler duration.
-    // Clone authentication still applies inside the enclave.
+    // Limit active requests across all connections (F03-AF-13), requests per
+    // connection, and handler duration. The enclave still authenticates clones.
     let per_conn = cfg.grpc_max_concurrent_per_conn;
     tracing::info!(
         %listen_addr,
@@ -81,22 +79,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "starting gRPC server"
     );
 
-    // Bind the probe before serving anything, so a bad HEALTH_PORT fails here
-    // rather than at the next deploy's first poll.
+    // Bind the probe first, so a bad HEALTH_PORT fails at boot.
     let health_listener = health::bind(health_addr).await?;
     let service = ParentAdapterService::new(target, cfg.evm_network_ids.clone());
 
-    // The enclave takes headers in every phase, so sync starts before keys and
-    // endpoints. A failed step, or a bad HEADER_ELECTRUM_URL, never stops the
-    // gRPC server: both show up in `/health` as `header_sync`.
+    // The enclave accepts headers in every phase, so sync starts before keys
+    // and endpoints. A failed step or a bad HEADER_ELECTRUM_URL does not stop
+    // the gRPC server. `/health` reports both as `header_sync`.
     let (header_sync, sync_status) =
         HeaderSync::new(service.clone(), header_source, header_interval);
     tokio::spawn(header_sync.run());
 
     let broker = utexo_bridge_parent::seed_persistence::start(&cfg).await?;
 
-    // Serving it, though, is the lower-value half: these parents hold a 2-of-3
-    // quorum, so a dead probe must not take signing down with it.
+    // A failed health server must not stop signing: these parents hold a
+    // 2-of-3 quorum.
     let health_service = service.clone();
     tokio::spawn(async move {
         if let Err(e) = health::serve(health_listener, health_service, sync_status).await {

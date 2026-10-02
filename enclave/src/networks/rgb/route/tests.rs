@@ -28,13 +28,13 @@ fn validated_consignment(
         last_transfer_witness_prevouts: None,
         last_transfer_op_id: None,
         non_mined_witness_txids: vec![],
-        // These cases never reach the PSBT bind (garbage `psbt_bytes`).
+        // These cases do not reach the PSBT bind.
         transitions_by_witness: vec![],
     }
 }
 
-/// A withdrawal consignment shaped for this build's flow, carrying
-/// `amount` where that flow reads it.
+/// A withdrawal consignment in the shape of this build's flow, with `amount`
+/// in the field that the flow reads.
 #[cfg(all(feature = "rgb-swap", rgb_to_evm))]
 fn funds_out_consignment(amount: u64, op_id: &str) -> ValidatedConsignment {
     validated_consignment(bfa::TS_TRANSFER, amount, None, op_id)
@@ -123,23 +123,20 @@ fn route_proof_rejects_the_other_flows_shape() {
     );
 }
 
-// Asset-identity binding, destination path. The legs are
-// inlined in `validate_destination_anchor` after `validate_consignment`, so
-// that function is the narrowest callable unit. Driven end-to-end with the
-// in-tree mainnet transfer fixture against a stub Esplora.
+// Asset-identity binding, destination path. The checks are inline in
+// `validate_destination_anchor`, so that function is the smallest testable
+// unit. The tests use the mainnet transfer fixture and a stub Esplora.
 //
-// Deliberate asymmetry: this path enforces the RGB_ASSET_ID pin
-// unconditionally, while the source path gates it on
-// `BridgeConfig::is_configured()`.
+// Intentional asymmetry: this path always enforces the RGB_ASSET_ID pin.
+// The source path enforces it only if `BridgeConfig::is_configured()`.
 
-/// END-TO-END asset binding: these drive the whole validator, so they also
-/// prove the bind is wired into the request path - what the pure-rule tests
-/// in `validation::tests::asset_binding_rule` cannot show.
+/// End-to-end asset binding. These tests run the full validator, so they
+/// prove that the bind is in the request path. The rule tests in
+/// `validation::tests::asset_binding_rule` cannot show this.
 ///
-/// ALL IGNORED, one reason: `transfer_consignment.rgbc` is an NIA
-/// consignment, which the enclave now refuses at the schema gate before any
-/// of these reaches the asset bind. Drop every `#[ignore]` in this module
-/// once a BFA consignment lands in `enclave/tests/fixtures/`.
+/// All tests are ignored for one reason: `transfer_consignment.rgbc` is an
+/// NIA consignment, and the schema gate refuses it before the asset bind.
+/// Remove each `#[ignore]` when a BFA fixture is in `enclave/tests/fixtures/`.
 #[cfg(evm_to_rgb)]
 mod asset_bind {
     use super::*;
@@ -153,13 +150,11 @@ mod asset_bind {
     const TRANSFER_FIXTURE: &[u8] =
         include_bytes!("../../../../tests/fixtures/transfer_consignment.rgbc");
 
-    /// Contract id of `TRANSFER_FIXTURE`. Kept as a literal (the old
-    /// suite's `PIN`), re-derived and asserted in [`fixture_asset_id`] so
-    /// a fixture swap fails loud instead of silently retargeting every
-    /// binding test.
+    /// Contract id of `TRANSFER_FIXTURE`. [`fixture_asset_id`] derives it again
+    /// and asserts it, so a fixture change fails loudly.
     const FIXTURE_ASSET_ID: &str = "rgb:fuhLYX9G-eC8gDvf-V0XpYFH-ceSafoc-lGutAYq-~SExGU4";
 
-    /// The validated asset identity: the fixture's genesis contract id.
+    /// The validated asset identity: the genesis contract id of the fixture.
     fn fixture_asset_id() -> String {
         let t = Transfer::load(Cursor::new(TRANSFER_FIXTURE)).expect("load transfer fixture");
         let id = t.contract_id().to_string();
@@ -170,11 +165,11 @@ mod asset_bind {
         id
     }
 
-    /// Stub Esplora serving only `GET /block-height/0` with the mainnet
-    /// genesis hash - all offline rgbstd validation of the fixture needs:
-    /// the resolver phones home only for the genesis-hash chain-identity
-    /// check, and the fixture embeds its witness txs (registered as
-    /// tentative via `add_consignment_txes`).
+    /// Stub Esplora that serves only `GET /block-height/0` with the mainnet
+    /// genesis hash. Offline rgbstd validation of the fixture needs only this.
+    /// The resolver calls out only for the genesis-hash chain check. The
+    /// fixture embeds its witness txs (added as tentative by
+    /// `add_consignment_txes`).
     fn spawn_stub_esplora() -> String {
         use std::io::{Read as _, Write as _};
         use std::net::TcpListener;
@@ -208,7 +203,7 @@ mod asset_bind {
         format!("http://{addr}")
     }
 
-    /// Fully-pinned operator config (`is_configured() == true`) with the
+    /// Fully pinned operator config (`is_configured() == true`) with the
     /// given RGB_ASSET_ID.
     fn pinned_config(rgb_asset_id: &str) -> BridgeConfig {
         BridgeConfig {
@@ -220,7 +215,7 @@ mod asset_bind {
         }
     }
 
-    /// Fully-empty operator config - no RGB_ASSET_ID pin at all.
+    /// Empty operator config with no RGB_ASSET_ID pin.
     fn unconfigured_config() -> BridgeConfig {
         BridgeConfig {
             chain_id: 0,
@@ -231,10 +226,9 @@ mod asset_bind {
         }
     }
 
-    /// A destination around the fixture consignment, hash-bound, with
-    /// deliberately garbage `psbt_bytes`. PSBT deserialization runs after
-    /// every asset-binding leg, so its distinctive error proves the binding
-    /// was traversed.
+    /// A hash-bound destination with the fixture consignment and invalid
+    /// `psbt_bytes`. PSBT parsing runs after all asset-binding checks, so its
+    /// error proves that the binding passed.
     fn fixture_destination(asset_id: &str) -> RgbDestination {
         RgbDestination {
             operation_idx: 0,
@@ -247,8 +241,7 @@ mod asset_bind {
         }
     }
 
-    /// Drive `validate_destination_anchor` (the unit the binding is
-    /// inlined in) with a stub-Esplora validator.
+    /// Runs `validate_destination_anchor` with a stub-Esplora validator.
     fn run_validate_destination_anchor(
         destination: &RgbDestination,
         config: &BridgeConfig,
@@ -266,10 +259,8 @@ mod asset_bind {
                 chain_work: None,
             },
         ));
-        // Every case in this suite fails before the PSBT stage (the
-        // fixture's `psbt_bytes` are deliberately garbage), so the
-        // resolver is never called - but it must be present, or the
-        // fail-closed guard would mask the error each test asserts on.
+        // All cases fail before the PSBT stage, so the resolver is not called.
+        // It must be present, or the fail-closed guard hides the expected error.
         let self_owned = |_: &bitcoin::psbt::Psbt, _: bitcoin::OutPoint| Ok(false);
         let ctx = ValidationContext {
             bridge_config: config,
@@ -283,9 +274,8 @@ mod asset_bind {
         validate_destination_anchor(destination, 0, 0, &ctx).map(|(amount, _)| amount)
     }
 
-    /// Happy path (old `binds_when_contract_id_matches_pin`): validated
-    /// contract_id == declared asset_id == pinned RGB_ASSET_ID. Every
-    /// binding leg passes and validation proceeds to the PSBT stage.
+    /// Happy path: validated contract_id == declared asset_id == pinned
+    /// RGB_ASSET_ID. All binding checks pass and validation reaches the PSBT stage.
     // Ignored: see the module note on the BFA fixture.
     #[test]
     #[ignore]
@@ -304,9 +294,8 @@ mod asset_bind {
         );
     }
 
-    /// The destination must declare its asset: an empty `asset_id` fails
-    /// closed before the validator runs, rather than binding via the pin
-    /// alone. With an empty declared id nothing binds, foreign or not.
+    /// The destination must declare its asset. An empty `asset_id` fails
+    /// closed before the validator runs. The pin alone does not bind.
     #[test]
     fn rejects_when_declared_is_empty() {
         let err = run_validate_destination_anchor(
@@ -321,10 +310,9 @@ mod asset_bind {
         );
     }
 
-    /// Empty declarations are rejected up-front, so the reachable form of
-    /// the funds-theft path is a listener that declares the
-    /// foreign asset consistently with the consignment. The RGB_ASSET_ID
-    /// pin must still reject it.
+    /// Empty declarations fail first. Thus the reachable theft path is a
+    /// listener that declares the foreign asset of the consignment. The
+    /// RGB_ASSET_ID pin must still reject it.
     // Ignored: see the module note on the BFA fixture.
     #[test]
     #[ignore]
@@ -342,10 +330,9 @@ mod asset_bind {
         );
     }
 
-    /// This path fails closed on a missing RGB_ASSET_ID pin
-    /// unconditionally, with no `is_configured()` gate: an
-    /// rgb-validation-enabled enclave with no pin must not sign a send-RGB
-    /// PSBT in listener-trusting mode.
+    /// This path always fails closed on a missing RGB_ASSET_ID pin, with no
+    /// `is_configured()` gate. An enclave with no pin must not trust the
+    /// listener to sign a send-RGB PSBT.
     // Ignored: see the module note on the BFA fixture.
     #[test]
     #[ignore]
@@ -360,8 +347,8 @@ mod asset_bind {
         );
     }
 
-    /// The listener declares a different asset than the validated
-    /// identity. Fires on the declared-vs-validated leg, before the pin.
+    /// The listener declares an asset that is not the validated identity.
+    /// The declared-vs-validated check fails before the pin check.
     // Ignored: see the module note on the BFA fixture.
     #[test]
     #[ignore]
@@ -378,11 +365,8 @@ mod asset_bind {
         );
     }
 
-    // An absent contract_id has no explicit guard on this path: the
-    // property is structural, since `asset_id` must be non-empty and equal
-    // the validated contract_id. It is also unreachable through the
-    // narrowest callable unit, because `validate_consignment` derives
-    // contract_id from the consignment's genesis and no fabricated
-    // ValidatedConsignment can be injected. The source path keeps an
-    // explicit (equally unreachable) guard.
+    // No end-to-end test for an empty validated contract_id.
+    // `validate_consignment` derives it from the genesis, so it is never
+    // empty. `assert_asset_binding` rejects it, and
+    // `validation::tests::asset_binding_rule` covers the rule.
 }

@@ -1,5 +1,6 @@
-//! Host gRPC perimeter. TLS authenticates the peer; leaf SHA-256 pins grant
-//! explicit RPC roles before protobuf handlers or enclave I/O are invoked.
+//! Host gRPC perimeter. mTLS authenticates the peer. The SHA-256 pin of the
+//! leaf certificate gives an RPC role before any handler or enclave I/O runs.
+//! The only plaintext mode is `GRPC_ALLOW_INSECURE_LOOPBACK` on a loopback bind.
 use anyhow::{bail, Context as _, Result};
 use sha2::{Digest, Sha256};
 use std::{
@@ -47,8 +48,8 @@ fn read(path: &str) -> Result<Vec<u8>> {
 
 impl ServerSecurity {
     pub fn from_env(bind: std::net::IpAddr) -> Result<Self> {
-        // Other workspace dependencies may also enable aws-lc. Select ring
-        // explicitly so feature unification cannot make rustls panic at startup.
+        // Other dependencies can enable aws-lc. Select ring, so feature
+        // unification cannot make rustls panic at startup.
         let _ = rustls::crypto::ring::default_provider().install_default();
         let max_connections = value("GRPC_MAX_CONNECTIONS")?
             .unwrap_or_else(|| "64".into())
@@ -108,8 +109,8 @@ impl ServerSecurity {
     }
 }
 
-/// Shared Rust client settings used by clone and attest-verify. Only explicit
-/// HTTP loopback is allowed without TLS; partial settings never downgrade.
+/// Client endpoint for clone and attest-verify. Plaintext is allowed only to
+/// an explicit loopback IP. Partial TLS settings never downgrade to plaintext.
 pub fn client_endpoint(url: &str) -> Result<Endpoint> {
     let _ = rustls::crypto::ring::default_provider().install_default();
     let endpoint = Endpoint::from_shared(url.to_owned())?
@@ -300,8 +301,8 @@ where
     }
 }
 
-/// Caps sockets for their entire lifetime, including unfinished TLS handshakes.
-/// HTTP/2 request concurrency alone does not bound tonic's TLS accept tasks.
+/// Limits open sockets for their full lifetime, including TLS handshakes.
+/// HTTP/2 request limits do not bound the tonic TLS accept tasks.
 pub struct LimitedIncoming {
     listener: tokio::net::TcpListener,
     permits: Arc<tokio::sync::Semaphore>,
@@ -333,7 +334,7 @@ impl tokio_stream::Stream for LimitedIncoming {
                     _permit: permit,
                 }))),
                 Err(_) => {
-                    // Drop excess sockets without spawning work or logging per attempt.
+                    // Drop excess sockets. Do not spawn work or log each attempt.
                     drop(stream);
                     cx.waker().wake_by_ref();
                     Poll::Pending

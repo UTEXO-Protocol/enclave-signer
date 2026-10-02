@@ -24,37 +24,33 @@ use crate::proto::EvmSource;
 
 /// `keccak256("fundsOut((address,uint256,uint256,uint256,uint256,string,bytes,bytes,bytes32))")[0..4]`.
 ///
-/// Bundling the release fields into `FundsOutParams` moved the selector
-/// `0xccddb768` -> `0xdc771390`; appending `sourceBurnTxId` (bridge PR #152)
-/// moved it again to `0x340276aa`. A body in either older shape fails closed
-/// at the whitelist, so a half-migrated backend cannot get a signature.
+/// The older shapes `0xccddb768` and `0xdc771390` (before `sourceBurnTxId`,
+/// bridge PR #152) fail closed at the whitelist. Thus a half-migrated backend
+/// cannot get a signature.
 #[cfg(rgb_to_evm)]
 pub const FUNDS_OUT_SELECTOR_POOLS: [u8; 4] = [0x34, 0x02, 0x76, 0xaa];
 
 /// `keccak256("lzFundsOut(uint256,uint256,uint256,uint256,string,bytes,bytes,uint32,bytes32,uint256,bytes,bytes32)")[0..4]`.
 ///
-/// Enclave wire format for `MultisigProxy.lzFundsOutCall`: individual params,
-/// no struct wrapper - analogous to `fundsOut` above. The selector distinguishes
-/// the two release paths in the allowlist and routes to `TeeLzFundsOut` digest.
+/// Enclave wire format for `MultisigProxy.lzFundsOutCall`, with individual
+/// params and no struct. The selector identifies this release path in the
+/// allowlist and selects the `TeeLzFundsOut` digest.
 #[cfg(rgb_to_evm)]
 pub const LZ_FUNDS_OUT_SELECTOR: [u8; 4] = lzFundsOutCall::SELECTOR;
 
-/// Chain id the bridge assigns to the RGB network: `networks.IDUtexo` in
-/// bridge-utexo and the `96 -> <evm>` routes the contracts' `DeployAll`
-/// registers. A protocol constant, not a deployment knob, so it is pinned in
-/// code and measured into PCR0 with the rest of the image.
+/// Chain id of the RGB network: `networks.IDUtexo` in bridge-utexo and the
+/// `96 -> <evm>` routes that `DeployAll` registers. It is a protocol constant,
+/// so code pins it and PCR0 measures it.
 ///
-/// `sourceChainId` is not a label: the Router and CommissionManager key the
-/// verifier, the settlement module and the commission rate on the
-/// `(sourceChainId, destinationChainId)` pair, so a forged value steers an
-/// RGB release through a foreign verifier or rate. Enforced by
-/// [`validate_rgb_source_identity`] on both release routes.
+/// The Router and CommissionManager select the verifier, settlement module and
+/// commission rate by `(sourceChainId, destinationChainId)`. A forged value
+/// sends an RGB release through a foreign verifier or rate.
+/// [`validate_rgb_source_identity`] enforces it on both release routes.
 #[cfg(rgb_to_evm)]
 pub const RGB_SOURCE_CHAIN_ID: u64 = 96;
 
-/// Upper bound on `call_data` length. A legitimate `fundsOut` call is a few
-/// hundred bytes, so anything past 64 KiB is malformed or a work-amplification
-/// attempt. Compile-time and PCR-attested.
+/// Maximum `call_data` length. A valid `fundsOut` call is a few hundred bytes.
+/// More than 64 KiB is malformed or a work-amplification attempt. PCR-attested.
 #[cfg(rgb_to_evm)]
 pub const MAX_FUNDS_OUT_CALL_DATA_LEN: usize = 64 * 1024;
 
@@ -66,10 +62,11 @@ sol! {
     /// both the ABI decode here and the `TeeFundsOut` struct hash in
     /// [`super::signing::funds_out_digest`].
     ///
-    /// `sourceBurnTxId` (bridge PR #152) is the RGB OpId of the burn transition:
-    /// the only field that says WHICH burn is settled. The Bridge folds it into
-    /// `burnId` but cannot verify it; the enclave binds it to the validated
-    /// consignment in [`super::crosscheck::validate_funds_out_source_burn_tx_id`].
+    /// `sourceBurnTxId` (bridge PR #152) is the RGB OpId of the burn transition.
+    /// It is the only field that identifies the settled burn. The Bridge hashes
+    /// it into `burnId` but cannot verify it. The enclave binds it to the
+    /// validated consignment in
+    /// [`super::crosscheck::validate_funds_out_source_burn_tx_id`].
     struct FundsOutParams {
         address recipient;
         uint256 amount;
@@ -82,14 +79,13 @@ sol! {
         bytes32 sourceBurnTxId;
     }
 
-    /// Never reaches the chain - the proxy takes the struct directly. This is
-    /// only the enclave's wire format, which is why the protos still carry an
-    /// opaque `call_data` blob.
+    /// Enclave wire format only. It never goes on chain because the proxy takes
+    /// the struct directly. Thus the protos carry an opaque `call_data` blob.
     function fundsOut(FundsOutParams params);
 
-    /// Mirrors `IMultisigProxy.LzFundsOutParams` enclave wire format.
-    /// Individual params (no struct wrapper) analogous to `fundsOut` above.
-    /// Selector routes to `TeeLzFundsOut` digest in [`super::signing::lz_funds_out_digest`].
+    /// Enclave wire format of `IMultisigProxy.LzFundsOutParams`, as individual
+    /// params. The selector selects the `TeeLzFundsOut` digest in
+    /// [`super::signing::lz_funds_out_digest`].
     function lzFundsOut(
         uint256 amount,
         uint256 burnId,
@@ -106,10 +102,10 @@ sol! {
     );
 }
 
-/// Validate only source-EVM concerns reported by the listener.
+/// Validates only the source-EVM fields that the listener reports.
 ///
-/// Destination-network payload shape and cross-network amount consistency
-/// belong to the destination or route-level validator.
+/// The destination and route validators own the destination payload and the
+/// cross-network amount check.
 #[cfg(evm_to_rgb)]
 pub fn validate_source(amount: u64, source: &EvmSource) -> Result<RouteProof> {
     if source.tx_hash.len() != TX_HASH_LEN {
@@ -119,11 +115,9 @@ pub fn validate_source(amount: u64, source: &EvmSource) -> Result<RouteProof> {
         )));
     }
 
-    // The listener-supplied `event_valid` / `event_finalized`
-    // booleans are not trusted here - anyone reaching the enclave could set
-    // both. Validity and finality come from
-    // `networks::evm::events::verify_funds_in_event` in `handle_sign`. The
-    // proto fields remain, ignored, until the listener stops sending them.
+    // Do not trust the listener `event_valid` / `event_finalized` flags. Any
+    // caller can set them. Validity and finality come from
+    // `networks::evm::events::verify_funds_in_event` in `handle_sign`.
 
     Ok(RouteProof {
         amount,
@@ -131,11 +125,10 @@ pub fn validate_source(amount: u64, source: &EvmSource) -> Result<RouteProof> {
     })
 }
 
-/// The fields of a release calldata that identify WHICH burn it settles,
-/// decoded route-neutrally: both the direct `fundsOut` and the LayerZero
-/// `lzFundsOut` shapes carry them. They are exactly the `burnId` preimage
-/// inputs plus the `burnId` the backend derived, so the handler can bind the
-/// source fields to the request's source network and recompute `burnId`.
+/// The release calldata fields that identify the settled burn. Both
+/// `fundsOut` and `lzFundsOut` carry them. They are the `burnId` preimage
+/// inputs and the backend `burnId`. The handler binds the source fields to the
+/// request's source network and recomputes `burnId`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ReleaseIdentity {
     /// Calldata `burnId`, as the backend derived it.
@@ -160,7 +153,7 @@ const BURN_TYPEHASH_STR: &str = "UtexoBurnId(address bridge,uint256 chainId,addr
      uint256 amount,uint256 sourceChainId,bytes32 sourceAddressHash,\
      bytes32 settlementDataHash,bytes32 sourceBurnTxId)";
 
-/// Recompute `burnId` exactly as `Bridge._deriveBurnIdFromFields` does:
+/// Recomputes `burnId` exactly as `Bridge._deriveBurnIdFromFields` does:
 ///
 /// ```text
 /// keccak256(abi.encode(BURN_TYPEHASH, bridge, chainId, token, amount,
@@ -168,10 +161,10 @@ const BURN_TYPEHASH_STR: &str = "UtexoBurnId(address bridge,uint256 chainId,addr
 ///     sourceBurnTxId))
 /// ```
 ///
-/// `bridge` is `address(this)` inside the Bridge, i.e. the pinned
-/// `FUNDS_IN_CONTRACT` (the contract that emits `BridgeFundsIn`); `chainId`
-/// the pinned `EVM_CHAIN_ID`; `token` the pinned `TOKEN_CONTRACT`. Nine static
-/// words, so `abi.encode` is plain concatenation.
+/// `bridge` is `address(this)` in the Bridge: the pinned `FUNDS_IN_CONTRACT`
+/// that emits `BridgeFundsIn`. `chainId` is the pinned `EVM_CHAIN_ID`. `token`
+/// is the pinned `TOKEN_CONTRACT`. All nine words are static, so `abi.encode`
+/// is concatenation.
 #[cfg(rgb_to_evm)]
 pub fn expected_burn_id(cfg: &BridgeConfig, release: &ReleaseIdentity) -> U256 {
     use sha3::{Digest, Keccak256};
@@ -191,13 +184,13 @@ pub fn expected_burn_id(cfg: &BridgeConfig, release: &ReleaseIdentity) -> U256 {
     U256::from_be_bytes::<32>(Keccak256::digest(&buf).into())
 }
 
-/// Refuse a release whose `burnId` is not the one the Bridge will derive.
+/// Refuses a release whose `burnId` is not the one the Bridge derives.
 ///
-/// The contract performs the same check and reverts (`InvalidBurnId`), so
-/// this adds no authority; it fails at sign time, with the expected value in
-/// the error, instead of on chain. Both routes. Skipped while
-/// `TOKEN_CONTRACT` is unpinned (dev builds): a production policy cannot boot
-/// without it ([`crate::policy::ProductionPolicy::check_invariants`]).
+/// The contract does the same check (`InvalidBurnId`), so this adds no
+/// authority. It fails at sign time with the expected value, not on chain.
+/// Both routes. Skipped while `TOKEN_CONTRACT` is not pinned (dev builds). A
+/// production policy cannot boot without it
+/// ([`crate::policy::ProductionPolicy::check_invariants`]).
 #[cfg(rgb_to_evm)]
 pub fn validate_burn_id(cfg: &BridgeConfig, release: &ReleaseIdentity) -> Result<()> {
     if cfg.token_contract == [0u8; ADDRESS_LEN] {
@@ -216,18 +209,16 @@ pub fn validate_burn_id(cfg: &BridgeConfig, release: &ReleaseIdentity) -> Result
     Ok(())
 }
 
-/// Bind a release's source fields to an RGB source, on either route.
+/// Binds the source fields of a release to an RGB source, on both routes.
 ///
-/// - `sourceChainId` MUST be [`RGB_SOURCE_CHAIN_ID`]: it selects which
-///   verifier, settlement module and commission rate judge the release.
-/// - `sourceAddress` MUST be empty: RGB has no source-address concept
-///   (`RGBVerifier.UnexpectedSourceAddress`, bridge PR #152) and the field is
-///   hashed into `burnId`, so any other value would let one burn derive a
-///   second replay key. Refused here so the enclave never attests such an
-///   intent in the first place.
+/// - `sourceChainId` MUST be [`RGB_SOURCE_CHAIN_ID`]. It selects the
+///   verifier, settlement module and commission rate.
+/// - `sourceAddress` MUST be empty. RGB has no source address
+///   (`RGBVerifier.UnexpectedSourceAddress`, bridge PR #152). The field is
+///   hashed into `burnId`, so another value gives one burn a second replay key.
 ///
-/// Called by the sign handler only when the request's source is an RGB
-/// source; a CCD-sourced release names its own chain.
+/// The sign handler calls it only for an RGB source. A CCD-sourced release
+/// names its own chain.
 #[cfg(rgb_to_evm)]
 pub fn validate_rgb_source_identity(source: &ReleaseIdentity) -> Result<()> {
     if source.source_chain_id != U256::from(RGB_SOURCE_CHAIN_ID) {
@@ -248,13 +239,12 @@ pub fn validate_rgb_source_identity(source: &ReleaseIdentity) -> Result<()> {
     Ok(())
 }
 
-/// Validate only destination-EVM concerns.
+/// Validates only the destination-EVM fields.
 ///
-/// Source-network proof validation, including RGB consignments, assets,
-/// amounts, and SPV proofs, belongs to the source network validator. The
-/// returned [`ReleaseIdentity`] is decoded here but judged by the handler:
-/// the source fields against the request's source network, the `burnId`
-/// against the pinned Bridge, chain id and token.
+/// The source validator owns the source proofs (RGB consignments, assets,
+/// amounts, SPV). The handler checks the returned [`ReleaseIdentity`]: the
+/// source fields against the source network, and `burnId` against the pinned
+/// Bridge, chain id and token.
 #[cfg(rgb_to_evm)]
 pub fn validate_destination(
     destination: &EvmDestination,
@@ -268,7 +258,7 @@ pub fn validate_destination(
             destination.call_data.len()
         )));
     }
-    // Reject an oversize calldata before any offset extraction or signing.
+    // Reject oversize calldata before any decode or signing.
     if destination.call_data.len() > MAX_FUNDS_OUT_CALL_DATA_LEN {
         return Err(EnclaveError::CrossCheck(format!(
             "call_data too large: {} bytes (max {})",
@@ -286,11 +276,10 @@ pub fn validate_destination(
             hex::encode(selector)
         )));
     }
-    // Decoded once here; later stages take the typed result. The
-    // LayerZero route has its own param shape and yields no `FundsOutParams`, so
-    // `signing::lz_funds_out_digest` re-decodes it. Both routes surface
-    // `destinationChainId` but mean different things by it, so
-    // `is_entrypoint_route` picks the matching check below.
+    // Decode once. Later stages use the typed result. The LayerZero route gives
+    // no `FundsOutParams`, so `signing::lz_funds_out_digest` decodes it again.
+    // `destinationChainId` means different things on the two routes, so
+    // `is_entrypoint_route` selects the check below.
     let is_entrypoint_route = selector == LZ_FUNDS_OUT_SELECTOR;
     let (proof, params, calldata_destination_chain_id, release) = if is_entrypoint_route {
         let decoded = decode_lz_funds_out_params(&destination.call_data)?;
@@ -351,19 +340,13 @@ pub fn validate_destination(
             destination.chain_id, bridge_config.chain_id
         )));
     }
-    // Distinct from the request-level `chain_id` above, which only drives the
-    // EIP-712 domain.
+    // Calldata `destinationChainId` is not the request `chain_id` above, which
+    // sets only the EIP-712 domain.
     //
-    // A direct pools payout settles on the very chain the tx runs on, so its
-    // calldata destinationChainId must equal the attested pin. An entrypoint
-    // (LayerZero) payout settles on a remote chain by design - Ethereum,
-    // Polygon, Plasma, Tron - so pinning it the same way made every
-    // cross-chain payout unsignable. The execution chain stays pinned
-    // for both routes by the `destination.chain_id` and `proxy_contract`
-    // checks above; the entrypoint route only has to name a real, remote
-    // destination. Beyond that the field is bound on-chain: `Bridge.fundsOut`
-    // folds it into the canonical `burnId` preimage and rejects a mismatch,
-    // so it cannot be varied on its own.
+    // A direct pools payout settles on the execution chain, so it must equal
+    // the pin. An entrypoint (LayerZero) payout settles on a remote chain, so
+    // it must be non-zero and not the pin. The `destination.chain_id` and
+    // `proxy_contract` checks pin the execution chain on both routes.
     if is_entrypoint_route {
         if calldata_destination_chain_id.is_zero() {
             return Err(EnclaveError::CrossCheck(
@@ -408,7 +391,7 @@ pub fn validate_destination(
     Ok((proof, params, release))
 }
 
-/// Narrow a decoded release into the route-neutral proof.
+/// Maps a decoded release into the route-neutral proof.
 #[cfg(rgb_to_evm)]
 fn route_proof_from_params(params: &FundsOutParams) -> Result<RouteProof> {
     let amount: u64 = params
@@ -418,21 +401,18 @@ fn route_proof_from_params(params: &FundsOutParams) -> Result<RouteProof> {
 
     Ok(RouteProof {
         amount,
-        // Still `None`. `settlementData` cites bridge-derived deposit ids, not
-        // an RGB OpId, and `burnId` is not one either - so cross-network binding
-        // cannot be recovered from the calldata alone.
+        // `None`: the handler binds burn identity with `validate_burn_id` and
+        // the `sourceBurnTxId` OpId bind.
         operation_id: None,
     })
 }
 
-/// Decode a `fundsOut` calldata blob into the release fields, enforcing the
-/// canonical encoding. Shared with the signing path, which needs the fields to
-/// rebuild the `TeeFundsOut` struct hash.
+/// Decodes a `fundsOut` calldata blob and enforces canonical encoding. The
+/// signing path also uses it to rebuild the `TeeFundsOut` struct hash.
 ///
-/// The canonicity check lives here rather than only in the validator: a legacy
-/// flat body with a zero `recipient` decodes cleanly as a tuple, and only the
-/// re-encode catches it. Deferring to `validate_destination` would make the
-/// property depend on caller ordering.
+/// The canonical check is here, not in the validator. A legacy flat body with
+/// a zero `recipient` decodes as a tuple, and only the re-encode catches it.
+/// In the validator, the check would depend on caller order.
 #[cfg(rgb_to_evm)]
 pub fn decode_funds_out_params(call_data: &[u8]) -> Result<FundsOutParams> {
     let decoded = fundsOutCall::abi_decode_validate(call_data)
@@ -447,9 +427,9 @@ pub fn decode_funds_out_params(call_data: &[u8]) -> Result<FundsOutParams> {
     Ok(decoded.params)
 }
 
-/// Decode an `lzFundsOut` calldata blob, enforcing canonical encoding.
-/// Shared with [`super::signing::lz_funds_out_digest`] which needs every
-/// field to build the `TeeLzFundsOut` struct hash.
+/// Decodes an `lzFundsOut` calldata blob and enforces canonical encoding.
+/// [`super::signing::lz_funds_out_digest`] also uses it for the
+/// `TeeLzFundsOut` struct hash.
 #[cfg(rgb_to_evm)]
 pub fn decode_lz_funds_out_params(call_data: &[u8]) -> Result<lzFundsOutCall> {
     let decoded = lzFundsOutCall::abi_decode_validate(call_data)
@@ -463,8 +443,8 @@ pub fn decode_lz_funds_out_params(call_data: &[u8]) -> Result<lzFundsOutCall> {
     Ok(decoded)
 }
 
-/// Narrow a decoded LayerZero release into the route-neutral proof, mirroring
-/// [`route_proof_from_params`] on the pools route.
+/// Maps a decoded LayerZero release into the route-neutral proof, as
+/// [`route_proof_from_params`] does on the pools route.
 #[cfg(rgb_to_evm)]
 fn lz_route_proof_from_params(decoded: &lzFundsOutCall) -> Result<RouteProof> {
     let amount: u64 = decoded
@@ -477,8 +457,8 @@ fn lz_route_proof_from_params(decoded: &lzFundsOutCall) -> Result<RouteProof> {
     })
 }
 
-// Destination (`fundsOut`) checks: the RGB -> EVM direction.
 #[cfg(all(test, evm_to_rgb))]
 mod source_tests;
+// Destination (`fundsOut`) checks: the RGB -> EVM direction.
 #[cfg(all(test, rgb_to_evm))]
 mod tests;

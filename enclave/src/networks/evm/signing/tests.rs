@@ -42,10 +42,8 @@ fn test_domain_separator_deterministic() {
     assert_ne!(hash1, [0u8; HASH_LEN]);
 }
 
-/// Reference calldata over the fields listed in
-/// [`test_digest_matches_reference_vector`]: the pre-#152 Foundry vector with
-/// `sourceBurnTxId = 0xdd..dd` appended (one more head word, so every dynamic
-/// tail offset moved up by 0x20).
+/// Reference calldata for the fields in
+/// [`test_digest_matches_reference_vector`], with `sourceBurnTxId = 0xdd..dd`.
 fn reference_call_data() -> Vec<u8> {
     decode(concat!(
         "340276aa",
@@ -90,8 +88,8 @@ fn arbitrum_domain() -> Eip712Domain {
     }
 }
 
-/// The type string uses line continuations, so one stray space silently
-/// changes the type hash and every signature with it. Pin it.
+/// The type string uses line continuations. One stray space changes the type
+/// hash and each signature. Pin it.
 #[test]
 fn test_tee_funds_out_typehash_matches_contract() {
     let type_hash: [u8; HASH_LEN] =
@@ -100,8 +98,8 @@ fn test_tee_funds_out_typehash_matches_contract() {
         hex::encode(type_hash),
         "7b1c067721d3d07e40255c970c458626d43b425ca4bb0449b42baa0766cdae45"
     );
-    // The pre-#152 string (no `sourceBurnTxId`) must be gone: the proxy no
-    // longer verifies that struct.
+    // The pre-#152 string (no `sourceBurnTxId`) must not match: the proxy does
+    // not verify that struct.
     assert_ne!(
         hex::encode(type_hash),
         "e84f4b6ff956c2d754ac4310166ee6df5e488aa5a36cd65cf367cf80aff7c608"
@@ -137,8 +135,7 @@ fn test_different_nonce_different_digest() {
     assert_ne!(d1, d2);
 }
 
-/// Short and non-`fundsOut` calldata are rejected at the decode, which now
-/// happens before signing rather than inside it.
+/// The decode, before signing, rejects short and non-`fundsOut` calldata.
 #[test]
 fn test_undecodable_call_data_rejected() {
     assert!(decode_funds_out_params(&[0xAA, 0xBB]).is_err());
@@ -151,8 +148,8 @@ fn test_undecodable_call_data_rejected() {
 }
 
 /// Cross-implementation vector: Solidity, Go and this module must agree
-/// byte-for-byte, or the chain recovers a garbage signer and reports it only
-/// as "not a registered enclave signer".
+/// byte-for-byte. Else the chain recovers a wrong signer and reports only
+/// "not a registered enclave signer".
 ///
 /// Fields: recipient 0xf39F...2266, amount 1_000_000, burnId 123_456_789,
 /// sourceChainId 96, destinationChainId 31337, sourceAddress
@@ -160,12 +157,10 @@ fn test_undecodable_call_data_rejected() {
 /// settlementData = abi.encode([0xcc...], [999]), sourceBurnTxId 0xdd..dd,
 /// nonce 3, deadline 1_700_000_000, on the Arbitrum One domain.
 ///
-/// The pinned digest was produced by alloy's own EIP-712 encoder over the
-/// `TeeFundsOut` struct (an independent implementation of the hand-rolled
-/// encoding here), and [`test_digest_matches_alloy_eip712`] re-derives it at
-/// test time. The pre-#152 Foundry vector for the same fields was
-/// `fed59f73...3de5`; re-pin from Foundry once the contracts repo publishes a
-/// post-#152 vector.
+/// The alloy EIP-712 encoder over `TeeFundsOut` (an independent
+/// implementation) made the pinned digest. [`test_digest_matches_alloy_eip712`]
+/// derives it again at test time. TODO: pin a post-#152 Foundry vector when the
+/// contracts repo publishes one.
 #[test]
 fn test_digest_matches_reference_vector() {
     let digest =
@@ -176,8 +171,8 @@ fn test_digest_matches_reference_vector() {
     );
 }
 
-/// The hand-rolled struct hash against alloy's `SolStruct` EIP-712 encoding
-/// of the same `TeeFundsOut` type string: two encoders, one digest.
+/// Compares the hand-written struct hash with the alloy `SolStruct` EIP-712
+/// encoding of the same `TeeFundsOut` type: two encoders, one digest.
 #[test]
 fn test_digest_matches_alloy_eip712() {
     use alloy_primitives::{Address, U256};
@@ -277,9 +272,8 @@ fn lz_test_domain() -> Eip712Domain {
     }
 }
 
-/// Pack `lzFundsOut` calldata using the same ABI as the node's
-/// `packIMultisigProxyLzFundsOut` test helper - individual params, no
-/// struct wrapper.
+/// Packs `lzFundsOut` calldata with the same ABI as the node test helper
+/// `packIMultisigProxyLzFundsOut`: individual params, no struct.
 fn lz_test_calldata() -> Vec<u8> {
     use crate::networks::evm::validation::lzFundsOutCall;
     use alloy_primitives::{Bytes, FixedBytes, U256};
@@ -346,7 +340,7 @@ fn test_lz_different_dst_eid_different_digest() {
     let mut lz2 = lz_test_release();
     lz2.dst_eid = 40161; // Sepolia
 
-    // Rebuild calldata with different dstEid for lz2.
+    // Build calldata again with a different dstEid for lz2.
     use crate::networks::evm::validation::lzFundsOutCall;
     use alloy_primitives::{Bytes, FixedBytes, U256};
     use alloy_sol_types::SolCall;

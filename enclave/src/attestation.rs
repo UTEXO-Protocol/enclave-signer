@@ -1,15 +1,13 @@
-//! AWS Nitro Enclave attestation - enclave-side facade.
+//! AWS Nitro Enclave attestation, enclave side.
 //!
-//! Production: requests attestation documents from the NSM device
-//! (`/dev/nsm`) via `aws-nitro-enclaves-nsm-api` and reads the enclave's
-//! own PCRs at startup.
+//! Production gets attestation documents and the enclave's own PCRs from the
+//! NSM device (`/dev/nsm`).
 //!
-//! Verification (peer attestation, both real and mock): delegated to the
-//! workspace `attestation-verify` crate so the same code path is exercised
-//! by the cloning flow, by tests, and by the external `attest-verify` CLI.
+//! Peer verification uses the `attestation-verify` crate. Cloning, tests and
+//! the `attest-verify` CLI share that code.
 //!
-//! Mock mode (`mock-attestation` feature): documents are raw CBOR with
-//! all-zero PCRs and no COSE wrapping. Testing only.
+//! Mock mode (`mock-attestation`): raw CBOR documents with all-zero PCRs and no
+//! COSE. Testing only.
 
 #![allow(dead_code)]
 
@@ -35,13 +33,10 @@ impl From<attestation_verify::VerifyError> for EnclaveError {
     }
 }
 
-/// Produce an attestation document binding `nonce`, `public_key`, and optional
-/// `user_data`. The returned bytes are what we hand to peers (or external
-/// verifiers) over the wire.
+/// Produce an attestation document that binds `nonce`, `public_key` and
+/// optional `user_data`.
 ///
-/// Real path (Linux + no mock): calls the NSM device.
-/// Mock path (`mock-attestation` feature): returns a raw CBOR document with
-/// all-zero PCRs. Non-Linux builds without `mock-attestation` will fail.
+/// Non-Linux builds without `mock-attestation` return an error.
 pub fn get_attestation(
     nonce: &[u8; 32],
     public_key: Option<&[u8]>,
@@ -66,8 +61,7 @@ pub fn get_attestation(
     }
 }
 
-/// Read PCR0/1/2 from a self-attestation. Used at startup to learn our own
-/// measurement so we can reject peers with mismatched PCRs.
+/// Read the enclave's own PCR0/1/2. Peers with different PCRs are rejected.
 pub fn get_own_pcrs() -> Result<ExpectedPcrs> {
     #[cfg(feature = "mock-attestation")]
     {
@@ -87,8 +81,8 @@ pub fn get_own_pcrs() -> Result<ExpectedPcrs> {
     }
 }
 
-/// Verify a peer attestation document. See [`attestation_verify::verify_attestation`]
-/// for the real path; under `mock-attestation` the mock verifier is used.
+/// Verify a peer attestation document with [`attestation_verify::verify_attestation`],
+/// or with the mock verifier under `mock-attestation`.
 pub fn verify_peer_attestation(
     doc: &[u8],
     expected_pcrs: &ExpectedPcrs,
@@ -106,8 +100,6 @@ pub fn verify_peer_attestation(
             .map_err(Into::into)
     }
 }
-
-// NSM device interaction (Linux only, production path)
 
 #[cfg(all(target_os = "linux", not(feature = "mock-attestation")))]
 mod nsm {
@@ -194,11 +186,8 @@ mod nsm {
     }
 }
 
-// Tests - facade-level only. The verifier itself is tested in attestation-verify.
-
-// Both tests below need the mock-attestation path; gate the whole module
-// so the `use super::*` doesn't fire `unused_imports` when building without
-// `--features mock-attestation` (CI runs both feature combinations).
+// Facade tests only. attestation-verify tests the verifier.
+// Both tests need the mock path.
 #[cfg(all(test, feature = "mock-attestation"))]
 mod tests {
     use super::*;

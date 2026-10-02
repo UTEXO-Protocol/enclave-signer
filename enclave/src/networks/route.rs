@@ -1,8 +1,8 @@
 //! Route-level validation: match a source network against a destination
 //! network and prove the two describe the same bridge action.
 //!
-//! Dispatch only. Each arm hands the payload to the owning network module,
-//! which is the one place that knows how to check it.
+//! Dispatch only. Each arm sends the payload to the network module that owns
+//! its checks.
 
 #[cfg(feature = "rgb-validation")]
 use std::sync::Mutex;
@@ -16,10 +16,10 @@ use crate::error::{EnclaveError, Result};
 use crate::networks::rgb::validation::RgbValidator;
 use crate::proto::sign_request::{DestinationNetwork, SourceNetwork};
 
-/// Normalized bridge-side proof emitted by source and destination validators.
+/// Route-neutral proof that the source and destination validators return.
 ///
-/// Each network module validates only its own payload and maps the trusted
-/// amount/operation identity into this route-neutral shape
+/// Each network module validates only its own payload. It maps the trusted
+/// amount and operation identity into this shape.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RouteProof {
     pub amount: u64,
@@ -32,39 +32,37 @@ pub struct ValidationContext<'a> {
     pub rgb_validator: Option<&'a RgbValidator>,
     #[cfg(feature = "rgb-validation")]
     pub header_chain: &'a Mutex<crate::networks::rgb::spv::HeaderChain>,
-    /// The blocks the SPV checks used. Each check records them under its own
-    /// lock guard. Checked again just before the key is used, so a reorg in
-    /// the gap refuses instead of signing old chain state (F05-NEW-AF-08).
+    /// The blocks that the SPV checks used, recorded under each check's lock.
+    /// They are checked again before key use, so a reorg in the gap refuses
+    /// instead of signing old chain state (F05-NEW-AF-08).
     #[cfg(feature = "rgb-validation")]
     pub chain_pins: &'a crate::networks::rgb::spv_crosscheck::ChainPins,
-    /// Resolves whether a Bitcoin outpoint pays back to this enclave.
-    /// Required by the send-RGB per-output recipient bind to tell
-    /// bridge change from a payout to a third party. The outpoint may sit on
-    /// the PSBT being signed or on an earlier transaction - see
+    /// Tells if a Bitcoin outpoint pays back to this enclave. The send-RGB
+    /// recipient bind uses it to tell bridge change from a third-party payout.
+    /// The outpoint can be on the PSBT or on an earlier transaction. See
     /// [`crate::networks::rgb::psbt_validation::SelfOwnedOutpoint`].
     ///
-    /// A callback, so the key lock is taken only for that resolution and never
-    /// across consignment validation's network round-trips. `None` fails the
-    /// bind closed.
+    /// It is a callback, so the key lock is not held across the network
+    /// round-trips of consignment validation. `None` fails the bind closed.
     #[cfg(all(feature = "rgb-validation", evm_to_rgb))]
     pub self_owned_psbt_outputs:
         Option<crate::networks::rgb::psbt_validation::SelfOwnedOutpoint<'a>>,
     /// Selects owned key-path inputs for fee sizing without holding keys across I/O.
-    /// Without a resolver, disclosed scripts retain conservative script-path sizing.
+    /// Without a resolver, disclosed scripts keep conservative script-path sizing.
     #[cfg(all(feature = "rgb-validation", evm_to_rgb))]
     pub psbt_fee_key_paths: Option<crate::networks::rgb::psbt_validation::FeeKeyPathResolver<'a>>,
-    /// EVM lock events the enclave verified itself, handed to RGB consensus so
-    /// the ether extension can re-check a BFA mint's amount. Empty on every
-    /// other path (including every build without `bfa-mint`); a BFA consignment
-    /// with an empty set is refused.
+    /// EVM lock events that the enclave verified. RGB consensus gets them so
+    /// the ether extension can check a BFA mint amount again. Empty on all
+    /// other paths and on builds without `bfa-mint`. A BFA consignment with an
+    /// empty set is refused.
     #[cfg(feature = "rgb-validation")]
     pub bridge_events: &'a [rgbstd::vm::ether_extension::Event],
 }
 
-/// Outcome of validating a source network: the route proof, plus the validated
-/// consignment for an RGB source on an `rgb-validation` build. The EVM
-/// destination signer binds the `fundsOut` calldata to that consignment, so it
-/// must outlive source validation. `None` for EVM sources.
+/// Result of source validation: the route proof and, for an RGB source on an
+/// `rgb-validation` build, the validated consignment. The EVM destination
+/// signer binds the `fundsOut` calldata to that consignment, so it must
+/// outlive source validation. `None` for EVM sources.
 pub struct SourceProof {
     pub proof: RouteProof,
     #[cfg(feature = "rgb-validation")]
@@ -90,12 +88,10 @@ pub fn validate_source(
             #[cfg(feature = "rgb-validation")]
             rgb_consignment: None,
         }),
-        // RGB is always compiled; `rgb::validate_source` fails closed (with a
-        // "requires --features rgb-validation" message) on a build that lacks
-        // the validator, so a `ccd`-only enclave refuses RGB sources there.
+        // On a build without the validator, `rgb::validate_source` fails
+        // closed. Thus a `ccd`-only enclave refuses RGB sources.
         #[cfg(rgb_to_evm)]
         SourceNetwork::RgbSource(source) => rgb::validate_source(source, ctx),
-        // Concordium source handling is gated with the `ccd` feature.
         #[cfg(feature = "ccd")]
         SourceNetwork::CcdSource(source) => Ok(SourceProof {
             proof: ccd::validate_source(amount, source)?,
@@ -109,18 +105,17 @@ pub fn validate_source(
     }
 }
 
-/// Route proof plus, for an EVM `fundsOut`, the calldata decoded once into one
-/// typed intent that the later stages consume. `None` for RGB
-/// destinations.
+/// Route proof and, for an EVM `fundsOut`, the calldata decoded once into a
+/// typed intent for the later stages. `None` for RGB destinations.
 pub struct DestinationProof {
     pub proof: RouteProof,
     pub evm_funds_out: Option<crate::networks::evm::validation::FundsOutParams>,
-    /// The burn-identifying fields of an EVM release calldata (both routes):
-    /// the handler binds the source fields to the request's source network
-    /// and recomputes `burnId`. `None` for RGB destinations.
+    /// The burn-identity fields of an EVM release calldata (both routes). The
+    /// handler binds the source fields to the request's source network and
+    /// recomputes `burnId`. `None` for RGB destinations.
     pub evm_release_identity: Option<crate::networks::evm::validation::ReleaseIdentity>,
-    /// `utxob:...` seals of the send-RGB confidential recipient legs. Bound
-    /// against the deposit's invoice once that receipt is verified. Empty for
+    /// `utxob:...` seals of the send-RGB confidential recipient legs. They are
+    /// bound to the deposit invoice after that receipt is verified. Empty for
     /// EVM destinations and builds without the bind.
     pub rgb_recipient_seals: Vec<String>,
 }
@@ -154,11 +149,10 @@ pub fn validate_destination(
         DestinationNetwork::RgbDestination(destination) => {
             rgb::validate_destination(destination, ctx)?;
 
-            // The destination amount is the consignment's recipient leg,
-            // proven inside the enclave, not the unchecked
-            // host-supplied `psbt_output_amount`. Only builds without that
-            // binding fall back to the wire field, and they run no destination
-            // cross-checks at all.
+            // The destination amount is the consignment recipient leg that the
+            // enclave proves, not the unchecked host `psbt_output_amount`. Only
+            // builds without that bind use the wire field. They run no
+            // destination cross-checks.
             #[cfg(feature = "rgb-validation")]
             let (destination_amount, rgb_recipient_seals) =
                 rgb::validate_destination_anchor(destination, amount, source_commission, ctx)?;
@@ -202,13 +196,10 @@ pub fn validate_route_proofs(
         }
         (SourceNetwork::RgbSource(_), DestinationNetwork::EvmDestination(_)) => {
             validate_amount_covers_destination(source_proof.amount, destination_proof.amount)
-            // TODO: re-enable operation_id binding once EVM destination proofs
-            // derive the operation id from fundsOut.settlementData. The current
-            // contract burnId is unrelated to the RGB consignment opId.
-            // validate_operation_ids_match(source_proof, destination_proof)
+            // The handler binds burn identity: `validate_burn_id` (both routes)
+            // and the `sourceBurnTxId` OpId bind (pools route).
         }
-        // Concordium fundsIn -> EVM release. Source finality/structure was
-        // validated by the listener; bind the release amount to the destination.
+        // Concordium fundsIn -> EVM release. The listener validates the source.
         #[cfg(feature = "ccd")]
         (SourceNetwork::CcdSource(_), DestinationNetwork::EvmDestination(_)) => {
             validate_amount_covers_destination(source_proof.amount, destination_proof.amount)
@@ -220,10 +211,10 @@ pub fn validate_route_proofs(
 }
 
 /// Both sides are bridge asset units, not sats. `source_amount` is the EVM
-/// `FundsIn` token amount verified by `evm::events::verify_funds_in_event`;
-/// an RGB `destination_amount` is the consignment's recipient leg in RGB asset
-/// units, issued 1:1 against the EVM token. The sats-denominated PSBT checks
-/// live in [`crate::networks::rgb::btc_crosscheck`].
+/// `FundsIn` token amount from `evm::events::verify_funds_in_event`. An RGB
+/// `destination_amount` is the consignment recipient leg in RGB units, issued
+/// 1:1 against the EVM token. The PSBT checks in sats are in
+/// [`crate::networks::rgb::btc_crosscheck`].
 fn validate_amount_covers_destination(source_amount: u64, destination_amount: u64) -> Result<()> {
     if source_amount < destination_amount {
         return Err(EnclaveError::CrossCheck(format!(

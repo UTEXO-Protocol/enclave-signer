@@ -39,8 +39,8 @@ fn multi_a_2_of_3(keys: &[XOnlyPublicKey; 3]) -> ScriptBuf {
         .into_script()
 }
 
-/// The enclave's own BIP-86 key-path address at m/86'/1'/0'/0/0, plus the
-/// key and origin an input needs to be recognised as controlled.
+/// Our BIP-86 key-path address at m/86'/1'/0'/0/0, with the key and origin
+/// that make an input controlled.
 struct OurAddress {
     spk: ScriptBuf,
     xonly: XOnlyPublicKey,
@@ -68,14 +68,14 @@ fn our_address(keys: &KeyManager) -> OurAddress {
     }
 }
 
-/// A taproot address the enclave has nothing to do with.
+/// A taproot address with a foreign key.
 fn foreign_address() -> ScriptBuf {
     ScriptBuf::new_p2tr(&Secp256k1::new(), foreign_xonly(0xB1), None)
 }
 
-/// Plain-BTC PSBT spending `input_sats` per input from the enclave's own
-/// address, paying `outputs`. Inputs carry full key-path metadata, so rule
-/// (A) recognises any output paying back to that address.
+/// Plain-BTC PSBT that spends `inputs` (sats each) from our address and pays
+/// `outputs`. Inputs have full key-path metadata, so rule (A) accepts any
+/// output back to that address.
 fn psbt_from_our_address(
     keys: &KeyManager,
     inputs: &[u64],
@@ -84,8 +84,7 @@ fn psbt_from_our_address(
     psbt_inner(keys, inputs, outputs, true)
 }
 
-/// Like [`psbt_from_our_address`] but leaves witness_utxo unset (for the
-/// missing-witness_utxo guard test).
+/// Like [`psbt_from_our_address`], but without witness_utxo.
 fn psbt_without_witness_utxo(
     keys: &KeyManager,
     inputs: &[u64],
@@ -159,13 +158,12 @@ fn rgb_cfg(budget: u64) -> BridgeConfig {
     }
 }
 
-// --- send-RGB unowned-output budget (the BTC value-diversion PoC) ---
+// --- send-RGB unowned-output budget (BTC value-diversion PoC) ---
 
-/// **The attack.** Two 5_000_000-sat bridge UTXOs are spent. The RGB legs
-/// can be impeccable - recipient dust, change dust on a self-owned vout -
-/// while the whole residual goes to an attacker script on an output that
-/// carries no RGB assignment, so every asset-denominated bind ignores it.
-/// The budget is what sees it.
+/// **The attack.** The PSBT spends two 5_000_000-sat bridge UTXOs. The RGB
+/// legs are correct (recipient dust, change dust on a self-owned vout). The
+/// rest goes to an attacker output with no RGB assignment, so no
+/// asset-unit bind sees it. Only the budget catches it.
 #[test]
 fn rgb_sats_gate_rejects_a_treasury_sweep() {
     let keys = km();
@@ -187,8 +185,8 @@ fn rgb_sats_gate_rejects_a_treasury_sweep() {
     );
 }
 
-/// The genuine shape still signs: recipient dust is well inside the budget
-/// and the bridge change pays back to an input script (rule (A)).
+/// The correct shape signs: recipient dust is in the budget and the bridge
+/// change pays back to an input script (rule (A)).
 #[test]
 fn rgb_sats_gate_accepts_recipient_dust_with_self_owned_change() {
     let keys = km();
@@ -202,31 +200,29 @@ fn rgb_sats_gate_accepts_recipient_dust_with_self_owned_change() {
     assert!(validate_rgb_psbt_sats(&psbt, &rgb_cfg(5_000), &keys).is_ok());
 }
 
-/// The budget counts the whole unowned set, not the largest single output:
-/// splitting the sweep across many outputs must not slip under it.
+/// The budget counts the sum of unowned outputs, so a sweep split across
+/// many outputs still fails.
 #[test]
 fn rgb_sats_gate_sums_unowned_outputs() {
     let keys = km();
     let outputs: Vec<_> = (0..6).map(|_| (foreign_address(), 1_000)).collect();
     let psbt_bytes = psbt_from_our_address(&keys, &[5_000_000], &outputs);
     let psbt = bitcoin::psbt::Psbt::deserialize(&psbt_bytes).unwrap();
-    // 6 x 1_000 = 6_000 > 5_000, though every single output is under it.
+    // 6 x 1_000 = 6_000 > 5_000, but each output is under it.
     let err = validate_rgb_psbt_sats(&psbt, &rgb_cfg(5_000), &keys).unwrap_err();
     assert!(err.to_string().contains("6000 sats"), "got: {err}");
 }
 
-/// Rule (B) is not consulted: an output whose taproot tree merely mentions
-/// one of our keys is NOT proof of control (the rest of the tree and its
-/// internal key are someone else's), so it counts against the budget like any
-/// other unowned script.
+/// No rule (B): a taproot tree that names one of our keys is NOT proof of
+/// control. The rest of the tree and its internal key are foreign. The output
+/// counts against the budget.
 #[test]
 fn rgb_sats_gate_does_not_trust_a_leaf_mentioning_our_key() {
     use bitcoin::psbt::Psbt;
     let keys = km();
     let ours = our_address(&keys);
 
-    // A script the enclave does not co-control, but whose tree holds a leaf
-    // naming our key alongside two attacker keys.
+    // A foreign script with one leaf: our key and two attacker keys.
     let secp = Secp256k1::new();
     let leaf = multi_a_2_of_3(&[ours.xonly, foreign_xonly(0xC1), foreign_xonly(0xC2)]);
     let internal = foreign_xonly(0xC3);
@@ -239,7 +235,7 @@ fn rgb_sats_gate_does_not_trust_a_leaf_mentioning_our_key() {
 
     let psbt_bytes = psbt_from_our_address(&keys, &[5_000_000], &[(spk, 4_999_000)]);
     let mut psbt = Psbt::deserialize(&psbt_bytes).unwrap();
-    // Full BIP-371 output metadata - exactly what rule (B) would have accepted.
+    // Full BIP-371 output metadata for the leaf.
     psbt.outputs[0].tap_internal_key = Some(internal);
     psbt.outputs[0].tap_tree = Some(
         TaprootBuilder::new()
@@ -271,7 +267,7 @@ fn rejects_empty_psbt() {
     assert!(err.to_string().contains("psbt_bytes is empty"));
 }
 
-// --- witness_utxo required (needed to bound value spent) ---
+// --- witness_utxo required (to bound the value spent) ---
 
 #[test]
 fn rejects_missing_witness_utxo() {
@@ -287,7 +283,7 @@ fn rejects_missing_witness_utxo() {
     );
 }
 
-// --- Output self-ownership + value-spent cap ---
+// --- Output self-ownership and value-spent cap ---
 
 #[test]
 fn accepts_self_paying_output_under_cap() {
@@ -304,7 +300,7 @@ fn accepts_input_value_at_exact_cap() {
     let keys = km();
     let ours = our_address(&keys);
     let req = SignBtcRequest {
-        // input value 100_000 == cap; output pays back to us
+        // input value 100_000 == cap; output pays back to us.
         psbt_bytes: psbt_from_our_address(&keys, &[100_000], &[(ours.spk, 99_000)]),
     };
     assert!(validate_btc_request(&req, &cfg_with_cap(100_000), &keys).is_ok());
@@ -338,8 +334,8 @@ fn rejects_one_foreign_output_among_self_paying_ones() {
     );
 }
 
-/// A non-taproot output can never be proven ours: the enclave co-controls
-/// taproot scripts only, and BIP-371 metadata cannot describe a P2WPKH.
+/// A non-taproot output is never proven ours. The enclave co-controls taproot
+/// scripts only, and BIP-371 metadata cannot describe a P2WPKH.
 #[test]
 fn rejects_non_taproot_output() {
     let keys = km();
@@ -365,8 +361,8 @@ fn rejects_input_value_over_cap() {
     let keys = km();
     let ours = our_address(&keys);
     let req = SignBtcRequest {
-        // input value 100_001 > cap; output pays back to us at a sane fee
-        // (so we reach the cap, not the fee policy)
+        // input value 100_001 > cap. The fee is normal, so the cap fails,
+        // not the fee policy.
         psbt_bytes: psbt_from_our_address(&keys, &[100_001], &[(ours.spk, 95_000)]),
     };
     let err = validate_btc_request(&req, &cfg_with_cap(100_000), &keys).unwrap_err();
@@ -378,29 +374,27 @@ fn rejects_summed_input_value_over_cap() {
     let keys = km();
     let ours = our_address(&keys);
     let req = SignBtcRequest {
-        // two inputs, 70_000 + 50_000 = 120_000 > cap
+        // two inputs: 70_000 + 50_000 = 120_000 > cap.
         psbt_bytes: psbt_from_our_address(&keys, &[70_000, 50_000], &[(ours.spk, 100_000)]),
     };
     let err = validate_btc_request(&req, &cfg_with_cap(100_000), &keys).unwrap_err();
     assert!(err.to_string().contains("exceeds pinned cap"), "got: {err}");
 }
 
-/// The self-pay rule needs no configuration, so an unset cap does not
-/// excuse a foreign output in any build profile.
+/// The unowned budget applies even when the value cap allows the spend.
 #[test]
 fn foreign_output_over_budget_is_rejected_whatever_the_value_cap_says() {
     let keys = km();
     let req = SignBtcRequest {
         psbt_bytes: psbt_from_our_address(&keys, &[100_000], &[(foreign_address(), 90_000)]),
     };
-    // Well inside `btc_max_total_sats`, far outside the unowned budget.
+    // In `btc_max_total_sats`, but far over the unowned budget.
     let err = validate_btc_request(&req, &cfg_with_cap(1_000_000), &keys).unwrap_err();
     assert!(err.to_string().contains("same custody"), "got: {err}");
 }
 
-/// The shape rule (B) used to wave through, now bounded by value: five
-/// 1000-sat colored allocations funded out of vanilla inputs, with the
-/// vanilla change returning to the script being spent (address reuse).
+/// Five 1000-sat colored allocations funded from vanilla inputs fit the
+/// budget. The vanilla change goes back to the spent script (address reuse).
 #[test]
 fn create_utxo_allocation_dust_fits_the_budget() {
     let keys = km();
@@ -413,36 +407,35 @@ fn create_utxo_allocation_dust_fits_the_budget() {
     assert!(validate_btc_request(&req, &cfg_with_cap(100_000), &keys).is_ok());
 }
 
-/// With the cap unset, a production build fails closed on the amount
-/// dimension; default / test builds fall back to the dev path (the
-/// structural guards above having already passed).
+/// With the cap unset, a production build fails closed. Default and test
+/// builds use the dev path, after the other checks pass.
 #[test]
 fn unpinned_cap_behaviour_matches_build_profile() {
     let keys = km();
     let ours = our_address(&keys);
     let req = SignBtcRequest {
-        // 200 sat funds the ~111 vB signed size at the 1 sat/vB floor.
+        // 200 sat pays for approx 111 signed vB at the 1 sat/vB floor.
         psbt_bytes: psbt_from_our_address(&keys, &[1_000], &[(ours.spk, 800)]),
     };
     let result = validate_btc_request(&req, &BridgeConfig::default(), &keys);
     #[cfg(all(feature = "rgb-validation", not(test)))]
     assert!(result.is_err());
-    // Unit tests are always cfg(test): the dev fallback returns Ok.
+    // Unit tests are always cfg(test), so the dev fallback returns Ok.
     #[cfg(not(all(feature = "rgb-validation", not(test))))]
     assert!(result.is_ok());
 }
 
 // --- pinned fee policy on the plain-BTC path (#248) ---
 
-/// **The attack.** A compromised host spends a custody UTXO back to custody,
-/// so every output is self-owned and the value cap is met, but ~98% of the
+/// **The attack.** A compromised host spends a custody UTXO back to custody.
+/// All outputs are self-owned and the value cap passes, but approx 98% of the
 /// input goes to miners. Repeated per UTXO, this drains the mint wallet.
 #[test]
 fn rejects_a_fee_that_burns_most_of_the_input() {
     let keys = km();
     let ours = our_address(&keys);
     let req = SignBtcRequest {
-        // The #248 reproduction: 60_676 sat in, 1_000 sat out, 59_676 sat fee.
+        // #248: 60_676 sat in, 1_000 sat out, 59_676 sat fee.
         psbt_bytes: psbt_from_our_address(&keys, &[60_676], &[(ours.spk, 1_000)]),
     };
     let err = validate_btc_request(&req, &cfg_with_cap(100_000), &keys).unwrap_err();
@@ -457,7 +450,7 @@ fn rejects_an_excessive_fee_spread_over_two_inputs() {
     let keys = km();
     let ours = our_address(&keys);
     let req = SignBtcRequest {
-        // Each input alone is modest; together 59_000 sat over ~135 vB.
+        // Each input is small, but together 59_000 sat over approx 135 vB.
         psbt_bytes: psbt_from_our_address(&keys, &[30_000, 30_000], &[(ours.spk, 1_000)]),
     };
     let err = validate_btc_request(&req, &cfg_with_cap(100_000), &keys).unwrap_err();
@@ -468,8 +461,7 @@ fn rejects_an_excessive_fee_spread_over_two_inputs() {
 fn rejects_a_fee_over_the_pinned_absolute_maximum() {
     let keys = km();
     let ours = our_address(&keys);
-    // A wide transaction (many self-owned outputs) so the absolute ceiling,
-    // not the rate, is what refuses.
+    // Many self-owned outputs, so the absolute cap fails, not the rate.
     let outputs: Vec<_> = (0..30).map(|_| (ours.spk.clone(), 1_000)).collect();
     let req = SignBtcRequest {
         psbt_bytes: psbt_from_our_address(&keys, &[1_000_000], &outputs),
@@ -478,18 +470,17 @@ fn rejects_a_fee_over_the_pinned_absolute_maximum() {
     assert!(err.to_string().contains("fee too high"), "got: {err}");
 }
 
-/// The fee floor sizes the signed transaction, so every input must be
-/// classifiable. A second P2TR input with no key-path metadata (not ours, not
-/// needed for ownership: the outputs still pay back to input 0's script) was
-/// signable before the fee policy; now the whole request is refused with a
-/// size error, not waved through on the output and amount checks alone.
+/// The fee floor needs the signed size, so every input must be classifiable.
+/// A second P2TR input with no key-path metadata is not ours. Ownership does
+/// not need it, because the output pays back to input 0's script. The request
+/// still fails with a size error.
 #[test]
 fn rejects_an_input_whose_signed_size_cannot_be_estimated() {
     let keys = km();
     let ours = our_address(&keys);
-    // Input 0 proves the 90_000-sat output on its own (an input exempts
-    // outputs up to its value); 20_000 sat over ~125 unsigned vB is under the
-    // rate cap, so only the size estimate can refuse.
+    // Input 0 alone proves the 90_000-sat output (an input exempts outputs up
+    // to its value). 20_000 sat over approx 125 unsigned vB is under the rate
+    // cap, so only the size estimate can fail.
     let mut psbt = Psbt::deserialize(&psbt_from_our_address(
         &keys,
         &[100_000, 10_000],
@@ -512,13 +503,13 @@ fn rejects_an_input_whose_signed_size_cannot_be_estimated() {
     assert!(msg.contains("input 1"), "got: {msg}");
 }
 
-/// Above the crossover size the absolute cap refuses a rate the rate cap
-/// would accept; the error must say so instead of reading as a rate problem.
+/// Above the crossover size, the absolute cap refuses a rate that the rate
+/// cap accepts. The error must name the crossover, not a rate problem.
 #[test]
 fn absolute_cap_error_names_the_size_crossover() {
     let keys = km();
     let ours = our_address(&keys);
-    // One input + 12 outputs ~ 584 unsigned vB, 180 sat/vB: 105_120 sat.
+    // One input and 12 outputs: approx 584 unsigned vB x 180 sat/vB = 105_120.
     let outputs: Vec<_> = (0..12).map(|_| (ours.spk.clone(), 1_000)).collect();
     let fee = 105_120;
     let req = SignBtcRequest {
@@ -538,21 +529,21 @@ fn rejects_a_fee_below_the_signed_size_floor() {
     let keys = km();
     let ours = our_address(&keys);
     let req = SignBtcRequest {
-        // 50 sat cannot fund ~111 signed vB at 1 sat/vB: unrelayable.
+        // 50 sat cannot pay for approx 111 signed vB at 1 sat/vB.
         psbt_bytes: psbt_from_our_address(&keys, &[10_000], &[(ours.spk, 9_950)]),
     };
     let err = validate_btc_request(&req, &cfg_with_cap(100_000), &keys).unwrap_err();
     assert!(err.to_string().contains("fee rate too low"), "got: {err}");
 }
 
-/// A normal `create_utxos` batch at a healthy mainnet rate keeps signing:
-/// one input, five allocations plus change, ~50 sat/vB.
+/// A normal `create_utxos` batch signs: one input, five allocations and
+/// change, approx 50 sat/vB.
 #[test]
 fn accepts_a_create_utxos_batch_at_a_normal_fee_rate() {
     let keys = km();
     let ours = our_address(&keys);
     let mut outputs: Vec<_> = (0..5).map(|_| (foreign_address(), 1_000)).collect();
-    // ~310 unsigned vB * 50 sat/vB = 15_500 sat fee.
+    // Approx 310 unsigned vB x 50 sat/vB = 15_500 sat fee.
     outputs.push((ours.spk.clone(), 100_000 - 5_000 - 15_500));
     let req = SignBtcRequest {
         psbt_bytes: psbt_from_our_address(&keys, &[100_000], &outputs),
@@ -560,8 +551,8 @@ fn accepts_a_create_utxos_batch_at_a_normal_fee_rate() {
     validate_btc_request(&req, &cfg_with_cap(100_000), &keys).expect("create_utxos fee");
 }
 
-/// The fee policy needs no configuration: with the value cap unset, the dev
-/// fallback must not wave an excessive fee through in any build profile.
+/// The fee policy needs no config. With the value cap unset, the dev fallback
+/// must not accept an excessive fee in any build profile.
 #[test]
 fn fee_policy_holds_without_a_pinned_value_cap() {
     let keys = km();

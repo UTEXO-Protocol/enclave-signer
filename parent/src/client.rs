@@ -10,15 +10,11 @@ use crate::enclave_proto::{
 use crate::error::{ParentError, Result};
 use crate::framing;
 
-/// Connect timeout. Localhost connect resolves in microseconds; this is
-/// only relevant when reaching across a network (or through a mis-routed
-/// vsock proxy).
+/// TCP connect timeout. It matters only across a network or a bad vsock proxy.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// Read timeout for the response. Without it, a peer that accepts the TCP
-/// connection but never speaks our wire protocol hangs the CLI forever. Slow
-/// but legitimate operations (key generation, RGB consignment validation) must
-/// still fit inside this budget.
+/// Response read timeout. It stops a silent peer from hanging the CLI.
+/// Slow valid operations (key generation, consignment validation) must fit in it.
 const READ_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Debug, Clone)]
@@ -36,18 +32,17 @@ pub struct SignEvmRequest {
     pub consignment: Vec<u8>,
     pub consignment_hash: Vec<u8>,
     pub merkle_proofs: Vec<MerkleProofEntry>,
-    /// LZ-specific fields for `lzFundsOutCall` releases. `None` for direct
-    /// `fundsOutCall` releases. When set, the enclave routes to the
-    /// `TeeLzFundsOut` EIP-712 digest and crosschecks these fields against
-    /// the decoded calldata.
+    /// LZ fields for `lzFundsOutCall` releases. `None` for `fundsOutCall`.
+    /// When set, the enclave uses the `TeeLzFundsOut` EIP-712 digest and
+    /// checks these fields against the decoded calldata.
     pub lz_release: Option<crate::enclave_proto::LzReleaseParams>,
 }
 
 #[derive(Debug, Clone)]
 pub struct SignPsbtRequest {
     pub evm_tx_hash: Vec<u8>,
-    /// On-chain BridgeFundsIn.operationId, 32 bytes. Required by the enclave;
-    /// distinct from `operation_idx` (the RGB hub index / replay-guard key).
+    /// On-chain `BridgeFundsIn.operationId` (32 bytes). Required.
+    /// Not the same as `operation_idx` (RGB hub index and replay-guard key).
     pub evm_funds_in_operation_id: Vec<u8>,
     pub operation_idx: u64,
     pub evm_event_valid: bool,
@@ -63,9 +58,9 @@ pub struct SignPsbtRequest {
     pub consignment_hash: Vec<u8>,
 }
 
-/// Parse a `vsock://` address body (`<cid>` or `<cid>:<port>`) into `(cid, port)`,
-/// defaulting the port to 5000. Keeps enclave selection explicit on multi-enclave
-/// hosts instead of silently using a default CID.
+/// Parse a `vsock://` address body (`<cid>` or `<cid>:<port>`) into `(cid, port)`.
+/// The port defaults to 5000. There is no default CID: on multi-enclave hosts
+/// the caller must select the enclave.
 #[cfg(all(feature = "vsock", target_os = "linux"))]
 fn parse_vsock_spec(spec: &str) -> Result<(u32, u32)> {
     let (cid_str, port_str) = match spec.split_once(':') {
@@ -94,8 +89,8 @@ impl EnclaveClient {
     }
 
     pub fn send_request(&self, req: &EnclaveRequest) -> Result<EnclaveResponse> {
-        // A `vsock://<cid>[:<port>]` address explicitly targets one enclave and
-        // works regardless of build features (errors if vsock isn't compiled in).
+        // A `vsock://<cid>[:<port>]` address targets one enclave. Without vsock
+        // support in the build, it is an error.
         if let Some(spec) = self.addr.strip_prefix("vsock://") {
             #[cfg(all(feature = "vsock", target_os = "linux"))]
             {
@@ -113,9 +108,8 @@ impl EnclaveClient {
 
         #[cfg(all(feature = "vsock", target_os = "linux"))]
         {
-            // No `vsock://` address: fall back to env for back-compat, but do
-            // not default to CID 16 - on a multi-enclave host that would route
-            // every call to the wrong enclave identity.
+            // No `vsock://` address: read the env. Do not default to CID 16.
+            // On a multi-enclave host that sends calls to the wrong enclave.
             let cid = std::env::var("ENCLAVE_VSOCK_CID")
                 .ok()
                 .and_then(|v| v.parse::<u32>().ok());
@@ -168,8 +162,8 @@ impl EnclaveClient {
         self.initialize_keys_inner(seed, None, None)
     }
 
-    /// Initialize a donor enclave and configure its cloning secret in one
-    /// message, so the secret is delivered at runtime (never baked into the EIF).
+    /// Initialize a donor enclave and set its cloning secret in one message.
+    /// The secret comes at runtime and is never in the EIF.
     pub fn initialize_keys_with_secret(
         &self,
         seed: Option<Vec<u8>>,
@@ -211,11 +205,11 @@ impl EnclaveClient {
         }
     }
 
-    /// Requester side, step 1 of cloning. Asks the local enclave to enter the
-    /// Cloning phase: it mints an ephemeral X25519 keypair, computes the
-    /// cloning digest from the operator secret, and returns an NSM attestation
-    /// binding both. The digest is returned so the orchestrator can forward it
-    /// to the donor (the secret itself never leaves this enclave).
+    /// Requester side, cloning step 1. The local enclave enters the Cloning
+    /// phase. It makes an ephemeral X25519 keypair, computes the cloning
+    /// digest from the operator secret, and returns an NSM attestation that
+    /// binds both. The orchestrator sends the digest to the donor. The secret
+    /// stays in this enclave.
     pub fn initiate_cloning(
         &self,
         cloning_secret: &str,
@@ -243,11 +237,10 @@ impl EnclaveClient {
         }
     }
 
-    /// Requester side, step 3 of cloning. Hands the donor's sealed seed +
-    /// ephemeral pubkey + attestation to the local enclave. The enclave
-    /// verifies the donor attestation, unseals the seed, and only commits the
-    /// derived keys if the resulting EVM address matches the cluster identity it
-    /// was told to clone. On success it transitions Cloning -> Active.
+    /// Requester side, cloning step 3. Sends the donor sealed seed, ephemeral
+    /// public key and attestation to the local enclave. The enclave verifies
+    /// the attestation and unseals the seed. It commits the keys only if the
+    /// EVM address matches the cluster identity. On success: Cloning -> Active.
     pub fn set_clone(
         &self,
         encrypted_seed: Vec<u8>,
@@ -309,9 +302,9 @@ impl EnclaveClient {
                                 consignment_hash: req.consignment_hash,
                                 commission: req.calldata_commission,
                                 merkle_proofs: req.merkle_proofs,
-                                // The CLI has no way to resolve a mint's
-                                // backing deposit, so a BFA burn signed
-                                // through it fails closed in the enclave.
+                                // The CLI cannot resolve the deposit behind
+                                // a mint, so the enclave rejects a BFA burn
+                                // signed through it.
                                 mint_ancestors: Vec::new(),
                             },
                         ),
@@ -374,9 +367,8 @@ impl EnclaveClient {
                                 asset_id: req.rgb_asset_id,
                                 consignment: req.consignment,
                                 consignment_hash: req.consignment_hash,
-                                // As on the source side: the CLI cannot resolve
-                                // the deposits behind a chained mint, so one
-                                // signed through it fails closed in the enclave.
+                                // The CLI cannot resolve the deposits behind
+                                // a chained mint, so the enclave rejects one.
                                 mint_ancestors: Vec::new(),
                             },
                         ),
@@ -418,8 +410,8 @@ impl EnclaveClient {
         }
     }
 
-    /// Readiness probe. Mirrors what `GET /health` on the parent reports, for
-    /// operators debugging a stuck deploy from the host shell.
+    /// Readiness probe. Gives the enclave part of the parent `GET /health`
+    /// report, for operators on the host shell.
     pub fn health(&self) -> Result<HealthResponse> {
         let req = EnclaveRequest {
             request: Some(enclave_request::Request::Health(HealthRequest {})),
@@ -438,8 +430,8 @@ impl EnclaveClient {
         }
     }
 
-    /// Set the chain endpoints once, at launch. The enclave refuses a second
-    /// set.
+    /// Set the chain endpoints once, at launch. The enclave rejects a second
+    /// call.
     pub fn set_endpoints(&self, req: SetEndpointsRequest) -> Result<()> {
         let req = EnclaveRequest {
             request: Some(enclave_request::Request::SetEndpoints(req)),

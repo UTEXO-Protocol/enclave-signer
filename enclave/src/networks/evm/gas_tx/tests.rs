@@ -65,21 +65,21 @@ fn rlp_list(items: &[Vec<u8>]) -> Vec<u8> {
     out
 }
 
-/// Build a well-formed unsigned EIP-1559 preimage with default fee/gas
-/// fields and caller-chosen calldata.
+/// Builds an unsigned EIP-1559 preimage with default fee/gas fields and the
+/// given calldata.
 fn eip1559_with_data(chain_id: u64, to: &[u8], value: u64, data: &[u8]) -> Vec<u8> {
     eip1559_full(chain_id, to, value, 1, 100, 21_000, data)
 }
 
-/// Build a well-formed unsigned EIP-1559 preimage. Carries the allowlisted
-/// selector as calldata so the happy path passes the calldata check; the
-/// rejection tests that use this fail earlier (chain/destination/value/caps).
+/// Builds an unsigned EIP-1559 preimage with the allowlisted selector as
+/// calldata, so the happy path passes. Rejection tests that use it fail
+/// earlier (chain/destination/value/caps).
 fn eip1559(chain_id: u64, to: &[u8], value: u64) -> Vec<u8> {
     eip1559_with_data(chain_id, to, value, &ALLOWED_SELECTOR)
 }
 
-/// Build a well-formed unsigned EIP-1559 preimage with explicit fee/gas/data
-/// fields, for exercising the cap and calldata-allowlist checks.
+/// Builds an unsigned EIP-1559 preimage with explicit fee/gas/data fields, for
+/// the cap and calldata-allowlist checks.
 #[allow(clippy::too_many_arguments)]
 fn eip1559_full(
     chain_id: u64,
@@ -106,14 +106,14 @@ fn eip1559_full(
     out
 }
 
-/// Build a well-formed unsigned legacy EIP-155 preimage (allowlisted-selector
-/// calldata, so the happy path passes the calldata check).
+/// Builds an unsigned legacy EIP-155 preimage with allowlisted-selector
+/// calldata, so the happy path passes.
 fn legacy(chain_id: u64, to: &[u8], value: u64) -> Vec<u8> {
     legacy_full(chain_id, to, value, 100, 21_000, &ALLOWED_SELECTOR)
 }
 
-/// Build a well-formed unsigned legacy EIP-155 preimage with explicit
-/// gasPrice/gas/data fields.
+/// Builds an unsigned legacy EIP-155 preimage with explicit gasPrice/gas/data
+/// fields.
 fn legacy_full(
     chain_id: u64,
     to: &[u8],
@@ -135,8 +135,8 @@ fn legacy_full(
     ])
 }
 
-/// Build a well-formed unsigned legacy EIP-155 preimage with default
-/// gasPrice/gas and caller-chosen calldata.
+/// Builds an unsigned legacy EIP-155 preimage with default gasPrice/gas and
+/// the given calldata.
 fn legacy_with_data(chain_id: u64, to: &[u8], value: u64, data: &[u8]) -> Vec<u8> {
     legacy_full(chain_id, to, value, 100, 21_000, data)
 }
@@ -172,7 +172,7 @@ fn rejects_empty_preimage() {
 
 #[test]
 fn rejects_wrong_destination_the_drain() {
-    // The core drain: a well-formed tx sending to an attacker address.
+    // The core drain: a valid tx to an attacker address.
     let attacker = [0xEE; 20];
     let tx = eip1559(CHAIN_ID, &attacker, 0);
     let err = validate_gas_tx_request(&req(tx), &cfg()).unwrap_err();
@@ -192,13 +192,13 @@ fn rejects_nonzero_value_the_other_drain() {
 // LayerZero native-fee carve-out: payable selector + destination ==
 // pinned proxy + value <= ceiling. Each test breaks exactly one leg.
 
-/// Verbatim from `MultisigProxy.sol`. Kept in the test module so the
-/// release build carries no unused constant.
+/// Verbatim from `MultisigProxy.sol`. It is in the test module, so the release
+/// build has no unused constant.
 const ONCHAIN_LZ_FUNDS_OUT_CALL_SIG: &str =
     "lzFundsOutCall((uint256,uint256,uint256,uint256,string,bytes,bytes,uint32,bytes32,\
      uint256,bytes,bytes32),uint256,uint256,uint256,bytes[])";
 
-/// Drift fails closed, so this catches a silently disabled carve-out.
+/// Drift fails closed, so this test finds a disabled carve-out.
 #[test]
 fn onchain_lz_selector_matches_its_signature() {
     let digest = Keccak256::digest(ONCHAIN_LZ_FUNDS_OUT_CALL_SIG.as_bytes());
@@ -219,8 +219,8 @@ fn lz_cfg() -> BridgeConfig {
         gas_tx_max_value_wei: Some(1_000_000),
         gas_tx_max_gas_limit: MAX_GAS_LIMIT,
         gas_tx_max_fee_per_gas: MAX_FEE_PER_GAS,
-        // The carve-out widens the value rule only; the selector must
-        // still be allowlisted.
+        // The carve-out changes only the value rule. The selector must be
+        // allowlisted.
         gas_tx_allowed_selectors: vec![ONCHAIN_LZ_FUNDS_OUT_CALL_SELECTOR, ALLOWED_SELECTOR],
         ..Default::default()
     }
@@ -238,7 +238,8 @@ fn accepts_nonzero_value_for_lz_funds_out_call() {
     assert!(validate_gas_tx_request(&req(tx), &lz_cfg()).is_ok());
 }
 
-/// value/data indices differ per envelope; both must decide the same.
+/// value/data indices are different per envelope. Both must give the same
+/// result.
 #[test]
 fn accepts_nonzero_value_for_lz_funds_out_call_legacy_envelope() {
     let tx = legacy_with_data(CHAIN_ID, &ALLOWED_TO, 999_999, &lz_calldata());
@@ -258,7 +259,7 @@ fn rejects_nonzero_value_for_other_selector() {
     assert!(err.to_string().contains("value must be 0"), "got: {err}");
 }
 
-/// `GAS_TX_ALLOWED_TO` may be an EOA, which ignores calldata, so value
+/// `GAS_TX_ALLOWED_TO` can be an EOA, which ignores calldata. Thus a value
 /// also requires `to` == the pinned proxy.
 #[test]
 fn rejects_nonzero_value_when_destination_is_not_the_pinned_proxy() {
@@ -312,7 +313,7 @@ fn rejects_value_above_the_ceiling() {
     );
 }
 
-/// A bare selector passes leg (a); the ceiling is what stops it.
+/// A bare selector passes leg (a). The ceiling stops it.
 #[test]
 fn rejects_bare_selector_above_the_ceiling() {
     let tx = eip1559_with_data(
@@ -389,7 +390,7 @@ fn rejects_trailing_garbage() {
 
 #[test]
 fn rejects_wrong_field_count() {
-    // A 9-field list with the 0x02 prefix is valid; drop a field -> 8.
+    // A 9-field list with the 0x02 prefix is valid. Remove a field -> 8.
     let body = rlp_list(&[
         rlp_scalar(CHAIN_ID),
         rlp_scalar(7),
@@ -409,8 +410,8 @@ fn rejects_wrong_field_count() {
 
 #[test]
 fn rejects_signed_legacy_tx() {
-    // Legacy *signed* form has (v, r, s) where the unsigned body has
-    // (chainId, 0, 0); a non-zero r/s trailer must be refused.
+    // The legacy *signed* form has (v, r, s) where the unsigned body has
+    // (chainId, 0, 0). A non-zero r/s trailer must be refused.
     let signed = rlp_list(&[
         rlp_scalar(7),
         rlp_scalar(100),
@@ -448,9 +449,8 @@ fn rejects_truncated_rlp() {
 
 #[test]
 fn rejects_non_canonical_leading_zero_chain_id() {
-    // Hand-build a body where chainId is encoded as 0x8201 -> [0x01] is
-    // fine, but 0x820001 (leading zero) must be rejected. Build chainId
-    // as a 2-byte string with a leading zero.
+    // chainId as `0x82 0x00 0x01`: a 2-byte string with a leading zero. It
+    // must be rejected.
     let bad_chain = vec![0x82, 0x00, 0x01];
     let body = rlp_list(&[
         bad_chain,
@@ -474,8 +474,8 @@ fn rejects_non_canonical_leading_zero_chain_id() {
 
 #[test]
 fn rejects_value_field_that_is_a_list() {
-    // `value` (item 6) encoded as a list rather than a scalar must be
-    // rejected by the type check, not silently treated as zero.
+    // `value` (item 6) as a list, not a scalar. The type check must reject
+    // it, not read it as zero.
     let body = rlp_list(&[
         rlp_scalar(CHAIN_ID),
         rlp_scalar(7),
@@ -498,8 +498,8 @@ fn rejects_value_field_that_is_a_list() {
 
 #[test]
 fn rejects_wide_nonzero_value() {
-    // A non-zero value encoded as a wide (9-byte) scalar must be
-    // rejected by the value==0 check, not accepted.
+    // A non-zero value as a wide (9-byte) scalar. The value == 0 check must
+    // reject it.
     let wide_value = rlp_str(&[0x01; 9]);
     let body = rlp_list(&[
         rlp_scalar(CHAIN_ID),
@@ -518,8 +518,7 @@ fn rejects_wide_nonzero_value() {
     assert!(err.to_string().contains("value must be 0"), "got: {err}");
 }
 
-/// Refused at the decode, not wrapped into a small number that would
-/// slip under the ceiling.
+/// Refused at the decode, not wrapped into a small number under the ceiling.
 #[test]
 fn rejects_value_wider_than_u128() {
     let body = rlp_list(&[
@@ -541,8 +540,7 @@ fn rejects_value_wider_than_u128() {
 
 #[test]
 fn rejects_nesting_beyond_depth_limit() {
-    // An accessList nested past MAX_RLP_DEPTH must be rejected by the
-    // depth guard rather than recursing without bound.
+    // The depth guard must reject an accessList nested past MAX_RLP_DEPTH.
     let mut deep = rlp_list(&[]);
     for _ in 0..(MAX_RLP_DEPTH + 4) {
         deep = rlp_list(&[deep]);
@@ -656,7 +654,7 @@ fn rejects_when_fee_cap_unpinned() {
 
 #[test]
 fn rejects_fee_wider_than_u128() {
-    // A 17-byte maxFeePerGas is far above any pinnable cap; reject at decode.
+    // A 17-byte maxFeePerGas is above any pinnable cap. Reject at decode.
     let wide_fee = rlp_str(&[0x01; 17]);
     let body = rlp_list(&[
         rlp_scalar(CHAIN_ID),
@@ -709,7 +707,7 @@ fn rejects_disallowed_selector() {
 
 #[test]
 fn rejects_non_empty_calldata_when_allowlist_empty() {
-    // With no selectors pinned, only empty calldata may be signed.
+    // With no selectors pinned, no calldata is allowed.
     let mut c = cfg();
     c.gas_tx_allowed_selectors = Vec::new();
     let data = ALLOWED_SELECTOR.to_vec();
@@ -723,8 +721,8 @@ fn rejects_non_empty_calldata_when_allowlist_empty() {
 
 #[test]
 fn rejects_empty_calldata() {
-    // A bare / empty-calldata call is refused: it would still invoke the
-    // pinned contract's fallback/receive, outside the selector allowlist.
+    // Empty calldata is refused: it calls the contract fallback/receive,
+    // outside the selector allowlist.
     let tx = eip1559_full(CHAIN_ID, &ALLOWED_TO, 0, 1, 100, 21_000, &[]);
     let err = validate_gas_tx_request(&req(tx), &cfg()).unwrap_err();
     assert!(
@@ -748,7 +746,7 @@ fn rejects_calldata_shorter_than_selector() {
 
 #[test]
 fn rejects_data_field_that_is_a_list() {
-    // `data` (item 7) encoded as a list rather than a byte string.
+    // `data` (item 7) as a list, not a byte string.
     let body = rlp_list(&[
         rlp_scalar(CHAIN_ID),
         rlp_scalar(7),

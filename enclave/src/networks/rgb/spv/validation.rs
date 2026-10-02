@@ -1,21 +1,19 @@
-//! Per-header validation primitives. Pure functions; no chain state lives here.
+//! Per-header validation functions. They hold no chain state.
 //!
-//! `HeaderChain` orchestrates batches and supplies prior-header context; these
-//! helpers answer whether a header chains to its predecessor, whether its PoW
-//! is met, and whether its `nBits` is right for the height.
+//! `HeaderChain` gives the prior-header context. These functions check
+//! linkage to the predecessor, PoW, and the `nBits` for the height.
 //!
 //! Per network:
 //!
-//! - Mainnet, testnet3: full PoW + retarget enforcement. `expected_bits`
-//!   re-derives the required `nBits`, so a chain with arbitrarily low
-//!   difficulty is rejected.
-//! - Signet: PoW is trivial and not verified. Real signet validation is the
-//!   BIP-325 signature in the coinbase witness commitment, which
-//!   `SubmitHeadersRequest` does not carry, so only chain linkage is enforced.
+//! - Mainnet, testnet3: full PoW and retarget checks. `expected_bits`
+//!   computes the required `nBits` again, so a low-difficulty chain fails.
+//! - Signet: PoW is trivial and not checked. The real check is the BIP-325
+//!   coinbase signature. `SubmitHeadersRequest` does not carry it, so only
+//!   chain linkage is checked.
 //! - Regtest: chain linkage only.
 //!
-//! Testnet3's min-difficulty-after-20-minutes exception is not implemented,
-//! since testnet3 is not a target environment.
+//! The testnet3 20-minute min-difficulty rule is not implemented. Testnet3 is
+//! not a target environment.
 
 use bitcoin::block::Header;
 use bitcoin::pow::CompactTarget;
@@ -30,9 +28,8 @@ pub fn is_retarget_height(height: BlockHeight) -> bool {
     height.is_multiple_of(RETARGET_INTERVAL)
 }
 
-/// Verify that `header.prev_blockhash` matches `expected_prev_hash` (in
-/// internal byte order). The byte-array comparison sidesteps any conversion
-/// between `BlockHash` and our `[u8; 32]` alias.
+/// Verifies that `header.prev_blockhash` equals `expected_prev_hash`
+/// (internal byte order).
 pub fn check_linkage(
     header: &Header,
     expected_prev_hash: &[u8; 32],
@@ -45,8 +42,8 @@ pub fn check_linkage(
     Ok(())
 }
 
-/// Run PoW check: `block_hash <= target_from_nBits(header.bits)`. Skipped on
-/// networks where PoW is trivial (signet, regtest) - see module docs.
+/// PoW check: `block_hash <= target_from_nBits(header.bits)`. Skipped on
+/// signet and regtest (see module docs).
 pub fn check_pow(header: &Header, height: BlockHeight, network: Network) -> Result<()> {
     if !network.enforces_pow() {
         return Ok(());
@@ -58,17 +55,15 @@ pub fn check_pow(header: &Header, height: BlockHeight, network: Network) -> Resu
     Ok(())
 }
 
-/// Compute the `nBits` value that `header_at(height)` is required to carry,
-/// given the previous block's bits and (if `height` is a retarget boundary)
-/// the previous epoch's start time.
+/// Computes the required `nBits` for the header at `height`.
 ///
 /// `prev_bits` is the `nBits` of the block at `height - 1`.
 /// `prev_time` is the `time` of the block at `height - 1`.
-/// `epoch_start_time` is the `time` of the block at `height - RETARGET_INTERVAL`
-/// (only consulted at retarget boundaries; pass any value otherwise).
+/// `epoch_start_time` is the `time` of the block at `height - RETARGET_INTERVAL`.
+/// It is used only at retarget boundaries.
 ///
-/// Returns `Ok(None)` for networks with no retargeting enforcement (signet,
-/// regtest); the caller treats that as "don't check `nBits`".
+/// Returns `Ok(None)` on signet and regtest. The caller then skips the `nBits`
+/// check.
 pub fn expected_bits(
     height: BlockHeight,
     prev_bits: u32,
@@ -80,11 +75,11 @@ pub fn expected_bits(
         return Ok(None);
     }
     if !is_retarget_height(height) {
-        // Non-boundary block: bits MUST equal previous block's bits.
+        // Non-boundary block: bits must equal the previous block's bits.
         return Ok(Some(prev_bits));
     }
 
-    // Boundary block: re-derive expected bits from the previous epoch.
+    // Boundary block: compute the expected bits from the previous epoch.
     let actual_timespan = u64::from(prev_time.saturating_sub(epoch_start_time));
     let prev_compact = CompactTarget::from_consensus(prev_bits);
     let next = CompactTarget::from_next_work_required(
@@ -95,8 +90,8 @@ pub fn expected_bits(
     Ok(Some(next.to_consensus()))
 }
 
-/// Compose: linkage + (optional) PoW + (optional) nBits match. Used by
-/// `HeaderChain::submit_headers` once it has gathered the context.
+/// Checks linkage, then `nBits` (if given), then PoW (if the network
+/// enforces it). `HeaderChain::submit_headers` calls it.
 pub fn validate_header_full(
     header: &Header,
     height: BlockHeight,
@@ -127,8 +122,7 @@ mod tests {
     use bitcoin::consensus::deserialize;
     use bitcoin::hashes::Hash;
 
-    /// Real mainnet block 1 header (hex). Used to exercise the parser
-    /// and the mainnet PoW path against authentic data.
+    /// Real mainnet block 1 header (hex), to test the parser and mainnet PoW.
     /// https://blockstream.info/api/block/00000000839a8e6886ab5951d76f411475428afc90947ee320161bbf18eb6048/header
     const MAINNET_BLOCK_1_HEADER_HEX: &str = "010000006fe28c0ab6f1b372c1a6a246ae63f74f931e8365e15a089c68d6190000000000982051fd1e4ba744bbbe680e1fee14677ba1a3c3540bf7b1cdb606e857233e0e61bc6649ffff001d01e36299";
 
@@ -169,22 +163,18 @@ mod tests {
         // A header whose hash exceeds the target: mainnet PoW fails, signet
         // and regtest pass. Built by mutating block 1's nonce.
         let mut bytes = hex::decode(MAINNET_BLOCK_1_HEADER_HEX).unwrap();
-        // Flip the last byte (part of nonce) to break PoW.
+        // Flip the last nonce byte to break PoW.
         let last = bytes.len() - 1;
         bytes[last] ^= 0xFF;
         let bad = deserialize::<Header>(&bytes).unwrap();
 
-        // Mainnet would reject this:
         assert!(check_pow(&bad, 1, Network::Mainnet).is_err());
-        // Signet must accept (we don't enforce PoW there):
         check_pow(&bad, 1, Network::Signet).unwrap();
-        // Regtest must also accept:
         check_pow(&bad, 1, Network::Regtest).unwrap();
     }
 
     #[test]
     fn expected_bits_non_boundary_equals_prev() {
-        // Pick any height that's not a retarget boundary.
         let bits = 0x1d00ffff;
         let got = expected_bits(1, bits, 0, 0, Network::Mainnet).unwrap();
         assert_eq!(got, Some(bits));
@@ -214,9 +204,7 @@ mod tests {
 
     #[test]
     fn block_hash_round_trip() {
-        // Sanity: block 1's hash, computed from its header, has the well-known
-        // value `00000000839a8e6886ab5951d76f411475428afc90947ee320161bbf18eb6048`
-        // (display order). Our internal-order representation reverses it.
+        // Block 1 hash in display order. Internal order is the reverse.
         let h1 = parse_hex_header(MAINNET_BLOCK_1_HEADER_HEX);
         let internal = h1.block_hash().to_byte_array();
         let mut display = internal;

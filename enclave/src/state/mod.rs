@@ -1,9 +1,7 @@
 //! Enclave runtime state.
 //!
-//! Wiring only.
-//!
-//! - `enclave.rs`: the `Phase` machine and `EnclaveState`, the door every
-//!   signing entry point goes through.
+//! - `enclave.rs`: the `Phase` machine and `EnclaveState`. All signing entry
+//!   points go through `EnclaveState`.
 //! - `replay_guard.rs`: the in-memory nonce and bridge-operation guards.
 //! - `cloning_session.rs`: per-handshake cloning state.
 

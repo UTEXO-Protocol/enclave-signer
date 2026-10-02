@@ -1,9 +1,9 @@
-//! Route-level RGB validation: the entry points `networks::route` calls.
+//! Route-level RGB validation: the entry points that `networks::route` calls.
 //!
-//! This is the dispatch layer only. It decides which check runs for this
-//! build, then hands off. The checks themselves live in the sibling modules:
-//! consignment parsing and rgbstd validation in [`super::validation`], PSBT
-//! anchoring in [`super::psbt_validation`], per-flow rules in [`super::flow`].
+//! This layer only selects the check for this build. The checks are in the
+//! sibling modules: consignment parsing and rgbstd validation in
+//! [`super::validation`], PSBT anchoring in [`super::psbt_validation`], and
+//! per-flow rules in [`super::flow`].
 
 #[cfg(all(feature = "rgb-validation", rgb_to_evm))]
 use super::flow;
@@ -24,9 +24,8 @@ use crate::proto::RgbSource;
 #[cfg(all(feature = "rgb-validation", evm_to_rgb))]
 use sha3::{Digest, Keccak256};
 
-/// Validate an RGB source. The route amount is the consignment's, never the
-/// wire's. Field-level checks, consignment validation, asset binding, and SPV
-/// verification live in `validation.rs`.
+/// Validates an RGB source. The route amount comes from the consignment,
+/// never from the wire. The checks are in [`super::validation`].
 #[cfg(all(feature = "rgb-validation", rgb_to_evm))]
 pub fn validate_source(
     source: &RgbSource,
@@ -64,8 +63,8 @@ fn route_proof_from_validated_consignment(
         )
     })?;
 
-    // Which transition proves the withdrawal, and where its amount lives, is
-    // the flow's business - see `flow/`.
+    // The flow decides which transition proves the withdrawal and where its
+    // amount is.
     let amount = flow::funds_out_source_amount(last)?;
 
     Ok(RouteProof {
@@ -103,10 +102,9 @@ pub fn validate_destination(
     psbt_validation::validate_psbt_bytes(&destination.psbt_bytes)
 }
 
-/// Returns the **recipient leg** of the bound consignment in asset units - see
-/// [`psbt_validation::validate_psbt_anchors_transition`]. This is the
-/// enclave-derived destination amount the route-level cross-check uses, in
-/// place of the host-supplied `psbt_output_amount`.
+/// Returns the **recipient leg** of the bound consignment in asset units (see
+/// [`psbt_validation::validate_psbt_anchors_transition`]). The route-level
+/// cross-check uses this amount, not the host-supplied `psbt_output_amount`.
 #[cfg(all(feature = "rgb-validation", evm_to_rgb))]
 pub fn validate_destination_anchor(
     destination: &RgbDestination,
@@ -122,13 +120,11 @@ pub fn validate_destination_anchor(
                 .into(),
         ));
     }
-    // The destination consignment is otherwise bounded only by the generic
-    // 4 MB wire frame.
+    // Without this check, only the generic 4 MB wire frame limits the size.
     validation::assert_consignment_size(&destination.consignment, ctx.bridge_config, "send-RGB")?;
-    // Integrity, not authorization: the listener
-    // controls both `consignment` and `consignment_hash`, so a match only
-    // proves the wire copy is intact. Authorization is the rgbstd validation
-    // plus the witness-txid bind below.
+    // Integrity, not authorization. The listener controls both `consignment`
+    // and `consignment_hash`, so a match only proves the wire copy is intact.
+    // Authorization comes from rgbstd validation and the witness-txid bind.
     if destination.consignment_hash.is_empty() {
         return Err(EnclaveError::CrossCheck(
             "consignment present but consignment_hash is missing".into(),
@@ -151,13 +147,13 @@ pub fn validate_destination_anchor(
             "send-RGB PSBT carries a consignment but the RGB validator is not configured".into(),
         )
     })?;
-    // A BFA mint cannot be validated at all without the event `cea` checks it
-    // against, so the caller verified the EVM lock before reaching here.
+    // A BFA mint needs the event that `cea` checks it against. Thus the caller
+    // verifies the EVM lock before this call.
     let validated = validator.validate_consignment(&destination.consignment, ctx.bridge_events)?;
 
-    // Fail-closed on a missing pin, unlike the source direction: an
-    // unconfigured yet rgb-validation-enabled enclave must not sign in
-    // listener-trusting mode. Mirrors the EVM funds-out `!is_configured()` gate.
+    // Fail closed on a missing pin, unlike the source direction. An enclave
+    // with rgb-validation but no config must not trust the listener.
+    // Same as the EVM funds-out `!is_configured()` gate.
     validation::assert_asset_binding(
         &validated.contract_id,
         &destination.asset_id,
@@ -167,9 +163,8 @@ pub fn validate_destination_anchor(
 
     let psbt = bitcoin::psbt::Psbt::deserialize(&destination.psbt_bytes)
         .map_err(|e| EnclaveError::CrossCheck(format!("psbt_bytes is not a valid PSBT: {e}")))?;
-    // Fail closed: the per-output recipient bind needs to tell a
-    // bridge change output from a payout, and it cannot do that without the
-    // enclave's own keys. No resolver means no bind, so refuse to sign.
+    // Fail closed. The per-output recipient bind needs the enclave keys to
+    // tell bridge change from a payout. No resolver means no bind.
     let self_owned = ctx.self_owned_psbt_outputs.ok_or_else(|| {
         EnclaveError::CrossCheck(
             "send-RGB PSBT cannot be bound: no self-owned-output resolver is wired in, so the \
@@ -177,8 +172,8 @@ pub fn validate_destination_anchor(
                 .into(),
         )
     })?;
-    // `legs.recipient_seals` is surfaced, not compared here: the invoice is
-    // only authenticated once the FundsIn receipt is verified, in `handle_sign`.
+    // `legs.recipient_seals` is returned, not compared here. `handle_sign`
+    // authenticates the invoice after it verifies the FundsIn receipt.
     let legs = psbt_validation::validate_psbt_anchors_transition(
         &psbt,
         &validated,
@@ -193,8 +188,8 @@ pub fn validate_destination_anchor(
         .transpose()?
         .unwrap_or_default();
     // Pinned fee policy, shared with the plain-BTC path. No fee estimate is
-    // fetched: a dynamic bound could strand a mint whose EVM lock already
-    // settled when the fee market moved, and the host controls that egress.
+    // fetched. A dynamic bound can strand a mint whose EVM lock is settled.
+    // Also, the host controls that egress.
     psbt_validation::check_psbt_fee(&psbt, &key_path_inputs, "send-RGB")?;
 
     Ok((legs.recipient, legs.recipient_seals))

@@ -1,80 +1,67 @@
-//! Canonical encoding of the enclave's attested security policy.
+//! Canonical encoding of the enclave attested security policy.
 //!
-//! The enclave's posture is resolved once at boot, serialized here, and folded
-//! into the attestation `user_data` commitment alongside the public-key bundle
-//! (see `enclave/src/server.rs::handle_get_attested_public_key`).
+//! The enclave resolves its posture once at boot. This module serializes it,
+//! and the enclave adds it to the attestation `user_data` commitment with the
+//! public-key bundle (see `enclave/src/server.rs::handle_get_attested_public_key`).
 //!
-//! This module is the single source of truth for that serialization, so the
-//! enclave and every verifier (the `attest-verify` CLI, the cloning peer check)
-//! produce identical bytes. Both build an [`AttestedPolicy`] and call
-//! [`AttestedPolicy::to_bytes`]; a posture mismatch shows up as a `user_data`
-//! hash mismatch.
+//! This module is the only definition of the encoding. The enclave and every
+//! verifier (the `attest-verify` CLI, the clone peer check) build an
+//! [`AttestedPolicy`] and call [`AttestedPolicy::to_bytes`]. A posture
+//! mismatch gives a `user_data` hash mismatch.
 //!
-//! Wire contract: the discriminants and field order are load-bearing. Never
-//! renumber a variant or reorder fields - bump [`POLICY_COMMITMENT_V7`] and add
-//! a new arm instead.
-//!
-//! V7 adds the KMS pin the operator sets at launch. V6 added the Electrum host and the pinned TLS host and CA of the EVM RPC.
-//! V5 appended the released token contract (a `burnId` preimage input). V4
-//! added the signer role, so a verifier can tell a mint signer from a burn
-//! signer. V3 added the FundsIn emitter and confirmation rule.
+//! Wire contract: discriminants and field order are fixed. Do not renumber a
+//! variant or reorder fields. Bump [`POLICY_COMMITMENT_V7`] instead.
 
-/// Version tag prepended to every policy commitment. Lets a verifier reject a
-/// document produced by an enclave speaking a different policy-encoding version
-/// instead of silently mis-hashing it.
-///
-/// V7 adds the KMS pin; V6 the Electrum host and the EVM RPC TLS pin; V5 the token contract;
-/// V4 the signer role; V3 the deposit emitter and confirmation rule; V2 the
-/// gas-tx rule. Bumping the tag prevents older verifiers from silently
-/// agreeing on a differently shaped policy.
+/// Version tag at the start of every policy commitment. A verifier rejects a
+/// different encoding version instead of computing a wrong hash. Bump it on
+/// every layout change.
 pub const POLICY_COMMITMENT_V7: u8 = 7;
 
-/// Which bridge directions the image signs. Taken from the build features, so
-/// it is measured into PCR0 and no host config can widen it.
+/// Bridge directions that the image signs. It comes from build features, so
+/// PCR0 measures it and no host config can widen it.
 #[repr(u8)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SignerRole {
-    /// Both directions in one image: the swap and combined images
-    /// (`Dockerfile.enclave`, `Dockerfile.enclave.rgb`).
+    /// Both directions in one image (`Dockerfile.enclave`,
+    /// `Dockerfile.enclave.rgb`).
     Combined = 0,
     /// `mint-signer`: EVM -> RGB only. Refuses every `fundsOut` release.
     Mint = 1,
-    /// `burn-signer`: EVM releases only. Refuses every RGB mint PSBT. In a
-    /// `ccd` dev build it also signs CCD -> EVM; no shipped burn image has `ccd`.
+    /// `burn-signer`: EVM releases only. Refuses every RGB mint PSBT. A `ccd`
+    /// dev build also signs CCD -> EVM. No shipped burn image has `ccd`.
     Burn = 2,
 }
 
-/// Where the enclave gets the EVM `FundsIn` deposit evidence it verifies before
-/// signing an EVM->RGB bridge PSBT. Attested so a verifier can tell a trustless
-/// deployment (Helios) apart from a host-relayed one - the shipped image uses
-/// [`PinnedTlsRpc`](EvmDataSource::PinnedTlsRpc).
+/// Source of the EVM `FundsIn` deposit evidence that the enclave verifies
+/// before it signs an EVM->RGB bridge PSBT. The shipped image uses
+/// [`PinnedTlsRpc`](EvmDataSource::PinnedTlsRpc). The discriminants are wire
+/// values.
 #[repr(u8)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum EvmDataSource {
-    /// No in-enclave EVM verification compiled in (`evm-rpc` off). Bridge
-    /// EVM->RGB signing fails closed per request.
+    /// No EVM verification in the build (`evm-rpc` off). The enclave rejects
+    /// every EVM->RGB bridge request.
     Disabled = 0,
     /// Plaintext JSON-RPC over the host relay. The host can forge the
     /// responses. Dev and test builds only.
     RawRpc = 1,
-    /// Helios light client (`helios`): the RPC is cryptographically verified
-    /// against a pinned weak-subjectivity checkpoint before use (trustless).
+    /// Helios light client (`helios` feature). Not used in production.
     HeliosVerified = 2,
-    /// JSON-RPC over TLS that ends inside the enclave. The host relays
-    /// ciphertext only. The endpoint is authenticated by the pinned CA and
-    /// host ([`EvmRpcTlsPin`]); the chain state is not verified.
+    /// JSON-RPC over TLS that ends inside the enclave. The host relays only
+    /// ciphertext. The pinned CA and host ([`EvmRpcTlsPin`]) authenticate the
+    /// endpoint. The chain state is not verified.
     PinnedTlsRpc = 3,
 }
 
-/// The TLS pin of the EVM RPC endpoint. `host` is the name the certificate
-/// must match. `ca_sha256` is the SHA-256 of the DER of the only trusted CA.
+/// TLS pin of the EVM RPC endpoint. `host` is the name the certificate must
+/// match. `ca_sha256` is the SHA-256 of the DER of the only trusted CA.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct EvmRpcTlsPin {
     pub host: String,
     pub ca_sha256: [u8; 32],
 }
 
-/// The KMS key and seed object the operator set at launch. `Some` only in a
+/// KMS key and seed object set at launch. Present only in a
 /// `kms-persistence` build with KMS configured.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct KmsPin {
@@ -85,21 +72,20 @@ pub struct KmsPin {
     pub expected_evm_address: Option<[u8; 20]>,
 }
 
-/// Where the enclave gets the Bitcoin anchor evidence for RGB consignment
-/// witness txs. Only the SPV-verified source is safe, so a
-/// production build always reports [`SpvVerified`](BtcDataSource::SpvVerified).
+/// Source of Bitcoin anchor evidence for RGB consignment witness txs. Only
+/// SPV is safe, so a production build always reports
+/// [`SpvVerified`](BtcDataSource::SpvVerified).
 #[repr(u8)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BtcDataSource {
-    /// Witness txids re-anchored against the enclave's own PoW-verified header
+    /// Witness txids are checked against the enclave PoW-verified header
     /// chain (`spv`), not the host-controlled Esplora resolver.
     SpvVerified = 1,
 }
 
-/// Whether the attestation root of trust is a real NSM device or the zero-PCR
-/// mock. Mock is a `compile_error!` in release builds, so a production policy is
-/// always [`Real`](AttestationMode::Real); committed anyway so the posture is
-/// one self-contained value.
+/// Attestation root of trust: a real NSM device or the zero-PCR mock. Mock is
+/// a `compile_error!` in release builds, so production is always
+/// [`Real`](AttestationMode::Real). It is committed so the posture is complete.
 #[repr(u8)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AttestationMode {
@@ -107,15 +93,14 @@ pub enum AttestationMode {
     Real = 1,
 }
 
-/// The enclave's whole security posture in commitment form.
+/// The full enclave security posture in commitment form.
 ///
-/// [`Production`](AttestedPolicy::Production) is the fail-closed bridge-signing
-/// posture: fully pinned, real attestation, SPV-anchored, with an explicit EVM
-/// data source. A debug build, a dev feature, or an unpinned or non-bridge build
-/// is [`Development`](AttestedPolicy::Development), which a verifier of a
-/// production enclave must reject.
-// Resolved once at boot and committed to attestation user_data; the size
-// difference between the variants costs nothing here.
+/// [`Production`](AttestedPolicy::Production) is the fail-closed bridge
+/// posture: fully pinned, real attestation, SPV anchors and a known EVM data
+/// source. A debug, dev-feature, unpinned or non-bridge build is
+/// [`Development`](AttestedPolicy::Development). A production verifier must
+/// reject it.
+// Built once at boot, so the variant size difference does not matter.
 #[allow(clippy::large_enum_variant)]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum AttestedPolicy {
@@ -129,50 +114,43 @@ pub enum AttestedPolicy {
         chain_id: u64,
         bridge_contract: [u8; 20],
         rgb_asset_id: String,
-        /// Contract whose FundsIn events may authorize bridge signing.
+        /// Contract whose FundsIn events can authorize bridge signing.
         funds_in_contract: [u8; 20],
-        /// Minimum EVM receipt depth required before a deposit may authorize signing.
+        /// Minimum EVM receipt depth before a deposit can authorize signing.
         evm_min_confirmations: u64,
-        /// The Helios weak-subjectivity checkpoint (beacon block root) EVM
-        /// verification trust-roots on. `Some` only for
-        /// [`EvmDataSource::HeliosVerified`], and pinned here so a verifier
-        /// confirms which checkpoint the enclave synced from.
+        /// EVM checkpoint (beacon block root). `Some` only for
+        /// [`EvmDataSource::HeliosVerified`].
         evm_checkpoint: Option<[u8; 32]>,
         /// Host of the Electrum server the operator set at launch.
         electrum_host: String,
         /// The EVM RPC TLS pin. `Some` only for [`EvmDataSource::PinnedTlsRpc`].
         evm_rpc_tls: Option<EvmRpcTlsPin>,
-        /// Gas-tx (`SignRawDigest`) rule. Pinned destination
-        /// (all-zero when the operator left `GAS_TX_ALLOWED_TO` unset, which
-        /// fails the gas path closed), the gas/fee ceilings, and the allowlisted
-        /// calldata selectors. Committed so a verifier confirms the gas policy
-        /// the enclave enforces.
+        /// Gas-tx (`SignRawDigest`) rule: the pinned destination, the gas and
+        /// fee limits, and the allowed calldata selectors. An unset
+        /// `GAS_TX_ALLOWED_TO` gives all zeros, and the enclave rejects the
+        /// gas path.
         gas_tx_allowed_to: [u8; 20],
         gas_tx_max_gas_limit: u64,
         gas_tx_max_fee_per_gas: u128,
-        /// Ceiling (wei) on the native value a gas tx may carry, for the
-        /// payable `lzFundsOutCall` carve-out. `0` commits "no non-zero value is
-        /// signable", the same posture an unset `GAS_TX_MAX_VALUE_WEI` enforces,
-        /// so being unpinned is itself attested.
+        /// Maximum native value (wei) of a gas tx, for the payable
+        /// `lzFundsOutCall`. `0` means no non-zero value is signed. An unset
+        /// `GAS_TX_MAX_VALUE_WEI` gives `0`.
         gas_tx_max_value_wei: u128,
-        /// Permitted 4-byte calldata selectors. Canonicalised (sorted + deduped)
-        /// by [`to_bytes`](AttestedPolicy::to_bytes) so the operator's env order
-        /// never changes the commitment.
+        /// Allowed 4-byte calldata selectors. [`to_bytes`](AttestedPolicy::to_bytes)
+        /// sorts and dedups them, so env order does not change the commitment.
         gas_tx_allowed_selectors: Vec<[u8; 4]>,
-        /// The ERC-20 the Bridge releases (`TOKEN_CONTRACT`). An input of the
-        /// on-chain `burnId` preimage, which the enclave recomputes and
-        /// enforces; committed so a verifier confirms which token that rule is
-        /// pinned to. Appended in V5.
+        /// ERC-20 that the Bridge releases (`TOKEN_CONTRACT`). It is an input
+        /// to the on-chain `burnId` preimage, which the enclave recomputes.
         token_contract: [u8; 20],
-        /// The KMS pin set at launch. Appended in V7.
+        /// KMS pin set at launch.
         kms: Option<KmsPin>,
     },
     Development,
 }
 
 impl AttestedPolicy {
-    /// Deterministic, length-prefixed encoding folded into attestation
-    /// `user_data`. Layout (see the WIRE CONTRACT note in the module docs):
+    /// Deterministic, length-prefixed encoding for attestation `user_data`.
+    /// Layout (see the wire contract in the module docs):
     ///
     /// ```text
     /// [POLICY_COMMITMENT_V7]
@@ -233,10 +211,8 @@ impl AttestedPolicy {
                 out.extend_from_slice(rgb_asset_id.as_bytes());
                 out.extend_from_slice(funds_in_contract);
                 out.extend_from_slice(&evm_min_confirmations.to_be_bytes());
-                // EVM verification checkpoint: a presence byte plus, when
-                // present, the 32-byte Helios beacon block root. Pins which
-                // checkpoint, so an attacker-chosen trust root cannot hide
-                // behind an identical mode byte.
+                // EVM checkpoint: a presence byte, then the 32-byte root if
+                // present. The value is bound, not only the mode byte.
                 match evm_checkpoint {
                     Some(cp) => {
                         out.push(0x01);
@@ -260,8 +236,8 @@ impl AttestedPolicy {
                 out.extend_from_slice(&gas_tx_max_gas_limit.to_be_bytes());
                 out.extend_from_slice(&gas_tx_max_fee_per_gas.to_be_bytes());
                 out.extend_from_slice(&gas_tx_max_value_wei.to_be_bytes());
-                // Canonicalise the selector set: sort + dedup so the operator's
-                // env ordering (or duplicates) never changes the commitment.
+                // Sort and dedup the selectors, so env order and duplicates
+                // do not change the commitment.
                 let mut selectors = gas_tx_allowed_selectors.clone();
                 selectors.sort_unstable();
                 selectors.dedup();
@@ -269,7 +245,7 @@ impl AttestedPolicy {
                 for sel in &selectors {
                     out.extend_from_slice(sel);
                 }
-                // V5: the released token, a `burnId` preimage input.
+                // Released token, a `burnId` preimage input.
                 out.extend_from_slice(token_contract);
                 match kms {
                     Some(pin) => {
@@ -296,9 +272,9 @@ impl AttestedPolicy {
         out
     }
 
-    /// The inverse of [`to_bytes`](AttestedPolicy::to_bytes). Refuses any
-    /// other version, an unknown tag, a short or long input, a string that is
-    /// not UTF-8 and a selector list that is not sorted and unique.
+    /// Inverse of [`to_bytes`](AttestedPolicy::to_bytes). Rejects another
+    /// version, an unknown tag, a short or long input, a string that is not
+    /// UTF-8 and a selector list that is not sorted and unique.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, PolicyDecodeError> {
         let mut r = Reader(bytes);
         if r.u8()? != POLICY_COMMITMENT_V7 {
@@ -403,7 +379,7 @@ impl AttestedPolicy {
     }
 }
 
-/// Why [`AttestedPolicy::from_bytes`] refused its input.
+/// Why [`AttestedPolicy::from_bytes`] rejected its input.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
 #[error("cannot decode the attested policy: {0}")]
 pub struct PolicyDecodeError(pub &'static str);
@@ -450,8 +426,8 @@ impl Reader<'_> {
 mod tests {
     use super::*;
 
-    /// Parametrized production policy so each test varies exactly one field.
-    /// Gas-tx fields are fixed here; the gas-specific tests below vary them.
+    /// Production policy with parameters, so each test changes one field.
+    /// Gas-tx fields are fixed here. The gas tests change them.
     fn prod(
         vanilla: bool,
         evm: EvmDataSource,
@@ -611,8 +587,7 @@ mod tests {
 
     #[test]
     fn token_contract_changes_the_bytes() {
-        // The token enters the burnId preimage the enclave enforces, so a
-        // verifier must see which one the rule is pinned to.
+        // The token is a burnId preimage input, so it must be in the bytes.
         let mut other = base();
         if let AttestedPolicy::Production { token_contract, .. } = &mut other {
             *token_contract = [0x78; 20];
@@ -627,8 +602,7 @@ mod tests {
 
     #[test]
     fn evm_checkpoint_presence_and_value_change_the_bytes() {
-        // No checkpoint vs a pinned checkpoint must differ: a verifier
-        // expecting a specific trust root rejects one that pins none.
+        // No checkpoint and a pinned checkpoint must give different bytes.
         let none = base();
         let mut with_cp = base();
         if let AttestedPolicy::Production {
@@ -640,8 +614,7 @@ mod tests {
         }
         assert_ne!(none.to_bytes(), with_cp.to_bytes());
 
-        // Two different checkpoints must also differ - the value is bound, not
-        // just its presence.
+        // Two different checkpoints must also differ. The value is bound.
         let mut other_cp = base();
         if let AttestedPolicy::Production {
             ref mut evm_checkpoint,
@@ -788,8 +761,8 @@ mod tests {
 
     #[test]
     fn asset_is_length_prefixed_not_ambiguous() {
-        // The u32 length prefix means a longer asset id can never be confused
-        // with a shorter one that happens to share a prefix.
+        // The u32 length prefix stops confusion between asset IDs that share
+        // a prefix.
         let a = prod(false, EvmDataSource::RawRpc, 1, 0x11, "ab");
         let b = prod(false, EvmDataSource::RawRpc, 1, 0x11, "abc");
         assert_ne!(a.to_bytes(), b.to_bytes());
@@ -819,8 +792,7 @@ mod tests {
 
     #[test]
     fn selector_allowlist_is_order_and_dup_independent() {
-        // The commitment canonicalises selectors, so operator env ordering and
-        // duplicate entries never change the attested bytes.
+        // Selector order and duplicates do not change the attested bytes.
         let a = base_with_gas(
             [0xAA; 20],
             21_000,
@@ -840,8 +812,8 @@ mod tests {
 
     #[test]
     fn selector_count_is_length_prefixed() {
-        // A different number of selectors changes the length prefix, so a set
-        // can never be confused with a longer one sharing a prefix.
+        // The selector count is length-prefixed, so a set cannot be confused
+        // with a longer set that shares a prefix.
         let one = base_with_gas([0xAA; 20], 21_000, 1_000, 0, vec![[1, 1, 1, 1]]);
         let two = base_with_gas(
             [0xAA; 20],

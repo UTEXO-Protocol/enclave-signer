@@ -1,5 +1,5 @@
-//! The connection loop: read one framed request, dispatch it, write one
-//! framed response, close. One request per connection, by design.
+//! The connection loop. Each connection carries one framed request and one
+//! framed response, by design.
 
 use std::io::{Read, Write};
 
@@ -9,7 +9,7 @@ use crate::error::Result;
 use crate::framing;
 use crate::proto::EnclaveRequest;
 
-/// Handle a single connection: read one request, dispatch, write one response, close.
+/// Handle one connection with the default total request timeout.
 pub fn handle_connection(stream: impl Read + Write, ctx: &ServerContext) {
     handle_connection_until(
         stream,
@@ -18,7 +18,8 @@ pub fn handle_connection(stream: impl Read + Write, ctx: &ServerContext) {
     );
 }
 
-/// Preserve the ingress socket deadline through persistent seed initialization.
+/// Handle one connection with the ingress socket deadline.
+/// Persistent seed initialization uses the same deadline.
 pub fn handle_connection_until(
     stream: impl Read + Write,
     ctx: &ServerContext,
@@ -42,16 +43,16 @@ fn process_connection(
     framing::write_message(&mut stream, &response)?;
     tracing::debug!("response written");
 
-    // Commit the replay key only after the write succeeds. A failed write drops
-    // the reservation and rolls the key back.
+    // Commit the replay key only after the write succeeds.
+    // A failed write drops the reservation and rolls the key back.
     if let Some(reservation) = reservation {
         reservation.commit();
     }
     Ok(())
 }
 
-/// A connection that aged out in the queue is not dispatched. Its first
-/// read fails.
+/// A connection that expires in the queue is not dispatched.
+/// Its first read fails.
 #[cfg(all(test, feature = "rgb-validation"))]
 mod expired_pickup {
     use std::io::{self, Cursor, Read, Write};
@@ -121,7 +122,7 @@ mod expired_pickup {
             IO_IDLE_TIMEOUT,
         );
 
-        // The wait a busy worker pool imposes.
+        // Simulate the wait in a busy worker pool.
         std::thread::sleep(Duration::from_millis(200));
 
         let ctx = ServerContext::new(

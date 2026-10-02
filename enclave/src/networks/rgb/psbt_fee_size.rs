@@ -9,9 +9,10 @@ use bitcoin::{Script, ScriptBuf};
 
 use crate::error::{EnclaveError, Result};
 
-/// Estimate supported native-witness satisfactions, including all inputs.
-/// Hidden Taproot leaves and later finalizer changes are not bounded here;
-/// the finalizer must also check the actual transaction's fee rate.
+/// Estimated signed vsize, with a witness estimate for every input. Only
+/// native-witness spends are supported. Hidden Taproot leaves and later
+/// finalizer changes are not bounded, so the finalizer must check the real fee
+/// rate too.
 pub(super) fn estimated_signed_vsize(psbt: &Psbt, key_path_inputs: &[usize]) -> Result<u64> {
     if psbt.inputs.is_empty() || psbt.inputs.len() != psbt.unsigned_tx.input.len() {
         return Err(size_error("inconsistent or empty PSBT"));
@@ -81,7 +82,7 @@ fn taproot_witness_size(
     key_path: bool,
 ) -> std::result::Result<u64, &'static str> {
     let secp = Secp256k1::verification_only();
-    // Only the trusted signer resolver can select key-path despite disclosed leaves.
+    // With disclosed leaves, only the trusted signer resolver can select key-path.
     if key_path || input.tap_scripts.is_empty() {
         let internal_key = input
             .tap_internal_key
@@ -90,7 +91,7 @@ fn taproot_witness_size(
         if ScriptBuf::new_p2tr(&secp, internal_key, input.tap_merkle_root).as_script() != script {
             return Err("Taproot internal key/merkle root does not match the prevout");
         }
-        // DEFAULT omits the sighash byte; an existing ALL signature still needs it.
+        // DEFAULT has no sighash byte. An existing ALL signature still has it.
         let has_sighash_byte = input.sighash_type.is_some_and(|ty| ty.to_u32() != 0)
             || input
                 .tap_key_sig
@@ -110,7 +111,8 @@ fn taproot_witness_size(
         }
         let (slots, required) = tapscript_threshold(leaf)
             .ok_or("unsupported Taproot script; expected CHECKSIG or multi_a")?;
-        // Empty multi_a slots also occupy witness bytes; signatures may include sighash.
+        // Empty multi_a slots also use witness bytes. A signature can have a
+        // sighash byte.
         let size = compact_size(slots + 2)
             + required * 66
             + (slots - required)

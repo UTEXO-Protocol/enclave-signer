@@ -140,10 +140,10 @@ fn scoped_taproot_signing_rejects_unsupported_sighash() {
     }
 }
 
-/// `tap_key_origins` claims OUR fingerprint at a real BIP-86 path, but keys
-/// it with someone else's internal key, which the coin is really locked to.
-/// Without the derivation anchor (derived key == claimed key) the signer
-/// would sign for a key it doesn't own.
+/// `tap_key_origins` claims OUR fingerprint at a real BIP-86 path, but for a
+/// foreign internal key that locks the coin. Without the derivation check
+/// (derived key == claimed key), the signer would sign for a key it does not
+/// own.
 #[test]
 fn skips_key_path_when_a_foreign_key_claims_our_path() {
     let km = KeyManager::from_seed([0x42u8; 64], Network::Testnet).unwrap();
@@ -168,7 +168,7 @@ fn skips_when_path_outside_bip86_accounts() {
     let km = KeyManager::from_seed([0x42u8; 64], Network::Testnet).unwrap();
     let (mut psbt, _) = build_key_path_psbt(&km, AccountType::Vanilla, None);
     let our = our_xonly(&km);
-    // Replace path with m/44'/0'/...
+    // A path under m/44'/0'/...
     let bad_path = DerivationPath::from(vec![
         ChildNumber::from_hardened_idx(44).unwrap(),
         ChildNumber::from_hardened_idx(0).unwrap(),
@@ -224,7 +224,7 @@ fn scoped_vanilla_refuses_a_colored_input() {
         .0
         .serialize();
 
-    // Unscoped: the colored input IS signable (sanity check the fixture).
+    // Unscoped: the colored input IS signable (fixture check).
     let (_, unscoped) = km.sign_psbt_scoped(&bytes, None).unwrap();
     assert_eq!(unscoped, 1, "fixture: colored input should sign unscoped");
 
@@ -238,10 +238,9 @@ fn scoped_vanilla_refuses_a_colored_input() {
     );
 }
 
-/// The multisig shape the enclave used to co-sign: a script-path leaf that
-/// pushes our key, a verifying control block and a correct origins claim for
-/// that leaf, under a foreign (NUMS) internal key. The bridge wallet is
-/// singlesig now, so such an input is not ours and is never signed.
+/// A multisig script-path leaf that pushes our key, with a valid control block
+/// and a correct origins claim, under a foreign (NUMS) internal key. The
+/// bridge wallet is singlesig, so this input is not ours and is never signed.
 #[test]
 fn script_path_input_naming_our_key_is_never_signed() {
     let km = KeyManager::from_seed([0x42u8; 64], Network::Testnet).unwrap();
@@ -293,7 +292,8 @@ fn script_path_input_naming_our_key_is_never_signed() {
     }
 }
 
-/// Key-path P2TR PSBT spending our `account` key at /0/0, tweaked with `merkle_root`.
+/// Key-path P2TR PSBT that spends our `account` key at /0/0, tweaked with
+/// `merkle_root`.
 fn build_key_path_psbt(
     km: &KeyManager,
     account: AccountType,
@@ -409,7 +409,7 @@ fn key_path_with_a_merkle_root_signs_with_the_same_tweak() {
 fn skips_key_path_when_the_output_key_is_not_the_tweaked_internal_key() {
     let km = KeyManager::from_seed([0x42u8; 64], Network::Testnet).unwrap();
     let (mut psbt, _) = build_key_path_psbt(&km, AccountType::Vanilla, None);
-    // The PSBT claims our internal key, but the coin is locked to someone else.
+    // The PSBT claims our internal key, but a foreign key locks the coin.
     let secp = Secp256k1::new();
     let (foreign, _) = xonly_from_byte(0xA1).tap_tweak(&secp, None);
     psbt.inputs[0].witness_utxo.as_mut().unwrap().script_pubkey =

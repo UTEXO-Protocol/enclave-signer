@@ -1,102 +1,87 @@
-//! What a validated consignment is reduced to.
+//! Plain data extracted from a validated consignment.
 //!
-//! Plain data. Everything here has already passed rgbstd validation, so the
-//! rest of the enclave reads these shapes instead of re-parsing RGB.
+//! All of it passed rgbstd validation. The rest of the enclave reads these
+//! shapes and does not parse RGB again.
 
 /// Data extracted from a successfully validated RGB consignment.
 #[derive(Debug, Clone)]
 pub struct ValidatedConsignment {
-    /// RGB contract identifier (e.g., "rgb:2TGhRyP3-..."). Globally unique
-    /// per asset; derived from the genesis operation in RGB 0.11.
+    /// RGB contract identifier (for example "rgb:2TGhRyP3-..."). Unique per
+    /// asset. RGB 0.11 derives it from the genesis operation.
     pub contract_id: String,
-    /// Bitcoin network the consignment is anchored to, in rgbstd's prefix
-    /// form: `"bc"`, `"bc:testnet3"`/`"tb"`, `"bc:signet"`/`"sb"`, or `"bc:regtest"`.
-    /// Used to reject cross-network replay (e.g. a regtest consignment
-    /// presented to a mainnet enclave).
+    /// Bitcoin network of the consignment, in rgbstd prefix form: `"bc"`,
+    /// `"bc:testnet3"`/`"tb"`, `"bc:signet"`/`"sb"`, or `"bc:regtest"`.
+    /// Used to reject cross-network replay (for example regtest on mainnet).
     pub chain_net: String,
-    /// Bitcoin txids that anchor each transition bundle in the consignment,
-    /// in **display (big-endian) byte order** - same encoding as
-    /// `MerkleProofEntry.txid` on the wire. Deduplicated and sorted so
-    /// equality checks against the listener's set are stable.
+    /// Bitcoin txids that anchor each transition bundle, in **display
+    /// (big-endian) byte order**, as `MerkleProofEntry.txid` on the wire.
+    /// Deduplicated and sorted, so set comparisons are stable.
     pub witness_txids: Vec<[u8; 32]>,
-    /// Every state-transition `op_id` in the consignment, in witness order
-    /// (bundle k's transitions before bundle k+1's). Spec section 6 requires
-    /// every mint OpId committed to EVM state to be cross-checked across RGB
-    /// validations.
+    /// Each state-transition `op_id` in the consignment, in witness order
+    /// (bundle k before bundle k+1). Spec section 6 requires a cross-check of
+    /// each mint OpId committed to EVM state.
     pub all_op_ids: Vec<String>,
-    /// The `op_id`s of every BFA `TS_BRIDGE` (mint) transition in the
-    /// consignment, in witness order - the subset of [`Self::all_op_ids`]
-    /// that corresponds to EVM lock records (`fundsIn`).
+    /// The `op_id`s of each BFA `TS_BRIDGE` (mint) transition, in witness
+    /// order. This is the subset of [`Self::all_op_ids`] that matches EVM lock
+    /// records (`fundsIn`).
     ///
-    /// Not currently consumed by the EVM side: on the route-agnostic Bridge
-    /// the `fundsOut` citation comes from deposit receipts and is enforced
-    /// on-chain by `RgbSettlementModule.beforeFundsOut`. Kept as the RGB half
-    /// of that correspondence.
+    /// The EVM side does not use it. The `fundsOut` citation comes from
+    /// deposit receipts, and `RgbSettlementModule.beforeFundsOut` enforces it
+    /// on-chain.
     pub mint_op_ids: Vec<String>,
-    /// The most recent state transition: the state change the EVM action this
-    /// consignment authorises commits to. `None` only for malformed transfers
-    /// with no transition bundles, which rgbstd rejects upstream.
+    /// The last state transition: the state change that the EVM action
+    /// commits to. `None` only for a transfer with no bundles, which rgbstd
+    /// rejects.
     pub last_transition: Option<TransitionSummary>,
-    /// Bitcoin txid of the witness transaction anchoring the last transition,
-    /// whatever its transition type (burn included).
+    /// Bitcoin txid of the witness tx that anchors the last transition, for
+    /// all transition types (burn included).
     ///
-    /// Two consumers. In the send-RGB direction the PSBT being signed IS that
-    /// witness tx, and the PSBT cross-check binds
-    /// `psbt.unsigned_tx.compute_txid()` to this after gating on the last
-    /// transition being a Transfer or Bridge. The RGB->EVM `fundsOut`
-    /// source-block bind uses it ungated, so it works for transfer and burn
-    /// alike.
+    /// In the send-RGB direction, the PSBT is that witness tx. The PSBT
+    /// cross-check binds `psbt.unsigned_tx.compute_txid()` to it after the
+    /// flow transition-type check. The RGB->EVM `fundsOut` source-block bind
+    /// uses it for all types, so it works for transfer and burn.
     ///
-    /// A `bitcoin::Txid` rather than display-order bytes, to avoid the txid
-    /// byte-order footgun. `None` only for a consignment with no bundles.
+    /// A `bitcoin::Txid`, not display-order bytes, to prevent byte-order
+    /// errors. `None` only for a consignment with no bundles.
     pub last_witness_txid: Option<bitcoin::Txid>,
-    /// Bitcoin input prevouts of that witness transaction, when the
-    /// consignment embeds the full tx (`PubWitness::Tx`). Used by the PSBT
-    /// cross-check as a redundant per-input canary over the txid bind. `None`
-    /// for `PubWitness::Txid`, where the txid bind alone anchors every input.
+    /// Input prevouts of that witness tx, if the consignment embeds the full
+    /// tx (`PubWitness::Tx`). The PSBT cross-check uses them as a redundant
+    /// per-input canary. `None` for `PubWitness::Txid`, where the txid bind
+    /// alone anchors each input.
     pub last_transfer_witness_prevouts: Option<Vec<bitcoin::OutPoint>>,
-    /// Authoritative OpId (32-byte commitment hash) of the consignment's
-    /// **last** transition, read from the rgbstd-**validated** `Transfer`
-    /// (`KnownTransition.opid` of the same last bundle as
-    /// `last_witness_txid`), NOT from the flat `rgb_consignment`
-    /// parser. This is the value `validate()` authenticated and anchored on
-    /// chain.
+    /// Authoritative OpId (32-byte commitment hash) of the **last**
+    /// transition, read from the rgbstd-**validated** `Transfer`
+    /// (`KnownTransition.opid` of the same bundle as `last_witness_txid`),
+    /// NOT from the flat `rgb_consignment` parser.
     ///
-    /// No longer feeds the EVM `fundsOut` `burnId`: the new
-    /// Bridge derives that itself and reverts `InvalidBurnId` otherwise. `None`
-    /// for a consignment with no bundles or a non-Transfer last transition.
+    /// It does not feed the EVM `fundsOut` `burnId`: the Bridge derives that
+    /// and reverts `InvalidBurnId` on a mismatch. `None` for a consignment with
+    /// no bundles, or if this flow does not sign the last transition type.
     pub last_transfer_op_id: Option<[u8; 32]>,
-    /// Witness txids that rgbstd `validate()` classified as **not mined**
-    /// (`WitnessOrd::Tentative` / `Ignored`), in **display (big-endian) byte
-    /// order** - same encoding as [`Self::witness_txids`]. `validate()` already
-    /// hard-rejects `Archived`/unresolvable witnesses, so only these softer
-    /// not-yet-confirmed states reach here, and only because this set is built
-    /// from the rgbstd status that was previously discarded.
+    /// Witness txids that are **not mined**, in **display (big-endian) byte
+    /// order**, as [`Self::witness_txids`].
     ///
-    /// A non-empty set is **expected** for the send-RGB (EVM-lock -> RGB-send)
-    /// PSBT path: that witness tx is freshly composed and unbroadcast, so it is
-    /// legitimately `Tentative`. It is an **anomaly** for the RGB->EVM
-    /// `fundsOut` direction, where the witness is already confirmed on-chain
-    /// and SPV-verified - the SignEvm path rejects any non-mined witness as
-    /// defense-in-depth atop the SPV depth check (see
-    /// `evm::validation::assert_witnesses_confirmed`).
+    /// Always empty at present. rgb-ops sets each consignment tx to
+    /// `WitnessOrd::Tentative` at any depth, so `validate_consignment` does
+    /// not fill it. RGB->EVM confirmation comes from the SPV depth check.
+    /// The empty set keeps `evm::crosscheck::assert_witnesses_confirmed` as a
+    /// structural guard.
     pub non_mined_witness_txids: Vec<[u8; 32]>,
     /// Every transition in the consignment, grouped by the witness tx that
     /// commits it.
     ///
-    /// A single Bitcoin transaction commits a bundle, which may hold several
-    /// transitions. Binding only [`Self::last_transition`] would let an
-    /// attacker park a large transfer earlier in the bundle, so the send-RGB
-    /// PSBT cross-check binds the whole group via
-    /// [`Self::transitions_committed_by`].
+    /// One Bitcoin tx commits a bundle, which can hold many transitions. A
+    /// bind of only [`Self::last_transition`] lets an attacker put a large
+    /// transfer earlier in the bundle. Thus the send-RGB PSBT cross-check
+    /// binds the full group with [`Self::transitions_committed_by`].
     pub transitions_by_witness: Vec<(bitcoin::Txid, Vec<TransitionSummary>)>,
 }
 
 impl ValidatedConsignment {
-    /// Every transition committed by witness transaction `txid`.
+    /// Each transition that the witness tx `txid` commits.
     ///
-    /// Empty when the consignment commits nothing to that transaction - which
-    /// callers must treat as a rejection, not as "nothing to check".
+    /// Empty if the consignment commits nothing to that tx. Callers must treat
+    /// empty as a rejection, not as "nothing to check".
     pub fn transitions_committed_by(&self, txid: bitcoin::Txid) -> Vec<&TransitionSummary> {
         self.transitions_by_witness
             .iter()
@@ -107,43 +92,38 @@ impl ValidatedConsignment {
 }
 
 /// Flat summary of one RGB state transition. Mirrors
-/// `rgb_consignment::TransitionInfo` but in types we own, so the parser dep
-/// doesn't leak into our public surface.
+/// `rgb_consignment::TransitionInfo` in local types, so the parser dependency
+/// stays out of the public API.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TransitionSummary {
-    /// Operation id: 64-char lowercase hex of the 32-byte RGB OpId, as the
-    /// parser yields it. The hex form is load-bearing, not baid64 -
+    /// Operation id: 64-char lowercase hex of the 32-byte RGB OpId, from the
+    /// parser. It must be hex, not baid64:
     /// `evm::crosscheck::decode_op_id_to_bytes32` decodes it to 32 bytes.
     pub op_id: String,
-    /// BFA-schema transition-type id; compare against [`bfa::TS_TRANSFER`]
-    /// / [`bfa::TS_BURN`] / [`bfa::TS_BRIDGE`] to classify the EVM
-    /// action this consignment authorises.
+    /// BFA transition-type id. Compare with [`bfa::TS_TRANSFER`],
+    /// [`bfa::TS_BURN`] or [`bfa::TS_BRIDGE`] to classify the EVM action.
     pub transition_type: u16,
-    /// Sum of all fungible amounts across all output assignments of this
-    /// transition. For a Transfer this is the total of recipient + change
-    /// outputs; for a Burn this is **zero** because burns have no output
-    /// assignments - the destroyed amount lives in [`Self::burned_asset_amount`].
+    /// Sum of all fungible amounts in the output assignments. For a Transfer,
+    /// this is recipient plus change. For a Burn, it is **zero**: a burn has no
+    /// output assignments, and the amount is in [`Self::burned_asset_amount`].
     pub total_output_amount: u64,
-    /// Sum of the fungible amounts on `OS_ASSET`-typed output assignments
-    /// only - the allocations that actually carry asset units. For a
-    /// Transfer this equals [`Self::total_output_amount`] (transfers move
-    /// only `OS_ASSET`); for a Bridge (mint) it is the freshly minted
-    /// value, **excluding** the declarative `OS_BRIDGE` output, which carries
-    /// the mint right and no asset units.
+    /// Sum of the fungible amounts on `OS_ASSET` output assignments only.
+    /// Only these carry asset units. For a Transfer, this equals
+    /// [`Self::total_output_amount`]. For a Bridge (mint), it is the minted
+    /// value, **without** the declarative `OS_BRIDGE` output (the mint right).
     pub asset_output_amount: u64,
-    /// Concrete output assignments, each tagged with a destination seal
-    /// and an amount. Empty for Burn transitions.
+    /// Output assignments, each with a destination seal and an amount.
+    /// Empty for a Burn.
     pub outputs: Vec<TransitionOutput>,
-    /// Asset units destroyed by this transition, from the BFA
-    /// `MS_BURNED_ASSET` metadata field. `Some(0)` is schema-legal, but the
-    /// EVM cross-check layer requires it strictly positive to sign an unlock.
+    /// Asset units that this transition destroys, from the BFA
+    /// `MS_BURNED_ASSET` metadata. The schema allows `Some(0)`, but the EVM
+    /// cross-check requires a positive value to sign an unlock.
     ///
-    /// `None` when the transition is not a burn, or when a burn transition is
-    /// malformed (which rgbstd validation should already have rejected).
+    /// `None` for a non-burn, or for a malformed burn (rgbstd rejects it).
     pub burned_asset_amount: Option<u64>,
-    /// Where the burn's proceeds are owed on the EVM side, from the BFA
-    /// `MS_BURN_RECIPIENT` metadata field: exactly 32 bytes, as the schema
-    /// requires. `None` for a non-burn.
+    /// EVM-side recipient of the burn proceeds, from the BFA
+    /// `MS_BURN_RECIPIENT` metadata: exactly 32 bytes, as the schema requires.
+    /// `None` for a non-burn.
     pub burn_recipient: Option<Vec<u8>>,
 }
 
@@ -151,25 +131,22 @@ pub struct TransitionSummary {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TransitionOutput {
     /// BFA assignment type ([`bfa::OS_ASSET`] or [`bfa::OS_BRIDGE`]).
-    /// Load-bearing: only `OS_ASSET` entries carry asset units, so the
-    /// per-output recipient bind must filter on this just as
-    /// `asset_output_amount` does.
+    /// Only `OS_ASSET` entries carry asset units. The per-output recipient
+    /// bind must filter on it, as `asset_output_amount` does.
     pub assignment_type: u16,
-    /// Amount in the asset's smallest unit.
+    /// Amount in the smallest unit of the asset.
     pub amount: u64,
-    /// Destination seal - either a revealed `txid:vout` or a hidden
-    /// commitment.
+    /// Destination seal: a revealed `txid:vout` or a hidden commitment.
     pub seal: OutputSeal,
 }
 
-/// Where a fungible output lives. Mirrors `rgb_consignment::SealInfo`.
+/// The seal of a fungible output. Mirrors `rgb_consignment::SealInfo`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum OutputSeal {
-    /// Concrete `txid:vout`. `txid` is `None` when the seal points at the
-    /// witness tx of its containing bundle - resolve by combining with
-    /// the bundle's witness txid in display order.
+    /// Concrete `txid:vout`. `txid` is `None` if the seal points to the
+    /// witness tx of its bundle. Then use the bundle witness txid.
     Revealed {
-        /// Display-order bytes - matches `witness_txids` encoding.
+        /// Display-order bytes, as in `witness_txids`.
         txid: Option<[u8; 32]>,
         vout: u32,
     },

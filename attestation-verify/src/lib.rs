@@ -1,16 +1,15 @@
 //! AWS Nitro Enclave attestation document verification.
 //!
-//! Pure-Rust verifier shared by the enclave's cloning peer-verify path and the
-//! parent's `attest-verify` CLI, so both run the same code.
+//! Pure-Rust verifier. The enclave clone peer check and the parent
+//! `attest-verify` CLI both use it.
 //!
-//! Real path: parses COSE_Sign1, verifies the AWS Nitro certificate chain
-//! down from the hardcoded root CA, checks PCR0/1/2 against expected, and
-//! enforces nonce presence (and equality if a specific value is expected).
+//! Real path: parse COSE_Sign1, verify the AWS Nitro certificate chain from
+//! the hardcoded root CA, and compare PCR0/1/2. A nonce must be present. If
+//! the caller gives a nonce, it must be equal.
 //!
-//! Mock path (`mock` feature): produces and verifies raw CBOR documents
-//! without COSE wrapping or certificate validation. PCR/nonce/pubkey
-//! binding is still enforced. Used by integration tests and dev builds
-//! that cannot reach a real NSM device.
+//! Mock path (`mock` feature): make and verify raw CBOR documents without COSE
+//! or certificate checks. PCR, nonce and public key binding stay enforced.
+//! For integration tests and dev builds without an NSM device.
 
 #![forbid(unsafe_code)]
 
@@ -44,9 +43,9 @@ pub enum VerifyError {
 
 pub type Result<T> = std::result::Result<T, VerifyError>;
 
-/// Expected PCR values for an enclave we trust. Sourced out-of-band (a release
-/// artifact, on-chain config, or an operator flag) and compared bytewise
-/// against the PCRs in an attestation document.
+/// Expected PCR values of a trusted enclave. They come out-of-band (release
+/// artifact, on-chain config or operator flag). The verifier compares them
+/// byte for byte with the document PCRs.
 #[derive(Clone, Debug)]
 pub struct ExpectedPcrs {
     pub pcr0: [u8; 48],
@@ -92,10 +91,9 @@ pub struct VerifiedAttestation {
     pub nonce: Vec<u8>,
 }
 
-/// Wire-format representation of the NSM attestation payload.
+/// Wire format of the NSM attestation payload.
 ///
-/// In real mode this is the CBOR payload *inside* a COSE_Sign1 wrapper.
-/// In mock mode it is the entire document (no COSE wrapping).
+/// Real mode: the CBOR payload inside COSE_Sign1. Mock mode: the full document.
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub(crate) struct AttestationDocument {
     #[serde(rename = "module_id", default)]
@@ -120,16 +118,16 @@ pub(crate) struct AttestationDocument {
 
 /// Verify a real (production) Nitro Enclave attestation document.
 ///
-/// Checks (in order):
-///   1. Parse COSE_Sign1 envelope and inner CBOR AttestationDocument.
-///   2. Validate the X.509 certificate chain back to the hardcoded
-///      AWS Nitro root CA, checking each certificate's validity window.
-///   3. Verify the COSE_Sign1 signature using the leaf signing certificate.
-///   4. Compare PCR0/1/2 against `expected_pcrs`.
-///   5. Require a nonce. If `expected_nonce` is `Some`, require byte-equality
-///      with it; if `None`, the caller is expected to enforce freshness via
-///      its own replay guard.
-///   6. Require a `public_key` field.
+/// Checks, in order:
+///   1. Parse COSE_Sign1, require alg ES384, and parse the CBOR document.
+///   2. Validate the X.509 chain to the hardcoded AWS Nitro root CA,
+///      including each validity window.
+///   3. Verify the COSE_Sign1 signature with the leaf certificate.
+///   4. Require a nonce. If `expected_nonce` is `Some`, it must be equal.
+///      If `None`, the caller must enforce freshness with its own replay guard.
+///   5. Reject all-zero PCRs (unless `allow-debug-pcrs`).
+///   6. Compare PCR0/1/2 with `expected_pcrs`.
+///   7. Require a `public_key` field.
 pub fn verify_attestation(
     doc: &[u8],
     expected_pcrs: &ExpectedPcrs,
@@ -140,9 +138,9 @@ pub fn verify_attestation(
 
 // Public API - mock path (feature-gated)
 
-/// Verify a mock attestation document (raw CBOR, no COSE wrapping, no cert chain).
+/// Verify a mock attestation document (raw CBOR, no COSE, no cert chain).
 ///
-/// PCR / nonce / pubkey binding are still enforced. Test-only.
+/// PCR, nonce and public key binding stay enforced. Tests only.
 #[cfg(feature = "mock")]
 pub fn verify_mock_attestation(
     doc: &[u8],
@@ -152,10 +150,8 @@ pub fn verify_mock_attestation(
     mock::verify_mock_document(doc, expected_pcrs, expected_nonce)
 }
 
-/// Build a mock attestation document for tests.
-///
-/// PCRs are zeroed, no COSE wrapping, no certificate. Pairs with
-/// [`verify_mock_attestation`].
+/// Build a mock attestation document for tests: zero PCRs, no COSE, no
+/// certificate. Use with [`verify_mock_attestation`].
 #[cfg(feature = "mock")]
 pub fn build_mock_document(
     nonce: &[u8; 32],
@@ -165,9 +161,8 @@ pub fn build_mock_document(
     mock::build_mock_document(nonce, public_key, user_data)
 }
 
-/// Build a mock attestation document with caller-specified PCRs. Like
-/// [`build_mock_document`], but a test can set PCR0/1/2 to exercise the
-/// PCR-binding rejection path. Test-only.
+/// Like [`build_mock_document`], but with caller PCRs, to test PCR mismatch.
+/// Tests only.
 #[cfg(feature = "mock")]
 pub fn build_mock_document_with_pcrs(
     nonce: &[u8; 32],
@@ -247,9 +242,8 @@ mod real {
     use x509_cert::ext::pkix::{BasicConstraints, KeyUsage};
     use x509_cert::Certificate;
 
-    /// COSE algorithm identifier for ECDSA with SHA-384 (ES384), from the COSE
-    /// Algorithms registry (RFC 8152 / RFC 9053). AWS Nitro attestation
-    /// documents are signed with ES384 over the P-384 leaf key.
+    /// COSE algorithm ID for ECDSA with SHA-384 (ES384) (RFC 8152 / RFC 9053).
+    /// AWS Nitro signs attestation documents with ES384 and the P-384 leaf key.
     const COSE_ALG_ES384: i128 = -35;
 
     // AWS Nitro Enclave root CA. Source:
@@ -270,8 +264,8 @@ rfMCMQCi85sWBbJwKKXdS6BptQFuZbT73o/gBh1qUxl/nNr12UO8Yfwr6wPLb+6N
 IwLz3/Y=
 -----END CERTIFICATE-----"#;
 
-    /// DER bytes of the embedded root cert. Parsed once and compared to
-    /// `cabundle[0]` bytewise on every verify.
+    /// DER bytes of the embedded root cert. Decoded once. Each verify compares
+    /// them byte for byte with `cabundle[0]`.
     fn root_cert_der() -> &'static [u8] {
         static ROOT: OnceLock<Vec<u8>> = OnceLock::new();
         ROOT.get_or_init(|| {
@@ -358,9 +352,9 @@ IwLz3/Y=
         verify_cert_validity(&signing_cert)?;
         chain.push(signing_cert);
 
-        // chain[0] is the root, anchored above by byte-equality. Walk forward,
-        // checking each issuer both signed the next subject and is a CA
-        // permitted to issue subordinate certificates (RFC 5280 6.1.4).
+        // chain[0] is the root, anchored by byte equality above. Each issuer
+        // must sign the next subject and be a CA that can issue subordinate
+        // certificates (RFC 5280 6.1.4).
         let mut max_path_len = chain.len();
         for i in 0..chain.len() - 1 {
             verify_issuer_signed_subject(&chain[i], &chain[i + 1])?;
@@ -368,8 +362,8 @@ IwLz3/Y=
         }
 
         let leaf = chain.last().expect("non-empty");
-        // Defensive: if the end-entity asserts a KeyUsage it must permit the
-        // digitalSignature it uses to sign the COSE envelope.
+        // If the leaf has KeyUsage, it must permit digitalSignature, which it
+        // uses to sign the COSE envelope.
         if let Some((_critical, key_usage)) = leaf
             .tbs_certificate
             .get::<KeyUsage>()
@@ -410,21 +404,19 @@ IwLz3/Y=
             .map_err(|_| VerifyError::Certificate("certificate signature invalid".into()))
     }
 
-    /// Enforce RFC 5280 6.1.4-style CA constraints on `issuer`, a certificate
-    /// that signs a subordinate one (the root and every intermediate, never the
-    /// end-entity). Without this a non-CA leaf could sign further certificates.
+    /// Apply RFC 5280 6.1.4 CA constraints to `issuer` (the root or an
+    /// intermediate, never the leaf). Without this, a non-CA leaf could sign
+    /// more certificates.
     ///
     /// Checks:
-    ///   * `BasicConstraints` is present and asserts `cA = TRUE`.
-    ///   * if `KeyUsage` is present it permits `keyCertSign`.
-    ///   * the `pathLenConstraint` budget is not exhausted.
+    ///   * `BasicConstraints` is present with `cA = TRUE`.
+    ///   * If `KeyUsage` is present, it permits `keyCertSign`.
+    ///   * The `pathLenConstraint` budget is not used up.
     ///
-    /// `max_path_len` is the number of additional non-self-issued CA
-    /// certificates still permitted below `issuer`, per constraints set by
-    /// certificates already processed higher in the chain. The (possibly
-    /// tightened) budget for the next issuer down the chain is returned.
-    /// `is_trust_anchor` is true only for the root (`cabundle[0]`); per RFC 5280
-    /// the trust anchor is not counted against the path-length budget.
+    /// `max_path_len` is the number of non-self-issued CA certificates still
+    /// permitted below `issuer`. Returns the budget for the next issuer.
+    /// `is_trust_anchor` is true only for the root (`cabundle[0]`). RFC 5280
+    /// does not count the trust anchor against the budget.
     pub(super) fn check_ca_constraints(
         issuer: &Certificate,
         is_trust_anchor: bool,
@@ -444,7 +436,7 @@ IwLz3/Y=
             ));
         }
 
-        // If KeyUsage is asserted it must permit signing subordinate certs.
+        // If KeyUsage is present, it must permit signing subordinate certs.
         if let Some((_critical, key_usage)) = issuer
             .tbs_certificate
             .get::<KeyUsage>()
@@ -457,9 +449,9 @@ IwLz3/Y=
             }
         }
 
-        // Path length (RFC 5280 section 6.1.4 steps (l)/(m)). The trust anchor is not
-        // counted; every other (non-self-issued) CA consumes one unit of budget
-        // and may only tighten it via its own pathLenConstraint.
+        // Path length (RFC 5280 section 6.1.4 steps (l)/(m)). The trust anchor
+        // is not counted. Each other CA uses one unit of budget, and its
+        // pathLenConstraint can only make the budget smaller.
         let mut budget = max_path_len;
         if !is_trust_anchor {
             if budget == 0 {
@@ -475,9 +467,9 @@ IwLz3/Y=
         Ok(budget)
     }
 
-    /// RFC 8152 8.1 mandates the COSE ECDSA signature be the fixed-width raw
-    /// `r || s` concatenation, 96 bytes for P-384 / ES384. DER is rejected here,
-    /// unlike X.509 certificate signatures (see `verify_issuer_signed_subject`).
+    /// RFC 8152 8.1: the COSE ECDSA signature is raw fixed-width `r || s`,
+    /// 96 bytes for P-384 / ES384. Reject DER here. X.509 signatures use DER
+    /// (see `verify_issuer_signed_subject`).
     pub(super) fn parse_cose_ecdsa_signature(sig_bytes: &[u8]) -> Result<Signature> {
         if sig_bytes.len() != 96 {
             return Err(VerifyError::Attestation(format!(
@@ -489,12 +481,11 @@ IwLz3/Y=
             .map_err(|e| VerifyError::Attestation(format!("invalid COSE raw signature: {e}")))
     }
 
-    /// Assert the COSE_Sign1 protected header pins the signature algorithm to
-    /// ES384 (COSE alg `-35`), the algorithm AWS Nitro uses. Rejecting any
-    /// other value prevents a document from downgrading to a weaker or foreign
-    /// algorithm that the leaf key was not meant to be used with.
+    /// Require ES384 (COSE alg `-35`) in the COSE_Sign1 protected header.
+    /// AWS Nitro uses ES384. Any other value could downgrade to an algorithm
+    /// that the leaf key is not for.
     ///
-    /// `protected` is the raw CBOR-encoded protected header map (bstr content).
+    /// `protected` is the raw CBOR protected header map (bstr content).
     pub(super) fn verify_cose_alg_es384(protected: &[u8]) -> Result<()> {
         let header: ciborium::Value = ciborium::from_reader(protected)
             .map_err(|e| VerifyError::Attestation(format!("invalid COSE protected header: {e}")))?;
@@ -532,21 +523,14 @@ IwLz3/Y=
             .map_err(|e| VerifyError::Certificate(format!("invalid P-384 key: {e}")))
     }
 
-    /// Symmetric tolerance (seconds) applied to the certificate validity window
-    /// to absorb residual clock skew between the verifier and the AWS-issued
-    /// attestation certificate.
+    /// Clock-skew tolerance in seconds, on both sides of the certificate
+    /// validity window.
     ///
-    /// Nitro enclaves take their initial time from the hypervisor at boot and then
-    /// free-run without NTP, so a long-lived enclave can drift relative to a
-    /// freshly-booted peer; without any tolerance a clone/attestation exchange
-    /// between a drifted donor and a fresh requester fails with a spurious
-    /// "certificate not yet valid". The PRIMARY fix for that drift is now in the
-    /// enclave itself (`enclave::clocksync` disciplines CLOCK_REALTIME from the
-    /// hypervisor PTP clock every few minutes), so this tolerance is only a
-    /// secondary net for brief skew (e.g. the first seconds after boot, before the
-    /// first PTP sync, or a peer whose PTP sync is unavailable). Keep it small — a
-    /// wide window needlessly weakens the validity-freshness signal (replay is
-    /// already guarded by nonces, not by wall-clock).
+    /// Nitro enclaves get their time from the hypervisor at boot and have no
+    /// NTP, so clocks can drift. `enclave::clocksync` corrects CLOCK_REALTIME
+    /// from the hypervisor PTP clock. This tolerance covers short skew, for
+    /// example before the first PTP sync. Keep it small. Nonces, not the wall
+    /// clock, prevent replay.
     const CERT_CLOCK_SKEW_TOLERANCE_SECS: u64 = 60;
 
     fn verify_cert_validity(cert: &Certificate) -> Result<()> {
@@ -562,8 +546,8 @@ IwLz3/Y=
         check_cert_validity_window(now, not_before, not_after)
     }
 
-    /// Pure validity-window check with a symmetric clock-skew tolerance, split out
-    /// so it can be unit-tested without minting and signing a certificate.
+    /// Validity-window check with clock-skew tolerance. Separate, so tests do
+    /// not need a signed certificate.
     fn check_cert_validity_window(now: u64, not_before: u64, not_after: u64) -> Result<()> {
         if now.saturating_add(CERT_CLOCK_SKEW_TOLERANCE_SECS) < not_before {
             return Err(VerifyError::Certificate("certificate not yet valid".into()));
@@ -685,7 +669,7 @@ IwLz3/Y=
             let tagged = ciborium::Value::Tag(18, Box::new(arr));
             let tagged = CoseSign1::from_bytes(&encode(&tagged)).expect("tag-18 parses");
 
-            // Same fields whether wrapped or not - only the envelope differs.
+            // Same fields with or without the tag.
             assert_eq!(bare.protected, tagged.protected);
             assert_eq!(bare.payload, tagged.payload);
             assert_eq!(bare.signature, tagged.signature);
@@ -702,10 +686,9 @@ IwLz3/Y=
 
         // --- helpers -------------------------------------------------------
 
-        /// A base certificate to mutate. Neither `check_ca_constraints` nor the
-        /// end-entity KeyUsage gate inspects the signature, so swapping the
-        /// embedded root's extensions exercises the constraint logic without
-        /// minting a full signed chain.
+        /// A base certificate to change. The constraint checks do not read the
+        /// signature, so tests replace the root extensions and need no signed
+        /// chain.
         fn base_cert() -> Certificate {
             Certificate::from_der(root_cert_der()).expect("embedded root parses")
         }
@@ -753,8 +736,7 @@ IwLz3/Y=
 
         #[test]
         fn cert_validity_accepts_fresh_peer_within_skew_tolerance() {
-            // Verifier is behind the cert's not_before by less than the tolerance
-            // (the donor-drift / fresh-requester case that broke clone).
+            // The verifier clock is behind not_before by less than the tolerance.
             let not_before = 1_000;
             let now = not_before - (CERT_CLOCK_SKEW_TOLERANCE_SECS - 1);
             assert!(check_cert_validity_window(now, not_before, not_before + 10_000).is_ok());
@@ -785,7 +767,7 @@ IwLz3/Y=
 
         #[test]
         fn cert_validity_saturates_near_epoch_zero() {
-            // now near 0 must not underflow when tolerance is added.
+            // `now` near 0 must not underflow.
             assert!(check_cert_validity_window(0, 10, 10_000).is_ok());
         }
 
@@ -810,9 +792,8 @@ IwLz3/Y=
 
         #[test]
         fn cose_sig_rejects_der_encoding() {
-            // A full-size DER ECDSA-Sig-Value for P-384: SEQUENCE { INTEGER(48),
-            // INTEGER(48) } == 102 bytes. RFC 8152 requires raw r||s, so it must
-            // be rejected.
+            // A full-size P-384 DER ECDSA-Sig-Value: SEQUENCE { INTEGER(48),
+            // INTEGER(48) } is 102 bytes. RFC 8152 requires raw r||s.
             let integer = |bytes: &[u8]| {
                 let mut v = vec![0x02u8, bytes.len() as u8];
                 v.extend_from_slice(bytes);
@@ -881,8 +862,7 @@ IwLz3/Y=
 
         #[test]
         fn ca_non_ca_issuer_rejected() {
-            // BasicConstraints present but cA = FALSE: a non-CA
-            // cert must not be accepted as an issuer.
+            // BasicConstraints with cA = FALSE: a non-CA cert is not an issuer.
             let cert = cert_with_exts(vec![ext(&basic(false, None), false)]);
             assert!(matches!(
                 check_ca_constraints(&cert, false, 3).unwrap_err(),
@@ -905,7 +885,7 @@ IwLz3/Y=
 
         #[test]
         fn ca_without_keyusage_is_allowed() {
-            // KeyUsage is optional; its absence must not fail the usage gate.
+            // KeyUsage is optional. Without it, the check must pass.
             let cert = cert_with_exts(vec![ext(&basic(true, None), true)]);
             assert!(check_ca_constraints(&cert, false, 3).is_ok());
         }

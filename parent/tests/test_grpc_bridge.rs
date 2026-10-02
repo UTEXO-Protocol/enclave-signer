@@ -1,8 +1,7 @@
 //! Integration tests for the gRPC bridge (Parent Adapter -> Enclave).
 //!
-//! These tests start a mock enclave TCP server that speaks our wire protocol,
-//! then a real tonic gRPC server (Parent Adapter) pointing at it, and finally
-//! exercise the full path via a gRPC client.
+//! Each test starts a mock enclave TCP server on the wire protocol and a real
+//! tonic Parent Adapter that targets it. A gRPC client then runs the full path.
 
 use attestation_verify::AttestedPolicy;
 use std::collections::HashSet;
@@ -69,9 +68,9 @@ fn start_mock_enclave() -> u16 {
                             response: Some(enclave_response::Response::EvmSignature(
                                 enclave_proto::EvmSignatureResponse {
                                     signature: vec![0xCC; 65],
-                                    // Marker so the roundtrip test can assert the
-                                    // parent forwards the enclave-rewritten
-                                    // calldata (OpId binding).
+                                    // Marker: the roundtrip test checks that
+                                    // the parent returns the calldata from
+                                    // the enclave (OpId binding).
                                     call_data: vec![0xE0; 9],
                                 },
                             )),
@@ -141,7 +140,7 @@ fn start_mock_enclave() -> u16 {
                     )),
                 },
                 Some(enclave_request::Request::GetAttestedPublicKey(req)) => {
-                    // Build a fresh mock attestation doc binding the mock pubkey.
+                    // Build a mock attestation doc that binds the mock public key.
                     use sha2::Digest;
                     let public_keys = enclave_proto::PublicKeysResponse {
                         evm_address: vec![0xAA; 20],
@@ -204,9 +203,8 @@ fn start_mock_enclave() -> u16 {
                     }
                 }
                 Some(enclave_request::Request::SignRawDigest(req)) => {
-                    // Prove the parent forwarded the unsigned gas-tx preimage:
-                    // require it, and echo its first byte into the signature so
-                    // the test can assert what the enclave received.
+                    // Require the unsigned gas-tx preimage. Copy its first byte
+                    // into the signature, so the test sees what the enclave got.
                     if req.unsigned_tx.is_empty() {
                         EnclaveResponse {
                             response: Some(enclave_response::Response::Error(
@@ -386,9 +384,8 @@ async fn grpc_public_key_transaction_type() {
 
 #[tokio::test]
 async fn grpc_public_key_ccd_governance() {
-    // The governance pubkey must be reachable over plain PublicKey, with no
-    // attestation involved - AttestedPublicKey needs an NSM device, which the
-    // dev deployment (plain container, no /dev/nsm) does not have.
+    // Plain PublicKey must return the governance key without attestation.
+    // AttestedPublicKey needs an NSM device, and the dev container has none.
     let enclave_port = start_mock_enclave();
     let grpc_port = start_grpc_server(enclave_port).await;
 
@@ -415,8 +412,8 @@ async fn grpc_public_key_ccd_governance() {
 
 #[tokio::test]
 async fn grpc_public_key_rejects_unsupported_data_type() {
-    // Guard against the CCD_GOVERNANCE arm turning the match into a catch-all:
-    // data types with no pubkey of their own must still be rejected.
+    // The CCD_GOVERNANCE arm must not become a catch-all. Data types without
+    // their own public key must still fail.
     let enclave_port = start_mock_enclave();
     let grpc_port = start_grpc_server(enclave_port).await;
 
@@ -485,8 +482,8 @@ async fn grpc_sign_evm_roundtrip() {
 
     let resp = client.sign(req).await.unwrap().into_inner();
     assert_eq!(resp.signature.len(), 65, "EVM signature must be 65 bytes");
-    // The parent must forward the enclave-rewritten (OpId-bound) calldata back
-    // to the caller - the signature commits to it.
+    // The parent must return the enclave calldata (OpId-bound) to the caller.
+    // The signature commits to it.
     assert_eq!(
         resp.call_data,
         vec![0xE0; 9],
@@ -521,9 +518,9 @@ async fn grpc_sign_evm_gas_tx_forwards_unsigned_tx() {
         data: Some(sign_request::Data::EvmData(payload)),
     };
 
-    // The mock enclave echoes unsigned_tx[0] into every signature byte, so a
-    // signature of all-0x02 proves the parent forwarded the preimage to
-    // SignRawDigestRequest.unsigned_tx (and would have errored on an empty one).
+    // The mock enclave copies unsigned_tx[0] into every signature byte. An
+    // all-0x02 signature shows the parent sent the preimage in
+    // SignRawDigestRequest.unsigned_tx.
     let resp = client.sign(req).await.unwrap().into_inner();
     assert_eq!(
         resp.signature,
@@ -548,7 +545,7 @@ async fn grpc_sign_psbt_roundtrip() {
         rgb_asset_id: String::new(),
         consignment: vec![],
         consignment_hash: vec![],
-        // Plain PSBT roundtrip - no bridged mint, so no ancestors to prove.
+        // Plain PSBT roundtrip. There is no bridged mint, so no ancestors.
         mint_ancestors: vec![],
     };
 
@@ -563,8 +560,8 @@ async fn grpc_sign_psbt_roundtrip() {
 
 #[tokio::test]
 async fn grpc_sign_btc_roundtrip() {
-    // BTC_UTXO routes the EnrichedBtcPayload to a SignBtcRequest and returns a
-    // signed PSBT - the plain-BTC path is distinct from TRANSACTION/SignPsbt.
+    // BTC_UTXO sends the EnrichedBtcPayload as a SignBtcRequest and returns a
+    // signed PSBT. This path is separate from TRANSACTION.
     let enclave_port = start_mock_enclave();
     let grpc_port = start_grpc_server(enclave_port).await;
 
@@ -592,8 +589,7 @@ async fn grpc_sign_btc_roundtrip() {
 
 #[tokio::test]
 async fn grpc_btc_utxo_rejects_missing_payload() {
-    // BTC_UTXO with no BtcData in the oneof must be rejected at the boundary,
-    // not forwarded to the enclave.
+    // BTC_UTXO without BtcData must fail in the parent, not in the enclave.
     let enclave_port = start_mock_enclave();
     let grpc_port = start_grpc_server(enclave_port).await;
 
@@ -613,8 +609,8 @@ async fn grpc_btc_utxo_rejects_missing_payload() {
 
 #[tokio::test]
 async fn grpc_evm_passes_enriched_fields_through() {
-    // Verify the Parent Adapter correctly deserializes EnrichedEvmPayload
-    // and passes fields to the enclave.
+    // The Parent Adapter must decode EnrichedEvmPayload and pass its fields
+    // to the enclave.
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let enclave_port = listener.local_addr().unwrap().port();
 
@@ -701,9 +697,8 @@ async fn grpc_evm_passes_enriched_fields_through() {
 
 #[tokio::test]
 async fn grpc_evm_forwards_raw_consignment_bytes() {
-    // Regression: parent adapter previously hardcoded consignment: vec![] and
-    // forwarded only the hash. After the listener wire-format change (field 11
-    // is now raw bytes; new field 12 carries keccak256), both must round-trip.
+    // Regression: the parent must forward both the raw consignment (field 11)
+    // and its keccak256 hash (field 12).
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let enclave_port = listener.local_addr().unwrap().port();
 
@@ -819,7 +814,7 @@ async fn grpc_invalid_data_type_returns_error() {
         .await
         .unwrap();
 
-    // Use SIGNATURE data_type which we don't support
+    // SIGNATURE data_type is not supported.
     let req = SignRequest {
         common: Some(common(0, 84, DataType::Signature)),
         source: Some(rgb_source(0, 0, vec![], vec![], String::new())),
@@ -839,7 +834,7 @@ async fn grpc_missing_transaction_payload_returns_error() {
         .await
         .unwrap();
 
-    // Structured API requires one destination payload for transaction signing.
+    // Transaction signing requires one destination payload.
     let req = SignRequest {
         common: Some(common(0, 84, DataType::Transaction)),
         source: Some(rgb_source(0, 0, vec![], vec![], String::new())),
@@ -895,7 +890,7 @@ async fn grpc_get_last_saved_block_roundtrip() {
 
 #[tokio::test]
 async fn grpc_submit_headers_refused() {
-    // An enclave that must never see a connection.
+    // This enclave must not get a connection.
     let enclave = TcpListener::bind("127.0.0.1:0").unwrap();
     enclave.set_nonblocking(true).unwrap();
     let grpc_port = start_grpc_server(enclave.local_addr().unwrap().port()).await;
@@ -938,13 +933,13 @@ async fn grpc_attested_public_key_roundtrip_and_verify() {
         .unwrap()
         .into_inner();
 
-    // Wire-level public-key bundle is intact.
+    // The wire public-key bundle is intact.
     assert_eq!(resp.evm_address, vec![0xAA; 20]);
     assert_eq!(resp.evm_uncompressed_pub, vec![0xEE; 64]);
     assert!(!resp.attestation_doc.is_empty());
 
-    // The attestation document verifies, binds the EVM pubkey, and the
-    // commitment over the canonical bundle matches.
+    // The document verifies and binds the EVM public key. The commitment over
+    // the canonical bundle matches.
     let verified = attestation_verify::verify_mock_attestation(
         &resp.attestation_doc,
         &attestation_verify::ExpectedPcrs::zero(),

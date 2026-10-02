@@ -1,8 +1,8 @@
-//! Reading an rgbstd `Transfer` apart.
+//! Decodes an rgbstd `Transfer`.
 //!
-//! Decode-only. Nothing here decides whether a consignment is acceptable; it
-//! turns parser output into the shapes in [`super::types`] and fails closed on
-//! anything it cannot read exactly.
+//! Decode only. Nothing here accepts or rejects a consignment. It converts
+//! parser output into the shapes in [`super::types`]. It fails closed on data
+//! that it cannot read exactly.
 
 use super::bfa;
 use super::types::{OutputSeal, TransitionOutput, TransitionSummary};
@@ -18,23 +18,20 @@ use rgbstd::containers::Transfer;
 use rgbstd::schema::MetaType;
 use rgbstd::schema::TransitionType;
 
-/// Extract the rest of the witness-tx identity binding for the consignment's
-/// **last** transition out of the rgbstd `Transfer`: when that bundle embeds
-/// the full witness tx (`PubWitness::Tx`), its Bitcoin input prevouts.
-/// Consumed by the send-RGB PSBT cross-check alongside
-/// [`ValidatedConsignment::last_witness_txid`], which names the same bundle.
+/// Reads the witness-tx bind data for the **last** transition from the rgbstd
+/// `Transfer`: the input prevouts, if the bundle embeds the full witness tx
+/// (`PubWitness::Tx`). The send-RGB PSBT cross-check uses them with
+/// [`super::types::ValidatedConsignment::last_witness_txid`], which names the same bundle.
 ///
-/// Reads the same `transfer.bundles.iter().last()` bundle as
-/// [`read_last_transition_burned_asset`] and asserts its last known transition
-/// type equals `expected_type`, the type the flat parser reported. The two
-/// walks are independent traversals of the same data, so a disagreement is
-/// rejected fail-closed.
+/// It reads the same last bundle as [`read_last_transition_burned_asset`]. It
+/// asserts that the last known transition type equals `expected_type` from
+/// the flat parser. The two walks are independent, so a mismatch fails closed.
 ///
-/// Also returns the validated OpId of that transition, read from the rgbstd
-/// bundle rather than the flat parser.
+/// Also returns the validated OpId of that transition, from the rgbstd bundle,
+/// not the flat parser.
 ///
-/// Returns `(None, None)` only for a bundle-less transfer, which rgbstd
-/// rejects upstream.
+/// Returns `(None, None)` only for a transfer with no bundles, which rgbstd
+/// rejects.
 pub(super) fn read_last_transfer_witness(
     transfer: &Transfer,
     expected_type: u16,
@@ -43,10 +40,8 @@ pub(super) fn read_last_transfer_witness(
         return Ok((None, None));
     };
 
-    // OpId of the validated last transition, from the same bundle. rgbstd's
-    // `OpId` displays as lowercase hex of its 32-byte commitment hash, so
-    // hex-decode it back. Sourced from the validated object, not the flat
-    // parser.
+    // The rgbstd `OpId` displays as lowercase hex of its 32-byte commitment
+    // hash, so decode the hex.
     let mut op_id: Option<[u8; 32]> = None;
     if let Some(known) = last_bundle.bundle().known_transitions.iter().last() {
         let actual = known.transition.transition_type;
@@ -77,22 +72,21 @@ pub(super) fn read_last_transfer_witness(
     Ok((prevouts, op_id))
 }
 
-/// Binding data for the consignment's last transfer bundle:
-/// `(witness input prevouts, validated last-transition OpId)`. Both `Option`
-/// because a bundle-less transfer (rejected upstream by rgbstd) yields
-/// `(None, None)`. See [`read_last_transfer_witness`].
+/// Bind data for the last bundle:
+/// `(witness input prevouts, validated last-transition OpId)`. See
+/// [`read_last_transfer_witness`].
 type LastTransferBinding = (Option<Vec<bitcoin::OutPoint>>, Option<[u8; 32]>);
 
-/// Mint transitions - the ones that map 1:1 to an EVM lock record. BFA mints
-/// only through `TS_BRIDGE`; no other transition type creates units.
+/// Returns true for a mint transition, which maps 1:1 to an EVM lock record.
+/// In BFA, only `TS_BRIDGE` creates units.
 pub fn is_mint_transition(transition_type: u16) -> bool {
     transition_type == bfa::TS_BRIDGE
 }
 
-/// Parse the consignment with `rgb_consignment::parse` and pull out the
-/// flat transition summary (every op_id, the most recent transition's shape,
-/// and every transition grouped by the witness tx that commits it). Errors if
-/// the consignment isn't a Transfer or if any field fails to decode.
+/// Parses the consignment with `rgb_consignment::parse` and returns the flat
+/// transition summary: all op_ids, the mint op_ids, the last transition, and
+/// all transitions grouped by witness tx. Fails if the consignment is not a
+/// Transfer or if a field does not decode.
 #[allow(clippy::type_complexity)]
 pub(super) fn extract_transition_summary(
     consignment_bytes: &[u8],
@@ -107,8 +101,7 @@ pub(super) fn extract_transition_summary(
 
     let transfer = match info {
         ConsignmentInfo::Transfer(t) => t,
-        // A Contract / Kit cannot authorise an EVM action. Rejected
-        // explicitly so a mistaken upload fails closed.
+        // A Contract or Kit cannot authorize an EVM action.
         ConsignmentInfo::Contract(_) => {
             return Err(EnclaveError::CrossCheck(
                 "consignment is a Contract, expected Transfer".into(),
@@ -128,9 +121,9 @@ pub(super) fn extract_transition_summary(
         .map(|t: &TransitionInfo| t.op_id.clone())
         .collect();
 
-    // The mint (BFA `TS_BRIDGE`) subset - these map 1:1 to EVM lock
-    // records (`fundsIn`). The `fundsOut` `fundsInIds[]` must each correspond
-    // to one of these (spec section 6).
+    // The mint (BFA `TS_BRIDGE`) subset. These map 1:1 to EVM lock records
+    // (`fundsIn`). Each `fundsOut` `fundsInIds[]` entry must match one
+    // (spec section 6).
     let mint_op_ids: Vec<String> = transfer
         .witnesses
         .iter()
@@ -139,9 +132,8 @@ pub(super) fn extract_transition_summary(
         .map(|t: &TransitionInfo| t.op_id.clone())
         .collect();
 
-    // Every transition, grouped by the witness tx that commits it. One tx can
-    // carry several, so reading only `last_transition` would leave the rest of
-    // the value it moves unbound. The PSBT cross-check binds the whole group.
+    // One tx can commit many transitions. A bind of only `last_transition`
+    // leaves the other value unbound, so the PSBT cross-check binds the group.
     let mut transitions_by_witness: Vec<(bitcoin::Txid, Vec<TransitionSummary>)> =
         Vec::with_capacity(transfer.witnesses.len());
     for w in transfer.witnesses.iter() {
@@ -151,8 +143,7 @@ pub(super) fn extract_transition_summary(
         transitions_by_witness.push((txid, summaries?));
     }
 
-    // Taken from the group rather than summarised a second time - it is the
-    // last witness's last transition either way.
+    // The last transition of the last witness, taken from the group.
     let last_transition = transitions_by_witness
         .last()
         .and_then(|(_, summaries)| summaries.last())
@@ -166,10 +157,10 @@ pub(super) fn extract_transition_summary(
     ))
 }
 
-/// Parse a display-order (big-endian) txid hex string into a `bitcoin::Txid`.
+/// Parses a display-order (big-endian) txid hex string into a `bitcoin::Txid`.
 ///
-/// The parser stringifies txids in display order while `bitcoin::Txid` stores
-/// them reversed, so the flip lives here rather than at each comparison site.
+/// The parser writes txids in display order, and `bitcoin::Txid` stores them
+/// reversed. The reversal is here, not at each comparison.
 pub(super) fn txid_from_display_hex(display_hex: &str) -> Result<bitcoin::Txid> {
     use bitcoin::hashes::Hash;
 
@@ -225,21 +216,19 @@ pub(super) fn transition_summary(t: &TransitionInfo) -> Result<TransitionSummary
         total_output_amount,
         asset_output_amount,
         outputs: outputs?,
-        // Filled by `read_last_transition_burned_asset` /
-        // `read_last_transition_burn_recipient` if the transition is a burn;
-        // the parser doesn't expose metadata so we leave these `None` here.
+        // The parser has no metadata. For a burn, the
+        // `read_last_transition_burn*` functions fill these later.
         burned_asset_amount: None,
         burn_recipient: None,
     })
 }
 
-/// Raw metadata value `meta_type` carries on the last witness bundle's last
-/// known transition, if any. The flat parser drops `Transition.metadata`, so
-/// the cross-checks that need it walk the rgbstd `Transfer` through here.
+/// Raw `meta_type` metadata value on the last known transition of the last
+/// bundle. The flat parser drops `Transition.metadata`, so read it from the
+/// rgbstd `Transfer`.
 ///
-/// `None` when the transfer has no bundle, that bundle no known transition, or
-/// the transition no value under that key - all three are "not declared" rather
-/// than errors, and each caller decides what a missing value means for it.
+/// `None` if there is no bundle, no known transition, or no value for the key.
+/// This means "not declared", not an error. Each caller decides what it means.
 pub(super) fn last_transition_meta(transfer: &Transfer, meta_type: u16) -> Option<&[u8]> {
     let known = transfer
         .bundles
@@ -258,12 +247,11 @@ pub(super) fn last_transition_meta(transfer: &Transfer, meta_type: u16) -> Optio
         .map(|(_, mv)| mv.as_unconfined().as_slice())
 }
 
-/// The BFA `MS_BURN_RECIPIENT` metadata on the last transition - the 32 bytes
-/// naming where the redemption is owed.
+/// The BFA `MS_BURN_RECIPIENT` metadata on the last transition: 32 bytes that
+/// name the redemption recipient.
 ///
-/// `Ok(None)` when the key is absent, and `Err` when the blob is not exactly
-/// 32 bytes, because a release must never be pointed at a truncated or padded
-/// address.
+/// `Ok(None)` if the key is absent. `Err` if the blob is not exactly 32 bytes,
+/// so a release never goes to a truncated or padded address.
 pub(super) fn read_last_transition_burn_recipient(transfer: &Transfer) -> Result<Option<Vec<u8>>> {
     let Some(raw) = last_transition_meta(transfer, bfa::MS_BURN_RECIPIENT) else {
         return Ok(None);
@@ -277,16 +265,16 @@ pub(super) fn read_last_transition_burn_recipient(transfer: &Transfer) -> Result
     Ok(Some(raw.to_vec()))
 }
 
-/// The BFA `MS_BURNED_ASSET` metadata on the last transition - the destroyed
-/// amount the unlock cross-check binds against.
+/// The BFA `MS_BURNED_ASSET` metadata on the last transition: the destroyed
+/// amount that the unlock cross-check binds.
 ///
 /// The value is a strict-encoded `rgbstd::Amount` (`u64`, 8 bytes,
-/// little-endian). Decoded manually rather than via
-/// `StrictDeserialize::from_strict_serialized`, to avoid threading the
-/// `rgb-strict-encoding`-as-`strict_encoding` rename through our deps.
+/// little-endian). Decoded by hand, not with
+/// `StrictDeserialize::from_strict_serialized`, to avoid the
+/// `rgb-strict-encoding`-as-`strict_encoding` rename in the dependencies.
 ///
-/// `Ok(None)` when the key is absent (which for a `TS_BURN` implies a schema
-/// mismatch), and `Err` when the blob is the wrong size for a `u64`.
+/// `Ok(None)` if the key is absent (for a `TS_BURN`, a schema mismatch).
+/// `Err` if the blob is not the size of a `u64`.
 pub(super) fn read_last_transition_burned_asset(transfer: &Transfer) -> Result<Option<u64>> {
     let Some(raw) = last_transition_meta(transfer, bfa::MS_BURNED_ASSET) else {
         return Ok(None);

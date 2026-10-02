@@ -1,9 +1,9 @@
 //! Key lifecycle requests: `InitializeKey`, `GetPublicKey`, and the attested
 //! variant.
 //!
-//! [`canonical_pubkey_bundle`] is the enclave half of a two-sided contract:
-//! the parent's `attest_verify.rs::canonical_bundle` must hash the same bytes
-//! in the same order, or every attestation check fails.
+//! [`canonical_pubkey_bundle`] is the enclave side of a two-sided contract.
+//! The parent `attest_verify.rs::canonical_bundle` must hash the same bytes in
+//! the same order. If not, all attestation checks fail.
 
 use super::context::ServerContext;
 use crate::config::BridgeConfig;
@@ -24,7 +24,7 @@ pub(super) fn handle_initialize(
         ));
     }
     if !req.mnemonic.is_empty() {
-        // Testing path: import from BIP-39 mnemonic phrase
+        // Test path: import a BIP-39 mnemonic.
         #[cfg(feature = "allow-seed-import")]
         {
             state.initialize_from_mnemonic(&req.mnemonic)?;
@@ -39,7 +39,7 @@ pub(super) fn handle_initialize(
     } else if req.seed.is_empty() {
         #[cfg(feature = "kms-persistence")]
         {
-            // The KMS values come with the launch.
+            // The KMS values come from the launch, so it must be set.
             ctx.launch()?;
             let deadline = _deadline
                 .checked_sub(crate::seed_persistence::RESPONSE_RESERVE)
@@ -51,7 +51,6 @@ pub(super) fn handle_initialize(
         }
         #[cfg(not(feature = "kms-persistence"))]
         {
-            // Builds without persistence generate from OS entropy.
             let mut entropy = [0u8; 32];
             getrandom::fill(&mut entropy)
                 .map_err(|e| EnclaveError::Internal(format!("entropy generation failed: {}", e)))?;
@@ -59,7 +58,7 @@ pub(super) fn handle_initialize(
             tracing::info!("key initialized from new mnemonic");
         }
     } else {
-        // Testing path: import raw seed
+        // Test path: import a raw seed.
         #[cfg(feature = "allow-seed-import")]
         {
             let seed: [u8; 64] = req.seed.try_into().map_err(|v: Vec<u8>| {
@@ -79,9 +78,9 @@ pub(super) fn handle_initialize(
         }
     }
 
-    // Donor-side cloning secret, delivered at runtime via the init message
-    // (never baked into the EIF, so it stays out of the PCRs). Only required
-    // for enclaves that will serve `GetClone`. Idempotent; empty = disabled.
+    // Donor cloning secret. It comes at runtime in the init message, not in the
+    // EIF, so it stays out of the PCRs. Only a `GetClone` donor needs it.
+    // Empty means disabled.
     if !req.cloning_secret.is_empty() {
         state.set_donor_cloning_secret(req.cloning_secret)?;
         tracing::info!("donor cloning secret configured from init request");
@@ -135,10 +134,9 @@ pub(super) fn handle_get_public_key(
     })
 }
 
-/// Single place that assembles a `PublicKeysResponse`, keeping the field order
-/// matching `canonical_pubkey_bundle`. A new field must be added to the bundle
-/// and to the verifier mirror in
-/// `parent/src/attest_verify.rs::canonical_bundle`.
+/// The only builder of `PublicKeysResponse`. Field order matches
+/// `canonical_pubkey_bundle`. Add each new field to the bundle and to the
+/// verifier mirror in `parent/src/attest_verify.rs::canonical_bundle`.
 pub(super) fn build_public_keys_response(
     keys: crate::keys::KeyInfo,
     cfg: &BridgeConfig,
@@ -162,10 +160,10 @@ pub(super) fn build_public_keys_response(
 
 /// Build the canonical bundle that the verifier hashes to check `user_data`.
 ///
-/// Length-prefixed (u32 BE) concatenation of every field in
-/// PublicKeysResponse, in proto field order. Strings are encoded as their
-/// UTF-8 bytes; `chain_id` as 8-byte big-endian (its length prefix is the
-/// constant 8). Order and field set MUST match the verifier - see
+/// Concatenation of all `PublicKeysResponse` fields in proto field order.
+/// Each field has a u32 BE length prefix. Strings use their UTF-8 bytes.
+/// `chain_id` is 8 bytes big-endian (length prefix 8).
+/// Order and field set MUST match the verifier. See
 /// `docs/pubkey-attestation.md` and `parent/src/attest_verify.rs::canonical_bundle`.
 fn canonical_pubkey_bundle(keys: &PublicKeysResponse) -> Vec<u8> {
     let chain_id_bytes = keys.chain_id.to_be_bytes();
@@ -238,17 +236,15 @@ pub(super) fn handle_get_attested_public_key(
         EnclaveError::InvalidRequest(format!("nonce must be 32 bytes, got {}", req.nonce.len()))
     })?;
 
-    // This endpoint attests over a caller-supplied nonce, so it can
-    // mint attestations for arbitrary nonces. Safe for replay accounting: the
-    // cloning handlers record a nonce only after a fully-authenticated
-    // handshake, so an oracle-minted nonce cannot exhaust the guard.
+    // This endpoint attests any caller nonce. This is safe for replay
+    // accounting: the cloning handlers record a nonce only after a fully
+    // authenticated handshake. Thus these nonces cannot fill the guard.
     let keys = ctx.state.get_keys()?;
     let public_keys = build_public_keys_response(keys, &ctx.bridge_config);
 
-    // The attestation `user_data` commits to BOTH the public-key bundle and the
-    // enclave's resolved security policy, so a verifier checks the
-    // whole posture as one value: sha256(pubkey_bundle || policy_commitment).
-    // The verifier mirror is `parent/src/attest_verify.rs::verify_attested_pubkey`.
+    // `user_data` = sha256(pubkey_bundle || policy_commitment). A verifier
+    // checks keys and policy as one value.
+    // Verifier mirror: `parent/src/attest_verify.rs::verify_attested_pubkey`.
     let mut preimage = canonical_pubkey_bundle(&public_keys);
     let attested_policy = ctx.launch()?.policy.commitment_bytes();
     preimage.extend_from_slice(&attested_policy);

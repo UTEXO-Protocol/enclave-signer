@@ -1,23 +1,15 @@
-//! Periodic enclave clock discipline from the hypervisor PTP source.
+//! Periodic sync of the enclave clock from the hypervisor PTP clock.
 //!
-//! Nitro enclaves read wall-clock time from the hypervisor ONCE at boot and then
-//! free-run with no NTP, drifting by ~1s/day (proportional to enclave load). A
-//! long-lived enclave therefore starts rejecting freshly-issued attestation certs
-//! as "certificate not yet valid" (the clone clock-skew bug, found 2026-08-26) and
-//! can also fail TLS handshakes to electrs/hub whose server certs then look
-//! not-yet-valid / expired. Widening the attestation validity tolerance
-//! (`attestation-verify`) only papers over ONE of those call sites; disciplining
-//! the clock fixes the root cause for all of them at once.
+//! A Nitro enclave reads wall-clock time once at boot and has no NTP. It drifts
+//! about 1 s/day. A drifted clock rejects new attestation and TLS certs as not
+//! yet valid or expired.
 //!
-//! Our enclave kernel is built with `CONFIG_PTP_1588_CLOCK_KVM=y`, so the KVM
-//! hypervisor (Nitro) exposes an accurate PTP clock at `/dev/ptp0` (backed by
-//! Amazon Time Sync on the host). We periodically read it and set CLOCK_REALTIME,
-//! keeping drift in the microsecond range. This mirrors AWS's own guidance and the
-//! approach documented by Evervault for the same Nitro clock-drift quirk.
+//! The enclave kernel has `CONFIG_PTP_1588_CLOCK_KVM=y`, so `/dev/ptp0` gives
+//! the host clock (Amazon Time Sync). This module copies it to CLOCK_REALTIME
+//! at an interval, as AWS recommends.
 //!
-//! FAIL-SOFT by design: if `/dev/ptp0` is absent or a read fails we log and keep
-//! running on the current clock — the enclave is never worse off than before, and
-//! the `attestation-verify` tolerance remains as a secondary safety net.
+//! Fail-soft: if the PTP read fails, the enclave logs and keeps its current
+//! clock. The `attestation-verify` tolerance is the second safety net.
 
 use std::fs::File;
 use std::os::unix::io::{AsRawFd, RawFd};
@@ -30,19 +22,17 @@ use nix::time::{clock_gettime, clock_settime, ClockId};
 /// Hypervisor PTP clock exposed to the enclave by the built-in `ptp_kvm` driver.
 const PTP_DEVICE: &str = "/dev/ptp0";
 
-/// How often to re-discipline the clock. Drift is ~1s/day, so 5 min keeps the
-/// worst-case error far below a second while costing one syscall pair per tick.
+/// Sync interval. At about 1 s/day of drift, 5 min keeps the error far below 1 s.
 const SYNC_INTERVAL: Duration = Duration::from_secs(300);
 
-/// Linux `FD_TO_CLOCKID(fd)` = `((~(clockid_t)fd) << 3) | CLOCKFD` with
-/// `CLOCKFD == 3`: turn an open PTP character-device fd into the dynamic POSIX
-/// clock id that `clock_gettime` understands. Pure arithmetic — unit-tested below.
+/// Linux `FD_TO_CLOCKID(fd)` = `((~(clockid_t)fd) << 3) | CLOCKFD`, with
+/// `CLOCKFD == 3`. Turns a PTP device fd into a dynamic POSIX clock id.
 fn fd_to_clockid(fd: RawFd) -> nix::libc::clockid_t {
     ((!(fd as nix::libc::clockid_t)) << 3) | 3
 }
 
-/// Read the hypervisor PTP clock and copy it onto CLOCK_REALTIME. Returns the
-/// applied offset in whole seconds (new − old) for logging.
+/// Copy the PTP clock to CLOCK_REALTIME. Returns the offset in whole seconds
+/// (new - old) for logging.
 fn sync_from_ptp() -> Result<i64, String> {
     let dev = File::open(PTP_DEVICE).map_err(|e| format!("open {PTP_DEVICE}: {e}"))?;
     let clockid = ClockId::from_raw(fd_to_clockid(dev.as_raw_fd()));
@@ -52,8 +42,8 @@ fn sync_from_ptp() -> Result<i64, String> {
         clock_gettime(ClockId::CLOCK_REALTIME).map_err(|e| format!("read CLOCK_REALTIME: {e}"))?;
     clock_settime(ClockId::CLOCK_REALTIME, host).map_err(|e| format!("set CLOCK_REALTIME: {e}"))?;
 
-    // Keep `dev` (and therefore the dynamic clock fd) alive until AFTER the PTP
-    // read above — dropping it earlier would close the fd and invalidate `clockid`.
+    // Keep `dev` open until after the PTP read: closing the fd makes `clockid`
+    // invalid.
     drop(dev);
     Ok(host.num_seconds() - before.num_seconds())
 }
@@ -79,8 +69,8 @@ fn run() {
     }
 }
 
-/// Start the background clock-discipline thread. Non-blocking; a spawn failure is
-/// logged and ignored (the enclave keeps running on its boot clock).
+/// Start the background clock-sync thread. A spawn failure is logged and
+/// ignored.
 pub fn spawn() {
     match thread::Builder::new().name("clock-sync".into()).spawn(run) {
         Ok(_) => tracing::info!(
@@ -105,7 +95,6 @@ mod tests {
         assert_eq!(fd_to_clockid(0), -5);
         assert_eq!(fd_to_clockid(3), -29);
         assert_eq!(fd_to_clockid(5), -45);
-        // General identity: ((~fd) << 3) | 3 for arbitrary fd.
         for fd in 0..64 {
             assert_eq!(fd_to_clockid(fd), ((!fd) << 3) | 3);
         }

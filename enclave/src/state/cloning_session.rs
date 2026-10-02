@@ -6,22 +6,20 @@ use std::time::{Duration, Instant};
 use crate::cloning::CloneSession;
 
 /// Time limit for a Cloning session. (F03-AF-01)
-/// An expired session can be replaced without a restart.
+/// A new initiation can replace an expired session without a restart.
+/// The state refuses replacement of a valid session.
 /// The requester has no seed in this state.
-/// Reject replacement while the session is still valid.
 pub(super) const CLONING_SESSION_TTL: Duration = Duration::from_secs(5 * 60);
 
-/// All of the per-handshake state the requester must hold between
-/// receiving `InitiateCloning` and receiving `SetClone`.
+/// Requester state between `InitiateCloning` and `SetClone`.
 ///
-/// The X25519 secret inside `session` is zeroized on drop.
+/// The X25519 secret in `session` is zeroized on drop.
 pub struct CloningSession {
-    /// Ephemeral X25519 keypair we advertised in `InitiateCloningResponse`.
+    /// Ephemeral X25519 keypair sent in `InitiateCloningResponse`.
     pub session: CloneSession,
-    /// 20-byte EVM address of the donor we intend to clone from.
+    /// 20-byte EVM address of the donor to clone from.
     pub cluster_public_key: [u8; 20],
     /// Monotonic start time for session expiry. (F03-AF-01)
-    /// Wall-clock changes do not affect it.
     created_at: Instant,
 }
 
@@ -43,7 +41,7 @@ impl CloningSession {
         }
     }
 
-    /// Return true when the session reaches [`CLONING_SESSION_TTL`].
+    /// True when the session age is >= [`CLONING_SESSION_TTL`].
     pub(super) fn is_expired(&self, now: Instant) -> bool {
         now.saturating_duration_since(self.created_at) >= CLONING_SESSION_TTL
     }

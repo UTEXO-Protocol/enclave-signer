@@ -20,8 +20,8 @@ use utexo_bridge_parent::enclave_proto::{
 )]
 struct Cli {
     /// Enclave address: `host:port` (TCP, dev builds) or `vsock://<cid>:<port>`
-    /// (Nitro, vsock builds - e.g. `vsock://18:5000`). On a vsock build you MUST
-    /// pass a `vsock://` addr or set ENCLAVE_VSOCK_CID; it will not default to CID 16.
+    /// (Nitro vsock builds, for example `vsock://18:5000`). A vsock build needs a
+    /// `vsock://` address or ENCLAVE_VSOCK_CID. It does not default to CID 16.
     #[arg(long, default_value = "127.0.0.1:5000")]
     addr: String,
 
@@ -33,10 +33,10 @@ struct Cli {
 enum Command {
     /// Initialize keys (generate new mnemonic in the enclave)
     Init {
-        /// Donor cloning secret, delivered at runtime (not baked into the EIF).
-        /// Set only on enclaves that should serve clone requests.
-        /// DEPRECATED on the command line: visible in `ps` / shell history / SSM
-        /// logs (F03-AF-06). Prefer --cloning-secret-file or UTEXO_CLONING_SECRET.
+        /// Donor cloning secret, sent at runtime (not in the EIF). Set it only on
+        /// enclaves that serve clone requests. Deprecated on the command line:
+        /// `ps`, shell history and SSM logs show it (F03-AF-06). Use
+        /// --cloning-secret-file or UTEXO_CLONING_SECRET.
         #[arg(long)]
         cloning_secret: Option<String>,
         /// Read the cloning secret from this file instead of argv (F03-AF-06).
@@ -122,15 +122,15 @@ enum Command {
         #[arg(long, default_value = "")]
         consignment: String,
     },
-    /// Get the enclave's current SPV chain tip (height + hash).
-    /// The parent's header sync reads it to find where to resume.
+    /// Get the enclave SPV chain tip (height and hash).
+    /// The parent header sync reads it to find where to continue.
     GetLastSavedBlock,
-    /// Ask the enclave whether it is ready to sign: endpoints set, key loaded
-    /// and SPV chain caught up. Same answer the parent's `GET /health` serves
-    /// to deploy. Exits 0 when ready, 1 when not.
+    /// Ask the enclave if it is ready to sign: endpoints set, key loaded and
+    /// SPV chain current. The parent `GET /health` gives the same answer.
+    /// Exits 0 when ready, 1 when not.
     Health,
     /// Set the chain endpoints and the KMS values once, after launch. The
-    /// enclave refuses a second set. Each flag falls back to its environment
+    /// enclave rejects a second call. Each flag falls back to its environment
     /// variable. A value that is not given is sent empty.
     SetEndpoints {
         /// `ssl://host:port` or `tcp://host:port`. Env: ELECTRUM_URL.
@@ -160,23 +160,24 @@ enum Command {
         kms_expected_evm_address: Option<String>,
     },
     /// Clone the signing identity from a donor enclave into the local
-    /// (requester) enclave. Runs the full three-step handshake:
-    ///   1. InitiateCloning on the local enclave (vsock).
-    ///   2. gRPC Clone to the donor's parent adapter (relayed to its GetClone).
-    ///   3. SetClone on the local enclave (vsock), then verify the EVM address
-    ///      now matches the donor's cluster identity.
+    /// (requester) enclave. Steps:
+    ///   1. InitiateCloning on the local enclave.
+    ///   2. gRPC Clone to the donor parent (sent on to its GetClone).
+    ///   3. Read the donor identity with AttestedPublicKey.
+    ///   4. SetClone on the local enclave, then check that the identity
+    ///      matches the donor.
     Clone {
-        /// Pre-shared operator cloning secret (must match the donor enclave's
-        /// baked UTEXO_CLONING_SECRET).
-        /// DEPRECATED on the command line: visible in `ps` / shell history / SSM
-        /// logs (F03-AF-06). Prefer --cloning-secret-file or UTEXO_CLONING_SECRET.
+        /// Pre-shared operator cloning secret. Must match the donor enclave
+        /// cloning secret. Deprecated on the command line: `ps`, shell history
+        /// and SSM logs show it (F03-AF-06). Use --cloning-secret-file or
+        /// UTEXO_CLONING_SECRET.
         #[arg(long)]
         cloning_secret: Option<String>,
         /// Read the cloning secret from this file instead of argv (F03-AF-06).
         /// Takes precedence over UTEXO_CLONING_SECRET and --cloning-secret.
         #[arg(long)]
         cloning_secret_file: Option<PathBuf>,
-        /// Donor parent-adapter gRPC endpoint, e.g. http://10.0.1.23:50051
+        /// Donor parent gRPC endpoint, for example https://10.0.1.23:50051
         #[arg(long)]
         donor_grpc: String,
         /// Donor cluster identity: 20-byte EVM address, hex (with or without 0x).
@@ -620,8 +621,8 @@ fn main() {
                 Ok(completion) => {
                     println!("CLONE_RESULT_V1={}", completion.outcome.as_str());
                     eprintln!("{}", completion.detail);
-                    // This is a one-shot command. Exit also terminates any I/O
-                    // worker still blocked after the reconciliation deadline.
+                    // One-shot command. Exit also stops any I/O worker that
+                    // is still blocked after the reconciliation deadline.
                     process::exit(if completion.outcome.is_success() {
                         0
                     } else {
@@ -639,10 +640,10 @@ fn main() {
     }
 }
 
-/// Read the secret from file, environment, or the deprecated argument, in that order.
-/// Command-line arguments can expose the secret in process lists and logs. (F03-AF-06)
-/// Return None if all sources are absent.
-/// Init without a donor secret permits this result.
+/// Read the secret from the file, the environment, or the deprecated argument,
+/// in that order. Arguments can show the secret in process lists and logs.
+/// (F03-AF-06) Return `None` if no source is set; Init without a donor secret
+/// accepts that.
 fn resolve_cloning_secret(
     arg: Option<String>,
     file: Option<PathBuf>,
@@ -677,9 +678,9 @@ fn resolve_cloning_secret(
     Ok(None)
 }
 
-/// Drive the donor->requester cloning handshake. `client` targets the local
-/// (requester) enclave over vsock; the donor enclave is reached through its
-/// parent-adapter gRPC endpoint over TCP (cross-host within the VPC).
+/// Run the donor->requester cloning handshake. `client` targets the local
+/// (requester) enclave. The donor enclave is reached through its parent gRPC
+/// endpoint.
 fn run_clone(
     client: &EnclaveClient,
     cloning_secret: &str,
@@ -708,7 +709,7 @@ fn run_clone(
     );
 
     println!("[2/4] Clone via donor parent gRPC at {donor_grpc} ...");
-    // Bound donor calls before SetClone. Completion and read-only
+    // Limit donor calls before SetClone. Completion and read-only
     // reconciliation have their own caller deadline (F03-AF-05).
     let rt = tokio::runtime::Runtime::new()?;
     let clone_resp = rt.block_on(async {
@@ -720,10 +721,8 @@ fn run_clone(
             cluster_public_key: donor_addr.clone(),
             cloning_digest: init.cloning_digest,
         };
-        // Disambiguate the generated RPC `clone(&mut self, req)` from
-        // `Clone::clone(&self)`: autoref tries `&self` before `&mut self`, so
-        // `grpc.clone(req)` would wrongly resolve to the derive. Call the
-        // inherent method via path syntax (inherent wins over the trait).
+        // `grpc.clone(req)` resolves to `Clone::clone(&self)`, because
+        // autoref tries `&self` first. Path syntax calls the generated RPC.
         let resp = ParentServiceClient::clone(&mut grpc, req).await?;
         Ok::<_, Box<dyn std::error::Error>>(resp.into_inner())
     })?;
@@ -732,8 +731,8 @@ fn run_clone(
         hex::encode(&clone_resp.donor_pubkey)
     );
 
-    // Fetch the comparison bundle BEFORE mutation: donor outages must not
-    // extend reconciliation after the requester has committed.
+    // Get the comparison bundle before SetClone. A donor outage must not
+    // extend reconciliation after the requester commits.
     println!("[3/4] Fetching donor identity before SetClone...");
     let mut nonce = [0u8; 32];
     rand::thread_rng().fill_bytes(&mut nonce);

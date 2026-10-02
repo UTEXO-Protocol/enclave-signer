@@ -1,10 +1,8 @@
-//! True end-to-end test for the `attest-verify` flow.
+//! End-to-end test for the `attest-verify` flow.
 //!
-//! Spins up the real enclave server in-process, the real parent gRPC server
-//! pointing at it, and drives the real `attest-verify` library function against
-//! the full stack. No hand-built mock attestations and no duplicated check
-//! logic, so this covers everything the CLI does except argument parsing and
-//! output formatting.
+//! Starts the real enclave server and the real parent gRPC server in-process.
+//! Then runs the `attest-verify` library function against them. It covers all
+//! CLI behavior except argument parsing and output formatting.
 
 use std::net::TcpListener;
 use std::sync::Arc;
@@ -27,9 +25,8 @@ use utexo_bridge_parent::grpc_server::{EnclaveTarget, ParentAdapterService};
 const TEST_MNEMONIC: &str =
     "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
 
-/// Start a real enclave TCP server on a random port. Initializes keys
-/// from the canonical BIP-39 test mnemonic so the EVM address is
-/// deterministic across test runs. Returns the port.
+/// Start a real enclave TCP server on a random port and return the port.
+/// Keys come from the BIP-39 test mnemonic, so the EVM address is stable.
 fn start_real_enclave() -> u16 {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
@@ -93,15 +90,13 @@ async fn e2e_attest_verify_succeeds_against_live_stack() {
         &format!("http://127.0.0.1:{grpc_port}"),
         attestation_verify::ExpectedPcrs::zero(),
         VerifyMode::Mock,
-        // The in-process enclave is a debug/mock build => Development posture.
+        // The in-process enclave is a mock build, so its posture is Development.
         ExpectedPolicy::Development,
     )
     .await
     .expect("end-to-end verification succeeds");
 
-    // EVM address from BIP-39 test vector "abandon abandon ... about" with
-    // the project's BIP-44 derivation. We don't hardcode the bytes -
-    // we just assert the structure is correct.
+    // Check the structure only. The test does not hardcode key bytes.
     assert_eq!(result.response.evm_address.len(), 20);
     assert_eq!(result.response.evm_uncompressed_pub.len(), 64);
     assert_eq!(result.response.btc_compressed_pub.len(), 33);
@@ -116,11 +111,10 @@ async fn e2e_attest_verify_succeeds_against_live_stack() {
         result.response.evm_uncompressed_pub
     );
 
-    // The bundle commitment is non-zero and matches what verify_attested_pubkey
-    // checked against the NSM-bound `user_data`.
+    // verify_attested_pubkey checked this commitment against `user_data`.
     assert_ne!(result.bundle_commitment, [0u8; 32]);
 
-    // Nonce was a fresh 32 bytes and was echoed back in the doc.
+    // The document returns the fresh 32-byte nonce.
     assert_eq!(result.verified.nonce.len(), 32);
 }
 
@@ -129,8 +123,8 @@ async fn e2e_attest_verify_fails_on_pcr_mismatch() {
     let enclave_port = start_real_enclave();
     let grpc_port = start_real_parent_grpc(enclave_port).await;
 
-    // Mock enclaves report all-zero PCRs; pass non-zero expected PCRs to
-    // simulate "operator passed wrong/stale PCRs to the verifier".
+    // Mock enclaves report all-zero PCRs. Non-zero expected PCRs simulate
+    // wrong or old operator PCRs.
     let wrong_pcrs = attestation_verify::ExpectedPcrs::new([0xAA; 48], [0u8; 48], [0u8; 48]);
 
     let err = verify_attested_pubkey(
@@ -151,17 +145,15 @@ async fn e2e_attest_verify_fails_on_pcr_mismatch() {
 
 #[tokio::test]
 async fn e2e_attest_verify_fails_on_real_path_against_mock_enclave() {
-    // Mock enclave produces a raw-CBOR doc, not a COSE_Sign1. The real
-    // verify path expects COSE_Sign1, so it must reject the doc - proving
-    // that --mock and the real path are not interchangeable, which is the
-    // entire safety property of the mode flag.
+    // The mock enclave makes a raw-CBOR doc, not COSE_Sign1. The real path
+    // must reject it, so --mock and the real path cannot replace each other.
     let enclave_port = start_real_enclave();
     let grpc_port = start_real_parent_grpc(enclave_port).await;
 
     let err = verify_attested_pubkey(
         &format!("http://127.0.0.1:{grpc_port}"),
         attestation_verify::ExpectedPcrs::zero(),
-        VerifyMode::Real, // <- real path against mock doc
+        VerifyMode::Real, // Real path against a mock doc.
         ExpectedPolicy::Development,
     )
     .await
@@ -198,10 +190,8 @@ async fn e2e_attest_verify_fails_on_unreachable_endpoint() {
 
 #[tokio::test]
 async fn e2e_attest_verify_fails_on_policy_mismatch() {
-    // The in-process enclave is a debug/mock build, so it attests the
-    // `Development` posture. A verifier expecting a production enclave must
-    // reject it, because the committed policy differs and the user_data
-    // commitment no longer matches.
+    // The in-process mock enclave attests the `Development` posture. A
+    // verifier that expects production must reject the committed policy.
     let enclave_port = start_real_enclave();
     let grpc_port = start_real_parent_grpc(enclave_port).await;
 
@@ -240,11 +230,11 @@ async fn e2e_attest_verify_fails_on_policy_mismatch() {
     );
 }
 
-/// The parent sets the endpoints once, after launch. Before the set the
+/// The parent sets the endpoints once, after launch. Before that, the
 /// enclave attests nothing and opens no chain connection.
 #[tokio::test]
 async fn e2e_endpoints_are_set_once_at_launch() {
-    // Stands in for Electrum. Nothing may connect to it.
+    // Fake Electrum. Nothing must connect to it.
     let electrum = TcpListener::bind("127.0.0.1:0").unwrap();
     electrum.set_nonblocking(true).unwrap();
     let electrum_port = electrum.local_addr().unwrap().port();

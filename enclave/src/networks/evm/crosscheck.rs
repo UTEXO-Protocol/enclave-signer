@@ -1,10 +1,7 @@
-//! RGB->EVM `fundsOut` cross-checks: bind the calldata the enclave signs to the
-//! consignment it validated. All logic here is `rgb-validation`-gated (the
-//! module is only compiled then) because every check reads a
-//! [`ValidatedConsignment`]; SPV builds additionally run the BtcRelay agreement
-//! check ([`verify_btc_relay_agreement`]).
-//!
-//! The helpers operate on `EvmDestination.call_data` bytes.
+//! RGB -> EVM `fundsOut` cross-checks: they bind the signed calldata to the
+//! validated consignment. The module compiles only with `rgb-validation`,
+//! because each check reads a [`ValidatedConsignment`]. SPV builds also run
+//! the BtcRelay agreement check ([`verify_btc_relay_agreement`]).
 
 use crate::config::BtcRelayMode;
 use crate::error::{EnclaveError, Result};
@@ -15,14 +12,9 @@ use crate::networks::rgb::spv_crosscheck::ChainPins;
 use crate::networks::rgb::validation::ValidatedConsignment;
 use crate::proto::MerkleProofEntry;
 
-// Calldata is decoded via `sol!` ([`decode_funds_out_params`]), not at
-// hard-coded byte offsets: the `FundsOutParams` tuple shifts every field by one
-// head pointer word, so the old constants would be 32 bytes off.
-
-/// Defense-in-depth for the RGB->EVM `fundsOut` direction:
-/// every consignment witness tx must be mined. rgbstd's per-witness ordinal map
-/// (otherwise discarded) is surfaced as `non_mined_witness_txids`; reject here
-/// so confirmation does not rest on the SPV header chain alone.
+/// Defense-in-depth for RGB -> EVM `fundsOut`: each consignment witness tx must
+/// be mined. `non_mined_witness_txids` comes from the rgbstd per-witness
+/// ordinal map. Thus confirmation does not rest on the SPV header chain alone.
 pub fn assert_witnesses_confirmed(validated: &ValidatedConsignment) -> Result<()> {
     if !validated.non_mined_witness_txids.is_empty() {
         let list: Vec<String> = validated
@@ -40,21 +32,20 @@ pub fn assert_witnesses_confirmed(validated: &ValidatedConsignment) -> Result<()
     Ok(())
 }
 
-/// Amount cross-check for the `fundsOut` direction. Binds the release `amount`
-/// to the consignment's actual asset value:
+/// Amount cross-check for `fundsOut`. Binds the release `amount` to the
+/// consignment asset value:
 ///
-///   1. The consignment's most recent transition must be the type this build's
-///      RGB flow accepts on a withdrawal - a BFA `Transfer` under `rgb-swap`,
-///      a BFA `Burn` under `rgb-mint-burn`.
-///   2. The amount that transition proves left the source must cover the
-///      EVM-side release `amount`.
+///   1. The last transition must be the type that this build's RGB flow
+///      accepts on a withdrawal: a BFA `Transfer` under `rgb-swap`, a BFA
+///      `Burn` under `rgb-mint-burn`.
+///   2. The amount that transition moves out of the source must cover the
+///      EVM release `amount`.
 ///
-/// Both legs come from [`crate::networks::rgb::flow::funds_out_source_amount`],
-/// the same function the route proof is built from, so the two cannot disagree
-/// about which transition authorized the release.
+/// Both come from [`crate::networks::rgb::flow::funds_out_source_amount`],
+/// which also builds the route proof. Thus the two agree on the transition.
 ///
-/// Takes the decoded intent, which also replaces the old selector
-/// guard: `FundsOutParams` only exists after a successful `fundsOut` decode.
+/// `FundsOutParams` exists only after a successful `fundsOut` decode, so no
+/// selector check is necessary.
 pub fn validate_funds_out_amount(
     params: &FundsOutParams,
     validated: &ValidatedConsignment,
@@ -66,8 +57,8 @@ pub fn validate_funds_out_amount(
             "fundsOut requires a consignment with at least one transition".into(),
         )
     })?;
-    // The consignment, not the listener-supplied `calldata_amount`, is the
-    // authority on how much RGB moved.
+    // The consignment, not the listener `calldata_amount`, is the authority
+    // on the RGB amount.
     let source_amount = flow::funds_out_source_amount(last)?;
 
     let calldata_amount: u64 = params
@@ -78,20 +69,16 @@ pub fn validate_funds_out_amount(
     flow::assert_funds_out_amount(source_amount, calldata_amount)
 }
 
-/// Redemption-side payout bind for the `fundsOut` burn flow: the target the
-/// burner committed to (`MS_BURN_RECIPIENT`) must equal the calldata
-/// `recipient`.
+/// Payout bind for the `fundsOut` burn flow: the burner's target
+/// (`MS_BURN_RECIPIENT`) must equal the calldata `recipient`.
 ///
-/// This is what makes a redemption unforgeable. Those 32 bytes sit inside the
-/// burn operation, so they are covered by its OpId and signed by whoever spent
-/// the burned units; binding them here means a release cannot be redirected by
-/// anyone who merely holds a copy of the consignment.
+/// This makes a redemption unforgeable. The 32 bytes are in the burn
+/// operation, so its OpId covers them and the spender of the burned units signs
+/// them. A holder of a consignment copy cannot redirect the release.
 ///
-/// The shape and amount halves of the burn rule are NOT repeated here.
-/// [`validate_funds_out_amount`] runs first and, under `rgb-mint-burn`, its
-/// [`crate::networks::rgb::flow::funds_out_source_amount`] already rejects
-/// anything that is not a `Burn` covering the released amount. So a caller must
-/// run that first - this function assumes it did.
+/// This does not check the burn shape or amount. The caller must run
+/// [`validate_funds_out_amount`] first. Under `rgb-mint-burn`, it rejects
+/// anything that is not a `Burn` that covers the released amount.
 #[cfg(feature = "rgb-mint-burn")]
 pub fn validate_funds_out_burn_recipient(
     params: &FundsOutParams,
@@ -110,10 +97,9 @@ pub fn validate_funds_out_burn_recipient(
                 .into(),
         )
     })?;
-    // 32 bytes holding a 20-byte EVM address in the low half, ABI-style. The
-    // high 12 must be zero: a non-zero prefix means the burner committed to
-    // something that is not this address, and silently truncating it would pay
-    // out to a target nobody signed.
+    // 32 bytes with a 20-byte EVM address in the low bytes, ABI-style. The
+    // high 12 bytes must be zero. Truncation would pay a target that nobody
+    // signed.
     if recipient.len() != 32 || recipient[..12] != [0u8; 12] {
         return Err(EnclaveError::CrossCheck(format!(
             "MS_BURN_RECIPIENT is not a left-padded EVM address: 0x{}",
@@ -132,18 +118,17 @@ pub fn validate_funds_out_burn_recipient(
 }
 
 /// Source-burn bind (bridge PR #152): `sourceBurnTxId` must be the RGB OpId of
-/// the transition this release settles - the consignment's last transition,
-/// the one [`validate_funds_out_amount`] reads the released amount from.
+/// the settled transition. That is the last transition, which
+/// [`validate_funds_out_amount`] reads.
 ///
-/// On-chain, `sourceBurnTxId` is the only `burnId` input that says WHICH burn
-/// is settled: `Bridge.fundsOut` and `rebalanceLiquidity` fold it into the
-/// shared `BURN_TYPEHASH` key and reject zero, but cannot check it against
-/// anything - the field is attested by the enclave. A backend that put a fresh
-/// id in this slot would derive a fresh `burnId` for a burn already paid, so
-/// the bind here is what makes one validated burn map to one id.
+/// On chain, `sourceBurnTxId` is the only `burnId` input that identifies the
+/// burn. `Bridge.fundsOut` and `rebalanceLiquidity` hash it into the
+/// `BURN_TYPEHASH` key and reject zero, but cannot verify it. The enclave
+/// attests it. A new id would give a paid burn a new `burnId`. This bind maps
+/// one validated burn to one id.
 ///
-/// `op_id` is the parser's 64-char hex form of the 32-byte OpId; the calldata
-/// word must equal those bytes exactly.
+/// `op_id` is the 64-char hex form of the 32-byte OpId. The calldata word must
+/// equal those bytes.
 pub fn validate_funds_out_source_burn_tx_id(
     params: &FundsOutParams,
     validated: &ValidatedConsignment,
@@ -157,8 +142,8 @@ pub fn validate_funds_out_source_burn_tx_id(
     let expected = decode_op_id_to_bytes32(&last.op_id)?;
     let cited: [u8; 32] = params.sourceBurnTxId.0;
 
-    // The Bridge rejects zero on its own (`ZeroSourceBurnTxId`); refusing here
-    // keeps the enclave from attesting an intent that can never settle.
+    // The Bridge also rejects zero (`ZeroSourceBurnTxId`). Refuse here, so the
+    // enclave does not attest an intent that cannot settle.
     if cited == [0u8; 32] {
         return Err(EnclaveError::CrossCheck(
             "fundsOut sourceBurnTxId is zero: the calldata must carry the RGB OpId of the \
@@ -177,9 +162,8 @@ pub fn validate_funds_out_source_burn_tx_id(
     Ok(())
 }
 
-/// Decode a `TransitionSummary::op_id` (64 hex chars, optional `0x`) to the
-/// 32-byte word the calldata carries. A malformed id is an internal
-/// inconsistency in the validated consignment, so refuse rather than guess.
+/// Decodes a `TransitionSummary::op_id` (64 hex chars, optional `0x`) to the
+/// 32-byte calldata word. A malformed id is an internal error, so refuse.
 fn decode_op_id_to_bytes32(op_id: &str) -> Result<[u8; 32]> {
     let normalized = op_id.strip_prefix("0x").unwrap_or(op_id);
     let bytes = hex::decode(normalized).map_err(|e| {
@@ -199,18 +183,16 @@ fn decode_op_id_to_bytes32(op_id: &str) -> Result<[u8; 32]> {
 /// the deposits behind the burn's mint ancestry.
 ///
 /// `RgbSettlementModule.beforeFundsOut` decodes `settlementData` as
-/// `abi.encode(bytes32[] operationIds, uint256[] amounts)` and checks each
+/// `abi.encode(bytes32[] operationIds, uint256[] amounts)`. It checks each
 /// pair against the `(operationId, netAmount)` it recorded at `FundsIn`. It
-/// does not know which deposits a given burn descends from; the enclave does,
-/// because it verified every ancestry lock's receipt itself
-/// ([`crate::networks::evm::events::verify_rgb_funds_in`]). Requiring the
-/// cited set to equal that ancestry, pair for pair, ties the release to the
-/// burn: a second release of the same burn cannot cite other deposits to earn
-/// a fresh `burnId`.
+/// does not know the deposits behind a burn. The enclave knows, because it
+/// verified each ancestry lock receipt
+/// ([`crate::networks::evm::events::verify_rgb_funds_in`]). The cited set must
+/// equal that ancestry, pair for pair. Thus a second release of the same burn
+/// cannot cite other deposits to get a new `burnId`.
 ///
-/// Set equality, order-insensitive, no duplicates, canonical encoding. An
-/// empty lock set refuses: in this build every signable asset is bridged, so a
-/// burn with no verified deposit behind it settles nothing.
+/// Set equality, any order, no duplicates, canonical encoding. An empty lock
+/// set refuses: each signable asset is bridged, so such a burn settles nothing.
 #[cfg(feature = "bfa-mint")]
 pub fn validate_funds_out_settlement(
     params: &FundsOutParams,
@@ -286,40 +268,40 @@ struct ProofBlock {
     commitment: [u8; 32],
 }
 
-/// BtcRelay agreement + consignment source-block bind (spec section 13,
-/// #57/#122). Before signing a `fundsOut`:
+/// BtcRelay agreement and consignment source-block bind (spec section 13,
+/// #57/#122). Before a `fundsOut` is signed:
 ///
-/// 1. find the block anchoring the consignment's last witness tx from its SPV
-///    Merkle proof, not from the calldata;
-/// 2. require a header there, proving the TEE is in sync;
-/// 3. require the calldata `proof` to name that same height;
-/// 4. require both commitment words to equal the relay record the enclave
-///    rebuilds from its own chain ([`relay_record`]).
+/// 1. Find the block of the last witness tx from its SPV Merkle proof, not
+///    from the calldata.
+/// 2. Require a header there. This proves the TEE is in sync.
+/// 3. Require the calldata `proof` to name that height.
+/// 4. Require both commitment words to equal the relay record that the
+///    enclave builds from its own chain ([`relay_record`]).
 ///
 /// The `proof` slot is `abi.encode(uint256 sourceHeight, bytes32 sourceCommit,
-/// uint256 latestHeight, bytes32 latestCommit)` (`RGBVerifier.sol:115-117`):
-/// `source` packaged the burn/transfer, `latest` is the relay tip. `latest` must
-/// also sit within `MAX_RELAY_TIP_LAG_BLOCKS` of the enclave tip, so freshness
-/// is not delegated to a relay the host also feeds. Empty `proof` = reject.
+/// uint256 latestHeight, bytes32 latestCommit)` (`RGBVerifier.sol:115-117`).
+/// `source` holds the burn/transfer. `latest` is the relay tip. `latest` must
+/// be within `MAX_RELAY_TIP_LAG_BLOCKS` of the enclave tip, so freshness does
+/// not depend on a relay that the host also feeds. An empty `proof` is refused.
 ///
-/// `RGBVerifier` checks each commitment by height only. Step 4 proves the relay
-/// holds the enclave's block at that height.
+/// `RGBVerifier` checks each commitment by height only. Step 4 proves that the
+/// relay holds the enclave's block at that height.
 ///
-/// Step 4 depends on the operator's [`BtcRelayMode`] (`BTC_RELAY_MODE`):
+/// Step 4 depends on the operator [`BtcRelayMode`] (`BTC_RELAY_MODE`):
 ///
-/// - [`Required`](BtcRelayMode::Required), the default and the only mode a
-///   production policy boots with: both words must match, and a zero word is
-///   refused (the bridge sends zeros exactly when it has no relay configured).
-/// - [`None`](BtcRelayMode::None), a local stand with no BtcRelay: both words
-///   must be zero, and the compare is skipped. A non-zero word means the
-///   bridge and the enclave disagree about whether a relay exists: refused.
+/// - [`Required`](BtcRelayMode::Required): the default, and the only mode a
+///   production policy boots with. Both words must match. A zero word is
+///   refused, because the bridge sends zeros only when it has no relay.
+/// - [`None`](BtcRelayMode::None): a local stand with no BtcRelay. Both words
+///   must be zero, and no compare occurs. A non-zero word means the bridge
+///   and the enclave disagree about the relay, so it is refused.
 ///
-/// Steps 1-3 run in both modes. No build flag takes part in the choice.
+/// Steps 1-3 run in both modes. No build flag affects the choice.
 ///
-/// Ordered cheapest-first: the pure calldata decode and the `latest` checks run
-/// before the anchor resolution, which reads the chain and redoes a Merkle
-/// verification. The commitment checks run last: they sum the work of every
-/// header above the checkpoint.
+/// Order is cheapest first. The calldata decode and `latest` checks run
+/// before the anchor resolution, which reads the chain and verifies a Merkle
+/// proof again. The commitment checks run last, because they sum the work of
+/// each header above the checkpoint.
 pub fn verify_btc_relay_agreement(
     params: &FundsOutParams,
     validated: &ValidatedConsignment,
@@ -330,8 +312,8 @@ pub fn verify_btc_relay_agreement(
 ) -> Result<()> {
     let (source, latest) = decode_funds_out_proof(params)?;
 
-    // The tip cannot precede the block it buries. Caught here so the error names
-    // the problem instead of surfacing as a header-lookup failure.
+    // The tip cannot be below the block it buries. Check it here for a clear
+    // error, not a header-lookup failure.
     if latest.height < source.height {
         return Err(EnclaveError::Spv(format!(
             "fundsOut BtcRelay check: proof latest height {} is below source height {} - \
@@ -345,8 +327,8 @@ pub fn verify_btc_relay_agreement(
     // the freshness this check proved.
     pins.pin(chain, latest.height)?;
 
-    // `latest` must actually be near the tip, else it proves only that some
-    // block existed and the relay could be arbitrarily far behind.
+    // `latest` must be near the tip. Else it proves only that a block existed,
+    // and the relay can be far behind.
     let lag = chain.tip_height().saturating_sub(latest.height);
     if lag > MAX_RELAY_TIP_LAG_BLOCKS {
         return Err(EnclaveError::Spv(format!(
@@ -414,13 +396,13 @@ pub fn verify_btc_relay_agreement(
     }
 }
 
-/// Refuse unless the calldata commitment is `keccak256` of the relay record
-/// the enclave rebuilds at that height.
+/// Refuses unless the calldata commitment is `keccak256` of the relay record
+/// that the enclave builds at that height.
 ///
-/// The relay's deploy does not check the timestamps and `lastDiffAdjustment`
-/// of its own checkpoint record. If they are wrong, its records differ from
-/// the true ones for ten blocks or up to the next epoch start, and the enclave
-/// refuses there. That fails closed.
+/// The relay deploy does not check the timestamps and `lastDiffAdjustment` of
+/// its checkpoint record. If they are wrong, its records are wrong for ten
+/// blocks or up to the next epoch start. The enclave refuses there (fail
+/// closed).
 fn assert_relay_commitment(chain: &HeaderChain, block: &ProofBlock, label: &str) -> Result<()> {
     let expected = alloy_primitives::keccak256(relay_record(chain, block.height)?).0;
     if block.commitment != expected {
@@ -435,9 +417,9 @@ fn assert_relay_commitment(chain: &HeaderChain, block: &ProofBlock, label: &str)
     Ok(())
 }
 
-/// Rebuild BtcRelay's 160-byte `StoredBlockHeader` record from the enclave chain.
+/// Builds the BtcRelay 160-byte `StoredBlockHeader` record from the enclave chain.
 ///
-/// Refuse heights that need a block below the checkpoint: the relay seeds those
+/// Refuses heights that need a block below the checkpoint. The relay sets those
 /// values at deploy and does not check them, so the enclave cannot know them.
 fn relay_record(chain: &HeaderChain, height: u32) -> Result<[u8; 160]> {
     let cp = chain.checkpoint();
@@ -496,18 +478,16 @@ struct ConsignmentAnchor {
     txid: [u8; 32],
 }
 
-/// Locate that block from evidence the enclave already trusts: the txid from
-/// the rgbstd-validated `Transfer`, the height from the tx's SPV proof, the hash
-/// from the enclave's own header chain. Nothing is read from the calldata. No
-/// header at that height means the enclave is behind the anchoring block, so it
-/// refuses.
+/// Finds that block from trusted evidence only: the txid from the
+/// rgbstd-validated consignment, the height from the tx SPV proof, and the hash
+/// from the enclave header chain. Nothing comes from the calldata. If no header
+/// is at that height, the enclave is behind, so it refuses.
 ///
-/// The proof is re-verified here rather than relying on the earlier
-/// `validate_source_chain` pass: that ran under a different acquisition of the
-/// header-chain lock, and a concurrent `SubmitHeaders` reorg (up to
-/// `MAX_REORG_DEPTH = 100`, well past `SPV_MIN_CONFIRMATIONS = 6`) could have
-/// replaced the header in between. Inclusion and header hash must come from one
-/// consistent view.
+/// The proof is verified again here. The earlier `validate_source_chain` pass
+/// held a different header-chain lock. A concurrent `SubmitHeaders` reorg (up
+/// to `MAX_REORG_DEPTH = 100`, more than `SPV_MIN_CONFIRMATIONS = 6`) can
+/// replace the header between the two. Inclusion and header hash must come
+/// from one view.
 fn resolve_consignment_anchor(
     validated: &ValidatedConsignment,
     merkle_proofs: &[MerkleProofEntry],
@@ -526,7 +506,7 @@ fn resolve_consignment_anchor(
     let mut txid: [u8; 32] = witness_txid.to_byte_array();
     txid.reverse();
 
-    // `validate_spv_proofs` enforced set equality against `witness_txids`, so a
+    // `validate_spv_proofs` enforced set equality with `witness_txids`, so a
     // miss means the two views disagree. Fail closed.
     let proof = merkle_proofs
         .iter()
@@ -550,10 +530,9 @@ fn resolve_consignment_anchor(
         ))
     })?;
 
-    // Re-verify inclusion and depth against the chain just read, under this
-    // same lock guard (see the doc note on reorgs). The full set validator is
-    // reused on a one-element slice so the path-depth and txid-correspondence
-    // bounds it enforces apply here too.
+    // Verify inclusion and depth again under this lock guard (see the reorg
+    // note above). Use the full set validator on one element, so its path-depth
+    // and txid bounds also apply.
     spv_crosscheck::validate_spv_proofs(
         chain,
         &[txid],
@@ -568,9 +547,9 @@ fn resolve_consignment_anchor(
     })
 }
 
-/// Hash of the enclave's own header at `height`, in display (big-endian) order:
-/// the order calldata `commitmentHash` words carry. `None` when the enclave
-/// holds no header there (at or below the checkpoint, or beyond the tip).
+/// Hash of the enclave header at `height`, in display (big-endian) order, as
+/// calldata `commitmentHash` words carry it. `None` if the enclave has no
+/// header there (at or below the checkpoint, or above the tip).
 fn display_hash_at(chain: &HeaderChain, height: u32) -> Option<[u8; 32]> {
     use bitcoin::hashes::Hash as _;
 
@@ -579,7 +558,7 @@ fn display_hash_at(chain: &HeaderChain, height: u32) -> Option<[u8; 32]> {
     Some(display)
 }
 
-/// Confirm one proof pair against the in-enclave header chain.
+/// Confirms that the enclave header chain has a header at the proof height.
 fn assert_header_present(chain: &HeaderChain, block: &ProofBlock, label: &str) -> Result<()> {
     display_hash_at(chain, block.height)
         .map(|_| ())
@@ -597,19 +576,17 @@ fn assert_header_present(chain: &HeaderChain, block: &ProofBlock, label: &str) -
 /// Number of bytes in the finality proof: four ABI words.
 const FUNDS_OUT_PROOF_LEN: usize = 4 * 32;
 
-/// How far the calldata's `latest` block may sit below the enclave's own tip.
-/// Without a bound the `latest` pair proves only that a block existed, so a
-/// listener could pass an ancient known block and the freshness half of the
-/// BtcRelay check would be vacuous.
+/// Maximum distance of the calldata `latest` block below the enclave tip.
+/// Without a bound, a listener can send a very old block, and the freshness
+/// check proves nothing.
 ///
-/// Set to `MAX_REORG_DEPTH` (100 blocks, ~16 h on mainnet): generous next to
-/// the relay's own posting cadence, and the depth beyond which the enclave
-/// already refuses to rewrite history. Aliased rather than re-typed so the two
-/// cannot drift. Compile-time, not host-tunable.
+/// Equal to `MAX_REORG_DEPTH` (100 blocks, ~16 h on mainnet). This is more
+/// than the relay posting interval, and the enclave does not reorg deeper.
+/// It is an alias, so the two values cannot drift. The host cannot change it.
 const MAX_RELAY_TIP_LAG_BLOCKS: u32 = crate::networks::rgb::spv::chain::MAX_REORG_DEPTH;
 
-/// Decode the `fundsOut` `proof` slot into its `(source, latest)` block pair.
-/// An empty slot is rejected: it leaves nothing to bind the anchor to.
+/// Decodes the `fundsOut` `proof` slot into its `(source, latest)` block pair.
+/// An empty slot is refused, because the anchor then has nothing to bind to.
 fn decode_funds_out_proof(params: &FundsOutParams) -> Result<(ProofBlock, ProofBlock)> {
     let proof = &params.proof;
     if proof.is_empty() {
@@ -645,8 +622,8 @@ fn decode_funds_out_proof(params: &FundsOutParams) -> Result<(ProofBlock, ProofB
     Ok((source, latest))
 }
 
-/// Read one proof height word as a `u32`. Bitcoin heights fit comfortably; a
-/// larger value is rejected rather than truncated.
+/// Reads one proof height word as a `u32`. A larger value is rejected, not
+/// truncated.
 fn proof_height(word: &[u8], field: &str) -> Result<u32> {
     if word[..28].iter().any(|&b| b != 0) {
         return Err(EnclaveError::CrossCheck(format!(
@@ -657,10 +634,6 @@ fn proof_height(word: &[u8], field: &str) -> Result<u32> {
     buf.copy_from_slice(&word[28..32]);
     Ok(u32::from_be_bytes(buf))
 }
-
-// `extract_uint256_as_u64` moved to `events`, its only remaining consumer.
-// `extract_bytes32` and `bytes32_to_usize` went with the removed calldata
-// rewrite; `decode_op_id_to_bytes32` came back for the `sourceBurnTxId` bind.
 
 #[cfg(test)]
 mod tests;

@@ -22,7 +22,7 @@ pub(crate) fn bridge_funds_in_data(gross: u64, net: u64, commission: u64, dest: 
     d.extend_from_slice(&[0u8; 32 * 3]); // nativeCommission, sourceChainId, destinationChainId
     let mut bytes = dest.as_bytes().to_vec();
     bytes.resize(bytes.len().div_ceil(32) * 32, 0);
-    // destinationAddress tail: just past the head words.
+    // destinationAddress tail: after the head words.
     d.extend_from_slice(&abi_word(9 * 32));
     // settlementData tail (empty): after the string's length word and body.
     d.extend_from_slice(&abi_word((9 * 32 + 32 + bytes.len()) as u64));

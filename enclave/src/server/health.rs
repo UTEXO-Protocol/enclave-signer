@@ -1,14 +1,14 @@
-//! `Health`: the readiness probe deploy orchestration polls.
+//! `Health`: the readiness probe for deploy orchestration.
 //!
-//! Not feature-gated. Every build must answer it; a build without `spv`
-//! reports SPV readiness vacuously.
+//! All builds answer it. A build without `rgb-validation` always reports
+//! SPV as synced.
 
 use super::context::ServerContext;
 use crate::error::Result;
 use crate::proto::enclave_response::Response;
 use crate::proto::*;
 
-/// SPV half of the readiness answer:
+/// SPV part of the readiness answer:
 /// `(synced, tip_height, tip_time, tip_age_secs, max_tip_age_secs)`.
 #[cfg(feature = "rgb-validation")]
 fn spv_health(ctx: &ServerContext) -> (bool, u32, u32, u32, u32) {
@@ -40,19 +40,19 @@ fn spv_health(ctx: &ServerContext) -> (bool, u32, u32, u32, u32) {
     )
 }
 
-/// A `ccd`-only build carries no header chain and rejects SubmitHeaders, so
-/// there is nothing to sync. The zeroed heights say "not applicable here".
+/// A `ccd`-only build has no header chain, so it has nothing to sync.
+/// Zero values mean "not applicable".
 #[cfg(not(feature = "rgb-validation"))]
 fn spv_health(_ctx: &ServerContext) -> (bool, u32, u32, u32, u32) {
     (true, 0, 0, 0, 0)
 }
 
-/// Readiness probe for deploy orchestration: answers "could I sign right now?".
+/// Readiness probe: can the enclave sign now?
 ///
-/// Ready means the endpoints are set, the key is loaded, and the header
-/// chain passes `assert_chain_ready`, the same precondition signing applies.
-/// So a caller that sees `ready` will not immediately hit an SPV refusal.
-/// A mint signer never reads the header chain, so it skips the SPV half.
+/// Ready means: endpoints are set, the key is loaded, and the header chain
+/// passes `assert_chain_ready`. Signing uses the same SPV precondition.
+/// A mint signer (no `rgb_to_evm`) does not read the header chain, so it
+/// skips the SPV check.
 pub(super) fn handle_health(ctx: &ServerContext) -> Result<EnclaveResponse> {
     let key_loaded = ctx.state.is_initialized();
     let phase = ctx.state.phase_name().to_string();

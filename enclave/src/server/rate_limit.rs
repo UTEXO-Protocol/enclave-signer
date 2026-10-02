@@ -1,32 +1,28 @@
-//! Cumulative `SubmitHeaders` rate limit.
+//! Total `SubmitHeaders` rate limit across calls.
 //!
-//! SPV-only: a `ccd`-only build has no header chain to rate-limit, so
-//! `server/mod.rs` gates this whole module on `spv`.
+//! `server/mod.rs` gates this module on `rgb-validation`.
 
 use crate::error::{EnclaveError, Result};
 
-/// Sliding-window rate limit for `SubmitHeaders` (cumulative cap): at most
-/// [`MAX_HEADERS_PER_RATE_WINDOW`] headers submitted, validated or not, within
-/// [`RATE_LIMIT_WINDOW`]. Generous enough for a cold-start sync, tight enough
-/// that a flood of garbage headers cannot occupy the enclave.
-///
-/// SPV-only: a `ccd`-only build has no header chain to rate-limit.
+/// Fixed-window rate limit for `SubmitHeaders`. It admits at most
+/// [`MAX_HEADERS_PER_RATE_WINDOW`] headers, valid or not, in each
+/// [`RATE_LIMIT_WINDOW`]. This is enough for a cold-start sync, and it stops
+/// a flood of bad headers from keeping the enclave busy.
 #[derive(Default)]
 pub struct SubmitRateLimiter {
     window_start: Option<std::time::SystemTime>,
     headers_in_window: u64,
 }
 
-/// Max headers admitted per [`RATE_LIMIT_WINDOW`]. A cold-start sync from the
-/// mainnet checkpoint to the tip is a few thousand blocks, well inside this.
+/// Maximum headers in each [`RATE_LIMIT_WINDOW`]. A cold-start sync from the
+/// mainnet checkpoint is a few thousand blocks.
 const MAX_HEADERS_PER_RATE_WINDOW: u64 = 100_000;
 /// Length of the rate-limit window.
 const RATE_LIMIT_WINDOW: std::time::Duration = std::time::Duration::from_secs(60);
 
 impl SubmitRateLimiter {
-    /// Account for `count` submitted headers at time `now`. Returns `Err` if
-    /// the rolling-window budget would be exceeded. The window resets once
-    /// `RATE_LIMIT_WINDOW` has elapsed (or if the clock moves backwards).
+    /// Add `count` headers at time `now`. Returns `Err` above the window budget.
+    /// The window resets after `RATE_LIMIT_WINDOW`, or if the clock goes back.
     pub fn check(&mut self, count: u64, now: std::time::SystemTime) -> Result<()> {
         let reset = match self.window_start {
             None => true,
@@ -62,8 +58,7 @@ mod tests {
         let mut limiter = SubmitRateLimiter::default();
         let t0 = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000);
 
-        // Spending exactly the budget across several calls within the window
-        // is fine.
+        // The full budget across several calls in one window is accepted.
         limiter
             .check(MAX_HEADERS_PER_RATE_WINDOW - 1, t0)
             .expect("under budget");
@@ -71,7 +66,7 @@ mod tests {
             .check(1, t0 + Duration::from_secs(1))
             .expect("exactly at budget");
 
-        // One more header in the same window trips the limit.
+        // One more header in the same window is refused.
         let err = limiter.check(1, t0 + Duration::from_secs(2)).unwrap_err();
         assert!(matches!(err, EnclaveError::Spv(_)));
     }
@@ -84,11 +79,11 @@ mod tests {
         limiter
             .check(MAX_HEADERS_PER_RATE_WINDOW, t0)
             .expect("fills the budget");
-        // Still in-window: rejected.
+        // Refused inside the window.
         assert!(limiter
             .check(1, t0 + RATE_LIMIT_WINDOW - Duration::from_secs(1))
             .is_err());
-        // After the window elapses, the budget resets.
+        // The budget resets after the window.
         limiter
             .check(MAX_HEADERS_PER_RATE_WINDOW, t0 + RATE_LIMIT_WINDOW)
             .expect("window reset");
@@ -99,8 +94,8 @@ mod tests {
         let mut limiter = SubmitRateLimiter::default();
         let t1 = SystemTime::UNIX_EPOCH + Duration::from_secs(2_000_000);
         limiter.check(10, t1).expect("first call");
-        // An earlier timestamp (clock skew) resets the window rather than
-        // panicking or underflowing.
+        // An earlier timestamp (clock skew) resets the window.
+        // It must not panic or underflow.
         let t0 = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000);
         limiter
             .check(10, t0)

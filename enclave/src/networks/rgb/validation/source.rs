@@ -1,5 +1,5 @@
-//! RGB source validation: everything owned by the `RgbSource` payload, from
-//! field shape through to the SPV cross-check of its witness transactions.
+//! RGB source validation: all checks on the `RgbSource` payload, from field
+//! shape to the SPV cross-check of its witness transactions.
 
 #[cfg(rgb_to_evm)]
 use super::asset_bind::{assert_asset_binding, AssetBindMode};
@@ -19,20 +19,18 @@ use sha3::{Digest, Keccak256};
 #[cfg(rgb_to_evm)]
 use std::time::SystemTime;
 
-/// Validate all fields and source-chain evidence owned by an RGB source.
+/// Validates all fields and source-chain evidence of an RGB source.
 ///
-/// Does not inspect the destination network. The source-chain proof is:
+/// It does not examine the destination network. The source-chain proof is:
 ///
-/// 1. raw consignment bytes must be present, hash-bound, and pass full
+/// 1. raw consignment bytes are present, hash-bound, and pass full
 ///    in-enclave RGB validation;
-/// 2. the validated consignment asset must match the listener-declared
-///    `asset_id` and, when configured, the operator-pinned `RGB_ASSET_ID`;
-/// 3. when built with `spv`, every consignment witness tx must have a matching
-///    Merkle proof against the in-enclave Bitcoin header chain with sufficient
-///    confirmations;
-/// 4. when built without `spv`, reject any supplied Merkle proofs so build
-///    mismatches fail closed instead of silently ignoring host-provided SPV
-///    evidence.
+/// 2. the validated asset matches the listener-declared `asset_id` and, if
+///    configured, the operator-pinned `RGB_ASSET_ID`;
+/// 3. with `spv`, each witness tx has a Merkle proof against the in-enclave
+///    header chain with sufficient confirmations;
+/// 4. without `spv`, any supplied Merkle proof is rejected, so a build
+///    mismatch fails closed.
 #[cfg(rgb_to_evm)]
 pub fn validate_source(
     source: &RgbSource,
@@ -46,9 +44,9 @@ pub fn validate_source(
         )
     })?;
 
-    // A burn consignment carries its whole mint ancestry, and every one of those
-    // mint transitions ends in `cea` - consensus re-runs them, so it needs the
-    // locks the enclave verified for itself.
+    // A burn consignment contains its full mint ancestry. Each mint transition
+    // ends in `cea`, and consensus runs them again. Thus it needs the EVM locks
+    // that the enclave verified.
     let validated = validator.validate_consignment(&source.consignment, ctx.bridge_events)?;
 
     assert_asset_binding(
@@ -75,14 +73,12 @@ pub fn validate_source(
     Ok(validated)
 }
 
-/// Aggregate size/compute cap (operator-configurable via
-/// `MAX_CONSIGNMENT_BYTES`), enforced before the keccak hash and the rgbstd
-/// parse so a request cannot force disproportionate work while staying under
-/// every per-field cap.
+/// Total size cap (`MAX_CONSIGNMENT_BYTES`, set by the operator). It runs
+/// before the keccak hash and the rgbstd parse. Thus a request under each
+/// per-field cap cannot force too much work.
 ///
-/// `label` names the direction in the rejection, e.g. `"RGB source"` or
-/// `"send-RGB"`. Shared so that lowering the cap cannot produce a different
-/// message depending on which caller happens to run first.
+/// `label` names the direction in the rejection, for example `"RGB source"`
+/// or `"send-RGB"`. Both directions share it, so the message is the same.
 pub fn assert_consignment_size(consignment: &[u8], cfg: &BridgeConfig, label: &str) -> Result<()> {
     if consignment.len() > cfg.max_consignment_bytes {
         return Err(EnclaveError::CrossCheck(format!(
@@ -121,11 +117,10 @@ pub(super) fn validate_source_payload(source: &RgbSource, cfg: &BridgeConfig) ->
             cfg.max_total_proof_bytes
         )));
     }
-    // Integrity, NOT authorization: the listener
-    // controls both `consignment` and `consignment_hash`, so a match only
-    // proves the wire copy was not corrupted. Authorization comes from the
-    // in-enclave RGB validation, SPV anchoring, and the binding of validated
-    // facts (contract_id / op_id / amount).
+    // Integrity, NOT authorization. The listener controls both `consignment`
+    // and `consignment_hash`, so a match only proves the wire copy is intact.
+    // Authorization comes from RGB validation, SPV anchoring, and the bind of
+    // validated facts (contract_id / op_id / amount).
     if source.consignment_hash.is_empty() {
         return Err(EnclaveError::CrossCheck(
             "consignment present but consignment_hash is missing".into(),

@@ -1,10 +1,9 @@
-//! Integration tests for `GET /health` - the full path a deploy poll takes:
+//! Integration tests for `GET /health`, on the full deploy poll path:
 //! HTTP/1.1 -> axum router -> wire protocol -> enclave -> status code.
 //!
-//! The contract deploy relies on is narrow: `200` means ready, and every other
-//! outcome - not ready, enclave down, enclave error, garbled reply - is `503`.
-//! A `5xx` the poller had to special-case would turn a slow restart into a
-//! failed deploy, so each of those paths is pinned here.
+//! Contract: `200` means ready. Every other result (not ready, enclave down,
+//! enclave error, bad reply) is `503`. Any other `5xx` can turn a slow restart
+//! into a failed deploy, so these tests cover each path.
 
 use std::collections::HashSet;
 use std::io::{Read, Write};
@@ -87,12 +86,11 @@ async fn serve_with(reply: Option<enclave_response::Response>) -> u16 {
     start_health_server(start_mock_enclave(reply)).await
 }
 
-/// Minimal HTTP/1.1 GET. Hand-rolled rather than pulling in an HTTP client: one
-/// request, one connection, no keep-alive. Returns (status_code, body).
+/// Minimal HTTP/1.1 GET: one request, one connection, no keep-alive.
+/// Returns (status_code, body).
 ///
-/// It blocks, which is why every test here runs on a multi-thread runtime - on
-/// the default current-thread flavor it would starve the spawned server task
-/// and hang instead of failing.
+/// It blocks, so every test uses a multi-thread runtime. On a current-thread
+/// runtime it starves the server task and hangs.
 fn get(port: u16, path: &str) -> (u16, String) {
     let mut stream = TcpStream::connect(format!("127.0.0.1:{port}")).unwrap();
     write!(
@@ -122,7 +120,7 @@ async fn ready_enclave_returns_200() {
     let (status, body) = get(port, "/health");
     assert_eq!(status, 200);
     assert!(body.contains("\"ready\":true"), "body: {body}");
-    // Diagnostics ride along so a stuck deploy is debuggable from the poll log.
+    // The body has diagnostics, so the poll log helps debug a stuck deploy.
     assert!(body.contains("\"spv_tip_height\":900000"), "body: {body}");
 }
 
@@ -141,7 +139,7 @@ async fn starting_enclave_returns_503() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn unreachable_enclave_returns_503() {
-    // Bind then drop, so the port is almost certainly free and refuses.
+    // Bind then drop, so the port is almost certainly free and refuses connections.
     let dead = TcpListener::bind("127.0.0.1:0").unwrap();
     let dead_port = dead.local_addr().unwrap().port();
     drop(dead);
@@ -169,8 +167,8 @@ async fn enclave_error_returns_503() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn enclave_without_health_support_returns_503() {
-    // `None` is what an enclave built before `Health` existed sends back:
-    // prost drops the unknown request field, so no oneof variant is set.
+    // An enclave without `Health` drops the unknown request field and sends
+    // no oneof variant (`None`).
     let port = serve_with(None).await;
 
     let (status, body) = get(port, "/health");
@@ -185,7 +183,7 @@ async fn unknown_path_is_404() {
     ))))
     .await;
 
-    // The probe server serves exactly one route; nothing else is on it.
+    // The probe server has only one route.
     let (status, _) = get(port, "/metrics");
     assert_eq!(status, 404);
 }
@@ -214,7 +212,7 @@ async fn header_sync_is_reported_and_code_follows_ready() {
         assert!(body.contains(expected), "body: {body}");
     }
 
-    // The object is there when the enclave cannot answer too.
+    // The object is also present when the enclave cannot answer.
     let dead = TcpListener::bind("127.0.0.1:0").unwrap();
     let dead_port = dead.local_addr().unwrap().port();
     drop(dead);

@@ -1,10 +1,9 @@
 //! `kms` unit tests.
 //!
-//! The recipient envelope is built here by hand, exactly as KMS shapes it
-//! (RSAES-OAEP-SHA-256 key transport, AES-256-CBC content), and opened by
-//! `recipient::open_envelope`. The KMS exchanges are canned HTTP responses
-//! through the SDK's replay client, so the request the enclave signs and the
-//! way it validates each reply are exercised without AWS. The end-to-end
+//! The tests build the recipient envelope as KMS does (RSAES-OAEP-SHA-256 key
+//! transport, AES-256-CBC content) and open it with `recipient::open_envelope`.
+//! The KMS exchanges are canned HTTP responses through the SDK replay client,
+//! so the signed request and the reply checks run without AWS. The end-to-end
 //! cases need `mock-attestation`, because a real recipient needs `/dev/nsm`.
 
 use std::time::{Duration, Instant};
@@ -42,7 +41,7 @@ fn credentials() -> AwsCredentials {
     AwsCredentials::new("AKIDEXAMPLE".into(), "secret".into(), "token".into()).unwrap()
 }
 
-/// Key generation dominates these tests; share one key.
+/// Key generation is slow, so the tests share one key.
 fn recipient_key() -> RsaPrivateKey {
     use std::sync::OnceLock;
     static KEY: OnceLock<RsaPrivateKey> = OnceLock::new();
@@ -240,8 +239,7 @@ fn recipient_envelope_round_trips_and_rejects_every_deviation() {
 }
 
 /// KMS returns `CiphertextForRecipient` as streaming BER: indefinite lengths
-/// and a chunked, constructed encrypted content. The DER-only decode used to
-/// reject every real envelope, which the DER fixtures above never showed.
+/// and chunked encrypted content. A DER-only decode rejects it.
 #[test]
 fn recipient_envelope_accepts_streaming_ber_from_kms() {
     let key = recipient_key();
@@ -254,7 +252,7 @@ fn recipient_envelope_accepts_streaming_ber_from_kms() {
         "strict DER must reject the BER form"
     );
     assert_eq!(open_envelope(&key, &ber).unwrap().as_slice(), &seed);
-    // Truncating the end-of-contents marker is still refused.
+    // A missing end-of-contents marker is refused.
     assert!(open_envelope(&key, &ber[..ber.len() - 2]).is_err());
 }
 
@@ -342,8 +340,8 @@ fn expired_deadline_never_starts_a_call() {
         .is_err());
 }
 
-/// Canned KMS exchanges. The recipient key is fixed so a response can be
-/// sealed to it before the call is made.
+/// Canned KMS exchanges. The recipient key is fixed, so a response can be
+/// sealed to it before the call.
 #[cfg(feature = "mock-attestation")]
 mod exchanges {
     use super::*;

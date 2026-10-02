@@ -20,7 +20,7 @@ use crate::signer::{
     SignatureResponse,
 };
 
-/// Enclave connection target - either TCP address or vsock CID+port.
+/// Enclave connection target: a TCP address or a vsock CID and port.
 #[derive(Clone)]
 pub enum EnclaveTarget {
     Tcp(String),
@@ -31,8 +31,8 @@ pub enum EnclaveTarget {
     },
 }
 
-/// gRPC server that translates the federated-signer-node's listener-enclave.proto
-/// RPCs into enclave.proto wire-protocol requests over TCP/vsock.
+/// gRPC server. It translates `ParentService` RPCs from the federated signer
+/// node into enclave wire requests over TCP or vsock.
 #[derive(Clone)]
 pub struct ParentAdapterService {
     target: EnclaveTarget,
@@ -47,10 +47,9 @@ impl ParentAdapterService {
         }
     }
 
-    /// Send an EnclaveRequest to the enclave and read the EnclaveResponse.
-    /// Runs blocking I/O on a spawn_blocking thread.
-    // `tonic::Status` is a large (~176 byte) error type, but it is the fixed
-    // gRPC error contract here, so the lint is allowed rather than boxing it.
+    /// Send an `EnclaveRequest` and read the `EnclaveResponse`.
+    /// The blocking I/O runs on a `spawn_blocking` thread.
+    // `tonic::Status` is large (~176 bytes), but it is the gRPC error contract.
     #[allow(clippy::result_large_err)]
     pub(crate) async fn send_to_enclave(
         &self,
@@ -98,10 +97,8 @@ impl ParentAdapterService {
                             .map_err(|e| {
                                 Status::unavailable(format!("enclave vsock connection failed: {e}"))
                             })?;
-                        // Parity with the TCP branch. Without it a wedged socket
-                        // pins a blocking-pool thread indefinitely: the outer
-                        // `timeout` only abandons the JoinHandle, it cannot
-                        // cancel a `spawn_blocking` body already in a read.
+                        // Same as TCP. Without socket timeouts, a stuck socket
+                        // holds a blocking-pool thread forever. (F03-AF-18)
                         stream.set_read_timeout(Some(ENCLAVE_TIMEOUT)).ok();
                         stream.set_write_timeout(Some(ENCLAVE_TIMEOUT)).ok();
                         framing::write_message(&mut stream, &req)
@@ -156,10 +153,10 @@ impl ParentAdapterService {
             .map_err(|e| Status::invalid_argument(format!("{field} must be hex bytes: {e}")))
     }
 
-    /// Decode a field that is hex for EVM addresses but an opaque string for
-    /// other networks: EVM->RGB FundsIn events carry the RGB invoice
-    /// (`utxob:`) in SourceProof.recipient. Non-hex values pass through as raw
-    /// UTF-8 so the enclave sees what the listener saw.
+    /// Decode a field that is hex for EVM but an opaque string elsewhere.
+    /// EVM->RGB FundsIn events put the RGB invoice (`utxob:`) in
+    /// `SourceProof.recipient`. Non-hex values pass through as raw UTF-8, so
+    /// the enclave sees what the listener saw.
     fn decode_hex_or_raw_field(value: String) -> Vec<u8> {
         let hex = value.strip_prefix("0x").unwrap_or(&value);
         match hex::decode(hex) {
@@ -191,8 +188,8 @@ impl ParentAdapterService {
     ) -> Result<enclave_proto::sign_request::SourceNetwork, Status> {
         match source.chain {
             Some(source_proof::Chain::Evm(evm)) => {
-                // Diagnosability only - here we still know which node sent it.
-                // The enclave's own check is the authority.
+                // For diagnostics only: here the sending node is still known.
+                // The enclave check is the authority.
                 if evm.funds_in_operation_id.len() != 32 {
                     return Err(Status::invalid_argument(format!(
                         "EvmSource.funds_in_operation_id must be 32 bytes (the BridgeFundsIn \
@@ -224,8 +221,8 @@ impl ParentAdapterService {
                         .into_iter()
                         .map(Self::enclave_merkle_proof)
                         .collect(),
-                    // Forwarded as given: the enclave verifies every pair
-                    // against the chain, so the parent adds no trust here.
+                    // Forward as given. The enclave verifies every pair
+                    // against the chain, so the parent adds no trust.
                     mint_ancestors: rgb
                         .mint_ancestors
                         .into_iter()
@@ -233,9 +230,9 @@ impl ParentAdapterService {
                         .collect(),
                 }),
             ),
-            // A CCD source (fundsIn burn) feeding an EVM release. The listener
-            // validated finality/structure on-chain; the enclave trusts it and
-            // cross-checks the release amount against the destination.
+            // CCD source (fundsIn burn) for an EVM release. The listener
+            // checked finality and structure on-chain. The enclave trusts it and
+            // checks the release amount against the destination.
             Some(source_proof::Chain::Ccd(ccd)) => Ok(
                 enclave_proto::sign_request::SourceNetwork::CcdSource(enclave_proto::CcdSource {
                     tx_hash: ccd.tx_hash,
@@ -279,8 +276,7 @@ impl ParentAdapterService {
                         asset_id: payload.rgb_asset_id,
                         consignment: payload.consignment,
                         consignment_hash: payload.consignment_hash,
-                        // Same as the source direction: forwarded as given,
-                        // because the enclave verifies every pair on-chain.
+                        // Forward as given. The enclave verifies every pair.
                         mint_ancestors: payload
                             .mint_ancestors
                             .into_iter()
@@ -289,12 +285,11 @@ impl ParentAdapterService {
                     },
                 )
             }
-            // Plain BTC is not a cross-network destination - it is dispatched
-            // via `data_type=BTC_UTXO` to the SignBtc path, never here.
+            // Plain BTC goes to SignBtc through `data_type=BTC_UTXO`.
             sign_request::Data::BtcData(_) => unreachable!(
                 "BtcData is handled by the BTC_UTXO dispatch, not enclave_destination_network"
             ),
-            // CCD is handled in `sign` before destination dispatch; never routed here.
+            // `sign` handles CCD before destination dispatch.
             sign_request::Data::CcdData(_) => {
                 unreachable!("CCD sign requests are handled before destination dispatch")
             }
@@ -328,13 +323,12 @@ impl ParentAdapterService {
 
 #[tonic::async_trait]
 impl ParentService for ParentAdapterService {
-    /// Sign converts the structured ParentService request into the enclave
-    /// wire `SignRequest`.
+    /// Convert a `ParentService` sign request into an enclave request.
     ///
-    /// Dispatches on `data_type`:
-    ///   TRANSACTION -> source/destination cross-network Sign (bridge / RGB-send / EVM)
-    ///   EVM_GAS_TX  -> unsigned gas-tx preimage -> SignRawDigest
-    /// BTC_UTXO -> plain-BTC PSBT -> SignBtc (vanilla BIP-86 path)
+    /// Dispatch on `data_type`:
+    /// - TRANSACTION: cross-network Sign (bridge, RGB send, EVM).
+    /// - EVM_GAS_TX: unsigned gas-tx preimage to SignRawDigest.
+    /// - BTC_UTXO: plain-BTC PSBT to SignBtc (vanilla BIP-86 path).
     async fn sign(
         &self,
         request: Request<grpc_proto::SignRequest>,
@@ -347,9 +341,9 @@ impl ParentService for ParentAdapterService {
         })?;
         let signer_network_id = common.dst_network_id;
 
-        // Concordium: the listener has already validated the operation and
-        // re-derived the transaction hash; the enclave signs the hash directly.
-        // No source/destination validation or amount cross-check happens here.
+        // Concordium: the listener validated the operation and derived the
+        // transaction hash. The enclave signs the hash. There is no
+        // source/destination check or amount check here.
         if let Some(sign_request::Data::CcdData(payload)) = inner.data.as_ref() {
             if data_type != DataType::Transaction {
                 return Err(Status::invalid_argument(
@@ -482,9 +476,8 @@ impl ParentService for ParentAdapterService {
                             signer_network_id,
                             signature: r.signature,
                             identifier: None,
-                            // Forward the exact calldata the signature commits
-                            // to, so the caller submits these bytes rather than
-                            // the ones it sent.
+                            // Return the calldata the signature commits to.
+                            // The caller must submit these bytes.
                             call_data: r.call_data,
                             // secp256k1: the signer is recoverable from the signature.
                             public_key: Vec::new(),
@@ -500,13 +493,11 @@ impl ParentService for ParentAdapterService {
                 }
             }
             DataType::EvmGasTx => {
-                // EVM_GAS_TX is signed with the dedicated gas-tx key and has no
-                // source proof, so it routes to SignRawDigest. The Listener
-                // sends the unsigned tx preimage in
-                // `EnrichedEvmPayload.unsigned_tx`, and may still carry a
-                // pre-hashed digest in `call_data`; the enclave decodes the
-                // preimage, enforces the gas-tx shape allowlist, and computes
-                // the digest itself.
+                // EVM_GAS_TX uses the gas-tx key and has no source proof, so
+                // it goes to SignRawDigest. The Listener sends the unsigned tx
+                // preimage in `EnrichedEvmPayload.unsigned_tx`. `call_data` can
+                // also hold a digest. The enclave decodes the preimage, applies
+                // the gas-tx shape allowlist, and computes the digest itself.
                 let (digest, unsigned_tx) =
                     match inner.data {
                         Some(sign_request::Data::EvmData(payload)) => {
@@ -552,11 +543,11 @@ impl ParentService for ParentAdapterService {
                 }
             }
             DataType::BtcUtxo => {
-                // Plain-BTC signing: a distinct request with
-                // no source proof or consignment. The Listener sends the PSBT in
-                // `EnrichedBtcPayload.psbt_bytes`; the enclave signs it on the
-                // vanilla BIP-86 account, only after proving every output pays
-                // back to a script it controls, under an input-value cap.
+                // Plain-BTC signing, with no source proof or consignment. The
+                // Listener sends the PSBT in `EnrichedBtcPayload.psbt_bytes`.
+                // The enclave signs on the vanilla BIP-86 account. It signs only
+                // if every output pays to its own script and inputs are under
+                // the value cap.
                 let payload = match inner.data {
                     Some(sign_request::Data::BtcData(payload)) => payload,
                     _ => {
@@ -610,18 +601,16 @@ impl ParentService for ParentAdapterService {
         }
     }
 
-    /// PublicKey - returns the enclave's public key bytes.
-    /// Dispatches on `data_type`:
-    ///   EVM_GAS_TX               -> 64-byte uncompressed X||Y (gas key m/44'/60'/0'/0/1)
-    ///   TRANSACTION, UNSPENDABLE -> 33-byte compressed BTC pubkey
-    ///   CCD_GOVERNANCE           -> 32-byte Concordium Ed25519 governance pubkey
-    ///                              (m/44'/919'/0'/0'/0')
+    /// Return an enclave public key, selected by `data_type`:
+    /// - EVM_GAS_TX: 64-byte uncompressed X||Y (gas key m/44'/60'/0'/0/1).
+    /// - TRANSACTION, UNSPENDABLE: 33-byte compressed BTC public key.
+    /// - CCD_GOVERNANCE: 32-byte Concordium Ed25519 governance key
+    ///   (m/44'/919'/0'/0'/0').
     ///
-    /// `CCD_GOVERNANCE` is the attestation-free way to read the governance
-    /// pubkey. `AttestedPublicKey` carries the same value but also produces an
-    /// NSM document, so it fails wherever there is no Nitro Security Module.
-    /// Callers needing proof the key came from a real enclave must still use
-    /// `AttestedPublicKey`; see docs/pubkey-attestation.md.
+    /// `CCD_GOVERNANCE` reads the governance key without attestation.
+    /// `AttestedPublicKey` needs a Nitro Security Module. For proof that the
+    /// key comes from a real enclave, use `AttestedPublicKey`
+    /// (see docs/pubkey-attestation.md).
     async fn public_key(
         &self,
         request: Request<PublicKeyRequest>,
@@ -709,13 +698,14 @@ impl ParentService for ParentAdapterService {
         }
     }
 
-    /// Clone - donor side of cluster cloning. The requester's orchestrator
-    /// relays its InitiateCloning output here, translated into a
-    /// GetCloneRequest against the local donor enclave. The enclave verifies the
-    /// requester attestation, PCRs, nonce freshness, pubkey/digest binding, and
-    /// the digest against its own cloning secret before sealing the seed. The
-    /// sealed seed plus the donor's ephemeral pubkey and attestation go back so
-    /// the requester can drive SetClone.
+    /// Donor side of cluster cloning. The requester orchestrator sends its
+    /// InitiateCloning output here. The parent turns it into a GetCloneRequest
+    /// for the local donor enclave.
+    ///
+    /// Before it seals the seed, the enclave verifies the requester
+    /// attestation, PCRs, nonce freshness, public key and digest binding, and
+    /// the digest against its cloning secret. The response has the sealed
+    /// seed, the donor ephemeral public key and attestation for SetClone.
     async fn clone(
         &self,
         request: Request<CloneRequest>,
@@ -750,8 +740,8 @@ impl ParentService for ParentAdapterService {
         }
     }
 
-    /// GetLastSavedBlock - forwards to the enclave's SPV header chain. A build
-    /// without that chain returns NOT_READY.
+    /// Read the tip of the enclave SPV header chain. A build without that
+    /// chain returns NOT_READY.
     async fn get_last_saved_block(
         &self,
         _request: Request<GetLastSavedBlockRequest>,
@@ -781,8 +771,7 @@ impl ParentService for ParentAdapterService {
         }
     }
 
-    /// SubmitHeaders - refused for every caller. The parent's own header sync
-    /// is the one writer.
+    /// Always refused. The parent header sync is the only header writer.
     async fn submit_headers(
         &self,
         _request: Request<SubmitHeadersRequest>,
@@ -792,12 +781,11 @@ impl ParentService for ParentAdapterService {
         ))
     }
 
-    /// AttestedPublicKey - proves the bridge's signing pubkey was produced
-    /// inside this TEE. Forwards a 32-byte caller nonce to the enclave,
-    /// returns the public-key bundle plus an NSM attestation document that
-    /// binds the EVM pubkey + a sha256 commitment over the full bundle to
-    /// the enclave's PCRs. See docs/pubkey-attestation.md for the
-    /// verification recipe.
+    /// Prove that the bridge signing key comes from this TEE. Sends a 32-byte
+    /// caller nonce to the enclave. Returns the public-key bundle and an NSM
+    /// attestation document. The document binds the EVM public key and a
+    /// sha256 of the full bundle to the enclave PCRs.
+    /// See docs/pubkey-attestation.md for verification.
     async fn attested_public_key(
         &self,
         request: Request<AttestedPublicKeyRequest>,

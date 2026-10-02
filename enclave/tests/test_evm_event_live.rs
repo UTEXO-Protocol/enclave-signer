@@ -41,9 +41,8 @@ fn num(var: &str, default: u64) -> u64 {
         .unwrap_or(default)
 }
 
-/// `operationId` is a `bytes32` on chain (a keccak hash). Accept a `0x` literal
-/// (or bare hex) and left-pad to 32 bytes so a short value pasted from a receipt
-/// still binds.
+/// `operationId` is a `bytes32` on chain. Accept hex with or without `0x` and
+/// left-pad it to 32 bytes, so a short value from a receipt still binds.
 fn op_id(var: &str) -> Vec<u8> {
     let v = std::env::var(var).unwrap_or_else(|_| panic!("{var} is required"));
     let raw = hex::decode(v.strip_prefix("0x").unwrap_or(&v)).expect("operationId hex");
@@ -93,8 +92,8 @@ fn live_deposit_binds_operation_id() {
     .expect("the real deposit must verify");
 }
 
-/// A different id must refuse - proves the comparison runs rather than the
-/// decode merely succeeding.
+/// A different id must fail. This proves that the comparison runs, not only
+/// the decode.
 #[test]
 fn live_deposit_rejects_wrong_operation_id() {
     let Some(l) = live() else { return };
@@ -115,8 +114,8 @@ fn live_deposit_rejects_wrong_operation_id() {
     assert!(e.contains("operationId mismatch"), "got: {e}");
 }
 
-/// The amount is bound off the same log, at a different word offset - a swapped
-/// or mis-numbered offset would still bind the id but not this.
+/// The amount comes from a different word offset in the same log. A wrong
+/// offset still binds the id but fails this test.
 #[test]
 fn live_deposit_rejects_wrong_amount() {
     let Some(l) = live() else { return };

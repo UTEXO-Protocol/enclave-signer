@@ -1,23 +1,23 @@
-//! BER -> DER normalisation for the KMS recipient envelope.
+//! BER -> DER conversion of the KMS recipient envelope.
 //!
-//! AWS KMS emits `CiphertextForRecipient` as streaming BER (X.690 §8.1.3.6):
-//! constructed values carry the indefinite length `0x80 ... 00 00`, and the
-//! encrypted content arrives as a constructed OCTET STRING made of primitive
-//! chunks. The RustCrypto `der` parser accepts only DER, so the envelope is
-//! transcoded first: every length becomes definite and minimal, and chunked
-//! strings are joined into one primitive. Nothing else is reinterpreted; the
-//! typed CMS decode in `recipient.rs` still validates the structure.
+//! AWS KMS sends `CiphertextForRecipient` as streaming BER (X.690, 8.1.3.6).
+//! Constructed values have the indefinite length `0x80 ... 00 00`. The
+//! encrypted content is a constructed OCTET STRING of primitive chunks.
 //!
-//! The transcoder is total on its bounded input: it never panics, refuses
-//! anything it cannot account for byte by byte, and caps nesting depth.
+//! The RustCrypto `der` parser accepts only DER. So every length becomes
+//! definite and minimal, and chunked strings become one primitive. Nothing
+//! else changes. The typed CMS decode in `recipient.rs` validates the structure.
+//!
+//! The converter never panics. It refuses every byte it cannot parse and caps
+//! the nesting depth.
 
 /// Deepest nesting accepted. A CMS EnvelopedData is six levels deep.
 const MAX_DEPTH: usize = 16;
-/// Longest tag (identifier octets) accepted: one leading byte plus three
-/// continuation bytes, far beyond any CMS tag.
+/// Longest tag accepted: one leading byte and three continuation bytes. No CMS
+/// tag is this long.
 const MAX_TAG_BYTES: usize = 4;
-/// Longest definite length field accepted (4 octets = u32), which already
-/// exceeds the envelope cap.
+/// Longest definite length field accepted (4 octets). This is more than the
+/// envelope cap.
 const MAX_LENGTH_BYTES: usize = 4;
 
 const UNIVERSAL_OCTET_STRING: u8 = 0x04;
@@ -35,8 +35,8 @@ enum Body {
     Constructed(Vec<Node>),
 }
 
-/// Transcode `input` (BER or DER) to DER. `None` when the input is not a
-/// single, complete, well-formed BER value.
+/// Convert `input` (BER or DER) to DER. `None` when the input is not one
+/// complete, well-formed BER value.
 pub(super) fn ber_to_der(input: &[u8]) -> Option<Vec<u8>> {
     let (node, used) = parse(input, 0)?;
     if used != input.len() {
@@ -47,7 +47,7 @@ pub(super) fn ber_to_der(input: &[u8]) -> Option<Vec<u8>> {
     Some(out)
 }
 
-/// Parse one TLV at the start of `input`. Returns the node and bytes consumed.
+/// Parse one TLV at the start of `input`. Returns the node and the bytes used.
 fn parse(input: &[u8], depth: usize) -> Option<(Node, usize)> {
     if depth > MAX_DEPTH || input.len() < 2 {
         return None;
@@ -134,10 +134,10 @@ fn parse(input: &[u8], depth: usize) -> Option<(Node, usize)> {
 }
 
 impl Node {
-    /// Join a constructed string back into one primitive. Applies to a
-    /// constructed universal OCTET STRING and to a constructed context-specific
-    /// value whose parts are all primitive OCTET STRINGs (the IMPLICIT
-    /// `encryptedContent [0]` in `EncryptedContentInfo`).
+    /// Join a constructed string into one primitive. Applies to a constructed
+    /// universal OCTET STRING, and to a constructed context-specific value of
+    /// primitive OCTET STRINGs only (the IMPLICIT `encryptedContent [0]` in
+    /// `EncryptedContentInfo`).
     fn joined(self) -> Node {
         let Body::Constructed(children) = &self.body else {
             return self;
@@ -197,11 +197,11 @@ fn encode_length(len: usize, out: &mut Vec<u8>) {
 
 #[cfg(test)]
 pub(super) mod test_support {
-    //! Turns DER into the streaming BER shape KMS produces, for tests.
+    //! Converts DER into the streaming BER shape of KMS, for tests.
 
-    /// Re-encode `der` with indefinite lengths on every constructed value and
-    /// every OCTET STRING (universal or context `[0]`) longer than one byte
-    /// split into two constructed chunks.
+    /// Encode `der` again with indefinite lengths on all constructed values.
+    /// Each OCTET STRING (universal or context `[0]`) longer than one byte
+    /// becomes two chunks in a constructed value.
     pub(crate) fn to_streaming_ber(der: &[u8]) -> Vec<u8> {
         let mut out = Vec::new();
         let used = walk(der, &mut out);
