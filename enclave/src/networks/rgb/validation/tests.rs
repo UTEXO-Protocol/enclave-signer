@@ -1228,6 +1228,81 @@ mod asset_bind {
         );
     }
 
+    /// The fixture with the mint witness tx changed: input `input` of that tx
+    /// spends a different outpoint. The outputs do not change, so the
+    /// commitment to the mint stays valid.
+    #[cfg(feature = "bfa-validation")]
+    fn fixture_with_mint_witness_input_replaced(input: usize) -> Vec<u8> {
+        use rgbstd::validation::PubWitness;
+
+        let original = Transfer::load(Cursor::new(BFA_BURN_FIXTURE)).expect("load BFA fixture");
+        let (_, opid) = fixture_mint();
+        let mut bundles: Vec<_> = original.bundles.iter().cloned().collect();
+        let mint_bundle = bundles
+            .iter_mut()
+            .find(|wb| wb.bundle().known_transitions.iter().any(|k| k.opid == opid))
+            .expect("the fixture has the mint bundle");
+        let mut tx = mint_bundle
+            .pub_witness
+            .tx()
+            .expect("the fixture embeds the mint witness tx")
+            .clone();
+        tx.input[input].previous_output.vout += 7;
+        mint_bundle.pub_witness = PubWitness::Tx(tx);
+
+        let mut transfer = original.clone();
+        transfer.bundles = Default::default();
+        transfer.bundles.extend(bundles).expect("three bundles fit");
+        let mut bytes = Vec::new();
+        transfer
+            .save(&mut bytes)
+            .expect("serialize the consignment");
+        bytes
+    }
+
+    /// RGB consensus refuses a mint whose witness tx does not spend the UTXO
+    /// of the mint right. The mint witness tx of the fixture has two inputs:
+    /// input 0 spends the mint right, input 1 pays the fee.
+    ///
+    /// With a different outpoint on input 0, the consignment is refused: the
+    /// tx does not close the seal of the right. With a different outpoint on
+    /// input 1, consensus accepts the consignment. Thus the seal causes the
+    /// refusal, not the change of the tx. A second tx for the same mint is
+    /// possible, but it must spend the same UTXO, so only one tx can confirm.
+    #[test]
+    #[cfg(feature = "bfa-validation")]
+    fn refuses_a_mint_witness_tx_that_does_not_spend_the_mint_right() {
+        const RIGHT_UTXO: &str =
+            "8c2a99d569e9d3cfb5abe1697cdb73d170835672db9c161d684cb01d50c6b9e6:1";
+
+        let original = Transfer::load(Cursor::new(BFA_BURN_FIXTURE)).expect("load BFA fixture");
+        let (_, opid) = fixture_mint();
+        let witness_tx = original
+            .bundles
+            .iter()
+            .find(|wb| wb.bundle().known_transitions.iter().any(|k| k.opid == opid))
+            .and_then(|wb| wb.pub_witness.tx())
+            .expect("the fixture embeds the mint witness tx");
+        assert_eq!(witness_tx.input.len(), 2);
+        assert_eq!(witness_tx.input[0].previous_output.to_string(), RIGHT_UTXO);
+
+        let validator = RgbValidator::new(spawn_stub_esplora(), "signet").expect("validator");
+        let events = fixture_mint_events();
+
+        let err = validator
+            .validate_consignment(&fixture_with_mint_witness_input_replaced(0), &events)
+            .expect_err("a mint that does not spend the mint right must be refused");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("does not closes seal") && msg.contains(RIGHT_UTXO),
+            "expected a seal-closing failure on the mint right, got: {msg}"
+        );
+
+        validator
+            .validate_consignment(&fixture_with_mint_witness_input_replaced(1), &events)
+            .expect("a different fee input does not break the seal of the right");
+    }
+
     /// The enclave gives RGB consensus the EVM lock for the OpId that the
     /// deposit names. A lock for a different OpId does not validate the mint,
     /// although the amount is correct. Thus one deposit can back only the mint
