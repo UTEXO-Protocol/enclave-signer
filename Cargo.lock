@@ -8359,6 +8359,7 @@ dependencies = [
  "rgb-invoicing",
  "rgb-ops",
  "rgb-schemas",
+ "rgb-strict-encoding",
  "rsa",
  "rustls 0.23.43",
  "rustls-pki-types",

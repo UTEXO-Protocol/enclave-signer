@@ -111,7 +111,7 @@ enables `kms-persistence`. Production images are built with
 (`mock-attestation`, `allow-seed-import`) are `compile_error!` in release.
 
 **Wire protocol** enclave<->parent: 4-byte little-endian length prefix + prost
-protobuf, 4 MiB frame cap, no version field (`framing.rs`). The consignment
+protobuf, 24 MiB frame cap, no version field (`framing.rs`). The consignment
 resolver and the EVM RPC are reached through in-enclave loopback forwarders
 that bridge over vsock to host-side `vsock-proxy` instances (vsock ports 8001
 and 8002); the enclave has no direct network stack.

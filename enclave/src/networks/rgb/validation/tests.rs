@@ -1326,6 +1326,300 @@ mod asset_bind {
         );
     }
 
+    /// The BFA fixture with `transfers` more `Transfer` transitions and one
+    /// last `Burn` after its history. Each new transition spends the output of
+    /// the transition before it, in its own witness tx.
+    #[cfg(feature = "bfa-validation")]
+    fn fixture_with_long_history(transfers: usize) -> Vec<u8> {
+        use bitcoin::hashes::Hash as _;
+        use rgbstd::containers::WitnessBundle;
+        use rgbstd::rgbcore::commit_verify::{mpc, CommitId, TryCommitVerify};
+        use rgbstd::rgbcore::dbc::opret::OpretProof;
+        use rgbstd::rgbcore::dbc::Anchor;
+        use rgbstd::rgbcore::seals::txout::TxPtr;
+        use rgbstd::validation::{DbcProof, PubWitness};
+        use rgbstd::{
+            Assign, AssignmentType, Assignments, GraphSeal, Inputs, KnownTransition, MetaType,
+            MetaValue, Metadata, Operation as _, Opout, RevealedValue, Transition,
+            TransitionBundle, TransitionType, TypedAssigns,
+        };
+        use strict_encoding::StrictDumb;
+
+        let mut transfer = Transfer::load(Cursor::new(BFA_BURN_FIXTURE)).expect("load BFA fixture");
+        let contract_id = transfer.contract_id();
+        let asset = AssignmentType::with(bfa::OS_ASSET);
+
+        // The unspent output of the fixture: 40_000 units on an explicit seal.
+        let last = transfer
+            .bundles
+            .iter()
+            .last()
+            .and_then(|wb| wb.bundle().known_transitions.iter().last())
+            .expect("fixture last transition")
+            .clone();
+        let TypedAssigns::Fungible(outs) = last.transition.assignments.get(&asset).expect("change")
+        else {
+            panic!("asset output is fungible");
+        };
+        let Assign::Revealed { seal, state } = &outs[0] else {
+            panic!("the change seal is revealed");
+        };
+        let amount = state.as_u64();
+        let TxPtr::Txid(seal_txid) = seal.txid else {
+            panic!("the fixture change seal names its txid");
+        };
+        let mut prev_opout = Opout::new(last.opid, asset, 0);
+        let mut prev_outpoint = bitcoin::OutPoint::new(seal_txid, seal.vout.into_u32());
+
+        let mut new_bundles = Vec::with_capacity(transfers + 1);
+        for i in 0..=transfers {
+            let is_burn = i == transfers;
+
+            let mut inputs = Inputs::strict_dumb();
+            inputs.push(prev_opout).unwrap();
+            inputs.remove(&Opout::strict_dumb()).unwrap();
+
+            let mut assignments = Assignments::<GraphSeal>::default();
+            let mut metadata = Metadata::default();
+            if is_burn {
+                let mut burned = MetaValue::default();
+                burned.extend(amount.to_le_bytes()).unwrap();
+                metadata
+                    .add_value(MetaType::with(bfa::MS_BURNED_ASSET), burned)
+                    .unwrap();
+                let mut recipient = MetaValue::default();
+                recipient.extend([0x22u8; 32]).unwrap();
+                metadata
+                    .add_value(MetaType::with(bfa::MS_BURN_RECIPIENT), recipient)
+                    .unwrap();
+            } else {
+                let mut typed = TypedAssigns::<GraphSeal>::Fungible(StrictDumb::strict_dumb());
+                if let TypedAssigns::Fungible(legs) = &mut typed {
+                    *legs.iter_mut().next().unwrap() = Assign::Revealed {
+                        seal: GraphSeal::with_blinding(TxPtr::WitnessTx, 1u32, i as u64),
+                        state: RevealedValue::new(amount),
+                    };
+                }
+                assignments.insert(asset, typed).unwrap();
+            }
+
+            let transition = Transition {
+                ffv: Default::default(),
+                contract_id,
+                nonce: i as u64,
+                transition_type: TransitionType::with(if is_burn {
+                    bfa::TS_BURN
+                } else {
+                    bfa::TS_TRANSFER
+                }),
+                metadata,
+                globals: Default::default(),
+                inputs,
+                assignments,
+                signature: None,
+            };
+            let opid = transition.id();
+
+            let mut bundle = TransitionBundle::strict_dumb();
+            bundle.input_map.insert(prev_opout, opid).unwrap();
+            bundle.input_map.remove(&Opout::strict_dumb()).unwrap();
+            *bundle.known_transitions.iter_mut().next().unwrap() =
+                KnownTransition::new(opid, transition);
+            let bundle_id = bundle.bundle_id();
+
+            // Commit the bundle in an OP_RETURN output of its witness tx.
+            let protocol = mpc::ProtocolId::from(contract_id);
+            let mut source = mpc::MultiSource {
+                static_entropy: Some(i as u64),
+                ..Default::default()
+            };
+            source
+                .messages
+                .insert(protocol, mpc::Message::from(bundle_id))
+                .unwrap();
+            let tree = mpc::MerkleTree::try_commit(&source).expect("mpc tree");
+            let commitment = tree.commit_id();
+            let mpc_proof = mpc::MerkleBlock::from(tree)
+                .to_merkle_proof(protocol)
+                .expect("mpc proof");
+
+            let tx = bitcoin::Transaction {
+                version: bitcoin::transaction::Version(2),
+                lock_time: bitcoin::absolute::LockTime::ZERO,
+                input: vec![bitcoin::TxIn {
+                    previous_output: prev_outpoint,
+                    script_sig: bitcoin::ScriptBuf::new(),
+                    sequence: bitcoin::Sequence::MAX,
+                    witness: bitcoin::Witness::new(),
+                }],
+                output: vec![
+                    bitcoin::TxOut {
+                        value: bitcoin::Amount::ZERO,
+                        script_pubkey: bitcoin::ScriptBuf::new_op_return(
+                            commitment.to_byte_array(),
+                        ),
+                    },
+                    bitcoin::TxOut {
+                        value: bitcoin::Amount::from_sat(1_000),
+                        script_pubkey: bitcoin::ScriptBuf::new_p2wpkh(
+                            &bitcoin::WPubkeyHash::from_byte_array([0x33; 20]),
+                        ),
+                    },
+                ],
+            };
+            prev_outpoint = bitcoin::OutPoint::new(tx.compute_txid(), 1);
+            prev_opout = Opout::new(opid, asset, 0);
+
+            new_bundles.push(WitnessBundle {
+                pub_witness: PubWitness::Tx(tx),
+                anchor: Anchor {
+                    mpc_proof,
+                    dbc_proof: DbcProof::Opret(OpretProof::default()),
+                },
+                bundle,
+            });
+        }
+        transfer.bundles.extend(new_bundles).expect("bundles fit");
+        let mut bytes = Vec::new();
+        transfer
+            .save(&mut bytes)
+            .expect("serialize the consignment");
+        bytes
+    }
+
+    /// A burn source for `consignment`, with one Merkle proof for each witness
+    /// txid. Each proof has `depth` siblings. The proofs are not valid. They
+    /// have the size of real proofs, which is what the request caps count.
+    #[cfg(feature = "bfa-validation")]
+    fn sized_source(consignment: &[u8], witness_txids: &[[u8; 32]], depth: usize) -> RgbSource {
+        RgbSource {
+            consignment: consignment.to_vec(),
+            consignment_hash: keccak(consignment),
+            merkle_proofs: witness_txids
+                .iter()
+                .enumerate()
+                .map(|(i, txid)| MerkleProofEntry {
+                    txid: txid.to_vec(),
+                    block_height: 900_000 + i as u32,
+                    tx_position: 4_000,
+                    merkle_path: vec![vec![0x5a; 32]; depth],
+                })
+                .collect(),
+            ..super::fixture_source(FIXTURE_ASSET_ID)
+        }
+    }
+
+    /// RGB consensus accepts a history of 200 transfers after the fixture.
+    /// This test is fast and keeps [`fixture_with_long_history`] correct. The
+    /// test below uses the same function for 10_000 transfers.
+    #[test]
+    #[cfg(feature = "bfa-validation")]
+    fn validates_a_history_of_200_transfers() {
+        let consignment = fixture_with_long_history(200);
+        let validator = RgbValidator::new(spawn_stub_esplora(), "signet").expect("validator");
+        let validated = validator
+            .validate_consignment(&consignment, &fixture_mint_events())
+            .expect("the long history passes RGB consensus");
+
+        // 1 mint and 2 burns in the fixture, then 200 transfers and 1 burn.
+        assert_eq!(validated.all_op_ids.len(), 204);
+        assert_eq!(validated.witness_txids.len(), 204);
+        let last = validated.last_transition.expect("terminal transition");
+        assert_eq!(last.transition_type, bfa::TS_BURN);
+        assert_eq!(last.burned_asset_amount, Some(40_000));
+    }
+
+    /// A burn with a history of 10_000 transfers passes with the default
+    /// limits. The test makes the real consignment and checks each limit:
+    ///
+    /// 1. RGB consensus accepts the consignment.
+    /// 2. The consignment and its Merkle proofs pass the request caps
+    ///    (`MAX_CONSIGNMENT_BYTES`, `MAX_MERKLE_PROOFS`,
+    ///    `MAX_TOTAL_PROOF_BYTES`). Each proof has 13 siblings, the depth of a
+    ///    full mainnet block.
+    /// 3. The full sign request is smaller than the frame limit, and the
+    ///    enclave reads it.
+    ///
+    /// Ignored by default because it is slow in a debug build. Set
+    /// `SAVE_LONG_HISTORY_CONSIGNMENT` to a file path to keep the consignment.
+    #[test]
+    #[cfg(feature = "bfa-validation")]
+    #[ignore = "validates a history of 10_000 transfers; run it on request"]
+    fn a_history_of_10_000_transfers_fits_the_default_limits() {
+        use crate::framing::{self, MAX_MESSAGE_SIZE};
+        use crate::networks::evm::validation::MAX_FUNDS_OUT_CALL_DATA_LEN;
+        use crate::proto::enclave_request::Request;
+        use crate::proto::sign_request::{DestinationNetwork, SourceNetwork};
+        use crate::proto::{EnclaveRequest, EvmDestination, MintAncestor, SignRequest};
+
+        const TRANSFERS: usize = 10_000;
+        // 1 mint and 2 burns in the fixture, then the transfers and 1 burn.
+        const TRANSITIONS: usize = TRANSFERS + 4;
+
+        let consignment = fixture_with_long_history(TRANSFERS);
+        if let Ok(path) = std::env::var("SAVE_LONG_HISTORY_CONSIGNMENT") {
+            std::fs::write(&path, &consignment).expect("save the consignment");
+        }
+
+        // 1. RGB consensus.
+        let validator = RgbValidator::new(spawn_stub_esplora(), "signet").expect("validator");
+        let start = std::time::Instant::now();
+        let validated = validator
+            .validate_consignment(&consignment, &fixture_mint_events())
+            .expect("the 10_000-transfer history passes RGB consensus");
+        let validate_ms = start.elapsed().as_millis();
+        assert_eq!(validated.all_op_ids.len(), TRANSITIONS);
+        assert_eq!(validated.witness_txids.len(), TRANSITIONS);
+
+        // 2. Request caps.
+        let cfg = BridgeConfig::default();
+        assert!(consignment.len() <= cfg.max_consignment_bytes);
+        let mut source = sized_source(&consignment, &validated.witness_txids, 13);
+        source.mint_ancestors = validated
+            .mint_op_ids
+            .iter()
+            .map(|opid| MintAncestor {
+                op_id: hex::decode(opid).expect("opid hex"),
+                tx_hash: vec![0x77; 32],
+            })
+            .collect();
+        validate_source_payload(&source, &cfg).expect("the source passes the default caps");
+        let proof_bytes: usize = source
+            .merkle_proofs
+            .iter()
+            .map(|p| p.txid.len() + p.merkle_path.iter().map(Vec::len).sum::<usize>())
+            .sum();
+
+        // 3. Frame. The calldata has its maximum size.
+        let request = EnclaveRequest {
+            request: Some(Request::Sign(SignRequest {
+                amount: 40_000,
+                source_network: Some(SourceNetwork::RgbSource(source)),
+                destination_network: Some(DestinationNetwork::EvmDestination(EvmDestination {
+                    call_data: vec![0x11; MAX_FUNDS_OUT_CALL_DATA_LEN],
+                    ..Default::default()
+                })),
+            })),
+        };
+        let mut frame = Vec::new();
+        framing::write_message(&mut frame, &request).expect("write the frame");
+        let body = frame.len() - 4;
+        assert!(
+            body <= MAX_MESSAGE_SIZE as usize,
+            "the request ({body} bytes) is larger than the frame limit"
+        );
+        let decoded: EnclaveRequest =
+            framing::read_message(&mut Cursor::new(&frame)).expect("the enclave reads the frame");
+        assert_eq!(decoded, request);
+
+        println!(
+            "10_000 transfers: consignment {} bytes, {} proofs, proof bytes {proof_bytes}, \
+             request {body} bytes, consensus validation {validate_ms} ms",
+            consignment.len(),
+            TRANSITIONS,
+        );
+    }
+
     // No end-to-end test for an empty validated contract_id.
     // `validate_consignment` derives it from the genesis, so it is never
     // empty. `asset_binding_rule::rejects_empty_validated_contract_id` covers
