@@ -164,13 +164,13 @@ policy_commitment =
     u8(allow_vanilla_psbt)                          // plain-BTC path enabled?
     u8(signer_role)                                 // 0 combined | 1 mint | 2 burn (from build features)
     u8(attestation_mode)                            // 1 = real NSM (0 = mock)
-    u8(evm_source)                                  // 0 disabled | 1 plaintext rpc (dev) | 2 Helios-verified | 3 pinned TLS rpc
+    u8(evm_source)                                  // 0 disabled | 1 plaintext rpc (dev) | 2 reserved, not used | 3 pinned TLS rpc
     u8(btc_source)                                  // 1 = SPV-verified
     chain_id_be8 || bridge_contract(20)
     u32_be(len(rgb_asset_id)) || rgb_asset_id_utf8
     funds_in_contract(20)                           // authorized event emitter
     evm_min_confirmations_be8                       // required receipt depth
-    u8(checkpoint_present)                          // 0 absent; 1 followed by 32-byte beacon root
+    u8(checkpoint_present)                          // 0 in production; 1 followed by 32 bytes (reserved, not used)
     u32_be(len(electrum_host)) || electrum_host     // Electrum host set at launch
     u8(evm_rpc_tls_present)                         // 0 absent; 1 followed by:
       u32_be(len(host)) || host || ca_sha256(32)    //   EVM RPC host, SHA-256 of the CA DER, set at launch
@@ -190,7 +190,7 @@ policy_commitment =
 ```
 
 The tuple omits the Bitcoin network, concrete sats budgets, the Electrum scheme
-and port, the EVM RPC TLS port and strict Helios checkpoint-age setting.
+and port, and the EVM RPC TLS port.
 Image-baked values remain measured in the EIF. The endpoints are not in the
 image; the operator sets them and the KMS values once at launch
 (`SetEndpoints`), and the attestation shows them without a restart. Until the
@@ -319,14 +319,6 @@ attest-verify --endpoint https://parent.example:50051 \
     --expect-kms-key-arn <arn> --expect-kms-region <region> --expect-kms-seed-id <id> \
     --expect-evm-rpc-host <rpc host> --expect-evm-rpc-ca-sha256 <64-hex-chars> \
     --expect-vanilla-psbt
-
-# Optional Helios build (not enabled in the supplied Dockerfiles):
-attest-verify --endpoint https://parent.example:50051 \
-    --pcr0 <..> --pcr1 <..> --pcr2 <..> --expect-signer-role mint \
-    --expect-funds-in-contract <hex20> --expect-evm-min-confirmations 12 \
-    --expect-electrum-host <electrum host> \
-    --expect-kms-key-arn <arn> --expect-kms-region <region> --expect-kms-seed-id <id> \
-    --expect-evm-source helios --expect-helios-checkpoint <hex32>
 
 # Dev / CI verification (against an enclave built with --features mock-attestation).
 # --mock implies the expected policy is Development.

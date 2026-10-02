@@ -1,4 +1,6 @@
-# `fundsOut` signing gate — TEE validation predicates (`handle_sign`)
+# `fundsOut` signing gate — burn signer (`handle_sign`)
+
+Step-by-step text: [burn flow](../burn-flow.md).
 
 ```mermaid
 flowchart TD
@@ -14,7 +16,7 @@ flowchart TD
         p1q -->|no| p1r[REFUSE — invalid consignment]:::refuse
         p1q -->|yes| p1c{"contract_id == declared asset_id<br/>(== pinned RGB_ASSET_ID when configured)?"}
         p1c -->|no| p1cr[REFUSE — asset mismatch]:::refuse
-        p1c -->|yes| p1e["source amount from consignment, per build flow:<br/>rgb-swap ⇒ TS_TRANSFER total_output /<br/>rgb-mint-burn ⇒ TS_BURN burned amount<br/>(host rgb_amount NOT used);<br/>any other transition ⇒ REFUSE"]
+        p1c -->|yes| p1e["source amount = TS_BURN MS_BURNED_ASSET<br/>(host rgb_amount NOT used);<br/>any other transition ⇒ REFUSE"]
     end
     start --> p1w
 
@@ -32,7 +34,7 @@ flowchart TD
     subgraph P2 ["P3 — EVM destination (validate_destination)"]
         p2len{"calldata ≥ 4 bytes AND ≤ 64 KiB?"}
         p2len -->|no| p2lenr[REFUSE — size]:::refuse
-        p2len -->|yes| p2sel{"selector is fundsOut 0xdc771390<br/>or lzFundsOut?"}
+        p2len -->|yes| p2sel{"selector is fundsOut 0x340276aa<br/>or lzFundsOut?"}
         p2sel -->|no| p2selr[REFUSE — unknown selector]:::refuse
         p2sel -->|yes| p2abi{"canonical ABI:<br/>decode FundsOutParams AND<br/>re-encode byte-equals input?"}
         p2abi -->|no| p2abir[REFUSE — non-canonical calldata]:::refuse
@@ -47,7 +49,7 @@ flowchart TD
     end
     p3q -->|yes| p2len
 
-    subgraph P4 ["P4 — route + fundsOut binding (apply_funds_out_binding)"]
+    subgraph P4 ["P4 — route + fundsOut binding (apply_funds_out_binding)<br/>pools route only; lzFundsOut skips after the route check"]
         p4r{"route: source amount ≥ destination amount?"}
         p4r -->|no| p4rr[REFUSE — not covered]:::refuse
         p4r -->|yes| p4w{all consignment witnesses mined?}
@@ -56,13 +58,13 @@ flowchart TD
         p4b -->|no| p4br[REFUSE — missing finality proof]:::refuse
         p4b -->|yes| p4bv{"proof (sourceHeight, sourceCommit,<br/>latestHeight, latestCommit):<br/>header held at latestHeight,<br/>tip − latestHeight ≤ 100,<br/>sourceHeight == consignment anchor block,<br/>BTC_RELAY_MODE=required: both commits == enclave-rebuilt relay records (zero ⇒ refuse);<br/>BTC_RELAY_MODE=none (never production): both commits zero?"}
         p4bv -->|no| p4bvr[REFUSE — BtcRelay disagreement]:::refuse
-        p4bv -->|yes| p4t{"last transition == the build flow's unlock shape<br/>(TS_TRANSFER / TS_BURN) AND<br/>swap: source amount ≥ calldata amount;<br/>mint/burn: burned amount == calldata amount?"}
+        p4bv -->|yes| p4t{"last transition == TS_BURN AND<br/>burned amount == calldata amount?"}
         p4t -->|no| p4tr[REFUSE — fundsOut amount bind]:::refuse
         p4t -->|yes| p4id{"sourceBurnTxId == settling transition OpId<br/>(non-zero) AND sourceAddress empty?"}
         p4id -->|no| p4idr[REFUSE — burn identity bind]:::refuse
-        p4id -->|yes| p4rc{"rgb-mint-burn:<br/>MS_BURN_RECIPIENT == calldata recipient?<br/>(swap: no recipient to bind)"}
+        p4id -->|yes| p4rc{"MS_BURN_RECIPIENT == calldata recipient?"}
         p4rc -->|no| p4rcr[REFUSE — burn recipient]:::refuse
-        p4rc -->|yes| p4st{"bfa-mint:<br/>settlementData pairs == verified<br/>ancestry BridgeFundsIn records?"}
+        p4rc -->|yes| p4st{"settlementData pairs == verified<br/>ancestry BridgeFundsIn records?"}
         p4st -->|no| p4str[REFUSE — settlement bind]:::refuse
     end
     p2d -->|yes| p4r
@@ -80,22 +82,14 @@ flowchart TD
 
 ### Notes
 
-- `sourceBurnTxId` is bound to the settling transition's RGB OpId and
-  `sourceAddress` to the empty string on every RGB build; `settlementData` is
-  bound to the burn's verified mint ancestry on a `bfa-mint` build. `burnId`
-  is signed as supplied: the contract recomputes it from these bound fields
-  (`BURN_TYPEHASH`, bridge PR #152) and reverts on a mismatch (spec P6).
-- Which unlock shape completes this gate is chosen at build time: an
-  `rgb-swap` enclave signs `TS_TRANSFER` only, an `rgb-mint-burn` enclave
-  `TS_BURN` only. They are separate instances with separate PCR0s; neither
-  binary contains the other's rules.
-- With `bfa-mint` (a mint/burn build on the bridged schema) the burn carries
-  mint ancestry: every `TS_BRIDGE` behind it is checked against its own
-  verified `FundsIn` lock before the gate completes.
-- Every dev feature is a `compile_error!` in release builds, and a release
-  bridge build refuses to boot without a valid attested `Production` policy.
-
-BFA ancestry locks are verified through the selected EVM provider before RGB
-validation. The diagram focuses on the subsequent authorization gates.
-Swap amount/recipient limitations and release-identifier limits are collected
-in [the spec](../tee-spec.md#13-implementation-status).
+- Pools route (`fundsOut`): `sourceBurnTxId` is bound to the burn OpId,
+  `sourceAddress` to empty, `settlementData` to the verified mint ancestry,
+  amount and recipient to the burn metadata. `burnId` is recomputed in the
+  enclave on both routes (`validate_burn_id`).
+- LayerZero route (`lzFundsOut`): P4 stops after the route check
+  (burned amount >= calldata amount). The other P4 binds do not run. See
+  [the spec](../tee-spec.md#13-implementation-status).
+- The burn signer verifies the mint ancestry locks through the pinned TLS EVM
+  RPC before RGB validation. This diagram starts after that step.
+- Each dev feature is a `compile_error!` in release builds. A release bridge
+  build refuses to boot without a valid attested `Production` policy.
