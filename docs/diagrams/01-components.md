@@ -15,7 +15,7 @@ flowchart TB
         PFr[framing.rs<br/>u32 LE len + protobuf]
         PALib[attest_verify.rs<br/>library half of CLI —<br/>rebuilds expected policy + bundle]
         PCli[bin/cli.rs<br/>utexo-bridge-parent-cli]
-        AVCli[attest-verify CLI<br/>--pcr0/1/2, --expect-signer-role,<br/>--expect-vanilla-psbt,<br/>--expect-evm-source tls, raw, helios or disabled,<br/>--expect-electrum-host,<br/>--expect-evm-rpc-host, --expect-evm-rpc-ca-sha256]
+        AVCli[attest-verify CLI<br/>--pcr0/1/2, --expect-signer-role,<br/>--expect-vanilla-psbt,<br/>--expect-evm-source tls, raw or disabled,<br/>--expect-electrum-host,<br/>--expect-evm-rpc-host, --expect-evm-rpc-ca-sha256]
         PMisc[config.rs / error.rs]
     end
 
@@ -45,15 +45,15 @@ flowchart TB
         KM[keys.rs — KeyManager<br/>BIP-39/32/44/84/86 + SLIP-0010 ed25519<br/>SecretBox seed + keys]
 
         subgraph NEVM [networks/evm/]
-            NEV[validation.rs<br/>selectors fundsOut 0xdc771390 + lzFundsOut,<br/>canonical ABI decode + re-encode,<br/>64 KiB cap, pins, destinationChainId, deadline]
+            NEV[validation.rs<br/>selectors fundsOut 0x340276aa + lzFundsOut,<br/>canonical ABI decode + re-encode,<br/>64 KiB cap, pins, destinationChainId, deadline]
             NEC[crosscheck.rs<br/>witnesses-confirmed, BtcRelay proof<br/>anchored to consignment block,<br/>flow amount bind, burn recipient]
-            NEE[events.rs<br/>independent FundsIn verify,<br/>pinned-TLS RPC (supplied images)<br/>or optional checkpoint-verified Helios]
+            NEE[events.rs<br/>independent FundsIn verify,<br/>pinned-TLS RPC,<br/>TLS ends in the enclave]
             NEG[gas_tx.rs<br/>gas-tx preimage allowlist:<br/>strict RLP + chain / to pins]
             NES[signing.rs<br/>EIP-712 MultisigProxy v1<br/>TeeFundsOut / TeeLzFundsOut digest]
         end
         subgraph NRGB [networks/rgb/]
             NRV[validation/<br/>indexer.rs Electrum/Esplora resolver,<br/>consensus.rs rgb-ops Transfer validation,<br/>consignment.rs decode, schema.rs typesystem pin]
-            NRF[flow/swap.rs or flow/mint_burn.rs<br/>exactly one per image:<br/>accepted transitions + amount rule]
+            NRF[flow/mint_burn.rs (production)<br/>flow/swap.rs (retired)<br/>exactly one per image:<br/>accepted transitions + amount rule]
             NRI[invoice.rs<br/>FundsIn destinationAddress →<br/>blinded seal == recipient leg]
             NRP[psbt_validation.rs<br/>PSBT ↔ consignment anchor,<br/>per-output legs, pinned fee policy<br/>(max rate + max fee, both PSBT paths)]
             NRB[btc_crosscheck.rs<br/>plain-BTC + send-RGB sats gates<br/>btc_ownership.rs custody rule<br/>+ total-sats cap + unowned budgets]
@@ -127,9 +127,9 @@ flowchart TB
     VFwd -->|"vsock CID 3:8001"| VP
     VP -->|"Electrum TCP/TLS or Esplora HTTP"| Esp
 
-    NEE -.->|"eth_getTransactionReceipt /<br/>eth_blockNumber — host-relayed evidence"| VFwd
+    NEE -.->|"eth_getTransactionReceipt /<br/>eth_blockNumber — TLS to pinned host and CA"| VFwd
     VFwd -->|"vsock 8002"| VPe
-    VPe -->|"real HTTP"| EvmRpc
+    VPe -->|"TLS bytes (ends in enclave)"| EvmRpc
 
     NRS --> SCh
     NRS --> SMk

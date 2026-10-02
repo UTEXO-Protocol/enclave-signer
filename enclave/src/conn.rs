@@ -1,26 +1,18 @@
-//! Connection-level resource limits for the request socket.
+//! Resource limits for the request socket.
 //!
-//! The enclave reads a single length-prefixed request, replies, and closes
-//! (see `framing` + `server::handle_connection`). Without deadlines a peer that
-//! sends a length prefix and then withholds (or trickles) the body parks the
-//! handler indefinitely; combined with serial accept handling that stalls every
-//! other client. [`DeadlineStream`] bounds a single request end-to-end.
+//! The enclave reads one length-prefixed request, replies and closes. Without
+//! deadlines, a peer that holds back the body blocks a worker for ever.
+//! [`DeadlineStream`] sets two bounds through `SO_RCVTIMEO` / `SO_SNDTIMEO`:
+//!   * idle gap: one read or write blocks at most [`IO_IDLE_TIMEOUT`];
+//!   * total deadline: the request completes in [`TOTAL_REQUEST_TIMEOUT`].
+//!     This stops a slow trickle that stays below the idle timeout.
 //!
-//! Two bounds, both enforced by shrinking the kernel socket timeout
-//! (`SO_RCVTIMEO` / `SO_SNDTIMEO`) before each syscall:
-//!   * idle gap: no single read/write may block longer than [`IO_IDLE_TIMEOUT`]
-//!     (kills "send prefix, then withhold the body"); and
-//!   * total deadline: the whole request must complete within
-//!     [`TOTAL_REQUEST_TIMEOUT`] (kills a slow trickle that stays just under the
-//!     idle timeout, which a fixed per-read timeout alone cannot bound).
+//! `main::serve` also caps work: [`WORKER_THREADS`] workers and a bounded queue
+//! of [`MAX_QUEUED_CONNECTIONS`].
 //!
-//! The accept layer (`main::serve`) also caps in-flight work: a small worker
-//! pool ([`WORKER_THREADS`]) fed by a bounded queue ([`MAX_QUEUED_CONNECTIONS`])
-//! so one slow-but-bounded request can't starve the rest.
-//!
-//! Sole ingress is the parent over vsock, already untrusted and able to kill
-//! the enclave outright, so this is availability defense in depth. The limits
-//! are compile-time constants (PCR-attested), not env-tunable.
+//! The only ingress is the untrusted parent, which can stop the enclave anyway.
+//! These limits are availability defense in depth. They are compile-time
+//! constants (PCR-attested), not env settings.
 
 use std::io::{self, Read, Write};
 use std::time::{Duration, Instant};
@@ -28,23 +20,19 @@ use std::time::{Duration, Instant};
 /// Max time a single read or write syscall on the request socket may block.
 pub const IO_IDLE_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// Max wall-clock for one request, end-to-end (read + dispatch-adjacent I/O +
-/// write). A trickle that stays under [`IO_IDLE_TIMEOUT`] per read is still
-/// bounded by this.
+/// Max wall-clock time for one request, from accept to the last write.
 pub const TOTAL_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// Number of connection-handling worker threads. The sole ingress is the
-/// single parent peer, so a small pool is ample; it exists so one slow request
-/// can't block the others.
+/// Connection worker threads. The only peer is the parent, so a small pool is
+/// sufficient. One slow request does not block the others.
 pub const WORKER_THREADS: usize = 4;
 
-/// Bounded backlog of accepted-but-unhandled connections. When full, new
-/// connections are dropped (closed) rather than queued unboundedly.
+/// Max accepted connections that wait for a worker. When full, new
+/// connections are closed.
 pub const MAX_QUEUED_CONNECTIONS: usize = 16;
 
-/// Sockets we accept requests on. Both `std::net::TcpStream` (dev / tests) and
-/// `vsock::VsockStream` (production) expose std-style timeout setters; this
-/// trait lets [`DeadlineStream`] arm whichever it wraps.
+/// Request socket timeouts, for `TcpStream` (dev, tests) and `VsockStream`
+/// (production).
 pub trait SocketTimeout {
     fn set_read_timeout(&self, dur: Option<Duration>) -> io::Result<()>;
     fn set_write_timeout(&self, dur: Option<Duration>) -> io::Result<()>;
@@ -59,7 +47,6 @@ impl SocketTimeout for std::net::TcpStream {
     }
 }
 
-// Production socket. vsock is Linux-only and mirrors the TcpStream impl.
 #[cfg(all(feature = "vsock", target_os = "linux"))]
 impl SocketTimeout for vsock::VsockStream {
     fn set_read_timeout(&self, dur: Option<Duration>) -> io::Result<()> {
@@ -70,10 +57,9 @@ impl SocketTimeout for vsock::VsockStream {
     }
 }
 
-/// Wraps a socket with an absolute per-request deadline. Before each read/write
-/// it arms the kernel timeout to `min(idle, time-left)`; once the deadline has
-/// passed, every op fails `TimedOut` without touching the socket. Implements
-/// `Read + Write`, so `framing::{read_message, write_message}` use it unchanged.
+/// A socket with an absolute per-request deadline. Before each read or write,
+/// it sets the kernel timeout to `min(idle, time left)`. After the deadline,
+/// every operation fails with `TimedOut` and does not touch the socket.
 pub struct DeadlineStream<S> {
     inner: S,
     deadline: Instant,
@@ -81,13 +67,13 @@ pub struct DeadlineStream<S> {
 }
 
 impl<S: SocketTimeout> DeadlineStream<S> {
-    /// Start the deadline clock now. `total` is the whole-request budget;
-    /// `idle` caps any single syscall.
+    /// Start the deadline now. `total` is the request budget. `idle` caps one
+    /// syscall.
     pub fn new(inner: S, total: Duration, idle: Duration) -> Self {
         Self::with_deadline(inner, Instant::now() + total, idle)
     }
 
-    /// Use an existing aggregate deadline instead of restarting its budget.
+    /// Use an existing deadline.
     pub fn with_deadline(inner: S, deadline: Instant, idle: Duration) -> Self {
         Self {
             inner,
@@ -96,14 +82,13 @@ impl<S: SocketTimeout> DeadlineStream<S> {
         }
     }
 
-    /// Time left until the deadline, or `None` (with a ready-made error) if the
-    /// budget is exhausted. The armed value is clamped to `idle`.
+    /// Time left, capped at `idle`. `TimedOut` error when no time is left.
     fn arm(&self) -> io::Result<Duration> {
         Ok(remaining_until(self.deadline)?.min(self.idle))
     }
 }
 
-/// Shared absolute-deadline check for sockets and custody calls.
+/// Time left until `deadline`, or `TimedOut`. Used by sockets and custody calls.
 pub(crate) fn remaining_until(deadline: Instant) -> io::Result<Duration> {
     let remaining = deadline.saturating_duration_since(Instant::now());
     if remaining.is_zero() {
@@ -200,8 +185,7 @@ mod tests {
 
     #[test]
     fn read_after_deadline_is_timed_out() {
-        // Zero total budget => deadline is already (about) now: the next op
-        // sees no time left and fails without reading. No sleeping needed.
+        // Zero budget: the deadline is now, so the read fails at once.
         let mut s = DeadlineStream::new(
             MockSock::with_read(vec![1, 2, 3]),
             Duration::ZERO,

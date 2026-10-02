@@ -43,7 +43,7 @@ impl Pki {
             self.pin("observer")
         )
     }
-    #[allow(dead_code)] // Used by perimeter tests; clone tests use the CLI's endpoint builder.
+    #[allow(dead_code)] // Perimeter tests use it. Clone tests use the CLI endpoint builder.
     pub fn endpoint(
         &self,
         addr: std::net::SocketAddr,

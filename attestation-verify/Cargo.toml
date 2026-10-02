@@ -20,11 +20,9 @@ thiserror = "2"
 
 [features]
 default = []
-# Enables the mock document path: build raw-CBOR docs without COSE wrapping
-# and verify them without cert-chain checks. PCR/nonce/pubkey binding still
-# enforced. Tests-only.
+# Mock document path for tests only. Docs are raw CBOR without COSE and skip
+# cert-chain checks. PCR, nonce and public key binding stay enforced.
 mock = []
-# Accept all-zero PCR0/1/2 for debug tests. (F03-AF-12 / F02-AF-08)
-# Debug PCRs cannot identify the peer image.
-# Do not enable this feature in production builds.
+# Accept all-zero PCR0/1/2 in debug tests. (F03-AF-12 / F02-AF-08)
+# Debug PCRs do not identify the peer image. Do not enable in production.
 allow-debug-pcrs = []

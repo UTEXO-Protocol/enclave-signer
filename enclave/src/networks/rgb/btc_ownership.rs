@@ -1,38 +1,32 @@
-//! Proof that a plain-BTC PSBT output pays back to keys this enclave controls.
+//! Proof that a PSBT output pays back to keys this enclave controls.
 //!
-//! Replaces the operator-pinned `BTC_ALLOWED_SCRIPTS` allowlist, which could
-//! not work in production: the scripts to pin derive from a seed that only
-//! exists after the enclave boots, and baking them into the image changes the
-//! PCR0 identity that seed is bound to.
+//! The proof uses no operator-pinned script list. Such scripts derive from a
+//! seed that exists only after boot, and putting them in the image changes
+//! PCR0.
 //!
-//! An output is accepted on either of two rules.
+//! An output is accepted on one of two rules.
 //!
 //! (A) Its `script_pubkey` equals that of an input this enclave controls, as
 //! resolved by
 //! [`find_controlled_taproot_inputs`](crate::networks::rgb::signing::taproot::find_controlled_taproot_inputs):
 //! a BIP-86 key-path input whose internal key derives from our seed and,
-//! tweaked with its merkle root, reproduces the output key. The sighash
-//! commits to the script, and custody does not change when the PSBT merges
-//! one of our signatures. A tapret-tweaked input can still commit to a script
-//! tree with foreign spend paths, so outputs on its script are exempt only up
-//! to the input value on that script. It holds for bridge change because the
-//! wallet reuses addresses.
+//! tweaked with its merkle root, gives the output key. The sighash commits to
+//! the script. A tapret-tweaked input can commit to a script tree with foreign
+//! spend paths. Thus outputs on its script are exempt only up to the input
+//! value on that script. Bridge change passes because the wallet reuses
+//! addresses.
 //!
-//! (C) It is a BIP-86 key-path output of one of our own accounts: the claimed
-//! internal key derives from our seed at the claimed path, the output carries
-//! no script tree, and the key tweaked with an empty tree reproduces the
-//! script. The metadata only names the path; a forged claim cannot match the
-//! script. Only we can spend it, so it is exempt in full. This is what makes
-//! fresh change and `create_utxo` allocations provably ours.
+//! (C) It is a BIP-86 key-path output of one of our accounts: the claimed
+//! internal key derives from our seed at the claimed path, the output has no
+//! script tree, and the key tweaked with an empty tree gives the script. The
+//! metadata only names the path. A forged claim cannot match the script. Only
+//! we can spend it, so it is exempt in full. This covers fresh change and
+//! `create_utxo` allocations.
 //!
-//! A former rule (B) accepted an output whose taproot tree held a leaf naming
-//! our key. One leaf proves nothing about the rest of the tree or its internal
-//! key, so it was removed; (C) refuses any output with a tree for the same
-//! reason. Whatever neither rule proves is bounded by value in
-//! [`crate::networks::rgb::btc_crosscheck`].
-//!
-//! Scope: this makes the plain-BTC path structurally self-pay. Withdrawals to
-//! an arbitrary user address remain out of scope.
+//! There is no rule (B). A taproot leaf that names our key proves nothing about
+//! the rest of the tree or its internal key. For the same reason, (C) refuses
+//! any output with a tree. [`crate::networks::rgb::btc_crosscheck`] bounds by
+//! value what neither rule proves.
 
 use std::collections::{HashMap, HashSet};
 
@@ -44,11 +38,11 @@ use bitcoin::{ScriptBuf, XOnlyPublicKey};
 use crate::keys::{AccountType, KeyManager};
 use crate::networks::rgb::signing::taproot::{find_controlled_taproot_inputs, TaprootSignJob};
 
-/// The `script_pubkey`s of every PSBT input this enclave provably controls
-/// on the plain-BTC (Vanilla) account.
+/// The `script_pubkey`s of the PSBT inputs this enclave provably controls on
+/// the plain-BTC (Vanilla) account.
 ///
-/// Membership comes from the custody resolver, so every entry is anchored
-/// to the output key and to a BIP-86 derivation that really produces the key.
+/// Each entry comes from the custody resolver, so a real BIP-86 derivation
+/// gives its output key.
 pub fn self_controlled_input_scripts(psbt: &Psbt, keys: &KeyManager) -> HashSet<Vec<u8>> {
     self_controlled_input_scripts_scoped(psbt, keys, Some(AccountType::Vanilla))
 }
@@ -56,10 +50,10 @@ pub fn self_controlled_input_scripts(psbt: &Psbt, keys: &KeyManager) -> HashSet<
 /// [`self_controlled_input_scripts`] with the account filter made explicit.
 ///
 /// `allowed_account` is `Some(_)` for one BIP-86 account, `None` for either.
-/// The plain-BTC path pins `Vanilla`; the send-RGB sats budget passes `None`,
-/// and the asset change oracle pins `Colored`.
-/// Widening the filter only widens which scripts count as ours, never what gets
-/// signed - that is `sign_psbt_scoped`'s job.
+/// The plain-BTC path uses `Vanilla`, the send-RGB sats budget uses `None`,
+/// and the asset change oracle uses `Colored`.
+/// A wider filter changes only which scripts count as ours, never what is
+/// signed. `sign_psbt_scoped` controls signing.
 pub fn self_controlled_input_scripts_scoped(
     psbt: &Psbt,
     keys: &KeyManager,
@@ -69,8 +63,8 @@ pub fn self_controlled_input_scripts_scoped(
     controlled_input_scripts(psbt, &jobs, allowed_account)
 }
 
-/// [`self_controlled_input_scripts_scoped`] over an already-resolved job list,
-/// so a caller that also needs the jobs (fee sizing) derives each input once.
+/// [`self_controlled_input_scripts_scoped`] over resolved jobs, so a caller
+/// that also needs the jobs (fee sizing) derives each input once.
 /// `jobs` must come from [`find_controlled_taproot_inputs`] on this `psbt`.
 pub fn controlled_input_scripts(
     psbt: &Psbt,
@@ -86,8 +80,8 @@ pub fn controlled_input_scripts(
 }
 
 /// The Colored input script that can take bridge asset change. Empty unless the
-/// PSBT spends exactly one. A qualified input can have foreign spend paths, so a
-/// second Colored script makes custody ambiguous.
+/// PSBT spends exactly one. A controlled input can have foreign spend paths, so
+/// a second Colored script makes custody ambiguous.
 pub fn asset_change_scripts(psbt: &Psbt, keys: &KeyManager) -> HashSet<Vec<u8>> {
     let scripts = self_controlled_input_scripts_scoped(psbt, keys, Some(AccountType::Colored));
     if scripts.len() == 1 {
@@ -97,12 +91,11 @@ pub fn asset_change_scripts(psbt: &Psbt, keys: &KeyManager) -> HashSet<Vec<u8>> 
     }
 }
 
-/// Indices of every PSBT output on an [`asset_change_scripts`] script, or
+/// Indices of the PSBT outputs on an [`asset_change_scripts`] script, or
 /// proven ours on the Colored account by rule (C).
 ///
-/// The change-leg oracle for the send-RGB per-output amount bind:
-/// a revealed RGB seal counts as bridge change only when the Bitcoin output it
-/// names is one we control.
+/// The change-leg oracle for the send-RGB per-output amount bind. A revealed
+/// RGB seal is bridge change only when we control its Bitcoin output.
 pub fn self_owned_output_indices(psbt: &Psbt, keys: &KeyManager) -> HashSet<u32> {
     let input_scripts = asset_change_scripts(psbt, keys);
     (0..psbt.unsigned_tx.output.len())
@@ -114,8 +107,8 @@ pub fn self_owned_output_indices(psbt: &Psbt, keys: &KeyManager) -> HashSet<u32>
         .collect()
 }
 
-/// Whether output `index` pays back into the custody its inputs were already in.
-/// `input_scripts` is hoisted so a multi-output PSBT resolves its inputs once.
+/// True when output `index` pays back to one of `input_scripts` (rule A).
+/// The caller resolves `input_scripts` once for all outputs.
 pub fn output_is_self_owned(psbt: &Psbt, index: usize, input_scripts: &HashSet<Vec<u8>>) -> bool {
     let Some(txout) = psbt.unsigned_tx.output.get(index) else {
         return false;
@@ -123,9 +116,9 @@ pub fn output_is_self_owned(psbt: &Psbt, index: usize, input_scripts: &HashSet<V
     input_scripts.contains(txout.script_pubkey.as_bytes())
 }
 
-/// Rule (C): the output's claimed internal key is ours at the claimed BIP-86
-/// path, there is no script tree, and the empty-tree tweak of that key is the
-/// script. The twin of the key-path sign job, applied to an output.
+/// Rule (C): the claimed internal key is ours at the claimed BIP-86 path, there
+/// is no script tree, and the empty-tree tweak of that key is the script. It is
+/// the key-path sign job check, applied to an output.
 /// `allowed_account` is `Some(_)` for one BIP-86 account, `None` for either.
 pub fn output_is_self_derived(
     psbt: &Psbt,
@@ -173,7 +166,7 @@ pub fn output_is_self_derived(
 
 /// Sats that the outputs pay outside the custody of the inputs. An output on a
 /// script in `input_scripts` is exempt up to the input value on that script
-/// (rule A); a rule (C) output is exempt in full. `None` on overflow.
+/// (rule A). A rule (C) output is exempt in full. `None` on overflow.
 pub fn unowned_output_sats(
     psbt: &Psbt,
     input_scripts: &HashSet<Vec<u8>>,
@@ -276,8 +269,8 @@ pub(crate) mod tests {
         our_key_on(keys, AccountType::Vanilla, chain, index)
     }
 
-    /// Colored-account key at m/86'/827167'/0'/0/0 - ours, on the RGB account
-    /// that `create_utxo` funds fresh allocation UTXOs on.
+    /// Colored-account key at m/86'/827167'/0'/0/0, where `create_utxo` makes
+    /// allocation UTXOs.
     fn our_colored_key(keys: &KeyManager) -> (XOnlyPublicKey, DerivationPath) {
         our_key_on(keys, AccountType::Colored, 0, 0)
     }
@@ -331,8 +324,8 @@ pub(crate) mod tests {
         ScriptBuf::new_p2tr(&Secp256k1::new(), foreign_xonly(b), None)
     }
 
-    /// Unsigned PSBT with `n_inputs` distinct prevouts (no input metadata yet)
-    /// and the given outputs. Output metadata is left empty for the caller.
+    /// Unsigned PSBT with `n_inputs` distinct prevouts and the given outputs.
+    /// Input and output metadata are empty.
     pub(crate) fn psbt_with_n(n_inputs: usize, outputs: &[(ScriptBuf, u64)]) -> Psbt {
         let unsigned_tx = Transaction {
             version: bitcoin::transaction::Version(2),
@@ -359,8 +352,8 @@ pub(crate) mod tests {
         Psbt::from_unsigned_tx(unsigned_tx).unwrap()
     }
 
-    /// One-input, one-output PSBT. The input spends `input_spk`; the output
-    /// pays `output_spk`. Output metadata is left empty for the caller to fill.
+    /// One-input, one-output PSBT: spends `input_spk`, pays `output_spk`.
+    /// Output metadata is empty.
     fn psbt_with(input_spk: ScriptBuf, output_spk: ScriptBuf) -> Psbt {
         let mut psbt = psbt_with_n(1, &[(output_spk, 40_000)]);
         psbt.inputs[0].witness_utxo = Some(TxOut {
@@ -370,8 +363,8 @@ pub(crate) mod tests {
         psbt
     }
 
-    /// Fully populate input `index` (worth `value` sats) as a BIP-86 key-path
-    /// input of our key at `account`/`chain`/`child`.
+    /// Sets input `index` (`value` sats) as a BIP-86 key-path input of our key
+    /// at `account`/`chain`/`child`.
     pub(crate) fn anchor_input(
         psbt: &mut Psbt,
         index: usize,
@@ -396,7 +389,7 @@ pub(crate) mod tests {
         spk
     }
 
-    /// Fully populate input 0 as our Vanilla key-path input.
+    /// Sets input 0 as our Vanilla key-path input.
     fn make_input_ours(psbt: &mut Psbt, keys: &KeyManager) -> ScriptBuf {
         anchor_input(psbt, 0, keys, AccountType::Vanilla, 0, 0, 50_000)
     }
@@ -413,14 +406,13 @@ pub(crate) mod tests {
         let keys = km();
         let mut psbt = psbt_with(ScriptBuf::new(), ScriptBuf::new());
         let spk = make_input_ours(&mut psbt, &keys);
-        // Pay straight back to the input's own script - no output metadata at all.
+        // Pay back to the input script, with no output metadata.
         psbt.unsigned_tx.output[0].script_pubkey = spk;
         assert!(owned(&psbt, &keys));
     }
 
-    /// Rule (A) must key off inputs we can actually sign, not merely inputs
-    /// present in the PSBT. An input locked to someone else's key produces no
-    /// sign job, so repaying it proves nothing.
+    /// Rule (A) uses only inputs we can sign. A foreign input gives no sign
+    /// job, so an output to its script proves nothing.
     #[test]
     fn rejects_output_repaying_an_input_we_do_not_control() {
         let keys = km();
@@ -429,9 +421,8 @@ pub(crate) mod tests {
         assert!(!owned(&psbt, &keys));
     }
 
-    /// Rule (A) anchors on inputs we sign, and this path signs Vanilla only,
-    /// so repaying a Colored input with no output metadata proves nothing. A
-    /// Colored destination is fine, but must come via rule (C).
+    /// This path signs Vanilla only, so an output to a Colored input script
+    /// with no metadata proves nothing. A Colored destination needs rule (C).
     #[test]
     fn rejects_bare_output_repaying_a_colored_input() {
         let keys = km();
@@ -442,12 +433,11 @@ pub(crate) mod tests {
         assert!(!owned(&psbt, &keys));
     }
 
-    // === Rule (B) is gone: metadata is not a proof of control ===
+    // === No rule (B): metadata is not a proof of control ===
     //
-    // Shapes rule (B) accepted, now rejected. Not a loss of function: rule (C)
-    // proves our own key-path outputs directly.
+    // Rule (C) proves our own key-path outputs directly.
 
-    /// The finding's shape: a leaf naming our key, in a tree we do not control.
+    /// A leaf that names our key, in a tree we do not control.
     #[test]
     fn a_leaf_mentioning_our_key_is_not_ownership() {
         let keys = km();
@@ -476,8 +466,8 @@ pub(crate) mod tests {
 
     // === Rule (C): a BIP-86 key-path output of one of our accounts ===
     //
-    // The metadata only names a path; the proof is that our key derived at
-    // that path, tweaked with an empty tree, reproduces the output script.
+    // The metadata only names a path. The proof: our key at that path, tweaked
+    // with an empty tree, gives the output script.
 
     /// Fresh change on the Vanilla account: the script is rebuilt from our
     /// derived key, so a forged claim cannot match it.
@@ -498,8 +488,8 @@ pub(crate) mod tests {
         assert!(owned(&psbt, &keys));
     }
 
-    /// `create_utxo` allocations land on the Colored account, whose scripts
-    /// never equal a Vanilla input's: rule (C) is what makes them ours.
+    /// `create_utxo` allocations are on the Colored account. Their scripts
+    /// never equal a Vanilla input script, so rule (C) proves them.
     #[test]
     fn accepts_an_allocation_output_on_the_colored_account() {
         let keys = km();
@@ -517,7 +507,7 @@ pub(crate) mod tests {
         assert!(owned(&psbt, &keys));
     }
 
-    /// Our path under someone else's fingerprint: the derivation is not ours.
+    /// Our path under a foreign fingerprint: the derivation is not ours.
     #[test]
     fn rejects_a_derived_claim_under_a_foreign_fingerprint() {
         let keys = km();
@@ -542,8 +532,8 @@ pub(crate) mod tests {
         assert!(!owned(&psbt, &keys));
     }
 
-    /// A foreign key claimed under our fingerprint and path: deriving the path
-    /// gives a different key, so the claim is refused before the script check.
+    /// A foreign key claimed on our fingerprint and path. The path derives a
+    /// different key, so the claim fails before the script check.
     #[test]
     fn rejects_a_foreign_key_claimed_on_our_path() {
         let keys = km();
@@ -562,8 +552,8 @@ pub(crate) mod tests {
         assert!(!owned(&psbt, &keys));
     }
 
-    /// Our key as the internal key of a script tree: the tree's leaves may let
-    /// others spend, so only an empty tree proves the output is ours alone.
+    /// Our key as the internal key of a script tree. Leaves can let others
+    /// spend, so only an empty tree proves the output is ours alone.
     #[test]
     fn rejects_our_key_under_a_script_tree() {
         let keys = km();
@@ -663,9 +653,9 @@ pub(crate) mod tests {
         }
     }
 
-    /// Non-taproot outputs can never be reconstructed from BIP-371 metadata, so
-    /// they are only accepted via rule (A) - which a P2WPKH input can't satisfy
-    /// either (the enclave controls key-path taproot inputs only).
+    /// BIP-371 metadata cannot describe a non-taproot output, so only rule (A)
+    /// can accept it. The enclave controls key-path taproot inputs only, so a
+    /// P2WPKH input never passes rule (A).
     #[test]
     fn rejects_non_taproot_output() {
         let keys = km();
@@ -711,8 +701,8 @@ pub(crate) mod tests {
         (spk, input)
     }
 
-    /// The send-RGB change oracle: bridge asset change must not land on the
-    /// script of an input that only names our key in one leaf.
+    /// Send-RGB change oracle: bridge asset change must not go to the script of
+    /// an input that only names our key in one leaf.
     #[test]
     fn change_oracle_rejects_output_on_a_foreign_input_script() {
         let keys = km();
@@ -724,7 +714,7 @@ pub(crate) mod tests {
         psbt.unsigned_tx.output[0].script_pubkey = bridge_spk;
         assert!(self_owned_output_indices(&psbt, &keys).contains(&0));
 
-        // Input 1: attacker-funded, internal key theirs, one leaf naming our key.
+        // Input 1: attacker internal key, one leaf that names our key.
         let leaf = ScriptBuilder::new()
             .push_x_only_key(&our)
             .push_opcode(OP_CHECKSIG)
@@ -742,7 +732,7 @@ pub(crate) mod tests {
 
     // === custody must not depend on merge progress ===
 
-    /// What the two sats gates and the ownership resolvers say about one PSBT.
+    /// Results of the two sats gates and the ownership resolvers for one PSBT.
     struct Gates {
         owned: HashSet<Vec<u8>>,
         indices: HashSet<u32>,
@@ -750,8 +740,8 @@ pub(crate) mod tests {
         btc: Option<String>,
     }
 
-    /// Budgets pinned, so the permissive unset branch never applies; the
-    /// plain-BTC gate only exists for the Vanilla account.
+    /// Budgets are pinned, so the permissive unset branch never runs. The
+    /// plain-BTC gate applies to the Vanilla account only.
     fn gates(psbt: &Psbt, keys: &KeyManager, account: AccountType) -> Gates {
         let rgb_cfg = BridgeConfig {
             rgb_max_unowned_sats: 5_000,
@@ -778,9 +768,9 @@ pub(crate) mod tests {
         }
     }
 
-    /// Check the key-path signature on input `index` against that input's own
-    /// key-spend sighash and output key. Independent of the signer: rebuilds
-    /// the message from the PSBT's transaction and prevouts.
+    /// Verifies the key-path signature on input `index` against its key-spend
+    /// sighash and output key. It does not use the signer: it rebuilds the
+    /// message from the PSBT transaction and prevouts.
     pub(crate) fn verify_own_signature(
         psbt: &Psbt,
         index: usize,
@@ -806,8 +796,8 @@ pub(crate) mod tests {
         Ok(sig)
     }
 
-    /// Sign input `index` as the enclave itself does, verify the signature
-    /// independently, and return it.
+    /// Signs input `index` as the enclave does, verifies the signature
+    /// separately, and returns it.
     pub(crate) fn merge_own_signature(
         psbt: &mut Psbt,
         keys: &KeyManager,
@@ -834,14 +824,14 @@ pub(crate) mod tests {
         /// Second signing pass: signatures added, B's signature present, A's
         /// byte-identical to the one merged.
         second_pass: (usize, bool, bool),
-        /// Why either surviving entry failed independent verification.
+        /// Why an entry failed the separate verification.
         unverified: Vec<String>,
     }
 
-    /// Two eligible inputs A and B on `account`, change paying each script
-    /// back plus a foreign dust output. Merge our own signature on A only,
-    /// leaving B outstanding, and record every gate before and after. Never
-    /// asserts on the finding itself so both accounts always run.
+    /// Two inputs A and B on `account`, change back to each script, and one
+    /// foreign dust output. Merges our signature on A only and records every
+    /// gate before and after. It does not assert the result, so both accounts
+    /// always run.
     fn merge_scenario(account: AccountType) -> MergeScenario {
         let keys = km();
         let a_spk = our_address(&keys, account, 0, 0);
@@ -886,8 +876,8 @@ pub(crate) mod tests {
             signed_psbt.inputs[0].tap_key_sig == Some(sig_a),
         );
 
-        // A's merged signature and B's new one must both verify against their
-        // own sighash of the very same transaction, and both stay controlled.
+        // A's merged signature and B's new one must verify against their own
+        // sighash of the same transaction. Both inputs stay controlled.
         let controlled: Vec<usize> =
             find_controlled_taproot_inputs(&signed_psbt, keys.master_fingerprint(), &keys)
                 .into_iter()
@@ -925,15 +915,14 @@ pub(crate) mod tests {
             merge_scenario(AccountType::Colored),
         ] {
             let tag = format!("merge progress {:?}", s.account);
-            // Sanity: the unsigned control passes, only B is outstanding, and
+            // Control: the unsigned PSBT passes, only B is outstanding, and
             // nothing else changed.
             let both = HashSet::from([s.a_spk.to_bytes(), s.b_spk.to_bytes()]);
             assert_eq!(s.before.owned, both, "{tag}: owned before");
-            // No asset change either way: the Vanilla run spends no Colored
-            // input, and the Colored run spends two Colored scripts, which the
-            // bounded-change rule refuses. What this test pins is that the set
-            // does not move when a signature merges; a non-empty change leg
-            // under merge is covered by
+            // No asset change in either run: Vanilla spends no Colored input,
+            // and Colored spends two Colored scripts, which the bounded-change
+            // rule refuses. This test makes sure the set does not change on a
+            // merge. A non-empty change leg under merge is tested in
             // `psbt_validation::tests::anchor::change_leg_survives_merging_our_own_signature`.
             assert_eq!(s.before.indices, HashSet::new(), "{tag}: indices before");
             assert_eq!(s.before.rgb, None, "{tag}: send-RGB gate before");
@@ -941,7 +930,7 @@ pub(crate) mod tests {
             assert_eq!(s.jobs_after, vec![1], "{tag}: only B outstanding");
             assert!(s.tx_unchanged, "{tag}: tx or prevouts changed");
 
-            // Custody must survive merging A's signature.
+            // Custody must not change when A's signature merges.
             if let Some(err) = &s.after.rgb {
                 failures.push(format!("{tag}: send-RGB gate after merging A: {err}"));
             }
@@ -977,9 +966,8 @@ pub(crate) mod tests {
         );
     }
 
-    /// Custody is a function of the PSBT structure alone, checked over every
-    /// signature subset on three mixed inputs. Only the remaining work moves
-    /// as entries merge.
+    /// Custody depends only on the PSBT structure. The test checks every
+    /// signature subset on three mixed inputs. Only the remaining work changes.
     #[test]
     fn custody_is_invariant_under_every_signature_subset() {
         let keys = km();
@@ -1012,11 +1000,11 @@ pub(crate) mod tests {
         let txid = unsigned.unsigned_tx.compute_txid();
         assert_eq!(owned_all.len(), 3);
         assert_eq!(owned_vanilla.len(), 2);
-        // Only output 2 sits on the single Colored input script; asset change
-        // is bounded to that script, so the Vanilla outputs are not change.
+        // Only output 2 is on the single Colored input script. Asset change is
+        // bound to that script, so the Vanilla outputs are not change.
         assert_eq!(indices, HashSet::from([2]));
 
-        // Sign every input once, then replay each subset of those entries.
+        // Sign every input once, then apply each subset of the signatures.
         let mut signed = unsigned.clone();
         let jobs = find_controlled_taproot_inputs(&signed, keys.master_fingerprint(), &keys);
         assert_eq!(jobs.len(), inputs.len());

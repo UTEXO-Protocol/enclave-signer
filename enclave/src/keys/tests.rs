@@ -62,7 +62,7 @@ fn initialize_from_mnemonic_then_double_init_fails() {
 
 #[test]
 fn bip86_testnet_derivation_matches_known_mnemonic() {
-    // Known test vector from colleague's multisig setup
+    // Known vector from a multisig setup.
     let km = KeyManager::from_mnemonic(
         "rail item marble one share venture artist brisk useful upset bus amused",
         Network::Testnet,
@@ -82,7 +82,7 @@ fn bip86_testnet_derivation_matches_known_mnemonic() {
 
 #[test]
 fn bip86_second_known_mnemonic() {
-    // Second cosigner from the same multisig setup
+    // Second cosigner of the same multisig setup.
     let km = KeyManager::from_mnemonic(
         "season pave name banana aspect inject book roast clown young hill unhappy",
         Network::Testnet,
@@ -111,14 +111,12 @@ fn bip86_mainnet_vs_testnet_vanilla_differ() {
     let km_main = KeyManager::from_seed(seed, Network::Bitcoin).unwrap();
     let km_test = KeyManager::from_seed(seed, Network::Testnet).unwrap();
 
-    // Same master fingerprint (derived from same seed)
     assert_eq!(km_main.master_fingerprint(), km_test.master_fingerprint());
-    // Different vanilla xpubs (different coin type + different network prefix)
+    // Different coin type and network prefix.
     assert_ne!(
         km_main.account_xpub_vanilla().to_string(),
         km_test.account_xpub_vanilla().to_string()
     );
-    // Mainnet xpubs start with "xpub", testnet with "tpub"
     assert!(km_main
         .account_xpub_vanilla()
         .to_string()
@@ -335,8 +333,8 @@ fn test_sign_ccd_deterministic() {
     assert_eq!(km.sign_ccd(&hash).unwrap(), km.sign_ccd(&hash).unwrap());
 }
 
-/// The legacy segwit v0 P2WSH signer is gone: a 2-of-3 P2WSH input whose
-/// witness script names our legacy key, committed correctly, is not signed.
+/// There is no segwit v0 P2WSH signer: a valid 2-of-3 P2WSH input with our
+/// legacy key in its witness script is not signed.
 #[test]
 fn p2wsh_input_naming_our_legacy_key_is_never_signed() {
     use bitcoin::blockdata::opcodes::all::OP_CHECKMULTISIG;
@@ -401,8 +399,8 @@ fn test_sign_psbt_invalid_bytes() {
     assert!(result.is_err());
 }
 
-/// Build a BIP-86 key-path taproot PSBT for testing.
-/// The signer's key is derived at m/86'/1'/0'/0/0 (vanilla testnet).
+/// A BIP-86 key-path taproot PSBT. The key is at m/86'/1'/0'/0/0 (vanilla
+/// testnet).
 fn build_test_taproot_psbt(km: &KeyManager) -> Vec<u8> {
     use bitcoin::bip32::ChildNumber;
     use bitcoin::{
@@ -411,7 +409,6 @@ fn build_test_taproot_psbt(km: &KeyManager) -> Vec<u8> {
 
     let secp = Secp256k1::new();
 
-    // Our key: derive child at m/86'/1'/0'/0/0
     let our_secret = km
         .derive_btc_child(
             AccountType::Vanilla,
@@ -486,20 +483,19 @@ fn test_sign_taproot_psbt_skip_already_signed() {
     let (signed_bytes, count1) = km.sign_psbt(&psbt_bytes).unwrap();
     assert_eq!(count1, 1);
 
-    // Sign the already-signed PSBT again - should skip
+    // A signed input is skipped.
     let (_, count2) = km.sign_psbt(&signed_bytes).unwrap();
     assert_eq!(count2, 0);
 }
 
 #[test]
 fn test_sign_taproot_psbt_no_matching_fingerprint() {
-    // Key with a different seed -> different fingerprint -> should not sign
+    // A different seed gives a different fingerprint, so nothing is signed.
     let km_signer = KeyManager::from_seed([0x42u8; 64], Network::Testnet).unwrap();
     let km_other = KeyManager::from_seed([0x99u8; 64], Network::Testnet).unwrap();
 
     let psbt_bytes = build_test_taproot_psbt(&km_signer);
 
-    // km_other's fingerprint won't match the tap_key_origins
     let (_, count) = km_other.sign_psbt(&psbt_bytes).unwrap();
     assert_eq!(count, 0);
 }

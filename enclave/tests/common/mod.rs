@@ -11,25 +11,23 @@ use utexo_bridge_enclave::proto::*;
 use utexo_bridge_enclave::server::{self, ServerContext};
 use utexo_bridge_enclave::state::EnclaveState;
 
-/// Start a test server on a random TCP port. Returns the port number.
-/// The server runs in a background thread and handles connections until
-/// the test process exits.
+/// Start a test server on a random TCP port and return the port. A background
+/// thread serves connections until the test process exits.
 #[allow(dead_code)]
 pub fn start_test_server() -> u16 {
     start_test_server_with(|_| {})
 }
 
-/// Start a test server, running the provided configuration closure against
-/// the fresh `EnclaveState` before the listener accepts connections. Used
-/// by the cloning integration test to seed the donor with a known seed
-/// and a cloning secret before the first client request arrives.
+/// Start a test server and run `configure` on the fresh `EnclaveState` before
+/// the listener accepts connections. The cloning test uses it to give the
+/// donor a known seed and cloning secret.
 pub fn start_test_server_with(configure: impl FnOnce(&EnclaveState)) -> u16 {
     start_test_server_with_config(configure, BridgeConfig::from_env())
 }
 
-/// Start a test server with an explicit `BridgeConfig`, for tests exercising
-/// the pinned cross-check path. `start_test_server` / `_with` read env, which
-/// is empty in CI, and mutating env across parallel tests is unsafe.
+/// Start a test server with an explicit `BridgeConfig`. `start_test_server`
+/// and `start_test_server_with` read env, which is empty in CI. A change to
+/// env across parallel tests is unsafe.
 #[allow(dead_code)]
 pub fn start_test_server_with_config(
     configure: impl FnOnce(&EnclaveState),
@@ -64,9 +62,9 @@ pub fn start_test_server_with_policy(
     )
 }
 
-/// Same, with an EVM receipt provider wired in. A bridge-mode PSBT is refused
-/// up front unless the enclave can verify the FundsIn deposit itself, so any
-/// test that wants to reach the RGB checks has to supply one.
+/// Same, with an EVM receipt provider. The enclave refuses a bridge-mode PSBT
+/// unless it can verify the FundsIn deposit. A test that must reach the RGB
+/// checks supplies a provider.
 #[cfg(feature = "evm-rpc")]
 #[allow(dead_code)]
 pub fn start_test_server_with_evm_rpc(
@@ -99,9 +97,8 @@ fn start_test_server_inner(
     #[cfg(feature = "kms-persistence")]
     let state = state.with_seed_source(Box::new(TestSeedSource));
     configure(&state);
-    // Tests run with the placeholder Regtest checkpoint. The header chain
-    // is initialised but empty; tests that don't push headers leave it
-    // alone, tests that do start from `checkpoint.height` (= 0). SPV-only.
+    // SPV only. Tests use the placeholder Regtest checkpoint and an empty
+    // header chain. Tests that push headers start from height 0.
     #[cfg(feature = "rgb-validation")]
     let header_chain = std::sync::Mutex::new(HeaderChain::new(
         Network::Regtest,
@@ -131,19 +128,17 @@ fn start_test_server_inner(
     port
 }
 
-/// Send a request to a test server and return the response.
-/// Opens a new TCP connection (one connection per request, matching
-/// the real vsock protocol).
+/// Send a request to a test server and return the response. Each request
+/// uses a new TCP connection, as the vsock protocol does.
 pub fn send_request(port: u16, req: &EnclaveRequest) -> EnclaveResponse {
     let mut stream = TcpStream::connect(format!("127.0.0.1:{}", port)).unwrap();
     framing::write_message(&mut stream, req).unwrap();
     framing::read_message(&mut stream).unwrap()
 }
 
-/// Build `count` synthetic regtest headers chained from `prev_hash`, the first
-/// carrying `prev_time + 1`. The test server runs `Network::Regtest`, where
-/// header validation is chain-linkage only, so no real PoW has to be satisfied
-/// and timestamps are free to choose.
+/// Build `count` synthetic regtest headers chained from `prev_hash`. The first
+/// header has the time `prev_time + 1`. Regtest validation checks only chain
+/// linkage, so the headers need no real PoW and timestamps are free.
 #[cfg(feature = "rgb-validation")]
 #[allow(dead_code)]
 pub fn synth_chain_from(prev_hash: [u8; 32], prev_time: u32, count: u32) -> Vec<Vec<u8>> {
@@ -169,8 +164,8 @@ pub fn synth_chain_from(prev_hash: [u8; 32], prev_time: u32, count: u32) -> Vec<
     out
 }
 
-/// Push a header batch and return the raw response, so callers can assert on
-/// either the success or the error shape.
+/// Push a header batch and return the raw response. Callers can assert on the
+/// success or the error shape.
 #[cfg(feature = "rgb-validation")]
 #[allow(dead_code)]
 pub fn submit_headers(port: u16, start_height: u32, headers: Vec<Vec<u8>>) -> EnclaveResponse {
@@ -187,12 +182,11 @@ pub fn submit_headers(port: u16, start_height: u32, headers: Vec<Vec<u8>>) -> En
     )
 }
 
-/// A stand-in EVM RPC that reports one confirmed `BridgeFundsIn` deposit.
+/// A stub EVM RPC that reports one confirmed `BridgeFundsIn` deposit.
 ///
-/// A bridge-mode PSBT is refused before any RGB work unless the enclave can
-/// verify the deposit itself, so a test that wants to reach the RGB checks
-/// needs this. The log carries the gross and commission the request declares,
-/// so the deposit gate passes and the later checks are what reject.
+/// The enclave refuses a bridge-mode PSBT before RGB work unless it can verify
+/// the deposit. The log carries the gross and commission that the request
+/// declares. The deposit gate passes, so only the later checks can reject.
 #[cfg(feature = "evm-rpc")]
 #[allow(dead_code)]
 pub mod deposit_stub {
@@ -210,8 +204,8 @@ pub mod deposit_stub {
         );
     }
 
-    /// An invoice `parse_authorized_recipient` accepts, so the deposit gate
-    /// gets past the recipient parse too.
+    /// An invoice that `parse_authorized_recipient` accepts, so the deposit
+    /// gate passes the recipient parse.
     const INVOICE: &str = "rgb:fuhLYX9G-eC8gDvf-V0XpYFH-ceSafoc-lGutAYq-~SExGU4/\
                            XvmU3d4_nQQ8S7oagbXi07x5vjMm7P~ERukQNX6SC4M/BF/bc:utxob:\
                            UzR~73lD-JyzirTn-engdWia-qjd5NyV-mndAmmo-EbxdVEG-L6OiP";
@@ -220,8 +214,8 @@ pub mod deposit_stub {
     const BLOCK: u64 = 100;
     const HEAD: u64 = 112;
 
-    /// Answers for any tx hash: the tests that care about a malformed hash are
-    /// rejected on length before the client is consulted.
+    /// Answers for each tx hash. A malformed hash fails the length check before
+    /// the enclave calls the client.
     pub struct OneDeposit {
         pub operation_id: [u8; 32],
         pub gross: u64,
@@ -264,8 +258,8 @@ pub mod deposit_stub {
     }
 }
 
-// This source exists only in the test harness. Production empty InitializeKey
-// requests must complete KMS recovery and durable storage before activation.
+// Test-only seed source. In production, an empty InitializeKey must complete
+// KMS recovery and durable storage before activation.
 #[cfg(feature = "kms-persistence")]
 struct TestSeedSource;
 

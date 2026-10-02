@@ -8,20 +8,17 @@ use crate::proto::{EvmDestination, LzReleaseParams};
 const DOMAIN_TYPE_HASH_STR: &str =
     "EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)";
 
-/// EIP-712 type string for `MultisigProxy.fundsOutCall` (MultisigProxy.sol:173-175),
-/// replacing the generic `BridgeOperation(bytes4,bytes,uint256,uint256)`: the proxy
-/// no longer takes opaque calldata, so the digest commits to the release fields.
-/// `sourceBurnTxId` joined the struct in bridge PR #152, right after
-/// `settlementData`.
+/// EIP-712 type string for `MultisigProxy.fundsOutCall` (MultisigProxy.sol:173-175).
+/// The digest commits to each release field. `sourceBurnTxId` (bridge PR #152)
+/// follows `settlementData`.
 ///
-/// Signing the old struct recovers a different address, which surfaces on-chain
-/// only as an unregistered-signer rejection. There is no interop window.
+/// A wrong struct recovers a different address. On chain, this shows only as
+/// an unregistered-signer rejection.
 const TEE_FUNDS_OUT_TYPE_HASH_STR: &str = "TeeFundsOut(address recipient,uint256 amount,\
      uint256 burnId,uint256 sourceChainId,uint256 destinationChainId,string sourceAddress,\
      bytes proof,bytes settlementData,bytes32 sourceBurnTxId,uint256 nonce,uint256 deadline)";
 
-/// EIP-712 domain separator components.
-/// Must match the deployed MultisigProxy contract exactly.
+/// EIP-712 domain separator fields. They must match the deployed MultisigProxy.
 pub struct Eip712Domain {
     pub name: String,
     pub version: String,
@@ -30,7 +27,7 @@ pub struct Eip712Domain {
 }
 
 impl Eip712Domain {
-    /// Compute the domain separator hash per EIP-712.
+    /// Computes the EIP-712 domain separator hash.
     pub fn separator_hash(&self) -> [u8; HASH_LEN] {
         let type_hash = Keccak256::digest(DOMAIN_TYPE_HASH_STR.as_bytes());
         let name_hash = Keccak256::digest(self.name.as_bytes());
@@ -47,7 +44,7 @@ impl Eip712Domain {
     }
 }
 
-/// Build EIP-712 domain from enriched request fields.
+/// Builds the EIP-712 domain from the request fields.
 pub fn build_evm_domain(req: &EvmDestination) -> Result<Eip712Domain> {
     if req.chain_id == 0 {
         return Err(EnclaveError::CrossCheck("chain_id must be > 0".into()));
@@ -70,18 +67,16 @@ pub fn build_evm_domain(req: &EvmDestination) -> Result<Eip712Domain> {
     })
 }
 
-/// Build the EIP-712 digest that `MultisigProxy.fundsOutCall` verifies, from a
-/// `fundsOut(FundsOutParams)` calldata blob.
+/// Builds the EIP-712 digest that `MultisigProxy.fundsOutCall` verifies.
 ///
 /// Mirrors `MultisigProxy._fundsOutStructHash` (MultisigProxy.sol:334-359):
-/// eleven words, `string`/`bytes` pre-hashed, `bytes32 sourceBurnTxId` as-is.
-/// Domain separator unchanged.
+/// eleven fields, `string`/`bytes` pre-hashed, `bytes32 sourceBurnTxId` as-is.
 ///
-/// Decoded rather than hashed whole, so the enclave commits to the individual
-/// values the transactor will submit.
+/// The enclave hashes the decoded fields, so it commits to the values that the
+/// transactor submits.
 ///
-/// Fallible, not `assert!`: with `panic = "abort"` a short
-/// calldata would take the enclave down.
+/// Returns `Result`, not `assert!`: with `panic = "abort"`, bad input would
+/// stop the enclave.
 pub fn funds_out_digest(
     domain: &Eip712Domain,
     params: &FundsOutParams,
@@ -116,20 +111,19 @@ pub fn funds_out_digest(
 }
 
 /// EIP-712 type string for `MultisigProxy.lzFundsOutCall` (MultisigProxy.sol:176-178).
-/// Fourteen fields: the eight shared with `TeeFundsOut` plus four LZ-specific
-/// ones, with `sourceBurnTxId` (bridge PR #152) after `extraOptions`.
+/// Fourteen fields. `sourceBurnTxId` (bridge PR #152) follows `extraOptions`.
 const TEE_LZ_FUNDS_OUT_TYPE_HASH_STR: &str = "TeeLzFundsOut(uint256 amount,uint256 burnId,\
      uint256 sourceChainId,uint256 destinationChainId,string sourceAddress,\
      bytes proof,bytes settlementData,uint32 dstEid,bytes32 recipient,\
      uint256 minAmountLD,bytes extraOptions,bytes32 sourceBurnTxId,uint256 nonce,\
      uint256 deadline)";
 
-/// Build the EIP-712 digest that `MultisigProxy.lzFundsOutCall` verifies.
+/// Builds the EIP-712 digest that `MultisigProxy.lzFundsOutCall` verifies.
 ///
 /// Mirrors `MultisigProxy._lzFundsOutStructHash` (MultisigProxy.sol:504-544):
-/// fourteen words - dynamic fields pre-hashed, `dstEid` (uint32) padded to
-/// 32 bytes, `sourceBurnTxId` (bytes32) as-is. The `lz_release` proto fields
-/// are crosschecked against the decoded calldata before the digest is built.
+/// fourteen fields, dynamic fields pre-hashed, `dstEid` (uint32) padded to 32
+/// bytes, `sourceBurnTxId` (bytes32) as-is. The `lz_release` proto fields must
+/// match the decoded calldata before the digest is built.
 pub fn lz_funds_out_digest(
     domain: &Eip712Domain,
     call_data: &[u8],
@@ -145,7 +139,7 @@ pub fn lz_funds_out_digest(
     }
     let params = decode_lz_funds_out_params(call_data)?;
 
-    // Crosscheck LZ-specific fields from proto against decoded calldata.
+    // Cross-check the LZ proto fields against the decoded calldata.
     if lz_release.dst_eid != params.dstEid {
         return Err(EnclaveError::CrossCheck(format!(
             "lz_release.dst_eid {} != calldata dstEid {}",
@@ -181,9 +175,9 @@ pub fn lz_funds_out_digest(
         buf.extend_from_slice(&Keccak256::digest(params.sourceAddress.as_bytes()));
         buf.extend_from_slice(&Keccak256::digest(&params.proof));
         buf.extend_from_slice(&Keccak256::digest(&params.settlementData));
-        // uint32 dstEid: right-aligned in a 32-byte word (same as Solidity uint32 ABI-encoding).
+        // uint32 dstEid: right-aligned in a 32-byte word, as Solidity ABI-encodes it.
         buf.extend_from_slice(&abi_encode_u32(params.dstEid));
-        // bytes32 recipient: already 32 bytes, used as-is.
+        // bytes32 recipient: used as-is.
         buf.extend_from_slice(&recipient_bytes);
         buf.extend_from_slice(&params.minAmountLD.to_be_bytes::<HASH_LEN>());
         buf.extend_from_slice(&Keccak256::digest(&params.extraOptions));
@@ -198,7 +192,7 @@ pub fn lz_funds_out_digest(
     Ok(eip712_digest(domain, &struct_hash))
 }
 
-/// Wrap a struct hash into the final EIP-712 digest: `keccak256(0x1901 ||
+/// Wraps a struct hash into the final EIP-712 digest: `keccak256(0x1901 ||
 /// domainSeparator || structHash)`.
 fn eip712_digest(domain: &Eip712Domain, struct_hash: &[u8; HASH_LEN]) -> [u8; HASH_LEN] {
     let domain_separator = domain.separator_hash();
@@ -218,8 +212,8 @@ fn abi_encode_u256(val: u64) -> [u8; HASH_LEN] {
     buf
 }
 
-/// ABI-encode a u32 as a uint32 (HASH_LEN bytes, big-endian, right-aligned).
-/// Matches Solidity's abi.encode(uint32) padding.
+/// ABI-encode a u32 as a uint32 (HASH_LEN bytes, big-endian, right-aligned),
+/// as Solidity `abi.encode(uint32)` does.
 fn abi_encode_u32(val: u32) -> [u8; HASH_LEN] {
     let mut buf = [0u8; HASH_LEN];
     buf[28..].copy_from_slice(&val.to_be_bytes());

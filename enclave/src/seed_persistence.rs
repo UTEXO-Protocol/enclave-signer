@@ -1,5 +1,5 @@
-//! Persistent seed lifecycle. The parent holds only an opaque KMS ciphertext;
-//! KMS responses are authenticated and decrypted inside the enclave.
+//! Persistent seed lifecycle. The parent holds only an opaque KMS ciphertext.
+//! The enclave authenticates and decrypts the KMS responses.
 
 use std::io::{self, Read, Write};
 #[cfg(not(all(feature = "vsock", target_os = "linux", not(test))))]
@@ -18,10 +18,10 @@ use crate::keys::KeyManager;
 use crate::kms::{deserialize_secret, AwsCredentials, KmsClient, KmsConfig, MAX_CIPHERTEXT_BYTES};
 use crate::policy::KmsPin;
 
-/// Upper bound on one framed broker message in either direction.
+/// Max size of one framed broker message, in each direction.
 pub(crate) const MAX_MESSAGE_BYTES: usize = 64 * 1024;
 
-// TCP is only used by non-VSOCK development builds and unit fixtures.
+// TCP is only for non-vsock dev builds and unit tests.
 #[cfg(not(all(feature = "vsock", target_os = "linux", not(test))))]
 type BrokerStream = TcpStream;
 #[cfg(all(feature = "vsock", target_os = "linux", not(test)))]
@@ -29,27 +29,27 @@ type BrokerStream = vsock::VsockStream;
 
 pub const BROKER_LOCAL_PORT: u16 = 3446;
 pub const BROKER_VSOCK_PORT: u32 = 8004;
-// Leave room inside the 30-second parent/request timeout for ingress and reply.
+// Less than the 30 s request timeout, to leave time for ingress and reply.
 pub const RECOVERY_TIMEOUT: Duration = Duration::from_secs(25);
 pub(crate) const RESPONSE_RESERVE: Duration = Duration::from_secs(2);
-// The broker's own seven-second operation deadline expires before this cap.
+// The broker's own 7 s operation deadline expires first.
 const BROKER_TIMEOUT: Duration = Duration::from_secs(8);
 
 fn failure(message: &str) -> EnclaveError {
     EnclaveError::InvalidRequest(format!("seed persistence: {message}"))
 }
 
-/// Production installs a persistent source at boot. Tests can inject a source
-/// without teaching the production wire protocol to accept plaintext seeds.
+/// The seed source. Production installs a persistent source at boot. Tests
+/// inject their own, so the wire protocol never accepts a plaintext seed.
 pub trait SeedSource: Send + Sync {
-    /// Bound every external operation by this same absolute deadline. The state
-    /// machine also checks it immediately before activating the returned keys.
+    /// `deadline` bounds every external operation. The state machine checks it
+    /// again before it activates the keys.
     fn load_keys(&self, network: Network, deadline: Instant) -> Result<KeyManager>;
 }
 
 trait SeedStore {
     fn load(&self, deadline: Instant) -> Result<Option<Vec<u8>>>;
-    /// Atomically create if absent, then return the persisted winning blob.
+    /// Create atomically if absent. Returns the blob that is persisted.
     fn create(&self, ciphertext: &[u8], deadline: Instant) -> Result<Vec<u8>>;
 }
 
@@ -75,12 +75,12 @@ fn recover_seed(
     deadline: Instant,
 ) -> Result<Zeroizing<[u8; 64]>> {
     remaining_until(deadline)?;
-    // The pin decides the direction. Without one, the launch may only
-    // bootstrap: a confirmed missing object permits first-use creation, and an
-    // existing object is refused, so a parent cannot hand an unpinned image a
-    // planted blob or a `null` to make it generate over a saved identity. With
-    // a pin, only the saved object is accepted, so neither KMS generation nor
-    // persistence can replace a lost pinned seed.
+    // The pin decides the direction.
+    // Without a pin, the launch only bootstraps: a missing object allows
+    // creation, and an existing object is refused. So a parent cannot give an
+    // unpinned image a planted blob.
+    // With a pin, only the saved object is accepted. Nothing can replace a lost
+    // pinned seed.
     let ciphertext = match (store.load(deadline)?, expected_evm_address) {
         (Some(blob), Some(_)) => {
             tracing::info!("seed custody: loading saved identity");
@@ -98,9 +98,9 @@ fn recover_seed(
             validate_ciphertext(&blob)?;
             remaining_until(deadline)?;
             let committed = store.create(&blob, deadline)?;
-            // Activate only the blob this call generated. A different winner
-            // (a concurrent initializer, or a parent answering with a planted
-            // ciphertext) is never decrypted here; relaunch with its pin.
+            // Activate only the blob that this call generated. A different blob
+            // (a concurrent initializer or a planted one) is not decrypted.
+            // Relaunch with its pin.
             if committed != blob {
                 return Err(failure(
                     "another initializer committed a different seed; pin its identity and restart",
@@ -115,8 +115,7 @@ fn recover_seed(
         }
     };
     validate_ciphertext(&ciphertext)?;
-    // This is the only step that returns plaintext to Rust: recover the blob
-    // returned by persistence, including the winner of concurrent bootstrap.
+    // Decrypt the persisted blob. The seed is returned only from here.
     remaining_until(deadline)?;
     let seed = kms.decrypt(&ciphertext, deadline)?;
     remaining_until(deadline)?;
@@ -160,7 +159,7 @@ impl PersistentSeed {
 
 impl SeedSource for PersistentSeed {
     fn load_keys(&self, network: Network, deadline: Instant) -> Result<KeyManager> {
-        // Refresh short-lived instance-role credentials on every attempt.
+        // Get new short-lived instance-role credentials on every attempt.
         let credentials = self.broker.credentials(deadline)?;
         let kms = KmsClient::new(self.config.clone(), credentials, network)?;
         let seed = recover_seed(&self.broker, &kms, self.expected_evm_address, deadline)?;
@@ -227,15 +226,14 @@ impl SeedBroker {
         if length == 0 || length > MAX_MESSAGE_BYTES {
             return Err(broker_error("invalid_response"));
         }
-        // Responses may contain AWS credentials. Avoid Debug/logging and
-        // erase the original JSON buffer as soon as typed parsing finishes.
+        // Responses can contain AWS credentials. Do not log them. The buffer
+        // is zeroized after parsing.
         let mut response = Zeroizing::new(vec![0u8; length]);
         stream
             .read_exact(&mut response)
             .map_err(|_| broker_error("aws_unavailable"))?;
-        // Parse only a bounded, exact error envelope before the typed success
-        // response. Borrow the code directly; do not copy credential fields into
-        // an intermediate JSON value or relay an untrusted host message.
+        // Parse the exact error shape first. Borrow the code: do not copy
+        // credentials into a JSON value or relay an untrusted host message.
         #[derive(Deserialize)]
         #[serde(deny_unknown_fields)]
         struct BrokerFailure<'a> {
@@ -283,8 +281,8 @@ fn broker_error(code: &str) -> EnclaveError {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct BlobResponse {
-    // Value deliberately requires the field to exist: a missing property or
-    // a broker error is not proof that S3 has no object.
+    // The field must exist: a missing field or a broker error does not prove
+    // that S3 has no object.
     ciphertext: serde_json::Value,
 }
 
@@ -320,9 +318,9 @@ impl SeedStore for SeedBroker {
     }
 }
 
-// The only broker connection is owned by the initialization attempt: there is
-// no background relay or detached I/O. Parent CID 3 is fixed by Nitro, and the
-// nonblocking connect consumes the same deadline as framing and recovery.
+// The initialization attempt owns the only broker connection. There is no
+// background I/O. Nitro fixes parent CID 3. The nonblocking connect uses the
+// same deadline as framing and recovery.
 #[cfg(all(feature = "vsock", target_os = "linux"))]
 fn connect_vsock(port: u32, deadline: Instant) -> io::Result<vsock::VsockStream> {
     use nix::poll::{poll, PollFd, PollFlags, PollTimeout};
@@ -416,7 +414,7 @@ mod tests {
     impl SeedKms for Kms {
         fn generate(&self, _deadline: Instant) -> Result<Vec<u8>> {
             self.generates.set(self.generates.get() + 1);
-            Ok(vec![42; 64]) // Opaque ciphertext stand-in; never a production backend.
+            Ok(vec![42; 64]) // Stand-in ciphertext.
         }
         fn decrypt(&self, blob: &[u8], _deadline: Instant) -> Result<Zeroizing<[u8; 64]>> {
             self.decrypts.set(self.decrypts.get() + 1);
@@ -447,8 +445,8 @@ mod tests {
         let kms = Kms::default();
         let first = recover_seed(&store, &kms, None, Instant::now() + RECOVERY_TIMEOUT).unwrap();
         let a = KeyManager::from_seed(*first, Network::Bitcoin).unwrap();
-        // An unpinned restart is refused without touching KMS; the pin is the
-        // only way to recover a saved identity.
+        // An unpinned restart is refused before KMS. Only the pin recovers a
+        // saved identity.
         assert!(recover_seed(&store, &kms, None, Instant::now() + RECOVERY_TIMEOUT).is_err());
         assert_eq!(kms.decrypts.get(), 1);
         let restored = recover_seed(
@@ -505,8 +503,7 @@ mod tests {
         let expected = *KeyManager::from_seed([42; 64], Network::Bitcoin)
             .unwrap()
             .evm_address();
-        // No pin: the saved object is refused before any KMS call, so a parent
-        // cannot make an unpinned image adopt a blob it did not generate.
+        // No pin: the saved object is refused before any KMS call.
         assert!(recover_seed(&store, &kms, None, Instant::now() + RECOVERY_TIMEOUT).is_err());
         assert_eq!(kms.decrypts.get(), 0);
         for pin in [Some(expected), Some([1; 20])] {
@@ -538,10 +535,9 @@ mod tests {
 
     #[test]
     fn concurrent_bootstrap_loser_never_activates_the_winner() {
-        // The store commits a different blob than this call generated: either
-        // a concurrent initializer won, or the parent answered the create with
-        // a planted ciphertext. The loser fails without decrypting anything
-        // and the committed object stays intact for a pinned relaunch.
+        // The store commits a different blob (a concurrent initializer or a
+        // planted one). The call fails without a decrypt, and the committed
+        // object stays for a pinned relaunch.
         let store = Store {
             race_winner: Some(vec![17; 64]),
             ..Store::default()

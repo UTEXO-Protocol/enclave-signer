@@ -1,7 +1,6 @@
-//! Request router: one proto oneof variant to one handler.
+//! Request router: each proto oneof variant goes to one handler.
 //!
-//! The only place that turns a handler `Err` into an `ErrorResponse`, so the
-//! handlers themselves stay in `Result` land.
+//! This is the only place that turns a handler `Err` into an `ErrorResponse`.
 
 #[cfg(not(feature = "kms-persistence"))]
 use super::cloning::{handle_get_clone, handle_initiate_cloning, handle_set_clone};
@@ -24,10 +23,9 @@ use crate::proto::enclave_response::Response;
 use crate::proto::*;
 use crate::state::ReplayReservation;
 
-/// Error for a request whose owning network was not compiled into this build.
-/// Single-network EIFs (RGB-only / CCD-only) return this for requests that
-/// belong to the other network, so the separation is observable to callers
-/// rather than a silent no-op.
+/// Error for a request whose network is not compiled into this build.
+/// Single-network EIFs (RGB-only / CCD-only) return it, so callers see the
+/// refusal. It is not a silent no-op.
 #[allow(dead_code)]
 pub(super) fn unsupported_build(network: &str) -> EnclaveError {
     EnclaveError::InvalidRequest(format!(
@@ -36,8 +34,8 @@ pub(super) fn unsupported_build(network: &str) -> EnclaveError {
     ))
 }
 
-/// Error for a request that belongs to the other signer role: a mint signer
-/// never releases and a burn signer never mints.
+/// Error for a request of the other signer role. A mint signer does not
+/// release, and a burn signer does not mint.
 #[allow(dead_code)]
 pub(super) fn wrong_signer_role(what: &str) -> EnclaveError {
     let role = if cfg!(feature = "mint-signer") {
@@ -50,9 +48,8 @@ pub(super) fn wrong_signer_role(what: &str) -> EnclaveError {
     EnclaveError::InvalidRequest(format!("this enclave is {role}: it does not sign {what}"))
 }
 
-/// Dispatch one request. A sign that reserved a replay key hands the
-/// reservation back un-committed, so the caller commits it only after the
-/// response is written.
+/// Dispatch one request. A sign that reserves a replay key returns the
+/// reservation uncommitted. The caller commits it after the response is written.
 pub(super) fn dispatch(
     request: EnclaveRequest,
     ctx: &ServerContext,
@@ -101,10 +98,9 @@ pub(super) fn dispatch(
                 Err(wrong_signer_role("plain-BTC PSBTs"))
             }
         }
-        // Removed. The EIP-191 `personal_sign` path was
-        // gated by no feature and no policy, and signed arbitrary caller-supplied
-        // bytes with the main bridge key. The proto still carries the variant, so
-        // refuse explicitly instead of dropping the arm.
+        // The EIP-191 `personal_sign` path had no feature or policy gate. It
+        // signed any caller bytes with the main bridge key. The proto still has
+        // the variant, so refuse it explicitly.
         Some(Request::SignRawMessage(_)) => {
             tracing::warn!("request: SignRawMessage - removed, refusing");
             Err(EnclaveError::InvalidRequest(
@@ -206,8 +202,7 @@ pub(super) fn dispatch(
             tracing::info!("request: SetEndpoints");
             handle_set_endpoints(ctx, req)
         }
-        // Not feature-gated: every build must answer the readiness probe, and a
-        // build without `spv` reports SPV readiness vacuously.
+        // All builds must answer the readiness probe.
         Some(Request::Health(_)) => {
             tracing::debug!("request: Health");
             handle_health(ctx)

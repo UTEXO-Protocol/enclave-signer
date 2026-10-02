@@ -1,14 +1,11 @@
-# Enclave workspace — everything measured into the EIF, plus the attestation
+# Enclave workspace: every crate measured into the EIF, plus the attestation
 # verifier it shares with the parent.
 #
-# `parent/` is deliberately EXCLUDED and is its own workspace. Cargo materialises
-# every git source declared anywhere in a workspace during resolution, before it
-# knows which crates a `-p` build actually compiles. While `parent` was a member,
-# its private `federated-signer-proto` dep made even
-# `cargo build -p utexo-bridge-enclave --no-default-features` demand that
-# credential — which would defeat the whole point of vendoring `enclave-proto/`.
-# Splitting keeps the parent proto dependency out of enclave resolution.
-# Private RGB mirrors still require credentials. Keep parent out of `members`.
+# `parent/` is a separate workspace. Cargo resolves every git source of a
+# workspace, also for a `-p` build. As a member, the private parent proto dep
+# needs credentials for every enclave build, which defeats the vendored
+# `enclave-proto/`. Keep `parent` out of `members`.
+# The private RGB mirrors still need credentials.
 [workspace]
 members = [
     "attestation-verify",
@@ -25,29 +22,19 @@ strip = true
 panic = "abort"
 codegen-units = 1
 
-# RGB ecosystem crates for consignment validation, pinned by REV, not branch.
+# RGB crates for consignment validation, pinned by rev, not by branch.
+# If upstream rebases a branch, the locked rev can become unreachable.
+# The build and PCR0 reproduction then fail.
 #
-# `branch = "master"` was a reproducibility hazard on two counts. (1) Cargo
-# fetches the branch and then looks up the locked rev inside it; if upstream
-# rebases or force-pushes, that rev becomes unreachable and the build breaks
-# permanently for everyone, including anyone reproducing PCR0. (2) It let the
-# parent workspace resolve `master` to a NEWER commit than this one, so the two
-# halves of the repo compiled against different rgb-ops.
-#
-# These revs must match parent/Cargo.toml exactly. Bump both together.
+# These revs must match parent/Cargo.toml exactly. Change both together.
 [patch.crates-io]
-# BFA lives on the `s/bfa` branches of the RGB crates, mirrored into our org.
-# These replace the previous rgb-protocol rev pins, which carry no BFA schema.
+# The `s/bfa` branches of the RGB crates, mirrored into our org, carry the BFA
+# schema. The mirrors are cut from 0.11.1-rc.10, which pulls electrum-client 0.24.
+# See the REVERT note in enclave/src/networks/rgb/validation/indexer.rs.
 #
-# The mirrors are cut from 0.11.1-rc.10 while this crate previously resolved
-# rc.11, so the patch is ignored (cargo only warns) until the lock is updated
-# with `cargo update -p rgb-ops -p rgb-consensus -p rgb-invoicing -p rgb-schemas`.
-# That downgrade also pulls electrum-client 0.24 - see the REVERT note in
-# enclave/src/networks/rgb/validation.rs.
-#
-# Local builds: these three repos are private. You need an SSH key with read
-# access to rgb-consensus-s-bfa, rgb-ops-s-bfa, and rgb-schemas-s-bfa loaded
-# in your SSH agent (or in ~/.ssh/). Ask the team for a deploy key if needed.
+# Local builds: these three repos are private. Load an SSH key with read
+# access to rgb-consensus-s-bfa, rgb-ops-s-bfa and rgb-schemas-s-bfa.
+# Ask the team for a deploy key.
 rgb-consensus = { git = "ssh://git@github-rgb-consensus/UTEXO-Protocol/rgb-consensus-s-bfa", rev = "68a1470e22ae4bb6a38205404e484b264b4139ee" }
 rgb-ops = { git = "ssh://git@github-rgb-ops/UTEXO-Protocol/rgb-ops-s-bfa", rev = "3bcc7d98d759a8b71bf94ad4a36371dcb7bf392b" }
 rgb-invoicing = { git = "ssh://git@github-rgb-ops/UTEXO-Protocol/rgb-ops-s-bfa", rev = "3bcc7d98d759a8b71bf94ad4a36371dcb7bf392b" }

@@ -5,7 +5,7 @@ const BRIDGE: [u8; 20] = [0xB1; 20];
 const OTHER: [u8; 20] = [0xC2; 20];
 const TX: [u8; 32] = [0x11; 32];
 
-/// A hash-shaped operationId - deliberately not a small left-padded integer.
+/// A hash-shaped operationId, not a small left-padded integer.
 fn op_id(tag: u8) -> [u8; 32] {
     let mut id = [tag; 32];
     id[0] = 0xF0 | (tag & 0x0F); // high bytes set: cannot fit a u64
@@ -19,8 +19,7 @@ fn bridge_data(gross: u64, net: u64, commission: u64) -> Vec<u8> {
 
 // --- destinationAddress tail decoding ---
 //
-// Attacker-shaped data on a host-relayed receipt, so every bound is
-// asserted.
+// A relayed receipt can carry attacker data, so each bound is asserted.
 
 #[test]
 fn decodes_the_destination_address_tail() {
@@ -48,7 +47,7 @@ fn rejects_a_tail_offset_past_the_data() {
 fn rejects_a_tail_length_past_the_data() {
     let mut d = bridge_funds_in_data(1000, 950, 50, SAMPLE_INVOICE);
     let len_at = 9 * 32;
-    // Under the size cap, so the bounds check is what must catch it.
+    // Under the size cap, so the bounds check must catch it.
     d[len_at..len_at + 32].copy_from_slice(&word(1_000));
     let err = decode_abi_string(&d, BFI_DEST_ADDRESS_HEAD_OFF, "destinationAddress").unwrap_err();
     assert!(err.to_string().contains("log data is"), "{err}");
@@ -71,7 +70,7 @@ fn rejects_a_non_utf8_tail() {
     assert!(err.to_string().contains("not valid UTF-8"), "{err}");
 }
 
-/// Without this the recipient bind has nothing to compare against.
+/// Without this, the recipient bind has no value to compare.
 #[cfg(evm_to_rgb)]
 #[test]
 fn verified_funds_in_carries_the_destination_address() {
@@ -95,7 +94,7 @@ fn bridge_log(op: [u8; 32], gross: u64, net: u64, commission: u64) -> LogEntry {
 }
 
 /// The RGB-only companion `FundsIn(address,uint256 rgbOpId,uint64)`. Its id
-/// is an RGB id, so the predicate must never fall back to this shape.
+/// is an RGB id, so the predicate must never use this shape as a fallback.
 fn rgb_companion_log(rgb_op_id: u64, net: u64) -> LogEntry {
     let mut data = word(rgb_op_id).to_vec();
     data.extend_from_slice(&word(net));
@@ -123,7 +122,7 @@ fn happy_provider() -> FakeEvm {
     }
 }
 
-/// Verify with the operationId bound - the only supported call shape.
+/// Verifies with the operationId bound, the only supported call shape.
 #[cfg(evm_to_rgb)]
 fn verify(p: &FakeEvm) -> Result<()> {
     verify_funds_in_event(p, &BRIDGE, 12, &TX, &op_id(7), 1000, 50).map(|_| ())
@@ -132,7 +131,6 @@ fn verify(p: &FakeEvm) -> Result<()> {
 #[test]
 fn extract_uint256_works() {
     let mut data = vec![0u8; 40];
-    // Put value 42 at offset 8 (bytes 8..40)
     data[39] = 42;
     assert_eq!(extract_uint256_as_u64(&data, 8).unwrap(), 42);
 }
@@ -166,9 +164,9 @@ fn topic0_vectors_are_pinned() {
     );
 }
 
-/// Pins the pre-migration topic0s so a silent revert to the 9-field or the
-/// 11-field (pre-`settlementData`, bridge PR #152) signature fails loudly here
-/// instead of looking like "no deposit found".
+/// Pins the older topic0s. A revert to the 9-field or 11-field
+/// (pre-`settlementData`, bridge PR #152) signature then fails here, not as
+/// "no deposit found".
 #[test]
 fn legacy_topic0_is_not_in_use() {
     let current = hex::encode(event_topic0(BRIDGE_FUNDS_IN_SIG));
@@ -193,8 +191,8 @@ fn accepts_matching_bridge_funds_in() {
 #[cfg(evm_to_rgb)]
 #[test]
 fn accepts_real_contract_dual_emit() {
-    // One deposit emits both events; the pair must not trip the ambiguity
-    // guard, since only BridgeFundsIn is a candidate.
+    // One deposit emits both events. The pair must not trip the ambiguity
+    // guard, because only BridgeFundsIn is a candidate.
     let p = FakeEvm {
         receipt: Some(receipt_with(
             vec![
@@ -212,8 +210,7 @@ fn accepts_real_contract_dual_emit() {
 #[test]
 fn dual_emit_binds_via_bridge_shape_not_the_companion() {
     // The pair must resolve to BridgeFundsIn, which binds tokenCommission.
-    // Commission is invisible to the companion event: passing would mean
-    // selection had fallen back to it.
+    // The companion event has no commission, so a pass means a fallback to it.
     let p = FakeEvm {
         receipt: Some(receipt_with(
             vec![
@@ -228,8 +225,8 @@ fn dual_emit_binds_via_bridge_shape_not_the_companion() {
     assert!(e.contains("tokenCommission mismatch"), "got: {e}");
 }
 
-/// A tx carrying only the companion `FundsIn` is not an authorised deposit:
-/// its id is an RGB id and it binds no commission.
+/// A tx with only the companion `FundsIn` is not an authorised deposit: its
+/// id is an RGB id and it binds no commission.
 #[cfg(evm_to_rgb)]
 #[test]
 fn rejects_rgb_companion_event_alone() {
@@ -244,8 +241,8 @@ fn rejects_rgb_companion_event_alone() {
 #[cfg(evm_to_rgb)]
 #[test]
 fn rejects_two_real_deposits_in_one_tx() {
-    // Uniqueness still holds WITHIN a shape: two distinct BridgeFundsIn
-    // logs are two deposits, and picking one is a guess.
+    // Uniqueness also applies WITHIN a shape: two BridgeFundsIn logs are two
+    // deposits, and a selection is a guess.
     let p = FakeEvm {
         receipt: Some(receipt_with(
             vec![
@@ -396,8 +393,8 @@ fn rejects_net_amount_above_gross_minus_commission() {
     assert!(e.contains("exceeds gross - commission"), "got: {e}");
 }
 
-/// Under-crediting is legitimate for a fee-on-transfer token and safe, so it
-/// is accepted and logged rather than refused.
+/// A lower net is correct for a fee-on-transfer token and is safe. It is
+/// accepted and logged, not refused.
 #[cfg(evm_to_rgb)]
 #[test]
 fn accepts_net_amount_below_gross_minus_commission() {
@@ -421,8 +418,8 @@ fn rejects_commission_exceeding_gross() {
     assert!(e.contains("exceeds gross amount"), "got: {e}");
 }
 
-/// A log without the indexed topics cannot be bound: fail closed rather than
-/// reading a data word.
+/// A log without the indexed topics cannot be bound. Fail closed, and do not
+/// read a data word.
 #[cfg(evm_to_rgb)]
 #[test]
 fn rejects_log_without_operation_id_topic() {
@@ -436,8 +433,7 @@ fn rejects_log_without_operation_id_topic() {
     assert!(e.contains("operationId is expected in topic1"), "got: {e}");
 }
 
-/// A full-width id must round-trip - the old u64 decode rejected every
-/// realistic one as "exceeds u64 range".
+/// A full-width 32-byte id must bind.
 #[cfg(evm_to_rgb)]
 #[test]
 fn binds_full_width_operation_id() {
@@ -450,8 +446,7 @@ fn binds_full_width_operation_id() {
     assert!(e.contains("operationId mismatch"), "got: {e}");
 }
 
-/// Regression guard: an absent id must refuse, not degrade to an unbound
-/// check as it once did.
+/// Regression guard: an absent id must refuse, not skip the bind.
 #[cfg(evm_to_rgb)]
 #[test]
 fn rejects_when_operation_id_not_supplied() {
@@ -515,14 +510,13 @@ fn rejects_head_below_receipt_block() {
     assert!(e.contains("reorg"), "got: {e}");
 }
 
-// ---- regression: listener booleans can no longer authorize ----
+// ---- regression: listener flags cannot authorize ----
 
 #[cfg(evm_to_rgb)]
 #[test]
 fn issue_51_no_receipt_means_no_authorization() {
-    // Simulates a request whose listener set evm_event_valid/finalized=true
-    // but for which no real deposit exists: verification must still reject,
-    // proving the removed booleans no longer gate signing.
+    // The listener sets evm_event_valid/finalized=true, but no deposit
+    // exists. Verification must reject, so the flags do not gate signing.
     let p = FakeEvm {
         receipt: None,
         head: 112,
@@ -578,8 +572,8 @@ fn rejects_funds_in_with_unexpected_layout() {
 #[cfg(feature = "bfa-mint")]
 #[test]
 fn verify_rgb_funds_in_accepts_a_verified_lock() {
-    // A real deposit tx emits both: the RGB companion (minted amount) and
-    // the BridgeFundsIn record (operationId, netAmount).
+    // A real deposit tx emits both: the RGB companion (minted amount) and the
+    // BridgeFundsIn record (operationId, netAmount).
     let p = FakeEvm {
         receipt: Some(receipt_with(
             vec![
@@ -601,8 +595,8 @@ fn verify_rgb_funds_in_accepts_a_verified_lock() {
     );
 }
 
-/// Without the record there is nothing a `fundsOut` could cite, so the
-/// lock is not usable as settlement evidence.
+/// Without the record, a `fundsOut` has nothing to cite, so the lock is not
+/// settlement evidence.
 #[cfg(feature = "bfa-validation")]
 #[test]
 fn verify_rgb_funds_in_requires_the_bridge_funds_in_record() {
@@ -616,8 +610,8 @@ fn verify_rgb_funds_in_requires_the_bridge_funds_in_record() {
     assert!(e.contains("no BridgeFundsIn log"), "got: {e}");
 }
 
-/// The extension never checks the emitter, so this filter is the only thing
-/// between a mint and a log from an attacker's contract.
+/// The extension does not check the emitter. This filter is the only guard
+/// against a mint from a log of an attacker contract.
 #[cfg(feature = "bfa-validation")]
 #[test]
 fn verify_rgb_funds_in_rejects_a_log_from_an_unpinned_contract() {

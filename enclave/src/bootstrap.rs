@@ -1,8 +1,5 @@
-//! Boot sequence, one step per function.
-//!
-//! `main.rs` reads as the order those steps run in; every step that has to
-//! look at the environment, panic on a bad pin, or fail soft on a missing
-//! dependency does it here. Nothing in this module handles a request.
+//! Boot sequence, one step per function. `main.rs` calls them in order.
+//! Nothing in this module handles a request.
 
 use crate::config::BridgeConfig;
 #[cfg(feature = "evm-rpc")]
@@ -56,14 +53,14 @@ pub fn pin_hosts(
     std::fs::rename(&tmp, path)
 }
 
-/// The raw `BITCOIN_NETWORK` value, defaulted. Kept as a string because the
+/// The raw `BITCOIN_NETWORK` value, default `bitcoin`. A string, because the
 /// SPV chain parses it with its own network enum.
 pub fn bitcoin_network_str() -> String {
     std::env::var("BITCOIN_NETWORK").unwrap_or_else(|_| "bitcoin".into())
 }
 
-/// Map `BITCOIN_NETWORK` onto a `bitcoin::Network`. An unknown value warns and
-/// falls back to mainnet rather than refusing to boot.
+/// Map `BITCOIN_NETWORK` to a `bitcoin::Network`. An unknown value logs a
+/// warning and gives mainnet.
 pub fn resolve_bitcoin_network(bitcoin_network_str: &str) -> bitcoin::Network {
     let bitcoin_network = match bitcoin_network_str {
         "bitcoin" | "mainnet" => bitcoin::Network::Bitcoin,
@@ -79,23 +76,20 @@ pub fn resolve_bitcoin_network(bitcoin_network_str: &str) -> bitcoin::Network {
     bitcoin_network
 }
 
-/// Log what the operator pinned, loudly when it is half-set.
+/// Log the pinned bridge config, as an error when it is partially set.
 ///
-/// A partially configured bridge is a botched production config: `SignEvm`
-/// fails closed on it, and the boot gate in `main` turns it fatal in a
-/// production build. This only makes it visible first.
+/// `SignEvm` fails closed on a partial config, and the boot gate in `main`
+/// stops a production build on it.
 pub fn log_bridge_config(bridge_config: &BridgeConfig) {
     if bridge_config.btc_relay_mode == crate::config::BtcRelayMode::None {
-        // Visible at boot, since a production policy refuses to start on it.
         tracing::warn!(
             "{}=none: fundsOut relay commitments are NOT verified (local stand without a \
              BtcRelay); heights, anchor and freshness are still bound",
             crate::config::BTC_RELAY_MODE_ENV
         );
     }
-    // Production deployments must set EVM_CHAIN_ID, EVM_PROXY_CONTRACT_ADDRESS
-    // and RGB_ASSET_ID. A misconfigured production enclave is detectable
-    // externally via the attestation bundle.
+    // Production sets EVM_CHAIN_ID, EVM_PROXY_CONTRACT_ADDRESS and RGB_ASSET_ID.
+    // The attestation bundle shows a bad config to external verifiers.
     if bridge_config.is_configured() {
         tracing::info!(
             chain_id = bridge_config.chain_id,
@@ -105,9 +99,6 @@ pub fn log_bridge_config(bridge_config: &BridgeConfig) {
             "bridge config pinned from env"
         );
     } else if bridge_config.is_partially_configured() {
-        // Some-but-not-all pin fields set: a botched production config. SignEvm
-        // fails closed on this; log it before the boot
-        // gate below turns it fatal in a production build.
         tracing::error!(
             chain_id = bridge_config.chain_id,
             bridge_contract = %hex::encode(bridge_config.bridge_contract),
@@ -124,23 +115,19 @@ pub fn log_bridge_config(bridge_config: &BridgeConfig) {
     }
 }
 
-/// Which EVM `FundsIn` deposit-verification source this deployment uses, plus
-/// the Helios checkpoint or the TLS pin of that source.
+/// The EVM `FundsIn` verification source, plus its Helios checkpoint or TLS pin.
 ///
-/// Decided the same way the RPC client is built in [`build_evm_rpc_client`]:
-/// `helios` plus `HELIOS_EXECUTION_RPC` means the trustless path; otherwise
-/// the pinned TLS of `tls`.
+/// Uses the same rule as [`build_evm_rpc_client`]. Production uses the pinned
+/// TLS of `tls`. The unused `helios` feature with `HELIOS_EXECUTION_RPC` selects
+/// Helios.
 #[cfg(feature = "evm-rpc")]
 pub fn resolve_evm_data_source(
     tls: &EvmRpcTls,
 ) -> (EvmDataSource, Option<[u8; 32]>, Option<EvmRpcTlsPin>) {
     #[cfg(feature = "helios")]
     if std::env::var("HELIOS_EXECUTION_RPC").is_ok() {
-        // The pinned weak-subjectivity checkpoint is Helios's trust root, so
-        // it is committed into the attested policy: a verifier confirms which
-        // checkpoint the enclave synced from, not just that it is in Helios
-        // mode. A missing or malformed value yields `None`, and the boot
-        // gate in `main` then refuses to boot.
+        // The checkpoint is the Helios trust root, so the attested policy
+        // commits it. A missing or bad value gives `None`, and boot fails.
         let checkpoint = std::env::var("HELIOS_CHECKPOINT")
             .ok()
             .and_then(|s| hex::decode(s.strip_prefix("0x").unwrap_or(&s)).ok())
@@ -155,8 +142,7 @@ pub fn resolve_evm_data_source(
     (EvmDataSource::PinnedTlsRpc, None, Some(pin))
 }
 
-/// Say which posture was resolved. This is what gets committed into the
-/// attestation `user_data`, so it belongs in the boot log.
+/// Log the resolved policy. The attestation `user_data` commits it.
 pub fn log_policy(policy: &SecurityPolicy) {
     match policy {
         SecurityPolicy::Production(p) => tracing::info!(
@@ -177,13 +163,12 @@ pub fn log_policy(policy: &SecurityPolicy) {
     }
 }
 
-/// Legacy/dev fallback for the donor-side cloning secret.
+/// Dev fallback for the donor cloning secret, from `UTEXO_CLONING_SECRET`.
 ///
-/// The supported path is the `InitializeKey` `cloning_secret` field, which
-/// never lands in the EIF or the PCRs. Never logged; `SecretBox` zeroizes it.
+/// Use the `InitializeKey` `cloning_secret` field instead: it never goes into
+/// the EIF or the PCRs. Never logged; `SecretBox` zeroizes it.
 pub fn install_env_cloning_secret(state: &EnclaveState) {
-    // `UTEXO_CLONING_SECRET` must not be baked into a release EIF, and is
-    // needed only by enclaves that serve `GetClone`.
+    // Never bake this var into a release EIF. Only `GetClone` donors need it.
     if let Ok(secret) = std::env::var("UTEXO_CLONING_SECRET") {
         if !secret.is_empty() {
             if let Err(e) = state.set_donor_cloning_secret(secret) {
@@ -198,18 +183,15 @@ pub fn install_env_cloning_secret(state: &EnclaveState) {
     }
 }
 
-/// Start the vsock-to-TCP forwarders this build needs at boot. The Electrum,
-/// EVM RPC and KMS forwarders start at launch, with the endpoints.
+/// Start the TCP-to-vsock forwarders that this build needs at boot. The
+/// Electrum, EVM RPC and KMS forwarders start at launch, with the endpoints.
 ///
-/// No-op off Linux or without `vsock`. Untrusted egress in every case - the
-/// host relays these bytes; see `vsock_forwarder`'s trust-boundary note.
+/// No-op off Linux or without `vsock`. Untrusted egress: see `vsock_forwarder`.
 pub fn start_vsock_forwarders() {
     #[cfg(all(feature = "vsock", target_os = "linux"))]
     {
-        // Helios execution + consensus RPC forwarders (trustless EVM
-        // verification). Helios verifies these UNTRUSTED upstreams against a
-        // pinned checkpoint. Local ports mirror HeliosConfig defaults
-        // (18545/18550); the host must run one vsock-proxy per upstream.
+        // Helios execution and consensus RPC forwarders. Local ports match the
+        // HeliosConfig defaults (18545/18550). The host runs one vsock-proxy each.
         #[cfg(feature = "helios")]
         {
             let exec_local: u16 = std::env::var("HELIOS_EXECUTION_LOCAL_PORT")
@@ -236,8 +218,7 @@ pub fn start_vsock_forwarders() {
                 } else {
                     8004
                 });
-            // KMS custody reserves 8003 for KMS and 8004 for the broker.
-            // Keep the non-custody defaults; fail early on an explicit collision.
+            // KMS custody reserves 8003 (KMS) and 8004 (broker).
             #[cfg(feature = "kms-persistence")]
             assert!(
                 ![exec_vsock, cons_vsock]
@@ -263,7 +244,7 @@ pub fn start_vsock_forwarders() {
 }
 
 /// Build the RGB consignment validator for the Electrum URL set at launch.
-/// A `None` refuses the launch.
+/// `None` makes the launch fail.
 #[cfg(feature = "rgb-validation")]
 pub fn build_rgb_validator(indexer_url: String) -> Option<RgbValidator> {
     let network = std::env::var("BITCOIN_NETWORK").unwrap_or_else(|_| "bitcoin".into());
@@ -279,13 +260,12 @@ pub fn build_rgb_validator(indexer_url: String) -> Option<RgbValidator> {
     }
 }
 
-/// Initialise the in-enclave Bitcoin header chain, anchored to the
-/// compile-time checkpoint for the active network. The chain starts empty; the
-/// listener fills it via `SubmitHeaders`.
+/// Create the in-enclave Bitcoin header chain at the compile-time checkpoint
+/// of the active network. The chain starts empty. `SubmitHeaders` fills it.
 ///
-/// Panics on a checkpoint a release build must not run with - a placeholder,
-/// a retarget-misaligned one, or a malformed `SPV_CHECKPOINT` override. Those
-/// are build-time misconfigurations, and booting anyway wedges the chain.
+/// Panics on a bad checkpoint: a placeholder in a release build, one not on a
+/// retarget boundary, or a malformed `SPV_CHECKPOINT` override. Such a chain
+/// cannot advance.
 #[cfg(feature = "rgb-validation")]
 pub fn build_header_chain(bitcoin_network_str: &str) -> std::sync::Mutex<HeaderChain> {
     let spv_network = Network::from_env_str(bitcoin_network_str).unwrap_or_else(|e| {
@@ -295,8 +275,7 @@ pub fn build_header_chain(bitcoin_network_str: &str) -> std::sync::Mutex<HeaderC
         Network::Mainnet
     });
     // Compiled-in anchor, or the dev-only `SPV_CHECKPOINT` override. A
-    // production-shaped build refuses to boot when that var is set, and a
-    // malformed spec is fatal rather than silently ignored.
+    // production build does not boot with that var set. A malformed value is fatal.
     let (checkpoint, checkpoint_source) = resolve_checkpoint(spv_network).unwrap_or_else(|msg| {
         panic!("{msg}");
     });
@@ -310,14 +289,12 @@ pub fn build_header_chain(bitcoin_network_str: &str) -> std::sync::Mutex<HeaderC
         );
     }
     if let Err(msg) = checkpoint.assert_real_in_release() {
-        // Fatal in a release build: with a placeholder checkpoint the
-        // listener can never push headers that chain to anything real.
+        // No real header connects to a placeholder checkpoint.
         panic!("{msg}");
     }
     if let Err(msg) = checkpoint.assert_retarget_aligned(spv_network) {
-        // A misaligned PoW-network checkpoint wedges the chain at the first
-        // retarget boundary above it, since the epoch-start lookup falls
-        // below the checkpoint. A build-time misconfiguration.
+        // A misaligned checkpoint stops the chain at the next retarget
+        // boundary: the epoch-start lookup falls below the checkpoint.
         panic!("{msg}");
     }
     if !checkpoint.is_real {
@@ -338,10 +315,9 @@ pub fn build_header_chain(bitcoin_network_str: &str) -> std::sync::Mutex<HeaderC
 
 /// Build the in-enclave EVM RPC client for independent `FundsIn` verification.
 ///
-/// The client reaches the RPC through the loopback forwarder. Responses are
-/// treated as evidence to verify, never as trusted input. A `None` client
-/// refuses the launch; it never downgrades to an unverified path after a
-/// Helios sync failure.
+/// The client reaches the RPC through the loopback forwarder, with TLS to the
+/// pinned host and CA. `None` makes the launch fail. There is no fallback to an
+/// unverified path.
 #[cfg(feature = "evm-rpc")]
 pub fn build_evm_rpc_client(
     bridge_config: &BridgeConfig,
@@ -374,15 +350,13 @@ pub fn build_evm_rpc_client(
         }
     };
 
-    // Runtime-selectable: HELIOS_EXECUTION_RPC set selects the
-    // Helios-verified path, else raw alloy. Fail closed on the selected
-    // provider - a Helios sync failure leaves the client unset so bridge
-    // signing refuses, never downgrading to the unverified path.
+    // HELIOS_EXECUTION_RPC selects Helios, else pinned-TLS alloy. A Helios sync
+    // failure leaves no client, so bridge signing fails closed.
     #[cfg(feature = "helios")]
     let client: Option<Boxed> = match crate::config::HeliosConfig::from_env() {
         Some(hcfg) => {
-            // Pass the pinned EVM_CHAIN_ID so Helios rejects a
-            // HELIOS_NETWORK inconsistent with it (predicate 1).
+            // Helios rejects a HELIOS_NETWORK that does not match EVM_CHAIN_ID
+            // (predicate 1).
             match crate::networks::evm::events::HeliosEvmClient::new(&hcfg, bridge_config.chain_id)
             {
                 Ok(c) => {

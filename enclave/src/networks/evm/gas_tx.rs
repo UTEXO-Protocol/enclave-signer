@@ -1,8 +1,8 @@
 //! Gas-key transaction shape allowlist.
 //!
 //! The gas key (`m/44'/60'/0'/0/1`) pays L1 gas for the bridge's Ethereum
-//! transactions. The enclave is given the unsigned transaction preimage, not a
-//! pre-hashed digest, and:
+//! transactions. The enclave gets the unsigned transaction preimage, not a
+//! digest. It:
 //!   1. decodes it as EIP-1559 (type `0x02`) or legacy EIP-155 with a strict
 //!      canonical RLP decoder;
 //!   2. computes the signing hash itself (`keccak256(preimage)`);
@@ -16,13 +16,12 @@
 //! `to` == pinned `BRIDGE_CONTRACT`, and `value` <= `GAS_TX_MAX_VALUE_WEI`. The
 //! selector must also be in `GAS_TX_ALLOWED_SELECTORS`.
 //!
-//! Any unset pin fails the path closed. The whole rule is folded into the
-//! attestation `user_data` commitment via [`crate::policy::SecurityPolicy`].
+//! Any unset pin fails the path closed. The attestation `user_data`
+//! commitment includes the whole rule, via [`crate::policy::SecurityPolicy`].
 //!
-//! Not bounded here: aggregate fee spend across many txs (validation is
-//! stateless), and the LayerZero fee is not bound to its release.
-//! EIP-712 typed data is not accepted: the gas key signs L1 transactions,
-//! whose envelope is RLP.
+//! Not bounded here: total fee spend across many txs (validation is
+//! stateless). The LayerZero fee is not bound to its release.
+//! EIP-712 typed data is refused: the gas key signs RLP L1 transactions.
 
 use sha3::{Digest, Keccak256};
 
@@ -34,25 +33,24 @@ use crate::proto::SignRawDigestRequest;
 const TX_TYPE_EIP1559: u8 = 0x02;
 
 /// Selector of the **on-chain** `MultisigProxy.lzFundsOutCall` (params as one
-/// struct) - the only proxy method that legitimately carries native value.
+/// struct). It is the only proxy method that can carry native value.
 ///
-/// NOT [`super::validation::LZ_FUNDS_OUT_SELECTOR`], which is the enclave's
-/// wire format for the same operation. A literal because keccak is not
-/// const-evaluable here; `onchain_lz_selector_matches_its_signature` pins it.
+/// NOT [`super::validation::LZ_FUNDS_OUT_SELECTOR`], the enclave wire format.
+/// It is a literal because keccak is not const here.
+/// `onchain_lz_selector_matches_its_signature` pins it.
 const ONCHAIN_LZ_FUNDS_OUT_CALL_SELECTOR: [u8; 4] = [0x8f, 0x6b, 0x30, 0x31];
 
-/// Maximum RLP nesting depth we will decode. A real transaction reaches
-/// depth ~4 (tx list -> accessList -> entry -> storage-key list); the cap is
-/// a defensive backstop against a deeply-nested input exhausting the stack.
+/// Maximum RLP nesting depth. A real transaction reaches depth ~4 (tx list ->
+/// accessList -> entry -> storage-key list). The cap stops deep input from
+/// exhausting the stack.
 const MAX_RLP_DEPTH: usize = 8;
 
-/// Shorthand for the cross-check rejection used throughout this module.
 fn reject(msg: impl Into<String>) -> EnclaveError {
     EnclaveError::CrossCheck(msg.into())
 }
 
-/// A decoded RLP item: either a byte string or a list of items. Borrows
-/// from the input buffer - no allocation of payload bytes.
+/// A decoded RLP item: a byte string or a list of items. It borrows from the
+/// input buffer.
 enum Rlp<'a> {
     Str(&'a [u8]),
     List(Vec<Rlp<'a>>),
@@ -62,16 +60,16 @@ enum Rlp<'a> {
 struct GasTx<'a> {
     chain_id: u64,
     to: [u8; 20],
-    /// Wei. A number rather than a zero flag: the LayerZero carve-out
-    /// compares it against a pinned ceiling.
+    /// Wei. A number, not a zero flag, because the LayerZero carve-out
+    /// compares it to a pinned ceiling.
     value: u128,
-    /// `gasLimit` - bounded by `GAS_TX_MAX_GAS_LIMIT`.
+    /// `gasLimit`, bounded by `GAS_TX_MAX_GAS_LIMIT`.
     gas_limit: u64,
-    /// `maxFeePerGas` (EIP-1559) or `gasPrice` (legacy) - bounded by
+    /// `maxFeePerGas` (EIP-1559) or `gasPrice` (legacy), bounded by
     /// `GAS_TX_MAX_FEE_PER_GAS`.
     max_fee_per_gas: u128,
-    /// `maxPriorityFeePerGas` (EIP-1559); equal to `gasPrice` for legacy. Also
-    /// bounded by `GAS_TX_MAX_FEE_PER_GAS`.
+    /// `maxPriorityFeePerGas` (EIP-1559), or `gasPrice` for legacy. Bounded by
+    /// `GAS_TX_MAX_FEE_PER_GAS`.
     max_priority_fee_per_gas: u128,
     /// Leading 4-byte function selector, or `None` for empty calldata (which
     /// `validate_gas_tx_request` refuses).
@@ -80,16 +78,15 @@ struct GasTx<'a> {
     data: &'a [u8],
 }
 
-/// Validate a gas-key `SignRawDigest` request against the operator pins and
-/// return the 32-byte digest the enclave should sign - `keccak256` of the
-/// supplied preimage, computed here rather than trusted from the wire.
+/// Validates a gas-key `SignRawDigest` request against the operator pins.
+/// Returns the digest to sign: `keccak256` of the preimage, computed here and
+/// not taken from the wire.
 ///
-/// Fails closed (`CrossCheck`) on: missing preimage, unparseable / malformed
-/// / non-canonical RLP, unsupported envelope, unpinned chain id / destination /
-/// gas cap / fee cap, chain-id / destination mismatch, contract-creation, a
-/// non-zero value failing any leg of the LayerZero fee carve-out, a `gasLimit`
-/// or per-gas fee above the pinned ceiling, or calldata whose selector is not
-/// in the operator allowlist.
+/// Fails closed (`CrossCheck`) on: no preimage, bad or non-canonical RLP,
+/// unsupported envelope, unpinned chain id / destination / gas cap / fee cap,
+/// chain id or destination mismatch, contract creation, a non-zero value that
+/// fails the LayerZero carve-out, `gasLimit` or fee above the cap, or a
+/// selector not in the operator allowlist.
 pub fn validate_gas_tx_request(req: &SignRawDigestRequest, cfg: &BridgeConfig) -> Result<[u8; 32]> {
     if req.unsigned_tx.is_empty() {
         return Err(reject(
@@ -98,7 +95,6 @@ pub fn validate_gas_tx_request(req: &SignRawDigestRequest, cfg: &BridgeConfig) -
         ));
     }
 
-    // Decode + structural allowlist.
     let tx = parse_gas_tx(&req.unsigned_tx)?;
 
     // Chain-id pin: blocks cross-chain replay of a gas tx.
@@ -201,10 +197,9 @@ pub fn validate_gas_tx_request(req: &SignRawDigestRequest, cfg: &BridgeConfig) -
         )));
     }
 
-    // Calldata allowlist. Every signed gas tx must invoke an
-    // allowlisted 4-byte selector on the pinned destination. Empty calldata is
-    // refused (it would invoke `fallback()` / `receive()`), and an empty
-    // allowlist refuses all gas-tx signing.
+    // Each gas tx must call an allowlisted selector on the pinned destination.
+    // Empty calldata is refused because it calls `fallback()` / `receive()`.
+    // An empty allowlist refuses all gas-tx signing.
     match tx.selector {
         Some(selector) => {
             if !cfg.gas_tx_allowed_selectors.contains(&selector) {
@@ -225,8 +220,8 @@ pub fn validate_gas_tx_request(req: &SignRawDigestRequest, cfg: &BridgeConfig) -
         }
     }
 
-    // Compute the digest from the validated preimage. Any wire-supplied
-    // digest must agree, but the signed bytes come from our own hash.
+    // The signed digest comes from the validated preimage. A wire digest, if
+    // present, must agree.
     let digest: [u8; 32] = Keccak256::digest(&req.unsigned_tx).into();
     if !req.digest.is_empty() && req.digest.as_slice() != digest {
         return Err(reject(
@@ -236,9 +231,9 @@ pub fn validate_gas_tx_request(req: &SignRawDigestRequest, cfg: &BridgeConfig) -
     Ok(digest)
 }
 
-/// Decode an unsigned gas transaction preimage and extract the fields the
-/// allowlist needs. Accepts EIP-1559 (`0x02 || rlp([...9])`) and legacy
-/// EIP-155 (`rlp([...9])`) unsigned bodies; rejects everything else.
+/// Decodes an unsigned gas transaction preimage into the allowlist fields.
+/// Accepts only EIP-1559 (`0x02 || rlp([...9])`) and legacy EIP-155
+/// (`rlp([...9])`) unsigned bodies.
 fn parse_gas_tx(raw: &[u8]) -> Result<GasTx<'_>> {
     let first = *raw
         .first()
@@ -284,8 +279,8 @@ fn parse_gas_tx(raw: &[u8]) -> Result<GasTx<'_>> {
                  refusing a signed or pre-EIP-155 transaction",
             ));
         }
-        // Legacy has a single `gasPrice`; it plays the role of both the max fee
-        // and the priority fee for the cap check.
+        // Legacy has one `gasPrice`. The cap check uses it as both the max fee
+        // and the priority fee.
         let gas_price = scalar_u128(&items[1])?;
         Ok(GasTx {
             chain_id: scalar_u64(&items[6])?,
@@ -308,12 +303,11 @@ fn parse_gas_tx(raw: &[u8]) -> Result<GasTx<'_>> {
 
 // Minimal, defensive RLP decoder
 //
-// Hand-rolled and strict: it decodes attacker-controlled bytes inside the TEE,
-// so it bounds-checks every read, rejects non-canonical encodings, and requires
-// the whole input to be consumed by exactly one top-level item.
+// Strict, because it decodes attacker bytes inside the TEE. It bounds-checks
+// every read and rejects non-canonical encodings. Exactly one top-level item
+// must use the whole input.
 
-/// Decode exactly one top-level RLP item and require it to consume the
-/// entire buffer (no trailing bytes).
+/// Decodes exactly one top-level RLP item. It must use the whole buffer.
 fn decode_canonical(buf: &[u8]) -> Result<Rlp<'_>> {
     let (item, used) = decode_one(buf, 0)?;
     if used != buf.len() {
@@ -322,8 +316,8 @@ fn decode_canonical(buf: &[u8]) -> Result<Rlp<'_>> {
     Ok(item)
 }
 
-/// Decode a single RLP item from the front of `buf`, returning it and the
-/// number of bytes consumed.
+/// Decodes one RLP item from the front of `buf`. Returns the item and the
+/// number of bytes used.
 fn decode_one(buf: &[u8], depth: usize) -> Result<(Rlp<'_>, usize)> {
     if depth > MAX_RLP_DEPTH {
         return Err(reject("rlp: nesting too deep"));
@@ -388,11 +382,10 @@ fn decode_one(buf: &[u8], depth: usize) -> Result<(Rlp<'_>, usize)> {
     }
 }
 
-/// Read the big-endian length that follows a long-string/long-list header
-/// byte. `len_of_len` is in 1..=8. Returns `(length, header_size)` where
-/// `header_size = 1 + len_of_len`. Enforces canonical form: no leading-zero
-/// length bytes and the length must be > 55 (otherwise the short form was
-/// required).
+/// Reads the big-endian length after a long-string/long-list header byte.
+/// `len_of_len` is in 1..=8. Returns `(length, 1 + len_of_len)`. Canonical
+/// form: no leading-zero length bytes, and the length must be > 55 (else the
+/// short form applies).
 fn read_long_len(buf: &[u8], len_of_len: u8) -> Result<(usize, usize)> {
     let lol = len_of_len as usize; // 1..=8 by construction
     let header = 1 + lol;
@@ -405,7 +398,7 @@ fn read_long_len(buf: &[u8], len_of_len: u8) -> Result<(usize, usize)> {
     }
     let mut len: usize = 0;
     for &b in len_bytes {
-        // lol <= 8 and we cap at usize below; shift-accumulate big-endian.
+        // Big-endian accumulate. Checked ops reject overflow.
         len = len
             .checked_shl(8)
             .and_then(|v| v.checked_add(b as usize))
@@ -417,8 +410,7 @@ fn read_long_len(buf: &[u8], len_of_len: u8) -> Result<(usize, usize)> {
     Ok((len, header))
 }
 
-/// Decode a buffer that is the concatenation of zero or more RLP items
-/// (a list payload), consuming all of it.
+/// Decodes a list payload (zero or more concatenated RLP items) completely.
 fn decode_list(mut buf: &[u8], depth: usize) -> Result<Vec<Rlp<'_>>> {
     let mut items = Vec::new();
     while !buf.is_empty() {
@@ -430,7 +422,7 @@ fn decode_list(mut buf: &[u8], depth: usize) -> Result<Vec<Rlp<'_>>> {
     Ok(items)
 }
 
-/// Borrow an item's list contents, or reject if it's a string.
+/// Borrows an item's list contents. Rejects a string.
 fn as_list<'a, 'b>(item: &'b Rlp<'a>) -> Result<&'b [Rlp<'a>]> {
     match item {
         Rlp::List(v) => Ok(v),
@@ -438,7 +430,7 @@ fn as_list<'a, 'b>(item: &'b Rlp<'a>) -> Result<&'b [Rlp<'a>]> {
     }
 }
 
-/// Borrow a byte-string field such as transaction calldata.
+/// Borrows a byte-string field, such as transaction calldata.
 fn as_bytes<'a>(item: &Rlp<'a>) -> Result<&'a [u8]> {
     match item {
         Rlp::Str(bytes) => Ok(bytes),
@@ -446,8 +438,8 @@ fn as_bytes<'a>(item: &Rlp<'a>) -> Result<&'a [u8]> {
     }
 }
 
-/// Borrow an item's scalar bytes (a canonical big-endian integer string),
-/// rejecting a list or a non-minimal leading-zero encoding.
+/// Borrows an item's scalar bytes (canonical big-endian integer). Rejects a
+/// list or a leading zero.
 fn as_scalar<'a>(item: &Rlp<'a>) -> Result<&'a [u8]> {
     match item {
         Rlp::Str(s) => {
@@ -460,7 +452,7 @@ fn as_scalar<'a>(item: &Rlp<'a>) -> Result<&'a [u8]> {
     }
 }
 
-/// Interpret a scalar item as a `u64`, rejecting anything wider than 8 bytes.
+/// Reads a scalar item as a `u64`. Rejects more than 8 bytes.
 fn scalar_u64(item: &Rlp) -> Result<u64> {
     let s = as_scalar(item)?;
     if s.len() > 8 {
@@ -473,10 +465,9 @@ fn scalar_u64(item: &Rlp) -> Result<u64> {
     Ok(v)
 }
 
-/// Interpret a scalar item as a `u128`, used for the wei-denominated fee
-/// fields and `value` (all `uint256` on the wire). Wider than 16 bytes is
-/// rejected rather than truncated: `u128::MAX` wei already exceeds any
-/// pinnable ceiling.
+/// Reads a scalar item as a `u128`, for the wei fee fields and `value`
+/// (`uint256` on the wire). More than 16 bytes is rejected, not truncated:
+/// `u128::MAX` wei is above any pinnable ceiling.
 fn scalar_u128(item: &Rlp) -> Result<u128> {
     let s = as_scalar(item)?;
     if s.len() > 16 {
@@ -496,8 +487,8 @@ fn scalar_is_zero(item: &Rlp) -> Result<bool> {
     Ok(as_scalar(item)?.is_empty())
 }
 
-/// Interpret an item as a 20-byte address. Rejects the empty string
-/// (contract creation), a wrong-length string, or a list.
+/// Reads an item as a 20-byte address. Rejects the empty string (contract
+/// creation), a wrong length, or a list.
 fn as_address(item: &Rlp) -> Result<[u8; 20]> {
     match item {
         Rlp::Str(s) if s.len() == 20 => {
@@ -513,9 +504,8 @@ fn as_address(item: &Rlp) -> Result<[u8; 20]> {
     }
 }
 
-/// Interpret the `data` item as calldata and extract its leading 4-byte
-/// function selector. Empty calldata yields `None` (the caller refuses it).
-/// Non-empty calldata shorter than 4 bytes, or a list, is rejected.
+/// Gets the 4-byte selector from the `data` item. Empty calldata gives `None`
+/// (the caller refuses it). Rejects 1-3 bytes of calldata, or a list.
 fn as_calldata_selector(item: &Rlp) -> Result<Option<[u8; 4]>> {
     match item {
         Rlp::Str([]) => Ok(None),

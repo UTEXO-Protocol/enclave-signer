@@ -31,15 +31,14 @@ fn source_rejects_invalid_tx_hash_length() {
         .contains(&format!("evm_tx_hash must be {TX_HASH_LEN} bytes")));
 }
 
-/// `validate_source` no longer reads the listener's
-/// `event_valid` / `event_finalized` booleans, so flipping them changes
-/// nothing. Validity and finality come from
+/// `validate_source` ignores the listener `event_valid` / `event_finalized`
+/// flags, so a change to them has no effect. Validity and finality come from
 /// `events::verify_funds_in_event`.
 #[test]
 fn source_ignores_listener_evm_booleans() {
     let mut source = source();
     source.event_valid = false;
     source.event_finalized = false;
-    // Shape is still valid and the booleans are ignored now.
+    // The shape is valid and the flags are ignored.
     assert!(validate_source(1_000, &source).is_ok());
 }

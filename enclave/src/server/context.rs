@@ -1,8 +1,8 @@
-//! The boot-time context every request handler reads.
+//! The boot-time context that all request handlers read.
 //!
-//! Built once in `main.rs` and shared immutably. The only mutable parts are
-//! behind their own `Mutex` (the SPV header chain and its rate limiter) or
-//! written once (`launch`).
+//! `main.rs` builds it once, and it is shared as immutable. The only mutable
+//! parts are behind a `Mutex` (SPV header chain, rate limiter) or written
+//! once (`launch`).
 
 use std::sync::{Mutex, OnceLock};
 
@@ -16,21 +16,21 @@ use crate::state::EnclaveState;
 /// What the operator's one `SetEndpoints` installs.
 pub struct Launch {
     pub endpoints: Endpoints,
-    /// The enclave's single, explicit security posture, resolved once at
-    /// launch. Committed into the attestation `user_data` commitment via
-    /// [`crate::policy::SecurityPolicy::commitment_bytes`] and consulted by the
-    /// signing handlers instead of re-deriving posture from build features and
-    /// empty request fields.
+    /// The enclave security policy, resolved once at launch.
+    /// The attestation `user_data` commits to it through
+    /// [`crate::policy::SecurityPolicy::commitment_bytes`].
+    /// Signing handlers read it. They do not derive the policy from build
+    /// features or empty request fields.
     pub policy: SecurityPolicy,
-    /// `SetEndpoints` always sets it. Tests may leave it `None`, and the
-    /// handlers then refuse.
+    /// `SetEndpoints` always sets it. Tests can leave it `None`.
+    /// Then the handlers refuse.
     #[cfg(feature = "rgb-validation")]
     pub rgb_validator: Option<crate::networks::rgb::validation::RgbValidator>,
     /// In-enclave EVM RPC client for independent `FundsIn` verification.
-    /// `SetEndpoints` always sets it. Tests may leave it `None`, and
-    /// `handle_sign` then fails closed in bridge mode. Reaches the RPC only
-    /// through the loopback vsock forwarder, so responses are host-relayed -
-    /// see [`crate::networks::evm::events`].
+    /// `SetEndpoints` always sets it. Tests can leave it `None`.
+    /// Then `handle_sign` fails closed in bridge mode.
+    /// The host relays the RPC traffic through the loopback vsock forwarder.
+    /// TLS ends inside the enclave. See [`crate::networks::evm::events`].
     #[cfg(feature = "evm-rpc")]
     pub evm_rpc_client:
         Option<Box<dyn crate::networks::evm::events::EvmReceiptProvider + Send + Sync>>,
@@ -39,11 +39,10 @@ pub struct Launch {
 /// Shared context passed to every request handler.
 pub struct ServerContext {
     pub state: EnclaveState,
-    /// Bridge config pinned at boot from env. Folded into the attestation
-    /// `user_data` commitment and used to cross-check `SignEvm` requests
-    /// against operator-pinned values.
+    /// Bridge config pinned at boot from env. The attestation `user_data`
+    /// commits to it. `SignEvm` requests are cross-checked against it.
     pub bridge_config: BridgeConfig,
-    /// The build the launch policy is resolved for.
+    /// The build that the launch policy applies to.
     pub build_ctx: BuildContext,
     /// Empty until `SetEndpoints`. Written once, under `launch_lock`.
     pub launch: OnceLock<Launch>,
@@ -51,25 +50,23 @@ pub struct ServerContext {
     /// Pinned EVM-RPC config (min confirmations).
     #[cfg(feature = "evm-rpc")]
     pub evm_rpc_config: crate::config::EvmRpcConfig,
-    /// In-enclave Bitcoin header chain for SPV verification. Populated at boot
-    /// from the compile-time checkpoint and mutated by SubmitHeaders. `Mutex`
-    /// rather than `RefCell` so multi-threaded handling needs no plumbing
-    /// change.
+    /// In-enclave Bitcoin header chain for SPV verification.
+    /// It starts from the compile-time checkpoint. SubmitHeaders changes it.
     ///
-    /// SPV-only: a `ccd`-only build carries no chain and rejects
+    /// A `ccd`-only build has no chain and refuses
     /// `SubmitHeaders` / `GetLastSavedBlock`.
     #[cfg(feature = "rgb-validation")]
     pub header_chain: std::sync::Mutex<crate::networks::rgb::spv::HeaderChain>,
-    /// Cumulative rate limit for `SubmitHeaders`. The per-call cap lives
-    /// in `HeaderChain::submit_headers`; this bounds the *aggregate* rate
-    /// across calls so a flood of small batches can't keep the enclave busy.
+    /// Total rate limit for `SubmitHeaders` across calls.
+    /// `HeaderChain::submit_headers` has the per-call cap.
+    /// This limit stops a flood of small batches from keeping the enclave busy.
     #[cfg(feature = "rgb-validation")]
     pub submit_rate_limiter: std::sync::Mutex<SubmitRateLimiter>,
 }
 
 impl ServerContext {
-    /// A context with no endpoints: it signs nothing until `SetEndpoints`.
-    /// `main.rs` builds this one.
+    /// A context with no endpoints. It signs nothing until `SetEndpoints`.
+    /// `main.rs` uses this constructor.
     pub fn awaiting_launch(
         state: EnclaveState,
         bridge_config: BridgeConfig,
@@ -93,9 +90,9 @@ impl ServerContext {
         }
     }
 
-    /// Construct a `ServerContext` from the always-present fields, hiding
-    /// feature-gated fields like `rgb_validator` so external callers
-    /// (e.g. the parent's E2E tests) don't need to mirror our cfg flags.
+    /// Make a `ServerContext` without feature-gated fields such as
+    /// `rgb_validator`. External callers (for example parent E2E tests) do
+    /// not need the same cfg flags.
     /// The launch is preset with no endpoints and no chain clients.
     #[cfg(feature = "rgb-validation")]
     pub fn new(
@@ -109,7 +106,7 @@ impl ServerContext {
         ctx
     }
 
-    /// `ccd`-only variant: no SPV header chain to pass in.
+    /// `ccd`-only variant without an SPV header chain.
     #[cfg(not(feature = "rgb-validation"))]
     pub fn new(state: EnclaveState, bridge_config: BridgeConfig) -> Self {
         let ctx = Self::awaiting_launch(state, bridge_config, BuildContext::current());
@@ -118,7 +115,7 @@ impl ServerContext {
     }
 
     fn preset_dev_launch(&self) {
-        // No EVM source is wired here, so resolve `Disabled`.
+        // No EVM source exists here, so the policy is `Disabled`.
         let policy = SecurityPolicy::resolve(
             &self.build_ctx,
             &self.bridge_config,

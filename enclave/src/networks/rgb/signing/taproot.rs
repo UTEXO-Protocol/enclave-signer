@@ -22,15 +22,16 @@ pub struct TaprootSignJob {
     pub child_path: Vec<bitcoin::bip32::ChildNumber>,
 }
 
-/// Scan all PSBT inputs for BIP-86 key-path spends we own, one entry per input.
+/// Finds the PSBT inputs that are BIP-86 key-path spends we own, one entry per
+/// input.
 ///
 /// This is the custody anchor. An input is ours when its claimed
-/// `tap_internal_key` is (1) listed in `tap_key_origins` under our fingerprint,
+/// `tap_internal_key` is (1) in `tap_key_origins` under our fingerprint,
 /// (2) at a BIP-86 path of one of our accounts that (3) derives exactly that
-/// key, and (4) tweaked with `tap_merkle_root` reproduces the output key in
-/// `witness_utxo.script_pubkey` (BIP-341). A forged origins entry cannot pass
-/// (3) and a foreign coin cannot pass (4). Script-path spends are never ours:
-/// the bridge wallet is singlesig. It never reads `tap_key_sig`, so an input
+/// key, and (4) tweaked with `tap_merkle_root` gives the output key in
+/// `witness_utxo.script_pubkey` (BIP-341). A forged origins entry fails (3).
+/// A foreign coin fails (4). Script-path spends are never ours, because the
+/// bridge wallet is singlesig. It does not read `tap_key_sig`, so an input
 /// stays ours after we merge a signature into it.
 pub fn find_controlled_taproot_inputs(
     psbt: &Psbt,
@@ -48,7 +49,7 @@ pub fn find_controlled_taproot_inputs(
                 return None;
             }
             let spk_bytes = witness_utxo.script_pubkey.as_bytes();
-            // P2TR is exactly OP_1 (0x51) + 0x20 + 32-byte program.
+            // P2TR is OP_1 (0x51), 0x20, and a 32-byte program.
             if spk_bytes.len() != 34 {
                 return None;
             }
@@ -65,8 +66,8 @@ pub fn find_controlled_taproot_inputs(
         .collect()
 }
 
-/// Key-path entry when the claimed internal key is ours and, tweaked with
-/// `tap_merkle_root`, reproduces the output key. Never looks at `tap_key_sig`.
+/// Key-path job when the claimed internal key is ours and, tweaked with
+/// `tap_merkle_root`, gives the output key. Does not read `tap_key_sig`.
 fn key_path_job(
     secp: &Secp256k1<bitcoin::secp256k1::All>,
     input: &bitcoin::psbt::Input,
@@ -102,8 +103,8 @@ fn key_path_job(
     })
 }
 
-/// The signing work left on this PSBT: the controlled inputs that carry no
-/// key-path signature yet, whatever an existing one contains.
+/// The signing work left on this PSBT: the controlled inputs with no key-path
+/// signature yet.
 pub fn find_taproot_sign_jobs(
     psbt: &Psbt,
     master_fingerprint: &Fingerprint,
@@ -115,9 +116,8 @@ pub fn find_taproot_sign_jobs(
         .collect()
 }
 
-/// Input indices of [`find_taproot_sign_jobs`], used only by tests to check
-/// signing work left on a PSBT. Custody code must never call the job
-/// resolver: that would be a regression.
+/// Input indices of [`find_taproot_sign_jobs`], for tests only. Custody code
+/// must not use the job resolver, because it drops inputs that are signed.
 #[cfg(all(test, evm_to_rgb))]
 pub(crate) fn outstanding_job_inputs(psbt: &Psbt, key_manager: &KeyManager) -> Vec<usize> {
     find_taproot_sign_jobs(psbt, key_manager.master_fingerprint(), key_manager)
@@ -126,7 +126,7 @@ pub(crate) fn outstanding_job_inputs(psbt: &Psbt, key_manager: &KeyManager) -> V
         .collect()
 }
 
-/// Sign key-path taproot inputs: each job gets a `tap_key_sig`. Returns the
+/// Signs key-path taproot inputs: each job gets a `tap_key_sig`. Returns the
 /// number of signatures added.
 pub fn sign_taproot_inputs(
     psbt: &mut Psbt,
@@ -139,7 +139,7 @@ pub fn sign_taproot_inputs(
 
     let secp = Secp256k1::new();
 
-    // BIP-341 requires ALL prevouts for taproot sighash computation
+    // BIP-341: the taproot sighash needs all prevouts.
     let prevouts: Vec<TxOut> = psbt
         .inputs
         .iter()

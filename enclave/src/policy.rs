@@ -1,22 +1,18 @@
-//! The enclave's single, explicit security posture.
+//! The enclave security policy, as one object.
 //!
-//! [`SecurityPolicy`] holds the whole posture as one object, resolved once at
-//! boot by [`SecurityPolicy::resolve`], rather than reconstructing it at
-//! runtime from build features, [`BridgeConfig`] fields, and request shape. It
-//! is:
+//! [`SecurityPolicy::resolve`] makes it from the build features and the
+//! [`BridgeConfig`]. It is:
 //!
-//!   * fail-closed: a release `rgb-validation` build that does not resolve to a
-//!     valid [`SecurityPolicy::Production`] refuses to boot or launch
+//!   * fail-closed: a release `rgb-validation` build without a valid
+//!     [`SecurityPolicy::Production`] does not boot or launch
 //!     ([`SecurityPolicy::assert_valid_at_boot`],
 //!     [`SecurityPolicy::assert_valid_for_build`]);
-//!   * attested: [`SecurityPolicy::commitment_bytes`] is folded into the
-//!     attestation `user_data` commitment, so a verifier checks the posture as
-//!     a single value;
-//!   * authoritative: handlers consult it instead of re-deriving posture from
-//!     features and empty fields.
+//!   * attested: the attestation `user_data` commits
+//!     [`SecurityPolicy::commitment_bytes`];
+//!   * authoritative: handlers read it and do not derive the policy again.
 //!
-//! Resolution and the boot gate take an explicit [`BuildContext`], so release
-//! behaviour is unit-testable without a release build.
+//! The functions take an explicit [`BuildContext`], so unit tests cover release
+//! behavior without a release build.
 
 use crate::config::{BridgeConfig, BtcRelayMode};
 
@@ -24,62 +20,53 @@ pub use attestation_verify::{
     AttestationMode, AttestedPolicy, BtcDataSource, EvmDataSource, EvmRpcTlsPin, KmsPin, SignerRole,
 };
 
-/// The enclave's resolved security posture. See the module docs.
+/// The resolved security policy. See the module docs.
 #[derive(Clone, Debug, PartialEq, Eq)]
-// Resolved once at boot and committed to attestation user_data; the size
-// difference between the variants costs nothing here.
+// One instance per enclave, so the variant size difference is not important.
 #[allow(clippy::large_enum_variant)]
 pub enum SecurityPolicy {
-    /// A fully-pinned, fail-closed bridge-signing enclave.
+    /// A fully pinned, fail-closed bridge-signing enclave.
     Production(ProductionPolicy),
-    /// Anything that is not a production bridge signer: a debug build, a dev
-    /// feature, a non-bridge build, or an unpinned config. Carries the reason so
-    /// boot logs and the fail-closed panic say *why*.
+    /// Not a production bridge signer: a debug build, a dev feature, a
+    /// non-bridge build or an unpinned config. The reason goes into logs and the
+    /// fail-closed panic.
     Development { reason: DevReason },
 }
 
-/// The pinned facts and enabled modes of a production bridge-signing enclave:
-/// signing modes, chain/contract/asset pins, expected attestation
-/// values, and allowed data sources, all committed into attestation
-/// `user_data`.
+/// The pins, signing modes and data sources of a production bridge signer.
+/// The attestation `user_data` commits all of them.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ProductionPolicy {
     /// Pinned EVM chain id (`EVM_CHAIN_ID`).
     pub chain_id: u64,
-    /// Pinned bridge (MultisigProxy) contract (`BRIDGE_CONTRACT`).
+    /// Pinned MultisigProxy contract (`EVM_PROXY_CONTRACT_ADDRESS`).
     pub bridge_contract: [u8; 20],
     /// Pinned RGB asset id (`RGB_ASSET_ID`).
     pub rgb_asset_id: String,
     /// Only this contract's FundsIn events may authorize bridge signing.
     pub funds_in_contract: [u8; 20],
-    /// The ERC-20 the Bridge releases (`TOKEN_CONTRACT`): a `burnId` preimage
-    /// input, so the recomputed `burnId` the enclave enforces is attested.
+    /// The ERC-20 that the Bridge releases (`TOKEN_CONTRACT`), a `burnId`
+    /// preimage input.
     pub token_contract: [u8; 20],
-    /// Minimum receipt depth required before a FundsIn deposit is accepted.
+    /// Min receipt depth of an accepted FundsIn deposit.
     pub evm_min_confirmations: u64,
-    /// `fundsOut` proofs must carry BtcRelay commitments the enclave verifies
-    /// (`BTC_RELAY_MODE=required`). [`check_invariants`](Self::check_invariants)
-    /// refuses `false`, so a production enclave always has it `true`; that is
-    /// why it has no field in [`AttestedPolicy`] - `Production` already
-    /// commits to it.
+    /// `fundsOut` proofs must carry BtcRelay commitments (`BTC_RELAY_MODE=required`).
+    /// [`check_invariants`](Self::check_invariants) refuses `false`, so
+    /// [`AttestedPolicy`] has no field for it.
     pub btc_relay_required: bool,
-    /// Whether the plain-BTC (vanilla / create_utxo) signing path is authorised.
-    /// Derived from the operator's `BTC_MAX_TOTAL_SATS` pin
-    /// ([`BridgeConfig::allows_vanilla_btc`]); default fail-closed (false).
+    /// If plain-BTC (vanilla, create_utxo) signing is allowed
+    /// ([`BridgeConfig::allows_vanilla_btc`]). Default `false`.
     pub allow_vanilla_psbt: bool,
     /// Bridge directions this image signs, from the build features.
     pub signer_role: SignerRole,
-    /// Expected attestation root of trust. Always [`AttestationMode::Real`] in a
-    /// production build (mock is a `compile_error!` in release - see `lib.rs`).
+    /// Attestation root of trust. Always [`AttestationMode::Real`] in
+    /// production: mock is a release `compile_error!` in `lib.rs`.
     pub attestation: AttestationMode,
-    /// EVM `FundsIn` deposit-verification source (pinned TLS, plaintext RPC,
-    /// Helios-verified or disabled). Recorded and attested so a verifier can
-    /// tell a trustless deployment apart from a host-relayed one.
+    /// EVM `FundsIn` verification source (pinned TLS, plaintext RPC, Helios or
+    /// disabled). Attested.
     pub evm_source: EvmDataSource,
-    /// The Helios weak-subjectivity checkpoint (beacon block root) EVM
-    /// verification trust-roots on. `Some`, and required, only when
-    /// `evm_source` is [`EvmDataSource::HeliosVerified`]. Attested so a verifier
-    /// confirms which checkpoint the enclave synced from.
+    /// The Helios weak-subjectivity checkpoint (beacon block root). Required
+    /// only when `evm_source` is [`EvmDataSource::HeliosVerified`]. Attested.
     pub evm_checkpoint: Option<[u8; 32]>,
     /// Host of the Electrum server set at launch.
     pub electrum_host: String,
@@ -88,18 +75,16 @@ pub struct ProductionPolicy {
     pub evm_rpc_tls: Option<EvmRpcTlsPin>,
     /// Bitcoin anchor-verification source. Always SPV in a production build.
     pub btc_source: BtcDataSource,
-    /// Gas-tx (`SignRawDigest`) allowed destination (`GAS_TX_ALLOWED_TO`), or
-    /// `None` when unset, which fails the gas path closed per request. Attested
-    /// as all-zero when `None`. See `networks::evm::gas_tx`.
+    /// Allowed gas-tx (`SignRawDigest`) destination (`GAS_TX_ALLOWED_TO`).
+    /// `None` fails the gas path closed and is attested as all-zero.
+    /// See `networks::evm::gas_tx`.
     pub gas_tx_allowed_to: Option<[u8; 20]>,
-    /// Gas-tx `gasLimit` ceiling (`GAS_TX_MAX_GAS_LIMIT`; 0 = unset -> fail closed).
+    /// Max gas-tx `gasLimit` (`GAS_TX_MAX_GAS_LIMIT`). 0 fails closed.
     pub gas_tx_max_gas_limit: u64,
-    /// Gas-tx per-gas fee ceiling in wei (`GAS_TX_MAX_FEE_PER_GAS`; 0 = unset ->
-    /// fail closed).
+    /// Max gas-tx per-gas fee in wei (`GAS_TX_MAX_FEE_PER_GAS`). 0 fails closed.
     pub gas_tx_max_fee_per_gas: u128,
-    /// Gas-tx native-value ceiling in wei (`GAS_TX_MAX_VALUE_WEI`) for the
-    /// payable `lzFundsOutCall` carve-out, or `None` when unset, which makes no
-    /// non-zero value signable. Attested as 0 when `None`.
+    /// Max gas-tx native value in wei (`GAS_TX_MAX_VALUE_WEI`), for the payable
+    /// `lzFundsOutCall`. `None` allows no non-zero value and is attested as 0.
     pub gas_tx_max_value_wei: Option<u128>,
     /// Gas-tx calldata selector allowlist (`GAS_TX_ALLOWED_SELECTORS`).
     pub gas_tx_allowed_selectors: Vec<[u8; 4]>,
@@ -107,8 +92,7 @@ pub struct ProductionPolicy {
     pub kms: Option<KmsPin>,
 }
 
-/// Why an enclave resolved to [`SecurityPolicy::Development`] rather than
-/// production. Included in boot logs and the fail-closed panic message.
+/// Why the policy is [`SecurityPolicy::Development`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DevReason {
     /// Built with `debug_assertions` (or under `cfg(test)`).
@@ -117,31 +101,28 @@ pub enum DevReason {
     MockAttestation,
     /// `allow-seed-import` feature: the parent can install a chosen seed.
     AllowSeedImport,
-    /// A non-bridge build (`rgb-validation` off): no bridge-signing path exists.
+    /// A non-bridge build (`rgb-validation` off).
     NonBridgeBuild,
     /// A bridge build whose chain/contract/asset pins are not fully set.
     Unconfigured,
 }
 
-/// Compile-time posture inputs, captured so [`SecurityPolicy::resolve`] and
-/// [`SecurityPolicy::assert_valid_for_build`] are pure and unit-testable. The
-/// real values come from [`BuildContext::current`]; tests construct arbitrary
-/// contexts to exercise the release paths.
+/// Compile-time policy inputs. [`BuildContext::current`] gives the real values.
+/// Tests make other values to cover the release paths.
 #[derive(Clone, Copy, Debug)]
 pub struct BuildContext {
-    /// `cfg!(debug_assertions) || cfg!(test)` - the "not a release build" signal.
+    /// `cfg!(debug_assertions) || cfg!(test)`: not a release build.
     pub debug_or_test: bool,
     pub mock_attestation: bool,
     pub allow_seed_import: bool,
-    /// `rgb-validation`: the feature that turns on bridge signing. A release
-    /// build with this on is the one the production policy must protect.
+    /// `rgb-validation`: the feature that enables bridge signing.
     pub rgb_validation: bool,
     /// `mint-signer` / `burn-signer`, or both directions.
     pub signer_role: SignerRole,
 }
 
 impl BuildContext {
-    /// The current build's posture inputs, read from `cfg!`.
+    /// The inputs of the current build, from `cfg!`.
     pub fn current() -> Self {
         Self {
             debug_or_test: cfg!(debug_assertions) || cfg!(test),
@@ -160,13 +141,12 @@ impl BuildContext {
 }
 
 impl SecurityPolicy {
-    /// Resolve the single security posture from the build context, the pinned
-    /// [`BridgeConfig`], and the endpoints set at launch.
+    /// Resolve the policy from the build context, the [`BridgeConfig`] and the
+    /// launch endpoints.
     ///
-    /// Fail-closed by construction: any dev feature, a debug/test build, a
-    /// non-bridge build, or an unpinned config yields
-    /// [`SecurityPolicy::Development`]. Only a release bridge build with all
-    /// three pins set becomes [`SecurityPolicy::Production`].
+    /// Only a release bridge build with all three pins set gives
+    /// [`SecurityPolicy::Production`]. All other inputs give
+    /// [`SecurityPolicy::Development`].
     pub fn resolve(
         ctx: &BuildContext,
         bridge: &BridgeConfig,
@@ -176,10 +156,8 @@ impl SecurityPolicy {
         electrum_host: &str,
         evm_min_confirmations: u64,
     ) -> Self {
-        // Any dev feature collapses the posture regardless of everything else.
-        // (These are `compile_error!` in a release build - lib.rs - so in a real
-        // production binary they are all false; the checks make dev/test builds
-        // resolve honestly and keep this function total.)
+        // Dev features are a release `compile_error!` (lib.rs). These checks
+        // keep dev and test builds correct.
         if ctx.mock_attestation {
             return Self::dev(DevReason::MockAttestation);
         }
@@ -191,14 +169,13 @@ impl SecurityPolicy {
         }
         // Release build from here.
         if !ctx.rgb_validation {
-            // No bridge-signing path compiled in: not a production bridge signer.
             return Self::dev(DevReason::NonBridgeBuild);
         }
         if !bridge.is_configured() {
             return Self::dev(DevReason::Unconfigured);
         }
-        // A path the role does not compile in is attested as off, whatever the
-        // env pins say: `SignBtc` is mint-side, the gas tx burn-side.
+        // A path that the role does not compile is attested as off, for all env
+        // pins. `SignBtc` is mint side, the gas tx is burn side.
         let signs_plain_btc = ctx.signer_role != SignerRole::Burn;
         let signs_gas_tx = ctx.signer_role != SignerRole::Mint;
         Self::Production(ProductionPolicy {
@@ -216,12 +193,10 @@ impl SecurityPolicy {
             evm_checkpoint,
             electrum_host: electrum_host.to_string(),
             evm_rpc_tls,
-            // `rgb-validation` implies `spv` (lib.rs `compile_error!`), so a
-            // bridge build always anchors witness txs via the SPV header chain.
+            // `rgb-validation` implies `spv` (lib.rs `compile_error!`).
             btc_source: BtcDataSource::SpvVerified,
-            // Gas-tx rule: reflect the same pins the request-time
-            // `validate_gas_tx_request` enforces so the attested commitment and
-            // the enforced policy cannot drift.
+            // The same pins that `validate_gas_tx_request` enforces, so the
+            // attested and the enforced rules agree.
             gas_tx_allowed_to: bridge.gas_tx_allowed_to.filter(|_| signs_gas_tx),
             gas_tx_max_gas_limit: if signs_gas_tx {
                 bridge.gas_tx_max_gas_limit
@@ -274,14 +249,11 @@ impl SecurityPolicy {
                 evm_checkpoint: p.evm_checkpoint,
                 electrum_host: p.electrum_host.clone(),
                 evm_rpc_tls: p.evm_rpc_tls.clone(),
-                // An unset destination commits as all-zero - a value the gas
-                // path can never accept - so "unpinned" is itself attested.
+                // Unset commits as all-zero, which the gas path never accepts.
                 gas_tx_allowed_to: p.gas_tx_allowed_to.unwrap_or([0u8; 20]),
                 gas_tx_max_gas_limit: p.gas_tx_max_gas_limit,
                 gas_tx_max_fee_per_gas: p.gas_tx_max_fee_per_gas,
-                // Same rule as the destination: an unset ceiling commits as 0,
-                // which is exactly the posture it enforces (no non-zero value
-                // is signable), so "unpinned" is itself attested.
+                // Unset commits as 0, which is the enforced rule.
                 gas_tx_max_value_wei: p.gas_tx_max_value_wei.unwrap_or(0),
                 gas_tx_allowed_selectors: p.gas_tx_allowed_selectors.clone(),
                 kms: p.kms.clone(),
@@ -290,20 +262,17 @@ impl SecurityPolicy {
         }
     }
 
-    /// Canonical bytes appended to the attestation commitment preimage. Mirrored
-    /// by every verifier via [`attestation_verify::AttestedPolicy::to_bytes`].
+    /// Canonical bytes added to the attestation commitment preimage. Verifiers
+    /// use [`attestation_verify::AttestedPolicy::to_bytes`].
     pub fn commitment_bytes(&self) -> Vec<u8> {
         self.attested().to_bytes()
     }
 
-    /// Fail-closed launch gate. A release bridge-signing (`rgb-validation`)
-    /// build MUST resolve to a valid [`SecurityPolicy::Production`];
-    /// otherwise `SetEndpoints` refuses the set. At boot,
-    /// [`Self::assert_valid_at_boot`] runs the checks that do not need the
-    /// endpoints, and the caller `panic!`s on an error.
+    /// Fail-closed launch gate. A release `rgb-validation` build MUST resolve
+    /// to a valid [`SecurityPolicy::Production`], or `SetEndpoints` fails.
+    /// [`Self::assert_valid_at_boot`] runs the checks that need no endpoints.
     ///
-    /// Debug/test builds and non-bridge builds are exempt - they have no
-    /// production bridge-signing path to protect.
+    /// Debug, test and non-bridge builds are exempt.
     pub fn assert_valid_for_build(&self, ctx: &BuildContext) -> Result<(), String> {
         if ctx.debug_or_test || !ctx.rgb_validation {
             return Ok(());
@@ -332,17 +301,15 @@ impl SecurityPolicy {
 }
 
 impl ProductionPolicy {
-    /// Invariants that must hold before a production enclave signs anything.
-    /// Bitcoin anchors must be SPV-verified, and the EVM RPC must be
-    /// authenticated.
+    /// Invariants that must hold before a production enclave signs. Bitcoin
+    /// anchors are SPV-verified and the EVM RPC is authenticated.
     pub fn check_invariants(&self) -> Result<(), String> {
         self.check_build_invariants()?;
         if self.electrum_host.is_empty() {
             return Err("production policy has no Electrum host. Set it at launch.".into());
         }
-        // Helios has no Arbitrum light client, so an L2 image reads the RPC
-        // over pinned TLS. `Disabled` fails closed per request. Plaintext lets
-        // the host forge a receipt, so it is rejected.
+        // Plaintext lets the host forge a receipt. `Disabled` fails closed per
+        // request.
         if self.evm_source == EvmDataSource::RawRpc {
             return Err(
                 "production policy reads the EVM RPC over plaintext; plaintext is for dev and \
@@ -357,7 +324,7 @@ impl ProductionPolicy {
                     .into(),
             );
         }
-        // Helios with no pinned checkpoint would bootstrap untrusted.
+        // Without a pinned checkpoint, Helios starts from an untrusted root.
         if self.evm_source == EvmDataSource::HeliosVerified && self.evm_checkpoint.is_none() {
             return Err(
                 "production policy uses the Helios EVM source but pins no weak-subjectivity \

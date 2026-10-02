@@ -1,13 +1,14 @@
 //! Opens KMS `CiphertextForRecipient`.
 //!
-//! The value is a CMS `ContentInfo` holding `EnvelopedData` (RFC 5652 §6)
-//! with exactly one `KeyTransRecipientInfo`: the content-encryption key is
-//! wrapped with RSAES-OAEP (SHA-256, MGF1-SHA-256) to the public key from the
-//! attestation document, and the content is AES-256-CBC with PKCS#7 padding.
-//! That is the shape the AWS Nitro Enclaves SDK's `cms.c` accepts; every other
-//! algorithm or recipient type is rejected before any key is used. KMS encodes
-//! the envelope as streaming BER, so it is normalised to DER (`ber.rs`) before
-//! the strict decode.
+//! The value is a CMS `ContentInfo` with `EnvelopedData` (RFC 5652, section 6)
+//! and exactly one `KeyTransRecipientInfo`. The content-encryption key is
+//! wrapped with RSAES-OAEP (SHA-256, MGF1-SHA-256) to the attested public key.
+//! The content is AES-256-CBC with PKCS#7 padding.
+//!
+//! This is the shape that `cms.c` of the AWS Nitro Enclaves SDK accepts. All
+//! other algorithms and recipient types are rejected before a key is used.
+//! KMS sends streaming BER, so `ber.rs` converts it to DER before the strict
+//! decode.
 
 use aes::cipher::{block_padding::Pkcs7, BlockDecryptMut, KeyIvInit};
 use cms::cert::x509::der::asn1::{ObjectIdentifier, OctetString};
@@ -35,12 +36,12 @@ pub(super) const ID_AES_256_CBC: ObjectIdentifier =
 /// AES-256 content-encryption key and CBC block size.
 const CEK_BYTES: usize = 32;
 const IV_BYTES: usize = 16;
-/// A 64-byte seed envelope is well under 1 KiB; this bounds a hostile reply.
+/// A 64-byte seed envelope is less than 1 KiB. This bounds a hostile reply.
 pub(super) const MAX_ENVELOPE_BYTES: usize = 8 * 1024;
 
 type Aes256CbcDec = cbc::Decryptor<aes::Aes256>;
 
-/// Decrypt `envelope` with `key`. Returns the padded-out content.
+/// Decrypt `envelope` with `key`. Returns the content without the padding.
 pub(super) fn open_envelope(key: &RsaPrivateKey, envelope: &[u8]) -> Result<Zeroizing<Vec<u8>>> {
     if envelope.is_empty() || envelope.len() > MAX_ENVELOPE_BYTES {
         return Err(reject("envelope size"));

@@ -1,17 +1,17 @@
 //! In-enclave RGB consignment validation using rgbstd plus a witness resolver.
 //!
-//! Wiring only. The pipeline reads left to right:
+//! This module only wires the submodules:
 //!
 //! - `source.rs`: validate an `RgbSource` payload and its SPV evidence.
-//! - `indexer.rs`: the Esplora/Electrum client `RgbValidator` talks through.
+//! - `indexer.rs`: the Esplora/Electrum client that `RgbValidator` uses.
 //! - `consensus.rs`: run rgbstd validation over the consignment bytes.
 //! - `consignment.rs`: decode the resulting `Transfer` into plain shapes.
 //! - `types.rs`: those shapes.
 //! - `asset_bind.rs`: bind the validated asset id to the operator pin.
 //! - `bfa.rs`: the BFA schema keys and its mint/burn binding.
-//! - `schema.rs`: the trusted type system a consignment is pinned against.
+//! - `schema.rs`: the trusted type system that a consignment is pinned to.
 //!
-//! This replaces trusting the listener's `consignment_valid` boolean.
+//! The enclave does not trust the listener `consignment_valid` boolean.
 
 mod asset_bind;
 pub mod bfa;

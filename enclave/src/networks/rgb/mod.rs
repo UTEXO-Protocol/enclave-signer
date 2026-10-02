@@ -1,29 +1,29 @@
 //! The RGB/BTC half of the bridge.
 //!
-//! Wiring only. Every check lives in a submodule:
+//! This module only wires the submodules. Each check lives in a submodule:
 //!
-//! - `route.rs`: the entry points `networks::route` dispatches to.
-//! - `validation.rs`: consignment parsing, rgbstd validation, asset binding,
+//! - `route.rs`: the entry points that `networks::route` calls.
+//! - `validation/`: consignment parsing, rgbstd validation, asset binding,
 //!   and the `RgbValidator` indexer client.
 //! - `psbt_validation.rs`: binds a PSBT to a validated RGB transition.
 //! - `btc_crosscheck.rs`: the plain-BTC (`SignBtc`) authorization gate.
-//! - `btc_ownership.rs`: proves an output or input script is one we control.
+//! - `btc_ownership.rs`: proves that the enclave controls an output or input script.
 //! - `spv/`: the in-enclave Bitcoin header chain and Merkle verifier.
 //! - `spv_crosscheck.rs`: anchors consignment witness txs in that chain.
 //! - `signing/`: the low-level segwit and taproot input signers.
 //! - `flow/`: the per-flow rules (send/receive vs mint/burn).
 //! - `invoice.rs`: the send-RGB recipient bind.
 
-// The PSBT-side checks (`SignBtc`, the mint PSBT bind, the recipient invoice)
-// belong to the EVM -> RGB direction only.
+// The PSBT checks (`SignBtc`, the mint PSBT bind, the recipient invoice)
+// apply to the EVM -> RGB direction only.
 #[cfg(evm_to_rgb)]
 pub mod btc_crosscheck;
 #[cfg(evm_to_rgb)]
 pub mod btc_ownership;
 #[cfg(feature = "rgb-validation")]
 pub mod flow;
-// The invoice bind reads a verified BridgeFundsIn log, so it only exists
-// where the enclave can fetch one (`evm-rpc` implies `rgb-validation`).
+// The invoice bind reads a verified BridgeFundsIn log. It needs `evm-rpc` to
+// fetch that log (`evm-rpc` implies `rgb-validation`).
 #[cfg(all(feature = "evm-rpc", evm_to_rgb))]
 pub mod invoice;
 #[cfg(evm_to_rgb)]

@@ -1,21 +1,20 @@
-//! `attest-verify` - externally verify that the bridge signing pubkey
-//! belongs to the running TEE.
+//! `attest-verify`: verify from outside that the bridge signing key belongs
+//! to the running TEE.
 //!
-//! Issues a fresh nonce, calls the parent's `AttestedPublicKey` gRPC,
-//! and runs the AWS Nitro attestation verifier (cert chain + COSE
-//! signature + PCR check + nonce equality + bundle commitment).
+//! Sends a fresh nonce to the parent `AttestedPublicKey` RPC. Then runs the
+//! AWS Nitro attestation verifier: cert chain, COSE signature, PCRs, nonce
+//! and bundle commitment.
 //!
 //! Usage:
 //!     attest-verify --endpoint http://127.0.0.1:50051 \
 //!         --pcr0 <hex> --pcr1 <hex> --pcr2 <hex>
 //!
-//! Use `--mock` against an enclave built with `mock-attestation` (PCRs are
-//! all zeros and the COSE wrapper is skipped).
+//! Use `--mock` with a `mock-attestation` enclave (zero PCRs, no COSE).
 //!
 //! Exit codes:
 //!     0 - verification succeeded
-//!     1 - verification failed (output explains why)
-//!     2 - usage / IO / connection error
+//!     1 - verification, IO or connection failure (output gives the reason)
+//!     2 - command-line usage error
 
 use std::process::ExitCode;
 
@@ -50,117 +49,105 @@ struct Cli {
     pcr2: Option<String>,
 
     /// Verify a mock-attestation document (zero PCRs, no COSE wrapping).
-    /// For dev/CI only. Real production verification MUST NOT use this flag.
-    /// Implies the expected security policy is `Development`.
+    /// For dev and CI only. Do not use for production verification.
+    /// Sets the expected security policy to `Development`.
     #[arg(long)]
     mock: bool,
 
-    /// Expect the enclave to enable the plain-BTC (vanilla / create_utxo)
-    /// signing path. Default: expect it DISABLED (fail-closed). Ignored with
-    /// --mock. This posture is committed into attestation user_data.
+    /// Expect the plain-BTC (vanilla / create_utxo) signing path to be on.
+    /// Default: expect it off. Committed in attestation user_data.
+    /// Ignored with --mock.
     #[arg(long)]
     expect_vanilla_psbt: bool,
 
-    /// Expected signer role, committed into attestation user_data: `mint`
-    /// (EVM -> RGB only), `burn` (RGB -> EVM only), or `combined` (both
-    /// directions, the combined and swap images). Required for production
-    /// verification. Ignored with --mock.
+    /// Expected signer role, committed in attestation user_data: `mint`
+    /// (EVM -> RGB only), `burn` (RGB -> EVM only) or `combined` (both
+    /// directions). Required for production verification. Ignored with --mock.
     #[arg(long)]
     expect_signer_role: Option<String>,
 
-    /// Expected EVM `FundsIn` deposit-verification data source the enclave must
-    /// have committed to: `tls` (RPC over pinned TLS), `helios` (trustless,
-    /// checkpoint-verified), `raw` (plaintext, dev only), or `disabled`.
-    /// Defaults to `tls` - the source the shipped image uses. Ignored with
-    /// --mock.
+    /// Expected EVM `FundsIn` data source in the commitment: `tls` (RPC over
+    /// pinned TLS, used by the shipped image), `helios`, `raw` (plaintext, dev
+    /// only) or `disabled`. Ignored with --mock.
     #[arg(long, default_value = "tls")]
     expect_evm_source: String,
 
-    /// Expected Electrum host the operator set at launch (the host of
-    /// `ELECTRUM_URL`). Required for production verification. Ignored with
-    /// --mock.
+    /// Expected Electrum host set at launch (the host of `ELECTRUM_URL`).
+    /// Required for production verification. Ignored with --mock.
     #[arg(long)]
     expect_electrum_host: Option<String>,
 
-    /// Expected EVM RPC TLS host (`EVM_RPC_HOST`). REQUIRED when
+    /// Expected EVM RPC TLS host (`EVM_RPC_HOST`). Required with
     /// `--expect-evm-source tls`. Ignored otherwise.
     #[arg(long)]
     expect_evm_rpc_host: Option<String>,
 
-    /// Expected SHA-256 of the DER of the EVM RPC CA (`EVM_RPC_TLS_CA_DER_FILE`), 64
-    /// hex characters. REQUIRED when `--expect-evm-source tls`. Ignored
+    /// Expected SHA-256 of the EVM RPC CA DER (`EVM_RPC_TLS_CA_DER_FILE`), as
+    /// 64 hex characters. Required with `--expect-evm-source tls`. Ignored
     /// otherwise.
     #[arg(long)]
     expect_evm_rpc_ca_sha256: Option<String>,
 
-    /// Expected Helios weak-subjectivity checkpoint (0x-prefixed 32-byte beacon
-    /// block root) the enclave must have trust-rooted on. REQUIRED when
-    /// `--expect-evm-source helios`: the verifier reconstructs the committed
-    /// posture with this value, so an enclave that synced from a different
-    /// checkpoint fails the `user_data` hash. Ignored otherwise.
+    /// Expected Helios checkpoint (0x-prefixed 32-byte beacon block root).
+    /// Required with `--expect-evm-source helios`. Ignored otherwise.
     #[arg(long)]
     expect_helios_checkpoint: Option<String>,
 
-    /// Require this EVM chain ID in the attestation.
-    /// Omit to verify the reported value without comparison.
-    /// Ignored with --mock.
+    /// Require this EVM chain ID in the attestation. Omit to accept the
+    /// authenticated value. Ignored with --mock.
     #[arg(long)]
     expect_chain_id: Option<u64>,
 
-    /// Require this bridge or MultisigProxy address as 20-byte 0x-hex.
-    /// Omit to verify the reported value without comparison.
-    /// Ignored with --mock.
+    /// Require this bridge or MultisigProxy address (20-byte 0x-hex). Omit to
+    /// accept the authenticated value. Ignored with --mock.
     #[arg(long)]
     expect_bridge_contract: Option<String>,
 
-    /// Require this RGB asset ID in the attestation.
-    /// Use an empty string to require no RGB asset.
-    /// Omit to verify the reported value without comparison.
-    /// Ignored with --mock.
+    /// Require this RGB asset ID in the attestation. An empty string requires
+    /// no RGB asset. Omit to accept the authenticated value. Ignored with --mock.
     #[arg(long)]
     expect_rgb_asset_id: Option<String>,
 
-    /// Expected contract whose FundsIn events may authorize bridge signing.
+    /// Expected contract whose FundsIn events can authorize bridge signing.
     /// Required for production verification.
     #[arg(long)]
     expect_funds_in_contract: Option<String>,
 
-    /// Expected ERC-20 the Bridge releases (`TOKEN_CONTRACT`), the `burnId`
-    /// preimage input the enclave pinned, as 0x-hex. Required for production
+    /// Expected ERC-20 that the Bridge releases (`TOKEN_CONTRACT`), as 0x-hex.
+    /// It is an input to the `burnId` preimage. Required for production
     /// verification.
     #[arg(long)]
     expect_token_contract: Option<String>,
 
-    /// Expected minimum receipt confirmation depth. Required and non-zero for
+    /// Expected minimum receipt confirmations. Required and not zero for
     /// production verification.
     #[arg(long)]
     expect_evm_min_confirmations: Option<u64>,
 
-    /// Expected gas-tx (`SignRawDigest`) allowed destination the enclave pinned
-    /// (`GAS_TX_ALLOWED_TO`), as 0x-hex. Omit if the operator left the gas path
-    /// unpinned (the enclave then commits the all-zero destination and fails the
-    /// path closed). Ignored with --mock.
+    /// Expected gas-tx (`SignRawDigest`) destination (`GAS_TX_ALLOWED_TO`), as
+    /// 0x-hex. Omit if the gas path is not pinned. The enclave then commits an
+    /// all-zero destination and rejects the path. Ignored with --mock.
     #[arg(long)]
     expect_gas_tx_to: Option<String>,
 
-    /// Expected gas-tx `gasLimit` ceiling (`GAS_TX_MAX_GAS_LIMIT`). Default 0
-    /// (unpinned). Ignored with --mock.
+    /// Expected gas-tx `gasLimit` maximum (`GAS_TX_MAX_GAS_LIMIT`). Default 0
+    /// (not pinned). Ignored with --mock.
     #[arg(long, default_value_t = 0)]
     expect_gas_max_gas_limit: u64,
 
-    /// Expected gas-tx per-gas fee ceiling in wei (`GAS_TX_MAX_FEE_PER_GAS`).
-    /// Default 0 (unpinned). Ignored with --mock.
+    /// Expected gas-tx maximum fee per gas in wei (`GAS_TX_MAX_FEE_PER_GAS`).
+    /// Default 0 (not pinned). Ignored with --mock.
     #[arg(long, default_value_t = 0)]
     expect_gas_max_fee_per_gas: u128,
 
-    /// Expected gas-tx native-value ceiling in wei (`GAS_TX_MAX_VALUE_WEI`), the
-    /// bound on the payable `lzFundsOutCall` carve-out. Default 0 (unpinned -
-    /// the enclave then signs no non-zero value at all). Ignored with --mock.
+    /// Expected gas-tx maximum native value in wei (`GAS_TX_MAX_VALUE_WEI`).
+    /// It limits the payable `lzFundsOutCall`. Default 0: the enclave signs no
+    /// non-zero value. Ignored with --mock.
     #[arg(long, default_value_t = 0)]
     expect_gas_max_value_wei: u128,
 
-    /// Expected gas-tx calldata selector allowlist (`GAS_TX_ALLOWED_SELECTORS`):
-    /// comma-separated 4-byte hex selectors. Default empty. Ignored with --mock.
+    /// Expected gas-tx selector allowlist (`GAS_TX_ALLOWED_SELECTORS`), as
+    /// comma-separated 4-byte hex. Default empty. Ignored with --mock.
     #[arg(long, default_value = "")]
     expect_gas_selectors: String,
 
@@ -174,7 +161,7 @@ struct Cli {
     #[arg(long)]
     expect_kms_region: Option<String>,
 
-    /// Expected KMS seed id set at launch (`KMS_SEED_ID`). Required with
+    /// Expected KMS seed ID set at launch (`KMS_SEED_ID`). Required with
     /// `--expect-signer-role mint`. Ignored with --mock.
     #[arg(long)]
     expect_kms_seed_id: Option<String>,
@@ -198,7 +185,7 @@ fn parse_checkpoint(s: &str) -> Result<[u8; 32]> {
 }
 
 /// Parse `--expect-evm-rpc-host` and `--expect-evm-rpc-ca-sha256`. Both are
-/// required: a real TLS enclave always commits both.
+/// required because a TLS enclave always commits both.
 fn parse_evm_rpc_tls(host: Option<&str>, ca_sha256: Option<&str>) -> Result<EvmRpcTlsPin> {
     let host = host.context("--expect-evm-source tls requires --expect-evm-rpc-host")?;
     let ca = ca_sha256.context("--expect-evm-source tls requires --expect-evm-rpc-ca-sha256")?;
@@ -212,8 +199,8 @@ fn parse_evm_rpc_tls(host: Option<&str>, ca_sha256: Option<&str>) -> Result<EvmR
     })
 }
 
-/// Parse the `--expect-kms-*` flags. The key ARN, region and seed id go
-/// together, and a mint signer requires them.
+/// Parse the `--expect-kms-*` flags. Key ARN, region and seed ID go together.
+/// A mint signer requires them.
 fn parse_expect_kms(
     role: SignerRole,
     key_arn: Option<&str>,
@@ -266,8 +253,8 @@ fn parse_evm_source(s: &str) -> Result<EvmDataSource> {
     }
 }
 
-/// Parse an optional `0x`-hex Ethereum address into 20 bytes; `None` -> all-zero
-/// (the "gas path unpinned" commitment).
+/// Parse an optional `0x`-hex address into 20 bytes. `None` gives all zeros,
+/// the "gas path not pinned" commitment.
 fn parse_expect_gas_to(s: &Option<String>) -> Result<[u8; 20]> {
     match s {
         None => Ok([0u8; 20]),
@@ -348,7 +335,7 @@ async fn run(cli: Cli) -> Result<()> {
         (
             attestation_verify::ExpectedPcrs::zero(),
             VerifyMode::Mock,
-            // A mock/dev enclave resolves to the Development posture.
+            // A mock or dev enclave has the Development posture.
             ExpectedPolicy::Development,
         )
     } else {
@@ -363,9 +350,8 @@ async fn run(cli: Cli) -> Result<()> {
             .as_deref()
             .map(parse_checkpoint)
             .transpose()?;
-        // A Helios expectation without a pinned checkpoint could never match a
-        // real trustless enclave (which always commits one), so refuse early
-        // with a clear message rather than a downstream hash mismatch.
+        // A Helios enclave always commits a checkpoint. Fail early with a clear
+        // message, not a hash mismatch later.
         if evm_source == EvmDataSource::HeliosVerified && evm_checkpoint.is_none() {
             anyhow::bail!(
                 "--expect-evm-source helios requires --expect-helios-checkpoint \

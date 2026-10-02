@@ -1,31 +1,30 @@
-//! Mint/burn flow rules. The bridge owns the contract's mint right: a
-//! deposit mints with a BFA `Bridge`, a withdrawal destroys units with a
+//! Mint/burn flow rules. The bridge owns the mint right of the contract. A
+//! deposit mints with a BFA `Bridge`. A withdrawal destroys units with a
 //! BFA `Burn`.
 //!
-//! See [`super`] for why this lives in its own file, and for the mirrored-name
-//! contract these items keep.
+//! See [`super`] for the reason for a separate file and the shared item names.
 
 use crate::error::{EnclaveError, Result};
 use crate::networks::rgb::validation::{bfa, is_mint_transition, TransitionSummary};
 
-/// Human-readable flow name, used in rejection messages so an operator can
-/// tell "wrong shape" from "wrong enclave".
+/// Flow name for rejection messages. It lets an operator tell "wrong shape"
+/// from "wrong enclave".
 pub const FLOW_NAME: &str = "mint/burn";
 
-/// Is this the transition type a deposit PSBT may finalize?
+/// Returns true if a deposit PSBT can finalize this transition type.
 ///
-/// Also decides whether the consignment parser bothers extracting the last
-/// bundle's witness prevouts ([`crate::networks::rgb::validation`]).
+/// The consignment parser also uses it to decide whether to extract the
+/// witness prevouts of the last bundle ([`crate::networks::rgb::validation`]).
 ///
-/// The signing shape of this flow *is* the mint shape, so this is
-/// [`is_mint_transition`] rather than a second list that could drift from it.
-/// BFA's `TS_BRIDGE` is the only mint shape, and it takes the mint rules below
-/// - notably the exact-equality amount bind that refuses an over-mint.
+/// The signing shape of this flow is the mint shape. Thus it calls
+/// [`is_mint_transition`], so that no second list can drift from it.
+/// BFA `TS_BRIDGE` is the only mint shape. It gets the mint rules below,
+/// which include the exact-equality amount bind that refuses an over-mint.
 pub fn is_signing_transition(transition_type: u16) -> bool {
     is_mint_transition(transition_type)
 }
 
-/// Gate on the consignment's last transition before the PSBT is bound to it.
+/// Checks the last transition of the consignment before the PSBT bind.
 #[cfg(evm_to_rgb)]
 pub fn assert_signing_transition(last: &TransitionSummary) -> Result<()> {
     if !is_signing_transition(last.transition_type) {
@@ -39,11 +38,10 @@ pub fn assert_signing_transition(last: &TransitionSummary) -> Result<()> {
     Ok(())
 }
 
-/// Gate on every transition the signed tx commits, not just the last one: a
-/// Bitcoin tx commits a bundle, and a sibling of the wrong type would move
-/// value under a rule that was never applied to it. In particular a `Transfer`
-/// smuggled into a mint bundle would get the mint's equality rule, which does
-/// not account for change.
+/// Checks every transition that the signed tx commits, not only the last one.
+/// A Bitcoin tx commits a full bundle. A sibling of the wrong type would move
+/// value under a rule that the enclave did not apply to it. For example, a
+/// `Transfer` in a mint bundle gets the mint equality rule, which ignores change.
 #[cfg(evm_to_rgb)]
 pub fn assert_committed_group(committed: &[&TransitionSummary]) -> Result<()> {
     for t in committed {
@@ -60,15 +58,14 @@ pub fn assert_committed_group(committed: &[&TransitionSummary]) -> Result<()> {
     Ok(())
 }
 
-/// Aggregate amount bind over the committed group.
+/// Total amount bind over the committed group.
 ///
-/// Exact equality, unlike the send/receive floor: a mint has no pre-existing
-/// allocation to return as change, so every minted unit must be accounted for
-/// by the credit. Any surplus is an over-mint - free supply the bridge never
-/// received a deposit for.
+/// This is exact equality, not the send/receive lower bound. A mint has no
+/// prior allocation to return as change, so the credit must cover every
+/// minted unit. A surplus is an over-mint: supply with no deposit.
 ///
-/// `committed_asset_output` counts `OS_ASSET` only; an `OS_BRIDGE` output
-/// riding along is the declarative mint right, not minted value.
+/// `committed_asset_output` counts `OS_ASSET` only. An `OS_BRIDGE` output is
+/// the declarative mint right, not minted value.
 #[cfg(evm_to_rgb)]
 pub fn assert_group_amount(
     committed_asset_output: u64,
@@ -86,14 +83,14 @@ pub fn assert_group_amount(
     Ok(())
 }
 
-/// The asset amount a withdrawal (`fundsOut`) consignment proves was
-/// destroyed, and the shape gate that makes it meaningful.
+/// Returns the asset amount that a withdrawal (`fundsOut`) consignment
+/// destroys, after a check of the transition type.
 ///
-/// A `Burn` has no output assignments carrying the destroyed value, so the
-/// figure comes from the BFA `MS_BURNED_ASSET` metadata that
-/// [`crate::networks::rgb::validation`] reads off the rgbstd `Transfer`.
-/// Missing metadata on a burn implies a schema mismatch - fail closed rather
-/// than release against an unknown amount.
+/// A `Burn` has no output assignment with the destroyed value. The amount
+/// comes from the BFA `MS_BURNED_ASSET` metadata that
+/// [`crate::networks::rgb::validation`] reads from the rgbstd `Transfer`.
+/// Missing metadata means a schema mismatch. Fail closed, because the amount
+/// is unknown.
 #[cfg(rgb_to_evm)]
 pub fn funds_out_source_amount(last: &TransitionSummary) -> Result<u64> {
     if last.transition_type != bfa::TS_BURN {
@@ -111,11 +108,11 @@ pub fn funds_out_source_amount(last: &TransitionSummary) -> Result<u64> {
     })
 }
 
-/// Bind the EVM release amount to what the consignment proves.
+/// Binds the EVM release amount to the amount that the consignment proves.
 ///
-/// Exact equality: a burn destroys one figure and has no change leg, and
-/// `fundsOut.amount` is gross (commission is taken on-chain from it). A
-/// release below the burn strands units; one above it is unbacked.
+/// This is exact equality. A burn destroys one amount and has no change leg.
+/// `fundsOut.amount` is gross: the contract takes the commission on-chain.
+/// A release below the burn strands units. A release above it is unbacked.
 #[cfg(rgb_to_evm)]
 pub fn assert_funds_out_amount(source_amount: u64, calldata_amount: u64) -> Result<()> {
     if source_amount != calldata_amount {

@@ -14,7 +14,7 @@ flowchart TB
         Parent[utexo-bridge-parent<br/>tonic gRPC, GRPC_HOST:GRPC_PORT<br/>―<br/>Default 127.0.0.1:5000.<br/>Deployed hosts: 0.0.0.0:50051-50053,<br/>one parent per enclave CID 16 / 18 / 20.<br/>30 s timeout per enclave RPC.<br/>USE_VSOCK=true in production.]
         Cli[utexo-bridge-parent-cli<br/>attest-verify CLI]
         VP[vsock-proxy port 8001<br/>―<br/>Allowlist → Electrum ssl:// or Esplora.]
-        VPe["vsock-proxy 8002<br/>―<br/>evm-rpc builds only.<br/>8002 → EVM JSON-RPC via host nginx.<br/>Allowlisted upstream."]
+        VPe["vsock-proxy 8002<br/>―<br/>evm-rpc builds only.<br/>8002 → EVM JSON-RPC TLS port.<br/>Relays TLS bytes only."]
 
         subgraph ENCL [AWS Nitro Enclave — TRUSTED, PCR-pinned]
             Bin[utexo-bridge-enclave<br/>Rust binary<br/>―<br/>Listens on vsock port 5000, any CID.<br/>One connection = one request;<br/>4 worker threads, queue of 16,<br/>10 s idle / 30 s total deadlines.<br/>No filesystem persistence.<br/>Env pins read at boot:<br/>EVM_CHAIN_ID / EVM_PROXY_CONTRACT_ADDRESS / RGB_ASSET_ID<br/>GAS_TX_ALLOWED_TO / GAS_TX_MAX_GAS_LIMIT<br/>GAS_TX_MAX_FEE_PER_GAS / GAS_TX_MAX_VALUE_WEI<br/>GAS_TX_ALLOWED_SELECTORS<br/>FUNDS_IN_CONTRACT / BTC_MAX_TOTAL_SATS<br/>BTC_MAX_UNOWNED_SATS / RGB_MAX_UNOWNED_SATS<br/>→ SecurityPolicy resolved once, committed<br/>into attestation user_data.<br/>Release bridge build refuses to boot<br/>unless the policy is valid Production.]
@@ -23,7 +23,7 @@ flowchart TB
             Replay[(NonceReplayGuard — cloning<br/>≤10 000 entries, 1 h TTL<br/>+ op_replay_guard — bridge ops<br/>≤100 000 entries, 24 h TTL)]
             Fwd[vsock_forwarder<br/>loopback → vsock, per-port<br/>Electrum port / EVM RPC TLS port<br/>Electrum host pinned to loopback in /etc/hosts]
             RgbVal[RgbValidator<br/>rgb-ops + Electrum or Esplora]
-            EvmVer[events.rs verifier<br/>raw RPC (supplied images)<br/>receipt/head correctness trusted]
+            EvmVer[events.rs verifier<br/>pinned TLS RPC<br/>receipt/head correctness trusted]
             NSM[/dev/nsm — Nitro Security Module/]
         end
     end
@@ -49,13 +49,14 @@ flowchart TB
     Fwd -->|"vsock CID 3:8001"| VP
     Fwd -->|"vsock CID 3:8002"| VPe
     VP -->|"Electrum TCP/TLS or Esplora HTTP"| Esp
-    VPe -->|"real HTTP"| EvmRpc
+    VPe -->|"TLS bytes (ends in enclave)"| EvmRpc
 ```
 
 ### Build / cluster notes
 
-- Built as an **EIF** via `nitro-cli build-enclave` from `build/Dockerfile.enclave`
-  (combined), `.rgb`, `.mint`, `.burn` or `.ccd`. PCR0/1/2 are pinned at build
+- Built as an **EIF** via `nitro-cli build-enclave`. Production images:
+  `build/Dockerfile.enclave.mint` (mint signer) and `.burn` (burn signer).
+  Other images: `Dockerfile.enclave` (combined), `.rgb` (retired swap), `.ccd`. PCR0/1/2 are pinned at build
   time; changes to the measured image require updating accepted measurements.
   `build-eif.yml` publishes EIF + `PCR.json` + `SHA256SUMS` to S3 under the git
   sha; `deploy/deploy-host.sh` verifies both before and after start.
@@ -75,9 +76,3 @@ flowchart TB
 
 Clones provide replicas of one signing identity. Independent quorum members
 need independently initialized seeds.
-
-Optional `helios` builds use execution and consensus forwarders on host vsock
-ports 8003/8004 (enclave loopback 18545/18550) when Helios is selected. With
-`kms-persistence`, KMS and seed storage reserve 8003/8004; Helios uses 8005/8006
-and rejects overrides that collide with the reserved ports. These
-replace the raw receipt provider and require a pinned beacon checkpoint.

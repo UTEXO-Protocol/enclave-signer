@@ -1,9 +1,9 @@
 //! `SetEndpoints`: the operator sets the chain endpoints and the KMS pin once,
 //! at launch.
 //!
-//! Every step that can fail runs before the slot is written. A refused set
-//! leaves the slot empty, so the operator can retry. A second set is refused
-//! and the running values stay.
+//! All steps that can fail run before the slot is written. A refused set
+//! keeps the slot empty, so the operator can retry. A second set is refused,
+//! and the current values stay.
 
 use super::context::{Launch, ServerContext};
 use crate::config::Endpoints;
@@ -55,7 +55,7 @@ pub(super) fn handle_set_endpoints(
         .assert_valid_for_build(&ctx.build_ctx)
         .map_err(EnclaveError::InvalidRequest)?;
 
-    // `set_seed_source` below refuses a second install natively.
+    // `set_seed_source` refuses a second install.
     #[cfg(feature = "kms-persistence")]
     let seed_source = endpoints
         .kms
@@ -63,9 +63,8 @@ pub(super) fn handle_set_endpoints(
         .map(crate::seed_persistence::PersistentSeed::new)
         .transpose()?;
 
-    // The loopback binds and the /etc/hosts pin are real I/O the unit tests
-    // cannot do (port 443, root). Skipped under `cfg(test)`, as the other
-    // vsock-only paths are.
+    // Unit tests cannot do the loopback binds and the /etc/hosts pin
+    // (port 443, root). Thus `cfg(test)` skips them.
     #[cfg(all(feature = "vsock", target_os = "linux", not(test)))]
     let listeners = bind_all(&forwarder_plan(&endpoints))?;
 
@@ -122,7 +121,7 @@ pub(super) fn handle_set_endpoints(
 
     crate::bootstrap::log_policy(&launch.policy);
     tracing::info!(endpoints = ?launch.endpoints, "endpoints set");
-    // Under the lock, and the slot was empty.
+    // The lock is held and the slot is empty, so this set cannot fail.
     let _ = ctx.launch.set(launch);
     Ok(EnclaveResponse {
         response: Some(Response::SetEndpoints(SetEndpointsResponse {})),
@@ -259,8 +258,8 @@ mod tests {
     #[test]
     fn before_the_set_signing_and_attestation_are_refused() {
         let ctx = awaiting(BuildContext::current());
-        // A persistence build fetches the seed from KMS, which a unit test
-        // has no access to; import a mnemonic there instead.
+        // A persistence build gets the seed from KMS, which a unit test
+        // cannot reach. Import a mnemonic there instead.
         let init = InitializeKeyRequest {
             mnemonic: if cfg!(feature = "kms-persistence") {
                 "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about".into()
@@ -278,7 +277,7 @@ mod tests {
             Request::SignCcd(SignCcdRequest::default()),
             Request::GetAttestedPublicKey(GetAttestedPublicKeyRequest { nonce: vec![0; 32] }),
         ] {
-            // A request this build does not serve is refused for its own reason.
+            // A request that this build does not serve has its own refusal.
             let got = call(&ctx, request.clone());
             assert!(matches!(got, Response::Error(_)), "{request:?}: {got:?}");
         }
@@ -361,8 +360,8 @@ mod tests {
         assert!(ctx.launch.get().is_none());
     }
 
-    /// The README launch: EVM RPC on port 443, and KMS in a mint build. Port
-    /// 443 maps to one free port, the other ports to any port.
+    /// The README launch: EVM RPC on port 443, and KMS in a mint build.
+    /// The test maps port 443 to one free port, and other ports to any port.
     #[test]
     fn the_forwarders_bind_together() {
         let plan = forwarder_plan(&Endpoints::parse(&valid(1)).unwrap());
@@ -442,8 +441,8 @@ mod tests {
         assert_eq!(connections.load(Ordering::SeqCst), 1);
     }
 
-    /// A release bridge build with no bridge pins resolves a policy that
-    /// fails the launch gate. The set is refused, not a panic.
+    /// A release bridge build with no bridge pins gets a policy that fails
+    /// the launch gate. The set is refused without a panic.
     #[test]
     fn a_policy_that_fails_the_launch_gate_is_refused() {
         let release = BuildContext {

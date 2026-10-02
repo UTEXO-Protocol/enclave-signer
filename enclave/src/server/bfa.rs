@@ -1,16 +1,16 @@
-//! BFA lock verification: pair every mint in a consignment with the EVM
-//! `FundsIn` deposit that paid for it, verify each one, and hand RGB consensus
-//! the `cea` events it checks the minted amounts against.
+//! BFA lock verification. Each mint in a consignment is paired with the EVM
+//! `FundsIn` deposit that paid for it, and each pair is verified.
+//! RGB consensus gets the `cea` events to check the minted amounts.
 //!
-//! `bfa-validation`-only; `server/mod.rs` gates the whole module.
+//! `server/mod.rs` gates this module on `bfa-validation`.
 
 use super::context::ServerContext;
 use crate::error::{EnclaveError, Result};
 
-/// The EVM tx hash the listener claims backs `mint_opid`.
+/// The EVM tx hash that the listener gives for `mint_opid`.
 ///
-/// Fails closed: an unlisted mint, or one listed with a malformed hash, aborts
-/// the burn rather than validating with that mint's lock unchecked.
+/// Fails closed. An unlisted mint, or a malformed hash, stops the operation.
+/// A mint lock is never left unchecked.
 fn ancestor_tx_hash(
     mint_opid: &[u8; 32],
     ancestors: &[enclave_proto::MintAncestor],
@@ -35,13 +35,12 @@ fn ancestor_tx_hash(
     })
 }
 
-/// Pair every `TS_BRIDGE` in a mint consignment with the EVM deposit that must
-/// back it: the terminal mint with this request's own deposit, every ancestor
-/// with the lock the caller listed for it. Consignment order is preserved.
+/// Pair each `TS_BRIDGE` in a mint consignment with its EVM deposit.
+/// The terminal mint gets the deposit of this request. Each ancestor gets the
+/// lock that the caller lists for it. Consignment order is kept.
 ///
-/// Pure, so the rule that decides which lock pays for which mint is testable
-/// without an EVM client - it is the one place a spent lock could be
-/// substituted for the one being paid now.
+/// Pure function, so tests can check it without an EVM client. It is the only
+/// place where a spent lock could replace the current deposit.
 #[cfg(all(feature = "rgb-mint-burn", evm_to_rgb))]
 fn mint_lock_plan(
     mint_opids: &[[u8; 32]],
@@ -73,17 +72,15 @@ fn mint_lock_plan(
         .collect()
 }
 
-/// Verify the `FundsIn` lock paired with every mint in `plan` and return one
-/// `cea` event per mint, in plan order.
+/// Verify the `FundsIn` lock for each mint in `plan`. Returns one `cea` event
+/// per mint, in plan order.
 ///
-/// `plan` is `(mint OpId, EVM tx hash)`: the OpId is untrusted and only selects
-/// which log must exist, and the tx hash is a listener hint. Both are checked
-/// here against the enclave's own contract pin, through the same Helios-backed
-/// path the swap flow uses, and consensus re-binds OpId and amount when `cea`
-/// runs. Every failure refuses the signature.
+/// `plan` is `(mint OpId, EVM tx hash)`. The OpId is untrusted and only selects
+/// the log that must exist. The tx hash is a listener hint. Both are checked
+/// against the enclave contract pin. Consensus binds OpId and amount again when
+/// `cea` runs. Each failure refuses the signature.
 ///
-/// `unavailable` names, in the rejection, what the missing EVM client would
-/// have been used to authorise.
+/// `unavailable` is the error message when the EVM client is missing.
 fn verify_mint_locks(
     ctx: &ServerContext,
     plan: &[([u8; 32], [u8; 32])],
@@ -114,8 +111,8 @@ fn verify_mint_locks(
         .collect()
 }
 
-/// The `cea` events RGB consensus checks the mints against: one per verified
-/// lock, `(mint OpId, minted amount)`, in plan order.
+/// The `cea` events for RGB consensus: one `(mint OpId, minted amount)` per
+/// verified lock, in plan order.
 pub(super) fn cea_events(
     locks: &[crate::networks::evm::events::VerifiedLock],
 ) -> Vec<rgbstd::vm::ether_extension::Event> {
@@ -128,9 +125,9 @@ pub(super) fn cea_events(
         .collect()
 }
 
-/// The contract pin both directions apply before any log is trusted: the
-/// extension never checks which contract an event came from, so this is the
-/// only thing between a mint or a redemption and an attacker's contract.
+/// The contract pin that both directions apply before a log is trusted.
+/// The extension does not check the source contract of an event. Thus this
+/// pin is the only barrier against an attacker contract.
 fn bfa_binding_for(
     ctx: &ServerContext,
     consignment: &[u8],
@@ -139,12 +136,12 @@ fn bfa_binding_for(
     use crate::networks::evm::events::check_bridge_location;
     use crate::networks::rgb::validation::{assert_consignment_size, bfa_binding};
 
-    // The same cap the anchor validation applies, repeated because that check
-    // now runs after this parse rather than before it.
+    // Same cap as the anchor validation. That check runs after this parse,
+    // so the cap is applied here too.
     assert_consignment_size(consignment, &ctx.bridge_config, label)?;
 
-    // Not a BFA consignment: the other schemas run no extension opcode, so an
-    // empty event set is correct rather than merely tolerated.
+    // Not a BFA consignment. Other schemas run no extension opcode, so an
+    // empty event set is correct.
     let Some(binding) = bfa_binding(consignment)? else {
         return Ok(None);
     };
@@ -155,14 +152,13 @@ fn bfa_binding_for(
     Ok(Some(binding))
 }
 
-/// Verify the `FundsIn` lock behind every mint a burn consignment descends
-/// from, and return one `cea` event per mint.
+/// Verify the `FundsIn` lock behind each mint in a burn consignment history.
+/// Returns one `cea` event per mint.
 ///
-/// The listener supplies `(op_id, tx_hash)` pairs because only it can search
-/// the chain; they are hints. Every pair is fetched and checked by
-/// [`verify_mint_locks`], and a mint with no pair - or with one whose log does
-/// not bind to it - fails the whole validation. That is the point: a burn may
-/// only release funds that a real, verified lock once created.
+/// The listener supplies `(op_id, tx_hash)` pairs as hints, because only it
+/// can search the chain. [`verify_mint_locks`] checks each pair. A mint with
+/// no pair, or with a log that does not bind to it, fails the validation.
+/// A burn can only release funds that a real, verified lock created.
 #[cfg(rgb_to_evm)]
 pub(super) fn bfa_burn_ancestry_events(
     ctx: &ServerContext,
@@ -186,12 +182,10 @@ pub(super) fn bfa_burn_ancestry_events(
     )
 }
 
-/// Verify the EVM lock a BFA mint commits to, plus the lock behind each of its
-/// ancestors, and return them as the event set RGB consensus checks the minted
-/// amounts against.
+/// Verify the EVM lock of a BFA mint and the lock of each ancestor.
+/// Returns them as the event set for RGB consensus.
 ///
-/// Empty vec when this is not an EVM-to-RGB request or the consignment is not a
-/// BFA one, so the swap path is unaffected.
+/// Returns an empty vec for a non-BFA consignment.
 #[cfg(all(feature = "rgb-mint-burn", evm_to_rgb))]
 pub(super) fn bfa_mint_events(
     ctx: &ServerContext,
@@ -223,8 +217,8 @@ pub(super) fn bfa_mint_events(
     )
 }
 
-/// A swap transfer spends previously minted BFA allocations. Verify every
-/// mint in its consignment history before running the consensus extension.
+/// A swap transfer spends BFA allocations from earlier mints. Verify each
+/// mint in its consignment history before the consensus extension runs.
 #[cfg(feature = "rgb-swap")]
 pub(super) fn bfa_transfer_ancestry_events(
     ctx: &ServerContext,
@@ -259,8 +253,8 @@ mod mint_ancestry {
         }
     }
 
-    /// The first mint on a bridge right carries nothing else, so the only
-    /// lock in play is the deposit that arrived with the request.
+    /// The first mint on a bridge right has no ancestors. Its only lock is
+    /// the deposit of the request.
     #[test]
     fn a_first_mint_is_paid_by_this_requests_deposit() {
         let terminal = [1u8; 32];
@@ -270,8 +264,7 @@ mod mint_ancestry {
         );
     }
 
-    /// What the whole change is for: mint N carries mints 1..N-1, and each
-    /// of them is verified against the deposit that actually paid for it.
+    /// Mint N carries mints 1..N-1. Each is verified against its own deposit.
     #[test]
     fn a_chained_mint_pairs_each_predecessor_with_its_own_lock() {
         let (first, second, terminal) = ([1u8; 32], [2u8; 32], [3u8; 32]);
@@ -294,8 +287,8 @@ mod mint_ancestry {
         );
     }
 
-    /// The replay this design has to refuse. Listing the terminal mint would
-    /// let a caller pay for it with a lock some earlier mint already spent.
+    /// Replay case. If the caller lists the terminal mint, it could pay for it
+    /// with a lock that an earlier mint already spent.
     #[test]
     fn refuses_a_caller_that_lists_the_mint_being_authorised() {
         let terminal = [3u8; 32];
@@ -316,9 +309,8 @@ mod mint_ancestry {
         );
     }
 
-    /// A predecessor nobody accounted for must abort the mint rather than
-    /// reach consensus with its lock unchecked - the same rule the burn
-    /// direction already enforces.
+    /// An unlisted predecessor must stop the mint. Its lock must not reach
+    /// consensus unchecked. The burn direction has the same rule.
     #[test]
     fn refuses_a_predecessor_with_no_listed_lock() {
         let (first, terminal) = ([1u8; 32], [3u8; 32]);
@@ -326,9 +318,8 @@ mod mint_ancestry {
         assert!(err.to_string().contains("no mint_ancestors entry"), "{err}");
     }
 
-    /// The terminal mint is identified by op id, not by position: a
-    /// consignment that lists it first must still pay for it with the
-    /// deposit, and the later transitions must bring their own locks.
+    /// The op id identifies the terminal mint, not the position. If it is
+    /// first, it still uses the deposit. Later transitions need their own locks.
     #[test]
     fn the_terminal_mint_is_found_by_op_id_not_by_position() {
         let (terminal, later) = ([3u8; 32], [4u8; 32]);
@@ -364,9 +355,8 @@ mod burn_ancestry {
         );
     }
 
-    /// The whole point of the pre-pass. A mint the listener did not account
-    /// for must abort the burn - never validate with its lock unchecked,
-    /// which is what would let an unbacked mint be redeemed on EVM.
+    /// An unlisted mint must stop the burn. An unchecked lock would let an
+    /// unbacked mint be redeemed on EVM.
     #[test]
     fn rejects_a_mint_with_no_listed_ancestor() {
         let err = ancestor_tx_hash(&[9u8; 32], &[ancestor(1, 0xaa)]).unwrap_err();
@@ -378,8 +368,7 @@ mod burn_ancestry {
         assert!(ancestor_tx_hash(&[1u8; 32], &[]).is_err());
     }
 
-    /// A short hash would otherwise be silently padded by a lenient decoder
-    /// and look up a different transaction.
+    /// A lenient decoder could pad a short hash and find a different transaction.
     #[test]
     fn rejects_a_tx_hash_that_is_not_32_bytes() {
         let listed = MintAncestor {
@@ -390,7 +379,7 @@ mod burn_ancestry {
         assert!(err.to_string().contains("must be 32 bytes"), "{err}");
     }
 
-    /// An op id that merely shares a prefix is a different transition.
+    /// An op id with the same prefix is a different transition.
     #[test]
     fn matches_the_op_id_exactly() {
         let mut near = ancestor(1, 0xaa);

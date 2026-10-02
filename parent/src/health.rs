@@ -1,13 +1,12 @@
-//! Internal readiness endpoint: `GET /health`. See README for how deploy uses
-//! it.
+//! Internal readiness endpoint: `GET /health`. The README shows how deploy
+//! uses it.
 //!
-//! An operations probe, not part of the signing API: loopback by default and on
-//! its own port, unlike the gRPC listener on `0.0.0.0`. Must not be exposed
+//! This is an operations probe, not part of the signing API. It binds to
+//! loopback by default, on a port separate from gRPC. Do not expose it
 //! off-host.
 //!
-//! Every failure is a `503`, never a `5xx` the poller would have to
-//! special-case: "not ready" and "cannot tell" are one answer to a caller that
-//! is waiting.
+//! Every failure returns `503`. To a waiting poller, "not ready" and
+//! "cannot tell" are the same answer.
 
 use std::net::SocketAddr;
 use std::time::Duration;
@@ -23,17 +22,16 @@ use crate::enclave_proto::{enclave_request, enclave_response, EnclaveRequest, He
 use crate::grpc_server::ParentAdapterService;
 use crate::header_sync::SyncStatus;
 
-/// How long to wait before answering "cannot tell". Shorter than the 30s
-/// signing timeout so a probe answers within its own poll interval rather than
-/// leaving the poller to guess.
+/// Time to wait before the answer is "cannot tell". It is shorter than the
+/// 30s enclave timeout, so a probe answers within its poll interval.
 ///
-/// It bounds the *answer*, not the enclave-side work: the request runs on a
-/// blocking thread that cannot be cancelled, so an abandoned probe is still
-/// released by the socket read timeout and the enclave's own 30s request cap.
+/// It limits the answer, not the enclave work. The request runs on a blocking
+/// thread that cannot be cancelled. The socket read timeout and the enclave
+/// 30s request limit release an abandoned probe.
 const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// Build the router. Public so tests can serve it on an ephemeral port and
-/// exercise the real HTTP path deploy will curl.
+/// Build the router. Public so tests can serve the real HTTP path on an
+/// ephemeral port.
 pub fn router(service: ParentAdapterService, sync: watch::Receiver<SyncStatus>) -> Router {
     Router::new()
         .route("/health", get(health))
@@ -41,8 +39,7 @@ pub fn router(service: ParentAdapterService, sync: watch::Receiver<SyncStatus>) 
 }
 
 /// Bind the readiness port. Separate from [`serve`] so a bad `HEALTH_PORT`
-/// fails at boot: deploy waits on this endpoint, so a parent that silently has
-/// none turns a config typo into a poll timeout.
+/// fails at boot, not as a deploy poll timeout.
 pub async fn bind(addr: SocketAddr) -> std::io::Result<tokio::net::TcpListener> {
     tokio::net::TcpListener::bind(addr).await.map_err(|e| {
         std::io::Error::new(
@@ -100,8 +97,7 @@ async fn health(
     }
 }
 
-/// Ask the enclave. Returns the reply, or a human-readable reason the probe
-/// could not answer.
+/// Ask the enclave for health. On failure, return a readable reason.
 pub(crate) async fn probe(service: &ParentAdapterService) -> Result<HealthResponse, String> {
     let req = EnclaveRequest {
         request: Some(enclave_request::Request::Health(Default::default())),
@@ -117,9 +113,8 @@ pub(crate) async fn probe(service: &ParentAdapterService) -> Result<HealthRespon
         Some(enclave_response::Response::Error(e)) => {
             Err(format!("enclave error (code {}): {}", e.code, e.message))
         }
-        // An enclave built before Health existed drops the unknown oneof and
-        // replies with no variant set. Report it as not-ready rather than
-        // pretending the probe succeeded.
+        // An enclave without Health drops the unknown oneof and sends no
+        // variant. Report it as not ready.
         other => Err(format!("unexpected enclave response variant: {other:?}")),
     }
 }

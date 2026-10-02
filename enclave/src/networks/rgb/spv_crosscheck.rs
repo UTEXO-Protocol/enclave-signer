@@ -1,24 +1,23 @@
-//! SPV cross-check: verify the consignment's witness Bitcoin transactions
-//! are included in the in-enclave header chain with sufficient confirmations.
+//! SPV cross-check: the witness Bitcoin transactions of the consignment must
+//! be in the in-enclave header chain with enough confirmations.
 //!
-//! Before signing an EVM unlock this gate demands:
+//! Before it signs an EVM unlock, this gate requires:
 //!
-//! 1. **Coverage**: every witness txid extracted from the consignment is
-//!    backed by a `MerkleProofEntry` from the listener - and there are no
-//!    extra unrelated proofs. Set equality, both directions.
-//! 2. **Cross-network**: the consignment's `chain_net` matches the network
-//!    the enclave is compiled for. Catches "regtest consignment replayed
-//!    against mainnet enclave".
-//! 3. **Inclusion**: every Merkle proof reconstructs to the `merkle_root`
-//!    committed in the header at `block_height` we have stored.
-//! 4. **Confirmation depth**: every witness tx (not just the burn) must be
-//!    at least `SPV_MIN_CONFIRMATIONS` deep - bridge spec section 11 explicitly
-//!    forbids relying only on the most recent anchoring transaction.
+//! 1. **Coverage**: each witness txid of the consignment has a
+//!    `MerkleProofEntry` in the request, and no extra proofs exist (set
+//!    equality, both directions).
+//! 2. **Cross-network**: the consignment `chain_net` matches the compiled
+//!    network. This stops a regtest consignment on a mainnet enclave.
+//! 3. **Inclusion**: each Merkle proof gives the `merkle_root` of our stored
+//!    header at `block_height`.
+//! 4. **Confirmation depth**: every witness tx (not only the burn) is at least
+//!    `SPV_MIN_CONFIRMATIONS` deep. Bridge spec section 11 forbids trust in
+//!    only the most recent anchoring transaction.
 //!
-//! Byte order: `MerkleProofEntry.txid` and `.merkle_path` arrive in display
-//! (big-endian) order, while `spv::merkle` works in internal (little-endian)
-//! order. Conversion happens once per hash, at the `verify_one_proof`
-//! boundary. Coverage checking stays in display order on both sides.
+//! Byte order: `MerkleProofEntry.txid` and `.merkle_path` are in display
+//! (big-endian) order. `spv::merkle` uses internal (little-endian) order.
+//! `verify_one_proof` converts each hash once. The coverage check uses display
+//! order on both sides.
 
 #[cfg(rgb_to_evm)]
 use std::collections::BTreeSet;
@@ -39,37 +38,35 @@ use crate::proto::MerkleProofEntry;
 #[cfg(rgb_to_evm)]
 use super::validation::ValidatedConsignment;
 
-/// Confirmation depth required before the enclave will sign. Compile-time, not
-/// env-driven: a host-set value of 0 would bypass SPV while attestation still
-/// passed.
+/// Confirmation depth required before the enclave signs. Compile-time, not an
+/// env var: a host value of 0 would bypass SPV and attestation would still pass.
 pub const SPV_MIN_CONFIRMATIONS: u32 = 6;
 
-/// Maximum age of the chain tip's `time`, in seconds. An older tip means the
-/// enclave refuses to sign: defense against a listener feeding real-but-old
-/// headers that never reach the real chain head.
+/// Maximum age of the chain tip `time`, in seconds. With an older tip the
+/// enclave does not sign. This stops a host that sends real but old headers
+/// and never reaches the real chain head.
 ///
-/// 2 hours is generous - the listener pushes every ~30s, and even mainnet's
-/// 10-minute target leaves legitimate gaps well short of it.
+/// 2 hours is a wide margin. The parent syncs every 10s by default, and mainnet
+/// blocks come approx every 10 minutes.
 pub const SPV_MAX_TIP_AGE_SECS: u64 = 2 * 60 * 60;
 
-/// Bitcoin consensus allows a block `time` up to ~2 hours ahead of
-/// network-adjusted time. That grace is accepted; beyond it a header with
+/// Bitcoin consensus allows a block `time` up to approx 2 hours ahead of
+/// network-adjusted time. The check accepts that. A larger skew fails, because
 /// `time = far_future` would defeat the staleness check.
 pub const SPV_MAX_TIP_FUTURE_SECS: u64 = 2 * 60 * 60;
 
-/// Maximum sibling hashes in a single Merkle path. Depth d authenticates up to
-/// 2^d transactions, and a 4 MB block holds well under 2^17, so 32 never
-/// false-rejects a real proof while bounding the hashing a hostile listener can
-/// demand. Checked in `validate_spv_proofs` before any hashing runs.
-/// Compile-time and PCR-attested, not host-tunable.
+/// Maximum sibling hashes in one Merkle path. Depth d covers up to 2^d
+/// transactions, and a 4 MB block holds far fewer than 2^17. Thus 32 never
+/// rejects a real proof and bounds the hashing a hostile host can cause.
+/// `validate_spv_proofs` checks it before any hashing. Compile-time and in
+/// PCR0, so the host cannot change it.
 #[cfg(rgb_to_evm)]
 pub const MAX_MERKLE_PATH_DEPTH: usize = 32;
 
-/// Validate the RGB source's Bitcoin anchoring before signing.
+/// Validates the Bitcoin anchoring of the RGB source before signing.
 ///
-/// The caller passes the already-validated consignment and the listener's
-/// Merkle proofs; this checks chain freshness, network binding, inclusion, and
-/// confirmation depth.
+/// Takes the validated consignment and the request Merkle proofs. Checks chain
+/// freshness, network binding, inclusion, and confirmation depth.
 #[cfg(rgb_to_evm)]
 pub fn validate_source_chain(
     chain: &HeaderChain,
@@ -97,8 +94,8 @@ pub fn validate_source_chain(
     )?;
 
     // Pin every block this check used, under the caller's lock guard. The guard
-    // ends at return, so `ChainPins::assert_unchanged` keeps the result true at
-    // signing time (F05-NEW-AF-08).
+    // ends at return, so `ChainPins::assert_unchanged` checks the blocks again
+    // at signing time (F05-NEW-AF-08).
     for proof in merkle_proofs {
         pins.pin(chain, proof.block_height)?;
     }
@@ -112,12 +109,11 @@ pub fn validate_source_chain(
     Ok(())
 }
 
-/// Verify a complete set of SPV proofs against the chain.
+/// Verifies a full set of SPV proofs against the chain.
 ///
-/// `expected_txids` is the witness-txid set extracted from the validated
-/// RGB consignment, in **display byte order** (matches the wire format of
-/// `MerkleProofEntry.txid`). `proofs` are exactly the entries the listener
-/// supplied on the wire.
+/// `expected_txids` is the witness-txid set of the validated RGB consignment,
+/// in **display byte order** (the wire format of `MerkleProofEntry.txid`).
+/// `proofs` are the entries from the request.
 #[cfg(rgb_to_evm)]
 pub fn validate_spv_proofs(
     chain: &HeaderChain,
@@ -125,7 +121,7 @@ pub fn validate_spv_proofs(
     proofs: &[MerkleProofEntry],
     min_confirmations: u32,
 ) -> Result<()> {
-    // 1. Coverage: build sets in display order, compare both ways.
+    // 1. Coverage: sets in display order, compared both ways.
     let expected_set: BTreeSet<[u8; 32]> = expected_txids.iter().copied().collect();
     let mut proof_set: BTreeSet<[u8; 32]> = BTreeSet::new();
 
@@ -136,8 +132,8 @@ pub fn validate_spv_proofs(
                 proof.txid.len()
             ))
         })?;
-        // Bound per-proof hashing before it starts: a path deeper than any
-        // real block is a bug or a work-amplification attempt.
+        // Bound per-proof hashing before it starts. A path deeper than any
+        // real block is a bug or a work-amplification attack.
         if proof.merkle_path.len() > MAX_MERKLE_PATH_DEPTH {
             return Err(EnclaveError::Spv(format!(
                 "merkle_proofs[{i}].merkle_path too deep: {} siblings (max {})",
@@ -160,9 +156,8 @@ pub fn validate_spv_proofs(
     }
 
     if proof_set.len() != expected_set.len() {
-        // expected_set  strictly contains  proof_set (we already rejected anything in
-        // proof_set  minus  expected_set above). Find what's missing for a
-        // useful error.
+        // proof_set is a strict subset of expected_set (extras failed above).
+        // List the missing txids in the error.
         let missing: Vec<String> = expected_set
             .difference(&proof_set)
             .map(hex::encode)
@@ -183,10 +178,9 @@ pub fn validate_spv_proofs(
     Ok(())
 }
 
-/// The chain-freshness half of the signing precondition, with this module's
-/// bounds already bound. Signing calls it before validating proofs; the
-/// readiness probe calls it to answer "would signing pass right now". Both go
-/// through here so the two cannot drift apart.
+/// Chain-freshness part of the signing precondition, with this module's
+/// bounds. Signing calls it before the proof checks. The readiness probe calls
+/// it too, so the two cannot drift apart.
 pub fn assert_chain_fresh(chain: &HeaderChain, now: SystemTime) -> Result<()> {
     assert_chain_not_stale(
         chain,
@@ -196,13 +190,12 @@ pub fn assert_chain_fresh(chain: &HeaderChain, now: SystemTime) -> Result<()> {
     )
 }
 
-/// The full signing precondition on the chain alone: fresh, and deep enough
-/// past the checkpoint to serve a proof at [`SPV_MIN_CONFIRMATIONS`].
+/// Full signing precondition on the chain only: fresh, and at least
+/// [`SPV_MIN_CONFIRMATIONS`] blocks past the checkpoint.
 ///
-/// Depth matters because `validate_spv_proofs` rejects anything shallower. A
-/// chain one block past the compiled-in checkpoint is fresh but cannot yet
-/// confirm anything, so a probe that checked freshness alone would report ready
-/// while every signing request still failed.
+/// `validate_spv_proofs` rejects shallower proofs. A chain one block past the
+/// checkpoint is fresh but cannot confirm anything. A freshness-only probe
+/// would then report ready while every signing request fails.
 pub fn assert_chain_ready(chain: &HeaderChain, now: SystemTime) -> Result<()> {
     assert_chain_fresh(chain, now)?;
 
@@ -218,13 +211,12 @@ pub fn assert_chain_ready(chain: &HeaderChain, now: SystemTime) -> Result<()> {
     Ok(())
 }
 
-/// Refuse to sign if the chain tip is too old, or anomalously in the future,
-/// against wall clock. `now` is injected for testability; production passes
+/// Fails if the chain tip is too old, or too far in the future, against the
+/// wall clock. `now` is a parameter for tests. Production passes
 /// `SystemTime::now()`.
 ///
-/// Threat model: a listener serving real-but-old headers from the checkpoint
-/// forward produces a chain that validates perfectly while the tip stays stuck
-/// in the past, making an old block look well confirmed.
+/// Threat model: a host that sends real but old headers makes a valid chain
+/// with an old tip. An old block then looks well confirmed.
 pub fn assert_chain_not_stale(
     chain: &HeaderChain,
     now: SystemTime,
@@ -237,9 +229,8 @@ pub fn assert_chain_not_stale(
         .as_secs();
     let tip_time = u64::from(chain.tip_time());
 
-    // Future-bound: a tip claiming to be far ahead of now is anomalous.
-    // Bitcoin's consensus rule allows ~2h of future skew per block; we
-    // reject anything beyond.
+    // Future bound: Bitcoin consensus allows approx 2h of future skew per
+    // block. Reject more than `max_future`.
     if let Some(future_skew) = tip_time.checked_sub(now_unix) {
         if future_skew > max_future.as_secs() {
             return Err(EnclaveError::Spv(format!(
@@ -248,12 +239,10 @@ pub fn assert_chain_not_stale(
                 max_future.as_secs()
             )));
         }
-        // Else: in-bounds future skew, OK.
         return Ok(());
     }
 
-    // Past-bound: tip is in the past (the normal case). Check it isn't
-    // too far back.
+    // Past bound: the normal case.
     let age = now_unix.saturating_sub(tip_time);
     if age > max_age.as_secs() {
         return Err(EnclaveError::Spv(format!(
@@ -266,19 +255,17 @@ pub fn assert_chain_not_stale(
     Ok(())
 }
 
-/// Cross-network replay defense: assert the consignment's `chain_net`
-/// prefix (e.g. `"sb"` for signet) is the one this enclave is compiled for.
+/// Cross-network replay defense: the consignment `chain_net` prefix (for
+/// example `"sb"` for signet) must match the compiled network.
 ///
-/// The expected value is derived from [`ChainNet::prefix()`] - the same
-/// rgb-core code that produces the consignment-side string in
-/// `validation::rgb` (`transfer.genesis.chain_net.prefix()`) - so the two
-/// sides cannot drift apart on notation.
+/// The expected value comes from [`ChainNet::prefix()`], the same rgb-core
+/// code that makes the consignment string in `validation::rgb`
+/// (`transfer.genesis.chain_net.prefix()`). Thus the two sides use the same
+/// notation.
 ///
-/// rgbstd's full validation also enforces this when `rgb-validation` is on,
-/// but we re-assert at the SPV layer so a future configuration change that
-/// loosens rgbstd validation (e.g. accepting an unresolved consignment for
-/// some niche flow) can never accidentally let a wrong-network consignment
-/// reach the signing path.
+/// rgbstd validation also checks this when `rgb-validation` is on. This SPV
+/// check stays, so a later change that loosens rgbstd validation cannot let a
+/// wrong-network consignment reach signing.
 #[cfg(rgb_to_evm)]
 pub fn assert_chain_net(consignment_chain_net: &str, enclave_network: Network) -> Result<()> {
     let chain_net = expected_chain_net(enclave_network);
@@ -294,10 +281,10 @@ pub fn assert_chain_net(consignment_chain_net: &str, enclave_network: Network) -
 
 /// The rgb-core [`ChainNet`] this enclave accepts consignments for.
 ///
-/// Mirrors the `bitcoin_network` -> `ChainNet` mapping in
-/// `validation::rgb::RgbValidator::new`. Plain `BitcoinSignet` also covers
-/// our custom signet: the challenge script differs, but the rgb-core chain
-/// identity (and thus the consignment prefix) is the same `"sb"`.
+/// Same `bitcoin_network` -> `ChainNet` mapping as
+/// `validation::rgb::RgbValidator::new`. `BitcoinSignet` also covers our custom
+/// signet: the challenge script is different, but the rgb-core chain identity
+/// (and the consignment prefix `"sb"`) is the same.
 #[cfg(rgb_to_evm)]
 fn expected_chain_net(network: Network) -> ChainNet {
     match network {
@@ -316,9 +303,8 @@ fn verify_one_proof(
     index: usize,
     proof: &MerkleProofEntry,
 ) -> Result<()> {
-    // Header lookup. `header_at` returns None for heights at-or-below
-    // checkpoint (we don't store the checkpoint header itself) and for
-    // heights beyond the tip - both are rejection cases here.
+    // `header_at` returns None at or below the checkpoint and above the tip.
+    // Both cases fail.
     let header = chain.header_at(proof.block_height).ok_or_else(|| {
         EnclaveError::Spv(format!(
             "merkle_proofs[{index}]: no header at height {} (chain tip = {})",
@@ -326,9 +312,8 @@ fn verify_one_proof(
         ))
     })?;
 
-    // Confirmation depth, with checked arithmetic. A hostile listener can
-    // send `block_height = u32::MAX`, which without the check would
-    // underflow on `tip - block_height`.
+    // Checked arithmetic: a hostile host can send `block_height = u32::MAX`,
+    // which would underflow `tip - block_height`.
     let confs = tip
         .checked_sub(proof.block_height)
         .and_then(|d| d.checked_add(1))
@@ -346,7 +331,7 @@ fn verify_one_proof(
         )));
     }
 
-    // Reverse display-order bytes to internal-order for the Merkle verifier.
+    // Display order -> internal order for the Merkle verifier.
     let mut txid_internal: [u8; 32] = proof.txid.as_slice().try_into().map_err(|_| {
         EnclaveError::Spv(format!(
             "merkle_proofs[{index}].txid must be 32 bytes (already validated above; defensive)"
@@ -366,9 +351,7 @@ fn verify_one_proof(
         path_internal.push(s);
     }
 
-    // header.merkle_root is a TxMerkleNode wrapping sha256d::Hash -
-    // its as_byte_array() is internal order, matching what verify_merkle_proof
-    // wants.
+    // TxMerkleNode bytes are in internal order, as verify_merkle_proof needs.
     let merkle_root_internal: [u8; 32] = header.merkle_root.to_byte_array();
 
     verify_merkle_proof(
@@ -379,8 +362,7 @@ fn verify_one_proof(
     )
     .map_err(|e| match e {
         MerkleError::RootMismatch { computed, expected } => {
-            // Display-order hex for human readability - these are end-user
-            // diagnostic hashes, not bytes used in further computation.
+            // Display-order hex, for readable diagnostics only.
             let mut c = computed;
             c.reverse();
             let mut x = expected;
@@ -402,14 +384,14 @@ fn verify_one_proof(
     Ok(())
 }
 
-/// The blocks the SPV checks used, re-checked before the key is used.
+/// The blocks the SPV checks used, checked again before the key is used.
 ///
-/// Each check drops the header-chain lock when it returns. Another worker can
-/// then accept a reorg before signing (F05-NEW-AF-08).
+/// Each check releases the header-chain lock when it returns. Another worker
+/// can then accept a reorg before signing (F05-NEW-AF-08).
 ///
 /// A check records every block it used here. `assert_unchanged` reads those
-/// heights again and refuses if a hash moved. An extension does not touch a
-/// pinned height, so it still signs.
+/// heights again and fails if a hash changed. An extension does not touch a
+/// pinned height, so signing continues.
 #[derive(Debug, Default)]
 pub struct ChainPins {
     pinned: std::sync::Mutex<std::collections::BTreeMap<u32, [u8; 32]>>,

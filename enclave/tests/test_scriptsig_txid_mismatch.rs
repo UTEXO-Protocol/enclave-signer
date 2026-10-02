@@ -3,9 +3,9 @@
 //! (BIP-16), which changes the txid, so the broadcastable tx is not the one
 //! the consignment names.
 //!
-//! Runs through the wire and `handle_sign`: the bridge-location pin, the
-//! `FundsIn` read and the invoice bind are all on the path. Issues a BFA
-//! asset over regtest funding transactions. Mint-burn lane only.
+//! Runs over the wire through `handle_sign`, so the bridge-location pin, the
+//! `FundsIn` read, and the invoice bind are on the path. Issues a BFA asset
+//! over regtest funding transactions. Mint/burn flow only.
 // A full mint over the wire: the EVM -> RGB direction.
 #![cfg(all(feature = "rgb-mint-burn", feature = "bfa-validation", evm_to_rgb))]
 
@@ -92,7 +92,7 @@ fn foreign(b: u8) -> Keypair {
     Keypair::from_secret_key(&Secp256k1::new(), &SecretKey::from_slice(&[b; 32]).unwrap())
 }
 
-/// Our Colored key at m/86'/827167'/0'/0/0, the account a deposit is signed under.
+/// Our Colored key at m/86'/827167'/0'/0/0. A deposit is signed under it.
 fn colored_key(keys: &KeyManager) -> (XOnlyPublicKey, DerivationPath) {
     let child = [ChildNumber::from(0), ChildNumber::from(0)];
     let sk = keys.derive_btc_child(AccountType::Colored, &child).unwrap();
@@ -178,10 +178,9 @@ struct Deposit {
     user_funding: Transaction,
 }
 
-/// Issues a BFA asset whose mint right sits on `bridge_funding:0`. Mints
-/// `MINTED` units to the user's blinded seal via a `Bridge` transition
-/// anchored in a witness tx that spends that right and `aux`, if any, and
-/// rolls the right forward onto the bridge's change output.
+/// Issues a BFA asset with its mint right on `bridge_funding:0`. A `Bridge`
+/// transition mints `MINTED` units to the user's blinded seal. Its witness tx
+/// spends the right and `aux` (if any) and moves the right to the bridge change.
 fn issue_and_mint(
     bridge_funding: &Transaction,
     bridge_spk: &ScriptBuf,
@@ -250,9 +249,8 @@ fn issue_and_mint(
     .unwrap();
     let mint_opid = transition.id();
 
-    // amplify's non-empty containers cannot be named from this crate, so the
-    // bundle and terminal of an in-tree consignment are retyped: every entry
-    // is replaced, none is read.
+    // This crate cannot name amplify's non-empty containers. So the test reuses
+    // the bundle and terminal of a fixture consignment and replaces each entry.
     let donor = Transfer::load(Cursor::new(include_bytes!(
         "fixtures/transfer_consignment.rgbc"
     )))
@@ -368,9 +366,9 @@ fn log<E: SolEvent>(event: &E) -> LogEntry {
     }
 }
 
-/// The receipt of the EVM deposit: `FundsIn` naming the mint's OpId and
-/// `BridgeFundsIn` carrying the invoice, both from the pinned contract. What
-/// the enclave reads instead of trusting the listener.
+/// The EVM deposit receipt: `FundsIn` with the mint OpId and `BridgeFundsIn`
+/// with the invoice, both from the pinned contract. The enclave reads this
+/// receipt and does not trust the listener.
 fn deposit_receipt(mint_opid: &OpId, invoice: &str) -> ReceiptData {
     let opid = alloy_primitives::B256::from_slice(&hex::decode(mint_opid.to_string()).unwrap());
     let funds_in = FundsIn {
@@ -413,9 +411,9 @@ impl EvmReceiptProvider for DepositChain {
     }
 }
 
-/// Stub Esplora for a regtest validator: only the genesis hash for the chain
-/// identity check. The enclave fetches no fee estimate; the fee policy is
-/// pinned at compile time.
+/// Stub Esplora for a regtest validator. It serves only the genesis hash for
+/// the chain identity check. The fee policy is pinned at compile time, so the
+/// enclave fetches no fee estimate.
 fn spawn_regtest_stub() -> String {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap();
@@ -482,8 +480,8 @@ fn context(contract_id: &ContractId, receipt: ReceiptData) -> ServerContext {
     ctx
 }
 
-/// One framed request in, one framed response out, as over vsock. The cursor
-/// is read to its end and the response appended after it.
+/// One framed request in, one framed response out, as over vsock. The handler
+/// writes the response after the request in the cursor.
 fn sign_over_the_wire(ctx: &ServerContext, req: SignRequest) -> EnclaveResponse {
     let mut wire = Cursor::new(Vec::new());
     let request = EnclaveRequest {
@@ -572,9 +570,8 @@ fn signed_psbt(response: &EnclaveResponse) -> Result<(Psbt, u32), String> {
     }
 }
 
-/// Our key-path signature on input 0, from the same seed the enclave holds.
-/// Lets a test build the transaction a finalizer would broadcast even on a
-/// build where the enclave refuses to sign the PSBT.
+/// Our key-path signature on input 0, from the enclave seed. A test can then
+/// build the finalizer's broadcast tx even when the enclave refuses to sign.
 fn sign_ours(psbt: &mut Psbt) {
     let secp = Secp256k1::new();
     let keys = KeyManager::from_seed(SEED, Network::Regtest).unwrap();
@@ -599,10 +596,8 @@ fn sign_ours(psbt: &mut Psbt) {
     });
 }
 
-/// Completes the PSBT as a finalizer would: our key-path signature, the
-/// auxiliary input's own signature. Extracts the transaction and re-verifies
-/// it: the key-path signature verifies against the output key, and the pushed
-/// redeemScript's P2WPKH signature verifies.
+/// Completes the PSBT as a finalizer does, with our key-path signature and the
+/// auxiliary input signature. It extracts the tx and verifies both signatures.
 fn finalize(signed: &Psbt, aux: Option<&Aux>) -> Transaction {
     let secp = Secp256k1::new();
     let mut psbt = signed.clone();
@@ -696,8 +691,8 @@ impl ResolveWitness for ChainWith {
     }
 }
 
-/// What the RGB consumer sees when it validates the consignment the enclave
-/// signed for against the chain as it is.
+/// The RGB consumer result when it validates the signed consignment against
+/// the given chain.
 fn consumer_validates(deposit: &Deposit, chain: Vec<Transaction>) -> Result<(), ValidationError> {
     let transfer = Transfer::load(Cursor::new(&deposit.consignment)).unwrap();
     let schema = transfer.schema.clone();
@@ -726,9 +721,8 @@ fn bound_witness(consignment: &[u8]) -> Txid {
         .witness_id()
 }
 
-/// Control: the bridge's native input alone. Signed through the front door,
-/// finalized to the bound txid, valid for the consumer against the chain that
-/// carries it. What the gate must keep working.
+/// Control: the bridge native input alone. The enclave signs it, it finalizes
+/// to the bound txid, and the consumer accepts it. The gate must keep this working.
 #[test]
 fn native_deposit_signs_and_finalizes_to_the_bound_txid() {
     let native = build(None);
@@ -749,8 +743,7 @@ fn native_deposit_signs_and_finalizes_to_the_bound_txid() {
     .expect("consumer resolves the bound witness");
 }
 
-/// The same deposit plus one P2SH-P2WPKH input. The enclave must refuse it;
-/// on the base it signed, which is what made the mismatch reachable.
+/// The same deposit plus one P2SH-P2WPKH input. The enclave must refuse it.
 #[test]
 fn refuses_input_whose_finalized_script_sig_changes_the_bound_txid() {
     let aux = wrapped_segwit_aux();
@@ -770,10 +763,9 @@ fn refuses_input_whose_finalized_script_sig_changes_the_bound_txid() {
     );
 }
 
-/// The consequence the refusal exists for: a finalizer's broadcast tx has a
-/// different txid, so a consumer cannot resolve the witness the consignment
-/// names. Our signature is produced locally from the enclave's seed, so the
-/// evidence does not depend on the enclave signing.
+/// Why the refusal exists: the finalized tx has a different txid, so a consumer
+/// cannot resolve the witness that the consignment names. The test signs
+/// locally with the enclave seed, so the result does not need the enclave to sign.
 #[test]
 fn finalized_wrapped_input_leaves_the_bound_witness_unresolvable() {
     let aux = wrapped_segwit_aux();

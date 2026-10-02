@@ -1,25 +1,25 @@
-//! Asset-identity binding: tie a validated consignment's contract id to what
-//! the listener declared and to the operator-pinned `RGB_ASSET_ID`.
+//! Asset-identity binding: binds the validated contract id to the asset that
+//! the listener declares and to the operator-pinned `RGB_ASSET_ID`.
 
 use crate::config::BridgeConfig;
 use crate::error::EnclaveError;
 use crate::error::Result;
 
-/// Which side of the bridge an asset binding is being made for. The two sides
-/// differ only in how they treat a missing `RGB_ASSET_ID` pin.
+/// The bridge side of an asset binding. The sides differ only in how they
+/// treat a missing `RGB_ASSET_ID` pin.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AssetBindMode {
-    /// RGB -> EVM. The pin is enforced only once the bridge config is otherwise
-    /// configured; the fail-closed half for this direction lives in the EVM
-    /// destination (`networks/evm/validation.rs`).
+    /// RGB -> EVM. The pin applies only when the bridge config is configured.
+    /// The fail-closed check for this direction is in the EVM destination
+    /// (`networks/evm/validation.rs`).
     Source,
-    /// EVM -> RGB. An unpinned asset is refused outright: an unconfigured yet
-    /// `rgb-validation`-enabled enclave must not sign in listener-trusting mode.
+    /// EVM -> RGB. An unpinned asset is always refused. An unconfigured enclave
+    /// with `rgb-validation` must not trust the listener.
     Destination,
 }
 
 impl AssetBindMode {
-    /// How the direction names itself in a declared-vs-validated rejection.
+    /// The direction name in a declared-vs-validated rejection.
     fn declarer(self) -> &'static str {
         match self {
             Self::Source => "RGB source",
@@ -28,16 +28,15 @@ impl AssetBindMode {
     }
 }
 
-/// Bind a validated consignment's asset identity to what the listener declared
-/// and to the operator-pinned `RGB_ASSET_ID`.
+/// Binds the validated asset identity to the declared asset and to the
+/// operator-pinned `RGB_ASSET_ID`.
 ///
-/// Three legs, all fail-closed: the validated id must be non-empty, must equal
-/// the declared `asset_id`, and must equal the pin. `mode` carries the only
-/// difference between the two directions - see [`AssetBindMode`].
+/// Three checks, all fail closed: the validated id must be non-empty, equal
+/// the declared `asset_id`, and equal the pin. `mode` holds the only
+/// difference between the directions (see [`AssetBindMode`]).
 ///
-/// Pure on purpose: this is the check standing between a colluding listener and
-/// a foreign asset, so it is testable without a consignment, a resolver or a
-/// header chain.
+/// A pure function by design. It stops a colluding listener from using a
+/// foreign asset, so tests need no consignment, resolver or header chain.
 pub fn assert_asset_binding(
     validated_contract_id: &str,
     declared_asset_id: &str,

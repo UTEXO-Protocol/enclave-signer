@@ -1,11 +1,9 @@
-//! The witness-resolver client: everything `RgbValidator` does over the
-//! network.
+//! The witness-resolver client: all network calls of `RgbValidator`.
 //!
-//! Esplora REST or Electrum, chosen from the URL scheme, always reached
-//! through the host's vsock forwarder. Every call here crosses the trust
-//! boundary, so each one is bounded by its own timeout and each answer is
-//! evidence to check, never input to trust. Running RGB consensus over what
-//! comes back is [`super::consensus`].
+//! The URL scheme selects Esplora REST or Electrum, through the host vsock
+//! forwarder. Each call crosses the trust boundary. Thus each call has a
+//! timeout, and each answer is evidence to check, never trusted input.
+//! [`super::consensus`] runs RGB consensus on the results.
 
 #[cfg(test)]
 use super::types::ValidatedConsignment;
@@ -14,58 +12,54 @@ use crate::error::Result;
 use rgbstd::indexers::esplora_blocking::esplora_client;
 use rgbstd::ChainNet;
 
-/// Hard cap on a single blocking Esplora HTTP call (connect + read), in
-/// seconds. The egress runs through the host-controlled vsock proxy on the
-/// signing path, so without a timeout a stalled host pins the worker
-/// thread. Aligned with `conn.rs`'s `TOTAL_REQUEST_TIMEOUT`.
-/// Compile-time and PCR-attested, not host-tunable.
+/// Maximum time for one blocking Esplora HTTP call (connect + read), in
+/// seconds. The egress goes through the host vsock proxy, so a stalled host
+/// can block the worker thread. Aligned with `TOTAL_REQUEST_TIMEOUT` in
+/// `conn.rs`. Compile-time and PCR-attested; the host cannot change it.
 pub(super) const ESPLORA_HTTP_TIMEOUT_SECS: u64 = 30;
 
-/// Per-socket timeout (seconds) for the Electrum witness resolver, the
-/// production signing path. Electrum analog of [`ESPLORA_HTTP_TIMEOUT_SECS`]
-/// and the same problem: `Config::default()` leaves
-/// `timeout: None`, so a stalled electrs read blocks the worker thread forever
-/// and eventually wedges the whole enclave. `electrum-client` retries `retry`
-/// times, so worst-case blocking is ~`(retry+1) *` this; kept within the
-/// `conn.rs` `TOTAL_REQUEST_TIMEOUT` budget. Compile-time and PCR-attested.
+/// Per-socket timeout (seconds) for the Electrum witness resolver, used in
+/// production. Electrum version of [`ESPLORA_HTTP_TIMEOUT_SECS`].
+/// `Config::default()` has `timeout: None`, so a stalled read blocks the
+/// worker thread forever. `electrum-client` retries `retry` times, so the
+/// worst case is about `(retry+1) *` this value. That stays within the
+/// `conn.rs` `TOTAL_REQUEST_TIMEOUT`. Compile-time and PCR-attested.
 pub(super) const ELECTRUM_WITNESS_TIMEOUT_SECS: u64 = 15;
 
-// TEMPORARY, tied to the BFA dependency base. The `s/bfa` RGB branches are cut
-// from 0.11.1-rc.10, which pins electrum-client 0.24, while this crate targets
-// the 0.25 API that came with rc.11: `timeout` took a `Duration`. The
-// `timeout` call sites below were stepped back to the 0.24 shape purely so the
-// branch builds. REVERT THEM once the `s/bfa` branches are rebased onto rc.11 -
-// this is an upstream fix, not ours.
+// TEMPORARY. The `s/bfa` RGB branches use 0.11.1-rc.10, which pins
+// electrum-client 0.24. Thus the `timeout` calls use the 0.24 shape (`u8`
+// seconds), not the 0.25 `Duration`. Change them back to `Duration` when the
+// `s/bfa` branches move to rc.11.
 
 /// Validates RGB consignments using rgbstd and a witness resolver.
 ///
-/// The resolver backend is chosen from the URL scheme at validation time:
-/// `ssl://` / `tcp://` -> Electrum (`electrum-client`), anything else
-/// (`http://` / `https://`) -> Esplora REST. Production uses an Electrum
-/// endpoint (`ssl://...:50002`) reached through the vsock forwarder; with an
-/// `ssl://` URL the TLS handshake terminates inside the enclave against the
+/// The URL scheme selects the resolver backend: `ssl://` / `tcp://` ->
+/// Electrum (`electrum-client`), other schemes (`http://` / `https://`) ->
+/// Esplora REST. Production uses Electrum (`ssl://...:50002`) through the
+/// vsock forwarder. With `ssl://`, TLS ends inside the enclave against the
 /// real server cert, so the host relays only ciphertext.
 #[derive(Debug)]
 pub struct RgbValidator {
     pub(super) indexer_url: String,
     pub(super) chain_net: ChainNet,
     /// Per-request HTTP timeout, [`ESPLORA_HTTP_TIMEOUT_SECS`] in production.
-    /// Overridable only from tests (no env / host input reaches it).
+    /// Only tests can change it (no env or host input).
     pub(super) http_timeout_secs: u64,
-    /// Canned validation result for the crate's own tests, so the signing
-    /// path runs with no indexer. Test-only by construction.
+    /// Canned validation result, so tests run the signing path with no
+    /// indexer.
     #[cfg(test)]
     pub(super) canned: Option<ValidatedConsignment>,
 }
 
 impl RgbValidator {
-    /// Create a new validator.
+    /// Creates a validator.
     ///
     /// - `indexer_url`: witness-resolver endpoint. `ssl://host:port` /
     ///   `tcp://host:port` selects Electrum; `http(s)://...` selects Esplora.
-    ///   Through the vsock forwarder this is typically `ssl://<host>:50002`
-    ///   (Electrum) or the legacy `http://127.0.0.1:3443` (Esplora).
-    /// - `bitcoin_network`: One of "bitcoin", "testnet", "signet", "regtest".
+    ///   Usually `ssl://<host>:50002` (Electrum) or `http://127.0.0.1:3443`
+    ///   (Esplora).
+    /// - `bitcoin_network`: "bitcoin" (or "mainnet"), "testnet" (or
+    ///   "testnet3"), "signet", or "regtest".
     pub fn new(indexer_url: String, bitcoin_network: &str) -> Result<Self> {
         let chain_net = match bitcoin_network {
             "bitcoin" | "mainnet" => ChainNet::BitcoinMainnet,
@@ -88,8 +82,7 @@ impl RgbValidator {
         })
     }
 
-    /// A validator that answers from `validated` instead of the indexer.
-    /// Test-only by construction.
+    /// A validator that returns `validated` and does not call the indexer.
     #[cfg(test)]
     pub fn canned(validated: ValidatedConsignment) -> Self {
         let mut v =
@@ -98,22 +91,21 @@ impl RgbValidator {
         v
     }
 
-    /// Shrink the HTTP timeout so the stalled-host test doesn't wait the
-    /// production budget. Test-only by construction.
+    /// Sets a short HTTP timeout for the stalled-host test.
     #[cfg(test)]
     pub(super) fn with_http_timeout(mut self, secs: u64) -> Self {
         self.http_timeout_secs = secs;
         self
     }
 
-    /// Fetch a raw transaction by txid from the witness indexer.
+    /// Fetches a raw transaction by txid from the witness indexer.
     ///
-    /// The egress is host-controlled, so the bytes are re-hashed and must match
-    /// `txid`: a lying host can only make the fetch fail. Used by the send-RGB
-    /// change-leg proof (W-06 / #52) to read the script of an outpoint that is
-    /// not in the PSBT.
+    /// The host controls the egress, so the bytes are hashed again and must
+    /// match `txid`. A lying host can only make the fetch fail. The send-RGB
+    /// change-leg proof (W-06 / #52) uses it to read the script of an outpoint
+    /// that is not in the PSBT.
     pub fn fetch_transaction(&self, txid: bitcoin::Txid) -> Result<bitcoin::Transaction> {
-        // Backend and timeouts mirror the witness resolver (final I-03 / #87).
+        // Same backend and timeouts as the witness resolver (final I-03 / #87).
         let is_electrum =
             self.indexer_url.starts_with("ssl://") || self.indexer_url.starts_with("tcp://");
         let tx = if is_electrum {

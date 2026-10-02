@@ -338,8 +338,8 @@ impl Reply {
     }
 }
 
-// A real local HTTP endpoint exercises official SDK signing, S3 response
-// parsing, conditional headers and streaming. It never contacts AWS.
+// A local HTTP endpoint tests SDK signing, S3 response parsing, conditional
+// headers and streaming. It never contacts AWS.
 async fn endpoint(replies: Vec<Reply>) -> (String, Arc<Mutex<Vec<String>>>, JoinHandle<()>) {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = format!("http://{}", listener.local_addr().unwrap());

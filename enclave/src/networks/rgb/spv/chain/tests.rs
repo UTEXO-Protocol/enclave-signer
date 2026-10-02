@@ -2,11 +2,9 @@ use super::*;
 use bitcoin::consensus::serialize;
 use bitcoin::hashes::Hash;
 
-/// Synthetic mainnet-shaped chain: our own checkpoint + headers, each with
-/// valid PoW under regtest rules. Avoids fixtures with real-difficulty PoW.
+/// Synthetic regtest chain: a checkpoint at 100 and 5 headers. Regtest checks
+/// linkage only, so the headers need no mining.
 fn synthetic_regtest_setup() -> (HeaderChain, Vec<Vec<u8>>) {
-    // Regtest is chain-linkage-only in our validator, so a synthetic chain
-    // needs no mining.
     let mut prev_hash = [0u8; 32];
     prev_hash[0] = 0xAA; // arbitrary checkpoint hash
 
@@ -62,7 +60,7 @@ fn submits_contiguous_batch() {
 #[test]
 fn rejects_non_contiguous_batch() {
     let (mut chain, raws) = synthetic_regtest_setup();
-    // tip is at 100 (checkpoint), start_height 102 leaves a gap.
+    // Tip is at 100 (checkpoint). start_height 102 leaves a gap.
     let err = chain.submit_headers(102, &raws).unwrap_err();
     assert!(matches!(
         err,
@@ -73,7 +71,7 @@ fn rejects_non_contiguous_batch() {
 #[test]
 fn rejects_at_or_below_checkpoint() {
     let (mut chain, raws) = synthetic_regtest_setup();
-    // start_height = 100 == checkpoint.height: refuses to rewrite below the trust anchor.
+    // start_height == checkpoint.height.
     let err = chain.submit_headers(100, &raws).unwrap_err();
     assert!(matches!(
         err,
@@ -82,7 +80,7 @@ fn rejects_at_or_below_checkpoint() {
             checkpoint: 100,
         }
     ));
-    // start_height < checkpoint.height: same.
+    // start_height < checkpoint.height.
     let err = chain.submit_headers(50, &raws).unwrap_err();
     assert!(matches!(err, SpvError::BelowCheckpoint { got: 50, .. }));
 }
@@ -90,10 +88,8 @@ fn rejects_at_or_below_checkpoint() {
 #[test]
 fn rejects_broken_linkage() {
     let (mut chain, raws) = synthetic_regtest_setup();
-    // Submit the first one to advance the tip.
     chain.submit_headers(101, &raws[..1]).unwrap();
-    // Now submit the FIRST raw again at height 102 - its prev_blockhash
-    // points to the checkpoint, not to height 101's hash.
+    // The same header at 102: its prev_blockhash is the checkpoint, not 101.
     let err = chain.submit_headers(102, &raws[..1]).unwrap_err();
     assert!(matches!(err, SpvError::ChainLinkage { height: 102 }));
 }
@@ -103,15 +99,12 @@ fn header_lookup_by_height() {
     let (mut chain, raws) = synthetic_regtest_setup();
     chain.submit_headers(101, &raws).unwrap();
 
-    // Checkpoint height: header() returns None, but hash() returns the
-    // checkpoint hash.
+    // Checkpoint height: no header, but the hash is the checkpoint hash.
     assert!(chain.header_at(100).is_none());
     assert_eq!(chain.hash_at(100).unwrap()[0], 0xAA);
 
-    // Validated heights: both lookups work.
     assert!(chain.header_at(101).is_some());
     assert!(chain.header_at(105).is_some());
-    // Out of range:
     assert!(chain.header_at(106).is_none());
     assert!(chain.header_at(99).is_none());
 }
@@ -128,7 +121,7 @@ fn rejects_garbage_header_bytes() {
 #[test]
 fn batch_is_atomic_on_failure() {
     let (mut chain, mut raws) = synthetic_regtest_setup();
-    // Corrupt the third raw header so it won't parse.
+    // The third header does not parse.
     raws[2] = vec![0u8; 79];
 
     let pre_tip = chain.tip_height();
@@ -136,18 +129,15 @@ fn batch_is_atomic_on_failure() {
     let err = chain.submit_headers(101, &raws).unwrap_err();
     assert!(matches!(err, SpvError::HeaderParse { index: 2, .. }));
 
-    // Chain MUST be unchanged: no partial accept.
+    // No partial accept.
     assert_eq!(chain.tip_height(), pre_tip);
     assert_eq!(chain.len(), pre_len);
 }
 
-/// Mainnet PoW + bits checks: feed the real block 1 into a chain whose
-/// checkpoint claims to be the genesis. Bits at non-boundary blocks must
-/// equal previous block's bits, and PoW must hold.
+/// Mainnet PoW and bits checks: the real block 1 on a genesis checkpoint.
 #[test]
 fn mainnet_block_1_appends_after_genesis_checkpoint() {
-    // Mainnet genesis facts (well-known):
-    // height=0, hash (internal) below, bits=0x1d00ffff, time=1231006505
+    // Mainnet genesis: height 0, bits 0x1d00ffff, time 1231006505.
     let genesis_hash_internal: [u8; 32] = [
         0x6f, 0xe2, 0x8c, 0x0a, 0xb6, 0xf1, 0xb3, 0x72, 0xc1, 0xa6, 0xa2, 0x46, 0xae, 0x63, 0xf7,
         0x4f, 0x93, 0x1e, 0x83, 0x65, 0xe1, 0x5a, 0x08, 0x9c, 0x68, 0xd6, 0x19, 0x00, 0x00, 0x00,
@@ -174,12 +164,11 @@ fn mainnet_block_1_appends_after_genesis_checkpoint() {
 
 // ===== Bounded-reorg tests =====
 //
-// Regtest headers have constant nBits, so every header contributes the same
-// Work and chain length is a clean proxy for "more work".
+// Regtest headers have constant nBits, so chain length is a proxy for work.
 
-/// Build `count` synthetic regtest headers starting from `prev_hash` and
-/// `prev_time`, varying `nonce_seed` so different forks produce different
-/// hashes. Returns the raw 80-byte serialisations + the final tip hash.
+/// Builds `count` regtest headers on `prev_hash` and `prev_time`. A different
+/// `nonce_seed` gives a different fork. Returns raw 80-byte headers and the
+/// tip hash.
 fn synth_chain_from(
     prev_hash: [u8; 32],
     prev_time: u32,
@@ -198,7 +187,7 @@ fn synth_chain_from(
             merkle_root: bitcoin::TxMerkleNode::all_zeros(),
             time: prev_time + 1 + i,
             bits: bitcoin::CompactTarget::from_consensus(0x207fffff),
-            // Combine seed + index so each fork's nonce sequence is unique.
+            // Seed and index make each fork's nonces unique.
             nonce: nonce_seed.wrapping_mul(1_000_000) + i,
         };
         raws.push(serialize(&header));
@@ -211,12 +200,11 @@ fn synth_chain_from(
 #[test]
 fn reorg_accepted_when_alt_chain_is_strictly_longer() {
     let (mut chain, original) = synthetic_regtest_setup();
-    // Original: 5 blocks, heights 101..=105.
+    // Original: heights 101..=105.
     chain.submit_headers(101, &original).unwrap();
     let original_tip = chain.tip_hash();
 
-    // Alternative starting at 101 with 6 blocks (different nonce_seed
-    // so the hashes diverge from block 1 of the alt chain).
+    // Alternative from 101 with 6 blocks.
     let cp_hash = chain.checkpoint().hash;
     let (alt, _alt_tip) = synth_chain_from(cp_hash, 1_700_000_000, 7, 6);
 
@@ -224,7 +212,6 @@ fn reorg_accepted_when_alt_chain_is_strictly_longer() {
     assert_eq!(outcome.headers_accepted, 6);
     assert_eq!(outcome.reorg_depth, 5); // displaced 101..=105
     assert_eq!(outcome.last_block_height, 106);
-    // Tip MUST have changed.
     assert_ne!(chain.tip_hash(), original_tip);
     assert_eq!(chain.tip_height(), 106);
     assert_eq!(chain.len(), 6);
@@ -237,13 +224,12 @@ fn reorg_rejected_when_alt_chain_is_equal_length() {
     let original_tip = chain.tip_hash();
     let original_height = chain.tip_height();
 
-    // Same length (5), different content.
+    // Same length (5), different headers.
     let cp_hash = chain.checkpoint().hash;
     let (alt, _) = synth_chain_from(cp_hash, 1_700_000_000, 99, 5);
 
     let err = chain.submit_headers(101, &alt).unwrap_err();
     assert!(matches!(err, SpvError::WeakerChain));
-    // Chain unchanged.
     assert_eq!(chain.tip_hash(), original_tip);
     assert_eq!(chain.tip_height(), original_height);
 }
@@ -254,7 +240,7 @@ fn reorg_rejected_when_alt_chain_is_shorter() {
     chain.submit_headers(101, &original).unwrap();
     let original_tip = chain.tip_hash();
 
-    // Reorg at 102 with only 3 alt blocks (vs original 4 from 102..=105).
+    // Reorg at 102 with 3 alt blocks. The original has 4 (102..=105).
     let pred_hash = chain.hash_at(101).unwrap();
     let (alt, _) = synth_chain_from(pred_hash, 1_700_000_002, 11, 3);
 
@@ -266,13 +252,12 @@ fn reorg_rejected_when_alt_chain_is_shorter() {
 #[test]
 fn reorg_too_deep_rejected() {
     let (mut chain, _) = synthetic_regtest_setup();
-    // Build a long chain so a deep reorg is possible.
     let cp_hash = chain.checkpoint().hash;
     let (long, _) = synth_chain_from(cp_hash, 1_700_000_000, 1, MAX_REORG_DEPTH + 50);
     chain.submit_headers(101, &long).unwrap();
     let tip_before = chain.tip_height();
 
-    // Try to reorg from way back. depth = tip - start + 1 > MAX_REORG_DEPTH.
+    // depth = tip - start + 1 > MAX_REORG_DEPTH.
     let too_deep_start = chain.checkpoint().height + 5;
     let pred_hash = chain.hash_at(too_deep_start - 1).unwrap();
     let (alt, _) = synth_chain_from(pred_hash, 1_700_000_005, 50, MAX_REORG_DEPTH + 100);
@@ -286,13 +271,12 @@ fn reorg_too_deep_rejected() {
 fn reorg_at_max_depth_is_allowed() {
     let (mut chain, _) = synthetic_regtest_setup();
     let cp_hash = chain.checkpoint().hash;
-    // Build a chain of exactly MAX_REORG_DEPTH headers, so we can reorg
-    // from height (checkpoint + 1) - depth == MAX_REORG_DEPTH exactly.
+    // MAX_REORG_DEPTH headers, so a reorg from checkpoint + 1 has depth
+    // MAX_REORG_DEPTH.
     let (orig, _) = synth_chain_from(cp_hash, 1_700_000_000, 1, MAX_REORG_DEPTH);
     chain.submit_headers(101, &orig).unwrap();
 
-    // Alt of MAX_REORG_DEPTH + 1 headers from the SAME predecessor (the
-    // checkpoint) - strictly more work than the original.
+    // MAX_REORG_DEPTH + 1 alt headers from the checkpoint: more work.
     let (alt, _) = synth_chain_from(cp_hash, 1_700_000_000, 42, MAX_REORG_DEPTH + 1);
     let outcome = chain.submit_headers(101, &alt).unwrap();
     assert_eq!(outcome.reorg_depth, MAX_REORG_DEPTH);
@@ -306,15 +290,14 @@ fn reorg_atomic_on_validation_failure() {
     let original_tip = chain.tip_hash();
     let original_height = chain.tip_height();
 
-    // Build alt starting at 102 (depth 4), longer than what we replace,
-    // then corrupt the middle header so the BATCH itself fails to parse.
+    // Longer alt from 102 (depth 4) with a header that does not parse.
     let pred_hash = chain.hash_at(101).unwrap();
     let (mut alt, _) = synth_chain_from(pred_hash, 1_700_000_002, 13, 6);
-    alt[3] = vec![0u8; 79]; // shorter than the 80-byte header - parse error
+    alt[3] = vec![0u8; 79]; // not 80 bytes
 
     let err = chain.submit_headers(102, &alt).unwrap_err();
     assert!(matches!(err, SpvError::HeaderParse { index: 3, .. }));
-    // Chain MUST be unchanged: no partial accept, no truncate.
+    // No partial accept, no truncate.
     assert_eq!(chain.tip_hash(), original_tip);
     assert_eq!(chain.tip_height(), original_height);
     assert_eq!(chain.len(), 5);
@@ -322,9 +305,8 @@ fn reorg_atomic_on_validation_failure() {
 
 #[test]
 fn non_pow_network_skips_epoch_lookup_across_retarget_boundary() {
-    // Regression: a non-PoW network whose checkpoint sits above the
-    // retarget epoch start must not fail with HeaderNotFound. Checkpoint at
-    // 4000, first retarget at 4032, whose epoch start (2016) is below it.
+    // Regression: on a non-PoW network, an epoch start below the checkpoint
+    // must not give HeaderNotFound. Checkpoint 4000, retarget 4032, start 2016.
     let cp_hash = {
         let mut h = [0u8; 32];
         h[0] = 0xBB;
@@ -340,7 +322,7 @@ fn non_pow_network_skips_epoch_lookup_across_retarget_boundary() {
     };
     let mut chain = HeaderChain::new(Network::Regtest, checkpoint);
 
-    // Build 100 headers from 4001 to 4100, crossing retarget at 4032.
+    // Heights 4001..=4100, across the retarget at 4032.
     let (raws, _) = synth_chain_from(cp_hash, 1_700_000_000, 1, 100);
     let outcome = chain.submit_headers(4001, &raws).unwrap();
     assert_eq!(outcome.headers_accepted, 100);
@@ -349,15 +331,12 @@ fn non_pow_network_skips_epoch_lookup_across_retarget_boundary() {
 
 // ===== retarget-boundary epoch-start resolution =====
 //
-// A retarget boundary at height B needs the block at `B -
-// RETARGET_INTERVAL`. With a misaligned checkpoint, the first boundary
-// above it references an epoch start below the checkpoint, which is never
-// stored, and the chain wedges. Tested through the lookup directly; the
-// difficulty math itself is covered in validation.rs.
+// A retarget boundary at height B needs the block at `B - RETARGET_INTERVAL`.
+// With a misaligned checkpoint, that block is below the checkpoint and is not
+// stored, so the chain stops. validation.rs tests the difficulty math.
 
-/// With a boundary-aligned checkpoint, the first
-/// retarget boundary above it resolves its epoch start to the checkpoint
-/// instead of wedging.
+/// TH-1: with an aligned checkpoint, the first boundary above it resolves its
+/// epoch start to the checkpoint.
 #[test]
 fn th1_epoch_start_resolves_at_first_boundary_above_aligned_checkpoint() {
     let cp = Checkpoint {
@@ -372,16 +351,15 @@ fn th1_epoch_start_resolves_at_first_boundary_above_aligned_checkpoint() {
     let chain = HeaderChain::new(Network::Mainnet, cp);
 
     let first_boundary = cp.height + RETARGET_INTERVAL; // 953_568
-                                                        // epoch start = first_boundary - RETARGET_INTERVAL = cp.height (the base).
     let epoch_start = chain
         .epoch_start_time(first_boundary, first_boundary, &[])
         .expect("aligned checkpoint must resolve the first boundary's epoch start");
     assert_eq!(epoch_start, cp.time);
 }
 
-/// TH-2: a misaligned checkpoint (950 000) wedges - the first boundary
-/// above it (951 552) references an epoch start (949 536) below it, which
-/// is never stored. The load-time assertion now rejects such a checkpoint.
+/// TH-2: a misaligned checkpoint (950_000) stops the chain. The first boundary
+/// (951_552) needs the epoch start 949_536, which is not stored. The load-time
+/// check rejects such a checkpoint.
 #[test]
 fn th2_misaligned_checkpoint_wedges_at_first_boundary() {
     let cp = Checkpoint {
@@ -395,7 +373,7 @@ fn th2_misaligned_checkpoint_wedges_at_first_boundary() {
     assert_ne!(cp.height % RETARGET_INTERVAL, 0, "precondition: misaligned");
     let chain = HeaderChain::new(Network::Mainnet, cp);
 
-    // First retarget boundary above 950_000 is 951_552 (= 472 * 2016).
+    // 951_552 = 472 * 2016.
     let first_boundary = 951_552;
     let err = chain
         .epoch_start_time(first_boundary, first_boundary, &[])
@@ -403,14 +381,13 @@ fn th2_misaligned_checkpoint_wedges_at_first_boundary() {
     assert!(matches!(err, SpvError::HeaderNotFound(949_536)));
 }
 
-// ===== full retention from the checkpoint (no sliding window) =====
+// ===== full retention from the checkpoint =====
 
-/// Core retention regression: the base stays pinned at the checkpoint and
-/// `header_at` resolves anchors far below the old `HEADER_WINDOW` (~2122),
-/// which used to be pruned.
+/// The base stays at the checkpoint, and `header_at` resolves anchors more
+/// than 2122 blocks below the tip.
 #[test]
 fn retains_full_history_from_checkpoint() {
-    // Checkpoint at height 0 so boundaries fall on clean multiples of 2016.
+    // Checkpoint at height 0, so boundaries are multiples of 2016.
     let cp = Checkpoint {
         height: 0,
         hash: [0xCC; 32],
@@ -421,27 +398,23 @@ fn retains_full_history_from_checkpoint() {
     };
     let mut chain = HeaderChain::new(Network::Regtest, cp);
 
-    // Build well past the former window (100 + 2016 + 6 = 2122) plus a
-    // full epoch, so any leftover pruning logic would have fired.
+    // More than 2122 headers plus a full epoch.
     let count = 4200u32;
     let (raws, _) = synth_chain_from(cp.hash, cp.time, 1, count);
     let outcome = chain.submit_headers(1, &raws).unwrap();
     assert_eq!(outcome.last_block_height, count);
     assert_eq!(chain.tip_height(), count);
 
-    // Base stays pinned at the checkpoint - nothing is pruned, so the whole
-    // history is kept.
+    // Nothing is pruned.
     assert_eq!(chain.base_height, 0, "base pinned at the checkpoint");
     assert_eq!(chain.headers.len(), count as usize);
 
-    // The checkpoint header itself is not stored, but its hash is available
-    // at its own height; every height above it resolves.
+    // The checkpoint header is not stored, but its hash is.
     assert!(chain.header_at(0).is_none(), "checkpoint header not stored");
     assert_eq!(chain.hash_at(0), Some(chain.base_hash));
     assert!(chain.header_at(1).is_some(), "oldest header retained");
 
-    // A height far below `tip - 2122` is still present - exactly the case
-    // that failed under the old sliding window (anchor at ~tip - 3200 here).
+    // An anchor at approx tip - 3200 is still present.
     let deep = 1000u32;
     assert!(
         (count - deep) > 2122,
@@ -455,7 +428,7 @@ fn retains_full_history_from_checkpoint() {
     assert!(chain.header_at(count).is_some(), "tip is retained");
     assert_eq!(chain.header_at(count), chain.headers.last());
 
-    // The chain still extends correctly on top of the full history.
+    // The chain still extends on top of the full history.
     let tip_hash = chain.tip_hash();
     let (more, _) = synth_chain_from(tip_hash, chain.tip_time(), 9, 10);
     let outcome = chain.submit_headers(count + 1, &more).unwrap();
@@ -463,9 +436,8 @@ fn retains_full_history_from_checkpoint() {
     assert_eq!(chain.tip_height(), count + 10);
 }
 
-/// The retarget epoch-start lookup resolves off retained history. A high
-/// boundary references a stored header; the first boundary above the
-/// checkpoint references the base (checkpoint) metadata.
+/// Epoch-start lookup on retained history. A high boundary uses a stored
+/// header. The first boundary above the checkpoint uses the checkpoint metadata.
 #[test]
 fn epoch_start_resolves_from_retained_history() {
     let cp = Checkpoint {
@@ -481,8 +453,7 @@ fn epoch_start_resolves_from_retained_history() {
     chain.submit_headers(1, &raws).unwrap();
     assert_eq!(chain.base_height, 0);
 
-    // synth_chain_from sets the header at height h to time cp.time + h.
-    // Boundary at 4032 references epoch start 2016 - a retained header.
+    // synth_chain_from gives the header at height h the time cp.time + h.
     let boundary = 2 * RETARGET_INTERVAL; // 4032
     let epoch_start_height = boundary - RETARGET_INTERVAL; // 2016
     let expected = chain.header_at(epoch_start_height).unwrap().time;
@@ -492,8 +463,7 @@ fn epoch_start_resolves_from_retained_history() {
         .expect("epoch start from retained history must resolve");
     assert_eq!(got, expected);
 
-    // The first boundary above the checkpoint references the base itself,
-    // whose timestamp is the checkpoint time.
+    // The first boundary uses the checkpoint time.
     let first_boundary = RETARGET_INTERVAL; // 2016
     let got_base = chain
         .epoch_start_time(first_boundary, first_boundary, &[])
@@ -501,8 +471,8 @@ fn epoch_start_resolves_from_retained_history() {
     assert_eq!(got_base, cp.time);
 }
 
-/// A reorg near the tip validates with full retention - the truncate index
-/// is computed off the base, which is pinned at the checkpoint.
+/// A reorg near the tip with full retention. The truncate index comes from
+/// the base, which stays at the checkpoint.
 #[test]
 fn reorg_near_tip_with_full_retention() {
     let cp = Checkpoint {
@@ -518,7 +488,7 @@ fn reorg_near_tip_with_full_retention() {
     chain.submit_headers(1, &raws).unwrap();
     assert_eq!(chain.base_height, 0);
 
-    // Reorg the last 5 blocks (depth 5) with a longer alt chain.
+    // Reorg the last 5 blocks with a longer alt chain.
     let start = 4196;
     let pred_hash = chain.hash_at(start - 1).unwrap();
     let pred_time = chain.header_at(start - 1).unwrap().time;
@@ -532,8 +502,8 @@ fn reorg_near_tip_with_full_retention() {
     );
 }
 
-/// The retention ceiling (`MAX_STORED_HEADERS`) is fail-closed: a batch
-/// past the cap is rejected and the chain left unchanged, never pruned.
+/// `MAX_STORED_HEADERS` fails closed: a batch past the cap is rejected and the
+/// chain is not pruned.
 #[test]
 fn rejects_extension_past_retention_cap() {
     let cp = Checkpoint {
@@ -545,16 +515,15 @@ fn rejects_extension_past_retention_cap() {
         chain_work: None,
     };
     let mut chain = HeaderChain::new(Network::Regtest, cp);
-    // Shrink the cap so we can hit it without building a million headers.
     let cap = 50usize;
     chain.set_max_stored_headers_for_test(cap);
 
-    // Filling exactly to the cap is accepted (boundary: 50 == cap).
+    // Exactly at the cap is accepted.
     let (raws, tip_hash) = synth_chain_from(cp.hash, cp.time, 1, cap as u32);
     chain.submit_headers(1, &raws).unwrap();
     assert_eq!(chain.len(), cap);
 
-    // One more header would make 51 > 50 -> fail-closed rejection.
+    // One more header: 51 > 50.
     let (more, _) = synth_chain_from(tip_hash, chain.tip_time(), 9, 1);
     let err = chain.submit_headers(cap as u32 + 1, &more).unwrap_err();
     assert!(matches!(
@@ -562,7 +531,7 @@ fn rejects_extension_past_retention_cap() {
         SpvError::ChainTooLong { len, max } if len == cap + 1 && max == cap
     ));
 
-    // Chain is unchanged - nothing was pruned to make room.
+    // Nothing was pruned.
     assert_eq!(chain.len(), cap);
     assert_eq!(chain.tip_height(), cap as u32);
     assert!(
@@ -571,8 +540,7 @@ fn rejects_extension_past_retention_cap() {
     );
 }
 
-/// Per-call cap: a batch larger than `MAX_HEADERS_PER_SUBMIT` is
-/// rejected before any parsing, so the garbage vecs are never deserialised.
+/// A batch over `MAX_HEADERS_PER_SUBMIT` is rejected before parsing.
 #[test]
 fn rejects_batch_over_per_call_cap() {
     let (mut chain, _) = synthetic_regtest_setup();
@@ -586,15 +554,14 @@ fn rejects_batch_over_per_call_cap() {
     assert_eq!(chain.len(), 0, "rejected batch leaves the chain unchanged");
 }
 
-/// An empty batch is a no-op success: nothing to place, chain unchanged,
-/// and it must not panic via the reorg path.
+/// An empty batch is a no-op success and must not panic in the reorg path.
 #[test]
 fn empty_batch_is_noop() {
     let (mut chain, raws) = synthetic_regtest_setup();
     chain.submit_headers(101, &raws).unwrap();
     let tip = chain.tip_height();
     let len = chain.len();
-    // Empty at an extension height and at a reorg height both no-op.
+    // Extension height and reorg height.
     let outcome = chain.submit_headers(tip + 1, &[]).unwrap();
     assert_eq!(outcome.headers_accepted, 0);
     assert_eq!(outcome.reorg_depth, 0);
@@ -606,8 +573,7 @@ fn empty_batch_is_noop() {
 
 #[test]
 fn reorg_uses_correct_predecessor_not_tip() {
-    // A reorg from height 103 (depth 3) must validate against the
-    // hash at 102, not the current tip at 105.
+    // A reorg from 103 (depth 3) must link to 102, not to the tip at 105.
     let (mut chain, original) = synthetic_regtest_setup();
     chain.submit_headers(101, &original).unwrap();
 
@@ -617,7 +583,7 @@ fn reorg_uses_correct_predecessor_not_tip() {
     let outcome = chain.submit_headers(103, &alt).unwrap();
     assert_eq!(outcome.reorg_depth, 3); // displaced 103, 104, 105
     assert_eq!(outcome.last_block_height, 107);
-    // Heights 101 and 102 from the ORIGINAL chain should still be there.
+    // Original heights 101 and 102 stay.
     assert!(chain.header_at(101).is_some());
     assert!(chain.header_at(102).is_some());
 }

@@ -1,8 +1,7 @@
-//! The enclave's phase state machine and the keys it guards.
+//! The enclave phase state machine and the keys it guards.
 //!
-//! Every signing entry point goes through [`EnclaveState`], which holds the
-//! phase behind a `Mutex` and refuses anything the current phase does not
-//! allow. [`Phase`] is the machine; `EnclaveState` is the door.
+//! All signing entry points go through [`EnclaveState`]. It keeps the [`Phase`]
+//! behind a `Mutex` and refuses each request that the current phase does not allow.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
@@ -26,10 +25,8 @@ const CLONE_EXPORT_SOFT_CAP_ENV: &str = "CLONE_EXPORT_SOFT_CAP";
 
 /// Environment variable for the export limit per enclave process. (F03-AF-10)
 /// An unset, zero, or invalid value disables the limit.
-/// A positive value limits successful exports.
-/// Check the limit after authentication and before encryption.
-/// Restart resets the count.
-/// Each enclave has a separate count.
+/// The check occurs after authentication and before encryption.
+/// Each enclave has a separate count. A restart resets it.
 const CLONE_EXPORT_HARD_CAP_ENV: &str = "CLONE_EXPORT_HARD_CAP";
 
 /// Enclave lifecycle phase.
@@ -38,18 +35,17 @@ const CLONE_EXPORT_HARD_CAP_ENV: &str = "CLONE_EXPORT_HARD_CAP";
 ///   Initial  -> Active   (local InitializeKey / InitializeFromEntropy)
 ///   Initial  -> Initializing -> Active (KMS seed recovery)
 ///   Initializing -> Initial (failed or expired seed recovery)
-///   Initial  -> Cloning  (InitiateCloning, wired in PR 4)
-///   Cloning  -> Active   (SetClone,      wired in PR 4)
-///   Active   -> Active   (GetClone handled by donor without state change)
-/// Any other transition is rejected.
+///   Initial  -> Cloning  (InitiateCloning)
+///   Cloning  -> Active   (SetClone)
+///   Active   -> Active   (donor serves GetClone, no state change)
+/// The state refuses all other transitions.
 ///
-/// `KeyManager` is boxed so the enum stays ~24 bytes rather than ~584. The
-/// heap indirection is irrelevant next to the mutex lock.
+/// `KeyManager` is boxed to keep the enum at approx 24 bytes, not 584.
 pub enum Phase {
     /// No keys, waiting for an initialize request.
     Initial,
-    /// Seed custody recovery owns the initialization reservation, with no lock
-    /// held while it waits for the host broker or KMS.
+    /// KMS seed recovery holds the initialization reservation.
+    /// No lock is held while it waits for the host broker or KMS.
     #[cfg(feature = "kms-persistence")]
     Initializing,
     /// Cloning handshake in progress, waiting for SetClone.
@@ -77,52 +73,44 @@ pub struct EnclaveState {
     /// Set once, at launch or by a test.
     #[cfg(feature = "kms-persistence")]
     seed_source: std::sync::OnceLock<Box<dyn crate::seed_persistence::SeedSource>>,
-    /// Operator-configured cloning secret for the *donor* role. Required
-    /// when serving `GetClone`; not used in the requester role (the
-    /// requester receives the secret via `InitiateCloningRequest`).
+    /// Operator cloning secret for the donor role. `GetClone` requires it.
+    /// The requester gets its secret from `InitiateCloningRequest`.
     donor_cloning_secret: Mutex<Option<SecretBox<String>>>,
     /// Replay guard for nonces in peer attestations.
     pub replay_guard: NonceReplayGuard,
-    /// **Soft** dedup guard for EVM->RGB bridge PSBT operations, keyed on a
-    /// hash of `(chain_id, bridge_contract, evm_tx_hash, operation_idx,
-    /// rgb_asset_id)` (see `networks::rgb::psbt_validation::psbt_operation_key`).
-    /// Rejects a same-operation resubmission inside the TTL window before
-    /// signing.
+    /// Soft dedup guard for EVM->RGB bridge PSBT operations.
+    /// The key is a hash of `(chain_id, bridge_contract, evm_tx_hash,
+    /// funds_in_operation_id, rgb_asset_id)`
+    /// (see `networks::rgb::psbt_validation::psbt_operation_key`).
+    /// It refuses a repeated operation inside the TTL window before signing.
     ///
-    /// Defense in depth, not a sufficient double-spend control. Nitro has no
-    /// persistent storage, so the set is volatile (wiped on restart),
-    /// per-instance (the host can route a duplicate to a sibling enclave), and
-    /// TTL-bounded (a replay after eviction is admitted again). A host that
-    /// varies any keyed field also bypasses it.
-    ///
-    /// It stops honest listener retries and naive same-tuple replay; the
-    /// durable guard is an on-chain ticket.
+    /// Defense in depth only, not a full double-spend control. Nitro has no
+    /// persistent storage. Thus the set is lost on restart, is per instance
+    /// (the host can send a duplicate to a sibling enclave), and is TTL-bounded.
+    /// A host that changes a key field also bypasses it.
+    /// The durable guard is an on-chain ticket.
     pub op_replay_guard: NonceReplayGuard,
 
     /// Successful exports from this enclave process. (F03-AF-10)
-    /// Restart resets the count.
-    /// The separate slot counter enforces the hard quota.
+    /// A restart resets the count. The slot counter enforces the hard quota.
     pub(super) seed_export_count: AtomicU64,
 
-    /// Successful exports plus exports in flight. Reserving a slot atomically
-    /// prevents concurrent GetClone calls from exceeding the per-instance cap.
+    /// Successful exports plus exports in progress. An atomic slot reservation
+    /// stops concurrent GetClone calls from going above the per-instance cap.
     pub(super) seed_export_slots: AtomicU64,
 
-    /// Warning threshold for [`Self::seed_export_count`].
-    /// Read [`CLONE_EXPORT_SOFT_CAP_ENV`] at startup.
-    /// Zero disables the threshold.
-    /// This threshold does not block exports.
+    /// Warning threshold for [`Self::seed_export_count`], from
+    /// [`CLONE_EXPORT_SOFT_CAP_ENV`]. Zero disables it. It does not block exports.
     seed_export_soft_cap: u64,
 
-    /// Maximum successful exports for this enclave process.
-    /// Read [`CLONE_EXPORT_HARD_CAP_ENV`] at startup.
-    /// Zero disables the limit.
+    /// Maximum successful exports for this enclave process, from
+    /// [`CLONE_EXPORT_HARD_CAP_ENV`]. Zero disables it.
     /// See [`Self::reserve_export_quota`].
     pub(super) seed_export_hard_cap: u64,
 }
 
 /// Holds one export slot until sealing and donor attestation both succeed.
-/// Any error before commit releases the slot, including nonce replay rejection.
+/// Any error before commit releases the slot. This includes a nonce replay error.
 #[must_use = "hold the reservation until the export succeeds, then commit it"]
 pub struct ExportQuotaReservation<'a> {
     state: &'a EnclaveState,
@@ -177,12 +165,9 @@ impl EnclaveState {
         }
     }
 
-    /// Reserve a slot before encrypting the seed. (F03-AF-10)
-    /// Count successful exports and exports in progress against the limit.
-    /// Return an error when no slot is available.
-    /// An error before commit releases the slot.
-    /// Zero disables the limit.
-    /// Restart resets all slots.
+    /// Reserve an export slot before the seed is encrypted. (F03-AF-10)
+    /// The limit counts successful exports and exports in progress.
+    /// Returns an error when no slot is available. Zero disables the limit.
     pub fn reserve_export_quota(&self) -> Result<ExportQuotaReservation<'_>> {
         let cap = self.seed_export_hard_cap;
         if cap > 0 {
@@ -214,10 +199,8 @@ impl EnclaveState {
         })
     }
 
-    /// Record a successful export and return the count. (F03-AF-10)
-    /// Log each export.
-    /// Emit a warning above the configured soft cap.
-    /// This method does not enforce the hard quota.
+    /// Record and log a successful export, and return the count. (F03-AF-10)
+    /// Logs a warning above the soft cap. It does not enforce the hard quota.
     pub fn record_seed_export(&self, requester_pk: &[u8; 32]) -> u64 {
         let count = self.seed_export_count.fetch_add(1, Ordering::Relaxed) + 1;
         tracing::warn!(
@@ -245,7 +228,7 @@ impl EnclaveState {
         self.network
     }
 
-    /// Configure the persistent seed source before exposing the request listener.
+    /// Set the persistent seed source before the request listener starts.
     #[cfg(feature = "kms-persistence")]
     pub fn with_seed_source(
         mut self,
@@ -274,10 +257,10 @@ impl EnclaveState {
         )
     }
 
-    /// The caller supplies its absolute request deadline minus response time.
-    /// Reserve the phase briefly, then release its lock during all external I/O:
-    /// other workers can reject initialization/signing immediately. A failed,
-    /// expired or panicking recovery drops the reservation back to Initial.
+    /// `deadline` is the absolute request deadline minus response time.
+    /// The phase lock is not held during external I/O, so other workers can
+    /// refuse initialization or signing immediately.
+    /// A failed, expired or panicking recovery sets the phase back to Initial.
     #[cfg(feature = "kms-persistence")]
     pub fn initialize_from_persistence_until(&self, deadline: Instant) -> Result<()> {
         let deadline = deadline.min(Instant::now() + crate::seed_persistence::RECOVERY_TIMEOUT);
@@ -291,12 +274,11 @@ impl EnclaveState {
             *guard = Phase::Initializing;
         }
         let _reservation = SeedInitialization { state: self };
-        // Derivation and allocation can fail before the phase is locked.
         let manager = Box::new(source.load_keys(self.network, deadline)?);
         let mut guard = self.lock_phase()?;
         crate::conn::remaining_until(deadline)?;
-        // No other transition accepts Initializing. Keep the check explicit so
-        // future lifecycle changes cannot overwrite an unrelated identity.
+        // Explicit check: a later lifecycle change must not overwrite an
+        // unrelated identity.
         if !matches!(*guard, Phase::Initializing) {
             return Err(EnclaveError::NotReady {
                 state: guard.name().into(),
@@ -306,9 +288,8 @@ impl EnclaveState {
         Ok(())
     }
 
-    /// Set the donor cloning secret after checking its strength. (F03-AF-26)
-    /// Replace any previous secret.
-    /// SecretBox clears the bytes when it is dropped.
+    /// Set the donor cloning secret after a strength check. (F03-AF-26)
+    /// Replaces any previous secret. SecretBox clears the bytes on drop.
     pub fn set_donor_cloning_secret(&self, secret: String) -> Result<()> {
         validate_cloning_secret(&secret)?;
         let mut guard = self
@@ -319,9 +300,8 @@ impl EnclaveState {
         Ok(())
     }
 
-    /// Read the configured donor cloning secret, if any, and apply `f` to
-    /// it while holding the lock so the plaintext never escapes the
-    /// closure frame.
+    /// Apply `f` to the donor cloning secret while the lock is held.
+    /// The plaintext does not leave the closure.
     pub fn with_donor_cloning_secret<T>(&self, f: impl FnOnce(&str) -> Result<T>) -> Result<T> {
         let guard = self
             .donor_cloning_secret
@@ -335,7 +315,7 @@ impl EnclaveState {
         }
     }
 
-    /// Returns the current phase: initial, initializing (KMS persistence), cloning or active.
+    /// Current phase name: initial, initializing (KMS), cloning or active.
     pub fn phase_name(&self) -> &'static str {
         self.inner.lock().map(|g| g.name()).unwrap_or("poisoned")
     }
@@ -346,7 +326,8 @@ impl EnclaveState {
     }
 
     /// Initialize from OS entropy. Returns the mnemonic for one-time logging.
-    /// Only valid from `Phase::Initial`; any other phase returns `AlreadyInitialized`.
+    /// Valid only from `Phase::Initial`. `Initializing` returns `NotReady`.
+    /// All other phases return `AlreadyInitialized`.
     pub fn initialize_from_entropy(&self, entropy: &mut [u8; 32]) -> Result<Mnemonic> {
         let mut guard = self.lock_phase()?;
         ensure_initial(&guard)?;
@@ -355,7 +336,7 @@ impl EnclaveState {
         Ok(mnemonic)
     }
 
-    /// Initialize from a BIP-39 mnemonic phrase (testing only, requires `allow-seed-import` feature).
+    /// Initialize from a BIP-39 mnemonic. Test only, behind `allow-seed-import`.
     pub fn initialize_from_mnemonic(&self, mnemonic_str: &str) -> Result<()> {
         let mut guard = self.lock_phase()?;
         ensure_initial(&guard)?;
@@ -364,7 +345,7 @@ impl EnclaveState {
         Ok(())
     }
 
-    /// Initialize from a raw 64-byte seed (testing only, requires `allow-seed-import` feature).
+    /// Initialize from a raw 64-byte seed. Test only, behind `allow-seed-import`.
     pub fn initialize_from_seed(&self, seed: [u8; 64]) -> Result<()> {
         let mut guard = self.lock_phase()?;
         ensure_initial(&guard)?;
@@ -374,7 +355,7 @@ impl EnclaveState {
     }
 
     /// Enter Cloning from Initial or an expired Cloning session. (F03-AF-01)
-    /// Return AlreadyInitialized for a valid Cloning session or Active state.
+    /// Returns AlreadyInitialized for all other phases.
     pub fn enter_cloning(&self, session: CloningSession) -> Result<()> {
         self.enter_cloning_at(session, Instant::now())
     }
@@ -384,18 +365,16 @@ impl EnclaveState {
         let mut guard = self.lock_phase()?;
         match &*guard {
             Phase::Initial => {}
-            // Abandoned (expired) handshake: a fresh initiation may replace it.
+            // A new initiation can replace an expired handshake.
             Phase::Cloning(existing) if existing.is_expired(now) => {}
-            // Live Cloning session or already Active: refuse.
             _ => return Err(EnclaveError::AlreadyInitialized),
         }
         *guard = Phase::Cloning(session);
         Ok(())
     }
 
-    /// Run `f` against the live `CloningSession` while holding the state
-    /// lock. Errors with `NotReady` if the state is not `Cloning`. The
-    /// closure cannot keep a reference to the session past its return.
+    /// Run `f` on the live `CloningSession` while the state lock is held.
+    /// Returns `NotReady` if the phase is not `Cloning`.
     pub fn with_cloning_session<T>(
         &self,
         f: impl FnOnce(&CloningSession) -> Result<T>,
@@ -409,24 +388,21 @@ impl EnclaveState {
         }
     }
 
-    /// Active-phase accessor for the donor side of `GetClone` - the donor
-    /// is in `Phase::Active` and needs to read the seed to seal it.
+    /// Seed access for the `GetClone` donor, which seals the seed in `Active`.
     pub fn with_seed<T>(&self, f: impl FnOnce(&[u8; 64]) -> Result<T>) -> Result<T> {
         self.with_active(|km| f(km.expose_seed()))
     }
 
-    /// Donor-side accessor for the EVM address used in the `GetClone`
-    /// identity check (`cluster_public_key`).
+    /// EVM address for the donor `GetClone` identity check (`cluster_public_key`).
     pub fn evm_address(&self) -> Result<[u8; 20]> {
         self.with_active(|km| Ok(*km.evm_address()))
     }
 
-    /// Initialize from a seed obtained via the cloning handshake.
+    /// Initialize from a seed that the cloning handshake supplies.
     ///
-    /// The production path for cloned enclaves, not gated on
-    /// `allow-seed-import`: the `Phase::Cloning` guard replaces that flag. The
-    /// `SetClone` handler is the only caller, and runs only after verifying the
-    /// donor's attestation and unsealing the seed.
+    /// This production path does not need `allow-seed-import`.
+    /// The `Phase::Cloning` guard replaces that flag. The only caller is
+    /// `SetClone`, after it verifies the donor attestation and unseals the seed.
     pub fn initialize_from_cloned_seed(&self, seed: [u8; 64]) -> Result<()> {
         let mut guard = self.lock_phase()?;
         match &*guard {
@@ -444,14 +420,13 @@ impl EnclaveState {
 
     /// Complete the cloning handshake atomically.
     ///
-    /// The closure gets the current `CloningSession` and must return a
-    /// `KeyManager` built from the unsealed seed, including any identity check
-    /// (derived address vs `cluster_public_key`). On `Ok`, the phase moves
-    /// atomically to `Active`; on error it stays `Cloning` so the operator can
-    /// retry.
+    /// The closure gets the current `CloningSession`. It must return a
+    /// `KeyManager` from the unsealed seed, after any identity check
+    /// (derived address vs `cluster_public_key`). On `Ok`, the phase goes to
+    /// `Active`. On error it stays `Cloning`, so the operator can retry.
     ///
-    /// The phase stays locked across decrypt-derive-check-commit, so the seed
-    /// is in memory for the shortest window and the transition is atomic.
+    /// The phase stays locked across decrypt, derive, check and commit.
+    /// This keeps the seed in memory for the shortest time.
     pub fn complete_cloning(
         &self,
         f: impl FnOnce(&CloningSession) -> Result<KeyManager>,
@@ -497,7 +472,7 @@ impl EnclaveState {
     }
 
     /// Sign a 32-byte Concordium account-transaction hash with the governance
-    /// Ed25519 key. Returns the 64-byte signature.
+    /// Ed25519 key. Returns the 64-byte signature and the 32-byte public key.
     pub fn sign_ccd(&self, hash: &[u8; 32]) -> Result<([u8; 64], [u8; 32])> {
         self.with_active(|km| km.sign_ccd(hash))
     }
@@ -512,10 +487,9 @@ impl EnclaveState {
         self.with_active(|km| km.sign_psbt(psbt_bytes))
     }
 
-    /// Sign a PSBT restricted to a single BIP-86 account (see
-    /// [`crate::keys::KeyManager::sign_psbt_scoped`]). The plain-BTC path uses
-    /// this with `Some(AccountType::Vanilla)` so it can never co-sign a Colored
-    /// (RGB-allocated) input.
+    /// Sign a PSBT for one BIP-86 account only
+    /// (see [`crate::keys::KeyManager::sign_psbt_scoped`]). The plain-BTC path
+    /// uses `Some(AccountType::Vanilla)`, so it cannot co-sign a Colored input.
     pub fn sign_psbt_scoped(
         &self,
         psbt_bytes: &[u8],
@@ -524,10 +498,9 @@ impl EnclaveState {
         self.with_active(|km| km.sign_psbt_scoped(psbt_bytes, allowed_account))
     }
 
-    /// Run `f` against the active `KeyManager`, or fail with
-    /// `KeyNotInitialized`. Exposed for validators that need the derivation and
-    /// not just a signature, such as the plain-BTC output ownership proof
-    /// ([`crate::networks::rgb::btc_ownership`]).
+    /// Run `f` on the active `KeyManager`, or return `KeyNotInitialized`.
+    /// For validators that need the derivation, such as the plain-BTC output
+    /// ownership proof ([`crate::networks::rgb::btc_ownership`]).
     pub fn with_keys<T>(&self, f: impl FnOnce(&KeyManager) -> Result<T>) -> Result<T> {
         self.with_active(f)
     }
@@ -547,9 +520,9 @@ impl EnclaveState {
     }
 }
 
-/// Drop guard for the `Initializing` reservation: any exit from
-/// `initialize_from_persistence_until` that did not activate rolls the phase
-/// back to `Initial` so the next request can retry.
+/// Drop guard for the `Initializing` reservation. If
+/// `initialize_from_persistence_until` does not activate, the phase goes back
+/// to `Initial` so the next request can retry.
 #[cfg(feature = "kms-persistence")]
 struct SeedInitialization<'a> {
     state: &'a EnclaveState,

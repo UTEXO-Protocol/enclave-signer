@@ -1,18 +1,14 @@
 #![deny(unsafe_code)]
 
-// Release guards. Two dev-only features are catastrophic if accidentally
-// enabled in a shipped build:
+// Release guards for two dev-only features:
 //
-//   * `allow-seed-import` - the parent can install a chosen seed on a fresh
-//     enclave, defeating the in-enclave key custody.
-//   * `mock-attestation`  - zero-PCR attestation documents are accepted, so
-//     a forged "enclave" passes verification.
+//   * `allow-seed-import` - the parent can install a chosen seed, which
+//     defeats in-enclave key custody.
+//   * `mock-attestation`  - zero-PCR attestation documents pass, so a forged
+//     enclave passes verification.
 //
-// A release build (`debug_assertions` off) must never carry any of them, so
-// each trips a `compile_error!`. `not(test)` exempts `cargo test --release`,
-// which legitimately exercises the dev paths; local dev images build in debug.
-//
-// `dev_feature_release_guard!` keeps the checks in one place.
+// A release build (`debug_assertions` off) with either one fails to compile.
+// `not(test)` exempts `cargo test --release`. Dev images build in debug.
 macro_rules! dev_feature_release_guard {
     ($feature:literal, $msg:literal) => {
         #[cfg(all(feature = $feature, not(debug_assertions), not(test)))]
@@ -31,11 +27,10 @@ dev_feature_release_guard!(
      it accepts zero-PCR attestation documents."
 );
 
-// `rgb-validation` asks a resolver whether a consignment's witness txs are
-// mined. Without `spv` that resolver is the host-controlled Esplora endpoint,
-// so a malicious host could claim a fabricated witness tx is confirmed and the
-// enclave would sign a `fundsOut` against a non-existent anchor. `spv` re-anchors every witness tx against the enclave's own header
-// chain. Unsafe in every profile, so this is not release-gated.
+// Without `spv`, the host-controlled Esplora tells if witness txs are mined.
+// A malicious host can then get a `fundsOut` signed against a fake anchor.
+// `spv` checks every witness tx against the enclave's own header chain.
+// Unsafe in every profile, so this guard is not release-gated (M-01).
 #[cfg(all(feature = "rgb-validation", not(feature = "spv")))]
 compile_error!(
     "rgb-validation requires spv: without spv, consignment anchoring trusts only \
@@ -43,19 +38,12 @@ compile_error!(
      pulls in rgb-validation)"
 );
 
-// With the Cargo implications and the flow guards below, `rgb`, `spv` and
-// `rgb-validation` are one switch in every build that compiles. Code gates the
-// RGB stack on `rgb-validation` only.
+// With these guards, `rgb`, `spv` and `rgb-validation` act as one switch.
+// Code gates the RGB stack on `rgb-validation` only.
 
-// RGB flow selection is mutually exclusive and mandatory. The two flows are two
-// separate enclave instances with two PCR0s; the per-flow rules in
-// `networks/rgb/flow/` deliberately expose the same item names, so enabling
-// both would be a glob-import collision, and enabling neither leaves every
-// `flow::` call unresolved. Both are caught here with a message that says what
-// to do instead of a wall of name-resolution errors.
-// No `rgb-validation` term: either flow feature already implies it
-// (`rgb-swap` -> `rgb` -> `spv` -> `rgb-validation`), and both flows on is
-// wrong in any build.
+// Exactly one RGB flow. Each flow is its own enclave image with its own PCR0.
+// The modules in `networks/rgb/flow/` export the same item names. These guards
+// give a clear message instead of many name-resolution errors.
 #[cfg(all(feature = "rgb-swap", feature = "rgb-mint-burn"))]
 compile_error!(
     "rgb-swap and rgb-mint-burn are mutually exclusive: the send/receive and mint/burn flows \
@@ -74,9 +62,8 @@ compile_error!(
      may sign, and refusing to build is safer than defaulting to either"
 );
 
-// Mint/burn signer role: the two directions are two images with two seeds, so
-// a mint/burn build must name exactly one. `build.rs` derives the direction
-// cfgs from the same two features.
+// Exactly one mint/burn signer role: each role is its own image with its own
+// seed. `build.rs` derives the direction cfgs from the same two features.
 #[cfg(all(feature = "mint-signer", feature = "burn-signer"))]
 compile_error!(
     "mint-signer and burn-signer are mutually exclusive: the mint (EVM -> RGB) and burn \
@@ -94,8 +81,8 @@ compile_error!(
      vsock,rgb,mint-signer`"
 );
 
-// The attested role reads the features; every gate reads the `build.rs` cfgs.
-// A cfg forced from outside (e.g. RUSTFLAGS) must not let them disagree.
+// The attested role reads the features. The gates read the `build.rs` cfgs.
+// A cfg set from outside (for example RUSTFLAGS) must not make them disagree.
 #[cfg(all(feature = "mint-signer", rgb_to_evm))]
 compile_error!(
     "mint-signer with the `rgb_to_evm` cfg set: the image would attest Mint but compile the \
@@ -107,21 +94,17 @@ compile_error!(
      mint path. Do not set direction cfgs by hand; `build.rs` derives them"
 );
 
-// Only the mint signer owns a persistent seed. The role guards above also
-// reject attempts to combine it with another signing role or flow.
+// Only the mint signer has a persistent seed.
 #[cfg(all(feature = "kms-persistence", not(feature = "mint-signer")))]
 compile_error!(
     "kms-persistence requires mint-signer; seed persistence is available only to the RGB mint signer"
 );
 
 pub mod attestation;
-// Boot sequence for `main.rs`: env parsing, forwarders, and the fail-closed
-// pins. In the library so it is covered by clippy/tests like everything else.
+// Boot sequence for `main.rs`. In the library so clippy and tests cover it.
 pub mod bootstrap;
 pub mod cloning;
-// Disciplines CLOCK_REALTIME from the hypervisor PTP source (`/dev/ptp0`) so a
-// long-lived enclave does not drift and start rejecting valid attestation/TLS
-// certs. Linux-only (uses `nix::time`, which is a linux-gated dep here).
+// Keeps CLOCK_REALTIME on the hypervisor PTP clock. Linux-only (`nix::time`).
 #[cfg(target_os = "linux")]
 pub mod clocksync;
 pub mod config;
@@ -143,6 +126,5 @@ mod test_support;
 #[cfg(all(feature = "vsock", target_os = "linux"))]
 pub mod vsock_forwarder;
 
-// Only the `enclave` package is vendored into the TEE build. The parent
-// adapter still exposes the other proto packages (see parent/src/lib.rs).
+// Only the `enclave` proto package is vendored into the TEE build.
 pub use enclave_proto as proto;

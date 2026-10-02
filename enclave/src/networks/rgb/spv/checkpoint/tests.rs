@@ -2,8 +2,7 @@ use super::*;
 
 #[test]
 fn signet_challenge_matches_oleksandrs_hex() {
-    // The byte array must hex-encode to exactly the published value, so a
-    // typo is caught before it ships to attestation.
+    // The bytes must match the published hex, to catch a typo before release.
     let hex = hex::encode(UTEXO_SIGNET_CHALLENGE);
     assert_eq!(
         hex,
@@ -13,7 +12,7 @@ fn signet_challenge_matches_oleksandrs_hex() {
 
 #[test]
 fn signet_challenge_decodes_as_3_of_3_multisig() {
-    // Light structural check: the trailing bytes are OP_3 OP_CHECKMULTISIG.
+    // The last bytes are OP_3 OP_CHECKMULTISIG.
     let len = UTEXO_SIGNET_CHALLENGE.len();
     assert_eq!(UTEXO_SIGNET_CHALLENGE[len - 2], 0x53); // OP_3 (n)
     assert_eq!(UTEXO_SIGNET_CHALLENGE[len - 1], 0xae); // OP_CHECKMULTISIG
@@ -21,8 +20,6 @@ fn signet_challenge_decodes_as_3_of_3_multisig() {
 
 #[test]
 fn signet_magic_is_four_bytes() {
-    // Defensive: future refactors that reshape the magic must not silently
-    // change its length.
     assert_eq!(UTEXO_SIGNET_MAGIC.len(), 4);
     assert_eq!(UTEXO_SIGNET_MAGIC, [0x6f, 0x21, 0x61, 0x5a]);
 }
@@ -37,8 +34,7 @@ fn checkpoint_for_dispatches_on_network() {
 
 #[test]
 fn mainnet_checkpoint_is_retarget_boundary_aligned() {
-    // The mainnet checkpoint MUST sit on a retarget boundary, else
-    // the chain wedges at the first boundary above it.
+    // Else the chain stops at the first boundary above it.
     assert_eq!(MAINNET_CHECKPOINT.height % RETARGET_INTERVAL, 0);
     assert_eq!(MAINNET_CHECKPOINT.height, 472 * RETARGET_INTERVAL);
     MAINNET_CHECKPOINT
@@ -48,9 +44,8 @@ fn mainnet_checkpoint_is_retarget_boundary_aligned() {
 
 // === SPV_CHECKPOINT override (dev-only boot anchor) ===
 
-/// Round-trip: the spec for the real signet checkpoint must parse back to
-/// the compiled-in constant, display-order hash included. Catches a
-/// regression in the byte flip.
+/// The signet checkpoint spec must parse to the compiled-in constant. This
+/// tests the display-to-internal byte flip.
 #[test]
 fn parse_spec_round_trips_the_signet_constant() {
     let spec = "334000:000000ac5fccb8a26d3bf859952e164b4fb65190c8f29c8339c6a2c39f3aeb66:0x1e0377ae:1780464472";
@@ -78,7 +73,7 @@ fn parse_spec_five_field_form_sets_chainwork() {
 
 #[test]
 fn parse_spec_two_field_form_inherits_bits_and_time() {
-    let spec = "0x334000".to_string(); // not a full spec - see below
+    let spec = "0x334000".to_string(); // one field: rejected
     assert!(parse_checkpoint_spec(&spec, Network::Signet, &SIGNET_CHECKPOINT).is_err());
 
     let spec = "400000:000000ac5fccb8a26d3bf859952e164b4fb65190c8f29c8339c6a2c39f3aeb66";
@@ -97,21 +92,20 @@ fn parse_spec_accepts_0x_prefixed_hash() {
     assert_eq!(a.hash, b.hash);
 }
 
-/// A PoW network must not inherit bits/time: the nBits check and the
-/// retarget epoch-start lookup consume them, so a stale pair would reject
-/// every real header.
+/// A PoW network must not inherit bits/time. The nBits and retarget checks
+/// use them, so wrong values would reject every real header.
 #[test]
 fn parse_spec_requires_bits_and_time_on_pow_networks() {
     let spec = "953568:00000000000000000001b472f1922f86148c8286609fb14be39e12b8bd14bb64";
     let err = parse_checkpoint_spec(spec, Network::Mainnet, &MAINNET_CHECKPOINT).unwrap_err();
     assert!(err.contains("enforces PoW"), "got: {err}");
-    // Same height with the full four fields is fine.
+    // The four-field form is accepted.
     let full = format!("{spec}:0x1702068f:1780050586");
     assert!(parse_checkpoint_spec(&full, Network::Mainnet, &MAINNET_CHECKPOINT).is_ok());
 }
 
-/// Esplora reports `bits` in decimal; without the `0x` requirement
-/// `503538094` would silently parse as hex (a completely different target).
+/// Esplora shows `bits` in decimal. Without the `0x` rule, `503538094` would
+/// parse as hex (a different target).
 #[test]
 fn parse_spec_rejects_decimal_bits() {
     let spec = "334000:000000ac5fccb8a26d3bf859952e164b4fb65190c8f29c8339c6a2c39f3aeb66:503538094:1780464472";
@@ -146,9 +140,8 @@ fn parse_spec_rejects_malformed_specs() {
     }
 }
 
-/// Unit tests run under `cfg(test)`, one of the sanctioned dev shapes, so
-/// the override is allowed here. The production-shaped combination
-/// (release, no `allow-seed-import`) is what the boot gate refuses.
+/// `cfg(test)` allows the override. The boot gate refuses it only in release
+/// builds without `allow-seed-import`.
 #[test]
 fn override_is_allowed_in_test_builds() {
     assert!(checkpoint_override_allowed());
@@ -158,7 +151,7 @@ fn override_is_allowed_in_test_builds() {
 #[test]
 fn resolve_without_env_returns_the_compiled_checkpoint() {
     if std::env::var(CHECKPOINT_ENV).is_ok() {
-        return; // someone's shell has it set; the pure parser tests cover the rest
+        return; // set in the shell; the parser tests cover the rest
     }
     let (cp, source) = resolve_checkpoint(Network::Signet).unwrap();
     assert_eq!(cp.hash, SIGNET_CHECKPOINT.hash);
@@ -167,9 +160,7 @@ fn resolve_without_env_returns_the_compiled_checkpoint() {
 
 #[test]
 fn assert_retarget_aligned_rejects_misaligned_pow_checkpoint() {
-    // The previous checkpoint height (950 000) is NOT boundary-aligned
-    // (950 000 % 2016 == 464) - exactly the misalignment bug. A PoW network
-    // must reject it.
+    // 950_000 % 2016 == 464: not aligned. A PoW network must reject it.
     let misaligned = Checkpoint {
         height: 950_000,
         hash: [0u8; 32],
@@ -181,7 +172,7 @@ fn assert_retarget_aligned_rejects_misaligned_pow_checkpoint() {
     assert!(misaligned
         .assert_retarget_aligned(Network::Mainnet)
         .is_err());
-    // Non-PoW networks are exempt - they never consult the retarget lookup.
+    // Non-PoW networks have no retarget lookup.
     assert!(misaligned.assert_retarget_aligned(Network::Signet).is_ok());
     assert!(misaligned.assert_retarget_aligned(Network::Regtest).is_ok());
 }

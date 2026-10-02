@@ -1,12 +1,10 @@
-//! Library half of the `attest-verify` CLI.
+//! Library part of the `attest-verify` CLI.
 //!
-//! Calls the parent's `AttestedPublicKey` gRPC, verifies the returned
-//! attestation document end-to-end, and returns the verified bundle. The
-//! binary in `bin/attest_verify.rs` is a thin wrapper that parses CLI
-//! flags, calls [`verify_attested_pubkey`], and formats output.
-//!
-//! Exposed here so integration tests can drive the same code paths used
-//! by the binary against an in-process parent + enclave stack.
+//! Calls the parent `AttestedPublicKey` RPC, verifies the attestation
+//! document end-to-end, and returns the verified bundle. The binary in
+//! `bin/attest_verify.rs` parses flags, calls [`verify_attested_pubkey`] and
+//! formats the output. Integration tests use this module against an
+//! in-process parent and enclave.
 
 use anyhow::{bail, Context, Result};
 use attestation_verify::{
@@ -18,86 +16,77 @@ use sha2::{Digest, Sha256};
 use crate::grpc_proto::parent_service_client::ParentServiceClient;
 use crate::grpc_proto::{AttestedPublicKeyRequest, AttestedPublicKeyResponse};
 
-/// Whether to verify the document via the COSE/cert-chain real path or
-/// the raw-CBOR mock path. Real production use MUST always pass `Real`.
+/// Verify through the real COSE and cert-chain path, or the raw-CBOR mock
+/// path. Production MUST use `Real`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum VerifyMode {
     Real,
     Mock,
 }
 
-/// The security posture the caller expects the attested enclave to have.
-/// The enclave commits its resolved posture into `user_data`, and the
-/// verifier reconstructs the expected posture here and requires a match, so a
-/// downgraded enclave is rejected.
+/// The security posture the caller expects from the attested enclave.
 ///
-/// Chain/contract/asset pins come from the wire response, which the public-key
-/// bundle already binds, so a production expectation states only the posture
-/// flags and authorization rules that are not on the wire and must be declared
-/// independently by the verifier. Optional chain, contract
-/// and asset pins (F02-AF-04) additionally compare those wire values against
-/// the operator's intended deployment; without a pin the value is
-/// authenticated but not compared.
+/// The enclave commits its posture into `user_data`. The verifier builds the
+/// expected posture and requires an exact match, so a downgraded enclave fails.
 ///
-/// One value is built per verifier run, so the size gap between the two
-/// variants is irrelevant; boxing would only complicate the struct literals.
+/// Chain, contract and asset values come from the wire response, which the
+/// public-key bundle binds. This type gives only the posture flags and rules
+/// that are not on the wire. The optional chain, contract and asset pins
+/// (F02-AF-04) also compare the wire values with the operator deployment.
+/// Without a pin, the value is authenticated but not compared.
+///
+/// One value is built per run, so the variant size difference does not matter.
 #[allow(clippy::large_enum_variant)]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ExpectedPolicy {
     /// Expect a production bridge enclave with these posture flags.
     Production {
         allow_vanilla_psbt: bool,
-        /// The image the operator expects: a mint signer, a burn signer, or a
-        /// combined one. A burn signer that attests `Mint` fails verification.
+        /// Expected image: mint, burn or combined signer. A role mismatch
+        /// fails verification.
         signer_role: SignerRole,
         evm_source: EvmDataSource,
-        /// The Helios weak-subjectivity checkpoint the operator expects the
-        /// enclave to have pinned. `Some` (required) when `evm_source` is
-        /// [`EvmDataSource::HeliosVerified`]; folded into the reconstructed
-        /// commitment so an enclave that trust-rooted on a different checkpoint
-        /// fails verification.
+        /// Expected EVM checkpoint. Required only when `evm_source` is
+        /// [`EvmDataSource::HeliosVerified`]. It is part of the commitment.
         evm_checkpoint: Option<[u8; 32]>,
         /// The Electrum host the operator set at launch.
         electrum_host: String,
-        /// The EVM RPC TLS host and CA hash the operator expects. `Some`
-        /// (required) when `evm_source` is [`EvmDataSource::PinnedTlsRpc`].
+        /// Expected EVM RPC TLS host and CA hash. Required when `evm_source`
+        /// is [`EvmDataSource::PinnedTlsRpc`].
         evm_rpc_tls: Option<EvmRpcTlsPin>,
-        /// Expected EVM chain ID.
-        /// None accepts the authenticated chain ID without comparison.
+        /// Expected EVM chain ID. `None` accepts the authenticated value.
         expected_chain_id: Option<u64>,
-        /// Expected 20-byte bridge or MultisigProxy address.
-        /// Some requires an exact match.
+        /// Expected 20-byte bridge or MultisigProxy address. `Some` requires
+        /// an exact match.
         expected_bridge_contract: Option<[u8; 20]>,
-        /// Expected RGB asset ID.
-        /// Some requires an exact match.
-        /// An empty string requires no RGB asset.
+        /// Expected RGB asset ID. `Some` requires an exact match. An empty
+        /// string requires no RGB asset.
         expected_rgb_asset_id: Option<String>,
         funds_in_contract: [u8; 20],
-        /// Expected ERC-20 the Bridge releases (`TOKEN_CONTRACT`), the
-        /// `burnId` preimage input the enclave pinned. Not on the wire; the
-        /// operator declares it and the commitment must match.
+        /// Expected ERC-20 that the Bridge releases (`TOKEN_CONTRACT`). It is
+        /// an input to the `burnId` preimage. It is not on the wire, so the
+        /// operator declares it.
         token_contract: [u8; 20],
         evm_min_confirmations: u64,
-        /// Expected gas-tx (`SignRawDigest`) rule the enclave committed.
-        /// An all-zero destination, zero caps, and empty selectors mean
-        /// the operator did not pin the gas path, which the enclave attests as
-        /// such and fails closed on per request.
+        /// Expected gas-tx (`SignRawDigest`) rule. An all-zero destination,
+        /// zero caps and no selectors mean "not pinned". The enclave then
+        /// rejects every gas-tx request.
         gas_tx_allowed_to: [u8; 20],
         gas_tx_max_gas_limit: u64,
         gas_tx_max_fee_per_gas: u128,
         gas_tx_max_value_wei: u128,
         gas_tx_allowed_selectors: Vec<[u8; 4]>,
-        /// The KMS key, region, seed id and address the operator set at
-        /// launch. `None` expects no KMS pin.
+        /// KMS key, region, seed ID and address set at launch. `None` expects
+        /// no KMS pin.
         kms: Option<KmsPin>,
     },
-    /// Expect a dev/mock enclave (e.g. behind `--mock`). Never for production.
+    /// Expect a dev or mock enclave (for example with `--mock`). Not for
+    /// production.
     Development,
 }
 
-/// Successful verification result. The presence of this value is the
-/// proof that the bridge's signing pubkey was produced inside a TEE
-/// matching the supplied PCRs.
+/// Successful verification result. This value proves that the bridge signing
+/// key comes from a TEE with the supplied PCRs.
 #[derive(Debug, Clone)]
 pub struct AttestedPubkeyResult {
     pub response: AttestedPublicKeyResponse,
@@ -109,7 +98,7 @@ pub struct AttestedPubkeyResult {
 }
 
 /// Build the canonical key bundle that the verifier hashes to check
-/// `user_data`. Field order and encoding MUST match the enclave's
+/// `user_data`. Field order and encoding MUST match
 /// `canonical_pubkey_bundle` in `enclave/src/server.rs`.
 pub fn canonical_bundle(resp: &AttestedPublicKeyResponse) -> Vec<u8> {
     let chain_id_bytes = resp.chain_id.to_be_bytes();
@@ -136,14 +125,12 @@ pub fn canonical_bundle(resp: &AttestedPublicKeyResponse) -> Vec<u8> {
     out
 }
 
-/// Run the full attestation flow: connect to `endpoint`, send a fresh
-/// nonce, verify the returned doc against `expected_pcrs`, and re-check
-/// the embedded pubkey + commitment against the wire bundle.
+/// Run the full attestation flow. Connect to `endpoint`, send a fresh nonce,
+/// verify the document against `expected_pcrs`, and check the public key and
+/// commitment against the wire bundle.
 ///
-/// Returns `Ok(_)` only if every check passes. Errors describe the
-/// specific failure (gRPC connect, RPC error, parse error, signature
-/// failure, PCR mismatch, nonce mismatch, pubkey mismatch, commitment
-/// mismatch).
+/// Returns `Ok(_)` only if every check passes. The error names the failed
+/// check.
 pub async fn verify_attested_pubkey(
     endpoint: &str,
     expected_pcrs: attestation_verify::ExpectedPcrs,
@@ -170,8 +157,8 @@ pub async fn verify_attested_pubkey(
     verify_attested_response(response, nonce, &expected_pcrs, mode, &expected_policy)
 }
 
-/// The checks of [`verify_attested_pubkey`] after the RPC: document, pubkey
-/// and policy commitment. Split out so tests can drive it without a server.
+/// The checks of [`verify_attested_pubkey`] after the RPC: document, public
+/// key and policy commitment. Tests call it without a server.
 pub fn verify_attested_response(
     response: AttestedPublicKeyResponse,
     nonce: [u8; 32],
@@ -240,10 +227,9 @@ pub fn verify_attested_response(
     })
 }
 
-/// Build the [`AttestedPolicy`] the verifier expects the enclave to have
-/// committed, combining the operator-declared posture ([`ExpectedPolicy`]) with
-/// the pins from the wire response (which the pubkey bundle already binds). MUST
-/// produce the same bytes the enclave's `SecurityPolicy::commitment_bytes` does.
+/// Build the expected [`AttestedPolicy`] from the operator posture
+/// ([`ExpectedPolicy`]) and the wire values (bound by the key bundle).
+/// The bytes MUST equal the enclave `SecurityPolicy::commitment_bytes`.
 fn expected_attested_policy(
     expected: &ExpectedPolicy,
     resp: &AttestedPublicKeyResponse,
@@ -282,7 +268,7 @@ fn expected_attested_policy(
                     )
                 })?;
 
-            // Check operator pins before constructing the expected commitment. (F02-AF-04)
+            // Check operator pins before building the expected commitment. (F02-AF-04)
             if let Some(want) = expected_chain_id {
                 if *want != resp.chain_id {
                     bail!(
@@ -313,8 +299,8 @@ fn expected_attested_policy(
             Ok(AttestedPolicy::Production {
                 allow_vanilla_psbt: *allow_vanilla_psbt,
                 signer_role: *signer_role,
-                // A real-verified production enclave always uses real (NSM)
-                // attestation; SPV is the only Bitcoin anchor source.
+                // A production enclave always uses real (NSM) attestation.
+                // SPV is the only Bitcoin anchor source.
                 attestation: AttestationMode::Real,
                 evm_source: *evm_source,
                 btc_source: BtcDataSource::SpvVerified,
@@ -326,9 +312,8 @@ fn expected_attested_policy(
                 evm_checkpoint: *evm_checkpoint,
                 electrum_host: electrum_host.clone(),
                 evm_rpc_tls: evm_rpc_tls.clone(),
-                // Gas-tx rule: declared by the operator, not on the
-                // wire. `to_bytes` canonicalises the selector set, so the caller
-                // need not pre-sort it.
+                // The operator declares the gas-tx rule. `to_bytes` sorts the
+                // selector set, so the caller does not need to sort it.
                 gas_tx_allowed_to: *gas_tx_allowed_to,
                 gas_tx_max_gas_limit: *gas_tx_max_gas_limit,
                 gas_tx_max_fee_per_gas: *gas_tx_max_fee_per_gas,
@@ -345,8 +330,8 @@ fn expected_attested_policy(
 mod tests {
     use super::*;
 
-    /// A production expectation with the three deployment pins set to `pins`
-    /// (chain_id, bridge_contract, rgb_asset_id) and everything else neutral.
+    /// A production expectation with the given chain_id, bridge_contract and
+    /// rgb_asset_id pins. All other fields are neutral.
     fn expect_prod(
         chain_id: Option<u64>,
         bridge_contract: Option<[u8; 20]>,
@@ -457,7 +442,7 @@ mod tests {
 
     #[test]
     fn empty_asset_pin_matches_empty_wire() {
-        // A pure-EVM / pure-CCD build ships no RGB asset; pinning "" must match.
+        // A build with no RGB asset (EVM or CCD only) must match a "" pin.
         let mut w = wire();
         w.rgb_asset_id = String::new();
         let exp = expect_prod(None, None, Some(String::new()));

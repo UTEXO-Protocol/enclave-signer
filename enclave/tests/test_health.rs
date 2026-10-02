@@ -1,15 +1,14 @@
-//! Integration tests for the `Health` readiness probe - the full wire path:
+//! Integration tests for the `Health` readiness probe over the full wire path:
 //! TCP framing -> `dispatch` -> `EnclaveState` + `ServerContext.header_chain`
 //! -> response.
 //!
-//! Readiness is `endpoints_set && key_loaded && spv_synced`, and `spv_synced` is the same
-//! `assert_chain_ready` precondition signing applies. These tests pin every
-//! corner of that conjunction so a later change to either half cannot quietly
-//! make a not-yet-ready enclave advertise itself to deploy.
+//! Readiness is `endpoints_set && key_loaded && spv_synced`. `spv_synced` is
+//! the same `assert_chain_ready` precondition that signing applies. These tests
+//! pin each corner of that conjunction, so a not-ready enclave cannot report ready.
 //!
-//! SPV/RGB-only: a `ccd`-only build has no header chain and reports SPV
-//! readiness vacuously, which is a different assertion set. A mint signer
-//! skips the SPV half too; `test_signer_role.rs` covers it.
+//! SPV/RGB builds only. A `ccd`-only build has no header chain and reports SPV
+//! readiness vacuously. A mint signer also skips the SPV half;
+//! `test_signer_role.rs` covers it.
 #![cfg(all(feature = "rgb-validation", rgb_to_evm))]
 
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -51,9 +50,8 @@ fn health(port: u16) -> HealthResponse {
     }
 }
 
-/// Push `count` headers onto the regtest checkpoint, the last one timestamped
-/// `last_time`. `count` defaults matter: readiness needs `SPV_MIN_CONFIRMATIONS`
-/// of depth, not just one header.
+/// Push `count` headers onto the regtest checkpoint. The last header has the
+/// timestamp `last_time`. Readiness needs `SPV_MIN_CONFIRMATIONS` of depth.
 fn submit_chain(port: u16, count: u32, last_time: u32) {
     let cp = checkpoint_for(Network::Regtest);
     let headers = synth_chain_from(cp.hash, last_time - count, count);
@@ -64,8 +62,8 @@ fn submit_chain(port: u16, count: u32, last_time: u32) {
     }
 }
 
-/// Seed a key without needing `allow-seed-import`: entropy-based init is the
-/// production path and is not feature-gated.
+/// Load a key without `allow-seed-import`. Entropy-based init is the
+/// production path and has no feature gate.
 fn with_key(state: &EnclaveState) {
     let mut entropy = [7u8; 32];
     state.initialize_from_entropy(&mut entropy).unwrap();
@@ -90,8 +88,8 @@ fn key_without_headers_is_not_ready() {
 
     assert!(h.key_loaded);
     assert_eq!(h.phase, "active");
-    // The chain still sits on the compiled-in checkpoint. Even a freshly cut
-    // checkpoint must not read as synced: nothing can be confirmed yet.
+    // The chain is still at the compiled-in checkpoint. A new checkpoint must
+    // not read as synced, because nothing is confirmed yet.
     assert!(!h.spv_synced);
     assert!(!h.ready);
 }
@@ -124,8 +122,8 @@ fn key_and_fresh_chain_is_ready() {
 #[test]
 fn chain_too_shallow_to_confirm_is_not_ready() {
     let port = start_test_server_with(with_key);
-    // Fresh, but one block short of the depth a proof needs. Freshness alone
-    // would have called this ready.
+    // The chain is fresh but one block short of the depth a proof needs.
+    // A freshness-only check would report ready.
     submit_chain(port, SPV_MIN_CONFIRMATIONS - 1, now_unix());
     let h = health(port);
 
@@ -137,8 +135,8 @@ fn chain_too_shallow_to_confirm_is_not_ready() {
 #[test]
 fn key_and_stale_chain_is_not_ready() {
     let port = start_test_server_with(with_key);
-    // Deep enough, but one second past the age signing refuses at, so health
-    // and signing agree on the boundary.
+    // The chain is deep enough but one second past the age limit of signing.
+    // Health and signing must agree on this boundary.
     let age = u32::try_from(SPV_MAX_TIP_AGE_SECS).unwrap() + 1;
     submit_chain(port, SPV_MIN_CONFIRMATIONS, now_unix() - age);
     let h = health(port);

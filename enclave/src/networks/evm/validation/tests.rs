@@ -1,16 +1,16 @@
-/// Drop the typed intent; these assertions cover the route proof.
+/// Drops the typed intent. These assertions cover the route proof.
 fn validate_dest(destination: &EvmDestination, ctx: &ValidationContext<'_>) -> Result<RouteProof> {
     super::validate_destination(destination, ctx).map(|(proof, _, _)| proof)
 }
 
-/// Keep only the decoded burn fields; these assertions cover the identity.
+/// Keeps only the decoded burn fields. These assertions cover the identity.
 fn release_of(destination: &EvmDestination, ctx: &ValidationContext<'_>) -> ReleaseIdentity {
     super::validate_destination(destination, ctx)
         .expect("valid destination")
         .2
 }
 
-/// Keeps the canonical-encoding regressions expressed against raw bytes.
+/// Decodes raw bytes for the canonical-encoding regressions.
 fn parse_proof_from_calldata(call_data: &[u8]) -> Result<RouteProof> {
     route_proof_from_params(&decode_funds_out_params(call_data)?)
 }
@@ -120,8 +120,8 @@ fn rejects_unknown_selector() {
     destination.call_data[..4].copy_from_slice(&[0xDE, 0xAD, 0xBE, 0xEF]);
     with_ctx(&config(), |ctx| {
         let msg = validate_dest(&destination, ctx).unwrap_err().to_string();
-        // The error must both name the failing predicate and echo the
-        // offending selector so an operator can see WHAT was rejected.
+        // The error must name the failed predicate and the selector, so an
+        // operator can see WHAT was rejected.
         assert!(
             msg.contains("unexpected calldata selector") && msg.contains("deadbeef"),
             "expected selector rejection echoing the selector hex, got: {msg}"
@@ -145,9 +145,8 @@ fn rejects_calldata_shorter_than_selector() {
 
 #[test]
 fn rejects_calldata_over_size_cap() {
-    // A maximally packed calldata must be rejected up-front,
-    // before selector dispatch or any offset extraction. Start from
-    // a valid fundsOut destination and pad the tail past the cap.
+    // Oversize calldata must be rejected before selector dispatch or decode.
+    // Pad a valid fundsOut tail past the cap.
     let mut destination = destination();
     destination
         .call_data
@@ -163,15 +162,15 @@ fn rejects_calldata_over_size_cap() {
 
 #[test]
 fn accepts_calldata_at_size_cap() {
-    // Exactly at the cap is allowed; the selector head is preserved so
-    // dispatch still recognizes the fundsOut shape.
+    // Exactly at the cap is allowed. The selector stays, so dispatch still
+    // recognizes the fundsOut shape.
     let mut destination = destination();
     destination
         .call_data
         .resize(MAX_FUNDS_OUT_CALL_DATA_LEN, 0u8);
     destination.call_data[..4].copy_from_slice(&FUNDS_OUT_SELECTOR_POOLS);
-    // The zero-padded tail may still fail the later ABI decode; assert
-    // only that it is NOT the size error.
+    // The zero-padded tail can fail the ABI decode. Assert only that it is
+    // NOT the size error.
     with_ctx(&config(), |ctx| {
         if let Err(e) = validate_dest(&destination, ctx) {
             assert!(
@@ -194,8 +193,8 @@ fn rejects_chain_mismatch() {
     });
 }
 
-/// A release naming an unpinned chain is refused even when the
-/// request-level `chain_id` matches.
+/// A release that names an unpinned chain is refused, also when the request
+/// `chain_id` matches.
 #[test]
 fn rejects_calldata_destination_chain_id_mismatch() {
     let mut destination = destination();
@@ -241,8 +240,8 @@ fn lz_destination(destination_chain_id: u64) -> EvmDestination {
 }
 
 /// The entrypoint route settles on a remote chain, so its calldata
-/// destinationChainId must NOT be pinned to the execution chain: pinning it
-/// blocked every LayerZero payout (Ethereum, Polygon, Plasma, Tron).
+/// destinationChainId must NOT be pinned to the execution chain. A pin blocks
+/// each LayerZero payout (Ethereum, Polygon, Plasma, Tron).
 #[test]
 fn accepts_entrypoint_route_to_remote_chain() {
     with_ctx(&config(), |ctx| {
@@ -252,7 +251,7 @@ fn accepts_entrypoint_route_to_remote_chain() {
     });
 }
 
-/// The entrypoint route still has to name a real destination.
+/// The entrypoint route must name a real destination.
 #[test]
 fn rejects_entrypoint_route_with_zero_destination_chain_id() {
     with_ctx(&config(), |ctx| {
@@ -264,8 +263,8 @@ fn rejects_entrypoint_route_with_zero_destination_chain_id() {
     });
 }
 
-/// A payout that lands back on the pinned execution chain is a direct
-/// payout; routing it through the entrypoint digest is refused.
+/// A payout to the pinned execution chain is a direct payout. The entrypoint
+/// route refuses it.
 #[test]
 fn rejects_entrypoint_route_to_pinned_chain() {
     let config = config(); // pinned chain_id = 1
@@ -381,16 +380,15 @@ fn rejects_uint256_amount_overflow() {
     });
 }
 
-/// The hand-pinned selector constant and the alloy-derived ABI selector
-/// must never drift apart: the whitelist gates on the constant while
-/// decode/encode use the `sol!` type.
+/// The pinned selector constant and the alloy ABI selector must agree. The
+/// whitelist uses the constant, and decode/encode use the `sol!` type.
 #[test]
 fn funds_out_selector_matches_abi_derived_selector() {
     assert_eq!(FUNDS_OUT_SELECTOR_POOLS, fundsOutCall::SELECTOR);
 }
 
-/// Canonical calldata with non-empty dynamic tails - the baseline the two
-/// non-canonical rejection tests below tamper with.
+/// Canonical calldata with non-empty dynamic tails. The two non-canonical
+/// tests below change it.
 fn funds_out_calldata_with_tails(amount: u64) -> Vec<u8> {
     fundsOutCall {
         params: FundsOutParams {
@@ -415,9 +413,9 @@ fn accepts_canonical_calldata_with_dynamic_tails() {
     assert_eq!(proof.amount, 1_234);
 }
 
-/// ABI residual: the ABI decoder accepts trailing junk
-/// after the last dynamic tail; the canonical re-encode check must not, so
-/// no unread bytes can ride along inside a signing request.
+/// ABI residual: the ABI decoder accepts trailing junk after the last dynamic
+/// tail. The canonical re-encode check must refuse it, so a signing request
+/// carries no unread bytes.
 #[test]
 fn rejects_calldata_with_trailing_junk() {
     let mut cd = funds_out_calldata_with_tails(1_234);
@@ -429,14 +427,14 @@ fn rejects_calldata_with_trailing_junk() {
     );
 }
 
-/// ABI residual: two dynamic-arg head words pointing at the
-/// same tail decode fine but are not a canonical encoding.
+/// ABI residual: two dynamic-arg head words that point at the same tail
+/// decode, but are not a canonical encoding.
 #[test]
 fn rejects_calldata_with_overlapping_dynamic_tails() {
     let mut cd = funds_out_calldata_with_tails(1_234);
     // Offset words for `proof` (228..260) and `settlementData` (260..292),
-    // counting the selector and the tuple head pointer. Both are measured
-    // from the same tuple start, so copying one aliases the two tails.
+    // with the selector and the tuple head pointer. Both start at the same
+    // tuple start, so a copy of one aliases the two tails.
     let proof_offset_word: [u8; 32] = cd[228..260].try_into().unwrap();
     cd[260..292].copy_from_slice(&proof_offset_word);
     let err = parse_proof_from_calldata(&cd).unwrap_err();
@@ -466,9 +464,9 @@ fn rgb_source_identity_accepts_the_rgb_network_id_and_empty_address() {
 
 #[test]
 fn rgb_source_identity_rejects_a_foreign_source_chain() {
-    // The pair (sourceChainId, destinationChainId) picks the verifier and
-    // commission rate on chain, so any id but the RGB one must refuse -
-    // including the execution chain's own id and zero.
+    // On chain, (sourceChainId, destinationChainId) selects the verifier and
+    // commission rate. Each id but the RGB one must refuse, also the
+    // execution chain id and zero.
     for foreign in [0u64, 1, 42161, RGB_SOURCE_CHAIN_ID + 1] {
         let release = ReleaseIdentity {
             source_chain_id: U256::from(foreign),
@@ -496,8 +494,8 @@ fn rgb_source_identity_rejects_a_non_empty_source_address() {
     assert!(err.contains("sourceAddress must be empty"), "{err}");
 }
 
-/// Every burn-identifying field is surfaced from the direct route's calldata,
-/// so the handler binds what will actually be signed.
+/// The direct route returns each burn-identity field from its calldata, so the
+/// handler binds the signed values.
 #[test]
 fn direct_route_surfaces_its_release_identity() {
     let mut destination = destination();
@@ -530,8 +528,8 @@ fn direct_route_surfaces_its_release_identity() {
     });
 }
 
-/// Same for the LayerZero route, which yields no `FundsOutParams`: the
-/// identity is the only typed view of its burn fields the handler gets.
+/// Same for the LayerZero route. It gives no `FundsOutParams`, so the identity
+/// is the handler's only typed view of its burn fields.
 #[test]
 fn entrypoint_route_surfaces_its_release_identity() {
     let mut destination = destination();
@@ -567,9 +565,8 @@ fn entrypoint_route_surfaces_its_release_identity() {
 
 // ---- burnId recompute ----
 
-/// Pins the enclave's recompute to the contract formula, encoded here with
-/// alloy's `abi.encode` of the nine-word static tuple rather than the manual
-/// concatenation the implementation uses.
+/// Pins the enclave recompute to the contract formula. The test uses the
+/// alloy `abi.encode` of the nine-word tuple, not the manual concatenation.
 fn contract_burn_id(cfg: &BridgeConfig, release: &ReleaseIdentity) -> U256 {
     use alloy_primitives::{keccak256, B256};
     use alloy_sol_types::SolValue;
@@ -620,8 +617,8 @@ fn burn_id_recompute_matches_the_contract_formula() {
 
 #[test]
 fn burn_id_recompute_binds_every_input() {
-    // Each preimage input on its own must move the id, so none can be
-    // varied without the contract deriving a different key.
+    // Each preimage input alone must change the id, so the contract derives a
+    // different key for each change.
     let cfg = token_pinned_config();
     let base = rgb_release();
     let base_id = expected_burn_id(&cfg, &base);
@@ -688,8 +685,8 @@ fn burn_id_check_accepts_the_derived_id_and_refuses_any_other() {
 
 #[test]
 fn burn_id_check_is_skipped_while_the_token_is_unpinned() {
-    // Dev builds have no token pin; production cannot boot without one, so
-    // skipping here never reaches a release image.
+    // Dev builds have no token pin. Production cannot boot without one, so a
+    // release image never skips.
     let cfg = BridgeConfig {
         token_contract: [0u8; ADDRESS_LEN],
         ..token_pinned_config()

@@ -1,6 +1,4 @@
-// `TcpListener` is only used in the non-vsock TCP fallback. The import is gated
-// to match the block at the bottom of `main`, so the production build emits no
-// unused-import warning.
+// Used only by the non-vsock TCP fallback at the end of `main`.
 #[cfg(not(all(feature = "vsock", target_os = "linux")))]
 use std::net::TcpListener;
 
@@ -16,25 +14,22 @@ fn main() {
     bootstrap::init_tracing();
     tracing::info!("starting utexo-bridge-enclave");
 
-    // Start disciplining the clock from the hypervisor PTP source ASAP. Nitro
-    // enclaves free-run without NTP after boot (drift ~1s/day), which otherwise
-    // makes long-lived enclaves reject freshly-issued attestation/TLS certs as
-    // "not yet valid" (the clone clock-skew bug). Fail-soft: no-op if unavailable.
+    // Start first. Without NTP the enclave clock drifts (about 1 s/day) and then
+    // rejects new certs as "not yet valid". No-op if PTP is not available.
     #[cfg(target_os = "linux")]
     utexo_bridge_enclave::clocksync::spawn();
 
     let bitcoin_network_str = bootstrap::bitcoin_network_str();
     let state = EnclaveState::new(bootstrap::resolve_bitcoin_network(&bitcoin_network_str));
 
-    // Pinned bridge config from env. Folded into the attestation `user_data`
-    // commitment and cross-checked on every SignEvm.
+    // Pinned bridge config. Committed in attestation `user_data` and checked on
+    // every SignEvm.
     let bridge_config = BridgeConfig::from_env();
     bootstrap::log_bridge_config(&bridge_config);
 
-    // Fail closed at boot: a release rgb-validation build that does not resolve
-    // to a valid Production policy must never become reachable. Debug / test /
-    // non-bridge builds are exempt. The endpoint checks wait for
-    // `SetEndpoints`, which checks the full policy.
+    // Fail closed: a release rgb-validation build without a valid Production
+    // policy does not start. Debug, test and non-bridge builds are exempt.
+    // `SetEndpoints` checks the full policy later.
     #[cfg(feature = "evm-rpc")]
     let evm_min_confirmations =
         utexo_bridge_enclave::config::EvmRpcConfig::from_env().min_confirmations;
@@ -54,14 +49,13 @@ fn main() {
         panic!("{msg}");
     }
 
-    // Cloning is disabled with KMS persistence; every replica recovers the
-    // same seed from KMS, so no donor secret is installed.
+    // No cloning with KMS persistence: every replica recovers its seed from KMS.
     #[cfg(not(feature = "kms-persistence"))]
     bootstrap::install_env_cloning_secret(&state);
     bootstrap::start_vsock_forwarders();
 
-    // The security policy, the chain clients and their forwarders come with
-    // `SetEndpoints`. Until then the enclave signs nothing.
+    // The policy and chain clients come with `SetEndpoints`. Until then the
+    // enclave signs nothing.
     let ctx = ServerContext::awaiting_launch(
         state,
         bridge_config,
@@ -93,9 +87,9 @@ fn main() {
     }
 }
 
-/// Accept loop: a fixed worker pool behind a bounded queue. The deadline starts
-/// at accept, so queue wait counts and an expired connection fails its first
-/// read. Excess connections are dropped. Generic over the socket type.
+/// Accept loop: a fixed worker pool behind a bounded queue.
+/// The deadline starts at accept, so queue wait counts. Excess connections are
+/// dropped.
 fn serve<I, S>(incoming: I, ctx: ServerContext)
 where
     I: IntoIterator<Item = std::io::Result<S>>,
@@ -109,8 +103,7 @@ where
     };
 
     let ctx = Arc::new(ctx);
-    // Bounded queue doubles as the connection cap: a full queue means all
-    // workers are busy and the backlog is at its limit.
+    // The bounded queue is also the connection cap.
     let (tx, rx) = sync_channel::<(S, std::time::Instant)>(MAX_QUEUED_CONNECTIONS);
     let rx = Arc::new(Mutex::new(rx));
 
@@ -118,8 +111,7 @@ where
         let rx = Arc::clone(&rx);
         let ctx = Arc::clone(&ctx);
         std::thread::spawn(move || loop {
-            // Hold the queue lock only to dequeue; handling happens unlocked so
-            // workers run concurrently.
+            // Hold the queue lock only to dequeue, so workers run concurrently.
             let next = {
                 let guard = match rx.lock() {
                     Ok(g) => g,
@@ -132,12 +124,11 @@ where
             };
             match next {
                 Ok((stream, deadline)) => {
-                    // Preserve the accept-time budget through framing and
-                    // dispatch, including persistent seed initialization.
+                    // Keep the accept-time budget for framing, dispatch and seed init.
                     let stream = DeadlineStream::with_deadline(stream, deadline, IO_IDLE_TIMEOUT);
                     server::handle_connection_until(stream, &ctx, deadline);
                 }
-                // All senders dropped: the listener is gone, so is the process.
+                // All senders dropped: the listener is gone.
                 Err(_) => break,
             }
         });
@@ -145,8 +136,8 @@ where
 
     for stream in incoming {
         match stream {
-            // Count queue wait in the same budget as framing and custody;
-            // otherwise work could begin after the parent has timed out.
+            // Queue wait counts in the budget, so no work starts after the
+            // parent timed out.
             Ok(stream) => {
                 match tx.try_send((stream, std::time::Instant::now() + TOTAL_REQUEST_TIMEOUT)) {
                     Ok(()) => tracing::debug!("connection queued"),

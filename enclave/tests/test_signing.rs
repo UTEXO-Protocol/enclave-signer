@@ -8,8 +8,7 @@ use utexo_bridge_enclave::proto::enclave_response::Response;
 use utexo_bridge_enclave::proto::sign_request::{DestinationNetwork, SourceNetwork};
 use utexo_bridge_enclave::proto::*;
 
-// Mirrors `IBridge.fundsOut(FundsOutParams)`: one dynamic tuple, not the old
-// flat 8-argument encoding, which the decoder rejects outright.
+// Mirrors `IBridge.fundsOut(FundsOutParams)`: one dynamic tuple.
 sol! {
     struct FundsOutParams {
         address recipient;
@@ -42,9 +41,9 @@ sol! {
     );
 }
 
-/// Pinned `BridgeConfig` matching the defaults of `valid_sign_evm_request`.
-/// Injected by tests that must pass the production fail-closed gate,
-/// since env is unconfigured in CI.
+/// Pinned `BridgeConfig` that matches the defaults of `valid_sign_evm_request`.
+/// Tests that must pass the production fail-closed gate use it, because env is
+/// empty in CI.
 #[allow(dead_code)]
 fn pinned_bridge_config() -> BridgeConfig {
     BridgeConfig {
@@ -55,10 +54,9 @@ fn pinned_bridge_config() -> BridgeConfig {
     }
 }
 
-/// Pinned `BridgeConfig` for the plain-BTC (`SignBtc`) path. Only the
-/// value-spent cap is operator-supplied now - the destination rule (outputs
-/// must pay back to scripts the enclave proves it controls) needs no config,
-/// which is the point of dropping `BTC_ALLOWED_SCRIPTS`.
+/// Pinned `BridgeConfig` for the plain-BTC (`SignBtc`) path. It sets only the
+/// value caps. The destination rule needs no config: outputs pay to scripts
+/// that the enclave proves it controls.
 #[allow(dead_code)]
 fn btc_capped_config(max_total_sats: u64) -> BridgeConfig {
     BridgeConfig {
@@ -76,8 +74,8 @@ fn mock_funds_out_calldata(recipient: [u8; 20], amount: u64) -> Vec<u8> {
             recipient: Address::from(recipient),
             amount: U256::from(amount),
             burnId: U256::ZERO,
-            // The RGB network id: an RGB-sourced release under any other
-            // sourceChainId is refused before the consignment binding.
+            // The RGB network id. The enclave refuses an RGB-sourced release
+            // with another sourceChainId before the consignment binding.
             sourceChainId: U256::from(96u64),
             destinationChainId: U256::from(1u64),
             sourceAddress: String::new(),
@@ -89,10 +87,9 @@ fn mock_funds_out_calldata(recipient: [u8; 20], amount: u64) -> Vec<u8> {
     .abi_encode()
 }
 
-/// Placeholder consignment bytes. `validate_source_payload` only verifies the
-/// keccak hash; the RGB validator that would deserialize them is `None` in this
-/// harness. So tests reach the cross-check layer but stop at the handler's
-/// "requires validated consignment" check, which is what they assert.
+/// Placeholder consignment bytes. `validate_source_payload` checks only the
+/// keccak hash. This harness has no RGB validator, so tests stop at the
+/// handler's "requires validated consignment" check.
 const PLACEHOLDER_CONSIGNMENT: &[u8] = b"placeholder-consignment-bytes-for-integration-tests";
 
 fn placeholder_consignment_hash() -> Vec<u8> {
@@ -135,10 +132,9 @@ fn rgb_source_mut(req: &mut SignRequest) -> &mut RgbSource {
     }
 }
 
-/// Build a minimal BIP-174-valid PSBT for tests that only care about
-/// `validate_psbt_bytes` shape-checking accepting the bytes - the actual
-/// signing path won't sign this (no witness data, no matchable keys), so
-/// only use it for tests that expect rejection BEFORE the signer runs.
+/// A minimal BIP-174-valid PSBT that passes `validate_psbt_bytes`. It has no
+/// witness data and no matching keys, so the signer cannot sign it. Use it only
+/// for tests that expect a rejection before the signer runs.
 #[cfg(evm_to_rgb)]
 fn minimal_valid_psbt_bytes() -> Vec<u8> {
     use bitcoin::hashes::Hash;
@@ -169,10 +165,9 @@ fn minimal_valid_psbt_bytes() -> Vec<u8> {
         .serialize()
 }
 
-/// The public half of the enclave's wallet as a listener sees it: the master
-/// fingerprint and the vanilla BIP-86 account xpub, both from `InitializeKey`.
-/// Everything the plain-BTC path needs to build a self-paying PSBT derives from
-/// these, with no secret and no post-boot configuration.
+/// The public wallet material that a listener sees: the master fingerprint and
+/// the BIP-86 account xpubs from `InitializeKey`. Tests build self-paying
+/// plain-BTC PSBTs from it, with no secret and no post-boot config.
 #[allow(dead_code)]
 struct EnclaveWallet {
     fingerprint: bitcoin::bip32::Fingerprint,
@@ -188,7 +183,7 @@ const NUMS_INTERNAL: [u8; 32] = [
     0x07, 0x8a, 0x5a, 0x0f, 0x28, 0xec, 0x96, 0xd5, 0x47, 0xbf, 0xee, 0x9a, 0xce, 0x80, 0x3a, 0xc0,
 ];
 
-/// Initialise the enclave's key and keep the public wallet material from the
+/// Initialize the enclave key and keep the public wallet material from the
 /// response.
 #[allow(dead_code)]
 fn init_wallet(port: u16) -> EnclaveWallet {
@@ -215,10 +210,9 @@ fn init_wallet(port: u16) -> EnclaveWallet {
     }
 }
 
-/// One of the enclave's own BIP-86 key-path addresses, derived from the account
-/// xpub at `m/86'/0'/0'/chain/index` (the test server runs on mainnet, so coin
-/// type 0). Returns the `script_pubkey` plus the material a PSBT needs to prove
-/// the address is the enclave's.
+/// An enclave BIP-86 key-path address at `m/86'/0'/0'/chain/index`. The test
+/// server runs on mainnet, so the coin type is 0. It holds the `script_pubkey`
+/// and the PSBT material that proves the enclave owns the address.
 #[allow(dead_code)]
 struct OurAddress {
     spk: bitcoin::ScriptBuf,
@@ -233,7 +227,7 @@ fn our_address(wallet: &EnclaveWallet, chain: u32, index: u32) -> OurAddress {
 }
 
 /// The colored (RGB) counterpart of [`our_address`], at
-/// `m/86'/827166'/0'/chain/index` - the account `create_utxo` funds.
+/// `m/86'/827166'/0'/chain/index`. `create_utxo` funds this account.
 #[allow(dead_code)]
 fn our_colored_address(wallet: &EnclaveWallet, chain: u32, index: u32) -> OurAddress {
     address_on_account(wallet, &wallet.account_xpub_colored, 827166, chain, index)
@@ -288,17 +282,15 @@ fn foreign_xonly(b: u8) -> bitcoin::XOnlyPublicKey {
         .0
 }
 
-/// Build a plain-BTC PSBT spending `input_sats` from the enclave's own address
-/// and paying `outputs`. Inputs carry the key-path metadata that makes them
-/// signable by the enclave, so an output paying back to `from.spk` is
-/// recognised as self-pay with no output metadata at all.
+/// Build a plain-BTC PSBT that spends `input_sats` from an enclave address and
+/// pays `outputs`. Inputs carry key-path metadata, so the enclave sees an output
+/// to `from.spk` as self-pay without output metadata.
 #[allow(dead_code)]
 fn btc_psbt(from: &OurAddress, input_sats: u64, outputs: &[(bitcoin::ScriptBuf, u64)]) -> Vec<u8> {
     btc_psbt_from(&[(from, input_sats)], outputs)
 }
 
-/// [`btc_psbt`] over any number of the enclave's own inputs, each on its own
-/// deterministic prevout.
+/// [`btc_psbt`] over many enclave inputs, each on its own deterministic prevout.
 #[allow(dead_code)]
 fn btc_psbt_from(inputs: &[(&OurAddress, u64)], outputs: &[(bitcoin::ScriptBuf, u64)]) -> Vec<u8> {
     use bitcoin::hashes::Hash;
@@ -341,9 +333,9 @@ fn btc_psbt_from(inputs: &[(&OurAddress, u64)], outputs: &[(bitcoin::ScriptBuf, 
     psbt.serialize()
 }
 
-/// Like [`btc_psbt`], but each output is one of the enclave's own addresses and
-/// carries the BIP-371 metadata (`PSBT_OUT_TAP_INTERNAL_KEY` /
-/// `_TAP_BIP32_DERIVATION`) that proves it - the shape `create_utxo` produces.
+/// Like [`btc_psbt`], but each output is an enclave address with the BIP-371
+/// metadata that proves it (`PSBT_OUT_TAP_INTERNAL_KEY`,
+/// `_TAP_BIP32_DERIVATION`). `create_utxo` produces this shape.
 #[allow(dead_code)]
 fn btc_psbt_to_ours(from: &OurAddress, input_sats: u64, outputs: &[(&OurAddress, u64)]) -> Vec<u8> {
     use bitcoin::psbt::Psbt;
@@ -399,10 +391,8 @@ fn sign_psbt_request(
 
 // EVM signing tests
 
-// No happy-path `test_sign_evm_roundtrip` here: the harness leaves
-// `ctx.rgb_validator` as `None`, so the handler refuses to sign fundsOut
-// without a validator having run, and a real one would need an Esplora mock.
-// Happy-path coverage lives in the `evm::crosscheck` unit tests.
+// No happy-path EVM sign test here. The harness has no `rgb_validator`, so the
+// handler refuses fundsOut. The `evm::crosscheck` unit tests cover the happy path.
 
 #[test]
 fn test_sign_evm_before_init() {
@@ -421,9 +411,8 @@ fn test_sign_evm_before_init() {
 
 // EVM enriched cross-check tests
 
-/// P0 regression: the host-supplied `consignment_valid` flag must not bypass
-/// validation. `consignment_valid: true` with `consignment: []` once produced a
-/// signature with no RGB backing; empty bytes are now rejected regardless.
+/// P0 regression: the host `consignment_valid` flag must not bypass validation.
+/// The enclave rejects empty consignment bytes, whatever the flag says.
 #[cfg(all(feature = "rgb-validation", rgb_to_evm))]
 #[test]
 fn test_sign_evm_rejects_consignment_valid_with_empty_bytes() {
@@ -465,15 +454,13 @@ fn test_sign_evm_rejects_consignment_valid_with_empty_bytes() {
     }
 }
 
-/// The handler-level check fires when bytes are present but the in-enclave
-/// validator did not run: production must never sign fundsOut against
-/// unvalidated bytes. The harness leaves `rgb_validator` as `None`.
+/// The enclave must not sign fundsOut when bytes are present but the in-enclave
+/// validator did not run. The harness leaves `rgb_validator` as `None`.
 #[cfg(all(feature = "rgb-validation", rgb_to_evm))]
 #[test]
 fn test_sign_evm_rejects_funds_out_without_validator() {
-    // Pinned config so the request clears the production fail-closed gate
-    // and the pinned cross-check, leaving the handler-level
-    // "validator didn't run" check as the failing predicate under test.
+    // The pinned config passes the fail-closed gate and the pinned cross-check.
+    // Only the "validator did not run" check can fail.
     let port = common::start_test_server_with_config(|_| {}, pinned_bridge_config());
 
     let init_req = EnclaveRequest {
@@ -493,9 +480,7 @@ fn test_sign_evm_rejects_funds_out_without_validator() {
     match &resp.response {
         Some(Response::Error(e)) => {
             assert_eq!(e.code, 3, "cross-check failures should use code 3");
-            // Either the handler-level check (no validator) or the SPV
-            // gate (also requires a validated consignment) fires -
-            // current source validation fails first when no validator is wired.
+            // Source validation fails first when no validator is set.
             assert!(
                 e.message.contains("rgb_validator"),
                 "expected rgb_validator rejection, got: {}",
@@ -507,11 +492,10 @@ fn test_sign_evm_rejects_funds_out_without_validator() {
 }
 
 /// Regression (CcdSource -> EvmDestination fundsOut): a Concordium-sourced
-/// release must sign. A CCD source carries no RGB consignment, so the RGB->EVM
-/// fundsOut binding must be skipped for it. Exercises the full `handle_sign`
-/// path with the real fundsOut selector, which the
-/// `route_proofs_accept_ccd_source_to_evm_destination` unit test does not
-/// reach.
+/// release must sign. A CCD source has no RGB consignment, so the RGB->EVM
+/// fundsOut binding does not apply. This covers the full `handle_sign` path with
+/// the real selector, which `route_proofs_accept_ccd_source_to_evm_destination`
+/// does not reach.
 #[cfg(all(feature = "rgb-validation", feature = "ccd"))]
 #[test]
 fn test_sign_evm_accepts_ccd_source_funds_out() {
@@ -556,7 +540,7 @@ fn test_sign_evm_accepts_ccd_source_funds_out() {
                 "expected a non-empty EVM signature for CcdSource -> EvmDestination fundsOut"
             );
         }
-        // A regression re-introduces the unconditional RGB binding, which fails here.
+        // An unconditional RGB binding fails here.
         other => panic!(
             "expected EvmSignature for CcdSource -> EvmDestination fundsOut, got {:?}",
             other
@@ -629,11 +613,10 @@ fn test_sign_evm_refuses_lz_selector_without_lz_release() {
     }
 }
 
-/// Fail-closed regression: a build that can validate
-/// consignments must refuse to sign with no operator config pinned, rather than
-/// degrading to the listener-trusting model. The integration harness builds the
-/// library without `cfg(test)`, so the production guard is active. The
-/// unconfigured `BridgeConfig` is built explicitly so env cannot interfere.
+/// Fail-closed: a build that can validate consignments must not sign without a
+/// pinned operator config. It must not fall back to trusting the listener.
+/// The harness builds the library without `cfg(test)`, so the production guard
+/// is active. The test builds the empty `BridgeConfig`, so env cannot interfere.
 #[cfg(all(feature = "rgb-validation", rgb_to_evm))]
 #[test]
 fn test_sign_evm_rejects_unconfigured_bridge_config() {
@@ -654,8 +637,7 @@ fn test_sign_evm_rejects_unconfigured_bridge_config() {
     };
     common::send_request(port, &init_req);
 
-    // A fully-formed, otherwise-valid fundsOut request - the only thing
-    // wrong is that the enclave was never provisioned with a pin.
+    // A valid fundsOut request. Only the pinned config is missing.
     let sign_req = EnclaveRequest {
         request: Some(Request::Sign(valid_sign_evm_request(1000, 50))),
     };
@@ -670,14 +652,13 @@ fn test_sign_evm_rejects_unconfigured_bridge_config() {
     }
 }
 
-// Amount binding now runs through route proofs: RGB source validation emits the
-// consignment amount, EVM destination validation decodes `fundsOut.amount` and
-// adds `calldata_commission`, then `validate_route_proofs` compares the two.
+// Route proofs bind the amount. RGB source validation emits the consignment
+// amount. EVM destination validation decodes `fundsOut.amount` and adds
+// `calldata_commission`. `validate_route_proofs` compares the two.
 
 /// A build without `spv` must refuse every `fundsOut`, even with no
-/// merkle_proofs. Without SPV the enclave can only anchor witness txs through
-/// the host-controlled Esplora resolver, so a fabricated anchor would be signed
-/// against. The earlier guard fired only on non-empty `merkle_proofs[]`.
+/// merkle_proofs. Without SPV, only the host-controlled Esplora resolver anchors
+/// witness txs, so the enclave could sign against a fabricated anchor.
 ///
 /// `not(rgb-validation)` implies `not(spv)` for any build that compiles. The
 /// refusal fires in RGB source validation, whose message names the missing
@@ -696,9 +677,7 @@ fn test_no_spv_build_refuses_funds_out_even_without_merkle_proofs() {
     };
     common::send_request(port, &init_req);
 
-    // A fundsOut request carrying no merkle_proofs - exactly the shape that
-    // previously bypassed the no-validation guard: the refusal
-    // must fire even when the request supplies no SPV proofs at all.
+    // A fundsOut request with no merkle_proofs. The refusal must still fire.
     let req = valid_sign_evm_request(1000, 50);
     match &req.source_network {
         Some(SourceNetwork::RgbSource(source)) => assert!(
@@ -756,10 +735,8 @@ fn test_sign_psbt_before_init() {
 
 // PSBT enriched cross-check tests
 
-/// The listener's `evm_event_valid` / `evm_event_finalized`
-/// booleans neither authorize nor block signing. With both `false` the request
-/// is never rejected with the old boolean-driven messages; whatever else
-/// happens to it, the booleans are not what decide.
+/// The listener `evm_event_valid` and `evm_event_finalized` booleans do not
+/// authorize or block signing. With both `false`, no rejection comes from them.
 #[test]
 #[cfg(evm_to_rgb)]
 fn test_sign_psbt_ignores_listener_evm_booleans() {
@@ -787,8 +764,7 @@ fn test_sign_psbt_ignores_listener_evm_booleans() {
     };
     let resp = common::send_request(port, &sign_req);
 
-    // Any error is fine (other real checks may reject this synthetic request),
-    // but it must NOT be the removed listener-boolean checks.
+    // Other checks can reject this synthetic request, but not the booleans.
     if let Some(Response::Error(e)) = &resp.response {
         assert!(
             !e.message.contains("not yet finalized")
@@ -799,10 +775,9 @@ fn test_sign_psbt_ignores_listener_evm_booleans() {
     }
 }
 
-/// A build without the `evm-rpc` FundsIn verifier must
-/// refuse a bridge-mode PSBT rather than sign it on the removed listener
-/// booleans. Exercises the minimal build, where the `evm-rpc` fail-closed guard
-/// is the first bridge-mode gate.
+/// A build without the `evm-rpc` FundsIn verifier must refuse a bridge-mode
+/// PSBT. In the minimal build, the `evm-rpc` fail-closed guard is the first
+/// bridge-mode gate.
 #[cfg(not(feature = "rgb-validation"))]
 #[test]
 fn test_no_evm_rpc_build_refuses_bridge_psbt() {
@@ -818,8 +793,8 @@ fn test_no_evm_rpc_build_refuses_bridge_psbt() {
     common::send_request(port, &init_req);
 
     // Bridge mode (EVM source + RGB destination) with a shape-valid PSBT and
-    // consistent amounts, so it clears the route cross-checks and reaches the
-    // evm-rpc fail-closed guard. The listener booleans are set true but ignored.
+    // consistent amounts. It passes the route cross-checks and reaches the
+    // evm-rpc guard. The listener booleans are true but ignored.
     let sign_req = EnclaveRequest {
         request: Some(Request::Sign(sign_psbt_request(
             vec![0xAA; 32],
@@ -849,9 +824,9 @@ fn test_no_evm_rpc_build_refuses_bridge_psbt() {
 #[test]
 #[cfg(all(feature = "evm-rpc", evm_to_rgb))]
 fn test_sign_psbt_rejects_amount_mismatch() {
-    // A bridge-mode PSBT is refused before any RGB work unless the enclave can
-    // verify the FundsIn deposit itself, so wire a stub that reports the very
-    // deposit this request declares. What rejects below is then the RGB bind.
+    // The enclave refuses a bridge-mode PSBT unless it can verify the FundsIn
+    // deposit. The stub reports the deposit that this request declares, so the
+    // RGB bind is what rejects.
     let port = common::start_test_server_with_evm_rpc(Box::new(common::deposit_stub::OneDeposit {
         operation_id: [0x33; 32],
         gross: 100,
@@ -896,11 +871,9 @@ fn test_sign_psbt_rejects_amount_mismatch() {
     }
 }
 
-// Bridge SignPsbt no longer has a vanilla bypass
-
-// In a production (rgb-validation) build, a SignPsbt with no consignment is
-// rejected fail-closed - the empty-`evm_tx_hash` "vanilla mode" that used to
-// skip every bridge predicate is gone. This is the core regression gate.
+// A production (rgb-validation) build rejects a SignPsbt with no consignment.
+// An empty `evm_tx_hash` does not select a "vanilla mode" that skips the
+// bridge checks.
 #[cfg(all(feature = "rgb-validation", evm_to_rgb))]
 #[test]
 #[cfg(feature = "evm-rpc")]
@@ -942,17 +915,16 @@ fn test_sign_psbt_rejects_missing_evm_source_hash() {
     }
 }
 
-// A length-valid but all-zero evm_tx_hash must not
-// read as a "vanilla mode" signal. SignPsbt runs the bridge cross-checks
-// unconditionally and fails closed when no consignment binds the PSBT.
-// Companion to `test_sign_psbt_rejects_missing_evm_source_hash`, which covers
-// the zero-length hash rejected at the 32-byte length check.
+// A length-valid, all-zero evm_tx_hash is not a "vanilla mode" signal.
+// SignPsbt always runs the bridge cross-checks and fails closed when no
+// consignment binds the PSBT. `test_sign_psbt_rejects_missing_evm_source_hash`
+// covers the zero-length hash.
 #[cfg(all(feature = "rgb-validation", evm_to_rgb))]
 #[test]
 #[cfg(feature = "evm-rpc")]
 fn test_sign_psbt_zero_evm_hash_is_bridge_mode_not_vanilla() {
-    // Deposit stub, so the run reaches the consignment bind rather than
-    // stopping at the FundsIn-verification gate.
+    // The deposit stub lets the run pass the FundsIn gate and reach the
+    // consignment bind.
     let port = common::start_test_server_with_evm_rpc(Box::new(common::deposit_stub::OneDeposit {
         operation_id: [0x33; 32],
         gross: 1000,
@@ -969,10 +941,8 @@ fn test_sign_psbt_zero_evm_hash_is_bridge_mode_not_vanilla() {
     };
     common::send_request(port, &init_req);
 
-    // All-zero 32-byte hash: passes the length check (unlike the empty-hash
-    // sibling test) but is the exact "looks like no tx" shape the removed
-    // vanilla-inference keyed on. The RgbDestination carries no consignment, so
-    // bridge mode must fail closed - never sign this as a vanilla PSBT.
+    // An all-zero 32-byte hash passes the length check. The RgbDestination has
+    // no consignment, so bridge mode must fail closed.
     let sign_req = EnclaveRequest {
         request: Some(Request::Sign(sign_psbt_request(
             vec![0u8; 32],
@@ -989,8 +959,7 @@ fn test_sign_psbt_zero_evm_hash_is_bridge_mode_not_vanilla() {
     match &resp.response {
         Some(Response::Error(e)) => {
             assert_eq!(e.code, 3, "bridge cross-check failures use code 3");
-            // Bridge mode ran and rejected the missing consignment binding -
-            // the zeroed hash did NOT route the request onto the vanilla path.
+            // Bridge mode ran and rejected the missing consignment binding.
             assert!(
                 e.message.contains("consignment"),
                 "expected a consignment-binding rejection (bridge mode), got: {}",
@@ -1004,21 +973,19 @@ fn test_sign_psbt_zero_evm_hash_is_bridge_mode_not_vanilla() {
     }
 }
 
-// Plain-BTC signing (SignBtc): structural input guard + output self-ownership
-// + pinned value-spent cap
+// Plain-BTC signing (SignBtc): structural input guard, output self-ownership,
+// and pinned value-spent cap.
 //
-// The destination policy is not configuration: every output must pay back to a
-// script the enclave proves it controls. These tests build their PSBTs the way
-// a listener must, deriving the enclave's own address from the account xpub
-// `InitializeKey` returns.
+// The destination policy is not configuration. Each output must pay to a script
+// that the enclave proves it controls. As a listener does, these tests derive
+// the enclave address from the account xpub that `InitializeKey` returns.
 
 #[test]
 #[cfg(evm_to_rgb)]
 fn test_sign_btc_before_init() {
     let port = common::start_test_server_with_config(|_| {}, btc_capped_config(100_000));
 
-    // No key, so the request can't even be validated (the output check runs
-    // against the enclave's own derivation) - it must fail, not sign.
+    // With no key, the output check cannot run, so the request must fail.
     let sign_req = EnclaveRequest {
         request: Some(Request::SignBtc(SignBtcRequest {
             psbt_bytes: minimal_valid_psbt_bytes(),
@@ -1032,15 +999,12 @@ fn test_sign_btc_before_init() {
     );
 }
 
-// The structural guard for the plain-BTC path (refusing to co-sign a
-// Colored input under SignBtc's vanilla-only scope) is covered by
-// `signing::taproot::tests::scoped_vanilla_refuses_a_colored_input`. Paying
-// into the colored account is legitimate: see
-// `test_sign_btc_accepts_create_utxo_colored_output` below.
+// `signing::taproot::tests::scoped_vanilla_refuses_a_colored_input` covers the
+// structural guard: SignBtc does not sign a Colored input. An output to the
+// colored account is valid; see `test_sign_btc_accepts_create_utxo_colored_output`.
 
-/// `create_utxo`: vanilla input, one fresh Colored (RGB-allocation) output plus
-/// vanilla change. Both destinations are the enclave's, so both must pass the
-/// self-ownership check and the PSBT must get signed.
+/// `create_utxo`: a vanilla input, one new Colored (RGB-allocation) output, and
+/// vanilla change. The enclave owns both destinations, so the PSBT must sign.
 #[test]
 #[cfg(evm_to_rgb)]
 fn test_sign_btc_accepts_create_utxo_colored_output() {
@@ -1049,9 +1013,8 @@ fn test_sign_btc_accepts_create_utxo_colored_output() {
     let ours = our_address(&wallet, 0, 0);
     let colored = our_colored_address(&wallet, 0, 0);
 
-    // The real shape: colored allocation outputs and vanilla change, each a
-    // key-path output of the enclave's own key. Rule (C) proves both from the
-    // output metadata, so none of it counts against BTC_MAX_UNOWNED_SATS.
+    // Both outputs are key-path outputs of the enclave key. Rule (C) proves both
+    // from the output metadata, so neither counts against BTC_MAX_UNOWNED_SATS.
     let sign_req = EnclaveRequest {
         request: Some(Request::SignBtc(SignBtcRequest {
             psbt_bytes: btc_psbt_to_ours(&ours, 60_000, &[(&colored, 5_000), (&ours, 50_000)]),
@@ -1104,7 +1067,7 @@ fn test_sign_btc_second_pass_after_partial_merge_still_signs() {
         other => panic!("first pass should sign both inputs, got {:?}", other),
     };
 
-    // The orchestrator merged only A's contribution: same tx, same prevouts.
+    // The orchestrator merges only the A signature. The tx and prevouts stay.
     let mut partial = signed.clone();
     partial.inputs[1].tap_key_sig = None;
     let sig_a = signed.inputs[0].tap_key_sig.expect("A signed on pass 1");
@@ -1124,7 +1087,7 @@ fn test_sign_btc_second_pass_after_partial_merge_still_signs() {
         "A's signature must come back untouched"
     );
 
-    // Both signatures verify against the same sighashes, independently.
+    // Each signature must verify against its own sighash.
     let prevouts: Vec<TxOut> = second
         .inputs
         .iter()
@@ -1171,9 +1134,8 @@ fn test_sign_btc_rejects_output_the_enclave_does_not_control() {
     let wallet = init_wallet(port);
     let ours = our_address(&wallet, 0, 0);
 
-    // Input is the enclave's own, but the output pays an address it has no key
-    // in - the redirect the old allowlist was meant to stop, now caught without
-    // any operator configuration.
+    // The input is the enclave's, but the output pays an address with no enclave
+    // key. The self-ownership check stops this redirect with no operator config.
     let sign_req = EnclaveRequest {
         request: Some(Request::SignBtc(SignBtcRequest {
             psbt_bytes: btc_psbt(&ours, 60_000, &[(foreign_address(), 10_000)]),
@@ -1201,8 +1163,7 @@ fn test_sign_btc_rejects_input_value_over_cap() {
     let wallet = init_wallet(port);
     let ours = our_address(&wallet, 0, 0);
 
-    // Self-paying destination at a sane fee, but the input value spent
-    // exceeds the cap.
+    // A self-paying output at a sane fee, but the input value is over the cap.
     let sign_req = EnclaveRequest {
         request: Some(Request::SignBtc(SignBtcRequest {
             psbt_bytes: btc_psbt(&ours, 200_000, &[(ours.spk.clone(), 190_000)]),
@@ -1223,9 +1184,9 @@ fn test_sign_btc_rejects_input_value_over_cap() {
     }
 }
 
-/// #248 end to end: every output pays back to custody and the value cap is
-/// met, yet ~98% of the input would go to miners. The pinned fee policy
-/// refuses before the signer is reached.
+/// #248 end to end: each output pays back to custody and the value cap holds,
+/// but about 98% of the input goes to miners. The pinned fee policy refuses
+/// before the signer runs.
 #[test]
 #[cfg(evm_to_rgb)]
 fn test_sign_btc_rejects_a_fee_that_burns_most_of_the_input() {
@@ -1253,10 +1214,8 @@ fn test_sign_btc_rejects_a_fee_that_burns_most_of_the_input() {
     }
 }
 
-/// End-to-end happy path: a PSBT built only from the enclave's published xpub
-/// passes policy and gets signed. This is the check that the rework is actually
-/// usable - under the old allowlist an operator had no way to pin this address
-/// before the enclave that owns it existed.
+/// End-to-end happy path: a PSBT built only from the published enclave xpub
+/// passes policy and gets signed.
 #[test]
 #[cfg(evm_to_rgb)]
 fn test_sign_btc_accepts_self_paying_psbt_under_cap() {
@@ -1280,10 +1239,10 @@ fn test_sign_btc_accepts_self_paying_psbt_under_cap() {
     }
 }
 
-/// A fresh change address on a script tree whose leaf names one of our keys,
-/// "proven" only by coordinator-supplied output metadata. Rule (B) used to
-/// accept this; the leaf says nothing about the rest of the tree, so it is
-/// refused. Key-path change of our own key is proven by rule (C) instead.
+/// A new change address on a script tree whose leaf names one of our keys.
+/// Only coordinator output metadata "proves" it. The leaf says nothing about
+/// the rest of the tree, so the enclave refuses it. Rule (C) proves key-path
+/// change of our own key.
 #[test]
 #[cfg(evm_to_rgb)]
 fn test_sign_btc_rejects_fresh_change_address_proven_only_by_metadata() {
@@ -1359,8 +1318,8 @@ fn test_sign_btc_rejects_fresh_change_address_proven_only_by_metadata() {
 
 /// A bridge input pays a script that a second, small input also spends. The
 /// second input is our key path, but its output key also commits to a script
-/// tree with a foreign spend path, so paying its script is exempt only up to
-/// that input's own value.
+/// tree with a foreign spend path. So an output to that script is exempt only
+/// up to the value of that input.
 #[test]
 #[cfg(evm_to_rgb)]
 fn test_sign_btc_refuses_bridge_value_paid_to_a_foreign_input_script() {
@@ -1452,8 +1411,8 @@ fn test_sign_btc_refuses_bridge_value_paid_to_a_foreign_input_script() {
 }
 
 // A production (rgb-validation) build refuses plain-BTC signing while the
-// value-spent cap is unconfigured - fail-closed, mirroring the EVM path. The
-// destination rule needs no config, so it is not part of this gate.
+// value-spent cap is unset, as the EVM path does. The destination rule needs
+// no config, so it is not part of this gate.
 #[cfg(all(feature = "rgb-validation", evm_to_rgb))]
 #[test]
 fn test_sign_btc_uncapped_fails_closed_under_rgb_validation() {
@@ -1463,8 +1422,7 @@ fn test_sign_btc_uncapped_fails_closed_under_rgb_validation() {
 
     let sign_req = EnclaveRequest {
         request: Some(Request::SignBtc(SignBtcRequest {
-            // Self-paying (passes the structural guards) so the failure is
-            // specifically the unset cap.
+            // Self-paying, so only the unset cap can fail.
             psbt_bytes: btc_psbt(&ours, 10_000, &[(ours.spk.clone(), 9_000)]),
         })),
     };
@@ -1565,12 +1523,10 @@ fn test_sign_evm_rejects_consignment_without_hash() {
     }
 }
 
-// Raw message signing (removed)
+// Raw message signing
 
-/// `SignRawMessage` used to sign arbitrary caller-supplied bytes with the main
-/// bridge key under an EIP-191 envelope, gated by no feature and no policy. It
-/// was removed; the proto variant still exists, so the enclave must refuse it
-/// rather than sign anything.
+/// The proto still has `SignRawMessage`. Signing it would put the bridge key on
+/// caller bytes under EIP-191 with no policy, so the enclave must refuse it.
 #[test]
 fn test_sign_raw_message_is_refused() {
     let port = common::start_test_server();
@@ -1610,8 +1566,8 @@ fn test_sign_raw_message_is_refused() {
 // EVM gas-tx (SignRawDigest) shape-allowlist tests
 //
 // These run through the real handler, so the fail-closed gate in
-// `networks::evm::gas_tx` is active. They cover the accept path and the two
-// drain vectors.
+// `networks::evm::gas_tx` is active. They cover the accept path, the drain
+// vectors, the caps, and the selector allowlist.
 
 /// Minimal RLP encoder for building gas-tx fixtures.
 #[cfg(rgb_to_evm)]
@@ -1672,7 +1628,8 @@ fn rlp_list(items: &[Vec<u8>]) -> Vec<u8> {
     out
 }
 
-/// Unsigned EIP-1559 preimage: `0x02 || rlp([chainId, nonce, maxPrio, maxFee, gas, to, value, data, accessList])`.
+/// Unsigned EIP-1559 preimage:
+/// `0x02 || rlp([chainId, nonce, maxPrio, maxFee, gas, to, value, data, accessList])`.
 #[cfg(rgb_to_evm)]
 fn eip1559_unsigned(chain_id: u64, to: &[u8; 20], value: u64) -> Vec<u8> {
     let body = rlp_list(&[
@@ -1771,7 +1728,7 @@ fn test_gas_tx_rejects_opaque_digest() {
     let port = common::start_test_server_with_config(|_| {}, gas_pinned_config());
     init(port);
 
-    // Legacy opaque-digest request (no preimage) must be refused.
+    // An opaque-digest request with no preimage must be refused.
     let resp = common::send_request(
         port,
         &EnclaveRequest {
@@ -1801,7 +1758,7 @@ fn test_gas_tx_rejects_drain_to_attacker() {
     let port = common::start_test_server_with_config(|_| {}, gas_pinned_config());
     init(port);
 
-    // Well-formed tx, but to an attacker address - the drain this rule closes.
+    // A well-formed tx to an attacker address: the drain that this rule stops.
     let tx = eip1559_unsigned(1, &[0xEE; 20], 0);
     let resp = common::send_request(
         port,
@@ -1842,7 +1799,7 @@ fn test_gas_tx_rejects_gas_limit_over_cap() {
     let port = common::start_test_server_with_config(|_| {}, gas_pinned_config());
     init(port);
 
-    // gasLimit 40_000 exceeds the pinned 30_000 cap - the fee-griefing bound.
+    // gasLimit 40_000 is over the pinned 30_000 cap, which bounds fee griefing.
     let tx = eip1559_full(&[0xAA; 20], 100, 40_000, &[]);
     match &sign_gas_tx(port, tx).response {
         Some(Response::Error(e)) => {
@@ -1906,8 +1863,7 @@ fn test_gas_tx_rejects_disallowed_selector() {
 #[test]
 #[cfg(rgb_to_evm)]
 fn test_gas_tx_fails_closed_when_caps_unpinned() {
-    // A config that pins the destination but NOT the caps must refuse to sign:
-    // an uncapped gas tx is never produced (fail-closed).
+    // A config that pins the destination but not the caps must fail closed.
     let mut cfg = gas_pinned_config();
     cfg.gas_tx_max_gas_limit = 0;
     cfg.gas_tx_max_fee_per_gas = 0;

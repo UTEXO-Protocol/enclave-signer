@@ -1,19 +1,16 @@
-//! In-enclave Bitcoin SPV: header chain + Merkle inclusion proof
-//! verification.
+//! In-enclave Bitcoin SPV: header chain and Merkle inclusion proof checks.
 //!
-//! - `chain.rs`: in-memory header chain anchored to a compile-time checkpoint,
-//!   with bounded reorg support.
-//! - `validation.rs`: mainnet PoW + retarget enforcement; signet and regtest
-//!   are chain-linkage only. BIP-325 signet signature verification is not
-//!   implemented - see that module's notes.
+//! - `chain.rs`: in-memory header chain from a compile-time checkpoint, with
+//!   bounded reorg support.
+//! - `validation.rs`: PoW and retarget checks on mainnet and testnet3. Signet
+//!   and regtest check chain linkage only. BIP-325 signet signatures are not
+//!   verified.
 //! - `merkle.rs`: Bitcoin Merkle inclusion proof verifier.
 //! - `checkpoint.rs`: the compile-time checkpoint constants.
-//!
-//! See docs/spv-review.md for the full design and open questions.
 
 pub mod chain;
 pub mod checkpoint;
-// Merkle proofs anchor an RGB source's witness txs: the burn direction.
+// Merkle proofs anchor the witness txs of an RGB source (burn direction).
 #[cfg(rgb_to_evm)]
 pub mod merkle;
 pub mod types;

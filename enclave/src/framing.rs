@@ -3,7 +3,7 @@ use std::io::{Read, Write};
 
 use crate::error::{EnclaveError, Result};
 
-const MAX_MESSAGE_SIZE: u32 = 4 * 1024 * 1024; // 4 MB
+const MAX_MESSAGE_SIZE: u32 = 4 * 1024 * 1024; // 4 MiB
 
 /// Read a length-prefixed protobuf message from a stream.
 /// Wire format: [4-byte LE u32 length][protobuf bytes].

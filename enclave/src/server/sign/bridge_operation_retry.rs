@@ -17,8 +17,7 @@ use crate::server::{handle_connection, ServerContext};
 use crate::state::EnclaveState;
 use crate::test_support::{bridge_funds_in_data, regtest_header_chain, FakeEvm};
 
-/// Fixed seed, so every derived key and every txid is the same on each
-/// run.
+/// Fixed seed, so all derived keys and txids are the same on each run.
 const SEED: [u8; 64] = [0x21; 64];
 const ASSET_ID: &str = "rgb:test-asset";
 const BRIDGE_CONTRACT: [u8; 20] = [0xAA; 20];
@@ -29,8 +28,8 @@ const DEPOSIT_BLOCK: u64 = 100;
 const GROSS: u64 = 100_000;
 const COMMISSION: u64 = 1_000;
 
-/// Canonical `BridgeFundsIn` signature, as the deposit verifier selects logs
-/// by. A local copy, so a changed production signature fails this test.
+/// Canonical `BridgeFundsIn` signature that the deposit verifier uses to
+/// select logs. A local copy, so a change in production fails this test.
 const FUNDS_IN_SIG: &str = "BridgeFundsIn(bytes32,bytes32,address,uint256,uint256,\
      uint256,uint256,uint256,uint256,uint256,string,bytes)";
 const NET: u64 = GROSS - COMMISSION;
@@ -39,8 +38,7 @@ const NET: u64 = GROSS - COMMISSION;
 const INVOICE: &str = "rgb:~/~/~/bc:utxob:dYwB28dy-yD6EBgm-MO~UKN_-FyEEdBL-E9hw8Oj-i9KxH5b-e9vZL";
 const RECIPIENT_SEAL: &str = "utxob:dYwB28dy-yD6EBgm-MO~UKN_-FyEEdBL-E9hw8Oj-i9KxH5b-e9vZL";
 
-/// A caller that is gone: the request still reads back, every write
-/// fails.
+/// A disconnected caller: the request is readable, and all writes fail.
 struct DeadCaller(Cursor<Vec<u8>>);
 
 impl Read for DeadCaller {

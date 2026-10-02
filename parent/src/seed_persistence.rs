@@ -1,6 +1,7 @@
 //! Optional seed storage bridge for AWS credentials and opaque KMS ciphertext.
-//! The enclave chooses the flow, performs recipient-attested KMS calls and signs.
-//! This is a separate, bounded JSON protocol, not the parent protobuf framing.
+//! The enclave selects the flow, makes the recipient-attested KMS calls and
+//! does all signing. The bridge uses its own bounded JSON protocol, not the
+//! parent protobuf framing.
 
 use std::{
     collections::HashMap,
@@ -39,7 +40,7 @@ const OPERATIONS_PER_CID: usize = 2;
 const OPERATION_RATE: f64 = 4.0;
 const OPERATION_BURST: f64 = 8.0;
 
-/// Fixed public diagnostics only: never wrap an SDK error or request content.
+/// Fixed public diagnostic codes. Never wrap an SDK error or request content.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum Error {
     #[error("configuration_error")]
@@ -157,7 +158,7 @@ const CONFIG_KEYS: [&str; 5] = [
     "KMS_BROKER_TCP",
 ];
 
-/// Shared activation predicate for configuration and safe startup logging.
+/// True when any seed storage variable is set. Config and startup logging use it.
 pub fn configured() -> bool {
     CONFIG_KEYS
         .iter()
@@ -217,8 +218,8 @@ fn credential_error(error: &aws_credential_types::provider::error::CredentialsEr
 }
 
 fn sdk_error<E: ProvideErrorMetadata + std::error::Error + 'static>(error: &SdkError<E>) -> Error {
-    // Identity-provider failures can be nested inside dispatch errors. Inspect
-    // types only, never format provider diagnostics or signed request details.
+    // Credential provider failures can be nested in dispatch errors. Inspect
+    // types only. Never format provider diagnostics or signed request details.
     let mut source = std::error::Error::source(error);
     while let Some(cause) = source {
         if let Some(credentials) =
@@ -336,8 +337,8 @@ impl Broker {
         if length.is_some_and(|size| size <= 0 || size > MAX_CIPHERTEXT as i64) {
             return Err(Error::InvalidCiphertext);
         }
-        // The SDK operation timeout ends at the headers. The caller's absolute
-        // timeout also covers this capped streaming read, including a trickle.
+        // The SDK operation timeout stops at the headers. The caller deadline
+        // also covers this capped body read, including a slow trickle.
         let mut blob = Vec::new();
         output
             .body
@@ -373,8 +374,8 @@ impl Broker {
                     || service_error_is(&error, 409, &["ConditionalRequestConflict"]) => {}
             Err(error) => return Err(sdk_error(&error)),
         }
-        // Even a successful creator returns a GET of the committed winner.
-        // A timed-out PUT can commit remotely; the next initialization loads it.
+        // Always return a GET of the committed object, also after our own PUT.
+        // A timed-out PUT can still commit. The next initialization loads it.
         self.load().await?.ok_or(Error::AwsUnavailable)
     }
 
@@ -404,8 +405,9 @@ impl Broker {
         }
         match request {
             Request::Credentials {} => {
-                // Admission grants the FULL role. Use a dedicated least-privilege
-                // role; CID reuse is not attestation. KMS verifies the recipient.
+                // An admitted peer gets the full role. Use a dedicated
+                // least-privilege role. A CID is not attestation: KMS
+                // verifies the recipient.
                 let credentials = self
                     .credentials
                     .provide_credentials()
@@ -442,8 +444,8 @@ impl Broker {
         self.validate(&request)?;
         let _permits = acquire(&self.operations, &peer.operations)?;
         peer.take_token(Instant::now())?;
-        // Cancellation drops the entire async SDK/body future; there is no
-        // detached blocking worker that can accumulate after repeated timeouts.
+        // Cancel drops the full async SDK and body future. No blocking worker
+        // stays behind after a timeout.
         timeout_at(
             deadline.min(Instant::now() + OPERATION_TIMEOUT),
             self.dispatch(request),
@@ -476,8 +478,8 @@ impl Broker {
 }
 
 fn json(value: &impl Serialize) -> Result<Zeroizing<Vec<u8>>, Error> {
-    // Fixed storage avoids reallocations leaving credential fragments behind.
-    // Cursor refuses overflow before any oversized response is allocated.
+    // A fixed buffer stops reallocations that leave credential fragments.
+    // The cursor rejects overflow, so no oversized response is allocated.
     let mut bytes = Zeroizing::new(vec![0; MAX_FRAME]);
     let length = {
         let mut cursor = std::io::Cursor::new(bytes.as_mut_slice());
@@ -546,7 +548,7 @@ impl Listener {
         match self {
             Self::Tcp(listener) => {
                 let (stream, address) = listener.accept().await?;
-                // All loopback callers share one quota; TCP is development only.
+                // TCP is for development only. All loopback callers share one quota.
                 Ok((
                     Box::new(stream),
                     if address.ip() == std::net::Ipv4Addr::LOCALHOST {
@@ -590,8 +592,8 @@ async fn serve(listener: Listener, broker: Arc<Broker>) {
     }
 }
 
-/// Bind before starting gRPC, so a partial persistence configuration fails startup.
-/// With no seed storage environment variables this performs no AWS work.
+/// Call before gRPC starts, so a partial configuration stops startup.
+/// Without seed storage variables, it does no AWS work.
 pub async fn start(parent: &Config) -> Result<Option<JoinHandle<()>>, Error> {
     if !configured() {
         return Ok(None);

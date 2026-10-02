@@ -8,7 +8,6 @@ use utexo_bridge_enclave::proto::*;
 fn initialize_and_get_keys() {
     let port = common::start_test_server();
 
-    // Initialize with new entropy
     let req = EnclaveRequest {
         request: Some(Request::InitializeKey(InitializeKeyRequest {
             seed: vec![],
@@ -40,7 +39,7 @@ fn initialize_and_get_keys() {
     assert!(!init_resp.btc_xpub.is_empty());
     assert!(init_resp.btc_xpub.starts_with("xpub"));
 
-    // Get keys - should return same values
+    // GetPublicKey must return the same keys.
     let req2 = EnclaveRequest {
         request: Some(Request::GetPublicKey(GetPublicKeyRequest {})),
     };
@@ -127,7 +126,7 @@ fn deterministic_seed_import() {
         other => panic!("expected InitializeKeyResponse, got {:?}", other),
     };
 
-    // Same seed on a fresh server should produce identical keys
+    // The same seed on a fresh server must produce the same keys.
     let port2 = common::start_test_server();
     let resp2 = common::send_request(port2, &req);
 
@@ -157,19 +156,16 @@ fn deterministic_seed_import() {
     assert_eq!(init1.btc_xpub, init2.btc_xpub);
 }
 
-// A canonical BIP-39 test vector - a stable, non-secret mnemonic used to
-// exercise the caller-supplied-mnemonic import path.
+// Canonical BIP-39 test vector. It is stable and not secret.
 const TEST_MNEMONIC: &str =
     "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
 
-/// Production build (`allow-seed-import` off): an `InitializeKey`
-/// carrying a caller-supplied seed or mnemonic must be rejected by the
-/// `#[cfg(not(feature = "allow-seed-import"))]` arm of `handle_initialize`. The
-/// rejection precedes any state mutation, so a later OS-entropy init on the
-/// same server still succeeds.
+/// Production build (`allow-seed-import` off): `handle_initialize` rejects a
+/// caller-supplied seed or mnemonic. The rejection occurs before any state
+/// change, so a later OS-entropy init on the same server succeeds.
 ///
-/// The counterpart is `dev_build_accepts_caller_supplied_seed_and_mnemonic`
-/// below; the gate is compile-time, so CI must run both feature profiles.
+/// The counterpart is `dev_build_accepts_caller_supplied_seed_and_mnemonic`.
+/// The gate is compile-time, so CI must run both feature profiles.
 #[test]
 #[cfg(not(feature = "allow-seed-import"))]
 fn production_build_rejects_caller_supplied_seed_and_mnemonic() {
@@ -218,8 +214,7 @@ fn production_build_rejects_caller_supplied_seed_and_mnemonic() {
         ),
     }
 
-    // The rejected imports must not have consumed initialization: a plain
-    // OS-entropy init on the same server still succeeds.
+    // The rejected imports must not consume initialization.
     let entropy_req = EnclaveRequest {
         request: Some(Request::InitializeKey(InitializeKeyRequest {
             seed: vec![],
@@ -235,9 +230,8 @@ fn production_build_rejects_caller_supplied_seed_and_mnemonic() {
     );
 }
 
-/// Dev build (`--features allow-seed-import`): the same
-/// `InitializeKey` call production rejects is accepted, installing the caller's
-/// seed / mnemonic. Each import uses a fresh server, since init is one-shot.
+/// Dev build (`--features allow-seed-import`): the enclave accepts the caller's
+/// seed or mnemonic. Each import uses a fresh server, because init is one-shot.
 #[test]
 #[cfg(feature = "allow-seed-import")]
 fn dev_build_accepts_caller_supplied_seed_and_mnemonic() {

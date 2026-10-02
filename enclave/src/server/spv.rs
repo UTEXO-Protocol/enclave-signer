@@ -1,26 +1,19 @@
 //! SPV header-sync requests: `SubmitHeaders` and `GetLastSavedBlock`.
 //!
-//! SPV-only; `server/mod.rs` gates the whole module on `spv`.
+//! `server/mod.rs` gates this module on `rgb-validation`.
 
 use super::context::ServerContext;
 use crate::error::Result;
 use crate::proto::enclave_response::Response;
 use crate::proto::*;
 
-// SPV header sync handlers. The chain itself lives in `ctx.header_chain`,
-// initialised at boot from the compile-time checkpoint for the active
-// network (see main.rs).
-//
-// A poisoned mutex means a previous handler panicked while holding the lock.
-// The only mutation is `submit_headers`, which never panics, but if it happens
-// the poison is cleared rather than wedging the enclave: all mutations are
-// atomic, so the chain is still consistent.
+// A poisoned mutex is recovered, not left to block the enclave.
+// All chain mutations are atomic, so the chain stays consistent.
 pub(super) fn handle_submit_headers(
     ctx: &ServerContext,
     req: SubmitHeadersRequest,
 ) -> Result<EnclaveResponse> {
-    // Cumulative rate limit: bound the aggregate submission rate across
-    // calls. The per-call cap is enforced inside `submit_headers`.
+    // Total rate limit across calls. `submit_headers` has the per-call cap.
     ctx.submit_rate_limiter
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())

@@ -105,8 +105,7 @@ vsock-proxy 8003 "kms.${AWS_REGION}.amazonaws.com" 443 --config kms-vsock-proxy.
 Permit outbound HTTPS to KMS/S3 and role access to IMDS. KMS TLS terminates in
 the enclave; the proxy only forwards bytes. The standard proxy restricts the
 destination, not source CIDs; isolation and process supervision belong to the
-host deployment. Do not run a second listener on `8003` or `8004`. KMS-enabled Helios
-uses `8005`/`8006` when enabled. No systemd units or deployment automation are
+host deployment. Do not run a second listener on `8003` or `8004`. No systemd units or deployment automation are
 provided by this feature.
 
 ## AWS permissions and persistence

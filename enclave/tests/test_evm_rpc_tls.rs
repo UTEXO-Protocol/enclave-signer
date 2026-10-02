@@ -299,7 +299,7 @@ fn pinned_client(port: u16, ca_der_hex: &str) -> Box<dyn EvmReceiptProvider + Se
             ..Default::default()
         })),
     };
-    // The response lands after the request.
+    // The handler writes the response after the request in the buffer.
     let mut wire = Cursor::new(Vec::new());
     framing::write_message(&mut wire, &set).unwrap();
     let request_len = wire.position();
@@ -409,8 +409,8 @@ fn pinned_ca_is_the_only_trusted_root() {
     );
 }
 
-/// A hung RPC must fail closed within `EVM_RPC_CALL_TIMEOUT`, not wedge the
-/// enclave forever.
+/// A hung RPC must fail closed within `EVM_RPC_CALL_TIMEOUT`. It must not block
+/// the enclave.
 #[test]
 fn timeout_refuses_to_sign() {
     let client = pinned_client(serve_hang(), CA_A_HEX);
@@ -424,8 +424,8 @@ fn timeout_refuses_to_sign() {
     );
 }
 
-/// Only the pinned endpoint can redirect. It could still point at a peer
-/// the pinned CA never certified.
+/// Only the pinned endpoint can send a redirect, but its target can be a peer
+/// that the pinned CA did not certify. The client must not follow it.
 #[test]
 fn pinned_host_redirect_is_not_followed() {
     let client = pinned_client(serve_redirect(), CA_A_HEX);

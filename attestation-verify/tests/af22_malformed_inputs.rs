@@ -16,13 +16,13 @@ fn lcg_byte(state: &mut u64) -> u8 {
 fn malformed_corpus() -> Vec<Vec<u8>> {
     let mut out: Vec<Vec<u8>> = Vec::new();
 
-    // empty + every single byte
+    // Empty input and every single byte.
     out.push(Vec::new());
     for b in 0u16..=255 {
         out.push(vec![b as u8]);
     }
 
-    // deterministic garbage of assorted lengths
+    // Deterministic garbage of different lengths.
     let mut state = 0x9E37_79B9_7F4A_7C15u64;
     for len in [2usize, 3, 7, 16, 31, 64, 127, 256, 1024, 4096] {
         let mut v = Vec::with_capacity(len);
@@ -32,7 +32,7 @@ fn malformed_corpus() -> Vec<Vec<u8>> {
         out.push(v);
     }
 
-    // well-formed CBOR, wrong shape (must be rejected as not-a-COSE-Sign1)
+    // Valid CBOR with the wrong shape. Must fail as not COSE_Sign1.
     out.push(vec![0x00]); // unsigned 0
     out.push(vec![0xf6]); // null
     out.push(vec![0xf5]); // true
@@ -107,7 +107,7 @@ mod mock_path {
             "valid mock control failed to verify"
         );
 
-        // Every proper prefix breaks the definite-length CBOR structure → Err.
+        // Each proper prefix breaks the definite-length CBOR, so it must fail.
         for cut in 0..doc.len() {
             let r = verify_mock_attestation(&doc[..cut], &pcrs, Some(&nonce));
             assert!(
@@ -116,14 +116,14 @@ mod mock_path {
             );
         }
 
-        // Single-byte mutations: must not panic (result intentionally ignored).
+        // Single-byte mutations must not panic. The result is ignored.
         for i in 0..doc.len() {
             let mut m = doc.clone();
             m[i] ^= 0xff;
             let _ = verify_mock_attestation(&m, &pcrs, Some(&nonce));
         }
 
-        // The shared malformed corpus must also be handled without panicking.
+        // The shared malformed corpus must not panic either.
         for input in malformed_corpus() {
             let _ = verify_mock_attestation(&input, &pcrs, Some(&nonce));
             let _ = verify_mock_attestation(&input, &pcrs, None);

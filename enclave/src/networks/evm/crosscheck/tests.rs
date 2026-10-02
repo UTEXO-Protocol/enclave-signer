@@ -7,15 +7,13 @@ use crate::networks::evm::validation::{
     decode_funds_out_params, fundsOutCall, FundsOutParams, FUNDS_OUT_SELECTOR_POOLS,
 };
 
-/// Decode a fixture blob into the intent the cross-checks now take.
+/// Decodes a fixture blob into the intent that the cross-checks take.
 fn params_of(call_data: &[u8]) -> FundsOutParams {
     decode_funds_out_params(call_data).expect("fixture calldata must decode")
 }
 
-/// Build a `fundsOut(FundsOutParams)` calldata through the real ABI encoder.
-///
-/// Encoded through `sol!` rather than hand-assembled head words, which
-/// would have to reproduce the dynamic-tail arithmetic.
+/// Builds a `fundsOut(FundsOutParams)` calldata with the real `sol!` ABI
+/// encoder, so the tests do not repeat the dynamic-tail arithmetic.
 fn mock_funds_out_calldata(amount: u64) -> Vec<u8> {
     mock_funds_out_calldata_with_proof(amount, Bytes::new())
 }
@@ -44,8 +42,8 @@ fn mock_funds_out_calldata_full(
     )
 }
 
-/// A non-zero `sourceBurnTxId` for the fixtures whose check is not this
-/// field; [`source_burn`] pins the real bind.
+/// A non-zero `sourceBurnTxId` for fixtures that do not test this field.
+/// [`source_burn`] tests the real bind.
 const SOURCE_BURN_TX_ID: [u8; 32] = [0x5b; 32];
 
 fn mock_funds_out_calldata_identity(
@@ -72,9 +70,8 @@ fn mock_funds_out_calldata_identity(
     .abi_encode()
 }
 
-/// A `ValidatedConsignment` carrying nothing but `transition` as its last.
-/// The `fundsOut` cross-checks read `last_transition` only; the per-witness
-/// grouping is the send-RGB PSBT bind's input.
+/// A `ValidatedConsignment` with only `transition` as its last transition.
+/// The `fundsOut` cross-checks read only `last_transition`.
 fn validated_with_last(
     transition: crate::networks::rgb::validation::TransitionSummary,
 ) -> crate::networks::rgb::validation::ValidatedConsignment {
@@ -93,8 +90,7 @@ fn validated_with_last(
     }
 }
 
-/// The tuple encoding must round-trip through the decoder the cross-checks
-/// rely on. Replaces the old `abi_layout` module's hard-coded head offsets.
+/// The tuple encoding must round-trip through the cross-check decoder.
 #[test]
 fn mock_calldata_decodes_back_to_its_fields() {
     let cd = mock_funds_out_calldata_with_proof(1_234, Bytes::from(vec![0xAB; 128]));
@@ -104,15 +100,12 @@ fn mock_calldata_decodes_back_to_its_fields() {
     assert_eq!(&cd[..4], &FUNDS_OUT_SELECTOR_POOLS);
 }
 
-/// Guard against a half-finished migration: a flat 9-argument body must not
-/// decode as the tuple shape.
+/// A flat 9-argument body must not decode as the tuple shape.
 ///
-/// With a zero `recipient`, as here, the ABI decoder accepts the legacy
-/// body: the leading zero word reads as a tuple head pointer of 0, aliasing
-/// the tuple onto those words so every field lines up. Only the canonical
-/// re-encode check inside [`decode_funds_out_params`] rejects it. A
-/// non-zero recipient fails the decode by itself, so this pins the harder
-/// case.
+/// With a zero `recipient`, the ABI decoder accepts the legacy body: the
+/// leading zero word is a tuple head pointer of 0, so all fields align. Only
+/// the canonical re-encode check in [`decode_funds_out_params`] rejects it. A
+/// non-zero recipient fails the decode alone, so this tests the harder case.
 fn legacy_flat_calldata(recipient: [u8; 32]) -> Vec<u8> {
     let mut legacy = Vec::with_capacity(4 + 9 * 32);
     legacy.extend_from_slice(&FUNDS_OUT_SELECTOR_POOLS);
@@ -139,14 +132,13 @@ fn rejects_legacy_flat_encoding_real_recipient() {
     assert!(decode_funds_out_params(&legacy_flat_calldata(recipient)).is_err());
 }
 
-/// A calldata in the shape the bridge accepted before PR #152 (no
-/// `sourceBurnTxId`, selector `0xdc771390`) must fail closed: the enclave
-/// would otherwise sign an intent the new `MultisigProxy` cannot verify.
+/// A calldata in the pre-PR #152 shape (no `sourceBurnTxId`, selector
+/// `0xdc771390`) must fail closed. `MultisigProxy` cannot verify that intent.
 #[test]
 fn rejects_pre_source_burn_tx_id_calldata() {
     let current = mock_funds_out_calldata(1_000);
-    // Drop the appended static word: the tuple then has eight fields, so
-    // every dynamic tail offset is one word too large for its head.
+    // Remove the last static word. The tuple then has eight fields, so each
+    // dynamic tail offset is one word too large.
     let mut legacy = current.clone();
     legacy[..4].copy_from_slice(&[0xdc, 0x77, 0x13, 0x90]);
     assert!(
@@ -159,10 +151,9 @@ fn rejects_pre_source_burn_tx_id_calldata() {
     );
 }
 
-// Source-burn identity - `validate_funds_out_source_burn_tx_id`. Flow-agnostic:
-// the bind reads the last transition's OpId only, whatever its type.
-// (`sourceChainId` / `sourceAddress` are bound in `validation.rs`, see
-// `validate_rgb_source_identity`.)
+// Source-burn identity: `validate_funds_out_source_burn_tx_id`. The bind reads
+// only the last transition OpId, of any type. `validate_rgb_source_identity`
+// in `validation.rs` binds `sourceChainId` / `sourceAddress`.
 mod source_burn {
     use super::*;
     use crate::networks::rgb::validation::{bfa, TransitionSummary};
@@ -211,8 +202,7 @@ mod source_burn {
         assert!(validate_funds_out_source_burn_tx_id(&params_of(&cd), &validated).is_ok());
     }
 
-    /// The whole point of the bind: a fresh id here would be a fresh `burnId`
-    /// for a burn already settled.
+    /// The purpose of the bind: a new id gives a settled burn a new `burnId`.
     #[test]
     fn rejects_an_id_that_is_not_the_settling_op_id() {
         let mut other = op_id_bytes();
@@ -239,8 +229,7 @@ mod source_burn {
         assert!(validate_funds_out_source_burn_tx_id(&params_of(&cd), &validated).is_err());
     }
 
-    /// A malformed op_id is an inconsistency inside the validated consignment,
-    /// never something to paper over with a partial compare.
+    /// A malformed op_id is an internal error. Do not use a partial compare.
     #[test]
     fn rejects_a_non_hex_or_short_op_id() {
         let cd = calldata_with("", op_id_bytes());
@@ -254,12 +243,12 @@ mod source_burn {
     }
 }
 
-// fundsOut amount tests - `validate_funds_out_amount` (+ the witness
-// recency guard `assert_witnesses_confirmed`).
+// fundsOut amount tests: `validate_funds_out_amount` and the witness recency
+// guard `assert_witnesses_confirmed`.
 
-// Redemption fundsOut tests - `validate_funds_out_burn_recipient`. The shape
-// and amount halves belong to `validate_funds_out_amount` / the mint-burn
-// flow, and are tested there.
+// Redemption fundsOut tests: `validate_funds_out_burn_recipient`. The shape
+// and amount checks are tested with `validate_funds_out_amount` and the
+// mint-burn flow.
 #[cfg(feature = "rgb-mint-burn")]
 mod burn {
     use super::*;
@@ -271,9 +260,8 @@ mod burn {
         TransitionSummary {
             op_id: "burn-op".into(),
             transition_type: bfa::TS_BURN,
-            // A burn has no output assignments; the destroyed value lives
-            // in the metadata, which is exactly why this must not be the
-            // quantity the release is bound to.
+            // A burn has no output assignments. The destroyed value is in
+            // the metadata.
             total_output_amount: 0,
             asset_output_amount: 0,
             outputs: Vec::new(),
@@ -302,8 +290,8 @@ mod burn {
         assert!(validate_funds_out_burn_recipient(&params_of(&cd), &validated).is_err());
     }
 
-    /// The whole point of the field: a release must not go anywhere the
-    /// burner did not commit to.
+    /// The purpose of the field: a release must go only to the burner's
+    /// committed target.
     #[test]
     fn rejects_a_recipient_the_burn_did_not_commit_to() {
         let cd = mock_funds_out_calldata_to(Address::from([0x99; 20]), 1000, Bytes::new());
@@ -311,9 +299,8 @@ mod burn {
         assert!(validate_funds_out_burn_recipient(&params_of(&cd), &validated).is_err());
     }
 
-    /// A non-zero high half means the burner committed to something that is
-    /// not this address; truncating to the low 20 bytes would pay out to a
-    /// target nobody signed.
+    /// A non-zero high part is not this address. Truncation to the low 20
+    /// bytes would pay a target that nobody signed.
     #[test]
     fn rejects_a_recipient_with_a_dirty_high_half() {
         let cd = mock_funds_out_calldata_to(Address::from(RECIPIENT), 1000, Bytes::new());
@@ -328,10 +315,10 @@ mod transfer {
     use super::*;
     use crate::networks::rgb::validation::{bfa, TransitionSummary};
 
-    /// The last transition this build's RGB flow accepts on a `fundsOut`,
-    /// carrying `amount` where that flow reads it: a Transfer's output
-    /// assignments under `rgb-swap`, a Burn's `MS_BURNED_ASSET` metadata
-    /// under `rgb-mint-burn`. Keeps the shared cases below flow-agnostic.
+    /// The last transition that this build's RGB flow accepts on a
+    /// `fundsOut`, with `amount` where that flow reads it: Transfer output
+    /// assignments under `rgb-swap`, Burn `MS_BURNED_ASSET` metadata under
+    /// `rgb-mint-burn`. The shared cases below then work for both flows.
     #[cfg(feature = "rgb-swap")]
     fn source_transition(amount: u64) -> TransitionSummary {
         TransitionSummary {
@@ -349,16 +336,15 @@ mod transfer {
     fn source_transition(amount: u64) -> TransitionSummary {
         TransitionSummary {
             op_id: "burn-op".into(),
-            // A burn destroys units; it has no output assignments carrying
-            // them, so the amount lives in the metadata field only.
+            // A burn destroys units and has no output assignments, so the
+            // amount is only in the metadata field.
             transition_type: bfa::TS_BURN,
             total_output_amount: 0,
             asset_output_amount: 0,
             outputs: Vec::new(),
             burned_asset_amount: Some(amount),
             // The payout target is a separate bind
-            // (`validate_funds_out_burn_recipient`, tested in `mod burn`),
-            // so the amount cases here leave it unset.
+            // (`validate_funds_out_burn_recipient`, tested in `mod burn`).
             burn_recipient: None,
         }
     }
@@ -372,15 +358,15 @@ mod transfer {
 
     #[test]
     fn witnesses_confirmed_passes_when_all_mined() {
-        // No non-mined witnesses surfaced -> the recency guard is a no-op.
+        // No non-mined witnesses, so the recency guard passes.
         let validated = validated_with_last(source_transition(1000));
         assert!(super::super::assert_witnesses_confirmed(&validated).is_ok());
     }
 
     #[test]
     fn witnesses_confirmed_rejects_non_mined() {
-        // A tentative/ignored witness in the RGB->EVM direction is an
-        // anomaly: the unlock settles an already-confirmed transfer.
+        // A tentative/ignored witness in the RGB -> EVM direction is an
+        // anomaly: the unlock settles a confirmed transfer.
         let mut validated = validated_with_last(source_transition(1000));
         validated.non_mined_witness_txids = vec![[0xABu8; 32]];
         let err = super::super::assert_witnesses_confirmed(&validated).unwrap_err();
@@ -390,8 +376,8 @@ mod transfer {
         );
     }
 
-    /// A Transfer's total includes the sender's change, so surplus is
-    /// legitimate on the swap flow.
+    /// A Transfer total includes the sender change, so a surplus is correct
+    /// on the swap flow.
     #[cfg(feature = "rgb-swap")]
     #[test]
     fn passes_when_source_amount_exceeds_calldata_amount() {
@@ -400,9 +386,9 @@ mod transfer {
         assert!(validate_funds_out_amount(&params_of(&cd), &validated).is_ok());
     }
 
-    /// I-06: a burn has no change leg and `fundsOut.amount` is gross, so
-    /// the release must equal the burned figure exactly. A release below
-    /// the burn would strand the difference.
+    /// I-06: a burn has no change leg and `fundsOut.amount` is gross, so the
+    /// release must equal the burned amount. A lower release strands the
+    /// difference.
     #[cfg(feature = "rgb-mint-burn")]
     #[test]
     fn rejects_when_source_amount_exceeds_calldata_amount() {
@@ -415,10 +401,9 @@ mod transfer {
         );
     }
 
-    /// P0 regression: even with a valid consignment that deserializes
-    /// and validates, the EVM-side release cannot exceed what the RGB side
-    /// proves left the source. A consignment for 1 unit must not authorise
-    /// a withdrawal for 10^9.
+    /// P0 regression: with a valid consignment, the EVM release cannot be
+    /// more than the RGB amount that left the source. A consignment for 1
+    /// unit must not authorise a withdrawal of 10^9.
     #[test]
     fn rejects_when_source_amount_less_than_calldata_amount() {
         let cd = mock_funds_out_calldata(1_000_000_000);
@@ -430,10 +415,10 @@ mod transfer {
         );
     }
 
-    /// A consignment whose last transition is not the one this build's
-    /// flow withdraws with must be refused. `TS_BRIDGE` is a deposit
-    /// shape in both flows, so it is wrong for either build - which is
-    /// also how a mint-shaped consignment stays out of a swap enclave.
+    /// A last transition that is not this build's withdrawal type must be
+    /// refused. `TS_BRIDGE` is a deposit shape in both flows, so both builds
+    /// refuse it. This also keeps a mint-shaped consignment out of a swap
+    /// enclave.
     #[test]
     fn rejects_when_last_transition_is_not_the_flow_shape() {
         let cd = mock_funds_out_calldata(500);
@@ -520,14 +505,14 @@ mod settlement {
         assert!(check(&reordered, &locks).is_ok());
 
         // The settlement validator accepts both encodings, but burnId
-        // commits to their bytes rather than the normalized pair set.
+        // commits to their bytes, not to the normalized pair set.
         let original_hash = alloy_primitives::keccak256(settlement(&original));
         let reordered_hash = alloy_primitives::keccak256(settlement(&reordered));
         assert_ne!(original_hash, reordered_hash);
     }
 
-    /// The P6 attack: a valid burn re-presented with other deposits cited,
-    /// which would earn a fresh `burnId` on-chain.
+    /// The P6 attack: a valid burn sent again with other deposits cited, to
+    /// get a new `burnId` on chain.
     #[test]
     fn rejects_a_deposit_the_burn_does_not_descend_from() {
         let err = check(&[(0xC3, 950)], &[LOCK_A]).unwrap_err();
@@ -552,8 +537,8 @@ mod settlement {
         assert!(err.to_string().contains("settlementData mismatch"), "{err}");
     }
 
-    /// The module checks the full recorded netAmount per pair, so a wrong
-    /// amount is a wrong citation, not a rounding issue.
+    /// The module checks the full recorded netAmount per pair. A wrong amount
+    /// is a wrong citation, not a rounding issue.
     #[test]
     fn rejects_a_wrong_net_amount() {
         let err = check(&[(0xA1, 949)], &[LOCK_A]).unwrap_err();
@@ -593,9 +578,8 @@ mod settlement {
     }
 }
 
-// BtcRelay-agreement cross-check - `verify_btc_relay_agreement`.
-// These exercise `proof` decoding and header comparison directly against a
-// synthetic regtest header chain.
+// BtcRelay-agreement cross-check: `verify_btc_relay_agreement`. These test
+// `proof` decoding and header comparison against a synthetic regtest chain.
 
 mod btc_relay {
     use super::*;
@@ -605,9 +589,9 @@ mod btc_relay {
     use bitcoin::consensus::serialize;
     use bitcoin::hashes::Hash as _;
 
-    /// Display-order txid of the consignment's single witness tx.
-    /// Deliberately NOT a palindrome: a byte-order slip in
-    /// `resolve_consignment_anchor` must fail the tests, not pass them.
+    /// Display-order txid of the consignment's single witness tx. NOT a
+    /// palindrome, so a byte-order error in `resolve_consignment_anchor`
+    /// fails the tests.
     const WITNESS_TXID: [u8; 32] = [
         0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f,
         0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e,
@@ -625,8 +609,8 @@ mod btc_relay {
         U256::from(n).to_be_bytes()
     }
 
-    /// Raise the nonce until the header meets its own target, so the
-    /// relay accepts it too.
+    /// Increases the nonce until the header meets its target, so the relay
+    /// also accepts it.
     fn mined(mut header: Header) -> Header {
         while header.validate_pow(header.target()).is_err() {
             header.nonce += 1;
@@ -842,10 +826,10 @@ mod btc_relay {
     }
 
     // -- BTC_RELAY_MODE. The bridge zeroes both commitment words when it has
-    // no BtcRelay configured; only an enclave that says so accepts that.
+    // no BtcRelay. Only an enclave in `none` mode accepts that.
 
-    /// `required` (the default) refuses a zero word before touching the
-    /// chain, and the message names the knob.
+    /// `required` (the default) refuses a zero word before it reads the
+    /// chain. The message names the setting.
     #[test]
     fn required_mode_rejects_zero_commitments() {
         let (chain, hashes) = chain();
@@ -856,7 +840,7 @@ mod btc_relay {
             "got: {err}"
         );
 
-        // One zero word is just as refused.
+        // One zero word is also refused.
         let cd = calldata(
             ANCHOR_HEIGHT,
             hashes[ANCHOR_HEIGHT as usize],
@@ -885,8 +869,8 @@ mod btc_relay {
         assert!(check_no_relay(&zero_commit_calldata(), &chain).is_ok());
     }
 
-    /// `none` refuses a real commitment: the bridge thinks there is a relay,
-    /// the enclave was told there is none.
+    /// `none` refuses a real commitment: the bridge has a relay, but the
+    /// enclave config has none.
     #[test]
     fn none_mode_rejects_a_non_zero_commitment() {
         let (chain, hashes) = chain();
@@ -907,8 +891,8 @@ mod btc_relay {
         assert!(err.to_string().contains("latest commitment"), "got: {err}");
     }
 
-    /// `none` relaxes only step 4: the source height must still be the
-    /// consignment anchor.
+    /// `none` skips only step 4. The source height must be the consignment
+    /// anchor.
     #[test]
     fn none_mode_still_binds_the_source_height() {
         let (chain, _) = chain();
@@ -920,7 +904,7 @@ mod btc_relay {
         );
     }
 
-    /// ... and the relay tip must still be fresh.
+    /// ... and the relay tip must be fresh.
     #[test]
     fn none_mode_still_binds_relay_freshness() {
         let (chain, _) = chain_to(TIP_HEIGHT + MAX_RELAY_TIP_LAG_BLOCKS + 1);
@@ -931,7 +915,7 @@ mod btc_relay {
         );
     }
 
-    /// ... and an empty proof is still refused.
+    /// ... and an empty proof is refused.
     #[test]
     fn none_mode_still_rejects_an_empty_proof() {
         let (chain, _) = chain();
@@ -957,8 +941,8 @@ mod btc_relay {
         );
     }
 
-    /// The bind that remains: a source height other than the consignment's
-    /// anchor is refused, whatever commitment accompanies it.
+    /// A source height that is not the consignment anchor is refused, with
+    /// any commitment.
     #[test]
     fn rejects_a_source_height_that_is_not_the_anchor() {
         let (chain, hashes) = chain();
@@ -975,11 +959,10 @@ mod btc_relay {
         );
     }
 
-    /// A `source` height the enclave holds no header for - here at the
-    /// checkpoint, below every stored header - cannot equal the anchor, so
-    /// the bind rejects it without a separate header lookup. (A height
-    /// ABOVE the tip trips the ordering guard first; see
-    /// `rejects_latest_below_source`.)
+    /// A `source` height with no enclave header (here the checkpoint, below
+    /// all stored headers) cannot equal the anchor. The bind rejects it with
+    /// no header lookup. A height ABOVE the tip fails the ordering guard
+    /// first (see `rejects_latest_below_source`).
     #[test]
     fn rejects_source_height_with_no_header() {
         let (chain, hashes) = chain();
@@ -991,8 +974,8 @@ mod btc_relay {
         );
     }
 
-    /// The relay-tip half of the proof is checked too, else freshness would
-    /// be delegated to a relay the untrusted host also feeds.
+    /// The relay-tip part of the proof is also checked. Else freshness
+    /// depends on a relay that the untrusted host also feeds.
     #[test]
     fn rejects_unknown_latest_block() {
         let (chain, hashes) = chain();
@@ -1031,8 +1014,8 @@ mod btc_relay {
         );
     }
 
-    /// What `latest` still proves: the enclave holds a header there, so it
-    /// is in sync with the chain the relay claims to be following.
+    /// `latest` proves that the enclave has a header there, so it is in sync
+    /// with the chain that the relay follows.
     #[test]
     fn rejects_a_latest_height_the_enclave_has_no_header_for() {
         let (chain, hashes) = chain();
@@ -1065,8 +1048,8 @@ mod btc_relay {
         );
     }
 
-    /// A `latest` far below the enclave tip proves only that a block
-    /// existed, so the freshness half would be vacuous.
+    /// A `latest` far below the enclave tip proves only that a block existed.
+    /// The freshness check then proves nothing.
     #[test]
     fn rejects_stale_relay_tip() {
         let (chain, hashes) = chain_to(MAX_RELAY_TIP_LAG_BLOCKS + 20);
@@ -1083,7 +1066,7 @@ mod btc_relay {
         );
     }
 
-    /// A relay lagging inside the bound is still accepted.
+    /// A relay lag within the bound is accepted.
     #[test]
     fn accepts_relay_tip_within_lag_bound() {
         let (chain, hashes) = chain_to(MAX_RELAY_TIP_LAG_BLOCKS);
@@ -1097,8 +1080,8 @@ mod btc_relay {
         assert!(check(&cd, &chain).is_ok());
     }
 
-    /// Fail-closed: a zero-filled `proof` leaves nothing to bind the
-    /// anchoring block to.
+    /// Fail closed: a zero-filled `proof` gives the anchor block nothing to
+    /// bind to.
     #[test]
     fn rejects_empty_proof() {
         let (chain, _) = chain();
@@ -1115,9 +1098,8 @@ mod btc_relay {
         assert!(err.to_string().contains("128 bytes"), "got: {err}");
     }
 
-    /// The pre-migration proof was a single 64-byte
-    /// `(blockHeight, commitmentHash)` pair. Accepting it would verify the
-    /// source block and leave the relay-freshness half unchecked.
+    /// The legacy proof is one 64-byte `(blockHeight, commitmentHash)` pair.
+    /// It verifies the source block, but not relay freshness, so refuse it.
     #[test]
     fn rejects_legacy_two_field_proof() {
         let (chain, hashes) = chain();
@@ -1147,8 +1129,8 @@ mod btc_relay {
     // -- Source-block bind: the calldata `source` pair must be the block
     // -- anchoring the consignment's last witness tx.
 
-    /// A different but real block - one the enclave knows, so the BtcRelay
-    /// half passes - must still be refused.
+    /// A different real block must be refused. The enclave knows it, so the
+    /// BtcRelay check passes.
     #[test]
     fn rejects_source_block_that_is_not_the_consignment_anchor() {
         let (chain, hashes) = chain();
@@ -1166,8 +1148,7 @@ mod btc_relay {
         );
     }
 
-    /// No header at the anchoring height: refuse rather than trust the
-    /// calldata.
+    /// No header at the anchor height: refuse, and do not trust the calldata.
     #[test]
     fn rejects_when_tee_has_no_header_at_anchor_height() {
         let (chain, hashes) = chain();
@@ -1175,9 +1156,8 @@ mod btc_relay {
         assert!(err.to_string().contains("not in sync"), "got: {err}");
     }
 
-    /// The anchor's own SPV proof is re-verified here, under the same lock
-    /// guard the header is read with, so a reorg between the source-chain
-    /// pass and this one cannot slip a substituted header through.
+    /// The anchor SPV proof is verified again under the header lock guard.
+    /// Thus a reorg after the source-chain pass cannot replace the header.
     #[test]
     fn rejects_when_anchor_proof_does_not_reconstruct_the_root() {
         let (chain, hashes) = chain();
@@ -1186,8 +1166,8 @@ mod btc_relay {
         assert!(err.to_string().contains("failed"), "got: {err}");
     }
 
-    /// Depth is re-checked too: an anchor at the tip is only 1 confirmation
-    /// deep, short of `SPV_MIN_CONFIRMATIONS`.
+    /// Depth is also checked again: an anchor at the tip has 1 confirmation,
+    /// less than `SPV_MIN_CONFIRMATIONS`.
     #[test]
     fn rejects_when_anchor_is_too_shallow() {
         let (chain, hashes) = chain();
@@ -1221,8 +1201,8 @@ mod btc_relay {
     // route. Its lock ends at return. A real reorg must close the gate.
     // A real extension must not.
 
-    /// Build a longer chain from `from_height` and submit it the normal
-    /// way. No test state is written directly, so the accept rule is real.
+    /// Builds a longer chain from `from_height` and submits it normally. No
+    /// test state is written directly, so the real accept rule applies.
     fn submit_reorg(chain: &mut HeaderChain, from_height: u32, extra: u32) {
         let pred = chain
             .hash_at(from_height - 1)
@@ -1250,7 +1230,7 @@ mod btc_relay {
         );
     }
 
-    /// Extend the tip and rewrite nothing. The harmless control.
+    /// Extends the tip and rewrites nothing. The harmless control.
     fn submit_extension(chain: &mut HeaderChain, count: u32) {
         let mut prev = <bitcoin::BlockHash as bitcoin::hashes::Hash>::from_byte_array(
             chain.hash_at(chain.tip_height()).expect("tip present"),
@@ -1273,7 +1253,7 @@ mod btc_relay {
         assert_eq!(outcome.reorg_depth, 0, "control must not be a reorg");
     }
 
-    /// Run the last check and return what it pinned.
+    /// Runs the last check and returns what it pinned.
     fn check_pinning(chain: &HeaderChain, hashes: &[[u8; 32]]) -> ChainPins {
         let pins = ChainPins::new();
         let (validated, proofs) = anchored_at(ANCHOR_HEIGHT);
@@ -1326,8 +1306,8 @@ mod btc_relay {
         );
     }
 
-    /// A reorg above the anchor still rewrites the relay's `latest`
-    /// header. The freshness the check proved no longer holds.
+    /// A reorg above the anchor rewrites the relay `latest` header. The
+    /// proven freshness is then not valid.
     #[test]
     fn accepted_reorg_replacing_the_relay_latest_header_refuses() {
         let (mut chain, hashes) = chain();

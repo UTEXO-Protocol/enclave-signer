@@ -1,41 +1,36 @@
 //! Plain-BTC (`SignBtc`) signing cross-check.
 //!
-//! Authorization gate for the plain-BTC signing path: bridge ops with no RGB
-//! consignment and no EVM correlation (`create_utxo`, plain BTC withdrawals).
-//! A request type distinct from `SignPsbt` so plain-BTC ops cannot be reached
-//! by omitting the bridge fields on a bridge request.
+//! Authorization gate for plain-BTC bridge ops: no RGB consignment and no EVM
+//! correlation (`create_utxo`, plain BTC withdrawals). It is a separate request
+//! type from `SignPsbt`. Thus a bridge request without its bridge fields cannot
+//! reach this path.
 //!
-//! Funds-safety is layered:
+//! Funds-safety layers:
 //!
-//!   * Account scope, enforced in the signer, not here: the handler calls
-//!     `sign_psbt_scoped(.., Some(Vanilla))`, so only Vanilla-account inputs
-//!     are co-signed, never a Colored (RGB-allocated) one.
-//!   * Output self-ownership ([`crate::networks::rgb::btc_ownership`]): every
-//!     output must pay back to a script this enclave co-controls, proven from
-//!     the PSBT and our own derivation. Either BIP-86 account counts, since
-//!     `create_utxo` funds Colored UTXOs from vanilla inputs; the rule is
-//!     about which inputs we spend. Replaces the `BTC_ALLOWED_SCRIPTS` allowlist,
-//!     which was unbootstrappable in production.
+//!   * Account scope, in the signer: the handler calls
+//!     `sign_psbt_scoped(.., Some(Vanilla))`. Only Vanilla inputs are
+//!     co-signed, never a Colored (RGB-allocated) one.
+//!   * Output self-ownership ([`crate::networks::rgb::btc_ownership`]): outputs
+//!     must pay back to a script this enclave co-controls, proven from the PSBT
+//!     and our own derivation. Unproven outputs must fit the pinned
+//!     `BTC_MAX_UNOWNED_SATS` budget. Both BIP-86 accounts count, because
+//!     `create_utxo` funds Colored UTXOs from vanilla inputs.
 //!   * Fee policy ([`crate::networks::rgb::psbt_validation::check_psbt_fee`]):
-//!     the miner fee is bounded by the pinned maximum fee rate and absolute
-//!     fee shared with the send-RGB path. Like the output check and the
-//!     amount cap it bounds one transaction: what a single request can burn
-//!     as fees, not what a host can burn across many requests. Nothing here
-//!     rate-limits `SignBtc`, so the aggregate bound belongs out-of-enclave.
-//!     The relay floor needs every input to be sizeable: a P2TR input without
-//!     key-path metadata or a non-CHECKMULTISIG P2WSH input refuses the whole
-//!     request, even when the output and amount checks already hold.
-//!   * Amount cap (`BTC_MAX_TOTAL_SATS`) on total input value spent, not
-//!     output value, so it also bounds value routed to miner fees.
+//!     the pinned maximum fee rate and absolute fee of the send-RGB path. All
+//!     checks here bound one transaction only. Nothing here rate-limits
+//!     `SignBtc`, so the aggregate bound is outside the enclave. Every input
+//!     must be sizeable: a P2TR input without key-path metadata or a
+//!     non-CHECKMULTISIG P2WSH input fails the whole request.
+//!   * Amount cap (`BTC_MAX_TOTAL_SATS`) on total input value, not output
+//!     value, so it also bounds value sent to miner fees.
 //!
-//! Scope: this path is structurally self-pay. Withdrawals to an arbitrary user
-//! address need a destination bound to verified evidence and remain out of
-//! scope.
+//! Scope: this path is self-pay. Withdrawals to an arbitrary user address need
+//! a destination bound to verified evidence and are out of scope.
 //!
-//! Fail-closed posture: the output check and the fee policy need no
-//! configuration and run in every build. The amount cap is operator-supplied, so a production
-//! (`rgb-validation`) build refuses to sign while it is unset; default /
-//! `cfg(test)` builds fall back to a permissive dev path. The witness_utxo requirement runs in all builds.
+//! Fail-closed: the fee policy and the witness_utxo rule need no config and run
+//! in every build. The amount cap and the unowned budget are operator values.
+//! A production (`rgb-validation`) build refuses to sign while they are unset.
+//! Default and `cfg(test)` builds use a permissive dev path.
 
 use crate::config::BridgeConfig;
 use crate::error::{EnclaveError, Result};
@@ -45,9 +40,9 @@ use crate::networks::rgb::psbt_validation;
 use crate::networks::rgb::signing::taproot::find_controlled_taproot_inputs;
 use crate::proto::SignBtcRequest;
 
-/// Validate a plain-BTC `SignBtcRequest` before signing: output self-ownership,
-/// the pinned fee policy, plus the operator-pinned value-spent cap. Account scoping - never sign a
-/// Colored input - is enforced separately in the signer; see the module docs.
+/// Validates a plain-BTC `SignBtcRequest` before signing: output
+/// self-ownership, the pinned fee policy, and the value-spent cap. The signer
+/// applies the account scope (see module docs).
 ///
 /// Returns `Ok(())` when authorized, a `CrossCheck` error otherwise.
 pub fn validate_btc_request(
@@ -55,11 +50,11 @@ pub fn validate_btc_request(
     cfg: &BridgeConfig,
     keys: &KeyManager,
 ) -> Result<()> {
-    // 0. Shape whitelist (shared with the bridge path).
+    // 0. Shape allowlist (same as the bridge path).
     let psbt = psbt_validation::parse_psbt_shape(&req.psbt_bytes)?;
 
-    // 1. Sum the value spent (for the cap). Every input must carry its
-    //    witness_utxo; without it the value cannot be bounded.
+    // 1. Sum the value spent (for the cap). Every input needs witness_utxo,
+    //    else the value has no bound.
     let mut total_in_sat: u64 = 0;
     for (i, input) in psbt.inputs.iter().enumerate() {
         let Some(witness_utxo) = input.witness_utxo.as_ref() else {
@@ -75,20 +70,17 @@ pub fn validate_btc_request(
             })?;
     }
 
-    // 2. Reject an empty output set: all input value would go to fees, and the
-    //    per-output check below would have nothing to inspect.
+    // 2. No outputs: all input value would go to fees.
     if psbt.unsigned_tx.output.is_empty() {
         return Err(EnclaveError::CrossCheck(
             "plain-BTC PSBT has no outputs - refusing (would route all input value to fees)".into(),
         ));
     }
 
-    // 3. Output self-ownership: every output must pay back to a script this
-    //    enclave co-controls. Needs no operator configuration, so it runs
-    //    unconditionally. Anchored to the unsigned tx's outputs, which the
-    //    segwit sighash commits to. The controlled-input resolution (BIP32
-    //    derivation plus tap tweak per input) is done once here and shared
-    //    with the fee sizing in step 4.
+    // 3. Output self-ownership on the unsigned tx outputs, which the segwit
+    //    sighash commits to. Unproven value must fit `btc_max_unowned_sats`.
+    //    The controlled-input lookup (BIP32 derivation and tap tweak) runs
+    //    once and step 4 uses it again.
     let jobs = find_controlled_taproot_inputs(&psbt, keys.master_fingerprint(), keys);
     let input_scripts = controlled_input_scripts(&psbt, &jobs, Some(AccountType::Vanilla));
     let unowned_sat = unowned_output_sats(&psbt, &input_scripts, keys).ok_or_else(|| {
@@ -97,7 +89,7 @@ pub fn validate_btc_request(
 
     if unowned_sat > 0 {
         if cfg.btc_max_unowned_sats == 0 {
-            // Unset must never read as "no limit".
+            // Unset never means "no limit".
             #[cfg(all(feature = "rgb-validation", not(test)))]
             {
                 return Err(EnclaveError::CrossCheck(format!(
@@ -124,19 +116,16 @@ pub fn validate_btc_request(
         }
     }
 
-    // 4. Pinned fee policy, shared with the send-RGB path. Before the amount
-    //    cap, whose dev fallback returns early: the fee bound needs no
-    //    configuration, so it holds in every build. Key-path sizing uses the
-    //    Vanilla account, the scope the signer co-signs on this path.
+    // 4. Pinned fee policy (same as send-RGB). It runs before the amount cap,
+    //    because the cap's dev fallback returns early. Key-path sizing uses the
+    //    Vanilla account, which the signer co-signs on this path.
     let key_path_inputs = psbt_validation::fee_key_path_inputs_of(&jobs, AccountType::Vanilla);
     psbt_validation::check_psbt_fee(&psbt, &key_path_inputs, "plain-BTC")?;
 
-    // 5. Amount cap on value spent (sum of input values), which also bounds
-    //    value routed to fees. Operator-supplied, so this dimension keeps the
-    //    production fail-closed / dev-fallback split.
+    // 5. Amount cap on the sum of input values. It also bounds fees.
     if cfg.btc_max_total_sats == 0 {
-        // Production must not sign plain BTC without the cap: nothing else
-        // bounds what a host can route to miner fees.
+        // Production must not sign without the cap. Nothing else bounds what
+        // a host can send to miner fees.
         #[cfg(all(feature = "rgb-validation", not(test)))]
         {
             return Err(EnclaveError::CrossCheck(
@@ -145,7 +134,7 @@ pub fn validate_btc_request(
                     .into(),
             ));
         }
-        // Default / test builds: no cap to enforce. Dev path only.
+        // Default and test builds: dev path only.
         #[cfg(not(all(feature = "rgb-validation", not(test))))]
         {
             tracing::warn!(
@@ -166,27 +155,26 @@ pub fn validate_btc_request(
     Ok(())
 }
 
-/// Bound the Bitcoin value a send-RGB PSBT moves to destinations this enclave
+/// Bounds the Bitcoin value a send-RGB PSBT sends to destinations this enclave
 /// cannot prove it controls.
 ///
-/// Every other send-RGB bind is denominated in RGB asset units, so a witness tx
-/// can satisfy the ledger exactly and still sweep the bridge's Bitcoin backing.
-/// `check_psbt_fee` misses it: a diverted sat is an output, not a fee, so
-/// diversion *lowers* the implied rate.
+/// All other send-RGB binds use RGB asset units. Thus a witness tx can match
+/// the ledger and still sweep the Bitcoin backing of the bridge.
+/// `check_psbt_fee` does not see it: a diverted sat is an output, not a fee,
+/// so it *lowers* the implied rate.
 ///
-/// Plain-BTC requires every output to be self-owned; send-RGB cannot, because
-/// it pays the recipient a witness output and that seal is blinded. It bounds
-/// the total instead - dust fits, a sweep does not.
+/// Send-RGB cannot require self-owned outputs, because the recipient witness
+/// output has a blinded seal. It bounds the total: dust fits, a sweep does not.
 ///
-/// Ownership is the rules in [`super::btc_ownership`]: metadata only names a
-/// path, the script check is the proof.
+/// Ownership follows [`super::btc_ownership`]: metadata only names a path, the
+/// script check is the proof.
 pub fn validate_rgb_psbt_sats(
     psbt: &bitcoin::psbt::Psbt,
     cfg: &BridgeConfig,
     keys: &KeyManager,
 ) -> Result<()> {
-    // `None` scope: change sits on Colored, vanilla funding on Vanilla. Widens
-    // what counts as ours, never what is signed.
+    // `None` scope: change is on Colored, vanilla funding on Vanilla. This
+    // widens what counts as ours, never what is signed.
     let input_scripts =
         crate::networks::rgb::btc_ownership::self_controlled_input_scripts_scoped(psbt, keys, None);
 
@@ -194,7 +182,7 @@ pub fn validate_rgb_psbt_sats(
         .ok_or_else(|| EnclaveError::CrossCheck("send-RGB unowned output value overflow".into()))?;
 
     if cfg.rgb_max_unowned_sats == 0 {
-        // Unset must never read as "no limit".
+        // Unset never means "no limit".
         #[cfg(all(feature = "rgb-validation", not(test)))]
         {
             return Err(EnclaveError::CrossCheck(

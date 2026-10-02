@@ -1,8 +1,8 @@
-//! The RGB recipient an EVM deposit authorises.
+//! The RGB recipient that an EVM deposit authorizes.
 //!
-//! `BridgeFundsIn.destinationAddress` carries the user's invoice verbatim, in a
-//! log the enclave verifies itself. The consignment comes from the coordinator,
-//! so only the invoice says who the deposit meant to pay.
+//! `BridgeFundsIn.destinationAddress` holds the user invoice verbatim, in a
+//! log that the enclave verifies. The coordinator supplies the consignment,
+//! so only the invoice identifies the intended recipient.
 
 use std::str::FromStr;
 
@@ -11,17 +11,17 @@ use rgbinvoice::{Beneficiary, RgbInvoice};
 use crate::error::{EnclaveError, Result};
 use crate::networks::evm::events::BFI_MAX_DEST_ADDRESS_LEN as MAX_INVOICE_LEN;
 
-/// The `utxob:...` blinded seal a verified deposit authorises paying.
+/// The `utxob:...` blinded seal that a verified deposit authorizes.
 ///
-/// A newtype, not a bare `String`: [`assert_recipient_authorized`] compares it
-/// against consignment seals, and the two must not be swappable at a call site.
+/// A newtype, not a `String`. [`assert_recipient_authorized`] compares it with
+/// consignment seals, and a call site must not swap the two.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AuthorizedRecipient(String);
 
-/// Parse `BridgeFundsIn.destinationAddress` into the recipient it authorises.
+/// Parses `BridgeFundsIn.destinationAddress` into the authorized recipient.
 ///
-/// A witness-vout beneficiary is refused, not skipped: its recipient leg is a
-/// revealed seal, which the per-output bind already rejects unless bridge-owned.
+/// A witness-vout beneficiary is refused, not skipped. Its recipient leg is a
+/// revealed seal, which the per-output bind rejects unless the bridge owns it.
 pub fn parse_authorized_recipient(destination_address: &str) -> Result<AuthorizedRecipient> {
     let trimmed = destination_address.trim();
     if trimmed.is_empty() {
@@ -54,11 +54,9 @@ pub fn parse_authorized_recipient(destination_address: &str) -> Result<Authorize
     }
 }
 
-/// Require the consignment's confidential recipient legs to be the authorised
-/// seal, and only it.
+/// Requires exactly one confidential recipient leg, equal to the authorized seal.
 ///
-/// Exactly one leg: the amount bind pins their total, so a second would split an
-/// authorised payment.
+/// The amount bind pins the total, so a second leg would split the payment.
 pub fn assert_recipient_authorized(
     seals: &[String],
     authorized: &AuthorizedRecipient,
@@ -86,7 +84,7 @@ pub fn assert_recipient_authorized(
 mod tests {
     use super::*;
 
-    /// The one literal the ABI half encodes and this half parses.
+    /// The same literal that the ABI side encodes and this side parses.
     use crate::networks::evm::events::{
         SAMPLE_INVOICE as BLINDED_INVOICE, SAMPLE_INVOICE_SEAL as INVOICE_SEAL,
     };
@@ -100,8 +98,7 @@ mod tests {
                                         XvmU3d4_nQQ8S7oagbXi07x5vjMm7P~ERukQNX6SC4M/Sa/bc:wvout:\
                                         A8cJ7Ww3-NIzADo3-Tzp_5aD-7CTBWmA-AAAAAAA-AAAAAAA-ALSQkcw";
 
-    /// A parser that refused every real invoice would still pass the negative
-    /// tests below.
+    /// Positive control: a parser that refuses all invoices passes the negative tests.
     #[test]
     fn a_real_invoice_yields_its_blinded_seal() {
         assert_eq!(
@@ -110,16 +107,16 @@ mod tests {
         );
     }
 
-    /// Both sides render `SecretSeal`. A format change on either breaks here
-    /// instead of refusing every deposit in production.
+    /// Both sides render `SecretSeal`. A format change on either side fails here,
+    /// not in production.
     #[test]
     fn a_real_invoice_binds_the_consignment_seal_it_names() {
         let authorized = parse_authorized_recipient(BLINDED_INVOICE).unwrap();
         assert!(assert_recipient_authorized(&[INVOICE_SEAL.to_string()], &authorized).is_ok());
     }
 
-    /// The shape the frontend actually emits: no contract/schema/state, plus
-    /// `expiry` and `endpoints` query params. Signet (`sb:`) as well as mainnet.
+    /// The frontend invoice shape: no contract/schema/state, with `expiry` and
+    /// `endpoints` query params. Covers signet (`sb:`) and mainnet.
     #[test]
     fn the_frontend_invoice_shape_parses() {
         for chain in ["bc", "sb"] {
@@ -167,7 +164,7 @@ mod tests {
         assert!(err.to_string().contains("max"), "{err}");
     }
 
-    /// The finding itself: right amount, wrong destination.
+    /// Correct amount to the wrong destination.
     #[test]
     fn a_seal_the_deposit_did_not_authorise_is_refused() {
         let err = assert_recipient_authorized(

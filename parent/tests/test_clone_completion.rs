@@ -1,5 +1,5 @@
-//! F03-IT-03: real enclave state/crypto/handlers, with response faults AFTER
-//! SetClone commits Active. NSM is mocked; clone processing is not.
+//! F03-IT-03: real enclave state, crypto and handlers. Response faults occur
+//! after SetClone commits Active. NSM is mocked. Clone processing is real.
 #![cfg(not(feature = "vsock"))]
 
 #[path = "../src/bin/cli/clone_completion.rs"]
@@ -113,7 +113,7 @@ fn start(donor: bool, fault: Fault) -> Enclave {
                 if is_set {
                     sets.fetch_add(1, Ordering::SeqCst);
                     if matches!(fault, Fault::Pending) {
-                        // Never dispatch; emulate a request stalled before commit.
+                        // Do not dispatch. This simulates a request stuck before commit.
                         std::thread::sleep(Duration::from_secs(3));
                         return;
                     }
@@ -135,7 +135,7 @@ fn start(donor: bool, fault: Fault) -> Enclave {
                 };
                 handle_connection(&mut io, &ctx);
                 if is_set && !matches!(fault, Fault::Reject) {
-                    // This assertion happens before ALL response-loss injection.
+                    // This check runs before any response-loss fault.
                     assert!(
                         ctx.state.get_keys().is_ok(),
                         "SetClone must really commit Active"
@@ -223,7 +223,7 @@ async fn run_cli_completion(secure: bool) {
         ParentAdapterService::new(EnclaveTarget::Tcp(donor.addr.clone()), Default::default());
     let pki = pki::Pki::new();
     let mut builder = tonic::transport::Server::builder();
-    // Exercise production mTLS/auth with the actual CLI and actual enclave clone handlers.
+    // Test production mTLS and auth with the real CLI and enclave clone handlers.
     let access = if secure {
         builder = builder
             .tls_config(

@@ -1,27 +1,25 @@
 //! Per-flow RGB validation rules.
 //!
-//! The bridge runs two RGB flows, and each ships as its own enclave instance
-//! with its own PCR0:
+//! The bridge has two RGB flows. Each flow is a separate enclave build with
+//! its own PCR0:
 //!
 //!   * **send/receive** (`rgb-swap`) - the bridge holds a pool of the asset.
-//!     A deposit pays the user with a BFA `Transfer`; a withdrawal is a
+//!     A deposit pays the user with a BFA `Transfer`. A withdrawal is a
 //!     `Transfer` back to the bridge.
-//!   * **mint/burn** (`rgb-mint-burn`) - the bridge owns the contract's
-//!     mint right. A deposit mints with a BFA `Bridge`; a withdrawal
-//!     destroys units with a BFA `Burn`.
+//!   * **mint/burn** (`rgb-mint-burn`) - the bridge owns the mint right of the
+//!     contract. A deposit mints with a BFA `Bridge`. A withdrawal destroys
+//!     units with a BFA `Burn`.
 //!
-//! The two differ only in which transition types they accept and how the
-//! amounts bind, but those are exactly the checks that authorize value to
-//! move. Splitting them per file (rather than branching at runtime) means a
-//! send/receive enclave carries no mint rule at all: an attacker who gets a
-//! mint-shaped consignment past every other check still cannot reach a code
-//! path that would sign it.
+//! The flows differ only in the accepted transition types and the amount
+//! binds. These are the checks that authorize value to move. Thus each flow
+//! is a separate file, not a runtime branch. A send/receive enclave contains
+//! no mint rule, so a mint-shaped consignment has no code path that signs it.
 //!
-//! Exactly one of the two features must be enabled - see the `compile_error!`
-//! pair in `lib.rs`. Both files expose the same item names, so every caller
-//! writes `flow::...` and never a `cfg`.
+//! Exactly one of the two features must be on (see the `compile_error!` pair
+//! in `lib.rs`). Both files export the same item names, so callers use
+//! `flow::...` without a `cfg`.
 //!
-//! Everything NOT flow-specific stays shared: consignment parsing
+//! Shared code that is not flow-specific: consignment parsing
 //! ([`super::validation`]), SPV anchoring, and the PSBT mechanics in
 //! [`super::psbt_validation`] (txid identity bind, prevout canary, sighash
 //! guard, recipient/change leg split, fee-rate bound).

@@ -1,14 +1,15 @@
 //! Seed custody through AWS KMS with Nitro recipient attestation.
 //!
-//! In-process Rust: `aws-sdk-kms` sends `GenerateDataKey` / `Decrypt` with an
-//! NSM attestation document carrying a one-shot RSA key, and `recipient.rs`
-//! opens the `CiphertextForRecipient` envelope. The plaintext seed exists only
-//! in this address space and only for the call; the parent, the proxy and S3
-//! handle ciphertext. TLS to `kms.<region>.amazonaws.com` ends in the enclave
-//! against the Amazon Trust Services roots, forwarded over vsock port
-//! [`DEFAULT_KMS_VSOCK_PORT`]. Failures surface as fixed [`CustodyFailure`]
-//! categories, never service text. Deployment, key policy and recovery rules
-//! are in `docs/kms-persistence.md`.
+//! `aws-sdk-kms` sends `GenerateDataKey` / `Decrypt` with an NSM attestation
+//! document that carries a one-shot RSA key. `recipient.rs` opens the
+//! `CiphertextForRecipient` envelope.
+//!
+//! The plaintext seed exists only in the enclave. The parent, the proxy and S3
+//! see only ciphertext. TLS to `kms.<region>.amazonaws.com` ends in the enclave,
+//! against the Amazon Trust Services roots, over vsock port
+//! [`DEFAULT_KMS_VSOCK_PORT`]. Errors are fixed [`CustodyFailure`] categories,
+//! never service text. See `docs/kms-persistence.md` for deployment, key
+//! policy and recovery.
 
 use std::collections::HashMap;
 use std::future::Future;
@@ -40,28 +41,26 @@ mod tests;
 /// Upper bound on the `CiphertextBlob` KMS returns for a 64-byte data key.
 pub const MAX_CIPHERTEXT_BYTES: usize = 6144;
 const SEED_BYTES: usize = 64;
-/// Ceiling for one KMS round trip, including RSA key generation. The caller's
-/// recovery deadline applies on top when it is shorter.
+/// Max time of one KMS round trip. A shorter caller deadline wins.
 const CALL_TIMEOUT: Duration = Duration::from_secs(12);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 /// KMS accepts a 2048-bit RSA public key in the attestation document.
 const RECIPIENT_RSA_BITS: usize = 2048;
-/// KMS HTTPS port; a vsock build forwards it to the parent.
+/// KMS HTTPS port. A vsock build forwards it to the parent.
 pub const KMS_PORT: u16 = 443;
-/// The KMS forwarder listens here, so it does not collide with an EVM RPC
-/// forwarder on `127.0.0.1:443`.
+/// Loopback address of the KMS forwarder. It is not `127.0.0.1`, so it does
+/// not collide with an EVM RPC forwarder on `127.0.0.1:443`.
 pub const KMS_LOOPBACK: std::net::Ipv4Addr = std::net::Ipv4Addr::new(127, 0, 0, 2);
 /// Parent `vsock-proxy` port for KMS (`KMS_VSOCK_PORT` overrides it).
 pub const DEFAULT_KMS_VSOCK_PORT: u32 = 8003;
 const AMAZON_TRUST_ROOTS: &[u8] = include_bytes!("amazon_trust_roots.pem");
 
-/// Mint custody domain, the `flow` entry of the encryption context. It is
-/// compiled into the measured image (`kms-persistence` requires
-/// `mint-signer`); neither host requests nor environment select it.
+/// The `flow` entry of the encryption context. It is compiled into the
+/// measured image. Host requests and env cannot change it.
 pub const CUSTODY_FLOW: &str = "rgb-mint";
 
-/// Public configuration. The operator sets it once, at launch
-/// (`SetEndpoints`), and the attested policy commits it.
+/// Public KMS config. The operator sets it once at launch (`SetEndpoints`).
+/// The attested policy commits it.
 #[derive(Debug, Clone)]
 pub struct KmsConfig {
     pub key_arn: String,
@@ -71,8 +70,8 @@ pub struct KmsConfig {
 
 impl KmsConfig {
     pub fn validate(&self) -> Result<()> {
-        // Deliberately restrict endpoints to commercial AWS regions. Separate
-        // partitions need their own pinned hostname/ARN validation rules.
+        // Commercial AWS regions only. Other partitions need their own host
+        // and ARN rules.
         if !(3..=32).contains(&self.region.len())
             || !self
                 .region
@@ -136,15 +135,15 @@ impl KmsConfig {
     }
 }
 
-/// `kms.<region>.amazonaws.com`, the SDK's default endpoint for the
-/// commercial partition [`KmsConfig::validate`] admits.
+/// `kms.<region>.amazonaws.com`, the SDK default endpoint in the commercial
+/// partition.
 pub fn endpoint_host(region: &str) -> String {
     format!("kms.{region}.amazonaws.com")
 }
 
-/// Temporary EC2 role credentials relayed by the parent. They authorize the
-/// HTTPS request; only the attested enclave can unwrap the KMS response.
-/// No Debug implementation: request logging must never expose credentials.
+/// Temporary EC2 role credentials from the parent. They authorize the HTTPS
+/// request. Only the attested enclave can open the KMS response.
+/// No `Debug`, so logs never show credentials.
 #[derive(Clone)]
 pub struct AwsCredentials {
     access_key_id: Zeroizing<String>,
@@ -198,8 +197,7 @@ impl AwsCredentials {
         Ok(credentials)
     }
 
-    /// The SDK's credential type. It holds plain `String`s, so this copy is
-    /// made per call and dropped with the one-shot SDK client.
+    /// The SDK credential type. It holds plain `String`s, so make it per call.
     fn to_sdk(&self) -> Credentials {
         let token = (!self.session_token.is_empty()).then(|| self.session_token.to_string());
         Credentials::new(
@@ -222,8 +220,8 @@ pub struct KmsClient {
     config: KmsConfig,
     credentials: AwsCredentials,
     network: Network,
-    /// Tests replace the HTTPS client with canned exchanges and fix the
-    /// recipient key so the canned envelope can be opened.
+    /// Test HTTPS client with canned exchanges, and the fixed recipient key that
+    /// opens the canned envelope.
     #[cfg(test)]
     test_transport: Option<(SharedHttpClient, RsaPrivateKey)>,
 }
@@ -240,14 +238,14 @@ impl KmsClient {
         })
     }
 
-    /// `GenerateDataKey(NumberOfBytes=64)` with recipient attestation. KMS
-    /// returns the seed only inside `CiphertextForRecipient`; it is opened to
-    /// prove the envelope is well formed and then discarded. Only the durable
-    /// `CiphertextBlob` is returned; recover the committed winner separately
+    /// `GenerateDataKey(NumberOfBytes=64)` with recipient attestation.
+    ///
+    /// The seed in `CiphertextForRecipient` is opened only to check the envelope,
+    /// then dropped. Returns the `CiphertextBlob`. Recover the committed seed
     /// before activation.
     pub fn generate_ciphertext(&self, deadline: Instant) -> Result<Vec<u8>> {
-        // RSA key generation and NSM attestation take real time; budget the
-        // network call only after they are done.
+        // RSA key generation and NSM attestation are slow, so compute the
+        // network budget after them.
         let recipient = self.recipient()?;
         let budget = call_budget(deadline)?;
         let client = self.sdk_client(budget)?;
@@ -275,8 +273,8 @@ impl KmsClient {
         if ciphertext.is_empty() || ciphertext.len() > MAX_CIPHERTEXT_BYTES {
             return Err(invalid("KMS CiphertextBlob has an invalid length"));
         }
-        // Validate the recipient envelope before permitting the first S3
-        // write, but keep its seed in this frame only.
+        // Check the envelope before the first S3 write. The seed stays in this
+        // frame.
         let seed = recipient.open(output.ciphertext_for_recipient.as_ref())?;
         drop(seed);
         Ok(ciphertext)
@@ -291,8 +289,7 @@ impl KmsClient {
         if ciphertext_blob.is_empty() || ciphertext_blob.len() > MAX_CIPHERTEXT_BYTES {
             return Err(fail("invalid persisted KMS ciphertext length"));
         }
-        // RSA key generation and NSM attestation take real time; budget the
-        // network call only after they are done.
+        // Compute the network budget after the slow recipient setup.
         let recipient = self.recipient()?;
         let budget = call_budget(deadline)?;
         let client = self.sdk_client(budget)?;
@@ -321,9 +318,8 @@ impl KmsClient {
         recipient.open(output.ciphertext_for_recipient.as_ref())
     }
 
-    /// The four public context entries every policy must require verbatim
-    /// (see docs/kms-persistence.md). `flow` is [`CUSTODY_FLOW`], never a
-    /// host value.
+    /// The four public context entries. The key policy must require each one
+    /// exactly (see docs/kms-persistence.md).
     fn encryption_context(&self) -> HashMap<String, String> {
         HashMap::from([
             (
@@ -337,7 +333,7 @@ impl KmsClient {
     }
 
     fn check_key_id(&self, key_id: Option<&str>) -> Result<()> {
-        // Bind the response to the measured key before any envelope is opened.
+        // Bind the response to the pinned key before an envelope is opened.
         if key_id != Some(self.config.key_arn.as_str()) {
             return Err(invalid("KMS answered for an unexpected key"));
         }
@@ -354,9 +350,8 @@ impl KmsClient {
         Recipient::new(key)
     }
 
-    /// One SDK client per call: no retries (the persistence layer decides
-    /// whether to retry), every timeout bounded by `budget`, credentials
-    /// dropped with the client.
+    /// One SDK client per call. No retries: the persistence layer decides.
+    /// `budget` bounds every timeout.
     fn sdk_client(&self, budget: Duration) -> Result<aws_sdk_kms::Client> {
         let http_client = self.http_client()?;
         let sleep = default_async_sleep().ok_or_else(|| custody(CustodyFailure::Internal))?;
@@ -387,8 +382,8 @@ impl KmsClient {
     }
 }
 
-/// rustls (ring) with only the Amazon Trust Services roots. The enclave has
-/// no system certificate store and must not trust one.
+/// rustls (aws-lc) with only the Amazon Trust Services roots. The enclave
+/// must not trust a system certificate store.
 fn https_client() -> Result<SharedHttpClient> {
     let trust = TrustStore::empty()
         .with_native_roots(false)
@@ -404,7 +399,7 @@ fn https_client() -> Result<SharedHttpClient> {
 }
 
 /// The one-shot recipient: an RSA private key and the attestation document
-/// that carries its public half. Dropped, and zeroized, with the call.
+/// with its public key. Dropped with the call.
 struct Recipient {
     key: RsaPrivateKey,
     info: RecipientInfo,
@@ -445,8 +440,8 @@ fn call_budget(deadline: Instant) -> Result<Duration> {
     Ok(crate::conn::remaining_until(deadline)?.min(CALL_TIMEOUT))
 }
 
-/// Drive one SDK call on a private single-threaded runtime. The runtime, its
-/// connection and the SDK client all end with this call.
+/// Run one SDK call on a private single-threaded runtime. The runtime, its
+/// connection and the SDK client end with the call.
 fn block_on<F, T>(budget: Duration, future: F) -> Result<T>
 where
     F: Future<Output = T>,
@@ -455,15 +450,15 @@ where
         .enable_all()
         .build()
         .map_err(|_| custody(CustodyFailure::Internal))?;
-    // The timer must be created inside the runtime, hence the async block.
+    // The async block creates the timer inside the runtime.
     runtime
         .block_on(async { tokio::time::timeout(budget, future).await })
         .map_err(|_| custody(CustodyFailure::Unavailable))
 }
 
 fn reject_plaintext(plaintext: Option<&Blob>) -> Result<()> {
-    // With a Recipient, KMS must not return plaintext. An empty value is the
-    // documented shape; anything else means the request was not attested.
+    // With a Recipient, KMS returns no plaintext (empty is documented).
+    // Anything else means the request was not attested.
     match plaintext {
         None => Ok(()),
         Some(blob) if blob.as_ref().is_empty() => Ok(()),
@@ -471,8 +466,8 @@ fn reject_plaintext(plaintext: Option<&Blob>) -> Result<()> {
     }
 }
 
-/// Map an SDK failure to a fixed category. Service text is dropped; only an
-/// allow-listed error code is logged.
+/// Map an SDK failure to a fixed category. Service text is dropped. Only a
+/// known error code is logged.
 fn classify<E>(error: SdkError<E, HttpResponse>) -> EnclaveError
 where
     E: ProvideErrorMetadata + std::error::Error + 'static,
@@ -482,8 +477,8 @@ where
         SdkError::TimeoutError(_) => (CustodyFailure::Unavailable, None),
         SdkError::DispatchFailure(dispatch) => {
             let failure = match dispatch.as_connector_error() {
-                // Only documented transport failures are retryable. A TLS
-                // authentication failure is a bad peer, not a retry hint.
+                // Only transport failures can be retried. A TLS auth failure
+                // is a bad peer.
                 Some(c) if c.is_timeout() || c.is_io() => CustodyFailure::Unavailable,
                 Some(c) if c.is_user() => CustodyFailure::Configuration,
                 _ => CustodyFailure::InvalidResponse,
@@ -504,14 +499,14 @@ where
     custody(failure)
 }
 
-/// The SDK reports either `AccessDeniedException` or the wire form
-/// `com.amazonaws.kms#AccessDeniedException`; compare the bare name.
+/// The bare error name. The SDK gives `AccessDeniedException` or the wire form
+/// `com.amazonaws.kms#AccessDeniedException`.
 fn kms_error_name(code: &str) -> &str {
     code.rsplit('#').next().unwrap_or(code)
 }
 
-/// Inspect an allow-listed status/code, never the service's free-form message.
-/// Unknown or malformed errors are invalid responses, not retryable failures.
+/// Classify by known status and code, never by the service message.
+/// Unknown errors are invalid responses, not retryable.
 fn classify_service(status: u16, code: Option<&str>) -> CustodyFailure {
     match status {
         401 | 403 => return CustodyFailure::AccessDenied,

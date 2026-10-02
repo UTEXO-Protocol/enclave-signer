@@ -1,12 +1,11 @@
 //! Per-network validation, one module per chain family.
 //!
 //! Wiring only. `route.rs` holds the source/destination dispatch and the
-//! route-level amount binding; each network module owns the checks for its
-//! own payload.
+//! route amount bind. Each network module owns the checks for its payload.
 
-// `ccd` is self-contained, so its module is feature-gated. `rgb` and `evm` stay
-// always-compiled: they are woven into shared code (keys.rs PSBT signing,
-// error.rs SpvError), and their heavy deps sit behind `rgb-validation`.
+// `ccd` is self-contained, so a feature gates it. `rgb` and `evm` always
+// compile because shared code uses them (keys.rs PSBT signing, error.rs
+// SpvError). Their heavy deps are behind `rgb-validation`.
 #[cfg(feature = "ccd")]
 pub mod ccd;
 pub mod evm;

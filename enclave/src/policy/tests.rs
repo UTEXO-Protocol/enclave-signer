@@ -7,7 +7,7 @@ fn release_bridge_ctx() -> BuildContext {
         mock_attestation: false,
         allow_seed_import: false,
         rgb_validation: true,
-        // Both directions, so the gas and plain-BTC rules are all live.
+        // Both directions, so the gas and plain-BTC rules are live.
         signer_role: SignerRole::Combined,
     }
 }
@@ -23,8 +23,7 @@ fn pinned_config() -> BridgeConfig {
     }
 }
 
-/// A pinned Helios checkpoint for tests that resolve a valid production
-/// Helios policy (a real beacon block root is 32 bytes).
+/// A pinned Helios checkpoint (a 32-byte beacon block root).
 fn a_checkpoint() -> Option<[u8; 32]> {
     Some([0x0c; 32])
 }
@@ -148,8 +147,7 @@ fn a_tls_pin() -> Option<EvmRpcTlsPin> {
 #[test]
 fn production_accepts_an_authenticated_evm_source_and_attests_it() {
     let ctx = release_bridge_ctx();
-    // Helios has no L2 light client, so an Arbitrum image reads the RPC over
-    // pinned TLS. `Disabled` fails closed per request.
+    // `Disabled` fails closed per request.
     for (source, pin) in [
         (EvmDataSource::Disabled, None),
         (EvmDataSource::PinnedTlsRpc, a_tls_pin()),
@@ -164,7 +162,7 @@ fn production_accepts_an_authenticated_evm_source_and_attests_it() {
             "{source:?} must not be gated at boot"
         );
     }
-    // Helios WITH a pinned checkpoint still passes.
+    // Helios with a pinned checkpoint passes.
     let p = SecurityPolicy::resolve(
         &ctx,
         &pinned_config(),
@@ -248,10 +246,8 @@ fn evm_rpc_tls_pin_is_carried_into_the_commitment() {
 
 #[test]
 fn production_helios_without_a_pinned_checkpoint_is_rejected_at_boot() {
-    // Helios is the trustless source, but with no weak-subjectivity
-    // checkpoint its trust root is unpinned and unattested. Such a build
-    // resolves to Production (so the missing pin is visible) but must NOT
-    // pass the boot gate.
+    // Without a checkpoint the Helios trust root is not pinned. The policy is
+    // Production, so the gap is visible, but the boot gate fails.
     let ctx = release_bridge_ctx();
     let p = SecurityPolicy::resolve(
         &ctx,
@@ -302,8 +298,7 @@ fn production_rejects_a_zero_confirmation_rule() {
 
 #[test]
 fn production_rejects_an_unpinned_token_contract() {
-    // The token is a burnId preimage input; without it the recompute would
-    // be skipped, which a production signer must not silently do.
+    // Without the token, the burnId check is skipped.
     let ctx = release_bridge_ctx();
     let mut cfg = pinned_config();
     cfg.token_contract = [0u8; 20];
@@ -315,8 +310,7 @@ fn production_rejects_an_unpinned_token_contract() {
 
 #[test]
 fn production_rejects_btc_relay_mode_none() {
-    // `none` exists for a local stand with no BtcRelay. A production signer
-    // must never boot with the relay compare off.
+    // `none` is only for a local stand with no BtcRelay.
     let ctx = release_bridge_ctx();
     let mut cfg = pinned_config();
     cfg.btc_relay_mode = BtcRelayMode::None;
@@ -326,8 +320,7 @@ fn production_rejects_btc_relay_mode_none() {
     assert!(err.contains("BTC_RELAY_MODE=none"), "got: {err}");
 }
 
-/// The default config (env unset) is `required`, so a pinned production
-/// config boots without naming the variable.
+/// The default is `required`, so a production config boots without the env var.
 #[test]
 fn production_defaults_to_btc_relay_required() {
     let ctx = release_bridge_ctx();
@@ -347,8 +340,8 @@ fn production_defaults_to_btc_relay_required() {
     assert!(policy.assert_valid_for_build(&ctx).is_ok());
 }
 
-/// A debug/dev build honours the env value and never gates on it: the
-/// posture is `Development` either way.
+/// A debug build uses the env value and does not gate on it: the policy is
+/// `Development`.
 #[test]
 fn dev_build_ignores_btc_relay_mode_for_the_boot_gate() {
     let ctx = BuildContext {
@@ -434,7 +427,7 @@ fn release_bridge_unconfigured_is_rejected_at_boot() {
             reason: DevReason::Unconfigured
         }
     );
-    // The whole point of the policy: a misconfigured production build never boots.
+    // A misconfigured production build never boots.
     let err = p.assert_valid_for_build(&ctx).unwrap_err();
     assert!(err.contains("Unconfigured"), "got: {err}");
 }
@@ -489,7 +482,7 @@ fn each_dev_feature_forces_development_even_when_fully_pinned() {
             12,
         );
         assert_eq!(p, SecurityPolicy::Development { reason });
-        // Even fully pinned, a dev feature in a release rgb build must not boot.
+        // Fully pinned, a dev feature in a release rgb build still does not boot.
         assert!(p.assert_valid_for_build(&ctx).is_err());
     }
 }
@@ -539,7 +532,7 @@ fn minimal_non_bridge_release_is_exempt() {
             reason: DevReason::NonBridgeBuild
         }
     );
-    // No bridge path to protect -> the boot gate passes.
+    // No bridge path, so the boot gate passes.
     assert!(p.assert_valid_for_build(&ctx).is_ok());
 }
 
@@ -547,7 +540,7 @@ fn minimal_non_bridge_release_is_exempt() {
 fn allow_vanilla_psbt_tracks_the_btc_pins() {
     let ctx = release_bridge_ctx();
     let mut cfg = pinned_config();
-    // Unset BTC pins -> vanilla disabled (fail-closed).
+    // Unset BTC pins: vanilla is off.
     let p = SecurityPolicy::resolve(&ctx, &cfg, EvmDataSource::RawRpc, None, None, "e.test", 12);
     assert!(matches!(
         p,
@@ -556,7 +549,7 @@ fn allow_vanilla_psbt_tracks_the_btc_pins() {
             ..
         })
     ));
-    // Operator sets the cap -> vanilla enabled and attested.
+    // With the cap set, vanilla is on and attested.
     cfg.btc_max_total_sats = 100_000;
     let p = SecurityPolicy::resolve(&ctx, &cfg, EvmDataSource::RawRpc, None, None, "e.test", 12);
     assert!(matches!(
@@ -570,8 +563,7 @@ fn allow_vanilla_psbt_tracks_the_btc_pins() {
 
 #[test]
 fn gas_tx_rule_is_carried_into_the_commitment() {
-    // The gas-tx pins flow from BridgeConfig into the attested
-    // policy, so pinning them changes the commitment a verifier checks.
+    // The gas-tx pins change the commitment.
     let ctx = release_bridge_ctx();
     let unpinned = SecurityPolicy::resolve(
         &ctx,
@@ -611,8 +603,7 @@ fn gas_tx_rule_is_carried_into_the_commitment() {
 
 #[test]
 fn gas_tx_value_ceiling_alone_changes_the_commitment() {
-    // The LayerZero carve-out's bound is part of the attested gas-tx rule:
-    // raising it must be visible to a verifier, not a silent config change.
+    // The LayerZero value cap is part of the attested gas-tx rule.
     let ctx = release_bridge_ctx();
     let mut base = pinned_config();
     base.gas_tx_allowed_to = Some([0x77; 20]);
@@ -642,9 +633,7 @@ fn gas_tx_value_ceiling_alone_changes_the_commitment() {
 
 #[test]
 fn unset_gas_tx_value_ceiling_commits_as_zero() {
-    // `None` and `Some(0)` enforce the same posture - no non-zero value is
-    // signable - so they must commit identically rather than let an operator
-    // produce two different attestations for one enforced rule.
+    // `None` and `Some(0)` enforce the same rule, so they commit the same bytes.
     let ctx = release_bridge_ctx();
     let mut unset = pinned_config();
     unset.gas_tx_max_value_wei = None;
@@ -688,16 +677,13 @@ fn evm_source_is_carried_into_the_commitment() {
         "e.test",
         12,
     );
-    // A raw-RPC deployment and a Helios deployment commit to different bytes,
-    // so a verifier expecting one rejects the other (data source).
+    // Raw RPC and Helios commit different bytes.
     assert_ne!(raw.commitment_bytes(), helios.commitment_bytes());
 }
 
 #[test]
 fn evm_checkpoint_is_carried_into_the_commitment() {
-    // Two Helios deployments identical except for the pinned checkpoint
-    // commit different bytes, so a verifier bound to one trust root rejects
-    // an enclave that synced from another.
+    // Different checkpoints commit different bytes.
     let ctx = release_bridge_ctx();
     let a = SecurityPolicy::resolve(
         &ctx,
@@ -728,8 +714,7 @@ fn development_commitment_is_stable_and_distinct() {
     let dev_b = SecurityPolicy::Development {
         reason: DevReason::MockAttestation,
     };
-    // The reason is for logs only; it is NOT part of the commitment, so any
-    // Development enclave commits the same bytes a verifier can reconstruct.
+    // The reason is for logs only. It is not in the commitment.
     assert_eq!(dev_a.commitment_bytes(), dev_b.commitment_bytes());
     assert_ne!(
         dev_a.commitment_bytes(),

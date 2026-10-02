@@ -7,10 +7,10 @@ use crate::header_source::ElectrumSource;
 
 /// Parent Adapter configuration, populated from environment variables.
 pub struct Config {
-    /// Host for the gRPC server to bind (default 127.0.0.1; use 0.0.0.0 in Docker).
+    /// Bind host for the gRPC server (default 127.0.0.1; use 0.0.0.0 in Docker).
     pub grpc_host: String,
 
-    /// Port for the gRPC server (Listener connects here).
+    /// Port for the gRPC server. The Listener connects here.
     pub grpc_port: u16,
 
     /// Enclave TCP address for local dev.
@@ -25,26 +25,25 @@ pub struct Config {
     /// Use vsock instead of TCP.
     pub use_vsock: bool,
 
-    /// EVM network IDs - TRANSACTION with these network_ids routes to signEVM.
+    /// A TRANSACTION with one of these network IDs routes to signEVM.
     pub evm_network_ids: HashSet<u32>,
 
     /// Maximum active gRPC requests across all connections. (F03-AF-13)
     pub grpc_max_concurrent: usize,
 
-    /// Per-connection cap on concurrent in-flight gRPC requests / HTTP/2 streams.
+    /// Maximum in-flight gRPC requests and HTTP/2 streams per connection.
     pub grpc_max_concurrent_per_conn: usize,
 
     /// Time limit for each gRPC handler.
     pub grpc_request_timeout_secs: u64,
 
-    /// Host for the `GET /health` readiness endpoint. Loopback by default:
-    /// deploy polls it from the parent host, and it must not be exposed
-    /// off-host. Unlike `grpc_host`, do NOT set this to 0.0.0.0 in Docker.
+    /// Host for the `GET /health` readiness endpoint (default loopback).
+    /// Deploy polls it from the parent host. Do not expose it off-host.
+    /// Unlike `grpc_host`, do not set it to 0.0.0.0 in Docker.
     pub health_host: String,
 
-    /// Port for the health endpoint. Separate from `grpc_port`: the gRPC
-    /// listener speaks h2 only, and the probe is plain HTTP/1.1 so a shell
-    /// script can curl it.
+    /// Port for the health endpoint. The gRPC listener is h2 only. The probe
+    /// is plain HTTP/1.1, so a shell script can curl it.
     pub health_port: u16,
 }
 
@@ -73,10 +72,11 @@ impl Config {
     }
 }
 
-/// Parse `HEADER_ELECTRUM_URL` and `HEADER_SYNC_INTERVAL_SECS`. An unset or
-/// empty value takes its default. A malformed interval is an error that stops
-/// the parent. A malformed URL is returned as the inner `Err`: header sync
-/// reports it as `unconfigured`, and signing is not held hostage to it.
+/// Parse `HEADER_ELECTRUM_URL` and `HEADER_SYNC_INTERVAL_SECS`.
+///
+/// An unset or empty value takes its default. A bad interval is an error that
+/// stops the parent. A bad URL comes back as the inner `Err`. Header sync
+/// reports it as `unconfigured`, and signing continues.
 pub fn header_sync(
     url: Option<String>,
     interval_secs: Option<String>,
@@ -127,7 +127,7 @@ mod tests {
             parse(Some("tcp://127.0.0.1:50001"), Some("600")).unwrap(),
             (Ok(true), 600)
         );
-        // A bad URL does not stop the parent; it is reported.
+        // A bad URL does not stop the parent.
         for url in ["tcp://192.0.2.1:50001", "electrum:50002"] {
             let (source, secs) = parse(Some(url), None).unwrap();
             assert!(

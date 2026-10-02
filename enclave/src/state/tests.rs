@@ -33,12 +33,12 @@ fn export_hard_cap_blocks_after_quota() {
     let pk = [7u8; 32];
     assert_eq!(state.reserve_export_quota().unwrap().commit(&pk), 1);
     assert_eq!(state.reserve_export_quota().unwrap().commit(&pk), 2);
-    // Quota reached: the cap+1-th export is refused before sealing.
+    // The export after the cap is refused before sealing.
     let err = state.reserve_export_quota().err().unwrap();
     assert!(matches!(err, EnclaveError::Clone(_)));
 }
 
-// Default (cap 0) never gates, no matter how many exports were served.
+// The default cap 0 never blocks exports.
 #[test]
 fn export_hard_cap_disabled_by_default() {
     let state = EnclaveState::new(Network::Bitcoin);
@@ -82,8 +82,8 @@ fn export_hard_cap_bounds_concurrent_in_flight_exports() {
                 scope.spawn(|| {
                     start.wait();
                     let slot = state.reserve_export_quota();
-                    // No successful export is recorded until every worker
-                    // has tried admission: exercise the old race window.
+                    // All workers try admission before any export is recorded.
+                    // This exercises the concurrent reservation race.
                     reserved.wait();
                     if let Ok(slot) = slot {
                         slot.commit(&[3; 32]);
@@ -110,7 +110,6 @@ fn enter_cloning_replaces_expired_but_protects_live_session() {
     let state = EnclaveState::new(Network::Bitcoin);
     let t0 = Instant::now();
 
-    // First initiation from Initial succeeds.
     state
         .enter_cloning_at(
             CloningSession::new_at(CloneSession::new(), [1u8; 20], t0),
@@ -119,7 +118,7 @@ fn enter_cloning_replaces_expired_but_protects_live_session() {
         .unwrap();
     assert_eq!(state.phase_name(), "cloning");
 
-    // Reject a second request while the session is valid.
+    // A second request is refused while the session is valid.
     let err = state
         .enter_cloning_at(
             CloningSession::new_at(CloneSession::new(), [2u8; 20], t0),
@@ -134,7 +133,7 @@ fn enter_cloning_replaces_expired_but_protects_live_session() {
         })
         .unwrap();
 
-    // Replace the session after its time limit.
+    // The session can be replaced after its time limit.
     let later = t0 + CLONING_SESSION_TTL + Duration::from_secs(1);
     state
         .enter_cloning_at(
@@ -250,11 +249,10 @@ fn initialize_from_cloning_phase_rejected() {
     assert!(matches!(err, EnclaveError::AlreadyInitialized));
 }
 
-// NonceReplayGuard - time-bounded replay guard (coverage
-// map). Helpers use `check_and_record_at` so eviction is exercised
-// without sleeping.
+// NonceReplayGuard. Tests use `check_and_record_at` to check eviction
+// without a sleep.
 
-/// Distinct 32-byte nonce keyed by a small integer, for readable tests.
+/// Unique 32-byte nonce from a small integer.
 fn nonce(i: u32) -> [u8; 32] {
     let mut n = [0u8; 32];
     n[..4].copy_from_slice(&i.to_be_bytes());
@@ -283,14 +281,14 @@ fn replay_guard_rejects_duplicate_within_ttl() {
     let g = NonceReplayGuard::with_capacity(100, Duration::from_secs(3600));
     let t0 = Instant::now();
     assert!(g.check_and_record_at(nonce(1), t0).is_ok());
-    // Same nonce, still inside the TTL window -> replay.
+    // The same nonce inside the TTL window is a replay.
     let err = g
         .check_and_record_at(nonce(1), t0 + Duration::from_secs(30))
         .unwrap_err();
     assert!(matches!(err, EnclaveError::NonceReplay));
 }
 
-// ReplayReservation - reserve/commit/rollback.
+// ReplayReservation: reserve, commit and rollback.
 
 #[test]
 fn reservation_rolls_back_when_dropped_uncommitted() {
@@ -299,14 +297,14 @@ fn reservation_rolls_back_when_dropped_uncommitted() {
     {
         let _r = g.reserve(key).expect("first reserve succeeds");
         assert_eq!(g.seen_count(), 1, "reserved key is recorded while held");
-        // `_r` drops here without commit -> rollback.
+        // `_r` drops here without commit, so it rolls back.
     }
     assert_eq!(
         g.seen_count(),
         0,
         "un-committed reservation rolls back on drop"
     );
-    // The same key can now be reserved again (a legitimate retry).
+    // A legitimate retry can reserve the same key again.
     g.reserve(key)
         .expect("retry after rollback succeeds")
         .commit();
@@ -373,15 +371,14 @@ fn reservation_sticks_after_commit() {
     let g = NonceReplayGuard::with_capacity(100, Duration::from_secs(3600));
     let key = nonce(2);
     g.reserve(key).expect("reserve succeeds").commit();
-    // Committed -> a second reserve of the same key is a replay.
+    // After commit, a second reserve of the same key is a replay.
     assert!(matches!(g.reserve(key), Err(EnclaveError::NonceReplay)));
 }
 
 #[test]
 fn reservation_rejects_concurrent_duplicate_before_commit() {
-    // While a reservation is held (not yet committed), a second reserve of
-    // the same key is still rejected up front - reserve-before-sign blocks a
-    // concurrent duplicate, not only a committed one.
+    // An uncommitted reservation also blocks a second reserve of the same key.
+    // Thus reserve-before-sign blocks a concurrent duplicate.
     let g = NonceReplayGuard::with_capacity(100, Duration::from_secs(3600));
     let key = nonce(3);
     let held = g.reserve(key).expect("first reserve succeeds");
@@ -389,25 +386,24 @@ fn reservation_rejects_concurrent_duplicate_before_commit() {
     held.commit();
 }
 
-/// A flood of distinct nonces beyond `max` must
-/// not wedge the guard. Regression for the reject-when-full DoS.
+/// A flood of unique nonces above `max` must not block the guard.
+/// Regression test for the reject-when-full DoS.
 #[test]
 fn replay_guard_never_wedges_under_flood() {
     let max = 8;
     let g = NonceReplayGuard::with_capacity(max, Duration::from_secs(3600));
     let t0 = Instant::now();
 
-    // Flood with 10x the cap in distinct nonces.
+    // Flood with 10x the cap in unique nonces.
     for i in 0..(max as u32 * 10) {
         assert!(
             g.check_and_record_at(nonce(i), t0).is_ok(),
             "record {i} should succeed (no reject-when-full)"
         );
     }
-    // Memory stayed bounded.
     assert_eq!(g.seen_count(), max);
 
-    // A brand-new legitimate handshake is still admitted, not blocked.
+    // A new legitimate handshake is still admitted.
     assert!(g.check_and_record_at(nonce(9_999), t0).is_ok());
 }
 
@@ -418,12 +414,12 @@ fn replay_guard_evicts_oldest_first_on_overflow() {
     for i in 1..=3 {
         assert!(g.check_and_record_at(nonce(i), t0).is_ok());
     }
-    // 4th distinct nonce overflows the cap -> oldest (nonce 1) evicted.
+    // The 4th unique nonce overflows the cap, so the guard evicts nonce 1.
     assert!(g.check_and_record_at(nonce(4), t0).is_ok());
     assert_eq!(g.seen_count(), 3);
 
-    // nonce(2..=4) survive and are still replay-rejected. A replay returns
-    // before any insert, so these checks do not mutate the set.
+    // nonce(2..=4) stay and are refused as replays. A replay returns before
+    // any insert, so these checks do not change the set.
     for i in 2..=4 {
         assert!(
             matches!(
@@ -433,8 +429,8 @@ fn replay_guard_evicts_oldest_first_on_overflow() {
             "nonce({i}) should still be recorded"
         );
     }
-    // nonce(1) was the oldest and got evicted, so it is admitted again.
-    // (Done last: this insert evicts the new oldest.)
+    // The evicted nonce(1) is admitted again.
+    // This check is last because this insert evicts the new oldest entry.
     assert!(g.check_and_record_at(nonce(1), t0).is_ok());
 }
 
@@ -449,7 +445,7 @@ fn replay_guard_evicts_stale_entries_by_ttl() {
     assert!(g.check_and_record_at(nonce(2), t0 + ttl).is_ok());
     assert_eq!(g.seen_count(), 1, "stale nonce(1) should have been evicted");
 
-    // Because nonce(1) aged out, the same nonce is accepted again.
+    // nonce(1) expired, so the guard accepts it again.
     assert!(g
         .check_and_record_at(nonce(1), t0 + ttl + Duration::from_secs(1))
         .is_ok());
