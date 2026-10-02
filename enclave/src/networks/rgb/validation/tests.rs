@@ -1133,6 +1133,124 @@ mod asset_bind {
         }
     }
 
+    /// The mint transition of the fixture, with the OpId that the consignment
+    /// records for it.
+    fn fixture_mint() -> (rgbstd::Transition, rgbstd::OpId) {
+        let transfer = Transfer::load(Cursor::new(BFA_BURN_FIXTURE)).expect("load BFA fixture");
+        let known = transfer
+            .bundles
+            .iter()
+            .flat_map(|wb| wb.bundle().known_transitions.iter())
+            .find(|k| k.transition.transition_type == rgbstd::TransitionType::with(bfa::TS_BRIDGE))
+            .expect("the fixture has a mint");
+        (known.transition.clone(), known.opid)
+    }
+
+    /// A deposit names its mint by OpId, and the OpId is a hash of the full
+    /// transition. Thus the deposit fixes the mint right that the mint spends,
+    /// and the outputs of the mint. A mint with a different right, or with
+    /// different outputs, has a different OpId and is a different mint.
+    #[test]
+    fn a_mint_opid_commits_to_the_right_it_spends_and_to_its_outputs() {
+        use rgbstd::Operation as _;
+
+        let (mint, opid) = fixture_mint();
+        assert_eq!(mint.id(), opid, "the OpId is the hash of the transition");
+
+        // The mint spends one input, and that input is a mint right.
+        let inputs: Vec<_> = (&mint.inputs).into_iter().collect();
+        assert_eq!(inputs.len(), 1);
+        assert_eq!(inputs[0].ty, rgbstd::AssignmentType::with(bfa::OS_BRIDGE));
+
+        // A different mint right gives a different OpId.
+        let mut other_right = mint.clone();
+        let mut input = inputs[0];
+        input.no += 1;
+        other_right.inputs.push(input).expect("add an input");
+        other_right
+            .inputs
+            .remove(&inputs[0])
+            .expect("remove an input");
+        assert_ne!(other_right.id(), opid);
+
+        // Different outputs give a different OpId.
+        let mut other_outputs = mint.clone();
+        other_outputs
+            .assignments
+            .remove(&rgbstd::AssignmentType::with(bfa::OS_ASSET))
+            .expect("remove the asset outputs");
+        assert_ne!(other_outputs.id(), opid);
+    }
+
+    /// The mint right is a seal on one Bitcoin UTXO, and the witness tx of the
+    /// mint spends that UTXO. Each tx that commits this mint must spend the
+    /// same UTXO, so only one of them can confirm.
+    #[test]
+    fn the_mint_witness_tx_spends_the_utxo_of_the_mint_right() {
+        use rgbstd::{Assign, Operation as _, TypedAssigns};
+
+        let transfer = Transfer::load(Cursor::new(BFA_BURN_FIXTURE)).expect("load BFA fixture");
+        let (mint, opid) = fixture_mint();
+        let right = (&mint.inputs).into_iter().next().expect("one input");
+        assert_eq!(
+            right.op,
+            transfer.genesis.id(),
+            "the right comes from genesis"
+        );
+
+        // The seal of that right in genesis.
+        let rights = transfer
+            .genesis
+            .assignments
+            .get(&rgbstd::AssignmentType::with(bfa::OS_BRIDGE))
+            .expect("genesis assigns mint rights");
+        let TypedAssigns::Declarative(rights) = rights else {
+            panic!("a mint right is declarative");
+        };
+        let Assign::Revealed { seal, .. } = &rights[right.no as usize] else {
+            panic!("the genesis seal of the right is revealed");
+        };
+
+        // The witness tx of the bundle that has the mint.
+        let witness_tx = transfer
+            .bundles
+            .iter()
+            .find(|wb| wb.bundle().known_transitions.iter().any(|k| k.opid == opid))
+            .and_then(|wb| wb.pub_witness.tx())
+            .expect("the fixture embeds the mint witness tx");
+        assert!(
+            witness_tx
+                .input
+                .iter()
+                .any(|txin| txin.previous_output.txid == seal.txid
+                    && txin.previous_output.vout == seal.vout.into_u32()),
+            "the mint witness tx must spend the UTXO of the mint right"
+        );
+    }
+
+    /// The enclave gives RGB consensus the EVM lock for the OpId that the
+    /// deposit names. A lock for a different OpId does not validate the mint,
+    /// although the amount is correct. Thus one deposit can back only the mint
+    /// that it names.
+    #[test]
+    #[cfg(feature = "bfa-validation")]
+    fn refuses_a_mint_whose_evm_lock_names_a_different_transition() {
+        let id = fixture_asset_id();
+        let other_mint = vec![rgbstd::vm::ether_extension::Event::new(
+            rgbstd::OpId::from([0x77; 32]),
+            rgbstd::RevealedValue::new(100_000u64),
+        )];
+        let err =
+            run_validate_source_with_events(&fixture_source(&id), &pinned_config(&id), &other_mint)
+                .unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("evaluation of AluVM script for operation 6d72ee69")
+                && msg.contains("Some(1)"),
+            "expected the mint script to fail with ERRNO_ISSUED_MISMATCH, got: {msg}"
+        );
+    }
+
     // No end-to-end test for an empty validated contract_id.
     // `validate_consignment` derives it from the genesis, so it is never
     // empty. `asset_binding_rule::rejects_empty_validated_contract_id` covers
