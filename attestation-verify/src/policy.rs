@@ -2,7 +2,8 @@
 //!
 //! The enclave resolves its posture once at boot. This module serializes it,
 //! and the enclave adds it to the attestation `user_data` commitment with the
-//! public-key bundle (see `enclave/src/server.rs::handle_get_attested_public_key`).
+//! public-key bundle (see
+//! `enclave/src/server/keys.rs::handle_get_attested_public_key`).
 //!
 //! This module is the only definition of the encoding. The enclave and every
 //! verifier (the `attest-verify` CLI, the clone peer check) build an

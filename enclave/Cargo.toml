@@ -83,10 +83,11 @@ aws-nitro-enclaves-nsm-api = "0.4"
 
 [features]
 # A plain `cargo build` is the combined bridge: rgb + ccd. Production images
-# add `vsock` and `evm-rpc` (see build/Dockerfile.enclave*).
+# add `vsock`. RGB images get `evm-rpc` through `bfa-validation` (see
+# build/Dockerfile.enclave*).
 #
 # Single-network EIFs, one flow each:
-#   RGB send/receive: `--no-default-features --features vsock,rgb,rgb-swap,evm-rpc`
+#   RGB send/receive: `--no-default-features --features vsock,rgb,rgb-swap,bfa-validation` (retired)
 #   RGB mint:         `--no-default-features --features vsock,rgb,mint-signer`
 #   RGB burn:         `--no-default-features --features vsock,rgb,burn-signer`
 #   Concordium:       `--no-default-features --features vsock,ccd` (no

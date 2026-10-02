@@ -74,7 +74,7 @@ sequenceDiagram
 | `MAX_FEE_RATE_SAT_VB` | 200 | Maximum fee rate, over the unsigned size. |
 | `MAX_FEE_SATS` | 100 000 | Maximum fee. |
 | `MIN_FEE_RATE_SAT_VB` | 1 | Minimum fee rate, over the estimated signed size. |
-| `RGB_MAX_UNOWNED_SATS` | set in the image | Maximum sats that go to scripts the enclave does not own. Not set: refuse. |
+| `RGB_MAX_UNOWNED_SATS` | not set in the mint image | Maximum sats that go to scripts the enclave does not own. Not set: refuse every mint PSBT. |
 | Replay window | 24 h, 100 000 entries | In memory, per enclave. |
 | Colored account | `m/86'/827166'/0'` (mainnet) | The only account that signs a mint. |
 | Amount rule | `sum(OS_ASSET) == amount - commission` | Exact. Not a minimum. |

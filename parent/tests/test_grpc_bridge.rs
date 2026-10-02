@@ -697,8 +697,8 @@ async fn grpc_evm_passes_enriched_fields_through() {
 
 #[tokio::test]
 async fn grpc_evm_forwards_raw_consignment_bytes() {
-    // Regression: the parent must forward both the raw consignment (field 11)
-    // and its keccak256 hash (field 12).
+    // Regression: the parent must forward both the raw RGB consignment and
+    // its keccak256 hash.
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let enclave_port = listener.local_addr().unwrap().port();
 

@@ -180,7 +180,7 @@ impl KeyManager {
         let mut evm_gas_tx_address = [0u8; 20];
         evm_gas_tx_address.copy_from_slice(&gas_tx_hash[12..32]);
 
-        // === BTC Legacy: m/84'/0'/0'/0/0 ===
+        // === Retired BTC key: BIP-84 path m/84'/0'/0'/0/0, all networks ===
         // Only its public key is published. It signs nothing.
         let btc_path = DerivationPath::from_str("m/84'/0'/0'/0/0")
             .map_err(|e| EnclaveError::InvalidKey(format!("invalid BTC path: {}", e)))?;

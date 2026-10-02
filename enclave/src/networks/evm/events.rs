@@ -13,8 +13,7 @@
 //!
 //! The module does not match the raw log from the listener. It pins the
 //! contract from config and decodes the fields (`operationId`,
-//! gross/net/commission) itself. Thus `evm_log_index` / `evm_event_topics` /
-//! `evm_event_data` are not used.
+//! gross/net/commission) itself.
 //!
 //! Not bound here: `operationId` has no on-chain link to the signed RGB mint,
 //! so the listener supplies that link. Amounts are `u64`, as in the proto. A
@@ -219,7 +218,7 @@ pub fn verify_funds_in_event(
 
     // Bounded, not equal. The Bridge credits the measured balance delta and
     // `amount` stays nominal, so a fee-on-transfer token nets less
-    // (Bridge.sol:501-508). Only a `net` that is too high is unsafe.
+    // (`Bridge` fee-on-transfer balance delta). Only a `net` that is too high is unsafe.
     let max_net = gross.checked_sub(commission).ok_or_else(|| {
         EnclaveError::CrossCheck(format!(
             "BridgeFundsIn commission ({commission}) exceeds gross amount ({gross})"

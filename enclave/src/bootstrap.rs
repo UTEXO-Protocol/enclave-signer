@@ -264,7 +264,7 @@ pub fn build_rgb_validator(indexer_url: String) -> Option<RgbValidator> {
 /// of the active network. The chain starts empty. `SubmitHeaders` fills it.
 ///
 /// Panics on a bad checkpoint: a placeholder in a release build, one not on a
-/// retarget boundary, or a malformed `SPV_CHECKPOINT` override. Such a chain
+/// retarget boundary on a PoW network, or a malformed `SPV_CHECKPOINT` override. Such a chain
 /// cannot advance.
 #[cfg(feature = "rgb-validation")]
 pub fn build_header_chain(bitcoin_network_str: &str) -> std::sync::Mutex<HeaderChain> {
@@ -293,8 +293,8 @@ pub fn build_header_chain(bitcoin_network_str: &str) -> std::sync::Mutex<HeaderC
         panic!("{msg}");
     }
     if let Err(msg) = checkpoint.assert_retarget_aligned(spv_network) {
-        // A misaligned checkpoint stops the chain at the next retarget
-        // boundary: the epoch-start lookup falls below the checkpoint.
+        // On a PoW network, a misaligned checkpoint stops the chain at the next
+        // retarget boundary: the epoch-start lookup falls below the checkpoint.
         panic!("{msg}");
     }
     if !checkpoint.is_real {

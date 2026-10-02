@@ -25,7 +25,8 @@ pub struct Config {
     /// Use vsock instead of TCP.
     pub use_vsock: bool,
 
-    /// A TRANSACTION with one of these network IDs routes to signEVM.
+    /// EVM network IDs. A TRANSACTION with EvmData must target one of them.
+    /// A TRANSACTION with RgbData must not.
     pub evm_network_ids: HashSet<u32>,
 
     /// Maximum active gRPC requests across all connections. (F03-AF-13)

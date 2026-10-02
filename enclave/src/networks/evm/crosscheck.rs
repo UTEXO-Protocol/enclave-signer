@@ -1,7 +1,7 @@
 //! RGB -> EVM `fundsOut` cross-checks: they bind the signed calldata to the
 //! validated consignment. The module compiles only with `rgb-validation`,
-//! because each check reads a [`ValidatedConsignment`]. SPV builds also run
-//! the BtcRelay agreement check ([`verify_btc_relay_agreement`]).
+//! because each check reads a [`ValidatedConsignment`]. It includes the
+//! BtcRelay agreement check ([`verify_btc_relay_agreement`]).
 
 use crate::config::BtcRelayMode;
 use crate::error::{EnclaveError, Result};
@@ -39,7 +39,8 @@ pub fn assert_witnesses_confirmed(validated: &ValidatedConsignment) -> Result<()
 ///      accepts on a withdrawal: a BFA `Transfer` under `rgb-swap`, a BFA
 ///      `Burn` under `rgb-mint-burn`.
 ///   2. The amount that transition moves out of the source must cover the
-///      EVM release `amount`.
+///      EVM release `amount` under `rgb-swap`, and equal it under
+///      `rgb-mint-burn`.
 ///
 /// Both come from [`crate::networks::rgb::flow::funds_out_source_amount`],
 /// which also builds the route proof. Thus the two agree on the transition.
@@ -78,7 +79,7 @@ pub fn validate_funds_out_amount(
 ///
 /// This does not check the burn shape or amount. The caller must run
 /// [`validate_funds_out_amount`] first. Under `rgb-mint-burn`, it rejects
-/// anything that is not a `Burn` that covers the released amount.
+/// anything that is not a `Burn` of exactly the released amount.
 #[cfg(feature = "rgb-mint-burn")]
 pub fn validate_funds_out_burn_recipient(
     params: &FundsOutParams,
@@ -279,7 +280,7 @@ struct ProofBlock {
 ///    enclave builds from its own chain ([`relay_record`]).
 ///
 /// The `proof` slot is `abi.encode(uint256 sourceHeight, bytes32 sourceCommit,
-/// uint256 latestHeight, bytes32 latestCommit)` (`RGBVerifier.sol:115-117`).
+/// uint256 latestHeight, bytes32 latestCommit)` (`RGBVerifier` proof `abi.decode`).
 /// `source` holds the burn/transfer. `latest` is the relay tip. `latest` must
 /// be within `MAX_RELAY_TIP_LAG_BLOCKS` of the enclave tip, so freshness does
 /// not depend on a relay that the host also feeds. An empty `proof` is refused.

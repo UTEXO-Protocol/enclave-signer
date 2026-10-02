@@ -58,7 +58,7 @@ pub const MAX_FUNDS_OUT_CALL_DATA_LEN: usize = 64 * 1024;
 const ALLOWED_SELECTORS: &[[u8; 4]] = &[FUNDS_OUT_SELECTOR_POOLS, LZ_FUNDS_OUT_SELECTOR];
 
 sol! {
-    /// Mirrors `IBridge.FundsOutParams` (IBridge.sol:294-304). Field order fixes
+    /// Mirrors `IBridge.FundsOutParams` (in IBridge.sol). Field order fixes
     /// both the ABI decode here and the `TeeFundsOut` struct hash in
     /// [`super::signing::funds_out_digest`].
     ///
