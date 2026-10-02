@@ -120,7 +120,7 @@ pub fn validate_destination_anchor(
                 .into(),
         ));
     }
-    // Without this check, only the generic 4 MB wire frame limits the size.
+    // Without this check, only the generic wire frame limits the size.
     validation::assert_consignment_size(&destination.consignment, ctx.bridge_config, "send-RGB")?;
     // Integrity, not authorization. The listener controls both `consignment`
     // and `consignment_hash`, so a match only proves the wire copy is intact.

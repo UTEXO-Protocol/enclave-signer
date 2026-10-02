@@ -183,7 +183,7 @@ See [`docs/pubkey-attestation.md`](docs/pubkey-attestation.md).
 ## Enclave requests
 
 Wire format: `[4-byte little-endian length][protobuf EnclaveRequest]`. One
-request per connection. Frame cap 4 MiB. Schema:
+request per connection. Frame cap 24 MiB. Schema:
 [`enclave-proto/proto/enclave.proto`](enclave-proto/proto/enclave.proto).
 
 | Request | Phase | Signer | Description |
@@ -479,9 +479,9 @@ Limits and dev knobs:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `MAX_CONSIGNMENT_BYTES` | 1 MiB | Consignment size cap. |
-| `MAX_MERKLE_PROOFS` | `256` | Proof-count cap per request. |
-| `MAX_TOTAL_PROOF_BYTES` | 128 KiB | Aggregate proof-bytes cap per request. |
+| `MAX_CONSIGNMENT_BYTES` | 8 MiB | Consignment size cap. Sized for a history of 10,000 transitions. |
+| `MAX_MERKLE_PROOFS` | `16384` | Proof-count cap per request. A burn needs one proof for each witness tx in its history. |
+| `MAX_TOTAL_PROOF_BYTES` | 8 MiB | Aggregate proof-bytes cap per request. |
 | `SPV_CHECKPOINT` | unset | Dev builds only: `height:hash[:bits:time[:chainwork]]` moves the SPV anchor forward. Without `chainwork` (Core's `getblockheader` value) every `fundsOut` is refused under `BTC_RELAY_MODE=required`; `none` needs no chainwork. A production-shaped build refuses to boot when set. |
 | `UTEXO_CLONING_SECRET` | unset | Legacy donor secret; ignored with `kms-persistence`, which rejects cloning. Otherwise prefer `init --cloning-secret` at runtime. |
 

@@ -3,7 +3,13 @@ use std::io::{Read, Write};
 
 use crate::error::{EnclaveError, Result};
 
-const MAX_MESSAGE_SIZE: u32 = 4 * 1024 * 1024; // 4 MiB
+/// Maximum size of one framed message. A request is one message, so it holds
+/// the consignment, the Merkle proofs, the mint ancestors and the calldata.
+///
+/// Sized for the default request caps in [`crate::config`]: 8 MiB consignment,
+/// 8 MiB proof bytes, and approx 2.5 MB of protobuf overhead and mint
+/// ancestors for 16_384 entries. The parent has the same constant.
+pub const MAX_MESSAGE_SIZE: u32 = 24 * 1024 * 1024; // 24 MiB
 
 /// Read a length-prefixed protobuf message from a stream.
 /// Wire format: [4-byte LE u32 length][protobuf bytes].
@@ -106,7 +112,7 @@ mod tests {
     }
 
     /// Handle each fixed test frame without a panic.
-    /// Inputs stay below the 4 MiB frame limit.
+    /// Inputs stay below the frame limit.
     #[test]
     fn framed_garbage_corpus_never_panics() {
         let mut state = 0xD1B5_4A32_D192_ED03u64;

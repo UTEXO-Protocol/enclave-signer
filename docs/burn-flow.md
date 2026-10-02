@@ -105,7 +105,7 @@ The burned units came from earlier mints. Each mint has an EVM deposit. The
 burn signer checks each deposit before it validates the consignment.
 
 - **B1.1** The consignment must not be larger than `MAX_CONSIGNMENT_BYTES`
-  (default 1 MiB).
+  (default 8 MiB).
 - **B1.2** The asset's `bridgeLocation` must equal the pinned
   `FUNDS_IN_CONTRACT`.
 - **B1.3** Each `TS_BRIDGE` (mint) in the consignment must have a
@@ -121,8 +121,8 @@ burn signer checks each deposit before it validates the consignment.
 
 ### Stage 2 - Is the RGB history valid?
 
-- **B2.1** Proof count must be at most `MAX_MERKLE_PROOFS` (default 256).
-  Proof bytes must be at most `MAX_TOTAL_PROOF_BYTES` (default 128 KiB).
+- **B2.1** Proof count must be at most `MAX_MERKLE_PROOFS` (default 16384).
+  Proof bytes must be at most `MAX_TOTAL_PROOF_BYTES` (default 8 MiB).
 - **B2.2** `keccak256(consignment)` must equal `consignment_hash`. This check
   finds a damaged copy only. It is not a safety proof.
 - **B2.3** Full RGB consensus validation runs. BFA is the only schema. Each
