@@ -94,8 +94,7 @@ pub(super) fn handle_sign_evm(
     );
 
     // Last gate before the key, for both routes. The checked chain must still
-    // be the chain that the enclave holds. The LayerZero digest has no
-    // `fundsOut` binding, so the source check is its only SPV evidence.
+    // be the chain that the enclave holds.
     #[cfg(feature = "rgb-validation")]
     assert_chain_pins_unchanged(ctx, pins)?;
 

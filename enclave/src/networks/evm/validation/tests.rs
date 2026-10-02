@@ -454,6 +454,8 @@ fn rgb_release() -> ReleaseIdentity {
         source_address: String::new(),
         settlement_data: Vec::new(),
         source_burn_tx_id: [0x5b; 32],
+        recipient: [0u8; 32],
+        proof: Vec::new(),
     }
 }
 
@@ -507,7 +509,7 @@ fn direct_route_surfaces_its_release_identity() {
             sourceChainId: U256::from(RGB_SOURCE_CHAIN_ID),
             destinationChainId: U256::from(1u64),
             sourceAddress: "who".into(),
-            proof: Bytes::new(),
+            proof: Bytes::from(vec![0xf0]),
             settlementData: Bytes::from(vec![0xd0, 0x0d]),
             sourceBurnTxId: FixedBytes([0x5b; 32]),
         },
@@ -523,6 +525,12 @@ fn direct_route_surfaces_its_release_identity() {
                 source_address: "who".into(),
                 settlement_data: vec![0xd0, 0x0d],
                 source_burn_tx_id: [0x5b; 32],
+                recipient: {
+                    let mut padded = [0u8; 32];
+                    padded[12..].copy_from_slice(&[0x22; ADDRESS_LEN]);
+                    padded
+                },
+                proof: vec![0xf0],
             }
         );
     });
@@ -539,7 +547,7 @@ fn entrypoint_route_surfaces_its_release_identity() {
         sourceChainId: U256::from(5u64),
         destinationChainId: U256::from(137u64),
         sourceAddress: "lz-who".into(),
-        proof: Bytes::new(),
+        proof: Bytes::from(vec![0xf1]),
         settlementData: Bytes::from(vec![0xe1]),
         dstEid: 30101u32,
         recipient: FixedBytes([0x05; 32]),
@@ -558,6 +566,8 @@ fn entrypoint_route_surfaces_its_release_identity() {
                 source_address: "lz-who".into(),
                 settlement_data: vec![0xe1],
                 source_burn_tx_id: [0x6c; 32],
+                recipient: [0x05; 32],
+                proof: vec![0xf1],
             }
         );
     });
