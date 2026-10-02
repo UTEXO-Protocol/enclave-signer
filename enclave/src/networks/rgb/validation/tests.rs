@@ -36,11 +36,12 @@ const TRANSFER_FIXTURE: &[u8] =
 const CONTRACT_FIXTURE: &[u8] =
     include_bytes!("../../../../tests/fixtures/contract_consignment.rgbc");
 
-// A real BFA consignment, from a bridge run on signet: one `Bridge` mint of
-// 100_000 units, then two `Burn`s (50_000, then 10_000 - the terminal one,
-// leaving 40_000 as change). Same bytes as `tests/fixtures/bfa_two_burns.rgb`
-// in UTEXO-Protocol/rgb-lib. It embeds its witness txs, so validating it needs
-// no network beyond the genesis-hash check.
+// A real BFA consignment from a bridge run on signet: one `Bridge` mint of
+// 100_000 units, then a `Burn` of 50_000 and a last `Burn` of 10_000, with
+// 40_000 as change. It has the same bytes as
+// `tests/fixtures/bfa_two_burns.rgb` in UTEXO-Protocol/rgb-lib. It contains
+// its witness txs, so validation only needs the network for the genesis-hash
+// check.
 const BFA_BURN_FIXTURE: &[u8] =
     include_bytes!("../../../../tests/fixtures/bfa_burn_consignment.rgbc");
 
@@ -728,9 +729,9 @@ fn rejects_consignment_hash_mismatch_even_with_valid_flag() {
 /// prove that the bind is in the request path. The rule tests in
 /// `validation::tests::asset_binding_rule` cannot show this.
 ///
-/// They run on `BFA_BURN_FIXTURE`. Its ancestry holds a mint, and only a
-/// `bfa-validation` build can run a mint script, so the cases that have to
-/// get through RGB consensus are ignored without that feature.
+/// They run on `BFA_BURN_FIXTURE`. The consignment history has a mint, and
+/// only a `bfa-validation` build can run a mint script. Without that feature,
+/// the cases that must pass RGB consensus are ignored.
 #[cfg(rgb_to_evm)]
 mod asset_bind {
     use super::*;
@@ -753,8 +754,8 @@ mod asset_bind {
         id
     }
 
-    /// An RGB source around the BFA fixture. Shadows the NIA-backed
-    /// [`super::fixture_source`], which the payload-gate tests keep using.
+    /// An RGB source for the BFA fixture. It shadows [`super::fixture_source`],
+    /// which uses the NIA fixture and stays for the payload-gate tests.
     fn fixture_source(asset_id: &str) -> RgbSource {
         RgbSource {
             consignment: BFA_BURN_FIXTURE.to_vec(),
@@ -763,10 +764,10 @@ mod asset_bind {
         }
     }
 
-    /// The EVM lock behind the fixture's one mint, as the enclave's own
-    /// `FundsIn` read would report it: the mint's OpId and its 100_000 units.
-    /// RGB consensus (`cea`) refuses the mint - and so every burn descending
-    /// from it - without a matching event.
+    /// The EVM lock for the one mint in the fixture, as the `FundsIn` read of
+    /// the enclave reports it: the mint OpId and 100_000 units. Without an
+    /// event that agrees, RGB consensus (`cea`) refuses the mint and each burn
+    /// that comes from it.
     fn fixture_mint_events() -> Vec<rgbstd::vm::ether_extension::Event> {
         let mint_opid: [u8; 32] =
             hex::decode("6d72ee6970a5cd28ef6f00a67b95242e088941bd79980739c29a40fb4050e593")
@@ -872,7 +873,7 @@ mod asset_bind {
         run_validate_source_with_events(source, config, &fixture_mint_events())
     }
 
-    /// [`run_validate_source`] with the verified EVM locks given explicitly.
+    /// [`run_validate_source`] with explicit verified EVM locks.
     fn run_validate_source_with_events(
         source: &RgbSource,
         config: &BridgeConfig,
@@ -902,7 +903,7 @@ mod asset_bind {
     #[test]
     #[cfg_attr(
         not(feature = "bfa-validation"),
-        ignore = "needs bfa-validation to run the fixture's mint script"
+        ignore = "needs bfa-validation to run the mint script of the fixture"
     )]
     fn binds_when_contract_id_matches_pin() {
         let id = fixture_asset_id();
@@ -936,7 +937,7 @@ mod asset_bind {
     #[test]
     #[cfg_attr(
         not(feature = "bfa-validation"),
-        ignore = "needs bfa-validation to run the fixture's mint script"
+        ignore = "needs bfa-validation to run the mint script of the fixture"
     )]
     fn rejects_foreign_asset_even_when_declared_agrees() {
         let id = fixture_asset_id();
@@ -957,7 +958,7 @@ mod asset_bind {
     #[test]
     #[cfg_attr(
         not(feature = "bfa-validation"),
-        ignore = "needs bfa-validation to run the fixture's mint script"
+        ignore = "needs bfa-validation to run the mint script of the fixture"
     )]
     fn rejects_when_declared_disagrees_with_validated() {
         let err = run_validate_source(
@@ -982,7 +983,7 @@ mod asset_bind {
     #[test]
     #[cfg_attr(
         not(feature = "bfa-validation"),
-        ignore = "needs bfa-validation to run the fixture's mint script"
+        ignore = "needs bfa-validation to run the mint script of the fixture"
     )]
     fn pin_check_skipped_when_config_unconfigured() {
         let id = fixture_asset_id();
@@ -995,11 +996,10 @@ mod asset_bind {
         );
     }
 
-    /// The whole validator over a real burn: RGB consensus accepts the
-    /// fixture (mint script against its EVM lock, both burn scripts), and the
-    /// summary the release binds read from carries the terminal burn - its
-    /// OpId, the 10_000 units it destroyed and the payout target it commits
-    /// to - not the earlier 50_000 burn in the same history.
+    /// The full validator on a real burn. RGB consensus accepts the fixture:
+    /// the mint script with its EVM lock, and the two burn scripts. The
+    /// summary has the last burn: its OpId, the 10_000 burned units and its
+    /// payout recipient. It does not have the earlier burn of 50_000.
     #[test]
     #[cfg(feature = "bfa-validation")]
     fn validates_a_real_burn_and_reads_its_terminal_burn() {
@@ -1033,10 +1033,10 @@ mod asset_bind {
         );
     }
 
-    /// The burn descends from a mint, and a mint is only valid against the
-    /// EVM lock the enclave verified itself. With no lock for it, or one for
-    /// the wrong amount, consensus refuses the whole consignment - so a burn
-    /// of units that were never backed cannot reach the release binds.
+    /// The burn comes from a mint. A mint is valid only with the EVM lock that
+    /// the enclave verified. With no lock, or a lock for a different amount,
+    /// the consignment is refused. Thus a burn of units with no backing does
+    /// not get to the release binds.
     #[test]
     #[cfg(feature = "bfa-validation")]
     fn refuses_a_burn_whose_mint_has_no_matching_evm_lock() {

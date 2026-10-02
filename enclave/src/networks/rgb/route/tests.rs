@@ -134,10 +134,10 @@ fn route_proof_rejects_the_other_flows_shape() {
 /// prove that the bind is in the request path. The rule tests in
 /// `validation::tests::asset_binding_rule` cannot show this.
 ///
-/// They run on a real BFA consignment (see `BFA_FIXTURE`). Its ancestry holds
-/// a mint, and only a `bfa-validation` build can run a mint script, so the
-/// cases that have to get through RGB consensus are ignored without that
-/// feature.
+/// They run on a real BFA consignment (see `BFA_FIXTURE`). The consignment
+/// history has a mint, and only a `bfa-validation` build can run a mint
+/// script. Without that feature, the cases that must pass RGB consensus are
+/// ignored.
 #[cfg(evm_to_rgb)]
 mod asset_bind {
     use super::*;
@@ -149,10 +149,10 @@ mod asset_bind {
     use std::sync::Mutex;
 
     /// A real BFA consignment from a bridge run on signet: one `Bridge` mint
-    /// of 100_000 units, then two `Burn`s. Its last transition is a burn, not
-    /// the mint a deposit PSBT finalizes - which is fine here: every case
-    /// below stops at or before PSBT parsing, ahead of the transition-type
-    /// gate.
+    /// of 100_000 units, then two `Burn`s. The last transition is a burn, not
+    /// the mint that a deposit PSBT finalizes. That is sufficient here: each
+    /// case below stops at or before the PSBT parse, which is before the
+    /// transition-type gate.
     const BFA_FIXTURE: &[u8] =
         include_bytes!("../../../../tests/fixtures/bfa_burn_consignment.rgbc");
 
@@ -171,9 +171,9 @@ mod asset_bind {
         id
     }
 
-    /// The EVM lock behind the fixture's one mint, as the enclave's own
-    /// `FundsIn` read would report it: the mint's OpId and its 100_000 units.
-    /// RGB consensus (`cea`) refuses the mint without a matching event.
+    /// The EVM lock for the one mint in the fixture, as the `FundsIn` read of
+    /// the enclave reports it: the mint OpId and 100_000 units. RGB consensus
+    /// (`cea`) refuses the mint without an event that agrees.
     fn fixture_mint_events() -> Vec<rgbstd::vm::ether_extension::Event> {
         let mint_opid: [u8; 32] =
             hex::decode("6d72ee6970a5cd28ef6f00a67b95242e088941bd79980739c29a40fb4050e593")
@@ -301,7 +301,7 @@ mod asset_bind {
     #[test]
     #[cfg_attr(
         not(feature = "bfa-validation"),
-        ignore = "needs bfa-validation to run the fixture's mint script"
+        ignore = "needs bfa-validation to run the mint script of the fixture"
     )]
     fn binds_when_contract_id_matches_pin() {
         let id = fixture_asset_id();
@@ -340,7 +340,7 @@ mod asset_bind {
     #[test]
     #[cfg_attr(
         not(feature = "bfa-validation"),
-        ignore = "needs bfa-validation to run the fixture's mint script"
+        ignore = "needs bfa-validation to run the mint script of the fixture"
     )]
     fn rejects_foreign_asset_even_when_declared_agrees() {
         let id = fixture_asset_id();
@@ -362,7 +362,7 @@ mod asset_bind {
     #[test]
     #[cfg_attr(
         not(feature = "bfa-validation"),
-        ignore = "needs bfa-validation to run the fixture's mint script"
+        ignore = "needs bfa-validation to run the mint script of the fixture"
     )]
     fn rejects_when_pin_absent() {
         let id = fixture_asset_id();
@@ -380,7 +380,7 @@ mod asset_bind {
     #[test]
     #[cfg_attr(
         not(feature = "bfa-validation"),
-        ignore = "needs bfa-validation to run the fixture's mint script"
+        ignore = "needs bfa-validation to run the mint script of the fixture"
     )]
     fn rejects_when_declared_disagrees_with_validated() {
         let err = run_validate_destination_anchor(
