@@ -6,8 +6,9 @@
 //! is:
 //!
 //!   * fail-closed: a release `rgb-validation` build that does not resolve to a
-//!     valid [`SecurityPolicy::Production`] refuses to boot
-//!     ([`SecurityPolicy::assert_valid_for_build`]);
+//!     valid [`SecurityPolicy::Production`] refuses to boot or launch
+//!     ([`SecurityPolicy::assert_valid_at_boot`],
+//!     [`SecurityPolicy::assert_valid_for_build`]);
 //!   * attested: [`SecurityPolicy::commitment_bytes`] is folded into the
 //!     attestation `user_data` commitment, so a verifier checks the posture as
 //!     a single value;
@@ -17,12 +18,17 @@
 //! Resolution and the boot gate take an explicit [`BuildContext`], so release
 //! behaviour is unit-testable without a release build.
 
-use crate::config::BridgeConfig;
+use crate::config::{BridgeConfig, BtcRelayMode};
 
-pub use attestation_verify::{AttestationMode, AttestedPolicy, BtcDataSource, EvmDataSource};
+pub use attestation_verify::{
+    AttestationMode, AttestedPolicy, BtcDataSource, EvmDataSource, EvmRpcTlsPin, KmsPin, SignerRole,
+};
 
 /// The enclave's resolved security posture. See the module docs.
 #[derive(Clone, Debug, PartialEq, Eq)]
+// Resolved once at boot and committed to attestation user_data; the size
+// difference between the variants costs nothing here.
+#[allow(clippy::large_enum_variant)]
 pub enum SecurityPolicy {
     /// A fully-pinned, fail-closed bridge-signing enclave.
     Production(ProductionPolicy),
@@ -44,22 +50,42 @@ pub struct ProductionPolicy {
     pub bridge_contract: [u8; 20],
     /// Pinned RGB asset id (`RGB_ASSET_ID`).
     pub rgb_asset_id: String,
+    /// Only this contract's FundsIn events may authorize bridge signing.
+    pub funds_in_contract: [u8; 20],
+    /// The ERC-20 the Bridge releases (`TOKEN_CONTRACT`): a `burnId` preimage
+    /// input, so the recomputed `burnId` the enclave enforces is attested.
+    pub token_contract: [u8; 20],
+    /// Minimum receipt depth required before a FundsIn deposit is accepted.
+    pub evm_min_confirmations: u64,
+    /// `fundsOut` proofs must carry BtcRelay commitments the enclave verifies
+    /// (`BTC_RELAY_MODE=required`). [`check_invariants`](Self::check_invariants)
+    /// refuses `false`, so a production enclave always has it `true`; that is
+    /// why it has no field in [`AttestedPolicy`] - `Production` already
+    /// commits to it.
+    pub btc_relay_required: bool,
     /// Whether the plain-BTC (vanilla / create_utxo) signing path is authorised.
     /// Derived from the operator's `BTC_MAX_TOTAL_SATS` pin
     /// ([`BridgeConfig::allows_vanilla_btc`]); default fail-closed (false).
     pub allow_vanilla_psbt: bool,
+    /// Bridge directions this image signs, from the build features.
+    pub signer_role: SignerRole,
     /// Expected attestation root of trust. Always [`AttestationMode::Real`] in a
     /// production build (mock is a `compile_error!` in release - see `lib.rs`).
     pub attestation: AttestationMode,
-    /// EVM `FundsIn` deposit-verification source (raw RPC vs Helios-verified vs
-    /// disabled). Recorded and attested so a verifier can tell a trustless
-    /// deployment apart from a host-relayed one.
+    /// EVM `FundsIn` deposit-verification source (pinned TLS, plaintext RPC,
+    /// Helios-verified or disabled). Recorded and attested so a verifier can
+    /// tell a trustless deployment apart from a host-relayed one.
     pub evm_source: EvmDataSource,
     /// The Helios weak-subjectivity checkpoint (beacon block root) EVM
     /// verification trust-roots on. `Some`, and required, only when
     /// `evm_source` is [`EvmDataSource::HeliosVerified`]. Attested so a verifier
     /// confirms which checkpoint the enclave synced from.
     pub evm_checkpoint: Option<[u8; 32]>,
+    /// Host of the Electrum server set at launch.
+    pub electrum_host: String,
+    /// The EVM RPC TLS host and CA hash. Required when `evm_source` is
+    /// [`EvmDataSource::PinnedTlsRpc`].
+    pub evm_rpc_tls: Option<EvmRpcTlsPin>,
     /// Bitcoin anchor-verification source. Always SPV in a production build.
     pub btc_source: BtcDataSource,
     /// Gas-tx (`SignRawDigest`) allowed destination (`GAS_TX_ALLOWED_TO`), or
@@ -77,6 +103,8 @@ pub struct ProductionPolicy {
     pub gas_tx_max_value_wei: Option<u128>,
     /// Gas-tx calldata selector allowlist (`GAS_TX_ALLOWED_SELECTORS`).
     pub gas_tx_allowed_selectors: Vec<[u8; 4]>,
+    /// The KMS pin set at launch. See [`SecurityPolicy::with_kms`].
+    pub kms: Option<KmsPin>,
 }
 
 /// Why an enclave resolved to [`SecurityPolicy::Development`] rather than
@@ -85,8 +113,6 @@ pub struct ProductionPolicy {
 pub enum DevReason {
     /// Built with `debug_assertions` (or under `cfg(test)`).
     DebugBuild,
-    /// `dev-mode` feature: every signing cross-check is skipped.
-    DevMode,
     /// `mock-attestation` feature: zero-PCR attestation documents.
     MockAttestation,
     /// `allow-seed-import` feature: the parent can install a chosen seed.
@@ -105,12 +131,13 @@ pub enum DevReason {
 pub struct BuildContext {
     /// `cfg!(debug_assertions) || cfg!(test)` - the "not a release build" signal.
     pub debug_or_test: bool,
-    pub dev_mode: bool,
     pub mock_attestation: bool,
     pub allow_seed_import: bool,
     /// `rgb-validation`: the feature that turns on bridge signing. A release
     /// build with this on is the one the production policy must protect.
     pub rgb_validation: bool,
+    /// `mint-signer` / `burn-signer`, or both directions.
+    pub signer_role: SignerRole,
 }
 
 impl BuildContext {
@@ -118,17 +145,23 @@ impl BuildContext {
     pub fn current() -> Self {
         Self {
             debug_or_test: cfg!(debug_assertions) || cfg!(test),
-            dev_mode: cfg!(feature = "dev-mode"),
             mock_attestation: cfg!(feature = "mock-attestation"),
             allow_seed_import: cfg!(feature = "allow-seed-import"),
             rgb_validation: cfg!(feature = "rgb-validation"),
+            signer_role: if cfg!(feature = "mint-signer") {
+                SignerRole::Mint
+            } else if cfg!(feature = "burn-signer") {
+                SignerRole::Burn
+            } else {
+                SignerRole::Combined
+            },
         }
     }
 }
 
 impl SecurityPolicy {
     /// Resolve the single security posture from the build context, the pinned
-    /// [`BridgeConfig`], and the EVM data source selected at boot.
+    /// [`BridgeConfig`], and the endpoints set at launch.
     ///
     /// Fail-closed by construction: any dev feature, a debug/test build, a
     /// non-bridge build, or an unpinned config yields
@@ -139,14 +172,14 @@ impl SecurityPolicy {
         bridge: &BridgeConfig,
         evm_source: EvmDataSource,
         evm_checkpoint: Option<[u8; 32]>,
+        evm_rpc_tls: Option<EvmRpcTlsPin>,
+        electrum_host: &str,
+        evm_min_confirmations: u64,
     ) -> Self {
         // Any dev feature collapses the posture regardless of everything else.
         // (These are `compile_error!` in a release build - lib.rs - so in a real
         // production binary they are all false; the checks make dev/test builds
         // resolve honestly and keep this function total.)
-        if ctx.dev_mode {
-            return Self::dev(DevReason::DevMode);
-        }
         if ctx.mock_attestation {
             return Self::dev(DevReason::MockAttestation);
         }
@@ -164,26 +197,59 @@ impl SecurityPolicy {
         if !bridge.is_configured() {
             return Self::dev(DevReason::Unconfigured);
         }
+        // A path the role does not compile in is attested as off, whatever the
+        // env pins say: `SignBtc` is mint-side, the gas tx burn-side.
+        let signs_plain_btc = ctx.signer_role != SignerRole::Burn;
+        let signs_gas_tx = ctx.signer_role != SignerRole::Mint;
         Self::Production(ProductionPolicy {
             chain_id: bridge.chain_id,
             bridge_contract: bridge.bridge_contract,
             rgb_asset_id: bridge.rgb_asset_id.clone(),
-            allow_vanilla_psbt: bridge.allows_vanilla_btc(),
+            funds_in_contract: bridge.funds_in_contract,
+            token_contract: bridge.token_contract,
+            evm_min_confirmations,
+            btc_relay_required: bridge.btc_relay_mode == BtcRelayMode::Required,
+            allow_vanilla_psbt: signs_plain_btc && bridge.allows_vanilla_btc(),
+            signer_role: ctx.signer_role,
             attestation: AttestationMode::Real,
             evm_source,
             evm_checkpoint,
+            electrum_host: electrum_host.to_string(),
+            evm_rpc_tls,
             // `rgb-validation` implies `spv` (lib.rs `compile_error!`), so a
             // bridge build always anchors witness txs via the SPV header chain.
             btc_source: BtcDataSource::SpvVerified,
             // Gas-tx rule: reflect the same pins the request-time
             // `validate_gas_tx_request` enforces so the attested commitment and
             // the enforced policy cannot drift.
-            gas_tx_allowed_to: bridge.gas_tx_allowed_to,
-            gas_tx_max_gas_limit: bridge.gas_tx_max_gas_limit,
-            gas_tx_max_fee_per_gas: bridge.gas_tx_max_fee_per_gas,
-            gas_tx_max_value_wei: bridge.gas_tx_max_value_wei,
-            gas_tx_allowed_selectors: bridge.gas_tx_allowed_selectors.clone(),
+            gas_tx_allowed_to: bridge.gas_tx_allowed_to.filter(|_| signs_gas_tx),
+            gas_tx_max_gas_limit: if signs_gas_tx {
+                bridge.gas_tx_max_gas_limit
+            } else {
+                0
+            },
+            gas_tx_max_fee_per_gas: if signs_gas_tx {
+                bridge.gas_tx_max_fee_per_gas
+            } else {
+                0
+            },
+            gas_tx_max_value_wei: bridge.gas_tx_max_value_wei.filter(|_| signs_gas_tx),
+            gas_tx_allowed_selectors: if signs_gas_tx {
+                bridge.gas_tx_allowed_selectors.clone()
+            } else {
+                Vec::new()
+            },
+            kms: None,
         })
+    }
+
+    /// Set the KMS pin of a production policy. A development policy does not
+    /// change.
+    pub fn with_kms(mut self, kms: Option<KmsPin>) -> Self {
+        if let Self::Production(p) = &mut self {
+            p.kms = kms;
+        }
+        self
     }
 
     fn dev(reason: DevReason) -> Self {
@@ -195,13 +261,19 @@ impl SecurityPolicy {
         match self {
             Self::Production(p) => AttestedPolicy::Production {
                 allow_vanilla_psbt: p.allow_vanilla_psbt,
+                signer_role: p.signer_role,
                 attestation: p.attestation,
                 evm_source: p.evm_source,
                 btc_source: p.btc_source,
                 chain_id: p.chain_id,
                 bridge_contract: p.bridge_contract,
                 rgb_asset_id: p.rgb_asset_id.clone(),
+                funds_in_contract: p.funds_in_contract,
+                token_contract: p.token_contract,
+                evm_min_confirmations: p.evm_min_confirmations,
                 evm_checkpoint: p.evm_checkpoint,
+                electrum_host: p.electrum_host.clone(),
+                evm_rpc_tls: p.evm_rpc_tls.clone(),
                 // An unset destination commits as all-zero - a value the gas
                 // path can never accept - so "unpinned" is itself attested.
                 gas_tx_allowed_to: p.gas_tx_allowed_to.unwrap_or([0u8; 20]),
@@ -212,6 +284,7 @@ impl SecurityPolicy {
                 // is signable), so "unpinned" is itself attested.
                 gas_tx_max_value_wei: p.gas_tx_max_value_wei.unwrap_or(0),
                 gas_tx_allowed_selectors: p.gas_tx_allowed_selectors.clone(),
+                kms: p.kms.clone(),
             },
             Self::Development { .. } => AttestedPolicy::Development,
         }
@@ -223,10 +296,11 @@ impl SecurityPolicy {
         self.attested().to_bytes()
     }
 
-    /// Fail-closed boot gate. A release bridge-signing (`rgb-validation`) build
-    /// MUST resolve to a valid [`SecurityPolicy::Production`]; otherwise the
-    /// enclave refuses to become reachable (the caller `panic!`s at boot, the
-    /// same way a placeholder SPV checkpoint does).
+    /// Fail-closed launch gate. A release bridge-signing (`rgb-validation`)
+    /// build MUST resolve to a valid [`SecurityPolicy::Production`];
+    /// otherwise `SetEndpoints` refuses the set. At boot,
+    /// [`Self::assert_valid_at_boot`] runs the checks that do not need the
+    /// endpoints, and the caller `panic!`s on an error.
     ///
     /// Debug/test builds and non-bridge builds are exempt - they have no
     /// production bridge-signing path to protect.
@@ -240,21 +314,86 @@ impl SecurityPolicy {
                 "release rgb-validation (bridge-signing) build resolved to a non-production \
                  security policy ({reason:?}); refusing to boot. A production bridge enclave must \
                  pin EVM_CHAIN_ID / BRIDGE_CONTRACT / RGB_ASSET_ID and be built without any dev \
-                 feature (dev-mode / mock-attestation / allow-seed-import)."
+                 feature (mock-attestation / allow-seed-import)."
             )),
+        }
+    }
+
+    /// Boot gate: [`Self::assert_valid_for_build`] without the endpoint
+    /// checks. The endpoints come at launch.
+    pub fn assert_valid_at_boot(&self, ctx: &BuildContext) -> Result<(), String> {
+        match self {
+            Self::Production(p) if !ctx.debug_or_test && ctx.rgb_validation => {
+                p.check_build_invariants()
+            }
+            _ => self.assert_valid_for_build(ctx),
         }
     }
 }
 
 impl ProductionPolicy {
     /// Invariants that must hold before a production enclave signs anything.
-    /// Bitcoin anchors must be SPV-verified; the EVM source is attested, not
-    /// gated.
+    /// Bitcoin anchors must be SPV-verified, and the EVM RPC must be
+    /// authenticated.
     pub fn check_invariants(&self) -> Result<(), String> {
+        self.check_build_invariants()?;
+        if self.electrum_host.is_empty() {
+            return Err("production policy has no Electrum host. Set it at launch.".into());
+        }
+        // Helios has no Arbitrum light client, so an L2 image reads the RPC
+        // over pinned TLS. `Disabled` fails closed per request. Plaintext lets
+        // the host forge a receipt, so it is rejected.
+        if self.evm_source == EvmDataSource::RawRpc {
+            return Err(
+                "production policy reads the EVM RPC over plaintext; plaintext is for dev and \
+                 test builds only."
+                    .into(),
+            );
+        }
+        if self.evm_source == EvmDataSource::PinnedTlsRpc && self.evm_rpc_tls.is_none() {
+            return Err(
+                "production policy uses the pinned TLS EVM source without a valid pin. Set \
+                 the EVM RPC host and CA at launch."
+                    .into(),
+            );
+        }
+        // Helios with no pinned checkpoint would bootstrap untrusted.
+        if self.evm_source == EvmDataSource::HeliosVerified && self.evm_checkpoint.is_none() {
+            return Err(
+                "production policy uses the Helios EVM source but pins no weak-subjectivity \
+                 checkpoint. Set HELIOS_CHECKPOINT to a recent beacon block root so the trust \
+                 root is fixed and attested."
+                    .into(),
+            );
+        }
+        Ok(())
+    }
+
+    /// The invariants that do not depend on the endpoints.
+    fn check_build_invariants(&self) -> Result<(), String> {
         if self.chain_id == 0 || self.bridge_contract == [0u8; 20] || self.rgb_asset_id.is_empty() {
             return Err(
                 "production policy is missing one or more of the chain/contract/asset pins".into(),
             );
+        }
+        if self.funds_in_contract == [0u8; 20] {
+            return Err("production policy must pin a non-zero FundsIn contract".into());
+        }
+        if self.token_contract == [0u8; 20] {
+            return Err(
+                "production policy must pin a non-zero TOKEN_CONTRACT (burnId preimage input)"
+                    .into(),
+            );
+        }
+        if self.evm_min_confirmations == 0 {
+            return Err("production policy must require at least one EVM confirmation".into());
+        }
+        if !self.btc_relay_required {
+            return Err(format!(
+                "production policy must verify BtcRelay commitments on fundsOut: \
+                 {}=none is only for a local stand that has no BtcRelay",
+                crate::config::BTC_RELAY_MODE_ENV
+            ));
         }
         if self.attestation != AttestationMode::Real {
             return Err(
@@ -266,369 +405,9 @@ impl ProductionPolicy {
                 "production policy must anchor Bitcoin witness txs via the SPV header chain".into(),
             );
         }
-        // The EVM source is not gated: Helios has no Arbitrum light client, so
-        // an L2 image runs on host-relayed RPC. It stays attested, so verifiers
-        // judge the posture; `Disabled` fails closed per request. Helios with no
-        // pinned checkpoint would bootstrap untrusted, so that stays rejected.
-        if self.evm_source == EvmDataSource::HeliosVerified && self.evm_checkpoint.is_none() {
-            return Err(
-                "production policy uses the Helios EVM source but pins no weak-subjectivity \
-                 checkpoint. Set HELIOS_CHECKPOINT to a recent beacon block root so the trust \
-                 root is fixed and attested."
-                    .into(),
-            );
-        }
         Ok(())
     }
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// A build context for a clean release bridge build (no dev features).
-    fn release_bridge_ctx() -> BuildContext {
-        BuildContext {
-            debug_or_test: false,
-            dev_mode: false,
-            mock_attestation: false,
-            allow_seed_import: false,
-            rgb_validation: true,
-        }
-    }
-
-    fn pinned_config() -> BridgeConfig {
-        BridgeConfig {
-            chain_id: 1,
-            bridge_contract: [0x11; 20],
-            rgb_asset_id: "rgb:asset".into(),
-            ..Default::default()
-        }
-    }
-
-    /// A pinned Helios checkpoint for tests that resolve a valid production
-    /// Helios policy (a real beacon block root is 32 bytes).
-    fn a_checkpoint() -> Option<[u8; 32]> {
-        Some([0x0c; 32])
-    }
-
-    #[test]
-    fn release_bridge_with_full_pins_is_production() {
-        let p = SecurityPolicy::resolve(
-            &release_bridge_ctx(),
-            &pinned_config(),
-            EvmDataSource::HeliosVerified,
-            a_checkpoint(),
-        );
-        match &p {
-            SecurityPolicy::Production(pp) => {
-                assert_eq!(pp.chain_id, 1);
-                assert_eq!(pp.evm_source, EvmDataSource::HeliosVerified);
-                assert_eq!(pp.evm_checkpoint, a_checkpoint());
-                assert_eq!(pp.attestation, AttestationMode::Real);
-                assert_eq!(pp.btc_source, BtcDataSource::SpvVerified);
-            }
-            other => panic!("expected Production, got {other:?}"),
-        }
-        assert!(p.assert_valid_for_build(&release_bridge_ctx()).is_ok());
-    }
-
-    #[test]
-    fn production_accepts_any_evm_source_but_still_attests_it() {
-        let ctx = release_bridge_ctx();
-        // Helios has no L2 light client, so an Arbitrum image runs on raw RPC.
-        // Every source boots, and each is recorded and attested.
-        for source in [EvmDataSource::Disabled, EvmDataSource::RawRpc] {
-            let p = SecurityPolicy::resolve(&ctx, &pinned_config(), source, None);
-            match &p {
-                SecurityPolicy::Production(pp) => assert_eq!(pp.evm_source, source),
-                other => panic!("expected Production for {source:?}, got {other:?}"),
-            }
-            assert!(
-                p.assert_valid_for_build(&ctx).is_ok(),
-                "{source:?} must not be gated at boot"
-            );
-        }
-        // Helios WITH a pinned checkpoint still passes.
-        let p = SecurityPolicy::resolve(
-            &ctx,
-            &pinned_config(),
-            EvmDataSource::HeliosVerified,
-            a_checkpoint(),
-        );
-        assert!(p.assert_valid_for_build(&ctx).is_ok());
-    }
-
-    #[test]
-    fn production_helios_without_a_pinned_checkpoint_is_rejected_at_boot() {
-        // Helios is the trustless source, but with no weak-subjectivity
-        // checkpoint its trust root is unpinned and unattested. Such a build
-        // resolves to Production (so the missing pin is visible) but must NOT
-        // pass the boot gate.
-        let ctx = release_bridge_ctx();
-        let p =
-            SecurityPolicy::resolve(&ctx, &pinned_config(), EvmDataSource::HeliosVerified, None);
-        assert!(matches!(p, SecurityPolicy::Production(_)));
-        let err = p.assert_valid_for_build(&ctx).unwrap_err();
-        assert!(err.contains("checkpoint"), "got: {err}");
-    }
-
-    #[test]
-    fn release_bridge_unconfigured_is_rejected_at_boot() {
-        let ctx = release_bridge_ctx();
-        let p =
-            SecurityPolicy::resolve(&ctx, &BridgeConfig::default(), EvmDataSource::RawRpc, None);
-        assert_eq!(
-            p,
-            SecurityPolicy::Development {
-                reason: DevReason::Unconfigured
-            }
-        );
-        // The whole point of the policy: a misconfigured production build never boots.
-        let err = p.assert_valid_for_build(&ctx).unwrap_err();
-        assert!(err.contains("Unconfigured"), "got: {err}");
-    }
-
-    #[test]
-    fn release_bridge_partially_pinned_is_rejected_at_boot() {
-        let ctx = release_bridge_ctx();
-        let partial = BridgeConfig {
-            chain_id: 1,
-            ..Default::default()
-        };
-        let p = SecurityPolicy::resolve(&ctx, &partial, EvmDataSource::RawRpc, None);
-        assert!(matches!(p, SecurityPolicy::Development { .. }));
-        assert!(p.assert_valid_for_build(&ctx).is_err());
-    }
-
-    #[test]
-    fn each_dev_feature_forces_development_even_when_fully_pinned() {
-        let base = release_bridge_ctx();
-        let cases = [
-            (
-                BuildContext {
-                    dev_mode: true,
-                    ..base
-                },
-                DevReason::DevMode,
-            ),
-            (
-                BuildContext {
-                    mock_attestation: true,
-                    ..base
-                },
-                DevReason::MockAttestation,
-            ),
-            (
-                BuildContext {
-                    allow_seed_import: true,
-                    ..base
-                },
-                DevReason::AllowSeedImport,
-            ),
-        ];
-        for (ctx, reason) in cases {
-            let p = SecurityPolicy::resolve(
-                &ctx,
-                &pinned_config(),
-                EvmDataSource::HeliosVerified,
-                a_checkpoint(),
-            );
-            assert_eq!(p, SecurityPolicy::Development { reason });
-            // Even fully pinned, a dev feature in a release rgb build must not boot.
-            assert!(p.assert_valid_for_build(&ctx).is_err());
-        }
-    }
-
-    #[test]
-    fn debug_build_is_development_and_exempt_from_the_boot_gate() {
-        let ctx = BuildContext {
-            debug_or_test: true,
-            ..release_bridge_ctx()
-        };
-        let p = SecurityPolicy::resolve(&ctx, &pinned_config(), EvmDataSource::RawRpc, None);
-        assert_eq!(
-            p,
-            SecurityPolicy::Development {
-                reason: DevReason::DebugBuild
-            }
-        );
-        assert!(p.assert_valid_for_build(&ctx).is_ok());
-    }
-
-    #[test]
-    fn minimal_non_bridge_release_is_exempt() {
-        let ctx = BuildContext {
-            rgb_validation: false,
-            ..release_bridge_ctx()
-        };
-        let p = SecurityPolicy::resolve(
-            &ctx,
-            &BridgeConfig::default(),
-            EvmDataSource::Disabled,
-            None,
-        );
-        assert_eq!(
-            p,
-            SecurityPolicy::Development {
-                reason: DevReason::NonBridgeBuild
-            }
-        );
-        // No bridge path to protect -> the boot gate passes.
-        assert!(p.assert_valid_for_build(&ctx).is_ok());
-    }
-
-    #[test]
-    fn allow_vanilla_psbt_tracks_the_btc_pins() {
-        let ctx = release_bridge_ctx();
-        let mut cfg = pinned_config();
-        // Unset BTC pins -> vanilla disabled (fail-closed).
-        let p = SecurityPolicy::resolve(&ctx, &cfg, EvmDataSource::RawRpc, None);
-        assert!(matches!(
-            p,
-            SecurityPolicy::Production(ProductionPolicy {
-                allow_vanilla_psbt: false,
-                ..
-            })
-        ));
-        // Operator sets the cap -> vanilla enabled and attested.
-        cfg.btc_max_total_sats = 100_000;
-        let p = SecurityPolicy::resolve(&ctx, &cfg, EvmDataSource::RawRpc, None);
-        assert!(matches!(
-            p,
-            SecurityPolicy::Production(ProductionPolicy {
-                allow_vanilla_psbt: true,
-                ..
-            })
-        ));
-    }
-
-    #[test]
-    fn gas_tx_rule_is_carried_into_the_commitment() {
-        // The gas-tx pins flow from BridgeConfig into the attested
-        // policy, so pinning them changes the commitment a verifier checks.
-        let ctx = release_bridge_ctx();
-        let unpinned = SecurityPolicy::resolve(&ctx, &pinned_config(), EvmDataSource::RawRpc, None);
-
-        let mut cfg = pinned_config();
-        cfg.gas_tx_allowed_to = Some([0x77; 20]);
-        cfg.gas_tx_max_gas_limit = 30_000;
-        cfg.gas_tx_max_fee_per_gas = 5_000;
-        cfg.gas_tx_max_value_wei = Some(9_000);
-        cfg.gas_tx_allowed_selectors = vec![[0xaa, 0xbb, 0xcc, 0xdd]];
-        let pinned = SecurityPolicy::resolve(&ctx, &cfg, EvmDataSource::RawRpc, None);
-
-        assert_ne!(
-            unpinned.commitment_bytes(),
-            pinned.commitment_bytes(),
-            "pinning the gas-tx rule must change the attested commitment"
-        );
-        match &pinned {
-            SecurityPolicy::Production(p) => {
-                assert_eq!(p.gas_tx_allowed_to, Some([0x77; 20]));
-                assert_eq!(p.gas_tx_max_gas_limit, 30_000);
-                assert_eq!(p.gas_tx_max_fee_per_gas, 5_000);
-                assert_eq!(p.gas_tx_max_value_wei, Some(9_000));
-                assert_eq!(p.gas_tx_allowed_selectors, vec![[0xaa, 0xbb, 0xcc, 0xdd]]);
-            }
-            other => panic!("expected Production, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn gas_tx_value_ceiling_alone_changes_the_commitment() {
-        // The LayerZero carve-out's bound is part of the attested gas-tx rule:
-        // raising it must be visible to a verifier, not a silent config change.
-        let ctx = release_bridge_ctx();
-        let mut base = pinned_config();
-        base.gas_tx_allowed_to = Some([0x77; 20]);
-        base.gas_tx_max_gas_limit = 30_000;
-        base.gas_tx_max_fee_per_gas = 5_000;
-        base.gas_tx_allowed_selectors = vec![[0xaa, 0xbb, 0xcc, 0xdd]];
-
-        let mut raised = base.clone();
-        raised.gas_tx_max_value_wei = Some(1);
-
-        assert_ne!(
-            SecurityPolicy::resolve(&ctx, &base, EvmDataSource::RawRpc, None).commitment_bytes(),
-            SecurityPolicy::resolve(&ctx, &raised, EvmDataSource::RawRpc, None).commitment_bytes(),
-            "raising GAS_TX_MAX_VALUE_WEI must change the attested commitment"
-        );
-    }
-
-    #[test]
-    fn unset_gas_tx_value_ceiling_commits_as_zero() {
-        // `None` and `Some(0)` enforce the same posture - no non-zero value is
-        // signable - so they must commit identically rather than let an operator
-        // produce two different attestations for one enforced rule.
-        let ctx = release_bridge_ctx();
-        let mut unset = pinned_config();
-        unset.gas_tx_max_value_wei = None;
-        let mut zero = pinned_config();
-        zero.gas_tx_max_value_wei = Some(0);
-
-        assert_eq!(
-            SecurityPolicy::resolve(&ctx, &unset, EvmDataSource::RawRpc, None).commitment_bytes(),
-            SecurityPolicy::resolve(&ctx, &zero, EvmDataSource::RawRpc, None).commitment_bytes(),
-        );
-    }
-
-    #[test]
-    fn evm_source_is_carried_into_the_commitment() {
-        let ctx = release_bridge_ctx();
-        let raw = SecurityPolicy::resolve(&ctx, &pinned_config(), EvmDataSource::RawRpc, None);
-        let helios = SecurityPolicy::resolve(
-            &ctx,
-            &pinned_config(),
-            EvmDataSource::HeliosVerified,
-            a_checkpoint(),
-        );
-        // A raw-RPC deployment and a Helios deployment commit to different bytes,
-        // so a verifier expecting one rejects the other (data source).
-        assert_ne!(raw.commitment_bytes(), helios.commitment_bytes());
-    }
-
-    #[test]
-    fn evm_checkpoint_is_carried_into_the_commitment() {
-        // Two Helios deployments identical except for the pinned checkpoint
-        // commit different bytes, so a verifier bound to one trust root rejects
-        // an enclave that synced from another.
-        let ctx = release_bridge_ctx();
-        let a = SecurityPolicy::resolve(
-            &ctx,
-            &pinned_config(),
-            EvmDataSource::HeliosVerified,
-            Some([0xAA; 32]),
-        );
-        let b = SecurityPolicy::resolve(
-            &ctx,
-            &pinned_config(),
-            EvmDataSource::HeliosVerified,
-            Some([0xBB; 32]),
-        );
-        assert_ne!(a.commitment_bytes(), b.commitment_bytes());
-    }
-
-    #[test]
-    fn development_commitment_is_stable_and_distinct() {
-        let dev_a = SecurityPolicy::Development {
-            reason: DevReason::DebugBuild,
-        };
-        let dev_b = SecurityPolicy::Development {
-            reason: DevReason::MockAttestation,
-        };
-        // The reason is for logs only; it is NOT part of the commitment, so any
-        // Development enclave commits the same bytes a verifier can reconstruct.
-        assert_eq!(dev_a.commitment_bytes(), dev_b.commitment_bytes());
-        assert_ne!(
-            dev_a.commitment_bytes(),
-            SecurityPolicy::resolve(
-                &release_bridge_ctx(),
-                &pinned_config(),
-                EvmDataSource::RawRpc,
-                None,
-            )
-            .commitment_bytes()
-        );
-    }
-}
+mod tests;

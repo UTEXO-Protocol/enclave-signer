@@ -24,3 +24,7 @@ default = []
 # and verify them without cert-chain checks. PCR/nonce/pubkey binding still
 # enforced. Tests-only.
 mock = []
+# Accept all-zero PCR0/1/2 for debug tests. (F03-AF-12 / F02-AF-08)
+# Debug PCRs cannot identify the peer image.
+# Do not enable this feature in production builds.
+allow-debug-pcrs = []

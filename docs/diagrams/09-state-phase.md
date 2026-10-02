@@ -1,4 +1,4 @@
-# Enclave key-state machine (`state.rs :: Phase`)
+# Enclave key-state machine (`state/enclave.rs :: Phase`)
 
 ```mermaid
 stateDiagram-v2

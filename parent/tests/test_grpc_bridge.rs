@@ -4,6 +4,7 @@
 //! then a real tonic gRPC server (Parent Adapter) pointing at it, and finally
 //! exercise the full path via a gRPC client.
 
+use attestation_verify::AttestedPolicy;
 use std::collections::HashSet;
 use std::net::TcpListener;
 
@@ -178,6 +179,8 @@ fn start_mock_enclave() -> u16 {
                         bundle.extend_from_slice(&(p.len() as u32).to_be_bytes());
                         bundle.extend_from_slice(p);
                     }
+                    let attested_policy = AttestedPolicy::Development.to_bytes();
+                    bundle.extend_from_slice(&attested_policy);
                     let commitment: [u8; 32] = sha2::Sha256::digest(&bundle).into();
                     let nonce: [u8; 32] = req
                         .nonce
@@ -195,6 +198,7 @@ fn start_mock_enclave() -> u16 {
                             enclave_proto::GetAttestedPublicKeyResponse {
                                 public_keys: Some(public_keys),
                                 attestation_doc: doc,
+                                attested_policy,
                             },
                         )),
                     }
@@ -429,6 +433,31 @@ async fn grpc_public_key_rejects_unsupported_data_type() {
         .unwrap_err();
 
     assert_eq!(err.code(), tonic::Code::InvalidArgument);
+}
+
+#[tokio::test]
+async fn grpc_public_key_rejects_unknown_data_type() {
+    let enclave_port = start_mock_enclave();
+    let grpc_port = start_grpc_server(enclave_port).await;
+
+    let mut client = ParentServiceClient::connect(format!("http://127.0.0.1:{grpc_port}"))
+        .await
+        .unwrap();
+
+    for data_type in [-1, i32::MAX] {
+        assert!(DataType::try_from(data_type).is_err());
+
+        let err = client
+            .public_key(PublicKeyRequest {
+                network_id: 0,
+                data_type,
+            })
+            .await
+            .unwrap_err();
+
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+        assert_eq!(err.message(), format!("unknown data_type: {data_type}"));
+    }
 }
 
 #[tokio::test]
@@ -748,6 +777,40 @@ async fn grpc_evm_forwards_raw_consignment_bytes() {
 // Error-path tests
 
 #[tokio::test]
+async fn grpc_sign_rejects_unknown_data_type() {
+    let enclave_port = start_mock_enclave();
+    let grpc_port = start_grpc_server(enclave_port).await;
+
+    let mut client = ParentServiceClient::connect(format!("http://127.0.0.1:{grpc_port}"))
+        .await
+        .unwrap();
+
+    for data_type in [-1, i32::MAX] {
+        assert!(DataType::try_from(data_type).is_err());
+
+        let payload = enriched::EnrichedEvmPayload {
+            call_data: vec![0xAB; 132],
+            nonce: 1,
+            deadline: u64::MAX,
+            chain_id: 1,
+            proxy_contract: vec![],
+            calldata_amount: 0,
+            calldata_commission: 0,
+            unsigned_tx: Vec::new(),
+            lz_release: None,
+        };
+
+        // Change only the type so missing payload fields cannot cause the rejection.
+        let mut req = sign_evm_request(rgb_source(0, 0, vec![], vec![], String::new()), payload);
+        req.common.as_mut().unwrap().data_type = data_type;
+
+        let err = client.sign(req).await.unwrap_err();
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+        assert_eq!(err.message(), format!("unknown data_type: {data_type}"));
+    }
+}
+
+#[tokio::test]
 async fn grpc_invalid_data_type_returns_error() {
     let enclave_port = start_mock_enclave();
     let grpc_port = start_grpc_server(enclave_port).await;
@@ -831,27 +894,30 @@ async fn grpc_get_last_saved_block_roundtrip() {
 }
 
 #[tokio::test]
-async fn grpc_submit_headers_roundtrip() {
-    let enclave_port = start_mock_enclave();
-    let grpc_port = start_grpc_server(enclave_port).await;
+async fn grpc_submit_headers_refused() {
+    // An enclave that must never see a connection.
+    let enclave = TcpListener::bind("127.0.0.1:0").unwrap();
+    enclave.set_nonblocking(true).unwrap();
+    let grpc_port = start_grpc_server(enclave.local_addr().unwrap().port()).await;
 
     let mut client = ParentServiceClient::connect(format!("http://127.0.0.1:{grpc_port}"))
         .await
         .unwrap();
 
-    let headers = vec![vec![0xAB; 80], vec![0xCD; 80], vec![0xEF; 80]];
-    let resp = client
+    let err = client
         .submit_headers(utexo_bridge_parent::grpc_proto::SubmitHeadersRequest {
-            headers: headers.clone(),
+            headers: vec![vec![0xAB; 80]],
             start_height: 215_001,
         })
         .await
-        .unwrap()
-        .into_inner();
+        .unwrap_err();
 
-    assert_eq!(resp.last_block_height, 215_003);
-    assert_eq!(resp.last_block_hash, vec![0x22; 32]);
-    assert_eq!(resp.headers_accepted, 3);
+    assert_eq!(err.code(), tonic::Code::PermissionDenied);
+    assert_eq!(
+        enclave.accept().unwrap_err().kind(),
+        std::io::ErrorKind::WouldBlock,
+        "SubmitHeaders must not reach the enclave"
+    );
 }
 
 #[tokio::test]
@@ -909,6 +975,8 @@ async fn grpc_attested_public_key_roundtrip_and_verify() {
         bundle.extend_from_slice(&(p.len() as u32).to_be_bytes());
         bundle.extend_from_slice(p);
     }
+    assert_eq!(resp.attested_policy, AttestedPolicy::Development.to_bytes());
+    bundle.extend_from_slice(&resp.attested_policy);
     let expected: [u8; 32] = sha2::Sha256::digest(&bundle).into();
     assert_eq!(verified.user_data.as_deref(), Some(expected.as_slice()));
     assert_eq!(verified.nonce, nonce.to_vec());

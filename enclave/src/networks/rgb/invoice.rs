@@ -9,7 +9,7 @@ use std::str::FromStr;
 use rgbinvoice::{Beneficiary, RgbInvoice};
 
 use crate::error::{EnclaveError, Result};
-use crate::networks::evm::evm_event::BFI_MAX_DEST_ADDRESS_LEN as MAX_INVOICE_LEN;
+use crate::networks::evm::events::BFI_MAX_DEST_ADDRESS_LEN as MAX_INVOICE_LEN;
 
 /// The `utxob:...` blinded seal a verified deposit authorises paying.
 ///
@@ -87,7 +87,7 @@ mod tests {
     use super::*;
 
     /// The one literal the ABI half encodes and this half parses.
-    use crate::networks::evm::evm_event::{
+    use crate::networks::evm::events::{
         SAMPLE_INVOICE as BLINDED_INVOICE, SAMPLE_INVOICE_SEAL as INVOICE_SEAL,
     };
 

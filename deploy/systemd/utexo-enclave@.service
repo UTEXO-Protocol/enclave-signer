@@ -8,10 +8,13 @@ Requires=nitro-enclaves-allocator.service
 Type=oneshot
 RemainAfterExit=yes
 User=ubuntu
-# Allow for the serialized start lock (flock -w 180) plus run-enclave retries.
-TimeoutStartSec=300
-# EIF path + cpu/memory come from the deploy-written env file.
+# Allow for the serialized start lock (flock -w 180), run-enclave retries and
+# 60 s for the endpoint set.
+TimeoutStartSec=390
+# EIF path, cpu/memory, CLI, Electrum URL and EVM RPC CA come from the
+# deploy-written env file. The EVM RPC host and port come from host-prep-evmrpc.sh.
 EnvironmentFile=/etc/utexo/enclave.env
+EnvironmentFile=-/etc/nitro_enclaves/vsock-proxy-evmrpc.env
 ExecStart=/usr/local/bin/utexo-enclave-ctl.sh start %i
 ExecStop=/usr/local/bin/utexo-enclave-ctl.sh stop %i
 

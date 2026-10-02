@@ -22,7 +22,7 @@ use std::process::ExitCode;
 use anyhow::{Context, Result};
 use clap::Parser;
 
-use attestation_verify::EvmDataSource;
+use attestation_verify::{AttestedPolicy, EvmDataSource, EvmRpcTlsPin, KmsPin, SignerRole};
 use utexo_bridge_parent::attest_verify::{
     verify_attested_pubkey, AttestedPubkeyResult, ExpectedPolicy, VerifyMode,
 };
@@ -61,13 +61,37 @@ struct Cli {
     #[arg(long)]
     expect_vanilla_psbt: bool,
 
+    /// Expected signer role, committed into attestation user_data: `mint`
+    /// (EVM -> RGB only), `burn` (RGB -> EVM only), or `combined` (both
+    /// directions, the combined and swap images). Required for production
+    /// verification. Ignored with --mock.
+    #[arg(long)]
+    expect_signer_role: Option<String>,
+
     /// Expected EVM `FundsIn` deposit-verification data source the enclave must
-    /// have committed to: `raw` (host-relayed RPC), `helios` (trustless,
-    /// checkpoint-verified), or `disabled`. Defaults to `raw` - the source the
-    /// shipped image uses. Pass `helios` to require the trustless path and fail
-    /// verification if the enclave is only on raw RPC. Ignored with --mock.
-    #[arg(long, default_value = "raw")]
+    /// have committed to: `tls` (RPC over pinned TLS), `helios` (trustless,
+    /// checkpoint-verified), `raw` (plaintext, dev only), or `disabled`.
+    /// Defaults to `tls` - the source the shipped image uses. Ignored with
+    /// --mock.
+    #[arg(long, default_value = "tls")]
     expect_evm_source: String,
+
+    /// Expected Electrum host the operator set at launch (the host of
+    /// `ELECTRUM_URL`). Required for production verification. Ignored with
+    /// --mock.
+    #[arg(long)]
+    expect_electrum_host: Option<String>,
+
+    /// Expected EVM RPC TLS host (`EVM_RPC_HOST`). REQUIRED when
+    /// `--expect-evm-source tls`. Ignored otherwise.
+    #[arg(long)]
+    expect_evm_rpc_host: Option<String>,
+
+    /// Expected SHA-256 of the DER of the EVM RPC CA (`EVM_RPC_TLS_CA_DER_FILE`), 64
+    /// hex characters. REQUIRED when `--expect-evm-source tls`. Ignored
+    /// otherwise.
+    #[arg(long)]
+    expect_evm_rpc_ca_sha256: Option<String>,
 
     /// Expected Helios weak-subjectivity checkpoint (0x-prefixed 32-byte beacon
     /// block root) the enclave must have trust-rooted on. REQUIRED when
@@ -76,6 +100,41 @@ struct Cli {
     /// checkpoint fails the `user_data` hash. Ignored otherwise.
     #[arg(long)]
     expect_helios_checkpoint: Option<String>,
+
+    /// Require this EVM chain ID in the attestation.
+    /// Omit to verify the reported value without comparison.
+    /// Ignored with --mock.
+    #[arg(long)]
+    expect_chain_id: Option<u64>,
+
+    /// Require this bridge or MultisigProxy address as 20-byte 0x-hex.
+    /// Omit to verify the reported value without comparison.
+    /// Ignored with --mock.
+    #[arg(long)]
+    expect_bridge_contract: Option<String>,
+
+    /// Require this RGB asset ID in the attestation.
+    /// Use an empty string to require no RGB asset.
+    /// Omit to verify the reported value without comparison.
+    /// Ignored with --mock.
+    #[arg(long)]
+    expect_rgb_asset_id: Option<String>,
+
+    /// Expected contract whose FundsIn events may authorize bridge signing.
+    /// Required for production verification.
+    #[arg(long)]
+    expect_funds_in_contract: Option<String>,
+
+    /// Expected ERC-20 the Bridge releases (`TOKEN_CONTRACT`), the `burnId`
+    /// preimage input the enclave pinned, as 0x-hex. Required for production
+    /// verification.
+    #[arg(long)]
+    expect_token_contract: Option<String>,
+
+    /// Expected minimum receipt confirmation depth. Required and non-zero for
+    /// production verification.
+    #[arg(long)]
+    expect_evm_min_confirmations: Option<u64>,
 
     /// Expected gas-tx (`SignRawDigest`) allowed destination the enclave pinned
     /// (`GAS_TX_ALLOWED_TO`), as 0x-hex. Omit if the operator left the gas path
@@ -104,6 +163,26 @@ struct Cli {
     /// comma-separated 4-byte hex selectors. Default empty. Ignored with --mock.
     #[arg(long, default_value = "")]
     expect_gas_selectors: String,
+
+    /// Expected KMS key ARN set at launch (`KMS_KEY_ARN`). Required with
+    /// `--expect-signer-role mint`. Ignored with --mock.
+    #[arg(long)]
+    expect_kms_key_arn: Option<String>,
+
+    /// Expected KMS region set at launch (`KMS_REGION`). Required with
+    /// `--expect-signer-role mint`. Ignored with --mock.
+    #[arg(long)]
+    expect_kms_region: Option<String>,
+
+    /// Expected KMS seed id set at launch (`KMS_SEED_ID`). Required with
+    /// `--expect-signer-role mint`. Ignored with --mock.
+    #[arg(long)]
+    expect_kms_seed_id: Option<String>,
+
+    /// Expected EVM address of the KMS seed (`KMS_EXPECTED_EVM_ADDRESS`), as
+    /// 0x-hex. Omit to expect none. Ignored with --mock.
+    #[arg(long)]
+    expect_kms_evm_address: Option<String>,
 }
 
 /// Parse the `--expect-helios-checkpoint` flag into a 32-byte beacon block root.
@@ -118,14 +197,71 @@ fn parse_checkpoint(s: &str) -> Result<[u8; 32]> {
     })
 }
 
+/// Parse `--expect-evm-rpc-host` and `--expect-evm-rpc-ca-sha256`. Both are
+/// required: a real TLS enclave always commits both.
+fn parse_evm_rpc_tls(host: Option<&str>, ca_sha256: Option<&str>) -> Result<EvmRpcTlsPin> {
+    let host = host.context("--expect-evm-source tls requires --expect-evm-rpc-host")?;
+    let ca = ca_sha256.context("--expect-evm-source tls requires --expect-evm-rpc-ca-sha256")?;
+    let ca_sha256 = hex::decode(ca)
+        .ok()
+        .and_then(|b| <[u8; 32]>::try_from(b).ok())
+        .context("--expect-evm-rpc-ca-sha256 must be 64 hex characters")?;
+    Ok(EvmRpcTlsPin {
+        host: host.into(),
+        ca_sha256,
+    })
+}
+
+/// Parse the `--expect-kms-*` flags. The key ARN, region and seed id go
+/// together, and a mint signer requires them.
+fn parse_expect_kms(
+    role: SignerRole,
+    key_arn: Option<&str>,
+    region: Option<&str>,
+    seed_id: Option<&str>,
+    address: Option<&str>,
+) -> Result<Option<KmsPin>> {
+    match (key_arn, region, seed_id) {
+        (Some(key_arn), Some(region), Some(seed_id)) => Ok(Some(KmsPin {
+            key_arn: key_arn.into(),
+            region: region.into(),
+            seed_id: seed_id.into(),
+            expected_evm_address: address
+                .map(|a| parse_hex20(a, "--expect-kms-evm-address"))
+                .transpose()?,
+        })),
+        (None, None, None) if role != SignerRole::Mint && address.is_none() => Ok(None),
+        _ => anyhow::bail!(
+            "--expect-kms-key-arn, --expect-kms-region and --expect-kms-seed-id go together, \
+             and --expect-signer-role mint requires them"
+        ),
+    }
+}
+
+/// Parse the `--expect-signer-role` flag into a [`SignerRole`].
+fn parse_signer_role(s: Option<&str>) -> Result<SignerRole> {
+    let s = s.context("--expect-signer-role required: mint | burn | combined (or pass --mock)")?;
+    match s.to_ascii_lowercase().as_str() {
+        "mint" => Ok(SignerRole::Mint),
+        "burn" => Ok(SignerRole::Burn),
+        "combined" => Ok(SignerRole::Combined),
+        other => {
+            anyhow::bail!(
+                "invalid --expect-signer-role '{other}' (expected: mint | burn | combined)"
+            )
+        }
+    }
+}
+
 /// Parse the `--expect-evm-source` flag into an [`EvmDataSource`].
 fn parse_evm_source(s: &str) -> Result<EvmDataSource> {
     match s.to_ascii_lowercase().as_str() {
+        "tls" | "pinned-tls" => Ok(EvmDataSource::PinnedTlsRpc),
         "raw" | "raw-rpc" | "rawrpc" => Ok(EvmDataSource::RawRpc),
         "helios" | "helios-verified" => Ok(EvmDataSource::HeliosVerified),
         "disabled" | "none" | "off" => Ok(EvmDataSource::Disabled),
         other => anyhow::bail!(
-            "invalid --expect-evm-source '{other}' (expected: raw | helios | disabled)"
+            "invalid --expect-evm-source '{other}' (expected: tls | helios | raw | disabled)"
         ),
     }
 }
@@ -144,6 +280,35 @@ fn parse_expect_gas_to(s: &Option<String>) -> Result<[u8; 20]> {
             })
         }
     }
+}
+
+/// Parse a required 20-byte address in 0x-hex format.
+fn parse_hex20(s: &str, flag: &str) -> Result<[u8; 20]> {
+    let stripped = s.strip_prefix("0x").unwrap_or(s);
+    let bytes = hex::decode(stripped).with_context(|| format!("{flag} '{s}' is not hex"))?;
+    bytes
+        .try_into()
+        .map_err(|v: Vec<u8>| anyhow::anyhow!("{flag} must be 20 bytes, got {}", v.len()))
+}
+
+fn parse_expect_funds_in_contract(s: &Option<String>) -> Result<[u8; 20]> {
+    let s = s
+        .as_deref()
+        .context("--expect-funds-in-contract required (or pass --mock)")?;
+    parse_hex20(s, "--expect-funds-in-contract")
+}
+
+fn parse_expect_token_contract(s: &Option<String>) -> Result<[u8; 20]> {
+    let s = s
+        .as_deref()
+        .context("--expect-token-contract required (or pass --mock)")?;
+    parse_hex20(s, "--expect-token-contract")
+}
+
+fn parse_expect_evm_min_confirmations(value: Option<u64>) -> Result<u64> {
+    value
+        .filter(|n| *n > 0)
+        .context("--expect-evm-min-confirmations must be specified and greater than zero")
 }
 
 /// Parse `--expect-gas-selectors` (comma-separated 4-byte hex) into selectors.
@@ -207,15 +372,52 @@ async fn run(cli: Cli) -> Result<()> {
                  (the beacon block root the enclave pinned)"
             );
         }
+        let electrum_host = cli
+            .expect_electrum_host
+            .clone()
+            .context("--expect-electrum-host required (or pass --mock)")?;
+        let evm_rpc_tls = (evm_source == EvmDataSource::PinnedTlsRpc)
+            .then(|| {
+                parse_evm_rpc_tls(
+                    cli.expect_evm_rpc_host.as_deref(),
+                    cli.expect_evm_rpc_ca_sha256.as_deref(),
+                )
+            })
+            .transpose()?;
+        let expected_bridge_contract = cli
+            .expect_bridge_contract
+            .as_deref()
+            .map(|s| parse_hex20(s, "--expect-bridge-contract"))
+            .transpose()?;
+        let signer_role = parse_signer_role(cli.expect_signer_role.as_deref())?;
+        let kms = parse_expect_kms(
+            signer_role,
+            cli.expect_kms_key_arn.as_deref(),
+            cli.expect_kms_region.as_deref(),
+            cli.expect_kms_seed_id.as_deref(),
+            cli.expect_kms_evm_address.as_deref(),
+        )?;
         let expected_policy = ExpectedPolicy::Production {
             allow_vanilla_psbt: cli.expect_vanilla_psbt,
+            signer_role,
             evm_source,
             evm_checkpoint,
+            electrum_host,
+            evm_rpc_tls,
+            expected_chain_id: cli.expect_chain_id,
+            expected_bridge_contract,
+            expected_rgb_asset_id: cli.expect_rgb_asset_id.clone(),
+            funds_in_contract: parse_expect_funds_in_contract(&cli.expect_funds_in_contract)?,
+            token_contract: parse_expect_token_contract(&cli.expect_token_contract)?,
+            evm_min_confirmations: parse_expect_evm_min_confirmations(
+                cli.expect_evm_min_confirmations,
+            )?,
             gas_tx_allowed_to: parse_expect_gas_to(&cli.expect_gas_tx_to)?,
             gas_tx_max_gas_limit: cli.expect_gas_max_gas_limit,
             gas_tx_max_fee_per_gas: cli.expect_gas_max_fee_per_gas,
             gas_tx_max_value_wei: cli.expect_gas_max_value_wei,
             gas_tx_allowed_selectors: parse_expect_gas_selectors(&cli.expect_gas_selectors)?,
+            kms,
         };
         (pcrs, VerifyMode::Real, expected_policy)
     };
@@ -254,6 +456,16 @@ fn print_ok(result: &AttestedPubkeyResult) {
         "  Bundle commitment     : 0x{}",
         hex::encode(result.bundle_commitment)
     );
+    if let AttestedPolicy::Production { kms: Some(k), .. } = &result.policy {
+        println!("  KMS key ARN           : {}", k.key_arn);
+        println!("  KMS region            : {}", k.region);
+        println!("  KMS seed id           : {}", k.seed_id);
+        println!(
+            "  KMS expected address  : {}",
+            k.expected_evm_address
+                .map_or("none".into(), |a| format!("0x{}", hex::encode(a)))
+        );
+    }
     println!(
         "  PCR0                  : 0x{}",
         hex::encode(v.pcrs.get(&0).map(|v| v.as_slice()).unwrap_or(&[]))
@@ -271,4 +483,66 @@ fn print_ok(result: &AttestedPubkeyResult) {
         "  Nonce echoed          : 0x{}",
         hex::encode(v.nonce.clone())
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_signer_role_accepts_the_three_roles() {
+        assert_eq!(parse_signer_role(Some("mint")).unwrap(), SignerRole::Mint);
+        assert_eq!(parse_signer_role(Some("burn")).unwrap(), SignerRole::Burn);
+        assert_eq!(
+            parse_signer_role(Some("Combined")).unwrap(),
+            SignerRole::Combined
+        );
+    }
+
+    #[test]
+    fn tls_source_needs_host_and_ca_hash() {
+        let hash = "ab".repeat(32);
+        assert!(parse_evm_rpc_tls(None, Some(&hash)).is_err());
+        assert!(parse_evm_rpc_tls(Some("rpc.test"), None).is_err());
+        assert!(parse_evm_rpc_tls(Some("rpc.test"), Some("abcd")).is_err());
+        let pin = parse_evm_rpc_tls(Some("rpc.test"), Some(&hash)).unwrap();
+        assert_eq!(pin.host, "rpc.test");
+        assert_eq!(pin.ca_sha256, [0xab; 32]);
+        assert_eq!(
+            parse_evm_source("tls").unwrap(),
+            EvmDataSource::PinnedTlsRpc
+        );
+    }
+
+    #[test]
+    fn mint_requires_the_kms_flags() {
+        let arn =
+            Some("arn:aws:kms:eu-west-1:123456789012:key/mrk-0123456789abcdef0123456789abcdef");
+        let (region, seed) = (Some("eu-west-1"), Some("seed-1"));
+        assert!(parse_expect_kms(SignerRole::Mint, None, None, None, None).is_err());
+        assert!(parse_expect_kms(SignerRole::Mint, arn, region, None, None).is_err());
+        assert!(parse_expect_kms(SignerRole::Burn, arn, None, None, None).is_err());
+        assert!(parse_expect_kms(SignerRole::Burn, None, None, None, Some("0x00")).is_err());
+        assert_eq!(
+            parse_expect_kms(SignerRole::Burn, None, None, None, None).unwrap(),
+            None
+        );
+        let pin = parse_expect_kms(SignerRole::Mint, arn, region, seed, None)
+            .unwrap()
+            .unwrap();
+        assert_eq!(pin.expected_evm_address, None);
+        let address = format!("0x{}", "ab".repeat(20));
+        let pin = parse_expect_kms(SignerRole::Mint, arn, region, seed, Some(&address))
+            .unwrap()
+            .unwrap();
+        assert_eq!(pin.expected_evm_address, Some([0xab; 20]));
+    }
+
+    #[test]
+    fn parse_signer_role_rejects_missing_and_invalid() {
+        let missing = parse_signer_role(None).unwrap_err();
+        assert!(format!("{missing:#}").contains("required"), "{missing:#}");
+        let invalid = parse_signer_role(Some("minter")).unwrap_err();
+        assert!(format!("{invalid:#}").contains("invalid"), "{invalid:#}");
+    }
 }

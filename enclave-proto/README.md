@@ -35,8 +35,8 @@ disagree, or if the commit recorded below drifts from the `rev` that
 | | |
 |---|---|
 | Upstream | https://github.com/UTEXO-Protocol/federated-signer-proto |
-| Commit | `18c5d271d40a049ec0ffc8f3a970ef042d8b7ffb` ("feat: carry mint ancestry on the mint path", branch `bfa`) |
-| Commit date | 2026-09-02T09:29:35+03:00 |
+| Commit | `53e09934400527320c6b5c589be3a94d982a5830` ("feat(enclave): add KMS values to SetEndpoints and the attested policy bytes to the attested key response") |
+| Commit date | 2026-09-30T16:18:36+02:00 |
 
 This is the same commit `parent/Cargo.toml` still pins as a git dependency, so
 both crates compile against one schema version. Keep them in lockstep.
@@ -50,7 +50,7 @@ both crates compile against one schema version. Keep them in lockstep.
 Verify against upstream (needs read access to the private repo):
 
 ```bash
-REV=18c5d271d40a049ec0ffc8f3a970ef042d8b7ffb
+REV=53e09934400527320c6b5c589be3a94d982a5830
 git clone https://github.com/UTEXO-Protocol/federated-signer-proto /tmp/fsp
 git -C /tmp/fsp checkout "$REV"
 diff /tmp/fsp/rust-gen/src/enclave/enclave.rs enclave-proto/src/enclave.rs
@@ -65,8 +65,8 @@ git hash-object enclave-proto/src/enclave.rs enclave-proto/proto/enclave.proto
 
 | File | Upstream blob hash |
 |---|---|
-| `rust-gen/src/enclave/enclave.rs` | `dcdc121e83278ac83a7723c31bc2a18c511186d5` |
-| `proto/enclave/enclave.proto` | `2068a6e78bbdfe03f2f06ade4551f3123a846910` |
+| `rust-gen/src/enclave/enclave.rs` | `fb1c02445e6ea6e08a779c69db701c3903cac8df` |
+| `proto/enclave/enclave.proto` | `48bd838af82cdc2dd7a2e65bd47b07b0e56a069f` |
 
 ## Why only `prost`
 

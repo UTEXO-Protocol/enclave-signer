@@ -13,6 +13,8 @@
 
 pub mod chain;
 pub mod checkpoint;
+// Merkle proofs anchor an RGB source's witness txs: the burn direction.
+#[cfg(rgb_to_evm)]
 pub mod merkle;
 pub mod types;
 pub mod validation;
@@ -22,5 +24,6 @@ pub use checkpoint::{
     checkpoint_for, resolve_checkpoint, Checkpoint, CheckpointSource, CHECKPOINT_ENV,
     UTEXO_SIGNET_BLOCK_TIME_SECS, UTEXO_SIGNET_CHALLENGE, UTEXO_SIGNET_MAGIC,
 };
+#[cfg(rgb_to_evm)]
 pub use merkle::{verify_merkle_proof, MerkleError, Sha256d};
 pub use types::{BlockHash, BlockHeight, Network, SpvError};

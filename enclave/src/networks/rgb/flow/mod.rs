@@ -4,11 +4,11 @@
 //! with its own PCR0:
 //!
 //!   * **send/receive** (`rgb-swap`) - the bridge holds a pool of the asset.
-//!     A deposit pays the user with an IFA `Transfer`; a withdrawal is a
+//!     A deposit pays the user with a BFA `Transfer`; a withdrawal is a
 //!     `Transfer` back to the bridge.
 //!   * **mint/burn** (`rgb-mint-burn`) - the bridge owns the contract's
-//!     inflation rights. A deposit mints with an IFA `Inflation`; a withdrawal
-//!     destroys units with an IFA `Burn`.
+//!     mint right. A deposit mints with a BFA `Bridge`; a withdrawal
+//!     destroys units with a BFA `Burn`.
 //!
 //! The two differ only in which transition types they accept and how the
 //! amounts bind, but those are exactly the checks that authorize value to

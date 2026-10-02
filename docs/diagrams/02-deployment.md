@@ -21,9 +21,9 @@ flowchart TB
             Headers[(Header chain<br/>in-memory)]
             State[(EnclaveState<br/>Phase + KeyManager in SecretBox)]
             Replay[(NonceReplayGuard — cloning<br/>≤10 000 entries, 1 h TTL<br/>+ op_replay_guard — bridge ops<br/>≤100 000 entries, 24 h TTL)]
-            Fwd[vsock_forwarder<br/>loopback → vsock, per-port<br/>Electrum port or 3443 / 3444<br/>Electrum host pinned to loopback in /etc/hosts]
+            Fwd[vsock_forwarder<br/>loopback → vsock, per-port<br/>Electrum port / EVM RPC TLS port<br/>Electrum host pinned to loopback in /etc/hosts]
             RgbVal[RgbValidator<br/>rgb-ops + Electrum or Esplora]
-            EvmVer[evm_event verifier<br/>raw RPC (supplied images)<br/>receipt/head correctness trusted]
+            EvmVer[events.rs verifier<br/>raw RPC (supplied images)<br/>receipt/head correctness trusted]
             NSM[/dev/nsm — Nitro Security Module/]
         end
     end
@@ -55,22 +55,29 @@ flowchart TB
 ### Build / cluster notes
 
 - Built as an **EIF** via `nitro-cli build-enclave` from `build/Dockerfile.enclave`
-  (combined), `.rgb`, `.mint-burn`, `.ccd` or `.bfa`. PCR0/1/2 are pinned at build
+  (combined), `.rgb`, `.mint`, `.burn` or `.ccd`. PCR0/1/2 are pinned at build
   time; changes to the measured image require updating accepted measurements.
   `build-eif.yml` publishes EIF + `PCR.json` + `SHA256SUMS` to S3 under the git
   sha; `deploy/deploy-host.sh` verifies both before and after start.
-- Cloned enclaves share **one HD seed** via the cloning handshake
-  (`utexo-bridge-parent-cli clone`). Each node holds an identical `KeyManager`
+- Without `kms-persistence`, cloned enclaves share **one HD seed** via the
+  cloning handshake (`utexo-bridge-parent-cli clone`). Each node holds an identical `KeyManager`
   after `Cloning → Active`. Keys live only in memory; a restart needs re-init or
-  re-clone.
+  re-clone. Mint signers enable `kms-persistence` and recover the saved encrypted
+  seed instead; peer cloning is disabled. See
+  [KMS seed persistence](../kms-persistence.md).
 - **Bridge-mode `signPsbt` requires the `evm-rpc` feature**: a build without it
   refuses bridge PSBTs, since it cannot independently verify the EVM `FundsIn`
   deposit. Operators MUST run the host `vsock-proxy` allowlist on 8002. Env:
-  `EVM_RPC_URL` / `EVM_MIN_CONFIRMATIONS`. See the README env table.
+  `EVM_MIN_CONFIRMATIONS`. See the README env table.
+- **Endpoints at launch**: `utexo-enclave-ctl.sh start` sends `set-endpoints`
+  once to each fresh enclave (Electrum URL, EVM RPC host, CA, TLS port). Until
+  then the enclave signs nothing.
 
 Clones provide replicas of one signing identity. Independent quorum members
 need independently initialized seeds.
 
 Optional `helios` builds use execution and consensus forwarders on host vsock
-ports 8003/8004 (enclave loopback 18545/18550) when Helios is selected. These
+ports 8003/8004 (enclave loopback 18545/18550) when Helios is selected. With
+`kms-persistence`, KMS and seed storage reserve 8003/8004; Helios uses 8005/8006
+and rejects overrides that collide with the reserved ports. These
 replace the raw receipt provider and require a pinned beacon checkpoint.

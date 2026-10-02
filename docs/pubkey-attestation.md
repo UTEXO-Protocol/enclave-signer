@@ -20,6 +20,33 @@ rules and selected data sources — resolved once at boot. Committing it into `u
 lets a verifier check the committed policy as one attested value instead of
 inferring it from build flags or configuration guesses.
 
+### What attestation does NOT prove
+
+Real verification proves only that **approved, measured code (PCR0/1/2 = X/Y/Z)
+answered a fresh-nonce request with these public bytes at time T**. It does
+**not** establish any of the following, and consumers MUST NOT rely on them:
+
+- **Origin of key generation.** The document says nothing about *where or when*
+  the corresponding private key was first created. A measured enclave can just
+  as validly attest a key it generated at boot, restored from sealed storage, or
+  received over the enclave-to-enclave cloning protocol.
+- **Exclusive custody / uniqueness.** It does not prove the private key exists
+  in exactly one place. By design this bridge supports **seed cloning** (see
+  [`enclave/src/cloning.rs`](../enclave/src/cloning.rs) and `docs/tee-spec.md`):
+  a donor enclave hands its sealed seed to another enclave running the *same*
+  measurement, so the same signing key legitimately runs in more than one
+  enclave. Two valid attestations for the same `public_key` under the same PCRs
+  are expected, not an anomaly.
+- **Absence of a cloned/imported copy.** It cannot show that no party ever held
+  or copied the key material — only that a live instance of the measured code
+  holds it now.
+
+What binds trust is the *combination* of (a) the PCR-pinned measured code —
+whose review/audit is what actually constrains how keys are generated, sealed
+and cloned — and (b) the fresh-nonce signature proving a live instance of that
+code holds the key. The guarantee is **"an approved measured enclave controls
+this key now,"** not "this key was born here and lives only here."
+
 The chain of trust is:
 
 ```
@@ -106,12 +133,17 @@ mock build with no env is `chain_id=0`, `bridge_contract=20 zero bytes`,
 build, so the bundle has the same shape regardless of features.
 
 The CLI reconstructs policy using the chain/contract/asset pins from the
-response. It authenticates these values but does not compare them to independent
-expected pins. Callers must compare them with their intended deployment.
+response. These values are always authenticated (they are inside the signed
+commitment); to also compare them against the operator's intended deployment,
+pass `--expect-chain-id`, `--expect-bridge-contract` and/or
+`--expect-rgb-asset-id`. When set, verification fails unless the enclave attests
+exactly those pins, so onboarding can reject a valid attestation of the *wrong*
+chain, contract or RGB asset. When omitted, the pins are authenticated but not
+compared (legacy behaviour) — the caller must then compare them out of band.
 
 The verifier MUST use the same field set, the same order, and the same
 length-prefix encoding. The reference encoder is `canonical_pubkey_bundle`
-in [`enclave/src/server.rs`](../enclave/src/server.rs) and the reference
+in [`enclave/src/server/keys.rs`](../enclave/src/server/keys.rs) and the reference
 decoder/checker is `canonical_bundle` in
 [`parent/src/attest_verify.rs`](../parent/src/attest_verify.rs).
 
@@ -126,29 +158,44 @@ both the enclave and every verifier share so the bytes are identical.
 
 ```
 policy_commitment =
-    u8(POLICY_COMMITMENT_V2 = 2)                    // version tag
+    u8(POLICY_COMMITMENT_V7 = 7)                    // version tag
     // Production (release, fully-pinned bridge signer):
     u8(0x01)                                        // production discriminant
     u8(allow_vanilla_psbt)                          // plain-BTC path enabled?
+    u8(signer_role)                                 // 0 combined | 1 mint | 2 burn (from build features)
     u8(attestation_mode)                            // 1 = real NSM (0 = mock)
-    u8(evm_source)                                  // 0 disabled | 1 raw-rpc | 2 Helios-verified
+    u8(evm_source)                                  // 0 disabled | 1 plaintext rpc (dev) | 2 Helios-verified | 3 pinned TLS rpc
     u8(btc_source)                                  // 1 = SPV-verified
     chain_id_be8 || bridge_contract(20)
     u32_be(len(rgb_asset_id)) || rgb_asset_id_utf8
+    funds_in_contract(20)                           // authorized event emitter
+    evm_min_confirmations_be8                       // required receipt depth
     u8(checkpoint_present)                          // 0 absent; 1 followed by 32-byte beacon root
+    u32_be(len(electrum_host)) || electrum_host     // Electrum host set at launch
+    u8(evm_rpc_tls_present)                         // 0 absent; 1 followed by:
+      u32_be(len(host)) || host || ca_sha256(32)    //   EVM RPC host, SHA-256 of the CA DER, set at launch
     // Gas-tx (SignRawDigest) rule:
     gas_tx_allowed_to(20)                           // all-zero = gas path unpinned
     gas_tx_max_gas_limit_be8                        // gasLimit ceiling (0 = unset)
     gas_tx_max_fee_per_gas_be16                     // per-gas fee ceiling, wei (0 = unset)
     gas_tx_max_value_wei_be16                       // native-value ceiling, wei (0 = unset)
     u32_be(len(selectors)) || selector(4)...        // sorted + deduped 4-byte selectors
+    token_contract(20)                              // released ERC-20 (burnId preimage input), V5
+    u8(kms_present)                                 // 0 absent; 1 followed by (set at launch, V7):
+      u32_be(len(key_arn)) || key_arn || u32_be(len(region)) || region
+      || u32_be(len(seed_id)) || seed_id
+      || u8(address_present) [|| expected_evm_address(20)]
     // Development (debug/test/dev-feature/non-bridge/unpinned build):
     u8(0x00)                                        // development discriminant
 ```
 
-The tuple omits the deposit emitter, EVM confirmation depth, Bitcoin network,
-concrete sats budgets, resolver URLs and strict Helios checkpoint-age setting.
-Image-baked values remain measured in the EIF.
+The tuple omits the Bitcoin network, concrete sats budgets, the Electrum scheme
+and port, the EVM RPC TLS port and strict Helios checkpoint-age setting.
+Image-baked values remain measured in the EIF. The endpoints are not in the
+image; the operator sets them and the KMS values once at launch
+(`SetEndpoints`), and the attestation shows them without a restart. Until the
+set, `GetAttestedPublicKey` is refused. The response carries the policy bytes
+that `user_data` commits (`attested_policy`), so a verifier can decode them.
 
 A production enclave commits the production tuple; a dev/mock enclave
 commits just `[version, 0x00]`. Because the posture flags (`allow_vanilla_psbt`,
@@ -207,9 +254,10 @@ Given `(public_keys_bundle, attestation_doc, nonce_sent, expected_pcrs)`:
    bytewise.
 6. Nonce check: `doc.nonce == nonce_sent`.
 7. Pubkey check: `doc.public_key == public_keys_bundle.evm_uncompressed_pub`.
-8. Commitment check: build the expected policy (from the expected posture +
-   the wire pins) and confirm
-   `doc.user_data == sha256(canonical_bundle(public_keys_bundle) || expected_policy)`.
+8. Commitment check: confirm
+   `doc.user_data == sha256(canonical_bundle(public_keys_bundle) || attested_policy)`,
+   decode `attested_policy`, and confirm it equals the expected policy (from
+   the expected posture + the wire pins).
 
 If all eight checks pass, the bridge's EVM address (`keccak256(evm_uncompressed_pub)[12..]`)
 is bound to the running TEE measurement *and* the enclave's attested posture
@@ -217,17 +265,39 @@ equals the expected production policy.
 
 ## Verification recipe (with `attest-verify`)
 
-The `attest-verify` CLI in this repo runs the full recipe.
+The `attest-verify` CLI in this repo runs the full recipe. Configure the client
+CA/certificate/key environment from [Parent mTLS](parent-mtls.md) first; an
+`observer` certificate is sufficient for verification.
 
 ```bash
 # Production verification (against a real Nitro enclave). By default it expects a
-# production policy with plain-BTC signing DISABLED and the raw-RPC EVM data
-# source (`--expect-evm-source raw`, what the shipped image uses).
+# production policy with plain-BTC signing DISABLED and the pinned-TLS EVM data
+# source (`--expect-evm-source tls`, what the shipped image uses), which needs the
+# Electrum host, the EVM RPC host and the CA the operator set at launch. Compute
+# the CA hash from the same DER the operator set:
+#   openssl x509 -in ca.pem -outform der | openssl dgst -sha256 -hex
 attest-verify \
-    --endpoint http://parent.example:50051 \
+    --endpoint https://parent.example:50051 \
     --pcr0 <96-hex-chars> \
     --pcr1 <96-hex-chars> \
-    --pcr2 <96-hex-chars>
+    --pcr2 <96-hex-chars> \
+    --expect-signer-role burn \
+    --expect-funds-in-contract 0x6711f1a319B37847fa0234181C34D883774c4951 \
+    --expect-token-contract 0xFd086bC7CD5C481DCC9C85ebE478A1C0b69FCbb9 \
+    --expect-evm-min-confirmations 12 \
+    --expect-electrum-host <electrum host> \
+    --expect-evm-rpc-host <rpc host> \
+    --expect-evm-rpc-ca-sha256 <64-hex-chars>
+
+# --expect-signer-role is required: `mint` for the mint signer image
+# (Dockerfile.enclave.mint), `burn` for the burn signer
+# (Dockerfile.enclave.burn), `combined` for a swap image. A burn signer that
+# attests `mint` fails verification. A role attests the other role's path as
+# off whatever its env says: a burn signer never attests plain-BTC signing
+# (omit --expect-vanilla-psbt), a mint signer never attests a gas rule (omit
+# the --expect-gas-* flags). A mint signer also needs --expect-kms-key-arn,
+# --expect-kms-region and --expect-kms-seed-id, and --expect-kms-evm-address
+# when the operator set one.
 
 # Gas signing: also supply the image's exact expected rule when configured:
 # --expect-gas-tx-to <hex20> --expect-gas-max-gas-limit <units>
@@ -235,18 +305,33 @@ attest-verify \
 # --expect-gas-selectors <comma-separated-hex4>
 # Omitted flags expect an unpinned gas rule, not values discovered from the enclave.
 
+# Deployment pins: compare the attested chain/contract/asset against the
+# operator's intended deployment (otherwise they are authenticated but not
+# compared). Verification fails on any mismatch:
+# --expect-chain-id <u64> --expect-bridge-contract <hex20> \
+# --expect-rgb-asset-id <asset>   # empty string pins "no RGB asset"
+
 # Expect the plain-BTC path enabled:
-attest-verify --endpoint http://parent.example:50051 \
-    --pcr0 <..> --pcr1 <..> --pcr2 <..> \
+attest-verify --endpoint https://parent.example:50051 \
+    --pcr0 <..> --pcr1 <..> --pcr2 <..> --expect-signer-role mint \
+    --expect-funds-in-contract <hex20> --expect-evm-min-confirmations 12 \
+    --expect-electrum-host <electrum host> \
+    --expect-kms-key-arn <arn> --expect-kms-region <region> --expect-kms-seed-id <id> \
+    --expect-evm-rpc-host <rpc host> --expect-evm-rpc-ca-sha256 <64-hex-chars> \
     --expect-vanilla-psbt
 
 # Optional Helios build (not enabled in the supplied Dockerfiles):
-attest-verify --endpoint http://parent.example:50051 \
-    --pcr0 <..> --pcr1 <..> --pcr2 <..> \
+attest-verify --endpoint https://parent.example:50051 \
+    --pcr0 <..> --pcr1 <..> --pcr2 <..> --expect-signer-role mint \
+    --expect-funds-in-contract <hex20> --expect-evm-min-confirmations 12 \
+    --expect-electrum-host <electrum host> \
+    --expect-kms-key-arn <arn> --expect-kms-region <region> --expect-kms-seed-id <id> \
     --expect-evm-source helios --expect-helios-checkpoint <hex32>
 
 # Dev / CI verification (against an enclave built with --features mock-attestation).
 # --mock implies the expected policy is Development.
+# For this loopback plaintext example, remove PARENT_TLS_* and explicitly
+# enable GRPC_ALLOW_INSECURE_LOOPBACK=true on the loopback-bound Parent.
 attest-verify --endpoint http://127.0.0.1:50051 --mock
 ```
 
@@ -289,10 +374,16 @@ NOT defended (out of scope for attestation):
 - Bugs in the enclave code _after_ measurement (PCRs only attest the
   binary; runtime correctness is a separate problem solved by code review,
   fuzzing, audits).
+- **Key origin / exclusivity.** The document does not prove where the private
+  key was generated, that it lives in only one enclave, or that no cloned or
+  imported copy exists — seed cloning is an explicit feature, so the same key
+  can run in multiple same-measurement enclaves. Constraints on how keys are
+  generated, sealed and cloned come from reviewing the PCR-pinned code, not from
+  the attestation document itself. See *What attestation does NOT prove* above.
 
 ## Code references
 
-- Enclave-side handler: [`enclave/src/server.rs`](../enclave/src/server.rs)
+- Enclave-side handler: [`enclave/src/server/keys.rs`](../enclave/src/server/keys.rs)
   (`handle_get_attested_public_key`).
 - Parent gRPC handler: [`parent/src/grpc_server.rs`](../parent/src/grpc_server.rs)
   (`attested_public_key`).

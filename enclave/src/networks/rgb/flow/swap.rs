@@ -1,11 +1,11 @@
 //! Send/receive (pools) flow rules. The bridge holds an allocation of the
-//! asset and moves it with IFA `Transfer` transitions in both directions.
+//! asset and moves it with BFA `Transfer` transitions in both directions.
 //!
 //! See [`super`] for why this lives in its own file, and for the mirrored-name
 //! contract these items keep.
 
 use crate::error::{EnclaveError, Result};
-use crate::networks::rgb::validation::{ifa, TransitionSummary};
+use crate::networks::rgb::validation::{bfa, TransitionSummary};
 
 /// Human-readable flow name, used in rejection messages so an operator can
 /// tell "wrong shape" from "wrong enclave".
@@ -16,7 +16,7 @@ pub const FLOW_NAME: &str = "send/receive";
 /// Also decides whether the consignment parser bothers extracting the last
 /// bundle's witness prevouts ([`crate::networks::rgb::validation`]).
 pub fn is_signing_transition(transition_type: u16) -> bool {
-    transition_type == ifa::TS_TRANSFER
+    transition_type == bfa::TS_TRANSFER
 }
 
 /// Gate on the consignment's last transition before the PSBT is bound to it.
@@ -26,7 +26,7 @@ pub fn assert_signing_transition(last: &TransitionSummary) -> Result<()> {
             "send-RGB PSBT requires a Transfer transition (last transition_type = {}, want {}) - \
              this enclave is built for the {FLOW_NAME} flow",
             last.transition_type,
-            ifa::TS_TRANSFER
+            bfa::TS_TRANSFER
         )));
     }
     Ok(())
@@ -43,7 +43,7 @@ pub fn assert_committed_group(committed: &[&TransitionSummary]) -> Result<()> {
                  Transfer ({})",
                 t.op_id,
                 t.transition_type,
-                ifa::TS_TRANSFER
+                bfa::TS_TRANSFER
             )));
         }
     }
@@ -79,12 +79,12 @@ pub fn assert_group_amount(
 /// `total_output_amount` is the figure. Used both for the route proof and for
 /// the EVM calldata amount cross-check.
 pub fn funds_out_source_amount(last: &TransitionSummary) -> Result<u64> {
-    if last.transition_type != ifa::TS_TRANSFER {
+    if !is_signing_transition(last.transition_type) {
         return Err(EnclaveError::CrossCheck(format!(
             "fundsOut requires a Transfer transition (last transition_type = {}, want {}) - \
              this enclave is built for the {FLOW_NAME} flow",
             last.transition_type,
-            ifa::TS_TRANSFER
+            bfa::TS_TRANSFER
         )));
     }
     Ok(last.total_output_amount)

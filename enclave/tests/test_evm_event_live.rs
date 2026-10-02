@@ -2,18 +2,22 @@
 //! log. The unit tests build their own logs, so a wrong event signature or
 //! topic index would pass on both sides.
 //!
-//! Skipped unless `UTEXO_LIVE_EVM_RPC` is set. Run against the localnet after
-//! `make evm-fundsin`:
+//! Skipped unless `UTEXO_LIVE_EVM_RPC_HOST` is set. The client is the
+//! enclave's: TLS to `127.0.0.1:<port>`, under the CA in the DER file. Forward
+//! that port to the RPC first, for example
+//! `socat TCP-LISTEN:8443,fork TCP:<rpc host>:443`:
 //!
 //! ```sh
-//! UTEXO_LIVE_EVM_RPC=http://localhost:8545 \
+//! UTEXO_LIVE_EVM_RPC_HOST=<rpc host> UTEXO_LIVE_EVM_RPC_TLS_PORT=8443 \
+//! UTEXO_LIVE_EVM_RPC_CA_DER_FILE=ca.der \
 //! UTEXO_LIVE_BRIDGE=0x... UTEXO_LIVE_TX=0x... UTEXO_LIVE_OP_ID=0x<64 hex> \
 //! UTEXO_LIVE_AMOUNT=1000000 UTEXO_LIVE_COMMISSION=0 UTEXO_LIVE_MIN_CONF=1 \
 //!     cargo test -p utexo-bridge-enclave --features evm-rpc --test test_evm_event_live
 //! ```
-#![cfg(feature = "evm-rpc")]
+// FundsIn deposit verification: the EVM -> RGB direction.
+#![cfg(all(feature = "evm-rpc", evm_to_rgb))]
 
-use utexo_bridge_enclave::networks::evm::evm_event::{verify_funds_in_event, AlloyEvmClient};
+use utexo_bridge_enclave::networks::evm::events::{verify_funds_in_event, AlloyEvmClient};
 
 struct Live {
     client: AlloyEvmClient,
@@ -51,9 +55,17 @@ fn op_id(var: &str) -> Vec<u8> {
 
 /// `None` when the live chain is not configured, so the suite is a no-op in CI.
 fn live() -> Option<Live> {
-    let url = std::env::var("UTEXO_LIVE_EVM_RPC").ok()?;
+    let tls = utexo_bridge_enclave::config::EvmRpcTls {
+        host: std::env::var("UTEXO_LIVE_EVM_RPC_HOST").ok()?,
+        ca_der: std::fs::read(
+            std::env::var("UTEXO_LIVE_EVM_RPC_CA_DER_FILE")
+                .expect("UTEXO_LIVE_EVM_RPC_CA_DER_FILE is required"),
+        )
+        .expect("read the CA"),
+        tls_port: num("UTEXO_LIVE_EVM_RPC_TLS_PORT", 443) as u16,
+    };
     Some(Live {
-        client: AlloyEvmClient::new(&url).expect("build RPC client"),
+        client: AlloyEvmClient::with_pinned_tls(&tls).expect("build RPC client"),
         bridge: bytes("UTEXO_LIVE_BRIDGE")
             .try_into()
             .expect("20-byte bridge"),
