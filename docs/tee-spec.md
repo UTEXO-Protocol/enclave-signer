@@ -284,8 +284,10 @@ the enclave rewrites it.
 release settles. The enclave verifies every `FundsIn` lock behind the burn's
 mint ancestry itself (receipt, pinned emitter, RGB OpId, depth) and reads the
 `BridgeFundsIn` record from the same receipt. It then requires the cited
-pairs to equal those records exactly: set equality, no duplicates, canonical
-encoding, and at least one verified lock.
+pairs to equal those records exactly: set equality, canonical encoding,
+strictly ascending `operationId` order (so no duplicates), and at least one
+verified lock. `burnId` hashes the raw bytes, so the strict order gives one
+`burnId` per burn (F05-NEW-AF-04).
 
 **Burn identity bind.** Since bridge PR #152 the release carries
 `sourceBurnTxId`, the RGB OpId of the burn being settled, and `Bridge.fundsOut`
@@ -621,7 +623,7 @@ delegated to the receiving contract and known gaps. Enforced checks fail closed.
 | P3  | unlock amount equals the consignment-derived amount         | OK on the pools route -- the amount is the burn's `MS_BURNED_ASSET` (host `rgb_amount` is ignored) and MUST equal `fundsOut.amount` exactly (`flow::assert_funds_out_amount`; `fundsOut.amount` is gross, commission is taken on-chain). LayerZero route: only burned >= amount (Sec 7.1) |
 | P4  | calldata is well-formed                                     | OK -- two allowlisted selectors (`fundsOut`, `lzFundsOut`), 64 KiB cap, canonical ABI decode + re-encode byte-equality, `destinationChainId` rule per route |
 | P5  | payload binds destination chain / contract / **recipient**  | OK on the pools route -- chain + contract pinned; the BFA burn carries `MS_BURN_RECIPIENT` and the enclave refuses a release whose calldata names a different address. LayerZero route: no recipient bind (Sec 7.1) |
-| P6 | release identifiers and settlement | Both routes: `sourceChainId == 96`, `sourceAddress` empty, and `burnId` recomputed in-enclave (`validate_burn_id`). Pools route only: `sourceBurnTxId` MUST equal the settling transition's RGB OpId (non-zero), and `settlementData` MUST be canonical with exact set equality of `(operationId, netAmount)` ancestry locks, no duplicates and at least one lock. LayerZero route: these two binds do not run (Sec 7.1) |
+| P6 | release identifiers and settlement | Both routes: `sourceChainId == 96`, `sourceAddress` empty, and `burnId` recomputed in-enclave (`validate_burn_id`). Pools route only: `sourceBurnTxId` MUST equal the settling transition's RGB OpId (non-zero), and `settlementData` MUST be canonical with exact set equality of `(operationId, netAmount)` ancestry locks, strictly ascending `operationId` (no duplicates) and at least one lock. LayerZero route: these two binds do not run (Sec 7.1) |
 | P7  | referenced Bitcoin txs are in accepted chain history        | OK                                                                                                                                                               |
 | P8  | Bitcoin inclusion proofs valid against the in-enclave chain | OK; plus, on the pools route, the calldata `proof` is required (fail-closed): `source.height` is pinned to the block anchoring the consignment's last witness tx (re-verified under one lock guard), the enclave must hold a header at `latest.height`, and `latest` must be within `MAX_RELAY_TIP_LAG_BLOCKS = 100` of the enclave tip. Under `BTC_RELAY_MODE=required` (the default, and the only mode `ProductionPolicy::check_invariants` boots with) each `commitmentHash` word must equal `keccak256` of BtcRelay's 160-byte `StoredBlockHeader` that the enclave rebuilds at that height from its own chain (chainWork from the checkpoint's `chain_work`); a zero word is refused, and a record that needs a block below the checkpoint is refused (#57/#122). `BTC_RELAY_MODE=none` is for a local stand with no BtcRelay (route verifier `NullVerifier`): both words must be zero and the compare is skipped, the height/anchor/freshness binds stay. No build flag takes part in the choice |
 | P9  | corresponding EVM lock record exists for the same operation | on-chain for this direction; for EVM->RGB the enclave verifies `FundsIn` itself (Sec 7.2)                                                                         |
@@ -631,7 +633,8 @@ delegated to the receiving contract and known gaps. Enforced checks fail closed.
 The enclave signs `burnId` and the other decoded fields into the typed digest.
 A signature is not a check of their meaning. So `sourceBurnTxId`,
 `sourceAddress` and `settlementData` each have their own bind above.
-Settlement set equality does not require a unique ordering of deposit pairs.
+The strict `operationId` order gives one `settlementData` byte form per
+pair set, so a reorder cannot make a new `burnId` on the pools route.
 "Ancestry" is every `TS_BRIDGE` in the consignment, not only the mints that
 fed the burned allocation.
 End-to-end release uniqueness also depends on contract checks outside this repo
