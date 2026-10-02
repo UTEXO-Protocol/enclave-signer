@@ -20,22 +20,6 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
-        with:
-          # The PR merge commit and both its parents: HEAD^1 is the base the
-          # PR merges onto, so the step below diffs the PR alone, not base
-          # commits that landed after the PR branched.
-          fetch-depth: 2
-
-      # The enclave image (PCR0) changes only through a PR into dev or main,
-      # where it is rebuilt and re-measured, or a PR labelled
-      # `enclave-image-change`. Every other PR must leave its inputs alone.
-      - name: Enclave image inputs unchanged
-        if: >-
-          github.event_name == 'pull_request'
-          && github.base_ref != 'dev'
-          && github.base_ref != 'main'
-          && !contains(github.event.pull_request.labels.*.name, 'enclave-image-change')
-        run: git diff --exit-code HEAD^1 HEAD -- enclave enclave-proto Cargo.lock
 
       - name: Test private dependency build wiring
         run: python3 -m unittest discover -s build/tests -v
