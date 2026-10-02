@@ -954,16 +954,16 @@ mod asset_bind {
     // the rule.
 }
 
-/// A burn's release amount comes from its `MS_BURNED_ASSET` metadata
-/// ([`read_last_transition_burned_asset`]). That figure is not self-declared:
-/// the BFA burn script requires `sum(OS_ASSET inputs) == MS_BURNED_ASSET +
-/// sum(OS_ASSET outputs)`, and RGB consensus runs it on every `TS_BURN`.
+/// The release amount of a burn comes from its `MS_BURNED_ASSET` metadata
+/// ([`read_last_transition_burned_asset`]). The burner cannot set that value
+/// freely. The BFA burn script requires
+/// `sum(OS_ASSET inputs) == MS_BURNED_ASSET + sum(OS_ASSET outputs)`, and RGB
+/// consensus runs the script on each `TS_BURN`.
 ///
-/// These drive the pinned BFA schema and scripts through
-/// `Schema::validate_state` - the per-operation step `validate_consignment`
-/// runs - with the same contract-state and VM-extension types the enclave
-/// validates with. Only the transition and the state its inputs close are
-/// synthetic.
+/// These tests run the pinned BFA schema and scripts through
+/// `Schema::validate_state`, the step that `validate_consignment` runs for
+/// each operation. They use the same contract-state and VM-extension types as
+/// the enclave. Only the transition and its input state are synthetic.
 #[cfg(feature = "bfa-validation")]
 mod burn_amount_is_bound_by_consensus {
     use std::cell::RefCell;
@@ -997,9 +997,9 @@ mod burn_amount_is_bound_by_consensus {
         value
     }
 
-    /// Run consensus on one `TS_BURN` that closes `inputs` (asset units per
-    /// closed allocation), keeps `change` on new allocations and declares
-    /// `declared` in `MS_BURNED_ASSET`.
+    /// Runs consensus on one `TS_BURN`. `inputs` are the asset units of each
+    /// closed allocation, `change` goes to new allocations, and `declared` is
+    /// the `MS_BURNED_ASSET` value.
     fn validate_burn(inputs: &[u64], change: &[u64], declared: u64) -> Result<(), ValidationError> {
         let schema = BridgedFungibleAsset::schema();
         let types = BridgedFungibleAsset::types();
@@ -1023,8 +1023,8 @@ mod burn_amount_is_bound_by_consensus {
             )
             .unwrap();
 
-        // What the burn closes. A burn with no asset inputs closes a bridge
-        // right instead, since a transition needs at least one input.
+        // The state that the burn closes. A transition must have one input or
+        // more, so a burn with no asset inputs closes a bridge right.
         let mut prev_state = BTreeMap::<AssignmentType, Vec<RevealedState>>::new();
         let mut opouts = std::collections::BTreeSet::new();
         for (no, units) in inputs.iter().enumerate() {
@@ -1043,8 +1043,8 @@ mod burn_amount_is_bound_by_consensus {
                 .push(RevealedState::Void);
         }
 
-        // `Inputs` cannot be empty either: add the real inputs to its dumb
-        // value, then drop the dumb one.
+        // `Inputs` cannot be empty. Add the real inputs to its dumb value, then
+        // remove the dumb input.
         let mut inputs = Inputs::strict_dumb();
         for opout in opouts {
             inputs.push(opout).unwrap();
@@ -1057,8 +1057,8 @@ mod burn_amount_is_bound_by_consensus {
                 seal: GraphSeal::strict_dumb(),
                 state: RevealedValue::new(*units),
             };
-            // The vector type is not exported and cannot be empty: start from
-            // its one-element dumb value and overwrite that element.
+            // The vector type is not exported and cannot be empty. Start with
+            // its dumb value (one element) and replace that element.
             let mut typed = TypedAssigns::<GraphSeal>::Fungible(StrictDumb::strict_dumb());
             if let TypedAssigns::Fungible(legs) = &mut typed {
                 *legs.iter_mut().next().unwrap() = leg(&change[0]);
@@ -1110,7 +1110,7 @@ mod burn_amount_is_bound_by_consensus {
         }
     }
 
-    /// The honest shapes: everything burned, and a partial burn with change.
+    /// Valid burns: a full burn, and a partial burn with change.
     #[test]
     fn accepts_a_burn_that_declares_what_it_destroyed() {
         validate_burn(&[1_000], &[], 1_000).expect("full burn");
@@ -1118,26 +1118,26 @@ mod burn_amount_is_bound_by_consensus {
         validate_burn(&[1_000], &[600], 400).expect("partial burn with change");
     }
 
-    /// The scenario of the finding: destroy 1 unit, declare 1_000_000.
+    /// The burn destroys 1 unit and declares 1_000_000.
     #[test]
     fn rejects_a_burn_that_declares_more_than_it_destroyed() {
         assert_burn_mismatch(validate_burn(&[1], &[], 1_000_000));
         assert_burn_mismatch(validate_burn(&[1_000], &[], 1_001));
     }
 
-    /// Declaring the whole input while keeping change is the same inflation.
+    /// The burn keeps change but declares the full input as burned.
     #[test]
     fn rejects_a_burn_that_declares_its_change_as_burned() {
         assert_burn_mismatch(validate_burn(&[1_000], &[600], 1_000));
     }
 
-    /// A burn that closes no asset allocation cannot declare a positive burn.
+    /// A burn with no asset inputs cannot declare a burned amount.
     #[test]
     fn rejects_a_burn_with_no_asset_inputs() {
         assert_burn_mismatch(validate_burn(&[], &[], 1_000));
     }
 
-    /// The other direction: units cannot vanish without being declared.
+    /// The burn destroys more units than it declares.
     #[test]
     fn rejects_a_burn_that_declares_less_than_it_destroyed() {
         assert_burn_mismatch(validate_burn(&[1_000], &[], 999));
