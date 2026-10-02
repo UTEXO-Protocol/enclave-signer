@@ -727,8 +727,8 @@ Known limits. Read them before deployment.
 - **Build reproducibility.** The private RGB mirrors need credentials. CI,
   CD and EIF workflows use per-repository deploy keys. Docker builds mount
   credentials as BuildKit secrets. OS package versions are not pinned.
-  Images that leave gas limits or RGB unowned-sats budgets unset refuse the
-  matching signing path.
+  The supplied images leave the gas limits and `RGB_MAX_UNOWNED_SATS` unset,
+  so the gas and mint PSBT paths refuse until a rebuilt image sets them.
 - **Protocol integration.** BFA burns and chained mints need
   `mint_ancestors`. The enclave and the parent pin the same vendored schema.
   Clients must send its required fields.

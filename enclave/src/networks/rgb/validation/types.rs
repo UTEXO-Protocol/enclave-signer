@@ -116,8 +116,8 @@ pub struct TransitionSummary {
     /// Empty for a Burn.
     pub outputs: Vec<TransitionOutput>,
     /// Asset units that this transition destroys, from the BFA
-    /// `MS_BURNED_ASSET` metadata. The schema allows `Some(0)`, but the EVM
-    /// cross-check requires a positive value to sign an unlock.
+    /// `MS_BURNED_ASSET` metadata. The schema allows `Some(0)`. The enclave
+    /// does not reject zero. It only requires the calldata amount to equal it.
     ///
     /// `None` for a non-burn, or for a malformed burn (rgbstd rejects it).
     pub burned_asset_amount: Option<u64>,

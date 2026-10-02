@@ -250,10 +250,10 @@ Other builds stay in the tree. They are not the production bridge:
 
 ```bash
 # Combined (what build/Dockerfile.enclave ships). Uses the retired swap flow.
-cargo build --release -p utexo-bridge-enclave --no-default-features --features vsock,rgb,rgb-swap,ccd,evm-rpc
+cargo build --release -p utexo-bridge-enclave --no-default-features --features vsock,rgb,rgb-swap,ccd,bfa-validation
 
 # RGB send/receive (swap) only. Retired flow.
-cargo build --release -p utexo-bridge-enclave --no-default-features --features vsock,rgb,rgb-swap,evm-rpc
+cargo build --release -p utexo-bridge-enclave --no-default-features --features vsock,rgb,rgb-swap,bfa-validation
 
 # Concordium only
 cargo build --release -p utexo-bridge-enclave --no-default-features --features vsock,ccd
@@ -360,7 +360,7 @@ same PCR0 without knowing them.
 RUST_LOG=debug cargo run -p utexo-bridge-enclave
 
 # Parent gRPC server (GRPC_PORT defaults to 5000; pick another port when both run on one host)
-RUST_LOG=debug GRPC_PORT=50051 cargo run --manifest-path parent/Cargo.toml
+RUST_LOG=debug GRPC_PORT=50051 GRPC_ALLOW_INSECURE_LOOPBACK=true cargo run --manifest-path parent/Cargo.toml
 
 # CLI (shell function works in bash and zsh)
 cli() { cargo run --manifest-path parent/Cargo.toml --bin utexo-bridge-parent-cli -- "$@"; }
@@ -393,7 +393,10 @@ cli --addr vsock://16:5000 set-endpoints --electrum-url ssl://<electrum-host>:50
   --evm-rpc-host <EVM_RPC_HOST> --evm-rpc-tls-port 443 --evm-rpc-ca-der-file ca.der \
   --kms-key-arn <KMS_KEY_ARN> --kms-region <KMS_REGION> --kms-seed-id <KMS_SEED_ID>   # mint only
 
-GRPC_HOST=0.0.0.0 GRPC_PORT=50051 USE_VSOCK=true ENCLAVE_VSOCK_CID=16 ./utexo-bridge-parent
+GRPC_HOST=0.0.0.0 GRPC_PORT=50051 USE_VSOCK=true ENCLAVE_VSOCK_CID=16 \
+  GRPC_TLS_CERT_FILE=server.pem GRPC_TLS_KEY_FILE=server.key \
+  GRPC_TLS_CLIENT_CA_FILE=client-ca.pem GRPC_TLS_ACL_FILE=clients.acl \
+  ./utexo-bridge-parent
 ```
 
 `deploy/deploy-host.sh` installs the systemd units for a three-enclave host:
@@ -531,7 +534,7 @@ from the poll log. It also carries the parent's header sync:
 (a build with no header chain) or `unconfigured` (no `HEADER_ELECTRUM_URL`).
 It does not change the HTTP code. A rolling restart waits for `synced`, or
 `off`, before it moves to the next CID. Production binds it per parent on `50061` / `50062` /
-`50063` (`deploy/deploy-host.sh`); the Docker image wires the same probe into a
+`50063` (`deploy/deploy-host.sh`, stage); the Docker image wires the same probe into a
 `HEALTHCHECK`, so `docker inspect` reports it.
 
 This is an operations probe, not part of the signing API. It is loopback-only

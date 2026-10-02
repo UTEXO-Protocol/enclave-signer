@@ -121,8 +121,8 @@ jobs:
       - name: Test (parent)
         run: cargo test --manifest-path parent/Cargo.toml
 
-      # Production build profile: the exact feature set shipped in the EIF
-      # (build/Dockerfile.enclave). `helios` is not shipped.
+      # Combined build profile: the feature set of build/Dockerfile.enclave
+      # (retired swap flow, not production). `helios` is not shipped.
       - name: Build (production combo)
         run: cargo build -p utexo-bridge-enclave --features vsock,rgb,rgb-swap,ccd,bfa-validation
 

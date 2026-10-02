@@ -23,7 +23,7 @@ fn main() {
     let state = EnclaveState::new(bootstrap::resolve_bitcoin_network(&bitcoin_network_str));
 
     // Pinned bridge config. Committed in attestation `user_data` and checked on
-    // every SignEvm.
+    // every signing request.
     let bridge_config = BridgeConfig::from_env();
     bootstrap::log_bridge_config(&bridge_config);
 

@@ -4,9 +4,9 @@ name: "Build EIF"
 # publishes everything to S3 under an immutable git-SHA path. Runtime hosts then
 # pull the EIF by SHA instead of anyone building on a side machine.
 #
-# Builds three variants (matrix): the combined rgb+ccd image (historical name +
-# S3 path, unchanged), an RGB-only image (eif/<sha>/rgb/), and a Concordium-only
-# image (eif/<sha>/ccd/). Deploy whichever the target host needs.
+# Builds five variants (matrix): combined (historical name + S3 path,
+# unchanged), rgb (swap), rgb-mint and rgb-burn (production), and ccd.
+# Deploy whichever the target host needs.
 #
 # Reproducible PCRs: PCR0/PCR1 are a measurement of the EIF, which bakes in the
 # nitro-cli kernel/init blobs — NOT just our code. We therefore pin nitro-cli to

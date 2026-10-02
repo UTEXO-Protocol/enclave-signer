@@ -31,7 +31,7 @@ ENV CARGO_INCREMENTAL=0 \
 # (EVM_RPC_VSOCK_PORT, default 8002).
 #
 # `helios` is deliberately NOT enabled: the light-client path is unused in
-# production, so the attested evm_source is RawRpc.
+# production, so the attested evm_source is PinnedTlsRpc.
 #
 # `burn-signer` (implies `bfa-mint` -> the mint/burn flow + BFA validation)
 # builds the RGB -> EVM direction only: it signs the `fundsOut` release for a
@@ -74,7 +74,7 @@ RUN chmod +x /app/utexo-bridge-enclave /app/entrypoint.sh
 # NOTE: the donor cloning secret is intentionally NOT baked here. It is
 # delivered at runtime via the `InitializeKey` message (CLI: `init
 # --cloning-secret <secret>`), so it never lands in the EIF / image layers and
-# the PCRs stay reproducible. See enclave/src/server.rs (handle_initialize).
+# the PCRs stay reproducible. See enclave/src/server/keys.rs (handle_initialize).
 
 # Pinned bridge/indexer config - identical to Dockerfile.enclave; keep the two in
 # lockstep. `rgb` implies `spv` + `rgb-validation`, so this is a release
@@ -89,7 +89,7 @@ RUN chmod +x /app/utexo-bridge-enclave /app/entrypoint.sh
 # *entry* contract that emits FundsIn (FUNDS_IN_CONTRACT, set below).
 # The BFA asset id is a BUILD ARG with no default, unlike every other image
 # here: each BFA contract id is per-deployment, and baking
-# the swap asset would make this enclave refuse every mint at
+# the swap asset would make this enclave refuse every burn at
 # `networks/rgb/mod.rs` after the EVM RPC has already been paid. Empty leaves
 # the config partially pinned, which `policy.rs` refuses at boot.
 #   --build-arg RGB_ASSET_ID=rgb:<the issued BFA contract id>

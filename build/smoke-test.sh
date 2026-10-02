@@ -12,7 +12,7 @@
 #   ./smoke-test.sh --vsock             # vsock mode (production, CID 16 port 5000)
 #
 # Prerequisites:
-#   - utexo-bridge-parent binary on PATH or in current directory
+#   - utexo-bridge-parent-cli binary on PATH or in current directory
 #   - Enclave running (either TCP dev mode or Nitro vsock)
 # =============================================================================
 set -euo pipefail

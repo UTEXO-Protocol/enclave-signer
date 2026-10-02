@@ -32,7 +32,7 @@ flowchart TB
     EvmRpc{{EVM JSON-RPC}}
 
     V -->|"gRPC GRPC_PORT<br/>AttestedPublicKey(nonce)"| Parent
-    L -->|"gRPC GRPC_PORT<br/>Sign / PublicKey / SubmitHeaders ..."| Parent
+    L -->|"gRPC GRPC_PORT<br/>Sign / PublicKey / AttestedPublicKey ..."| Parent
     Cli -->|"direct enclave RPC (ops only)<br/>TCP host:port or vsock://cid:5000"| ENCL
 
     Parent -->|"vsock CID:5000<br/>u32 LE len + EnclaveRequest /<br/>u32 LE len + EnclaveResponse"| ENCL

@@ -10,7 +10,7 @@
 //! - `btc_ownership.rs`: proves that the enclave controls an output or input script.
 //! - `spv/`: the in-enclave Bitcoin header chain and Merkle verifier.
 //! - `spv_crosscheck.rs`: anchors consignment witness txs in that chain.
-//! - `signing/`: the low-level segwit and taproot input signers.
+//! - `signing/`: the low-level BIP-86 key-path taproot input signer.
 //! - `flow/`: the per-flow rules (send/receive vs mint/burn).
 //! - `invoice.rs`: the send-RGB recipient bind.
 

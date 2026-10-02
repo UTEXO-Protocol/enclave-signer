@@ -22,7 +22,7 @@ flowchart TB
     %% attestation-verify shared crate
     subgraph ATTV [attestation-verify crate — shared]
         AV[verify_attestation<br/>COSE_Sign1, alg pinned ES384, raw 96-byte sig,<br/>cert chain + CA constraints + PCR0/1/2]
-        AVPol[policy.rs<br/>AttestedPolicy — canonical policy<br/>commitment encoding v2]
+        AVPol[policy.rs<br/>AttestedPolicy - canonical policy<br/>commitment encoding v7]
         AVMock[verify_mock_attestation<br/>feature 'mock']
         Root[Embedded AWS Nitro<br/>root CA PEM]
     end
@@ -83,7 +83,7 @@ flowchart TB
     VPe[(host vsock-proxy<br/>port 8002)]
 
     %% Wires
-    L -->|"gRPC parent.ParentService<br/>Sign (data_type TRANSACTION /<br/>EVM_GAS_TX / BTC_UTXO; EVM / RGB / CCD payload) /<br/>PublicKey / Initialize / Clone /<br/>SubmitHeaders / GetLastSavedBlock /<br/>AttestedPublicKey"| PMain
+    L -->|"gRPC parent.ParentService<br/>Sign (data_type TRANSACTION /<br/>EVM_GAS_TX / BTC_UTXO; EVM / RGB / CCD payload) /<br/>PublicKey / Clone /<br/>GetLastSavedBlock /<br/>AttestedPublicKey"| PMain
     Op --> PCli
     V --> AVCli
     PCli --> PClient
