@@ -5,7 +5,7 @@
 
 use crate::config::BtcRelayMode;
 use crate::error::{EnclaveError, Result};
-use crate::networks::evm::validation::FundsOutParams;
+use crate::networks::evm::validation::ReleaseIdentity;
 use crate::networks::rgb::spv::HeaderChain;
 use crate::networks::rgb::spv_crosscheck;
 use crate::networks::rgb::spv_crosscheck::ChainPins;
@@ -44,10 +44,10 @@ pub fn assert_witnesses_confirmed(validated: &ValidatedConsignment) -> Result<()
 /// Both come from [`crate::networks::rgb::flow::funds_out_source_amount`],
 /// which also builds the route proof. Thus the two agree on the transition.
 ///
-/// `FundsOutParams` exists only after a successful `fundsOut` decode, so no
-/// selector check is necessary.
+/// `ReleaseIdentity` exists only after a successful `fundsOut` or
+/// `lzFundsOut` decode, so no selector check is necessary.
 pub fn validate_funds_out_amount(
-    params: &FundsOutParams,
+    release: &ReleaseIdentity,
     validated: &ValidatedConsignment,
 ) -> Result<()> {
     use crate::networks::rgb::flow;
@@ -61,7 +61,7 @@ pub fn validate_funds_out_amount(
     // on the RGB amount.
     let source_amount = flow::funds_out_source_amount(last)?;
 
-    let calldata_amount: u64 = params
+    let calldata_amount: u64 = release
         .amount
         .try_into()
         .map_err(|_| EnclaveError::CrossCheck("fundsOut amount exceeds u64 range".into()))?;
@@ -69,8 +69,10 @@ pub fn validate_funds_out_amount(
     flow::assert_funds_out_amount(source_amount, calldata_amount)
 }
 
-/// Payout bind for the `fundsOut` burn flow: the burner's target
-/// (`MS_BURN_RECIPIENT`) must equal the calldata `recipient`.
+/// Payout bind for the burn flow: the burner's target (`MS_BURN_RECIPIENT`)
+/// must equal the final payee. That is the `fundsOut` `recipient`, or the
+/// `lzFundsOut` LayerZero `recipient`. `dstEid` is not bound: the burn does not
+/// name a chain.
 ///
 /// This makes a redemption unforgeable. The 32 bytes are in the burn
 /// operation, so its OpId covers them and the spender of the burned units signs
@@ -81,7 +83,7 @@ pub fn validate_funds_out_amount(
 /// anything that is not a `Burn` that covers the released amount.
 #[cfg(feature = "rgb-mint-burn")]
 pub fn validate_funds_out_burn_recipient(
-    params: &FundsOutParams,
+    release: &ReleaseIdentity,
     validated: &ValidatedConsignment,
 ) -> Result<()> {
     let last = validated.last_transition.as_ref().ok_or_else(|| {
@@ -106,11 +108,11 @@ pub fn validate_funds_out_burn_recipient(
             hex::encode(recipient)
         )));
     }
-    if recipient[12..] != params.recipient.as_slice()[..] {
+    if recipient != release.recipient.as_slice() {
         return Err(EnclaveError::CrossCheck(format!(
-            "recipient mismatch: burn commits to 0x{}, calldata releases to {}",
-            hex::encode(&recipient[12..]),
-            params.recipient
+            "recipient mismatch: burn commits to 0x{}, calldata releases to 0x{}",
+            hex::encode(recipient),
+            hex::encode(release.recipient)
         )));
     }
 
@@ -130,7 +132,7 @@ pub fn validate_funds_out_burn_recipient(
 /// `op_id` is the 64-char hex form of the 32-byte OpId. The calldata word must
 /// equal those bytes.
 pub fn validate_funds_out_source_burn_tx_id(
-    params: &FundsOutParams,
+    release: &ReleaseIdentity,
     validated: &ValidatedConsignment,
 ) -> Result<()> {
     let last = validated.last_transition.as_ref().ok_or_else(|| {
@@ -140,7 +142,7 @@ pub fn validate_funds_out_source_burn_tx_id(
     })?;
 
     let expected = decode_op_id_to_bytes32(&last.op_id)?;
-    let cited: [u8; 32] = params.sourceBurnTxId.0;
+    let cited: [u8; 32] = release.source_burn_tx_id;
 
     // The Bridge also rejects zero (`ZeroSourceBurnTxId`). Refuse here, so the
     // enclave does not attest an intent that cannot settle.
@@ -195,7 +197,7 @@ fn decode_op_id_to_bytes32(op_id: &str) -> Result<[u8; 32]> {
 /// set refuses: each signable asset is bridged, so such a burn settles nothing.
 #[cfg(feature = "bfa-mint")]
 pub fn validate_funds_out_settlement(
-    params: &FundsOutParams,
+    release: &ReleaseIdentity,
     locks: &[crate::networks::evm::events::VerifiedLock],
 ) -> Result<()> {
     use alloy_primitives::{B256, U256};
@@ -211,7 +213,7 @@ pub fn validate_funds_out_settlement(
         ));
     }
 
-    let decoded: Settlement = Settlement::abi_decode_params_validate(&params.settlementData)
+    let decoded: Settlement = Settlement::abi_decode_params_validate(&release.settlement_data)
         .map_err(|e| {
             EnclaveError::CrossCheck(format!("fundsOut settlementData does not decode: {e}"))
         })?;
@@ -223,7 +225,7 @@ pub fn validate_funds_out_settlement(
             amounts.len()
         )));
     }
-    if decoded.abi_encode_params() != params.settlementData.as_ref() {
+    if decoded.abi_encode_params() != release.settlement_data {
         return Err(EnclaveError::CrossCheck(
             "fundsOut settlementData is not canonically encoded".into(),
         ));
@@ -303,14 +305,14 @@ struct ProofBlock {
 /// proof again. The commitment checks run last, because they sum the work of
 /// each header above the checkpoint.
 pub fn verify_btc_relay_agreement(
-    params: &FundsOutParams,
+    release: &ReleaseIdentity,
     validated: &ValidatedConsignment,
     merkle_proofs: &[MerkleProofEntry],
     chain: &HeaderChain,
     pins: &ChainPins,
     mode: BtcRelayMode,
 ) -> Result<()> {
-    let (source, latest) = decode_funds_out_proof(params)?;
+    let (source, latest) = decode_funds_out_proof(release)?;
 
     // The tip cannot be below the block it buries. Check it here for a clear
     // error, not a header-lookup failure.
@@ -587,8 +589,8 @@ const MAX_RELAY_TIP_LAG_BLOCKS: u32 = crate::networks::rgb::spv::chain::MAX_REOR
 
 /// Decodes the `fundsOut` `proof` slot into its `(source, latest)` block pair.
 /// An empty slot is refused, because the anchor then has nothing to bind to.
-fn decode_funds_out_proof(params: &FundsOutParams) -> Result<(ProofBlock, ProofBlock)> {
-    let proof = &params.proof;
+fn decode_funds_out_proof(release: &ReleaseIdentity) -> Result<(ProofBlock, ProofBlock)> {
+    let proof = &release.proof;
     if proof.is_empty() {
         return Err(EnclaveError::CrossCheck(
             "fundsOut proof is empty: the calldata must carry the finality proof - \

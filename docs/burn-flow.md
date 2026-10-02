@@ -177,11 +177,13 @@ Both routes:
   `EVM_CHAIN_ID` and `TOKEN_CONTRACT`, and the calldata fields. The calldata
   `burnId` must be equal.
 
-Pools route (`fundsOut`) only:
+Both routes (`fundsOut` and `lzFundsOut`):
 
 - **B5.5** Amount: `MS_BURNED_ASSET` must **equal** the calldata `amount`.
 - **B5.6** Recipient: `MS_BURN_RECIPIENT` must be 32 bytes. The high 12 bytes
-  must be zero. The low 20 bytes must equal the calldata `recipient`.
+  must be zero. It must equal the final payee: the calldata `recipient`,
+  left-padded, on the pools route, or the LayerZero `recipient` on the
+  LayerZero route.
 - **B5.7** Burn id: `sourceBurnTxId` must not be zero. It must equal the
   OpId of the burn transition.
 - **B5.8** Settlement: `settlementData` is
@@ -200,10 +202,10 @@ Pools route (`fundsOut`) only:
   - With `BTC_RELAY_MODE=none` (local stand only), both words must be zero.
     A production policy does not boot in this mode.
 
-> **Warning - LayerZero route.** B5.5 to B5.9 do not run on the `lzFundsOut`
-> route. On that route the enclave checks the LayerZero fields
-> (`dst_eid`, `min_amount_ld`, `recipient`) against the request, not against
-> the burn. See [spec Sec 13](tee-spec.md#13-implementation-status).
+> **Warning - LayerZero route.** The burn does not name a destination chain,
+> so `dst_eid` is not bound to the burn. The enclave checks `dst_eid` and
+> `min_amount_ld` against the request only. See
+> [spec Sec 13](tee-spec.md#13-implementation-status).
 
 ### Stage 6 - Sign
 
@@ -251,7 +253,7 @@ chain:
 - the `MultisigProxy` nonce is in the signed digest;
 - the Bridge refuses a `burnId` that it used before.
 
-On the pools route, `burnId` is bound to the burn through B5.7 and B5.8.
+On both routes, `burnId` is bound to the burn through B5.7 and B5.8.
 
 ## 8. What the burn signer refuses
 

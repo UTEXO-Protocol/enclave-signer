@@ -212,7 +212,7 @@ pub(super) fn handle_sign(
             if let SourceNetwork::RgbSource(rgb_source) = source_ref {
                 apply_funds_out_binding(
                     ctx,
-                    destination_proof.evm_funds_out.as_ref(),
+                    release,
                     source_validated.rgb_consignment.as_ref(),
                     &rgb_source.merkle_proofs,
                     &chain_pins,
@@ -264,24 +264,19 @@ fn check_signer_role(source: &SourceNetwork, destination: &DestinationNetwork) -
     Ok(())
 }
 
-/// Bind RGB->EVM `fundsOut` calldata to the validated consignment before
-/// signing. No-op for other calldata.
+/// Bind RGB->EVM release calldata to the validated consignment before
+/// signing. It runs on both routes, `fundsOut` and `lzFundsOut` (#264).
 /// Backend-supplied bridge operation ids are validated, not rewritten.
 #[cfg(all(feature = "rgb-validation", rgb_to_evm))]
 fn apply_funds_out_binding(
     ctx: &ServerContext,
-    params: Option<&crate::networks::evm::validation::FundsOutParams>,
+    release: &crate::networks::evm::validation::ReleaseIdentity,
     validated: Option<&crate::networks::rgb::validation::ValidatedConsignment>,
     merkle_proofs: &[crate::proto::MerkleProofEntry],
     pins: &crate::networks::rgb::spv_crosscheck::ChainPins,
     #[cfg(feature = "bfa-mint")] locks: &[crate::networks::evm::events::VerifiedLock],
 ) -> Result<()> {
     use crate::networks::evm::crosscheck;
-
-    // `Some` only when destination validation decoded `fundsOut` calldata.
-    let Some(params) = params else {
-        return Ok(());
-    };
 
     // A `fundsOut` release needs the validated RGB source consignment
     // (RgbSource, rgb_validator set, consignment present).
@@ -312,7 +307,7 @@ fn apply_funds_out_binding(
             .lock()
             .map_err(|e| EnclaveError::Internal(format!("SPV header chain lock poisoned: {e}")))?;
         crosscheck::verify_btc_relay_agreement(
-            params,
+            release,
             validated,
             merkle_proofs,
             &chain,
@@ -323,28 +318,28 @@ fn apply_funds_out_binding(
 
     // Consignment-bound release amount for the RGB flow of this build
     // (`rgb-swap` = Transfer, `rgb-mint-burn` = Burn).
-    crosscheck::validate_funds_out_amount(params, validated)?;
+    crosscheck::validate_funds_out_amount(release, validated)?;
 
     // Burn identity (bridge PR #152). `sourceBurnTxId` is the only `burnId`
     // input that names the settled RGB operation. The contract trusts the
     // enclave for it. Bind it to the OpId of the settling transition.
     // `validate_rgb_source_identity` in `handle_sign` binds
     // `sourceChainId` / `sourceAddress` before this.
-    crosscheck::validate_funds_out_source_burn_tx_id(params, validated)?;
+    crosscheck::validate_funds_out_source_burn_tx_id(release, validated)?;
 
     // A burn settles a redemption. Thus it also binds the payout target to
     // the 32 bytes that the burner committed to (`MS_BURN_RECIPIENT`).
     // `validate_funds_out_amount` already refused all non-burns, so no
     // runtime type test is necessary.
     #[cfg(feature = "rgb-mint-burn")]
-    crosscheck::validate_funds_out_burn_recipient(params, validated)?;
+    crosscheck::validate_funds_out_burn_recipient(release, validated)?;
 
     // Settlement bind (spec P6). The deposits in `settlementData` must be
     // exactly the verified locks of the burn mint ancestry. On-chain `burnId`
     // also hashes `settlementData`. Thus the backend cannot get a second
     // `burnId` for one burn with other deposits.
     #[cfg(feature = "bfa-mint")]
-    crosscheck::validate_funds_out_settlement(params, locks)?;
+    crosscheck::validate_funds_out_settlement(release, locks)?;
 
     Ok(())
 }
