@@ -1064,6 +1064,75 @@ mod asset_bind {
         );
     }
 
+    /// The enclave finds the settling transition two times. The flat parser
+    /// gives its OpId, which becomes `sourceBurnTxId`. The rgbstd walk gives
+    /// the burned amount, the recipient and the witness tx. A consignment for
+    /// which the two walks pick different burns would mix the OpId of one burn
+    /// with the amount and recipient of a different burn.
+    ///
+    /// The host controls only the order of the bundles in the bytes. This test
+    /// serializes the fixture in each order of its three bundles. The two
+    /// walks always pick the same transition. RGB consensus accepts only the
+    /// original order, because in each other order a transition comes before
+    /// the state that it spends.
+    #[test]
+    #[cfg(feature = "bfa-validation")]
+    fn the_two_walks_pick_the_same_transition_in_every_bundle_order() {
+        let original = Transfer::load(Cursor::new(BFA_BURN_FIXTURE)).expect("load BFA fixture");
+        let bundles: Vec<_> = original.bundles.iter().cloned().collect();
+        assert_eq!(bundles.len(), 3, "one mint and two burns");
+        let validator = RgbValidator::new(spawn_stub_esplora(), "signet").expect("validator");
+        let events = fixture_mint_events();
+
+        for order in [
+            [0, 1, 2],
+            [0, 2, 1],
+            [1, 0, 2],
+            [1, 2, 0],
+            [2, 0, 1],
+            [2, 1, 0],
+        ] {
+            let mut transfer = original.clone();
+            transfer.bundles = Default::default();
+            transfer
+                .bundles
+                .extend(order.iter().map(|i| bundles[*i].clone()))
+                .expect("three bundles fit");
+            let mut bytes = Vec::new();
+            transfer
+                .save(&mut bytes)
+                .expect("serialize the consignment");
+
+            let (_, _, flat_last, _) = extract_transition_summary(&bytes).expect("flat parse");
+            let flat_opid = flat_last.expect("flat last transition").op_id;
+
+            let reloaded = Transfer::load(Cursor::new(&bytes)).expect("reload");
+            let rgbstd_opid = reloaded
+                .bundles
+                .iter()
+                .last()
+                .and_then(|wb| wb.bundle().known_transitions.iter().last())
+                .map(|known| known.opid.to_string())
+                .expect("rgbstd last transition");
+
+            assert_eq!(
+                flat_opid, rgbstd_opid,
+                "bundle order {order:?}: the two walks pick different transitions"
+            );
+
+            let result = validator.validate_consignment(&bytes, &events);
+            if order == [0, 1, 2] {
+                result.expect("the original order passes RGB consensus");
+            } else {
+                let err = result.expect_err("a different bundle order must be refused");
+                assert!(
+                    err.to_string().contains("references previous state"),
+                    "bundle order {order:?}: expected an ordering failure, got: {err}"
+                );
+            }
+        }
+    }
+
     // No end-to-end test for an empty validated contract_id.
     // `validate_consignment` derives it from the genesis, so it is never
     // empty. `asset_binding_rule::rejects_empty_validated_contract_id` covers
