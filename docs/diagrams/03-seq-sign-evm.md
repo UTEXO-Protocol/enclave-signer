@@ -76,7 +76,7 @@ sequenceDiagram
     Srv->>Cx: validate_funds_out_amount:<br/>last transition == TS_BURN AND<br/>burned amount == calldata amount
     Srv->>Cx: validate_funds_out_source_burn_tx_id:<br/>calldata sourceBurnTxId == last transition OpId (non-zero)
     Srv->>Cx: validate_funds_out_burn_recipient:<br/>MS_BURN_RECIPIENT[12..] == calldata recipient
-    Srv->>Cx: validate_funds_out_settlement:<br/>settlementData (operationIds, netAmounts) ==<br/>BridgeFundsIn records of the verified ancestry locks,<br/>set equality, canonical, non-empty
+    Srv->>Cx: validate_funds_out_settlement:<br/>settlementData (operationIds, netAmounts) ==<br/>BridgeFundsIn records of the verified ancestry locks,<br/>set equality, strictly ascending operationId,<br/>canonical, non-empty
     Note right of Cx: LayerZero route: none of step 4 runs.<br/>Amount (≥ only), recipient, sourceBurnTxId,<br/>settlementData and BtcRelay are NOT bound (spec Sec 7.1).
     Cx-->>Srv: Ok / CrossCheck err
 

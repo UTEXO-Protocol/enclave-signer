@@ -191,8 +191,11 @@ fn decode_op_id_to_bytes32(op_id: &str) -> Result<[u8; 32]> {
 /// equal that ancestry, pair for pair. Thus a second release of the same burn
 /// cannot cite other deposits to get a new `burnId`.
 ///
-/// Set equality, any order, no duplicates, canonical encoding. An empty lock
-/// set refuses: each signable asset is bridged, so such a burn settles nothing.
+/// Exact set equality, canonical encoding, and strictly ascending
+/// `operationId` order. `burnId` hashes the raw bytes, so a second order of
+/// the same pairs would give a second `burnId` (F05-NEW-AF-04). The strict
+/// order also refuses duplicates. An empty lock set refuses: each signable
+/// asset is bridged, so such a burn settles nothing.
 #[cfg(feature = "bfa-mint")]
 pub fn validate_funds_out_settlement(
     params: &FundsOutParams,
@@ -229,17 +232,21 @@ pub fn validate_funds_out_settlement(
         ));
     }
 
-    let mut cited: Vec<([u8; 32], U256)> = ids
+    // One byte form per pair set. The bridge sorts the same way
+    // (`sortSettlementPairs`), and so does `bytes32 <` in Solidity.
+    if ids.windows(2).any(|w| w[0] >= w[1]) {
+        return Err(EnclaveError::CrossCheck(
+            "fundsOut settlementData operationIds are not strictly ascending (reordered or \
+             repeated deposit) - refusing to sign"
+                .into(),
+        ));
+    }
+
+    let cited: Vec<([u8; 32], U256)> = ids
         .iter()
         .zip(amounts.iter())
         .map(|(id, amount)| (id.0, *amount))
         .collect();
-    cited.sort();
-    if cited.windows(2).any(|w| w[0].0 == w[1].0) {
-        return Err(EnclaveError::CrossCheck(
-            "fundsOut settlementData cites the same deposit twice".into(),
-        ));
-    }
 
     let mut expected: Vec<([u8; 32], U256)> = locks
         .iter()
