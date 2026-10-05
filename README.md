@@ -216,9 +216,10 @@ maps it to `FAILED_PRECONDITION`), `2` not ready, `1` all other errors.
 - **Rust 1.96.1** - pinned in `rust-toolchain.toml`. The exact patch version
   matters for reproducible PCR0.
 - **SSH deploy keys** - the workspace currently pins the RGB crates to private
-  BFA mirrors (`rgb-consensus-s-bfa`, `rgb-ops-s-bfa`, `rgb-schemas-s-bfa`,
-  `consignment-utils`) through the `github-rgb-*` SSH host aliases in
-  `Cargo.toml`. Every build, including the enclave, needs read access to them.
+  BFA mirrors (`rgb-consensus-s-bfa`, `rgb-ops-s-bfa`, `rgb-schemas-s-bfa`)
+  through the `github-rgb-*` SSH host aliases in `Cargo.toml`. Every build,
+  including the enclave, needs read access to them. `consignment-utils` is
+  public and is fetched over HTTPS without a key.
   The parent additionally needs `federated-signer-proto`. CI wires the aliases
   in `.github/workflows/ci.yml`; copy that `~/.ssh/config` shape locally.
   Until the mirrors are public again, PCR0 is reproducible only by key holders.
@@ -314,15 +315,15 @@ docker build --secret id=github_token,env=GITHUB_TOKEN \
 PRIVATE_DEPS_DIR=/absolute/path/to/private-deps ./build/build-enclave.sh
 ```
 
-The key directory contains `consignment_key`, `consensus_key`, `ops_key`, and
-`schemas_key`; parent builds also need `federated_key`. Keep it outside the
+The key directory contains `consensus_key`, `ops_key`, and `schemas_key`;
+parent builds also need `federated_key`. Keep it outside the
 checkout, with directory mode `700` and key files `600`. For a direct Docker
 build with keys, pass each file as `--secret id=<name>,src=<absolute-path>`.
 `make build_*` uses the token option by default; `DOCKER_AUTH_ARGS` can override
 it with those key-file arguments.
 
-CD and EIF workflows reuse the five deploy-key secrets configured for Rust CI:
-`RGB_CONSIGNMENT_PARSER_DEPLOY_KEY`, `RGB_CONSENSUS_BFA_DEPLOY_KEY`,
+CD and EIF workflows reuse the four deploy-key secrets configured for Rust CI:
+`RGB_CONSENSUS_BFA_DEPLOY_KEY`,
 `RGB_OPS_BFA_DEPLOY_KEY`, `RGB_SCHEMAS_BFA_DEPLOY_KEY`, and
 `FEDERATED_SIGNER_PROTO_DEPLOY_KEY`. The workflow's automatic `GITHUB_TOKEN`
 is used for image publishing, not cross-repository dependency access.

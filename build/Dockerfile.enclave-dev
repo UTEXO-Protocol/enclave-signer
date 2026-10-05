@@ -33,7 +33,6 @@ WORKDIR /build/enclave
 # `rgb-swap` is the RGB flow this dev image carries; `--no-default-features`
 # drops it along with the rest of the default set, so it must be named.
 RUN --mount=type=secret,id=github_token \
-    --mount=type=secret,id=consignment_key \
     --mount=type=secret,id=consensus_key \
     --mount=type=secret,id=ops_key \
     --mount=type=secret,id=schemas_key \

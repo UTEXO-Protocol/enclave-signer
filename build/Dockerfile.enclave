@@ -41,7 +41,6 @@ ENV CARGO_INCREMENTAL=0 \
 # Leave this argument empty for production builds. (F03-AF-12)
 ARG ENCLAVE_DEBUG_FEATURES=""
 RUN --mount=type=secret,id=github_token \
-    --mount=type=secret,id=consignment_key \
     --mount=type=secret,id=consensus_key \
     --mount=type=secret,id=ops_key \
     --mount=type=secret,id=schemas_key \

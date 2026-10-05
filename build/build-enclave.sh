@@ -41,7 +41,7 @@
 #   NITRO_CLI_BLOBS        override blobs dir for `nitro-cli build-enclave`
 #   GITHUB_TOKEN           token with read access to the private RGB dependencies
 #   PRIVATE_DEPS_DIR       alternatively, directory of per-repository key files
-#                          (consignment_key, consensus_key, ops_key, schemas_key)
+#                          (consensus_key, ops_key, schemas_key)
 # NOTE: the donor cloning secret is NOT baked into the EIF. It is delivered at
 # runtime via the InitializeKey message (CLI: `init --cloning-secret <secret>`),
 # keeping the build secret-free and the PCRs reproducible.
@@ -79,7 +79,7 @@ SECRET_ARGS=()
 if [ -n "${GITHUB_TOKEN:-}" ]; then
     SECRET_ARGS=(--secret "id=github_token,env=GITHUB_TOKEN")
 elif [ -n "${PRIVATE_DEPS_DIR:-}" ]; then
-    for key in consignment_key consensus_key ops_key schemas_key; do
+    for key in consensus_key ops_key schemas_key; do
         [ -s "$PRIVATE_DEPS_DIR/$key" ] || {
             echo "Error: missing private dependency key file: $key" >&2
             exit 1
