@@ -30,7 +30,7 @@ use rgbstd::schema::TransitionType;
 /// Also returns the validated OpId of that transition, from the rgbstd bundle,
 /// not the flat parser.
 ///
-/// Returns `(None, None)` only for a transfer with no bundles, which rgbstd
+/// Returns `(None, None)` for a transfer with no bundles, which rgbstd
 /// rejects.
 pub(super) fn read_last_transfer_witness(
     transfer: &Transfer,

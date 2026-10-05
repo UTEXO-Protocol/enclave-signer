@@ -89,8 +89,8 @@ Use `--donor-grpc https://parent.example:50051` for clone and
 `--endpoint https://parent.example:50051` for attest-verify. The override does
 not disable CA/name verification. The clone CLI validates transport settings
 before initiating cloning. Both donor RPCs use the same TLS configuration.
-The cloning secret continues to use `UTEXO_CLONING_SECRET` on the local CLI;
-it is not sent as a gRPC bearer token.
+The local CLI reads the cloning secret from `--cloning-secret-file` or
+`UTEXO_CLONING_SECRET`. It is not sent as a gRPC bearer token.
 
 Local development only: bind Parent to a literal loopback IP, set
 `GRPC_ALLOW_INSECURE_LOOPBACK=true`, and remove all server TLS variables. This

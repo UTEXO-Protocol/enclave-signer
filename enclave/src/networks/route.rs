@@ -196,8 +196,8 @@ pub fn validate_route_proofs(
         }
         (SourceNetwork::RgbSource(_), DestinationNetwork::EvmDestination(_)) => {
             validate_amount_covers_destination(source_proof.amount, destination_proof.amount)
-            // The handler binds burn identity: `validate_burn_id` (both routes)
-            // and the `sourceBurnTxId` OpId bind (pools route).
+            // The handler binds burn identity on both routes: `validate_burn_id`
+            // and the `sourceBurnTxId` OpId bind.
         }
         // Concordium fundsIn -> EVM release. The listener validates the source.
         #[cfg(feature = "ccd")]

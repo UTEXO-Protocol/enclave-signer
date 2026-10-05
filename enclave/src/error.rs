@@ -109,9 +109,9 @@ impl EnclaveError {
                 failure: CustodyFailure::Unavailable,
                 ..
             } => 2,
-            EnclaveError::CrossCheck(_) => 3, // ERROR_CODE_VALIDATION_FAILED
-            EnclaveError::Spv(_) => 3,        // ERROR_CODE_VALIDATION_FAILED
-            EnclaveError::NotReady { .. } => 2, // ERROR_CODE_NOT_READY
+            EnclaveError::CrossCheck(_) => 3,   // validation failed
+            EnclaveError::Spv(_) => 3,          // validation failed
+            EnclaveError::NotReady { .. } => 2, // not ready
             _ => 1,
         }
     }

@@ -11,6 +11,7 @@ sequenceDiagram
 
     Note over Parent,Srv: Each step (external gRPC SubmitHeaders is refused)
     loop every HEADER_SYNC_INTERVAL_SECS, at once while behind
+        Parent->>Srv: Health probe (stop when the build has no SPV chain)
         Parent->>Srv: GetLastSavedBlockRequest
         Srv->>Chain: tip_height + tip_hash
         Chain-->>Srv: (height, hash) — checkpoint when empty
@@ -26,7 +27,7 @@ sequenceDiagram
             Parent->>Electrum: blockchain.block.headers(max(N−99, checkpoint+1), ≤ 2016)
         end
         Electrum-->>Parent: raw 80-byte headers
-        Parent->>Parent: check linkage; ≤ 50 000 headers per 60 s
+        Parent->>Parent: check linkage, <= 50 000 headers per 60 s
         Parent->>Srv: SubmitHeadersRequest
 
         Srv->>Srv: rate limiter: ≤ 100 000 headers per 60 s window<br/>(cumulative, counted before validation)
@@ -56,11 +57,11 @@ sequenceDiagram
         end
 
         Chain->>Chain: append all staged (all-or-nothing)
-        Chain-->>Srv: SubmitOutcome{last_height, last_hash,<br/>headers_accepted, reorg_depth}
+        Chain-->>Srv: SubmitOutcome{last_block_height, last_block_hash,<br/>headers_accepted, reorg_depth}
 
         Srv-->>Parent: SubmitHeadersResponse
-        Parent->>Parent: require the whole batch accepted<br/>and its last hash; else reread the tip
-        Note over Parent: a BelowCheckpoint refusal names the checkpoint;<br/>later fork repairs start above it
+        Parent->>Parent: require the whole batch accepted<br/>and its last hash, else reread the tip
+        Note over Parent: a BelowCheckpoint refusal names the checkpoint,<br/>later fork repairs start above it
     end
 
     Note over Chain: Boot-time invariants:<br/>— Checkpoint::assert_real_in_release() panics<br/> on placeholder checkpoint in release builds.<br/>— assert_retarget_aligned() panics (all profiles)<br/> on a non-retarget-aligned PoW checkpoint.<br/>— header_at(checkpoint.height) returns None<br/> (we never store the checkpoint header itself,<br/> only its hash/bits/time metadata).<br/>Retention: ALL headers from the checkpoint are kept<br/>(no sliding window - deep RGB anchors stay verifiable).

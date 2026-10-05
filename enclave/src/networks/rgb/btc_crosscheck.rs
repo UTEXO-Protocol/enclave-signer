@@ -19,7 +19,7 @@
 //!     the pinned maximum fee rate and absolute fee of the send-RGB path. All
 //!     checks here bound one transaction only. Nothing here rate-limits
 //!     `SignBtc`, so the aggregate bound is outside the enclave. Every input
-//!     must be sizeable: a P2TR input without key-path metadata or a
+//!     must be sizeable: a P2TR input with no Taproot spend metadata or a
 //!     non-CHECKMULTISIG P2WSH input fails the whole request.
 //!   * Amount cap (`BTC_MAX_TOTAL_SATS`) on total input value, not output
 //!     value, so it also bounds value sent to miner fees.
@@ -30,7 +30,8 @@
 //! Fail-closed: the fee policy and the witness_utxo rule need no config and run
 //! in every build. The amount cap and the unowned budget are operator values.
 //! A production (`rgb-validation`) build refuses to sign while they are unset.
-//! Default and `cfg(test)` builds use a permissive dev path.
+//! Builds without `rgb-validation` and `cfg(test)` builds use a permissive dev
+//! path.
 
 use crate::config::BridgeConfig;
 use crate::error::{EnclaveError, Result};
@@ -134,7 +135,7 @@ pub fn validate_btc_request(
                     .into(),
             ));
         }
-        // Default and test builds: dev path only.
+        // Builds without rgb-validation, and test builds: dev path only.
         #[cfg(not(all(feature = "rgb-validation", not(test))))]
         {
             tracing::warn!(

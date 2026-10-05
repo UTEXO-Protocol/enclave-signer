@@ -24,7 +24,7 @@ pub const POLICY_COMMITMENT_V8: u8 = 8;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SignerRole {
     /// Both directions in one image (`Dockerfile.enclave`,
-    /// `Dockerfile.enclave.rgb`).
+    /// `Dockerfile.enclave.rgb`; retired swap flow).
     Combined = 0,
     /// `mint-signer`: EVM -> RGB only. Refuses every `fundsOut` release.
     Mint = 1,
@@ -46,7 +46,7 @@ pub enum EvmDataSource {
     /// Plaintext JSON-RPC over the host relay. The host can forge the
     /// responses. Dev and test builds only.
     RawRpc = 1,
-    // 2 is retired (was the Helios light client). Do not reuse it.
+    // 2 is retired. Do not reuse it.
     /// JSON-RPC over TLS that ends inside the enclave. The host relays only
     /// ciphertext. The pinned CA and host ([`EvmRpcTlsPin`]) authenticate the
     /// endpoint. The chain state is not verified.
@@ -683,7 +683,7 @@ mod tests {
         let mut role = good.clone();
         role[3] = 3;
         bad.push(role);
-        // EVM source 2 (retired Helios) is no longer valid.
+        // EVM source 2 (retired) is no longer valid.
         let mut evm = good.clone();
         evm[5] = 2;
         bad.push(evm);

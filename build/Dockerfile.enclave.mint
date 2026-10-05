@@ -35,8 +35,9 @@ ENV CARGO_INCREMENTAL=0 \
     RUSTFLAGS="--remap-path-prefix=/build=/src -C debuginfo=0 -C strip=symbols"
 # `rgb` implies `spv` + `rgb-validation`. `--no-default-features` drops `ccd`
 # (so this binary is RGB-only) and also drops the default `rgb-swap`, which is
-# what lets the mint/burn flow be selected instead. `evm-rpc` adds in-enclave FundsIn verification,
-# pulling the alloy + tokio subtree; requires a second host vsock-proxy
+# what lets the mint/burn flow be selected instead. The signer role implies
+# `bfa-mint` -> `bfa-validation` -> `evm-rpc` (in-enclave FundsIn verification,
+# alloy + tokio); it needs a second host vsock-proxy
 # (EVM_RPC_VSOCK_PORT, default 8002).
 #
 # `mint-signer` (implies `bfa-mint` -> the mint/burn flow + BFA validation)
@@ -88,11 +89,8 @@ RUN chmod +x /app/utexo-bridge-enclave /app/entrypoint.sh
 # TWO-CONTRACT deployment: the EVM funds-out EIP-712 verifyingContract is the
 # MultisigProxy (EVM_PROXY_CONTRACT_ADDRESS), which DIFFERS from the bridge
 # *entry* contract that emits FundsIn (FUNDS_IN_CONTRACT, set below).
-# The BFA asset id is a BUILD ARG with no default, unlike every other image
-# here: each BFA contract id is per-deployment, and baking
-# the swap asset would make this enclave refuse every mint at
-# `networks/rgb/mod.rs` after the EVM RPC has already been paid. Empty leaves
-# the config partially pinned, which `policy.rs` refuses at boot.
+# The BFA asset id is a build arg with no default: each BFA contract id is per
+# deployment. An empty value fails the build (`test -n` below).
 #   --build-arg RGB_ASSET_ID=rgb:<the issued BFA contract id>
 # Note the pin is single-valued, so this EIF signs for the BFA asset only.
 ARG RGB_ASSET_ID=""

@@ -87,9 +87,11 @@ error.
 ### Stage 0 - Can this enclave do this request?
 
 - **M0.1** The endpoints must be set (`SetEndpoints`).
-- **M0.2** The enclave must be `Active`.
-- **M0.3** The source must be EVM and the destination must be RGB. The mint
+- **M0.2** The source must be EVM and the destination must be RGB. The mint
   signer refuses a burn request.
+
+The enclave must be `Active`, but no check runs here. The first check that
+reads the keys (Stage 5) refuses an enclave without keys.
 
 ### Stage 1 - Is this a repeat?
 

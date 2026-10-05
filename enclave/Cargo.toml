@@ -80,9 +80,9 @@ nix = { version = "0.31.2", features = ["socket", "time"] }
 aws-nitro-enclaves-nsm-api = "0.5"
 
 [features]
-# A plain `cargo build` is the combined bridge: rgb + ccd. Production images
-# add `vsock`. RGB images get `evm-rpc` through `bfa-validation` (see
-# build/Dockerfile.enclave*).
+# A plain `cargo build` is the combined dev bridge: rgb + rgb-swap + ccd.
+# Production images are the mint and burn signers below, with `vsock`. RGB
+# images get `evm-rpc` through `bfa-validation` (see build/Dockerfile.enclave*).
 #
 # Single-network EIFs, one flow each:
 #   RGB send/receive: `--no-default-features --features vsock,rgb,rgb-swap,bfa-validation` (retired)
@@ -159,8 +159,9 @@ mock-attestation = ["attestation-verify/mock"]
 # Accept all-zero peer PCRs for debug clone tests (F03-AF-12).
 # Never enable in production builds.
 allow-debug-pcrs = ["attestation-verify/allow-debug-pcrs"]
-# In-enclave EVM `FundsIn` event verification for signPsbt. Default OFF.
-# signPsbt fetches the deposit receipt with an in-enclave alloy JSON-RPC client.
+# In-enclave EVM `FundsIn` event verification for an EVM -> RGB `Sign`.
+# Default OFF. The enclave fetches the deposit receipt with an in-enclave alloy
+# JSON-RPC client.
 # It fails closed on a missing or invalid receipt or too few confirmations.
 # TLS to the pinned RPC host and CA ends inside the enclave. The host relays
 # only ciphertext through the vsock forwarder.

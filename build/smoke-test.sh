@@ -9,7 +9,7 @@
 #
 # Usage:
 #   ./smoke-test.sh                     # TCP mode (dev, enclave on localhost:5000)
-#   ./smoke-test.sh --vsock             # vsock mode (production, CID 16 port 5000)
+#   ./smoke-test.sh --vsock             # vsock mode (Nitro, CID 16 port 5000)
 #
 # Prerequisites:
 #   - utexo-bridge-parent-cli binary on PATH or in current directory
@@ -37,9 +37,8 @@ for arg in "$@"; do
 done
 
 # Find parent CLI binary: explicit env var > release build > debug build.
-# NOTE: the binary is utexo-bridge-parent-CLI, not utexo-bridge-parent (the
-# latter is the gRPC server and ignores subcommands). Earlier revisions of
-# this script pointed at the wrong binary.
+# NOTE: use utexo-bridge-parent-cli, not utexo-bridge-parent (the gRPC
+# server, which ignores subcommands).
 if [ -n "${PARENT_BIN:-}" ]; then
     :
 elif [ -f "./target/release/utexo-bridge-parent-cli" ]; then
@@ -70,7 +69,7 @@ echo ""
 # Check binary exists
 if ! command -v "$PARENT_BIN" &>/dev/null && [ ! -f "$PARENT_BIN" ]; then
     echo -e "${RED}Error: CLI binary not found at '$PARENT_BIN'${NC}"
-    echo "Run 'cargo build --bin utexo-bridge-parent-cli' or set PARENT_BIN env var."
+    echo "Run 'cargo build --manifest-path parent/Cargo.toml --bin utexo-bridge-parent-cli' or set PARENT_BIN env var."
     exit 1
 fi
 

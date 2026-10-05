@@ -95,9 +95,11 @@ error.
 ### Stage 0 - Can this enclave do this request?
 
 - **B0.1** The endpoints must be set (`SetEndpoints`).
-- **B0.2** The enclave must be `Active`.
-- **B0.3** The source must be RGB and the destination must be EVM. The burn
+- **B0.2** The source must be RGB and the destination must be EVM. The burn
   signer refuses a mint request.
+
+The enclave must be `Active`, but no check runs here. Signing (Stage 6) is
+the first step that reads the keys. It refuses an enclave without keys.
 
 ### Stage 1 - Are the deposits behind the burn real?
 
@@ -167,7 +169,7 @@ most work.
 
 ### Stage 5 - Does the release belong to this burn?
 
-Both routes:
+Both routes (`fundsOut` and `lzFundsOut`), in this order:
 
 - **B5.1** The burned amount must be at least the calldata amount.
 - **B5.2** `sourceChainId` must equal 96 (`RGB_SOURCE_CHAIN_ID`).
@@ -176,22 +178,7 @@ Both routes:
   `Bridge._deriveBurnIdFromFields`. It uses the pinned `FUNDS_IN_CONTRACT`,
   `EVM_CHAIN_ID` and `TOKEN_CONTRACT`, and the calldata fields. The calldata
   `burnId` must be equal.
-
-Both routes (`fundsOut` and `lzFundsOut`):
-
-- **B5.5** Amount: `MS_BURNED_ASSET` must **equal** the calldata `amount`.
-- **B5.6** Recipient: `MS_BURN_RECIPIENT` must be 32 bytes. The high 12 bytes
-  must be zero. It must equal the final payee: the calldata `recipient`,
-  left-padded, on the pools route, or the LayerZero `recipient` on the
-  LayerZero route.
-- **B5.7** Burn id: `sourceBurnTxId` must not be zero. It must equal the
-  OpId of the burn transition.
-- **B5.8** Settlement: `settlementData` is
-  `abi.encode(bytes32[] operationIds, uint256[] netAmounts)`. It must be
-  canonical. The two arrays must have the same length. Ids must not repeat.
-  The pairs must equal, as a set, the verified locks from Stage 1. An empty
-  list is refused.
-- **B5.9** BtcRelay proof: the calldata `proof` is
+- **B5.5** BtcRelay proof: the calldata `proof` is
   `(sourceHeight, sourceCommit, latestHeight, latestCommit)`, 128 bytes.
   - `sourceHeight` must be the block that holds the last witness transaction.
   - The enclave must have a header at `latestHeight`. That header must be at
@@ -201,6 +188,18 @@ Both routes (`fundsOut` and `lzFundsOut`):
     from its own chain. A zero word is refused.
   - With `BTC_RELAY_MODE=none` (local stand only), both words must be zero.
     A production policy does not boot in this mode.
+- **B5.6** Amount: `MS_BURNED_ASSET` must **equal** the calldata `amount`.
+- **B5.7** Burn id: `sourceBurnTxId` must not be zero. It must equal the
+  OpId of the burn transition.
+- **B5.8** Recipient: `MS_BURN_RECIPIENT` must be 32 bytes. The high 12 bytes
+  must be zero. It must equal the final payee: the calldata `recipient`,
+  left-padded, on the pools route, or the LayerZero `recipient` on the
+  LayerZero route.
+- **B5.9** Settlement: `settlementData` is
+  `abi.encode(bytes32[] operationIds, uint256[] netAmounts)`. It must be
+  canonical. The two arrays must have the same length. The ids must be in
+  strictly ascending order, so no id repeats. The pairs must equal, as a set,
+  the verified locks from Stage 1. An empty list is refused.
 
 > **Warning - LayerZero route.** The burn does not name a destination chain,
 > so `dst_eid` is not bound to the burn. The enclave checks `dst_eid` and
@@ -253,7 +252,7 @@ chain:
 - the `MultisigProxy` nonce is in the signed digest;
 - the Bridge refuses a `burnId` that it used before.
 
-On both routes, `burnId` is bound to the burn through B5.7 and B5.8.
+On both routes, `burnId` is bound to the burn through B5.7 and B5.9.
 
 ## 8. What the burn signer refuses
 
@@ -274,4 +273,4 @@ are in the burn's metadata. So the burn signer needs three proofs that agree:
 3. Metadata: the amount and the payee in the burn equal those in the calldata.
 
 The contract proves that the cited deposits exist. The burn signer proves that
-they are the deposits behind this burn (B5.8). Each half needs the other.
+they are the deposits behind this burn (B5.9). Each half needs the other.

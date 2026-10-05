@@ -78,8 +78,8 @@ pub fn resolve_bitcoin_network(bitcoin_network_str: &str) -> bitcoin::Network {
 
 /// Log the pinned bridge config, as an error when it is partially set.
 ///
-/// `SignEvm` fails closed on a partial config, and the boot gate in `main`
-/// stops a production build on it.
+/// An `rgb-validation` build refuses a `fundsOut` `Sign` without a full config,
+/// and the boot gate in `main` stops a release bridge build on it.
 pub fn log_bridge_config(bridge_config: &BridgeConfig) {
     if bridge_config.btc_relay_mode == crate::config::BtcRelayMode::None {
         tracing::warn!(
@@ -104,13 +104,13 @@ pub fn log_bridge_config(bridge_config: &BridgeConfig) {
             bridge_contract = %hex::encode(bridge_config.bridge_contract),
             rgb_asset_id = %bridge_config.rgb_asset_id,
             "bridge config PARTIALLY set - EVM_CHAIN_ID / EVM_PROXY_CONTRACT_ADDRESS / RGB_ASSET_ID must all \
-             be set (non-zero) or all unset; SignEvm will refuse to sign with this ambiguous pin"
+             be set (non-zero) or all unset; an rgb-validation build refuses fundsOut signing"
         );
     } else {
         tracing::warn!(
         "bridge config unconfigured (EVM_CHAIN_ID / EVM_PROXY_CONTRACT_ADDRESS / RGB_ASSET_ID unset) - \
-         SignEvm cross-check will fall back to legacy behaviour and the attestation bundle \
-         will commit to empty values"
+         fundsOut pin checks are skipped (an rgb-validation build refuses to sign) and the \
+         attestation bundle will commit to empty values"
     );
     }
 }

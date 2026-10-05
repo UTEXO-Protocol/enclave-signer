@@ -122,9 +122,10 @@ the EIF and get the same PCR0. The operator sends them once, after launch, in
 EVM RPC TLS port and, in a mint build, the KMS key ARN, region, seed id and
 expected EVM address. The enclave refuses a second set; changing them needs a
 restart, which loses the keys. Until the set, the enclave refuses `Sign`,
-`SignBtc`, `SignRawDigest`, `SignCcd`, `GetAttestedPublicKey`, `GetClone` and
-`SetClone`, starts no Electrum or EVM RPC forwarder and opens no chain
-connection, and `Health` reports not ready. A refused set leaves the enclave
+`SignBtc`, `SignRawDigest`, `SignCcd`, `GetAttestedPublicKey`, `GetClone`,
+`SetClone` and, on the mint signer, `InitializeKey`. It starts no Electrum or
+EVM RPC forwarder and opens no chain connection, and `Health` reports not
+ready. A refused set leaves the enclave
 unset, so a retry works.
 
 With an Electrum URL `ssl://host:port` (or `tcp://`) the forwarder listens on
@@ -150,12 +151,15 @@ the public-key bundle. This policy covers the fields below, not all configuratio
 ```
 SecurityPolicy = Production {
     chain_id, bridge_contract, rgb_asset_id,   -- operator pins
-    funds_in_contract, evm_min_confirmations,  -- deposit authorization rule
+    funds_in_contract, token_contract,         -- deposit and burnId pins
+    evm_min_confirmations,                     -- deposit depth
     allow_vanilla_psbt,                        -- plain-BTC signing on/off
+    signer_role: Mint | Burn | Combined,
     attestation: Real,                         -- always, in production
     evm_source:  Disabled | RawRpc | PinnedTlsRpc,
     electrum_host, evm_rpc_tls, gas_tx_rule,
     btc_source:  SpvVerified,                  -- always, in production
+    kms,                                       -- KMS pin, mint signer only
 } | Development { reason }
 ```
 
@@ -168,7 +172,8 @@ SecurityPolicy = Production {
   and the CA SHA-256 of the launch set. The verifier pins both.
 - **Boot gate:** a release `rgb-validation` build that does not resolve to a
   valid `Production` policy MUST refuse to boot (panic). The FundsIn contract
-  must be non-zero and the minimum confirmation depth must be greater than zero.
+  and `TOKEN_CONTRACT` must be non-zero, the minimum confirmation depth must be
+  greater than zero, and `BTC_RELAY_MODE` must be `required`.
   `SetEndpoints` runs the gate again with the endpoints and refuses the set on
   an error: `RawRpc`, and `PinnedTlsRpc` without a valid host and CA.
   Independently, each
@@ -209,10 +214,12 @@ own keys.
 
 ## 5. Key management
 
-- Keys are **generated inside the enclave** from OS entropy (BIP-39 mnemonic
-  -> BIP-32 seed). The 64-byte seed lives in a `SecretBox` and MUST NOT leave
-  the TEE in plaintext . Intermediate buffers are
-  zeroized; the BIP-86 account xprivs are wiped on drop.
+- Burn signer: keys are **generated inside the enclave** from OS entropy
+  (BIP-39 mnemonic -> BIP-32 seed). Mint signer: the 64-byte seed comes from
+  KMS `GenerateDataKey` through recipient attestation
+  ([KMS seed persistence](kms-persistence.md)). The seed lives in a
+  `SecretBox` and MUST NOT leave the TEE in plaintext. Intermediate buffers
+  are zeroized; the BIP-86 account xprivs are wiped on drop.
 - Derivation paths:
   - EVM bridge key (authorization): `m/44'/60'/0'/0/0`;
     `evm_address = keccak256(uncompressed_pub[1..])[12..]`.
@@ -240,7 +247,7 @@ no in-place rotation or re-init.
 |-----------|------------------------------------------|---------|--------------------------------------------------|
 | `Initial` | nothing                                  | no      | boot                                             |
 | `Cloning` | ephemeral X25519 + target cluster pubkey | no      | `enter_cloning` (requester)                      |
-| `Active`  | `KeyManager` (seed in `SecretBox`)       | yes     | `initialize_from_entropy`, or `complete_cloning` |
+| `Active`  | `KeyManager` (seed in `SecretBox`)       | yes     | `initialize_from_entropy`, `initialize_from_persistence` (mint), or `complete_cloning` |
 
 A second initialize attempt MUST fail (`AlreadyInitialized`). Upgrades MUST be
 done by standing up a new cluster with new PCRs, not by mutating an `Active`
@@ -615,12 +622,12 @@ delegated to the receiving contract and known gaps. Enforced checks fail closed.
 |-----|-------------------------------------------------------------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | P1  | submitted RGB consignment is valid (`rgbstd` full validation) | OK                                                                                                                                                               |
 | P2  | consignment proves the expected transition                  | OK -- the last transition MUST be `TS_BURN` (amount from `MS_BURNED_ASSET`). The `bfa-mint` build also validates every `TS_BRIDGE` in the consignment against its own verified `FundsIn` lock. Any other shape is refused |
-| P3  | unlock amount equals the consignment-derived amount         | OK on the pools route -- the amount is the burn's `MS_BURNED_ASSET` (host `rgb_amount` is ignored) and MUST equal `fundsOut.amount` exactly (`flow::assert_funds_out_amount`; `fundsOut.amount` is gross, commission is taken on-chain). Same on the LayerZero route |
+| P3  | unlock amount equals the consignment-derived amount         | OK on both routes -- the amount is the burn's `MS_BURNED_ASSET` (host `rgb_amount` is ignored) and MUST equal the calldata `amount` exactly (`flow::assert_funds_out_amount`; the amount is gross, commission is taken on-chain) |
 | P4  | calldata is well-formed                                     | OK -- two allowlisted selectors (`fundsOut`, `lzFundsOut`), 64 KiB cap, canonical ABI decode + re-encode byte-equality, `destinationChainId` rule per route |
-| P5  | payload binds destination chain / contract / **recipient**  | OK on the pools route -- chain + contract pinned; the BFA burn carries `MS_BURN_RECIPIENT` and the enclave refuses a release whose calldata names a different address. LayerZero route: no recipient bind (Sec 7.1) |
-| P6 | release identifiers and settlement | Both routes: `sourceChainId == 96`, `sourceAddress` empty, and `burnId` recomputed in-enclave (`validate_burn_id`). Pools route only: `sourceBurnTxId` MUST equal the settling transition's RGB OpId (non-zero), and `settlementData` MUST be canonical with exact set equality of `(operationId, netAmount)` ancestry locks, strictly ascending `operationId` (no duplicates) and at least one lock. LayerZero route: these two binds do not run (Sec 7.1) |
+| P5  | payload binds destination chain / contract / **recipient**  | OK on both routes -- chain + contract pinned; the BFA burn carries `MS_BURN_RECIPIENT` and the enclave refuses a release whose payee (`recipient`, or the LayerZero `recipient`) is a different address. LayerZero `dst_eid` is not bound (Sec 13) |
+| P6 | release identifiers and settlement | Both routes: `sourceChainId == 96`, `sourceAddress` empty, and `burnId` recomputed in-enclave (`validate_burn_id`); `sourceBurnTxId` MUST equal the settling transition's RGB OpId (non-zero), and `settlementData` MUST be canonical with exact set equality of `(operationId, netAmount)` ancestry locks, strictly ascending `operationId` (no duplicates) and at least one lock |
 | P7  | referenced Bitcoin txs are in accepted chain history        | OK                                                                                                                                                               |
-| P8  | Bitcoin inclusion proofs valid against the in-enclave chain | OK; plus, on the pools route, the calldata `proof` is required (fail-closed): `source.height` is pinned to the block anchoring the consignment's last witness tx (re-verified under one lock guard), the enclave must hold a header at `latest.height`, and `latest` must be within `MAX_RELAY_TIP_LAG_BLOCKS = 100` of the enclave tip. Under `BTC_RELAY_MODE=required` (the default, and the only mode `ProductionPolicy::check_invariants` boots with) each `commitmentHash` word must equal `keccak256` of BtcRelay's 160-byte `StoredBlockHeader` that the enclave rebuilds at that height from its own chain (chainWork from the checkpoint's `chain_work`); a zero word is refused, and a record that needs a block below the checkpoint is refused (#57/#122). `BTC_RELAY_MODE=none` is for a local stand with no BtcRelay (route verifier `NullVerifier`): both words must be zero and the compare is skipped, the height/anchor/freshness binds stay. No build flag takes part in the choice |
+| P8  | Bitcoin inclusion proofs valid against the in-enclave chain | OK; plus, on both routes, the calldata `proof` is required (fail-closed): `source.height` is pinned to the block anchoring the consignment's last witness tx (re-verified under one lock guard), the enclave must hold a header at `latest.height`, and `latest` must be within `MAX_RELAY_TIP_LAG_BLOCKS = 100` of the enclave tip. Under `BTC_RELAY_MODE=required` (the default, and the only mode `ProductionPolicy::check_invariants` boots with) each `commitmentHash` word must equal `keccak256` of BtcRelay's 160-byte `StoredBlockHeader` that the enclave rebuilds at that height from its own chain (chainWork from the checkpoint's `chain_work`); a zero word is refused, and a record that needs a block below the checkpoint is refused (#57/#122). `BTC_RELAY_MODE=none` is for a local stand with no BtcRelay (route verifier `NullVerifier`): both words must be zero and the compare is skipped, the height/anchor/freshness binds stay. No build flag takes part in the choice |
 | P9  | corresponding EVM lock record exists for the same operation | on-chain for this direction; for EVM->RGB the enclave verifies `FundsIn` itself (Sec 7.2)                                                                         |
 | P10 | EVM execution payload matches the validated unlock intent   | selector, calldata layout, amount, chain, contract: OK; recipient and operation id: see P5 / P6                                                                   |
 | P11 | on any failure, refuse to sign                              | OK -- fail-closed                                                                                                                                                |
@@ -629,7 +636,7 @@ The enclave signs `burnId` and the other decoded fields into the typed digest.
 A signature is not a check of their meaning. So `sourceBurnTxId`,
 `sourceAddress` and `settlementData` each have their own bind above.
 The strict `operationId` order gives one `settlementData` byte form per
-pair set, so a reorder cannot make a new `burnId` on the pools route.
+pair set, so a reorder cannot make a new `burnId`.
 "Ancestry" is every `TS_BRIDGE` in the consignment, not only the mints that
 fed the burned allocation.
 End-to-end release uniqueness also depends on contract checks outside this repo

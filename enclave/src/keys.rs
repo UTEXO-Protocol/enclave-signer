@@ -394,7 +394,7 @@ impl KeyManager {
 
     /// Sign the PSBT inputs of our keys, optionally of one BIP-86 account only.
     ///
-    /// `SignPsbt` passes `Some(Colored)` and `SignBtc` passes `Some(Vanilla)`,
+    /// The bridge PSBT path passes `Some(Colored)` and `SignBtc` `Some(Vanilla)`,
     /// so the plain-BTC path never signs an RGB-allocated input.
     pub fn sign_psbt_scoped(
         &self,

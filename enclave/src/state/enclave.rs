@@ -32,7 +32,7 @@ const CLONE_EXPORT_HARD_CAP_ENV: &str = "CLONE_EXPORT_HARD_CAP";
 /// Enclave lifecycle phase.
 ///
 /// Valid transitions (see `EnclaveState`):
-///   Initial  -> Active   (local InitializeKey / InitializeFromEntropy)
+///   Initial  -> Active   (local InitializeKey: entropy or import)
 ///   Initial  -> Initializing -> Active (KMS seed recovery)
 ///   Initializing -> Initial (failed or expired seed recovery)
 ///   Initial  -> Cloning  (InitiateCloning)
@@ -482,7 +482,8 @@ impl EnclaveState {
         self.with_active(|km| km.sign_evm_gas_tx(message_hash))
     }
 
-    /// Sign PSBT inputs matching our BTC key. Returns (signed_psbt_bytes, inputs_signed).
+    /// Sign the BIP-86 key-path inputs of either account. Returns
+    /// (signed_psbt_bytes, inputs_signed).
     pub fn sign_psbt(&self, psbt_bytes: &[u8]) -> Result<(Vec<u8>, usize)> {
         self.with_active(|km| km.sign_psbt(psbt_bytes))
     }

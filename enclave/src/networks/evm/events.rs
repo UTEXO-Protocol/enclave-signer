@@ -1,8 +1,8 @@
-//! In-enclave verification of the EVM `FundsIn` deposit event for bridge-mode
-//! `signPsbt`.
+//! In-enclave verification of the EVM `FundsIn` deposit event for an
+//! EVM -> RGB `Sign`.
 //!
-//! Bridge-mode `signPsbt` releases RGB against an EVM deposit. The enclave does
-//! not trust the listener `evm_event_valid` / `evm_event_finalized` flags. It
+//! An EVM -> RGB `Sign` releases RGB against an EVM deposit. The enclave does
+//! not trust the listener `event_valid` / `event_finalized` flags. It
 //! gets the deposit receipt over an in-enclave EVM RPC. It checks that the
 //! pinned bridge contract emitted a `BridgeFundsIn` log with the claimed
 //! amount, at sufficient depth. Each predicate fails closed.
@@ -151,7 +151,7 @@ pub struct VerifiedFundsIn {
     pub destination_address: String,
 }
 
-/// Verifies the `FundsIn` deposit for a bridge-mode `signPsbt`.
+/// Verifies the `FundsIn` deposit for an EVM -> RGB `Sign`.
 ///
 /// Fails closed on: a missing or failed receipt, no matching log, an ambiguous
 /// match, a field mismatch, an on-chain value above `u64`, or low confirmation
@@ -574,7 +574,7 @@ const EVM_RPC_CALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs
 
 /// Production [`EvmReceiptProvider`]: an alloy JSON-RPC client over the
 /// in-enclave loopback that a vsock forwarder tunnels to the EVM RPC. alloy is
-/// async, so boot builds a single-worker tokio runtime, and each call uses
+/// async, so the launch builds a single-worker tokio runtime, and each call uses
 /// `block_on`. One worker is sufficient and keeps the type `Send + Sync` for
 /// the shared `ServerContext`.
 pub struct AlloyEvmClient {

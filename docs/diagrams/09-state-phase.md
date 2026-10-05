@@ -5,7 +5,10 @@ stateDiagram-v2
     [*] --> Initial : enclave boot (no key material)
 
     Initial : signing DISABLED
-    Initial : get_keys() → KeyNotInitialized
+    Initial : get_keys() returns KeyNotInitialized
+
+    Initializing : kms-persistence only (mint signer)
+    Initializing : KMS seed recovery in progress, signing DISABLED
 
     Cloning : holds CloningSession (ephemeral X25519 + cluster pubkey)
     Cloning : signing DISABLED
@@ -14,22 +17,26 @@ stateDiagram-v2
     Active : signing permitted subject to validation and policy
     Active : get_keys() available; signing remains feature and policy gated
 
-    Initial --> Active : initialize_from_entropy() — first enclave, OS entropy
-    Initial --> Active : initialize_from_seed/mnemonic() — feature allow-seed-import, dev only
-    Initial --> Cloning : enter_cloning() (InitiateCloning — requester)
+    Initial --> Active : initialize_from_entropy() - first enclave, OS entropy (no kms-persistence)
+    Initial --> Active : initialize_from_seed/mnemonic() - feature allow-seed-import, dev only
+    Initial --> Initializing : initialize_from_persistence_until() (InitializeKey, kms-persistence)
+    Initializing --> Active : seed loaded from KMS persistence
+    Initializing --> Initial : recovery failed or expired
+    Initial --> Cloning : enter_cloning() (InitiateCloning - requester, no kms-persistence)
+    Cloning --> Cloning : enter_cloning() replaces an expired session
 
-    Cloning --> Active : complete_cloning() (SetClone — decrypt + install peer seed, assert evm_address == cluster_public_key)
+    Cloning --> Active : complete_cloning() (SetClone - decrypt + install peer seed, assert evm_address == cluster_public_key, verify clone commitment)
 
     Active --> Active : Sign / SignBtc / SignRawDigest / SignCcd / GetAttestedPublicKey (no state change)
     Initial --> Initial : SubmitHeaders / GetLastSavedBlock (no keys needed, any phase)
-    Active --> Active : GetClone (donor — exports sealed seed, stays Active)
+    Active --> Active : GetClone (donor - exports sealed seed, stays Active)
 
     note right of Active
         Active is terminal. There is no transition out of Active:
         no re-init, no re-clone, no key rotation in-place.
         ensure_initial() rejects any second initialize attempt
         with AlreadyInitialized. Upgrades/rotation happen by
-        standing up a NEW cluster (new PCRs) — never by mutating
+        standing up a NEW cluster (new PCRs) - never by mutating
         an Active enclave.
     end note
 ```

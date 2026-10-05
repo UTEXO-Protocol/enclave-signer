@@ -141,7 +141,7 @@ pub(super) fn handle_sign_psbt(
         .state
         .sign_psbt_scoped(&req.psbt_bytes, Some(crate::keys::AccountType::Colored))?;
 
-    // Refuse a no-op. `sign_psbt` returns Ok((bytes, 0)) when no input is ours.
+    // Refuse a no-op. `sign_psbt_scoped` returns Ok((bytes, 0)) when no input is ours.
     // A caller that checks only RPC success would count it as a signature.
     // Partial signing (0 < count < num_inputs) is allowed.
     if inputs_signed == 0 {
@@ -164,8 +164,8 @@ pub(super) fn handle_sign_psbt(
 
 /// Sign a plain-BTC PSBT (create_utxo, UTXO management).
 /// Unlike [`handle_sign_psbt`], it has no RGB consignment and no EVM event.
-/// Authorization: all outputs pay to enclave scripts, the pinned fee policy
-/// passes, and the operator amount cap holds
+/// Authorization: outputs pay to enclave scripts or fit the unowned budget,
+/// the pinned fee policy passes, and the operator amount cap holds
 /// ([`crate::networks::rgb::btc_crosscheck`]).
 /// A production build refuses to sign when the cap is not set.
 /// The separate request type is the structural part of the vanilla-bypass fix.

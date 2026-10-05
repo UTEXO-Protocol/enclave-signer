@@ -1,7 +1,7 @@
 //! The cloning handshake. It moves a seed from a running donor enclave to a
 //! new requester enclave. The seed does not leave a TEE.
 //!
-//! See proto/enclave.proto for the full protocol.
+//! See `enclave-proto/proto/enclave.proto` for the full protocol.
 
 use super::context::ServerContext;
 use super::keys::{build_public_keys_response, clone_commitment, verify_clone_commitment};

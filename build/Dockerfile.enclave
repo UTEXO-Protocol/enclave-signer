@@ -1,5 +1,6 @@
 # syntax=docker/dockerfile:1.7
-# Combined production enclave image (vsock + rgb + ccd + evm-rpc) -
+# Combined enclave image, retired swap flow (vsock + rgb + rgb-swap + ccd +
+# bfa-validation). Not a production image: see Dockerfile.enclave.mint/.burn.
 # Private Cargo dependencies require BuildKit secrets (see README, Building).
 # Supply github_token, or one deploy key per repo; keys never enter image layers.
 # Example: docker build --secret id=github_token,env=GITHUB_TOKEN -f build/Dockerfile.enclave .
@@ -49,7 +50,7 @@ RUN --mount=type=secret,id=github_token \
 
 
 # --- Runtime ---
-# Pinned by digest (see header) - this rootfs is what ends up in the EIF, so its
+# Pinned by digest - this rootfs is what ends up in the EIF, so its
 # digest directly drives PCR0. Bump tag + digest together when updating.
 FROM public.ecr.aws/amazonlinux/amazonlinux:2023-minimal@sha256:8073d921f4ac1bf17fca94e16b0bc575e3fc17e4ccbe53b563160f02f0c7ccfc AS runtime
 
@@ -75,7 +76,7 @@ RUN chmod +x /app/utexo-bridge-enclave /app/entrypoint.sh
 # NOTE: the donor cloning secret is intentionally NOT baked here. It is
 # delivered at runtime via the `InitializeKey` message (CLI: `init
 # --cloning-secret <secret>`), so it never lands in the EIF / image layers and
-# the PCRs stay reproducible. See enclave/src/server.rs (handle_initialize).
+# the PCRs stay reproducible. See enclave/src/server/keys.rs (handle_initialize).
 
 # Pinned bridge/indexer config - public identifiers, baked so PCR0 commits to
 # them (attestation proves which chain/contract/asset this enclave serves) and

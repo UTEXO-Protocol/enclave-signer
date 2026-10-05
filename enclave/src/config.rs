@@ -5,11 +5,11 @@
 //! `server/keys.rs`). So:
 //!
 //!   1. a `GetAttestedPublicKey` verifier sees the (chain_id, contract, asset);
-//!   2. `SignEvm` rejects request fields that do not match this config.
+//!   2. a `fundsOut` `Sign` rejects request fields that do not match this config.
 //!
-//! Production sets all three env vars. Dev and mock builds can leave them unset.
-//! Then the cross-check is skipped and the bundle commits empty values, so a
-//! production deploy without them is visible externally.
+//! Production sets all three env vars. A release bridge build without them does
+//! not boot ([`crate::policy`]). Dev and mock builds can leave them unset. Then
+//! the bundle commits empty values.
 
 use crate::error::{EnclaveError, Result};
 

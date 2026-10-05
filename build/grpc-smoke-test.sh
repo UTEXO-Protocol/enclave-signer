@@ -10,10 +10,12 @@
 #   - grpcurl installed (brew install grpcurl)
 #   - SSH tunnel open (if running from Mac):
 #       ssh -L 5000:127.0.0.1:5000 -N ubuntu@18.219.168.199
-#   - utexo-bridge-parent running on EC2:
-#       USE_VSOCK=true ./target/release/utexo-bridge-parent
+#   - utexo-bridge-parent running on EC2 in plaintext loopback mode (grpcurl
+#     uses -plaintext; the default parent requires mTLS):
+#       USE_VSOCK=true GRPC_ALLOW_INSECURE_LOOPBACK=true \
+#         ./parent/target/release/utexo-bridge-parent
 #   - Enclave already initialized (run smoke-test.sh --vsock on EC2 first,
-#     or: ./target/release/utexo-bridge-parent-cli --addr vsock://16:5000 init)
+#     or: ./parent/target/release/utexo-bridge-parent-cli --addr vsock://16:5000 init)
 #
 # Usage:
 #   ./grpc-smoke-test.sh                        # default: 127.0.0.1:5000

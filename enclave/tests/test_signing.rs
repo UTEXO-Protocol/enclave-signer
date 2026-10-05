@@ -735,7 +735,7 @@ fn test_sign_psbt_before_init() {
 
 // PSBT enriched cross-check tests
 
-/// The listener `evm_event_valid` and `evm_event_finalized` booleans do not
+/// The listener `event_valid` and `event_finalized` booleans do not
 /// authorize or block signing. With both `false`, no rejection comes from them.
 #[test]
 #[cfg(evm_to_rgb)]
@@ -871,7 +871,7 @@ fn test_sign_psbt_rejects_amount_mismatch() {
     }
 }
 
-// A production (rgb-validation) build rejects a SignPsbt with no consignment.
+// An rgb-validation build rejects an EVM -> RGB `Sign` with no consignment.
 // An empty `evm_tx_hash` does not select a "vanilla mode" that skips the
 // bridge checks.
 #[cfg(all(feature = "rgb-validation", evm_to_rgb))]
@@ -916,7 +916,7 @@ fn test_sign_psbt_rejects_missing_evm_source_hash() {
 }
 
 // A length-valid, all-zero evm_tx_hash is not a "vanilla mode" signal.
-// SignPsbt always runs the bridge cross-checks and fails closed when no
+// An EVM -> RGB `Sign` always runs the bridge cross-checks and fails closed when no
 // consignment binds the PSBT. `test_sign_psbt_rejects_missing_evm_source_hash`
 // covers the zero-length hash.
 #[cfg(all(feature = "rgb-validation", evm_to_rgb))]

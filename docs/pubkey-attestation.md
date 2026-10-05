@@ -16,7 +16,7 @@ After successful verification, the verifier knows:
 
 The security policy `P` describes the enclave's committed posture —
 plain-BTC enablement, chain/contract/asset pins, attestation mode, gas
-rules and selected data sources — resolved once at boot. Committing it into `user_data`
+rules and selected data sources - resolved once at launch (`SetEndpoints`). Committing it into `user_data`
 lets a verifier check the committed policy as one attested value instead of
 inferring it from build flags or configuration guesses.
 
@@ -151,8 +151,8 @@ decoder/checker is `canonical_bundle` in
 
 The canonical bundle above is followed by the enclave's resolved security
 policy, and `user_data = sha256(canonical_bundle || policy_commitment)`. The
-policy is the single source of truth for the enclave's posture — resolved once
-at boot in [`enclave/src/policy.rs`](../enclave/src/policy.rs) and serialized by
+policy is the single source of truth for the enclave's posture - resolved once
+at launch (`SetEndpoints`) in [`enclave/src/policy.rs`](../enclave/src/policy.rs) and serialized by
 [`attestation-verify/src/policy.rs`](../attestation-verify/src/policy.rs), which
 both the enclave and every verifier share so the bytes are identical.
 
@@ -313,7 +313,8 @@ attest-verify \
 # Expect the plain-BTC path enabled:
 attest-verify --endpoint https://parent.example:50051 \
     --pcr0 <..> --pcr1 <..> --pcr2 <..> --expect-signer-role mint \
-    --expect-funds-in-contract <hex20> --expect-evm-min-confirmations 12 \
+    --expect-funds-in-contract <hex20> --expect-token-contract <hex20> \
+    --expect-evm-min-confirmations 12 \
     --expect-electrum-host <electrum host> \
     --expect-kms-key-arn <arn> --expect-kms-region <region> --expect-kms-seed-id <id> \
     --expect-evm-rpc-host <rpc host> --expect-evm-rpc-ca-sha256 <64-hex-chars> \

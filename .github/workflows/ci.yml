@@ -95,13 +95,12 @@ jobs:
       - name: Check formatting
         run: cargo fmt --all -- --check
 
-      # Defaults are rgb + rgb-swap + ccd, so the steps below exercise the
-      # signing path shipped in the combined EIF (minus vsock / evm-rpc).
+      # Defaults are rgb + rgb-swap + ccd: the combined swap EIF (retired flow)
+      # minus vsock and bfa-validation.
       - name: Build (default features)
         run: cargo build --workspace
 
-      # `--all-targets` so clippy lints test code too — otherwise lints on
-      # files under `tests/` slip through, as happened on the attestation PR.
+      # `--all-targets` so clippy also lints test code under `tests/`.
       - name: Clippy (default features)
         run: cargo clippy --workspace --all-targets -- -D warnings
 
@@ -123,10 +122,10 @@ jobs:
 
       # Combined build profile: the feature set of build/Dockerfile.enclave
       # (retired swap flow, not production).
-      - name: Build (production combo)
+      - name: Build (swap combo)
         run: cargo build -p utexo-bridge-enclave --features vsock,rgb,rgb-swap,ccd,bfa-validation
 
-      - name: Clippy (production combo)
+      - name: Clippy (swap combo)
         run: cargo clippy -p utexo-bridge-enclave --features vsock,rgb,rgb-swap,ccd,bfa-validation --all-targets -- -D warnings
 
       # SPV path coverage. Cannot use vsock here (Linux runner without
@@ -135,7 +134,8 @@ jobs:
       - name: Test (--features spv,rgb-swap)
         run: cargo test -p utexo-bridge-enclave --features spv,rgb-swap
 
-      # RGB-only EIF profile, `ccd` dropped. Mirrors Dockerfile.enclave.rgb.
+      # RGB-only swap EIF profile (retired flow), `ccd` dropped. Mirrors
+      # Dockerfile.enclave.rgb.
       # CCD requests (SignCcd / CcdSource) must be refused here.
       - name: Build (rgb-only)
         run: cargo build -p utexo-bridge-enclave --no-default-features --features vsock,rgb,rgb-swap,bfa-validation
@@ -179,7 +179,7 @@ jobs:
 
       # Minimal build: no features at all (`--no-default-features` drops the
       # default rgb/rgb-swap/ccd set). Keeps the no-SPV path compiling and exercises the
-      # Guard that a no-spv build refuses to sign `fundsOut`
+      # guard that a no-spv build refuses to sign `fundsOut`
       # (test_no_spv_build_refuses_funds_out_even_without_merkle_proofs).
       # Skips the rgb-consignment dep entirely. Like every enclave build here it
       # still resolves the workspace's private RGB git sources using the keys above.

@@ -6,7 +6,7 @@
 # Supply github_token, or one deploy key per repo; keys never enter image layers.
 # Example: docker build --secret id=github_token,env=GITHUB_TOKEN \
 #   --build-arg SIGNER_ROLE=mint-signer -f build/Dockerfile.enclave-dev.bfa .
-# Production builder glibc must remain compatible with the AL2023 runtime.
+# Builder glibc must stay compatible with the runtime stage below.
 FROM rust:1.96-slim AS builder
 
 # Builder-only tools: system Git and SSH for private dependencies.
@@ -18,10 +18,9 @@ WORKDIR /build
 COPY . /build/
 
 WORKDIR /build/enclave
-# Dev image still gets `spv` so the new code path is exercised even
-# without the production-only `vsock,rgb-validation` combo. Without spv,
-# the enclave fails-closed on any request that carries merkle_proofs,
-# which is what we want - build mismatch should always fail loudly.
+# The dev image keeps `spv` (which implies `rgb-validation`), so the SPV path
+# runs without vsock. Without spv, the enclave fails closed on any request
+# that carries merkle_proofs, so a build mismatch fails loudly.
 #
 # DEBUG build (no `--release`): `allow-seed-import` is one of the dev-only
 # features that `compile_error!`s in a release build (`debug_assertions`
@@ -34,8 +33,8 @@ WORKDIR /build/enclave
 # `ccd` is listed because Concordium signing sits behind that feature; without it
 # every CCD request answers "not compiled in".
 #
-# `bfa-mint` (via the signer role, which implies it) is the only difference in
-# compiled code from Dockerfile.enclave-dev, besides the role itself.
+# Differs from Dockerfile.enclave-dev: the signer role (which implies
+# `bfa-mint`) replaces `rgb-swap`, and `mock-attestation` is on.
 # `ccd` stays in the list: init-enclaves.sh ends by asking each adapter for its
 # CCD_GOVERNANCE public key and fails the whole run if that answers "not
 # compiled in".

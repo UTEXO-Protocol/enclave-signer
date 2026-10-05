@@ -153,6 +153,6 @@ pub enum OutputSeal {
         txid: Option<[u8; 32]>,
         vout: u32,
     },
-    /// Hidden recipient seal (`utxob:...` SHA-256 commitment string).
+    /// Hidden (blinded) seal (`utxob:...` SHA-256 commitment string).
     Confidential { secret_seal: String },
 }

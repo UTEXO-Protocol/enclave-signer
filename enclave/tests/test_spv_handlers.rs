@@ -68,7 +68,7 @@ fn submit_below_checkpoint_returns_error() {
 
     match resp.response {
         Some(ERes::Error(e)) => {
-            assert_eq!(e.code, 3); // VALIDATION_FAILED (Spv error)
+            assert_eq!(e.code, 3); // validation failed (Spv error)
             assert!(
                 e.message.contains("checkpoint"),
                 "expected error to mention checkpoint, got: {}",

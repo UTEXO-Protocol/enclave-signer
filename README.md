@@ -106,10 +106,11 @@ Before it signs, the burn signer:
    2 hours old.
 4. Decodes the `fundsOut` calldata. The encoding must be canonical. Chain,
    contract and deadline must be correct.
-5. Binds the release to the burn: amount, recipient, `sourceBurnTxId`,
-   `sourceChainId`, `settlementData` and `burnId`.
+5. Checks `sourceChainId`, `sourceAddress` and `burnId`.
 6. Checks the BtcRelay finality proof against its own header chain.
-7. Signs the EIP-712 `TeeFundsOut` (or `TeeLzFundsOut`) digest over the
+7. Binds the release to the burn: amount, `sourceBurnTxId`, recipient and
+   `settlementData`.
+8. Signs the EIP-712 `TeeFundsOut` (or `TeeLzFundsOut`) digest over the
    decoded fields.
 
 The burn signer also signs the gas transaction that sends the release to EVM
@@ -203,7 +204,7 @@ request per connection. Frame cap 24 MiB. Schema:
 | `SetClone` | Cloning | burn | Requester installs the sealed seed and goes `Active`. |
 | `SignRawMessage` | - | - | Removed. Always refused. |
 | `Health` | any | all | Readiness: key loaded, header chain fresh. |
-| `ProxyFederation` | - | - | Stub. Returns `NOT_READY`. |
+| `ProxyFederation` | - | - | Not implemented. Always refused (code `1`). |
 
 The "Signer" column is for the mint/burn images. Other builds (combined,
 CCD) keep both directions where their features allow it.
@@ -296,9 +297,7 @@ is not the provisioning path. Use the approved BFA asset, not the swap asset.
 
 Before deploying, record the image/EIF checksum, approved asset, measured PCRs,
 registered key, and Parent endpoint together. Verify a genuine BFA request
-succeeds and an opposite-flow request is rejected. BTC payout-budget validation
-(F06-AF-40) remains a separate control from this asset-provisioning fix
-(F06-NEW-AF-19).
+succeeds and an opposite-flow request is rejected.
 
 All Dockerfiles resolve private dependencies. Supply either a GitHub token
 with read access to those repositories, or the same per-repository deploy keys
@@ -372,8 +371,8 @@ cli --help
 ```
 
 `--addr host:port` or `--addr vsock://<cid>:<port>` selects the enclave.
-Initialize once: use `cli init --cloning-secret <secret>` instead of `cli init`
-to configure a donor. Use a fresh requester for `cli clone`; initialization
+Initialize once: use `cli init --cloning-secret-file <file>` instead of
+`cli init` to configure a donor. Use a fresh requester for `cli clone`; initialization
 and cloning are alternative ways to enter `Active`. Signing subcommands require
 complete proofs and configured pins; see their `--help` and the spec.
 
@@ -486,7 +485,7 @@ Limits and dev knobs:
 | `MAX_MERKLE_PROOFS` | `16384` | Proof-count cap per request. A burn needs one proof for each witness tx in its history. |
 | `MAX_TOTAL_PROOF_BYTES` | 8 MiB | Aggregate proof-bytes cap per request. |
 | `SPV_CHECKPOINT` | unset | Dev builds only: `height:hash[:bits:time[:chainwork]]` moves the SPV anchor forward. Without `chainwork` (Core's `getblockheader` value) every `fundsOut` is refused under `BTC_RELAY_MODE=required`; `none` needs no chainwork. A production-shaped build refuses to boot when set. |
-| `UTEXO_CLONING_SECRET` | unset | Legacy donor secret; ignored with `kms-persistence`, which rejects cloning. Otherwise prefer `init --cloning-secret` at runtime. |
+| `UTEXO_CLONING_SECRET` | unset | Legacy donor secret; ignored with `kms-persistence`, which rejects cloning. Otherwise prefer `init --cloning-secret-file` at runtime. |
 
 ### Parent
 
