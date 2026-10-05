@@ -3,8 +3,8 @@
 //! The tests build the recipient envelope as KMS does (RSAES-OAEP-SHA-256 key
 //! transport, AES-256-CBC content) and open it with `recipient::open_envelope`.
 //! The KMS exchanges are canned HTTP responses through the SDK replay client,
-//! so the signed request and the reply checks run without AWS. The end-to-end
-//! cases need `mock-attestation`, because a real recipient needs `/dev/nsm`.
+//! so the signed request and the reply checks run without AWS. The exchange
+//! cases need `mock-attestation`, which drops the Recipient (no `/dev/nsm`).
 
 use std::time::{Duration, Instant};
 
@@ -340,8 +340,8 @@ fn expired_deadline_never_starts_a_call() {
         .is_err());
 }
 
-/// Canned KMS exchanges. The recipient key is fixed, so a response can be
-/// sealed to it before the call.
+/// Canned KMS exchanges. Under `mock-attestation` KMS gets no Recipient and
+/// answers with `Plaintext`.
 #[cfg(feature = "mock-attestation")]
 mod exchanges {
     use super::*;
@@ -381,10 +381,6 @@ mod exchanges {
         (client, replay)
     }
 
-    fn sealed_seed(seed: &[u8]) -> String {
-        BASE64.encode(seal(&recipient_key().to_public_key(), seed))
-    }
-
     fn sent_body(replay: &StaticReplayClient) -> Value {
         let request = replay.actual_requests().next().expect("one request");
         serde_json::from_slice(request.body().bytes().expect("in-memory body")).unwrap()
@@ -405,7 +401,7 @@ mod exchanges {
             json!({
                 "KeyId": KEY_ARN,
                 "EncryptionAlgorithm": "SYMMETRIC_DEFAULT",
-                "CiphertextForRecipient": sealed_seed(&seed),
+                "Plaintext": BASE64.encode(seed),
             }),
         );
         let recovered = client.decrypt_seed(&[9; 100], deadline()).unwrap();
@@ -440,22 +436,8 @@ mod exchanges {
                 "bitcoin_network": "bitcoin",
             })
         );
-        assert_eq!(
-            body["Recipient"]["KeyEncryptionAlgorithm"],
-            "RSAES_OAEP_SHA_256"
-        );
-        // The attestation document carries the recipient's own public key.
-        let document = BASE64
-            .decode(body["Recipient"]["AttestationDocument"].as_str().unwrap())
-            .unwrap();
-        let verified = crate::attestation::verify_peer_attestation(
-            &document,
-            &attestation_verify::ExpectedPcrs::zero(),
-            None,
-        )
-        .unwrap();
-        let spki = recipient_key().to_public_key().to_public_key_der().unwrap();
-        assert_eq!(verified.enclave_pubkey.as_slice(), spki.as_bytes());
+        // KMS rejects mock attestation documents, so no Recipient is sent.
+        assert!(body.get("Recipient").is_none());
     }
 
     #[test]
@@ -465,7 +447,7 @@ mod exchanges {
             json!({
                 "KeyId": KEY_ARN,
                 "CiphertextBlob": BASE64.encode([17; 200]),
-                "CiphertextForRecipient": sealed_seed(&[1; 64]),
+                "Plaintext": BASE64.encode([1; 64]),
             }),
         );
         assert_eq!(client.generate_ciphertext(deadline()).unwrap(), [17; 200]);
@@ -487,59 +469,43 @@ mod exchanges {
             })
         );
         assert!(body.get("KeySpec").is_none());
+        assert!(body.get("Recipient").is_none());
     }
 
     #[test]
-    fn responses_are_bound_to_the_key_and_never_accept_plaintext() {
+    fn responses_are_bound_to_the_key_and_the_seed_length() {
         let good = || {
             json!({
                 "KeyId": KEY_ARN,
                 "EncryptionAlgorithm": "SYMMETRIC_DEFAULT",
-                "CiphertextForRecipient": sealed_seed(&[3; 64]),
+                "Plaintext": BASE64.encode([3; 64]),
             })
         };
         let other_arn = KEY_ARN.replace("eu-west-1", "eu-west-2");
         let mut wrong_key = good();
         wrong_key["KeyId"] = json!(other_arn);
-        let mut leaked = good();
-        leaked["Plaintext"] = json!(BASE64.encode([3; 64]));
         let mut rsa_algorithm = good();
         rsa_algorithm["EncryptionAlgorithm"] = json!("RSAES_OAEP_SHA_256");
         let mut short_seed = good();
-        short_seed["CiphertextForRecipient"] = json!(sealed_seed(&[3; 32]));
-        let mut no_envelope = good();
-        no_envelope
-            .as_object_mut()
-            .unwrap()
-            .remove("CiphertextForRecipient");
-        let mut garbage = good();
-        garbage["CiphertextForRecipient"] = json!(BASE64.encode(b"not cms"));
+        short_seed["Plaintext"] = json!(BASE64.encode([3; 32]));
+        let mut empty_seed = good();
+        empty_seed["Plaintext"] = json!("");
+        let mut no_seed = good();
+        no_seed.as_object_mut().unwrap().remove("Plaintext");
 
-        for body in [
-            wrong_key,
-            leaked,
-            rsa_algorithm,
-            short_seed,
-            no_envelope,
-            garbage,
-        ] {
+        for body in [wrong_key, rsa_algorithm, short_seed, empty_seed, no_seed] {
             let (client, _) = client_with(200, body);
             assert_custody(
                 client.decrypt_seed(&[9; 100], deadline()).unwrap_err(),
                 CustodyFailure::InvalidResponse,
             );
         }
-        // An empty Plaintext is the documented attested shape.
-        let mut empty_plaintext = good();
-        empty_plaintext["Plaintext"] = json!("");
-        let (client, _) = client_with(200, empty_plaintext);
-        assert!(client.decrypt_seed(&[9; 100], deadline()).is_ok());
 
-        // Generation validates the envelope too, and bounds the blob.
+        // Generation checks the seed length too, and bounds the blob.
         let mut huge = json!({
             "KeyId": KEY_ARN,
             "CiphertextBlob": BASE64.encode(vec![1; MAX_CIPHERTEXT_BYTES + 1]),
-            "CiphertextForRecipient": sealed_seed(&[1; 64]),
+            "Plaintext": BASE64.encode([1; 64]),
         });
         let (client, _) = client_with(200, huge.clone());
         assert_custody(
@@ -547,7 +513,13 @@ mod exchanges {
             CustodyFailure::InvalidResponse,
         );
         huge["CiphertextBlob"] = json!(BASE64.encode([1; 8]));
-        huge["CiphertextForRecipient"] = json!(sealed_seed(&[1; 65]));
+        huge["Plaintext"] = json!(BASE64.encode([1; 65]));
+        let (client, _) = client_with(200, huge.clone());
+        assert_custody(
+            client.generate_ciphertext(deadline()).unwrap_err(),
+            CustodyFailure::InvalidResponse,
+        );
+        huge.as_object_mut().unwrap().remove("Plaintext");
         let (client, _) = client_with(200, huge);
         assert_custody(
             client.generate_ciphertext(deadline()).unwrap_err(),

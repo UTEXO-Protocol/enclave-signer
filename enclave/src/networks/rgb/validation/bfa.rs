@@ -12,7 +12,6 @@ use std::io::Cursor;
 #[cfg(feature = "bfa-validation")]
 use rgbstd::containers::{FileContent, Transfer};
 
-#[cfg(feature = "bfa-validation")]
 use crate::error::{EnclaveError, Result};
 
 #[cfg(feature = "bfa-validation")]
@@ -47,7 +46,6 @@ pub const OS_ASSET: u16 = 4000;
 pub const OS_BRIDGE: u16 = 4014;
 
 /// Decodes one OpId hex string from the parser into 32 bytes.
-#[cfg(feature = "bfa-validation")]
 pub(super) fn decode_opid(hex_opid: &str) -> Result<[u8; 32]> {
     let hex_opid = hex_opid.strip_prefix("0x").unwrap_or(hex_opid);
     let bytes = hex::decode(hex_opid).map_err(|e| {

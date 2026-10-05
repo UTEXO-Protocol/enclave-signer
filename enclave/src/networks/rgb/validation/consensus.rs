@@ -113,17 +113,36 @@ impl RgbValidator {
         // its own transition-type check.
         let last_witness_txid = transfer.bundles.iter().last().map(|wb| wb.witness_id());
 
-        // PSBT bind data for the same bundle: input prevouts (if the bundle
-        // has the full tx) and the validated OpId. Read only if this flow signs
-        // the last transition type (see `crate::networks::rgb::flow`).
+        // Bind data for the same bundle: input prevouts (if the bundle has the
+        // full tx) and the validated OpId. Read for the transition types that
+        // authorize an EVM action: the type this flow signs on a deposit (see
+        // `crate::networks::rgb::flow`) and a burn. The `fundsOut` binds take
+        // the burn OpId from here, not from the flat parser.
         let (last_transfer_witness_prevouts, last_transfer_op_id) = match last_transition {
             Some(ref last)
-                if crate::networks::rgb::flow::is_signing_transition(last.transition_type) =>
+                if crate::networks::rgb::flow::is_signing_transition(last.transition_type)
+                    || last.transition_type == bfa::TS_BURN =>
             {
                 read_last_transfer_witness(&transfer, last.transition_type)?
             }
             _ => (None, None),
         };
+
+        // The two walks must name the same last transition. The flat parser
+        // and the rgbstd walk read the same bytes in the same order, so a
+        // mismatch is a parser change or a bug. Refuse, so no bind downstream
+        // can mix the fields of two transitions.
+        if let (Some(ref last), Some(validated_opid)) = (&last_transition, last_transfer_op_id) {
+            let flat_opid = super::bfa::decode_opid(&last.op_id)?;
+            if flat_opid != validated_opid {
+                return Err(EnclaveError::CrossCheck(format!(
+                    "consignment last transition disagrees between the flat parser (0x{}) and \
+                     the validated transfer (0x{}) - refusing to sign",
+                    hex::encode(flat_opid),
+                    hex::encode(validated_opid)
+                )));
+            }
+        }
 
         // 2. Create the witness resolver. `RgbValidator::new` admits only an
         //    Electrum URL. TLS ends inside the enclave, so a compromised host
