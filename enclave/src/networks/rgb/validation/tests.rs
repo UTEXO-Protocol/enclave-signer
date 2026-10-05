@@ -128,6 +128,7 @@ fn transition_summary_excludes_bridge_right_from_asset_amount() {
             // adversarial. The filter must use the assignment type, not the amount.
             alloc(bfa::OS_BRIDGE, 1_000_000),
         ],
+        metadata: vec![],
     };
 
     let summary = transition_summary(&info).expect("summary");

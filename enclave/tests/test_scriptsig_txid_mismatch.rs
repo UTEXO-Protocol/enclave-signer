@@ -730,6 +730,12 @@ fn native_deposit_signs_and_finalizes_to_the_bound_txid() {
     assert_eq!(inputs_signed, 1);
     let bound = native.psbt.unsigned_tx.compute_txid();
     assert_eq!(bound_witness(&native.deposit.consignment), bound);
+    let rgb_consignment::ConsignmentInfo::Transfer(t) =
+        rgb_consignment::parse(&native.deposit.consignment).expect("parse")
+    else {
+        panic!("expected a Transfer");
+    };
+    assert_eq!(t.genesis.precision, Some(Precision::Micro as u8));
     let final_tx = finalize(&signed, None);
     assert_eq!(final_tx.compute_txid(), bound);
     consumer_validates(

@@ -3762,12 +3762,13 @@ dependencies = [
 [[package]]
 name = "rgb-consignment"
 version = "0.1.0"
-source = "git+ssh://git@github-rgb-consignment/UTEXO-Protocol/consignment-utils.git?rev=6a792af035cc5b011a790831a0732d420a2413e0#6a792af035cc5b011a790831a0732d420a2413e0"
+source = "git+ssh://git@github-rgb-consignment/UTEXO-Protocol/consignment-utils.git?rev=a6c2e4913bfe3b682270bc747311a2cf7160982b#a6c2e4913bfe3b682270bc747311a2cf7160982b"
 dependencies = [
  "amplify",
  "rgb-ops",
  "rgb-strict-types",
  "serde",
+ "serde_json",
  "thiserror 2.0.20",
 ]
 
