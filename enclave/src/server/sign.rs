@@ -59,7 +59,7 @@ pub(super) fn handle_sign(
         verify_funds_in_deposit(ctx, req.amount, source_ref, destination_ref)?;
 
     // Self-owned-outpoint oracle for the send-RGB per-output recipient bind.
-    // The key lock is held only for each lookup, not across Esplora/Electrum calls.
+    // The key lock is held only for each lookup, not across Electrum calls.
     //
     // An outpoint on this PSBT is resolved from its taproot metadata.
     // An outpoint on an earlier tx needs a fetch to read its script. rgb-lib
@@ -490,7 +490,7 @@ fn refuse_unverifiable_funds_in(
             "enclave was not built with --features evm-rpc: refusing to sign a bridge-mode PSBT \
              without independently verifying the FundsIn deposit (the listener-supplied \
              event_valid/event_finalized booleans are no longer trusted). \
-             Rebuild with `--features evm-rpc` (or `helios` for the trustless path)."
+             Rebuild with `--features evm-rpc`."
                 .into(),
         ));
     }

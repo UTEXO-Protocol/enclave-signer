@@ -11,7 +11,7 @@ sequenceDiagram
     participant Rgb as networks::rgb::validation<br/>RgbValidator
     participant Spv as networks::rgb::spv_crosscheck
     participant Chain as spv::HeaderChain
-    participant Esplora as vsock_forwarder →<br/>Electrum / Esplora
+    participant Electrum as vsock_forwarder →<br/>Electrum
     participant Evm as networks::evm::validation
     participant Cx as networks::evm::crosscheck
     participant Sign as networks::evm::signing<br/>+ KeyManager
@@ -28,13 +28,13 @@ sequenceDiagram
         Srv->>Srv: bfa_burn_ancestry_events:<br/>resolve mint_ancestors and verify each EVM lock<br/>through the pinned TLS EVM RPC BEFORE RGB validation
     end
 
-    Note over Srv,Esplora: 1 — validate_source (RGB)
+    Note over Srv,Electrum: 1 — validate_source (RGB)
     Srv->>Rgb: validate_source(RgbSource)
     Rgb->>Rgb: cheap payload gate first:<br/>consignment bytes present, size caps,<br/>keccak256(consignment) == consignment_hash (integrity),<br/>asset_id declared
     Rgb->>Rgb: Transfer::load(...), extract chain_net + witness_txids<br/>+ last transition + burned/total amounts
     Rgb->>Rgb: trusted typesystem pinned per schema_id,<br/>unknown schema ⇒ REFUSE
-    Rgb->>Esplora: resolver (Electrum 15 s / Esplora 30 s timeout)
-    Esplora-->>Rgb: witness tx data
+    Rgb->>Electrum: resolver (15 s timeout)
+    Electrum-->>Rgb: witness tx data
     Rgb->>Rgb: rgb-ops validate(chain_net, trusted_typesystem)<br/>(bfa-mint: + Bridge transitions vs verified FundsIn locks)
     Rgb->>Rgb: contract_id == declared asset_id<br/>(== pinned RGB_ASSET_ID when configured)
     Rgb-->>Srv: SourceProof (amount = TS_BURN MS_BURNED_ASSET —<br/>host rgb_amount is NOT used)

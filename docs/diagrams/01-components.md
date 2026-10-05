@@ -52,7 +52,7 @@ flowchart TB
             NES[signing.rs<br/>EIP-712 MultisigProxy v1<br/>TeeFundsOut / TeeLzFundsOut digest]
         end
         subgraph NRGB [networks/rgb/]
-            NRV[validation/<br/>indexer.rs Electrum/Esplora resolver,<br/>consensus.rs rgb-ops Transfer validation,<br/>consignment.rs decode, schema.rs typesystem pin]
+            NRV[validation/<br/>indexer.rs Electrum resolver,<br/>consensus.rs rgb-ops Transfer validation,<br/>consignment.rs decode, schema.rs typesystem pin]
             NRF[flow/mint_burn.rs (production)<br/>flow/swap.rs (retired)<br/>exactly one per image:<br/>accepted transitions + amount rule]
             NRI[invoice.rs<br/>FundsIn destinationAddress →<br/>blinded seal == recipient leg]
             NRP[psbt_validation.rs<br/>PSBT ↔ consignment anchor,<br/>per-output legs, pinned fee policy<br/>(max rate + max fee, both PSBT paths)]
@@ -77,7 +77,7 @@ flowchart TB
 
     %% External
     NSM[(AWS NSM device<br/>/dev/nsm)]
-    Esp{{Electrum or Esplora indexer}}
+    Esp{{Electrum indexer}}
     VP[(host vsock-proxy<br/>port 8001)]
     EvmRpc{{EVM JSON-RPC}}
     VPe[(host vsock-proxy<br/>port 8002)]
@@ -123,9 +123,9 @@ flowchart TB
     KM --> NES
     KM --> NRSIG
 
-    NRV -->|"Electrum 15 s or Esplora 30 s timeout,<br/>via loopback"| VFwd
+    NRV -->|"Electrum 15 s timeout,<br/>via loopback"| VFwd
     VFwd -->|"vsock CID 3:8001"| VP
-    VP -->|"Electrum TCP/TLS or Esplora HTTP"| Esp
+    VP -->|"Electrum TCP/TLS"| Esp
 
     NEE -.->|"eth_getTransactionReceipt /<br/>eth_blockNumber — TLS to pinned host and CA"| VFwd
     VFwd -->|"vsock 8002"| VPe

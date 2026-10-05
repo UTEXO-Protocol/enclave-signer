@@ -41,7 +41,7 @@ exceptions described below.
 Internet -- orchestrator -- EC2 parent (UNTRUSTED) -- vsock -- Nitro Enclave (TRUSTED)
                                   |                                    |
                               listener, backend,                 key material,
-                              Esplora / EVM-RPC                  validation, signing
+                              Electrum / EVM-RPC                 validation, signing
                               vsock proxies                       (this spec)
 ```
 
@@ -50,7 +50,7 @@ Internet -- orchestrator -- EC2 parent (UNTRUSTED) -- vsock -- Nitro Enclave (TR
 | Nitro hardware + NSM             | measurement (PCRs), attestation signing, entropy | --                                                                                     |
 | Enclave code (this repo)         | validation, key custody, signing                 | -- (the thing being attested)                                                          |
 | Parent host / listener / backend | liveness, transport, data *delivery*             | request claims are checked; the EVM RPC is TLS to a pinned CA; CCD has an explicit trust exception |
-| Esplora / Bitcoin data providers | availability                                     | correctness -- checked against the in-enclave PoW header chain + SPV                   |
+| Electrum / Bitcoin data providers | availability                                   | correctness -- checked against the in-enclave PoW header chain + SPV                   |
 | EVM RPC endpoint (pinned TLS) | receipt/head correctness and availability | the host relays ciphertext only; the endpoint is authenticated, but consensus is not verified (Sec 7.2) |
 | Operator                         | deployment, env pins, the cloning secret         | seed access (never leaves the TEE in plaintext)                                        |
 
@@ -558,7 +558,7 @@ The consignment pipeline (cheap checks first): non-empty payload within
 `MAX_TOTAL_PROOF_BYTES`, `keccak256(consignment) == consignment_hash`
 (integrity only), asset id declared; then full `rgb-ops` validation with the
 trusted typesystem pinned per schema id (unknown schemas rejected) against the
-resolver (Electrum, 15 s timeout, or Esplora REST, 30 s); the validated
+resolver (Electrum, 15 s timeout); the validated
 contract id must then equal the declared asset id and the pinned `RGB_ASSET_ID`
 (on the `fundsOut` path this last leg applies once the bridge is configured;
 on the PSBT path it is unconditional). The RGB-source path then checks SPV

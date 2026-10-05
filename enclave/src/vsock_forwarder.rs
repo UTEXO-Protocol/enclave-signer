@@ -1,5 +1,5 @@
 //! TCP-to-vsock forwarder from the enclave to external services (for example
-//! Esplora). It listens on loopback TCP and sends each connection over vsock to
+//! Electrum). It listens on loopback TCP and sends each connection over vsock to
 //! the parent, where `vsock-proxy` relays it to the real endpoint.
 //!
 //! Trust boundary: the host controls this path. It can drop, delay, reorder or
@@ -17,19 +17,11 @@ use vsock::VsockStream;
 /// Parent instance CID in Nitro enclaves is always 3.
 const PARENT_CID: u32 = 3;
 
-/// Start a background thread that forwards `127.0.0.1:{local_port}` to the
-/// parent (vsock CID 3), port `vsock_port`. Untrusted path: see the module docs.
+/// Start a background thread that forwards each connection on `listener` to
+/// the parent (vsock CID 3), port `vsock_port`. Untrusted path: see the module
+/// docs.
 ///
 /// Errors are logged and never stop the enclave.
-pub fn start_forwarder(local_port: u16, vsock_port: u32) -> io::Result<()> {
-    spawn(
-        TcpListener::bind(format!("127.0.0.1:{local_port}"))?,
-        vsock_port,
-    );
-    Ok(())
-}
-
-/// [`start_forwarder`] on a bound `listener`.
 pub fn spawn(listener: TcpListener, vsock_port: u32) {
     let local_port = listener.local_addr().map_or(0, |a| a.port());
     tracing::info!(

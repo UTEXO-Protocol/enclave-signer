@@ -13,7 +13,7 @@ flowchart TB
     subgraph EC2 [EC2 instance — Nitro-enabled, UNTRUSTED parent host]
         Parent[utexo-bridge-parent<br/>tonic gRPC, GRPC_HOST:GRPC_PORT<br/>―<br/>Default 127.0.0.1:5000.<br/>Deployed hosts: 0.0.0.0:50051-50053,<br/>one parent per enclave CID 16 / 18 / 20.<br/>30 s timeout per enclave RPC.<br/>USE_VSOCK=true in production.]
         Cli[utexo-bridge-parent-cli<br/>attest-verify CLI]
-        VP[vsock-proxy port 8001<br/>―<br/>Allowlist → Electrum ssl:// or Esplora.]
+        VP[vsock-proxy port 8001<br/>―<br/>Allowlist → Electrum ssl://.]
         VPe["vsock-proxy 8002<br/>―<br/>evm-rpc builds only.<br/>8002 → EVM JSON-RPC TLS port.<br/>Relays TLS bytes only."]
 
         subgraph ENCL [AWS Nitro Enclave — TRUSTED, PCR-pinned]
@@ -22,13 +22,13 @@ flowchart TB
             State[(EnclaveState<br/>Phase + KeyManager in SecretBox)]
             Replay[(NonceReplayGuard — cloning<br/>≤10 000 entries, 1 h TTL<br/>+ op_replay_guard — bridge ops<br/>≤100 000 entries, 24 h TTL)]
             Fwd[vsock_forwarder<br/>loopback → vsock, per-port<br/>Electrum port / EVM RPC TLS port<br/>Electrum host pinned to loopback in /etc/hosts]
-            RgbVal[RgbValidator<br/>rgb-ops + Electrum or Esplora]
+            RgbVal[RgbValidator<br/>rgb-ops + Electrum]
             EvmVer[events.rs verifier<br/>pinned TLS RPC<br/>receipt/head correctness trusted]
             NSM[/dev/nsm — Nitro Security Module/]
         end
     end
 
-    Esp{{Electrum / Esplora}}
+    Esp{{Electrum}}
     EvmRpc{{EVM JSON-RPC}}
 
     V -->|"gRPC GRPC_PORT<br/>AttestedPublicKey(nonce)"| Parent
@@ -48,7 +48,7 @@ flowchart TB
     EvmVer --> Fwd
     Fwd -->|"vsock CID 3:8001"| VP
     Fwd -->|"vsock CID 3:8002"| VPe
-    VP -->|"Electrum TCP/TLS or Esplora HTTP"| Esp
+    VP -->|"Electrum TCP/TLS"| Esp
     VPe -->|"TLS bytes (ends in enclave)"| EvmRpc
 ```
 

@@ -1,5 +1,8 @@
 //! Fixtures shared by the crate's unit tests. Test builds only.
 
+#[cfg(feature = "rgb-validation")]
+pub(crate) mod electrum_stub;
+
 /// A `uint256` ABI word holding `value`.
 #[cfg(feature = "evm-rpc")]
 pub(crate) fn abi_word(value: u64) -> [u8; 32] {

@@ -104,9 +104,9 @@ pub fn policy_cases(policy: &AttestedPolicy) -> Vec<(&'static str, Vec<u8>)> {
     alter!(evm_source, EvmDataSource::Disabled);
     // The Rust enum has only SpvVerified. A peer with another policy
     // vocabulary can still sign a byte encoding with a different source.
-    // V7 layout: [version, production, vanilla, role, attestation, evm, btc].
+    // V8 layout: [version, production, vanilla, role, attestation, evm, btc].
     let mut btc_source = policy.to_bytes();
-    assert_eq!(&btc_source[..2], &[7, 1]);
+    assert_eq!(&btc_source[..2], &[8, 1]);
     btc_source[6] = 0;
     cases.push(("btc_source", btc_source));
     alter!(chain_id, *chain_id ^ 1);
@@ -127,7 +127,6 @@ pub fn policy_cases(policy: &AttestedPolicy) -> Vec<(&'static str, Vec<u8>)> {
         x
     });
     alter!(evm_min_confirmations, *evm_min_confirmations ^ 1);
-    alter!(evm_checkpoint, Some([0x91; 32]));
     alter!(electrum_host, format!("{electrum_host}x"));
     alter!(
         evm_rpc_tls,

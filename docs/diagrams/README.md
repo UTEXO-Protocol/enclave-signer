@@ -8,7 +8,7 @@ are not authorization guarantees.
 
 | File | What it shows |
 |---|---|
-| [`01-components.md`](01-components.md) | Crate-level component structure across `enclave`, `parent`, `attestation-verify`, and the external infrastructure (NSM, Esplora, vsock-proxy). |
+| [`01-components.md`](01-components.md) | Crate-level component structure across `enclave`, `parent`, `attestation-verify`, and the external infrastructure (NSM, Electrum, vsock-proxy). |
 | [`02-deployment.md`](02-deployment.md) | Production deployment: Orchestrator → EC2 (parent) → Nitro Enclave → vsock-proxy → Electrum and EVM RPC, with trust zones. |
 | [`03-seq-sign-evm.md`](03-seq-sign-evm.md) | **Burn** (RGB → EVM) on the burn signer: mint-ancestry deposits, RGB validation, SPV gate, calldata checks, release-to-burn binds (pools route), BtcRelay proof, EIP-712 signature. |
 | [`04-seq-sign-psbt.md`](04-seq-sign-psbt.md) | **Mint** (EVM → RGB) on the mint signer, in code order: replay precheck, deposit receipt, mint ancestry, RGB validation, PSBT bind, fee, recipient, BIP-86 key-path signing on the colored account. |

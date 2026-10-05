@@ -41,7 +41,6 @@ fn main() {
         &bridge_config,
         utexo_bridge_enclave::policy::EvmDataSource::Disabled,
         None,
-        None,
         "",
         evm_min_confirmations,
     );
@@ -52,7 +51,6 @@ fn main() {
     // No cloning with KMS persistence: every replica recovers its seed from KMS.
     #[cfg(not(feature = "kms-persistence"))]
     bootstrap::install_env_cloning_secret(&state);
-    bootstrap::start_vsock_forwarders();
 
     // The policy and chain clients come with `SetEndpoints`. Until then the
     // enclave signs nothing.

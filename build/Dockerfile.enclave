@@ -37,7 +37,6 @@ ENV CARGO_INCREMENTAL=0 \
     RUSTFLAGS="--remap-path-prefix=/build=/src -C debuginfo=0 -C strip=symbols"
 # Build the RGB swap, BFA validation, and CCD features.
 # bfa-validation enables evm-rpc through the host proxy on port 8002.
-# This image uses RawRpc without Helios.
 # For debug tests only: allow-debug-pcrs accepts all-zero peer PCRs.
 # Leave this argument empty for production builds. (F03-AF-12)
 ARG ENCLAVE_DEBUG_FEATURES=""

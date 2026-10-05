@@ -9,13 +9,12 @@ use super::consignment::{
     extract_transition_summary, read_last_transfer_witness, read_last_transition_burn_recipient,
     read_last_transition_burned_asset,
 };
-use super::indexer::{RgbValidator, ELECTRUM_WITNESS_TIMEOUT_SECS};
+use super::indexer::RgbValidator;
 use super::schema::trusted_typesystem_for_schema;
 use super::types::ValidatedConsignment;
 use crate::error::EnclaveError;
 use crate::error::Result;
 use rgbstd::containers::{ConsignmentExt, FileContent, Transfer};
-use rgbstd::indexers::esplora_blocking::esplora_client;
 use rgbstd::indexers::AnyResolver;
 #[cfg(feature = "bfa-validation")]
 use rgbstd::persistence::MemContract;
@@ -145,33 +144,21 @@ impl RgbValidator {
             }
         }
 
-        // 2. Create the witness resolver. ssl:// or tcp:// selects Electrum,
-        //    other schemes select Esplora REST. Production uses Electrum: TLS
-        //    ends inside the enclave, so a compromised host cannot forge
-        //    witness data. The Esplora `.timeout()` limits a stalled call.
-        let is_electrum =
-            self.indexer_url.starts_with("ssl://") || self.indexer_url.starts_with("tcp://");
-        let mut resolver = if is_electrum {
-            // `Config::default()` has `timeout: None`, so a stalled read
-            // blocks the worker thread forever (see ELECTRUM_WITNESS_TIMEOUT_SECS).
-            // Use this re-export so that `Config` matches
-            // `AnyResolver::electrum_blocking`.
-            use rgbstd::indexers::electrum_blocking::electrum_client;
-            let electrum_cfg = electrum_client::Config::builder()
-                .timeout(Some(ELECTRUM_WITNESS_TIMEOUT_SECS as u8))
-                .build();
-            AnyResolver::electrum_blocking(&self.indexer_url, Some(electrum_cfg)).map_err(|e| {
+        // 2. Create the witness resolver. `RgbValidator::new` admits only an
+        //    Electrum URL. TLS ends inside the enclave, so a compromised host
+        //    cannot forge witness data.
+        // `Config::default()` has `timeout: None`, so a stalled read blocks the
+        // worker thread forever (see ELECTRUM_WITNESS_TIMEOUT_SECS). Use this
+        // re-export so that `Config` matches `AnyResolver::electrum_blocking`.
+        use rgbstd::indexers::electrum_blocking::electrum_client;
+        let electrum_cfg = electrum_client::Config::builder()
+            .timeout(Some(self.timeout_secs as u8))
+            .build();
+        let mut resolver = AnyResolver::electrum_blocking(&self.indexer_url, Some(electrum_cfg))
+            .map_err(|e| {
                 tracing::error!(indexer_url = %self.indexer_url, "electrum resolver creation failed: {e}");
                 EnclaveError::CrossCheck(format!("electrum resolver creation failed: {e}"))
-            })?
-        } else {
-            let builder =
-                esplora_client::Builder::new(&self.indexer_url).timeout(self.http_timeout_secs);
-            AnyResolver::esplora_blocking(builder).map_err(|e| {
-                tracing::error!(indexer_url = %self.indexer_url, "esplora resolver creation failed: {e}");
-                EnclaveError::CrossCheck(format!("esplora resolver creation failed: {e}"))
-            })?
-        };
+            })?;
 
         // The resolver treats the consignment txs as tentative (not mined).
         resolver.add_consignment_txes(&transfer);
@@ -192,7 +179,7 @@ impl RgbValidator {
         };
 
         // 4. Run full RGB validation (blocking calls to the indexer).
-        tracing::debug!(%contract_id, "calling rgbstd validate (this may block on Esplora)");
+        tracing::debug!(%contract_id, "calling rgbstd validate (this may block on Electrum)");
         // A BFA mint script ends with `cea`. The plain validator decodes it as
         // `Fail`, so only the ether extension can run it. The schema gate
         // admits only BFA, so no schema branch is necessary.

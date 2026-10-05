@@ -10,7 +10,7 @@
 //! KMS sends streaming BER, so `ber.rs` converts it to DER before the strict
 //! decode.
 
-use aes::cipher::{block_padding::Pkcs7, BlockDecryptMut, KeyIvInit};
+use aes::cipher::{block_padding::Pkcs7, BlockModeDecrypt, KeyIvInit};
 use cms::cert::x509::der::asn1::{ObjectIdentifier, OctetString};
 use cms::cert::x509::der::Decode;
 use cms::content_info::ContentInfo;
@@ -110,7 +110,7 @@ pub(super) fn open_envelope(key: &RsaPrivateKey, envelope: &[u8]) -> Result<Zero
         .as_bytes();
     let plaintext = Aes256CbcDec::new_from_slices(&cek, iv.as_bytes())
         .map_err(|_| reject("AES-CBC key or IV length"))?
-        .decrypt_padded_vec_mut::<Pkcs7>(ciphertext)
+        .decrypt_padded_vec::<Pkcs7>(ciphertext)
         .map_err(|_| reject("AES-CBC padding"))?;
     Ok(Zeroizing::new(plaintext))
 }

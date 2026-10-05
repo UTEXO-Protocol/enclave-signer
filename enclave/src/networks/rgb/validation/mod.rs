@@ -3,7 +3,7 @@
 //! This module only wires the submodules:
 //!
 //! - `source.rs`: validate an `RgbSource` payload and its SPV evidence.
-//! - `indexer.rs`: the Esplora/Electrum client that `RgbValidator` uses.
+//! - `indexer.rs`: the Electrum client that `RgbValidator` uses.
 //! - `consensus.rs`: run rgbstd validation over the consignment bytes.
 //! - `consignment.rs`: decode the resulting `Transfer` into plain shapes.
 //! - `types.rs`: those shapes.

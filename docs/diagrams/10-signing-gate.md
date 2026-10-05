@@ -11,7 +11,7 @@ flowchart TD
         p1w --> p1wq{pass?}
         p1wq -->|no| p1wr[REFUSE — payload gate]:::refuse
         p1wq -->|yes| p1a["Transfer::load + typesystem pinned<br/>per schema_id"]
-        p1a --> p1b[rgb-ops validate against the resolver<br/>Electrum 15 s / Esplora 30 s timeout]
+        p1a --> p1b[rgb-ops validate against the resolver<br/>Electrum 15 s timeout]
         p1b --> p1q{valid?}
         p1q -->|no| p1r[REFUSE — invalid consignment]:::refuse
         p1q -->|yes| p1c{"contract_id == declared asset_id<br/>(== pinned RGB_ASSET_ID when configured)?"}

@@ -436,7 +436,7 @@ impl KmsClient {
         if let Some((_, key)) = &self.test_transport {
             return Recipient::new(key.clone());
         }
-        let key = RsaPrivateKey::new(&mut rand_core::OsRng, RECIPIENT_RSA_BITS)
+        let key = RsaPrivateKey::new(&mut rsa::rand_core::OsRng, RECIPIENT_RSA_BITS)
             .map_err(|_| custody(CustodyFailure::Internal))?;
         Recipient::new(key)
     }
