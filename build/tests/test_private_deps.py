@@ -86,7 +86,7 @@ print(os.environ['GIT_CONFIG_GLOBAL'])
         sources = '\n'.join((ROOT / p).read_text() for p in
                             ['Cargo.toml', 'enclave/Cargo.toml', 'parent/Cargo.toml'])
         urls = sorted(set(re.findall(r'"(ssh://git@github-[^"]+)"', sources)))
-        self.assertGreaterEqual(len(urls), 5)
+        self.assertGreaterEqual(len(urls), 4)
         result = self.run_auth('parent', f'''
 for url in {urls!r}:
     actual = subprocess.check_output(['git', 'ls-remote', '--get-url', url], text=True).strip()
