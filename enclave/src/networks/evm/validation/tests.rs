@@ -232,11 +232,50 @@ fn lz_funds_out_calldata(amount: u64, destination_chain_id: u64) -> Vec<u8> {
     .abi_encode()
 }
 
+/// `lz_release` that matches `lz_funds_out_calldata(1000, _)`.
+fn lz_release() -> crate::proto::LzReleaseParams {
+    let mut recipient = vec![0u8; 32];
+    recipient[31] = 0x05;
+    crate::proto::LzReleaseParams {
+        dst_eid: 30101,
+        min_amount_ld: 1000,
+        recipient,
+    }
+}
+
 fn lz_destination(destination_chain_id: u64) -> EvmDestination {
     EvmDestination {
         call_data: lz_funds_out_calldata(1000, destination_chain_id),
+        lz_release: Some(lz_release()),
         ..destination()
     }
+}
+
+// F05-NEW-AF-12: `lz_release` is present exactly when the selector is
+// `lzFundsOut`. The two valid forms pass above. The two mixed forms fail here.
+
+#[test]
+fn rejects_lz_selector_without_lz_release() {
+    let destination = EvmDestination {
+        lz_release: None,
+        ..lz_destination(137)
+    };
+    with_ctx(&config(), |ctx| {
+        let err = destination_or_err(&destination, ctx);
+        assert!(err.contains("requires lz_release"), "got: {err}");
+    });
+}
+
+#[test]
+fn rejects_direct_selector_with_lz_release() {
+    let destination = EvmDestination {
+        lz_release: Some(lz_release()),
+        ..destination()
+    };
+    with_ctx(&config(), |ctx| {
+        let err = destination_or_err(&destination, ctx);
+        assert!(err.contains("only valid with lzFundsOut"), "got: {err}");
+    });
 }
 
 /// The entrypoint route settles on a remote chain, so its calldata
@@ -556,6 +595,7 @@ fn entrypoint_route_surfaces_its_release_identity() {
         sourceBurnTxId: FixedBytes([0x6c; 32]),
     }
     .abi_encode();
+    destination.lz_release = Some(lz_release());
     with_ctx(&config(), |ctx| {
         assert_eq!(
             release_of(&destination, ctx),
