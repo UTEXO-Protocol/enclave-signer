@@ -62,12 +62,9 @@ pub struct ProductionPolicy {
     /// Attestation root of trust. Always [`AttestationMode::Real`] in
     /// production: mock is a release `compile_error!` in `lib.rs`.
     pub attestation: AttestationMode,
-    /// EVM `FundsIn` verification source (pinned TLS, plaintext RPC, Helios or
+    /// EVM `FundsIn` verification source (pinned TLS, plaintext RPC or
     /// disabled). Attested.
     pub evm_source: EvmDataSource,
-    /// The Helios weak-subjectivity checkpoint (beacon block root). Required
-    /// only when `evm_source` is [`EvmDataSource::HeliosVerified`]. Attested.
-    pub evm_checkpoint: Option<[u8; 32]>,
     /// Host of the Electrum server set at launch.
     pub electrum_host: String,
     /// The EVM RPC TLS host and CA hash. Required when `evm_source` is
@@ -151,7 +148,6 @@ impl SecurityPolicy {
         ctx: &BuildContext,
         bridge: &BridgeConfig,
         evm_source: EvmDataSource,
-        evm_checkpoint: Option<[u8; 32]>,
         evm_rpc_tls: Option<EvmRpcTlsPin>,
         electrum_host: &str,
         evm_min_confirmations: u64,
@@ -190,7 +186,6 @@ impl SecurityPolicy {
             signer_role: ctx.signer_role,
             attestation: AttestationMode::Real,
             evm_source,
-            evm_checkpoint,
             electrum_host: electrum_host.to_string(),
             evm_rpc_tls,
             // `rgb-validation` implies `spv` (lib.rs `compile_error!`).
@@ -246,7 +241,6 @@ impl SecurityPolicy {
                 funds_in_contract: p.funds_in_contract,
                 token_contract: p.token_contract,
                 evm_min_confirmations: p.evm_min_confirmations,
-                evm_checkpoint: p.evm_checkpoint,
                 electrum_host: p.electrum_host.clone(),
                 evm_rpc_tls: p.evm_rpc_tls.clone(),
                 // Unset commits as all-zero, which the gas path never accepts.
@@ -321,15 +315,6 @@ impl ProductionPolicy {
             return Err(
                 "production policy uses the pinned TLS EVM source without a valid pin. Set \
                  the EVM RPC host and CA at launch."
-                    .into(),
-            );
-        }
-        // Without a pinned checkpoint, Helios starts from an untrusted root.
-        if self.evm_source == EvmDataSource::HeliosVerified && self.evm_checkpoint.is_none() {
-            return Err(
-                "production policy uses the Helios EVM source but pins no weak-subjectivity \
-                 checkpoint. Set HELIOS_CHECKPOINT to a recent beacon block root so the trust \
-                 root is fixed and attested."
                     .into(),
             );
         }

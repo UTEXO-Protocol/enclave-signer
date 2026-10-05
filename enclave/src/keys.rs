@@ -6,7 +6,7 @@ use bitcoin::psbt::Psbt;
 use bitcoin::secp256k1::{PublicKey, Secp256k1, SecretKey};
 use bitcoin::Network;
 use ed25519_dalek::{Signer, SigningKey as Ed25519SigningKey};
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use k256::ecdsa::SigningKey as K256SigningKey;
 use secrecy::{ExposeSecret, SecretBox};
 use sha2::Sha512;
@@ -357,9 +357,7 @@ impl KeyManager {
         let signing_key = K256SigningKey::from_slice(self.evm_secret.expose_secret())
             .map_err(|e| EnclaveError::Signing(format!("evm key: {e}")))?;
 
-        let (signature, recovery_id) = signing_key
-            .sign_prehash_recoverable(message_hash)
-            .map_err(|e| EnclaveError::Signing(format!("ecdsa sign: {e}")))?;
+        let (signature, recovery_id) = signing_key.sign_prehash_recoverable(message_hash);
 
         let mut result = [0u8; 65];
         result[..64].copy_from_slice(&signature.to_bytes());
@@ -373,9 +371,7 @@ impl KeyManager {
         let signing_key = K256SigningKey::from_slice(self.evm_gas_tx_secret.expose_secret())
             .map_err(|e| EnclaveError::Signing(format!("evm gas tx key: {e}")))?;
 
-        let (signature, recovery_id) = signing_key
-            .sign_prehash_recoverable(message_hash)
-            .map_err(|e| EnclaveError::Signing(format!("ecdsa sign gas tx: {e}")))?;
+        let (signature, recovery_id) = signing_key.sign_prehash_recoverable(message_hash);
 
         let mut result = [0u8; 65];
         result[..64].copy_from_slice(&signature.to_bytes());

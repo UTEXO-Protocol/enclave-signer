@@ -41,7 +41,7 @@ exceptions described below.
 Internet -- orchestrator -- EC2 parent (UNTRUSTED) -- vsock -- Nitro Enclave (TRUSTED)
                                   |                                    |
                               listener, backend,                 key material,
-                              Esplora / EVM-RPC                  validation, signing
+                              Electrum / EVM-RPC                 validation, signing
                               vsock proxies                       (this spec)
 ```
 
@@ -50,7 +50,7 @@ Internet -- orchestrator -- EC2 parent (UNTRUSTED) -- vsock -- Nitro Enclave (TR
 | Nitro hardware + NSM             | measurement (PCRs), attestation signing, entropy | --                                                                                     |
 | Enclave code (this repo)         | validation, key custody, signing                 | -- (the thing being attested)                                                          |
 | Parent host / listener / backend | liveness, transport, data *delivery*             | request claims are checked; the EVM RPC is TLS to a pinned CA; CCD has an explicit trust exception |
-| Esplora / Bitcoin data providers | availability                                     | correctness -- checked against the in-enclave PoW header chain + SPV                   |
+| Electrum / Bitcoin data providers | availability                                   | correctness -- checked against the in-enclave PoW header chain + SPV                   |
 | EVM RPC endpoint (pinned TLS) | receipt/head correctness and availability | the host relays ciphertext only; the endpoint is authenticated, but consensus is not verified (Sec 7.2) |
 | Operator                         | deployment, env pins, the cloning secret         | seed access (never leaves the TEE in plaintext)                                        |
 
@@ -111,7 +111,7 @@ enables `kms-persistence`. Production images are built with
 (`mock-attestation`, `allow-seed-import`) are `compile_error!` in release.
 
 **Wire protocol** enclave<->parent: 4-byte little-endian length prefix + prost
-protobuf, 4 MiB frame cap, no version field (`framing.rs`). The consignment
+protobuf, 24 MiB frame cap, no version field (`framing.rs`). The consignment
 resolver and the EVM RPC are reached through in-enclave loopback forwarders
 that bridge over vsock to host-side `vsock-proxy` instances (vsock ports 8001
 and 8002); the enclave has no direct network stack.
@@ -284,8 +284,10 @@ the enclave rewrites it.
 release settles. The enclave verifies every `FundsIn` lock behind the burn's
 mint ancestry itself (receipt, pinned emitter, RGB OpId, depth) and reads the
 `BridgeFundsIn` record from the same receipt. It then requires the cited
-pairs to equal those records exactly: set equality, no duplicates, canonical
-encoding, and at least one verified lock.
+pairs to equal those records exactly: set equality, canonical encoding,
+strictly ascending `operationId` order (so no duplicates), and at least one
+verified lock. `burnId` hashes the raw bytes, so the strict order gives one
+`burnId` per burn (F05-NEW-AF-04).
 
 **Burn identity bind.** Since bridge PR #152 the release carries
 `sourceBurnTxId`, the RGB OpId of the burn being settled, and `Bridge.fundsOut`
@@ -300,8 +302,7 @@ contract rejects a zero id but cannot check its meaning, so the enclave MUST:
 same transition the amount is read from), and `sourceAddress` is empty
 (`RGBVerifier` reverts otherwise; RGB has no source-address concept). Together
 with the settlement bind this gives one validated burn exactly one `burnId`
-on the pools route (Sec 9, P6). The LayerZero route does not have this
-property (see below).
+on both routes (Sec 9, P6).
 
 **Source chain bind.** The Router and CommissionManager key the verifier, the
 settlement module and the commission rate on the `(sourceChainId,
@@ -332,21 +333,17 @@ signer role: the **mint signer** compiles only the EVM -> RGB direction (mint
 PSBT, `SignBtc`), the **burn signer** only the RGB -> EVM direction
 (`fundsOut`, gas tx). Each refuses the other direction, runs on its own seed,
 and attests its role in the policy commitment (`signer_role`). Independently of the flow, the enclave
-recomputes `burnId` and refuses a mismatch. On the pools route it also binds
+recomputes `burnId` and refuses a mismatch. On both routes it also binds
 each enclave-checkable `burnId` input: `sourceBurnTxId` to the RGB OpId,
 `sourceAddress` to empty, `settlementData` (BFA) to the ancestry locks
 (Sec 9, P6).
 
-**LayerZero route gap.** On the `lzFundsOut` route, destination validation
-gives no decoded `fundsOut` parameters, so `apply_funds_out_binding` returns
-early. These binds do NOT run on that route: the exact amount
-(`MS_BURNED_ASSET == amount`), the recipient (`MS_BURN_RECIPIENT`),
-`sourceBurnTxId == OpId`, the `settlementData` set equality, and the BtcRelay
-proof. The route still checks: SPV of the witnesses, `TS_BURN` with
-burned amount >= calldata amount, `sourceChainId == 96`, empty
-`sourceAddress`, `burnId` self-consistency, the `destinationChainId` rule, and
-`lz_release` == calldata. The `lz_release` fields are checked against the
-request, not against the burn. See Sec 13.
+**LayerZero route.** `lzFundsOut` runs the same binds as `fundsOut` (#264):
+the exact amount (`MS_BURNED_ASSET == amount`), the recipient
+(`MS_BURN_RECIPIENT` == the LayerZero `recipient`), `sourceBurnTxId == OpId`,
+the `settlementData` bind, and the BtcRelay proof. `dst_eid` and
+`min_amount_ld` are checked against the request only, because the burn does
+not name a destination chain. See Sec 13.
 
 [Sign EVM](diagrams/03-seq-sign-evm.md)
 
@@ -561,7 +558,7 @@ The consignment pipeline (cheap checks first): non-empty payload within
 `MAX_TOTAL_PROOF_BYTES`, `keccak256(consignment) == consignment_hash`
 (integrity only), asset id declared; then full `rgb-ops` validation with the
 trusted typesystem pinned per schema id (unknown schemas rejected) against the
-resolver (Electrum, 15 s timeout, or Esplora REST, 30 s); the validated
+resolver (Electrum, 15 s timeout); the validated
 contract id must then equal the declared asset id and the pinned `RGB_ASSET_ID`
 (on the `fundsOut` path this last leg applies once the bridge is configured;
 on the PSBT path it is unconditional). The RGB-source path then checks SPV
@@ -618,10 +615,10 @@ delegated to the receiving contract and known gaps. Enforced checks fail closed.
 |-----|-------------------------------------------------------------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | P1  | submitted RGB consignment is valid (`rgbstd` full validation) | OK                                                                                                                                                               |
 | P2  | consignment proves the expected transition                  | OK -- the last transition MUST be `TS_BURN` (amount from `MS_BURNED_ASSET`). The `bfa-mint` build also validates every `TS_BRIDGE` in the consignment against its own verified `FundsIn` lock. Any other shape is refused |
-| P3  | unlock amount equals the consignment-derived amount         | OK on the pools route -- the amount is the burn's `MS_BURNED_ASSET` (host `rgb_amount` is ignored) and MUST equal `fundsOut.amount` exactly (`flow::assert_funds_out_amount`; `fundsOut.amount` is gross, commission is taken on-chain). LayerZero route: only burned >= amount (Sec 7.1) |
+| P3  | unlock amount equals the consignment-derived amount         | OK on the pools route -- the amount is the burn's `MS_BURNED_ASSET` (host `rgb_amount` is ignored) and MUST equal `fundsOut.amount` exactly (`flow::assert_funds_out_amount`; `fundsOut.amount` is gross, commission is taken on-chain). Same on the LayerZero route |
 | P4  | calldata is well-formed                                     | OK -- two allowlisted selectors (`fundsOut`, `lzFundsOut`), 64 KiB cap, canonical ABI decode + re-encode byte-equality, `destinationChainId` rule per route |
 | P5  | payload binds destination chain / contract / **recipient**  | OK on the pools route -- chain + contract pinned; the BFA burn carries `MS_BURN_RECIPIENT` and the enclave refuses a release whose calldata names a different address. LayerZero route: no recipient bind (Sec 7.1) |
-| P6 | release identifiers and settlement | Both routes: `sourceChainId == 96`, `sourceAddress` empty, and `burnId` recomputed in-enclave (`validate_burn_id`). Pools route only: `sourceBurnTxId` MUST equal the settling transition's RGB OpId (non-zero), and `settlementData` MUST be canonical with exact set equality of `(operationId, netAmount)` ancestry locks, no duplicates and at least one lock. LayerZero route: these two binds do not run (Sec 7.1) |
+| P6 | release identifiers and settlement | Both routes: `sourceChainId == 96`, `sourceAddress` empty, and `burnId` recomputed in-enclave (`validate_burn_id`). Pools route only: `sourceBurnTxId` MUST equal the settling transition's RGB OpId (non-zero), and `settlementData` MUST be canonical with exact set equality of `(operationId, netAmount)` ancestry locks, strictly ascending `operationId` (no duplicates) and at least one lock. LayerZero route: these two binds do not run (Sec 7.1) |
 | P7  | referenced Bitcoin txs are in accepted chain history        | OK                                                                                                                                                               |
 | P8  | Bitcoin inclusion proofs valid against the in-enclave chain | OK; plus, on the pools route, the calldata `proof` is required (fail-closed): `source.height` is pinned to the block anchoring the consignment's last witness tx (re-verified under one lock guard), the enclave must hold a header at `latest.height`, and `latest` must be within `MAX_RELAY_TIP_LAG_BLOCKS = 100` of the enclave tip. Under `BTC_RELAY_MODE=required` (the default, and the only mode `ProductionPolicy::check_invariants` boots with) each `commitmentHash` word must equal `keccak256` of BtcRelay's 160-byte `StoredBlockHeader` that the enclave rebuilds at that height from its own chain (chainWork from the checkpoint's `chain_work`); a zero word is refused, and a record that needs a block below the checkpoint is refused (#57/#122). `BTC_RELAY_MODE=none` is for a local stand with no BtcRelay (route verifier `NullVerifier`): both words must be zero and the compare is skipped, the height/anchor/freshness binds stay. No build flag takes part in the choice |
 | P9  | corresponding EVM lock record exists for the same operation | on-chain for this direction; for EVM->RGB the enclave verifies `FundsIn` itself (Sec 7.2)                                                                         |
@@ -631,7 +628,8 @@ delegated to the receiving contract and known gaps. Enforced checks fail closed.
 The enclave signs `burnId` and the other decoded fields into the typed digest.
 A signature is not a check of their meaning. So `sourceBurnTxId`,
 `sourceAddress` and `settlementData` each have their own bind above.
-Settlement set equality does not require a unique ordering of deposit pairs.
+The strict `operationId` order gives one `settlementData` byte form per
+pair set, so a reorder cannot make a new `burnId` on the pools route.
 "Ancestry" is every `TS_BRIDGE` in the consignment, not only the mints that
 fed the burned allocation.
 End-to-end release uniqueness also depends on contract checks outside this repo
@@ -702,12 +700,10 @@ CCD builds. The swap flow is retired. The default feature set still has
 
 Known limits. Read them before deployment.
 
-- **LayerZero release route.** On `lzFundsOut` the burn signer does not bind
-  the exact amount, the recipient, `sourceBurnTxId`, `settlementData` or the
-  BtcRelay proof to the burn (Sec 7.1). One valid burn can give releases with
-  different LayerZero recipients. A new `sourceBurnTxId` gives a new `burnId`,
-  so the same burn can give more than one release. Do not enable this route
-  until the binds also apply to it.
+- **LayerZero destination chain.** `lzFundsOut` runs the same burn binds as
+  `fundsOut` (#264). The burn does not name a destination chain, so `dstEid`
+  is not bound to the burn. A compromised backend can pay the bound recipient
+  address on another LayerZero chain. A fix needs a burn schema field.
 - **Release replay.** The burn signer keeps no release state. Replay
   protection is the `MultisigProxy` nonce and the Bridge `burnId` check. The
   EIP-712 deadline has no upper limit.

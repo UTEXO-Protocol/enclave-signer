@@ -687,7 +687,6 @@ fn run_clone(
     donor_grpc: &str,
     donor_evm: &str,
 ) -> Result<clone_completion::Completion, Box<dyn std::error::Error>> {
-    use rand::RngCore;
     use utexo_bridge_parent::grpc_proto::parent_service_client::ParentServiceClient;
     use utexo_bridge_parent::grpc_proto::{AttestedPublicKeyRequest, CloneRequest};
 
@@ -735,7 +734,7 @@ fn run_clone(
     // extend reconciliation after the requester commits.
     println!("[3/4] Fetching donor identity before SetClone...");
     let mut nonce = [0u8; 32];
-    rand::thread_rng().fill_bytes(&mut nonce);
+    rand::fill(&mut nonce);
     let donor_bundle = rt.block_on(async {
         let endpoint = donor_endpoint.clone();
         let mut grpc = ParentServiceClient::new(endpoint.connect().await?);

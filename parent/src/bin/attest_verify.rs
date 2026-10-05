@@ -68,8 +68,8 @@ struct Cli {
     expect_signer_role: Option<String>,
 
     /// Expected EVM `FundsIn` data source in the commitment: `tls` (RPC over
-    /// pinned TLS, used by the shipped image), `helios`, `raw` (plaintext, dev
-    /// only) or `disabled`. Ignored with --mock.
+    /// pinned TLS, used by the shipped image), `raw` (plaintext, dev only) or
+    /// `disabled`. Ignored with --mock.
     #[arg(long, default_value = "tls")]
     expect_evm_source: String,
 
@@ -88,11 +88,6 @@ struct Cli {
     /// otherwise.
     #[arg(long)]
     expect_evm_rpc_ca_sha256: Option<String>,
-
-    /// Expected Helios checkpoint (0x-prefixed 32-byte beacon block root).
-    /// Required with `--expect-evm-source helios`. Ignored otherwise.
-    #[arg(long)]
-    expect_helios_checkpoint: Option<String>,
 
     /// Require this EVM chain ID in the attestation. Omit to accept the
     /// authenticated value. Ignored with --mock.
@@ -173,18 +168,6 @@ struct Cli {
     expect_kms_evm_address: Option<String>,
 }
 
-/// Parse the `--expect-helios-checkpoint` flag into a 32-byte beacon block root.
-fn parse_checkpoint(s: &str) -> Result<[u8; 32]> {
-    let bytes = hex::decode(s.strip_prefix("0x").unwrap_or(s))
-        .context("--expect-helios-checkpoint is not valid hex")?;
-    bytes.try_into().map_err(|v: Vec<u8>| {
-        anyhow::anyhow!(
-            "--expect-helios-checkpoint must be 32 bytes (a beacon block root), got {}",
-            v.len()
-        )
-    })
-}
-
 /// Parse `--expect-evm-rpc-host` and `--expect-evm-rpc-ca-sha256`. Both are
 /// required because a TLS enclave always commits both.
 fn parse_evm_rpc_tls(host: Option<&str>, ca_sha256: Option<&str>) -> Result<EvmRpcTlsPin> {
@@ -246,11 +229,10 @@ fn parse_evm_source(s: &str) -> Result<EvmDataSource> {
     match s.to_ascii_lowercase().as_str() {
         "tls" | "pinned-tls" => Ok(EvmDataSource::PinnedTlsRpc),
         "raw" | "raw-rpc" | "rawrpc" => Ok(EvmDataSource::RawRpc),
-        "helios" | "helios-verified" => Ok(EvmDataSource::HeliosVerified),
         "disabled" | "none" | "off" => Ok(EvmDataSource::Disabled),
-        other => anyhow::bail!(
-            "invalid --expect-evm-source '{other}' (expected: tls | helios | raw | disabled)"
-        ),
+        other => {
+            anyhow::bail!("invalid --expect-evm-source '{other}' (expected: tls | raw | disabled)")
+        }
     }
 }
 
@@ -346,19 +328,6 @@ async fn run(cli: Cli) -> Result<()> {
         let pcrs = attestation_verify::ExpectedPcrs::from_hex(&pcr0, &pcr1, &pcr2)
             .context("invalid PCR hex")?;
         let evm_source = parse_evm_source(&cli.expect_evm_source)?;
-        let evm_checkpoint = cli
-            .expect_helios_checkpoint
-            .as_deref()
-            .map(parse_checkpoint)
-            .transpose()?;
-        // A Helios enclave always commits a checkpoint. Fail early with a clear
-        // message, not a hash mismatch later.
-        if evm_source == EvmDataSource::HeliosVerified && evm_checkpoint.is_none() {
-            anyhow::bail!(
-                "--expect-evm-source helios requires --expect-helios-checkpoint \
-                 (the beacon block root the enclave pinned)"
-            );
-        }
         let electrum_host = cli
             .expect_electrum_host
             .clone()
@@ -388,7 +357,6 @@ async fn run(cli: Cli) -> Result<()> {
             allow_vanilla_psbt: cli.expect_vanilla_psbt,
             signer_role,
             evm_source,
-            evm_checkpoint,
             electrum_host,
             evm_rpc_tls,
             expected_chain_id: cli.expect_chain_id,

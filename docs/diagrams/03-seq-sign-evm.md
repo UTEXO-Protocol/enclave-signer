@@ -11,7 +11,7 @@ sequenceDiagram
     participant Rgb as networks::rgb::validation<br/>RgbValidator
     participant Spv as networks::rgb::spv_crosscheck
     participant Chain as spv::HeaderChain
-    participant Esplora as vsock_forwarder →<br/>Electrum / Esplora
+    participant Electrum as vsock_forwarder →<br/>Electrum
     participant Evm as networks::evm::validation
     participant Cx as networks::evm::crosscheck
     participant Sign as networks::evm::signing<br/>+ KeyManager
@@ -28,13 +28,13 @@ sequenceDiagram
         Srv->>Srv: bfa_burn_ancestry_events:<br/>resolve mint_ancestors and verify each EVM lock<br/>through the pinned TLS EVM RPC BEFORE RGB validation
     end
 
-    Note over Srv,Esplora: 1 — validate_source (RGB)
+    Note over Srv,Electrum: 1 — validate_source (RGB)
     Srv->>Rgb: validate_source(RgbSource)
     Rgb->>Rgb: cheap payload gate first:<br/>consignment bytes present, size caps,<br/>keccak256(consignment) == consignment_hash (integrity),<br/>asset_id declared
     Rgb->>Rgb: Transfer::load(...), extract chain_net + witness_txids<br/>+ last transition + burned/total amounts
     Rgb->>Rgb: trusted typesystem pinned per schema_id,<br/>unknown schema ⇒ REFUSE
-    Rgb->>Esplora: resolver (Electrum 15 s / Esplora 30 s timeout)
-    Esplora-->>Rgb: witness tx data
+    Rgb->>Electrum: resolver (15 s timeout)
+    Electrum-->>Rgb: witness tx data
     Rgb->>Rgb: rgb-ops validate(chain_net, trusted_typesystem)<br/>(bfa-mint: + Bridge transitions vs verified FundsIn locks)
     Rgb->>Rgb: contract_id == declared asset_id<br/>(== pinned RGB_ASSET_ID when configured)
     Rgb-->>Srv: SourceProof (amount = TS_BURN MS_BURNED_ASSET —<br/>host rgb_amount is NOT used)
@@ -69,7 +69,7 @@ sequenceDiagram
 
     Srv->>Srv: validate_rgb_source_identity (RGB source, both routes):<br/>calldata sourceChainId == 96 (RGB network id, compile-time constant)<br/>AND sourceAddress == "" (RGB has no source address)
     Srv->>Srv: validate_burn_id (both routes):<br/>calldata burnId == keccak(BURN_TYPEHASH, FUNDS_IN_CONTRACT, EVM_CHAIN_ID, TOKEN_CONTRACT,<br/>amount, sourceChainId, keccak(sourceAddress), keccak(settlementData), sourceBurnTxId)
-    Note over Srv,Cx: 4 — apply_funds_out_binding (pools fundsOut route ONLY — skipped on lzFundsOut)
+    Note over Srv,Cx: 4 — apply_funds_out_binding (both routes: fundsOut and lzFundsOut)
     Srv->>Cx: require validated consignment for any fundsOut
     Srv->>Cx: assert_witnesses_confirmed (no unmined witness tx)
     Srv->>Cx: verify_btc_relay_agreement (proof REQUIRED, empty ⇒ REFUSE):<br/>decode (sourceHeight, sourceCommit, latestHeight, latestCommit),<br/>enclave holds header at latestHeight,<br/>tip − latestHeight ≤ 100,<br/>sourceHeight == block anchoring the last witness tx<br/>(re-derived from the consignment + SPV proof under one lock),<br/>BTC_RELAY_MODE=required: sourceCommit, latestCommit == keccak256 of the relay record the enclave rebuilds (zero word ⇒ REFUSE);<br/>BTC_RELAY_MODE=none (local stand, never production): both words must be zero
@@ -77,7 +77,7 @@ sequenceDiagram
     Srv->>Cx: validate_funds_out_source_burn_tx_id:<br/>calldata sourceBurnTxId == last transition OpId (non-zero)
     Srv->>Cx: validate_funds_out_burn_recipient:<br/>MS_BURN_RECIPIENT[12..] == calldata recipient
     Srv->>Cx: validate_funds_out_settlement:<br/>settlementData (operationIds, netAmounts) ==<br/>BridgeFundsIn records of the verified ancestry locks,<br/>set equality, canonical, non-empty
-    Note right of Cx: LayerZero route: none of step 4 runs.<br/>Amount (≥ only), recipient, sourceBurnTxId,<br/>settlementData and BtcRelay are NOT bound (spec Sec 7.1).
+    Note right of Cx: LayerZero route: recipient = the LayerZero recipient.<br/>dstEid is NOT bound to the burn (spec Sec 13).
     Cx-->>Srv: Ok / CrossCheck err
 
     Note over Srv,Sign: 5 — Sign

@@ -11,7 +11,7 @@ flowchart TD
         p1w --> p1wq{pass?}
         p1wq -->|no| p1wr[REFUSE — payload gate]:::refuse
         p1wq -->|yes| p1a["Transfer::load + typesystem pinned<br/>per schema_id"]
-        p1a --> p1b[rgb-ops validate against the resolver<br/>Electrum 15 s / Esplora 30 s timeout]
+        p1a --> p1b[rgb-ops validate against the resolver<br/>Electrum 15 s timeout]
         p1b --> p1q{valid?}
         p1q -->|no| p1r[REFUSE — invalid consignment]:::refuse
         p1q -->|yes| p1c{"contract_id == declared asset_id<br/>(== pinned RGB_ASSET_ID when configured)?"}
@@ -49,7 +49,7 @@ flowchart TD
     end
     p3q -->|yes| p2len
 
-    subgraph P4 ["P4 — route + fundsOut binding (apply_funds_out_binding)<br/>pools route only; lzFundsOut skips after the route check"]
+    subgraph P4 ["P4 — route + fundsOut binding (apply_funds_out_binding)<br/>both routes: fundsOut and lzFundsOut"]
         p4r{"route: source amount ≥ destination amount?"}
         p4r -->|no| p4rr[REFUSE — not covered]:::refuse
         p4r -->|yes| p4w{all consignment witnesses mined?}
@@ -62,7 +62,7 @@ flowchart TD
         p4t -->|no| p4tr[REFUSE — fundsOut amount bind]:::refuse
         p4t -->|yes| p4id{"sourceBurnTxId == settling transition OpId<br/>(non-zero) AND sourceAddress empty?"}
         p4id -->|no| p4idr[REFUSE — burn identity bind]:::refuse
-        p4id -->|yes| p4rc{"MS_BURN_RECIPIENT == calldata recipient?"}
+        p4id -->|yes| p4rc{"MS_BURN_RECIPIENT == calldata recipient<br/>(LZ: LayerZero recipient)?"}
         p4rc -->|no| p4rcr[REFUSE — burn recipient]:::refuse
         p4rc -->|yes| p4st{"settlementData pairs == verified<br/>ancestry BridgeFundsIn records?"}
         p4st -->|no| p4str[REFUSE — settlement bind]:::refuse

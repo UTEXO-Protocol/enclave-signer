@@ -1,6 +1,5 @@
 # syntax=docker/dockerfile:1.7
-# Combined enclave image (vsock + rgb + ccd + evm-rpc). Retired swap flow,
-# not the production mint/burn images -
+# Combined production enclave image (vsock + rgb + ccd + evm-rpc) -
 # Private Cargo dependencies require BuildKit secrets (see README, Building).
 # Supply github_token, or one deploy key per repo; keys never enter image layers.
 # Example: docker build --secret id=github_token,env=GITHUB_TOKEN -f build/Dockerfile.enclave .
@@ -38,7 +37,6 @@ ENV CARGO_INCREMENTAL=0 \
     RUSTFLAGS="--remap-path-prefix=/build=/src -C debuginfo=0 -C strip=symbols"
 # Build the RGB swap, BFA validation, and CCD features.
 # bfa-validation enables evm-rpc through the host proxy on port 8002.
-# This image uses PinnedTlsRpc without Helios.
 # For debug tests only: allow-debug-pcrs accepts all-zero peer PCRs.
 # Leave this argument empty for production builds. (F03-AF-12)
 ARG ENCLAVE_DEBUG_FEATURES=""
@@ -77,7 +75,7 @@ RUN chmod +x /app/utexo-bridge-enclave /app/entrypoint.sh
 # NOTE: the donor cloning secret is intentionally NOT baked here. It is
 # delivered at runtime via the `InitializeKey` message (CLI: `init
 # --cloning-secret <secret>`), so it never lands in the EIF / image layers and
-# the PCRs stay reproducible. See enclave/src/server/keys.rs (handle_initialize).
+# the PCRs stay reproducible. See enclave/src/server.rs (handle_initialize).
 
 # Pinned bridge/indexer config - public identifiers, baked so PCR0 commits to
 # them (attestation proves which chain/contract/asset this enclave serves) and

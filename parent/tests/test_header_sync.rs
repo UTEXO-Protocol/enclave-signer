@@ -810,7 +810,7 @@ fn self_signed_tls_source_is_refused() {
 
     let signed = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
     let cert: CertificateDer<'static> = signed.cert.der().clone();
-    let key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(signed.key_pair.serialize_der()));
+    let key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(signed.signing_key.serialize_der()));
     let config = Arc::new(
         rustls::ServerConfig::builder_with_provider(Arc::new(
             rustls::crypto::ring::default_provider(),

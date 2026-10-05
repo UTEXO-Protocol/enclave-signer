@@ -14,14 +14,21 @@
 use crate::error::{EnclaveError, Result};
 
 /// Default consignment size cap (`MAX_CONSIGNMENT_BYTES`). Defense-in-depth DoS
-/// bound. The 4 MiB wire frame also caps it. Real consignments are a few KB.
-pub const DEFAULT_MAX_CONSIGNMENT_BYTES: usize = 1024 * 1024;
-/// Default cap on Merkle proofs per source (`MAX_MERKLE_PROOFS`). A consignment
-/// anchors only a few witness txs.
-pub const DEFAULT_MAX_MERKLE_PROOFS: usize = 256;
+/// bound. The wire frame ([`crate::framing::MAX_MESSAGE_SIZE`]) also caps it.
+///
+/// The three defaults below are sized for a history of 10_000 state
+/// transitions. A consignment has approx 6 KB of fixed data, and each
+/// transition adds 470 to 600 bytes (measured: BFA transfer 468, BFA burn 560,
+/// BFA mint 593). Thus 10_000 transitions need 4.7 to 6 MB.
+pub const DEFAULT_MAX_CONSIGNMENT_BYTES: usize = 8 * 1024 * 1024;
+/// Default cap on Merkle proofs per source (`MAX_MERKLE_PROOFS`). A burn needs
+/// one proof for each witness tx in its history.
+pub const DEFAULT_MAX_MERKLE_PROOFS: usize = 16_384;
 /// Default cap on total proof bytes, txids and Merkle siblings, in all proofs
-/// (`MAX_TOTAL_PROOF_BYTES`). Bounds the total Merkle hashing work.
-pub const DEFAULT_MAX_TOTAL_PROOF_BYTES: usize = 128 * 1024;
+/// (`MAX_TOTAL_PROOF_BYTES`). Bounds the total Merkle hashing work. A proof in
+/// a full mainnet block has 13 siblings (448 bytes), so the proof-count cap
+/// fits: 16_384 x 448 bytes = 7.3 MB.
+pub const DEFAULT_MAX_TOTAL_PROOF_BYTES: usize = 8 * 1024 * 1024;
 
 /// Bridge config pinned at enclave boot from env. See module docs.
 #[derive(Debug, Clone)]
@@ -390,99 +397,6 @@ impl Default for EvmRpcConfig {
     }
 }
 
-/// True if the host of `url` is exactly `127.0.0.1`, `[::1]` or `localhost`.
-/// Exact match, so `127.0.0.1.evil.com` is not loopback.
-#[cfg(feature = "helios")]
-fn is_loopback_url(url: &str) -> bool {
-    let after_scheme = url.split_once("://").map(|(_, rest)| rest).unwrap_or(url);
-    // Drop path/query/fragment, then any `userinfo@` prefix.
-    let authority = after_scheme
-        .split(['/', '?', '#'])
-        .next()
-        .unwrap_or(after_scheme);
-    let hostport = authority.rsplit_once('@').map_or(authority, |(_, h)| h);
-    // Strip the port. IPv6 literals have brackets (`[::1]:8545`).
-    let host = if let Some(rest) = hostport.strip_prefix('[') {
-        match rest.split_once(']') {
-            // Valid IPv6 authority: `]` is followed by nothing or `:port`.
-            Some((inner, after)) => {
-                return inner == "::1" && (after.is_empty() || after.starts_with(':'))
-            }
-            None => hostport,
-        }
-    } else {
-        hostport.split(':').next().unwrap_or(hostport)
-    };
-    host == "127.0.0.1" || host == "localhost"
-}
-
-/// Helios light-client config (`helios` feature, not in production).
-///
-/// [`HeliosConfig::from_env`] gives `Some` only when `HELIOS_EXECUTION_RPC`
-/// is set. The URLs must be loopback. Helios verifies the untrusted upstreams
-/// against the pinned checkpoint.
-#[cfg(feature = "helios")]
-#[derive(Debug, Clone)]
-pub struct HeliosConfig {
-    /// Untrusted execution RPC (`HELIOS_EXECUTION_RPC`, required), for example
-    /// `http://127.0.0.1:18545`.
-    pub execution_rpc: String,
-    /// Beacon RPC (`HELIOS_CONSENSUS_RPC`, default `http://127.0.0.1:18550`).
-    pub consensus_rpc: String,
-    /// Helios network name: `mainnet` | `sepolia` | `holesky`
-    /// (`HELIOS_NETWORK`, default `mainnet`).
-    pub network: String,
-    /// Weak-subjectivity checkpoint: 0x-prefixed 32-byte beacon block root
-    /// (`HELIOS_CHECKPOINT`). `None` fails client init closed.
-    pub checkpoint: Option<String>,
-    /// Reject a checkpoint older than the safe weak-subjectivity window
-    /// (`HELIOS_STRICT_CHECKPOINT_AGE`, default `true`).
-    pub strict_checkpoint_age: bool,
-}
-
-#[cfg(feature = "helios")]
-impl HeliosConfig {
-    const DEFAULT_CONSENSUS_RPC: &'static str = "http://127.0.0.1:18550";
-
-    /// Load from `HELIOS_*` env. `None` when `HELIOS_EXECUTION_RPC` is unset.
-    /// A non-loopback URL is logged as an error. It cannot connect, because the
-    /// enclave has no direct egress.
-    pub fn from_env() -> Option<Self> {
-        let execution_rpc = std::env::var("HELIOS_EXECUTION_RPC").ok()?;
-        warn_if_not_loopback("HELIOS_EXECUTION_RPC", &execution_rpc);
-
-        let consensus_rpc = std::env::var("HELIOS_CONSENSUS_RPC")
-            .unwrap_or_else(|_| Self::DEFAULT_CONSENSUS_RPC.to_string());
-        warn_if_not_loopback("HELIOS_CONSENSUS_RPC", &consensus_rpc);
-
-        let network = std::env::var("HELIOS_NETWORK").unwrap_or_else(|_| "mainnet".to_string());
-        let checkpoint = std::env::var("HELIOS_CHECKPOINT").ok();
-        let strict_checkpoint_age = std::env::var("HELIOS_STRICT_CHECKPOINT_AGE")
-            .ok()
-            .map(|s| s != "false" && s != "0")
-            .unwrap_or(true);
-
-        Some(Self {
-            execution_rpc,
-            consensus_rpc,
-            network,
-            checkpoint,
-            strict_checkpoint_age,
-        })
-    }
-}
-
-#[cfg(feature = "helios")]
-fn warn_if_not_loopback(var: &str, url: &str) {
-    if !is_loopback_url(url) {
-        tracing::error!(
-            %var, %url,
-            "Helios RPC URL is not loopback - the enclave reaches upstreams only via the vsock \
-             forwarder; a non-loopback URL will not connect"
-        );
-    }
-}
-
 /// Endpoints and KMS pins set once at launch and committed in the attested policy.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Endpoints {
@@ -778,29 +692,6 @@ mod tests {
         };
         assert!(!c.is_configured());
         assert!(c.is_partially_configured());
-    }
-
-    #[cfg(feature = "helios")]
-    #[test]
-    fn loopback_url_accepts_real_loopback() {
-        assert!(is_loopback_url("http://127.0.0.1:3444"));
-        assert!(is_loopback_url("http://127.0.0.1"));
-        assert!(is_loopback_url("http://localhost:8545"));
-        assert!(is_loopback_url("http://[::1]:18545/path"));
-        assert!(is_loopback_url("http://[::1]"));
-        assert!(is_loopback_url("http://user:pass@127.0.0.1:3444"));
-    }
-
-    #[cfg(feature = "helios")]
-    #[test]
-    fn loopback_url_rejects_lookalike_authorities() {
-        // A `starts_with` check accepts all of these.
-        assert!(!is_loopback_url("http://127.0.0.1.evil.com"));
-        assert!(!is_loopback_url("http://localhost.evil.com/rpc"));
-        assert!(!is_loopback_url("http://127.0.0.1@evil.com"));
-        assert!(!is_loopback_url("http://[::1].evil.com"));
-        assert!(!is_loopback_url("http://10.0.0.1:8545"));
-        assert!(!is_loopback_url("http://evil.com/127.0.0.1"));
     }
 
     const CA_HEX: &str = include_str!("../tests/fixtures/evm_rpc_tls/ca_a.der.hex");

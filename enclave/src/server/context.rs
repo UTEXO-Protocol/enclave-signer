@@ -121,7 +121,6 @@ impl ServerContext {
             &self.bridge_config,
             crate::policy::EvmDataSource::Disabled,
             None,
-            None,
             "",
             0,
         );

@@ -69,7 +69,7 @@ sequenceDiagram
 | `OS_ASSET` | 4000 | Output that holds RGB units (u64). |
 | `OS_BRIDGE` | 4014 | The mint right. It holds no units. It does not count in the amount. |
 | `EVM_MIN_CONFIRMATIONS` | 12 (default) | Minimum depth of each deposit receipt. Attested. Production refuses 0. |
-| `MAX_CONSIGNMENT_BYTES` | 1 MiB (default) | Maximum consignment size. |
+| `MAX_CONSIGNMENT_BYTES` | 8 MiB (default) | Maximum consignment size. |
 | `MAX_OFF_TX_CHANGE_OUTPOINTS` | 4 | Maximum change outpoints outside the PSBT. |
 | `MAX_FEE_RATE_SAT_VB` | 200 | Maximum fee rate, over the unsigned size. |
 | `MAX_FEE_SATS` | 100 000 | Maximum fee. |
