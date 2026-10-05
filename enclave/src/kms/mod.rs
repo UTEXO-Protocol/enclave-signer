@@ -243,29 +243,66 @@ impl KmsClient {
     /// The seed in `CiphertextForRecipient` is opened only to check the envelope,
     /// then dropped. Returns the `CiphertextBlob`. Recover the committed seed
     /// before activation.
+    ///
+    /// Under `mock-attestation` the call is made without a `Recipient`: AWS KMS
+    /// rejects mock CBOR docs (no COSE signature) with `ValidationException`.
+    /// KMS returns the plaintext seed directly instead; we verify its length and
+    /// drop it. Security is reduced (plaintext briefly on the broker) but that is
+    /// acceptable in dev — there is no real NSM anyway.
     pub fn generate_ciphertext(&self, deadline: Instant) -> Result<Vec<u8>> {
+        #[cfg(not(feature = "mock-attestation"))]
         // RSA key generation and NSM attestation are slow, so compute the
         // network budget after them.
         let recipient = self.recipient()?;
+
         let budget = call_budget(deadline)?;
         let client = self.sdk_client(budget)?;
         let key_arn = self.config.key_arn.clone();
         let context = self.encryption_context();
-        let info = recipient.info.clone();
+
+        #[cfg(not(feature = "mock-attestation"))]
+        let output = {
+            let info = recipient.info.clone();
+            block_on(budget, async move {
+                client
+                    .generate_data_key()
+                    .key_id(key_arn)
+                    .number_of_bytes(SEED_BYTES as i32)
+                    .set_encryption_context(Some(context))
+                    .recipient(info)
+                    .send()
+                    .await
+            })?
+            .map_err(classify)?
+        };
+
+        #[cfg(feature = "mock-attestation")]
         let output = block_on(budget, async move {
             client
                 .generate_data_key()
                 .key_id(key_arn)
                 .number_of_bytes(SEED_BYTES as i32)
                 .set_encryption_context(Some(context))
-                .recipient(info)
                 .send()
                 .await
         })?
         .map_err(classify)?;
 
         self.check_key_id(output.key_id.as_deref())?;
-        reject_plaintext(output.plaintext.as_ref())?;
+
+        #[cfg(not(feature = "mock-attestation"))]
+        {
+            reject_plaintext(output.plaintext.as_ref())?;
+            let seed = recipient.open(output.ciphertext_for_recipient.as_ref())?;
+            drop(seed);
+        }
+
+        #[cfg(feature = "mock-attestation")]
+        match output.plaintext.as_ref() {
+            Some(blob) if blob.as_ref().len() == SEED_BYTES => {}
+            _ => return Err(invalid("KMS plaintext absent or wrong length (mock mode)")),
+        }
+
         let ciphertext = output
             .ciphertext_blob
             .ok_or_else(|| invalid("KMS omitted CiphertextBlob"))?
@@ -273,14 +310,13 @@ impl KmsClient {
         if ciphertext.is_empty() || ciphertext.len() > MAX_CIPHERTEXT_BYTES {
             return Err(invalid("KMS CiphertextBlob has an invalid length"));
         }
-        // Check the envelope before the first S3 write. The seed stays in this
-        // frame.
-        let seed = recipient.open(output.ciphertext_for_recipient.as_ref())?;
-        drop(seed);
         Ok(ciphertext)
     }
 
     /// `Decrypt(CiphertextBlob)` with recipient attestation; returns the seed.
+    ///
+    /// Under `mock-attestation` the call is made without a `Recipient` for the
+    /// same reason as `generate_ciphertext`: KMS returns the plaintext directly.
     pub fn decrypt_seed(
         &self,
         ciphertext_blob: &[u8],
@@ -289,14 +325,35 @@ impl KmsClient {
         if ciphertext_blob.is_empty() || ciphertext_blob.len() > MAX_CIPHERTEXT_BYTES {
             return Err(fail("invalid persisted KMS ciphertext length"));
         }
+
+        #[cfg(not(feature = "mock-attestation"))]
         // Compute the network budget after the slow recipient setup.
         let recipient = self.recipient()?;
+
         let budget = call_budget(deadline)?;
         let client = self.sdk_client(budget)?;
         let key_arn = self.config.key_arn.clone();
         let context = self.encryption_context();
-        let info = recipient.info.clone();
         let blob = Blob::new(ciphertext_blob);
+
+        #[cfg(not(feature = "mock-attestation"))]
+        let output = {
+            let info = recipient.info.clone();
+            block_on(budget, async move {
+                client
+                    .decrypt()
+                    .key_id(key_arn)
+                    .ciphertext_blob(blob)
+                    .encryption_algorithm(EncryptionAlgorithmSpec::SymmetricDefault)
+                    .set_encryption_context(Some(context))
+                    .recipient(info)
+                    .send()
+                    .await
+            })?
+            .map_err(classify)?
+        };
+
+        #[cfg(feature = "mock-attestation")]
         let output = block_on(budget, async move {
             client
                 .decrypt()
@@ -304,18 +361,36 @@ impl KmsClient {
                 .ciphertext_blob(blob)
                 .encryption_algorithm(EncryptionAlgorithmSpec::SymmetricDefault)
                 .set_encryption_context(Some(context))
-                .recipient(info)
                 .send()
                 .await
         })?
         .map_err(classify)?;
 
         self.check_key_id(output.key_id.as_deref())?;
-        reject_plaintext(output.plaintext.as_ref())?;
+
         if output.encryption_algorithm != Some(EncryptionAlgorithmSpec::SymmetricDefault) {
             return Err(invalid("KMS reported an unexpected encryption algorithm"));
         }
-        recipient.open(output.ciphertext_for_recipient.as_ref())
+
+        #[cfg(not(feature = "mock-attestation"))]
+        {
+            reject_plaintext(output.plaintext.as_ref())?;
+            return recipient.open(output.ciphertext_for_recipient.as_ref());
+        }
+
+        #[cfg(feature = "mock-attestation")]
+        {
+            let plaintext = output
+                .plaintext
+                .ok_or_else(|| invalid("KMS omitted plaintext (mock mode)"))?;
+            let bytes = plaintext.as_ref();
+            if bytes.len() != SEED_BYTES {
+                return Err(invalid("KMS plaintext has unexpected length (mock mode)"));
+            }
+            let mut seed = Zeroizing::new([0u8; SEED_BYTES]);
+            seed.copy_from_slice(bytes);
+            Ok(seed)
+        }
     }
 
     /// The four public context entries. The key policy must require each one
