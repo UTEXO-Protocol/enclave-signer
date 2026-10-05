@@ -27,14 +27,14 @@ dev_feature_release_guard!(
      it accepts zero-PCR attestation documents."
 );
 
-// Without `spv`, the host-controlled Esplora tells if witness txs are mined.
+// Without `spv`, the host-controlled indexer tells if witness txs are mined.
 // A malicious host can then get a `fundsOut` signed against a fake anchor.
 // `spv` checks every witness tx against the enclave's own header chain.
 // Unsafe in every profile, so this guard is not release-gated (M-01).
 #[cfg(all(feature = "rgb-validation", not(feature = "spv")))]
 compile_error!(
     "rgb-validation requires spv: without spv, consignment anchoring trusts only \
-     the host-controlled Esplora resolver - build with `--features spv` (which \
+     the host-controlled indexer - build with `--features spv` (which \
      pulls in rgb-validation)"
 );
 

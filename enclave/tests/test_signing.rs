@@ -657,7 +657,7 @@ fn test_sign_evm_rejects_unconfigured_bridge_config() {
 // `calldata_commission`. `validate_route_proofs` compares the two.
 
 /// A build without `spv` must refuse every `fundsOut`, even with no
-/// merkle_proofs. Without SPV, only the host-controlled Esplora resolver anchors
+/// merkle_proofs. Without SPV, only the host-controlled indexer anchors
 /// witness txs, so the enclave could sign against a fabricated anchor.
 ///
 /// `not(rgb-validation)` implies `not(spv)` for any build that compiles. The

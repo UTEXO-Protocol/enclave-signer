@@ -291,7 +291,7 @@ jobs:
 
   # Assert that enabling `rgb-validation` without `spv` fails to compile via the
   # `compile_error!` in lib.rs. Without SPV, a consignment's
-  # witness txs are anchored only through the host-controlled Esplora resolver,
+  # witness txs are anchored only through the host-controlled indexer,
   # so the enclave must never be built that way. Runs separately from `ci`
   # because the build is expected to fail. Unlike `release-guards` this is not
   # release-specific — the combination is unsafe in every profile.

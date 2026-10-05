@@ -40,7 +40,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 # RGB consignment validation (optional, behind rgb-validation feature)
-rgb-ops = { version = "0.11.1-rc.7", features = ["esplora_blocking", "electrum_blocking"], optional = true }
+rgb-ops = { version = "0.11.1-rc.7", features = ["electrum_blocking"], optional = true }
 rgb-consignment = { git = "https://github.com/UTEXO-Protocol/consignment-utils.git", rev = "a6c2e4913bfe3b682270bc747311a2cf7160982b", default-features = false, optional = true }
 rgb-schemas = { version = "=0.11.1-rc.10", default-features = false, optional = true }
 # Invoice parsing for the send-RGB recipient bind. Same repo and rev as
@@ -143,8 +143,8 @@ kms-persistence = [
 vsock = []
 # DANGER: allows importing a raw seed over the wire. Testing only.
 allow-seed-import = []
-# In-enclave RGB consignment validation via rgbstd + Esplora. REQUIRES `spv`
-# (a `compile_error!` in lib.rs). Without SPV, the host-controlled Esplora is the
+# In-enclave RGB consignment validation via rgbstd + Electrum. REQUIRES `spv`
+# (a `compile_error!` in lib.rs). Without SPV, the host-controlled indexer is the
 # only anchor for witness txs. A malicious host can then fake a Bitcoin anchor.
 # `spv` is not in this list because that makes a feature cycle.
 rgb-validation = ["rgb-ops", "rgb-consignment", "rgb-schemas", "rgb-invoicing", "dep:rustls-pki-types"]
@@ -196,6 +196,9 @@ aws-smithy-http-client = { version = "1.4", default-features = false, features =
 http = "1"
 # The in-test TLS server of `tests/test_evm_rpc_tls.rs`. Already in the lock.
 rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs", "std", "tls12"] }
+# JSON-RPC of the stub Electrum server (`src/test_support/electrum_stub.rs`).
+# Already in the lock.
+serde_json = "1"
 # `StrictDumb`, for the synthetic burn transition in the consensus tests of
 # `networks/rgb/validation/tests.rs`. Already in the lock.
 strict_encoding = { package = "rgb-strict-encoding", version = "1.0.2" }

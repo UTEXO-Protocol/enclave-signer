@@ -9,6 +9,9 @@
 // A full mint over the wire: the EVM -> RGB direction.
 #![cfg(all(feature = "rgb-mint-burn", feature = "bfa-validation", evm_to_rgb))]
 
+#[path = "../src/test_support/electrum_stub.rs"]
+mod electrum_stub;
+
 use std::io::{Cursor, Read, Write};
 use std::sync::Mutex;
 
@@ -411,36 +414,11 @@ impl EvmReceiptProvider for DepositChain {
     }
 }
 
-/// Stub Esplora for a regtest validator. It serves only the genesis hash for
-/// the chain identity check. The fee policy is pinned at compile time, so the
-/// enclave fetches no fee estimate.
+/// Stub Electrum for a regtest validator. It answers only the chain check.
+/// The fee policy is pinned at compile time, so the enclave fetches no fee
+/// estimate.
 fn spawn_regtest_stub() -> String {
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let addr = listener.local_addr().unwrap();
-    std::thread::spawn(move || {
-        for stream in listener.incoming() {
-            let Ok(mut stream) = stream else { break };
-            let mut buf = [0u8; 4096];
-            let n = stream.read(&mut buf).unwrap_or(0);
-            let req = String::from_utf8_lossy(&buf[..n]);
-            let body = if req.starts_with("GET /block-height/0") {
-                bitcoin::constants::genesis_block(Network::Regtest)
-                    .block_hash()
-                    .to_string()
-            } else {
-                let _ = stream.write_all(b"HTTP/1.1 404 Not Found\r\ncontent-length: 0\r\n\r\n");
-                continue;
-            };
-            let _ = stream.write_all(
-                format!(
-                    "HTTP/1.1 200 OK\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
-                    body.len()
-                )
-                .as_bytes(),
-            );
-        }
-    });
-    format!("http://{addr}")
+    electrum_stub::spawn(Network::Regtest)
 }
 
 /// A production-shaped context: pinned bridge config, real validator, the

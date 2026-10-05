@@ -125,7 +125,7 @@ fn route_proof_rejects_the_other_flows_shape() {
 
 // Asset-identity binding, destination path. The checks are inline in
 // `validate_destination_anchor`, so that function is the smallest testable
-// unit. The tests use the mainnet transfer fixture and a stub Esplora.
+// unit. The tests use the mainnet transfer fixture and a stub Electrum.
 //
 // Intentional asymmetry: this path always enforces the RGB_ASSET_ID pin.
 // The source path enforces it only if `BridgeConfig::is_configured()`.
@@ -186,42 +186,9 @@ mod asset_bind {
         )]
     }
 
-    /// Stub Esplora that serves only `GET /block-height/0` with the signet
-    /// genesis hash. Offline rgbstd validation of the fixture needs only this.
-    /// The resolver calls out only for the genesis-hash chain check. The
-    /// fixture embeds its witness txs (added as tentative by
-    /// `add_consignment_txes`).
-    fn spawn_stub_esplora() -> String {
-        use std::io::{Read as _, Write as _};
-        use std::net::TcpListener;
-
-        let listener = TcpListener::bind("127.0.0.1:0").expect("bind stub esplora");
-        let addr = listener.local_addr().unwrap();
-        std::thread::spawn(move || {
-            for stream in listener.incoming() {
-                let Ok(mut stream) = stream else { break };
-                let mut buf = [0u8; 4096];
-                let n = stream.read(&mut buf).unwrap_or(0);
-                let req = String::from_utf8_lossy(&buf[..n]).to_string();
-                let first = req.lines().next().unwrap_or("").to_string();
-                if !first.starts_with("GET /block-height/0") {
-                    let _ = stream.write_all(
-                        b"HTTP/1.1 404 Not Found\r\ncontent-length: 0\r\nconnection: close\r\n\r\n",
-                    );
-                    continue;
-                }
-                let body = bitcoin::constants::genesis_block(bitcoin::Network::Signet)
-                    .block_hash()
-                    .to_string();
-                let resp = format!(
-                    "HTTP/1.1 200 OK\r\ncontent-type: text/plain\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
-                    body.len(),
-                    body
-                );
-                let _ = stream.write_all(resp.as_bytes());
-            }
-        });
-        format!("http://{addr}")
+    /// Stub Electrum that answers only the signet chain check.
+    fn spawn_stub_electrum() -> String {
+        crate::test_support::electrum_stub::spawn(bitcoin::Network::Signet)
     }
 
     /// Fully pinned operator config (`is_configured() == true`) with the
@@ -262,12 +229,12 @@ mod asset_bind {
         }
     }
 
-    /// Runs `validate_destination_anchor` with a stub-Esplora validator.
+    /// Runs `validate_destination_anchor` with a stub-Electrum validator.
     fn run_validate_destination_anchor(
         destination: &RgbDestination,
         config: &BridgeConfig,
     ) -> Result<u64> {
-        let url = spawn_stub_esplora();
+        let url = spawn_stub_electrum();
         let validator = RgbValidator::new(url, "signet").expect("validator");
         let events = fixture_mint_events();
         let chain = Mutex::new(HeaderChain::new(

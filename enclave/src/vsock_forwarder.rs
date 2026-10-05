@@ -1,5 +1,5 @@
 //! TCP-to-vsock forwarder from the enclave to external services (for example
-//! Esplora). It listens on loopback TCP and sends each connection over vsock to
+//! Electrum). It listens on loopback TCP and sends each connection over vsock to
 //! the parent, where `vsock-proxy` relays it to the real endpoint.
 //!
 //! Trust boundary: the host controls this path. It can drop, delay, reorder or

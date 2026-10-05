@@ -59,7 +59,7 @@ pub(super) fn handle_sign(
         verify_funds_in_deposit(ctx, req.amount, source_ref, destination_ref)?;
 
     // Self-owned-outpoint oracle for the send-RGB per-output recipient bind.
-    // The key lock is held only for each lookup, not across Esplora/Electrum calls.
+    // The key lock is held only for each lookup, not across Electrum calls.
     //
     // An outpoint on this PSBT is resolved from its taproot metadata.
     // An outpoint on an earlier tx needs a fetch to read its script. rgb-lib

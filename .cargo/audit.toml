@@ -1,0 +1,8 @@
+# cargo-audit config. Each ignore needs a reason. Remove it when a fix ships.
+[advisories]
+ignore = [
+    # rsa Marvin timing attack. No fixed rsa release yet. The enclave makes a
+    # fresh RSA key for each KMS call (`kms/mod.rs` `recipient()`), so no key
+    # sees the repeated decryptions the attack needs.
+    "RUSTSEC-2023-0071",
+]

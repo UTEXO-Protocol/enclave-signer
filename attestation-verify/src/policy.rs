@@ -78,7 +78,7 @@ pub struct KmsPin {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BtcDataSource {
     /// Witness txids are checked against the enclave PoW-verified header
-    /// chain (`spv`), not the host-controlled Esplora resolver.
+    /// chain (`spv`), not the host-controlled indexer.
     SpvVerified = 1,
 }
 
