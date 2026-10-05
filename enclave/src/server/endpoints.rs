@@ -364,6 +364,13 @@ mod tests {
     /// The test maps port 443 to one free port, and other ports to any port.
     #[test]
     fn the_forwarders_bind_together() {
+        // macOS has only 127.0.0.1 on lo0. Linux (CI, the enclave) has all of
+        // 127/8. Add it locally with `sudo ifconfig lo0 alias 127.0.0.2 up`.
+        #[cfg(all(target_os = "macos", feature = "kms-persistence"))]
+        if TcpListener::bind((crate::kms::KMS_LOOPBACK, 0)).is_err() {
+            eprintln!("skipped: {} is not on lo0", crate::kms::KMS_LOOPBACK);
+            return;
+        }
         let plan = forwarder_plan(&Endpoints::parse(&valid(1)).unwrap());
         let addrs: std::collections::HashSet<_> = plan.iter().map(|(a, _)| *a).collect();
         assert_eq!(addrs.len(), plan.len(), "{plan:?}");

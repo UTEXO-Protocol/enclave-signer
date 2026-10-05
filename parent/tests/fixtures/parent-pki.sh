@@ -15,6 +15,9 @@ for name in server operator listener observer unknown expired foreign rotated; d
   else
     printf 'extendedKeyUsage=clientAuth\n' > "$name.ext"
   fi
-  openssl x509 -req -in "$name.csr" -CA "$ca.pem" -CAkey "$ca.key" -CAcreateserial -out "$name.pem" -days "$days" -extfile "$name.ext" >/dev/null 2>&1
+  sign=(openssl x509 -req -in "$name.csr" -CA "$ca.pem" -CAkey "$ca.key" -CAcreateserial -out "$name.pem" -extfile "$name.ext")
+  # OpenSSL 3.4+ refuses -days -1. Older ones lack -not_before. Try both.
+  "${sign[@]}" -days "$days" >/dev/null 2>&1 \
+    || { [ "$days" -lt 0 ] && "${sign[@]}" -not_before 20200101000000Z -not_after 20200102000000Z >/dev/null 2>&1; }
   openssl x509 -in "$name.pem" -outform DER -out "$name.der"
 done

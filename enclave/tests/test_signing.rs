@@ -548,8 +548,8 @@ fn test_sign_evm_accepts_ccd_source_funds_out() {
     }
 }
 
-/// An lzFundsOut selector without `lz_release` yields no fundsOut params, so
-/// the EVM signer must refuse it with an error and no signature.
+/// An lzFundsOut selector without `lz_release` must fail in validation,
+/// before the key, with an error and no signature (F05-NEW-AF-12).
 #[cfg(all(feature = "rgb-validation", feature = "ccd"))]
 #[test]
 fn test_sign_evm_refuses_lz_selector_without_lz_release() {
@@ -605,7 +605,8 @@ fn test_sign_evm_refuses_lz_selector_without_lz_release() {
 
     match &resp.response {
         Some(Response::Error(e)) => assert!(
-            e.message.contains("LayerZero selector without lz_release"),
+            e.message
+                .contains("lzFundsOut calldata requires lz_release"),
             "expected the missing lz_release refusal, got: {}",
             e.message
         ),
