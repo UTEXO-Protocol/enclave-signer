@@ -8,7 +8,7 @@
 
 use std::time::{Duration, Instant};
 
-use aes::cipher::{block_padding::Pkcs7, BlockEncryptMut, KeyIvInit};
+use aes::cipher::{block_padding::Pkcs7, BlockModeEncrypt, KeyIvInit};
 use cms::cert::x509::der::asn1::{OctetString, SetOfVec};
 use cms::cert::x509::der::{Any, Decode, Encode};
 use cms::cert::x509::ext::pkix::SubjectKeyIdentifier;
@@ -45,7 +45,7 @@ fn credentials() -> AwsCredentials {
 fn recipient_key() -> RsaPrivateKey {
     use std::sync::OnceLock;
     static KEY: OnceLock<RsaPrivateKey> = OnceLock::new();
-    KEY.get_or_init(|| RsaPrivateKey::new(&mut rand_core::OsRng, RECIPIENT_RSA_BITS).unwrap())
+    KEY.get_or_init(|| RsaPrivateKey::new(&mut rsa::rand_core::OsRng, RECIPIENT_RSA_BITS).unwrap())
         .clone()
 }
 
@@ -56,9 +56,9 @@ fn seal(public_key: &RsaPublicKey, plaintext: &[u8]) -> Vec<u8> {
     getrandom::fill(&mut cek).unwrap();
     getrandom::fill(&mut iv).unwrap();
     let ciphertext = cbc::Encryptor::<aes::Aes256>::new(&cek.into(), &iv.into())
-        .encrypt_padded_vec_mut::<Pkcs7>(plaintext);
+        .encrypt_padded_vec::<Pkcs7>(plaintext);
     let wrapped_key = public_key
-        .encrypt(&mut rand_core::OsRng, Oaep::new::<Sha256>(), &cek)
+        .encrypt(&mut rsa::rand_core::OsRng, Oaep::new::<Sha256>(), &cek)
         .unwrap();
     let ktri = KeyTransRecipientInfo {
         version: CmsVersion::V2,
@@ -159,7 +159,7 @@ fn recipient_envelope_round_trips_and_rejects_every_deviation() {
     assert_eq!(open_envelope(&key, &envelope).unwrap().as_slice(), &seed);
 
     // A different recipient key: the OAEP unwrap fails closed.
-    let other = RsaPrivateKey::new(&mut rand_core::OsRng, RECIPIENT_RSA_BITS).unwrap();
+    let other = RsaPrivateKey::new(&mut rsa::rand_core::OsRng, RECIPIENT_RSA_BITS).unwrap();
     assert!(open_envelope(&other, &envelope).is_err());
 
     // Bounds and framing.

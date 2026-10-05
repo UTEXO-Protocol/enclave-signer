@@ -365,8 +365,8 @@ IwLz3/Y=
         // If the leaf has KeyUsage, it must permit digitalSignature, which it
         // uses to sign the COSE envelope.
         if let Some((_critical, key_usage)) = leaf
-            .tbs_certificate
-            .get::<KeyUsage>()
+            .tbs_certificate()
+            .get_extension::<KeyUsage>()
             .map_err(|e| VerifyError::Certificate(format!("invalid signing-cert KeyUsage: {e}")))?
         {
             if !key_usage.digital_signature() {
@@ -389,11 +389,11 @@ IwLz3/Y=
     fn verify_issuer_signed_subject(issuer: &Certificate, subject: &Certificate) -> Result<()> {
         let issuer_pubkey = extract_p384_pubkey(issuer)?;
         let tbs_bytes = subject
-            .tbs_certificate
+            .tbs_certificate()
             .to_der()
             .map_err(|e| VerifyError::Certificate(format!("TBS DER encode failed: {e}")))?;
         let sig_bytes = subject
-            .signature
+            .signature()
             .as_bytes()
             .ok_or_else(|| VerifyError::Certificate("missing signature bytes".into()))?;
         // X.509 cert signatures are DER-encoded ECDSA (unlike COSE).
@@ -423,8 +423,8 @@ IwLz3/Y=
         max_path_len: usize,
     ) -> Result<usize> {
         let basic_constraints = issuer
-            .tbs_certificate
-            .get::<BasicConstraints>()
+            .tbs_certificate()
+            .get_extension::<BasicConstraints>()
             .map_err(|e| VerifyError::Certificate(format!("invalid BasicConstraints: {e}")))?
             .map(|(_critical, bc)| bc)
             .ok_or_else(|| {
@@ -437,10 +437,11 @@ IwLz3/Y=
         }
 
         // If KeyUsage is present, it must permit signing subordinate certs.
-        if let Some((_critical, key_usage)) = issuer
-            .tbs_certificate
-            .get::<KeyUsage>()
-            .map_err(|e| VerifyError::Certificate(format!("invalid KeyUsage: {e}")))?
+        if let Some((_critical, key_usage)) =
+            issuer
+                .tbs_certificate()
+                .get_extension::<KeyUsage>()
+                .map_err(|e| VerifyError::Certificate(format!("invalid KeyUsage: {e}")))?
         {
             if !key_usage.key_cert_sign() {
                 return Err(VerifyError::Certificate(
@@ -513,7 +514,7 @@ IwLz3/Y=
     }
 
     fn extract_p384_pubkey(cert: &Certificate) -> Result<VerifyingKey> {
-        let spki = &cert.tbs_certificate.subject_public_key_info;
+        let spki = cert.tbs_certificate().subject_public_key_info();
         let key_bytes = spki
             .subject_public_key
             .as_bytes()
@@ -539,7 +540,7 @@ IwLz3/Y=
             .map_err(|_| VerifyError::Certificate("system clock error".into()))?
             .as_secs();
 
-        let validity = &cert.tbs_certificate.validity;
+        let validity = cert.tbs_certificate().validity();
         let not_before = validity.not_before.to_unix_duration().as_secs();
         let not_after = validity.not_after.to_unix_duration().as_secs();
 
@@ -686,13 +687,6 @@ IwLz3/Y=
 
         // --- helpers -------------------------------------------------------
 
-        /// A base certificate to change. The constraint checks do not read the
-        /// signature, so tests replace the root extensions and need no signed
-        /// chain.
-        fn base_cert() -> Certificate {
-            Certificate::from_der(root_cert_der()).expect("embedded root parses")
-        }
-
         fn ext<T: Encode + AssociatedOid>(value: &T, critical: bool) -> Extension {
             Extension {
                 extn_id: T::OID,
@@ -702,10 +696,33 @@ IwLz3/Y=
             }
         }
 
+        /// The embedded root with its extensions replaced. The constraint
+        /// checks do not read the signature, so no signed chain is needed.
+        /// x509-cert has no mutable access, so this edits the DER: the `[3]`
+        /// element of the TBS sequence holds the extensions.
         fn cert_with_exts(exts: Vec<Extension>) -> Certificate {
-            let mut cert = base_cert();
-            cert.tbs_certificate.extensions = Some(exts);
-            cert
+            use x509_cert::der::asn1::{Any, ContextSpecific};
+            use x509_cert::der::{Tag, TagMode, TagNumber, Tagged};
+            let seq = |any: &Any| Vec::<Any>::from_der(&any.to_der().unwrap()).unwrap();
+            let mut cert = Vec::<Any>::from_der(root_cert_der()).expect("cert is a SEQUENCE");
+            let mut tbs = seq(&cert[0]);
+            tbs.retain(|a| {
+                !matches!(
+                    a.tag(),
+                    Tag::ContextSpecific {
+                        number: TagNumber(3),
+                        ..
+                    }
+                )
+            });
+            let exts = ContextSpecific {
+                tag_number: TagNumber(3),
+                tag_mode: TagMode::Explicit,
+                value: exts,
+            };
+            tbs.push(Any::from_der(&exts.to_der().unwrap()).unwrap());
+            cert[0] = Any::from_der(&tbs.to_der().unwrap()).unwrap();
+            Certificate::from_der(&cert.to_der().unwrap()).expect("edited cert parses")
         }
 
         fn basic(ca: bool, path_len: Option<u8>) -> BasicConstraints {

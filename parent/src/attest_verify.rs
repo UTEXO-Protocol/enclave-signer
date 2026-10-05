@@ -10,7 +10,6 @@ use anyhow::{bail, Context, Result};
 use attestation_verify::{
     AttestationMode, AttestedPolicy, BtcDataSource, EvmDataSource, EvmRpcTlsPin, KmsPin, SignerRole,
 };
-use rand::RngCore;
 use sha2::{Digest, Sha256};
 
 use crate::grpc_proto::parent_service_client::ParentServiceClient;
@@ -135,7 +134,7 @@ pub async fn verify_attested_pubkey(
     expected_policy: ExpectedPolicy,
 ) -> Result<AttestedPubkeyResult> {
     let mut nonce = [0u8; 32];
-    rand::thread_rng().fill_bytes(&mut nonce);
+    rand::fill(&mut nonce);
 
     let channel = crate::transport_security::client_endpoint(endpoint)?
         .connect()
