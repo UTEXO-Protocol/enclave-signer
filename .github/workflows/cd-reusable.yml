@@ -82,7 +82,6 @@ jobs:
         env:
           PRIVATE_DEPS_DIR: ${{ runner.temp }}/private-deps
           FEDERATED_SIGNER_PROTO_DEPLOY_KEY: ${{ secrets.FEDERATED_SIGNER_PROTO_DEPLOY_KEY }}
-          RGB_CONSIGNMENT_PARSER_DEPLOY_KEY: ${{ secrets.RGB_CONSIGNMENT_PARSER_DEPLOY_KEY }}
           RGB_CONSENSUS_BFA_DEPLOY_KEY: ${{ secrets.RGB_CONSENSUS_BFA_DEPLOY_KEY }}
           RGB_OPS_BFA_DEPLOY_KEY: ${{ secrets.RGB_OPS_BFA_DEPLOY_KEY }}
           RGB_SCHEMAS_BFA_DEPLOY_KEY: ${{ secrets.RGB_SCHEMAS_BFA_DEPLOY_KEY }}
@@ -110,7 +109,6 @@ jobs:
             BUILDKIT_INLINE_CACHE=1
             ${{ matrix.signer_role && format('SIGNER_ROLE={0}', matrix.signer_role) || '' }}
           secret-files: |
-            consignment_key=${{ runner.temp }}/private-deps/consignment_key
             consensus_key=${{ runner.temp }}/private-deps/consensus_key
             ops_key=${{ runner.temp }}/private-deps/ops_key
             schemas_key=${{ runner.temp }}/private-deps/schemas_key
@@ -132,7 +130,6 @@ jobs:
             BUILDKIT_INLINE_CACHE=1
             ${{ matrix.signer_role && format('SIGNER_ROLE={0}', matrix.signer_role) || '' }}
           secret-files: |
-            consignment_key=${{ runner.temp }}/private-deps/consignment_key
             consensus_key=${{ runner.temp }}/private-deps/consensus_key
             ops_key=${{ runner.temp }}/private-deps/ops_key
             schemas_key=${{ runner.temp }}/private-deps/schemas_key

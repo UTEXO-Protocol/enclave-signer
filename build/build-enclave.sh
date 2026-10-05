@@ -33,6 +33,17 @@
 # container/containerd builder). SOURCE_DATE_EPOCH defaults to the commit time.
 # OS package versions (apt/dnf) still float.
 #
+# Usage:
+#   ./build/build-enclave.sh
+# Tunables (env):
+#   OUT_DIR                output directory for artifacts (default: build/)
+#   IMAGE_TAG              docker tag for the builder image (default: utexo-bridge-enclave:latest)
+#   RGB_ASSET_ID           required approved asset pin for every Dockerfile that
+#                          declares ARG RGB_ASSET_ID (combined, rgb, mint, burn)
+#   NITRO_CLI_BLOBS        override blobs dir for `nitro-cli build-enclave`
+#   GITHUB_TOKEN           token with read access to the private RGB dependencies
+#   PRIVATE_DEPS_DIR       alternatively, directory of per-repository key files
+#                          (consensus_key, ops_key, schemas_key)
 # NOTE: the donor cloning secret is NOT baked into the EIF. It is delivered at
 # runtime via the InitializeKey message (CLI: `init --cloning-secret <secret>`),
 # keeping the build secret-free and the PCRs reproducible.
@@ -69,7 +80,7 @@ SECRET_ARGS=()
 if [ -n "${GITHUB_TOKEN:-}" ]; then
     SECRET_ARGS=(--secret "id=github_token,env=GITHUB_TOKEN")
 elif [ -n "${PRIVATE_DEPS_DIR:-}" ]; then
-    for key in consignment_key consensus_key ops_key schemas_key; do
+    for key in consensus_key ops_key schemas_key; do
         [ -s "$PRIVATE_DEPS_DIR/$key" ] || {
             echo "Error: missing private dependency key file: $key" >&2
             exit 1
