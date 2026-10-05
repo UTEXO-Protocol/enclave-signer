@@ -200,6 +200,6 @@ aws-smithy-http-client = { version = "1.4", default-features = false, features =
 http = "1"
 # The in-test TLS server of `tests/test_evm_rpc_tls.rs`. Already in the lock.
 rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs", "std", "tls12"] }
-# `StrictDumb`, for the synthetic long-history consignment of the limit tests in
+# `StrictDumb`, for the synthetic burn transition in the consensus tests of
 # `networks/rgb/validation/tests.rs`. Already in the lock.
 strict_encoding = { package = "rgb-strict-encoding", version = "1.0.2" }

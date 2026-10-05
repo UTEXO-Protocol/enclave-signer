@@ -1625,3 +1625,193 @@ mod asset_bind {
     // empty. `asset_binding_rule::rejects_empty_validated_contract_id` covers
     // the rule.
 }
+
+/// The release amount of a burn comes from its `MS_BURNED_ASSET` metadata
+/// ([`read_last_transition_burned_asset`]). The burner cannot set that value
+/// freely. The BFA burn script requires
+/// `sum(OS_ASSET inputs) == MS_BURNED_ASSET + sum(OS_ASSET outputs)`, and RGB
+/// consensus runs the script on each `TS_BURN`.
+///
+/// These tests run the pinned BFA schema and scripts through
+/// `Schema::validate_state`, the step that `validate_consignment` runs for
+/// each operation. They use the same contract-state and VM-extension types as
+/// the enclave. Only the transition and its input state are synthetic.
+#[cfg(feature = "bfa-validation")]
+mod burn_amount_is_bound_by_consensus {
+    use std::cell::RefCell;
+    use std::collections::BTreeMap;
+    use std::rc::Rc;
+
+    use rgbstd::contract::IssuerWrapper;
+    use rgbstd::persistence::{MemContract, MemContractState};
+    use rgbstd::validation::{Failure, ValidationError};
+    use rgbstd::vm::ether_extension::{BridgedContract, Event, IssuedAmountCheckExt};
+    use rgbstd::vm::{ContractStateEvolve, OrdOpRef, WitnessOrd};
+    use rgbstd::{
+        Assign, AssignmentType, Assignments, BundleId, Genesis, GraphSeal, Inputs, MetaType,
+        MetaValue, Metadata, OpId, Operation, Opout, RevealedState, RevealedValue, Transition,
+        TransitionType, Txid, TypedAssigns,
+    };
+    use schemata::{BridgedFungibleAsset, ERRNO_BURN_MISMATCH};
+    use strict_encoding::StrictDumb;
+
+    use super::bfa;
+
+    type State<'a> = BridgedContract<'a, MemContract<MemContractState>>;
+
+    fn asset() -> AssignmentType {
+        AssignmentType::with(bfa::OS_ASSET)
+    }
+
+    fn meta_value(bytes: &[u8]) -> MetaValue {
+        let mut value = MetaValue::default();
+        value.extend(bytes.iter().copied()).unwrap();
+        value
+    }
+
+    /// Runs consensus on one `TS_BURN`. `inputs` are the asset units of each
+    /// closed allocation, `change` goes to new allocations, and `declared` is
+    /// the `MS_BURNED_ASSET` value.
+    fn validate_burn(inputs: &[u64], change: &[u64], declared: u64) -> Result<(), ValidationError> {
+        let schema = BridgedFungibleAsset::schema();
+        let types = BridgedFungibleAsset::types();
+        let scripts = BridgedFungibleAsset::scripts();
+
+        let mut genesis = Genesis::strict_dumb();
+        genesis.schema_id = schema.schema_id();
+        let contract_id = genesis.contract_id();
+
+        let mut metadata = Metadata::default();
+        metadata
+            .add_value(
+                MetaType::with(bfa::MS_BURNED_ASSET),
+                meta_value(&declared.to_le_bytes()),
+            )
+            .unwrap();
+        metadata
+            .add_value(
+                MetaType::with(bfa::MS_BURN_RECIPIENT),
+                meta_value(&[0x22; 32]),
+            )
+            .unwrap();
+
+        // The state that the burn closes. A transition must have one input or
+        // more, so a burn with no asset inputs closes a bridge right.
+        let mut prev_state = BTreeMap::<AssignmentType, Vec<RevealedState>>::new();
+        let mut opouts = std::collections::BTreeSet::new();
+        for (no, units) in inputs.iter().enumerate() {
+            opouts.insert(Opout::new(OpId::from([0x11; 32]), asset(), no as u16));
+            prev_state
+                .entry(asset())
+                .or_default()
+                .push(RevealedState::Fungible(RevealedValue::new(*units)));
+        }
+        if inputs.is_empty() {
+            let right = AssignmentType::with(bfa::OS_BRIDGE);
+            opouts.insert(Opout::new(OpId::from([0x11; 32]), right, 0));
+            prev_state
+                .entry(right)
+                .or_default()
+                .push(RevealedState::Void);
+        }
+
+        // `Inputs` cannot be empty. Add the real inputs to its dumb value, then
+        // remove the dumb input.
+        let mut inputs = Inputs::strict_dumb();
+        for opout in opouts {
+            inputs.push(opout).unwrap();
+        }
+        inputs.remove(&Opout::strict_dumb()).unwrap();
+
+        let mut assignments = Assignments::<GraphSeal>::default();
+        if !change.is_empty() {
+            let leg = |units: &u64| Assign::Revealed {
+                seal: GraphSeal::strict_dumb(),
+                state: RevealedValue::new(*units),
+            };
+            // The vector type is not exported and cannot be empty. Start with
+            // its dumb value (one element) and replace that element.
+            let mut typed = TypedAssigns::<GraphSeal>::Fungible(StrictDumb::strict_dumb());
+            if let TypedAssigns::Fungible(legs) = &mut typed {
+                *legs.iter_mut().next().unwrap() = leg(&change[0]);
+                for units in &change[1..] {
+                    legs.push(leg(units)).unwrap();
+                }
+            }
+            assignments.insert(asset(), typed).unwrap();
+        }
+
+        let transition = Transition {
+            ffv: Default::default(),
+            contract_id,
+            nonce: 0,
+            transition_type: TransitionType::with(bfa::TS_BURN),
+            metadata,
+            globals: Default::default(),
+            inputs,
+            assignments,
+            signature: None,
+        };
+
+        let events: Vec<Event> = Vec::new();
+        let state = Rc::new(RefCell::new(State::init(((&schema, contract_id), &events))));
+        schema.validate_state::<State<'_>, IssuedAmountCheckExt>(
+            &types,
+            &scripts,
+            &genesis,
+            OrdOpRef::Transition(
+                &transition,
+                {
+                    use bitcoin::hashes::Hash;
+                    Txid::from_byte_array([0x33; 32])
+                },
+                WitnessOrd::Tentative,
+                BundleId::strict_dumb(),
+            ),
+            state,
+            &prev_state,
+        )
+    }
+
+    fn assert_burn_mismatch(result: Result<(), ValidationError>) {
+        match result {
+            Err(ValidationError::InvalidConsignment(Failure::ScriptFailure(_, code, _))) => {
+                assert_eq!(code, Some(ERRNO_BURN_MISMATCH), "burn script errno")
+            }
+            other => panic!("expected the burn script to reject, got {other:?}"),
+        }
+    }
+
+    /// Valid burns: a full burn, and a partial burn with change.
+    #[test]
+    fn accepts_a_burn_that_declares_what_it_destroyed() {
+        validate_burn(&[1_000], &[], 1_000).expect("full burn");
+        validate_burn(&[600, 400], &[], 1_000).expect("full burn of two allocations");
+        validate_burn(&[1_000], &[600], 400).expect("partial burn with change");
+    }
+
+    /// The burn destroys 1 unit and declares 1_000_000.
+    #[test]
+    fn rejects_a_burn_that_declares_more_than_it_destroyed() {
+        assert_burn_mismatch(validate_burn(&[1], &[], 1_000_000));
+        assert_burn_mismatch(validate_burn(&[1_000], &[], 1_001));
+    }
+
+    /// The burn keeps change but declares the full input as burned.
+    #[test]
+    fn rejects_a_burn_that_declares_its_change_as_burned() {
+        assert_burn_mismatch(validate_burn(&[1_000], &[600], 1_000));
+    }
+
+    /// A burn with no asset inputs cannot declare a burned amount.
+    #[test]
+    fn rejects_a_burn_with_no_asset_inputs() {
+        assert_burn_mismatch(validate_burn(&[], &[], 1_000));
+    }
+
+    /// The burn destroys more units than it declares.
+    #[test]
+    fn rejects_a_burn_that_declares_less_than_it_destroyed() {
+        assert_burn_mismatch(validate_burn(&[1_000], &[], 999));
+    }
+}
