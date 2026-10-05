@@ -4,12 +4,15 @@ use alloy_primitives::{Address, Bytes, FixedBytes, U256};
 use alloy_sol_types::SolCall;
 
 use crate::networks::evm::validation::{
-    decode_funds_out_params, fundsOutCall, FundsOutParams, FUNDS_OUT_SELECTOR_POOLS,
+    decode_funds_out_params, fundsOutCall, FundsOutParams, ReleaseIdentity,
+    FUNDS_OUT_SELECTOR_POOLS,
 };
 
-/// Decodes a fixture blob into the intent that the cross-checks take.
-fn params_of(call_data: &[u8]) -> FundsOutParams {
-    decode_funds_out_params(call_data).expect("fixture calldata must decode")
+/// Decodes a fixture blob into the release that the cross-checks take.
+fn params_of(call_data: &[u8]) -> ReleaseIdentity {
+    ReleaseIdentity::from_funds_out(
+        &decode_funds_out_params(call_data).expect("fixture calldata must decode"),
+    )
 }
 
 /// Builds a `fundsOut(FundsOutParams)` calldata with the real `sol!` ABI
@@ -607,6 +610,136 @@ mod settlement {
             err.to_string().contains("canonically") || err.to_string().contains("decode"),
             "{err}"
         );
+    }
+}
+
+// LayerZero route (#264): `lzFundsOut` runs the same burn binds as `fundsOut`.
+// Each case decodes real `lzFundsOut` calldata through the LZ path.
+#[cfg(feature = "bfa-mint")]
+mod lz_route {
+    use super::*;
+    use crate::networks::evm::events::VerifiedLock;
+    use crate::networks::evm::validation::{decode_lz_funds_out_params, lzFundsOutCall};
+    use crate::networks::rgb::validation::{bfa, TransitionSummary};
+    use alloy_primitives::B256;
+    use alloy_sol_types::SolValue;
+
+    const OP_ID_HEX: &str = "a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90";
+    const BURNED: u64 = 1000;
+
+    const LOCK: VerifiedLock = VerifiedLock {
+        mint_opid: [0x51; 32],
+        minted: 100,
+        operation_id: [0xA1; 32],
+        net_amount: 950,
+    };
+
+    fn padded_recipient() -> [u8; 32] {
+        let mut r = [0u8; 32];
+        r[12..].copy_from_slice(&[0x42; 20]);
+        r
+    }
+
+    fn burn() -> ValidatedConsignment {
+        validated_with_last(TransitionSummary {
+            op_id: OP_ID_HEX.into(),
+            transition_type: bfa::TS_BURN,
+            total_output_amount: 0,
+            asset_output_amount: 0,
+            outputs: Vec::new(),
+            burned_asset_amount: Some(BURNED),
+            burn_recipient: Some(padded_recipient().to_vec()),
+        })
+    }
+
+    /// An LZ release that matches [`burn`] and [`LOCK`] in every bound field.
+    fn honest() -> lzFundsOutCall {
+        let settlement = (
+            vec![B256::from(LOCK.operation_id)],
+            vec![U256::from(LOCK.net_amount)],
+        );
+        lzFundsOutCall {
+            amount: U256::from(BURNED),
+            burnId: U256::ZERO,
+            sourceChainId: U256::ZERO,
+            destinationChainId: U256::from(137u64),
+            sourceAddress: String::new(),
+            proof: Bytes::new(),
+            settlementData: Bytes::from(settlement.abi_encode_params()),
+            dstEid: 30109,
+            recipient: FixedBytes(padded_recipient()),
+            minAmountLD: U256::from(BURNED),
+            extraOptions: Bytes::new(),
+            sourceBurnTxId: FixedBytes(hex::decode(OP_ID_HEX).unwrap().try_into().unwrap()),
+        }
+    }
+
+    /// Encode, then decode through the LZ path, as `validate_destination` does.
+    fn release(call: lzFundsOutCall) -> ReleaseIdentity {
+        let decoded = decode_lz_funds_out_params(&call.abi_encode()).expect("LZ fixture decodes");
+        ReleaseIdentity::from_lz_funds_out(&decoded)
+    }
+
+    fn check(call: lzFundsOutCall) -> Result<()> {
+        let r = release(call);
+        let validated = burn();
+        validate_funds_out_amount(&r, &validated)?;
+        validate_funds_out_source_burn_tx_id(&r, &validated)?;
+        validate_funds_out_burn_recipient(&r, &validated)?;
+        validate_funds_out_settlement(&r, &[LOCK])
+    }
+
+    #[test]
+    fn passes_an_lz_release_that_matches_the_burn() {
+        check(honest()).expect("honest LZ release must pass");
+    }
+
+    #[test]
+    fn rejects_an_lz_recipient_the_burn_did_not_commit_to() {
+        let err = check(lzFundsOutCall {
+            recipient: FixedBytes([0x99; 32]),
+            ..honest()
+        })
+        .unwrap_err();
+        assert!(err.to_string().contains("recipient mismatch"), "{err}");
+    }
+
+    #[test]
+    fn rejects_an_lz_source_burn_tx_id_that_is_not_the_burn() {
+        let err = check(lzFundsOutCall {
+            sourceBurnTxId: FixedBytes([0x6c; 32]),
+            ..honest()
+        })
+        .unwrap_err();
+        assert!(err.to_string().contains("sourceBurnTxId mismatch"), "{err}");
+    }
+
+    #[test]
+    fn rejects_lz_settlement_data_that_is_not_the_ancestry() {
+        let other = (vec![B256::from([0xC3; 32])], vec![U256::from(950u64)]);
+        let err = check(lzFundsOutCall {
+            settlementData: Bytes::from(other.abi_encode_params()),
+            ..honest()
+        })
+        .unwrap_err();
+        assert!(err.to_string().contains("settlementData mismatch"), "{err}");
+    }
+
+    #[test]
+    fn rejects_an_lz_amount_below_the_burned_amount() {
+        let err = check(lzFundsOutCall {
+            amount: U256::from(BURNED - 100),
+            ..honest()
+        })
+        .unwrap_err();
+        assert!(err.to_string().contains("exact equality"), "{err}");
+    }
+
+    /// The BtcRelay bind reads the LZ `proof` too. An empty one fails closed.
+    #[test]
+    fn rejects_an_lz_release_with_no_finality_proof() {
+        let err = super::super::decode_funds_out_proof(&release(honest())).unwrap_err();
+        assert!(err.to_string().contains("proof is empty"), "{err}");
     }
 }
 

@@ -38,6 +38,7 @@ WORKDIR /home/parent
 
 # `parent/` is its own workspace, so its target dir is nested, not at /build.
 COPY --from=builder /build/parent/target/release/utexo-bridge-parent ./utexo-bridge-parent
+COPY --from=builder /build/parent/target/release/utexo-bridge-parent-cli ./utexo-bridge-parent-cli
 
 RUN chown -R parent:parent .
 

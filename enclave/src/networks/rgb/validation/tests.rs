@@ -36,6 +36,15 @@ const TRANSFER_FIXTURE: &[u8] =
 const CONTRACT_FIXTURE: &[u8] =
     include_bytes!("../../../../tests/fixtures/contract_consignment.rgbc");
 
+// A real BFA consignment from a bridge run on signet: one `Bridge` mint of
+// 100_000 units, then a `Burn` of 50_000 and a last `Burn` of 10_000, with
+// 40_000 as change. It has the same bytes as
+// `tests/fixtures/bfa_two_burns.rgb` in UTEXO-Protocol/rgb-lib. It contains
+// its witness txs, so validation only needs the network for the genesis-hash
+// check.
+const BFA_BURN_FIXTURE: &[u8] =
+    include_bytes!("../../../../tests/fixtures/bfa_burn_consignment.rgbc");
+
 use crate::config::BridgeConfig;
 #[cfg(rgb_to_evm)]
 use crate::config::{
@@ -170,16 +179,12 @@ fn extracts_op_ids_and_last_transition_from_transfer_fixture() {
     assert_eq!(last.burned_asset_amount, None);
 }
 
-// Ignored: `transfer_consignment.rgbc` is an NIA consignment, which
-// `trusted_typesystem_for_schema` refuses. Needs a BFA fixture in
-// `enclave/tests/fixtures/`.
 #[test]
-#[ignore]
 fn trusted_typesystem_sourced_from_schema_not_consignment() {
     // The trusted type system must come from rgb-schemas, not from
     // `transfer.types`. `non_bfa_schemas_are_rejected` covers non-BFA schemas.
     // This test checks that a valid consignment's types match the canonical ones.
-    let t = Transfer::load(Cursor::new(TRANSFER_FIXTURE)).expect("load transfer fixture");
+    let t = Transfer::load(Cursor::new(BFA_BURN_FIXTURE)).expect("load BFA fixture");
 
     let trusted = trusted_typesystem_for_schema(t.genesis.schema_id)
         .expect("fixture schema must be admitted");
@@ -724,9 +729,9 @@ fn rejects_consignment_hash_mismatch_even_with_valid_flag() {
 /// prove that the bind is in the request path. The rule tests in
 /// `validation::tests::asset_binding_rule` cannot show this.
 ///
-/// All tests are ignored for one reason: `transfer_consignment.rgbc` is an
-/// NIA consignment, and the schema gate refuses it before the asset bind.
-/// Remove each `#[ignore]` when a BFA fixture is in `enclave/tests/fixtures/`.
+/// They run on `BFA_BURN_FIXTURE`. The consignment history has a mint, and
+/// only a `bfa-validation` build can run a mint script. Without that feature,
+/// the cases that must pass RGB consensus are ignored.
 #[cfg(rgb_to_evm)]
 mod asset_bind {
     use super::*;
@@ -734,22 +739,48 @@ mod asset_bind {
     use crate::networks::rgb::spv::{Checkpoint, HeaderChain, Network};
     use std::sync::Mutex;
 
-    /// Contract id of `TRANSFER_FIXTURE`. [`fixture_asset_id`] derives it again
+    /// Contract id of `BFA_BURN_FIXTURE`. [`fixture_asset_id`] derives it again
     /// and asserts it, so a fixture change fails loudly.
-    const FIXTURE_ASSET_ID: &str = "rgb:fuhLYX9G-eC8gDvf-V0XpYFH-ceSafoc-lGutAYq-~SExGU4";
+    const FIXTURE_ASSET_ID: &str = "rgb:psO2jKZI-i4fudyA-ORTT8a~-SMaLO6u-69ELk2p-yPRGPJY";
 
     /// The validated asset identity: the genesis contract id of the fixture.
     fn fixture_asset_id() -> String {
-        let t = Transfer::load(Cursor::new(TRANSFER_FIXTURE)).expect("load transfer fixture");
+        let t = Transfer::load(Cursor::new(BFA_BURN_FIXTURE)).expect("load BFA fixture");
         let id = t.contract_id().to_string();
         assert_eq!(
             id, FIXTURE_ASSET_ID,
-            "transfer fixture contract id drifted - update FIXTURE_ASSET_ID"
+            "BFA fixture contract id drifted - update FIXTURE_ASSET_ID"
         );
         id
     }
 
-    /// Stub Esplora that serves only `GET /block-height/0` with the mainnet
+    /// An RGB source for the BFA fixture. It shadows [`super::fixture_source`],
+    /// which uses the NIA fixture and stays for the payload-gate tests.
+    fn fixture_source(asset_id: &str) -> RgbSource {
+        RgbSource {
+            consignment: BFA_BURN_FIXTURE.to_vec(),
+            consignment_hash: keccak(BFA_BURN_FIXTURE),
+            ..super::fixture_source(asset_id)
+        }
+    }
+
+    /// The EVM lock for the one mint in the fixture, as the `FundsIn` read of
+    /// the enclave reports it: the mint OpId and 100_000 units. Without an
+    /// event that agrees, RGB consensus (`cea`) refuses the mint and each burn
+    /// that comes from it.
+    fn fixture_mint_events() -> Vec<rgbstd::vm::ether_extension::Event> {
+        let mint_opid: [u8; 32] =
+            hex::decode("6d72ee6970a5cd28ef6f00a67b95242e088941bd79980739c29a40fb4050e593")
+                .unwrap()
+                .try_into()
+                .unwrap();
+        vec![rgbstd::vm::ether_extension::Event::new(
+            rgbstd::OpId::from(mint_opid),
+            rgbstd::RevealedValue::new(100_000u64),
+        )]
+    }
+
+    /// Stub Esplora that serves only `GET /block-height/0` with the signet
     /// genesis hash. Offline rgbstd validation of the fixture needs only this.
     /// The resolver calls out only for the genesis-hash chain check. The
     /// fixture embeds its witness txs (added as tentative by
@@ -773,7 +804,7 @@ mod asset_bind {
                     );
                     continue;
                 }
-                let body = bitcoin::constants::genesis_block(bitcoin::Network::Bitcoin)
+                let body = bitcoin::constants::genesis_block(bitcoin::Network::Signet)
                     .block_hash()
                     .to_string();
                 let resp = format!(
@@ -810,18 +841,18 @@ mod asset_bind {
         }
     }
 
-    /// Mainnet header chain with a checkpoint time of "now". The SPV
+    /// Signet header chain with a checkpoint time of "now". The SPV
     /// staleness and chain-net checks pass, so a bound source reaches the
     /// Merkle-proof coverage check. Its "missing merkle proofs" error proves
-    /// that all asset-binding checks passed. A unit test cannot build real
-    /// proofs for the mainnet witness txs.
-    fn fresh_mainnet_chain() -> Mutex<HeaderChain> {
+    /// that all asset-binding checks passed. The fixture carries no proofs for
+    /// its witness txs.
+    fn fresh_signet_chain() -> Mutex<HeaderChain> {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_secs() as u32;
         Mutex::new(HeaderChain::new(
-            Network::Mainnet,
+            Network::Signet,
             Checkpoint {
                 height: 0,
                 hash: [0u8; 32],
@@ -834,14 +865,23 @@ mod asset_bind {
     }
 
     /// Runs `validate_source` with a stub-Esplora validator and a fresh
-    /// mainnet header chain.
+    /// signet header chain.
     fn run_validate_source(
         source: &RgbSource,
         config: &BridgeConfig,
     ) -> Result<ValidatedConsignment> {
+        run_validate_source_with_events(source, config, &fixture_mint_events())
+    }
+
+    /// [`run_validate_source`] with explicit verified EVM locks.
+    fn run_validate_source_with_events(
+        source: &RgbSource,
+        config: &BridgeConfig,
+        events: &[rgbstd::vm::ether_extension::Event],
+    ) -> Result<ValidatedConsignment> {
         let url = spawn_stub_esplora();
-        let validator = RgbValidator::new(url, "bitcoin").expect("validator");
-        let chain = fresh_mainnet_chain();
+        let validator = RgbValidator::new(url, "signet").expect("validator");
+        let chain = fresh_signet_chain();
         let ctx = ValidationContext {
             bridge_config: config,
             rgb_validator: Some(&validator),
@@ -852,7 +892,7 @@ mod asset_bind {
             self_owned_psbt_outputs: None,
             #[cfg(evm_to_rgb)]
             psbt_fee_key_paths: None,
-            bridge_events: &[],
+            bridge_events: events,
         };
         validate_source(source, &ctx)
     }
@@ -860,9 +900,11 @@ mod asset_bind {
     /// Happy path: validated contract_id == declared asset_id == pinned
     /// RGB_ASSET_ID. The failure is in the SPV stage, after the binding and
     /// after the staleness and chain-net checks.
-    // Ignored: see the module note on the BFA fixture.
     #[test]
-    #[ignore]
+    #[cfg_attr(
+        not(feature = "bfa-validation"),
+        ignore = "needs bfa-validation to run the mint script of the fixture"
+    )]
     fn binds_when_contract_id_matches_pin() {
         let id = fixture_asset_id();
         let err = run_validate_source(&fixture_source(&id), &pinned_config(&id)).unwrap_err();
@@ -892,9 +934,11 @@ mod asset_bind {
     /// Empty declarations fail first. Thus the reachable theft path is a
     /// colluding listener that declares the foreign asset of the consignment.
     /// The RGB_ASSET_ID pin must still reject it.
-    // Ignored: see the module note on the BFA fixture.
     #[test]
-    #[ignore]
+    #[cfg_attr(
+        not(feature = "bfa-validation"),
+        ignore = "needs bfa-validation to run the mint script of the fixture"
+    )]
     fn rejects_foreign_asset_even_when_declared_agrees() {
         let id = fixture_asset_id();
         let err = run_validate_source(
@@ -911,9 +955,11 @@ mod asset_bind {
 
     /// The listener declares an asset that is not the validated identity.
     /// The declared-vs-validated check fails before the pin check.
-    // Ignored: see the module note on the BFA fixture.
     #[test]
-    #[ignore]
+    #[cfg_attr(
+        not(feature = "bfa-validation"),
+        ignore = "needs bfa-validation to run the mint script of the fixture"
+    )]
     fn rejects_when_declared_disagrees_with_validated() {
         let err = run_validate_source(
             &fixture_source("rgb:listener-lied"),
@@ -934,9 +980,11 @@ mod asset_bind {
     /// (`networks/rgb/route/tests.rs::asset_bind::rejects_when_pin_absent`)
     /// and, for RGB->EVM, the EVM destination `!is_configured()` rejection
     /// (`networks/evm/validation.rs`, `not(test)`-gated).
-    // Ignored: see the module note on the BFA fixture.
     #[test]
-    #[ignore]
+    #[cfg_attr(
+        not(feature = "bfa-validation"),
+        ignore = "needs bfa-validation to run the mint script of the fixture"
+    )]
     fn pin_check_skipped_when_config_unconfigured() {
         let id = fixture_asset_id();
         let err = run_validate_source(&fixture_source(&id), &unconfigured_config()).unwrap_err();
@@ -948,8 +996,528 @@ mod asset_bind {
         );
     }
 
+    /// The full validator on a real burn. RGB consensus accepts the fixture:
+    /// the mint script with its EVM lock, and the two burn scripts. The
+    /// summary has the last burn: its OpId, the 10_000 burned units and its
+    /// payout recipient. It does not have the earlier burn of 50_000.
+    #[test]
+    #[cfg(feature = "bfa-validation")]
+    fn validates_a_real_burn_and_reads_its_terminal_burn() {
+        let validator = RgbValidator::new(spawn_stub_esplora(), "signet").expect("validator");
+        let validated = validator
+            .validate_consignment(BFA_BURN_FIXTURE, &fixture_mint_events())
+            .expect("the BFA burn fixture passes RGB consensus");
+
+        assert_eq!(validated.contract_id, FIXTURE_ASSET_ID);
+        assert_eq!(validated.chain_net, "sb");
+        assert_eq!(
+            validated.mint_op_ids,
+            vec!["6d72ee6970a5cd28ef6f00a67b95242e088941bd79980739c29a40fb4050e593".to_string()]
+        );
+        assert_eq!(validated.all_op_ids.len(), 3, "one mint, two burns");
+
+        let last = validated.last_transition.expect("terminal transition");
+        assert_eq!(last.transition_type, bfa::TS_BURN);
+        assert_eq!(
+            last.op_id,
+            "b1477c16bbb2c78d7206084fd0288561ab614de4b09a3cb974d05a1a29011018"
+        );
+        assert_eq!(last.burned_asset_amount, Some(10_000));
+        assert_eq!(
+            last.asset_output_amount, 40_000,
+            "change kept by the burner"
+        );
+        assert_eq!(
+            last.burn_recipient.map(hex::encode).as_deref(),
+            Some("000000000000000000000000436365aab93332ad6555c78b6ab000fcea95c2eb")
+        );
+    }
+
+    /// The burn comes from a mint. A mint is valid only with the EVM lock that
+    /// the enclave verified. With no lock, or a lock for a different amount,
+    /// the consignment is refused. Thus a burn of units with no backing does
+    /// not get to the release binds.
+    #[test]
+    #[cfg(feature = "bfa-validation")]
+    fn refuses_a_burn_whose_mint_has_no_matching_evm_lock() {
+        let id = fixture_asset_id();
+        let source = fixture_source(&id);
+        let config = pinned_config(&id);
+
+        let err = run_validate_source_with_events(&source, &config, &[]).unwrap_err();
+        assert!(
+            err.to_string().contains("without a verified FundsIn event"),
+            "expected a mint with no EVM lock to be refused, got: {err}"
+        );
+
+        let mut short = fixture_mint_events();
+        short[0] = rgbstd::vm::ether_extension::Event::new(
+            *short[0].reason(),
+            rgbstd::RevealedValue::new(99_999u64),
+        );
+        let err = run_validate_source_with_events(&source, &config, &short).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("evaluation of AluVM script for operation 6d72ee69")
+                && msg.contains("Some(1)"),
+            "expected the mint script to fail with ERRNO_ISSUED_MISMATCH, got: {msg}"
+        );
+    }
+
+    /// The enclave finds the settling transition two times. The flat parser
+    /// gives its OpId, which becomes `sourceBurnTxId`. The rgbstd walk gives
+    /// the burned amount, the recipient and the witness tx. A consignment for
+    /// which the two walks pick different burns would mix the OpId of one burn
+    /// with the amount and recipient of a different burn.
+    ///
+    /// The host controls only the order of the bundles in the bytes. This test
+    /// serializes the fixture in each order of its three bundles. The two
+    /// walks always pick the same transition. RGB consensus accepts only the
+    /// original order, because in each other order a transition comes before
+    /// the state that it spends.
+    #[test]
+    #[cfg(feature = "bfa-validation")]
+    fn the_two_walks_pick_the_same_transition_in_every_bundle_order() {
+        let original = Transfer::load(Cursor::new(BFA_BURN_FIXTURE)).expect("load BFA fixture");
+        let bundles: Vec<_> = original.bundles.iter().cloned().collect();
+        assert_eq!(bundles.len(), 3, "one mint and two burns");
+        let validator = RgbValidator::new(spawn_stub_esplora(), "signet").expect("validator");
+        let events = fixture_mint_events();
+
+        for order in [
+            [0, 1, 2],
+            [0, 2, 1],
+            [1, 0, 2],
+            [1, 2, 0],
+            [2, 0, 1],
+            [2, 1, 0],
+        ] {
+            let mut transfer = original.clone();
+            transfer.bundles = Default::default();
+            transfer
+                .bundles
+                .extend(order.iter().map(|i| bundles[*i].clone()))
+                .expect("three bundles fit");
+            let mut bytes = Vec::new();
+            transfer
+                .save(&mut bytes)
+                .expect("serialize the consignment");
+
+            let (_, _, flat_last, _) = extract_transition_summary(&bytes).expect("flat parse");
+            let flat_opid = flat_last.expect("flat last transition").op_id;
+
+            let reloaded = Transfer::load(Cursor::new(&bytes)).expect("reload");
+            let rgbstd_opid = reloaded
+                .bundles
+                .iter()
+                .last()
+                .and_then(|wb| wb.bundle().known_transitions.iter().last())
+                .map(|known| known.opid.to_string())
+                .expect("rgbstd last transition");
+
+            assert_eq!(
+                flat_opid, rgbstd_opid,
+                "bundle order {order:?}: the two walks pick different transitions"
+            );
+
+            let result = validator.validate_consignment(&bytes, &events);
+            if order == [0, 1, 2] {
+                result.expect("the original order passes RGB consensus");
+            } else {
+                let err = result.expect_err("a different bundle order must be refused");
+                assert!(
+                    err.to_string().contains("references previous state"),
+                    "bundle order {order:?}: expected an ordering failure, got: {err}"
+                );
+            }
+        }
+    }
+
+    /// The mint transition of the fixture, with the OpId that the consignment
+    /// records for it.
+    fn fixture_mint() -> (rgbstd::Transition, rgbstd::OpId) {
+        let transfer = Transfer::load(Cursor::new(BFA_BURN_FIXTURE)).expect("load BFA fixture");
+        let known = transfer
+            .bundles
+            .iter()
+            .flat_map(|wb| wb.bundle().known_transitions.iter())
+            .find(|k| k.transition.transition_type == rgbstd::TransitionType::with(bfa::TS_BRIDGE))
+            .expect("the fixture has a mint");
+        (known.transition.clone(), known.opid)
+    }
+
+    /// A deposit names its mint by OpId, and the OpId is a hash of the full
+    /// transition. Thus the deposit fixes the mint right that the mint spends,
+    /// and the outputs of the mint. A mint with a different right, or with
+    /// different outputs, has a different OpId and is a different mint.
+    #[test]
+    fn a_mint_opid_commits_to_the_right_it_spends_and_to_its_outputs() {
+        use rgbstd::Operation as _;
+
+        let (mint, opid) = fixture_mint();
+        assert_eq!(mint.id(), opid, "the OpId is the hash of the transition");
+
+        // The mint spends one input, and that input is a mint right.
+        let inputs: Vec<_> = (&mint.inputs).into_iter().collect();
+        assert_eq!(inputs.len(), 1);
+        assert_eq!(inputs[0].ty, rgbstd::AssignmentType::with(bfa::OS_BRIDGE));
+
+        // A different mint right gives a different OpId.
+        let mut other_right = mint.clone();
+        let mut input = inputs[0];
+        input.no += 1;
+        other_right.inputs.push(input).expect("add an input");
+        other_right
+            .inputs
+            .remove(&inputs[0])
+            .expect("remove an input");
+        assert_ne!(other_right.id(), opid);
+
+        // Different outputs give a different OpId.
+        let mut other_outputs = mint.clone();
+        other_outputs
+            .assignments
+            .remove(&rgbstd::AssignmentType::with(bfa::OS_ASSET))
+            .expect("remove the asset outputs");
+        assert_ne!(other_outputs.id(), opid);
+    }
+
+    /// The mint right is a seal on one Bitcoin UTXO, and the witness tx of the
+    /// mint spends that UTXO. Each tx that commits this mint must spend the
+    /// same UTXO, so only one of them can confirm.
+    #[test]
+    fn the_mint_witness_tx_spends_the_utxo_of_the_mint_right() {
+        use rgbstd::{Assign, Operation as _, TypedAssigns};
+
+        let transfer = Transfer::load(Cursor::new(BFA_BURN_FIXTURE)).expect("load BFA fixture");
+        let (mint, opid) = fixture_mint();
+        let right = (&mint.inputs).into_iter().next().expect("one input");
+        assert_eq!(
+            right.op,
+            transfer.genesis.id(),
+            "the right comes from genesis"
+        );
+
+        // The seal of that right in genesis.
+        let rights = transfer
+            .genesis
+            .assignments
+            .get(&rgbstd::AssignmentType::with(bfa::OS_BRIDGE))
+            .expect("genesis assigns mint rights");
+        let TypedAssigns::Declarative(rights) = rights else {
+            panic!("a mint right is declarative");
+        };
+        let Assign::Revealed { seal, .. } = &rights[right.no as usize] else {
+            panic!("the genesis seal of the right is revealed");
+        };
+
+        // The witness tx of the bundle that has the mint.
+        let witness_tx = transfer
+            .bundles
+            .iter()
+            .find(|wb| wb.bundle().known_transitions.iter().any(|k| k.opid == opid))
+            .and_then(|wb| wb.pub_witness.tx())
+            .expect("the fixture embeds the mint witness tx");
+        assert!(
+            witness_tx
+                .input
+                .iter()
+                .any(|txin| txin.previous_output.txid == seal.txid
+                    && txin.previous_output.vout == seal.vout.into_u32()),
+            "the mint witness tx must spend the UTXO of the mint right"
+        );
+    }
+
+    /// The fixture with the mint witness tx changed: input `input` of that tx
+    /// spends a different outpoint. The outputs do not change, so the
+    /// commitment to the mint stays valid.
+    #[cfg(feature = "bfa-validation")]
+    fn fixture_with_mint_witness_input_replaced(input: usize) -> Vec<u8> {
+        use rgbstd::validation::PubWitness;
+
+        let original = Transfer::load(Cursor::new(BFA_BURN_FIXTURE)).expect("load BFA fixture");
+        let (_, opid) = fixture_mint();
+        let mut bundles: Vec<_> = original.bundles.iter().cloned().collect();
+        let mint_bundle = bundles
+            .iter_mut()
+            .find(|wb| wb.bundle().known_transitions.iter().any(|k| k.opid == opid))
+            .expect("the fixture has the mint bundle");
+        let mut tx = mint_bundle
+            .pub_witness
+            .tx()
+            .expect("the fixture embeds the mint witness tx")
+            .clone();
+        tx.input[input].previous_output.vout += 7;
+        mint_bundle.pub_witness = PubWitness::Tx(tx);
+
+        let mut transfer = original.clone();
+        transfer.bundles = Default::default();
+        transfer.bundles.extend(bundles).expect("three bundles fit");
+        let mut bytes = Vec::new();
+        transfer
+            .save(&mut bytes)
+            .expect("serialize the consignment");
+        bytes
+    }
+
+    /// RGB consensus refuses a mint whose witness tx does not spend the UTXO
+    /// of the mint right. The mint witness tx of the fixture has two inputs:
+    /// input 0 spends the mint right, input 1 pays the fee.
+    ///
+    /// With a different outpoint on input 0, the consignment is refused: the
+    /// tx does not close the seal of the right. With a different outpoint on
+    /// input 1, consensus accepts the consignment. Thus the seal causes the
+    /// refusal, not the change of the tx. A second tx for the same mint is
+    /// possible, but it must spend the same UTXO, so only one tx can confirm.
+    #[test]
+    #[cfg(feature = "bfa-validation")]
+    fn refuses_a_mint_witness_tx_that_does_not_spend_the_mint_right() {
+        const RIGHT_UTXO: &str =
+            "8c2a99d569e9d3cfb5abe1697cdb73d170835672db9c161d684cb01d50c6b9e6:1";
+
+        let original = Transfer::load(Cursor::new(BFA_BURN_FIXTURE)).expect("load BFA fixture");
+        let (_, opid) = fixture_mint();
+        let witness_tx = original
+            .bundles
+            .iter()
+            .find(|wb| wb.bundle().known_transitions.iter().any(|k| k.opid == opid))
+            .and_then(|wb| wb.pub_witness.tx())
+            .expect("the fixture embeds the mint witness tx");
+        assert_eq!(witness_tx.input.len(), 2);
+        assert_eq!(witness_tx.input[0].previous_output.to_string(), RIGHT_UTXO);
+
+        let validator = RgbValidator::new(spawn_stub_esplora(), "signet").expect("validator");
+        let events = fixture_mint_events();
+
+        let err = validator
+            .validate_consignment(&fixture_with_mint_witness_input_replaced(0), &events)
+            .expect_err("a mint that does not spend the mint right must be refused");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("does not closes seal") && msg.contains(RIGHT_UTXO),
+            "expected a seal-closing failure on the mint right, got: {msg}"
+        );
+
+        validator
+            .validate_consignment(&fixture_with_mint_witness_input_replaced(1), &events)
+            .expect("a different fee input does not break the seal of the right");
+    }
+
+    /// The enclave gives RGB consensus the EVM lock for the OpId that the
+    /// deposit names. A lock for a different OpId does not validate the mint,
+    /// although the amount is correct. Thus one deposit can back only the mint
+    /// that it names.
+    #[test]
+    #[cfg(feature = "bfa-validation")]
+    fn refuses_a_mint_whose_evm_lock_names_a_different_transition() {
+        let id = fixture_asset_id();
+        let other_mint = vec![rgbstd::vm::ether_extension::Event::new(
+            rgbstd::OpId::from([0x77; 32]),
+            rgbstd::RevealedValue::new(100_000u64),
+        )];
+        let err =
+            run_validate_source_with_events(&fixture_source(&id), &pinned_config(&id), &other_mint)
+                .unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("evaluation of AluVM script for operation 6d72ee69")
+                && msg.contains("Some(1)"),
+            "expected the mint script to fail with ERRNO_ISSUED_MISMATCH, got: {msg}"
+        );
+    }
+
     // No end-to-end test for an empty validated contract_id.
     // `validate_consignment` derives it from the genesis, so it is never
     // empty. `asset_binding_rule::rejects_empty_validated_contract_id` covers
     // the rule.
+}
+
+/// The release amount of a burn comes from its `MS_BURNED_ASSET` metadata
+/// ([`read_last_transition_burned_asset`]). The burner cannot set that value
+/// freely. The BFA burn script requires
+/// `sum(OS_ASSET inputs) == MS_BURNED_ASSET + sum(OS_ASSET outputs)`, and RGB
+/// consensus runs the script on each `TS_BURN`.
+///
+/// These tests run the pinned BFA schema and scripts through
+/// `Schema::validate_state`, the step that `validate_consignment` runs for
+/// each operation. They use the same contract-state and VM-extension types as
+/// the enclave. Only the transition and its input state are synthetic.
+#[cfg(feature = "bfa-validation")]
+mod burn_amount_is_bound_by_consensus {
+    use std::cell::RefCell;
+    use std::collections::BTreeMap;
+    use std::rc::Rc;
+
+    use rgbstd::contract::IssuerWrapper;
+    use rgbstd::persistence::{MemContract, MemContractState};
+    use rgbstd::validation::{Failure, ValidationError};
+    use rgbstd::vm::ether_extension::{BridgedContract, Event, IssuedAmountCheckExt};
+    use rgbstd::vm::{ContractStateEvolve, OrdOpRef, WitnessOrd};
+    use rgbstd::{
+        Assign, AssignmentType, Assignments, BundleId, Genesis, GraphSeal, Inputs, MetaType,
+        MetaValue, Metadata, OpId, Operation, Opout, RevealedState, RevealedValue, Transition,
+        TransitionType, Txid, TypedAssigns,
+    };
+    use schemata::{BridgedFungibleAsset, ERRNO_BURN_MISMATCH};
+    use strict_encoding::StrictDumb;
+
+    use super::bfa;
+
+    type State<'a> = BridgedContract<'a, MemContract<MemContractState>>;
+
+    fn asset() -> AssignmentType {
+        AssignmentType::with(bfa::OS_ASSET)
+    }
+
+    fn meta_value(bytes: &[u8]) -> MetaValue {
+        let mut value = MetaValue::default();
+        value.extend(bytes.iter().copied()).unwrap();
+        value
+    }
+
+    /// Runs consensus on one `TS_BURN`. `inputs` are the asset units of each
+    /// closed allocation, `change` goes to new allocations, and `declared` is
+    /// the `MS_BURNED_ASSET` value.
+    fn validate_burn(inputs: &[u64], change: &[u64], declared: u64) -> Result<(), ValidationError> {
+        let schema = BridgedFungibleAsset::schema();
+        let types = BridgedFungibleAsset::types();
+        let scripts = BridgedFungibleAsset::scripts();
+
+        let mut genesis = Genesis::strict_dumb();
+        genesis.schema_id = schema.schema_id();
+        let contract_id = genesis.contract_id();
+
+        let mut metadata = Metadata::default();
+        metadata
+            .add_value(
+                MetaType::with(bfa::MS_BURNED_ASSET),
+                meta_value(&declared.to_le_bytes()),
+            )
+            .unwrap();
+        metadata
+            .add_value(
+                MetaType::with(bfa::MS_BURN_RECIPIENT),
+                meta_value(&[0x22; 32]),
+            )
+            .unwrap();
+
+        // The state that the burn closes. A transition must have one input or
+        // more, so a burn with no asset inputs closes a bridge right.
+        let mut prev_state = BTreeMap::<AssignmentType, Vec<RevealedState>>::new();
+        let mut opouts = std::collections::BTreeSet::new();
+        for (no, units) in inputs.iter().enumerate() {
+            opouts.insert(Opout::new(OpId::from([0x11; 32]), asset(), no as u16));
+            prev_state
+                .entry(asset())
+                .or_default()
+                .push(RevealedState::Fungible(RevealedValue::new(*units)));
+        }
+        if inputs.is_empty() {
+            let right = AssignmentType::with(bfa::OS_BRIDGE);
+            opouts.insert(Opout::new(OpId::from([0x11; 32]), right, 0));
+            prev_state
+                .entry(right)
+                .or_default()
+                .push(RevealedState::Void);
+        }
+
+        // `Inputs` cannot be empty. Add the real inputs to its dumb value, then
+        // remove the dumb input.
+        let mut inputs = Inputs::strict_dumb();
+        for opout in opouts {
+            inputs.push(opout).unwrap();
+        }
+        inputs.remove(&Opout::strict_dumb()).unwrap();
+
+        let mut assignments = Assignments::<GraphSeal>::default();
+        if !change.is_empty() {
+            let leg = |units: &u64| Assign::Revealed {
+                seal: GraphSeal::strict_dumb(),
+                state: RevealedValue::new(*units),
+            };
+            // The vector type is not exported and cannot be empty. Start with
+            // its dumb value (one element) and replace that element.
+            let mut typed = TypedAssigns::<GraphSeal>::Fungible(StrictDumb::strict_dumb());
+            if let TypedAssigns::Fungible(legs) = &mut typed {
+                *legs.iter_mut().next().unwrap() = leg(&change[0]);
+                for units in &change[1..] {
+                    legs.push(leg(units)).unwrap();
+                }
+            }
+            assignments.insert(asset(), typed).unwrap();
+        }
+
+        let transition = Transition {
+            ffv: Default::default(),
+            contract_id,
+            nonce: 0,
+            transition_type: TransitionType::with(bfa::TS_BURN),
+            metadata,
+            globals: Default::default(),
+            inputs,
+            assignments,
+            signature: None,
+        };
+
+        let events: Vec<Event> = Vec::new();
+        let state = Rc::new(RefCell::new(State::init(((&schema, contract_id), &events))));
+        schema.validate_state::<State<'_>, IssuedAmountCheckExt>(
+            &types,
+            &scripts,
+            &genesis,
+            OrdOpRef::Transition(
+                &transition,
+                {
+                    use bitcoin::hashes::Hash;
+                    Txid::from_byte_array([0x33; 32])
+                },
+                WitnessOrd::Tentative,
+                BundleId::strict_dumb(),
+            ),
+            state,
+            &prev_state,
+        )
+    }
+
+    fn assert_burn_mismatch(result: Result<(), ValidationError>) {
+        match result {
+            Err(ValidationError::InvalidConsignment(Failure::ScriptFailure(_, code, _))) => {
+                assert_eq!(code, Some(ERRNO_BURN_MISMATCH), "burn script errno")
+            }
+            other => panic!("expected the burn script to reject, got {other:?}"),
+        }
+    }
+
+    /// Valid burns: a full burn, and a partial burn with change.
+    #[test]
+    fn accepts_a_burn_that_declares_what_it_destroyed() {
+        validate_burn(&[1_000], &[], 1_000).expect("full burn");
+        validate_burn(&[600, 400], &[], 1_000).expect("full burn of two allocations");
+        validate_burn(&[1_000], &[600], 400).expect("partial burn with change");
+    }
+
+    /// The burn destroys 1 unit and declares 1_000_000.
+    #[test]
+    fn rejects_a_burn_that_declares_more_than_it_destroyed() {
+        assert_burn_mismatch(validate_burn(&[1], &[], 1_000_000));
+        assert_burn_mismatch(validate_burn(&[1_000], &[], 1_001));
+    }
+
+    /// The burn keeps change but declares the full input as burned.
+    #[test]
+    fn rejects_a_burn_that_declares_its_change_as_burned() {
+        assert_burn_mismatch(validate_burn(&[1_000], &[600], 1_000));
+    }
+
+    /// A burn with no asset inputs cannot declare a burned amount.
+    #[test]
+    fn rejects_a_burn_with_no_asset_inputs() {
+        assert_burn_mismatch(validate_burn(&[], &[], 1_000));
+    }
+
+    /// The burn destroys more units than it declares.
+    #[test]
+    fn rejects_a_burn_that_declares_less_than_it_destroyed() {
+        assert_burn_mismatch(validate_burn(&[1_000], &[], 999));
+    }
 }
