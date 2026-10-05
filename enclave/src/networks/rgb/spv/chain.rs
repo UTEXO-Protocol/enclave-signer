@@ -59,7 +59,7 @@ pub const MAX_REORG_DEPTH: BlockHeight = 100;
 pub const MAX_STORED_HEADERS: usize = 1_000_000;
 
 /// Maximum headers in one `submit_headers` call. It bounds per-call work. The
-/// 4 MB `framing` cap alone allows approx 52k headers per message.
+/// 24 MiB `framing` cap alone allows approx 314k headers per message.
 pub const MAX_HEADERS_PER_SUBMIT: usize = 10_000;
 
 /// Outcome of pushing a batch of headers.
@@ -199,7 +199,7 @@ impl HeaderChain {
     ) -> Result<SubmitOutcome> {
         let tip = self.tip_height();
 
-        // Per-call cap. The 4 MB `framing` cap alone allows approx 52k headers.
+        // Per-call cap. The 24 MiB `framing` cap alone allows approx 314k headers.
         if raw_headers.len() > MAX_HEADERS_PER_SUBMIT {
             return Err(SpvError::BatchTooLarge {
                 len: raw_headers.len(),

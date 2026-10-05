@@ -119,7 +119,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .concurrency_limit_per_connection(per_conn)
         .max_concurrent_streams(Some(per_conn as u32))
         .timeout(Duration::from_secs(cfg.grpc_request_timeout_secs))
-        .add_service(ParentServiceServer::new(service))
+        // tonic refuses requests above 4 MiB by default. Accept the same
+        // size as the enclave frame.
+        .add_service(
+            ParentServiceServer::new(service)
+                .max_decoding_message_size(utexo_bridge_parent::framing::MAX_MESSAGE_SIZE as usize),
+        )
         .serve_with_incoming(incoming);
     if let Some(broker) = broker {
         tokio::select! {
