@@ -8,7 +8,6 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[2]
 ALIASES = {
-    'github-rgb-consignment': 'consignment_key',
     'github-rgb-consensus': 'consensus_key',
     'github-rgb-ops': 'ops_key',
     'github-rgb-schemas': 'schemas_key',
@@ -110,7 +109,6 @@ print(str(config))
 
     def test_prepare_keys_preserves_multiline_values_and_restricts_permissions(self):
         mapping = {
-            'RGB_CONSIGNMENT_PARSER_DEPLOY_KEY': 'consignment_key',
             'RGB_CONSENSUS_BFA_DEPLOY_KEY': 'consensus_key',
             'RGB_OPS_BFA_DEPLOY_KEY': 'ops_key',
             'RGB_SCHEMAS_BFA_DEPLOY_KEY': 'schemas_key',
