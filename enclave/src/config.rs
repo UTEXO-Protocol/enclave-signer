@@ -14,14 +14,21 @@
 use crate::error::{EnclaveError, Result};
 
 /// Default consignment size cap (`MAX_CONSIGNMENT_BYTES`). Defense-in-depth DoS
-/// bound. The 4 MiB wire frame also caps it. Real consignments are a few KB.
-pub const DEFAULT_MAX_CONSIGNMENT_BYTES: usize = 1024 * 1024;
-/// Default cap on Merkle proofs per source (`MAX_MERKLE_PROOFS`). A consignment
-/// anchors only a few witness txs.
-pub const DEFAULT_MAX_MERKLE_PROOFS: usize = 256;
+/// bound. The wire frame ([`crate::framing::MAX_MESSAGE_SIZE`]) also caps it.
+///
+/// The three defaults below are sized for a history of 10_000 state
+/// transitions. A consignment has approx 6 KB of fixed data, and each
+/// transition adds 470 to 600 bytes (measured: BFA transfer 468, BFA burn 560,
+/// BFA mint 593). Thus 10_000 transitions need 4.7 to 6 MB.
+pub const DEFAULT_MAX_CONSIGNMENT_BYTES: usize = 8 * 1024 * 1024;
+/// Default cap on Merkle proofs per source (`MAX_MERKLE_PROOFS`). A burn needs
+/// one proof for each witness tx in its history.
+pub const DEFAULT_MAX_MERKLE_PROOFS: usize = 16_384;
 /// Default cap on total proof bytes, txids and Merkle siblings, in all proofs
-/// (`MAX_TOTAL_PROOF_BYTES`). Bounds the total Merkle hashing work.
-pub const DEFAULT_MAX_TOTAL_PROOF_BYTES: usize = 128 * 1024;
+/// (`MAX_TOTAL_PROOF_BYTES`). Bounds the total Merkle hashing work. A proof in
+/// a full mainnet block has 13 siblings (448 bytes), so the proof-count cap
+/// fits: 16_384 x 448 bytes = 7.3 MB.
+pub const DEFAULT_MAX_TOTAL_PROOF_BYTES: usize = 8 * 1024 * 1024;
 
 /// Bridge config pinned at enclave boot from env. See module docs.
 #[derive(Debug, Clone)]
