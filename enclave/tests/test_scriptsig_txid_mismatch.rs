@@ -12,7 +12,7 @@
 #[path = "../src/test_support/electrum_stub.rs"]
 mod electrum_stub;
 
-use std::io::{Cursor, Read, Write};
+use std::io::Cursor;
 use std::sync::Mutex;
 
 use alloy_sol_types::{sol, SolEvent};
