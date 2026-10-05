@@ -179,6 +179,31 @@ fn extracts_op_ids_and_last_transition_from_transfer_fixture() {
     assert_eq!(last.burned_asset_amount, None);
 }
 
+/// `TRANSFER_FIXTURE` with one change: its type system gives the asset
+/// precision the signed type `I8`. The parser must not panic on it.
+#[test]
+fn signed_precision_is_refused_without_a_panic() {
+    const SIGNED_PRECISION_FIXTURE: &[u8] =
+        include_bytes!("../../../../tests/fixtures/transfer_consignment_signed_precision.rgbc");
+
+    let validator = RgbValidator::new("http://localhost:1".to_string(), "regtest").unwrap();
+    let err = validator
+        .validate_consignment(SIGNED_PRECISION_FIXTURE, &[])
+        .unwrap_err();
+    assert!(
+        err.to_string()
+            .contains("validates only the bridged fungible asset"),
+        "expected the schema refusal, got: {err}"
+    );
+
+    let rgb_consignment::ConsignmentInfo::Transfer(t) =
+        rgb_consignment::parse(SIGNED_PRECISION_FIXTURE).expect("parse")
+    else {
+        panic!("expected a Transfer");
+    };
+    assert_eq!(t.genesis.precision, None);
+}
+
 #[test]
 fn trusted_typesystem_sourced_from_schema_not_consignment() {
     // The trusted type system must come from rgb-schemas, not from
