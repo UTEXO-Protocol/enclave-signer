@@ -497,21 +497,53 @@ mod settlement {
         assert!(check(&[(0xA1, 950), (0xB2, 20)], &[LOCK_A, LOCK_B]).is_ok());
     }
 
-    // Characterizes the replay candidate, not a paid contract replay.
-    // burnid_test.go uses the same pairs to exercise payout ID derivation.
+    /// F05-NEW-AF-04: the same pairs in another order hash to another
+    /// `burnId`. Only the ascending order is signable.
     #[test]
-    fn reordered_settlement_passes_with_different_committed_bytes() {
+    fn rejects_reordered_settlement() {
         let locks = [LOCK_A, LOCK_B];
-        let original = [(0xA1, 950), (0xB2, 20)];
-        let reordered = [(0xB2, 20), (0xA1, 950)];
-        assert!(check(&original, &locks).is_ok());
-        assert!(check(&reordered, &locks).is_ok());
+        assert!(check(&[(0xA1, 950), (0xB2, 20)], &locks).is_ok());
+        let err = check(&[(0xB2, 20), (0xA1, 950)], &locks).unwrap_err();
+        assert!(err.to_string().contains("strictly ascending"), "{err}");
+    }
 
-        // The settlement validator accepts both encodings, but burnId
-        // commits to their bytes, not to the normalized pair set.
-        let original_hash = alloy_primitives::keccak256(settlement(&original));
-        let reordered_hash = alloy_primitives::keccak256(settlement(&reordered));
-        assert_ne!(original_hash, reordered_hash);
+    /// Lock order does not matter: only the calldata order is checked.
+    #[test]
+    fn passes_when_locks_arrive_in_any_order() {
+        assert!(check(&[(0xA1, 950), (0xB2, 20)], &[LOCK_B, LOCK_A]).is_ok());
+    }
+
+    /// Order is by the full 32 bytes, not by the first byte only.
+    #[test]
+    fn orders_by_full_operation_id() {
+        let mut hi_id = [0x10; 32];
+        hi_id[31] = 0x11;
+        let locks = [
+            VerifiedLock {
+                operation_id: [0x10; 32],
+                ..LOCK_A
+            },
+            VerifiedLock {
+                operation_id: hi_id,
+                ..LOCK_B
+            },
+        ];
+        let run = |order: [usize; 2]| {
+            let ids: Vec<B256> = order
+                .iter()
+                .map(|&i| B256::from(locks[i].operation_id))
+                .collect();
+            let amounts: Vec<U256> = order
+                .iter()
+                .map(|&i| U256::from(locks[i].net_amount))
+                .collect();
+            let data = Bytes::from((ids, amounts).abi_encode_params());
+            let cd = mock_funds_out_calldata_full(Address::ZERO, 1000, Bytes::new(), data);
+            validate_funds_out_settlement(&params_of(&cd), &locks)
+        };
+        assert!(run([0, 1]).is_ok());
+        let err = run([1, 0]).unwrap_err();
+        assert!(err.to_string().contains("strictly ascending"), "{err}");
     }
 
     /// The P6 attack: a valid burn sent again with other deposits cited, to
@@ -551,7 +583,7 @@ mod settlement {
     #[test]
     fn rejects_a_duplicated_citation() {
         let err = check(&[(0xA1, 950), (0xA1, 950)], &[LOCK_A]).unwrap_err();
-        assert!(err.to_string().contains("twice"), "{err}");
+        assert!(err.to_string().contains("strictly ascending"), "{err}");
     }
 
     #[test]
