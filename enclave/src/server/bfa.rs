@@ -387,3 +387,151 @@ mod burn_ancestry {
         assert!(ancestor_tx_hash(&[1u8; 32], &[near]).is_err());
     }
 }
+
+/// Finding 47. `fundsIn` is public, so anyone can make a second deposit that
+/// names a mint's RGB OpId. The burn must still settle under one `burnId`.
+#[cfg(all(test, feature = "bfa-mint", rgb_to_evm))]
+mod shadow_deposit {
+    use std::collections::HashMap;
+
+    use alloy_primitives::{B256, U256};
+    use alloy_sol_types::SolValue;
+    use enclave_proto::{MintAncestor, RgbSource};
+    use sha3::{Digest, Keccak256};
+
+    use super::{bfa_burn_ancestry_events, ServerContext};
+    use crate::config::BridgeConfig;
+    use crate::error::Result;
+    use crate::networks::evm::crosscheck::validate_funds_out_settlement;
+    use crate::networks::evm::events::{
+        EvmReceiptProvider, LogEntry, ReceiptData, VerifiedLock, BRIDGE_FUNDS_IN_SIG, FUNDS_IN_SIG,
+    };
+    use crate::networks::evm::validation::{expected_burn_id, ReleaseIdentity};
+    use crate::networks::rgb::validation::bfa_binding;
+    use crate::state::EnclaveState;
+    use crate::test_support::{abi_word, bridge_funds_in_data, regtest_header_chain};
+
+    /// One mint of 100_000, then burns (see `tests/fixtures`).
+    const BURN: &[u8] = include_bytes!("../../tests/fixtures/bfa_burn_consignment.rgbc");
+    const MINTED: u64 = 100_000;
+    const REAL_DEPOSIT: [u8; 32] = [0xaa; 32];
+    const SHADOW_DEPOSIT: [u8; 32] = [0xbb; 32];
+
+    /// Answers each receipt by its tx hash.
+    struct Chain(HashMap<[u8; 32], ReceiptData>);
+
+    impl EvmReceiptProvider for Chain {
+        fn get_transaction_receipt(&self, tx_hash: &[u8; 32]) -> Result<Option<ReceiptData>> {
+            Ok(self.0.get(tx_hash).cloned())
+        }
+
+        fn get_block_number(&self) -> Result<u64> {
+            Ok(1_000)
+        }
+    }
+
+    fn topic0(signature: &str) -> [u8; 32] {
+        Keccak256::digest(signature.as_bytes()).into()
+    }
+
+    /// A `fundsIn` that names `rgb_opid`, with the `operationId` the Bridge
+    /// derived for this deposit.
+    fn deposit(bridge: [u8; 20], rgb_opid: [u8; 32], operation_id: [u8; 32]) -> ReceiptData {
+        let mut funds_in = rgb_opid.to_vec();
+        funds_in.extend_from_slice(&abi_word(MINTED));
+        ReceiptData {
+            status_success: true,
+            block_number: 100,
+            logs: vec![
+                LogEntry {
+                    address: bridge,
+                    topics: vec![topic0(FUNDS_IN_SIG), abi_word(0xdead)],
+                    data: funds_in,
+                },
+                LogEntry {
+                    address: bridge,
+                    topics: vec![
+                        topic0(BRIDGE_FUNDS_IN_SIG),
+                        operation_id,
+                        [0x5c; 32],
+                        abi_word(0xdead),
+                    ],
+                    data: bridge_funds_in_data(MINTED, MINTED, 0, ""),
+                },
+            ],
+        }
+    }
+
+    fn release(locks: &[VerifiedLock]) -> ReleaseIdentity {
+        let ids: Vec<B256> = locks.iter().map(|l| B256::from(l.operation_id)).collect();
+        let amounts: Vec<U256> = locks.iter().map(|l| U256::from(l.net_amount)).collect();
+        ReleaseIdentity {
+            burn_id: U256::ZERO,
+            amount: U256::from(50_000),
+            source_chain_id: U256::from(96),
+            source_address: "rgb-burner".into(),
+            settlement_data: (ids, amounts).abi_encode_params(),
+            source_burn_tx_id: [0x0b; 32],
+            recipient: [0u8; 32],
+            proof: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn a_shadow_deposit_does_not_give_the_burn_a_second_burn_id() {
+        let binding = bfa_binding(BURN).unwrap().expect("a BFA consignment");
+        assert_eq!(binding.mint_opids.len(), 1, "the fixture has one mint");
+        let mint = binding.mint_opids[0];
+        let mut bridge = [0u8; 20];
+        hex::decode_to_slice(
+            binding.bridge_location.trim_start_matches("0x"),
+            &mut bridge,
+        )
+        .unwrap();
+
+        // The user's deposit paid for the mint. The attacker later calls
+        // `fundsIn` with the same RGB OpId and amount: a new `operationId`.
+        let chain = Chain(HashMap::from([
+            (REAL_DEPOSIT, deposit(bridge, mint, [0x11; 32])),
+            (SHADOW_DEPOSIT, deposit(bridge, mint, [0x22; 32])),
+        ]));
+        let cfg = BridgeConfig {
+            funds_in_contract: bridge,
+            ..BridgeConfig::default()
+        };
+        let mut ctx =
+            ServerContext::new(EnclaveState::default(), cfg.clone(), regtest_header_chain());
+        ctx.launch.get_mut().unwrap().evm_rpc_client = Some(Box::new(chain));
+
+        let locks_with = |deposit: [u8; 32]| {
+            bfa_burn_ancestry_events(
+                &ctx,
+                &RgbSource {
+                    consignment: BURN.to_vec(),
+                    mint_ancestors: vec![MintAncestor {
+                        op_id: mint.to_vec(),
+                        tx_hash: deposit.to_vec(),
+                    }],
+                    ..Default::default()
+                },
+            )
+        };
+
+        let real = locks_with(REAL_DEPOSIT).expect("the user's deposit backs the burn");
+        let Ok(shadow) = locks_with(SHADOW_DEPOSIT) else {
+            return; // the shadow deposit is refused: one lock set
+        };
+
+        // Both requests pass the settlement check, so both would be signed.
+        let (first, second) = (release(&real), release(&shadow));
+        validate_funds_out_settlement(&first, &real).unwrap();
+        validate_funds_out_settlement(&second, &shadow).unwrap();
+        assert_eq!(
+            expected_burn_id(&cfg, &first),
+            expected_burn_id(&cfg, &second),
+            "one burn, two burnIds: the Bridge pays it twice (settlementData cites 0x{} or 0x{})",
+            hex::encode(real[0].operation_id),
+            hex::encode(shadow[0].operation_id),
+        );
+    }
+}
