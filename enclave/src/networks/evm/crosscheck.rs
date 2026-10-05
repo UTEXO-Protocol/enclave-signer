@@ -135,13 +135,21 @@ pub fn validate_funds_out_source_burn_tx_id(
     release: &ReleaseIdentity,
     validated: &ValidatedConsignment,
 ) -> Result<()> {
-    let last = validated.last_transition.as_ref().ok_or_else(|| {
-        EnclaveError::CrossCheck(
+    if validated.last_transition.is_none() {
+        return Err(EnclaveError::CrossCheck(
             "fundsOut requires a consignment with at least one transition".into(),
+        ));
+    }
+    // The OpId that RGB consensus validated, not the flat parser's copy.
+    // Validation fills it for a burn and refuses a consignment where the two
+    // walks disagree, so this bind cannot name one burn and pay another.
+    let expected = validated.last_transfer_op_id.ok_or_else(|| {
+        EnclaveError::CrossCheck(
+            "fundsOut requires the validated OpId of the settling burn, but the consignment \
+             summary carries none - refusing to sign"
+                .into(),
         )
     })?;
-
-    let expected = decode_op_id_to_bytes32(&last.op_id)?;
     let cited: [u8; 32] = release.source_burn_tx_id;
 
     // The Bridge also rejects zero (`ZeroSourceBurnTxId`). Refuse here, so the
@@ -162,23 +170,6 @@ pub fn validate_funds_out_source_burn_tx_id(
         )));
     }
     Ok(())
-}
-
-/// Decodes a `TransitionSummary::op_id` (64 hex chars, optional `0x`) to the
-/// 32-byte calldata word. A malformed id is an internal error, so refuse.
-fn decode_op_id_to_bytes32(op_id: &str) -> Result<[u8; 32]> {
-    let normalized = op_id.strip_prefix("0x").unwrap_or(op_id);
-    let bytes = hex::decode(normalized).map_err(|e| {
-        EnclaveError::CrossCheck(format!(
-            "validated consignment op_id {op_id:?} is not hex-decodable: {e}"
-        ))
-    })?;
-    bytes.as_slice().try_into().map_err(|_| {
-        EnclaveError::CrossCheck(format!(
-            "validated consignment op_id {op_id:?} is not a 32-byte OpId ({} bytes)",
-            bytes.len()
-        ))
-    })
 }
 
 /// Settlement bind for the BFA burn flow: `settlementData` must cite exactly
