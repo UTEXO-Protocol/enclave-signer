@@ -80,7 +80,7 @@ pub(super) fn handle_initialize(
 
     // Donor cloning secret. It comes at runtime in the init message, not in the
     // EIF, so it stays out of the PCRs. Only a `GetClone` donor needs it.
-    // Empty means disabled.
+    // An empty field leaves any donor secret loaded at boot unchanged.
     if !req.cloning_secret.is_empty() {
         state.set_donor_cloning_secret(req.cloning_secret)?;
         tracing::info!("donor cloning secret configured from init request");

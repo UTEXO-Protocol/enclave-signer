@@ -145,8 +145,8 @@ impl RgbValidator {
         }
 
         // 2. Create the witness resolver. `RgbValidator::new` admits only an
-        //    Electrum URL. TLS ends inside the enclave, so a compromised host
-        //    cannot forge witness data.
+        //    Electrum URL (`ssl://` or `tcp://`). With `ssl://`, TLS ends inside
+        //    the enclave, so the host cannot forge witness data.
         // `Config::default()` has `timeout: None`, so a stalled read blocks the
         // worker thread forever (see ELECTRUM_WITNESS_TIMEOUT_SECS). Use this
         // re-export so that `Config` matches `AnyResolver::electrum_blocking`.

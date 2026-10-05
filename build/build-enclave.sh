@@ -9,10 +9,12 @@
 #   IMAGE_TAG        image tag (default: utexo-bridge-enclave:latest)
 #   DOCKERFILE       recipe name (default: Dockerfile.enclave)
 #   EIF_NAME         output name (default: utexo-bridge-enclave.eif)
-#   NITRO_CLI_BLOBS   optional Nitro kernel/init directory
-#   GITHUB_TOKEN     private dependency token
-#   PRIVATE_DEPS_DIR alternative directory for per-repository deploy keys
+#   NITRO_CLI_BLOBS  optional Nitro kernel/init directory
+#   GITHUB_TOKEN     token with read access to the private RGB dependencies
+#   PRIVATE_DEPS_DIR alternatively, directory of per-repository key files
+#                    (consignment_key, consensus_key, ops_key, schemas_key)
 #   RGB_ASSET_ID     required when the recipe declares ARG RGB_ASSET_ID
+#                    (combined, rgb, mint, burn)
 #   ENCLAVE_DEBUG_FEATURES optional test features; leave empty for production
 #   SOURCE_DATE_EPOCH build timestamp (default: commit time)
 #
@@ -25,8 +27,8 @@
 # hosts run (stage is on 1.4.5) or the PCRs will not match.
 #
 # On the build side the EIF packs the runtime-stage rootfs, so the image build
-# must be deterministic: both base images are digest-pinned in
-# Dockerfile.enclave, and layer timestamps are normalised via SOURCE_DATE_EPOCH
+# must be deterministic: both base images are digest-pinned in each enclave
+# Dockerfile, and layer timestamps are normalised via SOURCE_DATE_EPOCH
 # plus BuildKit's `rewrite-timestamp` exporter (needs `docker buildx` with a
 # container/containerd builder). SOURCE_DATE_EPOCH defaults to the commit time.
 # OS package versions (apt/dnf) still float.
@@ -52,13 +54,12 @@ PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 OUT_DIR="${OUT_DIR:-$SCRIPT_DIR}"
 IMAGE_TAG="${IMAGE_TAG:-utexo-bridge-enclave:latest}"
-# Which enclave image to build. Defaults to the combined (rgb+ccd) image; set
-# DOCKERFILE=Dockerfile.enclave.rgb (send/receive RGB flow),
-# Dockerfile.enclave.mint / Dockerfile.enclave.burn (the two BFA mint/burn
-# signer EIFs), or
-# Dockerfile.enclave.ccd for a lean single-network EIF. Every variant
-# needs private dependency credentials. EIF_NAME names the output .eif (and thus the SHA256SUMS
-# entry); default keeps the historical artifact name.
+# Which enclave image to build. The default is the combined (rgb + rgb-swap +
+# ccd) image of the retired swap flow. Production is
+# DOCKERFILE=Dockerfile.enclave.mint / Dockerfile.enclave.burn (the two BFA
+# signer EIFs). Others: Dockerfile.enclave.rgb (swap, retired) and
+# Dockerfile.enclave.ccd. EIF_NAME names the output .eif and its SHA256SUMS
+# entry; the default keeps the historical artifact name.
 DOCKERFILE="${DOCKERFILE:-Dockerfile.enclave}"
 EIF_NAME="${EIF_NAME:-utexo-bridge-enclave.eif}"
 EIF_PATH="$OUT_DIR/$EIF_NAME"
@@ -100,8 +101,7 @@ BUILD_ARGS=()
 if grep -qE '^ARG[[:space:]]+RGB_ASSET_ID' "$SCRIPT_DIR/$DOCKERFILE"; then
     if [ -z "${RGB_ASSET_ID:-}" ]; then
         echo "Error: $DOCKERFILE requires RGB_ASSET_ID (the issued BFA contract id, e.g. rgb:<...>)." >&2
-        echo "       Set RGB_ASSET_ID=rgb:<contract-id> and re-run; an empty pin leaves the" >&2
-        echo "       enclave config partially set and policy.rs refuses to boot." >&2
+        echo "       Set RGB_ASSET_ID=rgb:<contract-id> and re-run; the image build fails without it." >&2
         exit 1
     fi
     BUILD_ARGS+=(--build-arg "RGB_ASSET_ID=$RGB_ASSET_ID")

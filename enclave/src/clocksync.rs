@@ -1,12 +1,11 @@
 //! Periodic sync of the enclave clock from the hypervisor PTP clock.
 //!
-//! A Nitro enclave reads wall-clock time once at boot and has no NTP. It drifts
-//! about 1 s/day. A drifted clock rejects new attestation and TLS certs as not
-//! yet valid or expired.
+//! The enclave has no NTP client. Clock drift can make certificate validation
+//! reject a certificate as expired or not yet valid.
 //!
-//! The enclave kernel has `CONFIG_PTP_1588_CLOCK_KVM=y`, so `/dev/ptp0` gives
-//! the host clock (Amazon Time Sync). This module copies it to CLOCK_REALTIME
-//! at an interval, as AWS recommends.
+//! This module expects a hypervisor PTP clock at `/dev/ptp0`. The enclave
+//! kernel must expose that device. The module periodically copies its time
+//! into `CLOCK_REALTIME`.
 //!
 //! Fail-soft: if the PTP read fails, the enclave logs and keeps its current
 //! clock. The `attestation-verify` tolerance is the second safety net.
@@ -22,7 +21,8 @@ use nix::time::{clock_gettime, clock_settime, ClockId};
 /// Hypervisor PTP clock exposed to the enclave by the built-in `ptp_kvm` driver.
 const PTP_DEVICE: &str = "/dev/ptp0";
 
-/// Sync interval. At about 1 s/day of drift, 5 min keeps the error far below 1 s.
+/// Attempt to synchronize the clock every five minutes. This is not an
+/// accuracy guarantee; synchronization failures leave the current clock unchanged.
 const SYNC_INTERVAL: Duration = Duration::from_secs(300);
 
 /// Linux `FD_TO_CLOCKID(fd)` = `((~(clockid_t)fd) << 3) | CLOCKFD`, with

@@ -30,7 +30,7 @@ use rgbstd::schema::TransitionType;
 /// Also returns the validated OpId of that transition, from the rgbstd bundle,
 /// not the flat parser.
 ///
-/// Returns `(None, None)` only for a transfer with no bundles, which rgbstd
+/// Returns `(None, None)` for a transfer with no bundles, which rgbstd
 /// rejects.
 pub(super) fn read_last_transfer_witness(
     transfer: &Transfer,
@@ -121,9 +121,8 @@ pub(super) fn extract_transition_summary(
         .map(|t: &TransitionInfo| t.op_id.clone())
         .collect();
 
-    // The mint (BFA `TS_BRIDGE`) subset. These map 1:1 to EVM lock records
-    // (`fundsIn`). Each `fundsOut` `fundsInIds[]` entry must match one
-    // (spec section 6).
+    // The mint (BFA `TS_BRIDGE`) subset. Each one maps to one EVM `fundsIn`
+    // lock record.
     let mint_op_ids: Vec<String> = transfer
         .witnesses
         .iter()

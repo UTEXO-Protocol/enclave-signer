@@ -40,7 +40,7 @@ pub struct Launch {
 pub struct ServerContext {
     pub state: EnclaveState,
     /// Bridge config pinned at boot from env. The attestation `user_data`
-    /// commits to it. `SignEvm` requests are cross-checked against it.
+    /// commits to it. Signing requests are checked against it.
     pub bridge_config: BridgeConfig,
     /// The build that the launch policy applies to.
     pub build_ctx: BuildContext,

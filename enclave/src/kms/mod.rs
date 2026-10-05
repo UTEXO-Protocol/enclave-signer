@@ -283,14 +283,10 @@ impl KmsClient {
     /// `GenerateDataKey(NumberOfBytes=64)` without a Recipient (mock-attestation
     /// dev builds only).
     ///
-    /// AWS KMS rejects mock CBOR attestation documents (no COSE signature) with
-    /// `ValidationException`, so the `Recipient` field is omitted entirely. KMS
-    /// returns the plaintext data key directly; we verify its length and drop it.
-    /// The `CiphertextBlob` is returned for storage in S3 exactly as in the
-    /// attested path.
-    ///
-    /// Security trade-off: the plaintext seed briefly exists on the broker. This
-    /// is acceptable in dev — there is no real NSM hardware anyway.
+    /// KMS rejects a mock attestation document (no COSE signature), so the
+    /// request has no `Recipient`. KMS then returns the plaintext data key
+    /// without recipient encryption. Its length is checked and it is dropped.
+    /// The `CiphertextBlob` is returned for S3, as in the attested path.
     #[cfg(feature = "mock-attestation")]
     pub fn generate_ciphertext(&self, deadline: Instant) -> Result<Vec<u8>> {
         let budget = call_budget(deadline)?;

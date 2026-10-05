@@ -165,8 +165,8 @@ pub(super) fn handle_sign(
     bind_funds_in_recipient(authorized_recipient, &destination_proof)?;
 
     // Soft operation-uniqueness guard. Reserve before signing. The caller
-    // commits after the response is written, so a transient error or a lost
-    // response does not block a retry.
+    // commits after the response write succeeds. A failed write releases the
+    // reservation. A successful write does not prove receipt by the caller.
     #[cfg(evm_to_rgb)]
     let op_reservation = reserve_operation(ctx, source_ref, destination_ref)?;
     // The replay key is the EVM deposit, so only the mint direction has one.

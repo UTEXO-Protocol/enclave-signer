@@ -11,7 +11,7 @@ use bitcoin::XOnlyPublicKey;
 use crate::error::{EnclaveError, Result};
 use crate::keys::{AccountType, KeyManager};
 
-/// One BIP-86 key-path input this enclave controls and can sign.
+/// One Taproot key-path input with a key from an enclave BIP-86 account.
 pub struct TaprootSignJob {
     pub input_index: usize,
     /// The untweaked internal key, derived from our seed.
@@ -22,17 +22,18 @@ pub struct TaprootSignJob {
     pub child_path: Vec<bitcoin::bip32::ChildNumber>,
 }
 
-/// Finds the PSBT inputs that are BIP-86 key-path spends we own, one entry per
-/// input.
+/// Find inputs whose Taproot key path the enclave can sign.
+/// The keys use BIP-86 derivation paths. Outputs can include a script-tree root.
 ///
 /// This is the custody anchor. An input is ours when its claimed
 /// `tap_internal_key` is (1) in `tap_key_origins` under our fingerprint,
 /// (2) at a BIP-86 path of one of our accounts that (3) derives exactly that
 /// key, and (4) tweaked with `tap_merkle_root` gives the output key in
 /// `witness_utxo.script_pubkey` (BIP-341). A forged origins entry fails (3).
-/// A foreign coin fails (4). Script-path spends are never ours, because the
-/// bridge wallet is singlesig. It does not read `tap_key_sig`, so an input
-/// stays ours after we merge a signature into it.
+/// A foreign output key fails (4). This function does not authorize script-path
+/// signatures. A script tree can still contain spend paths controlled by others.
+/// The function ignores `tap_key_sig`, so an input remains eligible for custody
+/// checks after the enclave adds its signature.
 pub fn find_controlled_taproot_inputs(
     psbt: &Psbt,
     master_fingerprint: &Fingerprint,

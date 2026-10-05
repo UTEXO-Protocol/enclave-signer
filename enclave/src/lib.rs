@@ -8,7 +8,8 @@
 //     enclave passes verification.
 //
 // A release build (`debug_assertions` off) with either one fails to compile.
-// `not(test)` exempts `cargo test --release`. Dev images build in debug.
+// `not(test)` exempts the unit-test compilation only. Integration tests also
+// compile the library without `cfg(test)`. Dev images build in debug mode.
 macro_rules! dev_feature_release_guard {
     ($feature:literal, $msg:literal) => {
         #[cfg(all(feature = $feature, not(debug_assertions), not(test)))]
@@ -38,8 +39,9 @@ compile_error!(
      pulls in rgb-validation)"
 );
 
-// With these guards, `rgb`, `spv` and `rgb-validation` act as one switch.
-// Code gates the RGB stack on `rgb-validation` only.
+// `rgb` enables `spv`, and `spv` enables `rgb-validation`. The guard requires
+// `spv` when `rgb-validation` is selected directly. The stack uses the
+// `rgb-validation` gate; the `rgb` alias itself need not be enabled.
 
 // Exactly one RGB flow. Each flow is its own enclave image with its own PCR0.
 // The modules in `networks/rgb/flow/` export the same item names. These guards

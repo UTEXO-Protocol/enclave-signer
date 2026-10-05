@@ -22,7 +22,7 @@ push_parent: ## Push parent adapter docker image.
 	docker push $(IMAGE_PARENT_BACKUP) && \
 	docker push $(IMAGE_PARENT_LATEST)
 
-build_enclave: ## Build combined enclave docker image (vsock+rgb+ccd+evm-rpc).
+build_enclave: ## Build combined enclave image, retired swap flow (vsock+rgb+rgb-swap+ccd+bfa-validation).
 	docker build $(DOCKER_AUTH_ARGS) -f ./build/Dockerfile.enclave -t $(IMAGE_ENCLAVE_BACKUP) . && \
 	docker build $(DOCKER_AUTH_ARGS) -f ./build/Dockerfile.enclave -t $(IMAGE_ENCLAVE_LATEST) .
 
@@ -30,7 +30,7 @@ push_enclave: ## Push combined enclave docker image.
 	docker push $(IMAGE_ENCLAVE_BACKUP) && \
 	docker push $(IMAGE_ENCLAVE_LATEST)
 
-build_enclave_rgb: ## Build RGB-only enclave docker image (vsock+rgb+evm-rpc).
+build_enclave_rgb: ## Build RGB-only enclave image, retired swap flow (vsock+rgb+rgb-swap+bfa-validation).
 	docker build $(DOCKER_AUTH_ARGS) -f ./build/Dockerfile.enclave.rgb -t $(IMAGE_ENCLAVE_RGB_BACKUP) . && \
 	docker build $(DOCKER_AUTH_ARGS) -f ./build/Dockerfile.enclave.rgb -t $(IMAGE_ENCLAVE_RGB_LATEST) .
 
@@ -65,7 +65,7 @@ push_enclave_dev: ## Push enclave dev docker image.
 	docker push $(IMAGE_ENCLAVE_DEV_BACKUP) && \
 	docker push $(IMAGE_ENCLAVE_DEV_LATEST)
 
-docker: ## Build and push all production docker images.
+docker: ## Build and push the parent and the combined (retired swap) enclave image.
 	$(MAKE) build_parent push_parent build_enclave push_enclave
 
 docker_dev: ## Build and push all dev docker images (parent + enclave-dev).

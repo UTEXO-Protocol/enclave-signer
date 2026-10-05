@@ -15,7 +15,7 @@ panic = "abort"
 codegen-units = 1
 
 # Must match the root workspace exactly. The dev-dependency on
-# `utexo-bridge-enclave` pulls its default features (`spv` -> `rgb-validation`),
+# `utexo-bridge-enclave` pulls its default features (`rgb` -> `spv` -> `rgb-validation`),
 # so the RGB crates are in this graph too. Pin by rev, not branch, so both
 # workspaces compile against the same rgb-ops. Bump both together.
 [patch.crates-io]
@@ -106,5 +106,6 @@ tonic-prost = "0.14"
 # Real enclave (mock-attestation, seed-import) for end-to-end tests of the
 # CLI verifier against a live enclave and gRPC stack.
 utexo-bridge-enclave = { path = "../enclave", features = ["mock-attestation", "allow-seed-import"] }
-# Self-signed test certificates, made in-process. No openssl binary needed.
+# Self-signed certificate for the header-sync TLS test, made in-process.
+# The mTLS tests use openssl (tests/fixtures/parent-pki.sh).
 rcgen = "0.14"

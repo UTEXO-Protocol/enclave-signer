@@ -1,19 +1,19 @@
 name: "Build EIF"
 
-# Produces the PRODUCTION enclave EIFs, captures their PCR measurements, and
+# Produces the release enclave EIFs, captures their PCR measurements, and
 # publishes everything to S3 under an immutable git-SHA path. Runtime hosts then
 # pull the EIF by SHA instead of anyone building on a side machine.
 #
-# Builds three variants (matrix): the combined rgb+ccd image (historical name +
-# S3 path, unchanged), an RGB-only image (eif/<sha>/rgb/), and a Concordium-only
-# image (eif/<sha>/ccd/). Deploy whichever the target host needs.
+# Builds five variants (matrix): combined (retired swap flow, historical name +
+# S3 path), rgb (retired swap flow), rgb-mint and rgb-burn (production), and ccd.
+# Deploy whichever the target host needs.
 #
 # Reproducible PCRs: PCR0/PCR1 are a measurement of the EIF, which bakes in the
 # nitro-cli kernel/init blobs — NOT just our code. We therefore pin nitro-cli to
 # the SAME version the runtime hosts run (stage hosts: 1.4.5). Bump NITRO_CLI_VERSION
 # here in lockstep with the hosts, or attestation (KMS PCR policy + clone) breaks.
 # The image side is pinned too: base images are pinned by digest in
-# Dockerfile.enclave and layer timestamps are normalised via SOURCE_DATE_EPOCH +
+# each enclave Dockerfile and layer timestamps are normalised via SOURCE_DATE_EPOCH +
 # BuildKit rewrite-timestamp (build/build-enclave.sh). OS package versions
 # (apt/dnf) still float — pinning them is the next determinism step.
 #
@@ -61,14 +61,14 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # Combined (rgb+ccd) — the historical artifact. Keeps the original
-          # eif name and S3 path so existing consumers are unaffected.
+          # Combined (rgb + rgb-swap + ccd), retired swap flow. Keeps the
+          # historical eif name and S3 path.
           - variant: combined
             dockerfile: Dockerfile.enclave
             eif_name: utexo-bridge-enclave.eif
             s3_subpath: ""
             artifact_suffix: ""
-          # RGB-only single-network EIF, send/receive flow (`rgb-swap`).
+          # RGB-only single-network EIF, send/receive flow (`rgb-swap`, retired).
           - variant: rgb
             dockerfile: Dockerfile.enclave.rgb
             eif_name: utexo-bridge-enclave-rgb.eif

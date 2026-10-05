@@ -13,8 +13,9 @@
 //!
 //! Exit codes:
 //!     0 - verification succeeded
-//!     1 - verification, IO or connection failure (output gives the reason)
-//!     2 - command-line usage error
+//!     1 - verification, IO, connection or missing-flag failure (output gives
+//!         the reason)
+//!     2 - argument parse error
 
 use std::process::ExitCode;
 

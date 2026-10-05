@@ -1,8 +1,8 @@
-//! In-enclave verification of the EVM `FundsIn` deposit event for bridge-mode
-//! `signPsbt`.
+//! In-enclave verification of the EVM `FundsIn` deposit event for an
+//! EVM -> RGB `Sign`.
 //!
-//! Bridge-mode `signPsbt` releases RGB against an EVM deposit. The enclave does
-//! not trust the listener `evm_event_valid` / `evm_event_finalized` flags. It
+//! An EVM -> RGB `Sign` releases RGB against an EVM deposit. The enclave does
+//! not trust the listener `event_valid` / `event_finalized` flags. It
 //! gets the deposit receipt over an in-enclave EVM RPC. It checks that the
 //! pinned bridge contract emitted a `BridgeFundsIn` log with the claimed
 //! amount, at sufficient depth. Each predicate fails closed.
@@ -13,12 +13,12 @@
 //!
 //! The module does not match the raw log from the listener. It pins the
 //! contract from config and decodes the fields (`operationId`,
-//! gross/net/commission) itself. Thus `evm_log_index` / `evm_event_topics` /
-//! `evm_event_data` are not used.
+//! gross/net/commission) itself.
 //!
-//! Not bound here: `operationId` has no on-chain link to the signed RGB mint,
-//! so the listener supplies that link. Amounts are `u64`, as in the proto. A
-//! larger on-chain value fails closed (see [`extract_uint256_as_u64`]).
+//! `BridgeFundsIn.operationId` and the RGB OpId are different identifiers.
+//! For BFA mints, the caller also verifies the receipt's `FundsIn` RGB OpId
+//! against the mint transition. Amounts must fit the proto's `u64` fields.
+//! Larger values fail (see [`extract_uint256_as_u64`]).
 
 use sha3::{Digest, Keccak256};
 
@@ -152,7 +152,7 @@ pub struct VerifiedFundsIn {
     pub destination_address: String,
 }
 
-/// Verifies the `FundsIn` deposit for a bridge-mode `signPsbt`.
+/// Verifies the `FundsIn` deposit for an EVM -> RGB `Sign`.
 ///
 /// Fails closed on: a missing or failed receipt, no matching log, an ambiguous
 /// match, a field mismatch, an on-chain value above `u64`, or low confirmation
@@ -219,7 +219,7 @@ pub fn verify_funds_in_event(
 
     // Bounded, not equal. The Bridge credits the measured balance delta and
     // `amount` stays nominal, so a fee-on-transfer token nets less
-    // (Bridge.sol:501-508). Only a `net` that is too high is unsafe.
+    // (`Bridge` fee-on-transfer balance delta). Only a `net` that is too high is unsafe.
     let max_net = gross.checked_sub(commission).ok_or_else(|| {
         EnclaveError::CrossCheck(format!(
             "BridgeFundsIn commission ({commission}) exceeds gross amount ({gross})"
@@ -417,9 +417,10 @@ fn select_unique_log<'a>(
     })
 }
 
-/// Depth of `receipt_block` below the current head. The head and receipt are
-/// two calls, so `min_confirmations` also bounds a reorg between them. A head
-/// below the receipt block means a reorg removed that block.
+/// Depth is `head - receipt_block`; the receipt block itself is not counted.
+/// Receipt and head come from separate RPC calls. A head below the receipt
+/// height is rejected. This does not detect a reorg at the same or greater
+/// height, because no block hash is compared. The RPC provider remains trusted.
 fn check_confirmation_depth(
     provider: &dyn EvmReceiptProvider,
     receipt_block: u64,
@@ -575,7 +576,7 @@ const EVM_RPC_CALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs
 
 /// Production [`EvmReceiptProvider`]: an alloy JSON-RPC client over the
 /// in-enclave loopback that a vsock forwarder tunnels to the EVM RPC. alloy is
-/// async, so boot builds a single-worker tokio runtime, and each call uses
+/// async, so the launch builds a single-worker tokio runtime, and each call uses
 /// `block_on`. One worker is sufficient and keeps the type `Send + Sync` for
 /// the shared `ServerContext`.
 pub struct AlloyEvmClient {

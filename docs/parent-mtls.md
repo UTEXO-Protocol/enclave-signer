@@ -44,7 +44,8 @@ and more than 512 entries fail startup.
 - `clone-operator` may additionally call `Clone`.
 - `listener` may additionally call `Sign`.
 - `SubmitHeaders` answers `PERMISSION_DENIED` to every caller, with or without
-  an ACL. The parent's own header sync is the one writer.
+  an ACL. The parent's header sync uses the direct enclave protocol.
+  These gRPC controls do not restrict direct enclave callers.
 - `observer` has no mutation permissions.
 - `Initialize` is denied for every network role. Initialize locally through the
   host CLI over vsock. Unknown RPCs are denied by default.
@@ -89,8 +90,8 @@ Use `--donor-grpc https://parent.example:50051` for clone and
 `--endpoint https://parent.example:50051` for attest-verify. The override does
 not disable CA/name verification. The clone CLI validates transport settings
 before initiating cloning. Both donor RPCs use the same TLS configuration.
-The cloning secret continues to use `UTEXO_CLONING_SECRET` on the local CLI;
-it is not sent as a gRPC bearer token.
+The local CLI reads the cloning secret from `--cloning-secret-file` or
+`UTEXO_CLONING_SECRET`. It is not sent as a gRPC bearer token.
 
 Local development only: bind Parent to a literal loopback IP, set
 `GRPC_ALLOW_INSECURE_LOOPBACK=true`, and remove all server TLS variables. This
@@ -102,7 +103,9 @@ proxy or tunnel.
 
 ## Go listener
 
-The corresponding `federated-signer-node` update requires:
+The Go listener is maintained in a separate repository. The settings below
+describe the expected client integration. This review did not verify that
+repository or the deployed listener. Check these names against its selected version:
 
 ```text
 PARENT_ADAPTER_GRPC=parent.example:50051
@@ -116,12 +119,10 @@ files read-only inside the listener container. The address stays `host:port`.
 `PARENT_ADAPTER_ALLOW_INSECURE_LOOPBACK=true` is for explicit loopback development
 with all TLS fields removed. Custom in-process test dialers can opt in as well.
 
-Initial setup rejects missing/bad files. The Manager reloads files when it
-recreates a connection after a failed health/RPC probe. Existing connections and
-normal gRPC reconnects may retain the loaded identity. For a planned rotation,
-restart the listener after atomically installing a complete new file set. A
-failed file reload leaves the current connection in place. Health checks use
-`PublicKey` over the same authenticated connection.
+The expected client checks TLS files at startup and uses `PublicKey` for health
+checks over the authenticated connection. Do not assume that a reconnect loads
+new files. Check the listener version's reload behavior. For a planned rotation,
+install a complete new file set, then restart the listener.
 
 ## Deployment, rotation and rollback
 

@@ -47,12 +47,12 @@ fn spv_health(_ctx: &ServerContext) -> (bool, u32, u32, u32, u32) {
     (true, 0, 0, 0, 0)
 }
 
-/// Readiness probe: can the enclave sign now?
+/// Report whether the basic signing prerequisites are met.
 ///
-/// Ready means: endpoints are set, the key is loaded, and the header chain
-/// passes `assert_chain_ready`. Signing uses the same SPV precondition.
-/// A mint signer (no `rgb_to_evm`) does not read the header chain, so it
-/// skips the SPV check.
+/// Every build requires endpoints and a loaded key. Builds with `rgb_to_evm`
+/// also require `assert_chain_ready` to pass when they have an SPV chain.
+/// Mint readiness ignores the SPV result, but the response still reports it.
+/// Readiness does not guarantee that a particular request will pass validation.
 pub(super) fn handle_health(ctx: &ServerContext) -> Result<EnclaveResponse> {
     let key_loaded = ctx.state.is_initialized();
     let phase = ctx.state.phase_name().to_string();

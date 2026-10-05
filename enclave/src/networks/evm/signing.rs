@@ -8,7 +8,7 @@ use crate::proto::{EvmDestination, LzReleaseParams};
 const DOMAIN_TYPE_HASH_STR: &str =
     "EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)";
 
-/// EIP-712 type string for `MultisigProxy.fundsOutCall` (MultisigProxy.sol:173-175).
+/// EIP-712 type string for `MultisigProxy.fundsOutCall`.
 /// The digest commits to each release field. `sourceBurnTxId` (bridge PR #152)
 /// follows `settlementData`.
 ///
@@ -69,7 +69,7 @@ pub fn build_evm_domain(req: &EvmDestination) -> Result<Eip712Domain> {
 
 /// Builds the EIP-712 digest that `MultisigProxy.fundsOutCall` verifies.
 ///
-/// Mirrors `MultisigProxy._fundsOutStructHash` (MultisigProxy.sol:334-359):
+/// Mirrors `MultisigProxy._fundsOutStructHash`:
 /// eleven fields, `string`/`bytes` pre-hashed, `bytes32 sourceBurnTxId` as-is.
 ///
 /// The enclave hashes the decoded fields, so it commits to the values that the
@@ -110,7 +110,7 @@ pub fn funds_out_digest(
     Ok(eip712_digest(domain, &struct_hash))
 }
 
-/// EIP-712 type string for `MultisigProxy.lzFundsOutCall` (MultisigProxy.sol:176-178).
+/// EIP-712 type string for `MultisigProxy.lzFundsOutCall`.
 /// Fourteen fields. `sourceBurnTxId` (bridge PR #152) follows `extraOptions`.
 const TEE_LZ_FUNDS_OUT_TYPE_HASH_STR: &str = "TeeLzFundsOut(uint256 amount,uint256 burnId,\
      uint256 sourceChainId,uint256 destinationChainId,string sourceAddress,\
@@ -120,7 +120,7 @@ const TEE_LZ_FUNDS_OUT_TYPE_HASH_STR: &str = "TeeLzFundsOut(uint256 amount,uint2
 
 /// Builds the EIP-712 digest that `MultisigProxy.lzFundsOutCall` verifies.
 ///
-/// Mirrors `MultisigProxy._lzFundsOutStructHash` (MultisigProxy.sol:504-544):
+/// Mirrors `MultisigProxy._lzFundsOutStructHash`:
 /// fourteen fields, dynamic fields pre-hashed, `dstEid` (uint32) padded to 32
 /// bytes, `sourceBurnTxId` (bytes32) as-is. The `lz_release` proto fields must
 /// match the decoded calldata before the digest is built.

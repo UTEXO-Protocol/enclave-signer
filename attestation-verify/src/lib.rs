@@ -8,7 +8,8 @@
 //! the caller gives a nonce, it must be equal.
 //!
 //! Mock path (`mock` feature): make and verify raw CBOR documents without COSE
-//! or certificate checks. PCR, nonce and public key binding stay enforced.
+//! or certificate checks. It compares PCRs and the expected nonce, if supplied.
+//! It requires a public-key field. The caller must check that key and user_data.
 //! For integration tests and dev builds without an NSM device.
 
 #![forbid(unsafe_code)]
@@ -128,6 +129,9 @@ pub(crate) struct AttestationDocument {
 ///   5. Reject all-zero PCRs (unless `allow-debug-pcrs`).
 ///   6. Compare PCR0/1/2 with `expected_pcrs`.
 ///   7. Require a `public_key` field.
+///
+/// The caller must check the returned public key and user_data. This function
+/// returns the document timestamp but does not enforce a maximum document age.
 pub fn verify_attestation(
     doc: &[u8],
     expected_pcrs: &ExpectedPcrs,
@@ -140,7 +144,8 @@ pub fn verify_attestation(
 
 /// Verify a mock attestation document (raw CBOR, no COSE, no cert chain).
 ///
-/// PCR, nonce and public key binding stay enforced. Tests only.
+/// Compare PCRs and the expected nonce, if supplied. Require a public-key field.
+/// The caller must check the public key and user_data. Tests only.
 #[cfg(feature = "mock")]
 pub fn verify_mock_attestation(
     doc: &[u8],

@@ -1,5 +1,6 @@
 # syntax=docker/dockerfile:1.7
-# RGB-only enclave image (vsock + rgb + evm-rpc) - handles the RGB/BTC bridge
+# RGB-only enclave image, retired swap flow (vsock + rgb + rgb-swap +
+# bfa-validation). Not a production image: see Dockerfile.enclave.mint/.burn.
 # Private Cargo dependencies require BuildKit secrets (see README, Building).
 # Supply github_token, or one deploy key per repo; keys never enter image layers.
 # Example: docker build --secret id=github_token,env=GITHUB_TOKEN -f build/Dockerfile.enclave.rgb .
@@ -34,11 +35,11 @@ WORKDIR /build/enclave
 ENV CARGO_INCREMENTAL=0 \
     RUSTFLAGS="--remap-path-prefix=/build=/src -C debuginfo=0 -C strip=symbols"
 # `rgb` implies `spv` + `rgb-validation`. `--no-default-features` drops `ccd` so
-# this binary is RGB-only. `evm-rpc` adds in-enclave FundsIn verification,
-# pulling the alloy + tokio subtree; requires a second host vsock-proxy
+# this binary is RGB-only. `bfa-validation` implies `evm-rpc` (in-enclave
+# FundsIn verification, alloy + tokio); it needs a second host vsock-proxy
 # (EVM_RPC_VSOCK_PORT, default 8002).
 #
-# `rgb-swap` selects the send/receive RGB flow. Exactly one flow is required
+# `rgb-swap` selects the send/receive RGB flow (retired). Exactly one flow is required
 # under `rgb-validation`; the mint/burn images are Dockerfile.enclave.mint and
 # Dockerfile.enclave.burn.
 RUN --mount=type=secret,id=github_token \
@@ -74,7 +75,7 @@ RUN chmod +x /app/utexo-bridge-enclave /app/entrypoint.sh
 # NOTE: the donor cloning secret is intentionally NOT baked here. It is
 # delivered at runtime via the `InitializeKey` message (CLI: `init
 # --cloning-secret <secret>`), so it never lands in the EIF / image layers and
-# the PCRs stay reproducible. See enclave/src/server.rs (handle_initialize).
+# the PCRs stay reproducible. See enclave/src/server/keys.rs (handle_initialize).
 
 # Pinned bridge/indexer config - identical to Dockerfile.enclave; keep the two in
 # lockstep. `rgb` implies `spv` + `rgb-validation`, so this is a release

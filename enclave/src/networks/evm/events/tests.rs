@@ -515,7 +515,7 @@ fn rejects_head_below_receipt_block() {
 #[cfg(evm_to_rgb)]
 #[test]
 fn issue_51_no_receipt_means_no_authorization() {
-    // The listener sets evm_event_valid/finalized=true, but no deposit
+    // The listener sets event_valid/event_finalized=true, but no deposit
     // exists. Verification must reject, so the flags do not gate signing.
     let p = FakeEvm {
         receipt: None,

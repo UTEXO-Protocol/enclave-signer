@@ -95,7 +95,7 @@ pub struct AttestedPubkeyResult {
 
 /// Build the canonical key bundle that the verifier hashes to check
 /// `user_data`. Field order and encoding MUST match
-/// `canonical_pubkey_bundle` in `enclave/src/server.rs`.
+/// `canonical_pubkey_bundle` in `enclave/src/server/keys.rs`.
 pub fn canonical_bundle(resp: &AttestedPublicKeyResponse) -> Vec<u8> {
     let chain_id_bytes = resp.chain_id.to_be_bytes();
     let parts: [&[u8]; 13] = [

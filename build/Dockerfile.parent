@@ -3,7 +3,7 @@
 # Private Cargo dependencies require BuildKit secrets (see README, Building).
 # Supply github_token, or one deploy key per repo; keys never enter image layers.
 # Example: docker build --secret id=github_token,env=GITHUB_TOKEN -f build/Dockerfile.parent .
-# Production builder glibc must remain compatible with the AL2023 runtime.
+# Builder glibc must stay compatible with the runtime stage below.
 FROM rust:1.96-slim-bookworm@sha256:e18a79fc84dfcfc3ab5ba72290398a644c135c97eaa881447fddc354ee4701a3 AS builder
 
 # Builder-only tools: system Git and SSH for private dependencies.

@@ -8,8 +8,8 @@
 # The EVM RPC host and port come from host-prep-evmrpc.sh.
 # Each parent reads Bitcoin headers from HEADER_ELECTRUM_URL, passed through as
 # set: ssl://<host>:<port> (WebPKI roots) or tcp:// to a loopback IP. It is not
-# copied from ELECTRUM_URL, whose enclave-side rules differ (a tcp:// host, a
-# private CA): a URL the parent refuses would stop every parent at boot.
+# copied from ELECTRUM_URL, whose enclave-side rules differ. An invalid header
+# source leaves header sync unconfigured. The parent still starts.
 # KMS values, set on each enclave at start. A mint enclave requires the first three:
 #   KMS_KEY_ARN=<key ARN>  KMS_REGION=<region>  KMS_SEED_ID=<seed id>
 #   KMS_EXPECTED_EVM_ADDRESS=<0x address, optional>

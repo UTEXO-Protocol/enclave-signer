@@ -180,7 +180,7 @@ impl KeyManager {
         let mut evm_gas_tx_address = [0u8; 20];
         evm_gas_tx_address.copy_from_slice(&gas_tx_hash[12..32]);
 
-        // === BTC Legacy: m/84'/0'/0'/0/0 ===
+        // === Retired BTC key: BIP-84 path m/84'/0'/0'/0/0, all networks ===
         // Only its public key is published. It signs nothing.
         let btc_path = DerivationPath::from_str("m/84'/0'/0'/0/0")
             .map_err(|e| EnclaveError::InvalidKey(format!("invalid BTC path: {}", e)))?;
@@ -386,7 +386,7 @@ impl KeyManager {
         Ok((signing_key.sign(hash).to_bytes(), self.concordium_pub))
     }
 
-    /// Sign the BIP-86 key-path taproot inputs (BIP-340) of either account.
+    /// Sign Taproot key-path inputs (BIP-340) with BIP-86 keys from either account.
     /// Returns the PSBT bytes and the number of signed inputs.
     pub fn sign_psbt(&self, psbt_bytes: &[u8]) -> Result<(Vec<u8>, usize)> {
         self.sign_psbt_scoped(psbt_bytes, None)
@@ -394,7 +394,7 @@ impl KeyManager {
 
     /// Sign the PSBT inputs of our keys, optionally of one BIP-86 account only.
     ///
-    /// `SignPsbt` passes `Some(Colored)` and `SignBtc` passes `Some(Vanilla)`,
+    /// The bridge PSBT path passes `Some(Colored)` and `SignBtc` `Some(Vanilla)`,
     /// so the plain-BTC path never signs an RGB-allocated input.
     pub fn sign_psbt_scoped(
         &self,

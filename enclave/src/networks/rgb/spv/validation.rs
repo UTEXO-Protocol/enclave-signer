@@ -5,11 +5,11 @@
 //!
 //! Per network:
 //!
-//! - Mainnet, testnet3: full PoW and retarget checks. `expected_bits`
-//!   computes the required `nBits` again, so a low-difficulty chain fails.
-//! - Signet: PoW is trivial and not checked. The real check is the BIP-325
-//!   coinbase signature. `SubmitHeadersRequest` does not carry it, so only
-//!   chain linkage is checked.
+//! - Mainnet: PoW and retarget checks. `expected_bits` computes the required
+//!   `nBits`. Testnet3 uses these checks but lacks its minimum-difficulty rule.
+//! - Signet: this implementation skips PoW and `nBits` checks. It also cannot
+//!   verify the BIP-325 challenge because the request has no coinbase witness.
+//!   Per-header validation checks only chain linkage.
 //! - Regtest: chain linkage only.
 //!
 //! The testnet3 20-minute min-difficulty rule is not implemented. Testnet3 is

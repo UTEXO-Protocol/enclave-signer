@@ -24,9 +24,10 @@ zero for verified success, one for all other completion results.
   expected EVM or full bundle comparison. Do not activate this requester.
 - `not_initialized` (exit 1): SetClone returned an error and the requester
   explicitly answered `code=1, message="key not initialized"`. This is a
-  snapshot of absent keys, covering Initial **or** Cloning; the existing wire
-  API cannot distinguish those phases. It is not proof of durable failure or
-  permission to retry a mutation.
+  snapshot of absent keys, covering Initial **or** Cloning. `GetPublicKey`
+  cannot distinguish these phases. `Health` reports the phase separately,
+  but this completion check does not call it. The result does not prove
+  permanent failure or authorize a mutation retry.
 - `unknown` (exit 1): the requester identity could not be established within
   the read budget, another error occurred, or SetClone is still pending while
   no keys are observed. This also covers contradictory observations such as an

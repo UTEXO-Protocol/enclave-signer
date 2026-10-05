@@ -13,7 +13,8 @@ use crate::framing;
 /// TCP connect timeout. It matters only across a network or a bad vsock proxy.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// Response read timeout. It stops a silent peer from hanging the CLI.
+/// TCP response read timeout. It stops a silent TCP peer from hanging the CLI.
+/// The vsock path has no read timeout.
 /// Slow valid operations (key generation, consignment validation) must fit in it.
 const READ_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -42,7 +43,8 @@ pub struct SignEvmRequest {
 pub struct SignPsbtRequest {
     pub evm_tx_hash: Vec<u8>,
     /// On-chain `BridgeFundsIn.operationId` (32 bytes). Required.
-    /// Not the same as `operation_idx` (RGB hub index and replay-guard key).
+    /// Different from `operation_idx`, the RGB hub index. The replay key uses
+    /// this full operation ID, not the hub index.
     pub evm_funds_in_operation_id: Vec<u8>,
     pub operation_idx: u64,
     pub evm_event_valid: bool,
@@ -237,10 +239,11 @@ impl EnclaveClient {
         }
     }
 
-    /// Requester side, cloning step 3. Sends the donor sealed seed, ephemeral
-    /// public key and attestation to the local enclave. The enclave verifies
-    /// the attestation and unseals the seed. It commits the keys only if the
-    /// EVM address matches the cluster identity. On success: Cloning -> Active.
+    /// Requester side, final cloning step (SetClone). Sends the donor sealed
+    /// seed, ephemeral public key and attestation to the local enclave. The
+    /// enclave verifies the attestation and unseals the seed. It commits the
+    /// keys only if the EVM address matches the cluster identity. On success:
+    /// Cloning -> Active.
     pub fn set_clone(
         &self,
         encrypted_seed: Vec<u8>,

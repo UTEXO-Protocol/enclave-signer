@@ -276,8 +276,8 @@ impl SecurityPolicy {
             Self::Development { reason } => Err(format!(
                 "release rgb-validation (bridge-signing) build resolved to a non-production \
                  security policy ({reason:?}); refusing to boot. A production bridge enclave must \
-                 pin EVM_CHAIN_ID / BRIDGE_CONTRACT / RGB_ASSET_ID and be built without any dev \
-                 feature (mock-attestation / allow-seed-import)."
+                 pin EVM_CHAIN_ID / EVM_PROXY_CONTRACT_ADDRESS / RGB_ASSET_ID and be built \
+                 without any dev feature (mock-attestation / allow-seed-import)."
             )),
         }
     }

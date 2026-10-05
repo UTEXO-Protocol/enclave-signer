@@ -3,7 +3,7 @@
 # Private Cargo dependencies require BuildKit secrets (see README, Building).
 # Supply github_token, or one deploy key per repo; keys never enter image layers.
 # Example: docker build --secret id=github_token,env=GITHUB_TOKEN -f build/Dockerfile.enclave.ccd .
-# Pin linux/amd64, matching the x86_64 Nitro kernel/init blobs.
+# The image must be linux/amd64 to match the x86_64 Nitro kernel/init blobs.
 # The runtime loader check below enforces compatibility with AL2023 glibc.
 FROM rust:1.96-slim-trixie@sha256:d8f0d5c09580253ecdd6d6894ff112b2b760683ff2a74585e5189f2578728ce4 AS builder
 

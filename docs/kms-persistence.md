@@ -12,29 +12,35 @@ the custody flow. Builds enabling `kms-persistence` without `mint-signer` are
 rejected at compile time. Burn signers retain their existing OS-entropy and
 cloning lifecycle.
 
-The address pin decides the direction. An unpinned launch only bootstraps: a
-confirmed missing S3 object permits `GenerateDataKey(NumberOfBytes=64)`, and an
-existing object is refused until the verified address is pinned, so the parent
-cannot make an unpinned image adopt a planted blob or generate over a saved
-identity. The parent writes with `If-None-Match: *`, then reads the committed
-object; the enclave activates that object only when it is the blob this call
-generated. A concurrent initializer that lost the race fails without decrypting
-anything and is relaunched with the winner's pin. A pinned launch only
-recovers: it loads the saved object, verifies the derived address, and treats a
-missing object as a failure. Storage errors, invalid ciphertext and decryption
-failures never fall back to a new seed. Replicas recover the saved seed with the
-pin instead of using peer cloning.
+The address pin selects one of two initialization modes:
 
-The [KMS client](../enclave/src/kms/mod.rs) is pure Rust and runs inside the
-signer process. The official `aws-sdk-kms` crate signs (SigV4) and sends
-`GenerateDataKey` / `Decrypt`; `aws-nitro-enclaves-nsm-api` produces the
-attestation document that carries a one-shot RSA-2048 recipient key; the
-`CiphertextForRecipient` envelope (CMS, RFC 5652: RSAES-OAEP-SHA-256 key
-transport, AES-256-CBC content) is opened with RustCrypto. TLS is rustls
-(`ring`) trusting only the Amazon Trust Services roots. Credentials arrive from
-the parent broker and live only for one call; plaintext seed material stays
-inside KMS and the enclave. The durable object is `CiphertextBlob`, not the
-ephemeral `CiphertextForRecipient` encrypted to one call's recipient key.
+| Address pin | Saved object | Result |
+| --- | --- | --- |
+| Absent | Absent | Generate a seed, then create the object conditionally. |
+| Absent | Present | Refuse initialization. |
+| Set | Present | Decrypt the seed and check its derived address. |
+| Set | Absent | Refuse initialization. |
+
+The parent writes with `If-None-Match: *`, then reads the saved object.
+During bootstrap, the enclave accepts only the ciphertext that this call generated.
+If another initializer created a different object first, initialization fails before decryption.
+Verify the successful signer's address before you use it as the recovery pin.
+Storage errors and decryption failures never cause fallback to a new seed.
+Replicas recover the saved seed with the pin. They do not use peer cloning.
+
+The enclave cannot independently prove that S3 has no object. The untrusted
+parent reports storage results. Verify persistence and recovery before funding the signer.
+
+The [KMS client](../enclave/src/kms/mod.rs) runs inside the signer process.
+The AWS SDK signs and sends `GenerateDataKey` and `Decrypt` requests.
+The NSM API creates an attestation document with a one-use RSA-2048 recipient key.
+RustCrypto decrypts the returned CMS envelope. It uses RSAES-OAEP-SHA-256 for
+key transport and AES-256-CBC for content encryption.
+
+TLS uses rustls with the `aws-lc` provider and bundled Amazon Trust Services roots.
+The parent broker supplies credentials for each call. Plaintext seed material
+stays inside KMS and the enclave. S3 stores the durable `CiphertextBlob`.
+`CiphertextForRecipient` is temporary and bound to one recipient key.
 
 ## Enclave configuration
 
@@ -75,9 +81,11 @@ export ENCLAVE_VSOCK_CID=18
 ./utexo-bridge-parent
 ```
 
-With storage settings absent, the parent retains its existing behavior. The
-official AWS Rust SDK obtains and refreshes credentials; use a dedicated EC2
-instance role with IMDSv2. The custody listener admits `ENCLAVE_VSOCK_CID` by
+This example adds custody settings to the normal parent configuration.
+Configure gRPC mTLS as described in [Parent mTLS](parent-mtls.md).
+With storage settings absent, the parent does not start the custody broker.
+The AWS SDK obtains and refreshes credentials. Use a dedicated EC2 instance
+role with IMDSv2. The custody listener admits `ENCLAVE_VSOCK_CID` by
 default. `KMS_ALLOWED_CIDS` can explicitly allow comma-separated replica
 CIDs sharing the same logical signer. Every allowed CID receives the **full
 role**, so give it only this signer's KMS/S3 permissions. A CID is a routing
@@ -105,8 +113,9 @@ vsock-proxy 8003 "kms.${AWS_REGION}.amazonaws.com" 443 --config kms-vsock-proxy.
 Permit outbound HTTPS to KMS/S3 and role access to IMDS. KMS TLS terminates in
 the enclave; the proxy only forwards bytes. The standard proxy restricts the
 destination, not source CIDs; isolation and process supervision belong to the
-host deployment. Do not run a second listener on `8003` or `8004`. No systemd units or deployment automation are
-provided by this feature.
+host deployment. Do not run a second listener on `8003` or `8004`.
+
+The deployment scripts pass enclave KMS settings at launch. They do not provision the KMS relay, broker storage settings, or AWS policies.
 
 ## AWS permissions and persistence
 
@@ -140,18 +149,22 @@ KMS key deletion permissions. Do not authorize debug images or zero PCRs.
 See AWS's [recipient-attestation conditions](https://docs.aws.amazon.com/kms/latest/developerguide/conditions-attestation.html)
 and [conditional S3 writes](https://docs.aws.amazon.com/AmazonS3/latest/userguide/conditional-writes.html).
 
-Allow statements alone do not enforce any of this. A key policy that grants
-`kms:*` to the account root delegates to IAM, so a signer role whose identity
-policy allows `kms:Decrypt` is admitted through that statement and the
-conditions on its own Allow statement are never evaluated. Add explicit Deny
-statements for the signer principal; a Deny wins over every Allow. Keep one
-condition key per Deny: AWS ANDs the keys inside one condition block, so a
-`StringNotEquals` over several context keys fires only when every key is wrong.
-The `Not` operators also match when the key is absent, which denies unattested
-calls. Verified on Nitro hardware on 2026-10-01: a debug enclave (PCR0 zero) and
-a foreign `seed_id` are both refused only with this shape:
+A conditional Allow does not restrict permissions from other applicable Allow statements.
+For example, the default KMS key policy can delegate access to IAM policies.
+Add explicit Deny statements for the signer principal to enforce these restrictions.
+
+Use separate Deny statements for each required context field. AWS combines
+different condition keys with AND, even with `StringNotEquals`. One statement
+with several keys could therefore miss a request with only one incorrect field.
+See [AWS condition evaluation](https://docs.aws.amazon.com/IAM/latest/UserGuide/reference_policies_condition-logic-multiple-context-keys-or-values.html).
+
+The following statements are policy fragments, not a complete key policy.
+Add them to a policy's `Statement` array. Replace all placeholders before use.
+Test missing attestation, debug PCRs, and incorrect or missing context on Nitro.
+This source review does not verify a deployed policy or prior hardware test results:
 
 ```json
+[
 {"Sid":"DenyUnlessAttestedImage","Effect":"Deny","Principal":{"AWS":"SIGNER_ROLE_ARN"},
  "Action":["kms:GenerateDataKey","kms:Decrypt"],"Resource":"*",
  "Condition":{"StringNotEqualsIgnoreCase":{"kms:RecipientAttestation:PCR0":"PRODUCTION_PCR0"}}},
@@ -163,6 +176,7 @@ a foreign `seed_id` are both refused only with this shape:
  "Condition":{"ForAnyValue:StringNotEquals":{"kms:EncryptionContextKeys":["application","flow","seed_id","bitcoin_network"]}}},
 {"Sid":"DenyPlantedCiphertext","Effect":"Deny","Principal":{"AWS":"*"},
  "Action":["kms:Encrypt","kms:ReEncrypt*","kms:CreateGrant"],"Resource":"*"}
+]
 ```
 
 Repeat the `DenyUnlessSeedId` shape for `application`, `flow` and
@@ -181,23 +195,30 @@ recovery before funding the signer.
 
 ## Bootstrap, restart and recovery
 
-1. Launch a new mint signer without an address pin. Configure the parent,
-   relay, key and bucket policies for its actual CID, PCR0 and context.
-2. Run the enclave without debug mode and issue
-   `utexo-bridge-parent-cli --addr vsock://18:5000 init`. Supply no seed or cloning
-   secret. Verify the public identity/attestation and independently back up the
-   saved S3 ciphertext. This does not import a legacy ephemeral seed.
-3. Set at launch the verified `KMS_EXPECTED_EVM_ADDRESS`, start the enclave,
-   and verify identical keys after initialization and restart. A restart before
-   the pin is set is refused with "saved seed exists"; it is not a fault, set the
-   pin. During a rollout, approved PCR0 may be a list in both the allow and deny
-   conditions; retire the bootstrap measurement afterward.
-4. Before funding, remove `kms:GenerateDataKey` from the key's allow statement
-   and add an unconditional deny for that action for the signer role. Keep
-   `kms:Decrypt` for the pinned image. Test restore on a fresh parent. Subsequent
-   upgrades authorize the new measured image for decryption of the same seed.
+1. Launch a new mint signer without an address pin.
+   Configure the parent and relay for its CID.
+   Configure the key and bucket policies for its PCR0 and encryption context.
+2. Run the enclave without debug mode.
+   Send `utexo-bridge-parent-cli --addr vsock://18:5000 init`.
+   Supply no seed or cloning secret.
+   Verify the public identity and attestation.
+   Independently back up the saved S3 ciphertext.
+   This procedure does not import a legacy seed.
+3. Set `KMS_EXPECTED_EVM_ADDRESS` to the verified address at the next launch.
+   Initialize the restarted enclave.
+   Verify that its keys match the original keys.
+   An unpinned restart rejects an existing object with "saved seed exists".
+   During an image rollout, authorize approved PCR0 values in both Allow and Deny conditions.
+   Remove the old measurement when the rollout is complete.
+4. Before funding, remove `kms:GenerateDataKey` from the key's Allow statement.
+   Add an unconditional Deny for that action for the signer role.
+   Keep `kms:Decrypt` for the pinned image.
+   Test recovery on a fresh parent.
+   For later upgrades, authorize the new measured image to decrypt the same seed.
 
-A timeout leaves initialization inactive; a conditional PUT may still complete.
+If the enclave's initialization deadline expires before activation, it returns to `Initial`.
+A conditional PUT can still complete. A caller timeout alone does not prove
+that initialization failed. The enclave can activate before a response is lost.
 After service recovery, read the committed object, verify its identity, and
 relaunch with that address pinned. Custody calls are
 bounded and per-CID quotas/rate limits reject excess work. Never delete the blob,

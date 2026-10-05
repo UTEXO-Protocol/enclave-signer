@@ -52,9 +52,9 @@ pub struct ValidationContext<'a> {
     #[cfg(all(feature = "rgb-validation", evm_to_rgb))]
     pub psbt_fee_key_paths: Option<crate::networks::rgb::psbt_validation::FeeKeyPathResolver<'a>>,
     /// EVM lock events that the enclave verified. RGB consensus gets them so
-    /// the ether extension can check a BFA mint amount again. Empty on all
-    /// other paths and on builds without `bfa-mint`. A BFA consignment with an
-    /// empty set is refused.
+    /// the ether extension can check BFA mint amounts again. Empty when no
+    /// side has a BFA consignment, and on builds without `bfa-validation`. A
+    /// BFA consignment with an empty set is refused.
     #[cfg(feature = "rgb-validation")]
     pub bridge_events: &'a [rgbstd::vm::ether_extension::Event],
 }
@@ -196,8 +196,8 @@ pub fn validate_route_proofs(
         }
         (SourceNetwork::RgbSource(_), DestinationNetwork::EvmDestination(_)) => {
             validate_amount_covers_destination(source_proof.amount, destination_proof.amount)
-            // The handler binds burn identity: `validate_burn_id` (both routes)
-            // and the `sourceBurnTxId` OpId bind (pools route).
+            // The handler binds burn identity on both routes: `validate_burn_id`
+            // and the `sourceBurnTxId` OpId bind.
         }
         // Concordium fundsIn -> EVM release. The listener validates the source.
         #[cfg(feature = "ccd")]
@@ -210,8 +210,10 @@ pub fn validate_route_proofs(
     }
 }
 
-/// Both sides are bridge asset units, not sats. `source_amount` is the EVM
-/// `FundsIn` token amount from `evm::events::verify_funds_in_event`. An RGB
+/// Both sides are bridge asset units, not sats. For EVM -> RGB,
+/// `source_amount` is the `FundsIn` amount from
+/// `evm::events::verify_funds_in_event`. For RGB -> EVM, it is the consignment
+/// amount. An RGB
 /// `destination_amount` is the consignment recipient leg in RGB units, issued
 /// 1:1 against the EVM token. The PSBT checks in sats are in
 /// [`crate::networks::rgb::btc_crosscheck`].
