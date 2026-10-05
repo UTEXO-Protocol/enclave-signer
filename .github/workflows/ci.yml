@@ -43,7 +43,6 @@ jobs:
           mkdir -p ~/.ssh && chmod 700 ~/.ssh
           ssh-keyscan -H github.com >> ~/.ssh/known_hosts
           printf '%s\n' "${{ secrets.FEDERATED_SIGNER_PROTO_DEPLOY_KEY }}" > ~/.ssh/key_federated
-          printf '%s\n' "${{ secrets.RGB_CONSIGNMENT_PARSER_DEPLOY_KEY }}"  > ~/.ssh/key_consignment
           printf '%s\n' "${{ secrets.RGB_CONSENSUS_BFA_DEPLOY_KEY }}"       > ~/.ssh/key_consensus
           printf '%s\n' "${{ secrets.RGB_OPS_BFA_DEPLOY_KEY }}"             > ~/.ssh/key_ops
           printf '%s\n' "${{ secrets.RGB_SCHEMAS_BFA_DEPLOY_KEY }}"         > ~/.ssh/key_schemas
@@ -53,11 +52,6 @@ jobs:
             HostName github.com
             User git
             IdentityFile ~/.ssh/key_federated
-            IdentitiesOnly yes
-          Host github-rgb-consignment
-            HostName github.com
-            User git
-            IdentityFile ~/.ssh/key_consignment
             IdentitiesOnly yes
           Host github-rgb-consensus
             HostName github.com
@@ -236,17 +230,11 @@ jobs:
         run: |
           mkdir -p ~/.ssh && chmod 700 ~/.ssh
           ssh-keyscan -H github.com >> ~/.ssh/known_hosts
-          printf '%s\n' "${{ secrets.RGB_CONSIGNMENT_PARSER_DEPLOY_KEY }}"  > ~/.ssh/key_consignment
           printf '%s\n' "${{ secrets.RGB_CONSENSUS_BFA_DEPLOY_KEY }}"       > ~/.ssh/key_consensus
           printf '%s\n' "${{ secrets.RGB_OPS_BFA_DEPLOY_KEY }}"             > ~/.ssh/key_ops
           printf '%s\n' "${{ secrets.RGB_SCHEMAS_BFA_DEPLOY_KEY }}"         > ~/.ssh/key_schemas
           chmod 600 ~/.ssh/key_*
           cat >> ~/.ssh/config << 'SSHCONF'
-          Host github-rgb-consignment
-            HostName github.com
-            User git
-            IdentityFile ~/.ssh/key_consignment
-            IdentitiesOnly yes
           Host github-rgb-consensus
             HostName github.com
             User git
@@ -313,17 +301,11 @@ jobs:
         run: |
           mkdir -p ~/.ssh && chmod 700 ~/.ssh
           ssh-keyscan -H github.com >> ~/.ssh/known_hosts
-          printf '%s\n' "${{ secrets.RGB_CONSIGNMENT_PARSER_DEPLOY_KEY }}"  > ~/.ssh/key_consignment
           printf '%s\n' "${{ secrets.RGB_CONSENSUS_BFA_DEPLOY_KEY }}"       > ~/.ssh/key_consensus
           printf '%s\n' "${{ secrets.RGB_OPS_BFA_DEPLOY_KEY }}"             > ~/.ssh/key_ops
           printf '%s\n' "${{ secrets.RGB_SCHEMAS_BFA_DEPLOY_KEY }}"         > ~/.ssh/key_schemas
           chmod 600 ~/.ssh/key_*
           cat >> ~/.ssh/config << 'SSHCONF'
-          Host github-rgb-consignment
-            HostName github.com
-            User git
-            IdentityFile ~/.ssh/key_consignment
-            IdentitiesOnly yes
           Host github-rgb-consensus
             HostName github.com
             User git
