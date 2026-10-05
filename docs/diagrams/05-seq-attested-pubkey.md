@@ -70,5 +70,5 @@ sequenceDiagram
     Lib-->>Cli: AttestedPubkeyResult
     Cli-->>V: OK + printed bundle + PCRs
 
-    Note right of V: After OK the verifier knows:<br/>"AWS Nitro hardware certifies that an<br/>enclave with PCR0=X / PCR1=Y / PCR2=Z<br/>produced this signing pubkey, and the full<br/>key bundle PLUS the enclave's resolved<br/>security policy commit to user_data."<br/>A downgraded posture (vanilla on, other<br/>EVM source, dev build) FAILS here.
+    Note right of V: After OK the verifier knows:<br/>"AWS Nitro hardware certifies that an<br/>enclave with PCR0=X / PCR1=Y / PCR2=Z<br/>reported this signing pubkey, and the full<br/>key bundle PLUS the enclave's resolved<br/>security policy commit to user_data."<br/>A downgraded posture (vanilla on, other<br/>EVM source, dev build) FAILS here.
 ```

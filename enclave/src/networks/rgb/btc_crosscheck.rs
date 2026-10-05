@@ -2,7 +2,7 @@
 //!
 //! Authorization gate for plain-BTC bridge ops: no RGB consignment and no EVM
 //! correlation (`create_utxo`, plain BTC withdrawals). It is a separate request
-//! type from `SignPsbt`. Thus a bridge request without its bridge fields cannot
+//! type from `Sign` with an RGB destination. A request without bridge fields cannot
 //! reach this path.
 //!
 //! Funds-safety layers:
@@ -24,14 +24,14 @@
 //!   * Amount cap (`BTC_MAX_TOTAL_SATS`) on total input value, not output
 //!     value, so it also bounds value sent to miner fees.
 //!
-//! Scope: this path is self-pay. Withdrawals to an arbitrary user address need
-//! a destination bound to verified evidence and are out of scope.
+//! This path can fund enclave outputs or unproven outputs within the configured
+//! budget. It does not verify bridge evidence for a withdrawal recipient.
 //!
 //! Fail-closed: the fee policy and the witness_utxo rule need no config and run
 //! in every build. The amount cap and the unowned budget are operator values.
-//! A production (`rgb-validation`) build refuses to sign while they are unset.
-//! Builds without `rgb-validation` and `cfg(test)` builds use a permissive dev
-//! path.
+//! Non-test `rgb-validation` builds require a non-zero total-input cap.
+//! A zero unowned-output budget rejects unproven outputs but permits self-pay.
+//! Unit tests and builds without `rgb-validation` skip these unset-budget checks.
 
 use crate::config::BridgeConfig;
 use crate::error::{EnclaveError, Result};

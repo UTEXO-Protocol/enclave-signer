@@ -34,9 +34,9 @@ stateDiagram-v2
     note right of Active
         Active is terminal. There is no transition out of Active:
         no re-init, no re-clone, no key rotation in-place.
-        ensure_initial() rejects any second initialize attempt
-        with AlreadyInitialized. Upgrades/rotation happen by
-        standing up a NEW cluster (new PCRs) - never by mutating
-        an Active enclave.
+        Re-initialization from Active returns AlreadyInitialized.
+        An upgrade starts a new enclave process.
+        Mint signers can recover the existing KMS seed if the
+        KMS policy permits the new image. Peer cloning needs matching PCRs.
     end note
 ```

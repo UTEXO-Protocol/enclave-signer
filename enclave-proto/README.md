@@ -1,7 +1,7 @@
 # enclave-proto (vendored)
 
-The wire protocol the Nitro enclave speaks, vendored so **the proto schema
-adds no credential and no private dependency to the enclave build**. The schema itself adds no private build dependency.
+This crate contains the enclave wire protocol. Its local copy of the schema
+requires no credentials or private dependencies.
 
 Current caveat: the root `Cargo.toml` pins the RGB crates to private BFA
 mirrors over SSH, so an enclave build does need those deploy keys today. That
@@ -13,22 +13,42 @@ The bridge / node / orchestrator / parent / signer packages are not vendored —
 
 ## `enclave.proto` is NOT compiled
 
-There is no `build.rs` and no `prost-build` anywhere in this repo. `src/lib.rs`
-is `include!("enclave.rs")`, and **`enclave.rs` is committed pre-generated**.
+This crate has no `build.rs` or `prost-build` dependency. `src/lib.rs` includes
+the committed, pre-generated `enclave.rs`. The separate `enclave/build.rs`
+sets compiler configuration flags. It does not generate protobuf code.
 
 That is deliberate: generating at build time would put `protoc` in the enclave
 builder image and make PCR0 depend on which `protoc` / `prost-build` version
 built it, so the same commit would no longer reproduce the same measurement.
 
-The consequence is that **`proto/enclave.proto` is inert - editing it changes
-nothing.** The build still succeeds and the Rust types are unchanged. It is kept
-here as the human-readable source of truth for the schema, not as a build input.
+Changes to `proto/enclave.proto` do not change the compiled Rust types.
+The provenance test detects changes that do not match the recorded hashes.
+The file documents the schema. It is not a code-generation input in this crate.
 
 To change the wire protocol: change it upstream, regenerate there, then re-sync
 BOTH files here and update the Provenance tables below.
 `tests/vendored_provenance.rs` fails the test suite if the files and the tables
 disagree, or if the commit recorded below drifts from the `rev` that
 `parent/Cargo.toml` pins.
+
+## Known upstream comment differences
+
+The vendored files remain byte-for-byte copies of the pinned upstream revision.
+Some upstream comments describe older behavior. Use the Rust handlers and the
+[technical specification](../docs/tee-spec.md) for current behavior.
+
+| Wire item | Current behavior in this repository |
+| --- | --- |
+| `InitializeKeyRequest` | Empty seed and mnemonic use KMS on mint builds. Other builds generate a seed from OS entropy. |
+| `cloning_secret` | An empty field leaves a donor secret loaded at boot unchanged. KMS builds reject a non-empty field. |
+| `EvmSignatureResponse.call_data` | The enclave returns the input calldata unchanged. It signs decoded typed fields, not a hash of raw calldata. |
+| `SignBtcRequest` | The enclave derives output ownership and applies value budgets. There is no `BTC_ALLOWED_SCRIPTS` setting. |
+| `SubmitHeadersRequest` | Bounded chain replacements are permitted. The parent denies client gRPC submissions. Its internal sync sends headers directly. |
+| `HealthResponse.ready` | Mint readiness does not require `spv_synced`. Other builds with an SPV release path require it. |
+| `HealthResponse.phase` | KMS builds can also report `initializing`. |
+
+Correct these comments upstream, then synchronize both vendored files and their
+recorded provenance. Do not change only the local generated comments.
 
 ## Provenance
 
@@ -82,8 +102,8 @@ gRPC terminates at the parent.
 
 ## Why pre-generated code is committed
 
-`src/enclave.rs` is checked in rather than generated during the build, and no
-crate in this workspace has a `build.rs`. That is deliberate:
+`src/enclave.rs` is committed instead of generated during the build.
+The build script in the enclave crate does not change this file.
 
 - **Reproducibility.** `protoc` / buf plugin versions affect the generated Rust.
   Generating at build time would make the enclave binary — and therefore PCR0 —
@@ -111,5 +131,5 @@ about the wire format:
 1. the provenance table above,
 2. the `rev = "..."` pin in `parent/Cargo.toml`.
 
-Re-syncing changes the enclave binary and therefore **PCR0**. Treat it as a
-measurement-affecting change: rebuild the EIF and republish the reference PCRs.
+A schema update can change the enclave binary and its measurements.
+Rebuild the EIF after an update. Publish its new reference PCRs.

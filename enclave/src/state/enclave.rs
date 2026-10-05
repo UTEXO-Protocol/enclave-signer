@@ -36,11 +36,13 @@ const CLONE_EXPORT_HARD_CAP_ENV: &str = "CLONE_EXPORT_HARD_CAP";
 ///   Initial  -> Initializing -> Active (KMS seed recovery)
 ///   Initializing -> Initial (failed or expired seed recovery)
 ///   Initial  -> Cloning  (InitiateCloning)
+///   Cloning  -> Cloning  (replace an expired session)
 ///   Cloning  -> Active   (SetClone)
 ///   Active   -> Active   (donor serves GetClone, no state change)
 /// The state refuses all other transitions.
 ///
-/// `KeyManager` is boxed to keep the enum at approx 24 bytes, not 584.
+/// Boxing `KeyManager` keeps its key material out of the enum storage.
+/// The enum size also depends on `CloningSession` and the target platform.
 pub enum Phase {
     /// No keys, waiting for an initialize request.
     Initial,
@@ -84,11 +86,11 @@ pub struct EnclaveState {
     /// (see `networks::rgb::psbt_validation::psbt_operation_key`).
     /// It refuses a repeated operation inside the TTL window before signing.
     ///
-    /// Defense in depth only, not a full double-spend control. Nitro has no
-    /// persistent storage. Thus the set is lost on restart, is per instance
-    /// (the host can send a duplicate to a sibling enclave), and is TTL-bounded.
-    /// A host that changes a key field also bypasses it.
-    /// The durable guard is an on-chain ticket.
+    /// This cache does not provide durable deposit uniqueness. A restart
+    /// clears it, and replicas do not share it. Entries expire or are evicted
+    /// when the cache reaches its capacity. Each key field is also checked
+    /// by the request validators. A different cache key alone does not
+    /// authorize a request. Durable uniqueness needs a separate control.
     pub op_replay_guard: NonceReplayGuard,
 
     /// Successful exports from this enclave process. (F03-AF-10)

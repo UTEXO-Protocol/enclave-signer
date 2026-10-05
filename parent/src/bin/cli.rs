@@ -89,7 +89,7 @@ enum Command {
         #[arg(long)]
         consignment_valid: bool,
     },
-    /// Sign a bridge PSBT (BIP-86 key-path taproot inputs)
+    /// Sign a bridge PSBT (Taproot key path, colored BIP-86 account)
     SignPsbt {
         /// Hex-encoded PSBT bytes
         #[arg(long)]

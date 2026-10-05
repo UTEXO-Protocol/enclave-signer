@@ -4,7 +4,7 @@ Step-by-step text: [burn flow](../burn-flow.md).
 
 ```mermaid
 flowchart TD
-    start([Sign request received<br/>RgbSource + EvmDestination:<br/>consignment, merkle_proofs, call_data,<br/>nonce, deadline, chain_id, proxy_contract, ...])
+    start([After role, endpoint, and ancestry checks<br/>RgbSource + EvmDestination:<br/>consignment, merkle_proofs, call_data,<br/>nonce, deadline, chain_id, proxy_contract, ...])
 
     subgraph P1 ["P1 — RGB source (validate_source)"]
         p1w["cheap payload gate first:<br/>consignment bytes present, size caps,<br/>keccak256 == consignment_hash,<br/>asset_id declared"]

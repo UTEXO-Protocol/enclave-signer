@@ -15,9 +15,10 @@
 //! contract from config and decodes the fields (`operationId`,
 //! gross/net/commission) itself.
 //!
-//! Not bound here: `operationId` has no on-chain link to the signed RGB mint,
-//! so the listener supplies that link. Amounts are `u64`, as in the proto. A
-//! larger on-chain value fails closed (see [`extract_uint256_as_u64`]).
+//! `BridgeFundsIn.operationId` and the RGB OpId are different identifiers.
+//! For BFA mints, the caller also verifies the receipt's `FundsIn` RGB OpId
+//! against the mint transition. Amounts must fit the proto's `u64` fields.
+//! Larger values fail (see [`extract_uint256_as_u64`]).
 
 use sha3::{Digest, Keccak256};
 
@@ -416,9 +417,10 @@ fn select_unique_log<'a>(
     })
 }
 
-/// Depth of `receipt_block` below the current head. The head and receipt are
-/// two calls, so `min_confirmations` also bounds a reorg between them. A head
-/// below the receipt block means a reorg removed that block.
+/// Depth is `head - receipt_block`; the receipt block itself is not counted.
+/// Receipt and head come from separate RPC calls. A head below the receipt
+/// height is rejected. This does not detect a reorg at the same or greater
+/// height, because no block hash is compared. The RPC provider remains trusted.
 fn check_confirmation_depth(
     provider: &dyn EvmReceiptProvider,
     receipt_block: u64,

@@ -386,7 +386,7 @@ impl KeyManager {
         Ok((signing_key.sign(hash).to_bytes(), self.concordium_pub))
     }
 
-    /// Sign the BIP-86 key-path taproot inputs (BIP-340) of either account.
+    /// Sign Taproot key-path inputs (BIP-340) with BIP-86 keys from either account.
     /// Returns the PSBT bytes and the number of signed inputs.
     pub fn sign_psbt(&self, psbt_bytes: &[u8]) -> Result<(Vec<u8>, usize)> {
         self.sign_psbt_scoped(psbt_bytes, None)

@@ -4,7 +4,7 @@ The mint signer path, in code order. Step-by-step text:
 [mint flow](../mint-flow.md).
 
 The request must have the EVM deposit hash **and** the RGB consignment. The
-mint signer signs only the colored account, with the BIP-86 key path. Bitcoin
+mint signer uses Taproot key-path signatures from the colored BIP-86 account. Bitcoin
 outputs that the enclave cannot prove it owns are limited by
 `RGB_MAX_UNOWNED_SATS`.
 
@@ -37,7 +37,7 @@ sequenceDiagram
 
     Note over Srv,State: 1 — replay precheck (read only, before network I/O)
     Srv->>State: check(keccak(chain_id, proxy, evm_tx_hash,<br/>funds_in_operation_id, asset_id))
-    State-->>Srv: seen in 24 h ⇒ REFUSE
+    State-->>Srv: unexpired entry still in cache ⇒ REFUSE
 
     Note over Srv,Rpc: 2 — this deposit (verify_funds_in_event)
     Srv->>Evt: tx_hash, funds_in_operation_id (32 bytes each), amount, commission
@@ -85,6 +85,7 @@ sequenceDiagram
     Srv-->>Wire: SignedPsbtResponse + reservation
     Wire->>Parent: write response
     Wire->>State: commit replay key only after the write succeeds
+    Note over Wire,Parent: A successful write does not prove receipt by the caller.
     Parent-->>Listener: signed PSBT (not finalized)
     Listener-->>Orc: finalize + broadcast
 ```

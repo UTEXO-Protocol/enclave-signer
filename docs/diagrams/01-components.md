@@ -35,7 +35,7 @@ flowchart TB
     %% enclave crate
     subgraph ENC [enclave crate — utexo-bridge-enclave]
         EMain[main.rs + bootstrap.rs<br/>boot: a release bridge build panics<br/>unless the boot policy is valid Production,<br/>then listener loop vsock / TCP]
-        EConn[conn.rs<br/>DeadlineStream 10 s idle / 30 s total<br/>4 worker threads, queue of 16]
+        EConn[conn.rs<br/>DeadlineStream 10 s idle / 30 s socket deadline<br/>4 worker threads, queue of 16]
         ESrv[server/<br/>context.rs ServerContext + dispatch.rs router<br/>+ rate_limit.rs SubmitHeaders budget]
         EPol[policy.rs<br/>SecurityPolicy<br/>Production / Development,<br/>resolved once at SetEndpoints<br/>server/endpoints.rs]
         EState[state/<br/>enclave.rs Phase Initial / Initializing /<br/>Cloning / Active<br/>replay_guard.rs NonceReplayGuard 1 h TTL<br/>+ op_replay_guard 24 h TTL]

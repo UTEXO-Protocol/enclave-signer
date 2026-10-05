@@ -2,7 +2,8 @@
 # Mint signer enclave image: EVM -> RGB only (vsock + rgb + mint-signer).
 # Private Cargo dependencies require BuildKit secrets (see README, Building).
 # Supply github_token, or one deploy key per repo; keys never enter image layers.
-# Example: docker build --secret id=github_token,env=GITHUB_TOKEN -f build/Dockerfile.enclave.mint .
+# Example: docker build --build-arg RGB_ASSET_ID="$RGB_ASSET_ID" \
+#   --secret id=github_token,env=GITHUB_TOKEN -f build/Dockerfile.enclave.mint .
 # Production builder glibc must remain compatible with the AL2023 runtime.
 FROM rust:1.96-slim-bullseye@sha256:c593596210f729542a92aced6a8b0812bcc8d04c5f1b238e663b800d0e2e17bd AS builder
 

@@ -1,11 +1,11 @@
 # Burn flow (RGB -> EVM)
 
 **Signer image:** `burn-signer` (`--no-default-features --features vsock,rgb,burn-signer`).
-**Checked against code:** 2026-10-02.
+**Checked against repository code:** 2026-10-05. Deployment was not checked.
 
 This document tells how the burn signer checks and signs a release. The
-[spec](tee-spec.md) has the full rules. If this document and the code do not
-agree, the code is correct.
+[spec](tee-spec.md) describes the rules and known limits. If the code and this
+document differ, investigate the difference. Either can contain an error.
 
 ## 1. What the burn flow does
 
@@ -27,12 +27,17 @@ The burn signer signs nothing on Bitcoin.
 | Backend and listener | Operator servers | Nothing | Build the `fundsOut` calldata. Send the request. |
 | Parent | EC2 host | Nothing | Moves bytes. Sends Bitcoin headers to the enclave. |
 | Burn signer | Nitro Enclave | Checks and keys | Checks the burn. Signs the release and the gas transaction. |
-| EVM RPC | Pinned TLS host | Receipt data | Gives the receipts of the deposits behind the burn. |
-| Electrum | Through vsock proxy | Availability only | Gives Bitcoin data for RGB validation. |
+| EVM RPC | Pinned TLS host | Receipt and chain-head data | Gives the receipts of the deposits behind the burn. |
+| Electrum | Through vsock proxy | Bitcoin data, subject to the checks below | Supplies transactions and witness status for RGB validation. |
 | `MultisigProxy` and Bridge | EVM | Quorum and replay | Count signatures. Use the nonce. Check `burnId` again. |
 
-The listener can send flags and amounts. The burn signer does not use them as
-evidence. It proves each fact itself.
+The burn signer checks request claims before it signs. It derives the burn
+amount from the consignment. It trusts the pinned EVM RPC for deposit receipts
+and chain-head data. It does not verify EVM consensus.
+
+On mainnet, SPV checks witness inclusion against the enclave header chain.
+Signet and regtest do not enforce proof of work. See
+[Bitcoin network limits](tee-spec.md#8-rgb--bitcoin--spv-verification).
 
 ## 3. Sequence
 
@@ -63,7 +68,8 @@ sequenceDiagram
     P-->>L: signature
     L->>P: Sign(EVM_GAS_TX)
     P->>E: SignRawDigest
-    E-->>L: signed gas transaction
+    E-->>L: gas transaction signature
+    L->>L: assemble signed gas transaction
     L->>C: send transaction with M of N signatures
     C-->>U: tokens released
 ```
@@ -85,7 +91,7 @@ sequenceDiagram
 | `fundsOut` selector | `0x340276aa` | Pools route. |
 | `lzFundsOut` selector | from the enclave ABI | LayerZero route. |
 | Calldata cap | 64 KiB | Maximum calldata size. |
-| EIP-712 domain | `("MultisigProxy", "1", chainId, verifyingContract)` | A test pins it to the deployed contract. |
+| EIP-712 domain | `("MultisigProxy", "1", chainId, verifyingContract)` | Tests compare it with contract fixtures. |
 
 ## 5. Checks, in order
 
@@ -137,8 +143,9 @@ burn signer checks each deposit before it validates the consignment.
 ### Stage 3 - Is the burn buried in Bitcoin?
 
 The parent sends block headers. The burn signer builds its own header chain.
-It checks linkage, proof of work and `nBits`. It keeps the chain with the
-most work.
+On mainnet, it checks linkage, proof of work, and `nBits`. It accepts a
+replacement chain only when it has more work and meets the reorganization
+limits. Signet and regtest skip proof-of-work and `nBits` checks.
 
 - **B3.1** The tip must not be older than 2 hours. It must not be more than
   2 hours in the future.
@@ -219,7 +226,9 @@ Both routes (`fundsOut` and `lzFundsOut`), in this order:
 - **B6.4** The response has the signature and the calldata. The calldata is
   not changed.
 
-There is no batch digest. A signature from this path cannot authorize a batch.
+This path creates only `TeeFundsOut` and `TeeLzFundsOut` digests. It does not
+create a batch digest. The receiving contract must interpret these signatures
+according to the same ABI.
 
 ## 6. The gas transaction (`SignRawDigest`)
 
@@ -238,7 +247,9 @@ uses the gas key `m/44'/60'/0'/0/1`.
   Empty calldata is refused.
 - **G6** `value` must be zero. One exception: the payable `lzFundsOutCall` to
   `EVM_PROXY_CONTRACT_ADDRESS`, with `value` at most `GAS_TX_MAX_VALUE_WEI`.
-- **G7** If a limit is not set, the enclave refuses.
+- **G7** The destination, gas ceiling, fee ceiling, and selector allowlist
+  must be configured. An unset value ceiling prevents non-zero `value`. It
+  does not prevent a transaction with zero `value`.
 
 The gas rule is part of the attested policy. The gas transaction is not
 linked to one checked release. The limits apply to one transaction, not to a

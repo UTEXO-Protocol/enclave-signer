@@ -1,9 +1,10 @@
 //! The witness-resolver client: all network calls of `RgbValidator`.
 //!
 //! The resolver is Electrum, through the host vsock forwarder. Each call
-//! crosses the trust boundary. Thus each call has a timeout, and each answer
-//! is evidence to check, never trusted input.
-//! [`super::consensus`] runs RGB consensus on the results.
+//! crosses the trust boundary. Each socket operation has a timeout.
+//! [`super::consensus`] runs RGB consensus on the results. The RGB-source
+//! path also checks witness inclusion through SPV. The mint destination
+//! path has no separate SPV inclusion check.
 
 #[cfg(test)]
 use super::types::ValidatedConsignment;
@@ -13,9 +14,10 @@ use rgbstd::ChainNet;
 
 /// Per-socket timeout (seconds) for the Electrum witness resolver.
 /// `Config::default()` has `timeout: None`, so a stalled read blocks the
-/// worker thread forever. `electrum-client` retries `retry` times, so the
-/// worst case is about `(retry+1) *` this value. That stays within the
-/// `conn.rs` `TOTAL_REQUEST_TIMEOUT`. Compile-time and PCR-attested.
+/// worker thread indefinitely. This limit applies to each socket operation.
+/// Retries and multiple calls can exceed the ingress response deadline.
+/// The ingress deadline does not cancel resolver work. The timeout is compiled
+/// into the image.
 const ELECTRUM_WITNESS_TIMEOUT_SECS: u64 = 15;
 
 // TEMPORARY. The `s/bfa` RGB branches use 0.11.1-rc.10, which pins

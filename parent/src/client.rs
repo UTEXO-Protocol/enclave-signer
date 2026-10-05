@@ -43,7 +43,8 @@ pub struct SignEvmRequest {
 pub struct SignPsbtRequest {
     pub evm_tx_hash: Vec<u8>,
     /// On-chain `BridgeFundsIn.operationId` (32 bytes). Required.
-    /// Not the same as `operation_idx` (RGB hub index and replay-guard key).
+    /// Different from `operation_idx`, the RGB hub index. The replay key uses
+    /// this full operation ID, not the hub index.
     pub evm_funds_in_operation_id: Vec<u8>,
     pub operation_idx: u64,
     pub evm_event_valid: bool,
