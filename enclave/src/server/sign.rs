@@ -490,7 +490,7 @@ fn refuse_unverifiable_funds_in(
             "enclave was not built with --features evm-rpc: refusing to sign a bridge-mode PSBT \
              without independently verifying the FundsIn deposit (the listener-supplied \
              event_valid/event_finalized booleans are no longer trusted). \
-             Rebuild with `--features evm-rpc` (or `helios` for the trustless path)."
+             Rebuild with `--features evm-rpc`."
                 .into(),
         ));
     }

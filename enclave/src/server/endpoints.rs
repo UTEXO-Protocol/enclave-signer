@@ -35,17 +35,16 @@ pub(super) fn handle_set_endpoints(
         .as_ref()
         .ok_or_else(|| EnclaveError::InvalidRequest("the EVM RPC endpoint is not set".into()))?;
     #[cfg(feature = "evm-rpc")]
-    let (evm_source, evm_checkpoint, evm_rpc_tls) = crate::bootstrap::resolve_evm_data_source(tls);
+    let (evm_source, evm_rpc_tls) = crate::bootstrap::resolve_evm_data_source(tls);
     #[cfg(feature = "evm-rpc")]
     let evm_min_confirmations = ctx.evm_rpc_config.min_confirmations;
     #[cfg(not(feature = "evm-rpc"))]
-    let (evm_source, evm_checkpoint, evm_rpc_tls, evm_min_confirmations) =
-        (crate::policy::EvmDataSource::Disabled, None, None, 0);
+    let (evm_source, evm_rpc_tls, evm_min_confirmations) =
+        (crate::policy::EvmDataSource::Disabled, None, 0);
     let policy = SecurityPolicy::resolve(
         &ctx.build_ctx,
         &ctx.bridge_config,
         evm_source,
-        evm_checkpoint,
         evm_rpc_tls,
         &endpoints.electrum_host,
         evm_min_confirmations,
@@ -72,9 +71,8 @@ pub(super) fn handle_set_endpoints(
     let rgb_validator = crate::bootstrap::build_rgb_validator(endpoints.electrum_url.clone())
         .ok_or_else(|| EnclaveError::Internal("cannot build the RGB validator".into()))?;
     #[cfg(feature = "evm-rpc")]
-    let evm_rpc_client =
-        crate::bootstrap::build_evm_rpc_client(&ctx.bridge_config, &ctx.evm_rpc_config, tls)
-            .ok_or_else(|| EnclaveError::Internal("cannot build the EVM RPC client".into()))?;
+    let evm_rpc_client = crate::bootstrap::build_evm_rpc_client(tls)
+        .ok_or_else(|| EnclaveError::Internal("cannot build the EVM RPC client".into()))?;
     let launch = Launch {
         #[cfg(feature = "rgb-validation")]
         rgb_validator: Some(rgb_validator),

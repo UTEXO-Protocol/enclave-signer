@@ -46,9 +46,6 @@ pub enum ExpectedPolicy {
         /// fails verification.
         signer_role: SignerRole,
         evm_source: EvmDataSource,
-        /// Expected EVM checkpoint. Required only when `evm_source` is
-        /// [`EvmDataSource::HeliosVerified`]. It is part of the commitment.
-        evm_checkpoint: Option<[u8; 32]>,
         /// The Electrum host the operator set at launch.
         electrum_host: String,
         /// Expected EVM RPC TLS host and CA hash. Required when `evm_source`
@@ -240,7 +237,6 @@ fn expected_attested_policy(
             allow_vanilla_psbt,
             signer_role,
             evm_source,
-            evm_checkpoint,
             electrum_host,
             evm_rpc_tls,
             expected_chain_id,
@@ -309,7 +305,6 @@ fn expected_attested_policy(
                 rgb_asset_id: resp.rgb_asset_id.clone(),
                 funds_in_contract: *funds_in_contract,
                 evm_min_confirmations: *evm_min_confirmations,
-                evm_checkpoint: *evm_checkpoint,
                 electrum_host: electrum_host.clone(),
                 evm_rpc_tls: evm_rpc_tls.clone(),
                 // The operator declares the gas-tx rule. `to_bytes` sorts the
@@ -341,7 +336,6 @@ mod tests {
             allow_vanilla_psbt: false,
             evm_source: EvmDataSource::RawRpc,
             signer_role: SignerRole::Combined,
-            evm_checkpoint: None,
             electrum_host: "electrum.test".into(),
             evm_rpc_tls: None,
             funds_in_contract: [0x11; 20],
@@ -364,7 +358,6 @@ mod tests {
             allow_vanilla_psbt: false,
             signer_role,
             evm_source: EvmDataSource::PinnedTlsRpc,
-            evm_checkpoint: None,
             electrum_host: "electrum.test".into(),
             evm_rpc_tls: Some(EvmRpcTlsPin {
                 host: "rpc.test".into(),

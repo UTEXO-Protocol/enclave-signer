@@ -461,7 +461,6 @@ fn context(contract_id: &ContractId, receipt: ReceiptData) -> ServerContext {
         &bridge_config,
         EvmDataSource::Disabled,
         None,
-        None,
         "",
         0,
     );

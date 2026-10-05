@@ -39,9 +39,6 @@ ENV CARGO_INCREMENTAL=0 \
 # pulling the alloy + tokio subtree; requires a second host vsock-proxy
 # (EVM_RPC_VSOCK_PORT, default 8002).
 #
-# `helios` is deliberately NOT enabled: the light-client path is unused in
-# production, so the attested evm_source is RawRpc.
-#
 # `mint-signer` (implies `bfa-mint` -> the mint/burn flow + BFA validation)
 # builds the EVM -> RGB direction only: it signs the RGB mint PSBT after
 # verifying the EVM lock, and signs create_utxo (`SignBtc`). It carries no

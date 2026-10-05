@@ -36,7 +36,6 @@ fn context() -> (BridgeConfig, SecurityPolicy) {
         &cfg,
         EvmDataSource::RawRpc,
         None,
-        None,
         "electrum.test",
         12,
     );

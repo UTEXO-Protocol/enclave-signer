@@ -30,9 +30,6 @@ ENV CARGO_INCREMENTAL=0 \
 # pulling the alloy + tokio subtree; requires a second host vsock-proxy
 # (EVM_RPC_VSOCK_PORT, default 8002).
 #
-# `helios` is deliberately NOT enabled: the light-client path is unused in
-# production, so the attested evm_source is RawRpc.
-#
 # `burn-signer` (implies `bfa-mint` -> the mint/burn flow + BFA validation)
 # builds the RGB -> EVM direction only: it signs the `fundsOut` release for a
 # verified RGB burn, and the gas tx that submits it (`SignRawDigest`). It

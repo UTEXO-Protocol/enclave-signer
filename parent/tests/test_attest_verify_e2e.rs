@@ -203,7 +203,6 @@ async fn e2e_attest_verify_fails_on_policy_mismatch() {
             allow_vanilla_psbt: false,
             signer_role: attestation_verify::SignerRole::Mint,
             evm_source: EvmDataSource::RawRpc,
-            evm_checkpoint: None,
             electrum_host: "electrum.test".into(),
             evm_rpc_tls: None,
             expected_chain_id: None,
