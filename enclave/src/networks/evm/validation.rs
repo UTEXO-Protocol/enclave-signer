@@ -125,10 +125,10 @@ pub fn validate_source(amount: u64, source: &EvmSource) -> Result<RouteProof> {
     })
 }
 
-/// The release calldata fields that identify the settled burn. Both
-/// `fundsOut` and `lzFundsOut` carry them. They are the `burnId` preimage
-/// inputs and the backend `burnId`. The handler binds the source fields to the
-/// request's source network and recomputes `burnId`.
+/// The release calldata fields that identify the settled burn and its payout.
+/// Both `fundsOut` and `lzFundsOut` carry them, so every burn bind runs on both
+/// routes (#264). The handler binds the source fields to the request's source
+/// network and recomputes `burnId`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ReleaseIdentity {
     /// Calldata `burnId`, as the backend derived it.
@@ -143,6 +143,43 @@ pub struct ReleaseIdentity {
     pub settlement_data: Vec<u8>,
     /// Calldata `sourceBurnTxId`.
     pub source_burn_tx_id: [u8; 32],
+    /// Final payee as 32 bytes. `fundsOut`: `recipient`, left-padded.
+    /// `lzFundsOut`: the LayerZero `recipient`.
+    pub recipient: [u8; 32],
+    /// Calldata `proof`.
+    pub proof: Vec<u8>,
+}
+
+impl ReleaseIdentity {
+    /// The identity of a pools-route `fundsOut`.
+    pub fn from_funds_out(params: &FundsOutParams) -> Self {
+        let mut recipient = [0u8; 32];
+        recipient[12..].copy_from_slice(params.recipient.as_slice());
+        Self {
+            burn_id: params.burnId,
+            amount: params.amount,
+            source_chain_id: params.sourceChainId,
+            source_address: params.sourceAddress.clone(),
+            settlement_data: params.settlementData.to_vec(),
+            source_burn_tx_id: params.sourceBurnTxId.0,
+            recipient,
+            proof: params.proof.to_vec(),
+        }
+    }
+
+    /// The identity of a LayerZero-route `lzFundsOut`.
+    pub fn from_lz_funds_out(call: &lzFundsOutCall) -> Self {
+        Self {
+            burn_id: call.burnId,
+            amount: call.amount,
+            source_chain_id: call.sourceChainId,
+            source_address: call.sourceAddress.clone(),
+            settlement_data: call.settlementData.to_vec(),
+            source_burn_tx_id: call.sourceBurnTxId.0,
+            recipient: call.recipient.0,
+            proof: call.proof.to_vec(),
+        }
+    }
 }
 
 /// `Bridge.BURN_TYPEHASH` preimage, verbatim from `Bridge.sol` (bridge PRs
@@ -285,27 +322,13 @@ pub fn validate_destination(
         let decoded = decode_lz_funds_out_params(&destination.call_data)?;
         let proof = lz_route_proof_from_params(&decoded)?;
         let chain_id = decoded.destinationChainId;
-        let release = ReleaseIdentity {
-            burn_id: decoded.burnId,
-            amount: decoded.amount,
-            source_chain_id: decoded.sourceChainId,
-            source_address: decoded.sourceAddress,
-            settlement_data: decoded.settlementData.to_vec(),
-            source_burn_tx_id: decoded.sourceBurnTxId.0,
-        };
+        let release = ReleaseIdentity::from_lz_funds_out(&decoded);
         (proof, None, chain_id, release)
     } else {
         let params = decode_funds_out_params(&destination.call_data)?;
         let proof = route_proof_from_params(&params)?;
         let chain_id = params.destinationChainId;
-        let release = ReleaseIdentity {
-            burn_id: params.burnId,
-            amount: params.amount,
-            source_chain_id: params.sourceChainId,
-            source_address: params.sourceAddress.clone(),
-            settlement_data: params.settlementData.to_vec(),
-            source_burn_tx_id: params.sourceBurnTxId.0,
-        };
+        let release = ReleaseIdentity::from_funds_out(&params);
         (proof, Some(params), chain_id, release)
     };
     if proof.amount != destination.calldata_amount {
