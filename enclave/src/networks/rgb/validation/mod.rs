@@ -27,7 +27,7 @@ mod tests;
 
 pub use asset_bind::{assert_asset_binding, AssetBindMode};
 #[cfg(feature = "bfa-validation")]
-pub use bfa::{bfa_binding, BfaBinding};
+pub use bfa::{bfa_binding, BfaBinding, BfaMint};
 pub use consignment::is_mint_transition;
 pub use indexer::RgbValidator;
 pub use source::assert_consignment_size;

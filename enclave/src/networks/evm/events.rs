@@ -487,6 +487,81 @@ pub struct VerifiedLock {
     pub net_amount: u64,
 }
 
+/// `Bridge.RGB_MINT_DEPOSIT_TYPEHASH` preimage. bridge-utexo derives the same id
+/// (`connectors/evm/mintdepositid.go`), so all three cite one deposit per mint.
+#[cfg(feature = "bfa-validation")]
+const RGB_MINT_DEPOSIT_TYPEHASH_STR: &str = "UtexoRgbMintDeposit(address bridge,uint256 chainId,\
+     address token,uint256 rgbNetwork,uint256 rgbOpId,uint256 netAmount)";
+
+/// The `operationId` of the one deposit that can back a mint:
+///
+/// ```text
+/// keccak256(abi.encode(RGB_MINT_DEPOSIT_TYPEHASH, bridge, chainId, token,
+///     rgbNetwork, rgbOpId, netAmount))
+/// ```
+///
+/// Every input is pinned or read from the consignment, so neither the caller
+/// nor the RPC chooses which deposit a mint cites (finding 47). The Bridge
+/// refuses a second deposit under the same id.
+#[cfg(feature = "bfa-validation")]
+pub fn rgb_mint_deposit_id(
+    cfg: &crate::config::BridgeConfig,
+    mint_opid: &[u8; 32],
+    minted: u64,
+) -> Result<[u8; 32]> {
+    use crate::networks::evm::validation::RGB_SOURCE_CHAIN_ID;
+
+    if cfg.token_contract == [0u8; 20] || cfg.chain_id == 0 {
+        return Err(EnclaveError::CrossCheck(
+            "TOKEN_CONTRACT and EVM_CHAIN_ID must be pinned to derive a mint's deposit id - \
+             refusing to sign"
+                .into(),
+        ));
+    }
+    if minted == 0 {
+        return Err(EnclaveError::CrossCheck(format!(
+            "BFA mint 0x{} mints nothing, so no deposit can back it",
+            hex::encode(mint_opid)
+        )));
+    }
+
+    let word = |value: u64| {
+        let mut w = [0u8; 32];
+        w[24..].copy_from_slice(&value.to_be_bytes());
+        w
+    };
+    let address = |a: &[u8; 20]| {
+        let mut w = [0u8; 32];
+        w[12..].copy_from_slice(a);
+        w
+    };
+    let mut hasher = Keccak256::new();
+    hasher.update(Keccak256::digest(RGB_MINT_DEPOSIT_TYPEHASH_STR.as_bytes()));
+    hasher.update(address(&cfg.funds_in_contract));
+    hasher.update(word(cfg.chain_id));
+    hasher.update(address(&cfg.token_contract));
+    hasher.update(word(RGB_SOURCE_CHAIN_ID));
+    hasher.update(mint_opid);
+    hasher.update(word(minted));
+    Ok(hasher.finalize().into())
+}
+
+/// The lock of a mint, derived from the mint: its deposit id and its minted
+/// units, which the Bridge recorded as that deposit's net amount.
+#[cfg(feature = "bfa-validation")]
+pub fn derived_lock(
+    cfg: &crate::config::BridgeConfig,
+    mint_opid: [u8; 32],
+    minted: u64,
+) -> Result<VerifiedLock> {
+    Ok(VerifiedLock {
+        mint_opid,
+        minted,
+        operation_id: rgb_mint_deposit_id(cfg, &mint_opid, minted)?,
+        net_amount: minted,
+    })
+}
+
 /// Verifies the `FundsIn` lock that a BFA mint commits to. Returns the deposit.
 ///
 /// Same fail-closed checks as [`verify_funds_in_event`] (receipt, success,

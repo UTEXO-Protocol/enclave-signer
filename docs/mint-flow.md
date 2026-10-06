@@ -132,11 +132,13 @@ host. TLS ends inside the enclave. Each call has a 15 s timeout.
   `FUNDS_IN_CONTRACT`.
 - **M3.2** The last mint must be the mint of this request. It pairs with
   `evm_tx_hash`.
-- **M3.3** Each older mint in the history must have a `mint_ancestors` entry.
-  A request that lists the last mint in `mint_ancestors` is refused.
-- **M3.4** For each mint, the receipt must have exactly one `FundsIn` event
-  with that mint's RGB OpId, and exactly one `BridgeFundsIn` event. Both must
-  come from `FUNDS_IN_CONTRACT`. Depth: at least `EVM_MIN_CONFIRMATIONS`.
+- **M3.3** Each mint's deposit id is derived from the mint (see burn-flow
+  B1.3); `mint_ancestors` is ignored.
+- **M3.4** The receipt of `evm_tx_hash` must have exactly one `FundsIn` event
+  with the last mint's RGB OpId, and exactly one `BridgeFundsIn` event, both
+  from `FUNDS_IN_CONTRACT`, at least `EVM_MIN_CONFIRMATIONS` deep. Its
+  `operationId`, amount and net amount must be the ones the last mint derives.
+  Another deposit for the same OpId is refused.
 
 ### Stage 4 - Is the RGB history valid?
 

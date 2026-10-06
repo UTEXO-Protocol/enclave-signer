@@ -635,3 +635,48 @@ fn refuses_a_bridge_location_that_is_not_the_pinned_contract() {
     assert!(check_bridge_location("0x2222222222222222222222222222222222222222", &pinned).is_err());
     assert!(check_bridge_location("not-an-address", &pinned).is_err());
 }
+
+/// The vector bridge-utexo pins in `connectors/evm/mintdepositid_test.go`; the
+/// Bridge test pins it too, so the three derivations cannot drift apart.
+#[cfg(feature = "bfa-validation")]
+#[test]
+fn rgb_mint_deposit_id_matches_the_shared_vector() {
+    let mut cfg = crate::config::BridgeConfig::default();
+    hex::decode_to_slice(
+        "50d244bca9273fd5faadbee2d653b80a23e89ee5",
+        &mut cfg.funds_in_contract,
+    )
+    .unwrap();
+    hex::decode_to_slice(
+        "fd086bc7cd5c481dcc9c85ebe478a1c0b69fcbb9",
+        &mut cfg.token_contract,
+    )
+    .unwrap();
+    cfg.chain_id = 42161;
+    let mut opid = [0u8; 32];
+    opid[0] = 0xab;
+    opid[1] = 0x01;
+    opid[31] = 0x02;
+
+    assert_eq!(
+        hex::encode(rgb_mint_deposit_id(&cfg, &opid, 100_000).unwrap()),
+        "e0ff3d136bfe0a4de03da1aab87b954b20895d976e1a1753b2d553b451420766"
+    );
+}
+
+/// Every input moves the id: a deposit for another amount or mint cannot
+/// stand in for this one.
+#[cfg(feature = "bfa-validation")]
+#[test]
+fn rgb_mint_deposit_id_binds_the_mint_and_its_amount() {
+    let cfg = crate::config::BridgeConfig {
+        funds_in_contract: [0x50; 20],
+        token_contract: [0xfd; 20],
+        chain_id: 42161,
+        ..crate::config::BridgeConfig::default()
+    };
+    let id = rgb_mint_deposit_id(&cfg, &[1; 32], 100).unwrap();
+    assert_ne!(id, rgb_mint_deposit_id(&cfg, &[1; 32], 101).unwrap());
+    assert_ne!(id, rgb_mint_deposit_id(&cfg, &[2; 32], 100).unwrap());
+    assert!(rgb_mint_deposit_id(&cfg, &[1; 32], 0).is_err());
+}

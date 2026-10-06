@@ -50,7 +50,7 @@ sequenceDiagram
     Evt-->>Srv: destinationAddress (may be empty)
 
     Note over Srv,Rpc: 3 — each mint has a deposit (bfa_mint_events)
-    Srv->>Srv: bridgeLocation == FUNDS_IN_CONTRACT<br/>last mint ↔ evm_tx_hash, older mints ↔ mint_ancestors
+    Srv->>Srv: bridgeLocation == FUNDS_IN_CONTRACT<br/>last mint ↔ evm_tx_hash (its derived id), older mints ↔ derived ids
     Srv->>Rpc: receipt per mint
     Srv->>Srv: one FundsIn (rgbOpId == mint OpId) + one BridgeFundsIn,<br/>depth ≥ EVM_MIN_CONFIRMATIONS ⇒ verified locks
 

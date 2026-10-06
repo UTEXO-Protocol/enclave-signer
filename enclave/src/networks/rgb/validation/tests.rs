@@ -293,7 +293,10 @@ fn binding_defers_undecodable_bytes() {
 #[cfg(feature = "bfa-validation")]
 fn binding_with(mint_opids: Vec<[u8; 32]>, last: Option<(u16, [u8; 32])>) -> BfaBinding {
     BfaBinding {
-        mint_opids,
+        mints: mint_opids
+            .into_iter()
+            .map(|opid| super::BfaMint { opid, minted: 1 })
+            .collect(),
         bridge_location: "0x0".into(),
         last_transition: last.map(|(transition_type, opid)| TransitionSummary {
             op_id: hex::encode(opid),

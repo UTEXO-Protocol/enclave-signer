@@ -72,7 +72,7 @@ const SEED: [u8; 64] = [0x42; 64];
 /// The bridge entry contract: pinned in the enclave and written into genesis.
 const FUNDS_IN_CONTRACT: [u8; 20] = [0xB1; 20];
 const DEPOSIT_TX: [u8; 32] = [0x11; 32];
-const OPERATION_ID: [u8; 32] = [0xF7; 32];
+const TOKEN_CONTRACT: [u8; 20] = [0x7E; 20];
 const MINTED: u64 = 100_000;
 const BRIDGE_FUNDS: u64 = 10_000;
 const BRIDGE_CHANGE: u64 = 9_700;
@@ -372,7 +372,7 @@ fn log<E: SolEvent>(event: &E) -> LogEntry {
 /// The EVM deposit receipt: `FundsIn` with the mint OpId and `BridgeFundsIn`
 /// with the invoice, both from the pinned contract. The enclave reads this
 /// receipt and does not trust the listener.
-fn deposit_receipt(mint_opid: &OpId, invoice: &str) -> ReceiptData {
+fn deposit_receipt(mint_opid: &OpId, operation_id: [u8; 32], invoice: &str) -> ReceiptData {
     let opid = alloy_primitives::B256::from_slice(&hex::decode(mint_opid.to_string()).unwrap());
     let funds_in = FundsIn {
         sender: [0xde; 20].into(),
@@ -380,7 +380,7 @@ fn deposit_receipt(mint_opid: &OpId, invoice: &str) -> ReceiptData {
         amount: MINTED,
     };
     let bridge_funds_in = BridgeFundsIn {
-        operationId: OPERATION_ID.into(),
+        operationId: operation_id.into(),
         sourceTx: [0x5c; 32].into(),
         sender: [0xde; 20].into(),
         senderNonce: alloy_primitives::U256::ZERO,
@@ -423,17 +423,36 @@ fn spawn_regtest_stub() -> String {
 
 /// A production-shaped context: pinned bridge config, real validator, the
 /// deposit's receipt behind the EVM client, keys from `SEED`.
-fn context(contract_id: &ContractId, receipt: ReceiptData) -> ServerContext {
-    let state = EnclaveState::new(Network::Regtest);
-    state.initialize_from_seed(SEED).unwrap();
-    let bridge_config = BridgeConfig {
+fn bridge_config(contract_id: &ContractId) -> BridgeConfig {
+    BridgeConfig {
         chain_id: 1,
         bridge_contract: [0x11; 20],
         funds_in_contract: FUNDS_IN_CONTRACT,
+        token_contract: TOKEN_CONTRACT,
         rgb_asset_id: contract_id.to_string(),
         rgb_max_unowned_sats: 1_000,
         ..Default::default()
-    };
+    }
+}
+
+/// The operationId the Bridge derives for the deposit that backs this mint.
+fn operation_id(deposit: &Deposit) -> [u8; 32] {
+    let opid: [u8; 32] = hex::decode(deposit.mint_opid.to_string())
+        .unwrap()
+        .try_into()
+        .unwrap();
+    utexo_bridge_enclave::networks::evm::events::rgb_mint_deposit_id(
+        &bridge_config(&deposit.contract_id),
+        &opid,
+        MINTED,
+    )
+    .unwrap()
+}
+
+fn context(contract_id: &ContractId, receipt: ReceiptData) -> ServerContext {
+    let state = EnclaveState::new(Network::Regtest);
+    state.initialize_from_seed(SEED).unwrap();
+    let bridge_config = bridge_config(contract_id);
     let policy = SecurityPolicy::resolve(
         &BuildContext::current(),
         &bridge_config,
@@ -518,7 +537,7 @@ fn drive(built: &Built) -> EnclaveResponse {
             token: Vec::new(),
             recipient: Vec::new(),
             commission: 0,
-            funds_in_operation_id: OPERATION_ID.to_vec(),
+            funds_in_operation_id: operation_id(&built.deposit).to_vec(),
         })),
         destination_network: Some(DestinationNetwork::RgbDestination(RgbDestination {
             operation_idx: 0,
@@ -532,7 +551,11 @@ fn drive(built: &Built) -> EnclaveResponse {
     };
     let ctx = context(
         &built.deposit.contract_id,
-        deposit_receipt(&built.deposit.mint_opid, &built.deposit.invoice),
+        deposit_receipt(
+            &built.deposit.mint_opid,
+            operation_id(&built.deposit),
+            &built.deposit.invoice,
+        ),
     );
     sign_over_the_wire(&ctx, request)
 }

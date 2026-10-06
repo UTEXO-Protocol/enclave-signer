@@ -46,7 +46,7 @@ pub const LZ_FUNDS_OUT_SELECTOR: [u8; 4] = lzFundsOutCall::SELECTOR;
 /// commission rate by `(sourceChainId, destinationChainId)`. A forged value
 /// sends an RGB release through a foreign verifier or rate.
 /// [`validate_rgb_source_identity`] enforces it on both release routes.
-#[cfg(rgb_to_evm)]
+#[cfg(any(rgb_to_evm, feature = "bfa-validation"))]
 pub const RGB_SOURCE_CHAIN_ID: u64 = 96;
 
 /// Maximum `call_data` length. A valid `fundsOut` call is a few hundred bytes.

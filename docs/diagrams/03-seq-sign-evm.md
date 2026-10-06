@@ -25,7 +25,7 @@ sequenceDiagram
     Parent->>Srv: Sign{source_network: RgbSource,<br/>destination_network: EvmDestination}<br/>(TCP/vsock, length-prefixed proto)
 
     opt always (burn signer)
-        Srv->>Srv: bfa_burn_ancestry_events:<br/>resolve mint_ancestors and verify each EVM lock<br/>through the pinned TLS EVM RPC BEFORE RGB validation
+        Srv->>Srv: bfa_burn_ancestry_events:<br/>derive the deposit id of each mint<br/>(no EVM RPC read)FORE RGB validation
     end
 
     Note over Srv,Electrum: 1 — validate_source (RGB)

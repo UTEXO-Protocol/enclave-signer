@@ -116,16 +116,19 @@ burn signer checks each deposit before it validates the consignment.
   (default 8 MiB).
 - **B1.2** The asset's `bridgeLocation` must equal the pinned
   `FUNDS_IN_CONTRACT`.
-- **B1.3** Each `TS_BRIDGE` (mint) in the consignment must have a
-  `mint_ancestors` entry with a 32-byte EVM transaction hash.
-- **B1.4** For each mint, the burn signer gets the receipt itself:
-  - the receipt must be a success;
-  - it must have exactly one `FundsIn` event from `FUNDS_IN_CONTRACT`, with
-    the mint's RGB OpId;
-  - it must have exactly one `BridgeFundsIn` event from the same contract;
-  - it must be at least `EVM_MIN_CONFIRMATIONS` blocks deep.
-- **B1.5** The result is a list of verified locks: `(operationId, netAmount)`.
-  Stage 2 and Stage 5 use this list.
+- **B1.3** For each `TS_BRIDGE` (mint) in the consignment, the burn signer
+  derives the `operationId` of the one deposit that can back it:
+  `keccak256(abi.encode(RGB_MINT_DEPOSIT_TYPEHASH, FUNDS_IN_CONTRACT,
+  EVM_CHAIN_ID, TOKEN_CONTRACT, 96, mint OpId, minted units))`. It reads
+  nothing from the chain and ignores `mint_ancestors`. `TOKEN_CONTRACT` and
+  `EVM_CHAIN_ID` must be pinned.
+- **B1.4** The Bridge holds a record under that id only if a deposit of
+  exactly the minted units was made for that mint, and it refuses a second
+  one. The release checks each cited record, so a mint with no deposit fails
+  on chain.
+- **B1.5** The result is a list of locks: `(operationId, netAmount)`. One burn
+  has one list, so one `settlementData` and one `burnId`. Stage 2 and Stage 5
+  use this list.
 
 ### Stage 2 - Is the RGB history valid?
 

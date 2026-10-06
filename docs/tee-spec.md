@@ -775,8 +775,9 @@ Known limits. Read them before deployment.
   credentials as BuildKit secrets. OS package versions are not pinned.
   The supplied images leave the gas limits and `RGB_MAX_UNOWNED_SATS` unset,
   so the gas and mint PSBT paths refuse until a rebuilt image sets them.
-- **Protocol integration.** BFA burns and chained mints need
-  `mint_ancestors`. The enclave and the parent pin the same vendored schema.
+- **Protocol integration.** The enclave derives each mint's deposit id, so
+  `mint_ancestors` is ignored. The Bridge must derive RGB deposit ids the
+  same way. The enclave and the parent pin the same vendored schema.
   Clients must send its required fields.
 - **Network limits.** Testnet3 has a placeholder checkpoint. A release build
   refuses it. Signet does not check PoW, `nBits` or its challenge signature
