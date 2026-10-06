@@ -133,7 +133,9 @@ unset, so a retry works.
 
 With an Electrum URL `ssl://host:port` (or `tcp://`) the forwarder listens on
 that port and pins `host` to loopback in `/etc/hosts`, so TLS terminates inside
-the enclave against the real certificate. The EVM RPC forwarder listens on the
+the enclave against the real certificate. An `https://host[:port]` (or
+`http://`) URL selects Esplora instead, with the same forwarder and pin. Dev
+uses it on the custom signet, where the rgb-ops Electrum chain check fails. The EVM RPC forwarder listens on the
 EVM RPC TLS port, and the client connects to `https://<host>:<port>/` through
 it, so TLS ends inside the enclave; it trusts only the CA of the set, in every
 build. The host runs `vsock-proxy 8002 <EVM_RPC_HOST> <EVM_RPC_TLS_PORT>`.
@@ -586,7 +588,7 @@ The consignment pipeline (cheap checks first): non-empty payload within
 `MAX_TOTAL_PROOF_BYTES`, `keccak256(consignment) == consignment_hash`
 (integrity only), asset id declared; then full `rgb-ops` validation with the
 trusted typesystem pinned per schema id (unknown schemas rejected) against the
-resolver (Electrum, 15 s timeout); the validated
+resolver (Electrum with a 15 s timeout, or Esplora with 30 s); the validated
 contract id must then equal the declared asset id and the pinned `RGB_ASSET_ID`
 (on the `fundsOut` path this last leg applies once the bridge is configured;
 on the PSBT path it is unconditional). The RGB-source path then checks SPV
