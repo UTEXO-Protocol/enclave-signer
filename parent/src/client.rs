@@ -2,10 +2,10 @@ use std::time::Duration;
 
 use crate::enclave_proto::{
     enclave_request, enclave_response, EnclaveRequest, EnclaveResponse, EvmSignatureResponse,
-    GetLastSavedBlockRequest, GetLastSavedBlockResponse, GetPublicKeyRequest, HealthRequest,
-    HealthResponse, InitializeKeyRequest, InitializeKeyResponse, InitiateCloningRequest,
-    InitiateCloningResponse, MerkleProofEntry, PublicKeysResponse, SetCloneRequest,
-    SetEndpointsRequest, SignedPsbtResponse,
+    GetAttestedPublicKeyRequest, GetAttestedPublicKeyResponse, GetLastSavedBlockRequest,
+    GetLastSavedBlockResponse, GetPublicKeyRequest, HealthRequest, HealthResponse,
+    InitializeKeyRequest, InitializeKeyResponse, InitiateCloningRequest, InitiateCloningResponse,
+    MerkleProofEntry, PublicKeysResponse, SetCloneRequest, SetEndpointsRequest, SignedPsbtResponse,
 };
 use crate::error::{ParentError, Result};
 use crate::framing;
@@ -420,6 +420,30 @@ impl EnclaveClient {
         let resp = self.send_request(&req)?;
         match resp.response {
             Some(enclave_response::Response::Health(r)) => Ok(r),
+            Some(enclave_response::Response::Error(e)) => Err(ParentError::EnclaveError {
+                code: e.code,
+                message: e.message,
+            }),
+            other => Err(ParentError::Connection(format!(
+                "unexpected response variant: {:?}",
+                other
+            ))),
+        }
+    }
+
+    /// Attestation for `nonce`, straight from the enclave. Before keys exist,
+    /// it attests the policy only.
+    pub fn get_attested_public_key(&self, nonce: [u8; 32]) -> Result<GetAttestedPublicKeyResponse> {
+        let req = EnclaveRequest {
+            request: Some(enclave_request::Request::GetAttestedPublicKey(
+                GetAttestedPublicKeyRequest {
+                    nonce: nonce.to_vec(),
+                },
+            )),
+        };
+        let resp = self.send_request(&req)?;
+        match resp.response {
+            Some(enclave_response::Response::GetAttestedPublicKey(r)) => Ok(r),
             Some(enclave_response::Response::Error(e)) => Err(ParentError::EnclaveError {
                 code: e.code,
                 message: e.message,

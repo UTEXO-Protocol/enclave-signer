@@ -65,7 +65,7 @@ zeroize = "1"
 # host, so a private build credential is acceptable here. Keep this rev equal
 # to the vendored slice in `enclave-proto/` (see its README).
 federated-signer-proto = { git = "ssh://git@github-federated-signer/UTEXO-Protocol/federated-signer-proto.git", rev = "2b81a2eaadb99daa68c4428ea38f80ae3f40805d", package = "federated-signer-proto" }
-clap = { version = "4", features = ["derive"] }
+clap = { version = "4", features = ["derive", "env"] }
 # `GET /health` readiness probe. Keep the axum version equal to tonic's axum.
 axum = "0.8"
 serde_json = "1"
@@ -103,6 +103,8 @@ vsock = []
 
 [dev-dependencies]
 tonic-prost = "0.14"
+# Edits a mock attestation document in the launch check tests.
+ciborium = "0.2"
 # Real enclave (mock-attestation, seed-import) for end-to-end tests of the
 # CLI verifier against a live enclave and gRPC stack.
 utexo-bridge-enclave = { path = "../enclave", features = ["mock-attestation", "allow-seed-import"] }

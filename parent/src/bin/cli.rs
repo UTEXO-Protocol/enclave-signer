@@ -5,7 +5,7 @@ use std::io::{self, BufRead, Write};
 use std::path::PathBuf;
 use std::process;
 
-use clap::{Parser, Subcommand};
+use clap::{Args, Parser, Subcommand};
 use tracing_subscriber::EnvFilter;
 
 use utexo_bridge_parent::client::{EnclaveClient, SignEvmRequest, SignPsbtRequest};
@@ -130,34 +130,26 @@ enum Command {
     /// Exits 0 when ready, 1 when not.
     Health,
     /// Set the chain endpoints and the KMS values once, after launch. The
-    /// enclave rejects a second call. Each flag falls back to its environment
-    /// variable. A value that is not given is sent empty.
+    /// enclave rejects a second call.
     SetEndpoints {
-        /// `ssl://host:port` or `tcp://host:port`. Env: ELECTRUM_URL.
+        #[command(flatten)]
+        endpoints: EndpointArgs,
+    },
+    /// Verify a fresh enclave's attested policy after `set-endpoints`.
+    /// Exits 1 and names the field on a mismatch.
+    VerifyLaunch {
+        /// `PCR.json` of the release.
         #[arg(long)]
-        electrum_url: Option<String>,
-        /// TLS host name of the EVM RPC. Env: EVM_RPC_HOST.
+        pcr_file: PathBuf,
+        /// `IMAGE-ENV.json` of the release: the env of the measured image.
         #[arg(long)]
-        evm_rpc_host: Option<String>,
-        /// TLS port of the EVM RPC. Env: EVM_RPC_TLS_PORT.
-        #[arg(long)]
-        evm_rpc_tls_port: Option<u32>,
-        /// DER file of the only CA the EVM RPC TLS trusts.
-        /// Env: EVM_RPC_TLS_CA_DER_FILE.
-        #[arg(long)]
-        evm_rpc_ca_der_file: Option<PathBuf>,
-        /// Full ARN of the KMS key that wraps the seed. Env: KMS_KEY_ARN.
-        #[arg(long)]
-        kms_key_arn: Option<String>,
-        /// AWS region of the KMS key. Env: KMS_REGION.
-        #[arg(long)]
-        kms_region: Option<String>,
-        /// Name of the seed object. Env: KMS_SEED_ID.
-        #[arg(long)]
-        kms_seed_id: Option<String>,
-        /// EVM address the seed must give. Env: KMS_EXPECTED_EVM_ADDRESS.
-        #[arg(long)]
-        kms_expected_evm_address: Option<String>,
+        image_env: PathBuf,
+        /// Role of the deployed image.
+        #[arg(long, value_parser = ["combined", "mint", "burn"])]
+        signer_role: String,
+        /// The values that `set-endpoints` sent.
+        #[command(flatten)]
+        endpoints: EndpointArgs,
     },
     /// Clone the signing identity from a donor enclave into the local
     /// (requester) enclave. Steps:
@@ -186,6 +178,69 @@ enum Command {
     },
     /// Enter interactive REPL mode
     Interactive,
+}
+
+/// Endpoint and KMS values. Each flag falls back to its environment variable.
+/// A value that is not given is sent empty.
+#[derive(Args)]
+struct EndpointArgs {
+    /// `ssl://host:port` or `tcp://host:port`.
+    #[arg(long, env = "ELECTRUM_URL")]
+    electrum_url: Option<String>,
+    /// TLS host name of the EVM RPC.
+    #[arg(long, env = "EVM_RPC_HOST")]
+    evm_rpc_host: Option<String>,
+    /// TLS port of the EVM RPC. Empty means no port.
+    #[arg(long, env = "EVM_RPC_TLS_PORT")]
+    evm_rpc_tls_port: Option<String>,
+    /// DER file of the only CA the EVM RPC TLS trusts. Empty means no CA.
+    #[arg(long, env = "EVM_RPC_TLS_CA_DER_FILE")]
+    evm_rpc_ca_der_file: Option<PathBuf>,
+    /// Full ARN of the KMS key that wraps the seed.
+    #[arg(long, env = "KMS_KEY_ARN")]
+    kms_key_arn: Option<String>,
+    /// AWS region of the KMS key.
+    #[arg(long, env = "KMS_REGION")]
+    kms_region: Option<String>,
+    /// Name of the seed object.
+    #[arg(long, env = "KMS_SEED_ID")]
+    kms_seed_id: Option<String>,
+    /// EVM address the seed must give.
+    #[arg(long, env = "KMS_EXPECTED_EVM_ADDRESS")]
+    kms_expected_evm_address: Option<String>,
+}
+
+fn fail(msg: String) -> ! {
+    eprintln!("Error: {msg}");
+    process::exit(1)
+}
+
+fn endpoints_request(args: EndpointArgs) -> SetEndpointsRequest {
+    let evm_rpc_tls_port = args
+        .evm_rpc_tls_port
+        .filter(|p| !p.is_empty())
+        .map_or(0, |p| {
+            p.parse()
+                .unwrap_or_else(|_| fail(format!("EVM_RPC_TLS_PORT {p:?} is not a port")))
+        });
+    let evm_rpc_ca_der = args
+        .evm_rpc_ca_der_file
+        .filter(|path| !path.as_os_str().is_empty())
+        .map(|path| {
+            std::fs::read(&path)
+                .unwrap_or_else(|e| fail(format!("cannot read {}: {e}", path.display())))
+        })
+        .unwrap_or_default();
+    SetEndpointsRequest {
+        electrum_url: args.electrum_url.unwrap_or_default(),
+        evm_rpc_host: args.evm_rpc_host.unwrap_or_default(),
+        evm_rpc_ca_der,
+        evm_rpc_tls_port,
+        kms_key_arn: args.kms_key_arn.unwrap_or_default(),
+        kms_region: args.kms_region.unwrap_or_default(),
+        kms_seed_id: args.kms_seed_id.unwrap_or_default(),
+        kms_expected_evm_address: args.kms_expected_evm_address.unwrap_or_default(),
+    }
 }
 
 fn print_init_response(r: &InitializeKeyResponse) {
@@ -537,61 +592,21 @@ fn main() {
                 process::exit(1);
             }
         },
-        Command::SetEndpoints {
-            electrum_url,
-            evm_rpc_host,
-            evm_rpc_tls_port,
-            evm_rpc_ca_der_file,
-            kms_key_arn,
-            kms_region,
-            kms_seed_id,
-            kms_expected_evm_address,
-        } => {
-            let var = |name: &str| std::env::var(name).ok().filter(|v| !v.is_empty());
-            let fail = |msg: String| -> ! {
-                eprintln!("Error: {msg}");
-                process::exit(1)
-            };
-            let evm_rpc_tls_port = match evm_rpc_tls_port {
-                Some(p) => p,
-                None => var("EVM_RPC_TLS_PORT")
-                    .map(|p| {
-                        p.parse().unwrap_or_else(|_| {
-                            fail(format!("EVM_RPC_TLS_PORT {p:?} is not a port"))
-                        })
-                    })
-                    .unwrap_or(0),
-            };
-            let evm_rpc_ca_der = evm_rpc_ca_der_file
-                .or_else(|| var("EVM_RPC_TLS_CA_DER_FILE").map(PathBuf::from))
-                .map(|path| {
-                    std::fs::read(&path)
-                        .unwrap_or_else(|e| fail(format!("cannot read {}: {e}", path.display())))
-                })
-                .unwrap_or_default();
-            let req = SetEndpointsRequest {
-                electrum_url: electrum_url
-                    .or_else(|| var("ELECTRUM_URL"))
-                    .unwrap_or_default(),
-                evm_rpc_host: evm_rpc_host
-                    .or_else(|| var("EVM_RPC_HOST"))
-                    .unwrap_or_default(),
-                evm_rpc_ca_der,
-                evm_rpc_tls_port,
-                kms_key_arn: kms_key_arn
-                    .or_else(|| var("KMS_KEY_ARN"))
-                    .unwrap_or_default(),
-                kms_region: kms_region.or_else(|| var("KMS_REGION")).unwrap_or_default(),
-                kms_seed_id: kms_seed_id
-                    .or_else(|| var("KMS_SEED_ID"))
-                    .unwrap_or_default(),
-                kms_expected_evm_address: kms_expected_evm_address
-                    .or_else(|| var("KMS_EXPECTED_EVM_ADDRESS"))
-                    .unwrap_or_default(),
-            };
-            match client.set_endpoints(req) {
+        Command::SetEndpoints { endpoints } => {
+            match client.set_endpoints(endpoints_request(endpoints)) {
                 Ok(()) => println!("Endpoints set"),
                 Err(e) => fail(e.to_string()),
+            }
+        }
+        Command::VerifyLaunch {
+            pcr_file,
+            image_env,
+            signer_role,
+            endpoints,
+        } => {
+            if let Err(e) = verify_launch(&client, &pcr_file, &image_env, &signer_role, endpoints) {
+                eprintln!("FAIL: {e:#}");
+                process::exit(1);
             }
         }
         Command::Clone {
@@ -638,6 +653,62 @@ fn main() {
         }
         Command::Interactive => run_interactive(&client),
     }
+}
+
+fn verify_launch(
+    client: &EnclaveClient,
+    pcr_file: &std::path::Path,
+    image_env: &std::path::Path,
+    signer_role: &str,
+    endpoints: EndpointArgs,
+) -> anyhow::Result<()> {
+    use anyhow::Context;
+    use attestation_verify::SignerRole;
+    use utexo_bridge_parent::launch_check;
+
+    let read = |path: &std::path::Path| {
+        std::fs::read_to_string(path).with_context(|| format!("cannot read {}", path.display()))
+    };
+    let pcrs: serde_json::Value = serde_json::from_str(&read(pcr_file)?)
+        .with_context(|| format!("{} is not JSON", pcr_file.display()))?;
+    let pcr = |name: &str| {
+        pcrs[name]
+            .as_str()
+            .with_context(|| format!("{} has no {name}", pcr_file.display()))
+    };
+    let pcrs =
+        attestation_verify::ExpectedPcrs::from_hex(pcr("PCR0")?, pcr("PCR1")?, pcr("PCR2")?)?;
+    let role = match signer_role {
+        "mint" => SignerRole::Mint,
+        "burn" => SignerRole::Burn,
+        _ => SignerRole::Combined,
+    };
+    let expected =
+        launch_check::expected_policy(role, &read(image_env)?, &endpoints_request(endpoints))?;
+
+    let mut nonce = [0u8; 32];
+    rand::fill(&mut nonce);
+    let response = client.get_attested_public_key(nonce)?;
+    let policy = launch_check::check_launch(
+        response,
+        nonce,
+        &pcrs,
+        &expected,
+        utexo_bridge_parent::attest_verify::VerifyMode::Real,
+    )?;
+
+    println!("OK: the attested launch policy matches the deploy");
+    for (name, pcr) in [
+        ("PCR0", pcrs.pcr0),
+        ("PCR1", pcrs.pcr1),
+        ("PCR2", pcrs.pcr2),
+    ] {
+        println!("  {name:<26}: {}", hex::encode(pcr));
+    }
+    for (field, value) in launch_check::fields(&policy) {
+        println!("  {field:<26}: {value}");
+    }
+    Ok(())
 }
 
 /// Read the secret from the file, the environment, or the deprecated argument,
@@ -790,5 +861,23 @@ mod tests {
         .err()
         .expect("submit-headers must not parse");
         assert_eq!(err.kind(), clap::error::ErrorKind::InvalidSubcommand);
+    }
+
+    #[test]
+    fn verify_launch_takes_the_ctl_arguments() {
+        let cli = Cli::try_parse_from([
+            "utexo-bridge-parent-cli",
+            "--addr",
+            "vsock://16:5000",
+            "verify-launch",
+            "--pcr-file",
+            "PCR.json",
+            "--image-env",
+            "IMAGE-ENV.json",
+            "--signer-role",
+            "combined",
+        ])
+        .unwrap();
+        assert!(matches!(cli.command, Command::VerifyLaunch { .. }));
     }
 }

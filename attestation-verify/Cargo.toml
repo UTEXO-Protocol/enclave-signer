@@ -16,7 +16,12 @@ der = { version = "0.8", features = ["alloc"] }
 base64 = "0.23"
 serde = { version = "1", features = ["derive"] }
 hex = "0.4"
+sha2 = "0.11"
 thiserror = "2"
+
+[dev-dependencies]
+# Signed test chain for the COSE signature test.
+rcgen = "0.14"
 
 [features]
 default = []
