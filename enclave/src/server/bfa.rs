@@ -1,6 +1,4 @@
-//! BFA lock binding. Each mint in a consignment is paired with the one EVM
-//! deposit that can back it. Its id follows from the mint (OpId and minted
-//! units) and the pins, so neither the caller nor the RPC chooses it.
+//! BFA lock binding: each mint is paired with the deposit id it derives.
 //! RGB consensus gets the `cea` events to check the minted amounts.
 //!
 //! `server/mod.rs` gates this module on `bfa-validation`.
@@ -10,9 +8,7 @@ use crate::error::Result;
 use crate::networks::evm::events::{derived_lock, VerifiedLock};
 use crate::networks::rgb::validation::BfaMint;
 
-/// The derived lock of each mint, in consignment order. No RPC read: the
-/// Bridge holds a record under each id only if a deposit of exactly that
-/// net amount was made for that mint, and the release checks it.
+/// The derived lock of each mint, in consignment order; no RPC read.
 fn derived_locks(ctx: &ServerContext, mints: &[BfaMint]) -> Result<Vec<VerifiedLock>> {
     mints
         .iter()
@@ -59,9 +55,7 @@ fn bfa_binding_for(
     Ok(Some(binding))
 }
 
-/// The locks behind each mint in a burn consignment history, one `cea` event
-/// per mint. The caller's `mint_ancestors` hints are not read: one burn has
-/// one lock set, so one `settlementData` and one `burnId`.
+/// The locks behind each mint in a burn's history. `mint_ancestors` is not read.
 #[cfg(rgb_to_evm)]
 pub(super) fn bfa_burn_ancestry_events(
     ctx: &ServerContext,
@@ -73,11 +67,8 @@ pub(super) fn bfa_burn_ancestry_events(
     derived_locks(ctx, &binding.mints)
 }
 
-/// The locks of a BFA mint and of its ancestors, as the event set for RGB
-/// consensus. The deposit of the request must be the one the terminal mint
-/// derives; the ancestors' locks are derived.
-///
-/// Returns an empty vec for a non-BFA consignment.
+/// The locks of a BFA mint and its ancestors. The request's deposit must be
+/// the one the terminal mint derives. Empty for a non-BFA consignment.
 #[cfg(all(feature = "rgb-mint-burn", evm_to_rgb))]
 pub(super) fn bfa_mint_events(
     ctx: &ServerContext,
@@ -132,8 +123,7 @@ fn verify_request_deposit(
     )
 }
 
-/// The request's deposit pays for the mint only if it is the deposit the mint
-/// derives: the same `operationId`, `FundsIn` amount and net amount.
+/// The request's deposit must equal the mint's derived lock.
 #[cfg(all(feature = "rgb-mint-burn", evm_to_rgb))]
 fn bind_request_deposit(derived: &VerifiedLock, paid: &VerifiedLock) -> Result<()> {
     if paid != derived {
@@ -151,8 +141,7 @@ fn bind_request_deposit(derived: &VerifiedLock, paid: &VerifiedLock) -> Result<(
     Ok(())
 }
 
-/// A swap transfer spends BFA allocations from earlier mints. Their derived
-/// locks give consensus the events it needs.
+/// The derived locks of the mints a swap transfer descends from.
 #[cfg(feature = "rgb-swap")]
 pub(super) fn bfa_transfer_ancestry_events(
     ctx: &ServerContext,
@@ -219,8 +208,7 @@ mod burn_locks {
         }
     }
 
-    /// Finding 47: whatever deposit the caller names, one burn has one lock set,
-    /// so one `settlementData` and one `burnId`.
+    /// Finding 47: the caller's hints do not change a burn's lock set.
     #[test]
     fn one_burn_has_one_lock_set_whatever_the_caller_names() {
         let (ctx, mint) = context([0x7e; 20]);
@@ -275,8 +263,6 @@ mod request_deposit {
         assert!(bind_request_deposit(&DERIVED, &DERIVED).is_ok());
     }
 
-    /// A second deposit for the same OpId has another operationId (an old
-    /// formula, or an id the Bridge did not derive for this mint).
     #[test]
     fn refuses_another_deposit_for_the_same_mint() {
         let shadow = VerifiedLock {

@@ -636,8 +636,7 @@ fn refuses_a_bridge_location_that_is_not_the_pinned_contract() {
     assert!(check_bridge_location("not-an-address", &pinned).is_err());
 }
 
-/// The vector bridge-utexo pins in `connectors/evm/mintdepositid_test.go`; the
-/// Bridge test pins it too, so the three derivations cannot drift apart.
+/// The vector bridge-utexo and the Bridge tests pin too.
 #[cfg(feature = "bfa-validation")]
 #[test]
 fn rgb_mint_deposit_id_matches_the_shared_vector() {
@@ -664,8 +663,6 @@ fn rgb_mint_deposit_id_matches_the_shared_vector() {
     );
 }
 
-/// Every input moves the id: a deposit for another amount or mint cannot
-/// stand in for this one.
 #[cfg(feature = "bfa-validation")]
 #[test]
 fn rgb_mint_deposit_id_binds_the_mint_and_its_amount() {

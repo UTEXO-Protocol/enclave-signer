@@ -67,8 +67,7 @@ pub(super) fn decode_opid(hex_opid: &str) -> Result<[u8; 32]> {
 /// The mint direction also needs [`BfaBinding::terminal_opid`].
 #[cfg(feature = "bfa-validation")]
 pub struct BfaBinding {
-    /// Each `TS_BRIDGE` in the consignment, in consignment order. Its OpId and
-    /// minted units name the one deposit that can back it.
+    /// Each `TS_BRIDGE` in the consignment, in consignment order.
     pub mints: Vec<BfaMint>,
     /// `bridgeLocation` exactly as the asset genesis writes it. It is compared
     /// with the enclave `funds_in_contract` pin before any log is trusted.
@@ -117,8 +116,7 @@ impl BfaBinding {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BfaMint {
     pub opid: [u8; 32],
-    /// The mint's `OS_ASSET` outputs. Consensus binds them to
-    /// `GS_BRIDGED_SUPPLY` and, through `cea`, to the lock event.
+    /// The mint's `OS_ASSET` outputs.
     pub minted: u64,
 }
 

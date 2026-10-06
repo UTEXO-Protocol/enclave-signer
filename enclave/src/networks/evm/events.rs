@@ -487,22 +487,13 @@ pub struct VerifiedLock {
     pub net_amount: u64,
 }
 
-/// `Bridge.RGB_MINT_DEPOSIT_TYPEHASH` preimage. bridge-utexo derives the same id
-/// (`connectors/evm/mintdepositid.go`), so all three cite one deposit per mint.
+/// `Bridge.RGB_MINT_DEPOSIT_TYPEHASH` preimage; bridge-utexo derives the same id.
 #[cfg(feature = "bfa-validation")]
 const RGB_MINT_DEPOSIT_TYPEHASH_STR: &str = "UtexoRgbMintDeposit(address bridge,uint256 chainId,\
      address token,uint256 rgbNetwork,uint256 rgbOpId,uint256 netAmount)";
 
-/// The `operationId` of the one deposit that can back a mint:
-///
-/// ```text
-/// keccak256(abi.encode(RGB_MINT_DEPOSIT_TYPEHASH, bridge, chainId, token,
-///     rgbNetwork, rgbOpId, netAmount))
-/// ```
-///
-/// Every input is pinned or read from the consignment, so neither the caller
-/// nor the RPC chooses which deposit a mint cites (finding 47). The Bridge
-/// refuses a second deposit under the same id.
+/// The `operationId` of the one deposit that can back a mint. Every input is
+/// pinned or in the consignment, so no caller or RPC chooses it (finding 47).
 #[cfg(feature = "bfa-validation")]
 pub fn rgb_mint_deposit_id(
     cfg: &crate::config::BridgeConfig,
@@ -546,8 +537,7 @@ pub fn rgb_mint_deposit_id(
     Ok(hasher.finalize().into())
 }
 
-/// The lock of a mint, derived from the mint: its deposit id and its minted
-/// units, which the Bridge recorded as that deposit's net amount.
+/// The lock of a mint: its deposit id, with the minted units as net amount.
 #[cfg(feature = "bfa-validation")]
 pub fn derived_lock(
     cfg: &crate::config::BridgeConfig,
