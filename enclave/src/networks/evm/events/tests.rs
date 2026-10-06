@@ -663,6 +663,25 @@ fn rgb_mint_deposit_id_matches_the_shared_vector() {
     );
 }
 
+/// The vector BridgeProxy.t.sol pins (bridge-smart-contracts #173).
+#[cfg(feature = "bfa-validation")]
+#[test]
+fn rgb_mint_deposit_id_matches_the_contract_vector() {
+    let cfg = crate::config::BridgeConfig {
+        funds_in_contract: [0x11; 20],
+        token_contract: [0x22; 20],
+        chain_id: 42161,
+        ..Default::default()
+    };
+    let mut opid = [0u8; 32];
+    opid[29..].copy_from_slice(&[0xab, 0xcd, 0xef]);
+
+    assert_eq!(
+        hex::encode(rgb_mint_deposit_id(&cfg, &opid, 1_000_000).unwrap()),
+        "6f0c19c7e7e8764fbd2afa1fc8211144acc9b45766be22d6b9bba1b20ed6cbd9"
+    );
+}
+
 #[cfg(feature = "bfa-validation")]
 #[test]
 fn rgb_mint_deposit_id_binds_the_mint_and_its_amount() {

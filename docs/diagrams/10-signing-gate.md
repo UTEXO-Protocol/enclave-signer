@@ -31,7 +31,7 @@ flowchart TD
     p1c -->|yes| p3stale
 
     subgraph P2 ["P3 — EVM destination (validate_destination)"]
-        p2len{"calldata ≥ 4 bytes AND ≤ 64 KiB?"}
+        p2len{"calldata ≥ 4 bytes AND ≤ 96 KiB?"}
         p2len -->|no| p2lenr[REFUSE — size]:::refuse
         p2len -->|yes| p2sel{"selector is fundsOut 0x340276aa<br/>or lzFundsOut?"}
         p2sel -->|no| p2selr[REFUSE — unknown selector]:::refuse

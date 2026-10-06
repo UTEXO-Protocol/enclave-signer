@@ -90,7 +90,7 @@ sequenceDiagram
 | `EVM_MIN_CONFIRMATIONS` | 12 (default) | Minimum depth of each deposit receipt. Attested. |
 | `fundsOut` selector | `0x340276aa` | Pools route. |
 | `lzFundsOut` selector | from the enclave ABI | LayerZero route. |
-| Calldata cap | 64 KiB | Maximum calldata size. |
+| Calldata cap | 96 KiB | Maximum calldata size. |
 | EIP-712 domain | `("MultisigProxy", "1", chainId, verifyingContract)` | Tests compare it with contract fixtures. |
 
 ## 5. Checks, in order
@@ -163,7 +163,7 @@ limits. Signet and regtest skip proof-of-work and `nBits` checks.
 
 ### Stage 4 - Is the calldata correct?
 
-- **B4.1** Calldata must be at least 4 bytes and at most 64 KiB.
+- **B4.1** Calldata must be at least 4 bytes and at most 96 KiB.
 - **B4.2** The selector must be `fundsOut` (`0x340276aa`) or `lzFundsOut`.
 - **B4.3** The burn signer decodes the calldata and encodes it again. The two
   must be byte-equal. This stops a non-canonical encoding.

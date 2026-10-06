@@ -45,7 +45,7 @@ flowchart TB
         KM[keys.rs — KeyManager<br/>BIP-39/32/44/84/86 + SLIP-0010 ed25519<br/>SecretBox seed + keys]
 
         subgraph NEVM [networks/evm/]
-            NEV[validation.rs<br/>selectors fundsOut 0x340276aa + lzFundsOut,<br/>canonical ABI decode + re-encode,<br/>64 KiB cap, pins, destinationChainId, deadline]
+            NEV[validation.rs<br/>selectors fundsOut 0x340276aa + lzFundsOut,<br/>canonical ABI decode + re-encode,<br/>96 KiB cap, pins, destinationChainId, deadline]
             NEC[crosscheck.rs<br/>witnesses-confirmed, BtcRelay proof<br/>anchored to consignment block,<br/>flow amount bind, burn recipient]
             NEE[events.rs<br/>independent FundsIn verify,<br/>pinned-TLS RPC,<br/>TLS ends in the enclave]
             NEG[gas_tx.rs<br/>gas-tx preimage allowlist:<br/>strict RLP + chain / to pins]

@@ -57,7 +57,7 @@ sequenceDiagram
 
     Note over Srv,Evm: 2 — validate_destination (EVM)
     Srv->>Evm: validate_destination(EvmDestination)
-    Evm->>Evm: calldata ≥ 4 bytes, ≤ 64 KiB
+    Evm->>Evm: calldata ≥ 4 bytes, ≤ 96 KiB
     Evm->>Evm: selector is fundsOut 0x340276aa or lzFundsOut
     Evm->>Evm: canonical ABI check: decode FundsOutParams,<br/>then re-encode must byte-equal input
     Evm->>Evm: decoded amount == declared calldata_amount (fits u64)

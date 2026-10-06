@@ -49,10 +49,10 @@ pub const LZ_FUNDS_OUT_SELECTOR: [u8; 4] = lzFundsOutCall::SELECTOR;
 #[cfg(any(rgb_to_evm, feature = "bfa-validation"))]
 pub const RGB_SOURCE_CHAIN_ID: u64 = 96;
 
-/// Maximum `call_data` length. A valid `fundsOut` call is a few hundred bytes.
-/// More than 64 KiB is malformed or a work-amplification attempt. PCR-attested.
+/// Maximum `call_data` length: the Bridge's 90_000-byte settlement cap
+/// (`MAX_SETTLEMENT_DATA_OUT_LENGTH`) plus under 1 KiB of fields. PCR-attested.
 #[cfg(rgb_to_evm)]
-pub const MAX_FUNDS_OUT_CALL_DATA_LEN: usize = 64 * 1024;
+pub const MAX_FUNDS_OUT_CALL_DATA_LEN: usize = 96 * 1024;
 
 #[cfg(rgb_to_evm)]
 const ALLOWED_SELECTORS: &[[u8; 4]] = &[FUNDS_OUT_SELECTOR_POOLS, LZ_FUNDS_OUT_SELECTOR];

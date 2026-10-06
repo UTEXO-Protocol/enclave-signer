@@ -757,6 +757,28 @@ fn burn_id_matches_the_shared_vector() {
     );
 }
 
+/// The vector BridgeProxy.t.sol pins (bridge-smart-contracts #173).
+#[test]
+fn burn_id_matches_the_contract_vector() {
+    let cfg = BridgeConfig {
+        chain_id: 42161,
+        funds_in_contract: [0x11; ADDRESS_LEN],
+        token_contract: [0x22; ADDRESS_LEN],
+        ..config()
+    };
+    let mut release = ReleaseIdentity {
+        amount: U256::from(1_000_000u64),
+        source_burn_tx_id: [0u8; 32],
+        ..rgb_release()
+    };
+    release.source_burn_tx_id[29..].copy_from_slice(&[0xab, 0xcd, 0xef]);
+
+    assert_eq!(
+        hex::encode(expected_burn_id(&cfg, &release).to_be_bytes::<32>()),
+        "5f7d9d965dd22d924a86f6d23852911167ff751aa0d6a7227ad84d93fc20041d"
+    );
+}
+
 #[test]
 fn burn_id_check_accepts_the_derived_id_and_refuses_any_other() {
     let cfg = token_pinned_config();
