@@ -1,7 +1,9 @@
 //! The witness-resolver client: all network calls of `RgbValidator`.
 //!
-//! The resolver is Electrum, through the host vsock forwarder. Each call
-//! crosses the trust boundary. Each socket operation has a timeout.
+//! The URL scheme selects Electrum (`ssl://`, `tcp://`) or Esplora (`https://`,
+//! `http://`), through the host vsock forwarder. Esplora serves our custom
+//! signet: rgb-ops' Electrum chain check needs a public-signet tx it lacks.
+//! Each call crosses the trust boundary and has a timeout.
 //! [`super::consensus`] runs RGB consensus on the results. The RGB-source
 //! path also checks witness inclusion through SPV. The mint destination
 //! path has no separate SPV inclusion check.
@@ -20,6 +22,9 @@ use rgbstd::ChainNet;
 /// into the image.
 const ELECTRUM_WITNESS_TIMEOUT_SECS: u64 = 15;
 
+/// Timeout (seconds) for one Esplora HTTP call, connect and read.
+const ESPLORA_HTTP_TIMEOUT_SECS: u64 = 30;
+
 // TEMPORARY. The `s/bfa` RGB branches use 0.11.1-rc.10, which pins
 // electrum-client 0.24. Thus the `timeout` calls use the 0.24 shape (`u8`
 // seconds), not the 0.25 `Duration`. Change them back to `Duration` when the
@@ -27,15 +32,14 @@ const ELECTRUM_WITNESS_TIMEOUT_SECS: u64 = 15;
 
 /// Validates RGB consignments using rgbstd and a witness resolver.
 ///
-/// The resolver is Electrum (`electrum-client`) at an `ssl://` or `tcp://`
-/// URL. Production uses `ssl://...:50002` through the vsock forwarder. TLS
-/// ends inside the enclave against the real server cert, so the host relays
-/// only ciphertext.
+/// Production uses Electrum at `ssl://...:50002` through the vsock forwarder.
+/// TLS ends inside the enclave against the real server cert, so the host
+/// relays only ciphertext. Dev signet uses Esplora at an `https://` URL.
 #[derive(Debug)]
 pub struct RgbValidator {
     pub(super) indexer_url: String,
     pub(super) chain_net: ChainNet,
-    /// Per-socket timeout, [`ELECTRUM_WITNESS_TIMEOUT_SECS`] in production.
+    /// [`ELECTRUM_WITNESS_TIMEOUT_SECS`] or [`ESPLORA_HTTP_TIMEOUT_SECS`].
     /// Only tests can change it (no env or host input).
     pub(super) timeout_secs: u64,
     /// Canned validation result, so tests run the signing path with no
@@ -47,16 +51,21 @@ pub struct RgbValidator {
 impl RgbValidator {
     /// Creates a validator.
     ///
-    /// - `indexer_url`: Electrum endpoint, `ssl://host:port` or
-    ///   `tcp://host:port`. Any other scheme is refused.
+    /// - `indexer_url`: `ssl://` or `tcp://` for Electrum, `https://` or
+    ///   `http://` for Esplora. Any other scheme is refused.
     /// - `bitcoin_network`: "bitcoin" (or "mainnet"), "testnet" (or
     ///   "testnet3"), "signet", or "regtest".
     pub fn new(indexer_url: String, bitcoin_network: &str) -> Result<Self> {
-        if !indexer_url.starts_with("ssl://") && !indexer_url.starts_with("tcp://") {
+        let timeout_secs = if is_electrum_url(&indexer_url) {
+            ELECTRUM_WITNESS_TIMEOUT_SECS
+        } else if indexer_url.starts_with("https://") || indexer_url.starts_with("http://") {
+            ESPLORA_HTTP_TIMEOUT_SECS
+        } else {
             return Err(EnclaveError::Internal(format!(
-                "indexer URL {indexer_url:?} is not ssl:// or tcp:// (Electrum)"
+                "indexer URL {indexer_url:?} is not ssl:// or tcp:// (Electrum), \
+                 https:// or http:// (Esplora)"
             )));
-        }
+        };
         let chain_net = match bitcoin_network {
             "bitcoin" | "mainnet" => ChainNet::BitcoinMainnet,
             "testnet" | "testnet3" => ChainNet::BitcoinTestnet3,
@@ -72,7 +81,7 @@ impl RgbValidator {
         Ok(Self {
             indexer_url,
             chain_net,
-            timeout_secs: ELECTRUM_WITNESS_TIMEOUT_SECS,
+            timeout_secs,
             #[cfg(test)]
             canned: None,
         })
@@ -94,6 +103,30 @@ impl RgbValidator {
         self
     }
 
+    /// The witness resolver for this URL, with its timeout.
+    pub(super) fn witness_resolver(&self) -> Result<rgbstd::indexers::AnyResolver> {
+        use rgbstd::indexers::AnyResolver;
+        if !is_electrum_url(&self.indexer_url) {
+            use rgbstd::indexers::esplora_blocking::esplora_client;
+            let builder =
+                esplora_client::Builder::new(&self.indexer_url).timeout(self.timeout_secs);
+            return AnyResolver::esplora_blocking(builder).map_err(|e| {
+                tracing::error!(indexer_url = %self.indexer_url, "esplora resolver creation failed: {e}");
+                EnclaveError::CrossCheck(format!("esplora resolver creation failed: {e}"))
+            });
+        }
+        // `Config::default()` has `timeout: None`, so a stalled read blocks the
+        // worker thread forever. This re-export matches `AnyResolver`.
+        use rgbstd::indexers::electrum_blocking::electrum_client;
+        let electrum_cfg = electrum_client::Config::builder()
+            .timeout(Some(self.timeout_secs as u8))
+            .build();
+        AnyResolver::electrum_blocking(&self.indexer_url, Some(electrum_cfg)).map_err(|e| {
+            tracing::error!(indexer_url = %self.indexer_url, "electrum resolver creation failed: {e}");
+            EnclaveError::CrossCheck(format!("electrum resolver creation failed: {e}"))
+        })
+    }
+
     /// Fetches a raw transaction by txid from the witness indexer.
     ///
     /// The host controls the egress, so the bytes are hashed again and must
@@ -102,6 +135,35 @@ impl RgbValidator {
     /// that is not in the PSBT.
     pub fn fetch_transaction(&self, txid: bitcoin::Txid) -> Result<bitcoin::Transaction> {
         // Same backend and timeout as the witness resolver (final I-03 / #87).
+        let tx = if is_electrum_url(&self.indexer_url) {
+            self.fetch_electrum_tx(txid)?
+        } else {
+            self.fetch_esplora_tx(txid)?
+        };
+
+        let got = tx.compute_txid();
+        if got != txid {
+            return Err(EnclaveError::CrossCheck(format!(
+                "indexer returned tx {got} for a request for tx {txid} - refusing to trust its \
+                 outputs"
+            )));
+        }
+        Ok(tx)
+    }
+
+    fn fetch_esplora_tx(&self, txid: bitcoin::Txid) -> Result<bitcoin::Transaction> {
+        use rgbstd::indexers::esplora_blocking::esplora_client;
+        esplora_client::Builder::new(&self.indexer_url)
+            .timeout(self.timeout_secs)
+            .build_blocking()
+            .get_tx(&txid)
+            .map_err(|e| {
+                EnclaveError::CrossCheck(format!("esplora fetch of tx {txid} failed: {e}"))
+            })?
+            .ok_or_else(|| EnclaveError::CrossCheck(format!("esplora does not know tx {txid}")))
+    }
+
+    fn fetch_electrum_tx(&self, txid: bitcoin::Txid) -> Result<bitcoin::Transaction> {
         use rgbstd::indexers::electrum_blocking::electrum_client::{Client, Config, ElectrumApi};
         let cfg = Config::builder()
             .timeout(Some(self.timeout_secs as u8))
@@ -114,19 +176,14 @@ impl RgbValidator {
         let raw = client.transaction_get_raw(&txid).map_err(|e| {
             EnclaveError::CrossCheck(format!("electrum fetch of tx {txid} failed: {e}"))
         })?;
-        let tx = bitcoin::consensus::deserialize::<bitcoin::Transaction>(&raw).map_err(|e| {
+        bitcoin::consensus::deserialize::<bitcoin::Transaction>(&raw).map_err(|e| {
             EnclaveError::CrossCheck(format!(
                 "electrum returned bytes for tx {txid} that do not decode: {e}"
             ))
-        })?;
-
-        let got = tx.compute_txid();
-        if got != txid {
-            return Err(EnclaveError::CrossCheck(format!(
-                "indexer returned tx {got} for a request for tx {txid} - refusing to trust its \
-                 outputs"
-            )));
-        }
-        Ok(tx)
+        })
     }
+}
+
+fn is_electrum_url(url: &str) -> bool {
+    url.starts_with("ssl://") || url.starts_with("tcp://")
 }

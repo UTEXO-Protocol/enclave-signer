@@ -15,7 +15,6 @@ use super::types::ValidatedConsignment;
 use crate::error::EnclaveError;
 use crate::error::Result;
 use rgbstd::containers::{ConsignmentExt, FileContent, Transfer};
-use rgbstd::indexers::AnyResolver;
 #[cfg(feature = "bfa-validation")]
 use rgbstd::persistence::MemContract;
 #[cfg(feature = "bfa-validation")]
@@ -144,21 +143,8 @@ impl RgbValidator {
             }
         }
 
-        // 2. Create the witness resolver. `RgbValidator::new` admits only an
-        //    Electrum URL (`ssl://` or `tcp://`). With `ssl://`, TLS ends inside
-        //    the enclave, so the host cannot forge witness data.
-        // `Config::default()` has `timeout: None`, so a stalled read blocks the
-        // worker thread forever (see ELECTRUM_WITNESS_TIMEOUT_SECS). Use this
-        // re-export so that `Config` matches `AnyResolver::electrum_blocking`.
-        use rgbstd::indexers::electrum_blocking::electrum_client;
-        let electrum_cfg = electrum_client::Config::builder()
-            .timeout(Some(self.timeout_secs as u8))
-            .build();
-        let mut resolver = AnyResolver::electrum_blocking(&self.indexer_url, Some(electrum_cfg))
-            .map_err(|e| {
-                tracing::error!(indexer_url = %self.indexer_url, "electrum resolver creation failed: {e}");
-                EnclaveError::CrossCheck(format!("electrum resolver creation failed: {e}"))
-            })?;
+        // 2. Create the witness resolver: Electrum or Esplora by URL scheme.
+        let mut resolver = self.witness_resolver()?;
 
         // The resolver treats the consignment txs as tentative (not mined).
         resolver.add_consignment_txes(&transfer);
