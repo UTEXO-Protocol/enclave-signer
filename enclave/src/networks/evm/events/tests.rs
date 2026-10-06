@@ -96,12 +96,10 @@ fn bridge_log(op: [u8; 32], gross: u64, net: u64, commission: u64) -> LogEntry {
 /// The RGB-only companion `FundsIn(address,uint256 rgbOpId,uint64)`. Its id
 /// is an RGB id, so the predicate must never use this shape as a fallback.
 fn rgb_companion_log(rgb_op_id: u64, net: u64) -> LogEntry {
-    let mut data = word(rgb_op_id).to_vec();
-    data.extend_from_slice(&word(net));
     LogEntry {
         address: BRIDGE,
-        topics: vec![event_topic0(FUNDS_IN_SIG), word(0xdead)],
-        data,
+        topics: vec![event_topic0(FUNDS_IN_SIG), word(0xdead), word(rgb_op_id)],
+        data: word(net).to_vec(),
     }
 }
 
@@ -536,9 +534,25 @@ fn rejects_old_funds_in_signature() {
 
 #[cfg(feature = "bfa-validation")]
 #[test]
-fn decodes_funds_in_with_the_operation_id_in_data() {
+fn decodes_funds_in_with_the_operation_id_as_topic2() {
     let log = rgb_companion_log(0xab, 100);
     assert_eq!(decode_funds_in(&log, &word(0xab)).unwrap(), 100);
+}
+
+/// The topic is the OpId bytes as they are, a big-endian uint256.
+#[cfg(feature = "bfa-validation")]
+#[test]
+fn funds_in_reads_the_operation_id_big_endian() {
+    let mut opid = [0u8; 32];
+    opid[0] = 0xab;
+    opid[31] = 0x02;
+    let mut log = rgb_companion_log(0, 100);
+    log.topics[2] = opid;
+    assert_eq!(decode_funds_in(&log, &opid).unwrap(), 100);
+
+    let mut reversed = opid;
+    reversed.reverse();
+    assert!(decode_funds_in(&log, &reversed).is_err());
 }
 
 #[cfg(feature = "bfa-validation")]
@@ -551,12 +565,10 @@ fn rejects_funds_in_for_a_different_operation_id() {
 #[cfg(feature = "bfa-validation")]
 #[test]
 fn rejects_funds_in_amount_above_u64() {
-    let mut data = word(0xab).to_vec();
-    data.extend_from_slice(&[0x01; 32]);
     let log = LogEntry {
         address: BRIDGE,
-        topics: vec![event_topic0(FUNDS_IN_SIG), word(0xdead)],
-        data,
+        topics: vec![event_topic0(FUNDS_IN_SIG), word(0xdead), word(0xab)],
+        data: vec![0x01; 32],
     };
     assert!(decode_funds_in(&log, &word(0xab)).is_err());
 }
@@ -564,9 +576,19 @@ fn rejects_funds_in_amount_above_u64() {
 #[cfg(feature = "bfa-validation")]
 #[test]
 fn rejects_funds_in_with_unexpected_layout() {
-    let mut log = rgb_companion_log(0xab, 100);
-    log.topics.push(word(0xab));
-    assert!(decode_funds_in(&log, &word(0xab)).is_err());
+    // The old layout: the OpId in data, not indexed.
+    let mut data = word(0xab).to_vec();
+    data.extend_from_slice(&word(100));
+    let old = LogEntry {
+        address: BRIDGE,
+        topics: vec![event_topic0(FUNDS_IN_SIG), word(0xdead)],
+        data,
+    };
+    assert!(decode_funds_in(&old, &word(0xab)).is_err());
+
+    let mut extra = rgb_companion_log(0xab, 100);
+    extra.topics.push(word(0xab));
+    assert!(decode_funds_in(&extra, &word(0xab)).is_err());
 }
 
 #[cfg(feature = "bfa-mint")]

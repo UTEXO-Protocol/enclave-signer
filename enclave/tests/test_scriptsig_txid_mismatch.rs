@@ -82,7 +82,7 @@ const USER_FUNDS: u64 = 1_000;
 // The two logs `handle_sign` reads from the deposit receipt, in the shape
 // `IBridge.sol` emits them.
 sol! {
-    event FundsIn(address indexed sender, uint256 rgbOpId, uint64 amount);
+    event FundsIn(address indexed sender, uint256 indexed rgbOpId, uint64 amount);
     event BridgeFundsIn(
         bytes32 indexed operationId, bytes32 indexed sourceTx, address indexed sender,
         uint256 senderNonce, uint256 amount, uint256 netAmount, uint256 tokenCommission,

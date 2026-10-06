@@ -80,8 +80,8 @@ pub(crate) const BFI_MAX_DEST_ADDRESS_LEN: usize = 2048;
 /// `settlementData`) must be present. The `settlementData` tail is not read.
 const BFI_MIN_DATA_LEN: usize = 9 * 32;
 
-/// Bridge `FundsIn` signature. Only the sender is indexed. The RGB OpId and
-/// the uint64 amount are two data words.
+/// Bridge `FundsIn` signature. The sender and the RGB OpId are indexed; the
+/// uint64 amount is the one data word.
 pub const FUNDS_IN_SIG: &str = "FundsIn(address,uint256,uint64)";
 
 /// An RGB invoice in the shape the pinned `rgb-invoicing` accepts:
@@ -444,8 +444,8 @@ fn check_confirmation_depth(
 
 /// Decodes a `FundsIn` log, binds it to `expected_rgb_opid`, and returns the amount.
 ///
-/// Only one layout is accepted: topic0 and the indexed sender, then `data` holds
-/// the `rgbOpId` word and the amount word.
+/// Only one layout is accepted: topic0, the indexed sender and the indexed
+/// `rgbOpId` (the OpId bytes as a big-endian uint256), then the amount word.
 #[cfg(feature = "bfa-validation")]
 fn decode_funds_in(log: &LogEntry, expected_rgb_opid: &[u8; 32]) -> Result<u64> {
     if log.topics.first() != Some(&*FUNDS_IN_TOPIC0) {
@@ -453,13 +453,13 @@ fn decode_funds_in(log: &LogEntry, expected_rgb_opid: &[u8; 32]) -> Result<u64> 
             "log is not a FundsIn event".into(),
         ));
     }
-    if log.topics.len() != 2 || log.data.len() != 64 {
+    if log.topics.len() != 3 || log.data.len() != 32 {
         return Err(EnclaveError::CrossCheck(
             "unexpected FundsIn event layout".into(),
         ));
     }
-    let rgb_op_id: [u8; 32] = log.data[..32].try_into().expect("checked data length");
-    let amount = extract_uint256_as_u64(&log.data, 32)?;
+    let rgb_op_id = log.topics[2];
+    let amount = extract_uint256_as_u64(&log.data, 0)?;
     if &rgb_op_id != expected_rgb_opid {
         return Err(EnclaveError::CrossCheck(format!(
             "FundsIn rgbOpId mismatch: on-chain 0x{} != consignment 0x{}",
