@@ -292,7 +292,6 @@ fn rgb_source(
             rgb_amount: amount,
             rgb_asset_id: rgb_asset_id.into(),
             merkle_proofs: vec![],
-            mint_ancestors: vec![],
         })),
     }
 }
@@ -545,8 +544,6 @@ async fn grpc_sign_psbt_roundtrip() {
         rgb_asset_id: String::new(),
         consignment: vec![],
         consignment_hash: vec![],
-        // Plain PSBT roundtrip. There is no bridged mint, so no ancestors.
-        mint_ancestors: vec![],
     };
 
     let req = sign_rgb_request(evm_source(0, 0), payload);

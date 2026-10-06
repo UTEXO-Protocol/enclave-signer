@@ -546,7 +546,6 @@ fn drive(built: &Built) -> EnclaveResponse {
             asset_id: built.deposit.contract_id.to_string(),
             consignment: built.deposit.consignment.clone(),
             consignment_hash: Keccak256::digest(&built.deposit.consignment).to_vec(),
-            mint_ancestors: Vec::new(),
         })),
     };
     let ctx = context(

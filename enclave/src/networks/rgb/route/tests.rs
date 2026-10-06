@@ -224,7 +224,6 @@ mod asset_bind {
             psbt_output_amount: 0,
             asset_id: asset_id.into(),
             consignment: BFA_FIXTURE.to_vec(),
-            mint_ancestors: Vec::new(),
             consignment_hash: Keccak256::digest(BFA_FIXTURE).to_vec(),
         }
     }

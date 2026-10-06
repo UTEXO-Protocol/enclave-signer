@@ -120,8 +120,7 @@ burn signer checks each deposit before it validates the consignment.
   derives the `operationId` of the one deposit that can back it:
   `keccak256(abi.encode(RGB_MINT_DEPOSIT_TYPEHASH, FUNDS_IN_CONTRACT,
   EVM_CHAIN_ID, TOKEN_CONTRACT, 96, mint OpId, minted units))`. It reads
-  nothing from the chain and ignores `mint_ancestors`. `TOKEN_CONTRACT` and
-  `EVM_CHAIN_ID` must be pinned.
+  nothing from the chain. `TOKEN_CONTRACT` and `EVM_CHAIN_ID` must be pinned.
 - **B1.4** The Bridge holds a record under that id only if a deposit of
   exactly the minted units was made for that mint, and it refuses a second
   one. The release checks each cited record, so a mint with no deposit fails

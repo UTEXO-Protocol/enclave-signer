@@ -614,7 +614,6 @@ fn fixture_source(asset_id: &str) -> RgbSource {
         consignment_hash: keccak(TRANSFER_FIXTURE),
         merkle_proofs: vec![],
         commission: 0,
-        mint_ancestors: vec![],
     }
 }
 
@@ -1561,7 +1560,7 @@ mod asset_bind {
         use crate::networks::evm::validation::MAX_FUNDS_OUT_CALL_DATA_LEN;
         use crate::proto::enclave_request::Request;
         use crate::proto::sign_request::{DestinationNetwork, SourceNetwork};
-        use crate::proto::{EnclaveRequest, EvmDestination, MintAncestor, SignRequest};
+        use crate::proto::{EnclaveRequest, EvmDestination, SignRequest};
 
         const TRANSFERS: usize = 10_000;
         // 1 mint and 2 burns in the fixture, then the transfers and 1 burn.
@@ -1585,15 +1584,7 @@ mod asset_bind {
         // 2. Request caps.
         let cfg = BridgeConfig::default();
         assert!(consignment.len() <= cfg.max_consignment_bytes);
-        let mut source = sized_source(&consignment, &validated.witness_txids, 13);
-        source.mint_ancestors = validated
-            .mint_op_ids
-            .iter()
-            .map(|opid| MintAncestor {
-                op_id: hex::decode(opid).expect("opid hex"),
-                tx_hash: vec![0x77; 32],
-            })
-            .collect();
+        let source = sized_source(&consignment, &validated.witness_txids, 13);
         validate_source_payload(&source, &cfg).expect("the source passes the default caps");
         let proof_bytes: usize = source
             .merkle_proofs

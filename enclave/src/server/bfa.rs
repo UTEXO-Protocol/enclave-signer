@@ -55,7 +55,7 @@ fn bfa_binding_for(
     Ok(Some(binding))
 }
 
-/// The locks behind each mint in a burn's history. `mint_ancestors` is not read.
+/// The locks behind each mint in a burn's history.
 #[cfg(rgb_to_evm)]
 pub(super) fn bfa_burn_ancestry_events(
     ctx: &ServerContext,
@@ -155,7 +155,7 @@ pub(super) fn bfa_transfer_ancestry_events(
 
 #[cfg(all(test, feature = "bfa-mint", rgb_to_evm))]
 mod burn_locks {
-    use enclave_proto::{MintAncestor, RgbSource};
+    use enclave_proto::RgbSource;
 
     use super::{bfa_burn_ancestry_events, ServerContext};
     use crate::config::BridgeConfig;
@@ -200,26 +200,19 @@ mod burn_locks {
         (ctx, binding.mints[0].opid)
     }
 
-    fn burn_with(hints: Vec<MintAncestor>) -> RgbSource {
+    fn burn() -> RgbSource {
         RgbSource {
             consignment: BURN.to_vec(),
-            mint_ancestors: hints,
             ..Default::default()
         }
     }
 
-    /// Finding 47: the caller's hints do not change a burn's lock set.
+    /// Finding 47: a burn's locks come from its mints alone.
     #[test]
-    fn one_burn_has_one_lock_set_whatever_the_caller_names() {
+    fn derives_the_burn_locks_from_its_mints() {
         let (ctx, mint) = context([0x7e; 20]);
-        let named = |tx: u8| {
-            vec![MintAncestor {
-                op_id: mint.to_vec(),
-                tx_hash: vec![tx; 32],
-            }]
-        };
 
-        let locks = bfa_burn_ancestry_events(&ctx, &burn_with(Vec::new())).unwrap();
+        let locks = bfa_burn_ancestry_events(&ctx, &burn()).unwrap();
         assert_eq!(locks.len(), 1);
         assert_eq!(locks[0].mint_opid, mint);
         assert_eq!(locks[0].minted, 100_000);
@@ -228,20 +221,12 @@ mod burn_locks {
             locks[0].operation_id,
             rgb_mint_deposit_id(&ctx.bridge_config, &mint, 100_000).unwrap()
         );
-
-        for hint in [0xaa, 0xbb] {
-            assert_eq!(
-                bfa_burn_ancestry_events(&ctx, &burn_with(named(hint))).unwrap(),
-                locks,
-                "mint_ancestors has no effect"
-            );
-        }
     }
 
     #[test]
     fn refuses_a_burn_when_the_token_is_not_pinned() {
         let (ctx, _) = context([0u8; 20]);
-        let err = bfa_burn_ancestry_events(&ctx, &burn_with(Vec::new())).unwrap_err();
+        let err = bfa_burn_ancestry_events(&ctx, &burn()).unwrap_err();
         assert!(err.to_string().contains("TOKEN_CONTRACT"), "{err}");
     }
 }

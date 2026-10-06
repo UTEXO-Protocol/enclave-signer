@@ -308,7 +308,6 @@ impl EnclaveClient {
                                 // The CLI cannot resolve the deposit behind
                                 // a mint, so the enclave rejects a BFA burn
                                 // signed through it.
-                                mint_ancestors: Vec::new(),
                             },
                         ),
                     ),
@@ -372,7 +371,6 @@ impl EnclaveClient {
                                 consignment_hash: req.consignment_hash,
                                 // The CLI cannot resolve the deposits behind
                                 // a chained mint, so the enclave rejects one.
-                                mint_ancestors: Vec::new(),
                             },
                         ),
                     ),
