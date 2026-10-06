@@ -133,7 +133,8 @@ enum Command {
     /// enclave rejects a second call. Each flag falls back to its environment
     /// variable. A value that is not given is sent empty.
     SetEndpoints {
-        /// `ssl://host:port` or `tcp://host:port`. Env: ELECTRUM_URL.
+        /// Electrum `ssl://host:port` / `tcp://host:port`, or Esplora
+        /// `http(s)://host[:port][/path]`. Env: ELECTRUM_URL.
         #[arg(long)]
         electrum_url: Option<String>,
         /// TLS host name of the EVM RPC. Env: EVM_RPC_HOST.

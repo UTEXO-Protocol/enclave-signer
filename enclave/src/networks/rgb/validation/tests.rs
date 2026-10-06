@@ -66,9 +66,9 @@ fn rejects_invalid_bytes() {
 }
 
 #[test]
-fn stalled_electrum_times_out_instead_of_hanging() {
+fn stalled_indexer_times_out_instead_of_hanging() {
     // A host that accepts the connection and never responds must cost at most
-    // the socket timeout.
+    // the timeout, for Electrum and Esplora.
     use std::net::TcpListener;
 
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind stalled stub");
@@ -83,18 +83,20 @@ fn stalled_electrum_times_out_instead_of_hanging() {
         }
     });
 
-    let validator = RgbValidator::new(format!("tcp://{addr}"), "bitcoin")
-        .unwrap()
-        .with_timeout(2);
-    let start = std::time::Instant::now();
-    let err = validator
-        .validate_consignment(TRANSFER_FIXTURE, &[])
-        .unwrap_err();
-    let elapsed = start.elapsed();
-    assert!(
-        elapsed < std::time::Duration::from_secs(60),
-        "stalled Electrum must be bounded by the socket timeout, took {elapsed:?}: {err}"
-    );
+    for scheme in ["tcp", "http"] {
+        let validator = RgbValidator::new(format!("{scheme}://{addr}"), "bitcoin")
+            .unwrap()
+            .with_timeout(2);
+        let start = std::time::Instant::now();
+        let err = validator
+            .validate_consignment(TRANSFER_FIXTURE, &[])
+            .unwrap_err();
+        let elapsed = start.elapsed();
+        assert!(
+            elapsed < std::time::Duration::from_secs(60),
+            "stalled {scheme} indexer must be bounded by the timeout, took {elapsed:?}: {err}"
+        );
+    }
 }
 
 #[test]
@@ -104,13 +106,27 @@ fn rejects_unknown_network() {
 }
 
 #[test]
-fn rejects_a_non_electrum_url() {
-    for url in ["http://localhost:1", "https://localhost:1", "localhost:1"] {
+fn rejects_an_unknown_indexer_scheme() {
+    for url in ["ftp://localhost:1", "localhost:1"] {
         let err = RgbValidator::new(url.to_string(), "regtest").unwrap_err();
         assert!(
-            err.to_string().contains("not ssl:// or tcp://"),
+            err.to_string()
+                .contains("is not ssl://, tcp://, http:// or https://"),
             "{url}: {err}"
         );
+    }
+}
+
+#[test]
+fn indexer_scheme_selects_the_backend() {
+    for (url, electrum) in [
+        ("ssl://localhost:1", true),
+        ("tcp://localhost:1", true),
+        ("http://localhost:1", false),
+        ("https://localhost/api", false),
+    ] {
+        let validator = RgbValidator::new(url.to_string(), "regtest").unwrap();
+        assert_eq!(validator.is_electrum(), electrum, "{url}");
     }
 }
 

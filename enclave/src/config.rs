@@ -400,7 +400,8 @@ impl Default for EvmRpcConfig {
 /// Endpoints and KMS pins set once at launch and committed in the attested policy.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Endpoints {
-    /// `ssl://host:port` or `tcp://host:port`. Empty without `rgb-validation`.
+    /// Electrum `ssl://host:port` / `tcp://host:port`, or Esplora
+    /// `http(s)://host[:port][/path]`. Empty without `rgb-validation`.
     pub electrum_url: String,
     pub electrum_host: String,
     pub electrum_port: u16,
@@ -415,7 +416,7 @@ impl Endpoints {
     /// Check the values this build uses. A value the build does not use
     /// must be empty.
     pub fn parse(req: &crate::proto::SetEndpointsRequest) -> std::result::Result<Self, String> {
-        // Allow one trailing slash. The Electrum client does not.
+        // Allow one trailing slash. The indexer clients do not.
         let electrum_url = req
             .electrum_url
             .strip_suffix('/')
@@ -533,13 +534,29 @@ fn parse_port(name: &str, port: u32) -> std::result::Result<u16, String> {
         .ok_or_else(|| format!("{name} {port} is not in 1-65535"))
 }
 
-/// `ssl://host:port` or `tcp://host:port`, nothing after the port.
+/// Electrum `ssl://host:port` / `tcp://host:port`, nothing after the port.
+/// Esplora `http(s)://host[:port][/path]`, default port 80 / 443.
 #[cfg(feature = "rgb-validation")]
 fn parse_electrum_url(url: &str) -> std::result::Result<(String, u16), String> {
-    let rest = url
-        .strip_prefix("ssl://")
-        .or_else(|| url.strip_prefix("tcp://"))
-        .ok_or_else(|| format!("electrum_url {url:?} is not ssl:// or tcp://"))?;
+    let esplora = [("http://", 80), ("https://", 443)]
+        .into_iter()
+        .find_map(|(scheme, port)| url.strip_prefix(scheme).map(|rest| (rest, port)));
+    let rest = if let Some((rest, default_port)) = esplora {
+        let (authority, path) = rest.split_at(rest.find('/').unwrap_or(rest.len()));
+        if path.contains(['?', '#']) || path.contains(char::is_whitespace) {
+            return Err(format!("electrum_url {url:?} has a bad path"));
+        }
+        if !authority.contains(':') {
+            return Ok((parse_host("electrum_url host", authority)?, default_port));
+        }
+        authority
+    } else {
+        url.strip_prefix("ssl://")
+            .or_else(|| url.strip_prefix("tcp://"))
+            .ok_or_else(|| {
+                format!("electrum_url {url:?} is not ssl://, tcp://, http:// or https://")
+            })?
+    };
     let (host, port) = rest
         .rsplit_once(':')
         .ok_or_else(|| format!("electrum_url {url:?} has no port"))?;
@@ -748,7 +765,7 @@ mod tests {
         assert_eq!(e.electrum_url, "ssl://electrum.test:50002");
         for url in [
             "",
-            "http://electrum.test:50001",
+            "ftp://electrum.test:50001",
             "electrum.test:50001",
             "ssl://electrum.test",
             "ssl://electrum.test:50002/x",
@@ -757,6 +774,45 @@ mod tests {
             "ssl://127.0.0.1:50002",
             "ssl://electrum_test:50002",
             "ssl://electrum test:50002",
+        ] {
+            assert!(
+                parse_with(|r| r.electrum_url = url.into()).is_err(),
+                "{url:?}"
+            );
+        }
+    }
+
+    #[cfg(feature = "rgb-validation")]
+    #[test]
+    fn electrum_url_accepts_esplora_http_and_https() {
+        for (url, host, port) in [
+            ("http://esplora.test:3000", "esplora.test", 3000),
+            ("http://esplora.test", "esplora.test", 80),
+            ("https://Esplora.test/api/", "esplora.test", 443),
+            ("https://esplora.test:8443/api", "esplora.test", 8443),
+        ] {
+            let e = parse_with(|r| {
+                r.electrum_url = url.into();
+                // Keep the EVM RPC forwarder off the Esplora port.
+                if cfg!(feature = "evm-rpc") {
+                    r.evm_rpc_tls_port = 9443;
+                }
+            })
+            .unwrap_or_else(|err| panic!("{url}: {err}"));
+            assert_eq!(
+                (e.electrum_host.as_str(), e.electrum_port),
+                (host, port),
+                "{url}"
+            );
+            assert_eq!(e.electrum_url, url.strip_suffix('/').unwrap_or(url));
+        }
+        for url in [
+            "https://",
+            "https://127.0.0.1",
+            "https://esplora.test:0",
+            "https://esplora.test/api?x=1",
+            "https://esplora.test/a b",
+            "https://user@esplora.test",
         ] {
             assert!(
                 parse_with(|r| r.electrum_url = url.into()).is_err(),
