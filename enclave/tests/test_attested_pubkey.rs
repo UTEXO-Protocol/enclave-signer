@@ -137,19 +137,27 @@ fn attested_pubkey_rejects_wrong_nonce_size() {
 }
 
 #[test]
-fn attested_pubkey_rejects_before_init() {
+fn attested_pubkey_before_init_attests_the_policy_only() {
     let port = start_test_server();
+    let nonce = [3u8; 32];
 
-    let resp = send_request(
-        port,
-        &EnclaveRequest {
-            request: Some(Req::GetAttestedPublicKey(GetAttestedPublicKeyRequest {
-                nonce: vec![0u8; 32],
-            })),
-        },
+    let r = request_attested(port, &nonce);
+
+    assert!(r.public_keys.is_none());
+    let verified = attestation_verify::verify_mock_policy_attestation(
+        &r.attestation_doc,
+        &attestation_verify::ExpectedPcrs::zero(),
+        &nonce,
+    )
+    .expect("policy-only document verifies");
+    assert_eq!(
+        verified.user_data.as_deref(),
+        Some(attestation_verify::policy_commitment(&r.attested_policy).as_slice())
     );
-
-    assert!(matches!(resp.response, Some(Resp::Error(_))));
+    assert_eq!(
+        r.attested_policy,
+        attestation_verify::AttestedPolicy::Development.to_bytes()
+    );
 }
 
 #[test]
