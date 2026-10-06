@@ -64,7 +64,7 @@ zeroize = "1"
 # Full schema from the shared upstream repo. The parent runs on the untrusted
 # host, so a private build credential is acceptable here. Keep this rev equal
 # to the vendored slice in `enclave-proto/` (see its README).
-federated-signer-proto = { git = "ssh://git@github-federated-signer/UTEXO-Protocol/federated-signer-proto.git", rev = "53e09934400527320c6b5c589be3a94d982a5830", package = "federated-signer-proto" }
+federated-signer-proto = { git = "ssh://git@github-federated-signer/UTEXO-Protocol/federated-signer-proto.git", rev = "816d75ed25db6440755283f8b919363b6898c4d6", package = "federated-signer-proto" }
 clap = { version = "4", features = ["derive"] }
 # `GET /health` readiness probe. Keep the axum version equal to tonic's axum.
 axum = "0.8"

@@ -55,8 +55,8 @@ recorded provenance. Do not change only the local generated comments.
 | | |
 |---|---|
 | Upstream | https://github.com/UTEXO-Protocol/federated-signer-proto |
-| Commit | `53e09934400527320c6b5c589be3a94d982a5830` ("feat(enclave): add KMS values to SetEndpoints and the attested policy bytes to the attested key response") |
-| Commit date | 2026-09-30T16:18:36+02:00 |
+| Commit | `816d75ed25db6440755283f8b919363b6898c4d6` ("Feat: enclave kms at launch (#34)") |
+| Commit date | 2026-10-06T09:14:08+03:00 |
 
 This is the same commit `parent/Cargo.toml` still pins as a git dependency, so
 both crates compile against one schema version. Keep them in lockstep.
@@ -70,7 +70,7 @@ both crates compile against one schema version. Keep them in lockstep.
 Verify against upstream (needs read access to the private repo):
 
 ```bash
-REV=53e09934400527320c6b5c589be3a94d982a5830
+REV=816d75ed25db6440755283f8b919363b6898c4d6
 git clone https://github.com/UTEXO-Protocol/federated-signer-proto /tmp/fsp
 git -C /tmp/fsp checkout "$REV"
 diff /tmp/fsp/rust-gen/src/enclave/enclave.rs enclave-proto/src/enclave.rs
