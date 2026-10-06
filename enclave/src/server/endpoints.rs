@@ -296,7 +296,7 @@ mod tests {
     fn a_refused_set_leaves_the_slot_empty() {
         let ctx = awaiting(BuildContext::current());
         let mut bad = vec![SetEndpointsRequest {
-            electrum_url: "http://electrum.test:1".into(),
+            electrum_url: "ftp://electrum.test:1".into(),
             ..valid(1)
         }];
         if cfg!(feature = "evm-rpc") {

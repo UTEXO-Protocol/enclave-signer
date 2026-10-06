@@ -104,14 +104,49 @@ fn rejects_unknown_network() {
 }
 
 #[test]
-fn rejects_a_non_electrum_url() {
-    for url in ["http://localhost:1", "https://localhost:1", "localhost:1"] {
+fn rejects_an_unknown_indexer_scheme() {
+    for url in ["ftp://localhost:1", "ws://localhost:1", "localhost:1"] {
         let err = RgbValidator::new(url.to_string(), "regtest").unwrap_err();
         assert!(
             err.to_string().contains("not ssl:// or tcp://"),
             "{url}: {err}"
         );
     }
+}
+
+#[test]
+fn accepts_an_esplora_url() {
+    for url in ["https://esplora.test", "http://127.0.0.1:3000"] {
+        RgbValidator::new(url.to_string(), "signet").expect(url);
+    }
+}
+
+#[test]
+fn stalled_esplora_times_out_instead_of_hanging() {
+    use std::net::TcpListener;
+
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind stalled stub");
+    let addr = listener.local_addr().unwrap();
+    std::thread::spawn(move || {
+        let mut held = Vec::new();
+        for stream in listener.incoming() {
+            let Ok(stream) = stream else { break };
+            held.push(stream);
+        }
+    });
+
+    let validator = RgbValidator::new(format!("http://{addr}"), "bitcoin")
+        .unwrap()
+        .with_timeout(2);
+    let start = std::time::Instant::now();
+    let err = validator
+        .validate_consignment(TRANSFER_FIXTURE, &[])
+        .unwrap_err();
+    let elapsed = start.elapsed();
+    assert!(
+        elapsed < std::time::Duration::from_secs(60),
+        "stalled Esplora must be bounded by the HTTP timeout, took {elapsed:?}: {err}"
+    );
 }
 
 /// `asset_output_amount` must count only `OS_ASSET` allocations, not the
@@ -1004,6 +1039,53 @@ mod asset_bind {
             "expected to reach the SPV proof-coverage stage with the pin block skipped, \
              got: {msg}"
         );
+    }
+
+    /// Stub Esplora that serves only `GET /block-height/0`, the chain check.
+    #[cfg(feature = "bfa-validation")]
+    fn spawn_stub_esplora() -> String {
+        use std::io::{Read as _, Write as _};
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind stub esplora");
+        let addr = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { break };
+                let mut buf = [0u8; 4096];
+                let n = stream.read(&mut buf).unwrap_or(0);
+                let request = String::from_utf8_lossy(&buf[..n]).to_string();
+                if !request.starts_with("GET /block-height/0 ") {
+                    let _ = stream.write_all(
+                        b"HTTP/1.1 404 Not Found\r\ncontent-length: 0\r\nconnection: close\r\n\r\n",
+                    );
+                    continue;
+                }
+                let body = bitcoin::constants::genesis_block(bitcoin::Network::Signet)
+                    .block_hash()
+                    .to_string();
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: text/plain\r\ncontent-length: {}\r\n\
+                     connection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = stream.write_all(response.as_bytes());
+            }
+        });
+        format!("http://{addr}")
+    }
+
+    /// Esplora passes the signet chain check on the genesis hash alone, so it
+    /// validates where rgb-ops' Electrum check needs a public-signet tx.
+    #[test]
+    #[cfg(feature = "bfa-validation")]
+    fn validates_a_real_burn_through_esplora() {
+        let validator = RgbValidator::new(spawn_stub_esplora(), "signet").expect("validator");
+        let validated = validator
+            .validate_consignment(BFA_BURN_FIXTURE, &fixture_mint_events())
+            .expect("the BFA burn fixture passes RGB consensus through Esplora");
+        assert_eq!(validated.contract_id, FIXTURE_ASSET_ID);
     }
 
     /// The full validator on a real burn. RGB consensus accepts the fixture:

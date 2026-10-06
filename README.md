@@ -483,7 +483,7 @@ requires the values it uses and refuses the others:
 
 | Value (CLI flag / env) | Build | Description |
 |------------------------|-------|-------------|
-| `--electrum-url` / `ELECTRUM_URL` | `rgb-validation` | `ssl://host:port` or `tcp://host:port`. The forwarder listens on that port and pins `host` to loopback in `/etc/hosts`, so TLS terminates inside the enclave. |
+| `--electrum-url` / `ELECTRUM_URL` | `rgb-validation` | `ssl://host:port` or `tcp://host:port` (Electrum), or `https://host[:port]` / `http://host[:port]` (Esplora, for the custom dev signet). The forwarder listens on that port and pins `host` to loopback in `/etc/hosts`, so TLS terminates inside the enclave. |
 | `--evm-rpc-host` / `EVM_RPC_HOST` | `evm-rpc` | TLS host name of the EVM RPC. No scheme, path, port or IP literal. The JSON-RPC is served at `/`. |
 | `--evm-rpc-tls-port` / `EVM_RPC_TLS_PORT` | `evm-rpc` | TLS port, 1-65535, not the Electrum port. The forwarder listens on it. |
 | `--evm-rpc-ca-der-file` / `EVM_RPC_TLS_CA_DER_FILE` | `evm-rpc` | DER of the only CA the EVM RPC TLS trusts. |

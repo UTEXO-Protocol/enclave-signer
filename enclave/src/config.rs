@@ -400,7 +400,8 @@ impl Default for EvmRpcConfig {
 /// Endpoints and KMS pins set once at launch and committed in the attested policy.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Endpoints {
-    /// `ssl://host:port` or `tcp://host:port`. Empty without `rgb-validation`.
+    /// `ssl://host:port` or `tcp://host:port` (Electrum), or `https://host[:port]`
+    /// or `http://host[:port]` (Esplora). Empty without `rgb-validation`.
     pub electrum_url: String,
     pub electrum_host: String,
     pub electrum_port: u16,
@@ -533,19 +534,34 @@ fn parse_port(name: &str, port: u32) -> std::result::Result<u16, String> {
         .ok_or_else(|| format!("{name} {port} is not in 1-65535"))
 }
 
-/// `ssl://host:port` or `tcp://host:port`, nothing after the port.
+/// `ssl://host:port` or `tcp://host:port` (Electrum), or `https://host[:port]`
+/// or `http://host[:port]` (Esplora, port 443 or 80 by default). Nothing after
+/// the port.
 #[cfg(feature = "rgb-validation")]
 fn parse_electrum_url(url: &str) -> std::result::Result<(String, u16), String> {
-    let rest = url
+    let (rest, default_port) = if let Some(rest) = url
         .strip_prefix("ssl://")
         .or_else(|| url.strip_prefix("tcp://"))
-        .ok_or_else(|| format!("electrum_url {url:?} is not ssl:// or tcp://"))?;
-    let (host, port) = rest
-        .rsplit_once(':')
-        .ok_or_else(|| format!("electrum_url {url:?} has no port"))?;
-    let port = port
-        .parse::<u32>()
-        .map_err(|_| format!("electrum_url {url:?} has a bad port"))?;
+    {
+        (rest, None)
+    } else if let Some(rest) = url.strip_prefix("https://") {
+        (rest, Some(443))
+    } else if let Some(rest) = url.strip_prefix("http://") {
+        (rest, Some(80))
+    } else {
+        return Err(format!(
+            "electrum_url {url:?} is not ssl://, tcp://, https:// or http://"
+        ));
+    };
+    let (host, port) = match (rest.rsplit_once(':'), default_port) {
+        (Some((host, port)), _) => (
+            host,
+            port.parse::<u32>()
+                .map_err(|_| format!("electrum_url {url:?} has a bad port"))?,
+        ),
+        (None, Some(port)) => (rest, port),
+        (None, None) => return Err(format!("electrum_url {url:?} has no port")),
+    };
     Ok((
         parse_host("electrum_url host", host)?,
         parse_port("electrum_url port", port)?,
@@ -748,7 +764,7 @@ mod tests {
         assert_eq!(e.electrum_url, "ssl://electrum.test:50002");
         for url in [
             "",
-            "http://electrum.test:50001",
+            "ftp://electrum.test:50001",
             "electrum.test:50001",
             "ssl://electrum.test",
             "ssl://electrum.test:50002/x",
@@ -757,6 +773,38 @@ mod tests {
             "ssl://127.0.0.1:50002",
             "ssl://electrum_test:50002",
             "ssl://electrum test:50002",
+        ] {
+            assert!(
+                parse_with(|r| r.electrum_url = url.into()).is_err(),
+                "{url:?}"
+            );
+        }
+    }
+
+    #[cfg(feature = "rgb-validation")]
+    #[test]
+    fn esplora_url_takes_a_default_port() {
+        // The EVM RPC forwarder takes another loopback port than Esplora's 443.
+        let e = parse_with(|r| {
+            r.electrum_url = "https://esplora.test".into();
+            if cfg!(feature = "evm-rpc") {
+                r.evm_rpc_tls_port = 8443;
+            }
+        })
+        .unwrap();
+        assert_eq!(
+            (e.electrum_host.as_str(), e.electrum_port),
+            ("esplora.test", 443)
+        );
+        let e = parse_with(|r| r.electrum_url = "http://esplora.test:3000/".into()).unwrap();
+        assert_eq!(
+            (e.electrum_host.as_str(), e.electrum_port),
+            ("esplora.test", 3000)
+        );
+        for url in [
+            "https://esplora.test/api",
+            "https://esplora.test:0",
+            "https://",
         ] {
             assert!(
                 parse_with(|r| r.electrum_url = url.into()).is_err(),
