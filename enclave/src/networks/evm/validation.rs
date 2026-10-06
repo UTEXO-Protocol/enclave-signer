@@ -184,29 +184,29 @@ impl ReleaseIdentity {
 
 /// `Bridge.BURN_TYPEHASH` preimage, verbatim from `Bridge.sol` (bridge PRs
 /// #152 and #155). `recipient`, `proof` and `destinationChainId` are absent
-/// by design: the key is shared with `rebalanceLiquidity`.
+/// by design: the key is shared with `rebalanceLiquidity`. `settlementData` is
+/// absent so one burn has one `burnId` whatever deposits it cites.
 #[cfg(rgb_to_evm)]
 const BURN_TYPEHASH_STR: &str = "UtexoBurnId(address bridge,uint256 chainId,address token,\
      uint256 amount,uint256 sourceChainId,bytes32 sourceAddressHash,\
-     bytes32 settlementDataHash,bytes32 sourceBurnTxId)";
+     bytes32 sourceBurnTxId)";
 
 /// Recomputes `burnId` exactly as `Bridge._deriveBurnIdFromFields` does:
 ///
 /// ```text
 /// keccak256(abi.encode(BURN_TYPEHASH, bridge, chainId, token, amount,
-///     sourceChainId, keccak256(sourceAddress), keccak256(settlementData),
-///     sourceBurnTxId))
+///     sourceChainId, keccak256(sourceAddress), sourceBurnTxId))
 /// ```
 ///
 /// `bridge` is `address(this)` in the Bridge: the pinned `FUNDS_IN_CONTRACT`
 /// that emits `BridgeFundsIn`. `chainId` is the pinned `EVM_CHAIN_ID`. `token`
-/// is the pinned `TOKEN_CONTRACT`. All nine words are static, so `abi.encode`
+/// is the pinned `TOKEN_CONTRACT`. All eight words are static, so `abi.encode`
 /// is concatenation.
 #[cfg(rgb_to_evm)]
 pub fn expected_burn_id(cfg: &BridgeConfig, release: &ReleaseIdentity) -> U256 {
     use sha3::{Digest, Keccak256};
 
-    let mut buf = Vec::with_capacity(32 * 9);
+    let mut buf = Vec::with_capacity(32 * 8);
     buf.extend_from_slice(&Keccak256::digest(BURN_TYPEHASH_STR.as_bytes()));
     buf.extend_from_slice(&[0u8; 12]);
     buf.extend_from_slice(&cfg.funds_in_contract);
@@ -216,7 +216,6 @@ pub fn expected_burn_id(cfg: &BridgeConfig, release: &ReleaseIdentity) -> U256 {
     buf.extend_from_slice(&release.amount.to_be_bytes::<32>());
     buf.extend_from_slice(&release.source_chain_id.to_be_bytes::<32>());
     buf.extend_from_slice(&Keccak256::digest(release.source_address.as_bytes()));
-    buf.extend_from_slice(&Keccak256::digest(&release.settlement_data));
     buf.extend_from_slice(&release.source_burn_tx_id);
     U256::from_be_bytes::<32>(Keccak256::digest(&buf).into())
 }
@@ -238,7 +237,7 @@ pub fn validate_burn_id(cfg: &BridgeConfig, release: &ReleaseIdentity) -> Result
         return Err(EnclaveError::CrossCheck(format!(
             "calldata burnId {:#x} != {:#x}, the burnId the Bridge derives from the bound fields \
              (FUNDS_IN_CONTRACT, EVM_CHAIN_ID, TOKEN_CONTRACT, amount, sourceChainId, \
-             sourceAddress, settlementData, sourceBurnTxId) - refusing to sign a release the \
+             sourceAddress, sourceBurnTxId) - refusing to sign a release the \
              contract would revert with InvalidBurnId",
             release.burn_id, expected
         )));

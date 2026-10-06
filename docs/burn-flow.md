@@ -127,8 +127,8 @@ burn signer checks each deposit before it validates the consignment.
   one. The release checks each cited record, so a mint with no deposit fails
   on chain.
 - **B1.5** The result is a list of locks: `(operationId, netAmount)`. One burn
-  has one list, so one `settlementData` and one `burnId`. Stage 2 and Stage 5
-  use this list.
+  has one list, so one `settlementData`; `burnId` does not hash it. Stage 2
+  and Stage 5 use this list.
 
 ### Stage 2 - Is the RGB history valid?
 
@@ -266,7 +266,7 @@ chain:
 - the `MultisigProxy` nonce is in the signed digest;
 - the Bridge refuses a `burnId` that it used before.
 
-On both routes, `burnId` is bound to the burn through B5.7 and B5.9.
+On both routes, `burnId` is bound to the burn through B5.3, B5.6 and B5.7.
 
 ## 8. What the burn signer refuses
 

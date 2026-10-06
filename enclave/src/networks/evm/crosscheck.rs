@@ -182,13 +182,12 @@ pub fn validate_funds_out_source_burn_tx_id(
 /// does not know the deposits behind a burn. The enclave knows, because it
 /// verified each ancestry lock receipt
 /// ([`crate::networks::evm::events::verify_rgb_funds_in`]). The cited set must
-/// equal that ancestry, pair for pair. Thus a second release of the same burn
-/// cannot cite other deposits to get a new `burnId`.
+/// equal that ancestry, pair for pair.
 ///
 /// Exact set equality, canonical encoding, and strictly ascending
-/// `operationId` order. `burnId` hashes the raw bytes, so a second order of
-/// the same pairs would give a second `burnId` (F05-NEW-AF-04). The strict
-/// order also refuses duplicates. An empty lock set refuses: each signable
+/// `operationId` order, which also refuses duplicates. `burnId` does not hash
+/// `settlementData`, so replay safety does not rest on this order
+/// (F05-NEW-AF-04). An empty lock set refuses: each signable
 /// asset is bridged, so such a burn settles nothing.
 #[cfg(feature = "bfa-mint")]
 pub fn validate_funds_out_settlement(

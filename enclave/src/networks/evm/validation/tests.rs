@@ -616,15 +616,14 @@ fn entrypoint_route_surfaces_its_release_identity() {
 // ---- burnId recompute ----
 
 /// Pins the enclave recompute to the contract formula. The test uses the
-/// alloy `abi.encode` of the nine-word tuple, not the manual concatenation.
+/// alloy `abi.encode` of the eight-word tuple, not the manual concatenation.
 fn contract_burn_id(cfg: &BridgeConfig, release: &ReleaseIdentity) -> U256 {
     use alloy_primitives::{keccak256, B256};
     use alloy_sol_types::SolValue;
 
     let typehash: B256 = keccak256(
         "UtexoBurnId(address bridge,uint256 chainId,address token,uint256 amount,\
-         uint256 sourceChainId,bytes32 sourceAddressHash,bytes32 settlementDataHash,\
-         bytes32 sourceBurnTxId)",
+         uint256 sourceChainId,bytes32 sourceAddressHash,bytes32 sourceBurnTxId)",
     );
     let encoded = (
         typehash,
@@ -634,11 +633,10 @@ fn contract_burn_id(cfg: &BridgeConfig, release: &ReleaseIdentity) -> U256 {
         release.amount,
         release.source_chain_id,
         keccak256(release.source_address.as_bytes()),
-        keccak256(&release.settlement_data),
         B256::from(release.source_burn_tx_id),
     )
         .abi_encode();
-    assert_eq!(encoded.len(), 9 * 32, "nine static words");
+    assert_eq!(encoded.len(), 8 * 32, "eight static words");
     U256::from_be_bytes(keccak256(encoded).0)
 }
 
@@ -687,10 +685,6 @@ fn burn_id_recompute_binds_every_input() {
             ..base.clone()
         },
         ReleaseIdentity {
-            settlement_data: vec![0x01],
-            ..base.clone()
-        },
-        ReleaseIdentity {
             source_burn_tx_id: [0x5c; 32],
             ..base.clone()
         },
@@ -714,6 +708,53 @@ fn burn_id_recompute_binds_every_input() {
     ] {
         assert_ne!(expected_burn_id(&other_cfg, &base), base_id);
     }
+}
+
+#[test]
+fn burn_id_ignores_settlement_data() {
+    // One burn has one burnId, so a second release citing other deposits reverts.
+    let cfg = token_pinned_config();
+    let base = rgb_release();
+    let other = ReleaseIdentity {
+        settlement_data: vec![0x01],
+        ..base.clone()
+    };
+    assert_eq!(
+        expected_burn_id(&cfg, &other),
+        expected_burn_id(&cfg, &base)
+    );
+}
+
+/// The vector bridge-utexo and the Bridge tests pin too.
+#[test]
+fn burn_id_matches_the_shared_vector() {
+    let mut cfg = BridgeConfig {
+        chain_id: 42161,
+        ..config()
+    };
+    hex::decode_to_slice(
+        "50d244bca9273fd5faadbee2d653b80a23e89ee5",
+        &mut cfg.funds_in_contract,
+    )
+    .unwrap();
+    hex::decode_to_slice(
+        "fd086bc7cd5c481dcc9c85ebe478a1c0b69fcbb9",
+        &mut cfg.token_contract,
+    )
+    .unwrap();
+    let mut release = ReleaseIdentity {
+        amount: U256::from(100_000u64),
+        source_burn_tx_id: [0u8; 32],
+        ..rgb_release()
+    };
+    release.source_burn_tx_id[0] = 0xcd;
+    release.source_burn_tx_id[1] = 0x01;
+    release.source_burn_tx_id[31] = 0x03;
+
+    assert_eq!(
+        hex::encode(expected_burn_id(&cfg, &release).to_be_bytes::<32>()),
+        "0ad0753aada237279f32f213f95d4e78a02bf0ec07a92d65dc5d4ecfa5911508"
+    );
 }
 
 #[test]

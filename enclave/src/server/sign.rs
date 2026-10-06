@@ -335,9 +335,7 @@ fn apply_funds_out_binding(
     crosscheck::validate_funds_out_burn_recipient(release, validated)?;
 
     // Settlement bind (spec P6). The deposits in `settlementData` must be
-    // exactly the verified locks of the burn mint ancestry. On-chain `burnId`
-    // also hashes `settlementData`. Thus the backend cannot get a second
-    // `burnId` for one burn with other deposits.
+    // exactly the verified locks of the burn mint ancestry.
     #[cfg(feature = "bfa-mint")]
     crosscheck::validate_funds_out_settlement(release, locks)?;
 
