@@ -332,6 +332,23 @@ Exit codes:
 | 1    | Verification failed, or the endpoint could not be reached (stderr explains why) |
 | 2    | Command-line usage error                                        |
 
+## Launch check at deploy
+
+Before keys exist, `GetAttestedPublicKey` returns a policy-only answer:
+`public_keys` is empty, the document has no `public_key`, and `user_data` is
+`sha256("utexo/attested-policy/v1\0" || policy_bytes)`. The parent gRPC
+`AttestedPublicKey` still refuses an answer without keys.
+
+`deploy/deploy-host.sh` runs `utexo-bridge-parent-cli verify-launch` on each
+enclave after `set-endpoints`. It verifies the document for a fresh nonce
+against `PCR.json`, and compares every attested policy field with the deploy
+inputs: the image role, `IMAGE-ENV.json` (the env of the measured image, from
+the build) and the `set-endpoints` values. On a mismatch it names the field,
+the expected value and the attested value. The enclave is then terminated,
+all enclaves stop, and the deploy exits 1 before a parent starts.
+
+`ENCLAVE_DEBUG_MODE=1` skips this check, because the PCRs are zero.
+
 ## Threat model
 
 Trusted: AWS Nitro root CA private key (off-machine), the running enclave

@@ -14,6 +14,9 @@
 #   KMS_KEY_ARN=<key ARN>  KMS_REGION=<region>  KMS_SEED_ID=<seed id>
 #   KMS_EXPECTED_EVM_ADDRESS=<0x address, optional>
 #
+# After set-endpoints, verify each enclave's attested launch policy.
+# ENCLAVE_DEBUG_MODE=1 skips this check, because the PCRs are zero.
+#
 # Initialize or clone keys after deployment.
 # Put --addr vsock://<CID>:5000 before the CLI subcommand.
 # Donor: cli --addr vsock://16:5000 init --cloning-secret-file <path>
@@ -96,6 +99,7 @@ mkdir -p "$DIR"
 log "pulling artifacts from $SRC"
 asubuntu "aws s3 cp $SRC/utexo-bridge-enclave.eif $EIF                 --region $REGION --no-progress"
 asubuntu "aws s3 cp $SRC/PCR.json                 $DIR/PCR.json         --region $REGION --no-progress"
+asubuntu "aws s3 cp $SRC/IMAGE-ENV.json           $DIR/IMAGE-ENV.json   --region $REGION --no-progress"
 asubuntu "aws s3 cp $SRC/SHA256SUMS               $DIR/SHA256SUMS.eif   --region $REGION --no-progress"
 asubuntu "aws s3 cp $SRC/utexo-bridge-parent      $DIR/utexo-bridge-parent     --region $REGION --no-progress"
 asubuntu "aws s3 cp $SRC/utexo-bridge-parent-cli  $DIR/utexo-bridge-parent-cli --region $REGION --no-progress"
@@ -146,7 +150,7 @@ CID="${2:?cid required}"
 NAME="enclave-${CID}"
 CPU="${ENCLAVE_CPU_COUNT:-2}"
 MEM="${ENCLAVE_MEMORY:-3072}"
-LOCK="/tmp/utexo-enclave-start.lock"
+LOCK="${UTEXO_ENCLAVE_LOCK:-/tmp/utexo-enclave-start.lock}"
 enc_id() {
   nitro-cli describe-enclaves 2>/dev/null \
     | python3 -c "import json,sys; print(next((e['EnclaveID'] for e in json.load(sys.stdin) if e.get('EnclaveName')=='$NAME'), ''))"
@@ -169,9 +173,28 @@ set_endpoints() {
   echo "enclave CID $CID did not answer health" >&2
   return 1
 }
+# Terminate this enclave if it runs. Fail if it still runs after.
+terminate() {
+  id="$(enc_id)"; [ -n "$id" ] && nitro-cli terminate-enclave --enclave-id "$id"
+  [ -z "$(enc_id)" ] && return 0
+  echo "FATAL: enclave CID $CID still running after terminate" >&2
+  return 1
+}
+# Compare the attested launch policy with the deploy inputs. Debug mode
+# zeroes the PCRs, so it skips the check.
+verify_launch() {
+  if [ "${ENCLAVE_DEBUG_MODE:-0}" = "1" ]; then
+    echo "debug mode: PCRs are zero, launch attestation check skipped"
+    return 0
+  fi
+  timeout --kill-after=5 "${VERIFY_LAUNCH_TIMEOUT:-45}" \
+    "$CLI" --addr "vsock://$CID:5000" verify-launch \
+    --pcr-file "$PCR_FILE" --image-env "$IMAGE_ENV" --signer-role "$SIGNER_ROLE"
+}
 case "$ACTION" in
   start)
     : "${EIF:?EIF env required (set in /etc/utexo/enclave.env)}"
+    : "${PCR_FILE:?PCR_FILE env required}" "${IMAGE_ENV:?IMAGE_ENV env required}" "${SIGNER_ROLE:?SIGNER_ROLE env required}"
     # fd 9 closed in nitro-cli children (9>&-) so an orphaned run-enclave can't
     # keep holding the lock and deadlock the next CID.
     exec 9>"$LOCK"
@@ -186,9 +209,9 @@ case "$ACTION" in
         --eif-path "$EIF" --cpu-count "$CPU" --memory "$MEM" \
         --enclave-cid "$CID" --enclave-name "$NAME" "${DEBUG_ARG[@]}" 9>&-; then
         exec 9>&-
-        set_endpoints && exit 0
-        echo "set-endpoints CID $CID failed; terminating the enclave" >&2
-        id="$(enc_id)"; [ -n "$id" ] && nitro-cli terminate-enclave --enclave-id "$id" || true
+        set_endpoints && verify_launch && exit 0
+        echo "set-endpoints or launch check CID $CID failed; terminating the enclave" >&2
+        terminate
         exit 1
       fi
       echo "run-enclave CID $CID attempt $attempt failed; cleaning up and retrying" >&2
@@ -199,7 +222,7 @@ case "$ACTION" in
     exit 1
     ;;
   stop)
-    id="$(enc_id)"; [ -n "$id" ] && nitro-cli terminate-enclave --enclave-id "$id" || true
+    terminate
     ;;
   *) echo "usage: utexo-enclave-ctl.sh start|stop <cid>" >&2; exit 2 ;;
 esac
@@ -231,7 +254,7 @@ TimeoutStartSec=390
 EnvironmentFile=/etc/utexo/enclave.env
 EnvironmentFile=-/etc/nitro_enclaves/vsock-proxy-evmrpc.env
 ExecStart=/usr/local/bin/utexo-enclave-ctl.sh start %i
-ExecStop=/usr/local/bin/utexo-enclave-ctl.sh stop %i
+ExecStopPost=/usr/local/bin/utexo-enclave-ctl.sh stop %i
 
 [Install]
 WantedBy=multi-user.target
@@ -266,6 +289,9 @@ ENCLAVE_CPU_COUNT=$ENCLAVE_CPU_COUNT
 ENCLAVE_MEMORY=$ENCLAVE_MEMORY
 ENCLAVE_DEBUG_MODE=$ENCLAVE_DEBUG_MODE
 CLI=$DIR/utexo-bridge-parent-cli
+PCR_FILE=$DIR/PCR.json
+IMAGE_ENV=$DIR/IMAGE-ENV.json
+SIGNER_ROLE=combined
 ELECTRUM_URL=$ELECTRUM_URL
 EVM_RPC_TLS_CA_DER_FILE=$EVM_RPC_TLS_CA_DER_FILE
 KMS_KEY_ARN=$KMS_KEY_ARN
@@ -308,11 +334,20 @@ done
 pkill -f utexo-bridge-parent 2>/dev/null || true
 sleep 2
 
+# A unit fails when its enclave fails the launch check. Then stop all of them.
+failed=()
 for CID in "${CIDS[@]}"; do
   systemctl enable "utexo-enclave@$CID" "utexo-parent@$CID" >/dev/null 2>&1 || true
-  systemctl restart "utexo-enclave@$CID"
+  systemctl restart "utexo-enclave@$CID" || failed+=("$CID")
   sleep 2
 done
+if [ "${#failed[@]}" -gt 0 ]; then
+  for CID in "${CIDS[@]}"; do
+    systemctl stop "utexo-enclave@$CID" 2>/dev/null || true
+  done
+  log "enclave start or launch check failed on CID ${failed[*]}; all enclaves stopped, no parent started"
+  exit 1
+fi
 
 # --- 6. verify runtime PCR matches the manifest ----------------------------
 # In debug-mode the running enclave reports zeroed PCR0, so a manifest match is

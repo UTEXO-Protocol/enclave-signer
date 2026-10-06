@@ -46,6 +46,7 @@ Some upstream comments describe older behavior. Use the Rust handlers and the
 | `SubmitHeadersRequest` | Bounded chain replacements are permitted. The parent denies client gRPC submissions. Its internal sync sends headers directly. |
 | `HealthResponse.ready` | Mint readiness does not require `spv_synced`. Other builds with an SPV release path require it. |
 | `HealthResponse.phase` | KMS builds can also report `initializing`. |
+| `GetAttestedPublicKeyResponse` | Before keys exist, `public_keys` is empty, the document has no public key, and `user_data` commits only the policy bytes. |
 
 Correct these comments upstream, then synchronize both vendored files and their
 recorded provenance. Do not change only the local generated comments.

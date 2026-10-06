@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Build an enclave image and convert it to an EIF.
-# Write the EIF, PCR.json, and SHA256SUMS to OUT_DIR.
+# IMAGE-ENV.json is the env of the measured image. The deploy launch check
+# reads the expected policy pins from it.
 # The caller uploads these files to S3.
 #
 # Usage: ./build/build-enclave.sh
@@ -146,6 +147,7 @@ nitro-cli build-enclave \
 echo "Extracting PCRs..."
 nitro-cli describe-eif --eif-path "$EIF_PATH" \
     | jq '.Measurements' > "$OUT_DIR/PCR.json"
+docker image inspect --format '{{json .Config.Env}}' "$IMAGE_TAG" > "$OUT_DIR/IMAGE-ENV.json"
 
 echo "Writing SHA256SUMS..."
 ( cd "$OUT_DIR" && sha256sum "$(basename "$EIF_PATH")" > SHA256SUMS )
@@ -154,6 +156,7 @@ echo ""
 echo "=== Build Complete ==="
 echo "EIF       : $EIF_PATH"
 echo "PCR.json  : $OUT_DIR/PCR.json"
+echo "IMAGE-ENV : $OUT_DIR/IMAGE-ENV.json"
 echo "SHA256SUMS: $OUT_DIR/SHA256SUMS"
 echo ""
 echo "PCRs:"
