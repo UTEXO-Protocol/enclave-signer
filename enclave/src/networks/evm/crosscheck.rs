@@ -35,7 +35,7 @@ pub fn assert_witnesses_confirmed(validated: &ValidatedConsignment) -> Result<()
 /// Amount cross-check for `fundsOut`. Binds the release `amount` to the
 /// consignment asset value:
 ///
-///   1. The last transition must be the type that this build's RGB flow
+///   1. The settling transition must be the type that this build's RGB flow
 ///      accepts on a withdrawal: a BFA `Transfer` under `rgb-swap`, a BFA
 ///      `Burn` under `rgb-mint-burn`.
 ///   2. The amount that transition moves out of the source must cover the
@@ -121,8 +121,7 @@ pub fn validate_funds_out_burn_recipient(
 }
 
 /// Source-burn bind (bridge PR #152): `sourceBurnTxId` must be the RGB OpId of
-/// the settled transition. That is the last transition, which
-/// [`validate_funds_out_amount`] reads.
+/// the settling transition, which [`validate_funds_out_amount`] reads.
 ///
 /// On chain, `sourceBurnTxId` is the only `burnId` input that identifies the
 /// burn. `Bridge.fundsOut` and `rebalanceLiquidity` hash it into the

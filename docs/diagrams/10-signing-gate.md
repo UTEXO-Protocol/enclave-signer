@@ -46,7 +46,7 @@ flowchart TD
         p2dc -->|yes| p2d{deadline strictly in the future?}
         p2d -->|no| p2dr[REFUSE — expired]:::refuse
     end
-    p3q -->|yes| p1e{"last transition == TS_BURN?<br/>source amount = MS_BURNED_ASSET<br/>(host rgb_amount NOT used)"}
+    p3q -->|yes| p1e{"settling transition == TS_BURN?<br/>source amount = MS_BURNED_ASSET<br/>(host rgb_amount NOT used)"}
     p1e -->|no| p1er[REFUSE - not a burn]:::refuse
     p1e -->|yes| p2len
 
@@ -61,7 +61,7 @@ flowchart TD
         p4b -->|no| p4br[REFUSE — missing finality proof]:::refuse
         p4b -->|yes| p4bv{"proof (sourceHeight, sourceCommit,<br/>latestHeight, latestCommit):<br/>header held at latestHeight,<br/>tip − latestHeight ≤ 100,<br/>sourceHeight == consignment anchor block,<br/>BTC_RELAY_MODE=required: both commits == enclave-rebuilt relay records (zero ⇒ refuse);<br/>BTC_RELAY_MODE=none (never production): both commits zero?"}
         p4bv -->|no| p4bvr[REFUSE — BtcRelay disagreement]:::refuse
-        p4bv -->|yes| p4t{"last transition == TS_BURN AND<br/>burned amount == calldata amount?"}
+        p4bv -->|yes| p4t{"settling transition == TS_BURN AND<br/>burned amount == calldata amount?"}
         p4t -->|no| p4tr[REFUSE — fundsOut amount bind]:::refuse
         p4t -->|yes| p4id{"sourceBurnTxId == settling transition OpId<br/>(non-zero)?"}
         p4id -->|no| p4idr[REFUSE — burn identity bind]:::refuse

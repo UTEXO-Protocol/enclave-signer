@@ -644,7 +644,7 @@ delegated to the receiving contract and known gaps. Enforced checks fail closed.
 | # | Required check | Enforcement |
 | --- | --- | --- |
 | P1 | Valid RGB consignment | Full RGB consensus validation. |
-| P2 | Expected transition | The last transition must be `TS_BURN`. Each ancestry mint needs a verified deposit. |
+| P2 | Expected transition | The settling transition (the last witness's last burn, else its last transition) must be `TS_BURN`. Each ancestry mint needs a verified deposit. |
 | P3 | Exact amount | `MS_BURNED_ASSET` must equal calldata `amount`. The host's `rgb_amount` is not evidence. |
 | P4 | Valid calldata | Allowed selector, 96 KiB cap, canonical ABI encoding, and route-specific destination-chain check. |
 | P5 | Correct destination | Pinned chain and contract. The payee must match `MS_BURN_RECIPIENT`. The burn does not bind LayerZero `dstEid`. |

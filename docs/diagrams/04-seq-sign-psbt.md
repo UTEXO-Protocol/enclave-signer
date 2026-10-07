@@ -58,7 +58,7 @@ sequenceDiagram
     Srv->>Rgb: size cap, keccak256(consignment) == consignment_hash,<br/>rgb-ops validation (BFA only, mints vs verified locks)
     Rgb-->>Srv: ValidatedConsignment / REFUSE
     Srv->>Anchor: contract_id == asset_id == RGB_ASSET_ID
-    Srv->>Anchor: last transition == TS_BRIDGE<br/>PSBT txid == last witness txid<br/>every input SegWit with witness_utxo<br/>input prevouts == witness prevouts<br/>sighash ALL / taproot DEFAULT only
+    Srv->>Anchor: settling transition == TS_BRIDGE<br/>PSBT txid == last witness txid<br/>every input SegWit with witness_utxo<br/>input prevouts == witness prevouts<br/>sighash ALL / taproot DEFAULT only
     Srv->>Anchor: every committed transition is TS_BRIDGE<br/>sum(OS_ASSET) == amount − commission (OS_BRIDGE excluded)
     Srv->>Anchor: legs: blinded seal ⇒ recipient,<br/>revealed seal ⇒ must be self-owned (≤ 4 off-PSBT outpoints)<br/>sum(recipient legs) == amount − commission
     Srv->>Anchor: fee ≤ 100 000 sats, ≤ 200 sat/vB (unsigned size),<br/>≥ 1 sat/vB (estimated signed size)

@@ -78,7 +78,7 @@ sequenceDiagram
 
 | Name | Value | Meaning |
 |------|-------|---------|
-| `TS_BURN` | 8010 | Burn transition. The only last transition the burn signer accepts. |
+| `TS_BURN` | 8010 | Burn transition. The only settling transition the burn signer accepts. |
 | `TS_BRIDGE` | 8014 | Mint transition. It shows in the burn's history (the ancestry). |
 | `MS_BURNED_ASSET` | 1001 | Burn metadata: the number of units destroyed (u64). |
 | `MS_BURN_RECIPIENT` | 1003 | Burn metadata: 32 bytes. A left-padded EVM address. |
@@ -139,8 +139,9 @@ burn signer checks each deposit before it validates the consignment.
   mint must match a verified lock from Stage 1.
 - **B2.4** The contract id must equal the declared `asset_id` and the pinned
   `RGB_ASSET_ID`.
-- **B2.5** The last transition must be `TS_BURN`. The amount comes from
-  `MS_BURNED_ASSET`. The burn signer does not use the amount from the host.
+- **B2.5** The settling transition must be `TS_BURN`: the last burn of the
+  last witness, so one tx can also carry a plain transfer. The amount comes
+  from `MS_BURNED_ASSET`. The burn signer does not use the amount from the host.
 
 ### Stage 3 - Is the burn buried in Bitcoin?
 

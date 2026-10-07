@@ -29,8 +29,8 @@ pub struct ValidatedConsignment {
     /// deposit receipts, and `RgbSettlementModule.beforeFundsOut` enforces it
     /// on-chain.
     pub mint_op_ids: Vec<String>,
-    /// The last state transition: the state change that the EVM action
-    /// commits to. `None` only for a transfer with no bundles, which rgbstd
+    /// The settling transition: the last burn of the last witness, or its last
+    /// transition. `None` only for a transfer with no bundles, which rgbstd
     /// rejects.
     pub last_transition: Option<TransitionSummary>,
     /// Bitcoin txid of the witness tx that anchors the last transition, for
@@ -56,7 +56,7 @@ pub struct ValidatedConsignment {
     ///
     /// The `fundsOut` bind of `sourceBurnTxId` reads it, so the burn that a
     /// release names is the burn that consensus validated. `Some` when the
-    /// last transition is the type this flow signs on a deposit, or a burn.
+    /// settling transition is the type this flow signs on a deposit, or a burn.
     /// `None` for a consignment with no bundles or another transition type.
     /// Validation refuses a consignment where this OpId and the flat parser's
     /// `last_transition.op_id` differ.

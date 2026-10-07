@@ -45,6 +45,11 @@ const CONTRACT_FIXTURE: &[u8] =
 const BFA_BURN_FIXTURE: &[u8] =
     include_bytes!("../../../../tests/fixtures/bfa_burn_consignment.rgbc");
 
+// From QA (rgb-lib-go 0.3.0-beta.44-bfa.1): the last witness commits a burn of
+// 10_000 and, after it, a plain transfer of 22_200 units.
+const BURN_WITH_COMPANION_FIXTURE: &[u8] =
+    include_bytes!("../../../../tests/fixtures/bfa_burn_with_companion_transfer.rgbc");
+
 use crate::config::BridgeConfig;
 #[cfg(rgb_to_evm)]
 use crate::config::{
@@ -52,6 +57,48 @@ use crate::config::{
 };
 #[cfg(rgb_to_evm)]
 use crate::proto::MerkleProofEntry;
+
+/// Both walks pick the burn, not the transfer after it, and agree on its OpId.
+#[test]
+fn both_walks_pick_the_burn_beside_a_companion_transfer() {
+    const BURN_OPID: &str = "5753e10e9241d8f02065d52ba759580c22d3b7d6a46bcac4db6a699e7d3e9a97";
+    let (_, _, last, by_witness) = extract_transition_summary(BURN_WITH_COMPANION_FIXTURE).unwrap();
+    assert_eq!(by_witness.last().unwrap().1.len(), 2, "burn and transfer");
+    let last = last.expect("settling transition");
+    assert_eq!(last.transition_type, bfa::TS_BURN);
+    assert_eq!(last.op_id, BURN_OPID);
+
+    let transfer = Transfer::load(Cursor::new(BURN_WITH_COMPANION_FIXTURE)).unwrap();
+    assert_eq!(
+        read_last_transition_burned_asset(&transfer).unwrap(),
+        Some(10_000)
+    );
+    assert_eq!(
+        read_last_transition_burn_recipient(&transfer)
+            .unwrap()
+            .map(hex::encode)
+            .as_deref(),
+        Some("0000000000000000000000000258c3129102efbc672fa5e4377f02487695a375")
+    );
+    let (_, opid) = read_last_transfer_witness(&transfer, bfa::TS_BURN).unwrap();
+    assert_eq!(opid.map(hex::encode).as_deref(), Some(BURN_OPID));
+}
+
+/// One tx can burn and send a plain transfer. The burn settles, whatever the
+/// bundle order. Two burns keep the later one, as before.
+#[test]
+fn settling_index_takes_the_burn_beside_a_transfer() {
+    let burn = |t: &u16| *t == bfa::TS_BURN;
+    let transfer = 10_000u16;
+    assert_eq!(settling_index(&[bfa::TS_BURN, transfer], burn), Some(0));
+    assert_eq!(settling_index(&[transfer, bfa::TS_BURN], burn), Some(1));
+    assert_eq!(
+        settling_index(&[bfa::TS_BURN, transfer, bfa::TS_BURN], burn),
+        Some(2)
+    );
+    assert_eq!(settling_index(&[transfer, bfa::TS_BRIDGE], burn), Some(1));
+    assert_eq!(settling_index::<u16>(&[], burn), None);
+}
 
 #[test]
 fn rejects_invalid_bytes() {
@@ -595,14 +642,14 @@ fn extracts_last_transfer_witness_from_transfer_fixture() {
 
 #[test]
 fn rejects_last_transfer_witness_on_type_mismatch() {
-    // If the rgbstd walk and the parser walk disagree on the last transition
+    // If the rgbstd walk and the parser walk disagree on the settling transition
     // type, fail closed. The fixture ends in TS_TRANSFER, so a TS_BURN claim
     // triggers the check.
     let transfer = Transfer::load(Cursor::new(TRANSFER_FIXTURE)).expect("load transfer fixture");
     let err = read_last_transfer_witness(&transfer, bfa::TS_BURN).unwrap_err();
     assert!(
         err.to_string()
-            .contains("disagrees with parsed last transition type"),
+            .contains("disagrees with parsed settling transition type"),
         "expected type-mismatch rejection, got: {err}"
     );
 }

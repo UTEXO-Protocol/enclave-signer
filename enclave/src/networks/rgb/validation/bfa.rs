@@ -20,13 +20,13 @@ use super::consignment::extract_transition_summary;
 use super::types::TransitionSummary;
 
 /// BFA transition that moves an asset allocation to a new owner. The
-/// send/receive flow uses it as the last transition.
+/// send/receive flow uses it as the settling transition.
 pub const TS_TRANSFER: u16 = 10000;
 /// BFA transition that mints units against an EVM lock. The enclave reads
 /// its OpIds for the spec section 6 OpId binding.
 pub const TS_BRIDGE: u16 = 8014;
 /// BFA transition that destroys asset units. In the mint/burn unlock flow it
-/// is the last transition. The amount is in its [`MS_BURNED_ASSET`] metadata.
+/// is the settling transition. The amount is in its [`MS_BURNED_ASSET`] metadata.
 pub const TS_BURN: u16 = 8010;
 
 /// BFA burn metadata key for the destroyed `OS_ASSET` amount. The value is a
@@ -72,18 +72,18 @@ pub struct BfaBinding {
     /// `bridgeLocation` exactly as the asset genesis writes it. It is compared
     /// with the enclave `funds_in_contract` pin before any log is trusted.
     pub bridge_location: String,
-    /// The last transition of the consignment, or `None`. Only the mint
+    /// The settling transition of the consignment, or `None`. Only the mint
     /// direction uses it, through [`Self::terminal_opid`].
     pub(super) last_transition: Option<TransitionSummary>,
 }
 
 #[cfg(feature = "bfa-validation")]
 impl BfaBinding {
-    /// The mint that this request authorizes: the OpId of the last transition.
+    /// The mint that this request authorizes: the OpId of the settling transition.
     /// Only it binds to the deposit of this request. Each other entry in
     /// `mints` is an ancestor with its own deposit.
     ///
-    /// Mint direction only. Each failure refuses the signature. If the last
+    /// Mint direction only. Each failure refuses the signature. If the settling
     /// transition is not a bridge mint, or is not in the transition list, the
     /// paying deposit is unknown. Do not guess it.
     pub fn terminal_opid(&self) -> Result<[u8; 32]> {
@@ -93,7 +93,7 @@ impl BfaBinding {
             .ok_or_else(|| EnclaveError::CrossCheck("BFA consignment has no transitions".into()))?;
         if last.transition_type != TS_BRIDGE {
             return Err(EnclaveError::CrossCheck(format!(
-                "BFA consignment's last transition is type {}, expected the bridge mint {}",
+                "BFA consignment's settling transition is type {}, expected the bridge mint {}",
                 last.transition_type, TS_BRIDGE
             )));
         }
@@ -102,7 +102,7 @@ impl BfaBinding {
         // the consignment.
         if !self.mints.iter().any(|mint| mint.opid == terminal_opid) {
             return Err(EnclaveError::CrossCheck(
-                "BFA consignment's last transition is a bridge mint but is absent from the \
+                "BFA consignment's settling transition is a bridge mint but is absent from the \
                  transition list - refusing to guess which mint this request authorises"
                     .into(),
             ));

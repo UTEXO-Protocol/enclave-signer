@@ -99,7 +99,7 @@ impl RgbValidator {
         let transitions_count = all_op_ids.len();
 
         // The parser drops `Transition.metadata`, so read the BFA burn metadata
-        // from the rgbstd `Transfer`. Only the last transition is read.
+        // from the rgbstd `Transfer`. Only the settling transition is read.
         if let Some(ref mut last) = last_transition {
             if last.transition_type == bfa::TS_BURN {
                 last.burned_asset_amount = read_last_transition_burned_asset(&transfer)?;
@@ -127,7 +127,7 @@ impl RgbValidator {
             _ => (None, None),
         };
 
-        // The two walks must name the same last transition. The flat parser
+        // The two walks must name the same settling transition. The flat parser
         // and the rgbstd walk read the same bytes in the same order, so a
         // mismatch is a parser change or a bug. Refuse, so no bind downstream
         // can mix the fields of two transitions.
@@ -135,7 +135,7 @@ impl RgbValidator {
             let flat_opid = super::bfa::decode_opid(&last.op_id)?;
             if flat_opid != validated_opid {
                 return Err(EnclaveError::CrossCheck(format!(
-                    "consignment last transition disagrees between the flat parser (0x{}) and \
+                    "consignment settling transition disagrees between the flat parser (0x{}) and \
                      the validated transfer (0x{}) - refusing to sign",
                     hex::encode(flat_opid),
                     hex::encode(validated_opid)

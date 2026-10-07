@@ -155,7 +155,8 @@ host. TLS ends inside the enclave. Each call has a 15 s timeout.
 ### Stage 5 - Does the PSBT do this mint, and only this mint?
 
 - **M5.1** The PSBT must parse and have at least one input.
-- **M5.2** The last transition must be `TS_BRIDGE`.
+- **M5.2** The settling transition must be `TS_BRIDGE`, so the last witness
+  commits no `TS_BURN`.
 - **M5.3** The PSBT txid must equal the last witness txid. So the signature
   can complete this one transaction only.
 - **M5.4** Each input must be a SegWit output with a `witness_utxo`. So the

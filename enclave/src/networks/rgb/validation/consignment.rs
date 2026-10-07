@@ -17,14 +17,32 @@ use rgb_consignment::WitnessInfo;
 use rgbstd::containers::Transfer;
 use rgbstd::schema::MetaType;
 use rgbstd::schema::TransitionType;
+use rgbstd::KnownTransition;
 
-/// Reads the witness-tx bind data for the **last** transition from the rgbstd
+/// Index of the transition a witness settles: its last `TS_BURN`, or its last
+/// transition when it burns nothing. One tx can carry a burn and a plain transfer.
+pub(super) fn settling_index<T>(transitions: &[T], is_burn: impl Fn(&T) -> bool) -> Option<usize> {
+    transitions
+        .iter()
+        .rposition(is_burn)
+        .or(transitions.len().checked_sub(1))
+}
+
+/// The settling known transition of the last bundle, by [`settling_index`].
+fn settling_known_transition(transfer: &Transfer) -> Option<&KnownTransition> {
+    let known = &transfer.bundles.iter().last()?.bundle().known_transitions;
+    let burn = TransitionType::with(bfa::TS_BURN);
+    let i = settling_index(known, |k| k.transition.transition_type == burn)?;
+    known.get(i)
+}
+
+/// Reads the witness-tx bind data for the **settling** transition from the rgbstd
 /// `Transfer`: the input prevouts, if the bundle embeds the full witness tx
 /// (`PubWitness::Tx`). The send-RGB PSBT cross-check uses them with
 /// [`super::types::ValidatedConsignment::last_witness_txid`], which names the same bundle.
 ///
 /// It reads the same last bundle as [`read_last_transition_burned_asset`]. It
-/// asserts that the last known transition type equals `expected_type` from
+/// asserts that the settling known transition type equals `expected_type` from
 /// the flat parser. The two walks are independent, so a mismatch fails closed.
 ///
 /// Also returns the validated OpId of that transition, from the rgbstd bundle,
@@ -43,12 +61,12 @@ pub(super) fn read_last_transfer_witness(
     // The rgbstd `OpId` displays as lowercase hex of its 32-byte commitment
     // hash, so decode the hex.
     let mut op_id: Option<[u8; 32]> = None;
-    if let Some(known) = last_bundle.bundle().known_transitions.iter().last() {
+    if let Some(known) = settling_known_transition(transfer) {
         let actual = known.transition.transition_type;
         let expected = TransitionType::with(expected_type);
         if actual != expected {
             return Err(EnclaveError::CrossCheck(format!(
-                "consignment last-bundle transition type {actual} disagrees with parsed last \
+                "consignment settling transition type {actual} disagrees with parsed settling \
                  transition type {expected} - refusing to bind PSBT to an ambiguous witness"
             )));
         }
@@ -73,7 +91,7 @@ pub(super) fn read_last_transfer_witness(
 }
 
 /// Bind data for the last bundle:
-/// `(witness input prevouts, validated last-transition OpId)`. See
+/// `(witness input prevouts, validated settling-transition OpId)`. See
 /// [`read_last_transfer_witness`].
 type LastTransferBinding = (Option<Vec<bitcoin::OutPoint>>, Option<[u8; 32]>);
 
@@ -84,7 +102,7 @@ pub fn is_mint_transition(transition_type: u16) -> bool {
 }
 
 /// Parses the consignment with `rgb_consignment::parse` and returns the flat
-/// transition summary: all op_ids, the mint op_ids, the last transition, and
+/// transition summary: all op_ids, the mint op_ids, the settling transition, and
 /// all transitions grouped by witness tx. Fails if the consignment is not a
 /// Transfer or if a field does not decode.
 #[allow(clippy::type_complexity)]
@@ -142,11 +160,11 @@ pub(super) fn extract_transition_summary(
         transitions_by_witness.push((txid, summaries?));
     }
 
-    // The last transition of the last witness, taken from the group.
-    let last_transition = transitions_by_witness
-        .last()
-        .and_then(|(_, summaries)| summaries.last())
-        .cloned();
+    // The settling transition of the last witness, taken from the group.
+    let last_transition = transitions_by_witness.last().and_then(|(_, summaries)| {
+        settling_index(summaries, |t| t.transition_type == bfa::TS_BURN)
+            .map(|i| summaries[i].clone())
+    });
 
     Ok((
         all_op_ids,
@@ -222,21 +240,14 @@ pub(super) fn transition_summary(t: &TransitionInfo) -> Result<TransitionSummary
     })
 }
 
-/// Raw `meta_type` metadata value on the last known transition of the last
+/// Raw `meta_type` metadata value on the settling transition of the last
 /// bundle. The flat parser drops `Transition.metadata`, so read it from the
 /// rgbstd `Transfer`.
 ///
 /// `None` if there is no bundle, no known transition, or no value for the key.
 /// This means "not declared", not an error. Each caller decides what it means.
 pub(super) fn last_transition_meta(transfer: &Transfer, meta_type: u16) -> Option<&[u8]> {
-    let known = transfer
-        .bundles
-        .iter()
-        .last()?
-        .bundle()
-        .known_transitions
-        .iter()
-        .last()?;
+    let known = settling_known_transition(transfer)?;
     let key = MetaType::with(meta_type);
     known
         .transition
@@ -246,7 +257,7 @@ pub(super) fn last_transition_meta(transfer: &Transfer, meta_type: u16) -> Optio
         .map(|(_, mv)| mv.as_unconfined().as_slice())
 }
 
-/// The BFA `MS_BURN_RECIPIENT` metadata on the last transition: 32 bytes that
+/// The BFA `MS_BURN_RECIPIENT` metadata on the settling transition: 32 bytes that
 /// name the redemption recipient.
 ///
 /// `Ok(None)` if the key is absent. `Err` if the blob is not exactly 32 bytes,
@@ -264,7 +275,7 @@ pub(super) fn read_last_transition_burn_recipient(transfer: &Transfer) -> Result
     Ok(Some(raw.to_vec()))
 }
 
-/// The BFA `MS_BURNED_ASSET` metadata on the last transition: the destroyed
+/// The BFA `MS_BURNED_ASSET` metadata on the settling transition: the destroyed
 /// amount that the unlock cross-check binds.
 ///
 /// The value is a strict-encoded `rgbstd::Amount` (`u64`, 8 bytes,

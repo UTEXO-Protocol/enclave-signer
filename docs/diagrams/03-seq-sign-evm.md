@@ -31,7 +31,7 @@ sequenceDiagram
     Note over Srv,Electrum: 1 — validate_source (RGB)
     Srv->>Rgb: validate_source(RgbSource)
     Rgb->>Rgb: cheap payload gate first:<br/>consignment bytes present, size caps,<br/>keccak256(consignment) == consignment_hash (integrity),<br/>asset_id declared
-    Rgb->>Rgb: Transfer::load(...), extract chain_net + witness_txids<br/>+ last transition + burned/total amounts
+    Rgb->>Rgb: Transfer::load(...), extract chain_net + witness_txids<br/>+ settling transition + burned/total amounts
     Rgb->>Rgb: trusted typesystem pinned per schema_id,<br/>unknown schema ⇒ REFUSE
     Rgb->>Electrum: resolver (15 s timeout)
     Electrum-->>Rgb: witness tx data
@@ -53,7 +53,7 @@ sequenceDiagram
     end
     Spv->>Chain: pin each proof block (ChainPins)
     Spv-->>Srv: Ok / Spv err
-    Srv->>Srv: source amount := TS_BURN MS_BURNED_ASSET<br/>(other last transition => REFUSE, host rgb_amount NOT used)
+    Srv->>Srv: source amount := TS_BURN MS_BURNED_ASSET<br/>(other settling transition => REFUSE, host rgb_amount NOT used)
 
     Note over Srv,Evm: 2 — validate_destination (EVM)
     Srv->>Evm: validate_destination(EvmDestination)
@@ -75,8 +75,8 @@ sequenceDiagram
     Srv->>Cx: require validated consignment for any fundsOut
     Srv->>Cx: assert_witnesses_confirmed (no unmined witness tx)
     Srv->>Cx: verify_btc_relay_agreement (proof REQUIRED, empty => REFUSE):<br/>decode (sourceHeight, sourceCommit, latestHeight, latestCommit),<br/>enclave holds header at latestHeight,<br/>tip - latestHeight <= 100,<br/>sourceHeight == block anchoring the last witness tx<br/>(re-derived from the consignment + SPV proof under one lock),<br/>BTC_RELAY_MODE=required: sourceCommit, latestCommit == keccak256 of the relay record the enclave rebuilds (zero word => REFUSE),<br/>BTC_RELAY_MODE=none (local stand, never production): both words must be zero
-    Srv->>Cx: validate_funds_out_amount:<br/>last transition == TS_BURN AND<br/>burned amount == calldata amount
-    Srv->>Cx: validate_funds_out_source_burn_tx_id:<br/>calldata sourceBurnTxId == last transition OpId (non-zero)
+    Srv->>Cx: validate_funds_out_amount:<br/>settling transition == TS_BURN AND<br/>burned amount == calldata amount
+    Srv->>Cx: validate_funds_out_source_burn_tx_id:<br/>calldata sourceBurnTxId == settling transition OpId (non-zero)
     Srv->>Cx: validate_funds_out_burn_recipient:<br/>MS_BURN_RECIPIENT[12..] == calldata recipient
     Srv->>Cx: validate_funds_out_settlement:<br/>settlementData (operationIds, netAmounts) ==<br/>BridgeFundsIn records of the verified ancestry locks,<br/>set equality, canonical, non-empty
     Note right of Cx: LayerZero route: recipient = the LayerZero recipient.<br/>dstEid is NOT bound to the burn (spec Sec 13).

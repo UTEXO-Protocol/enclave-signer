@@ -87,7 +87,7 @@ pub fn validate_psbt_bytes(psbt_bytes: &[u8]) -> Result<()> {
 /// `rgb-mint-burn` enclave only BFA `Bridge`. The rest is shared PSBT logic.
 ///
 /// Checks, fail-closed:
-///   1. The last transition of the consignment is the type this flow signs.
+///   1. The settling transition of the consignment is the type this flow signs.
 ///   2. Identity bind: `psbt.unsigned_tx.compute_txid()` equals the last
 ///      witness txid, and every input spends a native witness program. Such an
 ///      input finalizes with an empty `scriptSig` (BIP-141), so the unsigned
@@ -100,7 +100,7 @@ pub fn validate_psbt_bytes(psbt_bytes: &[u8]) -> Result<()> {
 ///      signature into a different tx.
 ///   5. Whole-bundle scope: both amount binds cover every transition the
 ///      signed txid commits. The group must not be empty, must contain the
-///      last transition, and every member must be the type this flow signs.
+///      settling transition, and every member must be the type this flow signs.
 ///   6. Aggregate amount bind: the summed `asset_output_amount` of the group
 ///      (`OS_ASSET` only, not the `OS_BRIDGE` mint right) against
 ///      `source_amount - source_commission`, under the flow rule: equality for
@@ -209,12 +209,12 @@ pub fn validate_psbt_anchors_transition(
              ({psbt_txid}) - refusing to sign an unbound witness"
         )));
     }
-    // Canary: this tx must commit the "last" transition. Else the flat parser
+    // Canary: this tx must commit the settling transition. Else the flat parser
     // and the rgbstd walk disagree, and the binds below check a different
     // operation.
     if !committed.iter().any(|t| t.op_id == last.op_id) {
         return Err(EnclaveError::CrossCheck(format!(
-            "send-RGB consignment inconsistency: last transition {} is not committed by the \
+            "send-RGB consignment inconsistency: settling transition {} is not committed by the \
              transaction being signed ({psbt_txid})",
             last.op_id
         )));
