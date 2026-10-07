@@ -152,8 +152,8 @@ ready. A refused set leaves the enclave
 unset, so a retry works.
 
 With an Electrum URL `ssl://host:port` (or `tcp://`) the forwarder listens on
-that port and pins `host` to loopback in `/etc/hosts`, so TLS terminates inside
-the enclave against the real certificate. An `https://host[:port]` (or
+that port and pins `host` to loopback in `/etc/hosts`. With `ssl://`, TLS
+terminates inside the enclave against the real certificate. An `https://host[:port]` (or
 `http://`) URL selects Esplora instead, with the same forwarder and pin. Dev
 uses it on the custom signet, where the rgb-ops Electrum chain check fails. The EVM RPC forwarder listens on the
 EVM RPC TLS port, and the client connects to `https://<host>:<port>/` through
@@ -240,10 +240,17 @@ Inside the commitment: the whole gas-tx rule -- `GAS_TX_ALLOWED_TO`,
 instead of trusting the operator's configuration. An unset pin commits as its zero value, which is the posture it enforces, so
 "unpinned" is attested too.
 
-Not inside the policy commitment: `BITCOIN_NETWORK`, the Electrum scheme and
-port, the EVM RPC TLS port, request-size caps, and the concrete
+Not inside the policy commitment: `BITCOIN_NETWORK`, the Electrum/Esplora URL
+scheme and port, the EVM RPC TLS port, request-size caps, and the concrete
 `BTC_MAX_TOTAL_SATS`, `BTC_MAX_UNOWNED_SATS` and `RGB_MAX_UNOWNED_SATS` values
 (only the `BTC_MAX_TOTAL_SATS` on/off boolean is attested).
+
+The exclusion of these connection settings is intentional (F05-RR-AF-24).
+Matching policies do not prove TLS-only Electrum/Esplora or compliance with a
+specific port requirement. EVM RPC still requires TLS with the pinned host
+and CA on every accepted port. Bitcoin SPV checks for RGB-source requests
+still apply.
+
 Image-baked configuration is still covered by image measurement; runtime
 configuration is not automatically added to the policy commitment. The plain-BTC *destination* rule needs no
 commitment: it is not configuration but a property the enclave derives from its
