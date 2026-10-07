@@ -229,7 +229,9 @@ maps it to `FAILED_PRECONDITION`), `2` not ready, `1` all other errors.
   public and is fetched over HTTPS without a key.
   The parent additionally needs `federated-signer-proto`. CI wires the aliases
   in `.github/workflows/ci.yml`; copy that `~/.ssh/config` shape locally.
-  Until the mirrors are public again, PCR0 is reproducible only by key holders.
+  External users cannot build without read access to all three private repos.
+  Public source builds require public access to their pinned revisions.
+  Access alone does not prove that a build reproduces the approved PCR0.
 - **Rootful Docker Engine, Buildx and `nitro-cli`** for the EIF. Use an x86_64
   Linux VM or bare-metal host with a `docker-container` builder. Do not use
   rootless Docker or Docker inside LXC for release measurements. Nitro
@@ -326,6 +328,16 @@ id for mint and burn images. There is no default asset id.
 The helper and Dockerfile reject an empty value. They do not validate the id
 or reject a value that contains only spaces. The image contains the asset pin.
 A runtime environment override is not the provisioning procedure.
+
+The EIF workflow gets this value from the repository variable `BFA_RGB_ASSET_ID`.
+It records the asset pin from the built image as `rgb_asset_id` in `metadata.json`.
+This file accompanies the EIF in the Actions artifact and S3 bundle. CCD images
+have no asset pin and record `null`.
+
+To reproduce a published EIF, use its recorded asset id, not the current
+repository variable. Older bundles may lack this field; obtain the original
+build value from the release owner. Include `metadata.json` when distributing
+a release. An internal S3 upload alone does not make these inputs public.
 
 Before deploying, record the image/EIF checksum, approved asset, measured PCRs,
 registered key, and Parent endpoint together. Verify a genuine BFA request
