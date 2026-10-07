@@ -230,8 +230,10 @@ maps it to `FAILED_PRECONDITION`), `2` not ready, `1` all other errors.
   The parent additionally needs `federated-signer-proto`. CI wires the aliases
   in `.github/workflows/ci.yml`; copy that `~/.ssh/config` shape locally.
   Until the mirrors are public again, PCR0 is reproducible only by key holders.
-- **Docker + `nitro-cli`** for the EIF. Any x86_64 Linux host with Docker can
-  build an EIF and read its PCRs; Nitro hardware is needed only to run it.
+- **Rootful Docker Engine, Buildx and `nitro-cli`** for the EIF. Use an x86_64
+  Linux VM or bare-metal host with a `docker-container` builder. Do not use
+  rootless Docker or Docker inside LXC for release measurements. Nitro
+  hardware is needed only to run the EIF.
 
 ```bash
 git clone git@github.com:UTEXO-Protocol/enclave-signer
@@ -279,6 +281,25 @@ exactly one of `mint-signer` / `burn-signer` whenever `rgb-mint-burn` is on;
 profile. CI asserts every guard fires.
 
 ### Enclave image (EIF)
+
+Create and select the builder once on the build host:
+
+```bash
+docker buildx create --name enclave-eif --driver docker-container --use
+docker buildx inspect --bootstrap
+```
+
+Check that `Driver` is `docker-container`. Use this builder for each build:
+
+```bash
+export BUILDX_BUILDER=enclave-eif
+```
+
+Match Docker, Buildx, BuildKit, `nitro-cli` and Nitro kernel/init blobs to the
+approved build environment. The script does not enforce these versions or
+reject rootless/LXC environments. A successful build alone does not prove a
+matching PCR0. Compare `PCR.json` from two clean builds of the same commit
+with the same asset and build arguments before approving measurements.
 
 No image takes a KMS value: the mint enclave gets them at launch. See
 [mint KMS setup](docs/kms-persistence.md) for the parent and policy requirements.
@@ -342,8 +363,11 @@ The script builds the Docker image with `SOURCE_DATE_EPOCH` set to the commit
 time, converts it with `nitro-cli build-enclave`, and writes the EIF,
 `PCR.json` and `SHA256SUMS` to `build/`. Reproducibility inputs: pinned
 toolchain, digest-pinned base images, `--locked`, `CARGO_INCREMENTAL=0`,
-path-prefix remapping, pre-generated proto code. Known drift: apt / dnf
-package versions still float.
+path-prefix remapping, pre-generated proto code. Mint and burn use the Debian
+snapshot dated `20260801T000000Z`. APT still checks repository signatures;
+only the snapshot expiry check is disabled. Other recipes still use live APT
+repositories. The runtime DNF packages and build tools need separate version
+control; the Debian snapshot alone does not guarantee matching PCRs.
 
 `.github/workflows/build-eif.yml` builds the `combined`, `rgb`,
 `rgb-mint`, `rgb-burn` and `ccd` variants on a plain runner with `nitro-cli 1.4.5`
