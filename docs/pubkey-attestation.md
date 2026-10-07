@@ -174,12 +174,17 @@ policy_commitment =
     u8(0x00)                                        // development discriminant
 ```
 
-The tuple omits the Bitcoin network, concrete sats budgets, the Electrum scheme
-and port, and the EVM RPC TLS port.
+The tuple omits the Bitcoin network, concrete sats budgets, the Electrum/Esplora
+URL scheme and port, and the EVM RPC TLS port. These connection settings are
+excluded by design: matching policies do not prove TLS-only Electrum/Esplora
+or specific endpoint ports. For example, `ssl://electrum.example:50002` and
+`tcp://electrum.example:50002` give the same policy when the other committed
+fields match.
+
 Image-baked values remain measured in the EIF. The endpoints are not in the
 image; the operator sets them and the KMS values once at launch
-(`SetEndpoints`), and the attestation shows them without a restart. Until the
-set, `GetAttestedPublicKey` is refused. The response carries the policy bytes
+(`SetEndpoints`). The policy commits only the fields listed above. Until
+the set, `GetAttestedPublicKey` is refused. The response carries the policy bytes
 that `user_data` commits (`attested_policy`), so a verifier can decode them.
 
 A production enclave commits the full production tuple. A dev/mock enclave

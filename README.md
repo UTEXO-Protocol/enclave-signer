@@ -483,7 +483,7 @@ requires the values it uses and refuses the others:
 
 | Value (CLI flag / env) | Build | Description |
 |------------------------|-------|-------------|
-| `--electrum-url` / `ELECTRUM_URL` | `rgb-validation` | `ssl://host:port` or `tcp://host:port` (Electrum), or `https://host[:port]` / `http://host[:port]` (Esplora, for the custom dev signet). The forwarder listens on that port and pins `host` to loopback in `/etc/hosts`, so TLS terminates inside the enclave. |
+| `--electrum-url` / `ELECTRUM_URL` | `rgb-validation` | `ssl://host:port` or `tcp://host:port` (Electrum), or `https://host[:port]` / `http://host[:port]` (Esplora, for the custom dev signet). The forwarder listens on that port and pins `host` to loopback in `/etc/hosts`. For `ssl://` or `https://`, TLS terminates inside the enclave. |
 | `--evm-rpc-host` / `EVM_RPC_HOST` | `evm-rpc` | TLS host name of the EVM RPC. No scheme, path, port or IP literal. The JSON-RPC is served at `/`. |
 | `--evm-rpc-tls-port` / `EVM_RPC_TLS_PORT` | `evm-rpc` | TLS port, 1-65535, not the Electrum port. The forwarder listens on it. |
 | `--evm-rpc-ca-der-file` / `EVM_RPC_TLS_CA_DER_FILE` | `evm-rpc` | DER of the only CA the EVM RPC TLS trusts. |
@@ -637,7 +637,9 @@ Re-syncing changes PCR0. Procedure in
   SHA-256 with independently approved values. See the
   [EVM RPC trust boundary](docs/tee-spec.md#2-trust-boundary-and-threat-model).
 - **Attested posture.** Build flags and pins resolve to one `SecurityPolicy`
-  committed into the attestation. A downgraded posture fails verification.
+  committed into the attestation. Policy matching checks only the committed fields;
+  it does not prove TLS-only Electrum/Esplora or specific endpoint ports. See
+  the [policy scope](docs/tee-spec.md#4-security-policy).
 - **Fail closed.** Missing feature, missing pin, missing receipt, missing
   proof, zero inputs signed: refuse, never sign with less verification.
 - **Limits.** Bitcoin confirmation depth, freshness, reorg/retention caps and
