@@ -622,10 +622,20 @@ Re-syncing changes PCR0. Procedure in
 
 ## Security model
 
-- **Untrusted host.** Requests from the parent, listener and backend are checked inside the
-  enclave. Bitcoin witness inclusion is checked against its header chain.
-  Raw EVM RPC receipts/head and Concordium source validation remain trust
-  dependencies; see the spec for network-specific limits.
+- **Untrusted host.** Requests from the parent, listener and backend are checked
+  inside the enclave. For RGB-source requests, Bitcoin witness inclusion is
+  checked against its header chain. Concordium source validation still trusts
+  the listener; see the spec for network-specific limits.
+- **Pinned EVM RPC trust (accepted by design).** TLS ends inside the enclave and
+  authenticates the configured RPC hostname against the pinned CA. The host
+  relay cannot alter authenticated responses without detection. The enclave
+  checks successful receipts, unique expected events from the pinned contract,
+  operation IDs, amounts and depth relative to the provider-reported chain head.
+  These checks do not prove EVM consensus: an approved provider can return a
+  self-consistent false deposit history. Trust in the provider's data is an
+  explicit design assumption. Verifiers must compare the attested host and CA
+  SHA-256 with independently approved values. See the
+  [EVM RPC trust boundary](docs/tee-spec.md#2-trust-boundary-and-threat-model).
 - **Attested posture.** Build flags and pins resolve to one `SecurityPolicy`
   committed into the attestation. A downgraded posture fails verification.
 - **Fail closed.** Missing feature, missing pin, missing receipt, missing
