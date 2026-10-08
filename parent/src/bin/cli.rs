@@ -184,7 +184,9 @@ enum Command {
 /// A value that is not given is sent empty.
 #[derive(Args)]
 struct EndpointArgs {
-    /// `ssl://host:port` or `tcp://host:port`.
+    /// `ssl://host:port` (Electrum) or `https://host[:port]` (Esplora). A
+    /// release enclave refuses plaintext; only a dev build accepts
+    /// `tcp://host:port` or `http://host[:port]`.
     #[arg(long, env = "ELECTRUM_URL")]
     electrum_url: Option<String>,
     /// TLS host name of the EVM RPC.
