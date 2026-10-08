@@ -22,12 +22,12 @@ push_parent: ## Push parent adapter docker image.
 	docker push $(IMAGE_PARENT_BACKUP) && \
 	docker push $(IMAGE_PARENT_LATEST)
 
-build_parent_dev: ## Build parent dev docker image (debug, insecure-dev: plaintext gRPC, no mTLS).
+build_parent_dev: ## Build parent dev image (debug, insecure-dev: plaintext gRPC, no mTLS). Same name, tags :dev and :<date>-<commit>-dev.
 	docker build $(DOCKER_AUTH_ARGS) -f ./build/Dockerfile.parent \
 		--build-arg CARGO_ARGS="--features insecure-dev" --build-arg PROFILE_DIR=debug \
 		-t $(IMAGE_PARENT_DEV_BACKUP) -t $(IMAGE_PARENT_DEV_LATEST) .
 
-push_parent_dev: ## Push parent dev docker image.
+push_parent_dev: ## Push parent dev image tags.
 	docker push $(IMAGE_PARENT_DEV_BACKUP) && \
 	docker push $(IMAGE_PARENT_DEV_LATEST)
 
