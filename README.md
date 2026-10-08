@@ -375,11 +375,19 @@ The script builds the Docker image with `SOURCE_DATE_EPOCH` set to the commit
 time, converts it with `nitro-cli build-enclave`, and writes the EIF,
 `PCR.json` and `SHA256SUMS` to `build/`. Reproducibility inputs: pinned
 toolchain, digest-pinned base images, `--locked`, `CARGO_INCREMENTAL=0`,
-path-prefix remapping, pre-generated proto code. Mint and burn use the Debian
-snapshot dated `20260801T000000Z`. APT still checks repository signatures;
-only the snapshot expiry check is disabled. Other recipes still use live APT
-repositories. The runtime DNF packages and build tools need separate version
-control; the Debian snapshot alone does not guarantee matching PCRs.
+path-prefix remapping, pre-generated proto code. All five EIF recipes use
+digest-pinned Debian 13 Trixie images for both build and runtime stages.
+The builder uses Rust `1.96.1`, matching `rust-toolchain.toml`.
+Both stages install packages from the signed Debian snapshot
+`20261007T000000Z`. APT checks repository signatures; only the snapshot expiry
+check is disabled. CMake comes from this snapshot instead of PyPI.
+
+Each runtime checks the binary with its dynamic loader before EIF conversion.
+This rejects missing libraries and incompatible symbol versions.
+The base-image update changes enclave measurements. Build new EIFs and approve
+their PCRs before updating attestation allowlists or KMS policies. Existing
+measurements do not apply to these images. Matching PCRs still require the
+same build tools and inputs described above.
 
 `.github/workflows/build-eif.yml` builds the `combined`, `rgb`,
 `rgb-mint`, `rgb-burn` and `ccd` variants on a plain runner with `nitro-cli 1.4.5`

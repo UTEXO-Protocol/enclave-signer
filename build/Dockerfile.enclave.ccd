@@ -3,22 +3,19 @@
 # Private Cargo dependencies require BuildKit secrets (see README, Building).
 # Supply github_token, or one deploy key per repo; keys never enter image layers.
 # Example: docker build --secret id=github_token,env=GITHUB_TOKEN -f build/Dockerfile.enclave.ccd .
-# The image must be linux/amd64 to match the x86_64 Nitro kernel/init blobs.
-# The runtime loader check below enforces compatibility with AL2023 glibc.
-FROM rust:1.96-slim-trixie@sha256:d8f0d5c09580253ecdd6d6894ff112b2b760683ff2a74585e5189f2578728ce4 AS builder
+# Use the same Debian release for the builder and runtime.
+FROM rust:1.96.1-slim-trixie@sha256:31ee7fc65186be7e0e0ccb3f2ca305f14e4739e7642a1ae65753aa5d7b874523 AS builder
 
-# Builder-only tools: system Git and SSH for private dependencies.
-# Pin builder packages to an immutable, signed Debian snapshot.
-# HTTP bootstraps the slim image before ca-certificates is installed.
+# Pin packages to a signed snapshot. HTTP bootstraps ca-certificates.
 RUN set -eux; \
     printf '%s\n' \
-      'deb http://snapshot.debian.org/archive/debian/20260915T000000Z trixie main' \
-      'deb http://snapshot.debian.org/archive/debian-security/20260915T000000Z trixie-security main' \
+      'deb http://snapshot.debian.org/archive/debian/20261007T000000Z trixie main' \
+      'deb http://snapshot.debian.org/archive/debian-security/20261007T000000Z trixie-security main' \
       > /etc/apt/sources.list; \
     rm -f /etc/apt/sources.list.d/*; \
     printf 'Acquire::Check-Valid-Until "false";\nAcquire::Retries "5";\n' > /etc/apt/apt.conf.d/99snapshot; \
     apt-get update && apt-get install -y --no-install-recommends \
-    pkg-config libssl-dev git ca-certificates openssh-client \
+    pkg-config libssl-dev git ca-certificates openssh-client make cmake \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /build
@@ -44,21 +41,22 @@ RUN --mount=type=secret,id=github_token \
 
 
 # --- Runtime ---
-# Pinned by DIGEST: this rootfs is what ends up in the EIF, so its digest drives
-# PCR0 directly. Bump tag + digest together, in step with Dockerfile.enclave.
-FROM public.ecr.aws/amazonlinux/amazonlinux:2023-minimal@sha256:8073d921f4ac1bf17fca94e16b0bc575e3fc17e4ccbe53b563160f02f0c7ccfc AS runtime
+# Pin the measured rootfs by digest. Update both stages together.
+FROM debian:trixie-slim@sha256:a29215f6a35e51e22adffa17f89e9d2ef06214e64a2bad10d765c46aea49f11f AS runtime
 
-# Deterministic runtime rootfs (PCR0/PCR2 reproducibility). dnf/rpm write state
-# with embedded timestamps and randomness (rpmdb, history, caches, logs);
-# rewrite-timestamp normalises mtimes but not file contents. Scrub it in the SAME
-# layer so the measured rootfs is stable. (rpmdb is not needed at runtime.)
-RUN dnf install -y socat iproute \
-    && dnf clean all \
-    && rm -rf \
-        /var/cache/dnf /var/cache/libdnf5 /var/cache/ldconfig \
-        /var/lib/dnf /var/lib/rpm /var/lib/rpm-state \
-        /var/log/* /tmp/* \
-    && :
+# Remove package-manager logs and caches in the installation layer.
+RUN set -eux; \
+    printf '%s\n' \
+      'deb http://snapshot.debian.org/archive/debian/20261007T000000Z trixie main' \
+      'deb http://snapshot.debian.org/archive/debian-security/20261007T000000Z trixie-security main' \
+      > /etc/apt/sources.list; \
+    rm -f /etc/apt/sources.list.d/*; \
+    printf 'Acquire::Check-Valid-Until "false";\nAcquire::Retries "5";\n' > /etc/apt/apt.conf.d/99snapshot; \
+    apt-get update && apt-get install -y --no-install-recommends \
+    bash ca-certificates socat iproute2 libssl3t64 libstdc++6 \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/* /var/cache/apt/* \
+        /var/cache/debconf /var/cache/ldconfig /var/log/* /tmp/*
 
 WORKDIR /app
 COPY --from=builder /build/target/release/utexo-bridge-enclave /app/utexo-bridge-enclave

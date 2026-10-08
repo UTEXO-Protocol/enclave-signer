@@ -14,8 +14,8 @@ name: "Build EIF"
 # here in lockstep with the hosts, or attestation (KMS PCR policy + clone) breaks.
 # The image side is pinned too: base images are pinned by digest in
 # each enclave Dockerfile and layer timestamps are normalised via SOURCE_DATE_EPOCH +
-# BuildKit rewrite-timestamp (build/build-enclave.sh). OS package versions
-# (apt/dnf) still float — pinning them is the next determinism step.
+# BuildKit rewrite-timestamp (build/build-enclave.sh). EIF recipes pin OS
+# packages to a signed Debian snapshot.
 #
 # Required repo config (Settings -> Secrets and variables -> Actions):
 #   secrets.FEDERATED_SIGNER_PROTO_DEPLOY_KEY  parent proto access

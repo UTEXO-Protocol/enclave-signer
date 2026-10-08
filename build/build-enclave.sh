@@ -31,7 +31,7 @@
 # Dockerfile, and layer timestamps are normalised via SOURCE_DATE_EPOCH
 # plus BuildKit's `rewrite-timestamp` exporter (needs `docker buildx` with a
 # container/containerd builder). SOURCE_DATE_EPOCH defaults to the commit time.
-# OS package versions (apt/dnf) still float.
+# EIF recipes pin OS packages to a signed Debian snapshot.
 #
 # Usage:
 #   ./build/build-enclave.sh
