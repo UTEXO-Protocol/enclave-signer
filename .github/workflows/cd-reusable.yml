@@ -56,6 +56,8 @@ jobs:
     strategy:
       matrix:
         include:
+          # The dev stage builds the parent with `insecure-dev` (debug,
+          # plaintext gRPC, no mTLS). Stage and prod build the release parent.
           - name: parent
             image: utexo-bridge-parent
             dockerfile: ./build/Dockerfile.parent
@@ -108,6 +110,8 @@ jobs:
           build-args: |
             BUILDKIT_INLINE_CACHE=1
             ${{ matrix.signer_role && format('SIGNER_ROLE={0}', matrix.signer_role) || '' }}
+            ${{ matrix.name == 'parent' && inputs.stage == 'dev' && 'CARGO_ARGS=--features insecure-dev' || '' }}
+            ${{ matrix.name == 'parent' && inputs.stage == 'dev' && 'PROFILE_DIR=debug' || '' }}
           secret-files: |
             consensus_key=${{ runner.temp }}/private-deps/consensus_key
             ops_key=${{ runner.temp }}/private-deps/ops_key
@@ -129,6 +133,8 @@ jobs:
           build-args: |
             BUILDKIT_INLINE_CACHE=1
             ${{ matrix.signer_role && format('SIGNER_ROLE={0}', matrix.signer_role) || '' }}
+            ${{ matrix.name == 'parent' && inputs.stage == 'dev' && 'CARGO_ARGS=--features insecure-dev' || '' }}
+            ${{ matrix.name == 'parent' && inputs.stage == 'dev' && 'PROFILE_DIR=debug' || '' }}
           secret-files: |
             consensus_key=${{ runner.temp }}/private-deps/consensus_key
             ops_key=${{ runner.temp }}/private-deps/ops_key
