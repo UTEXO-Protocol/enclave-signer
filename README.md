@@ -229,7 +229,9 @@ maps it to `FAILED_PRECONDITION`), `2` not ready, `1` all other errors.
   public and is fetched over HTTPS without a key.
   The parent additionally needs `federated-signer-proto`. CI wires the aliases
   in `.github/workflows/ci.yml`; copy that `~/.ssh/config` shape locally.
-  Until the mirrors are public again, PCR0 is reproducible only by key holders.
+  External users cannot build without read access to all three private repos.
+  Public source builds require public access to their pinned revisions.
+  Access alone does not prove that a build reproduces the approved PCR0.
 - **Docker + `nitro-cli`** for the EIF. Any x86_64 Linux host with Docker can
   build an EIF and read its PCRs; Nitro hardware is needed only to run it.
 
@@ -306,6 +308,16 @@ The helper and Dockerfile reject an empty value. They do not validate the id
 or reject a value that contains only spaces. The image contains the asset pin.
 A runtime environment override is not the provisioning procedure.
 
+The EIF workflow gets this value from the repository variable `BFA_RGB_ASSET_ID`.
+It records the asset pin from the built image as `rgb_asset_id` in `metadata.json`.
+This file accompanies the EIF in the Actions artifact and S3 bundle. CCD images
+have no asset pin and record `null`.
+
+To reproduce a published EIF, use its recorded asset id, not the current
+repository variable. Older bundles may lack this field; obtain the original
+build value from the release owner. Include `metadata.json` when distributing
+a release. An internal S3 upload alone does not make these inputs public.
+
 Before deploying, record the image/EIF checksum, approved asset, measured PCRs,
 registered key, and Parent endpoint together. Verify a genuine BFA request
 succeeds and an opposite-flow request is rejected.
@@ -342,8 +354,23 @@ The script builds the Docker image with `SOURCE_DATE_EPOCH` set to the commit
 time, converts it with `nitro-cli build-enclave`, and writes the EIF,
 `PCR.json` and `SHA256SUMS` to `build/`. Reproducibility inputs: pinned
 toolchain, digest-pinned base images, `--locked`, `CARGO_INCREMENTAL=0`,
-path-prefix remapping, pre-generated proto code. Known drift: apt / dnf
-package versions still float.
+path-prefix remapping, pre-generated proto code. All five EIF recipes use
+digest-pinned Debian 13 Trixie images for both build and runtime stages.
+The builder uses Rust `1.96.1`, matching `rust-toolchain.toml`.
+Both stages install packages from the signed Debian snapshot
+`20261007T000000Z` over HTTPS. APT checks repository signatures.
+The expiry check is disabled because a fixed snapshot must remain usable after
+its Release metadata expires. CMake comes from this snapshot instead of PyPI.
+Only the parent and dev image recipes still use live APT repositories.
+CI pins `nitro-cli` and its kernel/init blobs to `1.4.5`. Docker, Buildx and
+BuildKit versions are not pinned in CI, so PCR reproducibility still requires
+verification.
+
+Each runtime checks the binary with its dynamic loader before EIF conversion.
+This rejects missing libraries and incompatible symbol versions.
+The base-image update changes enclave measurements. Build new EIFs and approve
+their PCRs before updating attestation allowlists or KMS policies. Existing
+measurements do not apply to these images.
 
 `.github/workflows/build-eif.yml` builds the `combined`, `rgb`,
 `rgb-mint`, `rgb-burn` and `ccd` variants on a plain runner with `nitro-cli 1.4.5`

@@ -825,7 +825,11 @@ Known limits. Read them before deployment.
   pins. The caller must compare them with the intended deployment.
 - **Build reproducibility.** The private RGB mirrors need credentials. CI,
   CD and EIF workflows use per-repository deploy keys. Docker builds mount
-  credentials as BuildKit secrets. OS package versions are not pinned.
+  credentials as BuildKit secrets. All five EIF recipes pin both base images
+  by digest and install packages from the signed Debian snapshot
+  `20261007T000000Z` over HTTPS. The parent and dev image recipes use live APT
+  repositories. EIF CI pins `nitro-cli` and its kernel/init blobs to `1.4.5`,
+  but Docker, Buildx and BuildKit versions are not pinned.
   The supplied images leave the gas limits and `RGB_MAX_UNOWNED_SATS` unset,
   so the gas and mint PSBT paths refuse until a rebuilt image sets them.
 - **Protocol integration.** BFA burns and chained mints need

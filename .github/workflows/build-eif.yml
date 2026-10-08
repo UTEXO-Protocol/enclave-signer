@@ -14,8 +14,8 @@ name: "Build EIF"
 # here in lockstep with the hosts, or attestation (KMS PCR policy + clone) breaks.
 # The image side is pinned too: base images are pinned by digest in
 # each enclave Dockerfile and layer timestamps are normalised via SOURCE_DATE_EPOCH +
-# BuildKit rewrite-timestamp (build/build-enclave.sh). OS package versions
-# (apt/dnf) still float — pinning them is the next determinism step.
+# BuildKit rewrite-timestamp (build/build-enclave.sh). EIF recipes pin OS
+# packages to a signed Debian snapshot.
 #
 # Required repo config (Settings -> Secrets and variables -> Actions):
 #   secrets.FEDERATED_SIGNER_PROTO_DEPLOY_KEY  parent proto access
@@ -186,20 +186,39 @@ jobs:
           cat artifacts/HOST-SHA256SUMS
 
       - name: Write build metadata
+        env:
+          VARIANT: ${{ matrix.variant }}
+          DOCKERFILE: ${{ matrix.dockerfile }}
+          EIF_NAME: ${{ matrix.eif_name }}
+          IMAGE_TAG: utexo-bridge-enclave-${{ matrix.variant }}:latest
+          DEBUG_FEATURES: ${{ github.event.inputs.debug_features || '' }}
         run: |
           set -euxo pipefail
-          cat > artifacts/metadata.json <<EOF
-          {
-            "git_sha": "${{ github.sha }}",
-            "ref": "${{ github.ref }}",
-            "variant": "${{ matrix.variant }}",
-            "eif_name": "${{ matrix.eif_name }}",
-            "nitro_cli_version": "${NITRO_CLI_VERSION}",
-            "run_id": "${{ github.run_id }}",
-            "debug_features": "${{ github.event.inputs.debug_features }}",
-            "built_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-          }
-          EOF
+          # Read the asset pin from the image used for the EIF.
+          docker image inspect "$IMAGE_TAG" | jq \
+            --arg git_sha "$GITHUB_SHA" \
+            --arg ref "$GITHUB_REF" \
+            --arg variant "$VARIANT" \
+            --arg dockerfile "$DOCKERFILE" \
+            --arg eif_name "$EIF_NAME" \
+            --arg nitro_cli_version "$NITRO_CLI_VERSION" \
+            --arg run_id "$GITHUB_RUN_ID" \
+            --arg debug_features "$DEBUG_FEATURES" \
+            --arg built_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            '.[0].Config.Env
+            | map(select(startswith("RGB_ASSET_ID=")) | ltrimstr("RGB_ASSET_ID="))
+            | {
+                git_sha: $git_sha,
+                ref: $ref,
+                variant: $variant,
+                dockerfile: $dockerfile,
+                eif_name: $eif_name,
+                rgb_asset_id: (.[0] // null),
+                nitro_cli_version: $nitro_cli_version,
+                run_id: $run_id,
+                debug_features: $debug_features,
+                built_at: $built_at
+              }' > artifacts/metadata.json
           cat artifacts/metadata.json
 
       - name: Upload run artifacts
