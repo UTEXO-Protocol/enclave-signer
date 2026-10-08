@@ -264,6 +264,8 @@ equals the expected production policy.
 The `attest-verify` CLI in this repo runs the full recipe. Configure the client
 CA/certificate/key environment from [Parent mTLS](parent-mtls.md) first; an
 `observer` certificate is sufficient for verification.
+To check a published bundle offline (`--from-file`), see
+[Verify a burn signer](verify-a-signer.md).
 
 ```bash
 # Production verification (against a real Nitro enclave). By default it expects a

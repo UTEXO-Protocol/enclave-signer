@@ -27,6 +27,8 @@ Reference material:
   model, signing rules, limits.
 - [`docs/pubkey-attestation.md`](docs/pubkey-attestation.md) - how to prove
   that a signing key belongs to attested enclave code. The `attest-verify` CLI.
+- [`docs/verify-a-signer.md`](docs/verify-a-signer.md) - how anyone checks a
+  published burn-signer attestation bundle and the on-chain signer list.
 - [`docs/kms-persistence.md`](docs/kms-persistence.md) - how the mint signer
   keeps its seed with AWS KMS and S3.
 - [`docs/parent-mtls.md`](docs/parent-mtls.md) - the required mTLS between
