@@ -424,6 +424,10 @@ impl ParentService for ParentAdapterService {
 
                 let source_network = Self::enclave_source_network(source)?;
                 Self::validate_cross_network_route(&source_network, &destination_network)?;
+                let expects_evm = match &destination_network {
+                    enclave_proto::sign_request::DestinationNetwork::EvmDestination(_) => true,
+                    enclave_proto::sign_request::DestinationNetwork::RgbDestination(_) => false,
+                };
 
                 let enclave_req = EnclaveRequest {
                     request: Some(enclave_request::Request::Sign(enclave_proto::SignRequest {
@@ -442,6 +446,11 @@ impl ParentService for ParentAdapterService {
 
                 match resp.response {
                     Some(enclave_response::Response::SignedPsbt(r)) => {
+                        if expects_evm {
+                            return Err(Status::internal(
+                                "enclave reply type mismatch for Sign: expected EvmSignature, got SignedPsbt",
+                            ));
+                        }
                         Ok(Response::new(SignatureResponse {
                             signer_network_id,
                             signature: r.signed_psbt,
@@ -452,6 +461,11 @@ impl ParentService for ParentAdapterService {
                         }))
                     }
                     Some(enclave_response::Response::EvmSignature(r)) => {
+                        if !expects_evm {
+                            return Err(Status::internal(
+                                "enclave reply type mismatch for Sign: expected SignedPsbt, got EvmSignature",
+                            ));
+                        }
                         Ok(Response::new(SignatureResponse {
                             signer_network_id,
                             signature: r.signature,
