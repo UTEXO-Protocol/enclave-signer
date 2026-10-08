@@ -20,13 +20,13 @@ use super::consignment::extract_transition_summary;
 use super::types::TransitionSummary;
 
 /// BFA transition that moves an asset allocation to a new owner. The
-/// send/receive flow uses it as the last transition.
+/// send/receive flow uses it as the settling transition.
 pub const TS_TRANSFER: u16 = 10000;
 /// BFA transition that mints units against an EVM lock. The enclave reads
 /// its OpIds for the spec section 6 OpId binding.
 pub const TS_BRIDGE: u16 = 8014;
 /// BFA transition that destroys asset units. In the mint/burn unlock flow it
-/// is the last transition. The amount is in its [`MS_BURNED_ASSET`] metadata.
+/// is the settling transition. The amount is in its [`MS_BURNED_ASSET`] metadata.
 pub const TS_BURN: u16 = 8010;
 
 /// BFA burn metadata key for the destroyed `OS_ASSET` amount. The value is a
@@ -67,25 +67,23 @@ pub(super) fn decode_opid(hex_opid: &str) -> Result<[u8; 32]> {
 /// The mint direction also needs [`BfaBinding::terminal_opid`].
 #[cfg(feature = "bfa-validation")]
 pub struct BfaBinding {
-    /// Each `TS_BRIDGE` OpId in the consignment, in consignment order.
-    /// Untrusted: each only selects the log to verify. The ether extension
-    /// binds it to the operation again inside consensus.
-    pub mint_opids: Vec<[u8; 32]>,
+    /// Each `TS_BRIDGE` in the consignment, in consignment order.
+    pub mints: Vec<BfaMint>,
     /// `bridgeLocation` exactly as the asset genesis writes it. It is compared
     /// with the enclave `funds_in_contract` pin before any log is trusted.
     pub bridge_location: String,
-    /// The last transition of the consignment, or `None`. Only the mint
+    /// The settling transition of the consignment, or `None`. Only the mint
     /// direction uses it, through [`Self::terminal_opid`].
     pub(super) last_transition: Option<TransitionSummary>,
 }
 
 #[cfg(feature = "bfa-validation")]
 impl BfaBinding {
-    /// The mint that this request authorizes: the OpId of the last transition.
+    /// The mint that this request authorizes: the OpId of the settling transition.
     /// Only it binds to the deposit of this request. Each other entry in
-    /// `mint_opids` is an ancestor with its own deposit.
+    /// `mints` is an ancestor with its own deposit.
     ///
-    /// Mint direction only. Each failure refuses the signature. If the last
+    /// Mint direction only. Each failure refuses the signature. If the settling
     /// transition is not a bridge mint, or is not in the transition list, the
     /// paying deposit is unknown. Do not guess it.
     pub fn terminal_opid(&self) -> Result<[u8; 32]> {
@@ -95,22 +93,31 @@ impl BfaBinding {
             .ok_or_else(|| EnclaveError::CrossCheck("BFA consignment has no transitions".into()))?;
         if last.transition_type != TS_BRIDGE {
             return Err(EnclaveError::CrossCheck(format!(
-                "BFA consignment's last transition is type {}, expected the bridge mint {}",
+                "BFA consignment's settling transition is type {}, expected the bridge mint {}",
                 last.transition_type, TS_BRIDGE
             )));
         }
         let terminal_opid = decode_opid(&last.op_id)?;
         // The terminal transition selects the paying deposit, so it must be in
         // the consignment.
-        if !self.mint_opids.contains(&terminal_opid) {
+        if !self.mints.iter().any(|mint| mint.opid == terminal_opid) {
             return Err(EnclaveError::CrossCheck(
-                "BFA consignment's last transition is a bridge mint but is absent from the \
+                "BFA consignment's settling transition is a bridge mint but is absent from the \
                  transition list - refusing to guess which mint this request authorises"
                     .into(),
             ));
         }
         Ok(terminal_opid)
     }
+}
+
+/// One `TS_BRIDGE` of a consignment and the units it minted.
+#[cfg(feature = "bfa-validation")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BfaMint {
+    pub opid: [u8; 32],
+    /// The mint's `OS_ASSET` outputs.
+    pub minted: u64,
 }
 
 /// Reads the BFA binding from raw consignment bytes, before validation.
@@ -134,13 +141,30 @@ pub fn bfa_binding(consignment_bytes: &[u8]) -> Result<Option<BfaBinding>> {
     // Use the flat parser, not `read_last_transfer_witness`, which needs the
     // rgbstd validation walk. The OpIds are necessary *before* validation to
     // select the logs to verify.
-    let (_, mint_op_ids, last_transition, _) = extract_transition_summary(consignment_bytes)?;
+    let (_, mint_op_ids, last_transition, by_witness) =
+        extract_transition_summary(consignment_bytes)?;
+    let mints = mint_op_ids
+        .iter()
+        .map(|hex_opid| {
+            let minted = by_witness
+                .iter()
+                .flat_map(|(_, transitions)| transitions)
+                .find(|t| t.transition_type == TS_BRIDGE && &t.op_id == hex_opid)
+                .map(|t| t.asset_output_amount)
+                .ok_or_else(|| {
+                    EnclaveError::CrossCheck(format!(
+                        "BFA mint {hex_opid} is not among the consignment's transitions"
+                    ))
+                })?;
+            Ok(BfaMint {
+                opid: decode_opid(hex_opid)?,
+                minted,
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
 
     Ok(Some(BfaBinding {
-        mint_opids: mint_op_ids
-            .iter()
-            .map(|hex_opid| decode_opid(hex_opid))
-            .collect::<Result<Vec<_>>>()?,
+        mints,
         bridge_location: genesis_bridge_location(&transfer)?,
         last_transition,
     }))

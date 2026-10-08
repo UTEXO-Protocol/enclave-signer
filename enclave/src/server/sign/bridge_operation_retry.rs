@@ -219,7 +219,6 @@ fn deposit_request(psbt_bytes: Vec<u8>) -> EnclaveRequest {
                 asset_id: ASSET_ID.into(),
                 consignment_hash: Keccak256::digest(&consignment).to_vec(),
                 consignment,
-                mint_ancestors: Vec::new(),
             })),
         })),
     }

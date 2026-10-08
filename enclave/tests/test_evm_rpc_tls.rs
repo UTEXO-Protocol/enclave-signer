@@ -37,7 +37,7 @@ sol! {
         uint256 nativeCommission, uint256 sourceChainId, uint256 destinationChainId,
         string destinationAddress, bytes settlementData
     );
-    event FundsIn(address indexed sender, uint256 rgbOpId, uint64 amount);
+    event FundsIn(address indexed sender, uint256 indexed rgbOpId, uint64 amount);
 }
 
 const BRIDGE: [u8; 20] = [0xB1; 20];

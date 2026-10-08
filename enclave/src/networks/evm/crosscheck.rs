@@ -35,7 +35,7 @@ pub fn assert_witnesses_confirmed(validated: &ValidatedConsignment) -> Result<()
 /// Amount cross-check for `fundsOut`. Binds the release `amount` to the
 /// consignment asset value:
 ///
-///   1. The last transition must be the type that this build's RGB flow
+///   1. The settling transition must be the type that this build's RGB flow
 ///      accepts on a withdrawal: a BFA `Transfer` under `rgb-swap`, a BFA
 ///      `Burn` under `rgb-mint-burn`.
 ///   2. The amount that transition moves out of the source must cover the
@@ -121,8 +121,7 @@ pub fn validate_funds_out_burn_recipient(
 }
 
 /// Source-burn bind (bridge PR #152): `sourceBurnTxId` must be the RGB OpId of
-/// the settled transition. That is the last transition, which
-/// [`validate_funds_out_amount`] reads.
+/// the settling transition, which [`validate_funds_out_amount`] reads.
 ///
 /// On chain, `sourceBurnTxId` is the only `burnId` input that identifies the
 /// burn. `Bridge.fundsOut` and `rebalanceLiquidity` hash it into the
@@ -182,13 +181,12 @@ pub fn validate_funds_out_source_burn_tx_id(
 /// does not know the deposits behind a burn. The enclave knows, because it
 /// verified each ancestry lock receipt
 /// ([`crate::networks::evm::events::verify_rgb_funds_in`]). The cited set must
-/// equal that ancestry, pair for pair. Thus a second release of the same burn
-/// cannot cite other deposits to get a new `burnId`.
+/// equal that ancestry, pair for pair.
 ///
 /// Exact set equality, canonical encoding, and strictly ascending
-/// `operationId` order. `burnId` hashes the raw bytes, so a second order of
-/// the same pairs would give a second `burnId` (F05-NEW-AF-04). The strict
-/// order also refuses duplicates. An empty lock set refuses: each signable
+/// `operationId` order, which also refuses duplicates. `burnId` does not hash
+/// `settlementData`, so replay safety does not rest on this order
+/// (F05-NEW-AF-04). An empty lock set refuses: each signable
 /// asset is bridged, so such a burn settles nothing.
 #[cfg(feature = "bfa-mint")]
 pub fn validate_funds_out_settlement(

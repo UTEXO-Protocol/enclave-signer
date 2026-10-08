@@ -133,11 +133,13 @@ host. TLS ends inside the enclave. Each call has a 15 s timeout.
   `FUNDS_IN_CONTRACT`.
 - **M3.2** The last mint must be the mint of this request. It pairs with
   `evm_tx_hash`.
-- **M3.3** Each older mint in the history must have a `mint_ancestors` entry.
-  A request that lists the last mint in `mint_ancestors` is refused.
-- **M3.4** For each mint, the receipt must have exactly one `FundsIn` event
-  with that mint's RGB OpId, and exactly one `BridgeFundsIn` event. Both must
-  come from `FUNDS_IN_CONTRACT`. Depth: at least `EVM_MIN_CONFIRMATIONS`.
+- **M3.3** Each mint's deposit id is derived from the mint (see burn-flow
+  B1.3).
+- **M3.4** The receipt of `evm_tx_hash` must have exactly one `FundsIn` event
+  with the last mint's RGB OpId, and exactly one `BridgeFundsIn` event, both
+  from `FUNDS_IN_CONTRACT`, at least `EVM_MIN_CONFIRMATIONS` deep. Its
+  `operationId`, amount and net amount must be the ones the last mint derives.
+  Another deposit for the same OpId is refused.
 - **M3.5** The `BridgeFundsIn` `destinationChainId` must equal 827166
   (`RGB_CHAIN_ID`). `FundsIn` has no chain field, so this binds the deposit
   to the RGB network.
@@ -157,7 +159,8 @@ host. TLS ends inside the enclave. Each call has a 15 s timeout.
 ### Stage 5 - Does the PSBT do this mint, and only this mint?
 
 - **M5.1** The PSBT must parse and have at least one input.
-- **M5.2** The last transition must be `TS_BRIDGE`.
+- **M5.2** The settling transition must be `TS_BRIDGE`, so the last witness
+  commits no `TS_BURN`.
 - **M5.3** The PSBT txid must equal the last witness txid. So the signature
   can complete this one transaction only.
 - **M5.4** Each input must be a SegWit output with a `witness_utxo`. So the

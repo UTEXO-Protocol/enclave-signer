@@ -78,7 +78,7 @@ sequenceDiagram
 
 | Name | Value | Meaning |
 |------|-------|---------|
-| `TS_BURN` | 8010 | Burn transition. The only last transition the burn signer accepts. |
+| `TS_BURN` | 8010 | Burn transition. The only settling transition the burn signer accepts. |
 | `TS_BRIDGE` | 8014 | Mint transition. It shows in the burn's history (the ancestry). |
 | `MS_BURNED_ASSET` | 1001 | Burn metadata: the number of units destroyed (u64). |
 | `MS_BURN_RECIPIENT` | 1003 | Burn metadata: 32 bytes. A left-padded EVM address. |
@@ -90,7 +90,7 @@ sequenceDiagram
 | `EVM_MIN_CONFIRMATIONS` | 12 (default) | Minimum depth of each deposit receipt. Attested. |
 | `fundsOut` selector | `0x340276aa` | Pools route. |
 | `lzFundsOut` selector | from the enclave ABI | LayerZero route. |
-| Calldata cap | 64 KiB | Maximum calldata size. |
+| Calldata cap | 96 KiB | Maximum calldata size. |
 | EIP-712 domain | `("MultisigProxy", "1", chainId, verifyingContract)` | Tests compare it with contract fixtures. |
 
 ## 5. Checks, in order
@@ -116,17 +116,18 @@ burn signer checks each deposit before it validates the consignment.
   (default 8 MiB).
 - **B1.2** The asset's `bridgeLocation` must equal the pinned
   `FUNDS_IN_CONTRACT`.
-- **B1.3** Each `TS_BRIDGE` (mint) in the consignment must have a
-  `mint_ancestors` entry with a 32-byte EVM transaction hash.
-- **B1.4** For each mint, the burn signer gets the receipt itself:
-  - the receipt must be a success;
-  - it must have exactly one `FundsIn` event from `FUNDS_IN_CONTRACT`, with
-    the mint's RGB OpId;
-  - it must have exactly one `BridgeFundsIn` event from the same contract,
-    with `destinationChainId` 827166 (`RGB_CHAIN_ID`);
-  - it must be at least `EVM_MIN_CONFIRMATIONS` blocks deep.
-- **B1.5** The result is a list of verified locks: `(operationId, netAmount)`.
-  Stage 2 and Stage 5 use this list.
+- **B1.3** For each `TS_BRIDGE` (mint) in the consignment, the burn signer
+  derives the `operationId` of the one deposit that can back it:
+  `keccak256(abi.encode(RGB_MINT_DEPOSIT_TYPEHASH, FUNDS_IN_CONTRACT,
+  EVM_CHAIN_ID, TOKEN_CONTRACT, RGB_CHAIN_ID, mint OpId, minted units))`. It reads
+  nothing from the chain. `TOKEN_CONTRACT` and `EVM_CHAIN_ID` must be pinned.
+- **B1.4** The Bridge holds a record under that id only if a deposit of
+  exactly the minted units was made for that mint, and it refuses a second
+  one. The release checks each cited record, so a mint with no deposit fails
+  on chain.
+- **B1.5** The result is a list of locks: `(operationId, netAmount)`. One burn
+  has one list, so one `settlementData`; `burnId` does not hash it. Stage 2
+  and Stage 5 use this list.
 
 ### Stage 2 - Is the RGB history valid?
 
@@ -138,8 +139,9 @@ burn signer checks each deposit before it validates the consignment.
   mint must match a verified lock from Stage 1.
 - **B2.4** The contract id must equal the declared `asset_id` and the pinned
   `RGB_ASSET_ID`.
-- **B2.5** The last transition must be `TS_BURN`. The amount comes from
-  `MS_BURNED_ASSET`. The burn signer does not use the amount from the host.
+- **B2.5** The settling transition must be `TS_BURN`: the last burn of the
+  last witness, so one tx can also carry a plain transfer. The amount comes
+  from `MS_BURNED_ASSET`. The burn signer does not use the amount from the host.
 
 ### Stage 3 - Is the burn buried in Bitcoin?
 
@@ -162,7 +164,7 @@ limits. Signet and regtest skip proof-of-work and `nBits` checks.
 
 ### Stage 4 - Is the calldata correct?
 
-- **B4.1** Calldata must be at least 4 bytes and at most 64 KiB.
+- **B4.1** Calldata must be at least 4 bytes and at most 96 KiB.
 - **B4.2** The selector must be `fundsOut` (`0x340276aa`) or `lzFundsOut`.
 - **B4.3** The burn signer decodes the calldata and encodes it again. The two
   must be byte-equal. This stops a non-canonical encoding.
@@ -264,7 +266,7 @@ chain:
 - the `MultisigProxy` nonce is in the signed digest;
 - the Bridge refuses a `burnId` that it used before.
 
-On both routes, `burnId` is bound to the burn through B5.7 and B5.9.
+On both routes, `burnId` is bound to the burn through B5.3, B5.6 and B5.7.
 
 ## 8. What the burn signer refuses
 

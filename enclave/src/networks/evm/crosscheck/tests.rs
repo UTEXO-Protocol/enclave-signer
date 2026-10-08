@@ -536,8 +536,7 @@ mod settlement {
         assert!(check(&[(0xA1, 950), (0xB2, 20)], &[LOCK_A, LOCK_B]).is_ok());
     }
 
-    /// F05-NEW-AF-04: the same pairs in another order hash to another
-    /// `burnId`. Only the ascending order is signable.
+    /// F05-NEW-AF-04: only the ascending order is signable.
     #[test]
     fn rejects_reordered_settlement() {
         let locks = [LOCK_A, LOCK_B];
@@ -585,8 +584,7 @@ mod settlement {
         assert!(err.to_string().contains("strictly ascending"), "{err}");
     }
 
-    /// The P6 attack: a valid burn sent again with other deposits cited, to
-    /// get a new `burnId` on chain.
+    /// A valid burn citing a deposit it does not descend from.
     #[test]
     fn rejects_a_deposit_the_burn_does_not_descend_from() {
         let err = check(&[(0xC3, 950)], &[LOCK_A]).unwrap_err();

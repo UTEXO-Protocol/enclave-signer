@@ -81,8 +81,8 @@ pub(crate) const BFI_MAX_DEST_ADDRESS_LEN: usize = 2048;
 /// `settlementData`) must be present. The `settlementData` tail is not read.
 const BFI_MIN_DATA_LEN: usize = 9 * 32;
 
-/// Bridge `FundsIn` signature. Only the sender is indexed. The RGB OpId and
-/// the uint64 amount are two data words.
+/// Bridge `FundsIn` signature. The sender and the RGB OpId are indexed; the
+/// uint64 amount is the one data word.
 pub const FUNDS_IN_SIG: &str = "FundsIn(address,uint256,uint64)";
 
 /// An RGB invoice in the shape the pinned `rgb-invoicing` accepts:
@@ -448,8 +448,8 @@ fn check_confirmation_depth(
 
 /// Decodes a `FundsIn` log, binds it to `expected_rgb_opid`, and returns the amount.
 ///
-/// Only one layout is accepted: topic0 and the indexed sender, then `data` holds
-/// the `rgbOpId` word and the amount word.
+/// Only one layout is accepted: topic0, the indexed sender and the indexed
+/// `rgbOpId` (the OpId bytes as a big-endian uint256), then the amount word.
 #[cfg(feature = "bfa-validation")]
 fn decode_funds_in(log: &LogEntry, expected_rgb_opid: &[u8; 32]) -> Result<u64> {
     if log.topics.first() != Some(&*FUNDS_IN_TOPIC0) {
@@ -457,13 +457,13 @@ fn decode_funds_in(log: &LogEntry, expected_rgb_opid: &[u8; 32]) -> Result<u64> 
             "log is not a FundsIn event".into(),
         ));
     }
-    if log.topics.len() != 2 || log.data.len() != 64 {
+    if log.topics.len() != 3 || log.data.len() != 32 {
         return Err(EnclaveError::CrossCheck(
             "unexpected FundsIn event layout".into(),
         ));
     }
-    let rgb_op_id: [u8; 32] = log.data[..32].try_into().expect("checked data length");
-    let amount = extract_uint256_as_u64(&log.data, 32)?;
+    let rgb_op_id = log.topics[2];
+    let amount = extract_uint256_as_u64(&log.data, 0)?;
     if &rgb_op_id != expected_rgb_opid {
         return Err(EnclaveError::CrossCheck(format!(
             "FundsIn rgbOpId mismatch: on-chain 0x{} != consignment 0x{}",
@@ -489,6 +489,69 @@ pub struct VerifiedLock {
     pub minted: u64,
     pub operation_id: [u8; 32],
     pub net_amount: u64,
+}
+
+/// `Bridge.RGB_MINT_DEPOSIT_TYPEHASH` preimage; bridge-utexo derives the same id.
+#[cfg(feature = "bfa-validation")]
+const RGB_MINT_DEPOSIT_TYPEHASH_STR: &str = "UtexoRgbMintDeposit(address bridge,uint256 chainId,\
+     address token,uint256 rgbNetwork,uint256 rgbOpId,uint256 netAmount)";
+
+/// The `operationId` of the one deposit that can back a mint. Every input is
+/// pinned or in the consignment, so no caller or RPC chooses it (finding 47).
+#[cfg(feature = "bfa-validation")]
+pub fn rgb_mint_deposit_id(
+    cfg: &crate::config::BridgeConfig,
+    mint_opid: &[u8; 32],
+    minted: u64,
+) -> Result<[u8; 32]> {
+    if cfg.token_contract == [0u8; 20] || cfg.chain_id == 0 {
+        return Err(EnclaveError::CrossCheck(
+            "TOKEN_CONTRACT and EVM_CHAIN_ID must be pinned to derive a mint's deposit id - \
+             refusing to sign"
+                .into(),
+        ));
+    }
+    if minted == 0 {
+        return Err(EnclaveError::CrossCheck(format!(
+            "BFA mint 0x{} mints nothing, so no deposit can back it",
+            hex::encode(mint_opid)
+        )));
+    }
+
+    let word = |value: u64| {
+        let mut w = [0u8; 32];
+        w[24..].copy_from_slice(&value.to_be_bytes());
+        w
+    };
+    let address = |a: &[u8; 20]| {
+        let mut w = [0u8; 32];
+        w[12..].copy_from_slice(a);
+        w
+    };
+    let mut hasher = Keccak256::new();
+    hasher.update(Keccak256::digest(RGB_MINT_DEPOSIT_TYPEHASH_STR.as_bytes()));
+    hasher.update(address(&cfg.funds_in_contract));
+    hasher.update(word(cfg.chain_id));
+    hasher.update(address(&cfg.token_contract));
+    hasher.update(word(crate::networks::evm::RGB_CHAIN_ID));
+    hasher.update(mint_opid);
+    hasher.update(word(minted));
+    Ok(hasher.finalize().into())
+}
+
+/// The lock of a mint: its deposit id, with the minted units as net amount.
+#[cfg(feature = "bfa-validation")]
+pub fn derived_lock(
+    cfg: &crate::config::BridgeConfig,
+    mint_opid: [u8; 32],
+    minted: u64,
+) -> Result<VerifiedLock> {
+    Ok(VerifiedLock {
+        mint_opid,
+        minted,
+        operation_id: rgb_mint_deposit_id(cfg, &mint_opid, minted)?,
+        net_amount: minted,
+    })
 }
 
 /// Verifies the `FundsIn` lock that a BFA mint commits to. Returns the deposit.
