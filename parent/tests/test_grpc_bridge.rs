@@ -555,6 +555,86 @@ async fn grpc_sign_psbt_roundtrip() {
     );
 }
 
+/// Start a mock enclave that answers every Sign request with `resp`.
+fn start_sign_reply_mock(resp: EnclaveResponse) -> u16 {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let mut stream = stream.unwrap();
+            let req: EnclaveRequest = framing::read_message(&mut stream).unwrap();
+            if let Some(enclave_request::Request::Sign(_)) = req.request {
+                let _ = framing::write_message(&mut stream, &resp);
+            }
+        }
+    });
+
+    port
+}
+
+#[tokio::test]
+async fn grpc_sign_refuses_crossed_reply_type() {
+    let evm_payload = enriched::EnrichedEvmPayload {
+        call_data: vec![0xAB; 132],
+        nonce: 1,
+        deadline: u64::MAX,
+        chain_id: 1,
+        proxy_contract: vec![],
+        calldata_amount: 0,
+        calldata_commission: 0,
+        unsigned_tx: Vec::new(),
+        lz_release: None,
+    };
+    let rgb_payload = enriched::EnrichedRgbPayload {
+        operation_idx: 5,
+        psbt_bytes: vec![0xFF; 32],
+        psbt_output_amount: 0,
+        rgb_asset_id: String::new(),
+        consignment: vec![],
+        consignment_hash: vec![],
+    };
+
+    let cases = [
+        (
+            EnclaveResponse {
+                response: Some(enclave_response::Response::SignedPsbt(
+                    enclave_proto::SignedPsbtResponse {
+                        signed_psbt: vec![0xDD; 100],
+                        inputs_signed: 2,
+                    },
+                )),
+            },
+            sign_evm_request(rgb_source(0, 0, vec![], vec![], String::new()), evm_payload),
+            "enclave reply type mismatch for Sign: expected EvmSignature, got SignedPsbt",
+        ),
+        (
+            EnclaveResponse {
+                response: Some(enclave_response::Response::EvmSignature(
+                    enclave_proto::EvmSignatureResponse {
+                        signature: vec![0xCC; 65],
+                        call_data: Vec::new(),
+                    },
+                )),
+            },
+            sign_rgb_request(evm_source(0, 0), rgb_payload),
+            "enclave reply type mismatch for Sign: expected SignedPsbt, got EvmSignature",
+        ),
+    ];
+
+    for (mock_reply, req, expected_message) in cases {
+        let enclave_port = start_sign_reply_mock(mock_reply);
+        let grpc_port = start_grpc_server(enclave_port).await;
+        let mut client = ParentServiceClient::connect(format!("http://127.0.0.1:{grpc_port}"))
+            .await
+            .unwrap();
+
+        let err = client.sign(req).await.unwrap_err();
+        assert_eq!(err.code(), tonic::Code::Internal);
+        assert_eq!(err.message(), expected_message);
+    }
+}
+
 #[tokio::test]
 async fn grpc_sign_btc_roundtrip() {
     // BTC_UTXO sends the EnrichedBtcPayload as a SignBtcRequest and returns a
