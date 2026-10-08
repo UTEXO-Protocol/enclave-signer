@@ -55,8 +55,8 @@ recorded provenance. Do not change only the local generated comments.
 | | |
 |---|---|
 | Upstream | https://github.com/UTEXO-Protocol/federated-signer-proto |
-| Commit | `51db3ce791fe0d17c159787d4ecf4c4e5427d3c8` ("chore(proto): drop mint_ancestors") |
-| Commit date | 2026-10-06T12:32:37+03:00 |
+| Commit | `2b81a2eaadb99daa68c4428ea38f80ae3f40805d` (merge of PR #35, "chore(proto): drop mint_ancestors") |
+| Commit date | 2026-10-08T12:17:24Z |
 
 This is the same commit `parent/Cargo.toml` still pins as a git dependency, so
 both crates compile against one schema version. Keep them in lockstep.
@@ -70,7 +70,7 @@ both crates compile against one schema version. Keep them in lockstep.
 Verify against upstream (needs read access to the private repo):
 
 ```bash
-REV=51db3ce791fe0d17c159787d4ecf4c4e5427d3c8
+REV=2b81a2eaadb99daa68c4428ea38f80ae3f40805d
 git clone https://github.com/UTEXO-Protocol/federated-signer-proto /tmp/fsp
 git -C /tmp/fsp checkout "$REV"
 diff /tmp/fsp/rust-gen/src/enclave/enclave.rs enclave-proto/src/enclave.rs
