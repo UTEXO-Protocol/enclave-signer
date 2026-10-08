@@ -24,7 +24,7 @@ use thiserror::Error;
 pub mod policy;
 pub use policy::{
     policy_commitment, AttestationMode, AttestedPolicy, BtcDataSource, EvmDataSource, EvmRpcTlsPin,
-    KmsPin, PolicyDecodeError, SignerRole, POLICY_COMMITMENT_V8,
+    KmsPin, PolicyDecodeError, SignerRole, POLICY_COMMITMENT_V9,
 };
 
 // Public types
@@ -215,8 +215,16 @@ pub fn verify_mock_policy_attestation(
     into_verified(attestation, nonce, false)
 }
 
-/// Build a mock attestation document for tests: zero PCRs, no COSE, no
-/// certificate. Use with [`verify_mock_attestation`].
+/// PCR3 of every mock document, of a mock enclave and of a
+/// `test_util::signed_document`. PCR3 measures the IAM role of the parent
+/// instance; a mock enclave has none, so it gets this fixed, non-zero value.
+/// Then the clone-peer PCR3 rule runs in mock tests too.
+#[cfg(any(test, feature = "mock", feature = "test-util"))]
+pub const MOCK_PCR3: [u8; 48] = [0x33; 48];
+
+/// Build a mock attestation document for tests: zero PCR0/1/2,
+/// [`MOCK_PCR3`], no COSE, no certificate. Use with
+/// [`verify_mock_attestation`].
 #[cfg(feature = "mock")]
 pub fn build_mock_document(
     nonce: &[u8; 32],
@@ -235,7 +243,19 @@ pub fn build_mock_document_with_pcrs(
     user_data: Option<&[u8]>,
     pcrs: &ExpectedPcrs,
 ) -> Result<Vec<u8>> {
-    mock::build_mock_document_with_pcrs(nonce, public_key, user_data, pcrs)
+    mock::build_mock_document_with_pcrs(nonce, public_key, user_data, pcrs, Some(&MOCK_PCR3))
+}
+
+/// Like [`build_mock_document`], but with a caller PCR3 (`None`: no PCR3), to
+/// test the clone-peer PCR3 rule. Tests only.
+#[cfg(feature = "mock")]
+pub fn build_mock_document_with_pcr3(
+    nonce: &[u8; 32],
+    public_key: Option<&[u8]>,
+    user_data: Option<&[u8]>,
+    pcr3: Option<&[u8; 48]>,
+) -> Result<Vec<u8>> {
+    mock::build_mock_document_with_pcrs(nonce, public_key, user_data, &ExpectedPcrs::zero(), pcr3)
 }
 
 /// The time at which the certificate validity is checked.
@@ -1127,8 +1147,9 @@ pub mod test_util {
     use rcgen::{CertificateParams, IsCa, Issuer, KeyPair, KeyUsagePurpose};
 
     /// A COSE_Sign1 document signed by a leaf under a fresh test root, and
-    /// the root DER. `leaf_valid_on` limits the leaf to one UTC day
-    /// (year, month, day). `None` keeps the rcgen default validity.
+    /// the root DER. PCR3 is [`MOCK_PCR3`], as in a mock document.
+    /// `leaf_valid_on` limits the leaf to one UTC day (year, month, day).
+    /// `None` keeps the rcgen default validity.
     pub fn signed_document(
         pcrs: &ExpectedPcrs,
         nonce: &[u8; 32],
@@ -1161,6 +1182,7 @@ pub mod test_util {
                 (0, pcrs.pcr0.to_vec()),
                 (1, pcrs.pcr1.to_vec()),
                 (2, pcrs.pcr2.to_vec()),
+                (3, MOCK_PCR3.to_vec()),
             ]),
             certificate: leaf.der().to_vec(),
             cabundle: vec![root.der().to_vec()],
@@ -1224,7 +1246,13 @@ mod mock {
         public_key: Option<&[u8]>,
         user_data: Option<&[u8]>,
     ) -> Result<Vec<u8>> {
-        build_mock_document_with_pcrs(nonce, public_key, user_data, &ExpectedPcrs::zero())
+        build_mock_document_with_pcrs(
+            nonce,
+            public_key,
+            user_data,
+            &ExpectedPcrs::zero(),
+            Some(&super::MOCK_PCR3),
+        )
     }
 
     pub(super) fn build_mock_document_with_pcrs(
@@ -1232,11 +1260,15 @@ mod mock {
         public_key: Option<&[u8]>,
         user_data: Option<&[u8]>,
         expected: &ExpectedPcrs,
+        pcr3: Option<&[u8; 48]>,
     ) -> Result<Vec<u8>> {
         let mut pcrs = HashMap::new();
         pcrs.insert(0, expected.pcr0.to_vec());
         pcrs.insert(1, expected.pcr1.to_vec());
         pcrs.insert(2, expected.pcr2.to_vec());
+        if let Some(pcr3) = pcr3 {
+            pcrs.insert(3, pcr3.to_vec());
+        }
 
         let timestamp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)

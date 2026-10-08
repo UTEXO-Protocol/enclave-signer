@@ -11,12 +11,12 @@
 //! mismatch gives a `user_data` hash mismatch.
 //!
 //! Wire contract: discriminants and field order are fixed. Do not renumber a
-//! variant or reorder fields. Bump [`POLICY_COMMITMENT_V8`] instead.
+//! variant or reorder fields. Bump [`POLICY_COMMITMENT_V9`] instead.
 
 /// Version tag at the start of every policy commitment. A verifier rejects a
 /// different encoding version instead of computing a wrong hash. Bump it on
 /// every layout change.
-pub const POLICY_COMMITMENT_V8: u8 = 8;
+pub const POLICY_COMMITMENT_V9: u8 = 9;
 
 /// Bridge directions that the image signs. It comes from build features, so
 /// PCR0 measures it and no host config can widen it.
@@ -31,6 +31,14 @@ pub enum SignerRole {
     /// `burn-signer`: EVM releases only. Refuses every RGB mint PSBT. A `ccd`
     /// dev build also signs CCD -> EVM. No shipped burn image has `ccd`.
     Burn = 2,
+}
+
+impl SignerRole {
+    /// True for a role that clones its seed. The mint signer persists its
+    /// seed with KMS and refuses cloning; the other roles clone.
+    pub fn clones(self) -> bool {
+        self != SignerRole::Mint
+    }
 }
 
 /// Source of the EVM `FundsIn` deposit evidence that the enclave verifies
@@ -141,6 +149,11 @@ pub enum AttestedPolicy {
         token_contract: [u8; 20],
         /// KMS pin set at launch.
         kms: Option<KmsPin>,
+        /// PCR3 that a cloning peer must have: the enclave's own PCR3, the
+        /// measurement of the parent instance IAM role. It binds clone peers
+        /// to the operator's role. `Some` exactly for a role that clones (not
+        /// [`SignerRole::Mint`]), and never all zero there.
+        clone_peer_pcr3: Option<[u8; 48]>,
     },
     Development,
 }
@@ -150,7 +163,7 @@ impl AttestedPolicy {
     /// Layout (see the wire contract in the module docs):
     ///
     /// ```text
-    /// [POLICY_COMMITMENT_V8]
+    /// [POLICY_COMMITMENT_V9]
     /// Production:  [0x01][allow_vanilla u8][signer_role u8][attestation u8]
     ///              [evm_source u8]
     ///              [btc_source u8][chain_id u64 BE][bridge_contract 20]
@@ -167,11 +180,12 @@ impl AttestedPolicy {
     ///              [kms: 0x00 | 0x01 ++ len(arn) u32 BE ++ arn
     ///               ++ len(region) u32 BE ++ region ++ len(seed_id) u32 BE
     ///               ++ seed_id ++ (0x00 | 0x01 ++ address 20)]
+    ///              [clone_peer_pcr3: 0x00 | 0x01 ++ pcr3 48]
     /// Development: [0x00]
     /// ```
     pub fn to_bytes(&self) -> Vec<u8> {
         let mut out = Vec::new();
-        out.push(POLICY_COMMITMENT_V8);
+        out.push(POLICY_COMMITMENT_V9);
         match self {
             AttestedPolicy::Production {
                 allow_vanilla_psbt,
@@ -193,6 +207,7 @@ impl AttestedPolicy {
                 gas_tx_allowed_selectors,
                 token_contract,
                 kms,
+                clone_peer_pcr3,
             } => {
                 out.push(0x01);
                 out.push(*allow_vanilla_psbt as u8);
@@ -250,6 +265,13 @@ impl AttestedPolicy {
                     }
                     None => out.push(0x00),
                 }
+                match clone_peer_pcr3 {
+                    Some(pcr3) => {
+                        out.push(0x01);
+                        out.extend_from_slice(pcr3);
+                    }
+                    None => out.push(0x00),
+                }
             }
             AttestedPolicy::Development => {
                 out.push(0x00);
@@ -263,7 +285,7 @@ impl AttestedPolicy {
     /// UTF-8 and a selector list that is not sorted and unique.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, PolicyDecodeError> {
         let mut r = Reader(bytes);
-        if r.u8()? != POLICY_COMMITMENT_V8 {
+        if r.u8()? != POLICY_COMMITMENT_V9 {
             return Err(PolicyDecodeError("unknown policy version"));
         }
         let policy = match r.u8()? {
@@ -331,6 +353,7 @@ impl AttestedPolicy {
                         })
                     })
                     .transpose()?;
+                let clone_peer_pcr3 = r.flag()?.then(|| r.array()).transpose()?;
                 AttestedPolicy::Production {
                     allow_vanilla_psbt,
                     signer_role,
@@ -351,6 +374,7 @@ impl AttestedPolicy {
                     gas_tx_allowed_selectors,
                     token_contract,
                     kms,
+                    clone_peer_pcr3,
                 }
             }
             _ => return Err(PolicyDecodeError("unknown policy kind")),
@@ -449,6 +473,7 @@ mod tests {
             gas_tx_allowed_selectors: vec![[0xde, 0xad, 0xbe, 0xef]],
             token_contract: [0x77; 20],
             kms: None,
+            clone_peer_pcr3: None,
         }
     }
 
@@ -480,6 +505,7 @@ mod tests {
                 evm_rpc_tls,
                 token_contract,
                 kms,
+                clone_peer_pcr3,
                 ..
             } => AttestedPolicy::Production {
                 allow_vanilla_psbt,
@@ -501,6 +527,7 @@ mod tests {
                 gas_tx_allowed_selectors: selectors,
                 token_contract,
                 kms,
+                clone_peer_pcr3,
             },
             AttestedPolicy::Development => unreachable!(),
         }
@@ -508,10 +535,10 @@ mod tests {
 
     #[test]
     fn every_encoding_starts_with_the_version_tag() {
-        assert_eq!(base().to_bytes()[0], POLICY_COMMITMENT_V8);
+        assert_eq!(base().to_bytes()[0], POLICY_COMMITMENT_V9);
         assert_eq!(
             AttestedPolicy::Development.to_bytes()[0],
-            POLICY_COMMITMENT_V8
+            POLICY_COMMITMENT_V9
         );
     }
 
@@ -584,11 +611,12 @@ mod tests {
             *token_contract = [0x78; 20];
         }
         assert_ne!(base().to_bytes(), other.to_bytes());
-        // Only the token bytes change. The KMS presence byte follows them.
+        // Only the token bytes change. The KMS and the PCR3 presence bytes
+        // follow them.
         let a = base().to_bytes();
         let b = other.to_bytes();
-        assert_eq!(a[..a.len() - 21], b[..b.len() - 21]);
-        assert_eq!(&a[a.len() - 21..a.len() - 1], &[0x77; 20]);
+        assert_eq!(a[..a.len() - 22], b[..b.len() - 22]);
+        assert_eq!(&a[a.len() - 22..a.len() - 2], &[0x77; 20]);
     }
 
     #[test]
@@ -654,6 +682,30 @@ mod tests {
         }
     }
 
+    /// `base()` as a burn signer with the given clone-peer PCR3.
+    fn with_clone_peer_pcr3(pcr3: Option<[u8; 48]>) -> AttestedPolicy {
+        let mut p = base();
+        if let AttestedPolicy::Production {
+            signer_role,
+            clone_peer_pcr3,
+            ..
+        } = &mut p
+        {
+            *signer_role = SignerRole::Burn;
+            *clone_peer_pcr3 = pcr3;
+        }
+        p
+    }
+
+    /// Two enclaves under different IAM roles attest different policies, so a
+    /// verifier sees which role the clone peers are bound to.
+    #[test]
+    fn clone_peer_pcr3_changes_the_bytes() {
+        let role_a = with_clone_peer_pcr3(Some([0x33; 48])).to_bytes();
+        assert_ne!(role_a, with_clone_peer_pcr3(Some([0x34; 48])).to_bytes());
+        assert_ne!(role_a, with_clone_peer_pcr3(None).to_bytes());
+    }
+
     #[test]
     fn from_bytes_inverts_to_bytes() {
         let mut policies = vec![AttestedPolicy::Development, base()];
@@ -673,6 +725,7 @@ mod tests {
             *kms = Some(a_kms_pin());
         }
         policies.push(full);
+        policies.push(with_clone_peer_pcr3(Some([0x33; 48])));
         for p in policies {
             assert_eq!(AttestedPolicy::from_bytes(&p.to_bytes()), Ok(p));
         }
@@ -688,6 +741,14 @@ mod tests {
         let mut v7 = good.clone();
         v7[0] = 7;
         bad.push(v7);
+        // A V8 policy has no PCR3 field, so a V9 decoder refuses it.
+        let mut v8 = good.clone();
+        v8[0] = 8;
+        bad.push(v8);
+        // The last byte is the PCR3 presence flag. Only 0 and 1 are valid.
+        let mut flag = good.clone();
+        *flag.last_mut().unwrap() = 2;
+        bad.push(flag);
         let mut kind = good.clone();
         kind[1] = 2;
         bad.push(kind);

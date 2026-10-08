@@ -13,7 +13,7 @@ sequenceDiagram
     participant RN as Req NSM
     participant DN as Don NSM
 
-    Note over Req,Don: Both enclaves must have IDENTICAL PCRs<br/>(same compiled binary) for cloning to succeed.<br/>The cloning_secret is a pre-shared operator value - the donor<br/>received it at runtime via InitializeKey.cloning_secret<br/>(or the legacy UTEXO_CLONING_SECRET env). Never in the image.
+    Note over Req,Don: Both enclaves must have IDENTICAL PCR0/1/2<br/>(same compiled binary) and PCR3<br/>(same parent IAM role) for cloning to succeed.<br/>The cloning_secret is a pre-shared operator value - the donor<br/>received it at runtime via InitializeKey.cloning_secret<br/>(or the legacy UTEXO_CLONING_SECRET env). Never in the image.
 
     Note over Cli,Req: Message 1 - the CLI talks to the requester over the enclave wire<br/>protocol and to the donor through its parent's gRPC Clone RPC
     Op->>Cli: clone --cloning-secret-file --donor-grpc --donor-evm
@@ -36,6 +36,8 @@ sequenceDiagram
     DN-->>Don: ExpectedPcrs{pcr0, pcr1, pcr2}
     Don->>Don: verify_peer_attestation(requester_attestation,<br/>expected=own_PCRs, nonce=None)
     Note right of Don: Cert-chain -> AWS Nitro root,<br/>COSE_Sign1 signature, PCR equality.<br/>No expected_nonce - freshness via the<br/>replay guard after auth.
+    Don->>DN: get_own_pcr3()
+    Don->>Don: check_clone_peer_pcr3: own PCR3 not all zero,<br/>requester PCR3 present and equal (same IAM role)
     Don->>Don: verified.public_key == encryption_pubkey (pubkey binding)
     Don->>Don: verified.user_data == cloning_digest (digest binding)
     Don->>Don: reserve_export_quota() (optional CLONE_EXPORT_HARD_CAP)
@@ -57,6 +59,8 @@ sequenceDiagram
     Req->>RN: get_own_pcrs()
     RN-->>Req: ExpectedPcrs
     Req->>Req: verify_peer_attestation(donor_attestation,<br/>expected=own_PCRs, nonce=None)
+    Req->>RN: get_own_pcr3()
+    Req->>Req: check_clone_peer_pcr3: own PCR3 not all zero,<br/>donor PCR3 present and equal (same IAM role)
     Req->>Req: verified.public_key == donor_pubkey
     Req->>Req: replay_guard.reserve(verified.nonce)
     Req->>Req: complete_cloning {<br/>  seed := session.decrypt_seed_from_peer(donor_pubkey, ct)<br/>  km := KeyManager::from_seed(seed, network)<br/>  assert km.evm_address() == session.cluster_public_key<br/>  verify_clone_commitment(user_data, own bundle + policy + transcript)<br/>  return km<br/>}

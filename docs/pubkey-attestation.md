@@ -144,7 +144,7 @@ both the enclave and every verifier share so the bytes are identical.
 
 ```
 policy_commitment =
-    u8(POLICY_COMMITMENT_V8 = 8)                    // version tag
+    u8(POLICY_COMMITMENT_V9 = 9)                    // version tag
     // Production (release, fully-pinned bridge signer):
     u8(0x01)                                        // production discriminant
     u8(allow_vanilla_psbt)                          // plain-BTC path enabled?
@@ -170,9 +170,17 @@ policy_commitment =
       u32_be(len(key_arn)) || key_arn || u32_be(len(region)) || region
       || u32_be(len(seed_id)) || seed_id
       || u8(address_present) [|| expected_evm_address(20)]
+    u8(clone_peer_pcr3_present)                     // V9: 1 for a cloning role (burn, combined), 0 for mint
+      [|| clone_peer_pcr3(48)]                      //   own PCR3 (parent IAM role), never all zero
     // Development (debug/test/dev-feature/non-bridge/unpinned build):
     u8(0x00)                                        // development discriminant
 ```
+
+`clone_peer_pcr3` binds clone peers to the parent instance IAM role (#270). A
+verifier does not configure it: it takes PCR3 from the verified document (the
+NSM signs it), requires it to be present and not all zero for a cloning role,
+and expects no value for the mint signer. An enclave on an instance without an
+IAM role therefore fails verification, and does not start.
 
 The tuple omits the Bitcoin network, concrete sats budgets, the Electrum/Esplora
 URL scheme and port, and the EVM RPC TLS port. The scheme needs no field: a
@@ -347,7 +355,9 @@ against `PCR.json`, and compares every attested policy field with the deploy
 inputs: the image role, `IMAGE-ENV.json` (the env of the measured image, from
 the build) and the `set-endpoints` values. On a mismatch it names the field,
 the expected value and the attested value. The enclave is then terminated,
-all enclaves stop, and the deploy exits 1 before a parent starts.
+all enclaves stop, and the deploy exits 1 before a parent starts. The deploy
+inputs do not give `clone_peer_pcr3`: `verify-launch` takes it from the
+verified document, as described above.
 
 `ENCLAVE_DEBUG_MODE=1` skips this check, because the PCRs are zero.
 

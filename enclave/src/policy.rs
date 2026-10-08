@@ -87,6 +87,12 @@ pub struct ProductionPolicy {
     pub gas_tx_allowed_selectors: Vec<[u8; 4]>,
     /// The KMS pin set at launch. See [`SecurityPolicy::with_kms`].
     pub kms: Option<KmsPin>,
+    /// PCR3 that a clone peer must have: this enclave's own PCR3, read at
+    /// launch ([`SecurityPolicy::with_clone_peer_pcr3`]). `Some` for a role
+    /// that clones (not [`SignerRole::Mint`]).
+    /// [`check_invariants`](Self::check_invariants) refuses `None` or all zero
+    /// there: the parent instance must have an IAM role.
+    pub clone_peer_pcr3: Option<[u8; 48]>,
 }
 
 /// Why the policy is [`SecurityPolicy::Development`].
@@ -210,7 +216,24 @@ impl SecurityPolicy {
                 Vec::new()
             },
             kms: None,
+            clone_peer_pcr3: None,
         })
+    }
+
+    /// Set the clone-peer PCR3 of a production policy whose role clones.
+    /// `read_pcr3` reads this enclave's own PCR3 (NSM); it runs only for such a
+    /// policy. A development policy, or a mint signer (cloning is off), does
+    /// not change.
+    pub fn with_clone_peer_pcr3(
+        mut self,
+        read_pcr3: impl FnOnce() -> crate::error::Result<[u8; 48]>,
+    ) -> crate::error::Result<Self> {
+        if let Self::Production(p) = &mut self {
+            if p.signer_role.clones() {
+                p.clone_peer_pcr3 = Some(read_pcr3()?);
+            }
+        }
+        Ok(self)
     }
 
     /// Set the KMS pin of a production policy. A development policy does not
@@ -251,6 +274,7 @@ impl SecurityPolicy {
                 gas_tx_max_value_wei: p.gas_tx_max_value_wei.unwrap_or(0),
                 gas_tx_allowed_selectors: p.gas_tx_allowed_selectors.clone(),
                 kms: p.kms.clone(),
+                clone_peer_pcr3: p.clone_peer_pcr3,
             },
             Self::Development { .. } => AttestedPolicy::Development,
         }
@@ -317,6 +341,23 @@ impl ProductionPolicy {
                  the EVM RPC host and CA at launch."
                     .into(),
             );
+        }
+        // Clone peers are bound to the parent IAM role through PCR3. An
+        // instance without a role has an all-zero PCR3, and then nothing binds
+        // a clone peer to the operator account.
+        match (self.signer_role.clones(), self.clone_peer_pcr3) {
+            (true, Some(pcr3)) if pcr3.iter().any(|&b| b != 0) => {}
+            (true, _) => {
+                return Err(
+                    "production policy has no clone-peer PCR3: the parent instance has no IAM \
+                     role (PCR3 is all zero). Attach the IAM role to the instance before launch."
+                        .into(),
+                );
+            }
+            (false, None) => {}
+            (false, Some(_)) => {
+                return Err("production policy of a role that does not clone has a PCR3".into());
+            }
         }
         Ok(())
     }
