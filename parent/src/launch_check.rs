@@ -150,16 +150,22 @@ pub fn check_launch(
     {
         bail!("attestation user_data does not commit the returned policy bytes");
     }
-    let attested = AttestedPolicy::from_bytes(&response.attested_policy)?;
-    for ((field, want), (_, got)) in fields(expected).into_iter().zip(fields(&attested)) {
+    compare_policy(expected, &response.attested_policy)
+}
+
+/// Decode `attested` and compare it with `expected`, field by field. The
+/// error names the first field that differs.
+pub fn compare_policy(expected: &AttestedPolicy, attested: &[u8]) -> Result<AttestedPolicy> {
+    let decoded = AttestedPolicy::from_bytes(attested)?;
+    for ((field, want), (_, got)) in fields(expected).into_iter().zip(fields(&decoded)) {
         if want != got {
             bail!("{field} mismatch: expected {want}, attested {got}");
         }
     }
-    if expected.to_bytes() != response.attested_policy {
+    if expected.to_bytes() != attested {
         bail!("attested policy bytes differ from the expected policy");
     }
-    Ok(attested)
+    Ok(decoded)
 }
 
 /// Each field of `policy` as (name, value), in wire order. An option gives a

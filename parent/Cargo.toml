@@ -111,3 +111,5 @@ utexo-bridge-enclave = { path = "../enclave", features = ["mock-attestation", "a
 # Self-signed certificate for the header-sync TLS test, made in-process.
 # The mTLS tests use openssl (tests/fixtures/parent-pki.sh).
 rcgen = "0.14"
+# Real-format documents under a test root, for the offline bundle tests.
+attestation-verify = { path = "../attestation-verify", features = ["mock", "test-util"] }
