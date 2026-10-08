@@ -232,10 +232,8 @@ maps it to `FAILED_PRECONDITION`), `2` not ready, `1` all other errors.
   External users cannot build without read access to all three private repos.
   Public source builds require public access to their pinned revisions.
   Access alone does not prove that a build reproduces the approved PCR0.
-- **Rootful Docker Engine, Buildx and `nitro-cli`** for the EIF. Use an x86_64
-  Linux VM or bare-metal host with a `docker-container` builder. Do not use
-  rootless Docker or Docker inside LXC for release measurements. Nitro
-  hardware is needed only to run the EIF.
+- **Docker + `nitro-cli`** for the EIF. Any x86_64 Linux host with Docker can
+  build an EIF and read its PCRs; Nitro hardware is needed only to run it.
 
 ```bash
 git clone git@github.com:UTEXO-Protocol/enclave-signer
@@ -283,25 +281,6 @@ exactly one of `mint-signer` / `burn-signer` whenever `rgb-mint-burn` is on;
 profile. CI asserts every guard fires.
 
 ### Enclave image (EIF)
-
-Create and select the builder once on the build host:
-
-```bash
-docker buildx create --name enclave-eif --driver docker-container --use
-docker buildx inspect --bootstrap
-```
-
-Check that `Driver` is `docker-container`. Use this builder for each build:
-
-```bash
-export BUILDX_BUILDER=enclave-eif
-```
-
-Match Docker, Buildx, BuildKit, `nitro-cli` and Nitro kernel/init blobs to the
-approved build environment. The script does not enforce these versions or
-reject rootless/LXC environments. A successful build alone does not prove a
-matching PCR0. Compare `PCR.json` from two clean builds of the same commit
-with the same asset and build arguments before approving measurements.
 
 No image takes a KMS value: the mint enclave gets them at launch. See
 [mint KMS setup](docs/kms-persistence.md) for the parent and policy requirements.
@@ -379,15 +358,19 @@ path-prefix remapping, pre-generated proto code. All five EIF recipes use
 digest-pinned Debian 13 Trixie images for both build and runtime stages.
 The builder uses Rust `1.96.1`, matching `rust-toolchain.toml`.
 Both stages install packages from the signed Debian snapshot
-`20261007T000000Z`. APT checks repository signatures; only the snapshot expiry
-check is disabled. CMake comes from this snapshot instead of PyPI.
+`20261007T000000Z` over HTTPS. APT checks repository signatures.
+The expiry check is disabled because a fixed snapshot must remain usable after
+its Release metadata expires. CMake comes from this snapshot instead of PyPI.
+Only the parent and dev image recipes still use live APT repositories.
+CI pins `nitro-cli` and its kernel/init blobs to `1.4.5`. Docker, Buildx and
+BuildKit versions are not pinned in CI, so PCR reproducibility still requires
+verification.
 
 Each runtime checks the binary with its dynamic loader before EIF conversion.
 This rejects missing libraries and incompatible symbol versions.
 The base-image update changes enclave measurements. Build new EIFs and approve
 their PCRs before updating attestation allowlists or KMS policies. Existing
-measurements do not apply to these images. Matching PCRs still require the
-same build tools and inputs described above.
+measurements do not apply to these images.
 
 `.github/workflows/build-eif.yml` builds the `combined`, `rgb`,
 `rgb-mint`, `rgb-burn` and `ccd` variants on a plain runner with `nitro-cli 1.4.5`

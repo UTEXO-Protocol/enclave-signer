@@ -7,11 +7,12 @@
 # Use the same Debian release for the builder and runtime.
 FROM rust:1.96.1-slim-trixie@sha256:31ee7fc65186be7e0e0ccb3f2ca305f14e4739e7642a1ae65753aa5d7b874523 AS builder
 
-# Pin packages to a signed snapshot. HTTP bootstraps ca-certificates.
+# Pin packages to a signed snapshot over HTTPS.
+# Disable expiry checks so the fixed snapshot remains usable after Valid-Until.
 RUN set -eux; \
     printf '%s\n' \
-      'deb http://snapshot.debian.org/archive/debian/20261007T000000Z trixie main' \
-      'deb http://snapshot.debian.org/archive/debian-security/20261007T000000Z trixie-security main' \
+      'deb https://snapshot.debian.org/archive/debian/20261007T000000Z trixie main' \
+      'deb https://snapshot.debian.org/archive/debian-security/20261007T000000Z trixie-security main' \
       > /etc/apt/sources.list; \
     rm -f /etc/apt/sources.list.d/*; \
     printf 'Acquire::Check-Valid-Until "false";\nAcquire::Retries "5";\n' > /etc/apt/apt.conf.d/99snapshot; \
@@ -49,14 +50,19 @@ RUN --mount=type=secret,id=github_token \
 # Pin the measured rootfs by digest. Update both stages together.
 FROM debian:trixie-slim@sha256:a29215f6a35e51e22adffa17f89e9d2ef06214e64a2bad10d765c46aea49f11f AS runtime
 
+# Bootstrap HTTPS before the runtime installs its CA package.
+COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
+
+# Disable expiry checks for the fixed snapshot; keep signature checks enabled.
 # Remove package-manager logs and caches in the installation layer.
 RUN set -eux; \
     printf '%s\n' \
-      'deb http://snapshot.debian.org/archive/debian/20261007T000000Z trixie main' \
-      'deb http://snapshot.debian.org/archive/debian-security/20261007T000000Z trixie-security main' \
+      'deb https://snapshot.debian.org/archive/debian/20261007T000000Z trixie main' \
+      'deb https://snapshot.debian.org/archive/debian-security/20261007T000000Z trixie-security main' \
       > /etc/apt/sources.list; \
     rm -f /etc/apt/sources.list.d/*; \
     printf 'Acquire::Check-Valid-Until "false";\nAcquire::Retries "5";\n' > /etc/apt/apt.conf.d/99snapshot; \
+    printf 'Acquire::https::CaInfo "/etc/ssl/certs/ca-certificates.crt";\n' > /etc/apt/apt.conf.d/98ca; \
     apt-get update && apt-get install -y --no-install-recommends \
     bash ca-certificates socat iproute2 libssl3t64 libstdc++6 \
     && apt-get clean \
