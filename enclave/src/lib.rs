@@ -111,6 +111,9 @@ pub mod cloning;
 pub mod clocksync;
 pub mod config;
 pub mod conn;
+// The TLS rule of the loopback forwarders. Plain std, so tests run on all
+// targets.
+pub mod egress;
 pub mod error;
 pub mod framing;
 pub mod keys;

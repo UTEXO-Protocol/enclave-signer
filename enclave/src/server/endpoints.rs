@@ -109,8 +109,8 @@ pub(super) fn handle_set_endpoints(
             .map_err(|e| EnclaveError::Internal(format!("cannot pin hosts in /etc/hosts: {e}")))?;
     }
     #[cfg(all(feature = "vsock", target_os = "linux", not(test)))]
-    for (listener, vsock_port) in listeners {
-        crate::vsock_forwarder::spawn(listener, vsock_port);
+    for (listener, vsock_port, require_tls) in listeners {
+        crate::vsock_forwarder::spawn(listener, vsock_port, require_tls);
     }
     #[cfg(feature = "kms-persistence")]
     if let Some(source) = seed_source {
@@ -126,24 +126,27 @@ pub(super) fn handle_set_endpoints(
     })
 }
 
-/// The loopback end and the parent vsock port of each forwarder this build
-/// needs. The host must run `vsock-proxy <vsock port> <host> <port>` for each.
+/// The loopback end, the parent vsock port and the TLS rule of each forwarder
+/// this build needs. The host must run `vsock-proxy <vsock port> <host>
+/// <port>` for each. A TLS endpoint gets only TLS ([`crate::egress`]).
 #[cfg(any(test, all(feature = "vsock", target_os = "linux")))]
 // Each push depends on a feature.
 #[allow(clippy::vec_init_then_push)]
-fn forwarder_plan(endpoints: &Endpoints) -> Vec<(SocketAddrV4, u32)> {
+fn forwarder_plan(endpoints: &Endpoints) -> Vec<(SocketAddrV4, u32, bool)> {
     #[allow(unused_mut)]
     let mut plan = Vec::new();
     #[cfg(feature = "rgb-validation")]
     plan.push((
         SocketAddrV4::new(std::net::Ipv4Addr::LOCALHOST, endpoints.electrum_port),
         vsock_port("ESPLORA_VSOCK_PORT", 8001),
+        endpoints.indexer_uses_tls(),
     ));
     #[cfg(feature = "evm-rpc")]
     if let Some(tls) = &endpoints.evm_rpc_tls {
         plan.push((
             SocketAddrV4::new(std::net::Ipv4Addr::LOCALHOST, tls.tls_port),
             vsock_port("EVM_RPC_VSOCK_PORT", 8002),
+            true,
         ));
     }
     // KMS and EVM RPC both use port 443, so KMS takes its own address.
@@ -152,6 +155,7 @@ fn forwarder_plan(endpoints: &Endpoints) -> Vec<(SocketAddrV4, u32)> {
         plan.push((
             SocketAddrV4::new(crate::kms::KMS_LOOPBACK, crate::kms::KMS_PORT),
             vsock_port("KMS_VSOCK_PORT", crate::kms::DEFAULT_KMS_VSOCK_PORT),
+            true,
         ));
     }
     let _ = endpoints;
@@ -159,11 +163,11 @@ fn forwarder_plan(endpoints: &Endpoints) -> Vec<(SocketAddrV4, u32)> {
 }
 
 #[cfg(any(test, all(feature = "vsock", target_os = "linux")))]
-fn bind_all(plan: &[(SocketAddrV4, u32)]) -> Result<Vec<(TcpListener, u32)>> {
+fn bind_all(plan: &[(SocketAddrV4, u32, bool)]) -> Result<Vec<(TcpListener, u32, bool)>> {
     plan.iter()
-        .map(|&(addr, vsock_port)| {
+        .map(|&(addr, vsock_port, require_tls)| {
             TcpListener::bind(addr)
-                .map(|listener| (listener, vsock_port))
+                .map(|listener| (listener, vsock_port, require_tls))
                 .map_err(|e| EnclaveError::Internal(format!("cannot listen on {addr}: {e}")))
         })
         .collect()
@@ -370,7 +374,7 @@ mod tests {
             return;
         }
         let plan = forwarder_plan(&Endpoints::parse(&valid(1)).unwrap());
-        let addrs: std::collections::HashSet<_> = plan.iter().map(|(a, _)| *a).collect();
+        let addrs: std::collections::HashSet<_> = plan.iter().map(|(a, _, _)| *a).collect();
         assert_eq!(addrs.len(), plan.len(), "{plan:?}");
         let free = TcpListener::bind("127.0.0.1:0")
             .unwrap()
@@ -379,9 +383,9 @@ mod tests {
             .port();
         let plan: Vec<_> = plan
             .into_iter()
-            .map(|(a, v)| {
+            .map(|(a, v, t)| {
                 let port = if a.port() == 443 { free } else { 0 };
-                (SocketAddrV4::new(*a.ip(), port), v)
+                (SocketAddrV4::new(*a.ip(), port), v, t)
             })
             .collect();
         let listeners = bind_all(&plan).unwrap();
@@ -390,7 +394,7 @@ mod tests {
         {
             let bound: Vec<_> = listeners
                 .iter()
-                .map(|(l, _)| l.local_addr().unwrap())
+                .map(|(l, _, _)| l.local_addr().unwrap())
                 .collect();
             for ip in [Ipv4Addr::LOCALHOST, crate::kms::KMS_LOOPBACK] {
                 assert!(bound.contains(&(ip, free).into()), "{bound:?}");
@@ -399,9 +403,44 @@ mod tests {
             // Control: KMS on 127.0.0.1 collides with the EVM RPC forwarder.
             let control: Vec<_> = plan
                 .iter()
-                .map(|&(a, v)| (SocketAddrV4::new(Ipv4Addr::LOCALHOST, a.port()), v))
+                .map(|&(a, v, t)| (SocketAddrV4::new(Ipv4Addr::LOCALHOST, a.port()), v, t))
                 .collect();
             assert!(bind_all(&control).is_err());
+        }
+    }
+
+    /// Each forwarder of a TLS endpoint refuses plaintext. The indexer
+    /// forwarder follows the URL scheme: a dev build can still use a
+    /// plaintext indexer.
+    #[test]
+    fn tls_endpoints_get_tls_only_forwarders() {
+        let tls = forwarder_plan(&Endpoints::parse(&valid(1)).unwrap());
+        assert!(
+            tls.iter().all(|&(_, _, require_tls)| require_tls),
+            "{tls:?}"
+        );
+
+        #[cfg(feature = "rgb-validation")]
+        {
+            let plaintext = forwarder_plan(
+                &Endpoints::parse(&SetEndpointsRequest {
+                    electrum_url: "tcp://electrum1.test:50001".into(),
+                    ..valid(1)
+                })
+                .unwrap(),
+            );
+            let indexer = plaintext
+                .iter()
+                .find(|(a, _, _)| a.port() == 50001)
+                .unwrap();
+            assert!(!indexer.2, "a plaintext dev indexer is not gated");
+            assert!(
+                plaintext
+                    .iter()
+                    .filter(|(a, _, _)| a.port() != 50001)
+                    .all(|&(_, _, require_tls)| require_tls),
+                "the EVM RPC and KMS forwarders stay TLS-only: {plaintext:?}"
+            );
         }
     }
 

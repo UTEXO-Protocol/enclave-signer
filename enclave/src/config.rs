@@ -414,6 +414,12 @@ pub struct Endpoints {
 }
 
 impl Endpoints {
+    /// True for an `ssl://` or `https://` indexer. Its forwarder then sends on
+    /// only TLS ([`crate::egress`]).
+    pub fn indexer_uses_tls(&self) -> bool {
+        self.electrum_url.starts_with("ssl://") || self.electrum_url.starts_with("https://")
+    }
+
     /// Check the values this build uses. A value the build does not use
     /// must be empty.
     pub fn parse(req: &crate::proto::SetEndpointsRequest) -> std::result::Result<Self, String> {

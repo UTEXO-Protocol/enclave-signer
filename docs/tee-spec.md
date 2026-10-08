@@ -162,7 +162,17 @@ instead, with the same forwarder and pin. Dev uses it on the custom signet,
 where the rgb-ops Electrum chain check fails. The plaintext forms `tcp://` and
 `http://` let the host read and change every answer; only a test, debug,
 `mock-attestation` or `allow-seed-import` build accepts them. A release image
-refuses them in `SetEndpoints`. The EVM RPC forwarder listens on the
+refuses them in `SetEndpoints`.
+
+Each loopback forwarder of a TLS endpoint (an `ssl://` or `https://` indexer,
+the EVM RPC, KMS) sends on only a connection that starts with a TLS handshake
+record (`enclave/src/egress.rs`). The enclave has no other network path, so no
+client can send plaintext to the host for such an endpoint, not even after an
+HTTPS -> HTTP redirect. `esplora-client` (`minreq`) and the EVM RPC client
+(`reqwest`) follow redirects, and their APIs here cannot turn that off. A
+redirect to a port with no forwarder, or to another host, has no route out.
+The parent -> enclave channel (vsock port 5000) is a separate inbound listener
+and is not affected. The EVM RPC forwarder listens on the
 EVM RPC TLS port, and the client connects to `https://<host>:<port>/` through
 it, so TLS ends inside the enclave; it trusts only the CA of the set, in every
 build. The host runs `vsock-proxy 8002 <EVM_RPC_HOST> <EVM_RPC_TLS_PORT>`.
