@@ -110,8 +110,8 @@ jobs:
           build-args: |
             BUILDKIT_INLINE_CACHE=1
             ${{ matrix.signer_role && format('SIGNER_ROLE={0}', matrix.signer_role) || '' }}
-            ${{ matrix.name == 'parent' && inputs.stage == 'dev' && 'CARGO_ARGS=--features insecure-dev' || '' }}
-            ${{ matrix.name == 'parent' && inputs.stage == 'dev' && 'PROFILE_DIR=debug' || '' }}
+            ${{ matrix.name == 'parent' && inputs.stage == 'dev' && 'CARGO_ARGS=--features insecure-dev' || 'CARGO_ARGS=--release' }}
+            ${{ matrix.name == 'parent' && inputs.stage == 'dev' && 'PROFILE_DIR=debug' || 'PROFILE_DIR=release' }}
           secret-files: |
             consensus_key=${{ runner.temp }}/private-deps/consensus_key
             ops_key=${{ runner.temp }}/private-deps/ops_key
@@ -133,8 +133,8 @@ jobs:
           build-args: |
             BUILDKIT_INLINE_CACHE=1
             ${{ matrix.signer_role && format('SIGNER_ROLE={0}', matrix.signer_role) || '' }}
-            ${{ matrix.name == 'parent' && inputs.stage == 'dev' && 'CARGO_ARGS=--features insecure-dev' || '' }}
-            ${{ matrix.name == 'parent' && inputs.stage == 'dev' && 'PROFILE_DIR=debug' || '' }}
+            ${{ matrix.name == 'parent' && inputs.stage == 'dev' && 'CARGO_ARGS=--features insecure-dev' || 'CARGO_ARGS=--release' }}
+            ${{ matrix.name == 'parent' && inputs.stage == 'dev' && 'PROFILE_DIR=debug' || 'PROFILE_DIR=release' }}
           secret-files: |
             consensus_key=${{ runner.temp }}/private-deps/consensus_key
             ops_key=${{ runner.temp }}/private-deps/ops_key
