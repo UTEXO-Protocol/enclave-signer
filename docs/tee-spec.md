@@ -58,7 +58,11 @@ Internet -- orchestrator -- EC2 parent (UNTRUSTED) -- vsock -- Nitro Enclave (TR
 **Residual trust anchors:** AWS (Nitro isolation + attestation root CA), the
 correctness of this enclave code and its validation libraries, the Bitcoin
 checkpoint, and the pinned EVM RPC endpoint. Mint seed recovery also trusts
-AWS KMS and its access policies. The mint path uses Electrum resolver data
+AWS KMS and its access policies. The Bridge contract and its governance are
+trusted: the enclave pins the Bridge address, not its code, so an upgraded
+Bridge could emit fake `FundsIn` events and back unbacked mints. EVM finality is
+`EVM_MIN_CONFIRMATIONS` blocks below the RPC head, not L1 finality, so a deeper
+Arbitrum sequencer reorg is also accepted risk. The mint path uses Electrum resolver data
 without a separate SPV inclusion check. CCD source checks trust the listener.
 
 **Pinned EVM RPC trust (accepted by design, F05-NEW-AF-07):** the production
@@ -340,7 +344,8 @@ The response returns the calldata unchanged.
 **Settlement bind (`bfa-mint`).** `settlementData` is
 `abi.encode(bytes32[] operationIds, uint256[] netAmounts)`, the deposits the
 release settles. The enclave verifies every `FundsIn` lock behind the burn's
-mint ancestry itself (receipt, pinned emitter, RGB OpId, depth) and reads the
+mint ancestry itself (receipt, pinned emitter, RGB OpId, destination chain 827166,
+depth) and reads the
 `BridgeFundsIn` record from the same receipt. It then requires the cited
 pairs to equal those records exactly: set equality, canonical encoding,
 strictly ascending `operationId` order (so no duplicates), and at least one
@@ -368,8 +373,8 @@ on both routes (Sec 9, P6).
 settlement module and the commission rate on the `(sourceChainId,
 destinationChainId)` pair, so `sourceChainId` decides which contracts judge a
 release. An RGB-sourced release (direct `fundsOut` and LayerZero `lzFundsOut`
-alike) MUST carry `sourceChainId == 96`, the bridge's RGB network id, pinned as
-a compile-time constant (`RGB_SOURCE_CHAIN_ID`) and so measured into PCR0. The
+alike) MUST carry `sourceChainId == 827166`, the bridge's RGB network id, pinned as
+a compile-time constant (`RGB_CHAIN_ID`) and so measured into PCR0. The
 `sourceAddress` rule above applies to both routes the same way
 (`validate_rgb_source_identity`). A CCD-sourced release is not subject to it.
 
@@ -634,7 +639,12 @@ proofs for every witness transaction. The PSBT destination path instead binds
 the transaction being signed to the consignment; that transaction need not
 already be mined. A `bfa-mint` build validates the bridged schema with an extension that
 checks every `Bridge` transition against the enclave's own verified `FundsIn`
-lock, and refuses a mint with no verified lock behind it.
+lock, and refuses a mint with no verified lock behind it. A verified lock is
+the one receipt the listener names for that mint OpId (`mint_ancestors` or
+`evm_tx_hash`). Its `FundsIn` `rgbOpId` word must equal the 32 raw OpId bytes
+(a big-endian `uint256`, no byte reversal), and its `BridgeFundsIn`
+`destinationChainId` must equal `RGB_CHAIN_ID` (827166). Other `FundsIn` events
+with the same OpId are ignored.
 
 For an RGB-source request, the SPV layer enforces these rules:
 
@@ -686,7 +696,7 @@ delegated to the receiving contract and known gaps. Enforced checks fail closed.
 | P3 | Exact amount | `MS_BURNED_ASSET` must equal calldata `amount`. The host's `rgb_amount` is not evidence. |
 | P4 | Valid calldata | Allowed selector, 64 KiB cap, canonical ABI encoding, and route-specific destination-chain check. |
 | P5 | Correct destination | Pinned chain and contract. The payee must match `MS_BURN_RECIPIENT`. The burn does not bind LayerZero `dstEid`. |
-| P6 | Release identity | RGB source chain 96, empty source address, recomputed `burnId`, matching burn OpId, and exact settlement pairs. |
+| P6 | Release identity | RGB source chain 827166, empty source address, recomputed `burnId`, matching burn OpId, and exact settlement pairs. |
 | P7 | Accepted Bitcoin history | Each witness must belong to the retained chain. |
 | P8 | Inclusion and relay agreement | Merkle inclusion, confirmation depth, tip freshness, and the BtcRelay checks below. |
 | P9 | Ancestry deposits | Verify each deposit through the pinned EVM RPC. Receiving contracts must enforce their settlement rules. |

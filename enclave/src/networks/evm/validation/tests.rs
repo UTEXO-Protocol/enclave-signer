@@ -489,7 +489,7 @@ fn rgb_release() -> ReleaseIdentity {
     ReleaseIdentity {
         burn_id: U256::ZERO,
         amount: U256::from(1000u64),
-        source_chain_id: U256::from(RGB_SOURCE_CHAIN_ID),
+        source_chain_id: U256::from(RGB_CHAIN_ID),
         source_address: String::new(),
         settlement_data: Vec::new(),
         source_burn_tx_id: [0x5b; 32],
@@ -508,7 +508,7 @@ fn rgb_source_identity_rejects_a_foreign_source_chain() {
     // On chain, (sourceChainId, destinationChainId) selects the verifier and
     // commission rate. Each id but the RGB one must refuse, also the
     // execution chain id and zero.
-    for foreign in [0u64, 1, 42161, RGB_SOURCE_CHAIN_ID + 1] {
+    for foreign in [0u64, 1, 42161, RGB_CHAIN_ID + 1] {
         let release = ReleaseIdentity {
             source_chain_id: U256::from(foreign),
             ..rgb_release()
@@ -517,7 +517,7 @@ fn rgb_source_identity_rejects_a_foreign_source_chain() {
             .expect_err("foreign source chain must refuse")
             .to_string();
         assert!(
-            err.contains("sourceChainId") && err.contains(&RGB_SOURCE_CHAIN_ID.to_string()),
+            err.contains("sourceChainId") && err.contains(&RGB_CHAIN_ID.to_string()),
             "{foreign}: {err}"
         );
     }
@@ -545,7 +545,7 @@ fn direct_route_surfaces_its_release_identity() {
             recipient: Address::from([0x22; ADDRESS_LEN]),
             amount: U256::from(1000u64),
             burnId: U256::from(7u64),
-            sourceChainId: U256::from(RGB_SOURCE_CHAIN_ID),
+            sourceChainId: U256::from(RGB_CHAIN_ID),
             destinationChainId: U256::from(1u64),
             sourceAddress: "who".into(),
             proof: Bytes::from(vec![0xf0]),
@@ -560,7 +560,7 @@ fn direct_route_surfaces_its_release_identity() {
             ReleaseIdentity {
                 burn_id: U256::from(7u64),
                 amount: U256::from(1000u64),
-                source_chain_id: U256::from(RGB_SOURCE_CHAIN_ID),
+                source_chain_id: U256::from(RGB_CHAIN_ID),
                 source_address: "who".into(),
                 settlement_data: vec![0xd0, 0x0d],
                 source_burn_tx_id: [0x5b; 32],

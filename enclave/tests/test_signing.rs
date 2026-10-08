@@ -76,7 +76,7 @@ fn mock_funds_out_calldata(recipient: [u8; 20], amount: u64) -> Vec<u8> {
             burnId: U256::ZERO,
             // The RGB network id. The enclave refuses an RGB-sourced release
             // with another sourceChainId before the consignment binding.
-            sourceChainId: U256::from(96u64),
+            sourceChainId: U256::from(utexo_bridge_enclave::networks::evm::RGB_CHAIN_ID),
             destinationChainId: U256::from(1u64),
             sourceAddress: String::new(),
             proof: Bytes::new(),

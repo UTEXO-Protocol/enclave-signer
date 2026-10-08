@@ -595,6 +595,25 @@ fn verify_rgb_funds_in_accepts_a_verified_lock() {
     );
 }
 
+/// A deposit routed to another chain must not back an RGB mint.
+#[cfg(feature = "bfa-validation")]
+#[test]
+fn verify_rgb_funds_in_rejects_a_foreign_destination_chain() {
+    let mut bridge = bridge_log(op_id(7), 1000, 950, 50);
+    bridge.data[BFI_DEST_CHAIN_ID_OFF..BFI_DEST_CHAIN_ID_OFF + 32].copy_from_slice(&word(42161));
+    let p = FakeEvm {
+        receipt: Some(receipt_with(
+            vec![rgb_companion_log(0xab, 100), bridge],
+            100,
+        )),
+        head: 112,
+    };
+    let e = verify_rgb_funds_in(&p, &BRIDGE, 12, &TX, &word(0xab))
+        .unwrap_err()
+        .to_string();
+    assert!(e.contains("destinationChainId 42161"), "got: {e}");
+}
+
 /// Without the record, a `fundsOut` has nothing to cite, so the lock is not
 /// settlement evidence.
 #[cfg(feature = "bfa-validation")]

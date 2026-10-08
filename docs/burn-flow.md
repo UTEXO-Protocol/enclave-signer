@@ -82,7 +82,7 @@ sequenceDiagram
 | `TS_BRIDGE` | 8014 | Mint transition. It shows in the burn's history (the ancestry). |
 | `MS_BURNED_ASSET` | 1001 | Burn metadata: the number of units destroyed (u64). |
 | `MS_BURN_RECIPIENT` | 1003 | Burn metadata: 32 bytes. A left-padded EVM address. |
-| `RGB_SOURCE_CHAIN_ID` | 96 | The bridge's id for the RGB network. Compiled in. |
+| `RGB_CHAIN_ID` | 827166 | The bridge's id for the RGB network. Compiled in. |
 | `SPV_MIN_CONFIRMATIONS` | 6 | Minimum depth of each Bitcoin transaction. |
 | `SPV_MAX_TIP_AGE_SECS` | 7200 | Maximum age of the header-chain tip. |
 | `SPV_MAX_TIP_FUTURE_SECS` | 7200 | Maximum time the tip can be in the future. |
@@ -122,7 +122,8 @@ burn signer checks each deposit before it validates the consignment.
   - the receipt must be a success;
   - it must have exactly one `FundsIn` event from `FUNDS_IN_CONTRACT`, with
     the mint's RGB OpId;
-  - it must have exactly one `BridgeFundsIn` event from the same contract;
+  - it must have exactly one `BridgeFundsIn` event from the same contract,
+    with `destinationChainId` 827166 (`RGB_CHAIN_ID`);
   - it must be at least `EVM_MIN_CONFIRMATIONS` blocks deep.
 - **B1.5** The result is a list of verified locks: `(operationId, netAmount)`.
   Stage 2 and Stage 5 use this list.
@@ -179,7 +180,7 @@ limits. Signet and regtest skip proof-of-work and `nBits` checks.
 Both routes (`fundsOut` and `lzFundsOut`), in this order:
 
 - **B5.1** The burned amount must be at least the calldata amount.
-- **B5.2** `sourceChainId` must equal 96 (`RGB_SOURCE_CHAIN_ID`).
+- **B5.2** `sourceChainId` must equal 827166 (`RGB_CHAIN_ID`).
 - **B5.3** `sourceAddress` must be empty. RGB has no source address.
 - **B5.4** The burn signer calculates `burnId` the same way as
   `Bridge._deriveBurnIdFromFields`. It uses the pinned `FUNDS_IN_CONTRACT`,
