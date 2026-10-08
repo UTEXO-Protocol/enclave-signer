@@ -362,6 +362,17 @@ impl AttestedPolicy {
     }
 }
 
+/// `user_data` of a policy-only attestation, which an enclave without keys
+/// gives. A keyed attestation commits the key bundle too, so the two never
+/// collide.
+pub fn policy_commitment(policy: &[u8]) -> [u8; 32] {
+    use sha2::{Digest, Sha256};
+    let mut hash = Sha256::new();
+    hash.update(b"utexo/attested-policy/v1\0");
+    hash.update(policy);
+    hash.finalize().into()
+}
+
 /// Why [`AttestedPolicy::from_bytes`] rejected its input.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
 #[error("cannot decode the attested policy: {0}")]

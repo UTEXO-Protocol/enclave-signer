@@ -239,14 +239,33 @@ pub(super) fn handle_get_attested_public_key(
     // This endpoint attests any caller nonce. This is safe for replay
     // accounting: the cloning handlers record a nonce only after a fully
     // authenticated handshake. Thus these nonces cannot fill the guard.
-    let keys = ctx.state.get_keys()?;
+    let attested_policy = ctx.launch()?.policy.commitment_bytes();
+    let keys = match ctx.state.get_keys() {
+        Ok(keys) => keys,
+        // No keys yet: attest the policy only.
+        // Checked by `parent/src/launch_check.rs::check_launch`.
+        Err(EnclaveError::KeyNotInitialized) => {
+            let commitment = attestation_verify::policy_commitment(&attested_policy);
+            let attestation_doc =
+                crate::attestation::get_attestation(&nonce, None, Some(&commitment))?;
+            return Ok(EnclaveResponse {
+                response: Some(Response::GetAttestedPublicKey(
+                    GetAttestedPublicKeyResponse {
+                        public_keys: None,
+                        attestation_doc,
+                        attested_policy,
+                    },
+                )),
+            });
+        }
+        Err(e) => return Err(e),
+    };
     let public_keys = build_public_keys_response(keys, &ctx.bridge_config);
 
     // `user_data` = sha256(pubkey_bundle || policy_commitment). A verifier
     // checks keys and policy as one value.
     // Verifier mirror: `parent/src/attest_verify.rs::verify_attested_pubkey`.
     let mut preimage = canonical_pubkey_bundle(&public_keys);
-    let attested_policy = ctx.launch()?.policy.commitment_bytes();
     preimage.extend_from_slice(&attested_policy);
     let commitment: [u8; 32] = Sha256::digest(&preimage).into();
 

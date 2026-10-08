@@ -7,6 +7,9 @@
 //! the hardcoded root CA, and compare PCR0/1/2. A nonce must be present. If
 //! the caller gives a nonce, it must be equal.
 //!
+//! Policy-only path. An enclave without keys attests only its policy.
+//! The document has no public key. Its `user_data` is [`policy_commitment`].
+//!
 //! Mock path (`mock` feature): make and verify raw CBOR documents without COSE
 //! or certificate checks. It compares PCRs and the expected nonce, if supplied.
 //! It requires a public-key field. The caller must check that key and user_data.
@@ -20,8 +23,8 @@ use thiserror::Error;
 
 pub mod policy;
 pub use policy::{
-    AttestationMode, AttestedPolicy, BtcDataSource, EvmDataSource, EvmRpcTlsPin, KmsPin,
-    PolicyDecodeError, SignerRole, POLICY_COMMITMENT_V8,
+    policy_commitment, AttestationMode, AttestedPolicy, BtcDataSource, EvmDataSource, EvmRpcTlsPin,
+    KmsPin, PolicyDecodeError, SignerRole, POLICY_COMMITMENT_V8,
 };
 
 // Public types
@@ -85,6 +88,7 @@ impl ExpectedPcrs {
 /// The verified contents of an attestation document, minus CBOR/COSE wrapping.
 #[derive(Debug, Clone)]
 pub struct VerifiedAttestation {
+    /// Empty for a policy-only document.
     pub enclave_pubkey: Vec<u8>,
     pub pcrs: HashMap<u32, Vec<u8>>,
     pub timestamp: u64,
@@ -137,7 +141,50 @@ pub fn verify_attestation(
     expected_pcrs: &ExpectedPcrs,
     expected_nonce: Option<&[u8; 32]>,
 ) -> Result<VerifiedAttestation> {
-    real::verify_real_document(doc, expected_pcrs, expected_nonce)
+    let (attestation, nonce) = real::verify_real_document(
+        doc,
+        expected_pcrs,
+        expected_nonce,
+        real::root_cert_der(),
+        CheckTime::Now,
+    )?;
+    into_verified(attestation, nonce, true)
+}
+
+/// Verify a real keyed document, as [`verify_attestation`] does, but check
+/// the certificates at the document timestamp. NSM certificates live for
+/// hours, so a stored document needs this check. The nonce is required.
+pub fn verify_attestation_at_document_time(
+    doc: &[u8],
+    expected_pcrs: &ExpectedPcrs,
+    expected_nonce: &[u8; 32],
+) -> Result<VerifiedAttestation> {
+    let (attestation, nonce) = real::verify_real_document(
+        doc,
+        expected_pcrs,
+        Some(expected_nonce),
+        real::root_cert_der(),
+        CheckTime::Document,
+    )?;
+    into_verified(attestation, nonce, true)
+}
+
+/// Verify a real policy-only document, as [`verify_attestation`] does.
+/// The nonce is required and there must be no `public_key`.
+/// The caller must check `user_data` against [`policy_commitment`].
+pub fn verify_policy_attestation(
+    doc: &[u8],
+    expected_pcrs: &ExpectedPcrs,
+    expected_nonce: &[u8; 32],
+) -> Result<VerifiedAttestation> {
+    let (attestation, nonce) = real::verify_real_document(
+        doc,
+        expected_pcrs,
+        Some(expected_nonce),
+        real::root_cert_der(),
+        CheckTime::Now,
+    )?;
+    into_verified(attestation, nonce, false)
 }
 
 // Public API - mock path (feature-gated)
@@ -152,7 +199,20 @@ pub fn verify_mock_attestation(
     expected_pcrs: &ExpectedPcrs,
     expected_nonce: Option<&[u8; 32]>,
 ) -> Result<VerifiedAttestation> {
-    mock::verify_mock_document(doc, expected_pcrs, expected_nonce)
+    let (attestation, nonce) = mock::verify_mock_document(doc, expected_pcrs, expected_nonce)?;
+    into_verified(attestation, nonce, true)
+}
+
+/// Mock form of [`verify_policy_attestation`]. Tests only.
+#[cfg(feature = "mock")]
+pub fn verify_mock_policy_attestation(
+    doc: &[u8],
+    expected_pcrs: &ExpectedPcrs,
+    expected_nonce: &[u8; 32],
+) -> Result<VerifiedAttestation> {
+    let (attestation, nonce) =
+        mock::verify_mock_document(doc, expected_pcrs, Some(expected_nonce))?;
+    into_verified(attestation, nonce, false)
 }
 
 /// Build a mock attestation document for tests: zero PCRs, no COSE, no
@@ -176,6 +236,14 @@ pub fn build_mock_document_with_pcrs(
     pcrs: &ExpectedPcrs,
 ) -> Result<Vec<u8>> {
     mock::build_mock_document_with_pcrs(nonce, public_key, user_data, pcrs)
+}
+
+/// The time at which the certificate validity is checked.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum CheckTime {
+    Now,
+    /// The document timestamp. NSM gives it in milliseconds.
+    Document,
 }
 
 // Shared helpers
@@ -220,6 +288,31 @@ fn verify_pcrs(pcrs: &HashMap<u32, Vec<u8>>, expected: &ExpectedPcrs) -> Result<
     check(1, &expected.pcr1)?;
     check(2, &expected.pcr2)?;
     Ok(())
+}
+
+/// A keyed document must have a `public_key`. A policy-only document must not.
+fn into_verified(
+    attestation: AttestationDocument,
+    nonce: Vec<u8>,
+    keyed: bool,
+) -> Result<VerifiedAttestation> {
+    let enclave_pubkey = match (attestation.public_key, keyed) {
+        (Some(key), true) => key,
+        (None, false) => Vec::new(),
+        (None, true) => return Err(VerifyError::Attestation("missing public key".into())),
+        (Some(_), false) => {
+            return Err(VerifyError::Attestation(
+                "policy-only attestation has a public key".into(),
+            ))
+        }
+    };
+    Ok(VerifiedAttestation {
+        enclave_pubkey,
+        pcrs: attestation.pcrs,
+        timestamp: attestation.timestamp,
+        user_data: attestation.user_data,
+        nonce,
+    })
 }
 
 fn check_nonce(doc_nonce: &Option<Vec<u8>>, expected: Option<&[u8; 32]>) -> Result<Vec<u8>> {
@@ -271,7 +364,7 @@ IwLz3/Y=
 
     /// DER bytes of the embedded root cert. Decoded once. Each verify compares
     /// them byte for byte with `cabundle[0]`.
-    fn root_cert_der() -> &'static [u8] {
+    pub(super) fn root_cert_der() -> &'static [u8] {
         static ROOT: OnceLock<Vec<u8>> = OnceLock::new();
         ROOT.get_or_init(|| {
             let lines: Vec<&str> = AWS_NITRO_ROOT_CERT_PEM
@@ -284,11 +377,14 @@ IwLz3/Y=
         })
     }
 
+    /// `root_der` is the trust anchor. Tests pass their own root.
     pub(super) fn verify_real_document(
         doc: &[u8],
         expected_pcrs: &ExpectedPcrs,
         expected_nonce: Option<&[u8; 32]>,
-    ) -> Result<VerifiedAttestation> {
+        root_der: &[u8],
+        at: CheckTime,
+    ) -> Result<(AttestationDocument, Vec<u8>)> {
         let cose = CoseSign1::from_bytes(doc)?;
         verify_cose_alg_es384(&cose.protected)?;
         let payload = cose
@@ -299,7 +395,20 @@ IwLz3/Y=
         let attestation: AttestationDocument = ciborium::from_reader(payload.as_slice())
             .map_err(|e| VerifyError::Attestation(format!("failed to parse attestation: {e}")))?;
 
-        verify_certificate_chain(&attestation.certificate, &attestation.cabundle, &cose)?;
+        let at = match at {
+            CheckTime::Now => SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map_err(|_| VerifyError::Certificate("system clock error".into()))?
+                .as_secs(),
+            CheckTime::Document => attestation.timestamp / 1000,
+        };
+        verify_certificate_chain(
+            &attestation.certificate,
+            &attestation.cabundle,
+            &cose,
+            root_der,
+            at,
+        )?;
 
         let nonce = check_nonce(&attestation.nonce, expected_nonce)?;
 
@@ -309,17 +418,7 @@ IwLz3/Y=
 
         verify_pcrs(&attestation.pcrs, expected_pcrs)?;
 
-        let enclave_pubkey = attestation
-            .public_key
-            .ok_or_else(|| VerifyError::Attestation("missing public key".into()))?;
-
-        Ok(VerifiedAttestation {
-            enclave_pubkey,
-            pcrs: attestation.pcrs,
-            timestamp: attestation.timestamp,
-            user_data: attestation.user_data,
-            nonce,
-        })
+        Ok((attestation, nonce))
     }
 
     /// Parse and verify the attestation certificate chain.
@@ -333,12 +432,14 @@ IwLz3/Y=
         signing_cert_der: &[u8],
         cabundle: &[Vec<u8>],
         cose: &CoseSign1,
+        root_der: &[u8],
+        at: u64,
     ) -> Result<()> {
         if cabundle.is_empty() {
             return Err(VerifyError::Certificate("empty certificate bundle".into()));
         }
 
-        if cabundle[0].as_slice() != root_cert_der() {
+        if cabundle[0].as_slice() != root_der {
             return Err(VerifyError::Certificate(
                 "cabundle[0] is not the AWS Nitro root CA".into(),
             ));
@@ -349,12 +450,12 @@ IwLz3/Y=
             let cert = Certificate::from_der(cert_der).map_err(|e| {
                 VerifyError::Certificate(format!("failed to parse cabundle[{i}]: {e}"))
             })?;
-            verify_cert_validity(&cert)?;
+            verify_cert_validity(&cert, at)?;
             chain.push(cert);
         }
         let signing_cert = Certificate::from_der(signing_cert_der)
             .map_err(|e| VerifyError::Certificate(format!("failed to parse signing cert: {e}")))?;
-        verify_cert_validity(&signing_cert)?;
+        verify_cert_validity(&signing_cert, at)?;
         chain.push(signing_cert);
 
         // chain[0] is the root, anchored by byte equality above. Each issuer
@@ -539,17 +640,13 @@ IwLz3/Y=
     /// clock, prevent replay.
     const CERT_CLOCK_SKEW_TOLERANCE_SECS: u64 = 60;
 
-    fn verify_cert_validity(cert: &Certificate) -> Result<()> {
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_err(|_| VerifyError::Certificate("system clock error".into()))?
-            .as_secs();
-
+    /// `at` is the check time in Unix seconds.
+    fn verify_cert_validity(cert: &Certificate, at: u64) -> Result<()> {
         let validity = cert.tbs_certificate().validity();
         let not_before = validity.not_before.to_unix_duration().as_secs();
         let not_after = validity.not_after.to_unix_duration().as_secs();
 
-        check_cert_validity_window(now, not_before, not_after)
+        check_cert_validity_window(at, not_before, not_after)
     }
 
     /// Validity-window check with clock-skew tolerance. Separate, so tests do
@@ -749,6 +846,87 @@ IwLz3/Y=
             buf
         }
 
+        fn signed_document(pcrs: &ExpectedPcrs, nonce: &[u8; 32]) -> (Vec<u8>, Vec<u8>) {
+            // 2020-01-01T12:00:00Z, inside the default leaf validity.
+            crate::test_util::signed_document(
+                pcrs,
+                nonce,
+                None,
+                &[0x55; 32],
+                1_577_880_000_000,
+                None,
+            )
+        }
+
+        #[test]
+        fn a_flipped_signature_byte_fails_the_cose_signature_check() {
+            let pcrs = ExpectedPcrs::new([1; 48], [2; 48], [3; 48]);
+            let nonce = [9; 32];
+            let (doc, root) = signed_document(&pcrs, &nonce);
+            for at in [CheckTime::Now, CheckTime::Document] {
+                verify_real_document(&doc, &pcrs, Some(&nonce), &root, at).expect("valid control");
+
+                // The signature is the last element, so the last byte is in it.
+                let mut bad = doc.clone();
+                *bad.last_mut().unwrap() ^= 1;
+                let err = verify_real_document(&bad, &pcrs, Some(&nonce), &root, at).unwrap_err();
+                assert!(
+                    matches!(&err, VerifyError::Attestation(m) if m == "COSE signature verification failed"),
+                    "{at:?}: {err}"
+                );
+            }
+        }
+
+        #[test]
+        fn a_document_past_its_certificates_verifies_at_its_own_time() {
+            let pcrs = ExpectedPcrs::new([1; 48], [2; 48], [3; 48]);
+            let nonce = [9; 32];
+            // 2020-01-01T12:00:00Z. The leaf is valid on 2020-01-01 only.
+            let noon_ms = 1_577_880_000_000;
+            let document = |timestamp_ms| {
+                crate::test_util::signed_document(
+                    &pcrs,
+                    &nonce,
+                    None,
+                    &[0x55; 32],
+                    timestamp_ms,
+                    Some((2020, 1, 1)),
+                )
+            };
+            let verify = |(doc, root): &(Vec<u8>, Vec<u8>), at| {
+                verify_real_document(doc, &pcrs, Some(&nonce), root, at).map(|_| ())
+            };
+
+            let noon = document(noon_ms);
+            let err = verify(&noon, CheckTime::Now).unwrap_err();
+            assert!(err.to_string().contains("certificate has expired"), "{err}");
+            verify(&noon, CheckTime::Document).expect("valid at the document time");
+
+            // A year later the leaf has expired.
+            let later = document(noon_ms + 366 * 86_400_000);
+            let err = verify(&later, CheckTime::Document).unwrap_err();
+            assert!(err.to_string().contains("certificate has expired"), "{err}");
+
+            // The timestamp is in milliseconds. Seconds read as 1970.
+            let seconds = document(noon_ms / 1000);
+            let err = verify(&seconds, CheckTime::Document).unwrap_err();
+            assert!(err.to_string().contains("not yet valid"), "{err}");
+        }
+
+        #[test]
+        fn a_signed_document_with_other_pcrs_fails() {
+            let pcrs = ExpectedPcrs::new([1; 48], [2; 48], [3; 48]);
+            let nonce = [9; 32];
+            let (doc, root) = signed_document(&pcrs, &nonce);
+            let other = ExpectedPcrs::new([1; 48], [2; 48], [4; 48]);
+            let err = verify_real_document(&doc, &other, Some(&nonce), &root, CheckTime::Now)
+                .unwrap_err();
+            assert!(
+                matches!(err, VerifyError::PcrMismatch { pcr: 2, .. }),
+                "{err}"
+            );
+        }
+
         // --- certificate validity window w/ clock-skew tolerance -----------
 
         #[test]
@@ -940,6 +1118,101 @@ IwLz3/Y=
     }
 }
 
+/// Real-format documents signed under a test root. Tests only.
+#[cfg(any(test, feature = "test-util"))]
+pub mod test_util {
+    use super::*;
+    use p384::ecdsa::{signature::Signer, Signature, SigningKey};
+    use p384::pkcs8::DecodePrivateKey;
+    use rcgen::{CertificateParams, IsCa, Issuer, KeyPair, KeyUsagePurpose};
+
+    /// A COSE_Sign1 document signed by a leaf under a fresh test root, and
+    /// the root DER. `leaf_valid_on` limits the leaf to one UTC day
+    /// (year, month, day). `None` keeps the rcgen default validity.
+    pub fn signed_document(
+        pcrs: &ExpectedPcrs,
+        nonce: &[u8; 32],
+        public_key: Option<&[u8]>,
+        user_data: &[u8],
+        timestamp_ms: u64,
+        leaf_valid_on: Option<(i32, u8, u8)>,
+    ) -> (Vec<u8>, Vec<u8>) {
+        let root_key = KeyPair::generate_for(&rcgen::PKCS_ECDSA_P384_SHA384).unwrap();
+        let mut root_params = CertificateParams::new(Vec::<String>::new()).unwrap();
+        root_params.is_ca = IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+        root_params.key_usages = vec![KeyUsagePurpose::KeyCertSign];
+        let root = root_params.self_signed(&root_key).unwrap();
+        let leaf_key = KeyPair::generate_for(&rcgen::PKCS_ECDSA_P384_SHA384).unwrap();
+        let mut leaf_params = CertificateParams::new(Vec::<String>::new()).unwrap();
+        leaf_params.key_usages = vec![KeyUsagePurpose::DigitalSignature];
+        if let Some((year, month, day)) = leaf_valid_on {
+            leaf_params.not_before = rcgen::date_time_ymd(year, month, day);
+            leaf_params.not_after = leaf_params.not_before + std::time::Duration::from_secs(86_400);
+        }
+        let leaf = leaf_params
+            .signed_by(&leaf_key, &Issuer::from_params(&root_params, &root_key))
+            .unwrap();
+
+        let document = AttestationDocument {
+            module_id: "test".into(),
+            timestamp: timestamp_ms,
+            digest: "SHA384".into(),
+            pcrs: HashMap::from([
+                (0, pcrs.pcr0.to_vec()),
+                (1, pcrs.pcr1.to_vec()),
+                (2, pcrs.pcr2.to_vec()),
+            ]),
+            certificate: leaf.der().to_vec(),
+            cabundle: vec![root.der().to_vec()],
+            public_key: public_key.map(<[u8]>::to_vec),
+            user_data: Some(user_data.to_vec()),
+            nonce: Some(nonce.to_vec()),
+        };
+        let encode = |v: &ciborium::Value| {
+            let mut buf = Vec::new();
+            ciborium::into_writer(v, &mut buf).unwrap();
+            buf
+        };
+        let mut payload = Vec::new();
+        ciborium::into_writer(&document, &mut payload).unwrap();
+        // Protected header {1: -35}: alg ES384.
+        let protected = vec![0xa1, 0x01, 0x38, 0x22];
+        let sig_structure = encode(&ciborium::Value::Array(vec![
+            ciborium::Value::Text("Signature1".into()),
+            ciborium::Value::Bytes(protected.clone()),
+            ciborium::Value::Bytes(vec![]),
+            ciborium::Value::Bytes(payload.clone()),
+        ]));
+        let key = SigningKey::from_pkcs8_der(&leaf_key.serialize_der()).unwrap();
+        let signature: Signature = key.sign(&sig_structure);
+        let cose = ciborium::Value::Array(vec![
+            ciborium::Value::Bytes(protected),
+            ciborium::Value::Map(vec![]),
+            ciborium::Value::Bytes(payload),
+            ciborium::Value::Bytes(signature.to_bytes().to_vec()),
+        ]);
+        (encode(&cose), root.der().to_vec())
+    }
+
+    /// [`verify_attestation_at_document_time`] with `root_der` as the trust
+    /// anchor.
+    pub fn verify_at_document_time_with_root(
+        doc: &[u8],
+        expected_pcrs: &ExpectedPcrs,
+        expected_nonce: &[u8; 32],
+        root_der: &[u8],
+    ) -> Result<VerifiedAttestation> {
+        let (attestation, nonce) = real::verify_real_document(
+            doc,
+            expected_pcrs,
+            Some(expected_nonce),
+            root_der,
+            CheckTime::Document,
+        )?;
+        into_verified(attestation, nonce, true)
+    }
+}
+
 // Mock path (raw CBOR, no COSE / cert chain)
 
 #[cfg(feature = "mock")]
@@ -992,24 +1265,14 @@ mod mock {
         doc: &[u8],
         expected_pcrs: &ExpectedPcrs,
         expected_nonce: Option<&[u8; 32]>,
-    ) -> Result<VerifiedAttestation> {
+    ) -> Result<(AttestationDocument, Vec<u8>)> {
         let attestation: AttestationDocument = ciborium::from_reader(doc)
             .map_err(|e| VerifyError::Attestation(format!("failed to parse mock doc: {e}")))?;
 
         let nonce = check_nonce(&attestation.nonce, expected_nonce)?;
         verify_pcrs(&attestation.pcrs, expected_pcrs)?;
 
-        let enclave_pubkey = attestation
-            .public_key
-            .ok_or_else(|| VerifyError::Attestation("missing public key".into()))?;
-
-        Ok(VerifiedAttestation {
-            enclave_pubkey,
-            pcrs: attestation.pcrs,
-            timestamp: attestation.timestamp,
-            user_data: attestation.user_data,
-            nonce,
-        })
+        Ok((attestation, nonce))
     }
 }
 
@@ -1122,6 +1385,39 @@ mod tests {
             let err =
                 verify_mock_attestation(&doc, &ExpectedPcrs::zero(), Some(&nonce)).unwrap_err();
             assert!(matches!(err, VerifyError::Attestation(_)));
+        }
+
+        #[test]
+        fn mock_policy_only_rejects_a_public_key() {
+            let nonce = [6u8; 32];
+            let keyed = build_mock_document(&nonce, Some(&[1u8; 65]), Some(b"p")).unwrap();
+            let err =
+                verify_mock_policy_attestation(&keyed, &ExpectedPcrs::zero(), &nonce).unwrap_err();
+            assert!(err.to_string().contains("has a public key"), "{err}");
+
+            let policy_only = build_mock_document(&nonce, None, Some(b"p")).unwrap();
+            let verified =
+                verify_mock_policy_attestation(&policy_only, &ExpectedPcrs::zero(), &nonce)
+                    .unwrap();
+            assert!(verified.enclave_pubkey.is_empty());
+            assert_eq!(verified.user_data.as_deref(), Some(b"p".as_ref()));
+        }
+
+        #[test]
+        fn mock_policy_only_requires_the_nonce() {
+            let nonce = [6u8; 32];
+            let doc = build_mock_document(&nonce, None, None).unwrap();
+            let err = verify_mock_policy_attestation(&doc, &ExpectedPcrs::zero(), &[7u8; 32])
+                .unwrap_err();
+            assert!(err.to_string().contains("nonce mismatch"), "{err}");
+
+            let mut no_nonce: AttestationDocument = ciborium::from_reader(doc.as_slice()).unwrap();
+            no_nonce.nonce = None;
+            let mut doc = Vec::new();
+            ciborium::into_writer(&no_nonce, &mut doc).unwrap();
+            let err =
+                verify_mock_policy_attestation(&doc, &ExpectedPcrs::zero(), &nonce).unwrap_err();
+            assert!(err.to_string().contains("missing nonce"), "{err}");
         }
 
         #[test]

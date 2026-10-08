@@ -15,7 +15,7 @@ CID="${2:?cid required}"
 NAME="enclave-${CID}"
 CPU="${ENCLAVE_CPU_COUNT:-2}"
 MEM="${ENCLAVE_MEMORY:-3072}"
-LOCK="/tmp/utexo-enclave-start.lock"
+LOCK="${UTEXO_ENCLAVE_LOCK:-/tmp/utexo-enclave-start.lock}"
 
 # Resolve the running enclave-id for our name (empty if not running).
 enc_id() {
@@ -42,9 +42,28 @@ set_endpoints() {
   return 1
 }
 
+# Terminate this enclave if it runs. Fail if it still runs after.
+terminate() {
+  id="$(enc_id)"; [ -n "$id" ] && nitro-cli terminate-enclave --enclave-id "$id"
+  [ -z "$(enc_id)" ] && return 0
+  echo "FATAL: enclave CID $CID still running after terminate" >&2
+  return 1
+}
+# Compare the attested launch policy with the deploy inputs. Debug mode
+# zeroes the PCRs, so it skips the check.
+verify_launch() {
+  if [ "${ENCLAVE_DEBUG_MODE:-0}" = "1" ]; then
+    echo "debug mode: PCRs are zero, launch attestation check skipped"
+    return 0
+  fi
+  timeout --kill-after=5 "${VERIFY_LAUNCH_TIMEOUT:-45}" \
+    "$CLI" --addr "vsock://$CID:5000" verify-launch \
+    --pcr-file "$PCR_FILE" --image-env "$IMAGE_ENV" --signer-role "$SIGNER_ROLE"
+}
 case "$ACTION" in
   start)
     : "${EIF:?EIF env required (set in /etc/utexo/enclave.env)}"
+    : "${PCR_FILE:?PCR_FILE env required}" "${IMAGE_ENV:?IMAGE_ENV env required}" "${SIGNER_ROLE:?SIGNER_ROLE env required}"
     # Hold a host-wide lock so only one run-enclave runs at a time (anti-race).
     # `nitro-cli` children are spawned with fd 9 closed (9>&-) so an occasionally
     # orphaned/lingering run-enclave can never keep holding the lock and deadlock
@@ -63,9 +82,9 @@ case "$ACTION" in
         --eif-path "$EIF" --cpu-count "$CPU" --memory "$MEM" \
         --enclave-cid "$CID" --enclave-name "$NAME" "${DEBUG_ARG[@]}" 9>&-; then
         exec 9>&-
-        set_endpoints && exit 0
-        echo "set-endpoints CID $CID failed; terminating the enclave" >&2
-        id="$(enc_id)"; [ -n "$id" ] && nitro-cli terminate-enclave --enclave-id "$id" || true
+        set_endpoints && verify_launch && exit 0
+        echo "set-endpoints or launch check CID $CID failed; terminating the enclave" >&2
+        terminate
         exit 1
       fi
       echo "run-enclave CID $CID attempt $attempt failed; cleaning up and retrying" >&2
@@ -76,7 +95,7 @@ case "$ACTION" in
     exit 1
     ;;
   stop)
-    id="$(enc_id)"; [ -n "$id" ] && nitro-cli terminate-enclave --enclave-id "$id" || true
+    terminate
     ;;
   *)
     echo "usage: utexo-enclave-ctl.sh start|stop <cid>" >&2

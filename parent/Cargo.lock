@@ -620,7 +620,9 @@ dependencies = [
  "der 0.8.2",
  "hex",
  "p384",
+ "rcgen",
  "serde",
+ "sha2 0.11.0",
  "thiserror 2.0.21",
  "x509-cert",
 ]
@@ -5430,6 +5432,7 @@ dependencies = [
  "axum",
  "base64 0.23.1",
  "bitcoin",
+ "ciborium",
  "clap",
  "electrum-client",
  "federated-signer-proto",

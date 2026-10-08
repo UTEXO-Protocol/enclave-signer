@@ -153,6 +153,21 @@ class BuildArgumentsTests(unittest.TestCase):
                 self.assertEqual(argv[0], 'build')
                 self.assertFalse(any('KMS_' in value for value in argv))
 
+    def test_the_measured_image_env_is_published(self):
+        stubs = {
+            'docker': ('#!/bin/sh\n[ "$1 $2" = "image inspect" ] && '
+                       'echo \'["EVM_CHAIN_ID=42161"]\'\nexit 0\n'),
+            'nitro-cli': ('#!/bin/sh\n[ "$1" = build-enclave ] && touch "$5"\n'
+                          '[ "$1" = describe-eif ] && echo \'{"Measurements": {}}\'\nexit 0\n'),
+            'jq': '#!/bin/sh\ncat\n',
+        }
+        for name, body in stubs.items():
+            (self.bin / name).write_text(body)
+        result = self.invoke('Dockerfile.enclave', RGB_ASSET_ID='rgb:test-bfa-asset')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        env = json.loads((self.base / 'out/IMAGE-ENV.json').read_text())
+        self.assertEqual(env, ['EVM_CHAIN_ID=42161'])
+
     def test_ccd_does_not_require_asset(self):
         result = self.invoke('Dockerfile.enclave.ccd')
         self.assertEqual(result.returncode, 42, result.stderr)

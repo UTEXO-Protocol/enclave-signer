@@ -27,6 +27,8 @@ Reference material:
   model, signing rules, limits.
 - [`docs/pubkey-attestation.md`](docs/pubkey-attestation.md) - how to prove
   that a signing key belongs to attested enclave code. The `attest-verify` CLI.
+- [`docs/verify-a-signer.md`](docs/verify-a-signer.md) - how anyone checks a
+  published burn-signer attestation bundle and the on-chain signer list.
 - [`docs/kms-persistence.md`](docs/kms-persistence.md) - how the mint signer
   keeps its seed with AWS KMS and S3.
 - [`docs/parent-mtls.md`](docs/parent-mtls.md) - the required mTLS between
@@ -402,7 +404,7 @@ RUST_LOG=debug GRPC_PORT=50051 GRPC_ALLOW_INSECURE_LOOPBACK=true cargo run --man
 
 # CLI (shell function works in bash and zsh)
 cli() { cargo run --manifest-path parent/Cargo.toml --bin utexo-bridge-parent-cli -- "$@"; }
-cli set-endpoints --electrum-url tcp://<host>:<port>   # once, before any signature
+cli set-endpoints --electrum-url tcp://<host>:<port>   # once, before any signature (debug build; release needs ssl://)
 cli init
 cli get-keys
 cli get-last-saved-block
@@ -510,7 +512,7 @@ requires the values it uses and refuses the others:
 
 | Value (CLI flag / env) | Build | Description |
 |------------------------|-------|-------------|
-| `--electrum-url` / `ELECTRUM_URL` | `rgb-validation` | `ssl://host:port` or `tcp://host:port` (Electrum), or `https://host[:port]` / `http://host[:port]` (Esplora, for the custom dev signet). The forwarder listens on that port and pins `host` to loopback in `/etc/hosts`. For `ssl://` or `https://`, TLS terminates inside the enclave. |
+| `--electrum-url` / `ELECTRUM_URL` | `rgb-validation` | `ssl://host:port` (Electrum) or `https://host[:port]` (Esplora, for the custom dev signet). TLS terminates inside the enclave. The forwarder listens on that port and pins `host` to loopback in `/etc/hosts`. A test, debug, `mock-attestation` or `allow-seed-import` build also accepts plaintext `tcp://host:port` and `http://host[:port]`; a release image refuses them. |
 | `--evm-rpc-host` / `EVM_RPC_HOST` | `evm-rpc` | TLS host name of the EVM RPC. No scheme, path, port or IP literal. The JSON-RPC is served at `/`. |
 | `--evm-rpc-tls-port` / `EVM_RPC_TLS_PORT` | `evm-rpc` | TLS port, 1-65535, not the Electrum port. The forwarder listens on it. |
 | `--evm-rpc-ca-der-file` / `EVM_RPC_TLS_CA_DER_FILE` | `evm-rpc` | DER of the only CA the EVM RPC TLS trusts. |
@@ -664,9 +666,10 @@ Re-syncing changes PCR0. Procedure in
   SHA-256 with independently approved values. See the
   [EVM RPC trust boundary](docs/tee-spec.md#2-trust-boundary-and-threat-model).
 - **Attested posture.** Build flags and pins resolve to one `SecurityPolicy`
-  committed into the attestation. Policy matching checks only the committed fields;
-  it does not prove TLS-only Electrum/Esplora or specific endpoint ports. See
-  the [policy scope](docs/tee-spec.md#4-security-policy).
+  committed into the attestation. Policy matching checks only the committed fields.
+  The Electrum/Esplora scheme is not committed: a release image accepts only
+  TLS (`ssl://`, `https://`), so PCR0 covers it. Endpoint ports are not
+  committed. See the [policy scope](docs/tee-spec.md#4-security-policy).
 - **Fail closed.** Missing feature, missing pin, missing receipt, missing
   proof, zero inputs signed: refuse, never sign with less verification.
 - **Limits.** Bitcoin confirmation depth, freshness, reorg/retention caps and
