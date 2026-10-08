@@ -15,7 +15,7 @@
 # never auto-triggered on every build.
 #
 # Required repo config:
-#   vars:    AWS_REGION, EIF_S3_BUCKET, CLUSTER_DIR
+#   vars:    AWS_REGION, EIF_S3_BUCKET, CLUSTER_DIR, EVM_NETWORK_IDS
 #   secrets: AWS_DEPLOY_OIDC_ROLE_ARN  (role with ssm:SendCommand + ssm:GetCommandInvocation
 #                                       on the target instances; SEPARATE from the build role)
 #            STAGE_INSTANCE_IDS        (space-separated EC2 instance ids; kept out of the public repo)
@@ -63,6 +63,7 @@ jobs:
           BUCKET: ${{ vars.EIF_S3_BUCKET }}
           REGION: ${{ vars.AWS_REGION }}
           CLUSTER_DIR: ${{ vars.CLUSTER_DIR }}
+          EVM_NETWORK_IDS: ${{ vars.EVM_NETWORK_IDS }}
           INSTANCES_INPUT: ${{ inputs.instances }}
           INSTANCES_SECRET: ${{ secrets.STAGE_INSTANCE_IDS }}
         run: |
@@ -70,6 +71,7 @@ jobs:
           : "${BUCKET:?set repo var EIF_S3_BUCKET}"
           : "${REGION:?set repo var AWS_REGION}"
           : "${CLUSTER_DIR:?set repo var CLUSTER_DIR}"
+          : "${EVM_NETWORK_IDS:?set repo var EVM_NETWORK_IDS}"
           INSTANCES="${INSTANCES_INPUT:-}"; [ -n "$INSTANCES" ] || INSTANCES="$INSTANCES_SECRET"
           [ -n "$INSTANCES" ] || { echo "::error::no instances (input or STAGE_INSTANCE_IDS)"; exit 1; }
 
@@ -80,6 +82,7 @@ jobs:
             echo "export BUCKET=$BUCKET"
             echo "export AWS_REGION=$REGION"
             echo "export CLUSTER_DIR=$CLUSTER_DIR"
+            printf 'export EVM_NETWORK_IDS=%q\n' "$EVM_NETWORK_IDS"
             cat deploy/deploy-host.sh
           } > /tmp/deploy-run.sh
           B64="$(base64 -w0 /tmp/deploy-run.sh)"

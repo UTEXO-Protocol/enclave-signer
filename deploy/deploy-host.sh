@@ -13,6 +13,7 @@
 # KMS values, set on each enclave at start. A mint enclave requires the first three:
 #   KMS_KEY_ARN=<key ARN>  KMS_REGION=<region>  KMS_SEED_ID=<seed id>
 #   KMS_EXPECTED_EVM_ADDRESS=<0x address, optional>
+# Required: EVM_NETWORK_IDS=<id>[,<id>...], the EVM networks each parent accepts as destinations.
 #
 # After set-endpoints, verify each enclave's attested launch policy.
 # ENCLAVE_DEBUG_MODE=1 skips this check, because the PCRs are zero.
@@ -49,6 +50,17 @@ KMS_EXPECTED_EVM_ADDRESS="${KMS_EXPECTED_EVM_ADDRESS:-}"
 if [ -n "$KMS_KEY_ARN$KMS_REGION$KMS_SEED_ID" ] \
   && { [ -z "$KMS_KEY_ARN" ] || [ -z "$KMS_REGION" ] || [ -z "$KMS_SEED_ID" ]; }; then
   echo "KMS_KEY_ARN, KMS_REGION and KMS_SEED_ID go together" >&2
+  exit 1
+fi
+# Accept only u32 ids. The parent silently drops any other value.
+EVM_NETWORK_IDS="${EVM_NETWORK_IDS:-}"
+evm_ids_ok=0
+if [[ "$EVM_NETWORK_IDS" =~ ^[0-9]{1,10}(,[0-9]{1,10})*$ ]]; then
+  evm_ids_ok=1
+  for id in ${EVM_NETWORK_IDS//,/ }; do (( 10#$id <= 4294967295 )) || evm_ids_ok=0; done
+fi
+if [ "$evm_ids_ok" = 0 ]; then
+  echo "EVM_NETWORK_IDS required: comma-separated u32 network ids" >&2
   exit 1
 fi
 CIDS=(16 18 20)
@@ -316,6 +328,7 @@ USE_VSOCK=true
 ENCLAVE_VSOCK_CID=$CID
 ENCLAVE_VSOCK_PORT=5000
 HEADER_ELECTRUM_URL=$HEADER_ELECTRUM_URL
+EVM_NETWORK_IDS=$EVM_NETWORK_IDS
 EOF
 done
 
