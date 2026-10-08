@@ -175,11 +175,11 @@ policy_commitment =
 ```
 
 The tuple omits the Bitcoin network, concrete sats budgets, the Electrum/Esplora
-URL scheme and port, and the EVM RPC TLS port. These connection settings are
-excluded by design: matching policies do not prove TLS-only Electrum/Esplora
-or specific endpoint ports. For example, `ssl://electrum.example:50002` and
-`tcp://electrum.example:50002` give the same policy when the other committed
-fields match.
+URL scheme and port, and the EVM RPC TLS port. The scheme needs no field: a
+release image accepts only `ssl://` or `https://` for the Electrum/Esplora
+URL, so PCR0 covers it. Only a dev build (and thus a development policy)
+accepts `tcp://` or `http://`. Matching policies do not prove specific
+endpoint ports.
 
 Image-baked values remain measured in the EIF. The endpoints are not in the
 image; the operator sets them and the KMS values once at launch
@@ -264,6 +264,8 @@ equals the expected production policy.
 The `attest-verify` CLI in this repo runs the full recipe. Configure the client
 CA/certificate/key environment from [Parent mTLS](parent-mtls.md) first; an
 `observer` certificate is sufficient for verification.
+To check a published bundle offline (`--from-file`), see
+[Verify a burn signer](verify-a-signer.md).
 
 ```bash
 # Production verification (against a real Nitro enclave). By default it expects a

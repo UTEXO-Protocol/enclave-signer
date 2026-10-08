@@ -789,26 +789,9 @@ impl ParentService for ParentAdapterService {
 
         match resp.response {
             Some(enclave_response::Response::GetAttestedPublicKey(r)) => {
-                let pk = r.public_keys.ok_or_else(|| {
-                    Status::internal("enclave returned attestation without public_keys")
-                })?;
-                Ok(Response::new(AttestedPublicKeyResponse {
-                    evm_address: pk.evm_address,
-                    evm_uncompressed_pub: pk.evm_uncompressed_pub,
-                    btc_compressed_pub: pk.btc_compressed_pub,
-                    btc_xpub: pk.btc_xpub,
-                    master_fingerprint: pk.master_fingerprint,
-                    account_xpub_vanilla: pk.account_xpub_vanilla,
-                    account_xpub_colored: pk.account_xpub_colored,
-                    attestation_doc: r.attestation_doc,
-                    chain_id: pk.chain_id,
-                    bridge_contract: pk.bridge_contract,
-                    rgb_asset_id: pk.rgb_asset_id,
-                    evm_gas_tx_uncompressed_pub: pk.evm_gas_tx_uncompressed_pub,
-                    evm_gas_tx_address: pk.evm_gas_tx_address,
-                    ccd_ed25519_pub: pk.ccd_ed25519_pub,
-                    attested_policy: r.attested_policy,
-                }))
+                crate::attest_verify::attested_response(r)
+                    .map(Response::new)
+                    .map_err(|e| Status::internal(e.to_string()))
             }
             Some(enclave_response::Response::Error(e)) => Err(Self::enclave_error_to_status(&e)),
             other => Err(Status::internal(format!(

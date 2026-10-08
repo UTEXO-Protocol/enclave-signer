@@ -18,6 +18,8 @@ serde = { version = "1", features = ["derive"] }
 hex = "0.4"
 sha2 = "0.11"
 thiserror = "2"
+# Signs real-format test documents (`test-util`).
+rcgen = { version = "0.14", optional = true }
 
 [dev-dependencies]
 # Signed test chain for the COSE signature test.
@@ -31,3 +33,5 @@ mock = []
 # Accept all-zero PCR0/1/2 in debug tests. (F03-AF-12 / F02-AF-08)
 # Debug PCRs do not identify the peer image. Do not enable in production.
 allow-debug-pcrs = []
+# `test_util`: real-format documents signed under a test root. Tests only.
+test-util = ["dep:rcgen"]

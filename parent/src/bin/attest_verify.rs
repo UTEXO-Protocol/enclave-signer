@@ -9,6 +9,10 @@
 //!     attest-verify --endpoint http://127.0.0.1:50051 \
 //!         --pcr0 <hex> --pcr1 <hex> --pcr2 <hex>
 //!
+//! `--from-file <bundle.json>` runs the same checks offline on a bundle that
+//! `utexo-bridge-parent-cli export-attestation` wrote. The nonce is the
+//! bundle nonce, and the certificates are checked at the document time.
+//!
 //! Use `--mock` with a `mock-attestation` enclave (zero PCRs, no COSE).
 //!
 //! Exit codes:
@@ -24,7 +28,7 @@ use clap::Parser;
 
 use attestation_verify::{AttestedPolicy, EvmDataSource, EvmRpcTlsPin, KmsPin, SignerRole};
 use utexo_bridge_parent::attest_verify::{
-    verify_attested_pubkey, AttestedPubkeyResult, ExpectedPolicy, VerifyMode,
+    verify_attested_pubkey, verify_bundle, AttestedPubkeyResult, ExpectedPolicy, VerifyMode,
 };
 
 #[derive(Parser)]
@@ -36,6 +40,10 @@ struct Cli {
     /// Parent gRPC endpoint
     #[arg(long, default_value = "http://127.0.0.1:50051")]
     endpoint: String,
+
+    /// Verify this attestation bundle offline instead of `--endpoint`.
+    #[arg(long, conflicts_with = "endpoint")]
+    from_file: Option<std::path::PathBuf>,
 
     /// Expected PCR0 (96 hex chars = 48 bytes). Required unless --mock.
     #[arg(long)]
@@ -378,8 +386,14 @@ async fn run(cli: Cli) -> Result<()> {
     };
 
     eprintln!("expecting security policy: {expected_policy:?}");
-    let result =
-        verify_attested_pubkey(&cli.endpoint, expected_pcrs, mode, expected_policy).await?;
+    let result = match &cli.from_file {
+        Some(path) => {
+            let json = std::fs::read_to_string(path)
+                .with_context(|| format!("cannot read {}", path.display()))?;
+            verify_bundle(&json, &expected_pcrs, mode, &expected_policy)?
+        }
+        None => verify_attested_pubkey(&cli.endpoint, expected_pcrs, mode, expected_policy).await?,
+    };
     print_ok(&result);
     Ok(())
 }
