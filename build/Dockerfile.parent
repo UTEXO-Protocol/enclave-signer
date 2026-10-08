@@ -3,6 +3,8 @@
 # Private Cargo dependencies require BuildKit secrets (see README, Building).
 # Supply github_token, or one deploy key per repo; keys never enter image layers.
 # Example: docker build --secret id=github_token,env=GITHUB_TOKEN -f build/Dockerfile.parent .
+# Dev image (debug, `insecure-dev`: plaintext gRPC, no mTLS):
+#   --build-arg CARGO_ARGS="--features insecure-dev" --build-arg PROFILE_DIR=debug
 # Builder glibc must stay compatible with the runtime stage below.
 FROM rust:1.96-slim-bookworm@sha256:e18a79fc84dfcfc3ab5ba72290398a644c135c97eaa881447fddc354ee4701a3 AS builder
 
@@ -15,12 +17,13 @@ WORKDIR /build
 COPY . /build/
 
 WORKDIR /build/parent
+ARG CARGO_ARGS=--release
 RUN --mount=type=secret,id=github_token \
     --mount=type=secret,id=consensus_key \
     --mount=type=secret,id=ops_key \
     --mount=type=secret,id=schemas_key \
     --mount=type=secret,id=federated_key \
-    sh /build/build/with-private-deps.sh parent cargo build --release
+    sh /build/build/with-private-deps.sh parent cargo build $CARGO_ARGS
 
 # ===== Runtime Stage =====
 FROM debian:bookworm-slim@sha256:3783cc01769c7b2b1b83a5c5ad96c815348e28ed7da68e2e3687004faa906251
@@ -34,10 +37,11 @@ RUN apt-get update && apt-get install -y \
     && useradd -u 1000 -m parent
 
 WORKDIR /home/parent
+ARG PROFILE_DIR=release
 
 # `parent/` is its own workspace, so its target dir is nested, not at /build.
-COPY --from=builder /build/parent/target/release/utexo-bridge-parent ./utexo-bridge-parent
-COPY --from=builder /build/parent/target/release/utexo-bridge-parent-cli ./utexo-bridge-parent-cli
+COPY --from=builder /build/parent/target/${PROFILE_DIR}/utexo-bridge-parent ./utexo-bridge-parent
+COPY --from=builder /build/parent/target/${PROFILE_DIR}/utexo-bridge-parent-cli ./utexo-bridge-parent-cli
 
 RUN chown -R parent:parent .
 

@@ -402,6 +402,10 @@ RUST_LOG=debug cargo run -p utexo-bridge-enclave
 # Parent gRPC server (GRPC_PORT defaults to 5000; pick another port when both run on one host)
 RUST_LOG=debug GRPC_PORT=50051 GRPC_ALLOW_INSECURE_LOOPBACK=true cargo run --manifest-path parent/Cargo.toml
 
+# Or: parent reachable from other hosts, plaintext, no mTLS (see "insecure-dev" below)
+RUST_LOG=debug GRPC_HOST=0.0.0.0 GRPC_PORT=50051 \
+  cargo run --manifest-path parent/Cargo.toml --features insecure-dev
+
 # CLI (shell function works in bash and zsh)
 cli() { cargo run --manifest-path parent/Cargo.toml --bin utexo-bridge-parent-cli -- "$@"; }
 cli set-endpoints --electrum-url tcp://<host>:<port>   # once, before any signature (debug build; release needs ssl://)
@@ -412,6 +416,11 @@ cli --help
 ```
 
 `--addr host:port` or `--addr vsock://<cid>:<port>` selects the enclave.
+
+`insecure-dev` (parent cargo feature, dev only): the parent serves plaintext gRPC
+with no client auth on any `GRPC_HOST`, and `clone` / `attest-verify` accept
+`http://` to any host. Any `GRPC_TLS_*` setting is an error. A release build with
+this feature does not compile. Dev image: `make build_parent_dev`.
 Initialize once: use `cli init --cloning-secret-file <file>` instead of
 `cli init` to configure a donor. Use a fresh requester for `cli clone`; initialization
 and cloning are alternative ways to enter `Active`. Signing subcommands require
