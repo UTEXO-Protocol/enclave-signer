@@ -389,7 +389,9 @@ fn deposit_receipt(mint_opid: &OpId, operation_id: [u8; 32], invoice: &str) -> R
         tokenCommission: alloy_primitives::U256::ZERO,
         nativeCommission: alloy_primitives::U256::ZERO,
         sourceChainId: alloy_primitives::U256::ZERO,
-        destinationChainId: alloy_primitives::U256::ZERO,
+        destinationChainId: alloy_primitives::U256::from(
+            utexo_bridge_enclave::networks::evm::RGB_CHAIN_ID,
+        ),
         destinationAddress: invoice.into(),
         settlementData: Default::default(),
     };

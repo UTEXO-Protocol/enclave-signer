@@ -53,7 +53,7 @@ flowchart TD
     subgraph P4 ["P4 - route, release identity, apply_funds_out_binding<br/>both routes: fundsOut and lzFundsOut"]
         p4r{"route: source amount ≥ destination amount?"}
         p4r -->|no| p4rr[REFUSE — not covered]:::refuse
-        p4r -->|yes| p4si{"sourceChainId == 96 AND sourceAddress empty<br/>AND burnId == in-enclave recompute?"}
+        p4r -->|yes| p4si{"sourceChainId == 827166 AND sourceAddress empty<br/>AND burnId == in-enclave recompute?"}
         p4si -->|no| p4sir[REFUSE - release identity]:::refuse
         p4si -->|yes| p4w{all consignment witnesses mined?}
         p4w -->|no| p4wr[REFUSE — unmined witness]:::refuse

@@ -51,15 +51,39 @@ Internet -- orchestrator -- EC2 parent (UNTRUSTED) -- vsock -- Nitro Enclave (TR
 | Enclave code (this repo)         | validation, key custody, signing                 | -- (the thing being attested)                                                          |
 | Parent host / listener / backend | liveness, transport, data *delivery*             | request claims are checked; the EVM RPC is TLS to a pinned CA; CCD has an explicit trust exception |
 | Electrum / Bitcoin data providers | availability and resolver data used by RGB validation | RGB-source witness inclusion is checked by SPV. The mint destination path has no SPV inclusion check. Network exceptions apply (Sec 8). |
-| EVM RPC endpoint (pinned TLS) | receipt/head correctness and availability | the host relays ciphertext only; the endpoint is authenticated, but consensus is not verified (Sec 7.2) |
+| EVM RPC endpoint (pinned TLS) | receipt/head correctness and availability, as an explicit design assumption | TLS authenticates the endpoint; it does not prove canonical EVM history (Sec 7.1-7.2) |
 | Operator | deployment, configuration pins, the cloning secret | plaintext seed export from the enclave |
 | AWS KMS (mint only) | seed generation, encryption, and decryption | host access to plaintext, subject to the configured KMS policies |
 
 **Residual trust anchors:** AWS (Nitro isolation + attestation root CA), the
 correctness of this enclave code and its validation libraries, the Bitcoin
 checkpoint, and the pinned EVM RPC endpoint. Mint seed recovery also trusts
-AWS KMS and its access policies. The mint path uses Electrum resolver data
+AWS KMS and its access policies. The Bridge contract and its governance are
+trusted: the enclave pins the Bridge address, not its code, so an upgraded
+Bridge could emit fake `FundsIn` events and back unbacked mints. EVM finality is
+`EVM_MIN_CONFIRMATIONS` blocks below the RPC head, not L1 finality, so a deeper
+Arbitrum sequencer reorg is also accepted risk. The mint path uses Electrum resolver data
 without a separate SPV inclusion check. CCD source checks trust the listener.
+
+**Pinned EVM RPC trust (accepted by design, F05-NEW-AF-07):** the production
+mint and burn images use `PinnedTlsRpc`. TLS ends inside the enclave and
+authenticates the configured hostname against the pinned CA. The host relay
+can block or delay traffic, but cannot alter authenticated responses without
+detection. A TLS or RPC failure refuses the signing request.
+
+The enclave checks successful receipts, unique expected events from the pinned
+`FUNDS_IN_CONTRACT`, the operation-ID and amount bindings for the selected
+flow, and depth of at least `EVM_MIN_CONFIRMATIONS`. The receipt and chain head
+come from the same provider. These are consistency checks, not EVM consensus
+proofs. A faulty, malicious or compromised approved provider can return a
+self-consistent false deposit history that passes them.
+
+For the burn flow, RGB consensus, Bitcoin SPV and burn/settlement bindings
+still apply. The receiving contracts must also enforce their on-chain
+settlement rules and signature quorum (Secs 9-10). Those checks constrain
+release execution; they do not authenticate the provider's historical receipts
+inside the enclave. Passing the enclave checks alone does not prove that a
+release will succeed on-chain.
 
 **Wall clock:** the deadline check, the SPV tip-staleness check, and the
 header-submission rate limit read `SystemTime::now()`. Inside Nitro this clock
@@ -132,8 +156,8 @@ ready. A refused set leaves the enclave
 unset, so a retry works.
 
 With an Electrum URL `ssl://host:port` (or `tcp://`) the forwarder listens on
-that port and pins `host` to loopback in `/etc/hosts`, so TLS terminates inside
-the enclave against the real certificate. An `https://host[:port]` (or
+that port and pins `host` to loopback in `/etc/hosts`. With `ssl://`, TLS
+terminates inside the enclave against the real certificate. An `https://host[:port]` (or
 `http://`) URL selects Esplora instead, with the same forwarder and pin. Dev
 uses it on the custom signet, where the rgb-ops Electrum chain check fails. The EVM RPC forwarder listens on the
 EVM RPC TLS port, and the client connects to `https://<host>:<port>/` through
@@ -207,16 +231,30 @@ SecurityPolicy = Production {
   a different EVM source, a dev build) fails verification instead of being
   silently trusted.
 
+Provider approval is a deployment responsibility. For `PinnedTlsRpc`, supply
+`--expect-evm-source tls` and the RPC hostname and CA SHA-256 from an
+independently approved configuration. Copying expected values from the
+deployment being verified does not establish approval. Attestation confirms
+the configured endpoint identity; it does not prove that the provider is
+honest or that its data is genuine.
+
 Inside the commitment: the whole gas-tx rule -- `GAS_TX_ALLOWED_TO`,
 `GAS_TX_MAX_GAS_LIMIT`, `GAS_TX_MAX_FEE_PER_GAS`, `GAS_TX_MAX_VALUE_WEI`, and
 `GAS_TX_ALLOWED_SELECTORS` -- so a verifier confirms the `SignRawDigest` policy
 instead of trusting the operator's configuration. An unset pin commits as its zero value, which is the posture it enforces, so
 "unpinned" is attested too.
 
-Not inside the policy commitment: `BITCOIN_NETWORK`, the Electrum scheme and
-port, the EVM RPC TLS port, request-size caps, and the concrete
+Not inside the policy commitment: `BITCOIN_NETWORK`, the Electrum/Esplora URL
+scheme and port, the EVM RPC TLS port, request-size caps, and the concrete
 `BTC_MAX_TOTAL_SATS`, `BTC_MAX_UNOWNED_SATS` and `RGB_MAX_UNOWNED_SATS` values
 (only the `BTC_MAX_TOTAL_SATS` on/off boolean is attested).
+
+The exclusion of these connection settings is intentional (F05-RR-AF-24).
+Matching policies do not prove TLS-only Electrum/Esplora or compliance with a
+specific port requirement. EVM RPC still requires TLS with the pinned host
+and CA on every accepted port. Bitcoin SPV checks for RGB-source requests
+still apply.
+
 Image-baked configuration is still covered by image measurement; runtime
 configuration is not automatically added to the policy commitment. The plain-BTC *destination* rule needs no
 commitment: it is not configuration but a property the enclave derives from its
@@ -305,10 +343,10 @@ The response returns the calldata unchanged.
 
 **Settlement bind (`bfa-mint`).** `settlementData` is
 `abi.encode(bytes32[] operationIds, uint256[] netAmounts)`, the deposits the
-release settles. The enclave verifies every `FundsIn` lock behind the burn's
-mint ancestry itself (receipt, pinned emitter, RGB OpId, depth) and reads the
-`BridgeFundsIn` record from the same receipt. It then requires the cited
-pairs to equal those records exactly: set equality, canonical encoding,
+release settles. For each mint in the burn's ancestry, the enclave derives
+the `operationId` of the one deposit that can back it (burn-flow B1.3). It
+reads nothing from the chain. It then requires the cited pairs to equal those
+derived locks exactly: set equality, canonical encoding,
 strictly ascending `operationId` order (so no duplicates), and at least one
 verified lock. `burnId` does not hash `settlementData`, so these rules decide
 what backs a release, not its replay key (F05-NEW-AF-04).
@@ -332,8 +370,8 @@ on both routes (Sec 9, P6).
 settlement module and the commission rate on the `(sourceChainId,
 destinationChainId)` pair, so `sourceChainId` decides which contracts judge a
 release. An RGB-sourced release (direct `fundsOut` and LayerZero `lzFundsOut`
-alike) MUST carry `sourceChainId == 96`, the bridge's RGB network id, pinned as
-a compile-time constant (`RGB_SOURCE_CHAIN_ID`) and so measured into PCR0. The
+alike) MUST carry `sourceChainId == 827166`, the bridge's RGB network id, pinned as
+a compile-time constant (`RGB_CHAIN_ID`) and so measured into PCR0. The
 `sourceAddress` rule above applies to both routes the same way
 (`validate_rgb_source_identity`). A CCD-sourced release is not subject to it.
 
@@ -376,7 +414,8 @@ not name a destination chain. See Sec 13.
 A bridge PSBT request MUST carry the EVM deposit tx hash **and** the RGB
 consignment; there is no consignment-less bridge mode. Listener-supplied
 `event_valid` / `event_finalized` booleans are ignored. The
-enclave establishes validity and finality itself, fail-closed
+enclave checks the deposit against the approved provider's receipt and head,
+subject to the trust assumption in Sec 2. These checks fail closed
 (`events::verify_funds_in_event`):
 
 - a **successful receipt** must exist for `evm_tx_hash`, at depth >=
@@ -424,11 +463,12 @@ so the operational fee check belongs to the bridge, before the lock. Raising a
 ceiling ships a new enclave image, so it needs federation agreement.
 
 **EVM data source:** a build without `evm-rpc` refuses bridge PSBTs outright.
-With the default `evm-rpc` provider, TLS to the pinned host and CA ends inside
-the enclave, so the host cannot fabricate a receipt; it can withhold one
-(liveness). A TLS failure refuses to sign. The endpoint itself is trusted: its
-receipts are not checked against consensus. The chosen
-source is part of the attested policy (Sec 4).
+With `PinnedTlsRpc`, TLS ends inside the enclave and authenticates the pinned
+host against the configured CA. The host can withhold a response, but cannot
+alter it without detection. The endpoint remains trusted for receipt and head
+correctness: the checks above cannot reject a self-consistent false history
+solely because the approved provider invented it (Sec 2). The source, hostname
+and CA SHA-256 are committed into the attested policy (Sec 4).
 
 An in-memory replay cache (24-hour TTL, 100,000-entry cap) checks requests keyed by
 `(chain_id, bridge_contract, evm_tx_hash, funds_in_operation_id, rgb_asset_id)`
@@ -596,7 +636,12 @@ proofs for every witness transaction. The PSBT destination path instead binds
 the transaction being signed to the consignment; that transaction need not
 already be mined. A `bfa-mint` build validates the bridged schema with an extension that
 checks every `Bridge` transition against the enclave's own verified `FundsIn`
-lock, and refuses a mint with no verified lock behind it.
+lock, and refuses a mint with no verified lock behind it. A verified lock is
+the one receipt the listener names for that mint OpId (`mint_ancestors` or
+`evm_tx_hash`). Its `FundsIn` `rgbOpId` word must equal the 32 raw OpId bytes
+(a big-endian `uint256`, no byte reversal), and its `BridgeFundsIn`
+`destinationChainId` must equal `RGB_CHAIN_ID` (827166). Other `FundsIn` events
+with the same OpId are ignored.
 
 For an RGB-source request, the SPV layer enforces these rules:
 
@@ -648,7 +693,7 @@ delegated to the receiving contract and known gaps. Enforced checks fail closed.
 | P3 | Exact amount | `MS_BURNED_ASSET` must equal calldata `amount`. The host's `rgb_amount` is not evidence. |
 | P4 | Valid calldata | Allowed selector, 96 KiB cap, canonical ABI encoding, and route-specific destination-chain check. |
 | P5 | Correct destination | Pinned chain and contract. The payee must match `MS_BURN_RECIPIENT`. The burn does not bind LayerZero `dstEid`. |
-| P6 | Release identity | RGB source chain 96, empty source address, recomputed `burnId`, matching burn OpId, and exact settlement pairs. |
+| P6 | Release identity | RGB source chain 827166, empty source address, recomputed `burnId`, matching burn OpId, and exact settlement pairs. |
 | P7 | Accepted Bitcoin history | Each witness must belong to the retained chain. |
 | P8 | Inclusion and relay agreement | Merkle inclusion, confirmation depth, tip freshness, and the BtcRelay checks below. |
 | P9 | Ancestry deposits | Verify each deposit through the pinned EVM RPC. Receiving contracts must enforce their settlement rules. |
@@ -723,8 +768,9 @@ End-to-end release uniqueness also depends on contract checks outside this repo
   does not imply every runtime setting is in the policy commitment (Sec 4).
 - Mainnet Bitcoin anchors use the pinned checkpoint and PoW/SPV checks.
   Signet/regtest have different validation rules (Sec 8).
-- EVM deposit checks use the selected provider's receipt/head. Raw RPC is a
-  trust dependency; CCD source validity is delegated to the listener.
+- EVM deposit checks use the selected provider's receipt/head. `PinnedTlsRpc`
+  retains trust in the approved provider's data (Sec 2); CCD source validity
+  is delegated to the listener.
 - Plain-BTC and bridge PSBTs sign only vanilla and colored accounts respectively.
   Unowned output budgets permit bounded outputs outside proved custody scripts.
 - Cloning transfers an encrypted seed between PCR-matched enclaves. Clones
@@ -764,8 +810,10 @@ Known limits. Read them before deployment.
   after 24 hours. The 100,000-entry cap can remove entries earlier. A successful
   response write can commit an entry even when the caller receives no response.
 - **EVM and CCD trust.** The images trust the pinned EVM RPC endpoint for
-  receipts. TLS ends inside the enclave, but the enclave does not check
-  receipts against EVM consensus. CCD source validation trusts the listener.
+  receipts and the chain head. TLS authenticates the endpoint, not its EVM
+  history. A self-consistent false history from an approved provider can pass
+  the deposit checks; this risk is accepted by design (Sec 2). CCD source
+  validation trusts the listener.
 - **Gas transactions.** The gas limits apply to one transaction, not to a
   sum. A gas transaction is not linked to one checked release. The LayerZero
   fee is not bound to its release.

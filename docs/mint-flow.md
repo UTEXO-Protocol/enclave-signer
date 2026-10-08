@@ -75,6 +75,7 @@ sequenceDiagram
 | `OS_ASSET` | 4000 | Output that holds RGB units (u64). |
 | `OS_BRIDGE` | 4014 | The mint right. It holds no units. It does not count in the amount. |
 | `EVM_MIN_CONFIRMATIONS` | 12 (default) | Minimum depth of each deposit receipt. Attested. Production refuses 0. |
+| `RGB_CHAIN_ID` | 827166 | The bridge's id for the RGB network. Compiled in. |
 | `MAX_CONSIGNMENT_BYTES` | 8 MiB (default) | Maximum consignment size. |
 | `MAX_OFF_TX_CHANGE_OUTPOINTS` | 4 | Maximum change outpoints outside the PSBT. |
 | `MAX_FEE_RATE_SAT_VB` | 200 | Maximum fee rate, over the unsigned size. |
@@ -139,6 +140,9 @@ host. TLS ends inside the enclave. Each call has a 15 s timeout.
   from `FUNDS_IN_CONTRACT`, at least `EVM_MIN_CONFIRMATIONS` deep. Its
   `operationId`, amount and net amount must be the ones the last mint derives.
   Another deposit for the same OpId is refused.
+- **M3.5** The `BridgeFundsIn` `destinationChainId` must equal 827166
+  (`RGB_CHAIN_ID`). `FundsIn` has no chain field, so this binds the deposit
+  to the RGB network.
 
 ### Stage 4 - Is the RGB history valid?
 

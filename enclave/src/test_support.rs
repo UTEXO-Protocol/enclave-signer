@@ -22,7 +22,8 @@ pub(crate) fn bridge_funds_in_data(gross: u64, net: u64, commission: u64, dest: 
     d.extend_from_slice(&abi_word(gross));
     d.extend_from_slice(&abi_word(net));
     d.extend_from_slice(&abi_word(commission));
-    d.extend_from_slice(&[0u8; 32 * 3]); // nativeCommission, sourceChainId, destinationChainId
+    d.extend_from_slice(&[0u8; 32 * 2]); // nativeCommission, sourceChainId
+    d.extend_from_slice(&abi_word(crate::networks::evm::RGB_CHAIN_ID)); // destinationChainId
     let mut bytes = dest.as_bytes().to_vec();
     bytes.resize(bytes.len().div_ceil(32) * 32, 0);
     // destinationAddress tail: after the head words.

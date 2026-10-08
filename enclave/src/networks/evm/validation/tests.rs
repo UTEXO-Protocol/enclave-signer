@@ -489,7 +489,7 @@ fn rgb_release() -> ReleaseIdentity {
     ReleaseIdentity {
         burn_id: U256::ZERO,
         amount: U256::from(1000u64),
-        source_chain_id: U256::from(RGB_SOURCE_CHAIN_ID),
+        source_chain_id: U256::from(RGB_CHAIN_ID),
         source_address: String::new(),
         settlement_data: Vec::new(),
         source_burn_tx_id: [0x5b; 32],
@@ -508,7 +508,7 @@ fn rgb_source_identity_rejects_a_foreign_source_chain() {
     // On chain, (sourceChainId, destinationChainId) selects the verifier and
     // commission rate. Each id but the RGB one must refuse, also the
     // execution chain id and zero.
-    for foreign in [0u64, 1, 42161, RGB_SOURCE_CHAIN_ID + 1] {
+    for foreign in [0u64, 1, 42161, RGB_CHAIN_ID + 1] {
         let release = ReleaseIdentity {
             source_chain_id: U256::from(foreign),
             ..rgb_release()
@@ -517,7 +517,7 @@ fn rgb_source_identity_rejects_a_foreign_source_chain() {
             .expect_err("foreign source chain must refuse")
             .to_string();
         assert!(
-            err.contains("sourceChainId") && err.contains(&RGB_SOURCE_CHAIN_ID.to_string()),
+            err.contains("sourceChainId") && err.contains(&RGB_CHAIN_ID.to_string()),
             "{foreign}: {err}"
         );
     }
@@ -545,7 +545,7 @@ fn direct_route_surfaces_its_release_identity() {
             recipient: Address::from([0x22; ADDRESS_LEN]),
             amount: U256::from(1000u64),
             burnId: U256::from(7u64),
-            sourceChainId: U256::from(RGB_SOURCE_CHAIN_ID),
+            sourceChainId: U256::from(RGB_CHAIN_ID),
             destinationChainId: U256::from(1u64),
             sourceAddress: "who".into(),
             proof: Bytes::from(vec![0xf0]),
@@ -560,7 +560,7 @@ fn direct_route_surfaces_its_release_identity() {
             ReleaseIdentity {
                 burn_id: U256::from(7u64),
                 amount: U256::from(1000u64),
-                source_chain_id: U256::from(RGB_SOURCE_CHAIN_ID),
+                source_chain_id: U256::from(RGB_CHAIN_ID),
                 source_address: "who".into(),
                 settlement_data: vec![0xd0, 0x0d],
                 source_burn_tx_id: [0x5b; 32],
@@ -725,7 +725,7 @@ fn burn_id_ignores_settlement_data() {
     );
 }
 
-/// The vector bridge-utexo and the Bridge tests pin too.
+/// The shared vector, with `sourceChainId` = `RGB_CHAIN_ID` (827166).
 #[test]
 fn burn_id_matches_the_shared_vector() {
     let mut cfg = BridgeConfig {
@@ -753,11 +753,12 @@ fn burn_id_matches_the_shared_vector() {
 
     assert_eq!(
         hex::encode(expected_burn_id(&cfg, &release).to_be_bytes::<32>()),
-        "0ad0753aada237279f32f213f95d4e78a02bf0ec07a92d65dc5d4ecfa5911508"
+        "29c56dee5d5c83392c91d778ef063a7e72432d0c5c3d85d509ad802df0a10fe5"
     );
 }
 
-/// The vector BridgeProxy.t.sol pins (bridge-smart-contracts #173).
+/// The BridgeProxy.t.sol vector inputs (bridge-smart-contracts #173), with
+/// `sourceChainId` = 827166. The contract test still pins the 96 form.
 #[test]
 fn burn_id_matches_the_contract_vector() {
     let cfg = BridgeConfig {
@@ -775,7 +776,7 @@ fn burn_id_matches_the_contract_vector() {
 
     assert_eq!(
         hex::encode(expected_burn_id(&cfg, &release).to_be_bytes::<32>()),
-        "5f7d9d965dd22d924a86f6d23852911167ff751aa0d6a7227ad84d93fc20041d"
+        "8e9c5e1d3bdacfe89bda87a85bbb59bc1578888f8d63c5de8744c13ff8c9423f"
     );
 }
 

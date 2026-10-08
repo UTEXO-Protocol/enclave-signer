@@ -69,6 +69,7 @@ const BFI_OPERATION_ID_TOPIC: usize = 1;
 const BFI_AMOUNT_OFF: usize = 32;
 const BFI_NET_AMOUNT_OFF: usize = 64;
 const BFI_TOKEN_COMMISSION_OFF: usize = 96;
+const BFI_DEST_CHAIN_ID_OFF: usize = 192;
 /// Word 7: the byte offset of the `string destinationAddress` tail, not the
 /// string itself.
 const BFI_DEST_ADDRESS_HEAD_OFF: usize = 224;
@@ -204,6 +205,7 @@ pub fn verify_funds_in_event(
         net,
         commission,
         destination_address,
+        ..
     } = decode_bridge_funds_in(log)?;
 
     if expected_operation_id != operation_id.as_slice() {
@@ -263,6 +265,7 @@ struct BridgeFundsInRecord {
     gross: u64,
     net: u64,
     commission: u64,
+    dest_chain_id: u64,
     destination_address: String,
 }
 
@@ -290,6 +293,7 @@ fn decode_bridge_funds_in(log: &LogEntry) -> Result<BridgeFundsInRecord> {
         gross: decode_u64_word(&log.data, BFI_AMOUNT_OFF, "amount")?,
         net: decode_u64_word(&log.data, BFI_NET_AMOUNT_OFF, "netAmount")?,
         commission: decode_u64_word(&log.data, BFI_TOKEN_COMMISSION_OFF, "tokenCommission")?,
+        dest_chain_id: decode_u64_word(&log.data, BFI_DEST_CHAIN_ID_OFF, "destinationChainId")?,
         destination_address: decode_abi_string(
             &log.data,
             BFI_DEST_ADDRESS_HEAD_OFF,
@@ -500,8 +504,6 @@ pub fn rgb_mint_deposit_id(
     mint_opid: &[u8; 32],
     minted: u64,
 ) -> Result<[u8; 32]> {
-    use crate::networks::evm::validation::RGB_SOURCE_CHAIN_ID;
-
     if cfg.token_contract == [0u8; 20] || cfg.chain_id == 0 {
         return Err(EnclaveError::CrossCheck(
             "TOKEN_CONTRACT and EVM_CHAIN_ID must be pinned to derive a mint's deposit id - \
@@ -531,7 +533,7 @@ pub fn rgb_mint_deposit_id(
     hasher.update(address(&cfg.funds_in_contract));
     hasher.update(word(cfg.chain_id));
     hasher.update(address(&cfg.token_contract));
-    hasher.update(word(RGB_SOURCE_CHAIN_ID));
+    hasher.update(word(crate::networks::evm::RGB_CHAIN_ID));
     hasher.update(mint_opid);
     hasher.update(word(minted));
     Ok(hasher.finalize().into())
@@ -591,8 +593,16 @@ pub fn verify_rgb_funds_in(
     let BridgeFundsInRecord {
         operation_id,
         net: net_amount,
+        dest_chain_id,
         ..
     } = decode_bridge_funds_in(bridge_log)?;
+    // FundsIn has no chain field, so the deposit's chain comes from BridgeFundsIn.
+    if dest_chain_id != crate::networks::evm::RGB_CHAIN_ID {
+        return Err(EnclaveError::CrossCheck(format!(
+            "BridgeFundsIn destinationChainId {dest_chain_id} != RGB network id {}",
+            crate::networks::evm::RGB_CHAIN_ID
+        )));
+    }
 
     let depth = check_confirmation_depth(provider, receipt.block_number, min_confirmations)?;
 

@@ -10,10 +10,10 @@ use alloy_sol_types::SolCall;
 #[cfg(rgb_to_evm)]
 use crate::config::BridgeConfig;
 use crate::error::{EnclaveError, Result};
-#[cfg(rgb_to_evm)]
-use crate::networks::evm::ADDRESS_LEN;
 #[cfg(evm_to_rgb)]
 use crate::networks::evm::HASH_LEN as TX_HASH_LEN;
+#[cfg(rgb_to_evm)]
+use crate::networks::evm::{ADDRESS_LEN, RGB_CHAIN_ID};
 use crate::networks::RouteProof;
 #[cfg(rgb_to_evm)]
 use crate::networks::ValidationContext;
@@ -37,17 +37,6 @@ pub const FUNDS_OUT_SELECTOR_POOLS: [u8; 4] = [0x34, 0x02, 0x76, 0xaa];
 /// allowlist and selects the `TeeLzFundsOut` digest.
 #[cfg(rgb_to_evm)]
 pub const LZ_FUNDS_OUT_SELECTOR: [u8; 4] = lzFundsOutCall::SELECTOR;
-
-/// Chain id of the RGB network: `networks.IDUtexo` in bridge-utexo and the
-/// `96 -> <evm>` routes that `DeployAll` registers. It is a protocol constant,
-/// so code pins it and PCR0 measures it.
-///
-/// The Router and CommissionManager select the verifier, settlement module and
-/// commission rate by `(sourceChainId, destinationChainId)`. A forged value
-/// sends an RGB release through a foreign verifier or rate.
-/// [`validate_rgb_source_identity`] enforces it on both release routes.
-#[cfg(any(rgb_to_evm, feature = "bfa-validation"))]
-pub const RGB_SOURCE_CHAIN_ID: u64 = 96;
 
 /// Maximum `call_data` length: the Bridge's 90_000-byte settlement cap
 /// (`MAX_SETTLEMENT_DATA_OUT_LENGTH`) plus under 1 KiB of fields. PCR-attested.
@@ -247,7 +236,7 @@ pub fn validate_burn_id(cfg: &BridgeConfig, release: &ReleaseIdentity) -> Result
 
 /// Binds the source fields of a release to an RGB source, on both routes.
 ///
-/// - `sourceChainId` MUST be [`RGB_SOURCE_CHAIN_ID`]. It selects the
+/// - `sourceChainId` MUST be [`RGB_CHAIN_ID`]. It selects the
 ///   verifier, settlement module and commission rate.
 /// - `sourceAddress` MUST be empty. RGB has no source address
 ///   (`RGBVerifier.UnexpectedSourceAddress`, bridge PR #152). The field is
@@ -257,9 +246,9 @@ pub fn validate_burn_id(cfg: &BridgeConfig, release: &ReleaseIdentity) -> Result
 /// names its own chain.
 #[cfg(rgb_to_evm)]
 pub fn validate_rgb_source_identity(source: &ReleaseIdentity) -> Result<()> {
-    if source.source_chain_id != U256::from(RGB_SOURCE_CHAIN_ID) {
+    if source.source_chain_id != U256::from(RGB_CHAIN_ID) {
         return Err(EnclaveError::CrossCheck(format!(
-            "calldata sourceChainId {} != RGB network id {RGB_SOURCE_CHAIN_ID}: the source chain \
+            "calldata sourceChainId {} != RGB network id {RGB_CHAIN_ID}: the source chain \
              selects the verifier, settlement module and commission rate - refusing to sign an \
              RGB release under a foreign source chain",
             source.source_chain_id

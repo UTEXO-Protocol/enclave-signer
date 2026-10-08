@@ -617,6 +617,25 @@ fn verify_rgb_funds_in_accepts_a_verified_lock() {
     );
 }
 
+/// A deposit routed to another chain must not back an RGB mint.
+#[cfg(feature = "bfa-validation")]
+#[test]
+fn verify_rgb_funds_in_rejects_a_foreign_destination_chain() {
+    let mut bridge = bridge_log(op_id(7), 1000, 950, 50);
+    bridge.data[BFI_DEST_CHAIN_ID_OFF..BFI_DEST_CHAIN_ID_OFF + 32].copy_from_slice(&word(42161));
+    let p = FakeEvm {
+        receipt: Some(receipt_with(
+            vec![rgb_companion_log(0xab, 100), bridge],
+            100,
+        )),
+        head: 112,
+    };
+    let e = verify_rgb_funds_in(&p, &BRIDGE, 12, &TX, &word(0xab))
+        .unwrap_err()
+        .to_string();
+    assert!(e.contains("destinationChainId 42161"), "got: {e}");
+}
+
 /// Without the record, a `fundsOut` has nothing to cite, so the lock is not
 /// settlement evidence.
 #[cfg(feature = "bfa-validation")]
@@ -658,7 +677,7 @@ fn refuses_a_bridge_location_that_is_not_the_pinned_contract() {
     assert!(check_bridge_location("not-an-address", &pinned).is_err());
 }
 
-/// The vector bridge-utexo and the Bridge tests pin too.
+/// The shared vector, with `rgbNetwork` = `RGB_CHAIN_ID` (827166).
 #[cfg(feature = "bfa-validation")]
 #[test]
 fn rgb_mint_deposit_id_matches_the_shared_vector() {
@@ -681,11 +700,12 @@ fn rgb_mint_deposit_id_matches_the_shared_vector() {
 
     assert_eq!(
         hex::encode(rgb_mint_deposit_id(&cfg, &opid, 100_000).unwrap()),
-        "e0ff3d136bfe0a4de03da1aab87b954b20895d976e1a1753b2d553b451420766"
+        "37a9c9b5fe6b36b6ac70e27858cd0408becfe3ee3b10161e27d3faf7fc200d25"
     );
 }
 
-/// The vector BridgeProxy.t.sol pins (bridge-smart-contracts #173).
+/// The BridgeProxy.t.sol vector inputs (bridge-smart-contracts #173), with
+/// `rgbNetwork` = 827166. The contract test still pins the 96 form.
 #[cfg(feature = "bfa-validation")]
 #[test]
 fn rgb_mint_deposit_id_matches_the_contract_vector() {
@@ -700,7 +720,7 @@ fn rgb_mint_deposit_id_matches_the_contract_vector() {
 
     assert_eq!(
         hex::encode(rgb_mint_deposit_id(&cfg, &opid, 1_000_000).unwrap()),
-        "6f0c19c7e7e8764fbd2afa1fc8211144acc9b45766be22d6b9bba1b20ed6cbd9"
+        "f275b61cb80792e5a40bf8de0b0d66b3ed9c29b774ea9df36d3ae567eb17c3c4"
     );
 }
 

@@ -98,7 +98,7 @@ fn forged_receipt() -> String {
         tokenCommission: U256::from(50),
         nativeCommission: U256::ZERO,
         sourceChainId: U256::ZERO,
-        destinationChainId: U256::ZERO,
+        destinationChainId: U256::from(utexo_bridge_enclave::networks::evm::RGB_CHAIN_ID),
         destinationAddress: INVOICE.into(),
         settlementData: Default::default(),
     };
