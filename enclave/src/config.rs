@@ -400,8 +400,9 @@ impl Default for EvmRpcConfig {
 /// Endpoints and KMS pins set once at launch and committed in the attested policy.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Endpoints {
-    /// `ssl://host:port` or `tcp://host:port` (Electrum), or `https://host[:port]`
-    /// or `http://host[:port]` (Esplora). Empty without `rgb-validation`.
+    /// `ssl://host:port` (Electrum) or `https://host[:port]` (Esplora).
+    /// Test and dev builds also accept `tcp://` and `http://`. Empty without
+    /// `rgb-validation`.
     pub electrum_url: String,
     pub electrum_host: String,
     pub electrum_port: u16,
@@ -534,19 +535,60 @@ fn parse_port(name: &str, port: u32) -> std::result::Result<u16, String> {
         .ok_or_else(|| format!("{name} {port} is not in 1-65535"))
 }
 
-/// `ssl://host:port` or `tcp://host:port` (Electrum), or `https://host[:port]`
-/// or `http://host[:port]` (Esplora, port 443 or 80 by default). Nothing after
-/// the port.
+/// `ssl://host:port` (Electrum) or `https://host[:port]` (Esplora, port 443 by
+/// default). Nothing after the port.
+///
+/// The plaintext forms `tcp://host:port` and `http://host[:port]` (port 80 by
+/// default) are accepted only by a build that can never attest a production
+/// policy. See [`plaintext_indexer_allowed`].
 #[cfg(feature = "rgb-validation")]
 fn parse_electrum_url(url: &str) -> std::result::Result<(String, u16), String> {
-    let (rest, default_port) = if let Some(rest) = url
-        .strip_prefix("ssl://")
-        .or_else(|| url.strip_prefix("tcp://"))
-    {
+    parse_indexer_url(url, plaintext_indexer_allowed())
+}
+
+/// True for a test, debug, mock-attestation or seed-import build. These are
+/// the inputs that make [`crate::policy::SecurityPolicy::resolve`] return a
+/// development policy.
+///
+/// Over `tcp://` or `http://` the host reads and changes every indexer answer.
+/// The mint path has no SPV check, so the indexer is its only source of the
+/// witness history. The attested policy commits the indexer host, not its
+/// scheme. Thus a release image refuses plaintext: the rule is in the code,
+/// and PCR0 measures it.
+#[cfg(feature = "rgb-validation")]
+fn plaintext_indexer_allowed() -> bool {
+    let ctx = crate::policy::BuildContext::current();
+    ctx.debug_or_test || ctx.mock_attestation || ctx.allow_seed_import
+}
+
+/// [`parse_electrum_url`] with the plaintext rule as an input, so tests can
+/// check the release rule.
+#[cfg(feature = "rgb-validation")]
+fn parse_indexer_url(
+    url: &str,
+    allow_plaintext: bool,
+) -> std::result::Result<(String, u16), String> {
+    let plaintext = |scheme: &str| {
+        url.strip_prefix(scheme)
+            .map(|rest| {
+                if allow_plaintext {
+                    Ok(rest)
+                } else {
+                    Err(format!(
+                        "electrum_url {url:?} is plaintext ({scheme}); a release image \
+                         accepts only ssl:// or https://"
+                    ))
+                }
+            })
+            .transpose()
+    };
+    let (rest, default_port) = if let Some(rest) = url.strip_prefix("ssl://") {
         (rest, None)
     } else if let Some(rest) = url.strip_prefix("https://") {
         (rest, Some(443))
-    } else if let Some(rest) = url.strip_prefix("http://") {
+    } else if let Some(rest) = plaintext("tcp://")? {
+        (rest, None)
+    } else if let Some(rest) = plaintext("http://")? {
         (rest, Some(80))
     } else {
         return Err(format!(
@@ -779,6 +821,43 @@ mod tests {
                 "{url:?}"
             );
         }
+    }
+
+    /// A release image refuses a plaintext indexer. The host relays the
+    /// bytes, so over `tcp://` or `http://` it can forge every answer.
+    #[cfg(feature = "rgb-validation")]
+    #[test]
+    fn a_release_build_refuses_a_plaintext_indexer() {
+        for url in [
+            "tcp://electrum.test:50001",
+            "http://esplora.test:3000",
+            "http://esplora.test",
+        ] {
+            let err = parse_indexer_url(url, false).unwrap_err();
+            assert!(err.contains("plaintext"), "{url:?}: {err}");
+            assert!(
+                parse_indexer_url(url, true).is_ok(),
+                "{url:?} in a dev build"
+            );
+        }
+        assert_eq!(
+            parse_indexer_url("ssl://electrum.test:50002", false).unwrap(),
+            ("electrum.test".to_string(), 50002)
+        );
+        assert_eq!(
+            parse_indexer_url("https://esplora.test", false).unwrap(),
+            ("esplora.test".to_string(), 443)
+        );
+        assert!(parse_indexer_url("ftp://electrum.test:1", false)
+            .unwrap_err()
+            .contains("is not ssl://"));
+    }
+
+    /// The test build is a dev build, so the launch path takes plaintext.
+    #[cfg(feature = "rgb-validation")]
+    #[test]
+    fn a_test_build_allows_a_plaintext_indexer() {
+        assert!(plaintext_indexer_allowed());
     }
 
     #[cfg(feature = "rgb-validation")]

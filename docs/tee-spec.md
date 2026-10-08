@@ -155,11 +155,14 @@ EVM RPC forwarder and opens no chain connection, and `Health` reports not
 ready. A refused set leaves the enclave
 unset, so a retry works.
 
-With an Electrum URL `ssl://host:port` (or `tcp://`) the forwarder listens on
-that port and pins `host` to loopback in `/etc/hosts`. With `ssl://`, TLS
-terminates inside the enclave against the real certificate. An `https://host[:port]` (or
-`http://`) URL selects Esplora instead, with the same forwarder and pin. Dev
-uses it on the custom signet, where the rgb-ops Electrum chain check fails. The EVM RPC forwarder listens on the
+With an Electrum URL `ssl://host:port` the forwarder listens on that port and
+pins `host` to loopback in `/etc/hosts`, so TLS terminates inside the enclave
+against the real certificate. An `https://host[:port]` URL selects Esplora
+instead, with the same forwarder and pin. Dev uses it on the custom signet,
+where the rgb-ops Electrum chain check fails. The plaintext forms `tcp://` and
+`http://` let the host read and change every answer; only a test, debug,
+`mock-attestation` or `allow-seed-import` build accepts them. A release image
+refuses them in `SetEndpoints`. The EVM RPC forwarder listens on the
 EVM RPC TLS port, and the client connects to `https://<host>:<port>/` through
 it, so TLS ends inside the enclave; it trusts only the CA of the set, in every
 build. The host runs `vsock-proxy 8002 <EVM_RPC_HOST> <EVM_RPC_TLS_PORT>`.
@@ -249,9 +252,10 @@ scheme and port, the EVM RPC TLS port, request-size caps, and the concrete
 `BTC_MAX_TOTAL_SATS`, `BTC_MAX_UNOWNED_SATS` and `RGB_MAX_UNOWNED_SATS` values
 (only the `BTC_MAX_TOTAL_SATS` on/off boolean is attested).
 
-The exclusion of these connection settings is intentional (F05-RR-AF-24).
-Matching policies do not prove TLS-only Electrum/Esplora or compliance with a
-specific port requirement. EVM RPC still requires TLS with the pinned host
+The scheme needs no commitment: a release image accepts only TLS
+(`ssl://` or `https://`) for the Electrum/Esplora URL, so the rule is in the
+code and PCR0 measures it (F05-RR-AF-24). The ports are not committed, and
+matching policies do not prove compliance with a specific port requirement. EVM RPC still requires TLS with the pinned host
 and CA on every accepted port. Bitcoin SPV checks for RGB-source requests
 still apply.
 
