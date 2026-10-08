@@ -173,5 +173,17 @@ pub fn policy_cases(policy: &AttestedPolicy) -> Vec<(&'static str, Vec<u8>)> {
             expected_evm_address: None,
         })
     );
+    // Issue #270: a donor under another IAM role commits another PCR3.
+    alter!(
+        clone_peer_pcr3,
+        Some(match clone_peer_pcr3 {
+            Some(pcr3) => {
+                let mut x = *pcr3;
+                x[0] ^= 1;
+                x
+            }
+            None => [0x91; 48],
+        })
+    );
     cases
 }

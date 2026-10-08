@@ -118,6 +118,10 @@ requires `--expect-evm-finality-tag` with the approved value. Receipt checks
 require coverage by that head and canonical block-hash matching. Use the
 verifier and EIF from the same release with approved PCRs.
 
+The `policy` also lists `clone_peer_pcr3`, the PCR3 of the parent instance IAM
+role. You set no flag for it. `attest-verify` takes the expected value from the
+signed document, and refuses a burn signer whose PCR3 is missing or all zero.
+
 ## Run the check
 
 ```bash

@@ -45,7 +45,10 @@ pub(super) fn handle_set_endpoints(
         evm_rpc_tls,
         &endpoints.electrum_host,
     )
-    .with_kms(endpoints.kms.clone());
+    .with_kms(endpoints.kms.clone())
+    // A production policy of a cloning role reads its own PCR3 (the parent
+    // IAM role) here. The gate below refuses an all-zero PCR3.
+    .with_clone_peer_pcr3(crate::attestation::get_own_pcr3)?;
     policy
         .assert_valid_for_build(&ctx.build_ctx)
         .map_err(EnclaveError::InvalidRequest)?;

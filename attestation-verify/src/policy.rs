@@ -20,6 +20,7 @@
 /// Every accepted FundsIn receipt must belong to the canonical chain at or
 /// below that tagged head. The selected tag is attested so verifiers can
 /// reject a weaker policy, including `latest` when they require `safe`.
+/// It also commits the clone-peer PCR3 of a cloning role.
 pub const POLICY_COMMITMENT_V1: u8 = 1;
 
 /// Bridge directions that the image signs. It comes from build features, so
@@ -35,6 +36,14 @@ pub enum SignerRole {
     /// `burn-signer`: EVM releases only. Refuses every RGB mint PSBT. A `ccd`
     /// dev build also signs CCD -> EVM. No shipped burn image has `ccd`.
     Burn = 2,
+}
+
+impl SignerRole {
+    /// True for a role that clones its seed. The mint signer persists its
+    /// seed with KMS and refuses cloning; the other roles clone.
+    pub fn clones(self) -> bool {
+        self != SignerRole::Mint
+    }
 }
 
 /// Source of the EVM `FundsIn` deposit evidence that the enclave verifies
@@ -189,6 +198,11 @@ pub enum AttestedPolicy {
         token_contract: [u8; 20],
         /// KMS pin set at launch.
         kms: Option<KmsPin>,
+        /// PCR3 that a cloning peer must have: the enclave's own PCR3, the
+        /// measurement of the parent instance IAM role. It binds clone peers
+        /// to the operator's role. `Some` exactly for a role that clones (not
+        /// [`SignerRole::Mint`]), and never all zero there.
+        clone_peer_pcr3: Option<[u8; 48]>,
     },
     Development,
 }
@@ -216,6 +230,7 @@ impl AttestedPolicy {
     ///              [kms: 0x00 | 0x01 ++ len(arn) u32 BE ++ arn
     ///               ++ len(region) u32 BE ++ region ++ len(seed_id) u32 BE
     ///               ++ seed_id ++ (0x00 | 0x01 ++ address 20)]
+    ///              [clone_peer_pcr3: 0x00 | 0x01 ++ pcr3 48]
     /// Development: [0x00]
     /// ```
     pub fn to_bytes(&self) -> Vec<u8> {
@@ -243,6 +258,7 @@ impl AttestedPolicy {
                 gas_tx_allowed_selectors,
                 token_contract,
                 kms,
+                clone_peer_pcr3,
             } => {
                 out.push(0x01);
                 out.push(*allow_vanilla_psbt as u8);
@@ -298,6 +314,13 @@ impl AttestedPolicy {
                             }
                             None => out.push(0x00),
                         }
+                    }
+                    None => out.push(0x00),
+                }
+                match clone_peer_pcr3 {
+                    Some(pcr3) => {
+                        out.push(0x01);
+                        out.extend_from_slice(pcr3);
                     }
                     None => out.push(0x00),
                 }
@@ -388,6 +411,7 @@ impl AttestedPolicy {
                         })
                     })
                     .transpose()?;
+                let clone_peer_pcr3 = r.flag()?.then(|| r.array()).transpose()?;
                 AttestedPolicy::Production {
                     allow_vanilla_psbt,
                     signer_role,
@@ -409,6 +433,7 @@ impl AttestedPolicy {
                     gas_tx_allowed_selectors,
                     token_contract,
                     kms,
+                    clone_peer_pcr3,
                 }
             }
             _ => return Err(PolicyDecodeError("unknown policy kind")),
@@ -508,6 +533,7 @@ mod tests {
             gas_tx_allowed_selectors: vec![[0xde, 0xad, 0xbe, 0xef]],
             token_contract: [0x77; 20],
             kms: None,
+            clone_peer_pcr3: None,
         }
     }
 
@@ -597,6 +623,7 @@ mod tests {
                 evm_rpc_tls,
                 token_contract,
                 kms,
+                clone_peer_pcr3,
                 ..
             } => AttestedPolicy::Production {
                 allow_vanilla_psbt,
@@ -619,6 +646,7 @@ mod tests {
                 gas_tx_allowed_selectors: selectors,
                 token_contract,
                 kms,
+                clone_peer_pcr3,
             },
             AttestedPolicy::Development => unreachable!(),
         }
@@ -723,11 +751,12 @@ mod tests {
             *token_contract = [0x78; 20];
         }
         assert_ne!(base().to_bytes(), other.to_bytes());
-        // Only the token bytes change. The KMS presence byte follows them.
+        // Only the token bytes change. The KMS and the PCR3 presence bytes
+        // follow them.
         let a = base().to_bytes();
         let b = other.to_bytes();
-        assert_eq!(a[..a.len() - 21], b[..b.len() - 21]);
-        assert_eq!(&a[a.len() - 21..a.len() - 1], &[0x77; 20]);
+        assert_eq!(a[..a.len() - 22], b[..b.len() - 22]);
+        assert_eq!(&a[a.len() - 22..a.len() - 2], &[0x77; 20]);
     }
 
     #[test]
@@ -793,6 +822,30 @@ mod tests {
         }
     }
 
+    /// `base()` as a burn signer with the given clone-peer PCR3.
+    fn with_clone_peer_pcr3(pcr3: Option<[u8; 48]>) -> AttestedPolicy {
+        let mut p = base();
+        if let AttestedPolicy::Production {
+            signer_role,
+            clone_peer_pcr3,
+            ..
+        } = &mut p
+        {
+            *signer_role = SignerRole::Burn;
+            *clone_peer_pcr3 = pcr3;
+        }
+        p
+    }
+
+    /// Two enclaves under different IAM roles attest different policies, so a
+    /// verifier sees which role the clone peers are bound to.
+    #[test]
+    fn clone_peer_pcr3_changes_the_bytes() {
+        let role_a = with_clone_peer_pcr3(Some([0x33; 48])).to_bytes();
+        assert_ne!(role_a, with_clone_peer_pcr3(Some([0x34; 48])).to_bytes());
+        assert_ne!(role_a, with_clone_peer_pcr3(None).to_bytes());
+    }
+
     #[test]
     fn from_bytes_inverts_to_bytes() {
         let mut policies = vec![AttestedPolicy::Development, base()];
@@ -812,6 +865,7 @@ mod tests {
             *kms = Some(a_kms_pin());
         }
         policies.push(full);
+        policies.push(with_clone_peer_pcr3(Some([0x33; 48])));
         for p in policies {
             assert_eq!(AttestedPolicy::from_bytes(&p.to_bytes()), Ok(p));
         }
@@ -827,6 +881,10 @@ mod tests {
         let mut version = good.clone();
         version[0] = 2;
         bad.push(version);
+        // The last byte is the PCR3 presence flag. Only 0 and 1 are valid.
+        let mut flag = good.clone();
+        *flag.last_mut().unwrap() = 2;
+        bad.push(flag);
         let mut kind = good.clone();
         kind[1] = 2;
         bad.push(kind);
