@@ -12,7 +12,7 @@ IMAGE_ENCLAVE_MINT_BACKUP ?= $(REGISTRY_HOST)/utexo-bridge-enclave-mint$(ENVIRON
 IMAGE_ENCLAVE_MINT_LATEST ?= $(REGISTRY_HOST)/utexo-bridge-enclave-mint$(ENVIRONMENT):$(IMAGE_TAG)
 build_enclave_mint: export RGB_ASSET_ID := $(RGB_ASSET_ID)
 
-.PHONY: build_parent push_parent build_enclave push_enclave build_enclave_rgb push_enclave_rgb build_enclave_ccd push_enclave_ccd build_enclave_dev push_enclave_dev build_enclave_mint push_enclave_mint check_mint_config docker docker_dev help
+.PHONY: build_parent push_parent build_parent_dev push_parent_dev build_enclave push_enclave build_enclave_rgb push_enclave_rgb build_enclave_ccd push_enclave_ccd build_enclave_dev push_enclave_dev build_enclave_mint push_enclave_mint check_mint_config docker docker_dev help
 
 build_parent: ## Build parent adapter docker image.
 	docker build $(DOCKER_AUTH_ARGS) -f ./build/Dockerfile.parent -t $(IMAGE_PARENT_BACKUP) . && \
@@ -21,6 +21,15 @@ build_parent: ## Build parent adapter docker image.
 push_parent: ## Push parent adapter docker image.
 	docker push $(IMAGE_PARENT_BACKUP) && \
 	docker push $(IMAGE_PARENT_LATEST)
+
+build_parent_dev: ## Build parent dev image (debug, insecure-dev: plaintext gRPC, no mTLS). Same name, tags :dev and :<date>-<commit>-dev.
+	docker build $(DOCKER_AUTH_ARGS) -f ./build/Dockerfile.parent \
+		--build-arg CARGO_ARGS="--features insecure-dev" --build-arg PROFILE_DIR=debug \
+		-t $(IMAGE_PARENT_DEV_BACKUP) -t $(IMAGE_PARENT_DEV_LATEST) .
+
+push_parent_dev: ## Push parent dev image tags.
+	docker push $(IMAGE_PARENT_DEV_BACKUP) && \
+	docker push $(IMAGE_PARENT_DEV_LATEST)
 
 build_enclave: ## Build combined enclave image, retired swap flow (vsock+rgb+rgb-swap+ccd+bfa-validation).
 	docker build $(DOCKER_AUTH_ARGS) -f ./build/Dockerfile.enclave -t $(IMAGE_ENCLAVE_BACKUP) . && \
@@ -68,8 +77,8 @@ push_enclave_dev: ## Push enclave dev docker image.
 docker: ## Build and push the parent and the combined (retired swap) enclave image.
 	$(MAKE) build_parent push_parent build_enclave push_enclave
 
-docker_dev: ## Build and push all dev docker images (parent + enclave-dev).
-	$(MAKE) build_parent push_parent build_enclave_dev push_enclave_dev
+docker_dev: ## Build and push all dev docker images (parent-dev + enclave-dev).
+	$(MAKE) build_parent_dev push_parent_dev build_enclave_dev push_enclave_dev
 
 help: ## Show this help.
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-20s\033[0m %s\n", $$1, $$2}'

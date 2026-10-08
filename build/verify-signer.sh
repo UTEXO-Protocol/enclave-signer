@@ -19,7 +19,7 @@ set -uo pipefail
 
 EVM_CHAIN_ID=42161
 # The bridge's id for the RGB network.
-SOURCE_CHAIN_ID=96
+SOURCE_CHAIN_ID=827166
 
 usage() { echo "verify-signer: $*" >&2; exit 2; }
 fail() { echo "FAIL: $*" >&2; exit 1; }

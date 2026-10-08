@@ -114,6 +114,12 @@ jobs:
       - name: Test (parent)
         run: cargo test --manifest-path parent/Cargo.toml
 
+      - name: Clippy (parent, insecure-dev)
+        run: cargo clippy --manifest-path parent/Cargo.toml --features insecure-dev --lib --bins --test test_insecure_dev -- -D warnings
+
+      - name: Test (parent, insecure-dev)
+        run: cargo test --manifest-path parent/Cargo.toml --features insecure-dev --test test_insecure_dev
+
       # Combined build profile: the feature set of build/Dockerfile.enclave
       # (retired swap flow, not production).
       - name: Build (swap combo)
@@ -205,7 +211,7 @@ jobs:
 
   # Assert the dev-only features `compile_error!` in a release build, so a
   # misconfigured Dockerfile / CI matrix can never ship one. Each feature is
-  # built individually with `--release`; the build MUST fail, and fail via
+  # checked individually with `--release`; the check MUST fail, and fail via
   # our guard rather than some unrelated error. Runs separately from `ci`
   # because these builds are expected to fail.
   release-guards:
@@ -213,7 +219,13 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        feature: [allow-seed-import, mock-attestation]
+        include:
+          - feature: allow-seed-import
+            target: -p utexo-bridge-enclave
+          - feature: mock-attestation
+            target: -p utexo-bridge-enclave
+          - feature: insecure-dev
+            target: --manifest-path parent/Cargo.toml
 
     steps:
       - uses: actions/checkout@v4
@@ -226,15 +238,21 @@ jobs:
       - name: Install system dependencies
         run: sudo apt-get update && sudo apt-get install -y pkg-config libssl-dev
 
-      - name: Set up SSH for private BFA deps
+      - name: Set up SSH for private deps
         run: |
           mkdir -p ~/.ssh && chmod 700 ~/.ssh
           ssh-keyscan -H github.com >> ~/.ssh/known_hosts
+          printf '%s\n' "${{ secrets.FEDERATED_SIGNER_PROTO_DEPLOY_KEY }}" > ~/.ssh/key_federated
           printf '%s\n' "${{ secrets.RGB_CONSENSUS_BFA_DEPLOY_KEY }}"       > ~/.ssh/key_consensus
           printf '%s\n' "${{ secrets.RGB_OPS_BFA_DEPLOY_KEY }}"             > ~/.ssh/key_ops
           printf '%s\n' "${{ secrets.RGB_SCHEMAS_BFA_DEPLOY_KEY }}"         > ~/.ssh/key_schemas
           chmod 600 ~/.ssh/key_*
           cat >> ~/.ssh/config << 'SSHCONF'
+          Host github-federated-signer
+            HostName github.com
+            User git
+            IdentityFile ~/.ssh/key_federated
+            IdentitiesOnly yes
           Host github-rgb-consensus
             HostName github.com
             User git
@@ -261,12 +279,12 @@ jobs:
             ~/.cargo/git
             target
             parent/target
-          key: ${{ runner.os }}-cargo-release-guards-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-cargo-release-guards-${{ matrix.feature }}-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-release-guards-
 
       - name: Assert release build is rejected with ${{ matrix.feature }}
         run: |
-          if cargo build -p utexo-bridge-enclave --release --features ${{ matrix.feature }} 2>build.log; then
+          if cargo check ${{ matrix.target }} --release --features ${{ matrix.feature }} 2>build.log; then
             echo "::error::release build unexpectedly SUCCEEDED with '${{ matrix.feature }}' — the compile_error release guard is missing or not firing"
             exit 1
           fi

@@ -100,6 +100,9 @@ tokio-vsock = "=0.7.2"
 [features]
 default = []
 vsock = []
+# DANGER: dev only. The parent serves plaintext gRPC with no client auth on
+# any bind address. A release build with it fails to compile.
+insecure-dev = []
 
 [dev-dependencies]
 tonic-prost = "0.14"
