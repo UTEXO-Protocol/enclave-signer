@@ -39,16 +39,7 @@ pub fn expected_policy(
     let signs_gas_tx = role != SignerRole::Mint;
     let gas = |key: &str| optional(key).filter(|_| signs_gas_tx);
 
-    let url = endpoints
-        .electrum_url
-        .strip_suffix('/')
-        .unwrap_or(&endpoints.electrum_url);
-    let electrum_host = url
-        .strip_prefix("ssl://")
-        .or_else(|| url.strip_prefix("tcp://"))
-        .and_then(|rest| rest.rsplit_once(':'))
-        .map(|(host, _)| host.to_ascii_lowercase())
-        .with_context(|| format!("electrum_url {url:?} is not ssl:// or tcp://host:port"))?;
+    let electrum_host = indexer_host(&endpoints.electrum_url)?;
     let evm_rpc_tls = (!endpoints.evm_rpc_ca_der.is_empty()).then(|| EvmRpcTlsPin {
         host: endpoints.evm_rpc_host.to_ascii_lowercase(),
         ca_sha256: Sha256::digest(&endpoints.evm_rpc_ca_der).into(),
@@ -113,6 +104,32 @@ pub fn expected_policy(
         token_contract: address20("TOKEN_CONTRACT", required("TOKEN_CONTRACT")?)?,
         kms,
     })
+}
+
+/// The lowercased host of an indexer URL, as the enclave attests it:
+/// `ssl://` or `tcp://host:port` (Electrum), `https://` or `http://host[:port]`
+/// (Esplora). The enclave checks the scheme and port rules itself.
+fn indexer_host(url: &str) -> Result<String> {
+    let url = url.strip_suffix('/').unwrap_or(url);
+    let (rest, port_optional) = if let Some(rest) = url
+        .strip_prefix("ssl://")
+        .or_else(|| url.strip_prefix("tcp://"))
+    {
+        (rest, false)
+    } else if let Some(rest) = url
+        .strip_prefix("https://")
+        .or_else(|| url.strip_prefix("http://"))
+    {
+        (rest, true)
+    } else {
+        bail!("electrum_url {url:?} is not ssl://, tcp://, https:// or http://");
+    };
+    let host = match rest.rsplit_once(':') {
+        Some((host, _)) => host,
+        None if port_optional => rest,
+        None => bail!("electrum_url {url:?} has no port"),
+    };
+    Ok(host.to_ascii_lowercase())
 }
 
 fn address20(key: &str, value: &str) -> Result<[u8; 20]> {
@@ -690,6 +707,25 @@ mod tests {
         upper.evm_rpc_host = "RPC.Example".into();
         let policy = expected_policy(SignerRole::Combined, &image_env(), &upper).unwrap();
         assert_eq!(policy, expected());
+    }
+
+    #[test]
+    fn esplora_urls_give_the_attested_host() {
+        for url in [
+            "https://esplora.example",
+            "https://Esplora.Example:443/",
+            "http://esplora.example:3000",
+            "tcp://esplora.example:50001",
+        ] {
+            assert_eq!(indexer_host(url).unwrap(), "esplora.example", "{url}");
+        }
+        for url in [
+            "ssl://esplora.example",
+            "esplora.example:443",
+            "ftp://e.example:1",
+        ] {
+            assert!(indexer_host(url).is_err(), "{url}");
+        }
     }
 
     #[test]

@@ -4,7 +4,8 @@
 # Start enclave CIDs 16/18/20 and Parent ports 50051/52/53.
 #
 # Optional chain endpoints, set on each enclave at start:
-#   ELECTRUM_URL=ssl://<host>:<port>  EVM_RPC_TLS_CA_DER_FILE=<CA in DER>
+#   ELECTRUM_URL=ssl://<host>:<port> (Electrum) or https://<host>[:<port>] (Esplora)
+#   EVM_RPC_TLS_CA_DER_FILE=<CA in DER>
 # The EVM RPC host and port come from host-prep-evmrpc.sh.
 # Each parent reads Bitcoin headers from HEADER_ELECTRUM_URL, passed through as
 # set: ssl://<host>:<port> (WebPKI roots) or tcp:// to a loopback IP. It is not

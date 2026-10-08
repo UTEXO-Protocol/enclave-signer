@@ -90,8 +90,8 @@ The script:
    certificate chain to the AWS Nitro root, the COSE signature, the PCRs, the
    nonce, the public key and the commitment of the keys and the policy.
 4. Reads the EVM address from the verified output.
-5. Checks that the address is in `MultisigProxy.getEnclaveSigners(96)`. 96 is
-   the bridge's id for the RGB network.
+5. Checks that the address is in `MultisigProxy.getEnclaveSigners(827166)`.
+   827166 is the bridge's id for the RGB network (`RGB_CHAIN_ID`).
 
 Exit 0 means all checks pass. Exit 1 names the check that failed. Exit 2 is a
 usage error. Run the script once for each published bundle.
