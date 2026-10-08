@@ -408,4 +408,4 @@ miss=(); for p in "${WANT_PORTS[@]}"; do printf '%s\n' "$LISTEN" | grep -qx "$p"
 [ "${#miss[@]}" -eq 0 ] || { log "parents NOT listening on: ${miss[*]} (want ${WANT_PORTS[*]})"; exit 1; }
 log "all parent ports listening: ${WANT_PORTS[*]}"
 
-log "deploy OK (git_sha $GIT_SHA) — systemd-managed; run init/clone to bootstrap identity"
+log "deploy OK (git_sha $GIT_SHA) — systemd-managed; run init/clone to bootstrap identity, then verify-identity.sh (it writes the attestation bundles)"

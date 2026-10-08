@@ -5,15 +5,24 @@
 //! `bin/attest_verify.rs` parses flags, calls [`verify_attested_pubkey`] and
 //! formats the output. Integration tests use this module against an
 //! in-process parent and enclave.
+//!
+//! An [`AttestationBundle`] stores one verified answer, so anyone can run
+//! the same checks later without network access ([`verify_bundle`]).
 
 use anyhow::{bail, Context, Result};
 use attestation_verify::{
-    AttestationMode, AttestedPolicy, BtcDataSource, EvmDataSource, EvmRpcTlsPin, KmsPin, SignerRole,
+    AttestationMode, AttestedPolicy, BtcDataSource, EvmDataSource, EvmRpcTlsPin, ExpectedPcrs,
+    KmsPin, SignerRole, VerifiedAttestation,
 };
+use base64::engine::general_purpose::STANDARD as BASE64;
+use base64::Engine;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+use crate::enclave_proto::GetAttestedPublicKeyResponse;
 use crate::grpc_proto::parent_service_client::ParentServiceClient;
 use crate::grpc_proto::{AttestedPublicKeyRequest, AttestedPublicKeyResponse};
+use crate::launch_check;
 
 /// Verify through the real COSE and cert-chain path, or the raw-CBOR mock
 /// path. Production MUST use `Real`.
@@ -162,20 +171,37 @@ pub fn verify_attested_response(
     mode: VerifyMode,
     expected_policy: &ExpectedPolicy,
 ) -> Result<AttestedPubkeyResult> {
-    let verified = match mode {
-        VerifyMode::Real => attestation_verify::verify_attestation(
-            &response.attestation_doc,
-            expected_pcrs,
-            Some(&nonce),
-        )
-        .context("attestation verify failed")?,
-        VerifyMode::Mock => attestation_verify::verify_mock_attestation(
-            &response.attestation_doc,
-            expected_pcrs,
-            Some(&nonce),
-        )
-        .context("mock attestation verify failed")?,
-    };
+    let result = verify_keyed(response, nonce, |doc| {
+        verify_now(doc, expected_pcrs, &nonce, mode)
+    })?;
+    check_expected_policy(&result, expected_policy)?;
+    Ok(result)
+}
+
+/// Verify the document now, with the PCRs and the nonce.
+fn verify_now(
+    doc: &[u8],
+    pcrs: &ExpectedPcrs,
+    nonce: &[u8; 32],
+    mode: VerifyMode,
+) -> Result<VerifiedAttestation> {
+    match mode {
+        VerifyMode::Real => attestation_verify::verify_attestation(doc, pcrs, Some(nonce))
+            .context("attestation verify failed"),
+        VerifyMode::Mock => attestation_verify::verify_mock_attestation(doc, pcrs, Some(nonce))
+            .context("mock attestation verify failed"),
+    }
+}
+
+/// Verify the document with `verify_doc`, then check that it binds the
+/// public key and the commitment of the key bundle and the policy bytes.
+/// Decode the policy. The caller compares it with what it expects.
+fn verify_keyed(
+    response: AttestedPublicKeyResponse,
+    nonce: [u8; 32],
+    verify_doc: impl FnOnce(&[u8]) -> Result<VerifiedAttestation>,
+) -> Result<AttestedPubkeyResult> {
+    let verified = verify_doc(&response.attestation_doc)?;
 
     if verified.enclave_pubkey != response.evm_uncompressed_pub {
         bail!(
@@ -204,15 +230,6 @@ pub fn verify_attested_response(
     }
     // 2. Decode them.
     let policy = AttestedPolicy::from_bytes(&response.attested_policy)?;
-    // 3. Compare them with the expected policy: pins from the wire response,
-    // posture flags from `expected_policy`. The bytes are canonical.
-    let expected = expected_attested_policy(expected_policy, &response)?;
-    if response.attested_policy != expected.to_bytes() {
-        bail!(
-            "the attested policy {policy:?} does not match the expected policy {expected:?}: \
-             the enclave's security posture differs from what was expected"
-        );
-    }
 
     Ok(AttestedPubkeyResult {
         response,
@@ -221,6 +238,232 @@ pub fn verify_attested_response(
         nonce_sent: nonce,
         policy,
     })
+}
+
+/// Compare the attested policy with the expected policy: pins from the wire
+/// response, posture flags from `expected_policy`. The bytes are canonical.
+fn check_expected_policy(
+    result: &AttestedPubkeyResult,
+    expected_policy: &ExpectedPolicy,
+) -> Result<()> {
+    let expected = expected_attested_policy(expected_policy, &result.response)?;
+    if result.response.attested_policy != expected.to_bytes() {
+        bail!(
+            "the attested policy {:?} does not match the expected policy {expected:?}: \
+             the enclave's security posture differs from what was expected",
+            result.policy
+        );
+    }
+    Ok(())
+}
+
+/// The parent RPC answer for an enclave answer. An enclave without keys
+/// attests its policy only, which proves no key.
+pub fn attested_response(r: GetAttestedPublicKeyResponse) -> Result<AttestedPublicKeyResponse> {
+    let pk = r
+        .public_keys
+        .context("the enclave has no key; run init or clone first")?;
+    Ok(AttestedPublicKeyResponse {
+        evm_address: pk.evm_address,
+        evm_uncompressed_pub: pk.evm_uncompressed_pub,
+        btc_compressed_pub: pk.btc_compressed_pub,
+        btc_xpub: pk.btc_xpub,
+        master_fingerprint: pk.master_fingerprint,
+        account_xpub_vanilla: pk.account_xpub_vanilla,
+        account_xpub_colored: pk.account_xpub_colored,
+        attestation_doc: r.attestation_doc,
+        chain_id: pk.chain_id,
+        bridge_contract: pk.bridge_contract,
+        rgb_asset_id: pk.rgb_asset_id,
+        evm_gas_tx_uncompressed_pub: pk.evm_gas_tx_uncompressed_pub,
+        evm_gas_tx_address: pk.evm_gas_tx_address,
+        ccd_ed25519_pub: pk.ccd_ed25519_pub,
+        attested_policy: r.attested_policy,
+    })
+}
+
+/// The `format` value of an [`AttestationBundle`].
+pub const BUNDLE_FORMAT: &str = "utexo-signer-attestation/1";
+
+/// One verified attested answer, stored for offline verification.
+/// Bytes are 0x-hex, except the document, which is base64.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AttestationBundle {
+    pub format: String,
+    /// The 32-byte nonce that the document carries.
+    pub nonce: String,
+    pub attestation_doc: String,
+    pub public_keys: BundleKeys,
+    /// The policy bytes that `user_data` commits.
+    pub attested_policy: String,
+    /// The decoded policy as (field, value) pairs, for the reader.
+    /// [`verify_bundle`] requires it to equal the decoded policy bytes.
+    pub policy: Vec<(String, String)>,
+}
+
+/// The public-key bundle, in the order of [`canonical_bundle`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BundleKeys {
+    pub evm_address: String,
+    pub btc_compressed_pub: String,
+    pub btc_xpub: String,
+    pub master_fingerprint: String,
+    pub account_xpub_vanilla: String,
+    pub account_xpub_colored: String,
+    pub evm_uncompressed_pub: String,
+    pub chain_id: u64,
+    pub bridge_contract: String,
+    pub rgb_asset_id: String,
+    pub evm_gas_tx_uncompressed_pub: String,
+    pub evm_gas_tx_address: String,
+    pub ccd_ed25519_pub: String,
+}
+
+fn hex0x(bytes: &[u8]) -> String {
+    format!("0x{}", hex::encode(bytes))
+}
+
+fn from_hex0x(field: &str, value: &str) -> Result<Vec<u8>> {
+    hex::decode(value.strip_prefix("0x").unwrap_or(value))
+        .with_context(|| format!("bundle field {field} is not hex"))
+}
+
+impl AttestationBundle {
+    fn new(result: &AttestedPubkeyResult) -> Self {
+        let r = &result.response;
+        Self {
+            format: BUNDLE_FORMAT.into(),
+            nonce: hex0x(&result.nonce_sent),
+            attestation_doc: BASE64.encode(&r.attestation_doc),
+            public_keys: BundleKeys {
+                evm_address: hex0x(&r.evm_address),
+                btc_compressed_pub: hex0x(&r.btc_compressed_pub),
+                btc_xpub: r.btc_xpub.clone(),
+                master_fingerprint: hex0x(&r.master_fingerprint),
+                account_xpub_vanilla: r.account_xpub_vanilla.clone(),
+                account_xpub_colored: r.account_xpub_colored.clone(),
+                evm_uncompressed_pub: hex0x(&r.evm_uncompressed_pub),
+                chain_id: r.chain_id,
+                bridge_contract: hex0x(&r.bridge_contract),
+                rgb_asset_id: r.rgb_asset_id.clone(),
+                evm_gas_tx_uncompressed_pub: hex0x(&r.evm_gas_tx_uncompressed_pub),
+                evm_gas_tx_address: hex0x(&r.evm_gas_tx_address),
+                ccd_ed25519_pub: hex0x(&r.ccd_ed25519_pub),
+            },
+            attested_policy: hex0x(&r.attested_policy),
+            policy: launch_check::fields(&result.policy)
+                .into_iter()
+                .map(|(field, value)| (field.into(), value))
+                .collect(),
+        }
+    }
+
+    /// The nonce and the parent RPC answer that the bundle stores.
+    fn response(&self) -> Result<([u8; 32], AttestedPublicKeyResponse)> {
+        if self.format != BUNDLE_FORMAT {
+            bail!("bundle format {:?} is not {BUNDLE_FORMAT:?}", self.format);
+        }
+        let nonce = from_hex0x("nonce", &self.nonce)?
+            .try_into()
+            .map_err(|_| anyhow::anyhow!("bundle field nonce is not 32 bytes"))?;
+        let k = &self.public_keys;
+        let response = AttestedPublicKeyResponse {
+            evm_address: from_hex0x("evm_address", &k.evm_address)?,
+            evm_uncompressed_pub: from_hex0x("evm_uncompressed_pub", &k.evm_uncompressed_pub)?,
+            btc_compressed_pub: from_hex0x("btc_compressed_pub", &k.btc_compressed_pub)?,
+            btc_xpub: k.btc_xpub.clone(),
+            master_fingerprint: from_hex0x("master_fingerprint", &k.master_fingerprint)?,
+            account_xpub_vanilla: k.account_xpub_vanilla.clone(),
+            account_xpub_colored: k.account_xpub_colored.clone(),
+            attestation_doc: BASE64
+                .decode(&self.attestation_doc)
+                .context("bundle field attestation_doc is not base64")?,
+            chain_id: k.chain_id,
+            bridge_contract: from_hex0x("bridge_contract", &k.bridge_contract)?,
+            rgb_asset_id: k.rgb_asset_id.clone(),
+            evm_gas_tx_uncompressed_pub: from_hex0x(
+                "evm_gas_tx_uncompressed_pub",
+                &k.evm_gas_tx_uncompressed_pub,
+            )?,
+            evm_gas_tx_address: from_hex0x("evm_gas_tx_address", &k.evm_gas_tx_address)?,
+            ccd_ed25519_pub: from_hex0x("ccd_ed25519_pub", &k.ccd_ed25519_pub)?,
+            attested_policy: from_hex0x("attested_policy", &self.attested_policy)?,
+        };
+        Ok((nonce, response))
+    }
+}
+
+/// Verify a fresh keyed enclave answer for `nonce` as `verify-launch` and
+/// `attest-verify` do, and return it as a bundle. `expected` is the launch
+/// policy of the deploy. `expect_evm` is the registered EVM address.
+pub fn export_bundle(
+    response: GetAttestedPublicKeyResponse,
+    nonce: [u8; 32],
+    pcrs: &ExpectedPcrs,
+    mode: VerifyMode,
+    expected: &AttestedPolicy,
+    expect_evm: Option<[u8; 20]>,
+) -> Result<AttestationBundle> {
+    let result = verify_keyed(attested_response(response)?, nonce, |doc| {
+        verify_now(doc, pcrs, &nonce, mode)
+    })?;
+    launch_check::compare_policy(expected, &result.response.attested_policy)?;
+    if let Some(want) = expect_evm {
+        if result.response.evm_address != want {
+            bail!(
+                "evm_address mismatch: expected {}, attested {}",
+                hex0x(&want),
+                hex0x(&result.response.evm_address)
+            );
+        }
+    }
+    Ok(AttestationBundle::new(&result))
+}
+
+/// Run every check of [`verify_attested_response`] on a bundle, offline.
+/// The nonce is the bundle nonce. A real document is checked at its own
+/// timestamp, because its certificates expire within hours.
+pub fn verify_bundle(
+    json: &str,
+    pcrs: &ExpectedPcrs,
+    mode: VerifyMode,
+    expected_policy: &ExpectedPolicy,
+) -> Result<AttestedPubkeyResult> {
+    verify_bundle_with(json, expected_policy, |doc, nonce| match mode {
+        VerifyMode::Real => {
+            attestation_verify::verify_attestation_at_document_time(doc, pcrs, nonce)
+                .context("attestation verify failed")
+        }
+        VerifyMode::Mock => attestation_verify::verify_mock_attestation(doc, pcrs, Some(nonce))
+            .context("mock attestation verify failed"),
+    })
+}
+
+fn verify_bundle_with(
+    json: &str,
+    expected_policy: &ExpectedPolicy,
+    verify_doc: impl FnOnce(&[u8], &[u8; 32]) -> Result<VerifiedAttestation>,
+) -> Result<AttestedPubkeyResult> {
+    let bundle: AttestationBundle =
+        serde_json::from_str(json).context("the file is not an attestation bundle")?;
+    let (nonce, response) = bundle.response()?;
+    let result = verify_keyed(response, nonce, |doc| verify_doc(doc, &nonce))?;
+    check_expected_policy(&result, expected_policy)?;
+    let attested = launch_check::fields(&result.policy);
+    for (i, (field, value)) in attested.iter().enumerate() {
+        match bundle.policy.get(i) {
+            Some((f, v)) if f == field && v == value => {}
+            other => {
+                bail!("policy field {field} mismatch: bundle says {other:?}, attested {value:?}")
+            }
+        }
+    }
+    if bundle.policy.len() != attested.len() {
+        bail!("policy has fields the attestation does not have");
+    }
+    Ok(result)
 }
 
 /// Build the expected [`AttestedPolicy`] from the operator posture
@@ -451,6 +694,7 @@ mod tests {
     fn attested_by(attested: &ExpectedPolicy, nonce: &[u8; 32]) -> AttestedPublicKeyResponse {
         let pubkey = vec![0x04; 65];
         let mut resp = AttestedPublicKeyResponse {
+            evm_address: vec![0x0E; 20],
             evm_uncompressed_pub: pubkey.clone(),
             chain_id: 1,
             bridge_contract: vec![0xAA; 20],
@@ -602,5 +846,221 @@ mod tests {
         assert!(
             matches!(ok.policy, AttestedPolicy::Production { kms: Some(k), .. } if k == a_kms_pin())
         );
+    }
+
+    /// A burn expectation with chain and contract pins.
+    fn burn_pinned(chain_id: Option<u64>, bridge_contract: Option<[u8; 20]>) -> ExpectedPolicy {
+        let mut p = production(SignerRole::Burn);
+        if let ExpectedPolicy::Production {
+            expected_chain_id,
+            expected_bridge_contract,
+            ..
+        } = &mut p
+        {
+            *expected_chain_id = chain_id;
+            *expected_bridge_contract = bridge_contract;
+        }
+        p
+    }
+
+    #[test]
+    fn a_tampered_bundle_fails_with_the_field_named() {
+        let nonce = [0x42; 32];
+        let good = {
+            let resp = attested_by(&production(SignerRole::Burn), &nonce);
+            let result = verify_policy(resp, &production(SignerRole::Burn)).unwrap();
+            assert_eq!(result.nonce_sent, nonce);
+            serde_json::to_value(AttestationBundle::new(&result)).unwrap()
+        };
+        let zero = ExpectedPcrs::zero();
+        let pcr0 = ExpectedPcrs::new([1; 48], [0; 48], [0; 48]);
+        let verify =
+            |bundle: &serde_json::Value, pcrs: &ExpectedPcrs, expected: &ExpectedPolicy| {
+                verify_bundle(&bundle.to_string(), pcrs, VerifyMode::Mock, expected)
+            };
+        let ok = verify(&good, &zero, &burn_pinned(Some(1), Some([0xAA; 20]))).unwrap();
+        assert_eq!(ok.response.evm_uncompressed_pub, vec![0x04; 65]);
+
+        /// Change the last hex digit.
+        fn flip(v: &mut serde_json::Value) {
+            let s = v.as_str().unwrap();
+            let last = if s.ends_with('0') { '1' } else { '0' };
+            *v = format!("{}{last}", &s[..s.len() - 1]).into();
+        }
+        type Edit = fn(&mut serde_json::Value);
+        let rows: [(Edit, &ExpectedPcrs, ExpectedPolicy, &str); 7] = [
+            (
+                |b| flip(&mut b["public_keys"]["evm_uncompressed_pub"]),
+                &zero,
+                production(SignerRole::Burn),
+                "public_key",
+            ),
+            (
+                |b| flip(&mut b["nonce"]),
+                &zero,
+                production(SignerRole::Burn),
+                "nonce mismatch",
+            ),
+            (
+                |b| flip(&mut b["attested_policy"]),
+                &zero,
+                production(SignerRole::Burn),
+                "user_data",
+            ),
+            (
+                |b| {
+                    let row = b["policy"]
+                        .as_array_mut()
+                        .unwrap()
+                        .iter_mut()
+                        .find(|r| r[0] == "chain_id")
+                        .unwrap();
+                    row[1] = "42161".into();
+                },
+                &zero,
+                production(SignerRole::Burn),
+                "policy field chain_id mismatch",
+            ),
+            (|_| {}, &pcr0, production(SignerRole::Burn), "PCR0"),
+            (
+                |_| {},
+                &zero,
+                burn_pinned(None, Some([0xBB; 20])),
+                "bridge_contract mismatch",
+            ),
+            (
+                |_| {},
+                &zero,
+                burn_pinned(Some(42161), None),
+                "chain_id mismatch",
+            ),
+        ];
+        for (edit, pcrs, expected, message) in rows {
+            let mut bundle = good.clone();
+            edit(&mut bundle);
+            let err = verify(&bundle, pcrs, &expected).unwrap_err();
+            assert!(format!("{err:#}").contains(message), "{message}: {err:#}");
+        }
+    }
+
+    #[test]
+    fn a_real_format_expired_bundle_verifies_offline() {
+        use attestation_verify::test_util::{signed_document, verify_at_document_time_with_root};
+        let nonce = [0x42; 32];
+        let pcrs = ExpectedPcrs::new([1; 48], [2; 48], [3; 48]);
+        let mut resp = attested_by(&production(SignerRole::Burn), &nonce);
+        let mock: VerifiedAttestation = attestation_verify::verify_mock_attestation(
+            &resp.attestation_doc,
+            &ExpectedPcrs::zero(),
+            None,
+        )
+        .unwrap();
+        // 2020-01-01T12:00:00Z. The leaf certificate expired on 2020-01-02.
+        let (doc, root) = signed_document(
+            &pcrs,
+            &nonce,
+            Some(&resp.evm_uncompressed_pub),
+            &mock.user_data.unwrap(),
+            1_577_880_000_000,
+            Some((2020, 1, 1)),
+        );
+        resp.attestation_doc = doc;
+        let verify_doc = |doc: &[u8], nonce: &[u8; 32]| {
+            verify_at_document_time_with_root(doc, &pcrs, nonce, &root)
+                .context("attestation verify failed")
+        };
+        let result = verify_keyed(resp, nonce, |doc| verify_doc(doc, &nonce)).unwrap();
+        let mut bundle = AttestationBundle::new(&result);
+        let expected = production(SignerRole::Burn);
+        verify_bundle_with(
+            &serde_json::to_string(&bundle).unwrap(),
+            &expected,
+            verify_doc,
+        )
+        .unwrap();
+
+        // The signature is the last element, so the last byte is in it.
+        let mut doc = BASE64.decode(&bundle.attestation_doc).unwrap();
+        *doc.last_mut().unwrap() ^= 1;
+        bundle.attestation_doc = BASE64.encode(doc);
+        let err = verify_bundle_with(
+            &serde_json::to_string(&bundle).unwrap(),
+            &expected,
+            verify_doc,
+        )
+        .unwrap_err();
+        assert!(format!("{err:#}").contains("COSE signature"), "{err:#}");
+    }
+
+    /// The enclave answer that `resp` maps from.
+    fn enclave_answer(resp: AttestedPublicKeyResponse) -> GetAttestedPublicKeyResponse {
+        GetAttestedPublicKeyResponse {
+            public_keys: Some(crate::enclave_proto::PublicKeysResponse {
+                evm_address: resp.evm_address,
+                evm_uncompressed_pub: resp.evm_uncompressed_pub,
+                chain_id: resp.chain_id,
+                bridge_contract: resp.bridge_contract,
+                rgb_asset_id: resp.rgb_asset_id,
+                ..Default::default()
+            }),
+            attestation_doc: resp.attestation_doc,
+            attested_policy: resp.attested_policy,
+        }
+    }
+
+    #[test]
+    fn export_refuses_what_does_not_verify() {
+        let nonce = [0x42; 32];
+        let resp = attested_by(&production(SignerRole::Burn), &nonce);
+        let burn = expected_attested_policy(&production(SignerRole::Burn), &resp).unwrap();
+        let combined = expected_attested_policy(&production(SignerRole::Combined), &resp).unwrap();
+        let zero = ExpectedPcrs::zero();
+        let export = |answer, pcrs: &ExpectedPcrs, expected: &AttestedPolicy, evm| {
+            export_bundle(answer, nonce, pcrs, VerifyMode::Mock, expected, evm)
+        };
+
+        let bundle = export(enclave_answer(resp.clone()), &zero, &burn, Some([0x0E; 20])).unwrap();
+        let json = serde_json::to_string(&bundle).unwrap();
+        verify_bundle(
+            &json,
+            &zero,
+            VerifyMode::Mock,
+            &production(SignerRole::Burn),
+        )
+        .unwrap();
+
+        let no_key = GetAttestedPublicKeyResponse {
+            public_keys: None,
+            ..enclave_answer(resp.clone())
+        };
+        let other_pcrs = ExpectedPcrs::new([1; 48], [0; 48], [0; 48]);
+        let cases = [
+            (no_key, &zero, &burn, None, "no key"),
+            (
+                enclave_answer(resp.clone()),
+                &zero,
+                &combined,
+                None,
+                "signer_role mismatch",
+            ),
+            (
+                enclave_answer(resp.clone()),
+                &other_pcrs,
+                &burn,
+                None,
+                "PCR0",
+            ),
+            (
+                enclave_answer(resp.clone()),
+                &zero,
+                &burn,
+                Some([1; 20]),
+                "evm_address mismatch",
+            ),
+        ];
+        for (answer, pcrs, expected, evm, message) in cases {
+            let err = export(answer, pcrs, expected, evm).unwrap_err();
+            assert!(format!("{err:#}").contains(message), "{message}: {err:#}");
+        }
     }
 }

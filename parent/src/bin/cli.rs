@@ -151,6 +151,32 @@ enum Command {
         #[command(flatten)]
         endpoints: EndpointArgs,
     },
+    /// Verify a fresh burn-key attestation and export its bundle.
+    /// Check it offline with attest-verify --from-file.
+    ExportAttestation {
+        /// `PCR.json` of the release. With `--mock`, zero PCRs by default.
+        #[arg(long, required_unless_present = "mock")]
+        pcr_file: Option<PathBuf>,
+        /// `IMAGE-ENV.json` of the release: the env of the measured image.
+        #[arg(long, required_unless_present = "mock")]
+        image_env: Option<PathBuf>,
+        /// Role of the deployed image.
+        #[arg(long, value_parser = ["combined", "burn"], required_unless_present = "mock")]
+        signer_role: Option<String>,
+        /// The bundle file to write.
+        #[arg(long)]
+        out: PathBuf,
+        /// The registered EVM address. The attested address must equal it.
+        #[arg(long)]
+        expect_evm_address: Option<String>,
+        /// Expect a mock-attestation enclave with the Development policy.
+        /// For tests only.
+        #[arg(long)]
+        mock: bool,
+        /// The values that `set-endpoints` sent.
+        #[command(flatten)]
+        endpoints: EndpointArgs,
+    },
     /// Clone the signing identity from a donor enclave into the local
     /// (requester) enclave. Steps:
     ///   1. InitiateCloning on the local enclave.
@@ -611,6 +637,29 @@ fn main() {
                 process::exit(1);
             }
         }
+        Command::ExportAttestation {
+            pcr_file,
+            image_env,
+            signer_role,
+            out,
+            expect_evm_address,
+            mock,
+            endpoints,
+        } => {
+            if let Err(e) = export_attestation(
+                &client,
+                pcr_file.as_deref(),
+                image_env.as_deref(),
+                signer_role.as_deref(),
+                &out,
+                expect_evm_address.as_deref(),
+                mock,
+                endpoints,
+            ) {
+                eprintln!("FAIL: {e:#}");
+                process::exit(1);
+            }
+        }
         Command::Clone {
             cloning_secret,
             cloning_secret_file,
@@ -664,22 +713,10 @@ fn verify_launch(
     signer_role: &str,
     endpoints: EndpointArgs,
 ) -> anyhow::Result<()> {
-    use anyhow::Context;
     use attestation_verify::SignerRole;
     use utexo_bridge_parent::launch_check;
 
-    let read = |path: &std::path::Path| {
-        std::fs::read_to_string(path).with_context(|| format!("cannot read {}", path.display()))
-    };
-    let pcrs: serde_json::Value = serde_json::from_str(&read(pcr_file)?)
-        .with_context(|| format!("{} is not JSON", pcr_file.display()))?;
-    let pcr = |name: &str| {
-        pcrs[name]
-            .as_str()
-            .with_context(|| format!("{} has no {name}", pcr_file.display()))
-    };
-    let pcrs =
-        attestation_verify::ExpectedPcrs::from_hex(pcr("PCR0")?, pcr("PCR1")?, pcr("PCR2")?)?;
+    let pcrs = read_pcrs(pcr_file)?;
     let role = match signer_role {
         "mint" => SignerRole::Mint,
         "burn" => SignerRole::Burn,
@@ -710,6 +747,80 @@ fn verify_launch(
     for (field, value) in launch_check::fields(&policy) {
         println!("  {field:<26}: {value}");
     }
+    Ok(())
+}
+
+fn read(path: &std::path::Path) -> anyhow::Result<String> {
+    use anyhow::Context;
+    std::fs::read_to_string(path).with_context(|| format!("cannot read {}", path.display()))
+}
+
+/// PCR0, PCR1 and PCR2 of a release `PCR.json`.
+fn read_pcrs(pcr_file: &std::path::Path) -> anyhow::Result<attestation_verify::ExpectedPcrs> {
+    use anyhow::Context;
+    let pcrs: serde_json::Value = serde_json::from_str(&read(pcr_file)?)
+        .with_context(|| format!("{} is not JSON", pcr_file.display()))?;
+    let pcr = |name: &str| {
+        pcrs[name]
+            .as_str()
+            .with_context(|| format!("{} has no {name}", pcr_file.display()))
+    };
+    Ok(attestation_verify::ExpectedPcrs::from_hex(
+        pcr("PCR0")?,
+        pcr("PCR1")?,
+        pcr("PCR2")?,
+    )?)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn export_attestation(
+    client: &EnclaveClient,
+    pcr_file: Option<&std::path::Path>,
+    image_env: Option<&std::path::Path>,
+    signer_role: Option<&str>,
+    out: &std::path::Path,
+    expect_evm_address: Option<&str>,
+    mock: bool,
+    endpoints: EndpointArgs,
+) -> anyhow::Result<()> {
+    use anyhow::Context;
+    use attestation_verify::{AttestedPolicy, ExpectedPcrs, SignerRole};
+    use utexo_bridge_parent::attest_verify::{export_bundle, VerifyMode};
+    use utexo_bridge_parent::launch_check;
+
+    let pcrs = pcr_file.map_or(Ok(ExpectedPcrs::zero()), read_pcrs)?;
+    let (mode, expected) = if mock {
+        (VerifyMode::Mock, AttestedPolicy::Development)
+    } else {
+        let role = match signer_role {
+            Some("burn") => SignerRole::Burn,
+            _ => SignerRole::Combined,
+        };
+        let image_env = image_env.context("--image-env required")?;
+        let endpoints = endpoints_request(endpoints);
+        let expected = launch_check::expected_policy(role, &read(image_env)?, &endpoints)?;
+        (VerifyMode::Real, expected)
+    };
+    let expect_evm = expect_evm_address
+        .map(|a| {
+            hex::decode(a.strip_prefix("0x").unwrap_or(a))
+                .ok()
+                .and_then(|b| <[u8; 20]>::try_from(b).ok())
+                .with_context(|| format!("--expect-evm-address {a:?} is not a 20-byte address"))
+        })
+        .transpose()?;
+
+    let mut nonce = [0u8; 32];
+    rand::fill(&mut nonce);
+    let response = client.get_attested_public_key(nonce)?;
+    let bundle = export_bundle(response, nonce, &pcrs, mode, &expected, expect_evm)?;
+
+    let tmp = out.with_extension("tmp");
+    std::fs::write(&tmp, serde_json::to_string_pretty(&bundle)? + "\n")
+        .with_context(|| format!("cannot write {}", tmp.display()))?;
+    std::fs::rename(&tmp, out).with_context(|| format!("cannot write {}", out.display()))?;
+    println!("OK: wrote {}", out.display());
+    println!("  EVM address: {}", bundle.public_keys.evm_address);
     Ok(())
 }
 
@@ -881,5 +992,30 @@ mod tests {
         ])
         .unwrap();
         assert!(matches!(cli.command, Command::VerifyLaunch { .. }));
+    }
+
+    #[test]
+    fn export_attestation_takes_the_ctl_arguments() {
+        let args = |role: &'static str| {
+            [
+                "utexo-bridge-parent-cli",
+                "--addr",
+                "vsock://16:5000",
+                "export-attestation",
+                "--pcr-file",
+                "PCR.json",
+                "--image-env",
+                "IMAGE-ENV.json",
+                "--signer-role",
+                role,
+                "--out",
+                "attestation-16.json",
+                "--expect-evm-address",
+                "0x0000000000000000000000000000000000000001",
+            ]
+        };
+        let cli = Cli::try_parse_from(args("burn")).unwrap();
+        assert!(matches!(cli.command, Command::ExportAttestation { .. }));
+        assert!(Cli::try_parse_from(args("mint")).is_err());
     }
 }
