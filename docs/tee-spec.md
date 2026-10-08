@@ -606,8 +606,9 @@ enclave code *and* that the enclave runs the expected security posture (Sec 4).
 
 ### 7.8 Cloning (recovery / federation membership)
 
-Three-message handshake, valid only between enclaves with identical PCRs, the
-same cluster pubkey, and the shared cloning secret (Sec 10). The donor learns
+Three-message handshake, valid only between enclaves with identical PCR0/1/2,
+the same PCR3 (the parent instance IAM role), the same cluster pubkey, and the
+shared cloning secret (Sec 10). The donor learns
 the secret at runtime (`InitializeKey.cloning_secret`, or the legacy
 `UTEXO_CLONING_SECRET` env), never from the image. The CLI `clone` command
 drives it: `InitiateCloning` on the new enclave, the parent `Clone` RPC on the
@@ -755,10 +756,19 @@ End-to-end release uniqueness also depends on contract checks outside this repo
   leaf `digitalSignature` checks; COSE `alg == ES384` with the
   raw 96-byte signature form only; PCR0/1/2 equality; nonce equality;
   and the `user_data` commitment over pubkey bundle + security policy (Sec 4).
-- **PCR policy:** verifiers assert PCR0/1/2.
+- **PCR policy:** verifiers assert PCR0/1/2. Clone peers also assert PCR3.
 - **Cloning** is valid only between enclaves that target the same cluster
-  pubkey, run the same code (PCR equality), and share the cloning secret, with
-  mutual attestation. The DH exchange rejects small-order points; the seed
+  pubkey, run the same code (PCR0/1/2 equality), run under the same parent
+  instance IAM role (PCR3 equality), and share the cloning secret, with mutual
+  attestation. PCR0/1/2 are the same for each instance of the published image,
+  in any AWS account; PCR3 binds the peer to the operator's role (#270). Each
+  side compares the peer's PCR3 with its own (`GetClone` and `SetClone`) and
+  refuses a missing or different PCR3, and refuses to clone at all when its own
+  PCR3 is all zero (no IAM role). A role that clones (burn, combined) commits
+  its PCR3 in the attested policy (`clone_peer_pcr3`, V9) and refuses
+  `SetEndpoints` when it is all zero, so such an enclave does not start on an
+  instance without an IAM role. Recovery onto an instance with another role
+  fails by design. The mint signer does not clone and does not read PCR3. The DH exchange rejects small-order points; the seed
   ciphertext is bound to both handshake keys via HKDF; replay-guard nonces are
   recorded only **after** authentication succeeds, and the guard
   is TTL-bounded (1 h) with oldest-first eviction so it cannot be wedged.
@@ -787,8 +797,9 @@ End-to-end release uniqueness also depends on contract checks outside this repo
   is delegated to the listener.
 - Plain-BTC and bridge PSBTs sign only vanilla and colored accounts respectively.
   Unowned output budgets permit bounded outputs outside proved custody scripts.
-- Cloning transfers an encrypted seed between PCR-matched enclaves. Clones
-  share one signing identity; they are not independent quorum members.
+- Cloning transfers an encrypted seed between enclaves with matching
+  PCR0/1/2 and PCR3 (same image, same IAM role). Clones share one signing
+  identity; they are not independent quorum members.
 
 ## 12. Failure conditions
 

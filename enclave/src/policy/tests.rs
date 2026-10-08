@@ -12,6 +12,14 @@ fn release_bridge_ctx() -> BuildContext {
     }
 }
 
+/// PCR3 of a parent instance with an IAM role.
+const ROLE_PCR3: [u8; 48] = [0x33; 48];
+
+/// `p` with the clone-peer PCR3 that `SetEndpoints` reads for a cloning role.
+fn with_role(p: SecurityPolicy) -> SecurityPolicy {
+    p.with_clone_peer_pcr3(|| Ok(ROLE_PCR3)).unwrap()
+}
+
 fn pinned_config() -> BridgeConfig {
     BridgeConfig {
         chain_id: 1,
@@ -25,14 +33,14 @@ fn pinned_config() -> BridgeConfig {
 
 #[test]
 fn release_bridge_with_full_pins_is_production() {
-    let p = SecurityPolicy::resolve(
+    let p = with_role(SecurityPolicy::resolve(
         &release_bridge_ctx(),
         &pinned_config(),
         EvmDataSource::PinnedTlsRpc,
         a_tls_pin(),
         "e.test",
         12,
-    );
+    ));
     match &p {
         SecurityPolicy::Production(pp) => {
             assert_eq!(pp.chain_id, 1);
@@ -144,7 +152,14 @@ fn production_accepts_an_authenticated_evm_source_and_attests_it() {
         (EvmDataSource::Disabled, None),
         (EvmDataSource::PinnedTlsRpc, a_tls_pin()),
     ] {
-        let p = SecurityPolicy::resolve(&ctx, &pinned_config(), source, pin, "e.test", 12);
+        let p = with_role(SecurityPolicy::resolve(
+            &ctx,
+            &pinned_config(),
+            source,
+            pin,
+            "e.test",
+            12,
+        ));
         match &p {
             SecurityPolicy::Production(pp) => assert_eq!(pp.evm_source, source),
             other => panic!("expected Production for {source:?}, got {other:?}"),
@@ -173,7 +188,14 @@ fn production_launches_only_with_a_pinned_tls_evm_rpc() {
         let tls = e.evm_rpc_tls.as_ref().unwrap();
         let (source, pin) = crate::bootstrap::resolve_evm_data_source(tls);
         let ctx = release_bridge_ctx();
-        let p = SecurityPolicy::resolve(&ctx, &pinned_config(), source, pin, &e.electrum_host, 12);
+        let p = with_role(SecurityPolicy::resolve(
+            &ctx,
+            &pinned_config(),
+            source,
+            pin,
+            &e.electrum_host,
+            12,
+        ));
         p.assert_valid_for_build(&ctx).map(|()| p)
     };
     assert!(launch("", ca.clone()).is_err());
@@ -273,14 +295,14 @@ fn production_rejects_btc_relay_mode_none() {
 #[test]
 fn production_defaults_to_btc_relay_required() {
     let ctx = release_bridge_ctx();
-    let policy = SecurityPolicy::resolve(
+    let policy = with_role(SecurityPolicy::resolve(
         &ctx,
         &pinned_config(),
         EvmDataSource::PinnedTlsRpc,
         a_tls_pin(),
         "e.test",
         12,
-    );
+    ));
     match &policy {
         SecurityPolicy::Production(p) => assert!(p.btc_relay_required),
         other => panic!("expected Production, got {other:?}"),
@@ -633,4 +655,130 @@ fn with_kms_is_committed_in_production_only() {
         reason: DevReason::DebugBuild,
     };
     assert_eq!(dev.clone().with_kms(pin), dev);
+}
+
+/// Issue #270: a cloning role (burn, combined) launches only on an instance
+/// with an IAM role. An all-zero or unread PCR3 refuses `SetEndpoints`.
+#[test]
+fn a_cloning_role_needs_a_non_zero_pcr3_to_launch() {
+    for signer_role in [SignerRole::Burn, SignerRole::Combined] {
+        let ctx = BuildContext {
+            signer_role,
+            ..release_bridge_ctx()
+        };
+        let resolve = || {
+            SecurityPolicy::resolve(
+                &ctx,
+                &pinned_config(),
+                EvmDataSource::PinnedTlsRpc,
+                a_tls_pin(),
+                "e.test",
+                12,
+            )
+        };
+        let unread = resolve();
+        let err = unread.assert_valid_for_build(&ctx).unwrap_err();
+        assert!(err.contains("no IAM role"), "{signer_role:?}: {err}");
+
+        let zero = resolve().with_clone_peer_pcr3(|| Ok([0; 48])).unwrap();
+        let err = zero.assert_valid_for_build(&ctx).unwrap_err();
+        assert!(err.contains("no IAM role"), "{signer_role:?}: {err}");
+
+        let role = with_role(resolve());
+        assert!(role.assert_valid_for_build(&ctx).is_ok(), "{signer_role:?}");
+        let SecurityPolicy::Production(p) = role else {
+            panic!("expected Production")
+        };
+        assert_eq!(p.clone_peer_pcr3, Some(ROLE_PCR3));
+    }
+}
+
+/// A failed PCR3 read refuses the launch.
+#[test]
+fn a_failed_pcr3_read_refuses_the_launch() {
+    let ctx = BuildContext {
+        signer_role: SignerRole::Burn,
+        ..release_bridge_ctx()
+    };
+    let p = SecurityPolicy::resolve(
+        &ctx,
+        &pinned_config(),
+        EvmDataSource::PinnedTlsRpc,
+        a_tls_pin(),
+        "e.test",
+        12,
+    );
+    assert!(p
+        .with_clone_peer_pcr3(|| Err(crate::error::EnclaveError::Attestation("nsm".into())))
+        .is_err());
+}
+
+/// The mint signer refuses cloning, so it does not read PCR3 and launches
+/// without an IAM role.
+#[test]
+fn the_mint_signer_does_not_read_pcr3() {
+    let ctx = BuildContext {
+        signer_role: SignerRole::Mint,
+        ..release_bridge_ctx()
+    };
+    let p = SecurityPolicy::resolve(
+        &ctx,
+        &pinned_config(),
+        EvmDataSource::PinnedTlsRpc,
+        a_tls_pin(),
+        "e.test",
+        12,
+    )
+    .with_clone_peer_pcr3(|| panic!("the mint signer must not read PCR3"))
+    .unwrap();
+    assert!(p.assert_valid_for_build(&ctx).is_ok());
+    let SecurityPolicy::Production(pp) = &p else {
+        panic!("expected Production")
+    };
+    assert_eq!(pp.clone_peer_pcr3, None);
+}
+
+/// The clone-peer PCR3 is in the commitment: two instances under different
+/// IAM roles attest different policies.
+#[test]
+fn the_clone_peer_pcr3_is_attested() {
+    let ctx = BuildContext {
+        signer_role: SignerRole::Burn,
+        ..release_bridge_ctx()
+    };
+    let resolve = |pcr3: [u8; 48]| {
+        SecurityPolicy::resolve(
+            &ctx,
+            &pinned_config(),
+            EvmDataSource::PinnedTlsRpc,
+            a_tls_pin(),
+            "e.test",
+            12,
+        )
+        .with_clone_peer_pcr3(|| Ok(pcr3))
+        .unwrap()
+    };
+    let a = resolve(ROLE_PCR3);
+    assert!(matches!(
+        a.attested(),
+        AttestedPolicy::Production {
+            clone_peer_pcr3: Some(ROLE_PCR3),
+            ..
+        }
+    ));
+    assert_ne!(a.commitment_bytes(), resolve([0x44; 48]).commitment_bytes());
+}
+
+/// A development policy keeps no PCR3 and does not read it.
+#[test]
+fn a_development_policy_does_not_read_pcr3() {
+    let ctx = BuildContext {
+        debug_or_test: true,
+        signer_role: SignerRole::Burn,
+        ..release_bridge_ctx()
+    };
+    let p = SecurityPolicy::resolve(&ctx, &pinned_config(), EvmDataSource::Disabled, None, "", 0)
+        .with_clone_peer_pcr3(|| panic!("a development policy must not read PCR3"))
+        .unwrap();
+    assert!(matches!(p, SecurityPolicy::Development { .. }));
 }

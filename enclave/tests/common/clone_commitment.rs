@@ -104,9 +104,9 @@ pub fn policy_cases(policy: &AttestedPolicy) -> Vec<(&'static str, Vec<u8>)> {
     alter!(evm_source, EvmDataSource::Disabled);
     // The Rust enum has only SpvVerified. A peer with another policy
     // vocabulary can still sign a byte encoding with a different source.
-    // V8 layout: [version, production, vanilla, role, attestation, evm, btc].
+    // V9 layout: [version, production, vanilla, role, attestation, evm, btc].
     let mut btc_source = policy.to_bytes();
-    assert_eq!(&btc_source[..2], &[8, 1]);
+    assert_eq!(&btc_source[..2], &[9, 1]);
     btc_source[6] = 0;
     cases.push(("btc_source", btc_source));
     alter!(chain_id, *chain_id ^ 1);
@@ -156,6 +156,18 @@ pub fn policy_cases(policy: &AttestedPolicy) -> Vec<(&'static str, Vec<u8>)> {
             region: "eu-west-1".into(),
             seed_id: "seed".into(),
             expected_evm_address: None,
+        })
+    );
+    // Issue #270: a donor under another IAM role commits another PCR3.
+    alter!(
+        clone_peer_pcr3,
+        Some(match clone_peer_pcr3 {
+            Some(pcr3) => {
+                let mut x = *pcr3;
+                x[0] ^= 1;
+                x
+            }
+            None => [0x91; 48],
         })
     );
     cases

@@ -63,6 +63,10 @@ them, and decide whether you accept each one:
 The script sets `chain_id` (42161) and `bridge_contract` (your
 `MULTISIG_PROXY`) itself.
 
+The `policy` also lists `clone_peer_pcr3`, the PCR3 of the parent instance IAM
+role. You set no flag for it. `attest-verify` takes the expected value from the
+signed document, and refuses a burn signer whose PCR3 is missing or all zero.
+
 ## Run the check
 
 ```bash

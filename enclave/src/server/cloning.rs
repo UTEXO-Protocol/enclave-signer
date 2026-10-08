@@ -124,6 +124,9 @@ pub(super) fn handle_get_clone(
     let expected_pcrs = attestation::get_own_pcrs()?;
     let verified =
         attestation::verify_peer_attestation(&req.requester_attestation, &expected_pcrs, None)?;
+    // 3b. The requester must run under the same IAM role (PCR3). PCR0/1/2 are
+    //     the same for each instance of the image, in any AWS account.
+    attestation::check_clone_peer_pcr3(&attestation::get_own_pcr3()?, &verified)?;
 
     // 4. The attested `public_key` must equal the wire key. If not, the
     //    parent could replace it with a key that it controls.
@@ -214,6 +217,8 @@ pub(super) fn handle_set_clone(
     let expected_pcrs = attestation::get_own_pcrs()?;
     let verified =
         attestation::verify_peer_attestation(&req.donor_attestation, &expected_pcrs, None)?;
+    // 1b. The donor must run under the same IAM role (PCR3).
+    attestation::check_clone_peer_pcr3(&attestation::get_own_pcr3()?, &verified)?;
 
     // 2. The wire donor pubkey must equal the attested pubkey.
     if verified.enclave_pubkey.as_slice() != donor_pubkey {

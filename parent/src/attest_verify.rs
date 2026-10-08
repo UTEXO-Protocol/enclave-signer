@@ -246,7 +246,8 @@ fn check_expected_policy(
     result: &AttestedPubkeyResult,
     expected_policy: &ExpectedPolicy,
 ) -> Result<()> {
-    let expected = expected_attested_policy(expected_policy, &result.response)?;
+    let expected =
+        expected_attested_policy(expected_policy, &result.response, &result.verified.pcrs)?;
     if result.response.attested_policy != expected.to_bytes() {
         bail!(
             "the attested policy {:?} does not match the expected policy {expected:?}: \
@@ -409,7 +410,8 @@ pub fn export_bundle(
     let result = verify_keyed(attested_response(response)?, nonce, |doc| {
         verify_now(doc, pcrs, &nonce, mode)
     })?;
-    launch_check::compare_policy(expected, &result.response.attested_policy)?;
+    let expected = launch_check::with_document_pcr3(expected, &result.verified.pcrs)?;
+    launch_check::compare_policy(&expected, &result.response.attested_policy)?;
     if let Some(want) = expect_evm {
         if result.response.evm_address != want {
             bail!(
@@ -466,12 +468,41 @@ fn verify_bundle_with(
     Ok(result)
 }
 
+/// The clone-peer PCR3 that an enclave of `role` must attest. A cloning role
+/// binds its clone peers to its own PCR3, the parent IAM role. The NSM signs
+/// the document PCRs, so the expected value is the document's PCR3. It must be
+/// set: an all-zero PCR3 means the instance has no IAM role. A role that does
+/// not clone attests none.
+pub(crate) fn clone_peer_pcr3(
+    role: SignerRole,
+    doc_pcrs: &std::collections::HashMap<u32, Vec<u8>>,
+) -> Result<Option<[u8; 48]>> {
+    if !role.clones() {
+        return Ok(None);
+    }
+    let pcr3: [u8; 48] = doc_pcrs
+        .get(&3)
+        .context("the attestation document has no PCR3")?
+        .as_slice()
+        .try_into()
+        .context("the document PCR3 is not 48 bytes")?;
+    if pcr3.iter().all(|&b| b == 0) {
+        bail!(
+            "the document PCR3 is all zero: the parent instance has no IAM role, \
+             so the enclave cannot bind clone peers"
+        );
+    }
+    Ok(Some(pcr3))
+}
+
 /// Build the expected [`AttestedPolicy`] from the operator posture
-/// ([`ExpectedPolicy`]) and the wire values (bound by the key bundle).
-/// The bytes MUST equal the enclave `SecurityPolicy::commitment_bytes`.
+/// ([`ExpectedPolicy`]), the wire values (bound by the key bundle) and the
+/// verified document PCRs. The bytes MUST equal the enclave
+/// `SecurityPolicy::commitment_bytes`.
 fn expected_attested_policy(
     expected: &ExpectedPolicy,
     resp: &AttestedPublicKeyResponse,
+    doc_pcrs: &std::collections::HashMap<u32, Vec<u8>>,
 ) -> Result<AttestedPolicy> {
     match expected {
         ExpectedPolicy::Development => Ok(AttestedPolicy::Development),
@@ -534,6 +565,8 @@ fn expected_attested_policy(
                 }
             }
 
+            let clone_peer_pcr3 = clone_peer_pcr3(*signer_role, doc_pcrs)?;
+
             Ok(AttestedPolicy::Production {
                 allow_vanilla_psbt: *allow_vanilla_psbt,
                 signer_role: *signer_role,
@@ -558,6 +591,7 @@ fn expected_attested_policy(
                 gas_tx_allowed_selectors: gas_tx_allowed_selectors.clone(),
                 token_contract: *token_contract,
                 kms: kms.clone(),
+                clone_peer_pcr3,
             })
         }
     }
@@ -620,6 +654,14 @@ mod tests {
         }
     }
 
+    /// The PCRs of a mock document: zero PCR0/1/2 and the mock PCR3.
+    fn mock_pcrs() -> std::collections::HashMap<u32, Vec<u8>> {
+        let mut pcrs: std::collections::HashMap<u32, Vec<u8>> =
+            (0..3).map(|i| (i, vec![0u8; 48])).collect();
+        pcrs.insert(3, attestation_verify::MOCK_PCR3.to_vec());
+        pcrs
+    }
+
     /// A wire response pinned to chain 42161, contract 0x11.., asset "rgb:abc".
     fn wire() -> AttestedPublicKeyResponse {
         AttestedPublicKeyResponse {
@@ -633,7 +675,7 @@ mod tests {
     #[test]
     fn unset_pins_trust_the_wire() {
         // Without operator pins, authenticate values without comparing them.
-        let got = expected_attested_policy(&expect_prod(None, None, None), &wire())
+        let got = expected_attested_policy(&expect_prod(None, None, None), &wire(), &mock_pcrs())
             .expect("unset pins must not reject");
         match got {
             AttestedPolicy::Production {
@@ -651,27 +693,30 @@ mod tests {
     #[test]
     fn matching_pins_are_accepted() {
         let exp = expect_prod(Some(42161), Some([0x11u8; 20]), Some("rgb:abc".into()));
-        assert!(expected_attested_policy(&exp, &wire()).is_ok());
+        assert!(expected_attested_policy(&exp, &wire(), &mock_pcrs()).is_ok());
     }
 
     #[test]
     fn wrong_chain_id_is_rejected() {
         let exp = expect_prod(Some(1), None, None);
-        let err = expected_attested_policy(&exp, &wire()).expect_err("wrong chain must fail");
+        let err = expected_attested_policy(&exp, &wire(), &mock_pcrs())
+            .expect_err("wrong chain must fail");
         assert!(format!("{err:#}").contains("chain_id mismatch"));
     }
 
     #[test]
     fn wrong_bridge_contract_is_rejected() {
         let exp = expect_prod(None, Some([0x22u8; 20]), None);
-        let err = expected_attested_policy(&exp, &wire()).expect_err("wrong contract must fail");
+        let err = expected_attested_policy(&exp, &wire(), &mock_pcrs())
+            .expect_err("wrong contract must fail");
         assert!(format!("{err:#}").contains("bridge_contract mismatch"));
     }
 
     #[test]
     fn wrong_rgb_asset_is_rejected() {
         let exp = expect_prod(None, None, Some("rgb:other".into()));
-        let err = expected_attested_policy(&exp, &wire()).expect_err("wrong asset must fail");
+        let err = expected_attested_policy(&exp, &wire(), &mock_pcrs())
+            .expect_err("wrong asset must fail");
         assert!(format!("{err:#}").contains("rgb_asset_id mismatch"));
     }
 
@@ -681,7 +726,7 @@ mod tests {
         let mut w = wire();
         w.rgb_asset_id = String::new();
         let exp = expect_prod(None, None, Some(String::new()));
-        assert!(expected_attested_policy(&exp, &w).is_ok());
+        assert!(expected_attested_policy(&exp, &w, &mock_pcrs()).is_ok());
     }
 
     /// A response whose mock document commits to a production policy with
@@ -701,7 +746,7 @@ mod tests {
             rgb_asset_id: "rgb:asset".into(),
             ..Default::default()
         };
-        resp.attested_policy = expected_attested_policy(attested, &resp)
+        resp.attested_policy = expected_attested_policy(attested, &resp, &mock_pcrs())
             .unwrap()
             .to_bytes();
         let mut preimage = canonical_bundle(&resp);
@@ -1012,8 +1057,11 @@ mod tests {
     fn export_refuses_what_does_not_verify() {
         let nonce = [0x42; 32];
         let resp = attested_by(&production(SignerRole::Burn), &nonce);
-        let burn = expected_attested_policy(&production(SignerRole::Burn), &resp).unwrap();
-        let combined = expected_attested_policy(&production(SignerRole::Combined), &resp).unwrap();
+        let burn =
+            expected_attested_policy(&production(SignerRole::Burn), &resp, &mock_pcrs()).unwrap();
+        let combined =
+            expected_attested_policy(&production(SignerRole::Combined), &resp, &mock_pcrs())
+                .unwrap();
         let zero = ExpectedPcrs::zero();
         let export = |answer, pcrs: &ExpectedPcrs, expected: &AttestedPolicy, evm| {
             export_bundle(answer, nonce, pcrs, VerifyMode::Mock, expected, evm)
@@ -1062,5 +1110,85 @@ mod tests {
             let err = export(answer, pcrs, expected, evm).unwrap_err();
             assert!(format!("{err:#}").contains(message), "{message}: {err:#}");
         }
+    }
+
+    /// Issue #270: a cloning role commits the document PCR3 (the parent IAM
+    /// role). The mint signer commits none.
+    #[test]
+    fn a_cloning_role_commits_the_document_pcr3() {
+        for (role, want) in [
+            (SignerRole::Burn, Some(attestation_verify::MOCK_PCR3)),
+            (SignerRole::Combined, Some(attestation_verify::MOCK_PCR3)),
+            (SignerRole::Mint, None),
+        ] {
+            let got = expected_attested_policy(&production(role), &wire(), &mock_pcrs()).unwrap();
+            let AttestedPolicy::Production {
+                clone_peer_pcr3, ..
+            } = got
+            else {
+                panic!("expected Production");
+            };
+            assert_eq!(clone_peer_pcr3, want, "{role:?}");
+        }
+    }
+
+    /// A cloning role on an instance with no IAM role (all-zero or missing
+    /// PCR3) fails verification.
+    #[test]
+    fn a_cloning_role_without_an_iam_role_fails() {
+        let mut zero = mock_pcrs();
+        zero.insert(3, vec![0u8; 48]);
+        let err =
+            expected_attested_policy(&production(SignerRole::Burn), &wire(), &zero).unwrap_err();
+        assert!(err.to_string().contains("no IAM role"), "{err}");
+
+        let mut missing = mock_pcrs();
+        missing.remove(&3);
+        assert!(
+            expected_attested_policy(&production(SignerRole::Burn), &wire(), &missing).is_err()
+        );
+
+        // The mint signer does not clone, so it needs no PCR3.
+        assert!(expected_attested_policy(&production(SignerRole::Mint), &wire(), &zero).is_ok());
+    }
+
+    /// The committed PCR3 must be the document's PCR3: a policy that names
+    /// another role does not verify.
+    #[test]
+    fn a_committed_pcr3_that_is_not_the_document_pcr3_fails() {
+        let nonce = [0x42; 32];
+        let attested = production(SignerRole::Burn);
+        let pubkey = vec![0x04; 65];
+        let mut resp = AttestedPublicKeyResponse {
+            evm_uncompressed_pub: pubkey.clone(),
+            chain_id: 1,
+            bridge_contract: vec![0xAA; 20],
+            rgb_asset_id: "rgb:asset".into(),
+            ..Default::default()
+        };
+        let mut other_role = mock_pcrs();
+        other_role.insert(3, vec![0x44; 48]);
+        resp.attested_policy = expected_attested_policy(&attested, &resp, &other_role)
+            .unwrap()
+            .to_bytes();
+        let mut preimage = canonical_bundle(&resp);
+        preimage.extend_from_slice(&resp.attested_policy);
+        let user_data: [u8; 32] = Sha256::digest(&preimage).into();
+        resp.attestation_doc =
+            attestation_verify::build_mock_document(&nonce, Some(&pubkey), Some(&user_data))
+                .unwrap();
+        let err = verify_attested_response(
+            resp,
+            nonce,
+            &attestation_verify::ExpectedPcrs::zero(),
+            VerifyMode::Mock,
+            &attested,
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("does not match the expected policy"),
+            "{err}"
+        );
     }
 }

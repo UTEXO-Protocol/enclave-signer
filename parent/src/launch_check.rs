@@ -14,7 +14,8 @@ use crate::enclave_proto::{GetAttestedPublicKeyResponse, SetEndpointsRequest};
 
 /// The policy that a production enclave of `role` must attest after
 /// `endpoints` is set. `image_env` is the `Config.Env` JSON list of the
-/// measured image.
+/// measured image. The deploy inputs do not give the clone-peer PCR3, so it is
+/// unset here; [`with_document_pcr3`] sets it from the verified document.
 pub fn expected_policy(
     role: SignerRole,
     image_env: &str,
@@ -112,7 +113,26 @@ pub fn expected_policy(
             .collect::<Result<_>>()?,
         token_contract: address20("TOKEN_CONTRACT", required("TOKEN_CONTRACT")?)?,
         kms,
+        clone_peer_pcr3: None,
     })
+}
+
+/// `expected` with the clone-peer PCR3 taken from the verified document PCRs,
+/// as [`crate::attest_verify`] does. A cloning role needs a non-zero PCR3.
+pub fn with_document_pcr3(
+    expected: &AttestedPolicy,
+    doc_pcrs: &HashMap<u32, Vec<u8>>,
+) -> Result<AttestedPolicy> {
+    let mut policy = expected.clone();
+    if let AttestedPolicy::Production {
+        signer_role,
+        clone_peer_pcr3,
+        ..
+    } = &mut policy
+    {
+        *clone_peer_pcr3 = crate::attest_verify::clone_peer_pcr3(*signer_role, doc_pcrs)?;
+    }
+    Ok(policy)
 }
 
 fn address20(key: &str, value: &str) -> Result<[u8; 20]> {
@@ -150,7 +170,8 @@ pub fn check_launch(
     {
         bail!("attestation user_data does not commit the returned policy bytes");
     }
-    compare_policy(expected, &response.attested_policy)
+    let expected = with_document_pcr3(expected, &verified.pcrs)?;
+    compare_policy(&expected, &response.attested_policy)
 }
 
 /// Decode `attested` and compare it with `expected`, field by field. The
@@ -191,6 +212,7 @@ pub fn fields(policy: &AttestedPolicy) -> Vec<(&'static str, String)> {
         gas_tx_allowed_selectors,
         token_contract,
         kms,
+        clone_peer_pcr3,
     } = policy
     else {
         return vec![("policy", "Development".into())];
@@ -245,6 +267,10 @@ pub fn fields(policy: &AttestedPolicy) -> Vec<(&'static str, String)> {
                 pin.expected_evm_address.map_or("none".into(), |a| hex(&a)),
             ),
         ]);
+    }
+    out.push(("clone_peer_pcr3", presence(clone_peer_pcr3.is_some())));
+    if let Some(pcr3) = clone_peer_pcr3 {
+        out.push(("clone_peer_pcr3.value", hex(pcr3)));
     }
     out
 }
@@ -320,9 +346,9 @@ mod tests {
     /// The enclave attests `expected()` with one edit. The check must fail
     /// with `message`.
     fn assert_mismatch(edit: impl FnOnce(&mut AttestedPolicy), message: &str) {
-        let mut attested = expected();
-        edit(&mut attested);
-        let err = check(response(&attested.to_bytes())).unwrap_err();
+        let mut policy = attested();
+        edit(&mut policy);
+        let err = check(response(&policy.to_bytes())).unwrap_err();
         assert_eq!(err.to_string(), message);
     }
 
@@ -333,6 +359,14 @@ mod tests {
                 AttestedPolicy::Development => unreachable!(),
             }
         };
+    }
+
+    /// What a matching enclave attests: `expected()` with the PCR3 of its
+    /// mock document as the clone-peer PCR3.
+    fn attested() -> AttestedPolicy {
+        let mut policy = expected();
+        set!(clone_peer_pcr3, Some(attestation_verify::MOCK_PCR3))(&mut policy);
+        policy
     }
 
     fn tls(edit: impl FnOnce(&mut EvmRpcTlsPin)) -> impl FnOnce(&mut AttestedPolicy) {
@@ -354,8 +388,8 @@ mod tests {
 
     #[test]
     fn a_matching_enclave_passes() {
-        let attested = check(response(&expected().to_bytes())).unwrap();
-        assert_eq!(attested.to_bytes(), expected().to_bytes());
+        let policy = check(response(&attested().to_bytes())).unwrap();
+        assert_eq!(policy.to_bytes(), attested().to_bytes());
     }
 
     #[test]
@@ -393,7 +427,7 @@ mod tests {
     #[test]
     fn an_unknown_btc_source_aborts_at_decode() {
         // SpvVerified is the only value. Byte 6 is btc_source.
-        let mut bytes = expected().to_bytes();
+        let mut bytes = attested().to_bytes();
         assert_eq!(bytes[6], BtcDataSource::SpvVerified as u8);
         bytes[6] = 2;
         let err = check(response(&bytes)).unwrap_err();
@@ -584,6 +618,77 @@ mod tests {
         );
     }
 
+    /// Issue #270: a cloning role must attest its document PCR3.
+    #[test]
+    fn clone_peer_pcr3_absent_aborts() {
+        assert_mismatch(
+            set!(clone_peer_pcr3, None),
+            "clone_peer_pcr3 mismatch: expected present, attested absent",
+        );
+    }
+
+    #[test]
+    fn clone_peer_pcr3_of_another_role_aborts() {
+        assert_mismatch(
+            set!(clone_peer_pcr3, Some([0x44; 48])),
+            &format!(
+                "clone_peer_pcr3.value mismatch: expected 0x{}, attested 0x{}",
+                "33".repeat(48),
+                "44".repeat(48)
+            ),
+        );
+    }
+
+    /// A cloning role on an instance with no IAM role (all-zero PCR3) fails,
+    /// whatever it attests.
+    #[test]
+    fn a_cloning_role_without_an_iam_role_aborts() {
+        let mut policy = expected();
+        set!(clone_peer_pcr3, Some([0; 48]))(&mut policy);
+        let commitment = policy_commitment(&policy.to_bytes());
+        let r = GetAttestedPublicKeyResponse {
+            public_keys: None,
+            attestation_doc: attestation_verify::build_mock_document_with_pcr3(
+                &NONCE,
+                None,
+                Some(&commitment),
+                Some(&[0; 48]),
+            )
+            .unwrap(),
+            attested_policy: policy.to_bytes(),
+        };
+        let err = check_launch(
+            r,
+            NONCE,
+            &ExpectedPcrs::zero(),
+            &expected(),
+            VerifyMode::Mock,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("no IAM role"), "{err}");
+    }
+
+    /// The mint signer does not clone, so it attests no PCR3.
+    #[test]
+    fn the_mint_signer_attests_no_pcr3() {
+        let mint = expected_policy(SignerRole::Mint, &image_env(), &endpoints()).unwrap();
+        let policy = check_launch(
+            response(&mint.to_bytes()),
+            NONCE,
+            &PCRS,
+            &mint,
+            VerifyMode::Mock,
+        )
+        .unwrap();
+        assert!(matches!(
+            policy,
+            AttestedPolicy::Production {
+                clone_peer_pcr3: None,
+                ..
+            }
+        ));
+    }
+
     #[test]
     fn a_development_policy_aborts() {
         let err = check(response(&AttestedPolicy::Development.to_bytes())).unwrap_err();
@@ -597,7 +702,7 @@ mod tests {
     fn a_wrong_pcr_aborts() {
         let other = ExpectedPcrs::new([1; 48], [2; 48], [9; 48]);
         let err = check_launch(
-            response(&expected().to_bytes()),
+            response(&attested().to_bytes()),
             NONCE,
             &other,
             &expected(),
@@ -610,7 +715,7 @@ mod tests {
     #[test]
     fn a_wrong_nonce_aborts() {
         let err = check_launch(
-            response(&expected().to_bytes()),
+            response(&attested().to_bytes()),
             [8; 32],
             &PCRS,
             &expected(),
@@ -623,7 +728,7 @@ mod tests {
     #[test]
     fn a_missing_nonce_aborts() {
         // The mock builder always sets a nonce. Drop it from the CBOR map.
-        let mut r = response(&expected().to_bytes());
+        let mut r = response(&attested().to_bytes());
         let mut doc: ciborium::Value = ciborium::from_reader(r.attestation_doc.as_slice()).unwrap();
         doc.as_map_mut()
             .unwrap()
@@ -636,8 +741,8 @@ mod tests {
 
     #[test]
     fn changed_policy_bytes_fail_the_commitment() {
-        let mut r = response(&expected().to_bytes());
-        let mut other = expected();
+        let mut r = response(&attested().to_bytes());
+        let mut other = attested();
         set!(chain_id, 1)(&mut other);
         r.attested_policy = other.to_bytes();
         let err = check(r).unwrap_err();
@@ -646,7 +751,7 @@ mod tests {
 
     #[test]
     fn a_keyed_answer_aborts() {
-        let mut r = response(&expected().to_bytes());
+        let mut r = response(&attested().to_bytes());
         r.public_keys = Some(Default::default());
         let err = check(r).unwrap_err();
         assert!(err.to_string().contains("already has keys"), "{err}");
@@ -654,7 +759,7 @@ mod tests {
 
     #[test]
     fn a_keyed_document_aborts() {
-        let mut r = response(&expected().to_bytes());
+        let mut r = response(&attested().to_bytes());
         let commitment = policy_commitment(&r.attested_policy);
         r.attestation_doc = attestation_verify::build_mock_document_with_pcrs(
             &NONCE,
@@ -670,7 +775,7 @@ mod tests {
     #[test]
     fn a_malformed_document_aborts_in_real_mode() {
         let err = check_launch(
-            response(&expected().to_bytes()),
+            response(&attested().to_bytes()),
             NONCE,
             &PCRS,
             &expected(),
