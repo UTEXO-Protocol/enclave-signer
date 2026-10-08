@@ -3,6 +3,8 @@
 //! Starts the real enclave server and the real parent gRPC server in-process.
 //! Then runs the `attest-verify` library function against them. It covers all
 //! CLI behavior except argument parsing and output formatting.
+//!
+//! The bundle tests run the built binaries and `deploy/verify-identity.sh`.
 
 use std::net::TcpListener;
 use std::sync::Arc;
@@ -291,4 +293,209 @@ async fn e2e_endpoints_are_set_once_at_launch() {
     );
     assert_eq!(ctx.launch().unwrap().endpoints.electrum_host, "localhost");
     assert!(electrum.accept().is_err(), "a chain connection opened");
+}
+
+/// A fresh directory under the cargo target directory.
+fn scratch(name: &str) -> std::path::PathBuf {
+    let dir = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!(
+        "{name}-{}-{}",
+        std::process::id(),
+        rand::random::<u64>()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    dir
+}
+
+fn run(program: &str, args: &[&str]) -> std::process::Output {
+    std::process::Command::new(program)
+        .args(args)
+        .output()
+        .unwrap()
+}
+
+/// The `OK` output without the lines that change with the nonce.
+fn key_lines(out: &std::process::Output) -> Vec<String> {
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.starts_with("OK\n"), "{stdout}");
+    stdout
+        .lines()
+        .filter(|l| !l.contains("Nonce echoed") && !l.contains("Attestation timestamp"))
+        .map(String::from)
+        .collect()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn exported_bundle_round_trips_through_the_binaries() {
+    let cli = env!("CARGO_BIN_EXE_utexo-bridge-parent-cli");
+    let verify = env!("CARGO_BIN_EXE_attest-verify");
+    let enclave = format!("127.0.0.1:{}", start_real_enclave());
+    let dir = scratch("bundle");
+    let bundle = dir.join("attestation.json");
+    let bundle = bundle.to_str().unwrap();
+
+    let out = run(
+        cli,
+        &[
+            "--addr",
+            &enclave,
+            "export-attestation",
+            "--mock",
+            "--out",
+            bundle,
+        ],
+    );
+    assert!(out.status.success(), "{out:?}");
+
+    // No parent runs yet, so the check is offline.
+    let offline = run(verify, &["--from-file", bundle, "--mock"]);
+    assert!(offline.status.success(), "{offline:?}");
+
+    let grpc_port = start_real_parent_grpc(enclave[10..].parse().unwrap()).await;
+    let endpoint = format!("http://127.0.0.1:{grpc_port}");
+    let live = run(verify, &["--endpoint", &endpoint, "--mock"]);
+    assert!(live.status.success(), "{live:?}");
+    assert_eq!(key_lines(&offline), key_lines(&live));
+
+    let pcrs = dir.join("PCR.json");
+    let pcr = "aa".repeat(48);
+    std::fs::write(
+        &pcrs,
+        format!(r#"{{"PCR0":"{pcr}","PCR1":"{pcr}","PCR2":"{pcr}"}}"#),
+    )
+    .unwrap();
+    let refused = dir.join("refused.json");
+    let refused = refused.to_str().unwrap();
+    for extra in [
+        ["--pcr-file", pcrs.to_str().unwrap()],
+        [
+            "--expect-evm-address",
+            "0x0000000000000000000000000000000000000001",
+        ],
+    ] {
+        let mut args = vec![
+            "--addr",
+            &enclave,
+            "export-attestation",
+            "--mock",
+            "--out",
+            refused,
+        ];
+        args.extend(extra);
+        let out = run(cli, &args);
+        assert_eq!(out.status.code(), Some(1), "{out:?}");
+        assert!(String::from_utf8_lossy(&out.stderr).starts_with("FAIL: "));
+        assert!(!std::path::Path::new(refused).exists());
+    }
+
+    let both = run(
+        verify,
+        &["--from-file", bundle, "--endpoint", &endpoint, "--mock"],
+    );
+    assert_eq!(both.status.code(), Some(2), "{both:?}");
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn verify_identity_writes_a_bundle_per_enclave_and_gates_on_the_attested_address() {
+    let dir = scratch("verify-identity");
+    let (p16, p18) = (start_real_enclave(), start_real_enclave());
+    // The real CLI, with the TCP enclaves for the vsock CIDs. The mock
+    // enclaves attest zero PCRs and the Development policy, so the wrapper
+    // swaps the release flags for --mock.
+    let wrapper = dir.join("utexo-bridge-parent-cli");
+    std::fs::write(
+        &wrapper,
+        format!(
+            r#"#!/usr/bin/env bash
+args=()
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --addr) case "$2" in vsock://16:*) args+=(--addr 127.0.0.1:{p16});; vsock://18:*) args+=(--addr 127.0.0.1:{p18});; esac; shift 2;;
+    --pcr-file|--image-env|--signer-role) shift 2;;
+    export-attestation) args+=(export-attestation --mock); shift;;
+    *) args+=("$1"); shift;;
+  esac
+done
+exec {} "${{args[@]}}"
+"#,
+            env!("CARGO_BIN_EXE_utexo-bridge-parent-cli")
+        ),
+    )
+    .unwrap();
+    let bin = dir.join("bin");
+    std::fs::create_dir(&bin).unwrap();
+    std::fs::write(
+        bin.join("nitro-cli"),
+        "#!/bin/sh\necho '[{\"EnclaveCID\":16,\"State\":\"RUNNING\"},{\"EnclaveCID\":18,\"State\":\"RUNNING\"}]'\n",
+    )
+    .unwrap();
+    for f in [&wrapper, &bin.join("nitro-cli")] {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(f, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let env_file = dir.join("enclave.env");
+    let path = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap());
+    let gate = |env: &str, expected_evm: &str| {
+        std::fs::write(&env_file, env).unwrap();
+        let out = std::process::Command::new("bash")
+            .arg(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../deploy/verify-identity.sh"
+            ))
+            .env_clear()
+            .env("PATH", &path)
+            .env("CLUSTER_DIR", &dir)
+            .env("CIDS", "16 18")
+            .env("ENCLAVE_ENV", &env_file)
+            .env("EXPECTED_EVM", expected_evm)
+            .output()
+            .unwrap();
+        (
+            out.status.code(),
+            String::from_utf8_lossy(&out.stdout).into_owned(),
+        )
+    };
+    let burn = "PCR_FILE=PCR.json\nIMAGE_ENV=IMAGE-ENV.json\nSIGNER_ROLE=burn\n";
+    let bundle = |cid: u16| dir.join(format!("attestation-{cid}.json"));
+
+    let (code, log) = gate(burn, "");
+    assert_eq!(code, Some(0), "{log}");
+    let json: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(bundle(16)).unwrap()).unwrap();
+    let evm = json["public_keys"]["evm_address"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let (code, log) = gate(burn, &format!("16={evm} 18={evm}"));
+    assert_eq!(code, Some(0), "{log}");
+    for cid in [16, 18] {
+        assert!(
+            log.contains(&format!("CID {cid} attested EVM {evm} == registered")),
+            "{log}"
+        );
+        let out = run(
+            env!("CARGO_BIN_EXE_attest-verify"),
+            &["--from-file", bundle(cid).to_str().unwrap(), "--mock"],
+        );
+        assert!(out.status.success(), "{out:?}");
+    }
+
+    let other = "0x0000000000000000000000000000000000000001";
+    let (code, log) = gate(burn, &format!("16={evm} 18={other}"));
+    assert_eq!(code, Some(1), "{log}");
+    assert!(
+        log.contains("CID 18 attested export failed: FAIL: evm_address mismatch"),
+        "{log}"
+    );
+    assert!(bundle(16).exists() && !bundle(18).exists());
+
+    let (code, log) = gate("IMAGE_ENV=IMAGE-ENV.json\nSIGNER_ROLE=burn\n", "");
+    assert_eq!(code, Some(2), "{log}");
+
+    std::fs::remove_file(bundle(16)).unwrap();
+    let (code, log) = gate("SIGNER_ROLE=mint\n", &format!("16={evm} 18={evm}"));
+    assert_eq!(code, Some(0), "{log}");
+    assert!(!bundle(16).exists() && !bundle(18).exists());
+    std::fs::remove_dir_all(dir).unwrap();
 }
