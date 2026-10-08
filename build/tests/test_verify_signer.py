@@ -54,7 +54,7 @@ class VerifySignerTests(unittest.TestCase):
     def test_an_unlisted_signer_fails(self):
         result = self.run_script(SIGNERS='0x' + '01' * 20)
         self.assertEqual(result.returncode, 1)
-        self.assertIn('is not in getEnclaveSigners(96)', result.stderr)
+        self.assertIn('is not in getEnclaveSigners(827166)', result.stderr)
 
     def test_an_rpc_on_another_chain_fails(self):
         result = self.run_script(CHAIN='1')
