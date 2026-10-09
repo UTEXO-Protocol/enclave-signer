@@ -398,6 +398,7 @@ fn deposit_receipt(mint_opid: &OpId, operation_id: [u8; 32], invoice: &str) -> R
     ReceiptData {
         status_success: true,
         block_number: 100,
+        block_hash: [0x42; 32],
         logs: vec![log(&funds_in), log(&bridge_funds_in)],
     }
 }
@@ -411,8 +412,27 @@ impl EvmReceiptProvider for DepositChain {
     ) -> utexo_bridge_enclave::error::Result<Option<ReceiptData>> {
         Ok((*tx_hash == DEPOSIT_TX).then(|| self.0.clone()))
     }
-    fn get_block_number(&self) -> utexo_bridge_enclave::error::Result<u64> {
-        Ok(112)
+
+    fn get_safe_block(
+        &self,
+    ) -> utexo_bridge_enclave::error::Result<
+        Option<utexo_bridge_enclave::networks::evm::events::BlockData>,
+    > {
+        self.get_block_by_number(self.0.block_number)
+    }
+
+    fn get_block_by_number(
+        &self,
+        number: u64,
+    ) -> utexo_bridge_enclave::error::Result<
+        Option<utexo_bridge_enclave::networks::evm::events::BlockData>,
+    > {
+        Ok(Some(
+            utexo_bridge_enclave::networks::evm::events::BlockData {
+                number,
+                hash: self.0.block_hash,
+            },
+        ))
     }
 }
 
@@ -461,7 +481,6 @@ fn context(contract_id: &ContractId, receipt: ReceiptData) -> ServerContext {
         EvmDataSource::Disabled,
         None,
         "",
-        0,
     );
     let mut ctx = ServerContext::new(
         state,

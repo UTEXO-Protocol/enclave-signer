@@ -162,7 +162,7 @@ allow-debug-pcrs = ["attestation-verify/allow-debug-pcrs"]
 # In-enclave EVM `FundsIn` event verification for an EVM -> RGB `Sign`.
 # Default OFF. The enclave fetches the deposit receipt with an in-enclave alloy
 # JSON-RPC client.
-# It fails closed on a missing or invalid receipt or too few confirmations.
+# It fails closed on a missing or invalid receipt, or an unsafe/noncanonical block.
 # TLS to the pinned RPC host and CA ends inside the enclave. The host relays
 # only ciphertext through the vsock forwarder.
 # Implies `rgb-validation`: the bridge path and amount/asset context are there.

@@ -2,7 +2,7 @@ use std::io::{Cursor, Read, Write};
 
 use sha3::{Digest, Keccak256};
 
-use crate::config::{BridgeConfig, EvmRpcConfig};
+use crate::config::BridgeConfig;
 use crate::framing;
 use crate::networks::evm::events::{LogEntry, ReceiptData};
 use crate::networks::rgb::validation::{
@@ -65,6 +65,7 @@ fn stub_deposit() -> FakeEvm {
         receipt: Some(ReceiptData {
             status_success: true,
             block_number: DEPOSIT_BLOCK,
+            block_hash: [0x42; 32],
             logs: vec![LogEntry {
                 address: FUNDS_IN_CONTRACT,
                 topics: vec![
@@ -74,7 +75,6 @@ fn stub_deposit() -> FakeEvm {
                 data: bridge_funds_in_data(GROSS, NET, COMMISSION, INVOICE),
             }],
         }),
-        head: DEPOSIT_BLOCK + EvmRpcConfig::default().min_confirmations,
     }
 }
 
@@ -258,7 +258,6 @@ fn a_retry_is_signed_when_the_first_response_never_reached_the_caller() {
         EvmDataSource::Disabled,
         None,
         "",
-        0,
     );
     let state = EnclaveState::new(bitcoin::Network::Bitcoin);
     state.initialize_from_seed(SEED).expect("initialize keys");

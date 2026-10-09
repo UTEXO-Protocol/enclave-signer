@@ -352,16 +352,6 @@ fn parse_eth_address(s: &str) -> Result<[u8; 20]> {
     })
 }
 
-/// Boot config of the in-enclave `FundsIn` verification (`evm-rpc`).
-/// The endpoint comes at launch ([`Endpoints`]).
-#[cfg(feature = "evm-rpc")]
-#[derive(Debug, Clone)]
-pub struct EvmRpcConfig {
-    /// Min confirmations of a `FundsIn` receipt below the RPC head block
-    /// (`EVM_MIN_CONFIRMATIONS`, default 12).
-    pub min_confirmations: u64,
-}
-
 /// The TLS pin of the EVM RPC endpoint.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EvmRpcTls {
@@ -371,30 +361,6 @@ pub struct EvmRpcTls {
     pub ca_der: Vec<u8>,
     /// The upstream TLS port. The forwarder listens on it in the enclave.
     pub tls_port: u16,
-}
-
-#[cfg(feature = "evm-rpc")]
-impl EvmRpcConfig {
-    /// A safe head distance for most EVM chains.
-    const DEFAULT_MIN_CONFIRMATIONS: u64 = 12;
-
-    /// Load `EVM_MIN_CONFIRMATIONS` from env.
-    pub fn from_env() -> Self {
-        let min_confirmations = std::env::var("EVM_MIN_CONFIRMATIONS")
-            .ok()
-            .and_then(|s| s.parse::<u64>().ok())
-            .unwrap_or(Self::DEFAULT_MIN_CONFIRMATIONS);
-        Self { min_confirmations }
-    }
-}
-
-#[cfg(feature = "evm-rpc")]
-impl Default for EvmRpcConfig {
-    fn default() -> Self {
-        Self {
-            min_confirmations: Self::DEFAULT_MIN_CONFIRMATIONS,
-        }
-    }
 }
 
 /// Endpoints and KMS pins set once at launch and committed in the attested policy.

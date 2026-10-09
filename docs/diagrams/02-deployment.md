@@ -76,7 +76,9 @@ flowchart TB
   have it through `bfa-validation`): the mint signer verifies the EVM
   `FundsIn` deposit, the burn signer the mint-ancestry locks. A build without
   it refuses bridge PSBTs. Operators MUST run the host `vsock-proxy` allowlist
-  on 8002. Env: `EVM_MIN_CONFIRMATIONS`. See the README env table.
+  on 8002. Receipt checks always require the RPC's `safe` head and canonical
+  block-hash agreement.
+  An unsupported `safe` tag refuses signing. See the README env table.
 - **Endpoints at launch**: `utexo-enclave-ctl.sh start` sends `set-endpoints`
   once to each fresh enclave (Electrum URL, EVM RPC host, CA, TLS port, and
   the KMS pin on mint signers). Until then the enclave signs nothing.

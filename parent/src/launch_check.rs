@@ -78,10 +78,6 @@ pub fn expected_policy(
         )?,
         rgb_asset_id: required("RGB_ASSET_ID")?.to_string(),
         funds_in_contract: address20("FUNDS_IN_CONTRACT", required("FUNDS_IN_CONTRACT")?)?,
-        evm_min_confirmations: number(
-            "EVM_MIN_CONFIRMATIONS",
-            Some(required("EVM_MIN_CONFIRMATIONS")?),
-        )?,
         electrum_host,
         evm_rpc_tls,
         gas_tx_allowed_to: gas("GAS_TX_ALLOWED_TO")
@@ -198,7 +194,6 @@ pub fn fields(policy: &AttestedPolicy) -> Vec<(&'static str, String)> {
         bridge_contract,
         rgb_asset_id,
         funds_in_contract,
-        evm_min_confirmations,
         electrum_host,
         evm_rpc_tls,
         gas_tx_allowed_to,
@@ -228,7 +223,6 @@ pub fn fields(policy: &AttestedPolicy) -> Vec<(&'static str, String)> {
         ("bridge_contract", hex(bridge_contract)),
         ("rgb_asset_id", rgb_asset_id.clone()),
         ("funds_in_contract", hex(funds_in_contract)),
-        ("evm_min_confirmations", evm_min_confirmations.to_string()),
         ("electrum_host", electrum_host.clone()),
         ("evm_rpc_tls", presence(evm_rpc_tls.is_some())),
     ];
@@ -286,7 +280,6 @@ mod tests {
             "RGB_ASSET_ID=rgb:asset",
             "FUNDS_IN_CONTRACT=0x6711f1a319B37847fa0234181C34D883774c4951",
             "TOKEN_CONTRACT=0xFd086bC7CD5C481DCC9C85ebE478A1C0b69FCbb9",
-            "EVM_MIN_CONFIRMATIONS=12",
             "GAS_TX_ALLOWED_TO=0x6711f1a319B37847fa0234181C34D883774c4951",
             "GAS_TX_MAX_GAS_LIMIT=300000",
             "GAS_TX_MAX_FEE_PER_GAS=1000",
@@ -454,14 +447,6 @@ mod tests {
                  attested 0x{}",
                 "22".repeat(20)
             ),
-        );
-    }
-
-    #[test]
-    fn evm_min_confirmations_mismatch_aborts() {
-        assert_mismatch(
-            set!(evm_min_confirmations, 1),
-            "evm_min_confirmations mismatch: expected 12, attested 1",
         );
     }
 

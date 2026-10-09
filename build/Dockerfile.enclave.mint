@@ -108,6 +108,8 @@ ENV EVM_CHAIN_ID=42161 \
 # In-enclave EVM verification (evm-rpc). The enclave reaches the EVM RPC only
 # through the vsock forwarder (host runs
 # `vsock-proxy <EVM_RPC_VSOCK_PORT=8002> <rpc host> <tls port>`).
+# Receipts always require safe-head coverage and a matching canonical block hash.
+# Missing safe support fails closed; there is no confirmation-count setting.
 # FUNDS_IN_CONTRACT is set EXPLICITLY because it differs from
 # EVM_PROXY_CONTRACT_ADDRESS - unset, it falls back to the proxy address and
 # points FundsIn verification at the wrong contract.
@@ -116,8 +118,7 @@ ENV EVM_CHAIN_ID=42161 \
 # The Electrum URL and the EVM RPC host, CA and TLS port are not in the
 # image. The operator sets them at launch (SetEndpoints), and the attestation
 # commits them. See docs/tee-spec.md.
-ENV EVM_MIN_CONFIRMATIONS=12 \
-    FUNDS_IN_CONTRACT=0x6711f1a319B37847fa0234181C34D883774c4951 \
+ENV FUNDS_IN_CONTRACT=0x6711f1a319B37847fa0234181C34D883774c4951 \
     TOKEN_CONTRACT=0xFd086bC7CD5C481DCC9C85ebE478A1C0b69FCbb9 \
     BTC_MAX_TOTAL_SATS=1000000
 

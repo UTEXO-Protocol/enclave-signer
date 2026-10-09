@@ -1,5 +1,5 @@
 //! Live-chain check of the FundsIn binding against a real `BridgeFundsIn`
-//! log. The unit tests build their own logs, so a wrong event signature or
+//! log in a canonical block at or below the RPC `safe` head. The unit tests build their own logs, so a wrong event signature or
 //! topic index would pass on both sides.
 //!
 //! Skipped unless `UTEXO_LIVE_EVM_RPC_HOST` is set. The client is the
@@ -11,7 +11,7 @@
 //! UTEXO_LIVE_EVM_RPC_HOST=<rpc host> UTEXO_LIVE_EVM_RPC_TLS_PORT=8443 \
 //! UTEXO_LIVE_EVM_RPC_CA_DER_FILE=ca.der \
 //! UTEXO_LIVE_BRIDGE=0x... UTEXO_LIVE_TX=0x... UTEXO_LIVE_OP_ID=0x<64 hex> \
-//! UTEXO_LIVE_AMOUNT=1000000 UTEXO_LIVE_COMMISSION=0 UTEXO_LIVE_MIN_CONF=1 \
+//! UTEXO_LIVE_AMOUNT=1000000 UTEXO_LIVE_COMMISSION=0 \
 //!     cargo test -p utexo-bridge-enclave --features evm-rpc --test test_evm_event_live
 //! ```
 // FundsIn deposit verification: the EVM -> RGB direction.
@@ -26,7 +26,6 @@ struct Live {
     op_id: Vec<u8>,
     amount: u64,
     commission: u64,
-    min_conf: u64,
 }
 
 fn bytes(var: &str) -> Vec<u8> {
@@ -72,7 +71,6 @@ fn live() -> Option<Live> {
         op_id: op_id("UTEXO_LIVE_OP_ID"),
         amount: num("UTEXO_LIVE_AMOUNT", 0),
         commission: num("UTEXO_LIVE_COMMISSION", 0),
-        min_conf: num("UTEXO_LIVE_MIN_CONF", 1),
     })
 }
 
@@ -83,7 +81,6 @@ fn live_deposit_binds_operation_id() {
     verify_funds_in_event(
         &l.client,
         &l.bridge,
-        l.min_conf,
         &l.tx,
         &l.op_id,
         l.amount,
@@ -100,17 +97,9 @@ fn live_deposit_rejects_wrong_operation_id() {
     // Flip the last byte so the id is a valid 32-byte value that differs.
     let mut wrong = l.op_id.clone();
     wrong[31] ^= 1;
-    let e = verify_funds_in_event(
-        &l.client,
-        &l.bridge,
-        l.min_conf,
-        &l.tx,
-        &wrong,
-        l.amount,
-        l.commission,
-    )
-    .unwrap_err()
-    .to_string();
+    let e = verify_funds_in_event(&l.client, &l.bridge, &l.tx, &wrong, l.amount, l.commission)
+        .unwrap_err()
+        .to_string();
     assert!(e.contains("operationId mismatch"), "got: {e}");
 }
 
@@ -122,7 +111,6 @@ fn live_deposit_rejects_wrong_amount() {
     let e = verify_funds_in_event(
         &l.client,
         &l.bridge,
-        l.min_conf,
         &l.tx,
         &l.op_id,
         l.amount.wrapping_add(1),
