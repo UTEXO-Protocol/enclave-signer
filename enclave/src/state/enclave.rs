@@ -190,9 +190,7 @@ impl EnclaveState {
                     "GetClone: seed-export HARD cap reached - export refused \
                      (F03-AF-10, fail-closed). Rotate/re-provision to lift."
                 );
-                return Err(EnclaveError::Clone(format!(
-                    "seed-export hard cap reached ({used}/{cap}); export refused"
-                )));
+                return Err(EnclaveError::ExportCapReached { used, cap });
             }
         }
         Ok(ExportQuotaReservation {

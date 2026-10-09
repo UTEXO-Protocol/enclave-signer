@@ -16,8 +16,8 @@ use utexo_bridge_parent::framing;
 use utexo_bridge_parent::grpc_proto::parent_service_client::ParentServiceClient;
 use utexo_bridge_parent::grpc_proto::parent_service_server::ParentServiceServer;
 use utexo_bridge_parent::grpc_proto::{
-    sign_request, source_proof, AttestedPublicKeyRequest, EvmSource, RgbSource, SignRequest,
-    SourceProof,
+    sign_request, source_proof, AttestedPublicKeyRequest, CloneRequest, EvmSource, RgbSource,
+    SignRequest, SourceProof,
 };
 use utexo_bridge_parent::grpc_server::{EnclaveTarget, ParentAdapterService};
 use utexo_bridge_parent::signer::{DataType, PublicKeyRequest, SignRequest as CommonSignRequest};
@@ -223,6 +223,15 @@ fn start_mock_enclave() -> u16 {
                         }
                     }
                 }
+                // Answer with the error code in the first cluster_public_key byte.
+                Some(enclave_request::Request::GetClone(req)) => EnclaveResponse {
+                    response: Some(enclave_response::Response::Error(
+                        enclave_proto::ErrorResponse {
+                            code: req.cluster_public_key[0].into(),
+                            message: "mock: GetClone refused".into(),
+                        },
+                    )),
+                },
                 _ => EnclaveResponse {
                     response: Some(enclave_response::Response::Error(
                         enclave_proto::ErrorResponse {
@@ -917,6 +926,37 @@ async fn grpc_missing_transaction_payload_returns_error() {
 
     let err = client.sign(req).await.unwrap_err();
     assert_eq!(err.code(), tonic::Code::InvalidArgument);
+}
+
+// Codes 1-3 are the map that Sign and the other RPCs share.
+#[tokio::test]
+async fn grpc_clone_maps_enclave_codes() {
+    use tonic::Code;
+    let enclave_port = start_mock_enclave();
+    let grpc_port = start_grpc_server(enclave_port).await;
+    let mut client = ParentServiceClient::connect(format!("http://127.0.0.1:{grpc_port}"))
+        .await
+        .unwrap();
+
+    let cases = [
+        (1, Code::Internal),
+        (2, Code::Unavailable),
+        (3, Code::FailedPrecondition),
+        (4, Code::InvalidArgument),
+        (5, Code::PermissionDenied),
+        (6, Code::AlreadyExists),
+        (7, Code::ResourceExhausted),
+    ];
+    for (code, expected) in cases {
+        let req = CloneRequest {
+            cluster_public_key: vec![code],
+            ..Default::default()
+        };
+        let status = ParentServiceClient::clone(&mut client, req)
+            .await
+            .unwrap_err();
+        assert_eq!(status.code(), expected, "code {code}");
+    }
 }
 
 #[tokio::test]

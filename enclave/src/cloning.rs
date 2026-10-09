@@ -173,7 +173,7 @@ pub fn encrypt_seed_for_peer(
 /// Reject non-contributory DH outputs (RFC 7748, section 6.1).
 fn reject_non_contributory(shared: &SharedSecret) -> Result<()> {
     if !shared.was_contributory() {
-        return Err(EnclaveError::Clone(
+        return Err(EnclaveError::InvalidRequest(
             "peer X25519 public key was small-order (non-contributory DH)".into(),
         ));
     }
@@ -359,7 +359,7 @@ mod tests {
     fn encrypt_rejects_small_order_peer_pubkey() {
         // The all-zero point is a small-order point on Curve25519.
         let result = encrypt_seed_for_peer(&[0u8; 32], &[42u8; 64]);
-        assert!(matches!(result, Err(EnclaveError::Clone(_))));
+        assert!(matches!(result, Err(EnclaveError::InvalidRequest(_))));
     }
 
     #[test]
@@ -369,7 +369,7 @@ mod tests {
         let (ciphertext, _legit_donor) =
             encrypt_seed_for_peer(&requester.public_key(), &[42u8; 64]).unwrap();
         let result = requester.decrypt_seed_from_peer(&[0u8; 32], &ciphertext);
-        assert!(matches!(result, Err(EnclaveError::Clone(_))));
+        assert!(matches!(result, Err(EnclaveError::InvalidRequest(_))));
     }
 
     #[test]

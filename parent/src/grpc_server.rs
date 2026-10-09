@@ -120,6 +120,11 @@ impl ParentAdapterService {
             // Report NotReady as unavailable so the caller can retry. (F03-AF-11)
             2 => Status::unavailable(err.message.clone()),
             3 => Status::failed_precondition(err.message.clone()),
+            // Codes 4-7 come from GetClone only.
+            4 => Status::invalid_argument(err.message.clone()),
+            5 => Status::permission_denied(err.message.clone()),
+            6 => Status::already_exists(err.message.clone()),
+            7 => Status::resource_exhausted(err.message.clone()),
             _ => Status::internal(format!(
                 "enclave error (code {}): {}",
                 err.code, err.message
