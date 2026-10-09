@@ -22,7 +22,7 @@ flowchart TB
     %% attestation-verify shared crate
     subgraph ATTV [attestation-verify crate — shared]
         AV[verify_attestation<br/>COSE_Sign1, alg pinned ES384, raw 96-byte sig,<br/>cert chain + CA constraints + PCR0/1/2]
-        AVPol[policy.rs<br/>AttestedPolicy - canonical policy<br/>commitment encoding v8]
+        AVPol[policy.rs<br/>AttestedPolicy - canonical policy<br/>commitment encoding v9]
         AVMock[verify_mock_attestation<br/>feature 'mock']
         Root[Embedded AWS Nitro<br/>root CA PEM]
     end
