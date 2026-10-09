@@ -47,6 +47,9 @@ pub(super) fn handle_sign(
     #[cfg(not(feature = "evm-rpc"))]
     refuse_unverifiable_funds_in(source_ref, destination_ref)?;
 
+    // Refuse before any validation work while the key is not ready.
+    ctx.state.with_keys(|_| Ok(()))?;
+
     // Refuse known replays before network I/O. An invalid request must not
     // use guard capacity, so this only checks. The reservation is made later.
     #[cfg(evm_to_rgb)]
@@ -646,6 +649,7 @@ mod early_bridge_checks {
             BridgeConfig::default(),
             crate::test_support::regtest_header_chain(),
         );
+        ctx.state.initialize_from_seed([7; 64]).unwrap();
         ctx.launch.get_mut().unwrap().evm_rpc_client =
             Some(Box::new(MissingDeposit(Arc::clone(calls))));
         ctx
@@ -722,5 +726,126 @@ mod early_bridge_checks {
         );
         assert_eq!(calls.load(Ordering::SeqCst), 0);
         assert_eq!(ctx.state.op_replay_guard.seen_count(), 1);
+    }
+}
+
+/// A signer with no ready key refuses a burn before any validation work.
+#[cfg(all(test, feature = "bfa-validation", rgb_to_evm))]
+mod key_not_ready {
+    use super::*;
+    use crate::cloning::CloneSession;
+    use crate::config::BridgeConfig;
+    use crate::networks::evm::events::{EvmReceiptProvider, ReceiptData};
+    use crate::networks::rgb::validation::{bfa_binding, RgbValidator};
+    use crate::proto::enclave_request::Request;
+    use crate::proto::enclave_response::Response;
+    use crate::state::{CloningSession, EnclaveState};
+    use sha3::{Digest, Keccak256};
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    };
+
+    /// A signet BFA burn with one mint (see `tests/fixtures`).
+    const BURN: &[u8] = include_bytes!("../../tests/fixtures/bfa_burn_consignment.rgbc");
+
+    /// Counts EVM RPC calls. A burn's locks are derived from its mints, not
+    /// read from the chain (see `bfa::burn_locks::NoRpc`), so this must stay
+    /// at 0 through the whole test.
+    struct CountingEvmRpc(Arc<AtomicUsize>);
+
+    impl EvmReceiptProvider for CountingEvmRpc {
+        fn get_transaction_receipt(&self, _: &[u8; 32]) -> Result<Option<ReceiptData>> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Ok(None)
+        }
+
+        fn get_block_number(&self) -> Result<u64> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Ok(0)
+        }
+    }
+
+    /// Sends the burn. Returns the response, the count of indexer
+    /// connections that RGB validation made, and the count of EVM RPC calls.
+    fn sign_burn(state: EnclaveState) -> (Response, usize, usize) {
+        let binding = bfa_binding(BURN).unwrap().expect("a BFA consignment");
+        let mut bridge = [0u8; 20];
+        hex::decode_to_slice(
+            binding.bridge_location.trim_start_matches("0x"),
+            &mut bridge,
+        )
+        .unwrap();
+        let cfg = BridgeConfig {
+            funds_in_contract: bridge,
+            token_contract: [0x7e; 20],
+            chain_id: 42161,
+            ..BridgeConfig::default()
+        };
+        let mut ctx = ServerContext::new(state, cfg, crate::test_support::regtest_header_chain());
+        let (url, hits) =
+            crate::test_support::electrum_stub::spawn_counted(bitcoin::Network::Signet);
+        let rpc_calls = Arc::new(AtomicUsize::new(0));
+        let launch = ctx.launch.get_mut().unwrap();
+        launch.rgb_validator = Some(RgbValidator::new(url, "signet").unwrap());
+        launch.evm_rpc_client = Some(Box::new(CountingEvmRpc(Arc::clone(&rpc_calls))));
+
+        let request = EnclaveRequest {
+            request: Some(Request::Sign(SignRequest {
+                amount: 100_000,
+                source_network: Some(SourceNetwork::RgbSource(RgbSource {
+                    consignment: BURN.to_vec(),
+                    consignment_hash: Keccak256::digest(BURN).to_vec(),
+                    asset_id: "rgb:psO2jKZI-i4fudyA-ORTT8a~-SMaLO6u-69ELk2p-yPRGPJY".into(),
+                    ..Default::default()
+                })),
+                destination_network: Some(DestinationNetwork::EvmDestination(
+                    EvmDestination::default(),
+                )),
+            })),
+        };
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let response = super::super::dispatch::dispatch(request, &ctx, deadline)
+            .0
+            .response
+            .unwrap();
+        (
+            response,
+            hits.load(Ordering::SeqCst),
+            rpc_calls.load(Ordering::SeqCst),
+        )
+    }
+
+    #[test]
+    fn a_sign_is_refused_before_validation_while_the_key_is_not_ready() {
+        let cloning = EnclaveState::default();
+        cloning
+            .enter_cloning(CloningSession::new(CloneSession::new(), [1; 20]))
+            .unwrap();
+        for state in [EnclaveState::default(), cloning] {
+            let (response, hits, rpc_calls) = sign_burn(state);
+            assert_eq!(rpc_calls, 0, "an EVM RPC call ran: {response:?}");
+            assert_eq!(hits, 0, "RGB validation ran: {response:?}");
+            assert_eq!(
+                response,
+                Response::Error(ErrorResponse {
+                    code: 1,
+                    message: EnclaveError::KeyNotInitialized.to_string(),
+                })
+            );
+        }
+    }
+
+    /// Control: the same request reaches RGB validation with a ready key.
+    #[test]
+    fn a_ready_key_lets_the_same_sign_reach_rgb_validation() {
+        let state = EnclaveState::default();
+        state.initialize_from_seed([7; 64]).unwrap();
+        let (response, hits, rpc_calls) = sign_burn(state);
+        assert!(hits >= 1, "RGB validation did not run: {response:?}");
+        assert_eq!(
+            rpc_calls, 0,
+            "a burn must not read the EVM chain: {response:?}"
+        );
     }
 }

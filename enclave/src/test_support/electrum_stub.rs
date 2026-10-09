@@ -11,22 +11,33 @@
 
 use std::io::{BufRead, BufReader, Write};
 use std::net::{TcpListener, TcpStream};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 
 /// Starts the stub and returns its `tcp://` URL.
 pub fn spawn(network: bitcoin::Network) -> String {
+    spawn_counted(network).0
+}
+
+/// Starts the stub. Returns its `tcp://` URL and the count of connections.
+/// The count goes up before the stub reads the connection.
+pub fn spawn_counted(network: bitcoin::Network) -> (String, Arc<AtomicUsize>) {
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind stub electrum");
     let addr = listener.local_addr().unwrap();
     let header = bitcoin::consensus::encode::serialize_hex(
         &bitcoin::constants::genesis_block(network).header,
     );
+    let hits = Arc::new(AtomicUsize::new(0));
+    let counter = Arc::clone(&hits);
     std::thread::spawn(move || {
         for stream in listener.incoming() {
             let Ok(stream) = stream else { break };
+            counter.fetch_add(1, Ordering::SeqCst);
             let header = header.clone();
             std::thread::spawn(move || serve(stream, &header));
         }
     });
-    format!("tcp://{addr}")
+    (format!("tcp://{addr}"), hits)
 }
 
 fn serve(stream: TcpStream, header: &str) {
