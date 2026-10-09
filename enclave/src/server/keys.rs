@@ -27,6 +27,10 @@ pub(super) fn handle_initialize(
         // Test path: import a BIP-39 mnemonic.
         #[cfg(feature = "allow-seed-import")]
         {
+            // Check the secret before key install. A refused init keeps the phase Initial.
+            if !req.cloning_secret.is_empty() {
+                crate::cloning::validate_cloning_secret(&req.cloning_secret)?;
+            }
             state.initialize_from_mnemonic(&req.mnemonic)?;
             tracing::info!("key initialized from imported mnemonic");
         }
@@ -51,6 +55,9 @@ pub(super) fn handle_initialize(
         }
         #[cfg(not(feature = "kms-persistence"))]
         {
+            if !req.cloning_secret.is_empty() {
+                crate::cloning::validate_cloning_secret(&req.cloning_secret)?;
+            }
             let mut entropy = [0u8; 32];
             getrandom::fill(&mut entropy)
                 .map_err(|e| EnclaveError::Internal(format!("entropy generation failed: {}", e)))?;
@@ -67,6 +74,9 @@ pub(super) fn handle_initialize(
                     v.len()
                 ))
             })?;
+            if !req.cloning_secret.is_empty() {
+                crate::cloning::validate_cloning_secret(&req.cloning_secret)?;
+            }
             state.initialize_from_seed(seed)?;
             tracing::info!("key initialized from imported seed");
         }
