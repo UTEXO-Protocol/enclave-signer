@@ -13,10 +13,10 @@ use crate::framing;
 /// TCP connect timeout. It matters only across a network or a bad vsock proxy.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// TCP response read timeout. It stops a silent TCP peer from hanging the CLI.
-/// The vsock path has no read timeout.
+/// Read and write timeout for one socket operation to the enclave. It stops a
+/// silent peer from hanging the CLI.
 /// Slow valid operations (key generation, consignment validation) must fit in it.
-const READ_TIMEOUT: Duration = Duration::from_secs(30);
+const IO_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Debug, Clone)]
 pub struct SignEvmRequest {
@@ -143,7 +143,7 @@ impl EnclaveClient {
             let mut stream = TcpStream::connect_timeout(&socket_addr, CONNECT_TIMEOUT)
                 .map_err(|e| ParentError::Connection(e.to_string()))?;
             stream
-                .set_read_timeout(Some(READ_TIMEOUT))
+                .set_read_timeout(Some(IO_TIMEOUT))
                 .map_err(|e| ParentError::Connection(format!("set_read_timeout: {e}")))?;
             framing::write_message(&mut stream, req)?;
             framing::read_message(&mut stream)
@@ -156,6 +156,12 @@ impl EnclaveClient {
         let mut stream = VsockStream::connect_with_cid_port(cid, port).map_err(|e| {
             ParentError::Connection(format!("vsock connect cid={cid} port={port}: {e}"))
         })?;
+        stream
+            .set_read_timeout(Some(IO_TIMEOUT))
+            .map_err(|e| ParentError::Connection(format!("set_read_timeout: {e}")))?;
+        stream
+            .set_write_timeout(Some(IO_TIMEOUT))
+            .map_err(|e| ParentError::Connection(format!("set_write_timeout: {e}")))?;
         framing::write_message(&mut stream, req)?;
         framing::read_message(&mut stream)
     }
