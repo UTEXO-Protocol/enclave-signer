@@ -30,11 +30,6 @@ fn main() {
     // Fail closed: a release rgb-validation build without a valid Production
     // policy does not start. Debug, test and non-bridge builds are exempt.
     // `SetEndpoints` checks the full policy later.
-    #[cfg(feature = "evm-rpc")]
-    let evm_min_confirmations =
-        utexo_bridge_enclave::config::EvmRpcConfig::from_env().min_confirmations;
-    #[cfg(not(feature = "evm-rpc"))]
-    let evm_min_confirmations = 0;
     let build_ctx = BuildContext::current();
     let policy = SecurityPolicy::resolve(
         &build_ctx,
@@ -42,7 +37,6 @@ fn main() {
         utexo_bridge_enclave::policy::EvmDataSource::Disabled,
         None,
         "",
-        evm_min_confirmations,
     );
     if let Err(msg) = policy.assert_valid_at_boot(&build_ctx) {
         panic!("{msg}");

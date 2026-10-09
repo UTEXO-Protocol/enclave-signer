@@ -1,5 +1,6 @@
 //! Live-chain check of the FundsIn binding against a real `BridgeFundsIn`
-//! log. The unit tests build their own logs, so a wrong event signature or
+//! log in a canonical block at or below the selected RPC head. The unit tests
+//! build their own logs, so a wrong event signature or
 //! topic index would pass on both sides.
 //!
 //! Skipped unless `UTEXO_LIVE_EVM_RPC_HOST` is set. The client is the
@@ -11,22 +12,24 @@
 //! UTEXO_LIVE_EVM_RPC_HOST=<rpc host> UTEXO_LIVE_EVM_RPC_TLS_PORT=8443 \
 //! UTEXO_LIVE_EVM_RPC_CA_DER_FILE=ca.der \
 //! UTEXO_LIVE_BRIDGE=0x... UTEXO_LIVE_TX=0x... UTEXO_LIVE_OP_ID=0x<64 hex> \
-//! UTEXO_LIVE_AMOUNT=1000000 UTEXO_LIVE_COMMISSION=0 UTEXO_LIVE_MIN_CONF=1 \
+//! UTEXO_LIVE_AMOUNT=1000000 UTEXO_LIVE_COMMISSION=0 \
 //!     cargo test -p utexo-bridge-enclave --features evm-rpc --test test_evm_event_live
 //! ```
 // FundsIn deposit verification: the EVM -> RGB direction.
 #![cfg(all(feature = "evm-rpc", evm_to_rgb))]
 
+use attestation_verify::EvmFinalityTag;
+
 use utexo_bridge_enclave::networks::evm::events::{verify_funds_in_event, AlloyEvmClient};
 
 struct Live {
     client: AlloyEvmClient,
+    finality_tag: EvmFinalityTag,
     bridge: [u8; 20],
     tx: [u8; 32],
     op_id: Vec<u8>,
     amount: u64,
     commission: u64,
-    min_conf: u64,
 }
 
 fn bytes(var: &str) -> Vec<u8> {
@@ -65,6 +68,11 @@ fn live() -> Option<Live> {
     };
     Some(Live {
         client: AlloyEvmClient::with_pinned_tls(&tls).expect("build RPC client"),
+        finality_tag: match std::env::var("EVM_FINALITY_TAG") {
+            Ok(value) => value.parse().expect("EVM_FINALITY_TAG"),
+            Err(std::env::VarError::NotPresent) => EvmFinalityTag::Safe,
+            Err(error) => panic!("invalid EVM_FINALITY_TAG: {error}"),
+        },
         bridge: bytes("UTEXO_LIVE_BRIDGE")
             .try_into()
             .expect("20-byte bridge"),
@@ -72,7 +80,6 @@ fn live() -> Option<Live> {
         op_id: op_id("UTEXO_LIVE_OP_ID"),
         amount: num("UTEXO_LIVE_AMOUNT", 0),
         commission: num("UTEXO_LIVE_COMMISSION", 0),
-        min_conf: num("UTEXO_LIVE_MIN_CONF", 1),
     })
 }
 
@@ -83,7 +90,7 @@ fn live_deposit_binds_operation_id() {
     verify_funds_in_event(
         &l.client,
         &l.bridge,
-        l.min_conf,
+        l.finality_tag,
         &l.tx,
         &l.op_id,
         l.amount,
@@ -103,7 +110,7 @@ fn live_deposit_rejects_wrong_operation_id() {
     let e = verify_funds_in_event(
         &l.client,
         &l.bridge,
-        l.min_conf,
+        l.finality_tag,
         &l.tx,
         &wrong,
         l.amount,
@@ -122,7 +129,7 @@ fn live_deposit_rejects_wrong_amount() {
     let e = verify_funds_in_event(
         &l.client,
         &l.bridge,
-        l.min_conf,
+        l.finality_tag,
         &l.tx,
         &l.op_id,
         l.amount.wrapping_add(1),

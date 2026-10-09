@@ -26,7 +26,9 @@ use std::process::ExitCode;
 use anyhow::{Context, Result};
 use clap::Parser;
 
-use attestation_verify::{AttestedPolicy, EvmDataSource, EvmRpcTlsPin, KmsPin, SignerRole};
+use attestation_verify::{
+    AttestedPolicy, EvmDataSource, EvmFinalityTag, EvmRpcTlsPin, KmsPin, SignerRole,
+};
 use utexo_bridge_parent::attest_verify::{
     verify_attested_pubkey, verify_bundle, AttestedPubkeyResult, ExpectedPolicy, VerifyMode,
 };
@@ -117,16 +119,16 @@ struct Cli {
     #[arg(long)]
     expect_funds_in_contract: Option<String>,
 
+    /// Expected EVM RPC head tag: latest, safe or finalized. Required for
+    /// production verification. Ignored with --mock.
+    #[arg(long, required_unless_present = "mock")]
+    expect_evm_finality_tag: Option<EvmFinalityTag>,
+
     /// Expected ERC-20 that the Bridge releases (`TOKEN_CONTRACT`), as 0x-hex.
     /// It is an input to the `burnId` preimage. Required for production
     /// verification.
     #[arg(long)]
     expect_token_contract: Option<String>,
-
-    /// Expected minimum receipt confirmations. Required and not zero for
-    /// production verification.
-    #[arg(long)]
-    expect_evm_min_confirmations: Option<u64>,
 
     /// Expected gas-tx (`SignRawDigest`) destination (`GAS_TX_ALLOWED_TO`), as
     /// 0x-hex. Omit if the gas path is not pinned. The enclave then commits an
@@ -283,12 +285,6 @@ fn parse_expect_token_contract(s: &Option<String>) -> Result<[u8; 20]> {
     parse_hex20(s, "--expect-token-contract")
 }
 
-fn parse_expect_evm_min_confirmations(value: Option<u64>) -> Result<u64> {
-    value
-        .filter(|n| *n > 0)
-        .context("--expect-evm-min-confirmations must be specified and greater than zero")
-}
-
 /// Parse `--expect-gas-selectors` (comma-separated 4-byte hex) into selectors.
 /// An empty string yields an empty allowlist.
 fn parse_expect_gas_selectors(s: &str) -> Result<Vec<[u8; 4]>> {
@@ -371,10 +367,10 @@ async fn run(cli: Cli) -> Result<()> {
             expected_bridge_contract,
             expected_rgb_asset_id: cli.expect_rgb_asset_id.clone(),
             funds_in_contract: parse_expect_funds_in_contract(&cli.expect_funds_in_contract)?,
+            evm_finality_tag: cli
+                .expect_evm_finality_tag
+                .context("--expect-evm-finality-tag required (or pass --mock)")?,
             token_contract: parse_expect_token_contract(&cli.expect_token_contract)?,
-            evm_min_confirmations: parse_expect_evm_min_confirmations(
-                cli.expect_evm_min_confirmations,
-            )?,
             gas_tx_allowed_to: parse_expect_gas_to(&cli.expect_gas_tx_to)?,
             gas_tx_max_gas_limit: cli.expect_gas_max_gas_limit,
             gas_tx_max_fee_per_gas: cli.expect_gas_max_fee_per_gas,
@@ -457,6 +453,32 @@ fn print_ok(result: &AttestedPubkeyResult) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn finality_tag_is_explicit_in_production_and_strictly_parsed() {
+        let missing = Cli::try_parse_from(["attest-verify"]).err().unwrap();
+        assert_eq!(
+            missing.kind(),
+            clap::error::ErrorKind::MissingRequiredArgument
+        );
+        assert!(missing.to_string().contains("--expect-evm-finality-tag"));
+        assert!(Cli::try_parse_from(["attest-verify", "--mock"]).is_ok());
+        for (value, tag) in [
+            ("latest", EvmFinalityTag::Latest),
+            ("safe", EvmFinalityTag::Safe),
+            ("finalized", EvmFinalityTag::Finalized),
+        ] {
+            let cli =
+                Cli::try_parse_from(["attest-verify", "--expect-evm-finality-tag", value]).unwrap();
+            assert_eq!(cli.expect_evm_finality_tag, Some(tag));
+        }
+        for invalid in ["", "SAFE", "pending"] {
+            assert!(
+                Cli::try_parse_from(["attest-verify", "--expect-evm-finality-tag", invalid])
+                    .is_err()
+            );
+        }
+    }
 
     #[test]
     fn parse_signer_role_accepts_the_three_roles() {

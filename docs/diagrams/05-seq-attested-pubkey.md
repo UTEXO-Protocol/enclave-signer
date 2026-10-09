@@ -14,7 +14,7 @@ sequenceDiagram
     participant RootCa as Embedded AWS Nitro<br/>root CA (PEM)
 
     Note over V,Lib: Verifier issues nonce
-    V->>Cli: attest-verify --endpoint ... --pcr0/1/2 ...<br/>--expect-signer-role mint|burn|combined<br/>--expect-vanilla-psbt --expect-evm-source tls|raw|disabled<br/>--expect-electrum-host ... --expect-evm-rpc-host ... --expect-evm-rpc-ca-sha256 ...<br/>+ contract, gas-rule and (mint) KMS pins
+    V->>Cli: attest-verify --endpoint ... --pcr0/1/2 ...<br/>--expect-signer-role mint|burn|combined<br/>--expect-vanilla-psbt --expect-evm-source tls|raw|disabled<br/>--expect-evm-finality-tag latest|safe|finalized<br/>--expect-electrum-host ... --expect-evm-rpc-host ... --expect-evm-rpc-ca-sha256 ...<br/>+ contract, gas-rule and (mint) KMS pins
     Cli->>Lib: verify_attested_pubkey(endpoint, expected_pcrs, expected_policy)
     Lib->>Lib: nonce := rand_32_bytes()
 

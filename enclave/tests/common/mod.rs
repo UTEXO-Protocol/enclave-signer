@@ -39,7 +39,6 @@ pub fn start_test_server_with_config(
         EvmDataSource::Disabled,
         None,
         "",
-        0,
     );
     start_test_server_with_policy(configure, bridge_config, policy)
 }
@@ -76,7 +75,6 @@ pub fn start_test_server_with_evm_rpc(
         EvmDataSource::Disabled,
         None,
         "",
-        0,
     );
     start_test_server_inner(|_| {}, bridge_config, policy, Some(client))
 }
@@ -191,7 +189,9 @@ pub mod deposit_stub {
     use alloy_primitives::U256;
     use alloy_sol_types::{sol, SolEvent};
     use utexo_bridge_enclave::error::Result;
-    use utexo_bridge_enclave::networks::evm::events::{EvmReceiptProvider, LogEntry, ReceiptData};
+    use utexo_bridge_enclave::networks::evm::events::{
+        BlockData, EvmReceiptProvider, LogEntry, ReceiptData,
+    };
 
     sol! {
         event BridgeFundsIn(
@@ -208,9 +208,8 @@ pub mod deposit_stub {
                            XvmU3d4_nQQ8S7oagbXi07x5vjMm7P~ERukQNX6SC4M/BF/bc:utxob:\
                            UzR~73lD-JyzirTn-engdWia-qjd5NyV-mndAmmo-EbxdVEG-L6OiP";
 
-    /// Block 100 against head 112 is a depth of 12, the default minimum.
+    /// Block 100 is both canonical and safe.
     const BLOCK: u64 = 100;
-    const HEAD: u64 = 112;
 
     /// Answers for each tx hash. A malformed hash fails the length check before
     /// the enclave calls the client.
@@ -242,6 +241,7 @@ pub mod deposit_stub {
             Ok(Some(ReceiptData {
                 status_success: true,
                 block_number: BLOCK,
+                block_hash: [0x42; 32],
                 logs: vec![LogEntry {
                     address: self.emitter,
                     topics: event.encode_topics().into_iter().map(|t| t.0 .0).collect(),
@@ -250,8 +250,18 @@ pub mod deposit_stub {
             }))
         }
 
-        fn get_block_number(&self) -> Result<u64> {
-            Ok(HEAD)
+        fn get_block_by_tag(
+            &self,
+            _tag: attestation_verify::EvmFinalityTag,
+        ) -> Result<Option<BlockData>> {
+            self.get_block_by_number(BLOCK)
+        }
+
+        fn get_block_by_number(&self, number: u64) -> Result<Option<BlockData>> {
+            Ok(Some(BlockData {
+                number,
+                hash: [0x42; 32],
+            }))
         }
     }
 }

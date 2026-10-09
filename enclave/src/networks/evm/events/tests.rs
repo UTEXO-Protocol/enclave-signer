@@ -75,7 +75,8 @@ fn rejects_a_non_utf8_tail() {
 #[test]
 fn verified_funds_in_carries_the_destination_address() {
     let p = happy_provider();
-    let v = verify_funds_in_event(&p, &BRIDGE, 12, &TX, &op_id(7), 1000, 50).unwrap();
+    let v =
+        verify_funds_in_event(&p, &BRIDGE, EvmFinalityTag::Safe, &TX, &op_id(7), 1000, 50).unwrap();
     assert_eq!(v.destination_address, SAMPLE_INVOICE);
 }
 
@@ -107,23 +108,23 @@ fn receipt_with(logs: Vec<LogEntry>, block_number: u64) -> ReceiptData {
     ReceiptData {
         status_success: true,
         block_number,
+        block_hash: [0x42; 32],
         logs,
     }
 }
 
-/// gross=1000, commission=50, net=950. head 112, block 100 -> depth 12.
+/// gross=1000, commission=50, net=950, in the safe block 100.
 #[cfg(evm_to_rgb)]
 fn happy_provider() -> FakeEvm {
     FakeEvm {
         receipt: Some(receipt_with(vec![bridge_log(op_id(7), 1000, 950, 50)], 100)),
-        head: 112,
     }
 }
 
 /// Verifies with the operationId bound, the only supported call shape.
 #[cfg(evm_to_rgb)]
 fn verify(p: &FakeEvm) -> Result<()> {
-    verify_funds_in_event(p, &BRIDGE, 12, &TX, &op_id(7), 1000, 50).map(|_| ())
+    verify_funds_in_event(p, &BRIDGE, EvmFinalityTag::Safe, &TX, &op_id(7), 1000, 50).map(|_| ())
 }
 
 #[test]
@@ -199,7 +200,6 @@ fn accepts_real_contract_dual_emit() {
             ],
             100,
         )),
-        head: 112,
     };
     assert!(verify(&p).is_ok());
 }
@@ -217,7 +217,6 @@ fn dual_emit_binds_via_bridge_shape_not_the_companion() {
             ],
             100,
         )),
-        head: 112,
     };
     let e = verify(&p).unwrap_err().to_string();
     assert!(e.contains("tokenCommission mismatch"), "got: {e}");
@@ -230,7 +229,6 @@ fn dual_emit_binds_via_bridge_shape_not_the_companion() {
 fn rejects_rgb_companion_event_alone() {
     let p = FakeEvm {
         receipt: Some(receipt_with(vec![rgb_companion_log(7, 100)], 100)),
-        head: 112,
     };
     let e = verify(&p).unwrap_err().to_string();
     assert!(e.contains("no BridgeFundsIn log"), "got: {e}");
@@ -249,7 +247,6 @@ fn rejects_two_real_deposits_in_one_tx() {
             ],
             100,
         )),
-        head: 112,
     };
     let e = verify(&p).unwrap_err().to_string();
     assert!(e.contains("ambiguous"), "got: {e}");
@@ -260,10 +257,7 @@ fn rejects_two_real_deposits_in_one_tx() {
 #[cfg(evm_to_rgb)]
 #[test]
 fn rejects_missing_receipt() {
-    let p = FakeEvm {
-        receipt: None,
-        head: 112,
-    };
+    let p = FakeEvm { receipt: None };
     let e = verify(&p).unwrap_err().to_string();
     assert!(e.contains("receipt not found"), "got: {e}");
 }
@@ -273,10 +267,7 @@ fn rejects_missing_receipt() {
 fn rejects_reverted_tx() {
     let mut r = receipt_with(vec![bridge_log(op_id(7), 1000, 950, 50)], 100);
     r.status_success = false;
-    let p = FakeEvm {
-        receipt: Some(r),
-        head: 112,
-    };
+    let p = FakeEvm { receipt: Some(r) };
     let e = verify(&p).unwrap_err().to_string();
     assert!(e.contains("reverted"), "got: {e}");
 }
@@ -290,7 +281,6 @@ fn rejects_log_from_wrong_contract() {
     log.address = OTHER;
     let p = FakeEvm {
         receipt: Some(receipt_with(vec![log], 100)),
-        head: 112,
     };
     let e = verify(&p).unwrap_err().to_string();
     assert!(e.contains("no BridgeFundsIn log"), "got: {e}");
@@ -303,7 +293,6 @@ fn rejects_wrong_topic0() {
     log.topics[0] = word(0x1234); // not a FundsIn topic
     let p = FakeEvm {
         receipt: Some(receipt_with(vec![log], 100)),
-        head: 112,
     };
     let e = verify(&p).unwrap_err().to_string();
     assert!(e.contains("no BridgeFundsIn log"), "got: {e}");
@@ -320,7 +309,6 @@ fn rejects_ambiguous_multiple_logs() {
             ],
             100,
         )),
-        head: 112,
     };
     let e = verify(&p).unwrap_err().to_string();
     assert!(e.contains("ambiguous"), "got: {e}");
@@ -339,7 +327,6 @@ fn ignores_unrelated_logs_and_accepts() {
             vec![unrelated, bridge_log(op_id(7), 1000, 950, 50)],
             100,
         )),
-        head: 112,
     };
     assert!(verify(&p).is_ok());
 }
@@ -351,7 +338,6 @@ fn ignores_unrelated_logs_and_accepts() {
 fn rejects_operation_id_mismatch() {
     let p = FakeEvm {
         receipt: Some(receipt_with(vec![bridge_log(op_id(8), 1000, 950, 50)], 100)),
-        head: 112,
     };
     let e = verify(&p).unwrap_err().to_string();
     assert!(e.contains("operationId mismatch"), "got: {e}");
@@ -362,7 +348,6 @@ fn rejects_operation_id_mismatch() {
 fn rejects_amount_mismatch() {
     let p = FakeEvm {
         receipt: Some(receipt_with(vec![bridge_log(op_id(7), 999, 949, 50)], 100)),
-        head: 112,
     };
     let e = verify(&p).unwrap_err().to_string();
     assert!(e.contains("amount mismatch"), "got: {e}");
@@ -373,7 +358,6 @@ fn rejects_amount_mismatch() {
 fn rejects_commission_mismatch() {
     let p = FakeEvm {
         receipt: Some(receipt_with(vec![bridge_log(op_id(7), 1000, 950, 40)], 100)),
-        head: 112,
     };
     let e = verify(&p).unwrap_err().to_string();
     assert!(e.contains("tokenCommission mismatch"), "got: {e}");
@@ -385,7 +369,6 @@ fn rejects_net_amount_above_gross_minus_commission() {
     // gross-commission = 950 but the log claims 960.
     let p = FakeEvm {
         receipt: Some(receipt_with(vec![bridge_log(op_id(7), 1000, 960, 50)], 100)),
-        head: 112,
     };
     let e = verify(&p).unwrap_err().to_string();
     assert!(e.contains("exceeds gross - commission"), "got: {e}");
@@ -398,7 +381,6 @@ fn rejects_net_amount_above_gross_minus_commission() {
 fn accepts_net_amount_below_gross_minus_commission() {
     let p = FakeEvm {
         receipt: Some(receipt_with(vec![bridge_log(op_id(7), 1000, 900, 50)], 100)),
-        head: 112,
     };
     assert!(verify(&p).is_ok());
 }
@@ -408,9 +390,8 @@ fn accepts_net_amount_below_gross_minus_commission() {
 fn rejects_commission_exceeding_gross() {
     let p = FakeEvm {
         receipt: Some(receipt_with(vec![bridge_log(op_id(7), 100, 0, 150)], 100)),
-        head: 112,
     };
-    let e = verify_funds_in_event(&p, &BRIDGE, 12, &TX, &op_id(7), 100, 150)
+    let e = verify_funds_in_event(&p, &BRIDGE, EvmFinalityTag::Safe, &TX, &op_id(7), 100, 150)
         .unwrap_err()
         .to_string();
     assert!(e.contains("exceeds gross amount"), "got: {e}");
@@ -425,7 +406,6 @@ fn rejects_log_without_operation_id_topic() {
     log.topics.truncate(1); // topic0 only
     let p = FakeEvm {
         receipt: Some(receipt_with(vec![log], 100)),
-        head: 112,
     };
     let e = verify(&p).unwrap_err().to_string();
     assert!(e.contains("operationId is expected in topic1"), "got: {e}");
@@ -438,7 +418,7 @@ fn binds_full_width_operation_id() {
     let p = happy_provider();
     assert!(verify(&p).is_ok(), "a 32-byte operationId must bind");
     // ...and a different one must not.
-    let e = verify_funds_in_event(&p, &BRIDGE, 12, &TX, &op_id(9), 1000, 50)
+    let e = verify_funds_in_event(&p, &BRIDGE, EvmFinalityTag::Safe, &TX, &op_id(9), 1000, 50)
         .unwrap_err()
         .to_string();
     assert!(e.contains("operationId mismatch"), "got: {e}");
@@ -448,9 +428,17 @@ fn binds_full_width_operation_id() {
 #[cfg(evm_to_rgb)]
 #[test]
 fn rejects_when_operation_id_not_supplied() {
-    let e = verify_funds_in_event(&happy_provider(), &BRIDGE, 12, &TX, &[], 1000, 50)
-        .unwrap_err()
-        .to_string();
+    let e = verify_funds_in_event(
+        &happy_provider(),
+        &BRIDGE,
+        EvmFinalityTag::Safe,
+        &TX,
+        &[],
+        1000,
+        50,
+    )
+    .unwrap_err()
+    .to_string();
     assert!(e.contains("must be exactly 32 bytes"), "got: {e}");
 }
 
@@ -459,7 +447,6 @@ fn rejects_when_operation_id_not_supplied() {
 fn still_rejects_amount_mismatch_with_matching_operation_id() {
     let p = FakeEvm {
         receipt: Some(receipt_with(vec![bridge_log(op_id(7), 999, 949, 50)], 100)),
-        head: 112,
     };
     let e = verify(&p).unwrap_err().to_string();
     assert!(e.contains("amount mismatch"), "got: {e}");
@@ -469,43 +456,427 @@ fn still_rejects_amount_mismatch_with_matching_operation_id() {
 #[cfg(evm_to_rgb)]
 #[test]
 fn rejects_malformed_expected_operation_id() {
-    let e = verify_funds_in_event(&happy_provider(), &BRIDGE, 12, &TX, &[0xAA; 8], 1000, 50)
-        .unwrap_err()
-        .to_string();
+    let e = verify_funds_in_event(
+        &happy_provider(),
+        &BRIDGE,
+        EvmFinalityTag::Safe,
+        &TX,
+        &[0xAA; 8],
+        1000,
+        50,
+    )
+    .unwrap_err()
+    .to_string();
     assert!(e.contains("must be exactly 32 bytes"), "got: {e}");
 }
 
-// ---- confirmation-depth rejections ----
+// The attested tag selects the head in both deposit verification paths.
+#[cfg(any(evm_to_rgb, feature = "bfa-validation"))]
+mod finality {
+    use super::*;
+    use std::cell::RefCell;
 
-#[cfg(evm_to_rgb)]
-#[test]
-fn rejects_insufficient_depth() {
-    // head 111, block 100 -> depth 11 < 12.
-    let p = FakeEvm {
-        receipt: Some(receipt_with(vec![bridge_log(op_id(7), 1000, 950, 50)], 100)),
-        head: 111,
-    };
-    let e = verify(&p).unwrap_err().to_string();
-    assert!(e.contains("not final"), "got: {e}");
+    struct Provider {
+        expected_tag: EvmFinalityTag,
+        head: Option<BlockData>,
+        head_after: Option<Option<BlockData>>,
+        canonical: Option<BlockData>,
+        snapshot_canonical: Option<Option<BlockData>>,
+        receipt_number: u64,
+        fail_tag: bool,
+        fail_canonical: bool,
+        calls: RefCell<Vec<&'static str>>,
+    }
+
+    impl Default for Provider {
+        fn default() -> Self {
+            let block = BlockData {
+                number: 100,
+                hash: [0x42; 32],
+            };
+            Self {
+                expected_tag: EvmFinalityTag::Safe,
+                head: Some(block),
+                head_after: None,
+                canonical: Some(block),
+                snapshot_canonical: None,
+                receipt_number: 100,
+                fail_tag: false,
+                fail_canonical: false,
+                calls: RefCell::new(Vec::new()),
+            }
+        }
+    }
+
+    impl EvmReceiptProvider for Provider {
+        fn get_transaction_receipt(&self, _: &[u8; 32]) -> Result<Option<ReceiptData>> {
+            self.calls.borrow_mut().push("receipt");
+            Ok(Some(receipt_with(
+                vec![
+                    rgb_companion_log(0xab, 950),
+                    bridge_log(op_id(7), 1000, 950, 50),
+                ],
+                self.receipt_number,
+            )))
+        }
+
+        fn get_block_by_tag(&self, tag: EvmFinalityTag) -> Result<Option<BlockData>> {
+            assert_eq!(
+                tag, self.expected_tag,
+                "both head snapshots must use the configured tag"
+            );
+            let recheck = self.calls.borrow().contains(&"tag");
+            self.calls
+                .borrow_mut()
+                .push(if recheck { "tag_recheck" } else { "tag" });
+            if self.fail_tag {
+                return Err(EnclaveError::CrossCheck("tag RPC failed".into()));
+            }
+            Ok(if recheck {
+                self.head_after.unwrap_or(self.head)
+            } else {
+                self.head
+            })
+        }
+
+        fn get_block_by_number(&self, number: u64) -> Result<Option<BlockData>> {
+            let recheck = self.calls.borrow().contains(&"canonical");
+            self.calls.borrow_mut().push(if recheck {
+                "head_ancestor"
+            } else {
+                "canonical"
+            });
+            assert_eq!(
+                number,
+                if recheck {
+                    self.head.unwrap().number
+                } else {
+                    self.receipt_number
+                }
+            );
+            if self.fail_canonical {
+                return Err(EnclaveError::CrossCheck("canonical RPC failed".into()));
+            }
+            Ok(if recheck {
+                self.snapshot_canonical.unwrap_or(self.canonical)
+            } else {
+                self.canonical
+            })
+        }
+    }
+
+    type Verifier = fn(&dyn EvmReceiptProvider, EvmFinalityTag) -> Result<()>;
+
+    fn verifiers() -> Vec<Verifier> {
+        vec![
+            #[cfg(evm_to_rgb)]
+            |provider, tag| {
+                verify_funds_in_event(provider, &BRIDGE, tag, &TX, &op_id(7), 1000, 50).map(|_| ())
+            },
+            #[cfg(feature = "bfa-validation")]
+            |provider, tag| {
+                verify_rgb_funds_in(provider, &BRIDGE, tag, &TX, &word(0xab)).map(|_| ())
+            },
+        ]
+    }
+
+    fn cases() -> Vec<(EvmFinalityTag, Verifier)> {
+        [
+            EvmFinalityTag::Latest,
+            EvmFinalityTag::Safe,
+            EvmFinalityTag::Finalized,
+        ]
+        .into_iter()
+        .flat_map(|tag| verifiers().into_iter().map(move |verify| (tag, verify)))
+        .collect()
+    }
+
+    fn rejects(configure: impl Fn(&mut Provider), message: &str) {
+        for (tag, verify) in cases() {
+            let mut provider = Provider {
+                expected_tag: tag,
+                ..Provider::default()
+            };
+            configure(&mut provider);
+            let err = verify(&provider, tag).unwrap_err().to_string();
+            assert!(
+                err.contains(&message.replace("{tag}", tag.as_str())),
+                "{err}"
+            );
+        }
+    }
+
+    #[test]
+    fn receipt_above_selected_head_is_rejected() {
+        rejects(
+            |p| {
+                p.head.as_mut().unwrap().number = 99;
+            },
+            "above RPC {tag}",
+        );
+    }
+
+    #[test]
+    fn receipt_at_selected_head_uses_same_tag_for_both_snapshots() {
+        for (tag, verify) in cases() {
+            let provider = Provider {
+                expected_tag: tag,
+                ..Provider::default()
+            };
+            verify(&provider, tag).unwrap();
+            assert_eq!(
+                *provider.calls.borrow(),
+                ["tag", "receipt", "canonical", "tag_recheck"]
+            );
+        }
+    }
+
+    #[test]
+    fn receipt_below_selected_head_is_accepted_with_its_own_canonical_hash() {
+        for (tag, verify) in cases() {
+            let provider = Provider {
+                expected_tag: tag,
+                head: Some(BlockData {
+                    number: 105,
+                    hash: [0x55; 32],
+                }),
+                ..Provider::default()
+            };
+            verify(&provider, tag).unwrap();
+        }
+    }
+
+    #[test]
+    fn missing_selected_tag_fails_before_receipt_is_read() {
+        for (tag, verify) in cases() {
+            let provider = Provider {
+                expected_tag: tag,
+                head: None,
+                ..Provider::default()
+            };
+            let err = verify(&provider, tag).unwrap_err().to_string();
+            assert!(err.contains("block unavailable"), "{err}");
+            assert_eq!(*provider.calls.borrow(), ["tag"]);
+        }
+    }
+
+    #[test]
+    fn selected_tag_rpc_error_fails_closed() {
+        for (tag, verify) in cases() {
+            let provider = Provider {
+                expected_tag: tag,
+                fail_tag: true,
+                ..Provider::default()
+            };
+            let err = verify(&provider, tag).unwrap_err().to_string();
+            assert!(err.contains("tag RPC failed"), "{err}");
+            assert_eq!(*provider.calls.borrow(), ["tag"]);
+        }
+    }
+
+    #[test]
+    fn orphaned_receipt_hash_is_rejected() {
+        rejects(
+            |p| p.canonical.as_mut().unwrap().hash = [0x99; 32],
+            "does not match canonical block",
+        );
+    }
+
+    #[test]
+    fn canonical_block_must_exist() {
+        rejects(|p| p.canonical = None, "canonical block 100 unavailable");
+    }
+
+    #[test]
+    fn canonical_rpc_error_fails_closed() {
+        rejects(|p| p.fail_canonical = true, "canonical RPC failed");
+    }
+
+    #[test]
+    fn canonical_response_must_be_for_requested_height() {
+        rejects(
+            |p| p.canonical.as_mut().unwrap().number = 101,
+            "canonical block number mismatch",
+        );
+    }
+
+    #[test]
+    fn head_height_receipt_must_match_original_head_hash() {
+        rejects(
+            |p| p.head.as_mut().unwrap().hash = [0x99; 32],
+            "does not match {tag} block snapshot",
+        );
+    }
+
+    #[test]
+    fn head_regression_cannot_authorize_a_new_fork_receipt() {
+        rejects(
+            |p| {
+                // Snapshot A100, then receipt B95, while a reorg moves the
+                // selected head to B90. The old height cannot authorize B95.
+                p.head.as_mut().unwrap().hash = [0xaa; 32];
+                p.receipt_number = 95;
+                p.canonical.as_mut().unwrap().number = 95;
+                p.head_after = Some(Some(BlockData {
+                    number: 90,
+                    hash: [0xbb; 32],
+                }));
+            },
+            "{tag} block regressed",
+        );
+    }
+
+    #[test]
+    fn changing_head_hash_at_same_height_is_rejected() {
+        rejects(
+            |p| {
+                p.head_after = Some(Some(BlockData {
+                    number: 100,
+                    hash: [0xbb; 32],
+                }));
+            },
+            "{tag} block snapshot changed",
+        );
+    }
+
+    #[test]
+    fn advancing_head_on_a_different_fork_is_rejected() {
+        rejects(
+            |p| {
+                p.head_after = Some(Some(BlockData {
+                    number: 101,
+                    hash: [0xbb; 32],
+                }));
+                p.snapshot_canonical = Some(Some(BlockData {
+                    number: 100,
+                    hash: [0xcc; 32],
+                }));
+            },
+            "{tag} block snapshot changed",
+        );
+    }
+
+    #[test]
+    fn advancing_head_preserving_original_block_is_accepted() {
+        for (tag, verify) in cases() {
+            let provider = Provider {
+                expected_tag: tag,
+                head_after: Some(Some(BlockData {
+                    number: 101,
+                    hash: [0xbb; 32],
+                })),
+                ..Provider::default()
+            };
+            verify(&provider, tag).unwrap();
+            assert_eq!(
+                *provider.calls.borrow(),
+                [
+                    "tag",
+                    "receipt",
+                    "canonical",
+                    "tag_recheck",
+                    "head_ancestor"
+                ]
+            );
+        }
+    }
+
+    #[test]
+    fn tag_recheck_must_be_available() {
+        rejects(|p| p.head_after = Some(None), "block unavailable");
+    }
+
+    #[test]
+    fn advancing_head_requires_original_block_to_exist() {
+        rejects(
+            |p| {
+                p.head_after = Some(Some(BlockData {
+                    number: 101,
+                    hash: [0xbb; 32],
+                }));
+                p.snapshot_canonical = Some(None);
+            },
+            "original {tag} block 100 unavailable",
+        );
+    }
+
+    #[test]
+    fn advancing_head_requires_original_block_number_to_match() {
+        rejects(
+            |p| {
+                p.head_after = Some(Some(BlockData {
+                    number: 101,
+                    hash: [0xbb; 32],
+                }));
+                p.snapshot_canonical = Some(Some(BlockData {
+                    number: 99,
+                    hash: [0x42; 32],
+                }));
+            },
+            "{tag} block snapshot changed",
+        );
+    }
 }
 
-#[cfg(evm_to_rgb)]
-#[test]
-fn accepts_exact_min_depth() {
-    // head 112, block 100 -> depth 12 == 12.
-    assert!(verify(&happy_provider()).is_ok());
+fn rpc_receipt_json() -> serde_json::Value {
+    serde_json::json!({
+        "type": "0x2",
+        "status": "0x1",
+        "cumulativeGasUsed": "0x5208",
+        "gasUsed": "0x5208",
+        "effectiveGasPrice": "0x1",
+        "logsBloom": format!("0x{}", "00".repeat(256)),
+        "transactionHash": format!("0x{}", hex::encode(TX)),
+        "transactionIndex": "0x0",
+        "blockHash": format!("0x{}", "42".repeat(32)),
+        "blockNumber": "0x64",
+        "from": format!("0x{}", hex::encode(BRIDGE)),
+        "to": format!("0x{}", hex::encode(BRIDGE)),
+        "contractAddress": null,
+        "logs": []
+    })
 }
 
-#[cfg(evm_to_rgb)]
 #[test]
-fn rejects_head_below_receipt_block() {
-    // head 99 < block 100 -> reorg.
-    let p = FakeEvm {
-        receipt: Some(receipt_with(vec![bridge_log(op_id(7), 1000, 950, 50)], 100)),
-        head: 99,
-    };
-    let e = verify(&p).unwrap_err().to_string();
-    assert!(e.contains("reorg"), "got: {e}");
+fn receipt_mapping_preserves_block_hash() {
+    let rpc = serde_json::from_value(rpc_receipt_json()).unwrap();
+    let receipt = map_alloy_receipt(rpc).unwrap();
+    assert_eq!(receipt.block_number, 100);
+    assert_eq!(receipt.block_hash, [0x42; 32]);
+}
+
+#[test]
+fn receipt_mapping_rejects_missing_or_null_block_hash() {
+    let mut missing = rpc_receipt_json();
+    missing.as_object_mut().unwrap().remove("blockHash");
+    let mut null = rpc_receipt_json();
+    null["blockHash"] = serde_json::Value::Null;
+    for json in [missing, null] {
+        let rpc = serde_json::from_value(json).unwrap();
+        let err = map_alloy_receipt(rpc).unwrap_err().to_string();
+        assert!(err.contains("no block_hash"), "{err}");
+    }
+}
+
+#[test]
+fn rpc_block_requires_hash_and_number() {
+    let block: alloy::rpc::types::Block = Default::default();
+    let json = serde_json::to_value(block).unwrap();
+    // Pin Alloy's wire behavior: neither tagged nor canonical block responses
+    // may silently turn missing identity fields into zero-valued defaults.
+    serde_json::from_value::<alloy::rpc::types::Block>(json.clone()).unwrap();
+    for field in ["hash", "number"] {
+        let mut missing = json.clone();
+        missing.as_object_mut().unwrap().remove(field);
+        let mut null = json.clone();
+        null[field] = serde_json::Value::Null;
+        for malformed in [missing, null] {
+            assert!(
+                serde_json::from_value::<alloy::rpc::types::Block>(malformed).is_err(),
+                "missing/null {field} must fail block parsing"
+            );
+        }
+    }
 }
 
 // ---- regression: listener flags cannot authorize ----
@@ -515,10 +886,7 @@ fn rejects_head_below_receipt_block() {
 fn issue_51_no_receipt_means_no_authorization() {
     // The listener sets event_valid/event_finalized=true, but no deposit
     // exists. Verification must reject, so the flags do not gate signing.
-    let p = FakeEvm {
-        receipt: None,
-        head: 112,
-    };
+    let p = FakeEvm { receipt: None };
     assert!(verify(&p).is_err());
 }
 
@@ -604,10 +972,9 @@ fn verify_rgb_funds_in_accepts_a_verified_lock() {
             ],
             100,
         )),
-        head: 112,
     };
     assert_eq!(
-        verify_rgb_funds_in(&p, &BRIDGE, 12, &TX, &word(0xab)).unwrap(),
+        verify_rgb_funds_in(&p, &BRIDGE, EvmFinalityTag::Safe, &TX, &word(0xab)).unwrap(),
         VerifiedLock {
             mint_opid: word(0xab),
             minted: 100,
@@ -628,9 +995,8 @@ fn verify_rgb_funds_in_rejects_a_foreign_destination_chain() {
             vec![rgb_companion_log(0xab, 100), bridge],
             100,
         )),
-        head: 112,
     };
-    let e = verify_rgb_funds_in(&p, &BRIDGE, 12, &TX, &word(0xab))
+    let e = verify_rgb_funds_in(&p, &BRIDGE, EvmFinalityTag::Safe, &TX, &word(0xab))
         .unwrap_err()
         .to_string();
     assert!(e.contains("destinationChainId 42161"), "got: {e}");
@@ -643,9 +1009,8 @@ fn verify_rgb_funds_in_rejects_a_foreign_destination_chain() {
 fn verify_rgb_funds_in_requires_the_bridge_funds_in_record() {
     let p = FakeEvm {
         receipt: Some(receipt_with(vec![rgb_companion_log(0xab, 100)], 100)),
-        head: 112,
     };
-    let e = verify_rgb_funds_in(&p, &BRIDGE, 12, &TX, &word(0xab))
+    let e = verify_rgb_funds_in(&p, &BRIDGE, EvmFinalityTag::Safe, &TX, &word(0xab))
         .unwrap_err()
         .to_string();
     assert!(e.contains("no BridgeFundsIn log"), "got: {e}");
@@ -660,9 +1025,8 @@ fn verify_rgb_funds_in_rejects_a_log_from_an_unpinned_contract() {
     log.address = OTHER;
     let p = FakeEvm {
         receipt: Some(receipt_with(vec![log], 100)),
-        head: 112,
     };
-    let e = verify_rgb_funds_in(&p, &BRIDGE, 12, &TX, &word(0xab))
+    let e = verify_rgb_funds_in(&p, &BRIDGE, EvmFinalityTag::Safe, &TX, &word(0xab))
         .unwrap_err()
         .to_string();
     assert!(e.contains("no FundsIn log"), "got: {e}");

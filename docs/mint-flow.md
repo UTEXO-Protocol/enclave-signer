@@ -27,12 +27,13 @@ document differ, investigate the difference. Either can contain an error.
 | Backend and listener | Operator servers | Nothing | Build the consignment and the PSBT. Send the request. |
 | Parent | EC2 host | Nothing | Moves bytes. Relays KMS and S3 traffic for the seed. |
 | Mint signer | Nitro Enclave | Checks and keys | Checks the deposit and the mint. Signs the PSBT. |
-| EVM RPC | Pinned TLS host | Receipt and chain-head data | Gives the deposit receipts. |
+| EVM RPC | Pinned TLS host | Receipts, canonical blocks and selected finality head | Gives the deposit receipts and the data for the finality and block-hash checks. |
 | Electrum | Through vsock proxy | Bitcoin data, subject to the checks below | Supplies transactions and witness status for RGB validation. |
 
 The mint signer ignores `event_valid` and `event_finalized` from the listener.
 It checks deposits through the pinned EVM RPC. It trusts that provider for
-receipt and chain-head data. It does not verify EVM consensus.
+receipt, canonical block and selected finality head data. It does not verify EVM
+consensus.
 
 The mint path does not verify witness inclusion against the enclave SPV chain.
 RGB validation uses the Electrum resolver. The PSBT check binds the new
@@ -74,7 +75,7 @@ sequenceDiagram
 | `TS_BRIDGE` | 8014 | Mint transition. The only transition the mint signer accepts. |
 | `OS_ASSET` | 4000 | Output that holds RGB units (u64). |
 | `OS_BRIDGE` | 4014 | The mint right. It holds no units. It does not count in the amount. |
-| `EVM_MIN_CONFIRMATIONS` | 12 (default) | Minimum depth of each deposit receipt. Attested. Production refuses 0. |
+| `EVM_FINALITY_TAG` | `safe` (default) | Attested receipt acceptance tag: `latest`, `safe`, or `finalized`. Invalid values reject startup. |
 | `RGB_CHAIN_ID` | 827166 | The bridge's id for the RGB network. Compiled in. |
 | `MAX_CONSIGNMENT_BYTES` | 8 MiB (default) | Maximum consignment size. |
 | `MAX_OFF_TX_CHANGE_OUTPOINTS` | 4 | Maximum change outpoints outside the PSBT. |
@@ -124,8 +125,11 @@ host. TLS ends inside the enclave. Each call has a 15 s timeout.
 - **M2.6** `netAmount` must not be more than `amount - commission`.
 - **M2.7** Each amount must fit in a u64. The mint signer does not cut a
   larger value. It refuses it.
-- **M2.8** The receipt must be at least `EVM_MIN_CONFIRMATIONS` blocks deep. A
-  receipt above the chain head (a reorg) is refused.
+- **M2.8** The receipt must be covered by
+  `eth_getBlockByNumber(EVM_FINALITY_TAG, false)` and its `blockHash` must match
+  the canonical block at its height. The selected head snapshot is revalidated
+  to detect a reorg. A receipt above that head or unavailable tag data refuses
+  signing. Pending deposits can be retried after the selected head covers them.
 
 ### Stage 3 - Does each mint have a deposit?
 
@@ -137,7 +141,8 @@ host. TLS ends inside the enclave. Each call has a 15 s timeout.
   B1.3).
 - **M3.4** The receipt of `evm_tx_hash` must have exactly one `FundsIn` event
   with the last mint's RGB OpId, and exactly one `BridgeFundsIn` event, both
-  from `FUNDS_IN_CONTRACT`, at least `EVM_MIN_CONFIRMATIONS` deep. Its
+  from `FUNDS_IN_CONTRACT`, covered by the selected finality head and matching the canonical
+  block hash. Its
   `operationId`, amount and net amount must be the ones the last mint derives.
   Another deposit for the same OpId is refused.
 - **M3.5** The `BridgeFundsIn` `destinationChainId` must equal 827166

@@ -15,14 +15,14 @@ flowchart TB
         PFr[framing.rs<br/>u32 LE len + protobuf]
         PALib[attest_verify.rs<br/>library half of CLI —<br/>rebuilds expected policy + bundle]
         PCli[bin/cli.rs<br/>utexo-bridge-parent-cli]
-        AVCli[attest-verify CLI<br/>--pcr0/1/2, --expect-signer-role,<br/>--expect-vanilla-psbt,<br/>--expect-evm-source tls, raw or disabled,<br/>--expect-electrum-host,<br/>--expect-evm-rpc-host, --expect-evm-rpc-ca-sha256]
+        AVCli[attest-verify CLI<br/>--pcr0/1/2, --expect-signer-role,<br/>--expect-vanilla-psbt,<br/>--expect-evm-source tls, raw or disabled,<br/>--expect-evm-finality-tag latest, safe or finalized,<br/>--expect-electrum-host,<br/>--expect-evm-rpc-host, --expect-evm-rpc-ca-sha256]
         PMisc[config.rs / error.rs / health.rs<br/>header_sync.rs - Electrum headers to SubmitHeaders<br/>seed_persistence.rs - KMS custody broker, mint only]
     end
 
     %% attestation-verify shared crate
     subgraph ATTV [attestation-verify crate — shared]
         AV[verify_attestation<br/>COSE_Sign1, alg pinned ES384, raw 96-byte sig,<br/>cert chain + CA constraints + PCR0/1/2]
-        AVPol[policy.rs<br/>AttestedPolicy - canonical policy<br/>commitment encoding v8]
+        AVPol[policy.rs<br/>AttestedPolicy - canonical policy<br/>commitment encoding v9]
         AVMock[verify_mock_attestation<br/>feature 'mock']
         Root[Embedded AWS Nitro<br/>root CA PEM]
     end
@@ -127,7 +127,7 @@ flowchart TB
     VFwd -->|"vsock CID 3:8001"| VP
     VP -->|"Electrum TCP/TLS"| Esp
 
-    NEE -.->|"eth_getTransactionReceipt /<br/>eth_blockNumber — TLS to pinned host and CA"| VFwd
+    NEE -.->|"eth_getTransactionReceipt /<br/>eth_getBlockByNumber — TLS to pinned host and CA"| VFwd
     VFwd -->|"vsock 8002"| VPe
     VPe -->|"TLS bytes (ends in enclave)"| EvmRpc
 
