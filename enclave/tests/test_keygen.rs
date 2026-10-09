@@ -88,6 +88,65 @@ fn double_initialize_returns_error() {
 }
 
 #[test]
+#[cfg(not(feature = "kms-persistence"))]
+fn refused_cloning_secret_keeps_phase_initial() {
+    let port = common::start_test_server();
+    let init = |secret: &str| {
+        common::send_request(
+            port,
+            &EnclaveRequest {
+                request: Some(Request::InitializeKey(InitializeKeyRequest {
+                    seed: vec![],
+                    mnemonic: String::new(),
+                    cloning_secret: secret.into(),
+                })),
+            },
+        )
+    };
+    let phase = || {
+        let req = EnclaveRequest {
+            request: Some(Request::Health(HealthRequest::default())),
+        };
+        match common::send_request(port, &req).response {
+            Some(Response::Health(h)) => h.phase,
+            other => panic!("expected Health, got {other:?}"),
+        }
+    };
+
+    match init("weak-secret").response {
+        Some(Response::Error(e)) => assert!(e.message.contains("cloning_secret"), "{}", e.message),
+        other => panic!("expected Error, got {other:?}"),
+    }
+    assert_eq!(phase(), "initial");
+
+    let evm_address = match init("test-operator-cloning-secret-0123456789abcdef").response {
+        Some(Response::InitializeKey(r)) => r.evm_address,
+        other => panic!("expected InitializeKeyResponse, got {other:?}"),
+    };
+    assert_eq!(phase(), "active");
+
+    // The donor secret is stored: the digest check runs and fails.
+    let req = EnclaveRequest {
+        request: Some(Request::GetClone(GetCloneRequest {
+            cluster_public_key: evm_address,
+            encryption_pubkey: vec![0; 32],
+            cloning_digest: vec![0; 32],
+            requester_attestation: vec![],
+        })),
+    };
+    match common::send_request(port, &req).response {
+        Some(Response::Error(e)) => {
+            assert!(
+                e.message.contains("cloning digest mismatch"),
+                "{}",
+                e.message
+            )
+        }
+        other => panic!("expected Error, got {other:?}"),
+    }
+}
+
+#[test]
 fn get_keys_before_init_returns_error() {
     let port = common::start_test_server();
 
