@@ -802,7 +802,38 @@ mod anchor {
     const SIGNING_TT: u16 = bfa::TS_BRIDGE;
 
     fn transfer_summary(outputs: Vec<TransitionOutput>) -> TransitionSummary {
-        summary("transfer-op", SIGNING_TT, outputs)
+        summary("transfer-op", SIGNING_TT, signing_outputs(outputs))
+    }
+
+    /// The mint right as an output leg. `OS_BRIDGE` is declarative and has no
+    /// amount.
+    #[cfg(feature = "mint-signer")]
+    fn bridge_right(seal: OutputSeal) -> TransitionOutput {
+        TransitionOutput {
+            assignment_type: bfa::OS_BRIDGE,
+            amount: 0,
+            seal,
+        }
+    }
+
+    /// The output legs of the baseline signing transition. A mint consumes the
+    /// mint right of the bridge. Thus on the mint signer the baseline returns
+    /// the right on a revealed seal at vout 1, which [`owns_vout_1`] owns. A
+    /// test that sets the right itself keeps its own. For a transition with
+    /// no right, use [`summary`].
+    #[cfg(feature = "mint-signer")]
+    fn signing_outputs(mut outputs: Vec<TransitionOutput>) -> Vec<TransitionOutput> {
+        if !outputs.iter().any(|o| o.assignment_type == bfa::OS_BRIDGE) {
+            outputs.push(bridge_right(OutputSeal::Revealed {
+                txid: None,
+                vout: 1,
+            }));
+        }
+        outputs
+    }
+    #[cfg(not(feature = "mint-signer"))]
+    fn signing_outputs(outputs: Vec<TransitionOutput>) -> Vec<TransitionOutput> {
+        outputs
     }
 
     fn summary(
@@ -1158,13 +1189,15 @@ mod anchor {
         let psbt = psbt_with_two_inputs();
         let mut validated = validated_with(&psbt, vec![confidential(1_000)]);
         edit_signing_transition(&mut validated, |t| {
-            // A confidential allowance. The recipient sum skips it, so
-            // 1_000 == net credited.
+            // The right has an amount and is on the bridge-owned output. The
+            // recipient sum must skip it, so 1_000 == net credited.
+            t.outputs.retain(|o| o.assignment_type != bfa::OS_BRIDGE);
             t.outputs.push(TransitionOutput {
                 assignment_type: bfa::OS_BRIDGE,
                 amount: 9_000_000,
-                seal: OutputSeal::Confidential {
-                    secret_seal: "utxob:allowance".into(),
+                seal: OutputSeal::Revealed {
+                    txid: None,
+                    vout: 1,
                 },
             });
             t.total_output_amount = 9_001_000;
@@ -1182,7 +1215,9 @@ mod anchor {
     fn rejects_transition_without_asset_outputs() {
         let psbt = psbt_with_two_inputs();
         let mut validated = validated_with(&psbt, vec![confidential(1_000)]);
-        edit_signing_transition(&mut validated, |t| t.outputs = vec![]);
+        edit_signing_transition(&mut validated, |t| {
+            t.outputs.retain(|o| o.assignment_type != bfa::OS_ASSET)
+        });
         let err = validate_psbt_anchors_transition(&psbt, &validated, 1_000, 0, &owns_vout_1)
             .unwrap_err();
         assert!(
@@ -1498,8 +1533,14 @@ mod anchor {
     #[test]
     fn skips_non_asset_assignments() {
         let psbt = psbt_with_two_inputs();
-        let mut bridge_right = confidential_to(500, "utxob:bridge-right");
-        bridge_right.assignment_type = bfa::OS_BRIDGE;
+        let bridge_right = TransitionOutput {
+            assignment_type: bfa::OS_BRIDGE,
+            amount: 500,
+            seal: OutputSeal::Revealed {
+                txid: None,
+                vout: 1,
+            },
+        };
         let validated = validated_with(
             &psbt,
             vec![bridge_right, confidential_to(1_000, "utxob:recipient")],
@@ -1509,6 +1550,94 @@ mod anchor {
         assert_eq!(legs.recipient_seals, vec!["utxob:recipient".to_string()]);
     }
 
+    /// A `Bridge` transition consumes the mint right (`OS_BRIDGE`). The schema
+    /// lets the transition assign the right again or not (`NoneOrOnce`). A
+    /// mint with no `OS_BRIDGE` output closes the right, and no mint can use
+    /// it again. The enclave must not sign that mint.
+    #[cfg(feature = "mint-signer")]
+    #[test]
+    fn refuses_a_mint_that_drops_the_bridge_right() {
+        let psbt = psbt_with_two_inputs();
+        // Use `summary`, because the baseline adds the right.
+        let validated = validated_from(
+            &psbt,
+            vec![summary(
+                "transfer-op",
+                SIGNING_TT,
+                vec![confidential(1_000)],
+            )],
+        );
+        assert!(
+            validate_psbt_anchors_transition(&psbt, &validated, 1_000, 0, &owns_vout_1).is_err(),
+            "a mint with no OS_BRIDGE output destroys the mint right of the bridge"
+        );
+    }
+
+    /// The enclave cannot see which UTXO a blinded seal names. A mint right on
+    /// a blinded seal can be out of bridge custody. Then a mint on that right
+    /// does not need the signature of this enclave, or its recipient bind.
+    #[cfg(feature = "mint-signer")]
+    #[test]
+    fn refuses_a_mint_right_paid_to_a_blinded_seal() {
+        let psbt = psbt_with_two_inputs();
+        let validated = validated_with(
+            &psbt,
+            vec![
+                bridge_right(OutputSeal::Confidential {
+                    secret_seal: "utxob:not-provably-the-bridge".into(),
+                }),
+                confidential_to(1_000, "utxob:recipient"),
+            ],
+        );
+        assert!(
+            validate_psbt_anchors_transition(&psbt, &validated, 1_000, 0, &owns_vout_1).is_err(),
+            "the mint right must stay on a seal that the enclave can prove is bridge-owned"
+        );
+    }
+
+    /// The same for a revealed seal on an outpoint that the enclave does not
+    /// control.
+    #[cfg(feature = "mint-signer")]
+    #[test]
+    fn refuses_a_mint_right_paid_to_an_unowned_outpoint() {
+        let psbt = psbt_with_two_inputs();
+        let validated = validated_with(
+            &psbt,
+            vec![
+                bridge_right(OutputSeal::Revealed {
+                    txid: None,
+                    vout: 0,
+                }),
+                confidential_to(1_000, "utxob:recipient"),
+            ],
+        );
+        assert!(
+            validate_psbt_anchors_transition(&psbt, &validated, 1_000, 0, &owns_vout_1).is_err(),
+            "vout 0 is not bridge-owned, so the mint right leaves bridge custody"
+        );
+    }
+
+    /// The valid shape: the right returns to a revealed seal on an output that
+    /// this enclave controls. The enclave must continue to sign it.
+    #[cfg(feature = "mint-signer")]
+    #[test]
+    fn accepts_a_mint_right_returned_to_a_bridge_owned_outpoint() {
+        let psbt = psbt_with_two_inputs();
+        let validated = validated_with(
+            &psbt,
+            vec![
+                bridge_right(OutputSeal::Revealed {
+                    txid: None,
+                    vout: 1,
+                }),
+                confidential_to(1_000, "utxob:recipient"),
+            ],
+        );
+        let legs = validate_psbt_anchors_transition(&psbt, &validated, 1_000, 0, &owns_vout_1)
+            .expect("the mint right stays in bridge custody");
+        assert_eq!(legs.recipient, 1_000);
+        assert_eq!(legs.change, 0);
+    }
     /// The split shape that the invoice bind refuses. Both seals must be
     /// returned in consignment order, so the bind sees the second one.
     #[test]
