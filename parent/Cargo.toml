@@ -53,6 +53,8 @@ http = "1"
 tower = { version = "0.5", features = ["limit"] }
 tokio = { version = "1", features = ["full"] }
 tokio-stream = "0.1"
+# Enclave connect with a timeout on TCP and vsock. Tokio already builds it.
+socket2 = { version = "0.6", features = ["all"] }
 # The optional seed storage bridge uses the AWS role provider and S3 client.
 # The EC2 parent does not need SSO, credential subprocesses or SigV4a.
 aws-config = { version = "=1.12.0", default-features = false, features = ["default-https-client", "rt-tokio"] }
