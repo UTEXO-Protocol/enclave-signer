@@ -1,4 +1,3 @@
-use std::collections::HashSet;
 use std::time::Duration;
 
 use tonic::{Request, Response, Status};
@@ -36,15 +35,11 @@ pub enum EnclaveTarget {
 #[derive(Clone)]
 pub struct ParentAdapterService {
     target: EnclaveTarget,
-    evm_network_ids: HashSet<u32>,
 }
 
 impl ParentAdapterService {
-    pub fn new(target: EnclaveTarget, evm_network_ids: HashSet<u32>) -> Self {
-        Self {
-            target,
-            evm_network_ids,
-        }
+    pub fn new(target: EnclaveTarget) -> Self {
+        Self { target }
     }
 
     /// Send an `EnclaveRequest` and read the `EnclaveResponse`.
@@ -374,12 +369,6 @@ impl ParentService for ParentAdapterService {
 
                 let destination_network = match inner.data {
                     Some(sign_request::Data::EvmData(payload)) => {
-                        if !self.evm_network_ids.contains(&common.dst_network_id) {
-                            return Err(Status::invalid_argument(format!(
-                                "EVM payload destination network {} is not configured as EVM",
-                                common.dst_network_id
-                            )));
-                        }
                         tracing::info!(
                             src_network_id = common.src_network_id,
                             dst_network_id = common.dst_network_id,
@@ -392,12 +381,6 @@ impl ParentService for ParentAdapterService {
                         Self::enclave_destination_network(sign_request::Data::EvmData(payload))
                     }
                     Some(sign_request::Data::RgbData(payload)) => {
-                        if self.evm_network_ids.contains(&common.dst_network_id) {
-                            return Err(Status::invalid_argument(format!(
-                                "RGB payload destination network {} is configured as EVM",
-                                common.dst_network_id
-                            )));
-                        }
                         tracing::info!(
                             src_network_id = common.src_network_id,
                             dst_network_id = common.dst_network_id,
