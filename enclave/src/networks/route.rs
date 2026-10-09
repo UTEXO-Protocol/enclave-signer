@@ -75,7 +75,7 @@ pub fn validate_source(
     source: &SourceNetwork,
     ctx: &ValidationContext<'_>,
 ) -> Result<SourceProof> {
-    // Each direction reads only one of these.
+    // An RGB source drops `amount`. The payout is the decoded calldata amount.
     #[cfg(not(evm_to_rgb))]
     let _ = amount;
     #[cfg(not(rgb_to_evm))]
@@ -127,7 +127,7 @@ pub fn validate_destination(
     destination: &DestinationNetwork,
     ctx: &ValidationContext<'_>,
 ) -> Result<DestinationProof> {
-    // Only the RGB (mint) destination binds the amounts.
+    // An EVM destination drops these. It checks only `calldata_amount`, against the calldata.
     #[cfg(not(evm_to_rgb))]
     let _ = (amount, source_commission);
     #[cfg(all(evm_to_rgb, not(feature = "rgb-validation")))]
