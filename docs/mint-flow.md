@@ -128,7 +128,7 @@ host. TLS ends inside the enclave. Each call has a 15 s timeout.
   `eth_getBlockByNumber("safe", false)` and its `blockHash` must match the
   canonical block at its height. A receipt above the safe head is refused.
   Pending or unsafe deposits can be retried after they become
-  safe. An unavailable `safe` tag refuses signing; there is no fallback.
+  safe. An unavailable `safe` tag refuses signing.
 
 ### Stage 3 - Does each mint have a deposit?
 

@@ -540,19 +540,13 @@ Data sources and transport:
 | `ENCLAVE_LISTEN_ADDR` | `127.0.0.1:5000` | TCP listen address, non-vsock builds only. |
 | `RUST_LOG` | unset | Log filter. |
 
-EVM receipt verification always requires `eth_getBlockByNumber("safe", false)`;
-there is no finality-mode setting. On Arbitrum, waiting for `safe` requires the
-batch to be posted and covered by L1's safe head, with residual L1 reorg risk; it does not wait for
-`finalized`. No fixed number of L2 blocks replaces this check. See
+EVM deposit receipts must be at or below `eth_getBlockByNumber("safe", false)`
+and match the canonical block hash at their height. On Arbitrum, `safe` requires
+the batch to be posted and covered by L1's safe head, with residual L1 reorg risk.
+See
 [Arbitrum finality guidance](https://docs.arbitrum.io/how-arbitrum-works/reference/finality-and-reorgs).
-An unsafe or pending deposit refuses signing; retry after it becomes safe.
-An unavailable or unsupported `safe` tag also refuses signing, with no fallback
-to `latest`.
-
-The fixed `safe` requirement is committed by policy version 9, which removes
-the previous confirmation-count field. Rebuild the EIF and verifiers together
-and approve the new PCRs; version 8 attestations are incompatible with the new
-verifier.
+The enclave refuses signing until the deposit is safe and whenever the required
+RPC data is unavailable or invalid. Retry an unsafe deposit after it becomes safe.
 
 Chain endpoints and KMS values, set once at launch with `cli set-endpoints`
 (`SetEndpoints`), never in the image. The attested policy commits the Electrum

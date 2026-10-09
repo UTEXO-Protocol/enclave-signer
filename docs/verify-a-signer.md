@@ -63,10 +63,8 @@ The script sets `chain_id` (42161) and `bridge_contract` (your
 `MULTISIG_PROXY`) itself.
 
 Policy version 9 commits to mandatory `safe` receipt verification and canonical
-block-hash matching, and removes the confirmation-count field. There is no
-finality-mode setting. Use the verifier and EIF from the same
-release and approve the rebuilt EIF's PCRs; version 8 attestations are
-incompatible with the version 9 verifier.
+block-hash matching. Use the verifier and EIF from the same release with
+approved PCRs.
 
 ## Run the check
 

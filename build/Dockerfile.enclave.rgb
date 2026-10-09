@@ -106,7 +106,7 @@ ENV EVM_CHAIN_ID=42161 \
 # the vsock forwarder (host runs
 # `vsock-proxy <EVM_RPC_VSOCK_PORT=8002> <rpc host> <tls port>`).
 # Receipts always require safe-head coverage and a matching canonical block hash.
-# Missing safe support fails closed; there is no confirmation-count setting.
+# Missing safe support refuses signing.
 # FUNDS_IN_CONTRACT is set EXPLICITLY because it differs from
 # EVM_PROXY_CONTRACT_ADDRESS - unset, it falls back to the proxy address and
 # points FundsIn verification at the wrong contract. In a release

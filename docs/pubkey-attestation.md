@@ -173,16 +173,13 @@ policy_commitment =
     u8(0x00)                                        // development discriminant
 ```
 
-V9 removes V8's confirmation-count field and binds a fixed deposit rule: every
-EVM `FundsIn` receipt must be at or below the RPC's `safe` head, with its block
-hash matching the canonical block at that height. Safe-chain membership has no
-configuration switch or fallback to a confirmation count. The pinned
-RPC remains trusted for these responses; this is not an EVM consensus proof.
+V9 commits to a fixed deposit rule: every EVM `FundsIn` receipt must be at or
+below the RPC's `safe` head, with its block hash matching the canonical block
+at that height. The enclave trusts the pinned RPC for the correctness of
+these responses.
 
-The version change makes V8 depth-only commitments incompatible with V9, even
-when all configurable values match. Verifiers reject V8 policy bytes, and clone
-peers reject the different policy commitment. Deploy V9 enclave images and
-verifiers together with updated approved EIF measurements.
+Use enclave images and verifiers from the same release with approved EIF
+measurements. Clone peers must have matching policy commitments.
 
 The tuple omits the Bitcoin network, concrete sats budgets, the Electrum/Esplora
 URL scheme and port, and the EVM RPC TLS port. The scheme needs no field: a
