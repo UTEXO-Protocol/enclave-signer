@@ -4,7 +4,6 @@
 //! tonic Parent Adapter that targets it. A gRPC client then runs the full path.
 
 use attestation_verify::AttestedPolicy;
-use std::collections::HashSet;
 use std::net::TcpListener;
 
 use tonic::transport::Server;
@@ -247,10 +246,8 @@ async fn start_grpc_server(enclave_port: u16) -> u16 {
     let grpc_port = grpc_addr.port();
     drop(grpc_listener);
 
-    let service = ParentAdapterService::new(
-        EnclaveTarget::Tcp(format!("127.0.0.1:{enclave_port}")),
-        HashSet::from([84]),
-    );
+    let service =
+        ParentAdapterService::new(EnclaveTarget::Tcp(format!("127.0.0.1:{enclave_port}")));
 
     tokio::spawn(async move {
         Server::builder()
