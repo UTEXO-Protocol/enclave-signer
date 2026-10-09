@@ -11,8 +11,8 @@
 
 use anyhow::{bail, Context, Result};
 use attestation_verify::{
-    AttestationMode, AttestedPolicy, BtcDataSource, EvmDataSource, EvmRpcTlsPin, ExpectedPcrs,
-    KmsPin, SignerRole, VerifiedAttestation,
+    AttestationMode, AttestedPolicy, BtcDataSource, EvmDataSource, EvmFinalityTag, EvmRpcTlsPin,
+    ExpectedPcrs, KmsPin, SignerRole, VerifiedAttestation,
 };
 use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine;
@@ -68,6 +68,8 @@ pub enum ExpectedPolicy {
         /// string requires no RGB asset.
         expected_rgb_asset_id: Option<String>,
         funds_in_contract: [u8; 20],
+        /// Required EVM RPC head tag; never inferred from the enclave response.
+        evm_finality_tag: EvmFinalityTag,
         /// Expected ERC-20 that the Bridge releases (`TOKEN_CONTRACT`). It is
         /// an input to the `burnId` preimage. It is not on the wire, so the
         /// operator declares it.
@@ -484,6 +486,7 @@ fn expected_attested_policy(
             expected_bridge_contract,
             expected_rgb_asset_id,
             funds_in_contract,
+            evm_finality_tag,
             token_contract,
             gas_tx_allowed_to,
             gas_tx_max_gas_limit,
@@ -544,6 +547,7 @@ fn expected_attested_policy(
                 bridge_contract,
                 rgb_asset_id: resp.rgb_asset_id.clone(),
                 funds_in_contract: *funds_in_contract,
+                evm_finality_tag: *evm_finality_tag,
                 electrum_host: electrum_host.clone(),
                 evm_rpc_tls: evm_rpc_tls.clone(),
                 // The operator declares the gas-tx rule. `to_bytes` sorts the
@@ -578,6 +582,7 @@ mod tests {
             electrum_host: "electrum.test".into(),
             evm_rpc_tls: None,
             funds_in_contract: [0x11; 20],
+            evm_finality_tag: EvmFinalityTag::Safe,
             token_contract: [0x22; 20],
             expected_chain_id: chain_id,
             expected_bridge_contract: bridge_contract,
@@ -602,6 +607,7 @@ mod tests {
                 ca_sha256: [0x33; 32],
             }),
             funds_in_contract: [0x11; 20],
+            evm_finality_tag: EvmFinalityTag::Safe,
             token_contract: [0x22; 20],
             expected_chain_id: None,
             expected_bridge_contract: None,
@@ -612,6 +618,32 @@ mod tests {
             gas_tx_max_value_wei: 0,
             gas_tx_allowed_selectors: Vec::new(),
             kms: None,
+        }
+    }
+
+    #[test]
+    fn finality_tag_must_match_the_verifier_expectation() {
+        for tag in [
+            EvmFinalityTag::Latest,
+            EvmFinalityTag::Safe,
+            EvmFinalityTag::Finalized,
+        ] {
+            let mut expected = production(SignerRole::Burn);
+            if let ExpectedPolicy::Production {
+                evm_finality_tag, ..
+            } = &mut expected
+            {
+                *evm_finality_tag = tag;
+            }
+            let response = attested_by(&expected, &[0x42; 32]);
+            assert!(verify_policy(response.clone(), &expected).is_ok());
+            if tag != EvmFinalityTag::Safe {
+                let err = verify_policy(response, &production(SignerRole::Burn)).unwrap_err();
+                assert!(
+                    format!("{err:#}").contains("does not match the expected policy"),
+                    "{err:#}"
+                );
+            }
         }
     }
 

@@ -96,6 +96,7 @@ pub fn log_bridge_config(bridge_config: &BridgeConfig) {
             bridge_contract = %hex::encode(bridge_config.bridge_contract),
             rgb_asset_id = %bridge_config.rgb_asset_id,
             btc_relay_mode = ?bridge_config.btc_relay_mode,
+            evm_finality_tag = %bridge_config.evm_finality_tag,
             "bridge config pinned from env"
         );
     } else if bridge_config.is_partially_configured() {
@@ -138,7 +139,7 @@ pub fn log_policy(policy: &SecurityPolicy) {
             evm_rpc_tls = ?p.evm_rpc_tls,
             funds_in_contract = %hex::encode(p.funds_in_contract),
             token_contract = %hex::encode(p.token_contract),
-            evm_finality = "safe",
+            evm_finality_tag = %p.evm_finality_tag,
             btc_source = ?p.btc_source,
             "resolved PRODUCTION security policy (committed into attestation user_data)"
         ),

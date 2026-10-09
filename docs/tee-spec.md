@@ -51,7 +51,7 @@ Internet -- orchestrator -- EC2 parent (UNTRUSTED) -- vsock -- Nitro Enclave (TR
 | Enclave code (this repo)         | validation, key custody, signing                 | -- (the thing being attested)                                                          |
 | Parent host / listener / backend | liveness, transport, data *delivery*             | request claims are checked; the EVM RPC is TLS to a pinned CA; CCD has an explicit trust exception |
 | Electrum / Bitcoin data providers | availability and resolver data used by RGB validation | RGB-source witness inclusion is checked by SPV. The mint destination path has no SPV inclusion check. Network exceptions apply (Sec 8). |
-| EVM RPC endpoint (pinned TLS) | receipt, canonical block and safe head correctness and availability, as an explicit design assumption | TLS authenticates the endpoint; it does not prove canonical EVM history (Sec 7.1-7.2) |
+| EVM RPC endpoint (pinned TLS) | receipt, canonical block and selected finality head correctness and availability, as an explicit design assumption | TLS authenticates the endpoint; it does not prove canonical EVM history (Sec 7.1-7.2) |
 | Operator | deployment, configuration pins, the cloning secret | plaintext seed export from the enclave |
 | AWS KMS (mint only) | seed generation, encryption, and decryption | host access to plaintext, subject to the configured KMS policies |
 
@@ -61,9 +61,11 @@ checkpoint, and the pinned EVM RPC endpoint. Mint seed recovery also trusts
 AWS KMS and its access policies. The Bridge contract and its governance are
 trusted: the enclave pins the Bridge address, not its code, so an upgraded
 Bridge could emit fake `FundsIn` events and back unbacked mints. EVM deposits
-must be covered by the RPC's `safe` head. On Arbitrum this waits for the batch
-to be posted and covered by L1's safe head. An L1 reorg remains an accepted
-risk. The mint path uses Electrum resolver data without a separate SPV
+must be covered by the RPC head selected by `EVM_FINALITY_TAG`, default `safe`.
+On Arbitrum, `latest` accepts the current L2 tip with sequencer and L1 reorg
+risk; `safe` waits for the batch to be posted and covered by L1's safe head,
+with residual L1 reorg risk; `finalized` waits for L1 finalized coverage.
+The mint path uses Electrum resolver data without a separate SPV
 inclusion check. CCD source checks trust the listener.
 
 **Pinned EVM RPC trust (accepted by design, F05-NEW-AF-07):** the production
@@ -74,8 +76,8 @@ detection. A TLS or RPC failure refuses the signing request.
 
 The enclave checks successful receipts, unique expected events from the pinned
 `FUNDS_IN_CONTRACT`, the operation-ID and amount bindings for the selected
-flow, coverage by the `safe` head and a matching canonical block hash at the
-receipt height. Receipts, blocks and the safe head come from the same provider.
+flow, coverage by the selected finality head and a matching canonical block
+hash at the receipt height. Receipts, blocks and the head come from the same provider.
 These are consistency checks, not EVM consensus proofs. A faulty, malicious
 or compromised approved provider can return a self-consistent false deposit
 history that passes them.
@@ -201,6 +203,7 @@ the public-key bundle. This policy covers the fields below, not all configuratio
 SecurityPolicy = Production {
     chain_id, bridge_contract, rgb_asset_id,   -- operator pins
     funds_in_contract, token_contract,         -- deposit and burnId pins
+    evm_finality_tag: Latest | Safe | Finalized, -- required receipt head
     allow_vanilla_psbt,                        -- plain-BTC signing on/off
     signer_role: Mint | Burn | Combined,
     attestation: Real,                         -- always, in production
@@ -221,6 +224,8 @@ SecurityPolicy = Production {
 - **Boot gate:** a release `rgb-validation` build that does not resolve to a
   valid `Production` policy MUST refuse to boot (panic). The FundsIn contract
   and `TOKEN_CONTRACT` must be non-zero, and `BTC_RELAY_MODE` must be `required`.
+  `EVM_FINALITY_TAG` accepts exactly `latest`, `safe`, or `finalized` (default
+  `safe`); an invalid value rejects startup.
   `SetEndpoints` runs the gate again with the endpoints and refuses the set on
   an error: `RawRpc`, and `PinnedTlsRpc` without a valid host and CA.
   Independently, each
@@ -232,19 +237,20 @@ SecurityPolicy = Production {
 - **Attestation:** `user_data = sha256(canonical_pubkey_bundle ||
   policy_commitment)`. The commitment encoding is versioned and shared
   (`attestation-verify/src/policy.rs`), so the enclave and every verifier
-  produce identical bytes. Version 9 commits to mandatory `safe` receipt
-  verification and canonical block-hash matching. Use the EIF and verifiers
-  from the same release with approved PCRs. See
+  produce identical bytes. Version 9 commits to the selected EVM finality tag.
+  Receipt verification requires coverage by that head and canonical block-hash
+  matching. Use the EIF and verifiers from the same release with approved PCRs. See
   [`pubkey-attestation.md`](pubkey-attestation.md).
 - **Verification:** `attest-verify` reconstructs the *expected* policy
   (`--expect-signer-role mint|burn|combined`, `--expect-vanilla-psbt`,
   `--expect-evm-source tls|raw|disabled`, `--expect-electrum-host`,
   `--expect-evm-rpc-host`,
   `--expect-evm-rpc-ca-sha256`,
-  `--expect-funds-in-contract`, and the gas-rule flags) and
+  `--expect-funds-in-contract`, `--expect-evm-finality-tag`, and the gas-rule flags) and
   fails if the commitment differs -- a downgraded posture (vanilla signing on,
   a different EVM source, a dev build) fails verification instead of being
   silently trusted.
+  `--expect-evm-finality-tag` is required for production verification.
 
 Provider approval is a deployment responsibility. For `PinnedTlsRpc`, supply
 `--expect-evm-source tls` and the RPC hostname and CA SHA-256 from an
@@ -431,13 +437,14 @@ A bridge PSBT request MUST carry the EVM deposit tx hash **and** the RGB
 consignment; there is no consignment-less bridge mode. Listener-supplied
 `event_valid` / `event_finalized` booleans are ignored. The
 enclave checks the deposit against the approved provider's receipt, blocks
-and safe head, subject to the trust assumption in Sec 2. These checks fail closed
+and selected finality head, subject to the trust assumption in Sec 2. These checks fail closed
 (`events::verify_funds_in_event`):
 
 - a **successful receipt** must exist for `evm_tx_hash`;
 - its block number MUST be at or below
-  `eth_getBlockByNumber("safe", false).number`. The receipt's `blockHash` MUST
-  match the canonical block fetched at that height;
+  `eth_getBlockByNumber(EVM_FINALITY_TAG, false).number`. The receipt's
+  `blockHash` MUST match the canonical block fetched at that height. The
+  selected head snapshot is revalidated to detect a reorg during verification;
 - it must carry exactly **one** `BridgeFundsIn` event from the pinned
   `FUNDS_IN_CONTRACT` (falls back to `EVM_PROXY_CONTRACT_ADDRESS`). Zero or two
   such events refuse. There is no fallback to the plain `FundsIn` event: it
@@ -481,8 +488,8 @@ so the operational fee check belongs to the bridge, before the lock. Raising a
 ceiling ships a new enclave image, so it needs federation agreement.
 
 **EVM data source:** a build without `evm-rpc` refuses bridge PSBTs outright.
-Pending or unsafe deposits refuse signing and can be retried after they become
-safe. A missing, malformed or unsupported `safe` response refuses signing.
+Deposits above the selected head refuse signing and can be retried once that
+head covers them. A missing, malformed or unsupported tag response refuses signing.
 With `PinnedTlsRpc`, TLS ends inside the enclave and authenticates the pinned
 host against the configured CA. The host can withhold a response, but cannot
 alter it without detection. The endpoint remains trusted for receipt, block
@@ -684,7 +691,7 @@ For an RGB-source request, the SPV layer enforces these rules:
    The image measurement covers the value when it is part of the image.
 
 The SPV thresholds above are compile-time constants. EVM receipts always require
-coverage by the `safe` head and a matching canonical block hash. The
+coverage by the selected finality head and a matching canonical block hash. The
 three request-size caps above are env-tunable because they only bound
 resource use; they never relax a verification step.
 
@@ -789,7 +796,7 @@ End-to-end release uniqueness also depends on contract checks outside this repo
 - Mainnet Bitcoin anchors use the pinned checkpoint and PoW/SPV checks.
   Signet/regtest have different validation rules (Sec 8).
 - EVM deposit checks use the selected provider's receipt, canonical block and
-  safe head. `PinnedTlsRpc` retains trust in the approved provider's
+  selected finality head. `PinnedTlsRpc` retains trust in the approved provider's
   data (Sec 2); CCD source validity is delegated to the listener.
 - Plain-BTC and bridge PSBTs sign only vanilla and colored accounts respectively.
   Unowned output budgets permit bounded outputs outside proved custody scripts.
@@ -802,8 +809,8 @@ On any of the following the enclave MUST return an error and MUST NOT sign:
 invalid consignment; unsupported or unclassified transition; amount not
 covered; malformed or non-canonical calldata; unpinned or mismatched
 chain/contract/asset; invalid or missing SPV proof; stale, future-dated, or
-incomplete header chain; cross-network consignment; missing/failed/unsafe
-`FundsIn` verification; unavailable safe head or mismatched receipt block hash;
+incomplete header chain; cross-network consignment; missing/failed/unconfirmed
+`FundsIn` verification; unavailable finality head or mismatched receipt block hash;
 `operationId` mismatch; fee over the pinned fee rate or
 absolute maximum, or under the relay floor (both PSBT paths); PSBT not
 anchored to the consignment; disallowed output script or value cap exceeded
@@ -831,7 +838,7 @@ Known limits. Read them before deployment.
   after 24 hours. The 100,000-entry cap can remove entries earlier. A successful
   response write can commit an entry even when the caller receives no response.
 - **EVM and CCD trust.** The images trust the pinned EVM RPC endpoint for
-  receipts, canonical blocks and the safe head. TLS authenticates the
+  receipts, canonical blocks and the selected finality head. TLS authenticates the
   endpoint, not its EVM history. A self-consistent false history from an
   approved provider can pass the deposit checks; this risk is accepted by
   design (Sec 2). CCD source

@@ -155,6 +155,7 @@ policy_commitment =
     chain_id_be8 || bridge_contract(20)
     u32_be(len(rgb_asset_id)) || rgb_asset_id_utf8
     funds_in_contract(20)                           // authorized event emitter
+    u8(evm_finality_tag)                            // 0 latest | 1 safe | 2 finalized
     u32_be(len(electrum_host)) || electrum_host     // Electrum host set at launch
     u8(evm_rpc_tls_present)                         // 0 absent; 1 followed by:
       u32_be(len(host)) || host || ca_sha256(32)    //   EVM RPC host, SHA-256 of the CA DER, set at launch
@@ -173,10 +174,13 @@ policy_commitment =
     u8(0x00)                                        // development discriminant
 ```
 
-V9 commits to a fixed deposit rule: every EVM `FundsIn` receipt must be at or
-below the RPC's `safe` head, with its block hash matching the canonical block
-at that height. The enclave trusts the pinned RPC for the correctness of
-these responses.
+V9 commits to `evm_finality_tag`, selected by `EVM_FINALITY_TAG` (default `safe`).
+Every EVM `FundsIn` receipt must be at or below the selected head, with its
+block hash matching the canonical block at that height. The enclave
+revalidates the selected head snapshot to detect a reorg. The enclave trusts
+the pinned RPC for the correctness of these responses. Production verification
+requires `--expect-evm-finality-tag` with the approved `latest`, `safe`, or
+`finalized` value.
 
 Use enclave images and verifiers from the same release with approved EIF
 measurements. Clone peers must have matching policy commitments.
@@ -288,6 +292,7 @@ attest-verify \
     --pcr2 <96-hex-chars> \
     --expect-signer-role burn \
     --expect-funds-in-contract 0x6711f1a319B37847fa0234181C34D883774c4951 \
+    --expect-evm-finality-tag safe \
     --expect-token-contract 0xFd086bC7CD5C481DCC9C85ebE478A1C0b69FCbb9 \
     --expect-electrum-host <electrum host> \
     --expect-evm-rpc-host <rpc host> \
@@ -319,6 +324,7 @@ attest-verify \
 attest-verify --endpoint https://parent.example:50051 \
     --pcr0 <..> --pcr1 <..> --pcr2 <..> --expect-signer-role mint \
     --expect-funds-in-contract <hex20> --expect-token-contract <hex20> \
+    --expect-evm-finality-tag safe \
     --expect-electrum-host <electrum host> \
     --expect-kms-key-arn <arn> --expect-kms-region <region> --expect-kms-seed-id <id> \
     --expect-evm-rpc-host <rpc host> --expect-evm-rpc-ca-sha256 <64-hex-chars> \

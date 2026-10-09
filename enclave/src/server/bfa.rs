@@ -117,6 +117,7 @@ fn verify_request_deposit(
     crate::networks::evm::events::verify_rgb_funds_in(
         &**client,
         &ctx.bridge_config.funds_in_contract,
+        ctx.bridge_config.evm_finality_tag,
         tx_hash,
         mint_opid,
     )
@@ -177,7 +178,10 @@ mod burn_locks {
             panic!("a burn's locks are derived, not read")
         }
 
-        fn get_safe_block(&self) -> Result<Option<BlockData>> {
+        fn get_block_by_tag(
+            &self,
+            _tag: attestation_verify::EvmFinalityTag,
+        ) -> Result<Option<BlockData>> {
             panic!("a burn's locks are derived, not read")
         }
 

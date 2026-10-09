@@ -128,6 +128,14 @@ pub fn policy_cases(policy: &AttestedPolicy) -> Vec<(&'static str, Vec<u8>)> {
         x[0] ^= 1;
         x
     });
+    alter!(
+        evm_finality_tag,
+        if *evm_finality_tag == attestation_verify::EvmFinalityTag::Safe {
+            attestation_verify::EvmFinalityTag::Latest
+        } else {
+            attestation_verify::EvmFinalityTag::Safe
+        }
+    );
     alter!(token_contract, {
         let mut x = *token_contract;
         x[0] ^= 1;

@@ -2,7 +2,7 @@
 //! every byte between the enclave and the RPC, so it must not be able to
 //! answer a receipt request itself.
 // The mint path reads the deposit and the BFA mint lock over this channel.
-// The same channel authenticates the safe head and canonical receipt block.
+// The same channel authenticates the selected head and canonical receipt block.
 #![cfg(feature = "bfa-validation")]
 
 use std::io::{BufRead, BufReader, Cursor, Read, Write};
@@ -12,6 +12,7 @@ use std::time::Duration;
 
 use alloy_primitives::U256;
 use alloy_sol_types::{sol, SolEvent};
+use attestation_verify::EvmFinalityTag;
 use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use utexo_bridge_enclave::config::BridgeConfig;
@@ -129,14 +130,14 @@ fn forged_receipt() -> String {
 /// Answers JSON-RPC on loopback, over TLS with `leaf` when set. With
 /// `truncate` it sends half of each body and closes.
 fn serve(leaf: Option<(&str, &str)>, truncate: bool) -> u16 {
-    serve_chain(leaf, truncate, ChainView::Safe)
+    serve_chain(leaf, truncate, ChainView::Eligible, EvmFinalityTag::Safe)
 }
 
 #[derive(Clone, Copy)]
 enum ChainView {
-    Safe,
-    Unsafe,
-    MissingSafe,
+    Eligible,
+    AboveHead,
+    MissingHead,
     Reorg,
 }
 
@@ -147,7 +148,12 @@ fn block_json(number: u64, hash_byte: u8) -> String {
     serde_json::to_string(&block).unwrap()
 }
 
-fn serve_chain(leaf: Option<(&str, &str)>, truncate: bool, chain: ChainView) -> u16 {
+fn serve_chain(
+    leaf: Option<(&str, &str)>,
+    truncate: bool,
+    chain: ChainView,
+    finality_tag: EvmFinalityTag,
+) -> u16 {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
     let tls = leaf.map(|(cert, key)| {
@@ -168,10 +174,15 @@ fn serve_chain(leaf: Option<(&str, &str)>, truncate: bool, chain: ChainView) -> 
                 .set_read_timeout(Some(Duration::from_secs(1)))
                 .unwrap();
             match &tls {
-                None => answer(stream, truncate, chain),
+                None => answer(stream, truncate, chain, finality_tag),
                 Some(cfg) => {
                     let conn = rustls::ServerConnection::new(cfg.clone()).unwrap();
-                    answer(rustls::StreamOwned::new(conn, stream), truncate, chain)
+                    answer(
+                        rustls::StreamOwned::new(conn, stream),
+                        truncate,
+                        chain,
+                        finality_tag,
+                    )
                 }
             }
         }
@@ -241,8 +252,13 @@ fn serve_redirect() -> u16 {
 /// The Host header of every request `answer` read.
 static HOSTS: Mutex<Vec<String>> = Mutex::new(Vec::new());
 
-/// Answers one JSON-RPC request with the forged receipt or block 112.
-fn answer(stream: impl Read + Write, truncate: bool, chain: ChainView) {
+/// Answers one JSON-RPC request for the selected tag, canonical block, or receipt.
+fn answer(
+    stream: impl Read + Write,
+    truncate: bool,
+    chain: ChainView,
+    finality_tag: EvmFinalityTag,
+) {
     let mut reader = BufReader::new(stream);
     let mut len = 0;
     for line in reader.by_ref().lines().map_while(Result::ok) {
@@ -269,10 +285,10 @@ fn answer(stream: impl Read + Write, truncate: bool, chain: ChainView) {
         "eth_getBlockByNumber" => {
             assert_eq!(body["params"][1], false, "only block headers are needed");
             match body["params"][0].as_str().unwrap() {
-                "safe" => match chain {
-                    ChainView::Safe => block_json(100, 0x22),
-                    ChainView::Unsafe => block_json(99, 0x21),
-                    ChainView::MissingSafe => "null".into(),
+                tag if tag == finality_tag.as_str() => match chain {
+                    ChainView::Eligible => block_json(100, 0x22),
+                    ChainView::AboveHead => block_json(99, 0x21),
+                    ChainView::MissingHead => "null".into(),
                     ChainView::Reorg => block_json(101, 0x33),
                 },
                 "0x64" => block_json(
@@ -283,7 +299,7 @@ fn answer(stream: impl Read + Write, truncate: bool, chain: ChainView) {
                         0x22
                     },
                 ),
-                tag => panic!("unexpected block tag {tag}; safe must not fall back to latest"),
+                tag => panic!("unexpected block tag {tag}; configured tag is {finality_tag}"),
             }
         }
         method => panic!("unexpected RPC method {method}"),
@@ -370,7 +386,7 @@ fn non_default_port_reaches_listener_with_host_header() {
     let port = serve(Some(RPC_TEST), false);
     assert_ne!(port, 443);
     let client = pinned_client(port, CA_A_HEX);
-    verify_rgb_funds_in(&*client, &BRIDGE, &TX, &MINT_OPID).unwrap();
+    verify_rgb_funds_in(&*client, &BRIDGE, EvmFinalityTag::Safe, &TX, &MINT_OPID).unwrap();
     let want = format!("rpc.test:{port}");
     assert!(HOSTS.lock().unwrap().contains(&want), "no Host {want}");
 }
@@ -379,29 +395,66 @@ fn non_default_port_reaches_listener_with_host_header() {
 #[test]
 fn pinned_ca_and_host_return_the_deposit() {
     let client = pinned_client(serve(Some(RPC_TEST), false), CA_A_HEX);
-    verify_funds_in_event(&*client, &BRIDGE, &TX, &OP_ID, 1000, 50).unwrap();
+    verify_funds_in_event(
+        &*client,
+        &BRIDGE,
+        EvmFinalityTag::Safe,
+        &TX,
+        &OP_ID,
+        1000,
+        50,
+    )
+    .unwrap();
 }
 
 #[test]
 fn pinned_ca_and_host_return_the_ancestor_mint_lock() {
     let client = pinned_client(serve(Some(RPC_TEST), false), CA_A_HEX);
-    verify_rgb_funds_in(&*client, &BRIDGE, &TX, &MINT_OPID).unwrap();
+    verify_rgb_funds_in(&*client, &BRIDGE, EvmFinalityTag::Safe, &TX, &MINT_OPID).unwrap();
 }
 
-/// Only the authenticated safe head and canonical block can authorize a receipt.
+/// The Alloy client must send the configured tag verbatim on both head reads.
 #[test]
-fn pinned_rpc_requires_safe_and_matching_canonical_block() {
-    for chain in [ChainView::Unsafe, ChainView::MissingSafe, ChainView::Reorg] {
-        let client = pinned_client(serve_chain(Some(RPC_TEST), false, chain), CA_A_HEX);
+fn pinned_rpc_uses_latest_safe_and_finalized_tags() {
+    for tag in [
+        EvmFinalityTag::Latest,
+        EvmFinalityTag::Safe,
+        EvmFinalityTag::Finalized,
+    ] {
+        let client = pinned_client(
+            serve_chain(Some(RPC_TEST), false, ChainView::Eligible, tag),
+            CA_A_HEX,
+        );
         #[cfg(evm_to_rgb)]
-        assert!(
-            verify_funds_in_event(&*client, &BRIDGE, &TX, &OP_ID, 1000, 50).is_err(),
-            "an unsafe or noncanonical deposit must not authorize signing"
-        );
-        assert!(
-            verify_rgb_funds_in(&*client, &BRIDGE, &TX, &MINT_OPID).is_err(),
-            "an unsafe or noncanonical mint lock must not authorize signing"
-        );
+        verify_funds_in_event(&*client, &BRIDGE, tag, &TX, &OP_ID, 1000, 50).unwrap();
+        verify_rgb_funds_in(&*client, &BRIDGE, tag, &TX, &MINT_OPID).unwrap();
+    }
+}
+
+/// The authenticated selected head and canonical block authorize the receipt.
+#[test]
+fn pinned_rpc_requires_configured_tag_and_matching_canonical_block() {
+    for tag in [
+        EvmFinalityTag::Latest,
+        EvmFinalityTag::Safe,
+        EvmFinalityTag::Finalized,
+    ] {
+        for chain in [
+            ChainView::AboveHead,
+            ChainView::MissingHead,
+            ChainView::Reorg,
+        ] {
+            let client = pinned_client(serve_chain(Some(RPC_TEST), false, chain, tag), CA_A_HEX);
+            #[cfg(evm_to_rgb)]
+            assert!(
+                verify_funds_in_event(&*client, &BRIDGE, tag, &TX, &OP_ID, 1000, 50).is_err(),
+                "a receipt above the {tag} head or outside the canonical chain must not authorize signing"
+            );
+            assert!(
+                verify_rgb_funds_in(&*client, &BRIDGE, tag, &TX, &MINT_OPID).is_err(),
+                "a receipt above the {tag} head or outside the canonical chain must not authorize a mint lock"
+            );
+        }
     }
 }
 
@@ -426,11 +479,20 @@ fn tls_failure_refuses_to_sign() {
         let client = pinned_client(port, ca_hex);
         #[cfg(evm_to_rgb)]
         assert!(
-            verify_funds_in_event(&*client, &BRIDGE, &TX, &OP_ID, 1000, 50).is_err(),
+            verify_funds_in_event(
+                &*client,
+                &BRIDGE,
+                EvmFinalityTag::Safe,
+                &TX,
+                &OP_ID,
+                1000,
+                50
+            )
+            .is_err(),
             "deposit accepted: {case}"
         );
         assert!(
-            verify_rgb_funds_in(&*client, &BRIDGE, &TX, &MINT_OPID).is_err(),
+            verify_rgb_funds_in(&*client, &BRIDGE, EvmFinalityTag::Safe, &TX, &MINT_OPID).is_err(),
             "ancestor mint lock accepted: {case}"
         );
     }
@@ -445,7 +507,7 @@ fn proxy_env_has_no_effect() {
     std::env::remove_var("NO_PROXY");
     std::env::remove_var("no_proxy");
     let client = pinned_client(serve(Some(RPC_TEST), false), CA_A_HEX);
-    verify_rgb_funds_in(&*client, &BRIDGE, &TX, &MINT_OPID).unwrap();
+    verify_rgb_funds_in(&*client, &BRIDGE, EvmFinalityTag::Safe, &TX, &MINT_OPID).unwrap();
 }
 
 /// CA A is trusted through the system store, but only CA B is pinned. If the
@@ -458,7 +520,7 @@ fn pinned_ca_is_the_only_trusted_root() {
     std::env::set_var("SSL_CERT_FILE", &path);
     let client = pinned_client(serve(Some(RPC_TEST), false), CA_B_HEX);
     assert!(
-        verify_rgb_funds_in(&*client, &BRIDGE, &TX, &MINT_OPID).is_err(),
+        verify_rgb_funds_in(&*client, &BRIDGE, EvmFinalityTag::Safe, &TX, &MINT_OPID).is_err(),
         "a leaf trusted only through the system store must be refused"
     );
 }
@@ -469,7 +531,7 @@ fn pinned_ca_is_the_only_trusted_root() {
 fn timeout_refuses_to_sign() {
     let client = pinned_client(serve_hang(), CA_A_HEX);
     let start = std::time::Instant::now();
-    let got = verify_rgb_funds_in(&*client, &BRIDGE, &TX, &MINT_OPID);
+    let got = verify_rgb_funds_in(&*client, &BRIDGE, EvmFinalityTag::Safe, &TX, &MINT_OPID);
     assert!(got.is_err(), "a hung RPC must refuse to sign");
     assert!(
         start.elapsed() < Duration::from_secs(20),
@@ -484,7 +546,7 @@ fn timeout_refuses_to_sign() {
 fn pinned_host_redirect_is_not_followed() {
     let client = pinned_client(serve_redirect(), CA_A_HEX);
     assert!(
-        verify_rgb_funds_in(&*client, &BRIDGE, &TX, &MINT_OPID).is_err(),
+        verify_rgb_funds_in(&*client, &BRIDGE, EvmFinalityTag::Safe, &TX, &MINT_OPID).is_err(),
         "a redirect from the pinned host must not be followed"
     );
 }
@@ -496,10 +558,18 @@ fn host_forged_receipt_is_refused() {
     let client = pinned_client(serve(None, false), CA_A_HEX);
     // The mint path: the deposit predicate, the recipient bind, then the BFA
     // mint lock, all read through the same client.
-    let got = verify_funds_in_event(&*client, &BRIDGE, &TX, &OP_ID, 1000, 50)
-        .and_then(|v| parse_authorized_recipient(&v.destination_address))
-        .and_then(|r| assert_recipient_authorized(&[SEAL.into()], &r))
-        .and_then(|()| verify_rgb_funds_in(&*client, &BRIDGE, &TX, &MINT_OPID));
+    let got = verify_funds_in_event(
+        &*client,
+        &BRIDGE,
+        EvmFinalityTag::Safe,
+        &TX,
+        &OP_ID,
+        1000,
+        50,
+    )
+    .and_then(|v| parse_authorized_recipient(&v.destination_address))
+    .and_then(|r| assert_recipient_authorized(&[SEAL.into()], &r))
+    .and_then(|()| verify_rgb_funds_in(&*client, &BRIDGE, EvmFinalityTag::Safe, &TX, &MINT_OPID));
     assert!(
         got.is_err(),
         "the enclave accepted a FundsIn receipt that the host forged over plaintext: {got:?}"

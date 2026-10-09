@@ -78,8 +78,8 @@ the user. The mint signer signs the Bitcoin transaction that does the mint.
 Before it signs, the mint signer:
 
 1. Gets the EVM deposit receipt itself. The receipt must be a success, be at
-   or below the RPC's `safe` head, and have the canonical block hash at its
-   height.
+   or below the RPC head selected by `EVM_FINALITY_TAG` (default `safe`), and
+   have the canonical block hash at its height.
 2. Finds exactly one `BridgeFundsIn` event from the pinned `FUNDS_IN_CONTRACT`.
    The `operationId`, amount and commission must match the request.
 3. Validates the RGB consignment (full RGB consensus). The asset must be the
@@ -537,16 +537,27 @@ Data sources and transport:
 | `BITCOIN_NETWORK` | `bitcoin` | `bitcoin`, `testnet`, `signet`, `regtest`. Selects the SPV checkpoint, coin types and xpub prefix. Baked into the image. |
 | `ESPLORA_VSOCK_PORT` | `8001` | Host vsock-proxy port for the Electrum resolver. |
 | `EVM_RPC_VSOCK_PORT` | `8002` | Host vsock-proxy port for the EVM RPC. |
+| `EVM_FINALITY_TAG` | `safe` | Attested receipt acceptance tag: `latest`, `safe`, or `finalized`. Invalid values reject startup. |
 | `ENCLAVE_LISTEN_ADDR` | `127.0.0.1:5000` | TCP listen address, non-vsock builds only. |
 | `RUST_LOG` | unset | Log filter. |
 
-EVM deposit receipts must be at or below `eth_getBlockByNumber("safe", false)`
-and match the canonical block hash at their height. On Arbitrum, `safe` requires
-the batch to be posted and covered by L1's safe head, with residual L1 reorg risk.
-See
+EVM deposit receipts must be at or below the head returned by
+`eth_getBlockByNumber(EVM_FINALITY_TAG, false)` and match the canonical block
+hash at their height. The enclave revalidates the selected head snapshot to
+detect a reorg during verification.
+
+| Tag | Arbitrum acceptance |
+|-----|---------------------|
+| `latest` | Current L2 tip; lowest latency, with sequencer and L1 reorg risk. |
+| `safe` | Batch posted and covered by L1's safe head, with residual L1 reorg risk. Default. |
+| `finalized` | Batch covered by L1's finalized head. |
+
+Values must use the exact lowercase spelling. See
 [Arbitrum finality guidance](https://docs.arbitrum.io/how-arbitrum-works/reference/finality-and-reorgs).
-The enclave refuses signing until the deposit is safe and whenever the required
-RPC data is unavailable or invalid. Retry an unsafe deposit after it becomes safe.
+The enclave refuses signing until the deposit meets the selected tag and
+whenever required RPC data is unavailable or invalid. Retry a pending deposit
+after the selected head covers it. Production verification requires
+`--expect-evm-finality-tag` to match the approved image value.
 
 Chain endpoints and KMS values, set once at launch with `cli set-endpoints`
 (`SetEndpoints`), never in the image. The attested policy commits the Electrum
@@ -701,7 +712,8 @@ Re-syncing changes PCR0. Procedure in
   authenticates the configured RPC hostname against the pinned CA. The host
   relay cannot alter authenticated responses without detection. The enclave
   checks successful receipts, unique expected events from the pinned contract,
-  operation IDs, amounts, coverage by the `safe` head and canonical block hashes.
+  operation IDs, amounts, coverage by the selected finality head and canonical
+  block hashes.
   These checks do not prove EVM consensus: an approved provider can return a
   self-consistent false deposit history. Trust in the provider's data is an
   explicit design assumption. Verifiers must compare the attested host and CA
@@ -715,9 +727,8 @@ Re-syncing changes PCR0. Procedure in
 - **Fail closed.** Missing feature, missing pin, missing receipt, missing
   proof, zero inputs signed: refuse, never sign with less verification.
 - **Limits.** Bitcoin confirmation depth, freshness, reorg/retention caps and
-  connection limits are compiled in. EVM receipts always require `safe`.
-  Request-size caps are read from environment; image-baked values are measured
-  with the EIF.
+  connection limits are compiled in. `EVM_FINALITY_TAG` and request-size caps
+  are read from environment; image-baked values are measured with the EIF.
 - **Key custody.** Seed and keys in `SecretBox`, zeroized on drop.
   `#![deny(unsafe_code)]`. With `kms-persistence`, seeds persist as KMS ciphertext
   in S3. The parent receives no plaintext seed. KMS handles the seed during

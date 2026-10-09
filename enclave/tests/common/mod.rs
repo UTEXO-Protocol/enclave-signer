@@ -250,7 +250,10 @@ pub mod deposit_stub {
             }))
         }
 
-        fn get_safe_block(&self) -> Result<Option<BlockData>> {
+        fn get_block_by_tag(
+            &self,
+            _tag: attestation_verify::EvmFinalityTag,
+        ) -> Result<Option<BlockData>> {
             self.get_block_by_number(BLOCK)
         }
 

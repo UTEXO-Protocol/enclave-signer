@@ -15,7 +15,7 @@ flowchart TB
         PFr[framing.rs<br/>u32 LE len + protobuf]
         PALib[attest_verify.rs<br/>library half of CLI —<br/>rebuilds expected policy + bundle]
         PCli[bin/cli.rs<br/>utexo-bridge-parent-cli]
-        AVCli[attest-verify CLI<br/>--pcr0/1/2, --expect-signer-role,<br/>--expect-vanilla-psbt,<br/>--expect-evm-source tls, raw or disabled,<br/>--expect-electrum-host,<br/>--expect-evm-rpc-host, --expect-evm-rpc-ca-sha256]
+        AVCli[attest-verify CLI<br/>--pcr0/1/2, --expect-signer-role,<br/>--expect-vanilla-psbt,<br/>--expect-evm-source tls, raw or disabled,<br/>--expect-evm-finality-tag latest, safe or finalized,<br/>--expect-electrum-host,<br/>--expect-evm-rpc-host, --expect-evm-rpc-ca-sha256]
         PMisc[config.rs / error.rs / health.rs<br/>header_sync.rs - Electrum headers to SubmitHeaders<br/>seed_persistence.rs - KMS custody broker, mint only]
     end
 

@@ -4,8 +4,8 @@ use std::collections::HashMap;
 
 use anyhow::{anyhow, bail, Context, Result};
 use attestation_verify::{
-    policy_commitment, AttestationMode, AttestedPolicy, BtcDataSource, EvmDataSource, EvmRpcTlsPin,
-    ExpectedPcrs, KmsPin, SignerRole,
+    policy_commitment, AttestationMode, AttestedPolicy, BtcDataSource, EvmDataSource,
+    EvmFinalityTag, EvmRpcTlsPin, ExpectedPcrs, KmsPin, SignerRole,
 };
 use sha2::{Digest, Sha256};
 
@@ -36,6 +36,14 @@ pub fn expected_policy(
                 .map_err(|_| anyhow!("{key} {v:?} is not a number"))
         })
     }
+    // Match the enclave: only an absent tag defaults; empty/invalid values refuse.
+    let evm_finality_tag =
+        env.get("EVM_FINALITY_TAG")
+            .map_or(Ok(EvmFinalityTag::default()), |value| {
+                value
+                    .parse()
+                    .map_err(|e: String| anyhow!("EVM_FINALITY_TAG: {e}"))
+            })?;
     let signs_gas_tx = role != SignerRole::Mint;
     let gas = |key: &str| optional(key).filter(|_| signs_gas_tx);
 
@@ -78,6 +86,7 @@ pub fn expected_policy(
         )?,
         rgb_asset_id: required("RGB_ASSET_ID")?.to_string(),
         funds_in_contract: address20("FUNDS_IN_CONTRACT", required("FUNDS_IN_CONTRACT")?)?,
+        evm_finality_tag,
         electrum_host,
         evm_rpc_tls,
         gas_tx_allowed_to: gas("GAS_TX_ALLOWED_TO")
@@ -194,6 +203,7 @@ pub fn fields(policy: &AttestedPolicy) -> Vec<(&'static str, String)> {
         bridge_contract,
         rgb_asset_id,
         funds_in_contract,
+        evm_finality_tag,
         electrum_host,
         evm_rpc_tls,
         gas_tx_allowed_to,
@@ -223,6 +233,7 @@ pub fn fields(policy: &AttestedPolicy) -> Vec<(&'static str, String)> {
         ("bridge_contract", hex(bridge_contract)),
         ("rgb_asset_id", rgb_asset_id.clone()),
         ("funds_in_contract", hex(funds_in_contract)),
+        ("evm_finality_tag", evm_finality_tag.to_string()),
         ("electrum_host", electrum_host.clone()),
         ("evm_rpc_tls", presence(evm_rpc_tls.is_some())),
     ];
@@ -305,6 +316,41 @@ mod tests {
 
     fn expected() -> AttestedPolicy {
         expected_policy(SignerRole::Combined, &image_env(), &endpoints()).unwrap()
+    }
+
+    #[test]
+    fn image_finality_tag_defaults_only_when_absent() {
+        assert!(matches!(
+            expected(),
+            AttestedPolicy::Production {
+                evm_finality_tag: EvmFinalityTag::Safe,
+                ..
+            }
+        ));
+        for value in [
+            "latest",
+            "safe",
+            "finalized",
+            "",
+            "SAFE",
+            " safe",
+            "safe ",
+            "pending",
+        ] {
+            let mut env: Vec<String> = serde_json::from_str(&image_env()).unwrap();
+            env.push(format!("EVM_FINALITY_TAG={value}"));
+            let result = expected_policy(
+                SignerRole::Combined,
+                &serde_json::to_string(&env).unwrap(),
+                &endpoints(),
+            );
+            match value.parse::<EvmFinalityTag>() {
+                Ok(expected_tag) => assert!(matches!(result.unwrap(), AttestedPolicy::Production {
+                    evm_finality_tag, ..
+                } if evm_finality_tag == expected_tag)),
+                Err(_) => assert!(result.unwrap_err().to_string().contains("EVM_FINALITY_TAG")),
+            }
+        }
     }
 
     /// The policy-only answer of an enclave that attests `policy`.
@@ -398,6 +444,16 @@ mod tests {
             set!(evm_source, EvmDataSource::RawRpc),
             "evm_source mismatch: expected PinnedTlsRpc, attested RawRpc",
         );
+    }
+
+    #[test]
+    fn evm_finality_tag_mismatch_aborts() {
+        for tag in [EvmFinalityTag::Latest, EvmFinalityTag::Finalized] {
+            assert_mismatch(
+                set!(evm_finality_tag, tag),
+                &format!("evm_finality_tag mismatch: expected safe, attested {tag}"),
+            );
+        }
     }
 
     #[test]

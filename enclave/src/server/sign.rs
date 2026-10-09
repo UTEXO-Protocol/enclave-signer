@@ -441,6 +441,7 @@ fn verify_funds_in_deposit(
         // The bridge entry contract emits FundsIn. It can differ from the
         // MultisigProxy in EVM_PROXY_CONTRACT_ADDRESS (see config.rs).
         &ctx.bridge_config.funds_in_contract,
+        ctx.bridge_config.evm_finality_tag,
         &tx_hash,
         &source.funds_in_operation_id,
         amount,
@@ -637,7 +638,10 @@ mod early_bridge_checks {
             Ok(None)
         }
 
-        fn get_safe_block(&self) -> Result<Option<BlockData>> {
+        fn get_block_by_tag(
+            &self,
+            _tag: attestation_verify::EvmFinalityTag,
+        ) -> Result<Option<BlockData>> {
             Ok(Some(BlockData {
                 number: 100,
                 hash: [0x42; 32],
@@ -766,7 +770,10 @@ mod key_not_ready {
             Ok(None)
         }
 
-        fn get_safe_block(&self) -> Result<Option<BlockData>> {
+        fn get_block_by_tag(
+            &self,
+            _tag: attestation_verify::EvmFinalityTag,
+        ) -> Result<Option<BlockData>> {
             self.0.fetch_add(1, Ordering::SeqCst);
             Ok(None)
         }
