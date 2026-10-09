@@ -217,8 +217,16 @@ request per connection. Frame cap 24 MiB. Schema:
 The "Signer" column is for the mint/burn images. Other builds (combined,
 CCD) keep both directions where their features allow it.
 
-Error codes in `ErrorResponse`: `3` cross-check or SPV failure (the parent
-maps it to `FAILED_PRECONDITION`), `2` not ready, `1` all other errors.
+Error codes in `ErrorResponse`, with the gRPC status the parent gives each:
+
+- `1` all other errors (`INTERNAL`).
+- `2` not ready (`UNAVAILABLE`).
+- `3` cross-check or SPV failure, or a `GetClone` donor without keys
+  (`FAILED_PRECONDITION`).
+- `GetClone` only: `4` invalid input (`INVALID_ARGUMENT`), `5` refused
+  credential, attestation, PCR or pubkey (`PERMISSION_DENIED`), `6` replayed
+  attestation nonce (`ALREADY_EXISTS`), `7` seed-export hard cap
+  (`RESOURCE_EXHAUSTED`).
 
 ## Prerequisites
 
