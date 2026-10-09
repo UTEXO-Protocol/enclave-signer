@@ -16,10 +16,10 @@
 /// Version tag at the start of every policy commitment. A verifier rejects a
 /// different policy version instead of accepting different security semantics.
 /// Bump it on every layout change or change to a fixed policy requirement.
-/// V9 removes V8's confirmation-count field and requires every EVM FundsIn
-/// receipt to be at or below the RPC `safe` head and match the canonical block
-/// hash. This requirement is fixed, so it has no configurable field. The version prevents
-/// a V8 depth-only policy from being accepted as the stronger V9 policy.
+/// V9 encodes the selected EVM RPC finality tag.
+/// Every accepted FundsIn receipt must belong to the canonical chain at or
+/// below that tagged head. The selected tag is attested so verifiers can
+/// reject a weaker policy, including `latest` when they require `safe`.
 pub const POLICY_COMMITMENT_V9: u8 = 9;
 
 /// Bridge directions that the image signs. It comes from build features, so
@@ -55,6 +55,48 @@ pub enum EvmDataSource {
     /// ciphertext. The pinned CA and host ([`EvmRpcTlsPin`]) authenticate the
     /// endpoint. The chain state is not verified.
     PinnedTlsRpc = 3,
+}
+
+/// RPC head that must cover an EVM FundsIn receipt. The discriminants are
+/// stable values in the attested policy, independent of the tag's spelling.
+#[repr(u8)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum EvmFinalityTag {
+    Latest = 0,
+    #[default]
+    Safe = 1,
+    Finalized = 2,
+}
+
+impl EvmFinalityTag {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Latest => "latest",
+            Self::Safe => "safe",
+            Self::Finalized => "finalized",
+        }
+    }
+}
+
+impl std::fmt::Display for EvmFinalityTag {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl std::str::FromStr for EvmFinalityTag {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "latest" => Ok(Self::Latest),
+            "safe" => Ok(Self::Safe),
+            "finalized" => Ok(Self::Finalized),
+            _ => Err(format!(
+                "invalid EVM finality tag {value:?}; expected latest, safe or finalized"
+            )),
+        }
+    }
 }
 
 /// TLS pin of the EVM RPC endpoint. `host` is the name the certificate must
@@ -120,6 +162,8 @@ pub enum AttestedPolicy {
         rgb_asset_id: String,
         /// Contract whose FundsIn events can authorize bridge signing.
         funds_in_contract: [u8; 20],
+        /// Required RPC head tag, selected at boot (default `safe`).
+        evm_finality_tag: EvmFinalityTag,
         /// Host of the Electrum server the operator set at launch.
         electrum_host: String,
         /// The EVM RPC TLS pin. `Some` only for [`EvmDataSource::PinnedTlsRpc`].
@@ -157,6 +201,7 @@ impl AttestedPolicy {
     ///              [evm_source u8]
     ///              [btc_source u8][chain_id u64 BE][bridge_contract 20]
     ///              [len(asset) u32 BE][asset bytes][funds_in_contract 20]
+    ///              [evm_finality_tag u8: 0 latest | 1 safe | 2 finalized]
     ///              [len(electrum_host) u32 BE][electrum_host bytes]
     ///              [evm_rpc_tls: 0x00 | 0x01 ++ len(host) u32 BE ++ host
     ///               ++ ca_sha256 32]
@@ -184,6 +229,7 @@ impl AttestedPolicy {
                 bridge_contract,
                 rgb_asset_id,
                 funds_in_contract,
+                evm_finality_tag,
                 electrum_host,
                 evm_rpc_tls,
                 gas_tx_allowed_to,
@@ -205,6 +251,7 @@ impl AttestedPolicy {
                 out.extend_from_slice(&(rgb_asset_id.len() as u32).to_be_bytes());
                 out.extend_from_slice(rgb_asset_id.as_bytes());
                 out.extend_from_slice(funds_in_contract);
+                out.push(*evm_finality_tag as u8);
                 out.extend_from_slice(&(electrum_host.len() as u32).to_be_bytes());
                 out.extend_from_slice(electrum_host.as_bytes());
                 match evm_rpc_tls {
@@ -294,6 +341,12 @@ impl AttestedPolicy {
                 let bridge_contract = r.array()?;
                 let rgb_asset_id = r.string()?;
                 let funds_in_contract = r.array()?;
+                let evm_finality_tag = match r.u8()? {
+                    0 => EvmFinalityTag::Latest,
+                    1 => EvmFinalityTag::Safe,
+                    2 => EvmFinalityTag::Finalized,
+                    _ => return Err(PolicyDecodeError("unknown EVM finality tag")),
+                };
                 let electrum_host = r.string()?;
                 let evm_rpc_tls = r
                     .flag()?
@@ -339,6 +392,7 @@ impl AttestedPolicy {
                     bridge_contract,
                     rgb_asset_id,
                     funds_in_contract,
+                    evm_finality_tag,
                     electrum_host,
                     evm_rpc_tls,
                     gas_tx_allowed_to,
@@ -436,6 +490,7 @@ mod tests {
             bridge_contract: [contract; 20],
             rgb_asset_id: asset.into(),
             funds_in_contract: [0x44; 20],
+            evm_finality_tag: EvmFinalityTag::Safe,
             electrum_host: "electrum.test".into(),
             evm_rpc_tls: None,
             gas_tx_allowed_to: [0xAA; 20],
@@ -450,6 +505,63 @@ mod tests {
 
     fn base() -> AttestedPolicy {
         prod(false, EvmDataSource::RawRpc, 1, 0x11, "rgb:asset")
+    }
+
+    #[test]
+    fn finality_tags_are_strict_and_default_to_safe() {
+        assert_eq!(EvmFinalityTag::default(), EvmFinalityTag::Safe);
+        for (text, tag, wire) in [
+            ("latest", EvmFinalityTag::Latest, 0),
+            ("safe", EvmFinalityTag::Safe, 1),
+            ("finalized", EvmFinalityTag::Finalized, 2),
+        ] {
+            assert_eq!(text.parse::<EvmFinalityTag>(), Ok(tag));
+            assert_eq!(tag.as_str(), text);
+            assert_eq!(tag.to_string(), text);
+            assert_eq!(tag as u8, wire);
+        }
+        for invalid in ["", "SAFE", "Safe", " safe", "safe ", "pending", "12"] {
+            assert!(invalid.parse::<EvmFinalityTag>().is_err(), "{invalid:?}");
+        }
+    }
+
+    #[test]
+    fn finality_tag_is_committed_and_round_trips() {
+        let mut encodings = Vec::new();
+        for tag in [
+            EvmFinalityTag::Latest,
+            EvmFinalityTag::Safe,
+            EvmFinalityTag::Finalized,
+        ] {
+            let mut policy = base();
+            if let AttestedPolicy::Production {
+                evm_finality_tag, ..
+            } = &mut policy
+            {
+                *evm_finality_tag = tag;
+            }
+            let bytes = policy.to_bytes();
+            assert_eq!(AttestedPolicy::from_bytes(&bytes), Ok(policy));
+            encodings.push(bytes);
+        }
+        assert_ne!(encodings[0], encodings[1]);
+        assert_ne!(encodings[0], encodings[2]);
+        assert_ne!(encodings[1], encodings[2]);
+    }
+
+    #[test]
+    fn unknown_finality_tag_refuses_to_decode() {
+        let mut bytes = base().to_bytes();
+        // The tag immediately follows the fixed FundsIn emitter in this fixture.
+        let tag_at = bytes.windows(20).position(|b| b == [0x44; 20]).unwrap() + 20;
+        assert_eq!(bytes[tag_at], EvmFinalityTag::Safe as u8);
+        for invalid in [3, 255] {
+            bytes[tag_at] = invalid;
+            assert_eq!(
+                AttestedPolicy::from_bytes(&bytes),
+                Err(PolicyDecodeError("unknown EVM finality tag"))
+            );
+        }
     }
 
     /// `base()` with the gas-tx fields overridden, for the gas tests.
@@ -471,6 +583,7 @@ mod tests {
                 bridge_contract,
                 rgb_asset_id,
                 funds_in_contract,
+                evm_finality_tag,
                 electrum_host,
                 evm_rpc_tls,
                 token_contract,
@@ -486,6 +599,7 @@ mod tests {
                 bridge_contract,
                 rgb_asset_id,
                 funds_in_contract,
+                evm_finality_tag,
                 electrum_host,
                 evm_rpc_tls,
                 gas_tx_allowed_to: to,

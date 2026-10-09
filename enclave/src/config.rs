@@ -12,6 +12,7 @@
 //! the bundle commits empty values.
 
 use crate::error::{EnclaveError, Result};
+use attestation_verify::EvmFinalityTag;
 
 /// Default consignment size cap (`MAX_CONSIGNMENT_BYTES`). Defense-in-depth DoS
 /// bound. The wire frame ([`crate::framing::MAX_MESSAGE_SIZE`]) also caps it.
@@ -93,6 +94,8 @@ pub struct BridgeConfig {
     /// `bridge_contract`. The bridge entry contract is not the MultisigProxy in
     /// this deployment, so set it explicitly.
     pub funds_in_contract: [u8; 20],
+    /// RPC block tag required for deposit inclusion (`EVM_FINALITY_TAG`). Attested.
+    pub evm_finality_tag: EvmFinalityTag,
     /// The ERC-20 that the Bridge releases (`TOKEN_CONTRACT`, `Bridge.TOKEN`).
     /// An input of the `burnId` preimage
     /// (`networks::evm::validation::validate_burn_id`). Zero = unset: dev skips
@@ -114,6 +117,16 @@ pub struct BridgeConfig {
 
 /// Env var selecting [`BtcRelayMode`].
 pub const BTC_RELAY_MODE_ENV: &str = "BTC_RELAY_MODE";
+
+fn parse_evm_finality_tag(
+    value: std::result::Result<String, std::env::VarError>,
+) -> std::result::Result<EvmFinalityTag, String> {
+    match value {
+        Ok(value) => value.parse(),
+        Err(std::env::VarError::NotPresent) => Ok(EvmFinalityTag::Safe),
+        Err(std::env::VarError::NotUnicode(_)) => Err("value must be valid Unicode".into()),
+    }
+}
 
 /// How the `fundsOut` finality proof's BtcRelay commitment words are checked.
 /// See `networks::evm::crosscheck::verify_btc_relay_agreement`.
@@ -164,6 +177,7 @@ impl Default for BridgeConfig {
             rgb_max_unowned_sats: 0,
             btc_max_unowned_sats: 0,
             funds_in_contract: [0u8; 20],
+            evm_finality_tag: EvmFinalityTag::Safe,
             token_contract: [0u8; 20],
             btc_relay_mode: BtcRelayMode::Required,
             max_consignment_bytes: DEFAULT_MAX_CONSIGNMENT_BYTES,
@@ -174,7 +188,7 @@ impl Default for BridgeConfig {
 }
 
 impl BridgeConfig {
-    /// Load from env. A missing or invalid field gives its zero or empty value.
+    /// Load from env. An invalid `EVM_FINALITY_TAG` refuses startup.
     pub fn from_env() -> Self {
         let chain_id = std::env::var("EVM_CHAIN_ID")
             .ok()
@@ -256,6 +270,9 @@ impl BridgeConfig {
             .and_then(|s| parse_eth_address(&s).ok())
             .unwrap_or(bridge_contract);
 
+        let evm_finality_tag = parse_evm_finality_tag(std::env::var("EVM_FINALITY_TAG"))
+            .expect("EVM_FINALITY_TAG must be latest, safe, or finalized");
+
         let token_contract = std::env::var("TOKEN_CONTRACT")
             .ok()
             .and_then(|s| parse_eth_address(&s).ok())
@@ -300,6 +317,7 @@ impl BridgeConfig {
             rgb_max_unowned_sats,
             btc_max_unowned_sats,
             funds_in_contract,
+            evm_finality_tag,
             token_contract,
             btc_relay_mode,
             max_consignment_bytes,
@@ -603,6 +621,28 @@ fn parse_host(name: &str, host: &str) -> std::result::Result<String, String> {
 mod tests {
     use super::*;
     use crate::proto::SetEndpointsRequest;
+
+    #[test]
+    fn finality_tag_env_defaults_only_when_absent() {
+        assert_eq!(
+            parse_evm_finality_tag(Err(std::env::VarError::NotPresent)).unwrap(),
+            EvmFinalityTag::Safe
+        );
+        for (value, tag) in [
+            ("latest", EvmFinalityTag::Latest),
+            ("safe", EvmFinalityTag::Safe),
+            ("finalized", EvmFinalityTag::Finalized),
+        ] {
+            assert_eq!(parse_evm_finality_tag(Ok(value.into())).unwrap(), tag);
+        }
+        for value in ["", "finilized", "pending", "Safe", " safe "] {
+            assert!(parse_evm_finality_tag(Ok(value.into())).is_err());
+        }
+        assert!(parse_evm_finality_tag(Err(std::env::VarError::NotUnicode(
+            std::ffi::OsString::new()
+        )))
+        .is_err());
+    }
 
     #[test]
     fn parse_eth_address_with_prefix() {

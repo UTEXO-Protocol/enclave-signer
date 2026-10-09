@@ -103,8 +103,8 @@ ENV EVM_CHAIN_ID=42161 \
 # commits to the verification policy. The enclave reaches the EVM RPC only
 # through the vsock forwarder (host runs
 # `vsock-proxy <EVM_RPC_VSOCK_PORT=8002> <rpc host> <tls port>`).
-# Receipts must be covered by the RPC's
-# safe head and match the canonical block hash; missing safe support fails closed.
+# Receipts must be covered by EVM_FINALITY_TAG (latest, safe, finalized) and
+# match the canonical block hash; missing tag support fails closed.
 # FUNDS_IN_CONTRACT is set EXPLICITLY to the bridge *entry* contract (the FundsIn
 # event emitter). It MUST be explicit here because it differs from
 # EVM_PROXY_CONTRACT_ADDRESS (the MultisigProxy) - leaving it unset would fall
@@ -127,7 +127,8 @@ ENV EVM_CHAIN_ID=42161 \
 # The operator sets the Electrum URL and EVM RPC host, CA, and TLS port at launch.
 # The policy commits the hosts and CA hash, but not ports or the Electrum scheme.
 # See docs/tee-spec.md.
-ENV FUNDS_IN_CONTRACT=0x6711f1a319B37847fa0234181C34D883774c4951 \
+ENV EVM_FINALITY_TAG=safe \
+    FUNDS_IN_CONTRACT=0x6711f1a319B37847fa0234181C34D883774c4951 \
     TOKEN_CONTRACT=0xFd086bC7CD5C481DCC9C85ebE478A1C0b69FCbb9 \
     GAS_TX_ALLOWED_TO=0x6711f1a319B37847fa0234181C34D883774c4951 \
     BTC_MAX_TOTAL_SATS=1000000

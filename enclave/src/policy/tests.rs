@@ -49,6 +49,39 @@ fn release_bridge_with_full_pins_is_production() {
     );
 }
 
+#[test]
+fn configured_finality_tag_is_attested() {
+    let commitments: Vec<_> = [
+        EvmFinalityTag::Latest,
+        EvmFinalityTag::Safe,
+        EvmFinalityTag::Finalized,
+    ]
+    .into_iter()
+    .map(|tag| {
+        let config = BridgeConfig {
+            evm_finality_tag: tag,
+            ..pinned_config()
+        };
+        let policy = SecurityPolicy::resolve(
+            &release_bridge_ctx(),
+            &config,
+            EvmDataSource::PinnedTlsRpc,
+            a_tls_pin(),
+            "e.test",
+        );
+        assert!(policy.assert_valid_for_build(&release_bridge_ctx()).is_ok());
+        assert!(matches!(
+            policy.attested(),
+            AttestedPolicy::Production { evm_finality_tag, .. } if evm_finality_tag == tag
+        ));
+        policy.commitment_bytes()
+    })
+    .collect();
+    assert_ne!(commitments[0], commitments[1]);
+    assert_ne!(commitments[0], commitments[2]);
+    assert_ne!(commitments[1], commitments[2]);
+}
+
 /// The attested role reads the features, so compare it with the direction
 /// cfgs the gates read. Catches drift between the two.
 #[test]

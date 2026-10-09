@@ -413,8 +413,9 @@ impl EvmReceiptProvider for DepositChain {
         Ok((*tx_hash == DEPOSIT_TX).then(|| self.0.clone()))
     }
 
-    fn get_safe_block(
+    fn get_block_by_tag(
         &self,
+        _tag: attestation_verify::EvmFinalityTag,
     ) -> utexo_bridge_enclave::error::Result<
         Option<utexo_bridge_enclave::networks::evm::events::BlockData>,
     > {

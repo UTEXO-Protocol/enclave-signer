@@ -5,7 +5,7 @@
 //! not trust the listener `event_valid` / `event_finalized` flags. It
 //! gets the deposit receipt over an in-enclave EVM RPC. It checks that the
 //! pinned bridge contract emitted a `BridgeFundsIn` log with the claimed
-//! amount, in the canonical chain at or below the RPC's `safe` block.
+//! amount, in the canonical chain at or below the configured RPC block tag.
 //! Each predicate fails closed.
 //!
 //! Trust boundary: the untrusted host relays the RPC over vsock, but TLS ends
@@ -21,6 +21,7 @@
 //! against the mint transition. Amounts must fit the proto's `u64` fields.
 //! Larger values fail (see [`extract_uint256_as_u64`]).
 
+use attestation_verify::EvmFinalityTag;
 use sha3::{Digest, Keccak256};
 
 use crate::error::{EnclaveError, Result};
@@ -117,7 +118,7 @@ pub struct LogEntry {
 pub struct ReceiptData {
     /// Post-Byzantium receipt status: `true` == success (`0x1`).
     pub status_success: bool,
-    /// Block that contains the tx (for safe inclusion).
+    /// Block that contains the tx (for finality inclusion).
     pub block_number: u64,
     /// Hash of the block containing the tx, checked against the canonical chain.
     pub block_hash: [u8; 32],
@@ -136,8 +137,8 @@ pub struct BlockData {
 pub trait EvmReceiptProvider {
     /// `eth_getTransactionReceipt`. `Ok(None)` == tx not mined / not found.
     fn get_transaction_receipt(&self, tx_hash: &[u8; 32]) -> Result<Option<ReceiptData>>;
-    /// `eth_getBlockByNumber("safe", false)`. No latest-head fallback.
-    fn get_safe_block(&self) -> Result<Option<BlockData>>;
+    /// `eth_getBlockByNumber(tag, false)` for the configured finality tag.
+    fn get_block_by_tag(&self, tag: EvmFinalityTag) -> Result<Option<BlockData>>;
     /// `eth_getBlockByNumber(number, false)` from the canonical chain.
     fn get_block_by_number(&self, number: u64) -> Result<Option<BlockData>>;
 }
@@ -168,10 +169,10 @@ pub struct VerifiedFundsIn {
 /// Verifies the `FundsIn` deposit for an EVM -> RGB `Sign`.
 ///
 /// Fails closed on: a missing or failed receipt, no matching log, an ambiguous
-/// match, a field mismatch, an on-chain value above `u64`, an unsafe or
-/// noncanonical receipt block. The caller then refuses to sign.
+/// match, a field mismatch, an on-chain value above `u64`, a receipt above the configured
+/// finality head, or a noncanonical receipt block. The caller then refuses to sign.
 ///
-/// `bridge_contract` comes from PINNED config, never the request.
+/// `bridge_contract` and `finality_tag` come from PINNED config, never the request.
 /// `expected_*` are the listener request fields that this function
 /// checks against the chain.
 ///
@@ -182,6 +183,7 @@ pub struct VerifiedFundsIn {
 pub fn verify_funds_in_event(
     provider: &dyn EvmReceiptProvider,
     bridge_contract: &[u8; 20],
+    finality_tag: EvmFinalityTag,
     evm_tx_hash: &[u8; 32],
     expected_operation_id: &[u8],
     expected_gross_amount: u64,
@@ -194,9 +196,9 @@ pub fn verify_funds_in_event(
             expected_operation_id.len()
         )));
     }
-    // Snapshot safe before reading the receipt, so a receipt from an earlier
-    // unsafe fork cannot become eligible just because safe advances afterward.
-    let safe = fetch_safe_block(provider)?;
+    // Snapshot the configured head before reading the receipt, so an advancing
+    // head cannot make an earlier receipt from another fork eligible.
+    let head = fetch_finality_block(provider, finality_tag)?;
     // 1/2. The receipt must exist and the deposit tx must have succeeded.
     let receipt = fetch_successful_receipt(provider, evm_tx_hash)?;
 
@@ -256,9 +258,9 @@ pub fn verify_funds_in_event(
         );
     }
 
-    // 8. Safe canonical inclusion, with a second safe snapshot after the lookups.
-    check_safe_inclusion(provider, &safe, &receipt)?;
-    check_safe_snapshot(provider, &safe)?;
+    // 8. Canonical inclusion, with the same tagged head rechecked afterward.
+    check_finality_inclusion(provider, finality_tag, &head, &receipt)?;
+    check_finality_snapshot(provider, finality_tag, &head)?;
 
     tracing::info!(
         tx = %hex::encode(evm_tx_hash),
@@ -435,27 +437,31 @@ fn select_unique_log<'a>(
     })
 }
 
-/// Read safe before fetching a receipt. Missing/unsupported safe fails closed.
-fn fetch_safe_block(provider: &dyn EvmReceiptProvider) -> Result<BlockData> {
-    provider.get_safe_block()?.ok_or_else(|| {
-        EnclaveError::CrossCheck(
-            "FundsIn safe block unavailable from RPC - refusing to sign".into(),
-        )
+/// Read the configured head before fetching a receipt. Missing tags fail closed.
+fn fetch_finality_block(
+    provider: &dyn EvmReceiptProvider,
+    tag: EvmFinalityTag,
+) -> Result<BlockData> {
+    provider.get_block_by_tag(tag)?.ok_or_else(|| {
+        EnclaveError::CrossCheck(format!(
+            "FundsIn {tag} block unavailable from RPC - refusing to sign"
+        ))
     })
 }
 
-/// Require canonical inclusion at or below the previously observed safe head.
-/// The canonical lookup follows the safe snapshot and receipt fetch, detecting
+/// Require canonical inclusion at or below the previously observed tagged head.
+/// The canonical lookup follows the head snapshot and receipt fetch, detecting
 /// stale receipts for an orphaned block. The pinned RPC remains trusted.
-fn check_safe_inclusion(
+fn check_finality_inclusion(
     provider: &dyn EvmReceiptProvider,
-    safe: &BlockData,
+    tag: EvmFinalityTag,
+    head: &BlockData,
     receipt: &ReceiptData,
 ) -> Result<()> {
-    if receipt.block_number > safe.number {
+    if receipt.block_number > head.number {
         return Err(EnclaveError::CrossCheck(format!(
-            "FundsIn not safe: receipt block {} is above RPC safe block {} - refusing to sign",
-            receipt.block_number, safe.number
+            "FundsIn receipt block {} is above RPC {tag} block {} - refusing to sign",
+            receipt.block_number, head.number
         )));
     }
     let canonical = provider
@@ -480,24 +486,27 @@ fn check_safe_inclusion(
             receipt.block_number
         )));
     }
-    if receipt.block_number == safe.number && receipt.block_hash != safe.hash {
-        return Err(EnclaveError::CrossCheck(
-            "FundsIn receipt block hash does not match safe block snapshot (reorg?) - \
+    if receipt.block_number == head.number && receipt.block_hash != head.hash {
+        return Err(EnclaveError::CrossCheck(format!(
+            "FundsIn receipt block hash does not match {tag} block snapshot (reorg?) - \
              refusing to sign"
-                .into(),
-        ));
+        )));
     }
     Ok(())
 }
 
-/// Recheck safe after every other lookup. A reorg must not combine an old
-/// safe height with a receipt from a newly unsafe fork. If safe advanced,
-/// require the original safe block to remain in the canonical chain.
-fn check_safe_snapshot(provider: &dyn EvmReceiptProvider, initial: &BlockData) -> Result<()> {
-    let current = fetch_safe_block(provider)?;
+/// Recheck the same tag after the receipt and canonical lookups. A reorg must
+/// not combine an old head height with a receipt from another fork. If the
+/// tagged head advanced, require the original block to remain canonical.
+fn check_finality_snapshot(
+    provider: &dyn EvmReceiptProvider,
+    tag: EvmFinalityTag,
+    initial: &BlockData,
+) -> Result<()> {
+    let current = fetch_finality_block(provider, tag)?;
     if current.number < initial.number {
         return Err(EnclaveError::CrossCheck(format!(
-            "FundsIn safe block regressed from {} to {} during verification (reorg?) - \
+            "FundsIn {tag} block regressed from {} to {} during verification (reorg?) - \
              refusing to sign",
             initial.number, current.number
         )));
@@ -509,16 +518,15 @@ fn check_safe_snapshot(provider: &dyn EvmReceiptProvider, initial: &BlockData) -
             .get_block_by_number(initial.number)?
             .ok_or_else(|| {
                 EnclaveError::CrossCheck(format!(
-                    "FundsIn original safe block {} unavailable from RPC - refusing to sign",
+                    "FundsIn original {tag} block {} unavailable from RPC - refusing to sign",
                     initial.number
                 ))
             })?
     };
     if original != *initial {
-        return Err(EnclaveError::CrossCheck(
-            "FundsIn safe block snapshot changed during verification (reorg?) - refusing to sign"
-                .into(),
-        ));
+        return Err(EnclaveError::CrossCheck(format!(
+            "FundsIn {tag} block snapshot changed during verification (reorg?) - refusing to sign"
+        )));
     }
     Ok(())
 }
@@ -634,9 +642,9 @@ pub fn derived_lock(
 /// Verifies the `FundsIn` lock that a BFA mint commits to. Returns the deposit.
 ///
 /// Same fail-closed checks as [`verify_funds_in_event`] (receipt, success,
-/// pinned emitter, safe canonical inclusion), but bound to the RGB OpId, not to
-/// the bridge `operationId` (a different id-space). `funds_in_contract`
-/// comes from PINNED config, never the request. `rgb_opid`
+/// pinned emitter, canonical inclusion below the configured tag), but bound to
+/// the RGB OpId, not to the bridge `operationId` (a different id-space).
+/// `funds_in_contract` and `finality_tag` come from PINNED config. `rgb_opid`
 /// comes from the consignment and only selects the log that must exist.
 ///
 /// The receipt must also have exactly one `BridgeFundsIn` from the pinned
@@ -646,10 +654,11 @@ pub fn derived_lock(
 pub fn verify_rgb_funds_in(
     provider: &dyn EvmReceiptProvider,
     funds_in_contract: &[u8; 20],
+    finality_tag: EvmFinalityTag,
     evm_tx_hash: &[u8; 32],
     rgb_opid: &[u8; 32],
 ) -> Result<VerifiedLock> {
-    let safe = fetch_safe_block(provider)?;
+    let head = fetch_finality_block(provider, finality_tag)?;
     let receipt = fetch_successful_receipt(provider, evm_tx_hash)?;
     let log = select_unique_log(
         &receipt,
@@ -681,8 +690,8 @@ pub fn verify_rgb_funds_in(
         )));
     }
 
-    check_safe_inclusion(provider, &safe, &receipt)?;
-    check_safe_snapshot(provider, &safe)?;
+    check_finality_inclusion(provider, finality_tag, &head, &receipt)?;
+    check_finality_snapshot(provider, finality_tag, &head)?;
 
     tracing::info!(
         tx = %hex::encode(evm_tx_hash),
@@ -841,8 +850,13 @@ impl EvmReceiptProvider for AlloyEvmClient {
         receipt.map(map_alloy_receipt).transpose()
     }
 
-    fn get_safe_block(&self) -> Result<Option<BlockData>> {
-        self.fetch_block(alloy::rpc::types::BlockNumberOrTag::Safe)
+    fn get_block_by_tag(&self, tag: EvmFinalityTag) -> Result<Option<BlockData>> {
+        use alloy::rpc::types::BlockNumberOrTag;
+        self.fetch_block(match tag {
+            EvmFinalityTag::Latest => BlockNumberOrTag::Latest,
+            EvmFinalityTag::Safe => BlockNumberOrTag::Safe,
+            EvmFinalityTag::Finalized => BlockNumberOrTag::Finalized,
+        })
     }
 
     fn get_block_by_number(&self, number: u64) -> Result<Option<BlockData>> {
@@ -854,7 +868,7 @@ impl EvmReceiptProvider for AlloyEvmClient {
 /// types reach the predicate.
 ///
 /// Fails closed on a missing `block_number` or `block_hash`: both are required
-/// to establish safe canonical inclusion. Neither identity field may default
+/// to establish canonical inclusion below the configured finality head. Neither identity field may default
 /// to zero for a pending or malformed receipt.
 fn map_alloy_receipt(r: alloy::rpc::types::TransactionReceipt) -> Result<ReceiptData> {
     let logs = r
