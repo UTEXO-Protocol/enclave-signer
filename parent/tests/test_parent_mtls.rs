@@ -1,7 +1,6 @@
 //! Real TLS, the generated Parent router and a counting enclave transport.
 //! These tests do not prove deployed VPC rules or a real NSM clone.
 use std::{
-    collections::HashSet,
     sync::{
         atomic::{AtomicUsize, Ordering},
         Arc,
@@ -88,7 +87,6 @@ async fn server(
             .timeout(Duration::from_secs(2))
             .add_service(ParentServiceServer::new(ParentAdapterService::new(
                 EnclaveTarget::Tcp(target.to_string()),
-                HashSet::new(),
             )))
             .serve_with_incoming(incoming)
             .await

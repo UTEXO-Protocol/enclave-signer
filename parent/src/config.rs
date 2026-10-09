@@ -1,4 +1,3 @@
-use std::collections::HashSet;
 use std::time::Duration;
 
 use anyhow::Context;
@@ -24,10 +23,6 @@ pub struct Config {
 
     /// Use vsock instead of TCP.
     pub use_vsock: bool,
-
-    /// EVM network IDs. A TRANSACTION with EvmData must target one of them.
-    /// A TRANSACTION with RgbData must not.
-    pub evm_network_ids: HashSet<u32>,
 
     /// Maximum active gRPC requests across all connections. (F03-AF-13)
     pub grpc_max_concurrent: usize,
@@ -59,11 +54,6 @@ impl Config {
             use_vsock: std::env::var("USE_VSOCK")
                 .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
                 .unwrap_or(false),
-            evm_network_ids: std::env::var("EVM_NETWORK_IDS")
-                .unwrap_or_default()
-                .split(',')
-                .filter_map(|s| s.trim().parse::<u32>().ok())
-                .collect(),
             grpc_max_concurrent: env_or("GRPC_MAX_CONCURRENT", 128usize).max(1),
             grpc_max_concurrent_per_conn: env_or("GRPC_MAX_CONCURRENT_PER_CONN", 32usize).max(1),
             grpc_request_timeout_secs: env_or("GRPC_REQUEST_TIMEOUT_SECS", 120u64).max(1),

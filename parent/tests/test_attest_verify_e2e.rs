@@ -66,10 +66,8 @@ async fn start_real_parent_grpc(enclave_port: u16) -> u16 {
     let grpc_port = grpc_addr.port();
     drop(grpc_listener);
 
-    let service = ParentAdapterService::new(
-        EnclaveTarget::Tcp(format!("127.0.0.1:{enclave_port}")),
-        std::collections::HashSet::new(),
-    );
+    let service =
+        ParentAdapterService::new(EnclaveTarget::Tcp(format!("127.0.0.1:{enclave_port}")));
 
     tokio::spawn(async move {
         Server::builder()

@@ -224,8 +224,7 @@ async fn run_cli_completion(secure: bool) {
     let incoming = tonic::transport::server::TcpIncoming::from(
         tokio::net::TcpListener::from_std(socket).unwrap(),
     );
-    let service =
-        ParentAdapterService::new(EnclaveTarget::Tcp(donor.addr.clone()), Default::default());
+    let service = ParentAdapterService::new(EnclaveTarget::Tcp(donor.addr.clone()));
     let pki = pki::Pki::new();
     let mut builder = tonic::transport::Server::builder();
     // Test production mTLS and auth with the real CLI and enclave clone handlers.

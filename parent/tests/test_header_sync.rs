@@ -1,7 +1,6 @@
 //! The parent's header sync against a real enclave or a scripted one, with a
 //! fake Electrum server that serves synthetic regtest headers.
 
-use std::collections::HashSet;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -340,10 +339,7 @@ fn enclave_tip(port: u16) -> (u32, Vec<u8>) {
 // Sync
 
 fn service(port: u16) -> ParentAdapterService {
-    ParentAdapterService::new(
-        EnclaveTarget::Tcp(format!("127.0.0.1:{port}")),
-        HashSet::new(),
-    )
+    ParentAdapterService::new(EnclaveTarget::Tcp(format!("127.0.0.1:{port}")))
 }
 
 fn start_sync(
