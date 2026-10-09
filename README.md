@@ -455,6 +455,25 @@ A restart removes the in-memory keys. Initialize or clone each enclave again.
 Mint signers recover their saved KMS seed through `InitializeKey`. They require
 the verified address pin and do not support peer cloning.
 
+### Lost `SetEndpoints` reply
+
+`deploy/systemd/utexo-enclave-ctl.sh start` terminates the enclave it
+launched if `set-endpoints` or the launch check fails. That enclave has no key
+yet. Run `start` again.
+
+After a manual `set-endpoints` with no reply, do not send it again blindly:
+the enclave refuses a second set. Read the enclave state first:
+
+```bash
+cli --addr vsock://16:5000 health   # read "Endpoints set" and "Key loaded"; exit code 1 only means "not ready"
+```
+
+| `Endpoints set` | `Key loaded` | Action |
+| --- | --- | --- |
+| false | any | The set did not take effect. A refused set keeps the slot empty. Send `set-endpoints` again. |
+| true | false | The set took effect. Run `verify-launch` with the same values. On a mismatch, terminate the enclave and start it again. It has no key to lose. |
+| true | true | The set took effect. Do not run `verify-launch`: it refuses an enclave with keys. Do not restart: a restart removes the keys. Check the attested values with `attest-verify`, the release PCRs and the `--expect-*` values of this launch, through the parent with an `observer` certificate. On a mismatch, stop and report. |
+
 ### Debug mode
 
 `nitro-cli run-enclave ... --debug-mode` zeroes PCR0/1/2, so attestation

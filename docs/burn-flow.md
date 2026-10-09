@@ -225,7 +225,7 @@ Both routes (`fundsOut` and `lzFundsOut`), in this order:
     sourceBurnTxId, nonce, deadline)`;
   - LayerZero route: `TeeLzFundsOut(...)`, 14 fields.
 - **B6.3** The burn signer signs with the EVM bridge key `m/44'/60'/0'/0/0`.
-  The signature is 65 bytes (`r || s || v`, `v` is 0 or 1).
+  The signature is 65 bytes (`r || s || v`). `v` is the raw recovery id, 0 to 3, with no +27.
 - **B6.4** The response has the signature and the calldata. The calldata is
   not changed.
 

@@ -2,24 +2,15 @@
 # =============================================================================
 # gRPC Smoke Test Suite (via grpcurl)
 # =============================================================================
-# Tests the parent adapter's gRPC interface - the same interface the Go
-# Listener uses. Run this from your local machine with an SSH tunnel open,
-# or directly on EC2.
+# Tests the parent's gRPC service `parent.ParentService`
+# (`proto/enclave/parent.proto` of federated-signer-proto).
 #
-# Prerequisites:
-#   - grpcurl installed (brew install grpcurl)
-#   - SSH tunnel open (if running from Mac):
-#       ssh -L 5000:127.0.0.1:5000 -N ubuntu@18.219.168.199
-#   - utexo-bridge-parent running on EC2 in plaintext loopback mode (grpcurl
-#     uses -plaintext; the default parent requires mTLS):
-#       USE_VSOCK=true GRPC_ALLOW_INSECURE_LOOPBACK=true \
-#         ./parent/target/release/utexo-bridge-parent
-#   - Enclave already initialized (run smoke-test.sh --vsock on EC2 first,
-#     or: ./parent/target/release/utexo-bridge-parent-cli --addr vsock://16:5000 init)
-#
-# Usage:
-#   ./grpc-smoke-test.sh                        # default: 127.0.0.1:5000
-#   ./grpc-smoke-test.sh --addr 1.2.3.4:5000    # override address
+# Setup: grpcurl installed; a burn-signer parent in plaintext loopback mode
+# (USE_VSOCK=true GRPC_ALLOW_INSECURE_LOOPBACK=true ./parent/target/release/utexo-bridge-parent)
+# with its enclave keyed and endpoints set; PROTO_DIR is the `proto/` dir of
+# federated-signer-proto at the rev that parent/Cargo.toml pins.
+# Usage: ./grpc-smoke-test.sh [--addr=HOST:PORT]
+# Each negative case sends its own payload and passes only on the expected gRPC code and message.
 # =============================================================================
 set -euo pipefail
 
@@ -33,17 +24,17 @@ FAIL=0
 
 ADDR="127.0.0.1:5000"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# Parent-side gRPC schema. It is NOT vendored here - only the enclave's slice is
-# (see enclave-proto/). Point this at a checkout of
-# https://github.com/UTEXO-Protocol/federated-signer-proto:
-#   PROTO_DIR=/path/to/federated-signer-proto/proto ./build/grpc-smoke-test.sh
 PROTO_DIR="${PROTO_DIR:-$(cd "$SCRIPT_DIR/../.." && pwd)/federated-signer-proto/proto}"
 
-for arg in "$@"; do
-    case $arg in
-        --addr=*) ADDR="${arg#*=}" ;;
-        --addr)   shift; ADDR="$1" ;;
+while [ $# -gt 0 ]; do
+    case $1 in
+        --addr=*) ADDR="${1#*=}" ;;
+        --addr)
+            [ $# -ge 2 ] || { echo "--addr needs a value" >&2; exit 2; }
+            shift; ADDR="$1" ;;
+        *) echo "unknown argument: $1" >&2; exit 2 ;;
     esac
+    shift
 done
 
 log()  { echo -e "${YELLOW}[TEST]${NC} $1"; }
@@ -55,118 +46,71 @@ command -v grpcurl &>/dev/null || {
     exit 1
 }
 
-[ -d "$PROTO_DIR" ] || {
-    echo -e "${RED}Error: proto dir not found: $PROTO_DIR${NC}"
+[ -f "$PROTO_DIR/enclave/parent.proto" ] || {
+    echo -e "${RED}Error: parent.proto not found in: $PROTO_DIR${NC}"
     echo "The parent gRPC schema is not vendored in this repo. Clone"
     echo "  https://github.com/UTEXO-Protocol/federated-signer-proto"
     echo "and re-run with PROTO_DIR=/path/to/that/checkout/proto"
     exit 1
 }
 
-# Convert hex string to base64 (for bytes fields in grpcurl JSON)
-hex_to_b64() {
-    printf '%s' "$1" | xxd -r -p | base64 | tr -d '\n'
-}
-
-# SHA-256 of a string -> hex (macOS + Linux compatible)
-sha256_hex() {
-    if command -v sha256sum &>/dev/null; then
-        printf '%s' "$1" | sha256sum | awk '{print $1}'
-    else
-        printf '%s' "$1" | shasum -a 256 | awk '{print $1}'
-    fi
-}
-
 echo "============================================="
-echo "  gRPC Smoke Tests (parent adapter)"
+echo "  gRPC Smoke Tests (parent.ParentService)"
 echo "  Target: $ADDR"
 echo "  Proto:  $PROTO_DIR"
 echo "============================================="
 echo ""
 
-GRPCURL=(grpcurl -plaintext -import-path "$PROTO_DIR" -proto listener/listener.proto)
+GRPCURL=(grpcurl -plaintext -import-path "$PROTO_DIR" -proto enclave/parent.proto)
 
-# ---------------------------------------------
-# 1. GetPublicKeys
-# ---------------------------------------------
-log "1. GetPublicKeys"
-OUTPUT=$("${GRPCURL[@]}" "$ADDR" listener.FederatedSignerNode/PublicKey 2>&1) && RC=$? || RC=$?
+# call METHOD PAYLOAD: sets OUT and RC.
+call() {
+    OUT=$("${GRPCURL[@]}" -d "$2" "$ADDR" "parent.ParentService/$1" 2>&1) && RC=0 || RC=$?
+}
 
-if [ $RC -eq 0 ] && echo "$OUTPUT" | grep -q "publicKeys"; then
-    pass "GetPublicKeys — keys returned"
-    echo "  $OUTPUT"
-else
-    fail "GetPublicKeys" "$OUTPUT"
-fi
+# expect_ok NAME METHOD PAYLOAD FIELD
+expect_ok() {
+    log "$1"
+    call "$2" "$3"
+    if [ "$RC" -eq 0 ] && grep -q "\"$4\"" <<<"$OUT"; then
+        pass "$1"
+    else
+        fail "$1" "$OUT"
+    fi
+}
 
-# ---------------------------------------------
-# 2. Sign EVM - valid consignment
-# ---------------------------------------------
-log "2. Sign (EVMSigningFlow, consignment_valid=true)"
+# expect_error NAME METHOD PAYLOAD CODE MESSAGE
+expect_error() {
+    log "$1"
+    call "$2" "$3"
+    if [ "$RC" -ne 0 ] && grep -qx "  Code: $4" <<<"$OUT" \
+        && grep '^  Message: ' <<<"$OUT" | grep -qF -- "$5"; then
+        pass "$1"
+    else
+        fail "$1" "expected $4 / $5, got: $OUT"
+    fi
+}
 
-# Same calldata as smoke-test.sh:
-# selector(4) + token(32) + recipient(32) + amount=1000(32) + commission=50(32) + padding(96)
-CALLDATA_HEX="abcdef12"
-CALLDATA_HEX+="0000000000000000000000001111111111111111111111111111111111111111"
-CALLDATA_HEX+="0000000000000000000000002222222222222222222222222222222222222222"
-CALLDATA_HEX+="00000000000000000000000000000000000000000000000000000000000003e8"
-CALLDATA_HEX+="0000000000000000000000000000000000000000000000000000000000000032"
-CALLDATA_HEX+="000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+# Zero bytes in base64, for bytes fields in grpcurl JSON.
+zeros() { head -c "$1" /dev/zero | base64 | tr -d '\n'; }
+NONCE_32=$(zeros 32)
+NONCE_31=$(zeros 31)
+COMMON='"common":{"srcNetworkId":84,"dataType":"TRANSACTION","dstNetworkId":1}'
 
-CALLDATA_B64=$(hex_to_b64 "$CALLDATA_HEX")
+expect_ok "PublicKey" PublicKey '{"networkId":1,"dataType":"TRANSACTION"}' publicKey
+expect_ok "AttestedPublicKey (32-byte nonce)" AttestedPublicKey "{\"nonce\":\"$NONCE_32\"}" evmAddress
 
-# No consignment bytes - matches what the CLI smoke test does.
-# The current listener proto exposes SignRequest with generic data bytes, so
-# this smoke test now exercises the gRPC boundary only.
-SIGN_JSON="{\"network_id\":84,\"data_type\":\"TRANSACTION\",\"data\":\"$CALLDATA_B64\"}"
+expect_error "Sign without common" Sign '{}' \
+    InvalidArgument "SignRequest.common is missing"
+expect_error "AttestedPublicKey (31-byte nonce)" AttestedPublicKey "{\"nonce\":\"$NONCE_31\"}" \
+    InvalidArgument "nonce must be 32 bytes, got 31"
+expect_error "SubmitHeaders" SubmitHeaders '{"startHeight":1}' \
+    PermissionDenied "SubmitHeaders is closed"
 
-OUTPUT=$("${GRPCURL[@]}" -d "$SIGN_JSON" "$ADDR" listener.FederatedSignerNode/Sign 2>&1) && RC=$? || RC=$?
-
-if [ $RC -eq 0 ] && echo "$OUTPUT" | grep -q "signature"; then
-    pass "Sign EVMSigningFlow — EVM signature returned"
-    echo "  $OUTPUT" | head -5
-else
-    fail "Sign EVMSigningFlow valid" "$OUTPUT"
-fi
-
-# ---------------------------------------------
-# 3. Sign EVM - consignment_valid=false (should fail)
-# ---------------------------------------------
-log "3. Sign (EVMSigningFlow, consignment_valid=false — should fail)"
-
-OUTPUT=$("${GRPCURL[@]}" -d "{\"network_id\":84,\"data_type\":\"TRANSACTION\",\"data\":\"$CALLDATA_B64\"}" "$ADDR" listener.FederatedSignerNode/Sign 2>&1) && RC=$? || RC=$?
-
-if [ $RC -eq 0 ] || echo "$OUTPUT" | grep -qi "error\|failed"; then
-    pass "Sign EVMSigningFlow invalid consignment correctly rejected"
-else
-    fail "Sign EVMSigningFlow invalid consignment" "expected rejection, got: $OUTPUT"
-fi
-
-# ---------------------------------------------
-# 4. Sign EVM - expired deadline (should fail)
-# ---------------------------------------------
-log "4. Sign (EVMSigningFlow, expired deadline — should fail)"
-
-OUTPUT=$("${GRPCURL[@]}" -d "{\"network_id\":84,\"data_type\":\"TRANSACTION\",\"data\":\"$CALLDATA_B64\"}" "$ADDR" listener.FederatedSignerNode/Sign 2>&1) && RC=$? || RC=$?
-
-if [ $RC -ne 0 ] || echo "$OUTPUT" | grep -qi "error\|expired\|deadline"; then
-    pass "Sign EVMSigningFlow expired deadline correctly rejected"
-else
-    fail "Sign EVMSigningFlow expired deadline" "expected rejection, got: $OUTPUT"
-fi
-
-# ---------------------------------------------
-# 5. Sign - missing flow field (should fail)
-# ---------------------------------------------
-log "5. Sign (empty request, no flow — should fail)"
-
-OUTPUT=$("${GRPCURL[@]}" -d '{}' "$ADDR" listener.FederatedSignerNode/Sign 2>&1) && RC=$? || RC=$?
-
-if [ $RC -ne 0 ] || echo "$OUTPUT" | grep -qi "error\|missing\|invalid"; then
-    pass "Sign empty request correctly rejected"
-else
-    fail "Sign empty request" "expected rejection, got: $OUTPUT"
-fi
+# The other signer role's direction. It reaches the enclave, which refuses it.
+expect_error "Sign EVM -> RGB on the burn signer" Sign \
+    "{$COMMON,\"source\":{\"amount\":1000,\"evm\":{\"txHash\":\"$NONCE_32\",\"fundsInOperationId\":\"$NONCE_32\"}},\"rgbData\":{\"psbtBytes\":\"AA==\"}}" \
+    Internal "it does not sign EVM -> RGB bridge PSBTs"
 
 # ---------------------------------------------
 # Summary
