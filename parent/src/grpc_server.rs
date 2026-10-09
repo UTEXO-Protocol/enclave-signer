@@ -1,11 +1,15 @@
 use std::collections::HashSet;
-use std::time::Duration;
+use std::io::{self, Read, Write};
+use std::time::{Duration, Instant};
 
+use socket2::{Domain, SockAddr, Socket, Type};
 use tonic::{Request, Response, Status};
 
 use crate::enclave_proto::{
     self, enclave_request, enclave_response, EnclaveRequest, EnclaveResponse,
 };
+use crate::error::ParentError;
+use crate::framing;
 
 const ENCLAVE_TIMEOUT: Duration = Duration::from_secs(30);
 use crate::grpc_proto::parent_service_server::ParentService;
@@ -29,6 +33,128 @@ pub enum EnclaveTarget {
         cid: u32,
         port: u32,
     },
+}
+
+/// Start the deadline before the worker is queued, then run `exchange`.
+#[allow(clippy::result_large_err)]
+async fn send_within(
+    target: EnclaveTarget,
+    req: EnclaveRequest,
+    timeout: Duration,
+) -> Result<EnclaveResponse, Status> {
+    let deadline = Instant::now() + timeout;
+    let worker = tokio::task::spawn_blocking(move || exchange(&target, &req, deadline));
+    match tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), worker).await {
+        Ok(join_result) => {
+            join_result.map_err(|e| Status::internal(format!("spawn_blocking join failed: {e}")))?
+        }
+        Err(_) => Err(timed_out()),
+    }
+}
+
+/// Connect, write `req` and read the response before `deadline`.
+#[allow(clippy::result_large_err)]
+fn exchange(
+    target: &EnclaveTarget,
+    req: &EnclaveRequest,
+    deadline: Instant,
+) -> Result<EnclaveResponse, Status> {
+    let (domain, addr, connect_failed) = match target {
+        EnclaveTarget::Tcp(addr) => {
+            use std::net::ToSocketAddrs;
+            let sockaddr = addr
+                .to_socket_addrs()
+                .map_err(|e| Status::unavailable(format!("enclave addr resolve failed: {e}")))?
+                .next()
+                .ok_or_else(|| {
+                    Status::unavailable("enclave addr resolved to no endpoints".to_string())
+                })?;
+            (
+                Domain::for_address(sockaddr),
+                SockAddr::from(sockaddr),
+                "enclave connection failed",
+            )
+        }
+        #[cfg(target_os = "linux")]
+        EnclaveTarget::Vsock { cid, port } => (
+            Domain::VSOCK,
+            SockAddr::vsock(*cid, *port),
+            "enclave vsock connection failed",
+        ),
+    };
+    let connect_status = |e: io::Error| {
+        if is_timeout(&e) {
+            timed_out()
+        } else {
+            Status::unavailable(format!("{connect_failed}: {e}"))
+        }
+    };
+
+    // The worker can start late. Each step uses the time left.
+    let left = remaining(deadline).map_err(|_| timed_out())?;
+    let sock = Socket::new(domain, Type::STREAM, None).map_err(connect_status)?;
+    sock.connect_timeout(&addr, left).map_err(connect_status)?;
+    let mut stream = DeadlineStream { sock, deadline };
+    framing::write_message(&mut stream, req).map_err(|e| io_status(e, "enclave write failed"))?;
+    framing::read_message(&mut stream).map_err(|e| io_status(e, "enclave read failed"))
+}
+
+fn timed_out() -> Status {
+    Status::deadline_exceeded("enclave request timed out (30s)")
+}
+
+fn is_timeout(e: &io::Error) -> bool {
+    matches!(
+        e.kind(),
+        io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock
+    )
+}
+
+/// A socket timeout gives the same status as the outer timer.
+fn io_status(e: ParentError, context: &str) -> Status {
+    match e {
+        ParentError::Io(e) if is_timeout(&e) => timed_out(),
+        e => Status::internal(format!("{context}: {e}")),
+    }
+}
+
+/// Time left until `deadline`, or `TimedOut`.
+fn remaining(deadline: Instant) -> io::Result<Duration> {
+    let left = deadline.saturating_duration_since(Instant::now());
+    if left.is_zero() {
+        return Err(io::Error::new(
+            io::ErrorKind::TimedOut,
+            "request deadline exceeded",
+        ));
+    }
+    // socket2 reads a timeout below 1 µs as no timeout.
+    Ok(left.max(Duration::from_micros(1)))
+}
+
+/// A socket that sets its timeout to the time left before each read and write.
+struct DeadlineStream {
+    sock: Socket,
+    deadline: Instant,
+}
+
+impl Read for DeadlineStream {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        self.sock
+            .set_read_timeout(Some(remaining(self.deadline)?))?;
+        (&self.sock).read(buf)
+    }
+}
+
+impl Write for DeadlineStream {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.sock
+            .set_write_timeout(Some(remaining(self.deadline)?))?;
+        (&self.sock).write(buf)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
 }
 
 /// gRPC server. It translates `ParentService` RPCs from the federated signer
@@ -55,68 +181,7 @@ impl ParentAdapterService {
         &self,
         req: EnclaveRequest,
     ) -> Result<EnclaveResponse, Status> {
-        let target = self.target.clone();
-
-        let result = tokio::time::timeout(
-            ENCLAVE_TIMEOUT,
-            tokio::task::spawn_blocking(move || {
-                use crate::framing;
-
-                // The outer timeout cannot stop a blocking worker. (F03-AF-18)
-                // Use socket timeouts to limit each transport operation.
-                match target {
-                    EnclaveTarget::Tcp(addr) => {
-                        use std::net::ToSocketAddrs;
-                        let sockaddr = addr
-                            .to_socket_addrs()
-                            .map_err(|e| {
-                                Status::unavailable(format!("enclave addr resolve failed: {e}"))
-                            })?
-                            .next()
-                            .ok_or_else(|| {
-                                Status::unavailable(
-                                    "enclave addr resolved to no endpoints".to_string(),
-                                )
-                            })?;
-                        let mut stream =
-                            std::net::TcpStream::connect_timeout(&sockaddr, ENCLAVE_TIMEOUT)
-                                .map_err(|e| {
-                                    Status::unavailable(format!("enclave connection failed: {e}"))
-                                })?;
-                        stream.set_read_timeout(Some(ENCLAVE_TIMEOUT)).ok();
-                        stream.set_write_timeout(Some(ENCLAVE_TIMEOUT)).ok();
-                        framing::write_message(&mut stream, &req)
-                            .map_err(|e| Status::internal(format!("enclave write failed: {e}")))?;
-                        let resp: EnclaveResponse = framing::read_message(&mut stream)
-                            .map_err(|e| Status::internal(format!("enclave read failed: {e}")))?;
-                        Ok(resp)
-                    }
-                    #[cfg(target_os = "linux")]
-                    EnclaveTarget::Vsock { cid, port } => {
-                        let mut stream = vsock::VsockStream::connect_with_cid_port(cid, port)
-                            .map_err(|e| {
-                                Status::unavailable(format!("enclave vsock connection failed: {e}"))
-                            })?;
-                        // Same as TCP. Without socket timeouts, a stuck socket
-                        // holds a blocking-pool thread forever. (F03-AF-18)
-                        stream.set_read_timeout(Some(ENCLAVE_TIMEOUT)).ok();
-                        stream.set_write_timeout(Some(ENCLAVE_TIMEOUT)).ok();
-                        framing::write_message(&mut stream, &req)
-                            .map_err(|e| Status::internal(format!("enclave write failed: {e}")))?;
-                        let resp: EnclaveResponse = framing::read_message(&mut stream)
-                            .map_err(|e| Status::internal(format!("enclave read failed: {e}")))?;
-                        Ok(resp)
-                    }
-                }
-            }),
-        )
-        .await;
-
-        match result {
-            Ok(join_result) => join_result
-                .map_err(|e| Status::internal(format!("spawn_blocking join failed: {e}")))?,
-            Err(_) => Err(Status::deadline_exceeded("enclave request timed out (30s)")),
-        }
+        send_within(self.target.clone(), req, ENCLAVE_TIMEOUT).await
     }
 
     /// Unwrap an enclave error response into a gRPC Status.
@@ -799,5 +864,132 @@ impl ParentService for ParentAdapterService {
                 other
             ))),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::enclave_proto::{sign_request::SourceNetwork, RgbSource};
+    use std::net::{SocketAddr, TcpListener};
+    use std::thread;
+    use tonic::Code;
+
+    const BUDGET: Duration = Duration::from_millis(300);
+    const SLACK: Duration = Duration::from_secs(1);
+
+    fn health() -> EnclaveRequest {
+        EnclaveRequest {
+            request: Some(enclave_request::Request::Health(Default::default())),
+        }
+    }
+
+    fn tcp(addr: SocketAddr) -> EnclaveTarget {
+        EnclaveTarget::Tcp(addr.to_string())
+    }
+
+    /// Run `exchange` with `BUDGET` and check that it stops at the deadline.
+    fn assert_stops_at_deadline(target: EnclaveTarget, req: EnclaveRequest) {
+        let start = Instant::now();
+        let err = exchange(&target, &req, start + BUDGET).unwrap_err();
+        assert_eq!(err.code(), Code::DeadlineExceeded, "{err:?}");
+        assert!(start.elapsed() < BUDGET + SLACK, "{:?}", start.elapsed());
+    }
+
+    #[test]
+    fn queued_request_after_deadline_does_not_connect() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let target = tcp(listener.local_addr().unwrap());
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .max_blocking_threads(1)
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            let (release, wait) = std::sync::mpsc::channel::<()>();
+            let blocker = tokio::task::spawn_blocking(move || wait.recv());
+            let err = send_within(target, health(), Duration::from_millis(50))
+                .await
+                .unwrap_err();
+            assert_eq!(err.code(), Code::DeadlineExceeded);
+            release.send(()).unwrap();
+            blocker.await.unwrap().unwrap();
+            // The pool runs tasks in order, so the late worker is done.
+            tokio::task::spawn_blocking(|| ()).await.unwrap();
+        });
+        listener.set_nonblocking(true).unwrap();
+        let err = listener.accept().unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::WouldBlock);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn connect_stops_at_deadline() {
+        let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
+        let listener = Socket::new(Domain::IPV4, Type::STREAM, None).unwrap();
+        listener.bind(&addr.into()).unwrap();
+        listener.listen(0).unwrap();
+        let addr = listener.local_addr().unwrap();
+        // Fill the accept queue. Linux then drops new SYNs.
+        let mut fillers = Vec::new();
+        loop {
+            let filler = Socket::new(Domain::IPV4, Type::STREAM, None).unwrap();
+            if filler
+                .connect_timeout(&addr, Duration::from_millis(100))
+                .is_err()
+            {
+                break;
+            }
+            fillers.push(filler);
+            assert!(fillers.len() < 16, "accept queue does not fill");
+        }
+        assert_stops_at_deadline(tcp(addr.as_socket().unwrap()), health());
+    }
+
+    #[test]
+    fn slow_write_stops_at_deadline() {
+        let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
+        let listener = Socket::new(Domain::IPV4, Type::STREAM, None).unwrap();
+        listener.set_recv_buffer_size(4096).unwrap();
+        listener.bind(&addr.into()).unwrap();
+        listener.listen(1).unwrap();
+        let addr = listener.local_addr().unwrap().as_socket().unwrap();
+        thread::spawn(move || {
+            let (mut peer, _) = listener.accept().unwrap();
+            let start = Instant::now();
+            let mut buf = [0u8; 1024];
+            while start.elapsed() < Duration::from_secs(5) {
+                if !matches!(peer.read(&mut buf), Ok(n) if n > 0) {
+                    break;
+                }
+                thread::sleep(Duration::from_millis(5));
+            }
+        });
+        let req = EnclaveRequest {
+            request: Some(enclave_request::Request::Sign(enclave_proto::SignRequest {
+                source_network: Some(SourceNetwork::RgbSource(RgbSource {
+                    consignment: vec![0x5a; 8 * 1024 * 1024],
+                    ..Default::default()
+                })),
+                ..Default::default()
+            })),
+        };
+        assert_stops_at_deadline(tcp(addr), req);
+    }
+
+    #[test]
+    fn slow_read_stops_at_deadline() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        thread::spawn(move || {
+            let (mut peer, _) = listener.accept().unwrap();
+            let _: EnclaveRequest = framing::read_message(&mut peer).unwrap();
+            peer.write_all(&1000u32.to_le_bytes()).unwrap();
+            let start = Instant::now();
+            while start.elapsed() < Duration::from_secs(5) && peer.write_all(&[0]).is_ok() {
+                thread::sleep(Duration::from_millis(20));
+            }
+        });
+        assert_stops_at_deadline(tcp(addr), health());
     }
 }
