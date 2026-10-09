@@ -98,7 +98,7 @@ fn placeholder_consignment_hash() -> Vec<u8> {
 }
 
 /// Build a valid enriched EVM-destination SignRequest for testing. `commission`
-/// stays outside the calldata but remains part of route-proof amount coverage.
+/// stays outside the calldata and does not reach the signed digest.
 fn valid_sign_evm_request(amount: u64, commission: u64) -> SignRequest {
     SignRequest {
         amount: amount + commission + 100, // plenty of headroom
@@ -652,8 +652,8 @@ fn test_sign_evm_rejects_unconfigured_bridge_config() {
 }
 
 // Route proofs bind the amount. RGB source validation emits the consignment
-// amount. EVM destination validation decodes `fundsOut.amount` and adds
-// `calldata_commission`. `validate_route_proofs` compares the two.
+// amount. EVM destination validation decodes `fundsOut.amount` and checks it
+// against `calldata_amount`. `validate_route_proofs` compares the two.
 
 /// A build without `spv` must refuse every `fundsOut`, even with no
 /// merkle_proofs. Without SPV, only the host-controlled indexer anchors
