@@ -62,11 +62,9 @@ AWS KMS and its access policies. The Bridge contract and its governance are
 trusted: the enclave pins the Bridge address, not its code, so an upgraded
 Bridge could emit fake `FundsIn` events and back unbacked mints. EVM deposits
 must be covered by the RPC's `safe` head. On Arbitrum this waits for the batch
-to be posted and covered by L1's safe head; it does not wait for `finalized`, so an L1 reorg remains an
-accepted risk. An L2 block count alone does not establish L1 inclusion, so
-receipt verification has no confirmation-count setting. The mint path uses
-Electrum resolver data without a separate SPV inclusion check. CCD source
-checks trust the listener.
+to be posted and covered by L1's safe head. An L1 reorg remains an accepted
+risk. The mint path uses Electrum resolver data without a separate SPV
+inclusion check. CCD source checks trust the listener.
 
 **Pinned EVM RPC trust (accepted by design, F05-NEW-AF-07):** the production
 mint and burn images use `PinnedTlsRpc`. TLS ends inside the enclave and
@@ -235,9 +233,9 @@ SecurityPolicy = Production {
   policy_commitment)`. The commitment encoding is versioned and shared
   (`attestation-verify/src/policy.rs`), so the enclave and every verifier
   produce identical bytes. Version 9 commits to mandatory `safe` receipt
-  verification and removes the confirmation-count field. Version 8 attestations
-  are incompatible: rebuild the EIF and verifiers together and approve the
-  new PCRs. See [`pubkey-attestation.md`](pubkey-attestation.md).
+  verification and canonical block-hash matching. Use the EIF and verifiers
+  from the same release with approved PCRs. See
+  [`pubkey-attestation.md`](pubkey-attestation.md).
 - **Verification:** `attest-verify` reconstructs the *expected* policy
   (`--expect-signer-role mint|burn|combined`, `--expect-vanilla-psbt`,
   `--expect-evm-source tls|raw|disabled`, `--expect-electrum-host`,
@@ -484,8 +482,7 @@ ceiling ships a new enclave image, so it needs federation agreement.
 
 **EVM data source:** a build without `evm-rpc` refuses bridge PSBTs outright.
 Pending or unsafe deposits refuse signing and can be retried after they become
-safe. A missing, malformed or unsupported `safe` response refuses signing;
-there is no fallback to `latest` and no finality-mode setting.
+safe. A missing, malformed or unsupported `safe` response refuses signing.
 With `PinnedTlsRpc`, TLS ends inside the enclave and authenticates the pinned
 host against the configured CA. The host can withhold a response, but cannot
 alter it without detection. The endpoint remains trusted for receipt, block
