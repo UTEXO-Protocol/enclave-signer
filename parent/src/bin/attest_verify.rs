@@ -123,11 +123,6 @@ struct Cli {
     #[arg(long)]
     expect_token_contract: Option<String>,
 
-    /// Expected minimum receipt confirmations. Required and not zero for
-    /// production verification.
-    #[arg(long)]
-    expect_evm_min_confirmations: Option<u64>,
-
     /// Expected gas-tx (`SignRawDigest`) destination (`GAS_TX_ALLOWED_TO`), as
     /// 0x-hex. Omit if the gas path is not pinned. The enclave then commits an
     /// all-zero destination and rejects the path. Ignored with --mock.
@@ -283,12 +278,6 @@ fn parse_expect_token_contract(s: &Option<String>) -> Result<[u8; 20]> {
     parse_hex20(s, "--expect-token-contract")
 }
 
-fn parse_expect_evm_min_confirmations(value: Option<u64>) -> Result<u64> {
-    value
-        .filter(|n| *n > 0)
-        .context("--expect-evm-min-confirmations must be specified and greater than zero")
-}
-
 /// Parse `--expect-gas-selectors` (comma-separated 4-byte hex) into selectors.
 /// An empty string yields an empty allowlist.
 fn parse_expect_gas_selectors(s: &str) -> Result<Vec<[u8; 4]>> {
@@ -372,9 +361,6 @@ async fn run(cli: Cli) -> Result<()> {
             expected_rgb_asset_id: cli.expect_rgb_asset_id.clone(),
             funds_in_contract: parse_expect_funds_in_contract(&cli.expect_funds_in_contract)?,
             token_contract: parse_expect_token_contract(&cli.expect_token_contract)?,
-            evm_min_confirmations: parse_expect_evm_min_confirmations(
-                cli.expect_evm_min_confirmations,
-            )?,
             gas_tx_allowed_to: parse_expect_gas_to(&cli.expect_gas_tx_to)?,
             gas_tx_max_gas_limit: cli.expect_gas_max_gas_limit,
             gas_tx_max_fee_per_gas: cli.expect_gas_max_fee_per_gas,

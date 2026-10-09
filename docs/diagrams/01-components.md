@@ -127,7 +127,7 @@ flowchart TB
     VFwd -->|"vsock CID 3:8001"| VP
     VP -->|"Electrum TCP/TLS"| Esp
 
-    NEE -.->|"eth_getTransactionReceipt /<br/>eth_blockNumber — TLS to pinned host and CA"| VFwd
+    NEE -.->|"eth_getTransactionReceipt /<br/>eth_getBlockByNumber — TLS to pinned host and CA"| VFwd
     VFwd -->|"vsock 8002"| VPe
     VPe -->|"TLS bytes (ends in enclave)"| EvmRpc
 

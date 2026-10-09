@@ -41,18 +41,18 @@ sequenceDiagram
 
     Note over Srv,Rpc: 2 — this deposit (verify_funds_in_event)
     Srv->>Evt: tx_hash, funds_in_operation_id (32 bytes each), amount, commission
-    Evt->>Rpc: eth_getTransactionReceipt / eth_blockNumber (15 s timeout)
-    Rpc-->>Evt: receipt / head
+    Evt->>Rpc: eth_getTransactionReceipt<br/>eth_getBlockByNumber(safe, false) / block at receipt height (15 s per call)
+    Rpc-->>Evt: receipt / safe head / canonical block
     Evt->>Evt: receipt exists + status success
     Evt->>Evt: exactly ONE BridgeFundsIn from FUNDS_IN_CONTRACT<br/>(zero or two ⇒ REFUSE, no plain FundsIn fallback)
     Evt->>Evt: topic1 operationId == funds_in_operation_id<br/>gross == amount, tokenCommission == commission<br/>netAmount ≤ gross − commission, u64 only
-    Evt->>Evt: depth ≥ EVM_MIN_CONFIRMATIONS (default 12),<br/>receipt above head ⇒ REFUSE
+    Evt->>Evt: receipt height ≤ safe head, canonical blockHash matches,<br/>missing safe head or receipt above safe head ⇒ REFUSE
     Evt-->>Srv: destinationAddress (may be empty)
 
     Note over Srv,Rpc: 3 — each mint has a deposit (bfa_mint_events)
     Srv->>Srv: bridgeLocation == FUNDS_IN_CONTRACT<br/>last mint ↔ evm_tx_hash (its derived id), older mints ↔ derived ids
-    Srv->>Rpc: receipt per mint
-    Srv->>Srv: one FundsIn (rgbOpId == mint OpId) + one BridgeFundsIn,<br/>depth ≥ EVM_MIN_CONFIRMATIONS ⇒ verified locks
+    Srv->>Rpc: request deposit receipt and canonical block, safe head
+    Srv->>Srv: one FundsIn (rgbOpId == terminal mint OpId) + one BridgeFundsIn,<br/>safe coverage + canonical blockHash match ⇒ terminal lock verified
 
     Note over Srv,Anchor: 4 — consignment and PSBT (validate_destination_anchor)
     Srv->>Rgb: size cap, keccak256(consignment) == consignment_hash,<br/>rgb-ops validation (BFA only, mints vs verified locks)

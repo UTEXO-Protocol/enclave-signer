@@ -87,7 +87,6 @@ sequenceDiagram
 | `SPV_MAX_TIP_AGE_SECS` | 7200 | Maximum age of the header-chain tip. |
 | `SPV_MAX_TIP_FUTURE_SECS` | 7200 | Maximum time the tip can be in the future. |
 | `MAX_RELAY_TIP_LAG_BLOCKS` | 100 | Maximum distance from the BtcRelay tip to the enclave tip. |
-| `EVM_MIN_CONFIRMATIONS` | 12 (default) | Minimum depth of each deposit receipt. Attested. |
 | `fundsOut` selector | `0x340276aa` | Pools route. |
 | `lzFundsOut` selector | from the enclave ABI | LayerZero route. |
 | Calldata cap | 96 KiB | Maximum calldata size. |

@@ -117,7 +117,6 @@ fn verify_request_deposit(
     crate::networks::evm::events::verify_rgb_funds_in(
         &**client,
         &ctx.bridge_config.funds_in_contract,
-        ctx.evm_rpc_config.min_confirmations,
         tx_hash,
         mint_opid,
     )
@@ -160,7 +159,9 @@ mod burn_locks {
     use super::{bfa_burn_ancestry_events, ServerContext};
     use crate::config::BridgeConfig;
     use crate::error::Result;
-    use crate::networks::evm::events::{rgb_mint_deposit_id, EvmReceiptProvider, ReceiptData};
+    use crate::networks::evm::events::{
+        rgb_mint_deposit_id, BlockData, EvmReceiptProvider, ReceiptData,
+    };
     use crate::networks::rgb::validation::bfa_binding;
     use crate::state::EnclaveState;
     use crate::test_support::regtest_header_chain;
@@ -176,7 +177,11 @@ mod burn_locks {
             panic!("a burn's locks are derived, not read")
         }
 
-        fn get_block_number(&self) -> Result<u64> {
+        fn get_safe_block(&self) -> Result<Option<BlockData>> {
+            panic!("a burn's locks are derived, not read")
+        }
+
+        fn get_block_by_number(&self, _: u64) -> Result<Option<BlockData>> {
             panic!("a burn's locks are derived, not read")
         }
     }

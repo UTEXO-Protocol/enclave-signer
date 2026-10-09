@@ -36,11 +36,10 @@ pub(crate) fn bridge_funds_in_data(gross: u64, net: u64, commission: u64, dest: 
     d
 }
 
-/// In-memory EVM RPC: a fixed receipt and chain head.
+/// In-memory EVM RPC: a fixed receipt in the safe canonical chain.
 #[cfg(feature = "evm-rpc")]
 pub(crate) struct FakeEvm {
     pub receipt: Option<crate::networks::evm::events::ReceiptData>,
-    pub head: u64,
 }
 
 #[cfg(feature = "evm-rpc")]
@@ -52,8 +51,27 @@ impl crate::networks::evm::events::EvmReceiptProvider for FakeEvm {
         Ok(self.receipt.clone())
     }
 
-    fn get_block_number(&self) -> crate::error::Result<u64> {
-        Ok(self.head)
+    fn get_safe_block(
+        &self,
+    ) -> crate::error::Result<Option<crate::networks::evm::events::BlockData>> {
+        use crate::networks::evm::events::BlockData;
+        Ok(Some(BlockData {
+            number: self.receipt.as_ref().map_or(0, |r| r.block_number),
+            hash: self.receipt.as_ref().map_or([0x42; 32], |r| r.block_hash),
+        }))
+    }
+
+    fn get_block_by_number(
+        &self,
+        number: u64,
+    ) -> crate::error::Result<Option<crate::networks::evm::events::BlockData>> {
+        Ok(self
+            .receipt
+            .as_ref()
+            .map(|receipt| crate::networks::evm::events::BlockData {
+                number,
+                hash: receipt.block_hash,
+            }))
     }
 }
 

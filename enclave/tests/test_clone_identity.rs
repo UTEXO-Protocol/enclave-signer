@@ -37,7 +37,6 @@ fn context() -> (BridgeConfig, SecurityPolicy) {
         EvmDataSource::RawRpc,
         None,
         "electrum.test",
-        12,
     );
     assert!(matches!(policy, SecurityPolicy::Production(_)));
     (cfg, policy)

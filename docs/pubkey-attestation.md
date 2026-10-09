@@ -144,7 +144,7 @@ both the enclave and every verifier share so the bytes are identical.
 
 ```
 policy_commitment =
-    u8(POLICY_COMMITMENT_V8 = 8)                    // version tag
+    u8(POLICY_COMMITMENT_V9 = 9)                    // version tag
     // Production (release, fully-pinned bridge signer):
     u8(0x01)                                        // production discriminant
     u8(allow_vanilla_psbt)                          // plain-BTC path enabled?
@@ -155,7 +155,6 @@ policy_commitment =
     chain_id_be8 || bridge_contract(20)
     u32_be(len(rgb_asset_id)) || rgb_asset_id_utf8
     funds_in_contract(20)                           // authorized event emitter
-    evm_min_confirmations_be8                       // required receipt depth
     u32_be(len(electrum_host)) || electrum_host     // Electrum host set at launch
     u8(evm_rpc_tls_present)                         // 0 absent; 1 followed by:
       u32_be(len(host)) || host || ca_sha256(32)    //   EVM RPC host, SHA-256 of the CA DER, set at launch
@@ -173,6 +172,17 @@ policy_commitment =
     // Development (debug/test/dev-feature/non-bridge/unpinned build):
     u8(0x00)                                        // development discriminant
 ```
+
+V9 removes V8's confirmation-count field and binds a fixed deposit rule: every
+EVM `FundsIn` receipt must be at or below the RPC's `safe` head, with its block
+hash matching the canonical block at that height. Safe-chain membership has no
+configuration switch or fallback to a confirmation count. The pinned
+RPC remains trusted for these responses; this is not an EVM consensus proof.
+
+The version change makes V8 depth-only commitments incompatible with V9, even
+when all configurable values match. Verifiers reject V8 policy bytes, and clone
+peers reject the different policy commitment. Deploy V9 enclave images and
+verifiers together with updated approved EIF measurements.
 
 The tuple omits the Bitcoin network, concrete sats budgets, the Electrum/Esplora
 URL scheme and port, and the EVM RPC TLS port. The scheme needs no field: a
@@ -282,7 +292,6 @@ attest-verify \
     --expect-signer-role burn \
     --expect-funds-in-contract 0x6711f1a319B37847fa0234181C34D883774c4951 \
     --expect-token-contract 0xFd086bC7CD5C481DCC9C85ebE478A1C0b69FCbb9 \
-    --expect-evm-min-confirmations 12 \
     --expect-electrum-host <electrum host> \
     --expect-evm-rpc-host <rpc host> \
     --expect-evm-rpc-ca-sha256 <64-hex-chars>
@@ -313,7 +322,6 @@ attest-verify \
 attest-verify --endpoint https://parent.example:50051 \
     --pcr0 <..> --pcr1 <..> --pcr2 <..> --expect-signer-role mint \
     --expect-funds-in-contract <hex20> --expect-token-contract <hex20> \
-    --expect-evm-min-confirmations 12 \
     --expect-electrum-host <electrum host> \
     --expect-kms-key-arn <arn> --expect-kms-region <region> --expect-kms-seed-id <id> \
     --expect-evm-rpc-host <rpc host> --expect-evm-rpc-ca-sha256 <64-hex-chars> \
