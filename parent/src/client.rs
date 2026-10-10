@@ -328,6 +328,8 @@ impl EnclaveClient {
                                 calldata_amount: req.calldata_amount,
                                 calldata_commission: req.calldata_commission,
                                 lz_release: req.lz_release,
+                                // The CLI has no record, so it signs V0 burns only.
+                                burn_destination: None,
                             },
                         ),
                     ),
