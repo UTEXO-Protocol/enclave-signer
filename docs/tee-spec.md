@@ -415,11 +415,17 @@ each enclave-checkable `burnId` input: `sourceBurnTxId` to the RGB OpId,
 `settlementData` (BFA) to the ancestry locks.
 
 **LayerZero route.** `lzFundsOut` runs the same binds as `fundsOut` (#264):
-the exact amount (`MS_BURNED_ASSET == amount`), the recipient
-(`MS_BURN_RECIPIENT` == the LayerZero `recipient`), `sourceBurnTxId == OpId`,
-the `settlementData` bind, and the BtcRelay proof. `dst_eid` and
-`min_amount_ld` are checked against the request only, because the burn does
-not name a destination chain. See Sec 13.
+the exact amount (`MS_BURNED_ASSET == amount`), the destination,
+`sourceBurnTxId == OpId`, the `settlementData` bind, and the BtcRelay proof.
+
+**Burn destination.** `MS_BURN_RECIPIENT` is either a legacy (V0) EVM address
+or the hash of a versioned destination record
+([burn-destination.md](burn-destination.md)). For V1 the request carries the
+record (`EvmDestination.burn_destination`). The enclave hashes it, compares the
+hash with the burn, and then requires the calldata `destinationChainId`,
+`dstEid` (LayerZero) and `recipient` to equal the record. A V0 burn names no
+chain, so it is released on the direct route only. `min_amount_ld` is checked
+against the request only.
 
 [Sign EVM](diagrams/03-seq-sign-evm.md)
 
@@ -706,7 +712,7 @@ delegated to the receiving contract and known gaps. Enforced checks fail closed.
 | P2 | Expected transition | The settling transition (the last witness's last burn, else its last transition) must be `TS_BURN`. Each ancestry mint needs a verified deposit. |
 | P3 | Exact amount | `MS_BURNED_ASSET` must equal calldata `amount`. The host's `rgb_amount` is not evidence. |
 | P4 | Valid calldata | Allowed selector, 96 KiB cap, canonical ABI encoding, and route-specific destination-chain check. |
-| P5 | Correct destination | Pinned chain and contract. The payee must match `MS_BURN_RECIPIENT`. The burn does not bind LayerZero `dstEid`. |
+| P5 | Correct destination | Pinned chain and contract. The payee, `destinationChainId` and LayerZero `dstEid` must match the burn destination (`MS_BURN_RECIPIENT`, V1 record). A V0 burn: direct route only. |
 | P6 | Release identity | RGB source chain 827166, empty source address, recomputed `burnId`, matching burn OpId, and exact settlement pairs. |
 | P7 | Accepted Bitcoin history | Each witness must belong to the retained chain. |
 | P8 | Inclusion and relay agreement | Merkle inclusion, confirmation depth, tip freshness, and the BtcRelay checks below. |
@@ -811,10 +817,8 @@ CCD builds. The swap flow is retired. The default feature set still has
 
 Known limits. Read them before deployment.
 
-- **LayerZero destination chain.** `lzFundsOut` runs the same burn binds as
-  `fundsOut` (#264). The burn does not name a destination chain, so `dstEid`
-  is not bound to the burn. A compromised backend can pay the bound recipient
-  address on another LayerZero chain. A fix needs a burn schema field.
+- **Stuck burns.** A V1 burn whose record is lost, or whose route is later
+  disabled, cannot be released. A refund path is planned for record V2.
 - **Release replay.** The burn signer keeps no release state. Replay
   protection is the `MultisigProxy` nonce and the Bridge `burnId` check. The
   EIP-712 deadline has no upper limit.

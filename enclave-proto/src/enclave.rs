@@ -326,6 +326,30 @@ pub struct EvmDestination {
     /// crosscheck. Absent for direct fundsOutCall releases.
     #[prost(message, optional, tag="8")]
     pub lz_release: ::core::option::Option<LzReleaseParams>,
+    /// burn_destination is the preimage of the burn's MS_BURN_RECIPIENT hash.
+    /// Required for a V1+ burn. Absent for a legacy (V0) burn, whose metadata
+    /// holds the EVM address itself. Transport only: the enclave hashes the
+    /// typed fields, never these protobuf bytes.
+    #[prost(message, optional, tag="9")]
+    pub burn_destination: ::core::option::Option<BurnDestination>,
+}
+/// BurnDestination carries the fields of a versioned burn destination record.
+/// The hash rules per version are in enclave-signer docs/burn-destination.md.
+/// A new version adds new fields; existing field numbers never change.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct BurnDestination {
+    /// version selects the record type. 1 = UtexoBurnDestinationV1.
+    #[prost(uint32, tag="1")]
+    pub version: u32,
+    /// destination_chain_id is the Bridge route chain id (fundsOut destinationChainId).
+    #[prost(uint64, tag="2")]
+    pub destination_chain_id: u64,
+    /// dst_eid is the LayerZero endpoint id. 0 means a direct fundsOut.
+    #[prost(uint32, tag="3")]
+    pub dst_eid: u32,
+    /// recipient is the chain-native payee address, 1 to 32 bytes.
+    #[prost(bytes="vec", tag="4")]
+    pub recipient: ::prost::alloc::vec::Vec<u8>,
 }
 /// LzReleaseParams carries the LayerZero-specific crosscheck fields for an
 /// lzFundsOutCall release. Absent means a direct fundsOutCall release.

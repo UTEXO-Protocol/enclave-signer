@@ -55,6 +55,7 @@ fn evm_destination(destination_amount: u64, commission: u64) -> DestinationNetwo
         calldata_amount: destination_amount,
         calldata_commission: commission,
         lz_release: None,
+        burn_destination: None,
     })
 }
 
