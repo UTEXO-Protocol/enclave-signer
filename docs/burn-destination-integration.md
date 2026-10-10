@@ -43,20 +43,24 @@ wallet ----(record + burn)----> backend (tricorn) ---> listener ---> enclave
 - Check `hash_v1(record) == MS_BURN_RECIPIENT` of the burn. Refuse a mismatch
   early.
 - Store the record with the burn. Losing it makes the burn unreleasable.
+- Send it in node `EvmSignData.burn_destination` with the sign job.
 - Pick the route from the record: `dstEid == 0` -> `fundsOut`, else
   `lzFundsOut` with `dstEid` and `destinationChainId` from the record.
 - A V0 burn (legacy address) goes on the direct route only.
 
 ### Listener (federated-signer-node)
 
-- Copy the record into `EvmDestination.burn_destination`. No other logic.
+- Copy the record from node `EvmSignData.burn_destination` into parent
+  `EnrichedEvmPayload.burn_destination`. No other logic. Do not rebuild it
+  from the calldata: the padded recipient loses its length.
 
 ### Proto (federated-signer-proto)
 
-- Add `BurnDestination` and `EvmDestination.burn_destination = 9`
-  and `EnrichedEvmPayload.burn_destination = 10`
-  (branch `feat/burn-destination`, commit `7d287a7`). Not yet on `main`.
-- enclave-signer vendors and pins that commit. Re-pin after the merge.
+- One field per hop, branch `feat/burn-destination` (not yet on `main`):
+  - backend -> listener: node `EvmSignData.burn_destination = 4`;
+  - listener -> parent: parent `EnrichedEvmPayload.burn_destination = 10`;
+  - parent -> enclave: enclave `EvmDestination.burn_destination = 9`.
+- enclave-signer vendors and pins the branch head. Re-pin after the merge.
 
 ### Enclave (enclave-signer)
 
