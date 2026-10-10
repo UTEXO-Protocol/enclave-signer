@@ -5,6 +5,8 @@
 
 use crate::config::BtcRelayMode;
 use crate::error::{EnclaveError, Result};
+#[cfg(feature = "rgb-mint-burn")]
+use crate::networks::evm::burn_destination::{self, BurnDestinationRecord};
 use crate::networks::evm::validation::ReleaseIdentity;
 use crate::networks::rgb::spv::HeaderChain;
 use crate::networks::rgb::spv_crosscheck;
@@ -70,22 +72,21 @@ pub fn validate_funds_out_amount(
     flow::assert_funds_out_amount(source_amount, calldata_amount)
 }
 
-/// Payout bind for the burn flow: the burner's target (`MS_BURN_RECIPIENT`)
-/// must equal the final payee. That is the `fundsOut` `recipient`, or the
-/// `lzFundsOut` LayerZero `recipient`. `dstEid` is not bound: the burn does not
-/// name a chain.
+/// Payout bind for the burn flow: the release must be the one that the burn's
+/// `MS_BURN_RECIPIENT` names: route, `dstEid`, `destinationChainId` and payee.
+/// Rules: [`burn_destination`] and `docs/burn-destination.md`.
 ///
-/// This makes a redemption unforgeable. The 32 bytes are in the burn
-/// operation, so its OpId covers them and the spender of the burned units signs
-/// them. A holder of a consignment copy cannot redirect the release.
+/// The 32 bytes are in the burn operation, so its OpId covers them and the
+/// spender of the burned units signs them.
 ///
-/// This does not check the burn shape or amount. The caller must run
-/// [`validate_funds_out_amount`] first. Under `rgb-mint-burn`, it rejects
-/// anything that is not a `Burn` of exactly the released amount.
+/// The caller must run [`validate_funds_out_amount`] first. Under
+/// `rgb-mint-burn`, it rejects anything that is not a `Burn` of exactly the
+/// released amount.
 #[cfg(feature = "rgb-mint-burn")]
 pub fn validate_funds_out_burn_recipient(
     release: &ReleaseIdentity,
     validated: &ValidatedConsignment,
+    record: Option<&BurnDestinationRecord>,
 ) -> Result<()> {
     let last = validated.last_transition.as_ref().ok_or_else(|| {
         EnclaveError::CrossCheck(
@@ -93,30 +94,38 @@ pub fn validate_funds_out_burn_recipient(
         )
     })?;
 
-    let recipient = last.burn_recipient.as_deref().ok_or_else(|| {
+    let meta = last.burn_recipient.as_deref().ok_or_else(|| {
         EnclaveError::CrossCheck(
             "burn transition carries no MS_BURN_RECIPIENT metadata - this burn cannot authorise \
              a bridged redemption"
                 .into(),
         )
     })?;
-    // 32 bytes with a 20-byte EVM address in the low bytes, ABI-style. The
-    // high 12 bytes must be zero. Truncation would pay a target that nobody
-    // signed.
-    if recipient.len() != 32 || recipient[..12] != [0u8; 12] {
+    let target = burn_destination::resolve(meta, record)?;
+
+    // `None` = direct fundsOut. A legacy (V0) burn names no chain, so it is
+    // direct only.
+    if target.dst_eid != release.dst_eid {
         return Err(EnclaveError::CrossCheck(format!(
-            "MS_BURN_RECIPIENT is not a left-padded EVM address: 0x{}",
-            hex::encode(recipient)
+            "dstEid mismatch: burn names {:?}, calldata sends to {:?} (None = direct fundsOut)",
+            target.dst_eid, release.dst_eid
         )));
     }
-    if recipient != release.recipient.as_slice() {
+    if let Some(chain) = target.destination_chain_id {
+        if release.destination_chain_id != alloy_primitives::U256::from(chain) {
+            return Err(EnclaveError::CrossCheck(format!(
+                "destinationChainId mismatch: burn names {chain}, calldata routes to {}",
+                release.destination_chain_id
+            )));
+        }
+    }
+    if target.recipient != release.recipient {
         return Err(EnclaveError::CrossCheck(format!(
             "recipient mismatch: burn commits to 0x{}, calldata releases to 0x{}",
-            hex::encode(recipient),
+            hex::encode(target.recipient),
             hex::encode(release.recipient)
         )));
     }
-
     Ok(())
 }
 

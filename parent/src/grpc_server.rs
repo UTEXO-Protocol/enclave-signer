@@ -250,6 +250,14 @@ impl ParentAdapterService {
                             min_amount_ld: lr.min_amount_ld,
                             recipient: lr.recipient,
                         }),
+                        burn_destination: payload.burn_destination.map(|bd| {
+                            enclave_proto::BurnDestination {
+                                version: bd.version,
+                                destination_chain_id: bd.destination_chain_id,
+                                dst_eid: bd.dst_eid,
+                                recipient: bd.recipient,
+                            }
+                        }),
                     },
                 )
             }
@@ -801,5 +809,37 @@ impl ParentService for ParentAdapterService {
                 other
             ))),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn evm_destination_forwards_burn_destination() {
+        let payload = grpc_proto::EnrichedEvmPayload {
+            burn_destination: Some(grpc_proto::BurnDestination {
+                version: 1,
+                destination_chain_id: 137,
+                dst_eid: 30109,
+                recipient: vec![0x42; 20],
+            }),
+            ..Default::default()
+        };
+        let dest =
+            ParentAdapterService::enclave_destination_network(sign_request::Data::EvmData(payload));
+        let enclave_proto::sign_request::DestinationNetwork::EvmDestination(evm) = dest else {
+            panic!("expected an EVM destination");
+        };
+        assert_eq!(
+            evm.burn_destination,
+            Some(enclave_proto::BurnDestination {
+                version: 1,
+                destination_chain_id: 137,
+                dst_eid: 30109,
+                recipient: vec![0x42; 20],
+            })
+        );
     }
 }

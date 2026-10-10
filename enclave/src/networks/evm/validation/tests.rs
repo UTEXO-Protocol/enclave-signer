@@ -66,6 +66,7 @@ fn destination() -> EvmDestination {
         calldata_amount: 1000,
         calldata_commission: 0,
         lz_release: None,
+        burn_destination: None,
     }
 }
 
@@ -494,6 +495,8 @@ fn rgb_release() -> ReleaseIdentity {
         settlement_data: Vec::new(),
         source_burn_tx_id: [0x5b; 32],
         recipient: [0u8; 32],
+        destination_chain_id: U256::ZERO,
+        dst_eid: None,
         proof: Vec::new(),
     }
 }
@@ -569,6 +572,8 @@ fn direct_route_surfaces_its_release_identity() {
                     padded[12..].copy_from_slice(&[0x22; ADDRESS_LEN]);
                     padded
                 },
+                destination_chain_id: U256::from(1u64),
+                dst_eid: None,
                 proof: vec![0xf0],
             }
         );
@@ -607,6 +612,8 @@ fn entrypoint_route_surfaces_its_release_identity() {
                 settlement_data: vec![0xe1],
                 source_burn_tx_id: [0x6c; 32],
                 recipient: [0x05; 32],
+                destination_chain_id: U256::from(137u64),
+                dst_eid: Some(30101),
                 proof: vec![0xf1],
             }
         );

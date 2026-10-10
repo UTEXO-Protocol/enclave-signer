@@ -124,8 +124,8 @@ pub struct TransitionSummary {
     ///
     /// `None` for a non-burn, or for a malformed burn (rgbstd rejects it).
     pub burned_asset_amount: Option<u64>,
-    /// EVM-side recipient of the burn proceeds, from the BFA
-    /// `MS_BURN_RECIPIENT` metadata: exactly 32 bytes, as the schema requires.
+    /// Burn destination, from the BFA `MS_BURN_RECIPIENT` metadata: exactly
+    /// 32 bytes, as the schema requires. A V0 address or a V1 record hash.
     /// `None` for a non-burn.
     pub burn_recipient: Option<Vec<u8>>,
 }

@@ -294,6 +294,7 @@ mod source_burn {
 #[cfg(feature = "rgb-mint-burn")]
 mod burn {
     use super::*;
+    use crate::networks::evm::burn_destination::BurnDestinationRecord;
     use crate::networks::rgb::validation::{bfa, TransitionSummary};
 
     const RECIPIENT: [u8; 20] = [0x42; 20];
@@ -322,14 +323,14 @@ mod burn {
     fn passes_when_the_burn_names_the_calldata_recipient() {
         let cd = mock_funds_out_calldata_to(Address::from(RECIPIENT), 1000, Bytes::new());
         let validated = validated_with_last(burn_transition(Some(1000), Some(padded(RECIPIENT))));
-        assert!(validate_funds_out_burn_recipient(&params_of(&cd), &validated).is_ok());
+        assert!(validate_funds_out_burn_recipient(&params_of(&cd), &validated, None).is_ok());
     }
 
     #[test]
     fn rejects_a_burn_that_names_no_recipient() {
         let cd = mock_funds_out_calldata_to(Address::from(RECIPIENT), 1000, Bytes::new());
         let validated = validated_with_last(burn_transition(Some(1000), None));
-        assert!(validate_funds_out_burn_recipient(&params_of(&cd), &validated).is_err());
+        assert!(validate_funds_out_burn_recipient(&params_of(&cd), &validated, None).is_err());
     }
 
     /// The purpose of the field: a release must go only to the burner's
@@ -338,18 +339,83 @@ mod burn {
     fn rejects_a_recipient_the_burn_did_not_commit_to() {
         let cd = mock_funds_out_calldata_to(Address::from([0x99; 20]), 1000, Bytes::new());
         let validated = validated_with_last(burn_transition(Some(1000), Some(padded(RECIPIENT))));
-        assert!(validate_funds_out_burn_recipient(&params_of(&cd), &validated).is_err());
+        assert!(validate_funds_out_burn_recipient(&params_of(&cd), &validated, None).is_err());
     }
 
-    /// A non-zero high part is not this address. Truncation to the low 20
-    /// bytes would pay a target that nobody signed.
+    /// A non-zero high part is a V1 hash, not this address. With no record it
+    /// fails. Truncation to the low 20 bytes would pay a target nobody signed.
     #[test]
     fn rejects_a_recipient_with_a_dirty_high_half() {
         let cd = mock_funds_out_calldata_to(Address::from(RECIPIENT), 1000, Bytes::new());
         let mut dirty = padded(RECIPIENT);
         dirty[0] = 1;
         let validated = validated_with_last(burn_transition(Some(1000), Some(dirty)));
-        assert!(validate_funds_out_burn_recipient(&params_of(&cd), &validated).is_err());
+        assert!(validate_funds_out_burn_recipient(&params_of(&cd), &validated, None).is_err());
+    }
+
+    // ---- V1 (hashed record) on the direct route ----
+
+    const HOME: u64 = 42161;
+
+    /// A direct release to `RECIPIENT` on `HOME`.
+    fn direct_release() -> ReleaseIdentity {
+        let cd = mock_funds_out_calldata_to(Address::from(RECIPIENT), 1000, Bytes::new());
+        let mut r = params_of(&cd);
+        r.destination_chain_id = U256::from(HOME);
+        r
+    }
+
+    fn v1_burn(rec: &BurnDestinationRecord) -> ValidatedConsignment {
+        validated_with_last(burn_transition(Some(1000), Some(rec.hash_v1().to_vec())))
+    }
+
+    /// Checks `direct_release` against a V1 burn of this record.
+    fn check_v1(chain: u64, eid: u32, recipient: &[u8]) -> Result<()> {
+        let rec = BurnDestinationRecord::v1(chain, eid, recipient);
+        validate_funds_out_burn_recipient(&direct_release(), &v1_burn(&rec), Some(&rec))
+    }
+
+    #[test]
+    fn v1_direct_passes() {
+        check_v1(HOME, 0, &RECIPIENT).expect("V1 direct release must pass");
+    }
+
+    #[test]
+    fn v1_direct_rejects_another_chain() {
+        let err = check_v1(1, 0, &RECIPIENT).unwrap_err();
+        assert!(
+            err.to_string().contains("destinationChainId mismatch"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn v1_direct_rejects_another_recipient() {
+        let err = check_v1(HOME, 0, &[0x99; 20]).unwrap_err();
+        assert!(err.to_string().contains("recipient mismatch"), "{err}");
+    }
+
+    #[test]
+    fn v1_layerzero_burn_rejects_a_direct_release() {
+        let err = check_v1(HOME, 30101, &RECIPIENT).unwrap_err();
+        assert!(err.to_string().contains("dstEid mismatch"), "{err}");
+    }
+
+    #[test]
+    fn v1_rejects_a_missing_record() {
+        let rec = BurnDestinationRecord::v1(HOME, 0, &RECIPIENT);
+        assert!(
+            validate_funds_out_burn_recipient(&direct_release(), &v1_burn(&rec), None).is_err()
+        );
+    }
+
+    #[test]
+    fn v0_rejects_a_record() {
+        let validated = validated_with_last(burn_transition(Some(1000), Some(padded(RECIPIENT))));
+        let rec = BurnDestinationRecord::v1(HOME, 0, &RECIPIENT);
+        assert!(
+            validate_funds_out_burn_recipient(&direct_release(), &validated, Some(&rec)).is_err()
+        );
     }
 }
 
@@ -655,6 +721,7 @@ mod settlement {
 #[cfg(feature = "bfa-mint")]
 mod lz_route {
     use super::*;
+    use crate::networks::evm::burn_destination::BurnDestinationRecord;
     use crate::networks::evm::events::VerifiedLock;
     use crate::networks::evm::validation::{decode_lz_funds_out_params, lzFundsOutCall};
     use crate::networks::rgb::validation::{bfa, TransitionSummary};
@@ -677,7 +744,15 @@ mod lz_route {
         r
     }
 
-    fn burn() -> ValidatedConsignment {
+    const DST_CHAIN: u64 = 137;
+    const DST_EID: u32 = 30109;
+
+    /// The V1 record the burner signed: `DST_CHAIN` via `DST_EID` to `0x42..`.
+    fn record() -> BurnDestinationRecord {
+        BurnDestinationRecord::v1(DST_CHAIN, DST_EID, &[0x42; 20])
+    }
+
+    fn burn_with_meta(meta: Vec<u8>) -> ValidatedConsignment {
         validated_with_last(TransitionSummary {
             op_id: OP_ID_HEX.into(),
             transition_type: bfa::TS_BURN,
@@ -685,8 +760,12 @@ mod lz_route {
             asset_output_amount: 0,
             outputs: Vec::new(),
             burned_asset_amount: Some(BURNED),
-            burn_recipient: Some(padded_recipient().to_vec()),
+            burn_recipient: Some(meta),
         })
+    }
+
+    fn burn() -> ValidatedConsignment {
+        burn_with_meta(record().hash_v1().to_vec())
     }
 
     /// An LZ release that matches [`burn`] and [`LOCK`] in every bound field.
@@ -699,11 +778,11 @@ mod lz_route {
             amount: U256::from(BURNED),
             burnId: U256::ZERO,
             sourceChainId: U256::ZERO,
-            destinationChainId: U256::from(137u64),
+            destinationChainId: U256::from(DST_CHAIN),
             sourceAddress: String::new(),
             proof: Bytes::new(),
             settlementData: Bytes::from(settlement.abi_encode_params()),
-            dstEid: 30109,
+            dstEid: DST_EID,
             recipient: FixedBytes(padded_recipient()),
             minAmountLD: U256::from(BURNED),
             extraOptions: Bytes::new(),
@@ -722,8 +801,61 @@ mod lz_route {
         let validated = burn();
         validate_funds_out_amount(&r, &validated)?;
         validate_funds_out_source_burn_tx_id(&r, &validated)?;
-        validate_funds_out_burn_recipient(&r, &validated)?;
+        validate_funds_out_burn_recipient(&r, &validated, Some(&record()))?;
         validate_funds_out_settlement(&r, &[LOCK])
+    }
+
+    /// The audit case: the backend picks another LayerZero endpoint.
+    #[test]
+    fn rejects_an_lz_dst_eid_the_burn_did_not_name() {
+        let err = check(lzFundsOutCall {
+            dstEid: 30110,
+            ..honest()
+        })
+        .unwrap_err();
+        assert!(err.to_string().contains("dstEid mismatch"), "{err}");
+    }
+
+    /// The audit case: route and commission of another chain.
+    #[test]
+    fn rejects_an_lz_destination_chain_the_burn_did_not_name() {
+        let err = check(lzFundsOutCall {
+            destinationChainId: U256::from(10u64),
+            ..honest()
+        })
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("destinationChainId mismatch"),
+            "{err}"
+        );
+    }
+
+    /// A legacy burn names no chain, so it cannot leave via LayerZero.
+    #[test]
+    fn rejects_a_legacy_burn_on_the_lz_route() {
+        let r = release(honest());
+        let validated = burn_with_meta(padded_recipient().to_vec());
+        let err = validate_funds_out_burn_recipient(&r, &validated, None).unwrap_err();
+        assert!(err.to_string().contains("dstEid mismatch"), "{err}");
+    }
+
+    #[test]
+    fn rejects_an_lz_release_without_the_record() {
+        let r = release(honest());
+        assert!(validate_funds_out_burn_recipient(&r, &burn(), None).is_err());
+    }
+
+    /// A 32-byte (non-EVM) recipient fills the whole LayerZero word.
+    #[test]
+    fn passes_a_32_byte_lz_recipient() {
+        let rec = BurnDestinationRecord::v1(DST_CHAIN, DST_EID, &[0x77; 32]);
+        let validated = burn_with_meta(rec.hash_v1().to_vec());
+        let r = release(lzFundsOutCall {
+            recipient: FixedBytes([0x77; 32]),
+            ..honest()
+        });
+        validate_funds_out_burn_recipient(&r, &validated, Some(&rec))
+            .expect("32-byte LZ recipient must pass");
     }
 
     #[test]
