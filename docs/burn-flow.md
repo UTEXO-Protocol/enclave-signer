@@ -81,7 +81,7 @@ sequenceDiagram
 | `TS_BURN` | 8010 | Burn transition. The only settling transition the burn signer accepts. |
 | `TS_BRIDGE` | 8014 | Mint transition. It shows in the burn's history (the ancestry). |
 | `MS_BURNED_ASSET` | 1001 | Burn metadata: the number of units destroyed (u64). |
-| `MS_BURN_RECIPIENT` | 1003 | Burn metadata: 32 bytes. A left-padded EVM address. |
+| `MS_BURN_RECIPIENT` | 1003 | Burn metadata: 32 bytes. A left-padded EVM address (V0), or the hash of a destination record (V1). See [burn-destination.md](burn-destination.md). |
 | `RGB_CHAIN_ID` | 827166 | The bridge's id for the RGB network. Compiled in. |
 | `SPV_MIN_CONFIRMATIONS` | 6 | Minimum depth of each Bitcoin transaction. |
 | `SPV_MAX_TIP_AGE_SECS` | 7200 | Maximum age of the header-chain tip. |
@@ -201,20 +201,24 @@ Both routes (`fundsOut` and `lzFundsOut`), in this order:
 - **B5.6** Amount: `MS_BURNED_ASSET` must **equal** the calldata `amount`.
 - **B5.7** Burn id: `sourceBurnTxId` must not be zero. It must equal the
   OpId of the burn transition.
-- **B5.8** Recipient: `MS_BURN_RECIPIENT` must be 32 bytes. The high 12 bytes
-  must be zero. It must equal the final payee: the calldata `recipient`,
-  left-padded, on the pools route, or the LayerZero `recipient` on the
-  LayerZero route.
+- **B5.8** Destination: `MS_BURN_RECIPIENT` must be 32 bytes.
+  - High 12 bytes zero (V0): the low 20 bytes are an EVM address. The request
+    must carry no `burn_destination`. Pools route only. The calldata
+    `recipient` must equal the address.
+  - Otherwise (V1): the request must carry `burn_destination`, and its hash
+    must equal the 32 bytes ([burn-destination.md](burn-destination.md)).
+    `destinationChainId` must equal the record. `dstEid == 0` means the pools
+    route, with a 20-byte `recipient` equal to the calldata. `dstEid != 0`
+    means the LayerZero route: the calldata `dstEid` must equal it, and the
+    left-padded record `recipient` must equal the LayerZero `recipient`.
 - **B5.9** Settlement: `settlementData` is
   `abi.encode(bytes32[] operationIds, uint256[] netAmounts)`. It must be
   canonical. The two arrays must have the same length. The ids must be in
   strictly ascending order, so no id repeats. The pairs must equal, as a set,
   the verified locks from Stage 1. An empty list is refused.
 
-> **Warning - LayerZero route.** The burn does not name a destination chain,
-> so `dst_eid` is not bound to the burn. The enclave checks `dst_eid` and
-> `min_amount_ld` against the request only. See
-> [spec Sec 13](tee-spec.md#13-implementation-status).
+> **Note - LayerZero route.** Only a V1 burn can leave via LayerZero, because
+> only V1 names a chain. `min_amount_ld` is checked against the request only.
 
 ### Stage 6 - Sign
 

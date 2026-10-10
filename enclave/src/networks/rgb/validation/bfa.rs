@@ -32,8 +32,10 @@ pub const TS_BURN: u16 = 8010;
 /// BFA burn metadata key for the destroyed `OS_ASSET` amount. The value is a
 /// strict-encoded `rgbstd::Amount` (u64).
 pub const MS_BURNED_ASSET: u16 = 1001;
-/// BFA burn metadata key for the EVM-side redemption recipient: 32 opaque
-/// bytes, mandatory on each `TS_BURN`. Consensus does not validate them.
+/// BFA burn metadata key for the redemption destination: 32 opaque bytes,
+/// mandatory on each `TS_BURN`. A left-padded EVM address (V0) or a
+/// destination record hash (V1), see `networks::evm::burn_destination`.
+/// Consensus does not validate them.
 /// They are inside the burn operation, so its OpId covers them and the
 /// spender of the burned units signs them. Thus a release can trust them.
 pub const MS_BURN_RECIPIENT: u16 = 1003;
