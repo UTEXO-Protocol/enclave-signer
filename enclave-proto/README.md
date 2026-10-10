@@ -56,8 +56,8 @@ recorded provenance. Do not change only the local generated comments.
 | | |
 |---|---|
 | Upstream | https://github.com/UTEXO-Protocol/federated-signer-proto |
-| Commit | `607ba865af97273e17947749a7bf72c96cb631b0` (branch `feat/burn-destination`, "feat(proto): add BurnDestination to EvmDestination") |
-| Commit date | 2026-10-10T05:35:27Z |
+| Commit | `7d287a7ce240d4d4402e6578fd86533e8153332e` (branch `feat/burn-destination`, "add destination to parents proto") |
+| Commit date | 2026-10-10T06:18:44Z |
 
 This is the same commit `parent/Cargo.toml` still pins as a git dependency, so
 both crates compile against one schema version. Keep them in lockstep.
@@ -71,7 +71,7 @@ both crates compile against one schema version. Keep them in lockstep.
 Verify against upstream (needs read access to the private repo):
 
 ```bash
-REV=607ba865af97273e17947749a7bf72c96cb631b0
+REV=7d287a7ce240d4d4402e6578fd86533e8153332e
 git clone https://github.com/UTEXO-Protocol/federated-signer-proto /tmp/fsp
 git -C /tmp/fsp checkout "$REV"
 diff /tmp/fsp/rust-gen/src/enclave/enclave.rs enclave-proto/src/enclave.rs

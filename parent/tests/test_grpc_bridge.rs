@@ -481,6 +481,7 @@ async fn grpc_sign_evm_roundtrip() {
         calldata_commission: 0,
         unsigned_tx: Vec::new(),
         lz_release: None,
+        burn_destination: None,
     };
 
     let req = sign_evm_request(rgb_source(0, 0, vec![], vec![], String::new()), payload);
@@ -516,6 +517,7 @@ async fn grpc_sign_evm_gas_tx_forwards_unsigned_tx() {
         calldata_commission: 0,
         unsigned_tx: vec![0x02; 10],
         lz_release: None,
+        burn_destination: None,
     };
     let req = SignRequest {
         common: Some(common(0, 84, DataType::EvmGasTx)),
@@ -591,6 +593,7 @@ async fn grpc_sign_refuses_crossed_reply_type() {
         calldata_commission: 0,
         unsigned_tx: Vec::new(),
         lz_release: None,
+        burn_destination: None,
     };
     let rgb_payload = enriched::EnrichedRgbPayload {
         operation_idx: 5,
@@ -737,6 +740,7 @@ async fn grpc_evm_passes_enriched_fields_through() {
         calldata_commission: 5,
         unsigned_tx: Vec::new(),
         lz_release: None,
+        burn_destination: None,
     };
 
     let req = sign_evm_request(
@@ -825,6 +829,7 @@ async fn grpc_evm_forwards_raw_consignment_bytes() {
         calldata_commission: 0,
         unsigned_tx: Vec::new(),
         lz_release: None,
+        burn_destination: None,
     };
 
     let req = sign_evm_request(
@@ -876,6 +881,7 @@ async fn grpc_sign_rejects_unknown_data_type() {
             calldata_commission: 0,
             unsigned_tx: Vec::new(),
             lz_release: None,
+            burn_destination: None,
         };
 
         // Change only the type so missing payload fields cannot cause the rejection.

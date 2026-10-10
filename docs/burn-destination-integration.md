@@ -54,7 +54,8 @@ wallet ----(record + burn)----> backend (tricorn) ---> listener ---> enclave
 ### Proto (federated-signer-proto)
 
 - Add `BurnDestination` and `EvmDestination.burn_destination = 9`
-  (branch `feat/burn-destination`, commit `607ba86`). Not yet on `main`.
+  and `EnrichedEvmPayload.burn_destination = 10`
+  (branch `feat/burn-destination`, commit `7d287a7`). Not yet on `main`.
 - enclave-signer vendors and pins that commit. Re-pin after the merge.
 
 ### Enclave (enclave-signer)
