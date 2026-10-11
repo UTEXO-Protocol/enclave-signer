@@ -47,6 +47,26 @@ struct GuardState {
     seen: HashMap<[u8; 32], u64>,
     next_generation: u64,
     order: VecDeque<(Instant, [u8; 32])>,
+    /// Completed bridge signatures for idempotent retries (issue #220).
+    /// Keyed by the operation key, with the same TTL/capacity eviction as
+    /// `seen`. A retry with the same key but a different fingerprint (mutated
+    /// signing data) must still be refused.
+    responses: HashMap<[u8; 32], (StoredOpResponse, Instant)>,
+}
+
+/// Completed bridge signature cached for idempotent retries.
+///
+/// Stored alongside the replay key after a successful sign. An identical retry
+/// (same operation key, same request fingerprint) returns the stored response
+/// instead of being refused as a duplicate or signed twice.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StoredOpResponse {
+    /// Hash of the canonical signing request (PSBT + consignment + amount).
+    pub fingerprint: [u8; 32],
+    /// Serialized PSBT with enclave partial signatures.
+    pub signed_psbt: Vec<u8>,
+    /// Number of inputs signed by the enclave.
+    pub inputs_signed: u32,
 }
 
 impl Default for NonceReplayGuard {
@@ -62,6 +82,7 @@ impl NonceReplayGuard {
                 seen: HashMap::new(),
                 next_generation: 0,
                 order: VecDeque::new(),
+                responses: HashMap::new(),
             }),
             max,
             ttl,
@@ -103,6 +124,7 @@ impl NonceReplayGuard {
             if now.saturating_duration_since(seen_at) >= self.ttl {
                 g.order.pop_front();
                 g.seen.remove(&old);
+                g.responses.remove(&old);
             } else {
                 break;
             }
@@ -122,6 +144,7 @@ impl NonceReplayGuard {
             match g.order.pop_front() {
                 Some((_, old)) => {
                     g.seen.remove(&old);
+                    g.responses.remove(&old);
                 }
                 None => break,
             }
@@ -169,6 +192,30 @@ impl NonceReplayGuard {
         }
     }
 
+    /// Cache a completed bridge signature for idempotent retries.
+    /// Called after a successful sign, before the response is written.
+    /// A rollback of the replay key (failed write) does not clear the cache:
+    /// the next retry re-signs only if the cache misses or conflicts.
+    pub fn store_op_response(&self, key: [u8; 32], response: StoredOpResponse) {
+        let mut g = self.inner.lock().unwrap_or_else(|p| p.into_inner());
+        g.responses.insert(key, (response, Instant::now()));
+    }
+
+    /// Return the cached signature only for an identical retry: same operation
+    /// key and same request fingerprint, within the TTL. A conflicting retry
+    /// (same key, different signing data) returns `None` and stays refused.
+    pub fn op_response(&self, key: &[u8; 32], fingerprint: &[u8; 32]) -> Option<StoredOpResponse> {
+        let g = self.inner.lock().unwrap_or_else(|p| p.into_inner());
+        let (stored, stored_at) = g.responses.get(key)?;
+        if stored_at.elapsed() >= self.ttl {
+            return None;
+        }
+        if &stored.fingerprint != fingerprint {
+            return None;
+        }
+        Some(stored.clone())
+    }
+
     #[cfg(test)]
     pub fn seen_count(&self) -> usize {
         self.inner.lock().map(|g| g.seen.len()).unwrap_or(0)
@@ -198,5 +245,51 @@ impl Drop for ReplayReservation<'_> {
         if !self.committed {
             self.guard.remove(&self.nonce, self.generation);
         }
+    }
+}
+
+#[cfg(test)]
+mod stored_response_tests {
+    use super::*;
+
+    fn stored(fp: u8, psbt: &[u8]) -> StoredOpResponse {
+        StoredOpResponse {
+            fingerprint: [fp; 32],
+            signed_psbt: psbt.to_vec(),
+            inputs_signed: 2,
+        }
+    }
+
+    #[test]
+    fn identical_retry_returns_stored_response() {
+        let guard = NonceReplayGuard::with_capacity(16, Duration::from_secs(60));
+        let key = [7u8; 32];
+        guard.store_op_response(key, stored(1, b"signed"));
+        let hit = guard.op_response(&key, &[1u8; 32]).expect("cache hit");
+        assert_eq!(hit.signed_psbt, b"signed");
+        assert_eq!(hit.inputs_signed, 2);
+    }
+
+    #[test]
+    fn conflicting_fingerprint_does_not_match() {
+        let guard = NonceReplayGuard::with_capacity(16, Duration::from_secs(60));
+        let key = [7u8; 32];
+        guard.store_op_response(key, stored(1, b"signed"));
+        assert!(guard.op_response(&key, &[2u8; 32]).is_none());
+    }
+
+    #[test]
+    fn unknown_key_misses() {
+        let guard = NonceReplayGuard::with_capacity(16, Duration::from_secs(60));
+        assert!(guard.op_response(&[9u8; 32], &[1u8; 32]).is_none());
+    }
+
+    #[test]
+    fn expired_response_misses() {
+        let guard = NonceReplayGuard::with_capacity(16, Duration::from_millis(1));
+        let key = [7u8; 32];
+        guard.store_op_response(key, stored(1, b"signed"));
+        std::thread::sleep(Duration::from_millis(5));
+        assert!(guard.op_response(&key, &[1u8; 32]).is_none());
     }
 }
