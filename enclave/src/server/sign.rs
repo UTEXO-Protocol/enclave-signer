@@ -50,6 +50,34 @@ pub(super) fn handle_sign(
     // Refuse before any validation work while the key is not ready.
     ctx.state.with_keys(|_| Ok(()))?;
 
+    // Idempotent retry (issue #220): an identical request whose signature was
+    // already produced but never reached the caller returns the stored
+    // response instead of being refused as a duplicate. A conflicting retry
+    // (same operation key, different signing data) misses the cache and stays
+    // refused by the guard below.
+    #[cfg(evm_to_rgb)]
+    let replay_id: Option<([u8; 32], [u8; 32])> = operation_key(ctx, source_ref, destination_ref)
+        .map(|op_key| {
+            (
+                op_key,
+                request_fingerprint(req.amount, source_ref, destination_ref),
+            )
+        });
+    #[cfg(evm_to_rgb)]
+    if let Some((op_key, fingerprint)) = &replay_id {
+        if let Some(stored) = ctx.state.op_replay_guard.op_response(op_key, fingerprint) {
+            return Ok((
+                EnclaveResponse {
+                    response: Some(Response::SignedPsbt(SignedPsbtResponse {
+                        signed_psbt: stored.signed_psbt,
+                        inputs_signed: stored.inputs_signed,
+                    })),
+                },
+                None,
+            ));
+        }
+    }
+
     // Refuse known replays before network I/O. An invalid request must not
     // use guard capacity, so this only checks. The reservation is made later.
     #[cfg(evm_to_rgb)]
@@ -243,8 +271,79 @@ pub(super) fn handle_sign(
         _ => Err(wrong_signer_role("this route")),
     };
 
+    // Cache the completed signature so an identical retry whose response was
+    // lost in transit returns the same signature instead of being refused as
+    // a duplicate (issue #220). Only successful signs are stored; validation
+    // and signing errors never reach here, so a failed attempt stays retryable.
+    // A conflicting retry (same key, different fingerprint) is not stored and
+    // stays refused by the guard.
+    #[cfg(evm_to_rgb)]
+    if let (Some((op_key, fingerprint)), Ok(response)) = (&replay_id, &result) {
+        if let Some(Response::SignedPsbt(signed)) = &response.response {
+            ctx.state.op_replay_guard.store_op_response(
+                *op_key,
+                crate::state::StoredOpResponse {
+                    fingerprint: *fingerprint,
+                    signed_psbt: signed.signed_psbt.clone(),
+                    inputs_signed: signed.inputs_signed,
+                },
+            );
+        }
+    }
+
     // On error, the reservation drops here and rolls the key back.
     result.map(|response| (response, op_reservation))
+}
+
+/// Hash of the complete EVM->RGB signing request. The operation key binds the
+/// deposit identity; the fingerprint additionally binds the exact signing
+/// data, so a mutated retry (same key, different PSBT/consignment) does not
+/// match the cache.
+#[cfg(evm_to_rgb)]
+fn request_fingerprint(
+    amount: u64,
+    source: &SourceNetwork,
+    destination: &DestinationNetwork,
+) -> [u8; 32] {
+    use sha3::{Digest, Keccak256};
+
+    let mut h = Keccak256::new();
+    h.update(b"utexo:sign-req:v1");
+    h.update(amount.to_be_bytes());
+    match source {
+        SourceNetwork::EvmSource(s) => {
+            h.update([0x01]);
+            h.update((s.tx_hash.len() as u64).to_be_bytes());
+            h.update(&s.tx_hash);
+            h.update((s.funds_in_operation_id.len() as u64).to_be_bytes());
+            h.update(&s.funds_in_operation_id);
+            h.update((s.token.len() as u64).to_be_bytes());
+            h.update(&s.token);
+            h.update((s.recipient.len() as u64).to_be_bytes());
+            h.update(&s.recipient);
+            h.update(s.commission.to_be_bytes());
+        }
+        _ => {
+            h.update([0x00]);
+        }
+    }
+    match destination {
+        DestinationNetwork::RgbDestination(d) => {
+            h.update([0x01]);
+            h.update((d.psbt_bytes.len() as u64).to_be_bytes());
+            h.update(&d.psbt_bytes);
+            h.update((d.consignment.len() as u64).to_be_bytes());
+            h.update(&d.consignment);
+            h.update(d.operation_idx.to_be_bytes());
+            h.update(d.psbt_output_amount.to_be_bytes());
+            h.update((d.asset_id.len() as u64).to_be_bytes());
+            h.update(d.asset_id.as_bytes());
+        }
+        _ => {
+            h.update([0x00]);
+        }
+    }
+    h.finalize().into()
 }
 
 /// Refuse a route of the other signer role. No-op on a build with both
