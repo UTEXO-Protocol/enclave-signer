@@ -161,7 +161,9 @@ jobs:
           IMAGE_TAG: utexo-bridge-enclave-${{ matrix.variant }}:latest
           # Enable debug features only for manual test builds. (F03-AF-12)
           ENCLAVE_DEBUG_FEATURES: ${{ github.event.inputs.debug_features || '' }}
-          RGB_ASSET_ID: ${{ vars.BFA_RGB_ASSET_ID }}
+          # Await the new stage asset; do not inherit the previous deployment's
+          # repo variable. RGB release builds reject an empty asset pin.
+          RGB_ASSET_ID: ""
         run: |
           set -euxo pipefail
           mkdir -p "$OUT_DIR"
