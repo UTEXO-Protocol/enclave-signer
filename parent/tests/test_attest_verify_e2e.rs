@@ -535,14 +535,17 @@ exec {} "${{args[@]}}"
     let burn = "PCR_FILE=PCR.json\nIMAGE_ENV=IMAGE-ENV.json\nSIGNER_ROLE=burn\n";
     let bundle = |cid: u16| dir.join(format!("attestation-{cid}.json"));
 
-    let (code, log) = gate(burn, "");
-    assert_eq!(code, Some(0), "{log}");
-    let json: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(bundle(16)).unwrap()).unwrap();
-    let evm = json["public_keys"]["evm_address"]
-        .as_str()
-        .unwrap()
-        .to_string();
+    // Approve the identity from the fixed test fixture, not the live export.
+    let expected = EnclaveState::new(bitcoin::Network::Bitcoin);
+    expected.initialize_from_mnemonic(TEST_MNEMONIC).unwrap();
+    let evm = format!("0x{}", hex::encode(expected.evm_address().unwrap()));
+
+    for incomplete in [String::new(), format!("16={evm}")] {
+        let (code, log) = gate(burn, &incomplete);
+        assert_eq!(code, Some(2), "{log}");
+        assert!(!bundle(16).exists() && !bundle(18).exists());
+        assert!(!log.contains("PASS:"), "{log}");
+    }
 
     let (code, log) = gate(burn, &format!("16={evm} 18={evm}"));
     assert_eq!(code, Some(0), "{log}");
@@ -567,7 +570,10 @@ exec {} "${{args[@]}}"
     );
     assert!(bundle(16).exists() && !bundle(18).exists());
 
-    let (code, log) = gate("IMAGE_ENV=IMAGE-ENV.json\nSIGNER_ROLE=burn\n", "");
+    let (code, log) = gate(
+        "IMAGE_ENV=IMAGE-ENV.json\nSIGNER_ROLE=burn\n",
+        &format!("16={evm} 18={evm}"),
+    );
     assert_eq!(code, Some(2), "{log}");
 
     std::fs::remove_file(bundle(16)).unwrap();
