@@ -62,6 +62,15 @@ fn live() -> Option<Live> {
         )
         .expect("read the CA"),
         tls_port: num("UTEXO_LIVE_EVM_RPC_TLS_PORT", 443) as u16,
+        path: std::env::var("UTEXO_LIVE_EVM_RPC_PATH_FILE")
+            .ok()
+            .map(|p| {
+                std::fs::read_to_string(p)
+                    .expect("read RPC path")
+                    .trim_end()
+                    .to_owned()
+            })
+            .unwrap_or_else(|| "/".into()),
     };
     Some(Live {
         client: AlloyEvmClient::with_pinned_tls(&tls).expect("build RPC client"),

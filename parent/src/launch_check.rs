@@ -303,6 +303,7 @@ mod tests {
             evm_rpc_host: "rpc.example".into(),
             evm_rpc_ca_der: vec![0xca; 40],
             evm_rpc_tls_port: 443,
+            evm_rpc_path: String::new(),
             kms_key_arn: ARN.into(),
             kms_region: "eu-west-1".into(),
             kms_seed_id: "seed-1".into(),
@@ -312,6 +313,30 @@ mod tests {
 
     fn expected() -> AttestedPolicy {
         expected_policy(SignerRole::Combined, &image_env(), &endpoints()).unwrap()
+    }
+
+    #[test]
+    fn rpc_credential_path_is_not_part_of_public_policy() {
+        let mut request = endpoints();
+        request.evm_rpc_path = "/v3/private-fixture-key".into();
+        let policy = expected_policy(SignerRole::Combined, &image_env(), &request).unwrap();
+        assert_eq!(policy.to_bytes(), expected().to_bytes());
+        assert!(!format!("{:?}", fields(&policy)).contains("private-fixture-key"));
+    }
+
+    #[test]
+    fn rpc_path_survives_parent_to_enclave_protobuf_encoding() {
+        use prost::Message;
+
+        let mut request = endpoints();
+        request.evm_rpc_path = "/v3/private-fixture-key".into();
+        let decoded = utexo_bridge_enclave::proto::SetEndpointsRequest::decode(
+            request.encode_to_vec().as_slice(),
+        )
+        .unwrap();
+        assert_eq!(decoded.evm_rpc_path, request.evm_rpc_path);
+        assert_eq!(decoded.evm_rpc_host, request.evm_rpc_host);
+        assert_eq!(decoded.evm_rpc_ca_der, request.evm_rpc_ca_der);
     }
 
     /// The policy-only answer of an enclave that attests `policy`.

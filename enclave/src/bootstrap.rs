@@ -15,10 +15,20 @@ use crate::policy::SecurityPolicy;
 use crate::policy::{EvmDataSource, EvmRpcTlsPin};
 use crate::state::EnclaveState;
 
-/// Install the tracing subscriber. `RUST_LOG` picks the filter.
+/// Install tracing. RPC dependencies can log URLs or reflected response
+/// bodies, so their events are always suppressed, even with RUST_LOG=trace.
 pub fn init_tracing() {
-    tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+    use tracing_subscriber::prelude::*;
+    tracing_subscriber::registry()
+        .with(tracing_subscriber::EnvFilter::from_default_env())
+        .with(
+            tracing_subscriber::fmt::layer().with_filter(tracing_subscriber::filter::filter_fn(
+                |metadata| {
+                    let target = metadata.target();
+                    !target.starts_with("reqwest") && !target.starts_with("alloy_")
+                },
+            )),
+        )
         .init();
 }
 
@@ -59,18 +69,16 @@ pub fn bitcoin_network_str() -> String {
     std::env::var("BITCOIN_NETWORK").unwrap_or_else(|_| "bitcoin".into())
 }
 
-/// Map `BITCOIN_NETWORK` to a `bitcoin::Network`. An unknown value logs a
-/// warning and gives mainnet.
+/// Map `BITCOIN_NETWORK` to a `bitcoin::Network`. Refuse unknown values so a
+/// typo cannot silently select a different chain or key derivation network.
 pub fn resolve_bitcoin_network(bitcoin_network_str: &str) -> bitcoin::Network {
     let bitcoin_network = match bitcoin_network_str {
         "bitcoin" | "mainnet" => bitcoin::Network::Bitcoin,
         "testnet" | "testnet3" => bitcoin::Network::Testnet,
+        "testnet4" => bitcoin::Network::Testnet4,
         "signet" => bitcoin::Network::Signet,
         "regtest" => bitcoin::Network::Regtest,
-        other => {
-            tracing::warn!("unknown BITCOIN_NETWORK '{other}', defaulting to mainnet");
-            bitcoin::Network::Bitcoin
-        }
+        other => panic!("unknown BITCOIN_NETWORK '{other}'"),
     };
     tracing::info!(%bitcoin_network_str, "bitcoin network configured");
     bitcoin_network
@@ -194,12 +202,8 @@ pub fn build_rgb_validator(indexer_url: String) -> Option<RgbValidator> {
 /// cannot advance.
 #[cfg(feature = "rgb-validation")]
 pub fn build_header_chain(bitcoin_network_str: &str) -> std::sync::Mutex<HeaderChain> {
-    let spv_network = Network::from_env_str(bitcoin_network_str).unwrap_or_else(|e| {
-        tracing::warn!(
-            "spv: unknown BITCOIN_NETWORK '{bitcoin_network_str}' ({e}); defaulting to mainnet"
-        );
-        Network::Mainnet
-    });
+    let spv_network = Network::from_env_str(bitcoin_network_str)
+        .unwrap_or_else(|e| panic!("spv: unknown BITCOIN_NETWORK '{bitcoin_network_str}': {e}"));
     // Compiled-in anchor, or the dev-only `SPV_CHECKPOINT` override. A
     // production build does not boot with that var set. A malformed value is fatal.
     let (checkpoint, checkpoint_source) = resolve_checkpoint(spv_network).unwrap_or_else(|msg| {
@@ -273,6 +277,24 @@ mod tests {
     use std::path::PathBuf;
 
     use super::pin_hosts;
+
+    #[test]
+    fn testnet4_key_network_is_not_mainnet_or_testnet3() {
+        assert_eq!(
+            super::resolve_bitcoin_network("testnet4"),
+            bitcoin::Network::Testnet4
+        );
+        assert_eq!(
+            super::resolve_bitcoin_network("testnet3"),
+            bitcoin::Network::Testnet
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "unknown BITCOIN_NETWORK")]
+    fn unknown_bitcoin_network_does_not_fall_back_to_mainnet() {
+        super::resolve_bitcoin_network("testnet44");
+    }
 
     const PINS: [(Ipv4Addr, &str); 2] = [
         (Ipv4Addr::new(127, 0, 0, 1), "electrum.test"),

@@ -380,16 +380,14 @@ pub struct MerkleProofEntry {
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct EvmSignatureResponse {
-    /// 65-byte Ethereum signature: r || s || v.
+    /// 65-byte signature: r (32) || s (32) || v (1). v is the raw recovery id,
+    /// 0 or 1, not 27 or 28.
     #[prost(bytes="vec", tag="1")]
     pub signature: ::prost::alloc::vec::Vec<u8>,
-    /// The exact fundsOut calldata the signature commits to. For the RGB->EVM
-    /// fundsOut path the enclave derives the OpId-bound fields (burnId,
-    /// settlementData/fundsInIds) from the validated consignment and rewrites
-    /// them, so this MAY differ from the call_data sent in EvmDestination. The
-    /// caller MUST submit these bytes on-chain (the EIP-712 digest is keccak256
-    /// over this calldata). Equal to the request's call_data on non-fundsOut /
-    /// non-rgb-validation paths.
+    /// The request's call_data, unchanged. The enclave validates it as canonical
+    /// ABI and signs the EIP-712 TeeFundsOut digest built from the validated
+    /// fields; it never rewrites the calldata and never signs its keccak256. The
+    /// caller submits these bytes on-chain with the signature.
     #[prost(bytes="vec", tag="2")]
     pub call_data: ::prost::alloc::vec::Vec<u8>,
 }
@@ -648,6 +646,10 @@ pub struct SetEndpointsRequest {
     /// 20-byte hex EVM address the seed must give. Empty: none.
     #[prost(string, tag="8")]
     pub kms_expected_evm_address: ::prost::alloc::string::String,
+    /// Absolute HTTP path, e.g. /v3/<API_KEY>. Empty means /. No query or fragment.
+    /// May contain credentials: do not log it or publish it in attestation data.
+    #[prost(string, tag="9")]
+    pub evm_rpc_path: ::prost::alloc::string::String,
 }
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct SetEndpointsResponse {

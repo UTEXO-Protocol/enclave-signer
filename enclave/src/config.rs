@@ -363,7 +363,7 @@ pub struct EvmRpcConfig {
 }
 
 /// The TLS pin of the EVM RPC endpoint.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct EvmRpcTls {
     /// The name for SNI and the certificate check, lowercased.
     pub host: String,
@@ -371,6 +371,38 @@ pub struct EvmRpcTls {
     pub ca_der: Vec<u8>,
     /// The upstream TLS port. The forwarder listens on it in the enclave.
     pub tls_port: u16,
+    /// Runtime HTTP path. May contain a provider credential; never attest or log it.
+    pub path: String,
+}
+
+impl std::fmt::Debug for EvmRpcTls {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("EvmRpcTls")
+            .field("host", &self.host)
+            .field("ca_der", &self.ca_der)
+            .field("tls_port", &self.tls_port)
+            .field("path", &"[REDACTED]")
+            .finish()
+    }
+}
+
+/// Accept only an absolute path with unreserved ASCII characters. Keeping
+/// authority, query, fragment and escaping out makes the TLS host independent
+/// of the credential and avoids URL-parser normalization of dot segments.
+#[cfg(feature = "evm-rpc")]
+fn parse_evm_rpc_path(value: &str) -> std::result::Result<String, String> {
+    let path = if value.is_empty() { "/" } else { value };
+    if path.len() > 2048
+        || !path.starts_with('/')
+        || path.starts_with("//")
+        || !path
+            .bytes()
+            .all(|c| c.is_ascii_alphanumeric() || b"/-._~".contains(&c))
+        || path.split('/').any(|s| s == "." || s == "..")
+    {
+        return Err("evm_rpc_path must be an absolute ASCII path (max 2048 bytes), without query, fragment, escapes or dot segments".into());
+    }
+    Ok(path.into())
 }
 
 #[cfg(feature = "evm-rpc")]
@@ -455,6 +487,7 @@ impl Endpoints {
                 host,
                 ca_der: req.evm_rpc_ca_der.clone(),
                 tls_port,
+                path: parse_evm_rpc_path(&req.evm_rpc_path)?,
             })
         };
         #[cfg(not(feature = "evm-rpc"))]
@@ -462,6 +495,7 @@ impl Endpoints {
             unused("evm_rpc_host", req.evm_rpc_host.is_empty())?;
             unused("evm_rpc_ca_der", req.evm_rpc_ca_der.is_empty())?;
             unused("evm_rpc_tls_port", req.evm_rpc_tls_port == 0)?;
+            unused("evm_rpc_path", req.evm_rpc_path.is_empty())?;
             None
         };
 
@@ -896,6 +930,41 @@ mod tests {
                 "{url:?}"
             );
         }
+    }
+
+    #[cfg(feature = "evm-rpc")]
+    #[test]
+    fn rpc_path_is_runtime_only_and_debug_redacted() {
+        let root = parse_with(|_| {}).unwrap();
+        assert_eq!(root.evm_rpc_tls.unwrap().path, "/");
+        let e = parse_with(|r| r.evm_rpc_path = "/v3/fixture-secret".into()).unwrap();
+        assert_eq!(e.evm_rpc_tls.as_ref().unwrap().path, "/v3/fixture-secret");
+        assert!(!format!("{e:?}").contains("fixture-secret"));
+        assert!(format!("{e:?}").contains("[REDACTED]"));
+    }
+
+    #[cfg(feature = "evm-rpc")]
+    #[test]
+    fn rpc_path_rejects_authority_query_fragment_and_normalization() {
+        for bad in [
+            "https://other.test/key",
+            "//other.test/key",
+            "key",
+            "/x?key=y",
+            "/x#key",
+            "/x\\key",
+            "/x\r\nheader",
+            "/x/../key",
+            "/./key",
+            "/%2e%2e/key",
+            "/clé",
+            "/key with space",
+        ] {
+            let err = parse_with(|r| r.evm_rpc_path = bad.into()).unwrap_err();
+            assert!(err.contains("evm_rpc_path"));
+            assert!(!err.contains(bad));
+        }
+        assert!(parse_with(|r| r.evm_rpc_path = format!("/{}", "a".repeat(2048))).is_err());
     }
 
     #[cfg(feature = "evm-rpc")]

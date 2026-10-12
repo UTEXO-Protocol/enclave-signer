@@ -3,8 +3,9 @@
 //! The chain starts at a compile-time `Checkpoint` (height, hash, bits, time).
 //! It grows as the parent sends batches of contiguous 80-byte headers to
 //! `submit_headers`. Each header must pass the linkage check against its
-//! predecessor before it is appended. Mainnet and testnet3 also check PoW and
-//! nBits.
+//! predecessor before it is appended. Mainnet and testnet3/4 also check PoW and
+//! nBits. Testnet4 additionally checks median-time-past, future timestamps,
+//! its minimum-difficulty exception and the BIP-94 retarget rules.
 //!
 //! ## Three submission cases
 //!
@@ -291,8 +292,11 @@ impl HeaderChain {
                 0
             };
 
-            let expected_bits_value =
-                expected_bits(height, prev_bits, prev_time, epoch_start_time, self.network)?;
+            let expected_bits_value = if self.network == Network::Testnet4 {
+                Some(self.testnet4_bits(&header, height, start_height, &staged)?)
+            } else {
+                expected_bits(height, prev_bits, prev_time, epoch_start_time, self.network)?
+            };
 
             validate_header_full(
                 &header,
@@ -334,6 +338,98 @@ impl HeaderChain {
             headers_accepted: accepted,
             reorg_depth,
         })
+    }
+
+    /// Read only the candidate branch: staged headers replace the committed
+    /// tail during a reorg. Never use the displaced tail to validate a fork.
+    fn candidate_bits_time(
+        &self,
+        height: BlockHeight,
+        batch_start: BlockHeight,
+        staged: &[(Header, BlockHash)],
+    ) -> Result<(u32, u32)> {
+        if height >= batch_start {
+            return staged
+                .get((height - batch_start) as usize)
+                .map(|(h, _)| (h.bits.to_consensus(), h.time))
+                .ok_or(SpvError::HeaderNotFound(height));
+        }
+        if height == self.base_height {
+            return Ok((self.base_bits, self.base_time));
+        }
+        self.header_at(height)
+            .map(|h| (h.bits.to_consensus(), h.time))
+            .ok_or(SpvError::HeaderNotFound(height))
+    }
+
+    /// Testnet4 header context (BIP-94). See Bitcoin Core v29.0 pow.cpp
+    /// GetNextWorkRequired/CalculateNextWorkRequired and ContextualCheckBlockHeader.
+    fn testnet4_bits(
+        &self,
+        header: &Header,
+        height: BlockHeight,
+        batch_start: BlockHeight,
+        staged: &[(Header, BlockHash)],
+    ) -> Result<u32> {
+        use bitcoin::pow::CompactTarget;
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let previous = height
+            .checked_sub(1)
+            .ok_or(SpvError::HeaderNotFound(height))?;
+        let (_, prev_time) = self.candidate_bits_time(previous, batch_start, staged)?;
+        let timestamp_error = |reason| SpvError::Timestamp { height, reason };
+        let mut times = (height.saturating_sub(11)..height)
+            .map(|h| {
+                self.candidate_bits_time(h, batch_start, staged)
+                    .map(|(_, t)| t)
+            })
+            .collect::<Result<Vec<_>>>()?;
+        times.sort_unstable();
+        if header.time <= times[times.len() / 2] {
+            return Err(timestamp_error("not greater than median time past"));
+        }
+        if is_retarget_height(height) && u64::from(header.time) + 600 < u64::from(prev_time) {
+            return Err(timestamp_error("BIP-94 timewarp at retarget boundary"));
+        }
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|_| timestamp_error("clock is before the Unix epoch"))?
+            .as_secs();
+        if u64::from(header.time) > now.saturating_add(7200) {
+            return Err(timestamp_error("more than two hours in the future"));
+        }
+
+        let params = Network::Testnet4.as_bitcoin_params();
+        if is_retarget_height(height) {
+            // BIP-94 uses the FIRST block's target, not a possibly minimum-
+            // difficulty last block's target, when computing the new epoch.
+            let (first_bits, first_time) =
+                self.candidate_bits_time(height - RETARGET_INTERVAL, batch_start, staged)?;
+            return Ok(CompactTarget::from_next_work_required(
+                CompactTarget::from_consensus(first_bits),
+                u64::from(prev_time.saturating_sub(first_time)),
+                params,
+            )
+            .to_consensus());
+        }
+        let min_bits = params
+            .max_attainable_target
+            .to_compact_lossy()
+            .to_consensus();
+        if u64::from(header.time) > u64::from(prev_time) + 2 * params.pow_target_spacing {
+            return Ok(min_bits);
+        }
+        // After a timely block, return to the last non-exception target.
+        // Stop at the epoch boundary even if its target is the minimum.
+        let mut cursor = previous;
+        loop {
+            let (bits, _) = self.candidate_bits_time(cursor, batch_start, staged)?;
+            if is_retarget_height(cursor) || bits != min_bits {
+                return Ok(bits);
+            }
+            cursor -= 1;
+        }
     }
 
     /// Timestamp of the block at `height - RETARGET_INTERVAL`. Looks in the

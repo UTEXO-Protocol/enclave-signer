@@ -681,11 +681,13 @@ impl AlloyEvmClient {
             .timeout(EVM_RPC_CALL_TIMEOUT)
             .build()
             .map_err(err)?;
-        let url = format!("https://{}:{}/", tls.host, tls.tls_port)
-            .parse()
+        let mut url = format!("https://{}:{}/", tls.host, tls.tls_port)
+            .parse::<reqwest::Url>()
             .map_err(|e| {
                 EnclaveError::CrossCheck(format!("evm-rpc: invalid host {:?}: {e}", tls.host))
             })?;
+        // Set only the path: a credential can never replace the pinned host.
+        url.set_path(&tls.path);
         Ok(Self {
             runtime: Self::runtime()?,
             provider: alloy::providers::ProviderBuilder::default().connect_reqwest(client, url),
@@ -727,8 +729,10 @@ impl EvmReceiptProvider for AlloyEvmClient {
                     EVM_RPC_CALL_TIMEOUT.as_secs()
                 ))
             })?
-            .map_err(|e| {
-                EnclaveError::CrossCheck(format!("evm-rpc: eth_getTransactionReceipt failed: {e}"))
+            .map_err(|_| {
+                // Transport errors may include the URL; JSON-RPC errors may
+                // echo credentials. Do not return either to callers or logs.
+                EnclaveError::CrossCheck("evm-rpc: eth_getTransactionReceipt failed (transport or RPC error)".into())
             })?;
         receipt.map(map_alloy_receipt).transpose()
     }
@@ -748,7 +752,11 @@ impl EvmReceiptProvider for AlloyEvmClient {
                     EVM_RPC_CALL_TIMEOUT.as_secs()
                 ))
             })?
-            .map_err(|e| EnclaveError::CrossCheck(format!("evm-rpc: eth_blockNumber failed: {e}")))
+            .map_err(|_| {
+                EnclaveError::CrossCheck(
+                    "evm-rpc: eth_blockNumber failed (transport or RPC error)".into(),
+                )
+            })
     }
 }
 

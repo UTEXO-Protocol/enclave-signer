@@ -2,6 +2,8 @@ use super::*;
 use bitcoin::consensus::serialize;
 use bitcoin::hashes::Hash;
 
+mod testnet4;
+
 /// Synthetic regtest chain: a checkpoint at 100 and 5 headers. Regtest checks
 /// linkage only, so the headers need no mining.
 fn synthetic_regtest_setup() -> (HeaderChain, Vec<Vec<u8>>) {

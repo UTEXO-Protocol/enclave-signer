@@ -7,6 +7,8 @@
 //!
 //! - Mainnet: PoW and retarget checks. `expected_bits` computes the required
 //!   `nBits`. Testnet3 uses these checks but lacks its minimum-difficulty rule.
+//! - Testnet4: PoW and `nBits`; `HeaderChain` supplies BIP-94 retarget and
+//!   minimum-difficulty context and checks median-time-past/future timestamps.
 //! - Signet: this implementation skips PoW and `nBits` checks. It also cannot
 //!   verify the BIP-325 challenge because the request has no coinbase witness.
 //!   Per-header validation checks only chain linkage.
@@ -55,7 +57,8 @@ pub fn check_pow(header: &Header, height: BlockHeight, network: Network) -> Resu
     Ok(())
 }
 
-/// Computes the required `nBits` for the header at `height`.
+/// Computes mainnet/testnet3 `nBits` for the header at `height`.
+/// Testnet4 must use `HeaderChain::testnet4_bits` for its extra context.
 ///
 /// `prev_bits` is the `nBits` of the block at `height - 1`.
 /// `prev_time` is the `time` of the block at `height - 1`.

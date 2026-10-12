@@ -221,12 +221,19 @@ fn serve_redirect() -> u16 {
 
 /// The Host header of every request `answer` read.
 static HOSTS: Mutex<Vec<String>> = Mutex::new(Vec::new());
+static PATHS: Mutex<Vec<String>> = Mutex::new(Vec::new());
 
 /// Answers one JSON-RPC request with the forged receipt or block 112.
 fn answer(stream: impl Read + Write, truncate: bool) {
     let mut reader = BufReader::new(stream);
     let mut len = 0;
     for line in reader.by_ref().lines().map_while(Result::ok) {
+        if let Some(rest) = line.strip_prefix("POST ") {
+            PATHS
+                .lock()
+                .unwrap()
+                .push(rest.split_whitespace().next().unwrap().into());
+        }
         if let Some(v) = line.to_ascii_lowercase().strip_prefix("content-length:") {
             len = v.trim().parse().unwrap();
         }
@@ -268,6 +275,14 @@ fn answer(stream: impl Read + Write, truncate: bool) {
 /// The client a launch set installs: TLS to `rpc.test` on `port`, under
 /// `ca_der_hex`.
 fn pinned_client(port: u16, ca_der_hex: &str) -> Box<dyn EvmReceiptProvider + Send + Sync> {
+    pinned_client_path(port, ca_der_hex, "")
+}
+
+fn pinned_client_path(
+    port: u16,
+    ca_der_hex: &str,
+    path: &str,
+) -> Box<dyn EvmReceiptProvider + Send + Sync> {
     // With `vsock`, the set binds a forwarder on each port and pins the
     // Electrum host in /etc/hosts. Give it free ports and `localhost`.
     #[cfg(feature = "vsock")]
@@ -296,6 +311,7 @@ fn pinned_client(port: u16, ca_der_hex: &str) -> Box<dyn EvmReceiptProvider + Se
             evm_rpc_host: "rpc.test".into(),
             evm_rpc_ca_der: hex::decode(ca_der_hex.trim()).unwrap(),
             evm_rpc_tls_port: set_port.into(),
+            evm_rpc_path: path.into(),
             ..Default::default()
         })),
     };
@@ -325,6 +341,43 @@ fn pinned_client(port: u16, ca_der_hex: &str) -> Box<dyn EvmReceiptProvider + Se
     }
     #[cfg(not(feature = "vsock"))]
     launch.evm_rpc_client.unwrap()
+}
+
+#[test]
+fn rpc_credential_path_reaches_tls_server_and_is_absent_from_errors() {
+    // A separate process exercises the production tracing subscriber without
+    // installing a global subscriber in the other integration tests.
+    if std::env::var_os("UTEXO_RPC_TRACE_CHILD").is_none() {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "rpc_credential_path_reaches_tls_server_and_is_absent_from_errors",
+                "--nocapture",
+            ])
+            .env("UTEXO_RPC_TRACE_CHILD", "1")
+            .env("RUST_LOG", "trace")
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "TLS subprocess failed");
+        for bytes in [&output.stdout, &output.stderr] {
+            assert!(!String::from_utf8_lossy(bytes).contains("fixture-secret-rpc-path"));
+        }
+        return;
+    }
+    utexo_bridge_enclave::bootstrap::init_tracing();
+    let path = "/v3/fixture-secret-rpc-path";
+    let client = pinned_client_path(serve(Some(RPC_TEST), false), CA_A_HEX, path);
+    verify_rgb_funds_in(&*client, &BRIDGE, 12, &TX, &MINT_OPID).unwrap();
+    assert!(PATHS.lock().unwrap().iter().any(|p| p == path));
+
+    let client = pinned_client_path(serve(Some(RPC_TEST), false), CA_B_HEX, path);
+    for err in [
+        client.get_block_number().unwrap_err(),
+        client.get_transaction_receipt(&TX).unwrap_err(),
+    ] {
+        assert!(err.to_string().contains("evm-rpc"));
+        assert!(!format!("{err:?} {err}").contains("fixture-secret-rpc-path"));
+    }
 }
 
 /// The URL port selects the listener, so the Host header carries it.

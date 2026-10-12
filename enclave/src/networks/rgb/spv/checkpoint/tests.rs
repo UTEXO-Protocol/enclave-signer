@@ -29,7 +29,29 @@ fn checkpoint_for_dispatches_on_network() {
     assert!(checkpoint_for(Network::Mainnet).is_real);
     assert!(checkpoint_for(Network::Signet).is_real);
     assert!(!checkpoint_for(Network::Testnet3).is_real);
+    assert!(checkpoint_for(Network::Testnet4).is_real);
     assert!(checkpoint_for(Network::Regtest).is_real);
+}
+
+#[test]
+fn testnet4_genesis_hash_and_work_match_bitcoin_core() {
+    let cp = checkpoint_for(Network::Testnet4);
+    let mut hash = cp.hash;
+    hash.reverse();
+    assert_eq!(
+        hex::encode(hash),
+        "00000000da84f2bafbbc53dee25a72ae507ff4914b867c565be350b0da8bf043"
+    );
+    assert_eq!(cp.height, 0);
+    assert_eq!(cp.bits, 0x1d00ffff);
+    // floor(2^256 / (target + 1)), Bitcoin Core's genesis chainwork.
+    assert_eq!(
+        hex::encode(cp.chain_work.unwrap()),
+        "0000000000000000000000000000000000000000000000000000000100010001"
+    );
+    cp.assert_retarget_aligned(Network::Testnet4).unwrap();
+    let later = Checkpoint { height: 2016, ..cp };
+    assert!(later.assert_retarget_aligned(Network::Testnet4).is_err());
 }
 
 #[test]

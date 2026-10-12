@@ -17,6 +17,9 @@
 //!   (3-of-3 multisig, 30s blocks). They are in PCR0, but BIP-325 signatures
 //!   are not verified.
 //! - Regtest: standard regtest constants.
+//! - Testnet4: the canonical genesis header and its work, from the pinned
+//!   bitcoin crate. Sync from genesis preserves the complete BIP-94/MTP
+//!   context and needs no operator-supplied chainwork or trust anchor.
 
 use crate::networks::rgb::spv::types::{BlockHash, BlockHeight, Network};
 use crate::networks::rgb::spv::validation::RETARGET_INTERVAL;
@@ -26,8 +29,8 @@ use crate::networks::rgb::spv::validation::RETARGET_INTERVAL;
 pub struct Checkpoint {
     pub height: BlockHeight,
     pub hash: BlockHash,
-    /// Compact `nBits` at this block. The next headers must have the same
-    /// `nBits` until the next retarget boundary.
+    /// Compact `nBits` at this block. Testnet4 may use minimum-difficulty
+    /// exceptions before the next retarget boundary.
     pub bits: u32,
     /// Block timestamp. `from_next_work_required()` needs it when the checkpoint
     /// is on a retarget boundary.
@@ -137,6 +140,13 @@ impl Checkpoint {
     ///
     /// Signet and regtest have no retarget checks and are exempt.
     pub fn assert_retarget_aligned(&self, network: Network) -> Result<(), String> {
+        // Testnet4 validates median-time-past using the preceding 11 headers.
+        // A later checkpoint would need that extra context, not just one time.
+        if network == Network::Testnet4 && self.height != 0 {
+            return Err(
+                "testnet4 currently requires a genesis checkpoint for timestamp context".into(),
+            );
+        }
         if network.enforces_pow() && !self.height.is_multiple_of(RETARGET_INTERVAL) {
             return Err(format!(
                 "SPV checkpoint for {network:?} is at height {} which is not on a retarget \
@@ -159,6 +169,19 @@ pub fn checkpoint_for(network: Network) -> Checkpoint {
         Network::Mainnet => MAINNET_CHECKPOINT,
         Network::Signet => SIGNET_CHECKPOINT,
         Network::Testnet3 => TESTNET3_CHECKPOINT,
+        Network::Testnet4 => {
+            use bitcoin::hashes::Hash;
+            let header =
+                bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Testnet4).header;
+            Checkpoint {
+                height: 0,
+                hash: header.block_hash().to_byte_array(),
+                bits: header.bits.to_consensus(),
+                time: header.time,
+                is_real: true,
+                chain_work: Some(header.work().to_be_bytes()),
+            }
+        }
         Network::Regtest => REGTEST_CHECKPOINT,
     }
 }
@@ -180,7 +203,7 @@ pub fn checkpoint_for(network: Network) -> Checkpoint {
 /// and then every `fundsOut` fails.
 ///
 /// The two-field form takes `bits`/`time` from the compiled-in checkpoint. That
-/// is safe only where `nBits` is not checked. PoW networks (mainnet, testnet3)
+/// is safe only where `nBits` is not checked. PoW networks (mainnet, testnet3/4)
 /// must give all four.
 pub const CHECKPOINT_ENV: &str = "SPV_CHECKPOINT";
 

@@ -10,7 +10,7 @@ pub struct ValidatedConsignment {
     /// asset. RGB 0.11 derives it from the genesis operation.
     pub contract_id: String,
     /// Bitcoin network of the consignment, in rgbstd prefix form: `"bc"`,
-    /// `"bc:testnet3"`/`"tb"`, `"bc:signet"`/`"sb"`, or `"bc:regtest"`.
+    /// `"tb3"`, `"tb4"`, `"sb"`, or `"bcrt"`.
     /// Used to reject cross-network replay (for example regtest on mainnet).
     pub chain_net: String,
     /// Bitcoin txids that anchor each transition bundle, in **display

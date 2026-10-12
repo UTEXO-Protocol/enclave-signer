@@ -54,7 +54,7 @@ impl RgbValidator {
     /// - `indexer_url`: `ssl://` or `tcp://` for Electrum, `https://` or
     ///   `http://` for Esplora. Any other scheme is refused.
     /// - `bitcoin_network`: "bitcoin" (or "mainnet"), "testnet" (or
-    ///   "testnet3"), "signet", or "regtest".
+    ///   "testnet3"), "testnet4", "signet", or "regtest".
     pub fn new(indexer_url: String, bitcoin_network: &str) -> Result<Self> {
         let timeout_secs = if is_electrum_url(&indexer_url) {
             ELECTRUM_WITNESS_TIMEOUT_SECS
@@ -69,6 +69,7 @@ impl RgbValidator {
         let chain_net = match bitcoin_network {
             "bitcoin" | "mainnet" => ChainNet::BitcoinMainnet,
             "testnet" | "testnet3" => ChainNet::BitcoinTestnet3,
+            "testnet4" => ChainNet::BitcoinTestnet4,
             "signet" => ChainNet::BitcoinSignet,
             "regtest" => ChainNet::BitcoinRegtest,
             other => {

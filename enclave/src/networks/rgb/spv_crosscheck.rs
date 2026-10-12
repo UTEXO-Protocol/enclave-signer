@@ -291,6 +291,7 @@ fn expected_chain_net(network: Network) -> ChainNet {
         Network::Mainnet => ChainNet::BitcoinMainnet,
         Network::Signet => ChainNet::BitcoinSignet,
         Network::Testnet3 => ChainNet::BitcoinTestnet3,
+        Network::Testnet4 => ChainNet::BitcoinTestnet4,
         Network::Regtest => ChainNet::BitcoinRegtest,
     }
 }

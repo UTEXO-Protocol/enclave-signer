@@ -169,13 +169,18 @@ the EVM RPC, KMS) sends on only a connection that starts with a TLS handshake
 record (`enclave/src/egress.rs`). The enclave has no other network path, so no
 client can send plaintext to the host for such an endpoint, not even after an
 HTTPS -> HTTP redirect. `esplora-client` (`minreq`) and the EVM RPC client
-(`reqwest`) follow redirects, and their APIs here cannot turn that off. A
-redirect to a port with no forwarder, or to another host, has no route out.
+(`reqwest`) have different redirect policies: the EVM client disables redirects.
+For Esplora, a redirect to a port with no forwarder, or to another host, has no route out.
 The parent -> enclave channel (vsock port 5000) is a separate inbound listener
 and is not affected. The EVM RPC forwarder listens on the
-EVM RPC TLS port, and the client connects to `https://<host>:<port>/` through
+EVM RPC TLS port, and the client connects to `https://<host>:<port><path>` through
 it, so TLS ends inside the enclave; it trusts only the CA of the set, in every
 build. The host runs `vsock-proxy 8002 <EVM_RPC_HOST> <EVM_RPC_TLS_PORT>`.
+The optional `SetEndpoints.evm_rpc_path` defaults to `/` and can carry a provider
+API key. The CLI reads it from `EVM_RPC_PATH_FILE`. This host-readable credential
+is not baked into the image or included in public attestation. Application
+errors and endpoint debug output redact it, and RPC dependency tracing is
+suppressed. Authority, query, fragment and dot segments are refused in the path.
 
 **Connection limits:** 4 worker threads and a queue of 16 connections.
 Each socket read or write has a 10-second idle timeout. A 30-second socket
@@ -659,7 +664,9 @@ with the same OpId are ignored.
 
 For an RGB-source request, the SPV layer enforces these rules:
 
-1. On mainnet, validate header linkage, PoW, and `nBits`.
+1. On mainnet and testnet4, validate header linkage, PoW, and `nBits`.
+   Testnet4 also enforces the 20-minute minimum-difficulty exception, BIP-94
+   retarget rules, median-time-past and the two-hour future timestamp limit.
    Testnet3 uses these checks but lacks the 20-minute minimum-difficulty exception.
    Accept a replacement chain only when its cumulative work is greater.
    Limit reorganization depth to `MAX_REORG_DEPTH = 100`.
@@ -683,8 +690,12 @@ three request-size caps above are env-tunable because they only bound
 resource use; they never relax a verification step.
 
 **Checkpoints:** mainnet block 951,552 (retarget-aligned) and UTEXO
-signet block 334,000 are real pinned checkpoints; regtest uses genesis. Local/dev
-builds (debug, `cfg(test)`, or `allow-seed-import`) may move the anchor forward
+signet block 334,000 are real pinned checkpoints; regtest uses genesis.
+Testnet4 starts at its canonical genesis, including genesis chainwork from the
+pinned Bitcoin library. The parent must sync all subsequent headers before
+Burn readiness succeeds. A later testnet4 checkpoint is rejected because the
+current checkpoint format lacks the preceding headers needed for timestamp checks.
+Local/dev builds (debug, `cfg(test)`, or `allow-seed-import`) may move the anchor forward
 at boot with `SPV_CHECKPOINT=height:block_hash[:bits:time[:chainwork]]` to skip a long
 initial sync; a production-shaped build refuses to start if that variable is
 set, so the host can never choose the trust anchor.

@@ -49,7 +49,7 @@ Reference material:
 4. The enclave reads Bitcoin data (Electrum) and EVM data (JSON-RPC) through
    host vsock proxies. EVM TLS ends inside the enclave. Electrum uses TLS
    only when the configured URL uses `ssl://`.
-5. The parent sends Bitcoin block headers to the enclave. On mainnet, the
+5. The parent sends Bitcoin block headers to the enclave. On mainnet and testnet4, the
    enclave checks proof of work and maintains its own header chain.
    Signet and regtest use weaker checks. See the specification.
 
@@ -533,7 +533,7 @@ Data sources and transport:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `BITCOIN_NETWORK` | `bitcoin` | `bitcoin`, `testnet`, `signet`, `regtest`. Selects the SPV checkpoint, coin types and xpub prefix. Baked into the image. |
+| `BITCOIN_NETWORK` | `bitcoin` | `bitcoin`, `testnet` (testnet3), `testnet4`, `signet`, `regtest`. Selects the SPV checkpoint, coin types and xpub prefix. Baked into the image. |
 | `ESPLORA_VSOCK_PORT` | `8001` | Host vsock-proxy port for the Electrum resolver. |
 | `EVM_RPC_VSOCK_PORT` | `8002` | Host vsock-proxy port for the EVM RPC. |
 | `EVM_MIN_CONFIRMATIONS` | `12` | Attested minimum depth of a `FundsIn` receipt; zero is rejected at production boot. |
@@ -548,13 +548,46 @@ requires the values it uses and refuses the others:
 | Value (CLI flag / env) | Build | Description |
 |------------------------|-------|-------------|
 | `--electrum-url` / `ELECTRUM_URL` | `rgb-validation` | `ssl://host:port` (Electrum) or `https://host[:port]` (Esplora, for the custom dev signet). TLS terminates inside the enclave. The forwarder listens on that port and pins `host` to loopback in `/etc/hosts`. A test, debug, `mock-attestation` or `allow-seed-import` build also accepts plaintext `tcp://host:port` and `http://host[:port]`; a release image refuses them. |
-| `--evm-rpc-host` / `EVM_RPC_HOST` | `evm-rpc` | TLS host name of the EVM RPC. No scheme, path, port or IP literal. The JSON-RPC is served at `/`. |
+| `--evm-rpc-host` / `EVM_RPC_HOST` | `evm-rpc` | TLS host name of the EVM RPC. No scheme, path, port or IP literal. |
 | `--evm-rpc-tls-port` / `EVM_RPC_TLS_PORT` | `evm-rpc` | TLS port, 1-65535, not the Electrum port. The forwarder listens on it. |
 | `--evm-rpc-ca-der-file` / `EVM_RPC_TLS_CA_DER_FILE` | `evm-rpc` | DER of the only CA the EVM RPC TLS trusts. |
+| `--evm-rpc-path-file` / `EVM_RPC_PATH_FILE` | `evm-rpc`, optional | File containing an absolute RPC path such as `/v3/<API_KEY>`. Omit for `/`. Max 2048 bytes; ASCII letters, digits, `/`, `-`, `.`, `_`, `~`; no query, fragment or dot segments. Contents are redacted from application logs and are not published in attestation. |
 | `--kms-key-arn` / `KMS_KEY_ARN` | `kms-persistence` | Full symmetric KMS key ARN; aliases are rejected. |
 | `--kms-region` / `KMS_REGION` | `kms-persistence` | Commercial AWS region matching the key ARN. The KMS forwarder listens on `127.0.0.2:443`. |
 | `--kms-seed-id` / `KMS_SEED_ID` | `kms-persistence` | Stable signer identity used in the KMS encryption context and storage namespace. |
 | `--kms-expected-evm-address` / `KMS_EXPECTED_EVM_ADDRESS` | `kms-persistence`, optional | Identity pin: 40 hex digits with optional `0x`. Pin the verified signer before funding; missing ciphertext then fails without replacement. |
+
+For an authenticated RPC provider, create the path file on the host outside
+Git and the Docker build context. The launcher user must be able to read it;
+use mode `0600`. Store only `/v3/<API_KEY>` (Infura) or `/v2/<API_KEY>`
+(Alchemy), not the full URL. Set these launch values:
+
+```bash
+export EVM_RPC_HOST=arbitrum-mainnet.infura.io
+export EVM_RPC_TLS_PORT=443
+export EVM_RPC_TLS_CA_DER_FILE=/etc/utexo/evm-rpc-ca.der
+export EVM_RPC_PATH_FILE=/etc/utexo/evm-rpc-path
+```
+
+Check credentials and the chain before starting or changing services:
+
+```bash
+EVM_CHAIN_ID=42161 EVM_RPC_CHECK_ONLY=1 bash deploy/host-prep-evmrpc.sh
+```
+
+The check reads `eth_chainId` and `eth_blockNumber`; it verifies TLS and refuses
+redirects. It does not test the enclave's vsock route. `set-endpoints` reads the
+same path file. `deploy-host.sh` copies it with mode `0600` for the launcher.
+The host provisioning account can read this provider credential; it is not an
+enclave-only secret. It is never a Docker build argument. The attested policy
+binds the RPC host and CA, not this credential path. RPC dependency tracing is
+disabled to avoid leaking URLs or reflected response bodies.
+
+Use matching Parent and enclave builds with `evm_rpc_path` support. An older
+protobuf receiver can ignore the new field and keep requesting `/`.
+`SetEndpoints` remains one-shot: changing the path requires an enclave restart
+and the normal key-recovery procedure. Changing only the file does not update
+a running enclave; changing its contents does not require rebuilding the EIF.
 
 Limits and dev knobs:
 

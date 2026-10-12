@@ -141,7 +141,7 @@ The flow is the compiled [`CustodyFlow::RgbMint`](../enclave/src/kms/mod.rs)
 value. Replace `YOUR_SEED_ID` with `KMS_SEED_ID`. The enclave supplies this
 context automatically; policies must match it exactly.
 
-Use the actual network: `bitcoin`, `testnet`, `signet`, or `regtest`. Reject
+Use the actual network: `bitcoin`, `testnet` (testnet3), `testnet4`, `signet`, or `regtest`. Reject
 unattested requests, wrong PCRs and changed/missing/extra context, including when
 another identity policy grants broader access. Keep the signer role free of
 unrelated policies, policy-management privileges, object/version deletion and

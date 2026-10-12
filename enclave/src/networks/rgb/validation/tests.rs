@@ -29,6 +29,13 @@ use super::schema::*;
 use super::source::*;
 use super::types::*;
 
+#[test]
+fn testnet4_rgb_chain_is_distinct_from_testnet3() {
+    let v = RgbValidator::new("ssl://indexer.invalid:60012".into(), "testnet4").unwrap();
+    assert_eq!(v.chain_net, rgbstd::ChainNet::BitcoinTestnet4);
+    assert_ne!(v.chain_net, rgbstd::ChainNet::BitcoinTestnet3);
+}
+
 // Fixtures from the rgb-consignment-parser repo (`test-data/`). Mainnet NIA
 // files in the tree, so the tests need no network access.
 const TRANSFER_FIXTURE: &[u8] =

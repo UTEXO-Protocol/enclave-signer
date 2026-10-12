@@ -88,11 +88,10 @@ RUN /lib64/ld-linux-x86-64.so.2 --list /app/utexo-bridge-enclave > /dev/null
 # --cloning-secret <secret>`), so it never lands in the EIF / image layers and
 # the PCRs stay reproducible. See enclave/src/server/keys.rs (handle_initialize).
 
-# Pinned bridge/indexer config - identical to Dockerfile.enclave; keep the two in
-# lockstep. `rgb` implies `spv` + `rgb-validation`, so this is a release
-# bridge-signing build and `SecurityPolicy::assert_valid_for_build` refuses to
+# Pinned stage bridge config for this signer role. `rgb` implies `spv` +
+# `rgb-validation`, so this is a release bridge-signing build and `SecurityPolicy::assert_valid_for_build` refuses to
 # boot without these pins (enclave/src/policy.rs). Public
-# identifiers, baked so PCR0 commits to them. Stage runs on Bitcoin MAINNET +
+# identifiers, baked so PCR0 commits to them. Stage runs on Bitcoin TESTNET4 +
 # Arbitrum One (chain_id 42161). Electrum is set at launch. The enclave pins its
 # host to 127.0.0.1 and reaches it over the vsock forwarder (host runs
 # `vsock-proxy 8001 <electrum host> <port>`); TLS terminates in-enclave.
@@ -108,7 +107,7 @@ RUN test -n "$RGB_ASSET_ID"
 ENV EVM_CHAIN_ID=42161 \
     EVM_PROXY_CONTRACT_ADDRESS=0x353c0160feaf2662eb37a7390c63a3d22190ef92 \
     RGB_ASSET_ID=${RGB_ASSET_ID} \
-    BITCOIN_NETWORK=bitcoin
+    BITCOIN_NETWORK=testnet4
 
 # In-enclave EVM verification (evm-rpc). The enclave reaches the EVM RPC only
 # through the vsock forwarder (host runs

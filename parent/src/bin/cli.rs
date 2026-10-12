@@ -224,6 +224,10 @@ struct EndpointArgs {
     /// DER file of the only CA the EVM RPC TLS trusts. Empty means no CA.
     #[arg(long, env = "EVM_RPC_TLS_CA_DER_FILE")]
     evm_rpc_ca_der_file: Option<PathBuf>,
+    /// File containing the RPC path (e.g. /v3/<API_KEY>). Omit for /.
+    /// The file is read at launch; its contents are never printed.
+    #[arg(long, env = "EVM_RPC_PATH_FILE")]
+    evm_rpc_path_file: Option<PathBuf>,
     /// Full ARN of the KMS key that wraps the seed.
     #[arg(long, env = "KMS_KEY_ARN")]
     kms_key_arn: Option<String>,
@@ -244,6 +248,11 @@ fn fail(msg: String) -> ! {
 }
 
 fn endpoints_request(args: EndpointArgs) -> SetEndpointsRequest {
+    let evm_rpc_path = args
+        .evm_rpc_path_file
+        .filter(|path| !path.as_os_str().is_empty())
+        .map(|path| read_rpc_path(&path).unwrap_or_else(|e| fail(e)))
+        .unwrap_or_default();
     let evm_rpc_tls_port = args
         .evm_rpc_tls_port
         .filter(|p| !p.is_empty())
@@ -264,11 +273,27 @@ fn endpoints_request(args: EndpointArgs) -> SetEndpointsRequest {
         evm_rpc_host: args.evm_rpc_host.unwrap_or_default(),
         evm_rpc_ca_der,
         evm_rpc_tls_port,
+        evm_rpc_path,
         kms_key_arn: args.kms_key_arn.unwrap_or_default(),
         kms_region: args.kms_region.unwrap_or_default(),
         kms_seed_id: args.kms_seed_id.unwrap_or_default(),
         kms_expected_evm_address: args.kms_expected_evm_address.unwrap_or_default(),
     }
+}
+
+fn read_rpc_path(path: &std::path::Path) -> Result<String, String> {
+    use std::io::Read;
+    let file =
+        std::fs::File::open(path).map_err(|_| "cannot open EVM_RPC_PATH_FILE".to_string())?;
+    let mut value = String::new();
+    file.take(2051)
+        .read_to_string(&mut value)
+        .map_err(|_| "cannot read EVM_RPC_PATH_FILE as UTF-8".to_string())?;
+    let value = value.trim_end_matches(['\r', '\n']);
+    if value.is_empty() || value.len() > 2048 {
+        return Err("EVM_RPC_PATH_FILE must contain a nonempty path of at most 2048 bytes".into());
+    }
+    Ok(value.into())
 }
 
 fn print_init_response(r: &InitializeKeyResponse) {
@@ -960,6 +985,28 @@ fn run_clone(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rpc_path_is_read_from_a_file_at_launch() {
+        let file = std::env::temp_dir().join(format!("rpc-path-test-{}", std::process::id()));
+        std::fs::write(&file, "/v3/fixture-key\n").unwrap();
+        let cli = Cli::try_parse_from([
+            "cli",
+            "set-endpoints",
+            "--evm-rpc-path-file",
+            file.to_str().unwrap(),
+        ])
+        .unwrap();
+        let Command::SetEndpoints { endpoints } = cli.command else {
+            panic!("wrong command")
+        };
+        assert_eq!(endpoints_request(endpoints).evm_rpc_path, "/v3/fixture-key");
+        std::fs::write(&file, "").unwrap();
+        assert!(read_rpc_path(&file).is_err());
+        std::fs::write(&file, "x".repeat(2051)).unwrap();
+        assert!(read_rpc_path(&file).is_err());
+        std::fs::remove_file(&file).unwrap();
+    }
 
     #[test]
     fn submit_headers_is_not_a_command() {

@@ -18,6 +18,7 @@ pub enum Network {
     /// the BIP-325 coinbase signature is not verified (see `validation.rs`).
     Signet,
     Testnet3,
+    Testnet4,
     Regtest,
 }
 
@@ -27,6 +28,7 @@ impl Network {
             "bitcoin" | "mainnet" => Ok(Self::Mainnet),
             "signet" => Ok(Self::Signet),
             "testnet" | "testnet3" => Ok(Self::Testnet3),
+            "testnet4" => Ok(Self::Testnet4),
             "regtest" => Ok(Self::Regtest),
             _ => Err("unknown network"),
         }
@@ -38,14 +40,15 @@ impl Network {
             Self::Mainnet => &bitcoin::consensus::params::MAINNET,
             Self::Signet => &bitcoin::consensus::params::SIGNET,
             Self::Testnet3 => &bitcoin::consensus::params::TESTNET3,
+            Self::Testnet4 => &bitcoin::consensus::params::TESTNET4,
             Self::Regtest => &bitcoin::consensus::params::REGTEST,
         }
     }
 
-    /// True when PoW is enforced (mainnet, testnet3). Signet PoW is trivial
+    /// True when PoW is enforced (mainnet, testnet3/4). Signet PoW is trivial
     /// because its real check is the BIP-325 signature. Regtest is local only.
     pub fn enforces_pow(self) -> bool {
-        matches!(self, Self::Mainnet | Self::Testnet3)
+        matches!(self, Self::Mainnet | Self::Testnet3 | Self::Testnet4)
     }
 }
 
@@ -67,6 +70,12 @@ pub enum SpvError {
         height: BlockHeight,
         got: u32,
         expected: u32,
+    },
+
+    #[error("invalid testnet4 timestamp at height {height}: {reason}")]
+    Timestamp {
+        height: BlockHeight,
+        reason: &'static str,
     },
 
     #[error("batch start_height {got} leaves a gap above tip {tip}")]

@@ -402,11 +402,14 @@ fn assert_chain_net_accepts_matching_pair() {
     assert_chain_net("bc", Network::Mainnet).unwrap();
     assert_chain_net("sb", Network::Signet).unwrap();
     assert_chain_net("tb3", Network::Testnet3).unwrap();
+    assert_chain_net("tb4", Network::Testnet4).unwrap();
     assert_chain_net("bcrt", Network::Regtest).unwrap();
 }
 
 #[test]
 fn assert_chain_net_rejects_mismatch() {
+    assert!(assert_chain_net("tb3", Network::Testnet4).is_err());
+    assert!(assert_chain_net("tb4", Network::Mainnet).is_err());
     let err = assert_chain_net("bcrt", Network::Mainnet).unwrap_err();
     assert!(err.to_string().contains("does not match"), "got: {err}");
 

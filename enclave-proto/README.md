@@ -56,8 +56,8 @@ recorded provenance. Do not change only the local generated comments.
 | | |
 |---|---|
 | Upstream | https://github.com/UTEXO-Protocol/federated-signer-proto |
-| Commit | `2b81a2eaadb99daa68c4428ea38f80ae3f40805d` (merge of PR #35, "chore(proto): drop mint_ancestors") |
-| Commit date | 2026-10-08T12:17:24Z |
+| Commit | `a4b2339720f9425d8835d50492cdb58e93c407cd` (`feat/evm-rpc-path-at-launch`, RPC path supplied at launch) |
+| Commit date | 2026-10-12T17:11:17Z |
 
 This is the same commit `parent/Cargo.toml` still pins as a git dependency, so
 both crates compile against one schema version. Keep them in lockstep.
@@ -71,7 +71,7 @@ both crates compile against one schema version. Keep them in lockstep.
 Verify against upstream (needs read access to the private repo):
 
 ```bash
-REV=2b81a2eaadb99daa68c4428ea38f80ae3f40805d
+REV=a4b2339720f9425d8835d50492cdb58e93c407cd
 git clone https://github.com/UTEXO-Protocol/federated-signer-proto /tmp/fsp
 git -C /tmp/fsp checkout "$REV"
 diff /tmp/fsp/rust-gen/src/enclave/enclave.rs enclave-proto/src/enclave.rs
@@ -86,8 +86,8 @@ git hash-object enclave-proto/src/enclave.rs enclave-proto/proto/enclave.proto
 
 | File | Upstream blob hash |
 |---|---|
-| `rust-gen/src/enclave/enclave.rs` | `e8f2ac3d051518c2f0d3605601adfd6eb788a681` |
-| `proto/enclave/enclave.proto` | `03c6966a2998785d0d92af35384b21631f11c5e5` |
+| `rust-gen/src/enclave/enclave.rs` | `0a4a8ef8965d8d8301aa5cbda184ea3188803b5b` |
+| `proto/enclave/enclave.proto` | `33fc311658e36dac8507d9cd520d34e39fde68c8` |
 
 ## Why only `prost`
 
