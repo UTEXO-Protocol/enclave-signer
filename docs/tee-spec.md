@@ -749,10 +749,12 @@ End-to-end release uniqueness also depends on contract checks outside this repo
 
 ## 10. Attestation & federation
 
-- **Public verifiability:** each signer pubkey is generated in-enclave and
-  bound to a Nitro attestation. The verifier enforces: cert chain to the
-  embedded AWS root with `BasicConstraints`, `keyCertSign`, path-length, and
-  leaf `digitalSignature` checks; COSE `alg == ES384` with the
+- **Public verifiability:** trusted Real verification binds the public-key
+  bundle and policy to code with independently approved PCRs. It does not
+  prove the key's original generation or exclusive custody; key-handling
+  rules depend on the measured code (Sec 5). The verifier enforces: cert chain
+  to the embedded AWS root with `BasicConstraints`, `keyCertSign`, path-length,
+  and leaf `digitalSignature` checks; COSE `alg == ES384` with the
   raw 96-byte signature form only; PCR0/1/2 equality; nonce equality;
   and the `user_data` commitment over pubkey bundle + security policy (Sec 4).
 - **PCR policy:** verifiers assert PCR0/1/2.
