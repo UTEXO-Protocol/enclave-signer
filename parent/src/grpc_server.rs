@@ -590,9 +590,10 @@ impl ParentService for ParentAdapterService {
     ///   (m/44'/919'/0'/0'/0').
     ///
     /// `CCD_GOVERNANCE` reads the governance key without attestation.
-    /// `AttestedPublicKey` needs a Nitro Security Module. For proof that the
-    /// key comes from a real enclave, use `AttestedPublicKey`
-    /// (see docs/pubkey-attestation.md).
+    /// For Nitro evidence binding these public keys to approved measured code,
+    /// use `AttestedPublicKey` with a trusted Real verifier. Genuine Nitro
+    /// evidence requires a Nitro Security Module. See docs/pubkey-attestation.md
+    /// for what verification does and does not prove.
     async fn public_key(
         &self,
         request: Request<PublicKeyRequest>,
@@ -763,11 +764,12 @@ impl ParentService for ParentAdapterService {
         ))
     }
 
-    /// Prove that the bridge signing key comes from this TEE. Sends a 32-byte
-    /// caller nonce to the enclave. Returns the public-key bundle and an NSM
-    /// attestation document. The document binds the EVM public key and a
-    /// sha256 of the full bundle to the enclave PCRs.
-    /// See docs/pubkey-attestation.md for verification.
+    /// Relay a 32-byte caller nonce to the enclave and return its public-key
+    /// bundle, policy and attestation document. The document commits to the EVM
+    /// public key and sha256(bundle || policy). This handler does not verify it:
+    /// the caller must use a trusted verifier with approved PCRs and expected
+    /// policy before relying on the identity. See docs/pubkey-attestation.md
+    /// for the checks and their limits.
     async fn attested_public_key(
         &self,
         request: Request<AttestedPublicKeyRequest>,

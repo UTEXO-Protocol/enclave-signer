@@ -90,8 +90,12 @@ pub enum ExpectedPolicy {
     Development,
 }
 
-/// Successful verification result. This value proves that the bridge signing
-/// key comes from a TEE with the supplied PCRs.
+/// Result of verification in the selected [`VerifyMode`]. Public fields also
+/// allow direct construction, so this type alone is not proof of verification.
+/// For production, use a trusted verifier in [`VerifyMode::Real`] with
+/// independently approved PCRs and expected policy. Successful Real verification
+/// binds the key bundle and policy to measured code; it does not prove the key's
+/// original generation or exclusive custody.
 #[derive(Debug, Clone)]
 pub struct AttestedPubkeyResult {
     pub response: AttestedPublicKeyResponse,

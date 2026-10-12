@@ -45,6 +45,16 @@ This EC2 instance's NSM signing cert
 Attestation document { pcrs, public_key, user_data, nonce, timestamp, ... }
 ```
 
+### Identity is not provider readiness
+
+`AttestedPublicKey` attests the installed public keys and configured policy.
+It does not contact the EVM RPC provider, so verification can succeed while that
+provider is unavailable. It does not show that the node can complete a signing
+request. The current `Health` response checks whether endpoints are set, keys
+are loaded and, where required, SPV is ready; it does not probe EVM RPC
+availability either. Routing that requires live provider availability needs
+a separate check.
+
 ## Protocol
 
 ```

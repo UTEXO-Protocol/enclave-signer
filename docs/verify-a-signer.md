@@ -1,7 +1,7 @@
 # Verify a burn signer
 
 This guide shows how to check, without access to the operator, that a burn
-signer's EVM address belongs to approved enclave code and is a signer of the
+signer's EVM address is bound to approved enclave code and is a signer of the
 bridge on Arbitrum One.
 
 The operator publishes one attestation bundle per burn enclave:
@@ -11,16 +11,18 @@ verify.
 
 ## What one bundle proves
 
-The bundle holds an AWS Nitro attestation document for a burn key. When it
-verifies, the approved code (the PCRs you trust) created this key and holds it:
+The bundle holds an AWS Nitro attestation document for a burn key. Verification
+with independently approved PCRs and expected policy binds the public-key
+bundle and policy to the measured code.
 
-- The release burn build has no seed import.
-- Cloning sends the seed only to an enclave with the same PCRs.
-
-So every signature by the attested EVM address comes from that code.
+The release burn build has no seed import, and cloning checks the peer's PCRs.
+These are key-handling rules of the measured code, not an independent proof of
+the key's history. See the [attestation trust limits](pubkey-attestation.md#what-attestation-does-not-prove).
 
 ## What it does not prove
 
+- Where the key was first created, exclusive custody, or where every signature
+  was produced. Cloned burn enclaves can share the same seed.
 - That the enclave runs now. The document is a record of one moment.
 - That the document is fresh. The operator chose the nonce. Use
   `attest-verify --endpoint` with your own nonce for a live check (see
