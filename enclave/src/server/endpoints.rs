@@ -260,18 +260,19 @@ mod tests {
     #[test]
     fn before_the_set_signing_and_attestation_are_refused() {
         let ctx = awaiting(BuildContext::current());
-        // A persistence build gets the seed from KMS, which a unit test
-        // cannot reach. Import a mnemonic there instead.
-        let init = InitializeKeyRequest {
-            mnemonic: if cfg!(feature = "kms-persistence") {
-                "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about".into()
-            } else {
-                String::new()
-            },
-            ..InitializeKeyRequest::default()
-        };
-        let got = call(&ctx, Request::InitializeKey(init));
-        assert!(ctx.state.is_initialized(), "{got:?}");
+        if cfg!(feature = "kms-persistence") {
+            // Exercise the endpoint gate with a loaded key, without contacting
+            // KMS or enabling the production seed-import RPC. This setup is
+            // confined to the unit test; persistence has its own tests.
+            ctx.state.initialize_from_entropy(&mut [42; 32]).unwrap();
+        } else {
+            let got = call(
+                &ctx,
+                Request::InitializeKey(InitializeKeyRequest::default()),
+            );
+            assert!(ctx.state.is_initialized(), "{got:?}");
+        }
+        assert!(ctx.state.is_initialized());
         for request in [
             Request::Sign(SignRequest::default()),
             Request::SignBtc(SignBtcRequest::default()),

@@ -163,17 +163,26 @@ fn production_launches_only_with_a_pinned_tls_evm_rpc() {
     let ca =
         hex::decode(include_str!("../../tests/fixtures/evm_rpc_tls/ca_a.der.hex").trim()).unwrap();
     let launch = |host: &str, ca_der: Vec<u8>| {
-        let e = crate::config::Endpoints::parse(&crate::proto::SetEndpointsRequest {
+        let mut request = crate::proto::SetEndpointsRequest {
             electrum_url: "ssl://electrum.test:50002".into(),
             evm_rpc_host: host.into(),
             evm_rpc_ca_der: ca_der,
             evm_rpc_tls_port: 443,
             ..Default::default()
-        })?;
+        };
+        if cfg!(feature = "kms-persistence") {
+            request.kms_key_arn =
+                "arn:aws:kms:eu-west-1:123456789012:key/mrk-0123456789abcdef0123456789abcdef"
+                    .into();
+            request.kms_region = "eu-west-1".into();
+            request.kms_seed_id = "tls-policy-test".into();
+        }
+        let e = crate::config::Endpoints::parse(&request)?;
         let tls = e.evm_rpc_tls.as_ref().unwrap();
         let (source, pin) = crate::bootstrap::resolve_evm_data_source(tls);
         let ctx = release_bridge_ctx();
-        let p = SecurityPolicy::resolve(&ctx, &pinned_config(), source, pin, &e.electrum_host, 12);
+        let p = SecurityPolicy::resolve(&ctx, &pinned_config(), source, pin, &e.electrum_host, 12)
+            .with_kms(e.kms.clone());
         p.assert_valid_for_build(&ctx).map(|()| p)
     };
     assert!(launch("", ca.clone()).is_err());
