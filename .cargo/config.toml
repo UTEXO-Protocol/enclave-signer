@@ -2,8 +2,9 @@
 # git dependencies, rather than cargo's bundled libgit2, which does not pick up
 # an SSH agent reliably across platforms.
 #
-# Both workspaces resolve private dependencies through per-repository SSH
-# aliases. Docker builds configure them in build/with-private-deps.sh; CI sets
-# up the matching deploy keys. System Git also honors the token URL rewrites.
+# The parent workspace resolves its private dependency through an SSH alias.
+# Docker builds configure it in build/with-private-deps.sh; CI sets up the
+# matching deploy key. System Git also honors the token URL rewrites. The
+# enclave workspace has no private dependency.
 [net]
 git-fetch-with-cli = true

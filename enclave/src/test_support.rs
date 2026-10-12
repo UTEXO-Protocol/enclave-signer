@@ -1,7 +1,18 @@
 //! Fixtures shared by the crate's unit tests. Test builds only.
 
 #[cfg(feature = "rgb-validation")]
-pub(crate) mod electrum_stub;
+pub(crate) mod bfa_consignment;
+
+/// BFA ids as the flat summary carries them. `validation::tests` pins them
+/// to `rgb-schemas`.
+#[cfg(feature = "rgb-validation")]
+pub(crate) mod bfa_ids {
+    pub const TS_TRANSFER: u16 = 10000;
+    pub const TS_BURN: u16 = 8010;
+    pub const TS_MINT: u16 = 8013;
+    pub const OS_ASSET: u16 = 4000;
+    pub const OS_MINT: u16 = 4013;
+}
 
 /// A `uint256` ABI word holding `value`.
 #[cfg(feature = "evm-rpc")]
@@ -36,11 +47,15 @@ pub(crate) fn bridge_funds_in_data(gross: u64, net: u64, commission: u64, dest: 
     d
 }
 
-/// In-memory EVM RPC: a fixed receipt and chain head.
+/// In-memory EVM RPC: a fixed receipt, chain head, finalized block and chain.
 #[cfg(feature = "evm-rpc")]
+#[derive(Default)]
 pub(crate) struct FakeEvm {
     pub receipt: Option<crate::networks::evm::events::ReceiptData>,
     pub head: u64,
+    /// `None` is a node without the `finalized` tag.
+    pub finalized: Option<u64>,
+    pub chain_id: u64,
 }
 
 #[cfg(feature = "evm-rpc")]
@@ -55,7 +70,22 @@ impl crate::networks::evm::events::EvmReceiptProvider for FakeEvm {
     fn get_block_number(&self) -> crate::error::Result<u64> {
         Ok(self.head)
     }
+
+    fn get_finalized_block_number(&self) -> crate::error::Result<u64> {
+        self.finalized.ok_or_else(|| {
+            crate::error::EnclaveError::CrossCheck("the node has no finalized block".into())
+        })
+    }
+
+    fn get_chain_id(&self) -> crate::error::Result<u64> {
+        Ok(self.chain_id)
+    }
 }
+
+/// An enclave clock past every `u32` header time, for tests that do not cover
+/// the header clock bound (`spv::chain` tests do).
+#[cfg(all(feature = "rgb-validation", rgb_to_evm))]
+pub(crate) const ANY_HEADER_CLOCK: u64 = u32::MAX as u64;
 
 /// A fresh regtest header chain at its built-in checkpoint.
 #[cfg(feature = "rgb-validation")]

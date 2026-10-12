@@ -4,14 +4,6 @@
 //! EVM deposit and holds the replay reservation. Then [`super::signers`] signs.
 //! The individual checks are in `networks/`.
 
-#[cfg(all(feature = "bfa-validation", rgb_to_evm))]
-use super::bfa::bfa_burn_ancestry_events;
-#[cfg(all(feature = "bfa-validation", feature = "rgb-mint-burn", evm_to_rgb))]
-use super::bfa::bfa_mint_events;
-#[cfg(all(feature = "bfa-validation", feature = "rgb-swap"))]
-use super::bfa::bfa_transfer_ancestry_events;
-#[cfg(feature = "bfa-validation")]
-use super::bfa::cea_events;
 use super::context::ServerContext;
 use super::dispatch::{unsupported_build, wrong_signer_role};
 #[cfg(rgb_to_evm)]
@@ -113,16 +105,13 @@ pub(super) fn handle_sign(
         })
     };
 
-    // Must run before destination validation. A BFA mint consignment cannot
-    // be validated until its lock is verified.
+    // Binds each BFA mint anchor of the consignment to an EVM lock.
     #[cfg(feature = "bfa-validation")]
-    let bfa_locks = verified_bfa_locks(ctx, source_ref, destination_ref)?;
-    #[cfg(feature = "bfa-validation")]
-    let bfa_bridge_events = cea_events(&bfa_locks);
-    // `validate_consignment` always takes the events. An empty set means
-    // "no BFA", so call sites need no `#[cfg]`.
-    #[cfg(all(feature = "rgb-validation", not(feature = "bfa-validation")))]
-    let bfa_bridge_events: Vec<rgbstd::vm::ether_extension::Event> = Vec::new();
+    let anchor_binder =
+        |bridge: &crate::networks::rgb::validation::BfaBridge,
+         anchors: &[crate::networks::rgb::validation::MintAnchor]| {
+            bind_anchors(ctx, source_ref, bridge, anchors)
+        };
 
     // Records the Bitcoin blocks that the SPV checks use. Each check releases
     // the header-chain lock at return. `assert_chain_pins_unchanged` reads these
@@ -143,8 +132,10 @@ pub(super) fn handle_sign(
         self_owned_psbt_outputs: Some(&self_owned_psbt_outputs),
         #[cfg(all(feature = "rgb-validation", evm_to_rgb))]
         psbt_fee_key_paths: Some(&psbt_fee_key_paths),
-        #[cfg(feature = "rgb-validation")]
-        bridge_events: &bfa_bridge_events,
+        #[cfg(feature = "bfa-validation")]
+        anchor_binder: Some(&anchor_binder),
+        #[cfg(all(feature = "rgb-validation", not(feature = "bfa-validation")))]
+        anchor_binder: None,
     };
     let source_validated = validate_source(req.amount, source_ref, &validation_ctx)?;
 
@@ -219,8 +210,6 @@ pub(super) fn handle_sign(
                     source_validated.rgb_consignment.as_ref(),
                     &rgb_source.merkle_proofs,
                     &chain_pins,
-                    #[cfg(feature = "bfa-mint")]
-                    &bfa_locks,
                 )?;
             }
             handle_sign_evm(
@@ -277,7 +266,6 @@ fn apply_funds_out_binding(
     validated: Option<&crate::networks::rgb::validation::ValidatedConsignment>,
     merkle_proofs: &[crate::proto::MerkleProofEntry],
     pins: &crate::networks::rgb::spv_crosscheck::ChainPins,
-    #[cfg(feature = "bfa-mint")] locks: &[crate::networks::evm::events::VerifiedLock],
 ) -> Result<()> {
     use crate::networks::evm::crosscheck;
 
@@ -331,16 +319,16 @@ fn apply_funds_out_binding(
     crosscheck::validate_funds_out_source_burn_tx_id(release, validated)?;
 
     // A burn settles a redemption. Thus it also binds the payout target to
-    // the 32 bytes that the burner committed to (`MS_BURN_RECIPIENT`).
+    // the 32 bytes that the burner committed to (`burnReason`).
     // `validate_funds_out_amount` already refused all non-burns, so no
     // runtime type test is necessary.
     #[cfg(feature = "rgb-mint-burn")]
     crosscheck::validate_funds_out_burn_recipient(release, validated)?;
 
     // Settlement bind (spec P6). The deposits in `settlementData` must be
-    // exactly the verified locks of the burn mint ancestry.
+    // exactly the locks consensus confirmed the burn's mint anchors against.
     #[cfg(feature = "bfa-mint")]
-    crosscheck::validate_funds_out_settlement(release, locks)?;
+    crosscheck::validate_funds_out_settlement(release, &validated.mint_locks)?;
 
     Ok(())
 }
@@ -360,32 +348,32 @@ fn source_commission(source: &SourceNetwork) -> Result<u64> {
     }
 }
 
-/// Verify the EVM lock of each BFA mint in this request, in each direction.
-/// Empty when no side has a BFA consignment.
+/// The binder for this route. A mint binds its own deposit from the request's
+/// receipt. Every other history only derives its locks.
 #[cfg(feature = "bfa-validation")]
-fn verified_bfa_locks(
+fn bind_anchors(
     ctx: &ServerContext,
     source: &SourceNetwork,
-    destination: &DestinationNetwork,
-) -> Result<Vec<crate::networks::evm::events::VerifiedLock>> {
-    match (source, destination) {
-        // A burn: the events prove the locks of its mint ancestry.
-        #[cfg(rgb_to_evm)]
-        (SourceNetwork::RgbSource(rgb), _) => bfa_burn_ancestry_events(ctx, rgb),
-        // A mint: the events prove the locks of the mint and its ancestry.
-        #[cfg(evm_to_rgb)]
-        (SourceNetwork::EvmSource(evm), DestinationNetwork::RgbDestination(rgb)) => {
-            #[cfg(feature = "rgb-mint-burn")]
-            {
-                bfa_mint_events(ctx, evm, rgb)
-            }
-            #[cfg(feature = "rgb-swap")]
-            {
-                let _ = evm;
-                bfa_transfer_ancestry_events(ctx, rgb)
-            }
+    bridge: &crate::networks::rgb::validation::BfaBridge,
+    anchors: &[crate::networks::rgb::validation::MintAnchor],
+) -> Result<crate::networks::rgb::validation::BoundAnchors> {
+    match source {
+        #[cfg(all(feature = "rgb-mint-burn", evm_to_rgb))]
+        SourceNetwork::EvmSource(evm) => {
+            let tx_hash: [u8; 32] = evm.tx_hash.as_slice().try_into().map_err(|_| {
+                EnclaveError::CrossCheck(format!(
+                    "evm_tx_hash must be 32 bytes, got {}",
+                    evm.tx_hash.len()
+                ))
+            })?;
+            super::bfa::mint_locks(ctx, &tx_hash, bridge, anchors)
         }
-        _ => Ok(Vec::new()),
+        #[cfg(any(rgb_to_evm, feature = "rgb-swap"))]
+        _ => super::bfa::derived_locks(ctx, bridge, anchors),
+        #[cfg(not(any(rgb_to_evm, feature = "rgb-swap")))]
+        _ => Err(EnclaveError::CrossCheck(
+            "BFA mint anchors on a route this signer does not mint on".into(),
+        )),
     }
 }
 
@@ -641,6 +629,14 @@ mod early_bridge_checks {
         fn get_block_number(&self) -> Result<u64> {
             panic!("a missing deposit must be rejected before querying the head")
         }
+
+        fn get_finalized_block_number(&self) -> Result<u64> {
+            panic!("a missing deposit must be rejected before querying finality")
+        }
+
+        fn get_chain_id(&self) -> Result<u64> {
+            panic!("a missing deposit must be rejected before querying the chain")
+        }
     }
 
     fn context(calls: &Arc<AtomicUsize>) -> ServerContext {
@@ -736,67 +732,85 @@ mod key_not_ready {
     use crate::cloning::CloneSession;
     use crate::config::BridgeConfig;
     use crate::networks::evm::events::{EvmReceiptProvider, ReceiptData};
-    use crate::networks::rgb::validation::{bfa_binding, RgbValidator};
+    use crate::networks::rgb::validation::RgbValidator;
     use crate::proto::enclave_request::Request;
     use crate::proto::enclave_response::Response;
     use crate::state::{CloningSession, EnclaveState};
+    use crate::test_support::bfa_consignment::{self as gen, History, Issue};
     use sha3::{Digest, Keccak256};
     use std::sync::{
         atomic::{AtomicUsize, Ordering},
         Arc,
     };
 
-    /// A signet BFA burn with one mint (see `tests/fixtures`).
-    const BURN: &[u8] = include_bytes!("../../tests/fixtures/bfa_burn_consignment.rgbc");
+    const BRIDGE: [u8; 20] = [0xB1; 20];
+
+    /// A generated mint of 100_000, then a burn of all of it.
+    fn burn() -> History {
+        let right = gen::outpoint(0xA0, 0);
+        let mut history = History::issue(Issue::new(42161, BRIDGE, vec![right]));
+        let right = history.genesis_right(0, right);
+        let (_, units) = history.mint_owned(right, 100_000, 90);
+        history.burn(units, 100_000, Some(100_000), Some([0; 32]));
+        history
+    }
 
     /// Counts EVM RPC calls. A burn's locks are derived from its mints, not
-    /// read from the chain (see `bfa::burn_locks::NoRpc`), so this must stay
-    /// at 0 through the whole test.
+    /// read from the chain, so this must stay at 0 through the whole test.
     struct CountingEvmRpc(Arc<AtomicUsize>);
 
-    impl EvmReceiptProvider for CountingEvmRpc {
-        fn get_transaction_receipt(&self, _: &[u8; 32]) -> Result<Option<ReceiptData>> {
-            self.0.fetch_add(1, Ordering::SeqCst);
-            Ok(None)
-        }
-
-        fn get_block_number(&self) -> Result<u64> {
+    impl CountingEvmRpc {
+        fn count(&self) -> Result<u64> {
             self.0.fetch_add(1, Ordering::SeqCst);
             Ok(0)
         }
     }
 
-    /// Sends the burn. Returns the response, the count of indexer
-    /// connections that RGB validation made, and the count of EVM RPC calls.
-    fn sign_burn(state: EnclaveState) -> (Response, usize, usize) {
-        let binding = bfa_binding(BURN).unwrap().expect("a BFA consignment");
-        let mut bridge = [0u8; 20];
-        hex::decode_to_slice(
-            binding.bridge_location.trim_start_matches("0x"),
-            &mut bridge,
-        )
-        .unwrap();
+    impl EvmReceiptProvider for CountingEvmRpc {
+        fn get_transaction_receipt(&self, _: &[u8; 32]) -> Result<Option<ReceiptData>> {
+            self.count().map(|_| None)
+        }
+
+        fn get_block_number(&self) -> Result<u64> {
+            self.count()
+        }
+
+        fn get_finalized_block_number(&self) -> Result<u64> {
+            self.count()
+        }
+
+        fn get_chain_id(&self) -> Result<u64> {
+            self.count()
+        }
+    }
+
+    /// Bytes RGB validation refuses with its own error, under a matching
+    /// `consignment_hash`.
+    const NOT_A_CONSIGNMENT: &[u8] = b"not-a-consignment";
+
+    /// Sends `consignment` of `asset_id` as a burn. Returns the response and
+    /// the count of EVM RPC calls.
+    fn sign_burn(state: EnclaveState, consignment: Vec<u8>, asset_id: String) -> (Response, usize) {
         let cfg = BridgeConfig {
-            funds_in_contract: bridge,
+            funds_in_contract: BRIDGE,
             token_contract: [0x7e; 20],
             chain_id: 42161,
             ..BridgeConfig::default()
         };
         let mut ctx = ServerContext::new(state, cfg, crate::test_support::regtest_header_chain());
-        let (url, hits) =
-            crate::test_support::electrum_stub::spawn_counted(bitcoin::Network::Signet);
         let rpc_calls = Arc::new(AtomicUsize::new(0));
         let launch = ctx.launch.get_mut().unwrap();
-        launch.rgb_validator = Some(RgbValidator::new(url, "signet").unwrap());
+        launch.rgb_validator =
+            Some(RgbValidator::new("tcp://indexer.invalid:1".into(), "regtest").unwrap());
         launch.evm_rpc_client = Some(Box::new(CountingEvmRpc(Arc::clone(&rpc_calls))));
 
         let request = EnclaveRequest {
             request: Some(Request::Sign(SignRequest {
                 amount: 100_000,
                 source_network: Some(SourceNetwork::RgbSource(RgbSource {
-                    consignment: BURN.to_vec(),
-                    consignment_hash: Keccak256::digest(BURN).to_vec(),
-                    asset_id: "rgb:psO2jKZI-i4fudyA-ORTT8a~-SMaLO6u-69ELk2p-yPRGPJY".into(),
+                    consignment_hash: Keccak256::digest(&consignment).to_vec(),
+                    consignment,
+                    asset_id,
                     ..Default::default()
                 })),
                 destination_network: Some(DestinationNetwork::EvmDestination(
@@ -809,13 +823,23 @@ mod key_not_ready {
             .0
             .response
             .unwrap();
-        (
-            response,
-            hits.load(Ordering::SeqCst),
-            rpc_calls.load(Ordering::SeqCst),
-        )
+        (response, rpc_calls.load(Ordering::SeqCst))
     }
 
+    /// A valid burn and its asset id.
+    fn valid_burn() -> (Vec<u8>, String) {
+        let history = burn();
+        (history.consignment(vec![]), history.contract_id.to_string())
+    }
+
+    fn ready_state() -> EnclaveState {
+        let state = EnclaveState::default();
+        state.initialize_from_seed([7; 64]).unwrap();
+        state
+    }
+
+    /// Validation would refuse these bytes with its own error, so the key
+    /// error proves that no validation ran.
     #[test]
     fn a_sign_is_refused_before_validation_while_the_key_is_not_ready() {
         let cloning = EnclaveState::default();
@@ -823,9 +847,9 @@ mod key_not_ready {
             .enter_cloning(CloningSession::new(CloneSession::new(), [1; 20]))
             .unwrap();
         for state in [EnclaveState::default(), cloning] {
-            let (response, hits, rpc_calls) = sign_burn(state);
+            let (response, rpc_calls) =
+                sign_burn(state, NOT_A_CONSIGNMENT.to_vec(), "rgb:test".into());
             assert_eq!(rpc_calls, 0, "an EVM RPC call ran: {response:?}");
-            assert_eq!(hits, 0, "RGB validation ran: {response:?}");
             assert_eq!(
                 response,
                 Response::Error(ErrorResponse {
@@ -836,13 +860,30 @@ mod key_not_ready {
         }
     }
 
-    /// Control: the same request reaches RGB validation with a ready key.
+    /// Control: with a ready key the same bytes reach validation, which
+    /// refuses them.
     #[test]
-    fn a_ready_key_lets_the_same_sign_reach_rgb_validation() {
-        let state = EnclaveState::default();
-        state.initialize_from_seed([7; 64]).unwrap();
-        let (response, hits, rpc_calls) = sign_burn(state);
-        assert!(hits >= 1, "RGB validation did not run: {response:?}");
+    fn a_ready_key_lets_the_same_bytes_reach_validation() {
+        let (response, _) = sign_burn(ready_state(), NOT_A_CONSIGNMENT.to_vec(), "rgb:test".into());
+        let Response::Error(err) = &response else {
+            panic!("expected the validation refusal, got {response:?}");
+        };
+        assert!(
+            err.message.contains("deserialization failed"),
+            "{response:?}"
+        );
+    }
+
+    /// Control: with a ready key a valid burn passes RGB validation and the
+    /// asset bind, and stops at the SPV check after them.
+    #[test]
+    fn a_ready_key_lets_a_valid_burn_reach_the_spv_check() {
+        let (consignment, asset_id) = valid_burn();
+        let (response, rpc_calls) = sign_burn(ready_state(), consignment, asset_id);
+        let Response::Error(err) = &response else {
+            panic!("expected the SPV refusal, got {response:?}");
+        };
+        assert!(err.message.contains("spv:"), "{response:?}");
         assert_eq!(
             rpc_calls, 0,
             "a burn must not read the EVM chain: {response:?}"

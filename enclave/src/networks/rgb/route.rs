@@ -148,9 +148,8 @@ pub fn validate_destination_anchor(
             "send-RGB PSBT carries a consignment but the RGB validator is not configured".into(),
         )
     })?;
-    // A BFA mint needs the event that `cea` checks it against. Thus the caller
-    // verifies the EVM lock before this call.
-    let validated = validator.validate_consignment(&destination.consignment, ctx.bridge_events)?;
+    // The binder verifies the mint's own EVM lock and derives the ancestors'.
+    let validated = validator.validate_consignment(&destination.consignment, ctx.anchor_binder)?;
 
     // Fail closed on a missing pin, unlike the source direction. An enclave
     // with rgb-validation but no config must not trust the listener.
@@ -183,11 +182,20 @@ pub fn validate_destination_anchor(
         self_owned,
     )?;
 
-    let key_path_inputs = ctx
-        .psbt_fee_key_paths
-        .map(|resolve| resolve(&psbt))
-        .transpose()?
-        .unwrap_or_default();
+    // The colored inputs the enclave signs, from its own keys.
+    let resolve_colored = ctx.psbt_fee_key_paths.ok_or_else(|| {
+        EnclaveError::CrossCheck(
+            "send-RGB PSBT cannot be bound: no key-path resolver is wired in, so the enclave \
+             cannot tell which inputs it signs"
+                .into(),
+        )
+    })?;
+    let key_path_inputs = resolve_colored(&psbt)?;
+    psbt_validation::assert_colored_inputs_close_seals(
+        &psbt,
+        &key_path_inputs,
+        &validated.last_closed_seals,
+    )?;
     // Pinned fee policy, shared with the plain-BTC path. No fee estimate is
     // fetched. A dynamic bound can strand a mint whose EVM lock is settled.
     // Also, the host controls that egress.

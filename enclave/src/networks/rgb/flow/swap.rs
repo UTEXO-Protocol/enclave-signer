@@ -4,7 +4,7 @@
 //! See [`super`] for the reason for a separate file and the shared item names.
 
 use crate::error::{EnclaveError, Result};
-use crate::networks::rgb::validation::{bfa, TransitionSummary};
+use crate::networks::rgb::validation::TransitionSummary;
 
 /// Flow name for rejection messages. It lets an operator tell "wrong shape"
 /// from "wrong enclave".
@@ -15,7 +15,7 @@ pub const FLOW_NAME: &str = "send/receive";
 /// The consignment parser also uses it to decide whether to extract the
 /// witness prevouts of the last bundle ([`crate::networks::rgb::validation`]).
 pub fn is_signing_transition(transition_type: u16) -> bool {
-    transition_type == bfa::TS_TRANSFER
+    rgbstd::TransitionType::with(transition_type) == schemata::TS_TRANSFER
 }
 
 /// Checks the last transition of the consignment before the PSBT bind.
@@ -25,7 +25,7 @@ pub fn assert_signing_transition(last: &TransitionSummary) -> Result<()> {
             "send-RGB PSBT requires a Transfer transition (last transition_type = {}, want {}) - \
              this enclave is built for the {FLOW_NAME} flow",
             last.transition_type,
-            bfa::TS_TRANSFER
+            schemata::TS_TRANSFER
         )));
     }
     Ok(())
@@ -42,7 +42,7 @@ pub fn assert_committed_group(committed: &[&TransitionSummary]) -> Result<()> {
                  Transfer ({})",
                 t.op_id,
                 t.transition_type,
-                bfa::TS_TRANSFER
+                schemata::TS_TRANSFER
             )));
         }
     }
@@ -82,7 +82,7 @@ pub fn funds_out_source_amount(last: &TransitionSummary) -> Result<u64> {
             "fundsOut requires a Transfer transition (last transition_type = {}, want {}) - \
              this enclave is built for the {FLOW_NAME} flow",
             last.transition_type,
-            bfa::TS_TRANSFER
+            schemata::TS_TRANSFER
         )));
     }
     Ok(last.total_output_amount)

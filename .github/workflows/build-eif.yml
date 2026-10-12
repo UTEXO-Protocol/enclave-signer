@@ -19,9 +19,6 @@ name: "Build EIF"
 #
 # Required repo config (Settings -> Secrets and variables -> Actions):
 #   secrets.FEDERATED_SIGNER_PROTO_DEPLOY_KEY  parent proto access
-#   secrets.RGB_CONSENSUS_BFA_DEPLOY_KEY        rgb-consensus-s-bfa access
-#   secrets.RGB_OPS_BFA_DEPLOY_KEY              rgb-ops-s-bfa access
-#   secrets.RGB_SCHEMAS_BFA_DEPLOY_KEY          rgb-schemas-s-bfa access
 #   secrets.AWS_OIDC_ROLE_ARN                  IAM role to assume via OIDC for S3 upload
 #                                              (if unset, the S3 step is skipped and
 #                                               artifacts are only attached to the run)
@@ -100,9 +97,6 @@ jobs:
         env:
           PRIVATE_DEPS_DIR: ${{ runner.temp }}/private-deps
           FEDERATED_SIGNER_PROTO_DEPLOY_KEY: ${{ secrets.FEDERATED_SIGNER_PROTO_DEPLOY_KEY }}
-          RGB_CONSENSUS_BFA_DEPLOY_KEY: ${{ secrets.RGB_CONSENSUS_BFA_DEPLOY_KEY }}
-          RGB_OPS_BFA_DEPLOY_KEY: ${{ secrets.RGB_OPS_BFA_DEPLOY_KEY }}
-          RGB_SCHEMAS_BFA_DEPLOY_KEY: ${{ secrets.RGB_SCHEMAS_BFA_DEPLOY_KEY }}
         run: sh build/prepare-private-deps.sh
 
       - name: Set up Docker Buildx

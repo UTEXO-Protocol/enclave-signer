@@ -253,6 +253,14 @@ pub mod deposit_stub {
         fn get_block_number(&self) -> Result<u64> {
             Ok(HEAD)
         }
+
+        fn get_finalized_block_number(&self) -> Result<u64> {
+            Ok(BLOCK)
+        }
+
+        fn get_chain_id(&self) -> Result<u64> {
+            Ok(1)
+        }
     }
 }
 

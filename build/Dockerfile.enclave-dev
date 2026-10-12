@@ -1,12 +1,11 @@
 # syntax=docker/dockerfile:1.4
 # Enclave (dev mode, TCP, no vsock)
-# Private Cargo dependencies require BuildKit secrets (see README, Building).
-# Supply github_token, or one deploy key per repo; keys never enter image layers.
-# Example: docker build --secret id=github_token,env=GITHUB_TOKEN -f build/Dockerfile.enclave-dev .
+# The enclave has no private dependency, so the build needs no secret.
+# Example: docker build -f build/Dockerfile.enclave-dev .
 # Builder glibc must stay compatible with the runtime stage below.
 FROM rust:1.96-slim AS builder
 
-# Builder-only tools: system Git and SSH for private dependencies.
+# Builder-only tools: system Git fetches the public git dependency.
 RUN apt-get update && apt-get install -y \
     pkg-config libssl-dev git ca-certificates openssh-client make cmake \
     && rm -rf /var/lib/apt/lists/*
@@ -31,11 +30,7 @@ WORKDIR /build/enclave
 # every CCD request answers "not compiled in".
 # `rgb-swap` is the RGB flow this dev image carries; `--no-default-features`
 # drops it along with the rest of the default set, so it must be named.
-RUN --mount=type=secret,id=github_token \
-    --mount=type=secret,id=consensus_key \
-    --mount=type=secret,id=ops_key \
-    --mount=type=secret,id=schemas_key \
-    sh /build/build/with-private-deps.sh enclave cargo build --no-default-features --features allow-seed-import,spv,rgb-swap,ccd,evm-rpc
+RUN cargo build --locked --no-default-features --features allow-seed-import,spv,rgb-swap,ccd,evm-rpc
 
 
 # ===== Runtime Stage =====

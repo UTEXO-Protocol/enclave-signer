@@ -44,6 +44,8 @@ const BRIDGE: [u8; 20] = [0xB1; 20];
 const TX: [u8; 32] = [0x11; 32];
 const OP_ID: [u8; 32] = [0xAB; 32];
 const MINT_OPID: [u8; 32] = [0xCD; 32];
+/// The mint's `afterBlock`: the lock is at block 100.
+const AFTER_BLOCK: u64 = 90;
 /// Hex of the CA's DER.
 const CA_A_HEX: &str = include_str!("fixtures/evm_rpc_tls/ca_a.der.hex");
 const CA_B_HEX: &str = include_str!("fixtures/evm_rpc_tls/ca_b.der.hex");
@@ -222,7 +224,24 @@ fn serve_redirect() -> u16 {
 /// The Host header of every request `answer` read.
 static HOSTS: Mutex<Vec<String>> = Mutex::new(Vec::new());
 
-/// Answers one JSON-RPC request with the forged receipt or block 112.
+/// The `finalized` block (105), as `eth_getBlockByNumber` returns it.
+fn finalized_block() -> String {
+    let hash = |b: &str| format!("0x{}", b.repeat(32));
+    format!(
+        r#"{{"hash":"{h}","parentHash":"{h}","sha3Uncles":"{h}","miner":"0x{miner}",
+        "stateRoot":"{h}","transactionsRoot":"{h}","receiptsRoot":"{h}",
+        "logsBloom":"0x{bloom}","difficulty":"0x0","number":"0x69","gasLimit":"0x1c9c380",
+        "gasUsed":"0x0","timestamp":"0x6553f100","extraData":"0x","mixHash":"{h}",
+        "nonce":"0x0000000000000000","baseFeePerGas":"0x7","size":"0x200",
+        "uncles":[],"transactions":[]}}"#,
+        h = hash("22"),
+        miner = "00".repeat(20),
+        bloom = "00".repeat(256),
+    )
+}
+
+/// Answers one JSON-RPC request: the forged receipt, the finalized block,
+/// chain 42161 or head 112.
 fn answer(stream: impl Read + Write, truncate: bool) {
     let mut reader = BufReader::new(stream);
     let mut len = 0;
@@ -248,6 +267,10 @@ fn answer(stream: impl Read + Write, truncate: bool) {
     let id = id.split(['}', ',']).next().unwrap();
     let result = if body.contains("eth_getTransactionReceipt") {
         forged_receipt()
+    } else if body.contains("eth_getBlockByNumber") {
+        finalized_block()
+    } else if body.contains("eth_chainId") {
+        "\"0xa4b1\"".into()
     } else {
         "\"0x70\"".into() // eth_blockNumber: 112
     };
@@ -333,7 +356,7 @@ fn non_default_port_reaches_listener_with_host_header() {
     let port = serve(Some(RPC_TEST), false);
     assert_ne!(port, 443);
     let client = pinned_client(port, CA_A_HEX);
-    verify_rgb_funds_in(&*client, &BRIDGE, 12, &TX, &MINT_OPID).unwrap();
+    verify_rgb_funds_in(&*client, &BRIDGE, 12, &TX, &MINT_OPID, AFTER_BLOCK).unwrap();
     let want = format!("rpc.test:{port}");
     assert!(HOSTS.lock().unwrap().contains(&want), "no Host {want}");
 }
@@ -348,7 +371,15 @@ fn pinned_ca_and_host_return_the_deposit() {
 #[test]
 fn pinned_ca_and_host_return_the_ancestor_mint_lock() {
     let client = pinned_client(serve(Some(RPC_TEST), false), CA_A_HEX);
-    verify_rgb_funds_in(&*client, &BRIDGE, 12, &TX, &MINT_OPID).unwrap();
+    verify_rgb_funds_in(&*client, &BRIDGE, 12, &TX, &MINT_OPID, AFTER_BLOCK).unwrap();
+}
+
+/// The finality and chain id reads parse a real node's answers.
+#[test]
+fn pinned_client_reads_finality_and_the_chain() {
+    let client = pinned_client(serve(Some(RPC_TEST), false), CA_A_HEX);
+    assert_eq!(client.get_finalized_block_number().unwrap(), 105);
+    assert_eq!(client.get_chain_id().unwrap(), 42161);
 }
 
 #[test]
@@ -376,7 +407,7 @@ fn tls_failure_refuses_to_sign() {
             "deposit accepted: {case}"
         );
         assert!(
-            verify_rgb_funds_in(&*client, &BRIDGE, 12, &TX, &MINT_OPID).is_err(),
+            verify_rgb_funds_in(&*client, &BRIDGE, 12, &TX, &MINT_OPID, AFTER_BLOCK).is_err(),
             "ancestor mint lock accepted: {case}"
         );
     }
@@ -391,7 +422,7 @@ fn proxy_env_has_no_effect() {
     std::env::remove_var("NO_PROXY");
     std::env::remove_var("no_proxy");
     let client = pinned_client(serve(Some(RPC_TEST), false), CA_A_HEX);
-    verify_rgb_funds_in(&*client, &BRIDGE, 12, &TX, &MINT_OPID).unwrap();
+    verify_rgb_funds_in(&*client, &BRIDGE, 12, &TX, &MINT_OPID, AFTER_BLOCK).unwrap();
 }
 
 /// CA A is trusted through the system store, but only CA B is pinned. If the
@@ -404,7 +435,7 @@ fn pinned_ca_is_the_only_trusted_root() {
     std::env::set_var("SSL_CERT_FILE", &path);
     let client = pinned_client(serve(Some(RPC_TEST), false), CA_B_HEX);
     assert!(
-        verify_rgb_funds_in(&*client, &BRIDGE, 12, &TX, &MINT_OPID).is_err(),
+        verify_rgb_funds_in(&*client, &BRIDGE, 12, &TX, &MINT_OPID, AFTER_BLOCK).is_err(),
         "a leaf trusted only through the system store must be refused"
     );
 }
@@ -415,7 +446,7 @@ fn pinned_ca_is_the_only_trusted_root() {
 fn timeout_refuses_to_sign() {
     let client = pinned_client(serve_hang(), CA_A_HEX);
     let start = std::time::Instant::now();
-    let got = verify_rgb_funds_in(&*client, &BRIDGE, 12, &TX, &MINT_OPID);
+    let got = verify_rgb_funds_in(&*client, &BRIDGE, 12, &TX, &MINT_OPID, AFTER_BLOCK);
     assert!(got.is_err(), "a hung RPC must refuse to sign");
     assert!(
         start.elapsed() < Duration::from_secs(20),
@@ -430,7 +461,7 @@ fn timeout_refuses_to_sign() {
 fn pinned_host_redirect_is_not_followed() {
     let client = pinned_client(serve_redirect(), CA_A_HEX);
     assert!(
-        verify_rgb_funds_in(&*client, &BRIDGE, 12, &TX, &MINT_OPID).is_err(),
+        verify_rgb_funds_in(&*client, &BRIDGE, 12, &TX, &MINT_OPID, AFTER_BLOCK).is_err(),
         "a redirect from the pinned host must not be followed"
     );
 }
@@ -445,7 +476,7 @@ fn host_forged_receipt_is_refused() {
     let got = verify_funds_in_event(&*client, &BRIDGE, 12, &TX, &OP_ID, 1000, 50)
         .and_then(|v| parse_authorized_recipient(&v.destination_address))
         .and_then(|r| assert_recipient_authorized(&[SEAL.into()], &r))
-        .and_then(|()| verify_rgb_funds_in(&*client, &BRIDGE, 12, &TX, &MINT_OPID));
+        .and_then(|()| verify_rgb_funds_in(&*client, &BRIDGE, 12, &TX, &MINT_OPID, AFTER_BLOCK));
     assert!(
         got.is_err(),
         "the enclave accepted a FundsIn receipt that the host forged over plaintext: {got:?}"

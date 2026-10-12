@@ -31,7 +31,7 @@ sequenceDiagram
         Parent->>Srv: SubmitHeadersRequest
 
         Srv->>Srv: rate limiter: ≤ 100 000 headers per 60 s window<br/>(cumulative, counted before validation)
-        Srv->>Chain: submit_headers(start_height, &headers)
+        Srv->>Chain: submit_headers(start_height, &headers, now)
         Chain->>Chain: batch ≤ MAX_HEADERS_PER_SUBMIT (10 000)
         Chain->>Chain: check bounds:<br/>start_height > checkpoint AND<br/>start_height ≤ tip+1
         Chain->>Chain: reorg_depth := (tip+1) − start_height
@@ -40,11 +40,13 @@ sequenceDiagram
 
         loop staged in batch
             Chain->>Chain: deserialize 80-byte Header (atomic fail)
-            Chain->>Chain: epoch_start_time on retarget heights<br/>(staged batch → chain → checkpoint base_time)
-            Chain->>Val: expected_bits(height, prev_bits, prev_time,<br/>epoch_start_time, network)
-            Val-->>Chain: Some(bits) for mainnet/testnet3,<br/>None for signet/regtest
-            Chain->>Val: validate_header_full(<br/>header, height, prev_hash, expected_bits, net)
+            Chain->>Chain: bits_input: period-first block on retarget heights,<br/>period bits on testnets (staged batch → chain → checkpoint)
+            Chain->>Val: expected_bits(BitsInput, network)
+            Val-->>Chain: Some(bits) for mainnet/testnets (20-minute rule, BIP94 on testnet4),<br/>None for signet/regtest
+            Chain->>Val: validate_header_full(<br/>header, height, prev_hash, prev_time, expected_bits, net, now)
             Val->>Val: check_linkage (prev_blockhash equality)
+            Val->>Val: check_timewarp (testnet4 boundary: ≥ parent − 600 s)
+            Val->>Val: check_future_time (≤ enclave clock + 2 h, every network)
             Val->>Val: nBits match if Some(expected)
             Val->>Val: check_pow (skipped on signet/regtest)
             Val-->>Chain: Ok / SpvError

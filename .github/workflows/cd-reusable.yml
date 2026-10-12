@@ -84,9 +84,6 @@ jobs:
         env:
           PRIVATE_DEPS_DIR: ${{ runner.temp }}/private-deps
           FEDERATED_SIGNER_PROTO_DEPLOY_KEY: ${{ secrets.FEDERATED_SIGNER_PROTO_DEPLOY_KEY }}
-          RGB_CONSENSUS_BFA_DEPLOY_KEY: ${{ secrets.RGB_CONSENSUS_BFA_DEPLOY_KEY }}
-          RGB_OPS_BFA_DEPLOY_KEY: ${{ secrets.RGB_OPS_BFA_DEPLOY_KEY }}
-          RGB_SCHEMAS_BFA_DEPLOY_KEY: ${{ secrets.RGB_SCHEMAS_BFA_DEPLOY_KEY }}
         run: sh build/prepare-private-deps.sh
 
       - name: Set up Docker Buildx
@@ -113,9 +110,6 @@ jobs:
             ${{ matrix.name == 'parent' && inputs.stage == 'dev' && 'CARGO_ARGS=--features insecure-dev' || 'CARGO_ARGS=--release' }}
             ${{ matrix.name == 'parent' && inputs.stage == 'dev' && 'PROFILE_DIR=debug' || 'PROFILE_DIR=release' }}
           secret-files: |
-            consensus_key=${{ runner.temp }}/private-deps/consensus_key
-            ops_key=${{ runner.temp }}/private-deps/ops_key
-            schemas_key=${{ runner.temp }}/private-deps/schemas_key
             federated_key=${{ runner.temp }}/private-deps/federated_key
           tags: |
             ${{ env.REGISTRY }}/${{ matrix.image }}:${{ matrix.tag }}
@@ -136,9 +130,6 @@ jobs:
             ${{ matrix.name == 'parent' && inputs.stage == 'dev' && 'CARGO_ARGS=--features insecure-dev' || 'CARGO_ARGS=--release' }}
             ${{ matrix.name == 'parent' && inputs.stage == 'dev' && 'PROFILE_DIR=debug' || 'PROFILE_DIR=release' }}
           secret-files: |
-            consensus_key=${{ runner.temp }}/private-deps/consensus_key
-            ops_key=${{ runner.temp }}/private-deps/ops_key
-            schemas_key=${{ runner.temp }}/private-deps/schemas_key
             federated_key=${{ runner.temp }}/private-deps/federated_key
           tags: |
             ${{ env.REGISTRY }}/${{ matrix.image }}:${{ matrix.tag }}

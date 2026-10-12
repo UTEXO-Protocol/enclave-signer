@@ -70,18 +70,20 @@ pub fn validate_funds_out_amount(
     flow::assert_funds_out_amount(source_amount, calldata_amount)
 }
 
-/// Payout bind for the burn flow: the burner's target (`MS_BURN_RECIPIENT`)
-/// must equal the final payee. That is the `fundsOut` `recipient`, or the
+/// Payout bind for the burn flow: the burner's target (`burnReason`) must
+/// equal the final payee. That is the `fundsOut` `recipient`, or the
 /// `lzFundsOut` LayerZero `recipient`. `dstEid` is not bound: the burn does not
 /// name a chain.
 ///
-/// This makes a redemption unforgeable. The 32 bytes are in the burn
-/// operation, so its OpId covers them and the spender of the burned units signs
-/// them. A holder of a consignment copy cannot redirect the release.
+/// This makes a redemption unforgeable. The 32 bytes are a global of the burn
+/// operation, so its OpId covers them and the burner's Bitcoin signature
+/// commits to that OpId. A holder of a consignment copy cannot redirect the
+/// release.
 ///
-/// This does not check the burn shape or amount. The caller must run
+/// The schema does not require `burnReason`, so this is its only guard. This
+/// does not check the burn shape or amount. The caller must run
 /// [`validate_funds_out_amount`] first. Under `rgb-mint-burn`, it rejects
-/// anything that is not a `Burn` of exactly the released amount.
+/// anything that is not a burn of exactly the released amount.
 #[cfg(feature = "rgb-mint-burn")]
 pub fn validate_funds_out_burn_recipient(
     release: &ReleaseIdentity,
@@ -93,26 +95,25 @@ pub fn validate_funds_out_burn_recipient(
         )
     })?;
 
-    let recipient = last.burn_recipient.as_deref().ok_or_else(|| {
+    let reason = last.burn_reason.ok_or_else(|| {
         EnclaveError::CrossCheck(
-            "burn transition carries no MS_BURN_RECIPIENT metadata - this burn cannot authorise \
-             a bridged redemption"
+            "burn transition carries no burnReason (GS_BURN_REASON) global - this burn cannot \
+             authorise a bridged redemption"
                 .into(),
         )
     })?;
-    // 32 bytes with a 20-byte EVM address in the low bytes, ABI-style. The
-    // high 12 bytes must be zero. Truncation would pay a target that nobody
-    // signed.
-    if recipient.len() != 32 || recipient[..12] != [0u8; 12] {
+    // A 20-byte EVM address in the low bytes, ABI-style. The high 12 bytes
+    // must be zero. Truncation would pay a target that nobody signed.
+    if reason[..12] != [0u8; 12] {
         return Err(EnclaveError::CrossCheck(format!(
-            "MS_BURN_RECIPIENT is not a left-padded EVM address: 0x{}",
-            hex::encode(recipient)
+            "burnReason is not a left-padded EVM address: 0x{}",
+            hex::encode(reason)
         )));
     }
-    if recipient != release.recipient.as_slice() {
+    if reason != release.recipient {
         return Err(EnclaveError::CrossCheck(format!(
             "recipient mismatch: burn commits to 0x{}, calldata releases to 0x{}",
-            hex::encode(recipient),
+            hex::encode(reason),
             hex::encode(release.recipient)
         )));
     }
@@ -191,7 +192,7 @@ pub fn validate_funds_out_source_burn_tx_id(
 #[cfg(feature = "bfa-mint")]
 pub fn validate_funds_out_settlement(
     release: &ReleaseIdentity,
-    locks: &[crate::networks::evm::events::VerifiedLock],
+    locks: &[crate::networks::rgb::validation::VerifiedLock],
 ) -> Result<()> {
     use alloy_primitives::{B256, U256};
     use alloy_sol_types::SolValue;

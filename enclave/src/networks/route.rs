@@ -47,16 +47,16 @@ pub struct ValidationContext<'a> {
     #[cfg(all(feature = "rgb-validation", evm_to_rgb))]
     pub self_owned_psbt_outputs:
         Option<crate::networks::rgb::psbt_validation::SelfOwnedOutpoint<'a>>,
-    /// Selects owned key-path inputs for fee sizing without holding keys across I/O.
-    /// Without a resolver, disclosed scripts keep conservative script-path sizing.
+    /// Selects the colored key-path inputs the enclave signs, without holding
+    /// keys across I/O. Fee sizing and the closed-seal bind use them. `None`
+    /// fails the destination bind closed.
     #[cfg(all(feature = "rgb-validation", evm_to_rgb))]
     pub psbt_fee_key_paths: Option<crate::networks::rgb::psbt_validation::FeeKeyPathResolver<'a>>,
-    /// EVM lock events that the enclave verified. RGB consensus gets them so
-    /// the ether extension can check BFA mint amounts again. Empty when no
-    /// side has a BFA consignment, and on builds without `bfa-validation`. A
-    /// BFA consignment with an empty set is refused.
+    /// Binds each BFA mint anchor of a consignment to an EVM lock. `None` on
+    /// builds without `bfa-validation`: a consignment with a mint anchor is
+    /// then refused.
     #[cfg(feature = "rgb-validation")]
-    pub bridge_events: &'a [rgbstd::vm::ether_extension::Event],
+    pub anchor_binder: Option<crate::networks::rgb::validation::AnchorBinder<'a>>,
 }
 
 /// Result of source validation: the route proof and, for an RGB source on an

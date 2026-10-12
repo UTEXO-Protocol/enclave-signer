@@ -19,8 +19,10 @@ fn main() {
     #[cfg(target_os = "linux")]
     utexo_bridge_enclave::clocksync::spawn();
 
-    let bitcoin_network_str = bootstrap::bitcoin_network_str();
-    let state = EnclaveState::new(bootstrap::resolve_bitcoin_network(&bitcoin_network_str));
+    let network = bootstrap::resolve_network(&bootstrap::bitcoin_network_str());
+    #[cfg(feature = "rgb-validation")]
+    bootstrap::load_schema_rules();
+    let state = EnclaveState::new(network.bitcoin_network());
 
     // Pinned bridge config. Committed in attestation `user_data` and checked on
     // every signing request.
@@ -58,7 +60,7 @@ fn main() {
         state,
         bridge_config,
         #[cfg(feature = "rgb-validation")]
-        bootstrap::build_header_chain(&bitcoin_network_str),
+        bootstrap::build_header_chain(network),
         build_ctx,
     );
 

@@ -154,8 +154,6 @@ dependencies = [
  "amplify_syn",
  "ascii",
  "rand 0.8.8",
- "serde",
- "stringly_conversions",
  "wasm-bindgen",
 ]
 
@@ -188,7 +186,6 @@ version = "0.5.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "afed304556696656d2d71495e1e5f2c4b524a3fb6eb0f2f3778ffc482a40b8a8"
 dependencies = [
- "serde",
  "wasm-bindgen",
 ]
 
@@ -551,9 +548,6 @@ name = "ascii"
 version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d92bec98840b8f03a5ff5413de5293bfcd8bf96467cf5452609f939ec6f5de16"
-dependencies = [
- "serde",
-]
 
 [[package]]
 name = "asn1-rs"
@@ -2033,6 +2027,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a5059f13888a90486e7268bbce59b175f5f76b1c55e5b9c568ceaa42d2b8507c"
 dependencies = [
  "bitcoin",
+ "log",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "electrum-client"
+version = "0.25.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1970c5d7bd9de6d4041cbfc3e46faa3e85fe7efcea2b0eb06750d3ae1ef577b7"
+dependencies = [
+ "bitcoin",
  "byteorder",
  "libc",
  "log",
@@ -3269,15 +3275,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "nonasync"
-version = "0.1.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d81f7335a3fa37124e24461d6164485760d4c056dd92a81a70c23fc28c2b63c8"
-dependencies = [
- "amplify",
-]
-
-[[package]]
 name = "nu-ansi-term"
 version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3916,20 +3913,18 @@ dependencies = [
 
 [[package]]
 name = "rgb-aluvm"
-version = "0.11.1-rc.4"
+version = "0.11.2-rc.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dcf4d92478fcff567ff0bd9f18684fd954f8426c74f16e5517254b0a2d34023a"
+checksum = "21de8dc75b4ce90dffe66cff585053e9f5d2abe6436589c95e6308f0605195f4"
 dependencies = [
  "amplify",
  "baid64",
  "blake3",
- "getrandom 0.3.4",
  "half 2.7.1",
- "paste",
  "rgb-ascii-armor",
  "rgb-strict-encoding",
  "rgb-strict-types",
- "ripemd 0.2.0",
+ "ripemd",
  "serde",
  "sha2 0.11.0",
  "wasm-bindgen",
@@ -3937,9 +3932,9 @@ dependencies = [
 
 [[package]]
 name = "rgb-ascii-armor"
-version = "1.0.2"
+version = "1.0.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fcde5a129540e5911c24930fd854ea658a715b50a690d254273088f907a63516"
+checksum = "0b3a739537822793adce1f9539bb3fae3d54a16f409e8353ac85281bdfcec078"
 dependencies = [
  "amplify",
  "baid64",
@@ -3950,8 +3945,9 @@ dependencies = [
 
 [[package]]
 name = "rgb-consensus"
-version = "0.11.1-rc.10"
-source = "git+ssh://git@github-rgb-consensus/UTEXO-Protocol/rgb-consensus-s-bfa?rev=68a1470e22ae4bb6a38205404e484b264b4139ee#68a1470e22ae4bb6a38205404e484b264b4139ee"
+version = "0.11.2-rc.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cd5d6c21f60f24976d8b983b6b5925cd87a4865af8ad6d965d45360518bbfd24"
 dependencies = [
  "amplify",
  "baid64",
@@ -3961,23 +3957,23 @@ dependencies = [
  "daggy",
  "getrandom 0.2.17",
  "getrandom 0.3.4",
- "hex-conservative 0.2.3",
- "mime",
+ "hex-conservative 1.3.0",
  "rand 0.9.5",
  "rgb-aluvm",
+ "rgb-ascii-armor",
  "rgb-strict-encoding",
  "rgb-strict-types",
- "ripemd 0.1.3",
- "secp256k1 0.29.1",
+ "ripemd",
+ "secp256k1 0.33.1",
  "serde",
- "sha2 0.10.9",
+ "sha2 0.11.0",
  "wasm-bindgen",
 ]
 
 [[package]]
 name = "rgb-consignment"
 version = "0.1.0"
-source = "git+https://github.com/UTEXO-Protocol/consignment-utils.git?rev=a6c2e4913bfe3b682270bc747311a2cf7160982b#a6c2e4913bfe3b682270bc747311a2cf7160982b"
+source = "git+https://github.com/UTEXO-Protocol/consignment-utils.git?rev=fac3e14baa44eb05c3400d8c106a9f51bfde3c9d#fac3e14baa44eb05c3400d8c106a9f51bfde3c9d"
 dependencies = [
  "amplify",
  "rgb-ops",
@@ -3989,8 +3985,9 @@ dependencies = [
 
 [[package]]
 name = "rgb-invoicing"
-version = "0.11.1-rc.10"
-source = "git+ssh://git@github-rgb-ops/UTEXO-Protocol/rgb-ops-s-bfa?rev=3bcc7d98d759a8b71bf94ad4a36371dcb7bf392b#3bcc7d98d759a8b71bf94ad4a36371dcb7bf392b"
+version = "0.11.2-rc.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "76692ae2017e3b4789d2539dcf483b5e5e9f4468030d9ffb619aabeab7cd43b4"
 dependencies = [
  "amplify",
  "baid64",
@@ -3998,7 +3995,6 @@ dependencies = [
  "fluent-uri",
  "indexmap 2.14.2",
  "percent-encoding",
- "rand 0.9.5",
  "rgb-consensus",
  "rgb-strict-encoding",
  "rgb-strict-types",
@@ -4007,19 +4003,16 @@ dependencies = [
 
 [[package]]
 name = "rgb-ops"
-version = "0.11.1-rc.10"
-source = "git+ssh://git@github-rgb-ops/UTEXO-Protocol/rgb-ops-s-bfa?rev=3bcc7d98d759a8b71bf94ad4a36371dcb7bf392b#3bcc7d98d759a8b71bf94ad4a36371dcb7bf392b"
+version = "0.11.2-rc.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a0b0b332a32be0e41ce328d534d559e67a0add6381d250bdc188e44eb8777ca7"
 dependencies = [
  "amplify",
  "baid64",
- "base85",
  "chrono",
- "electrum-client",
+ "electrum-client 0.25.0",
  "esplora-client",
  "getrandom 0.3.4",
- "indexmap 2.14.2",
- "nonasync",
- "rand 0.9.5",
  "rgb-aluvm",
  "rgb-ascii-armor",
  "rgb-consensus",
@@ -4033,8 +4026,9 @@ dependencies = [
 
 [[package]]
 name = "rgb-schemas"
-version = "0.11.1-rc.10"
-source = "git+ssh://git@github-rgb-schemas/UTEXO-Protocol/rgb-schemas-s-bfa?rev=af4f91e6807a9680ab195c28719197b7811ac5d6#af4f91e6807a9680ab195c28719197b7811ac5d6"
+version = "0.11.2-rc.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "480f3d71e0f1b23b3c75b59255d62de178259e074f4a74410c330c734f52246f"
 dependencies = [
  "amplify",
  "rgb-aluvm",
@@ -4044,8 +4038,9 @@ dependencies = [
 
 [[package]]
 name = "rgb-strict-encoding"
-version = "1.0.2"
-source = "git+https://github.com/rgb-protocol/rgb-strict-encoding?rev=7698a5e96a2a27d5bfa4cd3560da0e8af8e4a18a#7698a5e96a2a27d5bfa4cd3560da0e8af8e4a18a"
+version = "1.0.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "43cf06a3afea7b29f92f279a5fabb39215d1287f796a8d1a75ce77dd4f807fd4"
 dependencies = [
  "amplify",
  "bitcoin",
@@ -4056,8 +4051,9 @@ dependencies = [
 
 [[package]]
 name = "rgb-strict-encoding-derive"
-version = "1.0.2"
-source = "git+https://github.com/rgb-protocol/rgb-strict-encoding?rev=7698a5e96a2a27d5bfa4cd3560da0e8af8e4a18a#7698a5e96a2a27d5bfa4cd3560da0e8af8e4a18a"
+version = "1.0.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "473d4bc563f8db593abf7213f82fafc5bc667125f2c39222cd66ead369e60421"
 dependencies = [
  "amplify_syn",
  "heck",
@@ -4068,9 +4064,9 @@ dependencies = [
 
 [[package]]
 name = "rgb-strict-types"
-version = "1.0.2"
+version = "1.0.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e920bdf61b662a3743572a03696b0d88992eeb7d4f7afa0902915968327b3ce6"
+checksum = "5efea5be04a66a22f96580fb8c7fd9558f7c5d74039c096bb024e4f325f4529a"
 dependencies = [
  "amplify",
  "baid64",
@@ -4097,15 +4093,6 @@ dependencies = [
  "libc",
  "untrusted",
  "windows-sys 0.52.0",
-]
-
-[[package]]
-name = "ripemd"
-version = "0.1.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bd124222d17ad93a644ed9d011a40f4fb64aa54275c08cc216524a9ea82fb09f"
-dependencies = [
- "digest 0.10.7",
 ]
 
 [[package]]
@@ -4368,7 +4355,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9465315bc9d4566e1724f0fffcbcc446268cb522e60f9a27bcded6b19c108113"
 dependencies = [
  "bitcoin_hashes",
- "rand 0.8.8",
  "secp256k1-sys 0.10.1",
  "serde",
 ]
@@ -4385,6 +4371,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "secp256k1"
+version = "0.33.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d7f404a8dab7a7a5a631e741d8699aa9c8e1d689fc26ccf897c7187565490b69"
+dependencies = [
+ "rand 0.9.5",
+ "secp256k1-sys 0.14.1",
+ "serde",
+]
+
+[[package]]
 name = "secp256k1-sys"
 version = "0.10.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4398,6 +4395,15 @@ name = "secp256k1-sys"
 version = "0.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "dcb913707158fadaf0d8702c2db0e857de66eb003ccfdda5924b5f5ac98efb38"
+dependencies = [
+ "cc",
+]
+
+[[package]]
+name = "secp256k1-sys"
+version = "0.14.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f6b2992d4a3cd244539a7d5d0966aadbe5ca7fb868a5d7e38c29499b9e709bbd"
 dependencies = [
  "cc",
 ]
@@ -4539,16 +4545,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bf41e0cfaf7226dca15e8197172c295a782857fcb97fad1808a166870dee75a3"
 dependencies = [
  "serde",
-]
-
-[[package]]
-name = "serde_str_helpers"
-version = "0.1.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b744a7c94f2f3785496af33a0d93857dfc0c521e25c38e993e9c5bb45f09c841"
-dependencies = [
- "serde",
- "serde_derive",
 ]
 
 [[package]]
@@ -4780,16 +4776,6 @@ name = "static_assertions"
 version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a2eb9349b6444b326872e140eb1cf5e7c522154d69e7a0ffb0fb81c06b37543f"
-
-[[package]]
-name = "stringly_conversions"
-version = "0.1.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ff63080f492dd4d289ffcaed8d7ece38adfb423db910eb342c0e04d409536a7a"
-dependencies = [
- "paste",
- "serde_str_helpers",
-]
 
 [[package]]
 name = "strsim"
@@ -5388,6 +5374,7 @@ version = "0.1.0"
 dependencies = [
  "alloy-primitives",
  "alloy-sol-types",
+ "amplify",
  "attestation-verify",
  "aws-nitro-enclaves-nsm-api",
  "bip39",
@@ -5402,6 +5389,8 @@ dependencies = [
  "k256 0.14.0",
  "nix",
  "prost",
+ "rgb-aluvm",
+ "rgb-consensus",
  "rgb-consignment",
  "rgb-invoicing",
  "rgb-ops",
@@ -5434,7 +5423,7 @@ dependencies = [
  "bitcoin",
  "ciborium",
  "clap",
- "electrum-client",
+ "electrum-client 0.24.1",
  "federated-signer-proto",
  "hex",
  "http 1.5.0",

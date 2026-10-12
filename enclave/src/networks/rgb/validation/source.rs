@@ -42,10 +42,9 @@ pub fn validate_source(
         )
     })?;
 
-    // A burn consignment contains its full mint ancestry. Each mint transition
-    // ends in `cea`, and consensus runs them again. Thus it needs the EVM locks
-    // that the enclave verified.
-    let validated = validator.validate_consignment(&source.consignment, ctx.bridge_events)?;
+    // A burn consignment contains its full mint ancestry. Each mint leaves an
+    // anchor that only a bound lock confirms.
+    let validated = validator.validate_consignment(&source.consignment, ctx.anchor_binder)?;
 
     assert_asset_binding(
         &validated.contract_id,

@@ -1,9 +1,8 @@
 # syntax=docker/dockerfile:1.7
 # RGB-only enclave image, retired swap flow (vsock + rgb + rgb-swap +
 # bfa-validation). Not a production image: see Dockerfile.enclave.mint/.burn.
-# Private Cargo dependencies require BuildKit secrets (see README, Building).
-# Supply github_token, or one deploy key per repo; keys never enter image layers.
-# Example: docker build --secret id=github_token,env=GITHUB_TOKEN -f build/Dockerfile.enclave.rgb .
+# The enclave has no private dependency, so the build needs no secret.
+# Example: docker build -f build/Dockerfile.enclave.rgb .
 # Use the same Debian release for the builder and runtime.
 FROM rust:1.96.1-slim-trixie@sha256:31ee7fc65186be7e0e0ccb3f2ca305f14e4739e7642a1ae65753aa5d7b874523 AS builder
 
@@ -39,11 +38,7 @@ ENV CARGO_INCREMENTAL=0 \
 # `rgb-swap` selects the send/receive RGB flow (retired). Exactly one flow is required
 # under `rgb-validation`; the mint/burn images are Dockerfile.enclave.mint and
 # Dockerfile.enclave.burn.
-RUN --mount=type=secret,id=github_token \
-    --mount=type=secret,id=consensus_key \
-    --mount=type=secret,id=ops_key \
-    --mount=type=secret,id=schemas_key \
-    sh /build/build/with-private-deps.sh enclave cargo build --release --locked --no-default-features --features vsock,rgb,rgb-swap,bfa-validation
+RUN cargo build --release --locked --no-default-features --features vsock,rgb,rgb-swap,bfa-validation
 
 
 # --- Runtime ---

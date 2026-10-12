@@ -1,0 +1,257 @@
+use super::*;
+use crate::error::Result;
+use crate::networks::evm::events::{rgb_mint_deposit_id, EvmReceiptProvider, ReceiptData};
+use crate::state::EnclaveState;
+use crate::test_support::regtest_header_chain;
+
+const BRIDGE: [u8; 20] = [0x50; 20];
+const CHAIN_ID: u64 = 42161;
+
+fn config() -> BridgeConfig {
+    BridgeConfig {
+        funds_in_contract: BRIDGE,
+        token_contract: [0x7e; 20],
+        chain_id: CHAIN_ID,
+        ..BridgeConfig::default()
+    }
+}
+
+fn context(cfg: BridgeConfig, rpc: Box<dyn EvmReceiptProvider + Send + Sync>) -> ServerContext {
+    let mut ctx = ServerContext::new(EnclaveState::default(), cfg, regtest_header_chain());
+    ctx.launch.get_mut().unwrap().evm_rpc_client = Some(rpc);
+    ctx
+}
+
+const PINNED: BfaBridge = BfaBridge {
+    chain_id: CHAIN_ID,
+    address: BRIDGE,
+};
+
+fn anchor(tag: u8, amount: u64, in_last_bundle: bool) -> MintAnchor {
+    MintAnchor {
+        opid: [tag; 32],
+        amount,
+        after_block: 90,
+        in_last_bundle,
+    }
+}
+
+/// A binder that must not read the chain.
+struct NoRpc;
+
+impl EvmReceiptProvider for NoRpc {
+    fn get_transaction_receipt(&self, _: &[u8; 32]) -> Result<Option<ReceiptData>> {
+        panic!("this binder must not read the chain")
+    }
+
+    fn get_block_number(&self) -> Result<u64> {
+        panic!("this binder must not read the chain")
+    }
+
+    fn get_finalized_block_number(&self) -> Result<u64> {
+        panic!("this binder must not read the chain")
+    }
+
+    fn get_chain_id(&self) -> Result<u64> {
+        panic!("this binder must not read the chain")
+    }
+}
+
+#[cfg(rgb_to_evm)]
+mod burn {
+    use super::*;
+
+    /// Finding 47: a burn's locks come from its mints alone.
+    #[test]
+    fn derives_every_lock_from_its_anchor_without_rpc() {
+        let ctx = context(config(), Box::new(NoRpc));
+        let anchors = [anchor(1, 100_000, false), anchor(2, 5, true)];
+
+        let bound = derived_locks(&ctx, &PINNED, &anchors).unwrap();
+        assert_eq!(bound.evm_chain_id, CHAIN_ID);
+        assert_eq!(bound.locks.len(), 2);
+        for (lock, a) in bound.locks.iter().zip(&anchors) {
+            assert_eq!(lock.mint_opid, a.opid);
+            assert_eq!(lock.minted, a.amount);
+            assert_eq!(lock.net_amount, a.amount);
+            assert_eq!(
+                lock.operation_id,
+                rgb_mint_deposit_id(&ctx.bridge_config, &a.opid, a.amount).unwrap()
+            );
+        }
+    }
+
+    #[test]
+    fn refuses_when_the_token_is_not_pinned() {
+        let cfg = BridgeConfig {
+            token_contract: [0; 20],
+            ..config()
+        };
+        let ctx = context(cfg, Box::new(NoRpc));
+        let err = derived_locks(&ctx, &PINNED, &[anchor(1, 1, false)]).unwrap_err();
+        assert!(err.to_string().contains("TOKEN_CONTRACT"), "{err}");
+    }
+
+    #[test]
+    fn refuses_an_asset_of_another_bridge_or_chain() {
+        let ctx = context(config(), Box::new(NoRpc));
+        for bridge in [
+            BfaBridge {
+                address: [0x51; 20],
+                ..PINNED
+            },
+            BfaBridge {
+                chain_id: 1,
+                ..PINNED
+            },
+        ] {
+            let err = derived_locks(&ctx, &bridge, &[anchor(1, 1, false)]).unwrap_err();
+            assert!(err.to_string().contains("is not the pinned"), "{err}");
+        }
+    }
+}
+
+#[cfg(evm_to_rgb)]
+mod mint {
+    use super::*;
+    use crate::networks::evm::events::{LogEntry, BRIDGE_FUNDS_IN_SIG, FUNDS_IN_SIG};
+    use crate::test_support::{abi_word, bridge_funds_in_data, FakeEvm};
+    use sha3::{Digest, Keccak256};
+
+    const TX: [u8; 32] = [0xee; 32];
+
+    fn topic0(sig: &str) -> [u8; 32] {
+        Keccak256::digest(sig.as_bytes()).into()
+    }
+
+    /// A finalized deposit for mint `opid` of `amount`, with `operation_id`.
+    fn deposit(opid: [u8; 32], amount: u64, operation_id: [u8; 32]) -> FakeEvm {
+        let logs = vec![
+            LogEntry {
+                address: BRIDGE,
+                topics: vec![topic0(FUNDS_IN_SIG), abi_word(0xdead), opid],
+                data: abi_word(amount).to_vec(),
+            },
+            LogEntry {
+                address: BRIDGE,
+                topics: vec![topic0(BRIDGE_FUNDS_IN_SIG), operation_id],
+                data: bridge_funds_in_data(amount, amount, 0, ""),
+            },
+        ];
+        FakeEvm {
+            receipt: Some(ReceiptData {
+                status_success: true,
+                block_number: 100,
+                logs,
+            }),
+            head: 200,
+            finalized: Some(150),
+            chain_id: CHAIN_ID,
+        }
+    }
+
+    fn paid(opid: [u8; 32], amount: u64) -> FakeEvm {
+        let id = rgb_mint_deposit_id(&config(), &opid, amount).unwrap();
+        deposit(opid, amount, id)
+    }
+
+    #[test]
+    fn binds_the_signed_mint_to_its_receipt_and_derives_the_ancestors() {
+        let anchors = [anchor(1, 7, false), anchor(2, 100, true)];
+        let ctx = context(config(), Box::new(paid([2; 32], 100)));
+
+        let bound = mint_locks(&ctx, &TX, &PINNED, &anchors).unwrap();
+        assert_eq!(bound.evm_chain_id, CHAIN_ID);
+        assert_eq!(bound.locks.len(), 2);
+        assert_eq!(bound.locks[0].mint_opid, [1; 32]);
+        assert_eq!(bound.locks[1].mint_opid, [2; 32]);
+    }
+
+    #[test]
+    fn refuses_a_shadow_deposit_for_the_same_mint() {
+        let ctx = context(config(), Box::new(deposit([2; 32], 100, [0xd2; 32])));
+        let err = mint_locks(&ctx, &TX, &PINNED, &[anchor(2, 100, true)]).unwrap_err();
+        assert!(err.to_string().contains("not the one mint"), "{err}");
+    }
+
+    #[test]
+    fn refuses_a_deposit_of_another_amount() {
+        let ctx = context(config(), Box::new(paid([2; 32], 99)));
+        let err = mint_locks(&ctx, &TX, &PINNED, &[anchor(2, 100, true)]).unwrap_err();
+        assert!(err.to_string().contains("not the one mint"), "{err}");
+    }
+
+    #[test]
+    fn refuses_a_deposit_for_another_mint() {
+        let ctx = context(config(), Box::new(paid([3; 32], 100)));
+        let err = mint_locks(&ctx, &TX, &PINNED, &[anchor(2, 100, true)]).unwrap_err();
+        assert!(err.to_string().contains("rgbOpId mismatch"), "{err}");
+    }
+
+    #[test]
+    fn refuses_a_node_on_another_chain() {
+        let node = FakeEvm {
+            chain_id: 1,
+            ..paid([2; 32], 100)
+        };
+        let ctx = context(config(), Box::new(node));
+        let err = mint_locks(&ctx, &TX, &PINNED, &[anchor(2, 100, true)]).unwrap_err();
+        assert!(err.to_string().contains("reports chain id 1"), "{err}");
+    }
+
+    #[test]
+    fn refuses_a_lock_not_yet_finalized() {
+        let node = FakeEvm {
+            finalized: Some(99),
+            ..paid([2; 32], 100)
+        };
+        let ctx = context(config(), Box::new(node));
+        let err = mint_locks(&ctx, &TX, &PINNED, &[anchor(2, 100, true)]).unwrap_err();
+        assert!(err.to_string().contains("not finalized"), "{err}");
+    }
+
+    /// The pins are checked before any RPC read.
+    #[test]
+    fn refuses_an_asset_of_another_bridge_before_reading_the_chain() {
+        let ctx = context(config(), Box::new(NoRpc));
+        let bridge = BfaBridge {
+            chain_id: 1,
+            ..PINNED
+        };
+        let err = mint_locks(&ctx, &TX, &bridge, &[anchor(2, 100, true)]).unwrap_err();
+        assert!(err.to_string().contains("is not the pinned"), "{err}");
+    }
+
+    #[test]
+    fn refuses_a_signed_bundle_without_exactly_one_mint() {
+        let ctx = context(config(), Box::new(NoRpc));
+        for anchors in [
+            vec![anchor(1, 1, false)],
+            vec![anchor(1, 1, true), anchor(2, 1, true)],
+        ] {
+            let err = mint_locks(&ctx, &TX, &PINNED, &anchors).unwrap_err();
+            assert!(err.to_string().contains("exactly one mint anchor"), "{err}");
+        }
+    }
+
+    const DERIVED: VerifiedLock = VerifiedLock {
+        mint_opid: [1; 32],
+        minted: 100,
+        operation_id: [0xd1; 32],
+        net_amount: 100,
+    };
+
+    #[test]
+    fn accepts_the_deposit_the_mint_derives() {
+        assert!(bind_request_deposit(&DERIVED, &DERIVED).is_ok());
+    }
+
+    #[test]
+    fn refuses_another_net_amount_for_the_same_deposit() {
+        let other = VerifiedLock {
+            net_amount: 99,
+            ..DERIVED
+        };
+        assert!(bind_request_deposit(&DERIVED, &other).is_err());
+    }
+}

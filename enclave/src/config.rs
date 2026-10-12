@@ -17,10 +17,11 @@ use crate::error::{EnclaveError, Result};
 /// bound. The wire frame ([`crate::framing::MAX_MESSAGE_SIZE`]) also caps it.
 ///
 /// The three defaults below are sized for a history of 10_000 state
-/// transitions. A consignment has approx 6 KB of fixed data, and each
-/// transition adds 470 to 600 bytes (measured: BFA transfer 468, BFA burn 560,
-/// BFA mint 593). Thus 10_000 transitions need 4.7 to 6 MB.
-pub const DEFAULT_MAX_CONSIGNMENT_BYTES: usize = 8 * 1024 * 1024;
+/// transitions. A V1 consignment carries no schema or types, and each
+/// transition adds approx 470 bytes, or 890 with an SPV proof of a full
+/// mainnet block. Measured: 10_002 transitions, each with a proof, are
+/// 8_932_088 bytes (`a_history_of_10_000_transfers_fits_the_default_limits`).
+pub const DEFAULT_MAX_CONSIGNMENT_BYTES: usize = 12 * 1024 * 1024;
 /// Default cap on Merkle proofs per source (`MAX_MERKLE_PROOFS`). A burn needs
 /// one proof for each witness tx in its history.
 pub const DEFAULT_MAX_MERKLE_PROOFS: usize = 16_384;

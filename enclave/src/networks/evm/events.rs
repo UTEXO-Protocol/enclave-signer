@@ -23,6 +23,8 @@
 use sha3::{Digest, Keccak256};
 
 use crate::error::{EnclaveError, Result};
+#[cfg(feature = "bfa-validation")]
+use crate::networks::rgb::validation::VerifiedLock;
 
 /// Reads a uint256 ABI word at a byte offset as u64. Fails if the data is too
 /// short or the value is more than u64.
@@ -128,6 +130,10 @@ pub trait EvmReceiptProvider {
     fn get_transaction_receipt(&self, tx_hash: &[u8; 32]) -> Result<Option<ReceiptData>>;
     /// `eth_blockNumber` (current head).
     fn get_block_number(&self) -> Result<u64>;
+    /// Number of the `finalized` block. A node without the tag fails.
+    fn get_finalized_block_number(&self) -> Result<u64>;
+    /// `eth_chainId`: the chain the node itself is on.
+    fn get_chain_id(&self) -> Result<u64>;
 }
 
 /// keccak256 of an event signature -> its `topic0`.
@@ -474,23 +480,6 @@ fn decode_funds_in(log: &LogEntry, expected_rgb_opid: &[u8; 32]) -> Result<u64> 
     Ok(amount)
 }
 
-/// One verified EVM deposit behind a BFA mint.
-///
-/// `minted` is the maximum RGB issue: consensus checks the mint against this
-/// `FundsIn` amount. `operation_id` / `net_amount` are the `BridgeFundsIn`
-/// record that the settlement module stored. Thus they are the only pair that
-/// a `fundsOut.settlementData` can cite for this deposit.
-#[cfg(feature = "bfa-validation")]
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct VerifiedLock {
-    /// The mint that this lock backs, named by the caller and confirmed by the
-    /// `FundsIn` log.
-    pub mint_opid: [u8; 32],
-    pub minted: u64,
-    pub operation_id: [u8; 32],
-    pub net_amount: u64,
-}
-
 /// `Bridge.RGB_MINT_DEPOSIT_TYPEHASH` preimage; bridge-utexo derives the same id.
 #[cfg(feature = "bfa-validation")]
 const RGB_MINT_DEPOSIT_TYPEHASH_STR: &str = "UtexoRgbMintDeposit(address bridge,uint256 chainId,\
@@ -560,7 +549,12 @@ pub fn derived_lock(
 /// pinned emitter, depth), but bound to the RGB OpId, not to the bridge
 /// `operationId` (a different id-space). `funds_in_contract` and
 /// `min_confirmations` come from PINNED config, never the request. `rgb_opid`
-/// comes from the consignment and only selects the log that must exist.
+/// and `after_block` come from the mint's anchor and only select the log that
+/// must exist.
+///
+/// The lock must also follow the RGB rule for a mint anchor: a block after
+/// `after_block`, and finalized. An RGB receiver refuses any other lock, so a
+/// signed mint would strand the user's deposit.
 ///
 /// The receipt must also have exactly one `BridgeFundsIn` from the pinned
 /// contract. A later `fundsOut` must cite its `(operationId, netAmount)` in
@@ -572,6 +566,7 @@ pub fn verify_rgb_funds_in(
     min_confirmations: u64,
     evm_tx_hash: &[u8; 32],
     rgb_opid: &[u8; 32],
+    after_block: u64,
 ) -> Result<VerifiedLock> {
     let receipt = fetch_successful_receipt(provider, evm_tx_hash)?;
     let log = select_unique_log(
@@ -604,7 +599,15 @@ pub fn verify_rgb_funds_in(
         )));
     }
 
+    if receipt.block_number <= after_block {
+        return Err(EnclaveError::CrossCheck(format!(
+            "FundsIn block {} is not after the mint's afterBlock {after_block} - an RGB \
+             receiver refuses this lock, refusing to sign",
+            receipt.block_number
+        )));
+    }
     let depth = check_confirmation_depth(provider, receipt.block_number, min_confirmations)?;
+    check_finalized(provider, receipt.block_number)?;
 
     tracing::info!(
         tx = %hex::encode(evm_tx_hash),
@@ -613,6 +616,7 @@ pub fn verify_rgb_funds_in(
         minted,
         net_amount,
         depth,
+        after_block,
         "FundsIn lock for a BFA mint independently verified in-enclave"
     );
     Ok(VerifiedLock {
@@ -623,23 +627,32 @@ pub fn verify_rgb_funds_in(
     })
 }
 
-/// A BFA asset names its bridge contract in genesis. Only the pinned contract
-/// can authorise a mint that this federation signs.
+/// The lock's block must be finalized: RGB receivers read mint anchors from
+/// finalized blocks only. Retry once finality catches up.
 #[cfg(feature = "bfa-validation")]
-pub fn check_bridge_location(location: &str, pinned: &[u8; 20]) -> Result<()> {
-    let hex_addr = location.strip_prefix("0x").unwrap_or(location);
-    let mut addr = [0u8; 20];
-    hex::decode_to_slice(hex_addr, &mut addr).map_err(|e| {
-        EnclaveError::CrossCheck(format!("invalid bridge location {location:?}: {e}"))
-    })?;
-    if &addr != pinned {
+fn check_finalized(provider: &dyn EvmReceiptProvider, receipt_block: u64) -> Result<()> {
+    let finalized = provider.get_finalized_block_number()?;
+    if receipt_block > finalized {
         return Err(EnclaveError::CrossCheck(format!(
-            "asset bridge location 0x{} is not the pinned funds-in contract 0x{}",
-            hex::encode(addr),
-            hex::encode(pinned)
+            "FundsIn block {receipt_block} is not finalized yet (finalized block {finalized}) - \
+             retry after finality"
         )));
     }
     Ok(())
+}
+
+/// The node must report the pinned chain. A receipt from a node on another
+/// chain (for example a testnet Bridge at the same address) backs nothing.
+#[cfg(feature = "bfa-validation")]
+pub fn check_node_chain_id(provider: &dyn EvmReceiptProvider, pinned: u64) -> Result<u64> {
+    let node = provider.get_chain_id()?;
+    if node != pinned {
+        return Err(EnclaveError::CrossCheck(format!(
+            "EVM RPC node reports chain id {node}, but this enclave is pinned to EVM_CHAIN_ID \
+             {pinned} - refusing to read deposits from another chain"
+        )));
+    }
+    Ok(node)
 }
 
 /// Hard per-call limit for one EVM JSON-RPC round-trip. Without it, a hung RPC
@@ -749,6 +762,53 @@ impl EvmReceiptProvider for AlloyEvmClient {
                 ))
             })?
             .map_err(|e| EnclaveError::CrossCheck(format!("evm-rpc: eth_blockNumber failed: {e}")))
+    }
+
+    fn get_finalized_block_number(&self) -> Result<u64> {
+        use alloy::providers::Provider;
+        use alloy::rpc::types::BlockNumberOrTag;
+        // Standard `eth_getBlockByNumber("finalized", false)`. Build the
+        // `timeout` future inside the async block. See `get_transaction_receipt`.
+        let block = self
+            .runtime
+            .block_on(async {
+                tokio::time::timeout(
+                    EVM_RPC_CALL_TIMEOUT,
+                    self.provider
+                        .get_block_by_number(BlockNumberOrTag::Finalized),
+                )
+                .await
+            })
+            .map_err(|_elapsed| {
+                EnclaveError::CrossCheck(format!(
+                    "evm-rpc: finalized block lookup timed out after {}s - refusing to sign",
+                    EVM_RPC_CALL_TIMEOUT.as_secs()
+                ))
+            })?
+            .map_err(|e| {
+                EnclaveError::CrossCheck(format!("evm-rpc: finalized block lookup failed: {e}"))
+            })?;
+        block.map(|b| b.header.number).ok_or_else(|| {
+            EnclaveError::CrossCheck(
+                "evm-rpc: the node has no finalized block - refusing to treat a lock as final"
+                    .into(),
+            )
+        })
+    }
+
+    fn get_chain_id(&self) -> Result<u64> {
+        use alloy::providers::Provider;
+        self.runtime
+            .block_on(async {
+                tokio::time::timeout(EVM_RPC_CALL_TIMEOUT, self.provider.get_chain_id()).await
+            })
+            .map_err(|_elapsed| {
+                EnclaveError::CrossCheck(format!(
+                    "evm-rpc: eth_chainId timed out after {}s - refusing to sign",
+                    EVM_RPC_CALL_TIMEOUT.as_secs()
+                ))
+            })?
+            .map_err(|e| EnclaveError::CrossCheck(format!("evm-rpc: eth_chainId failed: {e}")))
     }
 }
 

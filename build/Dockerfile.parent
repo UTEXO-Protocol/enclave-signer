@@ -1,7 +1,8 @@
 # syntax=docker/dockerfile:1.4
 # Parent Adapter (gRPC proxy to Enclave)
 # Private Cargo dependencies require BuildKit secrets (see README, Building).
-# Supply github_token, or one deploy key per repo; keys never enter image layers.
+# Supply github_token, or the federated-signer-proto deploy key; keys never
+# enter image layers.
 # Example: docker build --secret id=github_token,env=GITHUB_TOKEN -f build/Dockerfile.parent .
 # Dev image (debug, `insecure-dev`: plaintext gRPC, no mTLS):
 #   --build-arg CARGO_ARGS="--features insecure-dev" --build-arg PROFILE_DIR=debug
@@ -19,9 +20,6 @@ COPY . /build/
 WORKDIR /build/parent
 ARG CARGO_ARGS=--release
 RUN --mount=type=secret,id=github_token \
-    --mount=type=secret,id=consensus_key \
-    --mount=type=secret,id=ops_key \
-    --mount=type=secret,id=schemas_key \
     --mount=type=secret,id=federated_key \
     sh /build/build/with-private-deps.sh parent cargo build $CARGO_ARGS
 

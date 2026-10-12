@@ -1,39 +1,42 @@
-//! The trusted strict type system that a consignment is pinned to.
+//! The schema rules a consignment is validated under, and the genesis gate.
 //!
-//! It comes from the schema id, never from the consignment. A consignment
-//! with its own type system can redefine the meaning of its own bytes.
+//! The rules come from the `rgb-schemas` crate, never from the consignment.
+//! A V1 consignment carries no schema, types or scripts, so nothing in it can
+//! redefine the meaning of its bytes.
 
-use crate::error::EnclaveError;
-use crate::error::Result;
+use std::sync::LazyLock;
 
-/// Returns the trusted strict type system for `schema_id`, from the canonical
-/// `rgb-schemas` crate.
+use rgbstd::contract::IssuerWrapper;
+use rgbstd::validation::SchemaRules;
+use rgbstd::Genesis;
+use schemata::BridgedFungibleAsset;
+
+use crate::error::{EnclaveError, Result};
+
+/// The BFA rules, built once. Boot forces them, so an inconsistent built-in
+/// schema stops the launch, not a request.
+pub(crate) static BFA_RULES: LazyLock<SchemaRules> =
+    LazyLock::new(BridgedFungibleAsset::schema_rules);
+
+/// BFA is the only accepted schema. The exact asset is pinned separately
+/// (`contract_id` -> `RGB_ASSET_ID`).
 ///
-/// `ValidationConfig.trusted_typesystem` must never come from the consignment.
-/// If `transfer.types` is used, rgbstd compares the consignment types with
-/// themselves. The check then always passes, and a malicious consignment can
-/// supply its own type definitions for the schema `SemId`s.
-///
-/// BFA is the only accepted schema. All other schema ids fail closed. The
-/// exact asset is pinned separately (`contract_id` -> `RGB_ASSET_ID`).
-pub(super) fn trusted_typesystem_for_schema(
-    schema_id: rgbstd::SchemaId,
-) -> Result<rgbstd::TypeSystem> {
-    if schema_id != schemata::BFA_SCHEMA_ID {
+/// A genesis with a reject list is refused: the enclave does not read the
+/// list, so it would release burns of outputs the issuer froze.
+pub(super) fn assert_bfa_genesis(genesis: &Genesis) -> Result<()> {
+    if genesis.schema_id != schemata::BFA_SCHEMA_ID {
         return Err(EnclaveError::CrossCheck(format!(
-            "consignment uses RGB schema {schema_id}, but this enclave validates only the \
-             bridged fungible asset (BFA) schema - refusing to validate"
+            "consignment uses RGB schema {}, but this enclave validates only the bridged \
+             fungible asset (BFA) schema - refusing to validate",
+            genesis.schema_id
         )));
     }
-    Ok(BFA_TYPES.clone())
+    if genesis.globals.contains_key(&schemata::GS_REJECT_LIST) {
+        return Err(EnclaveError::CrossCheck(
+            "BFA genesis declares a reject list, which this enclave does not enforce - refusing \
+             to validate"
+                .into(),
+        ));
+    }
+    Ok(())
 }
-
-/// The canonical BFA type system, built once.
-///
-/// `BridgedFungibleAsset::types()` rebuilds the standard type libraries and
-/// three AluVM scripts on each call. The result is constant, so build it once.
-pub(super) static BFA_TYPES: std::sync::LazyLock<rgbstd::TypeSystem> =
-    std::sync::LazyLock::new(|| {
-        use rgbstd::contract::IssuerWrapper;
-        schemata::BridgedFungibleAsset::types()
-    });

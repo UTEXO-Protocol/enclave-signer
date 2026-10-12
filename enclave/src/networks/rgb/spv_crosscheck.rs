@@ -12,7 +12,8 @@
 //!    header at `block_height`.
 //! 4. **Confirmation depth**: every witness tx (not only the burn) is at least
 //!    `SPV_MIN_CONFIRMATIONS` deep. Bridge spec section 11 forbids trust in
-//!    only the most recent anchoring transaction.
+//!    only the most recent anchoring transaction. On the testnets,
+//!    min-difficulty blocks do not count: a host can mint them for free.
 //!
 //! Byte order: `MerkleProofEntry.txid` and `.merkle_path` are in display
 //! (big-endian) order. `spv::merkle` uses internal (little-endian) order.
@@ -25,8 +26,6 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 #[cfg(rgb_to_evm)]
 use bitcoin::hashes::Hash;
-#[cfg(rgb_to_evm)]
-use rgbstd::ChainNet;
 
 use crate::error::{EnclaveError, Result};
 use crate::networks::rgb::spv::HeaderChain;
@@ -199,10 +198,10 @@ pub fn assert_chain_fresh(chain: &HeaderChain, now: SystemTime) -> Result<()> {
 pub fn assert_chain_ready(chain: &HeaderChain, now: SystemTime) -> Result<()> {
     assert_chain_fresh(chain, now)?;
 
-    let depth = chain.len() as u32;
+    let depth = chain.confirmations(chain.checkpoint().height + 1, SPV_MIN_CONFIRMATIONS);
     if depth < SPV_MIN_CONFIRMATIONS {
         return Err(EnclaveError::Spv(format!(
-            "spv: chain is only {depth} block(s) past the checkpoint, need \
+            "spv: chain is only {depth} work block(s) past the checkpoint, need \
              {SPV_MIN_CONFIRMATIONS} before a proof can reach the required \
              confirmation depth"
         )));
@@ -216,7 +215,9 @@ pub fn assert_chain_ready(chain: &HeaderChain, now: SystemTime) -> Result<()> {
 /// `SystemTime::now()`.
 ///
 /// Threat model: a host that sends real but old headers makes a valid chain
-/// with an old tip. An old block then looks well confirmed.
+/// with an old tip. An old block then looks well confirmed. On the testnets it
+/// can also keep the tip fresh with free min-difficulty blocks, so the time is
+/// that of the newest block that proves work ([`HeaderChain::fresh_time`]).
 pub fn assert_chain_not_stale(
     chain: &HeaderChain,
     now: SystemTime,
@@ -227,7 +228,7 @@ pub fn assert_chain_not_stale(
         .duration_since(UNIX_EPOCH)
         .map_err(|e| EnclaveError::Internal(format!("system clock is before UNIX_EPOCH: {e}")))?
         .as_secs();
-    let tip_time = u64::from(chain.tip_time());
+    let tip_time = u64::from(chain.fresh_time());
 
     // Future bound: Bitcoin consensus allows approx 2h of future skew per
     // block. Reject more than `max_future`.
@@ -258,7 +259,7 @@ pub fn assert_chain_not_stale(
 /// Cross-network replay defense: the consignment `chain_net` prefix (for
 /// example `"sb"` for signet) must match the compiled network.
 ///
-/// The expected value comes from [`ChainNet::prefix()`], the same rgb-core
+/// The expected value comes from `ChainNet::prefix()`, the same rgb-core
 /// code that makes the consignment string in `validation::consensus`
 /// (`transfer.genesis.chain_net.prefix()`). Thus the two sides use the same
 /// notation.
@@ -268,7 +269,7 @@ pub fn assert_chain_not_stale(
 /// wrong-network consignment reach signing.
 #[cfg(rgb_to_evm)]
 pub fn assert_chain_net(consignment_chain_net: &str, enclave_network: Network) -> Result<()> {
-    let chain_net = expected_chain_net(enclave_network);
+    let chain_net = enclave_network.chain_net();
     let expected = chain_net.prefix();
     if consignment_chain_net != expected {
         return Err(EnclaveError::Spv(format!(
@@ -277,22 +278,6 @@ pub fn assert_chain_net(consignment_chain_net: &str, enclave_network: Network) -
         )));
     }
     Ok(())
-}
-
-/// The rgb-core [`ChainNet`] this enclave accepts consignments for.
-///
-/// Same `bitcoin_network` -> `ChainNet` mapping as `RgbValidator::new`
-/// (validation/indexer.rs). `BitcoinSignet` also covers our custom
-/// signet: the challenge script is different, but the rgb-core chain identity
-/// (and the consignment prefix `"sb"`) is the same.
-#[cfg(rgb_to_evm)]
-fn expected_chain_net(network: Network) -> ChainNet {
-    match network {
-        Network::Mainnet => ChainNet::BitcoinMainnet,
-        Network::Signet => ChainNet::BitcoinSignet,
-        Network::Testnet3 => ChainNet::BitcoinTestnet3,
-        Network::Regtest => ChainNet::BitcoinRegtest,
-    }
 }
 
 #[cfg(rgb_to_evm)]
@@ -312,17 +297,9 @@ fn verify_one_proof(
         ))
     })?;
 
-    // Checked arithmetic: a hostile host can send `block_height = u32::MAX`,
-    // which would underflow `tip - block_height`.
-    let confs = tip
-        .checked_sub(proof.block_height)
-        .and_then(|d| d.checked_add(1))
-        .ok_or_else(|| {
-            EnclaveError::Spv(format!(
-                "merkle_proofs[{index}]: block_height {} is beyond chain tip {}",
-                proof.block_height, tip
-            ))
-        })?;
+    // Blocks that prove work, from the proof block to the tip. `header_at`
+    // above already refused a height beyond the tip.
+    let confs = chain.confirmations(proof.block_height, min_confirmations);
     if confs < min_confirmations {
         return Err(EnclaveError::Spv(format!(
             "merkle_proofs[{index}]: insufficient confirmations for block_height {} \
@@ -493,6 +470,7 @@ mod tests;
 mod chain_pin_tests {
     use super::*;
     use crate::networks::rgb::spv::checkpoint::Checkpoint;
+    use crate::test_support::ANY_HEADER_CLOCK;
     use bitcoin::block::{Header, Version};
     use bitcoin::consensus::serialize;
     use bitcoin::hashes::Hash;
@@ -537,7 +515,7 @@ mod chain_pin_tests {
             prev = h.block_hash();
             raw.push(serialize(&h));
         }
-        chain.submit_headers(start, &raw).unwrap();
+        chain.submit_headers(start, &raw, ANY_HEADER_CLOCK).unwrap();
     }
 
     fn chain_of(count: u32) -> HeaderChain {

@@ -117,6 +117,7 @@ fn happy_provider() -> FakeEvm {
     FakeEvm {
         receipt: Some(receipt_with(vec![bridge_log(op_id(7), 1000, 950, 50)], 100)),
         head: 112,
+        ..FakeEvm::default()
     }
 }
 
@@ -200,6 +201,7 @@ fn accepts_real_contract_dual_emit() {
             100,
         )),
         head: 112,
+        ..FakeEvm::default()
     };
     assert!(verify(&p).is_ok());
 }
@@ -218,6 +220,7 @@ fn dual_emit_binds_via_bridge_shape_not_the_companion() {
             100,
         )),
         head: 112,
+        ..FakeEvm::default()
     };
     let e = verify(&p).unwrap_err().to_string();
     assert!(e.contains("tokenCommission mismatch"), "got: {e}");
@@ -231,6 +234,7 @@ fn rejects_rgb_companion_event_alone() {
     let p = FakeEvm {
         receipt: Some(receipt_with(vec![rgb_companion_log(7, 100)], 100)),
         head: 112,
+        ..FakeEvm::default()
     };
     let e = verify(&p).unwrap_err().to_string();
     assert!(e.contains("no BridgeFundsIn log"), "got: {e}");
@@ -250,6 +254,7 @@ fn rejects_two_real_deposits_in_one_tx() {
             100,
         )),
         head: 112,
+        ..FakeEvm::default()
     };
     let e = verify(&p).unwrap_err().to_string();
     assert!(e.contains("ambiguous"), "got: {e}");
@@ -263,6 +268,7 @@ fn rejects_missing_receipt() {
     let p = FakeEvm {
         receipt: None,
         head: 112,
+        ..FakeEvm::default()
     };
     let e = verify(&p).unwrap_err().to_string();
     assert!(e.contains("receipt not found"), "got: {e}");
@@ -276,6 +282,7 @@ fn rejects_reverted_tx() {
     let p = FakeEvm {
         receipt: Some(r),
         head: 112,
+        ..FakeEvm::default()
     };
     let e = verify(&p).unwrap_err().to_string();
     assert!(e.contains("reverted"), "got: {e}");
@@ -291,6 +298,7 @@ fn rejects_log_from_wrong_contract() {
     let p = FakeEvm {
         receipt: Some(receipt_with(vec![log], 100)),
         head: 112,
+        ..FakeEvm::default()
     };
     let e = verify(&p).unwrap_err().to_string();
     assert!(e.contains("no BridgeFundsIn log"), "got: {e}");
@@ -304,6 +312,7 @@ fn rejects_wrong_topic0() {
     let p = FakeEvm {
         receipt: Some(receipt_with(vec![log], 100)),
         head: 112,
+        ..FakeEvm::default()
     };
     let e = verify(&p).unwrap_err().to_string();
     assert!(e.contains("no BridgeFundsIn log"), "got: {e}");
@@ -321,6 +330,7 @@ fn rejects_ambiguous_multiple_logs() {
             100,
         )),
         head: 112,
+        ..FakeEvm::default()
     };
     let e = verify(&p).unwrap_err().to_string();
     assert!(e.contains("ambiguous"), "got: {e}");
@@ -340,6 +350,7 @@ fn ignores_unrelated_logs_and_accepts() {
             100,
         )),
         head: 112,
+        ..FakeEvm::default()
     };
     assert!(verify(&p).is_ok());
 }
@@ -352,6 +363,7 @@ fn rejects_operation_id_mismatch() {
     let p = FakeEvm {
         receipt: Some(receipt_with(vec![bridge_log(op_id(8), 1000, 950, 50)], 100)),
         head: 112,
+        ..FakeEvm::default()
     };
     let e = verify(&p).unwrap_err().to_string();
     assert!(e.contains("operationId mismatch"), "got: {e}");
@@ -363,6 +375,7 @@ fn rejects_amount_mismatch() {
     let p = FakeEvm {
         receipt: Some(receipt_with(vec![bridge_log(op_id(7), 999, 949, 50)], 100)),
         head: 112,
+        ..FakeEvm::default()
     };
     let e = verify(&p).unwrap_err().to_string();
     assert!(e.contains("amount mismatch"), "got: {e}");
@@ -374,6 +387,7 @@ fn rejects_commission_mismatch() {
     let p = FakeEvm {
         receipt: Some(receipt_with(vec![bridge_log(op_id(7), 1000, 950, 40)], 100)),
         head: 112,
+        ..FakeEvm::default()
     };
     let e = verify(&p).unwrap_err().to_string();
     assert!(e.contains("tokenCommission mismatch"), "got: {e}");
@@ -386,6 +400,7 @@ fn rejects_net_amount_above_gross_minus_commission() {
     let p = FakeEvm {
         receipt: Some(receipt_with(vec![bridge_log(op_id(7), 1000, 960, 50)], 100)),
         head: 112,
+        ..FakeEvm::default()
     };
     let e = verify(&p).unwrap_err().to_string();
     assert!(e.contains("exceeds gross - commission"), "got: {e}");
@@ -399,6 +414,7 @@ fn accepts_net_amount_below_gross_minus_commission() {
     let p = FakeEvm {
         receipt: Some(receipt_with(vec![bridge_log(op_id(7), 1000, 900, 50)], 100)),
         head: 112,
+        ..FakeEvm::default()
     };
     assert!(verify(&p).is_ok());
 }
@@ -409,6 +425,7 @@ fn rejects_commission_exceeding_gross() {
     let p = FakeEvm {
         receipt: Some(receipt_with(vec![bridge_log(op_id(7), 100, 0, 150)], 100)),
         head: 112,
+        ..FakeEvm::default()
     };
     let e = verify_funds_in_event(&p, &BRIDGE, 12, &TX, &op_id(7), 100, 150)
         .unwrap_err()
@@ -426,6 +443,7 @@ fn rejects_log_without_operation_id_topic() {
     let p = FakeEvm {
         receipt: Some(receipt_with(vec![log], 100)),
         head: 112,
+        ..FakeEvm::default()
     };
     let e = verify(&p).unwrap_err().to_string();
     assert!(e.contains("operationId is expected in topic1"), "got: {e}");
@@ -460,6 +478,7 @@ fn still_rejects_amount_mismatch_with_matching_operation_id() {
     let p = FakeEvm {
         receipt: Some(receipt_with(vec![bridge_log(op_id(7), 999, 949, 50)], 100)),
         head: 112,
+        ..FakeEvm::default()
     };
     let e = verify(&p).unwrap_err().to_string();
     assert!(e.contains("amount mismatch"), "got: {e}");
@@ -484,6 +503,7 @@ fn rejects_insufficient_depth() {
     let p = FakeEvm {
         receipt: Some(receipt_with(vec![bridge_log(op_id(7), 1000, 950, 50)], 100)),
         head: 111,
+        ..FakeEvm::default()
     };
     let e = verify(&p).unwrap_err().to_string();
     assert!(e.contains("not final"), "got: {e}");
@@ -503,6 +523,7 @@ fn rejects_head_below_receipt_block() {
     let p = FakeEvm {
         receipt: Some(receipt_with(vec![bridge_log(op_id(7), 1000, 950, 50)], 100)),
         head: 99,
+        ..FakeEvm::default()
     };
     let e = verify(&p).unwrap_err().to_string();
     assert!(e.contains("reorg"), "got: {e}");
@@ -518,6 +539,7 @@ fn issue_51_no_receipt_means_no_authorization() {
     let p = FakeEvm {
         receipt: None,
         head: 112,
+        ..FakeEvm::default()
     };
     assert!(verify(&p).is_err());
 }
@@ -591,12 +613,15 @@ fn rejects_funds_in_with_unexpected_layout() {
     assert!(decode_funds_in(&extra, &word(0xab)).is_err());
 }
 
-#[cfg(feature = "bfa-mint")]
-#[test]
-fn verify_rgb_funds_in_accepts_a_verified_lock() {
-    // A real deposit tx emits both: the RGB companion (minted amount) and the
-    // BridgeFundsIn record (operationId, netAmount).
-    let p = FakeEvm {
+/// The mint's `afterBlock` in the lock tests: the lock is at block 100.
+#[cfg(feature = "bfa-validation")]
+const AFTER_BLOCK: u64 = 90;
+
+/// A real deposit tx emits both: the RGB companion (minted amount) and the
+/// BridgeFundsIn record (operationId, netAmount). Block 100, finalized.
+#[cfg(feature = "bfa-validation")]
+fn lock_provider() -> FakeEvm {
+    FakeEvm {
         receipt: Some(receipt_with(
             vec![
                 rgb_companion_log(0xab, 100),
@@ -605,9 +630,17 @@ fn verify_rgb_funds_in_accepts_a_verified_lock() {
             100,
         )),
         head: 112,
-    };
+        finalized: Some(100),
+        chain_id: 42161,
+    }
+}
+
+#[cfg(feature = "bfa-mint")]
+#[test]
+fn verify_rgb_funds_in_accepts_a_verified_lock() {
+    let p = lock_provider();
     assert_eq!(
-        verify_rgb_funds_in(&p, &BRIDGE, 12, &TX, &word(0xab)).unwrap(),
+        verify_rgb_funds_in(&p, &BRIDGE, 12, &TX, &word(0xab), AFTER_BLOCK).unwrap(),
         VerifiedLock {
             mint_opid: word(0xab),
             minted: 100,
@@ -615,6 +648,70 @@ fn verify_rgb_funds_in_accepts_a_verified_lock() {
             net_amount: 950,
         }
     );
+}
+
+/// An RGB receiver accepts only a lock in a block after `afterBlock`.
+#[cfg(feature = "bfa-validation")]
+#[test]
+fn verify_rgb_funds_in_refuses_a_lock_at_or_before_after_block() {
+    let p = lock_provider();
+    for after_block in [100, 101] {
+        let e = verify_rgb_funds_in(&p, &BRIDGE, 12, &TX, &word(0xab), after_block)
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("is not after the mint's afterBlock"), "got: {e}");
+    }
+    assert!(verify_rgb_funds_in(&p, &BRIDGE, 12, &TX, &word(0xab), 99).is_ok());
+}
+
+#[cfg(feature = "bfa-validation")]
+#[test]
+fn verify_rgb_funds_in_refuses_a_lock_that_is_not_finalized() {
+    let p = FakeEvm {
+        finalized: Some(99),
+        ..lock_provider()
+    };
+    let e = verify_rgb_funds_in(&p, &BRIDGE, 12, &TX, &word(0xab), AFTER_BLOCK)
+        .unwrap_err()
+        .to_string();
+    assert!(e.contains("not finalized yet"), "got: {e}");
+}
+
+/// A node without the `finalized` tag cannot prove finality.
+#[cfg(feature = "bfa-validation")]
+#[test]
+fn verify_rgb_funds_in_fails_closed_without_a_finalized_block() {
+    let p = FakeEvm {
+        finalized: None,
+        ..lock_provider()
+    };
+    let e = verify_rgb_funds_in(&p, &BRIDGE, 12, &TX, &word(0xab), AFTER_BLOCK)
+        .unwrap_err()
+        .to_string();
+    assert!(e.contains("no finalized block"), "got: {e}");
+}
+
+/// Finality does not replace the confirmation floor.
+#[cfg(feature = "bfa-validation")]
+#[test]
+fn verify_rgb_funds_in_keeps_the_confirmation_floor() {
+    let p = FakeEvm {
+        head: 105,
+        ..lock_provider()
+    };
+    let e = verify_rgb_funds_in(&p, &BRIDGE, 12, &TX, &word(0xab), AFTER_BLOCK)
+        .unwrap_err()
+        .to_string();
+    assert!(e.contains("depth 5 < required 12"), "got: {e}");
+}
+
+#[cfg(feature = "bfa-validation")]
+#[test]
+fn node_chain_id_must_be_the_pinned_one() {
+    let p = lock_provider();
+    assert_eq!(check_node_chain_id(&p, 42161).unwrap(), 42161);
+    let e = check_node_chain_id(&p, 1).unwrap_err().to_string();
+    assert!(e.contains("reports chain id 42161"), "got: {e}");
 }
 
 /// A deposit routed to another chain must not back an RGB mint.
@@ -629,8 +726,9 @@ fn verify_rgb_funds_in_rejects_a_foreign_destination_chain() {
             100,
         )),
         head: 112,
+        ..FakeEvm::default()
     };
-    let e = verify_rgb_funds_in(&p, &BRIDGE, 12, &TX, &word(0xab))
+    let e = verify_rgb_funds_in(&p, &BRIDGE, 12, &TX, &word(0xab), AFTER_BLOCK)
         .unwrap_err()
         .to_string();
     assert!(e.contains("destinationChainId 42161"), "got: {e}");
@@ -644,15 +742,16 @@ fn verify_rgb_funds_in_requires_the_bridge_funds_in_record() {
     let p = FakeEvm {
         receipt: Some(receipt_with(vec![rgb_companion_log(0xab, 100)], 100)),
         head: 112,
+        ..FakeEvm::default()
     };
-    let e = verify_rgb_funds_in(&p, &BRIDGE, 12, &TX, &word(0xab))
+    let e = verify_rgb_funds_in(&p, &BRIDGE, 12, &TX, &word(0xab), AFTER_BLOCK)
         .unwrap_err()
         .to_string();
     assert!(e.contains("no BridgeFundsIn log"), "got: {e}");
 }
 
-/// The extension does not check the emitter. This filter is the only guard
-/// against a mint from a log of an attacker contract.
+/// Only the pinned emitter's log can back a mint: an attacker contract can
+/// emit the same event.
 #[cfg(feature = "bfa-validation")]
 #[test]
 fn verify_rgb_funds_in_rejects_a_log_from_an_unpinned_contract() {
@@ -661,20 +760,12 @@ fn verify_rgb_funds_in_rejects_a_log_from_an_unpinned_contract() {
     let p = FakeEvm {
         receipt: Some(receipt_with(vec![log], 100)),
         head: 112,
+        ..FakeEvm::default()
     };
-    let e = verify_rgb_funds_in(&p, &BRIDGE, 12, &TX, &word(0xab))
+    let e = verify_rgb_funds_in(&p, &BRIDGE, 12, &TX, &word(0xab), AFTER_BLOCK)
         .unwrap_err()
         .to_string();
     assert!(e.contains("no FundsIn log"), "got: {e}");
-}
-
-#[cfg(feature = "bfa-validation")]
-#[test]
-fn refuses_a_bridge_location_that_is_not_the_pinned_contract() {
-    let pinned = [0x11u8; 20];
-    assert!(check_bridge_location("0x1111111111111111111111111111111111111111", &pinned).is_ok());
-    assert!(check_bridge_location("0x2222222222222222222222222222222222222222", &pinned).is_err());
-    assert!(check_bridge_location("not-an-address", &pinned).is_err());
 }
 
 /// The shared vector, with `rgbNetwork` = `RGB_CHAIN_ID` (827166).

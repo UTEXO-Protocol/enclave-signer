@@ -1,23 +1,25 @@
-//! Decodes an rgbstd `Transfer`.
+//! Decodes a validated rgbstd `Transfer`.
 //!
 //! Decode only. Nothing here accepts or rejects a consignment. It converts
-//! parser output into the shapes in [`super::types`]. It fails closed on data
-//! that it cannot read exactly.
+//! rgbstd and parser output into the shapes in [`super::types`]. It fails
+//! closed on data that it cannot read exactly.
 
-use super::bfa;
+use std::collections::BTreeSet;
+
+use amplify::{ByteArray, Wrapper};
+use bitcoin::hashes::Hash;
+use rgb_consignment::{
+    ConsignmentInfo, FungibleAllocation, FungibleEntry, SealInfo, TransitionInfo,
+};
+use rgbstd::containers::{Transfer, WitnessBundle};
+use rgbstd::txout::TxoSeal;
+use rgbstd::{
+    Assign, Assignments, BuilderSeal, GlobalStateType, GraphSeal, KnownTransition, OpId, Operation,
+    Opout, TransitionType,
+};
+
 use super::types::{OutputSeal, TransitionOutput, TransitionSummary};
-use crate::error::EnclaveError;
-use crate::error::Result;
-use rgb_consignment::ConsignmentInfo;
-use rgb_consignment::FungibleAllocation;
-use rgb_consignment::FungibleEntry;
-use rgb_consignment::SealInfo;
-use rgb_consignment::TransitionInfo;
-use rgb_consignment::WitnessInfo;
-use rgbstd::containers::Transfer;
-use rgbstd::schema::MetaType;
-use rgbstd::schema::TransitionType;
-use rgbstd::KnownTransition;
+use crate::error::{EnclaveError, Result};
 
 /// Index of the transition a witness settles: its last `TS_BURN`, or its last
 /// transition when it burns nothing. One tx can carry a burn and a plain transfer.
@@ -28,150 +30,218 @@ pub(super) fn settling_index<T>(transitions: &[T], is_burn: impl Fn(&T) -> bool)
         .or(transitions.len().checked_sub(1))
 }
 
-/// The settling known transition of the last bundle, by [`settling_index`].
-fn settling_known_transition(transfer: &Transfer) -> Option<&KnownTransition> {
-    let known = &transfer.bundles.iter().last()?.bundle().known_transitions;
-    let burn = TransitionType::with(bfa::TS_BURN);
-    let i = settling_index(known, |k| k.transition.transition_type == burn)?;
-    known.get(i)
-}
-
-/// Reads the witness-tx bind data for the **settling** transition from the rgbstd
-/// `Transfer`: the input prevouts, if the bundle embeds the full witness tx
-/// (`PubWitness::Tx`). The send-RGB PSBT cross-check uses them with
-/// [`super::types::ValidatedConsignment::last_witness_txid`], which names the same bundle.
-///
-/// It reads the same last bundle as [`read_last_transition_burned_asset`]. It
-/// asserts that the settling known transition type equals `expected_type` from
-/// the flat parser. The two walks are independent, so a mismatch fails closed.
-///
-/// Also returns the validated OpId of that transition, from the rgbstd bundle,
-/// not the flat parser.
-///
-/// Returns `(None, None)` for a transfer with no bundles, which rgbstd
-/// rejects.
-pub(super) fn read_last_transfer_witness(
-    transfer: &Transfer,
-    expected_type: u16,
-) -> Result<LastTransferBinding> {
-    let Some(last_bundle) = transfer.bundles.iter().last() else {
-        return Ok((None, None));
-    };
-
-    // The rgbstd `OpId` displays as lowercase hex of its 32-byte commitment
-    // hash, so decode the hex.
-    let mut op_id: Option<[u8; 32]> = None;
-    if let Some(known) = settling_known_transition(transfer) {
-        let actual = known.transition.transition_type;
-        let expected = TransitionType::with(expected_type);
-        if actual != expected {
-            return Err(EnclaveError::CrossCheck(format!(
-                "consignment settling transition type {actual} disagrees with parsed settling \
-                 transition type {expected} - refusing to bind PSBT to an ambiguous witness"
-            )));
-        }
-        let opid_hex = known.opid.to_string();
-        let bytes = hex::decode(&opid_hex).map_err(|e| {
-            EnclaveError::CrossCheck(format!(
-                "validated opid hex decode failed: {e} ({opid_hex:?})"
-            ))
-        })?;
-        let arr: [u8; 32] = bytes.try_into().map_err(|v: Vec<u8>| {
-            EnclaveError::CrossCheck(format!("validated opid is not 32 bytes (got {})", v.len()))
-        })?;
-        op_id = Some(arr);
-    }
-
-    let prevouts = last_bundle
-        .pub_witness
-        .tx()
-        .map(|tx| tx.input.iter().map(|txin| txin.previous_output).collect());
-
-    Ok((prevouts, op_id))
-}
-
-/// Bind data for the last bundle:
-/// `(witness input prevouts, validated settling-transition OpId)`. See
-/// [`read_last_transfer_witness`].
-type LastTransferBinding = (Option<Vec<bitcoin::OutPoint>>, Option<[u8; 32]>);
-
 /// Returns true for a mint transition, which maps 1:1 to an EVM lock record.
-/// In BFA, only `TS_BRIDGE` creates units.
+/// In BFA, only `TS_MINT` creates units.
 pub fn is_mint_transition(transition_type: u16) -> bool {
-    transition_type == bfa::TS_BRIDGE
+    TransitionType::with(transition_type) == schemata::TS_MINT
 }
 
-/// Parses the consignment with `rgb_consignment::parse` and returns the flat
-/// transition summary: all op_ids, the mint op_ids, the settling transition, and
-/// all transitions grouped by witness tx. Fails if the consignment is not a
-/// Transfer or if a field does not decode.
-#[allow(clippy::type_complexity)]
+/// What the enclave binds about the last bundle, read from the validated
+/// rgbstd `Transfer`, not from the flat parser.
+pub(super) struct LastBundle {
+    pub witness_txid: bitcoin::Txid,
+    pub prevouts: Vec<bitcoin::OutPoint>,
+    pub closed_seals: Vec<bitcoin::OutPoint>,
+    pub fully_disclosed: bool,
+    pub settling: SettlingFacts,
+}
+
+/// The settling transition of the last bundle, as consensus validated it.
+pub(super) struct SettlingFacts {
+    pub opid: [u8; 32],
+    pub transition_type: u16,
+    pub burned_asset: Option<u64>,
+    pub burn_reason: Option<[u8; 32]>,
+    pub mint_rights: Vec<OutputSeal>,
+}
+
+/// Reads the last bundle. `None` for a transfer with no bundles.
+pub(super) fn read_last_bundle(transfer: &Transfer) -> Result<Option<LastBundle>> {
+    let Some(last) = transfer.bundles.iter().last() else {
+        return Ok(None);
+    };
+    let known = &last.bundle.known_transitions;
+    let Some(settling) = settling_known_transition(known)? else {
+        return Ok(None);
+    };
+    Ok(Some(LastBundle {
+        witness_txid: last.witness_id(),
+        prevouts: last.tx.input.iter().map(|i| i.previous_output).collect(),
+        closed_seals: closed_seals(transfer, last)?,
+        fully_disclosed: fully_disclosed(last),
+        settling: settling_facts(settling)?,
+    }))
+}
+
+/// The settling known transition, by [`settling_index`]. Two burns in one
+/// bundle are refused: only one of them could ever be released.
+fn settling_known_transition(known: &[KnownTransition]) -> Result<Option<&KnownTransition>> {
+    let is_burn = |k: &KnownTransition| k.transition.transition_type == schemata::TS_BURN;
+    let burns = known.iter().filter(|k| is_burn(k)).count();
+    if burns > 1 {
+        return Err(EnclaveError::CrossCheck(format!(
+            "the last bundle carries {burns} burns - a release settles exactly one"
+        )));
+    }
+    Ok(settling_index(known, is_burn).map(|i| &known[i]))
+}
+
+fn settling_facts(known: &KnownTransition) -> Result<SettlingFacts> {
+    let transition = &known.transition;
+    let globals = &transition.globals;
+    let burned_asset = single_global::<8>(globals, schemata::GS_BURNED_ASSET, "burnedAsset")?
+        .map(u64::from_le_bytes);
+    let burn_reason = single_global::<32>(globals, schemata::GS_BURN_REASON, "burnReason")?;
+    let mint_rights = transition
+        .assignments
+        .get(&schemata::OS_MINT)
+        .map(|typed| typed.seals().map(output_seal).collect())
+        .unwrap_or_default();
+    Ok(SettlingFacts {
+        opid: known.opid.to_byte_array(),
+        transition_type: transition.transition_type.to_inner(),
+        burned_asset,
+        burn_reason,
+        mint_rights,
+    })
+}
+
+/// The one value of a global, as exactly `N` raw bytes. `Ok(None)` when the
+/// transition does not declare it.
+///
+/// The bytes are the strict encoding: an `Amount` is a little-endian `u64`, a
+/// `BurnReason` its 32 bytes. Decoded by hand to keep the strict-encoding
+/// crate out of the enclave's own code.
+fn single_global<const N: usize>(
+    globals: &rgbstd::GlobalState,
+    ty: GlobalStateType,
+    name: &str,
+) -> Result<Option<[u8; N]>> {
+    let Some(values) = globals.get(&ty) else {
+        return Ok(None);
+    };
+    let [value] = values.as_slice() else {
+        return Err(EnclaveError::CrossCheck(format!(
+            "settling transition carries {} {name} values, expected one",
+            values.len()
+        )));
+    };
+    let bytes: [u8; N] = value.as_slice().try_into().map_err(|_| {
+        EnclaveError::CrossCheck(format!(
+            "{name} is {} bytes, expected {N}",
+            value.as_slice().len()
+        ))
+    })?;
+    Ok(Some(bytes))
+}
+
+/// The seal of an output as the flat parser shows it.
+fn output_seal(seal: &BuilderSeal<GraphSeal>) -> OutputSeal {
+    match seal {
+        BuilderSeal::Revealed(seal) => OutputSeal::Revealed {
+            txid: seal.txid().map(display_bytes),
+            vout: seal.vout().into_u32(),
+        },
+        BuilderSeal::Concealed(secret) => OutputSeal::Confidential {
+            secret_seal: secret.to_string(),
+        },
+    }
+}
+
+/// Every transition the bundle commits to is in the consignment.
+fn fully_disclosed(bundle: &WitnessBundle) -> bool {
+    let committed: BTreeSet<OpId> = bundle.bundle.input_map.values().copied().collect();
+    let known: BTreeSet<OpId> = bundle
+        .bundle
+        .known_transitions
+        .iter()
+        .map(|k| k.opid)
+        .collect();
+    committed == known
+}
+
+/// The outpoints of the seals the bundle's known transitions close.
+/// Consensus proved each one is spent by the bundle's witness tx.
+fn closed_seals(transfer: &Transfer, bundle: &WitnessBundle) -> Result<Vec<bitcoin::OutPoint>> {
+    bundle
+        .bundle
+        .known_transitions
+        .iter()
+        .flat_map(|k| k.transition.inputs.iter())
+        .map(|&input| {
+            seal_outpoint(transfer, input).ok_or_else(|| {
+                EnclaveError::CrossCheck(format!(
+                    "input {input} has no revealed seal in the consignment"
+                ))
+            })
+        })
+        .collect()
+}
+
+/// The outpoint of the seal `input` spends, from the operation that made it.
+fn seal_outpoint(transfer: &Transfer, input: Opout) -> Option<bitcoin::OutPoint> {
+    let genesis = &transfer.genesis;
+    if input.op == genesis.id() {
+        return revealed_seal(&genesis.assignments.transmutate_seals(), input, None);
+    }
+    let (known, witness_id) = transfer.bundles.iter().find_map(|wb| {
+        wb.bundle
+            .known_transitions
+            .iter()
+            .find(|k| k.opid == input.op)
+            .map(|k| (k, wb.witness_id()))
+    })?;
+    revealed_seal(&known.transition.assignments, input, Some(witness_id))
+}
+
+fn revealed_seal(
+    assignments: &Assignments<GraphSeal>,
+    input: Opout,
+    witness_id: Option<bitcoin::Txid>,
+) -> Option<bitcoin::OutPoint> {
+    let (seal, _) = assignments
+        .get(&input.ty)?
+        .to_revealed_assign_at(input.no, witness_id)
+        .ok()
+        .and_then(Assign::into_revealed)?;
+    Some(seal.to_outpoint())
+}
+
+/// Display-order (big-endian) bytes of a txid, as the wire carries it.
+fn display_bytes(txid: bitcoin::Txid) -> [u8; 32] {
+    let mut bytes = txid.to_byte_array();
+    bytes.reverse();
+    bytes
+}
+
+/// The flat transition summary of a consignment that consensus validated:
+/// all transitions grouped by witness tx.
 pub(super) fn extract_transition_summary(
     consignment_bytes: &[u8],
-) -> Result<(
-    Vec<String>,
-    Vec<String>,
-    Option<TransitionSummary>,
-    Vec<(bitcoin::Txid, Vec<TransitionSummary>)>,
-)> {
+) -> Result<Vec<(bitcoin::Txid, Vec<TransitionSummary>)>> {
     let info = rgb_consignment::parse(consignment_bytes)
         .map_err(|e| EnclaveError::CrossCheck(format!("rgb-consignment parse failed: {e}")))?;
-
-    let transfer = match info {
-        ConsignmentInfo::Transfer(t) => t,
-        // A Contract or Kit cannot authorize an EVM action.
-        ConsignmentInfo::Contract(_) => {
-            return Err(EnclaveError::CrossCheck(
-                "consignment is a Contract, expected Transfer".into(),
-            ));
-        }
-        ConsignmentInfo::Kit(_) => {
-            return Err(EnclaveError::CrossCheck(
-                "consignment is a Kit, expected Transfer".into(),
-            ));
-        }
+    let ConsignmentInfo::Transfer(transfer) = info else {
+        return Err(EnclaveError::CrossCheck(
+            "consignment is a Contract, expected Transfer".into(),
+        ));
     };
 
-    let all_op_ids: Vec<String> = transfer
-        .witnesses
-        .iter()
-        .flat_map(|w: &WitnessInfo| w.transitions.iter())
-        .map(|t: &TransitionInfo| t.op_id.clone())
-        .collect();
-
-    // The mint (BFA `TS_BRIDGE`) subset. Each one maps to one EVM `fundsIn`
-    // lock record.
-    let mint_op_ids: Vec<String> = transfer
-        .witnesses
-        .iter()
-        .flat_map(|w: &WitnessInfo| w.transitions.iter())
-        .filter(|t: &&TransitionInfo| is_mint_transition(t.transition_type))
-        .map(|t: &TransitionInfo| t.op_id.clone())
-        .collect();
-
-    // One tx can commit many transitions. A bind of only `last_transition`
+    // One tx can commit many transitions. A bind of only the settling one
     // leaves the other value unbound, so the PSBT cross-check binds the group.
-    let mut transitions_by_witness: Vec<(bitcoin::Txid, Vec<TransitionSummary>)> =
-        Vec::with_capacity(transfer.witnesses.len());
-    for w in transfer.witnesses.iter() {
-        let txid = txid_from_display_hex(&w.txid)?;
-        let summaries: Result<Vec<TransitionSummary>> =
-            w.transitions.iter().map(transition_summary).collect();
-        transitions_by_witness.push((txid, summaries?));
-    }
-
-    // The settling transition of the last witness, taken from the group.
-    let last_transition = transitions_by_witness.last().and_then(|(_, summaries)| {
-        settling_index(summaries, |t| t.transition_type == bfa::TS_BURN)
-            .map(|i| summaries[i].clone())
-    });
-
-    Ok((
-        all_op_ids,
-        mint_op_ids,
-        last_transition,
-        transitions_by_witness,
-    ))
+    transfer
+        .witnesses
+        .iter()
+        .map(|w| {
+            let txid = txid_from_display_hex(&w.txid)?;
+            let summaries = w
+                .transitions
+                .iter()
+                .map(transition_summary)
+                .collect::<Result<Vec<_>>>()?;
+            Ok((txid, summaries))
+        })
+        .collect()
 }
 
 /// Parses a display-order (big-endian) txid hex string into a `bitcoin::Txid`.
@@ -179,123 +249,55 @@ pub(super) fn extract_transition_summary(
 /// The parser writes txids in display order, and `bitcoin::Txid` stores them
 /// reversed. The reversal is here, not at each comparison.
 pub(super) fn txid_from_display_hex(display_hex: &str) -> Result<bitcoin::Txid> {
-    use bitcoin::hashes::Hash;
-
     let mut raw = decode_display_txid(display_hex)?;
     raw.reverse();
-    Ok(bitcoin::Txid::from_raw_hash(
-        bitcoin::hashes::sha256d::Hash::from_byte_array(raw),
-    ))
+    Ok(bitcoin::Txid::from_byte_array(raw))
 }
 
 pub(super) fn transition_summary(t: &TransitionInfo) -> Result<TransitionSummary> {
-    let total_output_amount: u64 =
+    let total_output_amount = checked_total(t.fungible_allocations.iter(), t)?;
+    let asset_output_amount = checked_total(
         t.fungible_allocations
             .iter()
-            .try_fold(0u64, |acc, a: &FungibleAllocation| {
-                acc.checked_add(a.total).ok_or_else(|| {
-                    EnclaveError::CrossCheck(format!(
-                        "consignment transition total_output_amount overflow (op_id {})",
-                        t.op_id
-                    ))
-                })
-            })?;
+            .filter(|a| a.assignment_type == schemata::OS_ASSET.to_inner()),
+        t,
+    )?;
 
-    // `OS_ASSET` allocations only. A Bridge transition also carries an
-    // `OS_BRIDGE` output that is the mint right, not value.
-    let asset_output_amount: u64 = t
+    let outputs = t
         .fungible_allocations
         .iter()
-        .filter(|a: &&FungibleAllocation| a.assignment_type == bfa::OS_ASSET)
-        .try_fold(0u64, |acc, a: &FungibleAllocation| {
-            acc.checked_add(a.total).ok_or_else(|| {
-                EnclaveError::CrossCheck(format!(
-                    "consignment transition asset_output_amount overflow (op_id {})",
-                    t.op_id
-                ))
-            })
-        })?;
-
-    let outputs: Result<Vec<TransitionOutput>> = t
-        .fungible_allocations
-        .iter()
-        .flat_map(|a: &FungibleAllocation| {
-            let assignment_type = a.assignment_type;
+        .flat_map(|a| {
             a.entries
                 .iter()
-                .map(move |e| transition_output(assignment_type, e))
+                .map(move |e| transition_output(a.assignment_type, e))
         })
-        .collect();
+        .collect::<Result<Vec<_>>>()?;
 
     Ok(TransitionSummary {
         op_id: t.op_id.clone(),
         transition_type: t.transition_type,
         total_output_amount,
         asset_output_amount,
-        outputs: outputs?,
-        // The parser has no metadata. For a burn, the
-        // `read_last_transition_burn*` functions fill these later.
+        outputs,
+        // Validation fills these from the rgbstd transition, for the settling
+        // transition only.
         burned_asset_amount: None,
-        burn_recipient: None,
+        burn_reason: None,
     })
 }
 
-/// Raw `meta_type` metadata value on the settling transition of the last
-/// bundle. The flat parser drops `Transition.metadata`, so read it from the
-/// rgbstd `Transfer`.
-///
-/// `None` if there is no bundle, no known transition, or no value for the key.
-/// This means "not declared", not an error. Each caller decides what it means.
-pub(super) fn last_transition_meta(transfer: &Transfer, meta_type: u16) -> Option<&[u8]> {
-    let known = settling_known_transition(transfer)?;
-    let key = MetaType::with(meta_type);
-    known
-        .transition
-        .metadata
-        .iter()
-        .find(|(mt, _)| **mt == key)
-        .map(|(_, mv)| mv.as_unconfined().as_slice())
-}
-
-/// The BFA `MS_BURN_RECIPIENT` metadata on the settling transition: 32 bytes that
-/// name the redemption recipient.
-///
-/// `Ok(None)` if the key is absent. `Err` if the blob is not exactly 32 bytes,
-/// so a release never goes to a truncated or padded address.
-pub(super) fn read_last_transition_burn_recipient(transfer: &Transfer) -> Result<Option<Vec<u8>>> {
-    let Some(raw) = last_transition_meta(transfer, bfa::MS_BURN_RECIPIENT) else {
-        return Ok(None);
-    };
-    if raw.len() != 32 {
-        return Err(EnclaveError::CrossCheck(format!(
-            "MS_BURN_RECIPIENT metadata is {} bytes, expected 32",
-            raw.len()
-        )));
-    }
-    Ok(Some(raw.to_vec()))
-}
-
-/// The BFA `MS_BURNED_ASSET` metadata on the settling transition: the destroyed
-/// amount that the unlock cross-check binds.
-///
-/// The value is a strict-encoded `rgbstd::Amount` (`u64`, 8 bytes,
-/// little-endian). Decoded by hand, not with
-/// `StrictDeserialize::from_strict_serialized`, to avoid the
-/// `rgb-strict-encoding`-as-`strict_encoding` rename in the dependencies.
-///
-/// `Ok(None)` if the key is absent (for a `TS_BURN`, a schema mismatch).
-/// `Err` if the blob is not the size of a `u64`.
-pub(super) fn read_last_transition_burned_asset(transfer: &Transfer) -> Result<Option<u64>> {
-    let Some(raw) = last_transition_meta(transfer, bfa::MS_BURNED_ASSET) else {
-        return Ok(None);
-    };
-    let bytes: [u8; 8] = raw.try_into().map_err(|_| {
-        EnclaveError::CrossCheck(format!(
-            "MS_BURNED_ASSET metadata is {} bytes, expected 8 (strict-encoded u64)",
-            raw.len()
-        ))
-    })?;
-    Ok(Some(u64::from_le_bytes(bytes)))
+fn checked_total<'a>(
+    mut allocations: impl Iterator<Item = &'a FungibleAllocation>,
+    t: &TransitionInfo,
+) -> Result<u64> {
+    allocations.try_fold(0u64, |acc, a| {
+        acc.checked_add(a.total).ok_or_else(|| {
+            EnclaveError::CrossCheck(format!(
+                "consignment transition output amount overflow (op_id {})",
+                t.op_id
+            ))
+        })
+    })
 }
 
 pub(super) fn transition_output(
@@ -303,16 +305,10 @@ pub(super) fn transition_output(
     e: &FungibleEntry,
 ) -> Result<TransitionOutput> {
     let seal = match &e.seal {
-        SealInfo::Revealed { txid, vout } => {
-            let txid_bytes = txid
-                .as_ref()
-                .map(|hex_str| decode_display_txid(hex_str))
-                .transpose()?;
-            OutputSeal::Revealed {
-                txid: txid_bytes,
-                vout: *vout,
-            }
-        }
+        SealInfo::Revealed { txid, vout } => OutputSeal::Revealed {
+            txid: txid.as_deref().map(decode_display_txid).transpose()?,
+            vout: *vout,
+        },
         SealInfo::Confidential { secret_seal } => OutputSeal::Confidential {
             secret_seal: secret_seal.clone(),
         },

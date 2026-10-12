@@ -1,9 +1,8 @@
 # syntax=docker/dockerfile:1.7
 # Mint signer enclave image: EVM -> RGB only (vsock + rgb + mint-signer).
-# Private Cargo dependencies require BuildKit secrets (see README, Building).
-# Supply github_token, or one deploy key per repo; keys never enter image layers.
+# The enclave has no private dependency, so the build needs no secret.
 # Example: docker build --build-arg RGB_ASSET_ID="$RGB_ASSET_ID" \
-#   --secret id=github_token,env=GITHUB_TOKEN -f build/Dockerfile.enclave.mint .
+#   -f build/Dockerfile.enclave.mint .
 # Use the same Debian release for the builder and runtime.
 FROM rust:1.96.1-slim-trixie@sha256:31ee7fc65186be7e0e0ccb3f2ca305f14e4739e7642a1ae65753aa5d7b874523 AS builder
 
@@ -43,11 +42,7 @@ ENV CARGO_INCREMENTAL=0 \
 # verifying the EVM lock, and signs create_utxo (`SignBtc`). It carries no
 # `fundsOut` release rule at all - the burn signer is Dockerfile.enclave.burn.
 # Two roles, two PCR0s, two seeds, two running enclaves.
-RUN --mount=type=secret,id=github_token \
-    --mount=type=secret,id=consensus_key \
-    --mount=type=secret,id=ops_key \
-    --mount=type=secret,id=schemas_key \
-    sh /build/build/with-private-deps.sh enclave cargo build --release --locked --no-default-features --features vsock,rgb,mint-signer
+RUN cargo build --release --locked --no-default-features --features vsock,rgb,mint-signer
 
 
 # --- Runtime ---

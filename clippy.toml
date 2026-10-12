@@ -1,0 +1,6 @@
+# Invariant 3 of the BFA port: a BFA consignment is validated in two phases,
+# and a mint anchor is confirmed only against a bound lock.
+disallowed-methods = [
+    { path = "rgbstd::containers::Consignment::validate", reason = "invariant 3: use validate_deterministic and resolve anchors through a bound lock" },
+    { path = "rgbstd::validation::PendingValidation::resolve_anchor", reason = "invariant 3: confirm anchors only through PendingConsignment::resolve_all_anchors with bound locks" },
+]

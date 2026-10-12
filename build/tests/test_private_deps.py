@@ -7,10 +7,8 @@ import tempfile
 import unittest
 
 ROOT = Path(__file__).resolve().parents[2]
+# Only the parent has a private dependency.
 ALIASES = {
-    'github-rgb-consensus': 'consensus_key',
-    'github-rgb-ops': 'ops_key',
-    'github-rgb-schemas': 'schemas_key',
     'github-federated-signer': 'federated_key',
 }
 
@@ -37,10 +35,8 @@ class PrivateDepsTests(unittest.TestCase):
                                scope, 'python3', str(probe)], env=self.env,
                               capture_output=True, text=True)
 
-    def keys(self, parent=True):
+    def keys(self):
         for key in ALIASES.values():
-            if key == 'federated_key' and not parent:
-                continue
             path = self.secrets / key
             path.write_text('fixture-private-key-not-a-real-credential\n')
             path.chmod(0o600)
@@ -62,21 +58,19 @@ print(os.environ['GIT_CONFIG_GLOBAL'])
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertFalse(Path(result.stdout.strip()).parent.exists())
 
-    def test_enclave_does_not_need_proto_key(self):
-        self.keys(parent=False)
-        result = self.run_auth('enclave', 'print("started")')
-        self.assertEqual(result.returncode, 0, result.stderr)
-        result = self.run_auth('parent', 'print("must not start")')
+    def test_only_the_parent_scope_exists(self):
+        self.keys()
+        result = self.run_auth('enclave', 'print("must not start")')
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn('federated_key', result.stderr)
+        self.assertIn('Invalid dependency scope', result.stderr)
         self.assertEqual(result.stdout, '')
 
     def test_missing_or_empty_key_refuses_before_build(self):
         self.keys()
-        (self.secrets / 'ops_key').write_text('')
-        result = self.run_auth('enclave', 'print("must not start")')
+        (self.secrets / 'federated_key').write_text('')
+        result = self.run_auth('parent', 'print("must not start")')
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn('ops_key', result.stderr)
+        self.assertIn('federated_key', result.stderr)
         self.assertEqual(result.stdout, '')
 
     def test_token_rewrites_actual_manifest_urls_without_embedding_token(self):
@@ -85,7 +79,7 @@ print(os.environ['GIT_CONFIG_GLOBAL'])
         sources = '\n'.join((ROOT / p).read_text() for p in
                             ['Cargo.toml', 'enclave/Cargo.toml', 'parent/Cargo.toml'])
         urls = sorted(set(re.findall(r'"(ssh://git@github-[^"]+)"', sources)))
-        self.assertGreaterEqual(len(urls), 4)
+        self.assertEqual(len(urls), 1)
         result = self.run_auth('parent', f'''
 for url in {urls!r}:
     actual = subprocess.check_output(['git', 'ls-remote', '--get-url', url], text=True).strip()
@@ -109,9 +103,6 @@ print(str(config))
 
     def test_prepare_keys_preserves_multiline_values_and_restricts_permissions(self):
         mapping = {
-            'RGB_CONSENSUS_BFA_DEPLOY_KEY': 'consensus_key',
-            'RGB_OPS_BFA_DEPLOY_KEY': 'ops_key',
-            'RGB_SCHEMAS_BFA_DEPLOY_KEY': 'schemas_key',
             'FEDERATED_SIGNER_PROTO_DEPLOY_KEY': 'federated_key',
         }
         value = "fixture first line\nfixture second line"
@@ -125,24 +116,25 @@ print(str(config))
             path = self.secrets / key
             self.assertEqual(path.read_text(), value + '\n')
             self.assertEqual(path.stat().st_mode & 0o777, 0o600)
-        env['RGB_OPS_BFA_DEPLOY_KEY'] = ''
+        env['FEDERATED_SIGNER_PROTO_DEPLOY_KEY'] = ''
         result = subprocess.run(script, env=env, capture_output=True, text=True)
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn('Missing RGB_OPS_BFA_DEPLOY_KEY', result.stderr)
+        self.assertIn('Missing FEDERATED_SIGNER_PROTO_DEPLOY_KEY', result.stderr)
         self.assertNotIn(value, result.stdout + result.stderr)
 
-    def test_all_dockerfiles_mount_the_required_keys(self):
+    def test_only_the_parent_dockerfile_takes_secrets(self):
         for path in (ROOT / 'build').glob('Dockerfile*'):
             with self.subTest(dockerfile=path.name):
                 data = path.read_text()
-                scope = 'parent' if path.name == 'Dockerfile.parent' else 'enclave'
-                self.assertIn(f'sh /build/build/with-private-deps.sh {scope} cargo build', data)
-                self.assertIn('--mount=type=secret,id=github_token', data)
-                for key in ALIASES.values():
-                    if key == 'federated_key' and scope == 'enclave':
-                        continue
-                    self.assertIn('--mount=type=secret,id=' + key, data)
-                self.assertIn('openssh-client', data.split('COPY . /build/')[0])
+                if path.name == 'Dockerfile.parent':
+                    self.assertIn('sh /build/build/with-private-deps.sh parent cargo build', data)
+                    self.assertIn('--mount=type=secret,id=github_token', data)
+                    self.assertIn('--mount=type=secret,id=federated_key', data)
+                    self.assertIn('openssh-client', data.split('COPY . /build/')[0])
+                else:
+                    self.assertNotIn('--mount=type=secret', data)
+                    self.assertNotIn('with-private-deps', data)
+                    self.assertIn('RUN cargo build --', data)
 
 
 if __name__ == '__main__':

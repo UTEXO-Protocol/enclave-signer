@@ -91,14 +91,13 @@ fn validated_with_last(
         contract_id: "rgb:test".into(),
         chain_net: "bc".into(),
         witness_txids: vec![],
-        all_op_ids: vec![transition.op_id.clone()],
-        mint_op_ids: vec![],
         last_transition: Some(transition),
         last_witness_txid: None,
-        last_transfer_witness_prevouts: None,
+        last_transfer_witness_prevouts: vec![],
         last_transfer_op_id,
         non_mined_witness_txids: vec![],
         transitions_by_witness: vec![],
+        ..Default::default()
     }
 }
 
@@ -168,7 +167,8 @@ fn rejects_pre_source_burn_tx_id_calldata() {
 // in `validation.rs` binds `sourceChainId` / `sourceAddress`.
 mod source_burn {
     use super::*;
-    use crate::networks::rgb::validation::{bfa, TransitionSummary};
+    use crate::networks::rgb::validation::TransitionSummary;
+    use crate::test_support::bfa_ids;
 
     /// OpId as the consignment parser yields it: 64 lowercase hex chars.
     const OP_ID_HEX: &str = "a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90";
@@ -180,12 +180,12 @@ mod source_burn {
     fn settling_transition(op_id: &str) -> TransitionSummary {
         TransitionSummary {
             op_id: op_id.into(),
-            transition_type: bfa::TS_TRANSFER,
+            transition_type: bfa_ids::TS_TRANSFER,
             total_output_amount: 1000,
             asset_output_amount: 1000,
             outputs: Vec::new(),
             burned_asset_amount: None,
-            burn_recipient: None,
+            burn_reason: None,
         }
     }
 
@@ -294,26 +294,23 @@ mod source_burn {
 #[cfg(feature = "rgb-mint-burn")]
 mod burn {
     use super::*;
-    use crate::networks::rgb::validation::{bfa, TransitionSummary};
+    use crate::networks::rgb::validation::TransitionSummary;
+    use crate::test_support::bfa_ids;
 
     const RECIPIENT: [u8; 20] = [0x42; 20];
 
-    fn burn_transition(burned: Option<u64>, recipient: Option<Vec<u8>>) -> TransitionSummary {
+    fn burn_transition(burned: Option<u64>, reason: Option<[u8; 32]>) -> TransitionSummary {
         TransitionSummary {
             op_id: "burn-op".into(),
-            transition_type: bfa::TS_BURN,
-            // A burn has no output assignments. The destroyed value is in
-            // the metadata.
-            total_output_amount: 0,
-            asset_output_amount: 0,
-            outputs: Vec::new(),
+            transition_type: bfa_ids::TS_BURN,
             burned_asset_amount: burned,
-            burn_recipient: recipient,
+            burn_reason: reason,
+            ..Default::default()
         }
     }
 
-    fn padded(addr: [u8; 20]) -> Vec<u8> {
-        let mut v = vec![0u8; 32];
+    fn padded(addr: [u8; 20]) -> [u8; 32] {
+        let mut v = [0u8; 32];
         v[12..].copy_from_slice(&addr);
         v
     }
@@ -355,22 +352,23 @@ mod burn {
 
 mod transfer {
     use super::*;
-    use crate::networks::rgb::validation::{bfa, TransitionSummary};
+    use crate::networks::rgb::validation::TransitionSummary;
+    use crate::test_support::bfa_ids;
 
     /// The last transition that this build's RGB flow accepts on a
     /// `fundsOut`, with `amount` where that flow reads it: Transfer output
-    /// assignments under `rgb-swap`, Burn `MS_BURNED_ASSET` metadata under
+    /// assignments under `rgb-swap`, the burn's `burnedAsset` global under
     /// `rgb-mint-burn`. The shared cases below then work for both flows.
     #[cfg(feature = "rgb-swap")]
     fn source_transition(amount: u64) -> TransitionSummary {
         TransitionSummary {
             op_id: "transfer-op".into(),
-            transition_type: bfa::TS_TRANSFER,
+            transition_type: bfa_ids::TS_TRANSFER,
             total_output_amount: amount,
             asset_output_amount: amount,
             outputs: Vec::new(),
             burned_asset_amount: None,
-            burn_recipient: None,
+            burn_reason: None,
         }
     }
 
@@ -378,16 +376,16 @@ mod transfer {
     fn source_transition(amount: u64) -> TransitionSummary {
         TransitionSummary {
             op_id: "burn-op".into(),
-            // A burn destroys units and has no output assignments, so the
-            // amount is only in the metadata field.
-            transition_type: bfa::TS_BURN,
+            // The destroyed amount is the burnedAsset global, never the
+            // outputs.
+            transition_type: bfa_ids::TS_BURN,
             total_output_amount: 0,
             asset_output_amount: 0,
             outputs: Vec::new(),
             burned_asset_amount: Some(amount),
             // The payout target is a separate bind
             // (`validate_funds_out_burn_recipient`, tested in `mod burn`).
-            burn_recipient: None,
+            burn_reason: None,
         }
     }
 
@@ -458,14 +456,14 @@ mod transfer {
     }
 
     /// A last transition that is not this build's withdrawal type must be
-    /// refused. `TS_BRIDGE` is a deposit shape in both flows, so both builds
+    /// refused. `TS_MINT` is a deposit shape in both flows, so both builds
     /// refuse it. This also keeps a mint-shaped consignment out of a swap
     /// enclave.
     #[test]
     fn rejects_when_last_transition_is_not_the_flow_shape() {
         let cd = mock_funds_out_calldata(500);
         let mut t = source_transition(500);
-        t.transition_type = bfa::TS_BRIDGE;
+        t.transition_type = bfa_ids::TS_MINT;
         let validated = validated_with_last(t);
         let err = validate_funds_out_amount(&params_of(&cd), &validated).unwrap_err();
         assert!(
@@ -481,14 +479,13 @@ mod transfer {
             contract_id: "rgb:test".into(),
             chain_net: "bc".into(),
             witness_txids: vec![],
-            all_op_ids: vec![],
-            mint_op_ids: vec![],
             last_transition: None,
             last_witness_txid: None,
-            last_transfer_witness_prevouts: None,
+            last_transfer_witness_prevouts: vec![],
             last_transfer_op_id: None,
             non_mined_witness_txids: vec![],
             transitions_by_witness: vec![],
+            ..Default::default()
         };
         let err = validate_funds_out_amount(&params_of(&cd), &validated).unwrap_err();
         assert!(
@@ -502,7 +499,7 @@ mod transfer {
 #[cfg(feature = "bfa-mint")]
 mod settlement {
     use super::*;
-    use crate::networks::evm::events::VerifiedLock;
+    use crate::networks::rgb::validation::VerifiedLock;
     use alloy_primitives::B256;
     use alloy_sol_types::SolValue;
 
@@ -655,9 +652,10 @@ mod settlement {
 #[cfg(feature = "bfa-mint")]
 mod lz_route {
     use super::*;
-    use crate::networks::evm::events::VerifiedLock;
     use crate::networks::evm::validation::{decode_lz_funds_out_params, lzFundsOutCall};
-    use crate::networks::rgb::validation::{bfa, TransitionSummary};
+    use crate::networks::rgb::validation::TransitionSummary;
+    use crate::networks::rgb::validation::VerifiedLock;
+    use crate::test_support::bfa_ids;
     use alloy_primitives::B256;
     use alloy_sol_types::SolValue;
 
@@ -680,12 +678,12 @@ mod lz_route {
     fn burn() -> ValidatedConsignment {
         validated_with_last(TransitionSummary {
             op_id: OP_ID_HEX.into(),
-            transition_type: bfa::TS_BURN,
+            transition_type: bfa_ids::TS_BURN,
             total_output_amount: 0,
             asset_output_amount: 0,
             outputs: Vec::new(),
             burned_asset_amount: Some(BURNED),
-            burn_recipient: Some(padded_recipient().to_vec()),
+            burn_reason: Some(padded_recipient()),
         })
     }
 
@@ -787,6 +785,7 @@ mod btc_relay {
     use super::*;
     use crate::networks::rgb::spv::checkpoint::{parse_checkpoint_spec, REGTEST_CHECKPOINT};
     use crate::networks::rgb::spv::{Checkpoint, HeaderChain, Network};
+    use crate::test_support::ANY_HEADER_CLOCK;
     use bitcoin::block::{Header, Version};
     use bitcoin::consensus::serialize;
     use bitcoin::hashes::Hash as _;
@@ -905,7 +904,9 @@ mod btc_relay {
                 bits: bitcoin::CompactTarget::from_consensus(0x207fffff),
                 nonce: 0,
             });
-            chain.submit_headers(height, &[serialize(&header)]).unwrap();
+            chain
+                .submit_headers(height, &[serialize(&header)], ANY_HEADER_CLOCK)
+                .unwrap();
             prev = header.block_hash();
         }
         let commits = if chain_work.is_some() {
@@ -961,14 +962,13 @@ mod btc_relay {
             contract_id: "rgb:test".into(),
             chain_net: "bc".into(),
             witness_txids: vec![WITNESS_TXID],
-            all_op_ids: vec![],
-            mint_op_ids: vec![],
             last_transition: None,
             last_witness_txid: Some(bitcoin::Txid::from_byte_array(internal)),
-            last_transfer_witness_prevouts: None,
+            last_transfer_witness_prevouts: vec![],
             last_transfer_op_id: None,
             non_mined_witness_txids: vec![],
             transitions_by_witness: vec![],
+            ..Default::default()
         };
         let proofs = vec![MerkleProofEntry {
             txid: WITNESS_TXID.to_vec(),
@@ -1425,7 +1425,9 @@ mod btc_relay {
             prev = header.block_hash();
             raw.push(serialize(&header));
         }
-        let outcome = chain.submit_headers(from_height, &raw).unwrap();
+        let outcome = chain
+            .submit_headers(from_height, &raw, ANY_HEADER_CLOCK)
+            .unwrap();
         assert!(
             outcome.reorg_depth > 0,
             "fixture must be a real reorg, got depth 0"
@@ -1451,7 +1453,7 @@ mod btc_relay {
             prev = header.block_hash();
             raw.push(serialize(&header));
         }
-        let outcome = chain.submit_headers(start, &raw).unwrap();
+        let outcome = chain.submit_headers(start, &raw, ANY_HEADER_CLOCK).unwrap();
         assert_eq!(outcome.reorg_depth, 0, "control must not be a reorg");
     }
 
@@ -1599,7 +1601,9 @@ mod btc_relay {
                 bits: bitcoin::CompactTarget::from_consensus(0x207fffff),
                 nonce: 0,
             });
-            chain.submit_headers(height, &[serialize(&header)]).unwrap();
+            chain
+                .submit_headers(height, &[serialize(&header)], ANY_HEADER_CLOCK)
+                .unwrap();
             prev = header.block_hash();
         }
         chain

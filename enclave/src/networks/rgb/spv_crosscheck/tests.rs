@@ -2,6 +2,7 @@ use super::*;
 use crate::networks::rgb::spv::checkpoint::Checkpoint;
 use crate::networks::rgb::spv::HeaderChain;
 use crate::proto::MerkleProofEntry;
+use crate::test_support::ANY_HEADER_CLOCK;
 use bitcoin::block::{Header, Version};
 use bitcoin::consensus::serialize;
 use bitcoin::hashes::{sha256d, Hash};
@@ -21,7 +22,9 @@ fn regtest_chain_with(headers: Vec<Header>) -> HeaderChain {
         },
     );
     let raw_headers: Vec<Vec<u8>> = headers.iter().map(serialize).collect();
-    chain.submit_headers(1, &raw_headers).unwrap();
+    chain
+        .submit_headers(1, &raw_headers, ANY_HEADER_CLOCK)
+        .unwrap();
     chain
 }
 
@@ -402,7 +405,58 @@ fn assert_chain_net_accepts_matching_pair() {
     assert_chain_net("bc", Network::Mainnet).unwrap();
     assert_chain_net("sb", Network::Signet).unwrap();
     assert_chain_net("tb3", Network::Testnet3).unwrap();
+    assert_chain_net("tb4", Network::Testnet4).unwrap();
+    assert_chain_net("sbc", Network::SignetCustom).unwrap();
     assert_chain_net("bcrt", Network::Regtest).unwrap();
+}
+
+#[test]
+fn assert_chain_net_tells_the_custom_signet_apart() {
+    assert!(assert_chain_net("sb", Network::SignetCustom).is_err());
+    assert!(assert_chain_net("sbc", Network::Signet).is_err());
+}
+
+/// Real testnet4 headers 155_233..=155_262 on the compiled checkpoint.
+fn testnet4_chain() -> HeaderChain {
+    let raws: Vec<Vec<u8>> = include_str!("../spv/chain/testnet4_155233_155262.hex")
+        .lines()
+        .map(|line| hex::decode(line).unwrap())
+        .collect();
+    let mut chain = HeaderChain::new(
+        Network::Testnet4,
+        crate::networks::rgb::spv::checkpoint::TESTNET4_CHECKPOINT,
+    );
+    chain
+        .submit_headers(155_233, &raws, ANY_HEADER_CLOCK)
+        .unwrap();
+    chain
+}
+
+/// A witness in 155_233 has 29 blocks on top, but only four prove work. A
+/// host can mint min-difficulty blocks for free, so they cannot confirm.
+#[test]
+fn min_difficulty_blocks_do_not_make_a_witness_deep() {
+    let chain = testnet4_chain();
+    let (txid, proof) = single_tx_proof(chain.header_at(155_233).unwrap(), 155_233);
+    let err = validate_spv_proofs(&chain, &[txid], &[proof], SPV_MIN_CONFIRMATIONS).unwrap_err();
+    assert!(
+        err.to_string().contains("insufficient confirmations"),
+        "got: {err}"
+    );
+    let (txid, proof) = single_tx_proof(chain.header_at(155_233).unwrap(), 155_233);
+    validate_spv_proofs(&chain, &[txid], &[proof], 4).unwrap();
+}
+
+/// The tip (155_262) is a min-difficulty block one minute old. The last work
+/// block (155_256) is two hours older, so the chain is stale.
+#[test]
+fn a_fresh_min_difficulty_tip_does_not_make_the_chain_fresh() {
+    let chain = testnet4_chain();
+    let now = UNIX_EPOCH + Duration::from_secs(u64::from(chain.tip_time()) + 60);
+    let err = assert_chain_fresh(&chain, now).unwrap_err();
+    assert!(err.to_string().contains("too stale"), "got: {err}");
+    let now = UNIX_EPOCH + Duration::from_secs(u64::from(chain.fresh_time()) + 60);
+    assert_chain_fresh(&chain, now).unwrap();
 }
 
 #[test]
